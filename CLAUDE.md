@@ -7,11 +7,13 @@ QSH is a QUIC-based direct-connect remote shell (single Rust binary `qsh`) that 
 ## Session onboarding
 
 1. Open `docs/ROADMAP.md` and find the current milestone (first one not marked Done). Its acceptance criteria are the definition of done — build to them, not past them.
-2. Before implementing, read the matching sections of `docs/design/protocol.md` (wire protocol), `docs/design/architecture.md` (crates, modules, key mechanisms), `docs/design/testing.md` (which tests the milestone owes), and the `docs/CLI.md` contract for any command you touch.
-3. Features deferred to P1/P2 stay deferred: reserved flags (e.g. `-D`) parse and return `UNSUPPORTED`; do not implement them early.
+2. Open `PLAN.md` — the execution plan for the current milestone (ordered PR-sized steps with per-step tests and completion criteria). It is a living doc: when a milestone is done, it is fully replaced by the next milestone's plan.
+3. Before implementing, read the matching sections of `docs/design/protocol.md` (wire protocol), `docs/design/architecture.md` (crates, modules, key mechanisms), `docs/design/testing.md` (which tests the milestone owes), and the `docs/CLI.md` contract for any command you touch.
+4. Features deferred to P1/P2 stay deferred: reserved flags (e.g. `-D`) parse and return `UNSUPPORTED`; do not implement them early.
 
 ## Document map
 
+- `PLAN.md` — execution plan for the current milestone (living doc, replaced per milestone)
 - `docs/PRD.md` — product requirements (binding)
 - `docs/CLI.md` — CLI / JSON / MCP contract (binding)
 - `docs/ROADMAP.md` — milestones M0–M9 with scope and acceptance criteria
