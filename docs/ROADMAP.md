@@ -2,7 +2,7 @@
 
 **상태:** 확정 (구현과 어긋나는 내용을 발견하면 이 문서를 먼저 갱신한다)
 **작성일:** 2026-08-17
-**현재 위치:** M0 완료 (2026-08-17) → **다음은 M1**
+**현재 위치:** M1 완료 (2026-08-18) → **다음은 M2**
 
 이 문서는 P0 MVP까지의 canonical 마일스톤 기록이다. 각 마일스톤의 "수용 기준"이 곧 그 마일스톤의 **완료 정의(Definition of Done)** 다 — 수용 기준을 통과하는 테스트/시연 없이는 마일스톤을 닫지 않는다. SC 번호는 PRD §15 성공 기준의 순번이다 (SC1: 신규 두 장비 5분 내 연결, SC2: 한 명령 접속, SC3: 네트워크 전환 ≥95% 유지/resume, SC4: resume 가능한 단절에서 output 무손실, SC5: client crash가 remote PTY를 죽이지 않음, SC6: 모든 privileged op의 ACL 추적성, SC7: 공개 beta 전 독립 보안 리뷰).
 
@@ -28,19 +28,20 @@
 - **수용 기준 (달성):** 4-target CI 구성, arch-lint가 의존 위반 시 실패(주입 테스트로 확인), 23개 테스트 green, `version --json`이 `qsh.cli/v1` envelope 출력.
 - **크기:** 1ew
 
-### M1 — Walking skeleton (다음)
+### M1 — Walking skeleton ✅ 완료 (2026-08-18)
 
 - **범위:** `qsh init`(device identity 생성, keystore auto/platform/file + headless fallback), `qsh serve`(QUIC listener), `qsh trust add --fingerprint`, `qsh exec host --json -- cmd`. QUIC + TLS 1.3 상호 인증(pinned cert), frame codec 실사용, typed op layer(`version.get`/`exec.run`/`identity.init`/`trust.*`; schema.get 계약은 CLI.md에 존재하나 구현은 M7), JSON envelope·exit code 계약(§4), `Authorizer::check()` chokepoint(임시 allow-all-pinned) + op별 audit line, localhost 통합 하네스. hosts.toml 기반 host directory(M7)가 도입되기 전까지 `qsh exec <host>`의 host→주소 해석은 trust store(trust.toml)의 pinned peer(name→address)가 단일 출처다.
 - **명시적 out:** PTY, 세션, resume, private CA, invite code pairing, 터널, reverse, 정책 파일.
-- **수용 기준 (DoD):**
-  - `qsh exec host --json -- sh -c 'echo out; echo err >&2; exit 7'` → 프로세스 exit 7, `ok:true`, 올바른 `stdout_b64`/`stderr_b64`/`remote_exit_code:7`.
-  - 비신뢰 peer로 같은 명령 → exit 255 + `AUTH_FAILED`.
-  - Handshake matrix 16종(client/server cert × trust store 조합: pin 일치/불일치/만료/cert 없음/CA 모드 혼동) 전부 기대 결과.
-  - `-v` 진단은 stderr에만, stdout은 파싱 가능한 JSON 하나.
+- **수용 기준 (DoD, 달성):**
+  - `qsh exec host --json -- sh -c 'echo out; echo err >&2; exit 7'` → 프로세스 exit 7, `ok:true`, 올바른 `stdout_b64`/`stderr_b64`/`remote_exit_code:7` — `crates/qsh-cli/tests/exec_e2e.rs`(실 subprocess) + `crates/qsh-testkit/tests/exec_loopback.rs`(in-process).
+  - 비신뢰 peer로 같은 명령 → exit 255 + `AUTH_FAILED` — 같은 파일; host audit.log에 handshake deny 기록.
+  - Handshake matrix 16종 전부 기대 결과 — `crates/qsh-transport/tests/handshake_matrix.rs`.
+  - `-v` 진단은 stderr에만, stdout은 파싱 가능한 JSON 하나 — `crates/qsh-cli/tests/jsonl_purity.rs`.
+  - 부수 산출: golden fixture(`crates/qsh-cli/tests/fixtures/cli-v1/`, schemars 스키마 검증 + ErrorCode 도달성), exit-code matrix(`exit_code_matrix.rs`) — 모두 CI 4-target matrix에서 실행.
 - **착수 시 읽을 문서:** `docs/design/protocol.md`(ALPN, frame, verifier, keep-alive), `docs/design/architecture.md`(ops layer, identity/keystore, config 경로), `docs/design/testing.md`(L0/L1/L3/L6), `docs/CLI.md` §2–§4·§6.8과 init/trust 계약, ADR-0001/0002/0006.
 - **크기:** 3ew
 
-### M2 — 세션 broker + PTY + resume
+### M2 — 세션 broker + PTY + resume (다음)
 
 - **범위:** (a) headless broker — 세션 registry, ReplayRing(누적 byte offset sequence), writer lease, resume TTL, gap 산출 + `session.open/get/read/write/resize/close`·`session.list` op, (b) POSIX PTY(setsid, controlling tty, resize, signal, reaping, login shell env) + 대화형 TUI(`qsh user@host`, `qsh attach`, detach key), (c) connection migration(`rebind`) + resume(`session.attach` + resume token + last_seq) + replay/dedup + `session.gap` 이벤트. **chaos proxy 하네스**(`docs/design/testing.md` L4)와 recovery 텔레메트리(`recovery ∈ {migrated,resumed,failed}` + time-to-recovery)를 같이 구축.
 - **명시적 out:** reverse, 터널, ACL 정책 파일, multi-attach, local echo prediction.

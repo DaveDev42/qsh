@@ -1,196 +1,263 @@
-# PLAN.md — M1 실행 계획
+# PLAN.md — M2 실행 계획
 
-이 문서는 **현재 마일스톤(M1 — Walking skeleton)의 실행 계획**이다. 마일스톤 정의(범위·수용 기준·크기)의 정본은 항상 [`docs/ROADMAP.md`](docs/ROADMAP.md)이며, 이 문서는 그 정의를 바꾸지 않고 실행 순서로 분해한다. **M1이 Done 처리되면 이 문서는 다음 마일스톤(M2)의 계획으로 전면 교체된다** — living doc이며 과거 마일스톤의 실행 기록으로 남기지 않는다.
+이 문서는 **현재 마일스톤(M2 — 세션 broker + PTY + resume)의 실행 계획**이다. 마일스톤 정의(범위·수용 기준·크기)의 정본은 항상 [`docs/ROADMAP.md`](docs/ROADMAP.md)이며, 이 문서는 그 정의를 바꾸지 않고 실행 순서로 분해한다. **M2가 Done 처리되면 이 문서는 다음 마일스톤(M3)의 계획으로 전면 교체된다** — living doc이며 과거 마일스톤의 실행 기록으로 남기지 않는다.
 
-## 1. M1 목표 요약
+## 1. M2 목표 요약
 
-`docs/ROADMAP.md` "M1 — Walking skeleton" 절 인용:
+`docs/ROADMAP.md` "M2 — 세션 broker + PTY + resume" 절 인용:
 
-> `qsh init`(device identity 생성, keystore auto/platform/file + headless fallback), `qsh serve`(QUIC listener), `qsh trust add --fingerprint`, `qsh exec host --json -- cmd`. QUIC + TLS 1.3 상호 인증(pinned cert), frame codec 실사용, typed op layer(`version.get`/`exec.run`/`identity.init`/`trust.*`; schema.get 계약은 CLI.md에 존재하나 구현은 M7), JSON envelope·exit code 계약(§4), `Authorizer::check()` chokepoint(임시 allow-all-pinned) + op별 audit line, localhost 통합 하네스. hosts.toml 기반 host directory(M7)가 도입되기 전까지 `qsh exec <host>`의 host→주소 해석은 trust store(trust.toml)의 pinned peer(name→address)가 단일 출처다.
+> (a) headless broker — 세션 registry, ReplayRing(누적 byte offset sequence), writer lease, resume TTL, gap 산출 + `session.open/get/read/write/resize/close`·`session.list` op, (b) POSIX PTY(setsid, controlling tty, resize, signal, reaping, login shell env) + 대화형 TUI(`qsh user@host`, `qsh attach`, detach key), (c) connection migration(`rebind`) + resume(`session.attach` + resume token + last_seq) + replay/dedup + `session.gap` 이벤트. **chaos proxy 하네스**(`docs/design/testing.md` L4)와 recovery 텔레메트리(`recovery ∈ {migrated,resumed,failed}` + time-to-recovery)를 같이 구축.
 
-### DoD 체크리스트 (`docs/ROADMAP.md` M1 "수용 기준" 인용)
+### DoD 체크리스트 (`docs/ROADMAP.md` M2 "수용 기준" 인용)
 
-- [x] `qsh exec host --json -- sh -c 'echo out; echo err >&2; exit 7'` → 프로세스 exit 7, `ok:true`, 올바른 `stdout_b64`/`stderr_b64`/`remote_exit_code:7`.
-- [x] 비신뢰 peer로 같은 명령 → exit 255 + `AUTH_FAILED`.
-- [x] Handshake matrix 16종(client/server cert × trust store 조합: pin 일치/불일치/만료/cert 없음/CA 모드 혼동) 전부 기대 결과.
-- [x] `-v` 진단은 stderr에만, stdout은 파싱 가능한 JSON 하나.
+- [ ] Property test: 임의의 append/read interleaving에서 gap 이벤트가 없는 한 반환 바이트 연결 == 원본 stream suffix (byte-identical, 무손실·무중복) — SC4의 property 표현.
+- [ ] `qsh user@host`로 실제 셸 사용 가능 — bash/zsh, vim, tmux, `claude`가 동작하고 resize 전파.
+- [ ] **클라이언트를 `yes` 실행 중 `kill -9` → reattach → last_seq부터 이어붙인 결과가 기준 stream과 byte-identical** (SC4). remote PTY와 자식 프로세스는 클라이언트 사망에 생존 (SC5).
+- [ ] Chaos proxy `repath()` → connection migration으로 세션 무중단; `sever()` → 2초 내 재dial + resume.
+- [ ] 실기기 Wi-Fi↔테더링 전환 20회 수동 캠페인, recovery 필드 기록 (SC3 조기 측정).
 
-M1 크기: 3ew (`docs/ROADMAP.md` M1 "크기").
+M2 크기: 5ew (`docs/ROADMAP.md` M2 "크기").
 
-## 2. 작업 분해 (Step 1..7)
+## 2. 작업 분해 (Step 1..9)
 
 원칙: **모든 step은 완료 시점에 `cargo fmt --all` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo test`(또는 `cargo nextest run`) / `cargo run -p xtask -- arch` 전부 green을 유지해야 한다.** 이 게이트를 통과하지 못한 상태로 다음 step으로 넘어가지 않는다 (`CLAUDE.md` "Before committing").
 
-각 step은 독립적으로 리뷰 가능한 PR 하나 크기로 잡는다. 순서는 의존 순 — wire 계약 → identity/keystore → trust store → transport(quinn/verifier) → serve dispatch + ACL chokepoint → exec end-to-end → handshake matrix/fixture 마감.
+각 step은 독립적으로 리뷰 가능한 PR 하나 크기다. 순서는 의존 순 — wire/JSON 계약 → 순수 broker → dispatch 배선(headless 검증) → PTY → session data 스트림 → TUI → resume/migration → chaos 회귀 → 실기기 캠페인. `docs/ROADMAP.md` 시퀀싱 원칙 3번("PTY 세션 모델은 headless로 먼저 검증 … TUI는 이미 검증된 broker의 얇은 소비자로 나중에 얹는다")이 Step 2–3과 Step 4·6의 분리 근거다.
+
+전 step 공통 계약 규율: `qsh.cli/v1`·`qsh.event/v1`은 **additive-only**(optional 필드 추가만, 삭제·의미 변경은 `/v2`), `crates/qsh-cli/tests/fixtures/cli-v1/`의 fixture는 **append-only**(기존 파일 편집·삭제 금지, 새 파일 추가만) — `docs/CLI.md` §10, `docs/design/testing.md` L6, `CLAUDE.md` "Contract stability rules".
 
 ---
 
-### Step 1 — Wire 계약: `.proto` v1 스케치 구체화 + JSON contract 타입 확장
+### Step 1 — Wire·JSON 계약 확장: session control message + `SessionFrame` + 계약 타입
 
-**(a) 범위:** M1이 실제로 쓰는 control message 부분집합(`Hello`, `ControlMessage`/`Response`/`Error`, `ExecStart`/`ExecStarted`, `ExecFrame`(Stdin/StdinEof/Stdout/Stderr/ExecExit), `StreamHeader`, `Ping`/`Pong`)을 prost로 구체화한다. `SessionOpen`/`SessionAttach` 등 M2 이후 variant는 oneof에 아직 추가하지 않는다(M1 out-of-scope). `qsh-proto::types`에 `ExecRunReq`/`ExecRunData`, `IdentityInitData`, `TrustPeer`/`TrustAddReq`/`TrustAddData`/`TrustListData`/`TrustRemoveData` JSON contract 타입을 CLI.md §5/§6.8/§6.11 field-for-field로 추가한다.
+**(a) 범위:** M1이 의도적으로 비워 둔 세션 영역을 `.proto`에 채운다. `ControlMessage.body`에 주석으로만 예약돼 있던 번호를 실제로 점유한다: `session_open=20`, `session_attach=21`, `session_list=22`, `session_get=23`, `session_resize=24`, `session_signal=25`, `session_close=26`, `session_event=60`. `Response.body`에 `session_opened=1`, `session_attached=2`. 신규 메시지 `SessionOpen/SessionOpened/SessionAttach/SessionAttached/SessionList/SessionGet/SessionResize/SessionSignal/SessionClose/SessionEvent`와 data 스트림용 `SessionFrame{Output|Input|InputAck|Gap|Resize|Exit}`를 `docs/design/protocol.md` §9 스케치 그대로 정의한다. 현재 `.proto`에는 컴파일러가 강제하는 `reserved` 선언이 없고 주석 관례뿐이므로, 이 step에서 M3/M4용 번호(`Hello.reverse=4`, `ControlMessage` 40–41, `Response` 4)에 **실제 `reserved` 선언을 넣어** 번호 도용을 기계적으로 막는다. `qsh-proto::types`에 `SessionOpenReq/SessionOpenData`, `SessionReadReq/SessionReadData`, `SessionWriteReq/SessionWriteData`, `SessionResizeReq`, `SessionCloseReq/SessionCloseData`, `SessionListReq/SessionListData`, `SessionGetReq`, `SessionAttachReq`를 CLI.md §5·§6.2–6.7 field-for-field로 추가하고, 이미 placeholder로 존재하는 `types::Session`(`session_ref`/`host`/`session_id`/`state`/`writer`/`created_at`/`last_sequence`)을 실사용 타입으로 승격한다. `event.rs`의 `SessionEvent::{Output,Gap,Exit}`는 M1에 이미 정의돼 있고 producer만 없다 — 이 step은 스키마를 건드리지 않고 그대로 쓴다.
 
 **(b) crate/모듈/파일:**
-- `crates/qsh-proto/proto/qsh/wire/v1.proto` (신규)
-- `crates/qsh-proto/build.rs` (신규, prost-build)
-- `crates/qsh-proto/src/wire.rs` 또는 `wire/mod.rs` (신규, generated code 포함 모듈)
-- `crates/qsh-proto/src/types.rs` (확장 — 기존 `VersionData`/`Host`/`Session` placeholder 옆에 추가)
-- `crates/qsh-proto/Cargo.toml` (prost/prost-build 의존성 추가)
+- `crates/qsh-proto/proto/qsh/wire/v1.proto` (확장 — 위 message/oneof/`reserved`)
+- `crates/qsh-proto/src/wire.rs` (확장 — `encode_session_frame()`(`DATA_FRAME_MAX`), `StreamHeader::session_data(ticket)`, `SessionFrame` 생성자 sugar, `CAP_SESSION = "session"`·`CAP_RESUME_V1 = "resume.v1"`를 `LOCAL_CAPABILITIES`에 추가, `SESSION_CHUNK_MAX = 16 KiB`)
+- `crates/qsh-proto/src/types.rs` (확장 — 위 JSON 계약 타입, 기존 타입 수정 금지)
+- `crates/qsh-proto/src/event.rs` (읽기 전용 확인 — 신규 event 타입이 필요하면 §4.1 미해결 질문 5·7 해소 후에만)
 
-**(c) 빚지는 테스트 (`docs/design/testing.md` L0):** 모든 신규 메시지의 `decode(encode(m)) == m` roundtrip (proptest+`arbitrary`), truncation(유효 인코딩의 모든 prefix가 `Err(Incomplete)`), allocation-bound(4GiB 주장 length prefix가 할당 전 거부 — 기존 `crates/qsh-proto/src/frame.rs`의 `CONTROL_FRAME_MAX`/`Oversize` 재사용), golden vector 1개 이상 체크인.
+**(c) 빚지는 테스트 (`docs/design/testing.md` L0):** 신규 message 전부 `decode(encode(m)) == m` roundtrip(proptest), 모든 prefix가 `Ok(None)`(=incomplete)로 처리되는 truncation 테스트, `SessionFrame` chunk가 `SESSION_CHUNK_MAX`를 넘으면 인코딩 단계에서 거부, golden vector 1개 이상 체크인. `Response.Error.code` 어휘가 `ErrorCode`와 동일함을 단언하는 기존 테스트에 세션 코드(`SESSION_NOT_FOUND`/`SESSION_CONFLICT`/`RESUME_GAP` — 셋 다 `error.rs`에 이미 존재)를 포함시킨다.
 
-**(d) 완료 판정:** 신규 메시지 전부 L0 테스트 green. `ErrorCode`(`crates/qsh-proto/src/error.rs`)와 `Response.Error.code`가 동일 문자열 어휘를 쓰는지 단언하는 테스트 1개. arch-lint green(`qsh-proto`는 여전히 아무 workspace crate에도 의존하지 않음).
+**(d) 완료 판정:** 신규 메시지 L0 green. `qsh version --json`의 `schemas` 배열과 fixture가 깨지지 않음(추가만 발생). `xtask arch` green(`qsh-proto`는 여전히 무의존).
 
-**(e) 인용:** `docs/design/protocol.md` §5(frame layer), §6(직렬화 근거), §7(스트림 배치), §9(.proto 스케치), `docs/CLI.md` §3.3(오류 코드 어휘), §5(Host/Session), §6.8/§6.11(exec/init/trust data shape), ADR-0001(custom QUIC 프로토콜 채택 근거).
+**(e) 인용:** `docs/design/protocol.md` §5(frame 상한), §7(스트림 배치 표 "Session data" 행), §8(sequence = 누적 output byte offset), §9(.proto 스케치 — 이 step의 정본), §10(resume 필드), `docs/CLI.md` §2.3(sequence 시맨틱), §5(Session 타입), §6.2–6.7(session op 계약), §10(additive-only).
 
 ---
 
-### Step 2 — Identity: keypair, self-signed cert, 3-mode keystore, `identity.init`
+### Step 2 — Broker core: `ReplayRing` + `SessionBackend` seam + 주입 가능한 clock (순수 로직)
 
-**(a) 범위:** `qsh init` — Ed25519 키쌍 생성, `rcgen` 장기(10y) self-signed X.509 device cert 발급, `auto`/`platform`/`file` 3-mode keystore(headless fallback 포함), `identity.init` typed op(멱등 — 기존 identity면 `created:false`).
+**(a) 범위:** 네트워크도 PTY도 없는 순수 broker. `ReplayStore` trait 뒤의 `ReplayRing`(기본 8 MB, chunk ring, eviction은 whole-chunk·gap 계산과 replay 절단은 byte 정확), 세션 registry(`SessionId → SessionHandle`, 단일 lock), `SessionActor`(세션당 tokio task, mpsc 인박스: Write/Resize/Signal/Pull/Subscribe/TakeLease/Close), writer lease 규칙(steal 기본 / `no_steal` → `SESSION_CONFLICT` / 소유 connection 사망 시 자동 해제 / 읽기는 lease 불요), resume TTL reaper(30s tick, SIGHUP→TERM→KILL), `pull(session, after, max_bytes, wait)` cursor-pull primitive와 gap 산출. **바이트는 생성 지점에서 누적 offset이 붙는다** — ring push가 offset을 확정하는 유일한 지점이고 그 아래(네트워크·렌더러)에서는 재계산하지 않는다. 시간은 전부 주입된 `Clock` trait 경유(`tokio::time::pause()` 및 M8 stateful fuzzer 전제). 바이트 생산자는 `SessionSource` trait(spawn → reader/writer/resize/signal/wait) 뒤에 두고 이 step에서는 pipe 기반 `PipeSource`(비-PTY)만 구현한다 — PTY는 Step 4.
 
 **(b) crate/모듈/파일:**
-- `crates/qsh-core/src/identity/mod.rs` (신규 — keypair/cert 생성, `KeyStore` trait + `platform`/`file` 구현)
-- `crates/qsh-core/src/ops/mod.rs` (확장 — `IdentityInitOp`, `Ops::identity_init()`)
-- `crates/qsh-core/src/config.rs` (신규 — `~/.config/qsh/` 경로 해석, `$QSH_CONFIG_DIR` override)
-- `crates/qsh-cli/src/cli.rs` (확장 — `Command::Init`)
-- `crates/qsh-cli/src/render/{human,json}.rs` (확장 — `identity.init` 렌더)
-- `crates/qsh-core/Cargo.toml` (rcgen, keyring, zeroize 의존성 추가)
+- `crates/qsh-core/src/broker/mod.rs` (신규 — `SessionBackend` trait + in-process `Broker` 구현, registry, TTL reaper)
+- `crates/qsh-core/src/broker/ring.rs` (신규 — `ReplayStore` trait, `ReplayRing`)
+- `crates/qsh-core/src/broker/session.rs` (신규 — `SessionActor`, `SessionHandle`, `SessionState`, `SessionSource` trait + `PipeSource`)
+- `crates/qsh-core/src/broker/lease.rs` (신규 — writer lease)
+- `crates/qsh-core/src/broker/clock.rs` (신규 — `Clock` trait, `SystemClock`, `TestClock`)
+- `crates/qsh-core/src/config.rs` (확장 — `[serve].replay_bytes`(기본 8 MiB), `[serve].resume_ttl`(기본 24h))
+- 네이밍 주의: `qsh_core::client::Session`(연결 수준)과 `qsh_proto::types::Session`(JSON DTO)이 이미 있으므로 broker 타입은 `SessionHandle`/`SessionId`/`SessionActor`로 명명한다.
 
-**(c) 빚지는 테스트 (`docs/design/testing.md` L1 keystore 절):** in-memory `KeyStore` 유닛 테스트, 플랫폼별 게이트 통합 테스트 각 1개(macOS Keychain / Linux Secret Service / **headless Linux file fallback** — "실전에서 가장 중요한 경로"). 키 바이트가 로그에 노출되지 않음을 단언(zeroize 사용 확인은 코드 리뷰 항목).
+**(c) 빚지는 테스트 (`docs/design/testing.md` L2):** naive `Vec` oracle 대조 property test(임의 append/pull interleaving → gap 없으면 반환 바이트 연결 == 원본 suffix, byte-identical) — **DoD 1번 항목이 여기서 통과한다**. buffer 초과 시 정확한 `available_from`을 가진 gap 산출(silent truncation 금지). lease: 획득/steal/`no_steal` → `SESSION_CONFLICT`/connection 사망 시 해제/TTL 만료. UTF-8 멀티바이트가 chunk 경계에 걸쳐도 손상 없음. **전 테스트 `sleep()` 금지** — `TestClock` + `tokio::time::pause()` + 이벤트 통지.
 
-**(d) 완료 판정:** `qsh init --json`이 CLI.md §6.11 스키마와 일치하는 envelope 산출. 재실행 시 `created:false` 멱등 확인. `key_store` 필드가 실제 사용된 저장소를 정확히 보고(headless Linux에서 `file` 보고 필수).
+**(d) 완료 판정:** DoD 1번 항목 green. `broker/` 모듈의 어떤 파일도 `qsh_transport::`를 import하지 않음(ADR-0003 seam — `xtask arch`는 manifest 수준이라 이걸 못 잡으므로 **Step 2에서 `xtask arch`에 모듈 경로 기반 import 금지 규칙을 추가**한다; `docs/design/architecture.md` §9-2가 이미 "arch-lint 확장 후보"로 지목). 세션당 메모리가 ring 예산 + 소비자별 소량으로 유계임을 테스트로 단언.
 
-**(e) 인용:** `docs/design/architecture.md` §5(Identity와 trust 문단 1~2), §7(config/state 경로), §8(rcgen/keyring 버전), `docs/CLI.md` §6.11(identity.init 계약, 실패 경로는 일반 `ErrorCode` 사용), `docs/ROADMAP.md` §4 일정 리스크 3번("Identity·keystore·pairing이 SC1의 critical path").
+**(e) 인용:** `docs/design/architecture.md` §3(Broker 구조도 전체 — registry/TTL reaper/SessionActor/ReplayRing/cursor-pull/writer lease/child 종료/Supervisor seam), §9-1(resume·replay 정합성 리스크), `docs/design/testing.md` L2 전체(특히 "주입 가능한 clock을 M2 설계 시점부터"), `docs/design/protocol.md` §8(누적 byte offset), §12(replay ring = 만능 decoupler), ADR-0003(SessionBackend trait은 transport 타입 import 금지), ADR-0004(memory-only ring, `ReplayStore` trait 격리, gap이 overflow의 유일한 신호), `docs/PRD.md` §8(세션 모델), §13(세션당 8MB·resume TTL 24h), `docs/ROADMAP.md` 시퀀싱 원칙 7(a).
 
 ---
 
-### Step 3 — Trust store: `trust.toml`, `TrustEvaluator` 골격, `trust.add/list/remove`
+### Step 3 — 세션 op를 `dispatch`에 배선: `Action` 확장 + ticket + headless `qsh session *`
 
-**(a) 범위:** pinned peer(이름+fingerprint+address) 저장/조회, `trust.add`(fingerprint 지정 시 연결 없이 pin, 멱등)/`trust.list`/`trust.remove`(멱등) typed op 3개 + CLI 서브커맨드. `qsh exec <host>`의 host→주소 해석이 trust store를 단일 출처로 쓰도록 조회 헬퍼도 함께 만든다(M7 이전 hosts.toml 부재 기간의 임시 계약).
+**(a) 범위:** `Server`에 broker를 주입하고 `dispatch`에서 세션 control message를 처리한다. `acl::Action`에 `SessionOpen`/`SessionList`/`SessionAttach`/`SessionControl` 4종을 추가하고(CLI.md §2.5 매핑표 그대로), **리소스(세션·PTY·ticket) 생성 이전에** `Authorizer::check` + `AuditRecord::now`를 호출하는 기존 `handle_exec_start` 패턴을 그대로 복제한다. `resource` 문자열은 세션 id(신규 세션은 `"session"`). ticket 발급/redeem은 기존 `issue_ticket`/`redeem_ticket`(16-byte, 30s TTL, 연결 결합, 단회용)을 `SESSION_DATA`용으로 일반화하고, `handle_data_stream`이 `StreamKind::SessionData`를 받도록 확장한다. `purge_connection`은 lease 해제까지 수행하되 **세션은 살려 둔다**. `dispatch`는 sync 시그니처(`fn dispatch(&self, ctx, msg) -> Option<ControlMessage>`)를 유지한다 — broker 인박스 send는 sync이므로 seam을 깨지 않는다. 클라이언트 측은 `client::Session::request()` 헬퍼 위에 세션 RPC를 얹고, `Ops`에 `session_open/get/list/read/write/resize/close` 메서드 + `ops/session.rs`의 `Operation` 마커를 추가한다. CLI에 `qsh session open|get|read|write|resize|close`, `qsh sessions [host]` 서브커맨드와 human/JSON 렌더러를 붙인다. **이 step까지 PTY 코드는 0줄** — 서버는 `PipeSource`로 세션을 연다.
 
 **(b) crate/모듈/파일:**
-- `crates/qsh-core/src/trust/mod.rs` (신규 — `trust.toml` 로드/저장, `TrustStore`, pinned peer CRUD)
-- `crates/qsh-core/src/ops/mod.rs` (확장 — `TrustAddOp`/`TrustListOp`/`TrustRemoveOp`)
-- `crates/qsh-cli/src/cli.rs` (확장 — `Command::Trust { Add, List, Remove }`)
-- `crates/qsh-cli/src/render/{human,json}.rs` (확장)
+- `crates/qsh-core/src/server/mod.rs` (확장 — broker 필드, session dispatch arm, `StreamKind::SessionData` 수용, `purge_connection` 확장)
+- `crates/qsh-core/src/acl/mod.rs` (확장 — `Action` 4종 + `as_str()`)
+- `crates/qsh-core/src/ops/session.rs` (신규 — `SessionOpenOp`/`SessionGetOp`/`SessionListOp`/`SessionReadOp`/`SessionWriteOp`/`SessionResizeOp`/`SessionCloseOp` 마커 + `Ops` 메서드)
+- `crates/qsh-core/src/client/mod.rs` (확장 — 세션 control RPC)
+- `crates/qsh-core/src/serve.rs` (확장 — `Broker` 구성·주입, config의 replay/TTL 값 전달)
+- `crates/qsh-cli/src/cli.rs`, `src/main.rs`, `src/render/{human,json}.rs` (확장)
 
-**(c) 빚지는 테스트:** `qsh-core` 유닛 테스트 — 신규 pin/멱등 재-add/remove 멱등/미존재 이름 조회. `docs/design/testing.md`가 명시하는 계층은 아니지만 L6 fixture(Step 7)로 최종 검증됨을 여기서 명시.
+**(c) 빚지는 테스트:** `qsh-core` 유닛 — 세션 op 전부가 ACL choke point를 통과하고, `DenyAll` 하에서 **세션·ticket이 하나도 생성되지 않음**을 단언(기존 `denied_exec_returns_permission_denied_and_creates_nothing` 패턴). L3 loopback — `crates/qsh-testkit/tests/session_loopback.rs` 신규, `LoopbackHarness::start()`/`session()` 위에서 open→write→read(`--after`)→resize→close 전 경로. 미인가 peer가 세션 존재 여부를 알아내지 못함(non-distinguishing 오류)을 단언.
 
-**(d) 완료 판정:** `trust add`/`list`/`remove` 각각 CLI.md §6.11 예시 envelope와 필드 일치(`peer`/`created`, `peers`, `name`/`removed`). fingerprint 지정 시 연결 없이 pin하는 경로만 Step 3의 완료 판정에 포함한다. fingerprint 없는 `trust add`가 `--json` 모드에서 대화형 prompt 대신 `TRUST_REQUIRED`(`details.observed_fingerprint`/`details.address`)를 반환하려면 실제 연결로 fingerprint를 관찰할 transport가 필요한데, Step 3 시점에는 transport(Step 4)가 아직 없어 이 경로를 테스트할 수 없다 — 따라서 이 경로는 Step 3의 완료 판정에서 전부 제외하고, 관련 코드에는 "transport 미배선" TODO 주석만 남긴 채 Step 6(exec.run end-to-end, transport와 ACL이 모두 갖춰진 시점)에서 실 handshake 관찰 기반으로 처음 구현·테스트한다(설계 문서의 새 결정이 아니라 구현 순서상 임시 상태이므로 §"미해결 질문"에는 기록하지 않는다).
+**(d) 완료 판정:** `qsh session open <host> --json`부터 `close`까지 전 시퀀스가 loopback에서 JSON 계약대로 동작하고, audit에 op별 라인이 남는다. `--` 뒤 argv가 shell 재해석 없이 전달됨. 세션 op 4종 모두 `Action` enum을 경유(문자열 하드코딩 0건).
 
-**(e) 인용:** `docs/design/architecture.md` §5(Trust store 문단), §7(config 경로의 `trust.toml`), `docs/CLI.md` §2.5(`trust.*`는 local operation으로 원격 peer의 ACL 평가 대상이 아님), §6.11(trust.add/list/remove 계약), §6.8("hosts.toml 기반 host directory가 도입되는 M7 전까지는 trust.toml의 pinned peer가 host→주소 해석의 단일 출처"), ADR-0002(pairing UX — fingerprint 수동 확인은 1급 fallback).
+**(e) 인용:** `docs/CLI.md` §2.4(dotted operation 이름), §2.5(operation→ACL action 매핑표), §6.2–6.7(session 조회/생성/읽기/쓰기/resize/종료 계약과 예시 envelope), `docs/design/architecture.md` §2(typed op layer 확장 패턴 — `Operation::COMMAND`, `OpError`), §6(단일 choke point: 리소스 생성 이전 `Authorizer::check`), `docs/design/protocol.md` §7(ticket은 ACL 통과 후에만 발급, 단회용 30s), `docs/PRD.md` §9(인증 전 PTY/exec/tunnel 리소스 생성 금지), `docs/ROADMAP.md` 시퀀싱 원칙 3번·7(b).
 
 ---
 
-### Step 4 — Transport: quinn endpoint, `QshPeerVerifier`(pin+CA), ALPN, frame codec 배선
+### Step 4 — POSIX PTY backend
 
-**(a) 범위:** `qsh-transport`에 quinn client/server endpoint 구성(ALPN `qsh/1`, keep-alive 15s/idle 45s, 0-RTT 비활성), `QshPeerVerifier`(rustls `danger` verifier — pin 일치 → 허용, 아니면 private CA 체인 검증 → 허용, 그 외 거부, web PKI 미적재) + `TrustEvaluator` trait(구현은 `qsh-core::trust`가 주입). control 스트림 위에 Step 1의 frame codec(`qsh-proto::frame`)을 실제로 얹어 `ControlMessage` 송수신 루프를 만든다.
+**(a) 범위:** `SessionSource`의 PTY 구현. `portable-pty` 0.9로 spawn, `setsid` + controlling tty를 가진 process group leader, master fd를 `tokio::io::unix::AsyncFd`로 감싼 비동기 read/write, `TIOCSWINSZ` resize, signal 전달과 세션 정리의 **`killpg`(leader가 아니라 process group 전체)**, waitpid reaping, login shell 환경 구성(`TERM`/`SHELL`/`$HOME`/`argv[0] = "-zsh"`/macOS `path_helper`). utmp/wtmp는 기록하지 않는다(결정 사항, 문서화만). 전 PTY 코드는 `#![cfg(unix)]` 게이트.
 
 **(b) crate/모듈/파일:**
-- `crates/qsh-transport/src/tls.rs` (신규 — `QshPeerVerifier`, `TrustEvaluator` trait)
-- `crates/qsh-transport/src/endpoint.rs` (신규 — client/server `Endpoint` 구성)
-- `crates/qsh-transport/src/control.rs` (신규 — control 스트림 위 framed `ControlMessage` 송수신)
-- `crates/qsh-transport/src/lib.rs` (확장 — 위 모듈 재노출)
-- `crates/qsh-transport/Cargo.toml` (quinn ≥0.11.14, rustls 0.23 aws-lc-rs, prost 의존성 추가)
-- `crates/qsh-core/src/trust/mod.rs` (확장 — `TrustEvaluator` 구현)
+- `crates/qsh-core/src/pty/mod.rs` (신규 — `PtySource: SessionSource`, spawn/resize/signal/wait)
+- `crates/qsh-core/src/broker/session.rs` (확장 — `PtySource` 배선, child 종료를 ring에 기록 후 `exited` 상태 유지)
+- `crates/qsh-core/Cargo.toml` (portable-pty 0.9 추가; unix 전용 target 의존)
 
-**(c) 빚지는 테스트 (`docs/design/testing.md` L3):** in-process loopback QUIC(`127.0.0.1:0`, quinn endpoint 2개, subprocess 없음) — verifier pin 성공/실패, CA 성공/실패, keep-alive 동작, control 스트림 프레임 송수신 roundtrip. `cargo test`에서 항상 실행.
+**(c) 빚지는 테스트 (`docs/design/testing.md` L5):** macOS/Linux master-fd EOF 시맨틱 차이(`sh -c 'printf x; exit 0'`의 `x`가 exit 이벤트 **전에** 양 플랫폼에서 도착 — 고전적 "마지막 한 줄 손실" 버그, SC4 직격), 순서 불변식(1MB 출력 후 즉시 exit → 모든 출력이 ring에 들어간 뒤에야 `session.exit` append), UTF-8 chunk 경계, macOS/Linux backpressure 차이, `setsid`+controlling tty에서 job control 동작 및 close가 process group 전체 종료, 순차 세션 100회 후 zombie 0·fd 증가 0, login shell 환경 변수 단언.
 
-**(d) 완료 판정:** 두 로컬 endpoint가 pinned cert로 상호 TLS handshake 성공, `Hello` 교환 성공. 비신뢰 cert는 handshake 단계에서 거부(어떤 스트림도 application 계층에 도달하지 않음). 0-RTT 미사용 확인(`into_0rtt()` 미호출, 서버 early data 비활성).
+**(d) 완료 판정:** 위 L5 테스트가 macOS·Linux 양쪽 CI 타깃에서 green. `PipeSource` 기반 Step 2–3 테스트는 그대로 유지(회귀 감시용으로 남긴다). clippy가 4개 타깃 전부에서 green(`cfg(target_os)` 블록 누락 방지).
 
-**(e) 인용:** `docs/design/protocol.md` §2(QUIC 스택/전송 설정 — quinn ≥0.11.14, keep-alive/idle, 0-RTT 금지 근거), §3(`QshPeerVerifier` 검증 순서), §4(ALPN/버전/capability), §5(frame layer 재사용 — 이미 `qsh-proto/src/frame.rs`에 구현됨), `docs/design/architecture.md` §1(crate 의존 매트릭스 — `qsh-transport` → `qsh-proto`만), §5(Trust store 문단 — "검증 로직은 qsh-transport에 살되 신뢰 평가는 qsh-core::trust가 TrustEvaluator trait로 주입"), §8(quinn/rustls 버전 근거), `xtask/src/arch.rs`(강제되는 의존 매트릭스 — 이 step에서 `qsh-transport`가 `qsh-proto` 이외 workspace crate에 의존하지 않아야 함).
+**(e) 인용:** `docs/design/architecture.md` §4(PTY — portable-pty/AsyncFd/setsid/killpg/login shell env/utmp 미기록), `docs/design/testing.md` L5 전체, `docs/PRD.md` §7 P0 표(PTY: POSIX PTY, resize, signal, attach와 detach), `docs/ROADMAP.md` §4 일정 리스크 2번(PTY long tail — 명명된 수용 세트로 timebox), §3 유예 가드레일(Windows: PTY 코드 `#![cfg(unix)]`, Windows CI 없음).
 
 ---
 
-### Step 5 — `qsh serve` + dispatch 골격 + `Authorizer::check()` chokepoint(allow-all-pinned)
+### Step 5 — `SESSION_DATA` 스트림 + `session.attach` stream op + `--follow --jsonl`
 
-**(a) 범위:** `qsh serve --bind`(foreground 전용, `--bind` 우선순위: flag > config.toml > `[::]:4433` 기본값) — accept 루프, 연결마다 `Hello` 교환 후 control 메시지 dispatch. **모든 op 앞에서** `Authorizer::check(principal, action, resource)` 호출(M1 정책: pinned peer 전부 허용, 진짜 정책 엔진은 M5) + op별 구조화 audit 1줄(JSONL, `$XDG_STATE_HOME/qsh/audit.log`).
+**(a) 범위:** attach당 bidi 스트림 1개: `StreamHeader{SESSION_DATA, ticket}` 후 framed `SessionFrame`. 서버→클라이언트 `Output{sequence, data}`(chunk ≤ 16 KiB, quinn `set_priority(100)`), 클라이언트→서버 `Input{input_seq, data}`/`Resize`, 서버의 `InputAck{acked_input_seq}`와 `input_seq ≤ 적용 offset` input 폐기(무손실·무중복), 종료 시 `Exit{final_seq, exit_code, signal}`. `Ops`에 유일한 stream operation `session.attach`를 typed event `Stream` 반환 형태로 추가하고, `session read --follow --jsonl`과 `session read --wait`이 **같은 cursor-pull primitive**를 소비하도록 배선한다(M6 MCP long-poll이 얹힐 자리). JSONL 렌더러는 `qsh.event/v1`의 `session.output`/`session.gap`/`session.exit`를 그대로 한 줄씩 출력한다 — 이 step이 `event.rs`의 첫 producer다.
 
 **(b) crate/모듈/파일:**
-- `crates/qsh-core/src/acl/mod.rs` (신규 — `Authorizer` trait, `AllowAllPinned` 구현, `Action` 타입)
-- `crates/qsh-core/src/audit.rs` (신규 — 구조화 audit record: ts/request_id/principal/action/resource/decision — payload 필드 없음)
-- `crates/qsh-core/src/server/mod.rs` (신규 — `dispatch(ControlMessage) -> Response`, ACL choke point 호출 지점)
-- `crates/qsh-cli/src/cli.rs` (확장 — `Command::Serve { bind: Option<String> }`)
-- `crates/qsh-cli/src/main.rs` (확장 — serve 모드는 envelope를 stdout에 내지 않고 bind 주소를 stderr에 출력)
+- `crates/qsh-core/src/session_stream.rs` 또는 `crates/qsh-core/src/broker/stream.rs` (신규 — 서버측 SESSION_DATA 펌프: ring cursor → `Output` 프레이밍, input dedup/ack)
+- `crates/qsh-core/src/client/mod.rs` (확장 — `Session::attach()`: ticket으로 data 스트림 open, send/recv 분리 펌프)
+- `crates/qsh-core/src/ops/session.rs` (확장 — `SessionAttachOp` stream op, `session.read --follow` 소스 공유)
+- `crates/qsh-cli/src/render/json.rs` (확장 — JSONL event 렌더)
+- `crates/qsh-transport/src/control.rs` (필요 시 확장 — 우선순위 설정 헬퍼는 이미 `FramedSend::set_priority` 존재)
 
-**(c) 빚지는 테스트:** `qsh-core` 유닛 — `AllowAllPinned`가 pinned peer는 허용·비pinned는 거부, 모든 op 호출 경로가 chokepoint를 통과함을 mock dispatch로 단언(리소스 생성 이전에 ACL 통과를 요구하는 구조 자체를 테스트 — `docs/design/protocol.md` §7의 "ACL 통과 후에만 ticket 발급" 규칙의 M1 축소판). `docs/design/testing.md` L3(loopback QUIC 위에서 accept→dispatch 통합).
+**(c) 빚지는 테스트:** L3 loopback — attach 스트림 위에서 output 순서·sequence 단조성, input ack/dedup(같은 `input_seq` 2회 전송 → 1회만 적용), 느린 소비자가 ring 밖으로 밀리면 `session.gap` 수신 후 전진(pty_reader가 절대 블록되지 않음을 별도 단언). L6 — `-vv --jsonl`로 시끄러운 세션 실행 후 stdout 전 줄이 완전한 JSON object(`jsonl_purity.rs` 확장).
 
-**(d) 완료 판정:** `qsh serve` 시작 시 실제 bind 주소가 stderr에 출력되고 stdout은 비어 있음. 비신뢰 peer의 연결 시도가 handshake 단계 또는 ACL 단계에서 거부되고 audit에 deny로 기록됨. audit record에 argv/PTY/key 내용이 담길 필드 자체가 없음(타입 검사로 확인).
+**(d) 완료 판정:** `qsh session read <ref> --after N --follow --jsonl`이 무손실 event stream을 내고, 동일 세션에 대한 `--wait` 1회 pull과 `--follow` 루프가 같은 코드 경로임을 테스트로 증명. control 스트림 우선순위 200 > session data 100 설정이 코드에 존재.
 
-**(e) 인용:** `docs/CLI.md` §6.12(serve 계약 — foreground 전용, `--bind` 우선순위, stdout/stderr 규칙), `docs/design/architecture.md` §6(ACL 엔진과 audit — "호스트 측 `server::dispatch`가 리소스 생성 이전에 `Authorizer::check` 호출", "audit 레코드 타입에 payload 필드가 없음"), `docs/ROADMAP.md` 시퀀싱 원칙 5번("ACL은 두 단계로 분리 — 인가 지점은 M1부터, 정책 엔진은 M5"), 7번(c)("connection 방향과 세션 역할을 독립 축으로 유지" — M1은 축 도입만, 실제 역방향은 M3), `crates/qsh-core/src/ops/mod.rs`(기존 `Operation`/`OpError` 패턴 재사용).
+**(e) 인용:** `docs/design/protocol.md` §7(Session data 행), §8(sequence/input_seq 시맨틱), §9(`SessionFrame` 정의), §10-5(input 무손실·무중복, 64 KiB 미-ack 버퍼 상한), §12(우선순위 band, replay ring decoupler), `docs/CLI.md` §6.4(read/follow/gap/exit event 계약과 `available_from` 의미), §7.1(value op vs stream op — `session.attach`가 유일한 stream op이며 attach와 read/write 사이에 별도 business logic 없음), `docs/design/architecture.md` §2(streaming op), §3(cursor-pull 단일 primitive), §9-5(느린 소비자 backpressure 리스크).
 
 ---
 
-### Step 6 — `exec.run` end-to-end
+### Step 6 — 대화형 TUI: `qsh user@host` / `qsh attach` / detach key / resize / signal
 
-**(a) 범위:** `qsh exec host --json -- cmd` 전체 척추 — `ExecStart` control 요청(argv/env/timeout) → ACL `exec.run` 검사 → `ExecStarted{exec_id, ticket}` → `EXEC_DATA` 스트림에 `StreamHeader{EXEC_DATA, ticket}` → 자식 프로세스 spawn(비-PTY, stdin/stdout/stderr pipe) → `ExecFrame::{Stdout,Stderr}` 프레이밍 → 종료 시 `ExecExit{exit_code, signal}` → 클라이언트가 `stdout_b64`/`stderr_b64`/`remote_exit_code`로 조립. exit code clamp(remote 255 → process exit 254, JSON `remote_exit_code`는 실값 유지) 로직은 `qsh-cli`에만 존재.
+**(a) 범위:** Step 5의 stream op 위에 얹는 **얇은** 소비자. 로컬 터미널 raw mode 진입/복원(패닉·시그널 경로 포함), `SIGWINCH` → `SessionResize` 전파, SIGINT는 기본적으로 원격 PTY로 전달, detach key로 세션을 살린 채 로컬만 이탈, 종료 시 원격 exit code 반영. clap에 bare positional 형태(`qsh dave@personal-mac`)를 도입한다 — 현재 `Command` enum에는 `user@host` 파서가 전혀 없으므로 신규 value-parser + 기본 서브커맨드 배치가 필요하다. `qsh attach <session-ref>`도 같은 경로. **DoD 2번 항목의 수용 세트(bash/zsh, vim, tmux, `claude`)를 이 step의 명명된 timebox로 고정**하고, 그 밖의 터미널 quirk는 마일스톤 밖 백로그로 보낸다.
 
 **(b) crate/모듈/파일:**
-- `crates/qsh-core/src/exec/mod.rs` (신규 — 서버측 spawn, `EXEC_DATA` 스트림 프레이밍)
-- `crates/qsh-core/src/ops/mod.rs` (확장 — `ExecRunOp`, `Ops::exec_run()` — 클라이언트측: dial→Hello→ExecStart→data stream 소비)
-- `crates/qsh-cli/src/cli.rs` (확장 — `Command::Exec { host, args }`, `--` 뒤 argv는 shell 재해석 없음)
-- `crates/qsh-cli/src/main.rs` (확장 — exit code clamp, 254 규칙)
-- `crates/qsh-cli/src/render/json.rs` (확장 — `exec.run` envelope)
+- `crates/qsh-cli/src/tui/mod.rs` (신규 — raw mode 관리, 입력 펌프, detach key 처리, resize 감시)
+- `crates/qsh-cli/src/cli.rs` (확장 — `user@host` positional + `Command::Attach { session_ref }`)
+- `crates/qsh-cli/src/main.rs` (확장 — TUI 경로는 envelope를 stdout에 내지 않음; 진단은 stderr 전용)
+- `crates/qsh-cli/Cargo.toml` (raw-mode crate 추가 — §4.1 미해결 질문 9 해소 후 확정)
 
-**(c) 빚지는 테스트:** L3 loopback 통합 — in-process QUIC endpoint 2개(qsh 바이너리 subprocess 없음) 위에서 서버측이 실제 `sh -c` 자식 프로세스를 spawn하는 데까지 포함한 localhost 통합 하네스(`crates/qsh-testkit`, ROADMAP M1 "localhost 통합 하네스" 항목). ticket이 ACL 통과 전에 발급되지 않음을 단언(`docs/design/protocol.md` §7 ticket 규칙).
+**(c) 빚지는 테스트 (`docs/design/testing.md` L5 마지막 항목):** `expectrl` 기반 expect 하네스 — **클라이언트 자체를 pty 아래에서 실행**해 termios raw mode 경로가 실제로 돌게 한다. 수용 세트 스크립트: bash/zsh 프롬프트 왕복, `vim` 진입/편집/종료, `tmux` 안에서의 resize 전파, `claude` 기동. resize는 `--cols/--rows` 변경 후 원격 `stty size`가 일치함으로 단언. detach key 후 세션이 `running` 상태로 남고 재attach 가능함을 단언.
 
-**(d) 완료 판정:** DoD 1번째 항목(`echo out; echo err >&2; exit 7` → exit 7, `ok:true`, 올바른 `stdout_b64`/`stderr_b64`/`remote_exit_code:7`)이 실제로 통과. DoD 2번째 항목(비신뢰 peer → exit 255 + `AUTH_FAILED`)도 이 step에서 처음 end-to-end로 통과 가능해짐(Step 3의 TODO가 여기서 해소됨).
+**(d) 완료 판정:** DoD 2번 항목 green(수용 세트 4종 + resize 전파). 터미널 상태가 어떤 종료 경로(정상/에러/패닉/시그널)에서도 복원됨. `qsh-cli`에 인증·ACL·세션 로직이 0줄임을 리뷰로 확인(`CLAUDE.md` 하드 아키텍처 규칙 — 필요해 보이면 `Ops`로 옮긴다).
 
-**(e) 인용:** `docs/CLI.md` §4(exit code 규칙 — 254 clamp, source of truth는 JSON), §6.8(exec 계약, 결과 envelope 예시), `docs/design/protocol.md` §7(스트림 배치 표의 "Exec data" 행, ticket 발급 규칙), §9(`.proto` 스케치의 `ExecStart`/`ExecFrame`), `docs/design/architecture.md` §2(typed operation layer 확장 패턴), `docs/ROADMAP.md` 시퀀싱 원칙 2번("Walking skeleton은 PTY가 아니라 exec — expect 하네스 없이 CI에서 완전 자동화").
+**(e) 인용:** `docs/CLI.md` §7(human interactive mode — `qsh dave@personal-mac`, `qsh attach <session-ref>`, raw mode·resize·signal forwarding), §7.1(interactive attach는 `session.attach` 하나 위에 구현), §9(SIGINT 전달과 detach key), §2.2(stdout/stderr 분리), §11(frontend 제약), `docs/design/testing.md` L5("클라이언트도 pty 아래에서 테스트"), `docs/ROADMAP.md` §4 일정 리스크 2번(수용 세트 timebox + expect 하네스 조기 구축), 시퀀싱 원칙 3번.
 
 ---
 
-### Step 7 — Handshake matrix(16종) + L6 fixture/exit-code/JSONL 순수성 마감
+### Step 7 — Resume + connection migration + recovery 텔레메트리
 
-**(a) 범위:** M1 DoD의 나머지 두 항목을 직접 겨냥한 마감 step. (i) 표 기반 handshake matrix: (client cert, server cert, client trust store, server trust store, 모드[pin/CA]) 조합 16종 — fingerprint 불일치, 만료 cert, 다른 CA 서명, pin-only 모드에 CA 서명 cert, CA 모드에 self-signed, client cert 부재, 정상 pin, 정상 CA 등. (ii) `crates/qsh-cli/tests/fixtures/cli-v1/`에 `identity.init`/`trust.add`/`trust.list`/`trust.remove`/`exec.run` golden fixture 추가(append-only, 기존 `version.json`은 그대로 유지). (iii) exit-code matrix(시나리오→exit code/`ok`/`error.code`)를 human/JSON 양 모드에서. (iv) `-vv --jsonl`로 시끄러운 exec 실행 후 stdout 전 줄이 완전한 JSON object임을 단언.
+**(a) 범위:** `SessionOpened`가 32-byte CSPRNG `resume_token`을 반환하고 호스트는 `blake3(token)`만 `(session_id, peer_spki_sha256, expires_at)`과 저장한다. 클라이언트는 `$XDG_STATE_HOME/qsh/resume.json`(0600)에 보관. `SessionAttach{session_id, resume_token, last_output_seq, mode, no_steal}` 처리 순서를 프로토콜 그대로 구현: 토큰 해시 일치·미만료(`subtle::ConstantTimeEq`) → peer fingerprint가 세션 결합 identity와 일치 → ACL `session.attach` → **전부 통과 후에만** ticket + `new_resume_token` 발급(제시 토큰 즉시 무효화, 단일 세대). 실패는 fail-closed·non-distinguishing(`AUTH_FAILED`/`PERMISSION_DENIED`; `SESSION_NOT_FOUND`는 identity 검사 통과 후에만). 데이터 경로: ring이 `L` 이후를 보존하면 정확히 `L`부터 재전송 후 live 전환, 클라이언트는 방어적으로 `sequence ≤ L` frame 폐기; 보존 최소 offset `G > L`이면 첫 frame으로 `Gap{requested_after:L, available_from:G}`. 클라이언트 재접속 루프: path 사망 감지 → **2초 내** 재dial + resume, 인터페이스 변화 시에는 그 전에 `Endpoint::rebind()`로 active migration 시도(`Dialed.endpoint`/`Listener::endpoint()`로 이미 접근 가능). **migration은 지연 최적화일 뿐이며 실패해도 correctness는 resume이 보장한다 — migration 성공에 의존하는 코드를 쓰지 않는다.** recovery 텔레메트리(`recovery ∈ {migrated, resumed, failed}` + time-to-recovery ms)를 계측한다.
 
 **(b) crate/모듈/파일:**
-- `crates/qsh-transport/tests/handshake_matrix.rs` (신규)
-- `crates/qsh-cli/tests/fixtures/cli-v1/{identity.init,trust.add,trust.list,trust.remove,exec.run}.json` (신규, append-only)
-- `crates/qsh-cli/tests/exit_code_matrix.rs` (신규)
-- `crates/qsh-cli/tests/jsonl_purity.rs` (신규)
-- `crates/qsh-testkit/src/lib.rs` (확장 — fixture loader, 필요 시 loopback endpoint 헬퍼)
+- `crates/qsh-core/src/broker/resume.rs` (신규 — 토큰 발급/해시 저장/rotation/검증, TTL)
+- `crates/qsh-core/src/server/mod.rs` (확장 — `SessionAttach` dispatch arm, 검사 순서)
+- `crates/qsh-core/src/client/reconnect.rs` (신규 — 재dial 루프, rebind 시도, 미-ack input 재전송(64 KiB 상한, 초과 시 조용히 쌓지 않고 오류))
+- `crates/qsh-core/src/config.rs` (확장 — `Paths::resume_file()`, 0600 쓰기는 기존 `write_private_file` 재사용)
+- `crates/qsh-core/src/telemetry.rs` (신규 — recovery 결과/소요시간 기록. 사용자 노출 표면이 계약으로 확정되기 전까지는 **stderr 구조화 진단(tracing)만** — stdout은 §2.2에 따라 계약 전용. §4.1 미해결 질문 7)
+- `crates/qsh-core/Cargo.toml` (blake3, subtle 추가)
 
-**(c) 빚지는 테스트:** `docs/design/testing.md` L1(handshake matrix 16종 — 이 step의 핵심 산출물), L6(golden fixture append-only, `ErrorCode` 전수 도달성 — 이 step에서 M1이 실제로 생성 가능한 코드(`AUTH_FAILED`/`TRUST_REQUIRED`/`INVALID_ARGUMENT`/`INTERNAL` 등)만큼 fixture 커버리지 확보, exit-code matrix, JSONL 순수성).
+**(c) 빚지는 테스트:** L2 — 토큰 단회성(같은 토큰 2회 사용 → 두 번째 거부), 만료, 다른 peer fingerprint의 상환 시도 → non-distinguishing 오류, lease steal/`no_steal` 경합이 broker 단일 락 안에서 결정됨. L3 loopback — 연결을 끊고 새 연결로 attach하여 `last_seq`부터 이어붙인 바이트가 기준 stream과 byte-identical, ring 밖 요청 시 `Gap` 후 `available_from`부터 재개. 미-ack input 재전송이 중복 적용되지 않음.
 
-**(d) 완료 판정:** DoD 3번째 항목(handshake matrix 16종 전부 기대 결과), 4번째 항목(`-v` 진단 stderr 전용, stdout은 단일 JSON) 통과. `qsh schema --json`으로 검증하려던 스키마 서빙은 M7 구현이므로(§1 인용 "schema.get 계약은 CLI.md에 존재하나 구현은 M7") 이 step에서는 schemars로 생성한 JSON Schema를 **테스트 내부에서만** fixture 검증에 쓰고 `qsh schema` 커맨드 자체는 만들지 않는다.
+**(d) 완료 판정:** 재dial→resume 경로가 loopback에서 결정적으로 green이고, `recovery`/time-to-recovery가 기록된다. resume 토큰이 로그·audit·JSON envelope 어디에도 나타나지 않음(audit 레코드 타입에 payload 필드 자체가 없음 — 기존 `record_has_only_structural_fields` 테스트로 유지).
 
-**(e) 인용:** `docs/design/testing.md` L1("M1의 수용 기준인 16종 조합이 여기서 나온다"), L6(golden fixture/ErrorCode 전수 도달성/exit-code matrix/JSONL 순수성 4항목 전부), `docs/ROADMAP.md` M1 DoD 3·4번째 항목, `docs/CLI.md` §2.2(stdout/stderr 분리 규칙), §10(compatibility policy — fixture append-only가 이 정책의 기계적 강제).
+**(e) 인용:** `docs/design/protocol.md` §2(migration은 지연 최적화, correctness는 resume), §10 전체(토큰·rotation·reattach 4단계·gap·input 무손실·writer lease), `docs/design/architecture.md` §3(writer lease 규칙 a/b/c, child 종료 후 `exited` 상태), §7(state 경로), §8(blake3/subtle/zeroize), `docs/CLI.md` §6.4(gap event 계약), `docs/PRD.md` §8(세션 모델), §9(resume credential은 session과 peer identity에 결합), §13(30분 단절 후에도 TTL 내 복구), `docs/design/testing.md` L4(recovery 텔레메트리를 M2부터 계측), `docs/ROADMAP.md` §4 일정 리스크 1번.
 
 ---
 
-## 3. 명시적 non-goals (M2+ 유예)
+### Step 8 — Chaos proxy(L4) 하네스 + `repath()`/`sever()` 회귀 + SC4/SC5 마감
 
-`docs/ROADMAP.md` M1 절 "명시적 out" 인용: **PTY, 세션, resume, private CA, invite code pairing, 터널, reverse, 정책 파일.**
+**(a) 범위:** `qsh-testkit`에 in-process UDP chaos proxy를 만든다 — `UdpSocket` 2개를 쥔 tokio task + seed 가능한 `ChaosPolicy`. 클라이언트가 proxy로 dial하고 proxy가 서버로 중계한다. fault: `drop(p)`, `delay(dist)`, `reorder`, `duplicate`, `corrupt(p)`(AEAD positive control), `blackhole(dur)` 후 복구, **`repath()`**(client 소켓을 새 포트로 rebind — NAT rebind/Wi-Fi→LTE가 서버에게 보이는 모습), **`sever()`**(client 소켓 완전 폐쇄 → 재dial + resume 강제). 실패 메시지에 seed 출력. 이 위에서 DoD 3·4번 항목을 마감한다: `yes` 실행 중 클라이언트 `kill -9` → reattach → `last_seq`부터의 결과가 기준 stream과 byte-identical(SC4), remote PTY와 자식 프로세스 생존(SC5), `repath()` → 세션 무중단(migration), `sever()` → 2초 내 재dial + resume. **통과 기준은 사전 정의대로** — idle timeout이 뒤늦게 터져 복구되는 것은 통과가 아니다. 세션 op fixture(append-only)와 exit-code matrix도 여기서 마감한다.
 
-추가로 M1 범위에 넣지 않는 항목(같은 문서의 다른 조항에서 파생):
+**(b) crate/모듈/파일:**
+- `crates/qsh-testkit/src/chaos.rs` (신규 — proxy + `ChaosPolicy::seeded(u64)`, `repath()`, `sever()`)
+- `crates/qsh-testkit/src/loopback.rs` (확장 — chaos proxy를 경유해 dial하는 harness 변형)
+- `crates/qsh-testkit/tests/resume_chaos.rs` (신규 — repath/sever/blackhole 시나리오)
+- `crates/qsh-testkit/tests/session_kill9.rs` (신규 — SC4/SC5: 클라이언트 프로세스 `kill -9`, 기준 stream 대조)
+- `crates/qsh-cli/tests/fixtures/cli-v1/{session.open,session.get,session.list,session.read,session.write,session.resize,session.close}.json` (신규, append-only)
+- `crates/qsh-cli/tests/exit_code_matrix.rs`, `tests/jsonl_purity.rs` (확장 — 세션 시나리오 행 추가)
 
-- **`schema.get` 구현** — CLI.md §6.10에 계약은 존재하나 ROADMAP M1 절이 명시적으로 "구현은 M7"이라 못박음. Step 7에서 schemars 스키마는 fixture 검증용 내부 도구로만 쓰고 `qsh schema` 커맨드는 만들지 않는다.
-- **`doctor.run`** — CLI.md §6.11: "`doctor.run`은 operation 이름만 예약되어 있으며 계약은 M7에서 확정한다."
-- **ACL 정책 엔진(TOML 기반 principal/wildcard 매칭)** — `docs/ROADMAP.md` 시퀀싱 원칙 5번, M5 범위. M1의 `Authorizer::check()`는 allow-all-pinned 고정 정책만 구현한다.
-- **hosts.toml 기반 host directory** — M7 범위(`docs/CLI.md` §6.8, `docs/design/architecture.md` §7 config 경로 표 주석). M1의 host→주소 해석은 trust.toml 단일 출처(Step 3).
-- **P1/P2 유예 기능** 전반(`docs/ROADMAP.md` §3 유예 가드레일 표) — TCP/TLS fallback, SOCKS `-D`, file copy, Windows, multi-attach, local echo prediction, relay, cert rotation UX, service 설치. M1은 이 중 어떤 CLI flag도 새로 노출하지 않으므로(`-L`/`-R`/`-D`는 M4 범위) "flag는 파싱하되 UNSUPPORTED 반환" 가드레일이 실제로 발동하는 표면이 없다 — M4 이후 해당 flag가 도입될 때 지켜야 할 규율로만 여기 기록해 둔다.
+**(c) 빚지는 테스트:** 위 파일들이 곧 테스트다. 추가로 L6 — 신규 fixture 전부가 schemars 생성 스키마를 통과하고 기존 fixture도 계속 유효(append-only CI job), `ErrorCode` 전수 도달성 재확인(M2가 새로 생성 가능해진 `SESSION_NOT_FOUND`/`SESSION_CONFLICT`/`RESUME_GAP` 커버).
+
+**(d) 완료 판정:** DoD 3·4번 항목 green. chaos 테스트는 seeded로 재현 가능하며 `sleep()`을 쓰지 않는다. 2초 재dial 기준이 assertion으로 코드에 박혀 있다(주석이 아니라).
+
+**(e) 인용:** `docs/design/testing.md` L4 전체(설계·fault 표·대안 기각 근거·"chaos proxy는 PR 회귀 게이트이고 SC3 실측은 실기기 캠페인"·2초 기준), L6(fixture append-only, ErrorCode 전수 도달성, exit-code matrix, JSONL 순수성), CI 규율(port 0, seeded chaos, `sleep()` 금지), `docs/ROADMAP.md` M2 DoD 3·4번, 시퀀싱 원칙 6번("Chaos 하네스는 M2에서 resume과 함께 구축 … 측정 도구는 측정 대상과 같이 만든다"), `docs/PRD.md` §15 SC4·SC5.
+
+---
+
+### Step 9 — 실기기 Wi-Fi↔테더링 20회 수동 캠페인 + 기록 템플릿
+
+**(a) 범위:** DoD 5번 항목 전용 step. macOS(`networksetup -setairportpower`)와 Linux(`nmcli`) 전환 보조 스크립트를 만들고, 실제 노트북 ↔ 실제 `qsh serve` 호스트 사이에서 대화형 세션을 유지한 채 Wi-Fi↔테더링을 **20회** 전환하며 매 회차의 `recovery ∈ {migrated, resumed, failed}`와 time-to-recovery를 기록한다. 산출물은 (i) 재실행 가능한 스크립트, (ii) 회차별 기록 템플릿(회차·플랫폼·전환 방향·recovery 분류·time-to-recovery ms·gap 발생 여부·비고)과 채워진 20행, (iii) migrated/resumed/failed 분해 요약. 이 캠페인은 **SC3의 조기 측정**이며 합격/불합격 게이트가 아니다 — 본 캠페인(N≥60, ≥95%)은 M8이다. 실패 사례는 마일스톤을 막지 않고 M8용 백로그 항목으로 남긴다.
+
+**(b) crate/모듈/파일:**
+- `scripts/mobility/switch-macos.sh`, `scripts/mobility/switch-linux.sh` (신규 — 전환 보조, root 불요 경로 우선)
+- `docs/campaigns/m2-mobility.md` (신규 — 기록 템플릿 + 20행 결과 + 분해 요약. M8이 같은 템플릿을 N≥60으로 재사용한다. 새 문서이므로 `CLAUDE.md`의 document map에 한 줄 추가)
+- `crates/qsh-core/src/telemetry.rs` (필요 시 확장 — 캠페인 기록에 필요한 최소 필드만)
+
+**(c) 빚지는 테스트:** 자동화 테스트 없음(정의상 CI 불가). 대신 스크립트가 dry-run 모드에서 인터페이스를 건드리지 않고 동작함을 수동 확인하고, 텔레메트리 필드 파싱은 Step 8의 chaos 테스트가 이미 커버한다.
+
+**(d) 완료 판정:** 20행이 채워진 기록 문서가 체크인되고, migrated/resumed/failed 분해와 time-to-recovery 분포가 요약돼 있다. idle timeout에 기대어 늦게 복구된 회차는 **failed로 분류**한다(사전 정의 기준).
+
+**(e) 인용:** `docs/design/testing.md` L4("SC3용 실측: … 실기기 스크립트로 N≥60회 전환 시험 … 통과 기준은 사전 정의"), `docs/ROADMAP.md` M2 DoD 5번, M8 수용 기준(≥60회 본 캠페인 — 이 step의 산출물을 재사용), §4 일정 리스크 1번("M2 말 실기기 20회 조기 측정"), `docs/PRD.md` §15 SC3.
+
+---
+
+## 3. 명시적 non-goals (M3+ 유예)
+
+`docs/ROADMAP.md` M2 절 "명시적 out" 인용: **reverse, 터널, ACL 정책 파일, multi-attach, local echo prediction.**
+
+추가로 M2 범위에 넣지 않는 항목(같은 문서의 다른 조항에서 파생):
+
+- **역방향(M3)** — `Hello.reverse`/`ReverseRegistration`, `host.reverse` action, `qsh listen`/`qsh reverse`. Step 1에서 `.proto` 번호만 `reserved`로 못 박고 메시지는 정의하지 않는다.
+- **터널(M4)** — `-L`/`-R`/`tunnel.*`. `StreamKind::TCP_CONNECT`/`TCP_ACCEPTED`는 M1에 이미 enum 값만 존재하며 M2는 이를 수용하지 않는다(`handle_data_stream`에서 reset).
+- **ACL 정책 엔진(M5)** — M2의 `Authorizer`는 여전히 `AllowAllPinned`이고, 이 step에서 추가하는 것은 `Action` variant와 호출 지점뿐이다.
+- **Multi-attach observer 개념** — `docs/ROADMAP.md` §3 유예 가드레일: "**관찰자(observer) 개념 자체를 만들지 않는다.** writer lease는 P0 필수, 두 번째 attach 정책은 lease 규칙만 따름." 두 번째 attach는 steal 또는 `SESSION_CONFLICT`이며 read-only 관찰자 타입을 만들지 않는다.
+- **Local echo prediction(P2)** — 대신 실제 PTY 지연을 측정·공개한다(PRD §13의 10ms 예산; perf 게이트 자체는 M4/M8).
+- **Windows** — client P1 / host P2. PTY 코드는 `#![cfg(unix)]`, Windows CI 없음.
+- **Encrypted disk spool** — ADR-0004에 따라 P1. `ReplayStore` trait 뒤 격리만 유지한다.
+- **별도 supervisor 프로세스** — ADR-0003에 따라 P1. M2는 seam(`SessionBackend` + transport 타입 import 금지)만 순수하게 유지한다.
+- **MCP adapter(M6)·`schema.get`/`doctor.run`/hosts.toml(M7)** — M2는 `read_session` long-poll이 Step 5의 cursor-pull primitive를 1:1로 소비할 수 있게 형태만 맞춰 두고 adapter는 만들지 않는다.
 
 ## 4. 리스크와 감시 항목
 
-`docs/ROADMAP.md` §4 "일정 리스크 5건" 중 M1과 직결되는 항목 인용:
+`docs/ROADMAP.md` §4 "일정 리스크 5건" 중 M2와 직결되는 항목:
 
-> 3. **Identity·keystore·pairing이 SC1(간판 숫자)의 critical path.** headless Linux에 Secret Service 부재 → file fallback + doctor 보고 필수, macOS 미서명 바이너리의 Keychain 재프롬프트가 dev loop을 괴롭힘. 대응: keystore fallback을 M1의 명명된 task로, 스톱워치 테스트를 M7 한 번이 아니라 조기·반복 실행.
+> 1. **SC3(≥95% mobility)은 CI로 측정 불가능한 측정 문제이고, 통과 기준이 미정의면 그 자체가 리스크.** 대응: chaos proxy + recovery 텔레메트리를 M2에 구축, M2 말 실기기 20회 조기 측정, "idle timeout이 늦게 터져서 기술적으로 통과"를 배제하는 기준(재dial 2초)을 지금 명문화, M8에 ≥60회 본 캠페인.
 
-→ **Step 2**에 직접 매핑. `key_store` 필드가 headless 환경에서 정확히 `file`을 보고하는지가 이 리스크의 M1 관측 지점이다.
+→ **Step 7·8·9**에 매핑. 감시 지점: 2초 기준이 assertion으로 존재하는가, `recovery` 분류가 migrated/resumed/failed로 실제 분해되는가.
 
-`docs/design/architecture.md` §9 "아키텍처 리스크 5건" 중 M1이 지금 지켜야 할 구조적 항목:
+> 2. **PTY/터미널 정확성은 추정을 거부하는 long tail.** 대응: M2b를 명명된 수용 세트(bash/zsh+vim+tmux+claude)로 timebox, "terminal quirks" 백로그를 마일스톤 밖에 유지, expect 하네스를 초기에 구축해 수정마다 회귀 테스트가 싸게 남게.
 
-> 2. **In-listener 세션 vs listener 재시작** — seam(`SessionBackend`+UDS)이 오염되면 supervisor 전환이 재작성이 된다. 대응: broker의 transport 타입 import 금지를 유지(arch-lint 확장 후보)...
+→ **Step 4·6**. 수용 세트 밖의 터미널 이슈는 발견 즉시 백로그로 보내고 M2를 늘리지 않는다.
 
-→ M1에는 broker가 아직 없지만(**Step 5**), `qsh-core::server::dispatch`가 `qsh-transport`의 구체 타입을 그대로 노출하지 않고 trait/추상 타입 경계를 지키도록 지금부터 설계한다 — M2에서 broker가 이 경계 위에 얹힐 때 재작업을 피하기 위함. `docs/ROADMAP.md` 시퀀싱 원칙 7(a)(b)(c)의 "M1부터 지켜야 할 선행 불변식"(output byte sequence 태깅, `Authorizer::check`+audit, 연결 방향/세션 역할 축 분리)도 같은 이유로 M1 코드에 구조적으로 반영한다 — 기능은 나중이어도 구조는 지금.
+> 4. **In-listener 세션과 listener 재시작/업그레이드의 충돌은 구조적.** 대응: ADR-0003의 `SessionBackend` seam을 처음부터 순수하게 유지(CI로 transport import 금지 확인) …
 
-> 3. **Headless Linux 키 저장** — platform store 부재 시 file fallback이 조용히 일어나면 보안 태세 공백. 대응: init/doctor의 명시 보고를 계약으로 유지.
+→ **Step 2·3**. 현재 `xtask arch`는 **manifest 수준 검사**라 `qsh-core` 내부 모듈의 import를 보지 못한다 — Step 2에서 모듈 경로 기반 규칙을 추가하지 않으면 이 대응책은 "CI로 확인"이 아니라 구두 약속으로 남는다.
 
-→ 위 ROADMAP 리스크 3번과 동일 지점, **Step 2**.
+`docs/design/architecture.md` §9 리스크 중 M2가 직접 지는 항목:
+
+> 1. **Resume/replay 정합성** — byte offset 경계·gap 계산·lease 경합 버그는 제품의 핵심 약속을 깬다.
+
+→ **Step 2(oracle property test)·7(단절 지점 시뮬레이션)·8(fault 주입)**. resume 정확성은 fault 주입 없이는 검증 불가이므로 Step 8 이전에 "resume 완료" 선언을 하지 않는다.
+
+> 5. **느린 소비자 backpressure vs PTY 생존성** — cursor-pull + 유계 구독자 버퍼 + gap 재동기화가 설계 답이지만 QUIC flow control과의 상호작용은 soak test로 실증해야 한다.
+
+→ **Step 5**에서 "pty_reader가 네트워크·소비자에 절대 블록되지 않음"을 단언하고, 본 soak(24h/100세션)은 M8.
+
+추가 감시 항목 — `docs/ROADMAP.md` §4 리스크 3번의 M2판: **macOS 미서명 바이너리의 Keychain 재프롬프트가 dev loop을 괴롭힌다.** M2는 재dial·재attach를 반복하는 마일스톤이라 프롬프트 빈도가 M1보다 훨씬 높다. 대응: 모든 자동 테스트와 chaos/expect 하네스는 `$QSH_CONFIG_DIR` 격리 프로필 + `key_store = "file"`로 고정하고, platform keystore 경로는 Step 4·6의 수동 확인에서만 쓴다.
+
+### 4.1 미해결 질문 (문서 갱신이 선행돼야 하는 항목)
+
+구현 중 임의로 정하지 않는다. 각 항목은 괄호 안 문서가 정본이며, 그 문서를 먼저 갱신한 뒤 코드를 쓴다.
+
+1. **detach key 시퀀스가 어디에도 명시돼 있지 않다** — "detach key는 별도로 제공한다"만 존재. 기본 시퀀스와 설정 가능 여부 필요 (`docs/CLI.md` §7·§9).
+2. **`qsh user@host`의 `user` 시맨틱** — 원격 OS 계정 매핑인지 표시용인지. ACL principal은 항상 인증서에서 나오므로(§2.5, protocol.md §3) 둘의 관계 명시 필요 (`docs/CLI.md` §7, `docs/PRD.md` §6).
+3. **`session_ref` 조립 주체** — architecture.md §2는 "서버 발급 opaque 값", CLI.md §5는 "CLI가 반환하는 opaque value"이고 예시는 `host/session_id` 형태다. 원격 호스트는 자신의 로컬 alias를 모르므로 조립 지점이 정의돼야 한다 (`docs/design/architecture.md` §2 / `docs/CLI.md` §5).
+4. **`resume_token`의 JSON 노출 여부** — wire `SessionOpened`는 토큰을 반환하지만 CLI.md §6.3의 `session.open` data는 `session_ref`/`initial_sequence`뿐이다. 기계 사용자가 재attach하려면 additive 필드가 필요한지, 아니면 클라이언트 상태 파일에만 남는지 (`docs/CLI.md` §6.3).
+5. **wire `SessionEvent::{WriterChanged, Closed}`에 대응하는 `qsh.event/v1` 타입이 없다** — `--follow --jsonl` 소비자에게 lease 회수를 알릴 방법 (`docs/CLI.md` §6.4, additive-only 규칙 하에서).
+6. **wire `SessionSignal`(번호 25)에 대응하는 CLI operation이 없다** — §2.4 operation 목록에는 `session close --signal`만 있다. 실행 중 세션에 신호를 보내는 op가 M2 범위인지 (`docs/CLI.md` §2.4·§6.7).
+7. **recovery 텔레메트리의 노출 표면** — testing.md L4는 "계측"만 요구하고 사용자 노출 형태를 정하지 않았다. M2는 stdout 순수성 규칙(§2.2) 때문에 stderr 구조화 진단으로만 내보내며, `qsh.event/v1` event로 승격할지 결정 필요 (`docs/design/testing.md` L4 + `docs/CLI.md` §6.4).
+8. **`localctl`(UDS 제어 소켓) 도입 시점** — ADR-0003 "결과"는 "M2에 broker와 함께 도입"이라 하지만 ROADMAP M2 범위 목록에는 없고 첫 소비자(`qsh tunnels`)는 M4다. M2에서 빈 IPC 계층을 까는 것이 목적에 부합하는지 (`docs/adr/0003-sessions-in-listener.md` 결과 절 / `docs/ROADMAP.md` M2 범위).
+9. **클라이언트 raw-mode 터미널 crate가 architecture.md §8 표에 없다** — portable-pty는 host 측이다. crossterm 계열 vs 직접 termios 중 선택과 근거 필요 (`docs/design/architecture.md` §8).
 
 ## 5. 완료 절차
 
-1. §1의 DoD 체크리스트 4항목 전건 통과를 실제 테스트 실행 로그로 확인한다(체크박스는 근거 테스트가 green일 때만 표시).
-2. `docs/ROADMAP.md`의 "현재 위치" 줄과 M1 절 상태 표기를 "M1 완료"로 갱신한다(로드맵 자체는 이 계획 문서가 아니라 로드맵 문서 소유자가 갱신 — PLAN.md는 이 절차를 지시만 하고 ROADMAP.md를 대신 수정하지 않는다).
-3. 이 PLAN.md를 M2("세션 broker + PTY + resume") 실행 계획으로 전면 교체한다 — 과거 M1 계획은 git 이력에만 남긴다.
+1. §1의 DoD 체크리스트 5항목 전건 통과를 실제 테스트 실행 로그(및 Step 9의 캠페인 기록)로 확인한다(체크박스는 근거가 green일 때만 표시).
+2. `docs/ROADMAP.md`의 "현재 위치" 줄과 M2 절 상태 표기를 "M2 완료"로 갱신한다(로드맵 자체는 이 계획 문서가 아니라 로드맵 문서 소유자가 갱신 — PLAN.md는 이 절차를 지시만 하고 ROADMAP.md를 대신 수정하지 않는다).
+3. 이 PLAN.md를 M3("역방향") 실행 계획으로 전면 교체한다 — 과거 M2 계획은 git 이력에만 남긴다.
