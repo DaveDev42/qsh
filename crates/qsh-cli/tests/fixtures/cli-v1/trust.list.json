@@ -1,0 +1,16 @@
+{
+  "command": "trust.list",
+  "data": {
+    "peers": [
+      {
+        "added_at": "<timestamp>",
+        "address": "<address>",
+        "fingerprint": "<fingerprint>",
+        "name": "personal-mac"
+      }
+    ]
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

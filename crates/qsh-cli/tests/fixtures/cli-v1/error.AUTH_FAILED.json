@@ -1,0 +1,14 @@
+{
+  "command": "exec.run",
+  "error": {
+    "code": "AUTH_FAILED",
+    "details": {
+      "category": "remote_rejected"
+    },
+    "message": "peer authentication failed (mutual TLS)",
+    "retryable": false
+  },
+  "ok": false,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

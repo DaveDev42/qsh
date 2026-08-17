@@ -70,7 +70,7 @@ Broker
 
 - 정책은 `acl.toml`(PRD §9 형태). principal은 정확 일치(연결의 `Principal`과 대조), action은 정확 일치 또는 **trailing `.*` wildcard만** 허용한다(중간 glob 금지 — 평가와 `qsh acl check` 설명 가능성 유지).
 - **Default deny, fail closed:** 매칭 allow 없음 → `PERMISSION_DENIED`; acl.toml이 없거나 파싱 불가 → 전부 deny + 운영자에게 `CONFIG_ERROR` 노출. "오류 시 개방"은 존재하지 않는다.
-- **단일 choke point:** 호스트 측 `server::dispatch`가 디코딩된 모든 요청에 대해 `Authorizer::check(principal, action, resource)`를 **리소스 생성(PTY spawn/exec fork/socket bind/ticket 발급) 이전에** 호출한다. 클라이언트 측 코드와 렌더러에는 ACL 로직이 0이며, MCP는 같은 dispatch를 타므로 자동 상속된다. op → 필요 ACL action 매핑은 CLI.md의 매핑 표가 정본이다.
+- **단일 choke point:** 호스트 측 `server::dispatch`가 디코딩된 모든 요청에 대해 `Authorizer::check(principal, auth_path, action, resource)`를 **리소스 생성(PTY spawn/exec fork/socket bind/ticket 발급) 이전에** 호출한다. `auth_path`(`Pin`|`Ca`)는 transport가 principal과 함께 connection에 부착하는 "어떤 신뢰 경로로 인증됐는가"이며, principal 모양으로는 복원할 수 없다(CA 발급 leaf도 `qsh://device/…` SAN으로 `device:` principal을 낼 수 있다) — M1 임시 정책 allow-all-**pinned**는 이 값으로만 판정한다. 클라이언트 측 코드와 렌더러에는 ACL 로직이 0이며, MCP는 같은 dispatch를 타므로 자동 상속된다. op → 필요 ACL action 매핑은 CLI.md의 매핑 표가 정본이다.
 - **Audit:** 결정당 한 줄 JSONL(`$XDG_STATE_HOME/qsh/audit.log`) — ts, request_id, principal, action, resource, decision, rule index, peer_addr. 레코드 타입에 argv·PTY 내용·키를 담을 **필드 자체가 없어** "내용 무기록"이 규율이 아니라 타입 수준 속성이다(opt-in `audit.log_argv`만 예외).
 
 ## 7. Config·state·runtime 경로

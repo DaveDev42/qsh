@@ -1,0 +1,152 @@
+// QSH wire protocol, major version 1 (ALPN "qsh/1").
+//
+// This file is the reviewable, fuzzable grammar of every control/data
+// message QSH puts on a QUIC stream (docs/design/protocol.md §6, §9).
+// Rules:
+//   * additive only within v1 — never renumber or reuse a field/tag;
+//   * every message on the wire is wrapped by the u32-BE length-prefixed
+//     frame layer in `qsh-proto/src/frame.rs` (§5);
+//   * `Response.Error.code` uses the CLI.md §3.3 error-code strings verbatim.
+//
+// M1 scope: only the messages the walking skeleton uses are defined here
+// (Hello, Response/Error, ExecStart/ExecStarted, StreamHeader, ExecFrame,
+// Ping/Pong). Session/tunnel/reverse variants (tags 20–26, 40–41, 60 and
+// Hello.reverse = 4) are reserved by the protocol sketch and are added when
+// their milestone lands.
+
+syntax = "proto3";
+
+package qsh.wire.v1;
+
+// ---------------------------------------------------------------------------
+// Control stream (one per connection, bidirectional RPC, role-symmetric).
+// ---------------------------------------------------------------------------
+
+// Every control-stream frame decodes to exactly one ControlMessage.
+// Requests carry a non-zero request_id; the matching Response echoes it.
+// Asynchronous events use request_id = 0.
+message ControlMessage {
+  uint64 request_id = 1;
+  oneof body {
+    Hello     hello      = 10;
+    Response  response   = 11;
+    // 20–26: session_* (M2)
+    ExecStart exec_start = 30;
+    // 40–41: rfwd_* (M4)
+    Ping      ping       = 50;
+    Pong      pong       = 51;
+    // 60: session_event (M2)
+  }
+}
+
+// Sent by both sides as the very first control message after the TLS
+// handshake. Identity is *never* taken from this message — the principal is
+// bound to the connection from the peer certificate (protocol.md §3).
+message Hello {
+  // Minor versions supported within this major (ALPN) version. Peers adopt
+  // the intersection; an empty intersection is a fatal UNSUPPORTED.
+  repeated uint32 versions = 1;
+  // Display-only device name.
+  string device_name = 2;
+  // Capability strings; peers adopt the intersection ("exec", "session", ...).
+  repeated string capabilities = 3;
+  // 4: ReverseRegistration reverse (M3)
+}
+
+// The reply to a request. Exactly one body variant is set: either the typed
+// success payload matching the request, or Error.
+message Response {
+  oneof body {
+    // 1: SessionOpened (M2)
+    // 2: SessionAttached (M2)
+    ExecStarted exec_started = 3;
+    // 4: RemoteForwardOpened (M4)
+    Error error = 15;
+  }
+}
+
+// Failure payload. `code` is one of the docs/CLI.md §3.3 strings
+// (INVALID_ARGUMENT, PERMISSION_DENIED, ...) — the same vocabulary as
+// qsh-proto's ErrorCode; unknown codes are passed through by receivers.
+message Error {
+  string code = 1;
+  string message = 2;
+  bool retryable = 3;
+}
+
+// Request: run a non-PTY command on the peer (op `exec.run`).
+message ExecStart {
+  // Program + arguments, executed directly (no shell re-interpretation).
+  repeated string argv = 1;
+  // Extra environment variables layered over the executor's environment.
+  map<string, string> env = 2;
+  // 0 = no timeout. When exceeded the executor kills the child.
+  uint64 timeout_ms = 3;
+}
+
+// Success payload for ExecStart. `ticket` authorizes exactly one EXEC_DATA
+// stream (single use, short expiry) and is only ever issued after the ACL
+// check passed (protocol.md §7).
+message ExecStarted {
+  string exec_id = 1;
+  bytes ticket = 2;
+}
+
+// Application-level liveness probe (QUIC keep-alive handles the transport).
+message Ping {}
+message Pong {}
+
+// ---------------------------------------------------------------------------
+// Non-control streams: the first frame is always a StreamHeader.
+// ---------------------------------------------------------------------------
+
+enum StreamKind {
+  STREAM_KIND_UNSPECIFIED = 0;
+  SESSION_DATA = 1;
+  EXEC_DATA = 2;
+  TCP_CONNECT = 3;
+  TCP_ACCEPTED = 4;
+}
+
+message StreamHeader {
+  StreamKind kind = 1;
+  // SESSION_DATA / EXEC_DATA: the ticket from the corresponding response.
+  // TCP_ACCEPTED: forward_id.
+  bytes ticket = 2;
+  // TCP_CONNECT only.
+  string host = 3;
+  uint32 port = 4;
+}
+
+// ---------------------------------------------------------------------------
+// Exec data stream. Not resumable: no sequence numbers, relies on the
+// stream's own reliable ordered delivery. ExecExit is always the last frame
+// sent by the executor, after which it finishes the stream.
+// ---------------------------------------------------------------------------
+
+message ExecFrame {
+  oneof body {
+    Stdin    stdin     = 1;
+    StdinEof stdin_eof = 2;
+    Stdout   stdout    = 3;
+    Stderr   stderr    = 4;
+    ExecExit exec_exit = 5;
+  }
+}
+
+// Payload chunks are ≤ EXEC_CHUNK_MAX (16 KiB) each.
+message Stdin    { bytes data = 1; }
+message StdinEof {}
+message Stdout   { bytes data = 1; }
+message Stderr   { bytes data = 1; }
+
+message ExecExit {
+  // Process exit status. When the child was terminated by a signal this is
+  // 128 + signal number (shell convention) and `signal` names the signal.
+  int32 exit_code = 1;
+  optional string signal = 2;
+  // True when the host killed the process because the requested
+  // `ExecStart.timeout_ms` elapsed. The client reports this as TIMEOUT
+  // rather than as a plain signal exit.
+  bool timed_out = 3;
+}

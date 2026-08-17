@@ -7,5 +7,31 @@ license.workspace = true
 
 [dependencies]
 qsh-proto.workspace = true
+qsh-transport.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+toml.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+rcgen.workspace = true
+zeroize.workspace = true
+base64.workspace = true
+time.workspace = true
+ulid.workspace = true
+rand.workspace = true
+libc.workspace = true
+
+# The OS credential store is only wired up on the platforms QSH supports as
+# hosts today (`docs/design/architecture.md` §5, §8: keyring 3.x pinned).
+# Linux uses the pure-Rust async Secret Service backend so no libdbus /
+# system C dependency is needed; where neither table applies
+# (`PlatformKeyStore`) reports `Unavailable` and `auto` falls back to file.
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", features = ["async-secret-service", "tokio", "crypto-rust"] }
+
+[dev-dependencies]
+tempfile.workspace = true

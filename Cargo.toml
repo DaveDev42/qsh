@@ -16,14 +16,46 @@ publish = false
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
+# frontend / contract
 clap = { version = "4.5", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+schemars = "1"
 thiserror = "2"
 ulid = "1"
 bytes = "1"
 toml = "0.8"
 anyhow = "1"
+base64 = "0.22"
+time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
+
+# wire
+prost = "0.14"
+prost-build = "0.14"
+protox = "0.9"
+
+# transport (docs/design/protocol.md §2, architecture.md §8)
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-aws-lc-rs", "log"] }
+rustls = { version = "0.23", default-features = false, features = ["std", "aws_lc_rs", "logging", "tls12"] }
+rustls-webpki = { version = "0.103", default-features = false, features = ["std", "aws-lc-rs"] }
+x509-parser = "0.18"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "process", "sync", "time", "net", "signal", "io-std"] }
+
+# identity / crypto hygiene
+rcgen = { version = "0.14", default-features = false, features = ["pem", "aws_lc_rs"] }
+sha2 = "0.10"
+zeroize = { version = "1", features = ["derive"] }
+rand = "0.9"
+libc = "0.2"
+
+# diagnostics
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+
+# tests
+proptest = "1"
+tempfile = "3"
+jsonschema = { version = "0.49", default-features = false }
 
 qsh-proto = { path = "crates/qsh-proto" }
 qsh-transport = { path = "crates/qsh-transport" }

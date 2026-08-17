@@ -3,20 +3,27 @@
 //! This crate has no async runtime and no I/O of its own. It owns:
 //!
 //! - [`frame`]: the length-prefixed framing used on every QSH byte stream.
+//! - [`wire`]: the prost-generated `qsh/1` control/data messages
+//!   (`proto/qsh/wire/v1.proto`) and their frame-layer glue.
 //! - [`error`]: [`error::ErrorCode`], the vocabulary shared by the wire
 //!   protocol and the `qsh.cli/v1` JSON envelope.
-//! - [`types`]: JSON contract types (`docs/CLI.md` §5).
+//! - [`types`]: JSON contract types (`docs/CLI.md` §5, §6).
 //! - [`event`]: `qsh.event/v1` session events (`docs/CLI.md` §6.4).
 //!
 //! Because this crate parses untrusted input from the network, it is the
-//! designated fuzzing surface for the project (see the PRD's fuzzing
-//! section) and depends on nothing beyond `serde`/`serde_json`/`thiserror`.
+//! designated fuzzing surface for the project (`docs/design/protocol.md`
+//! §13) and depends on no other workspace crate.
 
 pub mod error;
 pub mod event;
 pub mod frame;
 pub mod types;
+pub mod wire;
 
 pub use error::ErrorCode;
 pub use event::SessionEvent;
-pub use types::{Host, Session, VersionData};
+pub use types::{
+    CLI_SCHEMA_V1, CliEnvelope, CliError, EnvVar, ExecRunData, ExecRunReq, Host, IdentityInitData,
+    IdentityInitReq, KeyStoreKind, KeyStoreMode, Session, TrustAddData, TrustAddReq, TrustListData,
+    TrustPeer, TrustRemoveData, VersionData,
+};

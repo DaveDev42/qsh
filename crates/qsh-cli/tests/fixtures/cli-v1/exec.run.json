@@ -1,0 +1,13 @@
+{
+  "command": "exec.run",
+  "data": {
+    "duration_ms": 0,
+    "remote_exit_code": 7,
+    "signal": null,
+    "stderr_b64": "ZXJyCg==",
+    "stdout_b64": "b3V0Cg=="
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

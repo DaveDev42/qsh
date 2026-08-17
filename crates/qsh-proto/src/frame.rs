@@ -83,6 +83,12 @@ impl FrameDecoder {
         self.buf.extend_from_slice(bytes);
     }
 
+    /// Number of bytes buffered but not yet returned as a frame. Non-zero
+    /// at end-of-stream means the peer truncated a frame.
+    pub fn buffered(&self) -> usize {
+        self.buf.len()
+    }
+
     /// Try to decode one complete frame from the buffered bytes.
     ///
     /// - `Ok(None)`: not enough bytes buffered yet for a full frame.

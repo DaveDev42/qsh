@@ -1,0 +1,12 @@
+{
+  "command": "exec.run",
+  "error": {
+    "code": "CONNECTION_FAILED",
+    "details": null,
+    "message": "no response from 127.0.0.1:<port> within 10s",
+    "retryable": true
+  },
+  "ok": false,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

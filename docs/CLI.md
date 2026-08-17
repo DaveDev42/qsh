@@ -1,6 +1,6 @@
 # QSH CLI, JSON and MCP Contract
 
-**상태:** Draft v0.3  
+**상태:** Draft v0.4 (M1 구현과 동기화)  
 **대상:** QSH MVP  
 **Canonical interface:** `qsh` CLI
 
@@ -341,9 +341,17 @@ qsh session close <session-ref> --signal TERM --json
 
 ```bash
 qsh exec personal-mac --json -- uname -a
+qsh exec personal-mac --json --timeout 5000 --env FOO=bar -- sh -c 'echo "$FOO"'
 ```
 
 `host` 인자는 host 이름이다. hosts.toml 기반 host directory가 도입되는 M7 전까지는 trust store(trust.toml)의 pinned peer(name→address)가 host→주소 해석의 단일 출처다.
+
+- 실행할 명령은 항상 `--` 뒤에 온다(`--` 이후는 qsh가 해석하지 않는다). `--` 뒤에 명령이 없으면 usage 오류(exit `2`)다.
+- `--timeout <milliseconds>`(§9): 기한 내 종료하지 않으면 remote 프로세스(process group)를 kill하고 `TIMEOUT`(`retryable: true`, `details.timeout_ms`)을 반환한다. 기한은 해석·연결·협상·실행 전체에 하나의 예산으로 적용되고, 종료 후 연결 정리 시간은 포함하지 않는다(제때 끝난 명령이 정리가 느리다고 `TIMEOUT`이 되지 않는다). 호스트도 같은 기한을 스스로 강제하며(`ExecExit.timed_out`), 어느 쪽이 먼저 걸리든 결과는 `TIMEOUT`이다.
+- `exec.run`은 출력 전체를 한 envelope에 담으므로 stdout+stderr 합계에 상한(64 MiB)이 있다. 초과하면 remote 명령을 중단하고 `RESOURCE_EXHAUSTED`(`details.limit_bytes`)를 반환한다 — 대용량·스트리밍 출력은 session(§6.4, M2)의 몫이다.
+- `--env NAME=VALUE`(반복 가능): remote 명령의 환경 변수를 추가한다.
+- local stdin이 terminal이 아니면(pipe/file) EOF까지 remote 명령의 stdin으로 전달하고, terminal이면 remote stdin을 즉시 닫는다.
+- human mode에서는 remote stdout/stderr 바이트를 각각 local stdout/stderr에 그대로 통과시키고, exit code는 §4 규칙을 따른다.
 
 결과는 stdout과 stderr를 별도 Base64 field로 반환한다.
 
@@ -388,9 +396,10 @@ qsh version --json
 
 ```bash
 qsh init --json
+qsh init --key-store file --json
 ```
 
-`identity.init`은 device identity(keypair와 self-signed certificate)를 생성한다. 이미 초기화된 경우 오류가 아니라 기존 identity 정보를 `created: false`와 함께 반환한다(멱등).
+`identity.init`은 device identity(keypair와 self-signed certificate)를 생성한다. 이미 초기화된 경우 오류가 아니라 기존 identity 정보를 `created: false`와 함께 반환한다(멱등). `--key-store <auto|platform|file>`는 private key 저장소를 고른다 — `auto`(기본, platform 우선·부재 시 file fallback), `platform`(OS credential store 강제, 부재 시 `INTERNAL` 실패), `file`(0600 파일). 기본값은 `config.toml`의 `[identity].key_store`, 그 다음 `auto`다.
 
 ```json
 {
@@ -418,14 +427,14 @@ qsh trust list --json
 qsh trust remove <name> --json
 ```
 
-`trust.add`는 fingerprint를 명시하면 연결 없이 peer를 pin한다(provisioning 친화). fingerprint 없이 연결해서 확인하는 방식은 human mode에서만 prompt를 열며, `--json` mode에서는 §2.1 규칙에 따라 prompt 대신 `TRUST_REQUIRED` 오류에 `details.observed_fingerprint`와 `details.address`를 담아 반환한다 — 호출자는 그 값을 검증한 뒤 `--fingerprint`로 재호출한다.
+`trust.add`는 fingerprint를 명시하면 연결 없이 peer를 pin한다(provisioning 친화). 이때 `--address`는 선택이며 생략하면 `address`는 빈 문자열로 기록된다 — 단, `qsh exec <name>`의 host→주소 해석(§6.8)은 address가 있는 pin만 대상으로 하므로, 명령을 보낼 host는 address와 함께 pin한다(inbound 전용 peer, 즉 "이 장비에 접속해 올 client"는 fingerprint만으로 충분하다). fingerprint 없이 연결해서 확인하는 방식은 human mode에서만 prompt를 열며, `--json` mode에서는 §2.1 규칙에 따라 prompt 대신 `TRUST_REQUIRED` 오류에 `details.observed_fingerprint`와 `details.address`를 담아 반환한다 — 호출자는 그 값을 검증한 뒤 `--fingerprint`로 재호출한다.
 
 세 명령 모두 통일된 pinned peer 객체를 사용한다:
 
 ```json
 {
   "name": "personal-mac",
-  "fingerprint": "SHA256:BASE64FINGERPRINT",
+  "fingerprint": "sha256:BASE64FINGERPRINT",
   "address": "personal-mac.example.com:4433",
   "added_at": "2026-08-17T00:00:00Z"
 }
@@ -442,7 +451,7 @@ qsh trust remove <name> --json
   "data": {
     "peer": {
       "name": "personal-mac",
-      "fingerprint": "SHA256:BASE64FINGERPRINT",
+      "fingerprint": "sha256:BASE64FINGERPRINT",
       "address": "personal-mac.example.com:4433",
       "added_at": "2026-08-17T00:00:00Z"
     },
@@ -465,7 +474,7 @@ qsh trust remove <name> --json
     "peers": [
       {
         "name": "personal-mac",
-        "fingerprint": "SHA256:BASE64FINGERPRINT",
+        "fingerprint": "sha256:BASE64FINGERPRINT",
         "address": "personal-mac.example.com:4433",
         "added_at": "2026-08-17T00:00:00Z"
       }
@@ -495,7 +504,7 @@ qsh trust remove <name> --json
 
 원격 operation(`exec.run`, `session.*`, `tunnel.*`)의 mTLS 실패 오류 경로는 다음과 같다.
 
-- `TRUST_REQUIRED`: peer가 trust store에 없음. `details`: `observed_fingerprint`, `address`. `retryable: false`.
+- `TRUST_REQUIRED`: peer가 trust store에 없음. `details`: `observed_fingerprint`, `address`. `retryable: false`. (M7의 host directory 이전에는 `qsh exec <host>`의 host 자체가 trust store에서 해석되므로 원격 op가 이 코드를 낼 수 없다 — 미등록 host는 `HOST_NOT_FOUND`, pin 불일치는 `AUTH_FAILED`다. M1에서 이 코드의 유일한 생산자는 fingerprint 없는 `trust add`다.)
 - `AUTH_FAILED`: certificate 검증 실패(만료, CA 불일치, client certificate 미제시 등). `retryable: false`. 보안상 `details`에는 실패 category만 담고 상세 사유를 노출하지 않는다.
 
 ### 6.12 장기 실행 모드: `qsh serve`

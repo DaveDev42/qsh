@@ -1,0 +1,13 @@
+{
+  "command": "identity.init",
+  "data": {
+    "config_dir": "<config_dir>",
+    "created": true,
+    "device_id": "<device_id>",
+    "fingerprint": "<fingerprint>",
+    "key_store": "file"
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

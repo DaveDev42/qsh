@@ -1,0 +1,12 @@
+{
+  "command": "exec.run",
+  "error": {
+    "code": "CONFIG_ERROR",
+    "details": null,
+    "message": "no device identity; run `qsh init` first",
+    "retryable": false
+  },
+  "ok": false,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

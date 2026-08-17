@@ -1,0 +1,15 @@
+{
+  "command": "trust.add",
+  "error": {
+    "code": "TRUST_REQUIRED",
+    "details": {
+      "address": "<address>",
+      "observed_fingerprint": "<fingerprint>"
+    },
+    "message": "peer 127.0.0.1:<port> is not trusted; verify the fingerprint and re-run with --fingerprint",
+    "retryable": false
+  },
+  "ok": false,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

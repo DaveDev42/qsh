@@ -33,6 +33,8 @@ client/server 양쪽 verifier가 **하나의 검증 코어**를 공유한다 (`q
 2. 아니면 **private CA 체인 검증**(rustls-webpki, 신뢰 root는 trust store의 CA만) 성공 시 → 허용, principal = leaf의 SAN URI(`qsh://user/dave`, `qsh://device/hermes`).
 3. 그 외 → 거부. **web PKI root는 어떤 경로로도 로드하지 않는다.**
 
+두 경로 모두에서 leaf 인증서의 **유효기간(not_before/not_after)을 검사**한다 — pin 일치라도 만료·미도래 인증서는 거부한다(M1 명확화: 장기 device cert에서 유효기간은 유일한 revocation 레버이며, 모호하면 fail closed). SNI/hostname은 검증에 쓰지 않는다(identity는 pin 또는 SAN principal이지 DNS 이름이 아니다).
+
 양방향 인증서 필수(`client_auth_mandatory`). 검증된 peer identity 없이는 어떤 스트림도 application 계층에 도달하지 않는다. principal은 연결 수립 시 1회 계산되어 연결에 부착되고, ACL은 이것만 사용한다 — **`Hello`의 `device_name` 등 wire 데이터에서 identity를 취하지 않는다.** TLS 1.3 전용(QUIC이 보장).
 
 ## 4. ALPN·버전·capability
@@ -166,10 +168,12 @@ message ExecFrame {
     StdinEof stdin_eof = 2; // {}
     Stdout   stdout = 3;    // { bytes data; }         chunk ≤ 16 KiB
     Stderr   stderr = 4;    // { bytes data; }          chunk ≤ 16 KiB
-    ExecExit exec_exit = 5; // { int32 exit_code; optional string signal; }
+    ExecExit exec_exit = 5; // { int32 exit_code; optional string signal; bool timed_out; }
   }
 }
 ```
+
+`ExecExit.timed_out`은 호스트가 `ExecStart.timeout_ms` 만료로 프로세스 그룹을 kill했음을 뜻한다(이때 `exit_code`/`signal`은 보통 `137`/`SIGKILL`). 클라이언트는 이를 일반 signal 종료가 아니라 `TIMEOUT`으로 보고한다. 호스트는 한 connection이 미상환 ticket을 과도하게 쌓지 못하도록 per-connection 상한(현재 32)을 두며 초과 시 `ExecStart`에 `RESOURCE_EXHAUSTED`(retryable)로 답한다 — ACL 판정이 아니므로 audit되지 않는다. 자식이 종료된 뒤 peer가 data 스트림을 읽지 않아 flow control에 막히면 호스트는 유예(5s) 후 스트림을 reset(code 1)하고 자식을 reap한다 — 읽지 않는 peer가 호스트 exec를 붙잡아 둘 수 없다.
 
 ## 10. Session resume 프로토콜
 

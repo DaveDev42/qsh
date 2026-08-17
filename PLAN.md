@@ -10,10 +10,10 @@
 
 ### DoD 체크리스트 (`docs/ROADMAP.md` M1 "수용 기준" 인용)
 
-- [ ] `qsh exec host --json -- sh -c 'echo out; echo err >&2; exit 7'` → 프로세스 exit 7, `ok:true`, 올바른 `stdout_b64`/`stderr_b64`/`remote_exit_code:7`.
-- [ ] 비신뢰 peer로 같은 명령 → exit 255 + `AUTH_FAILED`.
-- [ ] Handshake matrix 16종(client/server cert × trust store 조합: pin 일치/불일치/만료/cert 없음/CA 모드 혼동) 전부 기대 결과.
-- [ ] `-v` 진단은 stderr에만, stdout은 파싱 가능한 JSON 하나.
+- [x] `qsh exec host --json -- sh -c 'echo out; echo err >&2; exit 7'` → 프로세스 exit 7, `ok:true`, 올바른 `stdout_b64`/`stderr_b64`/`remote_exit_code:7`.
+- [x] 비신뢰 peer로 같은 명령 → exit 255 + `AUTH_FAILED`.
+- [x] Handshake matrix 16종(client/server cert × trust store 조합: pin 일치/불일치/만료/cert 없음/CA 모드 혼동) 전부 기대 결과.
+- [x] `-v` 진단은 stderr에만, stdout은 파싱 가능한 JSON 하나.
 
 M1 크기: 3ew (`docs/ROADMAP.md` M1 "크기").
 
