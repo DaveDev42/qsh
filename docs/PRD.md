@@ -1,6 +1,6 @@
 # QSH Product Requirements Document
 
-**상태:** Draft v0.3  
+**상태:** Draft v0.4  
 **작성일:** 2026-08-17  
 **제품명:** QSH (Quick Shell / QUIC Shell)  
 **CLI:** `qsh`
@@ -106,8 +106,10 @@ qsh attach company-mac
 
 ```bash
 qsh sessions personal-mac
-qsh attach personal-mac:<session-id>
+qsh attach <session-ref>
 ```
+
+`<session-ref>`는 `qsh sessions`가 반환하는 opaque 값이며, 호출자가 host와 session ID를 조합해 만들지 않는다(CLI.md §5).
 
 클라이언트 종료, 절전 또는 네트워크 단절이 remote PTY를 종료해서는 안 된다. 재접속하면 마지막으로 확인한 output부터 복구한다.
 
@@ -184,11 +186,13 @@ qsh -D 1080 dave@server   # P1 — SOCKS5, 플래그는 예약만 되어 있음
 
 ACL principal은 certificate fingerprint 또는 CA가 발급한 user/device identity다. 최소 action은 다음과 같다.
 
-- `session.create`, `session.list`, `session.attach`, `session.control`
+- `session.open`, `session.list`, `session.attach`, `session.control`
 - `exec.run`
 - `forward.local`, `forward.remote`, `forward.socks`
 - `file.read`, `file.write`
 - `host.reverse`
+
+ACL action은 인가 어휘로 operation 이름과 별개 차원이며, 하나의 action이 여러 operation을 커버할 수 있다(`session.control`은 write/resize/close를 커버). Operation과 action의 매핑은 CLI.md §2.5에서 정의한다.
 
 ```toml
 [[acl]]
@@ -231,11 +235,13 @@ qsh mcp
 
 최소 tool set:
 
-- `list_hosts`, `list_sessions`
-- `open_session`, `attach_session`, `close_session`
+- `list_hosts`, `get_host`, `list_sessions`, `get_session`
+- `open_session`, `close_session`
 - `read_session`, `write_session`, `resize_session`
 - `exec`
 - `open_tunnel`, `close_tunnel`
+
+MCP는 long-poll `read_session`/`write_session` 모델을 사용하므로 별도의 attach tool은 없다(CLI.md §8.3).
 
 `qsh mcp`는 별도 기능 계층이 아니다. CLI와 같은 typed operation, identity, ACL과 session broker를 MCP tool로 노출하는 얇은 adapter다. 내부에서 `qsh` subprocess를 반복 실행하거나 별도 business logic을 구현하지 않는다.
 
@@ -251,7 +257,7 @@ qsh listen                      reverse listener
 qsh reverse controller          역방향 연결
 qsh hosts                       호스트 조회
 qsh sessions [host]             세션 조회
-qsh attach host:session         세션 attach
+qsh attach <session-ref>        세션 attach
 qsh tunnel ...                  터널 관리
 qsh trust ...                   신뢰 관리
 qsh cert ...                    인증서 관리

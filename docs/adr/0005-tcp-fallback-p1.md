@@ -16,7 +16,7 @@ TCP fallback 구현 자체는 **P1으로 유지**한다. 단, **transport 추상
 
 ## 근거
 
-- P0 로드맵(약 12주, M0~M2)은 이미 identity/mTLS/QUIC/framing/dispatch/ACL/JSON envelope라는 리스크 척추를 관통하는 것으로 꽉 차 있다 — TCP fallback을 지금 추가하면 두 번째 transport 구현+테스트 매트릭스가 필요해 일정이 크게 늘어난다.
+- M0~M2 로드맵(`docs/ROADMAP.md` 참고)은 이미 identity/mTLS/QUIC/framing/dispatch/ACL/JSON envelope라는 리스크 척추를 관통하는 것으로 꽉 차 있다 — TCP fallback을 지금 추가하면 두 번째 transport 구현+테스트 매트릭스가 필요해 일정이 크게 늘어난다.
 - ADR-0001의 custom QUIC protocol 결정 덕분에, TCP fallback은 나중에 붙여도 **wire 프로토콜 변경이 필요 없다** — "TLS over TCP + 소형 mux"만 추가하면 끝난다. 즉 지금 미루는 비용이 낮다(나중에 재설계가 필요 없음).
 - 반대로 `Transport` trait 없이 QUIC 전용으로 P0를 구현하면, P1에서 TCP를 붙일 때 dispatch/broker/ACL 코드 전반에 QUIC 전제(stream ID 등)가 스며들어 있어 대규모 재작업이 필요해진다 — 이 비용은 지금 trait 하나로 막을 수 있다.
 - UDP 차단은 실사용에서 바로 부딪힐 수 있는 문제이므로, fallback을 구현하지 않더라도 최소한 "왜 안 되는지 진단"은 P0에 있어야 사용자가 좌절하지 않는다. `qsh doctor`의 UDP probe는 구현 비용이 낮고 즉시 가치를 준다.

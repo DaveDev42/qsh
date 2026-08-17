@@ -1,6 +1,6 @@
 # QSH CLI, JSON and MCP Contract
 
-**상태:** Draft v0.2  
+**상태:** Draft v0.3  
 **대상:** QSH MVP  
 **Canonical interface:** `qsh` CLI
 
@@ -61,7 +61,7 @@ qsh hosts --json
 
 ### 2.4 Operation 이름
 
-CLI의 `command`, JSON envelope, audit record와 MCP tool mapping은 하나의 dotted operation 이름을 공유한다. ACL action 이름과 1:1로 대응하는 경우 이름을 맞춘다.
+CLI의 `command`, JSON envelope, audit record와 MCP tool mapping은 하나의 dotted operation 이름을 공유한다. 각 operation이 요구하는 ACL action은 §2.5의 매핑 표에서 정의한다.
 
 ```text
 host.list
@@ -78,12 +78,37 @@ exec.run
 tunnel.open
 tunnel.close
 tunnel.list
+identity.init
+trust.add
+trust.list
+trust.remove
+doctor.run
 schema.get
 capabilities.get
 version.get
 ```
 
 `session.attach`는 value operation이 아니라 stream operation이다 (§7.1 참고). CLI subcommand 표기(`qsh hosts`, `qsh session open` 등)와 이 dotted 이름은 서로 다른 계층이며, envelope의 `command` field·audit record·MCP mapping은 항상 이 dotted 이름을 사용한다.
+
+`qsh serve`, `qsh listen`, `qsh reverse`는 operation이 아니라 장기 실행 모드(long-running mode)다. 단일 요청/응답 계약이 없으며 이 목록에 포함되지 않는다.
+
+### 2.5 Operation과 ACL action 매핑
+
+ACL action은 인가(authorization) 어휘로, operation 이름과는 별개 차원이다. 하나의 action이 여러 operation을 커버할 수 있다. 전체 action 목록은 PRD §9에서 정의하며, 원격 peer가 요청한 operation은 아래 매핑에 따라 인가된다.
+
+| Operation | 필요 ACL action |
+|---|---|
+| `session.open` | `session.open` |
+| `session.list`, `session.get` | `session.list` |
+| `session.read`, `session.attach` | `session.attach` |
+| `session.write`, `session.resize`, `session.close` | `session.control` |
+| `exec.run` | `exec.run` |
+| `tunnel.open` (local forward) | `forward.local` |
+| `tunnel.open` (remote forward) | `forward.remote` |
+| `tunnel.close`, `tunnel.list` | 해당 tunnel의 소유 peer이면 허용 (`forward.*` 부여로 충분) |
+| `host.list`, `host.get`, `identity.init`, `trust.*`, `doctor.run`, `schema.get`, `capabilities.get`, `version.get` | 인가 불요 — local operation으로 원격 peer의 ACL 평가 대상이 아님 |
+
+향후 예약: streaming file copy → `file.read`/`file.write`, SOCKS(`-D`) → `forward.socks`, 역방향 host 등록 → `host.reverse`.
 
 ## 3. JSON envelope
 
@@ -135,9 +160,9 @@ SESSION_CONFLICT
 RESUME_GAP
 TIMEOUT
 CANCELED
-RESOURCE_EXHAUSTED
-UNSUPPORTED
 REMOTE_ERROR
+UNSUPPORTED
+RESOURCE_EXHAUSTED
 INTERNAL
 ```
 
@@ -318,6 +343,8 @@ qsh session close <session-ref> --signal TERM --json
 qsh exec personal-mac --json -- uname -a
 ```
 
+`host` 인자는 host 이름이다. hosts.toml 기반 host directory가 도입되는 M7 전까지는 trust store(trust.toml)의 pinned peer(name→address)가 host→주소 해석의 단일 출처다.
+
 결과는 stdout과 stderr를 별도 Base64 field로 반환한다.
 
 ```json
@@ -356,6 +383,133 @@ qsh version --json
 ```
 
 `schema`는 CLI가 지원하는 schema version을, `capabilities`는 peer와 negotiation된 기능을 반환한다.
+
+### 6.11 Identity와 trust
+
+```bash
+qsh init --json
+```
+
+`identity.init`은 device identity(keypair와 self-signed certificate)를 생성한다. 이미 초기화된 경우 오류가 아니라 기존 identity 정보를 `created: false`와 함께 반환한다(멱등).
+
+```json
+{
+  "schema": "qsh.cli/v1",
+  "request_id": "01K0EXAMPLE",
+  "command": "identity.init",
+  "ok": true,
+  "data": {
+    "device_id": "device_01K0EXAMPLE",
+    "fingerprint": "sha256:BASE64FINGERPRINT",
+    "key_store": "platform",
+    "config_dir": "/Users/dave/.config/qsh",
+    "created": true
+  }
+}
+```
+
+`key_store`는 `platform`(OS credential store) 또는 `file`(0600 permission fallback)이다. 어느 쪽이 사용됐는지는 항상 결과에 명시한다.
+
+`identity.init`의 실패 경로는 전용 오류 코드를 두지 않고 일반 `ErrorCode` 어휘(§3.3)를 따른다 — 예: keystore 쓰기 실패는 `INTERNAL`(`retryable: false`)로 보고한다.
+
+```bash
+qsh trust add <name> --address <host:port> --fingerprint sha256:... --json
+qsh trust list --json
+qsh trust remove <name> --json
+```
+
+`trust.add`는 fingerprint를 명시하면 연결 없이 peer를 pin한다(provisioning 친화). fingerprint 없이 연결해서 확인하는 방식은 human mode에서만 prompt를 열며, `--json` mode에서는 §2.1 규칙에 따라 prompt 대신 `TRUST_REQUIRED` 오류에 `details.observed_fingerprint`와 `details.address`를 담아 반환한다 — 호출자는 그 값을 검증한 뒤 `--fingerprint`로 재호출한다.
+
+세 명령 모두 통일된 pinned peer 객체를 사용한다:
+
+```json
+{
+  "name": "personal-mac",
+  "fingerprint": "SHA256:BASE64FINGERPRINT",
+  "address": "personal-mac.example.com:4433",
+  "added_at": "2026-08-17T00:00:00Z"
+}
+```
+
+`trust.add` 결과 (신규 pin):
+
+```json
+{
+  "schema": "qsh.cli/v1",
+  "request_id": "01K0EXAMPLE",
+  "command": "trust.add",
+  "ok": true,
+  "data": {
+    "peer": {
+      "name": "personal-mac",
+      "fingerprint": "SHA256:BASE64FINGERPRINT",
+      "address": "personal-mac.example.com:4433",
+      "added_at": "2026-08-17T00:00:00Z"
+    },
+    "created": true
+  }
+}
+```
+
+이미 같은 이름으로 pin된 경우도 오류가 아니라 멱등이다 — 기존 항목은 그대로 유지되고 `data.created`가 `false`로 돌아온다.
+
+`trust.list` 결과:
+
+```json
+{
+  "schema": "qsh.cli/v1",
+  "request_id": "01K0EXAMPLE",
+  "command": "trust.list",
+  "ok": true,
+  "data": {
+    "peers": [
+      {
+        "name": "personal-mac",
+        "fingerprint": "SHA256:BASE64FINGERPRINT",
+        "address": "personal-mac.example.com:4433",
+        "added_at": "2026-08-17T00:00:00Z"
+      }
+    ]
+  }
+}
+```
+
+`trust.remove` 결과:
+
+```json
+{
+  "schema": "qsh.cli/v1",
+  "request_id": "01K0EXAMPLE",
+  "command": "trust.remove",
+  "ok": true,
+  "data": {
+    "name": "personal-mac",
+    "removed": true
+  }
+}
+```
+
+존재하지 않는 이름을 제거하는 것도 오류가 아니라 멱등이다 — `ok: true`에 `data.removed: false`를 반환한다.
+
+일회용 invite code pairing(`qsh trust invite` 계열, ADR-0002)의 CLI 계약은 M7에서 확정한다. `doctor.run`은 operation 이름만 예약되어 있으며 계약은 M7에서 확정한다.
+
+원격 operation(`exec.run`, `session.*`, `tunnel.*`)의 mTLS 실패 오류 경로는 다음과 같다.
+
+- `TRUST_REQUIRED`: peer가 trust store에 없음. `details`: `observed_fingerprint`, `address`. `retryable: false`.
+- `AUTH_FAILED`: certificate 검증 실패(만료, CA 불일치, client certificate 미제시 등). `retryable: false`. 보안상 `details`에는 실패 category만 담고 상세 사유를 노출하지 않는다.
+
+### 6.12 장기 실행 모드: `qsh serve`
+
+`qsh serve`는 §2.4가 명시하듯 operation이 아니라 장기 실행 모드(long-running mode)이며 단일 요청/응답 JSON 계약이 없다.
+
+```bash
+qsh serve --bind <ip:port>
+```
+
+- **Foreground 전용(M1).** 데몬화는 QSH 자체가 하지 않고 OS 서비스 매니저(systemd/launchd)에 위임한다.
+- `--bind`의 우선순위: CLI flag > `config.toml`의 `[serve].bind` > 기본값 `[::]:4433`.
+- 시작 시 실제로 bind된 주소를 stderr에 출력한다 — stdout은 §2.2 규칙에 따라 JSON 계약 전용이므로 여기서는 쓰지 않는다.
+- listener 재시작 시 세션 소실에 대해서는 README의 [Known limitations](../README.md#known-limitations-mvp-by-design)를 참고한다.
 
 ## 7. Human interactive mode
 

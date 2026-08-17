@@ -27,7 +27,7 @@ Listener 재시작 시 세션 손실은 문서화된 알려진 제한(PRD §16�
 
 ## 대안과 기각 사유
 
-- **별도 supervisor 프로세스로 처음부터 분리**: 기각. IPC·업그레이드 오케스트레이션 비용이 MVP 일정(M0~M2, 약 9주)에 비해 과도하다. 이 복잡도는 세션 생존성이 실사용에서 검증된 뒤 투자하는 것이 합리적이다.
+- **별도 supervisor 프로세스로 처음부터 분리**: 기각. IPC·업그레이드 오케스트레이션 비용이 M0~M2 일정(`docs/ROADMAP.md` 참고)에 비해 과도하다. 이 복잡도는 세션 생존성이 실사용에서 검증된 뒤 투자하는 것이 합리적이다.
 - **세션을 아예 프로세스 재시작 시 버리는 것으로 확정(seam 없이)**: 기각. 나중에 supervisor를 붙이려면 broker 전체를 다시 설계해야 하는 함정에 빠진다. Trait seam의 비용은 낮고, 없으면 나중에 큰 재작업이 된다.
 - **systemd socket activation 등 OS 레벨 프로세스 관리에 의존**: 기각. macOS/Linux 양쪽에서 이식성 있는 방식이 아니고, PRD §12가 QSH 경계 밖으로 명시한 "조직 계정과 중앙 관리"와 달리 이건 QSH 코어 책임이라 OS 기능에 위임할 수 없다.
 
@@ -35,6 +35,6 @@ Listener 재시작 시 세션 손실은 문서화된 알려진 제한(PRD §16�
 
 - `qsh-core/broker/`는 `SessionBackend` trait의 in-process 구현체 하나만 P0에서 제공한다.
 - `SessionBackend` trait 시그니처는 transport crate(`qsh-transport`)를 import할 수 없다 — 의존 방향(`qsh(bin) → qsh-core → qsh-transport → qsh-proto`)과 arch-lint(xtask)로 강제한다.
-- `localctl.rs`(UDS 제어 소켓)는 M0 스캐폴드에 포함되어야 하며, tunnel 관리 등 로컬 제어 기능이 이를 통해 노출된다.
+- `localctl.rs`(UDS 제어 소켓)는 M2(session broker)와 함께 도입하며, tunnel 관리 등 로컬 제어 기능이 이를 통해 노출된다.
 - Listener 재시작으로 인한 세션 손실은 README/PRD에 알려진 제한으로 명시하고, SIGTERM 수신 시 drain(신규 attach 거부 + 기존 연결 정상 종료 유예) 로직을 구현해야 한다.
 - Supervisor 분리는 P1 이후 후보로 남긴다.
