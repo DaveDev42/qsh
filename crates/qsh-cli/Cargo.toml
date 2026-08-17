@@ -1,0 +1,18 @@
+[package]
+name = "qsh-cli"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "qsh"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ulid.workspace = true
+qsh-core.workspace = true
+qsh-proto.workspace = true
