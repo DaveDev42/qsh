@@ -1,6 +1,6 @@
 # QSH CLI, JSON and MCP Contract
 
-**상태:** Draft v0.1  
+**상태:** Draft v0.2  
 **대상:** QSH MVP  
 **Canonical interface:** `qsh` CLI
 
@@ -57,6 +57,33 @@ qsh hosts --json
 - Byte sequence는 JSON에서 standard Base64로 표현한다.
 - 알 수 없는 field는 무시할 수 있어야 한다.
 - 기존 field의 의미 변경과 삭제는 새 major schema가 필요하다.
+- `sequence`는 chunk index가 아니라 세션 수명(session lifetime) 동안 누적된 output byte 수(u64)다. 각 `session.output` event의 `sequence`는 해당 chunk까지 포함한 누적 byte offset, 즉 그 chunk의 마지막 byte offset + 1이다. 상세 계약은 §6.4를 참고한다.
+
+### 2.4 Operation 이름
+
+CLI의 `command`, JSON envelope, audit record와 MCP tool mapping은 하나의 dotted operation 이름을 공유한다. ACL action 이름과 1:1로 대응하는 경우 이름을 맞춘다.
+
+```text
+host.list
+host.get
+session.list
+session.get
+session.open
+session.read
+session.write
+session.resize
+session.close
+session.attach
+exec.run
+tunnel.open
+tunnel.close
+tunnel.list
+schema.get
+capabilities.get
+version.get
+```
+
+`session.attach`는 value operation이 아니라 stream operation이다 (§7.1 참고). CLI subcommand 표기(`qsh hosts`, `qsh session open` 등)와 이 dotted 이름은 서로 다른 계층이며, envelope의 `command` field·audit record·MCP mapping은 항상 이 dotted 이름을 사용한다.
 
 ## 3. JSON envelope
 
@@ -66,7 +93,7 @@ qsh hosts --json
 {
   "schema": "qsh.cli/v1",
   "request_id": "01K0EXAMPLE",
-  "command": "hosts",
+  "command": "host.list",
   "ok": true,
   "data": {
     "hosts": []
@@ -108,11 +135,13 @@ SESSION_CONFLICT
 RESUME_GAP
 TIMEOUT
 CANCELED
+RESOURCE_EXHAUSTED
+UNSUPPORTED
 REMOTE_ERROR
 INTERNAL
 ```
 
-오류 코드는 추가될 수 있다. 알 수 없는 code는 일반 QSH 오류로 처리한다.
+오류 코드는 추가될 수 있다. 알 수 없는 code는 일반 QSH 오류로 처리한다. `UNSUPPORTED`는 요청한 기능이 아직 구현되지 않았거나 peer와 협상되지 않은 경우(예: P1 기능인 `-D`/SOCKS)에 사용한다. `RESOURCE_EXHAUSTED`는 backpressure나 서버측 한도 초과를 나타낸다.
 
 ## 4. Process exit code
 
@@ -125,6 +154,8 @@ INTERNAL
 | `255` | 연결, 인증, 정책 등 QSH runtime 실패 |
 
 `qsh exec`는 OpenSSH와 마찬가지로 remote process의 exit code `0..254`를 그대로 반환한다. QSH 자체의 실패는 `255`다. JSON 결과에는 `remote_exit_code`와 QSH 오류가 구분되어 있으므로 자동화는 stdout JSON도 함께 확인한다.
+
+Remote process가 정확히 `255`로 종료한 경우, QSH 자체 실패(`255`)와 구분할 수 없게 되는 것을 막기 위해 qsh exec의 프로세스 exit code는 `254`로 clamp된다. 이때도 JSON 결과의 `remote_exit_code`는 실제 값(`255`)을 그대로 담으며, exit code의 source of truth는 항상 JSON이다.
 
 Output mode에 따라 exit code 의미가 달라져서는 안 된다.
 
@@ -157,6 +188,8 @@ Output mode에 따라 exit code 의미가 달라져서는 안 된다.
 ```
 
 `session_ref`는 CLI가 반환하는 opaque value다. 호출자가 host와 session ID를 조합해 생성하지 않는다.
+
+`last_sequence`는 chunk 개수가 아니라 이 세션에서 지금까지 누적된 output byte 수(offset)다. `session read --after`에 그대로 전달할 수 있다.
 
 ## 6. 명령 계약
 
@@ -207,12 +240,14 @@ qsh session read <session-ref> --after 42 --wait 30000 --json
 qsh session read <session-ref> --after 42 --follow --jsonl
 ```
 
-- `--after`: 마지막으로 처리한 sequence
+- `--after`: 마지막으로 수신한 누적 output byte offset (sequence)
 - `--wait`: 새 output을 기다릴 최대 milliseconds
 - `--follow`: 종료나 취소까지 event를 계속 출력
 - `--limit-bytes`: 한 응답의 최대 payload
 
 단일 JSON 응답은 event 배열을 반환한다. `--follow --jsonl`은 event 하나당 한 줄을 출력한다.
+
+**Sequence 시맨틱**: `sequence`는 세션 시작(0)부터 누적된 output byte 수이며 chunk index가 아니다. 각 `session.output` event의 `sequence`는 그 chunk까지 포함한 누적 byte offset, 즉 chunk의 마지막 byte offset + 1이다. `--after N`은 누적 offset `N` 이후의 byte를 요청한다. 서버는 chunk를 자유롭게 분할·병합할 수 있으므로 클라이언트가 매번 같은 크기로 chunk를 받는다고 가정해서는 안 되지만, replay는 항상 정확히 `N`에서 끊어 재개할 수 있다. 아래 예시는 `--after 42`로 요청한 뒤 7 byte(`Hello\r\n`) chunk 하나를 받아 누적 offset이 `49`가 된 상황이다.
 
 Output event:
 
@@ -221,7 +256,7 @@ Output event:
   "schema": "qsh.event/v1",
   "type": "session.output",
   "session_ref": "personal-mac/01K0SESSION",
-  "sequence": 43,
+  "sequence": 49,
   "data_b64": "SGVsbG8NCg=="
 }
 ```
@@ -237,6 +272,10 @@ Gap event:
   "available_from": 120
 }
 ```
+
+`available_from`은 replay buffer가 보존하고 있는 가장 오래된 byte offset이다. `requested_after`가 `available_from`보다 작으면 그 사이 byte는 영구히 유실된 것이며, QSH는 이를 숨기지 않고 gap event로 명시한다.
+
+Input(`session write`) 방향에도 동일한 누적 byte offset 모델이 적용된다. 다만 input side의 재전송/중복 제거(`input_seq`+ack)는 내부 프로토콜 동작이며, 이 문서가 정의하는 CLI 계약에는 별도 field가 없다.
 
 Exit event:
 
@@ -285,7 +324,7 @@ qsh exec personal-mac --json -- uname -a
 {
   "schema": "qsh.cli/v1",
   "request_id": "01K0EXAMPLE",
-  "command": "exec",
+  "command": "exec.run",
   "ok": true,
   "data": {
     "stdout_b64": "RGFyd2luCg==",
@@ -305,6 +344,8 @@ qsh tunnel open server --remote 9000:localhost:9000 --json
 qsh tunnels --json
 qsh tunnel close <tunnel-id> --json
 ```
+
+`-D`(SOCKS5 dynamic forwarding, `forward.socks`)는 CLI 인자로 parsing되지만 P0에서는 항상 `UNSUPPORTED` 오류를 반환한다. 구현은 P1이다.
 
 ### 6.10 Schema와 capability
 
@@ -327,6 +368,15 @@ qsh attach <session-ref>
 
 Interactive mode는 terminal raw mode, window resize와 signal forwarding을 처리한다. 세션 생성·읽기·쓰기의 권한과 동작은 machine-readable command와 동일하다.
 
+### 7.1 Value operation과 stream operation
+
+QSH operation은 두 종류로 나뉜다.
+
+- **Value operation**: 단일 요청에 단일 응답을 반환하는 일반 RPC. `session.read`, `session.write`를 비롯해 이 문서 대부분의 command가 여기 속한다.
+- **Stream operation**: 하나의 duplex byte channel을 열고 유지하는 operation. `session.attach`가 유일한 stream op이며, resume(`last_sequence` 기반) semantics를 갖는 duplex channel을 반환한다.
+
+`qsh dave@personal-mac`와 `qsh attach <session-ref>` 같은 interactive attach는 내부적으로 이 `session.attach` 하나의 streaming operation 위에 구현된다. `session.read`/`session.write`는 machine-facing value operation으로 별도 존재하며, `--follow --jsonl`(§6.4)도 같은 streaming source에서 값을 공급받는다. attach와 read/write 사이에 별도 business logic은 없다.
+
 ## 8. MCP server
 
 ### 8.1 실행
@@ -341,18 +391,18 @@ MVP에서는 stdio transport만 지원한다. MCP stdout에는 protocol frame만
 
 | MCP tool | Typed operation |
 |---|---|
-| `list_hosts` | `hosts` |
-| `get_host` | `host get` |
-| `list_sessions` | `sessions` |
-| `get_session` | `session get` |
-| `open_session` | `session open` |
-| `read_session` | `session read` |
-| `write_session` | `session write` |
-| `resize_session` | `session resize` |
-| `close_session` | `session close` |
-| `exec` | `exec` |
-| `open_tunnel` | `tunnel open` |
-| `close_tunnel` | `tunnel close` |
+| `list_hosts` | `host.list` |
+| `get_host` | `host.get` |
+| `list_sessions` | `session.list` |
+| `get_session` | `session.get` |
+| `open_session` | `session.open` |
+| `read_session` | `session.read` |
+| `write_session` | `session.write` |
+| `resize_session` | `session.resize` |
+| `close_session` | `session.close` |
+| `exec` | `exec.run` |
+| `open_tunnel` | `tunnel.open` |
+| `close_tunnel` | `tunnel.close` |
 
 Tool input과 output field는 JSON CLI의 data type과 동일하다. MCP adapter가 command string을 만들거나 CLI output을 다시 parse해서는 안 된다. 두 adapter 모두 같은 Rust operation layer를 직접 호출한다.
 
