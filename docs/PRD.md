@@ -1,6 +1,6 @@
 # QSH Product Requirements Document
 
-**상태:** Draft v0.2  
+**상태:** Draft v0.3  
 **작성일:** 2026-08-17  
 **제품명:** QSH (Quick Shell / QUIC Shell)  
 **CLI:** `qsh`
@@ -124,7 +124,7 @@ qsh exec personal-mac -- uname -a
 ```bash
 qsh -L 8080:localhost:3000 dave@personal-mac
 qsh -R 9000:localhost:9000 dave@server
-qsh -D 1080 dave@server
+qsh -D 1080 dave@server   # P1 — SOCKS5, 플래그는 예약만 되어 있음
 ```
 
 ## 7. 기능 요구사항
@@ -262,7 +262,7 @@ qsh schema --json               지원 schema와 capability 조회
 qsh doctor                      연결·인증·정책 진단
 ```
 
-SSH 사용자에게 익숙한 `-L`, `-R`, `-D`, `-t`, `-T`, `-v`는 의미가 충돌하지 않는 범위에서 유지한다.
+SSH 사용자에게 익숙한 `-L`, `-R`, `-D`, `-t`, `-T`, `-v`는 의미가 충돌하지 않는 범위에서 유지한다. `-D`(SOCKS5 dynamic forwarding)는 P0에서 flag parsing만 되며 실제 구현은 P1이다.
 
 ## 12. 시스템 경계
 
@@ -325,7 +325,7 @@ Relay는 payload와 endpoint private key를 볼 수 없어야 한다. 이를 위
 | Shell 권한의 과도한 범위 | 제한 자동화는 별도 `exec.run` 사용 |
 | 역방향 연결을 relay로 오인 | Controller reachability 요구 명시 |
 | Listener 재시작으로 세션 손실 | 초기 제한 명시, 추후 supervisor 검토 |
-| `qsh` 기존 명령과 충돌 | 지원 플랫폼의 패키지 충돌 재검증 |
+| `qsh` 기존 명령과 충돌 | crates.io `qsh`는 동일 컨셉의 활성 프로젝트(haukened/quicshell)가 선점, Debian/Ubuntu는 gridengine-client가 `/usr/bin/qsh`를 점유, npm에도 `qsh`가 존재(Homebrew·Arch·Nix는 충돌 없음 확인). 대응: crate 이름 분리(`qsh-cli`), 주 배포 채널은 Homebrew tap/curl\|sh 스크립트, `qsh doctor`가 PATH 상의 다른 `qsh` 바이너리를 경고 |
 
 ## 17. 확정된 결정
 
@@ -338,11 +338,20 @@ Relay는 payload와 endpoint private key를 볼 수 없어야 한다. 이를 위
 - JSON CLI를 canonical programmatic interface로 삼는다.
 - `qsh mcp`는 동일 operation을 노출하는 얇은 내장 adapter다.
 - Relay는 향후 별도 self-hosted/managed 제품으로 개발한다.
+- Transport protocol은 HTTP/3가 아닌 custom QUIC application protocol(`qsh/1` ALPN)로 확정한다. QSH에는 HTTP semantics가 필요 없고, custom frame layer는 P1 TCP fallback과도 동일하게 동작한다.
+- Pairing 기본 UX는 일회용 invite code(TLS-exporter 기반 channel binding, 10분 TTL)로 하며, fingerprint 방식은 Ansible/cloud-init 등 스크립트 provisioning용 fallback으로 유지한다. QR pairing은 P1이다.
+- Detached PTY 세션은 MVP에서 `qsh serve` 프로세스 내부(in-listener)에 둔다. 단 `SessionBackend` trait와 per-process UDS 제어 소켓 seam을 미리 마련해 P1에서 별도 supervisor로 drop-in 교체 가능하게 한다.
+- Replay buffer는 memory-only ring(세션당 기본 8MB)으로 하며 `ReplayStore` trait 뒤에 격리한다. Encrypted disk spool은 P1 이후 opt-in으로 검토한다.
+- TCP fallback은 P1으로 유지한다. 단 모든 프로토콜 코드를 transport-agnostic framing(`Transport`/`StreamMux` trait) 위에 작성하고, `qsh doctor`의 UDP reachability probe는 P0에 포함한다.
+- 제품명과 바이너리는 `qsh`를 유지한다. crates.io 배포 패키지명만 `qsh-cli`로 분리하고 `[[bin]] name = "qsh"`로 바이너리 이름은 그대로 둔다(§16 이름 충돌 위험 참고).
 
-## 18. 남은 결정
+## 18. 설계 결정 기록
 
-1. HTTP/3 semantics와 custom QUIC protocol 중 어느 쪽을 core로 둘지
-2. Pairing 기본 UX를 fingerprint, 일회용 code, QR 중 무엇으로 할지
-3. Detached PTY를 listener 내부에 둘지 별도 supervisor로 분리할지
-4. Replay buffer를 memory-only로 둘지 encrypted disk spool을 허용할지
-5. TCP fallback을 P0로 앞당길지
+초안 단계의 남은 결정은 모두 확정되었다(§17). 각 결정의 배경, 검토한 대안과 근거는 다음 ADR(Architecture Decision Record)에 남긴다.
+
+- `docs/adr/0001-custom-quic-protocol.md` — custom QUIC application protocol(`qsh/1`)
+- `docs/adr/0002-pairing-invite-code.md` — pairing 기본 UX(일회용 invite code)
+- `docs/adr/0003-sessions-in-listener.md` — detached PTY 세션 위치(in-listener + SessionBackend seam)
+- `docs/adr/0004-replay-buffer-memory-only.md` — replay buffer(memory-only ring)
+- `docs/adr/0005-tcp-fallback-p1.md` — TCP fallback 시점(P1)과 transport 추상화
+- `docs/adr/0006-product-name-and-crate-name.md` — 제품/바이너리 이름과 crates.io 패키지 이름
