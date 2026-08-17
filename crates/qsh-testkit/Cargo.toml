@@ -6,3 +6,13 @@ publish.workspace = true
 license.workspace = true
 
 [dependencies]
+qsh-proto.workspace = true
+qsh-transport.workspace = true
+qsh-core.workspace = true
+tokio.workspace = true
+rcgen.workspace = true
+tempfile.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+qsh-proto.workspace = true

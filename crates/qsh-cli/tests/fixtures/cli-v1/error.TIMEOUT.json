@@ -1,0 +1,14 @@
+{
+  "command": "exec.run",
+  "error": {
+    "code": "TIMEOUT",
+    "details": {
+      "timeout_ms": 300
+    },
+    "message": "exec did not complete within 300 ms; the remote command was killed",
+    "retryable": true
+  },
+  "ok": false,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

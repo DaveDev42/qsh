@@ -1,0 +1,10 @@
+{
+  "command": "trust.remove",
+  "data": {
+    "name": "personal-mac",
+    "removed": false
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

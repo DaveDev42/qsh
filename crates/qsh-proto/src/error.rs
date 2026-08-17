@@ -133,6 +133,28 @@ impl ErrorCode {
     }
 }
 
+impl schemars::JsonSchema for ErrorCode {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "ErrorCode".into()
+    }
+
+    fn json_schema(_gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        // Deliberately an open string, not a closed enum: the wire and the
+        // envelope are forward-compatible with codes this build does not
+        // know (module docs). `examples` lists the codes this build knows.
+        let known: Vec<serde_json::Value> = ErrorCode::KNOWN
+            .iter()
+            .map(|c| serde_json::Value::String(c.as_str().to_string()))
+            .collect();
+        schemars::json_schema!({
+            "type": "string",
+            "description": "QSH error code (`SCREAMING_SNAKE_CASE`). Unknown codes are passed through.",
+            "pattern": "^[A-Z][A-Z0-9_]*$",
+            "examples": known,
+        })
+    }
+}
+
 impl fmt::Display for ErrorCode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())

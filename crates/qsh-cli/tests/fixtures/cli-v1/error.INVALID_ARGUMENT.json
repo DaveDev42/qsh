@@ -1,0 +1,12 @@
+{
+  "command": "trust.add",
+  "error": {
+    "code": "INVALID_ARGUMENT",
+    "details": null,
+    "message": "invalid fingerprint \"not-a-fingerprint\": expected sha256:<base64 of 32 bytes>",
+    "retryable": false
+  },
+  "ok": false,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

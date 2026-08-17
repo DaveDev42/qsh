@@ -1,0 +1,12 @@
+{
+  "command": "exec.run",
+  "error": {
+    "code": "HOST_NOT_FOUND",
+    "details": null,
+    "message": "host \"nowhere\" is not in the trust store; pin it with `qsh trust add nowhere --address <host:port> --fingerprint sha256:...`",
+    "retryable": false
+  },
+  "ok": false,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}
