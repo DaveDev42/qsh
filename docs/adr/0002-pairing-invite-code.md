@@ -30,7 +30,7 @@ QSH는 password 인증을 지원하지 않고 상호 TLS와 pinned certificate(�
 
 ## 결과
 
-- `qsh trust invite` / `qsh trust accept <code>` 명령과 TLS exporter 기반 HMAC proof 교환 로직을 `qsh-core/identity.rs` 또는 `trust/` 모듈에 구현해야 한다.
+- `qsh trust invite` / `qsh trust accept <code>` 명령과 TLS exporter 기반 HMAC proof 교환 로직을 `qsh-core::trust` 모듈([architecture.md](../design/architecture.md) §5)에 구현해야 한다.
 - Pairing 로직은 `TrustEvaluator` trait을 통해 `QshPeerVerifier`(ADR와 무관하게 이미 결정된 pin-or-CA 검증기)와 연결된다.
 - `--json` 경로는 대화형 prompt를 절대 열지 않고 `TRUST_REQUIRED` + `details.fingerprint`를 반환해야 한다 — CLI.md §11(frontend에 인증 로직 금지)과 일치.
 - P1 백로그: QR 인코딩(invite code를 QR로 표시/스캔), pairing 만료·재발급 UX 개선.

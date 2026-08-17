@@ -4,6 +4,22 @@ QSH is a QUIC-based direct-connect remote shell (single Rust binary `qsh`) that 
 
 `docs/PRD.md` and `docs/CLI.md` are the binding contract for behavior, wire format, and JSON envelope shape. `docs/adr/` holds decided architecture decisions (ADRs). **Read the relevant PRD/CLI.md section and any related ADR before proposing a change to protocol, wire format, or JSON contract** — do not re-litigate a decision that already has an ADR; propose a new ADR instead if you believe it's wrong.
 
+## Session onboarding
+
+1. Open `docs/ROADMAP.md` and find the current milestone (first one not marked Done). Its acceptance criteria are the definition of done — build to them, not past them.
+2. Before implementing, read the matching sections of `docs/design/protocol.md` (wire protocol), `docs/design/architecture.md` (crates, modules, key mechanisms), `docs/design/testing.md` (which tests the milestone owes), and the `docs/CLI.md` contract for any command you touch.
+3. Features deferred to P1/P2 stay deferred: reserved flags (e.g. `-D`) parse and return `UNSUPPORTED`; do not implement them early.
+
+## Document map
+
+- `docs/PRD.md` — product requirements (binding)
+- `docs/CLI.md` — CLI / JSON / MCP contract (binding)
+- `docs/ROADMAP.md` — milestones M0–M9 with scope and acceptance criteria
+- `docs/design/protocol.md` — wire protocol design (frames, streams, resume, reverse)
+- `docs/design/architecture.md` — crate/module design and key mechanisms
+- `docs/design/testing.md` — per-layer test strategy and CI discipline
+- `docs/adr/` — architecture decision records (settled decisions)
+
 ## Commands
 
 - `cargo test` (or `cargo nextest run` if installed — preferred, process isolation matters for PTY tests)
@@ -23,9 +39,9 @@ QSH is a QUIC-based direct-connect remote shell (single Rust binary `qsh`) that 
 - `crates/qsh-testkit` — test harness.
 - `xtask` — arch-lint.
 
-## Hard architecture rules (CLI.md §11, enforced by xtask arch)
+## Hard architecture rules (docs/design/architecture.md §1, enforced by xtask arch)
 
-- Dependency direction is strictly `qsh-cli → qsh-core → qsh-transport → qsh-proto`. Never sideways, never backwards.
+- Allowed dependency matrix (exactly what `xtask arch` enforces): `qsh-proto` → nothing; `qsh-transport` → `qsh-proto`; `qsh-core` → `qsh-proto`, `qsh-transport`; `qsh-cli` → `qsh-core` and `qsh-proto` (contract types only — never `qsh-transport`); `qsh-testkit` → anything. Never backwards.
 - Renderers and the MCP adapter contain **zero** auth/ACL/session logic. They call only the typed `Ops` layer.
 - The MCP adapter never shells out to `qsh` and never re-parses CLI output. It calls `Ops` directly, same as the CLI frontend.
 
@@ -40,7 +56,7 @@ If a change requires putting logic in `qsh-cli` to make something work, that's a
 
 ## Security defaults
 
-- ACL is default-deny.
+- ACL is default-deny. The policy engine lands in M5; before that (M1–M4) the interim posture is the ROADMAP's allow-all-pinned (mTLS-authenticated pinned peers only), and any authentication failure is always denied.
 - Never create a resource (session, tunnel, listener) before authorization succeeds.
 - Fail closed on any ambiguous auth/ACL state.
 - Never log key material or PTY/command contents — audit records are structural (op, principal, result), never payload.

@@ -41,6 +41,7 @@ M0 진행 중 이름 충돌 조사를 신규로 수행했다(§18 원안에는 �
 ## 결과
 
 - `crates/qsh-cli/Cargo.toml`의 `[package] name = "qsh-cli"`, `[[bin]] name = "qsh"`로 M0 스캐폴드에서 설정해야 한다.
+- 현재 workspace는 `publish = false`로 잠겨 있다. crates.io 배포는 릴리스 마일스톤(M9)에서 publish gate를 해제하며 진행한다 — 그 전에 `cargo publish`를 시도하면 의도적으로 거부된다.
 - README.md와 설치 안내는 Homebrew tap / curl\|sh를 주 채널로 명시하고, `cargo install qsh-cli`는 보조 채널로 언급한다.
 - `qsh-core/doctor.rs`는 PATH 스캔으로 다른 `qsh` 실행파일 존재 여부와 경로를 human/JSON 양쪽으로 보고해야 한다(P0 범위).
 - PRD §16 위험 표를 이번 조사 결과(구체적 충돌처: crates.io `haukened/quicshell`, Debian `gridengine-client`, npm)로 갱신해야 한다.
