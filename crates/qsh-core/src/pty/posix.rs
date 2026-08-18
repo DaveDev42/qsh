@@ -654,7 +654,10 @@ fn try_reap(pid: libc::pid_t) -> Option<SourceExit> {
             continue;
         }
         // ECHILD: nothing of ours to reap — the child is gone but its
-        // status is unknowable (someone else reaped it).
+        // status is unknowable (someone else reaped it). Structural log
+        // only (pid + errno, never session payload); the session still
+        // ends, with the documented "both null" exit shape (CLI.md §6.4).
+        tracing::warn!(pid, error = %err, "pty child status is unknowable");
         return Some(SourceExit::default());
     }
 }
@@ -667,9 +670,11 @@ fn blocking_reap(pid: libc::pid_t) -> SourceExit {
         if rc == pid {
             return exit_from_status(status);
         }
-        if io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+        let err = io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::EINTR) {
             continue;
         }
+        tracing::warn!(pid, error = %err, "pty child status is unknowable");
         return SourceExit::default();
     }
 }
@@ -686,6 +691,10 @@ fn exit_from_status(status: libc::c_int) -> SourceExit {
             signal: Some(crate::exec::signal_name(libc::WTERMSIG(status))),
         }
     } else {
+        // Neither WIFEXITED nor WIFSIGNALED (we never pass WUNTRACED /
+        // WCONTINUED, so this should be unreachable): report the
+        // documented "both null" shape rather than inventing a status.
+        tracing::warn!(status, "pty child status is neither exit nor signal");
         SourceExit::default()
     }
 }
