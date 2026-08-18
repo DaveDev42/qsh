@@ -25,6 +25,11 @@ use qsh_proto::{EnvVar, SessionAttachReq, SessionGetReq, SessionOpenReq};
 /// round trip against `qsh serve`; nothing sleeps.
 const DEADLINE: Duration = Duration::from_secs(60);
 
+/// Pause between pulls of a poll loop. Not a wait for correctness — every
+/// assertion is on the value pulled — just enough to keep a regression from
+/// turning a deadline into an RPC flood.
+const POLL_BACKOFF: Duration = Duration::from_millis(20);
+
 /// `Ops` bound to a sandbox's config/state pair — the same directories the
 /// `qsh` binary would resolve from `QSH_CONFIG_DIR`/`QSH_STATE_DIR`, but
 /// called in-process so the stream object itself is under test.
@@ -151,8 +156,11 @@ fn attach_round_trips_input_and_reports_the_remote_exit_code() {
         stream.write(b"hello\n".to_vec()).expect("write");
         let seen = read_until(&mut stream, "GOT:hello");
         // The PTY echoes what we typed *and* the shell answers, which is
-        // exactly the interactive experience the TUI renders.
-        assert!(seen.contains("hello"), "{seen:?}");
+        // exactly the interactive experience the TUI renders — so the echo
+        // has to be there ahead of the answer, not just the answer.
+        let echo = seen.find("hello").expect("the PTY echo of the input");
+        let answer = seen.find("GOT:hello").expect("the shell's answer");
+        assert!(echo < answer, "the PTY did not echo the input: {seen:?}");
 
         let status = loop {
             match stream.next_event() {
@@ -226,6 +234,11 @@ fn detaching_leaves_the_session_running_and_re_attachable() {
                     std::time::Instant::now() < deadline,
                     "the writer lease was never released after the detach"
                 );
+                // Converges on the first or second pull today (the host
+                // releases the lease when it sees the connection close);
+                // the pause keeps a regression a slow failure rather than
+                // a minute-long RPC flood.
+                std::thread::sleep(POLL_BACKOFF);
             }
 
             let mut stream = attach(&ops, &session_ref).expect("re-attach");
@@ -233,10 +246,16 @@ fn detaching_leaves_the_session_running_and_re_attachable() {
             // replays the session from the start, which is what puts the
             // scrollback back on a reconnecting terminal.
             assert_eq!(stream.replay_from(), 0);
+            // The replay is what happened *before* this attach existed:
+            // both the echo of the input and the answer to it.
             let replayed = read_until(&mut stream, "ECHO:one");
+            let echo = replayed
+                .find("one\r\n")
+                .expect("the pre-detach input echo is missing from the replay");
+            let answer = replayed.find("ECHO:one").expect("the shell's answer");
             assert!(
-                replayed.contains("ECHO:one"),
-                "a re-attach replays what happened before it: {replayed:?}"
+                echo < answer,
+                "the replay starts after the pre-detach input: {replayed:?}"
             );
             stream.write(b"two\n".to_vec()).expect("write");
             let seen = read_until(&mut stream, "ECHO:two");

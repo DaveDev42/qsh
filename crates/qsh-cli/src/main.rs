@@ -90,9 +90,19 @@ fn run(cli: &Cli) -> i32 {
     let Some(command) = &cli.command else {
         // No subcommand: the bare interactive form, `qsh [user@]host`.
         let Some(target) = &cli.interactive.target else {
-            // Only reachable with global flags and nothing else
-            // (`arg_required_else_help` covers the empty command line).
-            let _ = Cli::command().print_help();
+            // Reachable with global flags and nothing else:
+            // `arg_required_else_help` only fires on a *completely* empty
+            // command line, so `qsh --json` lands here. clap prints an
+            // error to stderr, which is what keeps stdout pure JSON in
+            // machine mode (`docs/CLI.md` §2.2, §4: usage errors write
+            // nothing to stdout in either mode).
+            let _ = Cli::command()
+                .error(
+                    clap::error::ErrorKind::MissingRequiredArgument,
+                    "no target and no subcommand: expected `qsh [user@]host` \
+                     or one of the subcommands below",
+                )
+                .print();
             return EXIT_USAGE;
         };
         return run_interactive(

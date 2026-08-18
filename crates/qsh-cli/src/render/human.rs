@@ -296,8 +296,10 @@ pub fn print_session_close(data: &SessionCloseData) -> io::Result<()> {
 /// influenced by a remote peer — error messages, signal names — so a
 /// hostile host cannot smuggle terminal escape sequences or fake extra
 /// lines into *our* diagnostics. Command output itself is passed through
-/// verbatim on purpose (that is what the user asked to see).
-fn sanitize(text: &str) -> String {
+/// verbatim on purpose (that is what the user asked to see). Also used by
+/// the interactive TUI, which prints peer-supplied signal names and close
+/// reasons onto a terminal it has just restored.
+pub(crate) fn sanitize(text: &str) -> String {
     text.chars()
         .map(|c| {
             if c.is_control() && c != '\t' {

@@ -462,6 +462,47 @@ pub fn signal_name(signo: i32) -> String {
     name.to_string()
 }
 
+/// The exact inverse of [`signal_name`]: a canonical `SIGTERM`-form name
+/// back to its number, including the `SIG<n>` fallback for signals this
+/// table does not name.
+///
+/// `qsh exec` reports a signalled child as `128 + signo` (POSIX shell
+/// convention). An interactive attach only ever learns the *name* — the
+/// `session.exit` event carries `signal` and a null `exit_code`
+/// (`docs/CLI.md` §6.4) — so it needs this to reach the same exit code
+/// for the same death (§4).
+#[cfg(unix)]
+pub fn signal_number(name: &str) -> Option<i32> {
+    let signo = match name {
+        "SIGHUP" => libc::SIGHUP,
+        "SIGINT" => libc::SIGINT,
+        "SIGQUIT" => libc::SIGQUIT,
+        "SIGILL" => libc::SIGILL,
+        "SIGTRAP" => libc::SIGTRAP,
+        "SIGABRT" => libc::SIGABRT,
+        "SIGBUS" => libc::SIGBUS,
+        "SIGFPE" => libc::SIGFPE,
+        "SIGKILL" => libc::SIGKILL,
+        "SIGUSR1" => libc::SIGUSR1,
+        "SIGSEGV" => libc::SIGSEGV,
+        "SIGUSR2" => libc::SIGUSR2,
+        "SIGPIPE" => libc::SIGPIPE,
+        "SIGALRM" => libc::SIGALRM,
+        "SIGTERM" => libc::SIGTERM,
+        "SIGCHLD" => libc::SIGCHLD,
+        "SIGCONT" => libc::SIGCONT,
+        "SIGSTOP" => libc::SIGSTOP,
+        "SIGTSTP" => libc::SIGTSTP,
+        "SIGTTIN" => libc::SIGTTIN,
+        "SIGTTOU" => libc::SIGTTOU,
+        "SIGXCPU" => libc::SIGXCPU,
+        "SIGXFSZ" => libc::SIGXFSZ,
+        "SIGWINCH" => libc::SIGWINCH,
+        other => return other.strip_prefix("SIG")?.parse().ok(),
+    };
+    Some(signo)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -484,6 +525,24 @@ mod tests {
         assert_eq!(signal_name(libc::SIGKILL), "SIGKILL");
         assert_eq!(signal_name(libc::SIGTERM), "SIGTERM");
         assert_eq!(signal_name(200), "SIG200");
+    }
+
+    /// `signal_number` must be the exact inverse, or `qsh exec` and an
+    /// interactive attach would disagree about the same death
+    /// (`docs/CLI.md` §4).
+    #[cfg(unix)]
+    #[test]
+    fn signal_numbers_round_trip_every_name() {
+        for signo in 1..=31 {
+            assert_eq!(
+                signal_number(&signal_name(signo)),
+                Some(signo),
+                "signal {signo} did not round trip"
+            );
+        }
+        assert_eq!(signal_number("SIG200"), Some(200));
+        assert_eq!(signal_number("not-a-signal"), None);
+        assert_eq!(signal_number("SIGNOPE"), None);
     }
 
     #[cfg(unix)]

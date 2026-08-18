@@ -181,14 +181,26 @@ fn locate(binary: &str) -> Option<PathBuf> {
     std::env::split_paths(&path)
         .map(|dir| dir.join(binary))
         .find(|candidate| {
+            // Executable, not merely present: a non-executable `vim` on
+            // PATH would otherwise turn a clean skip into a confusing
+            // failure inside the session.
+            use std::os::unix::fs::PermissionsExt as _;
             std::fs::metadata(candidate)
-                .map(|meta| meta.is_file())
+                .map(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
                 .unwrap_or(false)
         })
 }
 
 /// Announce a skipped acceptance item, loudly enough to find in a CI log.
+///
+/// With `QSH_ACCEPTANCE_STRICT=1` a missing binary is a *failure* instead:
+/// the M2 acceptance set is only certified where all four are installed,
+/// and a job that claims to certify it must not pass by skipping.
 fn skip(binary: &str) {
+    assert!(
+        std::env::var_os("QSH_ACCEPTANCE_STRICT").is_none(),
+        "QSH_ACCEPTANCE_STRICT is set but {binary} is not installed on this runner"
+    );
     eprintln!("SKIP: {binary} is not installed on this runner");
 }
 
@@ -481,8 +493,7 @@ fn claude_starts_inside_a_session() {
     );
     let mut client = Client::spawn(&fleet.client, &["attach", &session_ref]);
 
-    let version = client.expect_regex(r"\d+\.\d+\.\d+");
-    assert!(!version.is_empty());
+    client.expect_regex(r"\d+\.\d+\.\d+");
     client.expect_exit(0);
     assert!(client.is_cooked(), "claude left the terminal raw");
 }
@@ -496,6 +507,10 @@ fn claude_starts_inside_a_session() {
 /// exactly the point: a shipped `qsh` cannot be talked into panicking by
 /// its environment.
 #[test]
+#[cfg_attr(
+    not(debug_assertions),
+    ignore = "the QSH_TUI_TEST_PANIC seam is debug-only"
+)]
 fn a_panic_restores_the_terminal() {
     let fleet = Fleet::start();
     let session_ref = open_session(&fleet.client, &["sh"]);
@@ -561,18 +576,164 @@ fn a_closed_session_ends_the_attach_cleanly() {
         .json(&["session", "close", &session_ref, "--json"]);
     assert_eq!(code, 0, "{closed}");
 
+    // The client has to *say* which of the two happened; a silent
+    // `Outcome::Lost` would otherwise satisfy the exit-code check below.
+    let reason = client.expect_regex(r"terminated by SIGHUP|the session was closed");
+
     match client.wait() {
-        // The child dies of the close signal (no exit code of its own) or
-        // the session is gone before its status is reported; either way
-        // this is a qsh-side failure, not a remote status
-        // (`docs/CLI.md` §4).
-        WaitStatus::Exited(_, 254 | 255) => {}
-        other => panic!("expected a non-zero exit, got {other:?}"),
+        // `session close` sends SIGHUP first (`docs/CLI.md` §6.7), so the
+        // child dies of it and the client reports `128 + SIGHUP` exactly
+        // like `qsh exec` (§4) — unless the session is removed before that
+        // status reaches us, which is a qsh-side failure (255).
+        WaitStatus::Exited(_, 129 | 255) => {}
+        other => panic!("expected 129 or 255 after {reason:?}, got {other:?}"),
     }
     assert!(
         client.is_cooked(),
         "the terminal must be restored on the error path"
     );
+}
+
+/// A line typed immediately before `~d` still reaches the shell.
+///
+/// One `read(2)` carries both, so the detach and the bytes ahead of it race
+/// unless the detach travels the same ordered queue as the input and the
+/// send half is flushed before the connection closes — a QUIC close
+/// discards unsent stream data. The replay a re-attach gets is where the
+/// answer shows up (`docs/CLI.md` §7: the session outlives the client).
+#[test]
+fn input_typed_just_before_a_detach_is_not_lost() {
+    let fleet = Fleet::start();
+    let session_ref = open_session(&fleet.client, &["sh"]);
+    let mut client = Client::spawn(&fleet.client, &["attach", &session_ref]);
+
+    client.round_trip("QSH-BEFORE");
+    // Deliberately one write: the command, its CR, and the escape.
+    client.type_("echo LAST''-OK\r~d");
+    client.expect("detached");
+    client.expect_exit(0);
+
+    let mut back = Client::spawn(&fleet.client, &["attach", &session_ref]);
+    back.expect("LAST-OK");
+    back.type_("exit\r");
+    back.expect_exit(0);
+}
+
+/// `^C` reaches the remote PTY, both ways it can arrive (`docs/CLI.md`
+/// §9): as a keystroke (raw mode clears `ISIG`, so it is an ordinary byte
+/// the client forwards) and as an externally delivered `SIGINT`, which the
+/// signal pump turns back into that byte.
+///
+/// The shell traps `INT` and prints, so the assertion is on the remote
+/// *reacting*, not on a byte disappearing into a pipe.
+#[test]
+fn an_interrupt_reaches_the_remote_pty_from_both_directions() {
+    let fleet = Fleet::start();
+    let session_ref = open_session(
+        &fleet.client,
+        &[
+            "sh",
+            "-c",
+            // No `|| exit`: a `read` interrupted by the signal returns
+            // non-zero, so an exit-on-failure loop would end the shell
+            // instead of proving the trap ran.
+            "trap 'echo GOT-INT' INT; echo READY; while :; do read x; done",
+        ],
+    );
+    let mut client = Client::spawn(&fleet.client, &["attach", &session_ref]);
+
+    // Wait for the shell's banner before typing anything: it is written by
+    // the event pump, which only runs once the terminal is raw. Until then
+    // `ISIG` is still set on the *local* pty and a `^C` would kill the
+    // client instead of travelling to the remote.
+    client.expect("READY");
+
+    client.type_("\x03");
+    client.expect("GOT-INT");
+
+    // ...and the same byte again, this time produced by the client itself
+    // out of a signal nobody typed.
+    client.signal(Signal::SIGINT);
+    client.expect("GOT-INT");
+
+    // The client is still attached: a forwarded SIGINT is not an exit.
+    // (`^C` is not a line end, so a CR comes first or `~d` is just input.)
+    client.type_("\r");
+    client.type_("~d");
+    client.expect_exit(0);
+    assert_eq!(
+        session_get(&fleet.client, &session_ref)["state"],
+        "running",
+        "a forwarded SIGINT must not end the session"
+    );
+}
+
+/// The two escape sequences that end up as remote input: `~~` sends one
+/// literal `~`, and an unrecognised `~x` sends **both** bytes
+/// (`docs/CLI.md` §7). Unit-tested byte for byte; this is the same rule
+/// through a real terminal, where the remote echo is in the way.
+#[test]
+fn literal_and_unknown_escapes_reach_the_shell() {
+    let fleet = Fleet::start();
+    // `cat` echoes its input back verbatim, so what the shell received is
+    // exactly what comes out — no prompt, no expansion, no quoting.
+    let session_ref = open_session(&fleet.client, &["cat"]);
+    let mut client = Client::spawn(&fleet.client, &["attach", &session_ref]);
+
+    // `~~` at a line start: one `~`, then a marker so the line is
+    // identifiable in the echo.
+    client.type_("~~TILDE\r");
+    client.expect("~TILDE");
+
+    // `~x` is not a sequence: both bytes go on. (`x` is not a line start
+    // afterwards, so the `~` in the marker is ordinary input too.)
+    client.type_("~xUNKNOWN\r");
+    client.expect("~xUNKNOWN");
+
+    client.type_("~d");
+    client.expect_exit(0);
+}
+
+/// `user@` is an assertion, not a choice: a name that is not the serve
+/// account's is refused with `UNSUPPORTED` and **no session is created**
+/// (`docs/CLI.md` §7, fail closed). This is the only CLI surface that can
+/// send the hint at all.
+#[test]
+fn a_foreign_user_hint_is_refused_without_creating_a_session() {
+    let fleet = Fleet::start();
+    let before = session_count(&fleet.client);
+
+    let target = format!("qsh-no-such-user@{HOST_ALIAS}");
+    let output = fleet.client.qsh(&[&target]);
+    assert_eq!(
+        common::exit_code(&output),
+        255,
+        "a refused hint is a qsh runtime failure (`docs/CLI.md` §4)"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("user switching is not supported"),
+        "stderr was {stderr:?}"
+    );
+    assert!(
+        stderr.contains("UNSUPPORTED"),
+        "the error code must reach the user: {stderr:?}"
+    );
+    assert_eq!(
+        session_count(&fleet.client),
+        before,
+        "a refused `user@` must not leave a session behind"
+    );
+}
+
+/// How many sessions the host is holding.
+fn session_count(client: &Sandbox) -> usize {
+    let (code, listed) = client.json(&["sessions", HOST_ALIAS, "--json"]);
+    assert_eq!(code, 0, "{listed}");
+    listed["data"]["sessions"]
+        .as_array()
+        .expect("sessions")
+        .len()
 }
 
 /// Not a terminal: with a pipe on stdin the client forwards every byte
