@@ -23,6 +23,7 @@
 
 pub mod clock;
 pub mod lease;
+pub mod resume;
 pub mod ring;
 pub mod session;
 pub mod signal;
@@ -39,13 +40,17 @@ use crate::config::ServeConfig;
 
 pub use clock::{BoxFuture, Clock, SystemClock, TestClock};
 pub use lease::{ConnectionId, LeaseHolder, TakeOutcome, WriterLease};
+pub use resume::{
+    PEER_FINGERPRINT_LEN, PeerFingerprint, RESUME_TOKEN_LEN, ResumeDenied, ResumeRegistry,
+    ResumeToken, TokenHash,
+};
 pub use ring::{
     CloseReason, ControlEvent, Cursor, ReadError, ReadOut, ReplayEvent, ReplayRing, ReplayStore,
 };
 pub use session::{
-    AttachGuard, AttachToken, PipeHandle, PipeSource, SessionActor, SessionConfig, SessionHandle,
-    SessionInfo, SessionSource, SessionSpec, SessionState, SourceControl, SourceExit,
-    SpawnedSource, WriteError,
+    AttachGuard, AttachToken, InputStreamId, PipeHandle, PipeSource, SessionActor, SessionConfig,
+    SessionHandle, SessionInfo, SessionSource, SessionSpec, SessionState, SourceControl,
+    SourceExit, SpawnedSource, WriteError,
 };
 pub use signal::Signal;
 
@@ -316,6 +321,12 @@ pub struct Broker {
     clock: Arc<dyn Clock>,
     config: BrokerConfig,
     factory: Arc<dyn SourceFactory>,
+    /// Resume credentials, keyed by session id (protocol.md §10). Lives
+    /// beside the registry because its entries die exactly when a session
+    /// does: the reaper and `close` both forget through it, so a closed
+    /// session's `session.attach` is indistinguishable from one naming an
+    /// id that never existed.
+    resume: ResumeRegistry,
 }
 
 impl std::fmt::Debug for Broker {
@@ -336,6 +347,7 @@ impl Broker {
     ) -> Arc<Self> {
         Arc::new(Self {
             registry: Mutex::new(HashMap::new()),
+            resume: ResumeRegistry::new(Arc::clone(&clock)),
             clock,
             config,
             factory,
@@ -463,6 +475,10 @@ impl Broker {
     ) -> Result<u64, BrokerError> {
         let handle = self.get(id)?;
         handle.close(reason, signal).await;
+        // The session is gone, so its resume credential must be too: a
+        // later `session.attach` presenting it has to look exactly like one
+        // naming an id that never existed (CLI.md §6.4, protocol.md §10-2).
+        self.resume.forget(id);
         Ok(handle.info().last_sequence)
     }
 
@@ -517,6 +533,9 @@ impl Broker {
                 registry.remove(&id);
             }
         }
+        // Credentials whose TTL lapsed on their own (nothing closed the
+        // session, e.g. the host restarted the reaper before a reattach).
+        self.resume.purge_expired();
         // Close concurrently: each close may take up to three grace periods
         // of escalation, and one stubborn child must not delay the rest.
         // `close` is idempotent and joins a concurrent close, so a race with
@@ -531,6 +550,7 @@ impl Broker {
         let mut reaped = Vec::new();
         while let Some(res) = joins.join_next().await {
             if let Ok(id) = res {
+                self.resume.forget(&id);
                 reaped.push(id);
             }
         }
@@ -611,6 +631,27 @@ pub trait SessionBackend: Send + Sync {
         data: Vec<u8>,
     ) -> BoxFuture<'_, Result<(), BrokerError>>;
 
+    /// Write client input carrying its cumulative offset (`input_seq` is
+    /// the offset *after* the chunk). The session trims what it already
+    /// applied and resolves to its applied offset — the value the peer is
+    /// acked with. This is the exactly-once half of protocol.md §10-5: a
+    /// reattach may retransmit its un-acked tail freely.
+    fn write_at(
+        &self,
+        id: &SessionId,
+        conn: ConnectionId,
+        stream: InputStreamId,
+        data: Vec<u8>,
+        input_seq: u64,
+    ) -> BoxFuture<'_, Result<u64, BrokerError>>;
+
+    /// The session's current input stream and applied offset — what a
+    /// **resumed** attach continues from.
+    fn input_cursor(&self, id: &SessionId) -> Result<(InputStreamId, u64), BrokerError>;
+
+    /// Mint a fresh input stream id for an attach that is not a resume.
+    fn new_input_stream(&self, id: &SessionId) -> Result<InputStreamId, BrokerError>;
+
     /// Apply a window-size change.
     fn resize(
         &self,
@@ -646,6 +687,32 @@ pub trait SessionBackend: Send + Sync {
     /// The resume TTL an unattached session lives for (`[serve].resume_ttl`)
     /// — what the host reports as `SessionOpened.expires_at`.
     fn resume_ttl(&self) -> Duration;
+
+    /// Mint the session's first resume credential, bound to `peer`
+    /// (protocol.md §10). Called once, by `session.open`, **after**
+    /// authorization; the plaintext is handed to the opening client and
+    /// never stored.
+    fn issue_resume(&self, id: &SessionId, peer: PeerFingerprint) -> ResumeToken;
+
+    /// Check a presented credential without consuming it. This is the
+    /// *first* gate of a reattach (protocol.md §10-2): it runs before the
+    /// ACL call, and its single failure mode is non-distinguishing.
+    fn verify_resume(
+        &self,
+        id: &SessionId,
+        presented: &[u8],
+        peer: PeerFingerprint,
+    ) -> Result<(), ResumeDenied>;
+
+    /// Honour a verified redemption: invalidate the presented credential
+    /// and mint its successor. Called **only** once the token check, the
+    /// identity check and the ACL check have all passed.
+    fn rotate_resume(
+        &self,
+        id: &SessionId,
+        presented: &[u8],
+        peer: PeerFingerprint,
+    ) -> Result<ResumeToken, ResumeDenied>;
 }
 
 impl SessionBackend for Broker {
@@ -695,6 +762,31 @@ impl SessionBackend for Broker {
         Box::pin(async move { handle?.write(conn, data).await.map_err(map_write_error) })
     }
 
+    fn write_at(
+        &self,
+        id: &SessionId,
+        conn: ConnectionId,
+        stream: InputStreamId,
+        data: Vec<u8>,
+        input_seq: u64,
+    ) -> BoxFuture<'_, Result<u64, BrokerError>> {
+        let handle = Broker::get(self, id);
+        Box::pin(async move {
+            handle?
+                .write_at(conn, data, Some((stream, input_seq)))
+                .await
+                .map_err(map_write_error)
+        })
+    }
+
+    fn input_cursor(&self, id: &SessionId) -> Result<(InputStreamId, u64), BrokerError> {
+        Ok(Broker::get(self, id)?.input_cursor())
+    }
+
+    fn new_input_stream(&self, id: &SessionId) -> Result<InputStreamId, BrokerError> {
+        Ok(Broker::get(self, id)?.new_input_stream())
+    }
+
     fn resize(
         &self,
         id: &SessionId,
@@ -738,6 +830,29 @@ impl SessionBackend for Broker {
     fn resume_ttl(&self) -> Duration {
         self.config.resume_ttl
     }
+
+    fn issue_resume(&self, id: &SessionId, peer: PeerFingerprint) -> ResumeToken {
+        self.resume.issue(id, peer, self.config.resume_ttl)
+    }
+
+    fn verify_resume(
+        &self,
+        id: &SessionId,
+        presented: &[u8],
+        peer: PeerFingerprint,
+    ) -> Result<(), ResumeDenied> {
+        self.resume.verify(id, presented, peer)
+    }
+
+    fn rotate_resume(
+        &self,
+        id: &SessionId,
+        presented: &[u8],
+        peer: PeerFingerprint,
+    ) -> Result<ResumeToken, ResumeDenied> {
+        self.resume
+            .rotate(id, presented, peer, self.config.resume_ttl)
+    }
 }
 
 fn map_write_error(err: WriteError) -> BrokerError {
@@ -745,6 +860,10 @@ fn map_write_error(err: WriteError) -> BrokerError {
         WriteError::NotWriter => BrokerError::NotWriter,
         WriteError::NotRunning => BrokerError::NotRunning,
         WriteError::Backpressure => BrokerError::Backpressure,
+        // A peer that skipped input bytes is a protocol fault, not a
+        // caller mistake the CLI can surface; the stream pump turns it into
+        // a reset. `INVALID_ARGUMENT` is the closest control-stream code.
+        err @ WriteError::InputGap { .. } => BrokerError::InvalidArgument(err.to_string()),
         WriteError::Io(e) => BrokerError::Io(e),
         WriteError::Gone => BrokerError::Gone,
     }

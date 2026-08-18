@@ -44,8 +44,8 @@ use thiserror::Error;
 use tokio::sync::mpsc;
 
 use crate::broker::{
-    AttachToken, BrokerError, ConnectionId, ControlEvent, Cursor, ReplayEvent, SessionBackend,
-    SessionId,
+    AttachToken, BrokerError, ConnectionId, ControlEvent, Cursor, InputStreamId, ReplayEvent,
+    SessionBackend, SessionId,
 };
 
 /// Payload budget of one output pull: four wire chunks. Enough to keep the
@@ -101,6 +101,13 @@ pub struct SessionStream {
     /// Where output replay starts (`SessionAttach.last_output_seq`; `0` for
     /// a stream redeemed straight off `session.open`).
     pub cursor: Cursor,
+    /// The logical input stream this attach continues (protocol.md §10-5).
+    /// A resumed attach carries the id it left, so the session's dedup
+    /// cursor still applies to it; anything else carries a fresh id.
+    pub input_stream: InputStreamId,
+    /// Cumulative input offset the peer was told to resume its own counter
+    /// from (`SessionAttached.input_seq`) — the first ack it can expect.
+    pub input_from: u64,
     /// Funnel to the connection's control-stream writer for the
     /// asynchronous `SessionEvent`s an attached peer is owed
     /// (protocol.md §9). For an *attached* peer this is the only carrier
@@ -135,6 +142,8 @@ impl SessionStream {
             session_id,
             conn,
             cursor,
+            input_stream,
+            input_from,
             events,
         } = self;
 
@@ -163,7 +172,15 @@ impl SessionStream {
         )));
 
         let result = {
-            let input = input_pump(sessions, session_id, conn, recv, frames_tx);
+            let input = input_pump(
+                sessions,
+                session_id,
+                conn,
+                input_stream,
+                input_from,
+                recv,
+                frames_tx,
+            );
             tokio::pin!(input);
             tokio::select! {
                 r = &mut input => match r {
@@ -283,18 +300,24 @@ async fn output_pump(
 
 /// `Input`/`Resize` from the peer, with the input dedup + ack of
 /// protocol.md §10-5.
+#[allow(clippy::too_many_arguments)]
 async fn input_pump(
     sessions: Arc<dyn SessionBackend>,
     id: SessionId,
     conn: ConnectionId,
+    stream: InputStreamId,
+    input_from: u64,
     mut recv: FramedRecv,
     frames: mpsc::Sender<SessionFrame>,
 ) -> Result<(), SessionStreamError> {
-    // Highest cumulative input offset applied on this stream. Per-attach in
-    // M2 Step 5: one attach is one input stream starting at 0. PLAN Step 7
-    // lifts it into the session, keyed by the resume token, so it survives
-    // a reattach (protocol.md §10-5).
-    let mut applied: u64 = 0;
+    // The dedup cursor lives in the **session** (protocol.md §10-5), not
+    // here: `SessionBackend::write_at` trims whatever the child already ran
+    // under the actor's own serialisation. A reattach that retransmits its
+    // un-acked tail therefore cannot make the child see a byte twice, and a
+    // stealing peer — told where the axis stands in
+    // `SessionAttached.input_seq` — cannot have its input mistaken for a
+    // replay. This local value is only the last ack we sent.
+    let mut applied: u64 = input_from;
     loop {
         let Some(frame) = recv.recv::<SessionFrame>().await? else {
             return Ok(()); // peer finished its half cleanly
@@ -314,32 +337,34 @@ async fn input_pump(
                 };
                 if start > applied {
                     // The peer skipped input bytes we never saw. Accepting
-                    // would lose them silently, which PRD §8 forbids.
+                    // would lose them silently, which PRD §8 forbids. (The
+                    // session re-checks this against its own cursor; this
+                    // catches it one round trip earlier.)
                     return Err(SessionStreamError::Protocol(format!(
                         "Input starts at {start} but only {applied} bytes were applied"
                     )));
                 }
-                if input.input_seq > applied {
-                    // Trim the already-applied prefix, then write the rest.
-                    let skip = (applied - start) as usize;
-                    match sessions.write(&id, conn, input.data[skip..].to_vec()).await {
-                        Ok(()) => applied = input.input_seq,
-                        // The lease was stolen (this attach is read-only
-                        // now — protocol.md §10 "read-only로 강등된다") or
-                        // the child is gone. Neither ends the attach: the
-                        // peer is still owed its output and its `Exit`, and
-                        // a steal-back must resume writing without a
-                        // reattach. Discard the bytes but keep the offset
-                        // moving, so the peer's stream stays contiguous and
-                        // its ack is never left dangling, and try again on
-                        // the next frame.
-                        Err(
-                            BrokerError::NotRunning
-                            | BrokerError::NotWriter
-                            | BrokerError::NotFound,
-                        ) => applied = input.input_seq,
-                        Err(err) => return Err(err.into()),
+                match sessions
+                    .write_at(&id, conn, stream, input.data.clone(), input.input_seq)
+                    .await
+                {
+                    Ok(now) => applied = now,
+                    Err(BrokerError::InvalidArgument(why)) => {
+                        return Err(SessionStreamError::Protocol(why));
                     }
+                    // The lease was stolen (this attach is read-only
+                    // now — protocol.md §10 "read-only로 강등된다") or
+                    // the child is gone. Neither ends the attach: the
+                    // peer is still owed its output and its `Exit`, and
+                    // a steal-back must resume writing without a
+                    // reattach. Discard the bytes but keep the offset
+                    // moving, so the peer's stream stays contiguous and
+                    // its ack is never left dangling, and try again on
+                    // the next frame.
+                    Err(
+                        BrokerError::NotRunning | BrokerError::NotWriter | BrokerError::NotFound,
+                    ) => applied = applied.max(input.input_seq),
+                    Err(err) => return Err(err.into()),
                 }
                 // Re-ack a duplicate too: the peer is waiting for it.
                 send_frame(&frames, SessionFrame::input_ack(applied)).await?;

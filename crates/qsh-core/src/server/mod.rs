@@ -46,8 +46,8 @@ use time::format_description::well_known::Rfc3339;
 use crate::acl::{Action, Authorizer};
 use crate::audit::{AuditRecord, AuditSink};
 use crate::broker::{
-    BrokerError, CloseReason, ConnectionId, ControlEvent, Cursor, ReplayEvent, SessionBackend,
-    SessionId, SessionSpec, Signal, TakeOutcome,
+    BrokerError, CloseReason, ConnectionId, ControlEvent, Cursor, InputStreamId, PeerFingerprint,
+    ReplayEvent, SessionBackend, SessionId, SessionSpec, Signal, TakeOutcome,
 };
 use crate::exec::{ExecSpec, run_exec};
 use crate::session_stream::SessionStream;
@@ -121,6 +121,12 @@ pub struct ConnCtx {
     pub principal: Principal,
     /// How the peer authenticated (pin vs. CA) — the other ACL input.
     pub auth_path: AuthPath,
+    /// SPKI SHA-256 of the peer's verified leaf certificate. **Not** an ACL
+    /// input (that is `principal`): this is the identity a resume
+    /// credential is bound to (protocol.md §10, PRD §9), so a token stolen
+    /// off one device cannot be redeemed from another. `None` means the
+    /// leaf did not re-parse, which fails resume closed.
+    pub peer_fingerprint: Option<PeerFingerprint>,
     /// Peer address at connection time (audit only).
     pub peer_addr: SocketAddr,
     /// Connection identity used to bind tickets to the connection that
@@ -186,6 +192,14 @@ pub enum TicketPurpose {
         /// stream *is* an attach, so the ACL choke point runs at
         /// redemption instead.
         attach_authorized: bool,
+        /// The logical input stream this attach continues. A **resumed**
+        /// attach keeps the session's current id, so the session's dedup
+        /// cursor still covers its retransmissions; every other attach
+        /// carries a fresh one (protocol.md §10-5).
+        input_stream: InputStreamId,
+        /// Cumulative input offset already promised to the peer in
+        /// `SessionAttached.input_seq`.
+        input_from: u64,
     },
 }
 
@@ -597,8 +611,26 @@ impl Server {
                 // Only `session.open` was authorized here; the attach the
                 // data stream performs is decided when it arrives.
                 attach_authorized: false,
+                // A fresh session's first input stream, counting from zero.
+                input_stream: InputStreamId(1),
+                input_from: 0,
             },
         );
+        // The resume credential (protocol.md §10). Bound to the peer's SPKI:
+        // without a verified leaf there is nothing to bind to, so no token
+        // is issued at all and the session simply cannot be resumed — fail
+        // closed rather than mint an unbound credential.
+        let resume_token = match ctx.peer_fingerprint {
+            Some(peer) => Some(self.sessions.issue_resume(&session_id, peer)),
+            None => {
+                tracing::warn!(
+                    principal = %ctx.principal,
+                    %session_id,
+                    "no peer SPKI fingerprint: session opened without a resume credential"
+                );
+                None
+            }
+        };
         let expires_at = rfc3339_after(self.sessions.resume_ttl());
         tracing::info!(
             principal = %ctx.principal,
@@ -610,9 +642,13 @@ impl Server {
             request_id,
             response::Body::SessionOpened(wire::SessionOpened {
                 session_id: session_id.0,
-                // Resume tokens land with PLAN M2 Step 7; until then no
-                // token is issued and `SessionAttach` is UNSUPPORTED.
-                resume_token: Vec::new(),
+                // The only time this plaintext ever leaves the host. It is
+                // never logged, never audited and never rendered as JSON
+                // (ADR-0007).
+                resume_token: resume_token
+                    .as_ref()
+                    .map(|t| t.expose().to_vec())
+                    .unwrap_or_default(),
                 ticket: ticket.to_vec(),
                 initial_seq: 0,
                 expires_at,
@@ -912,21 +948,29 @@ impl Server {
         }
     }
 
-    /// `session.attach` (stream op): validate the mode (an unset/unknown/RO
-    /// mode is `INVALID_ARGUMENT`, never RW — protocol.md §9), pass the ACL
-    /// choke point (`session.attach` on the id, audited like every other
-    /// session op) and only then consult the broker, take the writer lease
-    /// and issue the single-use `SESSION_DATA` ticket. Nothing exists
-    /// before the authorization succeeds and no unauthorized peer learns
-    /// whether the session is there.
+    /// `session.attach` (stream op), including **resume** (protocol.md §10).
     ///
-    /// **Resume is not this.** A `resume_token` presented on a *new*
-    /// connection lands with PLAN M2 Step 7, which inserts the
-    /// token → fingerprint checks *before* the ACL call (protocol.md
-    /// §10-2) and starts minting `new_resume_token`; until then this host
-    /// does not advertise `CAP_RESUME_V1`, refuses a presented token, and
-    /// attach only works for a session this same connection can already
-    /// authorize.
+    /// The order is the protocol's, and it is load-bearing:
+    ///
+    /// 1. the presented `resume_token` must hash to the stored credential
+    ///    and not be expired, **and** the connection's peer SPKI must be
+    ///    the one the session is bound to. Both are one non-distinguishing
+    ///    `AUTH_FAILED`: an unauthorized peer must not be able to tell an
+    ///    unknown session from a wrong token from a foreign device
+    ///    (protocol.md §10-2);
+    /// 2. the ACL choke point (`session.attach` on the id, audited like
+    ///    every other session op);
+    /// 3. **only then** the writer lease, the successor token — which
+    ///    kills the presented one — and the single-use `SESSION_DATA`
+    ///    ticket.
+    ///
+    /// `SESSION_NOT_FOUND` is reachable only past step 1, so it never
+    /// discloses existence to a peer that failed the identity check.
+    ///
+    /// An attach with **no** token is the same-connection case: the mutual
+    /// TLS principal *is* the identity, so step 1 is vacuous and step 2
+    /// carries the whole decision. It cannot cross connections, because a
+    /// session's credential is the only thing that survives one.
     async fn handle_session_attach(
         &self,
         ctx: &ConnCtx,
@@ -942,17 +986,37 @@ impl Server {
         if req.attach_mode() != Some(wire::AttachMode::Rw) {
             return invalid_argument(request_id, "attach mode must be RW");
         }
-        if !req.resume_token.is_empty() {
-            // Answered before the ACL call: a token is a claim about a
-            // *different* connection, and this host cannot evaluate it yet.
-            return ControlMessage::error(
-                request_id,
-                wire::Error::new(
-                    ErrorCode::Unsupported,
-                    "resume tokens are not implemented by this host yet",
-                    false,
-                ),
-            );
+        let id = SessionId(req.session_id.clone());
+        let resuming = !req.resume_token.is_empty();
+        if resuming {
+            // ---- Step 1: credential + bound identity, before anything
+            // else touches the registry. ----
+            let denied = match ctx.peer_fingerprint {
+                Some(peer) => self
+                    .sessions
+                    .verify_resume(&id, &req.resume_token, peer)
+                    .is_err(),
+                // No verified leaf to bind against: fail closed.
+                None => true,
+            };
+            if denied {
+                // Structural only — the record names the op, the principal
+                // and the decision, never the credential (CLAUDE.md).
+                self.audit.record(&AuditRecord::now(
+                    request_id,
+                    &ctx.principal,
+                    Action::SessionAttach,
+                    &req.session_id,
+                    crate::acl::Decision::Deny,
+                    ctx.peer_addr,
+                ));
+                tracing::warn!(
+                    principal = %ctx.principal,
+                    peer = %ctx.peer_addr,
+                    "session.attach rejected: resume credential did not verify"
+                );
+                return auth_failed(request_id);
+            }
         }
         if let Err(denied) = self.authorize(ctx, request_id, Action::SessionAttach, &req.session_id)
         {
@@ -960,7 +1024,6 @@ impl Server {
         }
 
         // ---- Allowed: lease, then a single-use ticket. ----
-        let id = SessionId(req.session_id.clone());
         let info = match self.sessions.get(&id) {
             Ok(info) => info,
             Err(err) => return broker_error(request_id, err),
@@ -990,6 +1053,37 @@ impl Server {
         // ring; clamp instead, so a client that over-reports simply gets
         // everything from the current end.
         let replay_from = req.last_output_seq.min(info.last_sequence);
+        // A resumed attach continues the input stream it left, so the bytes
+        // it retransmits are deduplicated against what the child already
+        // ran; anything else is a new logical writer and starts at zero
+        // (protocol.md §10-5).
+        let (input_stream, input_from) = if resuming {
+            match self.sessions.input_cursor(&id) {
+                Ok(cursor) => cursor,
+                Err(err) => return broker_error(request_id, err),
+            }
+        } else {
+            match self.sessions.new_input_stream(&id) {
+                Ok(stream) => (stream, 0),
+                Err(err) => return broker_error(request_id, err),
+            }
+        };
+        // The successor credential. Minted last, after every check passed:
+        // the presented token dies here, so a redemption that got this far
+        // is the one and only winner (protocol.md §10 "Rotation").
+        let new_resume_token = if resuming {
+            let Some(peer) = ctx.peer_fingerprint else {
+                return auth_failed(request_id);
+            };
+            match self.sessions.rotate_resume(&id, &req.resume_token, peer) {
+                Ok(token) => Some(token),
+                // Lost the race with another redemption of the same token
+                // between step 1 and here. Same non-distinguishing answer.
+                Err(_) => return auth_failed(request_id),
+            }
+        } else {
+            None
+        };
         let ticket = self.issue_ticket(
             ctx.conn_id,
             TicketPurpose::Session {
@@ -997,6 +1091,8 @@ impl Server {
                 replay_from,
                 no_steal: req.no_steal,
                 attach_authorized: true,
+                input_stream,
+                input_from,
             },
         );
         let expires_at = rfc3339_after(self.sessions.resume_ttl());
@@ -1005,17 +1101,21 @@ impl Server {
             peer = %ctx.peer_addr,
             session_id = %id,
             replay_from,
+            resumed = resuming,
             "session.attach authorized"
         );
         ControlMessage::response(
             request_id,
             response::Body::SessionAttached(wire::SessionAttached {
                 ticket: ticket.to_vec(),
-                // Minted by PLAN M2 Step 7 together with `CAP_RESUME_V1`.
-                new_resume_token: Vec::new(),
+                new_resume_token: new_resume_token
+                    .as_ref()
+                    .map(|t| t.expose().to_vec())
+                    .unwrap_or_default(),
                 replay_from,
                 writer_lease: true,
                 expires_at,
+                input_seq: input_from,
             }),
         )
     }
@@ -1204,6 +1304,9 @@ impl Server {
         let ctx = ConnCtx {
             principal: conn.principal().clone(),
             auth_path: conn.auth_path(),
+            peer_fingerprint: conn
+                .peer_fingerprint()
+                .map(|fp| PeerFingerprint::new(*fp.as_bytes())),
             peer_addr: conn.remote_address(),
             conn_id: conn.stable_id(),
             capabilities,
@@ -1419,6 +1522,8 @@ impl Server {
                 replay_from,
                 no_steal,
                 attach_authorized,
+                input_stream,
+                input_from,
             } => {
                 // Opening the session's data stream *is* the attach, and an
                 // attach is RW (protocol.md §9), so it holds the writer
@@ -1480,6 +1585,8 @@ impl Server {
                     session_id: session_id.clone(),
                     conn: ctx.connection_id(),
                     cursor: Cursor::from_offset(replay_from),
+                    input_stream,
+                    input_from,
                     events: Some(events),
                 };
                 match pump.run(stream, &conn).await {
@@ -1530,6 +1637,17 @@ pub fn valid_session_id(id: &str) -> bool {
         && id
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// The non-distinguishing refusal of a resume redemption (protocol.md
+/// §10-2): the same answer for an unknown session, a wrong or expired
+/// token, and a peer the session is not bound to. Nothing in the message
+/// varies with which of those it was.
+fn auth_failed(request_id: u64) -> ControlMessage {
+    ControlMessage::error(
+        request_id,
+        wire::Error::new(ErrorCode::AuthFailed, "resume credential rejected", false),
+    )
 }
 
 fn invalid_argument(request_id: u64, message: impl Into<String>) -> ControlMessage {
@@ -1738,7 +1856,8 @@ mod tests {
     use crate::acl::{AllowAllPinned, DenyAll};
     use crate::audit::MemoryAuditSink;
     use crate::broker::{
-        Broker, BrokerConfig, PipeFactory, PipeHandle, SessionState, SourceExit, TestClock,
+        Broker, BrokerConfig, PipeFactory, PipeHandle, RESUME_TOKEN_LEN, SessionState, SourceExit,
+        TestClock,
     };
 
     const ALL_CAPS: &[&str] = &["exec", "session"];
@@ -1747,6 +1866,7 @@ mod tests {
         ConnCtx {
             principal,
             auth_path: AuthPath::Pin,
+            peer_fingerprint: Some(PeerFingerprint::new([7u8; 32])),
             peer_addr: "127.0.0.1:5000".parse().unwrap(),
             conn_id: 42,
             capabilities: caps.iter().map(|s| s.to_string()).collect(),
@@ -2332,7 +2452,14 @@ mod tests {
             other => panic!("expected SessionOpened, got {other:?}"),
         };
         assert_eq!(opened.initial_seq, 0);
-        assert!(opened.resume_token.is_empty(), "no token before Step 7");
+        // A resume credential is issued with the session and bound to the
+        // connection's verified peer (protocol.md §10). It is the one
+        // thing in this reply that never reaches a log or an envelope.
+        assert_eq!(
+            opened.resume_token.len(),
+            RESUME_TOKEN_LEN,
+            "session.open must issue a resume credential"
+        );
         assert!(!opened.expires_at.is_empty());
         assert_eq!(opened.ticket.len(), TICKET_LEN);
         assert_eq!(rig.broker.session_count(), 1);
@@ -2754,7 +2881,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn attach_issues_a_ticket_and_a_resume_token_is_still_unsupported() {
+    async fn attach_issues_a_ticket_and_an_unverifiable_credential_is_refused() {
         let rig = allow_rig();
         let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
         let (id, _t, _pipe) = open_session(&rig, &ctx).await;
@@ -2783,10 +2910,14 @@ mod tests {
         assert_eq!(a.ticket.len(), TICKET_LEN);
         assert_eq!(a.replay_from, 0);
         assert!(a.writer_lease);
+        // Nothing was presented, so nothing rotates: a successor is the
+        // answer to a redemption, not a giveaway to any attach that asks
+        // (protocol.md §10 "Rotation").
         assert!(
             a.new_resume_token.is_empty(),
-            "no resume token before Step 7"
+            "a token-less attach must not be handed a credential"
         );
+        assert_eq!(a.input_seq, 0, "a fresh attach starts its own input axis");
         assert_eq!(
             rig.server.pending_tickets(),
             2,
@@ -2794,8 +2925,8 @@ mod tests {
         );
 
         // An unknown id is SESSION_NOT_FOUND (existence disclosure only
-        // *after* the ACL decision, same as session.get/read/write), and a
-        // presented resume token is still UNSUPPORTED.
+        // *after* the ACL decision, same as session.get/read/write) — and
+        // only for an attach that presents no credential at all.
         let reply = rig
             .server
             .dispatch(
@@ -2822,16 +2953,44 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(error_code(&reply), Some(ErrorCode::Unsupported));
+        // A token that does not verify is AUTH_FAILED, and says nothing
+        // about whether the session exists (protocol.md §10-2). Note the
+        // id here is a *real* session: the answer is the same one a
+        // fabricated id gets below.
+        assert_eq!(error_code(&reply), Some(ErrorCode::AuthFailed));
+        let reply = rig
+            .server
+            .dispatch(
+                &ctx,
+                &ControlMessage::new(
+                    4,
+                    control_message::Body::SessionAttach(attach(
+                        "01K0NOSUCHSESSION".into(),
+                        vec![7u8; 32],
+                    )),
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            error_code(&reply),
+            Some(ErrorCode::AuthFailed),
+            "a bad token on a real id and on a fake one must be \
+             indistinguishable"
+        );
 
-        // Every attempt that reached the broker passed the choke point
-        // (`session.attach` on the id) and was audited; the token attempt is
-        // refused before the ACL call, so it is not a decision.
+        // Every attempt was audited. A refused credential is a denial, not
+        // a silent drop — and the record is structural: op, principal,
+        // resource, decision, never the credential.
         let recs = rig.audit.records();
-        assert_eq!(recs.len(), 2, "{recs:?}");
+        assert_eq!(recs.len(), 4, "{recs:?}");
         assert!(recs.iter().all(|r| r.action == "session.attach"));
         assert_eq!(recs[0].resource, id);
+        assert_eq!(recs[0].decision, "allow");
         assert_eq!(recs[1].resource, "01K0NOSUCHSESSION");
+        assert_eq!(recs[1].decision, "allow");
+        assert_eq!(recs[2].decision, "deny");
+        assert_eq!(recs[3].decision, "deny");
 
         // Denied peers are audited too, and get the same non-distinguishing
         // PERMISSION_DENIED for a real and a fabricated id.

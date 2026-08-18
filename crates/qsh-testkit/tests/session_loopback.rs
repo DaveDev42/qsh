@@ -66,7 +66,11 @@ async fn session_full_path_open_write_read_resize_get_list_close() {
     let opened = s.session_open(open_req(&["sh", "-l"])).await.unwrap();
     assert!(!opened.session_id.is_empty());
     assert_eq!(opened.initial_seq, 0);
-    assert!(opened.resume_token.is_empty(), "no token before Step 7");
+    assert_eq!(
+        opened.resume_token.len(),
+        32,
+        "session.open must issue a resume credential (protocol.md §10)"
+    );
     assert_eq!(opened.ticket.len(), 16);
     assert!(!opened.expires_at.is_empty());
     let id = opened.session_id.clone();

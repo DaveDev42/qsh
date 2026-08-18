@@ -182,6 +182,7 @@ pub struct Connection {
     inner: quinn::Connection,
     principal: Principal,
     auth_path: AuthPath,
+    peer_fingerprint: Option<Fingerprint>,
 }
 
 impl Connection {
@@ -193,6 +194,18 @@ impl Connection {
     /// How the peer was authenticated (pin vs. CA) — the other ACL input.
     pub fn auth_path(&self) -> AuthPath {
         self.auth_path
+    }
+
+    /// SPKI SHA-256 fingerprint of the peer's verified leaf certificate.
+    ///
+    /// `None` only if the leaf failed to re-parse after the verifier
+    /// already accepted it (not reachable in practice). This is the value
+    /// a resume credential is bound to (`docs/design/protocol.md` §10: the
+    /// host stores `peer_spki_sha256` beside the token hash), and it is
+    /// **not** an ACL input — authorization runs on
+    /// [`principal`](Self::principal).
+    pub fn peer_fingerprint(&self) -> Option<Fingerprint> {
+        self.peer_fingerprint
     }
 
     /// Peer socket address (may change over the connection's life via
@@ -320,6 +333,7 @@ impl Dialer {
         };
         Ok(Dialed {
             connection: Connection {
+                peer_fingerprint: chain.first().and_then(|c| Fingerprint::of_cert_der(c).ok()),
                 inner: conn,
                 principal: verified.principal,
                 auth_path: verified.auth_path,
@@ -457,6 +471,7 @@ impl Incoming {
         let chain = peer_chain(&conn);
         match self.verifier.verify_peer(&chain, PeerRole::Client) {
             Ok(verified) => Ok(Connection {
+                peer_fingerprint: chain.first().and_then(|c| Fingerprint::of_cert_der(c).ok()),
                 inner: conn,
                 principal: verified.principal,
                 auth_path: verified.auth_path,

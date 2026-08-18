@@ -21,6 +21,8 @@ bytes.workspace = true
 time.workspace = true
 ulid.workspace = true
 rand.workspace = true
+blake3.workspace = true
+subtle.workspace = true
 libc.workspace = true
 
 # The OS credential store is only wired up on the platforms QSH supports as
