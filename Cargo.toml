@@ -48,6 +48,10 @@ zeroize = { version = "1", features = ["derive"] }
 rand = "0.9"
 libc = "0.2"
 
+# POSIX PTY backend (`docs/design/architecture.md` §4/§8; unix-only, declared
+# under `[target.'cfg(unix)'.dependencies]` in qsh-core)
+portable-pty = "0.9"
+
 # diagnostics
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }

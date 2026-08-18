@@ -34,6 +34,12 @@ keyring = { version = "3", features = ["apple-native"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "3", features = ["async-secret-service", "tokio", "crypto-rust"] }
 
+# POSIX PTY backend (`docs/design/architecture.md` §4): openpty + spawn with
+# setsid/controlling tty. The whole `pty` module is unix-only (`docs/ROADMAP.md`
+# §3: no Windows host in P0), so the crate builds on Windows without it.
+[target.'cfg(unix)'.dependencies]
+portable-pty.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
 proptest.workspace = true
