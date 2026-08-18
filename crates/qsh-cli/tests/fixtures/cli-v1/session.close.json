@@ -1,7 +1,7 @@
 {
   "command": "session.close",
   "data": {
-    "final_sequence": 31,
+    "final_sequence": 0,
     "session_ref": "box/<session_id>"
   },
   "ok": true,

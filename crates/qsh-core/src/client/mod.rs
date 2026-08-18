@@ -365,17 +365,25 @@ impl Session {
         }
     }
 
-    /// `session.read`: one cursor pull (`after`, bounded by `max_bytes`,
-    /// long-polling up to `wait_ms`).
+    /// `session.read`: one cursor pull (`after`/`ctl_after`, bounded by
+    /// `max_bytes`, long-polling up to `wait_ms`). The whole result is
+    /// returned so the caller can feed `next_after`/`next_ctl_after` back
+    /// as the next cursor.
     pub async fn session_read(
         &mut self,
         req: wire::SessionRead,
-    ) -> Result<Vec<wire::SessionReadEvent>, ClientError> {
+    ) -> Result<wire::SessionReadResult, ClientError> {
         match self
             .session_request(control_message::Body::SessionRead(req))
             .await?
         {
-            response::Body::SessionReadResult(r) => Ok(r.events),
+            response::Body::SessionReadResult(r) => {
+                // Receiver-side chunk check (protocol.md §9): a host not
+                // running our encoder is bounded only by the frame cap.
+                r.validate()
+                    .map_err(|e| ClientError::Protocol(format!("SessionReadResult: {e}")))?;
+                Ok(r)
+            }
             other => Err(unexpected("SessionRead", &other)),
         }
     }

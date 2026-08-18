@@ -194,6 +194,7 @@ fn run_session_read(cli: &Cli, ops: &Ops, args: &SessionReadArgs) -> i32 {
         after_sequence: args.after,
         wait_ms: args.wait,
         limit_bytes: args.limit_bytes,
+        ctl_after: Some(args.ctl_after),
     }) {
         Ok(output) => output,
         Err(err) => return report_error(cli, SessionReadOp::COMMAND, &err),
@@ -220,8 +221,11 @@ fn run_session_write(cli: &Cli, ops: &Ops, args: &SessionWriteArgs) -> i32 {
             data_b64: data_b64.clone(),
         }),
         None => {
+            // Read at most one byte past the cap: `Ops` rejects the
+            // oversize write, and stdin is never buffered unbounded.
             let mut data = Vec::new();
-            match io::stdin().lock().read_to_end(&mut data) {
+            let cap = qsh_core::ops::SESSION_WRITE_MAX as u64 + 1;
+            match io::stdin().lock().take(cap).read_to_end(&mut data) {
                 Ok(_) => ops.session_write_bytes(&args.session_ref, data),
                 Err(err) => Err(OpError::new(
                     ErrorCode::InvalidArgument,

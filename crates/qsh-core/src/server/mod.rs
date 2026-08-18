@@ -43,7 +43,7 @@ use thiserror::Error;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-use crate::acl::{Action, Authorizer, Decision};
+use crate::acl::{Action, Authorizer};
 use crate::audit::{AuditRecord, AuditSink};
 use crate::broker::{
     BrokerError, CloseReason, ConnectionId, ControlEvent, Cursor, ReplayEvent, SessionBackend,
@@ -75,11 +75,27 @@ pub const RESET_CODE_NOT_IMPLEMENTED: u32 = 0x2002;
 /// until tickets are redeemed or expire.
 pub const MAX_PENDING_TICKETS_PER_CONN: usize = 32;
 
-/// Maximum number of control requests one connection may have in flight
-/// (dispatched but not yet answered). A long-poll `SessionRead` or a
-/// `SessionClose` mid-escalation holds a slot; beyond this the request is
-/// answered `RESOURCE_EXHAUSTED` (retryable) without being dispatched.
+/// Maximum number of blocking control requests (`SessionRead` long-poll,
+/// `SessionClose` mid-escalation) one connection may have in flight
+/// (dispatched but not yet answered). Those are the only control messages
+/// that run concurrently with the control stream (a read can park for up
+/// to [`SESSION_READ_MAX_WAIT`]); every other message is handled inline,
+/// in arrival order. Beyond this the request is answered
+/// `RESOURCE_EXHAUSTED` (retryable) without being dispatched.
 pub const MAX_INFLIGHT_REQUESTS_PER_CONN: usize = 64;
+
+/// Upper bound the host applies to `SessionRead.wait_ms` (JSON `--wait`):
+/// a longer wait is clamped, never rejected — the sibling of
+/// `SESSION_READ_MAX_BYTES` (protocol.md §9). Bounds how long one parked
+/// long-poll can hold its in-flight slot; a client wanting a longer wait
+/// re-issues the read with the same cursor (`after` + `ctl_after`).
+pub const SESSION_READ_MAX_WAIT: Duration = Duration::from_secs(60);
+
+/// Upper bound on a `session_id` a peer may name in a request. Host-issued
+/// ids are 26-char ULIDs; anything longer is not one of ours and is
+/// rejected as `INVALID_ARGUMENT` before it becomes an ACL resource / audit
+/// field. Existence-independent, so non-distinguishing (protocol.md §10).
+pub const SESSION_ID_MAX_LEN: usize = 64;
 
 /// The ACL `resource` string for requests that do not target an existing
 /// session (`session.open`, `session.list`).
@@ -322,7 +338,7 @@ impl Server {
             decision,
             ctx.peer_addr,
         ));
-        if decision == Decision::Deny {
+        if !decision.is_allow() {
             return Err(Box::new(ControlMessage::error(
                 request_id,
                 wire::Error::new(
@@ -399,6 +415,22 @@ impl Server {
     // ------------------------------------------------------------------
     // session ops (M2 Step 3) — CLI.md §6.2–6.7, action mapping §2.5
     // ------------------------------------------------------------------
+
+    /// Shape check on a peer-supplied `session_id` before it becomes the
+    /// ACL resource and an audit field: non-empty, URL-safe
+    /// (`[A-Za-z0-9_-]`) and at most [`SESSION_ID_MAX_LEN`] bytes. The
+    /// check does not consult the broker, so it discloses nothing about
+    /// which sessions exist.
+    fn require_session_id(request_id: u64, id: &str) -> Result<(), Box<ControlMessage>> {
+        if valid_session_id(id) {
+            Ok(())
+        } else {
+            Err(Box::new(invalid_argument(
+                request_id,
+                "session_id must be 1..=64 URL-safe characters",
+            )))
+        }
+    }
 
     /// Common preamble of every session op: the peer must have negotiated
     /// the `session` capability. Not audited (no decision was made).
@@ -554,6 +586,9 @@ impl Server {
         if let Err(reply) = self.require_session_capability(ctx, request_id) {
             return *reply;
         }
+        if let Err(reply) = Self::require_session_id(request_id, &req.session_id) {
+            return *reply;
+        }
         if let Err(denied) = self.authorize(ctx, request_id, Action::SessionList, &req.session_id) {
             return *denied;
         }
@@ -577,6 +612,9 @@ impl Server {
         if let Err(reply) = self.require_session_capability(ctx, request_id) {
             return *reply;
         }
+        if let Err(reply) = Self::require_session_id(request_id, &req.session_id) {
+            return *reply;
+        }
         if let Err(denied) = self.authorize(ctx, request_id, Action::SessionAttach, &req.session_id)
         {
             return *denied;
@@ -586,12 +624,21 @@ impl Server {
             Ok(0) | Err(_) => wire::SESSION_READ_MAX_BYTES,
             Ok(n) => n.min(wire::SESSION_READ_MAX_BYTES),
         };
-        let wait = Duration::from_millis(req.wait_ms);
+        // Same treatment for the wait: clamp, never reject.
+        let wait = Duration::from_millis(req.wait_ms).min(SESSION_READ_MAX_WAIT);
+        // The cursor is (output offset, control id) — control entries are
+        // zero-length, so `after` alone cannot say whether one positioned
+        // exactly at `after` was already delivered. A caller that echoes
+        // `next_ctl_after` back gets every control exactly once; one that
+        // does not (`ctl_after: 0`) gets at-least-once (protocol.md §9).
         let out = match self
             .sessions
             .pull(
                 &SessionId(req.session_id.clone()),
-                Cursor::from_offset(req.after),
+                Cursor {
+                    after: req.after,
+                    ctl_after: req.ctl_after,
+                },
                 max_bytes,
                 wait,
             )
@@ -600,6 +647,7 @@ impl Server {
             Ok(out) => out,
             Err(err) => return broker_error(request_id, err),
         };
+        let next = out.next;
         let events = out
             .events
             .into_iter()
@@ -607,7 +655,11 @@ impl Server {
             .collect();
         ControlMessage::response(
             request_id,
-            response::Body::SessionReadResult(wire::SessionReadResult { events }),
+            response::Body::SessionReadResult(wire::SessionReadResult {
+                events,
+                next_after: next.after,
+                next_ctl_after: next.ctl_after,
+            }),
         )
     }
 
@@ -624,6 +676,9 @@ impl Server {
         if let Err(reply) = self.require_session_capability(ctx, request_id) {
             return *reply;
         }
+        if let Err(reply) = Self::require_session_id(request_id, &req.session_id) {
+            return *reply;
+        }
         if let Err(err) = req.validate() {
             return invalid_argument(request_id, err.to_string());
         }
@@ -634,6 +689,19 @@ impl Server {
         }
         let id = SessionId(req.session_id.clone());
         let conn = ctx.connection_id();
+        if req.data.is_empty() {
+            // Nothing to write: answer without touching the lease, so an
+            // empty write is not a side-channel for displacing (or
+            // flapping) the current writer. Existence is still checked
+            // (the ACL decision above already covers disclosure).
+            return match self.sessions.get(&id) {
+                Ok(_) => ControlMessage::response(
+                    request_id,
+                    response::Body::SessionWritten(wire::SessionWritten { bytes_written: 0 }),
+                ),
+                Err(err) => broker_error(request_id, err),
+            };
+        }
         match self
             .sessions
             .take_lease(&id, ctx.principal.to_string(), conn, true)
@@ -670,6 +738,9 @@ impl Server {
         req: &wire::SessionResize,
     ) -> ControlMessage {
         if let Err(reply) = self.require_session_capability(ctx, request_id) {
+            return *reply;
+        }
+        if let Err(reply) = Self::require_session_id(request_id, &req.session_id) {
             return *reply;
         }
         let Some((cols, rows)) = window_size(req.cols, req.rows) else {
@@ -710,6 +781,9 @@ impl Server {
         if let Err(reply) = self.require_session_capability(ctx, request_id) {
             return *reply;
         }
+        if let Err(reply) = Self::require_session_id(request_id, &req.session_id) {
+            return *reply;
+        }
         let signal = match req.signal.as_deref() {
             None => None,
             Some(name) => match Signal::parse(name) {
@@ -728,14 +802,11 @@ impl Server {
             return *denied;
         }
         let id = SessionId(req.session_id.clone());
-        // Snapshot the offset before the close removes the session from
-        // `get`; the ring only grows until the child is gone.
-        let final_seq = match self.sessions.get(&id) {
-            Ok(info) => info.last_sequence,
-            Err(err) => return broker_error(request_id, err),
-        };
+        // `final_seq` is the offset at removal time (CLI.md §6.7): whatever
+        // the child emitted while dying is included, and it equals the
+        // `sequence` on the trailing `session.closed` entry.
         match self.sessions.close(&id, CloseReason::Closed, signal).await {
-            Ok(()) => ControlMessage::response(
+            Ok(final_seq) => ControlMessage::response(
                 request_id,
                 response::Body::SessionClosed(wire::SessionClosed { final_seq }),
             ),
@@ -746,9 +817,12 @@ impl Server {
     /// `session.attach` (stream op): resume tokens and the attach data
     /// pump land with PLAN M2 Steps 5/7. Until then the host validates the
     /// mode (an unset/unknown/RO mode is `INVALID_ARGUMENT`, never RW —
-    /// protocol.md §9) and otherwise answers `UNSUPPORTED` without
-    /// consulting the broker, so nothing is created and session existence
-    /// is not disclosed.
+    /// protocol.md §9), passes the ACL choke point (`session.attach` on
+    /// the id, audited like every other session op) and only then answers
+    /// `UNSUPPORTED` without consulting the broker, so nothing is created
+    /// and session existence is not disclosed. Step 7 inserts the
+    /// token → fingerprint checks *before* the ACL call (protocol.md
+    /// §10-2); the choke point itself is already in place.
     fn handle_session_attach(
         &self,
         ctx: &ConnCtx,
@@ -758,8 +832,15 @@ impl Server {
         if let Err(reply) = self.require_session_capability(ctx, request_id) {
             return *reply;
         }
+        if let Err(reply) = Self::require_session_id(request_id, &req.session_id) {
+            return *reply;
+        }
         if req.attach_mode() != Some(wire::AttachMode::Rw) {
             return invalid_argument(request_id, "attach mode must be RW");
+        }
+        if let Err(denied) = self.authorize(ctx, request_id, Action::SessionAttach, &req.session_id)
+        {
+            return *denied;
         }
         ControlMessage::error(
             request_id,
@@ -940,18 +1021,33 @@ impl Server {
             capabilities,
         };
 
-        // Replies from concurrently dispatched requests funnel back through
-        // this queue to the single control-stream writer. The queue is
-        // sized like the in-flight bound so it never blocks a dispatch task
-        // for long; the semaphore is what bounds work per connection.
+        // Control messages are handled inline, in arrival order, so the
+        // control stream keeps its ordering guarantee for mutating ops
+        // (two pipelined `SessionWrite`s reach the PTY in the order they
+        // were sent — protocol.md §9). The exceptions are the messages
+        // that may block (`is_long_poll`: the `SessionRead` long-poll and
+        // `SessionClose`'s escalation), which must not stall the stream:
+        // those run in tasks owned by `blocking` (bounded by `inflight`),
+        // whose replies funnel back through `reply_rx` to the single
+        // control-stream writer. When this function returns, `blocking` is
+        // dropped and every parked task is aborted with it — nothing
+        // outlives the connection, and `purge_connection` (which runs
+        // after) therefore sees the connection's final state.
         let (reply_tx, mut reply_rx) =
             tokio::sync::mpsc::channel::<ControlMessage>(MAX_INFLIGHT_REQUESTS_PER_CONN);
         let inflight = Arc::new(tokio::sync::Semaphore::new(MAX_INFLIGHT_REQUESTS_PER_CONN));
+        let mut blocking: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
 
         loop {
             tokio::select! {
                 msg = ctl.recv.recv::<ControlMessage>() => match msg {
                     Ok(Some(msg)) => {
+                        if !is_long_poll(&msg) {
+                            if let Some(reply) = self.dispatch(&ctx, &msg).await {
+                                ctl.send.send(&reply).await?;
+                            }
+                            continue;
+                        }
                         let Ok(permit) = inflight.clone().try_acquire_owned() else {
                             ctl.send.send(&ControlMessage::error(
                                 msg.request_id,
@@ -966,7 +1062,7 @@ impl Server {
                         let server = self.clone();
                         let ctx = ctx.clone();
                         let reply_tx = reply_tx.clone();
-                        tokio::spawn(async move {
+                        blocking.spawn(async move {
                             let reply = server.dispatch(&ctx, &msg).await;
                             drop(permit);
                             if let Some(reply) = reply {
@@ -982,6 +1078,8 @@ impl Server {
                 Some(reply) = reply_rx.recv() => {
                     ctl.send.send(&reply).await?;
                 }
+                // Reap finished tasks so the set never grows unbounded.
+                Some(_) = blocking.join_next(), if !blocking.is_empty() => {}
                 stream = conn.accept_bi() => match stream {
                     Ok((send, recv)) => {
                         let server = self.clone();
@@ -1069,6 +1167,28 @@ impl Server {
 // ----------------------------------------------------------------------
 // helpers: wire ⇄ broker
 // ----------------------------------------------------------------------
+
+/// The control messages that may block for a long time — the `SessionRead`
+/// long-poll (up to [`SESSION_READ_MAX_WAIT`]) and `SessionClose` (the
+/// HUP → TERM → KILL escalation, up to two `close_grace` periods) — and
+/// therefore run off the control stream's ordered path. Neither reorders
+/// input: reads do not mutate, and a close is terminal for the session.
+fn is_long_poll(msg: &ControlMessage) -> bool {
+    matches!(
+        msg.body,
+        Some(control_message::Body::SessionRead(_)) | Some(control_message::Body::SessionClose(_))
+    )
+}
+
+/// Shape of a session id a peer may name: `1..=SESSION_ID_MAX_LEN` bytes of
+/// `[A-Za-z0-9_-]` (the URL-safe alphabet host-issued ULIDs live in).
+pub fn valid_session_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= SESSION_ID_MAX_LEN
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
 
 fn invalid_argument(request_id: u64, message: impl Into<String>) -> ControlMessage {
     ControlMessage::error(
@@ -1276,7 +1396,7 @@ mod tests {
         Broker, BrokerConfig, PipeFactory, PipeHandle, SessionState, SourceExit, TestClock,
     };
 
-    const ALL_CAPS: &[&str] = &["exec", "session", "resume.v1"];
+    const ALL_CAPS: &[&str] = &["exec", "session"];
 
     fn ctx(principal: Principal, caps: &[&str]) -> ConnCtx {
         ConnCtx {
@@ -1298,14 +1418,27 @@ mod tests {
     }
 
     fn rig(authorizer: Arc<dyn Authorizer>) -> Rig {
+        rig_with(
+            authorizer,
+            Arc::new(PipeFactory::new(64 * 1024)),
+            Duration::from_millis(100),
+        )
+    }
+
+    /// A rig over a caller-built source factory / close grace, so a test can
+    /// give the "child" its own behaviour (e.g. ignoring SIGHUP).
+    fn rig_with(
+        authorizer: Arc<dyn Authorizer>,
+        pipes: Arc<PipeFactory>,
+        close_grace: Duration,
+    ) -> Rig {
         let clock = TestClock::new();
-        let pipes = Arc::new(PipeFactory::new(64 * 1024));
         let broker = Broker::new(
             Arc::new(clock.clone()),
             BrokerConfig {
                 replay_bytes: 64 * 1024,
                 resume_ttl: Duration::from_secs(3600),
-                close_grace: Duration::from_millis(100),
+                close_grace,
             },
             pipes.clone(),
         );
@@ -1958,6 +2091,7 @@ mod tests {
                         after: 0,
                         max_bytes: 0,
                         wait_ms: 30_000,
+                        ctl_after: 0,
                     }),
                 ),
             )
@@ -2012,6 +2146,7 @@ mod tests {
                         after: 4,
                         max_bytes: 0,
                         wait_ms: 0,
+                        ctl_after: 0,
                     }),
                 ),
             )
@@ -2297,8 +2432,39 @@ mod tests {
                 .unwrap();
             assert_eq!(error_code(&reply), Some(ErrorCode::Unsupported), "{sid}");
         }
-        assert!(rig.audit.records().is_empty());
+        // Both attempts passed the choke point (`session.attach` on the id)
+        // and were audited before the UNSUPPORTED answer; nothing created.
+        let recs = rig.audit.records();
+        assert_eq!(recs.len(), 2, "{recs:?}");
+        assert!(recs.iter().all(|r| r.action == "session.attach"));
+        assert_eq!(recs[0].resource, id);
+        assert_eq!(recs[1].resource, "01K0NOSUCHSESSION");
         assert_eq!(rig.server.pending_tickets(), 1, "only the open's ticket");
+
+        // Denied peers are audited too, and get the same non-distinguishing
+        // PERMISSION_DENIED for a real and a fabricated id.
+        let denied = self::rig(Arc::new(DenyAll));
+        let dctx = self::ctx(Principal::Device("stranger".into()), ALL_CAPS);
+        let reply = denied
+            .server
+            .dispatch(
+                &dctx,
+                &ControlMessage::new(
+                    2,
+                    control_message::Body::SessionAttach(wire::SessionAttach {
+                        session_id: "01K0NOSUCHSESSION".into(),
+                        mode: wire::AttachMode::Rw as i32,
+                        ..Default::default()
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(error_code(&reply), Some(ErrorCode::PermissionDenied));
+        let recs = denied.audit.records();
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].decision, "deny");
+        assert_eq!(recs[0].action, "session.attach");
     }
 
     #[tokio::test]
@@ -2319,6 +2485,7 @@ mod tests {
                         after: 0,
                         max_bytes: 0,
                         wait_ms: 30_000,
+                        ctl_after: 0,
                     }),
                 ),
             )
@@ -2344,6 +2511,7 @@ mod tests {
                         after: 3,
                         max_bytes: 0,
                         wait_ms: 30_000,
+                        ctl_after: 0,
                     }),
                 ),
             )
@@ -2385,6 +2553,290 @@ mod tests {
         assert_eq!(error_code(&reply), None, "{reply:?}");
         assert!(pipe.signals().is_empty());
         let _ = &rig.clock;
+    }
+
+    /// A malformed / oversize `session_id` is `INVALID_ARGUMENT` before
+    /// the choke point (nothing audited) — a pinned peer cannot pump 256 KiB
+    /// per request into the audit log, and the check discloses nothing.
+    #[tokio::test]
+    async fn malformed_session_ids_are_rejected_before_the_choke_point() {
+        let rig = allow_rig();
+        let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
+        let too_long = "A".repeat(SESSION_ID_MAX_LEN + 1);
+        for bad in ["", "has space", "slash/inside", "../etc", too_long.as_str()] {
+            for (name, body) in session_bodies(bad) {
+                if matches!(name, "open" | "list") {
+                    continue; // no id in those
+                }
+                let reply = rig
+                    .server
+                    .dispatch(&ctx, &ControlMessage::new(1, body))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    error_code(&reply),
+                    Some(ErrorCode::InvalidArgument),
+                    "{name} with {bad:?}"
+                );
+            }
+        }
+        assert!(rig.audit.records().is_empty(), "rejected before audit");
+        assert_eq!(rig.broker.session_count(), 0);
+        // The exact-length boundary is fine, and ULIDs (the real shape) pass.
+        assert!(valid_session_id(&"a".repeat(SESSION_ID_MAX_LEN)));
+        assert!(valid_session_id("01K0SESSIONULID0000000000_"));
+        assert!(!valid_session_id(""));
+    }
+
+    /// Control entries are zero-length: they sit *at* an output offset
+    /// without advancing it, so `after` alone cannot say whether one was
+    /// already delivered. A caller that echoes `next_ctl_after` back sees
+    /// each control exactly once and its long-poll parks; one that does not
+    /// gets the documented at-least-once re-delivery (protocol.md §9).
+    /// Without the cursor a `--wait` loop would spin for ever.
+    #[tokio::test]
+    async fn echoed_control_cursor_makes_a_long_poll_park() {
+        let rig = allow_rig();
+        let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
+        let (id, _t, _pipe) = open_session(&rig, &ctx).await;
+        // Taking the writer lease appends a control entry at offset 0.
+        rig.server
+            .dispatch(
+                &ctx,
+                &ControlMessage::new(
+                    2,
+                    control_message::Body::SessionWrite(wire::SessionWrite {
+                        session_id: id.clone(),
+                        data: b"x".to_vec(),
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+
+        let read = |request_id, after, ctl_after, wait_ms| {
+            let server = rig.server.clone();
+            let ctx = ctx.clone();
+            let id = id.clone();
+            async move {
+                let reply = server
+                    .dispatch(
+                        &ctx,
+                        &ControlMessage::new(
+                            request_id,
+                            control_message::Body::SessionRead(wire::SessionRead {
+                                session_id: id,
+                                after,
+                                max_bytes: 0,
+                                wait_ms,
+                                ctl_after,
+                            }),
+                        ),
+                    )
+                    .await
+                    .unwrap();
+                match response_body(&reply) {
+                    response::Body::SessionReadResult(r) => r.clone(),
+                    other => panic!("expected SessionReadResult, got {other:?}"),
+                }
+            }
+        };
+
+        let first = read(3, 0, 0, 0).await;
+        assert_eq!(first.events.len(), 1, "writer_changed at offset 0");
+        assert_eq!(first.next_after, 0);
+        assert!(first.next_ctl_after > 0);
+
+        // Stateless repeat: same event again (at-least-once), returns at
+        // once even with a long wait — this is the loop the cursor fixes.
+        let repeat = read(4, first.next_after, 0, 30_000).await;
+        assert_eq!(repeat.events.len(), 1);
+
+        // Echoing the cursor back: nothing new, so the read parks until the
+        // wait elapses on the injected clock.
+        let parked = tokio::spawn(read(5, first.next_after, first.next_ctl_after, 30_000));
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        assert!(!parked.is_finished(), "parked instead of spinning");
+        rig.clock.advance(Duration::from_millis(30_000));
+        let out = tokio::time::timeout(Duration::from_secs(5), parked)
+            .await
+            .expect("returned once the wait elapsed")
+            .unwrap();
+        assert!(out.events.is_empty(), "{:?}", out.events);
+        assert_eq!(out.next_ctl_after, first.next_ctl_after);
+    }
+
+    /// `wait_ms` is clamped to `SESSION_READ_MAX_WAIT` (like `max_bytes`,
+    /// never rejected): a read asking to park "forever" returns once the
+    /// injected clock passes the cap, with no data.
+    #[tokio::test]
+    async fn session_read_wait_is_clamped_to_the_cap() {
+        let rig = allow_rig();
+        let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
+        let (id, _t, _pipe) = open_session(&rig, &ctx).await;
+        let reader = {
+            let server = rig.server.clone();
+            let ctx = ctx.clone();
+            let id = id.clone();
+            tokio::spawn(async move {
+                server
+                    .dispatch(
+                        &ctx,
+                        &ControlMessage::new(
+                            2,
+                            control_message::Body::SessionRead(wire::SessionRead {
+                                session_id: id,
+                                after: 0,
+                                max_bytes: 0,
+                                wait_ms: u64::MAX,
+                                ctl_after: 0,
+                            }),
+                        ),
+                    )
+                    .await
+                    .unwrap()
+            })
+        };
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        assert!(!reader.is_finished(), "still parked before the cap");
+        // Just short of the cap: still parked. Past it: returns.
+        rig.clock
+            .advance(SESSION_READ_MAX_WAIT - Duration::from_millis(1));
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        assert!(!reader.is_finished(), "still parked just short of the cap");
+        rig.clock.advance(Duration::from_millis(1));
+        let reply = tokio::time::timeout(Duration::from_secs(5), reader)
+            .await
+            .expect("read returned once the clamped wait elapsed")
+            .unwrap();
+        match response_body(&reply) {
+            response::Body::SessionReadResult(r) => assert!(r.events.is_empty()),
+            other => panic!("expected SessionReadResult, got {other:?}"),
+        }
+    }
+
+    /// `SessionClosed.final_seq` is the offset at removal time (CLI.md
+    /// §6.7): output the child emits while dying — after HUP, before TERM
+    /// lands — is included, and it equals the offset on the trailing
+    /// `session.closed` entry.
+    #[tokio::test]
+    async fn close_final_seq_includes_output_emitted_while_dying() {
+        let grace = Duration::from_millis(100);
+        let rig = rig_with(
+            Arc::new(AllowAllPinned),
+            Arc::new(PipeFactory::with_ignored_signals(64 * 1024, &[Signal::Hup])),
+            grace,
+        );
+        let clock = rig.clock.clone();
+        let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
+        let (id, _t, mut pipe) = open_session(&rig, &ctx).await;
+        pipe.write_output(b"$ ").await.unwrap();
+
+        let closer = {
+            let server = rig.server.clone();
+            let ctx = ctx.clone();
+            let id = id.clone();
+            tokio::spawn(async move {
+                server
+                    .dispatch(
+                        &ctx,
+                        &ControlMessage::new(
+                            2,
+                            control_message::Body::SessionClose(wire::SessionClose {
+                                session_id: id,
+                                signal: None,
+                            }),
+                        ),
+                    )
+                    .await
+                    .unwrap()
+            })
+        };
+        // HUP is ignored by this child; it keeps talking while dying.
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        assert!(!closer.is_finished());
+        assert_eq!(pipe.signals(), vec![Signal::Hup]);
+        pipe.write_output(b"bye").await.unwrap();
+        // Let the dying output reach the ring before TERM ends the child.
+        let backend: &dyn SessionBackend = rig.broker.as_ref();
+        let out = tokio::time::timeout(
+            Duration::from_secs(5),
+            backend.pull(
+                &SessionId(id.clone()),
+                Cursor::from_offset(2),
+                1024,
+                Duration::from_secs(30),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(
+            out.events
+                .iter()
+                .any(|e| matches!(e, ReplayEvent::Output { .. }))
+        );
+        clock.advance(grace);
+        let reply = tokio::time::timeout(Duration::from_secs(5), closer)
+            .await
+            .expect("close finished after TERM")
+            .unwrap();
+        let final_seq = match response_body(&reply) {
+            response::Body::SessionClosed(c) => c.final_seq,
+            other => panic!("expected SessionClosed, got {other:?}"),
+        };
+        assert_eq!(final_seq, 5, "'$ ' + 'bye'");
+        assert_eq!(pipe.signals(), vec![Signal::Hup, Signal::Term]);
+        // The trailing closed entry carries the same offset.
+        let out = backend
+            .pull(&SessionId(id), Cursor::from_offset(5), 1024, Duration::ZERO)
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                out.events.last(),
+                Some(ReplayEvent::Control { sequence: 5, .. })
+            ),
+            "{:?}",
+            out.events
+        );
+    }
+
+    /// An empty `SessionWrite` passes ACL + existence but takes no lease,
+    /// so it can neither displace nor flap the current writer.
+    #[tokio::test]
+    async fn empty_write_takes_no_lease() {
+        let rig = allow_rig();
+        let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
+        let (id, _t, _pipe) = open_session(&rig, &ctx).await;
+        let reply = rig
+            .server
+            .dispatch(
+                &ctx,
+                &ControlMessage::new(
+                    2,
+                    control_message::Body::SessionWrite(wire::SessionWrite {
+                        session_id: id.clone(),
+                        data: Vec::new(),
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        match response_body(&reply) {
+            response::Body::SessionWritten(w) => assert_eq!(w.bytes_written, 0),
+            other => panic!("expected SessionWritten, got {other:?}"),
+        }
+        assert_eq!(rig.broker.get(&SessionId(id)).unwrap().info().writer, None);
+        assert_eq!(rig.audit.records().len(), 2, "open + write both audited");
     }
 
     #[test]

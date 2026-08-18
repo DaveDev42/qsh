@@ -17,6 +17,9 @@ use qsh_transport::FramedStream;
 fn open_req(argv: &[&str]) -> wire::SessionOpen {
     wire::SessionOpen {
         argv: argv.iter().map(|s| s.to_string()).collect(),
+        env: [("QSH_TEST".to_string(), "1".to_string())]
+            .into_iter()
+            .collect(),
         cols: 80,
         rows: 24,
         term: "xterm-256color".into(),
@@ -68,24 +71,41 @@ async fn session_full_path_open_write_read_resize_get_list_close() {
     assert_eq!(opened.ticket.len(), 16);
     assert!(!opened.expires_at.is_empty());
     let id = opened.session_id.clone();
-    let mut pipe = h.pipes.take().expect("pipe handle for the session");
+    let (spec, mut pipe) = h
+        .pipes
+        .take_with_spec()
+        .expect("pipe handle for the session");
+    // PLAN Step 3 (d): what follows `--` reaches the source verbatim, with
+    // no shell re-interpretation anywhere on the path (CLI → SessionOpen →
+    // wire → SessionSpec), and the rest of the spec survives with it.
+    assert_eq!(spec.argv, vec!["sh".to_string(), "-l".to_string()]);
+    assert_eq!(spec.term.as_deref(), Some("xterm-256color"));
+    assert_eq!((spec.cols, spec.rows), (80, 24));
+    assert_eq!(
+        spec.env,
+        vec![("QSH_TEST".to_string(), "1".to_string())],
+        "extra env is layered through unchanged"
+    );
+    assert_eq!(spec.user, None, "no user@ hint was sent");
     assert_eq!(h.broker.session_count(), 1);
     assert_eq!(h.server.pending_tickets(), 1);
 
     // The child produces output; a long-poll read from 0 returns it.
     pipe.write_output(b"$ ").await.unwrap();
-    let events = s
+    let read = s
         .session_read(wire::SessionRead {
             session_id: id.clone(),
             after: 0,
             max_bytes: 0,
             wait_ms: 30_000,
+            ctl_after: 0,
         })
         .await
         .unwrap();
+    assert_eq!(read.next_after, 2, "the reply carries the resume cursor");
     let mut bytes = Vec::new();
     let mut seq = 0;
-    for e in &events {
+    for e in &read.events {
         if let Some(session_read_event::Body::Output(o)) = &e.body {
             bytes.extend_from_slice(&o.data);
             seq = o.sequence;
@@ -100,20 +120,38 @@ async fn session_full_path_open_write_read_resize_get_list_close() {
     assert_eq!(pipe.read_input(64).await.unwrap(), b"echo hi\n");
 
     // --after past everything, no wait: no output, no error.
-    let events = s
+    let read = s
         .session_read(wire::SessionRead {
             session_id: id.clone(),
             after: 2,
             max_bytes: 0,
             wait_ms: 0,
+            ctl_after: 0,
         })
         .await
         .unwrap();
     assert!(
-        events
+        read.events
             .iter()
             .all(|e| !matches!(e.body, Some(session_read_event::Body::Output(_))))
     );
+    // The write took the writer lease, so a control entry sits at exactly
+    // offset 2. A stateless re-read is handed it again; echoing the
+    // returned control cursor back makes the same read empty — the
+    // property a `--wait` poll loop depends on (protocol.md §9).
+    assert!(!read.events.is_empty(), "writer_changed at offset 2");
+    let again = s
+        .session_read(wire::SessionRead {
+            session_id: id.clone(),
+            after: read.next_after,
+            max_bytes: 0,
+            wait_ms: 0,
+            ctl_after: read.next_ctl_after,
+        })
+        .await
+        .unwrap();
+    assert!(again.events.is_empty(), "{:?}", again.events);
+    assert_eq!(again.next_ctl_after, read.next_ctl_after);
 
     // --after beyond the end is INVALID_ARGUMENT, not NOT_FOUND.
     let err = s
@@ -146,7 +184,7 @@ async fn session_full_path_open_write_read_resize_get_list_close() {
     let err = s.session_get(&id).await.unwrap_err();
     assert_eq!(remote_code(err), ErrorCode::SessionNotFound);
     // …but a late reader still drains exit + closed.
-    let events = s
+    let late = s
         .session_read(wire::SessionRead {
             session_id: id.clone(),
             after: 2,
@@ -154,12 +192,12 @@ async fn session_full_path_open_write_read_resize_get_list_close() {
         })
         .await
         .unwrap();
-    assert!(events.iter().any(|e| matches!(
+    assert!(late.events.iter().any(|e| matches!(
         &e.body,
         Some(session_read_event::Body::Exit(x)) if x.signal.as_deref() == Some("SIGTERM")
     )));
     assert!(matches!(
-        events.last().map(|e| &e.body),
+        late.events.last().map(|e| &e.body),
         Some(Some(session_read_event::Body::Closed(c))) if c.reason == "closed"
     ));
 
@@ -175,6 +213,7 @@ async fn session_full_path_open_write_read_resize_get_list_close() {
             Action::SessionAttach.as_str(),  // read
             Action::SessionControl.as_str(), // write
             Action::SessionAttach.as_str(),  // read
+            Action::SessionAttach.as_str(),  // read (same cursor, echoed)
             Action::SessionAttach.as_str(),  // read (beyond end)
             Action::SessionControl.as_str(), // resize
             Action::SessionList.as_str(),    // get
@@ -389,7 +428,13 @@ async fn attach_is_unsupported_and_reserved_ops_create_nothing() {
         })) => assert_eq!(e.error_code(), ErrorCode::Unsupported),
         other => panic!("expected UNSUPPORTED, got {other:?}"),
     }
-    assert!(h.audit.records().is_empty());
+    // The attempt went through the ACL choke point (`session.attach` on
+    // the id, audited) before the UNSUPPORTED answer; nothing was created.
+    let recs = h.audit.records();
+    assert_eq!(recs.len(), 1, "{recs:?}");
+    assert_eq!(recs[0].action, "session.attach");
+    assert_eq!(recs[0].resource, "01K0NOSUCHSESSION");
+    assert_eq!(recs[0].decision, "allow");
     assert_eq!(h.server.pending_tickets(), 0);
     assert_eq!(h.broker.session_count(), 0);
     dialed.connection.close(0, b"done");

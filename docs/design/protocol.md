@@ -130,9 +130,13 @@ message ControlMessage {
                                             //   ACL session.control
     SessionRead         session_read = 27;  // session_id, after, max_bytes(uint64; 0 = 호스트 기본,
                                             //   SESSION_READ_MAX_BYTES = 192 KiB로 clamp — 응답이 항상
-                                            //   control frame 1개(256 KiB)에 들어가도록), wait_ms
-                                            // -> SessionReadResult{events[]} — broker pull() 1회; events[]의
-                                            //   원소는 SessionReadEvent{Output|Gap|Exit|WriterChanged|Closed}
+                                            //   control frame 1개(256 KiB)에 들어가도록),
+                                            //   wait_ms(SESSION_READ_MAX_WAIT = 60 s로 clamp — 거부가 아니라
+                                            //   상한. 한 long-poll이 호스트 슬롯을 무한정 붙잡지 못하게),
+                                            //   ctl_after(직전 응답의 next_ctl_after; 0 = 처음부터)
+                                            // -> SessionReadResult{events[], next_after, next_ctl_after} —
+                                            //   broker pull() 1회; events[]의 원소는
+                                            //   SessionReadEvent{Output|Gap|Exit|WriterChanged|Closed}
                                             //   (CLI.md §6.4 `session read --wait`/`--follow` 루프/MCP long-poll);
                                             //   ACL session.attach, resume token 불요(CLI.md §6.3)
     SessionWrite        session_write = 28; // session_id, data(≤ 16 KiB, 초과 시 INVALID_ARGUMENT)
@@ -167,7 +171,7 @@ message Response {
     SessionAttached     session_attached = 2;// session_attach 성공
     ExecStarted         exec_started = 3;    // exec_start 성공
     RemoteForwardOpened rfwd_opened = 4;     // rfwd_open 성공
-    SessionReadResult   session_read_result = 5; // session_read 성공 (events[])
+    SessionReadResult   session_read_result = 5; // session_read 성공 (events[], next_after, next_ctl_after)
     SessionListResult   session_list_result = 6; // session_list 성공 (SessionInfo[])
     SessionInfo         session_info = 7;    // session_get 성공
     SessionWritten      session_written = 8; // session_write 성공 {bytes_written — 호스트가 실제 수용한 바이트}
@@ -218,6 +222,12 @@ message ExecFrame {
   }
 }
 ```
+
+**Cursor는 (output offset, control id) 쌍이다.** 제어 엔트리(`Exit`/`WriterChanged`/`Closed`)는 zero-length라서 append 시점의 offset을 달고 나오되 offset을 증가시키지 않는다. 따라서 `after` 하나로는 "offset N에 있는 제어 엔트리는 이미 받았다"를 표현할 수 없고, `ctl_after`(ring이 부여하는 단조 증가 id)가 그 나머지 절반이다. `next_after`/`next_ctl_after`를 되먹이는 소비자는 모든 event를 **정확히 한 번** 받고, 새 event가 없으면 long-poll이 정상적으로 대기한다. `ctl_after`를 되먹이지 않는 stateless 소비자는 offset이 정확히 `after`인 제어 엔트리를 매번 다시 받고(at-least-once) 그 때문에 long-poll이 즉시 반환된다 — 폴링 루프는 두 값을 함께 되먹여야 한다(CLI.md §6.4).
+
+**Control 스트림의 순서 계약.** 호스트는 control 메시지를 **도착 순서대로 인라인 처리**한다 — pipelining하는 클라이언트가 보낸 두 `SessionWrite`는 보낸 순서대로 PTY에 도달한다. 예외는 오래 블록될 수 있는 두 종류(`SessionRead` long-poll, `SessionClose`의 HUP→TERM→KILL escalation)로, 이들만 연결 소유의 task로 떼어내 control 스트림을 막지 않게 한다(둘 다 입력을 재배열하지 않는다: read는 변경이 없고 close는 세션의 마지막 op다). 떼어낸 task는 **연결보다 오래 살지 않는다** — 연결 루프가 반환하면 함께 취소되고, 그 다음에야 `purge_connection`(ticket 폐기 + writer lease 해제)이 돌아 lease가 죽은 연결 이름으로 다시 잡히는 창이 없다. 동시 실행 상한은 연결당 `MAX_INFLIGHT_REQUESTS_PER_CONN`(현재 64)이고 초과분은 dispatch 없이 `RESOURCE_EXHAUSTED`(retryable, ACL 판정이 아니므로 audit 없음)로 답한다.
+
+**세션 id는 모양부터 검사한다.** peer가 보낸 `session_id`는 ACL resource이자 audit field가 되므로, ACL choke point **이전에** `1..=64` 바이트의 URL-safe(`[A-Za-z0-9_-]`) 형태인지 검사하고 아니면 `INVALID_ARGUMENT`로 답한다. 존재 여부와 무관한 검사라 §10-2의 non-distinguishing 성질을 해치지 않으며, pinned peer가 요청마다 256 KiB짜리 id로 audit 로그를 부풀리지 못하게 막는다.
 
 `ExecExit.timed_out`은 호스트가 `ExecStart.timeout_ms` 만료로 프로세스 그룹을 kill했음을 뜻한다(이때 `exit_code`/`signal`은 보통 `137`/`SIGKILL`). 클라이언트는 이를 일반 signal 종료가 아니라 `TIMEOUT`으로 보고한다. 호스트는 한 connection이 미상환 ticket을 과도하게 쌓지 못하도록 per-connection 상한(현재 32)을 두며 초과 시 `ExecStart`에 `RESOURCE_EXHAUSTED`(retryable)로 답한다 — ACL 판정이 아니므로 audit되지 않는다. 자식이 종료된 뒤 peer가 data 스트림을 읽지 않아 flow control에 막히면 호스트는 유예(5s) 후 스트림을 reset(code 1)하고 자식을 reap한다 — 읽지 않는 peer가 호스트 exec를 붙잡아 둘 수 없다.
 

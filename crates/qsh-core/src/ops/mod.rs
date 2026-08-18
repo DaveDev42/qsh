@@ -22,8 +22,9 @@ pub mod session;
 
 pub use exec::{ExecRunOp, ExecRunOutput, ExecStdin};
 pub use session::{
-    SessionCloseOp, SessionGetOp, SessionListOp, SessionOpenOp, SessionReadOp, SessionReadOutput,
-    SessionRef, SessionResizeOp, SessionWriteOp, make_session_ref, parse_session_ref,
+    SESSION_WRITE_MAX, SessionCloseOp, SessionGetOp, SessionListOp, SessionOpenOp, SessionReadOp,
+    SessionReadOutput, SessionRef, SessionResizeOp, SessionWriteOp, make_session_ref,
+    parse_session_ref,
 };
 
 /// Everything a remote call needs to reach a pinned host: our identity,

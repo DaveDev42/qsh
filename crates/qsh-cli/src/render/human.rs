@@ -147,6 +147,16 @@ pub fn print_session(session: &Session) -> io::Result<()> {
 
 /// Print the session table (`qsh sessions`).
 pub fn print_session_list(data: &SessionListData) -> io::Result<()> {
+    // Hosts the fan-out could not reach are a stderr diagnostic, never a
+    // table row (`docs/CLI.md` §2.2, §6.2).
+    for h in &data.unreachable {
+        eprintln!(
+            "qsh: {}: unreachable: {} ({})",
+            sanitize(&h.host),
+            sanitize(&h.message),
+            sanitize(&h.code)
+        );
+    }
     let mut stdout = io::stdout().lock();
     if data.sessions.is_empty() {
         return writeln!(stdout, "no sessions");
