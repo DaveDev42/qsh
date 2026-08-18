@@ -81,7 +81,7 @@ M2 크기: 5ew (`docs/ROADMAP.md` M2 "크기").
 
 **(c) 빚지는 테스트:** `qsh-core` 유닛 — 세션 op 전부가 ACL choke point를 통과하고, `DenyAll` 하에서 **세션·ticket이 하나도 생성되지 않음**을 단언(기존 `denied_exec_returns_permission_denied_and_creates_nothing` 패턴). L3 loopback — `crates/qsh-testkit/tests/session_loopback.rs` 신규, `LoopbackHarness::start()`/`session()` 위에서 open→write→read(`--after`)→resize→close 전 경로. 미인가 peer가 세션 존재 여부를 알아내지 못함(non-distinguishing 오류)을 단언.
 
-**(d) 완료 판정:** `qsh session open <host> --json`부터 `close`까지 전 시퀀스가 loopback에서 JSON 계약대로 동작하고, audit에 op별 라인이 남는다. `--` 뒤 argv가 shell 재해석 없이 전달됨. 세션 op 4종 모두 `Action` enum을 경유(문자열 하드코딩 0건).
+**(d) 완료 판정:** `qsh session open <host> --json`부터 `close`까지 전 시퀀스가 loopback에서 JSON 계약대로 동작하고, audit에 op별 라인이 남는다. `--` 뒤 argv가 shell 재해석 없이 전달됨. 세션 op 4종 모두 `Action` enum을 경유(문자열 하드코딩 0건). Step 1이 남긴 `Server::dispatch`의 임시 "`session_*` → `UNSUPPORTED`" arm과 `wire.rs`의 `LOCAL_CAPABILITIES` TODO 메모를 제거해 광고 capability(`session`/`resume.v1`)와 실제 구현이 다시 일치한다(Step 1→3 사이에만 허용된 불일치 창). 호스트는 `SessionAttach.attach_mode() == None`(미설정/미지/RO)을 `INVALID_ARGUMENT`로 답하고 `wants_write()`가 참일 때만 lease를 다룬다; `SessionWrite::validate()`/`SessionReadResult::validate()`를 세션에 손대기 전에 호출하며 `SessionRead.max_bytes`를 `SESSION_READ_MAX_BYTES`로 clamp한다.
 
 **(e) 인용:** `docs/CLI.md` §2.4(dotted operation 이름), §2.5(operation→ACL action 매핑표), §6.2–6.7(session 조회/생성/읽기/쓰기/resize/종료 계약과 예시 envelope), `docs/design/architecture.md` §2(typed op layer 확장 패턴 — `Operation::COMMAND`, `OpError`), §6(단일 choke point: 리소스 생성 이전 `Authorizer::check`), `docs/design/protocol.md` §7(ticket은 ACL 통과 후에만 발급, 단회용 30s), `docs/PRD.md` §9(인증 전 PTY/exec/tunnel 리소스 생성 금지), `docs/ROADMAP.md` 시퀀싱 원칙 3번·7(b).
 

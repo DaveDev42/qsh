@@ -158,10 +158,14 @@ message SessionOpened {
   string expires_at = 5;
 }
 
-// Whether an attach wants to write. RO attaches never take the writer lease.
+// Whether an attach wants to write. Only an explicit ATTACH_MODE_RW asks
+// for the writer lease; UNSPECIFIED (the proto3 default, i.e. an unset
+// field) is INVALID_ARGUMENT, never treated as RW.
 enum AttachMode {
   ATTACH_MODE_UNSPECIFIED = 0;
   ATTACH_MODE_RW = 1;
+  // Number reserved for a later milestone; M2 hosts answer INVALID_ARGUMENT
+  // — there is no observer/read-only attach in M2 (ROADMAP §3).
   ATTACH_MODE_RO = 2;
 }
 
@@ -227,8 +231,12 @@ message SessionResize {
   uint32 rows = 3;
 }
 
-// Success payload for SessionResize.
-message SessionResized {}
+// Success payload for SessionResize: the size the host actually applied
+// to the PTY (may differ from the request if the host clamps).
+message SessionResized {
+  uint32 cols = 1;
+  uint32 rows = 2;
+}
 
 // Request: terminate the session's process group and remove the session
 // (op `session.close`, ACL `session.control`).
@@ -251,8 +259,9 @@ message SessionRead {
   string session_id = 1;
   // Cumulative output offset already consumed (`--after`).
   uint64 after = 2;
-  // Payload cap for this pull; 0 = host default.
-  uint32 max_bytes = 3;
+  // Payload cap for this pull; 0 = host default. The host clamps to
+  // SESSION_READ_MAX_BYTES so the reply always fits one control frame.
+  uint64 max_bytes = 3;
   // Long-poll wait when nothing is available; 0 = return immediately.
   uint64 wait_ms = 4;
 }
@@ -283,7 +292,10 @@ message SessionWrite {
 }
 
 // Success payload for SessionWrite.
-message SessionWritten {}
+message SessionWritten {
+  // Bytes the host actually accepted into the PTY input (≤ len(data)).
+  uint64 bytes_written = 1;
+}
 
 // Asynchronous host → client notification for a session the connection is
 // attached to (request_id = 0). Pull consumers see the same events as

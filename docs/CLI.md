@@ -278,9 +278,11 @@ qsh session read <session-ref> --after 42 --follow --jsonl
 - `--after`: 마지막으로 수신한 누적 output byte offset (sequence)
 - `--wait`: 새 output을 기다릴 최대 milliseconds
 - `--follow`: 종료나 취소까지 event를 계속 출력
-- `--limit-bytes`: 한 응답의 최대 payload
+- `--limit-bytes`: 한 응답의 최대 payload. 호스트는 이 값을 상한(현재 192 KiB, `SESSION_READ_MAX_BYTES`)으로 clamp한다 — 더 큰 값은 오류가 아니라 상한으로 취급된다.
 
-단일 JSON 응답은 event 배열을 반환한다. `--follow --jsonl`은 event 하나당 한 줄을 출력한다.
+단일 JSON 응답은 event 배열을 반환한다: `data`는 `{"session_ref": "...", "events": [Event, …]}`이며 각 원소는 아래 event 객체 그대로다. `--follow --jsonl`은 event 하나당 한 줄을 출력한다.
+
+소비자 규칙의 정확한 범위: "알 수 없는 event `type`은 무시"는 **`type` 문자열이 미지인 경우**에만 적용된다. 알려진 `type`(`session.output` 등)인데 필수 필드가 없거나 타입이 틀린 event는 잘못된 입력이며, 소비자는 이를 건너뛰지 말고 오류로 처리해야 한다(조용한 output 손실 금지, PRD §8).
 
 **Sequence 시맨틱**: `sequence`는 세션 시작(0)부터 누적된 output byte 수이며 chunk index가 아니다. 각 `session.output` event의 `sequence`는 그 chunk까지 포함한 누적 byte offset, 즉 chunk의 마지막 byte offset + 1이다. `--after N`은 누적 offset `N` 이후의 byte를 요청한다. 서버는 chunk를 자유롭게 분할·병합할 수 있으므로 클라이언트가 매번 같은 크기로 chunk를 받는다고 가정해서는 안 되지만, replay는 항상 정확히 `N`에서 끊어 재개할 수 있다. 아래 예시는 `--after 42`로 요청한 뒤 7 byte(`Hello\r\n`) chunk 하나를 받아 누적 offset이 `49`가 된 상황이다.
 
