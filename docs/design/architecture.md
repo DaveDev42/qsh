@@ -44,9 +44,12 @@ Broker
 ├── TTL reaper task (30s tick; resume TTL 초과 세션을 SIGHUP→TERM→KILL로 정리)
 └── SessionActor  ← 세션당 tokio task 하나
     ├── 소유: PTY master, child handle, ReplayRing, writer lease, output 알림
-    ├── mpsc 인박스: Write / Resize / Signal / Pull / Subscribe / TakeLease / Close
+    ├── mpsc 인박스: Write / Resize / Signal / TakeLease / ReleaseConnection / Close
+    ├── input writer task: 유계 큐 → PTY write (child가 입력을 안 읽어도 actor·pump는 안 막힘; 큐 가득 차면 RESOURCE_EXHAUSTED)
     └── pty_reader task: PTY read → ReplayRing.push → 누적 offset 증가 → 구독자 알림
 ```
+
+> **구현 주석(M2 Step 2):** `Pull`/`Subscribe`는 인박스 메시지가 아니다 — 읽기는 actor를 거치지 않고 `SessionHandle::pull`이 ring(mutex) 위 cursor를 직접 읽는다. 그래야 소비자가 pty_reader와 actor 어느 쪽도 블록하지 못한다. 세션당 task는 actor·pty_reader·input writer 셋이며, `Close`는 actor가 CLI.md §6.7 escalation(첫 신호 → `close_grace_ms` → TERM → KILL → 강제 정리)을 주입된 clock 위에서 구동하고 child 종료·output drain 후 `session.closed`를 마지막 엔트리로 append한다. `session.closed`가 append된 세션은 `get`/`list`/`write`/`close`에는 즉시 `SESSION_NOT_FOUND`지만 `pull`에는 짧은 보존창(`CLOSED_RETENTION`, 60s) 동안 남아 진행 중이던 follower가 마지막 event를 받아 갈 수 있다.
 
 - **ReplayRing:** 세션당 8 MB(기본, 설정 가능) byte 예산의 chunk ring. `sequence`는 누적 output **byte offset**(CLI.md §2.3) — eviction은 whole-chunk 단위로 하되 gap 계산·replay 절단은 byte 단위로 정확하다. 서버는 chunk를 자유로이 분할·병합할 수 있으므로 `--after N` 재개는 항상 정확히 N에서 시작한다. 저장은 memory-only, `ReplayStore` trait 뒤에 격리 ([ADR-0004](../adr/0004-replay-buffer-memory-only.md)).
 - **cursor-pull 단일 primitive:** `pull(session, after, max_bytes, wait)` 하나가 `session read --wait --json`(1회 pull), `session read --follow --jsonl`(pull 루프), MCP long-poll(동일 호출 1:1)을 전부 구동한다. 각 소비자는 ring 위의 cursor일 뿐이며, 느린 소비자의 cursor가 ring에서 밀려나면 `session.gap` 이벤트로 재동기화한다. **pty_reader는 절대 네트워크·소비자에 블록되지 않는다** — 세션당 메모리 상한은 ring + cursor 소량으로 유계다.

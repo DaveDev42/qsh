@@ -9,12 +9,14 @@
 //!   displaced holder is reported so the actor can broadcast
 //!   `session.writer_changed` and the old connection is demoted to
 //!   read-only.
-//! - **`no_steal`:** if a *different connection* holds a live lease the
-//!   request fails with [`TakeOutcome::Conflict`] (→ `SESSION_CONFLICT`).
-//!   Conservative reading of protocol.md §10 ("`no_steal = true`는 steal 대신
-//!   `SESSION_CONFLICT`"): the holder's principal does not matter, only that
-//!   somebody else's connection is alive on it — cautious automation must
-//!   not yank the lease from an interactive user on the same device.
+//! - **`no_steal`:** if a **different principal** holds a live lease the
+//!   request fails with [`TakeOutcome::Conflict`] (→ `SESSION_CONFLICT`) —
+//!   architecture.md §3 (b): "타 principal이 살아 있는 lease를 쥐고 있으면
+//!   `SESSION_CONFLICT`". The same principal on another connection (the
+//!   same device's headless `session write` next to its own interactive
+//!   attach) takes the lease over — that is its own session to steer.
+//!   protocol.md §10 is silent on the principal; architecture.md is the
+//!   explicit rule and is what this implements.
 //! - re-taking on the connection that already holds it is a no-op (no
 //!   `writer_changed`).
 //! - **release on connection death:** [`WriterLease::release_connection`]
@@ -51,7 +53,7 @@ pub enum TakeOutcome {
         /// same connection).
         changed: bool,
     },
-    /// `no_steal` was set and another connection holds the lease.
+    /// `no_steal` was set and another principal holds the lease.
     Conflict {
         /// Who holds it.
         holder: LeaseHolder,
@@ -87,7 +89,9 @@ impl WriterLease {
                 displaced: None,
                 changed: false,
             },
-            Some(h) if no_steal => TakeOutcome::Conflict { holder: h.clone() },
+            Some(h) if no_steal && h.principal != principal => {
+                TakeOutcome::Conflict { holder: h.clone() }
+            }
             _ => {
                 let displaced = self.holder.replace(LeaseHolder {
                     principal: principal.to_string(),
@@ -155,11 +159,11 @@ mod tests {
     }
 
     #[test]
-    fn no_steal_conflicts_with_a_live_holder_on_another_connection() {
+    fn no_steal_conflicts_with_a_live_holder_of_another_principal() {
         let mut lease = WriterLease::new();
         lease.take("device:a", A, false);
         assert_eq!(
-            lease.take("device:a", B, true),
+            lease.take("device:b", B, true),
             TakeOutcome::Conflict {
                 holder: LeaseHolder {
                     principal: "device:a".into(),
@@ -174,6 +178,24 @@ mod tests {
             free.take("device:b", B, true),
             TakeOutcome::Acquired { changed: true, .. }
         ));
+    }
+
+    #[test]
+    fn no_steal_lets_the_same_principal_take_over_from_another_connection() {
+        // architecture.md §3 (b): only *another* principal conflicts.
+        let mut lease = WriterLease::new();
+        lease.take("device:a", A, false);
+        assert_eq!(
+            lease.take("device:a", B, true),
+            TakeOutcome::Acquired {
+                displaced: Some(LeaseHolder {
+                    principal: "device:a".into(),
+                    conn: A
+                }),
+                changed: true
+            }
+        );
+        assert!(lease.is_held_by(B));
     }
 
     #[test]

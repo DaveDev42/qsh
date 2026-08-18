@@ -10,7 +10,11 @@
 //!   `[serve].replay_bytes`). Eviction is whole-chunk, oldest first; gap
 //!   computation and replay truncation are byte-exact, so `--after N` always
 //!   resumes at exactly `N` regardless of how the producer chunked its
-//!   writes.
+//!   writes. Small pushes are **coalesced into the tail chunk** (up to the
+//!   chunk size, at most [`RING_CHUNK_MAX`]), so per-entry overhead is bounded by
+//!   `budget / chunk_max` regardless of how the producer chunks —
+//!   a PTY echoing one byte at a time cannot blow the memory bound or make
+//!   reads O(bytes).
 //! - Overflow is never hidden: a cursor that points before
 //!   [`ReplayStore::available_from`] gets a [`ReplayEvent::Gap`] first, then
 //!   the data from `available_from` on (protocol.md §10 step 4).
@@ -20,7 +24,14 @@
 //!   they were appended, do not advance the offset, and are returned by
 //!   [`ReplayStore::read`] in total order with the output — a caught-up
 //!   consumer at offset `S` sees a control appended at `S` on its next pull
-//!   (CLI.md §6.4 "전달 경로와 순서").
+//!   (CLI.md §6.4 "전달 경로와 순서"). Eviction never drops a control that
+//!   sits at [`ReplayStore::available_from`] while the output starting there
+//!   is retained — the oldest *output* chunk goes first, and controls are
+//!   dropped only once they are strictly behind `available_from` (a cursor
+//!   there gets a [`ReplayEvent::Gap`] anyway). The one forced case — a ring
+//!   holding nothing but control entries over budget — is signalled by a
+//!   `Gap` with `requested_after == available_from` (ADR-0004: overflow is
+//!   never hidden).
 //!
 //! ## Cursors
 //!
@@ -40,9 +51,14 @@ use std::fmt;
 
 use bytes::Bytes;
 
-/// Largest single chunk kept in the ring. Bigger pushes are split, which
-/// keeps whole-chunk eviction granular and bounds the read-side copy.
+/// Largest single chunk kept in the ring. Bigger pushes are split and
+/// smaller ones coalesced up to this size, which keeps whole-chunk eviction
+/// granular, bounds the read-side copy, and bounds the entry count.
 pub const RING_CHUNK_MAX: usize = 16 * 1024;
+
+/// Chunks are also capped at `budget / RING_CHUNK_DIVISOR` so small budgets
+/// keep eviction granular (a chunk is never more than 1/16 of the ring).
+pub const RING_CHUNK_DIVISOR: usize = 16;
 
 /// Budget charged for one control entry (they carry no bytes but must not
 /// let a stream of pure control events grow the ring without bound).
@@ -226,13 +242,22 @@ pub trait ReplayStore: Send + fmt::Debug {
     /// Bytes currently charged against the budget (output bytes plus
     /// [`CONTROL_ENTRY_COST`] per control entry).
     fn retained(&self) -> usize;
+
+    /// Number of entries (output chunks + control entries) retained — the
+    /// per-entry overhead is bounded by `budget / chunk_max` plus controls.
+    fn entry_count(&self) -> usize;
+
+    /// Effective chunk size (pushes are split to it and coalesced up to it).
+    fn chunk_max(&self) -> usize;
 }
 
 #[derive(Debug, Clone)]
 enum Entry {
     Output {
         start: u64,
-        data: Bytes,
+        /// Owned so the tail chunk can grow (coalescing); reads copy the
+        /// requested slice into a `Bytes`.
+        data: Vec<u8>,
     },
     Control {
         seq: u64,
@@ -254,13 +279,19 @@ impl Entry {
 #[derive(Debug)]
 pub struct ReplayRing {
     budget: usize,
-    /// Largest piece a push is split into: `min(RING_CHUNK_MAX, budget)`,
-    /// so a single piece always fits the budget.
+    /// Chunk size: `clamp(budget / RING_CHUNK_DIVISOR, 1, RING_CHUNK_MAX)`.
+    /// Pushes are split to it and coalesced up to it, so a single piece
+    /// always fits the budget and the entry count is bounded by
+    /// `budget / piece_max` (+ controls, each charged
+    /// [`CONTROL_ENTRY_COST`]).
     piece_max: usize,
     entries: VecDeque<Entry>,
     retained: usize,
     end: u64,
     next_ctl_id: u64,
+    /// The newest control entry force-evicted while still positioned at
+    /// `available_from` (`(seq, id)`), if any. See [`ReplayRing::evict`].
+    lost_ctl: Option<(u64, u64)>,
 }
 
 impl ReplayRing {
@@ -270,42 +301,91 @@ impl ReplayRing {
         let budget = budget.max(1);
         Self {
             budget,
-            piece_max: RING_CHUNK_MAX.min(budget),
+            piece_max: (budget / RING_CHUNK_DIVISOR).clamp(1, RING_CHUNK_MAX),
             entries: VecDeque::new(),
             retained: 0,
             end: 0,
             next_ctl_id: 1,
+            lost_ctl: None,
         }
     }
 
-    /// Number of entries (output chunks + control entries) retained.
-    pub fn entry_count(&self) -> usize {
-        self.entries.len()
-    }
-
+    /// Trim to budget. The oldest **output** chunk goes first; control
+    /// entries are only dropped once they sit strictly behind
+    /// `available_from` (a cursor there gets a `Gap` for the bytes anyway,
+    /// so nothing is lost silently). Only when the ring holds nothing but
+    /// control entries and is still over budget is a control force-evicted,
+    /// and that is recorded in `lost_ctl` so [`ReplayStore::read`] can emit
+    /// a `Gap` for the consumers that were owed it.
+    ///
+    /// The entry that was just appended is never evicted: with pieces
+    /// capped at `piece_max <= budget` this only matters for budgets below
+    /// `CONTROL_ENTRY_COST`, where the invariant becomes
+    /// `retained <= budget + cost(last)`.
     fn evict(&mut self) {
-        // Never evict the entry that was just appended: with pieces capped
-        // at `piece_max <= budget` this only matters for budgets below
-        // `CONTROL_ENTRY_COST`, where the invariant becomes
-        // `retained <= budget + cost(last)`.
         while self.retained > self.budget && self.entries.len() > 1 {
-            if let Some(front) = self.entries.pop_front() {
-                self.retained -= front.cost();
+            let oldest_output = self
+                .entries
+                .iter()
+                .position(|e| matches!(e, Entry::Output { .. }));
+            match oldest_output {
+                Some(i) if i + 1 < self.entries.len() => {
+                    if let Some(gone) = self.entries.remove(i) {
+                        self.retained -= gone.cost();
+                    }
+                }
+                _ => {
+                    // No evictable output: everything in front of the newest
+                    // entry is a control positioned at `available_from`.
+                    if let Some(Entry::Control { seq, id, .. }) = self.entries.pop_front() {
+                        self.retained -= CONTROL_ENTRY_COST;
+                        self.lost_ctl = Some((seq, id));
+                    }
+                }
+            }
+            // Controls now strictly behind the oldest retained output are
+            // covered by the gap a cursor there receives; drop them.
+            let available_from = self.available_from();
+            while let Some(Entry::Control { seq, .. }) = self.entries.front() {
+                if *seq < available_from {
+                    self.entries.pop_front();
+                    self.retained -= CONTROL_ENTRY_COST;
+                } else {
+                    break;
+                }
             }
         }
+    }
+
+    /// Append `piece` to the tail output chunk if it is an output chunk with
+    /// room, else start a new chunk. Returns how many bytes were appended.
+    fn append_output(&mut self, piece: &[u8]) -> usize {
+        let piece_max = self.piece_max;
+        if let Some(Entry::Output { data, .. }) = self.entries.back_mut()
+            && data.len() < piece_max
+        {
+            let take = piece.len().min(piece_max - data.len());
+            data.extend_from_slice(&piece[..take]);
+            return take;
+        }
+        let take = piece.len().min(piece_max);
+        let start = self.end;
+        self.entries.push_back(Entry::Output {
+            start,
+            data: piece[..take].to_vec(),
+        });
+        take
     }
 }
 
 impl ReplayStore for ReplayRing {
     fn push(&mut self, data: &[u8]) -> u64 {
-        for piece in data.chunks(self.piece_max) {
-            let start = self.end;
-            self.entries.push_back(Entry::Output {
-                start,
-                data: Bytes::copy_from_slice(piece),
-            });
-            self.retained += piece.len();
-            self.end += piece.len() as u64;
+        let mut rest = data;
+        while !rest.is_empty() {
+            let n = self.append_output(rest);
+            self.retained += n;
+            self.end += n as u64;
+            rest = &rest[n..];
             self.evict();
         }
         self.end
@@ -354,8 +434,25 @@ impl ReplayStore for ReplayRing {
             });
             from = available_from;
         }
-        let start_from = from;
         let mut ctl_after = cursor.ctl_after;
+        if let Some((lost_seq, lost_id)) = self.lost_ctl
+            && ctl_after < lost_id
+            && from <= lost_seq
+        {
+            // Control entries this consumer was owed were force-evicted
+            // (control-only overflow). `from == available_from == lost_seq`
+            // here (a smaller `from` already produced the gap above, and
+            // `available_from` never moves behind a force-evicted control),
+            // so the gap has equal offsets: no bytes lost, controls were.
+            if events.is_empty() {
+                events.push(ReplayEvent::Gap {
+                    requested_after: cursor.after,
+                    available_from: from,
+                });
+            }
+            ctl_after = lost_id;
+        }
+        let start_from = from;
         let mut remaining = max_bytes;
 
         for entry in &self.entries {
@@ -372,7 +469,7 @@ impl ReplayStore for ReplayRing {
                     // have consumed everything before `from`.
                     let skip = (from - *start) as usize;
                     let take = (data.len() - skip).min(remaining);
-                    let chunk = data.slice(skip..skip + take);
+                    let chunk = Bytes::copy_from_slice(&data[skip..skip + take]);
                     from += take as u64;
                     remaining -= take;
                     events.push(ReplayEvent::Output {
@@ -425,6 +522,14 @@ impl ReplayStore for ReplayRing {
     fn retained(&self) -> usize {
         self.retained
     }
+
+    fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn chunk_max(&self) -> usize {
+        self.piece_max
+    }
 }
 
 #[cfg(test)]
@@ -463,7 +568,20 @@ mod tests {
         let out = ring.read(Cursor::from_offset(0), usize::MAX).unwrap();
         assert_eq!(output_bytes(&out), b"Hello\r\nworld");
         assert_eq!(out.next.after, 12);
+        // The two pushes coalesce into one chunk (the producer's chunking
+        // is not observable); every Output event's `sequence` is the offset
+        // after its last byte.
+        assert_eq!(out.events.len(), 1);
         match &out.events[0] {
+            ReplayEvent::Output { sequence, data } => {
+                assert_eq!(*sequence, 12);
+                assert_eq!(&data[..], b"Hello\r\nworld");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        // A read cut mid-way sees the same offsets: sequence 7 after 7 bytes.
+        let cut = ring.read(Cursor::from_offset(0), 7).unwrap();
+        match &cut.events[0] {
             ReplayEvent::Output { sequence, data } => {
                 assert_eq!(*sequence, 7);
                 assert_eq!(&data[..], b"Hello\r\n");
@@ -518,10 +636,16 @@ mod tests {
 
     #[test]
     fn overflow_evicts_whole_chunks_and_reports_exact_available_from() {
-        let mut ring = ReplayRing::new(10);
-        ring.push(b"aaaa"); // 0..4
-        ring.push(b"bbbb"); // 4..8
-        ring.push(b"cccc"); // 8..12 → evicts "aaaa"
+        // Budget 64 ⇒ 4-byte chunks. 17 four-byte pushes = 68 bytes: the
+        // oldest chunk (0..4) is evicted whole.
+        let mut ring = ReplayRing::new(64);
+        assert_eq!(ring.chunk_max(), 4);
+        let mut oracle = Vec::new();
+        for i in 0..17u8 {
+            let chunk = [b'a' + i; 4];
+            ring.push(&chunk);
+            oracle.extend_from_slice(&chunk);
+        }
         assert_eq!(ring.available_from(), 4);
         assert!(ring.retained() <= ring.budget());
         let out = ring.read(Cursor::from_offset(1), usize::MAX).unwrap();
@@ -532,25 +656,31 @@ mod tests {
                 available_from: 4
             }
         );
-        assert_eq!(output_bytes(&out), b"bbbbcccc");
-        assert_eq!(out.next.after, 12);
+        assert_eq!(output_bytes(&out), &oracle[4..]);
+        assert_eq!(out.next.after, 68);
         // Exactly at the boundary there is no gap.
         let out = ring.read(Cursor::from_offset(4), usize::MAX).unwrap();
         assert!(!out.has_gap());
-        assert_eq!(output_bytes(&out), b"bbbbcccc");
+        assert_eq!(output_bytes(&out), &oracle[4..]);
     }
 
     #[test]
     fn large_pushes_are_split_so_eviction_stays_granular() {
-        let mut ring = ReplayRing::new(4 * RING_CHUNK_MAX);
+        // Budget 64 chunks ⇒ piece_max == RING_CHUNK_MAX.
+        let mut ring = ReplayRing::new(64 * RING_CHUNK_MAX);
+        assert_eq!(ring.chunk_max(), RING_CHUNK_MAX);
         let big = vec![7u8; 3 * RING_CHUNK_MAX + 5];
         ring.push(&big);
         assert_eq!(ring.entry_count(), 4);
-        ring.push(&big);
+        for _ in 0..40 {
+            ring.push(&big);
+        }
         assert!(ring.retained() <= ring.budget());
-        // The oldest retained offset is a piece boundary, not 0.
+        // The oldest retained offset is a piece boundary, not 0, and the
+        // budget is honoured to within one chunk (whole-chunk eviction).
         assert_eq!(ring.available_from() % RING_CHUNK_MAX as u64, 0);
         assert!(ring.available_from() > 0);
+        assert!(ring.retained() > ring.budget() - RING_CHUNK_MAX);
     }
 
     #[test]
@@ -648,6 +778,174 @@ mod tests {
         assert_eq!(ring.end(), 0);
     }
 
+    #[test]
+    fn small_pushes_coalesce_so_entry_count_is_bounded() {
+        // A PTY echoing one byte at a time must not create one entry per
+        // byte: entries are bounded by budget / piece size, and memory by
+        // the budget itself (DoD: per-session memory is bounded).
+        let budget = 4096;
+        let mut ring = ReplayRing::new(budget);
+        let mut oracle = Vec::new();
+        for i in 0..200_000u32 {
+            let b = (i % 251) as u8;
+            ring.push(&[b]);
+            oracle.push(b);
+        }
+        assert!(ring.retained() <= budget);
+        assert!(
+            ring.entry_count() <= budget / ring.chunk_max() + 1,
+            "entries {} for budget {budget}",
+            ring.entry_count()
+        );
+        // Whatever is retained is still byte-exact.
+        let avail = ring.available_from() as usize;
+        let out = ring
+            .read(Cursor::from_offset(avail as u64), usize::MAX)
+            .unwrap();
+        assert_eq!(output_bytes(&out), &oracle[avail..]);
+        assert!(ring.end() as usize - avail <= budget);
+    }
+
+    #[test]
+    fn coalescing_never_crosses_a_control_entry() {
+        let mut ring = ReplayRing::new(1024);
+        ring.push(b"ab");
+        ring.push_control(ControlEvent::WriterChanged { writer: None });
+        ring.push(b"cd");
+        assert_eq!(
+            ring.entry_count(),
+            3,
+            "output after a control starts a new chunk"
+        );
+        let out = ring.read(Cursor::from_offset(0), usize::MAX).unwrap();
+        let kinds: Vec<&str> = out
+            .events
+            .iter()
+            .map(|e| match e {
+                ReplayEvent::Output { .. } => "out",
+                ReplayEvent::Control { .. } => "ctl",
+                ReplayEvent::Gap { .. } => "gap",
+            })
+            .collect();
+        assert_eq!(kinds, ["out", "ctl", "out"]);
+    }
+
+    #[test]
+    fn control_at_available_from_survives_output_eviction() {
+        // Fill the budget, append a control at offset B, then push B-64 more
+        // bytes: every chunk before the control is evicted and the ring
+        // lands exactly on budget as [Ctl@B, Out(B..)]. The control at the
+        // new available_from must survive and a cursor at B sees it with
+        // no gap (the reviewer's silent-loss scenario).
+        let budget = 3200;
+        let mut ring = ReplayRing::new(budget);
+        ring.push(&vec![b'a'; budget]);
+        let (seq, id) = ring.push_control(ControlEvent::Exit {
+            exit_code: Some(0),
+            signal: None,
+        });
+        assert_eq!((seq, id), (budget as u64, 1));
+        ring.push(&vec![b'b'; budget - CONTROL_ENTRY_COST]);
+        assert_eq!(ring.available_from(), budget as u64);
+        assert!(ring.retained() <= ring.budget());
+        let out = ring
+            .read(
+                Cursor {
+                    after: budget as u64,
+                    ctl_after: 0,
+                },
+                usize::MAX,
+            )
+            .unwrap();
+        assert!(!out.has_gap(), "{:?}", out.events.first());
+        assert_eq!(controls(&out), [(budget as u64, 1)]);
+        assert_eq!(output_bytes(&out), vec![b'b'; budget - CONTROL_ENTRY_COST]);
+        // Byte gap semantics are unchanged for a cursor behind it.
+        let behind = ring.read(Cursor::from_offset(5), usize::MAX).unwrap();
+        assert_eq!(
+            behind.events[0],
+            ReplayEvent::Gap {
+                requested_after: 5,
+                available_from: budget as u64
+            }
+        );
+        assert_eq!(controls(&behind), [(budget as u64, 1)]);
+    }
+
+    #[test]
+    fn forced_control_loss_is_signalled_by_a_gap_never_hidden() {
+        // Budget 80: 10 bytes then two controls at 10 = 138. Evicting all
+        // output leaves [Ctl@10, Ctl@10] = 128 > 80 and the only thing
+        // left to evict is a control still positioned at available_from.
+        // That loss must surface as a gap (equal offsets: no bytes lost),
+        // exactly once per consumer.
+        let mut ring = ReplayRing::new(80);
+        ring.push(&[b'a'; 10]);
+        ring.push_control(ControlEvent::WriterChanged { writer: None });
+        ring.push_control(ControlEvent::WriterChanged {
+            writer: Some("device:b".into()),
+        });
+        assert!(ring.retained() <= ring.budget());
+        assert_eq!(ring.available_from(), 10);
+        let out = ring
+            .read(
+                Cursor {
+                    after: 10,
+                    ctl_after: 0,
+                },
+                usize::MAX,
+            )
+            .unwrap();
+        assert_eq!(
+            out.events[0],
+            ReplayEvent::Gap {
+                requested_after: 10,
+                available_from: 10
+            }
+        );
+        assert_eq!(controls(&out), [(10, 2)]);
+        assert_eq!(
+            out.next,
+            Cursor {
+                after: 10,
+                ctl_after: 2
+            }
+        );
+        // Stateful follow-up: no repeated gap.
+        let again = ring.read(out.next, usize::MAX).unwrap();
+        assert!(again.events.is_empty(), "{again:?}");
+        // A consumer that already had the lost control sees no gap.
+        let had = ring
+            .read(
+                Cursor {
+                    after: 10,
+                    ctl_after: 1,
+                },
+                usize::MAX,
+            )
+            .unwrap();
+        assert!(!had.has_gap());
+        assert_eq!(controls(&had), [(10, 2)]);
+        // A consumer behind the byte gap gets the byte gap only, once.
+        let behind = ring.read(Cursor::from_offset(3), usize::MAX).unwrap();
+        assert_eq!(
+            behind.events[0],
+            ReplayEvent::Gap {
+                requested_after: 3,
+                available_from: 10
+            }
+        );
+        assert_eq!(
+            behind
+                .events
+                .iter()
+                .filter(|e| matches!(e, ReplayEvent::Gap { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(behind.next.ctl_after, 2);
+    }
+
     // ---- oracle property tests (DoD item 1) -------------------------------
 
     #[derive(Debug, Clone)]
@@ -713,7 +1011,14 @@ mod tests {
                             prop_assert_eq!(&bytes[..], &oracle[avail as usize..avail as usize + want_len]);
                             prop_assert_eq!(out.next.after, avail + want_len as u64);
                         } else {
-                            prop_assert!(!out.has_gap());
+                            // The only gap allowed here is the control-loss
+                            // gap (equal offsets), never a byte gap.
+                            for e in &out.events {
+                                if let ReplayEvent::Gap { requested_after, available_from } = e {
+                                    prop_assert_eq!(*requested_after, after);
+                                    prop_assert_eq!(*available_from, after);
+                                }
+                            }
                             let want_len = ((end - after) as usize).min(max_bytes);
                             prop_assert_eq!(&bytes[..], &oracle[after as usize..after as usize + want_len]);
                             prop_assert_eq!(out.next.after, after + want_len as u64);
@@ -734,7 +1039,13 @@ mod tests {
             // Whatever the ring claims to retain is served exactly.
             let avail = ring.available_from();
             let out = ring.read(Cursor::from_offset(avail), usize::MAX).unwrap();
-            prop_assert!(!out.has_gap());
+            for e in &out.events {
+                if let ReplayEvent::Gap { requested_after, available_from } = e {
+                    // Only the control-loss gap (equal offsets) may appear.
+                    prop_assert_eq!(*requested_after, avail);
+                    prop_assert_eq!(*available_from, avail);
+                }
+            }
             prop_assert_eq!(&output_bytes(&out)[..], &oracle[avail as usize..]);
             // Silence "unused" while keeping the counters available for
             // debugging a shrunk case.
@@ -752,11 +1063,12 @@ mod tests {
         ) {
             let mut ring = ReplayRing::new(budget);
             let mut oracle: Vec<u8> = Vec::new();
-            let mut ctl_ids: Vec<u64> = Vec::new();
+            let mut ctl_ids: Vec<(u64, u64)> = Vec::new();
             let mut cursor = Cursor::from_offset(0);
             let mut got: Vec<u8> = Vec::new();
             let mut got_start = 0u64;
             let mut got_ctls: Vec<u64> = Vec::new();
+            let mut gap_at: Vec<u64> = Vec::new();
             for op in ops {
                 match op {
                     Op::Push(data) => {
@@ -764,8 +1076,8 @@ mod tests {
                         oracle.extend_from_slice(&data);
                     }
                     Op::Ctl => {
-                        let (_, id) = ring.push_control(ControlEvent::WriterChanged { writer: None });
-                        ctl_ids.push(id);
+                        let (seq, id) = ring.push_control(ControlEvent::WriterChanged { writer: None });
+                        ctl_ids.push((seq, id));
                     }
                     Op::Read(_, max_bytes) => {
                         let out = ring.read(cursor, max_bytes).unwrap();
@@ -775,6 +1087,7 @@ mod tests {
                                     // Resync: the follower's history restarts.
                                     got.clear();
                                     got_start = *available_from;
+                                    gap_at.push(*available_from);
                                 }
                                 ReplayEvent::Output { data, .. } => got.extend_from_slice(data),
                                 ReplayEvent::Control { ctl_id, .. } => got_ctls.push(*ctl_id),
@@ -790,7 +1103,11 @@ mod tests {
                 if out.events.is_empty() { break; }
                 for e in &out.events {
                     match e {
-                        ReplayEvent::Gap { available_from, .. } => { got.clear(); got_start = *available_from; }
+                        ReplayEvent::Gap { available_from, .. } => {
+                            got.clear();
+                            got_start = *available_from;
+                            gap_at.push(*available_from);
+                        }
                         ReplayEvent::Output { data, .. } => got.extend_from_slice(data),
                         ReplayEvent::Control { ctl_id, .. } => got_ctls.push(*ctl_id),
                     }
@@ -805,16 +1122,26 @@ mod tests {
             for w in got_ctls.windows(2) {
                 prop_assert!(w[0] < w[1], "duplicate/out-of-order control: {:?}", got_ctls);
             }
-            // Every retained control the follower could have seen must
-            // have been delivered: check against a full read from
-            // `got_start`.
-            let full = ring.read(Cursor::from_offset(got_start), usize::MAX).unwrap();
-            let expected: Vec<u64> = full.events.iter().filter_map(|e| match e {
-                ReplayEvent::Control { ctl_id, .. } => Some(*ctl_id),
-                _ => None,
-            }).collect();
-            for id in expected {
-                prop_assert!(got_ctls.contains(&id), "control {} never delivered; got {:?}", id, got_ctls);
+            // Against the running oracle (not just what the ring still
+            // holds): every control positioned strictly after the start of
+            // the follower's history was delivered — losing one requires
+            // `available_from` to pass it, which the follower sees as a gap.
+            // A control positioned exactly at `got_start` was delivered
+            // unless a gap resynced the follower to that very offset (the
+            // control-loss gap or a byte gap that landed there).
+            for (seq, id) in &ctl_ids {
+                if *seq > got_start {
+                    prop_assert!(got_ctls.contains(id), "control {} at {} never delivered; got {:?}", id, seq, got_ctls);
+                } else if *seq == got_start {
+                    prop_assert!(
+                        got_ctls.contains(id) || gap_at.contains(&got_start),
+                        "control {} at {} (= history start) never delivered; got {:?}", id, seq, got_ctls
+                    );
+                }
+            }
+            // And nothing the oracle does not know about.
+            for id in &got_ctls {
+                prop_assert!(ctl_ids.iter().any(|(_, i)| i == id));
             }
         }
     }

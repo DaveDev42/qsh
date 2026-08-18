@@ -114,34 +114,58 @@ pub fn run(workspace_root: &Path) -> Result<()> {
     }
 }
 
-/// A ban on naming `forbidden_crate` anywhere under `dir` (relative to the
+/// A ban on naming `forbidden` anywhere under `dir` (relative to the
 /// workspace root). Enforced at source granularity, unlike the manifest
 /// matrix.
 struct ModuleBan {
     /// Directory (workspace-relative) the ban applies to, recursively.
     dir: &'static str,
-    /// The crate name (Rust path form, i.e. underscores) that must not
-    /// appear in any `.rs` file under `dir`.
-    forbidden_crate: &'static str,
+    /// The token (a crate name in Rust path form, or a `crate::` path) that
+    /// must not appear in any `.rs` file under `dir`, comments excluded.
+    forbidden: &'static str,
     /// Why, for the failure message.
     reason: &'static str,
 }
 
+/// The broker must not name a transport type — directly, through the
+/// crates behind `qsh_transport`, or through `qsh-core`'s own crate-root
+/// re-exports of transport types (`crate::Principal` / `crate::Fingerprint`)
+/// and the connection-level `crate::client` module. Note the lint is
+/// directory-scoped: transport-free code that lives elsewhere and is merely
+/// used by the broker is not checked here (keep PTY/source code that the
+/// broker consumes under `broker/` or equally transport-free).
+const BROKER_DIR: &str = "crates/qsh-core/src/broker";
+const BROKER_REASON: &str = "the SessionBackend seam must not name a transport type (ADR-0003); \
+     keep the broker transport-free so a supervisor can implement it over IPC";
+
 fn module_bans() -> Vec<ModuleBan> {
-    vec![ModuleBan {
-        dir: "crates/qsh-core/src/broker",
-        forbidden_crate: "qsh_transport",
-        reason: "the SessionBackend seam must not import qsh_transport (ADR-0003); \
-                 keep the broker transport-free so a supervisor can implement it over IPC",
-    }]
+    [
+        "qsh_transport",
+        "quinn",
+        "rustls",
+        "crate::Principal",
+        "crate::Fingerprint",
+        "crate::client",
+    ]
+    .into_iter()
+    .map(|forbidden| ModuleBan {
+        dir: BROKER_DIR,
+        forbidden,
+        reason: BROKER_REASON,
+    })
+    .collect()
 }
 
 /// Enforce every [`ModuleBan`], appending a violation line per offending
 /// occurrence.
 fn check_module_bans(workspace_root: &Path, violations: &mut Vec<String>) -> Result<()> {
+    let mut checked_dirs = std::collections::BTreeSet::new();
     for ban in module_bans() {
         let dir = workspace_root.join(ban.dir);
         if !dir.is_dir() {
+            if !checked_dirs.insert(ban.dir) {
+                continue; // reported once per directory
+            }
             // The directory is expected to exist once the broker lands; a
             // missing directory is itself a regression worth flagging.
             violations.push(format!(
@@ -159,13 +183,13 @@ fn check_module_bans(workspace_root: &Path, violations: &mut Vec<String>) -> Res
                 fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
             for (lineno, raw) in text.lines().enumerate() {
                 let code = strip_line_comment(raw);
-                if code.contains(ban.forbidden_crate) {
+                if code.contains(ban.forbidden) {
                     let rel = file.strip_prefix(workspace_root).unwrap_or(&file);
                     violations.push(format!(
                         "{}:{} names `{}` — {}",
                         rel.display(),
                         lineno + 1,
-                        ban.forbidden_crate,
+                        ban.forbidden,
                         ban.reason
                     ));
                 }
@@ -267,6 +291,28 @@ mod tests {
         let mut violations = Vec::new();
         check_module_bans(root.path(), &mut violations).unwrap();
         assert!(violations.is_empty(), "{violations:?}");
+    }
+
+    /// The crate-root re-export of a transport type (`crate::Principal`)
+    /// and the transport's own dependencies are banned too — the seam
+    /// cannot be evaded by going through `qsh-core`'s own paths.
+    #[test]
+    fn module_ban_flags_reexported_transport_types_and_underlying_crates() {
+        let root = tempfile::tempdir().unwrap();
+        let broker = root.path().join("crates/qsh-core/src/broker");
+        fs::create_dir_all(&broker).unwrap();
+        fs::write(
+            broker.join("lease.rs"),
+            "use crate::Principal;\nuse crate::client::Session;\nfn f() { let _ = quinn::Endpoint::client; }\n",
+        )
+        .unwrap();
+
+        let mut violations = Vec::new();
+        check_module_bans(root.path(), &mut violations).unwrap();
+        assert_eq!(violations.len(), 3, "{violations:?}");
+        assert!(violations.iter().any(|v| v.contains("crate::Principal")));
+        assert!(violations.iter().any(|v| v.contains("crate::client")));
+        assert!(violations.iter().any(|v| v.contains("quinn")));
     }
 
     /// A nested module file is scanned too.
