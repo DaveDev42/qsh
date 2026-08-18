@@ -237,6 +237,50 @@ pub struct ServeConfig {
     /// Listen address. `qsh serve --bind` wins over this, which wins over
     /// the `[::]:4433` default (`docs/CLI.md` §6.12).
     pub bind: Option<String>,
+    /// Per-session replay ring byte budget. Unset ⇒
+    /// [`ServeConfig::DEFAULT_REPLAY_BYTES`] (8 MiB, `docs/PRD.md` §13,
+    /// ADR-0004).
+    pub replay_bytes: Option<usize>,
+    /// Resume TTL for unattached sessions, in seconds (`[serve].resume_ttl`
+    /// — `docs/design/architecture.md` §7, `docs/CLI.md` §6.4). Unset ⇒
+    /// [`ServeConfig::DEFAULT_RESUME_TTL_SECS`] (24 h, `docs/PRD.md` §13).
+    /// `resume_ttl_secs` is accepted as an alias.
+    #[serde(alias = "resume_ttl_secs")]
+    pub resume_ttl: Option<u64>,
+    /// Per-step grace of the close signal escalation, in milliseconds.
+    /// Unset ⇒ [`ServeConfig::DEFAULT_CLOSE_GRACE_MS`] (5 s,
+    /// `docs/CLI.md` §6.7).
+    pub close_grace_ms: Option<u64>,
+}
+
+impl ServeConfig {
+    /// Default per-session replay budget: 8 MiB (`docs/PRD.md` §13).
+    pub const DEFAULT_REPLAY_BYTES: usize = 8 * 1024 * 1024;
+    /// Default resume TTL: 24 hours (`docs/PRD.md` §13).
+    pub const DEFAULT_RESUME_TTL_SECS: u64 = 24 * 60 * 60;
+    /// Default close escalation grace: 5 seconds (`docs/CLI.md` §6.7).
+    pub const DEFAULT_CLOSE_GRACE_MS: u64 = 5000;
+
+    /// Effective replay budget (never zero; a `0` in config is treated as
+    /// the default rather than an unusable ring).
+    pub fn replay_bytes(&self) -> usize {
+        match self.replay_bytes {
+            Some(n) if n > 0 => n,
+            _ => Self::DEFAULT_REPLAY_BYTES,
+        }
+    }
+
+    /// Effective resume TTL.
+    pub fn resume_ttl(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.resume_ttl.unwrap_or(Self::DEFAULT_RESUME_TTL_SECS))
+    }
+
+    /// Effective close escalation grace.
+    pub fn close_grace(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(
+            self.close_grace_ms.unwrap_or(Self::DEFAULT_CLOSE_GRACE_MS),
+        )
+    }
 }
 
 /// `[identity]` section.
@@ -348,6 +392,30 @@ mod tests {
         let config = Config::load(&paths).unwrap();
         assert_eq!(config.identity.key_store, Some(KeyStoreMode::File));
         assert_eq!(config.serve.bind.as_deref(), Some("127.0.0.1:4433"));
+    }
+
+    #[test]
+    fn serve_broker_keys_use_the_documented_names_and_defaults() {
+        // architecture.md §7 / PLAN Step 2: `[serve] replay_bytes ·
+        // resume_ttl · close_grace_ms`. Unknown keys are ignored, so a
+        // misnamed key would silently fall back to the default — pin the
+        // documented spellings.
+        let serve: ServeConfig =
+            toml::from_str("replay_bytes = 1024\nresume_ttl = 60\nclose_grace_ms = 250\n").unwrap();
+        assert_eq!(serve.replay_bytes(), 1024);
+        assert_eq!(serve.resume_ttl(), std::time::Duration::from_secs(60));
+        assert_eq!(serve.close_grace(), std::time::Duration::from_millis(250));
+        // The `_secs` spelling is an accepted alias.
+        let alias: ServeConfig = toml::from_str("resume_ttl_secs = 5\n").unwrap();
+        assert_eq!(alias.resume_ttl(), std::time::Duration::from_secs(5));
+        // Defaults: 8 MiB, 24 h, 5 s; replay_bytes = 0 degrades to default.
+        let empty: ServeConfig = toml::from_str("replay_bytes = 0\n").unwrap();
+        assert_eq!(empty.replay_bytes(), 8 * 1024 * 1024);
+        assert_eq!(
+            empty.resume_ttl(),
+            std::time::Duration::from_secs(24 * 3600)
+        );
+        assert_eq!(empty.close_grace(), std::time::Duration::from_millis(5000));
     }
 
     #[test]
