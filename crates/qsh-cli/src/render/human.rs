@@ -6,9 +6,11 @@
 
 use std::io::{self, Write};
 
-use qsh_core::{ExecRunOutput, OpError};
+use qsh_core::{ExecRunOutput, OpError, SessionReadOutput};
 use qsh_proto::{
-    IdentityInitData, TrustAddData, TrustListData, TrustPeer, TrustRemoveData, VersionData,
+    IdentityInitData, Session, SessionCloseData, SessionEvent, SessionListData, SessionOpenData,
+    SessionResizeData, SessionWriteData, TrustAddData, TrustListData, TrustPeer, TrustRemoveData,
+    VersionData,
 };
 
 /// Print `qsh <version>` to stdout.
@@ -117,6 +119,167 @@ pub fn print_exec(output: &ExecRunOutput) -> io::Result<()> {
         eprintln!("qsh: remote command terminated by {}", sanitize(signal));
     }
     Ok(())
+}
+
+/// Print the outcome of `qsh session open`.
+pub fn print_session_open(data: &SessionOpenData) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    writeln!(stdout, "{}", sanitize(&data.session_ref))
+}
+
+/// Print one session (`qsh session get`).
+pub fn print_session(session: &Session) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    writeln!(stdout, "session_ref:   {}", sanitize(&session.session_ref))?;
+    writeln!(stdout, "host:          {}", sanitize(&session.host))?;
+    writeln!(stdout, "state:         {}", sanitize(&session.state))?;
+    writeln!(
+        stdout,
+        "writer:        {}",
+        session
+            .writer
+            .as_deref()
+            .map_or_else(|| "-".to_string(), sanitize)
+    )?;
+    writeln!(stdout, "created_at:    {}", sanitize(&session.created_at))?;
+    writeln!(stdout, "last_sequence: {}", session.last_sequence)
+}
+
+/// Print the session table (`qsh sessions`).
+pub fn print_session_list(data: &SessionListData) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    if data.sessions.is_empty() {
+        return writeln!(stdout, "no sessions");
+    }
+    let rows: Vec<[String; 5]> = data
+        .sessions
+        .iter()
+        .map(|s| {
+            [
+                sanitize(&s.session_ref),
+                sanitize(&s.state),
+                s.writer
+                    .as_deref()
+                    .map_or_else(|| "-".to_string(), sanitize),
+                s.last_sequence.to_string(),
+                sanitize(&s.created_at),
+            ]
+        })
+        .collect();
+    let headers = ["SESSION", "STATE", "WRITER", "SEQ", "CREATED"];
+    let widths: Vec<usize> = (0..headers.len())
+        .map(|i| {
+            rows.iter()
+                .map(|r| r[i].chars().count())
+                .chain(std::iter::once(headers[i].len()))
+                .max()
+                .unwrap_or(0)
+        })
+        .collect();
+    let line = |cells: [&str; 5]| -> String {
+        cells
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                if i + 1 == cells.len() {
+                    c.to_string()
+                } else {
+                    format!("{:w$}", c, w = widths[i])
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("  ")
+    };
+    writeln!(stdout, "{}", line(headers))?;
+    for row in &rows {
+        writeln!(
+            stdout,
+            "{}",
+            line([&row[0], &row[1], &row[2], &row[3], &row[4]])
+        )?;
+    }
+    Ok(())
+}
+
+/// `qsh session read` in human mode: the raw session output goes to stdout
+/// verbatim; every other event (`exit`, `writer_changed`, `closed`, `gap`)
+/// is a one-line structural note on stderr so it never mixes into the
+/// output stream.
+pub fn print_session_read(output: &SessionReadOutput) -> io::Result<()> {
+    if !output.output.is_empty() {
+        let mut stdout = io::stdout().lock();
+        stdout.write_all(&output.output)?;
+        stdout.flush()?;
+    }
+    let mut stderr = io::stderr().lock();
+    for event in &output.data.events {
+        match event {
+            SessionEvent::Output { .. } | SessionEvent::Unknown(_) => {}
+            SessionEvent::Gap {
+                requested_after,
+                available_from,
+                ..
+            } => writeln!(
+                stderr,
+                "qsh: session output gap: requested after {requested_after}, available from {available_from}"
+            )?,
+            SessionEvent::Exit {
+                sequence,
+                exit_code,
+                signal,
+                ..
+            } => match (exit_code, signal) {
+                (_, Some(signal)) => writeln!(
+                    stderr,
+                    "qsh: session exited (terminated by {}) at sequence {sequence}",
+                    sanitize(signal)
+                )?,
+                (Some(code), None) => writeln!(
+                    stderr,
+                    "qsh: session exited with code {code} at sequence {sequence}"
+                )?,
+                (None, None) => writeln!(stderr, "qsh: session exited at sequence {sequence}")?,
+            },
+            SessionEvent::WriterChanged {
+                sequence, writer, ..
+            } => writeln!(
+                stderr,
+                "qsh: session writer is now {} (sequence {sequence})",
+                writer.as_deref().map_or_else(|| "-".to_string(), sanitize)
+            )?,
+            SessionEvent::Closed {
+                sequence, reason, ..
+            } => writeln!(
+                stderr,
+                "qsh: session closed ({}) at sequence {sequence}",
+                sanitize(reason)
+            )?,
+        }
+    }
+    stderr.flush()
+}
+
+/// Print the outcome of `qsh session write`.
+pub fn print_session_write(data: &SessionWriteData) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    writeln!(stdout, "wrote {} bytes", data.bytes_written)
+}
+
+/// Print the outcome of `qsh session resize`.
+pub fn print_session_resize(data: &SessionResizeData) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    writeln!(stdout, "resized to {}x{}", data.cols, data.rows)
+}
+
+/// Print the outcome of `qsh session close`.
+pub fn print_session_close(data: &SessionCloseData) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    writeln!(
+        stdout,
+        "closed {} (final sequence {})",
+        sanitize(&data.session_ref),
+        data.final_sequence
+    )
 }
 
 /// Strip control characters (except `\t`) from text that may have been

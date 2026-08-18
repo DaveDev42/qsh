@@ -1,0 +1,18 @@
+{
+  "command": "session.read",
+  "data": {
+    "events": [
+      {
+        "data_b64": "cXNoOiBoZWFkbGVzcyBlY2hvIHNlc3Npb24NCg==",
+        "schema": "qsh.event/v1",
+        "sequence": 28,
+        "session_ref": "box/<session_id>",
+        "type": "session.output"
+      }
+    ],
+    "session_ref": "box/<session_id>"
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

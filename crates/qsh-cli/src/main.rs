@@ -5,18 +5,24 @@
 mod cli;
 mod render;
 
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, IsTerminal, Read, Write};
 
 use clap::Parser;
 use qsh_core::{
-    ExecRunOp, ExecStdin, IdentityInitOp, OpError, Operation, Ops, TrustAddOp, TrustListOp,
-    TrustRemoveOp, VersionOp,
+    ExecRunOp, ExecStdin, IdentityInitOp, OpError, Operation, Ops, SessionCloseOp, SessionGetOp,
+    SessionListOp, SessionOpenOp, SessionReadOp, SessionResizeOp, SessionWriteOp, TrustAddOp,
+    TrustListOp, TrustRemoveOp, VersionOp,
 };
-use qsh_proto::{ErrorCode, ExecRunReq, IdentityInitReq, TrustAddReq};
+use qsh_proto::{
+    ErrorCode, ExecRunReq, IdentityInitReq, SessionCloseReq, SessionGetReq, SessionListReq,
+    SessionOpenReq, SessionReadReq, SessionResizeReq, SessionWriteReq, TrustAddReq,
+};
 use serde::Serialize;
 use tracing_subscriber::EnvFilter;
 
-use cli::{Cli, Command, ExecArgs, TrustAddArgs, TrustCmd};
+use cli::{
+    Cli, Command, ExecArgs, SessionCmd, SessionReadArgs, SessionWriteArgs, TrustAddArgs, TrustCmd,
+};
 use render::{human, json::Envelope};
 
 /// QSH runtime failure exit code (`docs/CLI.md` §4): connection, auth,
@@ -100,8 +106,136 @@ fn run(cli: &Cli) -> i32 {
             human::print_trust_remove,
         ),
         Command::Exec(args) => run_exec(cli, &ops, args),
+        Command::Session(cmd) => run_session(cli, &ops, cmd),
+        Command::Sessions { host } => finish(
+            cli,
+            SessionListOp::COMMAND,
+            ops.session_list(SessionListReq { host: host.clone() }),
+            human::print_session_list,
+        ),
         Command::Serve { bind } => run_serve(&ops, bind.as_deref()),
     }
+}
+
+/// `qsh session …` — value operations on one session (`docs/CLI.md`
+/// §6.2–6.7). Each is a plain `Ops` call plus a renderer; the CLI never
+/// looks inside a `session_ref`.
+fn run_session(cli: &Cli, ops: &Ops, cmd: &SessionCmd) -> i32 {
+    match cmd {
+        SessionCmd::Open(args) => finish(
+            cli,
+            SessionOpenOp::COMMAND,
+            ops.session_open(SessionOpenReq {
+                host: args.host.clone(),
+                argv: args.argv.clone(),
+                env: args.env.clone(),
+                term: args.term.clone(),
+                cols: args.cols.map(u32::from),
+                rows: args.rows.map(u32::from),
+                user: None,
+            }),
+            human::print_session_open,
+        ),
+        SessionCmd::Get { session_ref } => finish(
+            cli,
+            SessionGetOp::COMMAND,
+            ops.session_get(SessionGetReq {
+                session_ref: session_ref.clone(),
+            }),
+            human::print_session,
+        ),
+        SessionCmd::Read(args) => run_session_read(cli, ops, args),
+        SessionCmd::Write(args) => run_session_write(cli, ops, args),
+        SessionCmd::Resize {
+            session_ref,
+            cols,
+            rows,
+        } => finish(
+            cli,
+            SessionResizeOp::COMMAND,
+            ops.session_resize(SessionResizeReq {
+                session_ref: session_ref.clone(),
+                cols: u32::from(*cols),
+                rows: u32::from(*rows),
+            }),
+            human::print_session_resize,
+        ),
+        SessionCmd::Close {
+            session_ref,
+            signal,
+        } => finish(
+            cli,
+            SessionCloseOp::COMMAND,
+            ops.session_close(SessionCloseReq {
+                session_ref: session_ref.clone(),
+                signal: signal.clone(),
+            }),
+            human::print_session_close,
+        ),
+    }
+}
+
+/// `qsh session read`: a single pull. The `--follow` loop is the streaming
+/// form (`docs/CLI.md` §6.4) and lands with the attach pump; until then the
+/// flag parses and is answered `UNSUPPORTED` without contacting the host.
+fn run_session_read(cli: &Cli, ops: &Ops, args: &SessionReadArgs) -> i32 {
+    if args.follow {
+        return report_error(
+            cli,
+            SessionReadOp::COMMAND,
+            &OpError::new(
+                ErrorCode::Unsupported,
+                "session read --follow is not implemented yet; poll with --after/--wait",
+            ),
+        );
+    }
+    let output = match ops.session_read(SessionReadReq {
+        session_ref: args.session_ref.clone(),
+        after_sequence: args.after,
+        wait_ms: args.wait,
+        limit_bytes: args.limit_bytes,
+    }) {
+        Ok(output) => output,
+        Err(err) => return report_error(cli, SessionReadOp::COMMAND, &err),
+    };
+    if cli.wants_json() {
+        finish(
+            cli,
+            SessionReadOp::COMMAND,
+            Ok::<_, OpError>(output.data),
+            |_| Ok(()),
+        )
+    } else {
+        emit(human::print_session_read(&output))
+    }
+}
+
+/// `qsh session write`: `--data-b64` goes straight to `Ops`; `--stdin`
+/// reads this process's stdin to EOF first (raw bytes, no re-encoding on
+/// this side).
+fn run_session_write(cli: &Cli, ops: &Ops, args: &SessionWriteArgs) -> i32 {
+    let result = match &args.data_b64 {
+        Some(data_b64) => ops.session_write(SessionWriteReq {
+            session_ref: args.session_ref.clone(),
+            data_b64: data_b64.clone(),
+        }),
+        None => {
+            let mut data = Vec::new();
+            match io::stdin().lock().read_to_end(&mut data) {
+                Ok(_) => ops.session_write_bytes(&args.session_ref, data),
+                Err(err) => Err(OpError::new(
+                    ErrorCode::InvalidArgument,
+                    format!("cannot read stdin: {err}"),
+                )),
+            }
+        }
+    };
+    finish(
+        cli,
+        SessionWriteOp::COMMAND,
+        result,
+        human::print_session_write,
+    )
 }
 
 /// `qsh exec` — the one command whose exit code is not ours to choose.
@@ -345,6 +479,13 @@ fn command_name(command: &Command) -> &'static str {
         Command::Trust(TrustCmd::List) => TrustListOp::COMMAND,
         Command::Trust(TrustCmd::Remove { .. }) => TrustRemoveOp::COMMAND,
         Command::Exec(_) => ExecRunOp::COMMAND,
+        Command::Session(SessionCmd::Open(_)) => SessionOpenOp::COMMAND,
+        Command::Session(SessionCmd::Get { .. }) => SessionGetOp::COMMAND,
+        Command::Session(SessionCmd::Read(_)) => SessionReadOp::COMMAND,
+        Command::Session(SessionCmd::Write(_)) => SessionWriteOp::COMMAND,
+        Command::Session(SessionCmd::Resize { .. }) => SessionResizeOp::COMMAND,
+        Command::Session(SessionCmd::Close { .. }) => SessionCloseOp::COMMAND,
+        Command::Sessions { .. } => SessionListOp::COMMAND,
         Command::Serve { .. } => SERVE_MODE,
     }
 }

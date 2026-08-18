@@ -133,6 +133,74 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
             args: &["trust", "add", "bad", "--fingerprint", "not-a-fingerprint"],
             outcome: Outcome::Fails("INVALID_ARGUMENT"),
         },
+        Case {
+            name: "usage: session close with an unknown signal",
+            sandbox: &fleet.client,
+            args: &["session", "close", "box/01K0SESSION", "--signal", "STOP"],
+            outcome: Outcome::Usage,
+        },
+        Case {
+            name: "usage: session write without --stdin or --data-b64",
+            sandbox: &fleet.client,
+            args: &["session", "write", "box/01K0SESSION"],
+            outcome: Outcome::Usage,
+        },
+        Case {
+            name: "usage: session resize with cols 0",
+            sandbox: &fleet.client,
+            args: &[
+                "session",
+                "resize",
+                "box/01K0SESSION",
+                "--cols",
+                "0",
+                "--rows",
+                "1",
+            ],
+            outcome: Outcome::Usage,
+        },
+        Case {
+            name: "session open",
+            sandbox: &fleet.client,
+            args: &["session", "open", HOST_ALIAS],
+            outcome: Outcome::Succeeds(0),
+        },
+        Case {
+            name: "sessions",
+            sandbox: &fleet.client,
+            args: &["sessions", HOST_ALIAS],
+            outcome: Outcome::Succeeds(0),
+        },
+        Case {
+            name: "session get: unknown session id",
+            sandbox: &fleet.client,
+            args: &["session", "get", "box/01K0NOSUCHSESSION"],
+            outcome: Outcome::Fails("SESSION_NOT_FOUND"),
+        },
+        Case {
+            name: "session get: malformed session_ref",
+            sandbox: &fleet.client,
+            args: &["session", "get", "not-a-session-ref"],
+            outcome: Outcome::Fails("INVALID_ARGUMENT"),
+        },
+        Case {
+            name: "session get: unknown host alias",
+            sandbox: &fleet.client,
+            args: &["session", "get", "nowhere/01K0SESSION"],
+            outcome: Outcome::Fails("HOST_NOT_FOUND"),
+        },
+        Case {
+            name: "session read --follow: not implemented yet",
+            sandbox: &fleet.client,
+            args: &["session", "read", "box/01K0SESSION", "--follow"],
+            outcome: Outcome::Fails("UNSUPPORTED"),
+        },
+        Case {
+            name: "session open: unpinned peer",
+            sandbox: &rogue,
+            args: &["session", "open", HOST_ALIAS],
+            outcome: Outcome::Fails("AUTH_FAILED"),
+        },
     ];
 
     for case in &cases {

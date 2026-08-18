@@ -10,6 +10,7 @@ use qsh_transport::Listener;
 
 use crate::acl::AllowAllPinned;
 use crate::audit::FileAuditSink;
+use crate::broker::{Broker, BrokerConfig, EchoPipeFactory, SystemClock};
 use crate::config::{Config, Paths};
 use crate::identity::LoadedIdentity;
 use crate::ops::OpError;
@@ -74,9 +75,19 @@ pub async fn run_serve(
     on_bound(actual);
 
     let audit = Arc::new(FileAuditSink::new(paths.audit_log()));
+    // The session broker outlives every connection (architecture.md §3);
+    // the TTL reaper stops on its own once the broker is dropped. Sessions
+    // are pipe-backed echo sources until the PTY source lands (M2 Step 4).
+    let broker = Broker::new(
+        Arc::new(SystemClock),
+        BrokerConfig::from_serve(&config.serve),
+        Arc::new(EchoPipeFactory),
+    );
+    tokio::spawn(Broker::run_reaper(Arc::downgrade(&broker)));
     let server = Server::new(
         Arc::new(AllowAllPinned),
         audit,
+        broker,
         identity.identity.device_id.clone(),
     );
     tracing::info!(

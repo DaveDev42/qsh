@@ -26,13 +26,35 @@ use qsh_transport::{AuthPath, Principal};
 pub enum Action {
     /// Run a non-PTY command (`exec.run`).
     ExecRun,
+    /// Create a session (`session.open`).
+    SessionOpen,
+    /// See sessions (`session.list`, `session.get`).
+    SessionList,
+    /// Read a session's output stream (`session.read`, `session.attach`).
+    SessionAttach,
+    /// Drive a session (`session.write`, `session.resize`, `session.close`).
+    SessionControl,
 }
 
 impl Action {
-    /// The dotted action string used in `acl.toml` and audit records.
+    /// Every action this build can evaluate, in a stable order.
+    pub const ALL: [Action; 5] = [
+        Action::ExecRun,
+        Action::SessionOpen,
+        Action::SessionList,
+        Action::SessionAttach,
+        Action::SessionControl,
+    ];
+
+    /// The dotted action string used in `acl.toml` and audit records
+    /// (`docs/CLI.md` §2.5, right-hand column).
     pub fn as_str(self) -> &'static str {
         match self {
             Action::ExecRun => "exec.run",
+            Action::SessionOpen => "session.open",
+            Action::SessionList => "session.list",
+            Action::SessionAttach => "session.attach",
+            Action::SessionControl => "session.control",
         }
     }
 }
@@ -194,6 +216,14 @@ mod tests {
     #[test]
     fn action_and_decision_strings() {
         assert_eq!(Action::ExecRun.as_str(), "exec.run");
+        // CLI.md §2.5 mapping table, verbatim.
+        assert_eq!(Action::SessionOpen.as_str(), "session.open");
+        assert_eq!(Action::SessionList.as_str(), "session.list");
+        assert_eq!(Action::SessionAttach.as_str(), "session.attach");
+        assert_eq!(Action::SessionControl.as_str(), "session.control");
+        let strings: std::collections::BTreeSet<&str> =
+            Action::ALL.iter().map(|a| a.as_str()).collect();
+        assert_eq!(strings.len(), Action::ALL.len(), "distinct strings");
         assert_eq!(Decision::Allow.as_str(), "allow");
         assert_eq!(Decision::Deny.as_str(), "deny");
         assert!(Decision::Allow.is_allow());

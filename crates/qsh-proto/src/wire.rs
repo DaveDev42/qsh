@@ -51,12 +51,9 @@ pub const CAP_RESUME_V1: &str = "resume.v1";
 
 /// Capabilities this build advertises in [`Hello`].
 ///
-/// `session`/`resume.v1` are advertised from PLAN Step 1 on (the wire
-/// vocabulary is complete) even though the host answers every `session_*`
-/// request with `UNSUPPORTED` until the broker lands.
-// TODO(M2 Step 3): remove this note when `Server::dispatch` routes
-// `session_*` to the broker; until then the advertised set is knowingly
-// ahead of the implementation.
+/// `resume.v1` is advertised ahead of the resume implementation: the host
+/// answers `SessionAttach` with `UNSUPPORTED` until PLAN M2 Step 7, and a
+/// client must treat that answer (not the capability) as authoritative.
 pub const LOCAL_CAPABILITIES: &[&str] = &[CAP_EXEC, CAP_SESSION, CAP_RESUME_V1];
 
 /// Maximum size of a single exec payload chunk (the `data` field of a

@@ -295,6 +295,150 @@ impl Session {
         })
     }
 
+    // ------------------------------------------------------------------
+    // session.* value ops (M2 Step 3): one request, one typed response.
+    // ------------------------------------------------------------------
+
+    /// Send one `session.*` control request and return the raw response
+    /// body, mapping a wire `Error` to [`ClientError::Remote`]. Requires the
+    /// negotiated `session` capability.
+    async fn session_request(
+        &mut self,
+        body: control_message::Body,
+    ) -> Result<response::Body, ClientError> {
+        if !self.has_capability(wire::CAP_SESSION) {
+            return Err(ClientError::Unsupported(
+                "peer does not support sessions".into(),
+            ));
+        }
+        let resp = self.request(body).await?;
+        match resp.body {
+            Some(response::Body::Error(e)) => Err(ClientError::Remote {
+                code: e.error_code(),
+                message: e.message,
+                retryable: e.retryable,
+            }),
+            Some(body) => Ok(body),
+            None => Err(ClientError::Protocol("empty response body".into())),
+        }
+    }
+
+    /// `session.open`: create a session on the peer. The returned ticket
+    /// authorizes one `SESSION_DATA` stream (attach pump — M2 Step 5).
+    pub async fn session_open(
+        &mut self,
+        req: wire::SessionOpen,
+    ) -> Result<wire::SessionOpened, ClientError> {
+        match self
+            .session_request(control_message::Body::SessionOpen(req))
+            .await?
+        {
+            response::Body::SessionOpened(o) => Ok(o),
+            other => Err(unexpected("SessionOpen", &other)),
+        }
+    }
+
+    /// `session.list`: every session the peer will show us.
+    pub async fn session_list(&mut self) -> Result<Vec<wire::SessionInfo>, ClientError> {
+        match self
+            .session_request(control_message::Body::SessionList(wire::SessionList {}))
+            .await?
+        {
+            response::Body::SessionListResult(r) => Ok(r.sessions),
+            other => Err(unexpected("SessionList", &other)),
+        }
+    }
+
+    /// `session.get`: one session's snapshot.
+    pub async fn session_get(
+        &mut self,
+        session_id: &str,
+    ) -> Result<wire::SessionInfo, ClientError> {
+        match self
+            .session_request(control_message::Body::SessionGet(wire::SessionGet {
+                session_id: session_id.to_string(),
+            }))
+            .await?
+        {
+            response::Body::SessionInfo(i) => Ok(i),
+            other => Err(unexpected("SessionGet", &other)),
+        }
+    }
+
+    /// `session.read`: one cursor pull (`after`, bounded by `max_bytes`,
+    /// long-polling up to `wait_ms`).
+    pub async fn session_read(
+        &mut self,
+        req: wire::SessionRead,
+    ) -> Result<Vec<wire::SessionReadEvent>, ClientError> {
+        match self
+            .session_request(control_message::Body::SessionRead(req))
+            .await?
+        {
+            response::Body::SessionReadResult(r) => Ok(r.events),
+            other => Err(unexpected("SessionRead", &other)),
+        }
+    }
+
+    /// `session.write`: one chunk (≤ [`wire::SESSION_CHUNK_MAX`]) of input.
+    pub async fn session_write(
+        &mut self,
+        session_id: &str,
+        data: Vec<u8>,
+    ) -> Result<u64, ClientError> {
+        match self
+            .session_request(control_message::Body::SessionWrite(wire::SessionWrite {
+                session_id: session_id.to_string(),
+                data,
+            }))
+            .await?
+        {
+            response::Body::SessionWritten(w) => Ok(w.bytes_written),
+            other => Err(unexpected("SessionWrite", &other)),
+        }
+    }
+
+    /// `session.resize`.
+    pub async fn session_resize(
+        &mut self,
+        session_id: &str,
+        cols: u16,
+        rows: u16,
+    ) -> Result<(u16, u16), ClientError> {
+        match self
+            .session_request(control_message::Body::SessionResize(wire::SessionResize {
+                session_id: session_id.to_string(),
+                cols: u32::from(cols),
+                rows: u32::from(rows),
+            }))
+            .await?
+        {
+            response::Body::SessionResized(r) => Ok((
+                u16::try_from(r.cols).unwrap_or(u16::MAX),
+                u16::try_from(r.rows).unwrap_or(u16::MAX),
+            )),
+            other => Err(unexpected("SessionResize", &other)),
+        }
+    }
+
+    /// `session.close`; returns the final sequence.
+    pub async fn session_close(
+        &mut self,
+        session_id: &str,
+        signal: Option<String>,
+    ) -> Result<u64, ClientError> {
+        match self
+            .session_request(control_message::Body::SessionClose(wire::SessionClose {
+                session_id: session_id.to_string(),
+                signal,
+            }))
+            .await?
+        {
+            response::Body::SessionClosed(c) => Ok(c.final_seq),
+            other => Err(unexpected("SessionClose", &other)),
+        }
+    }
+
     /// Finish the control stream and close the connection cleanly.
     pub fn close(mut self) {
         let _ = self.ctl.send.finish();
@@ -319,6 +463,29 @@ pub struct ExecResult {
     pub timed_out: bool,
     /// Wall-clock time from request to exit.
     pub duration: Duration,
+}
+
+fn unexpected(request: &str, body: &response::Body) -> ClientError {
+    ClientError::Protocol(format!(
+        "unexpected response to {request}: {}",
+        response_kind(body)
+    ))
+}
+
+/// The variant name of a response body (never its payload).
+fn response_kind(body: &response::Body) -> &'static str {
+    match body {
+        response::Body::Error(_) => "Error",
+        response::Body::ExecStarted(_) => "ExecStarted",
+        response::Body::SessionOpened(_) => "SessionOpened",
+        response::Body::SessionAttached(_) => "SessionAttached",
+        response::Body::SessionReadResult(_) => "SessionReadResult",
+        response::Body::SessionListResult(_) => "SessionListResult",
+        response::Body::SessionInfo(_) => "SessionInfo",
+        response::Body::SessionWritten(_) => "SessionWritten",
+        response::Body::SessionResized(_) => "SessionResized",
+        response::Body::SessionClosed(_) => "SessionClosed",
+    }
 }
 
 async fn pump_stdin(

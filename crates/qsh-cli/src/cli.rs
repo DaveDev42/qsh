@@ -68,6 +68,17 @@ pub enum Command {
     /// through verbatim.
     Exec(ExecArgs),
 
+    /// Manage sessions: shells that outlive the connection that opened them.
+    #[command(subcommand)]
+    Session(SessionCmd),
+
+    /// List sessions on one pinned host, or on every pinned host.
+    Sessions {
+        /// Host alias from the trust store; omit for every host with an
+        /// address.
+        host: Option<String>,
+    },
+
     /// Run the host: accept connections from pinned peers. Foreground only;
     /// the bound address is printed to stderr.
     Serve {
@@ -147,6 +158,129 @@ pub struct TrustAddArgs {
 /// clap value parser for `--key-store`.
 fn parse_key_store_mode(value: &str) -> Result<KeyStoreMode, String> {
     value.parse()
+}
+
+/// `qsh session …` subcommands (`docs/CLI.md` §6.2–6.7). Every command
+/// takes the opaque `session_ref` returned by `session open` /
+/// `sessions`; the CLI never takes it apart.
+#[derive(Debug, Subcommand)]
+pub enum SessionCmd {
+    /// Create a session on a pinned host. Without a command after `--` the
+    /// remote login shell is started.
+    Open(SessionOpenArgs),
+    /// Show one session.
+    Get {
+        /// Opaque session handle (`<host>/<session_id>`).
+        session_ref: String,
+    },
+    /// Read session output after a cumulative byte offset.
+    Read(SessionReadArgs),
+    /// Inject input into a session.
+    Write(SessionWriteArgs),
+    /// Change a session's terminal size.
+    Resize {
+        /// Opaque session handle.
+        session_ref: String,
+        /// New terminal width (1..=65535).
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u16).range(1..))]
+        cols: u16,
+        /// New terminal height (1..=65535).
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u16).range(1..))]
+        rows: u16,
+    },
+    /// Terminate a session's process group and remove the session.
+    Close {
+        /// Opaque session handle.
+        session_ref: String,
+        /// First signal of the HUP -> TERM -> KILL escalation
+        /// (HUP|INT|QUIT|TERM|USR1|USR2|KILL, case-insensitive, `SIG`
+        /// prefix optional).
+        #[arg(long, value_name = "SIG", value_parser = parse_signal)]
+        signal: Option<String>,
+    },
+}
+
+/// Arguments of `qsh session open`.
+#[derive(Debug, Args)]
+pub struct SessionOpenArgs {
+    /// Host alias from the trust store (`qsh trust list`).
+    pub host: String,
+
+    /// Extra environment variable for the session (`NAME=VALUE`).
+    /// Repeatable.
+    #[arg(long = "env", value_name = "NAME=VALUE", value_parser = parse_env_var)]
+    pub env: Vec<EnvVar>,
+
+    /// `TERM` to export in the session; defaults to the remote's choice.
+    #[arg(long, value_name = "TERM")]
+    pub term: Option<String>,
+
+    /// Initial terminal width; defaults to the remote's choice.
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u16).range(1..))]
+    pub cols: Option<u16>,
+
+    /// Initial terminal height; defaults to the remote's choice.
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u16).range(1..))]
+    pub rows: Option<u16>,
+
+    /// The program and its arguments, after `--`. Omit for the login shell.
+    #[arg(last = true, value_name = "COMMAND")]
+    pub argv: Vec<String>,
+}
+
+/// Arguments of `qsh session read`.
+#[derive(Debug, Args)]
+pub struct SessionReadArgs {
+    /// Opaque session handle.
+    pub session_ref: String,
+
+    /// Cumulative output byte offset already received; the reply starts
+    /// right after it.
+    #[arg(long, value_name = "SEQUENCE", default_value_t = 0)]
+    pub after: u64,
+
+    /// Long-poll: wait up to this many milliseconds for new output.
+    #[arg(long, value_name = "MILLISECONDS")]
+    pub wait: Option<u64>,
+
+    /// Maximum output payload bytes in one reply (the host clamps to its
+    /// own cap).
+    #[arg(long, value_name = "BYTES")]
+    pub limit_bytes: Option<u64>,
+
+    /// Keep printing events until the session exits or is closed.
+    #[arg(long)]
+    pub follow: bool,
+}
+
+/// Arguments of `qsh session write`.
+#[derive(Debug, Args)]
+pub struct SessionWriteArgs {
+    /// Opaque session handle.
+    pub session_ref: String,
+
+    /// Send this process's stdin, verbatim, until EOF.
+    #[arg(
+        long,
+        conflicts_with = "data_b64",
+        required_unless_present = "data_b64"
+    )]
+    pub stdin: bool,
+
+    /// Send these bytes (standard Base64).
+    #[arg(long, value_name = "BASE64")]
+    pub data_b64: Option<String>,
+}
+
+/// clap value parser for `--signal`: canonical `SIGTERM` form, or a usage
+/// error (exit 2, `docs/CLI.md` §6.7). The vocabulary lives in `qsh-core`
+/// so the CLI never has its own list.
+fn parse_signal(value: &str) -> Result<String, String> {
+    qsh_core::broker::Signal::parse(value)
+        .map(|s| s.as_str().to_string())
+        .ok_or_else(|| {
+            format!("unknown signal {value:?}; expected one of HUP|INT|QUIT|TERM|USR1|USR2|KILL")
+        })
 }
 
 #[cfg(test)]
@@ -232,6 +366,152 @@ mod tests {
             Command::Serve { bind } => assert_eq!(bind.as_deref(), Some("127.0.0.1:0")),
             other => panic!("expected serve, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn session_subcommands_parse_per_cli_md() {
+        let cli = Cli::try_parse_from([
+            "qsh", "session", "open", "box", "--env", "A=1", "--term", "xterm", "--cols", "80",
+            "--rows", "24", "--json", "--", "claude", "--json",
+        ])
+        .unwrap();
+        assert!(cli.wants_json());
+        match cli.command {
+            Command::Session(SessionCmd::Open(args)) => {
+                assert_eq!(args.host, "box");
+                assert_eq!(args.env[0].name, "A");
+                assert_eq!(args.term.as_deref(), Some("xterm"));
+                assert_eq!((args.cols, args.rows), (Some(80), Some(24)));
+                assert_eq!(args.argv, ["claude", "--json"]);
+            }
+            other => panic!("expected session open, got {other:?}"),
+        }
+        // No `--` ⇒ login shell (empty argv), unlike exec.
+        let cli = Cli::try_parse_from(["qsh", "session", "open", "box"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Session(SessionCmd::Open(SessionOpenArgs { ref argv, .. })) if argv.is_empty()
+        ));
+        assert!(Cli::try_parse_from(["qsh", "session", "open", "box", "--cols", "0"]).is_err());
+
+        let cli = Cli::try_parse_from([
+            "qsh",
+            "session",
+            "read",
+            "box/01K0",
+            "--after",
+            "42",
+            "--wait",
+            "30000",
+            "--limit-bytes",
+            "1024",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Session(SessionCmd::Read(args)) => {
+                assert_eq!(args.session_ref, "box/01K0");
+                assert_eq!(args.after, 42);
+                assert_eq!(args.wait, Some(30000));
+                assert_eq!(args.limit_bytes, Some(1024));
+                assert!(!args.follow);
+            }
+            other => panic!("expected session read, got {other:?}"),
+        }
+        let cli = Cli::try_parse_from(["qsh", "session", "read", "box/01K0"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Session(SessionCmd::Read(SessionReadArgs {
+                after: 0,
+                wait: None,
+                ..
+            }))
+        ));
+
+        // write: exactly one source.
+        assert!(Cli::try_parse_from(["qsh", "session", "write", "box/01K0"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "qsh",
+                "session",
+                "write",
+                "box/01K0",
+                "--stdin",
+                "--data-b64",
+                "Yw=="
+            ])
+            .is_err()
+        );
+        let cli =
+            Cli::try_parse_from(["qsh", "session", "write", "box/01K0", "--data-b64", "Yw=="])
+                .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Session(SessionCmd::Write(SessionWriteArgs { stdin: false, ref data_b64, .. }))
+                if data_b64.as_deref() == Some("Yw==")
+        ));
+        let cli = Cli::try_parse_from(["qsh", "session", "write", "box/01K0", "--stdin"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Session(SessionCmd::Write(SessionWriteArgs {
+                stdin: true,
+                data_b64: None,
+                ..
+            }))
+        ));
+
+        // resize: both dimensions, 1..=65535.
+        let cli = Cli::try_parse_from([
+            "qsh", "session", "resize", "box/01K0", "--cols", "120", "--rows", "40",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Session(SessionCmd::Resize {
+                cols: 120,
+                rows: 40,
+                ..
+            })
+        ));
+        assert!(
+            Cli::try_parse_from(["qsh", "session", "resize", "box/01K0", "--cols", "120"]).is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "qsh", "session", "resize", "box/01K0", "--cols", "70000", "--rows", "1"
+            ])
+            .is_err()
+        );
+
+        // close: --signal is normalized to the canonical form or rejected
+        // as a usage error (exit 2).
+        for (given, canonical) in [
+            ("term", "SIGTERM"),
+            ("SIGKILL", "SIGKILL"),
+            ("Hup", "SIGHUP"),
+        ] {
+            let cli =
+                Cli::try_parse_from(["qsh", "session", "close", "box/01K0", "--signal", given])
+                    .unwrap();
+            match cli.command {
+                Command::Session(SessionCmd::Close { signal, .. }) => {
+                    assert_eq!(signal.as_deref(), Some(canonical), "{given}");
+                }
+                other => panic!("expected session close, got {other:?}"),
+            }
+        }
+        for bad in ["STOP", "TSTP", "9", "nope"] {
+            assert!(
+                Cli::try_parse_from(["qsh", "session", "close", "box/01K0", "--signal", bad])
+                    .is_err(),
+                "{bad}"
+            );
+        }
+
+        // sessions [host]
+        let cli = Cli::try_parse_from(["qsh", "sessions"]).unwrap();
+        assert!(matches!(cli.command, Command::Sessions { host: None }));
+        let cli = Cli::try_parse_from(["qsh", "sessions", "box", "--json"]).unwrap();
+        assert!(matches!(cli.command, Command::Sessions { host: Some(ref h) } if h == "box"));
     }
 
     #[test]
