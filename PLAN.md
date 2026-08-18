@@ -13,7 +13,7 @@
 - [ ] Property test: 임의의 append/read interleaving에서 gap 이벤트가 없는 한 반환 바이트 연결 == 원본 stream suffix (byte-identical, 무손실·무중복) — SC4의 property 표현.
 - [ ] `qsh user@host`로 실제 셸 사용 가능 — bash/zsh, vim, tmux, `claude`가 동작하고 resize 전파.
 - [ ] **클라이언트를 `yes` 실행 중 `kill -9` → reattach → last_seq부터 이어붙인 결과가 기준 stream과 byte-identical** (SC4). remote PTY와 자식 프로세스는 클라이언트 사망에 생존 (SC5).
-- [ ] Chaos proxy `repath()` → connection migration으로 세션 무중단; `sever()` → 2초 내 재dial + resume.
+- [x] Chaos proxy `repath()` → connection migration으로 세션 무중단; `sever()` → 2초 내 재dial + resume. (Step 7: `crates/qsh-testkit/tests/resume_chaos.rs` — 클럭은 `sever()` 직전 시작, 첫 replay 바이트에서 정지, 옛 연결의 idle timeout 아님을 함께 단언)
 - [ ] 실기기 Wi-Fi↔테더링 전환 20회 수동 캠페인, recovery 필드 기록 (SC3 조기 측정).
 
 M2 크기: 5ew (`docs/ROADMAP.md` M2 "크기").
