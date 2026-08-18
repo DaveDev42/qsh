@@ -95,17 +95,35 @@ message ControlMessage {
     Hello               hello = 10;
     Response            response = 11;      // 성공 payload 또는 Error — 상세는 아래 Response 참고
 
-    SessionOpen         session_open = 20;  // argv, env, term, cols, rows
-                                            // -> SessionOpened{session_id, resume_token, ticket, initial_seq}
+    SessionOpen         session_open = 20;  // argv, env, term, cols, rows,
+                                            //   optional user(hint; `qsh user@host`의 user — 검사 순서는
+                                            //   ACL session.open → hint → spawn; serve 계정 login name과
+                                            //   다르면 세션 생성 없이 UNSUPPORTED, 미인가 peer는 항상
+                                            //   PERMISSION_DENIED, CLI.md §7)
+                                            // -> SessionOpened{session_id, resume_token, ticket, initial_seq,
+                                            //      expires_at}
+                                            //    session_id는 opaque·URL-safe; session_ref는 클라이언트가
+                                            //    조립한다(ADR-0007). expires_at = 토큰/세션 TTL 만료 시각
+                                            //    (클라이언트 resume.json 정리용)
     SessionAttach       session_attach = 21;// session_id, resume_token, last_output_seq,
                                             //   mode(RW|RO), no_steal
                                             // -> SessionAttached{ticket, new_resume_token,
-                                            //      replay_from, writer_lease}
-    SessionList         session_list = 22;  // -> Session[] (CLI.md §5와 동일 형태)
-    SessionGet          session_get = 23;
+                                            //      replay_from, writer_lease, expires_at}
+    SessionList         session_list = 22;  // -> SessionInfo[] — wire SessionInfo는
+                                            //    session_id/state/writer(optional)/created_at/last_sequence만
+                                            //    담는다. CLI.md §5 Session의 session_ref·host는 클라이언트
+                                            //    Ops가 로컬 alias로 채운다(ADR-0007)
+    SessionGet          session_get = 23;   // session_id -> SessionInfo
     SessionResize       session_resize = 24; // detached resize; ACL session.control
-    SessionSignal       session_signal = 25;
-    SessionClose        session_close = 26;
+    reserved 25;                             // (구 SessionSignal) 번호만 예약, P1. M2 호스트는 25번 수신 시
+                                            //   리소스 생성 없이 UNSUPPORTED로 답한다(CLI.md §2.4)
+    SessionClose        session_close = 26; // session_id, optional signal(HUP|INT|QUIT|TERM|USR1|USR2|KILL —
+                                            //   `session close --signal`, CLI.md §6.7); ACL session.control
+    SessionRead         session_read = 27;  // session_id, after, max_bytes, wait_ms
+                                            // -> SessionReadResult{events[]} — broker pull() 1회
+                                            //   (CLI.md §6.4 `session read --wait`/`--follow` 루프/MCP long-poll);
+                                            //   ACL session.attach, resume token 불요(CLI.md §6.3)
+    SessionWrite        session_write = 28; // session_id, data -> SessionWritten{} ; ACL session.control
 
     ExecStart           exec_start = 30;    // argv, env, timeout_ms -> ExecStarted{exec_id, ticket}
 
@@ -116,7 +134,13 @@ message ControlMessage {
     Ping                ping = 50;
     Pong                pong = 51;
     SessionEvent        session_event = 60; // 비동기: Exited{exit_code, signal, final_seq}
-                                            //        | WriterChanged{new_writer} | Closed
+                                            //        | WriterChanged{optional new_writer, seq}
+                                            //          (new_writer 없음 = lease 해제, 보유자 없음)
+                                            //        | Closed{reason: CLOSED|EXIT|TTL_EXPIRED, seq}
+                                            // → qsh.event/v1 session.exit / session.writer_changed /
+                                            //   session.closed (CLI.md §6.4). attach 중인 connection에만
+                                            //   전송; pull 소비자는 같은 event를 ReplayRing의 제어 엔트리로
+                                            //   받는다(architecture.md §3)
   }
 }
 
@@ -128,6 +152,9 @@ message Response {
     SessionAttached     session_attached = 2;// session_attach 성공
     ExecStarted         exec_started = 3;    // exec_start 성공
     RemoteForwardOpened rfwd_opened = 4;     // rfwd_open 성공
+    SessionReadResult   session_read_result = 5; // session_read 성공 (events[])
+    SessionListResult   session_list_result = 6; // session_list 성공 (SessionInfo[])
+    SessionInfo         session_info = 7;    // session_get 성공
     Error               error = 15;          // { code, message, retryable } — code는 CLI.md §3.3 어휘
   }
 }
@@ -177,7 +204,7 @@ message ExecFrame {
 
 ## 10. Session resume 프로토콜
 
-**토큰.** `SessionOpened`가 32-byte CSPRNG `resume_token`을 반환한다. 호스트는 **`blake3(token)` 해시만** `(session_id, peer_spki_sha256, expires_at)`과 함께 저장한다. 클라이언트는 토큰을 `$XDG_STATE_HOME/qsh/resume.json`(0600)에 보관한다 — OS keychain이 아닌 이유는 재접속마다 인증 프롬프트가 뜨는 UX를 피하기 위해서이고, 토큰 단독으로는 무용하기 때문에 안전하다: 상환에는 기록된 SPKI와 일치하는 클라이언트 인증서로 맺은 상호 인증 TLS 연결이 필요하다(PRD §9 "resume credential은 session과 peer identity에 결합").
+**토큰.** `SessionOpened`가 32-byte CSPRNG `resume_token`을 반환한다. 호스트는 **`blake3(token)` 해시만** `(session_id, peer_spki_sha256, expires_at)`과 함께 저장한다. 클라이언트는 토큰을 `$XDG_STATE_HOME/qsh/resume.json`(0600, `session_ref`를 key로, peer SPKI fingerprint·`expires_at`과 함께; 쓰기·rotation·정리 규율은 ADR-0007)에 보관하며 **JSON 출력에는 절대 노출하지 않는다**(CLI.md §6.3, ADR-0007) — OS keychain이 아닌 이유는 재접속마다 인증 프롬프트가 뜨는 UX를 피하기 위해서이고, 토큰 단독으로는 무용하기 때문에 안전하다: 상환에는 기록된 SPKI와 일치하는 클라이언트 인증서로 맺은 상호 인증 TLS 연결이 필요하다(PRD §9 "resume credential은 session과 peer identity에 결합").
 
 **Rotation.** `SessionAttach` 성공 시마다 제시된 토큰은 즉시 무효화되고 replay 시작 전에 `new_resume_token`이 발급된다(단일 세대 유효). 상태 파일과 device key를 함께 탈취해도 정당한 클라이언트와 경쟁해야 하고, 탈취 성공은 피해자 측에서 resume 실패/`SESSION_CONFLICT`로 드러난다. 해시 비교는 `subtle::ConstantTimeEq`.
 

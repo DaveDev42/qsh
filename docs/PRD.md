@@ -1,6 +1,6 @@
 # QSH Product Requirements Document
 
-**상태:** Draft v0.4  
+**상태:** Draft v0.5 (M2 계약 확정: `user@` 시맨틱, ADR-0007)  
 **작성일:** 2026-08-17  
 **제품명:** QSH (Quick Shell / QUIC Shell)  
 **CLI:** `qsh`
@@ -87,6 +87,8 @@ qsh dave@personal-mac
 
 기본 동작은 대화형 PTY를 여는 것이다.
 
+`user@`는 SSH 근육 기억을 위해 받아들이며 생략할 수 있다(`qsh personal-mac`). MVP에는 user switching이 없다 — 원격 셸은 항상 **`qsh serve`를 실행한 OS 계정**으로 실행되고, 인가 principal은 `user@`가 아니라 항상 인증서에서 나온다(§9). `user@`를 지정하면 세션 생성 요청에 hint로 전달되고, 그 값이 serve 계정의 login name과 다르면 host는 세션을 만들지 않고 `UNSUPPORTED`(user switching is not supported)로 거부한다 — fail closed(CLI.md §7).
+
 ### 역방향 접속
 
 ```bash
@@ -109,7 +111,7 @@ qsh sessions personal-mac
 qsh attach <session-ref>
 ```
 
-`<session-ref>`는 `qsh sessions`가 반환하는 opaque 값이며, 호출자가 host와 session ID를 조합해 만들지 않는다(CLI.md §5).
+`<session-ref>`는 `qsh sessions`가 반환하는 opaque 값이며, 호출자가 host와 session ID를 조합해 만들지 않는다(CLI.md §5). attach는 **그 세션을 연 장비에서만** 가능하다 — resume credential이 세션과 peer identity에 결합되고(§9) 클라이언트 상태 파일에만 있기 때문이다(ADR-0007). 다른 장비에서는 `qsh sessions`에 보이더라도 attach는 `SESSION_NOT_FOUND`(`details.reason: "no_resume_token"`)이며, 조회·읽기·종료는 ACL 범위에서 가능하다.
 
 클라이언트 종료, 절전 또는 네트워크 단절이 remote PTY를 종료해서는 안 된다. 재접속하면 마지막으로 확인한 output부터 복구한다.
 
@@ -178,7 +180,7 @@ qsh -D 1080 dave@server   # P1 — SOCKS5, 플래그는 예약만 되어 있음
 - command, environment, terminal mode와 생성 시각 metadata
 - configurable resume TTL
 
-전송 연결이 끊겨도 세션과 child process는 유지된다. 새 연결은 session ID와 마지막 수신 sequence를 제시해 이어받는다. Buffer 범위를 벗어난 경우 QSH는 누락 구간을 숨기지 않고 명시한다.
+전송 연결이 끊겨도 세션과 child process는 유지된다. 새 연결은 session ID, 마지막 수신 sequence와 세션에 결합된 resume credential(§9)을 제시해 이어받는다 — 이 credential은 클라이언트 상태 파일에만 존재하며 JSON에 노출되지 않는다(ADR-0007). 상태를 잃은 장비는 세션을 조회·종료할 수 있으나 attach할 수 없다. Buffer 범위를 벗어난 경우 QSH는 누락 구간을 숨기지 않고 명시한다.
 
 ## 9. 보안과 ACL
 
@@ -350,6 +352,8 @@ Relay는 payload와 endpoint private key를 볼 수 없어야 한다. 이를 위
 - Replay buffer는 memory-only ring(세션당 기본 8MB)으로 하며 `ReplayStore` trait 뒤에 격리한다. Encrypted disk spool은 P1 이후 opt-in으로 검토한다.
 - TCP fallback은 P1으로 유지한다. 단 모든 프로토콜 코드를 transport-agnostic framing(`Transport`/`StreamMux` trait) 위에 작성하고, `qsh doctor`의 UDP reachability probe는 P0에 포함한다.
 - 제품명과 바이너리는 `qsh`를 유지한다. crates.io 배포 패키지명만 `qsh-cli`로 분리하고 `[[bin]] name = "qsh"`로 바이너리 이름은 그대로 둔다(§16 이름 충돌 위험 참고).
+- MVP에는 user switching이 없다. 원격 셸은 항상 `qsh serve` 계정으로 실행되며 `user@`는 일치 단언(hint)일 뿐이다(§6).
+- `session_ref`는 클라이언트 `Ops`가 조립하고, resume token은 클라이언트 상태 파일에만 두며 JSON에 노출하지 않는다(ADR-0007).
 
 ## 18. 설계 결정 기록
 
@@ -361,3 +365,4 @@ Relay는 payload와 endpoint private key를 볼 수 없어야 한다. 이를 위
 - `docs/adr/0004-replay-buffer-memory-only.md` — replay buffer(memory-only ring)
 - `docs/adr/0005-tcp-fallback-p1.md` — TCP fallback 시점(P1)과 transport 추상화
 - `docs/adr/0006-product-name-and-crate-name.md` — 제품/바이너리 이름과 crates.io 패키지 이름
+- `docs/adr/0007-session-ref-and-resume-token-custody.md` — `session_ref` 조립 주체(클라이언트 `Ops`)와 resume token 보관처(클라이언트 상태 파일, JSON 비노출)

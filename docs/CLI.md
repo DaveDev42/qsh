@@ -1,6 +1,6 @@
 # QSH CLI, JSON and MCP Contract
 
-**상태:** Draft v0.4 (M1 구현과 동기화)  
+**상태:** Draft v0.5 (M2 계약 확정 — PLAN.md §4.1 미결 질문 반영; v0.4 = M1 구현과 동기화)  
 **대상:** QSH MVP  
 **Canonical interface:** `qsh` CLI
 
@@ -92,6 +92,8 @@ version.get
 
 `qsh serve`, `qsh listen`, `qsh reverse`는 operation이 아니라 장기 실행 모드(long-running mode)다. 단일 요청/응답 계약이 없으며 이 목록에 포함되지 않는다.
 
+실행 중인 세션에 **신호만** 보내는 별도 operation(`session.signal`)은 M2 범위가 아니다(P1 후보 — 이 목록에 없다). M2에서 신호를 보내는 유일한 CLI 표면은 `qsh session close --signal <SIG>`(§6.7)이며, 신호는 wire `SessionClose`의 optional `signal` field로 전달된다(ACL은 §2.5의 `session.close` 행 그대로 `session.control`). wire 번호 25(`SessionSignal`)는 **예약만** 하고 M2에서는 메시지를 정의·전송하지 않는다 — 호스트가 25번을 수신하면 리소스 생성 없이 `UNSUPPORTED`로 답한다(protocol.md §9).
+
 ### 2.5 Operation과 ACL action 매핑
 
 ACL action은 인가(authorization) 어휘로, operation 이름과는 별개 차원이다. 하나의 action이 여러 operation을 커버할 수 있다. 전체 action 목록은 PRD §9에서 정의하며, 원격 peer가 요청한 operation은 아래 매핑에 따라 인가된다.
@@ -166,7 +168,7 @@ RESOURCE_EXHAUSTED
 INTERNAL
 ```
 
-오류 코드는 추가될 수 있다. 알 수 없는 code는 일반 QSH 오류로 처리한다. `UNSUPPORTED`는 요청한 기능이 아직 구현되지 않았거나 peer와 협상되지 않은 경우(예: P1 기능인 `-D`/SOCKS)에 사용한다. `RESOURCE_EXHAUSTED`는 backpressure나 서버측 한도 초과를 나타낸다.
+오류 코드는 추가될 수 있다. 알 수 없는 code는 일반 QSH 오류로 처리한다. `RESUME_GAP`은 M2에서 **event 전용 상황**이다 — replay 범위 이탈은 항상 `session.gap` event(§6.4)로 전달되며 오류 envelope로는 반환되지 않는다(도달성 테스트에서는 이 사유로 DEFERRED 유지; 오류로 반환하는 strict read 옵션은 P1에서 검토). `UNSUPPORTED`는 요청한 기능이 아직 구현되지 않았거나 peer와 협상되지 않은 경우(예: P1 기능인 `-D`/SOCKS)에 사용한다. `RESOURCE_EXHAUSTED`는 backpressure나 서버측 한도 초과를 나타낸다.
 
 ## 4. Process exit code
 
@@ -181,6 +183,8 @@ INTERNAL
 `qsh exec`는 OpenSSH와 마찬가지로 remote process의 exit code `0..254`를 그대로 반환한다. QSH 자체의 실패는 `255`다. JSON 결과에는 `remote_exit_code`와 QSH 오류가 구분되어 있으므로 자동화는 stdout JSON도 함께 확인한다.
 
 Remote process가 정확히 `255`로 종료한 경우, QSH 자체 실패(`255`)와 구분할 수 없게 되는 것을 막기 위해 qsh exec의 프로세스 exit code는 `254`로 clamp된다. 이때도 JSON 결과의 `remote_exit_code`는 실제 값(`255`)을 그대로 담으며, exit code의 source of truth는 항상 JSON이다.
+
+대화형 세션(`qsh [user@]host`, `qsh attach <session-ref>`, §7)은 원격 셸이 종료되면 그 exit code를 `qsh exec`와 같은 규칙(`0..=254`, `255`는 `254`로 clamp)으로 반환하고, escape 시퀀스 detach(§7)는 세션을 살려 둔 채 `0`으로 종료한다.
 
 Output mode에 따라 exit code 의미가 달라져서는 안 된다.
 
@@ -206,13 +210,15 @@ Output mode에 따라 exit code 의미가 달라져서는 안 된다.
   "host": "personal-mac",
   "session_id": "01K0SESSION",
   "state": "running",
-  "writer": "device_01K0EXAMPLE",
+  "writer": "device:hermes",
   "created_at": "2026-08-17T00:00:00Z",
   "last_sequence": 42
 }
 ```
 
-`session_ref`는 CLI가 반환하는 opaque value다. 호출자가 host와 session ID를 조합해 생성하지 않는다.
+`session_ref`는 CLI가 반환하는 opaque value다. 호출자가 host와 session ID를 조합해 생성하지 않는다. 내부적으로는 **클라이언트의 `Ops` 계층**(qsh-core)이 `<host-alias>/<session_id>` 형태로 조립한다 — 서버는 opaque·URL-safe한 `session_id`만 발급하며 클라이언트의 로컬 host alias(trust store/hosts.toml의 이름)를 알지 못하기 때문이다. 조립 형식은 구현 세부이지 계약이 아니다: 호출자는 `session_ref`를 파싱하지 않고 받은 그대로 되돌려 주며, `Ops`가 이를 (host, session_id)로 해석한다([ADR-0007](adr/0007-session-ref-and-resume-token-custody.md)).
+
+`writer`는 현재 writer lease 보유자의 principal 문자열 표기(architecture.md §5 — `fp:…`/`user:…`/`device:…`)이며, lease 보유자가 없으면(소유 connection이 죽어 lease가 자동 해제된 뒤, architecture.md §3) **`null`**이다. `writer`는 처음부터 nullable로 정의한다 — 나중에 nullable로 바꾸면 type 변경(§10, `/v2`)이 되기 때문이다. `host`와 `session_ref`는 클라이언트 `Ops`가 로컬 alias로 채우는 field이며 wire에는 존재하지 않는다(ADR-0007).
 
 `last_sequence`는 chunk 개수가 아니라 이 세션에서 지금까지 누적된 output byte 수(offset)다. `session read --after`에 그대로 전달할 수 있다.
 
@@ -233,6 +239,8 @@ qsh host get personal-mac --json
 qsh sessions [host] --json
 qsh session get <session-ref> --json
 ```
+
+`session.list`는 그 host의 세션을 (ACL `session.list` 범위에서) 장비와 무관하게 반환한다. 다만 **`session.attach`(및 `qsh attach`)는 세션을 연 장비에서만 가능하다** — resume credential이 세션에 결합된 peer identity에 묶여 있고(protocol.md §10, PRD §9) 토큰은 그 장비의 상태 파일에만 있기 때문이다(§6.3, ADR-0007). 다른 장비에서는 목록에 `running`으로 보이더라도 attach는 로컬 `SESSION_NOT_FOUND`(`details.reason: "no_resume_token"`)로 실패한다. `session.get`/`read`/`write`/`resize`/`close`는 토큰이 아니라 ACL만으로 동작하므로 다른 장비에서도 가능하다.
 
 ### 6.3 Session 생성
 
@@ -257,6 +265,8 @@ qsh session open personal-mac --json -- claude
   }
 }
 ```
+
+wire `SessionOpened`가 반환하는 `resume_token`(protocol.md §10)은 **어떤 출력 모드에서도 JSON에 노출되지 않는다.** 토큰은 클라이언트 상태 파일 `$XDG_STATE_HOME/qsh/resume.json`(0600)에 `session_ref`를 key로 저장되고 rotation도 거기서 갱신된다. 기계 사용자는 `session_ref`만으로 재attach(`qsh attach <session-ref>`, §7.1)하며, 토큰 조회·제시는 `Ops` 계층이 내부에서 처리한다([ADR-0007](adr/0007-session-ref-and-resume-token-custody.md)). **토큰이 필요한 경로는 wire `SessionAttach`(= `session.attach`와 그 위의 대화형 attach)뿐이다.** `session.get`/`read`(`--wait`·`--follow` 모두)/`write`/`resize`/`close`는 control 스트림 value op(protocol.md §9 `SessionRead`/`SessionWrite` 등)이며 토큰 없이 ACL(§2.5)만으로 동작한다 — `--follow`는 `session.read`의 pull 루프이지 attach가 아니다. 상태 파일에 해당 `session_ref`의 토큰이 없으면(다른 장비, 상태 파일 삭제) attach는 원격 요청 없이 로컬에서 `SESSION_NOT_FOUND`(`details.reason: "no_resume_token"`, human `message`는 세션이 아직 살아 있어 `session read`/`close`는 가능함을 안내)로 실패한다 — fail closed. 상태 파일 항목에 기록된 peer fingerprint가 현재 연결의 peer와 다르면 토큰을 보내지 않고 같은 코드(`details.reason: "peer_mismatch"`)로 실패한다.
 
 ### 6.4 Session 읽기
 
@@ -315,6 +325,38 @@ Exit event:
 }
 ```
 
+Writer changed event (wire `SessionEvent::WriterChanged`, protocol.md §10 writer lease). writer lease 보유자가 바뀔 때마다 — steal로 다른 attach가 가져갔을 때, 또는 소유 connection이 죽어 lease가 자동 해제됐을 때(그때 `writer: null`) — 발생한다. **세션의 모든 read 소비자에게 broadcast**되는 세션 상태 변화 event다(lease를 뺏긴 기존 보유자에게는 read-only 강등 통지를 겸한다; `writer` principal은 이미 `session.list`의 `Session.writer`로 같은 ACL 범위에 노출되는 값이므로 새 정보 누설은 없다). `writer`는 §5 Session의 `writer`와 같은 형식(새 보유자의 principal 문자열, 없으면 `null`)이고 `sequence`는 event 시점의 누적 output byte offset이다.
+
+```json
+{
+  "schema": "qsh.event/v1",
+  "type": "session.writer_changed",
+  "session_ref": "personal-mac/01K0SESSION",
+  "sequence": 180,
+  "writer": "device:hermes"
+}
+```
+
+Closed event (wire `SessionEvent::Closed`). 세션이 broker에서 제거되어 더 이상 read/attach할 수 없을 때 stream의 **마지막 event**로 전달된다. `reason`은 **누가 세션을 제거했는가**로 정해지며 세션의 이전 상태와 무관하다: `"closed"` = 명시적 `session.close`(세션이 `running`이든 이미 `exited`든) 또는 `qsh serve`의 SIGTERM drain(§6.12); `"exit"` = child가 스스로 종료해 `exited`가 된 세션을 **호출자 없이** TTL reaper가 정리(앞서 `session.exit`가 먼저 온다; `exited` 세션도 같은 `[serve].resume_ttl`을 exit 시점부터 적용해 정리한다); `"ttl_expired"` = **실행 중이던** 세션이 attach 없이 resume TTL을 넘겨 reaper가 process group을 종료. 알 수 없는 `reason` 값은 "세션이 끝났다"로만 해석한다(값 추가는 additive, §10). 이후 같은 `session_ref`에 대한 `session.get`/`read`/`write`/`resize`/`close`는 `SESSION_NOT_FOUND`다; `session.attach`는 protocol.md §10의 non-distinguishing 규칙에 따라 호스트가 `AUTH_FAILED`로 답하며(세션 존재 여부 비노출), 클라이언트는 이 event를 받으면 `resume.json` 항목을 지우므로 실제로는 로컬 `SESSION_NOT_FOUND`(`no_resume_token`)로 먼저 실패한다.
+
+```json
+{
+  "schema": "qsh.event/v1",
+  "type": "session.closed",
+  "session_ref": "personal-mac/01K0SESSION",
+  "sequence": 180,
+  "reason": "closed"
+}
+```
+
+두 event는 `qsh.event/v1`에 additive로 추가된 타입이다(§10). **소비자는 알 수 없는 event `type`을 오류 없이 무시(skip)해야 한다** — 알 수 없는 field를 무시하는 §2.3 규칙의 event 수준 대응이며, 새 event 타입은 major bump 없이 추가될 수 있다. `qsh.event/v1`은 아직 출시된 producer가 없으므로 이 규칙은 v1 최초 구현부터 적용된다(`qsh-proto`의 event 타입은 unknown-type fallback을 가져야 한다, architecture.md §2).
+
+**전달 경로와 순서.** `session.exit`/`session.writer_changed`/`session.closed`는 broker가 ReplayRing에 **zero-length 제어 엔트리**로 append하며, `pull()`(architecture.md §3)의 반환 event 열에서 `session.output`과 **전순서(total order)** 로 섞여 나온다 — 단발 `session read --wait`/MCP `read_session` 결과 배열에도 그대로 포함될 수 있다. 이 event들의 `sequence`는 append 시점의 누적 output offset이며 offset을 증가시키지 않는다. attach 중인 connection은 같은 event를 control 스트림의 wire `SessionEvent`로도 받는다.
+
+**`--follow`의 종료.** `--follow`는 `session.exit`를 수신하면 즉시 정상 종료한다(exit `0`) — TTL 정리(`session.closed{reason:"exit"}`)를 기다리지 않는다. 실행 중이던 세션이 `session.close`/reaper로 제거되면 `session.closed`가 마지막 event이고 그 직후 종료한다.
+
+Recovery 텔레메트리(`recovery ∈ {migrated, resumed, failed}`, `time_to_recovery_ms`, `session_ref`; testing.md L4)는 M2에서 `qsh.event/v1` event가 **아니라** stderr 구조화 진단(tracing target `qsh::recovery`, level `INFO`, **한 줄 JSON** 렌더링 — 기본 verbosity에서 방출되고 §2.2의 `--quiet`/`-v` 규칙을 그대로 따른다; PTY 내용·토큰 field는 존재하지 않는다)으로만 나가며 stdout에는 절대 나타나지 않는다(§2.2). event로의 승격은 P1에서 결정한다.
+
 ### 6.5 Session 쓰기
 
 ```bash
@@ -336,6 +378,8 @@ qsh session resize <session-ref> --cols 120 --rows 40 --json
 qsh session close <session-ref> --json
 qsh session close <session-ref> --signal TERM --json
 ```
+
+`session.close`는 세션의 **process group 전체**(architecture.md §4)를 종료하고 세션을 broker에서 제거한다. 기본 절차는 SIGHUP → 유예 후 SIGTERM → 유예 후 SIGKILL escalation이며, 단계별 유예는 `[serve].close_grace_ms`(기본 5000)다. `--signal <SIG>`는 이 절차의 **첫 신호를 지정한 신호로 바꾼다** — 신호를 process group에 보낸 뒤 동일한 유예·escalation과 세션 정리가 이어진다. `--signal`은 wire `SessionClose`의 optional `signal` field로 전달되며(§2.4), 허용 값은 `HUP|INT|QUIT|TERM|USR1|USR2|KILL`(대소문자 무시, `SIG` 접두 유무 무관)뿐이다. 그 외(숫자, stop 계열 `STOP`/`TSTP`, 미지의 이름)는 `INVALID_ARGUMENT`(exit `2`)다. 이름은 내부적으로 `SIGTERM` 형태의 정규형으로 정규화되며 `session.exit`의 `signal` field도 같은 정규형을 쓴다. `--signal KILL`은 escalation 없이 즉시 `killpg(SIGKILL)` 후 정리다. 세션을 종료하지 않고 신호만 보내는 operation은 M2에 없다(§2.4, P1). 종료가 완료되면 `--follow` 소비자는 `session.closed{reason: "closed"}` event(§6.4)를 받는다. 이미 종료된(`exited`) 세션의 close는 **어떤 신호도 보내지 않고**(재사용된 pgid로 무관한 프로세스에 신호가 갈 수 있다) 정리만 수행하며 오류가 아니다 — 이때도 `reason`은 `"closed"`다.
 
 ### 6.8 비대화형 실행
 
@@ -519,6 +563,7 @@ qsh serve --bind <ip:port>
 - `--bind`의 우선순위: CLI flag > `config.toml`의 `[serve].bind` > 기본값 `[::]:4433`.
 - 시작 시 실제로 bind된 주소를 stderr에 출력한다 — stdout은 §2.2 규칙에 따라 JSON 계약 전용이므로 여기서는 쓰지 않는다.
 - listener 재시작 시 세션 소실에 대해서는 README의 [Known limitations](../README.md#known-limitations-mvp-by-design)를 참고한다.
+- **SIGTERM drain(M2, ADR-0003):** 신규 attach·open을 거부한 뒤 모든 세션에 §6.7의 close 절차(SIGHUP→TERM→KILL, `close_grace_ms`)를 적용하고, 붙어 있는 소비자에게 `session.closed{reason: "closed"}`(§6.4)를 보낸 다음 종료한다 — 세션은 프로세스와 함께 끝나며 고아 셸을 남기지 않는다.
 
 ## 7. Human interactive mode
 
@@ -530,6 +575,21 @@ qsh attach <session-ref>
 ```
 
 Interactive mode는 terminal raw mode, window resize와 signal forwarding을 처리한다. 세션 생성·읽기·쓰기의 권한과 동작은 machine-readable command와 동일하다.
+
+**`user@`의 의미.** 원격 셸은 항상 **`qsh serve`를 실행한 OS 계정**으로 실행된다 — MVP에는 user switching이 없고, ACL principal은 항상 인증서에서 나온다(§2.5, protocol.md §3). `user@`는 SSH 근육 기억을 위해 받아들이며 생략해도 된다(`qsh personal-mac`). 지정하면 `SessionOpen`에 선택 hint로 전달되고, 호스트는 그 값이 serve 계정의 login name과 다르면 세션을 만들지 않고 `UNSUPPORTED`(message: user switching is not supported)로 거부한다 — fail closed. 즉 `user@`는 "이 계정이어야 한다"는 단언이지 계정 선택이 아니다(PRD §6). 검사 순서는 **ACL `session.open` → `user` hint → spawn**이다: 인가되지 않은 peer는 hint 값과 무관하게 항상 `PERMISSION_DENIED`를 받고(계정명 비노출, audit는 ACL 판정만 기록), `UNSUPPORTED`는 인가된 peer에게만 반환된다. 비교는 serve 계정의 login name과 정확 일치(case-sensitive)다. `user@`는 `qsh [user@]host` 형태(`-L`/`-R` 플래그를 동반한 경우 포함 — 모두 `SessionOpen`을 보낸다)에서만 받으며, `qsh exec`/`qsh session open`/`qsh tunnel open`은 bare host만 받는다.
+
+**Detach와 escape 시퀀스.** SSH와 같은 방식의 tilde escape를 쓴다. escape 문자는 **행의 시작에서만** 인식되며, 그 외 위치의 `~`는 그대로 원격 PTY로 전달된다. raw mode에는 line discipline이 없으므로 "행의 시작"은 *세션 시작 직후이거나, 클라이언트가 마지막으로 원격에 전달한 byte가 CR(`\r`, 0x0D) 또는 LF(`\n`, 0x0A)인 상태*로 정의한다.
+
+| 입력 | 동작 |
+|---|---|
+| `~d` | detach — local client만 종료하고 세션은 계속 실행된다 |
+| `~.` | detach와 동일 — **세션을 죽이지 않는다.** 세션은 설계상 client보다 오래 산다(PRD §8); 종료는 `qsh session close <session-ref>`(§6.7)로 한다 |
+| `~~` | 리터럴 `~` 하나를 전송 |
+| `~?` | escape 도움말을 **stderr**에 출력 |
+
+이 표가 전부이며 다른 시퀀스(`~^Z`, `~#`, `~&` 등)는 없다. 행 시작의 escape 문자 1 byte는 다음 byte가 올 때까지 로컬에 보류되고 전달되지 않는다; 표에 없는 두 번째 byte가 오면 escape 문자와 그 byte를 **둘 다 그대로** 원격에 전달하고 상태를 초기화한다(ssh와 동일 — 입력이 조용히 사라지지 않는다). escape 처리는 **local stdin이 TTY일 때만** 활성이다 — pipe/file stdin에서는 `--escape-char`와 무관하게 꺼지고 모든 byte가 그대로 전달된다(`qsh session write`·MCP 경로에는 애초에 escape 처리가 없다).
+
+escape 문자는 `--escape-char <c>`로 바꿀 수 있고 `--escape-char none`은 escape 처리를 끈다(그때 detach 수단은 client 프로세스 종료뿐이며 세션은 여전히 유지된다). 기본값은 `~`. `--escape-char`는 `qsh [user@]host`와 `qsh attach`에만 붙는 flag이며 값은 단일 ASCII 문자 또는 `none`이다(그 외는 `INVALID_ARGUMENT`, exit `2`); 설정 파일 기본값은 M2에 없다. escape 시퀀스는 client 로컬에서 소비되고 원격으로 전달되지 않는다.
 
 ### 7.1 Value operation과 stream operation
 
@@ -597,12 +657,13 @@ Agent는 반환된 마지막 sequence를 다음 cursor로 사용한다. 이 long
 - 모든 blocking machine operation은 `--timeout <milliseconds>`를 지원한다.
 - `session read --wait`은 long-poll 대기 시간이며 전체 command timeout과 구분한다.
 - SIGINT는 현재 local operation을 취소한다.
-- Interactive attach의 SIGINT는 기본적으로 remote PTY로 전달하며, detach key는 별도로 제공한다.
+- Interactive attach의 SIGINT는 기본적으로 remote PTY로 전달하며, detach는 행 시작의 `~d`(또는 `~.`) escape 시퀀스로 한다(§7, `--escape-char`로 변경·비활성화). detach는 세션을 종료하지 않는다.
 - MCP cancellation은 local wait 또는 request를 취소하고 session lifecycle을 변경하지 않는다.
 
 ## 10. Compatibility policy
 
-- `qsh.cli/v1`과 `qsh.event/v1`에는 optional field를 추가할 수 있다.
+- `qsh.cli/v1`과 `qsh.event/v1`에는 optional field를 추가할 수 있다. `qsh.event/v1`에는 새 event `type`도 추가할 수 있으며, 소비자는 알 수 없는 `type`을 무시해야 한다(§6.4).
+- `reason`·`state`·`error.code`처럼 값 집합이 열린 문자열 field에는 새 값을 추가할 수 있다. 소비자는 알 수 없는 값을 오류 없이 처리해야 한다(`ErrorCode` 미지 코드 pass-through와 같은 원칙, §3.3).
 - Field 삭제, type 변경과 의미 변경은 `/v2`가 필요하다.
 - MCP tool에는 optional argument를 추가할 수 있지만 기존 argument를 재해석하지 않는다.
 - Deprecated field와 tool은 최소 두 minor release 동안 유지한다.
