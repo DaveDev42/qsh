@@ -84,28 +84,208 @@ pub struct Host {
     pub device_id: String,
 }
 
-/// A session entry as returned by `qsh session get` / `qsh session open`
+/// A session entry as returned by `qsh sessions` / `qsh session get`
 /// (`docs/CLI.md` §5, "Session").
 ///
-/// Placeholder: field shape only, not yet produced or consumed by any op
-/// (sessions land in M2).
+/// This is the JSON DTO: the wire `SessionInfo` carries
+/// `session_id/state/writer/created_at/last_sequence` only, and the client
+/// `Ops` layer adds `session_ref`/`host` from its local alias knowledge
+/// (ADR-0007).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Session {
-    /// Opaque handle combining host and session id; callers must not
-    /// construct this themselves.
+    /// Opaque handle (`<host-alias>/<session_id>`, assembled by `Ops`);
+    /// callers must not construct or parse this themselves.
     pub session_ref: String,
     /// Host alias this session lives on.
     pub host: String,
-    /// ULID session identifier.
+    /// Opaque, URL-safe session identifier issued by the host (ULID).
     pub session_id: String,
-    /// Session lifecycle state, e.g. `"running"`.
+    /// Session lifecycle state — open string set: `"running"`, `"exited"`,
+    /// ... (`docs/CLI.md` §10).
     pub state: String,
-    /// `device_id` of the principal currently holding the writer lease.
-    pub writer: String,
-    /// RFC 3339 timestamp of session creation.
+    /// Principal string of the current writer-lease holder
+    /// (`device:…`/`user:…`/`fp:…`), or `null` when no connection holds the
+    /// lease.
+    pub writer: Option<String>,
+    /// RFC 3339 UTC timestamp of session creation.
     pub created_at: String,
-    /// Highest byte-offset sequence produced by this session so far.
+    /// Cumulative output byte offset produced by this session so far
+    /// (`docs/CLI.md` §2.3); pass straight to `session read --after`.
     pub last_sequence: u64,
+}
+
+// ---------------------------------------------------------------------------
+// session.* (`docs/CLI.md` §6.2–§6.7)
+// ---------------------------------------------------------------------------
+
+/// Request for `session.list` (`qsh sessions [host]`, `docs/CLI.md` §6.2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+pub struct SessionListReq {
+    /// Host alias to list; `None` = every configured host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+}
+
+/// Data payload of `session.list`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionListData {
+    /// Sessions visible under the caller's `session.list` ACL scope.
+    pub sessions: Vec<Session>,
+}
+
+/// Request for `session.get` (`docs/CLI.md` §6.2). The data payload is a
+/// [`Session`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionGetReq {
+    /// Opaque session handle as returned by `session.open`/`session.list`.
+    pub session_ref: String,
+}
+
+/// Request for `session.open` (`docs/CLI.md` §6.3).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionOpenReq {
+    /// Host alias.
+    pub host: String,
+    /// Program and arguments (`--` argv), passed verbatim — no shell
+    /// re-interpretation. Empty = the remote account's login shell.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub argv: Vec<String>,
+    /// Extra environment variables layered over the remote login-shell
+    /// environment.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<EnvVar>,
+    /// `TERM` to export in the session; `None` = remote default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub term: Option<String>,
+    /// Initial terminal width; `None` = remote default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cols: Option<u32>,
+    /// Initial terminal height; `None` = remote default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows: Option<u32>,
+    /// The `user` half of `qsh user@host` — a hint checked against the
+    /// remote serve account's login name (`docs/CLI.md` §7); never an
+    /// identity (the principal always comes from the certificate).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+}
+
+/// Data payload of a successful `session.open` (`docs/CLI.md` §6.3).
+///
+/// Deliberately has no `resume_token`: the token lives only in the client
+/// state file and is never surfaced in any output mode (ADR-0007).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionOpenData {
+    /// Opaque session handle for every later `session.*` call.
+    pub session_ref: String,
+    /// Cumulative output offset at creation — `0` for a fresh session.
+    pub initial_sequence: u64,
+}
+
+/// Request for the stream operation `session.attach` (`docs/CLI.md` §7.1).
+/// The resume token is looked up by `Ops` from the client state file, never
+/// supplied by the caller (ADR-0007).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionAttachReq {
+    /// Opaque session handle.
+    pub session_ref: String,
+    /// Fail with `SESSION_CONFLICT` instead of stealing a live writer lease
+    /// (`docs/design/protocol.md` §10). Default: steal.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_steal: bool,
+}
+
+/// Request for `session.read` (`docs/CLI.md` §6.4; same field names as the
+/// MCP `read_session` tool, §8.3).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionReadReq {
+    /// Opaque session handle.
+    pub session_ref: String,
+    /// Cumulative output byte offset already received (`--after`); the
+    /// reply starts right after it.
+    #[serde(default)]
+    pub after_sequence: u64,
+    /// Long-poll wait for new output in milliseconds (`--wait`); `None` =
+    /// return immediately.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_ms: Option<u64>,
+    /// Maximum output payload bytes in one reply (`--limit-bytes`); `None`
+    /// = server default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit_bytes: Option<u64>,
+}
+
+/// Data payload of a single (non-`--follow`) `session.read`: the events
+/// received for this pull, in total order (`docs/CLI.md` §6.4).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionReadData {
+    /// Opaque session handle the events belong to.
+    pub session_ref: String,
+    /// `qsh.event/v1` events (`session.output`/`gap`/`exit`/
+    /// `writer_changed`/`closed`); may be empty when `wait_ms` elapsed.
+    pub events: Vec<crate::event::SessionEvent>,
+}
+
+/// Request for `session.write` (`docs/CLI.md` §6.5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionWriteReq {
+    /// Opaque session handle.
+    pub session_ref: String,
+    /// Bytes to inject as terminal input, standard Base64 (`--data-b64`, or
+    /// raw stdin encoded by the CLI for `--stdin`).
+    pub data_b64: String,
+}
+
+/// Data payload of `session.write`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionWriteData {
+    /// Opaque session handle.
+    pub session_ref: String,
+    /// Number of input bytes accepted by the host.
+    pub bytes_written: u64,
+}
+
+/// Request for `session.resize` (`docs/CLI.md` §6.6).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionResizeReq {
+    /// Opaque session handle.
+    pub session_ref: String,
+    /// New terminal width.
+    pub cols: u32,
+    /// New terminal height.
+    pub rows: u32,
+}
+
+/// Data payload of `session.resize`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionResizeData {
+    /// Opaque session handle.
+    pub session_ref: String,
+    /// Applied terminal width.
+    pub cols: u32,
+    /// Applied terminal height.
+    pub rows: u32,
+}
+
+/// Request for `session.close` (`docs/CLI.md` §6.7).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionCloseReq {
+    /// Opaque session handle.
+    pub session_ref: String,
+    /// First signal of the HUP → TERM → KILL escalation, canonical
+    /// `SIGTERM` form (`--signal`, one of HUP|INT|QUIT|TERM|USR1|USR2|KILL);
+    /// `None` = default (SIGHUP).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signal: Option<String>,
+}
+
+/// Data payload of `session.close`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionCloseData {
+    /// Opaque session handle that was closed.
+    pub session_ref: String,
+    /// Cumulative output byte offset at removal.
+    pub final_sequence: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -434,5 +614,203 @@ mod tests {
         let _ = schemars::schema_for!(TrustAddData);
         let _ = schemars::schema_for!(TrustListData);
         let _ = schemars::schema_for!(TrustRemoveData);
+        for schema in session_schemas() {
+            assert!(schema.is_object());
+        }
+    }
+
+    fn session_schemas() -> Vec<serde_json::Value> {
+        vec![
+            schemars::schema_for!(Session).to_value(),
+            schemars::schema_for!(SessionListReq).to_value(),
+            schemars::schema_for!(SessionListData).to_value(),
+            schemars::schema_for!(SessionGetReq).to_value(),
+            schemars::schema_for!(SessionOpenReq).to_value(),
+            schemars::schema_for!(SessionOpenData).to_value(),
+            schemars::schema_for!(SessionAttachReq).to_value(),
+            schemars::schema_for!(SessionReadReq).to_value(),
+            schemars::schema_for!(SessionReadData).to_value(),
+            schemars::schema_for!(SessionWriteReq).to_value(),
+            schemars::schema_for!(SessionWriteData).to_value(),
+            schemars::schema_for!(SessionResizeReq).to_value(),
+            schemars::schema_for!(SessionResizeData).to_value(),
+            schemars::schema_for!(SessionCloseReq).to_value(),
+            schemars::schema_for!(SessionCloseData).to_value(),
+        ]
+    }
+
+    /// ADR-0007: the resume token is never a property of any JSON contract
+    /// type (checked structurally on every `properties` map, at any depth).
+    #[test]
+    fn no_session_contract_type_exposes_resume_token() {
+        fn property_names(v: &serde_json::Value, out: &mut Vec<String>) {
+            match v {
+                serde_json::Value::Object(map) => {
+                    if let Some(serde_json::Value::Object(props)) = map.get("properties") {
+                        out.extend(props.keys().cloned());
+                    }
+                    for child in map.values() {
+                        property_names(child, out);
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for child in items {
+                        property_names(child, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for schema in session_schemas() {
+            let mut names = Vec::new();
+            property_names(&schema, &mut names);
+            assert!(!names.is_empty());
+            for n in &names {
+                let lower = n.to_ascii_lowercase();
+                assert!(
+                    !lower.contains("token"),
+                    "credential-looking property {n:?} in a JSON contract schema"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn session_matches_documented_shape() {
+        let s = Session {
+            session_ref: "personal-mac/01K0SESSION".into(),
+            host: "personal-mac".into(),
+            session_id: "01K0SESSION".into(),
+            state: "running".into(),
+            writer: Some("device:hermes".into()),
+            created_at: "2026-08-17T00:00:00Z".into(),
+            last_sequence: 42,
+        };
+        assert_eq!(
+            serde_json::to_value(&s).unwrap(),
+            serde_json::json!({
+                "session_ref": "personal-mac/01K0SESSION",
+                "host": "personal-mac",
+                "session_id": "01K0SESSION",
+                "state": "running",
+                "writer": "device:hermes",
+                "created_at": "2026-08-17T00:00:00Z",
+                "last_sequence": 42
+            })
+        );
+        // `writer` is nullable from day one (CLI.md §5).
+        let json = serde_json::json!({
+            "session_ref": "personal-mac/01K0SESSION",
+            "host": "personal-mac",
+            "session_id": "01K0SESSION",
+            "state": "exited",
+            "writer": null,
+            "created_at": "2026-08-17T00:00:00Z",
+            "last_sequence": 180
+        });
+        let back: Session = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(back.writer, None);
+        assert_eq!(serde_json::to_value(&back).unwrap(), json);
+    }
+
+    #[test]
+    fn session_open_data_matches_documented_shape() {
+        let d = SessionOpenData {
+            session_ref: "personal-mac/01K0SESSION".into(),
+            initial_sequence: 0,
+        };
+        assert_eq!(
+            serde_json::to_value(&d).unwrap(),
+            serde_json::json!({
+                "session_ref": "personal-mac/01K0SESSION",
+                "initial_sequence": 0
+            })
+        );
+    }
+
+    #[test]
+    fn session_read_req_matches_mcp_read_session_shape() {
+        // CLI.md §8.3: {session_ref, after_sequence, wait_ms, limit_bytes}.
+        let json = serde_json::json!({
+            "session_ref": "personal-mac/01K0SESSION",
+            "after_sequence": 42,
+            "wait_ms": 30000,
+            "limit_bytes": 65536
+        });
+        let req: SessionReadReq = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(req.after_sequence, 42);
+        assert_eq!(req.wait_ms, Some(30000));
+        assert_eq!(req.limit_bytes, Some(65536));
+        assert_eq!(serde_json::to_value(&req).unwrap(), json);
+
+        // Optionals default.
+        let minimal: SessionReadReq =
+            serde_json::from_value(serde_json::json!({"session_ref": "h/x"})).unwrap();
+        assert_eq!(minimal.after_sequence, 0);
+        assert_eq!(minimal.wait_ms, None);
+        assert_eq!(minimal.limit_bytes, None);
+    }
+
+    #[test]
+    fn session_read_data_carries_events_in_order() {
+        use crate::event::{EVENT_SCHEMA, SessionEvent};
+        let d = SessionReadData {
+            session_ref: "personal-mac/01K0SESSION".into(),
+            events: vec![
+                SessionEvent::Output {
+                    schema: EVENT_SCHEMA.into(),
+                    session_ref: "personal-mac/01K0SESSION".into(),
+                    sequence: 49,
+                    data_b64: "SGVsbG8NCg==".into(),
+                },
+                SessionEvent::Exit {
+                    schema: EVENT_SCHEMA.into(),
+                    session_ref: "personal-mac/01K0SESSION".into(),
+                    sequence: 49,
+                    exit_code: Some(0),
+                    signal: None,
+                },
+            ],
+        };
+        let json = serde_json::to_value(&d).unwrap();
+        assert_eq!(json["events"][0]["type"], "session.output");
+        assert_eq!(json["events"][1]["type"], "session.exit");
+        let back: SessionReadData = serde_json::from_value(json).unwrap();
+        assert_eq!(back, d);
+    }
+
+    #[test]
+    fn session_reqs_omit_empty_optionals() {
+        let open = SessionOpenReq {
+            host: "h".into(),
+            argv: vec![],
+            env: vec![],
+            term: None,
+            cols: None,
+            rows: None,
+            user: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&open).unwrap(),
+            serde_json::json!({"host": "h"})
+        );
+        let attach = SessionAttachReq {
+            session_ref: "h/x".into(),
+            no_steal: false,
+        };
+        assert_eq!(
+            serde_json::to_value(&attach).unwrap(),
+            serde_json::json!({"session_ref": "h/x"})
+        );
+        let close = SessionCloseReq {
+            session_ref: "h/x".into(),
+            signal: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&close).unwrap(),
+            serde_json::json!({"session_ref": "h/x"})
+        );
+        let list: SessionListReq = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(list.host, None);
     }
 }

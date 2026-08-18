@@ -171,6 +171,30 @@ impl Server {
                 control_message::Body::Pong(wire::Pong {}),
             )),
             Some(control_message::Body::Pong(_)) | Some(control_message::Body::Response(_)) => None,
+            // Session control (M2). The wire contract exists (PLAN Step 1)
+            // but the broker is not wired in yet (Step 3): answer
+            // UNSUPPORTED without touching any state — no session, ticket
+            // or audit line is created for these.
+            Some(
+                control_message::Body::SessionOpen(_)
+                | control_message::Body::SessionAttach(_)
+                | control_message::Body::SessionList(_)
+                | control_message::Body::SessionGet(_)
+                | control_message::Body::SessionResize(_)
+                | control_message::Body::SessionClose(_)
+                | control_message::Body::SessionRead(_)
+                | control_message::Body::SessionWrite(_),
+            ) => Some(ControlMessage::error(
+                request_id,
+                wire::Error::new(
+                    ErrorCode::Unsupported,
+                    "session operations are not implemented by this host yet",
+                    false,
+                ),
+            )),
+            // A host never consumes SessionEvent (it is the producer);
+            // an unsolicited one is dropped like a stray Pong.
+            Some(control_message::Body::SessionEvent(_)) => None,
             Some(control_message::Body::Hello(_)) => Some(ControlMessage::error(
                 request_id,
                 wire::Error::new(
