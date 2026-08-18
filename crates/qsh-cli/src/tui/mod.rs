@@ -37,7 +37,11 @@
 mod term;
 
 use qsh_core::{OpError, Ops};
-use qsh_proto::{ErrorCode, SessionAttachReq, SessionOpenReq};
+use qsh_proto::ErrorCode;
+// Only the POSIX driver builds requests; on Windows `run` refuses before
+// there is anything to ask for.
+#[cfg(unix)]
+use qsh_proto::{SessionAttachReq, SessionOpenReq};
 
 /// What to attach to.
 #[derive(Debug, Clone)]
@@ -75,6 +79,7 @@ impl Attach {
 /// session: locale only (`docs/design/architecture.md` §4 — `TERM` travels
 /// in `SessionSpec.term`, and `HOME`/`USER`/`LOGNAME`/`SHELL`/`PATH` are
 /// pinned by the host and silently ignored here).
+#[cfg(unix)]
 const LOCALE_VARS: &[&str] = &["LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "LC_COLLATE"];
 
 /// Run an interactive session to completion and return the process exit
