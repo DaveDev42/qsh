@@ -353,3 +353,29 @@ async fn the_accounting_identity_holds_under_every_fault_at_once() {
     assert!(stats.corrupted > 0, "{stats:?}");
     assert!(stats.is_balanced(), "{stats:?}");
 }
+
+/// A `sever()` purges whatever that flow had staged. Those datagrams were
+/// already counted on arrival, so if the purge is silent the identity goes
+/// false the moment a chaos test severs a path under a delay — which is
+/// exactly what the resume tests do.
+#[tokio::test(flavor = "multi_thread")]
+async fn severing_a_flow_accounts_for_the_datagrams_it_purges() {
+    let w = Wire::start(ChaosPolicy::seeded(0x5EE_2ED).delay(DelayDist::fixed(ARRIVE))).await;
+    let c = client().await;
+    c.send_to(b"staged", w.front()).await.expect("send");
+    let staged = until_stats(&w.proxy, |s| s.inflight == 1).await;
+    assert_eq!(staged.to_server, 0, "{staged:?}");
+
+    w.proxy.sever().await;
+    let stats = until_stats(&w.proxy, |s| s.severs == 1 && s.inflight == 0).await;
+    assert_eq!(
+        stats.undeliverable, 1,
+        "the purged datagram was not accounted for — {stats:?}"
+    );
+    assert!(stats.is_balanced(), "{stats:?}");
+    assert!(
+        recv(&w.host, NEVER).await.is_none(),
+        "a purged datagram was relayed anyway — {}",
+        w.ctx()
+    );
+}

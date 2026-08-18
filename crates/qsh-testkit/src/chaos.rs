@@ -797,12 +797,22 @@ impl Runner {
                 for client in targets {
                     self.blocked.insert(client);
                     self.flows.remove(&client);
+                    // Datagrams already staged for this flow (waiting out a
+                    // delay or parked for a reorder) were counted on
+                    // arrival and can never be sent now. Count them as
+                    // undeliverable, or `inflight` would simply shrink and
+                    // `ChaosStats::is_balanced` — the identity that keeps
+                    // every other counter honest — would go false after a
+                    // sever.
+                    let before = self.pending.len() + self.held.len();
                     self.pending = self
                         .pending
                         .drain()
                         .filter(|Reverse(s)| s.client != client)
                         .collect();
                     self.held.retain(|(c, _), _| *c != client);
+                    let purged = before - (self.pending.len() + self.held.len());
+                    self.stats.undeliverable += purged as u64;
                 }
                 self.stats.severs += 1;
                 let _ = reply.send(());
