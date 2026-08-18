@@ -385,8 +385,10 @@ async fn denied_peer_cannot_learn_whether_a_session_exists() {
     h.shutdown().await;
 }
 
-/// `session.attach` for an unknown id is `SESSION_NOT_FOUND` — after mode
-/// validation and after the ACL choke point, with nothing created.
+/// `session.attach` for an unknown id is the same non-distinguishing
+/// `AUTH_FAILED` a wrong credential gets (protocol.md §10-2) — decided
+/// after mode validation, audited as a deny, with nothing created. The
+/// unknown id never reaches the broker, so existence is not disclosed.
 #[tokio::test(flavor = "multi_thread")]
 async fn attach_to_an_unknown_session_creates_nothing() {
     let h = LoopbackHarness::start().await;
@@ -424,6 +426,10 @@ async fn attach_to_an_unknown_session_creates_nothing() {
             1,
             wire::control_message::Body::SessionAttach(wire::SessionAttach {
                 session_id: "01K0NOSUCHSESSION".into(),
+                // A well-formed credential for a session that does not
+                // exist: the answer must not differ from the one a real id
+                // with a stale token gets.
+                resume_token: vec![7u8; 32],
                 mode: wire::AttachMode::Rw as i32,
                 ..Default::default()
             }),
@@ -440,16 +446,15 @@ async fn attach_to_an_unknown_session_creates_nothing() {
     match reply.body {
         Some(wire::control_message::Body::Response(wire::Response {
             body: Some(wire::response::Body::Error(e)),
-        })) => assert_eq!(e.error_code(), ErrorCode::SessionNotFound),
-        other => panic!("expected SESSION_NOT_FOUND, got {other:?}"),
+        })) => assert_eq!(e.error_code(), ErrorCode::AuthFailed),
+        other => panic!("expected AUTH_FAILED, got {other:?}"),
     }
-    // The attempt went through the ACL choke point (`session.attach` on
-    // the id, audited) before the broker was consulted; nothing was created.
+    // The refusal is audited structurally, and nothing was created.
     let recs = h.audit.records();
     assert_eq!(recs.len(), 1, "{recs:?}");
     assert_eq!(recs[0].action, "session.attach");
     assert_eq!(recs[0].resource, "01K0NOSUCHSESSION");
-    assert_eq!(recs[0].decision, "allow");
+    assert_eq!(recs[0].decision, "deny");
     assert_eq!(h.server.pending_tickets(), 0);
     assert_eq!(h.broker.session_count(), 0);
     dialed.connection.close(0, b"done");

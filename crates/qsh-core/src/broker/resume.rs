@@ -27,8 +27,9 @@ use rand::RngCore as _;
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
-use super::SessionId;
 use super::clock::Clock;
+use super::session::InputStreamId;
+use super::{SessionId, session::FIRST_INPUT_STREAM};
 
 /// Length of a resume token, in bytes (`docs/design/protocol.md` §10).
 pub const RESUME_TOKEN_LEN: usize = 32;
@@ -161,6 +162,11 @@ struct Entry {
     hash: TokenHash,
     peer: PeerFingerprint,
     expires_at: Instant,
+    /// The input axis this credential's lineage last used. A redemption
+    /// forks its own axis from this one, so the un-acked tail a resumed
+    /// client retransmits is deduplicated against what the child already
+    /// ran (protocol.md §10-5).
+    input_stream: InputStreamId,
 }
 
 /// The host's resume-credential store: `session_id → (blake3(token),
@@ -209,6 +215,9 @@ impl ResumeRegistry {
 
     /// Mint the session's first token, bound to `peer` and living `ttl`.
     /// Replaces any existing credential for `id` (single generation).
+    ///
+    /// The lineage starts on [`FIRST_INPUT_STREAM`], which is the axis
+    /// `session.open`'s own ticket carries.
     pub fn issue(&self, id: &SessionId, peer: PeerFingerprint, ttl: Duration) -> ResumeToken {
         let token = ResumeToken::generate();
         let expires_at = self.clock.now() + ttl;
@@ -218,6 +227,7 @@ impl ResumeRegistry {
                 hash: token.hash(),
                 peer,
                 expires_at,
+                input_stream: FIRST_INPUT_STREAM,
             },
         );
         token
@@ -230,13 +240,15 @@ impl ResumeRegistry {
     /// (protocol.md §10-2).
     ///
     /// A pass means the peer proved custody of the session; the caller
-    /// still owes the ACL check before anything is issued.
+    /// still owes the ACL check before anything is issued. On success the
+    /// lineage's current input axis comes back with it — the axis the
+    /// redemption forks from.
     pub fn verify(
         &self,
         id: &SessionId,
         presented: &[u8],
         peer: PeerFingerprint,
-    ) -> Result<(), ResumeDenied> {
+    ) -> Result<InputStreamId, ResumeDenied> {
         let now = self.clock.now();
         let entries = self.lock();
         let entry = entries.get(id);
@@ -249,7 +261,7 @@ impl ResumeRegistry {
         let hash_ok = TokenHash::of(presented).ct_eq(&stored_hash);
         let peer_ok = stored_peer.ct_eq(&peer);
         if bool::from(present & hash_ok & peer_ok & fresh) {
-            Ok(())
+            Ok(entry.map_or(FIRST_INPUT_STREAM, |e| e.input_stream))
         } else {
             Err(ResumeDenied)
         }
@@ -266,13 +278,21 @@ impl ResumeRegistry {
         presented: &[u8],
         peer: PeerFingerprint,
         ttl: Duration,
+        input_stream: InputStreamId,
     ) -> Result<ResumeToken, ResumeDenied> {
         let now = self.clock.now();
         let mut entries = self.lock();
-        let entry = entries.get(id).ok_or(ResumeDenied)?;
-        let ok = TokenHash::of(presented).ct_eq(&entry.hash)
-            & entry.peer.ct_eq(&peer)
-            & subtle::Choice::from(u8::from(entry.expires_at > now));
+        // Folded like `verify`, against zeros when the id is unknown, so
+        // this cannot become the timing oracle `verify` refuses to be.
+        let entry = entries.get(id);
+        let present = subtle::Choice::from(u8::from(entry.is_some()));
+        let stored_hash = entry.map_or(TokenHash([0u8; 32]), |e| e.hash);
+        let stored_peer = entry.map_or(PeerFingerprint([0u8; PEER_FINGERPRINT_LEN]), |e| e.peer);
+        let fresh = subtle::Choice::from(u8::from(entry.is_some_and(|e| e.expires_at > now)));
+        let ok = present
+            & TokenHash::of(presented).ct_eq(&stored_hash)
+            & stored_peer.ct_eq(&peer)
+            & fresh;
         if !bool::from(ok) {
             return Err(ResumeDenied);
         }
@@ -283,6 +303,7 @@ impl ResumeRegistry {
                 hash: token.hash(),
                 peer,
                 expires_at: now + ttl,
+                input_stream,
             },
         );
         Ok(token)
@@ -301,6 +322,27 @@ impl ResumeRegistry {
     pub fn purge_expired(&self) {
         let now = self.clock.now();
         self.lock().retain(|_, e| e.expires_at > now);
+    }
+
+    /// Re-anchor every credential to its session's own deadline, then drop
+    /// the ones whose session is gone and whose TTL has lapsed.
+    ///
+    /// A credential must live exactly as long as the session it resumes.
+    /// Anchoring it to the moment it was *issued* instead is what would
+    /// make a session that stays attached longer than `[serve].resume_ttl`
+    /// — the product's whole premise — alive but permanently unresumable:
+    /// the session's own TTL does not run while attached, so a credential
+    /// on a separate clock expires under a healthy session and the next
+    /// disconnect orphans it (`docs/PRD.md` §13).
+    pub fn sync_expiry(&self, deadlines: &HashMap<SessionId, Instant>) {
+        let now = self.clock.now();
+        self.lock().retain(|id, e| match deadlines.get(id) {
+            Some(&deadline) => {
+                e.expires_at = deadline;
+                true
+            }
+            None => e.expires_at > now,
+        });
     }
 }
 
@@ -321,14 +363,21 @@ mod tests {
         (clock, registry, SessionId("01K0SESSION".into()))
     }
 
+    const AXIS: InputStreamId = InputStreamId(7);
+
     #[test]
     fn a_token_is_accepted_once_and_its_successor_replaces_it() {
         let (_clock, registry, id) = rig();
         let first = registry.issue(&id, peer(1), TTL);
 
-        registry.verify(&id, first.expose(), peer(1)).unwrap();
+        // A fresh credential's lineage starts on the axis `session.open`'s
+        // own ticket carries.
+        assert_eq!(
+            registry.verify(&id, first.expose(), peer(1)),
+            Ok(FIRST_INPUT_STREAM)
+        );
         let second = registry
-            .rotate(&id, first.expose(), peer(1), TTL)
+            .rotate(&id, first.expose(), peer(1), TTL, AXIS)
             .expect("first redemption");
 
         assert_ne!(first.expose(), second.expose());
@@ -338,20 +387,46 @@ mod tests {
             Err(ResumeDenied)
         );
         assert_eq!(
-            registry.rotate(&id, first.expose(), peer(1), TTL),
+            registry.rotate(&id, first.expose(), peer(1), TTL, AXIS),
             Err(ResumeDenied)
         );
-        registry.verify(&id, second.expose(), peer(1)).unwrap();
+        // …and the successor carries the lineage the redemption forked on,
+        // so the next resume deduplicates against the right axis.
+        assert_eq!(registry.verify(&id, second.expose(), peer(1)), Ok(AXIS));
     }
 
     #[test]
     fn two_peers_racing_on_one_token_cannot_both_win() {
         let (_clock, registry, id) = rig();
         let token = registry.issue(&id, peer(1), TTL);
-        let a = registry.rotate(&id, token.expose(), peer(1), TTL);
-        let b = registry.rotate(&id, token.expose(), peer(1), TTL);
+        let a = registry.rotate(&id, token.expose(), peer(1), TTL, AXIS);
+        let b = registry.rotate(&id, token.expose(), peer(1), TTL, AXIS);
         assert!(a.is_ok());
         assert_eq!(b, Err(ResumeDenied));
+    }
+
+    #[test]
+    fn a_live_session_keeps_its_credential_past_the_issue_ttl() {
+        let (clock, registry, id) = rig();
+        let token = registry.issue(&id, peer(1), TTL);
+        // The session is attached, so its own TTL is not running: the
+        // reaper re-anchors the credential to the session's deadline on
+        // every pass.
+        for _ in 0..4 {
+            clock.advance(TTL / 2);
+            let deadlines = HashMap::from([(id.clone(), clock.now() + TTL)]);
+            registry.sync_expiry(&deadlines);
+        }
+        assert!(
+            registry.verify(&id, token.expose(), peer(1)).is_ok(),
+            "a session alive past `resume_ttl` must still be resumable"
+        );
+
+        // Once the session is gone from the registry, the credential is on
+        // its own clock again and lapses.
+        clock.advance(TTL + Duration::from_secs(1));
+        registry.sync_expiry(&HashMap::new());
+        assert!(registry.is_empty());
     }
 
     #[test]
@@ -407,7 +482,34 @@ mod tests {
         let token = ResumeToken::generate();
         assert_eq!(format!("{token:?}"), "ResumeToken(<redacted>)");
         assert_eq!(format!("{:?}", token.hash()), "TokenHash(<redacted>)");
-        // And a token is never printed by a container holding it either.
+
+        // A container that actually embeds the secret is where a stray
+        // `#[derive(Debug)]` would leak, so that is what this asserts on —
+        // `ResumeRegistry`'s own `Debug` prints a count and would pass
+        // however the redaction was broken.
+        #[derive(Debug)]
+        #[allow(dead_code)]
+        struct Holder {
+            token: ResumeToken,
+            hash: TokenHash,
+            peer: PeerFingerprint,
+        }
+        let rendered = format!(
+            "{:?}",
+            Holder {
+                token: token.clone(),
+                hash: token.hash(),
+                peer: peer(0xAB),
+            }
+        );
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+        let hex: String = token.expose().iter().map(|b| format!("{b:02x}")).collect();
+        assert!(!rendered.contains(&hex), "{rendered}");
+        // A fingerprint is not a secret, but a whole one in a log line is
+        // noise: only a short prefix is printed.
+        assert!(rendered.contains("PeerFingerprint(abab…)"), "{rendered}");
+
+        // …and the registry still prints nothing but a count.
         let registry = ResumeRegistry::new(Arc::new(TestClock::new()));
         let id = SessionId("01K0SESSION".into());
         let token = registry.issue(&id, peer(1), TTL);

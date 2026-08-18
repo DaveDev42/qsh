@@ -93,6 +93,26 @@ async fn attach(
     }
 }
 
+/// A second pinned device: its own dialer, its own connection, its own
+/// principal.
+async fn other_device(
+    h: &LoopbackHarness,
+    identity: &qsh_testkit::loopback::TestIdentity,
+) -> Session {
+    let client_trust = StaticTrust::empty().with_pin(
+        h.server_identity.fingerprint,
+        Principal::Device("box".into()),
+    );
+    let dialer = Dialer::new(identity.local.clone(), Arc::new(client_trust));
+    let dialed = dialer
+        .dial(h.addr, "127.0.0.1")
+        .await
+        .expect("the second device is pinned");
+    Session::negotiate(dialed.connection, "desktop")
+        .await
+        .expect("negotiate")
+}
+
 /// Read frames until `want` output bytes have arrived. Returns the bytes
 /// and the cumulative offset of the last one — the `L` a resume continues
 /// from.
@@ -216,8 +236,12 @@ async fn a_resumed_attach_stitches_the_stream_exactly_at_the_last_delivered_offs
     .await
     .expect("the successor credential must work");
 
-    // Nothing in the host's audit trail carries a credential. The record
-    // type has no payload field at all, which is the point.
+    // Nothing in the host's audit trail carries a credential. This is a
+    // tripwire, not a behavioural assertion: `AuditRecord` has no payload
+    // field, so today it cannot fail. It is here to fail the day someone
+    // adds one — the behavioural version is
+    // `record_has_only_structural_fields`, and `resume_secrecy.rs` covers
+    // the log/JSON surfaces properly.
     let audit = serde_json::to_string(&h.audit.records()).expect("audit records serialise");
     for token in [&opened.resume_token, &attached.new_resume_token] {
         assert!(
@@ -452,15 +476,17 @@ async fn a_stolen_credential_is_useless_to_a_different_peer() {
     h.shutdown().await;
 }
 
-/// The writer lease is decided under the broker's single lock, after the
-/// credential and the ACL (architecture.md §3 rule b): a foreign principal
-/// that refuses to steal gets `SESSION_CONFLICT`, and one that is willing
-/// takes the lease from the resumed attach.
+/// An attach that presents no credential is refused by the **host**, not
+/// just by the client (protocol.md §10-2, ADR-0007 결정 2).
 ///
-/// The two roles have to be two *principals*: a second connection from the
-/// same principal is the same writer moving devices, not a contender.
+/// The client refuses locally when it has no entry, but that is a
+/// convenience, not a boundary: under the M1–M4 allow-all-pinned posture
+/// every pinned device passes the ACL, so a `resume_token` the host treats
+/// as optional would hand any of them an RW PTY on somebody else's shell —
+/// and the credential's peer binding, which is the thing that makes attach
+/// device-local, would never be consulted.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_foreign_no_steal_attach_conflicts_and_a_stealing_one_takes_the_lease() {
+async fn an_attach_without_a_credential_is_refused_by_the_host() {
     let owner = make_identity();
     let other = make_identity();
     let server_trust = StaticTrust::empty()
@@ -473,51 +499,117 @@ async fn a_foreign_no_steal_attach_conflicts_and_a_stealing_one_takes_the_lease(
     drop(data);
     first.close();
 
-    // The owner resumes on a new connection and holds the lease.
+    // The owner itself, on a new connection, with the field left empty.
     let mut owner_conn = h.session().await;
+    assert_eq!(
+        attach(
+            &mut owner_conn,
+            attach_req(&opened.session_id, Vec::new(), 0)
+        )
+        .await
+        .unwrap_err(),
+        ErrorCode::AuthFailed,
+        "an empty resume_token must not skip the credential gate"
+    );
+
+    // A second pinned device the ACL allows everything: same answer, and
+    // the same one it gets for an id that never existed — no oracle.
+    let mut desktop = other_device(&h, &other).await;
+    assert_eq!(
+        attach(&mut desktop, attach_req(&opened.session_id, Vec::new(), 0))
+            .await
+            .unwrap_err(),
+        ErrorCode::AuthFailed
+    );
+    assert_eq!(
+        attach(&mut desktop, attach_req("01K0NOSUCHSESSION", Vec::new(), 0))
+            .await
+            .unwrap_err(),
+        ErrorCode::AuthFailed
+    );
+
+    // None of it spent the owner's credential.
+    attach(
+        &mut owner_conn,
+        attach_req(&opened.session_id, opened.resume_token.clone(), 0),
+    )
+    .await
+    .expect("the credential is untouched by the refusals");
+
+    desktop.close();
+    owner_conn.close();
+    h.shutdown().await;
+}
+
+/// The writer lease is decided under the broker's single lock, after the
+/// credential and the ACL (architecture.md §3 rule b) — and the control
+/// message only **probes** it: `session.attach` answers `SESSION_CONFLICT`
+/// without moving anything, because the redemption is not final until the
+/// successor credential is minted (protocol.md §10-2 "전부 통과 후에만").
+/// The binding take happens where the data stream opens.
+///
+/// The contender has to be a different *principal* (a second connection
+/// from the same principal is the same writer moving devices), and since
+/// an attach requires the session's credential, the only way a foreign
+/// principal comes to hold the lease is the `session.write` value op.
+#[tokio::test(flavor = "multi_thread")]
+async fn no_steal_conflicts_with_a_foreign_lease_and_spends_no_credential() {
+    let owner = make_identity();
+    let other = make_identity();
+    let server_trust = StaticTrust::empty()
+        .with_pin(owner.fingerprint, Principal::Device("laptop".into()))
+        .with_pin(other.fingerprint, Principal::Device("desktop".into()));
+    let h = LoopbackHarness::start_custom(Arc::new(AllowAllPinned), owner, server_trust).await;
+
+    let mut first = h.session().await;
+    let (opened, mut pipe, data) = open_and_attach(&h, &mut first).await;
+    drop(data);
+    first.close();
+
+    // A foreign principal takes the writer lease the only way it can.
+    let mut desktop = other_device(&h, &other).await;
+    desktop
+        .session_write(&opened.session_id, b"x".to_vec())
+        .await
+        .expect("the value op is ACL-allowed and takes the lease");
+
+    // Refusing to steal loses. The code says exactly why: this is not the
+    // non-distinguishing path — nothing about a credential failed.
+    let mut owner_conn = h.session().await;
+    let mut careful = attach_req(&opened.session_id, opened.resume_token.clone(), 0);
+    careful.no_steal = true;
+    assert_eq!(
+        attach(&mut owner_conn, careful).await.unwrap_err(),
+        ErrorCode::SessionConflict,
+        "no_steal must not take a lease a different principal holds"
+    );
+
+    // The refusal was decided before the rotation, so the credential is
+    // still spendable — a conflict must not orphan the session.
     let attached = attach(
         &mut owner_conn,
         attach_req(&opened.session_id, opened.resume_token.clone(), 0),
     )
     .await
-    .expect("resume is accepted");
-    assert!(attached.writer_lease, "an RW attach takes the lease");
-
-    let client_trust = StaticTrust::empty().with_pin(
-        h.server_identity.fingerprint,
-        Principal::Device("box".into()),
-    );
-    let other_dialer = Dialer::new(other.local.clone(), Arc::new(client_trust));
-    let connect_other = || async {
-        let dialed = other_dialer
-            .dial(h.addr, "127.0.0.1")
-            .await
-            .expect("the second device is pinned");
-        Session::negotiate(dialed.connection, "desktop")
-            .await
-            .expect("negotiate")
-    };
-
-    // Refusing to steal loses. The code says exactly why: this is not the
-    // non-distinguishing path — nothing about a credential failed.
-    let mut polite = connect_other().await;
-    let mut req = attach_req(&opened.session_id, Vec::new(), 0);
-    req.no_steal = true;
+    .expect("a stealing attach is allowed");
+    assert!(attached.writer_lease, "an RW attach is granted the lease");
+    // …and it is the data stream that actually moves it.
+    let mut data = redeem(&owner_conn, attached.ticket.clone()).await;
+    pipe.write_output(b"hi").await.unwrap();
+    let _ = read_output(&mut data, 2).await;
     assert_eq!(
-        attach(&mut polite, req).await.unwrap_err(),
-        ErrorCode::SessionConflict,
-        "no_steal must not take a lease a different principal holds"
+        h.broker
+            .get(&qsh_core::broker::SessionId(opened.session_id.clone()))
+            .unwrap()
+            .info()
+            .writer
+            .as_deref(),
+        Some("device:laptop"),
+        "the steal lands when the stream opens"
     );
 
-    // Willing to steal wins — interactive attach steals by default.
-    let mut thief = connect_other().await;
-    let stolen = attach(&mut thief, attach_req(&opened.session_id, Vec::new(), 0))
-        .await
-        .expect("a stealing attach is allowed");
-    assert!(stolen.writer_lease, "the steal must transfer the lease");
-
-    thief.close();
-    polite.close();
+    drop(data);
+    desktop.close();
     owner_conn.close();
     h.shutdown().await;
 }

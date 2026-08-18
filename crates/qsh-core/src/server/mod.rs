@@ -46,8 +46,9 @@ use time::format_description::well_known::Rfc3339;
 use crate::acl::{Action, Authorizer};
 use crate::audit::{AuditRecord, AuditSink};
 use crate::broker::{
-    BrokerError, CloseReason, ConnectionId, ControlEvent, Cursor, InputStreamId, PeerFingerprint,
-    ReplayEvent, SessionBackend, SessionId, SessionSpec, Signal, TakeOutcome,
+    BrokerError, CloseReason, ConnectionId, ControlEvent, Cursor, FIRST_INPUT_STREAM,
+    InputStreamId, PeerFingerprint, ReplayEvent, ResumeDenied, SessionBackend, SessionId,
+    SessionSpec, Signal, TakeOutcome,
 };
 use crate::exec::{ExecSpec, run_exec};
 use crate::session_stream::SessionStream;
@@ -612,7 +613,9 @@ impl Server {
                 // data stream performs is decided when it arrives.
                 attach_authorized: false,
                 // A fresh session's first input stream, counting from zero.
-                input_stream: InputStreamId(1),
+                // The resume credential minted just below starts its
+                // lineage on the same axis.
+                input_stream: FIRST_INPUT_STREAM,
                 input_from: 0,
             },
         );
@@ -967,10 +970,16 @@ impl Server {
     /// `SESSION_NOT_FOUND` is reachable only past step 1, so it never
     /// discloses existence to a peer that failed the identity check.
     ///
-    /// An attach with **no** token is the same-connection case: the mutual
-    /// TLS principal *is* the identity, so step 1 is vacuous and step 2
-    /// carries the whole decision. It cannot cross connections, because a
-    /// session's credential is the only thing that survives one.
+    /// A `SessionAttach` carrying **no** credential is refused outright,
+    /// with the same non-distinguishing `AUTH_FAILED`. The credential is
+    /// what binds an attach to the device that opened the session
+    /// (ADR-0007 결정 2, protocol.md §10), and a check the client performs
+    /// on itself is not a boundary: making the field optional would let any
+    /// peer the ACL admits — under the M1–M4 allow-all-pinned posture, any
+    /// pinned device — take an RW PTY on somebody else's shell just by
+    /// leaving the field empty. The first stream of a freshly opened
+    /// session does not come through here: `session.open` mints its own
+    /// `SESSION_DATA` ticket.
     async fn handle_session_attach(
         &self,
         ctx: &ConnCtx,
@@ -987,19 +996,21 @@ impl Server {
             return invalid_argument(request_id, "attach mode must be RW");
         }
         let id = SessionId(req.session_id.clone());
-        let resuming = !req.resume_token.is_empty();
-        if resuming {
-            // ---- Step 1: credential + bound identity, before anything
-            // else touches the registry. ----
-            let denied = match ctx.peer_fingerprint {
-                Some(peer) => self
-                    .sessions
-                    .verify_resume(&id, &req.resume_token, peer)
-                    .is_err(),
-                // No verified leaf to bind against: fail closed.
-                None => true,
-            };
-            if denied {
+        // ---- Step 1: credential + bound identity, before anything else
+        // touches the registry. ----
+        let lineage = match ctx.peer_fingerprint {
+            // An empty field never reaches `verify` as a token: it is
+            // refused here, so the gate cannot be opted out of.
+            Some(peer) if !req.resume_token.is_empty() => {
+                self.sessions.verify_resume(&id, &req.resume_token, peer)
+            }
+            // No verified leaf to bind against, or no credential presented:
+            // fail closed, and answer exactly as a bad credential does.
+            _ => Err(ResumeDenied),
+        };
+        let lineage = match lineage {
+            Ok(stream) => stream,
+            Err(_) => {
                 // Structural only — the record names the op, the principal
                 // and the decision, never the credential (CLAUDE.md).
                 self.audit.record(&AuditRecord::now(
@@ -1017,7 +1028,7 @@ impl Server {
                 );
                 return auth_failed(request_id);
             }
-        }
+        };
         if let Err(denied) = self.authorize(ctx, request_id, Action::SessionAttach, &req.session_id)
         {
             return *denied;
@@ -1028,61 +1039,61 @@ impl Server {
             Ok(info) => info,
             Err(err) => return broker_error(request_id, err),
         };
-        let conn = ctx.connection_id();
         // Interactive attach steals by default (architecture.md §3 rule b);
         // `no_steal` makes a live foreign lease a `SESSION_CONFLICT`.
-        match self
-            .sessions
-            .take_lease(&id, ctx.principal.to_string(), conn, req.no_steal)
-            .await
+        //
+        // A **probe**, not a take: the redemption is not decided yet (the
+        // rotation below can still lose a race), and CLAUDE.md's "never
+        // create a resource before authorization succeeds" applies just as
+        // much to moving one that already exists. Stealing here and failing
+        // afterwards would leave the legitimate writer demoted in favour of
+        // a connection that never attached. The real, actor-serialised take
+        // happens where the data stream opens, which is also where a lease
+        // that changed hands in between is caught.
+        if req.no_steal
+            && self
+                .sessions
+                .lease_conflict(&id, &ctx.principal.to_string())
         {
-            Ok(TakeOutcome::Conflict { .. }) => {
-                return ControlMessage::error(
-                    request_id,
-                    wire::Error::new(
-                        ErrorCode::SessionConflict,
-                        "another principal holds the session's writer lease",
-                        true,
-                    ),
-                );
-            }
-            Ok(_) => {}
-            Err(err) => return broker_error(request_id, err),
+            return ControlMessage::error(
+                request_id,
+                wire::Error::new(
+                    ErrorCode::SessionConflict,
+                    "another principal holds the session's writer lease",
+                    true,
+                ),
+            );
         }
         // A cursor past the end of the stream is `INVALID_ARGUMENT` at the
         // ring; clamp instead, so a client that over-reports simply gets
         // everything from the current end.
         let replay_from = req.last_output_seq.min(info.last_sequence);
-        // A resumed attach continues the input stream it left, so the bytes
-        // it retransmits are deduplicated against what the child already
-        // ran; anything else is a new logical writer and starts at zero
+        // This attach's own input axis, forked from the one its credential
+        // names and seeded with that axis's applied offset: the un-acked
+        // tail the client retransmits is deduplicated against what the child
+        // already ran, and the attach this one succeeds — which may still be
+        // connected and typing after its demotion — cannot move the cursor
         // (protocol.md §10-5).
-        let (input_stream, input_from) = if resuming {
-            match self.sessions.input_cursor(&id) {
-                Ok(cursor) => cursor,
-                Err(err) => return broker_error(request_id, err),
-            }
-        } else {
-            match self.sessions.new_input_stream(&id) {
-                Ok(stream) => (stream, 0),
-                Err(err) => return broker_error(request_id, err),
-            }
+        let (input_stream, input_from) = match self.sessions.fork_input_stream(&id, Some(lineage)) {
+            Ok(forked) => forked,
+            Err(err) => return broker_error(request_id, err),
         };
         // The successor credential. Minted last, after every check passed:
         // the presented token dies here, so a redemption that got this far
         // is the one and only winner (protocol.md §10 "Rotation").
-        let new_resume_token = if resuming {
+        let new_resume_token = {
             let Some(peer) = ctx.peer_fingerprint else {
                 return auth_failed(request_id);
             };
-            match self.sessions.rotate_resume(&id, &req.resume_token, peer) {
-                Ok(token) => Some(token),
+            match self
+                .sessions
+                .rotate_resume(&id, &req.resume_token, peer, input_stream)
+            {
+                Ok(token) => token,
                 // Lost the race with another redemption of the same token
                 // between step 1 and here. Same non-distinguishing answer.
                 Err(_) => return auth_failed(request_id),
             }
-        } else {
-            None
         };
         let ticket = self.issue_ticket(
             ctx.conn_id,
@@ -1101,17 +1112,13 @@ impl Server {
             peer = %ctx.peer_addr,
             session_id = %id,
             replay_from,
-            resumed = resuming,
             "session.attach authorized"
         );
         ControlMessage::response(
             request_id,
             response::Body::SessionAttached(wire::SessionAttached {
                 ticket: ticket.to_vec(),
-                new_resume_token: new_resume_token
-                    .as_ref()
-                    .map(|t| t.expose().to_vec())
-                    .unwrap_or_default(),
+                new_resume_token: new_resume_token.expose().to_vec(),
                 replay_from,
                 writer_lease: true,
                 expires_at,
@@ -1962,13 +1969,20 @@ mod tests {
     }
 
     async fn open_session(rig: &Rig, ctx: &ConnCtx) -> (String, Vec<u8>, PipeHandle) {
+        let (opened, pipe) = open_session_full(rig, ctx).await;
+        (opened.session_id, opened.ticket, pipe)
+    }
+
+    /// The whole `SessionOpened`, for the tests that need the session's
+    /// resume credential (every `session.attach` presents one).
+    async fn open_session_full(rig: &Rig, ctx: &ConnCtx) -> (wire::SessionOpened, PipeHandle) {
         let reply = rig.server.dispatch(ctx, &session_open(1)).await.unwrap();
-        let (id, ticket) = match response_body(&reply) {
-            response::Body::SessionOpened(o) => (o.session_id.clone(), o.ticket.clone()),
+        let opened = match response_body(&reply) {
+            response::Body::SessionOpened(o) => o.clone(),
             other => panic!("expected SessionOpened, got {other:?}"),
         };
         let pipe = rig.pipes.take().expect("pipe handle for the new session");
-        (id, ticket, pipe)
+        (opened, pipe)
     }
 
     /// Every session op with a fixed id, as (op name, body) — the set the
@@ -2881,10 +2895,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn attach_issues_a_ticket_and_an_unverifiable_credential_is_refused() {
+    async fn attach_redeems_a_credential_and_anything_else_is_refused() {
         let rig = allow_rig();
         let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
-        let (id, _t, _pipe) = open_session(&rig, &ctx).await;
+        let (opened, _pipe) = open_session_full(&rig, &ctx).await;
+        let id = opened.session_id.clone();
         rig.audit.clear();
 
         let attach = |sid: String, token: Vec<u8>| wire::SessionAttach {
@@ -2899,7 +2914,10 @@ mod tests {
                 &ctx,
                 &ControlMessage::new(
                     1,
-                    control_message::Body::SessionAttach(attach(id.clone(), Vec::new())),
+                    control_message::Body::SessionAttach(attach(
+                        id.clone(),
+                        opened.resume_token.clone(),
+                    )),
                 ),
             )
             .await
@@ -2910,90 +2928,69 @@ mod tests {
         assert_eq!(a.ticket.len(), TICKET_LEN);
         assert_eq!(a.replay_from, 0);
         assert!(a.writer_lease);
-        // Nothing was presented, so nothing rotates: a successor is the
-        // answer to a redemption, not a giveaway to any attach that asks
-        // (protocol.md §10 "Rotation").
-        assert!(
-            a.new_resume_token.is_empty(),
-            "a token-less attach must not be handed a credential"
+        // A redemption always mints the next generation, and it is never
+        // the one that was spent (protocol.md §10 "Rotation").
+        assert_eq!(a.new_resume_token.len(), RESUME_TOKEN_LEN);
+        assert_ne!(a.new_resume_token, opened.resume_token);
+        assert_eq!(
+            a.input_seq, 0,
+            "the axis is forked from the open's, which has applied nothing"
         );
-        assert_eq!(a.input_seq, 0, "a fresh attach starts its own input axis");
         assert_eq!(
             rig.server.pending_tickets(),
             2,
             "the open's ticket plus this one"
         );
 
-        // An unknown id is SESSION_NOT_FOUND (existence disclosure only
-        // *after* the ACL decision, same as session.get/read/write) — and
-        // only for an attach that presents no credential at all.
-        let reply = rig
-            .server
-            .dispatch(
-                &ctx,
-                &ControlMessage::new(
-                    2,
-                    control_message::Body::SessionAttach(attach(
-                        "01K0NOSUCHSESSION".into(),
-                        Vec::new(),
-                    )),
-                ),
-            )
-            .await
-            .unwrap();
-        assert_eq!(error_code(&reply), Some(ErrorCode::SessionNotFound));
-        let reply = rig
-            .server
-            .dispatch(
-                &ctx,
-                &ControlMessage::new(
-                    3,
-                    control_message::Body::SessionAttach(attach(id.clone(), vec![7u8; 32])),
-                ),
-            )
-            .await
-            .unwrap();
-        // A token that does not verify is AUTH_FAILED, and says nothing
-        // about whether the session exists (protocol.md §10-2). Note the
-        // id here is a *real* session: the answer is the same one a
-        // fabricated id gets below.
-        assert_eq!(error_code(&reply), Some(ErrorCode::AuthFailed));
-        let reply = rig
-            .server
-            .dispatch(
-                &ctx,
-                &ControlMessage::new(
-                    4,
-                    control_message::Body::SessionAttach(attach(
-                        "01K0NOSUCHSESSION".into(),
-                        vec![7u8; 32],
-                    )),
-                ),
-            )
-            .await
-            .unwrap();
+        // Every other shape gets the same non-distinguishing answer: no
+        // credential at all, a credential that does not verify, a real id,
+        // a fabricated one. `SESSION_NOT_FOUND` is not reachable from here,
+        // so an unauthorized peer cannot use attach as an existence oracle
+        // (protocol.md §10-2).
+        let refusals = [
+            (2u64, id.clone(), Vec::new()),
+            (3, "01K0NOSUCHSESSION".into(), Vec::new()),
+            (4, id.clone(), vec![7u8; RESUME_TOKEN_LEN]),
+            (5, "01K0NOSUCHSESSION".into(), vec![7u8; RESUME_TOKEN_LEN]),
+            // …including the credential that was just spent.
+            (6, id.clone(), opened.resume_token.clone()),
+        ];
+        for (request_id, sid, token) in refusals {
+            let reply = rig
+                .server
+                .dispatch(
+                    &ctx,
+                    &ControlMessage::new(
+                        request_id,
+                        control_message::Body::SessionAttach(attach(sid.clone(), token.clone())),
+                    ),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                error_code(&reply),
+                Some(ErrorCode::AuthFailed),
+                "request {request_id} on {sid}"
+            );
+        }
         assert_eq!(
-            error_code(&reply),
-            Some(ErrorCode::AuthFailed),
-            "a bad token on a real id and on a fake one must be \
-             indistinguishable"
+            rig.server.pending_tickets(),
+            2,
+            "a refused attach mints nothing"
         );
 
         // Every attempt was audited. A refused credential is a denial, not
         // a silent drop — and the record is structural: op, principal,
         // resource, decision, never the credential.
         let recs = rig.audit.records();
-        assert_eq!(recs.len(), 4, "{recs:?}");
+        assert_eq!(recs.len(), 6, "{recs:?}");
         assert!(recs.iter().all(|r| r.action == "session.attach"));
         assert_eq!(recs[0].resource, id);
         assert_eq!(recs[0].decision, "allow");
-        assert_eq!(recs[1].resource, "01K0NOSUCHSESSION");
-        assert_eq!(recs[1].decision, "allow");
-        assert_eq!(recs[2].decision, "deny");
-        assert_eq!(recs[3].decision, "deny");
+        assert!(recs[1..].iter().all(|r| r.decision == "deny"), "{recs:?}");
 
-        // Denied peers are audited too, and get the same non-distinguishing
-        // PERMISSION_DENIED for a real and a fabricated id.
+        // Denied peers are audited too. They never reach the ACL, because
+        // they hold no credential — and the answer is the same either way.
         let denied = self::rig(Arc::new(DenyAll));
         let dctx = self::ctx(Principal::Device("stranger".into()), ALL_CAPS);
         let reply = denied
@@ -3011,7 +3008,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(error_code(&reply), Some(ErrorCode::PermissionDenied));
+        assert_eq!(error_code(&reply), Some(ErrorCode::AuthFailed));
         let recs = denied.audit.records();
         assert_eq!(recs.len(), 1);
         assert_eq!(recs[0].decision, "deny");
@@ -3024,17 +3021,23 @@ mod tests {
     /// the lease — cannot quietly upgrade a careful attach into a stealing
     /// one. And a ticket minted by `session.open` carries no attach
     /// decision at all, because `session.open` only decided `session.open`.
+    ///
+    /// The control message *probes* the lease rather than taking it: a
+    /// redemption is not final until its successor credential is minted, and
+    /// a steal that happened before a failure would leave the real writer
+    /// demoted in favour of a connection that never attached.
     #[tokio::test]
     async fn no_steal_is_honoured_at_attach_and_rides_on_the_ticket() {
         let rig = allow_rig();
         let owner = ctx(Principal::Device("laptop".into()), ALL_CAPS);
-        let (id, open_ticket, _pipe) = open_session(&rig, &owner).await;
+        let (opened, _pipe) = open_session_full(&rig, &owner).await;
+        let id = opened.session_id.clone();
         let sid = SessionId(id.clone());
 
         // What `session.open` minted: no steal, and no attach decision.
         let purpose = rig
             .server
-            .redeem_ticket(owner.conn_id, StreamKind::SessionData, &open_ticket)
+            .redeem_ticket(owner.conn_id, StreamKind::SessionData, &opened.ticket)
             .expect("the open's ticket is redeemable")
             .purpose;
         let TicketPurpose::Session {
@@ -3068,8 +3071,9 @@ mod tests {
             .unwrap();
         assert_eq!(error_code(&reply), None, "{reply:?}");
 
-        let attach = |no_steal: bool| wire::SessionAttach {
+        let attach = |token: Vec<u8>, no_steal: bool| wire::SessionAttach {
             session_id: id.clone(),
+            resume_token: token,
             mode: wire::AttachMode::Rw as i32,
             no_steal,
             ..Default::default()
@@ -3086,7 +3090,10 @@ mod tests {
             .server
             .dispatch(
                 &careful,
-                &ControlMessage::new(3, control_message::Body::SessionAttach(attach(true))),
+                &ControlMessage::new(
+                    3,
+                    control_message::Body::SessionAttach(attach(opened.resume_token.clone(), true)),
+                ),
             )
             .await
             .unwrap();
@@ -3097,12 +3104,20 @@ mod tests {
             "a refused attach must not move the lease"
         );
 
-        // Steal-by-default wins, and the ticket records that it may.
+        // Steal-by-default wins, and the ticket records that it may. The
+        // conflict above was decided before the rotation, so the credential
+        // it refused is still the one that works here.
         let reply = rig
             .server
             .dispatch(
                 &careful,
-                &ControlMessage::new(4, control_message::Body::SessionAttach(attach(false))),
+                &ControlMessage::new(
+                    4,
+                    control_message::Body::SessionAttach(attach(
+                        opened.resume_token.clone(),
+                        false,
+                    )),
+                ),
             )
             .await
             .unwrap();
@@ -3111,8 +3126,10 @@ mod tests {
         };
         assert_eq!(
             rig.broker.get(&sid).unwrap().info().writer.as_deref(),
-            Some("device:phone")
+            Some("device:laptop"),
+            "the steal lands when the data stream opens, not before"
         );
+        let next_token = a.new_resume_token.clone();
         let purpose = rig
             .server
             .redeem_ticket(careful.conn_id, StreamKind::SessionData, &a.ticket)
@@ -3129,13 +3146,17 @@ mod tests {
         assert!(!no_steal);
         assert!(attach_authorized, "session.attach already decided it");
 
-        // A careful attach that *does* win still stamps `no_steal` on its
-        // ticket, so the data stream inherits the promise.
+        // A careful attach that *does* win — the lease is the requester's
+        // own principal — still stamps `no_steal` on its ticket, so the
+        // data stream inherits the promise.
         let reply = rig
             .server
             .dispatch(
-                &careful,
-                &ControlMessage::new(5, control_message::Body::SessionAttach(attach(true))),
+                &owner,
+                &ControlMessage::new(
+                    5,
+                    control_message::Body::SessionAttach(attach(next_token, true)),
+                ),
             )
             .await
             .unwrap();
@@ -3144,7 +3165,7 @@ mod tests {
         };
         let purpose = rig
             .server
-            .redeem_ticket(careful.conn_id, StreamKind::SessionData, &a.ticket)
+            .redeem_ticket(owner.conn_id, StreamKind::SessionData, &a.ticket)
             .expect("the attach ticket is redeemable")
             .purpose;
         let TicketPurpose::Session { no_steal, .. } = purpose else {

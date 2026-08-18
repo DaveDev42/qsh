@@ -219,6 +219,7 @@ async fn stale_consumer_gets_a_gap_and_the_source_reader_is_never_blocked() {
     let mut attached = s
         .attach(wire::SessionAttach {
             session_id: id.clone(),
+            resume_token: opened.resume_token.clone(),
             last_output_seq: 0,
             mode: wire::AttachMode::Rw as i32,
             ..Default::default()
@@ -460,14 +461,20 @@ async fn a_saturated_write_backlog_is_refused_retryably() {
     h.shutdown().await;
 }
 
-/// `session.attach` on a session another connection can also reach: the
-/// stream carries the same output the cursor-pull path would, and the
-/// child's exit closes it with an `Exit` frame.
+/// `session.attach` carries the session's output the same way the
+/// cursor-pull path would, and the child's exit closes it with an `Exit`
+/// frame.
+///
+/// A session created out of band — one this device never opened, so no
+/// credential was ever issued for it — cannot be attached at all: the
+/// credential is what binds an attach to the device that opened the
+/// session (ADR-0007 결정 2), and the host is where that is enforced.
 #[tokio::test(flavor = "multi_thread")]
 async fn attach_stream_ends_with_exit_when_the_child_exits() {
     let h = LoopbackHarness::start().await;
     let mut s = h.session().await;
-    let id = h
+
+    let out_of_band = h
         .broker
         .open(&SessionSpec {
             argv: vec!["sh".into()],
@@ -480,20 +487,41 @@ async fn attach_stream_ends_with_exit_when_the_child_exits() {
         .unwrap()
         .id()
         .to_string();
+    let _out_of_band_pipe = h.pipes.take().unwrap();
+    match s
+        .attach(wire::SessionAttach {
+            session_id: out_of_band.clone(),
+            mode: wire::AttachMode::Rw as i32,
+            ..Default::default()
+        })
+        .await
+    {
+        Err(qsh_core::client::ClientError::Remote {
+            code: ErrorCode::AuthFailed,
+            ..
+        }) => {}
+        Err(other) => panic!("expected AUTH_FAILED, got {other:?}"),
+        Ok(_) => panic!("a session with no credential must not be attachable"),
+    }
+
+    let opened = s.session_open(open_req()).await.expect("session.open");
+    let id = opened.session_id.clone();
     let mut pipe = h.pipes.take().unwrap();
 
     let mut attached = s
         .attach(wire::SessionAttach {
             session_id: id.clone(),
+            resume_token: opened.resume_token.clone(),
             mode: wire::AttachMode::Rw as i32,
             ..Default::default()
         })
         .await
         .expect("session.attach");
     assert!(attached.writer_lease, "an RW attach holds the lease");
-    assert!(
-        attached.new_resume_token.is_empty(),
-        "no resume token before Step 7"
+    assert_eq!(
+        attached.new_resume_token.len(),
+        32,
+        "a redemption mints the next generation"
     );
 
     pipe.write_output(b"done\r\n").await.unwrap();

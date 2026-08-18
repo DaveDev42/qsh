@@ -56,13 +56,15 @@ fn main() {
 /// and overridable with `QSH_LOG` (or `RUST_LOG`). stdout stays reserved
 /// for the JSON envelope / human result (`docs/CLI.md` §2.2).
 ///
-/// Recovery telemetry ([`qsh_core::telemetry`]) is the one exception to
-/// the level rule and gets its own layer. `docs/CLI.md` §6.4 fixes it as a
-/// **one-line JSON** record emitted at *default* verbosity — a campaign
-/// script (`docs/design/testing.md` L4) parses those lines whole — so a
-/// `warn` default level must not swallow it and the human formatter's
-/// timestamp/level prefix must not be wrapped around it. It still obeys
-/// `--quiet`, which means "no diagnostics".
+/// Recovery telemetry ([`qsh_core::telemetry`]) gets its own layer.
+/// `docs/CLI.md` §6.4 fixes it as a **one-line JSON** record emitted at
+/// *default* verbosity — a campaign script (`docs/design/testing.md` L4)
+/// parses those lines whole — so a `warn` default level must not swallow
+/// it and the human formatter's timestamp/level prefix must not be wrapped
+/// around it. It obeys `--quiet`, which means "no diagnostics", and it
+/// obeys an explicit `QSH_LOG`/`RUST_LOG` like every other diagnostic: a
+/// level control that cannot silence one of the two streams is a trap for
+/// anything scripting around it.
 fn init_tracing(cli: &Cli) {
     use tracing_subscriber::Layer as _;
     use tracing_subscriber::layer::SubscriberExt as _;
@@ -78,32 +80,65 @@ fn init_tracing(cli: &Cli) {
             _ => "trace",
         }
     };
-    let filter = EnvFilter::try_from_env("QSH_LOG")
-        .or_else(|_| EnvFilter::try_from_default_env())
-        .unwrap_or_else(|_| EnvFilter::new(default));
+    // One spec, two filters: `EnvFilter` is not `Clone`, and both layers
+    // have to read the same environment. An unparseable spec falls back to
+    // the flag-derived default, exactly as before.
+    let spec = std::env::var("QSH_LOG")
+        .or_else(|_| std::env::var("RUST_LOG"))
+        .ok()
+        .filter(|spec| EnvFilter::try_new(spec).is_ok());
+    // With no explicit spec, the recovery target sits at `info` whatever
+    // `-v` says, because §6.4 fixes the record as visible at *default*
+    // verbosity. An explicit spec governs it like anything else.
+    let recovery_default = format!("{default},{}=info", qsh_core::telemetry::TARGET);
     let human = tracing_subscriber::fmt::layer()
         .with_writer(io::stderr)
         .with_target(false)
-        .with_filter(filter)
+        .with_filter(env_filter(spec.as_deref(), default))
         .with_filter(tracing_subscriber::filter::filter_fn(|meta| {
             meta.target() != qsh_core::telemetry::TARGET
         }));
     let recovery_enabled = !cli.quiet;
-    let recovery = RecoveryLayer.with_filter(tracing_subscriber::filter::filter_fn(move |meta| {
-        recovery_enabled && meta.target() == qsh_core::telemetry::TARGET
-    }));
+    let recovery = RecoveryLayer(StderrLines)
+        .with_filter(env_filter(spec.as_deref(), &recovery_default))
+        .with_filter(tracing_subscriber::filter::filter_fn(move |meta| {
+            recovery_enabled && meta.target() == qsh_core::telemetry::TARGET
+        }));
     tracing_subscriber::registry()
         .with(human)
         .with(recovery)
         .init();
 }
 
-/// Writes a recovery record to stderr as exactly the line
+/// `spec` if it parses, otherwise `fallback`.
+fn env_filter(spec: Option<&str>, fallback: &str) -> EnvFilter {
+    spec.and_then(|spec| EnvFilter::try_new(spec).ok())
+        .unwrap_or_else(|| EnvFilter::new(fallback))
+}
+
+/// Where a recovery line goes. A trait so the layer can be exercised
+/// without a global subscriber and without capturing the process's stderr.
+trait LineSink: Send + Sync + 'static {
+    /// Write one already-complete line, terminator included.
+    fn write_line(&self, line: &str);
+}
+
+/// The production sink.
+struct StderrLines;
+
+impl LineSink for StderrLines {
+    fn write_line(&self, line: &str) {
+        // Best effort: telemetry must never be able to fail a command.
+        let _ = writeln!(io::stderr().lock(), "{line}");
+    }
+}
+
+/// Writes a recovery record as exactly the line
 /// [`qsh_core::telemetry::RecoveryReport::to_json_line`] produced —
 /// nothing before it, nothing after it.
-struct RecoveryLayer;
+struct RecoveryLayer<W>(W);
 
-impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for RecoveryLayer {
+impl<S: tracing::Subscriber, W: LineSink> tracing_subscriber::Layer<S> for RecoveryLayer<W> {
     fn on_event(
         &self,
         event: &tracing::Event<'_>,
@@ -114,8 +149,7 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for RecoveryLayer {
         if line.is_empty() {
             return;
         }
-        // Best effort: telemetry must never be able to fail a command.
-        let _ = writeln!(io::stderr().lock(), "{line}");
+        self.0.write_line(&line);
     }
 }
 
@@ -629,7 +663,91 @@ fn emit(result: std::io::Result<()>) -> i32 {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use qsh_core::telemetry::{Recovery, RecoveryReport, TARGET};
+    use tracing_subscriber::Layer as _;
+    use tracing_subscriber::layer::SubscriberExt as _;
+
     use super::*;
+
+    #[derive(Clone, Default)]
+    struct Captured(Arc<Mutex<Vec<String>>>);
+
+    impl LineSink for Captured {
+        fn write_line(&self, line: &str) {
+            self.0.lock().expect("not poisoned").push(line.to_string());
+        }
+    }
+
+    /// Run `body` with only the recovery layer installed, exactly as
+    /// `init_tracing` composes it, and return the lines it wrote.
+    fn capture(spec: Option<&str>, quiet: bool, body: impl FnOnce()) -> Vec<String> {
+        let sink = Captured::default();
+        let default = if quiet { "error" } else { "warn" };
+        let recovery_default = format!("{default},{TARGET}=info");
+        let enabled = !quiet;
+        let layer = RecoveryLayer(sink.clone())
+            .with_filter(env_filter(spec, &recovery_default))
+            .with_filter(tracing_subscriber::filter::filter_fn(move |meta| {
+                enabled && meta.target() == TARGET
+            }));
+        let subscriber = tracing_subscriber::registry().with(layer);
+        tracing::subscriber::with_default(subscriber, body);
+        let lines = sink.0.lock().expect("not poisoned");
+        lines.clone()
+    }
+
+    /// `docs/CLI.md` §6.4: at default verbosity a recovery is one line of
+    /// pure JSON on stderr — no level, no timestamp, no target prefix.
+    #[test]
+    fn a_recovery_is_one_pure_json_line_at_default_verbosity() {
+        let report = RecoveryReport::new(
+            Recovery::Resumed,
+            std::time::Duration::from_millis(412),
+            "mac/01K0ABCD",
+        );
+        let expected = report.to_json_line();
+        let lines = capture(None, false, || report.emit());
+        assert_eq!(lines, vec![expected.clone()], "expected exactly one line");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&lines[0]).expect("the line is pure JSON");
+        assert_eq!(parsed["recovery"], "resumed");
+        assert_eq!(parsed["time_to_recovery_ms"], 412);
+        assert_eq!(parsed["session_ref"], "mac/01K0ABCD");
+    }
+
+    /// An ordinary diagnostic on another target never reaches this layer,
+    /// so the stream stays parseable line by line.
+    #[test]
+    fn only_the_recovery_target_reaches_the_layer() {
+        let lines = capture(None, false, || {
+            tracing::info!("an ordinary diagnostic");
+            tracing::warn!(target: "qsh::something", "another one");
+        });
+        assert!(lines.is_empty(), "{lines:?}");
+    }
+
+    /// `-q` means no diagnostics, and an explicit `QSH_LOG` governs the
+    /// recovery stream like every other one.
+    #[test]
+    fn quiet_and_an_explicit_log_level_both_silence_it() {
+        let report = RecoveryReport::new(Recovery::Failed, std::time::Duration::ZERO, "mac/01K0");
+        assert!(capture(None, true, || report.emit()).is_empty(), "-q");
+        assert!(
+            capture(Some("off"), false, || report.emit()).is_empty(),
+            "off"
+        );
+        assert!(
+            capture(Some("error"), false, || report.emit()).is_empty(),
+            "error"
+        );
+        // …and asking for it explicitly still works.
+        assert_eq!(
+            capture(Some("qsh::recovery=info"), false, || report.emit()).len(),
+            1
+        );
+    }
 
     #[test]
     fn remote_exit_code_passes_through_except_255() {
