@@ -16,7 +16,16 @@
 //! client re-dial loop, the SC4 `kill -9` case. The harness is the point —
 //! those scenarios plug into it as `tests/resume_chaos.rs`.
 //!
-//! Every assertion message carries `h.context()`, which prints the seed.
+//! **Where the faults themselves are proved.** A counter bumped next to the
+//! effect it witnesses is not evidence, so "the fault fired" rests on two
+//! things outside this file's assertions: `ChaosStats::is_balanced` (the
+//! relay accounting identity — a fault that bumps its counter and relays
+//! anyway breaks it) and `tests/chaos_relay.rs`, which watches each fault
+//! happen on the wire with no QUIC in the way.
+//!
+//! Every assertion message carries `h.context()` — seed and addresses, safe
+//! to bind once. Counters are read at the assertion via `h.detail()`, never
+//! from a snapshot taken before the traffic.
 
 use std::time::Duration;
 
@@ -132,12 +141,20 @@ async fn a_fault_free_proxy_is_transparent() {
     assert_eq!(r.exit_code, 3, "{ctx}");
 
     let stats = h.chaos().stats();
-    assert!(stats.to_server > 0 && stats.to_client > 0, "{ctx}");
-    assert_eq!(stats.dropped, 0, "{ctx}");
-    assert_eq!(stats.corrupted, 0, "{ctx}");
-    assert_eq!(stats.duplicated, 0, "{ctx}");
-    assert_eq!(stats.delayed, 0, "{ctx}");
-    assert_eq!(stats.reordered, 0, "{ctx}");
+    assert!(
+        stats.to_server > 0 && stats.to_client > 0,
+        "{stats:?} — {ctx}"
+    );
+    assert_eq!(stats.dropped, 0, "{stats:?} — {ctx}");
+    assert_eq!(stats.corrupted, 0, "{stats:?} — {ctx}");
+    assert_eq!(stats.duplicated, 0, "{stats:?} — {ctx}");
+    assert_eq!(stats.delayed, 0, "{stats:?} — {ctx}");
+    assert_eq!(stats.reordered, 0, "{stats:?} — {ctx}");
+    assert_eq!(stats.blackholed, 0, "{stats:?} — {ctx}");
+    assert!(
+        stats.is_balanced(),
+        "relay accounting broke: {stats:?} — {ctx}"
+    );
     s.close();
     h.shutdown().await;
 }
@@ -180,12 +197,37 @@ async fn exec_is_byte_identical_under_loss_delay_reorder_and_duplication() {
         "stdout is not byte-identical — {ctx}"
     );
 
+    // The counters say the faults fired; the accounting identity says they
+    // *did* something (a fault that bumped and relayed anyway would have sent
+    // more datagrams than it accounts for), and quinn's own loss counter is
+    // the independent, transport-level witness that datagrams went missing —
+    // a loopback path with a transparent relay loses nothing.
     let stats = h.chaos().stats();
-    let ctx = h.context();
-    assert!(stats.dropped > 0, "the drop fault never fired — {ctx}");
-    assert!(stats.delayed > 0, "the delay fault never fired — {ctx}");
-    assert!(stats.duplicated > 0, "the dup fault never fired — {ctx}");
-    assert!(stats.reordered > 0, "the reorder fault never fired — {ctx}");
+    assert!(stats.dropped > 0, "the drop fault never fired — {stats:?}");
+    assert!(stats.delayed > 0, "the delay fault never fired — {stats:?}");
+    assert!(
+        stats.duplicated > 0,
+        "the dup fault never fired — {stats:?}"
+    );
+    assert!(
+        stats.reordered > 0,
+        "the reorder fault never fired — {stats:?}"
+    );
+    assert!(
+        stats.is_balanced(),
+        "relay accounting broke: {stats:?} — {ctx}"
+    );
+    let client_lost = s.connection().quinn().stats().path.lost_packets;
+    let host_lost: u64 = h
+        .server_connections()
+        .iter()
+        .map(|c| c.quinn().stats().path.lost_packets)
+        .sum();
+    assert!(
+        client_lost + host_lost > 0,
+        "nothing was ever detected as lost (client {client_lost}, host {host_lost}) — {}",
+        h.detail()
+    );
     s.close();
     h.shutdown().await;
 }
@@ -240,9 +282,15 @@ async fn session_ops_are_byte_identical_under_loss_delay_reorder_and_duplication
     assert_eq!(final_seq, produced.len() as u64, "{ctx}");
 
     let stats = h.chaos().stats();
-    let ctx = h.context();
-    assert!(stats.dropped > 0, "the drop fault never fired — {ctx}");
-    assert!(stats.duplicated > 0, "the dup fault never fired — {ctx}");
+    assert!(stats.dropped > 0, "the drop fault never fired — {stats:?}");
+    assert!(
+        stats.duplicated > 0,
+        "the dup fault never fired — {stats:?}"
+    );
+    assert!(
+        stats.is_balanced(),
+        "relay accounting broke: {stats:?} — {ctx}"
+    );
     s.close();
     h.shutdown().await;
 }
@@ -265,7 +313,9 @@ async fn corrupted_datagrams_never_reach_application_data() {
         .unwrap_or_else(|err| panic!("session.open: {err:?} — {ctx}"));
     let id = opened.session_id.clone();
     let (_spec, mut pipe) = h.pipes.take_with_spec().expect("pipe handle");
-    let produced = payload(48 * 1024);
+    // 32 KiB, well inside the harness's 64 KiB replay ring, so a gap here
+    // would be a bug and not eviction.
+    let produced = payload(32 * 1024);
     for chunk in produced.chunks(4096) {
         pipe.write_output(chunk).await.unwrap();
     }
@@ -278,9 +328,12 @@ async fn corrupted_datagrams_never_reach_application_data() {
     );
 
     let stats = h.chaos().stats();
-    let ctx = h.context();
-    assert!(stats.corrupted > 0, "nothing was corrupted — {ctx}");
-    assert_eq!(stats.dropped, 0, "only corruption was enabled — {ctx}");
+    assert!(stats.corrupted > 0, "nothing was corrupted — {stats:?}");
+    assert_eq!(stats.dropped, 0, "only corruption was enabled — {stats:?}");
+    assert!(
+        stats.is_balanced(),
+        "relay accounting broke: {stats:?} — {ctx}"
+    );
 
     // The other half of the control: the tampered datagrams did not merely
     // fail to poison the payload, they were *rejected* — the sender saw
@@ -294,7 +347,8 @@ async fn corrupted_datagrams_never_reach_application_data() {
         .sum();
     assert!(
         client_lost + host_lost > 0,
-        "corrupted datagrams were not treated as loss (client {client_lost}, host {host_lost}) — {ctx}"
+        "corrupted datagrams were not treated as loss (client {client_lost}, host {host_lost}) — {}",
+        h.detail()
     );
     s.close();
     h.shutdown().await;
@@ -335,8 +389,11 @@ async fn an_in_flight_op_survives_a_blackhole_and_recovery() {
     );
 
     let stats = h.chaos().stats();
-    let ctx = h.context();
-    assert!(stats.blackholed > 0, "nothing was blackholed — {ctx}");
+    assert!(stats.blackholed > 0, "nothing was blackholed — {stats:?}");
+    assert!(
+        stats.is_balanced(),
+        "relay accounting broke: {stats:?} — {ctx}"
+    );
     assert!(s.session_get(&id).await.is_ok(), "connection died — {ctx}");
     s.close();
     h.shutdown().await;
@@ -411,7 +468,7 @@ async fn repath_migrates_the_connection_and_the_session_continues() {
     })
     .await;
     assert_eq!(observed, new_up, "{ctx}");
-    assert_eq!(h.chaos().stats().repaths, 1, "{ctx}");
+    assert_eq!(h.chaos().stats().repaths, 1, "{}", h.detail());
     s.close();
     h.shutdown().await;
 }
@@ -456,8 +513,17 @@ async fn sever_kills_the_path_and_a_redial_finds_the_session_alive() {
     );
     s.close();
 
-    // The recovery criterion, in code: re-dial within 2 s (`testing.md` L4 —
-    // "idle timeout이 뒤늦게 터져서 복구되는 것은 통과가 아니다").
+    // NOT the L4 recovery criterion — only the scenario. `REDIAL_DEADLINE`
+    // is testing.md L4's "path 사망 감지 후 2초 내 재dial + resume", and this
+    // test can bound none of the parts that matter: the clock starts where
+    // the test chooses, the old session was closed by hand rather than
+    // detected as dead, and nothing is resumed. Nothing in M2 Step 8 can do
+    // better, because nothing yet notices path death (quinn's idle timeout is
+    // 45 s), so this assertion would also pass with a 44-second detector.
+    // Step 7 owes the real gate in `resume_chaos.rs`: start the clock at
+    // `sever()`, never `close()` by hand, stop it at the first replayed byte
+    // after `session.attach`, and assert the old connection was not closed by
+    // idle timeout. DoD 4 stays unchecked until then.
     let mut s2 = tokio::time::timeout(REDIAL_DEADLINE, h.session())
         .await
         .unwrap_or_else(|_| panic!("re-dial did not complete within {REDIAL_DEADLINE:?} — {ctx}"));
@@ -477,12 +543,12 @@ async fn sever_kills_the_path_and_a_redial_finds_the_session_alive() {
         "replay after re-dial is not byte-identical — {ctx}"
     );
 
-    let ctx = h.context();
-    assert_eq!(h.chaos().stats().severs, 1, "{ctx}");
+    assert_eq!(h.chaos().stats().severs, 1, "{}", h.detail());
     assert_eq!(
         h.server_connections().len(),
         2,
-        "the re-dial is a new host connection, not a migration — {ctx}"
+        "the re-dial is a new host connection, not a migration — {}",
+        h.detail()
     );
     s2.close();
     h.shutdown().await;
@@ -504,13 +570,20 @@ async fn a_severed_client_stays_severed() {
     let before = h.chaos().stats().to_server;
     let err = tokio::time::timeout(Duration::from_millis(300), s.session_list()).await;
     assert!(err.is_err(), "{ctx}");
-    let ctx = h.context();
+    let stats = h.chaos().stats();
     assert_eq!(
-        h.chaos().stats().to_server,
-        before,
-        "not one datagram may cross a severed path — {ctx}"
+        stats.to_server, before,
+        "not one datagram may cross a severed path — {stats:?}"
     );
-    assert!(h.chaos().stats().dropped > 0, "{ctx}");
+    assert!(
+        stats.refused > 0,
+        "the client kept retransmitting and the proxy refused it — {stats:?}"
+    );
+    assert!(
+        h.chaos().severed_clients().await.len() == 1,
+        "{}",
+        h.detail()
+    );
     s.close();
     h.shutdown().await;
 }
@@ -538,6 +611,111 @@ async fn errors_and_audit_are_unchanged_by_the_network() {
     assert_eq!(records.len(), 1, "{ctx}");
     assert_eq!(records[0].action, "session.list", "{ctx}");
     assert_eq!(records[0].decision, "allow", "{ctx}");
+    // A single tiny op is too few datagrams to *guarantee* an 8 % drop
+    // fires, so this test asserts the relay was live and honest rather than
+    // that a particular fault fired; the fault counters are pinned by the
+    // byte-identity tests above and by `chaos_relay.rs`.
+    let stats = h.chaos().stats();
+    assert!(
+        stats.from_client > 0,
+        "nothing crossed the proxy — {stats:?}"
+    );
+    assert!(
+        stats.is_balanced(),
+        "relay accounting broke: {stats:?} — {ctx}"
+    );
     s.close();
+    h.shutdown().await;
+}
+
+/// Two live connections through one proxy are relayed independently: a
+/// long-poll `session.read` on the first connection still gets its answer
+/// while the second connection is chatty. A relay that keyed the return path
+/// on "whoever spoke last" would send the host's reply to the wrong client,
+/// which drops it as an unknown connection id — a silent stall, not an
+/// error.
+///
+/// This is the shape PLAN M2 Step 7 needs: after a `sever()` the host-side
+/// connection stays alive for the full 45 s idle timeout, so a re-dial that
+/// attaches (lease steal, or `no_steal` → `SESSION_CONFLICT`) is *two* live
+/// connections, and the harness has to be able to relay both.
+#[tokio::test(flavor = "multi_thread")]
+async fn two_concurrent_connections_are_relayed_independently() {
+    let h = LoopbackHarness::start_chaotic(ChaosPolicy::seeded(0x2C0)).await;
+    let ctx = h.context();
+    let mut first = tokio::time::timeout(OP_DEADLINE, h.session())
+        .await
+        .unwrap_or_else(|_| panic!("negotiate — {ctx}"));
+    let opened = first
+        .session_open(open_req(&["sh"]))
+        .await
+        .unwrap_or_else(|err| panic!("session.open: {err:?} — {ctx}"));
+    let id = opened.session_id.clone();
+    let (_spec, mut pipe) = h.pipes.take_with_spec().expect("pipe handle");
+
+    let mut second = tokio::time::timeout(OP_DEADLINE, h.session())
+        .await
+        .unwrap_or_else(|_| panic!("second negotiate — {ctx}"));
+    assert_eq!(h.chaos().flows().await.len(), 2, "{}", h.detail());
+
+    // The first connection parks on a long poll: no output exists yet, so
+    // the host cannot answer until one is written.
+    let read = tokio::spawn(async move {
+        let out = first
+            .session_read(wire::SessionRead {
+                session_id: id,
+                after: 0,
+                max_bytes: 0,
+                wait_ms: 10_000,
+                ctl_after: 0,
+            })
+            .await;
+        (first, out)
+    });
+
+    // Meanwhile the second connection does all the talking.
+    for _ in 0..8 {
+        second
+            .session_list()
+            .await
+            .unwrap_or_else(|err| panic!("session.list on the second connection: {err:?} — {ctx}"));
+    }
+
+    let produced = payload(4 * 1024);
+    for chunk in produced.chunks(4096) {
+        pipe.write_output(chunk).await.unwrap();
+    }
+    let (mut first, out) = tokio::time::timeout(OP_DEADLINE, read)
+        .await
+        .unwrap_or_else(|_| panic!("the long poll never returned — {}", h.detail()))
+        .expect("read task panicked");
+    let out = out.unwrap_or_else(|err| panic!("session.read: {err:?} — {ctx}"));
+    let bytes: Vec<u8> = out
+        .events
+        .iter()
+        .filter_map(|e| match &e.body {
+            Some(session_read_event::Body::Output(o)) => Some(o.data.clone()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    assert!(
+        produced.starts_with(&bytes) && !bytes.is_empty(),
+        "the long poll's answer went to the wrong client ({} bytes) — {}",
+        bytes.len(),
+        h.detail()
+    );
+
+    // Both connections are still usable afterwards.
+    assert_eq!(first.session_list().await.unwrap().len(), 1, "{ctx}");
+    assert_eq!(second.session_list().await.unwrap().len(), 1, "{ctx}");
+    assert_eq!(
+        h.server_connections().len(),
+        2,
+        "two dials, two host connections — {}",
+        h.detail()
+    );
+    first.close();
+    second.close();
     h.shutdown().await;
 }

@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 use qsh_core::acl::{AllowAllPinned, Authorizer};
-use qsh_core::audit::{AuditRecord, AuditSink, MemoryAuditSink};
+use qsh_core::audit::MemoryAuditSink;
 use qsh_core::broker::{Broker, BrokerConfig, PipeFactory, SystemClock};
 use qsh_core::client::Session;
 use qsh_core::server::Server;
@@ -214,7 +214,6 @@ impl LoopbackHarness {
                 let task = tokio::spawn(accept_observed(
                     server.clone(),
                     listener,
-                    audit.clone(),
                     conns.clone(),
                     async move {
                         let _ = rx.await;
@@ -249,10 +248,21 @@ impl LoopbackHarness {
     }
 
     /// The one-line context every chaos assertion message must carry — it
-    /// prints the seed (`docs/design/testing.md`, CI 규율).
+    /// prints the seed (`docs/design/testing.md`, CI 규율). It is immutable,
+    /// so binding it once at the top of a test is safe; for the proxy's
+    /// counters use [`detail`](Self::detail) *at* the assertion.
     pub fn context(&self) -> String {
         match &self.chaos {
             Some(proxy) => proxy.context(),
+            None => format!("loopback host={}", self.host_addr),
+        }
+    }
+
+    /// [`context`](Self::context) plus a freshly read [`ChaosStats`]
+    /// (`qsh_testkit::chaos::ChaosStats`). Call it at the assertion site.
+    pub fn detail(&self) -> String {
+        match &self.chaos {
+            Some(proxy) => proxy.detail(),
             None => format!("loopback host={}", self.host_addr),
         }
     }
@@ -261,16 +271,24 @@ impl LoopbackHarness {
     /// populated for a [`start_chaotic`](Self::start_chaotic) harness — it is
     /// how a test observes the **host-side** peer address, which is what
     /// connection migration changes.
+    ///
+    /// Connections are retained for the harness's lifetime (a test needs the
+    /// closed ones too, e.g. to sum `lost_packets` after a re-dial), so a
+    /// test that dials in a long loop holds every quinn connection state it
+    /// created. That is fine at the handful of dials L4 scenarios need.
     pub fn server_connections(&self) -> Vec<Connection> {
         self.conns.lock().expect("conns lock").clone()
     }
 
-    /// Dial the host with the trusted client identity.
+    /// Dial the host with the trusted client identity. Under chaos a
+    /// handshake killed by `drop`/`corrupt` surfaces here, so the panic
+    /// carries the seed (`docs/design/testing.md` L4: 실패 메시지에 seed를
+    /// 출력한다).
     pub async fn dial(&self) -> Dialed {
         self.dialer
             .dial(self.addr, "127.0.0.1")
             .await
-            .expect("dial loopback host")
+            .unwrap_or_else(|err| panic!("dial {}: {err:?} — {}", self.addr, self.detail()))
     }
 
     /// Dial and negotiate `Hello`.
@@ -278,10 +296,17 @@ impl LoopbackHarness {
         let dialed = self.dial().await;
         Session::negotiate(dialed.connection, "laptop")
             .await
-            .expect("negotiate")
+            .unwrap_or_else(|err| panic!("negotiate: {err:?} — {}", self.detail()))
     }
 
-    /// Stop the host and wait for it to drain.
+    /// Stop the host and, for a non-chaotic harness, wait for it to drain.
+    ///
+    /// **A chaotic harness does not drain.** Its accept loop skips
+    /// `wait_idle()` and never joins the per-connection tasks, because a
+    /// severed or blackholed connection would hold teardown hostage for the
+    /// full 45 s idle timeout. After `shutdown()` returns, connections
+    /// started through the proxy may still be live — do not build an fd-count
+    /// or zombie-check assertion on top of it.
     pub async fn shutdown(mut self) {
         if let Some(tx) = self.shutdown.take() {
             let _ = tx.send(());
@@ -290,9 +315,10 @@ impl LoopbackHarness {
     }
 }
 
-/// The chaos harness's accept loop. It mirrors [`Server::run`] — same
-/// handshake, same rejection audit, same `serve_connection` — and differs in
-/// exactly two ways, both required by L4:
+/// The chaos harness's accept loop. The per-connection work — handshake,
+/// rejection audit, `serve_connection` — is [`Server::accept_and_serve`],
+/// the same code [`Server::run`] uses, so nothing about accepting is
+/// duplicated here. Only the loop differs, in exactly the two ways L4 needs:
 ///
 /// 1. it keeps a clone of every accepted [`Connection`], so a test can watch
 ///    the **host-side** peer address change across a `repath()`;
@@ -302,7 +328,6 @@ impl LoopbackHarness {
 async fn accept_observed(
     server: Arc<Server>,
     listener: Listener,
-    audit: Arc<MemoryAuditSink>,
     conns: Arc<Mutex<Vec<Connection>>>,
     shutdown: impl std::future::Future<Output = ()>,
 ) {
@@ -313,25 +338,13 @@ async fn accept_observed(
             incoming = listener.accept() => {
                 let Some(incoming) = incoming else { break };
                 let server = server.clone();
-                let audit = audit.clone();
                 let conns = conns.clone();
                 tokio::spawn(async move {
-                    let peer = incoming.remote_address();
-                    match incoming.accept().await {
-                        Ok(conn) => {
+                    server
+                        .accept_and_serve(incoming, |conn| {
                             conns.lock().expect("conns lock").push(conn.clone());
-                            server.serve_connection(conn).await;
-                        }
-                        Err(err) => {
-                            let category = match &err {
-                                qsh_transport::AcceptError::Unverified(reason) => {
-                                    format!("{reason:?}").to_lowercase()
-                                }
-                                _ => "handshake".to_string(),
-                            };
-                            audit.record(&AuditRecord::handshake_rejected(peer, &category));
-                        }
-                    }
+                        })
+                        .await;
                 });
             }
         }

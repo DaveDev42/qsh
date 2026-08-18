@@ -169,6 +169,7 @@ M2 크기: 5ew (`docs/ROADMAP.md` M2 "크기").
 - `crates/qsh-testkit/src/chaos.rs` (신규 — proxy + `ChaosPolicy::seeded(u64)`, `repath()`, `sever()`)
 - `crates/qsh-testkit/src/loopback.rs` (확장 — chaos proxy를 경유해 dial하는 harness 변형)
 - `crates/qsh-testkit/tests/chaos_proxy.rs` (신규 — 하네스 자체의 회귀 게이트: 이미 존재하는 `exec.run`·세션 value op이 `drop`/`delay`/`reorder`/`duplicate` 아래에서 byte-identical, `corrupt()` positive control, `blackhole()` 복구, `repath()` → migration, `sever()` → 재dial. resume은 다루지 않는다)
+- `crates/qsh-testkit/tests/chaos_relay.rs` (신규 — fault 자체의 negative control: QUIC 없이 순수 `UdpSocket` 사이에서 drop/delay/reorder/duplicate/blackhole이 **실제로 wire에 일어나는지** 직접 관찰. counter만 올리고 아무 일도 안 하는 fault는 여기서 잡힌다. multi-flow 중계·`sever_client`도 여기서 고정)
 - `crates/qsh-testkit/tests/resume_chaos.rs` (신규 — Step 7의 resume/attach 시나리오를 위 하네스 위에 얹는다)
 - `crates/qsh-testkit/tests/session_kill9.rs` (신규 — SC4/SC5: 클라이언트 프로세스 `kill -9`, 기준 stream 대조)
 - `crates/qsh-cli/tests/fixtures/cli-v1/{session.open,session.get,session.list,session.read,session.write,session.resize,session.close}.json` (신규, append-only)
@@ -177,6 +178,8 @@ M2 크기: 5ew (`docs/ROADMAP.md` M2 "크기").
 **(c) 빚지는 테스트:** 위 파일들이 곧 테스트다. 추가로 L6 — 신규 fixture 전부가 schemars 생성 스키마를 통과하고 기존 fixture도 계속 유효(append-only CI job), `ErrorCode` 전수 도달성 재확인(M2가 새로 생성 가능해진 `SESSION_NOT_FOUND`/`SESSION_CONFLICT` 커버; `RESUME_GAP`은 event 전용이라 오류로 도달 불가 — CLI.md §3.3 — DEFERRED 사유를 갱신해 유지).
 
 **(d) 완료 판정:** DoD 3·4번 항목 green. chaos 테스트는 seeded로 재현 가능하며 `sleep()`을 쓰지 않는다. 2초 재dial 기준이 assertion으로 코드에 박혀 있다(주석이 아니라).
+
+> **DoD 4번은 Step 7과 함께 닫힌다.** `chaos_proxy.rs`의 `REDIAL_DEADLINE` assertion은 *시나리오*만 묶는다 — 클럭이 테스트가 고른 지점에서 시작하고, path 사망 감지도 resume도 아직 없다(감지기가 없으므로 M2 Step 8 단독으로는 더 잘 할 수 없다; quinn idle timeout은 45 s). 실제 기준(“path 사망 감지 후 2초 내 재dial + resume”)은 Step 7이 `resume_chaos.rs`에 심는다: 클럭을 `sever()` 직전에 시작하고, 옛 세션을 손으로 `close()`하지 않으며, `session.attach` 후 첫 replay 바이트에서 멈추고, 옛 연결이 idle timeout으로 닫히지 않았음을 함께 단언한다. recovery 텔레메트리(`recovery`/`time_to_recovery_ms`)는 Step 7 (b)의 `crates/qsh-core/src/telemetry.rs`가 소유한다 — Step 9 (c)의 “텔레메트리 필드 파싱은 Step 8의 chaos 테스트가 이미 커버한다”는 Step 8의 나머지 절반(`resume_chaos.rs`)을 가리키며, `chaos_proxy.rs`/`chaos_relay.rs`는 텔레메트리를 다루지 않는다.
 
 **(e) 인용:** `docs/design/testing.md` L4 전체(설계·fault 표·대안 기각 근거·"chaos proxy는 PR 회귀 게이트이고 SC3 실측은 실기기 캠페인"·2초 기준), L6(fixture append-only, ErrorCode 전수 도달성, exit-code matrix, JSONL 순수성), CI 규율(port 0, seeded chaos, `sleep()` 금지), `docs/ROADMAP.md` M2 DoD 3·4번, 시퀀싱 원칙 6번("Chaos 하네스는 M2에서 resume과 함께 구축 … 측정 도구는 측정 대상과 같이 만든다"), `docs/PRD.md` §15 SC4·SC5.
 

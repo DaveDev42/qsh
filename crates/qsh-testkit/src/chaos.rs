@@ -6,18 +6,19 @@
 //!                          ◀──             ◀──
 //! ```
 //!
-//! One tokio task owns both sockets. The client dials [`ChaosProxy::addr`]
-//! instead of the host; every datagram in either direction is run through a
-//! seeded [`ChaosPolicy`] before it is relayed. Nothing about the host or the
-//! client changes — this is the real QUIC stack on both ends, which is the
-//! whole point: connection migration is a property of real path validation,
-//! so a transport mock would only be testing the mock (`testing.md` L4,
-//! "대안 대비 선택 근거").
+//! One tokio task owns the front socket and one upstream socket **per client
+//! address** (a "flow"). The client dials [`ChaosProxy::addr`] instead of the
+//! host; every datagram in either direction is run through a seeded
+//! [`ChaosPolicy`] before it is relayed. Nothing about the host or the client
+//! changes — this is the real QUIC stack on both ends, which is the whole
+//! point: connection migration is a property of real path validation, so a
+//! transport mock would only be testing the mock (`testing.md` L4, "대안 대비
+//! 선택 근거").
 //!
 //! **Faults.** Per-datagram, seeded: [`ChaosPolicy::drop`],
 //! [`ChaosPolicy::delay`], [`ChaosPolicy::reorder`],
 //! [`ChaosPolicy::duplicate`], [`ChaosPolicy::corrupt`] (the AEAD positive
-//! control — a corrupted datagram must be *rejected* by QUIC, never handed to
+//! control — a corrupted packet must be *rejected* by QUIC, never handed to
 //! the application). Live, out-of-band: [`ChaosProxy::blackhole`] +
 //! [`ChaosProxy::recover`], [`ChaosProxy::repath`] (rebind the upstream
 //! socket so the host sees a new peer address — what NAT rebinding and a
@@ -33,16 +34,23 @@
 //! which carries the seed (`testing.md`, "CI 규율": chaos는 seeded, 실패 시
 //! seed를 단언 메시지에 출력).
 //!
+//! **Counters are not self-certifying.** [`ChaosStats`] exists so a test can
+//! say "the fault fired", but a counter incremented next to the effect it
+//! witnesses proves nothing on its own. Two things keep it honest:
+//! [`ChaosStats::is_balanced`] ties the fault counters to the counters bumped
+//! at the actual `send_to` syscall (a fault that bumps without acting breaks
+//! the identity), and `tests/chaos_relay.rs` observes each fault directly on
+//! the wire, with no QUIC in the way.
+//!
 //! The only timers here are the injected delays themselves. Tests must stay
 //! event- or deadline-driven; they must never `sleep()` to "let things
 //! settle".
 
 use std::cmp::{Ordering, Reverse};
-use std::collections::{BinaryHeap, HashSet};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::net::UdpSocket;
@@ -59,12 +67,27 @@ pub const DATAGRAM_BUF: usize = 64 * 1024;
 /// damage of reordering the *last* datagram of a burst.
 pub const REORDER_HOLD: Duration = Duration::from_millis(10);
 
+/// Cap on datagrams simultaneously waiting out a [`ChaosPolicy::delay`].
+/// Far above anything a test produces; it exists so a pathological policy
+/// grows a counted `undeliverable` instead of unbounded memory.
+pub const MAX_PENDING: usize = 4_096;
+
 /// The pass/fail bound for recovery after a [`ChaosProxy::sever`]: path
-/// death → re-dial (+ resume, once PLAN M2 Step 7 lands) must complete
-/// inside this. `docs/design/testing.md` L4 fixes it: "idle timeout이 뒤늦게
-/// 터져서 복구되는 것은 통과가 아니다 — path 사망 감지 후 **2초 내 재dial +
-/// resume**". It lives here, as a constant used by assertions, so that the
-/// criterion is code and not a comment.
+/// death detection → re-dial → resume must fit inside this.
+/// `docs/design/testing.md` L4 fixes it: "idle timeout이 뒤늦게 터져서
+/// 복구되는 것은 통과가 아니다 — path 사망 감지 후 **2초 내 재dial +
+/// resume**".
+///
+/// **What it does and does not bound today.** The client-side death detector
+/// and the resume half are PLAN M2 Step 7; nothing in M2 Step 8 can start
+/// the clock at path death, because nothing yet notices path death (quinn's
+/// idle timeout is 45 s). `tests/chaos_proxy.rs` therefore uses this
+/// constant only to bound a re-dial the *test* initiates — the scenario, not
+/// the criterion. Step 7 owes the real gate in `tests/resume_chaos.rs`:
+/// start the clock immediately before [`ChaosProxy::sever`], never close the
+/// old session by hand, stop it at the first replayed byte after
+/// `session.attach` on the re-dialled connection, and assert the old
+/// connection was not closed by idle timeout.
 pub const REDIAL_DEADLINE: Duration = Duration::from_secs(2);
 
 // ---------------------------------------------------------------------------
@@ -236,10 +259,10 @@ impl ChaosPolicy {
         self
     }
 
-    /// With probability `p`, flip a bit in a datagram's AEAD tag before
-    /// relaying it. **Positive control:** QUIC must reject the datagram
-    /// (it is indistinguishable from loss); a corrupted byte must never
-    /// reach application data.
+    /// With probability `p`, flip a bit in the AEAD tag of a datagram's last
+    /// QUIC packet before relaying it. **Positive control:** QUIC must
+    /// reject that packet (it is indistinguishable from loss); a corrupted
+    /// byte must never reach application data.
     #[must_use]
     pub fn corrupt(mut self, p: f64) -> Self {
         self.corrupt_p = p;
@@ -251,74 +274,67 @@ impl ChaosPolicy {
 // counters
 // ---------------------------------------------------------------------------
 
-/// A snapshot of what the proxy has done so far. Chaos tests assert on these
-/// so that a fault which silently failed to fire cannot make a test vacuous.
+/// A snapshot of what the proxy has done so far.
+///
+/// The snapshot is taken at a quiescent point of the relay task (it is
+/// published after each datagram is fully disposed of), so
+/// [`is_balanced`](Self::is_balanced) is an exact identity and not a race.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ChaosStats {
-    /// Datagrams received from the client.
+    /// Datagrams accepted from a client.
     pub from_client: u64,
-    /// Datagrams received from the host.
+    /// Datagrams accepted from the host.
     pub from_server: u64,
     /// Datagrams actually sent on to the host.
     pub to_server: u64,
-    /// Datagrams actually sent on to the client.
+    /// Datagrams actually sent on to a client.
     pub to_client: u64,
-    /// Datagrams discarded by [`ChaosPolicy::drop`], or because the sender
-    /// had been [`ChaosProxy::sever`]ed.
+    /// Datagrams discarded by [`ChaosPolicy::drop`].
     pub dropped: u64,
+    /// Datagrams refused before they were ever accepted, because their flow
+    /// had been [`ChaosProxy::sever`]ed (either direction).
+    pub refused: u64,
+    /// Accepted datagrams that could not be handed to a socket: no live flow
+    /// for that client, a `send_to` error, or [`MAX_PENDING`] overflow.
+    pub undeliverable: u64,
     /// Datagrams whose AEAD tag was tampered with.
     pub corrupted: u64,
-    /// Datagrams relayed twice.
+    /// Datagrams relayed twice (counted once per extra copy).
     pub duplicated: u64,
     /// Datagrams held back by [`ChaosPolicy::delay`].
     pub delayed: u64,
-    /// Datagrams overtaken by their successor.
+    /// Datagrams that were actually overtaken by a successor — the swap
+    /// happened, not merely that one was parked.
     pub reordered: u64,
-    /// Datagrams swallowed while the path was blackholed.
+    /// Datagrams swallowed at egress while the path was blackholed.
     pub blackholed: u64,
+    /// Datagrams still waiting out a delay or a reorder hold.
+    pub inflight: u64,
     /// Completed [`ChaosProxy::repath`] calls.
     pub repaths: u64,
     /// Completed [`ChaosProxy::sever`] calls.
     pub severs: u64,
 }
 
-#[derive(Debug, Default)]
-struct Counters {
-    from_client: AtomicU64,
-    from_server: AtomicU64,
-    to_server: AtomicU64,
-    to_client: AtomicU64,
-    dropped: AtomicU64,
-    corrupted: AtomicU64,
-    duplicated: AtomicU64,
-    delayed: AtomicU64,
-    reordered: AtomicU64,
-    blackholed: AtomicU64,
-    repaths: AtomicU64,
-    severs: AtomicU64,
-}
-
-impl Counters {
-    fn bump(field: &AtomicU64) {
-        field.fetch_add(1, AtomicOrdering::Relaxed);
-    }
-
-    fn snapshot(&self) -> ChaosStats {
-        let get = |f: &AtomicU64| f.load(AtomicOrdering::Relaxed);
-        ChaosStats {
-            from_client: get(&self.from_client),
-            from_server: get(&self.from_server),
-            to_server: get(&self.to_server),
-            to_client: get(&self.to_client),
-            dropped: get(&self.dropped),
-            corrupted: get(&self.corrupted),
-            duplicated: get(&self.duplicated),
-            delayed: get(&self.delayed),
-            reordered: get(&self.reordered),
-            blackholed: get(&self.blackholed),
-            repaths: get(&self.repaths),
-            severs: get(&self.severs),
-        }
+impl ChaosStats {
+    /// The relay accounting identity: every accepted datagram is dropped,
+    /// blackholed, undeliverable, still staged, or sent — with one extra
+    /// send per duplicated datagram.
+    ///
+    /// This is what makes the fault counters worth asserting on. A fault
+    /// that bumps its counter and then relays anyway (a refactor that
+    /// short-circuits the pipeline, an inverted `if`) sends more datagrams
+    /// than it accounts for, and this identity fails immediately.
+    pub fn is_balanced(&self) -> bool {
+        let sent = i128::from(self.to_server)
+            + i128::from(self.to_client)
+            + i128::from(self.undeliverable)
+            + i128::from(self.inflight);
+        let expected = i128::from(self.from_client) + i128::from(self.from_server)
+            - i128::from(self.dropped)
+            - i128::from(self.blackholed)
+            + i128::from(self.duplicated);
+        sent == expected
     }
 }
 
@@ -328,21 +344,28 @@ impl Counters {
 
 #[derive(Debug)]
 enum Command {
-    Repath(oneshot::Sender<io::Result<SocketAddr>>),
-    Sever(oneshot::Sender<()>),
+    Repath(Option<SocketAddr>, oneshot::Sender<io::Result<SocketAddr>>),
+    Sever(Option<SocketAddr>, oneshot::Sender<()>),
     Blackhole(Duration, oneshot::Sender<()>),
     Recover(oneshot::Sender<()>),
-    Upstream(oneshot::Sender<Option<SocketAddr>>),
+    Flows(oneshot::Sender<Vec<(SocketAddr, SocketAddr)>>),
+    Blocked(oneshot::Sender<Vec<SocketAddr>>),
 }
 
 /// A running chaos proxy. Dial [`ChaosProxy::addr`]; the proxy relays to the
 /// host it was started for. Dropping it stops the relay.
+///
+/// The proxy multiplexes any number of client addresses: each gets its own
+/// upstream socket, so the host's replies come back to the client that
+/// earned them. Two live connections through one proxy — which is what a
+/// lease-steal or a re-dial-before-teardown test needs — are relayed
+/// independently.
 #[derive(Debug)]
 pub struct ChaosProxy {
     addr: SocketAddr,
     server: SocketAddr,
     seed: u64,
-    counters: Arc<Counters>,
+    stats: Arc<Mutex<ChaosStats>>,
     cmd: mpsc::UnboundedSender<Command>,
     task: tokio::task::JoinHandle<()>,
 }
@@ -359,28 +382,30 @@ impl ChaosProxy {
     pub async fn start(server: SocketAddr, policy: ChaosPolicy) -> io::Result<Self> {
         let front = Arc::new(UdpSocket::bind(loopback_wildcard(server)).await?);
         let addr = local_addr(&front, server)?;
-        let counters = Arc::new(Counters::default());
+        let stats = Arc::new(Mutex::new(ChaosStats::default()));
         let (tx, rx) = mpsc::unbounded_channel();
+        let (up_tx, up_rx) = mpsc::unbounded_channel();
         let runner = Runner {
             front,
             server,
-            up: None,
-            client: None,
+            flows: HashMap::new(),
+            up_tx,
             blocked: HashSet::new(),
             policy,
             rng: ChaosRng::new(policy.seed),
-            counters: counters.clone(),
+            stats: ChaosStats::default(),
+            shared: stats.clone(),
             pending: BinaryHeap::new(),
-            held: [None, None],
+            held: HashMap::new(),
             blackhole_until: None,
             seq: 0,
         };
-        let task = tokio::spawn(runner.run(rx));
+        let task = tokio::spawn(runner.run(rx, up_rx));
         Ok(Self {
             addr,
             server,
             seed: policy.seed,
-            counters,
+            stats,
             cmd: tx,
             task,
         })
@@ -403,59 +428,120 @@ impl ChaosProxy {
 
     /// What the proxy has done so far.
     pub fn stats(&self) -> ChaosStats {
-        self.counters.snapshot()
+        *self.stats.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// The one-line context every chaos assertion message must carry.
+    /// The one-line context every chaos assertion message must carry. It is
+    /// **immutable** — seed and addresses only — so a test may bind it once
+    /// and interpolate it anywhere without printing stale counters. For the
+    /// counters use [`detail`](Self::detail), which reads them fresh.
     pub fn context(&self) -> String {
         format!(
-            "chaos seed={:#x} front={} host={} stats={:?}",
-            self.seed,
-            self.addr,
-            self.server,
-            self.stats()
+            "chaos seed={:#x} front={} host={}",
+            self.seed, self.addr, self.server
         )
     }
 
-    /// The proxy's current *upstream* address — the peer address the host
-    /// sees. `None` after a [`sever`](Self::sever) and before the next dial.
-    pub async fn upstream_addr(&self) -> Option<SocketAddr> {
-        let (tx, rx) = oneshot::channel();
-        self.cmd.send(Command::Upstream(tx)).ok()?;
-        rx.await.ok().flatten()
+    /// [`context`](Self::context) plus a fresh [`ChaosStats`]. Call it *at*
+    /// the assertion, never before the traffic it describes.
+    pub fn detail(&self) -> String {
+        format!("{} stats={:?}", self.context(), self.stats())
     }
 
-    /// Rebind the upstream socket to a fresh port: the host suddenly sees
-    /// the same QUIC connection arriving from a new peer address, exactly as
-    /// a NAT rebinding or a Wi-Fi→LTE switch looks to it. Returns the new
-    /// upstream address. The client is not told and does not care — that is
-    /// the point.
+    /// Every live flow as `(client address, upstream address)`, in no
+    /// particular order.
+    pub async fn flows(&self) -> Vec<(SocketAddr, SocketAddr)> {
+        let (tx, rx) = oneshot::channel();
+        if self.cmd.send(Command::Flows(tx)).is_err() {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    /// Every client address [`sever`](Self::sever) has blacklisted, in no
+    /// particular order.
+    pub async fn severed_clients(&self) -> Vec<SocketAddr> {
+        let (tx, rx) = oneshot::channel();
+        if self.cmd.send(Command::Blocked(tx)).is_err() {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    /// The proxy's current *upstream* address — the peer address the host
+    /// sees — when there is exactly one live flow. `None` after a
+    /// [`sever`](Self::sever) and before the next dial, and `None` when
+    /// several clients are live (ask [`flows`](Self::flows) instead).
+    pub async fn upstream_addr(&self) -> Option<SocketAddr> {
+        let flows = self.flows().await;
+        match flows.as_slice() {
+            [(_, up)] => Some(*up),
+            _ => None,
+        }
+    }
+
+    /// Rebind the sole flow's upstream socket to a fresh port: the host
+    /// suddenly sees the same QUIC connection arriving from a new peer
+    /// address, exactly as a NAT rebinding or a Wi-Fi→LTE switch looks to
+    /// it. Returns the new upstream address. The client is not told and does
+    /// not care — that is the point.
+    ///
+    /// Fails if there is not exactly one live flow; use
+    /// [`repath_client`](Self::repath_client) then.
     pub async fn repath(&self) -> io::Result<SocketAddr> {
+        self.repath_inner(None).await
+    }
+
+    /// [`repath`](Self::repath) for one named client flow.
+    pub async fn repath_client(&self, client: SocketAddr) -> io::Result<SocketAddr> {
+        self.repath_inner(Some(client)).await
+    }
+
+    async fn repath_inner(&self, client: Option<SocketAddr>) -> io::Result<SocketAddr> {
         let (tx, rx) = oneshot::channel();
         self.cmd
-            .send(Command::Repath(tx))
+            .send(Command::Repath(client, tx))
             .map_err(|_| io::Error::other("chaos proxy is gone"))?;
         rx.await
             .map_err(|_| io::Error::other("chaos proxy is gone"))?
     }
 
-    /// Cut the path for good: close the upstream socket and blacklist the
-    /// current client address, so the in-flight connection can never be
-    /// recovered by any amount of retransmission. The front address stays
-    /// bound, so a **re-dial** (a fresh client endpoint, hence a fresh source
-    /// port) is relayed normally onto a brand-new host connection. This is
-    /// the harness half of the "재dial + resume" recovery path; the client
-    /// re-dial loop itself is PLAN M2 Step 7.
+    /// Cut every live path for good: close the upstream sockets and
+    /// blacklist the client addresses, so the in-flight connections can
+    /// never be recovered by any amount of retransmission. The front address
+    /// stays bound, so a **re-dial** (a fresh client endpoint, hence a fresh
+    /// source port) is relayed normally onto a brand-new host connection.
+    /// This is the harness half of the "재dial + resume" recovery path; the
+    /// client re-dial loop itself is PLAN M2 Step 7.
+    ///
+    /// There is deliberately no `unsever`. The blacklist is keyed by socket
+    /// address and never expires, so in the (rare) event that the OS hands a
+    /// later `Endpoint` the severed ephemeral port, that dial is blackholed
+    /// too and surfaces as a dial timeout. A test that re-dials in a loop
+    /// should assert the new source address is not in
+    /// [`severed_clients`](Self::severed_clients).
     pub async fn sever(&self) {
+        self.sever_inner(None).await;
+    }
+
+    /// [`sever`](Self::sever) for one named client flow, leaving the others
+    /// live.
+    pub async fn sever_client(&self, client: SocketAddr) {
+        self.sever_inner(Some(client)).await;
+    }
+
+    async fn sever_inner(&self, client: Option<SocketAddr>) {
         let (tx, rx) = oneshot::channel();
-        if self.cmd.send(Command::Sever(tx)).is_ok() {
+        if self.cmd.send(Command::Sever(client, tx)).is_ok() {
             let _ = rx.await;
         }
     }
 
     /// Swallow every datagram, both ways, for `dur` — then relay again. The
     /// path is not torn down: the connection is expected to ride it out on
-    /// PTO/keep-alive.
+    /// PTO/keep-alive. The check is at egress, so datagrams already staged
+    /// by [`ChaosPolicy::delay`] or [`ChaosPolicy::reorder`] are swallowed
+    /// too.
     pub async fn blackhole(&self, dur: Duration) {
         let (tx, rx) = oneshot::channel();
         if self.cmd.send(Command::Blackhole(dur, tx)).is_ok() {
@@ -493,19 +579,10 @@ fn local_addr(sock: &UdpSocket, peer: SocketAddr) -> io::Result<SocketAddr> {
 // the relay task
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Dir {
     ToServer,
     ToClient,
-}
-
-impl Dir {
-    fn idx(self) -> usize {
-        match self {
-            Self::ToServer => 0,
-            Self::ToClient => 1,
-        }
-    }
 }
 
 /// A datagram waiting out its injected delay.
@@ -513,6 +590,7 @@ impl Dir {
 struct Scheduled {
     at: Instant,
     seq: u64,
+    client: SocketAddr,
     dir: Dir,
     data: Vec<u8>,
 }
@@ -541,31 +619,99 @@ struct Held {
     until: Instant,
 }
 
+/// One client's relay path: the upstream socket the host sees, plus the task
+/// draining it.
+#[derive(Debug)]
+struct Flow {
+    up: Arc<UdpSocket>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for Flow {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+/// A datagram the host sent, tagged with the flow it arrived on.
+#[derive(Debug)]
+struct Inbound {
+    client: SocketAddr,
+    peer: SocketAddr,
+    data: Vec<u8>,
+}
+
+/// Consecutive `recv_from` errors a flow tolerates before giving up. On
+/// Windows a UDP socket reports ICMP port-unreachable as `WSAECONNRESET` on
+/// the *next* receive, which is transient and must not kill the flow; a
+/// permanently broken socket must not spin either.
+const FLOW_ERROR_BUDGET: u32 = 64;
+
+fn spawn_flow(
+    client: SocketAddr,
+    sock: Arc<UdpSocket>,
+    tx: mpsc::UnboundedSender<Inbound>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut buf = vec![0u8; DATAGRAM_BUF];
+        let mut errors = 0u32;
+        loop {
+            match sock.recv_from(&mut buf).await {
+                Ok((n, peer)) => {
+                    errors = 0;
+                    let inbound = Inbound {
+                        client,
+                        peer,
+                        data: buf[..n].to_vec(),
+                    };
+                    if tx.send(inbound).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => {
+                    errors += 1;
+                    if errors >= FLOW_ERROR_BUDGET {
+                        break;
+                    }
+                }
+            }
+        }
+    })
+}
+
 struct Runner {
     front: Arc<UdpSocket>,
     server: SocketAddr,
-    up: Option<Arc<UdpSocket>>,
-    client: Option<SocketAddr>,
+    flows: HashMap<SocketAddr, Flow>,
+    up_tx: mpsc::UnboundedSender<Inbound>,
     blocked: HashSet<SocketAddr>,
     policy: ChaosPolicy,
     rng: ChaosRng,
-    counters: Arc<Counters>,
+    stats: ChaosStats,
+    shared: Arc<Mutex<ChaosStats>>,
     pending: BinaryHeap<Reverse<Scheduled>>,
-    held: [Option<Held>; 2],
+    held: HashMap<(SocketAddr, Dir), Held>,
     blackhole_until: Option<Instant>,
     seq: u64,
 }
 
 impl Runner {
-    async fn run(mut self, mut cmds: mpsc::UnboundedReceiver<Command>) {
+    async fn run(
+        mut self,
+        mut cmds: mpsc::UnboundedReceiver<Command>,
+        mut up_rx: mpsc::UnboundedReceiver<Inbound>,
+    ) {
         let mut from_client = vec![0u8; DATAGRAM_BUF];
-        let mut from_server = vec![0u8; DATAGRAM_BUF];
         loop {
             let front = self.front.clone();
-            let up = self.up.clone();
             let deadline = self.next_deadline();
+            // Deliberately not `biased`: a biased select would poll the
+            // front socket before the upstream one every time, so a chatty
+            // client could starve the host→client direction. Command
+            // ordering does not need bias — every mutator awaits its own
+            // reply, so `sever().await` returning still means the command
+            // has been applied.
             tokio::select! {
-                biased;
                 cmd = cmds.recv() => {
                     match cmd {
                         Some(cmd) => self.command(cmd).await,
@@ -579,18 +725,27 @@ impl Runner {
                         self.on_client(peer, &from_client[..n]).await;
                     }
                 }
-                res = recv_from(up.as_deref(), &mut from_server) => {
-                    if let Some(Ok((n, peer))) = res {
-                        self.on_server(peer, &from_server[..n]).await;
+                inbound = up_rx.recv() => {
+                    if let Some(inbound) = inbound {
+                        self.on_server(inbound).await;
                     }
                 }
             }
+            self.publish();
         }
+    }
+
+    /// Publish a coherent snapshot. Called only between datagrams, so a
+    /// reader never sees a half-disposed one and
+    /// [`ChaosStats::is_balanced`] is exact.
+    fn publish(&mut self) {
+        self.stats.inflight = (self.pending.len() + self.held.len()) as u64;
+        *self.shared.lock().unwrap_or_else(|e| e.into_inner()) = self.stats;
     }
 
     fn next_deadline(&self) -> Option<Instant> {
         let mut next = self.pending.peek().map(|Reverse(s)| s.at);
-        for h in self.held.iter().flatten() {
+        for h in self.held.values() {
             next = Some(next.map_or(h.until, |n| n.min(h.until)));
         }
         if let Some(until) = self.blackhole_until {
@@ -599,31 +754,57 @@ impl Runner {
         next
     }
 
+    /// Resolve a command's optional client argument to a live flow.
+    fn resolve(&self, client: Option<SocketAddr>) -> Option<SocketAddr> {
+        match client {
+            Some(c) => self.flows.contains_key(&c).then_some(c),
+            None => match self.flows.keys().collect::<Vec<_>>().as_slice() {
+                [only] => Some(**only),
+                _ => None,
+            },
+        }
+    }
+
     async fn command(&mut self, cmd: Command) {
         match cmd {
-            Command::Repath(reply) => {
-                let bound = UdpSocket::bind(loopback_wildcard(self.server)).await;
-                let result = match bound {
-                    Ok(sock) => {
-                        let addr = local_addr(&sock, self.server);
-                        // The old socket is closed here: the host *must*
-                        // migrate, it cannot keep using the old path.
-                        self.up = Some(Arc::new(sock));
-                        Counters::bump(&self.counters.repaths);
-                        addr
-                    }
-                    Err(err) => Err(err),
+            Command::Repath(client, reply) => {
+                let result = match self.resolve(client) {
+                    None => Err(io::Error::other(
+                        "repath needs exactly one live flow (or a client address)",
+                    )),
+                    Some(client) => match UdpSocket::bind(loopback_wildcard(self.server)).await {
+                        Err(err) => Err(err),
+                        Ok(sock) => {
+                            let sock = Arc::new(sock);
+                            let addr = local_addr(&sock, self.server);
+                            let task = spawn_flow(client, sock.clone(), self.up_tx.clone());
+                            // Replacing the flow drops the old socket and
+                            // aborts its task: the host *must* migrate, it
+                            // cannot keep using the old path.
+                            self.flows.insert(client, Flow { up: sock, task });
+                            self.stats.repaths += 1;
+                            addr
+                        }
+                    },
                 };
                 let _ = reply.send(result);
             }
-            Command::Sever(reply) => {
-                if let Some(client) = self.client.take() {
+            Command::Sever(client, reply) => {
+                let targets: Vec<SocketAddr> = match client {
+                    Some(c) => vec![c],
+                    None => self.flows.keys().copied().collect(),
+                };
+                for client in targets {
                     self.blocked.insert(client);
+                    self.flows.remove(&client);
+                    self.pending = self
+                        .pending
+                        .drain()
+                        .filter(|Reverse(s)| s.client != client)
+                        .collect();
+                    self.held.retain(|(c, _), _| *c != client);
                 }
-                self.up = None;
-                self.pending.clear();
-                self.held = [None, None];
-                Counters::bump(&self.counters.severs);
+                self.stats.severs += 1;
                 let _ = reply.send(());
             }
             Command::Blackhole(dur, reply) => {
@@ -634,12 +815,20 @@ impl Runner {
                 self.blackhole_until = None;
                 let _ = reply.send(());
             }
-            Command::Upstream(reply) => {
-                let addr = self
-                    .up
-                    .as_ref()
-                    .and_then(|s| local_addr(s, self.server).ok());
-                let _ = reply.send(addr);
+            Command::Flows(reply) => {
+                let flows = self
+                    .flows
+                    .iter()
+                    .filter_map(|(client, flow)| {
+                        local_addr(&flow.up, self.server)
+                            .ok()
+                            .map(|up| (*client, up))
+                    })
+                    .collect();
+                let _ = reply.send(flows);
+            }
+            Command::Blocked(reply) => {
+                let _ = reply.send(self.blocked.iter().copied().collect());
             }
         }
     }
@@ -653,12 +842,19 @@ impl Runner {
             let Some(Reverse(item)) = self.pending.pop() else {
                 break;
             };
-            self.send(item.dir, &item.data).await;
+            self.send(item.client, item.dir, &item.data).await;
         }
-        for dir in [Dir::ToServer, Dir::ToClient] {
-            let expired = matches!(&self.held[dir.idx()], Some(h) if h.until <= now);
-            if expired && let Some(h) = self.held[dir.idx()].take() {
-                self.send(dir, &h.data).await;
+        // A hold that expires without a successor was never overtaken, so it
+        // is released unchanged and `reordered` is not bumped.
+        let expired: Vec<(SocketAddr, Dir)> = self
+            .held
+            .iter()
+            .filter(|(_, h)| h.until <= now)
+            .map(|(key, _)| *key)
+            .collect();
+        for key in expired {
+            if let Some(h) = self.held.remove(&key) {
+                self.send(key.0, key.1, &h.data).await;
             }
         }
         if matches!(self.blackhole_until, Some(until) if until <= now) {
@@ -670,118 +866,138 @@ impl Runner {
         if self.blocked.contains(&peer) {
             // Severed path: this client no longer exists as far as the host
             // is concerned. A re-dial arrives from a different source port.
-            Counters::bump(&self.counters.dropped);
+            self.stats.refused += 1;
             return;
         }
-        if self.client != Some(peer) {
-            self.client = Some(peer);
-        }
-        if self.up.is_none() {
-            match UdpSocket::bind(loopback_wildcard(self.server)).await {
-                Ok(sock) => self.up = Some(Arc::new(sock)),
-                Err(_) => return,
-            }
-        }
-        Counters::bump(&self.counters.from_client);
-        self.inject(Dir::ToServer, data).await;
-    }
-
-    async fn on_server(&mut self, peer: SocketAddr, data: &[u8]) {
-        if peer != self.server {
-            return;
-        }
-        Counters::bump(&self.counters.from_server);
-        self.inject(Dir::ToClient, data).await;
-    }
-
-    /// The fault pipeline: blackhole → drop → corrupt → duplicate → reorder
-    /// → delay.
-    async fn inject(&mut self, dir: Dir, data: &[u8]) {
-        if let Some(until) = self.blackhole_until {
-            if Instant::now() < until {
-                Counters::bump(&self.counters.blackholed);
+        if !self.flows.contains_key(&peer) {
+            let Ok(sock) = UdpSocket::bind(loopback_wildcard(self.server)).await else {
+                // Never accepted, so nothing to account for.
                 return;
-            }
-            self.blackhole_until = None;
+            };
+            let sock = Arc::new(sock);
+            let task = spawn_flow(peer, sock.clone(), self.up_tx.clone());
+            self.flows.insert(peer, Flow { up: sock, task });
         }
+        self.stats.from_client += 1;
+        self.inject(peer, Dir::ToServer, data).await;
+    }
+
+    async fn on_server(&mut self, inbound: Inbound) {
+        if inbound.peer != self.server {
+            return;
+        }
+        if !self.flows.contains_key(&inbound.client) {
+            // The flow was severed (or repathed) while this datagram was in
+            // the channel: it has nowhere to go.
+            self.stats.refused += 1;
+            return;
+        }
+        self.stats.from_server += 1;
+        self.inject(inbound.client, Dir::ToClient, &inbound.data)
+            .await;
+    }
+
+    /// The fault pipeline: drop → corrupt → duplicate → reorder → delay.
+    /// (Blackholing is at egress, in [`Runner::send`], so datagrams already
+    /// staged when the blackhole opens are swallowed too.)
+    async fn inject(&mut self, client: SocketAddr, dir: Dir, data: &[u8]) {
         if self.rng.chance(self.policy.drop_p) {
-            Counters::bump(&self.counters.dropped);
+            self.stats.dropped += 1;
             return;
         }
         let mut buf = data.to_vec();
         if self.rng.chance(self.policy.corrupt_p) {
             corrupt(&mut buf, &mut self.rng);
-            Counters::bump(&self.counters.corrupted);
+            self.stats.corrupted += 1;
         }
-        let twice = self.rng.chance(self.policy.duplicate_p);
-        if twice {
-            Counters::bump(&self.counters.duplicated);
-            self.stage(dir, buf.clone()).await;
+        if self.rng.chance(self.policy.duplicate_p) {
+            self.stats.duplicated += 1;
+            // The extra copy skips the reorder stage: two byte-identical
+            // copies swapping places is not an observable reordering, and
+            // counting it as one would make `reordered` a lie.
+            self.schedule(client, dir, buf.clone()).await;
         }
-        self.stage(dir, buf).await;
+        self.stage(client, dir, buf).await;
     }
 
     /// Reorder stage. A held datagram is released *after* the one that
     /// overtook it, and both bypass the delay stage so that the swap is
     /// guaranteed rather than probabilistic.
-    async fn stage(&mut self, dir: Dir, data: Vec<u8>) {
-        if let Some(held) = self.held[dir.idx()].take() {
-            self.send(dir, &data).await;
-            self.send(dir, &held.data).await;
+    async fn stage(&mut self, client: SocketAddr, dir: Dir, data: Vec<u8>) {
+        if let Some(held) = self.held.remove(&(client, dir)) {
+            self.stats.reordered += 1;
+            self.send(client, dir, &data).await;
+            self.send(client, dir, &held.data).await;
             return;
         }
         if self.rng.chance(self.policy.reorder_p) {
-            Counters::bump(&self.counters.reordered);
-            self.held[dir.idx()] = Some(Held {
-                data,
-                until: Instant::now() + REORDER_HOLD,
-            });
+            self.held.insert(
+                (client, dir),
+                Held {
+                    data,
+                    until: Instant::now() + REORDER_HOLD,
+                },
+            );
             return;
         }
-        self.schedule(dir, data).await;
+        self.schedule(client, dir, data).await;
     }
 
-    async fn schedule(&mut self, dir: Dir, data: Vec<u8>) {
+    async fn schedule(&mut self, client: SocketAddr, dir: Dir, data: Vec<u8>) {
         let delay = self.policy.delay.draw(&mut self.rng);
         if delay.is_zero() {
-            self.send(dir, &data).await;
+            self.send(client, dir, &data).await;
             return;
         }
-        Counters::bump(&self.counters.delayed);
+        if self.pending.len() >= MAX_PENDING {
+            self.stats.undeliverable += 1;
+            return;
+        }
+        self.stats.delayed += 1;
         self.seq += 1;
         self.pending.push(Reverse(Scheduled {
             at: Instant::now() + delay,
             seq: self.seq,
+            client,
             dir,
             data,
         }));
     }
 
-    async fn send(&self, dir: Dir, data: &[u8]) {
-        match dir {
-            Dir::ToServer => {
-                if let Some(up) = &self.up
-                    && up.send_to(data, self.server).await.is_ok()
-                {
-                    Counters::bump(&self.counters.to_server);
-                }
+    async fn send(&mut self, client: SocketAddr, dir: Dir, data: &[u8]) {
+        if let Some(until) = self.blackhole_until {
+            if Instant::now() < until {
+                self.stats.blackholed += 1;
+                return;
             }
-            Dir::ToClient => {
-                if let Some(client) = self.client
-                    && self.front.send_to(data, client).await.is_ok()
-                {
-                    Counters::bump(&self.counters.to_client);
-                }
-            }
+            self.blackhole_until = None;
+        }
+        let sent = match dir {
+            Dir::ToServer => match self.flows.get(&client) {
+                Some(flow) => flow.up.send_to(data, self.server).await.is_ok(),
+                None => false,
+            },
+            Dir::ToClient => self.front.send_to(data, client).await.is_ok(),
+        };
+        match (sent, dir) {
+            (true, Dir::ToServer) => self.stats.to_server += 1,
+            (true, Dir::ToClient) => self.stats.to_client += 1,
+            (false, _) => self.stats.undeliverable += 1,
         }
     }
 }
 
-/// Flip one bit inside the datagram's AEAD tag (the last 16 bytes of a QUIC
-/// packet). Targeting the tag rather than the header means the packet is
-/// well-formed all the way to *authentication* and is then rejected there —
-/// which is the property under test. Short datagrams (there are none in QUIC
-/// after the handshake) fall back to any byte.
+/// Flip one bit inside the AEAD tag of the datagram's **last** QUIC packet
+/// (its last 16 bytes). Targeting the tag rather than the header means the
+/// packet is well-formed all the way to *authentication* and is then
+/// rejected there — which is the property under test.
+///
+/// Note the "last packet" precision: a datagram may coalesce several QUIC
+/// packets (an Initial + a Handshake, typically), and the earlier ones stay
+/// intact and are still processed. That is enough for the control — the
+/// tampered packet is never authenticated — but it is not "the whole
+/// datagram is discarded". Short datagrams (there are none in QUIC after the
+/// handshake) fall back to any byte.
 fn corrupt(buf: &mut [u8], rng: &mut ChaosRng) {
     if buf.is_empty() {
         return;
@@ -800,29 +1016,17 @@ async fn sleep_until(at: Option<Instant>) {
     }
 }
 
-async fn recv_from(
-    sock: Option<&UdpSocket>,
-    buf: &mut [u8],
-) -> Option<io::Result<(usize, SocketAddr)>> {
-    match sock {
-        Some(sock) => Some(sock.recv_from(buf).await),
-        None => std::future::pending().await,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn the_prng_is_reproducible_and_independent_of_wall_clock() {
-        let a: Vec<u64> = (0..8).map(|_| ChaosRng::new(7).next_u64()).collect();
-        assert!(a.iter().all(|v| *v == a[0]), "same seed, same first draw");
         let mut r1 = ChaosRng::new(0xDEAD_BEEF);
         let mut r2 = ChaosRng::new(0xDEAD_BEEF);
         let s1: Vec<u64> = (0..64).map(|_| r1.next_u64()).collect();
         let s2: Vec<u64> = (0..64).map(|_| r2.next_u64()).collect();
-        assert_eq!(s1, s2);
+        assert_eq!(s1, s2, "same seed, same stream");
         assert!(s1.windows(2).all(|w| w[0] != w[1]), "not a constant");
     }
 
@@ -898,9 +1102,11 @@ mod tests {
     #[test]
     fn scheduled_datagrams_order_by_time_then_arrival() {
         let base = Instant::now();
+        let client: SocketAddr = "127.0.0.1:1".parse().expect("addr");
         let mk = |ms: u64, seq: u64| Scheduled {
             at: base + Duration::from_millis(ms),
             seq,
+            client,
             dir: Dir::ToServer,
             data: vec![],
         };
@@ -910,5 +1116,33 @@ mod tests {
         heap.push(Reverse(mk(5, 3)));
         let order: Vec<u64> = std::iter::from_fn(|| heap.pop().map(|Reverse(s)| s.seq)).collect();
         assert_eq!(order, vec![2, 3, 1]);
+    }
+
+    #[test]
+    fn the_accounting_identity_catches_a_fault_that_only_bumps_its_counter() {
+        // Ten datagrams in, two dropped, one duplicated, one blackholed:
+        // seven sends plus the extra copy.
+        let honest = ChaosStats {
+            from_client: 10,
+            to_server: 8,
+            dropped: 2,
+            duplicated: 1,
+            blackholed: 1,
+            ..Default::default()
+        };
+        assert!(honest.is_balanced(), "{honest:?}");
+        // A `drop` that bumps the counter and relays anyway.
+        let liar = ChaosStats {
+            to_server: 10,
+            ..honest
+        };
+        assert!(!liar.is_balanced(), "{liar:?}");
+        // A staged datagram is accounted for while it waits.
+        let staged = ChaosStats {
+            to_server: 6,
+            inflight: 2,
+            ..honest
+        };
+        assert!(staged.is_balanced(), "{staged:?}");
     }
 }
