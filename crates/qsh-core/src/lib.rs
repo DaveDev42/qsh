@@ -14,6 +14,7 @@
 
 pub mod acl;
 pub mod audit;
+pub mod broker;
 pub mod client;
 pub mod config;
 pub mod exec;

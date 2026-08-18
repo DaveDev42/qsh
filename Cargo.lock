@@ -1862,8 +1862,10 @@ name = "qsh-core"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "bytes",
  "keyring",
  "libc",
+ "proptest",
  "qsh-proto",
  "qsh-transport",
  "rand 0.9.5",
@@ -3212,6 +3214,7 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "tempfile",
  "toml",
 ]
 
