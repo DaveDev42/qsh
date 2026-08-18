@@ -51,12 +51,17 @@ const DEFERRED: &[(&str, &str)] = &[
         "PERMISSION_DENIED",
         "M5 policy engine (M1 interim policy is allow-all-pinned)",
     ),
-    ("SESSION_NOT_FOUND", "M2 sessions"),
-    ("SESSION_CONFLICT", "M2 sessions"),
+    (
+        "SESSION_CONFLICT",
+        "M2 Step 5/7: needs a concurrently held writer lease (attach)",
+    ),
     ("RESUME_GAP", "M2 sessions"),
     ("CANCELED", "M2 sessions"),
     ("RESOURCE_EXHAUSTED", "M2 backpressure"),
-    ("UNSUPPORTED", "M2 reserved flags"),
+    (
+        "UNSUPPORTED",
+        "M2 Step 5/7: `session read --follow` / attach",
+    ),
     ("REMOTE_ERROR", "no deterministic producer in M1"),
     ("INTERNAL", "no deterministic producer in M1"),
 ];
@@ -80,6 +85,14 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "error.AUTH_FAILED.json",
     "error.TRUST_REQUIRED.json",
     "error.TIMEOUT.json",
+    "session.open.json",
+    "session.get.json",
+    "session.list.json",
+    "session.read.json",
+    "session.write.json",
+    "session.resize.json",
+    "session.close.json",
+    "error.SESSION_NOT_FOUND.json",
 ];
 
 // ---------------------------------------------------------------------------
@@ -260,6 +273,103 @@ fn golden_remote_fixtures() {
     ]);
     assert_eq!(code, 255, "{trust_required}");
     check("error.TRUST_REQUIRED.json", trust_required);
+}
+
+/// The `session.*` value ops against a real `qsh serve` (headless echo
+/// sessions until the PTY source lands): open → write → get → read →
+/// resize → list → close → get (gone).
+#[test]
+fn golden_session_fixtures() {
+    let fleet = Fleet::start();
+    let client = &fleet.client;
+
+    let (code, opened) = client.json(&["session", "open", HOST_ALIAS, "--json", "--", "sh"]);
+    assert_eq!(code, 0, "{opened}");
+    let session_ref = opened["data"]["session_ref"]
+        .as_str()
+        .expect("session_ref")
+        .to_string();
+    assert!(session_ref.starts_with(&format!("{HOST_ALIAS}/")));
+    check("session.open.json", opened);
+
+    // The headless echo session prints a banner first; a long-poll read
+    // from 0 returns exactly that one output event (no lease has been
+    // taken yet, so no control events can interleave).
+    let banner_len = qsh_core::broker::ECHO_BANNER.len() as u64;
+    let (code, read) = client.json(&[
+        "session",
+        "read",
+        &session_ref,
+        "--after",
+        "0",
+        "--wait",
+        "5000",
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{read}");
+    let events = read["data"]["events"].as_array().expect("events");
+    assert_eq!(events.len(), 1, "{read}");
+    assert_eq!(events[0]["type"], "session.output");
+    assert_eq!(events[0]["sequence"], banner_len);
+    check("session.read.json", read);
+
+    // "hi\n" — the echo child sends it straight back as output.
+    let (code, written) = client.json(&[
+        "session",
+        "write",
+        &session_ref,
+        "--data-b64",
+        "aGkK",
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{written}");
+    assert_eq!(written["data"]["bytes_written"], 3);
+    check("session.write.json", written);
+
+    // Bounded poll (no sleeps: each iteration is a real round trip) until
+    // the echo has landed in the ring and the write's connection has
+    // released its lease, so the snapshots below are stable.
+    let mut got = None;
+    for _ in 0..500 {
+        let (code, session) = client.json(&["session", "get", &session_ref, "--json"]);
+        assert_eq!(code, 0, "{session}");
+        if session["data"]["last_sequence"] == banner_len + 3 && session["data"]["writer"].is_null()
+        {
+            got = Some(session);
+            break;
+        }
+    }
+    let session = got.expect("echoed output reached the replay ring and the lease was released");
+    assert_eq!(session["data"]["state"], "running");
+    check("session.get.json", session);
+
+    let (code, resized) = client.json(&[
+        "session",
+        "resize",
+        &session_ref,
+        "--cols",
+        "120",
+        "--rows",
+        "40",
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{resized}");
+    check("session.resize.json", resized);
+
+    let (code, listed) = client.json(&["sessions", HOST_ALIAS, "--json"]);
+    assert_eq!(code, 0, "{listed}");
+    assert_eq!(listed["data"]["sessions"].as_array().map(Vec::len), Some(1));
+    check("session.list.json", listed);
+
+    let (code, closed) = client.json(&["session", "close", &session_ref, "--json"]);
+    assert_eq!(code, 0, "{closed}");
+    assert_eq!(closed["data"]["final_sequence"], banner_len + 3);
+    check("session.close.json", closed);
+
+    let (code, gone) = client.json(&["session", "get", &session_ref, "--json"]);
+    assert_eq!(code, 255, "{gone}");
+    assert_eq!(gone["error"]["code"], "SESSION_NOT_FOUND");
+    check("error.SESSION_NOT_FOUND.json", gone);
 }
 
 // ---------------------------------------------------------------------------

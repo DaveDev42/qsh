@@ -60,6 +60,14 @@ pub fn normalize(mut value: serde_json::Value) -> serde_json::Value {
                             *child = serde_json::Value::String("<fingerprint>".into())
                         }
                         "address" => *child = serde_json::Value::String("<address>".into()),
+                        // Host-issued session ids are ULIDs; a `session_ref`
+                        // keeps its (stable) host alias and masks the id.
+                        "session_id" => *child = serde_json::Value::String("<session_id>".into()),
+                        "session_ref" => {
+                            if let serde_json::Value::String(text) = child {
+                                *text = mask_session_ref(text);
+                            }
+                        }
                         // The binary's own version churns on every release;
                         // the fixture asserts the *shape*, and `schemas`
                         // (right next to it) still pins the contract ids.
@@ -82,6 +90,15 @@ pub fn normalize(mut value: serde_json::Value) -> serde_json::Value {
     }
     walk(&mut value);
     value
+}
+
+/// Replace the session id half of `<host>/<session_id>` with the literal
+/// `<session_id>`; anything without a `/` is left alone.
+fn mask_session_ref(text: &str) -> String {
+    match text.rsplit_once('/') {
+        Some((host, _)) => format!("{host}/<session_id>"),
+        None => text.to_string(),
+    }
 }
 
 /// Replace the port of every `127.0.0.1:<digits>` occurrence in `text` with

@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use qsh_core::acl::{AllowAllPinned, Authorizer};
 use qsh_core::audit::MemoryAuditSink;
+use qsh_core::broker::{Broker, BrokerConfig, PipeFactory, SystemClock};
 use qsh_core::client::Session;
 use qsh_core::server::Server;
 use qsh_transport::{
@@ -91,6 +92,11 @@ pub struct LoopbackHarness {
     pub server: Arc<Server>,
     /// Every audit record the host produced.
     pub audit: Arc<MemoryAuditSink>,
+    /// The host's session broker (pipe-backed sources, real clock).
+    pub broker: Arc<Broker>,
+    /// Hands out the [`qsh_core::broker::PipeHandle`] of every session the
+    /// host opened, in open order — the test's side of the "child".
+    pub pipes: Arc<PipeFactory>,
     /// The host's bound address.
     pub addr: SocketAddr,
     /// A dialer whose identity the host pins as `device:laptop`; it pins the
@@ -139,7 +145,18 @@ impl LoopbackHarness {
         .expect("bind loopback");
         let addr = listener.local_addr().expect("local addr");
         let audit = Arc::new(MemoryAuditSink::new());
-        let server = Server::new(authorizer, audit.clone(), "box");
+        let pipes = Arc::new(PipeFactory::new(64 * 1024));
+        let broker = Broker::new(
+            Arc::new(SystemClock),
+            BrokerConfig {
+                replay_bytes: 64 * 1024,
+                resume_ttl: std::time::Duration::from_secs(3600),
+                close_grace: std::time::Duration::from_millis(100),
+            },
+            pipes.clone(),
+        );
+        tokio::spawn(Broker::run_reaper(Arc::downgrade(&broker)));
+        let server = Server::new(authorizer, audit.clone(), broker.clone(), "box");
         let (tx, rx) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(server.clone().run(listener, async move {
             let _ = rx.await;
@@ -147,6 +164,8 @@ impl LoopbackHarness {
         Self {
             server,
             audit,
+            broker,
+            pipes,
             addr,
             dialer: Dialer::new(client.local.clone(), Arc::new(client_trust)),
             client,

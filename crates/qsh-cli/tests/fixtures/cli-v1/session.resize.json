@@ -1,0 +1,11 @@
+{
+  "command": "session.resize",
+  "data": {
+    "cols": 120,
+    "rows": 40,
+    "session_ref": "box/<session_id>"
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}
