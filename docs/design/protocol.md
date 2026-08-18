@@ -114,13 +114,16 @@ message ControlMessage {
                                             //    담는다. CLI.md §5 Session의 session_ref·host는 클라이언트
                                             //    Ops가 로컬 alias로 채운다(ADR-0007)
     SessionGet          session_get = 23;   // session_id -> SessionInfo
-    SessionResize       session_resize = 24; // detached resize; ACL session.control
+    SessionResize       session_resize = 24; // session_id, cols, rows -> SessionResized{};
+                                            //   detached resize; ACL session.control
     reserved 25;                             // (구 SessionSignal) 번호만 예약, P1. M2 호스트는 25번 수신 시
                                             //   리소스 생성 없이 UNSUPPORTED로 답한다(CLI.md §2.4)
     SessionClose        session_close = 26; // session_id, optional signal(HUP|INT|QUIT|TERM|USR1|USR2|KILL —
-                                            //   `session close --signal`, CLI.md §6.7); ACL session.control
+                                            //   `session close --signal`, CLI.md §6.7) -> SessionClosed{final_seq};
+                                            //   ACL session.control
     SessionRead         session_read = 27;  // session_id, after, max_bytes, wait_ms
-                                            // -> SessionReadResult{events[]} — broker pull() 1회
+                                            // -> SessionReadResult{events[]} — broker pull() 1회; events[]의
+                                            //   원소는 SessionReadEvent{Output|Gap|Exit|WriterChanged|Closed}
                                             //   (CLI.md §6.4 `session read --wait`/`--follow` 루프/MCP long-poll);
                                             //   ACL session.attach, resume token 불요(CLI.md §6.3)
     SessionWrite        session_write = 28; // session_id, data -> SessionWritten{} ; ACL session.control
@@ -133,10 +136,12 @@ message ControlMessage {
 
     Ping                ping = 50;
     Pong                pong = 51;
-    SessionEvent        session_event = 60; // 비동기: Exited{exit_code, signal, final_seq}
+    SessionEvent        session_event = 60; // 비동기: {session_id, oneof
+                                            //          exited(Exit — SessionFrame.Exit와 같은 메시지)
                                             //        | WriterChanged{optional new_writer, seq}
                                             //          (new_writer 없음 = lease 해제, 보유자 없음)
-                                            //        | Closed{reason: CLOSED|EXIT|TTL_EXPIRED, seq}
+                                            //        | Closed{reason: "closed"|"exit"|"ttl_expired" (open string,
+                                            //          CLI.md §6.4·§10), seq}}
                                             // → qsh.event/v1 session.exit / session.writer_changed /
                                             //   session.closed (CLI.md §6.4). attach 중인 connection에만
                                             //   전송; pull 소비자는 같은 event를 ReplayRing의 제어 엔트리로
@@ -155,6 +160,9 @@ message Response {
     SessionReadResult   session_read_result = 5; // session_read 성공 (events[])
     SessionListResult   session_list_result = 6; // session_list 성공 (SessionInfo[])
     SessionInfo         session_info = 7;    // session_get 성공
+    SessionWritten      session_written = 8; // session_write 성공 (빈 ack)
+    SessionResized      session_resized = 9; // session_resize 성공 (빈 ack)
+    SessionClosed       session_closed = 10; // session_close 성공 (final_seq)
     Error               error = 15;          // { code, message, retryable } — code는 CLI.md §3.3 어휘
   }
 }
@@ -182,6 +190,7 @@ message SessionFrame {
     Gap      gap = 4;       // { uint64 requested_after; uint64 available_from; }
     Resize   resize = 5;    // { uint32 cols; uint32 rows; }
     Exit     exit = 6;      // { uint64 final_seq; int32 exit_code; optional string signal; }
+                            //   SessionEvent.exited / SessionReadEvent.exit도 같은 Exit 메시지를 쓴다
   }
 }
 
