@@ -131,7 +131,7 @@ M2 크기: 5ew (`docs/ROADMAP.md` M2 "크기").
 - `crates/qsh-cli/src/tui/mod.rs` (신규 — raw mode 관리, 입력 펌프, detach key 처리, resize 감시)
 - `crates/qsh-cli/src/cli.rs` (확장 — `user@host` positional + `Command::Attach { session_ref }`)
 - `crates/qsh-cli/src/main.rs` (확장 — TUI 경로는 envelope를 stdout에 내지 않음; 진단은 stderr 전용)
-- `crates/qsh-cli/Cargo.toml` (`nix` 0.29+ features `term`/`ioctl`/`poll`/`signal` — `[target.'cfg(unix)'.dependencies]`로 선언, architecture.md §8)
+- `crates/qsh-cli/Cargo.toml` (`nix` 0.29+ features `term`/`ioctl`/`signal` — `[target.'cfg(unix)'.dependencies]`로 선언, architecture.md §8)
 
 **(c) 빚지는 테스트 (`docs/design/testing.md` L5 마지막 항목):** `expectrl` 기반 expect 하네스 — **클라이언트 자체를 pty 아래에서 실행**해 termios raw mode 경로가 실제로 돌게 한다. 수용 세트 스크립트: bash/zsh 프롬프트 왕복, `vim` 진입/편집/종료, `tmux` 안에서의 resize 전파, `claude` 기동. resize는 `--cols/--rows` 변경 후 원격 `stty size`가 일치함으로 단언. detach key 후 세션이 `running` 상태로 남고 재attach 가능함을 단언.
 
@@ -260,7 +260,7 @@ M2 크기: 5ew (`docs/ROADMAP.md` M2 "크기").
 | 6 | `SessionSignal` | 별도 op 없음(P1); `session close --signal`은 `SessionClose.signal`(HUP\|INT\|QUIT\|TERM\|USR1\|USR2\|KILL, 그 외 `INVALID_ARGUMENT`); wire 25는 `reserved`(수신 시 `UNSUPPORTED`); `close_grace_ms` 5s, KILL 즉시, `exited`에는 무신호 | CLI.md §2.4·§6.7, protocol.md §9, architecture.md §4·§7 |
 | 7 | recovery 텔레메트리 | stderr 전용 — tracing `qsh::recovery`, INFO, 한 줄 JSON(`recovery`/`time_to_recovery_ms`/`session_ref`); event 승격은 P1 | testing.md L4, CLI.md §6.4 |
 | 8 | `localctl` 시점 | M2 아님 — **M3**(첫 소비자: 역방향 `qsh attach`의 UDS IPC, protocol.md §11-3); M2는 `SessionBackend` seam 순수성만 | ADR-0003 추기, architecture.md §3·§7 |
-| 9 | raw-mode crate | `nix`(`term`/`ioctl`/`poll`/`signal`; host 측 `user`) 직접 termios + `TIOCGWINSZ`, SIGWINCH는 `tokio::signal::unix`; crossterm 기각; `cfg(unix)` target 의존 | architecture.md §8 |
+| 9 | raw-mode crate | `nix`(`term`/`ioctl`/`signal`) 직접 termios + `TIOCGWINSZ`, SIGWINCH는 `tokio::signal::unix`; crossterm 기각; `cfg(unix)` target 의존 | architecture.md §8 |
 
 ## 5. 완료 절차
 
