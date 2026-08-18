@@ -475,12 +475,22 @@ impl SessionHandle {
 /// Clamp for `pull(..., wait)` when `now + wait` would overflow the clock.
 const MAX_PULL_WAIT: Duration = Duration::from_secs(365 * 24 * 60 * 60);
 
+/// Opaque RAII token handed out by [`super::SessionBackend::attach`]:
+/// while it is alive the session counts as attached and its resume TTL is
+/// suspended; dropping it detaches. In-process this is an
+/// [`AttachGuard`]; an out-of-process supervisor supplies its own type
+/// whose `Drop` sends the detach over IPC, which is why the seam names a
+/// trait object rather than the concrete guard.
+pub trait AttachToken: Send + Sync + std::fmt::Debug {}
+
 /// RAII attachment counter. While at least one is alive the resume TTL is
 /// suspended (architecture.md §3: TTL runs on unattached sessions).
 #[derive(Debug)]
 pub struct AttachGuard {
     shared: Arc<SessionShared>,
 }
+
+impl AttachToken for AttachGuard {}
 
 impl Drop for AttachGuard {
     fn drop(&mut self) {

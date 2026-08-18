@@ -6,6 +6,7 @@
 use std::io::{self, Write};
 
 use qsh_core::OpError;
+use qsh_proto::event::SessionEvent;
 use qsh_proto::{CLI_SCHEMA_V1, CliEnvelope, CliError};
 
 /// The `schema` value stamped on every envelope.
@@ -53,6 +54,19 @@ impl Envelope {
         let mut stdout = io::stdout().lock();
         writeln!(stdout, "{line}")
     }
+}
+
+/// Write one `qsh.event/v1` event as a single stdout line — the `--jsonl`
+/// streaming form (`docs/CLI.md` §6.4: `--follow --jsonl` emits one event
+/// per line, the bare event object, not a `qsh.cli/v1` envelope).
+///
+/// Flushed per line: a follower's consumer must see each event as it
+/// happens, and stdout is block-buffered when it is a pipe.
+pub fn print_event(event: &SessionEvent) -> io::Result<()> {
+    let line = serde_json::to_string(event).map_err(io::Error::other)?;
+    let mut stdout = io::stdout().lock();
+    writeln!(stdout, "{line}")?;
+    stdout.flush()
 }
 
 #[cfg(test)]

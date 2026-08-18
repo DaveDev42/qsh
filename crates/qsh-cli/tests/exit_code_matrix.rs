@@ -208,10 +208,12 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
             outcome: Outcome::Fails("HOST_NOT_FOUND"),
         },
         Case {
-            name: "session read --follow: not implemented yet",
+            // `--follow` is a pull loop on the same cursor primitive as
+            // `--wait`, so its first pull fails exactly like a single read.
+            name: "session read --follow: unknown session id",
             sandbox: &fleet.client,
             args: &["session", "read", "box/01K0SESSION", "--follow"],
-            outcome: Outcome::Fails("UNSUPPORTED"),
+            outcome: Outcome::Fails("SESSION_NOT_FOUND"),
         },
         Case {
             name: "session open: unpinned peer",

@@ -5,8 +5,10 @@
 //! (`<host-alias>/<session_id>`, ADR-0007), which only this module
 //! assembles and parses.
 //!
-//! The stream operations (`session.attach`, `session.read --follow`) are
-//! not here: they land with PLAN M2 Steps 5 and 7.
+//! The stream operations live here too: [`Ops::session_reader`] is the
+//! single cursor-pull primitive (`--wait`, `--follow`, and M6's MCP
+//! long-poll all go through it) and [`Ops::session_attach`] is the one
+//! stream op, a live `SESSION_DATA` stream as a typed event stream.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,10 +18,10 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use qsh_proto::event::{EVENT_SCHEMA, SessionEvent};
 use qsh_proto::wire::{self, session_read_event};
 use qsh_proto::{
-    ErrorCode, Session as SessionJson, SessionCloseData, SessionCloseReq, SessionGetReq,
-    SessionListData, SessionListReq, SessionOpenData, SessionOpenReq, SessionReadData,
-    SessionReadReq, SessionResizeData, SessionResizeReq, SessionWriteData, SessionWriteReq,
-    UnreachableHost,
+    ErrorCode, Session as SessionJson, SessionAttachReq, SessionCloseData, SessionCloseReq,
+    SessionGetReq, SessionListData, SessionListReq, SessionOpenData, SessionOpenReq,
+    SessionReadData, SessionReadReq, SessionResizeData, SessionResizeReq, SessionWriteData,
+    SessionWriteReq, UnreachableHost,
 };
 use qsh_transport::Dialer;
 
@@ -31,6 +33,18 @@ use crate::ops::{OpError, Operation, Ops, PeerTarget};
 /// `--data-b64`), 16 MiB. Keeps a single value op — and its stdin buffer —
 /// bounded, the way `EXEC_OUTPUT_MAX` bounds one `exec.run` envelope.
 pub const SESSION_WRITE_MAX: usize = 16 * 1024 * 1024;
+
+/// Depth of the two queues between a frontend and its attach driver — the
+/// same bound the host puts on its own side of the stream. Bounded on
+/// purpose: an unbounded event queue would let a slow renderer grow client
+/// memory without limit *and* remove QUIC flow control from the session
+/// stream (protocol.md §12, architecture.md §9-5).
+pub const SESSION_ATTACH_QUEUE: usize = 64;
+
+/// How long the control stream gets to deliver a `session.closed` that was
+/// queued just before the data stream's FIN. Not a synchronisation sleep:
+/// the drain ends as soon as the control stream closes or an event lands.
+const ATTACH_CONTROL_DRAIN: Duration = Duration::from_millis(250);
 
 /// The `session.open` operation.
 pub struct SessionOpenOp;
@@ -300,33 +314,84 @@ impl Ops {
     /// control event positioned exactly at `after_sequence` is re-delivered
     /// on every pull and a `--wait` loop never parks.
     pub fn session_read(&self, req: SessionReadReq) -> Result<SessionReadOutput, OpError> {
+        // One pull of the same primitive `--follow` loops on, so the two
+        // cannot drift: there is only one implementation of a pull.
+        let mut reader = self.session_reader(req)?;
+        let result = reader.pull();
+        reader.close();
+        result
+    }
+
+    /// The cursor-pull primitive `session read` sits on: a live connection
+    /// plus a cursor that advances with every [`SessionReader::pull`].
+    ///
+    /// `session read --wait` is exactly one `pull`, `--follow` is a loop of
+    /// them, and M6's MCP long-poll will be a third caller — all of them
+    /// the same code path, so a fix or a cap applies to every consumer at
+    /// once. `req`'s cursor and `wait_ms`/`limit_bytes` seed the reader;
+    /// each pull then feeds `next_after`/`next_ctl_after` back, which is
+    /// what keeps a control event positioned exactly at `after_sequence`
+    /// from being re-delivered for ever.
+    pub fn session_reader(&self, req: SessionReadReq) -> Result<SessionReader, OpError> {
         let r = parse_session_ref(&req.session_ref)?;
-        let msg = wire::SessionRead {
-            session_id: r.session_id.clone(),
+        let conn = self.connect(&r.host)?;
+        Ok(SessionReader {
+            conn,
+            session_ref: req.session_ref,
+            session_id: r.session_id,
             after: req.after_sequence,
-            max_bytes: req.limit_bytes.unwrap_or(0),
-            wait_ms: req.wait_ms.unwrap_or(0),
             ctl_after: req.ctl_after.unwrap_or(0),
+            wait_ms: req.wait_ms.unwrap_or(0),
+            max_bytes: req.limit_bytes.unwrap_or(0),
+            done: false,
+        })
+    }
+
+    /// `session.attach` — the one **stream** operation (`docs/CLI.md` §6.1):
+    /// authorize the attach, open the `SESSION_DATA` stream, and hand back
+    /// a live [`SessionAttachStream`] of `qsh.event/v1` events with an
+    /// input/resize channel going the other way.
+    ///
+    /// Resume across connections lands with PLAN M2 Step 7; this attaches a
+    /// session the peer can authorize on the connection it just dialed.
+    pub fn session_attach(&self, req: SessionAttachReq) -> Result<SessionAttachStream, OpError> {
+        let r = parse_session_ref(&req.session_ref)?;
+        let msg = wire::SessionAttach {
+            session_id: r.session_id.clone(),
+            // Minted and presented by PLAN M2 Step 7.
+            resume_token: Vec::new(),
+            last_output_seq: 0,
+            mode: wire::AttachMode::Rw as i32,
+            no_steal: req.no_steal,
         };
-        let result = self.call(&r.host, |s| Box::pin(s.session_read(msg)))?;
-        let mut output = Vec::new();
-        let mut json_events = Vec::with_capacity(result.events.len());
-        for event in result.events {
-            if let Some(session_read_event::Body::Output(o)) = &event.body {
-                output.extend_from_slice(&o.data);
-            }
-            if let Some(json) = event_json(&req.session_ref, event) {
-                json_events.push(json);
-            }
-        }
-        Ok(SessionReadOutput {
-            data: SessionReadData {
-                session_ref: req.session_ref,
-                events: json_events,
-                next_after: result.next_after,
-                next_ctl_after: result.next_ctl_after,
-            },
-            output,
+        let mut conn = self.connect(&r.host)?;
+        let attached = conn.run(move |s| Box::pin(s.attach(msg)))?;
+        let replay_from = attached.replay_from;
+        let writer_lease = attached.writer_lease;
+        let expires_at = attached.expires_at.clone();
+        let session = conn
+            .take_session()
+            .ok_or_else(|| OpError::new(ErrorCode::Internal, "attach lost its control stream"))?;
+
+        let (events_tx, events_rx) = tokio::sync::mpsc::channel(SESSION_ATTACH_QUEUE);
+        let (commands, command_rx) = tokio::sync::mpsc::channel(SESSION_ATTACH_QUEUE);
+        let session_ref = req.session_ref.clone();
+        let driver = conn.runtime().spawn(drive_attach(
+            session,
+            attached,
+            session_ref.clone(),
+            command_rx,
+            events_tx,
+        ));
+        Ok(SessionAttachStream {
+            conn,
+            driver,
+            events: events_rx,
+            commands,
+            session_ref,
+            replay_from,
+            writer_lease,
+            expires_at,
         })
     }
 
@@ -451,6 +516,21 @@ impl Ops {
             Box<dyn std::future::Future<Output = Result<T, ClientError>> + Send + 'a>,
         >,
     {
+        let mut connected = self.connect(host)?;
+        let result = connected.run(f);
+        connected.close();
+        result
+    }
+
+    /// Dial `host` and negotiate, keeping the connection open for the
+    /// caller. Blocking, for the same reason [`Ops::call`] is: the identity
+    /// is loaded before the runtime exists, because platform key stores
+    /// must not be touched from inside one.
+    ///
+    /// This is what the streaming ops (`session read --follow`,
+    /// `session.attach`) sit on — they need many round trips on one
+    /// connection, where a value op needs exactly one.
+    fn connect(&self, host: &str) -> Result<Connected, OpError> {
         let PeerTarget {
             identity,
             trust,
@@ -466,7 +546,7 @@ impl Ops {
             .enable_all()
             .build()
             .map_err(|err| OpError::new(ErrorCode::Internal, format!("runtime: {err}")))?;
-        let result = runtime.block_on(async {
+        let dialed = runtime.block_on(async {
             let addr = tokio::net::lookup_host(&address)
                 .await
                 .ok()
@@ -483,22 +563,462 @@ impl Ops {
                 .map_err(|err| map_dial_error(err, &address))?;
             let endpoint = dialed.endpoint.clone();
             let connection = dialed.connection.clone();
-            let result = match Session::negotiate(dialed.connection, &device_name).await {
-                Ok(mut session) => {
-                    let result = f(&mut session).await;
-                    session.close();
-                    result
+            match Session::negotiate(dialed.connection, &device_name).await {
+                Ok(session) => Ok((endpoint, connection, session)),
+                Err(err) => {
+                    connection.close(0, b"done");
+                    endpoint.wait_idle().await;
+                    Err(map_client_error(err))
                 }
-                Err(err) => Err(err),
-            };
+            }
+        });
+        match dialed {
+            Ok((endpoint, connection, session)) => Ok(Connected {
+                runtime: Some(runtime),
+                endpoint,
+                connection,
+                session: Some(session),
+            }),
+            Err(err) => {
+                runtime.shutdown_timeout(CLOSE_DRAIN);
+                Err(err)
+            }
+        }
+    }
+}
+
+/// How long a torn-down connection's QUIC close frames get to drain.
+const CLOSE_DRAIN: Duration = Duration::from_millis(200);
+
+/// A live cursor on one session's replay ring — the single pull primitive
+/// behind `session read --wait`, `session read --follow` and (M6) the MCP
+/// long-poll. See [`Ops::session_reader`].
+pub struct SessionReader {
+    conn: Connected,
+    session_ref: String,
+    session_id: String,
+    after: u64,
+    ctl_after: u64,
+    wait_ms: u64,
+    max_bytes: u64,
+    done: bool,
+}
+
+impl SessionReader {
+    /// The session being read.
+    pub fn session_ref(&self) -> &str {
+        &self.session_ref
+    }
+
+    /// The cursor the next pull will use, as `(after, ctl_after)`.
+    pub fn cursor(&self) -> (u64, u64) {
+        (self.after, self.ctl_after)
+    }
+
+    /// Whether a terminal event (`session.exit`, `session.closed`) has been
+    /// delivered — a follower stops here instead of polling a dead session.
+    pub fn is_done(&self) -> bool {
+        self.done
+    }
+
+    /// One pull. Advances the cursor by the reply's
+    /// `next_after`/`next_ctl_after`, so consecutive pulls neither skip nor
+    /// repeat.
+    pub fn pull(&mut self) -> Result<SessionReadOutput, OpError> {
+        let msg = wire::SessionRead {
+            session_id: self.session_id.clone(),
+            after: self.after,
+            max_bytes: self.max_bytes,
+            wait_ms: self.wait_ms,
+            ctl_after: self.ctl_after,
+        };
+        let result = self.conn.run(move |s| Box::pin(s.session_read(msg)))?;
+        self.after = result.next_after;
+        self.ctl_after = result.next_ctl_after;
+        let mut output = Vec::new();
+        let mut json_events = Vec::with_capacity(result.events.len());
+        for event in result.events {
+            if let Some(session_read_event::Body::Output(o)) = &event.body {
+                output.extend_from_slice(&o.data);
+            }
+            if let Some(json) = event_json(&self.session_ref, event) {
+                self.done |= is_terminal(&json);
+                json_events.push(json);
+            }
+        }
+        Ok(SessionReadOutput {
+            data: SessionReadData {
+                session_ref: self.session_ref.clone(),
+                events: json_events,
+                next_after: self.after,
+                next_ctl_after: self.ctl_after,
+            },
+            output,
+        })
+    }
+
+    /// Close the connection this reader holds.
+    pub fn close(self) {
+        self.conn.close();
+    }
+}
+
+/// Whether an event ends the stream: nothing follows an exit or a close.
+fn is_terminal(event: &SessionEvent) -> bool {
+    matches!(
+        event,
+        SessionEvent::Exit { .. } | SessionEvent::Closed { .. }
+    )
+}
+
+/// The `session.attach` operation — the only stream op.
+pub struct SessionAttachOp;
+impl Operation for SessionAttachOp {
+    const COMMAND: &'static str = "session.attach";
+}
+
+/// What a frontend sends into a live attach.
+enum AttachCommand {
+    /// Session input, split into wire chunks by the writer.
+    Input(Vec<u8>),
+    /// A window-size change.
+    Resize {
+        /// New column count.
+        cols: u16,
+        /// New row count.
+        rows: u16,
+    },
+}
+
+/// A live attach: a blocking `qsh.event/v1` event stream out, an
+/// input/resize channel in. See [`Ops::session_attach`].
+///
+/// The connection, its runtime and the driver task are owned here, so
+/// dropping this ends the attach.
+pub struct SessionAttachStream {
+    conn: Connected,
+    driver: tokio::task::JoinHandle<()>,
+    events: tokio::sync::mpsc::Receiver<Result<SessionEvent, OpError>>,
+    commands: tokio::sync::mpsc::Sender<AttachCommand>,
+    session_ref: String,
+    replay_from: u64,
+    writer_lease: bool,
+    expires_at: String,
+}
+
+impl SessionAttachStream {
+    /// The session being attached.
+    pub fn session_ref(&self) -> &str {
+        &self.session_ref
+    }
+
+    /// Cumulative output offset replay started from.
+    pub fn replay_from(&self) -> u64 {
+        self.replay_from
+    }
+
+    /// Whether this attach holds the writer lease.
+    pub fn writer_lease(&self) -> bool {
+        self.writer_lease
+    }
+
+    /// When the session's resume window ends (RFC 3339).
+    pub fn expires_at(&self) -> &str {
+        &self.expires_at
+    }
+
+    /// Block until the next event. `None` once the stream has ended — the
+    /// child exited, the session closed, or the connection went away.
+    ///
+    /// Call from a plain thread, never from inside an async runtime: like
+    /// every other `Ops` entry point this is the blocking face of the
+    /// driver that owns the connection.
+    pub fn next_event(&mut self) -> Option<Result<SessionEvent, OpError>> {
+        self.events.blocking_recv()
+    }
+
+    /// Queue session input; the driver writes it in order. Blocks only
+    /// while the driver's bounded queue is full — that backpressure is
+    /// what keeps a fast producer from growing the queue without limit.
+    pub fn write(&self, data: Vec<u8>) -> Result<(), OpError> {
+        self.commands
+            .blocking_send(AttachCommand::Input(data))
+            .map_err(|_| attach_gone())
+    }
+
+    /// Queue a window-size change. Same backpressure as [`write`](Self::write).
+    pub fn resize(&self, cols: u16, rows: u16) -> Result<(), OpError> {
+        self.commands
+            .blocking_send(AttachCommand::Resize { cols, rows })
+            .map_err(|_| attach_gone())
+    }
+
+    /// Stop the attach and close the connection.
+    pub fn close(self) {
+        self.driver.abort();
+        self.conn.close();
+    }
+}
+
+fn attach_gone() -> OpError {
+    OpError::new(ErrorCode::ConnectionFailed, "the attach stream has ended")
+}
+
+/// A spawned task aborted when its handle is dropped, so tearing the
+/// driver down takes its helpers with it.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Drive one attach: data-stream frames and control-stream `SessionEvent`s
+/// out as `qsh.event/v1` events, queued input and resizes in. Ends when the
+/// host finishes the stream, the peer goes away, or the frontend drops its
+/// command sender.
+///
+/// Three tasks, never one `select!` over all three, for two reasons that
+/// both bit the first cut:
+///
+/// - a `select!` arm that awaits `AttachWriter::send_input` stops polling
+///   the read arm while it is parked on QUIC flow control, and the host
+///   parks its own input reader when *its* frame queue fills — a large
+///   paste on a chatty session deadlocks both ends until the idle timeout;
+/// - `Session::next_event` answers a `Ping` with a `write_all`, which is
+///   **not** cancel-safe: losing a `select!` race mid-write leaves half a
+///   control frame on the wire and desynchronises the peer's decoder.
+///
+/// Giving the send halves their own tasks means nothing that writes is
+/// ever cancelled, and the reads (which *are* cancel-safe) are the only
+/// things racing.
+async fn drive_attach(
+    session: Session,
+    attached: crate::client::Attached,
+    session_ref: String,
+    commands: tokio::sync::mpsc::Receiver<AttachCommand>,
+    events: tokio::sync::mpsc::Sender<Result<SessionEvent, OpError>>,
+) {
+    let (writer, mut reader) = attached.split();
+    let _input = AbortOnDrop(tokio::spawn(pump_attach_input(writer, commands)));
+    let mut control = AbortOnDrop(tokio::spawn(pump_attach_control(
+        session,
+        session_ref.clone(),
+        events.clone(),
+    )));
+
+    loop {
+        match reader.next().await {
+            Ok(Some(event)) => {
+                if let Some(json) = attach_event_json(&session_ref, event)
+                    && events.send(Ok(json)).await.is_err()
+                {
+                    break;
+                }
+            }
+            Ok(None) => {
+                // The data stream ended. `session.closed` has no
+                // `SessionFrame` form, so a close that the host queued just
+                // before the FIN is still in flight on the control stream —
+                // give it a bounded moment to arrive rather than racing it
+                // to the exit (CLI.md §6.4 makes it the last event).
+                let _ = tokio::time::timeout(ATTACH_CONTROL_DRAIN, &mut control.0).await;
+                break;
+            }
+            Err(err) => {
+                let _ = events.send(Err(map_client_error(err))).await;
+                break;
+            }
+        }
+    }
+}
+
+/// Sole owner of the attach's send half: queued input and resizes, in
+/// order. A write that fails does not end the attach — a stolen writer
+/// lease demotes this peer to read-only (protocol.md §10) and it is still
+/// owed its output.
+async fn pump_attach_input(
+    mut writer: crate::client::AttachWriter,
+    mut commands: tokio::sync::mpsc::Receiver<AttachCommand>,
+) {
+    while let Some(command) = commands.recv().await {
+        let sent = match command {
+            AttachCommand::Input(data) => writer.send_input(&data).await.map(|_| ()),
+            AttachCommand::Resize { cols, rows } => writer.resize(cols, rows).await,
+        };
+        if sent.is_err() {
+            return;
+        }
+    }
+    // The frontend dropped its handle: finish our send half so the host
+    // drains what is left and finishes the stream.
+    writer.finish();
+}
+
+/// Sole owner of the control stream for the lifetime of an attach: the
+/// asynchronous `SessionEvent`s (`writer_changed`, `closed`) an attached
+/// peer is owed, plus the ping answers `Session::next_event` sends.
+async fn pump_attach_control(
+    mut session: Session,
+    session_ref: String,
+    events: tokio::sync::mpsc::Sender<Result<SessionEvent, OpError>>,
+) {
+    loop {
+        match session.next_event().await {
+            // `Exited` also arrives as a data frame, which is the
+            // authoritative copy; emitting both would duplicate a terminal
+            // event in the JSONL stream.
+            Ok(Some(event)) => {
+                if let Some(json) = control_event_json(&session_ref, event)
+                    && events.send(Ok(json)).await.is_err()
+                {
+                    return;
+                }
+            }
+            Ok(None) | Err(_) => return,
+        }
+    }
+}
+
+/// One attach data frame as a `qsh.event/v1` event. `InputAck` is flow
+/// control, not an event, and has no `qsh.event/v1` type.
+fn attach_event_json(session_ref: &str, event: crate::client::AttachEvent) -> Option<SessionEvent> {
+    let schema = EVENT_SCHEMA.to_string();
+    let session_ref = session_ref.to_string();
+    Some(match event {
+        crate::client::AttachEvent::Output { sequence, data } => SessionEvent::Output {
+            schema,
+            session_ref,
+            sequence,
+            data_b64: BASE64.encode(&data),
+        },
+        crate::client::AttachEvent::Gap {
+            requested_after,
+            available_from,
+        } => SessionEvent::Gap {
+            schema,
+            session_ref,
+            requested_after,
+            available_from,
+        },
+        crate::client::AttachEvent::Exit {
+            final_seq,
+            exit_code,
+            signal,
+        } => SessionEvent::Exit {
+            schema,
+            session_ref,
+            sequence: final_seq,
+            // A signal-terminated child has no exit code (CLI.md §6.4).
+            exit_code: if signal.is_some() {
+                None
+            } else {
+                Some(exit_code)
+            },
+            signal,
+        },
+        crate::client::AttachEvent::InputAck { .. } => return None,
+    })
+}
+
+/// One asynchronous control-stream `SessionEvent` as a `qsh.event/v1`
+/// event; the exit is dropped because the data stream already carries it.
+fn control_event_json(session_ref: &str, event: wire::SessionEvent) -> Option<SessionEvent> {
+    let schema = EVENT_SCHEMA.to_string();
+    let session_ref = session_ref.to_string();
+    Some(match event.body? {
+        wire::session_event::Body::WriterChanged(w) => SessionEvent::WriterChanged {
+            schema,
+            session_ref,
+            sequence: w.seq,
+            writer: w.new_writer,
+        },
+        wire::session_event::Body::Closed(c) => SessionEvent::Closed {
+            schema,
+            session_ref,
+            sequence: c.seq,
+            reason: c.reason,
+        },
+        wire::session_event::Body::Exited(_) => return None,
+    })
+}
+
+/// A dialed, negotiated peer connection held open across calls, with its
+/// own runtime — the backbone of both the value ops (one call, then
+/// [`close`](Connected::close)) and the streaming ops (many calls).
+struct Connected {
+    /// `None` only between [`Connected::close`] and the drop.
+    runtime: Option<tokio::runtime::Runtime>,
+    endpoint: qsh_transport::Endpoint,
+    connection: qsh_transport::Connection,
+    /// `None` only after the session was consumed by the teardown.
+    session: Option<Session>,
+}
+
+impl Connected {
+    /// Run one request closure on the live session.
+    fn run<T, F>(&mut self, f: F) -> Result<T, OpError>
+    where
+        F: for<'a> FnOnce(
+            &'a mut Session,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<T, ClientError>> + Send + 'a>,
+        >,
+    {
+        let (Some(runtime), Some(session)) = (self.runtime.as_ref(), self.session.as_mut()) else {
+            return Err(OpError::new(
+                ErrorCode::Internal,
+                "connection already closed",
+            ));
+        };
+        runtime.block_on(f(session)).map_err(map_client_error)
+    }
+
+    /// The runtime this connection lives on, for callers that drive their
+    /// own tasks on it (the attach driver).
+    fn runtime(&self) -> &tokio::runtime::Runtime {
+        self.runtime
+            .as_ref()
+            .expect("runtime is only taken by close()")
+    }
+
+    /// Take the negotiated session out, leaving the connection and runtime
+    /// in place (the attach driver owns the session for its lifetime).
+    fn take_session(&mut self) -> Option<Session> {
+        self.session.take()
+    }
+
+    /// Close the control stream and the connection, then let the QUIC close
+    /// frames drain.
+    fn close(mut self) {
+        let Some(runtime) = self.runtime.take() else {
+            return;
+        };
+        let session = self.session.take();
+        let connection = self.connection.clone();
+        let endpoint = self.endpoint.clone();
+        runtime.block_on(async move {
+            if let Some(session) = session {
+                session.close();
+            }
             connection.close(0, b"done");
             drop(connection);
             endpoint.wait_idle().await;
-            result.map_err(map_client_error)
         });
-        // Let in-flight QUIC close frames drain (bounded).
-        runtime.shutdown_timeout(Duration::from_millis(200));
-        result
+        runtime.shutdown_timeout(CLOSE_DRAIN);
+    }
+}
+
+impl Drop for Connected {
+    fn drop(&mut self) {
+        // `close()` already took the runtime on the normal path; this is the
+        // panic / early-return path.
+        if let Some(runtime) = self.runtime.take() {
+            self.session.take();
+            self.connection.close(0, b"done");
+            runtime.shutdown_timeout(CLOSE_DRAIN);
+        }
     }
 }
 

@@ -55,6 +55,21 @@ pub const CAP_RESUME_V1: &str = "resume.v1";
 /// `SessionAttach` with `UNSUPPORTED` and does not claim otherwise.
 pub const LOCAL_CAPABILITIES: &[&str] = &[CAP_EXEC, CAP_SESSION];
 
+/// quinn send priority of the control stream — the top of the
+/// `docs/design/protocol.md` §12 band, so a saturated bulk stream can never
+/// delay a control message in the local send queue.
+pub const PRIORITY_CONTROL: i32 = 200;
+
+/// quinn send priority of a `SESSION_DATA` stream (interactive PTY), below
+/// [`PRIORITY_CONTROL`] and above bulk traffic (`protocol.md` §12).
+pub const PRIORITY_SESSION_DATA: i32 = 100;
+
+/// quinn send priority of an `EXEC_DATA` stream (`protocol.md` §12).
+pub const PRIORITY_EXEC_DATA: i32 = 50;
+
+/// quinn send priority of tunnel/file streams (`protocol.md` §12; M4).
+pub const PRIORITY_TUNNEL: i32 = 0;
+
 /// Maximum size of a single exec payload chunk (the `data` field of a
 /// [`Stdout`]/[`Stderr`]/[`Stdin`] frame), 16 KiB (`protocol.md` §5).
 pub const EXEC_CHUNK_MAX: usize = 16 * 1024;
@@ -1092,6 +1107,29 @@ mod tests {
         assert!(LOCAL_CAPABILITIES.contains(&CAP_SESSION));
         // Resume is not implemented yet (PLAN M2 Step 7 re-adds it).
         assert!(!LOCAL_CAPABILITIES.contains(&CAP_RESUME_V1));
+    }
+
+    #[test]
+    fn send_priority_band_matches_protocol_md_12() {
+        // control 200 > session data 100 > exec 50 > tunnel 0.
+        assert_eq!(
+            (
+                PRIORITY_CONTROL,
+                PRIORITY_SESSION_DATA,
+                PRIORITY_EXEC_DATA,
+                PRIORITY_TUNNEL
+            ),
+            (200, 100, 50, 0)
+        );
+        // The ordering itself, not just the values: a later re-tune must
+        // keep control above session data above exec above bulk.
+        let band = [
+            PRIORITY_CONTROL,
+            PRIORITY_SESSION_DATA,
+            PRIORITY_EXEC_DATA,
+            PRIORITY_TUNNEL,
+        ];
+        assert!(band.windows(2).all(|w| w[0] > w[1]), "band: {band:?}");
     }
 
     // ---- error vocabulary ----------------------------------------------
