@@ -1207,6 +1207,9 @@ fn broker_error(request_id: u64, err: BrokerError) -> ControlMessage {
             (ErrorCode::SessionConflict, false)
         }
         BrokerError::Backpressure => (ErrorCode::ResourceExhausted, true),
+        // A policy/platform refusal, not a failure — nothing was spawned
+        // (no PTY backend on this host, or a foreign `user` hint; CLI.md §7).
+        BrokerError::Unsupported(_) => (ErrorCode::Unsupported, false),
         BrokerError::Spawn(_) | BrokerError::Io(_) | BrokerError::Gone => {
             (ErrorCode::Internal, false)
         }
