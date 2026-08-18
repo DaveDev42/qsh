@@ -237,6 +237,50 @@ pub struct ServeConfig {
     /// Listen address. `qsh serve --bind` wins over this, which wins over
     /// the `[::]:4433` default (`docs/CLI.md` §6.12).
     pub bind: Option<String>,
+    /// Per-session replay ring byte budget. Unset ⇒
+    /// [`ServeConfig::DEFAULT_REPLAY_BYTES`] (8 MiB, `docs/PRD.md` §13,
+    /// ADR-0004).
+    pub replay_bytes: Option<usize>,
+    /// Resume TTL in seconds for unattached sessions. Unset ⇒
+    /// [`ServeConfig::DEFAULT_RESUME_TTL_SECS`] (24 h, `docs/PRD.md` §13).
+    pub resume_ttl_secs: Option<u64>,
+    /// Per-step grace of the close signal escalation, in milliseconds.
+    /// Unset ⇒ [`ServeConfig::DEFAULT_CLOSE_GRACE_MS`] (5 s,
+    /// `docs/CLI.md` §6.7).
+    pub close_grace_ms: Option<u64>,
+}
+
+impl ServeConfig {
+    /// Default per-session replay budget: 8 MiB (`docs/PRD.md` §13).
+    pub const DEFAULT_REPLAY_BYTES: usize = 8 * 1024 * 1024;
+    /// Default resume TTL: 24 hours (`docs/PRD.md` §13).
+    pub const DEFAULT_RESUME_TTL_SECS: u64 = 24 * 60 * 60;
+    /// Default close escalation grace: 5 seconds (`docs/CLI.md` §6.7).
+    pub const DEFAULT_CLOSE_GRACE_MS: u64 = 5000;
+
+    /// Effective replay budget (never zero; a `0` in config is treated as
+    /// the default rather than an unusable ring).
+    pub fn replay_bytes(&self) -> usize {
+        match self.replay_bytes {
+            Some(n) if n > 0 => n,
+            _ => Self::DEFAULT_REPLAY_BYTES,
+        }
+    }
+
+    /// Effective resume TTL.
+    pub fn resume_ttl(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(
+            self.resume_ttl_secs
+                .unwrap_or(Self::DEFAULT_RESUME_TTL_SECS),
+        )
+    }
+
+    /// Effective close escalation grace.
+    pub fn close_grace(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(
+            self.close_grace_ms.unwrap_or(Self::DEFAULT_CLOSE_GRACE_MS),
+        )
+    }
 }
 
 /// `[identity]` section.
