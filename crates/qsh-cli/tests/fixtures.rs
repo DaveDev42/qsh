@@ -51,12 +51,17 @@ const DEFERRED: &[(&str, &str)] = &[
         "PERMISSION_DENIED",
         "M5 policy engine (M1 interim policy is allow-all-pinned)",
     ),
-    ("SESSION_NOT_FOUND", "M2 sessions"),
-    ("SESSION_CONFLICT", "M2 sessions"),
+    (
+        "SESSION_CONFLICT",
+        "M2 Step 5/7: needs a concurrently held writer lease (attach)",
+    ),
     ("RESUME_GAP", "M2 sessions"),
     ("CANCELED", "M2 sessions"),
     ("RESOURCE_EXHAUSTED", "M2 backpressure"),
-    ("UNSUPPORTED", "M2 reserved flags"),
+    (
+        "UNSUPPORTED",
+        "M2 Step 5/7: `session read --follow` / attach",
+    ),
     ("REMOTE_ERROR", "no deterministic producer in M1"),
     ("INTERNAL", "no deterministic producer in M1"),
 ];
@@ -80,6 +85,14 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "error.AUTH_FAILED.json",
     "error.TRUST_REQUIRED.json",
     "error.TIMEOUT.json",
+    "session.open.json",
+    "session.get.json",
+    "session.list.json",
+    "session.read.json",
+    "session.write.json",
+    "session.resize.json",
+    "session.close.json",
+    "error.SESSION_NOT_FOUND.json",
 ];
 
 // ---------------------------------------------------------------------------
@@ -262,6 +275,120 @@ fn golden_remote_fixtures() {
     check("error.TRUST_REQUIRED.json", trust_required);
 }
 
+/// The `session.*` value ops against a real `qsh serve` (headless echo
+/// sessions until the PTY source lands): open → write → get → read →
+/// resize → list → close → get (gone).
+#[test]
+fn golden_session_fixtures() {
+    let fleet = Fleet::start();
+    let client = &fleet.client;
+
+    let (code, opened) = client.json(&["session", "open", HOST_ALIAS, "--json", "--", "sh"]);
+    assert_eq!(code, 0, "{opened}");
+    let session_ref = opened["data"]["session_ref"]
+        .as_str()
+        .expect("session_ref")
+        .to_string();
+    assert!(session_ref.starts_with(&format!("{HOST_ALIAS}/")));
+    check("session.open.json", opened);
+
+    // The headless echo session prints a banner first; a long-poll read
+    // from 0 returns that output (no lease has been taken yet, so no
+    // control events can interleave). The fixture masks payload and
+    // offsets, so only this test's own asserts know about the stand-in —
+    // Step 4 (PTY) rewrites these asserts, not the fixtures.
+    let banner_len = qsh_core::broker::ECHO_BANNER.len() as u64;
+    let (code, read) = client.json(&[
+        "session",
+        "read",
+        &session_ref,
+        "--after",
+        "0",
+        "--wait",
+        "5000",
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{read}");
+    let events = read["data"]["events"].as_array().expect("events");
+    assert!(!events.is_empty(), "{read}");
+    assert!(
+        events.iter().all(|e| e["type"] == "session.output"),
+        "{read}"
+    );
+    assert_eq!(events.last().unwrap()["sequence"], banner_len, "{read}");
+    // The reply carries the resume cursor a poller must feed back
+    // (`--after`/`--ctl-after`, CLI.md §6.4).
+    assert_eq!(read["data"]["next_after"], banner_len, "{read}");
+    assert!(read["data"]["next_ctl_after"].is_u64(), "{read}");
+    // One event in the fixture: the pull may split the banner in theory,
+    // so keep the fixture to the first event only (shape is what it pins).
+    let mut read_fixture = read.clone();
+    read_fixture["data"]["events"] = Value::Array(vec![events[0].clone()]);
+    check("session.read.json", read_fixture);
+
+    // "hi\n" — the echo child sends it straight back as output.
+    let (code, written) = client.json(&[
+        "session",
+        "write",
+        &session_ref,
+        "--data-b64",
+        "aGkK",
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{written}");
+    assert_eq!(written["data"]["bytes_written"], 3);
+    check("session.write.json", written);
+
+    // Bounded poll (no sleeps: each iteration is a real round trip) until
+    // the echo has landed in the ring and the write's connection has
+    // released its lease, so the snapshots below are stable. Wall-clock
+    // bounded rather than iteration-bounded so a loaded box does not fail
+    // spuriously.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let session = loop {
+        let (code, session) = client.json(&["session", "get", &session_ref, "--json"]);
+        assert_eq!(code, 0, "{session}");
+        if session["data"]["last_sequence"] == banner_len + 3 && session["data"]["writer"].is_null()
+        {
+            break session;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "echoed output never reached the replay ring / lease never released: {session}"
+        );
+    };
+    assert_eq!(session["data"]["state"], "running");
+    check("session.get.json", session);
+
+    let (code, resized) = client.json(&[
+        "session",
+        "resize",
+        &session_ref,
+        "--cols",
+        "120",
+        "--rows",
+        "40",
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{resized}");
+    check("session.resize.json", resized);
+
+    let (code, listed) = client.json(&["sessions", HOST_ALIAS, "--json"]);
+    assert_eq!(code, 0, "{listed}");
+    assert_eq!(listed["data"]["sessions"].as_array().map(Vec::len), Some(1));
+    check("session.list.json", listed);
+
+    let (code, closed) = client.json(&["session", "close", &session_ref, "--json"]);
+    assert_eq!(code, 0, "{closed}");
+    assert_eq!(closed["data"]["final_sequence"], banner_len + 3);
+    check("session.close.json", closed);
+
+    let (code, gone) = client.json(&["session", "get", &session_ref, "--json"]);
+    assert_eq!(code, 255, "{gone}");
+    assert_eq!(gone["error"]["code"], "SESSION_NOT_FOUND");
+    check("error.SESSION_NOT_FOUND.json", gone);
+}
+
 // ---------------------------------------------------------------------------
 // Contract checks over the whole fixture directory
 // ---------------------------------------------------------------------------
@@ -316,6 +443,43 @@ fn every_fixture_is_a_wellformed_v1_envelope() {
             assert!(error["message"].as_str().is_some(), "{name}");
             assert!(error["retryable"].as_bool().is_some(), "{name}");
         }
+    }
+}
+
+/// ADR-0007 (결과 절): the resume token is never a property of any JSON
+/// contract type (`qsh-proto` pins the schemas) **and never appears in a
+/// fixture** — this is the fixture half. Checked structurally on every
+/// object key at any depth, and textually so a token smuggled inside a
+/// string value would trip it too.
+#[test]
+fn no_fixture_carries_a_resume_token() {
+    if skip_while_regenerating() {
+        return;
+    }
+    fn keys(v: &Value, out: &mut Vec<String>) {
+        match v {
+            Value::Object(map) => {
+                out.extend(map.keys().cloned());
+                map.values().for_each(|c| keys(c, out));
+            }
+            Value::Array(items) => items.iter().for_each(|c| keys(c, out)),
+            _ => {}
+        }
+    }
+    for (name, fixture) in fixtures::all_cli_v1() {
+        let mut names = Vec::new();
+        keys(&fixture, &mut names);
+        assert!(
+            !names
+                .iter()
+                .any(|k| k.contains("resume_token") || k == "token"),
+            "{name}: exposes a token field ({names:?}) — ADR-0007"
+        );
+        let text = serde_json::to_string(&fixture).expect("encode");
+        assert!(
+            !text.contains("resume_token"),
+            "{name}: mentions resume_token"
+        );
     }
 }
 

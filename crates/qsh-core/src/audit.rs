@@ -165,6 +165,14 @@ impl MemoryAuditSink {
             .unwrap_or_else(|e| e.into_inner())
             .clone()
     }
+
+    /// Drop everything recorded so far (tests: isolate one phase).
+    pub fn clear(&self) {
+        self.records
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+    }
 }
 
 impl AuditSink for MemoryAuditSink {

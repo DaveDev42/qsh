@@ -264,12 +264,23 @@ message SessionRead {
   uint64 max_bytes = 3;
   // Long-poll wait when nothing is available; 0 = return immediately.
   uint64 wait_ms = 4;
+  // Control-entry cursor: id of the last zero-length control entry the
+  // caller received (`next_ctl_after` of the previous reply); 0 = none yet.
+  // Control entries do not advance `after`, so without this a caller
+  // re-reading at the same offset would be handed the same control entry
+  // for ever (protocol.md §9).
+  uint64 ctl_after = 5;
 }
 
 // Success payload for SessionRead: events in total order (output chunks
 // interleaved with the zero-length control entries of the replay ring).
 message SessionReadResult {
   repeated SessionReadEvent events = 1;
+  // The cursor to resume from: feed both back as `after` / `ctl_after`.
+  // `next_after` equals the request's `after` plus the output bytes
+  // delivered (or `available_from` after a gap).
+  uint64 next_after = 2;
+  uint64 next_ctl_after = 3;
 }
 
 // One event of a SessionReadResult. Mirrors qsh.event/v1 (CLI.md §6.4).

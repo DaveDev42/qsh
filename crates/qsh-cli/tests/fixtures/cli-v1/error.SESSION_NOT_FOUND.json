@@ -1,0 +1,12 @@
+{
+  "command": "session.get",
+  "error": {
+    "code": "SESSION_NOT_FOUND",
+    "details": null,
+    "message": "session not found",
+    "retryable": false
+  },
+  "ok": false,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}
