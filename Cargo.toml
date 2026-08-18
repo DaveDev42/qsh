@@ -44,6 +44,11 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "pr
 # identity / crypto hygiene
 rcgen = { version = "0.14", default-features = false, features = ["pem", "aws_lc_rs"] }
 sha2 = "0.10"
+# Resume token custody (`docs/design/architecture.md` §8, protocol.md §10):
+# blake3 hashes the token the host stores, subtle compares it in constant
+# time, zeroize keeps the plaintext out of freed memory.
+blake3 = { version = "1", default-features = false, features = ["std"] }
+subtle = "2"
 zeroize = { version = "1", features = ["derive"] }
 rand = "0.9"
 libc = "0.2"

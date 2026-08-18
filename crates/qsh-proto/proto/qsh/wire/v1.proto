@@ -194,6 +194,11 @@ message SessionAttached {
   // True when this attach holds the writer lease.
   bool writer_lease = 4;
   string expires_at = 5;
+  // Cumulative *input* offset this attach continues from (protocol.md §8,
+  // §10-5). A resumed attach gets the offset the host has applied on the
+  // input stream it left, so its retransmitted tail is deduplicated; any
+  // other attach gets 0 and counts from scratch. Additive field 6.
+  uint64 input_seq = 6;
 }
 
 // Request: list this host's sessions (op `session.list`, ACL `session.list`).

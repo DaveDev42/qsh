@@ -26,7 +26,7 @@ fn spec(argv: &[&str]) -> ExecSpec {
 async fn exec_dod_case_stdout_stderr_and_exit_code() {
     let h = LoopbackHarness::start().await;
     let mut s = h.session().await;
-    assert_eq!(s.capabilities, vec!["exec", "session"]);
+    assert_eq!(s.capabilities, vec!["exec", "session", "resume.v1"]);
 
     let r = s
         .exec(&spec(&["sh", "-c", "echo out; echo err >&2; exit 7"]), None)

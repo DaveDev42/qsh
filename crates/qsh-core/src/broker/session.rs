@@ -156,6 +156,18 @@ struct Meta {
     /// Monotonic instant the TTL is measured from when `attached == 0`:
     /// creation, last detach, or exit.
     ttl_base: Instant,
+    /// The `SESSION_DATA` input stream the cursor below belongs to. A
+    /// stream that presents a different id is a *different* logical client
+    /// (a steal, or a fresh attach), so the cursor adopts its numbering
+    /// instead of deduplicating against a foreign axis.
+    input_stream: InputStreamId,
+    /// Highest cumulative input byte offset applied on [`Meta::input_stream`]
+    /// (protocol.md §8/§10-5). Session-scoped, not per-attach: a reattach
+    /// that keeps the id keeps the cursor, which is what makes retransmission
+    /// of the un-acked tail exactly-once.
+    applied_input: u64,
+    /// Source of fresh [`InputStreamId`]s for this session.
+    next_input_stream: u64,
     /// `true` from the moment a close was accepted (escalation may still be
     /// running). Rejects input and stops the TTL reaper from closing twice.
     closing: bool,
@@ -206,12 +218,27 @@ pub struct SessionHandle {
     inbox: mpsc::Sender<Command>,
 }
 
+/// Identifies one logical client input stream on a session.
+///
+/// Minted by the host: `session.open` gets the session's first, a fresh
+/// `session.attach` gets a new one, and a **resumed** attach keeps the one
+/// it left (protocol.md §10-5 — that is what makes the dedup cursor
+/// survive a reattach instead of restarting per attach). Opaque to the
+/// peer: it rides on the ticket, never on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct InputStreamId(pub u64);
+
 /// Inbox messages (architecture.md §3 "mpsc 인박스").
 enum Command {
     Write {
         conn: ConnectionId,
         data: Vec<u8>,
-        resp: oneshot::Sender<Result<(), WriteError>>,
+        /// The numbered input stream this chunk belongs to and the
+        /// cumulative offset *after* it. `None` for the `session.write`
+        /// value op, which has no cursor of its own: it injects out of band
+        /// and deliberately does not move any stream's axis.
+        input_seq: Option<(InputStreamId, u64)>,
+        resp: oneshot::Sender<Result<u64, WriteError>>,
     },
     Resize {
         cols: u16,
@@ -252,6 +279,17 @@ pub enum WriteError {
     /// full (→ `RESOURCE_EXHAUSTED`, CLI.md §3.3). Retry later.
     #[error("session input queue is full")]
     Backpressure,
+    /// The chunk starts past what the session has applied: the peer
+    /// skipped input bytes the host never received. Accepting would lose
+    /// them silently, which PRD §8 forbids — this is a protocol fault, not
+    /// a retryable condition.
+    #[error("input starts at {start} but only {applied} bytes were applied")]
+    InputGap {
+        /// Cumulative offset the rejected chunk starts at.
+        start: u64,
+        /// Cumulative offset the session had applied.
+        applied: u64,
+    },
     /// Writing to the source failed.
     #[error("write to session source failed: {0}")]
     Io(String),
@@ -331,12 +369,48 @@ impl SessionHandle {
     /// Resolves once the bytes have been written to the source (or fails
     /// fast with [`WriteError::Backpressure`] if the input queue is full).
     pub async fn write(&self, conn: ConnectionId, data: Vec<u8>) -> Result<(), WriteError> {
+        self.write_at(conn, data, None).await.map(|_| ())
+    }
+
+    /// Write client input carrying its cumulative offset (`input_seq` is
+    /// the offset *after* the chunk, protocol.md §8). The session trims
+    /// whatever it already applied and answers with its applied offset, so
+    /// a reattach may retransmit freely: input is neither lost nor applied
+    /// twice (protocol.md §10-5). `None` appends without a cursor.
+    pub async fn write_at(
+        &self,
+        conn: ConnectionId,
+        data: Vec<u8>,
+        input_seq: Option<(InputStreamId, u64)>,
+    ) -> Result<u64, WriteError> {
         let (resp, rx) = oneshot::channel();
         self.inbox
-            .send(Command::Write { conn, data, resp })
+            .send(Command::Write {
+                conn,
+                data,
+                input_seq,
+                resp,
+            })
             .await
             .map_err(|_| WriteError::Gone)?;
         rx.await.map_err(|_| WriteError::Gone)?
+    }
+
+    /// The session's current input stream and how far it has been applied
+    /// — what a **resumed** attach continues from (protocol.md §10-5).
+    pub fn input_cursor(&self) -> (InputStreamId, u64) {
+        let meta = self.shared.meta();
+        (meta.input_stream, meta.applied_input)
+    }
+
+    /// Mint a fresh input stream id for an attach that is *not* a resume
+    /// (a steal, or a first attach): its numbering starts at zero and is
+    /// deduplicated against nobody else's.
+    pub fn new_input_stream(&self) -> InputStreamId {
+        let mut meta = self.shared.meta();
+        let id = InputStreamId(meta.next_input_stream);
+        meta.next_input_stream += 1;
+        id
     }
 
     /// Apply a window-size change.
@@ -564,6 +638,9 @@ impl SessionActor {
                 lease: WriterLease::new(),
                 attached: 0,
                 ttl_base,
+                input_stream: InputStreamId(1),
+                applied_input: 0,
+                next_input_stream: 2,
                 closing: false,
                 closed_at: None,
             }),
@@ -621,12 +698,13 @@ impl SessionActor {
         // `WriteError::Backpressure` for callers.
         let (in_tx, mut in_rx) = mpsc::channel::<InputChunk>(config.input_queue.max(1));
         let writer = tokio::spawn(async move {
-            while let Some((data, resp)) = in_rx.recv().await {
+            while let Some((data, applied, resp)) = in_rx.recv().await {
                 let result = async {
                     input.write_all(&data).await?;
                     input.flush().await
                 }
                 .await
+                .map(|()| applied)
                 .map_err(|e| WriteError::Io(e.to_string()));
                 let _ = resp.send(result);
             }
@@ -708,7 +786,7 @@ impl SessionActor {
     }
 }
 
-type InputChunk = (Vec<u8>, oneshot::Sender<Result<(), WriteError>>);
+type InputChunk = (Vec<u8>, u64, oneshot::Sender<Result<u64, WriteError>>);
 
 /// An in-progress close (CLI.md §6.7 escalation).
 struct Closing {
@@ -757,9 +835,14 @@ impl ActorState {
 
     fn handle_command(&mut self, cmd: Command) {
         match cmd {
-            Command::Write { conn, data, resp } => {
+            Command::Write {
+                conn,
+                data,
+                input_seq,
+                resp,
+            } => {
                 // On refusal `resp` was answered inside; nothing else to do.
-                self.enqueue_write(conn, data, resp);
+                self.enqueue_write(conn, data, input_seq, resp);
             }
             Command::Resize { cols, rows, resp } => {
                 let _ = resp.send(self.control.resize(cols, rows));
@@ -818,32 +901,96 @@ impl ActorState {
     /// Validate and hand a write to the input writer without blocking the
     /// actor. On refusal the caller's `resp` is answered with the error;
     /// on success the writer task answers it once the bytes are written.
+    /// Admit one input chunk: state + lease, then the session's input
+    /// cursor, then the bounded queue.
+    ///
+    /// The cursor arithmetic happens **here**, inside the actor, because
+    /// the actor is what serialises writes: the order chunks are enqueued
+    /// is the order the child sees them, so trimming an already-applied
+    /// prefix under the same serialisation is what makes a reattach's
+    /// retransmission exactly-once (protocol.md §10-5). Doing it in the
+    /// stream pump instead would make it per-attach, and a reattach would
+    /// replay input the child already ran.
     fn enqueue_write(
         &mut self,
         conn: ConnectionId,
         data: Vec<u8>,
-        resp: oneshot::Sender<Result<(), WriteError>>,
+        input_seq: Option<(InputStreamId, u64)>,
+        resp: oneshot::Sender<Result<u64, WriteError>>,
     ) {
-        let refusal = {
+        let (admit, current_stream) = {
             let meta = self.shared.meta();
-            if meta.state != SessionState::Running || meta.closing {
-                Some(WriteError::NotRunning)
+            let admit = if meta.state != SessionState::Running || meta.closing {
+                Err(WriteError::NotRunning)
             } else if !meta.lease.is_held_by(conn) {
-                Some(WriteError::NotWriter)
+                Err(WriteError::NotWriter)
             } else {
-                None
+                Ok(meta.applied_input)
+            };
+            (admit, meta.input_stream)
+        };
+        let mut applied = match admit {
+            Ok(applied) => applied,
+            Err(err) => {
+                // A refused numbered chunk still moves *its own* stream's
+                // cursor: the bytes are deliberately dropped (a demoted
+                // read-only attach, protocol.md §10 "read-only로 강등"), and
+                // the peer must not resend them when its lease returns. The
+                // id keeps that advance from poisoning any other stream's
+                // axis.
+                if let Some((stream, seq)) = input_seq {
+                    let mut meta = self.shared.meta();
+                    meta.input_stream = stream;
+                    meta.applied_input = meta.applied_input.max(seq);
+                }
+                let _ = resp.send(Err(err));
+                return;
             }
         };
-        if let Some(err) = refusal {
-            let _ = resp.send(Err(err));
-            return;
-        }
-        match self.in_tx.try_send((data, resp)) {
-            Ok(()) => {}
-            Err(mpsc::error::TrySendError::Full((_, resp))) => {
+        let (data, next) = match input_seq {
+            // The value op has no cursor: it injects out of band and must
+            // not move any stream's axis, or the attached writer's next
+            // chunk would look like a retransmission and be dropped.
+            None => (data, applied),
+            Some((stream, seq)) => {
+                let Some(start) = seq.checked_sub(data.len() as u64) else {
+                    let _ = resp.send(Err(WriteError::InputGap {
+                        start: seq,
+                        applied,
+                    }));
+                    return;
+                };
+                if stream != current_stream {
+                    // A different logical client: adopt its numbering
+                    // rather than deduplicating against an axis that was
+                    // never its own.
+                    let mut meta = self.shared.meta();
+                    meta.input_stream = stream;
+                    meta.applied_input = start;
+                    applied = start;
+                }
+                if start > applied {
+                    // Bytes we never saw would be skipped; accepting would
+                    // lose them silently, which PRD §8 forbids.
+                    let _ = resp.send(Err(WriteError::InputGap { start, applied }));
+                    return;
+                }
+                let skip = (applied - start) as usize;
+                if skip >= data.len() {
+                    // Entirely a retransmission of what the child already
+                    // ran: acknowledge it again and apply nothing.
+                    let _ = resp.send(Ok(applied));
+                    return;
+                }
+                (data[skip..].to_vec(), seq)
+            }
+        };
+        match self.in_tx.try_send((data, next, resp)) {
+            Ok(()) => self.shared.meta().applied_input = next,
+            Err(mpsc::error::TrySendError::Full((_, _, resp))) => {
                 let _ = resp.send(Err(WriteError::Backpressure));
             }
-            Err(mpsc::error::TrySendError::Closed((_, resp))) => {
+            Err(mpsc::error::TrySendError::Closed((_, _, resp))) => {
                 let _ = resp.send(Err(WriteError::Gone));
             }
         }

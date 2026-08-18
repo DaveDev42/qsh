@@ -50,10 +50,13 @@ pub const CAP_SESSION: &str = "session";
 pub const CAP_RESUME_V1: &str = "resume.v1";
 
 /// Capabilities this build advertises in [`Hello`]. Advertised and
-/// implemented stay in lockstep: [`CAP_RESUME_V1`] joins the list with the
-/// resume implementation (PLAN M2 Step 7); until then a host answers
-/// `SessionAttach` with `UNSUPPORTED` and does not claim otherwise.
-pub const LOCAL_CAPABILITIES: &[&str] = &[CAP_EXEC, CAP_SESSION];
+/// implemented stay in lockstep — a capability string is a promise about
+/// behaviour, and a peer that advertises resume and then cannot replay is
+/// worse than one that never claimed it. [`CAP_RESUME_V1`] joined the list
+/// with the resume implementation (PLAN M2 Step 7): the host redeems a
+/// resume credential, replays from the requested offset (or opens with a
+/// `Gap`), and deduplicates retransmitted input.
+pub const LOCAL_CAPABILITIES: &[&str] = &[CAP_EXEC, CAP_SESSION, CAP_RESUME_V1];
 
 /// quinn send priority of the control stream — the top of the
 /// `docs/design/protocol.md` §12 band, so a saturated bulk stream can never
@@ -581,15 +584,17 @@ mod tests {
             any::<u64>(),
             any::<bool>(),
             arb_rfc3339(),
+            any::<u64>(),
         )
             .prop_map(
-                |(ticket, new_resume_token, replay_from, writer_lease, expires_at)| {
+                |(ticket, new_resume_token, replay_from, writer_lease, expires_at, input_seq)| {
                     SessionAttached {
                         ticket,
                         new_resume_token,
                         replay_from,
                         writer_lease,
                         expires_at,
+                        input_seq,
                     }
                 },
             )
@@ -1105,8 +1110,12 @@ mod tests {
     fn local_capabilities_advertise_exactly_what_is_implemented() {
         assert!(LOCAL_CAPABILITIES.contains(&CAP_EXEC));
         assert!(LOCAL_CAPABILITIES.contains(&CAP_SESSION));
-        // Resume is not implemented yet (PLAN M2 Step 7 re-adds it).
-        assert!(!LOCAL_CAPABILITIES.contains(&CAP_RESUME_V1));
+        // Resume is implemented (PLAN M2 Step 7): credential redemption,
+        // replay from `last_output_seq` with a `Gap` when the ring has
+        // moved past it, and input dedup across the reattach. This
+        // assertion is the lockstep — flipping it back means the
+        // implementation went away.
+        assert!(LOCAL_CAPABILITIES.contains(&CAP_RESUME_V1));
     }
 
     #[test]
