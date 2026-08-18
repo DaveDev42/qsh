@@ -275,9 +275,12 @@ fn golden_remote_fixtures() {
     check("error.TRUST_REQUIRED.json", trust_required);
 }
 
-/// The `session.*` value ops against a real `qsh serve` (headless echo
-/// sessions until the PTY source lands): open → write → get → read →
-/// resize → list → close → get (gone).
+/// The `session.*` value ops against a real `qsh serve` (PTY-backed
+/// sessions, M2 Step 4): open → read → write → get → resize → list →
+/// close → get (gone). A real PTY's byte stream is not reproducible
+/// (prompt text differs per shell and platform), so the asserts here pin
+/// invariants — cursor monotonicity and the shape of each envelope — while
+/// the fixtures themselves mask payload and offsets.
 #[test]
 fn golden_session_fixtures() {
     let fleet = Fleet::start();
@@ -292,12 +295,9 @@ fn golden_session_fixtures() {
     assert!(session_ref.starts_with(&format!("{HOST_ALIAS}/")));
     check("session.open.json", opened);
 
-    // The headless echo session prints a banner first; a long-poll read
-    // from 0 returns that output (no lease has been taken yet, so no
-    // control events can interleave). The fixture masks payload and
-    // offsets, so only this test's own asserts know about the stand-in —
-    // Step 4 (PTY) rewrites these asserts, not the fixtures.
-    let banner_len = qsh_core::broker::ECHO_BANNER.len() as u64;
+    // The shell writes its prompt as soon as the PTY is up; a long-poll
+    // read from 0 returns it (no lease has been taken yet, so no control
+    // events can interleave).
     let (code, read) = client.json(&[
         "session",
         "read",
@@ -315,10 +315,16 @@ fn golden_session_fixtures() {
         events.iter().all(|e| e["type"] == "session.output"),
         "{read}"
     );
-    assert_eq!(events.last().unwrap()["sequence"], banner_len, "{read}");
     // The reply carries the resume cursor a poller must feed back
-    // (`--after`/`--ctl-after`, CLI.md §6.4).
-    assert_eq!(read["data"]["next_after"], banner_len, "{read}");
+    // (`--after`/`--ctl-after`, CLI.md §6.4): it is exactly the last
+    // delivered output offset, and reading from 0 must have advanced it.
+    let prompt_end = read["data"]["next_after"].as_u64().expect("next_after");
+    assert!(prompt_end > 0, "{read}");
+    assert_eq!(
+        events.last().unwrap()["sequence"].as_u64(),
+        Some(prompt_end),
+        "{read}"
+    );
     assert!(read["data"]["next_ctl_after"].is_u64(), "{read}");
     // One event in the fixture: the pull may split the banner in theory,
     // so keep the fixture to the first event only (shape is what it pins).
@@ -326,7 +332,8 @@ fn golden_session_fixtures() {
     read_fixture["data"]["events"] = Value::Array(vec![events[0].clone()]);
     check("session.read.json", read_fixture);
 
-    // "hi\n" — the echo child sends it straight back as output.
+    // "hi\n" — the tty echoes it back, and the shell then reacts to it, so
+    // the ring grows by *at least* the three bytes written.
     let (code, written) = client.json(&[
         "session",
         "write",
@@ -340,16 +347,18 @@ fn golden_session_fixtures() {
     check("session.write.json", written);
 
     // Bounded poll (no sleeps: each iteration is a real round trip) until
-    // the echo has landed in the ring and the write's connection has
-    // released its lease, so the snapshots below are stable. Wall-clock
-    // bounded rather than iteration-bounded so a loaded box does not fail
-    // spuriously.
+    // the echoed input has landed in the ring and the write's connection
+    // has released its lease, so the snapshots below are stable.
+    // Wall-clock bounded rather than iteration-bounded so a loaded box
+    // does not fail spuriously.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let session = loop {
         let (code, session) = client.json(&["session", "get", &session_ref, "--json"]);
         assert_eq!(code, 0, "{session}");
-        if session["data"]["last_sequence"] == banner_len + 3 && session["data"]["writer"].is_null()
-        {
+        let last = session["data"]["last_sequence"]
+            .as_u64()
+            .expect("last_sequence");
+        if last >= prompt_end + 3 && session["data"]["writer"].is_null() {
             break session;
         }
         assert!(
@@ -380,7 +389,15 @@ fn golden_session_fixtures() {
 
     let (code, closed) = client.json(&["session", "close", &session_ref, "--json"]);
     assert_eq!(code, 0, "{closed}");
-    assert_eq!(closed["data"]["final_sequence"], banner_len + 3);
+    // A live shell keeps producing output, so the final offset is only
+    // bounded from below by what we have already observed.
+    assert!(
+        closed["data"]["final_sequence"]
+            .as_u64()
+            .expect("final_sequence")
+            >= prompt_end + 3,
+        "{closed}"
+    );
     check("session.close.json", closed);
 
     let (code, gone) = client.json(&["session", "get", &session_ref, "--json"]);
