@@ -24,19 +24,23 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            ext: .exe
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # Honors rust-toolchain.toml (pinned channel).
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
+          target: ${{ matrix.target }}
       - run: cargo build --release -p qsh-cli --target ${{ matrix.target }}
 
       - name: Smoke test
-        run: ./target/${{ matrix.target }}/release/qsh version --json
+        shell: bash
+        run: ./target/${{ matrix.target }}/release/qsh${{ matrix.ext }} version --json
 
       - uses: actions/upload-artifact@v4
         with:
           name: qsh-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/qsh
+          path: target/${{ matrix.target }}/release/qsh${{ matrix.ext }}

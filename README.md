@@ -108,7 +108,10 @@ Per-milestone scope, in/out boundaries and acceptance criteria live in
   separate session supervisor is planned after MVP
   ([ADR-0003](docs/adr/0003-sessions-in-listener.md)).
 - Windows is P1 for the client and P2 for the host — not supported yet. PTY
-  code is gated `#![cfg(unix)]` and there is no Windows CI.
+  code is gated `#![cfg(unix)]`. CI does build, lint and run the portable
+  test subset on `windows-latest` so the tree keeps compiling there, but
+  POSIX-only behaviour (signal exits, process-group kill) is not exercised
+  and nothing is promised for Windows.
 - Until the policy engine lands (M5), the host authorizes **every** pinned
   peer for `exec.run` (allow-all-pinned). Peers that authenticate through a
   trusted CA (`[[ca]]` in `trust.toml`) connect but get `PERMISSION_DENIED`;

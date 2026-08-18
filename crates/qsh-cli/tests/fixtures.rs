@@ -227,10 +227,15 @@ fn golden_remote_fixtures() {
     assert_eq!(code, 7, "{exec}");
     check("exec.run.json", exec);
 
-    let (code, killed) = fleet.exec_json(&["--", "sh", "-c", "kill -9 $$"]);
-    assert_eq!(code, 137, "{killed}");
-    assert_eq!(killed["data"]["signal"], "SIGKILL");
-    check("exec.run.signal.json", killed);
+    // Signal exits are POSIX semantics; the fixture is asserted where a
+    // signal can actually happen.
+    #[cfg(unix)]
+    {
+        let (code, killed) = fleet.exec_json(&["--", "sh", "-c", "kill -9 $$"]);
+        assert_eq!(code, 137, "{killed}");
+        assert_eq!(killed["data"]["signal"], "SIGKILL");
+        check("exec.run.signal.json", killed);
+    }
 
     let (code, timeout) = fleet.exec_json(&["--timeout", "300", "--", "sleep", "5"]);
     assert_eq!(code, 255, "{timeout}");

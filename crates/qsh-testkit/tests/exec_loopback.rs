@@ -91,7 +91,37 @@ async fn exec_stdin_forwarding_and_large_output() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn exec_signal_not_found_and_timeout() {
+async fn exec_not_found_and_timeout() {
+    let h = LoopbackHarness::start().await;
+    let mut s = h.session().await;
+
+    let r = s.exec(&spec(&["/nonexistent/binary"]), None).await.unwrap();
+    assert_eq!(r.exit_code, 127);
+    assert!(String::from_utf8_lossy(&r.stderr).contains("cannot execute"));
+
+    // The command itself must be the thing that sleeps: on Windows there is
+    // no process-group kill, so a shell wrapper's grandchild would keep the
+    // pipes open past the deadline.
+    let mut sp = spec(&["sleep", "30"]);
+    sp.timeout = Some(Duration::from_millis(300));
+    let started = std::time::Instant::now();
+    let r = s.exec(&sp, None).await.unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "timeout must kill"
+    );
+    assert!(r.timed_out, "host must flag the kill as a timeout");
+    assert_ne!(r.exit_code, 0);
+    #[cfg(unix)]
+    assert_eq!(r.signal.as_deref(), Some("SIGKILL"));
+}
+
+/// POSIX signal semantics: a signaled exit is `128 + signo` with the signal
+/// named, output produced before a timeout kill is still delivered, and a
+/// plain signal death is *not* flagged as a timeout.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn exec_signal_exit_and_timeout_kill_report_sigkill() {
     let h = LoopbackHarness::start().await;
     let mut s = h.session().await;
 
@@ -101,10 +131,7 @@ async fn exec_signal_not_found_and_timeout() {
         .unwrap();
     assert_eq!(r.exit_code, 137);
     assert_eq!(r.signal.as_deref(), Some("SIGKILL"));
-
-    let r = s.exec(&spec(&["/nonexistent/binary"]), None).await.unwrap();
-    assert_eq!(r.exit_code, 127);
-    assert!(String::from_utf8_lossy(&r.stderr).contains("cannot execute"));
+    assert!(!r.timed_out, "a plain signal exit is not a timeout");
 
     let mut sp = spec(&["sh", "-c", "echo before; sleep 30; echo after"]);
     sp.timeout = Some(Duration::from_millis(300));
@@ -112,18 +139,11 @@ async fn exec_signal_not_found_and_timeout() {
     let r = s.exec(&sp, None).await.unwrap();
     assert!(
         started.elapsed() < Duration::from_secs(10),
-        "timeout must kill"
+        "timeout must kill the whole process group"
     );
     assert_eq!(r.stdout, b"before\n");
     assert_eq!(r.signal.as_deref(), Some("SIGKILL"));
     assert!(r.timed_out, "host must flag the kill as a timeout");
-
-    // A plain signal exit is *not* a timeout.
-    let r = s
-        .exec(&spec(&["sh", "-c", "kill -9 $$"]), None)
-        .await
-        .unwrap();
-    assert!(!r.timed_out);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -193,6 +213,7 @@ async fn bogus_ticket_stream_is_reset_without_spawn_or_audit() {
 /// must not be able to wedge the host: once the deadline kills the child,
 /// the host waits at most `DRAIN_GRACE` for the tail to drain, then resets
 /// the stream and reaps. The child is gone well before that.
+#[cfg(unix)] // pid files via `$$`, `kill -0`, process-group kill
 #[tokio::test(flavor = "multi_thread")]
 async fn peer_that_stops_reading_is_reset_after_the_drain_grace() {
     let h = LoopbackHarness::start().await;
@@ -268,6 +289,7 @@ async fn peer_that_stops_reading_is_reset_after_the_drain_grace() {
 /// When the client vanishes mid-exec (connection dropped, no clean
 /// `StdinEof`/close), the host must not leave the child running as an
 /// orphan: nobody is listening, so it is killed with its process group.
+#[cfg(unix)] // pid files via `$$`, `kill -0`, process-group kill
 #[tokio::test(flavor = "multi_thread")]
 async fn peer_disappearing_mid_exec_kills_the_child() {
     let h = LoopbackHarness::start().await;
