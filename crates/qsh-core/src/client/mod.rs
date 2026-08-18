@@ -18,6 +18,8 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::exec::ExecSpec;
 
+pub mod reconnect;
+
 /// How long to wait for the peer's `Hello`.
 pub const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -455,17 +457,42 @@ impl Session {
     /// [`Attached`] is the live stream; the control stream stays with this
     /// [`Session`], so the caller drives both.
     ///
-    /// Resume (presenting a `resume_token` on a *new* connection) lands
-    /// with PLAN M2 Step 7; until then `req.resume_token` must be empty —
-    /// the peer answers `UNSUPPORTED` if it is not.
+    /// A non-empty `req.resume_token` makes this a **resume** across
+    /// connections (protocol.md §10): the host checks the credential and
+    /// the bound peer identity before its ACL call, and answers with a
+    /// successor token the caller must persist before using the stream.
     pub async fn attach(&mut self, req: wire::SessionAttach) -> Result<Attached, ClientError> {
-        let attached = match self
+        let attached = self.attach_request(req).await?;
+        self.open_attach_stream(attached).await
+    }
+
+    /// The control half of an attach: authorize it and get the ticket and
+    /// the successor credential, **without** opening the data stream yet.
+    ///
+    /// Split out from [`Session::attach`] because the successor token has
+    /// to be made durable before the stream is used (ADR-0007). It is
+    /// single-generation: the presented token died on the host the moment
+    /// this returned, so a successor lost between here and the first byte
+    /// is a session nobody can ever attach to again.
+    pub async fn attach_request(
+        &mut self,
+        req: wire::SessionAttach,
+    ) -> Result<wire::SessionAttached, ClientError> {
+        match self
             .session_request(control_message::Body::SessionAttach(req))
             .await?
         {
-            response::Body::SessionAttached(a) => a,
-            other => return Err(unexpected("SessionAttach", &other)),
-        };
+            response::Body::SessionAttached(a) => Ok(a),
+            other => Err(unexpected("SessionAttach", &other)),
+        }
+    }
+
+    /// The data half: redeem `attached`'s ticket on a fresh
+    /// `SESSION_DATA` stream.
+    pub async fn open_attach_stream(
+        &mut self,
+        attached: wire::SessionAttached,
+    ) -> Result<Attached, ClientError> {
         let (send, recv) = self.conn.open_bi().await?;
         let mut data = FramedStream::data(send, recv);
         data.send.set_priority(wire::PRIORITY_SESSION_DATA);
@@ -478,7 +505,14 @@ impl Session {
             writer_lease: attached.writer_lease,
             expires_at: attached.expires_at,
             new_resume_token: attached.new_resume_token,
-            writer: AttachWriter { send, input_seq: 0 },
+            input_from: attached.input_seq,
+            writer: AttachWriter {
+                send,
+                // Continue the host's axis, not a private one: this is what
+                // makes a reattach's retransmission line up with the
+                // session's dedup cursor (protocol.md §10-5).
+                input_seq: attached.input_seq,
+            },
             reader: AttachReader { recv },
         })
     }
@@ -543,8 +577,16 @@ pub struct Attached {
     pub writer_lease: bool,
     /// When the session's resume window ends (RFC 3339).
     pub expires_at: String,
-    /// The token to store for a later resume — empty until PLAN M2 Step 7.
+    /// The successor resume credential (protocol.md §10 "Rotation"), empty
+    /// when this attach presented no token. The caller must persist it
+    /// **durably before using the stream**: it is single-generation, so
+    /// losing it orphans the session (ADR-0007).
     pub new_resume_token: Vec<u8>,
+    /// Cumulative input offset this attach continues from
+    /// (`SessionAttached.input_seq`). A resumed attach gets back the offset
+    /// the host applied on the stream it left, so its un-acked tail can be
+    /// retransmitted without the child seeing a byte twice.
+    pub input_from: u64,
     writer: AttachWriter,
     reader: AttachReader,
 }

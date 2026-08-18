@@ -114,6 +114,18 @@ impl Paths {
     pub fn audit_log(&self) -> PathBuf {
         self.state_dir.join("audit.log")
     }
+
+    /// `<state_dir>/resume.json` — the client's resume-token store
+    /// (0600, ADR-0007). Never readable output: see [`crate::resume`].
+    pub fn resume_file(&self) -> PathBuf {
+        self.state_dir.join("resume.json")
+    }
+
+    /// The lock file serialising cross-process read-modify-write of
+    /// [`Paths::resume_file`] (ADR-0007 "원자성·durability·동시성").
+    pub fn resume_lock_file(&self) -> PathBuf {
+        self.state_dir.join("resume.json.lock")
+    }
 }
 
 /// The user's home directory, as `$HOME` or the platform equivalent.

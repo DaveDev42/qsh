@@ -21,9 +21,11 @@ pub mod exec;
 pub mod identity;
 pub mod ops;
 pub mod pty;
+pub mod resume;
 pub mod serve;
 pub mod server;
 pub mod session_stream;
+pub mod telemetry;
 pub mod trust;
 
 pub use config::{Config, Paths, now_rfc3339};
