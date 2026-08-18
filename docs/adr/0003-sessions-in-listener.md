@@ -36,5 +36,6 @@ Listener 재시작 시 세션 손실은 문서화된 알려진 제한(PRD §16�
 - `qsh-core/broker/`는 `SessionBackend` trait의 in-process 구현체 하나만 P0에서 제공한다.
 - `SessionBackend` trait 시그니처는 transport crate(`qsh-transport`)를 import할 수 없다 — 의존 방향(`qsh(bin) → qsh-core → qsh-transport → qsh-proto`)과 arch-lint(xtask)로 강제한다.
 - `localctl.rs`(UDS 제어 소켓)는 M2(session broker)와 함께 도입하며, tunnel 관리 등 로컬 제어 기능이 이를 통해 노출된다.
-- Listener 재시작으로 인한 세션 손실은 README/PRD에 알려진 제한으로 명시하고, SIGTERM 수신 시 drain(신규 attach 거부 + 기존 연결 정상 종료 유예) 로직을 구현해야 한다.
+  - **추기 (2026-08-18, M2 계획 시):** 도입 시점을 **M3(역방향)** 로 늦춘다. M2 범위(ROADMAP)에 localctl이 없고 첫 소비자는 M3의 controller측 `qsh attach <reverse-host>` — CLI 프로세스가 상주 `qsh listen` 데몬과 UDS IPC로 통신하는 경로(protocol.md §11-3) — 이며 `qsh tunnels`(M4)는 그 다음 소비자이므로, M2에서 소비자 없는 IPC 계층을 미리 까는 것은 검증되지 않은 코드만 늘린다. 결정 자체(seam 2종)는 유지되며, M2는 seam 1(`SessionBackend`의 transport import 0 — arch-lint 확장으로 CI 검사)만 이행한다. 위 문장의 "M2"는 이 추기로 대체된다.
+- Listener 재시작으로 인한 세션 손실은 README/PRD에 알려진 제한으로 명시하고, SIGTERM 수신 시 drain(신규 attach 거부 + 기존 연결 정상 종료 유예) 로직을 구현해야 한다. drain은 세션을 살려 두지 않는다 — 모든 세션에 close 절차를 적용하고 `session.closed{reason:"closed"}`를 보낸 뒤 종료한다(CLI.md §6.12, 2026-08-18 명확화).
 - Supervisor 분리는 P1 이후 후보로 남긴다.

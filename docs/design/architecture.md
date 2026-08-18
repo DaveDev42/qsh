@@ -29,9 +29,10 @@ xtask (arch-lint — workspace 멤버, 위 매트릭스를 빌드 실패로 강�
 세 frontend(human/JSON/MCP)가 공유하는 유일한 API. CLI.md §11의 "renderer/adapter에 로직 금지"를 코드 구조로 강제한다.
 
 - **Req/Data 타입 공유:** 각 op의 `*Req`/`*Data` 구조체는 `qsh-proto`에 두고 `Serialize + Deserialize + JsonSchema`(schemars)를 파생한다. clap은 플래그에서 `*Req`를 채우고, MCP는 tool input을 같은 타입으로 역직렬화하며(rmcp가 schemars로 tool schema 생성), JSON 렌더러는 `*Data`를 그대로 `envelope.data`에 넣는다.
-- **Streaming op:** 값 반환 op와 달리 `session.attach`(및 `--follow`)는 typed event의 `Stream`(cursor-pull 기반, §3)을 반환한다. JSONL 렌더러는 이 stream을 한 줄씩 출력하고, MCP `read_session` long-poll은 동일 소스를 1회 pull로 소비한다.
+- **Streaming op:** 값 반환 op와 달리 `session.attach`(및 `--follow`)는 typed event의 `Stream`(cursor-pull 기반, §3)을 반환한다. JSONL 렌더러는 이 stream을 한 줄씩 출력하고, MCP `read_session` long-poll은 동일 소스를 1회 pull로 소비한다. wire 수준에서 `--follow`는 control 스트림 `SessionRead`(protocol.md §9) pull 루프이며 attach(`SessionAttach` + data 스트림, resume token 필요)가 아니다 — 토큰이 필요한 op는 `session.attach`뿐이다(CLI.md §6.3).
+- **Event 타입의 전방 호환:** `qsh-proto`의 `SessionEvent`(qsh.event/v1)는 알 수 없는 `type`을 오류 없이 받아넘기는 fallback variant(`Unknown(serde_json::Value)` 등, `#[serde(untagged)]` 계열)를 갖고, `session.closed.reason`·`Session.state`처럼 값 집합이 열린 field는 enum이 아니라 open string으로 모델링한다(CLI.md §6.4·§10). `Session.writer`는 `Option<String>`(principal 문자열, lease 없으면 `None`).
 - **오류 경로:** 모든 op는 `Result<*Data, OpError>`. `OpError.code`는 `qsh-proto`의 단일 `ErrorCode` enum(미지 코드 pass-through 포함)이며, exit code 매핑은 `qsh-cli`에만 존재한다: 성공 0 / clap 인자 오류 2 / `OpError` 255. `exec.run`은 remote exit `0..=254`를 그대로 프로세스 exit로 반환하되 **remote 255는 254로 clamp**하고 JSON `remote_exit_code`가 참값을 가진다 (CLI.md §4).
-- **`session_ref`는 서버 발급 opaque 값**이다. frontend와 호출자는 조합·파싱하지 않고, `Ops`가 내부에서 (connection, session_id)로 해석한다.
+- **`session_ref`는 클라이언트 `Ops`가 조립하는 opaque 값**이다 ([ADR-0007](../adr/0007-session-ref-and-resume-token-custody.md)). 서버는 opaque·URL-safe한 `session_id`만 발급한다(자기 로컬 alias를 모른다); `Ops`가 `<host-alias>/<session_id>`로 조립해 반환하고, 입력으로 받은 `session_ref`를 (host → connection, session_id)로 해석한다. frontend와 호출자는 조합·파싱하지 않는다(CLI.md §5). wire의 `SessionInfo`(proto: `session_id/state/writer/created_at/last_sequence`)와 JSON DTO `qsh_proto::types::Session`(여기에 `session_ref`·`host` 추가)은 별개 타입이며 `Ops`가 변환한다. resume token도 같은 계층이 소유한다: `$XDG_STATE_HOME/qsh/resume.json`(0600)에 `session_ref` → 항목으로 저장·rotation하고 attach 시 내부에서 제시하며 어떤 `*Data`에도 싣지 않는다(CLI.md §6.3; 항목 형태·원자적 쓰기·프로세스 간 락·정리 규칙은 ADR-0007 결과 절). `session_ref` 문법·파싱 규칙(마지막 `/` 기준, `session_id`는 ULID)도 ADR-0007이 정본이다.
 
 ## 3. Session broker
 
@@ -50,19 +51,20 @@ Broker
 - **ReplayRing:** 세션당 8 MB(기본, 설정 가능) byte 예산의 chunk ring. `sequence`는 누적 output **byte offset**(CLI.md §2.3) — eviction은 whole-chunk 단위로 하되 gap 계산·replay 절단은 byte 단위로 정확하다. 서버는 chunk를 자유로이 분할·병합할 수 있으므로 `--after N` 재개는 항상 정확히 N에서 시작한다. 저장은 memory-only, `ReplayStore` trait 뒤에 격리 ([ADR-0004](../adr/0004-replay-buffer-memory-only.md)).
 - **cursor-pull 단일 primitive:** `pull(session, after, max_bytes, wait)` 하나가 `session read --wait --json`(1회 pull), `session read --follow --jsonl`(pull 루프), MCP long-poll(동일 호출 1:1)을 전부 구동한다. 각 소비자는 ring 위의 cursor일 뿐이며, 느린 소비자의 cursor가 ring에서 밀려나면 `session.gap` 이벤트로 재동기화한다. **pty_reader는 절대 네트워크·소비자에 블록되지 않는다** — 세션당 메모리 상한은 ring + cursor 소량으로 유계다.
 - **Writer lease:** 세션당 하나. (a) 대화형 attach는 기본 **steal** — 절전 후 같은 사람이 재접속하는 지배적 경우를 무마찰로 처리하고, 기존 보유자(살아 있다면)는 lease 회수 통지 후 read-only로 강등된다. (b) 프로그램적 write/attach는 타 principal이 살아 있는 lease를 쥐고 있으면 `SESSION_CONFLICT` — 명시적 `takeover: true`가 필요하다. (c) lease는 소유 connection이 죽으면 자동 해제되지만 **세션과 child process는 유지**된다. 읽기는 lease가 필요 없다.
-- **Child 종료:** waitpid 관찰 → 종료 이벤트를 ring에 기록 → 세션은 `exited` 상태로 남아 늦게 온 reader도 `session.exit` 이벤트를 수신한 뒤 TTL로 정리된다.
-- **Supervisor seam:** broker는 `SessionBackend` trait(open/attach/pull/write/resize/close/list) 뒤에 있고 transport 타입을 import하지 않는다. per-process UDS 제어 소켓 계층(`localctl`, M2에서 broker와 함께 도입 — `$XDG_RUNTIME_DIR/qsh/<pid>.sock`, 동일 frame layer)이 `qsh tunnels` 류의 프로세스 간 조회를 담당하며, P1에서 별도 supervisor 프로세스가 같은 trait를 UDS 너머로 제공하면 drop-in 교체된다.
+- **Child 종료:** waitpid 관찰 → 종료 이벤트를 ring에 기록 → 세션은 `exited` 상태로 남아 늦게 온 reader도 `session.exit` 이벤트를 수신한 뒤 TTL(같은 `[serve].resume_ttl`, exit 시점 기준)로 정리된다(`session.closed{reason:"exit"}`).
+- **제어 event의 전달:** `session.exit`/`session.writer_changed`/`session.closed`는 ring에 **zero-length 제어 엔트리**로 append되어 `pull()`이 output과 전순서로 섞어 반환한다(`sequence` = append 시점 offset, offset 증가 없음) — 단발 pull·`--follow`·MCP long-poll이 모두 같은 순서를 본다. attach 중인 connection에는 같은 event를 control 스트림 `SessionEvent`로도 보낸다. `writer_changed`는 모든 read 소비자에게 broadcast된다(CLI.md §6.4).
+- **Supervisor seam:** broker는 `SessionBackend` trait(open/attach/pull/write/resize/close/list) 뒤에 있고 transport 타입을 import하지 않는다. per-process UDS 제어 소켓 계층(`localctl` — `$XDG_RUNTIME_DIR/qsh/<pid>.sock`, 동일 frame layer)이 `qsh tunnels` 류의 프로세스 간 조회를 담당하며, P1에서 별도 supervisor 프로세스가 같은 trait를 UDS 너머로 제공하면 drop-in 교체된다. **`localctl`은 M2가 아니라 첫 소비자가 있는 M3(역방향)에서 도입한다** — 첫 소비자는 controller의 `qsh attach <reverse-host>`가 상주 `qsh listen` 데몬과 통신하는 경로(protocol.md §11-3)이며, `qsh tunnels`(M4)는 두 번째 소비자다. M2에서는 소비자 없는 IPC 계층을 깔지 않고 `SessionBackend` seam의 순수성(transport import 0)만 지킨다 ([ADR-0003](../adr/0003-sessions-in-listener.md) 결과 절 2026-08-18 추기).
 
 ## 4. PTY
 
 - **crate:** `portable-pty` 0.9 — macOS+Linux에서 검증된 spawn/resize(TIOCSWINSZ)/controlling-terminal 처리, Windows host(P2)로의 문 유지. 동기 I/O이므로 master fd를 `tokio::io::unix::AsyncFd`로 감싼다.
-- child는 `setsid` + controlling tty를 가진 process group leader로 spawn한다. `session close --signal`과 세션 정리는 leader가 아니라 **process group 전체에 `killpg`** 한다.
+- child는 항상 **`qsh serve`를 실행한 OS 계정**으로 spawn한다 — MVP에 user switching은 없고, `SessionOpen`의 `user` hint가 serve 계정의 login name과 다르면 spawn 없이 `UNSUPPORTED`다(CLI.md §7, PRD §6). 검사 순서는 **`Authorizer::check(session.open)` → `user` hint → spawn**이다: ACL 거부는 hint 값과 무관하게 `PERMISSION_DENIED`로 audit되고, hint 검증은 인가 통과 후에만 수행된다(미인가 peer에게 계정명 oracle을 주지 않는다 — protocol.md §10 step 2와 같은 규율). login name은 `getpwuid(geteuid()).pw_name`(nix `user` feature)으로 얻고 `$USER`/`$LOGNAME` 환경변수는 쓰지 않는다(서비스 매니저 아래에서 비어 있거나 틀릴 수 있다). child는 `setsid` + controlling tty를 가진 process group leader로 spawn한다. `session close --signal`과 세션 정리는 leader가 아니라 **process group 전체에 `killpg`** 한다. escalation 단계별 유예는 `[serve].close_grace_ms`(기본 5000); 허용 신호·`KILL`의 즉시 정리·`exited` 세션에는 신호를 보내지 않는 규칙은 CLI.md §6.7.
 - login shell 환경(`TERM`, `SHELL`, `$HOME`, macOS path_helper)을 구성하고, utmp/wtmp는 MVP에서 기록하지 않는다. 플랫폼별 EOF/버퍼 quirk와 테스트 요구는 [testing.md](testing.md) 참조.
 
 ## 5. Identity와 trust
 
 - **`qsh init`:** Ed25519 키쌍 생성 → `rcgen`으로 장기(10y) self-signed X.509 device cert 발급. fingerprint는 SPKI SHA-256, 표기는 `sha256:BASE64`. 공개 cert는 `identity/device.pem`.
-- **개인키 저장 3-mode** (`identity.key_store = auto | platform | file`): `platform`은 keyring 3.x(macOS Keychain / Linux Secret Service). headless Linux는 Secret Service가 없으므로 `auto`가 `identity/device.key`(0600, 디렉터리 0700 — sshd host key와 같은 태세)로 fallback하고, `qsh init`과 `qsh doctor`가 **어느 저장소가 실제 사용 중인지 명시 보고**한다. 키 바이트는 메모리에서 `zeroize::Zeroizing`으로 감싸고 절대 로그에 남기지 않는다.
+- **개인키 저장 3-mode** (`identity.key_store = auto | platform | file`): `platform`은 keyring 3.x(macOS Keychain / Linux Secret Service). headless Linux는 Secret Service가 없으므로 `auto`가 `identity/device.key`(0600, 디렉터리 0700 — sshd host key와 같은 태세)로 fallback하고, `qsh init`과 `qsh doctor`가 **어느 저장소가 실제 사용 중인지 명시 보고**한다. 키 바이트는 메모리에서 `zeroize::Zeroizing`으로 감싸고 절대 로그에 남기지 않는다. resume token(ADR-0007)도 같은 위생을 적용한다: `Zeroizing<[u8; 32]>`로 다루고, 토큰을 담는 타입(`SessionOpened`/`SessionAttached` 래퍼, `resume.json` 항목)은 `Debug`를 수동 구현해 `<redacted>`로 렌더하며, control message 전문을 `?msg`로 로깅하는 것은 어떤 verbosity에서도 금지한다.
 - **Trust store** (`trust.toml`): pinned peer(이름+fingerprint)와 private CA 두 종류. 검증 로직(`QshPeerVerifier`: pin 일치 → 허용, CA 체인 → 허용, 그 외 거부, web PKI 절대 미적재)은 `qsh-transport`에 살되 신뢰 평가는 `qsh-core::trust`가 `TrustEvaluator` trait로 주입한다. 검증 결과는 connection에 부착되는 `Principal`(`fp:…` / `user:…` / `device:…`) 하나로 환원되며 — principal은 **항상 인증서에서만** 나오고 Hello 등 wire 필드에서 나오지 않는다.
 - **Pairing:** 기본 UX는 일회용 invite code(10분 TTL) + TLS exporter 기반 channel binding으로 양방향 pin을 한 번에 설정, fingerprint 방식은 스크립트/프로비저닝용 일급 fallback — 프로토콜 상세와 근거는 [ADR-0002](../adr/0002-pairing-invite-code.md).
 
@@ -79,13 +81,13 @@ macOS/Linux 동일 (ssh 스타일 예측 가능성; `~/Library/…` 미사용):
 
 ```
 ~/.config/qsh/            # $QSH_CONFIG_DIR → $XDG_CONFIG_HOME/qsh → 이 경로
-├── config.toml           # [serve] bind·replay_bytes·resume_ttl / [identity] key_store / [audit]
-├── hosts.toml            # [[host]] name·address·user  → host.list (M7 도입; 그 전까지 host 해석은 trust.toml의 pinned peer가 단일 출처)
+├── config.toml           # [serve] bind·replay_bytes·resume_ttl·close_grace_ms / [identity] key_store / [audit]
+├── hosts.toml            # [[host]] name·address·user  → host.list (M7 도입; 그 전까지 host 해석은 trust.toml의 pinned peer가 단일 출처. `user`는 M7에서도 계정 선택이 아니라 CLI.md §7의 assertion hint — 불일치 시 UNSUPPORTED)
 ├── trust.toml            # pinned peers + CAs
 ├── acl.toml              # serve/listen 역할만 읽음
 └── identity/             # device.pem (+ file-mode일 때 device.key 0600)
-~/.local/state/qsh/       # $XDG_STATE_HOME: audit.log, resume 토큰 상태(0600)
-$XDG_RUNTIME_DIR/qsh/     # (없으면 state 하위 run/, 0700) per-process UDS: <pid>.sock
+~/.local/state/qsh/       # $XDG_STATE_HOME: audit.log, resume.json(0600; session_ref → {token, peer_spki_sha256, expires_at, …}; flock + tmp+rename 원자 교체, ADR-0007)
+$XDG_RUNTIME_DIR/qsh/     # (없으면 state 하위 run/, 0700) per-process UDS: <pid>.sock (localctl, M3 도입 — 첫 소비자는 역방향 attach, protocol.md §11-3)
 ```
 
 ## 8. Crate 선정 (버전은 lock 시점 재확인)
@@ -97,7 +99,8 @@ $XDG_RUNTIME_DIR/qsh/     # (없으면 state 하위 run/, 0700) per-process UDS:
 | rcgen | 0.14 | 디바이스 cert / private CA 발급 |
 | prost / prost-build | 0.14 | control 메시지 직렬화 — unknown-field 무시 네이티브, `.proto`가 리뷰·fuzz 문법 ([ADR-0001](../adr/0001-custom-quic-protocol.md)) |
 | tokio | 1.x | 런타임 |
-| portable-pty | 0.9 | §4 |
+| portable-pty | 0.9 | §4 (host 측 PTY) |
+| nix | 0.29+ (features `term`, `ioctl`, `poll`, `signal`, `user`) | **client 측 raw-mode 터미널**(host 측은 `user` feature의 `getpwuid` 한 곳, §4) — termios(`tcgetattr`/`tcsetattr`, cfmakeraw + 복원)와 `TIOCGWINSZ`를 직접 호출한다. crossterm 계열은 **채택하지 않는다**: TUI는 키 이벤트를 파싱하지 않고 stdin raw byte를 원격 PTY로 그대로 흘려야 하는데(escape 시퀀스 처리는 행 시작의 `~` 접두만 본다, CLI.md §7) crossterm의 이벤트 루프/키 파서·alternate screen 관리는 이 경로와 충돌하고 불필요한 의존성 표면(Windows API 등)을 끌고 온다. SIGWINCH는 `tokio::signal::unix`, 창 크기는 `TIOCGWINSZ` ioctl로 읽어 `session.resize`로 전파한다. `#![cfg(unix)]`(Windows client는 P1). 의존성은 `[target.'cfg(unix)'.dependencies]`로 선언한다 — `qsh-cli`는 CI clippy matrix와 release workflow에서 `x86_64-pc-windows-msvc`로도 빌드되므로 무조건 의존은 Windows leg를 깨뜨린다(nix는 unix 전용 crate) |
 | keyring | **3.x 고정** | 4.0은 beta이며 내장 store 제거 — 회피 |
 | rmcp | 3.x **정확히 pin** | 공식 Rust MCP SDK, 연내 0.14→3.x로 API 격변 — minor까지 고정, adapter는 ~300줄로 격리 |
 | schemars | rmcp 요구 버전 (1.x) | `*Req`에서 tool schema 생성 |

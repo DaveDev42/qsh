@@ -30,13 +30,13 @@ M2 크기: 5ew (`docs/ROADMAP.md` M2 "크기").
 
 ### Step 1 — Wire·JSON 계약 확장: session control message + `SessionFrame` + 계약 타입
 
-**(a) 범위:** M1이 의도적으로 비워 둔 세션 영역을 `.proto`에 채운다. `ControlMessage.body`에 주석으로만 예약돼 있던 번호를 실제로 점유한다: `session_open=20`, `session_attach=21`, `session_list=22`, `session_get=23`, `session_resize=24`, `session_signal=25`, `session_close=26`, `session_event=60`. `Response.body`에 `session_opened=1`, `session_attached=2`. 신규 메시지 `SessionOpen/SessionOpened/SessionAttach/SessionAttached/SessionList/SessionGet/SessionResize/SessionSignal/SessionClose/SessionEvent`와 data 스트림용 `SessionFrame{Output|Input|InputAck|Gap|Resize|Exit}`를 `docs/design/protocol.md` §9 스케치 그대로 정의한다. 현재 `.proto`에는 컴파일러가 강제하는 `reserved` 선언이 없고 주석 관례뿐이므로, 이 step에서 M3/M4용 번호(`Hello.reverse=4`, `ControlMessage` 40–41, `Response` 4)에 **실제 `reserved` 선언을 넣어** 번호 도용을 기계적으로 막는다. `qsh-proto::types`에 `SessionOpenReq/SessionOpenData`, `SessionReadReq/SessionReadData`, `SessionWriteReq/SessionWriteData`, `SessionResizeReq`, `SessionCloseReq/SessionCloseData`, `SessionListReq/SessionListData`, `SessionGetReq`, `SessionAttachReq`를 CLI.md §5·§6.2–6.7 field-for-field로 추가하고, 이미 placeholder로 존재하는 `types::Session`(`session_ref`/`host`/`session_id`/`state`/`writer`/`created_at`/`last_sequence`)을 실사용 타입으로 승격한다. `event.rs`의 `SessionEvent::{Output,Gap,Exit}`는 M1에 이미 정의돼 있고 producer만 없다 — 이 step은 스키마를 건드리지 않고 그대로 쓴다.
+**(a) 범위:** M1이 의도적으로 비워 둔 세션 영역을 `.proto`에 채운다. `ControlMessage.body`에 주석으로만 예약돼 있던 번호를 실제로 점유한다: `session_open=20`, `session_attach=21`, `session_list=22`, `session_get=23`, `session_resize=24`, `session_close=26`(optional `signal`), `session_read=27`, `session_write=28`, `session_event=60`; **25(구 `SessionSignal`)는 `reserved`만**(수신 시 `UNSUPPORTED`, CLI.md §2.4). `Response.body`에 `session_opened=1`, `session_attached=2`, `session_read_result=5`, `session_list_result=6`, `session_info=7`. 신규 메시지 `SessionOpen(optional user)/SessionOpened(+expires_at)/SessionAttach/SessionAttached(+expires_at)/SessionList/SessionGet/SessionResize/SessionClose/SessionRead/SessionWrite/SessionInfo(wire — `session_ref`·`host` 없음, ADR-0007)/SessionEvent(WriterChanged{optional new_writer, seq}, Closed{reason, seq})`와 data 스트림용 `SessionFrame{Output|Input|InputAck|Gap|Resize|Exit}`를 `docs/design/protocol.md` §9 스케치 그대로 정의한다. 현재 `.proto`에는 컴파일러가 강제하는 `reserved` 선언이 없고 주석 관례뿐이므로, 이 step에서 M3/M4용 번호(`Hello.reverse=4`, `ControlMessage` 40–41, `Response` 4)에 **실제 `reserved` 선언을 넣어** 번호 도용을 기계적으로 막는다. `qsh-proto::types`에 `SessionOpenReq/SessionOpenData`, `SessionReadReq/SessionReadData`, `SessionWriteReq/SessionWriteData`, `SessionResizeReq`, `SessionCloseReq/SessionCloseData`, `SessionListReq/SessionListData`, `SessionGetReq`, `SessionAttachReq`를 CLI.md §5·§6.2–6.7 field-for-field로 추가하고, 이미 placeholder로 존재하는 `types::Session`(`session_ref`/`host`/`session_id`/`state`/`writer`/`created_at`/`last_sequence`)을 실사용 타입으로 승격한다 — 단 `writer`는 `Option<String>`(principal 문자열, lease 없으면 `null`; CLI.md §5, placeholder라 fixture 없음). `event.rs`의 `SessionEvent::{Output,Gap,Exit}`는 M1에 이미 정의돼 있고 producer만 없다 — 이 step에서 `WriterChanged{session_ref, sequence, writer: Option<String>}`/`Closed{session_ref, sequence, reason: String}` variant와 unknown-type fallback variant를 추가한다(CLI.md §6.4·§10, architecture.md §2 "Event 타입의 전방 호환").
 
 **(b) crate/모듈/파일:**
 - `crates/qsh-proto/proto/qsh/wire/v1.proto` (확장 — 위 message/oneof/`reserved`)
 - `crates/qsh-proto/src/wire.rs` (확장 — `encode_session_frame()`(`DATA_FRAME_MAX`), `StreamHeader::session_data(ticket)`, `SessionFrame` 생성자 sugar, `CAP_SESSION = "session"`·`CAP_RESUME_V1 = "resume.v1"`를 `LOCAL_CAPABILITIES`에 추가, `SESSION_CHUNK_MAX = 16 KiB`)
 - `crates/qsh-proto/src/types.rs` (확장 — 위 JSON 계약 타입, 기존 타입 수정 금지)
-- `crates/qsh-proto/src/event.rs` (읽기 전용 확인 — 신규 event 타입이 필요하면 §4.1 미해결 질문 5·7 해소 후에만)
+- `crates/qsh-proto/src/event.rs` (확장 — `WriterChanged`/`Closed` variant + unknown-type fallback; 모듈 doc의 "output/gap/exit" 갱신)
 
 **(c) 빚지는 테스트 (`docs/design/testing.md` L0):** 신규 message 전부 `decode(encode(m)) == m` roundtrip(proptest), 모든 prefix가 `Ok(None)`(=incomplete)로 처리되는 truncation 테스트, `SessionFrame` chunk가 `SESSION_CHUNK_MAX`를 넘으면 인코딩 단계에서 거부, golden vector 1개 이상 체크인. `Response.Error.code` 어휘가 `ErrorCode`와 동일함을 단언하는 기존 테스트에 세션 코드(`SESSION_NOT_FOUND`/`SESSION_CONFLICT`/`RESUME_GAP` — 셋 다 `error.rs`에 이미 존재)를 포함시킨다.
 
@@ -56,7 +56,7 @@ M2 크기: 5ew (`docs/ROADMAP.md` M2 "크기").
 - `crates/qsh-core/src/broker/session.rs` (신규 — `SessionActor`, `SessionHandle`, `SessionState`, `SessionSource` trait + `PipeSource`)
 - `crates/qsh-core/src/broker/lease.rs` (신규 — writer lease)
 - `crates/qsh-core/src/broker/clock.rs` (신규 — `Clock` trait, `SystemClock`, `TestClock`)
-- `crates/qsh-core/src/config.rs` (확장 — `[serve].replay_bytes`(기본 8 MiB), `[serve].resume_ttl`(기본 24h))
+- `crates/qsh-core/src/config.rs` (확장 — `[serve].replay_bytes`(기본 8 MiB), `[serve].resume_ttl`(기본 24h), `[serve].close_grace_ms`(기본 5000, CLI.md §6.7))
 - 네이밍 주의: `qsh_core::client::Session`(연결 수준)과 `qsh_proto::types::Session`(JSON DTO)이 이미 있으므로 broker 타입은 `SessionHandle`/`SessionId`/`SessionActor`로 명명한다.
 
 **(c) 빚지는 테스트 (`docs/design/testing.md` L2):** naive `Vec` oracle 대조 property test(임의 append/pull interleaving → gap 없으면 반환 바이트 연결 == 원본 suffix, byte-identical) — **DoD 1번 항목이 여기서 통과한다**. buffer 초과 시 정확한 `available_from`을 가진 gap 산출(silent truncation 금지). lease: 획득/steal/`no_steal` → `SESSION_CONFLICT`/connection 사망 시 해제/TTL 만료. UTF-8 멀티바이트가 chunk 경계에 걸쳐도 손상 없음. **전 테스트 `sleep()` 금지** — `TestClock` + `tokio::time::pause()` + 이벤트 통지.
@@ -69,7 +69,7 @@ M2 크기: 5ew (`docs/ROADMAP.md` M2 "크기").
 
 ### Step 3 — 세션 op를 `dispatch`에 배선: `Action` 확장 + ticket + headless `qsh session *`
 
-**(a) 범위:** `Server`에 broker를 주입하고 `dispatch`에서 세션 control message를 처리한다. `acl::Action`에 `SessionOpen`/`SessionList`/`SessionAttach`/`SessionControl` 4종을 추가하고(CLI.md §2.5 매핑표 그대로), **리소스(세션·PTY·ticket) 생성 이전에** `Authorizer::check` + `AuditRecord::now`를 호출하는 기존 `handle_exec_start` 패턴을 그대로 복제한다. `resource` 문자열은 세션 id(신규 세션은 `"session"`). ticket 발급/redeem은 기존 `issue_ticket`/`redeem_ticket`(16-byte, 30s TTL, 연결 결합, 단회용)을 `SESSION_DATA`용으로 일반화하고, `handle_data_stream`이 `StreamKind::SessionData`를 받도록 확장한다. `purge_connection`은 lease 해제까지 수행하되 **세션은 살려 둔다**. `dispatch`는 sync 시그니처(`fn dispatch(&self, ctx, msg) -> Option<ControlMessage>`)를 유지한다 — broker 인박스 send는 sync이므로 seam을 깨지 않는다. 클라이언트 측은 `client::Session::request()` 헬퍼 위에 세션 RPC를 얹고, `Ops`에 `session_open/get/list/read/write/resize/close` 메서드 + `ops/session.rs`의 `Operation` 마커를 추가한다. CLI에 `qsh session open|get|read|write|resize|close`, `qsh sessions [host]` 서브커맨드와 human/JSON 렌더러를 붙인다. **이 step까지 PTY 코드는 0줄** — 서버는 `PipeSource`로 세션을 연다.
+**(a) 범위:** `Server`에 broker를 주입하고 `dispatch`에서 세션 control message를 처리한다. `acl::Action`에 `SessionOpen`/`SessionList`/`SessionAttach`/`SessionControl` 4종을 추가하고(CLI.md §2.5 매핑표 그대로), **리소스(세션·PTY·ticket) 생성 이전에** `Authorizer::check` + `AuditRecord::now`를 호출하는 기존 `handle_exec_start` 패턴을 그대로 복제한다. `resource` 문자열은 세션 id(신규 세션은 `"session"`). `SessionOpen.user` hint는 ACL 통과 **후**에만 serve 계정 login name(`getpwuid`)과 비교해 `UNSUPPORTED`를 내고, 미인가 peer는 항상 `PERMISSION_DENIED`다(architecture.md §4). `SessionRead`(27)/`SessionWrite`(28)는 control 스트림 value op로 배선하고(토큰 불요, ACL `session.attach`/`session.control`), 번호 25 수신은 `UNSUPPORTED`. ticket 발급/redeem은 기존 `issue_ticket`/`redeem_ticket`(16-byte, 30s TTL, 연결 결합, 단회용)을 `SESSION_DATA`용으로 일반화하고, `handle_data_stream`이 `StreamKind::SessionData`를 받도록 확장한다. `purge_connection`은 lease 해제까지 수행하되 **세션은 살려 둔다**. `dispatch`는 sync 시그니처(`fn dispatch(&self, ctx, msg) -> Option<ControlMessage>`)를 유지한다 — broker 인박스 send는 sync이므로 seam을 깨지 않는다. 클라이언트 측은 `client::Session::request()` 헬퍼 위에 세션 RPC를 얹고, `Ops`에 `session_open/get/list/read/write/resize/close` 메서드 + `ops/session.rs`의 `Operation` 마커를 추가한다. CLI에 `qsh session open|get|read|write|resize|close`, `qsh sessions [host]` 서브커맨드와 human/JSON 렌더러를 붙인다. **이 step까지 PTY 코드는 0줄** — 서버는 `PipeSource`로 세션을 연다.
 
 **(b) crate/모듈/파일:**
 - `crates/qsh-core/src/server/mod.rs` (확장 — broker 필드, session dispatch arm, `StreamKind::SessionData` 수용, `purge_connection` 확장)
@@ -125,13 +125,13 @@ M2 크기: 5ew (`docs/ROADMAP.md` M2 "크기").
 
 ### Step 6 — 대화형 TUI: `qsh user@host` / `qsh attach` / detach key / resize / signal
 
-**(a) 범위:** Step 5의 stream op 위에 얹는 **얇은** 소비자. 로컬 터미널 raw mode 진입/복원(패닉·시그널 경로 포함), `SIGWINCH` → `SessionResize` 전파, SIGINT는 기본적으로 원격 PTY로 전달, detach key로 세션을 살린 채 로컬만 이탈, 종료 시 원격 exit code 반영. clap에 bare positional 형태(`qsh dave@personal-mac`)를 도입한다 — 현재 `Command` enum에는 `user@host` 파서가 전혀 없으므로 신규 value-parser + 기본 서브커맨드 배치가 필요하다. `qsh attach <session-ref>`도 같은 경로. **DoD 2번 항목의 수용 세트(bash/zsh, vim, tmux, `claude`)를 이 step의 명명된 timebox로 고정**하고, 그 밖의 터미널 quirk는 마일스톤 밖 백로그로 보낸다.
+**(a) 범위:** Step 5의 stream op 위에 얹는 **얇은** 소비자. 로컬 터미널 raw mode 진입/복원(패닉·시그널 경로 포함), `SIGWINCH` → `SessionResize` 전파, SIGINT는 기본적으로 원격 PTY로 전달, 행 시작 tilde escape(`~d`/`~.` detach, `~~`, `~?`; `--escape-char <c>|none`; TTY stdin일 때만 활성 — CLI.md §7)로 세션을 살린 채 로컬만 이탈, 종료 시 원격 exit code 반영(CLI.md §4: `qsh exec`와 같은 clamp 규칙, detach는 `0`). clap에 bare positional 형태(`qsh dave@personal-mac`)를 도입한다 — 현재 `Command` enum에는 `user@host` 파서가 전혀 없으므로 신규 value-parser + 기본 서브커맨드 배치가 필요하다. `qsh attach <session-ref>`도 같은 경로. **DoD 2번 항목의 수용 세트(bash/zsh, vim, tmux, `claude`)를 이 step의 명명된 timebox로 고정**하고, 그 밖의 터미널 quirk는 마일스톤 밖 백로그로 보낸다.
 
 **(b) crate/모듈/파일:**
 - `crates/qsh-cli/src/tui/mod.rs` (신규 — raw mode 관리, 입력 펌프, detach key 처리, resize 감시)
 - `crates/qsh-cli/src/cli.rs` (확장 — `user@host` positional + `Command::Attach { session_ref }`)
 - `crates/qsh-cli/src/main.rs` (확장 — TUI 경로는 envelope를 stdout에 내지 않음; 진단은 stderr 전용)
-- `crates/qsh-cli/Cargo.toml` (raw-mode crate 추가 — §4.1 미해결 질문 9 해소 후 확정)
+- `crates/qsh-cli/Cargo.toml` (`nix` 0.29+ features `term`/`ioctl`/`poll`/`signal` — `[target.'cfg(unix)'.dependencies]`로 선언, architecture.md §8)
 
 **(c) 빚지는 테스트 (`docs/design/testing.md` L5 마지막 항목):** `expectrl` 기반 expect 하네스 — **클라이언트 자체를 pty 아래에서 실행**해 termios raw mode 경로가 실제로 돌게 한다. 수용 세트 스크립트: bash/zsh 프롬프트 왕복, `vim` 진입/편집/종료, `tmux` 안에서의 resize 전파, `claude` 기동. resize는 `--cols/--rows` 변경 후 원격 `stty size`가 일치함으로 단언. detach key 후 세션이 `running` 상태로 남고 재attach 가능함을 단언.
 
@@ -143,14 +143,14 @@ M2 크기: 5ew (`docs/ROADMAP.md` M2 "크기").
 
 ### Step 7 — Resume + connection migration + recovery 텔레메트리
 
-**(a) 범위:** `SessionOpened`가 32-byte CSPRNG `resume_token`을 반환하고 호스트는 `blake3(token)`만 `(session_id, peer_spki_sha256, expires_at)`과 저장한다. 클라이언트는 `$XDG_STATE_HOME/qsh/resume.json`(0600)에 보관. `SessionAttach{session_id, resume_token, last_output_seq, mode, no_steal}` 처리 순서를 프로토콜 그대로 구현: 토큰 해시 일치·미만료(`subtle::ConstantTimeEq`) → peer fingerprint가 세션 결합 identity와 일치 → ACL `session.attach` → **전부 통과 후에만** ticket + `new_resume_token` 발급(제시 토큰 즉시 무효화, 단일 세대). 실패는 fail-closed·non-distinguishing(`AUTH_FAILED`/`PERMISSION_DENIED`; `SESSION_NOT_FOUND`는 identity 검사 통과 후에만). 데이터 경로: ring이 `L` 이후를 보존하면 정확히 `L`부터 재전송 후 live 전환, 클라이언트는 방어적으로 `sequence ≤ L` frame 폐기; 보존 최소 offset `G > L`이면 첫 frame으로 `Gap{requested_after:L, available_from:G}`. 클라이언트 재접속 루프: path 사망 감지 → **2초 내** 재dial + resume, 인터페이스 변화 시에는 그 전에 `Endpoint::rebind()`로 active migration 시도(`Dialed.endpoint`/`Listener::endpoint()`로 이미 접근 가능). **migration은 지연 최적화일 뿐이며 실패해도 correctness는 resume이 보장한다 — migration 성공에 의존하는 코드를 쓰지 않는다.** recovery 텔레메트리(`recovery ∈ {migrated, resumed, failed}` + time-to-recovery ms)를 계측한다.
+**(a) 범위:** `SessionOpened`가 32-byte CSPRNG `resume_token`을 반환하고 호스트는 `blake3(token)`만 `(session_id, peer_spki_sha256, expires_at)`과 저장한다. 클라이언트는 `$XDG_STATE_HOME/qsh/resume.json`(0600)에 보관 — 항목에 `peer_spki_sha256`·`expires_at` 포함, `flock` + tmp+`rename` 원자 교체, 새 토큰을 durable하게 기록한 뒤에야 data 스트림 진행, 정리 규칙은 ADR-0007 결과 절. `SessionAttach{session_id, resume_token, last_output_seq, mode, no_steal}` 처리 순서를 프로토콜 그대로 구현: 토큰 해시 일치·미만료(`subtle::ConstantTimeEq`) → peer fingerprint가 세션 결합 identity와 일치 → ACL `session.attach` → **전부 통과 후에만** ticket + `new_resume_token` 발급(제시 토큰 즉시 무효화, 단일 세대). 실패는 fail-closed·non-distinguishing(`AUTH_FAILED`/`PERMISSION_DENIED`; `SESSION_NOT_FOUND`는 identity 검사 통과 후에만). 데이터 경로: ring이 `L` 이후를 보존하면 정확히 `L`부터 재전송 후 live 전환, 클라이언트는 방어적으로 `sequence ≤ L` frame 폐기; 보존 최소 offset `G > L`이면 첫 frame으로 `Gap{requested_after:L, available_from:G}`. 클라이언트 재접속 루프: path 사망 감지 → **2초 내** 재dial + resume, 인터페이스 변화 시에는 그 전에 `Endpoint::rebind()`로 active migration 시도(`Dialed.endpoint`/`Listener::endpoint()`로 이미 접근 가능). **migration은 지연 최적화일 뿐이며 실패해도 correctness는 resume이 보장한다 — migration 성공에 의존하는 코드를 쓰지 않는다.** recovery 텔레메트리(`recovery ∈ {migrated, resumed, failed}` + time-to-recovery ms)를 계측한다.
 
 **(b) crate/모듈/파일:**
 - `crates/qsh-core/src/broker/resume.rs` (신규 — 토큰 발급/해시 저장/rotation/검증, TTL)
 - `crates/qsh-core/src/server/mod.rs` (확장 — `SessionAttach` dispatch arm, 검사 순서)
 - `crates/qsh-core/src/client/reconnect.rs` (신규 — 재dial 루프, rebind 시도, 미-ack input 재전송(64 KiB 상한, 초과 시 조용히 쌓지 않고 오류))
 - `crates/qsh-core/src/config.rs` (확장 — `Paths::resume_file()`, 0600 쓰기는 기존 `write_private_file` 재사용)
-- `crates/qsh-core/src/telemetry.rs` (신규 — recovery 결과/소요시간 기록. 사용자 노출 표면이 계약으로 확정되기 전까지는 **stderr 구조화 진단(tracing)만** — stdout은 §2.2에 따라 계약 전용. §4.1 미해결 질문 7)
+- `crates/qsh-core/src/telemetry.rs` (신규 — recovery 결과/소요시간 기록. **stderr 구조화 진단만**: tracing target `qsh::recovery`, INFO, 한 줄 JSON, 필드 `recovery`/`time_to_recovery_ms`/`session_ref` — CLI.md §6.4, testing.md L4; stdout은 §2.2에 따라 계약 전용)
 - `crates/qsh-core/Cargo.toml` (blake3, subtle 추가)
 
 **(c) 빚지는 테스트:** L2 — 토큰 단회성(같은 토큰 2회 사용 → 두 번째 거부), 만료, 다른 peer fingerprint의 상환 시도 → non-distinguishing 오류, lease steal/`no_steal` 경합이 broker 단일 락 안에서 결정됨. L3 loopback — 연결을 끊고 새 연결로 attach하여 `last_seq`부터 이어붙인 바이트가 기준 stream과 byte-identical, ring 밖 요청 시 `Gap` 후 `available_from`부터 재개. 미-ack input 재전송이 중복 적용되지 않음.
@@ -173,7 +173,7 @@ M2 크기: 5ew (`docs/ROADMAP.md` M2 "크기").
 - `crates/qsh-cli/tests/fixtures/cli-v1/{session.open,session.get,session.list,session.read,session.write,session.resize,session.close}.json` (신규, append-only)
 - `crates/qsh-cli/tests/exit_code_matrix.rs`, `tests/jsonl_purity.rs` (확장 — 세션 시나리오 행 추가)
 
-**(c) 빚지는 테스트:** 위 파일들이 곧 테스트다. 추가로 L6 — 신규 fixture 전부가 schemars 생성 스키마를 통과하고 기존 fixture도 계속 유효(append-only CI job), `ErrorCode` 전수 도달성 재확인(M2가 새로 생성 가능해진 `SESSION_NOT_FOUND`/`SESSION_CONFLICT`/`RESUME_GAP` 커버).
+**(c) 빚지는 테스트:** 위 파일들이 곧 테스트다. 추가로 L6 — 신규 fixture 전부가 schemars 생성 스키마를 통과하고 기존 fixture도 계속 유효(append-only CI job), `ErrorCode` 전수 도달성 재확인(M2가 새로 생성 가능해진 `SESSION_NOT_FOUND`/`SESSION_CONFLICT` 커버; `RESUME_GAP`은 event 전용이라 오류로 도달 불가 — CLI.md §3.3 — DEFERRED 사유를 갱신해 유지).
 
 **(d) 완료 판정:** DoD 3·4번 항목 green. chaos 테스트는 seeded로 재현 가능하며 `sleep()`을 쓰지 않는다. 2초 재dial 기준이 assertion으로 코드에 박혀 있다(주석이 아니라).
 
@@ -242,19 +242,21 @@ M2 크기: 5ew (`docs/ROADMAP.md` M2 "크기").
 
 추가 감시 항목 — `docs/ROADMAP.md` §4 리스크 3번의 M2판: **macOS 미서명 바이너리의 Keychain 재프롬프트가 dev loop을 괴롭힌다.** M2는 재dial·재attach를 반복하는 마일스톤이라 프롬프트 빈도가 M1보다 훨씬 높다. 대응: 모든 자동 테스트와 chaos/expect 하네스는 `$QSH_CONFIG_DIR` 격리 프로필 + `key_store = "file"`로 고정하고, platform keystore 경로는 Step 4·6의 수동 확인에서만 쓴다.
 
-### 4.1 미해결 질문 (문서 갱신이 선행돼야 하는 항목)
+### 4.1 미해결 질문 — 해소됨 (2026-08-18)
 
-구현 중 임의로 정하지 않는다. 각 항목은 괄호 안 문서가 정본이며, 그 문서를 먼저 갱신한 뒤 코드를 쓴다.
+아래 9건은 문서 갱신으로 모두 확정되었다(CLI.md v0.5, PRD v0.5, ADR-0007). 구현은 괄호 안 정본을 따른다.
 
-1. **detach key 시퀀스가 어디에도 명시돼 있지 않다** — "detach key는 별도로 제공한다"만 존재. 기본 시퀀스와 설정 가능 여부 필요 (`docs/CLI.md` §7·§9).
-2. **`qsh user@host`의 `user` 시맨틱** — 원격 OS 계정 매핑인지 표시용인지. ACL principal은 항상 인증서에서 나오므로(§2.5, protocol.md §3) 둘의 관계 명시 필요 (`docs/CLI.md` §7, `docs/PRD.md` §6).
-3. **`session_ref` 조립 주체** — architecture.md §2는 "서버 발급 opaque 값", CLI.md §5는 "CLI가 반환하는 opaque value"이고 예시는 `host/session_id` 형태다. 원격 호스트는 자신의 로컬 alias를 모르므로 조립 지점이 정의돼야 한다 (`docs/design/architecture.md` §2 / `docs/CLI.md` §5).
-4. **`resume_token`의 JSON 노출 여부** — wire `SessionOpened`는 토큰을 반환하지만 CLI.md §6.3의 `session.open` data는 `session_ref`/`initial_sequence`뿐이다. 기계 사용자가 재attach하려면 additive 필드가 필요한지, 아니면 클라이언트 상태 파일에만 남는지 (`docs/CLI.md` §6.3).
-5. **wire `SessionEvent::{WriterChanged, Closed}`에 대응하는 `qsh.event/v1` 타입이 없다** — `--follow --jsonl` 소비자에게 lease 회수를 알릴 방법 (`docs/CLI.md` §6.4, additive-only 규칙 하에서).
-6. **wire `SessionSignal`(번호 25)에 대응하는 CLI operation이 없다** — §2.4 operation 목록에는 `session close --signal`만 있다. 실행 중 세션에 신호를 보내는 op가 M2 범위인지 (`docs/CLI.md` §2.4·§6.7).
-7. **recovery 텔레메트리의 노출 표면** — testing.md L4는 "계측"만 요구하고 사용자 노출 형태를 정하지 않았다. M2는 stdout 순수성 규칙(§2.2) 때문에 stderr 구조화 진단으로만 내보내며, `qsh.event/v1` event로 승격할지 결정 필요 (`docs/design/testing.md` L4 + `docs/CLI.md` §6.4).
-8. **`localctl`(UDS 제어 소켓) 도입 시점** — ADR-0003 "결과"는 "M2에 broker와 함께 도입"이라 하지만 ROADMAP M2 범위 목록에는 없고 첫 소비자(`qsh tunnels`)는 M4다. M2에서 빈 IPC 계층을 까는 것이 목적에 부합하는지 (`docs/adr/0003-sessions-in-listener.md` 결과 절 / `docs/ROADMAP.md` M2 범위).
-9. **클라이언트 raw-mode 터미널 crate가 architecture.md §8 표에 없다** — portable-pty는 host 측이다. crossterm 계열 vs 직접 termios 중 선택과 근거 필요 (`docs/design/architecture.md` §8).
+| # | 질문 | 결정 | 정본 |
+|---|---|---|---|
+| 1 | detach key | 행 시작 tilde escape: `~d`/`~.` detach(세션 유지), `~~` 리터럴, `~?` 도움말(stderr); 미지 `~x`는 둘 다 전달; TTY stdin에서만 활성; `--escape-char <c>\|none`(`qsh [user@]host`·`qsh attach` 전용) | CLI.md §7, §9, §4 |
+| 2 | `user@` 시맨틱 | user switching 없음 — 원격 셸은 항상 serve 계정; `user@`는 `SessionOpen.user` hint이며 login name 불일치 시 `UNSUPPORTED`. 검사 순서 ACL → hint → spawn(미인가는 항상 `PERMISSION_DENIED`), login name은 `getpwuid` | CLI.md §7, PRD §6·§17, architecture.md §4, protocol.md §9 |
+| 3 | `session_ref` 조립 | 클라이언트 `Ops`가 `<host-alias>/<session_id>` 조립·파싱(마지막 `/` 기준, `session_id`=ULID); wire `SessionInfo`에는 `session_ref`·`host` 없음 | ADR-0007, CLI.md §5, architecture.md §2, protocol.md §9 |
+| 4 | `resume_token` 노출 | JSON 비노출; `resume.json`(0600, `session_ref` key, peer SPKI·`expires_at` 포함, flock+원자 교체)에만; 토큰이 필요한 op는 `session.attach`뿐(read/write 등은 ACL만); 토큰 없음/peer 불일치 → 로컬 `SESSION_NOT_FOUND`(`no_resume_token`/`peer_mismatch`) | ADR-0007, CLI.md §6.2·§6.3, PRD §6·§8, protocol.md §10 |
+| 5 | `WriterChanged`/`Closed` event | `session.writer_changed{writer: principal\|null}`(broadcast), `session.closed{reason: closed\|exit\|ttl_expired}`(제거 주체 기준); ring 제어 엔트리로 전순서 전달; 미지 `type`/`reason` 무시; `--follow`는 `session.exit`에서 종료 | CLI.md §6.4·§10, architecture.md §2·§3, protocol.md §9 |
+| 6 | `SessionSignal` | 별도 op 없음(P1); `session close --signal`은 `SessionClose.signal`(HUP\|INT\|QUIT\|TERM\|USR1\|USR2\|KILL, 그 외 `INVALID_ARGUMENT`); wire 25는 `reserved`(수신 시 `UNSUPPORTED`); `close_grace_ms` 5s, KILL 즉시, `exited`에는 무신호 | CLI.md §2.4·§6.7, protocol.md §9, architecture.md §4·§7 |
+| 7 | recovery 텔레메트리 | stderr 전용 — tracing `qsh::recovery`, INFO, 한 줄 JSON(`recovery`/`time_to_recovery_ms`/`session_ref`); event 승격은 P1 | testing.md L4, CLI.md §6.4 |
+| 8 | `localctl` 시점 | M2 아님 — **M3**(첫 소비자: 역방향 `qsh attach`의 UDS IPC, protocol.md §11-3); M2는 `SessionBackend` seam 순수성만 | ADR-0003 추기, architecture.md §3·§7 |
+| 9 | raw-mode crate | `nix`(`term`/`ioctl`/`poll`/`signal`; host 측 `user`) 직접 termios + `TIOCGWINSZ`, SIGWINCH는 `tokio::signal::unix`; crossterm 기각; `cfg(unix)` target 의존 | architecture.md §8 |
 
 ## 5. 완료 절차
 

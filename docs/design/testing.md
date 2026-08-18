@@ -49,7 +49,7 @@ Keystore는 trait 뒤에: 유닛 테스트는 in-memory 구현, 플랫폼별로 
 
 **대안 대비 선택 근거:** `iptables`/`pfctl`은 root 필요·플랫폼 분기·GHA macOS에서 불안정. 실제 인터페이스 전환은 CI 자동화 불가. transport trait mock은 mock을 테스트하는 것 — migration은 실제 path validation의 속성이다. proxy는 `seeded(u64)`로 재현 가능하며 실패 메시지에 seed를 출력한다.
 
-**핵심 구분: chaos proxy는 PR 회귀 게이트이고, SC3의 실측치는 실기기 캠페인이다.** SC3용 실측: `recovery ∈ {migrated, resumed, failed}` + time-to-recovery 텔레메트리를 **M2부터** 계측하고, 실기기(macOS `networksetup -setairportpower`, Linux `nmcli`) 스크립트로 N≥60회 전환 시험. 95% vs 90%를 구분하려면 ~60회 이상이 필요하다. **통과 기준은 사전 정의:** idle timeout이 뒤늦게 터져서 복구되는 것은 통과가 아니다 — path 사망 감지 후 **2초 내 재dial + resume**이 목표이며, migrated/resumed 비율을 분해 보고한다.
+**핵심 구분: chaos proxy는 PR 회귀 게이트이고, SC3의 실측치는 실기기 캠페인이다.** SC3용 실측: `recovery ∈ {migrated, resumed, failed}` + time-to-recovery 텔레메트리를 **M2부터** 계측하고(노출 표면은 M2에서 **stderr 구조화 진단만** — tracing target `qsh::recovery`, level `INFO`, **한 줄 JSON**(`tracing_subscriber` JSON layer)으로 고정, 필드 `recovery`·`time_to_recovery_ms`·`session_ref`(PTY 내용·토큰 field 없음); stdout 순수성 규칙(CLI.md §2.2) 때문에 `qsh.event/v1` event로의 승격은 P1에서 결정, CLI.md §6.4. 캠페인 스크립트와 chaos 테스트는 기본 verbosity(`--quiet` 없이)로 실행해 stderr의 JSON 줄을 파싱한다), 실기기(macOS `networksetup -setairportpower`, Linux `nmcli`) 스크립트로 N≥60회 전환 시험. 95% vs 90%를 구분하려면 ~60회 이상이 필요하다. **통과 기준은 사전 정의:** idle timeout이 뒤늦게 터져서 복구되는 것은 통과가 아니다 — path 사망 감지 후 **2초 내 재dial + resume**이 목표이며, migrated/resumed 비율을 분해 보고한다.
 
 ## L5 — PTY end-to-end (플랫폼 quirk 명세)
 
@@ -70,7 +70,8 @@ CLI.md §11이 명시적으로 초대하는, 레버리지가 가장 큰 계층.
 
 - **Golden fixture** `crates/qsh-cli/tests/fixtures/cli-v1/<op>.json` — `request_id`/timestamp/duration은 정규화. **fixture는 v1에서 append-only**: 과거 fixture 전부가 현재 스키마에 대해 계속 유효해야 한다는 CI job이 CLI.md §10의 호환성 정책을 기계적으로 만든다.
 - Rust 타입에서 `schemars`로 JSON Schema 생성 → 모든 fixture와 테스트 산출 envelope를 스키마 검증 → 같은 스키마를 `qsh schema --json`이 서빙 (한 소스).
-- **ErrorCode 전수 도달성:** 모든 `ErrorCode` variant가 ≥1개 fixture에 등장해야 한다. 존재하지만 생성 불가능한 코드를 죽인다.
+- **ErrorCode 전수 도달성:** 모든 `ErrorCode` variant가 ≥1개 fixture에 등장해야 한다. 존재하지만 생성 불가능한 코드를 죽인다(예외: `RESUME_GAP`은 event 전용으로 오류 envelope에 도달 불가 — CLI.md §3.3 — 이므로 사유와 함께 DEFERRED에 유지).
+- **노출 금지 field:** 생성된 JSON Schema와 모든 fixture·테스트 산출 envelope·JSONL event에 `resume_token`(및 토큰류 key 이름) 문자열이 존재하지 않음을 단언한다 — ADR-0007 결정 2의 기계적 게이트.
 - **Exit-code matrix:** (시나리오 → exit code, `ok`, `error.code`) 표를 human/JSON **양 모드에서** 실행, exit code가 모드와 무관하게 동일함을 단언 — §4의 "output mode에 따라 exit code 의미가 달라져서는 안 된다"의 문자 그대로의 테스트.
 - **JSONL 순수성:** 시끄러운 세션을 `-vv --jsonl`로 실행, stdout의 모든 줄이 완전한 JSON object로 파싱됨을 단언.
 
