@@ -1,6 +1,6 @@
 # QSH CLI, JSON and MCP Contract
 
-**상태:** Draft v0.5 (M2 계약 확정 — PLAN.md §4.1 미결 질문 반영; v0.4 = M1 구현과 동기화)  
+**상태:** Draft v0.6 (M2 Step 5 — `session read --follow`의 출력 형태와 `--wait` 하한 명문화; v0.5 = M2 계약 확정, v0.4 = M1 구현과 동기화)  
 **대상:** QSH MVP  
 **Canonical interface:** `qsh` CLI
 
@@ -279,7 +279,7 @@ qsh session read <session-ref> --after 42 --follow --jsonl
 
 - `--after`: 마지막으로 수신한 누적 output byte offset (sequence)
 - `--ctl-after`: 마지막으로 수신한 **control entry id** — 직전 응답의 `next_ctl_after`를 그대로 되돌려준다. 생략하면 `0`(처음부터).
-- `--wait`: 새 output을 기다릴 최대 milliseconds. 호스트는 이 값도 상한(현재 60 s, `SESSION_READ_MAX_WAIT`)으로 clamp한다 — `--limit-bytes`와 같은 취급으로, 더 큰 값은 오류가 아니라 상한이다. 더 오래 기다리려면 같은 cursor로 다시 부른다.
+- `--wait`: 새 output을 기다릴 최대 milliseconds. 호스트는 이 값도 상한(현재 60 s, `SESSION_READ_MAX_WAIT`)으로 clamp한다 — `--limit-bytes`와 같은 취급으로, 더 큰 값은 오류가 아니라 상한이다. 더 오래 기다리려면 같은 cursor로 다시 부른다. `--follow`와 함께 쓰면 이 값은 **하한 30 s 아래로 내려가지 않는다** — follower는 parking 하는 것이지 spin 하는 것이 아니므로, 단발 pull용으로 준 작은 `--wait`이 follow loop을 tight round-trip loop으로 만들지 않는다.
 - `--follow`: 종료나 취소까지 event를 계속 출력
 - `--limit-bytes`: 한 응답의 최대 payload. 호스트는 이 값을 상한(현재 192 KiB, `SESSION_READ_MAX_BYTES`)으로 clamp한다 — 더 큰 값은 오류가 아니라 상한으로 취급된다.
 

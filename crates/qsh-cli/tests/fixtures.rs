@@ -53,7 +53,9 @@ const DEFERRED: &[(&str, &str)] = &[
     ),
     (
         "SESSION_CONFLICT",
-        "M2 Step 7: needs two attaches racing for the writer lease",
+        "M2 Step 6: the host produces it now (`session.attach --no-steal` \
+         against a held lease), but no CLI command opens an attach until \
+         the Step 6 frontend lands",
     ),
     ("RESUME_GAP", "M2 sessions"),
     ("CANCELED", "M2 sessions"),

@@ -302,18 +302,22 @@ async fn a_wedged_child_cannot_stall_other_control_traffic_on_the_connection() {
     // task is parked with a backlog behind it — and none of these replies
     // is read.
     let chunk = vec![b'k'; wire::SESSION_CHUNK_MAX];
-    for request_id in 10..40 {
-        ctl.send
-            .send(&wire::ControlMessage::new(
-                request_id,
-                wire::control_message::Body::SessionWrite(wire::SessionWrite {
-                    session_id: id.clone(),
-                    data: chunk.clone(),
-                }),
-            ))
-            .await
-            .unwrap();
-    }
+    tokio::time::timeout(DEADLINE, async {
+        for request_id in 10..40 {
+            ctl.send
+                .send(&wire::ControlMessage::new(
+                    request_id,
+                    wire::control_message::Body::SessionWrite(wire::SessionWrite {
+                        session_id: id.clone(),
+                        data: chunk.clone(),
+                    }),
+                ))
+                .await
+                .unwrap();
+        }
+    })
+    .await
+    .expect("the host keeps reading the control stream while a child is wedged");
 
     // The connection must still answer. Before the fix this timed out: the
     // connection loop was parked inside the first write that the child
@@ -334,6 +338,26 @@ async fn a_wedged_child_cannot_stall_other_control_traffic_on_the_connection() {
         ))
         .await
         .unwrap();
+    // The ping is answered too — the control stream is fully alive, not
+    // just able to serve one read.
+    tokio::time::timeout(DEADLINE, async {
+        loop {
+            let msg = ctl
+                .recv
+                .recv::<wire::ControlMessage>()
+                .await
+                .unwrap()
+                .unwrap();
+            if msg.request_id == 100
+                && matches!(msg.body, Some(wire::control_message::Body::Pong(_)))
+            {
+                return;
+            }
+        }
+    })
+    .await
+    .expect("the host answers a ping while a child is wedged");
+
     match reply_to(&mut ctl, 101).await {
         wire::response::Body::SessionInfo(info) => {
             assert_eq!(info.session_id, id);
@@ -395,18 +419,22 @@ async fn a_saturated_write_backlog_is_refused_retryably() {
     // between here and it. Whatever the host cannot take must come back as
     // an error, and that error must be retryable.
     let chunk = vec![b'k'; wire::SESSION_CHUNK_MAX];
-    for request_id in 10..400 {
-        ctl.send
-            .send(&wire::ControlMessage::new(
-                request_id,
-                wire::control_message::Body::SessionWrite(wire::SessionWrite {
-                    session_id: id.clone(),
-                    data: chunk.clone(),
-                }),
-            ))
-            .await
-            .unwrap();
-    }
+    tokio::time::timeout(DEADLINE, async {
+        for request_id in 10..400 {
+            ctl.send
+                .send(&wire::ControlMessage::new(
+                    request_id,
+                    wire::control_message::Body::SessionWrite(wire::SessionWrite {
+                        session_id: id.clone(),
+                        data: chunk.clone(),
+                    }),
+                ))
+                .await
+                .unwrap();
+        }
+    })
+    .await
+    .expect("the host answers rather than parking its control reader");
     let refusal = tokio::time::timeout(DEADLINE, async {
         loop {
             let msg = ctl
@@ -555,4 +583,166 @@ async fn reply_to(ctl: &mut FramedStream, request_id: u64) -> wire::response::Bo
     })
     .await
     .unwrap_or_else(|_| panic!("no reply to request {request_id} within the deadline"))
+}
+
+/// The property the inline/parked write split exists to *preserve*: two
+/// `SessionWrite`s pipelined on one control stream reach the child in the
+/// order they were sent (protocol.md §9 "control 스트림의 순서 계약"). The
+/// wedged-child test only proves the loop does not park; without this one a
+/// "just spawn a task per write" refactor would pass the whole suite and
+/// still scramble a user's keystrokes.
+#[tokio::test(flavor = "multi_thread")]
+async fn pipelined_writes_reach_a_draining_child_in_send_order() {
+    let h = LoopbackHarness::start().await;
+    let dialed = h.dial().await;
+    let mut ctl = hello(&dialed).await;
+    ctl.send
+        .send(&wire::ControlMessage::new(
+            1,
+            wire::control_message::Body::SessionOpen(open_req()),
+        ))
+        .await
+        .unwrap();
+    let id = match reply_to(&mut ctl, 1).await {
+        wire::response::Body::SessionOpened(o) => o.session_id,
+        other => panic!("expected SessionOpened, got {other:?}"),
+    };
+    let mut pipe = h.pipes.take().unwrap();
+
+    // Distinguishable payloads, pipelined without reading a single reply,
+    // to a child that *is* draining.
+    const WRITES: usize = 24;
+    let expected: Vec<u8> = (0..WRITES)
+        .flat_map(|i| format!("[{i:03}]").into_bytes())
+        .collect();
+    tokio::time::timeout(DEADLINE, async {
+        for (i, request_id) in (10..10 + WRITES as u64).enumerate() {
+            ctl.send
+                .send(&wire::ControlMessage::new(
+                    request_id,
+                    wire::control_message::Body::SessionWrite(wire::SessionWrite {
+                        session_id: id.clone(),
+                        data: format!("[{i:03}]").into_bytes(),
+                    }),
+                ))
+                .await
+                .unwrap();
+        }
+    })
+    .await
+    .expect("pipelined writes are accepted");
+
+    let got = tokio::time::timeout(DEADLINE, async {
+        let mut got = Vec::new();
+        while got.len() < expected.len() {
+            let chunk = pipe.read_input(expected.len()).await.unwrap();
+            assert!(!chunk.is_empty(), "the child's input side closed early");
+            got.extend_from_slice(&chunk);
+        }
+        got
+    })
+    .await
+    .expect("every pipelined write reaches the child");
+    assert_eq!(
+        String::from_utf8_lossy(&got),
+        String::from_utf8_lossy(&expected),
+        "pipelined writes must reach the child in send order"
+    );
+
+    dialed.connection.close(0, b"bye");
+    h.shutdown().await;
+}
+
+/// Losing the writer lease **demotes** an attach to read-only; it does not
+/// end it (protocol.md §10 "기존 보유자가 … read-only로 강등된다"). The
+/// stream keeps acking so the peer's input stream stays contiguous, keeps
+/// delivering output, and starts writing again the moment the lease comes
+/// back — no reattach, and no silently deaf stream.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stolen_lease_demotes_the_attach_to_read_only_and_a_steal_back_resumes_it() {
+    let h = LoopbackHarness::start().await;
+    let mut s = h.session().await;
+    let (id, mut pipe, mut data) = open_and_attach(&h, &mut s).await;
+
+    // The attach holds the lease, so its input reaches the child.
+    data.send
+        .send(&wire::SessionFrame::input(5, b"first".to_vec()))
+        .await
+        .unwrap();
+    assert_eq!(read_ack(&mut data).await, 5);
+    assert_eq!(read_child_input(&mut pipe, 5).await, b"first");
+
+    // A second connection writes, which steals the lease (architecture.md
+    // §3 rule b: same principal on another connection takes over).
+    let mut thief = h.session().await;
+    thief.session_write(&id, b"steal".to_vec()).await.unwrap();
+    assert_eq!(read_child_input(&mut pipe, 5).await, b"steal");
+
+    // The demoted attach is still alive: its input is dropped on the floor
+    // (it is read-only now) but it is still acked, and output still flows.
+    data.send
+        .send(&wire::SessionFrame::input(10, b"ghost".to_vec()))
+        .await
+        .unwrap();
+    assert_eq!(
+        read_ack(&mut data).await,
+        10,
+        "a read-only attach still acks, so the peer is never left hanging"
+    );
+    pipe.write_output(b"still-watching").await.unwrap();
+    let (bytes, _) = read_output(&mut data, b"still-watching".len()).await;
+    assert_eq!(bytes, b"still-watching", "a demoted attach still reads");
+
+    // Steal back on the attach's own connection; writing resumes with no
+    // reattach and no gap in the input offset.
+    s.session_write(&id, b"back!".to_vec()).await.unwrap();
+    assert_eq!(read_child_input(&mut pipe, 5).await, b"back!");
+    data.send
+        .send(&wire::SessionFrame::input(15, b"again".to_vec()))
+        .await
+        .unwrap();
+    assert_eq!(read_ack(&mut data).await, 15);
+    assert_eq!(
+        read_child_input(&mut pipe, 5).await,
+        b"again",
+        "the ghost write must not be replayed when the lease returns"
+    );
+
+    thief.close();
+    s.close();
+    h.shutdown().await;
+}
+
+/// Read frames until an `InputAck` arrives, returning its offset.
+async fn read_ack(data: &mut FramedStream) -> u64 {
+    tokio::time::timeout(DEADLINE, async {
+        loop {
+            let frame = data
+                .recv
+                .recv::<wire::SessionFrame>()
+                .await
+                .expect("frame")
+                .expect("stream ended early");
+            if let Some(session_frame::Body::InputAck(a)) = frame.body {
+                return a.acked_input_seq;
+            }
+        }
+    })
+    .await
+    .expect("the host acks within the deadline")
+}
+
+/// Read exactly `want` bytes of child input.
+async fn read_child_input(pipe: &mut PipeHandle, want: usize) -> Vec<u8> {
+    tokio::time::timeout(DEADLINE, async {
+        let mut got = Vec::new();
+        while got.len() < want {
+            let chunk = pipe.read_input(want - got.len()).await.unwrap();
+            assert!(!chunk.is_empty(), "the child's input side closed early");
+            got.extend_from_slice(&chunk);
+        }
+        got
+    })
+    .await
+    .expect("the child receives the input within the deadline")
 }

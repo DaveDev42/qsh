@@ -34,6 +34,18 @@ use crate::ops::{OpError, Operation, Ops, PeerTarget};
 /// bounded, the way `EXEC_OUTPUT_MAX` bounds one `exec.run` envelope.
 pub const SESSION_WRITE_MAX: usize = 16 * 1024 * 1024;
 
+/// Depth of the two queues between a frontend and its attach driver — the
+/// same bound the host puts on its own side of the stream. Bounded on
+/// purpose: an unbounded event queue would let a slow renderer grow client
+/// memory without limit *and* remove QUIC flow control from the session
+/// stream (protocol.md §12, architecture.md §9-5).
+pub const SESSION_ATTACH_QUEUE: usize = 64;
+
+/// How long the control stream gets to deliver a `session.closed` that was
+/// queued just before the data stream's FIN. Not a synchronisation sleep:
+/// the drain ends as soon as the control stream closes or an event lands.
+const ATTACH_CONTROL_DRAIN: Duration = Duration::from_millis(250);
+
 /// The `session.open` operation.
 pub struct SessionOpenOp;
 impl Operation for SessionOpenOp {
@@ -361,8 +373,8 @@ impl Ops {
             .take_session()
             .ok_or_else(|| OpError::new(ErrorCode::Internal, "attach lost its control stream"))?;
 
-        let (events_tx, events_rx) = std::sync::mpsc::channel();
-        let (commands, command_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (events_tx, events_rx) = tokio::sync::mpsc::channel(SESSION_ATTACH_QUEUE);
+        let (commands, command_rx) = tokio::sync::mpsc::channel(SESSION_ATTACH_QUEUE);
         let session_ref = req.session_ref.clone();
         let driver = conn.runtime().spawn(drive_attach(
             session,
@@ -686,8 +698,8 @@ enum AttachCommand {
 pub struct SessionAttachStream {
     conn: Connected,
     driver: tokio::task::JoinHandle<()>,
-    events: std::sync::mpsc::Receiver<Result<SessionEvent, OpError>>,
-    commands: tokio::sync::mpsc::UnboundedSender<AttachCommand>,
+    events: tokio::sync::mpsc::Receiver<Result<SessionEvent, OpError>>,
+    commands: tokio::sync::mpsc::Sender<AttachCommand>,
     session_ref: String,
     replay_from: u64,
     writer_lease: bool,
@@ -717,21 +729,27 @@ impl SessionAttachStream {
 
     /// Block until the next event. `None` once the stream has ended — the
     /// child exited, the session closed, or the connection went away.
+    ///
+    /// Call from a plain thread, never from inside an async runtime: like
+    /// every other `Ops` entry point this is the blocking face of the
+    /// driver that owns the connection.
     pub fn next_event(&mut self) -> Option<Result<SessionEvent, OpError>> {
-        self.events.recv().ok()
+        self.events.blocking_recv()
     }
 
-    /// Queue session input. Non-blocking: the driver writes it in order.
+    /// Queue session input; the driver writes it in order. Blocks only
+    /// while the driver's bounded queue is full — that backpressure is
+    /// what keeps a fast producer from growing the queue without limit.
     pub fn write(&self, data: Vec<u8>) -> Result<(), OpError> {
         self.commands
-            .send(AttachCommand::Input(data))
+            .blocking_send(AttachCommand::Input(data))
             .map_err(|_| attach_gone())
     }
 
-    /// Queue a window-size change.
+    /// Queue a window-size change. Same backpressure as [`write`](Self::write).
     pub fn resize(&self, cols: u16, rows: u16) -> Result<(), OpError> {
         self.commands
-            .send(AttachCommand::Resize { cols, rows })
+            .blocking_send(AttachCommand::Resize { cols, rows })
             .map_err(|_| attach_gone())
     }
 
@@ -746,64 +764,121 @@ fn attach_gone() -> OpError {
     OpError::new(ErrorCode::ConnectionFailed, "the attach stream has ended")
 }
 
+/// A spawned task aborted when its handle is dropped, so tearing the
+/// driver down takes its helpers with it.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// Drive one attach: data-stream frames and control-stream `SessionEvent`s
 /// out as `qsh.event/v1` events, queued input and resizes in. Ends when the
 /// host finishes the stream, the peer goes away, or the frontend drops its
 /// command sender.
+///
+/// Three tasks, never one `select!` over all three, for two reasons that
+/// both bit the first cut:
+///
+/// - a `select!` arm that awaits `AttachWriter::send_input` stops polling
+///   the read arm while it is parked on QUIC flow control, and the host
+///   parks its own input reader when *its* frame queue fills — a large
+///   paste on a chatty session deadlocks both ends until the idle timeout;
+/// - `Session::next_event` answers a `Ping` with a `write_all`, which is
+///   **not** cancel-safe: losing a `select!` race mid-write leaves half a
+///   control frame on the wire and desynchronises the peer's decoder.
+///
+/// Giving the send halves their own tasks means nothing that writes is
+/// ever cancelled, and the reads (which *are* cancel-safe) are the only
+/// things racing.
 async fn drive_attach(
-    mut session: Session,
+    session: Session,
     attached: crate::client::Attached,
     session_ref: String,
-    mut commands: tokio::sync::mpsc::UnboundedReceiver<AttachCommand>,
-    events: std::sync::mpsc::Sender<Result<SessionEvent, OpError>>,
+    commands: tokio::sync::mpsc::Receiver<AttachCommand>,
+    events: tokio::sync::mpsc::Sender<Result<SessionEvent, OpError>>,
 ) {
-    let (mut writer, mut reader) = attached.split();
-    let mut control_open = true;
+    let (writer, mut reader) = attached.split();
+    let _input = AbortOnDrop(tokio::spawn(pump_attach_input(writer, commands)));
+    let mut control = AbortOnDrop(tokio::spawn(pump_attach_control(
+        session,
+        session_ref.clone(),
+        events.clone(),
+    )));
+
     loop {
-        tokio::select! {
-            frame = reader.next() => match frame {
-                Ok(Some(event)) => {
-                    if let Some(json) = attach_event_json(&session_ref, event)
-                        && events.send(Ok(json)).is_err() {
-                            break;
-                        }
-                }
-                Ok(None) => break,
-                Err(err) => {
-                    let _ = events.send(Err(map_client_error(err)));
+        match reader.next().await {
+            Ok(Some(event)) => {
+                if let Some(json) = attach_event_json(&session_ref, event)
+                    && events.send(Ok(json)).await.is_err()
+                {
                     break;
                 }
-            },
-            control = session.next_event(), if control_open => match control {
-                // `Exited` also arrives as a data frame, which is the
-                // authoritative copy; emitting both would duplicate a
-                // terminal event in the JSONL stream.
-                Ok(Some(event)) => {
-                    if let Some(json) = control_event_json(&session_ref, event)
-                        && events.send(Ok(json)).is_err() {
-                            break;
-                        }
-                }
-                Ok(None) | Err(_) => control_open = false,
-            },
-            command = commands.recv() => match command {
-                Some(AttachCommand::Input(data)) => {
-                    if writer.send_input(&data).await.is_err() {
-                        break;
-                    }
-                }
-                Some(AttachCommand::Resize { cols, rows }) => {
-                    if writer.resize(cols, rows).await.is_err() {
-                        break;
-                    }
-                }
-                // The frontend dropped its handle: finish our send half so
-                // the host drains what is left, then stop.
-                None => break,
-            },
+            }
+            Ok(None) => {
+                // The data stream ended. `session.closed` has no
+                // `SessionFrame` form, so a close that the host queued just
+                // before the FIN is still in flight on the control stream —
+                // give it a bounded moment to arrive rather than racing it
+                // to the exit (CLI.md §6.4 makes it the last event).
+                let _ = tokio::time::timeout(ATTACH_CONTROL_DRAIN, &mut control.0).await;
+                break;
+            }
+            Err(err) => {
+                let _ = events.send(Err(map_client_error(err))).await;
+                break;
+            }
         }
     }
+}
+
+/// Sole owner of the attach's send half: queued input and resizes, in
+/// order. A write that fails does not end the attach — a stolen writer
+/// lease demotes this peer to read-only (protocol.md §10) and it is still
+/// owed its output.
+async fn pump_attach_input(
+    mut writer: crate::client::AttachWriter,
+    mut commands: tokio::sync::mpsc::Receiver<AttachCommand>,
+) {
+    while let Some(command) = commands.recv().await {
+        let sent = match command {
+            AttachCommand::Input(data) => writer.send_input(&data).await.map(|_| ()),
+            AttachCommand::Resize { cols, rows } => writer.resize(cols, rows).await,
+        };
+        if sent.is_err() {
+            return;
+        }
+    }
+    // The frontend dropped its handle: finish our send half so the host
+    // drains what is left and finishes the stream.
     writer.finish();
+}
+
+/// Sole owner of the control stream for the lifetime of an attach: the
+/// asynchronous `SessionEvent`s (`writer_changed`, `closed`) an attached
+/// peer is owed, plus the ping answers `Session::next_event` sends.
+async fn pump_attach_control(
+    mut session: Session,
+    session_ref: String,
+    events: tokio::sync::mpsc::Sender<Result<SessionEvent, OpError>>,
+) {
+    loop {
+        match session.next_event().await {
+            // `Exited` also arrives as a data frame, which is the
+            // authoritative copy; emitting both would duplicate a terminal
+            // event in the JSONL stream.
+            Ok(Some(event)) => {
+                if let Some(json) = control_event_json(&session_ref, event)
+                    && events.send(Ok(json)).await.is_err()
+                {
+                    return;
+                }
+            }
+            Ok(None) | Err(_) => return,
+        }
+    }
 }
 
 /// One attach data frame as a `qsh.event/v1` event. `InputAck` is flow
