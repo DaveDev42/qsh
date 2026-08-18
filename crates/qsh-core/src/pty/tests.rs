@@ -291,12 +291,15 @@ async fn child_is_a_session_leader_with_the_pty_as_controlling_tty() {
 
 /// Job control through the tty: `^C` written to the master delivers
 /// `SIGINT` to the foreground process group (only possible when the pty is
-/// the child's controlling tty), so `sleep` dies and `AFTER` never prints.
+/// the child's controlling tty), so the shell blocked in `read` dies and
+/// `AFTER` never prints. (`read` is a builtin: no fork/exec window in which
+/// a not-yet-exec'd child could swallow the signal — `sh -c '…; sleep 300'`
+/// has exactly that race and flaked 1/16 on Linux.)
 #[tokio::test]
 async fn ctrl_c_on_the_tty_interrupts_the_foreground_group() {
     let (broker, clock) = broker(1 << 20);
     let handle = broker
-        .open(&sh("echo READY; sleep 300; echo AFTER"))
+        .open(&sh("echo READY; read line; echo AFTER"))
         .unwrap();
     pull_until(&handle, &clock, 4096, |all| text(all).contains("READY")).await;
     within(handle.take_lease("tester", CONN, false))
@@ -305,9 +308,9 @@ async fn ctrl_c_on_the_tty_interrupts_the_foreground_group() {
     within(handle.write(CONN, vec![0x03])).await.unwrap();
     let events = pull_until_exit(&handle, &clock).await;
     let out = text(&events);
-    assert!(!out.contains("AFTER"), "sleep survived ^C: {out}");
-    // bash reports 130, dash/zsh may die of SIGINT themselves — either way
-    // the session ended because of the interrupt.
+    assert!(!out.contains("AFTER"), "shell survived ^C: {out}");
+    // bash/dash report 130, zsh may die of SIGINT itself — either way the
+    // session ended because of the interrupt.
     let (code, sig) = exit_of(&events).unwrap();
     assert!(
         code == Some(130) || sig.as_deref() == Some("SIGINT") || code.is_some_and(|c| c != 0),
@@ -621,11 +624,16 @@ fn post_fork_spawn_failure_kills_and_reaps_the_child() {
 }
 
 /// Resize reaches the pty (`TIOCSWINSZ`): the child observes the new size.
+/// A `0` dimension is normalised to 80x24 exactly like `spawn` does, so a
+/// `session.resize --cols 0` can never hand the child a zero-width terminal
+/// (the two paths must not disagree).
 #[tokio::test]
 async fn resize_is_applied_to_the_pty() {
     let (broker, clock) = broker(1 << 20);
     let handle = broker
-        .open(&sh("echo READY; read line; echo SIZE=$(stty size)"))
+        .open(&sh(
+            "echo READY; read a; echo SIZE=$(stty size); read b; echo ZERO=$(stty size)",
+        ))
         .unwrap();
     pull_until(&handle, &clock, 4096, |all| text(all).contains("READY")).await;
     within(handle.resize(132, 43)).await.unwrap();
@@ -633,9 +641,20 @@ async fn resize_is_applied_to_the_pty() {
         .await
         .unwrap();
     within(handle.write(CONN, b"go\n".to_vec())).await.unwrap();
+    pull_until(&handle, &clock, 4096, |all| {
+        line_value(&text(all), "SIZE=").is_some()
+    })
+    .await;
+    within(handle.resize(0, 0)).await.unwrap();
+    within(handle.write(CONN, b"go\n".to_vec())).await.unwrap();
     let events = pull_until_exit(&handle, &clock).await;
     let out = text(&events);
-    assert!(out.contains("SIZE=43 132"), "{out}");
+    assert_eq!(line_value(&out, "SIZE="), Some("43 132"), "{out}");
+    assert_eq!(
+        line_value(&out, "ZERO="),
+        Some("24 80"),
+        "resize(0, 0) must normalise to 80x24 like spawn: {out}"
+    );
     within(broker.close(&handle_id(&handle), CloseReason::Closed, None))
         .await
         .unwrap();
