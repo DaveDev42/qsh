@@ -741,6 +741,57 @@ impl SessionAttachStream {
     /// while the driver's bounded queue is full — that backpressure is
     /// what keeps a fast producer from growing the queue without limit.
     pub fn write(&self, data: Vec<u8>) -> Result<(), OpError> {
+        self.handle().write(data)
+    }
+
+    /// Queue a window-size change. Same backpressure as [`write`](Self::write).
+    pub fn resize(&self, cols: u16, rows: u16) -> Result<(), OpError> {
+        self.handle().resize(cols, rows)
+    }
+
+    /// A cloneable handle on the input side of this attach.
+    ///
+    /// [`next_event`](Self::next_event) blocks the thread that owns the
+    /// stream, so anything that has to reach the session while output is
+    /// flowing — a terminal's input pump, a `SIGWINCH` watcher, a detach
+    /// key — runs on another thread and needs its own handle. The stream
+    /// stays the sole owner of the event side.
+    pub fn handle(&self) -> AttachHandle {
+        AttachHandle {
+            commands: self.commands.clone(),
+            connection: self.conn.connection.clone(),
+        }
+    }
+
+    /// Stop the attach and close the connection.
+    pub fn close(self) {
+        self.driver.abort();
+        self.conn.close();
+    }
+}
+
+/// The input side of a live attach: cloneable, `Send`, and usable from any
+/// thread — session input, window-size changes, and a detach that leaves
+/// the session running. See [`SessionAttachStream::handle`].
+#[derive(Clone)]
+pub struct AttachHandle {
+    commands: tokio::sync::mpsc::Sender<AttachCommand>,
+    connection: qsh_transport::Connection,
+}
+
+impl std::fmt::Debug for AttachHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AttachHandle").finish_non_exhaustive()
+    }
+}
+
+impl AttachHandle {
+    /// Queue session input; the driver writes it in order. Blocks only
+    /// while the driver's bounded queue is full.
+    ///
+    /// Call from a plain thread, never from inside an async runtime — the
+    /// same rule every blocking `Ops` entry point follows.
+    pub fn write(&self, data: Vec<u8>) -> Result<(), OpError> {
         self.commands
             .blocking_send(AttachCommand::Input(data))
             .map_err(|_| attach_gone())
@@ -753,10 +804,17 @@ impl SessionAttachStream {
             .map_err(|_| attach_gone())
     }
 
-    /// Stop the attach and close the connection.
-    pub fn close(self) {
-        self.driver.abort();
-        self.conn.close();
+    /// Detach: end this client's attach **without touching the session**
+    /// (`docs/CLI.md` §7 — a session outlives its client by design).
+    ///
+    /// Closing the QUIC connection is what makes a detach prompt and
+    /// complete: the host purges the connection, releases the writer lease
+    /// it held and keeps the session running, and the
+    /// [`next_event`](SessionAttachStream::next_event) blocking the owning
+    /// thread returns. Idempotent, and callable from any thread — closing
+    /// a connection needs no runtime.
+    pub fn detach(&self) {
+        self.connection.close(0, b"detach");
     }
 }
 
