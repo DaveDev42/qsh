@@ -37,7 +37,7 @@ use qsh_proto::wire::{
     response, session_read_event,
 };
 use qsh_transport::endpoint::CLOSE_CODE_PROTOCOL;
-use qsh_transport::{AuthPath, Connection, FramedStream, Listener, Principal};
+use qsh_transport::{AuthPath, Connection, FramedStream, Incoming, Listener, Principal};
 use rand::RngCore;
 use thiserror::Error;
 use time::OffsetDateTime;
@@ -919,29 +919,46 @@ impl Server {
                 incoming = listener.accept() => {
                     let Some(incoming) = incoming else { break };
                     let server = self.clone();
-                    tokio::spawn(async move {
-                        let peer = incoming.remote_address();
-                        match incoming.accept().await {
-                            Ok(conn) => server.serve_connection(conn).await,
-                            Err(err) => {
-                                let category = match &err {
-                                    qsh_transport::AcceptError::Unverified(reason) => {
-                                        format!("{reason:?}").to_lowercase()
-                                    }
-                                    _ => "handshake".to_string(),
-                                };
-                                server
-                                    .audit
-                                    .record(&AuditRecord::handshake_rejected(peer, &category));
-                                tracing::warn!(%peer, %err, "connection rejected");
-                            }
-                        }
-                    });
+                    tokio::spawn(async move { server.accept_and_serve(incoming, |_| {}).await });
                 }
             }
         }
         listener.close(0, b"shutdown");
         listener.endpoint().wait_idle().await;
+    }
+
+    /// Accept one inbound connection and drive it: run the handshake, audit
+    /// a rejection with its category, then serve the verified connection.
+    /// `on_accept` observes that connection after verification and before it
+    /// is served.
+    ///
+    /// [`run`](Self::run) is this plus the accept loop. It is a public seam
+    /// so an alternative accept loop — `qsh-testkit`'s L4 chaos harness runs
+    /// one, to watch the host-side peer address across a migration — reuses
+    /// the rejection/audit path instead of copying it.
+    pub async fn accept_and_serve(
+        self: Arc<Self>,
+        incoming: Incoming,
+        on_accept: impl FnOnce(&Connection),
+    ) {
+        let peer = incoming.remote_address();
+        match incoming.accept().await {
+            Ok(conn) => {
+                on_accept(&conn);
+                self.serve_connection(conn).await;
+            }
+            Err(err) => {
+                let category = match &err {
+                    qsh_transport::AcceptError::Unverified(reason) => {
+                        format!("{reason:?}").to_lowercase()
+                    }
+                    _ => "handshake".to_string(),
+                };
+                self.audit
+                    .record(&AuditRecord::handshake_rejected(peer, &category));
+                tracing::warn!(%peer, %err, "connection rejected");
+            }
+        }
     }
 
     /// Drive one authenticated connection to completion.
