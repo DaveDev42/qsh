@@ -8,8 +8,8 @@ use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
 
 use portable_pty::{Child, CommandBuilder, PtySize, native_pty_system};
@@ -24,12 +24,17 @@ use crate::broker::{
 /// `TERM` when the client sent no hint.
 pub const DEFAULT_TERM: &str = "xterm-256color";
 
-/// The baseline `PATH` handed to the child — the same value `sshd` uses
-/// (`_PATH_STDPATH`). The login shell's own profile extends it (macOS:
+/// The baseline `PATH` handed to the child (the client cannot override it,
+/// see [`PINNED_ENV`]). The login shell's own profile extends it (macOS:
 /// `/usr/libexec/path_helper` from `/etc/zprofile`/`/etc/profile`).
+///
+/// macOS: `_PATH_STDPATH`, which is also what `sshd` hands a login shell
+/// there.
 #[cfg(target_os = "macos")]
 pub const DEFAULT_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
-/// See the macOS definition.
+/// Other unix: OpenSSH's default `--with-default-path` value (Debian/
+/// Ubuntu `sshd` ships this; glibc's `_PATH_STDPATH` is the shorter
+/// `/usr/bin:/bin:/usr/sbin:/sbin`).
 #[cfg(not(target_os = "macos"))]
 pub const DEFAULT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
@@ -41,9 +46,12 @@ const FALLBACK_SIZE: (u16, u16) = (80, 24);
 /// never `PATH`, never secrets.
 const PASSTHROUGH_ENV: &[&str] = &["LANG", "LANGUAGE", "TZ"];
 
-/// Keys the client's `env` may not override: they are the identity of the
-/// login, fixed by the password database.
-const PINNED_ENV: &[&str] = &["HOME", "USER", "LOGNAME", "SHELL"];
+/// Keys the client's `env` may not override: the identity of the login
+/// (fixed by the password database) and `PATH` — `argv[0]` is resolved
+/// against the child's `PATH`, so a client-supplied `PATH` would let the
+/// client pick *which* binary a policy-approved command name runs (M5 ACL
+/// choke point). `PATH` grows only through the login shell's own profile.
+const PINNED_ENV: &[&str] = &["HOME", "USER", "LOGNAME", "SHELL", "PATH"];
 
 /// The production [`SourceFactory`]: one [`PtySource`] per session.
 #[derive(Debug, Default, Clone, Copy)]
@@ -103,7 +111,7 @@ impl SessionSource for PtySource {
         if let Some(user) = &spec.user
             && user != &account.name
         {
-            return Err(super::unsupported());
+            return Err(super::user_switching_unsupported());
         }
         let shell = self
             .shell_override
@@ -111,11 +119,7 @@ impl SessionSource for PtySource {
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|| account.login_shell());
 
-        let (cols, rows) = if spec.cols == 0 || spec.rows == 0 {
-            FALLBACK_SIZE
-        } else {
-            (spec.cols, spec.rows)
-        };
+        let (cols, rows) = normalize_size(spec.cols, spec.rows);
         let pair = native_pty_system()
             .openpty(PtySize {
                 rows,
@@ -150,10 +154,16 @@ impl SessionSource for PtySource {
         // once the child (and everyone it forked) is gone.
         drop(pair.slave);
 
-        let pid = child
-            .process_id()
-            .ok_or_else(|| io::Error::other("spawned child has no pid"))?
-            as libc::pid_t;
+        // From here on a live child exists. Every early return below must
+        // kill and reap it (`portable_pty::Child`'s drop does neither), or
+        // an fd-exhaustion error would leave a running login shell and then
+        // a permanent zombie behind (`docs/design/testing.md` L5: zombie 0).
+        let mut cleanup = SpawnCleanup {
+            pid: child.process_id().map(|p| p as libc::pid_t),
+        };
+        let pid = cleanup
+            .pid
+            .ok_or_else(|| io::Error::other("spawned child has no pid"))?;
         if let Some(slot) = &self.pid_observer {
             slot.store(pid, Ordering::SeqCst);
         }
@@ -170,6 +180,9 @@ impl SessionSource for PtySource {
         drop(pair.master);
         let fd = Arc::new(AsyncFd::new(master)?);
 
+        // Success: the actor now owns the child's lifetime (`wait_for_exit`
+        // + `ReapGuard`).
+        cleanup.pid = None;
         Ok(SpawnedSource {
             output: Box::new(MasterReader {
                 fd: Arc::clone(&fd),
@@ -180,6 +193,52 @@ impl SessionSource for PtySource {
             control: Box::new(PtyControl { fd, pgid: pid }),
             wait: Box::pin(wait_for_exit(pid, child)),
         })
+    }
+}
+
+/// Kills and reaps a freshly spawned child if `spawn` fails after the fork
+/// (disarmed by setting `pid` to `None` on success).
+pub(super) struct SpawnCleanup {
+    pub(super) pid: Option<libc::pid_t>,
+}
+
+impl Drop for SpawnCleanup {
+    fn drop(&mut self) {
+        let Some(pid) = self.pid.take() else {
+            return;
+        };
+        // SAFETY: plain signal syscalls on a pid we just forked and have not
+        // reaped (so it cannot have been reused). The child is a session
+        // leader (`setsid`), so its pgid is its pid; fall back to the pid
+        // alone if the group is somehow gone.
+        unsafe {
+            if libc::killpg(pid, libc::SIGKILL) != 0 {
+                libc::kill(pid, libc::SIGKILL);
+            }
+        }
+        // Reap it. SIGKILL takes effect promptly, but do not block the
+        // caller's runtime thread on it: reap off-thread when we can.
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn_blocking(move || {
+                    let _ = blocking_reap(pid);
+                });
+            }
+            Err(_) => {
+                let _ = blocking_reap(pid);
+            }
+        }
+    }
+}
+
+/// `0` in either dimension means "unknown": use 80×24 (spawn and resize
+/// agree, so a `session.resize --cols 0` cannot hand the child a 0-width
+/// terminal).
+fn normalize_size(cols: u16, rows: u16) -> (u16, u16) {
+    if cols == 0 || rows == 0 {
+        FALLBACK_SIZE
+    } else {
+        (cols, rows)
     }
 }
 
@@ -215,9 +274,23 @@ fn is_executable(path: &str) -> bool {
     unsafe { libc::access(c.as_ptr(), libc::X_OK) == 0 }
 }
 
+/// The `qsh serve` account, looked up once (`getpwuid_r` may go through
+/// NSS/OpenDirectory, i.e. IPC or the network for directory-backed
+/// accounts, and `spawn` runs on a runtime thread — the effective uid does
+/// not change for the life of the process, so the answer is cached; only
+/// failures are retried).
+fn current_account() -> io::Result<Account> {
+    static ACCOUNT: OnceLock<Account> = OnceLock::new();
+    if let Some(a) = ACCOUNT.get() {
+        return Ok(a.clone());
+    }
+    let account = lookup_account()?;
+    Ok(ACCOUNT.get_or_init(|| account).clone())
+}
+
 /// `getpwuid_r(geteuid())` (architecture.md §4: the login name comes from
 /// the password database, not `$USER`/`$LOGNAME`).
-fn current_account() -> io::Result<Account> {
+fn lookup_account() -> io::Result<Account> {
     let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
     let mut result: *mut libc::passwd = std::ptr::null_mut();
     let mut buf = vec![0u8; 16 * 1024];
@@ -270,22 +343,30 @@ pub fn login_name() -> io::Result<String> {
     current_account().map(|a| a.name)
 }
 
+/// Home directory of the serve account per the password database (tests:
+/// what `HOME` must be pinned to — never `$HOME` of the serve process).
+#[cfg(test)]
+pub(crate) fn login_home() -> io::Result<String> {
+    current_account().map(|a| a.home)
+}
+
 /// The child's full environment, in application order (later wins in
 /// `CommandBuilder`, and the pinned identity keys are re-asserted last).
 fn build_env(spec: &SessionSpec, account: &Account, shell: &str) -> Vec<(String, String)> {
-    let mut env: Vec<(String, String)> = vec![
+    let pinned: Vec<(String, String)> = vec![
         ("HOME".into(), account.home.clone()),
         ("USER".into(), account.name.clone()),
         ("LOGNAME".into(), account.name.clone()),
         ("SHELL".into(), shell.to_string()),
         ("PATH".into(), DEFAULT_PATH.into()),
-        (
-            "TERM".into(),
-            spec.term
-                .clone()
-                .unwrap_or_else(|| DEFAULT_TERM.to_string()),
-        ),
     ];
+    debug_assert!(pinned.iter().all(|(k, _)| PINNED_ENV.contains(&k.as_str())));
+    let mut env: Vec<(String, String)> = vec![(
+        "TERM".into(),
+        spec.term
+            .clone()
+            .unwrap_or_else(|| DEFAULT_TERM.to_string()),
+    )];
     for (k, v) in std::env::vars() {
         if PASSTHROUGH_ENV.contains(&k.as_str()) || k.starts_with("LC_") {
             env.push((k, v));
@@ -297,12 +378,10 @@ fn build_env(spec: &SessionSpec, account: &Account, shell: &str) -> Vec<(String,
         }
         env.push((k.clone(), v.clone()));
     }
-    // Re-pin the login identity after the client overlay.
+    // The pinned keys go last so nothing above (pass-through or client
+    // overlay) can override them.
     env.retain(|(k, _)| !PINNED_ENV.contains(&k.as_str()));
-    env.push(("HOME".into(), account.home.clone()));
-    env.push(("USER".into(), account.name.clone()));
-    env.push(("LOGNAME".into(), account.name.clone()));
-    env.push(("SHELL".into(), shell.to_string()));
+    env.extend(pinned);
     env
 }
 
@@ -435,6 +514,7 @@ struct PtyControl {
 
 impl SourceControl for PtyControl {
     fn resize(&mut self, cols: u16, rows: u16) -> io::Result<()> {
+        let (cols, rows) = normalize_size(cols, rows);
         let ws = libc::winsize {
             ws_row: rows,
             ws_col: cols,
@@ -451,8 +531,13 @@ impl SourceControl for PtyControl {
     }
 
     fn signal(&mut self, signal: Signal) -> io::Result<()> {
-        // SAFETY: killpg only takes integers. The broker never calls this
-        // once the child was reaped (pgid reuse), see session.rs.
+        // SAFETY: killpg only takes integers. Pgid-reuse hazard: the kernel
+        // keeps the pgid reserved while any member of the group is alive,
+        // and the broker gates signals on session state (`Running`, not
+        // `exiting`/`exited` — session.rs), so a group whose leader was
+        // reaped but whose members still hold the slave is still ours;
+        // once the last member is gone the master hits EOF and the actor
+        // stops signalling. That is the CLI.md §6.7 rule.
         let rc = unsafe { libc::killpg(self.pgid, signo(signal)) };
         if rc != 0 {
             return Err(io::Error::last_os_error());
