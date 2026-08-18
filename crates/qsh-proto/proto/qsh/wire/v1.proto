@@ -8,11 +8,12 @@
 //     frame layer in `qsh-proto/src/frame.rs` (§5);
 //   * `Response.Error.code` uses the CLI.md §3.3 error-code strings verbatim.
 //
-// M1 scope: only the messages the walking skeleton uses are defined here
-// (Hello, Response/Error, ExecStart/ExecStarted, StreamHeader, ExecFrame,
-// Ping/Pong). Session/tunnel/reverse variants (tags 20–26, 40–41, 60 and
-// Hello.reverse = 4) are reserved by the protocol sketch and are added when
-// their milestone lands.
+// Scope so far: the M1 walking skeleton (Hello, Response/Error,
+// ExecStart/ExecStarted, StreamHeader, ExecFrame, Ping/Pong) plus the M2
+// session surface (session_* control messages, SessionEvent, SessionFrame).
+// Tunnel (M4) and reverse (M3) tags are `reserved` here so a later
+// milestone cannot accidentally take them for something else — protoc /
+// protox reject a field that reuses a reserved number.
 
 syntax = "proto3";
 
@@ -27,15 +28,32 @@ package qsh.wire.v1;
 // Asynchronous events use request_id = 0.
 message ControlMessage {
   uint64 request_id = 1;
+  // 25 was SessionSignal in early sketches; it is P1 and deliberately left
+  //    undefined in v1 (a host answers UNSUPPORTED to it, CLI.md §2.4).
+  // 40–41 are RemoteForwardOpen/Close (M4).
+  reserved 25, 40, 41;
   oneof body {
-    Hello     hello      = 10;
-    Response  response   = 11;
-    // 20–26: session_* (M2)
-    ExecStart exec_start = 30;
-    // 40–41: rfwd_* (M4)
-    Ping      ping       = 50;
-    Pong      pong       = 51;
-    // 60: session_event (M2)
+    Hello         hello          = 10;
+    Response      response       = 11;
+
+    // Session control (M2). Every session_* request is authorized against
+    // the ACL action in CLI.md §2.5 before any resource exists.
+    SessionOpen   session_open   = 20;
+    SessionAttach session_attach = 21;
+    SessionList   session_list   = 22;
+    SessionGet    session_get    = 23;
+    SessionResize session_resize = 24;
+    SessionClose  session_close  = 26;
+    SessionRead   session_read   = 27;
+    SessionWrite  session_write  = 28;
+
+    ExecStart     exec_start     = 30;
+
+    Ping          ping           = 50;
+    Pong          pong           = 51;
+
+    // Asynchronous (request_id = 0), host → attached client.
+    SessionEvent  session_event  = 60;
   }
 }
 
@@ -50,18 +68,26 @@ message Hello {
   string device_name = 2;
   // Capability strings; peers adopt the intersection ("exec", "session", ...).
   repeated string capabilities = 3;
-  // 4: ReverseRegistration reverse (M3)
+  // 4 is `ReverseRegistration reverse` (M3, protocol.md §11).
+  reserved 4;
 }
 
 // The reply to a request. Exactly one body variant is set: either the typed
 // success payload matching the request, or Error.
 message Response {
+  // 4 is `RemoteForwardOpened rfwd_opened` (M4).
+  reserved 4;
   oneof body {
-    // 1: SessionOpened (M2)
-    // 2: SessionAttached (M2)
-    ExecStarted exec_started = 3;
-    // 4: RemoteForwardOpened (M4)
-    Error error = 15;
+    SessionOpened     session_opened      = 1;  // session_open
+    SessionAttached   session_attached    = 2;  // session_attach
+    ExecStarted       exec_started        = 3;  // exec_start
+    SessionReadResult session_read_result = 5;  // session_read
+    SessionListResult session_list_result = 6;  // session_list
+    SessionInfo       session_info        = 7;  // session_get
+    SessionWritten    session_written     = 8;  // session_write
+    SessionResized    session_resized     = 9;  // session_resize
+    SessionClosed     session_closed      = 10; // session_close
+    Error             error               = 15;
   }
 }
 
@@ -92,6 +118,212 @@ message ExecStarted {
   bytes ticket = 2;
 }
 
+// ---------------------------------------------------------------------------
+// Session control messages (M2). `session_id` is an opaque, URL-safe id
+// issued by the host; the client-side `session_ref` (`<alias>/<session_id>`)
+// never appears on the wire (ADR-0007). Timestamps are RFC 3339 UTC strings,
+// the same representation the JSON contract uses (CLI.md §2.3).
+// ---------------------------------------------------------------------------
+
+// Request: create a PTY session (op `session.open`, ACL `session.open`).
+message SessionOpen {
+  // Program + arguments, executed directly. Empty = the account's login
+  // shell.
+  repeated string argv = 1;
+  // Extra environment layered over the login-shell environment.
+  map<string, string> env = 2;
+  // TERM to export; empty = host default.
+  string term = 3;
+  // Initial window size; 0 = host default.
+  uint32 cols = 4;
+  uint32 rows = 5;
+  // The `user` half of `qsh user@host` — a *hint*, never an identity. The
+  // host checks it after the ACL decision and before spawn: if it differs
+  // from the serve account's login name the request fails UNSUPPORTED
+  // without creating a session (CLI.md §7).
+  optional string user = 6;
+}
+
+// Success payload for SessionOpen. `ticket` authorizes exactly one
+// SESSION_DATA stream (single use, 30 s). `resume_token` is the 32-byte
+// CSPRNG credential of protocol.md §10 — the client stores it in
+// resume.json and never surfaces it in JSON (ADR-0007).
+message SessionOpened {
+  string session_id = 1;
+  bytes resume_token = 2;
+  bytes ticket = 3;
+  // Cumulative output byte offset at creation (0 for a fresh session).
+  uint64 initial_seq = 4;
+  // RFC 3339: when the session/token TTL lapses (client-side cleanup).
+  string expires_at = 5;
+}
+
+// Whether an attach wants to write. Only an explicit ATTACH_MODE_RW asks
+// for the writer lease; UNSPECIFIED (the proto3 default, i.e. an unset
+// field) is INVALID_ARGUMENT, never treated as RW.
+enum AttachMode {
+  ATTACH_MODE_UNSPECIFIED = 0;
+  ATTACH_MODE_RW = 1;
+  // Number reserved for a later milestone; M2 hosts answer INVALID_ARGUMENT
+  // — there is no observer/read-only attach in M2 (ROADMAP §3).
+  ATTACH_MODE_RO = 2;
+}
+
+// Request: (re)attach to a session (stream op `session.attach`, ACL
+// `session.attach`). Checked in order: token hash + expiry → peer
+// fingerprint bound to the session → ACL; only then is a ticket issued.
+message SessionAttach {
+  string session_id = 1;
+  bytes resume_token = 2;
+  // Highest cumulative output offset the client already has (protocol.md
+  // §8); replay resumes exactly after it.
+  uint64 last_output_seq = 3;
+  AttachMode mode = 4;
+  // RW only: fail with SESSION_CONFLICT instead of stealing a live lease.
+  bool no_steal = 5;
+}
+
+// Success payload for SessionAttach. The presented token is dead; the
+// client must durably store `new_resume_token` before using the ticket.
+message SessionAttached {
+  bytes ticket = 1;
+  bytes new_resume_token = 2;
+  // Offset replay will actually start from (== last_output_seq unless the
+  // ring evicted it, in which case the data stream opens with a Gap).
+  uint64 replay_from = 3;
+  // True when this attach holds the writer lease.
+  bool writer_lease = 4;
+  string expires_at = 5;
+}
+
+// Request: list this host's sessions (op `session.list`, ACL `session.list`).
+message SessionList {}
+
+// Success payload for SessionList.
+message SessionListResult {
+  repeated SessionInfo sessions = 1;
+}
+
+// Request: one session's info (op `session.get`, ACL `session.list`).
+message SessionGet {
+  string session_id = 1;
+}
+
+// Wire view of a session. The JSON `Session` (CLI.md §5) is this plus the
+// client-only `session_ref`/`host` fields that Ops fills in (ADR-0007).
+message SessionInfo {
+  string session_id = 1;
+  // Open string set: "running", "exited", ... (CLI.md §10).
+  string state = 2;
+  // Principal string of the writer-lease holder; absent = no holder.
+  optional string writer = 3;
+  // RFC 3339 creation time.
+  string created_at = 4;
+  // Cumulative output byte offset so far.
+  uint64 last_sequence = 5;
+}
+
+// Request: resize a session's PTY without being attached (op
+// `session.resize`, ACL `session.control`).
+message SessionResize {
+  string session_id = 1;
+  uint32 cols = 2;
+  uint32 rows = 3;
+}
+
+// Success payload for SessionResize: the size the host actually applied
+// to the PTY (may differ from the request if the host clamps).
+message SessionResized {
+  uint32 cols = 1;
+  uint32 rows = 2;
+}
+
+// Request: terminate the session's process group and remove the session
+// (op `session.close`, ACL `session.control`).
+message SessionClose {
+  string session_id = 1;
+  // Optional first signal of the HUP → TERM → KILL escalation, canonical
+  // "SIGTERM" form; one of HUP|INT|QUIT|TERM|USR1|USR2|KILL (CLI.md §6.7).
+  optional string signal = 2;
+}
+
+// Success payload for SessionClose.
+message SessionClosed {
+  // Cumulative output offset at removal.
+  uint64 final_seq = 1;
+}
+
+// Request: one cursor pull of session events (op `session.read`, ACL
+// `session.attach`; no resume token needed).
+message SessionRead {
+  string session_id = 1;
+  // Cumulative output offset already consumed (`--after`).
+  uint64 after = 2;
+  // Payload cap for this pull; 0 = host default. The host clamps to
+  // SESSION_READ_MAX_BYTES so the reply always fits one control frame.
+  uint64 max_bytes = 3;
+  // Long-poll wait when nothing is available; 0 = return immediately.
+  uint64 wait_ms = 4;
+}
+
+// Success payload for SessionRead: events in total order (output chunks
+// interleaved with the zero-length control entries of the replay ring).
+message SessionReadResult {
+  repeated SessionReadEvent events = 1;
+}
+
+// One event of a SessionReadResult. Mirrors qsh.event/v1 (CLI.md §6.4).
+message SessionReadEvent {
+  oneof body {
+    Output        output         = 1;
+    Gap           gap            = 2;
+    Exit          exit           = 3;
+    WriterChanged writer_changed = 4;
+    Closed        closed         = 5;
+  }
+}
+
+// Request: inject input into a session without being attached (op
+// `session.write`, ACL `session.control`). `data` ≤ SESSION_CHUNK_MAX per
+// message; the client splits larger writes into several requests.
+message SessionWrite {
+  string session_id = 1;
+  bytes data = 2;
+}
+
+// Success payload for SessionWrite.
+message SessionWritten {
+  // Bytes the host actually accepted into the PTY input (≤ len(data)).
+  uint64 bytes_written = 1;
+}
+
+// Asynchronous host → client notification for a session the connection is
+// attached to (request_id = 0). Pull consumers see the same events as
+// control entries in SessionReadResult.
+message SessionEvent {
+  string session_id = 1;
+  oneof body {
+    Exit          exited         = 2;
+    WriterChanged writer_changed = 3;
+    Closed        closed         = 4;
+  }
+}
+
+// The writer lease changed hands. `new_writer` absent = lease released
+// with no holder (owning connection died).
+message WriterChanged {
+  optional string new_writer = 1;
+  // Cumulative output offset at the moment of the change.
+  uint64 seq = 2;
+}
+
+// The session was removed from the broker; always the last event.
+message Closed {
+  // Open string set: "closed" | "exit" | "ttl_expired" (CLI.md §6.4).
+  string reason = 1;
+  uint64 seq = 2;
+}
+
 // Application-level liveness probe (QUIC keep-alive handles the transport).
 message Ping {}
 message Pong {}
@@ -116,6 +348,65 @@ message StreamHeader {
   // TCP_CONNECT only.
   string host = 3;
   uint32 port = 4;
+}
+
+// ---------------------------------------------------------------------------
+// Session data stream (one per attach). Resumable: `sequence`/`input_seq`
+// are cumulative byte offsets (protocol.md §8), so replay can restart at an
+// exact byte and the client can drop `sequence <= last_output_seq` frames.
+// ---------------------------------------------------------------------------
+
+message SessionFrame {
+  oneof body {
+    Output   output    = 1;
+    Input    input     = 2;
+    InputAck input_ack = 3;
+    Gap      gap       = 4;
+    Resize   resize    = 5;
+    Exit     exit      = 6;
+  }
+}
+
+// Host → client output chunk, ≤ SESSION_CHUNK_MAX (16 KiB). `sequence` is
+// the cumulative offset *after* this chunk (last byte offset + 1).
+message Output {
+  uint64 sequence = 1;
+  bytes data = 2;
+}
+
+// Client → host input chunk, ≤ SESSION_CHUNK_MAX. `input_seq` is the
+// cumulative input offset after this chunk; the host discards chunks whose
+// `input_seq` is at or below the offset it has already applied.
+message Input {
+  uint64 input_seq = 1;
+  bytes data = 2;
+}
+
+// Host → client: highest cumulative input offset applied so far.
+message InputAck {
+  uint64 acked_input_seq = 1;
+}
+
+// Host → client, first frame after attach when the ring no longer holds
+// `requested_after`; replay then continues from `available_from`.
+message Gap {
+  uint64 requested_after = 1;
+  uint64 available_from = 2;
+}
+
+// Client → host window-size change.
+message Resize {
+  uint32 cols = 1;
+  uint32 rows = 2;
+}
+
+// Host → client: the session's process exited. Also the payload of
+// SessionEvent.exited and SessionReadEvent.exit.
+message Exit {
+  // Cumulative output offset at exit (all output precedes this frame).
+  uint64 final_seq = 1;
+  int32 exit_code = 2;
+  optional string signal = 3;
 }
 
 // ---------------------------------------------------------------------------

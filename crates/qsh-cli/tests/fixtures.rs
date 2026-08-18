@@ -27,8 +27,9 @@ use std::path::PathBuf;
 
 use common::{Fleet, HOST_ALIAS, Sandbox};
 use qsh_proto::{
-    ErrorCode, ExecRunData, IdentityInitData, TrustAddData, TrustListData, TrustRemoveData,
-    VersionData,
+    ErrorCode, ExecRunData, IdentityInitData, Session, SessionCloseData, SessionListData,
+    SessionOpenData, SessionReadData, SessionResizeData, SessionWriteData, TrustAddData,
+    TrustListData, TrustRemoveData, VersionData,
 };
 use qsh_testkit::fixtures;
 use schemars::schema_for;
@@ -368,6 +369,15 @@ fn data_schema(command: &str) -> Option<Value> {
             "trust.list" => schema_for!(TrustListData),
             "trust.remove" => schema_for!(TrustRemoveData),
             "exec.run" => schema_for!(ExecRunData),
+            // M2 session ops (fixtures land with Step 3/5; registered now so
+            // the first session fixture validates instead of panicking).
+            "session.list" => schema_for!(SessionListData),
+            "session.get" => schema_for!(Session),
+            "session.open" => schema_for!(SessionOpenData),
+            "session.read" => schema_for!(SessionReadData),
+            "session.write" => schema_for!(SessionWriteData),
+            "session.resize" => schema_for!(SessionResizeData),
+            "session.close" => schema_for!(SessionCloseData),
             _ => return None,
         }
         .to_value(),
