@@ -615,7 +615,15 @@ mod tests {
         let _ = schemars::schema_for!(TrustListData);
         let _ = schemars::schema_for!(TrustRemoveData);
         for schema in session_schemas() {
-            assert!(schema.is_object());
+            // Every session contract type is an object schema with at least
+            // one property (none of them is a bare alias or an empty struct).
+            assert_eq!(schema["type"], "object", "{schema}");
+            assert!(
+                schema["properties"]
+                    .as_object()
+                    .is_some_and(|p| !p.is_empty()),
+                "{schema}"
+            );
         }
     }
 

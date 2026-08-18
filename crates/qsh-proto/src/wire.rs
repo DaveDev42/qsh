@@ -50,6 +50,13 @@ pub const CAP_SESSION: &str = "session";
 pub const CAP_RESUME_V1: &str = "resume.v1";
 
 /// Capabilities this build advertises in [`Hello`].
+///
+/// `session`/`resume.v1` are advertised from PLAN Step 1 on (the wire
+/// vocabulary is complete) even though the host answers every `session_*`
+/// request with `UNSUPPORTED` until the broker lands.
+// TODO(M2 Step 3): remove this note when `Server::dispatch` routes
+// `session_*` to the broker; until then the advertised set is knowingly
+// ahead of the implementation.
 pub const LOCAL_CAPABILITIES: &[&str] = &[CAP_EXEC, CAP_SESSION, CAP_RESUME_V1];
 
 /// Maximum size of a single exec payload chunk (the `data` field of a
@@ -62,6 +69,27 @@ pub const EXEC_CHUNK_MAX: usize = 16 * 1024;
 /// [`encode_session_frame`] / [`encode_control`], not merely by the 64 KiB
 /// data-frame cap.
 pub const SESSION_CHUNK_MAX: usize = 16 * 1024;
+
+/// Upper bound the host applies to `SessionRead.max_bytes` (JSON
+/// `limit_bytes`): the total `Output.data` payload of one
+/// [`SessionReadResult`], 192 KiB = 12 × [`SESSION_CHUNK_MAX`]. Chosen so a
+/// full-limit reply plus its per-event and frame overhead always fits one
+/// [`CONTROL_FRAME_MAX`] frame (pinned by a test). Larger requests are
+/// clamped, never rejected.
+pub const SESSION_READ_MAX_BYTES: usize = 12 * SESSION_CHUNK_MAX;
+
+/// A payload chunk exceeds its per-chunk cap ([`SESSION_CHUNK_MAX`]).
+/// Returned by the encoders (sender side) and by the `validate()` helpers
+/// on decoded messages (receiver side — a peer not running our encoder is
+/// bounded only by the frame cap, so hosts must validate before acting).
+#[derive(Debug, Error, PartialEq, Eq, Clone, Copy)]
+#[error("payload chunk ({len} bytes) exceeds chunk max {max}")]
+pub struct ChunkTooLarge {
+    /// Chunk length.
+    pub len: usize,
+    /// The applicable chunk cap.
+    pub max: usize,
+}
 
 /// Errors from encoding a message into a frame.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -76,27 +104,54 @@ pub enum WireEncodeError {
     },
     /// A payload chunk inside the message exceeds its per-chunk cap
     /// ([`SESSION_CHUNK_MAX`]), even though the whole frame would fit.
-    #[error("payload chunk ({len} bytes) exceeds chunk max {max}")]
-    ChunkTooLarge {
-        /// Chunk length.
-        len: usize,
-        /// The applicable chunk cap.
-        max: usize,
-    },
+    #[error(transparent)]
+    ChunkTooLarge(#[from] ChunkTooLarge),
     /// Frame-layer failure (unreachable in practice: `TooLarge` triggers
     /// first, but kept so callers see one error type).
     #[error(transparent)]
     Frame(#[from] FrameError),
 }
 
-fn check_chunk(len: usize) -> Result<(), WireEncodeError> {
+fn check_chunk(len: usize) -> Result<(), ChunkTooLarge> {
     if len > SESSION_CHUNK_MAX {
-        return Err(WireEncodeError::ChunkTooLarge {
+        return Err(ChunkTooLarge {
             len,
             max: SESSION_CHUNK_MAX,
         });
     }
     Ok(())
+}
+
+impl SessionWrite {
+    /// Receiver-side chunk check: `data` must not exceed
+    /// [`SESSION_CHUNK_MAX`]. Hosts call this before touching the session
+    /// (answer `INVALID_ARGUMENT` on error).
+    pub fn validate(&self) -> Result<(), ChunkTooLarge> {
+        check_chunk(self.data.len())
+    }
+}
+
+impl SessionReadResult {
+    /// Receiver-side chunk check over every `Output` event.
+    pub fn validate(&self) -> Result<(), ChunkTooLarge> {
+        self.events.iter().try_for_each(|e| match &e.body {
+            Some(session_read_event::Body::Output(o)) => check_chunk(o.data.len()),
+            _ => Ok(()),
+        })
+    }
+}
+
+impl SessionFrame {
+    /// Receiver-side chunk check: an `Output`/`Input` chunk must not
+    /// exceed [`SESSION_CHUNK_MAX`]. The `SESSION_DATA` pump calls this on
+    /// every decoded frame before feeding the PTY / replay ring.
+    pub fn validate(&self) -> Result<(), ChunkTooLarge> {
+        match &self.body {
+            Some(session_frame::Body::Output(o)) => check_chunk(o.data.len()),
+            Some(session_frame::Body::Input(i)) => check_chunk(i.data.len()),
+            _ => Ok(()),
+        }
+    }
 }
 
 /// Encode `msg` and wrap it in a length-prefixed frame, enforcing `max`
@@ -119,11 +174,16 @@ pub fn decode_msg<M: Message + Default>(payload: &[u8]) -> Result<M, prost::Deco
 }
 
 /// Encode a [`ControlMessage`] as one control-stream frame. A
-/// [`SessionWrite`] whose `data` exceeds [`SESSION_CHUNK_MAX`] is refused
-/// with [`WireEncodeError::ChunkTooLarge`].
+/// [`SessionWrite`] whose `data` exceeds [`SESSION_CHUNK_MAX`], or a
+/// [`SessionReadResult`] carrying an over-cap `Output`, is refused with
+/// [`WireEncodeError::ChunkTooLarge`].
 pub fn encode_control(msg: &ControlMessage) -> Result<Vec<u8>, WireEncodeError> {
-    if let Some(control_message::Body::SessionWrite(w)) = &msg.body {
-        check_chunk(w.data.len())?;
+    match &msg.body {
+        Some(control_message::Body::SessionWrite(w)) => w.validate()?,
+        Some(control_message::Body::Response(Response {
+            body: Some(response::Body::SessionReadResult(r)),
+        })) => r.validate()?,
+        _ => {}
     }
     encode_framed(msg, CONTROL_FRAME_MAX)
 }
@@ -137,11 +197,7 @@ pub fn encode_exec_frame(msg: &ExecFrame) -> Result<Vec<u8>, WireEncodeError> {
 /// [`Input`] chunk larger than [`SESSION_CHUNK_MAX`] is refused with
 /// [`WireEncodeError::ChunkTooLarge`] before framing.
 pub fn encode_session_frame(msg: &SessionFrame) -> Result<Vec<u8>, WireEncodeError> {
-    match &msg.body {
-        Some(session_frame::Body::Output(o)) => check_chunk(o.data.len())?,
-        Some(session_frame::Body::Input(i)) => check_chunk(i.data.len())?,
-        _ => {}
-    }
+    msg.validate()?;
     encode_framed(msg, DATA_FRAME_MAX)
 }
 
@@ -318,10 +374,21 @@ impl SessionFrame {
 }
 
 impl SessionAttach {
-    /// The requested attach mode, or `None` if this build does not know it
-    /// (treat as a malformed request, never as RW).
+    /// The requested attach mode. `None` when the field is unset
+    /// (`ATTACH_MODE_UNSPECIFIED`, the proto3 default) or unknown to this
+    /// build — treat both as `INVALID_ARGUMENT`, never as RW: the writer
+    /// lease is only ever requested by an explicit `ATTACH_MODE_RW`.
     pub fn attach_mode(&self) -> Option<AttachMode> {
-        AttachMode::try_from(self.mode).ok()
+        match AttachMode::try_from(self.mode) {
+            Ok(AttachMode::Unspecified) | Err(_) => None,
+            Ok(mode) => Some(mode),
+        }
+    }
+
+    /// `true` only for an explicit `ATTACH_MODE_RW` — the single value that
+    /// asks for the writer lease.
+    pub fn wants_write(&self) -> bool {
+        self.attach_mode() == Some(AttachMode::Rw)
     }
 }
 
@@ -480,7 +547,9 @@ mod tests {
             arb_session_id(),
             arb_bytes(32),
             any::<u64>(),
-            0i32..=2,
+            // Any i32: prost keeps unknown enum values in the raw field, so
+            // out-of-range modes must round-trip too.
+            any::<i32>(),
             any::<bool>(),
         )
             .prop_map(
@@ -603,8 +672,12 @@ mod tests {
                 response::Body::SessionListResult(SessionListResult { sessions })
             }),
             arb_session_info().prop_map(response::Body::SessionInfo),
-            Just(response::Body::SessionWritten(SessionWritten {})),
-            Just(response::Body::SessionResized(SessionResized {})),
+            any::<u64>().prop_map(|bytes_written| {
+                response::Body::SessionWritten(SessionWritten { bytes_written })
+            }),
+            (any::<u32>(), any::<u32>()).prop_map(|(cols, rows)| response::Body::SessionResized(
+                SessionResized { cols, rows }
+            )),
             any::<u64>()
                 .prop_map(|final_seq| response::Body::SessionClosed(SessionClosed { final_seq })),
             arb_error().prop_map(response::Body::Error),
@@ -636,7 +709,7 @@ mod tests {
                     session_id,
                     signal
                 })),
-            (arb_session_id(), any::<u64>(), any::<u32>(), any::<u64>()).prop_map(
+            (arb_session_id(), any::<u64>(), any::<u64>(), any::<u64>()).prop_map(
                 |(session_id, after, max_bytes, wait_ms)| {
                     Body::SessionRead(SessionRead {
                         session_id,
@@ -738,16 +811,6 @@ mod tests {
             // in-cap chunks.
             let via_helper = encode_session_frame(&m).unwrap();
             prop_assert_eq!(via_helper, encode_framed(&m, DATA_FRAME_MAX).unwrap());
-        }
-
-        /// Every session message reachable from the control stream
-        /// (session_* requests, every Response body, SessionEvent) is a
-        /// `control_message::Body`; `arb_control_body` enumerates them all,
-        /// so this pins `decode(encode(m)) == m` for each one.
-        #[test]
-        fn session_control_bodies_roundtrip(body in arb_control_body(), id in any::<u64>()) {
-            let m = ControlMessage::new(id, body);
-            roundtrip_via_frame(&m, CONTROL_FRAME_MAX);
         }
 
         /// Every strict prefix of a framed encoding is "incomplete" at the
@@ -852,14 +915,105 @@ mod tests {
             SessionFrame::output(0, vec![0u8; SESSION_CHUNK_MAX + 1]),
             SessionFrame::input(0, vec![0u8; SESSION_CHUNK_MAX + 1]),
         ] {
+            let expected = ChunkTooLarge {
+                len: SESSION_CHUNK_MAX + 1,
+                max: SESSION_CHUNK_MAX,
+            };
             assert_eq!(
                 encode_session_frame(&frame),
-                Err(WireEncodeError::ChunkTooLarge {
-                    len: SESSION_CHUNK_MAX + 1,
-                    max: SESSION_CHUNK_MAX
-                })
+                Err(WireEncodeError::ChunkTooLarge(expected))
             );
+            // The receiver-side check reports the same violation on a
+            // frame that arrived without passing through our encoder.
+            assert_eq!(frame.validate(), Err(expected));
         }
+    }
+
+    #[test]
+    fn decoded_over_cap_chunks_are_rejected_by_validate() {
+        // A peer that bypasses our encoder can put up to DATA_FRAME_MAX /
+        // CONTROL_FRAME_MAX in a chunk; `validate()` is what bounds it.
+        let frame = SessionFrame::output(0, vec![0u8; SESSION_CHUNK_MAX + 1]);
+        let raw = encode_framed(&frame, DATA_FRAME_MAX).unwrap();
+        let mut dec = FrameDecoder::new(DATA_FRAME_MAX);
+        dec.push(&raw);
+        let payload = dec.next_frame().unwrap().unwrap();
+        let back: SessionFrame = decode_msg(&payload).unwrap();
+        assert!(back.validate().is_err());
+
+        let write = SessionWrite {
+            session_id: "01K0SESSION".into(),
+            data: vec![0u8; SESSION_CHUNK_MAX + 1],
+        };
+        let raw = encode_framed(&write, CONTROL_FRAME_MAX).unwrap();
+        let mut dec = FrameDecoder::new(CONTROL_FRAME_MAX);
+        dec.push(&raw);
+        let payload = dec.next_frame().unwrap().unwrap();
+        let back: SessionWrite = decode_msg(&payload).unwrap();
+        assert!(back.validate().is_err());
+        assert!(
+            SessionWrite {
+                data: vec![0u8; SESSION_CHUNK_MAX],
+                ..write
+            }
+            .validate()
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn session_read_result_over_cap_output_is_rejected_at_encode() {
+        let m = ControlMessage::response(
+            1,
+            response::Body::SessionReadResult(SessionReadResult {
+                events: vec![SessionReadEvent::from_body(
+                    session_read_event::Body::Output(Output {
+                        sequence: 0,
+                        data: vec![0u8; SESSION_CHUNK_MAX + 1],
+                    }),
+                )],
+            }),
+        );
+        assert!(matches!(
+            encode_control(&m),
+            Err(WireEncodeError::ChunkTooLarge(_))
+        ));
+    }
+
+    #[test]
+    fn full_limit_session_read_result_fits_one_control_frame() {
+        // SESSION_READ_MAX_BYTES of Output payload, split into max-size
+        // chunks, plus interleaved control entries, must encode under
+        // CONTROL_FRAME_MAX — otherwise a legal `limit_bytes` could make the
+        // host unable to form a reply.
+        const { assert!(SESSION_READ_MAX_BYTES.is_multiple_of(SESSION_CHUNK_MAX)) };
+        let mut events = Vec::new();
+        for i in 0..(SESSION_READ_MAX_BYTES / SESSION_CHUNK_MAX) {
+            events.push(SessionReadEvent::from_body(
+                session_read_event::Body::Output(Output {
+                    sequence: u64::MAX - i as u64,
+                    data: vec![0xffu8; SESSION_CHUNK_MAX],
+                }),
+            ));
+            events.push(SessionReadEvent::from_body(
+                session_read_event::Body::WriterChanged(WriterChanged {
+                    new_writer: Some("device:".to_string() + &"x".repeat(200)),
+                    seq: u64::MAX,
+                }),
+            ));
+        }
+        events.push(SessionReadEvent::from_body(session_read_event::Body::Exit(
+            Exit {
+                final_seq: u64::MAX,
+                exit_code: i32::MIN,
+                signal: Some("SIGKILL".into()),
+            },
+        )));
+        let m = ControlMessage::response(
+            u64::MAX,
+            response::Body::SessionReadResult(SessionReadResult { events }),
+        );
+        assert!(encode_control(&m).is_ok());
     }
 
     #[test]
@@ -887,17 +1041,33 @@ mod tests {
     }
 
     #[test]
-    fn attach_mode_unknown_is_none_not_rw() {
+    fn attach_mode_unknown_or_unset_is_none_not_rw() {
+        // Unknown value.
         let a = SessionAttach {
             mode: 42,
             ..Default::default()
         };
         assert_eq!(a.attach_mode(), None);
+        assert!(!a.wants_write());
+        // Unset field (proto3 default 0 = ATTACH_MODE_UNSPECIFIED): a client
+        // that forgets `mode` must not be granted the writer lease.
+        let a = SessionAttach::default();
+        assert_eq!(a.mode, 0);
+        assert_eq!(a.attach_mode(), None);
+        assert!(!a.wants_write());
+        // Only an explicit RW asks for the lease.
         let a = SessionAttach {
             mode: AttachMode::Rw as i32,
             ..Default::default()
         };
         assert_eq!(a.attach_mode(), Some(AttachMode::Rw));
+        assert!(a.wants_write());
+        let a = SessionAttach {
+            mode: AttachMode::Ro as i32,
+            ..Default::default()
+        };
+        assert_eq!(a.attach_mode(), Some(AttachMode::Ro));
+        assert!(!a.wants_write());
     }
 
     #[test]
