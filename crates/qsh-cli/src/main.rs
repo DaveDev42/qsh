@@ -23,7 +23,7 @@ use tracing_subscriber::EnvFilter;
 use cli::{
     Cli, Command, ExecArgs, SessionCmd, SessionReadArgs, SessionWriteArgs, TrustAddArgs, TrustCmd,
 };
-use render::{human, json::Envelope};
+use render::{human, json, json::Envelope};
 
 /// QSH runtime failure exit code (`docs/CLI.md` §4): connection, auth,
 /// policy or any other `OpError`.
@@ -175,19 +175,19 @@ fn run_session(cli: &Cli, ops: &Ops, cmd: &SessionCmd) -> i32 {
     }
 }
 
-/// `qsh session read`: a single pull. The `--follow` loop is the streaming
-/// form (`docs/CLI.md` §6.4) and lands with the attach pump; until then the
-/// flag parses and is answered `UNSUPPORTED` without contacting the host.
+/// How long one `--follow` pull long-polls when `--wait` was not given.
+/// The host clamps it to `SESSION_READ_MAX_WAIT`; a follower that is not
+/// told otherwise should park, not spin.
+const FOLLOW_WAIT_MS: u64 = 30_000;
+
+/// `qsh session read`: one pull, or — with `--follow` — a loop of them
+/// (`docs/CLI.md` §6.4). Both forms go through the same
+/// [`Ops::session_reader`] cursor-pull primitive; `--wait` is exactly one
+/// `pull()` and `--follow` is that same call in a loop, so the two cannot
+/// drift apart.
 fn run_session_read(cli: &Cli, ops: &Ops, args: &SessionReadArgs) -> i32 {
     if args.follow {
-        return report_error(
-            cli,
-            SessionReadOp::COMMAND,
-            &OpError::new(
-                ErrorCode::Unsupported,
-                "session read --follow is not implemented yet; poll with --after/--wait",
-            ),
-        );
+        return run_session_follow(cli, ops, args);
     }
     let output = match ops.session_read(SessionReadReq {
         session_ref: args.session_ref.clone(),
@@ -209,6 +209,47 @@ fn run_session_read(cli: &Cli, ops: &Ops, args: &SessionReadArgs) -> i32 {
     } else {
         emit(human::print_session_read(&output))
     }
+}
+
+/// `qsh session read --follow`: pull, render, repeat until the session
+/// ends. Terminates on `session.exit` (exit `0`, without waiting for the
+/// TTL cleanup) or on `session.closed` — `docs/CLI.md` §6.4.
+///
+/// In either JSON mode this is the `--jsonl` streaming form: one bare
+/// `qsh.event/v1` event per stdout line, never an envelope (§6.4). A
+/// follower is a stream, so `--json`'s one-envelope-per-invocation shape
+/// does not apply to it; error reporting is unchanged, which is what keeps
+/// the exit-code/error-code matrix identical in both modes.
+fn run_session_follow(cli: &Cli, ops: &Ops, args: &SessionReadArgs) -> i32 {
+    let mut reader = match ops.session_reader(SessionReadReq {
+        session_ref: args.session_ref.clone(),
+        after_sequence: args.after,
+        wait_ms: Some(args.wait.unwrap_or(FOLLOW_WAIT_MS)),
+        limit_bytes: args.limit_bytes,
+        ctl_after: Some(args.ctl_after),
+    }) {
+        Ok(reader) => reader,
+        Err(err) => return report_error(cli, SessionReadOp::COMMAND, &err),
+    };
+    let code = loop {
+        let output = match reader.pull() {
+            Ok(output) => output,
+            Err(err) => break report_error(cli, SessionReadOp::COMMAND, &err),
+        };
+        let rendered = if cli.wants_json() {
+            output.data.events.iter().try_for_each(json::print_event)
+        } else {
+            human::print_session_read(&output)
+        };
+        if let Err(err) = rendered {
+            break emit(Err(err));
+        }
+        if reader.is_done() {
+            break 0;
+        }
+    };
+    reader.close();
+    code
 }
 
 /// `qsh session write`: `--data-b64` goes straight to `Ops`; `--stdin`

@@ -8,7 +8,6 @@ use std::sync::Arc;
 
 use qsh_core::acl::{Action, DenyAll};
 use qsh_core::client::{ClientError, Session};
-use qsh_core::server::RESET_CODE_NOT_IMPLEMENTED;
 use qsh_proto::ErrorCode;
 use qsh_proto::wire::{self, StreamHeader, session_read_event};
 use qsh_testkit::loopback::LoopbackHarness;
@@ -273,14 +272,14 @@ async fn sessions_survive_the_connection_and_leases_are_released() {
 }
 
 /// The redeemable-once `SESSION_DATA` ticket: valid → the host consumes it
-/// and resets with the not-implemented code (pump is Step 5); bogus → reset
-/// with the bad-header code, nothing touched.
+/// and runs the pump (the stream delivers real output); bogus → reset with
+/// the bad-header code, nothing touched.
 #[tokio::test(flavor = "multi_thread")]
-async fn session_data_ticket_is_consumed_and_stream_reset_until_the_pump_lands() {
+async fn session_data_ticket_is_consumed_exactly_once() {
     let h = LoopbackHarness::start().await;
     let mut s = h.session().await;
     let opened = s.session_open(open_req(&["sh"])).await.unwrap();
-    let _pipe = h.pipes.take().unwrap();
+    let mut pipe = h.pipes.take().unwrap();
     assert_eq!(h.server.pending_tickets(), 1);
 
     let (send, recv) = s.connection().open_bi().await.unwrap();
@@ -289,13 +288,20 @@ async fn session_data_ticket_is_consumed_and_stream_reset_until_the_pump_lands()
         .send(&StreamHeader::session_data(opened.ticket.clone()))
         .await
         .unwrap();
-    let res = data.recv.recv::<wire::SessionFrame>().await;
-    match res {
-        Err(qsh_transport::StreamError::Read(qsh_transport::ReadError::Reset(code))) => {
-            assert_eq!(code.into_inner(), u64::from(RESET_CODE_NOT_IMPLEMENTED));
-        }
-        other => panic!("expected a reset, got {other:?}"),
-    }
+    pipe.write_output(b"live").await.unwrap();
+    let frame = data
+        .recv
+        .recv::<wire::SessionFrame>()
+        .await
+        .unwrap()
+        .expect("the pump answers a redeemed ticket");
+    assert_eq!(
+        frame.body,
+        Some(wire::session_frame::Body::Output(wire::Output {
+            sequence: 4,
+            data: b"live".to_vec(),
+        }))
+    );
     assert_eq!(h.server.pending_tickets(), 0, "ticket consumed");
 
     // Replaying the same ticket, or presenting it on an EXEC_DATA header,
@@ -370,13 +376,13 @@ async fn denied_peer_cannot_learn_whether_a_session_exists() {
     h.shutdown().await;
 }
 
-/// `session.attach` is UNSUPPORTED (Step 7) — after mode validation, and
-/// without touching the broker.
+/// `session.attach` for an unknown id is `SESSION_NOT_FOUND` — after mode
+/// validation and after the ACL choke point, with nothing created.
 #[tokio::test(flavor = "multi_thread")]
-async fn attach_is_unsupported_and_reserved_ops_create_nothing() {
+async fn attach_to_an_unknown_session_creates_nothing() {
     let h = LoopbackHarness::start().await;
-    // Drive the raw control stream: SessionAttach has no typed client
-    // wrapper yet (Step 7).
+    // Drive the raw control stream so the wire shape itself is under test,
+    // not the typed client wrapper.
     let dialed = h.dial().await;
     let (send, recv) = dialed.connection.open_bi().await.unwrap();
     let mut ctl = FramedStream::control(send, recv);
@@ -425,11 +431,11 @@ async fn attach_is_unsupported_and_reserved_ops_create_nothing() {
     match reply.body {
         Some(wire::control_message::Body::Response(wire::Response {
             body: Some(wire::response::Body::Error(e)),
-        })) => assert_eq!(e.error_code(), ErrorCode::Unsupported),
-        other => panic!("expected UNSUPPORTED, got {other:?}"),
+        })) => assert_eq!(e.error_code(), ErrorCode::SessionNotFound),
+        other => panic!("expected SESSION_NOT_FOUND, got {other:?}"),
     }
     // The attempt went through the ACL choke point (`session.attach` on
-    // the id, audited) before the UNSUPPORTED answer; nothing was created.
+    // the id, audited) before the broker was consulted; nothing was created.
     let recs = h.audit.records();
     assert_eq!(recs.len(), 1, "{recs:?}");
     assert_eq!(recs[0].action, "session.attach");

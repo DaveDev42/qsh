@@ -53,15 +53,12 @@ const DEFERRED: &[(&str, &str)] = &[
     ),
     (
         "SESSION_CONFLICT",
-        "M2 Step 5/7: needs a concurrently held writer lease (attach)",
+        "M2 Step 7: needs two attaches racing for the writer lease",
     ),
     ("RESUME_GAP", "M2 sessions"),
     ("CANCELED", "M2 sessions"),
     ("RESOURCE_EXHAUSTED", "M2 backpressure"),
-    (
-        "UNSUPPORTED",
-        "M2 Step 5/7: `session read --follow` / attach",
-    ),
+    ("UNSUPPORTED", "M2 Step 7: attach with a resume token"),
     ("REMOTE_ERROR", "no deterministic producer in M1"),
     ("INTERNAL", "no deterministic producer in M1"),
 ];

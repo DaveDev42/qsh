@@ -9,10 +9,10 @@ use std::time::{Duration, Instant};
 
 use qsh_proto::ErrorCode;
 use qsh_proto::wire::{
-    self, ControlMessage, ExecFrame, ExecStart, ExecStarted, Hello, StreamHeader, control_message,
-    exec_frame, response,
+    self, ControlMessage, ExecFrame, ExecStart, ExecStarted, Hello, SessionFrame, StreamHeader,
+    control_message, exec_frame, response, session_frame,
 };
-use qsh_transport::{Connection, FramedStream, StreamError};
+use qsh_transport::{Connection, FramedRecv, FramedSend, FramedStream, StreamError};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
@@ -82,6 +82,8 @@ impl Session {
     pub async fn negotiate(conn: Connection, device_name: &str) -> Result<Self, ClientError> {
         let (send, recv) = conn.open_bi().await?;
         let mut ctl = FramedStream::control(send, recv);
+        // Top of the `docs/design/protocol.md` §12 band, same as the host's.
+        ctl.send.set_priority(wire::PRIORITY_CONTROL);
         ctl.send
             .send(&ControlMessage::new(
                 0,
@@ -235,6 +237,7 @@ impl Session {
         // Data stream: header first, then pump.
         let (send, recv) = self.conn.open_bi().await?;
         let mut data = FramedStream::data(send, recv);
+        data.send.set_priority(wire::PRIORITY_EXEC_DATA);
         data.send
             .send(&StreamHeader::exec_data(started_msg.ticket))
             .await?;
@@ -447,6 +450,63 @@ impl Session {
         }
     }
 
+    /// `session.attach` (stream op): authorize the attach, then open the
+    /// `SESSION_DATA` stream and redeem the ticket on it. The returned
+    /// [`Attached`] is the live stream; the control stream stays with this
+    /// [`Session`], so the caller drives both.
+    ///
+    /// Resume (presenting a `resume_token` on a *new* connection) lands
+    /// with PLAN M2 Step 7; until then `req.resume_token` must be empty —
+    /// the peer answers `UNSUPPORTED` if it is not.
+    pub async fn attach(&mut self, req: wire::SessionAttach) -> Result<Attached, ClientError> {
+        let attached = match self
+            .session_request(control_message::Body::SessionAttach(req))
+            .await?
+        {
+            response::Body::SessionAttached(a) => a,
+            other => return Err(unexpected("SessionAttach", &other)),
+        };
+        let (send, recv) = self.conn.open_bi().await?;
+        let mut data = FramedStream::data(send, recv);
+        data.send.set_priority(wire::PRIORITY_SESSION_DATA);
+        data.send
+            .send(&StreamHeader::session_data(attached.ticket.clone()))
+            .await?;
+        let (send, recv) = data.split();
+        Ok(Attached {
+            replay_from: attached.replay_from,
+            writer_lease: attached.writer_lease,
+            expires_at: attached.expires_at,
+            new_resume_token: attached.new_resume_token,
+            writer: AttachWriter { send, input_seq: 0 },
+            reader: AttachReader { recv },
+        })
+    }
+
+    /// Read the next unsolicited control message — the asynchronous
+    /// `SessionEvent`s an attached peer is owed (protocol.md §9). Pings are
+    /// answered on the way; correlated responses are skipped.
+    pub async fn next_event(&mut self) -> Result<Option<wire::SessionEvent>, ClientError> {
+        loop {
+            let Some(msg) = self.ctl.recv.recv::<ControlMessage>().await? else {
+                return Ok(None);
+            };
+            match msg.body {
+                Some(control_message::Body::SessionEvent(ev)) => return Ok(Some(ev)),
+                Some(control_message::Body::Ping(_)) => {
+                    self.ctl
+                        .send
+                        .send(&ControlMessage::new(
+                            msg.request_id,
+                            control_message::Body::Pong(wire::Pong {}),
+                        ))
+                        .await?;
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Finish the control stream and close the connection cleanly.
     pub fn close(mut self) {
         let _ = self.ctl.send.finish();
@@ -471,6 +531,170 @@ pub struct ExecResult {
     pub timed_out: bool,
     /// Wall-clock time from request to exit.
     pub duration: Duration,
+}
+
+/// A live `SESSION_DATA` stream (`docs/design/protocol.md` §9). Output,
+/// gaps, input acks and the final exit arrive as [`AttachEvent`]s; input
+/// and resizes go the other way.
+pub struct Attached {
+    /// Offset the host replays from (unless a `Gap` corrects it).
+    pub replay_from: u64,
+    /// Whether this attach holds the writer lease.
+    pub writer_lease: bool,
+    /// When the session's resume window ends (RFC 3339).
+    pub expires_at: String,
+    /// The token to store for a later resume — empty until PLAN M2 Step 7.
+    pub new_resume_token: Vec<u8>,
+    writer: AttachWriter,
+    reader: AttachReader,
+}
+
+/// One host → client event on an attach stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AttachEvent {
+    /// Session output ending at cumulative offset `sequence`.
+    Output {
+        /// Cumulative output offset after `data`.
+        sequence: u64,
+        /// The bytes.
+        data: Vec<u8>,
+    },
+    /// The requested offset was evicted; the stream resumes at
+    /// `available_from`.
+    Gap {
+        /// The offset that was asked for.
+        requested_after: u64,
+        /// Where the following output starts.
+        available_from: u64,
+    },
+    /// The host has applied every input byte up to `acked_input_seq`.
+    InputAck {
+        /// Cumulative input offset the host has applied.
+        acked_input_seq: u64,
+    },
+    /// The child exited; the last frame of the stream.
+    Exit {
+        /// Final cumulative output offset.
+        final_seq: u64,
+        /// Exit code (`-1` when signaled).
+        exit_code: i32,
+        /// Terminating signal name, if any.
+        signal: Option<String>,
+    },
+}
+
+impl Attached {
+    /// Read the next event. `Ok(None)` when the host finished the stream.
+    pub async fn next(&mut self) -> Result<Option<AttachEvent>, ClientError> {
+        self.reader.next().await
+    }
+
+    /// Send input, splitting at [`wire::SESSION_CHUNK_MAX`]. Returns the
+    /// cumulative input offset after this call — what a later
+    /// [`AttachEvent::InputAck`] is compared against.
+    pub async fn send_input(&mut self, data: &[u8]) -> Result<u64, ClientError> {
+        self.writer.send_input(data).await
+    }
+
+    /// Cumulative input offset sent so far.
+    pub fn input_seq(&self) -> u64 {
+        self.writer.input_seq()
+    }
+
+    /// Tell the host the terminal window changed.
+    pub async fn resize(&mut self, cols: u16, rows: u16) -> Result<(), ClientError> {
+        self.writer.resize(cols, rows).await
+    }
+
+    /// Split into halves so input and output can be driven concurrently
+    /// (what the M2 Step 6 TUI needs).
+    pub fn split(self) -> (AttachWriter, AttachReader) {
+        (self.writer, self.reader)
+    }
+
+    /// Finish our send half; the host drains what is left and exits.
+    pub fn finish(self) {
+        self.writer.finish();
+    }
+}
+
+/// Client → host half of an attach stream.
+pub struct AttachWriter {
+    send: FramedSend,
+    input_seq: u64,
+}
+
+impl AttachWriter {
+    /// See [`Attached::send_input`].
+    pub async fn send_input(&mut self, data: &[u8]) -> Result<u64, ClientError> {
+        for chunk in data.chunks(wire::SESSION_CHUNK_MAX) {
+            self.input_seq += chunk.len() as u64;
+            self.send
+                .send(&SessionFrame::input(self.input_seq, chunk.to_vec()))
+                .await?;
+        }
+        Ok(self.input_seq)
+    }
+
+    /// See [`Attached::resize`].
+    pub async fn resize(&mut self, cols: u16, rows: u16) -> Result<(), ClientError> {
+        self.send
+            .send(&SessionFrame::resize(u32::from(cols), u32::from(rows)))
+            .await?;
+        Ok(())
+    }
+
+    /// Cumulative input offset sent so far.
+    pub fn input_seq(&self) -> u64 {
+        self.input_seq
+    }
+
+    /// Finish our send half.
+    pub fn finish(mut self) {
+        let _ = self.send.finish();
+    }
+}
+
+/// Host → client half of an attach stream.
+pub struct AttachReader {
+    recv: FramedRecv,
+}
+
+impl AttachReader {
+    /// See [`Attached::next`].
+    pub async fn next(&mut self) -> Result<Option<AttachEvent>, ClientError> {
+        loop {
+            let Some(frame) = self.recv.recv::<SessionFrame>().await? else {
+                return Ok(None);
+            };
+            // Receiver-side chunk check (protocol.md §9): a host not
+            // running our encoder is bounded only by the frame cap.
+            frame
+                .validate()
+                .map_err(|e| ClientError::Protocol(format!("SessionFrame: {e}")))?;
+            return Ok(Some(match frame.body {
+                Some(session_frame::Body::Output(o)) => AttachEvent::Output {
+                    sequence: o.sequence,
+                    data: o.data,
+                },
+                Some(session_frame::Body::Gap(g)) => AttachEvent::Gap {
+                    requested_after: g.requested_after,
+                    available_from: g.available_from,
+                },
+                Some(session_frame::Body::InputAck(a)) => AttachEvent::InputAck {
+                    acked_input_seq: a.acked_input_seq,
+                },
+                Some(session_frame::Body::Exit(x)) => AttachEvent::Exit {
+                    final_seq: x.final_seq,
+                    exit_code: x.exit_code,
+                    signal: x.signal,
+                },
+                // Client → host frames coming back from a host are a slip;
+                // skip them rather than failing the stream.
+                Some(_) | None => continue,
+            }));
+        }
+    }
 }
 
 fn unexpected(request: &str, body: &response::Body) -> ClientError {
