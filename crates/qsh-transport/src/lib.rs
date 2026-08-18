@@ -33,7 +33,7 @@ pub use tls::{
 };
 
 // Re-export the certificate types callers need to build a `LocalIdentity`,
-// and quinn's connection error, so `qsh-core` never depends on rustls or
-// quinn directly.
-pub use quinn::{ConnectionError, ReadError, WriteError};
+// quinn's connection error, and the `Endpoint` a `Dialed` hands back, so
+// `qsh-core` never depends on rustls or quinn directly.
+pub use quinn::{ConnectionError, Endpoint, ReadError, WriteError};
 pub use rustls::pki_types::CertificateDer;

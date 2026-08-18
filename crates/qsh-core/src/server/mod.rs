@@ -50,6 +50,7 @@ use crate::broker::{
     SessionId, SessionSpec, Signal, TakeOutcome,
 };
 use crate::exec::{ExecSpec, run_exec};
+use crate::session_stream::SessionStream;
 
 /// How long a peer has to send its `Hello` (and open the control stream).
 pub const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
@@ -139,6 +140,17 @@ pub struct PendingExec {
     pub spec: ExecSpec,
 }
 
+/// An authorized `session.write` whose bytes have not reached the child
+/// yet: the ACL decision, the audit record and the writer lease are already
+/// done, only the parking half is left.
+#[derive(Debug)]
+pub struct PendingWrite {
+    request_id: u64,
+    id: SessionId,
+    conn: ConnectionId,
+    data: Vec<u8>,
+}
+
 /// What a ticket authorizes once a data stream redeems it.
 #[derive(Debug, Clone)]
 pub enum TicketPurpose {
@@ -148,6 +160,10 @@ pub enum TicketPurpose {
     Session {
         /// The session the stream attaches to.
         session_id: SessionId,
+        /// Cumulative output offset the stream replays from — the
+        /// `replay_from` already promised in the reply, so the ticket, not
+        /// the peer, decides where the pump starts.
+        replay_from: u64,
     },
 }
 
@@ -287,7 +303,7 @@ impl Server {
                 Some(self.handle_session_close(ctx, request_id, req).await)
             }
             Some(control_message::Body::SessionAttach(req)) => {
-                Some(self.handle_session_attach(ctx, request_id, req))
+                Some(self.handle_session_attach(ctx, request_id, req).await)
             }
             // A host never consumes SessionEvent (it is the producer);
             // an unsolicited one is dropped like a stray Pong.
@@ -532,6 +548,7 @@ impl Server {
             ctx.conn_id,
             TicketPurpose::Session {
                 session_id: session_id.clone(),
+                replay_from: 0,
             },
         );
         let expires_at = rfc3339_after(self.sessions.resume_ttl());
@@ -663,30 +680,44 @@ impl Server {
         )
     }
 
-    /// `session.write`: ACL `session.control` on the session id, then take
-    /// the writer lease (programmatic ⇒ `no_steal`: another principal's
-    /// live lease is `SESSION_CONFLICT`, architecture.md §3 rule b) and
-    /// write.
+    /// `session.write`: [`prepare_session_write`](Self::prepare_session_write)
+    /// then [`finish_session_write`](Self::finish_session_write). The
+    /// connection loop splits the two so the parking half never runs on the
+    /// control stream; `dispatch` keeps them together.
     async fn handle_session_write(
         &self,
         ctx: &ConnCtx,
         request_id: u64,
         req: &wire::SessionWrite,
     ) -> ControlMessage {
-        if let Err(reply) = self.require_session_capability(ctx, request_id) {
-            return *reply;
+        match self.prepare_session_write(ctx, request_id, req).await {
+            Ok(pending) => self.finish_session_write(pending).await,
+            Err(reply) => *reply,
         }
-        if let Err(reply) = Self::require_session_id(request_id, &req.session_id) {
-            return *reply;
-        }
+    }
+
+    /// The non-parking half of `session.write`: ACL `session.control` on
+    /// the session id, then take the writer lease (programmatic ⇒
+    /// `no_steal`: another principal's live lease is `SESSION_CONFLICT`,
+    /// architecture.md §3 rule b).
+    ///
+    /// Everything here is bounded — the session actor's loop never blocks
+    /// on the child — so this side is safe to run inline on the control
+    /// stream, which is what keeps two pipelined writes in arrival order
+    /// and keeps the lease from being taken after `purge_connection`.
+    /// `Err` is the finished reply; `Ok` is a write still owed to the PTY.
+    async fn prepare_session_write(
+        &self,
+        ctx: &ConnCtx,
+        request_id: u64,
+        req: &wire::SessionWrite,
+    ) -> Result<PendingWrite, Box<ControlMessage>> {
+        self.require_session_capability(ctx, request_id)?;
+        Self::require_session_id(request_id, &req.session_id)?;
         if let Err(err) = req.validate() {
-            return invalid_argument(request_id, err.to_string());
+            return Err(Box::new(invalid_argument(request_id, err.to_string())));
         }
-        if let Err(denied) =
-            self.authorize(ctx, request_id, Action::SessionControl, &req.session_id)
-        {
-            return *denied;
-        }
+        self.authorize(ctx, request_id, Action::SessionControl, &req.session_id)?;
         let id = SessionId(req.session_id.clone());
         let conn = ctx.connection_id();
         if req.data.is_empty() {
@@ -694,13 +725,13 @@ impl Server {
             // empty write is not a side-channel for displacing (or
             // flapping) the current writer. Existence is still checked
             // (the ACL decision above already covers disclosure).
-            return match self.sessions.get(&id) {
+            return Err(Box::new(match self.sessions.get(&id) {
                 Ok(_) => ControlMessage::response(
                     request_id,
                     response::Body::SessionWritten(wire::SessionWritten { bytes_written: 0 }),
                 ),
                 Err(err) => broker_error(request_id, err),
-            };
+            }));
         }
         match self
             .sessions
@@ -708,20 +739,39 @@ impl Server {
             .await
         {
             Ok(TakeOutcome::Conflict { .. }) => {
-                return ControlMessage::error(
+                return Err(Box::new(ControlMessage::error(
                     request_id,
                     wire::Error::new(
                         ErrorCode::SessionConflict,
                         "another principal holds the session's writer lease",
                         true,
                     ),
-                );
+                )));
             }
             Ok(_) => {}
-            Err(err) => return broker_error(request_id, err),
+            Err(err) => return Err(Box::new(broker_error(request_id, err))),
         }
-        let bytes_written = req.data.len() as u64;
-        match self.sessions.write(&id, conn, req.data.clone()).await {
+        Ok(PendingWrite {
+            request_id,
+            id,
+            conn,
+            data: req.data.clone(),
+        })
+    }
+
+    /// The parking half of `session.write`: hand the bytes to the session.
+    /// This can wait indefinitely — a child that stops draining its PTY
+    /// input buffer blocks its writer task — so the connection loop runs it
+    /// on a per-connection queue, never inline.
+    async fn finish_session_write(&self, pending: PendingWrite) -> ControlMessage {
+        let PendingWrite {
+            request_id,
+            id,
+            conn,
+            data,
+        } = pending;
+        let bytes_written = data.len() as u64;
+        match self.sessions.write(&id, conn, data).await {
             Ok(()) => ControlMessage::response(
                 request_id,
                 response::Body::SessionWritten(wire::SessionWritten { bytes_written }),
@@ -814,16 +864,22 @@ impl Server {
         }
     }
 
-    /// `session.attach` (stream op): resume tokens and the attach data
-    /// pump land with PLAN M2 Steps 5/7. Until then the host validates the
-    /// mode (an unset/unknown/RO mode is `INVALID_ARGUMENT`, never RW —
-    /// protocol.md §9), passes the ACL choke point (`session.attach` on
-    /// the id, audited like every other session op) and only then answers
-    /// `UNSUPPORTED` without consulting the broker, so nothing is created
-    /// and session existence is not disclosed. Step 7 inserts the
+    /// `session.attach` (stream op): validate the mode (an unset/unknown/RO
+    /// mode is `INVALID_ARGUMENT`, never RW — protocol.md §9), pass the ACL
+    /// choke point (`session.attach` on the id, audited like every other
+    /// session op) and only then consult the broker, take the writer lease
+    /// and issue the single-use `SESSION_DATA` ticket. Nothing exists
+    /// before the authorization succeeds and no unauthorized peer learns
+    /// whether the session is there.
+    ///
+    /// **Resume is not this.** A `resume_token` presented on a *new*
+    /// connection lands with PLAN M2 Step 7, which inserts the
     /// token → fingerprint checks *before* the ACL call (protocol.md
-    /// §10-2); the choke point itself is already in place.
-    fn handle_session_attach(
+    /// §10-2) and starts minting `new_resume_token`; until then this host
+    /// does not advertise `CAP_RESUME_V1`, refuses a presented token, and
+    /// attach only works for a session this same connection can already
+    /// authorize.
+    async fn handle_session_attach(
         &self,
         ctx: &ConnCtx,
         request_id: u64,
@@ -838,17 +894,79 @@ impl Server {
         if req.attach_mode() != Some(wire::AttachMode::Rw) {
             return invalid_argument(request_id, "attach mode must be RW");
         }
+        if !req.resume_token.is_empty() {
+            // Answered before the ACL call: a token is a claim about a
+            // *different* connection, and this host cannot evaluate it yet.
+            return ControlMessage::error(
+                request_id,
+                wire::Error::new(
+                    ErrorCode::Unsupported,
+                    "resume tokens are not implemented by this host yet",
+                    false,
+                ),
+            );
+        }
         if let Err(denied) = self.authorize(ctx, request_id, Action::SessionAttach, &req.session_id)
         {
             return *denied;
         }
-        ControlMessage::error(
+
+        // ---- Allowed: lease, then a single-use ticket. ----
+        let id = SessionId(req.session_id.clone());
+        let info = match self.sessions.get(&id) {
+            Ok(info) => info,
+            Err(err) => return broker_error(request_id, err),
+        };
+        let conn = ctx.connection_id();
+        // Interactive attach steals by default (architecture.md §3 rule b);
+        // `no_steal` makes a live foreign lease a `SESSION_CONFLICT`.
+        match self
+            .sessions
+            .take_lease(&id, ctx.principal.to_string(), conn, req.no_steal)
+            .await
+        {
+            Ok(TakeOutcome::Conflict { .. }) => {
+                return ControlMessage::error(
+                    request_id,
+                    wire::Error::new(
+                        ErrorCode::SessionConflict,
+                        "another principal holds the session's writer lease",
+                        true,
+                    ),
+                );
+            }
+            Ok(_) => {}
+            Err(err) => return broker_error(request_id, err),
+        }
+        // A cursor past the end of the stream is `INVALID_ARGUMENT` at the
+        // ring; clamp instead, so a client that over-reports simply gets
+        // everything from the current end.
+        let replay_from = req.last_output_seq.min(info.last_sequence);
+        let ticket = self.issue_ticket(
+            ctx.conn_id,
+            TicketPurpose::Session {
+                session_id: id.clone(),
+                replay_from,
+            },
+        );
+        let expires_at = rfc3339_after(self.sessions.resume_ttl());
+        tracing::info!(
+            principal = %ctx.principal,
+            peer = %ctx.peer_addr,
+            session_id = %id,
+            replay_from,
+            "session.attach authorized"
+        );
+        ControlMessage::response(
             request_id,
-            wire::Error::new(
-                ErrorCode::Unsupported,
-                "session.attach (resume) is not implemented by this host yet",
-                false,
-            ),
+            response::Body::SessionAttached(wire::SessionAttached {
+                ticket: ticket.to_vec(),
+                // Minted by PLAN M2 Step 7 together with `CAP_RESUME_V1`.
+                new_resume_token: Vec::new(),
+                replay_from,
+                writer_lease: true,
+                expires_at,
+            }),
         )
     }
 
@@ -972,6 +1090,9 @@ impl Server {
             .await
             .map_err(|_| ConnError::HelloTimeout)??;
         let mut ctl = FramedStream::control(send, recv);
+        // Top of the `docs/design/protocol.md` §12 band: a saturated
+        // session/exec stream can never delay a control message.
+        ctl.send.set_priority(wire::PRIORITY_CONTROL);
 
         let first = tokio::time::timeout(HELLO_TIMEOUT, ctl.recv.recv::<ControlMessage>())
             .await
@@ -1022,13 +1143,22 @@ impl Server {
         };
 
         // Control messages are handled inline, in arrival order, so the
-        // control stream keeps its ordering guarantee for mutating ops
-        // (two pipelined `SessionWrite`s reach the PTY in the order they
-        // were sent — protocol.md §9). The exceptions are the messages
-        // that may block (`is_long_poll`: the `SessionRead` long-poll and
-        // `SessionClose`'s escalation), which must not stall the stream:
-        // those run in tasks owned by `blocking` (bounded by `inflight`),
-        // whose replies funnel back through `reply_rx` to the single
+        // control stream keeps its ordering guarantee for mutating ops. The
+        // two exceptions never park this loop:
+        //
+        // - `is_long_poll` (the `SessionRead` long-poll and `SessionClose`'s
+        //   escalation) runs in tasks owned by `blocking` (bounded by
+        //   `inflight`);
+        // - `SessionWrite` is *split*: its ACL decision, audit record and
+        //   lease take run inline (bounded — the session actor never blocks
+        //   on the child), and only the handoff to the PTY, which parks for
+        //   as long as the child refuses to drain its input buffer, goes on
+        //   the per-connection `writes` queue. One queue, so two pipelined
+        //   writes still reach the child in arrival order (protocol.md §9),
+        //   and a wedged child costs at most `RESOURCE_EXHAUSTED` on further
+        //   writes instead of freezing every other op on the connection.
+        //
+        // All replies funnel back through `reply_rx` to the single
         // control-stream writer. When this function returns, `blocking` is
         // dropped and every parked task is aborted with it — nothing
         // outlives the connection, and `purge_connection` (which runs
@@ -1038,10 +1168,46 @@ impl Server {
         let inflight = Arc::new(tokio::sync::Semaphore::new(MAX_INFLIGHT_REQUESTS_PER_CONN));
         let mut blocking: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
 
+        let (writes_tx, mut writes_rx) =
+            tokio::sync::mpsc::channel::<PendingWrite>(MAX_INFLIGHT_REQUESTS_PER_CONN);
+        {
+            let server = self.clone();
+            let reply_tx = reply_tx.clone();
+            blocking.spawn(async move {
+                while let Some(pending) = writes_rx.recv().await {
+                    let reply = server.finish_session_write(pending).await;
+                    if reply_tx.send(reply).await.is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+
         loop {
             tokio::select! {
                 msg = ctl.recv.recv::<ControlMessage>() => match msg {
                     Ok(Some(msg)) => {
+                        if let Some(control_message::Body::SessionWrite(req)) = &msg.body {
+                            // Reserve the queue slot *before* authorizing,
+                            // so a full backlog never leaves a lease taken
+                            // for a write we then refuse.
+                            let Ok(slot) = writes_tx.try_reserve() else {
+                                ctl.send.send(&ControlMessage::error(
+                                    msg.request_id,
+                                    wire::Error::new(
+                                        ErrorCode::ResourceExhausted,
+                                        "session input backlog is full on this connection",
+                                        true,
+                                    ),
+                                )).await?;
+                                continue;
+                            };
+                            match self.prepare_session_write(&ctx, msg.request_id, req).await {
+                                Ok(pending) => slot.send(pending),
+                                Err(reply) => ctl.send.send(&reply).await?,
+                            }
+                            continue;
+                        }
                         if !is_long_poll(&msg) {
                             if let Some(reply) = self.dispatch(&ctx, &msg).await {
                                 ctl.send.send(&reply).await?;
@@ -1084,8 +1250,18 @@ impl Server {
                     Ok((send, recv)) => {
                         let server = self.clone();
                         let ctx = ctx.clone();
-                        tokio::spawn(async move {
-                            server.handle_data_stream(ctx, FramedStream::data(send, recv)).await;
+                        let conn = conn.clone();
+                        let events = reply_tx.clone();
+                        // Owned by `blocking`, so a data stream — and the
+                        // attach token that suspends its session's resume
+                        // TTL — can never outlive the connection.
+                        blocking.spawn(async move {
+                            server.handle_data_stream(
+                                ctx,
+                                FramedStream::data(send, recv),
+                                conn,
+                                events,
+                            ).await;
                         });
                     }
                     Err(_) => return Ok(()),
@@ -1097,7 +1273,13 @@ impl Server {
     /// Admit a peer-opened data stream: read the header, redeem the ticket
     /// for that stream kind, run the exec. Anything else resets the stream
     /// without touching any resource.
-    async fn handle_data_stream(&self, ctx: ConnCtx, mut stream: FramedStream) {
+    async fn handle_data_stream(
+        &self,
+        ctx: ConnCtx,
+        mut stream: FramedStream,
+        conn: Connection,
+        events: tokio::sync::mpsc::Sender<ControlMessage>,
+    ) {
         let header =
             match tokio::time::timeout(HEADER_TIMEOUT, stream.recv.recv::<StreamHeader>()).await {
                 Ok(Ok(Some(h))) => h,
@@ -1125,6 +1307,7 @@ impl Server {
         match ticket.purpose {
             TicketPurpose::Exec(pending) => {
                 let exec_id = pending.exec_id.clone();
+                stream.send.set_priority(wire::PRIORITY_EXEC_DATA);
                 match run_exec(pending.spec, stream.send, stream.recv).await {
                     Ok(outcome) => tracing::info!(
                         principal = %ctx.principal,
@@ -1148,17 +1331,53 @@ impl Server {
                     }
                 }
             }
-            // The `SESSION_DATA` pump lands with PLAN M2 Step 5. The ticket
-            // was valid and is now consumed; the stream is reset cleanly so
-            // the peer sees a definite failure rather than a hang.
-            TicketPurpose::Session { session_id } => {
-                tracing::debug!(
-                    principal = %ctx.principal,
-                    %session_id,
-                    "SESSION_DATA stream not implemented yet; resetting"
-                );
-                stream.send.reset(RESET_CODE_NOT_IMPLEMENTED);
-                stream.recv.stop(RESET_CODE_NOT_IMPLEMENTED);
+            TicketPurpose::Session {
+                session_id,
+                replay_from,
+            } => {
+                // Opening the session's data stream *is* the attach, and an
+                // attach is RW (protocol.md §9), so it holds the writer
+                // lease. `session.attach` already took it (honouring
+                // `no_steal`); a ticket issued by `session.open` gets it
+                // here — when the stream actually arrives, so `qsh session
+                // open` on its own still takes nothing. Steal-by-default is
+                // the interactive rule (architecture.md §3 rule b); a
+                // failure is left to surface on the pump's first write.
+                let _ = self
+                    .sessions
+                    .take_lease(
+                        &session_id,
+                        ctx.principal.to_string(),
+                        ctx.connection_id(),
+                        false,
+                    )
+                    .await;
+                let pump = SessionStream {
+                    sessions: Arc::clone(&self.sessions),
+                    session_id: session_id.clone(),
+                    conn: ctx.connection_id(),
+                    cursor: Cursor::from_offset(replay_from),
+                    events: Some(events),
+                };
+                match pump.run(stream, &conn).await {
+                    Ok(()) => tracing::info!(
+                        principal = %ctx.principal,
+                        %session_id,
+                        "session data stream finished"
+                    ),
+                    Err(err) if err.is_peer_gone() => tracing::info!(
+                        principal = %ctx.principal,
+                        %session_id,
+                        %err,
+                        "session data stream ended: peer went away"
+                    ),
+                    Err(err) => tracing::warn!(
+                        principal = %ctx.principal,
+                        %session_id,
+                        %err,
+                        "session data stream failed"
+                    ),
+                }
             }
         }
     }
@@ -2007,7 +2226,7 @@ mod tests {
             .expect("session ticket");
         assert!(matches!(
             ticket.purpose,
-            TicketPurpose::Session { session_id } if session_id.0 == opened.session_id
+            TicketPurpose::Session { session_id, .. } if session_id.0 == opened.session_id
         ));
         assert!(
             rig.server
@@ -2412,37 +2631,84 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn attach_is_unsupported_until_resume_lands_and_creates_nothing() {
+    async fn attach_issues_a_ticket_and_a_resume_token_is_still_unsupported() {
         let rig = allow_rig();
         let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
         let (id, _t, _pipe) = open_session(&rig, &ctx).await;
         rig.audit.clear();
-        for sid in [id.as_str(), "01K0NOSUCHSESSION"] {
-            let reply = rig
-                .server
-                .dispatch(
-                    &ctx,
-                    &ControlMessage::new(
-                        1,
-                        control_message::Body::SessionAttach(wire::SessionAttach {
-                            session_id: sid.into(),
-                            mode: wire::AttachMode::Rw as i32,
-                            ..Default::default()
-                        }),
-                    ),
-                )
-                .await
-                .unwrap();
-            assert_eq!(error_code(&reply), Some(ErrorCode::Unsupported), "{sid}");
-        }
-        // Both attempts passed the choke point (`session.attach` on the id)
-        // and were audited before the UNSUPPORTED answer; nothing created.
+
+        let attach = |sid: String, token: Vec<u8>| wire::SessionAttach {
+            session_id: sid,
+            resume_token: token,
+            mode: wire::AttachMode::Rw as i32,
+            ..Default::default()
+        };
+        let reply = rig
+            .server
+            .dispatch(
+                &ctx,
+                &ControlMessage::new(
+                    1,
+                    control_message::Body::SessionAttach(attach(id.clone(), Vec::new())),
+                ),
+            )
+            .await
+            .unwrap();
+        let response::Body::SessionAttached(a) = response_body(&reply) else {
+            panic!("expected SessionAttached, got {reply:?}");
+        };
+        assert_eq!(a.ticket.len(), TICKET_LEN);
+        assert_eq!(a.replay_from, 0);
+        assert!(a.writer_lease);
+        assert!(
+            a.new_resume_token.is_empty(),
+            "no resume token before Step 7"
+        );
+        assert_eq!(
+            rig.server.pending_tickets(),
+            2,
+            "the open's ticket plus this one"
+        );
+
+        // An unknown id is SESSION_NOT_FOUND (existence disclosure only
+        // *after* the ACL decision, same as session.get/read/write), and a
+        // presented resume token is still UNSUPPORTED.
+        let reply = rig
+            .server
+            .dispatch(
+                &ctx,
+                &ControlMessage::new(
+                    2,
+                    control_message::Body::SessionAttach(attach(
+                        "01K0NOSUCHSESSION".into(),
+                        Vec::new(),
+                    )),
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(error_code(&reply), Some(ErrorCode::SessionNotFound));
+        let reply = rig
+            .server
+            .dispatch(
+                &ctx,
+                &ControlMessage::new(
+                    3,
+                    control_message::Body::SessionAttach(attach(id.clone(), vec![7u8; 32])),
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(error_code(&reply), Some(ErrorCode::Unsupported));
+
+        // Every attempt that reached the broker passed the choke point
+        // (`session.attach` on the id) and was audited; the token attempt is
+        // refused before the ACL call, so it is not a decision.
         let recs = rig.audit.records();
         assert_eq!(recs.len(), 2, "{recs:?}");
         assert!(recs.iter().all(|r| r.action == "session.attach"));
         assert_eq!(recs[0].resource, id);
         assert_eq!(recs[1].resource, "01K0NOSUCHSESSION");
-        assert_eq!(rig.server.pending_tickets(), 1, "only the open's ticket");
 
         // Denied peers are audited too, and get the same non-distinguishing
         // PERMISSION_DENIED for a real and a fabricated id.
