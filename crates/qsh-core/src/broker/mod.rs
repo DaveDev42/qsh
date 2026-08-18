@@ -31,7 +31,7 @@ pub mod signal;
 use std::collections::HashMap;
 use std::io;
 use std::sync::{Arc, Mutex, Weak};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -48,9 +48,9 @@ pub use ring::{
     CloseReason, ControlEvent, Cursor, ReadError, ReadOut, ReplayEvent, ReplayRing, ReplayStore,
 };
 pub use session::{
-    AttachGuard, AttachToken, InputStreamId, PipeHandle, PipeSource, SessionActor, SessionConfig,
-    SessionHandle, SessionInfo, SessionSource, SessionSpec, SessionState, SourceControl,
-    SourceExit, SpawnedSource, WriteError,
+    AttachGuard, AttachToken, FIRST_INPUT_STREAM, InputStreamId, PipeHandle, PipeSource,
+    SessionActor, SessionConfig, SessionHandle, SessionInfo, SessionSource, SessionSpec,
+    SessionState, SourceControl, SourceExit, SpawnedSource, WriteError,
 };
 pub use signal::Signal;
 
@@ -506,8 +506,12 @@ impl Broker {
         let now = self.clock.now();
         let ttl = self.config.resume_ttl;
         // Decide under the registry lock, then act without holding it.
+        let mut deadlines: HashMap<SessionId, Instant> = HashMap::new();
         let (doomed, expired): (Vec<(SessionId, SessionHandle, CloseReason)>, Vec<SessionId>) = {
             let registry = self.lock();
+            for (id, handle) in registry.iter() {
+                deadlines.insert(id.clone(), handle.resume_deadline(now, ttl));
+            }
             let doomed = registry
                 .iter()
                 .filter_map(|(id, handle)| {
@@ -533,9 +537,12 @@ impl Broker {
                 registry.remove(&id);
             }
         }
-        // Credentials whose TTL lapsed on their own (nothing closed the
-        // session, e.g. the host restarted the reaper before a reattach).
-        self.resume.purge_expired();
+        // Re-anchor every live session's credential to that session's own
+        // deadline, and drop the credentials whose session is gone and
+        // whose TTL lapsed on its own. Without the re-anchoring a session
+        // attached for longer than `resume_ttl` would keep running with an
+        // expired credential and be orphaned by the next disconnect.
+        self.resume.sync_expiry(&deadlines);
         // Close concurrently: each close may take up to three grace periods
         // of escalation, and one stubborn child must not delay the rest.
         // `close` is idempotent and joins a concurrent close, so a race with
@@ -645,12 +652,14 @@ pub trait SessionBackend: Send + Sync {
         input_seq: u64,
     ) -> BoxFuture<'_, Result<u64, BrokerError>>;
 
-    /// The session's current input stream and applied offset — what a
-    /// **resumed** attach continues from.
-    fn input_cursor(&self, id: &SessionId) -> Result<(InputStreamId, u64), BrokerError>;
-
-    /// Mint a fresh input stream id for an attach that is not a resume.
-    fn new_input_stream(&self, id: &SessionId) -> Result<InputStreamId, BrokerError>;
+    /// Mint this attach's input axis, forked from `from` (the axis its
+    /// resume credential names) and seeded with that axis's applied
+    /// offset. `None` starts a client with no history at zero.
+    fn fork_input_stream(
+        &self,
+        id: &SessionId,
+        from: Option<InputStreamId>,
+    ) -> Result<(InputStreamId, u64), BrokerError>;
 
     /// Apply a window-size change.
     fn resize(
@@ -659,6 +668,15 @@ pub trait SessionBackend: Send + Sync {
         cols: u16,
         rows: u16,
     ) -> BoxFuture<'_, Result<(), BrokerError>>;
+
+    /// Whether a `no_steal` take would conflict right now: another
+    /// principal holds a live lease.
+    ///
+    /// A read-only probe, so a decision that is not final yet (an attach
+    /// whose credential rotation can still lose a race) can answer
+    /// `SESSION_CONFLICT` without moving the lease. The binding take stays
+    /// where the stream is actually opened.
+    fn lease_conflict(&self, id: &SessionId, principal: &str) -> bool;
 
     /// Try to take the writer lease.
     fn take_lease(
@@ -696,22 +714,26 @@ pub trait SessionBackend: Send + Sync {
 
     /// Check a presented credential without consuming it. This is the
     /// *first* gate of a reattach (protocol.md §10-2): it runs before the
-    /// ACL call, and its single failure mode is non-distinguishing.
+    /// ACL call, and its single failure mode is non-distinguishing. On
+    /// success it answers with the input axis the credential's lineage
+    /// last used, which the redemption forks from.
     fn verify_resume(
         &self,
         id: &SessionId,
         presented: &[u8],
         peer: PeerFingerprint,
-    ) -> Result<(), ResumeDenied>;
+    ) -> Result<InputStreamId, ResumeDenied>;
 
     /// Honour a verified redemption: invalidate the presented credential
-    /// and mint its successor. Called **only** once the token check, the
-    /// identity check and the ACL check have all passed.
+    /// and mint its successor, recording `input_stream` as the lineage's
+    /// axis. Called **only** once the token check, the identity check and
+    /// the ACL check have all passed.
     fn rotate_resume(
         &self,
         id: &SessionId,
         presented: &[u8],
         peer: PeerFingerprint,
+        input_stream: InputStreamId,
     ) -> Result<ResumeToken, ResumeDenied>;
 }
 
@@ -779,12 +801,12 @@ impl SessionBackend for Broker {
         })
     }
 
-    fn input_cursor(&self, id: &SessionId) -> Result<(InputStreamId, u64), BrokerError> {
-        Ok(Broker::get(self, id)?.input_cursor())
-    }
-
-    fn new_input_stream(&self, id: &SessionId) -> Result<InputStreamId, BrokerError> {
-        Ok(Broker::get(self, id)?.new_input_stream())
+    fn fork_input_stream(
+        &self,
+        id: &SessionId,
+        from: Option<InputStreamId>,
+    ) -> Result<(InputStreamId, u64), BrokerError> {
+        Ok(Broker::get(self, id)?.fork_input_stream(from))
     }
 
     fn resize(
@@ -795,6 +817,10 @@ impl SessionBackend for Broker {
     ) -> BoxFuture<'_, Result<(), BrokerError>> {
         let handle = Broker::get(self, id);
         Box::pin(async move { handle?.resize(cols, rows).await.map_err(map_write_error) })
+    }
+
+    fn lease_conflict(&self, id: &SessionId, principal: &str) -> bool {
+        Broker::get(self, id).is_ok_and(|h| h.lease_conflict(principal))
     }
 
     fn take_lease(
@@ -840,7 +866,7 @@ impl SessionBackend for Broker {
         id: &SessionId,
         presented: &[u8],
         peer: PeerFingerprint,
-    ) -> Result<(), ResumeDenied> {
+    ) -> Result<InputStreamId, ResumeDenied> {
         self.resume.verify(id, presented, peer)
     }
 
@@ -849,9 +875,10 @@ impl SessionBackend for Broker {
         id: &SessionId,
         presented: &[u8],
         peer: PeerFingerprint,
+        input_stream: InputStreamId,
     ) -> Result<ResumeToken, ResumeDenied> {
         self.resume
-            .rotate(id, presented, peer, self.config.resume_ttl)
+            .rotate(id, presented, peer, self.config.resume_ttl, input_stream)
     }
 }
 
@@ -1072,6 +1099,49 @@ mod tests {
         assert!(broker.reap_once().await.is_empty());
         clock.advance(ttl + Duration::from_secs(1));
         assert_eq!(within(broker.reap_once()).await.len(), 1);
+    }
+
+    /// A credential must live exactly as long as the session it resumes.
+    ///
+    /// The session's own TTL does not run while it is attached — that is
+    /// the product's premise, a shell worked in all day — so anchoring the
+    /// credential to its issue instant instead would leave a healthy
+    /// session with an expired credential and orphan it on the next
+    /// disconnect (PRD §13). The reaper re-anchors on every pass.
+    #[tokio::test]
+    async fn an_attached_session_keeps_its_credential_past_the_ttl() {
+        let ttl = Duration::from_secs(60);
+        let (broker, clock) = test_broker(ttl);
+        let (handle, _pipe) = open_pipe(&broker);
+        let id = sid(&handle);
+        let peer = PeerFingerprint::new([3u8; PEER_FINGERPRINT_LEN]);
+        let token = SessionBackend::issue_resume(&*broker, &id, peer);
+
+        {
+            let _guard = handle.attach_guard();
+            // Ten times the credential's nominal life, worked in the whole
+            // time. Nothing reaps, and the credential still verifies.
+            for _ in 0..10 {
+                clock.advance(ttl);
+                assert!(within(broker.reap_once()).await.is_empty());
+            }
+            assert!(
+                SessionBackend::verify_resume(&*broker, &id, token.expose(), peer).is_ok(),
+                "a session alive past its TTL must still be resumable"
+            );
+        }
+
+        // Detached, the credential lapses with the session, not before it.
+        clock.advance(ttl / 2);
+        assert!(within(broker.reap_once()).await.is_empty());
+        assert!(SessionBackend::verify_resume(&*broker, &id, token.expose(), peer).is_ok());
+        clock.advance(ttl);
+        assert_eq!(within(broker.reap_once()).await.len(), 1);
+        assert_eq!(
+            SessionBackend::verify_resume(&*broker, &id, token.expose(), peer),
+            Err(ResumeDenied),
+            "a reaped session's credential is forgotten with it"
+        );
     }
 
     #[tokio::test]

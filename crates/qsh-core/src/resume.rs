@@ -16,8 +16,19 @@
 //!   new one, never half of either.
 //! - **Cross-process serialisation.** A `qsh session read --follow`, a
 //!   `qsh mcp` and an interactive attach can all rotate a token at once, so
-//!   every read-modify-write holds an exclusive `flock` on a sidecar lock
-//!   file for its whole duration.
+//!   every read-modify-write holds an exclusive advisory lock on a sidecar
+//!   lock file for its whole duration ([`std::fs::File::lock`] — `flock(2)`
+//!   on unix, `LockFileEx` on Windows).
+//! - **Damage containment.** One unparseable record costs that record and
+//!   nothing else: the rest of the file is salvaged entry by entry, and a
+//!   file that does not parse at all is moved aside rather than silently
+//!   replaced with an empty one. A single bad byte must not orphan every
+//!   live session on the device.
+//!
+//! What it does **not** guarantee yet: on Windows the file is created with
+//! the inherited directory ACL, because there is no `mode(0o600)` there —
+//! the Windows client is P1 (`docs/ROADMAP.md` §3), and confidentiality of
+//! `resume.json` on that platform is part of it.
 //! - **Peer binding.** An entry records the `peer_spki_sha256` it was
 //!   issued to. [`ResumeStore::take_for`] hands a token out only if the
 //!   connected peer matches; a mismatch discards the entry and fails closed
@@ -28,7 +39,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -246,9 +257,11 @@ impl ResumeStore {
     /// The credential to present for `session_ref` on a connection to
     /// `peer` (its `sha256:…` fingerprint), or why there is none.
     ///
-    /// Expired entries are cleaned up on the way, and a peer mismatch
-    /// discards the entry: an alias re-pinned to another device must not
-    /// keep offering a credential that device cannot hold.
+    /// Expired entries are cleaned up on the way (ADR-0007 "정리": the host
+    /// answers a stale token with a non-distinguishing `AUTH_FAILED`, so
+    /// presenting one only buys a wasted round trip and an audit deny), and
+    /// a peer mismatch discards the entry: an alias re-pinned to another
+    /// device must not keep offering a credential that device cannot hold.
     pub fn take_for(&self, session_ref: &str, peer: &str) -> Result<StoredToken, NoToken> {
         let doc = self.load().unwrap_or_default();
         let Some(entry) = doc.sessions.get(session_ref) else {
@@ -258,7 +271,31 @@ impl ResumeStore {
             let _ = self.forget(session_ref);
             return Err(NoToken::PeerMismatch);
         }
+        if is_expired(entry, SystemTime::now()) {
+            let _ = self.forget(session_ref);
+            return Err(NoToken::Missing);
+        }
         Ok(entry.token.clone())
+    }
+
+    /// Push `session_ref`'s expiry out to `now + ttl` without touching the
+    /// credential itself.
+    ///
+    /// A live attach *is* proof the session is alive, and the host anchors
+    /// the credential to the session (the session's own TTL does not run
+    /// while it is attached). The stored `expires_at` is a snapshot taken
+    /// when the entry was written, so without this a session worked in for
+    /// longer than `[serve].resume_ttl` would have its still-good
+    /// credential purged locally and be orphaned by the next disconnect.
+    /// A no-op if nothing is stored for `session_ref`.
+    pub fn renew(&self, session_ref: &str, ttl: Duration) -> Result<(), OpError> {
+        let until = rfc3339_at(SystemTime::now() + ttl);
+        self.update(|doc| {
+            if let Some(entry) = doc.sessions.get_mut(session_ref) {
+                entry.expires_at = until;
+                entry.updated_at = now_rfc3339();
+            }
+        })
     }
 
     /// Read the raw entry (tests and diagnostics; never rendered).
@@ -280,14 +317,7 @@ impl ResumeStore {
     /// write, so a state file left behind by a dead laptop does not
     /// accumulate credentials for sessions the host reaped long ago.
     fn purge_expired(doc: &mut Document, now: SystemTime) {
-        doc.sessions
-            .retain(|_, e| match parse_rfc3339(&e.expires_at) {
-                // Unparseable stamps are kept: the host is the authority on
-                // whether a token still works, and dropping on a parse quirk
-                // would strand a live session.
-                None => true,
-                Some(at) => at > now,
-            });
+        doc.sessions.retain(|_, e| !is_expired(e, now));
     }
 
     /// Read-modify-write under an exclusive cross-process lock.
@@ -299,7 +329,24 @@ impl ResumeStore {
             .unwrap_or_else(|| PathBuf::from("."));
         ensure_private_dir(&dir)?;
         let _guard = FileLock::acquire(&self.lock_path)?;
-        let mut doc = self.load().unwrap_or_default();
+        let mut doc = match self.read() {
+            Ok(doc) => doc,
+            // Nothing could be salvaged. Keep the bytes: they are the only
+            // evidence of what went wrong, and overwriting them in place is
+            // exactly the step that would make a recoverable mistake
+            // permanent.
+            Err(Unreadable) => {
+                let mut aside = self.path.clone();
+                aside.as_mut_os_string().push(".corrupt");
+                let _ = std::fs::rename(&self.path, &aside);
+                tracing::warn!(
+                    path = %self.path.display(),
+                    moved_to = %aside.display(),
+                    "resume.json could not be parsed; moved aside and started a new one"
+                );
+                Document::default()
+            }
+        };
         Self::purge_expired(&mut doc, SystemTime::now());
         edit(&mut doc);
         let body = Zeroizing::new(
@@ -309,16 +356,91 @@ impl ResumeStore {
         write_durably(&self.path, &body).map_err(|e| config_io_error(&self.path, "write", &e))
     }
 
+    /// The document, degrading to "no token" (fail closed) rather than
+    /// failing a session command outright.
     fn load(&self) -> Result<Document, OpError> {
+        Ok(self.read().unwrap_or_default())
+    }
+
+    /// The document, distinguishing "nothing survived" from "empty" so the
+    /// writer can decide whether it is safe to replace the file.
+    fn read(&self) -> Result<Document, Unreadable> {
         let raw = match std::fs::read(&self.path) {
             Ok(raw) => Zeroizing::new(raw),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Document::default()),
-            Err(e) => return Err(config_io_error(&self.path, "read", &e)),
+            // An unreadable file is not an empty one; treat it like a
+            // corrupt one rather than proposing to overwrite it.
+            Err(_) => return Err(Unreadable),
         };
-        // A corrupt state file is not fatal: resume degrades to "no token"
-        // (fail closed) instead of breaking every session command.
-        Ok(serde_json::from_slice(&raw).unwrap_or_default())
+        if let Ok(doc) = serde_json::from_slice::<Document>(&raw) {
+            return Ok(doc);
+        }
+        // One bad record must cost that record and nothing else: a token
+        // that is not 32 bytes, a hand edit, a truncated write. Dropping
+        // every entry instead would orphan every live session on the
+        // device, and single-generation tokens make that unrecoverable.
+        salvage(&raw)
     }
+}
+
+/// The file yielded no usable document at all.
+struct Unreadable;
+
+/// Parse `raw` entry by entry, keeping the records that survive.
+///
+/// [`RawValue`] borrows out of `raw`, so a salvage pass makes no extra
+/// copy of a credential.
+///
+/// [`RawValue`]: serde_json::value::RawValue
+fn salvage(raw: &[u8]) -> Result<Document, Unreadable> {
+    #[derive(Deserialize)]
+    struct Loose<'a> {
+        #[serde(default, borrow)]
+        sessions: BTreeMap<String, &'a serde_json::value::RawValue>,
+    }
+    let Ok(loose) = serde_json::from_slice::<Loose<'_>>(raw) else {
+        return Err(Unreadable);
+    };
+    let kept: BTreeMap<String, ResumeEntry> = loose
+        .sessions
+        .into_iter()
+        .filter_map(|(key, value)| {
+            serde_json::from_str::<ResumeEntry>(value.get())
+                .ok()
+                .map(|entry| (key, entry))
+        })
+        .collect();
+    Ok(Document { sessions: kept })
+}
+
+/// Whether `entry`'s stated expiry has passed.
+///
+/// An unparseable stamp is **not** expired: the host is the authority on
+/// whether a token still works, and dropping one on a parse quirk would
+/// strand a live session.
+fn is_expired(entry: &ResumeEntry, now: SystemTime) -> bool {
+    parse_rfc3339(&entry.expires_at).is_some_and(|at| at <= now)
+}
+
+/// How long from now the RFC 3339 stamp `expires_at` is, or `None` if it
+/// does not parse or has already passed.
+///
+/// This is the client's read of the credential window the host reported —
+/// used to decide how often a live attach pushes its stored entry forward.
+pub fn ttl_until(expires_at: &str) -> Option<Duration> {
+    let at = parse_rfc3339(expires_at)?;
+    at.duration_since(SystemTime::now())
+        .ok()
+        .filter(|d| !d.is_zero())
+}
+
+/// `SystemTime` → RFC 3339, in the same shape [`now_rfc3339`] produces.
+fn rfc3339_at(at: SystemTime) -> String {
+    time::OffsetDateTime::from(at)
+        .replace_nanosecond(0)
+        .unwrap_or_else(|_| at.into())
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
 }
 
 /// RFC 3339 → `SystemTime`, `None` if it does not parse.
@@ -386,55 +508,40 @@ fn write_durably(path: &Path, body: &[u8]) -> std::io::Result<()> {
 }
 
 /// An exclusive advisory lock held for the duration of one
-/// read-modify-write.
+/// read-modify-write, on **every** platform.
 ///
-/// Unix uses `flock(2)`, which is what ADR-0007 specifies. Elsewhere the
-/// guard is a no-op: the Windows client is P1 (`docs/ROADMAP.md` §3), so
-/// there is no supported multi-process client there to serialise — and a
-/// silently wrong lock would be worse than an honest absent one.
+/// `std::fs::File::lock` is `flock(2)` on unix — the mechanism ADR-0007
+/// names — and `LockFileEx` on Windows, so the serialisation an MCP server
+/// running next to an interactive attach depends on is real there too
+/// rather than a no-op that quietly loses a rotation.
 struct FileLock {
-    #[cfg(unix)]
     file: std::fs::File,
 }
 
 impl FileLock {
-    #[cfg(unix)]
     fn acquire(path: &Path) -> Result<Self, OpError> {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        use std::os::unix::io::AsRawFd as _;
-
-        let file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let file = options
             .open(path)
             .map_err(|e| config_io_error(path, "open lock file", &e))?;
         // Blocking exclusive lock: the critical section is a small file
         // rewrite, and a failed lock would mean losing a rotation.
-        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
-        if rc != 0 {
-            let err = std::io::Error::last_os_error();
-            return Err(config_io_error(path, "lock", &err));
-        }
+        file.lock().map_err(|e| config_io_error(path, "lock", &e))?;
         Ok(Self { file })
-    }
-
-    #[cfg(not(unix))]
-    fn acquire(_path: &Path) -> Result<Self, OpError> {
-        Ok(Self {})
     }
 }
 
 impl Drop for FileLock {
     fn drop(&mut self) {
-        #[cfg(unix)]
-        {
-            use std::os::unix::io::AsRawFd as _;
-            unsafe {
-                libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
-            }
-        }
+        // Closing the file releases the lock anyway; being explicit keeps
+        // the critical section obvious.
+        let _ = self.file.unlock();
     }
 }
 
@@ -559,7 +666,7 @@ mod tests {
     }
 
     #[test]
-    fn a_corrupt_state_file_degrades_to_no_token() {
+    fn a_corrupt_state_file_degrades_to_no_token_and_is_kept_for_evidence() {
         let (_dir, store) = store();
         std::fs::create_dir_all(store.path().parent().unwrap()).unwrap();
         std::fs::write(store.path(), b"{ this is not json").unwrap();
@@ -569,14 +676,92 @@ mod tests {
             .put("mac/01K0", "mac", "01K0", token(1), PEER, &far_future())
             .unwrap();
         assert!(store.get("mac/01K0").is_some());
+        // The bytes that could not be parsed are moved aside, not
+        // overwritten: they are the only evidence of what went wrong.
+        let mut aside = store.path().to_path_buf();
+        aside.as_mut_os_string().push(".corrupt");
+        assert_eq!(std::fs::read(&aside).unwrap(), b"{ this is not json");
+    }
+
+    /// One bad record costs that record and nothing else. Under
+    /// single-generation tokens, dropping the whole file would orphan every
+    /// live session on the device — unrecoverably.
+    #[test]
+    fn one_unparseable_entry_does_not_cost_the_others() {
+        let (_dir, store) = store();
+        store
+            .put("mac/good", "mac", "good", token(1), PEER, &far_future())
+            .unwrap();
+        store
+            .put("mac/also", "mac", "also", token(2), PEER, &far_future())
+            .unwrap();
+
+        // Corrupt exactly one entry's token, the way a truncated write or a
+        // hand edit would.
+        let raw = std::fs::read_to_string(store.path()).unwrap();
+        let mut doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        doc["sessions"]["mac/also"]["token"] = serde_json::json!("not-32-bytes");
+        std::fs::write(store.path(), serde_json::to_vec(&doc).unwrap()).unwrap();
+
+        assert!(store.take_for("mac/good", PEER).is_ok(), "survivor lost");
+        assert_eq!(store.take_for("mac/also", PEER), Err(NoToken::Missing));
+        // The repair is durable: the salvaged document is what gets written
+        // back on the next update.
+        store.forget("mac/nothing").unwrap();
+        assert_eq!(store.len(), 1);
+    }
+
+    /// ADR-0007 "정리" (iii): an expired entry is dropped on the way out,
+    /// not presented for the host to refuse.
+    #[test]
+    fn an_expired_entry_is_dropped_instead_of_being_presented() {
+        let (_dir, store) = store();
+        store
+            .put(
+                "mac/old",
+                "mac",
+                "old",
+                token(1),
+                PEER,
+                "2000-01-01T00:00:00Z",
+            )
+            .unwrap();
+        assert_eq!(store.take_for("mac/old", PEER), Err(NoToken::Missing));
+        assert!(store.get("mac/old").is_none(), "and it is gone");
+    }
+
+    /// The other half of the same rule: a session that stays attached
+    /// longer than the window must not have its still-good credential
+    /// purged out from under it. A live attach pushes the stamp forward.
+    #[test]
+    fn a_renewed_entry_outlives_its_original_window() {
+        let (_dir, store) = store();
+        let soon = rfc3339_at(SystemTime::now() + Duration::from_secs(2));
+        store
+            .put("mac/01K0", "mac", "01K0", token(1), PEER, &soon)
+            .unwrap();
+        store.renew("mac/01K0", Duration::from_secs(3600)).unwrap();
+        let entry = store.get("mac/01K0").expect("still there");
+        assert!(
+            parse_rfc3339(&entry.expires_at).unwrap()
+                > SystemTime::now() + Duration::from_secs(3000),
+            "{}",
+            entry.expires_at
+        );
+        assert_eq!(
+            store.take_for("mac/01K0", PEER).unwrap().expose(),
+            token(1).expose(),
+            "renewal must not disturb the credential itself"
+        );
+        // Renewing something that is not there is not an error.
+        store.renew("mac/nope", Duration::from_secs(60)).unwrap();
     }
 
     /// The lock is what makes a read-modify-write safe when a `qsh attach`,
     /// a `qsh session read --follow` and an MCP server all rotate tokens at
-    /// once. Unix-only, because `flock` is what ADR-0007 specifies and the
-    /// Windows client is P1 — so is this test, rather than asserting a
-    /// guarantee the platform is not making.
-    #[cfg(unix)]
+    /// once. `std::fs::File::lock` is real on every supported platform, so
+    /// this asserts the guarantee everywhere rather than only where
+    /// `flock(2)` is spelled that way.
     #[test]
     fn concurrent_writers_do_not_lose_each_others_entries() {
         let (_dir, store) = store();

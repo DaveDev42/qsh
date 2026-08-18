@@ -470,21 +470,43 @@ impl Ops {
         // Durable before the stream is touched (ADR-0007): the presented
         // token is already invalid on the host, so a successor that only
         // exists in memory is one crash away from an unreachable session.
-        if let Some(successor) = StoredToken::from_slice(&attached.new_resume_token) {
-            store.put(
+        if let Some(successor) = StoredToken::from_slice(&attached.new_resume_token)
+            && let Err(err) = store.put(
                 &req.session_ref,
                 &r.host,
                 &r.session_id,
                 successor,
                 &peer,
                 &attached.expires_at,
-            )?;
+            )
+        {
+            // The presented token is already spent on the host and its
+            // successor did not reach the disk, so the entry we still
+            // hold is dead weight that would earn an `AUTH_FAILED` on
+            // the next try. Drop it and let go of the connection rather
+            // than leaving the host holding a ticket and a lease for an
+            // attach that is not going to happen.
+            let _ = store.forget(&req.session_ref);
+            conn.close();
+            return Err(err);
         }
         let replay_from = attached.replay_from;
         let writer_lease = attached.writer_lease;
         let expires_at = attached.expires_at.clone();
+        // How long the host says the credential lives. The stored
+        // `expires_at` is a snapshot, and a session's own TTL does not run
+        // while it is attached, so an attach outliving this window has to
+        // push its entry forward or the next disconnect finds no credential
+        // to resume with (ADR-0007 "정리").
+        let resume_ttl = crate::resume::ttl_until(&expires_at);
         // Only now, with the successor on disk, is the data stream opened.
-        let attached = conn.run(move |s| Box::pin(s.open_attach_stream(attached)))?;
+        let attached = match conn.run(move |s| Box::pin(s.open_attach_stream(attached))) {
+            Ok(attached) => attached,
+            Err(err) => {
+                conn.close();
+                return Err(err);
+            }
+        };
         let session = conn
             .take_session()
             .ok_or_else(|| OpError::new(ErrorCode::Internal, "attach lost its control stream"))?;
@@ -508,6 +530,8 @@ impl Ops {
             session_ref,
             replay_from,
             writer_lease,
+            resume_ttl,
+            renew_at: resume_ttl.map(|ttl| std::time::Instant::now() + ttl / 2),
             expires_at,
         })
     }
@@ -844,6 +868,10 @@ pub struct SessionAttachStream {
     session_ref: String,
     replay_from: u64,
     writer_lease: bool,
+    /// The credential window the host reported, if it parsed.
+    resume_ttl: Option<std::time::Duration>,
+    /// When to push the stored entry's expiry forward; `None` disables it.
+    renew_at: Option<std::time::Instant>,
     expires_at: String,
 }
 
@@ -879,7 +907,26 @@ impl SessionAttachStream {
         if let Ok(event) = &event {
             forget_if_closed(&self.store, &self.session_ref, event);
         }
+        self.renew_credential();
         Some(event)
+    }
+
+    /// Keep the stored credential's expiry ahead of the clock while this
+    /// attach is alive. Runs at most once per half-window (a disk write
+    /// every twelve hours at the default TTL), and a failure is not fatal:
+    /// the host is the authority, and the worst case is the stale stamp
+    /// this is trying to avoid.
+    fn renew_credential(&mut self) {
+        let (Some(ttl), Some(due)) = (self.resume_ttl, self.renew_at) else {
+            return;
+        };
+        if std::time::Instant::now() < due {
+            return;
+        }
+        if let Err(err) = self.store.renew(&self.session_ref, ttl) {
+            tracing::debug!(session_ref = %self.session_ref, %err, "resume entry renewal failed");
+        }
+        self.renew_at = Some(std::time::Instant::now() + ttl / 2);
     }
 
     /// Queue session input; the driver writes it in order. Blocks only

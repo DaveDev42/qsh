@@ -30,6 +30,7 @@
 //! PTY (Step 4) or, here, a [`PipeSource`] for headless tests — no PTY code
 //! in this step.
 
+use std::collections::BTreeMap;
 use std::io;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -156,16 +157,16 @@ struct Meta {
     /// Monotonic instant the TTL is measured from when `attached == 0`:
     /// creation, last detach, or exit.
     ttl_base: Instant,
-    /// The `SESSION_DATA` input stream the cursor below belongs to. A
-    /// stream that presents a different id is a *different* logical client
-    /// (a steal, or a fresh attach), so the cursor adopts its numbering
-    /// instead of deduplicating against a foreign axis.
-    input_stream: InputStreamId,
-    /// Highest cumulative input byte offset applied on [`Meta::input_stream`]
-    /// (protocol.md §8/§10-5). Session-scoped, not per-attach: a reattach
-    /// that keeps the id keeps the cursor, which is what makes retransmission
-    /// of the un-acked tail exactly-once.
-    applied_input: u64,
+    /// Highest cumulative input byte offset applied, **per logical input
+    /// stream** (protocol.md §8/§10-5).
+    ///
+    /// One axis per stream rather than one per session: a resumed attach is
+    /// forked from its predecessor's offset ([`SessionHandle::fork_input_stream`]),
+    /// so retransmission of an un-acked tail is still exactly-once, while a
+    /// peer that has been demoted to read-only — or any other attach living
+    /// alongside this one — can no longer move the cursor the live writer
+    /// deduplicates against. Bounded by [`MAX_INPUT_AXES`].
+    applied_input: BTreeMap<InputStreamId, u64>,
     /// Source of fresh [`InputStreamId`]s for this session.
     next_input_stream: u64,
     /// `true` from the moment a close was accepted (escalation may still be
@@ -220,13 +221,28 @@ pub struct SessionHandle {
 
 /// Identifies one logical client input stream on a session.
 ///
-/// Minted by the host: `session.open` gets the session's first, a fresh
-/// `session.attach` gets a new one, and a **resumed** attach keeps the one
-/// it left (protocol.md §10-5 — that is what makes the dedup cursor
-/// survive a reattach instead of restarting per attach). Opaque to the
-/// peer: it rides on the ticket, never on the wire.
+/// Minted by the host, one per attach: `session.open` gets the session's
+/// first, and every `session.attach` gets a fresh one *forked* from the
+/// axis its resume credential names, inheriting that axis's applied offset
+/// (protocol.md §10-5 — that is what makes the dedup cursor survive a
+/// reattach instead of restarting per attach, without two live attaches
+/// sharing one axis). Opaque to the peer: it rides on the ticket, never on
+/// the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct InputStreamId(pub u64);
+
+/// The input stream `session.open`'s own ticket carries — the session's
+/// first, and the one a resume lineage forks from until it forks again.
+pub const FIRST_INPUT_STREAM: InputStreamId = InputStreamId(1);
+
+/// How many input axes a session remembers.
+///
+/// Every attach forks a fresh axis, so without a bound a long-lived session
+/// that reconnects all day would grow one entry per recovery. Only the most
+/// recent axes can still have a live peer numbering against them (an attach
+/// this many generations old lost its lease long ago), so the oldest are
+/// dropped when a new one is minted.
+const MAX_INPUT_AXES: usize = 32;
 
 /// Inbox messages (architecture.md §3 "mpsc 인박스").
 enum Command {
@@ -396,21 +412,40 @@ impl SessionHandle {
         rx.await.map_err(|_| WriteError::Gone)?
     }
 
-    /// The session's current input stream and how far it has been applied
-    /// — what a **resumed** attach continues from (protocol.md §10-5).
-    pub fn input_cursor(&self) -> (InputStreamId, u64) {
-        let meta = self.shared.meta();
-        (meta.input_stream, meta.applied_input)
-    }
-
-    /// Mint a fresh input stream id for an attach that is *not* a resume
-    /// (a steal, or a first attach): its numbering starts at zero and is
-    /// deduplicated against nobody else's.
-    pub fn new_input_stream(&self) -> InputStreamId {
+    /// Mint the input axis for one attach and say where it starts.
+    ///
+    /// `from` is the axis this attach continues — the predecessor recorded
+    /// on the resume credential — and the new axis is seeded with exactly
+    /// what that one had applied, so the client's un-acked tail is still
+    /// deduplicated to exactly-once (protocol.md §10-5). `None` is a client
+    /// with no history: it starts at zero and deduplicates against nobody.
+    ///
+    /// A **fresh** id every time, never the predecessor's, is what keeps
+    /// the previous attach — which may still be connected and typing after
+    /// being demoted to read-only — off the axis this one deduplicates
+    /// against.
+    pub fn fork_input_stream(&self, from: Option<InputStreamId>) -> (InputStreamId, u64) {
         let mut meta = self.shared.meta();
+        let start = from
+            .and_then(|prev| meta.applied_input.get(&prev).copied())
+            .unwrap_or(0);
         let id = InputStreamId(meta.next_input_stream);
         meta.next_input_stream += 1;
-        id
+        meta.applied_input.insert(id, start);
+        while meta.applied_input.len() > MAX_INPUT_AXES {
+            let oldest = *meta
+                .applied_input
+                .keys()
+                .next()
+                .expect("non-empty: len is above the bound");
+            meta.applied_input.remove(&oldest);
+        }
+        (id, start)
+    }
+
+    /// How far `stream` has been applied (tests and diagnostics).
+    pub fn applied_input(&self, stream: InputStreamId) -> Option<u64> {
+        self.shared.meta().applied_input.get(&stream).copied()
     }
 
     /// Apply a window-size change.
@@ -437,6 +472,21 @@ impl SessionHandle {
         rx.await
             .map_err(|_| WriteError::Gone)?
             .map_err(|e| WriteError::Io(e.to_string()))
+    }
+
+    /// Whether a `no_steal` take would conflict: a **different** principal
+    /// holds a live lease (architecture.md §3 rule b — the same principal
+    /// on another connection is the same writer moving devices).
+    ///
+    /// A read-only snapshot, not a decision: the binding take still goes
+    /// through the actor. It exists so a caller whose own decision is not
+    /// final yet can refuse without mutating anything.
+    pub fn lease_conflict(&self, principal: &str) -> bool {
+        self.shared
+            .meta()
+            .lease
+            .holder()
+            .is_some_and(|h| h.principal != principal)
     }
 
     /// Try to take the writer lease. See [`WriterLease::take`].
@@ -523,6 +573,25 @@ impl SessionHandle {
             SessionState::Exited => CloseReason::Exit,
             SessionState::Running => CloseReason::TtlExpired,
         })
+    }
+
+    /// When this session stops being resumable, on the broker's clock.
+    ///
+    /// While attached the TTL does not run at all (architecture.md §3), so
+    /// the answer is `now + ttl`: the session cannot be reaped before then
+    /// whatever happens next. Unattached it is `ttl` past the last detach
+    /// (or the exit, or creation) — the same instant [`ttl_reap_reason`]
+    /// fires on. The resume credential is anchored to this, so a credential
+    /// never expires under a session that is still alive.
+    ///
+    /// [`ttl_reap_reason`]: Self::ttl_reap_reason
+    pub fn resume_deadline(&self, now: Instant, ttl: Duration) -> Instant {
+        let meta = self.shared.meta();
+        if meta.attached > 0 {
+            now + ttl
+        } else {
+            meta.ttl_base + ttl
+        }
     }
 
     /// Current lifecycle state.
@@ -638,9 +707,8 @@ impl SessionActor {
                 lease: WriterLease::new(),
                 attached: 0,
                 ttl_base,
-                input_stream: InputStreamId(1),
-                applied_input: 0,
-                next_input_stream: 2,
+                applied_input: BTreeMap::from([(FIRST_INPUT_STREAM, 0)]),
+                next_input_stream: FIRST_INPUT_STREAM.0 + 1,
                 closing: false,
                 closed_at: None,
             }),
@@ -918,30 +986,36 @@ impl ActorState {
         input_seq: Option<(InputStreamId, u64)>,
         resp: oneshot::Sender<Result<u64, WriteError>>,
     ) {
-        let (admit, current_stream) = {
+        // The axis this chunk is numbered on. A stream nobody minted (or one
+        // pruned generations ago) starts from zero rather than borrowing
+        // another client's offset.
+        let axis = input_seq.map(|(stream, _)| stream);
+        let admit = {
             let meta = self.shared.meta();
-            let admit = if meta.state != SessionState::Running || meta.closing {
+            if meta.state != SessionState::Running || meta.closing {
                 Err(WriteError::NotRunning)
             } else if !meta.lease.is_held_by(conn) {
                 Err(WriteError::NotWriter)
             } else {
-                Ok(meta.applied_input)
-            };
-            (admit, meta.input_stream)
+                Ok(axis
+                    .and_then(|stream| meta.applied_input.get(&stream).copied())
+                    .unwrap_or(0))
+            }
         };
-        let mut applied = match admit {
+        let applied = match admit {
             Ok(applied) => applied,
             Err(err) => {
-                // A refused numbered chunk still moves *its own* stream's
-                // cursor: the bytes are deliberately dropped (a demoted
-                // read-only attach, protocol.md §10 "read-only로 강등"), and
-                // the peer must not resend them when its lease returns. The
-                // id keeps that advance from poisoning any other stream's
-                // axis.
+                // A refused numbered chunk still moves **its own** axis: the
+                // bytes are deliberately dropped (a demoted read-only
+                // attach, protocol.md §10 "read-only로 강등"), and the peer
+                // must not resend them when its lease returns. Touching only
+                // its own axis is what keeps that advance from poisoning the
+                // live writer's — a peer holding no lease has no effect on
+                // any state but its own.
                 if let Some((stream, seq)) = input_seq {
                     let mut meta = self.shared.meta();
-                    meta.input_stream = stream;
-                    meta.applied_input = meta.applied_input.max(seq);
+                    let slot = meta.applied_input.entry(stream).or_insert(0);
+                    *slot = (*slot).max(seq);
                 }
                 let _ = resp.send(Err(err));
                 return;
@@ -952,7 +1026,7 @@ impl ActorState {
             // not move any stream's axis, or the attached writer's next
             // chunk would look like a retransmission and be dropped.
             None => (data, applied),
-            Some((stream, seq)) => {
+            Some((_, seq)) => {
                 let Some(start) = seq.checked_sub(data.len() as u64) else {
                     let _ = resp.send(Err(WriteError::InputGap {
                         start: seq,
@@ -960,15 +1034,6 @@ impl ActorState {
                     }));
                     return;
                 };
-                if stream != current_stream {
-                    // A different logical client: adopt its numbering
-                    // rather than deduplicating against an axis that was
-                    // never its own.
-                    let mut meta = self.shared.meta();
-                    meta.input_stream = stream;
-                    meta.applied_input = start;
-                    applied = start;
-                }
                 if start > applied {
                     // Bytes we never saw would be skipped; accepting would
                     // lose them silently, which PRD §8 forbids.
@@ -986,7 +1051,11 @@ impl ActorState {
             }
         };
         match self.in_tx.try_send((data, next, resp)) {
-            Ok(()) => self.shared.meta().applied_input = next,
+            Ok(()) => {
+                if let Some(stream) = axis {
+                    self.shared.meta().applied_input.insert(stream, next);
+                }
+            }
             Err(mpsc::error::TrySendError::Full((_, _, resp))) => {
                 let _ = resp.send(Err(WriteError::Backpressure));
             }
@@ -1443,6 +1512,118 @@ mod tests {
         assert_eq!(
             handle.write(B, b"y".to_vec()).await,
             Err(WriteError::NotWriter)
+        );
+    }
+
+    /// protocol.md §10-5 / PRD §8: input must be neither lost nor
+    /// duplicated across a resume. The failure this guards is silent — the
+    /// user's keystrokes are dropped *and* acked — and it happens whenever
+    /// two attaches of the same session are alive at once, which is the
+    /// dominant sleep/wake shape: the old attach has not noticed the path
+    /// is dead and its TUI keeps sending.
+    #[tokio::test]
+    async fn a_demoted_attach_cannot_move_the_live_writer_s_input_cursor() {
+        let (handle, mut pipe, _clock) = spawn_session();
+
+        // A1 attaches off the open's ticket — which carries the session's
+        // first axis, counting from zero — and types 8 bytes.
+        let a1 = FIRST_INPUT_STREAM;
+        assert_eq!(handle.applied_input(a1), Some(0));
+        handle.take_lease("device:a", A, false).await.unwrap();
+        within(handle.write_at(A, b"12345678".to_vec(), Some((a1, 8))))
+            .await
+            .unwrap();
+        assert_eq!(within(pipe.read_input(8)).await.unwrap(), b"12345678");
+
+        // The path dies. A2 resumes on a new connection: a fresh axis,
+        // forked from A1's, so it continues A1's numbering.
+        let (a2, resume_from) = handle.fork_input_stream(Some(a1));
+        assert_ne!(a2, a1, "each attach gets its own axis");
+        assert_eq!(resume_from, 8, "…seeded with what A1 had applied");
+        handle.take_lease("device:a", B, false).await.unwrap();
+
+        // A1 is still connected and still typing. Its writes are refused —
+        // it holds no lease — and must have no effect on A2's axis.
+        assert_eq!(
+            handle.write_at(A, b"XXXX".to_vec(), Some((a1, 12))).await,
+            Err(WriteError::NotWriter)
+        );
+        assert_eq!(
+            handle
+                .write_at(A, vec![b'Z'; 4096], Some((a1, u64::MAX)))
+                .await,
+            Err(WriteError::NotWriter),
+            "a peer with no lease must not be able to set a cursor at all"
+        );
+
+        // A2 types. Every byte reaches the child.
+        let applied = within(handle.write_at(B, b"ls\n".to_vec(), Some((a2, 11))))
+            .await
+            .unwrap();
+        assert_eq!(applied, 11);
+        assert_eq!(within(pipe.read_input(3)).await.unwrap(), b"ls\n");
+
+        // A1's own axis did move, so a steal-back does not replay the
+        // bytes it was refused — but it moved on its axis alone.
+        assert_eq!(handle.applied_input(a1), Some(u64::MAX));
+        assert_eq!(handle.applied_input(a2), Some(11));
+    }
+
+    /// The exactly-once half: a resumed attach retransmits its un-acked
+    /// tail and the child sees each byte once.
+    #[tokio::test]
+    async fn a_resumed_axis_deduplicates_the_retransmitted_tail() {
+        let (handle, mut pipe, _clock) = spawn_session();
+        let first = FIRST_INPUT_STREAM;
+        handle.take_lease("device:a", A, false).await.unwrap();
+        within(handle.write_at(A, b"abc".to_vec(), Some((first, 3))))
+            .await
+            .unwrap();
+        assert_eq!(within(pipe.read_input(3)).await.unwrap(), b"abc");
+
+        let (second, from) = handle.fork_input_stream(Some(first));
+        assert_eq!(from, 3);
+        handle.take_lease("device:a", B, false).await.unwrap();
+        // The client never saw the ack, so it resends from its own 0.
+        assert_eq!(
+            within(handle.write_at(B, b"abc".to_vec(), Some((second, 3))))
+                .await
+                .unwrap(),
+            3,
+            "a pure retransmission is acked and applied nowhere"
+        );
+        within(handle.write_at(B, b"def".to_vec(), Some((second, 6))))
+            .await
+            .unwrap();
+        assert_eq!(within(pipe.read_input(3)).await.unwrap(), b"def");
+
+        // A hole is refused rather than silently skipped (PRD §8).
+        assert_eq!(
+            handle.write_at(B, b"gh".to_vec(), Some((second, 20))).await,
+            Err(WriteError::InputGap {
+                start: 18,
+                applied: 6
+            })
+        );
+    }
+
+    /// The axis map is bounded: a session that reconnects all day must not
+    /// grow one entry per recovery.
+    #[tokio::test]
+    async fn forking_prunes_the_oldest_axes() {
+        let clock = TestClock::new();
+        let (source, _pipe) = PipeSource::new(64);
+        let handle = spawn_with(source, &clock, SessionConfig::default());
+        let mut last = FIRST_INPUT_STREAM;
+        for _ in 0..(MAX_INPUT_AXES * 2) {
+            let (next, _) = handle.fork_input_stream(Some(last));
+            last = next;
+        }
+        assert_eq!(handle.shared.meta().applied_input.len(), MAX_INPUT_AXES);
+        assert!(handle.applied_input(last).is_some(), "the newest survives");
+        assert!(
+            handle.applied_input(FIRST_INPUT_STREAM).is_none(),
+            "the oldest is pruned"
         );
     }
 

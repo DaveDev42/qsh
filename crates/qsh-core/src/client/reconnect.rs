@@ -262,11 +262,15 @@ impl OutputCursor {
                 }
                 let skip = self.last_seq.saturating_sub(start) as usize;
                 self.last_seq = sequence;
-                let data = if skip >= data.len() {
-                    data
-                } else {
-                    data[skip..].to_vec()
-                };
+                // `sequence > last_seq` above means the frame ends past what
+                // we delivered, so the overlap is always a strict prefix.
+                // The saturating form is defence in depth in the one
+                // direction that is safe: if it ever did cover the whole
+                // frame, the answer is "nothing left", never "all of it" —
+                // emitting the frame whole is the doubled output this type
+                // exists to prevent.
+                debug_assert!(skip < data.len(), "overlap covers the whole frame");
+                let data = data.get(skip..).unwrap_or_default().to_vec();
                 Some(AttachEvent::Output { sequence, data })
             }
             // A gap moves the cursor forward to where the host can

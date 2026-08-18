@@ -19,6 +19,16 @@
 //! The bound itself is [`REDIAL_DEADLINE`] — 2 s — and it is enforced by
 //! [`recover`], which is the same code path the product uses, not a
 //! test-local stopwatch.
+//!
+//! **What this does not yet measure.** testing.md L4's criterion is "2 s
+//! from path-death *detection*", and there is no detector: the probe passed
+//! to [`recover`] here is `|| async { false }`, which costs nothing. The
+//! measured window is therefore re-dial + attach + first byte, and the
+//! detection half of the budget is unrepresented. That is the honest state
+//! of the gate — the sever→resume half is green, the detector is the seam
+//! Step 9 plugs in.
+//! TODO(Step 9): drive this with the real path-death detector and re-check
+//! the bound with detection inside the window.
 
 use std::time::Duration;
 
@@ -149,9 +159,13 @@ async fn a_severed_path_is_redialed_and_resumed_inside_the_deadline() {
         ),
     };
     assert_eq!(out.report.recovery, Recovery::Resumed, "{ctx}");
+    // `recover` already enforced the bound with a timeout, so the
+    // load-bearing assertion is the `panic!` on `Err` above; this one is a
+    // consistency check that the *reported* number matches the window that
+    // was actually enforced.
     assert!(
         u128::from(out.report.time_to_recovery_ms) <= REDIAL_DEADLINE.as_millis(),
-        "time-to-recovery {} ms is outside the {REDIAL_DEADLINE:?} bound — {ctx}",
+        "the report contradicts the deadline `recover` enforced: {} ms — {ctx}",
         out.report.time_to_recovery_ms
     );
     assert_eq!(out.report.session_ref, session_ref);

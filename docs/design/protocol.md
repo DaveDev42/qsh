@@ -233,16 +233,18 @@ message ExecFrame {
 
 ## 10. Session resume 프로토콜
 
-**토큰.** `SessionOpened`가 32-byte CSPRNG `resume_token`을 반환한다. 호스트는 **`blake3(token)` 해시만** `(session_id, peer_spki_sha256, expires_at)`과 함께 저장한다. 클라이언트는 토큰을 `$XDG_STATE_HOME/qsh/resume.json`(0600, `session_ref`를 key로, peer SPKI fingerprint·`expires_at`과 함께; 쓰기·rotation·정리 규율은 ADR-0007)에 보관하며 **JSON 출력에는 절대 노출하지 않는다**(CLI.md §6.3, ADR-0007) — OS keychain이 아닌 이유는 재접속마다 인증 프롬프트가 뜨는 UX를 피하기 위해서이고, 토큰 단독으로는 무용하기 때문에 안전하다: 상환에는 기록된 SPKI와 일치하는 클라이언트 인증서로 맺은 상호 인증 TLS 연결이 필요하다(PRD §9 "resume credential은 session과 peer identity에 결합").
+**토큰.** `SessionOpened`가 32-byte CSPRNG `resume_token`을 반환한다. 호스트는 **`blake3(token)` 해시만** `(session_id, peer_spki_sha256, expires_at, input_stream)`과 함께 저장한다. `expires_at`은 **세션의 수명에 고정된다** — attach 중인 세션은 TTL이 흐르지 않으므로(architecture.md §3) reaper가 매 tick마다 credential의 만료를 세션 자신의 reap deadline으로 다시 맞춘다. 발급 시각 기준으로 두면 하루 넘게 붙잡고 일한 세션이 살아 있는 채로 resume 불가가 되어, 다음 단절에서 영구 orphan이 된다. 클라이언트는 토큰을 `$XDG_STATE_HOME/qsh/resume.json`(0600, `session_ref`를 key로, peer SPKI fingerprint·`expires_at`과 함께; 쓰기·rotation·정리 규율은 ADR-0007)에 보관하며 **JSON 출력에는 절대 노출하지 않는다**(CLI.md §6.3, ADR-0007) — OS keychain이 아닌 이유는 재접속마다 인증 프롬프트가 뜨는 UX를 피하기 위해서이고, 토큰 단독으로는 무용하기 때문에 안전하다: 상환에는 기록된 SPKI와 일치하는 클라이언트 인증서로 맺은 상호 인증 TLS 연결이 필요하다(PRD §9 "resume credential은 session과 peer identity에 결합").
 
 **Rotation.** `SessionAttach` 성공 시마다 제시된 토큰은 즉시 무효화되고 replay 시작 전에 `new_resume_token`이 발급된다(단일 세대 유효). 상태 파일과 device key를 함께 탈취해도 정당한 클라이언트와 경쟁해야 하고, 탈취 성공은 피해자 측에서 resume 실패/`SESSION_CONFLICT`로 드러난다. 해시 비교는 `subtle::ConstantTimeEq`.
 
 **Reattach 절차.**
 1. 새 QUIC 연결, 상호 TLS, `Hello` 교환.
-2. `SessionAttach{session_id, resume_token, last_output_seq = L, mode}` → 호스트는 순서대로 검사: 토큰 해시 일치·미만료 → peer fingerprint가 세션 결합 identity와 일치 → ACL `session.attach`. **전부 통과 후에만** ticket + 새 토큰 발급. 실패는 fail-closed이며, 인가되지 않은 peer에게 세션 존재 여부를 누설하지 않도록 **non-distinguishing 오류**(`AUTH_FAILED`/`PERMISSION_DENIED`)로 답한다 — `SESSION_NOT_FOUND`는 identity 검사를 통과한 뒤에만 쓴다.
+2. `SessionAttach{session_id, resume_token, last_output_seq = L, mode}` → 호스트는 순서대로 검사: 토큰 해시 일치·미만료 → peer fingerprint가 세션 결합 identity와 일치 → ACL `session.attach`. **전부 통과 후에만** ticket + 새 토큰 발급. `resume_token`은 **선택 항목이 아니다** — 비어 있는 `SessionAttach`는 아래와 같은 `AUTH_FAILED`로 거부한다(그렇지 않으면 credential의 peer 결합을 필드를 비우는 것만으로 우회할 수 있고, attach가 "세션을 연 장비에서만"이라는 ADR-0007 결정 2가 클라이언트 예의로 전락한다). 세션을 막 연 연결의 첫 스트림은 이 경로가 아니라 `SessionOpened`의 ticket으로 열린다. writer lease는 이 검사들이 결정을 끝낼 때까지 **움직이지 않는다**: `no_steal` 판정은 읽기 전용 probe이고, 실제 take는 data 스트림이 열릴 때 broker 락 안에서 일어난다. 실패는 fail-closed이며, 인가되지 않은 peer에게 세션 존재 여부를 누설하지 않도록 **non-distinguishing 오류**(`AUTH_FAILED`/`PERMISSION_DENIED`)로 답한다 — `SESSION_NOT_FOUND`는 identity 검사를 통과한 뒤에만 쓴다.
 3. 클라이언트가 ticket으로 data 스트림을 연다. ring이 `L` 이후를 보존 중이면 정확히 `L`부터 재전송 후 live 전환. 클라이언트는 방어적으로 `sequence ≤ L`인 frame을 버린다.
 4. **Gap:** ring의 보존 최소 offset `G > L`이면 첫 frame으로 `Gap{requested_after: L, available_from: G}`를 보낸 뒤 `G`부터 재전송. CLI는 이를 `session.gap` event로 렌더링(대화형은 `--- output lost ---` 마커). 절대 조용히 건너뛰지 않는다(PRD §8).
-5. **Input 무손실·무중복:** 클라이언트는 미-ack input을 소량 버퍼(64 KiB 상한, 초과 시 조용히 쌓지 않고 오류)에 보관하고 reattach 후 재전송한다. 호스트는 세션별 최고 적용 `input_seq`를 기록·ack하며(`InputAck`), `input_seq ≤ 적용 완료 offset`인 input을 버린다. 끊김 중 타이핑이 유실도 중복도 되지 않는다.
+5. **Input 무손실·무중복:** 클라이언트는 미-ack input을 소량 버퍼(64 KiB 상한, 초과 시 조용히 쌓지 않고 오류)에 보관하고 reattach 후 재전송한다. 호스트는 최고 적용 `input_seq`를 기록·ack하며(`InputAck`), `input_seq ≤ 적용 완료 offset`인 input을 버린다. 끊김 중 타이핑이 유실도 중복도 되지 않는다.
+
+   이 cursor는 **attach 단위 축(axis)** 이다. attach마다 호스트가 새 축을 발급하고, 그 축의 시작 offset은 resume credential이 가리키는 **직전 축의 적용 offset**이다 — 그래서 재전송은 여전히 exactly-once이면서, 아직 죽은 줄 모르고 계속 타이핑하는 **이전 attach**(read-only로 강등된 쪽)가 현재 writer의 cursor를 움직이지 못한다. lease 없는 peer의 write는 거절되고 **자기 축만** 전진시킨다(steal-back 시 거절된 바이트를 다시 보내지 않기 위해). 축이 세션 하나로 공유되면, 강등된 peer가 올린 offset 때문에 현재 writer의 입력이 "재전송"으로 오인돼 조용히 버려지고 ack까지 받는다 — PRD §8이 금지하는 정확히 그 손실이다. 축 개수는 상한이 있고 오래된 것부터 정리된다.
 
 **Writer lease.** 세션당 writer lease 1개. lease는 소유 연결이 죽으면 자동 해제된다(세션은 유지). `mode=RW` attach는 **기본이 steal**이다 — "절전 후 같은 사람이 재접속"이 지배적 경로이므로 수동 정리를 요구하면 핵심 약속이 깨진다. 기존 보유자가 실제로 살아 있으면 `SessionEvent::WriterChanged`를 받고 read-only로 강등된다. 신중한 자동화를 위해 `no_steal = true`는 steal 대신 `SESSION_CONFLICT`를 반환한다. 모든 handover 판정은 broker 단일 락 안에서 일어난다.
 
