@@ -87,6 +87,7 @@ fn a_noisy_exec_keeps_stdout_pure_json_at_every_verbosity() {
 /// `qsh.event/v1` object, and return them. Deliberately a separate parser
 /// from [`parse_stdout_lines`]: a follower streams bare events, so the
 /// envelope schema must *not* appear (`docs/CLI.md` §6.4).
+#[cfg(unix)]
 fn parse_stdout_events(stdout: &[u8], label: &str) -> Vec<Value> {
     let text = std::str::from_utf8(stdout).expect("stdout must be utf-8");
     assert!(!text.is_empty(), "{label}: stdout was empty");
@@ -109,6 +110,9 @@ fn parse_stdout_events(stdout: &[u8], label: &str) -> Vec<Value> {
 /// value *stream*, so "every line is pure JSON" has to hold across many
 /// lines and across chunk boundaries — a partially flushed `session.output`
 /// would fail to parse here. Verbosity still only ever adds stderr.
+// Sessions are PTY-backed, so this whole path only exists on POSIX hosts
+// (Windows host is P2), and `sh` is not there to run either.
+#[cfg(unix)]
 #[test]
 fn a_noisy_follow_keeps_every_stdout_line_a_complete_json_event() {
     let fleet = Fleet::start();

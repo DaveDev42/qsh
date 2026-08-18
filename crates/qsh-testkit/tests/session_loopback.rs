@@ -315,7 +315,12 @@ async fn session_data_ticket_is_consumed_exactly_once() {
         data.send.send(&header).await.unwrap();
         assert!(data.recv.recv::<wire::SessionFrame>().await.is_err());
     }
-    assert_eq!(h.audit.records().len(), 1, "only the open was a decision");
+    // Opening the data stream *is* an attach, and `session.open` only
+    // authorized opening — so redeeming its ticket runs (and audits) the
+    // `session.attach` decision too. Two decisions, no more: the two
+    // refused replays above are ticket failures, not ACL decisions.
+    let actions: Vec<String> = h.audit.records().iter().map(|r| r.action.clone()).collect();
+    assert_eq!(actions, ["session.open", "session.attach"], "{actions:?}");
     assert_eq!(h.broker.session_count(), 1);
     s.close();
     h.shutdown().await;

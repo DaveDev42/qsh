@@ -19,7 +19,10 @@
 //!   carries the cumulative input offset *after* its chunk, so the host
 //!   discards (or trims) whatever it already applied and answers
 //!   `InputAck{acked_input_seq}` — lossless and duplicate-free
-//!   (protocol.md §10-5).
+//!   (protocol.md §10-5). Losing the writer lease demotes this attach to
+//!   read-only rather than ending it: input is dropped on the floor while
+//!   another peer drives, still acked so the peer's stream stays
+//!   contiguous, and writing resumes by itself on a steal-back.
 //! - the **frame writer**: sole owner of the send half, fed by both of the
 //!   above through a bounded queue.
 //!
@@ -100,9 +103,11 @@ pub struct SessionStream {
     pub cursor: Cursor,
     /// Funnel to the connection's control-stream writer for the
     /// asynchronous `SessionEvent`s an attached peer is owed
-    /// (protocol.md §9). Advisory: a full queue drops the notification
-    /// rather than stalling the pump — the pull path carries the same
-    /// events authoritatively.
+    /// (protocol.md §9). For an *attached* peer this is the only carrier
+    /// of `writer_changed`/`closed` — neither has a `SessionFrame` — so a
+    /// full queue parks the pump instead of dropping the event (PRD §8:
+    /// never lose silently). The queue is drained by the connection loop,
+    /// which never parks on a session.
     pub events: Option<mpsc::Sender<ControlMessage>>,
 }
 
@@ -162,10 +167,11 @@ impl SessionStream {
             tokio::pin!(input);
             tokio::select! {
                 r = &mut input => match r {
-                    // The peer's send half is done (clean FIN, or this
-                    // attach was demoted to read-only when its lease was
-                    // stolen) — but it is still owed its output, so the
-                    // stream lives until the output pump is finished.
+                    // The peer finished its send half — but it is still
+                    // owed its output, so the stream lives until the
+                    // output pump is done. (Losing the writer lease does
+                    // *not* land here: that only demotes the attach to
+                    // read-only, it keeps reading input.)
                     Ok(()) => (&mut output.0).await.unwrap_or(Ok(())),
                     Err(err) => Err(err),
                 },
@@ -250,7 +256,7 @@ async fn output_pump(
                 ReplayEvent::Control {
                     sequence, event, ..
                 } => {
-                    notify(&events, &id, sequence, &event);
+                    notify(&events, &id, sequence, &event).await?;
                     match event {
                         ControlEvent::Exit { exit_code, signal } => {
                             // The wire `exit_code` is not optional: a
@@ -318,11 +324,20 @@ async fn input_pump(
                     let skip = (applied - start) as usize;
                     match sessions.write(&id, conn, input.data[skip..].to_vec()).await {
                         Ok(()) => applied = input.input_seq,
-                        // Child gone, or the lease was stolen: this attach
-                        // is read-only from here on. The output pump still
-                        // owes the peer its `Exit`, so stop reading input
-                        // instead of tearing the stream down.
-                        Err(BrokerError::NotRunning | BrokerError::NotWriter) => return Ok(()),
+                        // The lease was stolen (this attach is read-only
+                        // now — protocol.md §10 "read-only로 강등된다") or
+                        // the child is gone. Neither ends the attach: the
+                        // peer is still owed its output and its `Exit`, and
+                        // a steal-back must resume writing without a
+                        // reattach. Discard the bytes but keep the offset
+                        // moving, so the peer's stream stays contiguous and
+                        // its ack is never left dangling, and try again on
+                        // the next frame.
+                        Err(
+                            BrokerError::NotRunning
+                            | BrokerError::NotWriter
+                            | BrokerError::NotFound,
+                        ) => applied = input.input_seq,
                         Err(err) => return Err(err.into()),
                     }
                 }
@@ -360,14 +375,16 @@ async fn send_frame(
 }
 
 /// Mirror a ring control entry onto the control stream as an asynchronous
-/// `SessionEvent` (protocol.md §9). Advisory — never blocks the pump.
-fn notify(
+/// `SessionEvent` (protocol.md §9). `writer_changed` and `closed` have no
+/// `SessionFrame` form, so for an attached peer this is their only door —
+/// it waits for room rather than dropping them.
+async fn notify(
     events: &Option<mpsc::Sender<ControlMessage>>,
     id: &SessionId,
     sequence: u64,
     event: &ControlEvent,
-) {
-    let Some(tx) = events else { return };
+) -> Result<(), SessionStreamError> {
+    let Some(tx) = events else { return Ok(()) };
     let body = match event {
         ControlEvent::Exit { exit_code, signal } => wire::SessionEvent::exited(
             id.as_str(),
@@ -384,8 +401,10 @@ fn notify(
             wire::SessionEvent::closed(id.as_str(), reason.as_str(), sequence)
         }
     };
-    let _ = tx.try_send(ControlMessage::new(
+    tx.send(ControlMessage::new(
         0,
         control_message::Body::SessionEvent(body),
-    ));
+    ))
+    .await
+    .map_err(|_| SessionStreamError::PeerGone)
 }

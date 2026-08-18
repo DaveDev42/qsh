@@ -175,9 +175,12 @@ fn run_session(cli: &Cli, ops: &Ops, cmd: &SessionCmd) -> i32 {
     }
 }
 
-/// How long one `--follow` pull long-polls when `--wait` was not given.
-/// The host clamps it to `SESSION_READ_MAX_WAIT`; a follower that is not
-/// told otherwise should park, not spin.
+/// How long one `--follow` pull long-polls, and the *floor* under an
+/// explicit `--wait`. The host only clamps `wait_ms` from above
+/// (`SESSION_READ_MAX_WAIT`), so a follower given `--wait 0` for a single
+/// pull would otherwise turn into a tight round-trip loop against `serve`
+/// for as long as the session stays idle. A follower parks; it never
+/// spins.
 const FOLLOW_WAIT_MS: u64 = 30_000;
 
 /// `qsh session read`: one pull, or — with `--follow` — a loop of them
@@ -224,7 +227,9 @@ fn run_session_follow(cli: &Cli, ops: &Ops, args: &SessionReadArgs) -> i32 {
     let mut reader = match ops.session_reader(SessionReadReq {
         session_ref: args.session_ref.clone(),
         after_sequence: args.after,
-        wait_ms: Some(args.wait.unwrap_or(FOLLOW_WAIT_MS)),
+        // `--wait` may only make a follower park *longer*: see
+        // `FOLLOW_WAIT_MS`.
+        wait_ms: Some(args.wait.unwrap_or(FOLLOW_WAIT_MS).max(FOLLOW_WAIT_MS)),
         limit_bytes: args.limit_bytes,
         ctl_after: Some(args.ctl_after),
     }) {

@@ -6,6 +6,10 @@
 //! loop (`Ops::session_read` is literally a one-pull delegation), so a
 //! session's event stream must look the same through either door.
 
+// Sessions are PTY-backed, so this whole file only exists on POSIX hosts
+// (Windows host is P2) — and `sh` is not there to run the script either.
+#![cfg(unix)]
+
 mod common;
 
 use base64::Engine as _;
@@ -58,15 +62,28 @@ fn parse_events(stdout: &[u8], label: &str) -> Vec<Value> {
 /// through: the output bytes in order, and the (type, sequence) of every
 /// control event. Chunk boundaries are explicitly *not* part of it — the
 /// host may split or merge freely (`docs/CLI.md` §6.4).
-fn normalize(events: &[Value], label: &str) -> (Vec<u8>, Vec<(String, u64)>, u64) {
+/// A control event reduced to what both doors must agree on: its `type`
+/// and its `sequence` — `None` for `session.gap`, which has none.
+type Control = (String, Option<u64>);
+
+/// The comparable shape of one event stream: output bytes, control events,
+/// and the final cumulative offset.
+type Normalized = (Vec<u8>, Vec<Control>, u64);
+
+fn normalize(events: &[Value], label: &str) -> Normalized {
     let mut bytes = Vec::new();
     let mut controls = Vec::new();
     let mut last_sequence = 0u64;
     for event in events {
         let kind = event["type"].as_str().expect("type").to_string();
-        let sequence = event["sequence"].as_u64().unwrap_or(last_sequence);
+        // `session.gap` carries `requested_after`/`available_from` and no
+        // `sequence` at all (CLI.md §6.4). Recording it as `None` rather
+        // than inventing one keeps the comparison honest exactly where a
+        // gap would otherwise be papered over.
+        let sequence = event["sequence"].as_u64();
         match kind.as_str() {
             "session.output" => {
+                let sequence = sequence.expect("session.output carries a sequence");
                 let data = BASE64
                     .decode(event["data_b64"].as_str().expect("data_b64"))
                     .expect("data_b64 is Base64");
@@ -79,7 +96,7 @@ fn normalize(events: &[Value], label: &str) -> (Vec<u8>, Vec<(String, u64)>, u64
             }
             other => {
                 controls.push((other.to_string(), sequence));
-                last_sequence = last_sequence.max(sequence);
+                last_sequence = last_sequence.max(sequence.unwrap_or(last_sequence));
             }
         }
     }
@@ -179,4 +196,58 @@ fn wait_and_follow_deliver_the_same_stream() {
         .find(|e| e["type"] == "session.exit")
         .expect("session.exit");
     assert_eq!(exit["exit_code"], 7, "{exit}");
+}
+
+/// The one shape this step decided (`docs/CLI.md` §6.4): a follower is a
+/// stream, so `--json --follow` emits the same bare `qsh.event/v1` lines as
+/// `--jsonl --follow` — never a single `qsh.cli/v1` envelope. Without this
+/// the sentence in the contract has no test behind it.
+#[test]
+fn json_and_jsonl_follow_emit_the_same_bare_event_stream() {
+    let fleet = Fleet::start();
+
+    let mut streams = Vec::new();
+    for mode in ["--jsonl", "--json"] {
+        let session_ref = open_noisy_session(&fleet.client);
+        let out = fleet.client.qsh(&[
+            "session",
+            "read",
+            &session_ref,
+            mode,
+            "--follow",
+            "--after",
+            "0",
+        ]);
+        assert_eq!(
+            exit_code(&out),
+            0,
+            "{mode} --follow exits 0 on session.exit"
+        );
+        // `parse_events` already asserts every stdout line is a complete
+        // `qsh.event/v1` *object* — an envelope would fail there.
+        let events = parse_events(&out.stdout, mode);
+        assert!(
+            events.iter().all(|e| e["schema"] == "qsh.event/v1"),
+            "{mode}: a follower never emits a qsh.cli/v1 envelope"
+        );
+        let (bytes, controls, end) = normalize(&events, mode);
+        streams.push((bytes, controls, end));
+    }
+
+    let (jsonl, json) = (&streams[0], &streams[1]);
+    assert_eq!(
+        String::from_utf8_lossy(&jsonl.0),
+        String::from_utf8_lossy(&json.0),
+        "--json --follow and --jsonl --follow carry the same bytes"
+    );
+    assert_eq!(
+        jsonl.1, json.1,
+        "…and the same control events at the same offsets"
+    );
+    assert_eq!(jsonl.2, json.2);
+    assert!(
+        jsonl.1.iter().any(|(kind, _)| kind == "session.exit"),
+        "{:?}",
+        jsonl.1
+    );
 }
