@@ -3,7 +3,7 @@
   "data": {
     "created_at": "<timestamp>",
     "host": "box",
-    "last_sequence": 31,
+    "last_sequence": 0,
     "session_id": "<session_id>",
     "session_ref": "box/<session_id>",
     "state": "running",

@@ -177,20 +177,30 @@ where
 }
 
 /// A [`SourceFactory`] handing out cooperative [`PipeSource`]s and queueing
-/// their test-side [`PipeHandle`]s for the caller to pick up in open order.
-/// This is how the loopback harness (and the broker's own tests) drive
-/// session output/exit without a PTY.
+/// their test-side [`PipeHandle`]s (with the [`SessionSpec`] each was
+/// opened with) for the caller to pick up in open order. This is how the
+/// loopback harness (and the broker's own tests) drive session output/exit
+/// without a PTY, and assert what reached the source.
 #[derive(Default)]
 pub struct PipeFactory {
     buffer: usize,
-    handles: Mutex<std::collections::VecDeque<PipeHandle>>,
+    ignored: Vec<Signal>,
+    handles: Mutex<std::collections::VecDeque<(SessionSpec, PipeHandle)>>,
 }
 
 impl PipeFactory {
     /// Factory whose pipes buffer `buffer` bytes each way.
     pub fn new(buffer: usize) -> Self {
+        Self::with_ignored_signals(buffer, &[])
+    }
+
+    /// Like [`PipeFactory::new`], but every source it creates ignores the
+    /// listed signals ([`PipeSource::with_ignored_signals`]) — a "child"
+    /// that survives HUP, to exercise the close escalation end to end.
+    pub fn with_ignored_signals(buffer: usize, ignored: &[Signal]) -> Self {
         Self {
             buffer,
+            ignored: ignored.to_vec(),
             handles: Mutex::new(std::collections::VecDeque::new()),
         }
     }
@@ -198,6 +208,13 @@ impl PipeFactory {
     /// The handle of the oldest session opened through this factory that
     /// nobody has taken yet.
     pub fn take(&self) -> Option<PipeHandle> {
+        self.take_with_spec().map(|(_, handle)| handle)
+    }
+
+    /// Like [`PipeFactory::take`], also returning the exact [`SessionSpec`]
+    /// the broker handed to `create` — how tests assert that `argv`/`env`/
+    /// `term`/window size survived the wire unchanged.
+    pub fn take_with_spec(&self) -> Option<(SessionSpec, PipeHandle)> {
         self.handles
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -220,12 +237,12 @@ impl std::fmt::Debug for PipeFactory {
 }
 
 impl SourceFactory for PipeFactory {
-    fn create(&self, _spec: &SessionSpec) -> io::Result<Box<dyn SessionSource>> {
-        let (source, handle) = PipeSource::new(self.buffer.max(1));
+    fn create(&self, spec: &SessionSpec) -> io::Result<Box<dyn SessionSource>> {
+        let (source, handle) = PipeSource::with_ignored_signals(self.buffer.max(1), &self.ignored);
         self.handles
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .push_back(handle);
+            .push_back((spec.clone(), handle));
         Ok(Box::new(source))
     }
 }
@@ -418,19 +435,21 @@ impl Broker {
     /// Close a session: signal its child (escalating per CLI.md §6.7 on
     /// the injected clock; no signal at all if it already exited), then
     /// append `session.closed{reason}` as its last entry. Resolves once the
-    /// entry is in the ring. The session stays readable for
-    /// [`CLOSED_RETENTION`] and is otherwise gone at once. A missing or
-    /// already-closed session is [`BrokerError::NotFound`]; a close racing
-    /// another close joins it.
+    /// entry is in the ring and returns the final cumulative output offset
+    /// (the `sequence` stamped on that `session.closed` entry — CLI.md §6.7
+    /// `final_sequence`, which includes whatever the child emitted while
+    /// dying). The session stays readable for [`CLOSED_RETENTION`] and is
+    /// otherwise gone at once. A missing or already-closed session is
+    /// [`BrokerError::NotFound`]; a close racing another close joins it.
     pub async fn close(
         &self,
         id: &SessionId,
         reason: CloseReason,
         signal: Option<Signal>,
-    ) -> Result<(), BrokerError> {
+    ) -> Result<u64, BrokerError> {
         let handle = self.get(id)?;
         handle.close(reason, signal).await;
-        Ok(())
+        Ok(handle.info().last_sequence)
     }
 
     /// Release any writer lease held by `conn` across every session
@@ -585,15 +604,16 @@ pub trait SessionBackend: Send + Sync {
         no_steal: bool,
     ) -> BoxFuture<'_, Result<TakeOutcome, BrokerError>>;
 
-    /// Close a session (see [`Broker::close`]). `signal` overrides the
-    /// first escalation step; the dispatch edge parses it with
-    /// [`Signal::parse`] and answers `INVALID_ARGUMENT` itself.
+    /// Close a session (see [`Broker::close`]); resolves to the final
+    /// output offset. `signal` overrides the first escalation step; the
+    /// dispatch edge parses it with [`Signal::parse`] and answers
+    /// `INVALID_ARGUMENT` itself.
     fn close(
         &self,
         id: &SessionId,
         reason: CloseReason,
         signal: Option<Signal>,
-    ) -> BoxFuture<'_, Result<(), BrokerError>>;
+    ) -> BoxFuture<'_, Result<u64, BrokerError>>;
 
     /// A connection died: release every writer lease it held. Sessions and
     /// their children survive (architecture.md §3 rule c).
@@ -678,7 +698,7 @@ impl SessionBackend for Broker {
         id: &SessionId,
         reason: CloseReason,
         signal: Option<Signal>,
-    ) -> BoxFuture<'_, Result<(), BrokerError>> {
+    ) -> BoxFuture<'_, Result<u64, BrokerError>> {
         let id = id.clone();
         Box::pin(async move { Broker::close(self, &id, reason, signal).await })
     }

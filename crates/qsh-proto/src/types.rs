@@ -131,6 +131,24 @@ pub struct SessionListReq {
 pub struct SessionListData {
     /// Sessions visible under the caller's `session.list` ACL scope.
     pub sessions: Vec<Session>,
+    /// Hosts that could not be asked when `qsh sessions` fans out over
+    /// every pinned host (`docs/CLI.md` §6.2). Absent/empty when every host
+    /// answered, and always empty for a single-host request (that is a
+    /// plain error). Additive (`qsh.cli/v1`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unreachable: Vec<UnreachableHost>,
+}
+
+/// One host `session.list` could not reach — its alias plus the error it
+/// would have produced on its own (`docs/CLI.md` §6.2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct UnreachableHost {
+    /// Host alias.
+    pub host: String,
+    /// `ErrorCode` string of the failure (`CONNECTION_FAILED`, `TIMEOUT`, ...).
+    pub code: String,
+    /// Human-readable explanation. Automation must not parse this.
+    pub message: String,
 }
 
 /// Request for `session.get` (`docs/CLI.md` §6.2). The data payload is a
@@ -213,6 +231,16 @@ pub struct SessionReadReq {
     /// = server default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit_bytes: Option<u64>,
+    /// Control-entry cursor (`--ctl-after`): the `next_ctl_after` of the
+    /// previous reply, `0` (the default) for a fresh read. Control events
+    /// (`session.exit`/`writer_changed`/`closed`) carry the offset they were
+    /// appended at and do **not** advance it, so `after_sequence` alone
+    /// cannot express "I already have the control event positioned at N";
+    /// a poller that does not echo this back sees such an event again on
+    /// every pull (`docs/CLI.md` §6.4). Additive (`qsh.cli/v1`), so it is
+    /// omitted entirely when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ctl_after: Option<u64>,
 }
 
 /// Data payload of a single (non-`--follow`) `session.read`: the events
@@ -224,6 +252,16 @@ pub struct SessionReadData {
     /// `qsh.event/v1` events (`session.output`/`gap`/`exit`/
     /// `writer_changed`/`closed`); may be empty when `wait_ms` elapsed.
     pub events: Vec<crate::event::SessionEvent>,
+    /// Cursor to resume from: pass back as `after_sequence`. Equal to the
+    /// request's `after_sequence` plus the output bytes delivered (or the
+    /// replay buffer's `available_from` after a gap). Additive
+    /// (`qsh.cli/v1`).
+    #[serde(default)]
+    pub next_after: u64,
+    /// Control-entry half of the resume cursor: pass back as `ctl_after`.
+    /// Additive (`qsh.cli/v1`).
+    #[serde(default)]
+    pub next_ctl_after: u64,
 }
 
 /// Request for `session.write` (`docs/CLI.md` §6.5).
@@ -632,6 +670,7 @@ mod tests {
             schemars::schema_for!(Session).to_value(),
             schemars::schema_for!(SessionListReq).to_value(),
             schemars::schema_for!(SessionListData).to_value(),
+            schemars::schema_for!(UnreachableHost).to_value(),
             schemars::schema_for!(SessionGetReq).to_value(),
             schemars::schema_for!(SessionOpenReq).to_value(),
             schemars::schema_for!(SessionOpenData).to_value(),
@@ -757,6 +796,25 @@ mod tests {
         assert_eq!(minimal.after_sequence, 0);
         assert_eq!(minimal.wait_ms, None);
         assert_eq!(minimal.limit_bytes, None);
+        assert_eq!(minimal.ctl_after, None);
+
+        // `ctl_after` is additive: absent from the §8.3 shape above, and
+        // round-trips when a poller echoes the previous reply's cursor.
+        let with_cursor: SessionReadReq = serde_json::from_value(serde_json::json!({
+            "session_ref": "h/x",
+            "after_sequence": 42,
+            "ctl_after": 7
+        }))
+        .unwrap();
+        assert_eq!(with_cursor.ctl_after, Some(7));
+        assert_eq!(
+            serde_json::to_value(&with_cursor).unwrap(),
+            serde_json::json!({
+                "session_ref": "h/x",
+                "after_sequence": 42,
+                "ctl_after": 7
+            })
+        );
     }
 
     #[test]
@@ -764,6 +822,8 @@ mod tests {
         use crate::event::{EVENT_SCHEMA, SessionEvent};
         let d = SessionReadData {
             session_ref: "personal-mac/01K0SESSION".into(),
+            next_after: 180,
+            next_ctl_after: 3,
             events: vec![
                 SessionEvent::Output {
                     schema: EVENT_SCHEMA.into(),

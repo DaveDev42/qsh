@@ -293,8 +293,10 @@ fn golden_session_fixtures() {
     check("session.open.json", opened);
 
     // The headless echo session prints a banner first; a long-poll read
-    // from 0 returns exactly that one output event (no lease has been
-    // taken yet, so no control events can interleave).
+    // from 0 returns that output (no lease has been taken yet, so no
+    // control events can interleave). The fixture masks payload and
+    // offsets, so only this test's own asserts know about the stand-in —
+    // Step 4 (PTY) rewrites these asserts, not the fixtures.
     let banner_len = qsh_core::broker::ECHO_BANNER.len() as u64;
     let (code, read) = client.json(&[
         "session",
@@ -308,10 +310,21 @@ fn golden_session_fixtures() {
     ]);
     assert_eq!(code, 0, "{read}");
     let events = read["data"]["events"].as_array().expect("events");
-    assert_eq!(events.len(), 1, "{read}");
-    assert_eq!(events[0]["type"], "session.output");
-    assert_eq!(events[0]["sequence"], banner_len);
-    check("session.read.json", read);
+    assert!(!events.is_empty(), "{read}");
+    assert!(
+        events.iter().all(|e| e["type"] == "session.output"),
+        "{read}"
+    );
+    assert_eq!(events.last().unwrap()["sequence"], banner_len, "{read}");
+    // The reply carries the resume cursor a poller must feed back
+    // (`--after`/`--ctl-after`, CLI.md §6.4).
+    assert_eq!(read["data"]["next_after"], banner_len, "{read}");
+    assert!(read["data"]["next_ctl_after"].is_u64(), "{read}");
+    // One event in the fixture: the pull may split the banner in theory,
+    // so keep the fixture to the first event only (shape is what it pins).
+    let mut read_fixture = read.clone();
+    read_fixture["data"]["events"] = Value::Array(vec![events[0].clone()]);
+    check("session.read.json", read_fixture);
 
     // "hi\n" — the echo child sends it straight back as output.
     let (code, written) = client.json(&[
@@ -328,18 +341,22 @@ fn golden_session_fixtures() {
 
     // Bounded poll (no sleeps: each iteration is a real round trip) until
     // the echo has landed in the ring and the write's connection has
-    // released its lease, so the snapshots below are stable.
-    let mut got = None;
-    for _ in 0..500 {
+    // released its lease, so the snapshots below are stable. Wall-clock
+    // bounded rather than iteration-bounded so a loaded box does not fail
+    // spuriously.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let session = loop {
         let (code, session) = client.json(&["session", "get", &session_ref, "--json"]);
         assert_eq!(code, 0, "{session}");
         if session["data"]["last_sequence"] == banner_len + 3 && session["data"]["writer"].is_null()
         {
-            got = Some(session);
-            break;
+            break session;
         }
-    }
-    let session = got.expect("echoed output reached the replay ring and the lease was released");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "echoed output never reached the replay ring / lease never released: {session}"
+        );
+    };
     assert_eq!(session["data"]["state"], "running");
     check("session.get.json", session);
 
@@ -426,6 +443,43 @@ fn every_fixture_is_a_wellformed_v1_envelope() {
             assert!(error["message"].as_str().is_some(), "{name}");
             assert!(error["retryable"].as_bool().is_some(), "{name}");
         }
+    }
+}
+
+/// ADR-0007 (결과 절): the resume token is never a property of any JSON
+/// contract type (`qsh-proto` pins the schemas) **and never appears in a
+/// fixture** — this is the fixture half. Checked structurally on every
+/// object key at any depth, and textually so a token smuggled inside a
+/// string value would trip it too.
+#[test]
+fn no_fixture_carries_a_resume_token() {
+    if skip_while_regenerating() {
+        return;
+    }
+    fn keys(v: &Value, out: &mut Vec<String>) {
+        match v {
+            Value::Object(map) => {
+                out.extend(map.keys().cloned());
+                map.values().for_each(|c| keys(c, out));
+            }
+            Value::Array(items) => items.iter().for_each(|c| keys(c, out)),
+            _ => {}
+        }
+    }
+    for (name, fixture) in fixtures::all_cli_v1() {
+        let mut names = Vec::new();
+        keys(&fixture, &mut names);
+        assert!(
+            !names
+                .iter()
+                .any(|k| k.contains("resume_token") || k == "token"),
+            "{name}: exposes a token field ({names:?}) — ADR-0007"
+        );
+        let text = serde_json::to_string(&fixture).expect("encode");
+        assert!(
+            !text.contains("resume_token"),
+            "{name}: mentions resume_token"
+        );
     }
 }
 

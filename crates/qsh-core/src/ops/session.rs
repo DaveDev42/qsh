@@ -19,12 +19,18 @@ use qsh_proto::{
     ErrorCode, Session as SessionJson, SessionCloseData, SessionCloseReq, SessionGetReq,
     SessionListData, SessionListReq, SessionOpenData, SessionOpenReq, SessionReadData,
     SessionReadReq, SessionResizeData, SessionResizeReq, SessionWriteData, SessionWriteReq,
+    UnreachableHost,
 };
 use qsh_transport::Dialer;
 
 use crate::client::{ClientError, Session};
 use crate::ops::exec::{map_client_error, map_dial_error};
 use crate::ops::{OpError, Operation, Ops, PeerTarget};
+
+/// Upper bound on the input one `session.write` accepts (`--stdin` or
+/// `--data-b64`), 16 MiB. Keeps a single value op — and its stdin buffer —
+/// bounded, the way `EXEC_OUTPUT_MAX` bounds one `exec.run` envelope.
+pub const SESSION_WRITE_MAX: usize = 16 * 1024 * 1024;
 
 /// The `session.open` operation.
 pub struct SessionOpenOp;
@@ -224,29 +230,75 @@ impl Ops {
 
     /// `session.list` — sessions on one host, or on every pinned host with
     /// an address when `req.host` is `None` (`docs/CLI.md` §6.2). Hosts are
-    /// visited in trust-store order; the first failure aborts the call.
+    /// visited in trust-store order. A single-host request fails as that
+    /// host fails; the fan-out is best-effort per host — one sleeping
+    /// laptop must not hide every other host's sessions — so unreachable
+    /// hosts are reported in `unreachable` (additive) and the call only
+    /// fails when *no* host answered.
     pub fn session_list(&self, req: SessionListReq) -> Result<SessionListData, OpError> {
-        let hosts: Vec<String> = match req.host {
-            Some(host) => vec![host],
-            None => self
-                .open_trust()?
-                .snapshot()
-                .peers()
-                .iter()
-                .filter(|p| !p.address.is_empty())
-                .map(|p| p.name.clone())
-                .collect(),
+        let (hosts, fan_out) = match req.host {
+            Some(host) => (vec![host], false),
+            None => (
+                self.open_trust()?
+                    .snapshot()
+                    .peers()
+                    .iter()
+                    .filter(|p| !p.address.is_empty())
+                    .map(|p| p.name.clone())
+                    .collect(),
+                true,
+            ),
         };
         let mut sessions = Vec::new();
+        let mut unreachable = Vec::new();
+        let mut last_error = None;
+        let mut answered = 0usize;
         for host in hosts {
-            let infos = self.call(&host, |s| Box::pin(s.session_list()))?;
-            sessions.extend(infos.into_iter().map(|i| session_json(&host, i)));
+            match self.call(&host, |s| Box::pin(s.session_list())) {
+                Ok(infos) => {
+                    answered += 1;
+                    sessions.extend(infos.into_iter().map(|i| session_json(&host, i)));
+                }
+                Err(err) if fan_out => {
+                    tracing::warn!(%host, code = %err.code, %err.message, "session.list: host unreachable");
+                    unreachable.push(UnreachableHost {
+                        host,
+                        code: err.code.to_string(),
+                        message: err.message.clone(),
+                    });
+                    last_error = Some(err);
+                }
+                Err(err) => return Err(err),
+            }
         }
-        Ok(SessionListData { sessions })
+        if answered == 0
+            && !unreachable.is_empty()
+            && let Some(err) = last_error
+        {
+            // *No* host answered: that is the call failing, not a partial
+            // answer. A host that answered with an empty list is an answer,
+            // so it keeps the call successful. `unreachable` is on the
+            // error too.
+            let details = serde_json::json!({ "unreachable": unreachable });
+            return Err(OpError {
+                code: err.code,
+                message: format!("no host answered session.list (last: {})", err.message),
+                retryable: err.retryable,
+                details,
+            });
+        }
+        Ok(SessionListData {
+            sessions,
+            unreachable,
+        })
     }
 
-    /// `session.read` — one pull of the replay ring after `after_sequence`
-    /// (`docs/CLI.md` §6.4), long-polling up to `wait_ms`.
+    /// `session.read` — one pull of the replay ring from the
+    /// (`after_sequence`, `ctl_after`) cursor (`docs/CLI.md` §6.4),
+    /// long-polling up to `wait_ms`. The reply carries the next cursor:
+    /// a poller must feed `next_after`/`next_ctl_after` back, otherwise a
+    /// control event positioned exactly at `after_sequence` is re-delivered
+    /// on every pull and a `--wait` loop never parks.
     pub fn session_read(&self, req: SessionReadReq) -> Result<SessionReadOutput, OpError> {
         let r = parse_session_ref(&req.session_ref)?;
         let msg = wire::SessionRead {
@@ -254,11 +306,12 @@ impl Ops {
             after: req.after_sequence,
             max_bytes: req.limit_bytes.unwrap_or(0),
             wait_ms: req.wait_ms.unwrap_or(0),
+            ctl_after: req.ctl_after.unwrap_or(0),
         };
-        let events = self.call(&r.host, |s| Box::pin(s.session_read(msg)))?;
+        let result = self.call(&r.host, |s| Box::pin(s.session_read(msg)))?;
         let mut output = Vec::new();
-        let mut json_events = Vec::with_capacity(events.len());
-        for event in events {
+        let mut json_events = Vec::with_capacity(result.events.len());
+        for event in result.events {
             if let Some(session_read_event::Body::Output(o)) = &event.body {
                 output.extend_from_slice(&o.data);
             }
@@ -270,6 +323,8 @@ impl Ops {
             data: SessionReadData {
                 session_ref: req.session_ref,
                 events: json_events,
+                next_after: result.next_after,
+                next_ctl_after: result.next_ctl_after,
             },
             output,
         })
@@ -288,19 +343,32 @@ impl Ops {
 
     /// `session.write` with raw bytes (the CLI's `--stdin` path). Input
     /// longer than one wire chunk is sent as consecutive chunks on the same
-    /// connection; `bytes_written` is the total the host accepted.
+    /// connection; `bytes_written` is the total the host accepted. One
+    /// write is bounded by [`SESSION_WRITE_MAX`] (`INVALID_ARGUMENT`
+    /// beyond it — a single envelope must stay bounded, `docs/CLI.md`
+    /// §6.5); stream larger input through repeated writes or an attach.
     pub fn session_write_bytes(
         &self,
         session_ref: &str,
         data: Vec<u8>,
     ) -> Result<SessionWriteData, OpError> {
         let r = parse_session_ref(session_ref)?;
+        if data.len() > SESSION_WRITE_MAX {
+            return Err(OpError::new(
+                ErrorCode::InvalidArgument,
+                format!(
+                    "session write input is {} bytes; one write is limited to {SESSION_WRITE_MAX} bytes",
+                    data.len()
+                ),
+            ));
+        }
         let bytes_written = self.call(&r.host, |s| {
             Box::pin(async move {
                 let mut total = 0u64;
                 let mut chunks = data.chunks(wire::SESSION_CHUNK_MAX).peekable();
                 if chunks.peek().is_none() {
-                    // An empty write still exercises the lease + ACL path.
+                    // An empty write still goes through the ACL path (and
+                    // existence check) but takes no lease on the host.
                     return s.session_write(&r.session_id, Vec::new()).await;
                 }
                 for chunk in chunks {

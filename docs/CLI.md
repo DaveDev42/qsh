@@ -240,7 +240,9 @@ qsh sessions [host] --json
 qsh session get <session-ref> --json
 ```
 
-`session.list`의 `data`는 `{"sessions": [Session, …]}`(§5 Session 배열)이고 `session.get`의 `data`는 Session 객체 하나다. `session.list`는 그 host의 세션을 (ACL `session.list` 범위에서) 장비와 무관하게 반환한다. 다만 **`session.attach`(및 `qsh attach`)는 세션을 연 장비에서만 가능하다** — resume credential이 세션에 결합된 peer identity에 묶여 있고(protocol.md §10, PRD §9) 토큰은 그 장비의 상태 파일에만 있기 때문이다(§6.3, ADR-0007). 다른 장비에서는 목록에 `running`으로 보이더라도 attach는 로컬 `SESSION_NOT_FOUND`(`details.reason: "no_resume_token"`)로 실패한다. `session.get`/`read`/`write`/`resize`/`close`는 토큰이 아니라 ACL만으로 동작하므로 다른 장비에서도 가능하다.
+`session.list`의 `data`는 `{"sessions": [Session, …]}`(§5 Session 배열)이고 `session.get`의 `data`는 Session 객체 하나다.
+
+**`qsh sessions`를 host 없이 부르면** 주소가 있는 pinned host 전부에 fan-out한다. 이때는 **best-effort**다: 도달하지 못한 host는 결과를 감추지 않고 `data.unreachable`에 모아 보고하고(`[{"host": …, "code": "CONNECTION_FAILED", "message": …}, …]`, additive field이므로 비어 있으면 아예 생략된다) 나머지 host의 세션은 그대로 돌려준다. 잠든 노트북 한 대가 다른 host의 목록을 통째로 숨겨서는 안 되기 때문이다. **모든** host가 실패하면 그것은 부분 응답이 아니라 호출 실패이며, 마지막 오류의 `code`로 실패하고 `error.details.unreachable`에 같은 배열이 실린다. host를 명시한 단일 호출(`qsh sessions <host>`)은 fan-out이 아니므로 그 host의 실패가 곧 호출의 실패이고 `unreachable`은 항상 비어 있다. human 모드에서는 도달 실패가 stdout 표가 아니라 stderr 경고 줄로 나간다(§2.2). `session.list`는 그 host의 세션을 (ACL `session.list` 범위에서) 장비와 무관하게 반환한다. 다만 **`session.attach`(및 `qsh attach`)는 세션을 연 장비에서만 가능하다** — resume credential이 세션에 결합된 peer identity에 묶여 있고(protocol.md §10, PRD §9) 토큰은 그 장비의 상태 파일에만 있기 때문이다(§6.3, ADR-0007). 다른 장비에서는 목록에 `running`으로 보이더라도 attach는 로컬 `SESSION_NOT_FOUND`(`details.reason: "no_resume_token"`)로 실패한다. `session.get`/`read`/`write`/`resize`/`close`는 토큰이 아니라 ACL만으로 동작하므로 다른 장비에서도 가능하다.
 
 ### 6.3 Session 생성
 
@@ -276,11 +278,14 @@ qsh session read <session-ref> --after 42 --follow --jsonl
 ```
 
 - `--after`: 마지막으로 수신한 누적 output byte offset (sequence)
-- `--wait`: 새 output을 기다릴 최대 milliseconds
+- `--ctl-after`: 마지막으로 수신한 **control entry id** — 직전 응답의 `next_ctl_after`를 그대로 되돌려준다. 생략하면 `0`(처음부터).
+- `--wait`: 새 output을 기다릴 최대 milliseconds. 호스트는 이 값도 상한(현재 60 s, `SESSION_READ_MAX_WAIT`)으로 clamp한다 — `--limit-bytes`와 같은 취급으로, 더 큰 값은 오류가 아니라 상한이다. 더 오래 기다리려면 같은 cursor로 다시 부른다.
 - `--follow`: 종료나 취소까지 event를 계속 출력
 - `--limit-bytes`: 한 응답의 최대 payload. 호스트는 이 값을 상한(현재 192 KiB, `SESSION_READ_MAX_BYTES`)으로 clamp한다 — 더 큰 값은 오류가 아니라 상한으로 취급된다.
 
-단일 JSON 응답은 event 배열을 반환한다: `data`는 `{"session_ref": "...", "events": [Event, …]}`이며 각 원소는 아래 event 객체 그대로다. `--follow --jsonl`은 event 하나당 한 줄을 출력한다.
+단일 JSON 응답은 event 배열을 반환한다: `data`는 `{"session_ref": "...", "events": [Event, …], "next_after": <sequence>, "next_ctl_after": <id>}`이며 각 원소는 아래 event 객체 그대로다. `--follow --jsonl`은 event 하나당 한 줄을 출력한다.
+
+**Cursor는 두 값이다.** `session.exit`/`session.writer_changed`/`session.closed`는 zero-length control entry라서 자신이 append된 시점의 offset을 달고 나오지만 offset을 **증가시키지 않는다**(아래 "전달 경로와 순서"). 따라서 `--after` 하나로는 "offset N에 있는 control event는 이미 받았다"를 표현할 수 없다. `next_after`/`next_ctl_after`를 그대로 `--after`/`--ctl-after`로 되먹이는 소비자는 모든 event를 **정확히 한 번** 받는다. 되먹이지 않는 소비자(`--ctl-after` 생략)는 offset이 정확히 `--after`인 control event를 **매번 다시** 받으며(at-least-once), `--wait` 폴링 루프는 그 event 때문에 즉시 반환되어 대기하지 않는다 — 폴링 루프는 반드시 두 값을 함께 되먹여야 한다.
 
 소비자 규칙의 정확한 범위: "알 수 없는 event `type`은 무시"는 **`type` 문자열이 미지인 경우**에만 적용된다. 알려진 `type`(`session.output` 등)인데 필수 필드가 없거나 타입이 틀린 event는 잘못된 입력이며, 소비자는 이를 건너뛰지 말고 오류로 처리해야 한다(조용한 output 손실 금지, PRD §8).
 
@@ -366,7 +371,7 @@ printf 'continue\n' | qsh session write <session-ref> --stdin --json
 qsh session write <session-ref> --data-b64 Yw== --json
 ```
 
-`--stdin`과 `--data-b64`는 상호 배타적이다. 전자는 raw stdin bytes, 후자는 명시적인 Base64 bytes를 전송한다.
+`--stdin`과 `--data-b64`는 상호 배타적이다. 전자는 raw stdin bytes, 후자는 명시적인 Base64 bytes를 전송한다. 한 번의 `session.write`가 받는 입력은 **16 MiB**로 제한된다(`SESSION_WRITE_MAX`) — 단일 value op의 envelope은 유계여야 하므로, 초과분은 `INVALID_ARGUMENT`이고 `--stdin`은 상한을 넘겨 버퍼링하지 않는다. 더 큰 입력은 반복 write나 attach로 흘려보낸다. (호스트는 이 입력을 16 KiB wire chunk로 나눠 같은 connection에서 순서대로 보낸다.)
 
 결과 `data`는 `{"session_ref": "...", "bytes_written": <accepted byte count>}`다.
 
@@ -650,7 +655,7 @@ MVP의 `read_session`은 streaming MCP extension에 의존하지 않는다.
 }
 ```
 
-Agent는 반환된 마지막 sequence를 다음 cursor로 사용한다. 이 long-poll model은 다양한 MCP client에서 동일하게 동작한다.
+Agent는 응답의 `next_after`/`next_ctl_after`를 다음 호출의 `after_sequence`/`ctl_after`로 그대로 되먹인다(§6.4의 두-값 cursor; `ctl_after`는 additive optional field라 처음 호출에서는 생략한다). 이 long-poll model은 다양한 MCP client에서 동일하게 동작한다.
 
 ### 8.4 보안
 

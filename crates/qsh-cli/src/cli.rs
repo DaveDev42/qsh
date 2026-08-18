@@ -239,6 +239,12 @@ pub struct SessionReadArgs {
     #[arg(long, value_name = "SEQUENCE", default_value_t = 0)]
     pub after: u64,
 
+    /// Control-entry cursor: the `next_ctl_after` of the previous reply.
+    /// Control events do not advance `--after`, so a poller that omits this
+    /// is handed the control event sitting at `--after` on every pull.
+    #[arg(long, value_name = "ID", default_value_t = 0)]
+    pub ctl_after: u64,
+
     /// Long-poll: wait up to this many milliseconds for new output.
     #[arg(long, value_name = "MILLISECONDS")]
     pub wait: Option<u64>,

@@ -65,6 +65,12 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
     fleet
         .client
         .trust_add("deadport", Some("127.0.0.1:0"), &fleet.host_fingerprint);
+    // A client whose *only* pinned host with an address is unreachable:
+    // the `qsh sessions` fan-out is best-effort per host, but when no host
+    // answers at all that is the call failing (`docs/CLI.md` §6.2).
+    let all_dead = Sandbox::new();
+    all_dead.init();
+    all_dead.trust_add("deadport", Some("127.0.0.1:0"), &fleet.host_fingerprint);
 
     let cases = [
         Case {
@@ -172,6 +178,12 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
             outcome: Outcome::Succeeds(0),
         },
         Case {
+            name: "sessions: every pinned host unreachable",
+            sandbox: &all_dead,
+            args: &["sessions"],
+            outcome: Outcome::Fails("CONNECTION_FAILED"),
+        },
+        Case {
             name: "session get: unknown session id",
             sandbox: &fleet.client,
             args: &["session", "get", "box/01K0NOSUCHSESSION"],
@@ -206,6 +218,47 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
     for case in &cases {
         check(case);
     }
+
+    // `qsh sessions` with no host fans out over every pinned host that has
+    // an address (here: the live host plus the unreachable `deadport`).
+    // Best-effort: an unreachable host is reported in `data.unreachable`
+    // and must not hide the sessions the live host reported, nor turn the
+    // call into a failure (`docs/CLI.md` §6.2). The `session open` rows
+    // above left live sessions behind, so the list is non-empty.
+    let args = ["sessions", "--json"];
+    let out = fleet.client.qsh(&args);
+    assert_eq!(
+        exit_code(&out),
+        0,
+        "sessions fan-out: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let envelope = sole_envelope(&out.stdout, &args);
+    assert_eq!(envelope["ok"], true, "{envelope}");
+    let sessions = envelope["data"]["sessions"]
+        .as_array()
+        .expect("sessions array");
+    assert!(
+        sessions.iter().any(|s| s["host"] == HOST_ALIAS),
+        "the reachable host's sessions survive a peer being down: {envelope}"
+    );
+    let unreachable = envelope["data"]["unreachable"]
+        .as_array()
+        .expect("unreachable array");
+    assert_eq!(unreachable.len(), 1, "{envelope}");
+    assert_eq!(unreachable[0]["host"], "deadport", "{envelope}");
+    assert_eq!(unreachable[0]["code"], "CONNECTION_FAILED", "{envelope}");
+
+    // Human mode: the same warning is a stderr diagnostic, never a table
+    // row, and stdout still lists the reachable host's sessions (§2.2).
+    let human = fleet.client.qsh(&["sessions"]);
+    assert_eq!(exit_code(&human), 0);
+    let stderr = String::from_utf8_lossy(&human.stderr);
+    assert!(stderr.contains("deadport"), "human stderr was {stderr:?}");
+    assert!(
+        !String::from_utf8_lossy(&human.stdout).contains("deadport"),
+        "unreachable hosts are not table rows"
+    );
 }
 
 fn check(case: &Case<'_>) {

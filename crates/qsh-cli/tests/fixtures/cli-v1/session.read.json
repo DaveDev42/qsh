@@ -3,13 +3,15 @@
   "data": {
     "events": [
       {
-        "data_b64": "cXNoOiBoZWFkbGVzcyBlY2hvIHNlc3Npb24NCg==",
+        "data_b64": "<data_b64>",
         "schema": "qsh.event/v1",
-        "sequence": 28,
+        "sequence": 0,
         "session_ref": "box/<session_id>",
         "type": "session.output"
       }
     ],
+    "next_after": 0,
+    "next_ctl_after": 0,
     "session_ref": "box/<session_id>"
   },
   "ok": true,
