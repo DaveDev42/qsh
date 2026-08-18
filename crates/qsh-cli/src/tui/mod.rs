@@ -16,7 +16,18 @@
 //!
 //! Nothing on this path writes to stdout except session output itself:
 //! diagnostics, the `~?` help and every warning go to stderr
-//! (`docs/CLI.md` §2.2).
+//! (`docs/CLI.md` §2.2). There is no machine mode: `--json`/`--jsonl` on
+//! either interactive form is `INVALID_ARGUMENT` (§7), because stdout
+//! belongs to the remote terminal.
+//!
+//! ## Deliberate gaps
+//!
+//! - `~^Z` and job control: `docs/CLI.md` §7's escape table is exhaustive
+//!   and has no suspend, so SIGTSTP/SIGCONT are not handled. A `kill
+//!   -TSTP` therefore resumes into a terminal the client last configured;
+//!   that is backlog, not M2.
+//! - A lone escape character held at EOF is dropped when stdin closes,
+//!   which is what ssh does and what §7 leaves unspecified.
 //!
 //! ## Threads
 //!
@@ -76,9 +87,15 @@ impl Attach {
 }
 
 /// Environment variables an interactive client passes to the remote
-/// session: locale only (`docs/design/architecture.md` §4 — `TERM` travels
-/// in `SessionSpec.term`, and `HOME`/`USER`/`LOGNAME`/`SHELL`/`PATH` are
-/// pinned by the host and silently ignored here).
+/// session: locale only (`docs/CLI.md` §7, `docs/design/architecture.md`
+/// §4 — `TERM` travels in `SessionSpec.term`, and
+/// `HOME`/`USER`/`LOGNAME`/`SHELL`/`PATH` are pinned by the host and
+/// silently ignored here).
+///
+/// Interactive-only on purpose, and documented as such: `qsh session open`
+/// and the MCP adapter send exactly the `--env` their caller asked for, so
+/// a machine caller's session is never shaped by whatever locale the
+/// process that started it happened to have.
 #[cfg(unix)]
 const LOCALE_VARS: &[&str] = &["LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "LC_COLLATE"];
 

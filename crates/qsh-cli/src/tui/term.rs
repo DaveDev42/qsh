@@ -83,9 +83,10 @@ impl RawMode {
         Ok(Self { active: true })
     }
 
-    /// Whether the terminal is actually in raw mode (false for a piped
-    /// stdin), which is also what decides whether diagnostics need their
-    /// own CR.
+    /// Whether the terminal is actually in raw mode (`false` for a piped
+    /// stdin). Two things follow from it: escape processing is on only for
+    /// a terminal (`docs/CLI.md` §7), and raw mode has no output
+    /// post-processing, so diagnostics have to carry their own CR.
     pub fn is_raw(&self) -> bool {
         self.active
     }
@@ -184,6 +185,11 @@ mod tests {
     /// `restore()` is what the panic hook, the guard's `Drop` and the
     /// signal thread all call; it must be safe to call twice and safe to
     /// call when nothing was saved.
+    ///
+    /// Asserts on the process-global [`SAVED`], so it holds only while no
+    /// unit test in this binary calls [`RawMode::enter`] — a second one
+    /// that did would be stealing this one's slot. Add such a test and
+    /// these two need a shared lock.
     #[test]
     fn restore_is_idempotent_and_harmless_without_a_saved_state() {
         restore();
