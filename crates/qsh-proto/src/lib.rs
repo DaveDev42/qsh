@@ -8,7 +8,10 @@
 //! - [`error`]: [`error::ErrorCode`], the vocabulary shared by the wire
 //!   protocol and the `qsh.cli/v1` JSON envelope.
 //! - [`types`]: JSON contract types (`docs/CLI.md` §5, §6).
-//! - [`event`]: `qsh.event/v1` session events (`docs/CLI.md` §6.4).
+//! - [`event`]: `qsh.event/v1` session events (`docs/CLI.md` §6.4). Note
+//!   that [`event::SessionEvent`] (JSON) and [`wire::SessionEvent`]
+//!   (protobuf, control-stream notification) are distinct types; only the
+//!   JSON one is re-exported at the crate root.
 //!
 //! Because this crate parses untrusted input from the network, it is the
 //! designated fuzzing surface for the project (`docs/design/protocol.md`
@@ -24,6 +27,9 @@ pub use error::ErrorCode;
 pub use event::SessionEvent;
 pub use types::{
     CLI_SCHEMA_V1, CliEnvelope, CliError, EnvVar, ExecRunData, ExecRunReq, Host, IdentityInitData,
-    IdentityInitReq, KeyStoreKind, KeyStoreMode, Session, TrustAddData, TrustAddReq, TrustListData,
-    TrustPeer, TrustRemoveData, VersionData,
+    IdentityInitReq, KeyStoreKind, KeyStoreMode, Session, SessionAttachReq, SessionCloseData,
+    SessionCloseReq, SessionGetReq, SessionListData, SessionListReq, SessionOpenData,
+    SessionOpenReq, SessionReadData, SessionReadReq, SessionResizeData, SessionResizeReq,
+    SessionWriteData, SessionWriteReq, TrustAddData, TrustAddReq, TrustListData, TrustPeer,
+    TrustRemoveData, VersionData,
 };
