@@ -332,6 +332,8 @@ Exit event:
 }
 ```
 
+`exit_code`와 `signal`은 둘 중 하나만 채워진다(정상 종료 → `exit_code`, 신호 종료 → `signal`, `SIGTERM` 정규형). **둘 다 `null`이면 호스트가 child의 종료 상태를 알 수 없었다는 뜻이다**(reap 실패 등 예외 경로) — 소비자는 "종료했으나 상태 미상"으로 처리한다.
+
 Writer changed event (wire `SessionEvent::WriterChanged`, protocol.md §10 writer lease). writer lease 보유자가 바뀔 때마다 — steal로 다른 attach가 가져갔을 때, 또는 소유 connection이 죽어 lease가 자동 해제됐을 때(그때 `writer: null`) — 발생한다. **세션의 모든 read 소비자에게 broadcast**되는 세션 상태 변화 event다(lease를 뺏긴 기존 보유자에게는 read-only 강등 통지를 겸한다; `writer` principal은 이미 `session.list`의 `Session.writer`로 같은 ACL 범위에 노출되는 값이므로 새 정보 누설은 없다). `writer`는 §5 Session의 `writer`와 같은 형식(새 보유자의 principal 문자열, 없으면 `null`)이고 `sequence`는 event 시점의 누적 output byte offset이다.
 
 ```json
