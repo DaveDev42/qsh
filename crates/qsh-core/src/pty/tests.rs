@@ -447,44 +447,54 @@ async fn hundred_sequential_sessions_leave_no_zombies_and_no_fd_growth() {
 // --------------------------------------------------------------------------
 
 /// `TERM`, `SHELL`, `HOME`, `USER`/`LOGNAME`, baseline `PATH`, client env
-/// overlay; the serve process's own env does not leak; identity keys are
-/// pinned.
+/// overlay; the serve process's own env does not leak; identity keys and
+/// `PATH` are pinned.
 #[tokio::test]
 async fn child_environment_is_the_login_environment_not_ours() {
-    // A variable that must NOT leak from our process.
-    // SAFETY: test-only, single-threaded at this point (each nextest test
-    // is its own process).
-    unsafe { std::env::set_var("QSH_LEAK_CANARY", "leaked") };
+    // `CARGO_MANIFEST_DIR` is always set in a cargo/nextest test process
+    // and is neither passed through nor pinned: it must NOT reach the
+    // child. (No `set_var`: other tests read the environment concurrently
+    // under plain `cargo test`.)
+    assert!(std::env::var_os("CARGO_MANIFEST_DIR").is_some());
     let (broker, clock) = broker(1 << 20);
     let mut spec = sh(
         "echo T=$TERM; echo S=$SHELL; echo H=$HOME; echo U=$USER; echo L=$LOGNAME; \
-         echo P=$PATH; echo X=$QSH_EXTRA; echo C=${QSH_LEAK_CANARY:-unset}",
+         echo P=$PATH; echo X=$QSH_EXTRA; echo C=${CARGO_MANIFEST_DIR:-unset}",
     );
     spec.env = vec![
         ("QSH_EXTRA".into(), "extra".into()),
         ("HOME".into(), "/nope".into()),
         ("USER".into(), "root".into()),
+        ("PATH".into(), "/nope/bin".into()),
     ];
     let handle = broker.open(&spec).unwrap();
     let events = pull_until_exit(&handle, &clock).await;
     let out = text(&events);
     let name = super::login_name().unwrap();
-    let home = std::env::var("HOME").unwrap_or_default();
+    // The password-database home, never `$HOME` of this process (they
+    // differ e.g. in GH Actions container jobs).
+    let home = super::posix::login_home().unwrap();
     assert!(out.contains("T=xterm-qshtest"), "{out}");
     assert!(
         out.contains("S=/"),
         "SHELL should be an absolute path: {out}"
     );
     assert!(!out.contains("H=/nope"), "HOME must be pinned: {out}");
-    if !home.is_empty() {
-        assert!(out.contains(&format!("H={home}")), "{out}");
-    }
+    assert_eq!(
+        line_value(&out, "H="),
+        Some(home.as_str()),
+        "HOME = pw_dir: {out}"
+    );
     assert!(
         out.contains(&format!("U={name}")),
         "USER pinned to login name: {out}"
     );
     assert!(out.contains(&format!("L={name}")), "{out}");
-    assert!(out.contains("P=/"), "PATH must be set: {out}");
+    assert_eq!(
+        line_value(&out, "P="),
+        Some(super::posix::DEFAULT_PATH),
+        "PATH pinned to the baseline (argv is exec'd directly, no profile): {out}"
+    );
     assert!(out.contains("X=extra"), "client env overlay: {out}");
     assert!(out.contains("C=unset"), "serve process env leaked: {out}");
     within(broker.close(&handle_id(&handle), CloseReason::Closed, None))
@@ -493,10 +503,10 @@ async fn child_environment_is_the_login_environment_not_ours() {
 }
 
 /// Empty `argv` ⇒ login shell with `argv[0] = "-<basename>"`, interactive
-/// with working job control (no "job control turned off"). Uses `/bin/sh`
-/// as the login shell so the assertion does not depend on the developer's
-/// account; on macOS `/etc/profile` runs `path_helper`, which must extend
-/// the baseline `PATH`.
+/// on a controlling tty (`test -t 0` succeeds; bash would otherwise print
+/// "job control turned off"). Uses `/bin/sh` as the login shell so the
+/// assertion does not depend on the developer's account; on macOS
+/// `/etc/profile` runs `path_helper`, which must extend the baseline `PATH`.
 #[tokio::test]
 async fn empty_argv_runs_a_login_shell_with_dash_argv0() {
     let (broker, clock) = broker(1 << 20);
@@ -510,18 +520,29 @@ async fn empty_argv_runs_a_login_shell_with_dash_argv0() {
     };
     let source = PtySource::new().with_login_shell("/bin/sh");
     let handle = broker.open_with(&spec, Box::new(source)).unwrap();
+    // Wait for the interactive shell's first output (its prompt) before
+    // typing: a shell that preps the terminal with `TCSAFLUSH` would
+    // discard typeahead sent earlier.
+    pull_until(&handle, &clock, 4096, |all| !output_bytes(all).is_empty()).await;
     within(handle.take_lease("tester", CONN, false))
         .await
         .unwrap();
-    within(handle.write(
-        CONN,
-        b"echo ARGV0=$0; echo LPATH=$PATH; echo QSH_DONE\nexit\n".to_vec(),
-    ))
+    within(
+        handle.write(
+            CONN,
+            b"echo ARGV0=$0; test -t 0 && echo TTY_OK; echo LPATH=$PATH; echo QSH_DONE\nexit\n"
+                .to_vec(),
+        ),
+    )
     .await
     .unwrap();
     let events = pull_until_exit(&handle, &clock).await;
     let out = text(&events);
     assert!(out.contains("ARGV0=-sh"), "not a login shell: {out}");
+    assert!(
+        out.contains("TTY_OK"),
+        "stdin is not the controlling tty: {out}"
+    );
     assert!(
         !out.contains("job control turned off"),
         "no controlling tty: {out}"
@@ -549,7 +570,8 @@ async fn empty_argv_runs_a_login_shell_with_dash_argv0() {
 }
 
 /// A `user` hint naming anyone but the serve account fails closed before
-/// anything is spawned (`UNSUPPORTED`).
+/// anything is spawned: `BrokerError::Unsupported` (→ `UNSUPPORTED`) with
+/// the CLI.md §7 message.
 #[tokio::test]
 async fn foreign_user_hint_is_unsupported_and_spawns_nothing() {
     let (broker, _clock) = broker(1 << 20);
@@ -557,10 +579,10 @@ async fn foreign_user_hint_is_unsupported_and_spawns_nothing() {
     spec.user = Some(format!("not-{}", super::login_name().unwrap()));
     let err = broker.open(&spec).unwrap_err();
     assert!(
-        matches!(err, crate::broker::BrokerError::Spawn(_)),
+        matches!(err, crate::broker::BrokerError::Unsupported(_)),
         "{err:?}"
     );
-    assert!(err.to_string().contains("POSIX"), "{err}");
+    assert_eq!(err.to_string(), "user switching is not supported");
     assert_eq!(broker.session_count(), 0);
 
     // The account's own name is accepted.
@@ -569,6 +591,33 @@ async fn foreign_user_hint_is_unsupported_and_spawns_nothing() {
     within(broker.close(&handle_id(&handle), CloseReason::Closed, None))
         .await
         .unwrap();
+}
+
+/// A spawn that fails *after* the fork (fd exhaustion on the master dup,
+/// reactor registration) must not leave a live child or a zombie: the
+/// cleanup guard kills and reaps it.
+#[test]
+fn post_fork_spawn_failure_kills_and_reaps_the_child() {
+    let child = std::process::Command::new("sleep")
+        .arg("300")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let pid = child.id() as libc::pid_t;
+    std::mem::forget(child); // like `portable_pty::Child`: no kill, no wait
+    assert!(process_exists(pid));
+    drop(super::posix::SpawnCleanup { pid: Some(pid) });
+    // Reaped: nothing left to wait for, and the pid is not a zombie.
+    let mut status = 0;
+    // SAFETY: plain syscall with a valid out-pointer.
+    let rc = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+    assert_eq!(rc, -1, "pid {pid} still waitable");
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ECHILD)
+    );
+    assert!(!process_exists(pid), "pid {pid} still exists after cleanup");
 }
 
 /// Resize reaches the pty (`TIOCSWINSZ`): the child observes the new size.
@@ -595,6 +644,14 @@ async fn resize_is_applied_to_the_pty() {
 // --------------------------------------------------------------------------
 // helpers
 // --------------------------------------------------------------------------
+
+/// The rest of the first line that starts with `prefix` (tty output has
+/// `\r\n` line endings; both are trimmed).
+fn line_value<'a>(out: &'a str, prefix: &str) -> Option<&'a str> {
+    out.lines()
+        .map(|l| l.trim_end_matches('\r'))
+        .find_map(|l| l.strip_prefix(prefix))
+}
 
 fn handle_id(handle: &SessionHandle) -> crate::broker::SessionId {
     crate::broker::SessionId(handle.id().to_string())

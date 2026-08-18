@@ -99,7 +99,13 @@ pub trait SourceControl: Send {
 
 /// The byte producer behind a session. In-process only in P0.
 pub trait SessionSource: Send + 'static {
-    /// Launch and hand back the I/O trio. Called once, by the actor.
+    /// Launch and hand back the I/O trio. Called once, by the actor, on
+    /// the caller's task (synchronously — the production PTY source does
+    /// `openpty` + `fork`/`exec` here, milliseconds, not I/O waits; callers
+    /// on a latency-sensitive task may wrap `Broker::open` in
+    /// `spawn_blocking`). Must be called from within a tokio runtime.
+    /// An `io::ErrorKind::Unsupported` error means "refused, nothing
+    /// spawned" (→ `UNSUPPORTED`), any other error → `INTERNAL`.
     fn spawn(self: Box<Self>, spec: &SessionSpec) -> io::Result<SpawnedSource>;
 }
 
@@ -749,10 +755,13 @@ impl ActorState {
                 let _ = resp.send(self.control.resize(cols, rows));
             }
             Command::Signal { signal, resp } => {
+                // `exiting` (child reaped, output still draining) is treated
+                // like `exited`: the pgid may already be reused (CLI.md
+                // §6.7), same rule as `begin_close`.
                 let running = {
                     let meta = self.shared.meta();
                     meta.state == SessionState::Running && !meta.closing
-                };
+                } && !self.exiting;
                 let _ = resp.send(if running {
                     self.control.signal(signal)
                 } else {

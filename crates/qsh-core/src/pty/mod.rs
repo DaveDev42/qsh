@@ -15,19 +15,32 @@
 //! `LOGNAME` from the password database, `SHELL` (the account's login
 //! shell), a platform baseline `PATH`, `TERM` (client hint, default
 //! `xterm-256color`), locale/timezone pass-through (`LANG`, `LANGUAGE`,
-//! `LC_*`, `TZ`) and the client's extra `env`. An empty `argv` runs the
+//! `LC_*`, `TZ`) and the client's extra `env`. The client overlay may not
+//! override `HOME`/`USER`/`LOGNAME`/`SHELL`/`PATH` (pinned; `PATH` because
+//! it decides which binary `argv[0]` resolves to). An empty `argv` runs the
 //! login shell with `argv[0] = "-<basename>"` (e.g. `-zsh`), so the shell's
 //! own login files run — on macOS that is where `/usr/libexec/path_helper`
 //! (via `/etc/zprofile` / `/etc/profile`) builds the real `PATH` from
-//! `/etc/paths*`; the baseline we hand it is exactly what `sshd` uses.
+//! `/etc/paths*`; the baseline we hand it is what `sshd` hands a login shell.
 //!
 //! **Decisions (documented, not implemented):** utmp/wtmp/lastlog are not
 //! written in the MVP (`docs/design/testing.md` L5) — `who`/`last` do not
 //! show qsh sessions. There is no user switching: the child always runs as
 //! the `qsh serve` account; a `user` hint that names anyone else fails
-//! before spawn with an [`io::ErrorKind::Unsupported`] error (`UNSUPPORTED`,
-//! CLI.md §7). The dispatch edge already checks the hint after
-//! authorization; the check here is defence in depth.
+//! before `openpty` with [`user_switching_unsupported`] (`UNSUPPORTED`,
+//! message `user switching is not supported`, CLI.md §7), which the broker
+//! surfaces as `BrokerError::Unsupported`. The dispatch edge checks the hint
+//! after authorization (never before — no account-name oracle for
+//! unauthorized peers); the check here is defence in depth.
+//!
+//! `spawn` is synchronous and runs on the caller's task: `openpty`, a
+//! `fork`+`exec` (portable-pty sets `pre_exec`, so std cannot use
+//! `posix_spawn`) and a `stat` of the home directory. The password lookup
+//! is cached after the first call. Known upstream hazard, accepted for M2:
+//! portable-pty's `pre_exec` closes stray fds by reading `/dev/fd`, which
+//! allocates between `fork` and `exec` in a multi-threaded process (a
+//! child could deadlock on the allocator lock and present as a session
+//! that never produces output). See architecture.md §4.
 //!
 //! The whole implementation is unix-only. On other targets [`factory`]
 //! returns a factory whose `create` fails with
@@ -55,6 +68,15 @@ pub fn unsupported() -> io::Error {
     io::Error::new(
         io::ErrorKind::Unsupported,
         "PTY sessions are only supported on POSIX hosts",
+    )
+}
+
+/// The error for a `user` hint that names anyone but the serve account
+/// (CLI.md §7: `UNSUPPORTED`, message `user switching is not supported`).
+pub fn user_switching_unsupported() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        "user switching is not supported",
     )
 }
 
@@ -100,6 +122,9 @@ mod stub_tests {
     #[test]
     fn unsupported_error_maps_to_the_unsupported_kind() {
         assert_eq!(unsupported().kind(), io::ErrorKind::Unsupported);
+        let e = user_switching_unsupported();
+        assert_eq!(e.kind(), io::ErrorKind::Unsupported);
+        assert_eq!(e.to_string(), "user switching is not supported");
     }
 
     #[cfg(not(unix))]

@@ -112,6 +112,12 @@ pub enum BrokerError {
     /// (→ `RESOURCE_EXHAUSTED`).
     #[error("session input queue is full")]
     Backpressure,
+    /// The source refuses the request as a matter of policy/platform, not
+    /// failure: no PTY backend on this host, or a `user` hint naming anyone
+    /// but the serve account (`io::ErrorKind::Unsupported`; → `UNSUPPORTED`,
+    /// CLI.md §7). Nothing was spawned.
+    #[error("{0}")]
+    Unsupported(String),
     /// Launching the source failed (→ `INTERNAL`).
     #[error("failed to start session: {0}")]
     Spawn(String),
@@ -121,6 +127,16 @@ pub enum BrokerError {
     /// The session actor is gone (→ `INTERNAL`).
     #[error("session actor stopped")]
     Gone,
+}
+
+/// Factory/spawn `io::Error` → [`BrokerError`]: `Unsupported` is a policy
+/// answer (`UNSUPPORTED`), everything else is an `INTERNAL` spawn failure.
+fn spawn_error(e: std::io::Error) -> BrokerError {
+    if e.kind() == std::io::ErrorKind::Unsupported {
+        BrokerError::Unsupported(e.to_string())
+    } else {
+        BrokerError::Spawn(e.to_string())
+    }
 }
 
 /// Effective, validated broker settings resolved from `[serve]`
@@ -288,10 +304,7 @@ impl Broker {
     /// puts the ACL check ahead of `open` — never create a resource before
     /// authorization succeeds, `CLAUDE.md` security defaults).
     pub fn open(&self, spec: &SessionSpec) -> Result<SessionHandle, BrokerError> {
-        let source = self
-            .factory
-            .create(spec)
-            .map_err(|e| BrokerError::Spawn(e.to_string()))?;
+        let source = self.factory.create(spec).map_err(spawn_error)?;
         self.open_with(spec, source)
     }
 
@@ -316,7 +329,7 @@ impl Broker {
                 ..SessionConfig::default()
             },
         )
-        .map_err(|e| BrokerError::Spawn(e.to_string()))?;
+        .map_err(spawn_error)?;
         tokio::spawn(actor.run());
         self.lock().insert(id, handle.clone());
         Ok(handle)
