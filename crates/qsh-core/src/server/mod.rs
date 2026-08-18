@@ -171,6 +171,30 @@ impl Server {
                 control_message::Body::Pong(wire::Pong {}),
             )),
             Some(control_message::Body::Pong(_)) | Some(control_message::Body::Response(_)) => None,
+            // Session control (M2). The wire contract exists (PLAN Step 1)
+            // but the broker is not wired in yet (Step 3): answer
+            // UNSUPPORTED without touching any state — no session, ticket
+            // or audit line is created for these.
+            Some(
+                control_message::Body::SessionOpen(_)
+                | control_message::Body::SessionAttach(_)
+                | control_message::Body::SessionList(_)
+                | control_message::Body::SessionGet(_)
+                | control_message::Body::SessionResize(_)
+                | control_message::Body::SessionClose(_)
+                | control_message::Body::SessionRead(_)
+                | control_message::Body::SessionWrite(_),
+            ) => Some(ControlMessage::error(
+                request_id,
+                wire::Error::new(
+                    ErrorCode::Unsupported,
+                    "session operations are not implemented by this host yet",
+                    false,
+                ),
+            )),
+            // A host never consumes SessionEvent (it is the producer);
+            // an unsolicited one is dropped like a stray Pong.
+            Some(control_message::Body::SessionEvent(_)) => None,
             Some(control_message::Body::Hello(_)) => Some(ControlMessage::error(
                 request_id,
                 wire::Error::new(
@@ -179,9 +203,18 @@ impl Server {
                     false,
                 ),
             )),
+            // No body this build understands. prost drops unknown fields,
+            // so a reserved (25 `SessionSignal`, 40/41) or future control
+            // number decodes to `body: None` exactly like an empty message;
+            // CLI.md §2.4 / protocol.md §9 require UNSUPPORTED for those,
+            // and CLI.md §3.3 assigns un-negotiated features the same code.
             None => Some(ControlMessage::error(
                 request_id,
-                wire::Error::new(ErrorCode::InvalidArgument, "empty control message", false),
+                wire::Error::new(
+                    ErrorCode::Unsupported,
+                    "unknown, reserved or empty control message",
+                    false,
+                ),
             )),
         }
     }
@@ -671,6 +704,146 @@ mod tests {
         assert_eq!(error_code(&reply), Some(ErrorCode::Unsupported));
         assert!(audit.records().is_empty());
         assert_eq!(server.pending_tickets(), 0);
+    }
+
+    /// Every `session_*` request answers UNSUPPORTED until the broker lands
+    /// (M2 Step 3) — and creates nothing: no ticket, no audit line.
+    #[test]
+    fn session_ops_are_unsupported_and_create_nothing_before_broker() {
+        use control_message::Body;
+        let bodies: Vec<Body> = vec![
+            Body::SessionOpen(wire::SessionOpen {
+                argv: vec!["sh".into()],
+                ..Default::default()
+            }),
+            Body::SessionAttach(wire::SessionAttach {
+                session_id: "01K0SESSION".into(),
+                mode: wire::AttachMode::Rw as i32,
+                ..Default::default()
+            }),
+            Body::SessionList(wire::SessionList {}),
+            Body::SessionGet(wire::SessionGet {
+                session_id: "01K0SESSION".into(),
+            }),
+            Body::SessionResize(wire::SessionResize {
+                session_id: "01K0SESSION".into(),
+                cols: 80,
+                rows: 24,
+            }),
+            Body::SessionClose(wire::SessionClose {
+                session_id: "01K0SESSION".into(),
+                signal: None,
+            }),
+            Body::SessionRead(wire::SessionRead {
+                session_id: "01K0SESSION".into(),
+                ..Default::default()
+            }),
+            Body::SessionWrite(wire::SessionWrite {
+                session_id: "01K0SESSION".into(),
+                data: b"ls\n".to_vec(),
+            }),
+        ];
+        for (i, body) in bodies.into_iter().enumerate() {
+            let audit = Arc::new(MemoryAuditSink::new());
+            let server = Server::new(Arc::new(AllowAllPinned), audit.clone(), "host");
+            let ctx = ctx(
+                Principal::Device("laptop".into()),
+                &["exec", "session", "resume.v1"],
+            );
+            let request_id = 100 + i as u64;
+            let reply = server
+                .dispatch(&ctx, &ControlMessage::new(request_id, body))
+                .expect("session requests get a reply");
+            assert_eq!(reply.request_id, request_id);
+            assert_eq!(error_code(&reply), Some(ErrorCode::Unsupported), "#{i}");
+            assert!(audit.records().is_empty(), "#{i} audited");
+            assert_eq!(server.pending_tickets(), 0, "#{i} issued a ticket");
+        }
+    }
+
+    /// An unsolicited SessionEvent (host → client only) is dropped.
+    #[test]
+    fn inbound_session_event_is_ignored() {
+        let server = Server::new(
+            Arc::new(AllowAllPinned),
+            Arc::new(MemoryAuditSink::new()),
+            "h",
+        );
+        let ctx = ctx(Principal::Device("laptop".into()), &["exec", "session"]);
+        let msg = ControlMessage::new(
+            0,
+            control_message::Body::SessionEvent(wire::SessionEvent::closed(
+                "01K0SESSION",
+                "closed",
+                1,
+            )),
+        );
+        assert!(server.dispatch(&ctx, &msg).is_none());
+    }
+
+    /// Reserved control number 25 (`SessionSignal`, CLI.md §2.4) and any
+    /// other unknown number decode to `body: None` and are answered
+    /// UNSUPPORTED without creating anything.
+    #[test]
+    fn reserved_and_unknown_control_numbers_are_unsupported() {
+        // request_id = 7 (field 1 varint), then field N (LEN) with an empty
+        // body: tag = (N << 3) | 2 as a varint.
+        fn raw_with_field(field: u32) -> Vec<u8> {
+            let mut b = vec![0x08, 0x07];
+            let tag = (field << 3) | 2;
+            let mut v = tag;
+            loop {
+                let byte = (v & 0x7f) as u8;
+                v >>= 7;
+                if v == 0 {
+                    b.push(byte);
+                    break;
+                }
+                b.push(byte | 0x80);
+            }
+            b.push(0x00);
+            b
+        }
+        for field in [25u32, 40, 41, 200] {
+            let msg: ControlMessage = wire::decode_msg(&raw_with_field(field)).unwrap();
+            assert_eq!(msg.request_id, 7);
+            assert!(
+                msg.body.is_none(),
+                "field {field} should be dropped by prost"
+            );
+            let audit = Arc::new(MemoryAuditSink::new());
+            let server = Server::new(Arc::new(AllowAllPinned), audit.clone(), "host");
+            let ctx = ctx(
+                Principal::Device("laptop".into()),
+                &["exec", "session", "resume.v1"],
+            );
+            let reply = server.dispatch(&ctx, &msg).unwrap();
+            assert_eq!(reply.request_id, 7);
+            assert_eq!(
+                error_code(&reply),
+                Some(ErrorCode::Unsupported),
+                "field {field}"
+            );
+            assert!(audit.records().is_empty());
+            assert_eq!(server.pending_tickets(), 0);
+        }
+        // A genuinely empty message gets the same answer.
+        let server = Server::new(
+            Arc::new(AllowAllPinned),
+            Arc::new(MemoryAuditSink::new()),
+            "h",
+        );
+        let ctx = ctx(Principal::Device("laptop".into()), &["exec"]);
+        let reply = server
+            .dispatch(
+                &ctx,
+                &ControlMessage {
+                    request_id: 9,
+                    body: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(error_code(&reply), Some(ErrorCode::Unsupported));
     }
 
     #[test]

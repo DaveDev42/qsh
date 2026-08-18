@@ -106,7 +106,11 @@ message ControlMessage {
                                             //    조립한다(ADR-0007). expires_at = 토큰/세션 TTL 만료 시각
                                             //    (클라이언트 resume.json 정리용)
     SessionAttach       session_attach = 21;// session_id, resume_token, last_output_seq,
-                                            //   mode(RW|RO), no_steal
+                                            //   mode(AttachMode: UNSPECIFIED=0|RW=1|RO=2), no_steal
+                                            //   — writer lease는 명시적 RW에만 요청된다. UNSPECIFIED(필드
+                                            //   미설정)·미지 값은 INVALID_ARGUMENT, 절대 RW로 취급하지
+                                            //   않는다. RO=2는 번호만 확보(M2에 관찰자 모드 없음, ROADMAP
+                                            //   §3) — M2 호스트는 INVALID_ARGUMENT로 답한다
                                             // -> SessionAttached{ticket, new_resume_token,
                                             //      replay_from, writer_lease, expires_at}
     SessionList         session_list = 22;  // -> SessionInfo[] — wire SessionInfo는
@@ -114,16 +118,25 @@ message ControlMessage {
                                             //    담는다. CLI.md §5 Session의 session_ref·host는 클라이언트
                                             //    Ops가 로컬 alias로 채운다(ADR-0007)
     SessionGet          session_get = 23;   // session_id -> SessionInfo
-    SessionResize       session_resize = 24; // detached resize; ACL session.control
+    SessionResize       session_resize = 24; // session_id, cols, rows -> SessionResized{cols, rows}
+                                            //   (호스트가 실제 적용한 크기); detached resize; ACL session.control
     reserved 25;                             // (구 SessionSignal) 번호만 예약, P1. M2 호스트는 25번 수신 시
-                                            //   리소스 생성 없이 UNSUPPORTED로 답한다(CLI.md §2.4)
+                                            //   리소스 생성 없이 UNSUPPORTED로 답한다(CLI.md §2.4).
+                                            //   구현 메모: prost는 unknown field를 버리므로 25/40/41 등
+                                            //   예약·미지 번호는 body 없는 ControlMessage로 디코드되고,
+                                            //   호스트는 body 없는 메시지를 일괄 UNSUPPORTED로 답한다
     SessionClose        session_close = 26; // session_id, optional signal(HUP|INT|QUIT|TERM|USR1|USR2|KILL —
-                                            //   `session close --signal`, CLI.md §6.7); ACL session.control
-    SessionRead         session_read = 27;  // session_id, after, max_bytes, wait_ms
-                                            // -> SessionReadResult{events[]} — broker pull() 1회
+                                            //   `session close --signal`, CLI.md §6.7) -> SessionClosed{final_seq};
+                                            //   ACL session.control
+    SessionRead         session_read = 27;  // session_id, after, max_bytes(uint64; 0 = 호스트 기본,
+                                            //   SESSION_READ_MAX_BYTES = 192 KiB로 clamp — 응답이 항상
+                                            //   control frame 1개(256 KiB)에 들어가도록), wait_ms
+                                            // -> SessionReadResult{events[]} — broker pull() 1회; events[]의
+                                            //   원소는 SessionReadEvent{Output|Gap|Exit|WriterChanged|Closed}
                                             //   (CLI.md §6.4 `session read --wait`/`--follow` 루프/MCP long-poll);
                                             //   ACL session.attach, resume token 불요(CLI.md §6.3)
-    SessionWrite        session_write = 28; // session_id, data -> SessionWritten{} ; ACL session.control
+    SessionWrite        session_write = 28; // session_id, data(≤ 16 KiB, 초과 시 INVALID_ARGUMENT)
+                                            // -> SessionWritten{bytes_written} ; ACL session.control
 
     ExecStart           exec_start = 30;    // argv, env, timeout_ms -> ExecStarted{exec_id, ticket}
 
@@ -133,10 +146,12 @@ message ControlMessage {
 
     Ping                ping = 50;
     Pong                pong = 51;
-    SessionEvent        session_event = 60; // 비동기: Exited{exit_code, signal, final_seq}
+    SessionEvent        session_event = 60; // 비동기: {session_id, oneof
+                                            //          exited(Exit — SessionFrame.Exit와 같은 메시지)
                                             //        | WriterChanged{optional new_writer, seq}
                                             //          (new_writer 없음 = lease 해제, 보유자 없음)
-                                            //        | Closed{reason: CLOSED|EXIT|TTL_EXPIRED, seq}
+                                            //        | Closed{reason: "closed"|"exit"|"ttl_expired" (open string,
+                                            //          CLI.md §6.4·§10), seq}}
                                             // → qsh.event/v1 session.exit / session.writer_changed /
                                             //   session.closed (CLI.md §6.4). attach 중인 connection에만
                                             //   전송; pull 소비자는 같은 event를 ReplayRing의 제어 엔트리로
@@ -155,6 +170,9 @@ message Response {
     SessionReadResult   session_read_result = 5; // session_read 성공 (events[])
     SessionListResult   session_list_result = 6; // session_list 성공 (SessionInfo[])
     SessionInfo         session_info = 7;    // session_get 성공
+    SessionWritten      session_written = 8; // session_write 성공 {bytes_written — 호스트가 실제 수용한 바이트}
+    SessionResized      session_resized = 9; // session_resize 성공 {cols, rows — 실제 적용된 크기}
+    SessionClosed       session_closed = 10; // session_close 성공 (final_seq)
     Error               error = 15;          // { code, message, retryable } — code는 CLI.md §3.3 어휘
   }
 }
@@ -182,6 +200,7 @@ message SessionFrame {
     Gap      gap = 4;       // { uint64 requested_after; uint64 available_from; }
     Resize   resize = 5;    // { uint32 cols; uint32 rows; }
     Exit     exit = 6;      // { uint64 final_seq; int32 exit_code; optional string signal; }
+                            //   SessionEvent.exited / SessionReadEvent.exit도 같은 Exit 메시지를 쓴다
   }
 }
 
