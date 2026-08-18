@@ -281,6 +281,10 @@ fn golden_remote_fixtures() {
 /// (prompt text differs per shell and platform), so the asserts here pin
 /// invariants — cursor monotonicity and the shape of each envelope — while
 /// the fixtures themselves mask payload and offsets.
+// Sessions are PTY-backed, so this whole path only exists on POSIX hosts
+// (Windows host is P2). The fixtures it writes are checked in and are
+// still validated everywhere by the whole-directory contract tests below.
+#[cfg(unix)]
 #[test]
 fn golden_session_fixtures() {
     let fleet = Fleet::start();
