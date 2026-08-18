@@ -28,6 +28,7 @@ use qsh_transport::Dialer;
 use crate::client::{ClientError, Session};
 use crate::ops::exec::{map_client_error, map_dial_error};
 use crate::ops::{OpError, Operation, Ops, PeerTarget};
+use crate::resume::{NoToken, ResumeStore, StoredToken};
 
 /// Upper bound on the input one `session.write` accepts (`--stdin` or
 /// `--data-b64`), 16 MiB. Keeps a single value op — and its stdin buffer —
@@ -225,11 +226,73 @@ impl Ops {
             rows: req.rows.unwrap_or(0),
             user: req.user,
         };
-        let opened = self.call(&host, |s| Box::pin(s.session_open(msg)))?;
+        // Not `call`: the resume credential is bound to the peer that
+        // issued it (protocol.md §10-2), so the fingerprint of *this*
+        // connection has to be read before the connection is torn down.
+        let mut conn = self.connect(&host)?;
+        let peer = conn.peer_fingerprint();
+        let opened = conn.run(move |s| Box::pin(s.session_open(msg)));
+        conn.close();
+        let opened = opened?;
+        let session_ref = make_session_ref(&host, &opened.session_id);
+        self.remember_resume(
+            &session_ref,
+            &host,
+            &opened.session_id,
+            &opened.resume_token,
+            peer.as_deref(),
+            &opened.expires_at,
+        );
         Ok(SessionOpenData {
-            session_ref: make_session_ref(&host, &opened.session_id),
+            session_ref,
             initial_sequence: opened.initial_seq,
         })
+    }
+
+    /// Persist a freshly issued resume credential, if there is one to
+    /// persist and a peer to bind it to.
+    ///
+    /// Deliberately best-effort and silent about the token itself: a
+    /// `session.open` that succeeded on the host has created a session,
+    /// and failing the operation because a local state file could not be
+    /// written would leave the caller with no handle to a session that
+    /// exists. What is lost is the ability to resume it across a
+    /// connection — which is reported as a warning (never the token).
+    fn remember_resume(
+        &self,
+        session_ref: &str,
+        host: &str,
+        session_id: &str,
+        token: &[u8],
+        peer: Option<&str>,
+        expires_at: &str,
+    ) {
+        if token.is_empty() {
+            return;
+        }
+        let (Some(peer), Some(token)) = (peer, StoredToken::from_slice(token)) else {
+            tracing::warn!(
+                %session_ref,
+                "host issued a resume credential this client cannot bind; \
+                 the session will not survive a reconnect"
+            );
+            return;
+        };
+        if let Err(err) = ResumeStore::new(&self.paths).put(
+            session_ref,
+            host,
+            session_id,
+            token,
+            peer,
+            expires_at,
+        ) {
+            tracing::warn!(
+                %session_ref,
+                error = %err.message,
+                "could not store the resume credential; the session will \
+                 not survive a reconnect"
+            );
+        }
     }
 
     /// `session.get` — one session's snapshot (`docs/CLI.md` §6.2).
@@ -337,6 +400,7 @@ impl Ops {
         let conn = self.connect(&r.host)?;
         Ok(SessionReader {
             conn,
+            store: ResumeStore::new(&self.paths),
             session_ref: req.session_ref,
             session_id: r.session_id,
             after: req.after_sequence,
@@ -352,23 +416,75 @@ impl Ops {
     /// a live [`SessionAttachStream`] of `qsh.event/v1` events with an
     /// input/resize channel going the other way.
     ///
-    /// Resume across connections lands with PLAN M2 Step 7; this attaches a
-    /// session the peer can authorize on the connection it just dialed.
+    /// Attach carries the session's **resume credential** (protocol.md
+    /// §10, ADR-0007). The token is looked up from `resume.json` by
+    /// `session_ref` and presented only to the peer it was issued to, so
+    /// an attach is possible from the device that opened the session and
+    /// nowhere else — a session visible in `qsh sessions` from another
+    /// device still fails here, locally and before any request is sent
+    /// (`docs/CLI.md` §6.3). The successor token the host returns is made
+    /// durable **before** the stream is used, because it is
+    /// single-generation: losing it orphans the session.
     pub fn session_attach(&self, req: SessionAttachReq) -> Result<SessionAttachStream, OpError> {
         let r = parse_session_ref(&req.session_ref)?;
+        let store = ResumeStore::new(&self.paths);
+        let mut conn = self.connect(&r.host)?;
+        // No verified fingerprint means nothing to bind a credential to.
+        // Fail closed rather than present a token to an unidentified peer.
+        let Some(peer) = conn.peer_fingerprint() else {
+            conn.close();
+            return Err(NoToken::PeerMismatch.into_error(&req.session_ref));
+        };
+        let token = match store.take_for(&req.session_ref, &peer) {
+            Ok(token) => token,
+            Err(why) => {
+                conn.close();
+                return Err(why.into_error(&req.session_ref));
+            }
+        };
         let msg = wire::SessionAttach {
             session_id: r.session_id.clone(),
-            // Minted and presented by PLAN M2 Step 7.
-            resume_token: Vec::new(),
+            resume_token: token.expose().to_vec(),
+            // A fresh attach has delivered nothing, so it asks for the
+            // whole retained ring. The reconnect path
+            // ([`crate::client::reconnect`]) is the caller that has a real
+            // `L` to continue from.
             last_output_seq: 0,
             mode: wire::AttachMode::Rw as i32,
             no_steal: req.no_steal,
         };
-        let mut conn = self.connect(&r.host)?;
-        let attached = conn.run(move |s| Box::pin(s.attach(msg)))?;
+        let attached = match conn.run(move |s| Box::pin(s.attach_request(msg))) {
+            Ok(attached) => attached,
+            Err(err) => {
+                // The host refused the credential. Whether the session is
+                // gone or the token is stale is deliberately not
+                // distinguishable (protocol.md §10-2) and the answer is
+                // the same either way: this entry is dead weight.
+                if matches!(err.code, ErrorCode::AuthFailed | ErrorCode::SessionNotFound) {
+                    let _ = store.forget(&req.session_ref);
+                }
+                conn.close();
+                return Err(err);
+            }
+        };
+        // Durable before the stream is touched (ADR-0007): the presented
+        // token is already invalid on the host, so a successor that only
+        // exists in memory is one crash away from an unreachable session.
+        if let Some(successor) = StoredToken::from_slice(&attached.new_resume_token) {
+            store.put(
+                &req.session_ref,
+                &r.host,
+                &r.session_id,
+                successor,
+                &peer,
+                &attached.expires_at,
+            )?;
+        }
         let replay_from = attached.replay_from;
         let writer_lease = attached.writer_lease;
         let expires_at = attached.expires_at.clone();
+        // Only now, with the successor on disk, is the data stream opened.
+        let attached = conn.run(move |s| Box::pin(s.open_attach_stream(attached)))?;
         let session = conn
             .take_session()
             .ok_or_else(|| OpError::new(ErrorCode::Internal, "attach lost its control stream"))?;
@@ -385,6 +501,7 @@ impl Ops {
         ));
         Ok(SessionAttachStream {
             conn,
+            store: ResumeStore::new(&self.paths),
             driver,
             events: events_rx,
             commands,
@@ -498,6 +615,10 @@ impl Ops {
         let final_sequence = self.call(&r.host, move |s| {
             Box::pin(async move { s.session_close(&sid, signal).await })
         })?;
+        // The session is gone on the host, so its credential is now a
+        // token that can only ever earn an `AUTH_FAILED` (ADR-0007
+        // "정리").
+        let _ = ResumeStore::new(&self.paths).forget(&req.session_ref);
         Ok(SessionCloseData {
             session_ref: req.session_ref,
             final_sequence,
@@ -595,6 +716,9 @@ const CLOSE_DRAIN: Duration = Duration::from_millis(200);
 /// long-poll. See [`Ops::session_reader`].
 pub struct SessionReader {
     conn: Connected,
+    /// Where this session's resume credential lives, so a `session.closed`
+    /// seen while reading takes the dead entry with it (CLI.md §6.4).
+    store: ResumeStore,
     session_ref: String,
     session_id: String,
     after: u64,
@@ -643,6 +767,7 @@ impl SessionReader {
             }
             if let Some(json) = event_json(&self.session_ref, event) {
                 self.done |= is_terminal(&json);
+                forget_if_closed(&self.store, &self.session_ref, &json);
                 json_events.push(json);
             }
         }
@@ -660,6 +785,20 @@ impl SessionReader {
     /// Close the connection this reader holds.
     pub fn close(self) {
         self.conn.close();
+    }
+}
+
+/// Drop the stored resume credential once the host says the session is
+/// gone (`docs/CLI.md` §6.4).
+///
+/// Only `session.closed` — not `session.exit`. An exited session is still
+/// in the broker until the reaper takes it, and its output is still
+/// attachable; a session that has been *removed* can only answer an attach
+/// with the non-distinguishing `AUTH_FAILED`, and keeping the credential
+/// around would turn "this session is over" into that opaque refusal.
+fn forget_if_closed(store: &ResumeStore, session_ref: &str, event: &SessionEvent) {
+    if matches!(event, SessionEvent::Closed { .. }) {
+        let _ = store.forget(session_ref);
     }
 }
 
@@ -697,6 +836,8 @@ enum AttachCommand {
 /// dropping this ends the attach.
 pub struct SessionAttachStream {
     conn: Connected,
+    /// See [`SessionReader::store`].
+    store: ResumeStore,
     driver: tokio::task::JoinHandle<()>,
     events: tokio::sync::mpsc::Receiver<Result<SessionEvent, OpError>>,
     commands: tokio::sync::mpsc::Sender<AttachCommand>,
@@ -734,7 +875,11 @@ impl SessionAttachStream {
     /// every other `Ops` entry point this is the blocking face of the
     /// driver that owns the connection.
     pub fn next_event(&mut self) -> Option<Result<SessionEvent, OpError>> {
-        self.events.blocking_recv()
+        let event = self.events.blocking_recv()?;
+        if let Ok(event) = &event {
+            forget_if_closed(&self.store, &self.session_ref, event);
+        }
+        Some(event)
     }
 
     /// Queue session input; the driver writes it in order. Blocks only
@@ -987,6 +1132,13 @@ impl Connected {
     /// in place (the attach driver owns the session for its lifetime).
     fn take_session(&mut self) -> Option<Session> {
         self.session.take()
+    }
+
+    /// `sha256:…` fingerprint of the peer this connection verified — the
+    /// identity a resume credential is bound to (protocol.md §10-2). Not
+    /// an authorization input: the host authorizes on the mTLS principal.
+    fn peer_fingerprint(&self) -> Option<String> {
+        self.connection.peer_fingerprint().map(|fp| fp.to_string())
     }
 
     /// Close the control stream and the connection, then let the QUIC close
