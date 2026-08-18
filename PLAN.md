@@ -168,7 +168,8 @@ M2 크기: 5ew (`docs/ROADMAP.md` M2 "크기").
 **(b) crate/모듈/파일:**
 - `crates/qsh-testkit/src/chaos.rs` (신규 — proxy + `ChaosPolicy::seeded(u64)`, `repath()`, `sever()`)
 - `crates/qsh-testkit/src/loopback.rs` (확장 — chaos proxy를 경유해 dial하는 harness 변형)
-- `crates/qsh-testkit/tests/resume_chaos.rs` (신규 — repath/sever/blackhole 시나리오)
+- `crates/qsh-testkit/tests/chaos_proxy.rs` (신규 — 하네스 자체의 회귀 게이트: 이미 존재하는 `exec.run`·세션 value op이 `drop`/`delay`/`reorder`/`duplicate` 아래에서 byte-identical, `corrupt()` positive control, `blackhole()` 복구, `repath()` → migration, `sever()` → 재dial. resume은 다루지 않는다)
+- `crates/qsh-testkit/tests/resume_chaos.rs` (신규 — Step 7의 resume/attach 시나리오를 위 하네스 위에 얹는다)
 - `crates/qsh-testkit/tests/session_kill9.rs` (신규 — SC4/SC5: 클라이언트 프로세스 `kill -9`, 기준 stream 대조)
 - `crates/qsh-cli/tests/fixtures/cli-v1/{session.open,session.get,session.list,session.read,session.write,session.resize,session.close}.json` (신규, append-only)
 - `crates/qsh-cli/tests/exit_code_matrix.rs`, `tests/jsonl_purity.rs` (확장 — 세션 시나리오 행 추가)
