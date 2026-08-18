@@ -16,3 +16,8 @@ serde_json.workspace = true
 
 [dev-dependencies]
 qsh-proto.workspace = true
+# `tests/resume_secrecy.rs` captures every tracing event the host and the
+# client emit during a resume and asserts the credential is in none of them.
+tracing.workspace = true
+tracing-subscriber.workspace = true
+base64.workspace = true
