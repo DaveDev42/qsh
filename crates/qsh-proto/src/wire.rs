@@ -49,15 +49,11 @@ pub const CAP_SESSION: &str = "session";
 /// §10).
 pub const CAP_RESUME_V1: &str = "resume.v1";
 
-/// Capabilities this build advertises in [`Hello`].
-///
-/// `session`/`resume.v1` are advertised from PLAN Step 1 on (the wire
-/// vocabulary is complete) even though the host answers every `session_*`
-/// request with `UNSUPPORTED` until the broker lands.
-// TODO(M2 Step 3): remove this note when `Server::dispatch` routes
-// `session_*` to the broker; until then the advertised set is knowingly
-// ahead of the implementation.
-pub const LOCAL_CAPABILITIES: &[&str] = &[CAP_EXEC, CAP_SESSION, CAP_RESUME_V1];
+/// Capabilities this build advertises in [`Hello`]. Advertised and
+/// implemented stay in lockstep: [`CAP_RESUME_V1`] joins the list with the
+/// resume implementation (PLAN M2 Step 7); until then a host answers
+/// `SessionAttach` with `UNSUPPORTED` and does not claim otherwise.
+pub const LOCAL_CAPABILITIES: &[&str] = &[CAP_EXEC, CAP_SESSION];
 
 /// Maximum size of a single exec payload chunk (the `data` field of a
 /// [`Stdout`]/[`Stderr`]/[`Stdin`] frame), 16 KiB (`protocol.md` §5).
@@ -666,8 +662,18 @@ mod tests {
             arb_session_opened().prop_map(response::Body::SessionOpened),
             arb_session_attached().prop_map(response::Body::SessionAttached),
             arb_exec_started().prop_map(response::Body::ExecStarted),
-            proptest::collection::vec(arb_session_read_event(), 0..4)
-                .prop_map(|events| response::Body::SessionReadResult(SessionReadResult { events })),
+            (
+                proptest::collection::vec(arb_session_read_event(), 0..4),
+                any::<u64>(),
+                any::<u64>(),
+            )
+                .prop_map(|(events, next_after, next_ctl_after)| {
+                    response::Body::SessionReadResult(SessionReadResult {
+                        events,
+                        next_after,
+                        next_ctl_after,
+                    })
+                }),
             proptest::collection::vec(arb_session_info(), 0..4).prop_map(|sessions| {
                 response::Body::SessionListResult(SessionListResult { sessions })
             }),
@@ -709,16 +715,22 @@ mod tests {
                     session_id,
                     signal
                 })),
-            (arb_session_id(), any::<u64>(), any::<u64>(), any::<u64>()).prop_map(
-                |(session_id, after, max_bytes, wait_ms)| {
+            (
+                arb_session_id(),
+                any::<u64>(),
+                any::<u64>(),
+                any::<u64>(),
+                any::<u64>(),
+            )
+                .prop_map(|(session_id, after, max_bytes, wait_ms, ctl_after)| {
                     Body::SessionRead(SessionRead {
                         session_id,
                         after,
                         max_bytes,
                         wait_ms,
+                        ctl_after,
                     })
-                }
-            ),
+                }),
             (arb_session_id(), arb_bytes(64)).prop_map(|(session_id, data)| Body::SessionWrite(
                 SessionWrite { session_id, data }
             )),
@@ -972,6 +984,7 @@ mod tests {
                         data: vec![0u8; SESSION_CHUNK_MAX + 1],
                     }),
                 )],
+                ..Default::default()
             }),
         );
         assert!(matches!(
@@ -1011,7 +1024,10 @@ mod tests {
         )));
         let m = ControlMessage::response(
             u64::MAX,
-            response::Body::SessionReadResult(SessionReadResult { events }),
+            response::Body::SessionReadResult(SessionReadResult {
+                events,
+                ..Default::default()
+            }),
         );
         assert!(encode_control(&m).is_ok());
     }
@@ -1071,10 +1087,11 @@ mod tests {
     }
 
     #[test]
-    fn local_capabilities_advertise_session_and_resume() {
+    fn local_capabilities_advertise_exactly_what_is_implemented() {
         assert!(LOCAL_CAPABILITIES.contains(&CAP_EXEC));
         assert!(LOCAL_CAPABILITIES.contains(&CAP_SESSION));
-        assert!(LOCAL_CAPABILITIES.contains(&CAP_RESUME_V1));
+        // Resume is not implemented yet (PLAN M2 Step 7 re-adds it).
+        assert!(!LOCAL_CAPABILITIES.contains(&CAP_RESUME_V1));
     }
 
     // ---- error vocabulary ----------------------------------------------

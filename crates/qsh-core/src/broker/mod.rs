@@ -176,6 +176,116 @@ where
     }
 }
 
+/// A [`SourceFactory`] handing out cooperative [`PipeSource`]s and queueing
+/// their test-side [`PipeHandle`]s (with the [`SessionSpec`] each was
+/// opened with) for the caller to pick up in open order. This is how the
+/// loopback harness (and the broker's own tests) drive session output/exit
+/// without a PTY, and assert what reached the source.
+#[derive(Default)]
+pub struct PipeFactory {
+    buffer: usize,
+    ignored: Vec<Signal>,
+    handles: Mutex<std::collections::VecDeque<(SessionSpec, PipeHandle)>>,
+}
+
+impl PipeFactory {
+    /// Factory whose pipes buffer `buffer` bytes each way.
+    pub fn new(buffer: usize) -> Self {
+        Self::with_ignored_signals(buffer, &[])
+    }
+
+    /// Like [`PipeFactory::new`], but every source it creates ignores the
+    /// listed signals ([`PipeSource::with_ignored_signals`]) — a "child"
+    /// that survives HUP, to exercise the close escalation end to end.
+    pub fn with_ignored_signals(buffer: usize, ignored: &[Signal]) -> Self {
+        Self {
+            buffer,
+            ignored: ignored.to_vec(),
+            handles: Mutex::new(std::collections::VecDeque::new()),
+        }
+    }
+
+    /// The handle of the oldest session opened through this factory that
+    /// nobody has taken yet.
+    pub fn take(&self) -> Option<PipeHandle> {
+        self.take_with_spec().map(|(_, handle)| handle)
+    }
+
+    /// Like [`PipeFactory::take`], also returning the exact [`SessionSpec`]
+    /// the broker handed to `create` — how tests assert that `argv`/`env`/
+    /// `term`/window size survived the wire unchanged.
+    pub fn take_with_spec(&self) -> Option<(SessionSpec, PipeHandle)> {
+        self.handles
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pop_front()
+    }
+
+    /// Number of handles waiting to be taken.
+    pub fn pending(&self) -> usize {
+        self.handles.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+}
+
+impl std::fmt::Debug for PipeFactory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PipeFactory")
+            .field("buffer", &self.buffer)
+            .field("pending", &self.pending())
+            .finish()
+    }
+}
+
+impl SourceFactory for PipeFactory {
+    fn create(&self, spec: &SessionSpec) -> io::Result<Box<dyn SessionSource>> {
+        let (source, handle) = PipeSource::with_ignored_signals(self.buffer.max(1), &self.ignored);
+        self.handles
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push_back((spec.clone(), handle));
+        Ok(Box::new(source))
+    }
+}
+
+/// The headless stand-in `qsh serve` uses until the PTY source lands (PLAN
+/// M2 Step 4): every session is a [`PipeSource`] whose "child" prints
+/// [`ECHO_BANNER`] once, then echoes each input byte back as output, and
+/// exits on the first fatal signal. Zero PTY code, but the whole
+/// `session.*` control path — ACL, tickets, ring, lease, close escalation —
+/// runs for real against it.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct EchoPipeFactory;
+
+/// What an [`EchoPipeFactory`] session prints first, so a human (or a
+/// golden fixture) can tell it is talking to the stand-in.
+pub const ECHO_BANNER: &[u8] = b"qsh: headless echo session\r\n";
+
+impl SourceFactory for EchoPipeFactory {
+    fn create(&self, _spec: &SessionSpec) -> io::Result<Box<dyn SessionSource>> {
+        let (source, mut handle) = PipeSource::new(ECHO_PIPE_BUFFER);
+        tokio::spawn(async move {
+            if handle.write_output(ECHO_BANNER).await.is_err() {
+                return;
+            }
+            loop {
+                match handle.read_input(ECHO_PIPE_BUFFER).await {
+                    Ok(data) if !data.is_empty() => {
+                        if handle.write_output(&data).await.is_err() {
+                            break;
+                        }
+                    }
+                    // EOF: the actor dropped its input end (session closed).
+                    _ => break,
+                }
+            }
+        });
+        Ok(Box::new(source))
+    }
+}
+
+/// Buffer size of each [`EchoPipeFactory`] pipe.
+const ECHO_PIPE_BUFFER: usize = 64 * 1024;
+
 /// The in-process session broker.
 ///
 /// The registry is a single mutex (architecture.md §3: "단일 lock, 저경합");
@@ -325,19 +435,21 @@ impl Broker {
     /// Close a session: signal its child (escalating per CLI.md §6.7 on
     /// the injected clock; no signal at all if it already exited), then
     /// append `session.closed{reason}` as its last entry. Resolves once the
-    /// entry is in the ring. The session stays readable for
-    /// [`CLOSED_RETENTION`] and is otherwise gone at once. A missing or
-    /// already-closed session is [`BrokerError::NotFound`]; a close racing
-    /// another close joins it.
+    /// entry is in the ring and returns the final cumulative output offset
+    /// (the `sequence` stamped on that `session.closed` entry — CLI.md §6.7
+    /// `final_sequence`, which includes whatever the child emitted while
+    /// dying). The session stays readable for [`CLOSED_RETENTION`] and is
+    /// otherwise gone at once. A missing or already-closed session is
+    /// [`BrokerError::NotFound`]; a close racing another close joins it.
     pub async fn close(
         &self,
         id: &SessionId,
         reason: CloseReason,
         signal: Option<Signal>,
-    ) -> Result<(), BrokerError> {
+    ) -> Result<u64, BrokerError> {
         let handle = self.get(id)?;
         handle.close(reason, signal).await;
-        Ok(())
+        Ok(handle.info().last_sequence)
     }
 
     /// Release any writer lease held by `conn` across every session
@@ -492,15 +604,24 @@ pub trait SessionBackend: Send + Sync {
         no_steal: bool,
     ) -> BoxFuture<'_, Result<TakeOutcome, BrokerError>>;
 
-    /// Close a session (see [`Broker::close`]). `signal` overrides the
-    /// first escalation step; the dispatch edge parses it with
-    /// [`Signal::parse`] and answers `INVALID_ARGUMENT` itself.
+    /// Close a session (see [`Broker::close`]); resolves to the final
+    /// output offset. `signal` overrides the first escalation step; the
+    /// dispatch edge parses it with [`Signal::parse`] and answers
+    /// `INVALID_ARGUMENT` itself.
     fn close(
         &self,
         id: &SessionId,
         reason: CloseReason,
         signal: Option<Signal>,
-    ) -> BoxFuture<'_, Result<(), BrokerError>>;
+    ) -> BoxFuture<'_, Result<u64, BrokerError>>;
+
+    /// A connection died: release every writer lease it held. Sessions and
+    /// their children survive (architecture.md §3 rule c).
+    fn release_connection(&self, conn: ConnectionId) -> BoxFuture<'_, ()>;
+
+    /// The resume TTL an unattached session lives for (`[serve].resume_ttl`)
+    /// — what the host reports as `SessionOpened.expires_at`.
+    fn resume_ttl(&self) -> Duration;
 }
 
 impl SessionBackend for Broker {
@@ -577,9 +698,17 @@ impl SessionBackend for Broker {
         id: &SessionId,
         reason: CloseReason,
         signal: Option<Signal>,
-    ) -> BoxFuture<'_, Result<(), BrokerError>> {
+    ) -> BoxFuture<'_, Result<u64, BrokerError>> {
         let id = id.clone();
         Box::pin(async move { Broker::close(self, &id, reason, signal).await })
+    }
+
+    fn release_connection(&self, conn: ConnectionId) -> BoxFuture<'_, ()> {
+        Box::pin(Broker::release_connection(self, conn))
+    }
+
+    fn resume_ttl(&self) -> Duration {
+        self.config.resume_ttl
     }
 }
 
@@ -605,20 +734,6 @@ mod tests {
             .expect("timed out")
     }
 
-    /// A factory handing out cooperative pipe sources; the test side of
-    /// each is queued for the test to pick up.
-    struct PipeFactory {
-        handles: Mutex<Vec<PipeHandle>>,
-    }
-
-    impl SourceFactory for PipeFactory {
-        fn create(&self, _spec: &SessionSpec) -> io::Result<Box<dyn SessionSource>> {
-            let (source, handle) = PipeSource::new(64 * 1024);
-            self.handles.lock().unwrap().push(handle);
-            Ok(Box::new(source))
-        }
-    }
-
     fn test_broker(ttl: Duration) -> (Arc<Broker>, TestClock) {
         let clock = TestClock::new();
         let broker = Broker::new(
@@ -628,9 +743,7 @@ mod tests {
                 resume_ttl: ttl,
                 close_grace: Duration::from_millis(5000),
             },
-            Arc::new(PipeFactory {
-                handles: Mutex::new(Vec::new()),
-            }),
+            Arc::new(PipeFactory::new(64 * 1024)),
         );
         (broker, clock)
     }
@@ -912,9 +1025,7 @@ mod tests {
                 resume_ttl: Duration::from_secs(10),
                 close_grace: Duration::from_millis(5000),
             },
-            Arc::new(PipeFactory {
-                handles: Mutex::new(Vec::new()),
-            }),
+            Arc::new(PipeFactory::new(64 * 1024)),
         );
         let (source, _pipe) = PipeSource::new(64 * 1024);
         broker

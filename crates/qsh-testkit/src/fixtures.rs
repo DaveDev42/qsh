@@ -60,6 +60,24 @@ pub fn normalize(mut value: serde_json::Value) -> serde_json::Value {
                             *child = serde_json::Value::String("<fingerprint>".into())
                         }
                         "address" => *child = serde_json::Value::String("<address>".into()),
+                        // Host-issued session ids are ULIDs; a `session_ref`
+                        // keeps its (stable) host alias and masks the id.
+                        "session_id" => *child = serde_json::Value::String("<session_id>".into()),
+                        // Output payload and cumulative offsets depend on
+                        // what the host's session source printed (the
+                        // headless echo stand-in today, a real shell after
+                        // PLAN M2 Step 4). Fixtures pin the *shape*, so
+                        // these are masked the way `duration_ms` is —
+                        // append-only fixtures must not need editing when
+                        // the backend changes.
+                        "data_b64" => *child = serde_json::Value::String("<data_b64>".into()),
+                        "sequence" | "last_sequence" | "final_sequence" | "next_after"
+                        | "next_ctl_after" => *child = serde_json::Value::from(0),
+                        "session_ref" => {
+                            if let serde_json::Value::String(text) = child {
+                                *text = mask_session_ref(text);
+                            }
+                        }
                         // The binary's own version churns on every release;
                         // the fixture asserts the *shape*, and `schemas`
                         // (right next to it) still pins the contract ids.
@@ -82,6 +100,15 @@ pub fn normalize(mut value: serde_json::Value) -> serde_json::Value {
     }
     walk(&mut value);
     value
+}
+
+/// Replace the session id half of `<host>/<session_id>` with the literal
+/// `<session_id>`; anything without a `/` is left alone.
+fn mask_session_ref(text: &str) -> String {
+    match text.rsplit_once('/') {
+        Some((host, _)) => format!("{host}/<session_id>"),
+        None => text.to_string(),
+    }
 }
 
 /// Replace the port of every `127.0.0.1:<digits>` occurrence in `text` with
@@ -141,5 +168,30 @@ mod tests {
             normalized["error"]["message"],
             "peer 127.0.0.1:<port> is not trusted"
         );
+    }
+
+    /// Session payload and cumulative offsets depend on what the host's
+    /// session source printed (the headless echo stand-in today, a real
+    /// shell after PLAN M2 Step 4), so they are masked like `duration_ms`:
+    /// append-only fixtures must not need editing when the backend changes.
+    #[test]
+    fn session_payload_and_offsets_are_masked() {
+        let value = serde_json::json!({
+            "data": {"last_sequence": 31, "events": [
+                {"type": "session.output", "sequence": 28, "data_b64": "cXNo"},
+                {"type": "session.closed", "sequence": 31, "reason": "closed"},
+            ], "final_sequence": 31, "next_after": 31, "initial_sequence": 0,
+            "bytes_written": 3},
+        });
+        let normalized = normalize(value);
+        assert_eq!(normalized["data"]["last_sequence"], 0);
+        assert_eq!(normalized["data"]["final_sequence"], 0);
+        assert_eq!(normalized["data"]["next_after"], 0);
+        assert_eq!(normalized["data"]["events"][0]["sequence"], 0);
+        assert_eq!(normalized["data"]["events"][0]["data_b64"], "<data_b64>");
+        // Non-volatile neighbours are untouched.
+        assert_eq!(normalized["data"]["events"][1]["reason"], "closed");
+        assert_eq!(normalized["data"]["initial_sequence"], 0);
+        assert_eq!(normalized["data"]["bytes_written"], 3);
     }
 }

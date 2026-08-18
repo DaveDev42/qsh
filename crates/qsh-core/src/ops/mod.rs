@@ -18,8 +18,27 @@ use crate::identity::LoadedIdentity;
 use crate::trust::{SharedTrustStore, TrustStore};
 
 pub mod exec;
+pub mod session;
 
 pub use exec::{ExecRunOp, ExecRunOutput, ExecStdin};
+pub use session::{
+    SESSION_WRITE_MAX, SessionCloseOp, SessionGetOp, SessionListOp, SessionOpenOp, SessionReadOp,
+    SessionReadOutput, SessionRef, SessionResizeOp, SessionWriteOp, make_session_ref,
+    parse_session_ref,
+};
+
+/// Everything a remote call needs to reach a pinned host: our identity,
+/// the trust evaluator, and where to dial.
+pub(crate) struct PeerTarget {
+    /// This device's identity and private key.
+    pub identity: LoadedIdentity,
+    /// The trust store as the transport's evaluator.
+    pub trust: Arc<SharedTrustStore>,
+    /// `host:port` recorded for the peer.
+    pub address: String,
+    /// SNI value for the dial (see [`server_name_for`]).
+    pub server_name: String,
+}
 
 /// How long the `trust.add` fingerprint probe waits for a handshake before
 /// reporting `CONNECTION_FAILED`. Deliberately shorter than the transport's
@@ -291,6 +310,44 @@ impl Ops {
         Ok(TrustRemoveData {
             name: name.to_string(),
             removed,
+        })
+    }
+
+    /// Resolve `host` (a trust-store peer name) to a dial target: loads the
+    /// identity (`CONFIG_ERROR` before `qsh init`) and requires the peer to
+    /// be pinned with an address (`HOST_NOT_FOUND` otherwise). Until the
+    /// hosts directory lands (M7) the trust store is the host directory.
+    ///
+    /// **Runtime caveat:** loads the identity synchronously — call it
+    /// outside a tokio runtime (see [`Ops::load_identity`]).
+    pub(crate) fn resolve_peer(&self, host: &str) -> Result<PeerTarget, OpError> {
+        let identity = self.load_identity()?.ok_or_else(|| {
+            OpError::new(
+                ErrorCode::ConfigError,
+                "no device identity; run `qsh init` first",
+            )
+        })?;
+        let trust = self.open_trust()?;
+        let peer = trust.snapshot().find(host).cloned().ok_or_else(|| {
+            OpError::new(
+                ErrorCode::HostNotFound,
+                format!(
+                    "host {host:?} is not in the trust store; pin it with `qsh trust add {host} --address <host:port> --fingerprint sha256:...`"
+                ),
+            )
+        })?;
+        if peer.address.is_empty() {
+            return Err(OpError::new(
+                ErrorCode::HostNotFound,
+                format!("host {host:?} has no address recorded in the trust store"),
+            ));
+        }
+        let server_name = server_name_for(&peer.address);
+        Ok(PeerTarget {
+            identity,
+            trust,
+            address: peer.address,
+            server_name,
         })
     }
 

@@ -1,0 +1,15 @@
+{
+  "command": "session.get",
+  "data": {
+    "created_at": "<timestamp>",
+    "host": "box",
+    "last_sequence": 0,
+    "session_id": "<session_id>",
+    "session_ref": "box/<session_id>",
+    "state": "running",
+    "writer": null
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

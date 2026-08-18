@@ -13,7 +13,7 @@ use qsh_transport::{ConnectionError, DialError, Dialer, StreamError};
 
 use crate::client::{ClientError, Session};
 use crate::exec::ExecSpec;
-use crate::ops::{OpError, Operation, Ops};
+use crate::ops::{OpError, Operation, Ops, PeerTarget};
 
 /// The `exec.run` operation.
 pub struct ExecRunOp;
@@ -57,39 +57,12 @@ impl Ops {
                 "exec requires a command after `--`",
             ));
         }
-        let identity = self.load_identity()?.ok_or_else(|| {
-            OpError::new(
-                ErrorCode::ConfigError,
-                "no device identity; run `qsh init` first",
-            )
-        })?;
-        let trust = self.open_trust()?;
-        let peer = trust
-            .snapshot()
-            .find(&req.host)
-            .cloned()
-            .ok_or_else(|| {
-                OpError::new(
-                    ErrorCode::HostNotFound,
-                    format!(
-                        "host {:?} is not in the trust store; pin it with `qsh trust add {} --address <host:port> --fingerprint sha256:...`",
-                        req.host, req.host
-                    ),
-                )
-            })?;
-        if peer.address.is_empty() {
-            return Err(OpError::new(
-                ErrorCode::HostNotFound,
-                format!(
-                    "host {:?} has no address recorded in the trust store",
-                    req.host
-                ),
-            ));
-        }
-        let (server_name, _) = peer.address.rsplit_once(':').unwrap_or((&peer.address, ""));
-        let server_name = server_name
-            .trim_matches(|c| c == '[' || c == ']')
-            .to_string();
+        let PeerTarget {
+            identity,
+            trust,
+            address,
+            server_name,
+        } = self.resolve_peer(&req.host)?;
 
         let spec = ExecSpec {
             argv: req.argv.clone(),
@@ -105,8 +78,6 @@ impl Ops {
             identity.local,
             trust as Arc<dyn qsh_transport::TrustEvaluator>,
         );
-        let address = peer.address.clone();
-
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
