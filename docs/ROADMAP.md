@@ -107,7 +107,7 @@
 | TCP/TLS fallback (P1) | doctor가 "UDP 차단"을 보고하는 순간 | transport 추상화는 P0에 있으나 **TCP 코드는 0줄**. doctor 메시지가 "P1 예정"을 명시 (ADR-0005) |
 | SOCKS `-D` (P1) | 스펙 예시에 존재 | flag는 파싱되고 `UNSUPPORTED` + "P1" 반환. `forward.socks` action은 정의·항상 deny |
 | File copy (P1) | `file.read/write` action이 §9에 존재 | action만 정의, op 미등록, capabilities에 미광고 |
-| Windows (P1 client / P2 host) | 외부 기여 PR | PTY 코드에 `#![cfg(unix)]`, Windows CI 없음, README.md 플랫폼 지원 서술(Known limitations)에 명시 |
+| Windows (P1 client / P2 host) | 외부 기여 PR | PTY 코드에 `#![cfg(unix)]`. CI는 `windows-latest`에서 build/clippy/portable 테스트만 돌려 컴파일 회귀를 막는다(POSIX 시그널·process-group 테스트는 `cfg(unix)`). 지원 약속 아님 — README.md Known limitations에 명시 |
 | Multi-attach read-only (P2) | broker에서 거의 공짜로 나옴 — 그래서 위험 | **관찰자(observer) 개념 자체를 만들지 않는다.** writer lease는 P0 필수, 두 번째 attach 정책은 lease 규칙만 따름 |
 | Local echo prediction (P2) | mosh 대비 지연 불평 | P0는 실제 PTY 지연을 측정·공개해 데이터로 대화 (§13의 10ms 예산) |
 | Relay (§14, 별도 제품) | "작은 relay 하나면" | P0 의무는 세션 identity와 transport 분리뿐(resume이 이미 강제). **`--relay` flag는 stub조차 없음** |

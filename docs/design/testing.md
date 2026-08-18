@@ -105,7 +105,7 @@ ACL glob 평가기는 fuzz보다 property test가 적합 (`session.*`가 `sessio
 - Chaos는 seeded, 실패 시 seed를 단언 메시지에 출력.
 - `Swatinem/rust-cache`, concurrency group으로 구식 run 취소.
 - GHA macOS runner는 UDP 소켓 버퍼 기본값이 작다 — `SO_RCVBUF`를 명시 설정하거나 throughput 수치 저하를 예상할 것.
-- clippy는 **4개 타깃 전부에서** 실행 — Linux 전용 clippy는 `cfg(target_os = "macos")` 블록 전체를 놓친다. 이 프로젝트처럼 플랫폼 분기가 많으면 실질적 구멍이다.
+- clippy는 **모든 타깃에서** 실행 — Linux 전용 clippy는 `cfg(target_os = "macos")` 블록 전체를 놓친다. 이 프로젝트처럼 플랫폼 분기가 많으면 실질적 구멍이다. Windows도 포함: 지원 플랫폼은 아니지만 `cfg(unix)`/`cfg(not(unix))` 분기가 계속 컴파일되는지는 CI만이 보증한다.
 - `cargo-nextest` 권장: 테스트별 프로세스 격리(전역 상태를 바꾸는 PTY/termios 테스트에 필수), 실 timeout, flake 재시도, JUnit 출력.
 
-**현재 상태 (M0 시점):** `.github/workflows/ci.yml`에 fmt / clippy(4-target) / test(nextest, 4-target) / cargo-deny / arch-lint 구성 완료. fuzz-smoke·nightly-fuzz·soak·perf job은 M8에서 추가한다. `crates/qsh-testkit`은 빈 골격 — chaos proxy는 M2에서 구현.
+**현재 상태 (M1 이후):** `.github/workflows/ci.yml`이 push(main)/PR마다 fmt / clippy / test(nextest + doc-test) / arch-lint / cargo-deny를 5개 runner(ubuntu-24.04, ubuntu-24.04-arm, macos-14, macos-15-intel, windows-latest)에서 돌리고, 단일 required check `ci-ok`로 합친다. Windows에서는 POSIX 시그널·process-group·`$$` 의존 테스트가 `cfg(unix)`로 빠지고 나머지(`sh -c` 기반 DoD 테스트 포함 — runner의 Git for Windows `sh`에 의존)는 그대로 돈다. fuzz-smoke·nightly-fuzz·soak·perf job은 M8에서 추가한다. `crates/qsh-testkit`은 빈 골격 — chaos proxy는 M2에서 구현.
