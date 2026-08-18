@@ -43,8 +43,9 @@ pub use ring::{
     CloseReason, ControlEvent, Cursor, ReadError, ReadOut, ReplayEvent, ReplayRing, ReplayStore,
 };
 pub use session::{
-    AttachGuard, PipeHandle, PipeSource, SessionActor, SessionConfig, SessionHandle, SessionInfo,
-    SessionSource, SessionSpec, SessionState, SourceControl, SourceExit, SpawnedSource, WriteError,
+    AttachGuard, AttachToken, PipeHandle, PipeSource, SessionActor, SessionConfig, SessionHandle,
+    SessionInfo, SessionSource, SessionSpec, SessionState, SourceControl, SourceExit,
+    SpawnedSource, WriteError,
 };
 pub use signal::Signal;
 
@@ -580,6 +581,16 @@ pub trait SessionBackend: Send + Sync {
     /// Snapshot every live session.
     fn list(&self) -> Vec<SessionInfo>;
 
+    /// Register one live attachment on `id`, suspending its resume TTL for
+    /// as long as the returned token is alive; dropping the token detaches
+    /// (architecture.md §3: the TTL runs on *unattached* sessions).
+    ///
+    /// The token is an opaque local RAII handle, never a value that crosses
+    /// the seam: an out-of-process supervisor returns its own type whose
+    /// `Drop` sends the detach over IPC. The caller has already authorized
+    /// the attach.
+    fn attach(&self, id: &SessionId) -> Result<Box<dyn AttachToken>, BrokerError>;
+
     /// Read from `cursor` (the cursor-pull primitive). `wait` bounds how
     /// long to block for new data. A cursor beyond the end of the stream is
     /// [`BrokerError::InvalidArgument`], not `NotFound`. Works on a closed
@@ -648,6 +659,10 @@ impl SessionBackend for Broker {
 
     fn list(&self) -> Vec<SessionInfo> {
         Broker::list(self)
+    }
+
+    fn attach(&self, id: &SessionId) -> Result<Box<dyn AttachToken>, BrokerError> {
+        Ok(Box::new(Broker::get(self, id)?.attach_guard()))
     }
 
     fn pull(

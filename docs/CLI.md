@@ -1,6 +1,6 @@
 # QSH CLI, JSON and MCP Contract
 
-**상태:** Draft v0.5 (M2 계약 확정 — PLAN.md §4.1 미결 질문 반영; v0.4 = M1 구현과 동기화)  
+**상태:** Draft v0.6 (M2 Step 5 — `session read --follow`의 출력 형태와 `--wait` 하한 명문화; v0.5 = M2 계약 확정, v0.4 = M1 구현과 동기화)  
 **대상:** QSH MVP  
 **Canonical interface:** `qsh` CLI
 
@@ -279,11 +279,11 @@ qsh session read <session-ref> --after 42 --follow --jsonl
 
 - `--after`: 마지막으로 수신한 누적 output byte offset (sequence)
 - `--ctl-after`: 마지막으로 수신한 **control entry id** — 직전 응답의 `next_ctl_after`를 그대로 되돌려준다. 생략하면 `0`(처음부터).
-- `--wait`: 새 output을 기다릴 최대 milliseconds. 호스트는 이 값도 상한(현재 60 s, `SESSION_READ_MAX_WAIT`)으로 clamp한다 — `--limit-bytes`와 같은 취급으로, 더 큰 값은 오류가 아니라 상한이다. 더 오래 기다리려면 같은 cursor로 다시 부른다.
+- `--wait`: 새 output을 기다릴 최대 milliseconds. 호스트는 이 값도 상한(현재 60 s, `SESSION_READ_MAX_WAIT`)으로 clamp한다 — `--limit-bytes`와 같은 취급으로, 더 큰 값은 오류가 아니라 상한이다. 더 오래 기다리려면 같은 cursor로 다시 부른다. `--follow`와 함께 쓰면 이 값은 **하한 30 s 아래로 내려가지 않는다** — follower는 parking 하는 것이지 spin 하는 것이 아니므로, 단발 pull용으로 준 작은 `--wait`이 follow loop을 tight round-trip loop으로 만들지 않는다.
 - `--follow`: 종료나 취소까지 event를 계속 출력
 - `--limit-bytes`: 한 응답의 최대 payload. 호스트는 이 값을 상한(현재 192 KiB, `SESSION_READ_MAX_BYTES`)으로 clamp한다 — 더 큰 값은 오류가 아니라 상한으로 취급된다.
 
-단일 JSON 응답은 event 배열을 반환한다: `data`는 `{"session_ref": "...", "events": [Event, …], "next_after": <sequence>, "next_ctl_after": <id>}`이며 각 원소는 아래 event 객체 그대로다. `--follow --jsonl`은 event 하나당 한 줄을 출력한다.
+단일 JSON 응답은 event 배열을 반환한다: `data`는 `{"session_ref": "...", "events": [Event, …], "next_after": <sequence>, "next_ctl_after": <id>}`이며 각 원소는 아래 event 객체 그대로다. `--follow --jsonl`은 event 하나당 한 줄을 출력한다. `--follow`는 값 하나가 아니라 stream이므로 `--json`과 함께 써도 같은 streaming 형태(event 하나당 한 줄, envelope 없음)를 출력한다 — envelope는 단발 value operation의 형태이고 follower에는 적용되지 않는다. 실패 보고는 영향받지 않는다: `--follow`의 실패는 두 모드 모두 §4의 동일한 error envelope와 동일한 exit code다.
 
 **Cursor는 두 값이다.** `session.exit`/`session.writer_changed`/`session.closed`는 zero-length control entry라서 자신이 append된 시점의 offset을 달고 나오지만 offset을 **증가시키지 않는다**(아래 "전달 경로와 순서"). 따라서 `--after` 하나로는 "offset N에 있는 control event는 이미 받았다"를 표현할 수 없다. `next_after`/`next_ctl_after`를 그대로 `--after`/`--ctl-after`로 되먹이는 소비자는 모든 event를 **정확히 한 번** 받는다. 되먹이지 않는 소비자(`--ctl-after` 생략)는 offset이 정확히 `--after`인 control event를 **매번 다시** 받으며(at-least-once), `--wait` 폴링 루프는 그 event 때문에 즉시 반환되어 대기하지 않는다 — 폴링 루프는 반드시 두 값을 함께 되먹여야 한다.
 
