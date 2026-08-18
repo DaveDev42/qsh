@@ -1,0 +1,225 @@
+//! Recovery telemetry: how a session survived a dead path, and how long
+//! it took (`docs/design/testing.md` L4, `docs/CLI.md` §6.4).
+//!
+//! SC3 ("≥95% of network transitions recover") is a measurement problem,
+//! not a CI problem: the number comes from a real-device campaign, and the
+//! campaign can only report it if every recovery leaves a machine-readable
+//! trace. That trace starts in M2 so the M8 campaign has something to
+//! count.
+//!
+//! **Exposure surface is deliberately narrow.** In M2 this is a structured
+//! stderr diagnostic and nothing else:
+//!
+//! - tracing target [`TARGET`] (`qsh::recovery`), level `INFO`,
+//! - rendered as a **single line of JSON** — the message *is* the JSON, so
+//!   a campaign script can `grep '"recovery"'` and parse the line whole,
+//! - fields exactly `recovery`, `time_to_recovery_ms`, `session_ref`.
+//!
+//! It is **not** a `qsh.event/v1` event and never reaches stdout: stdout
+//! carries the contract envelope alone (CLI.md §2.2), and promoting
+//! recovery to the event contract would freeze a field set we are still
+//! learning the shape of. That promotion is a P1 decision.
+//!
+//! There is no field here that could carry a secret. `session_ref` is the
+//! same public handle `qsh session list` prints; there is no token field,
+//! no PTY content, no principal.
+
+use std::fmt;
+use std::time::Duration;
+
+// tokio's monotonic clock, not `std::time::Instant`: it is the one a
+// `#[tokio::test(start_paused = true)]` can advance, which is what lets
+// the recovery tests assert a duration instead of sleeping for one
+// (`docs/design/testing.md`: no `sleep()` in the correctness path).
+use tokio::time::Instant;
+
+/// The tracing target every recovery record carries. A campaign script
+/// filters stderr on this (`QSH_LOG=qsh::recovery=info`) and the CLI
+/// renders it specially so the line stays pure JSON.
+pub const TARGET: &str = "qsh::recovery";
+
+/// How a session got back to a live path.
+///
+/// The three-way split is the point: "it recovered" hides the difference
+/// between QUIC keeping the connection alive across an address change and
+/// the client having to rebuild everything from the resume token, and that
+/// difference is what tells us whether migration is earning its keep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Recovery {
+    /// The QUIC connection survived the path change — a rebind and/or
+    /// peer-address migration was enough, no re-dial, no replay.
+    Migrated,
+    /// The connection died and the session was rebuilt on a new one via
+    /// `session.attach` + the resume token. This is the correctness path;
+    /// [`Recovery::Migrated`] is only ever a latency optimization on top.
+    Resumed,
+    /// Neither worked inside the deadline. Recorded, not swallowed: a
+    /// silent failure is a campaign datapoint lost.
+    Failed,
+}
+
+impl Recovery {
+    /// The wire spelling used in the JSON line.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Recovery::Migrated => "migrated",
+            Recovery::Resumed => "resumed",
+            Recovery::Failed => "failed",
+        }
+    }
+}
+
+impl fmt::Display for Recovery {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// One recovery attempt, resolved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryReport {
+    /// How it recovered — or that it did not.
+    pub recovery: Recovery,
+    /// Milliseconds from "this path is dead" to "bytes flow again". The
+    /// clock starts at detection, not at the first symptom: a client that
+    /// waits out a 45 s idle timeout and then reconnects has not met the
+    /// 2 s bound, and starting the clock late would hide exactly that.
+    pub time_to_recovery_ms: u64,
+    /// The session this is about (`<host-alias>/<session_id>`, ADR-0007).
+    pub session_ref: String,
+}
+
+impl RecoveryReport {
+    /// Assemble a report.
+    pub fn new(recovery: Recovery, elapsed: Duration, session_ref: impl Into<String>) -> Self {
+        Self {
+            recovery,
+            // Saturating: a nonsense duration should skew a datapoint, not
+            // panic a reconnect loop.
+            time_to_recovery_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+            session_ref: session_ref.into(),
+        }
+    }
+
+    /// The exact line emitted to stderr — compact JSON, no trailing
+    /// newline, keys in a fixed order so a campaign log diffs cleanly.
+    pub fn to_json_line(&self) -> String {
+        // Hand-built rather than `serde_json::to_string` on a derived
+        // `Serialize`: this string is the shape a campaign script reads,
+        // and writing it out fixes the key order (serde_json's map sorts)
+        // so a later field cannot silently reshuffle the line. Only
+        // `session_ref` is free-form, so only it needs escaping.
+        let session_ref = serde_json::Value::String(self.session_ref.clone());
+        format!(
+            r#"{{"recovery":"{}","time_to_recovery_ms":{},"session_ref":{}}}"#,
+            self.recovery.as_str(),
+            self.time_to_recovery_ms,
+            session_ref
+        )
+    }
+
+    /// Emit the record on [`TARGET`] at `INFO`.
+    ///
+    /// The message *is* the JSON so that a subscriber which prints only
+    /// the message (the CLI installs one for this target) produces a pure
+    /// JSON line, while a default `fmt` subscriber still shows something
+    /// readable. The typed fields ride along for anyone consuming tracing
+    /// structurally.
+    pub fn emit(&self) {
+        tracing::info!(
+            target: TARGET,
+            recovery = self.recovery.as_str(),
+            time_to_recovery_ms = self.time_to_recovery_ms,
+            session_ref = %self.session_ref,
+            "{}",
+            self.to_json_line()
+        );
+    }
+}
+
+/// A running recovery: constructed the moment the path is declared dead,
+/// resolved once the outcome is known.
+///
+/// Holding the start instant in a value that must be consumed to produce a
+/// report is what keeps the measurement honest — there is no way to report
+/// a recovery without having timed it from detection.
+#[derive(Debug)]
+pub struct RecoveryTimer {
+    started: Instant,
+    session_ref: String,
+}
+
+impl RecoveryTimer {
+    /// Start timing at the point of detection.
+    pub fn start(session_ref: impl Into<String>) -> Self {
+        Self {
+            started: Instant::now(),
+            session_ref: session_ref.into(),
+        }
+    }
+
+    /// How long the recovery has been running so far.
+    pub fn elapsed(&self) -> Duration {
+        self.started.elapsed()
+    }
+
+    /// Resolve, emit and return the report.
+    pub fn finish(self, recovery: Recovery) -> RecoveryReport {
+        let report = RecoveryReport::new(recovery, self.started.elapsed(), self.session_ref);
+        report.emit();
+        report
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_line_is_one_json_object_with_the_documented_fields() {
+        let report = RecoveryReport::new(
+            Recovery::Resumed,
+            Duration::from_millis(412),
+            "mac/01K0ABCD",
+        );
+        let line = report.to_json_line();
+        assert!(!line.contains('\n'), "must be one line: {line}");
+        assert_eq!(
+            line,
+            r#"{"recovery":"resumed","time_to_recovery_ms":412,"session_ref":"mac/01K0ABCD"}"#
+        );
+
+        let parsed: serde_json::Value = serde_json::from_str(&line).expect("pure JSON");
+        let obj = parsed.as_object().expect("object");
+        // Exactly the three documented fields — nothing that could carry a
+        // token, a principal or PTY bytes has crept in.
+        let mut keys: Vec<_> = obj.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["recovery", "session_ref", "time_to_recovery_ms"]);
+    }
+
+    #[test]
+    fn every_outcome_has_a_stable_spelling() {
+        assert_eq!(Recovery::Migrated.as_str(), "migrated");
+        assert_eq!(Recovery::Resumed.as_str(), "resumed");
+        assert_eq!(Recovery::Failed.as_str(), "failed");
+        assert_eq!(Recovery::Failed.to_string(), "failed");
+    }
+
+    #[test]
+    fn a_timer_measures_from_start_to_finish() {
+        let timer = RecoveryTimer::start("mac/01K0");
+        let report = timer.finish(Recovery::Migrated);
+        assert_eq!(report.recovery, Recovery::Migrated);
+        assert_eq!(report.session_ref, "mac/01K0");
+        // No sleep, no wall-clock assumption: the only invariant a
+        // monotonic clock owes us here is that it did not run backwards.
+        assert!(report.time_to_recovery_ms < 60_000);
+    }
+
+    #[test]
+    fn an_absurd_duration_saturates_instead_of_panicking() {
+        let report = RecoveryReport::new(Recovery::Failed, Duration::MAX, "mac/01K0");
+        assert_eq!(report.time_to_recovery_ms, u64::MAX);
+    }
+}

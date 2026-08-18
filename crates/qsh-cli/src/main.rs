@@ -55,7 +55,19 @@ fn main() {
 /// Diagnostics go to **stderr only**, at a level set by `-q`/`-v`/`-vv`
 /// and overridable with `QSH_LOG` (or `RUST_LOG`). stdout stays reserved
 /// for the JSON envelope / human result (`docs/CLI.md` §2.2).
+///
+/// Recovery telemetry ([`qsh_core::telemetry`]) is the one exception to
+/// the level rule and gets its own layer. `docs/CLI.md` §6.4 fixes it as a
+/// **one-line JSON** record emitted at *default* verbosity — a campaign
+/// script (`docs/design/testing.md` L4) parses those lines whole — so a
+/// `warn` default level must not swallow it and the human formatter's
+/// timestamp/level prefix must not be wrapped around it. It still obeys
+/// `--quiet`, which means "no diagnostics".
 fn init_tracing(cli: &Cli) {
+    use tracing_subscriber::Layer as _;
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::util::SubscriberInitExt as _;
+
     let default = if cli.quiet {
         "error"
     } else {
@@ -69,11 +81,60 @@ fn init_tracing(cli: &Cli) {
     let filter = EnvFilter::try_from_env("QSH_LOG")
         .or_else(|_| EnvFilter::try_from_default_env())
         .unwrap_or_else(|_| EnvFilter::new(default));
-    tracing_subscriber::fmt()
+    let human = tracing_subscriber::fmt::layer()
         .with_writer(io::stderr)
-        .with_env_filter(filter)
         .with_target(false)
+        .with_filter(filter)
+        .with_filter(tracing_subscriber::filter::filter_fn(|meta| {
+            meta.target() != qsh_core::telemetry::TARGET
+        }));
+    let recovery_enabled = !cli.quiet;
+    let recovery = RecoveryLayer.with_filter(tracing_subscriber::filter::filter_fn(move |meta| {
+        recovery_enabled && meta.target() == qsh_core::telemetry::TARGET
+    }));
+    tracing_subscriber::registry()
+        .with(human)
+        .with(recovery)
         .init();
+}
+
+/// Writes a recovery record to stderr as exactly the line
+/// [`qsh_core::telemetry::RecoveryReport::to_json_line`] produced —
+/// nothing before it, nothing after it.
+struct RecoveryLayer;
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for RecoveryLayer {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let mut line = String::new();
+        event.record(&mut MessageOnly(&mut line));
+        if line.is_empty() {
+            return;
+        }
+        // Best effort: telemetry must never be able to fail a command.
+        let _ = writeln!(io::stderr().lock(), "{line}");
+    }
+}
+
+/// Pulls just the event's message out, which for a recovery record is the
+/// whole JSON object.
+struct MessageOnly<'a>(&'a mut String);
+
+impl tracing::field::Visit for MessageOnly<'_> {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        if field.name() == "message" {
+            self.0.push_str(value);
+        }
+    }
+
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            *self.0 = format!("{value:?}");
+        }
+    }
 }
 
 fn run(cli: &Cli) -> i32 {
