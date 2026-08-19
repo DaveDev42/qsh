@@ -43,26 +43,55 @@ const SAMPLE_FINGERPRINT: &str = "sha256:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxw
 /// against it.
 const UPDATE_ENV: &str = "QSH_UPDATE_FIXTURES";
 
-/// `ErrorCode`s M1 cannot produce yet, each with the milestone that will.
+/// `ErrorCode`s no fixture covers yet, each with the reason it has none.
 /// Move a code out of this list the moment a fixture covers it — the
 /// reachability test asserts the two sets are disjoint.
+///
+/// "No fixture" is not the same as "unreachable": several of these are
+/// produced today on a path that has no `qsh.cli/v1` envelope to capture
+/// (the interactive form has no machine mode, `docs/CLI.md` §7) or no
+/// deterministic way to force one. The reason string has to say which,
+/// because a stale "the next milestone will do it" hides a code that
+/// quietly became reachable (`docs/design/testing.md` L6).
 const DEFERRED: &[(&str, &str)] = &[
     (
         "PERMISSION_DENIED",
-        "M5 policy engine (M1 interim policy is allow-all-pinned)",
+        "M5 policy engine (the M1–M4 interim policy is allow-all-pinned)",
     ),
     (
         "SESSION_CONFLICT",
-        "M2 Step 6: the host produces it now (`session.attach --no-steal` \
-         against a held lease), but no CLI command opens an attach until \
-         the Step 6 frontend lands",
+        "reachable on the host since M2 Step 3 (`SessionAttach` with \
+         `no_steal` against a live foreign lease) and covered by the \
+         `qsh-core` server tests, but no CLI surface reaches it: \
+         `qsh attach` always sends `no_steal: false` (`src/tui/mod.rs`) \
+         and M2's CLI contract has no `--no-steal` flag",
     ),
-    ("RESUME_GAP", "M2 sessions"),
-    ("CANCELED", "M2 sessions"),
-    ("RESOURCE_EXHAUSTED", "M2 backpressure"),
-    ("UNSUPPORTED", "M2 Step 7: attach with a resume token"),
-    ("REMOTE_ERROR", "no deterministic producer in M1"),
-    ("INTERNAL", "no deterministic producer in M1"),
+    (
+        "RESUME_GAP",
+        "event-only by contract (`docs/CLI.md` §3.3): leaving the replay \
+         range is always delivered as a `session.gap` event, never as an \
+         error envelope. Stays deferred until the P1 strict-read option",
+    ),
+    (
+        "CANCELED",
+        "no producer anywhere in the tree yet — reserved for caller-side \
+         cancellation, which no M2 op offers",
+    ),
+    (
+        "RESOURCE_EXHAUSTED",
+        "produced since M2 (per-connection in-flight cap, attach queue \
+         overflow) but only under backpressure a fixture cannot stage \
+         deterministically",
+    ),
+    (
+        "UNSUPPORTED",
+        "produced since M2 Step 6 by the `qsh user@host` hint refusal, but \
+         the interactive form has no machine mode (`docs/CLI.md` §7), so \
+         there is no envelope to capture; `tui_expect.rs` asserts the code \
+         reaches the user on stderr instead",
+    ),
+    ("REMOTE_ERROR", "no deterministic producer"),
+    ("INTERNAL", "no deterministic producer"),
 ];
 
 /// Every fixture this milestone owes, so a silently-missing file fails
