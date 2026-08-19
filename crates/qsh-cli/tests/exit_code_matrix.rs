@@ -80,6 +80,17 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
             outcome: Outcome::Usage,
         },
         Case {
+            // No subcommand and no target. `qsh` alone is clap's
+            // `arg_required_else_help`; `qsh --json` is our own branch, and
+            // both owe the same answer — exit 2 with **nothing on stdout**,
+            // because help text on stdout would break machine mode
+            // (`docs/CLI.md` §2.2).
+            name: "usage: global flags with no target and no subcommand",
+            sandbox: &fleet.client,
+            args: &[],
+            outcome: Outcome::Usage,
+        },
+        Case {
             name: "version",
             sandbox: &fleet.client,
             args: &["version"],

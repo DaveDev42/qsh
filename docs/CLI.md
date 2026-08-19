@@ -184,9 +184,9 @@ INTERNAL
 
 Remote process가 정확히 `255`로 종료한 경우, QSH 자체 실패(`255`)와 구분할 수 없게 되는 것을 막기 위해 qsh exec의 프로세스 exit code는 `254`로 clamp된다. 이때도 JSON 결과의 `remote_exit_code`는 실제 값(`255`)을 그대로 담으며, exit code의 source of truth는 항상 JSON이다.
 
-대화형 세션(`qsh [user@]host`, `qsh attach <session-ref>`, §7)은 원격 셸이 종료되면 그 exit code를 `qsh exec`와 같은 규칙(`0..=254`, `255`는 `254`로 clamp)으로 반환하고, escape 시퀀스 detach(§7)는 세션을 살려 둔 채 `0`으로 종료한다.
+대화형 세션(`qsh [user@]host`, `qsh attach <session-ref>`, §7)은 원격 셸이 종료되면 그 exit code를 `qsh exec`와 같은 규칙(`0..=254`, `255`는 `254`로 clamp)으로 반환하고, escape 시퀀스 detach(§7)는 세션을 살려 둔 채 `0`으로 종료한다. 신호로 죽은 셸도 `qsh exec`와 같은 값이다: `session.exit`의 `signal`(§6.4)을 `128 + signo`로 되돌려 clamp 규칙에 태운다(예: `SIGHUP` → `129`, `SIGKILL` → `137`). `254`는 remote `255`의 clamp 결과이거나 **호스트가 종료 상태를 알려 주지 못한 경우**(`exit_code`와 `signal`이 모두 null, §6.4)를 뜻하며, 연결이 끊겨 종료 상태를 아예 받지 못한 경우는 QSH 자체 실패라 `255`다.
 
-Output mode에 따라 exit code 의미가 달라져서는 안 된다.
+Output mode에 따라 exit code 의미가 달라져서는 안 된다. 대화형 form(§7)은 machine output mode 자체가 없으므로 이 규칙의 대상이 아니다 — `--json`/`--jsonl`을 붙이면 세션을 만들지 않고 `INVALID_ARGUMENT`로 거부한다(§7).
 
 ## 5. 핵심 data type
 
@@ -591,6 +591,10 @@ qsh attach <session-ref>
 
 Interactive mode는 terminal raw mode, window resize와 signal forwarding을 처리한다. 세션 생성·읽기·쓰기의 권한과 동작은 machine-readable command와 동일하다.
 
+**Machine output mode가 없다.** 이 두 form의 stdout은 원격 터미널의 byte 그 자체이므로(§2.2) envelope가 들어갈 자리가 없다 — `qsh serve`(§6.12)와 같은 이유로 예외다. `--json`/`--jsonl`을 붙이면 **세션을 만들기 전에** `INVALID_ARGUMENT` error envelope 한 줄과 exit `255`(§4)로 거부한다. 기계 소비자는 같은 일을 `qsh session open --json` + `qsh session read --follow --jsonl` + `qsh session write`로 조합한다(§7.1).
+
+**전달되는 환경변수.** 대화형 form은 로컬 터미널을 재현하는 데 필요한 것만 보낸다: `TERM`은 `SessionOpen.term`으로, locale(`LANG`, `LANGUAGE`, `LC_ALL`, `LC_CTYPE`, `LC_COLLATE`) 중 클라이언트 프로세스에 설정된 것은 `SessionOpen.env` overlay로 전달한다(architecture.md §4). 이는 **대화형 form 한정** 동작이다 — `qsh session open`·`qsh exec`·MCP는 호출자가 명시한 `--env`만 보내며, 클라이언트 프로세스의 환경을 암묵적으로 상속시키지 않는다. `HOME`/`USER`/`LOGNAME`/`SHELL`/`PATH`는 어느 경로에서도 호스트가 고정한다.
+
 **`user@`의 의미.** 원격 셸은 항상 **`qsh serve`를 실행한 OS 계정**으로 실행된다 — MVP에는 user switching이 없고, ACL principal은 항상 인증서에서 나온다(§2.5, protocol.md §3). `user@`는 SSH 근육 기억을 위해 받아들이며 생략해도 된다(`qsh personal-mac`). 지정하면 `SessionOpen`에 선택 hint로 전달되고, 호스트는 그 값이 serve 계정의 login name과 다르면 세션을 만들지 않고 `UNSUPPORTED`(message: user switching is not supported)로 거부한다 — fail closed. 즉 `user@`는 "이 계정이어야 한다"는 단언이지 계정 선택이 아니다(PRD §6). 검사 순서는 **ACL `session.open` → `user` hint → spawn**이다: 인가되지 않은 peer는 hint 값과 무관하게 항상 `PERMISSION_DENIED`를 받고(계정명 비노출, audit는 ACL 판정만 기록), `UNSUPPORTED`는 인가된 peer에게만 반환된다. 비교는 serve 계정의 login name과 정확 일치(case-sensitive)다. `user@`는 `qsh [user@]host` 형태(`-L`/`-R` 플래그를 동반한 경우 포함 — 모두 `SessionOpen`을 보낸다)에서만 받으며, `qsh exec`/`qsh session open`/`qsh tunnel open`은 bare host만 받는다.
 
 **Detach와 escape 시퀀스.** SSH와 같은 방식의 tilde escape를 쓴다. escape 문자는 **행의 시작에서만** 인식되며, 그 외 위치의 `~`는 그대로 원격 PTY로 전달된다. raw mode에는 line discipline이 없으므로 "행의 시작"은 *세션 시작 직후이거나, 클라이언트가 마지막으로 원격에 전달한 byte가 CR(`\r`, 0x0D) 또는 LF(`\n`, 0x0A)인 상태*로 정의한다.
@@ -604,7 +608,7 @@ Interactive mode는 terminal raw mode, window resize와 signal forwarding을 처
 
 이 표가 전부이며 다른 시퀀스(`~^Z`, `~#`, `~&` 등)는 없다. 행 시작의 escape 문자 1 byte는 다음 byte가 올 때까지 로컬에 보류되고 전달되지 않는다; 표에 없는 두 번째 byte가 오면 escape 문자와 그 byte를 **둘 다 그대로** 원격에 전달하고 상태를 초기화한다(ssh와 동일 — 입력이 조용히 사라지지 않는다). escape 처리는 **local stdin이 TTY일 때만** 활성이다 — pipe/file stdin에서는 `--escape-char`와 무관하게 꺼지고 모든 byte가 그대로 전달된다(`qsh session write`·MCP 경로에는 애초에 escape 처리가 없다).
 
-escape 문자는 `--escape-char <c>`로 바꿀 수 있고 `--escape-char none`은 escape 처리를 끈다(그때 detach 수단은 client 프로세스 종료뿐이며 세션은 여전히 유지된다). 기본값은 `~`. `--escape-char`는 `qsh [user@]host`와 `qsh attach`에만 붙는 flag이며 값은 단일 ASCII 문자 또는 `none`이다(그 외는 `INVALID_ARGUMENT`, exit `2`); 설정 파일 기본값은 M2에 없다. escape 시퀀스는 client 로컬에서 소비되고 원격으로 전달되지 않는다.
+escape 문자는 `--escape-char <c>`로 바꿀 수 있고 `--escape-char none`은 escape 처리를 끈다(그때 detach 수단은 client 프로세스 종료뿐이며 세션은 여전히 유지된다). 기본값은 `~`. `--escape-char`는 `qsh [user@]host`와 `qsh attach`에만 붙는 flag이며 값은 **단일 출력 가능한(printable, 공백·제어문자 제외) ASCII 문자** 또는 `none`이다(그 외는 `INVALID_ARGUMENT`, exit `2`) — 행 시작에서 눈에 보이지 않는 byte가 입력을 삼키는 일이 없도록 하는 제한이다; 설정 파일 기본값은 M2에 없다. escape 시퀀스는 client 로컬에서 소비되고 원격으로 전달되지 않는다.
 
 ### 7.1 Value operation과 stream operation
 

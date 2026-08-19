@@ -131,13 +131,21 @@ M2 크기: 5ew (`docs/ROADMAP.md` M2 "크기").
 - `crates/qsh-cli/src/tui/mod.rs` (신규 — raw mode 관리, 입력 펌프, detach key 처리, resize 감시)
 - `crates/qsh-cli/src/cli.rs` (확장 — `user@host` positional + `Command::Attach { session_ref }`)
 - `crates/qsh-cli/src/main.rs` (확장 — TUI 경로는 envelope를 stdout에 내지 않음; 진단은 stderr 전용)
-- `crates/qsh-cli/Cargo.toml` (`nix` 0.29+ features `term`/`ioctl`/`poll`/`signal` — `[target.'cfg(unix)'.dependencies]`로 선언, architecture.md §8)
+- `crates/qsh-cli/Cargo.toml` (`nix` 0.29+ features `term`/`ioctl`/`signal` — `[target.'cfg(unix)'.dependencies]`로 선언, architecture.md §8)
 
 **(c) 빚지는 테스트 (`docs/design/testing.md` L5 마지막 항목):** `expectrl` 기반 expect 하네스 — **클라이언트 자체를 pty 아래에서 실행**해 termios raw mode 경로가 실제로 돌게 한다. 수용 세트 스크립트: bash/zsh 프롬프트 왕복, `vim` 진입/편집/종료, `tmux` 안에서의 resize 전파, `claude` 기동. resize는 `--cols/--rows` 변경 후 원격 `stty size`가 일치함으로 단언. detach key 후 세션이 `running` 상태로 남고 재attach 가능함을 단언.
 
 **(d) 완료 판정:** DoD 2번 항목 green(수용 세트 4종 + resize 전파). 터미널 상태가 어떤 종료 경로(정상/에러/패닉/시그널)에서도 복원됨. `qsh-cli`에 인증·ACL·세션 로직이 0줄임을 리뷰로 확인(`CLAUDE.md` 하드 아키텍처 규칙 — 필요해 보이면 `Ops`로 옮긴다).
 
 **(e) 인용:** `docs/CLI.md` §7(human interactive mode — `qsh dave@personal-mac`, `qsh attach <session-ref>`, raw mode·resize·signal forwarding), §7.1(interactive attach는 `session.attach` 하나 위에 구현), §9(SIGINT 전달과 detach key), §2.2(stdout/stderr 분리), §11(frontend 제약), `docs/design/testing.md` L5("클라이언트도 pty 아래에서 테스트"), `docs/ROADMAP.md` §4 일정 리스크 2번(수용 세트 timebox + expect 하네스 조기 구축), 시퀀싱 원칙 3번.
+
+> **Step 6 리뷰 후속 — 다음 step이 깨면 안 되는 불변식.**
+> - **Detach는 입력과 같은 ordered queue를 탄다.** `AttachHandle::detach()`는 `AttachCommand::Detach`를 큐에 넣고 driver가 send half를 `finish` + peer ack까지 flush한 뒤에야 connection을 닫는다(QUIC close는 미전송 stream data를 버린다). 양쪽 다 시간 상한이 있다(`DETACH_FLUSH` / `DETACH_FLUSH_GRACE`). `tui_expect.rs::input_typed_just_before_a_detach_is_not_lost`가 회귀 게이트이며, ack 경로를 빼면 결정적으로 실패한다.
+> - **시그널 pump는 세션 큐에서 절대 block하지 않는다** (`try_write`/`try_resize`). block하면 tokio가 disposition을 가져간 `SIGTERM`/`SIGHUP`/`SIGQUIT`이 dispatch되지 않아 클라이언트가 kill 불가 + 터미널 raw로 남는다. 같은 이유로 시그널 handler는 raw mode 진입 **전에** 설치하고(설치 완료를 기다린다), 전송 실패로 loop를 빠져나가지 않는다.
+> - **신호사(死) exit code는 `128 + signo`** — `qsh exec`와 같은 값(CLI.md §4). `session.exit`의 `signal` 이름을 `qsh_core::exec::signal_number`로 되돌린다. `254`는 "상태 미상"이라는 뜻만 남는다.
+> - **대화형 form에는 machine mode가 없다**(CLI.md §7). `--json`/`--jsonl`은 세션을 만들기 전에 `INVALID_ARGUMENT`.
+> - **재attach는 아직 sequence `0`부터 replay한다.** `attach_request()`가 cursor를 보내지 않으며 `attach_ops.rs`가 `replay_from() == 0`을 단언한다 — Step 7이 resume-with-cursor를 넣을 때 바꿀 단언이 그것이다.
+> - `QSH_ACCEPTANCE_STRICT=1`이면 수용 세트(bash/zsh/vim/tmux/`claude`) 누락이 skip이 아니라 **실패**다. M2를 certify하는 job은 이 변수를 켠 상태로 돌려야 한다.
 
 ---
 
@@ -262,7 +270,7 @@ M2 크기: 5ew (`docs/ROADMAP.md` M2 "크기").
 | 6 | `SessionSignal` | 별도 op 없음(P1); `session close --signal`은 `SessionClose.signal`(HUP\|INT\|QUIT\|TERM\|USR1\|USR2\|KILL, 그 외 `INVALID_ARGUMENT`); wire 25는 `reserved`(수신 시 `UNSUPPORTED`); `close_grace_ms` 5s, KILL 즉시, `exited`에는 무신호 | CLI.md §2.4·§6.7, protocol.md §9, architecture.md §4·§7 |
 | 7 | recovery 텔레메트리 | stderr 전용 — tracing `qsh::recovery`, INFO, 한 줄 JSON(`recovery`/`time_to_recovery_ms`/`session_ref`); event 승격은 P1 | testing.md L4, CLI.md §6.4 |
 | 8 | `localctl` 시점 | M2 아님 — **M3**(첫 소비자: 역방향 `qsh attach`의 UDS IPC, protocol.md §11-3); M2는 `SessionBackend` seam 순수성만 | ADR-0003 추기, architecture.md §3·§7 |
-| 9 | raw-mode crate | `nix`(`term`/`ioctl`/`poll`/`signal`; host 측 `user`) 직접 termios + `TIOCGWINSZ`, SIGWINCH는 `tokio::signal::unix`; crossterm 기각; `cfg(unix)` target 의존 | architecture.md §8 |
+| 9 | raw-mode crate | `nix`(`term`/`ioctl`/`signal`) 직접 termios + `TIOCGWINSZ`, SIGWINCH는 `tokio::signal::unix`; crossterm 기각; `cfg(unix)` target 의존 | architecture.md §8 |
 
 ## 5. 완료 절차
 
