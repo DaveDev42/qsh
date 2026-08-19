@@ -141,6 +141,12 @@ const BURST_ON_PTY: usize = BURST + BURST / 2;
 /// `printf 'QSHMARK-%04d\n'` is 13 bytes on the pipe, 14 on the pty.
 const MARKER_LINE: usize = 14;
 
+/// Width of a `QSHMARK-\d{4}` regex match itself, terminator excluded:
+/// the 8-byte literal prefix plus the fixed 4-digit index. Used to slice
+/// consecutive occurrences apart when one `expect()` scan turns up more
+/// than one (see `ClientGuard::next_marker`).
+const MARKER_MATCH_LEN: usize = 8 + 4;
+
 /// Nominal distance between the starts of two consecutive markers — the
 /// floor, since the tty may emit an extra `\r` (see
 /// [`assert_producer_corpus`]), never fewer bytes.
@@ -232,6 +238,11 @@ impl Drop for ChildGroupGuard {
 struct ClientGuard {
     session: OsSession,
     reaped: bool,
+    /// Markers a single `expect()` scan turned up beyond the one it
+    /// reported, queued in stream order and drained before the next scan.
+    /// See [`ClientGuard::next_marker`] for why this exists instead of
+    /// `Session::set_expect_lazy`.
+    pending_markers: std::collections::VecDeque<(Vec<u8>, usize)>,
 }
 
 impl ClientGuard {
@@ -244,6 +255,7 @@ impl ClientGuard {
         Self {
             session,
             reaped: false,
+            pending_markers: std::collections::VecDeque::new(),
         }
     }
 
@@ -285,20 +297,56 @@ impl ClientGuard {
     /// Consume the client's output up to and including the next
     /// `QSHMARK-NNNN`, returning the bytes consumed and the marker's
     /// index.
+    ///
+    /// A single non-blocking `expect()` scan can turn up more than one
+    /// occurrence: the producer's burst loop free-runs once the read gate
+    /// opens (`producer_script`'s doc comment), so a test-thread poll that
+    /// lands a round or more behind can find two markers already sitting in
+    /// the buffer. `expectrl`'s greedy `expect()` (`sync_session.rs`,
+    /// `expect_gready`) reports only the first such occurrence
+    /// (`Captures::get(0)`) but consumes the stream through the *last* one
+    /// it saw (`Captures::right_most_index`) — trusting `get(0)` alone
+    /// would silently drop every marker strictly in between, which is
+    /// exactly the byte this file's round-order assertion would need back.
+    /// (Forcing single-occurrence scans via `Session::set_expect_lazy` was
+    /// tried and rejected: it reads one byte per non-blocking syscall with
+    /// no batching, and consuming just the ~6 KiB burst between two markers
+    /// that way outlasts the producer's entire unthrottled run, turning
+    /// "killed mid-stream" into "killed after the producer finished" on any
+    /// reasonably fast machine.) Instead, every occurrence the scan
+    /// reports is sliced out of `Captures::as_bytes()` — the same span
+    /// `expect()` already consumed, so no extra pty reads — and queued in
+    /// stream order; only the first is returned here, and the rest are
+    /// served from the queue, without another scan, before the next call
+    /// touches the pty again.
     fn next_marker(&mut self) -> (Vec<u8>, usize) {
+        if let Some(pending) = self.pending_markers.pop_front() {
+            return pending;
+        }
         let found = self
             .session
             .expect(Regex(r"QSHMARK-\d{4}"))
             .unwrap_or_else(|err| panic!("the client never rendered another marker: {err}"));
-        let matched = found.get(0).expect("a match has group 0").to_vec();
-        let index: usize = std::str::from_utf8(&matched)
-            .expect("markers are ASCII")
-            .trim_start_matches("QSHMARK-")
-            .parse()
-            .expect("marker index");
-        let mut bytes = found.before().to_vec();
-        bytes.extend_from_slice(&matched);
-        (bytes, index)
+        // Everything the scan consumed, from where the previous call (or
+        // `next_pid`) left off through the end of the last occurrence —
+        // exactly `Captures::before()` generalised to more than one match.
+        let consumed = found.as_bytes();
+        let mut at = 0usize;
+        while let Some(hit) = find(&consumed[at..], b"QSHMARK-") {
+            let start = at + hit;
+            let end = start + MARKER_MATCH_LEN;
+            let index: usize = std::str::from_utf8(&consumed[start + "QSHMARK-".len()..end])
+                .expect("markers are ASCII")
+                .parse()
+                .expect("marker index");
+            let mut bytes = consumed[at..start].to_vec();
+            bytes.extend_from_slice(&consumed[start..end]);
+            self.pending_markers.push_back((bytes, index));
+            at = end;
+        }
+        self.pending_markers
+            .pop_front()
+            .expect("the regex matched, so the scan queued at least one marker")
     }
 
     /// `kill -9` the client — no grace, no unwind, no goodbye on the
