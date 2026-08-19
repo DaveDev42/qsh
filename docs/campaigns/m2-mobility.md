@@ -77,6 +77,26 @@ proxy(`docs/design/testing.md` L4)는 PR 회귀 게이트이고, 실제 인터�
 - **예산: `time_to_recovery_ms` ≤ 2000.** 측정 시점은 클라이언트의 path 사망 감지
   시각이며 라디오 토글 시각이 아니다(스크립트가 찍는 `switch_issued_ms`는 상관용
   보조 정보일 뿐 측정치가 아니다).
+- **`time_to_recovery_ms`는 사용자 체감 단절이 아니다 — 반드시 감지 지연을 더해
+  보고한다.** 클럭이 *감지 시점*에서 시작하므로(`crates/qsh-core/src/telemetry.rs`
+  의 `RecoveryTimer`는 driver가 path 사망을 판정한 뒤에 시작한다), 실제 단절은
+
+  > **사용자 체감 단절 ≈ 감지 지연 + `time_to_recovery_ms`**
+
+  다. 감지 지연은 `PathWatchConfig`(`crates/qsh-core/src/client/pathwatch.rs`)가
+  정하며, 세션이 **활성**인지 **유휴**인지에 따라 두 값이다:
+
+  | cadence | 조건 | probe 간격 | 감지 지연 (3 strikes, 침묵 하한 1 s) |
+  |---|---|---:|---:|
+  | active | 마지막 사용자 활동/트래픽 이후 `active_window`(15 s) 이내 | 250 ms | **~1 s** |
+  | idle | 그보다 오래 조용했던 attach | 5 s | **최대 ~15 s** |
+
+  §4 절차는 세션 안에 0.2 s 주기 부하를 걸어 두므로(3단계) 이 캠페인의 회차는
+  **active cadence(~1 s)** 로 도는 것이 정상이다. 즉 예산 내 회차의 실제 체감
+  단절은 대략 `1000 + time_to_recovery_ms` ms다. §7 요약에 **두 값을 합쳐 적는다**
+  — `time_to_recovery_ms`만 보고하면 SC3을 과소보고하게 된다. 부하를 걸지 않은
+  채(또는 15 s 넘게 조용한 상태에서) 전환한 회차가 있다면 그 회차는 idle cadence로
+  돌았을 수 있으므로 비고에 적고 체감 단절에 ~15 s를 쓴다.
 - **idle timeout에 기대어 늦게 복구된 회차는 `failed`로 분류한다.** quinn의 idle
   timeout은 45초이므로 "결국 돌아왔다"는 관측은 통과 근거가 되지 못한다. 실무
   판정: `time_to_recovery_ms > 2000`이면 텔레메트리가 `resumed`라고 말하더라도
@@ -229,6 +249,8 @@ scripts/mobility/summarize.py --json mobility-stderr.log > mobility-summary.json
 | 예산(2000 ms) 내 복구 비율 | _(미기재)_ |
 | `unverified` (측정 불가) | _(미기재, 0이 아니면 캡처 결함)_ |
 | time-to-recovery p50 / p90 / p95 / max (ms) | _(미기재)_ |
+| 감지 cadence (회차 대부분이 active인가) | _(미기재, §3 참조)_ |
+| **사용자 체감 단절** p50 / p90 / max (ms) = 감지 지연 + 위 값 | _(미기재)_ |
 | gap 발생 회차 수 | _(미기재)_ |
 
 서술로 남길 것:
