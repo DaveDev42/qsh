@@ -133,8 +133,21 @@ struct StderrLines;
 
 impl LineSink for StderrLines {
     fn write_line(&self, line: &str) {
+        // A recovery record is emitted at default verbosity (CLI.md §6.4)
+        // and, by definition, mid-session — which for `qsh attach` means
+        // the local terminal is in raw mode, where a bare LF moves down a
+        // row without returning the carriage and the record stair-steps
+        // across the screen. Only when stderr is a terminal: a redirected
+        // log stays plain LF so the M8 campaign's `grep` still reads one
+        // record per line.
+        let crlf = io::stderr().is_terminal();
+        let mut err = io::stderr().lock();
         // Best effort: telemetry must never be able to fail a command.
-        let _ = writeln!(io::stderr().lock(), "{line}");
+        let _ = if crlf {
+            write!(err, "{line}\r\n")
+        } else {
+            writeln!(err, "{line}")
+        };
     }
 }
 

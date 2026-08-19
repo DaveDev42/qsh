@@ -132,10 +132,23 @@ impl PathState {
 
     /// Something arrived from the host. Any traffic answers every
     /// outstanding probe: the question was "does this path carry packets".
+    ///
+    /// Deliberately **not** activity. A `Pong` is the watchdog talking to
+    /// itself, and counting it would hold the attach inside
+    /// [`PathWatchConfig::active_window`] forever — the fast cadence would
+    /// keep answering itself and the slow one would never be reached on
+    /// any path that is actually alive, which is exactly backwards.
     pub fn observe_inbound(&mut self, now: Instant) {
         self.last_inbound = now;
-        self.last_activity = now;
         self.unanswered = 0;
+    }
+
+    /// Session traffic arrived — output, an event, a `Ping` the host sent
+    /// of its own accord. Proves the path *and* means the session is in
+    /// use, so the fast cadence applies.
+    pub fn observe_traffic(&mut self, now: Instant) {
+        self.observe_inbound(now);
+        self.last_activity = now;
     }
 
     /// The client did something a user would expect an answer to — typed,
@@ -150,6 +163,22 @@ impl PathState {
         self.unanswered
     }
 
+    /// Whether nobody has been waiting on this attach for a whole
+    /// [`PathWatchConfig::active_window`].
+    pub fn is_idle(&self, now: Instant, cfg: &PathWatchConfig) -> bool {
+        now.saturating_duration_since(self.last_activity) > cfg.active_window
+    }
+
+    /// How often this attach should be probing right now — which is also
+    /// how long the watchdog task may sleep before deciding again.
+    pub fn cadence(&self, now: Instant, cfg: &PathWatchConfig) -> Duration {
+        if self.is_idle(now, cfg) {
+            cfg.idle_probe_interval
+        } else {
+            cfg.probe_interval
+        }
+    }
+
     /// Decide one tick, recording a probe if it orders one.
     pub fn verdict(&mut self, now: Instant, rtt: Duration, cfg: &PathWatchConfig) -> Verdict {
         let silence = now.saturating_duration_since(self.last_inbound);
@@ -158,11 +187,7 @@ impl PathState {
         if self.unanswered >= cfg.strikes && silence >= cfg.dead_after(rtt) {
             return Verdict::Dead;
         }
-        let cadence = if now.saturating_duration_since(self.last_activity) <= cfg.active_window {
-            cfg.probe_interval
-        } else {
-            cfg.idle_probe_interval
-        };
+        let cadence = self.cadence(now, cfg);
         let since_probe = self
             .last_probe
             .map_or(Duration::MAX, |at| now.saturating_duration_since(at));
@@ -193,9 +218,20 @@ struct Inner {
     /// refuses to judge.
     stalls: AtomicUsize,
     notify: tokio::sync::Notify,
-    /// Woken every time inbound traffic is reported, so a migration probe
+    /// Bumped every time inbound traffic is reported, so a migration probe
     /// can wait for "anything at all" without polling.
-    inbound: tokio::sync::Notify,
+    ///
+    /// A `watch` channel rather than a `Notify`: a notification edge is
+    /// only delivered to a waiter that has already registered, and the
+    /// migration probe necessarily asks its question *before* it starts
+    /// waiting for the answer. `subscribe()` snapshots the counter, so an
+    /// answer that lands in that window is still seen and a live
+    /// connection is not written off as unmigratable.
+    inbound: tokio::sync::watch::Sender<u64>,
+    /// Woken when the cadence changes under a sleeping watchdog, so
+    /// "somebody came back to their terminal" is measured fast rather than
+    /// after the rest of an idle-length beat.
+    wake: tokio::sync::Notify,
 }
 
 impl PathWatch {
@@ -208,7 +244,8 @@ impl PathWatch {
                 dead: AtomicBool::new(false),
                 stalls: AtomicUsize::new(0),
                 notify: tokio::sync::Notify::new(),
-                inbound: tokio::sync::Notify::new(),
+                inbound: tokio::sync::watch::Sender::new(0),
+                wake: tokio::sync::Notify::new(),
             }),
         }
     }
@@ -225,22 +262,78 @@ impl PathWatch {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// Report traffic from the host.
+    /// Report bare liveness from the host — a `Pong`, and nothing else.
+    /// Proves the path carries packets; says nothing about anybody
+    /// waiting, so it does not move the cadence.
     pub fn inbound(&self) {
         self.state().observe_inbound(Instant::now());
-        self.inner.inbound.notify_waiters();
+        self.bump_inbound();
     }
 
-    /// Resolve on the next inbound traffic reported *after* this is
-    /// awaited. Used by the migration probe, whose question is "did
-    /// anything come back", not "did this particular frame come back".
-    pub async fn next_inbound(&self) {
-        self.inner.inbound.notified().await;
+    /// Report session traffic from the host: output, an event, a host
+    /// `Ping`. Liveness *and* activity.
+    pub fn traffic(&self) {
+        self.observe(|state, now| state.observe_traffic(now));
+        self.bump_inbound();
+    }
+
+    fn bump_inbound(&self) {
+        self.inner.inbound.send_modify(|n| *n = n.wrapping_add(1));
+    }
+
+    /// A snapshot of the inbound counter that resolves on the *next* report
+    /// after it is taken. Used by the migration probe, whose question is
+    /// "did anything come back", not "did this particular frame come back".
+    pub fn inbound_signal(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.inner.inbound.subscribe()
+    }
+
+    /// Reset the silence clock without reporting traffic.
+    ///
+    /// Used where the *absence* of a signal proves nothing rather than
+    /// where a signal arrived: a window the watchdog could not see into.
+    /// Deliberately does not bump the inbound counter — a migration probe
+    /// waiting for an answer must not read the watchdog's own unblocking
+    /// as one.
+    fn restart_silence_clock(&self) {
+        self.state().observe_inbound(Instant::now());
     }
 
     /// Report local activity (input, resize) — somebody is waiting.
     pub fn activity(&self) {
-        self.state().observe_activity(Instant::now());
+        self.observe(|state, now| state.observe_activity(now));
+    }
+
+    /// Apply one observation, waking a watchdog that is sleeping out an
+    /// idle-length beat if this is what put the attach back in use.
+    fn observe(&self, f: impl FnOnce(&mut PathState, Instant)) {
+        let now = Instant::now();
+        let cfg = self.inner.cfg;
+        let was_idle = {
+            let mut state = self.state();
+            let was_idle = state.is_idle(now, &cfg);
+            f(&mut state, now);
+            was_idle
+        };
+        // Only on the transition: on a busy attach the beat is already
+        // fast, and waking the watchdog per keystroke would be a lot of
+        // noise for a cadence that does not change.
+        if was_idle {
+            self.inner.wake.notify_one();
+        }
+    }
+
+    /// The beat this attach is on right now.
+    pub fn cadence(&self) -> Duration {
+        let cfg = self.inner.cfg;
+        self.state().cadence(Instant::now(), &cfg)
+    }
+
+    /// Resolve when something changed the cadence under a sleeping
+    /// watchdog. Safe as a `select!` arm: a missed wake only costs the
+    /// rest of one beat.
+    pub async fn woken(&self) {
+        self.inner.wake.notified().await;
     }
 
     /// Decide one tick against `rtt`.
@@ -249,7 +342,7 @@ impl PathWatch {
         // nothing. Treat the window as live and start the clock again from
         // here, rather than banking strikes the path never earned.
         if self.inner.stalls.load(Ordering::Acquire) > 0 {
-            self.inbound();
+            self.restart_silence_clock();
             return Verdict::Healthy;
         }
         let cfg = self.inner.cfg;
@@ -316,7 +409,7 @@ impl Drop for StallGuard {
         self.watch.inner.stalls.fetch_sub(1, Ordering::AcqRel);
         // The window we could not see into is over; start measuring from
         // now rather than from whenever the last byte happened to land.
-        self.watch.inbound();
+        self.watch.restart_silence_clock();
     }
 }
 
@@ -329,12 +422,12 @@ pub async fn watch_path(
     watch: PathWatch,
     probes: std::sync::Arc<tokio::sync::Notify>,
 ) {
-    let period = watch.config().probe_interval;
-    let mut ticker = tokio::time::interval_at(Instant::now() + period, period);
-    // A watchdog that fell behind wants the *next* tick, not a burst of
-    // catch-up ticks each banking a strike.
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
+        // Re-read every round rather than arming a fixed ticker: the beat
+        // *is* the power budget, and an attach nobody is using must not
+        // wake this task four times a second to learn something nobody is
+        // waiting to hear.
+        let period = watch.cadence();
         tokio::select! {
             // The unambiguous case: QUIC itself gave up, or the peer
             // closed. No probing needed, and no reason to wait for a tick.
@@ -343,7 +436,12 @@ pub async fn watch_path(
                 watch.declare_dead();
                 return;
             }
-            _ = ticker.tick() => {}
+            // The attach went from idle to in-use while we were sleeping
+            // out a five-second beat. Re-time rather than finish it: "I
+            // came back to my terminal" is the case that has to be
+            // measured at the fast cadence.
+            () = watch.woken() => continue,
+            () = tokio::time::sleep(period) => {}
         }
         let rtt = conn.quinn().stats().path.rtt;
         match watch.verdict(rtt) {
@@ -500,6 +598,73 @@ mod tests {
             state.verdict(at(26) + cfg.probe_interval, LAN, &cfg),
             Verdict::Dead
         );
+    }
+
+    /// The regression the two-cadence design existed only on paper
+    /// without: a *healthy* idle path — one where the host answers every
+    /// probe — has to fall to the slow beat. The obvious version of
+    /// "inbound traffic means the attach is in use" made every answer
+    /// re-arm the active window, so a live silent session probed four
+    /// times a second for as long as it was open.
+    #[test]
+    fn a_healthy_idle_path_falls_to_the_slow_cadence() {
+        let cfg = cfg();
+        let t0 = Instant::now();
+        let mut state = PathState::new(t0);
+        let mut probes_in_the_last_minute = 0u32;
+        // A live host: every probe is answered a millisecond later.
+        for ms in 1..=60_000u64 {
+            let now = t0 + Duration::from_millis(ms);
+            match state.verdict(now, LAN, &cfg) {
+                Verdict::Probe => {
+                    probes_in_the_last_minute += 1;
+                    state.observe_inbound(now + Duration::from_millis(1));
+                }
+                Verdict::Dead => panic!("an answered path must never be declared dead"),
+                Verdict::Healthy => {}
+            }
+        }
+        assert_eq!(
+            state.cadence(t0 + Duration::from_secs(60), &cfg),
+            cfg.idle_probe_interval,
+            "a `Pong` is the watchdog answering itself; it must not count as somebody waiting"
+        );
+        // 15 s of fast cadence, then 45 s of slow: ~60 + ~9, nowhere near
+        // the ~240 a permanently-active window would produce.
+        assert!(
+            probes_in_the_last_minute < 100,
+            "an idle-but-live attach probed {probes_in_the_last_minute} times in a minute"
+        );
+        // …and a keystroke puts it straight back on the fast beat.
+        let back = t0 + Duration::from_secs(60);
+        state.observe_activity(back);
+        assert_eq!(state.cadence(back, &cfg), cfg.probe_interval);
+    }
+
+    /// Session traffic *is* activity, so a session that is printing stays
+    /// on the fast cadence — that is the one the user is watching.
+    #[test]
+    fn session_traffic_keeps_the_fast_cadence() {
+        let cfg = cfg();
+        let t0 = Instant::now();
+        let mut state = PathState::new(t0);
+        let at = t0 + Duration::from_secs(30);
+        state.observe_traffic(at);
+        assert_eq!(state.cadence(at, &cfg), cfg.probe_interval);
+    }
+
+    #[tokio::test]
+    async fn a_migration_probe_cannot_miss_the_answer_it_asked_for() {
+        let watch = PathWatch::new(cfg());
+        // Subscribed *before* the question, which is the whole point: the
+        // answer below lands before anything awaits, and must still be
+        // seen.
+        let mut signal = watch.inbound_signal();
+        watch.inbound();
+        tokio::time::timeout(Duration::from_secs(5), signal.changed())
+            .await
+            .expect("an answer that beat the waiter must not be lost")
+            .expect("the sender outlives the receiver");
     }
 
     #[tokio::test]

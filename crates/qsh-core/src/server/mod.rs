@@ -1034,6 +1034,19 @@ impl Server {
             return *denied;
         }
 
+        // ---- Resource bound, same as `exec.run` and `session.open`. ----
+        //
+        // Placed *after* the credential and the ACL rather than before
+        // them, unlike the other two: `RESOURCE_EXHAUSTED` before the
+        // identity gate would be an answer a peer with no credential can
+        // tell apart from `AUTH_FAILED`, and protocol.md §10-2 requires
+        // that every pre-identity refusal look the same. Placed before the
+        // lease probe and the rotation, so a refused attach still spends
+        // no credential and moves nothing.
+        if let Err(reply) = self.check_ticket_budget(ctx, request_id) {
+            return *reply;
+        }
+
         // ---- Allowed: lease, then a single-use ticket. ----
         //
         // `broker_error` here and at the two registry calls below can

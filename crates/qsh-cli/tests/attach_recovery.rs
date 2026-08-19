@@ -13,12 +13,18 @@
 //!
 //! - the client is never told the path died — no `close()`, no re-attach by
 //!   the test, no second `Ops` call;
-//! - the recovery record the driver emits is parsed and its
-//!   `time_to_recovery_ms` is asserted against the 2 s bound, and there must
-//!   be exactly one of them, so a recovery that only worked on the third
-//!   attempt fails the test;
-//! - the whole thing is bounded well inside 45 s of wall clock, so the idle
-//!   timeout cannot be the mechanism that noticed;
+//! - the recovery record the driver emits is parsed, and its
+//!   `time_to_recovery_ms` is cross-checked against the wall clock the test
+//!   measured for itself — the record alone proves nothing, because
+//!   `recover` caps its own attempt at the same bound, so every `resumed`
+//!   record is inside it by construction. There must also be exactly one
+//!   record, so a recovery that only worked on the third attempt fails;
+//! - the wall clock is held to **detection + recovery**, both derived from
+//!   the shipping config rather than written down here, so pushing the
+//!   probe cadence or the strike count out fails this test instead of
+//!   quietly quintupling the user-visible outage. (The clock in the record
+//!   starts at *detection*; the wall clock is the only thing that bounds
+//!   the detection half.);
 //! - and the delivered `sequence` values are checked to tile the output
 //!   stream exactly — every byte once, in order, across the seam. That is
 //!   what "byte-identical to a reference stream" means when the cursor is a
@@ -58,6 +64,24 @@ const REDIAL_DEADLINE_MS: u64 = 2_000;
 /// takes anywhere near this long recovered by waiting, which L4 defines as
 /// a failure.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(45);
+
+/// Room for everything the bounds below do not model: a real `qsh serve`
+/// on a loaded CI box, the shell's own round trip, and the proxy in the
+/// middle. Generous, but an order of magnitude short of the idle timeout —
+/// which is the point, because "the idle timeout eventually fired" must
+/// not be able to pass.
+const SCHEDULING_SLACK: Duration = Duration::from_secs(3);
+
+/// The longest the watchdog may take to call a silent path dead, derived
+/// from the config the product actually ships rather than restated: a
+/// strike per probe interval, and then the silence floor.
+///
+/// Derived rather than hard-coded so that loosening the detector — a
+/// slower cadence, more strikes — fails this test, instead of passing it
+/// while the outage the user sees grows.
+fn detection_budget(cfg: &qsh_core::PathWatchConfig) -> Duration {
+    cfg.probe_interval * cfg.strikes + cfg.min_dead_after
+}
 
 // ---------------------------------------------------------------------------
 // recovery telemetry capture
@@ -466,8 +490,31 @@ fn a_severed_path_is_detected_and_resumed_under_a_live_attach() {
         records[0].time_to_recovery_ms,
         fleet.detail()
     );
-    // Detection + recovery + a shell round trip, all of it far inside the
-    // idle timeout: nothing here waited for QUIC to give up.
+    // The line above is true by construction — `recover` caps its own
+    // attempt at exactly that bound, so a `resumed` record cannot exceed
+    // it. This is what makes it mean something: the driver's own clock has
+    // to fit inside the clock the test kept independently, which starts
+    // earlier (at the sever) and ends later (after the shell answered).
+    assert!(
+        u128::from(records[0].time_to_recovery_ms) <= elapsed.as_millis(),
+        "the driver reported a {} ms recovery inside a {elapsed:?} window it is nested in — {}",
+        records[0].time_to_recovery_ms,
+        fleet.detail()
+    );
+    // The real end-to-end bound, and the only one that constrains the
+    // *detection* half: noticing plus recovering plus a shell round trip.
+    let budget = detection_budget(&RecoveryConfig::default().watch)
+        + Duration::from_millis(REDIAL_DEADLINE_MS)
+        + SCHEDULING_SLACK;
+    assert!(
+        elapsed < budget,
+        "the path death took {elapsed:?} to turn back into a working shell, over the \
+         {budget:?} detection+recovery budget — {}",
+        fleet.detail()
+    );
+    // …and the same measurement said the other way, so the reason this
+    // passes can never be "quinn's idle timeout fired and something
+    // reconnected".
     assert!(
         elapsed < IDLE_TIMEOUT / 2,
         "the path death took {elapsed:?} to turn back into a working shell; \
