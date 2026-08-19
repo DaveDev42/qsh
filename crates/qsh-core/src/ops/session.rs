@@ -47,6 +47,16 @@ pub const SESSION_ATTACH_QUEUE: usize = 64;
 /// the drain ends as soon as the control stream closes or an event lands.
 const ATTACH_CONTROL_DRAIN: Duration = Duration::from_millis(250);
 
+/// How long the driver waits for the host to acknowledge the input it
+/// wrote before a detach, once the send half is finished. Long enough for
+/// a round trip on a bad link, short enough that `~d` still feels instant.
+const DETACH_FLUSH: Duration = Duration::from_millis(750);
+
+/// How long [`AttachHandle::detach`] waits for the driver's acknowledgement
+/// before closing anyway. Strictly longer than [`DETACH_FLUSH`], so the
+/// normal path is bounded by the driver, not by this fallback.
+const DETACH_FLUSH_GRACE: Duration = Duration::from_millis(1_000);
+
 /// The `session.open` operation.
 pub struct SessionOpenOp;
 impl Operation for SessionOpenOp {
@@ -851,6 +861,10 @@ enum AttachCommand {
         /// New row count.
         rows: u16,
     },
+    /// Finish the send half and report back once the host has it. Travels
+    /// the same ordered queue as the input so a detach cannot overtake the
+    /// bytes typed just before it (`docs/CLI.md` §7).
+    Detach(std::sync::mpsc::SyncSender<()>),
 }
 
 /// A live attach: a blocking `qsh.event/v1` event stream out, an
@@ -933,9 +947,75 @@ impl SessionAttachStream {
     /// while the driver's bounded queue is full — that backpressure is
     /// what keeps a fast producer from growing the queue without limit.
     pub fn write(&self, data: Vec<u8>) -> Result<(), OpError> {
+        self.handle().write(data)
+    }
+
+    /// Queue a window-size change. Same backpressure as [`write`](Self::write).
+    pub fn resize(&self, cols: u16, rows: u16) -> Result<(), OpError> {
+        self.handle().resize(cols, rows)
+    }
+
+    /// A cloneable handle on the input side of this attach.
+    ///
+    /// [`next_event`](Self::next_event) blocks the thread that owns the
+    /// stream, so anything that has to reach the session while output is
+    /// flowing — a terminal's input pump, a `SIGWINCH` watcher, a detach
+    /// key — runs on another thread and needs its own handle. The stream
+    /// stays the sole owner of the event side.
+    pub fn handle(&self) -> AttachHandle {
+        AttachHandle {
+            commands: self.commands.clone(),
+            connection: self.conn.connection.clone(),
+        }
+    }
+
+    /// Stop the attach and close the connection.
+    pub fn close(self) {
+        self.driver.abort();
+        self.conn.close();
+    }
+}
+
+/// The input side of a live attach: cloneable, `Send`, and usable from any
+/// thread — session input, window-size changes, and a detach that leaves
+/// the session running. See [`SessionAttachStream::handle`].
+#[derive(Clone)]
+pub struct AttachHandle {
+    commands: tokio::sync::mpsc::Sender<AttachCommand>,
+    connection: qsh_transport::Connection,
+}
+
+impl std::fmt::Debug for AttachHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AttachHandle").finish_non_exhaustive()
+    }
+}
+
+impl AttachHandle {
+    /// Queue session input; the driver writes it in order. Blocks only
+    /// while the driver's bounded queue is full.
+    ///
+    /// Call from a plain thread, never from inside an async runtime — the
+    /// same rule every blocking `Ops` entry point follows.
+    pub fn write(&self, data: Vec<u8>) -> Result<(), OpError> {
         self.commands
             .blocking_send(AttachCommand::Input(data))
             .map_err(|_| attach_gone())
+    }
+
+    /// Queue session input without ever blocking. `Ok(false)` means the
+    /// driver's queue was full and the bytes were **not** taken — the
+    /// caller has to say so rather than pretend they were sent.
+    ///
+    /// For callers that must stay responsive under backpressure: the host
+    /// parks its own input reader when its frame queue fills, so a
+    /// blocking [`write`](Self::write) can park indefinitely.
+    pub fn try_write(&self, data: Vec<u8>) -> Result<bool, OpError> {
+        match self.commands.try_send(AttachCommand::Input(data)) {
+            Ok(()) => Ok(true),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => Ok(false),
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => Err(attach_gone()),
+        }
     }
 
     /// Queue a window-size change. Same backpressure as [`write`](Self::write).
@@ -945,10 +1025,41 @@ impl SessionAttachStream {
             .map_err(|_| attach_gone())
     }
 
-    /// Stop the attach and close the connection.
-    pub fn close(self) {
-        self.driver.abort();
-        self.conn.close();
+    /// Queue a window-size change without ever blocking; see
+    /// [`try_write`](Self::try_write). A dropped resize is self-healing —
+    /// the next `SIGWINCH` sends the current size again.
+    pub fn try_resize(&self, cols: u16, rows: u16) -> Result<bool, OpError> {
+        match self.commands.try_send(AttachCommand::Resize { cols, rows }) {
+            Ok(()) => Ok(true),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => Ok(false),
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => Err(attach_gone()),
+        }
+    }
+
+    /// Detach: end this client's attach **without touching the session**
+    /// (`docs/CLI.md` §7 — a session outlives its client by design).
+    ///
+    /// Closing the QUIC connection is what makes a detach prompt and
+    /// complete: the host purges the connection, releases the writer lease
+    /// it held and keeps the session running, and the
+    /// [`next_event`](SessionAttachStream::next_event) blocking the owning
+    /// thread returns. Idempotent, and callable from any thread — closing
+    /// a connection needs no runtime.
+    pub fn detach(&self) {
+        // Ordering first: hand the driver a detach marker so everything
+        // already queued is written and the send half finished before the
+        // connection goes away — a QUIC close discards unsent stream data,
+        // which would silently eat a command typed just before `~d`.
+        //
+        // Bounded on both sides. A full queue (the host stopped reading)
+        // means the bytes were never going to land anyway, and a driver
+        // parked on flow control never answers; neither may keep the user
+        // attached, so the close happens regardless.
+        let (ack, flushed) = std::sync::mpsc::sync_channel(1);
+        if self.commands.try_send(AttachCommand::Detach(ack)).is_ok() {
+            let _ = flushed.recv_timeout(DETACH_FLUSH_GRACE);
+        }
+        self.connection.close(0, b"detach");
     }
 }
 
@@ -1038,6 +1149,14 @@ async fn pump_attach_input(
         let sent = match command {
             AttachCommand::Input(data) => writer.send_input(&data).await.map(|_| ()),
             AttachCommand::Resize { cols, rows } => writer.resize(cols, rows).await,
+            AttachCommand::Detach(ack) => {
+                // Everything queued ahead of the detach has been written
+                // by the time we get here. Finish and wait for the host to
+                // acknowledge it, then let the frontend close.
+                let _ = tokio::time::timeout(DETACH_FLUSH, writer.finish_flushed()).await;
+                let _ = ack.send(());
+                return;
+            }
         };
         if sent.is_err() {
             return;

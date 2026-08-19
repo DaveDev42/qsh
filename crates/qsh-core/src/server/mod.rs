@@ -1341,10 +1341,12 @@ impl Server {
         //   many a peer may create; that is a separate change.
         //
         // All replies funnel back through `reply_rx` to the single
-        // control-stream writer. When this function returns, `blocking` is
-        // dropped and every parked task is aborted with it — nothing
-        // outlives the connection, and `purge_connection` (which runs
-        // after) therefore sees the connection's final state.
+        // control-stream writer. Nothing may outlive the connection, but
+        // dropping a `JoinSet` only *requests* an abort — a parked task can
+        // still be mid-`await` on the session actor when `purge_connection`
+        // runs and re-take the lease it just released. `blocking.shutdown()`
+        // below is what actually joins every task before this function
+        // returns, so `purge_connection` sees the connection's final state.
         let (reply_tx, mut reply_rx) =
             tokio::sync::mpsc::channel::<ControlMessage>(MAX_INFLIGHT_REQUESTS_PER_CONN);
         let inflight = Arc::new(tokio::sync::Semaphore::new(MAX_INFLIGHT_REQUESTS_PER_CONN));
