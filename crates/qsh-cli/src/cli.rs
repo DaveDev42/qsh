@@ -7,7 +7,13 @@ use qsh_proto::{EnvVar, KeyStoreMode};
 
 /// QSH: a QUIC-based direct-connect remote shell.
 #[derive(Debug, Parser)]
-#[command(name = "qsh", version, about, propagate_version = true)]
+#[command(
+    name = "qsh",
+    version,
+    about,
+    propagate_version = true,
+    arg_required_else_help = true
+)]
 pub struct Cli {
     /// Emit a single `qsh.cli/v1` JSON envelope on stdout instead of
     /// human-readable text.
@@ -30,13 +36,94 @@ pub struct Cli {
     pub quiet: bool,
 
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
+
+    /// The bare `qsh [user@]host` form (`docs/CLI.md` §7): open a session
+    /// on a pinned host and attach to it interactively.
+    #[command(flatten)]
+    pub interactive: InteractiveArgs,
 }
 
 impl Cli {
     /// Whether either JSON output mode was requested.
     pub fn wants_json(&self) -> bool {
         self.json || self.jsonl
+    }
+}
+
+/// The root-level arguments of the interactive form, `qsh [user@]host`.
+///
+/// `--escape-char` `requires` the target, so it is a clap usage error
+/// (exit `2`) on any other command — `docs/CLI.md` §7 scopes the flag to
+/// `qsh [user@]host` and `qsh attach`.
+#[derive(Debug, Args)]
+pub struct InteractiveArgs {
+    /// Pinned host to open an interactive session on, optionally prefixed
+    /// with the expected remote login name (`dave@personal-mac`).
+    #[arg(value_name = "[USER@]HOST", value_parser = parse_target)]
+    pub target: Option<Target>,
+
+    /// Escape character for the line-start detach sequences (`~d`, `~.`,
+    /// `~~`, `~?`), or `none` to disable them. Default `~`; only active
+    /// when stdin is a terminal.
+    #[arg(long, value_name = "CHAR", value_parser = parse_escape_char, requires = "target")]
+    pub escape_char: Option<EscapeChar>,
+}
+
+/// A parsed `[user@]host` target (`docs/CLI.md` §7).
+///
+/// `user` is a *hint*, never an identity: the remote shell always runs as
+/// the account that runs `qsh serve`, and the host answers `UNSUPPORTED`
+/// when the hint names a different login (PRD §6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Target {
+    /// The `user@` half, if given.
+    pub user: Option<String>,
+    /// Host alias from the trust store.
+    pub host: String,
+}
+
+/// clap value parser for the `[user@]host` positional.
+fn parse_target(value: &str) -> Result<Target, String> {
+    // Split at the *last* `@`, like ssh: an alias may not contain one, but
+    // a user name conceivably does.
+    let (user, host) = match value.rsplit_once('@') {
+        Some((user, host)) => (Some(user), host),
+        None => (None, value),
+    };
+    if host.is_empty() {
+        return Err(format!("expected [user@]host, got {value:?}"));
+    }
+    if user.is_some_and(str::is_empty) {
+        return Err(format!("empty user in {value:?}"));
+    }
+    Ok(Target {
+        user: user.map(str::to_string),
+        host: host.to_string(),
+    })
+}
+
+/// The escape character of an interactive session, or `None` when escape
+/// processing is off (`--escape-char none`, `docs/CLI.md` §7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EscapeChar(pub Option<u8>);
+
+/// The default escape character (`~`), matching ssh.
+pub const DEFAULT_ESCAPE_CHAR: EscapeChar = EscapeChar(Some(b'~'));
+
+/// clap value parser for `--escape-char <c>|none`: a single printable
+/// ASCII character, or `none`. Anything else is a usage error (exit `2`,
+/// `docs/CLI.md` §7).
+fn parse_escape_char(value: &str) -> Result<EscapeChar, String> {
+    if value == "none" {
+        return Ok(EscapeChar(None));
+    }
+    let mut bytes = value.bytes();
+    match (bytes.next(), bytes.next()) {
+        (Some(c), None) if c.is_ascii_graphic() => Ok(EscapeChar(Some(c))),
+        _ => Err(format!(
+            "expected a single printable ASCII character or \"none\", got {value:?}"
+        )),
     }
 }
 
@@ -67,6 +154,13 @@ pub enum Command {
     /// returned Base64-encoded in the envelope; otherwise they are passed
     /// through verbatim.
     Exec(ExecArgs),
+
+    /// Re-attach this terminal to a session that is already running.
+    ///
+    /// Only possible from the device that opened the session, whose resume
+    /// credential is bound to it (`docs/CLI.md` §6.2, §7). Detach with the
+    /// escape sequence `~d`; the session keeps running.
+    Attach(AttachArgs),
 
     /// Manage sessions: shells that outlive the connection that opened them.
     #[command(subcommand)]
@@ -108,6 +202,19 @@ pub struct ExecArgs {
     /// The command and its arguments, after `--`.
     #[arg(last = true, required = true, value_name = "COMMAND")]
     pub argv: Vec<String>,
+}
+
+/// Arguments of `qsh attach`.
+#[derive(Debug, Args)]
+pub struct AttachArgs {
+    /// Opaque session handle (`<host>/<session_id>`) from `session open`
+    /// or `sessions`.
+    pub session_ref: String,
+
+    /// Escape character for the line-start detach sequences, or `none`.
+    /// Default `~`; only active when stdin is a terminal.
+    #[arg(long, value_name = "CHAR", value_parser = parse_escape_char)]
+    pub escape_char: Option<EscapeChar>,
 }
 
 /// clap value parser for `--env NAME=VALUE`.
@@ -302,7 +409,7 @@ mod tests {
     #[test]
     fn key_store_flag_parses_and_rejects_unknown_modes() {
         let cli = Cli::try_parse_from(["qsh", "init", "--key-store", "file"]).unwrap();
-        match cli.command {
+        match cli.command.unwrap() {
             Command::Init { key_store } => assert_eq!(key_store, Some(KeyStoreMode::File)),
             other => panic!("expected init, got {other:?}"),
         }
@@ -344,7 +451,7 @@ mod tests {
         ])
         .unwrap();
         assert!(cli.wants_json());
-        match cli.command {
+        match cli.command.unwrap() {
             Command::Exec(args) => {
                 assert_eq!(args.host, "box");
                 assert_eq!(args.timeout, Some(5000));
@@ -366,9 +473,12 @@ mod tests {
     #[test]
     fn serve_bind_is_optional() {
         let cli = Cli::try_parse_from(["qsh", "serve"]).unwrap();
-        assert!(matches!(cli.command, Command::Serve { bind: None }));
+        assert!(matches!(
+            cli.command.unwrap(),
+            Command::Serve { bind: None }
+        ));
         let cli = Cli::try_parse_from(["qsh", "serve", "--bind", "127.0.0.1:0"]).unwrap();
-        match cli.command {
+        match cli.command.unwrap() {
             Command::Serve { bind } => assert_eq!(bind.as_deref(), Some("127.0.0.1:0")),
             other => panic!("expected serve, got {other:?}"),
         }
@@ -382,7 +492,7 @@ mod tests {
         ])
         .unwrap();
         assert!(cli.wants_json());
-        match cli.command {
+        match cli.command.unwrap() {
             Command::Session(SessionCmd::Open(args)) => {
                 assert_eq!(args.host, "box");
                 assert_eq!(args.env[0].name, "A");
@@ -394,8 +504,7 @@ mod tests {
         }
         // No `--` ⇒ login shell (empty argv), unlike exec.
         let cli = Cli::try_parse_from(["qsh", "session", "open", "box"]).unwrap();
-        assert!(matches!(
-            cli.command,
+        assert!(matches!(cli.command.unwrap(),
             Command::Session(SessionCmd::Open(SessionOpenArgs { ref argv, .. })) if argv.is_empty()
         ));
         assert!(Cli::try_parse_from(["qsh", "session", "open", "box", "--cols", "0"]).is_err());
@@ -413,7 +522,7 @@ mod tests {
             "1024",
         ])
         .unwrap();
-        match cli.command {
+        match cli.command.unwrap() {
             Command::Session(SessionCmd::Read(args)) => {
                 assert_eq!(args.session_ref, "box/01K0");
                 assert_eq!(args.after, 42);
@@ -425,7 +534,7 @@ mod tests {
         }
         let cli = Cli::try_parse_from(["qsh", "session", "read", "box/01K0"]).unwrap();
         assert!(matches!(
-            cli.command,
+            cli.command.unwrap(),
             Command::Session(SessionCmd::Read(SessionReadArgs {
                 after: 0,
                 wait: None,
@@ -450,14 +559,13 @@ mod tests {
         let cli =
             Cli::try_parse_from(["qsh", "session", "write", "box/01K0", "--data-b64", "Yw=="])
                 .unwrap();
-        assert!(matches!(
-            cli.command,
+        assert!(matches!(cli.command.unwrap(),
             Command::Session(SessionCmd::Write(SessionWriteArgs { stdin: false, ref data_b64, .. }))
                 if data_b64.as_deref() == Some("Yw==")
         ));
         let cli = Cli::try_parse_from(["qsh", "session", "write", "box/01K0", "--stdin"]).unwrap();
         assert!(matches!(
-            cli.command,
+            cli.command.unwrap(),
             Command::Session(SessionCmd::Write(SessionWriteArgs {
                 stdin: true,
                 data_b64: None,
@@ -471,7 +579,7 @@ mod tests {
         ])
         .unwrap();
         assert!(matches!(
-            cli.command,
+            cli.command.unwrap(),
             Command::Session(SessionCmd::Resize {
                 cols: 120,
                 rows: 40,
@@ -498,7 +606,7 @@ mod tests {
             let cli =
                 Cli::try_parse_from(["qsh", "session", "close", "box/01K0", "--signal", given])
                     .unwrap();
-            match cli.command {
+            match cli.command.unwrap() {
                 Command::Session(SessionCmd::Close { signal, .. }) => {
                     assert_eq!(signal.as_deref(), Some(canonical), "{given}");
                 }
@@ -515,15 +623,108 @@ mod tests {
 
         // sessions [host]
         let cli = Cli::try_parse_from(["qsh", "sessions"]).unwrap();
-        assert!(matches!(cli.command, Command::Sessions { host: None }));
+        assert!(matches!(
+            cli.command.unwrap(),
+            Command::Sessions { host: None }
+        ));
         let cli = Cli::try_parse_from(["qsh", "sessions", "box", "--json"]).unwrap();
-        assert!(matches!(cli.command, Command::Sessions { host: Some(ref h) } if h == "box"));
+        assert!(
+            matches!(cli.command.unwrap(), Command::Sessions { host: Some(ref h) } if h == "box")
+        );
+    }
+
+    /// The bare `qsh [user@]host` form and `qsh attach` (`docs/CLI.md` §7).
+    #[test]
+    fn the_interactive_forms_parse_per_cli_md() {
+        // `qsh host` and `qsh user@host`, with the subcommand slot empty.
+        let cli = Cli::try_parse_from(["qsh", "personal-mac"]).unwrap();
+        assert!(cli.command.is_none());
+        assert_eq!(
+            cli.interactive.target,
+            Some(Target {
+                user: None,
+                host: "personal-mac".into()
+            })
+        );
+        assert_eq!(cli.interactive.escape_char, None);
+
+        let cli = Cli::try_parse_from(["qsh", "dave@personal-mac", "-vv"]).unwrap();
+        assert_eq!(
+            cli.interactive.target,
+            Some(Target {
+                user: Some("dave".into()),
+                host: "personal-mac".into()
+            })
+        );
+        assert_eq!(cli.verbose, 2);
+
+        // A subcommand name still wins over the positional.
+        let cli = Cli::try_parse_from(["qsh", "sessions"]).unwrap();
+        assert!(cli.interactive.target.is_none());
+        assert!(matches!(cli.command, Some(Command::Sessions { .. })));
+
+        // `--escape-char <c>|none`, on both interactive forms only.
+        let cli = Cli::try_parse_from(["qsh", "box", "--escape-char", "none"]).unwrap();
+        assert_eq!(cli.interactive.escape_char, Some(EscapeChar(None)));
+        let cli = Cli::try_parse_from(["qsh", "box", "--escape-char", "^"]).unwrap();
+        assert_eq!(cli.interactive.escape_char, Some(EscapeChar(Some(b'^'))));
+        for bad in ["", "~~", "tilde", "é", " "] {
+            assert!(
+                Cli::try_parse_from(["qsh", "box", "--escape-char", bad]).is_err(),
+                "{bad:?}"
+            );
+        }
+        // Scoped to the interactive forms: a usage error anywhere else.
+        assert!(Cli::try_parse_from(["qsh", "--escape-char", "none", "sessions"]).is_err());
+        assert!(Cli::try_parse_from(["qsh", "--escape-char", "none"]).is_err());
+
+        // `qsh attach <session-ref>` takes the same flag.
+        let cli =
+            Cli::try_parse_from(["qsh", "attach", "box/01K0", "--escape-char", "none"]).unwrap();
+        match cli.command.unwrap() {
+            Command::Attach(args) => {
+                assert_eq!(args.session_ref, "box/01K0");
+                assert_eq!(args.escape_char, Some(EscapeChar(None)));
+            }
+            other => panic!("expected attach, got {other:?}"),
+        }
+        assert!(Cli::try_parse_from(["qsh", "attach"]).is_err());
+    }
+
+    /// `[user@]host` splitting (`docs/CLI.md` §7): `user@` is a hint, and
+    /// the host half is what has to be there.
+    #[test]
+    fn target_parsing_splits_at_the_last_at_sign() {
+        assert_eq!(
+            parse_target("dave@box").unwrap(),
+            Target {
+                user: Some("dave".into()),
+                host: "box".into()
+            }
+        );
+        assert_eq!(
+            parse_target("dave@corp@box").unwrap(),
+            Target {
+                user: Some("dave@corp".into()),
+                host: "box".into()
+            }
+        );
+        assert_eq!(
+            parse_target("box").unwrap(),
+            Target {
+                user: None,
+                host: "box".into()
+            }
+        );
+        for bad in ["", "@box", "dave@", "@"] {
+            assert!(parse_target(bad).is_err(), "{bad:?}");
+        }
     }
 
     #[test]
     fn trust_add_requires_a_name_only() {
         let cli = Cli::try_parse_from(["qsh", "trust", "add", "mac"]).unwrap();
-        match cli.command {
+        match cli.command.unwrap() {
             Command::Trust(TrustCmd::Add(args)) => {
                 assert_eq!(args.name, "mac");
                 assert!(args.address.is_none() && args.fingerprint.is_none());
