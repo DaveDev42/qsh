@@ -33,10 +33,47 @@
 //! plus no `session.gap` anywhere, which is the precondition the DoD
 //! states ("gap 이벤트가 없는 한").
 //!
+//! Both halves come out of the same ring, so on their own they can only
+//! show that the *resume offset* is honest — a byte the broker dropped on
+//! the way in would be missing from both, identically, and every offset
+//! would still tile. [`assert_producer_corpus`] is the check whose oracle
+//! is **not** the ring: the producer's script fixes the number of markers,
+//! their order, and every byte between them, so a chunk lost at append
+//! time changes a round's contents and fails.
+//!
+//! ## Why the kill is mid-stream, and not by luck
+//!
+//! The DoD condition is "`yes` 실행 중" — the producer must still be
+//! writing when the signal lands. That is a race unless something orders
+//! it, so the producer's burst loop is **gated**: it blocks on `read`
+//! until the test types [`GO_TOKEN`] into the attached client. The
+//! producer therefore cannot have finished — cannot have started — before
+//! a live client was watching, and the client is killed three markers in.
+//! It is then *asserted*, not assumed: the ring's cursor taken off the
+//! corpse (`session.get`'s `last_sequence`) is still short of the offset
+//! `QSHDONE` ends up at — and that sample is taken a round trip *after*
+//! the kill, so it over-states how far the stream had got, never the
+//! reverse. Megabytes are still to come when the client dies, and `L` (the
+//! offset it had rendered) is measured, so "it had already seen
+//! everything" cannot pass either.
+//!
+//! ## Which mechanism proves which half
+//!
+//! `SessionAttachReq` carries no resume offset — a user-initiated
+//! reattach deliberately replays the whole retained ring (`PLAN.md` Step 6
+//! invariant, asserted here too). The offset-resume half of SC4 is
+//! therefore proven on the `session.read` cursor-pull (`docs/CLI.md`
+//! §6.4), which is the primitive a caller with an `L` actually has. The
+//! *wire* `SessionAttach{last_output_seq: L}` seam belongs to the driver's
+//! reconnect path and is proven in `attach_recovery.rs`, where the client
+//! is alive to remember `L`; a SIGKILLed process has no cursor to bring
+//! back, which is exactly why this file measures `L` from the pty.
+//!
 //! SC5 is three independent facts about the same corpse: the producer's
 //! own pid (it prints `$$` as its first line) still answers `kill -0`, the
-//! host still reports the session `running`, and the child *answers* —
-//! input written while no client is attached comes back out of the ring.
+//! host still reports the session `running`, and the pty is still wired up
+//! — input written while no client is attached comes back out of the ring
+//! (see [`ALIVE_MARKER`] for what that leg does and does not prove).
 //!
 //! ## Termination discipline
 //!
@@ -82,16 +119,32 @@ const PULL_WAIT_MS: u64 = 250;
 
 /// How many marker/burst rounds the producer emits.
 ///
-/// The whole stream must stay comfortably inside the replay ring's 8 MiB
-/// budget (`docs/PRD.md` §13): eviction would produce a `session.gap`,
-/// and a gap is the one condition under which the DoD does *not* promise
-/// byte-identity. At [`BURST`] bytes per round plus the pty's `\r\n`
-/// expansion this is ≈ 1.5 MiB — a fifth of the budget.
-const ROUNDS: usize = 240;
+/// Two ceilings meet here. The whole stream must stay comfortably inside
+/// the replay ring's 8 MiB budget (`docs/PRD.md` §13): eviction would
+/// produce a `session.gap`, and a gap is the one condition under which the
+/// DoD does *not* promise byte-identity. At [`MARKER_STRIDE`] bytes per
+/// round that is ≈ 2.1 MiB — a quarter of the budget. It also has to take
+/// long enough that the *sampling* round trip after the kill (a fresh dial
+/// while the host is blasting a megabyte a second — one lost handshake
+/// packet costs a QUIC PTO, ~0.7 s) stays a small part of it, because that
+/// sample is the upper bound the mid-stream assertion rests on.
+const ROUNDS: usize = 360;
 
 /// Bytes of `yes` between two markers, measured on the pipe (the pty's
 /// `ONLCR` turns each `y\n` into `y\r\n`, so the stream carries 1.5×).
 const BURST: usize = 4096;
+
+/// The same burst as the stream carries it: `head -c BURST` cuts `yes` on
+/// a `y\n` boundary, and the pty's `ONLCR` makes every pair three bytes.
+const BURST_ON_PTY: usize = BURST + BURST / 2;
+
+/// `printf 'QSHMARK-%04d\n'` is 13 bytes on the pipe, 14 on the pty.
+const MARKER_LINE: usize = 14;
+
+/// Nominal distance between the starts of two consecutive markers — the
+/// floor, since the tty may emit an extra `\r` (see
+/// [`assert_producer_corpus`]), never fewer bytes.
+const MARKER_STRIDE: usize = MARKER_LINE + BURST_ON_PTY;
 
 /// The client is killed once it has *rendered* this many markers. Early
 /// on purpose: everything after `L` is what the reattach has to recover,
@@ -99,8 +152,9 @@ const BURST: usize = 4096;
 const KILL_AFTER_MARKERS: usize = 3;
 
 /// Bytes of the canonical stream used to locate it inside what the client
-/// painted. Long enough to be unique (it spans the pid line and the first
-/// marker), short enough to be there however little the client rendered.
+/// painted. Long enough to be unique (it spans the pid line, the echoed
+/// go token and the start of the first marker), short enough to be there
+/// however little the client rendered.
 const PROBE: usize = 32;
 
 /// First line of the producer, carrying its own pid so SC5 can be checked
@@ -110,20 +164,33 @@ const PID_PREFIX: &str = "QSHPID=";
 /// Printed once the producer has emitted every round.
 const DONE_MARKER: &str = "QSHDONE";
 
-/// Echoed back by the producer's final `cat` when input is written to a
-/// session no client is attached to.
+/// Typed into the attached client to release the producer's burst loop.
+/// Nothing else in the corpus looks like it, so the `read` cannot be
+/// satisfied by anything but this test.
+const GO_TOKEN: &str = "QSHGO";
+
+/// Written to the session while nothing is attached, and read back out of
+/// the ring. Both the pty's own line discipline and the `cat` the producer
+/// exec'd into will emit it, so what this proves is that the pty and the
+/// broker's write path are still live without a client — not that the
+/// child is scheduling. (Once the child is *gone* the write fails outright
+/// with `SESSION_CONFLICT`; that path has its own fixture.)
 const ALIVE_MARKER: &str = "QSHALIVE";
 
 /// The deterministic producer.
 ///
 /// Numbered markers make any byte offset in the stream nameable; the
 /// `yes` bursts between them are the high-throughput part `PLAN.md` Step 8
-/// asks for. It ends in `exec cat` rather than exiting so that the pty's
-/// child is still there to be interrogated after the client is gone —
-/// `exec` keeps the pid it announced.
+/// asks for. The `read` between the pid line and the loop is the gate that
+/// turns "the kill was mid-stream" from a race into a fact: no burst
+/// exists until a live client types [`GO_TOKEN`]. It ends in `exec cat`
+/// rather than exiting so that the pty's child is still there to be
+/// interrogated after the client is gone — `exec` keeps the pid it
+/// announced.
 fn producer_script() -> String {
     format!(
         "printf '{PID_PREFIX}%s\\n' $$\n\
+         read go\n\
          i=0\n\
          while [ $i -lt {ROUNDS} ]; do\n\
          printf 'QSHMARK-%04d\\n' $i\n\
@@ -178,6 +245,41 @@ impl ClientGuard {
             session,
             reaped: false,
         }
+    }
+
+    /// Consume the client's output up to and including the producer's pid
+    /// line, returning the bytes consumed and the pid.
+    ///
+    /// The line terminator is part of the pattern: a bare `\d+` would
+    /// happily match the first three digits of a five-digit pid that is
+    /// still arriving, and the group this test kills is chosen from it.
+    fn next_pid(&mut self) -> (Vec<u8>, i32) {
+        let pattern = format!(r"{PID_PREFIX}\d+\r?\n");
+        let found = self
+            .session
+            .expect(Regex(pattern.as_str()))
+            .unwrap_or_else(|err| panic!("the producer never announced its pid: {err}"));
+        let matched = found.get(0).expect("a match has group 0").to_vec();
+        let pid: i32 = std::str::from_utf8(&matched)
+            .expect("the producer's prologue is ASCII")
+            .trim()
+            .trim_start_matches(PID_PREFIX)
+            .parse()
+            .expect("the producer's pid");
+        let mut bytes = found.before().to_vec();
+        bytes.extend_from_slice(&matched);
+        (bytes, pid)
+    }
+
+    /// Type at the client the way a person does — into its pty, so the
+    /// bytes travel the client's own input path and the writer lease stays
+    /// where it is. (An `Ops`-side write would steal the lease and print a
+    /// diagnostic into the very capture `L` is measured from.) Enter is
+    /// CR, exactly what a terminal sends.
+    fn type_line(&mut self, text: &str) {
+        self.session
+            .send(format!("{text}\r"))
+            .expect("type at the client's pty");
     }
 
     /// Consume the client's output up to and including the next
@@ -351,6 +453,97 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
+/// The one check in this file whose oracle is not the ring.
+///
+/// `full` and `tail` are both pulled from the same `ReplayRing` through
+/// the same primitive, so between them a byte the broker never appended is
+/// invisible: it is missing from both, identically, and every sequence
+/// still tiles. The producer's script, however, fixes the corpus: `ROUNDS`
+/// markers, numbered in order, each followed by exactly `BURST / 2` `y`s
+/// on their own lines. Every byte of every round is accounted for here, so
+/// a chunk lost on the way *into* the ring fails, naming the round it went
+/// missing in.
+///
+/// Every byte, but not every *stride*: the pty's `ONLCR` is applied inside
+/// the tty write path, and a write that is only partially accepted (the
+/// line discipline's buffer filling under load is enough) can re-emit the
+/// `\r` of a `\r\n` it had already started. That adds a byte and moves the
+/// nominal [`MARKER_STRIDE`] without losing anything, which is why the
+/// accounting below tolerates *extra* CRs and nothing else: the `y` and
+/// `\n` counts are exact, and no byte outside the marker text, `y`, `\r`
+/// and `\n` is allowed to exist at all.
+fn assert_producer_corpus(bytes: &[u8]) {
+    /// `QSHMARK-NNNN`, without its line terminator.
+    const MARKER_TEXT: usize = 12;
+
+    let mut markers: Vec<(usize, usize)> = Vec::new(); // (offset, index)
+    let mut at = 0usize;
+    while let Some(hit) = find(&bytes[at..], b"QSHMARK-") {
+        let offset = at + hit;
+        let digits = &bytes[offset + "QSHMARK-".len()..];
+        let index: usize = std::str::from_utf8(&digits[..4.min(digits.len())])
+            .expect("markers are ASCII")
+            .parse()
+            .expect("marker index");
+        markers.push((offset, index));
+        at = offset + "QSHMARK-".len();
+    }
+
+    assert_eq!(
+        markers.len(),
+        ROUNDS,
+        "the stream carries {} of the {ROUNDS} markers the producer printed — \
+         bytes went missing before the ring ever saw them",
+        markers.len()
+    );
+    for (round, (offset, index)) in markers.iter().enumerate() {
+        assert_eq!(
+            *index, round,
+            "marker {round} of the stream reads QSHMARK-{index:04} (at byte {offset}) — \
+             the corpus is out of order or a marker is duplicated"
+        );
+    }
+    for pair in markers.windows(2) {
+        let (from, round) = pair[0];
+        let (to, _) = pair[1];
+        let round_bytes = &bytes[from..to];
+        let count = |b: u8| round_bytes.iter().filter(|got| **got == b).count();
+        let (ys, newlines, crs) = (count(b'y'), count(b'\n'), count(b'\r'));
+        assert_eq!(
+            ys,
+            BURST / 2,
+            "round {round} carries {ys} `y`s, not the {} `yes | head -c {BURST}` writes — \
+             bytes were lost before the ring saw them",
+            BURST / 2
+        );
+        assert_eq!(
+            newlines,
+            BURST / 2 + 1,
+            "round {round} carries {newlines} line ends, not the {} its marker plus burst \
+             produce",
+            BURST / 2 + 1
+        );
+        assert!(
+            crs >= newlines,
+            "round {round} carries {crs} CRs for {newlines} line ends — the pty's ONLCR \
+             cannot drop one"
+        );
+        assert!(
+            round_bytes.len() >= MARKER_STRIDE,
+            "round {round} is {} bytes, below the {MARKER_STRIDE} its marker line and \
+             burst occupy at the nominal `ONLCR` expansion",
+            round_bytes.len()
+        );
+        assert_eq!(
+            round_bytes.len(),
+            MARKER_TEXT + ys + newlines + crs,
+            "round {round} carries {} bytes that are neither its marker text nor `y`, \
+             `\\r`, `\\n`",
+            round_bytes.len() - (MARKER_TEXT + ys + newlines + crs).min(round_bytes.len())
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // the gate
 // ---------------------------------------------------------------------------
@@ -386,23 +579,26 @@ fn a_sigkilled_client_loses_no_bytes_and_the_session_survives_it() {
     // ---- a real client, under a real pty, watching a real stream ----
     let mut client = ClientGuard::spawn(&fleet.client, &["attach", &session_ref]);
     let mut rendered: Vec<u8> = Vec::new();
-    let mut last_marker = 0usize;
-    for _ in 0..KILL_AFTER_MARKERS {
+
+    // The producer announced its own pid on its first line and is now
+    // parked on `read`: take ownership of its process group before a
+    // single burst exists, and before anything else can fail.
+    let (prologue, child_pid) = client.next_pid();
+    rendered.extend_from_slice(&prologue);
+    let child = ChildGroupGuard(Pid::from_raw(child_pid));
+
+    // ---- release the producer; the stream starts here, live ----
+    // Everything the client renders from now on is output it is *tailing*,
+    // not replay backlog it is catching up on.
+    client.type_line(GO_TOKEN);
+    for round in 0..KILL_AFTER_MARKERS {
         let (bytes, index) = client.next_marker();
         rendered.extend_from_slice(&bytes);
-        last_marker = index;
+        assert_eq!(
+            index, round,
+            "the client rendered QSHMARK-{index:04} where round {round} belongs"
+        );
     }
-
-    // The producer announced its own pid on its first line; take
-    // ownership of its process group before anything can fail.
-    let pid_line = std::str::from_utf8(&rendered)
-        .expect("the producer's prologue is ASCII")
-        .lines()
-        .find_map(|line| line.trim().strip_prefix(PID_PREFIX).map(str::to_string))
-        .unwrap_or_else(|| panic!("the producer never announced its pid: {rendered:?}"));
-    let child = ChildGroupGuard(Pid::from_raw(
-        pid_line.parse::<i32>().expect("the producer's pid"),
-    ));
 
     // ---- the client dies here, and nothing is told ----
     client.sigkill_and_reap();
@@ -421,6 +617,10 @@ fn a_sigkilled_client_loses_no_bytes_and_the_session_survives_it() {
         after_kill.state, "running",
         "the session did not survive its client — SC5"
     );
+    // Where the stream had got to when the corpse was examined — an upper
+    // bound on where it was when the signal landed, one round trip
+    // earlier. Checked against the producer's own finish line below.
+    let at_kill = after_kill.last_sequence;
 
     // ---- the canonical stream, from the ring, once the producer is done ----
     let mut whole = reader_from(&ops, &session_ref, 0);
@@ -432,37 +632,70 @@ fn a_sigkilled_client_loses_no_bytes_and_the_session_survives_it() {
     // while the ring has not evicted (`docs/CLI.md` §6.4).
     full.assert_tiles_from(0, "canonical sweep");
     let end = full.end;
+    // …and that the ring holds what the child wrote, judged against the
+    // producer's script rather than against the ring itself.
+    assert_producer_corpus(&full.bytes);
+
+    // ---- the kill really was mid-stream ----
+    //
+    // The DoD condition is "`yes` 실행 중". The `read` gate makes the
+    // client a *tail* of a live stream by construction — the producer
+    // cannot have filled the ring before a client existed, because it had
+    // not started. What remains to rule out is the other end: that the
+    // producer had already run to completion when the signal landed. The
+    // ring's cursor taken off the corpse answers it, and answers it
+    // conservatively — the sample costs a round trip the producer keeps
+    // writing through, so `at_kill` is an over-estimate of where the
+    // stream was when the client actually died. A test that degraded into
+    // "replay a finished ring" fails here.
+    let done_at = find(&full.bytes, DONE_MARKER.as_bytes())
+        .expect("the producer's finish line is in the canonical stream") as u64;
+    assert!(
+        at_kill < done_at,
+        "the producer had already written its finish line (offset {done_at}) by the time \
+         the dead client was examined at {at_kill} — nothing was in flight, so this is a \
+         replay test, not a mid-stream kill"
+    );
 
     // ---- L: the offset the dead client had provably rendered ----
     //
-    // Measured, not assumed. The client's terminal also carries its own
-    // diagnostics (`qsh: the writer lease moved to …` — stderr shares the
-    // pty, `docs/CLI.md` §2.2), so the stream is located inside what was
-    // painted and then followed byte for byte; `L` is where the two stop
-    // agreeing. Deriving it this way is what makes the SC4 comparison
-    // below a *byte-range* comparison on both halves of the seam rather
-    // than a claim about the half nobody checked.
-    let probe = &full.bytes[..PROBE.min(full.bytes.len())];
+    // Measured, not assumed: the canonical stream is located inside what
+    // the client painted and then followed byte for byte, and `L` is where
+    // the two stop agreeing. Deriving it this way is what makes the SC4
+    // comparison below a *byte-range* comparison on both halves of the
+    // seam rather than a claim about the half nobody checked.
+    //
+    // The anchor is the echo of the go token, not offset `0`, because the
+    // client's terminal also carries the client's own diagnostics (`qsh:
+    // the writer lease moved to …` — stderr shares the pty, `docs/CLI.md`
+    // §2.2), and the lease it takes at attach lands one such line between
+    // the replayed prologue and the live stream. Anchoring at the token
+    // starts the comparison at the first canonical byte the client can
+    // only have rendered *live*, and a diagnostic anywhere after it would
+    // cut `L` short — never lengthen it.
+    let anchor = find(&full.bytes, GO_TOKEN.as_bytes())
+        .expect("the go token's echo belongs to the canonical stream");
+    let probe = &full.bytes[anchor..(anchor + PROBE).min(full.bytes.len())];
     let start = find(&rendered, probe).unwrap_or_else(|| {
         panic!(
-            "the killed client never rendered the start of the stream; it showed {:?}",
-            String::from_utf8_lossy(&rendered[..200.min(rendered.len())])
+            "the killed client never rendered the live stream; it showed {:?}",
+            String::from_utf8_lossy(&rendered[..400.min(rendered.len())])
         )
     });
-    let l = rendered[start..]
-        .iter()
-        .zip(full.bytes.iter())
-        .take_while(|(painted, canonical)| painted == canonical)
-        .count() as u64;
+    let l = anchor as u64
+        + rendered[start..]
+            .iter()
+            .zip(full.bytes[anchor..].iter())
+            .take_while(|(painted, canonical)| painted == canonical)
+            .count() as u64;
+    // A floor on the half of the seam the ring did not produce: below a
+    // full burst the pty capture is too short to be following the stream
+    // rather than agreeing with it by accident.
     assert!(
-        l >= BURST as u64,
-        "the client only rendered {l} contiguous bytes of the stream before dying, \
-         which is too little to call this a mid-stream kill"
-    );
-    assert!(
-        last_marker < ROUNDS / 4,
-        "the client was killed at round {last_marker} of {ROUNDS} — that is not \
-         mid-stream any more"
+        l - anchor as u64 >= BURST as u64,
+        "the client only rendered {} contiguous bytes of the live stream before dying, \
+         which is too little to anchor the seam against",
+        l - anchor as u64
     );
     assert!(
         end - l >= (ROUNDS * BURST) as u64,
@@ -500,7 +733,7 @@ fn a_sigkilled_client_loses_no_bytes_and_the_session_survives_it() {
         "concatenating at the seam did not reproduce the canonical stream"
     );
 
-    // ---- SC5, behavioural: the child answers with no client attached ----
+    // ---- SC5, behavioural: the pty still carries input with no client ----
     ops.session_write_bytes(&session_ref, format!("{ALIVE_MARKER}\n").into_bytes())
         .expect("session.write");
     let mut after = reader_from(&ops, &session_ref, end);
@@ -514,6 +747,15 @@ fn a_sigkilled_client_loses_no_bytes_and_the_session_survives_it() {
     // token durable, so the credential is still good (ADR-0007). This is
     // the half of SC4 the cursor-pull cannot show: the session is not
     // merely readable, it is *attachable* again.
+    //
+    // It replays from `0`, and that is the contract, not a shortcut:
+    // `SessionAttachReq` carries no offset because a user-initiated
+    // reattach hands the terminal its scrollback back (`PLAN.md` Step 6
+    // invariant; `Ops::session_attach` sends `last_output_seq: 0`). The
+    // wire seam that resumes at a real `L` is the driver's reconnect path,
+    // and `attach_recovery.rs` is where it is byte-checked — a process
+    // that died of SIGKILL has no cursor left to present, which is the
+    // whole reason `L` is recovered from the pty here.
     let mut stream = ops
         .session_attach(SessionAttachReq {
             session_ref: session_ref.clone(),

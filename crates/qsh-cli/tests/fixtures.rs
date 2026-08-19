@@ -59,14 +59,6 @@ const DEFERRED: &[(&str, &str)] = &[
         "M5 policy engine (the M1–M4 interim policy is allow-all-pinned)",
     ),
     (
-        "SESSION_CONFLICT",
-        "reachable on the host since M2 Step 3 (`SessionAttach` with \
-         `no_steal` against a live foreign lease) and covered by the \
-         `qsh-core` server tests, but no CLI surface reaches it: \
-         `qsh attach` always sends `no_steal: false` (`src/tui/mod.rs`) \
-         and M2's CLI contract has no `--no-steal` flag",
-    ),
-    (
         "RESUME_GAP",
         "event-only by contract (`docs/CLI.md` §3.3): leaving the replay \
          range is always delivered as a `session.gap` event, never as an \
@@ -79,9 +71,11 @@ const DEFERRED: &[(&str, &str)] = &[
     ),
     (
         "RESOURCE_EXHAUSTED",
-        "produced since M2 (per-connection in-flight cap, attach queue \
-         overflow) but only under backpressure a fixture cannot stage \
-         deterministically",
+        "two producers, neither cheap to stage: `exec.run` output past \
+         `EXEC_OUTPUT_MAX` (64 MiB, since M1 — deterministic but a fixture \
+         would push 64 MiB through the harness for one envelope), and the \
+         broker's full input queue (`BrokerError::Backpressure`, M2), which \
+         needs a child that has stopped draining its pty",
     ),
     (
         "UNSUPPORTED",
@@ -121,6 +115,7 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "session.resize.json",
     "session.close.json",
     "error.SESSION_NOT_FOUND.json",
+    "error.SESSION_CONFLICT.json",
 ];
 
 // ---------------------------------------------------------------------------
@@ -436,6 +431,62 @@ fn golden_session_fixtures() {
     assert_eq!(code, 255, "{gone}");
     assert_eq!(gone["error"]["code"], "SESSION_NOT_FOUND");
     check("error.SESSION_NOT_FOUND.json", gone);
+}
+
+/// `SESSION_CONFLICT` from the one producer the CLI reaches
+/// deterministically: a write to a session whose child has already exited.
+///
+/// The code covers three broker refusals (`server/mod.rs`):
+/// `BrokerError::Conflict` (a `no_steal` attach against a foreign lease,
+/// which M2's CLI cannot ask for — `qsh attach` always sends
+/// `no_steal: false` and there is no `--no-steal` flag), `NotWriter`, and
+/// `NotRunning`. The last one needs nothing but a child that returned:
+/// `session.write` checks the session's state before it checks the lease,
+/// so an exited session refuses the write outright (`broker/session.rs`).
+#[cfg(unix)]
+#[test]
+fn golden_session_conflict_fixture() {
+    let fleet = Fleet::start();
+    let client = &fleet.client;
+
+    let (code, opened) = client.json(&[
+        "session", "open", HOST_ALIAS, "--json", "--", "sh", "-c", "exit 0",
+    ]);
+    assert_eq!(code, 0, "{opened}");
+    let session_ref = opened["data"]["session_ref"]
+        .as_str()
+        .expect("session_ref")
+        .to_string();
+
+    // Bounded poll (each iteration is a real round trip, never a sleep)
+    // until the host has reaped the child and the session has left
+    // `running`. Wall-clock bounded so a loaded box does not fail
+    // spuriously.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let (code, session) = client.json(&["session", "get", &session_ref, "--json"]);
+        assert_eq!(code, 0, "{session}");
+        if session["data"]["state"] == "exited" {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the session never reached `exited`: {session}"
+        );
+    }
+
+    // "x" — the byte never reaches a pty; the state check refuses it first.
+    let (code, conflict) = client.json(&[
+        "session",
+        "write",
+        &session_ref,
+        "--data-b64",
+        "eA==",
+        "--json",
+    ]);
+    assert_eq!(code, 255, "{conflict}");
+    assert_eq!(conflict["error"]["code"], "SESSION_CONFLICT", "{conflict}");
+    check("error.SESSION_CONFLICT.json", conflict);
 }
 
 // ---------------------------------------------------------------------------

@@ -191,15 +191,42 @@ fn locate(binary: &str) -> Option<PathBuf> {
         })
 }
 
-/// Announce a skipped acceptance item, loudly enough to find in a CI log.
+/// Which acceptance binaries a missing install must *fail* for, read from
+/// `QSH_ACCEPTANCE_STRICT`.
 ///
-/// With `QSH_ACCEPTANCE_STRICT=1` a missing binary is a *failure* instead:
-/// the M2 acceptance set is only certified where all four are installed,
-/// and a job that claims to certify it must not pass by skipping.
+/// * unset — nothing is required; every missing binary is a `SKIP:` line.
+/// * `1` / `all` — the whole acceptance set is required. This is the M2
+///   certification mode (`PLAN.md` DoD 2): a run that claims to certify
+///   the acceptance set must not pass by skipping half of it.
+/// * a comma-separated list — only those are required.
+///
+/// The list form exists because the certification set and what a *standing*
+/// gate can promise are not the same. `claude` is not installable on a
+/// hosted GitHub runner, so a CI job demanding it would be red for ever
+/// and would teach nobody anything; the CI job requires the four that
+/// `apt-get` provides, and the full set is certified where all five are
+/// installed. Neither mode ever downgrades a failure to a skip.
+fn required_by_strict(binary: &str) -> bool {
+    let Some(value) = std::env::var_os("QSH_ACCEPTANCE_STRICT") else {
+        return false;
+    };
+    let value = value.to_string_lossy().to_lowercase();
+    let value = value.trim();
+    if value.is_empty() || value == "0" {
+        return false;
+    }
+    if value == "1" || value == "all" {
+        return true;
+    }
+    value.split(',').any(|name| name.trim() == binary)
+}
+
+/// Announce a skipped acceptance item, loudly enough to find in a CI log —
+/// or fail, when [`required_by_strict`] says this runner promised it.
 fn skip(binary: &str) {
     assert!(
-        std::env::var_os("QSH_ACCEPTANCE_STRICT").is_none(),
-        "QSH_ACCEPTANCE_STRICT is set but {binary} is not installed on this runner"
+        !required_by_strict(binary),
+        "QSH_ACCEPTANCE_STRICT requires {binary}, but it is not installed on this runner"
     );
     eprintln!("SKIP: {binary} is not installed on this runner");
 }
