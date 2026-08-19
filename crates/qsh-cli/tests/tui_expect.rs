@@ -437,6 +437,32 @@ fn vim_opens_edits_and_quits() {
     );
 }
 
+/// Owns the tmux **server** on a private socket.
+///
+/// tmux daemonizes, so its server is reparented to init the moment it
+/// starts: killing the session, the client or `qsh serve` does not touch
+/// it. A clean run ends it by leaving the last pane, but any panic before
+/// that would strand a tmux server — and a shell inside it — on the
+/// developer's machine for ever. This makes the happy path's cleanup the
+/// fallback rather than the only path.
+struct TmuxServerGuard {
+    tmux: PathBuf,
+    socket: String,
+}
+
+impl Drop for TmuxServerGuard {
+    fn drop(&mut self) {
+        // Already gone on a clean run; `kill-server` then fails harmlessly
+        // ("no server running on …"), which is why nothing is asserted.
+        let _ = Command::new(&self.tmux)
+            .args(["-L", &self.socket, "kill-server"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+}
+
 /// Acceptance item 3: `tmux`, including a resize that has to travel
 /// through tmux's own client before it reaches the pane.
 #[test]
@@ -447,8 +473,13 @@ fn tmux_runs_and_propagates_a_resize() {
     };
     let fleet = Fleet::start();
     // A private socket and no config, so the test never touches (or is
-    // touched by) a tmux the developer is already running.
+    // touched by) a tmux the developer is already running. Unique per
+    // test process, which under nextest is per test.
     let socket = format!("qsh-test-{}", std::process::id());
+    let _tmux_server = TmuxServerGuard {
+        tmux: tmux.clone(),
+        socket: socket.clone(),
+    };
     let session_ref = open_session(
         &fleet.client,
         &[
