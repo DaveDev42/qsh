@@ -10,10 +10,16 @@
 //
 // Scope so far: the M1 walking skeleton (Hello, Response/Error,
 // ExecStart/ExecStarted, StreamHeader, ExecFrame, Ping/Pong) plus the M2
-// session surface (session_* control messages, SessionEvent, SessionFrame).
+// session surface (session_* control messages, SessionEvent, SessionFrame)
+// plus the M3 reverse-registration field (Hello.reverse).
 // Tunnel (M4) and reverse (M3) tags are `reserved` here so a later
 // milestone cannot accidentally take them for something else — protoc /
-// protox reject a field that reuses a reserved number.
+// protox reject a field that reuses a reserved number. Filling a
+// `reserved` tag with the exact message it was reserved for (as M3 does
+// below for `Hello.reverse`) is not a violation of the additive-only rule
+// above — the reservation named its eventual occupant, so this is that
+// reservation being realized, not a tag being reused for a different
+// meaning.
 
 syntax = "proto3";
 
@@ -68,8 +74,38 @@ message Hello {
   string device_name = 2;
   // Capability strings; peers adopt the intersection ("exec", "session", ...).
   repeated string capabilities = 3;
-  // 4 is `ReverseRegistration reverse` (M3, protocol.md §11).
-  reserved 4;
+  // Present only when the sender is a reverse target registering itself as
+  // a host on this connection (M3, protocol.md §11-2); absent on every
+  // other Hello (including a plain `qsh serve` responder's Hello, and a
+  // dialer's Hello that is not registering).
+  ReverseRegistration reverse = 4;
+}
+
+// A reverse target's self-announcement, carried once in `Hello.reverse`.
+// Both fields are self-reported by the dialer, exactly like `device_name`
+// above — the controller authenticates the connection from the peer
+// certificate first (protocol.md §3) and only then looks at this message;
+// neither field is ever an authorization or identity input.
+message ReverseRegistration {
+  // The name this target would like to be registered under. NEVER used for
+  // authentication or name resolution on its own — the controller honors it
+  // only when the peer has no trust-store alias and
+  // `[listen].allow_advertised_names` is set (protocol.md §11-2); otherwise
+  // a compromised or merely careless target could squat another device's
+  // name (name-squatting). Shape-checked with
+  // `name.is_empty() || wire::valid_host_name(name)` before this string
+  // reaches an ACL decision or an audit record — empty is exempt from the
+  // check (it means "let the controller pick"), a non-empty value must
+  // satisfy `wire::valid_host_name`.
+  string offered_name = 1;
+  // Capability strings this target is offering *in its host role for this
+  // registration* — a distinct list from `Hello.capabilities` (the
+  // connection's general capabilities). Empty means "same as
+  // Hello.capabilities". Unknown strings are ignored by the controller.
+  // Recorded in the reverse registry as metadata only: M3 never exposes
+  // this in JSON and never treats it as an authorization or identity
+  // input. The first consumer is M4 (tunnel capability negotiation).
+  repeated string capabilities = 2;
 }
 
 // The reply to a request. Exactly one body variant is set: either the typed

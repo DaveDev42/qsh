@@ -65,6 +65,7 @@ async fn pinned_peers_handshake_and_exchange_hello() {
                     versions: vec![0],
                     device_name: "server".into(),
                     capabilities: vec!["exec".into()],
+                    reverse: None,
                 }),
             ))
             .await
@@ -89,6 +90,7 @@ async fn pinned_peers_handshake_and_exchange_hello() {
                 versions: vec![0],
                 device_name: "client".into(),
                 capabilities: vec!["exec".into()],
+                reverse: None,
             }),
         ))
         .await
@@ -204,6 +206,7 @@ async fn data_stream_framed_roundtrip_many_messages_and_clean_eof() {
                 versions: vec![0],
                 device_name: "roundtrip-client".into(),
                 capabilities: vec!["exec".into()],
+                reverse: None,
             }),
         ),
         ControlMessage::new(0, control_message::Body::Ping(Ping {})),

@@ -407,6 +407,7 @@ async fn attach_to_an_unknown_session_creates_nothing() {
                     .iter()
                     .map(|s| s.to_string())
                     .collect(),
+                reverse: None,
             }),
         ))
         .await

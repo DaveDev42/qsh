@@ -56,7 +56,7 @@ Broker
 - **Writer lease:** 세션당 하나. (a) 대화형 attach는 기본 **steal** — 절전 후 같은 사람이 재접속하는 지배적 경우를 무마찰로 처리하고, 기존 보유자(살아 있다면)는 lease 회수 통지 후 read-only로 강등된다. (b) 프로그램적 write/attach는 타 principal이 살아 있는 lease를 쥐고 있으면 `SESSION_CONFLICT` — 명시적 `takeover: true`가 필요하다. (c) lease는 소유 connection이 죽으면 자동 해제되지만 **세션과 child process는 유지**된다. 읽기는 lease가 필요 없다.
 - **Child 종료:** waitpid 관찰 → 종료 이벤트를 ring에 기록 → 세션은 `exited` 상태로 남아 늦게 온 reader도 `session.exit` 이벤트를 수신한 뒤 TTL(같은 `[serve].resume_ttl`, exit 시점 기준)로 정리된다(`session.closed{reason:"exit"}`).
 - **제어 event의 전달:** `session.exit`/`session.writer_changed`/`session.closed`는 ring에 **zero-length 제어 엔트리**로 append되어 `pull()`이 output과 전순서로 섞어 반환한다(`sequence` = append 시점 offset, offset 증가 없음) — 단발 pull·`--follow`·MCP long-poll이 모두 같은 순서를 본다. attach 중인 connection에는 같은 event를 control 스트림 `SessionEvent`로도 보낸다. `writer_changed`는 모든 read 소비자에게 broadcast된다(CLI.md §6.4).
-- **Supervisor seam:** broker는 `SessionBackend` trait(open/attach/pull/write/resize/close/list) 뒤에 있고 transport 타입을 import하지 않는다. per-process UDS 제어 소켓 계층(`localctl` — `$XDG_RUNTIME_DIR/qsh/<pid>.sock`, 동일 frame layer)이 `qsh tunnels` 류의 프로세스 간 조회를 담당하며, P1에서 별도 supervisor 프로세스가 같은 trait를 UDS 너머로 제공하면 drop-in 교체된다. **`localctl`은 M2가 아니라 첫 소비자가 있는 M3(역방향)에서 도입한다** — 첫 소비자는 controller의 `qsh attach <reverse-host>`가 상주 `qsh listen` 데몬과 통신하는 경로(protocol.md §11-3)이며, `qsh tunnels`(M4)는 두 번째 소비자다. M2에서는 소비자 없는 IPC 계층을 깔지 않고 `SessionBackend` seam의 순수성(transport import 0)만 지킨다 ([ADR-0003](../adr/0003-sessions-in-listener.md) 결과 절 2026-08-18 추기).
+- **Supervisor seam:** broker는 `SessionBackend` trait(open/attach/pull/write/resize/close/list) 뒤에 있고 transport 타입을 import하지 않는다. per-process UDS 제어 소켓 계층(`localctl` — `$XDG_RUNTIME_DIR/qsh/<pid>.sock`, 동일 frame layer)이 `qsh tunnels` 류의 프로세스 간 조회를 담당하며, P1에서 별도 supervisor 프로세스가 같은 trait를 UDS 너머로 제공하면 drop-in 교체된다. **`localctl`은 M2가 아니라 첫 소비자가 있는 M3(역방향)에서 도입한다** — M3의 첫 소비자는 **2종**이다: controller의 `qsh hosts`가 상주 `qsh listen` 데몬의 live 역방향 등록을 `LOCAL_ADMIN` conduit(`LocalHostList`)로 조회하는 경로와, `qsh <name>`(신규 세션)/`qsh attach <name>/<session_id>`(재attach)가 `LOCAL_CONTROL` conduit로 데몬이 쥔 역방향 연결 위에 `SessionOpen`/`SessionAttach`를 보내는 경로(protocol.md §11-3)다. `qsh tunnels`(M4)는 그 다음 소비자다. M2에서는 소비자 없는 IPC 계층을 깔지 않고 `SessionBackend` seam의 순수성(transport import 0)만 지킨다 ([ADR-0003](../adr/0003-sessions-in-listener.md) 결과 절 2026-08-18 추기).
 
 ## 4. PTY
 
@@ -85,14 +85,16 @@ macOS/Linux 동일 (ssh 스타일 예측 가능성; `~/Library/…` 미사용):
 
 ```
 ~/.config/qsh/            # $QSH_CONFIG_DIR → $XDG_CONFIG_HOME/qsh → 이 경로
-├── config.toml           # [serve] bind·replay_bytes·resume_ttl·close_grace_ms / [identity] key_store / [audit]
+├── config.toml           # [serve] bind·replay_bytes·resume_ttl·close_grace_ms / [identity] key_store / [audit] / [listen] bind·allow_advertised_names(기본 false)·stale_retention(기본 120s) / [reverse] controller·offered_name·backoff_initial_ms(500)·backoff_max_ms(30000)·backoff_jitter_pct(±20)
 ├── hosts.toml            # [[host]] name·address·user  → host.list (M7 도입; 그 전까지 host 해석은 trust.toml의 pinned peer가 단일 출처. `user`는 M7에서도 계정 선택이 아니라 CLI.md §7의 assertion hint — 불일치 시 UNSUPPORTED)
 ├── trust.toml            # pinned peers + CAs
 ├── acl.toml              # serve/listen 역할만 읽음
 └── identity/             # device.pem (+ file-mode일 때 device.key 0600)
 ~/.local/state/qsh/       # $XDG_STATE_HOME: audit.log, resume.json(0600; session_ref → {token, peer_spki_sha256, expires_at, …}; flock + tmp+rename 원자 교체, ADR-0007)
-$XDG_RUNTIME_DIR/qsh/     # (없으면 state 하위 run/, 0700) per-process UDS: <pid>.sock (localctl, M3 도입 — 첫 소비자는 역방향 attach, protocol.md §11-3)
+$XDG_RUNTIME_DIR/qsh/     # (없으면 state 하위 run/, 0700) per-process UDS: <pid>.sock (localctl, M3 도입 — 첫 소비자 2종은 `qsh hosts`와 역방향 attach, protocol.md §11-3)
 ```
+
+**런타임 소켓 discovery.** 한 머신에 `qsh listen` 데몬이 여러 개 떠 있을 수 있으므로(프로세스마다 `<pid>.sock`), CLI는 `$XDG_RUNTIME_DIR/qsh/*.sock`을 pid 오름차순으로 순서대로 시도한다: connect가 거부되는 stale 소켓은 unlink하고 다음으로 넘어가며, 요청한 host를 모르는 데몬은 `HOST_NOT_FOUND`로 답해 다음 소켓으로 넘어가게 한다. 전부 실패하면 `HOST_NOT_FOUND`다(구현은 M3 Step 5).
 
 ## 8. Crate 선정 (버전은 lock 시점 재확인)
 

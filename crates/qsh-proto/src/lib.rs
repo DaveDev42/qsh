@@ -12,6 +12,10 @@
 //!   that [`event::SessionEvent`] (JSON) and [`wire::SessionEvent`]
 //!   (protobuf, control-stream notification) are distinct types; only the
 //!   JSON one is re-exported at the crate root.
+//! - [`local`]: the prost-generated `qsh.local.v1` messages (localctl IPC,
+//!   `proto/qsh/local/v1.proto`) and their frame-layer glue — a separate
+//!   package from [`wire`] but sharing its frame layer (M3,
+//!   `docs/design/protocol.md` §11-3).
 //!
 //! Because this crate parses untrusted input from the network, it is the
 //! designated fuzzing surface for the project (`docs/design/protocol.md`
@@ -20,16 +24,17 @@
 pub mod error;
 pub mod event;
 pub mod frame;
+pub mod local;
 pub mod types;
 pub mod wire;
 
 pub use error::ErrorCode;
 pub use event::SessionEvent;
 pub use types::{
-    CLI_SCHEMA_V1, CliEnvelope, CliError, EnvVar, ExecRunData, ExecRunReq, Host, IdentityInitData,
-    IdentityInitReq, KeyStoreKind, KeyStoreMode, Session, SessionAttachReq, SessionCloseData,
-    SessionCloseReq, SessionGetReq, SessionListData, SessionListReq, SessionOpenData,
-    SessionOpenReq, SessionReadData, SessionReadReq, SessionResizeData, SessionResizeReq,
-    SessionWriteData, SessionWriteReq, TrustAddData, TrustAddReq, TrustListData, TrustPeer,
-    TrustRemoveData, UnreachableHost, VersionData,
+    CLI_SCHEMA_V1, CliEnvelope, CliError, EnvVar, ExecRunData, ExecRunReq, Host, HostGetReq,
+    HostListData, HostListReq, IdentityInitData, IdentityInitReq, KeyStoreKind, KeyStoreMode,
+    Session, SessionAttachReq, SessionCloseData, SessionCloseReq, SessionGetReq, SessionListData,
+    SessionListReq, SessionOpenData, SessionOpenReq, SessionReadData, SessionReadReq,
+    SessionResizeData, SessionResizeReq, SessionWriteData, SessionWriteReq, TrustAddData,
+    TrustAddReq, TrustListData, TrustPeer, TrustRemoveData, UnreachableHost, VersionData,
 };

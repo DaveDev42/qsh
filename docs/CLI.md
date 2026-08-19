@@ -1,6 +1,6 @@
 # QSH CLI, JSON and MCP Contract
 
-**상태:** Draft v0.7 (M2 Step 7 — `session.attach`는 resume credential을 **반드시** 요구하며 그 실패는 항상 non-distinguishing `AUTH_FAILED`임을 §6.3·§6.4에 명문화; v0.6 = `session read --follow` 출력 형태와 `--wait` 하한 명문화, v0.5 = M2 계약 확정, v0.4 = M1 구현과 동기화)  
+**상태:** Draft v0.8 (M3 Step 1 — `Host`의 `state`/`device_id` 값 어휘 확정과 역방향 등록 ACL 매핑(§2.5·§5)·`host.list`/`host.get` 데이터 소스(§6.1)·recovery 진단의 `registration_wait_ms`(§6.4)·신규 §6.13 `qsh listen`/`qsh reverse` 계약 추가; v0.7 = M2 Step 7 — `session.attach`는 resume credential을 **반드시** 요구하며 그 실패는 항상 non-distinguishing `AUTH_FAILED`임을 §6.3·§6.4에 명문화; v0.6 = `session read --follow` 출력 형태와 `--wait` 하한 명문화, v0.5 = M2 계약 확정, v0.4 = M1 구현과 동기화)  
 **대상:** QSH MVP  
 **Canonical interface:** `qsh` CLI
 
@@ -110,7 +110,9 @@ ACL action은 인가(authorization) 어휘로, operation 이름과는 별개 차
 | `tunnel.close`, `tunnel.list` | 해당 tunnel의 소유 peer이면 허용 (`forward.*` 부여로 충분) |
 | `host.list`, `host.get`, `identity.init`, `trust.*`, `doctor.run`, `schema.get`, `capabilities.get`, `version.get` | 인가 불요 — local operation으로 원격 peer의 ACL 평가 대상이 아님 |
 
-향후 예약: streaming file copy → `file.read`/`file.write`, SOCKS(`-D`) → `forward.socks`, 역방향 host 등록 → `host.reverse`.
+향후 예약: streaming file copy → `file.read`/`file.write`, SOCKS(`-D`) → `forward.socks`.
+
+역방향 host 등록은 operation이 아니라 **연결 수립 시점의 검사**다 — 위 표는 operation→ACL action 매핑이고 `qsh listen`/`qsh reverse`는 §2.4가 명시하듯 operation이 아닌 장기 실행 모드이므로 표에 행을 만들지 않는다. `qsh reverse`(target)가 `qsh listen`(controller)에 dial해 보내는 `Hello.reverse`(protocol.md §9·§11)를 controller가 인증서로 인증한 뒤, 그 principal에 ACL action `host.reverse`를 검사한다 — 통과해야만 registry에 등록된다(default deny, PRD §9).
 
 ## 3. JSON envelope
 
@@ -197,10 +199,14 @@ Output mode에 따라 exit code 의미가 달라져서는 안 된다. 대화형 
   "name": "personal-mac",
   "address": "personal-mac.example.com:4433",
   "connection_mode": "forward",
-  "state": "reachable",
-  "device_id": "device_01K0EXAMPLE"
+  "state": "unknown",
+  "device_id": "sha256:BASE64FINGERPRINT"
 }
 ```
+
+`connection_mode ∈ {"forward", "reverse"}`. `state`는 열린 문자열(§10)이며 `∈ {"reachable", "stale", "unknown"}`: forward host는 도달성을 probe하지 않으므로 항상 `"unknown"`이다 — 확인하지 않은 것을 `"reachable"`로 보고하지 않는다. live 역방향 등록은 `"reachable"`(인증된 연결을 실제로 쥐고 있다), 죽은 등록은 보존 창 동안 `"stale"`이다(§6.13).
+
+`device_id`는 **peer의 SPKI SHA-256 fingerprint 문자열**(`sha256:BASE64`, architecture.md §5의 표기)이다 — forward host는 trust store에 **핀된** fingerprint, reverse host는 상주 데몬이 **TLS로 검증한** peer fingerprint다. `Hello.device_name` 같은 wire 표시 이름은 어떤 경우에도 identity로 쓰지 않는다(protocol.md §3). `Host`는 이전까지 어떤 op도 emit한 적 없는 placeholder였고 fixture도 없었으므로, 위 값 어휘는 field의 **정의**이지 §10이 금지하는 기존 의미의 변경이 아니다.
 
 ### Session
 
@@ -231,7 +237,9 @@ qsh hosts --json
 qsh host get personal-mac --json
 ```
 
-`hosts`는 설정된 forward host와 현재 연결된 reverse host를 함께 반환한다.
+`host.list`의 `data`는 `{"hosts": [Host, …]}`(§5 Host 배열)이고 `host.get`의 `data`는 Host 객체 하나다.
+
+`hosts`는 두 데이터 소스를 합쳐 반환한다: 로컬 trust store(`trust.toml`)에 pin된 forward host 전부와, 상주 `qsh listen` 데몬이 현재 쥐고 있는 live 역방향 등록(§6.13). **`host.list`는 dial하지 않는다** — forward host의 도달성은 확인하지 않으므로(§5, `state`는 항상 `"unknown"`) 이 목록은 순수 로컬 조회다. 같은 이름이 forward pin과 reverse 등록 양쪽에 존재하면 `hosts` 배열에 `connection_mode`로 구분되는 **두 항목**으로 나타난다 — 목록에서는 병합하지 않는다. 다만 그 이름으로 실제 연결을 맺을 때(attach, `qsh <name>`)의 **라우팅 우선순위는 live reverse 등록이 우선**이다 — 증명된 도달 가능 경로를 trust store의 추정 주소보다 앞세운다.
 
 ### 6.2 Session 조회
 
@@ -365,6 +373,8 @@ Closed event (wire `SessionEvent::Closed`). 세션이 broker에서 제거되어 
 **`--follow`의 종료.** `--follow`는 `session.exit`를 수신하면 즉시 정상 종료한다(exit `0`) — TTL 정리(`session.closed{reason:"exit"}`)를 기다리지 않는다. 실행 중이던 세션이 `session.close`/reaper로 제거되면 `session.closed`가 마지막 event이고 그 직후 종료한다.
 
 Recovery 텔레메트리(`recovery ∈ {migrated, resumed, failed}`, `time_to_recovery_ms`, `session_ref`; testing.md L4)는 M2에서 `qsh.event/v1` event가 **아니라** stderr 구조화 진단(tracing target `qsh::recovery`, level `INFO`, **한 줄 JSON** 렌더링 — 기본 verbosity에서 방출되고 §2.2의 `--quiet`/`-v` 규칙을 그대로 따른다; PTY 내용·토큰 field는 존재하지 않는다)으로만 나가며 stdout에는 절대 나타나지 않는다(§2.2). event로의 승격은 P1에서 결정한다.
+
+M3는 이 진단에 additive optional field `registration_wait_ms`(역방향에서 controller의 attach driver가 target의 새 `generation` 등록을 기다린 시간, ms)를 더한다 — `recovery` 값 집합 자체는 바뀌지 않으며, 필드 집합의 정본은 여기이고 값은 역방향 resume을 구현하는 M3 Step 8이 채운다.
 
 ### 6.5 Session 쓰기
 
@@ -559,7 +569,7 @@ qsh trust remove <name> --json
 
 존재하지 않는 이름을 제거하는 것도 오류가 아니라 멱등이다 — `ok: true`에 `data.removed: false`를 반환한다.
 
-일회용 invite code pairing(`qsh trust invite` 계열, ADR-0002)의 CLI 계약은 M7에서 확정한다. `doctor.run`은 operation 이름만 예약되어 있으며 계약은 M7에서 확정한다.
+일회용 invite code pairing(`qsh trust invite` 계열, ADR-0002)의 CLI 계약은 M7에서 확정한다. `doctor.run`은 operation 이름만 예약되어 있으며 계약은 M7에서 확정한다. M3가 만드는 진단 항목 상수(`qsh::reverse`의 `event` 값 어휘, `registration_wait_ms` 등)는 M7의 `doctor.run`이 그대로 소비한다 — 계약 확정을 앞당기지 않는다.
 
 원격 operation(`exec.run`, `session.*`, `tunnel.*`)의 mTLS 실패 오류 경로는 다음과 같다.
 
@@ -579,6 +589,22 @@ qsh serve --bind <ip:port>
 - 시작 시 실제로 bind된 주소를 stderr에 출력한다 — stdout은 §2.2 규칙에 따라 JSON 계약 전용이므로 여기서는 쓰지 않는다.
 - listener 재시작 시 세션 소실에 대해서는 README의 [Known limitations](../README.md#known-limitations-mvp-by-design)를 참고한다.
 - **SIGTERM drain(M2, ADR-0003):** 신규 attach·open을 거부한 뒤 모든 세션에 §6.7의 close 절차(SIGHUP→TERM→KILL, `close_grace_ms`)를 적용하고, 붙어 있는 소비자에게 `session.closed{reason: "closed"}`(§6.4)를 보낸 다음 종료한다 — 세션은 프로세스와 함께 끝나며 고아 셸을 남기지 않는다.
+
+### 6.13 장기 실행 모드: `qsh listen` / `qsh reverse`
+
+`qsh listen`(controller)과 `qsh reverse <controller>`(target)는 §2.4가 명시하는 장기 실행 모드다 — 단일 요청/응답 JSON 계약이 없고 operation 목록(§2.4)에 포함되지 않는다.
+
+```bash
+qsh listen [--bind <ip:port>]
+qsh reverse <controller> [--offered-name <name>]
+```
+
+- **Controller reachability 요구.** `qsh listen`은 target이 dial할 수 있는 주소에서 실행돼야 한다 — 역방향은 NAT 뒤 target을 도달 가능하게 만들 뿐, controller 자신은 여전히 direct-reachable해야 한다(relay·NAT traversal은 M3의 명시적 out-of-scope, ROADMAP.md M3).
+- `--bind`의 우선순위: CLI flag > `[listen].bind` > 기본값 `[::]:4433` — `qsh serve`(§6.12)와 **기본값이 같다**. 한 머신에서 두 역할을 겸하려면 명시적 `--bind`가 필요하고, 충돌은 조용한 오작동이 아니라 즉시·명시적 실패(stderr 진단 + exit `255`)다.
+- 시작 시 실제로 bind된 주소와 등록 이벤트(`registered|denied|replaced|lost|expired|retry`)를 stderr에 구조화 진단(tracing target `qsh::reverse`, 한 줄 JSON, payload·토큰 field 없음)으로 출력한다 — stdout에는 §2.2 규칙에 따라 한 바이트도 쓰지 않는다.
+- `qsh reverse <controller>`의 `<controller>`는 trust store alias다(§6.8의 host→주소 해석과 동일 — M7 이전에는 trust.toml pinned peer가 단일 출처). 등록에 성공하면 그 연결 위에서 host 역할로 동작하며, 서비스하는 세션은 `qsh serve`와 같은 broker·writer lease 규율을 그대로 따른다. **관찰 가능한 차이는 writer lease를 쥐는 connection이 상주 `qsh listen` 데몬이 유지하는 역방향 connection에 결합된다는 점이다** — 그 connection이 죽으면(재접속 루프가 새 connection을 세우기 전) lease는 forward 세션과 동일하게 자동 해제된다(architecture.md §3).
+- `qsh listen`/`qsh reverse` 둘 다 Windows에서는 리소스를 생성하지 않고 `UNSUPPORTED` + exit `255`다 — localctl(UDS)과 host 역할(PTY)이 `cfg(unix)`이기 때문이다. Windows의 `qsh hosts`는 forward host만 반환하며(데몬 개념 없음) 오류가 아니다.
+- 연결이 죽은 등록은 `state:"stale"`로 표시됐다가 `[listen].stale_retention`(기본 120s, `docs/design/protocol.md` §11-4)이 지나면 목록에서 제거된다.
 
 ## 7. Human interactive mode
 

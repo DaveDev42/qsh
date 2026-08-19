@@ -66,8 +66,14 @@ pub struct VersionData {
 /// A host entry as returned by `qsh hosts` / `qsh host get`
 /// (`docs/CLI.md` §5, "Host").
 ///
-/// Placeholder: field shape only, not yet produced or consumed by any op
-/// (host directory lands in M7).
+/// Placeholder no longer describes this type: M3 Step 1 is the first thing
+/// to fix its value vocabulary (below), even though no op emits it and no
+/// fixture exists for it *yet* (both land in Step 5) — so this is the
+/// *first definition* of these fields' meaning, not a documented-meaning
+/// change that would require `/v2` (`docs/CLI.md` §10). Actual production
+/// (`host.list`/`host.get`) lands with the M3 reverse registry and `qsh
+/// listen`/`qsh reverse` steps later in this milestone; the host *directory*
+/// (`hosts.toml`) is M7.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Host {
     /// Local alias for this host.
@@ -77,11 +83,47 @@ pub struct Host {
     pub address: String,
     /// `"forward"` or `"reverse"`.
     pub connection_mode: String,
-    /// Last known reachability state, e.g. `"reachable"`.
+    /// Reachability, open string set (`docs/CLI.md` §10): `"reachable"` |
+    /// `"stale"` | `"unknown"`. A forward host is never probed for
+    /// reachability in M3, so it always reports `"unknown"` — an
+    /// unconfirmed host is never reported as `"reachable"`. A live reverse
+    /// registration (the controller is actively holding an authenticated
+    /// connection to it) is `"reachable"`; a registration whose connection
+    /// died is `"stale"` for the controller's retention window
+    /// (`docs/design/protocol.md` §11-4) before it is dropped.
     pub state: String,
-    /// Stable per-device identifier the peer presented, e.g.
-    /// `"device_01K0EXAMPLE"`.
+    /// The peer's SPKI SHA-256 fingerprint, `sha256:BASE64`
+    /// (`docs/design/architecture.md` §5) — the value pinned in the trust
+    /// store for a forward host, or the value the daemon TLS-verified for a
+    /// reverse host. Never `Hello.device_name` or any other wire display
+    /// name (`docs/design/protocol.md` §3: identity is never taken from
+    /// wire data), e.g. `"sha256:BASE64FINGERPRINT"`.
     pub device_id: String,
+}
+
+/// Request for `host.list` (`qsh hosts`, `docs/CLI.md` §6.1). No filters in
+/// M3 — every configured forward host plus every currently-registered
+/// reverse host is returned in one call.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+pub struct HostListReq {}
+
+/// Data payload of `host.list`: configured forward hosts and
+/// currently-registered reverse hosts, together (`docs/CLI.md` §6.1:
+/// trust-store-pinned forward hosts plus the resident daemon's live reverse
+/// registrations, merged into one list; `host.list` never dials, and the
+/// same name can appear as two entries — one per `connection_mode`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct HostListData {
+    /// Every host visible to this caller, forward and reverse together.
+    pub hosts: Vec<Host>,
+}
+
+/// Request for `host.get` (`docs/CLI.md` §6.1). The data payload is a
+/// [`Host`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct HostGetReq {
+    /// Host alias.
+    pub name: String,
 }
 
 /// A session entry as returned by `qsh sessions` / `qsh session get`
@@ -652,6 +694,10 @@ mod tests {
         let _ = schemars::schema_for!(TrustAddData);
         let _ = schemars::schema_for!(TrustListData);
         let _ = schemars::schema_for!(TrustRemoveData);
+        let _ = schemars::schema_for!(Host);
+        let _ = schemars::schema_for!(HostListReq);
+        let _ = schemars::schema_for!(HostListData);
+        let _ = schemars::schema_for!(HostGetReq);
         for schema in session_schemas() {
             // Every session contract type is an object schema with at least
             // one property (none of them is a bare alias or an empty struct).
@@ -880,5 +926,78 @@ mod tests {
         );
         let list: SessionListReq = serde_json::from_value(serde_json::json!({})).unwrap();
         assert_eq!(list.host, None);
+    }
+
+    #[test]
+    fn host_matches_documented_shape() {
+        // CLI.md §5's device_id example is a peer SPKI fingerprint, not a
+        // wire display name (docs/design/protocol.md §3) — never
+        // "device_01K0EXAMPLE"-shaped (that vocabulary belongs to
+        // IdentityInitData.device_id, a different field on a different
+        // type).
+        let h = Host {
+            name: "personal-mac".into(),
+            address: "personal-mac.example.com:4433".into(),
+            connection_mode: "forward".into(),
+            state: "unknown".into(),
+            device_id: "sha256:BASE64FINGERPRINT".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&h).unwrap(),
+            serde_json::json!({
+                "name": "personal-mac",
+                "address": "personal-mac.example.com:4433",
+                "connection_mode": "forward",
+                "state": "unknown",
+                "device_id": "sha256:BASE64FINGERPRINT"
+            })
+        );
+        assert!(h.device_id.starts_with("sha256:"));
+    }
+
+    #[test]
+    fn host_list_req_is_empty_object() {
+        assert_eq!(
+            serde_json::to_value(HostListReq {}).unwrap(),
+            serde_json::json!({})
+        );
+        let _: HostListReq = serde_json::from_value(serde_json::json!({})).unwrap();
+    }
+
+    #[test]
+    fn host_list_data_wraps_hosts_array() {
+        let forward = Host {
+            name: "personal-mac".into(),
+            address: "personal-mac.example.com:4433".into(),
+            connection_mode: "forward".into(),
+            state: "unknown".into(),
+            device_id: "sha256:AAAA".into(),
+        };
+        let reverse = Host {
+            name: "laptop".into(),
+            address: "203.0.113.5:51820".into(),
+            connection_mode: "reverse".into(),
+            state: "reachable".into(),
+            device_id: "sha256:BBBB".into(),
+        };
+        let data = HostListData {
+            hosts: vec![forward.clone(), reverse.clone()],
+        };
+        let json = serde_json::to_value(&data).unwrap();
+        assert_eq!(json["hosts"][0]["connection_mode"], "forward");
+        assert_eq!(json["hosts"][1]["connection_mode"], "reverse");
+        let back: HostListData = serde_json::from_value(json).unwrap();
+        assert_eq!(back, data);
+    }
+
+    #[test]
+    fn host_get_req_matches_documented_shape() {
+        let req = HostGetReq {
+            name: "personal-mac".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&req).unwrap(),
+            serde_json::json!({"name": "personal-mac"})
+        );
     }
 }
