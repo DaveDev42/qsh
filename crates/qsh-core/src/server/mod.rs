@@ -1035,6 +1035,17 @@ impl Server {
         }
 
         // ---- Allowed: lease, then a single-use ticket. ----
+        //
+        // `broker_error` here and at the two registry calls below can
+        // spell `SESSION_NOT_FOUND`, which protocol.md §10-2 forbids on the
+        // attach path — an unauthorized peer must not learn whether a
+        // session exists. It stays unreachable rather than being mapped:
+        // every removal path (`Broker::close`, the reaper) calls
+        // `resume.forget` with the session, so a credential can only verify
+        // in step 1 while the session is still registered, and the gap
+        // between the two is not observable from outside the broker lock.
+        // Left as-is deliberately — folding it into `AUTH_FAILED` would
+        // hide a genuine broker bug behind a credential answer.
         let info = match self.sessions.get(&id) {
             Ok(info) => info,
             Err(err) => return broker_error(request_id, err),
@@ -1068,14 +1079,16 @@ impl Server {
         // ring; clamp instead, so a client that over-reports simply gets
         // everything from the current end.
         let replay_from = req.last_output_seq.min(info.last_sequence);
-        // This attach's own input axis, forked from the one its credential
-        // names and seeded with that axis's applied offset: the un-acked
-        // tail the client retransmits is deduplicated against what the child
-        // already ran, and the attach this one succeeds — which may still be
-        // connected and typing after its demotion — cannot move the cursor
-        // (protocol.md §10-5).
-        let (input_stream, input_from) = match self.sessions.fork_input_stream(&id, Some(lineage)) {
-            Ok(forked) => forked,
+        // The id of this attach's own input axis — reserved, not yet
+        // created. The credential rotation below has to name the axis it
+        // hands to the next generation, and the rotation is the point where
+        // this redemption becomes final; creating the axis first would mint
+        // session state for an attach that can still lose its race, which is
+        // the same reason `no_steal` above is a probe rather than a take.
+        // Reserving costs a counter value and no axis slot, so a lost race
+        // cannot evict a live peer's axis from the bounded window.
+        let input_stream = match self.sessions.reserve_input_stream(&id) {
+            Ok(stream) => stream,
             Err(err) => return broker_error(request_id, err),
         };
         // The successor credential. Minted last, after every check passed:
@@ -1091,9 +1104,23 @@ impl Server {
             {
                 Ok(token) => token,
                 // Lost the race with another redemption of the same token
-                // between step 1 and here. Same non-distinguishing answer.
+                // between step 1 and here. Same non-distinguishing answer,
+                // and no axis was created to leak.
                 Err(_) => return auth_failed(request_id),
             }
+        };
+        // Won. Now create the axis, forked from the one the credential
+        // named and seeded with that axis's applied offset: the un-acked
+        // tail the client retransmits is deduplicated against what the child
+        // already ran, and the attach this one succeeds — which may still be
+        // connected and typing after its demotion — cannot move the cursor
+        // (protocol.md §10-5).
+        let input_from = match self
+            .sessions
+            .seed_input_stream(&id, input_stream, Some(lineage))
+        {
+            Ok(from) => from,
+            Err(err) => return broker_error(request_id, err),
         };
         let ticket = self.issue_ticket(
             ctx.conn_id,

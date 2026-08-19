@@ -652,14 +652,21 @@ pub trait SessionBackend: Send + Sync {
         input_seq: u64,
     ) -> BoxFuture<'_, Result<u64, BrokerError>>;
 
-    /// Mint this attach's input axis, forked from `from` (the axis its
-    /// resume credential names) and seeded with that axis's applied
-    /// offset. `None` starts a client with no history at zero.
-    fn fork_input_stream(
+    /// Reserve the id this attach's input axis will have, without creating
+    /// it — so the id can be named to a credential rotation that has not
+    /// decided yet, and a rotation that loses its race costs no axis slot.
+    fn reserve_input_stream(&self, id: &SessionId) -> Result<InputStreamId, BrokerError>;
+
+    /// Create the axis [`reserve_input_stream`](Self::reserve_input_stream)
+    /// handed out, forked from `from` (the axis the resume credential
+    /// names) and seeded with that axis's applied offset. `None` starts a
+    /// client with no history at zero. Returns that starting offset.
+    fn seed_input_stream(
         &self,
         id: &SessionId,
+        stream: InputStreamId,
         from: Option<InputStreamId>,
-    ) -> Result<(InputStreamId, u64), BrokerError>;
+    ) -> Result<u64, BrokerError>;
 
     /// Apply a window-size change.
     fn resize(
@@ -801,12 +808,17 @@ impl SessionBackend for Broker {
         })
     }
 
-    fn fork_input_stream(
+    fn reserve_input_stream(&self, id: &SessionId) -> Result<InputStreamId, BrokerError> {
+        Ok(Broker::get(self, id)?.reserve_input_stream())
+    }
+
+    fn seed_input_stream(
         &self,
         id: &SessionId,
+        stream: InputStreamId,
         from: Option<InputStreamId>,
-    ) -> Result<(InputStreamId, u64), BrokerError> {
-        Ok(Broker::get(self, id)?.fork_input_stream(from))
+    ) -> Result<u64, BrokerError> {
+        Ok(Broker::get(self, id)?.seed_input_stream(stream, from))
     }
 
     fn resize(

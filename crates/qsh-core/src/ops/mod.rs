@@ -22,9 +22,10 @@ pub mod session;
 
 pub use exec::{ExecRunOp, ExecRunOutput, ExecStdin};
 pub use session::{
-    AttachHandle, SESSION_WRITE_MAX, SessionAttachOp, SessionAttachStream, SessionCloseOp,
-    SessionGetOp, SessionListOp, SessionOpenOp, SessionReadOp, SessionReadOutput, SessionReader,
-    SessionRef, SessionResizeOp, SessionWriteOp, make_session_ref, parse_session_ref,
+    AttachHandle, RecoveryConfig, SESSION_WRITE_MAX, SessionAttachOp, SessionAttachStream,
+    SessionCloseOp, SessionGetOp, SessionListOp, SessionOpenOp, SessionReadOp, SessionReadOutput,
+    SessionReader, SessionRef, SessionResizeOp, SessionWriteOp, make_session_ref,
+    parse_session_ref,
 };
 
 /// Everything a remote call needs to reach a pinned host: our identity,
@@ -163,12 +164,29 @@ impl Operation for TrustRemoveOp {
 #[derive(Debug, Clone)]
 pub struct Ops {
     paths: Paths,
+    recovery: session::RecoveryConfig,
 }
 
 impl Ops {
     /// Bind operations to explicit directories.
     pub fn new(paths: Paths) -> Self {
-        Self { paths }
+        Self {
+            paths,
+            recovery: session::RecoveryConfig::default(),
+        }
+    }
+
+    /// Override how a live attach survives a dead path
+    /// ([`session::RecoveryConfig`]).
+    ///
+    /// The defaults are what the product ships and what the M2 recovery
+    /// gate measures; this exists so a caller can turn a half of it off —
+    /// which is also how "nothing depends on migration succeeding"
+    /// (`docs/design/protocol.md` §2) is demonstrated rather than asserted.
+    #[must_use]
+    pub fn with_recovery(mut self, recovery: session::RecoveryConfig) -> Self {
+        self.recovery = recovery;
+        self
     }
 
     /// Bind operations to the directories resolved from the environment
