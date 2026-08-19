@@ -19,8 +19,11 @@
 //!   `recover` caps its own attempt at the same bound, so every `resumed`
 //!   record is inside it by construction. There must also be exactly one
 //!   record, so a recovery that only worked on the third attempt fails;
-//! - the wall clock is held to **detection + recovery**, both derived from
-//!   the shipping config rather than written down here, so pushing the
+//! - the wall clock is held to **detection + recovery**, the detection half
+//!   derived from the shipping config so the bound tracks what actually
+//!   ships — and that derived budget is *itself* held under a ceiling this
+//!   file writes down ([`DETECTION_CEILING`]), because a bound derived from
+//!   the config it polices moves whenever the config does. Pushing the
 //!   probe cadence or the strike count out fails this test instead of
 //!   quietly quintupling the user-visible outage. (The clock in the record
 //!   starts at *detection*; the wall clock is the only thing that bounds
@@ -76,12 +79,23 @@ const SCHEDULING_SLACK: Duration = Duration::from_secs(3);
 /// from the config the product actually ships rather than restated: a
 /// strike per probe interval, and then the silence floor.
 ///
-/// Derived rather than hard-coded so that loosening the detector — a
-/// slower cadence, more strikes — fails this test, instead of passing it
-/// while the outage the user sees grows.
+/// Derived rather than hard-coded so the wall-clock bound below tracks
+/// what the product actually ships.
 fn detection_budget(cfg: &qsh_core::PathWatchConfig) -> Duration {
     cfg.probe_interval * cfg.strikes + cfg.min_dead_after
 }
+
+/// The ceiling on [`detection_budget`] that no change to
+/// `PathWatchConfig` can raise.
+///
+/// Without it the derived budget is circular: loosening the detector
+/// raises its own allowance in lockstep, so a 5× probe interval (or 5×
+/// the strikes) doubles the outage a user sees and still passes. The
+/// number is `REDIAL_DEADLINE_MS` because that is the shape of the
+/// contract — *noticing* a dead path may not cost more than L4 allows for
+/// recovering from it, since what the user experiences is the sum.
+/// Shipped today this is 250 ms × 3 + 1 s = 1.75 s.
+const DETECTION_CEILING: Duration = Duration::from_millis(REDIAL_DEADLINE_MS);
 
 // ---------------------------------------------------------------------------
 // recovery telemetry capture
@@ -503,9 +517,19 @@ fn a_severed_path_is_detected_and_resumed_under_a_live_attach() {
     );
     // The real end-to-end bound, and the only one that constrains the
     // *detection* half: noticing plus recovering plus a shell round trip.
-    let budget = detection_budget(&RecoveryConfig::default().watch)
-        + Duration::from_millis(REDIAL_DEADLINE_MS)
-        + SCHEDULING_SLACK;
+    //
+    // The detection term is derived from the shipping config, so it is
+    // pinned to its own ceiling first — otherwise loosening the detector
+    // would raise this budget by exactly as much as it raises the outage,
+    // and the regression this assertion exists to catch would pass.
+    let detection = detection_budget(&RecoveryConfig::default().watch);
+    assert!(
+        detection <= DETECTION_CEILING,
+        "the shipping detector needs {detection:?} to call a path dead, over the \
+         {DETECTION_CEILING:?} ceiling — the outage a user sees is detection + recovery, \
+         so this is a regression in it even though the recovery half is untouched"
+    );
+    let budget = detection + Duration::from_millis(REDIAL_DEADLINE_MS) + SCHEDULING_SLACK;
     assert!(
         elapsed < budget,
         "the path death took {elapsed:?} to turn back into a working shell, over the \

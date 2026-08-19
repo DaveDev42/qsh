@@ -1362,6 +1362,24 @@ enum LegEnd {
     Broken(ClientError),
 }
 
+impl LegEnd {
+    /// Whether the leg's streams are still usable if the connection under
+    /// them turns out to be alive.
+    ///
+    /// Only [`LegEnd::PathDead`] is: the watchdog suspects the *path*, and
+    /// the streams on top of it are untouched, so a connection that
+    /// answers a probe (or one a rebind rescues) can simply be read on.
+    /// [`LegEnd::Broken`] is not — a reset or malformed `SESSION_DATA`
+    /// stream stays broken however healthy the connection is (a host-side
+    /// `RESET_CODE_SESSION_CONFLICT`/`RESET_CODE_BAD_HEADER` arrives on a
+    /// perfectly live connection), so answering it with a migration would
+    /// hand back the same failing reader for the driver to fail on again,
+    /// immediately and forever. It has to be rebuilt.
+    fn leg_survived(&self) -> bool {
+        matches!(self, LegEnd::PathDead)
+    }
+}
+
 /// A leg's helper tasks, stoppable without losing queued input.
 ///
 /// Stopping is a signal and a bounded wait, not an abort: a pump aborted
@@ -1503,6 +1521,10 @@ async fn drive_attach(
 
         loop {
             let end = read_leg(&mut reader, &cursor, &pending, &watch, &ctx, &events).await;
+            // Decided here, before `end` is consumed: a recovery may only
+            // be answered with "keep reading the same leg" if the leg
+            // itself survived. See [`LegEnd::leg_survived`].
+            let leg_survived = end.leg_survived();
             let recoverable = match end {
                 LegEnd::Ended => {
                     // The data stream ended. `session.closed` has no
@@ -1531,7 +1553,17 @@ async fn drive_attach(
             }
             drop(watchdog);
 
-            match recover_attach(&ctx, &watch, &probes, &pending, &cursor, &mut pumps).await {
+            match recover_attach(
+                &ctx,
+                leg_survived,
+                &watch,
+                &probes,
+                &pending,
+                &cursor,
+                &mut pumps,
+            )
+            .await
+            {
                 Recovery::SameLeg => {
                     // Migrated: the connection, both streams and every
                     // cursor are exactly as they were. Re-arm the watchdog
@@ -1623,7 +1655,9 @@ async fn read_leg(
 #[allow(clippy::large_enum_variant, reason = "short-lived, moved once")]
 enum Recovery {
     /// The connection survived; carry on with the leg that is already
-    /// running.
+    /// running. Only ever a valid answer to [`LegEnd::PathDead`], because
+    /// it hands the caller back the very reader and writer it came in
+    /// with.
     SameLeg,
     /// A new connection and a resumed attach.
     NewLeg(Session, crate::client::Attached),
@@ -1641,8 +1675,15 @@ enum Recovery {
 /// Every attempt is bounded by [`REDIAL_DEADLINE`] and recorded on
 /// `qsh::recovery` by [`recover`] itself, so a failed attempt is a campaign
 /// datapoint rather than a silence.
+///
+/// `leg_survived` says whether the old leg's streams are still worth
+/// keeping ([`LegEnd::leg_survived`]). When they are not, the migration
+/// half is skipped outright: probing the connection would answer "alive"
+/// and return [`Recovery::SameLeg`], which is a broken reader handed back
+/// to a caller that will fail on it again with no backoff.
 async fn recover_attach(
     ctx: &Arc<AttachContext>,
+    leg_survived: bool,
     watch: &PathWatch,
     probes: &Arc<tokio::sync::Notify>,
     pending: &Arc<std::sync::Mutex<PendingInput>>,
@@ -1671,8 +1712,9 @@ async fn recover_attach(
         }
         // Only the first attempt still has a live leg behind it, so only
         // the first can migrate: after a re-dial has been attempted the
-        // old connection and its control stream are gone.
-        let live_leg = attempt == 0 && in_flight.is_none();
+        // old connection and its control stream are gone. And only a leg
+        // whose streams outlived the failure can be kept at all.
+        let live_leg = leg_survived && attempt == 0 && in_flight.is_none();
         let binder = ctx.link.endpoint();
         let migration = live_leg && ctx.recovery.migration;
         let last_output_seq = lock(cursor).last_seq();
@@ -2381,6 +2423,31 @@ mod tests {
         // The message names the limit, so a user who pasted too much can
         // tell this from a host that ran out of memory.
         assert!(mapped.message.contains("un-acked"), "{:?}", mapped.message);
+    }
+
+    /// Migration is an answer to a *path* that died, never to a stream
+    /// that broke. The distinction is load-bearing: `probe_alive` asks the
+    /// connection, and a host that resets `SESSION_DATA` on a live
+    /// connection (`RESET_CODE_SESSION_CONFLICT`, `RESET_CODE_BAD_HEADER`)
+    /// still answers `Ping`. Classifying that as migratable returns
+    /// `Recovery::SameLeg` with the same broken reader, which the driver
+    /// re-reads with zero backoff — a hot loop that emits a `migrated`
+    /// record per turn and never tells the frontend anything.
+    #[test]
+    fn a_broken_stream_is_never_migratable_however_healthy_the_connection() {
+        assert!(
+            LegEnd::PathDead.leg_survived(),
+            "a dead path leaves usable streams behind; that is what migration rescues"
+        );
+        assert!(
+            !LegEnd::Broken(ClientError::Protocol("reset".into())).leg_survived(),
+            "a broken data stream must be rebuilt, not migrated onto"
+        );
+        // The two endings that never reach recovery at all are still
+        // classified conservatively, so a future caller cannot read a
+        // survival out of them.
+        assert!(!LegEnd::Ended.leg_survived());
+        assert!(!LegEnd::Gone.leg_survived());
     }
 
     /// A detach that lands mid-recovery is the user's own doing, so it ends
