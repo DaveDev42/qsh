@@ -14,6 +14,13 @@
 
 set -euo pipefail
 
+# nmcli's radio state and device-status strings are localized, and `-t` does not
+# force a C locale. Without this, the ORIGINAL_RADIO capture below never matches
+# `enabled` on a non-English desktop and the EXIT trap would turn the radio OFF
+# on a machine that started with it on — the exact opposite of the restore this
+# script promises.
+export LC_ALL=C
+
 PROGRAM=${0##*/}
 
 # --- defaults ---------------------------------------------------------------
@@ -120,6 +127,7 @@ if ! printf '%s\n' "$DEVICES" | awk -F: '{ print $1 }' | grep -Fxq "$WIFI_IFACE"
     exit 3
 fi
 
+TETHER_STATE=""
 if [ -n "$TETHER_IFACE" ]; then
     if ! printf '%s\n' "$DEVICES" | awk -F: '{ print $1 }' | grep -Fxq "$TETHER_IFACE"; then
         log "$PROGRAM: no such device: ${TETHER_IFACE}"
@@ -127,13 +135,42 @@ if [ -n "$TETHER_IFACE" ]; then
         printf '%s\n' "$DEVICES" | sed 's/^/  - /' >&2
         exit 3
     fi
+    TETHER_STATE=$(nmcli -t -f DEVICE,STATE device status 2>/dev/null |
+        awk -F: -v dev="$TETHER_IFACE" '$1 == dev { print $2; exit }')
+    if [ "$TETHER_STATE" != "connected" ]; then
+        log "$PROGRAM: WARNING: tether device ${TETHER_IFACE} is '${TETHER_STATE:-unknown}', not connected."
+        log "$PROGRAM: WARNING: if it cannot carry traffic, every transition fails for"
+        log "$PROGRAM: WARNING: environmental reasons and the campaign measures nothing."
+    fi
+else
+    log "$PROGRAM: WARNING: no --tether-iface given, so nothing verified that an"
+    log "$PROGRAM: WARNING: alternate path exists. With Wi-Fi down and no tether the"
+    log "$PROGRAM: WARNING: run produces 20/20 'failed' that looks like a qsh defect."
+    log "$PROGRAM: WARNING: Pass --tether-iface, and confirm reachability with Wi-Fi off first."
 fi
 
-ORIGINAL_RADIO=$(nmcli -t radio wifi 2>/dev/null || printf 'enabled')
+# Default to `enabled` on an empty or unrecognized read: guessing "it was on"
+# costs a redundant `radio wifi on`, guessing "it was off" leaves the operator
+# with no network.
+ORIGINAL_RADIO=$(nmcli -t radio wifi 2>/dev/null || true)
+case "$ORIGINAL_RADIO" in
+    enabled|disabled) ;;
+    *) log "$PROGRAM: unrecognized radio state '${ORIGINAL_RADIO}'; assuming enabled for restore"
+       ORIGINAL_RADIO="enabled" ;;
+esac
+
+# Finding 5's analogue: only reconnect the device on exit if it was connected at
+# startup and a disconnect actually ran.
+ORIGINAL_WIFI_DEVICE_STATE=$(nmcli -t -f DEVICE,STATE device status 2>/dev/null |
+    awk -F: -v dev="$WIFI_IFACE" '$1 == dev { print $2; exit }')
 
 # --- execution helpers ------------------------------------------------------
 TRANSITIONS=0
 RESTORED=0
+# Set before the first down-command is issued, so restore knows the link was
+# touched even if an interrupt lands mid-command (TRANSITIONS only advances
+# after the command returns, so it cannot answer that question).
+DOWN_ISSUED=0
 
 run() {
     if [ "$DRY_RUN" -eq 1 ]; then
@@ -154,14 +191,18 @@ pause() {
 }
 
 record() {
-    local run=$1 direction=$2 t0=$3 t1=$4 line
-    line=$(printf '{"mobility":"switch","platform":"linux","run":%s,"direction":"%s","method":"%s","switch_started_ms":%s,"switch_issued_ms":%s,"at":"%s"}' \
-        "$run" "$direction" "$METHOD" "$t0" "$t1" "$(now_iso)")
+    local run=$1 direction=$2 t0=$3 t1=$4 line seq
+    # `transition` is the monotonic 1-based transition number and is the
+    # campaign table's `run` column (one row = one transition); `run` is the
+    # round trip. See switch-macos.sh for the same note.
+    seq=$((TRANSITIONS + 1))
+    line=$(printf '{"mobility":"switch","platform":"linux","transition":%s,"run":%s,"direction":"%s","method":"%s","switch_started_ms":%s,"switch_issued_ms":%s,"at":"%s"}' \
+        "$seq" "$run" "$direction" "$METHOD" "$t0" "$t1" "$(now_iso)")
     printf '%s\n' "$line"
     if [ -n "$LOG_FILE" ] && [ "$DRY_RUN" -eq 0 ]; then
         printf '%s\n' "$line" >>"$LOG_FILE"
     fi
-    TRANSITIONS=$((TRANSITIONS + 1))
+    TRANSITIONS=$seq
 }
 
 wifi_up() {
@@ -172,6 +213,7 @@ wifi_up() {
 }
 
 wifi_down() {
+    DOWN_ISSUED=1
     case "$METHOD" in
         radio) run nmcli radio wifi off ;;
         device) run nmcli device disconnect "$WIFI_IFACE" ;;
@@ -191,7 +233,12 @@ restore() {
         enabled) nmcli radio wifi on || log "$PROGRAM: restore failed" ;;
         *) nmcli radio wifi off || log "$PROGRAM: restore failed" ;;
     esac
-    if [ "$METHOD" = "device" ] && [ "$ORIGINAL_RADIO" = "enabled" ]; then
+    # `device connect` can prompt for authentication on some distributions, so
+    # it fires only if a disconnect was actually issued (DOWN_ISSUED is set
+    # *before* the command, so an interrupt mid-command still restores) and the
+    # device was connected when the script started.
+    if [ "$METHOD" = "device" ] && [ "$DOWN_ISSUED" -eq 1 ] &&
+        [ "$ORIGINAL_WIFI_DEVICE_STATE" = "connected" ]; then
         nmcli device connect "$WIFI_IFACE" || log "$PROGRAM: device restore failed"
     fi
 }
@@ -204,6 +251,9 @@ trap on_signal INT TERM
 # --- preflight summary ------------------------------------------------------
 log "$PROGRAM: wifi_iface=${WIFI_IFACE} tether_iface=${TETHER_IFACE:-<unset>} method=${METHOD}"
 log "$PROGRAM: iterations=${ITERATIONS} settle=${SETTLE_SECONDS}s original_radio=${ORIGINAL_RADIO}"
+if [ "$METHOD" = "device" ]; then
+    log "$PROGRAM: original ${WIFI_IFACE} state=${ORIGINAL_WIFI_DEVICE_STATE:-unknown} (reconnected on exit only if 'connected')"
+fi
 if [ "$DRY_RUN" -eq 1 ]; then
     log "$PROGRAM: DRY RUN — no interface will be touched"
 else

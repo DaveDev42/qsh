@@ -57,7 +57,10 @@ proxy(`docs/design/testing.md` L4)는 PR 회귀 게이트이고, 실제 인터�
 6. **테더링이 실제로 대안 경로여야 한다.** 전환 전에 Wi-Fi를 끈 상태에서 호스트에
    도달되는지 한 번 손으로 확인한다(`qsh sessions campaign-host --json`). 폰이
    caller-side NAT 뒤라 호스트에 닿지 못하면 모든 회차가 `failed`로 나오고, 그것은
-   qsh가 아니라 시험 환경의 결함이다 — 비고란에 그렇게 적는다.
+   qsh가 아니라 시험 환경의 결함이다 — 비고란에 그렇게 적는다. 스크립트도 여기를
+   거든다: macOS 스크립트는 테더 service가 *비활성*이면 exit 3으로 거부하고, Linux
+   스크립트는 테더 device가 `connected`가 아니거나 `--tether-iface`가 아예 없으면
+   경고를 찍는다. 다만 실제 도달성은 여전히 사람이 확인해야 한다.
 
 ## 3. 사전 정의된 합격/불합격 기준 (실행 **전에** 고정)
 
@@ -80,12 +83,20 @@ proxy(`docs/design/testing.md` L4)는 PR 회귀 게이트이고, 실제 인터�
   **표의 recovery 열에는 `failed`로 적고** 비고에 원 분류와 실제 ms를 남긴다.
   `scripts/mobility/summarize.py`는 같은 회차를 `over_budget`으로 세며, 성공 수에
   절대 합산하지 않는다.
+- **`time_to_recovery_ms`가 없거나 숫자가 아닌 복구 회차는 `unverified`다.** 계약상
+  이 필드는 항상 존재하는 `u64`이므로(qsh-core `RecoveryReport::to_json_line`),
+  값이 없다는 것은 캡처/파싱이 실제 emitter와 어긋났다는 뜻이다. 측정되지 않은
+  복구는 예산 내 복구가 아니다 — `summarize.py`는 이를 `unverified`로 따로 세고
+  `within_budget`에도 그 비율의 분자에도 넣지 않는다. `unverified`가 0이 아니면
+  **먼저 캡처를 고치고 다시 돌린다**. 그 상태의 수치는 판정 근거가 아니다.
 - **gap**: `session.gap` event가 관측되면 `gap?` 열에 `yes`. gap은 그 자체로
   불합격이 아니지만(replay ring 밖으로 밀린 정상 동작) 회차의 성격이 다르므로
   반드시 기록한다. gap 없이 바이트가 유실됐다면 그것은 SC4 위반이며 캠페인 결과가
   아니라 **버그 리포트**다.
 - **한 회차 = 한 전환**(한 방향). 20행 = 20회 전환이며, 스크립트의 `--iterations 10`이
-  왕복 10회 = 전환 20회를 만든다.
+  왕복 10회 = 전환 20회를 만든다. 표의 `run` 열은 스크립트 기록줄의 **`transition`**
+  필드(1부터 단조 증가, 전환 1회당 1)다. 기록줄의 `run` 필드는 *왕복* 번호(1..10)로
+  다른 값이니 혼동하지 않는다.
 
 ## 4. 조작 절차
 
@@ -97,7 +108,21 @@ cd <repo>
 
 # 2. 대화형 세션을 열고 stderr를 캡처한다. 기본 verbosity, --quiet 금지.
 #    session_ref는 stderr 첫 줄들과 `qsh sessions` 로 확인해 표에 적는다.
+#    recovery 줄에는 시각 필드가 없다(RecoveryReport::to_json_line은
+#    recovery/time_to_recovery_ms/session_ref 세 필드뿐). 시각으로 대응시키고
+#    싶으면 캡처 자체에 타임스탬프를 붙인다 — summarize.py는 줄 앞의 접두사를
+#    건너뛰고 첫 '{' 부터 파싱하므로 아래 형태 그대로 집계된다.
 qsh dave@campaign-host 2> mobility-stderr.log
+#    (선택) 타임스탬프를 붙여 캡처하려면:
+#    qsh dave@campaign-host 2> >(while IFS= read -r l; do \
+#        printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$l"; done > mobility-stderr.log)
+
+# 2b. gap 관측 채널. `session.gap`은 대화형 TUI에 인라인 주석으로만 뜬다
+#     ("output was dropped; the session resumed at offset N") — stderr 캡처에도
+#     summarize.py에도 나오지 않는다. gap? 열을 채우려면 세션 자체를 기록해야
+#     한다: `script -q mobility-tty.log qsh dave@campaign-host 2> mobility-stderr.log`
+#     (또는 tmux `pipe-pane`). 나중에:
+#         grep -n "output was dropped" mobility-tty.log
 
 # 3. 다른 터미널에서, 세션 안에서 확인 가능한 부하를 걸어 둔다.
 #    (세션 안에서) while true; do date -u +%H:%M:%S.%3N; sleep 0.2; done
@@ -115,8 +140,13 @@ scripts/mobility/switch-linux.sh --iterations 10 --settle 8 --log mobility-switc
 scripts/mobility/summarize.py mobility-stderr.log
 scripts/mobility/summarize.py --json mobility-stderr.log > mobility-summary.json
 
-# 6. §6 표를 채우고 §7 요약을 적는다. mobility-switch.log 의 run/direction과
-#    stderr 줄의 시각을 맞춰 회차를 대응시킨다.
+# 6. §6 표를 채우고 §7 요약을 적는다. 대응은 **순서(ordinal)**로 한다:
+#    n번째 qsh::recovery 줄 = mobility-switch.log 의 transition=n 기록줄.
+#    (recovery 줄 자체에는 시각이 없다. 2단계에서 타임스탬프를 붙여 캡처했다면
+#     switch_issued_ms 와 교차 검증할 수 있으나, 기준은 순서다.)
+#    한 전환이 recovery 줄을 하나도 만들지 않았다면 그 자체가 관측이다 —
+#    해당 행 recovery=failed, 비고에 "no telemetry line"이라고 적고, 이후
+#    행들의 순서 대응이 한 칸 밀리지 않게 여기서 다시 맞춘다.
 ```
 
 주의:
@@ -172,13 +202,17 @@ scripts/mobility/summarize.py --json mobility-stderr.log > mobility-summary.json
 
 열 정의:
 
-- **run** — 1..20, 전환 1회당 1행.
+- **run** — 1..20, 전환 1회당 1행. 스크립트 기록줄의 `transition` 필드와 같은 값
+  (기록줄의 `run` 필드는 왕복 번호이므로 다른 값이다).
 - **platform** — `macos` / `linux` (전환을 수행한 클라이언트).
 - **direction** — `wifi->tether` / `tether->wifi`.
 - **recovery** — `migrated` / `resumed` / `failed` (§3의 최종 분류).
 - **time_to_recovery_ms** — 텔레메트리 원값. `failed`로 텔레메트리가 값을 주지
   않은 경우 `-`.
-- **gap?** — `session.gap` event 관측 여부 (`yes` / `no`).
+- **gap?** — `session.gap` 관측 여부 (`yes` / `no`). 관측 채널은 §4 2b의 TTY
+  기록뿐이다 — TUI 인라인 주석("output was dropped; the session resumed at
+  offset N"). TTY를 기록하지 않았다면 이 열은 `-`로 두고 비고에 "not captured"라고
+  적는다. 빈칸이나 `no`로 채우지 않는다.
 - **notes** — 예산 초과 시 원 분류와 ms, 세션 재생성, 환경 이상 등.
 
 ## 7. 요약 (표가 채워진 뒤 작성 — **아직 미작성**)
@@ -193,6 +227,7 @@ scripts/mobility/summarize.py --json mobility-stderr.log > mobility-summary.json
 | `resumed` | _(미기재)_ |
 | `failed` | _(미기재)_ |
 | 예산(2000 ms) 내 복구 비율 | _(미기재)_ |
+| `unverified` (측정 불가) | _(미기재, 0이 아니면 캡처 결함)_ |
 | time-to-recovery p50 / p90 / p95 / max (ms) | _(미기재)_ |
 | gap 발생 회차 수 | _(미기재)_ |
 
