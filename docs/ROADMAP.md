@@ -2,7 +2,7 @@
 
 **상태:** 확정 (구현과 어긋나는 내용을 발견하면 이 문서를 먼저 갱신한다)
 **작성일:** 2026-08-17
-**현재 위치:** M1 완료 (2026-08-18) → **다음은 M2**
+**현재 위치:** M2 완료 (2026-08-19) → **다음은 M3**
 
 이 문서는 P0 MVP까지의 canonical 마일스톤 기록이다. 각 마일스톤의 "수용 기준"이 곧 그 마일스톤의 **완료 정의(Definition of Done)** 다 — 수용 기준을 통과하는 테스트/시연 없이는 마일스톤을 닫지 않는다. SC 번호는 PRD §15 성공 기준의 순번이다 (SC1: 신규 두 장비 5분 내 연결, SC2: 한 명령 접속, SC3: 네트워크 전환 ≥95% 유지/resume, SC4: resume 가능한 단절에서 output 무손실, SC5: client crash가 remote PTY를 죽이지 않음, SC6: 모든 privileged op의 ACL 추적성, SC7: 공개 beta 전 독립 보안 리뷰).
 
@@ -41,19 +41,19 @@
 - **착수 시 읽을 문서:** `docs/design/protocol.md`(ALPN, frame, verifier, keep-alive), `docs/design/architecture.md`(ops layer, identity/keystore, config 경로), `docs/design/testing.md`(L0/L1/L3/L6), `docs/CLI.md` §2–§4·§6.8과 init/trust 계약, ADR-0001/0002/0006.
 - **크기:** 3ew
 
-### M2 — 세션 broker + PTY + resume (다음)
+### M2 — 세션 broker + PTY + resume ✅ 완료 (2026-08-19)
 
 - **범위:** (a) headless broker — 세션 registry, ReplayRing(누적 byte offset sequence), writer lease, resume TTL, gap 산출 + `session.open/get/read/write/resize/close`·`session.list` op, (b) POSIX PTY(setsid, controlling tty, resize, signal, reaping, login shell env) + 대화형 TUI(`qsh user@host`, `qsh attach`, detach key), (c) connection migration(`rebind`) + resume(`session.attach` + resume token + last_seq) + replay/dedup + `session.gap` 이벤트. **chaos proxy 하네스**(`docs/design/testing.md` L4)와 recovery 텔레메트리(`recovery ∈ {migrated,resumed,failed}` + time-to-recovery)를 같이 구축.
 - **명시적 out:** reverse, 터널, ACL 정책 파일, multi-attach, local echo prediction.
-- **수용 기준 (DoD):**
-  - Property test: 임의의 append/read interleaving에서 gap 이벤트가 없는 한 반환 바이트 연결 == 원본 stream suffix (byte-identical, 무손실·무중복) — SC4의 property 표현.
-  - `qsh user@host`로 실제 셸 사용 가능 — bash/zsh, vim, tmux, `claude`가 동작하고 resize 전파.
-  - **클라이언트를 `yes` 실행 중 `kill -9` → reattach → last_seq부터 이어붙인 결과가 기준 stream과 byte-identical** (SC4). remote PTY와 자식 프로세스는 클라이언트 사망에 생존 (SC5).
-  - Chaos proxy `repath()` → connection migration으로 세션 무중단; `sever()` → 2초 내 재dial + resume.
-  - 실기기 Wi-Fi↔테더링 전환 20회 수동 캠페인, recovery 필드 기록 (SC3 조기 측정).
+- **수용 기준 (DoD, 달성):**
+  - Property test: 임의의 append/read interleaving에서 gap 이벤트가 없는 한 반환 바이트 연결 == 원본 stream suffix (byte-identical, 무손실·무중복) — SC4의 property 표현. (`crates/qsh-core/src/broker/ring.rs`의 naive-`Vec`-oracle property + stateful follower property.)
+  - `qsh user@host`로 실제 셸 사용 가능 — bash/zsh, vim, tmux, `claude`가 동작하고 resize 전파. (`crates/qsh-cli/tests/tui_expect.rs` strict 모드 17/17 — 2026-08-19 수동 certify가 5종 정본, CI `acceptance` job이 bash/zsh/vim/tmux 상시 게이트.)
+  - **클라이언트를 `yes` 실행 중 `kill -9` → reattach → last_seq부터 이어붙인 결과가 기준 stream과 byte-identical** (SC4). remote PTY와 자식 프로세스는 클라이언트 사망에 생존 (SC5). (`crates/qsh-cli/tests/session_kill9.rs` — 실제 attach 프로세스 SIGKILL, ring 밖 producer-corpus oracle 포함.)
+  - Chaos proxy `repath()` → connection migration으로 세션 무중단; `sever()` → 2초 내 재dial + resume. (`crates/qsh-cli/tests/attach_recovery.rs` — driver 자신의 `qsh::recovery` 레코드로 단언, `DETECTION_CEILING`으로 감지 예산의 순환 참조 차단.)
+  - 실기기 Wi-Fi↔테더링 전환 20회 수동 캠페인, recovery 필드 기록 (SC3 조기 측정). (2026-08-19 수행, `docs/campaigns/m2-mobility.md` — path 사망 10회 전부 자동 resume·세션 사망 0·gap 0으로 SC4/SC5 실기기 확인; 예산 내 복구 1/10은 Tailscale underlay 재경로(~4–5 s)가 지배 요인으로 M8 백로그 이관, qsh 자체 resume은 233–1076 ms. SC3 판정은 M8 N ≥ 60.)
 - **크기:** 5ew
 
-### M3 — 역방향
+### M3 — 역방향 (다음)
 
 - **범위:** `qsh listen`(controller), `qsh reverse controller`(target, 등록 + heartbeat + 백오프 재접속), `host.reverse` ACL action 검사 지점, reverse host가 `hosts`에 `connection_mode:"reverse"`로 표시, `qsh attach <name>`이 역방향 연결 위에서 동작. 연결 방향/세션 역할 축 실사용.
 - **명시적 out:** relay, NAT traversal, discovery.
