@@ -28,6 +28,7 @@ pub mod session_stream;
 pub mod telemetry;
 pub mod trust;
 
+pub use client::pathwatch::PathWatchConfig;
 pub use config::{Config, Paths, now_rfc3339};
 pub use identity::{Identity, KeyStore, KeyStoreError, LoadedIdentity};
 pub use ops::{

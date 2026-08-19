@@ -27,7 +27,7 @@ use qsh_transport::Dialer;
 
 use crate::client::pathwatch::{PathWatch, PathWatchConfig, watch_path};
 use crate::client::reconnect::{
-    OutputCursor, PathBinder, PendingInput, REDIAL_DEADLINE, Recovered, recover,
+    OutputCursor, PathBinder, PendingInput, REDIAL_DEADLINE, Recovered, ResumeError, recover,
 };
 use crate::client::{AttachEvent, ClientError, ControlIn, Session};
 use crate::ops::exec::{map_client_error, map_dial_error};
@@ -61,20 +61,43 @@ const DETACH_FLUSH: Duration = Duration::from_millis(750);
 /// normal path is bounded by the driver, not by this fallback.
 const DETACH_FLUSH_GRACE: Duration = Duration::from_millis(1_000);
 
-/// How long a migration probe waits for *any* answer from the host before
-/// it is called a failure.
+/// Ceiling on how long a migration probe waits for *any* answer from the
+/// host before it is called a failure.
 ///
-/// Deliberately small: it is spent out of the same
-/// [`REDIAL_DEADLINE`] budget the re-dial needs, and migration is only ever
-/// a latency optimization (`docs/design/protocol.md` §2). A probe that has
-/// to wait longer than this has already cost more than it can save.
-const MIGRATION_PROBE: Duration = Duration::from_millis(300);
+/// Deliberately small: it is spent out of the same [`REDIAL_DEADLINE`]
+/// budget the re-dial needs, and migration is only ever a latency
+/// optimization (`docs/design/protocol.md` §2). A probe that has to wait
+/// longer than this has already cost more than it can save.
+const MIGRATION_PROBE_MAX: Duration = Duration::from_millis(300);
+
+/// Floor on the same, so a fast path still tolerates a scheduling hiccup.
+const MIGRATION_PROBE_MIN: Duration = Duration::from_millis(100);
+
+/// What a migration probe on a path with this smoothed RTT is worth
+/// waiting.
+///
+/// The question is "did one frame get there and back", so the honest
+/// budget is a round trip with slack — not a constant. Fixing it at
+/// [`MIGRATION_PROBE_MAX`] spent 600 ms of a 2 s budget on a LAN, where
+/// the answer arrives in under a millisecond or not at all; scaling it
+/// gives that time back to the re-dial, which is the part that actually
+/// needs it (`docs/design/testing.md` L4).
+fn migration_probe_budget(rtt: Duration) -> Duration {
+    rtt.saturating_mul(2)
+        .clamp(MIGRATION_PROBE_MIN, MIGRATION_PROBE_MAX)
+}
 
 /// How long the supervisor gives a leg's pumps to stop of their own accord
-/// before aborting them. They stop between commands, so this is only ever
-/// spent on a pump parked mid-write on a dead connection — which has
-/// already recorded its bytes as un-acked and loses nothing to an abort.
-const PUMP_STOP_GRACE: Duration = Duration::from_millis(250);
+/// before aborting them.
+///
+/// Short on purpose, because it is spent inside the recovery deadline. The
+/// window it protects is not a network round trip: a pump parked
+/// mid-`send_input` on a dead connection is never going to return, and
+/// aborting it loses nothing (its bytes were recorded as un-acked *before*
+/// the write). The only thing worth waiting for is the handful of
+/// microseconds between taking a command off the queue and recording it,
+/// plus enough slack for the task to be scheduled at all.
+const PUMP_STOP_GRACE: Duration = Duration::from_millis(50);
 
 /// How a live attach survives a dead path (`PLAN.md` M2 Step 7 (a)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -603,6 +626,7 @@ impl Ops {
             paths: self.paths.clone(),
             no_steal: req.no_steal,
             link: conn.link.clone(),
+            window: Arc::new(std::sync::Mutex::new(None)),
             recovery: self.recovery,
             finished: finished.clone(),
         });
@@ -610,9 +634,9 @@ impl Ops {
             .runtime()
             .spawn(drive_attach(ctx, session, attached, command_rx, events_tx));
         Ok(SessionAttachStream {
+            stop: AttachStop { finished, driver },
             conn,
             store: ResumeStore::new(&self.paths),
-            driver,
             events: events_rx,
             commands,
             session_ref,
@@ -620,7 +644,6 @@ impl Ops {
             writer_lease,
             renewal: resume_ttl.map(|ttl| RenewalSchedule::new(ttl, std::time::Instant::now())),
             expires_at,
-            finished,
         })
     }
 
@@ -961,10 +984,16 @@ enum AttachCommand {
 /// The connection, its runtime and the driver task are owned here, so
 /// dropping this ends the attach.
 pub struct SessionAttachStream {
+    /// **Declared first on purpose**: fields drop in declaration order, so
+    /// this marks the attach deliberately over and stops the driver before
+    /// the connection underneath it goes away. Without it, dropping a
+    /// stream without calling [`close`](Self::close) closes the connection
+    /// with `finished` still false, and the driver reads its own teardown
+    /// as a path death and starts re-dialing.
+    stop: AttachStop,
     conn: Connected,
     /// See [`SessionReader::store`].
     store: ResumeStore,
-    driver: tokio::task::JoinHandle<()>,
     events: tokio::sync::mpsc::Receiver<Result<SessionEvent, OpError>>,
     commands: tokio::sync::mpsc::Sender<AttachCommand>,
     session_ref: String,
@@ -974,9 +1003,24 @@ pub struct SessionAttachStream {
     /// host's window did not parse and there is nothing to schedule from.
     renewal: Option<RenewalSchedule>,
     expires_at: String,
+}
+
+/// Ends an attach the same way whether it was closed or merely dropped:
+/// mark it deliberately over, then stop the driver. See
+/// [`SessionAttachStream::stop`].
+struct AttachStop {
     /// Shared with the driver: set once this attach is deliberately over,
     /// so a connection the frontend closed is never recovered from.
     finished: Arc<std::sync::atomic::AtomicBool>,
+    driver: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for AttachStop {
+    fn drop(&mut self) {
+        self.finished
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.driver.abort();
+    }
 }
 
 /// When a live attach owes its stored resume entry a fresh `expires_at`.
@@ -1051,7 +1095,16 @@ impl SessionAttachStream {
         self.writer_lease
     }
 
-    /// When the session's resume window ends (RFC 3339).
+    /// When the session's resume window ends (RFC 3339), as the host
+    /// reported it when this attach was **first** established.
+    ///
+    /// A snapshot, not a live value: a resume underneath this stream gets a
+    /// fresh `expires_at` from the host and writes it straight to the
+    /// stored credential (`reattach`), which is the copy that decides
+    /// whether a later attach can resume. This one is not re-read, because
+    /// the TTL the host grants is a constant of its configuration; if that
+    /// ever stops being true, the driver has to publish the new window back
+    /// here and into [`RenewalSchedule::ttl`] together.
     pub fn expires_at(&self) -> &str {
         &self.expires_at
     }
@@ -1136,16 +1189,19 @@ impl SessionAttachStream {
         AttachHandle {
             commands: self.commands.clone(),
             link: self.conn.link.clone(),
-            finished: self.finished.clone(),
+            finished: self.stop.finished.clone(),
         }
     }
 
     /// Stop the attach and close the connection.
     pub fn close(self) {
-        self.finished
-            .store(true, std::sync::atomic::Ordering::Release);
-        self.driver.abort();
-        self.conn.close();
+        // Destructured rather than dropped whole so the ordering is
+        // explicit: `stop` marks the attach finished and aborts the driver
+        // *before* `close` drains and tears down the connection, which is
+        // the same order the drop glue produces.
+        let Self { stop, conn, .. } = self;
+        drop(stop);
+        conn.close();
     }
 }
 
@@ -1273,6 +1329,14 @@ struct AttachContext {
     no_steal: bool,
     /// The connection the attach is riding; a resume swaps it in place.
     link: Link,
+    /// The last window size the frontend asked for, if it ever did.
+    ///
+    /// A `Resize` is written straight through and is not part of the
+    /// un-acked input axis, so one that lands while the path is dead is
+    /// written to a stream nobody is reading. Remembering it lets the
+    /// resume re-assert the geometry instead of leaving the remote PTY on
+    /// a stale size until the user happens to resize again.
+    window: Arc<std::sync::Mutex<Option<(u16, u16)>>>,
     recovery: RecoveryConfig,
     /// Set once the frontend deliberately ended the attach, so a connection
     /// **we** closed is never mistaken for a path that died and recovered
@@ -1306,29 +1370,42 @@ enum LegEnd {
 /// for a pump parked mid-write on a connection that is already dead — by
 /// then its bytes are recorded as un-acked and the resume retransmits them.
 struct LegPumps {
-    input: Option<(
-        tokio::sync::oneshot::Sender<()>,
-        tokio::task::JoinHandle<()>,
-    )>,
-    control: Option<(
-        tokio::sync::oneshot::Sender<()>,
-        tokio::task::JoinHandle<()>,
-    )>,
+    input: Option<Pump>,
+    control: Option<Pump>,
+}
+
+/// One pump: the signal that asks it to stop, and its handle.
+struct Pump {
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
+    handle: tokio::task::JoinHandle<()>,
 }
 
 impl LegPumps {
     async fn stop(&mut self) {
         for slot in [&mut self.input, &mut self.control] {
-            let Some((stop, mut handle)) = slot.take() else {
-                continue;
-            };
-            let _ = stop.send(());
-            if tokio::time::timeout(PUMP_STOP_GRACE, &mut handle)
-                .await
-                .is_err()
             {
-                handle.abort();
+                let Some(pump) = slot.as_mut() else {
+                    continue;
+                };
+                if let Some(stop) = pump.stop.take() {
+                    let _ = stop.send(());
+                }
+                // Awaited **in place**, with the handle still in the slot.
+                // This future runs inside the recovery deadline and can be
+                // cancelled here, and a dropped `JoinHandle` *detaches* its
+                // task rather than aborting it — a pump left parked
+                // mid-write on the dead connection would keep the shared
+                // command queue locked, so the next leg's input pump could
+                // not start. Leaving it in the slot means the retry, and
+                // `Drop`, can still abort it.
+                if tokio::time::timeout(PUMP_STOP_GRACE, &mut pump.handle)
+                    .await
+                    .is_err()
+                {
+                    pump.handle.abort();
+                }
             }
+            *slot = None;
         }
     }
 }
@@ -1336,8 +1413,8 @@ impl LegPumps {
 impl Drop for LegPumps {
     fn drop(&mut self) {
         for slot in [&mut self.input, &mut self.control] {
-            if let Some((_, handle)) = slot.take() {
-                handle.abort();
+            if let Some(pump) = slot.take() {
+                pump.handle.abort();
             }
         }
     }
@@ -1394,20 +1471,21 @@ async fn drive_attach(
         let (input_stop, input_stop_rx) = tokio::sync::oneshot::channel();
         let (ctl_stop, ctl_stop_rx) = tokio::sync::oneshot::channel();
         let mut pumps = LegPumps {
-            input: Some((
-                input_stop,
-                tokio::spawn(pump_attach_input(
+            input: Some(Pump {
+                stop: Some(input_stop),
+                handle: tokio::spawn(pump_attach_input(
                     writer,
                     commands.clone(),
                     pending.clone(),
                     watch.clone(),
-                    ctx.finished.clone(),
+                    ctx.clone(),
+                    events.clone(),
                     input_stop_rx,
                 )),
-            )),
-            control: Some((
-                ctl_stop,
-                tokio::spawn(pump_attach_control(
+            }),
+            control: Some(Pump {
+                stop: Some(ctl_stop),
+                handle: tokio::spawn(pump_attach_control(
                     session,
                     ctx.session_ref.clone(),
                     events.clone(),
@@ -1415,7 +1493,7 @@ async fn drive_attach(
                     probes.clone(),
                     ctl_stop_rx,
                 )),
-            )),
+            }),
         };
         let mut watchdog = AbortOnDrop(tokio::spawn(watch_path(
             ctx.link.connection(),
@@ -1433,8 +1511,8 @@ async fn drive_attach(
                     // stream — give it a bounded moment to arrive rather
                     // than racing it to the exit (CLI.md §6.4 makes it the
                     // last event).
-                    if let Some((_, handle)) = pumps.control.as_mut() {
-                        let _ = tokio::time::timeout(ATTACH_CONTROL_DRAIN, handle).await;
+                    if let Some(pump) = pumps.control.as_mut() {
+                        let _ = tokio::time::timeout(ATTACH_CONTROL_DRAIN, &mut pump.handle).await;
                     }
                     return;
                 }
@@ -1467,10 +1545,19 @@ async fn drive_attach(
                     continue;
                 }
                 Recovery::NewLeg(new_session, new_attached) => {
+                    // Last check before the new leg is installed: a detach
+                    // that raced the rebuild must not be answered with a
+                    // fresh leg on a session the user has already left.
+                    if ctx.finished() {
+                        return;
+                    }
                     session = new_session;
                     attached = new_attached;
                     continue 'leg;
                 }
+                // The frontend ended the attach while we were recovering
+                // it. Nothing to report: this is the user's own doing.
+                Recovery::Abandoned => return,
                 Recovery::Failed(err) => {
                     let _ = events.send(Err(err)).await;
                     return;
@@ -1505,8 +1592,10 @@ async fn read_leg(
             Ok(None) => return LegEnd::Ended,
             Err(err) => return LegEnd::Broken(err),
         };
-        // Anything at all from the host proves the path carries packets.
-        watch.inbound();
+        // Anything at all from the host proves the path carries packets —
+        // and a session that is producing output is a session in use, so
+        // this is traffic rather than bare liveness.
+        watch.traffic();
         if let AttachEvent::InputAck { acked_input_seq } = &event {
             lock(pending).ack(*acked_input_seq);
         }
@@ -1538,6 +1627,10 @@ enum Recovery {
     SameLeg,
     /// A new connection and a resumed attach.
     NewLeg(Session, crate::client::Attached),
+    /// The frontend ended the attach while the recovery was running, so
+    /// there is nothing left to recover *to*. Not a failure: nobody is
+    /// owed an error for a detach they asked for.
+    Abandoned,
     /// Nothing worked inside the budget.
     Failed(OpError),
 }
@@ -1557,18 +1650,33 @@ async fn recover_attach(
     pumps: &mut LegPumps,
 ) -> Recovery {
     let mut last: Option<OpError> = None;
+    // A redemption a previous attempt's deadline walked away from. It is
+    // still running, it holds the session's only credential, and the next
+    // attempt adopts it rather than starting a second redemption of the
+    // same single-use token. See [`spawn_reattach`].
+    let mut in_flight: Option<ReattachTask> = None;
     for attempt in 0..ctx.recovery.attempts.max(1) {
+        // Re-checked on every attempt, not once before the loop: a `~d`
+        // that lands mid-recovery must end the attach, not be answered
+        // with a fresh connection to the session the user just left.
+        if ctx.finished() {
+            return Recovery::Abandoned;
+        }
         let backoff = RecoveryConfig::backoff(attempt);
         if !backoff.is_zero() {
             tokio::time::sleep(backoff).await;
         }
+        if ctx.finished() {
+            return Recovery::Abandoned;
+        }
         // Only the first attempt still has a live leg behind it, so only
         // the first can migrate: after a re-dial has been attempted the
         // old connection and its control stream are gone.
-        let live_leg = attempt == 0;
+        let live_leg = attempt == 0 && in_flight.is_none();
         let binder = ctx.link.endpoint();
         let migration = live_leg && ctx.recovery.migration;
         let last_output_seq = lock(cursor).last_seq();
+        let task = &mut in_flight;
 
         let outcome = recover(
             &ctx.session_ref,
@@ -1576,14 +1684,31 @@ async fn recover_attach(
             || {
                 let watch = watch.clone();
                 let probes = probes.clone();
-                async move { live_leg && probe_alive(&watch, &probes).await }
+                let rtt = ctx.link.connection().quinn().stats().path.rtt;
+                async move { live_leg && probe_alive(&watch, &probes, rtt).await }
             },
             || async {
                 // Past the point of no return for this leg: stop the pumps
                 // (which is what releases the command queue and the
                 // `Session`) before building a replacement.
                 pumps.stop().await;
-                reattach(ctx, pending, last_output_seq).await
+                let joined = {
+                    let handle = task.get_or_insert_with(|| {
+                        spawn_reattach(ctx.clone(), pending.clone(), last_output_seq)
+                    });
+                    handle.await
+                };
+                // Reached only when the redemption finished, so a
+                // cancellation above leaves the handle in the slot for the
+                // next attempt to adopt.
+                *task = None;
+                match joined {
+                    Ok(result) => result,
+                    Err(err) => Err(ResumeError::Local(OpError::new(
+                        ErrorCode::Internal,
+                        format!("the resume task did not finish: {err}"),
+                    ))),
+                }
             },
         )
         .await;
@@ -1591,7 +1716,12 @@ async fn recover_attach(
         match outcome.outcome {
             Ok(Recovered::Migrated) => return Recovery::SameLeg,
             Ok(Recovered::Resumed(leg)) => return Recovery::NewLeg(leg.0, leg.1),
-            Err(err) => last = Some(map_resume_error(err)),
+            Err(err) => {
+                if ctx.finished() {
+                    return Recovery::Abandoned;
+                }
+                last = Some(map_resume_error(err));
+            }
         }
     }
     Recovery::Failed(last.unwrap_or_else(|| {
@@ -1608,11 +1738,42 @@ async fn recover_attach(
 /// The `Ping` goes out through the control pump, which owns the stream;
 /// the answer is whatever the watchdog next sees as inbound traffic, which
 /// may be the `Pong`, a session event, or a frame of output.
-async fn probe_alive(watch: &PathWatch, probes: &Arc<tokio::sync::Notify>) -> bool {
+async fn probe_alive(watch: &PathWatch, probes: &Arc<tokio::sync::Notify>, rtt: Duration) -> bool {
+    // Subscribed **before** the question is asked. The answer can land on
+    // a runtime worker before this task is polled again, and a
+    // notification edge issued in that window is delivered to nobody — a
+    // connection that genuinely survived would then be written off as
+    // unmigratable and pay for a full resume it did not need.
+    let mut answered = watch.inbound_signal();
     probes.notify_one();
-    tokio::time::timeout(MIGRATION_PROBE, watch.next_inbound())
+    tokio::time::timeout(migration_probe_budget(rtt), answered.changed())
         .await
         .is_ok()
+}
+
+/// A redemption in flight: the [`reattach`] the recovery is waiting on.
+type ReattachTask =
+    tokio::task::JoinHandle<Result<(Session, crate::client::Attached), ResumeError>>;
+
+/// Run [`reattach`] on a task of its own, so the recovery deadline can stop
+/// *waiting* for it without stopping it.
+///
+/// This is not an optimization, it is the difference between a recovered
+/// session and one nobody can ever reach again. The host kills the
+/// presented resume token the instant it mints the successor
+/// (protocol.md §10 "Rotation"), so there is a window — from "the request
+/// is on the wire" to "the successor is on disk" — in which cancelling the
+/// client leaves this device holding a credential the host has already
+/// retired, for a session that is alive and, because attach is
+/// device-bound (`docs/CLI.md` §6.2), that no other device can rescue.
+/// A cancelled `.await` on a `JoinHandle` merely detaches the task, so the
+/// redemption always runs to `store.put`.
+fn spawn_reattach(
+    ctx: Arc<AttachContext>,
+    pending: Arc<std::sync::Mutex<PendingInput>>,
+    last_output_seq: u64,
+) -> ReattachTask {
+    tokio::spawn(async move { reattach(&ctx, &pending, last_output_seq).await })
 }
 
 /// Rebuild a dead attach on a fresh connection: dial, redeem the resume
@@ -1622,7 +1783,13 @@ async fn reattach(
     ctx: &Arc<AttachContext>,
     pending: &Arc<std::sync::Mutex<PendingInput>>,
     last_output_seq: u64,
-) -> Result<(Session, crate::client::Attached), crate::client::reconnect::ResumeError> {
+) -> Result<(Session, crate::client::Attached), ResumeError> {
+    // Cheapest place to notice a detach that raced the recovery: before a
+    // socket, a handshake or a `session.attach` the host would audit and
+    // answer by moving the writer lease back to a client that has left.
+    if ctx.finished() {
+        return Err(abandoned());
+    }
     let (endpoint, connection, mut session) = dial_peer(&ctx.target).await?;
     let store = ResumeStore::new(&ctx.paths);
     let Some(peer) = connection.peer_fingerprint().map(|fp| fp.to_string()) else {
@@ -1676,12 +1843,31 @@ async fn reattach(
         return Err(err.into());
     }
     let mut attached = session.open_attach_stream(attached).await?;
+    // A `SIGWINCH` that landed while the path was dead wrote to a stream
+    // nobody was reading, and a resize is not part of the un-acked input
+    // axis, so nothing else would ever retransmit it. Re-assert the
+    // geometry the frontend last asked for before the input replay, so the
+    // shell redraws at the size the terminal is actually at.
+    let window = *lock(&ctx.window);
+    if let Some((cols, rows)) = window {
+        attached.resize(cols, rows).await?;
+    }
     // The host's axis for this attach starts at what it actually applied on
     // the stream we lost, so the tail it never saw is retransmitted — and
     // nothing it *did* see is sent twice (protocol.md §10-5).
     let replay = lock(pending).rebase(attached.input_from)?.to_vec();
     if !replay.is_empty() {
         attached.send_input(&replay).await?;
+    }
+    // Last gate before the new connection becomes *the* connection: a
+    // detach that landed while this was being built must not have its
+    // freshly dialed replacement installed behind it. The successor
+    // credential is already durable, so the session stays attachable — it
+    // is only this leg that is dropped.
+    if ctx.finished() {
+        connection.close(0, b"detached");
+        endpoint.wait_idle().await;
+        return Err(abandoned());
     }
     // Only now, with the new leg working, is the old connection let go.
     let (old_endpoint, old_connection) = ctx.link.replace(endpoint, connection);
@@ -1690,8 +1876,15 @@ async fn reattach(
     Ok((session, attached))
 }
 
-fn map_resume_error(err: crate::client::reconnect::ResumeError) -> OpError {
-    use crate::client::reconnect::ResumeError;
+/// The attach ended under a recovery that was still running.
+fn abandoned() -> ResumeError {
+    ResumeError::Local(OpError::new(
+        ErrorCode::ConnectionFailed,
+        "the attach was ended while its path was being recovered",
+    ))
+}
+
+fn map_resume_error(err: ResumeError) -> OpError {
     match err {
         ResumeError::Local(err) => err,
         ResumeError::Client(err) => map_client_error(err),
@@ -1729,9 +1922,11 @@ async fn pump_attach_input(
     commands: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<AttachCommand>>>,
     pending: Arc<std::sync::Mutex<PendingInput>>,
     watch: PathWatch,
-    finished: Arc<std::sync::atomic::AtomicBool>,
+    ctx: Arc<AttachContext>,
+    events: tokio::sync::mpsc::Sender<Result<SessionEvent, OpError>>,
     mut stop: tokio::sync::oneshot::Receiver<()>,
 ) {
+    let finished = &ctx.finished;
     let mut commands = commands.lock().await;
     loop {
         let command = tokio::select! {
@@ -1752,13 +1947,36 @@ async fn pump_attach_input(
                 // Recorded first: bytes accepted from the frontend are the
                 // client's responsibility from this moment, and a leg that
                 // dies before the write lands must retransmit them.
-                if let Err(err) = lock(&pending).push(&data) {
-                    tracing::warn!(%err, "input dropped: the un-acked buffer is full");
-                    continue;
+                // Bound the guard to this statement: the refusal below
+                // awaits, and a `std` guard held across an await is not
+                // `Send`.
+                let refused = lock(&pending).push(&data).err();
+                if let Some(err) = refused {
+                    // protocol.md §10-5 is explicit that overrunning the
+                    // 64 KiB cap is an **error**, not silent buffering.
+                    // These bytes cannot be replayed across a break, so a
+                    // `warn` on stderr would be the user believing they
+                    // typed something the shell will never see — under a
+                    // raw-mode TUI, invisibly. Say so on the event stream
+                    // and stop writing.
+                    //
+                    // Only this leg's send half stops: the output the user
+                    // is owed keeps arriving, and a recovery — which is
+                    // what an unacking host usually means — spawns a fresh
+                    // pump against a host that is acking again.
+                    tracing::warn!(%err, "the un-acked input buffer is full");
+                    let _ = events.send(Err(map_resume_error(err))).await;
+                    return;
                 }
                 writer.send_input(&data).await.map(|_| ())
             }
-            AttachCommand::Resize { cols, rows } => writer.resize(cols, rows).await,
+            AttachCommand::Resize { cols, rows } => {
+                // Remembered before it is written: a resize is not on the
+                // input axis, so a resume has nothing to retransmit it
+                // from unless the last size was kept somewhere.
+                *lock(&ctx.window) = Some((cols, rows));
+                writer.resize(cols, rows).await
+            }
             AttachCommand::Detach(ack) => {
                 // Everything queued ahead of the detach has been written by
                 // the time we get here. Finish, wait for the host to
@@ -1809,13 +2027,15 @@ async fn pump_attach_control(
                     Ok(Some(message)) => message,
                     Ok(None) | Err(_) => return,
                 };
-                // Any inbound control message answers the watchdog, not
-                // just the `Pong`: the question is whether the path carries
-                // packets.
-                watch.inbound();
                 match message {
-                    ControlIn::Pong => {}
+                    // The answer to our own liveness probe. Proof the path
+                    // carries packets, and nothing more — counting it as
+                    // activity would let the watchdog hold itself inside
+                    // the active window forever and the idle cadence would
+                    // never be reached on a healthy path.
+                    ControlIn::Pong => watch.inbound(),
                     ControlIn::Ping { request_id } => {
+                        watch.traffic();
                         if session.send_pong(request_id).await.is_err() {
                             return;
                         }
@@ -1824,6 +2044,7 @@ async fn pump_attach_control(
                     // authoritative copy; emitting both would duplicate a
                     // terminal event in the JSONL stream.
                     ControlIn::Event(event) => {
+                        watch.traffic();
                         if let Some(json) = control_event_json(&session_ref, event) {
                             let _stalled = watch.stalled();
                             if events.send(Ok(json)).await.is_err() {
@@ -2138,6 +2359,60 @@ mod tests {
         let now = std::time::Instant::now();
         let schedule = RenewalSchedule::new(Duration::ZERO, now);
         assert!(schedule.due_in(now) > Duration::ZERO);
+    }
+
+    /// The un-acked cap is a *contract* (`protocol.md` §10-5: "초과 시
+    /// 조용히 쌓지 않고 오류"), and the driver now surfaces it on the event
+    /// stream instead of logging it away. This pins the code the frontend
+    /// sees, because a `warn` and a `RESOURCE_EXHAUSTED` are the same
+    /// number of lines of source and very different products.
+    #[test]
+    fn a_full_un_acked_buffer_is_resource_exhausted_not_a_log_line() {
+        let mut pending = PendingInput::new(0);
+        pending
+            .push(&vec![b'x'; crate::client::reconnect::UNACKED_INPUT_MAX])
+            .expect("the cap itself fits");
+        let err = pending
+            .push(b"one byte too many")
+            .expect_err("over the cap");
+        assert!(matches!(err, ResumeError::UnackedInputOverflow { .. }));
+        let mapped = map_resume_error(err);
+        assert_eq!(mapped.code, ErrorCode::ResourceExhausted);
+        // The message names the limit, so a user who pasted too much can
+        // tell this from a host that ran out of memory.
+        assert!(mapped.message.contains("un-acked"), "{:?}", mapped.message);
+    }
+
+    /// A detach that lands mid-recovery is the user's own doing, so it ends
+    /// the attach rather than producing an error the frontend has to
+    /// render — and it must not look like a failed recovery either.
+    #[test]
+    fn an_abandoned_recovery_is_not_a_wire_failure() {
+        assert_eq!(
+            map_resume_error(abandoned()).code,
+            ErrorCode::ConnectionFailed
+        );
+    }
+
+    /// The migration probe is worth one round trip, not a constant: on a
+    /// LAN a fixed 300 ms was 600 ms of a 2 s budget spent learning
+    /// nothing.
+    #[test]
+    fn the_migration_probe_scales_with_the_path() {
+        assert_eq!(
+            migration_probe_budget(Duration::from_micros(200)),
+            MIGRATION_PROBE_MIN,
+            "a fast path still gets a floor, for scheduling"
+        );
+        assert_eq!(
+            migration_probe_budget(Duration::from_millis(100)),
+            Duration::from_millis(200)
+        );
+        assert_eq!(
+            migration_probe_budget(Duration::from_secs(5)),
+            MIGRATION_PROBE_MAX,
+            "and it is capped: the deadline it is spent from is 2 s"
+        );
     }
 
     #[test]
