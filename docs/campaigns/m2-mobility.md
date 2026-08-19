@@ -140,7 +140,12 @@ qsh dave@campaign-host 2> mobility-stderr.log
 # 2b. gap 관측 채널. `session.gap`은 대화형 TUI에 인라인 주석으로만 뜬다
 #     ("output was dropped; the session resumed at offset N") — stderr 캡처에도
 #     summarize.py에도 나오지 않는다. gap? 열을 채우려면 세션 자체를 기록해야
-#     한다: `script -q mobility-tty.log qsh dave@campaign-host 2> mobility-stderr.log`
+#     한다. 이때 stderr 리다이렉트는 반드시 `script`의 **안쪽**에 둔다 — BSD
+#     `script`(macOS)는 명령의 stdin/stdout/stderr를 전부 자기 pty에 붙이므로,
+#     바깥에 둔 `2>`는 script 자신의 stderr만 잡고 qsh의 텔레메트리는 전부
+#     tty 로그로 섞여 들어간다(= mobility-stderr.log가 0바이트가 되고 모든
+#     회차가 "no telemetry line"이 된다):
+#         script -q mobility-tty.log sh -c 'exec qsh dave@campaign-host 2> mobility-stderr.log'
 #     (또는 tmux `pipe-pane`). 나중에:
 #         grep -n "output was dropped" mobility-tty.log
 
