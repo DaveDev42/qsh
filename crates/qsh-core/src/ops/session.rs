@@ -51,15 +51,20 @@ pub const SESSION_ATTACH_QUEUE: usize = 64;
 /// the drain ends as soon as the control stream closes or an event lands.
 const ATTACH_CONTROL_DRAIN: Duration = Duration::from_millis(250);
 
-/// How long the driver waits for the host to acknowledge the input it
-/// wrote before a detach, once the send half is finished. Long enough for
-/// a round trip on a bad link, short enough that `~d` still feels instant.
-const DETACH_FLUSH: Duration = Duration::from_millis(750);
+/// How long the driver waits for the host to confirm it *applied* the
+/// input written before a detach (`InputAck`, protocol.md §10-5).
+///
+/// Only reached when the host is answering slowly or not at all: the wait
+/// ends the moment the ack lands, which on a live session is one round trip
+/// plus a PTY write. The bound is what a user is made to wait for a host
+/// that has gone quiet, so it is generous rather than snappy — the
+/// alternative to waiting is throwing the bytes away.
+const DETACH_FLUSH: Duration = Duration::from_secs(2);
 
-/// How long [`AttachHandle::detach`] waits for the driver's acknowledgement
-/// before closing anyway. Strictly longer than [`DETACH_FLUSH`], so the
-/// normal path is bounded by the driver, not by this fallback.
-const DETACH_FLUSH_GRACE: Duration = Duration::from_millis(1_000);
+/// How long [`AttachHandle::detach`] waits for the driver's answer before
+/// closing anyway. Strictly longer than [`DETACH_FLUSH`], so the normal
+/// path is bounded by the driver, not by this fallback.
+const DETACH_FLUSH_GRACE: Duration = Duration::from_millis(2_500);
 
 /// Ceiling on how long a migration probe waits for *any* answer from the
 /// host before it is called a failure.
@@ -618,6 +623,11 @@ impl Ops {
         let (commands, command_rx) = tokio::sync::mpsc::channel(SESSION_ATTACH_QUEUE);
         let session_ref = req.session_ref.clone();
         let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let detaching = Arc::new(std::sync::Mutex::new(()));
+        // Seeded with the offset this attach continues from: everything at
+        // or below it is already the host's, so a detach with nothing typed
+        // since has nothing to wait for.
+        let (applied_input, _) = tokio::sync::watch::channel(attached.input_from);
         let ctx = Arc::new(AttachContext {
             target,
             host: r.host.clone(),
@@ -629,12 +639,17 @@ impl Ops {
             window: Arc::new(std::sync::Mutex::new(None)),
             recovery: self.recovery,
             finished: finished.clone(),
+            applied_input,
         });
         let driver = conn
             .runtime()
             .spawn(drive_attach(ctx, session, attached, command_rx, events_tx));
         Ok(SessionAttachStream {
-            stop: AttachStop { finished, driver },
+            stop: AttachStop {
+                finished,
+                detaching,
+                driver,
+            },
             conn,
             store: ResumeStore::new(&self.paths),
             events: events_rx,
@@ -972,10 +987,27 @@ enum AttachCommand {
         /// New row count.
         rows: u16,
     },
-    /// Finish the send half and report back once the host has it. Travels
-    /// the same ordered queue as the input so a detach cannot overtake the
-    /// bytes typed just before it (`docs/CLI.md` §7).
-    Detach(std::sync::mpsc::SyncSender<()>),
+    /// Finish the send half and report back once the host has acknowledged
+    /// applying everything written before it. Travels the same ordered
+    /// queue as the input so a detach cannot overtake the bytes typed just
+    /// before it (`docs/CLI.md` §7).
+    Detach(std::sync::mpsc::SyncSender<DetachFlush>),
+}
+
+/// What a detach could establish about the input queued ahead of it.
+///
+/// A detach closes the connection, and a QUIC close throws away anything
+/// the peer has not taken, so "did the shell get it?" has to be answered
+/// *before* the close rather than assumed after it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetachFlush {
+    /// The host acknowledged applying every byte written before the detach:
+    /// a command typed immediately ahead of `~d` reached the child.
+    Applied,
+    /// The bound elapsed with bytes still unacknowledged, so they may never
+    /// have reached the child. The caller has to say so — silently dropped
+    /// input is what `docs/PRD.md` §8 forbids.
+    Unconfirmed,
 }
 
 /// A live attach: a blocking `qsh.event/v1` event stream out, an
@@ -1012,11 +1044,22 @@ struct AttachStop {
     /// Shared with the driver: set once this attach is deliberately over,
     /// so a connection the frontend closed is never recovered from.
     finished: Arc<std::sync::atomic::AtomicBool>,
+    /// See [`AttachHandle::detaching`].
+    detaching: Arc<std::sync::Mutex<()>>,
     driver: tokio::task::JoinHandle<()>,
 }
 
 impl Drop for AttachStop {
     fn drop(&mut self) {
+        // A `~d` runs on the frontend's input thread while the thread that
+        // owns the stream is still in `next_event`, so the two race: the
+        // detach is announced before it has flushed, and the owner can
+        // reach this teardown while the driver is still writing the bytes
+        // typed just before the escape. Aborting there loses them for
+        // good. The gate makes the teardown wait out a detach that is
+        // already in flight — which is bounded by
+        // [`DETACH_FLUSH_GRACE`], not by the host.
+        let _flushing = lock(&self.detaching);
         self.finished
             .store(true, std::sync::atomic::Ordering::Release);
         self.driver.abort();
@@ -1190,6 +1233,7 @@ impl SessionAttachStream {
             commands: self.commands.clone(),
             link: self.conn.link.clone(),
             finished: self.stop.finished.clone(),
+            detaching: self.stop.detaching.clone(),
         }
     }
 
@@ -1213,6 +1257,10 @@ pub struct AttachHandle {
     commands: tokio::sync::mpsc::Sender<AttachCommand>,
     link: Link,
     finished: Arc<std::sync::atomic::AtomicBool>,
+    /// Held for as long as a detach is flushing, so the thread that owns
+    /// the stream cannot tear the driver down mid-flush. See
+    /// [`AttachStop::drop`].
+    detaching: Arc<std::sync::Mutex<()>>,
 }
 
 impl std::fmt::Debug for AttachHandle {
@@ -1275,28 +1323,42 @@ impl AttachHandle {
     /// [`next_event`](SessionAttachStream::next_event) blocking the owning
     /// thread returns. Idempotent, and callable from any thread — closing
     /// a connection needs no runtime.
-    pub fn detach(&self) {
-        // Ordering first: hand the driver a detach marker so everything
-        // already queued is written and the send half finished before the
-        // connection goes away — a QUIC close discards unsent stream data,
-        // which would silently eat a command typed just before `~d`.
-        //
-        // Bounded on both sides. A full queue (the host stopped reading)
-        // means the bytes were never going to land anyway, and a driver
-        // parked on flow control never answers; neither may keep the user
-        // attached, so the close happens regardless.
-        //
+    ///
+    /// The answer says whether the input typed ahead of the detach is known
+    /// to have reached the child; a caller that gets
+    /// [`DetachFlush::Unconfirmed`] owes the user a word about it.
+    pub fn detach(&self) -> DetachFlush {
+        // Held across the whole detach: the thread that owns the stream is
+        // free to tear the attach down the moment it notices, and the
+        // teardown aborts the very driver this flush is waiting on.
+        let _flushing = lock(&self.detaching);
         // Marked deliberate *first*: closing the connection is
         // indistinguishable, from the driver's side, from the path dying,
         // and a detach that raced the flag would be answered with a
         // re-dial and a resume of the session the user just left.
         self.finished
             .store(true, std::sync::atomic::Ordering::Release);
+        // Ordering next: hand the driver a detach marker down the same
+        // queue as the input, so everything already typed is written — and
+        // acknowledged by the host — before the connection goes away. A
+        // QUIC close discards unsent stream data, and a host that has not
+        // read a frame yet loses it with the stream, so only the host's own
+        // `InputAck` can say the bytes made it (protocol.md §10-5).
+        //
+        // Bounded on both sides. A full queue (the host stopped reading)
+        // means the bytes were never going to land anyway, and a driver
+        // parked on flow control never answers; neither may keep the user
+        // attached, so the close happens regardless — and says so.
         let (ack, flushed) = std::sync::mpsc::sync_channel(1);
-        if self.commands.try_send(AttachCommand::Detach(ack)).is_ok() {
-            let _ = flushed.recv_timeout(DETACH_FLUSH_GRACE);
-        }
+        let outcome = if self.commands.try_send(AttachCommand::Detach(ack)).is_ok() {
+            flushed
+                .recv_timeout(DETACH_FLUSH_GRACE)
+                .unwrap_or(DetachFlush::Unconfirmed)
+        } else {
+            DetachFlush::Unconfirmed
+        };
         self.link.connection().close(0, b"detach");
+        outcome
     }
 }
 
@@ -1342,6 +1404,16 @@ struct AttachContext {
     /// **we** closed is never mistaken for a path that died and recovered
     /// from.
     finished: Arc<std::sync::atomic::AtomicBool>,
+    /// Highest cumulative input offset the host has confirmed *applying*
+    /// (`InputAck`), published by whichever leg is reading.
+    ///
+    /// Separate from the un-acked buffer next to it, which the same acks
+    /// drain, because this one has a waiter: the detach flush. A transport
+    /// acknowledgement is not enough there — it says the bytes arrived,
+    /// while the host only sends an `InputAck` once the child has actually
+    /// been handed them (`crate::session_stream`), and a connection closed
+    /// in between drops whatever the host had not read yet.
+    applied_input: tokio::sync::watch::Sender<u64>,
 }
 
 impl AttachContext {
@@ -1630,6 +1702,16 @@ async fn read_leg(
         watch.traffic();
         if let AttachEvent::InputAck { acked_input_seq } = &event {
             lock(pending).ack(*acked_input_seq);
+            // Monotonic: a resumed leg re-acks from the offset the host
+            // applied, and a stale ack from the leg that just died must not
+            // walk the mark backwards under a waiting detach.
+            ctx.applied_input.send_if_modified(|applied| {
+                let ahead = *acked_input_seq > *applied;
+                if ahead {
+                    *applied = *acked_input_seq;
+                }
+                ahead
+            });
         }
         // Defence in depth against a doubled terminal (protocol.md §10-3):
         // the host is asked to replay from exactly where we stopped, but a
@@ -2021,12 +2103,14 @@ async fn pump_attach_input(
             }
             AttachCommand::Detach(ack) => {
                 // Everything queued ahead of the detach has been written by
-                // the time we get here. Finish, wait for the host to
-                // acknowledge it, and mark the attach deliberately over so
-                // the supervisor does not try to recover it.
+                // the time we get here, so this offset covers every byte
+                // the frontend handed us. Mark the attach deliberately over
+                // (the supervisor must not recover it), FIN the send half,
+                // and wait for the host to say the child ran them.
                 finished.store(true, std::sync::atomic::Ordering::Release);
-                let _ = tokio::time::timeout(DETACH_FLUSH, writer.finish_flushed()).await;
-                let _ = ack.send(());
+                let target = writer.input_seq();
+                writer.finish();
+                let _ = ack.send(await_applied(&ctx.applied_input, target).await);
                 return;
             }
         };
@@ -2038,6 +2122,24 @@ async fn pump_attach_input(
     // drains what is left and finishes the stream.
     finished.store(true, std::sync::atomic::Ordering::Release);
     writer.finish();
+}
+
+/// Wait until the host has acknowledged applying every byte up to `target`,
+/// or [`DETACH_FLUSH`] passes.
+///
+/// Returns immediately when the mark is already there, which is the usual
+/// case for a `~d` typed on its own line: the escape follows a CR the host
+/// acked while the user was still reading the prompt.
+async fn await_applied(applied: &tokio::sync::watch::Sender<u64>, target: u64) -> DetachFlush {
+    let mut mark = applied.subscribe();
+    let reached = tokio::time::timeout(DETACH_FLUSH, mark.wait_for(|applied| *applied >= target));
+    match reached.await {
+        Ok(Ok(_)) => DetachFlush::Applied,
+        // The sender lives in the attach context this task holds, so a
+        // closed channel is not reachable; a timeout is, and both mean the
+        // same thing to the user.
+        Ok(Err(_)) | Err(_) => DetachFlush::Unconfirmed,
+    }
 }
 
 /// Sole owner of one leg's control stream: the asynchronous `SessionEvent`s

@@ -305,6 +305,12 @@ impl ServeGuard {
         &self.addr
     }
 
+    /// The child's process id, for a test that has to stop the host
+    /// answering (`SIGSTOP`) rather than take it away.
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
     /// Stop the child and return everything it wrote. Idempotent.
     pub fn finish(&mut self) -> ServeOutput {
         let _ = self.child.kill();

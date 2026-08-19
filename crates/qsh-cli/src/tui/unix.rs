@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use qsh_core::{AttachHandle, OpError, Ops, SessionAttachStream};
+use qsh_core::{AttachHandle, DetachFlush, OpError, Ops, SessionAttachStream};
 use qsh_proto::event::SessionEvent;
 use qsh_proto::{ErrorCode, SessionOpenReq};
 
@@ -287,7 +287,12 @@ fn spawn_input_pump(
                     // event pump reports a detach rather than a lost
                     // connection.
                     detached.store(true, Ordering::SeqCst);
-                    handle.detach();
+                    if handle.detach() == DetachFlush::Unconfirmed {
+                        note(
+                            raw,
+                            "the host did not confirm the input typed before the detach",
+                        );
+                    }
                     break;
                 }
                 if !processed.forward.is_empty() && handle.write(processed.forward).is_err() {
