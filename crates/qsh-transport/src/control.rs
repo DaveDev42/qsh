@@ -75,18 +75,6 @@ impl FramedSend {
         Ok(())
     }
 
-    /// Wait until the peer has acknowledged everything written here (or
-    /// stopped the stream). Only meaningful after [`finish`](Self::finish).
-    ///
-    /// `finish` merely queues the FIN: bytes may still be sitting in the
-    /// local send buffer, and closing the *connection* discards them. A
-    /// caller that closes right after finishing needs this to know its
-    /// last bytes actually landed. Errors are not interesting — every one
-    /// of them means "they will never land", which is the same answer.
-    pub async fn flushed(&self) {
-        let _ = self.send.stopped().await;
-    }
-
     /// Abruptly reset the stream with an application error code.
     pub fn reset(&mut self, code: u32) {
         let _ = self.send.reset(quinn::VarInt::from_u32(code));

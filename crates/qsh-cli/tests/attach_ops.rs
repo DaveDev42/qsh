@@ -267,3 +267,70 @@ fn detaching_leaves_the_session_running_and_re_attachable() {
     });
     assert!(reattached.contains("ECHO:two"), "{reattached:?}");
 }
+
+/// A teardown must not cut a detach short.
+///
+/// The two run on different threads: `~d` detaches from the frontend's
+/// input pump while the thread that owns the stream is parked in
+/// `next_event`, and that thread ends the attach as soon as it notices —
+/// landing on `SessionAttachStream::close` while the detach is still
+/// getting the bytes typed ahead of the escape accepted by the host.
+/// Aborting the driver there loses them, which is the one thing `~d` may
+/// not do (`docs/CLI.md` §7, `docs/PRD.md` §8).
+///
+/// Made deterministic with `SIGSTOP`: a stopped host cannot acknowledge
+/// anything, so the detach is certain to still be waiting when `close` is
+/// called and the only open question is whether `close` waits for it. The
+/// assertion is deliberately a fraction of the flush bound, so it measures
+/// "the teardown waited" rather than the constant's exact value.
+#[test]
+fn a_teardown_waits_out_a_detach_that_is_still_flushing() {
+    let fleet = Fleet::start();
+    let ops = ops_for(&fleet.client);
+    let session_ref = open(
+        &ops,
+        &[
+            "sh",
+            "-c",
+            "while IFS= read -r line; do printf 'ECHO:%s\\n' \"$line\"; done",
+        ],
+    );
+    let host = nix::unistd::Pid::from_raw(fleet.serve.pid() as i32);
+
+    let (waited, outcome) = with_deadline("teardown vs. detach", move || {
+        let mut stream = attach(&ops, &session_ref).expect("attach");
+        stream.write(b"one\n".to_vec()).expect("write");
+        read_until(&mut stream, "ECHO:one");
+
+        // From here the host answers nothing at all, so the detach below
+        // cannot finish on its own.
+        nix::sys::signal::kill(host, nix::sys::signal::Signal::SIGSTOP).expect("stop the host");
+        stream
+            .write(b"two\n".to_vec())
+            .expect("write before the detach");
+
+        let handle = stream.handle();
+        let (entered, entering) = mpsc::sync_channel(1);
+        let detacher = std::thread::spawn(move || {
+            let _ = entered.send(());
+            handle.detach()
+        });
+        entering.recv().expect("the detaching thread started");
+
+        let started = std::time::Instant::now();
+        stream.close();
+        let waited = started.elapsed();
+
+        // Let the host run again so the fleet tears down normally.
+        nix::sys::signal::kill(host, nix::sys::signal::Signal::SIGCONT).expect("resume the host");
+        let outcome = detacher.join().expect("the detaching thread panicked");
+        (waited, outcome)
+    });
+
+    assert!(
+        waited >= Duration::from_secs(1),
+        "close() returned after {waited:?}, so it abandoned a detach that was still flushing"
+    );
+    // A host that never acknowledged cannot be reported as delivered.
+    assert_eq!(outcome, qsh_core::DetachFlush::Unconfirmed);
+}
