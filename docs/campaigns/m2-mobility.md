@@ -1,10 +1,10 @@
 # M2 mobility campaign — Wi-Fi ↔ tethering, N = 20
 
-> **상태: NOT YET RUN.** 아래 20행 표는 **비어 있다**. 이 문서는 기록 **템플릿**이며,
-> 캠페인 자체는 사람 조작자(실기기 라디오 토글)와 **두 번째 실호스트**(`qsh serve`)가
-> 있어야 수행된다. 표가 채워지고 §7 요약이 작성되기 전까지 `PLAN.md` Step 9 (d)와
-> `docs/ROADMAP.md` M2 DoD 5번은 **미충족**이다. 어떤 체크박스도 이 문서 때문에
-> 통과 처리되어서는 안 된다.
+> **상태: 수행 완료 (2026-08-19, N = 20).** §5–§7이 실측 기록이다. 결과 요약:
+> path 사망 10회 전부 자동 resume으로 세션 생존·output 무손실(SC4·SC5 실기기
+> 확인), 그러나 2초 예산 내 복구는 10회 중 1회 — 초과분의 지배 요인은 qsh가 아니라
+> **Tailscale underlay 재경로(~4–5 s)** 다(§7 서술). 이 캠페인은 합격 게이트가
+> 아니며(§1), 실패 회차 원인은 §7 끝의 M8 백로그로 이관됐다.
 
 ## 1. 목적
 
@@ -187,43 +187,50 @@ scripts/mobility/summarize.py --json mobility-stderr.log > mobility-summary.json
 
 | 항목 | 값 |
 |---|---|
-| 날짜 (UTC) | _(미기재)_ |
-| 조작자 | _(미기재)_ |
-| 클라이언트 장비 / OS | _(미기재)_ |
-| 서버 장비 / OS / `qsh serve` bind | _(미기재)_ |
-| qsh 커밋 SHA | _(미기재)_ |
-| Wi-Fi SSID / 대역 | _(미기재)_ |
-| 테더링 방식 (USB / 개인용 핫스팟) / 캐리어 | _(미기재)_ |
-| 스크립트 호출 (정확한 명령줄) | _(미기재)_ |
-| stderr 캡처 파일 | _(미기재)_ |
+| 날짜 (UTC) | 2026-08-19 07:59:58 – 08:02:35 (전환 20회, 2 m 37 s) |
+| 조작자 | Dave |
+| 클라이언트 장비 / OS | Dave-MBP16 (Apple M1 Max) / macOS (Darwin 27.0.0) |
+| 서버 장비 / OS / `qsh serve` bind | Dave-Windows-WSL (WSL2 Ubuntu, 7950X) / `qsh serve --bind 0.0.0.0:4433` (tmux, 전용 캠페인 프로필) |
+| qsh 커밋 SHA | 바이너리 양단 `37dd5ea` (release), 문서·스크립트 `ff433dc` |
+| Wi-Fi SSID / 대역 | 홈 Wi-Fi, en0 172.31.44.37 (SSID는 macOS가 비공개 처리 — 조작자 확인) |
+| 테더링 방식 / 캐리어 | iPhone **USB 테더**(개인용 핫스팟, en10 192.0.0.2) / 캐리어 IPv6 prefix `2001:2d8::/32` 관측 |
+| **경로 토폴로지 (중요)** | 클라이언트→서버 접속이 **Tailscale(utun) 경유** (`dave-windows-wsl.tail91e9e.ts.net`). QUIC 4-tuple이 tailnet 주소로 고정되어 물리 경로 전환이 QUIC에는 blackhole→복구로만 보인다 — §7 서술 참조 |
+| 스크립트 호출 (정확한 명령줄) | `scripts/mobility/switch-macos.sh --iterations 10 --settle 8 --log mobility-switch.log` |
+| stderr 캡처 파일 | `mobility-stderr.log` (28 레코드) + `mobility-switch.log` (20 전환) + `mobility-tty.log` (TTY 기록, 701 KB) — 타임스탬프 미부착 캡처(§7 방법론 한계) |
 
-## 6. 회차 기록 (20행 — **아직 채워지지 않음**)
+## 6. 회차 기록 (20행 — 2026-08-19 실측)
 
 `recovery` 열은 §3의 사전 정의 기준을 적용한 **최종 분류**다(예산 초과는 `failed`).
-`time_to_recovery_ms`는 텔레메트리 원값을 그대로 적는다.
+`time_to_recovery_ms`는 텔레메트리 원값(다시도 회차는 **마지막 resumed 시도**의
+값, 시도 사슬은 notes)이다. 이 캠페인의 레코드는 **시도 단위**로 나왔다(사슬
+`failed → failed → resumed` = path 사망 1회에 복구 시도 3회) — 28 레코드가 10개
+그룹으로 묶이며, 그룹↔전환 대응은 §7 방법론 절의 ordinal 규칙을 따른다.
+`tether->wifi` 10회는 경로가 아예 절단되지 않아(USB 경로 유효 유지) 레코드 0건
+— §3의 세 범주 어디에도 속하지 않는 **무중단 유지(held)** 로, `-`로 적고 §7에서
+설명한다.
 
 | run | platform | direction | recovery | time_to_recovery_ms | gap? | notes |
 |---:|---|---|---|---:|---|---|
-| 1 |  |  |  |  |  |  |
-| 2 |  |  |  |  |  |  |
-| 3 |  |  |  |  |  |  |
-| 4 |  |  |  |  |  |  |
-| 5 |  |  |  |  |  |  |
-| 6 |  |  |  |  |  |  |
-| 7 |  |  |  |  |  |  |
-| 8 |  |  |  |  |  |  |
-| 9 |  |  |  |  |  |  |
-| 10 |  |  |  |  |  |  |
-| 11 |  |  |  |  |  |  |
-| 12 |  |  |  |  |  |  |
-| 13 |  |  |  |  |  |  |
-| 14 |  |  |  |  |  |  |
-| 15 |  |  |  |  |  |  |
-| 16 |  |  |  |  |  |  |
-| 17 |  |  |  |  |  |  |
-| 18 |  |  |  |  |  |  |
-| 19 |  |  |  |  |  |  |
-| 20 |  |  |  |  |  |  |
+| 1 | macos | wifi->tether | failed | 233 | no | 시도 3회 f2001→f2002→r233, 감지 후 총 ≈4.24 s > 2 s. 원분류 resumed |
+| 2 | macos | tether->wifi | - | - | no | held — 경로 미절단, 레코드 0건(정상). PRD SC3의 "자동 유지" |
+| 3 | macos | wifi->tether | resumed | 385 | no | 단일 시도, **예산 내 ✓** (직전 사망로 underlay가 warm이었던 것으로 추정) |
+| 4 | macos | tether->wifi | - | - | no | held |
+| 5 | macos | wifi->tether | failed | 307 | no | f2002→f2001→r307, 총 ≈4.31 s |
+| 6 | macos | tether->wifi | - | - | no | held |
+| 7 | macos | wifi->tether | failed | 1020 | no | f2002→f2001→r1020, 총 ≈5.02 s |
+| 8 | macos | tether->wifi | - | - | no | held |
+| 9 | macos | wifi->tether | failed | 323 | no | f2001→f2002→r323, 총 ≈4.33 s |
+| 10 | macos | tether->wifi | - | - | no | held |
+| 11 | macos | wifi->tether | failed | 1055 | no | f2002→f2001→r1055, 총 ≈5.06 s |
+| 12 | macos | tether->wifi | - | - | no | held |
+| 13 | macos | wifi->tether | failed | 332 | no | f2002→f2003→r332, 총 ≈4.34 s |
+| 14 | macos | tether->wifi | - | - | no | held |
+| 15 | macos | wifi->tether | failed | 568 | no | f2001→f2001→r568, 총 ≈4.57 s |
+| 16 | macos | tether->wifi | - | - | no | held |
+| 17 | macos | wifi->tether | failed | 1008 | no | f2001→f2001→r1008, 총 ≈5.01 s |
+| 18 | macos | tether->wifi | - | - | no | held |
+| 19 | macos | wifi->tether | failed | 1076 | no | f2001→f2001→r1076, 총 ≈5.08 s |
+| 20 | macos | tether->wifi | - | - | no | held. 세션은 캠페인 후 2.5 h 더 부하 유지 후 조작자가 정상 종료 (SC5 위반 없음) |
 
 열 정의:
 
@@ -240,33 +247,92 @@ scripts/mobility/summarize.py --json mobility-stderr.log > mobility-summary.json
   적는다. 빈칸이나 `no`로 채우지 않는다.
 - **notes** — 예산 초과 시 원 분류와 ms, 세션 재생성, 환경 이상 등.
 
-## 7. 요약 (표가 채워진 뒤 작성 — **아직 미작성**)
+## 7. 요약 (2026-08-19 작성)
 
-`scripts/mobility/summarize.py mobility-stderr.log`의 출력을 그대로 붙이고, 아래를
-채운다.
+`scripts/mobility/summarize.py mobility-stderr.log` 출력 그대로:
+
+```
+recovery events: 28
+  migrated     0  (  0.0%)
+  resumed     10  ( 35.7%)
+  failed      18  ( 64.3%)
+
+budget: 2000 ms (docs/design/testing.md L4 — re-dial + resume)
+  within budget    10  ( 35.7% of all events)
+  over budget       0   <- FAIL per the pre-defined criterion
+
+time to recovery (ms, recovered events only)
+  min 233   max 1076
+  p50 385   p90 1055   p95 1076   p99 1076
+```
+
+summarize는 **레코드(=복구 시도) 단위**로 센다. 전환 단위 집계는 아래와 같다
+(28 레코드 = path 사망 10회 × 시도 1–3회; §6 참조):
 
 | 지표 | 값 |
 |---|---|
-| 전환 총수 (N) | _(미기재, 목표 20)_ |
-| `migrated` | _(미기재)_ |
-| `resumed` | _(미기재)_ |
-| `failed` | _(미기재)_ |
-| 예산(2000 ms) 내 복구 비율 | _(미기재)_ |
-| `unverified` (측정 불가) | _(미기재, 0이 아니면 캡처 결함)_ |
-| time-to-recovery p50 / p90 / p95 / max (ms) | _(미기재)_ |
-| 감지 cadence (회차 대부분이 active인가) | _(미기재, §3 참조)_ |
-| **사용자 체감 단절** p50 / p90 / max (ms) = 감지 지연 + 위 값 | _(미기재)_ |
-| gap 발생 회차 수 | _(미기재)_ |
+| 전환 총수 (N) | 20 (wifi->tether 10, tether->wifi 10) |
+| `migrated` | 0 (토폴로지상 도달 불가 — 아래 서술) |
+| `resumed` (예산 내, 전환 단위) | 1 (run 3) |
+| `failed` (예산 초과, 전환 단위) | 9 — 전부 wifi->tether, 전부 시도 3회 사슬 |
+| **held** (무중단 유지, §3 범주 외) | 10 — 전부 tether->wifi |
+| 예산(2000 ms) 내 복구 비율 | path 사망 기준 1/10 (10%) · PRD SC3 어법("자동 유지 또는 resume") 기준 **11/20 (55%)** |
+| `unverified` (측정 불가) | 0 (캡처 정상) |
+| time-to-recovery p50 / p90 / p95 / max (ms) | 385 / 1055 / 1076 / 1076 (min 233; resumed 시도 단위) |
+| 감지 cadence | 전 회차 active (세션 내 0.2 s 부하 유지, §4 3단계 수행) |
+| **사용자 체감 단절** (추정 = 감지 ~1 s + 시도 사슬 합) | held 0 s · run 3 ≈ 1.4 s · failed 회차 ≈ 5.2–6.1 s |
+| gap 발생 회차 수 | 0 (TTY 기록 grep — `output was dropped` 0건) |
 
-서술로 남길 것:
+### 서술
 
-- migrated 대 resumed의 분해가 예상과 맞는가 — Wi-Fi off는 소켓이 죽으므로 대개
-  `resumed`, 경로가 살아 있는 채 주소만 바뀌는 경우가 `migrated`다. 전부 `resumed`면
-  migration 경로가 실기기에서 한 번도 타지 않았다는 뜻이며 그 자체로 기록할 가치가
-  있다.
-- `failed` 회차의 원인 분류(도달 불가한 테더 경로 / 예산 초과 / 세션 소실) — 각각
-  **M8 백로그 항목**으로 옮기고 이슈 링크를 적는다. M2를 막지 않는다.
-- 이 20회로 SC3의 95%를 판정하지 않는다(표본 부족). 판정은 M8의 N ≥ 60이다.
+- **세션은 한 번도 죽지 않았다.** path 사망 10회 전부 조작자 개입 없이 자동
+  resume됐고, 같은 `session_ref` 하나가 캠페인 전체(그리고 이후 2.5 h 추가 부하)를
+  관통했다. gap 0건 — **SC4(무손실)·SC5(생존)의 실기기 확인**이다. TTY 기록의
+  원격 타임스탬프 스트림은 캠페인 창 내 최대 간격 0.221 s(부하 루프 주기)로
+  결손이 없다.
+- **migrated 0의 이유는 토폴로지다.** 접속이 Tailscale(utun) 경유라 QUIC 4-tuple이
+  tailnet 주소로 고정된다 — 물리 인터페이스가 바뀌어도 QUIC 관점의 주소 변화가
+  없으므로 connection migration 경로는 실기기에서 **한 번도 타지 않았다**(§5의
+  예상대로). M8 캠페인은 direct-address 토폴로지를 병행해야 migration 분해를 처음
+  관측한다.
+- **failed 9회의 지배 요인은 qsh 밖에 있다.** 각 사망에서 2 s 복구 시도창이 2회
+  만료된 뒤 3번째에 성공했다 — Tailscale underlay가 en0→en10로 WireGuard 경로를
+  재수립하는 데 ~4–5 s가 걸렸고, 그동안은 재dial도 같은 utun을 지나므로 성공할 수
+  없다. underlay가 살아난 뒤의 qsh 자체 복구는 233–1076 ms로 전부 예산 내다.
+  분류: 도달 불가한 테더 경로 0 / **예산 초과 9** / 세션 소실 0.
+- **tether->wifi 10회가 전부 held인 것도 토폴로지의 귀결이다.** Wi-Fi 복귀 시
+  USB 경로가 그대로 유효하므로 underlay가 옮겨갈 이유가 없고, path 사망 자체가
+  없다. §3 분류표에는 이 결과를 담을 범주가 없다 — 실측이 드러낸 기준의 공백이며,
+  PRD SC3 어법으로는 "자동 유지" 성공에 해당한다.
+- 이 20회로 SC3의 95%를 판정하지 않는다(표본 부족·단일 토폴로지). 판정은 M8의
+  N ≥ 60이다.
+
+### 방법론 노트 (M8이 반복하지 말 것)
+
+- **레코드는 시도 단위다.** `recover()`가 시도마다 한 줄을 찍으므로 "n번째 줄 =
+  전환 n"의 1:1 ordinal 규칙(§4 6단계)은 이 데이터에 적용 불가였다. 그룹핑(사슬의
+  마지막 resumed가 그룹 종료) 후 그룹↔사망 전환을 ordinal로 대응시켰다. run 1↔3
+  경계는 이 규칙의 유일한 불확실 지점(단일 시도 그룹 r385가 run 1의 2차 사망일
+  가능성)이며, 표는 보수적 해석을 적었다. **M8은 타임스탬프 부착 캡처(§4 2단계
+  선택지)를 필수로** 하여 `switch_issued_ms`와 교차 검증하라.
+- **TTY 기록의 원격 타임스탬프로 체감 단절을 측정할 수 없다.** 원격 루프는 경로
+  사망 중에도 계속 돌고 밀린 출력이 replay로 전부 도착하므로, 스탬프 연속성은
+  체감 단절이 아니라 무손실의 증거다. 체감 단절 행이 추정치인 이유다.
+- **호스트 시계 sawtooth를 스탬프 이상으로 오독하지 말 것.** 부하 상태의
+  WSL2 VM 시계가 ~30 s 주기로 ~2.3–2.5 s 스냅백하는 것을 관측했고(독립 프로브:
+  65 s 동안 realtime-vs-monotonic −2.493 s 점프 1회), TTY 기록의 주기적 역행·중복
+  3건·비순차 단발은 전부 이것으로 설명된다. qsh 시퀀스 이상이 아니다.
+
+### M8 백로그 (이 캠페인이 만든 항목)
+
+1. **VPN-underlay 재경로가 2 s 예산을 지배** — M8 캠페인에 direct-address
+   토폴로지 병행 + 재시도 정책(시도창 길이 vs 횟수) 재검토.
+2. **migration 경로 실기기 미실행** — direct 토폴로지에서만 관측 가능(위 1과 동일
+   실행에서 해소).
+3. **§3 분류에 `held`(무중단) 범주 추가** — tether->wifi류 무사망 전환의 정식 자리.
+4. **타임스탬프 부착 캡처를 필수화** — 그룹↔전환 ordinal 모호성 제거.
+5. TUI가 자기 attach의 lease 획득을 "writer lease moved"로 표시(cosmetic, Step 6
+   산물) — 억제 조건 추가.
 
 ## 8. M8 재사용
 
