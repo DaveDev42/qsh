@@ -653,6 +653,19 @@ impl AttachWriter {
     pub fn finish(mut self) {
         let _ = self.send.finish();
     }
+
+    /// Finish our send half and wait for the peer to acknowledge every
+    /// byte we wrote.
+    ///
+    /// [`finish`](Self::finish) only queues the FIN; a connection close
+    /// straight afterwards would discard whatever is still buffered. The
+    /// detach path needs the stronger guarantee — a command typed
+    /// immediately before `~d` has to reach the shell (`docs/CLI.md` §7) —
+    /// and bounds the wait itself.
+    pub async fn finish_flushed(mut self) {
+        let _ = self.send.finish();
+        self.send.flushed().await;
+    }
 }
 
 /// Host → client half of an attach stream.

@@ -29,10 +29,10 @@ pub mod trust;
 pub use config::{Config, Paths, now_rfc3339};
 pub use identity::{Identity, KeyStore, KeyStoreError, LoadedIdentity};
 pub use ops::{
-    ExecRunOp, ExecRunOutput, ExecStdin, IdentityInitOp, OpError, Operation, Ops, SessionAttachOp,
-    SessionAttachStream, SessionCloseOp, SessionGetOp, SessionListOp, SessionOpenOp, SessionReadOp,
-    SessionReadOutput, SessionReader, SessionResizeOp, SessionWriteOp, TrustAddOp, TrustListOp,
-    TrustRemoveOp, VersionOp,
+    AttachHandle, ExecRunOp, ExecRunOutput, ExecStdin, IdentityInitOp, OpError, Operation, Ops,
+    SessionAttachOp, SessionAttachStream, SessionCloseOp, SessionGetOp, SessionListOp,
+    SessionOpenOp, SessionReadOp, SessionReadOutput, SessionReader, SessionResizeOp,
+    SessionWriteOp, TrustAddOp, TrustListOp, TrustRemoveOp, VersionOp,
 };
 pub use trust::{SharedTrustStore, TrustStore};
 

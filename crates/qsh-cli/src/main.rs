@@ -4,14 +4,15 @@
 
 mod cli;
 mod render;
+mod tui;
 
 use std::io::{self, IsTerminal, Read, Write};
 
-use clap::Parser;
+use clap::{CommandFactory as _, Parser};
 use qsh_core::{
-    ExecRunOp, ExecStdin, IdentityInitOp, OpError, Operation, Ops, SessionCloseOp, SessionGetOp,
-    SessionListOp, SessionOpenOp, SessionReadOp, SessionResizeOp, SessionWriteOp, TrustAddOp,
-    TrustListOp, TrustRemoveOp, VersionOp,
+    ExecRunOp, ExecStdin, IdentityInitOp, OpError, Operation, Ops, SessionAttachOp, SessionCloseOp,
+    SessionGetOp, SessionListOp, SessionOpenOp, SessionReadOp, SessionResizeOp, SessionWriteOp,
+    TrustAddOp, TrustListOp, TrustRemoveOp, VersionOp,
 };
 use qsh_proto::{
     ErrorCode, ExecRunReq, IdentityInitReq, SessionCloseReq, SessionGetReq, SessionListReq,
@@ -21,7 +22,8 @@ use serde::Serialize;
 use tracing_subscriber::EnvFilter;
 
 use cli::{
-    Cli, Command, ExecArgs, SessionCmd, SessionReadArgs, SessionWriteArgs, TrustAddArgs, TrustCmd,
+    AttachArgs, Cli, Command, DEFAULT_ESCAPE_CHAR, EscapeChar, ExecArgs, SessionCmd,
+    SessionReadArgs, SessionWriteArgs, TrustAddArgs, TrustCmd,
 };
 use render::{human, json, json::Envelope};
 
@@ -42,6 +44,9 @@ const EXIT_REMOTE_CLAMPED: i32 = 254;
 /// The name `qsh serve` reports in diagnostics. Not an operation — it has
 /// no envelope (`docs/CLI.md` §6.12).
 const SERVE_MODE: &str = "serve";
+
+/// Usage error exit code (`docs/CLI.md` §4), matching clap's own.
+const EXIT_USAGE: i32 = 2;
 
 fn main() {
     // `Cli::parse()` exits with code 2 on usage errors and 0 on
@@ -79,10 +84,39 @@ fn init_tracing(cli: &Cli) {
 fn run(cli: &Cli) -> i32 {
     let ops = match Ops::from_env() {
         Ok(ops) => ops,
-        Err(err) => return report_error(cli, command_name(&cli.command), &err),
+        Err(err) => return report_error(cli, command_name(cli), &err),
     };
 
-    match &cli.command {
+    let Some(command) = &cli.command else {
+        // No subcommand: the bare interactive form, `qsh [user@]host`.
+        let Some(target) = &cli.interactive.target else {
+            // Reachable with global flags and nothing else:
+            // `arg_required_else_help` only fires on a *completely* empty
+            // command line, so `qsh --json` lands here. clap prints an
+            // error to stderr, which is what keeps stdout pure JSON in
+            // machine mode (`docs/CLI.md` §2.2, §4: usage errors write
+            // nothing to stdout in either mode).
+            let _ = Cli::command()
+                .error(
+                    clap::error::ErrorKind::MissingRequiredArgument,
+                    "no target and no subcommand: expected `qsh [user@]host` \
+                     or one of the subcommands below",
+                )
+                .print();
+            return EXIT_USAGE;
+        };
+        return run_interactive(
+            cli,
+            &ops,
+            tui::Attach::Open {
+                host: target.host.clone(),
+                user: target.user.clone(),
+            },
+            cli.interactive.escape_char,
+        );
+    };
+
+    match command {
         Command::Version => finish(cli, VersionOp::COMMAND, ops.version(), human::print_version),
         Command::Init { key_store } => finish(
             cli,
@@ -106,6 +140,17 @@ fn run(cli: &Cli) -> i32 {
             human::print_trust_remove,
         ),
         Command::Exec(args) => run_exec(cli, &ops, args),
+        Command::Attach(AttachArgs {
+            session_ref,
+            escape_char,
+        }) => run_interactive(
+            cli,
+            &ops,
+            tui::Attach::Existing {
+                session_ref: session_ref.clone(),
+            },
+            *escape_char,
+        ),
         Command::Session(cmd) => run_session(cli, &ops, cmd),
         Command::Sessions { host } => finish(
             cli,
@@ -114,6 +159,26 @@ fn run(cli: &Cli) -> i32 {
             human::print_session_list,
         ),
         Command::Serve { bind } => run_serve(&ops, bind.as_deref()),
+    }
+}
+
+/// `qsh [user@]host` and `qsh attach <session-ref>` — the interactive
+/// forms (`docs/CLI.md` §7).
+///
+/// The only command with **no envelope at all**: stdout carries the remote
+/// terminal's bytes, so every diagnostic goes to stderr (`docs/CLI.md`
+/// §2.2) and the exit code is the remote shell's (§4). Failures before the
+/// terminal is touched still report through the shared [`report_error`]
+/// path, which is what keeps `--json` honest about *why* it refuses.
+fn run_interactive(cli: &Cli, ops: &Ops, what: tui::Attach, escape: Option<EscapeChar>) -> i32 {
+    let command = what.command();
+    if cli.wants_json() {
+        return report_error(cli, command, &tui::json_mode_unsupported());
+    }
+    let EscapeChar(escape) = escape.unwrap_or(DEFAULT_ESCAPE_CHAR);
+    match tui::run(ops, what, escape) {
+        Ok(code) => code,
+        Err(err) => report_error(cli, command, &err),
     }
 }
 
@@ -520,8 +585,13 @@ fn finish<T: Serialize>(
     }
 }
 
-/// The dotted operation name a subcommand reports in its envelope.
-fn command_name(command: &Command) -> &'static str {
+/// The dotted operation name a command reports in its envelope. The bare
+/// interactive form (`qsh [user@]host`) has no subcommand; it reports the
+/// first operation it performs, `session.open`.
+fn command_name(cli: &Cli) -> &'static str {
+    let Some(command) = &cli.command else {
+        return SessionOpenOp::COMMAND;
+    };
     match command {
         Command::Version => VersionOp::COMMAND,
         Command::Init { .. } => IdentityInitOp::COMMAND,
@@ -529,6 +599,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Trust(TrustCmd::List) => TrustListOp::COMMAND,
         Command::Trust(TrustCmd::Remove { .. }) => TrustRemoveOp::COMMAND,
         Command::Exec(_) => ExecRunOp::COMMAND,
+        Command::Attach(_) => SessionAttachOp::COMMAND,
         Command::Session(SessionCmd::Open(_)) => SessionOpenOp::COMMAND,
         Command::Session(SessionCmd::Get { .. }) => SessionGetOp::COMMAND,
         Command::Session(SessionCmd::Read(_)) => SessionReadOp::COMMAND,

@@ -10,6 +10,7 @@ name = "qsh"
 path = "src/main.rs"
 
 [dependencies]
+base64.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -20,9 +21,19 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 tokio.workspace = true
 
+# Raw-mode terminal for the interactive TUI (`docs/design/architecture.md`
+# §8). unix-only: `qsh-cli` is also built for `x86_64-pc-windows-msvc`, where
+# the TUI path answers `UNSUPPORTED` instead (Windows client is P1).
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true, features = ["term", "ioctl", "signal"] }
+
 [dev-dependencies]
 tempfile.workspace = true
-base64.workspace = true
 jsonschema.workspace = true
 schemars.workspace = true
 qsh-testkit.workspace = true
+
+# The expect harness runs `qsh` itself under a pty so the termios path
+# really executes (`docs/design/testing.md` L5).
+[target.'cfg(unix)'.dev-dependencies]
+expectrl.workspace = true
