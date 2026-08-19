@@ -331,8 +331,13 @@ async fn close_terminates_the_whole_process_group_including_grandchildren() {
     let handle = broker
         .open(&sh("sleep 300 & echo GRANDCHILD=$!; wait"))
         .unwrap();
+    // `line_value_terminated`, not a `contains("GRANDCHILD=") && contains('\n')`
+    // pair: a newline appearing anywhere in the buffer does not prove the
+    // GRANDCHILD= line itself is the terminated one, and a still-growing
+    // buffer's unterminated tail fragment must not satisfy this predicate
+    // (see the helper's doc comment).
     let events = pull_until(&handle, &clock, 4096, |all| {
-        text(all).contains("GRANDCHILD=") && text(all).contains('\n')
+        line_value_terminated(&text(all), "GRANDCHILD=").is_some()
     })
     .await;
     let out = text(&events);
@@ -641,8 +646,12 @@ async fn resize_is_applied_to_the_pty() {
         .await
         .unwrap();
     within(handle.write(CONN, b"go\n".to_vec())).await.unwrap();
+    // `line_value_terminated`, not `line_value`: this predicate polls a
+    // buffer that is still growing, so it must not be satisfied by the
+    // SIZE= line before its trailing newline has actually arrived (see the
+    // helper's doc comment).
     pull_until(&handle, &clock, 4096, |all| {
-        line_value(&text(all), "SIZE=").is_some()
+        line_value_terminated(&text(all), "SIZE=").is_some()
     })
     .await;
     within(handle.resize(0, 0)).await.unwrap();
@@ -670,6 +679,24 @@ fn line_value<'a>(out: &'a str, prefix: &str) -> Option<&'a str> {
     out.lines()
         .map(|l| l.trim_end_matches('\r'))
         .find_map(|l| l.strip_prefix(prefix))
+}
+
+/// Like `line_value`, but only matches a line that is actually
+/// newline-terminated in `out`. `str::lines()` is lenient about the tail: an
+/// unterminated trailing fragment is still yielded as if it were a complete
+/// line, so a predicate polling a buffer that may still be growing can match
+/// on a half-written line just before its newline arrives — and the next
+/// write's echo can then land ahead of that pending newline on the kernel
+/// tty, corrupting the very value that was just matched. Use this (not
+/// `line_value`) for any predicate evaluated against a buffer that has not
+/// yet reached a known-final state (e.g. session exit).
+fn line_value_terminated<'a>(out: &'a str, prefix: &str) -> Option<&'a str> {
+    let terminated = if out.ends_with('\n') {
+        out
+    } else {
+        out.rsplit_once('\n').map_or("", |(head, _)| head)
+    };
+    line_value(terminated, prefix)
 }
 
 fn handle_id(handle: &SessionHandle) -> crate::broker::SessionId {
