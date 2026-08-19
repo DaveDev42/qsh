@@ -13,7 +13,7 @@
 - [ ] Property test: 임의의 append/read interleaving에서 gap 이벤트가 없는 한 반환 바이트 연결 == 원본 stream suffix (byte-identical, 무손실·무중복) — SC4의 property 표현.
 - [ ] `qsh user@host`로 실제 셸 사용 가능 — bash/zsh, vim, tmux, `claude`가 동작하고 resize 전파.
 - [ ] **클라이언트를 `yes` 실행 중 `kill -9` → reattach → last_seq부터 이어붙인 결과가 기준 stream과 byte-identical** (SC4). remote PTY와 자식 프로세스는 클라이언트 사망에 생존 (SC5).
-- [ ] Chaos proxy `repath()` → connection migration으로 세션 무중단; `sever()` → 2초 내 재dial + resume. (Step 7에서 **sever→resume 절반만** green: `crates/qsh-testkit/tests/resume_chaos.rs` — 클럭은 `sever()` 직전 시작, 첫 replay 바이트에서 정지, 옛 연결의 idle timeout 아님을 함께 단언. 남은 절반은 **path 사망 detector**로, 현재 probe는 `|| async { false }` stub이라 감지 비용이 window에 들어 있지 않다 — Step 9.)
+- [x] Chaos proxy `repath()` → connection migration으로 세션 무중단; `sever()` → 2초 내 재dial + resume. (Step 7 마감: `crates/qsh-cli/tests/attach_recovery.rs` — 실제 `Ops::session_attach` 스트림 아래에서 path를 죽이고, detector(`client/pathwatch.rs`)가 감지한 시점부터 driver가 스스로 찍은 `qsh::recovery` 레코드의 `time_to_recovery_ms <= 2000`을 단언한다. 테스트는 세션을 손으로 close/재attach하지 않으며, 전 시나리오가 idle timeout(45 s)의 절반 안에서 끝난다. `repath()`는 같은 하네스에서 무중단 생존(현재 QUIC passive migration으로 통과 — recovery 레코드 0건)을 단언한다.)
 - [ ] 실기기 Wi-Fi↔테더링 전환 20회 수동 캠페인, recovery 필드 기록 (SC3 조기 측정).
 
 M2 크기: 5ew (`docs/ROADMAP.md` M2 "크기").
@@ -144,7 +144,7 @@ M2 크기: 5ew (`docs/ROADMAP.md` M2 "크기").
 > - **시그널 pump는 세션 큐에서 절대 block하지 않는다** (`try_write`/`try_resize`). block하면 tokio가 disposition을 가져간 `SIGTERM`/`SIGHUP`/`SIGQUIT`이 dispatch되지 않아 클라이언트가 kill 불가 + 터미널 raw로 남는다. 같은 이유로 시그널 handler는 raw mode 진입 **전에** 설치하고(설치 완료를 기다린다), 전송 실패로 loop를 빠져나가지 않는다.
 > - **신호사(死) exit code는 `128 + signo`** — `qsh exec`와 같은 값(CLI.md §4). `session.exit`의 `signal` 이름을 `qsh_core::exec::signal_number`로 되돌린다. `254`는 "상태 미상"이라는 뜻만 남는다.
 > - **대화형 form에는 machine mode가 없다**(CLI.md §7). `--json`/`--jsonl`은 세션을 만들기 전에 `INVALID_ARGUMENT`.
-> - **재attach는 아직 sequence `0`부터 replay한다.** `attach_request()`가 cursor를 보내지 않으며 `attach_ops.rs`가 `replay_from() == 0`을 단언한다 — Step 7이 resume-with-cursor를 넣을 때 바꿀 단언이 그것이다.
+> - **사용자가 직접 거는 재attach는 sequence `0`부터 replay한다** — 그게 재연결한 터미널에 scrollback을 돌려주는 동작이고, `attach_ops.rs`의 `replay_from() == 0` 단언은 Step 7 이후에도 그대로 유효하다. cursor를 실어 보내는 resume은 *live attach 아래에서 path가 죽었을 때* driver가 하는 일이며, `attach_recovery.rs`가 그것을 증명한다.
 > - `QSH_ACCEPTANCE_STRICT=1`이면 수용 세트(bash/zsh/vim/tmux/`claude`) 누락이 skip이 아니라 **실패**다. M2를 certify하는 job은 이 변수를 켠 상태로 돌려야 한다.
 
 ---
@@ -157,6 +157,9 @@ M2 크기: 5ew (`docs/ROADMAP.md` M2 "크기").
 - `crates/qsh-core/src/broker/resume.rs` (신규 — 토큰 발급/해시 저장/rotation/검증, TTL)
 - `crates/qsh-core/src/server/mod.rs` (확장 — `SessionAttach` dispatch arm, 검사 순서)
 - `crates/qsh-core/src/client/reconnect.rs` (신규 — 재dial 루프, rebind 시도, 미-ack input 재전송(64 KiB 상한, 초과 시 조용히 쌓지 않고 오류))
+- `crates/qsh-core/src/client/pathwatch.rs` (신규 — path 사망 detector. quinn은 45 s idle timeout보다 이른 사망 신호를 주지 않으므로 제어 스트림 위 애플리케이션 `Ping`/`Pong` probe로 만든다)
+- `crates/qsh-core/src/ops/session.rs` (확장 — attach driver가 detector + `recover()`를 leg supervisor로 묶어 frontend 몰래 재dial·resume한다; `RecoveryConfig`)
+- `crates/qsh-cli/tests/attach_recovery.rs` (신규 — DoD 4번 게이트: 실제 attach 스트림 아래 `sever()`/`repath()`)
 - `crates/qsh-core/src/config.rs` (확장 — `Paths::resume_file()`, 0600 쓰기는 기존 `write_private_file` 재사용)
 - `crates/qsh-core/src/telemetry.rs` (신규 — recovery 결과/소요시간 기록. **stderr 구조화 진단만**: tracing target `qsh::recovery`, INFO, 한 줄 JSON, 필드 `recovery`/`time_to_recovery_ms`/`session_ref` — CLI.md §6.4, testing.md L4; stdout은 §2.2에 따라 계약 전용)
 - `crates/qsh-core/Cargo.toml` (blake3, subtle 추가)
@@ -165,7 +168,9 @@ M2 크기: 5ew (`docs/ROADMAP.md` M2 "크기").
 
 **(d) 완료 판정:** 재dial→resume 경로가 loopback에서 결정적으로 green이고, `recovery`/time-to-recovery가 기록된다. resume 토큰이 로그·audit·JSON envelope 어디에도 나타나지 않음(audit 레코드 타입에 payload 필드 자체가 없음 — 기존 `record_has_only_structural_fields` 테스트로 유지).
 
-**Step 7이 남긴 것(Step 9가 받는다):** `client/reconnect.rs`의 `recover()`/`OutputCursor`/`PendingInput`은 완성·테스트됐지만 **아직 어떤 command도 호출하지 않는다** — path 사망 *detector*가 없기 때문이다. 그래서 protocol.md §10-3의 방어적 `sequence ≤ L` 폐기는 제품 경로에서 아직 실행되지 않고, 2초 게이트도 stub probe로만 측정된다(위 DoD 4번 항목). Step 9는 detector를 붙여 `recover(...)` → `OutputCursor`로 이벤트를 흘리고, 그 순간 `RecoveryLayer`가 실제로 내보내는 줄까지 캠페인 스크립트가 파싱한다.
+**Step 7이 실제로 마감한 것:** path 사망 detector(`crates/qsh-core/src/client/pathwatch.rs` — 제어 스트림 위의 애플리케이션 `Ping`/`Pong` probe, active 250 ms / idle 5 s 두 cadence, RTT 배수로 스케일하는 deadline, 3-strike)가 `Ops::session_attach`의 driver에 붙어 있고, 사망 판정 시 driver가 (migration이 켜져 있으면) `Endpoint::rebind()`를 먼저 시도한 뒤 재dial + `SessionAttach{last_output_seq}`로 같은 세션을 이어붙인다. frontend는 아무것도 모른다 — 같은 `SessionAttachStream`이 계속 살아 있고, `OutputCursor`가 재전송분을 잘라내며(protocol.md §10-3의 방어적 `sequence ≤ L` 폐기가 이제 제품 경로에서 실행된다), `PendingInput`이 미-ack input을 정확히 한 번만 재적용한다. `recovery`/`time_to_recovery_ms` 레코드는 driver가 직접 찍는다.
+
+**Step 9가 받는 것:** 실기기 캠페인은 이 레코드를 파싱하기만 하면 된다 — 계측은 이미 제품 경로에 있다. 남은 미지수는 실제 인터페이스 전환에서 migrated/resumed/failed 분해가 어떻게 나오는가뿐이다.
 
 **(e) 인용:** `docs/design/protocol.md` §2(migration은 지연 최적화, correctness는 resume), §10 전체(토큰·rotation·reattach 4단계·gap·input 무손실·writer lease), `docs/design/architecture.md` §3(writer lease 규칙 a/b/c, child 종료 후 `exited` 상태), §7(state 경로), §8(blake3/subtle/zeroize), `docs/CLI.md` §6.4(gap event 계약), `docs/PRD.md` §8(세션 모델), §9(resume credential은 session과 peer identity에 결합), §13(30분 단절 후에도 TTL 내 복구), `docs/design/testing.md` L4(recovery 텔레메트리를 M2부터 계측), `docs/ROADMAP.md` §4 일정 리스크 1번.
 
@@ -189,7 +194,7 @@ M2 크기: 5ew (`docs/ROADMAP.md` M2 "크기").
 
 **(d) 완료 판정:** DoD 3·4번 항목 green. chaos 테스트는 seeded로 재현 가능하며 `sleep()`을 쓰지 않는다. 2초 재dial 기준이 assertion으로 코드에 박혀 있다(주석이 아니라).
 
-> **DoD 4번은 Step 7과 함께 닫힌다.** `chaos_proxy.rs`의 `REDIAL_DEADLINE` assertion은 *시나리오*만 묶는다 — 클럭이 테스트가 고른 지점에서 시작하고, path 사망 감지도 resume도 아직 없다(감지기가 없으므로 M2 Step 8 단독으로는 더 잘 할 수 없다; quinn idle timeout은 45 s). 실제 기준(“path 사망 감지 후 2초 내 재dial + resume”)은 Step 7이 `resume_chaos.rs`에 심는다: 클럭을 `sever()` 직전에 시작하고, 옛 세션을 손으로 `close()`하지 않으며, `session.attach` 후 첫 replay 바이트에서 멈추고, 옛 연결이 idle timeout으로 닫히지 않았음을 함께 단언한다. recovery 텔레메트리(`recovery`/`time_to_recovery_ms`)는 Step 7 (b)의 `crates/qsh-core/src/telemetry.rs`가 소유한다 — Step 9 (c)의 “텔레메트리 필드 파싱은 Step 8의 chaos 테스트가 이미 커버한다”는 Step 8의 나머지 절반(`resume_chaos.rs`)을 가리키며, `chaos_proxy.rs`/`chaos_relay.rs`는 텔레메트리를 다루지 않는다.
+> **DoD 4번은 Step 7과 함께 닫혔다.** `chaos_proxy.rs`의 `REDIAL_DEADLINE` assertion은 *시나리오*만 묶고(클럭이 테스트가 고른 지점에서 시작한다), `resume_chaos.rs`는 detector 없이 recover 메커니즘만 잰다. 실제 기준(“path 사망 감지 후 2초 내 재dial + resume”)은 Step 7이 `crates/qsh-cli/tests/attach_recovery.rs`에 심었다: 실제 `Ops::session_attach` 스트림 아래에서 `sever()`하고, 세션을 손으로 `close()`하거나 재attach하지 않으며, driver 자신이 찍은 `qsh::recovery` 레코드의 `time_to_recovery_ms`(클럭이 path 사망에서 시작한다)를 2000 ms에 대고 단언하고, 레코드가 정확히 1건임을 요구해 3번째 시도에서야 성공한 복구를 실패로 만든다. recovery 텔레메트리(`recovery`/`time_to_recovery_ms`)는 Step 7 (b)의 `crates/qsh-core/src/telemetry.rs`가 소유한다 — Step 9 (c)의 “텔레메트리 필드 파싱은 Step 8의 chaos 테스트가 이미 커버한다”는 Step 8의 나머지 절반(`resume_chaos.rs`)을 가리키며, `chaos_proxy.rs`/`chaos_relay.rs`는 텔레메트리를 다루지 않는다.
 
 **(e) 인용:** `docs/design/testing.md` L4 전체(설계·fault 표·대안 기각 근거·"chaos proxy는 PR 회귀 게이트이고 SC3 실측은 실기기 캠페인"·2초 기준), L6(fixture append-only, ErrorCode 전수 도달성, exit-code matrix, JSONL 순수성), CI 규율(port 0, seeded chaos, `sleep()` 금지), `docs/ROADMAP.md` M2 DoD 3·4번, 시퀀싱 원칙 6번("Chaos 하네스는 M2에서 resume과 함께 구축 … 측정 도구는 측정 대상과 같이 만든다"), `docs/PRD.md` §15 SC4·SC5.
 

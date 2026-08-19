@@ -244,6 +244,21 @@ pub const FIRST_INPUT_STREAM: InputStreamId = InputStreamId(1);
 /// dropped when a new one is minted.
 const MAX_INPUT_AXES: usize = 32;
 
+/// Hold the axis map to [`MAX_INPUT_AXES`], dropping the oldest ids first.
+///
+/// Ids are minted monotonically, so `BTreeMap` order is age order and the
+/// axis just created is always the largest key — it can never prune itself.
+fn prune_input_axes(meta: &mut Meta) {
+    while meta.applied_input.len() > MAX_INPUT_AXES {
+        let oldest = *meta
+            .applied_input
+            .keys()
+            .next()
+            .expect("non-empty: len is above the bound");
+        meta.applied_input.remove(&oldest);
+    }
+}
+
 /// Inbox messages (architecture.md §3 "mpsc 인박스").
 enum Command {
     Write {
@@ -412,34 +427,51 @@ impl SessionHandle {
         rx.await.map_err(|_| WriteError::Gone)?
     }
 
-    /// Mint the input axis for one attach and say where it starts.
+    /// Reserve the id of the input axis one attach *will* use, without
+    /// creating it.
+    ///
+    /// Split from [`seed_input_stream`](Self::seed_input_stream) so an
+    /// attach can name its axis to the credential rotation before the
+    /// rotation has decided. A redemption that loses that race then burns
+    /// nothing but a counter value: no map slot is taken, so a lost race
+    /// cannot evict a live peer's axis from the [`MAX_INPUT_AXES`] window.
+    ///
+    /// A **fresh** id every time, never the predecessor's, is what keeps
+    /// the previous attach — which may still be connected and typing after
+    /// being demoted to read-only — off the axis this one deduplicates
+    /// against.
+    pub fn reserve_input_stream(&self) -> InputStreamId {
+        let mut meta = self.shared.meta();
+        let id = InputStreamId(meta.next_input_stream);
+        meta.next_input_stream += 1;
+        id
+    }
+
+    /// Create the axis [`reserve_input_stream`](Self::reserve_input_stream)
+    /// handed out, and say where it starts.
     ///
     /// `from` is the axis this attach continues — the predecessor recorded
     /// on the resume credential — and the new axis is seeded with exactly
     /// what that one had applied, so the client's un-acked tail is still
     /// deduplicated to exactly-once (protocol.md §10-5). `None` is a client
     /// with no history: it starts at zero and deduplicates against nobody.
-    ///
-    /// A **fresh** id every time, never the predecessor's, is what keeps
-    /// the previous attach — which may still be connected and typing after
-    /// being demoted to read-only — off the axis this one deduplicates
-    /// against.
-    pub fn fork_input_stream(&self, from: Option<InputStreamId>) -> (InputStreamId, u64) {
+    pub fn seed_input_stream(&self, id: InputStreamId, from: Option<InputStreamId>) -> u64 {
         let mut meta = self.shared.meta();
         let start = from
             .and_then(|prev| meta.applied_input.get(&prev).copied())
             .unwrap_or(0);
-        let id = InputStreamId(meta.next_input_stream);
-        meta.next_input_stream += 1;
         meta.applied_input.insert(id, start);
-        while meta.applied_input.len() > MAX_INPUT_AXES {
-            let oldest = *meta
-                .applied_input
-                .keys()
-                .next()
-                .expect("non-empty: len is above the bound");
-            meta.applied_input.remove(&oldest);
-        }
+        prune_input_axes(&mut meta);
+        start
+    }
+
+    /// [`reserve_input_stream`](Self::reserve_input_stream) followed by
+    /// [`seed_input_stream`](Self::seed_input_stream) — the whole fork, for
+    /// callers with no rotation to interleave.
+    #[cfg(test)]
+    pub fn fork_input_stream(&self, from: Option<InputStreamId>) -> (InputStreamId, u64) {
+        let id = self.reserve_input_stream();
+        let start = self.seed_input_stream(id, from);
         (id, start)
     }
 
@@ -1016,6 +1048,11 @@ impl ActorState {
                     let mut meta = self.shared.meta();
                     let slot = meta.applied_input.entry(stream).or_insert(0);
                     *slot = (*slot).max(seq);
+                    // This path can create an axis too (a peer numbering
+                    // against an axis already pruned out), so it owes the
+                    // same bound a fork does — otherwise the map sits above
+                    // MAX_INPUT_AXES until the next attach.
+                    prune_input_axes(&mut meta);
                 }
                 let _ = resp.send(Err(err));
                 return;

@@ -90,6 +90,12 @@ pub enum ResumeError {
     /// The re-dial or the `session.attach` itself failed.
     #[error(transparent)]
     Client(#[from] ClientError),
+    /// The rebuild failed for a local reason rather than a wire one — the
+    /// resume credential could not be read back, or its successor could
+    /// not be made durable. Carried verbatim so the frontend sees the same
+    /// error code it would have seen from a first attach.
+    #[error(transparent)]
+    Local(#[from] crate::ops::OpError),
 }
 
 /// The endpoint-level operation migration needs: move the local socket to
@@ -168,7 +174,7 @@ impl<T> RecoveryOutcome<T> {
 /// is [`Recovery::Failed`], even if the attach would have succeeded a
 /// moment later: a late recovery is the failure mode this deadline exists
 /// to name.
-pub async fn recover<P, PFut, R, RFut, T>(
+pub async fn recover<P, PFut, R, RFut, T, E>(
     session_ref: &str,
     binder: Option<&dyn PathBinder>,
     mut probe: P,
@@ -178,7 +184,8 @@ where
     P: FnMut() -> PFut,
     PFut: Future<Output = bool>,
     R: FnOnce() -> RFut,
-    RFut: Future<Output = Result<T, ClientError>>,
+    RFut: Future<Output = Result<T, E>>,
+    E: Into<ResumeError>,
 {
     let timer = RecoveryTimer::start(session_ref);
 
@@ -262,14 +269,19 @@ impl OutputCursor {
                 }
                 let skip = self.last_seq.saturating_sub(start) as usize;
                 self.last_seq = sequence;
-                // `sequence > last_seq` above means the frame ends past what
-                // we delivered, so the overlap is always a strict prefix.
-                // The saturating form is defence in depth in the one
-                // direction that is safe: if it ever did cover the whole
-                // frame, the answer is "nothing left", never "all of it" —
-                // emitting the frame whole is the doubled output this type
-                // exists to prevent.
-                debug_assert!(skip < data.len(), "overlap covers the whole frame");
+                // The overlap can never *exceed* the frame: `start` is
+                // `sequence - len`, so `skip` is at most `len`. It can equal
+                // it, and legitimately does for the empty frame a host is
+                // free to send (`SessionFrame::validate` only caps the chunk
+                // size, so `Output{sequence: L+1, data: []}` is on the wire's
+                // menu) — that yields an empty slice, which is the right
+                // answer. What must never happen is the other direction:
+                // if the overlap ever did cover the whole frame, the answer
+                // is "nothing left", never "all of it", because emitting the
+                // frame whole is the doubled output this type exists to
+                // prevent. The saturating slice enforces exactly that, and
+                // the assertion guards the arithmetic rather than the wire.
+                debug_assert!(skip <= data.len(), "overlap ran past the frame");
                 let data = data.get(skip..).unwrap_or_default().to_vec();
                 Some(AttachEvent::Output { sequence, data })
             }
@@ -443,6 +455,41 @@ mod tests {
         assert_eq!(cursor.last_seq(), 12);
     }
 
+    /// A host is free to send an empty `Output` frame — `validate()` caps
+    /// the chunk size and nothing more — and one whose `sequence` is past
+    /// the cursor used to trip an assertion that assumed every accepted
+    /// frame carried at least one byte. In a debug build (every `cargo
+    /// test` binary, and every `qsh` a developer runs) that is a panic a
+    /// misbehaving or hostile host can trigger from the wire.
+    #[test]
+    fn an_empty_output_frame_past_the_cursor_is_accepted_not_a_panic() {
+        let mut cursor = OutputCursor::new(10);
+        // `Output{sequence: L + 1, data: []}` — the exact shape that panicked.
+        let kept = cursor.accept(output(11, ""));
+        assert_eq!(
+            text(kept).as_deref(),
+            Some(""),
+            "an empty frame carries no bytes, so nothing is delivered"
+        );
+        // The cursor still follows the host's offset, and real output after
+        // it is neither dropped nor doubled.
+        assert_eq!(cursor.last_seq(), 11);
+        assert_eq!(
+            text(cursor.accept(output(15, "abcd"))).as_deref(),
+            Some("abcd")
+        );
+    }
+
+    /// The same frame at or below the cursor takes the ordinary
+    /// already-delivered path.
+    #[test]
+    fn an_empty_output_frame_at_the_cursor_is_dropped() {
+        let mut cursor = OutputCursor::new(10);
+        assert!(cursor.accept(output(10, "")).is_none());
+        assert!(cursor.accept(output(3, "")).is_none());
+        assert_eq!(cursor.last_seq(), 10);
+    }
+
     #[test]
     fn fresh_output_passes_through_whole() {
         let mut cursor = OutputCursor::new(10);
@@ -572,7 +619,11 @@ mod tests {
             "mac/01K0",
             Some(&binder),
             || async { true },
-            || async { panic!("must not re-dial when the connection is alive") },
+            || async {
+                panic!("must not re-dial when the connection is alive");
+                #[allow(unreachable_code)]
+                Ok::<&str, ClientError>("")
+            },
         )
         .await;
         assert!(matches!(out.outcome, Ok(Recovered::Migrated)));
@@ -592,7 +643,11 @@ mod tests {
                 let answer = answers.next().expect("probed more than twice");
                 async move { answer }
             },
-            || async { panic!("must not re-dial when the rebind was enough") },
+            || async {
+                panic!("must not re-dial when the rebind was enough");
+                #[allow(unreachable_code)]
+                Ok::<&str, ClientError>("")
+            },
         )
         .await;
         assert!(matches!(out.outcome, Ok(Recovered::Migrated)));
@@ -606,7 +661,7 @@ mod tests {
             "mac/01K0",
             Some(&binder),
             || async { false },
-            || async { Ok("attached") },
+            || async { Ok::<_, ClientError>("attached") },
         )
         .await;
         assert!(matches!(out.outcome, Ok(Recovered::Resumed("attached"))));
@@ -622,7 +677,7 @@ mod tests {
             "mac/01K0",
             Some(&binder),
             || async { false },
-            || async { Ok("attached") },
+            || async { Ok::<_, ClientError>("attached") },
         )
         .await;
         assert!(matches!(out.outcome, Ok(Recovered::Resumed("attached"))));
@@ -635,7 +690,7 @@ mod tests {
             "mac/01K0",
             None,
             || async { false },
-            || async { Ok("attached") },
+            || async { Ok::<_, ClientError>("attached") },
         )
         .await;
         assert!(matches!(out.outcome, Ok(Recovered::Resumed("attached"))));
@@ -650,7 +705,7 @@ mod tests {
             || async { false },
             || async {
                 tokio::time::sleep(REDIAL_DEADLINE * 2).await;
-                Ok("too late")
+                Ok::<_, ClientError>("too late")
             },
         )
         .await;
@@ -671,7 +726,7 @@ mod tests {
             || async { false },
             || async {
                 tokio::time::sleep(Duration::from_millis(350)).await;
-                Ok("attached")
+                Ok::<_, ClientError>("attached")
             },
         )
         .await;

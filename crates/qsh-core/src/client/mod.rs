@@ -18,6 +18,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::exec::ExecSpec;
 
+pub mod pathwatch;
 pub mod reconnect;
 
 /// How long to wait for the peer's `Hello`.
@@ -520,25 +521,80 @@ impl Session {
     /// Read the next unsolicited control message — the asynchronous
     /// `SessionEvent`s an attached peer is owed (protocol.md §9). Pings are
     /// answered on the way; correlated responses are skipped.
+    ///
+    /// **Not cancel-safe**: answering a peer `Ping` writes, and losing a
+    /// `select!` race mid-write leaves half a frame on the wire. A caller
+    /// that must race this against anything else uses
+    /// [`next_control`](Self::next_control), which only reads.
     pub async fn next_event(&mut self) -> Result<Option<wire::SessionEvent>, ClientError> {
+        loop {
+            match self.next_control().await? {
+                None => return Ok(None),
+                Some(ControlIn::Event(ev)) => return Ok(Some(ev)),
+                Some(ControlIn::Ping { request_id }) => self.send_pong(request_id).await?,
+                Some(ControlIn::Pong) => {}
+            }
+        }
+    }
+
+    /// Read the next inbound control message that is not a correlated
+    /// response, **without writing anything**.
+    ///
+    /// This is [`next_event`](Self::next_event) with the reply to a peer
+    /// `Ping` handed back to the caller instead of sent inline, which is
+    /// what makes it cancel-safe: the only await is a framed read, whose
+    /// partial state lives in the decoder rather than on the stack. A
+    /// caller that races it in a `select!` — the attach's control pump,
+    /// which must also be able to send a liveness probe — can drop the
+    /// future at any poll and lose nothing.
+    pub async fn next_control(&mut self) -> Result<Option<ControlIn>, ClientError> {
         loop {
             let Some(msg) = self.ctl.recv.recv::<ControlMessage>().await? else {
                 return Ok(None);
             };
-            match msg.body {
-                Some(control_message::Body::SessionEvent(ev)) => return Ok(Some(ev)),
-                Some(control_message::Body::Ping(_)) => {
-                    self.ctl
-                        .send
-                        .send(&ControlMessage::new(
-                            msg.request_id,
-                            control_message::Body::Pong(wire::Pong {}),
-                        ))
-                        .await?;
-                }
-                _ => {}
-            }
+            return Ok(Some(match msg.body {
+                Some(control_message::Body::SessionEvent(ev)) => ControlIn::Event(ev),
+                Some(control_message::Body::Ping(_)) => ControlIn::Ping {
+                    request_id: msg.request_id,
+                },
+                Some(control_message::Body::Pong(_)) => ControlIn::Pong,
+                // Responses to requests nobody is waiting for: ignore.
+                _ => continue,
+            }));
         }
+    }
+
+    /// Answer a peer `Ping`.
+    pub async fn send_pong(&mut self, request_id: u64) -> Result<(), ClientError> {
+        self.ctl
+            .send
+            .send(&ControlMessage::new(
+                request_id,
+                control_message::Body::Pong(wire::Pong {}),
+            ))
+            .await?;
+        Ok(())
+    }
+
+    /// Send a liveness `Ping`; the peer answers with a `Pong` that arrives
+    /// as [`ControlIn::Pong`].
+    ///
+    /// The reply is deliberately **not** awaited here. A probe that blocked
+    /// on its own answer could not be issued from the same task that reads
+    /// them, and the thing being measured is whether *anything* comes back
+    /// at all — a `Pong`, a `SessionEvent`, a session output frame — not
+    /// the correlation of one particular request.
+    pub async fn send_ping(&mut self) -> Result<(), ClientError> {
+        let request_id = self.next_request_id;
+        self.next_request_id += 1;
+        self.ctl
+            .send
+            .send(&ControlMessage::new(
+                request_id,
+                control_message::Body::Ping(wire::Ping {}),
+            ))
+            .await?;
+        Ok(())
     }
 
     /// Finish the control stream and close the connection cleanly.
@@ -546,6 +602,22 @@ impl Session {
         let _ = self.ctl.send.finish();
         self.conn.close(0, b"done");
     }
+}
+
+/// One inbound control message that is not a correlated response
+/// (`docs/design/protocol.md` §9).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ControlIn {
+    /// An asynchronous session event (`writer_changed`, `closed`, …).
+    Event(wire::SessionEvent),
+    /// The peer is asking whether we are alive. Answer with
+    /// [`Session::send_pong`], carrying this id back.
+    Ping {
+        /// Correlation id to echo in the `Pong`.
+        request_id: u64,
+    },
+    /// The peer answered a [`Session::send_ping`].
+    Pong,
 }
 
 /// Assembled result of a remote exec.

@@ -20,15 +20,14 @@
 //! [`recover`], which is the same code path the product uses, not a
 //! test-local stopwatch.
 //!
-//! **What this does not yet measure.** testing.md L4's criterion is "2 s
-//! from path-death *detection*", and there is no detector: the probe passed
-//! to [`recover`] here is `|| async { false }`, which costs nothing. The
-//! measured window is therefore re-dial + attach + first byte, and the
-//! detection half of the budget is unrepresented. That is the honest state
-//! of the gate — the sever→resume half is green, the detector is the seam
-//! Step 9 plugs in.
-//! TODO(Step 9): drive this with the real path-death detector and re-check
-//! the bound with detection inside the window.
+//! **What this file measures, and where the product gate is.** The probe
+//! passed to [`recover`] here is `|| async { false }` — a path that is
+//! declared dead for free — so the window measured below is re-dial +
+//! attach + first byte, with the detection half of the budget excluded.
+//! This is the mechanism test. testing.md L4's full criterion ("2 s from
+//! path-death *detection*") is enforced against the real detector
+//! (`qsh_core::client::pathwatch`) driving a real `Ops::session_attach`
+//! stream in `qsh-cli/tests/attach_recovery.rs`.
 
 use std::time::Duration;
 
@@ -281,7 +280,11 @@ async fn a_repath_survives_as_a_migration_with_nothing_to_resume() {
                     .await
                     .is_ok_and(|r| r.is_ok())
             },
-            || async { panic!("a migrated connection must not be re-dialed — {ctx}") },
+            || async {
+                panic!("a migrated connection must not be re-dialed — {ctx}");
+                #[allow(unreachable_code)]
+                Ok::<(), ClientError>(())
+            },
         )
         .await
     };

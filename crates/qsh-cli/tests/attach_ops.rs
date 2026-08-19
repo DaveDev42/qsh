@@ -242,9 +242,11 @@ fn detaching_leaves_the_session_running_and_re_attachable() {
             }
 
             let mut stream = attach(&ops, &session_ref).expect("re-attach");
-            // Resume from a saved cursor is Step 7; today a re-attach
-            // replays the session from the start, which is what puts the
-            // scrollback back on a reconnecting terminal.
+            // A *user-initiated* re-attach is not a resume: it starts from
+            // zero on purpose, which is what puts the scrollback back on a
+            // reconnecting terminal. Resume-from-cursor is what the driver
+            // does under a live attach when the path dies, and it is proved
+            // in `attach_recovery.rs`, not here.
             assert_eq!(stream.replay_from(), 0);
             // The replay is what happened *before* this attach existed:
             // both the echo of the input and the answer to it.

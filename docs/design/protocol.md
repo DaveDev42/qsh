@@ -246,6 +246,14 @@ message ExecFrame {
 
    이 cursor는 **attach 단위 축(axis)** 이다. attach마다 호스트가 새 축을 발급하고, 그 축의 시작 offset은 resume credential이 가리키는 **직전 축의 적용 offset**이다 — 그래서 재전송은 여전히 exactly-once이면서, 아직 죽은 줄 모르고 계속 타이핑하는 **이전 attach**(read-only로 강등된 쪽)가 현재 writer의 cursor를 움직이지 못한다. lease 없는 peer의 write는 거절되고 **자기 축만** 전진시킨다(steal-back 시 거절된 바이트를 다시 보내지 않기 위해). 축이 세션 하나로 공유되면, 강등된 peer가 올린 offset 때문에 현재 writer의 입력이 "재전송"으로 오인돼 조용히 버려지고 ack까지 받는다 — PRD §8이 금지하는 정확히 그 손실이다. 축 개수는 상한이 있고 오래된 것부터 정리된다.
 
+**Path 사망 감지 (클라이언트).** §2의 예산("path 사망 감지 후 2초 내 재dial + resume")을 지키려면 감지가 QUIC 계층에서는 나오지 않는다는 사실을 인정해야 한다: quinn이 죽은 연결을 포기하는 유일한 무조건 신호는 `max_idle_timeout` 45 s이고, 그 값은 위에서 튜닝 대상이 아니라고 못박았다. 그래서 감지는 **제어 스트림 위의 애플리케이션 `Ping`/`Pong`** 으로 한다(§9의 frame은 이미 있고 호스트는 이미 응답한다):
+
+- **두 cadence.** 사용자 활동(입력 또는 출력)이 최근 15 s 안에 있었으면 250 ms마다, 아니면 5 s마다 probe한다. 하루 종일 idle한 셸이 초당 4번 radio를 깨우지 않게 하기 위해서다. idle 창에서의 감지는 느리지만, 그 창에는 잃을 대화형 상태도 없다.
+- **RTT에 비례하는 deadline.** 사망 판정 기준은 `max(1 s, 관측 RTT × 8)`이며, 연속 3회 무응답을 요구한다. 느린 링크를 죽었다고 오진하지 않기 위한 것이고, 세 값 모두 상수가 아니라 설정(`RecoveryConfig`)이다.
+- **소비자 정체는 사망이 아니다.** frontend가 이벤트를 늦게 읽어 pump가 막혀 있는 동안에는 판정을 유예한다. 그렇지 않으면 느린 터미널이 자기 연결을 끊는다.
+
+사망이 선언되면 클라이언트는 (인터페이스가 바뀐 경우) `Endpoint::rebind()`를 먼저 시도하고, 그것이 연결을 살리지 못하면 재dial → 위 4단계 reattach를 수행한다. **migration은 지연 최적화일 뿐이며 correctness는 resume이 보장한다.** 전 과정은 frontend에게 보이지 않는다 — 같은 attach 스트림이 계속 살아 있고, 재전송 중복은 `sequence ≤ L` 폐기가, 미-ack input은 위 5번이 처리한다. 결과는 `recovery ∈ {migrated, resumed, failed}` + `time_to_recovery_ms`로 stderr에 기록된다(CLI.md §6.4).
+
 **Writer lease.** 세션당 writer lease 1개. lease는 소유 연결이 죽으면 자동 해제된다(세션은 유지). `mode=RW` attach는 **기본이 steal**이다 — "절전 후 같은 사람이 재접속"이 지배적 경로이므로 수동 정리를 요구하면 핵심 약속이 깨진다. 기존 보유자가 실제로 살아 있으면 `SessionEvent::WriterChanged`를 받고 read-only로 강등된다. 신중한 자동화를 위해 `no_steal = true`는 steal 대신 `SESSION_CONFLICT`를 반환한다. 모든 handover 판정은 broker 단일 락 안에서 일어난다.
 
 ## 11. 역방향 모드

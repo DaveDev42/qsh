@@ -78,16 +78,17 @@ pub const MAX_PENDING: usize = 4_096;
 /// 복구되는 것은 통과가 아니다 — path 사망 감지 후 **2초 내 재dial +
 /// resume**".
 ///
-/// **What it does and does not bound today.** The client-side death detector
-/// and the resume half are PLAN M2 Step 7; nothing in M2 Step 8 can start
-/// the clock at path death, because nothing yet notices path death (quinn's
-/// idle timeout is 45 s). `tests/chaos_proxy.rs` therefore uses this
-/// constant only to bound a re-dial the *test* initiates — the scenario, not
-/// the criterion. Step 7 owes the real gate in `tests/resume_chaos.rs`:
-/// start the clock immediately before [`ChaosProxy::sever`], never close the
-/// old session by hand, stop it at the first replayed byte after
-/// `session.attach` on the re-dialled connection, and assert the old
-/// connection was not closed by idle timeout.
+/// **Where the real gate lives.** The client-side detector
+/// (`qsh_core::client::pathwatch`) and the resume half both landed in M2
+/// Step 7, and the criterion is enforced end to end by
+/// `qsh-cli/tests/attach_recovery.rs`: it severs the path under a live
+/// `Ops::session_attach` stream and asserts the driver's own
+/// `qsh::recovery` record carries `time_to_recovery_ms <= 2000` — the clock
+/// starts at path death, the test never closes or re-attaches the session
+/// by hand, and the whole scenario is bounded far inside quinn's 45 s idle
+/// timeout so "it eventually timed out" cannot pass. `tests/chaos_proxy.rs`
+/// and `tests/resume_chaos.rs` use this constant to bound re-dials the
+/// *test* initiates — the scenario, not the criterion.
 pub const REDIAL_DEADLINE: Duration = Duration::from_secs(2);
 
 // ---------------------------------------------------------------------------
