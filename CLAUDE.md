@@ -20,6 +20,7 @@ QSH is a QUIC-based direct-connect remote shell (single Rust binary `qsh`) that 
 - `docs/design/protocol.md` — wire protocol design (frames, streams, resume, reverse)
 - `docs/design/architecture.md` — crate/module design and key mechanisms
 - `docs/design/testing.md` — per-layer test strategy and CI discipline
+- `docs/campaigns/m2-mobility.md` — manual Wi-Fi↔tethering mobility campaign: preconditions, pre-defined pass/fail, record template (scripts in `scripts/mobility/`)
 - `docs/adr/` — architecture decision records (settled decisions)
 
 ## Commands
