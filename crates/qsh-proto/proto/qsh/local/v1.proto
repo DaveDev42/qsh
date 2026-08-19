@@ -1,0 +1,165 @@
+// QSH local IPC protocol, package `qsh.local.v1` ("localctl").
+//
+// This is the protocol a CLI process speaks to *this machine's* resident
+// `qsh listen` daemon over a Unix domain socket
+// ($XDG_RUNTIME_DIR/qsh/<pid>.sock, mode 0600) — introduced in M3, first
+// consumers `qsh hosts`/`qsh host get` and a reverse-host `qsh attach`
+// (`docs/design/architecture.md` §3, `docs/design/protocol.md` §11-3).
+//
+// It is a *separate file and package* from `qsh.wire.v1` deliberately:
+//
+//   * `docs/ROADMAP.md` M8 freezes `qsh.wire.v1` as the remote,
+//     externally-security-reviewed contract that crosses the network
+//     between two QSH peers. Every message here stays on one machine, on a
+//     socket only same-user local processes can even open — putting it in
+//     the wire file would let a local-only refactor block on the freeze
+//     that protects the actual remote attack surface.
+//   * "§5와 동일한 frame layer" (protocol.md §11-3) means the *parser* is
+//     shared: `qsh_proto::frame` (u32-BE length prefix + prost body,
+//     `CONTROL_FRAME_MAX` — see `crate::local::encode_local`/`decode_local`)
+//     runs unmodified over a `tokio::net::UnixStream`, exactly as it runs
+//     over a QUIC control stream. It does not mean this file shares
+//     `qsh.wire.v1`'s `.proto` source or tag numbering — the two are
+//     independent grammars that happen to reuse the same envelope.
+//   * `qsh-transport`'s quinn wrapper is *not* reused here — it is bound to
+//     quinn connection/stream types and localctl is not a transport-layer
+//     concern (`docs/design/architecture.md` §1 dependency direction:
+//     `qsh-transport` is invisible to anything below the connection it
+//     wraps).
+//
+// One-stream-per-connection ("conduit") model: each UDS connection is
+// exactly one logical stream, and its very first frame — a `LocalHello` —
+// declares what that connection is for (no separate local multiplexer is
+// built; `docs/design/protocol.md` §14 / ADR-0005 already commit every QSH
+// stream to declaring its own identity in-band, and this reuses that same
+// discipline instead of inventing a second one):
+//
+//   * `LOCAL_CONTROL` — a control session for `LocalHello.host`. After the
+//     `LocalHelloAck`, this connection carries the *exact same*
+//     `qsh.wire.v1` `ControlMessage`/`Response` pair that would cross the
+//     QUIC control stream to that host — the daemon relays each request
+//     onto the live reverse connection and relays the answer back.
+//   * `LOCAL_STREAM` — a data-stream conduit. The next frame after the
+//     `LocalHelloAck` is a `qsh.wire.v1` `StreamHeader{SESSION_DATA,
+//     ticket}`, exactly as it would be on a QUIC data stream.
+//   * `LOCAL_ADMIN` — a query about the daemon itself (`LocalHostList` and
+//     friends), never forwarded to any registered host.
+//
+// `qsh.wire.v1`'s `StreamKind` enum gets no UDS-only value for any of this:
+// stream identity is always the in-band header the receiver reads first, so
+// a local-only kind has no reason to exist in the frozen remote vocabulary.
+//
+// Every daemon-to-client frame on a localctl conduit — the reply to a
+// `LocalHello` and the reply to a `LOCAL_ADMIN` request alike — is exactly
+// one `LocalResponse`. This mirrors `qsh.wire.v1.Response`'s `oneof body`
+// envelope deliberately: two structurally distinct success payloads
+// (`LocalHelloAck{string,string,...}`) and a failure payload
+// (`LocalError{string,string}`) that happen to share the same field shapes
+// are not safely distinguishable on the wire without a discriminator —
+// `LocalResponse` is that discriminator, so a caller never has to guess
+// which reply type it received.
+
+syntax = "proto3";
+
+package qsh.local.v1;
+
+// First frame of every localctl connection; declares what the connection is
+// for before anything else happens on it.
+message LocalHello {
+  uint32 version = 1;
+  LocalStreamKind kind = 2;
+  // Host alias this conduit is for (LOCAL_CONTROL / LOCAL_STREAM); ignored
+  // for LOCAL_ADMIN, which is not about any particular host.
+  string host = 3;
+  // How long the caller is willing to wait for this request to be
+  // satisfied, upper-bounded by `LOCAL_WAIT_MAX` (60 s, `crate::local`) —
+  // the same clamp discipline as wire `SessionRead.wait_ms` /
+  // `SESSION_READ_MAX_WAIT`: a ceiling, not a rejection, so one caller
+  // cannot pin a daemon slot open indefinitely. What the daemon actually
+  // waits for (e.g. a pending registration) is a later step's concern —
+  // this field only carries the caller's request.
+  uint32 wait_ms = 4;
+}
+
+// What a localctl connection is for. `LOCAL_UNSPECIFIED` (the proto3
+// default, i.e. an unset field) is deliberately invalid — exactly like
+// `qsh.wire.v1.AttachMode.ATTACH_MODE_UNSPECIFIED` — so a caller must state
+// its intent explicitly and the daemon never guesses it.
+enum LocalStreamKind {
+  LOCAL_UNSPECIFIED = 0;
+  // A control session for `LocalHello.host`: relays `qsh.wire.v1`
+  // `ControlMessage`/`Response` over this connection.
+  LOCAL_CONTROL = 1;
+  // A data-stream conduit: the next frame is a `qsh.wire.v1` `StreamHeader`.
+  LOCAL_STREAM = 2;
+  // A query about the daemon itself; never forwarded to any host.
+  LOCAL_ADMIN = 3;
+}
+
+// The envelope for every daemon-to-client reply on a localctl conduit.
+// Exactly one variant is set — never bare `LocalHelloAck` / `LocalError` /
+// `LocalHostListResult` on the wire, so a reply frame is self-describing
+// the same way `qsh.wire.v1.Response` is.
+message LocalResponse {
+  oneof body {
+    LocalHelloAck hello_ack = 1;
+    LocalHostListResult host_list_result = 2;
+    LocalError error = 15;
+  }
+}
+
+// The daemon's success reply to a `LocalHello`.
+message LocalHelloAck {
+  // The resolved host alias (echoes `LocalHello.host`).
+  string host = 1;
+  // SPKI SHA-256 fingerprint (`sha256:BASE64`) of the peer the daemon holds
+  // this registration's live connection with. The CLI process is not
+  // itself a TLS endpoint on that connection and so has no other way to
+  // learn this value — without it, the resume fail-closed check
+  // ADR-0007 requires ("Ops sends the resume token only when the connected
+  // peer's SPKI fingerprint matches the stored entry's peer_spki_sha256")
+  // would have nothing to compare against on the reverse path and would
+  // silently stop happening.
+  string peer_fingerprint = 2;
+  // Registration generation (`docs/design/protocol.md` §11-4) at the
+  // moment of this ack.
+  uint64 generation = 3;
+  // Capabilities the registered host is offering in its host role
+  // (`ReverseRegistration.capabilities`, or `Hello.capabilities` when that
+  // was empty).
+  repeated string capabilities = 4;
+}
+
+// The daemon's failure reply to a `LocalHello` it could not satisfy.
+// `code` is one of the `docs/CLI.md` §3.3 strings — the same vocabulary as
+// `qsh.wire.v1.Error.code` and `qsh-proto`'s `ErrorCode` (never an ad hoc
+// string of its own).
+message LocalError {
+  string code = 1;
+  string message = 2;
+}
+
+// LOCAL_ADMIN request: list the daemon's currently-registered reverse
+// hosts.
+message LocalHostList {}
+
+// Success reply to `LocalHostList`.
+message LocalHostListResult {
+  repeated LocalHost hosts = 1;
+}
+
+// One reverse-registered host as the daemon sees it — the daemon's internal
+// admin view, distinct from the JSON `Host` type (`crate::types::Host`,
+// `docs/CLI.md` §5); the client `Ops` layer maps between the two.
+message LocalHost {
+  string name = 1;
+  string address = 2;
+  // Open string set, e.g. `"reachable"` | `"stale"` (`docs/CLI.md` §5).
+  string state = 3;
+  // SPKI SHA-256 fingerprint, `sha256:BASE64`.
+  string fingerprint = 4;
+  repeated string capabilities = 5;
+  uint64 generation = 6;
+  // RFC 3339 UTC.
+  string registered_at = 7;
+}

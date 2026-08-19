@@ -188,6 +188,20 @@ message Hello {
   ReverseRegistration reverse = 4;     // 역방향 target이 자신을 host로 제공할 때만 존재
 }
 
+// target이 자신을 host로 제공할 때 Hello.reverse에 담는 값(§11-2).
+message ReverseRegistration {
+  string offered_name = 1;  // 인증에 절대 쓰이지 않는 자기 신고 값. 검사 규칙은
+                             //   `name.is_empty() || wire::valid_host_name(name)` — 빈 문자열은
+                             //   검사에서 제외(이름을 controller에 위임한다는 뜻)이고, 비어 있지
+                             //   않으면 wire::valid_host_name()(1..=64 bytes, [A-Za-z0-9._-])을
+                             //   만족해야 한다. 실제 등록 이름은 controller가 정한다(§11-2 이름
+                             //   확정 규칙) — name-squatting 방지.
+  repeated string capabilities = 2;  // 이 target이 **이 등록에서 host 역할로 제공할** 기능
+                             //   문자열 집합(비어 있으면 Hello.capabilities와 동일). 미지 문자열은
+                             //   controller가 무시하며, 인가·identity 입력이 아니다. 신규 문자열을
+                             //   만들지 않는다 — 역방향의 신호는 Hello.reverse 필드의 존재 자체다.
+}
+
 // 모든 비-control 스트림의 첫 frame.
 message StreamHeader {
   StreamKind kind = 1;                 // SESSION_DATA | EXEC_DATA | TCP_CONNECT | TCP_ACCEPTED
@@ -263,9 +277,11 @@ message ExecFrame {
 **대칭 원칙:** TLS 역할(누가 dial했나)과 QSH 역할(누가 셸을 제공하나)은 `Hello`에서 분리된다. control 스트림 수립 후 프로토콜은 완전 대칭 — 어느 쪽이든 요청을 보낼 수 있고, **요청 수신자가 자기 ACL을 평가**한다. "client/host"는 연결 단위가 아니라 요청 단위 역할이다.
 
 1. `qsh listen`(controller)이 QUIC listener 실행, `qsh reverse <controller>`(target)가 평범한 상호 TLS로 dial.
-2. target의 `Hello.reverse = ReverseRegistration{offered_name, capabilities}`. controller는 target을 **인증서로** 인증(pin 또는 CA — `offered_name`은 절대 인증에 쓰지 않음)한 뒤 그 principal에 ACL action **`host.reverse`**를 검사한다. 기본 deny, 거부 시 연결 종료 + audit. 허용 시 controller는 자기 통제 하의 이름으로 등록한다: 그 fingerprint의 trust-store alias 우선, `offered_name`은 명시적 `allow_advertised_names` 설정 시에만 — 인가된 장비가 `personal-mac` 같은 이름을 사칭(name-squatting)하는 것을 막는다.
-3. 이후 controller에서 `qsh attach company-mac` 등: CLI 프로세스는 상주 `qsh listen` 데몬과 **local unix socket IPC**(`$XDG_RUNTIME_DIR/qsh/<pid>.sock`, 0600, §5와 동일한 frame layer — 파서 하나로 통일)로 통신하고, 데몬이 살아 있는 역방향 연결 위로 `SessionOpen`/`SessionAttach`를 보낸다. target은 자기 ACL(`session.open` 등)을 controller principal에 대해 평가한다 — **역방향 등록은 도달성만 부여하고 권한은 부여하지 않는다.**
-4. 연결 유지는 15s keep-alive. 연결이 죽으면 host 목록에서 stale 처리되고 target의 `qsh reverse` 재접속 루프(지수 backoff + jitter)가 재등록한다. target의 세션들은 재등록과 무관하게 유지되고 §10으로 resume된다.
+2. target의 `Hello.reverse = ReverseRegistration{offered_name, capabilities}`. controller는 target을 **인증서로** 인증(pin 또는 CA — `offered_name`은 절대 인증에 쓰지 않음)한다 — mTLS는 QUIC handshake에서 이미 끝나 있으므로 이 인증은 `Hello` 프레임을 읽기 전에 완료돼 있다. 인증된 연결에서 `Hello.reverse`를 받으면 `offered_name`에 모양 검사(`name.is_empty() || valid_host_name(name)` — 빈 문자열은 검사에서 제외되고 실제 이름은 controller가 정한다; 위반은 `INVALID_ARGUMENT` + 연결 종료, choke point 이전이므로 audit 없음)를 적용한 뒤, 그 principal에 ACL action **`host.reverse`**를 검사한다. 기본 deny, 거부 시 연결 종료 + audit(리소스는 하나도 만들지 않는다). 허용 시 controller는 자기 통제 하의 이름으로 등록한다: 그 fingerprint의 trust-store alias 우선, `offered_name`은 명시적 `allow_advertised_names` 설정 시에만(둘 다 없으면 `PERMISSION_DENIED`) — 인가된 장비가 `personal-mac` 같은 이름을 사칭(name-squatting)하는 것을 막는다. **충돌 처리:** 같은 이름의 live 등록이 이미 있고 fingerprint가 **다르면** 신규 등록을 `INVALID_ARGUMENT` + 연결 종료(조용한 덮어쓰기 금지), **같은 fingerprint면** 기존 등록을 대체하고 옛 연결을 닫으며 `generation`을 1 증가시킨다(NAT rebind로 인한 재등록이 정상 경로). **`qsh serve`(정방향 host)가 `Hello.reverse`를 받은 경우**는 이 대칭 원칙 하에서 실제로 발생 가능한 입력이며, 등록하지 않고 `UNSUPPORTED`로 답한다. `Hello.reverse` 없는 peer가 `qsh listen`에 연결한 경우도 `UNSUPPORTED` 후 종료다. (controller가 localctl UDS 연결을 accept할 때 요구하는 peer credential 검사(`SO_PEERCRED`/`getpeereid`)는 이 QUIC 등록 절차와 별개로 §11-3의 conduit 수립 시 수행되며, 구현은 M3 Step 5다.)
+3. 이후 controller에서 `qsh <name>`(신규 세션) 또는 `qsh attach <name>/<session_id>`(재attach) 등: CLI 프로세스는 상주 `qsh listen` 데몬과 **local unix socket IPC**(`$XDG_RUNTIME_DIR/qsh/<pid>.sock`, 0600, package `qsh.local.v1` — §5와 동일한 frame codec(`qsh_proto::frame`, u32-BE + prost)을 `tokio::net::UnixStream` 위에서 그대로 재사용하되, wire(`qsh.wire.v1`)와는 별도 `.proto` 파일·별도 package다)로 통신한다. **conduit 모델:** UDS 연결 하나가 논리 스트림(conduit) 하나이고, 첫 frame `LocalHello{version, kind, host, wait_ms}`가 그 정체를 정한다 — `LOCAL_CONTROL`(그 host의 control 세션: 이후 QUIC 위와 **완전히 같은** `ControlMessage`/`Response`가 흐른다), `LOCAL_STREAM`(다음 frame이 wire `StreamHeader{SESSION_DATA, ticket}`인 data 스트림), `LOCAL_ADMIN`(데몬 자신에 대한 조회 — `LocalHostList` 등). 데몬은 `LocalHelloAck{host, peer_fingerprint, generation, capabilities}`로 응답하며, `peer_fingerprint`는 CLI 프로세스가 스스로 알 수 없는(TLS endpoint가 아니므로) peer SPKI fingerprint를 되돌려 줘서 `Ops`가 ADR-0007의 fail-closed peer-mismatch 검사를 역방향에서도 수행할 수 있게 한다. **request_id 재매핑:** `LOCAL_CONTROL` conduit 위의 `ControlMessage.request_id`는 CLI 프로세스가 로컬에서 채번한 것이고, 데몬은 이를 자신이 역방향 QUIC connection 위에서 실제로 보내는 `ControlMessage.request_id`로 재매핑해 상관시킨다(여러 CLI 프로세스가 같은 QUIC connection을 공유하므로 채번 공간이 겹칠 수 있다). **peer credential 검사:** 데몬은 accept한 UDS 연결의 발신 프로세스가 자신과 같은 로컬 사용자인지 `SO_PEERCRED`(Linux)/`getpeereid`(macOS)로 검사한다. **localctl은 인가 계층이 아니다** — 그것은 이미 target의 ACL 몫이다: 데몬이 살아 있는 역방향 연결 위로 `SessionOpen`/`SessionAttach`를 그대로 전달하면 target이 자기 ACL(`session.open` 등)을 controller principal에 대해 평가한다 — **역방향 등록은 도달성만 부여하고 권한은 부여하지 않는다.** **응답 envelope:** 데몬→클라이언트 방향의 모든 frame은 예외 없이 `LocalResponse{oneof body}` 하나다(`LocalHelloAck`/`LocalError`/`LocalHostListResult`가 필드 shape상 서로 구별 불가능하기 때문에 필요 — wire의 `Response{oneof body}`와 같은 이유). 실패 응답은 `LocalError{code, message}`(`code`는 `docs/CLI.md` §3.3 어휘 그대로), `LocalHostList` 요청의 성공 응답은 `LocalHostListResult{repeated LocalHost hosts}`이며 `LocalHost{name, address, state, fingerprint, capabilities, generation, registered_at}`는 데몬의 admin view다(JSON `Host`와는 별개 타입, `docs/CLI.md` §5).
+4. **heartbeat의 정체:** 신규 wire 메시지는 없다. 연결 유지는 §2의 15s keep-alive이고, 사망 **감지**는 §10 "Path 사망 감지"와 같은 control 스트림 `Ping`/`Pong` probe다(두 cadence·RTT 비례 deadline·3-strike 판정 정책을 양쪽 role에서 그대로 재사용한다). 연결이 죽으면 controller는 host 목록에서 `state: "stale"`로 표시했다가 `[listen].stale_retention`(기본 120s — target의 `backoff_max_ms`(기본 30000ms)보다 확실히 크게, `stale_retention > backoff_max_ms × 3`) 후 제거한다. target은 사망 판정 후 지수 backoff + jitter(`backoff_initial_ms` 기본 500 → 배수 2 → `backoff_max_ms` 기본 30000, 등록 성공 시 초기값으로 리셋, 무한 재시도)로 재dial하고 `Hello.reverse`를 재전송해 재등록한다. target의 세션들은 재등록과 무관하게 유지되고 §10으로 resume된다.
+
+   **역방향에서의 §10 Reattach 매핑:** 재dial의 주체는 항상 **target**(host role)이지 controller가 아니다 — controller는 target이 새 연결을 세우기를 기다릴 뿐 자신은 아무것도 dial하지 않는다. controller 측 attach driver(§10의 재dial+redemption task에 대응하는 위치)는 registry에서 그 host의 새 `generation` 등록을 기다렸다가, 등록이 관측되면 §10 절차의 2단계(`SessionAttach{session_id, resume_token, last_output_seq}`)부터 그 새 연결 위에서 수행한다 — §10의 1단계("새 QUIC 연결")는 target이 이미 수행했으므로 controller가 이 leg에서 반복하지 않는다. **migration(`Endpoint::rebind()`)은 이 leg에 존재하지 않는다** — target의 재dial 자체가 유일한 복구 경로다.
 
 ## 12. 우선순위와 backpressure
 

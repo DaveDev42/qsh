@@ -270,6 +270,26 @@ impl Error {
     }
 }
 
+/// Shape of a name a reverse target may offer for itself
+/// (`ReverseRegistration.offered_name`) or a controller may register a
+/// target under: `1..=64` bytes of `[A-Za-z0-9._-]`.
+///
+/// Same discipline as `server::valid_session_id`
+/// (`crates/qsh-core/src/server/mod.rs`): a peer-supplied string that will
+/// become an ACL resource and an audit field gets its shape checked before
+/// either of those, so a peer cannot inflate audit records or exploit
+/// downstream assumptions with an oversized or oddly-charactered string
+/// (`docs/design/protocol.md` §9 — the same "check shape first" rule
+/// applied there to `session_id`). Lives in `qsh-proto`, not `qsh-core`,
+/// specifically so the M3 `host.reverse` ACL choke point can call it
+/// *before* authorization runs (`PLAN.md` M3 Step 1).
+pub fn valid_host_name(name: &str) -> bool {
+    (1..=64).contains(&name.len())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
 impl StreamHeader {
     /// Header for an exec data stream carrying `ticket`.
     pub fn exec_data(ticket: Vec<u8>) -> Self {
@@ -465,16 +485,29 @@ mod tests {
         proptest::collection::vec(any::<u8>(), 0..=max)
     }
 
+    fn arb_reverse_registration() -> impl Strategy<Value = ReverseRegistration> {
+        (
+            "[a-zA-Z0-9._-]{0,64}",
+            proptest::collection::vec("[a-z.0-9]{1,16}", 0..4),
+        )
+            .prop_map(|(offered_name, capabilities)| ReverseRegistration {
+                offered_name,
+                capabilities,
+            })
+    }
+
     fn arb_hello() -> impl Strategy<Value = Hello> {
         (
             proptest::collection::vec(any::<u32>(), 0..4),
             ".{0,32}",
             proptest::collection::vec("[a-z.0-9]{1,16}", 0..4),
+            proptest::option::of(arb_reverse_registration()),
         )
-            .prop_map(|(versions, device_name, capabilities)| Hello {
+            .prop_map(|(versions, device_name, capabilities, reverse)| Hello {
                 versions,
                 device_name,
                 capabilities,
+                reverse,
             })
     }
 
@@ -810,6 +843,18 @@ mod tests {
 
     // ---- roundtrip ------------------------------------------------------
 
+    /// `decode(encode(m)) == m`: the frame round-trips to an equal message.
+    ///
+    /// This does *not* also assert `encode(decode(b)) == b` (canonical
+    /// encoding) the way `local::tests::roundtrip_and_canonical` does — some
+    /// `qsh.wire.v1` messages carry a `map<string, string>` field
+    /// (`SessionOpen.env`, `ExecStart.env`), and prost's `HashMap` field
+    /// encoding order is a function of the map's internal bucket layout, not
+    /// wire order, so two maps with identical contents but different
+    /// insertion histories can legitimately re-encode to different (but
+    /// semantically equal) bytes. Canonical encoding is asserted separately,
+    /// scoped to the map-free messages that actually need it — see
+    /// `hello_encoding_is_canonical` below.
     fn roundtrip_via_frame<M: Message + Default + PartialEq + std::fmt::Debug>(m: &M, max: usize) {
         let wire = encode_framed(m, max).unwrap();
         let mut dec = FrameDecoder::new(max);
@@ -817,13 +862,39 @@ mod tests {
         let payload = dec.next_frame().unwrap().expect("one complete frame");
         assert_eq!(dec.next_frame().unwrap(), None, "no trailing bytes");
         let back: M = decode_msg(&payload).unwrap();
-        assert_eq!(&back, m);
+        assert_eq!(&back, m, "roundtrip: decode(encode(m)) == m");
+    }
+
+    /// `encode(decode(b)) == b` for a valid `b`: re-encoding what we just
+    /// decoded reproduces the exact bytes, not merely an equivalent message.
+    /// `Hello`/`ReverseRegistration` carry no map field, so this holds
+    /// (unlike `ControlMessage` in general — see `roundtrip_via_frame`).
+    fn assert_canonical_via_frame<M: Message + Default + PartialEq + std::fmt::Debug>(
+        m: &M,
+        max: usize,
+    ) {
+        let wire = encode_framed(m, max).unwrap();
+        let mut dec = FrameDecoder::new(max);
+        dec.push(&wire);
+        let payload = dec.next_frame().unwrap().expect("one complete frame");
+        let back: M = decode_msg(&payload).unwrap();
+        let re = encode_framed(&back, max).unwrap();
+        assert_eq!(re, wire, "canonical: encode(decode(b)) == b");
     }
 
     proptest! {
         #[test]
         fn control_message_roundtrips(m in arb_control()) {
             roundtrip_via_frame(&m, CONTROL_FRAME_MAX);
+        }
+
+        /// `Hello` (including the M3 `reverse` field) is map-free, so unlike
+        /// `ControlMessage` in general it owes canonical encoding too
+        /// (`docs/design/testing.md` L0).
+        #[test]
+        fn hello_encoding_is_canonical(m in arb_hello()) {
+            let ctl = ControlMessage::new(0, control_message::Body::Hello(m));
+            assert_canonical_via_frame(&ctl, CONTROL_FRAME_MAX);
         }
 
         #[test]
@@ -925,6 +996,31 @@ mod tests {
         let big = ExecFrame::stdout(vec![0u8; DATA_FRAME_MAX + 1]);
         assert!(matches!(
             encode_exec_frame(&big),
+            Err(WireEncodeError::TooLarge { .. })
+        ));
+    }
+
+    /// The allocation-bound guarantee extends to the new M3 message: a
+    /// `Hello.reverse` carrying an oversize `ReverseRegistration` is
+    /// refused by the same `CONTROL_FRAME_MAX` cap `encode_control` already
+    /// enforces for every other control message — no new bypass was opened
+    /// by adding the field.
+    #[test]
+    fn hello_with_oversize_reverse_registration_rejected_over_frame_cap() {
+        let msg = ControlMessage::new(
+            1,
+            control_message::Body::Hello(Hello {
+                versions: vec![0],
+                device_name: "hermes".into(),
+                capabilities: vec![],
+                reverse: Some(ReverseRegistration {
+                    offered_name: "x".into(),
+                    capabilities: vec!["x".repeat(CONTROL_FRAME_MAX)],
+                }),
+            }),
+        );
+        assert!(matches!(
+            encode_control(&msg),
             Err(WireEncodeError::TooLarge { .. })
         ));
     }
@@ -1178,12 +1274,20 @@ mod tests {
     /// that requires a deliberate `qsh/2` decision, not a test edit.
     #[test]
     fn golden_hello_frame() {
+        // No `reverse` field set: encoding is byte-for-byte identical to
+        // the pre-M3 wire format. This is the mechanical proof that adding
+        // `Hello.reverse` (M3, filling the tag `Hello` reserved for it) is
+        // additive — an old Hello re-encodes to exactly these bytes, field
+        // 4 simply never appears when unset. If this assertion ever needs
+        // to change, the wire format changed and that requires a
+        // deliberate `qsh/2` decision, not a test edit (PLAN.md M3 Step 1).
         let msg = ControlMessage::new(
             1,
             control_message::Body::Hello(Hello {
                 versions: vec![0],
                 device_name: "hermes".into(),
                 capabilities: vec!["exec".into()],
+                reverse: None,
             }),
         );
         let wire = encode_control(&msg).unwrap();
@@ -1199,6 +1303,75 @@ mod tests {
         dec.push(&wire);
         let back: ControlMessage = decode_msg(&dec.next_frame().unwrap().unwrap()).unwrap();
         assert_eq!(back, msg);
+    }
+
+    #[test]
+    fn golden_hello_with_reverse_frame() {
+        // New M3 golden: a Hello carrying `reverse` (a target registering
+        // itself). Paired with `golden_hello_frame` above — that one pins
+        // the additive *absence* of the field, this one pins its
+        // *presence*, both as checked-in bytes.
+        let msg = ControlMessage::new(
+            1,
+            control_message::Body::Hello(Hello {
+                versions: vec![0],
+                device_name: "hermes".into(),
+                capabilities: vec!["exec".into()],
+                reverse: Some(ReverseRegistration {
+                    offered_name: "personal-mac".into(),
+                    capabilities: vec![],
+                }),
+            }),
+        );
+        let wire = encode_control(&msg).unwrap();
+        assert_eq!(
+            hex(&wire),
+            "0000002508015221" // frame len 37 | request_id=1 | field 10 (Hello) len 33
+                .to_owned()
+                + "0a0100" // versions: packed [0]
+                + "12066865726d6573" // device_name "hermes"
+                + "1a0465786563" // capabilities ["exec"]
+                + "220e" // field 4 (ReverseRegistration) len 14
+                + "0a0c706572736f6e616c2d6d6163" // offered_name "personal-mac" (capabilities empty, omitted)
+        );
+        let mut dec = FrameDecoder::new(CONTROL_FRAME_MAX);
+        dec.push(&wire);
+        let back: ControlMessage = decode_msg(&dec.next_frame().unwrap().unwrap()).unwrap();
+        assert_eq!(back, msg);
+    }
+
+    // ---- valid_host_name --------------------------------------------
+
+    #[test]
+    fn valid_host_name_boundary_table() {
+        // Empty string: too short.
+        assert!(!valid_host_name(""));
+        // Exactly 64 bytes: allowed; 65 bytes: refused.
+        assert!(valid_host_name(&"a".repeat(64)));
+        assert!(!valid_host_name(&"a".repeat(65)));
+        // Path-traversal-shaped input: `/` is not in the allowed alphabet,
+        // so any name containing it is refused regardless of the dots.
+        assert!(!valid_host_name("../"));
+        assert!(!valid_host_name("/"));
+        // Two bare dots *are* in-alphabet on their own (`.` is allowed) —
+        // shape validity does not imply the name is semantically sensible,
+        // only that its bytes are in the allowed set and length range.
+        assert!(valid_host_name(".."));
+        // Unicode: multi-byte characters fall outside the ASCII alphabet.
+        assert!(!valid_host_name("café"));
+        assert!(!valid_host_name("主机"));
+        // Other disallowed separators.
+        assert!(!valid_host_name("host/name"));
+        assert!(!valid_host_name("host name"));
+        assert!(!valid_host_name("host@name"));
+        // Every allowed byte, exhaustively.
+        for b in (b'A'..=b'Z').chain(b'a'..=b'z').chain(b'0'..=b'9') {
+            let s = (b as char).to_string();
+            assert!(valid_host_name(&s), "byte {b} ({s:?}) should be allowed");
+        }
+        for c in ['.', '_', '-'] {
+            assert!(valid_host_name(&c.to_string()));
+        }
     }
 
     #[test]

@@ -97,6 +97,7 @@ impl Session {
                         .iter()
                         .map(|s| s.to_string())
                         .collect(),
+                    reverse: None,
                 }),
             ))
             .await?;

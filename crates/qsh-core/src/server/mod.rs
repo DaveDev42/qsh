@@ -278,6 +278,7 @@ impl Server {
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
+            reverse: None,
         }
     }
 

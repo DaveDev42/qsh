@@ -570,6 +570,7 @@ async fn hello(dialed: &qsh_transport::Dialed) -> FramedStream {
                     .iter()
                     .map(|s| s.to_string())
                     .collect(),
+                reverse: None,
             }),
         ))
         .await
