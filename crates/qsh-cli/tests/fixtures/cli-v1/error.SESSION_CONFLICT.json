@@ -1,0 +1,12 @@
+{
+  "command": "session.write",
+  "error": {
+    "code": "SESSION_CONFLICT",
+    "details": null,
+    "message": "session is no longer running",
+    "retryable": false
+  },
+  "ok": false,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

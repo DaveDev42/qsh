@@ -3,7 +3,9 @@ name: CI
 # Every push to main and every pull request runs the full gate set on all
 # three desktop platforms (Linux x64/arm64, macOS arm64/x64, Windows x64).
 # The gates are exactly the ones `CLAUDE.md` requires before a commit:
-# fmt, clippy -D warnings, tests, arch-lint, cargo-deny.
+# fmt, clippy -D warnings, tests, arch-lint, cargo-deny — plus the
+# interactive acceptance set, which needs binaries installed to be more
+# than a row of skips (see the `acceptance` job).
 
 on:
   push:
@@ -65,6 +67,33 @@ jobs:
       # Doc tests are not run by nextest.
       - run: cargo test --workspace --doc
 
+  # The interactive acceptance set (`PLAN.md` M2 DoD 2) as a *standing*
+  # gate. The suite skips an acceptance item whose binary is missing, which
+  # is right for a developer's box and wrong for a job that is supposed to
+  # keep the item from rotting — so this one installs what it needs and
+  # names those binaries in QSH_ACCEPTANCE_STRICT, which turns a missing
+  # install into a failure instead of a skip.
+  #
+  # `claude` is deliberately not in the list: it is not installable on a
+  # hosted runner. The full five-binary set (`QSH_ACCEPTANCE_STRICT=1`) is
+  # what certifies the milestone, and PLAN.md records where that was run.
+  acceptance:
+    name: acceptance (interactive shells)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+      - name: Install the acceptance set this runner can provide
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y tmux vim zsh
+      - run: cargo nextest run -p qsh-cli --test tui_expect
+        env:
+          QSH_ACCEPTANCE_STRICT: bash,zsh,vim,tmux
+
   arch:
     name: arch-lint (${{ matrix.os }})
     strategy:
@@ -88,7 +117,7 @@ jobs:
   ci-ok:
     name: ci-ok
     if: always()
-    needs: [fmt, clippy, test, arch, deny]
+    needs: [fmt, clippy, test, acceptance, arch, deny]
     runs-on: ubuntu-24.04
     steps:
       - name: Verify all jobs succeeded
