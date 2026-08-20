@@ -111,7 +111,15 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      # Not cargo-deny-action: its docker image floats independently of the
+      # action tag and broke against rust-toolchain.toml's pin (rustup inside
+      # the container had no matching musl toolchain). Same toolchain setup
+      # as every other job here + a prebuilt cargo-deny binary instead.
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - run: cargo deny check
 
   # Single required check for branch protection: green iff every job above is.
   ci-ok:
