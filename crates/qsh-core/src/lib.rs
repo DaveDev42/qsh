@@ -18,6 +18,7 @@ pub mod broker;
 pub mod client;
 pub mod config;
 pub mod exec;
+pub mod handshake;
 pub mod identity;
 pub mod ops;
 pub mod pty;

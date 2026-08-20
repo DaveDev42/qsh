@@ -21,8 +21,9 @@ use crate::exec::ExecSpec;
 pub mod pathwatch;
 pub mod reconnect;
 
-/// How long to wait for the peer's `Hello`.
-pub const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long to wait for the peer's `Hello`. Single definition now lives in
+/// [`crate::handshake`]; re-exported here so this path stays stable.
+pub use crate::handshake::HELLO_TIMEOUT;
 
 /// Client-side protocol errors.
 #[derive(Debug, Error)]
@@ -68,6 +69,42 @@ pub enum ClientError {
 /// output belongs to sessions (M2).
 pub const EXEC_OUTPUT_MAX: usize = 64 * 1024 * 1024;
 
+/// Map [`crate::handshake::HelloError`] onto the initiator's pre-existing
+/// [`ClientError`] surface, preserving every message exactly as it read
+/// before the handshake exchange moved into `handshake.rs` (PLAN M3 Step 2
+/// (d) — zero observable behavior change).
+fn map_hello_error(err: crate::handshake::HelloError) -> ClientError {
+    use crate::handshake::HelloError;
+    match err {
+        HelloError::Timeout => ClientError::HelloTimeout,
+        HelloError::ClosedBeforeHello => {
+            ClientError::Protocol("peer closed control stream before Hello".into())
+        }
+        HelloError::ExpectedHello => {
+            ClientError::Protocol("first control message was not Hello".into())
+        }
+        HelloError::VersionMismatch => {
+            ClientError::Unsupported("no common wire minor version".into())
+        }
+        HelloError::Remote {
+            code,
+            message,
+            retryable,
+        } => ClientError::Remote {
+            code,
+            message,
+            retryable,
+        },
+        HelloError::Stream(e) => ClientError::Stream(e),
+        HelloError::Connection(e) => ClientError::Connection(e),
+        // `handshake::initiate` never supplies a rejecting callback — only
+        // `respond`'s `make_local_hello` can produce this.
+        HelloError::Rejected(_) => {
+            unreachable!("initiate() never invokes a rejecting callback")
+        }
+    }
+}
+
 /// A negotiated connection: control stream open, `Hello` exchanged.
 pub struct Session {
     conn: Connection,
@@ -83,68 +120,36 @@ pub struct Session {
 impl Session {
     /// Open the control stream and exchange `Hello` on a fresh connection.
     pub async fn negotiate(conn: Connection, device_name: &str) -> Result<Self, ClientError> {
-        let (send, recv) = conn.open_bi().await?;
-        let mut ctl = FramedStream::control(send, recv);
-        // Top of the `docs/design/protocol.md` §12 band, same as the host's.
-        ctl.send.set_priority(wire::PRIORITY_CONTROL);
-        ctl.send
-            .send(&ControlMessage::new(
-                0,
-                control_message::Body::Hello(Hello {
-                    versions: wire::WIRE_MINOR_VERSIONS.to_vec(),
-                    device_name: device_name.to_string(),
-                    capabilities: wire::LOCAL_CAPABILITIES
-                        .iter()
-                        .map(|s| s.to_string())
-                        .collect(),
-                    reverse: None,
-                }),
-            ))
-            .await?;
-
-        let reply = tokio::time::timeout(HELLO_TIMEOUT, ctl.recv.recv::<ControlMessage>())
-            .await
-            .map_err(|_| ClientError::HelloTimeout)??
-            .ok_or_else(|| {
-                ClientError::Protocol("peer closed control stream before Hello".into())
-            })?;
-        let peer_hello = match reply.body {
-            Some(control_message::Body::Hello(h)) => h,
-            Some(control_message::Body::Response(wire::Response {
-                body: Some(response::Body::Error(e)),
-            })) => {
-                return Err(ClientError::Remote {
-                    code: e.error_code(),
-                    message: e.message,
-                    retryable: e.retryable,
-                });
-            }
-            _ => {
-                return Err(ClientError::Protocol(
-                    "first control message was not Hello".into(),
-                ));
-            }
+        let local_hello = Hello {
+            versions: wire::WIRE_MINOR_VERSIONS.to_vec(),
+            device_name: device_name.to_string(),
+            capabilities: wire::LOCAL_CAPABILITIES
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            reverse: None,
         };
-        if !wire::WIRE_MINOR_VERSIONS
-            .iter()
-            .any(|v| peer_hello.versions.contains(v))
-        {
-            return Err(ClientError::Unsupported(
-                "no common wire minor version".into(),
-            ));
-        }
-        let capabilities = wire::LOCAL_CAPABILITIES
-            .iter()
-            .filter(|c| peer_hello.capabilities.iter().any(|p| p == *c))
-            .map(|c| c.to_string())
-            .collect();
-        Ok(Self {
+        let (ctl, peer_hello) = crate::handshake::initiate(&conn, local_hello)
+            .await
+            .map_err(map_hello_error)?;
+        Ok(Self::from_control(conn, ctl, peer_hello))
+    }
+
+    /// Build a [`Session`] from an already-negotiated control stream (the
+    /// `ctl`/`peer_hello` [`crate::handshake::initiate`] just produced).
+    /// Split out so a caller that reaches the control stream a different
+    /// way — M3's reverse controller (`qsh listen`), which *accepts* the
+    /// reverse target's dialed-in connection and runs
+    /// [`crate::handshake::respond`] instead of `initiate` — can still end
+    /// up with a `Session` through the same construction.
+    pub fn from_control(conn: Connection, ctl: FramedStream, peer_hello: Hello) -> Self {
+        Self {
             conn,
             ctl,
             next_request_id: 1,
-            capabilities,
+            capabilities: crate::handshake::negotiated_capabilities(&peer_hello),
             peer_device_name: peer_hello.device_name,
-        })
+        }
     }
 
     /// The underlying connection.

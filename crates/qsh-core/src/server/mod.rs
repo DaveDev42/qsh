@@ -54,7 +54,9 @@ use crate::exec::{ExecSpec, run_exec};
 use crate::session_stream::SessionStream;
 
 /// How long a peer has to send its `Hello` (and open the control stream).
-pub const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
+/// Single definition now lives in [`crate::handshake`]; re-exported here so
+/// this path stays stable.
+pub use crate::handshake::HELLO_TIMEOUT;
 /// How long a data stream has to send its `StreamHeader`.
 pub const HEADER_TIMEOUT: Duration = Duration::from_secs(10);
 /// Ticket lifetime (`docs/design/protocol.md` §7).
@@ -269,8 +271,12 @@ impl Server {
         })
     }
 
-    /// The `Hello` this host sends.
-    pub fn local_hello(&self) -> Hello {
+    /// The `Hello` this host sends. `reverse` is `Some` only when this
+    /// `Hello` is a reverse target's self-registration on an initiator+host
+    /// connection (M3 Step 3's `qsh reverse` fills this in via
+    /// [`crate::handshake::initiate`]; every call site through this step
+    /// passes `None`).
+    pub fn local_hello(&self, reverse: Option<wire::ReverseRegistration>) -> Hello {
         Hello {
             versions: wire::WIRE_MINOR_VERSIONS.to_vec(),
             device_name: self.device_name.clone(),
@@ -278,7 +284,7 @@ impl Server {
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
-            reverse: None,
+            reverse,
         }
     }
 
@@ -1301,53 +1307,14 @@ impl Server {
     }
 
     async fn serve_connection_inner(self: Arc<Self>, conn: &Connection) -> Result<(), ConnError> {
-        let (send, recv) = tokio::time::timeout(HELLO_TIMEOUT, conn.accept_bi())
-            .await
-            .map_err(|_| ConnError::HelloTimeout)??;
-        let mut ctl = FramedStream::control(send, recv);
-        // Top of the `docs/design/protocol.md` §12 band: a saturated
-        // session/exec stream can never delay a control message.
-        ctl.send.set_priority(wire::PRIORITY_CONTROL);
-
-        let first = tokio::time::timeout(HELLO_TIMEOUT, ctl.recv.recv::<ControlMessage>())
-            .await
-            .map_err(|_| ConnError::HelloTimeout)??
-            .ok_or(ConnError::ClosedBeforeHello)?;
-        let Some(control_message::Body::Hello(peer_hello)) = first.body else {
-            return Err(ConnError::ExpectedHello);
-        };
-
-        let versions: Vec<u32> = wire::WIRE_MINOR_VERSIONS
-            .iter()
-            .copied()
-            .filter(|v| peer_hello.versions.contains(v))
-            .collect();
-        if versions.is_empty() {
-            let _ = ctl
-                .send
-                .send(&ControlMessage::error(
-                    0,
-                    wire::Error::new(
-                        ErrorCode::Unsupported,
-                        "no common wire minor version",
-                        false,
-                    ),
-                ))
-                .await;
-            return Err(ConnError::VersionMismatch);
-        }
-        let capabilities: Vec<String> = wire::LOCAL_CAPABILITIES
-            .iter()
-            .filter(|c| peer_hello.capabilities.iter().any(|p| p == *c))
-            .map(|c| c.to_string())
-            .collect();
-
-        ctl.send
-            .send(&ControlMessage::new(
-                0,
-                control_message::Body::Hello(self.local_hello()),
-            ))
-            .await?;
+        let (ctl, peer_hello) = crate::handshake::respond(conn, |_peer_hello| {
+            // M3 Step 2 does not yet read `Hello.reverse` or reject
+            // anything here (that lands in Step 3+); this callback always
+            // succeeds.
+            Ok(self.local_hello(None))
+        })
+        .await
+        .map_err(map_hello_error)?;
 
         let ctx = ConnCtx {
             principal: conn.principal().clone(),
@@ -1357,9 +1324,26 @@ impl Server {
                 .map(|fp| PeerFingerprint::new(*fp.as_bytes())),
             peer_addr: conn.remote_address(),
             conn_id: conn.stable_id(),
-            capabilities,
+            capabilities: crate::handshake::negotiated_capabilities(&peer_hello),
         };
 
+        self.serve_control(conn, ctl, ctx).await
+    }
+
+    /// Drive the dispatch loop over an already-negotiated control stream
+    /// (`ctl`, with `ctx` already built from the completed `Hello`
+    /// exchange). Crate-visible so a caller elsewhere in `qsh-core` that
+    /// establishes the control stream a different way — M3's
+    /// reverse-target path, which dials out and then runs
+    /// [`crate::handshake::initiate`] with the *host* role instead of
+    /// [`crate::handshake::respond`] — reaches this same dispatch loop
+    /// instead of duplicating it.
+    pub(crate) async fn serve_control(
+        self: Arc<Self>,
+        conn: &Connection,
+        mut ctl: FramedStream,
+        ctx: ConnCtx,
+    ) -> Result<(), ConnError> {
         // Control messages are handled inline, in arrival order, so the
         // control stream keeps its ordering guarantee for mutating ops. The
         // two exceptions never park this loop:
@@ -1864,7 +1848,7 @@ fn lookup_login_name() -> Option<String> {
 
 /// Per-connection protocol failures (all end the connection).
 #[derive(Debug, Error)]
-enum ConnError {
+pub(crate) enum ConnError {
     #[error("peer did not send Hello within {HELLO_TIMEOUT:?}")]
     HelloTimeout,
     #[error("peer closed the control stream before Hello")]
@@ -1873,6 +1857,18 @@ enum ConnError {
     ExpectedHello,
     #[error("no common wire minor version")]
     VersionMismatch,
+    /// `respond()`'s `make_local_hello` callback declined the peer's
+    /// `Hello`; the rejection was already sent as an error frame over the
+    /// control stream (`handshake::respond_on`), so this variant is purely
+    /// for the caller's own logging/close path. Never constructed while
+    /// `serve_connection_inner`'s callback always returns `Ok` (M3 Step 2
+    /// and earlier) — added now, ahead of Step 3 wiring a real rejection
+    /// into that callback, so the mapping in `map_hello_error` never has
+    /// to be `unreachable!()` for a peer-triggerable outcome (fail-closed
+    /// per `CLAUDE.md` "Security defaults": an authz-decline path must
+    /// never end in a panic).
+    #[error("{}: {}", .0.error_code(), .0.message)]
+    Rejected(wire::Error),
     #[error(transparent)]
     Stream(#[from] qsh_transport::StreamError),
     #[error(transparent)]
@@ -1895,8 +1891,38 @@ impl ConnError {
             ConnError::HelloTimeout
             | ConnError::ClosedBeforeHello
             | ConnError::ExpectedHello
-            | ConnError::VersionMismatch => false,
+            | ConnError::VersionMismatch
+            | ConnError::Rejected(_) => false,
         }
+    }
+}
+
+/// Map [`crate::handshake::HelloError`] onto the responder's pre-existing
+/// [`ConnError`] surface, preserving every message exactly as it read
+/// before the handshake exchange moved into `handshake.rs` (PLAN M3 Step 2
+/// (d) — zero observable behavior change).
+fn map_hello_error(err: crate::handshake::HelloError) -> ConnError {
+    use crate::handshake::HelloError;
+    match err {
+        HelloError::Timeout => ConnError::HelloTimeout,
+        HelloError::ClosedBeforeHello => ConnError::ClosedBeforeHello,
+        HelloError::ExpectedHello => ConnError::ExpectedHello,
+        HelloError::VersionMismatch => ConnError::VersionMismatch,
+        HelloError::Stream(e) => ConnError::Stream(e),
+        HelloError::Connection(e) => ConnError::Connection(e),
+        // `handshake::respond` only ever reads the peer's first message as
+        // a plain `Hello` (never as a reply to one of our own), so this
+        // arm stays structurally unreachable regardless of what any
+        // `make_local_hello` callback does — unlike `Rejected` below, it
+        // is not something a future step starts constructing.
+        HelloError::Remote { .. } => {
+            unreachable!("respond() never parses a reply to our own Hello")
+        }
+        // `serve_connection_inner`'s callback always returns `Ok` in M3
+        // Step 2 and earlier, so this arm is not exercised yet — but it is
+        // peer-triggerable from Step 3 onward (registration/ACL decline),
+        // so it maps to a real `ConnError` variant rather than panicking.
+        HelloError::Rejected(e) => ConnError::Rejected(e),
     }
 }
 
