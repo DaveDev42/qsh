@@ -351,13 +351,26 @@ pub struct ListenConfig {
 /// `[reverse]` section — `qsh reverse <controller>`, the reverse-mode
 /// target (`docs/CLI.md` §6.13, `docs/design/protocol.md` §11-2).
 ///
-/// `PLAN.md` Step 3 PR 3a wires `controller`/`offered_name` only; the
-/// backoff/heartbeat knobs (§11-4) are Step 4 scope and are not read yet.
+/// `PLAN.md` Step 3 PR 3a wires `offered_name` only — `controller` parses
+/// but is not read by any code path (see its own field doc); the
+/// backoff/heartbeat knobs (§11-4) are Step 4 scope and are not read yet
+/// either.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct ReverseConfig {
-    /// Trust-store alias of the controller to dial. The `qsh reverse
-    /// <controller>` positional argument wins over this.
+    /// Trust-store alias of the controller to dial. **Reserved, not
+    /// currently read by any code path.** `docs/CLI.md` §6.13's synopsis
+    /// (`qsh reverse <controller> [--offered-name <name>]`, no brackets
+    /// around `<controller>`) makes the CLI positional mandatory —
+    /// `crates/qsh-cli/src/cli.rs`'s `Command::Reverse.controller` is a
+    /// plain `String`, never absent — so there is no code path that would
+    /// ever fall back to this key the way `offered_name` genuinely falls
+    /// back to its own (`resolve_offered_name`, `reverse/target.rs`).
+    /// Kept so a `config.toml` carrying `[reverse].controller`
+    /// (`docs/design/architecture.md` §7's documented layout) parses
+    /// instead of hard-failing, and reserved in case a future milestone
+    /// relaxes the positional to optional — no ROADMAP/PLAN step currently
+    /// commits to that (`PLAN.md` M3 Step 3 review finding).
     pub controller: Option<String>,
     /// Name this target offers itself as. `--offered-name` wins over this.
     /// Only takes effect when the controller has no trust-store alias for

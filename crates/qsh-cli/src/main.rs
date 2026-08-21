@@ -45,6 +45,14 @@ const EXIT_REMOTE_CLAMPED: i32 = 254;
 /// no envelope (`docs/CLI.md` §6.12).
 const SERVE_MODE: &str = "serve";
 
+/// The name `qsh listen` reports in diagnostics. Not an operation — it has
+/// no envelope (`docs/CLI.md` §6.13).
+const LISTEN_MODE: &str = "listen";
+
+/// The name `qsh reverse` reports in diagnostics. Not an operation — it has
+/// no envelope (`docs/CLI.md` §6.13).
+const REVERSE_MODE: &str = "reverse";
+
 /// Usage error exit code (`docs/CLI.md` §4), matching clap's own.
 const EXIT_USAGE: i32 = 2;
 
@@ -96,12 +104,23 @@ fn init_tracing(cli: &Cli) {
     // `-v` says, because §6.4 fixes the record as visible at *default*
     // verbosity. An explicit spec governs it like anything else.
     let recovery_default = format!("{default},{}=info", qsh_core::telemetry::TARGET);
+    // `qsh listen`'s registration diagnostics (`registered`/`denied`/
+    // `replaced`/`lost`, `docs/CLI.md` §6.13) are the exact same shape of
+    // promise as the recovery record above — a one-line JSON record an
+    // operator/campaign script must see at *default* verbosity, never
+    // wrapped in the human formatter's timestamp/level prefix (adversarial
+    // review: at `warn` default the line was invisible outright; at `-v`
+    // it came out doubled and non-JSON, because both layers reused the
+    // same `human` filter/formatter that this constant now special-cases).
+    let reverse_target = qsh_core::reverse::listen::TARGET;
+    let reverse_default = format!("{default},{reverse_target}=info");
     let human = tracing_subscriber::fmt::layer()
         .with_writer(io::stderr)
         .with_target(false)
         .with_filter(env_filter(spec.as_deref(), default))
         .with_filter(tracing_subscriber::filter::filter_fn(|meta| {
             meta.target() != qsh_core::telemetry::TARGET
+                && meta.target() != qsh_core::reverse::listen::TARGET
         }));
     let recovery_enabled = !cli.quiet;
     let recovery = RecoveryLayer(StderrLines)
@@ -109,9 +128,16 @@ fn init_tracing(cli: &Cli) {
         .with_filter(tracing_subscriber::filter::filter_fn(move |meta| {
             recovery_enabled && meta.target() == qsh_core::telemetry::TARGET
         }));
+    let reverse_enabled = !cli.quiet;
+    let reverse = RecoveryLayer(StderrLines)
+        .with_filter(env_filter(spec.as_deref(), &reverse_default))
+        .with_filter(tracing_subscriber::filter::filter_fn(move |meta| {
+            reverse_enabled && meta.target() == reverse_target
+        }));
     tracing_subscriber::registry()
         .with(human)
         .with(recovery)
+        .with(reverse)
         .init();
 }
 
@@ -192,7 +218,23 @@ impl tracing::field::Visit for MessageOnly<'_> {
 fn run(cli: &Cli) -> i32 {
     let ops = match Ops::from_env() {
         Ok(ops) => ops,
-        Err(err) => return report_error(cli, command_name(cli), &err),
+        Err(err) => {
+            // `qsh listen`/`qsh reverse` are long-running modes with no
+            // envelope at all (`docs/CLI.md` §2.4, §6.13): stdout gets zero
+            // bytes on every path, including a setup failure this early —
+            // before `run_listen`/`run_reverse` even exist to apply their
+            // own stderr-only error path. `report_error` would otherwise
+            // print a `qsh.cli/v1` envelope to stdout here whenever
+            // `--json`/`--jsonl` was passed, exactly the leak `run_listen`/
+            // `run_reverse`'s own `Err` arms are already careful to avoid
+            // (adversarial review finding; `docs/design/testing.md` L6:
+            // "every machine-mode stdout line must be pure JSON" applies
+            // just as much to producing *no* line at all here).
+            return match long_running_setup_mode(&cli.command) {
+                Some(mode) => report_long_running_setup_error(mode, &err),
+                None => report_error(cli, command_name(cli), &err),
+            };
+        }
     };
 
     let Some(command) = &cli.command else {
@@ -267,6 +309,11 @@ fn run(cli: &Cli) -> i32 {
             human::print_session_list,
         ),
         Command::Serve { bind } => run_serve(&ops, bind.as_deref()),
+        Command::Listen { bind } => run_listen(&ops, bind.as_deref()),
+        Command::Reverse {
+            controller,
+            offered_name,
+        } => run_reverse(&ops, controller, offered_name.as_deref()),
     }
 }
 
@@ -560,6 +607,111 @@ fn run_serve(ops: &Ops, bind: Option<&str>) -> i32 {
     }
 }
 
+/// Whether `command` is one of the long-running modes whose setup failures
+/// must stay off stdout entirely (`docs/CLI.md` §2.4, §6.13), and if so,
+/// which mode name to report under. `None` for every ordinary operation
+/// (including `qsh serve`, which pre-dates this dispatch and is unchanged
+/// here), which keeps using [`report_error`]'s JSON-envelope path. A pure
+/// function so the routing decision itself is unit-testable without a real
+/// `Ops::from_env()` failure (which would need process-global environment
+/// mutation to provoke).
+fn long_running_setup_mode(command: &Option<Command>) -> Option<&'static str> {
+    match command {
+        Some(Command::Listen { .. }) => Some(LISTEN_MODE),
+        Some(Command::Reverse { .. }) => Some(REVERSE_MODE),
+        _ => None,
+    }
+}
+
+/// Report an [`OpError`] for `qsh listen`/`qsh reverse` — stderr only,
+/// never `report_error`'s JSON-envelope path, because these two
+/// long-running modes have no envelope at all and stdout must see zero
+/// bytes on every path (`docs/CLI.md` §2.4, §6.13). Shared by
+/// [`run_listen`]/[`run_reverse`]'s own runtime-failure arms and by
+/// [`run`]'s pre-dispatch `Ops::from_env()` failure, so the two paths
+/// cannot drift apart.
+fn report_long_running_setup_error(mode: &'static str, err: &OpError) -> i32 {
+    if let Err(io_err) = human::print_error(err) {
+        eprintln!("qsh {mode}: failed to write output: {io_err}");
+    }
+    EXIT_RUNTIME_FAILURE
+}
+
+/// `qsh listen` — the reverse-mode controller (`docs/CLI.md` §6.13). Not an
+/// operation: no envelope, nothing on stdout at all; the bound address and
+/// registration events go to stderr and the process runs until
+/// SIGINT/SIGTERM, exactly like [`run_serve`].
+fn run_listen(ops: &Ops, bind: Option<&str>) -> i32 {
+    let result = (|| -> Result<(), OpError> {
+        let config = ops.config()?;
+        // Identity is loaded synchronously, before any runtime exists: the
+        // credential store may block (and prompt) — keep that off the
+        // runtime's workers.
+        let identity = ops.load_identity()?.ok_or_else(|| {
+            OpError::new(
+                ErrorCode::ConfigError,
+                "no device identity; run `qsh init` first",
+            )
+        })?;
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .map_err(|err| OpError::new(ErrorCode::Internal, format!("runtime: {err}")))?;
+        runtime.block_on(qsh_core::reverse::listen::run_listen(
+            ops.paths(),
+            &config,
+            identity,
+            bind,
+            |addr| {
+                eprintln!("qsh listen: listening on {addr}");
+            },
+            shutdown_signal(),
+        ))
+    })();
+    match result {
+        Ok(()) => {
+            eprintln!("qsh listen: shutting down");
+            0
+        }
+        Err(err) => report_long_running_setup_error(LISTEN_MODE, &err),
+    }
+}
+
+/// `qsh reverse <controller>` — the reverse-mode target (`docs/CLI.md`
+/// §6.13). Not an operation: no envelope, nothing on stdout at all.
+/// Registers once and exits with a diagnostic when the connection dies (no
+/// reconnect loop yet); a clean SIGINT/SIGTERM exits `0` instead.
+fn run_reverse(ops: &Ops, controller: &str, offered_name: Option<&str>) -> i32 {
+    let result = (|| -> Result<(), OpError> {
+        let config = ops.config()?;
+        let identity = ops.load_identity()?.ok_or_else(|| {
+            OpError::new(
+                ErrorCode::ConfigError,
+                "no device identity; run `qsh init` first",
+            )
+        })?;
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .map_err(|err| OpError::new(ErrorCode::Internal, format!("runtime: {err}")))?;
+        runtime.block_on(qsh_core::reverse::target::run_reverse(
+            ops.paths(),
+            &config,
+            identity,
+            controller,
+            offered_name,
+            shutdown_signal(),
+        ))
+    })();
+    match result {
+        Ok(()) => {
+            eprintln!("qsh reverse: shutting down");
+            0
+        }
+        Err(err) => report_long_running_setup_error(REVERSE_MODE, &err),
+    }
+}
+
 /// Resolves on SIGINT (Ctrl-C) or, on Unix, SIGTERM.
 async fn shutdown_signal() {
     #[cfg(unix)]
@@ -716,6 +868,8 @@ fn command_name(cli: &Cli) -> &'static str {
         Command::Session(SessionCmd::Close { .. }) => SessionCloseOp::COMMAND,
         Command::Sessions { .. } => SessionListOp::COMMAND,
         Command::Serve { .. } => SERVE_MODE,
+        Command::Listen { .. } => LISTEN_MODE,
+        Command::Reverse { .. } => REVERSE_MODE,
     }
 }
 
@@ -831,6 +985,80 @@ mod tests {
             capture(Some("qsh::recovery=info"), false, || report.emit()).len(),
             1
         );
+    }
+
+    /// `docs/CLI.md` §6.13: a `qsh listen` registration event
+    /// (`RegistrationEvent`, `qsh_core::reverse::listen::TARGET`) is one
+    /// line of pure JSON on stderr **at default verbosity** — exactly the
+    /// same promise §6.4 makes for a recovery record, and `init_tracing`
+    /// now wires a dedicated layer for it (mirroring `recovery`) instead of
+    /// leaving it to fall through the `warn`-default human layer, which
+    /// would either drop it entirely or wrap it in a timestamp/level prefix
+    /// (adversarial review finding). This test pins the *composition* —
+    /// the same `EnvFilter`/`filter_fn` shape `init_tracing` builds — not
+    /// `RegistrationEvent` itself, which is private to `qsh-core` and
+    /// already pins its own JSON shape in `reverse::listen`'s unit tests.
+    #[test]
+    fn a_reverse_registration_event_is_one_pure_json_line_at_default_verbosity() {
+        let target = qsh_core::reverse::listen::TARGET;
+        let sink = Captured::default();
+        let default = "warn"; // `cli.verbose == 0`, `cli.quiet == false`
+        let reverse_default = format!("{default},{target}=info");
+        let layer = RecoveryLayer(sink.clone())
+            .with_filter(env_filter(None, &reverse_default))
+            .with_filter(tracing_subscriber::filter::filter_fn(move |meta| {
+                meta.target() == target
+            }));
+        let subscriber = tracing_subscriber::registry().with(layer);
+        let line =
+            r#"{"event":"registered","host":"widget","fingerprint":"sha256:abc","generation":0}"#;
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(target: qsh_core::reverse::listen::TARGET, "{}", line);
+        });
+        let lines = sink.0.lock().expect("not poisoned");
+        assert_eq!(
+            *lines,
+            vec![line.to_string()],
+            "visible at default verbosity, byte-identical, no prefix"
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(&lines[0]).expect("the line is pure JSON");
+        assert_eq!(parsed["event"], "registered");
+        assert_eq!(parsed["host"], "widget");
+    }
+
+    /// `docs/CLI.md` §2.4/§6.13: `qsh listen`/`qsh reverse` write zero
+    /// bytes to stdout on every path, envelope included — even a setup
+    /// failure this early (`Ops::from_env()`, before `run_listen`/
+    /// `run_reverse` exist to apply their own stderr-only error path).
+    /// `run`'s dispatch on an `Ops::from_env()` failure must therefore
+    /// route these two to [`report_long_running_setup_error`] (stderr
+    /// only) rather than [`report_error`] (which prints a `qsh.cli/v1`
+    /// envelope to stdout whenever `--json`/`--jsonl` was passed —
+    /// adversarial review finding). This pins the routing decision itself;
+    /// `report_long_running_setup_error`'s own body is `human::print_error`
+    /// verbatim, already proven stderr-only.
+    #[test]
+    fn ops_from_env_failure_routes_listen_and_reverse_off_the_envelope_path() {
+        assert_eq!(
+            long_running_setup_mode(&Some(Command::Listen { bind: None })),
+            Some(LISTEN_MODE)
+        );
+        assert_eq!(
+            long_running_setup_mode(&Some(Command::Reverse {
+                controller: "widget".to_string(),
+                offered_name: None,
+            })),
+            Some(REVERSE_MODE)
+        );
+        // Every ordinary operation (and `qsh serve`, unchanged here) keeps
+        // using `report_error`'s envelope path.
+        assert_eq!(
+            long_running_setup_mode(&Some(Command::Serve { bind: None })),
+            None
+        );
+        assert_eq!(long_running_setup_mode(&Some(Command::Version)), None);
+        assert_eq!(long_running_setup_mode(&None), None);
     }
 
     #[test]

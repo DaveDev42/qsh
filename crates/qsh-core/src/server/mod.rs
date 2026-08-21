@@ -1313,10 +1313,22 @@ impl Server {
     }
 
     async fn serve_connection_inner(self: Arc<Self>, conn: &Connection) -> Result<(), ConnError> {
-        let (ctl, peer_hello) = crate::handshake::respond(conn, |_peer_hello| {
-            // M3 Step 2 does not yet read `Hello.reverse` or reject
-            // anything here (that lands in Step 3+); this callback always
-            // succeeds.
+        let (ctl, peer_hello) = crate::handshake::respond(conn, |peer_hello| {
+            // A forward host does not accept registrations — the
+            // symmetric-protocol counterpart of `qsh listen` refusing a
+            // peer with no `Hello.reverse` at all (`docs/design/
+            // protocol.md` §11-2, `PLAN.md` M3 Step 3). Zero resources:
+            // this runs inside `respond`'s callback, strictly before any
+            // session/ticket/registry state could exist, and the rejection
+            // error frame this writes gets the same bounded drain as every
+            // other decline on this seam (`handshake::REJECTION_DRAIN_TIMEOUT`).
+            if peer_hello.reverse.is_some() {
+                return Err(wire::Error::new(
+                    ErrorCode::Unsupported,
+                    "this host does not accept reverse registrations",
+                    false,
+                ));
+            }
             Ok(self.local_hello(None))
         })
         .await
@@ -1338,13 +1350,18 @@ impl Server {
 
     /// Drive the dispatch loop over an already-negotiated control stream
     /// (`ctl`, with `ctx` already built from the completed `Hello`
-    /// exchange). Crate-visible so a caller elsewhere in `qsh-core` that
-    /// establishes the control stream a different way — M3's
-    /// reverse-target path, which dials out and then runs
+    /// exchange). Public for the same reason [`Self::accept_and_serve`] is:
+    /// a caller that establishes the control stream a different way reaches
+    /// this same dispatch loop instead of duplicating it. Two such callers
+    /// exist — M3's reverse-target path (`qsh-core`'s own
+    /// `reverse::target::run_reverse`, which dials out and runs
     /// [`crate::handshake::initiate`] with the *host* role instead of
-    /// [`crate::handshake::respond`] — reaches this same dispatch loop
-    /// instead of duplicating it.
-    pub(crate) async fn serve_control(
+    /// [`crate::handshake::respond`]), and `qsh-testkit`'s role-swapped
+    /// connected-pair harness (`crates/qsh-testkit/src/reverse.rs`'s
+    /// `ReversePairHarness`, `PLAN.md` M3 Step 3 PR 3b's role-axis-
+    /// independence proof), which needs this reachable from outside the
+    /// crate — hence `pub`, not `pub(crate)`.
+    pub async fn serve_control(
         self: Arc<Self>,
         conn: &Connection,
         mut ctl: FramedStream,
@@ -1852,9 +1869,10 @@ fn lookup_login_name() -> Option<String> {
     None
 }
 
-/// Per-connection protocol failures (all end the connection).
+/// Per-connection protocol failures (all end the connection). `pub` because
+/// [`Server::serve_control`] is (same reasoning, same doc comment).
 #[derive(Debug, Error)]
-pub(crate) enum ConnError {
+pub enum ConnError {
     #[error("peer did not send Hello within {HELLO_TIMEOUT:?}")]
     HelloTimeout,
     #[error("peer closed the control stream before Hello")]

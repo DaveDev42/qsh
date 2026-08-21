@@ -13,12 +13,14 @@ use qsh_core::audit::MemoryAuditSink;
 use qsh_core::broker::{Broker, BrokerConfig, PipeFactory, SystemClock};
 use qsh_core::client::Session;
 use qsh_core::server::Server;
+use qsh_proto::wire::{self, Hello};
 use qsh_transport::{
-    CertificateDer, Connection, Dialed, Dialer, Fingerprint, Listener, LocalIdentity, Principal,
-    StaticTrust,
+    CertificateDer, Connection, Dialed, Dialer, Fingerprint, FramedStream, Listener, LocalIdentity,
+    Principal, StaticTrust,
 };
 
 use crate::chaos::{ChaosPolicy, ChaosProxy};
+use crate::pair::HostedPair;
 
 /// A freshly generated self-signed Ed25519 device identity.
 #[derive(Clone)]
@@ -299,6 +301,29 @@ impl LoopbackHarness {
             .unwrap_or_else(|err| panic!("negotiate: {err:?} — {}", self.detail()))
     }
 
+    /// [`Self::session`] without the [`Session`] wrapper: dial, run
+    /// [`qsh_core::handshake::initiate`] with the ordinary "laptop" `Hello`,
+    /// and hand back the raw [`Connection`]/[`FramedStream`] — for tests
+    /// that pipeline `wire::ControlMessage`s directly instead of going
+    /// through the typed client API (`attach_loopback.rs`'s wedged-child/
+    /// backlog/pipelining scenarios; [`HostedPair::raw_session`]'s doc).
+    pub async fn raw_session(&self) -> (Connection, FramedStream) {
+        let dialed = self.dial().await;
+        let local_hello = Hello {
+            versions: wire::WIRE_MINOR_VERSIONS.to_vec(),
+            device_name: "laptop".to_string(),
+            capabilities: wire::LOCAL_CAPABILITIES
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            reverse: None,
+        };
+        let (ctl, _peer_hello) = qsh_core::handshake::initiate(&dialed.connection, local_hello)
+            .await
+            .unwrap_or_else(|err| panic!("raw negotiate: {err:?} — {}", self.detail()));
+        (dialed.connection, ctl)
+    }
+
     /// Stop the host and, for a non-chaotic harness, wait for it to drain.
     ///
     /// **A chaotic harness does not drain.** Its accept loop skips
@@ -358,5 +383,35 @@ impl Drop for LoopbackHarness {
             let _ = tx.send(());
         }
         self.task.abort();
+    }
+}
+
+impl HostedPair for LoopbackHarness {
+    fn server(&self) -> &Arc<Server> {
+        &self.server
+    }
+
+    fn broker(&self) -> &Arc<Broker> {
+        &self.broker
+    }
+
+    fn pipes(&self) -> &Arc<PipeFactory> {
+        &self.pipes
+    }
+
+    fn audit(&self) -> &Arc<MemoryAuditSink> {
+        &self.audit
+    }
+
+    async fn session(&self) -> Session {
+        LoopbackHarness::session(self).await
+    }
+
+    async fn raw_session(&self) -> (Connection, FramedStream) {
+        LoopbackHarness::raw_session(self).await
+    }
+
+    async fn shutdown(self) {
+        LoopbackHarness::shutdown(self).await
     }
 }

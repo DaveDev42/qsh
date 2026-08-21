@@ -5,6 +5,14 @@
 //!
 //! Every wait here is a real round trip under a wall-clock deadline — no
 //! sleep-based synchronisation.
+//!
+//! Every scenario below is a generic `async fn<P: HostedPair>(h: P)` run
+//! twice — once against [`LoopbackHarness`] (forward) and once against
+//! [`ReversePairHarness`] (reverse: the target dials the controller and
+//! *is* the host; the controller drives the attach stream as the
+//! client-role peer) — identical body, identical assertions, in both
+//! directions: the mechanical proof of role-axis independence `PLAN.md` M3
+//! Step 3 PR 3b owes.
 
 use std::time::Duration;
 
@@ -12,14 +20,17 @@ use qsh_core::broker::{PipeHandle, SessionSpec};
 use qsh_core::client::{AttachEvent, Session};
 use qsh_proto::ErrorCode;
 use qsh_proto::wire::{self, StreamHeader, session_frame};
+use qsh_testkit::HostedPair;
 use qsh_testkit::loopback::LoopbackHarness;
+use qsh_testkit::reverse::ReversePairHarness;
 use qsh_transport::FramedStream;
 
 /// Wall-clock ceiling for anything that should resolve in milliseconds.
 /// A miss is a hang, which is a failure, not flake.
 const DEADLINE: Duration = Duration::from_secs(20);
 
-/// The harness' replay ring and pipe buffers (`LoopbackHarness`).
+/// The harness' replay ring and pipe buffers (`LoopbackHarness`/
+/// `ReversePairHarness` both build a 64 KiB ring).
 const RING_BYTES: usize = 64 * 1024;
 
 fn open_req() -> wire::SessionOpen {
@@ -35,12 +46,12 @@ fn open_req() -> wire::SessionOpen {
 /// Open a session and redeem its `SESSION_DATA` ticket on a fresh bidi
 /// stream. Returns the session id, the "child" side of the pipe, and the
 /// live attach stream.
-async fn open_and_attach(
-    h: &LoopbackHarness,
+async fn open_and_attach<P: HostedPair>(
+    h: &P,
     s: &mut Session,
 ) -> (String, PipeHandle, FramedStream) {
     let opened = s.session_open(open_req()).await.expect("session.open");
-    let pipe = h.pipes.take().expect("pipe handle");
+    let pipe = h.pipes().take().expect("pipe handle");
     let (send, recv) = s.connection().open_bi().await.expect("open_bi");
     let mut data = FramedStream::data(send, recv);
     data.send
@@ -76,9 +87,7 @@ async fn read_output(data: &mut FramedStream, want: usize) -> (Vec<u8>, Vec<u64>
 
 /// Output arrives in order, split at the wire chunk cap, with `sequence`
 /// the exact cumulative end offset of each chunk.
-#[tokio::test(flavor = "multi_thread")]
-async fn attach_stream_delivers_output_in_order_with_monotonic_sequences() {
-    let h = LoopbackHarness::start().await;
+async fn attach_stream_delivers_output_in_order_with_monotonic_sequences<P: HostedPair>(h: P) {
     let mut s = h.session().await;
     let (_id, mut pipe, mut data) = open_and_attach(&h, &mut s).await;
 
@@ -112,12 +121,24 @@ async fn attach_stream_delivers_output_in_order_with_monotonic_sequences() {
     h.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn attach_stream_delivers_output_in_order_with_monotonic_sequences_forward() {
+    attach_stream_delivers_output_in_order_with_monotonic_sequences(LoopbackHarness::start().await)
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn attach_stream_delivers_output_in_order_with_monotonic_sequences_reverse() {
+    attach_stream_delivers_output_in_order_with_monotonic_sequences(
+        ReversePairHarness::start().await,
+    )
+    .await;
+}
+
 /// `Input.input_seq` is a cumulative offset, so replaying a frame the host
 /// already applied is discarded and re-acked — lossless and duplicate-free
 /// (protocol.md §10-5).
-#[tokio::test(flavor = "multi_thread")]
-async fn replayed_input_is_discarded_and_re_acked_exactly_once() {
-    let h = LoopbackHarness::start().await;
+async fn replayed_input_is_discarded_and_re_acked_exactly_once<P: HostedPair>(h: P) {
     let mut s = h.session().await;
     let (_id, mut pipe, mut data) = open_and_attach(&h, &mut s).await;
 
@@ -156,6 +177,16 @@ async fn replayed_input_is_discarded_and_re_acked_exactly_once() {
     h.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn replayed_input_is_discarded_and_re_acked_exactly_once_forward() {
+    replayed_input_is_discarded_and_re_acked_exactly_once(LoopbackHarness::start().await).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn replayed_input_is_discarded_and_re_acked_exactly_once_reverse() {
+    replayed_input_is_discarded_and_re_acked_exactly_once(ReversePairHarness::start().await).await;
+}
+
 /// Read frames until the next `InputAck`, returning its offset.
 async fn next_ack(data: &mut FramedStream) -> u64 {
     tokio::time::timeout(DEADLINE, async {
@@ -180,13 +211,11 @@ async fn next_ack(data: &mut FramedStream) -> u64 {
 /// never blocked by the absence of a consumer — every byte the child wrote
 /// was ingested (the ring, not the consumer, is the decoupler,
 /// protocol.md §12).
-#[tokio::test(flavor = "multi_thread")]
-async fn stale_consumer_gets_a_gap_and_the_source_reader_is_never_blocked() {
-    let h = LoopbackHarness::start().await;
+async fn stale_consumer_gets_a_gap_and_the_source_reader_is_never_blocked<P: HostedPair>(h: P) {
     let mut s = h.session().await;
     let opened = s.session_open(open_req()).await.unwrap();
     let id = opened.session_id.clone();
-    let mut pipe = h.pipes.take().unwrap();
+    let mut pipe = h.pipes().take().unwrap();
 
     // Nobody is attached and nobody is reading: push three ring-fulls
     // through the child. Each `write_output` completing at all is the
@@ -273,15 +302,28 @@ async fn stale_consumer_gets_a_gap_and_the_source_reader_is_never_blocked() {
     h.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn stale_consumer_gets_a_gap_and_the_source_reader_is_never_blocked_forward() {
+    stale_consumer_gets_a_gap_and_the_source_reader_is_never_blocked(
+        LoopbackHarness::start().await,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stale_consumer_gets_a_gap_and_the_source_reader_is_never_blocked_reverse() {
+    stale_consumer_gets_a_gap_and_the_source_reader_is_never_blocked(
+        ReversePairHarness::start().await,
+    )
+    .await;
+}
+
 /// The live-defect regression (PLAN M2 Step 5): a child that stops draining
 /// its PTY/pipe input parks the session's writer task for ever. That must
 /// never park the *connection*: other control traffic keeps flowing, and
 /// when the connection dies the writer lease is still released.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_wedged_child_cannot_stall_other_control_traffic_on_the_connection() {
-    let h = LoopbackHarness::start().await;
-    let dialed = h.dial().await;
-    let mut ctl = hello(&dialed).await;
+async fn a_wedged_child_cannot_stall_other_control_traffic_on_the_connection<P: HostedPair>(h: P) {
+    let (conn, mut ctl) = h.raw_session().await;
 
     // Open through the raw control stream so we can pipeline: the point of
     // the test is a request issued while an earlier one is still parked.
@@ -297,7 +339,7 @@ async fn a_wedged_child_cannot_stall_other_control_traffic_on_the_connection() {
         other => panic!("expected SessionOpened, got {other:?}"),
     };
     // Nobody ever reads this: the child is wedged from here on.
-    let _pipe = h.pipes.take().unwrap();
+    let _pipe = h.pipes().take().unwrap();
 
     // Far more input than the child's buffer holds, so the session's writer
     // task is parked with a backlog behind it — and none of these replies
@@ -375,8 +417,8 @@ async fn a_wedged_child_cannot_stall_other_control_traffic_on_the_connection() {
     // The connection dies with the writer still parked; the lease must
     // still come back (architecture.md §3 rule c: the session survives, the
     // lease does not).
-    dialed.connection.close(0, b"bye");
-    drop(dialed);
+    conn.close(0, b"bye");
+    drop(conn);
     drop(ctl);
 
     let mut s = h.session().await;
@@ -391,18 +433,31 @@ async fn a_wedged_child_cannot_stall_other_control_traffic_on_the_connection() {
     .await
     .expect("the writer lease is released when the connection dies");
     assert_eq!(info.state, "running", "the session itself survives");
-    assert_eq!(h.broker.session_count(), 1);
+    assert_eq!(h.broker().session_count(), 1);
     s.close();
     h.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wedged_child_cannot_stall_other_control_traffic_on_the_connection_forward() {
+    a_wedged_child_cannot_stall_other_control_traffic_on_the_connection(
+        LoopbackHarness::start().await,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wedged_child_cannot_stall_other_control_traffic_on_the_connection_reverse() {
+    a_wedged_child_cannot_stall_other_control_traffic_on_the_connection(
+        ReversePairHarness::start().await,
+    )
+    .await;
+}
+
 /// A saturated write backlog is refused with a retryable
 /// `RESOURCE_EXHAUSTED`, not by parking the connection.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_saturated_write_backlog_is_refused_retryably() {
-    let h = LoopbackHarness::start().await;
-    let dialed = h.dial().await;
-    let mut ctl = hello(&dialed).await;
+async fn a_saturated_write_backlog_is_refused_retryably<P: HostedPair>(h: P) {
+    let (conn, mut ctl) = h.raw_session().await;
     ctl.send
         .send(&wire::ControlMessage::new(
             1,
@@ -414,7 +469,7 @@ async fn a_saturated_write_backlog_is_refused_retryably() {
         wire::response::Body::SessionOpened(o) => o.session_id,
         other => panic!("expected SessionOpened, got {other:?}"),
     };
-    let _pipe = h.pipes.take().unwrap();
+    let _pipe = h.pipes().take().unwrap();
 
     // Enough writes to overrun both the child's buffer and every queue
     // between here and it. Whatever the host cannot take must come back as
@@ -457,8 +512,18 @@ async fn a_saturated_write_backlog_is_refused_retryably() {
     assert_eq!(refusal.error_code(), ErrorCode::ResourceExhausted);
     assert!(refusal.retryable, "a full backlog is a retryable condition");
 
-    dialed.connection.close(0, b"bye");
+    conn.close(0, b"bye");
     h.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_saturated_write_backlog_is_refused_retryably_forward() {
+    a_saturated_write_backlog_is_refused_retryably(LoopbackHarness::start().await).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_saturated_write_backlog_is_refused_retryably_reverse() {
+    a_saturated_write_backlog_is_refused_retryably(ReversePairHarness::start().await).await;
 }
 
 /// `session.attach` carries the session's output the same way the
@@ -469,13 +534,11 @@ async fn a_saturated_write_backlog_is_refused_retryably() {
 /// credential was ever issued for it — cannot be attached at all: the
 /// credential is what binds an attach to the device that opened the
 /// session (ADR-0007 결정 2), and the host is where that is enforced.
-#[tokio::test(flavor = "multi_thread")]
-async fn attach_stream_ends_with_exit_when_the_child_exits() {
-    let h = LoopbackHarness::start().await;
+async fn attach_stream_ends_with_exit_when_the_child_exits<P: HostedPair>(h: P) {
     let mut s = h.session().await;
 
     let out_of_band = h
-        .broker
+        .broker()
         .open(&SessionSpec {
             argv: vec!["sh".into()],
             env: vec![],
@@ -487,7 +550,7 @@ async fn attach_stream_ends_with_exit_when_the_child_exits() {
         .unwrap()
         .id()
         .to_string();
-    let _out_of_band_pipe = h.pipes.take().unwrap();
+    let _out_of_band_pipe = h.pipes().take().unwrap();
     match s
         .attach(wire::SessionAttach {
             session_id: out_of_band.clone(),
@@ -506,7 +569,7 @@ async fn attach_stream_ends_with_exit_when_the_child_exits() {
 
     let opened = s.session_open(open_req()).await.expect("session.open");
     let id = opened.session_id.clone();
-    let mut pipe = h.pipes.take().unwrap();
+    let mut pipe = h.pipes().take().unwrap();
 
     let mut attached = s
         .attach(wire::SessionAttach {
@@ -555,37 +618,14 @@ async fn attach_stream_ends_with_exit_when_the_child_exits() {
     h.shutdown().await;
 }
 
-/// Raw `Hello` handshake on a fresh connection, for the tests that need to
-/// pipeline control messages the typed client serialises.
-async fn hello(dialed: &qsh_transport::Dialed) -> FramedStream {
-    let (send, recv) = dialed.connection.open_bi().await.unwrap();
-    let mut ctl = FramedStream::control(send, recv);
-    ctl.send
-        .send(&wire::ControlMessage::new(
-            0,
-            wire::control_message::Body::Hello(wire::Hello {
-                versions: wire::WIRE_MINOR_VERSIONS.to_vec(),
-                device_name: "laptop".into(),
-                capabilities: wire::LOCAL_CAPABILITIES
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect(),
-                reverse: None,
-            }),
-        ))
-        .await
-        .unwrap();
-    let reply = ctl
-        .recv
-        .recv::<wire::ControlMessage>()
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(matches!(
-        reply.body,
-        Some(wire::control_message::Body::Hello(_))
-    ));
-    ctl
+#[tokio::test(flavor = "multi_thread")]
+async fn attach_stream_ends_with_exit_when_the_child_exits_forward() {
+    attach_stream_ends_with_exit_when_the_child_exits(LoopbackHarness::start().await).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn attach_stream_ends_with_exit_when_the_child_exits_reverse() {
+    attach_stream_ends_with_exit_when_the_child_exits(ReversePairHarness::start().await).await;
 }
 
 /// Read control messages until the one correlated to `request_id`.
@@ -620,11 +660,8 @@ async fn reply_to(ctl: &mut FramedStream, request_id: u64) -> wire::response::Bo
 /// wedged-child test only proves the loop does not park; without this one a
 /// "just spawn a task per write" refactor would pass the whole suite and
 /// still scramble a user's keystrokes.
-#[tokio::test(flavor = "multi_thread")]
-async fn pipelined_writes_reach_a_draining_child_in_send_order() {
-    let h = LoopbackHarness::start().await;
-    let dialed = h.dial().await;
-    let mut ctl = hello(&dialed).await;
+async fn pipelined_writes_reach_a_draining_child_in_send_order<P: HostedPair>(h: P) {
+    let (conn, mut ctl) = h.raw_session().await;
     ctl.send
         .send(&wire::ControlMessage::new(
             1,
@@ -636,7 +673,7 @@ async fn pipelined_writes_reach_a_draining_child_in_send_order() {
         wire::response::Body::SessionOpened(o) => o.session_id,
         other => panic!("expected SessionOpened, got {other:?}"),
     };
-    let mut pipe = h.pipes.take().unwrap();
+    let mut pipe = h.pipes().take().unwrap();
 
     // Distinguishable payloads, pipelined without reading a single reply,
     // to a child that *is* draining.
@@ -678,8 +715,18 @@ async fn pipelined_writes_reach_a_draining_child_in_send_order() {
         "pipelined writes must reach the child in send order"
     );
 
-    dialed.connection.close(0, b"bye");
+    conn.close(0, b"bye");
     h.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pipelined_writes_reach_a_draining_child_in_send_order_forward() {
+    pipelined_writes_reach_a_draining_child_in_send_order(LoopbackHarness::start().await).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pipelined_writes_reach_a_draining_child_in_send_order_reverse() {
+    pipelined_writes_reach_a_draining_child_in_send_order(ReversePairHarness::start().await).await;
 }
 
 /// Losing the writer lease **demotes** an attach to read-only; it does not
@@ -687,9 +734,11 @@ async fn pipelined_writes_reach_a_draining_child_in_send_order() {
 /// stream keeps acking so the peer's input stream stays contiguous, keeps
 /// delivering output, and starts writing again the moment the lease comes
 /// back — no reattach, and no silently deaf stream.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_stolen_lease_demotes_the_attach_to_read_only_and_a_steal_back_resumes_it() {
-    let h = LoopbackHarness::start().await;
+async fn a_stolen_lease_demotes_the_attach_to_read_only_and_a_steal_back_resumes_it<
+    P: HostedPair,
+>(
+    h: P,
+) {
     let mut s = h.session().await;
     let (id, mut pipe, mut data) = open_and_attach(&h, &mut s).await;
 
@@ -740,6 +789,22 @@ async fn a_stolen_lease_demotes_the_attach_to_read_only_and_a_steal_back_resumes
     thief.close();
     s.close();
     h.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stolen_lease_demotes_the_attach_to_read_only_and_a_steal_back_resumes_it_forward() {
+    a_stolen_lease_demotes_the_attach_to_read_only_and_a_steal_back_resumes_it(
+        LoopbackHarness::start().await,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stolen_lease_demotes_the_attach_to_read_only_and_a_steal_back_resumes_it_reverse() {
+    a_stolen_lease_demotes_the_attach_to_read_only_and_a_steal_back_resumes_it(
+        ReversePairHarness::start().await,
+    )
+    .await;
 }
 
 /// Read frames until an `InputAck` arrives, returning its offset.

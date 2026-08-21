@@ -3,6 +3,15 @@
 //! session + `SESSION_DATA` ticket → write / read (`--after`, `--wait`) /
 //! resize / get / list / close, all over a real QUIC connection against a
 //! pipe-backed session (`docs/design/testing.md` §3). Zero PTY code.
+//!
+//! Every scenario below is a generic `async fn<P: HostedPair>(h: P)` run
+//! twice — once against [`LoopbackHarness`] (forward: the client dials the
+//! host) and once against [`ReversePairHarness`] (reverse: the target
+//! dials the controller, and *it* is the host; the controller drives ops
+//! as the client-role peer) — with the identical body and identical
+//! assertions in both. That is the mechanical proof of role-axis
+//! independence `PLAN.md` M3 Step 3 PR 3b owes: the `session.*` `Ops` code
+//! never learns which side dialed.
 
 use std::sync::Arc;
 
@@ -10,7 +19,9 @@ use qsh_core::acl::{Action, DenyAll};
 use qsh_core::client::{ClientError, Session};
 use qsh_proto::ErrorCode;
 use qsh_proto::wire::{self, StreamHeader, session_read_event};
+use qsh_testkit::HostedPair;
 use qsh_testkit::loopback::LoopbackHarness;
+use qsh_testkit::reverse::ReversePairHarness;
 use qsh_transport::FramedStream;
 
 fn open_req(argv: &[&str]) -> wire::SessionOpen {
@@ -57,9 +68,7 @@ async fn each_op(s: &mut Session, id: &str) -> Vec<(&'static str, Result<(), Cli
     out
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn session_full_path_open_write_read_resize_get_list_close() {
-    let h = LoopbackHarness::start().await;
+async fn session_full_path_open_write_read_resize_get_list_close<P: HostedPair>(h: P) {
     let mut s = h.session().await;
 
     // open → session + ticket; the pipe side is the "child".
@@ -75,7 +84,7 @@ async fn session_full_path_open_write_read_resize_get_list_close() {
     assert!(!opened.expires_at.is_empty());
     let id = opened.session_id.clone();
     let (spec, mut pipe) = h
-        .pipes
+        .pipes()
         .take_with_spec()
         .expect("pipe handle for the session");
     // PLAN Step 3 (d): what follows `--` reaches the source verbatim, with
@@ -90,8 +99,8 @@ async fn session_full_path_open_write_read_resize_get_list_close() {
         "extra env is layered through unchanged"
     );
     assert_eq!(spec.user, None, "no user@ hint was sent");
-    assert_eq!(h.broker.session_count(), 1);
-    assert_eq!(h.server.pending_tickets(), 1);
+    assert_eq!(h.broker().session_count(), 1);
+    assert_eq!(h.server().pending_tickets(), 1);
 
     // The child produces output; a long-poll read from 0 returns it.
     pipe.write_output(b"$ ").await.unwrap();
@@ -183,7 +192,7 @@ async fn session_full_path_open_write_read_resize_get_list_close() {
     let final_seq = s.session_close(&id, Some("TERM".into())).await.unwrap();
     assert_eq!(final_seq, 2);
     assert_eq!(pipe.signals(), vec![qsh_core::broker::Signal::Term]);
-    assert_eq!(h.broker.session_count(), 0);
+    assert_eq!(h.broker().session_count(), 0);
     let err = s.session_get(&id).await.unwrap_err();
     assert_eq!(remote_code(err), ErrorCode::SessionNotFound);
     // …but a late reader still drains exit + closed.
@@ -206,8 +215,8 @@ async fn session_full_path_open_write_read_resize_get_list_close() {
 
     // The unredeemed session ticket is still outstanding until the
     // connection goes away; the audit log has one structural line per op.
-    assert_eq!(h.server.pending_tickets(), 1);
-    let recs = h.audit.records();
+    assert_eq!(h.server().pending_tickets(), 1);
+    let recs = h.audit().records();
     let actions: Vec<&str> = recs.iter().map(|r| r.action.as_str()).collect();
     assert_eq!(
         actions,
@@ -242,12 +251,21 @@ async fn session_full_path_open_write_read_resize_get_list_close() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn sessions_survive_the_connection_and_leases_are_released() {
-    let h = LoopbackHarness::start().await;
+async fn session_full_path_open_write_read_resize_get_list_close_forward() {
+    session_full_path_open_write_read_resize_get_list_close(LoopbackHarness::start().await).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn session_full_path_open_write_read_resize_get_list_close_reverse() {
+    session_full_path_open_write_read_resize_get_list_close(ReversePairHarness::start().await)
+        .await;
+}
+
+async fn sessions_survive_the_connection_and_leases_are_released<P: HostedPair>(h: P) {
     let mut s = h.session().await;
     let opened = s.session_open(open_req(&["sh"])).await.unwrap();
     let id = opened.session_id.clone();
-    let _pipe = h.pipes.take().unwrap();
+    let _pipe = h.pipes().take().unwrap();
     s.session_write(&id, b"a".to_vec()).await.unwrap();
     assert_eq!(
         s.session_get(&id).await.unwrap().writer.as_deref(),
@@ -270,21 +288,30 @@ async fn sessions_survive_the_connection_and_leases_are_released() {
     .await
     .expect("lease released after the connection went away");
     assert_eq!(info.state, "running");
-    assert_eq!(h.broker.session_count(), 1);
+    assert_eq!(h.broker().session_count(), 1);
     s2.close();
     h.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sessions_survive_the_connection_and_leases_are_released_forward() {
+    sessions_survive_the_connection_and_leases_are_released(LoopbackHarness::start().await).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sessions_survive_the_connection_and_leases_are_released_reverse() {
+    sessions_survive_the_connection_and_leases_are_released(ReversePairHarness::start().await)
+        .await;
 }
 
 /// The redeemable-once `SESSION_DATA` ticket: valid → the host consumes it
 /// and runs the pump (the stream delivers real output); bogus → reset with
 /// the bad-header code, nothing touched.
-#[tokio::test(flavor = "multi_thread")]
-async fn session_data_ticket_is_consumed_exactly_once() {
-    let h = LoopbackHarness::start().await;
+async fn session_data_ticket_is_consumed_exactly_once<P: HostedPair>(h: P) {
     let mut s = h.session().await;
     let opened = s.session_open(open_req(&["sh"])).await.unwrap();
-    let mut pipe = h.pipes.take().unwrap();
-    assert_eq!(h.server.pending_tickets(), 1);
+    let mut pipe = h.pipes().take().unwrap();
+    assert_eq!(h.server().pending_tickets(), 1);
 
     let (send, recv) = s.connection().open_bi().await.unwrap();
     let mut data = FramedStream::data(send, recv);
@@ -306,7 +333,7 @@ async fn session_data_ticket_is_consumed_exactly_once() {
             data: b"live".to_vec(),
         }))
     );
-    assert_eq!(h.server.pending_tickets(), 0, "ticket consumed");
+    assert_eq!(h.server().pending_tickets(), 0, "ticket consumed");
 
     // Replaying the same ticket, or presenting it on an EXEC_DATA header,
     // is refused.
@@ -323,23 +350,36 @@ async fn session_data_ticket_is_consumed_exactly_once() {
     // authorized opening — so redeeming its ticket runs (and audits) the
     // `session.attach` decision too. Two decisions, no more: the two
     // refused replays above are ticket failures, not ACL decisions.
-    let actions: Vec<String> = h.audit.records().iter().map(|r| r.action.clone()).collect();
+    let actions: Vec<String> = h
+        .audit()
+        .records()
+        .iter()
+        .map(|r| r.action.clone())
+        .collect();
     assert_eq!(actions, ["session.open", "session.attach"], "{actions:?}");
-    assert_eq!(h.broker.session_count(), 1);
+    assert_eq!(h.broker().session_count(), 1);
     s.close();
     h.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn session_data_ticket_is_consumed_exactly_once_forward() {
+    session_data_ticket_is_consumed_exactly_once(LoopbackHarness::start().await).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn session_data_ticket_is_consumed_exactly_once_reverse() {
+    session_data_ticket_is_consumed_exactly_once(ReversePairHarness::start().await).await;
 }
 
 /// Under `DenyAll` every session op is `PERMISSION_DENIED`, nothing is
 /// created (no session, no ticket, no pipe), and — the non-distinguishing
 /// property — an unauthorized peer gets the *same* answer for a real and a
 /// fabricated session id, so it cannot learn whether a session exists.
-#[tokio::test(flavor = "multi_thread")]
-async fn denied_peer_cannot_learn_whether_a_session_exists() {
-    let h = LoopbackHarness::start_with(Arc::new(DenyAll)).await;
+async fn denied_peer_cannot_learn_whether_a_session_exists<P: HostedPair>(h: P) {
     // Plant a real session behind the deny-all host through the broker.
     let real = h
-        .broker
+        .broker()
         .open(&qsh_core::broker::SessionSpec {
             argv: vec!["sh".into()],
             env: vec![],
@@ -351,7 +391,7 @@ async fn denied_peer_cannot_learn_whether_a_session_exists() {
         .unwrap()
         .id()
         .to_string();
-    let _pipe = h.pipes.take().unwrap();
+    let _pipe = h.pipes().take().unwrap();
     let mut s = h.session().await;
 
     let mut answers: Vec<Vec<(&str, ErrorCode)>> = Vec::new();
@@ -373,10 +413,10 @@ async fn denied_peer_cannot_learn_whether_a_session_exists() {
         answers[0], answers[1],
         "existence must not be distinguishable"
     );
-    assert_eq!(h.broker.session_count(), 1, "nothing created");
-    assert_eq!(h.pipes.pending(), 0);
-    assert_eq!(h.server.pending_tickets(), 0);
-    let recs = h.audit.records();
+    assert_eq!(h.broker().session_count(), 1, "nothing created");
+    assert_eq!(h.pipes().pending(), 0);
+    assert_eq!(h.server().pending_tickets(), 0);
+    let recs = h.audit().records();
     assert_eq!(recs.len(), 14, "one structural line per op");
     assert!(recs.iter().all(|r| r.decision == "deny"));
     let dump = format!("{recs:?}");
@@ -385,43 +425,35 @@ async fn denied_peer_cannot_learn_whether_a_session_exists() {
     h.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn denied_peer_cannot_learn_whether_a_session_exists_forward() {
+    denied_peer_cannot_learn_whether_a_session_exists(
+        LoopbackHarness::start_with(Arc::new(DenyAll)).await,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn denied_peer_cannot_learn_whether_a_session_exists_reverse() {
+    denied_peer_cannot_learn_whether_a_session_exists(
+        ReversePairHarness::start_with(Arc::new(DenyAll)).await,
+    )
+    .await;
+}
+
 /// `session.attach` for an unknown id is the same non-distinguishing
 /// `AUTH_FAILED` a wrong credential gets (protocol.md §10-2) — decided
 /// after mode validation, audited as a deny, with nothing created. The
 /// unknown id never reaches the broker, so existence is not disclosed.
-#[tokio::test(flavor = "multi_thread")]
-async fn attach_to_an_unknown_session_creates_nothing() {
-    let h = LoopbackHarness::start().await;
-    // Drive the raw control stream so the wire shape itself is under test,
-    // not the typed client wrapper.
-    let dialed = h.dial().await;
-    let (send, recv) = dialed.connection.open_bi().await.unwrap();
-    let mut ctl = FramedStream::control(send, recv);
-    ctl.send
-        .send(&wire::ControlMessage::new(
-            0,
-            wire::control_message::Body::Hello(wire::Hello {
-                versions: wire::WIRE_MINOR_VERSIONS.to_vec(),
-                device_name: "laptop".into(),
-                capabilities: wire::LOCAL_CAPABILITIES
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect(),
-                reverse: None,
-            }),
-        ))
-        .await
-        .unwrap();
-    let hello = ctl
-        .recv
-        .recv::<wire::ControlMessage>()
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(matches!(
-        hello.body,
-        Some(wire::control_message::Body::Hello(_))
-    ));
+///
+/// Drives the raw control stream (via [`HostedPair::raw_session`]) so the
+/// wire shape itself is under test, not the typed client wrapper — the
+/// `Hello` exchange to get there is `qsh_core::handshake::initiate`/
+/// `respond` (product code) rather than a hand-rolled frame, which is what
+/// makes this parametrizable: in reverse, only the *host* side (`qsh
+/// listen`'s equivalent) accepts, and it never opens the raw stream itself.
+async fn attach_to_an_unknown_session_creates_nothing<P: HostedPair>(h: P) {
+    let (conn, mut ctl) = h.raw_session().await;
     ctl.send
         .send(&wire::ControlMessage::new(
             1,
@@ -451,13 +483,23 @@ async fn attach_to_an_unknown_session_creates_nothing() {
         other => panic!("expected AUTH_FAILED, got {other:?}"),
     }
     // The refusal is audited structurally, and nothing was created.
-    let recs = h.audit.records();
+    let recs = h.audit().records();
     assert_eq!(recs.len(), 1, "{recs:?}");
     assert_eq!(recs[0].action, "session.attach");
     assert_eq!(recs[0].resource, "01K0NOSUCHSESSION");
     assert_eq!(recs[0].decision, "deny");
-    assert_eq!(h.server.pending_tickets(), 0);
-    assert_eq!(h.broker.session_count(), 0);
-    dialed.connection.close(0, b"done");
+    assert_eq!(h.server().pending_tickets(), 0);
+    assert_eq!(h.broker().session_count(), 0);
+    conn.close(0, b"done");
     h.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn attach_to_an_unknown_session_creates_nothing_forward() {
+    attach_to_an_unknown_session_creates_nothing(LoopbackHarness::start().await).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn attach_to_an_unknown_session_creates_nothing_reverse() {
+    attach_to_an_unknown_session_creates_nothing(ReversePairHarness::start().await).await;
 }

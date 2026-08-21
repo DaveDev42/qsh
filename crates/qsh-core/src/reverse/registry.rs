@@ -93,6 +93,14 @@ pub struct RegisterOutcome {
     /// connection that owned the previous generation is 3b's job — this
     /// registry only tracks the number (module docs).
     pub replaced_generation: Option<u64>,
+    /// The full entry this call replaced, when it replaced one — the
+    /// pre-image [`Registry::rollback`] restores if 3b's caller has to
+    /// undo this admission (the peer's control-stream reply after
+    /// `Registry::admit` ran never actually reached it, e.g. the
+    /// connection died mid-`Hello`-reply — `reverse/listen.rs`'s
+    /// `register_connection`). `None` exactly when `replaced_generation`
+    /// is `None`.
+    pub replaced_entry: Option<ReverseEntry>,
 }
 
 /// Metadata about one connection's `Hello.reverse` needed to actually
@@ -255,7 +263,7 @@ impl Registry {
         // Step 4 MUST introduce a per-name counter (or tombstone) that
         // survives removal; this map-derived computation is only valid
         // while entries are never removed.
-        let (generation, replaced_generation) = match entries.get(&name) {
+        let (generation, replaced_generation, replaced_entry) = match entries.get(&name) {
             Some(existing) if existing.fingerprint != entry.fingerprint => {
                 return Err(OpError::new(
                     ErrorCode::InvalidArgument,
@@ -263,8 +271,12 @@ impl Registry {
                 )
                 .with_retryable(false));
             }
-            Some(existing) => (existing.generation + 1, Some(existing.generation)),
-            None => (0, None),
+            Some(existing) => (
+                existing.generation + 1,
+                Some(existing.generation),
+                Some(existing.clone()),
+            ),
+            None => (0, None, None),
         };
         let new_entry = ReverseEntry {
             name: name.clone(),
@@ -280,7 +292,39 @@ impl Registry {
         Ok(RegisterOutcome {
             entry: new_entry,
             replaced_generation,
+            replaced_entry,
         })
+    }
+
+    /// Undo an [`Registry::admit`] whose caller never got to publish the
+    /// connection it authorized (`reverse/listen.rs`'s `register_connection`:
+    /// the control-stream `Hello` reply that would have confirmed the
+    /// registration to the peer failed to send). Only touches the entry
+    /// currently under `name` if it is still exactly the one `admit`
+    /// produced (`generation` match) — a concurrent successful
+    /// re-registration already superseding it must not be clobbered by a
+    /// late rollback of the admission it replaced.
+    ///
+    /// `replaced` is the [`RegisterOutcome::replaced_entry`] from the same
+    /// `admit` call: `None` restores nothing (a fresh registration simply
+    /// disappears, freeing the name); `Some` restores the exact entry that
+    /// admission replaced, so a NAT-rebind reconnect whose *second* `Hello`
+    /// reply fails to send leaves the still-live first connection's
+    /// registry row exactly as it was before the failed attempt.
+    pub fn rollback(&self, name: &str, generation: u64, replaced: Option<ReverseEntry>) {
+        let mut entries = self.lock();
+        let still_current = matches!(entries.get(name), Some(e) if e.generation == generation);
+        if !still_current {
+            return;
+        }
+        match replaced {
+            Some(previous) => {
+                entries.insert(name.to_string(), previous);
+            }
+            None => {
+                entries.remove(name);
+            }
+        }
     }
 }
 
@@ -489,6 +533,61 @@ mod tests {
         // with the function under test — a self-referential assertion would
         // never catch a formatting regression.
         assert_eq!(outcome.entry.registered_at, "2026-01-01T00:00:00Z");
+    }
+
+    // ---- rollback (undo an admit whose Hello reply never made it out) ----
+
+    #[test]
+    fn rollback_of_a_fresh_registration_frees_the_name() {
+        let r = registry(false);
+        let outcome = r
+            .admit("shared".to_string(), entry("sha256:a", "device:shared"))
+            .expect("first registration");
+        assert!(outcome.replaced_entry.is_none());
+
+        r.rollback("shared", outcome.entry.generation, outcome.replaced_entry);
+        assert!(r.get("shared").is_none(), "name is free again");
+        assert!(r.snapshot().is_empty());
+    }
+
+    #[test]
+    fn rollback_of_a_replace_restores_the_previous_entry() {
+        let r = registry(false);
+        let first = r
+            .admit("shared".to_string(), entry("sha256:a", "device:shared"))
+            .expect("first registration");
+        let second = r
+            .admit("shared".to_string(), entry("sha256:a", "device:shared"))
+            .expect("same-fingerprint reconnect replaces");
+        assert_eq!(second.entry.generation, 1);
+        assert_eq!(second.replaced_entry.as_ref(), Some(&first.entry));
+
+        r.rollback(
+            "shared",
+            second.entry.generation,
+            second.replaced_entry.clone(),
+        );
+        let restored = r.get("shared").expect("the first entry is back");
+        assert_eq!(restored, first.entry, "byte-for-byte the pre-image");
+    }
+
+    #[test]
+    fn rollback_is_a_no_op_once_a_newer_registration_already_superseded_it() {
+        let r = registry(false);
+        let first = r
+            .admit("shared".to_string(), entry("sha256:a", "device:shared"))
+            .expect("first registration");
+        // A concurrent successful reconnect moves the name to generation 1
+        // before the late rollback of generation 0 arrives.
+        r.admit("shared".to_string(), entry("sha256:a", "device:shared"))
+            .expect("reconnect");
+
+        r.rollback("shared", first.entry.generation, None);
+        let still = r.get("shared").expect("generation 1 must survive");
+        assert_eq!(
+            still.generation, 1,
+            "late rollback of a stale generation is a no-op"
+        );
     }
 
     #[test]
