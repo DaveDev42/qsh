@@ -674,8 +674,10 @@ fn run_listen(ops: &Ops, bind: Option<&str>) -> i32 {
 
 /// `qsh reverse <controller>` — the reverse-mode target (`docs/CLI.md`
 /// §6.13). Not an operation: no envelope, nothing on stdout at all.
-/// Registers once and exits with a diagnostic when the connection dies (no
-/// reconnect loop yet); a clean SIGINT/SIGTERM exits `0` instead.
+/// Registers and reconnects forever with backoff whenever the connection to
+/// the controller dies (`docs/design/protocol.md` §11-4, `PLAN.md` M3 Step
+/// 4) — registration is this target's only reachability path, so it is
+/// never abandoned; a clean SIGINT/SIGTERM is the only way this returns.
 fn run_reverse(ops: &Ops, controller: &str, offered_name: Option<&str>) -> i32 {
     let result = (|| -> Result<(), OpError> {
         let config = ops.config()?;

@@ -48,7 +48,8 @@ use qsh_core::ops::OpError;
 pub use qsh_core::reverse::listen::Listen;
 use qsh_core::reverse::registry::Registry;
 pub use qsh_core::reverse::registry::{EntryState, ReverseEntry};
-use qsh_core::reverse::target::run_reverse;
+use qsh_core::reverse::target::run_reverse_observed;
+pub use qsh_core::serve::HostRuntime;
 use qsh_core::server::{ConnCtx, Server};
 use qsh_core::trust::TrustStore;
 use qsh_proto::KeyStoreKind;
@@ -58,6 +59,7 @@ use qsh_transport::{
 };
 use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
 
+use crate::chaos::ChaosProxy;
 use crate::loopback::{TestIdentity, make_identity};
 use crate::pair::HostedPair;
 
@@ -101,6 +103,59 @@ impl ReverseHarness {
         allow_advertised_names: bool,
         trust: StaticTrust,
     ) -> Self {
+        // `docs/design/protocol.md` §11-4's documented default
+        // (`ListenConfig::DEFAULT_STALE_RETENTION_SECS`) — most callers
+        // don't care about stale-retention *timing*; a test that does uses
+        // [`Self::start_with_stale_retention`] instead.
+        Self::start_with_stale_retention(
+            authorizer,
+            allow_advertised_names,
+            trust,
+            Duration::from_secs(120),
+        )
+        .await
+    }
+
+    /// [`Self::start_with`] with a caller-chosen `[listen].stale_retention`
+    /// — for a test that actually wants to observe
+    /// [`Registry::sweep_expired`]'s removal firing (`docs/design/testing.md`
+    /// L4), rather than treating a live-vs-stale registration as a
+    /// same-process-forever detail. Also spawns
+    /// [`Listen::run_stale_sweeper`], exactly like production's
+    /// `run_listen_unix` does — without this, a harness registration could
+    /// transition to [`EntryState::Stale`] but nothing would ever sweep it,
+    /// no matter how long a test waited (adversarial review finding: the
+    /// harness never wired the sweeper at all).
+    pub async fn start_with_stale_retention(
+        authorizer: Arc<dyn Authorizer>,
+        allow_advertised_names: bool,
+        trust: StaticTrust,
+        stale_retention: Duration,
+    ) -> Self {
+        Self::start_with_stale_retention_and_sweep_tick(
+            authorizer,
+            allow_advertised_names,
+            trust,
+            stale_retention,
+            qsh_core::reverse::listen::STALE_SWEEP_TICK,
+        )
+        .await
+    }
+
+    /// [`Self::start_with_stale_retention`] with a caller-chosen sweeper
+    /// tick — for an L4 test that wants to actually observe
+    /// [`Listen::run_stale_sweeper`] fire without paying
+    /// `STALE_SWEEP_TICK`'s real 5 s wall-clock cost per tick
+    /// (adversarial review finding: the only integration coverage of the
+    /// sweeper previously had no way to inject a faster tick and so paid
+    /// that cost on every run).
+    pub async fn start_with_stale_retention_and_sweep_tick(
+        authorizer: Arc<dyn Authorizer>,
+        allow_advertised_names: bool,
+        trust: StaticTrust,
+        stale_retention: Duration,
+        sweep_tick: Duration,
+    ) -> Self {
         let controller = make_identity();
         let listener = Listener::bind(
             "127.0.0.1:0".parse().expect("addr"),
@@ -110,8 +165,18 @@ impl ReverseHarness {
         .expect("bind controller");
         let addr = listener.local_addr().expect("local addr");
         let audit = Arc::new(MemoryAuditSink::new());
-        let registry = Registry::new(Arc::new(SystemClock), allow_advertised_names);
-        let listen = Listen::new(registry, authorizer, audit.clone(), "controller-device");
+        let clock: Arc<dyn qsh_core::broker::Clock> = Arc::new(SystemClock);
+        let registry = Registry::new(clock.clone(), allow_advertised_names);
+        let listen = Listen::new_with_sweep_tick(
+            registry,
+            authorizer,
+            audit.clone(),
+            "controller-device",
+            clock,
+            stale_retention,
+            sweep_tick,
+        );
+        tokio::spawn(Listen::run_stale_sweeper(Arc::downgrade(&listen)));
         let (tx, rx) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(listen.clone().run(listener, async move {
             let _ = rx.await;
@@ -180,16 +245,24 @@ impl ReverseHarness {
         self.initiate(target, reverse_hello(offered_name)).await
     }
 
-    /// Build the temp [`Paths`] + on-disk `trust.toml` (pinning this
-    /// controller's address+fingerprint under `controller_alias`) a real
-    /// [`run_reverse`] invocation needs.
-    fn target_paths(&self, controller_alias: &str) -> (tempfile::TempDir, Paths) {
+    /// Build the temp [`Paths`] + on-disk `trust.toml` (pinning
+    /// `dial_addr` — this controller's own bound address for
+    /// [`Self::run_target_with_config`], or a [`ChaosProxy`]'s front
+    /// address for [`Self::run_target_through_chaos`] — under
+    /// `controller_alias`, so the target believes it is talking straight to
+    /// `controller_alias` either way) a real [`run_reverse_observed`]
+    /// invocation needs.
+    fn target_paths_at(
+        &self,
+        controller_alias: &str,
+        dial_addr: SocketAddr,
+    ) -> (tempfile::TempDir, Paths) {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = Paths::new(dir.path().join("config"), dir.path().join("state"));
         let mut trust = TrustStore::default();
         trust.add_peer(
             controller_alias,
-            Some(self.addr.to_string()),
+            Some(dial_addr.to_string()),
             self.controller.fingerprint,
             "2026-01-01T00:00:00Z".to_string(),
         );
@@ -201,9 +274,13 @@ impl ReverseHarness {
 
     /// Run the real [`qsh_core::reverse::target::run_reverse`] as `target`,
     /// pinning this controller under `controller_alias` in a fresh on-disk
-    /// trust store. Blocks until `shutdown` resolves or the connection dies
-    /// — a caller spawns this and drives it with its own shutdown channel,
-    /// the same shape [`Self::start_with`] uses for the controller.
+    /// trust store, with `Config::default()`'s backoff (`docs/design/
+    /// protocol.md` §11-4). Blocks until `shutdown` resolves — `run_reverse`
+    /// itself never returns on a dead/rejected connection any more (M3 Step
+    /// 4: registration is the target's only reachability path, so it is
+    /// never abandoned) — a caller spawns this and drives it with its own
+    /// shutdown channel, the same shape [`Self::start_with`] uses for the
+    /// controller.
     pub async fn run_target(
         &self,
         target: &TestIdentity,
@@ -212,15 +289,116 @@ impl ReverseHarness {
         offered_name: Option<&str>,
         shutdown: impl Future<Output = ()>,
     ) -> Result<(), OpError> {
-        let (_dir, paths) = self.target_paths(controller_alias);
-        let config = Config::default();
+        self.run_target_with_config(
+            target,
+            device_id,
+            controller_alias,
+            offered_name,
+            &Config::default(),
+            shutdown,
+        )
+        .await
+    }
+
+    /// [`Self::run_target`] with a caller-chosen [`Config`] — the reconnect
+    /// tests want a short `[reverse]` backoff so a bounded `TIMEOUT` can
+    /// actually observe more than one retry without the suite slowing down
+    /// (`docs/design/testing.md`'s "no `sleep()`-based synchronization"
+    /// still holds: the *shape* of the wait stays event-driven `wait_for`,
+    /// this only makes the events themselves arrive sooner).
+    pub async fn run_target_with_config(
+        &self,
+        target: &TestIdentity,
+        device_id: &str,
+        controller_alias: &str,
+        offered_name: Option<&str>,
+        config: &Config,
+        shutdown: impl Future<Output = ()>,
+    ) -> Result<(), OpError> {
+        self.run_target_via(
+            target,
+            device_id,
+            controller_alias,
+            offered_name,
+            config,
+            self.addr,
+            |_runtime| {},
+            shutdown,
+        )
+        .await
+    }
+
+    /// [`Self::run_target_with_config`], but dialed through `chaos`
+    /// (`docs/design/testing.md` L4) instead of this controller directly —
+    /// the target's on-disk trust.toml pins `chaos.addr()`, so the resolved
+    /// dial goes target → chaos → controller. A test builds `chaos` in
+    /// front of this harness itself (`ChaosProxy::start(harness.addr,
+    /// policy)`, mirroring [`crate::loopback::LoopbackHarness::
+    /// start_chaotic`]'s own setup) and can then `sever()`/`repath()`/etc.
+    /// the target→controller leg while the target keeps believing it is
+    /// talking straight to `controller_alias`; a re-dial after `sever()`
+    /// arrives from a fresh source port, so it is relayed onto a brand-new
+    /// connection exactly like a real NAT-rebind reconnect (`ChaosProxy::
+    /// sever`'s own docs).
+    ///
+    /// `on_runtime` fires once, synchronously, with the target's own
+    /// long-lived host runtime — the *same* broker instance every
+    /// reconnect this call makes reuses (`run_reverse_observed`'s doc
+    /// comment) — so a caller can stash `runtime.server.clone()` and query
+    /// its broker directly across a `sever()`, proving a session survives
+    /// the reconnect without needing a wire-level `session.list` the
+    /// controller side cannot issue yet (`docs/design/protocol.md` §11-3:
+    /// that passthrough is M3 Step 5's localctl, not this step's).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn run_target_through_chaos(
+        &self,
+        target: &TestIdentity,
+        device_id: &str,
+        controller_alias: &str,
+        offered_name: Option<&str>,
+        config: &Config,
+        chaos: &ChaosProxy,
+        on_runtime: impl FnOnce(&HostRuntime),
+        shutdown: impl Future<Output = ()>,
+    ) -> Result<(), OpError> {
+        self.run_target_via(
+            target,
+            device_id,
+            controller_alias,
+            offered_name,
+            config,
+            chaos.addr(),
+            on_runtime,
+            shutdown,
+        )
+        .await
+    }
+
+    /// The building block [`Self::run_target_with_config`] and
+    /// [`Self::run_target_through_chaos`] share: build a target trust.toml
+    /// pinning `dial_addr` under `controller_alias`, then run the real
+    /// [`run_reverse_observed`].
+    #[allow(clippy::too_many_arguments)]
+    async fn run_target_via(
+        &self,
+        target: &TestIdentity,
+        device_id: &str,
+        controller_alias: &str,
+        offered_name: Option<&str>,
+        config: &Config,
+        dial_addr: SocketAddr,
+        on_runtime: impl FnOnce(&HostRuntime),
+        shutdown: impl Future<Output = ()>,
+    ) -> Result<(), OpError> {
+        let (_dir, paths) = self.target_paths_at(controller_alias, dial_addr);
         let identity = loaded_identity(target, device_id);
-        run_reverse(
+        run_reverse_observed(
             &paths,
-            &config,
+            config,
             identity,
             controller_alias,
             offered_name,
+            on_runtime,
             shutdown,
         )
         .await
@@ -546,7 +724,10 @@ impl ReversePairHarness {
             // serve_connection` would have done for a forward host:
             // `serve_control` alone never releases writer leases or drops
             // pending tickets on its own.
-            let _ = server.clone().serve_control(&conn, ctl, ctx).await;
+            // `None`: this harness does not exercise the target's Step 4
+            // liveness probing — it is a role-axis-independence proof for
+            // ordinary dispatch, not a reconnect-loop test.
+            let _ = server.clone().serve_control(&conn, ctl, ctx, None).await;
             server.purge_connection(conn_id).await;
         });
         self.target_tasks

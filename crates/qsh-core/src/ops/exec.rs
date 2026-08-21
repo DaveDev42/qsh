@@ -275,7 +275,12 @@ fn well_formed_unknown_code(raw: &str) -> bool {
         && chars.all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
 }
 
-pub(crate) fn map_client_error(err: ClientError) -> OpError {
+/// `pub` (not `pub(crate)`) so `qsh-testkit`'s integration tests can chain
+/// it onto [`crate::client::map_hello_error`] and assert what a denied
+/// `qsh reverse` registration actually maps to — the exact chain
+/// `reverse::target::dial_and_register` applies — without re-deriving the
+/// mapping table in test code.
+pub fn map_client_error(err: ClientError) -> OpError {
     match err {
         ClientError::Remote {
             code: ErrorCode::Unknown(raw),
