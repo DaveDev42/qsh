@@ -771,6 +771,30 @@ async fn a_stolen_lease_demotes_the_attach_to_read_only_and_a_steal_back_resumes
     let (bytes, _) = read_output(&mut data, b"still-watching".len()).await;
     assert_eq!(bytes, b"still-watching", "a demoted attach still reads");
 
+    // A demoted attach's `Resize` is dropped on the floor too, same as its
+    // `Input` — it must not still be able to mutate the live PTY out from
+    // under whoever actually holds the lease (PLAN.md Step 3.5 PR② review:
+    // `SessionFrame::Resize` binds to the writer lease exactly like
+    // `write_at`, not just `Input`).
+    data.send
+        .send(&wire::SessionFrame::resize(132, 43))
+        .await
+        .unwrap();
+    // No ack exists for `Resize`. `input_pump` handles one frame at a time
+    // off a single stream, so a zero-length retransmission-of-nothing at
+    // the same offset — acked but never moving the input axis, unlike
+    // "again" below — is a deterministic sync point proving the `Resize`
+    // just sent was already dispatched by the time this ack arrives.
+    data.send
+        .send(&wire::SessionFrame::input(10, Vec::new()))
+        .await
+        .unwrap();
+    assert_eq!(read_ack(&mut data).await, 10);
+    assert!(
+        pipe.resizes().is_empty(),
+        "a demoted attach's resize must not reach the child"
+    );
+
     // Steal back on the attach's own connection; writing resumes with no
     // reattach and no gap in the input offset.
     s.session_write(&id, b"back!".to_vec()).await.unwrap();

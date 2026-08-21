@@ -143,6 +143,20 @@ pub struct SessionInfo {
     pub created_at: String,
     /// Highest cumulative output offset so far.
     pub last_sequence: u64,
+    /// The identity that opened this session — `server::opener_key`'s
+    /// output (`session.open`'s authenticated `(principal, auth_path)`, not
+    /// `ctx.principal.to_string()` alone: see that function's doc for why).
+    /// Never surfaced in `session.get`/`list` JSON (`session_info_to_wire`
+    /// does not map it) — internal to the `session.control` ownership check
+    /// (`PLAN.md` Step 3.5 PR②, PRD §6). `Broker::open`/`open_with` (as
+    /// opposed to `open_as`, which is what `SessionBackend::open` — the
+    /// only production path — always calls) leave this `String::new()`:
+    /// no `opener_key` output is ever empty, so a session created that way
+    /// is refused by the ownership check for every principal, permanently.
+    /// That is fine for a test double that never drives `session.write`/
+    /// `resize` through the wire dispatcher, but is a footgun for any
+    /// other caller — prefer `open_as`.
+    pub opener: String,
 }
 
 /// Mutable session metadata published to readers (`session.list`/`get` and
@@ -181,6 +195,9 @@ struct Meta {
 pub struct SessionShared {
     id: String,
     created_at: String,
+    /// The owner key recorded at open ([`SessionInfo::opener`]) — set once
+    /// at creation, never mutated (`PLAN.md` Step 3.5 PR②).
+    opener: String,
     clock: Arc<dyn Clock>,
     ring: Mutex<Box<dyn ReplayStore>>,
     /// Bumped on every ring append so `pull(..., wait)` can sleep until
@@ -276,6 +293,16 @@ enum Command {
         rows: u16,
         resp: oneshot::Sender<io::Result<()>>,
     },
+    /// The `SESSION_DATA` stream's resize, unlike [`Command::Resize`],
+    /// requires `conn` to hold the writer lease — the same bound `Input`
+    /// on that stream already has (`PLAN.md` Step 3.5 PR② follow-up: a
+    /// demoted attach must not still be able to mutate the live PTY).
+    ResizeAt {
+        conn: ConnectionId,
+        cols: u16,
+        rows: u16,
+        resp: oneshot::Sender<Result<(), WriteError>>,
+    },
     Signal {
         signal: Signal,
         resp: oneshot::Sender<io::Result<()>>,
@@ -335,6 +362,13 @@ impl SessionHandle {
         &self.shared.id
     }
 
+    /// The owner key recorded when this session was opened
+    /// ([`SessionInfo::opener`] — `PLAN.md` Step 3.5 PR②'s
+    /// `session.control` ownership check).
+    pub fn opener(&self) -> &str {
+        &self.shared.opener
+    }
+
     /// A point-in-time snapshot.
     pub fn info(&self) -> SessionInfo {
         let meta = self.shared.meta();
@@ -345,6 +379,7 @@ impl SessionHandle {
             writer: meta.lease.holder().map(|h| h.principal.clone()),
             created_at: self.shared.created_at.clone(),
             last_sequence,
+            opener: self.shared.opener.clone(),
         }
     }
 
@@ -490,6 +525,30 @@ impl SessionHandle {
         rx.await
             .map_err(|_| WriteError::Gone)?
             .map_err(|e| WriteError::Io(e.to_string()))
+    }
+
+    /// [`resize`](Self::resize), refused with [`WriteError::NotWriter`]
+    /// unless `conn` holds the writer lease. The `SESSION_DATA` stream's
+    /// `Resize` frame uses this, not `resize` — a peer whose `Input` is
+    /// already being discarded as read-only (lease stolen by a steal-back
+    /// reattach) must not keep mutating the live PTY's window size either.
+    pub async fn resize_at(
+        &self,
+        conn: ConnectionId,
+        cols: u16,
+        rows: u16,
+    ) -> Result<(), WriteError> {
+        let (resp, rx) = oneshot::channel();
+        self.inbox
+            .send(Command::ResizeAt {
+                conn,
+                cols,
+                rows,
+                resp,
+            })
+            .await
+            .map_err(|_| WriteError::Gone)?;
+        rx.await.map_err(|_| WriteError::Gone)?
     }
 
     /// Deliver a signal to the child's process group. Refused on an
@@ -716,10 +775,13 @@ impl SessionActor {
     /// Create a session: spawn the source, build shared state, and return
     /// the handle plus the actor future to spawn.
     ///
-    /// `id` is the opaque session id; `created_at` is the RFC 3339 stamp.
+    /// `id` is the opaque session id; `created_at` is the RFC 3339 stamp;
+    /// `opener` is the opaque owner key recorded for this session
+    /// ([`SessionInfo::opener`] — `PLAN.md` Step 3.5 PR②).
     pub fn create(
         id: String,
         created_at: String,
+        opener: String,
         clock: Arc<dyn Clock>,
         spec: &SessionSpec,
         source: Box<dyn SessionSource>,
@@ -731,6 +793,7 @@ impl SessionActor {
         let shared = Arc::new(SessionShared {
             id,
             created_at,
+            opener,
             clock,
             ring: Mutex::new(ring),
             notify: Notify::new(),
@@ -946,6 +1009,21 @@ impl ActorState {
             }
             Command::Resize { cols, rows, resp } => {
                 let _ = resp.send(self.control.resize(cols, rows));
+            }
+            Command::ResizeAt {
+                conn,
+                cols,
+                rows,
+                resp,
+            } => {
+                let result = if !self.shared.meta().lease.is_held_by(conn) {
+                    Err(WriteError::NotWriter)
+                } else {
+                    self.control
+                        .resize(cols, rows)
+                        .map_err(|e| WriteError::Io(e.to_string()))
+                };
+                let _ = resp.send(result);
             }
             Command::Signal { signal, resp } => {
                 // `exiting` (child reaped, output still draining) is treated
@@ -1455,6 +1533,7 @@ mod tests {
         let (handle, actor) = SessionActor::create(
             "01TESTSESSION".to_string(),
             "2026-01-01T00:00:00Z".to_string(),
+            "device:test-opener".to_string(),
             Arc::new(clock.clone()),
             &SessionSpec::default(),
             Box::new(source),

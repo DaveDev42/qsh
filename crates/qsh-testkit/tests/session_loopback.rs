@@ -15,14 +15,14 @@
 
 use std::sync::Arc;
 
-use qsh_core::acl::{Action, DenyAll};
+use qsh_core::acl::{Action, AllowAllPinned, DenyAll};
 use qsh_core::client::{ClientError, Session};
 use qsh_proto::ErrorCode;
 use qsh_proto::wire::{self, StreamHeader, session_read_event};
 use qsh_testkit::HostedPair;
-use qsh_testkit::loopback::LoopbackHarness;
+use qsh_testkit::loopback::{LoopbackHarness, TestIdentity, make_identity};
 use qsh_testkit::reverse::ReversePairHarness;
-use qsh_transport::FramedStream;
+use qsh_transport::{Dialer, FramedStream, Principal, StaticTrust};
 
 fn open_req(argv: &[&str]) -> wire::SessionOpen {
     wire::SessionOpen {
@@ -502,4 +502,237 @@ async fn attach_to_an_unknown_session_creates_nothing_forward() {
 #[tokio::test(flavor = "multi_thread")]
 async fn attach_to_an_unknown_session_creates_nothing_reverse() {
     attach_to_an_unknown_session_creates_nothing(ReversePairHarness::start().await).await;
+}
+
+// ==========================================================================
+// Session ownership (`PLAN.md` Step 3.5 PR②, PRD §6, audit A2 P0):
+// `session.write`/`session.resize` bind to the session's opener.
+// Forward-only, same reason `resume_loopback.rs`'s multi-principal section
+// gives — a reverse target has exactly one peer, ever, so there is no
+// second, distinct principal to test ownership against.
+// ==========================================================================
+
+/// A second pinned device: its own dialer, its own connection, its own
+/// principal. Mirrors `resume_loopback.rs`'s `other_device` (private to
+/// each file — the pattern, not the function, is what's shared).
+async fn other_device(h: &LoopbackHarness, identity: &TestIdentity) -> Session {
+    let client_trust = StaticTrust::empty().with_pin(
+        h.server_identity.fingerprint,
+        Principal::Device("box".into()),
+    );
+    let dialer = Dialer::new(identity.local.clone(), Arc::new(client_trust));
+    let dialed = dialer
+        .dial(h.addr, "127.0.0.1")
+        .await
+        .expect("the second device is pinned");
+    Session::negotiate(dialed.connection, "desktop")
+        .await
+        .expect("negotiate")
+}
+
+/// `session.write`/`session.resize` are refused to every principal but the
+/// session's opener, with the **identical** `PERMISSION_DENIED` an ACL
+/// policy deny for `session.control` would produce — a peer must not be
+/// able to tell "this session exists but is someone else's" from "the
+/// policy forbids this" — and each refusal is audited as a
+/// `session.control` deny. The opener itself is unaffected.
+#[tokio::test(flavor = "multi_thread")]
+async fn session_control_binds_write_and_resize_to_the_opener() {
+    let owner = make_identity();
+    let other = make_identity();
+    let server_trust = StaticTrust::empty()
+        .with_pin(owner.fingerprint, Principal::Device("laptop".into()))
+        .with_pin(other.fingerprint, Principal::Device("desktop".into()));
+    let h = LoopbackHarness::start_custom(Arc::new(AllowAllPinned), owner, server_trust).await;
+
+    let mut s = h.session().await;
+    let opened = s.session_open(open_req(&["sh"])).await.unwrap();
+    let id = opened.session_id.clone();
+    let _pipe = h.pipes().take().expect("pipe handle for the session");
+
+    let mut desktop = other_device(&h, &other).await;
+
+    for (name, result) in [
+        (
+            "write",
+            desktop.session_write(&id, b"x".to_vec()).await.map(|_| ()),
+        ),
+        (
+            "resize",
+            desktop.session_resize(&id, 80, 24).await.map(|_| ()),
+        ),
+    ] {
+        match result {
+            Err(ClientError::Remote { code, message, .. }) => {
+                assert_eq!(code, ErrorCode::PermissionDenied, "{name}");
+                assert_eq!(
+                    message, "peer is not allowed to session.control on this host",
+                    "{name}: message must match an ACL policy deny byte-for-byte"
+                );
+            }
+            other => panic!("{name}: expected PERMISSION_DENIED, got {other:?}"),
+        }
+    }
+
+    // Both refusals are audited structurally as `session.control` denies
+    // against the foreign principal — exactly one record per op
+    // (`Server::authorize_session_control` folds the ACL check and the
+    // ownership check into a single terminal decision, so a foreign
+    // principal's refusal never also shows up as an `allow`).
+    let recs = h.audit().records();
+    let desktop_recs: Vec<_> = recs
+        .iter()
+        .filter(|r| r.principal == "device:desktop")
+        .collect();
+    assert_eq!(desktop_recs.len(), 2, "{recs:?}");
+    assert!(desktop_recs.iter().all(|r| r.decision == "deny"));
+    assert!(
+        desktop_recs
+            .iter()
+            .all(|r| r.action == Action::SessionControl.as_str())
+    );
+    assert!(desktop_recs.iter().all(|r| r.resource == id));
+
+    // The owner's own write/resize are unaffected.
+    assert_eq!(s.session_write(&id, b"y".to_vec()).await.unwrap(), 1);
+    assert_eq!(s.session_resize(&id, 100, 30).await.unwrap(), (100, 30));
+
+    desktop.close();
+    s.close();
+    h.shutdown().await;
+}
+
+/// Not a real posture — `AllowAllPinned` denies every CA-authenticated
+/// peer for good (`acl/mod.rs` doc) — but exactly what `require_opener`'s
+/// own doc says the ownership binding must survive: a future M5 policy
+/// that admits a CA-authenticated peer for `session.control` too.
+struct AllowAllAnyAuthPath;
+
+impl qsh_core::acl::Authorizer for AllowAllAnyAuthPath {
+    fn check(
+        &self,
+        _principal: &Principal,
+        _auth_path: qsh_transport::AuthPath,
+        _action: Action,
+        _resource: &str,
+    ) -> qsh_core::acl::Decision {
+        qsh_core::acl::Decision::Allow
+    }
+}
+
+/// A CA-issued leaf asserting the pinned opener's own principal
+/// (`qsh://device/laptop`, same as the pin) must still be refused
+/// ownership: `Principal`'s `Display` alone cannot tell a pin from a CA
+/// leaf (`qsh-transport::tls::AuthPath`'s doc), so the binding has to key
+/// on `(principal, auth_path)`, not `principal.to_string()` alone
+/// (`PLAN.md` Step 3.5 PR② review). Forward-only for the same reason the
+/// two-principal ownership tests above are: this is about the ownership
+/// gate, not role symmetry.
+#[tokio::test(flavor = "multi_thread")]
+async fn ca_leaf_asserting_the_opener_principal_is_still_denied_ownership() {
+    let owner = make_identity();
+    let ca = qsh_testkit::loopback::make_ca();
+    let spoofer_identity = ca.issue("qsh://device/laptop");
+    let server_trust = StaticTrust::empty()
+        .with_pin(owner.fingerprint, Principal::Device("laptop".into()))
+        .with_ca(ca.root_der.clone());
+    let h = LoopbackHarness::start_custom(Arc::new(AllowAllAnyAuthPath), owner, server_trust).await;
+
+    let mut s = h.session().await;
+    let opened = s.session_open(open_req(&["sh"])).await.unwrap();
+    let id = opened.session_id.clone();
+    let _pipe = h.pipes().take().expect("pipe handle for the session");
+
+    let client_trust = StaticTrust::empty().with_pin(
+        h.server_identity.fingerprint,
+        Principal::Device("box".into()),
+    );
+    let dialer = Dialer::new(spoofer_identity.local.clone(), Arc::new(client_trust));
+    let dialed = dialer
+        .dial(h.addr, "127.0.0.1")
+        .await
+        .expect("the host's CA root trusts this leaf");
+    // `Connection::principal()` is the *peer's* authenticated principal —
+    // on the dialer side that is the host's ("box"), not what the host
+    // assigned this leaf. The audit assertion below is what actually
+    // proves the host classified this CA leaf as `device:laptop`, same as
+    // the pin.
+    let mut spoofer = Session::negotiate(dialed.connection, "desktop")
+        .await
+        .expect("negotiate");
+
+    let err = spoofer
+        .session_write(&id, b"pwned".to_vec())
+        .await
+        .unwrap_err();
+    match err {
+        ClientError::Remote { code, message, .. } => {
+            assert_eq!(code, ErrorCode::PermissionDenied);
+            assert_eq!(
+                message, "peer is not allowed to session.control on this host",
+                "byte-identical to a policy deny — no ownership oracle"
+            );
+        }
+        other => panic!("expected remote PERMISSION_DENIED, got {other:?}"),
+    }
+    let recs = h.audit().records();
+    assert!(
+        recs.iter()
+            .any(|r| r.principal == "device:laptop" && r.decision == "deny")
+    );
+
+    // The genuine (pinned) opener is unaffected.
+    assert_eq!(s.session_write(&id, b"y".to_vec()).await.unwrap(), 1);
+
+    spoofer.close();
+    s.close();
+    h.shutdown().await;
+}
+
+/// PRD §6's boundary, pinned so a future change cannot silently widen the
+/// ownership binding: unlike `write`/`resize` above, `session.get`/`read`/
+/// `close` stay cross-device, decided by ACL alone — a non-owner succeeds
+/// exactly as it did before session ownership existed.
+#[tokio::test(flavor = "multi_thread")]
+async fn session_control_binding_does_not_reach_get_read_or_close() {
+    let owner = make_identity();
+    let other = make_identity();
+    let server_trust = StaticTrust::empty()
+        .with_pin(owner.fingerprint, Principal::Device("laptop".into()))
+        .with_pin(other.fingerprint, Principal::Device("desktop".into()));
+    let h = LoopbackHarness::start_custom(Arc::new(AllowAllPinned), owner, server_trust).await;
+
+    let mut s = h.session().await;
+    let opened = s.session_open(open_req(&["sh"])).await.unwrap();
+    let id = opened.session_id.clone();
+    let mut pipe = h.pipes().take().expect("pipe handle for the session");
+
+    let mut desktop = other_device(&h, &other).await;
+
+    let info = desktop
+        .session_get(&id)
+        .await
+        .expect("session.get stays cross-device (PRD §6)");
+    assert_eq!(info.session_id, id);
+
+    pipe.write_output(b"hi").await.unwrap();
+    let read = desktop
+        .session_read(wire::SessionRead {
+            session_id: id.clone(),
+            after: 0,
+            wait_ms: 5_000,
+            ..Default::default()
+        })
+        .await
+        .expect("session.read stays cross-device (PRD §6)");
+    assert!(!read.events.is_empty());
+
+    desktop
+        .session_close(&id, None)
+        .await
+        .expect("session.close stays cross-device (PRD §6)");
+
+    desktop.close();
+    s.close();
+    h.shutdown().await;
 }

@@ -424,8 +424,16 @@ async fn input_pump(
                         "Resize cols/rows must fit in 16 bits".into(),
                     ));
                 };
-                match sessions.resize(&id, cols, rows).await {
-                    Ok(()) | Err(BrokerError::NotRunning | BrokerError::NotFound) => {}
+                // `resize_at`, not `resize`: this attach may have been
+                // demoted to read-only by a steal-back on another
+                // connection (protocol.md §10), same as `Input` above —
+                // a stale attach must not keep SIGWINCH-ing the live PTY
+                // out from under the connection that actually holds it.
+                match sessions.resize_at(&id, conn, cols, rows).await {
+                    Ok(())
+                    | Err(
+                        BrokerError::NotRunning | BrokerError::NotFound | BrokerError::NotWriter,
+                    ) => {}
                     Err(err) => return Err(err.into()),
                 }
             }
