@@ -310,12 +310,23 @@ fn a_teardown_waits_out_a_detach_that_is_still_flushing() {
             .expect("write before the detach");
 
         let handle = stream.handle();
-        let (entered, entering) = mpsc::sync_channel(1);
-        let detacher = std::thread::spawn(move || {
-            let _ = entered.send(());
-            handle.detach()
-        });
-        entering.recv().expect("the detaching thread started");
+        let probe = stream.handle();
+        let detacher = std::thread::spawn(move || handle.detach());
+        // Wait until the detach provably holds the teardown gate — a
+        // thread-start handshake is not enough. `close()` and `detach()`
+        // meet at a mutex, and on a loaded box the spawning thread can
+        // reach it first (ubuntu CI, 2026-08-21: `close()` returned in
+        // 94ms because it won that race, and there was no detach in
+        // flight for it to wait out). Once `is_detaching()` reports true,
+        // the detacher owns the gate for the whole flush, so the close
+        // below must wait.
+        while !probe.is_detaching() {
+            assert!(
+                !detacher.is_finished(),
+                "the detach finished before close() could contest it"
+            );
+            std::thread::yield_now();
+        }
 
         let started = std::time::Instant::now();
         stream.close();

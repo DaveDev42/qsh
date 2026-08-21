@@ -1360,6 +1360,27 @@ impl AttachHandle {
         self.link.connection().close(0, b"detach");
         outcome
     }
+
+    /// Whether a detach is flushing **right now** — the state the
+    /// teardown gate in [`SessionAttachStream::close`] waits out.
+    ///
+    /// A snapshot, with one asymmetry that makes it useful: `false` can be
+    /// stale the instant it returns (a detach may begin right after), but
+    /// `true` means the detach currently holding the gate keeps it until
+    /// that detach completes — so a teardown started while this reports
+    /// `true` is guaranteed to wait the flush out. An owner that knows a
+    /// detach was *requested* on another thread cannot get the same
+    /// guarantee from the request alone: thread start order says nothing
+    /// about who reaches the gate first.
+    pub fn is_detaching(&self) -> bool {
+        match self.detaching.try_lock() {
+            Ok(_guard) => false,
+            Err(std::sync::TryLockError::WouldBlock) => true,
+            // Poisoned: the flushing thread panicked, so whatever detach
+            // held the gate is over — nothing left to wait out.
+            Err(std::sync::TryLockError::Poisoned(_)) => false,
+        }
+    }
 }
 
 fn attach_gone() -> OpError {
