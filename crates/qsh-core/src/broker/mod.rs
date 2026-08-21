@@ -437,12 +437,37 @@ impl Broker {
         self.open_with(spec, source)
     }
 
+    /// [`Broker::open`], recording `opener` as the session's owner
+    /// (`PLAN.md` Step 3.5 PR②'s `session.control` ownership check —
+    /// [`SessionInfo::opener`]'s doc has the empty-string convention
+    /// [`Broker::open`]/[`Broker::open_with`] fall back to when this is not
+    /// used). `SessionBackend::open` — `server::handle_session_open`'s only
+    /// broker call, i.e. the sole production path — always calls this, not
+    /// `open`/`open_with`; every other caller in this crate is a test.
+    pub fn open_as(
+        &self,
+        spec: &SessionSpec,
+        opener: impl Into<String>,
+    ) -> Result<SessionHandle, BrokerError> {
+        let source = self.factory.create(spec).map_err(spawn_error)?;
+        self.open_with_opener(spec, source, opener.into())
+    }
+
     /// [`Broker::open`] with an explicit source (tests; Step 4 PTY wiring
     /// that already holds one). Same authorization precondition.
     pub fn open_with(
         &self,
         spec: &SessionSpec,
         source: Box<dyn SessionSource>,
+    ) -> Result<SessionHandle, BrokerError> {
+        self.open_with_opener(spec, source, String::new())
+    }
+
+    fn open_with_opener(
+        &self,
+        spec: &SessionSpec,
+        source: Box<dyn SessionSource>,
+        opener: String,
     ) -> Result<SessionHandle, BrokerError> {
         // Held from the draining check through the registry insert below,
         // spanning `SessionActor::create` (which spawns the real child —
@@ -467,6 +492,7 @@ impl Broker {
         let (handle, actor) = SessionActor::create(
             id.0.clone(),
             created_at,
+            opener,
             Arc::clone(&self.clock),
             spec,
             source,
@@ -662,8 +688,13 @@ impl Broker {
 /// [`Broker`] can be swapped for an IPC client at runtime.
 pub trait SessionBackend: Send + Sync {
     /// Open a new session from `spec`, returning its id. The caller has
-    /// already authorized the request.
-    fn open(&self, spec: &SessionSpec) -> Result<SessionId, BrokerError>;
+    /// already authorized the request. `opener` is recorded as the
+    /// session's owner — an opaque key the caller both mints and later
+    /// compares (production passes `server::opener_key`'s
+    /// `(auth_path, principal)` output, never a bare principal string) —
+    /// and `session.write`/`session.resize` are refused to every other
+    /// key (`PLAN.md` Step 3.5 PR②, PRD §6).
+    fn open(&self, spec: &SessionSpec, opener: &str) -> Result<SessionId, BrokerError>;
 
     /// Snapshot one live session.
     fn get(&self, id: &SessionId) -> Result<SessionInfo, BrokerError>;
@@ -735,6 +766,19 @@ pub trait SessionBackend: Send + Sync {
     fn resize(
         &self,
         id: &SessionId,
+        cols: u16,
+        rows: u16,
+    ) -> BoxFuture<'_, Result<(), BrokerError>>;
+
+    /// [`resize`](Self::resize), refused with [`BrokerError::NotWriter`]
+    /// unless `conn` holds the writer lease. The `SESSION_DATA` stream's
+    /// `Resize` frame uses this — the data-stream sibling of `write_at`'s
+    /// lease check, so a demoted (read-only) attach cannot keep mutating
+    /// the live PTY's window size after its `Input` is already discarded.
+    fn resize_at(
+        &self,
+        id: &SessionId,
+        conn: ConnectionId,
         cols: u16,
         rows: u16,
     ) -> BoxFuture<'_, Result<(), BrokerError>>;
@@ -815,8 +859,10 @@ pub trait SessionBackend: Send + Sync {
 }
 
 impl SessionBackend for Broker {
-    fn open(&self, spec: &SessionSpec) -> Result<SessionId, BrokerError> {
-        Ok(SessionId(Broker::open(self, spec)?.id().to_string()))
+    fn open(&self, spec: &SessionSpec, opener: &str) -> Result<SessionId, BrokerError> {
+        Ok(SessionId(
+            Broker::open_as(self, spec, opener)?.id().to_string(),
+        ))
     }
 
     fn get(&self, id: &SessionId) -> Result<SessionInfo, BrokerError> {
@@ -899,6 +945,22 @@ impl SessionBackend for Broker {
     ) -> BoxFuture<'_, Result<(), BrokerError>> {
         let handle = Broker::get(self, id);
         Box::pin(async move { handle?.resize(cols, rows).await.map_err(map_write_error) })
+    }
+
+    fn resize_at(
+        &self,
+        id: &SessionId,
+        conn: ConnectionId,
+        cols: u16,
+        rows: u16,
+    ) -> BoxFuture<'_, Result<(), BrokerError>> {
+        let handle = Broker::get(self, id);
+        Box::pin(async move {
+            handle?
+                .resize_at(conn, cols, rows)
+                .await
+                .map_err(map_write_error)
+        })
     }
 
     fn lease_conflict(&self, id: &SessionId, principal: &str) -> bool {
@@ -1101,7 +1163,9 @@ mod tests {
     async fn backend_open_uses_the_source_factory_and_is_object_safe() {
         let (broker, _clock) = test_broker(Duration::from_secs(3600));
         let backend: Arc<dyn SessionBackend> = broker.clone();
-        let id = backend.open(&SessionSpec::default()).unwrap();
+        let id = backend
+            .open(&SessionSpec::default(), "device:test-opener")
+            .unwrap();
         assert_eq!(backend.get(&id).unwrap().state, SessionState::Running);
         assert_eq!(backend.list().len(), 1);
         within(backend.close(&id, CloseReason::Closed, None))
@@ -1298,7 +1362,9 @@ mod tests {
     async fn backend_drain_closes_every_session_via_the_trait_object() {
         let (broker, _clock) = test_broker(Duration::from_secs(3600));
         let backend: Arc<dyn SessionBackend> = broker.clone();
-        let id = backend.open(&SessionSpec::default()).unwrap();
+        let id = backend
+            .open(&SessionSpec::default(), "device:test-opener")
+            .unwrap();
         assert_eq!(backend.list().len(), 1);
 
         within(backend.drain(CloseReason::Closed)).await;

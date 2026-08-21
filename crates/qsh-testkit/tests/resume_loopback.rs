@@ -621,9 +621,18 @@ async fn an_attach_without_a_credential_is_refused_by_the_host() {
 /// The binding take happens where the data stream opens.
 ///
 /// The contender has to be a different *principal* (a second connection
-/// from the same principal is the same writer moving devices), and since
-/// an attach requires the session's credential, the only way a foreign
-/// principal comes to hold the lease is the `session.write` value op.
+/// from the same principal is the same writer moving devices). Before
+/// session ownership (`PLAN.md` Step 3.5 PR②, PRD §6) the only way a
+/// foreign principal reached the lease at all was the `session.write` value
+/// op — an attach needs the session's credential, which never leaves the
+/// opening device. PR② closes that path too: `session.write`/`resize` now
+/// refuse every principal but the opener outright (proven at the wire by
+/// `session_control_binds_write_and_resize_to_the_opener` in
+/// `session_loopback.rs`), so a foreign lease can no longer arise over the
+/// wire *at all* — this test drives it directly through the broker seam
+/// `dispatch` sits on top of (the way `session.write` used to before
+/// ownership bound it), to prove `no_steal` still refuses one however it
+/// came to exist.
 #[tokio::test(flavor = "multi_thread")]
 async fn no_steal_conflicts_with_a_foreign_lease_and_spends_no_credential() {
     let owner = make_identity();
@@ -638,12 +647,35 @@ async fn no_steal_conflicts_with_a_foreign_lease_and_spends_no_credential() {
     drop(data);
     first.close();
 
-    // A foreign principal takes the writer lease the only way it can.
+    // A foreign principal's `session.write` is refused by ownership before
+    // the lease is ever consulted.
     let mut desktop = other_device(&h, &other).await;
-    desktop
+    match desktop
         .session_write(&opened.session_id, b"x".to_vec())
         .await
-        .expect("the value op is ACL-allowed and takes the lease");
+    {
+        Err(ClientError::Remote { code, message, .. }) => {
+            assert_eq!(code, ErrorCode::PermissionDenied);
+            assert_eq!(
+                message,
+                "peer is not allowed to session.control on this host"
+            );
+        }
+        other => panic!("expected a foreign principal's write to be PERMISSION_DENIED: {other:?}"),
+    }
+
+    // What `no_steal` must still refuse is a foreign lease however one
+    // comes to exist — drive it through the broker directly.
+    h.broker
+        .get(&qsh_core::broker::SessionId(opened.session_id.clone()))
+        .unwrap()
+        .take_lease(
+            "device:desktop",
+            qsh_core::broker::ConnectionId(u64::MAX),
+            false,
+        )
+        .await
+        .expect("the broker's own take_lease does not gate on identity");
 
     // Refusing to steal loses. The code says exactly why: this is not the
     // non-distinguishing path — nothing about a credential failed.

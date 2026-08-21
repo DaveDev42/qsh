@@ -44,7 +44,7 @@ use thiserror::Error;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-use crate::acl::{Action, Authorizer};
+use crate::acl::{Action, Authorizer, Decision};
 use crate::audit::{AuditRecord, AuditSink};
 use crate::broker::{
     BrokerError, CloseReason, ConnectionId, ControlEvent, Cursor, FIRST_INPUT_STREAM,
@@ -470,16 +470,131 @@ impl Server {
             ctx.peer_addr,
         ));
         if !decision.is_allow() {
-            return Err(Box::new(ControlMessage::error(
-                request_id,
-                wire::Error::new(
-                    ErrorCode::PermissionDenied,
-                    format!("peer is not allowed to {action} on this host"),
-                    false,
-                ),
-            )));
+            return Err(Box::new(Self::permission_denied(request_id, action)));
         }
         Ok(())
+    }
+
+    /// `Action::SessionControl` on `id`, **then** [`Self::require_opener`] —
+    /// the combined gate `session.write`/`session.resize` call instead of
+    /// [`Self::authorize`], so the two decisions land as a single terminal
+    /// audit record rather than [`Self::authorize`]'s unconditional allow
+    /// record followed by a second, contradicting `require_opener` deny for
+    /// the same request (`PLAN.md` Step 3.5 PR② review: a foreign
+    /// principal's refused write must not also read as an `allow` in the
+    /// audit log — see `crates/qsh-testkit/tests/session_loopback.rs`'s
+    /// `session_control_binds_write_and_resize_to_the_opener`).
+    fn authorize_session_control(
+        &self,
+        ctx: &ConnCtx,
+        request_id: u64,
+        id: &SessionId,
+    ) -> Result<(), Box<ControlMessage>> {
+        let decision =
+            self.authorizer
+                .check(&ctx.principal, ctx.auth_path, Action::SessionControl, &id.0);
+        if !decision.is_allow() {
+            self.audit.record(&AuditRecord::now(
+                request_id,
+                &ctx.principal,
+                Action::SessionControl,
+                &id.0,
+                decision,
+                ctx.peer_addr,
+            ));
+            return Err(Box::new(Self::permission_denied(
+                request_id,
+                Action::SessionControl,
+            )));
+        }
+        self.require_opener(ctx, request_id, id)?;
+        self.audit.record(&AuditRecord::now(
+            request_id,
+            &ctx.principal,
+            Action::SessionControl,
+            &id.0,
+            Decision::Allow,
+            ctx.peer_addr,
+        ));
+        Ok(())
+    }
+
+    /// The `PERMISSION_DENIED` reply for `action`. The **only** place this
+    /// wording is built, so [`Server::authorize`]'s policy deny and
+    /// [`Server::require_opener`]'s ownership deny are byte-identical — a
+    /// peer must not be able to tell "the policy forbids this" from "this
+    /// session exists but is someone else's" (`PLAN.md` Step 3.5 PR②).
+    fn permission_denied(request_id: u64, action: Action) -> ControlMessage {
+        ControlMessage::error(
+            request_id,
+            wire::Error::new(
+                ErrorCode::PermissionDenied,
+                format!("peer is not allowed to {action} on this host"),
+                false,
+            ),
+        )
+    }
+
+    /// `session.control`'s ownership binding (audit A2 P0, `PLAN.md` Step
+    /// 3.5 PR②, PRD §6): `session.write`/`session.resize` are refused to
+    /// every principal but the one that opened the session. Runs **after**
+    /// [`Server::authorize`]'s ACL decision, so an ownership deny is a
+    /// second, independent gate — never a substitute for policy.
+    ///
+    /// A session this host cannot find is left alone: existence is decided
+    /// by the caller's own subsequent broker call
+    /// ([`SessionBackend::get`]/`take_lease`/`resize`), never invented here
+    /// — inventing a denial for "no such session" would make this gate an
+    /// oracle the ACL choke point deliberately is not (`session.write`/
+    /// `resize` already answer `SESSION_NOT_FOUND` for an unknown id, same
+    /// as before this check existed).
+    ///
+    /// `session.get`/`read`/`close`/`list`, `session.open` and
+    /// `session.attach` are **not** gated here — PRD §6 keeps them
+    /// cross-device within ACL scope, and attach is already device-bound by
+    /// its resume credential (ADR-0007).
+    ///
+    /// Compares [`opener_key`], not `ctx.principal` alone: `Principal` by
+    /// itself cannot tell a pin from a CA leaf asserting the same name
+    /// (`qsh-transport::tls::AuthPath`'s own doc), so a bare principal
+    /// match would let a CA-issued leaf assert a pinned opener's identity
+    /// the moment M5's policy admits any CA-authenticated peer here.
+    ///
+    /// Writes **only** the deny record (on refusal); [`Self::
+    /// authorize_session_control`], its sole caller, writes the terminal
+    /// allow. It never writes an allow of its own.
+    fn require_opener(
+        &self,
+        ctx: &ConnCtx,
+        request_id: u64,
+        id: &SessionId,
+    ) -> Result<(), Box<ControlMessage>> {
+        // `NotFound` alone is left alone — existence is decided by the
+        // caller's own subsequent broker call, per the doc above. Any other
+        // lookup failure (an out-of-process `SessionBackend` timing out,
+        // say) is ambiguous, not "no such session", and CLAUDE.md's "fail
+        // closed on any ambiguous auth/ACL state" applies: it denies rather
+        // than silently waving the request through.
+        let is_opener = match self.sessions.get(id) {
+            Ok(info) => info.opener == opener_key(&ctx.principal, ctx.auth_path),
+            Err(BrokerError::NotFound) => return Ok(()),
+            Err(_) => false,
+        };
+        if is_opener {
+            return Ok(());
+        }
+        self.audit.record(&AuditRecord::now(
+            request_id,
+            &ctx.principal,
+            Action::SessionControl,
+            &id.0,
+            Decision::Deny,
+            ctx.peer_addr,
+        ));
+        Err(Box::new(Self::permission_denied(
+            request_id,
+            Action::SessionControl,
+        )))
     }
 
     fn handle_exec_start(&self, ctx: &ConnCtx, request_id: u64, req: &ExecStart) -> ControlMessage {
@@ -723,7 +838,14 @@ impl Server {
             rows,
             user: req.user.clone(),
         };
-        let session_id = match self.sessions.open(&spec) {
+        // The opener is recorded as this session's owner (`PLAN.md` Step
+        // 3.5 PR②) — `session.write`/`session.resize` bind to it from here
+        // on. `opener_key`, not `ctx.principal.to_string()` alone: see its
+        // doc comment.
+        let session_id = match self
+            .sessions
+            .open(&spec, &opener_key(&ctx.principal, ctx.auth_path))
+        {
             Ok(id) => id,
             Err(err) => return broker_error(request_id, err),
         };
@@ -910,9 +1032,13 @@ impl Server {
     }
 
     /// The non-parking half of `session.write`: ACL `session.control` on
-    /// the session id, then take the writer lease (programmatic ⇒
-    /// `no_steal`: another principal's live lease is `SESSION_CONFLICT`,
-    /// architecture.md §3 rule b).
+    /// the session id and the opener binding
+    /// ([`Server::authorize_session_control`], `PLAN.md` Step 3.5 PR②),
+    /// then take the writer lease. `TakeOutcome::Conflict` below can no
+    /// longer be produced by a *foreign* principal — every caller that
+    /// reaches this line is already the session's opener — so it is
+    /// unreachable through `session.write` now (architecture.md §3 rule
+    /// (b) predates this gate; see that doc's amendment note).
     ///
     /// Everything here is bounded — the session actor's loop never blocks
     /// on the child — so this side is safe to run inline on the control
@@ -930,8 +1056,8 @@ impl Server {
         if let Err(err) = req.validate() {
             return Err(Box::new(invalid_argument(request_id, err.to_string())));
         }
-        self.authorize(ctx, request_id, Action::SessionControl, &req.session_id)?;
         let id = SessionId(req.session_id.clone());
+        self.authorize_session_control(ctx, request_id, &id)?;
         let conn = ctx.connection_id();
         if req.data.is_empty() {
             // Nothing to write: answer without touching the lease, so an
@@ -993,7 +1119,9 @@ impl Server {
         }
     }
 
-    /// `session.resize`: ACL `session.control` on the session id.
+    /// `session.resize`: ACL `session.control` on the session id and the
+    /// opener binding, combined
+    /// ([`Server::authorize_session_control`], `PLAN.md` Step 3.5 PR②).
     async fn handle_session_resize(
         &self,
         ctx: &ConnCtx,
@@ -1012,16 +1140,11 @@ impl Server {
         if cols == 0 || rows == 0 {
             return invalid_argument(request_id, "cols and rows must be positive");
         }
-        if let Err(denied) =
-            self.authorize(ctx, request_id, Action::SessionControl, &req.session_id)
-        {
+        let id = SessionId(req.session_id.clone());
+        if let Err(denied) = self.authorize_session_control(ctx, request_id, &id) {
             return *denied;
         }
-        match self
-            .sessions
-            .resize(&SessionId(req.session_id.clone()), cols, rows)
-            .await
-        {
+        match self.sessions.resize(&id, cols, rows).await {
             Ok(()) => ControlMessage::response(
                 request_id,
                 response::Body::SessionResized(wire::SessionResized {
@@ -1862,6 +1985,22 @@ fn broker_error(request_id: u64, err: BrokerError) -> ControlMessage {
         request_id,
         wire::Error::new(code, err.to_string(), retryable),
     )
+}
+
+/// The string [`SessionBackend::open`]'s `opener` records, and
+/// [`Server::require_opener`] later compares against: the authenticated
+/// `(principal, auth_path)` pair, not `principal` alone (`PLAN.md` Step 3.5
+/// PR②'s ownership binding, PRD §6). `Principal`'s `Display` cannot be
+/// trusted on its own — a CA-issued leaf may legitimately assert the same
+/// `qsh://device/…` name a trust-store pin does (`qsh-transport::tls::
+/// AuthPath`'s own doc comment) — so folding `auth_path` into the key is
+/// what keeps a pinned opener's identity from being re-assertable by any
+/// CA-chained leaf that happens to share its principal. `SessionInfo.opener`
+/// stays a plain `String` (never a `qsh_transport` type) so the
+/// `SessionBackend` seam can still cross a process boundary (broker/mod.rs
+/// `SessionBackend` doc).
+fn opener_key(principal: &Principal, auth_path: AuthPath) -> String {
+    format!("{auth_path:?}:{principal}")
 }
 
 /// Narrow the wire's `uint32` window size to the broker's `u16`. `0` means
@@ -3025,8 +3164,16 @@ mod tests {
         }
     }
 
+    /// `PLAN.md` Step 3.5 PR②: `session.write` binds to the session's
+    /// opener, so a foreign principal is refused by ownership before the
+    /// lease is ever consulted — `SESSION_CONFLICT` from a genuinely
+    /// foreign principal is no longer reachable through `session.write` at
+    /// all (`broker::lease`'s own unit tests still cover the underlying
+    /// `no_steal` mechanics directly). The same principal on a second
+    /// connection is unaffected: ownership binds to the principal, not the
+    /// connection.
     #[tokio::test]
-    async fn write_by_another_principal_over_a_live_lease_is_session_conflict() {
+    async fn write_by_another_principal_is_denied_by_ownership_not_the_lease() {
         let rig = allow_rig();
         let a = ctx(Principal::Device("a".into()), ALL_CAPS);
         let mut b = ctx(Principal::Device("b".into()), ALL_CAPS);
@@ -3046,8 +3193,18 @@ mod tests {
             None
         );
         let reply = rig.server.dispatch(&b, &write(2)).await.unwrap();
-        assert_eq!(error_code(&reply), Some(ErrorCode::SessionConflict));
-        // Same principal on another connection takes over.
+        assert_eq!(error_code(&reply), Some(ErrorCode::PermissionDenied));
+        assert_eq!(
+            rig.broker
+                .get(&SessionId(id.clone()))
+                .unwrap()
+                .info()
+                .writer
+                .as_deref(),
+            Some("device:a"),
+            "a denied write must not move the lease"
+        );
+        // Same principal on another connection still takes over.
         let mut a2 = a.clone();
         a2.conn_id = 44;
         assert_eq!(
