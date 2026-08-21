@@ -72,11 +72,13 @@ pub const EXEC_OUTPUT_MAX: usize = 64 * 1024 * 1024;
 /// Map [`crate::handshake::HelloError`] onto the initiator's pre-existing
 /// [`ClientError`] surface, preserving every message exactly as it read
 /// before the handshake exchange moved into `handshake.rs` (PLAN M3 Step 2
-/// (d) — zero observable behavior change). `pub(crate)` — Step 3's `qsh
-/// reverse` (`crate::reverse::target::run_reverse`) is another
-/// `handshake::initiate` caller and reuses this exact mapping (chained into
-/// `ops::exec::map_client_error`) rather than a second copy of it.
-pub(crate) fn map_hello_error(err: crate::handshake::HelloError) -> ClientError {
+/// (d) — zero observable behavior change). `pub` — Step 3's `qsh reverse`
+/// (`crate::reverse::target::run_reverse`) is another `handshake::initiate`
+/// caller and reuses this exact mapping (chained into
+/// `ops::exec::map_client_error`) rather than a second copy of it; `qsh-
+/// testkit`'s integration tests reuse the same chain to assert what a
+/// denied registration actually maps to, rather than re-deriving it.
+pub fn map_hello_error(err: crate::handshake::HelloError) -> ClientError {
     use crate::handshake::HelloError;
     match err {
         HelloError::Timeout => ClientError::HelloTimeout,

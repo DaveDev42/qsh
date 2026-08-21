@@ -26,21 +26,27 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use qsh_proto::{ErrorCode, wire};
 
 use crate::broker::Clock;
 use crate::ops::OpError;
 
-/// Registration state of a [`ReverseEntry`]. PR 3a only ever produces
-/// [`EntryState::Live`] — `Stale` is Step 4's connection-loss bookkeeping
-/// (`docs/design/protocol.md` §11-4, `PLAN.md` Step 4). The variant is
-/// reserved now so the field never needs a breaking shape change later.
+/// Registration state of a [`ReverseEntry`]. `Stale` is Step 4's
+/// connection-loss bookkeeping (`docs/design/protocol.md` §11-4): a dead
+/// connection's entry is marked `Stale` rather than removed outright, and
+/// [`Registry::sweep_expired`] removes it once `[listen].stale_retention`
+/// has elapsed since [`Registry::mark_stale`] transitioned it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntryState {
     /// As far as this registry knows, the registering connection is still
     /// up.
     Live,
+    /// The connection that registered this entry has died. Still resolvable
+    /// (`docs/CLI.md` §6.13's "있었다가 끊겼다" — a vanished host is shown,
+    /// not silently erased) until [`Registry::sweep_expired`] removes it.
+    Stale,
 }
 
 /// One registered reverse host — metadata only, never a connection (see the
@@ -78,9 +84,18 @@ pub struct ReverseEntry {
     /// *different* fingerprint registering under a live name is a conflict,
     /// never a replace — see [`Registry::admit`].
     pub generation: u64,
-    /// Live vs. stale. PR 3a only ever inserts [`EntryState::Live`]; Step 4
-    /// adds the stale transition.
+    /// Live vs. stale. Every fresh or replacing registration inserts
+    /// [`EntryState::Live`]; [`Registry::mark_stale`] is the only path to
+    /// [`EntryState::Stale`].
     pub state: EntryState,
+    /// When [`Registry::mark_stale`] transitioned this entry to
+    /// [`EntryState::Stale`] — `None` for a [`EntryState::Live`] entry.
+    /// [`Registry::sweep_expired`] reads this against the injected
+    /// [`Clock`] to decide whether `[listen].stale_retention` has elapsed.
+    /// Monotonic ([`Clock::now`]), never the wall-clock `registered_at`
+    /// string — the same reasoning `broker::resume`'s TTL deadlines use
+    /// (immune to wall-clock adjustment).
+    pub stale_since: Option<Instant>,
 }
 
 /// The outcome of a successful [`Registry::admit`] call.
@@ -132,7 +147,58 @@ pub struct Registry {
     /// §6.13) — resolved once at construction, like `Server`'s
     /// `authorizer`/`audit`.
     allow_advertised_names: bool,
-    entries: Mutex<HashMap<String, ReverseEntry>>,
+    state: Mutex<RegistryState>,
+}
+
+/// Entries plus the generation tombstone, under one lock (module docs on
+/// [`Registry::admit`]'s generation derivation for why a plain
+/// `HashMap<String, ReverseEntry>` is not enough on its own).
+#[derive(Default)]
+struct RegistryState {
+    entries: HashMap<String, ReverseEntry>,
+    /// Per-name high-water mark of `generation`, kept **even after an entry
+    /// is removed** (`Registry::sweep_expired`'s eviction). Without this a
+    /// name that gets evicted and re-registered would restart at generation
+    /// `0` and collide with `reverse/listen.rs`'s `(name, generation)`-keyed
+    /// connection-table history — the exact defect PR 3a's `admit` doc
+    /// comment flagged and Step 4 commits to fixing (see git blame on this
+    /// struct).
+    last_generation: HashMap<String, u64>,
+}
+
+/// Hard cap on [`RegistryState::last_generation`]'s size. Comfortably above
+/// any realistic number of distinct names one `qsh listen` process serves —
+/// this exists only to keep growth *bounded*, not to reflect a real
+/// resource budget. Only reachable at all with `[listen].allow_advertised_names`
+/// set: a pinned peer can then advertise an unbounded number of distinct
+/// names over its lifetime, each leaving a tombstone that
+/// [`Registry::sweep_expired`] deliberately never removes (adversarial
+/// review finding).
+const MAX_TOMBSTONES: usize = 10_000;
+
+/// Evict tombstones once [`MAX_TOMBSTONES`] is exceeded — but only for
+/// names with no entry currently in `entries`. A name still registered
+/// (live or stale) must keep its tombstone no matter how large the map
+/// gets: evicting it would let a later `admit` reissue a generation that
+/// name's own history already used, exactly the invariant `Registry::admit`'s
+/// replace branch and [`Registry::rollback`] depend on. Eviction order is
+/// arbitrary (`HashMap` iteration order), not least-recently-used — the
+/// goal is only to keep the structure bounded, not to evict optimally.
+fn prune_tombstones(state: &mut RegistryState) {
+    if state.last_generation.len() <= MAX_TOMBSTONES {
+        return;
+    }
+    let overflow = state.last_generation.len() - MAX_TOMBSTONES;
+    let evictable: Vec<String> = state
+        .last_generation
+        .keys()
+        .filter(|name| !state.entries.contains_key(*name))
+        .take(overflow)
+        .cloned()
+        .collect();
+    for name in evictable {
+        state.last_generation.remove(&name);
+    }
 }
 
 impl std::fmt::Debug for Registry {
@@ -149,25 +215,25 @@ impl Registry {
         Self {
             clock,
             allow_advertised_names,
-            entries: Mutex::new(HashMap::new()),
+            state: Mutex::new(RegistryState::default()),
         }
     }
 
-    /// The entry registered under `name`, if any.
+    /// The entry registered under `name`, if any (live or stale).
     pub fn get(&self, name: &str) -> Option<ReverseEntry> {
-        self.lock().get(name).cloned()
+        self.lock().entries.get(name).cloned()
     }
 
     /// Every entry, sorted by name — deterministic, for `host.list` (Step
     /// 5) and tests.
     pub fn snapshot(&self) -> Vec<ReverseEntry> {
-        let mut entries: Vec<_> = self.lock().values().cloned().collect();
+        let mut entries: Vec<_> = self.lock().entries.values().cloned().collect();
         entries.sort_by(|a, b| a.name.cmp(&b.name));
         entries
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, ReverseEntry>> {
-        self.entries.lock().unwrap_or_else(|e| e.into_inner())
+    fn lock(&self) -> std::sync::MutexGuard<'_, RegistryState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Resolve the name a peer would register under, or refuse before it
@@ -251,19 +317,15 @@ impl Registry {
         name: String,
         entry: AdmittedEntry<'_>,
     ) -> Result<RegisterOutcome, OpError> {
-        let mut entries = self.lock();
-        // The next generation is derived purely from the live entry
-        // (`existing.generation + 1`, or `0` when there is none) — there is
-        // no per-name counter that survives entry removal. PR 3a never
-        // removes entries, so this is not a live defect yet, but Step 4's
-        // stale-eviction (`docs/design/protocol.md` §11-4) removes entries
-        // on connection loss, and once it does, a name that gets evicted
-        // and re-registered would silently restart at generation `0` here —
-        // colliding with 3b's `(name, generation)`-keyed connection table.
-        // Step 4 MUST introduce a per-name counter (or tombstone) that
-        // survives removal; this map-derived computation is only valid
-        // while entries are never removed.
-        let (generation, replaced_generation, replaced_entry) = match entries.get(&name) {
+        let mut state = self.lock();
+        // Conflict rule applies identically to a `Live` or `Stale` existing
+        // entry (`EntryState` doesn't enter this match at all): a name is
+        // "occupied" by whichever fingerprint last held it until that
+        // entry is actually removed by `sweep_expired`, stale or not — that
+        // is the entire point of staying `Stale` instead of vanishing
+        // immediately (`docs/design/protocol.md` §11-4's rationale doubles
+        // as the name-squatting-during-the-gap defense).
+        let (generation, replaced_generation, replaced_entry) = match state.entries.get(&name) {
             Some(existing) if existing.fingerprint != entry.fingerprint => {
                 return Err(OpError::new(
                     ErrorCode::InvalidArgument,
@@ -271,12 +333,34 @@ impl Registry {
                 )
                 .with_retryable(false));
             }
-            Some(existing) => (
-                existing.generation + 1,
-                Some(existing.generation),
-                Some(existing.clone()),
+            Some(existing) => {
+                // Not just `existing.generation + 1`: after a `rollback`
+                // restores an older snapshot, `existing.generation` can be
+                // *behind* the tombstone (`rollback`'s own doc comment —
+                // "generation was handed out and must never be reissued").
+                // Taking the max keeps that invariant true here too,
+                // rather than only in the untouched `None` branch below
+                // (adversarial review finding: without this, the very next
+                // `admit` after a rollback reissued the rolled-back
+                // generation number).
+                let next_from_tombstone =
+                    state.last_generation.get(&name).map(|g| g + 1).unwrap_or(0);
+                (
+                    next_from_tombstone.max(existing.generation + 1),
+                    Some(existing.generation),
+                    Some(existing.clone()),
+                )
+            }
+            // No current entry — either this name has never been seen, or
+            // its last entry was evicted by `sweep_expired`. Either way,
+            // continue from the tombstoned high-water mark rather than
+            // restarting at `0` (`RegistryState::last_generation`'s docs) —
+            // `unwrap_or(0)` covers the genuinely-never-seen case.
+            None => (
+                state.last_generation.get(&name).map(|g| g + 1).unwrap_or(0),
+                None,
+                None,
             ),
-            None => (0, None, None),
         };
         let new_entry = ReverseEntry {
             name: name.clone(),
@@ -287,8 +371,15 @@ impl Registry {
             registered_at: crate::config::rfc3339_of(self.clock.wall_now()),
             generation,
             state: EntryState::Live,
+            stale_since: None,
         };
-        entries.insert(name, new_entry.clone());
+        state.last_generation.insert(name.clone(), generation);
+        state.entries.insert(name, new_entry.clone());
+        // Bounds `last_generation`'s growth (module docs on
+        // `RegistryState::last_generation`) — runs after the insert above
+        // so the tombstone this call just wrote can never be the one
+        // pruned.
+        prune_tombstones(&mut state);
         Ok(RegisterOutcome {
             entry: new_entry,
             replaced_generation,
@@ -312,19 +403,80 @@ impl Registry {
     /// reply fails to send leaves the still-live first connection's
     /// registry row exactly as it was before the failed attempt.
     pub fn rollback(&self, name: &str, generation: u64, replaced: Option<ReverseEntry>) {
-        let mut entries = self.lock();
-        let still_current = matches!(entries.get(name), Some(e) if e.generation == generation);
+        let mut state = self.lock();
+        let still_current =
+            matches!(state.entries.get(name), Some(e) if e.generation == generation);
         if !still_current {
             return;
         }
+        // Deliberately does not touch `last_generation`: even though this
+        // registration is undone, `generation` was handed out and must
+        // never be reissued (`admit`'s docs — the tombstone survives a
+        // rollback exactly like it survives a `sweep_expired` eviction).
         match replaced {
             Some(previous) => {
-                entries.insert(name.to_string(), previous);
+                state.entries.insert(name.to_string(), previous);
             }
             None => {
-                entries.remove(name);
+                state.entries.remove(name);
             }
         }
+    }
+
+    /// Transition a live entry to [`EntryState::Stale`] on connection loss
+    /// (`docs/design/protocol.md` §11-4). Called by `reverse/listen.rs`'s
+    /// probe driver when [`crate::client::pathwatch::PathWatch::dead`]
+    /// fires for a registered connection.
+    ///
+    /// A no-op — mirrors [`Registry::rollback`]'s "only touch what I still
+    /// recognize" guard — unless `(name, generation)` is still exactly the
+    /// live entry: a newer registration may already have superseded it
+    /// (`admit`'s replace path), or a previous death report for the same
+    /// generation may already have marked it stale (this method is not
+    /// idempotent-by-accident, it is idempotent because a second call finds
+    /// `state != Live` and declines). Returns the entry as it stands right
+    /// after the transition on success, so the caller's `"lost"` diagnostic
+    /// needs no second [`Registry::get`].
+    pub fn mark_stale(&self, name: &str, generation: u64) -> Option<ReverseEntry> {
+        let mut state = self.lock();
+        let entry = state.entries.get_mut(name)?;
+        if entry.generation != generation || entry.state != EntryState::Live {
+            return None;
+        }
+        entry.state = EntryState::Stale;
+        entry.stale_since = Some(self.clock.now());
+        Some(entry.clone())
+    }
+
+    /// Remove every [`EntryState::Stale`] entry whose `retention` has
+    /// elapsed since [`Registry::mark_stale`] transitioned it
+    /// (`docs/design/protocol.md` §11-4 — "표시했다가 `stale_retention` 후
+    /// 제거한다"). Pure state, driven by this registry's injected
+    /// [`Clock`] — `reverse/listen.rs`'s sweeper decides *when* to call
+    /// this (a periodic tick, `Broker::run_reaper`'s exact shape); this
+    /// method only decides *what* is due. Removing an entry never touches
+    /// its `last_generation` tombstone (`admit`'s docs) — a later
+    /// registration under the freed name still continues the same counter.
+    /// Returns the entries removed, for the caller's `"expired"`
+    /// diagnostic.
+    pub fn sweep_expired(&self, retention: Duration) -> Vec<ReverseEntry> {
+        let now = self.clock.now();
+        let mut state = self.lock();
+        let due: Vec<String> = state
+            .entries
+            .iter()
+            .filter_map(|(name, e)| match (e.state, e.stale_since) {
+                (EntryState::Stale, Some(since))
+                    if now.saturating_duration_since(since) >= retention =>
+                {
+                    Some(name.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        due.into_iter()
+            .filter_map(|name| state.entries.remove(&name))
+            .collect()
     }
 }
 
@@ -368,6 +520,7 @@ pub(crate) fn host_reverse_denied() -> OpError {
 mod tests {
     use super::*;
     use crate::broker::TestClock;
+    use proptest::prelude::*;
 
     fn addr() -> SocketAddr {
         "127.0.0.1:4433".parse().unwrap()
@@ -383,6 +536,20 @@ mod tests {
             principal,
             address: addr(),
             capabilities: vec!["exec".to_string()],
+        }
+    }
+
+    fn stub_entry(name: &str, generation: u64) -> ReverseEntry {
+        ReverseEntry {
+            name: name.to_string(),
+            fingerprint: "sha256:a".to_string(),
+            principal: "device:x".to_string(),
+            address: addr(),
+            capabilities: Vec::new(),
+            registered_at: "2026-01-01T00:00:00Z".to_string(),
+            generation,
+            state: EntryState::Live,
+            stale_since: None,
         }
     }
 
@@ -502,6 +669,46 @@ mod tests {
     }
 
     #[test]
+    fn conflicting_fingerprint_under_a_stale_name_is_also_denied() {
+        // A stale entry still "occupies" its name — the whole point of
+        // staying `Stale` instead of vanishing immediately is to deny a
+        // squatter the gap between death and retention expiry
+        // (`admit`'s doc comment).
+        let (r, _clock) = clocked_registry(false);
+        let first = r
+            .admit("shared".to_string(), entry("sha256:a", "device:shared"))
+            .expect("first registration");
+        r.mark_stale("shared", first.entry.generation)
+            .expect("goes stale");
+
+        let err = r
+            .admit("shared".to_string(), entry("sha256:b", "device:shared"))
+            .expect_err("different fingerprint, stale name");
+        assert_eq!(err.code, ErrorCode::InvalidArgument);
+        let still = r.get("shared").expect("stale entry untouched");
+        assert_eq!(still.fingerprint, "sha256:a");
+        assert_eq!(still.state, EntryState::Stale);
+    }
+
+    #[test]
+    fn same_fingerprint_reregistering_a_stale_name_revives_it_as_live() {
+        let (r, _clock) = clocked_registry(false);
+        let first = r
+            .admit("shared".to_string(), entry("sha256:a", "device:shared"))
+            .expect("first registration");
+        r.mark_stale("shared", first.entry.generation)
+            .expect("goes stale");
+
+        let second = r
+            .admit("shared".to_string(), entry("sha256:a", "device:shared"))
+            .expect("same fingerprint revives it");
+        assert_eq!(second.entry.state, EntryState::Live);
+        assert!(second.entry.stale_since.is_none());
+        assert_eq!(second.entry.generation, 1);
+        assert_eq!(second.replaced_generation, Some(0));
+    }
+
+    #[test]
     fn same_fingerprint_reregistering_replaces_and_advances_generation() {
         let r = registry(false);
         let first = r
@@ -572,6 +779,71 @@ mod tests {
     }
 
     #[test]
+    fn a_rolled_back_generation_is_never_reissued() {
+        // Regression for the adversarial review finding: `rollback`'s own
+        // doc comment claims a rolled-back generation "must never be
+        // reissued", but the replace branch used to compute the next
+        // generation purely from `existing.generation`, which a rollback
+        // moves *backwards* — so the very next admit handed the same
+        // number straight back out.
+        let r = registry(false);
+        let first = r
+            .admit("shared".to_string(), entry("sha256:a", "device:shared"))
+            .expect("first registration");
+        let second = r
+            .admit("shared".to_string(), entry("sha256:a", "device:shared"))
+            .expect("reconnect");
+        assert_eq!(second.entry.generation, 1);
+
+        r.rollback(
+            "shared",
+            second.entry.generation,
+            second.replaced_entry.clone(),
+        );
+        assert_eq!(
+            r.get("shared").unwrap().generation,
+            0,
+            "rollback restores generation 0"
+        );
+
+        let third = r
+            .admit("shared".to_string(), entry("sha256:a", "device:shared"))
+            .expect("registers again after the rollback");
+        assert_eq!(
+            third.entry.generation, 2,
+            "generation 1 was already handed out once and rolled back — it must not come back"
+        );
+        assert_ne!(third.entry.generation, first.entry.generation);
+        assert_ne!(third.entry.generation, second.entry.generation);
+    }
+
+    #[test]
+    fn prune_tombstones_bounds_growth_without_evicting_a_live_names_tombstone() {
+        let mut state = RegistryState::default();
+        state
+            .entries
+            .insert("still-live".to_string(), stub_entry("still-live", 0));
+        state.last_generation.insert("still-live".to_string(), 0);
+        for i in 0..(MAX_TOMBSTONES + 5) {
+            state.last_generation.insert(format!("cold-{i}"), 0);
+        }
+        assert!(state.last_generation.len() > MAX_TOMBSTONES);
+
+        prune_tombstones(&mut state);
+
+        assert!(
+            state.last_generation.len() <= MAX_TOMBSTONES,
+            "growth must be bounded once the cap is exceeded"
+        );
+        assert!(
+            state.last_generation.contains_key("still-live"),
+            "a currently registered name's tombstone must never be evicted \
+             — doing so would let a later admit reissue a generation that \
+             name's own history already used"
+        );
+    }
+
+    #[test]
     fn rollback_is_a_no_op_once_a_newer_registration_already_superseded_it() {
         let r = registry(false);
         let first = r
@@ -600,9 +872,274 @@ mod tests {
             )
             .expect("registers");
         assert_eq!(outcome.entry.state, EntryState::Live);
+        assert!(outcome.entry.stale_since.is_none());
         assert_eq!(
             r.get("personal-mac").expect("entry present").state,
             EntryState::Live
         );
+    }
+
+    // ---- stale transition (`PLAN.md` M3 Step 4) ----
+
+    /// A `TestClock`-backed registry, for the deterministic stale/retention
+    /// tests below (`docs/design/testing.md` L2 — no `sleep()`).
+    fn clocked_registry(allow_advertised_names: bool) -> (Registry, TestClock) {
+        let clock = TestClock::new();
+        (
+            Registry::new(Arc::new(clock.clone()), allow_advertised_names),
+            clock,
+        )
+    }
+
+    #[test]
+    fn mark_stale_transitions_a_live_entry_and_stamps_stale_since() {
+        let (r, clock) = clocked_registry(false);
+        let outcome = r
+            .admit("shared".to_string(), entry("sha256:a", "device:shared"))
+            .expect("first registration");
+        clock.advance(Duration::from_secs(7));
+
+        let staled = r
+            .mark_stale("shared", outcome.entry.generation)
+            .expect("live entry at this generation transitions");
+        assert_eq!(staled.state, EntryState::Stale);
+        assert_eq!(staled.stale_since, Some(clock.now()));
+        // Nothing else about the entry changes.
+        assert_eq!(staled.fingerprint, "sha256:a");
+        assert_eq!(staled.generation, outcome.entry.generation);
+
+        let still = r.get("shared").expect("entry remains, just stale");
+        assert_eq!(still.state, EntryState::Stale);
+    }
+
+    #[test]
+    fn mark_stale_is_a_no_op_once_a_newer_registration_already_superseded_it() {
+        let (r, _clock) = clocked_registry(false);
+        let first = r
+            .admit("shared".to_string(), entry("sha256:a", "device:shared"))
+            .expect("first registration");
+        // A reconnect replaces it before the old connection's death report
+        // arrives — the exact race `Registry::rollback`'s doc comment
+        // already documents for the sibling method.
+        r.admit("shared".to_string(), entry("sha256:a", "device:shared"))
+            .expect("reconnect replaces");
+
+        let result = r.mark_stale("shared", first.entry.generation);
+        assert!(result.is_none(), "stale generation is not the live one");
+        let still = r.get("shared").expect("generation 1 must survive live");
+        assert_eq!(still.state, EntryState::Live);
+        assert_eq!(still.generation, 1);
+    }
+
+    #[test]
+    fn mark_stale_is_idempotent_on_a_repeated_call() {
+        let (r, clock) = clocked_registry(false);
+        let outcome = r
+            .admit("shared".to_string(), entry("sha256:a", "device:shared"))
+            .expect("first registration");
+        clock.advance(Duration::from_secs(1));
+        let first = r
+            .mark_stale("shared", outcome.entry.generation)
+            .expect("first transition succeeds");
+        clock.advance(Duration::from_secs(1));
+        // A second death report for the same generation (e.g. both the
+        // probe driver and a concurrent path) must not re-stamp
+        // `stale_since` or otherwise change anything.
+        let second = r.mark_stale("shared", outcome.entry.generation);
+        assert!(second.is_none());
+        assert_eq!(
+            r.get("shared").unwrap().stale_since,
+            first.stale_since,
+            "stale_since is stamped once, not refreshed"
+        );
+    }
+
+    #[test]
+    fn mark_stale_unknown_name_is_a_no_op() {
+        let (r, _clock) = clocked_registry(false);
+        assert!(r.mark_stale("nobody-home", 0).is_none());
+    }
+
+    // ---- retention expiry (`docs/design/protocol.md` §11-4) ----
+
+    #[test]
+    fn sweep_expired_removes_nothing_before_retention_elapses() {
+        let (r, clock) = clocked_registry(false);
+        let outcome = r
+            .admit("shared".to_string(), entry("sha256:a", "device:shared"))
+            .expect("registers");
+        r.mark_stale("shared", outcome.entry.generation)
+            .expect("goes stale");
+
+        let retention = Duration::from_secs(120);
+        clock.advance(Duration::from_secs(119));
+        let removed = r.sweep_expired(retention);
+        assert!(removed.is_empty(), "not due yet");
+        assert!(
+            r.get("shared").is_some(),
+            "entry still present, still stale"
+        );
+    }
+
+    #[test]
+    fn sweep_expired_removes_exactly_at_the_retention_boundary() {
+        let (r, clock) = clocked_registry(false);
+        let outcome = r
+            .admit("shared".to_string(), entry("sha256:a", "device:shared"))
+            .expect("registers");
+        r.mark_stale("shared", outcome.entry.generation)
+            .expect("goes stale");
+
+        let retention = Duration::from_secs(120);
+        clock.advance(retention);
+        let removed = r.sweep_expired(retention);
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].name, "shared");
+        assert!(r.get("shared").is_none(), "removed, not just marked");
+        assert!(r.snapshot().is_empty());
+    }
+
+    #[test]
+    fn sweep_expired_never_touches_a_live_entry() {
+        let (r, clock) = clocked_registry(false);
+        r.admit("shared".to_string(), entry("sha256:a", "device:shared"))
+            .expect("registers, stays live");
+        clock.advance(Duration::from_secs(10_000));
+        let removed = r.sweep_expired(Duration::from_secs(1));
+        assert!(removed.is_empty());
+        assert_eq!(
+            r.get("shared").expect("still there").state,
+            EntryState::Live
+        );
+    }
+
+    #[test]
+    fn sweep_expired_only_removes_entries_actually_due_leaving_others() {
+        let (r, clock) = clocked_registry(false);
+        let old = r
+            .admit("old".to_string(), entry("sha256:a", "device:old"))
+            .expect("registers");
+        r.mark_stale("old", old.entry.generation).expect("stale");
+        clock.advance(Duration::from_secs(60));
+        let recent = r
+            .admit("recent".to_string(), entry("sha256:b", "device:recent"))
+            .expect("registers");
+        r.mark_stale("recent", recent.entry.generation)
+            .expect("stale");
+
+        // "old" went stale at t=0, "recent" at t=60. At t=125 only "old"
+        // (125s stale) has cleared a 120s retention; "recent" (65s stale)
+        // has not.
+        clock.advance(Duration::from_secs(65));
+        let removed = r.sweep_expired(Duration::from_secs(120));
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].name, "old");
+        assert!(r.get("old").is_none());
+        assert!(r.get("recent").is_some(), "not due yet");
+    }
+
+    // ---- generation monotonicity across replace/stale/remove (`PLAN.md`
+    // M3 Step 4 (1): "the registry generation stays strictly monotonic
+    // across replace/stale/remove") ----
+
+    #[test]
+    fn generation_survives_a_stale_eviction_and_keeps_advancing() {
+        let (r, clock) = clocked_registry(false);
+        let retention = Duration::from_secs(120);
+
+        let first = r
+            .admit("shared".to_string(), entry("sha256:a", "device:shared"))
+            .expect("first registration");
+        assert_eq!(first.entry.generation, 0);
+        r.mark_stale("shared", 0).expect("goes stale");
+        clock.advance(retention);
+        let removed = r.sweep_expired(retention);
+        assert_eq!(removed.len(), 1, "the name is fully freed");
+        assert!(r.get("shared").is_none());
+
+        // Re-registration under the freed name — by the same fingerprint,
+        // as a real reconnect would be, or even a different one now that
+        // the slot is genuinely empty — must not restart at generation 0.
+        let second = r
+            .admit("shared".to_string(), entry("sha256:a", "device:shared"))
+            .expect("re-registers after eviction");
+        assert_eq!(
+            second.entry.generation, 1,
+            "generation must never repeat, even across a full remove"
+        );
+        assert!(
+            second.replaced_generation.is_none(),
+            "no live entry to replace"
+        );
+    }
+
+    #[test]
+    fn generation_survives_a_rollback_and_keeps_advancing() {
+        let (r, _clock) = clocked_registry(false);
+        let outcome = r
+            .admit("shared".to_string(), entry("sha256:a", "device:shared"))
+            .expect("first registration");
+        r.rollback("shared", outcome.entry.generation, None);
+        assert!(r.get("shared").is_none(), "rolled back, name is free");
+
+        let second = r
+            .admit("shared".to_string(), entry("sha256:a", "device:shared"))
+            .expect("re-registers");
+        assert_eq!(
+            second.entry.generation, 1,
+            "a rolled-back generation must never be reissued"
+        );
+    }
+
+    proptest! {
+        /// Any sequence of admit / mark_stale-then-sweep / rollback
+        /// operations on one name never produces a repeated `generation`
+        /// value across the whole history — the property `PLAN.md` M3 Step
+        /// 4 (1) names explicitly. `docs/design/testing.md` L2 property
+        /// test discipline.
+        #[test]
+        fn generation_is_never_repeated_across_any_replace_stale_remove_sequence(
+            ops in proptest::collection::vec(0u8..3, 1..30),
+        ) {
+            let (r, clock) = clocked_registry(false);
+            let retention = Duration::from_secs(10);
+            let mut seen = std::collections::HashSet::new();
+            let mut live_generation: Option<u64> = None;
+
+            for op in ops {
+                match op {
+                    // Register (fresh or same-fingerprint replace).
+                    0 => {
+                        let outcome = r
+                            .admit("shared".to_string(), entry("sha256:a", "device:shared"))
+                            .expect("same fingerprint always admits");
+                        prop_assert!(
+                            seen.insert(outcome.entry.generation),
+                            "generation {} reused",
+                            outcome.entry.generation
+                        );
+                        live_generation = Some(outcome.entry.generation);
+                    }
+                    // Mark the live entry stale, then let retention elapse
+                    // and sweep it away.
+                    1 => {
+                        if let Some(generation) = live_generation
+                            && r.mark_stale("shared", generation).is_some()
+                        {
+                            clock.advance(retention);
+                            r.sweep_expired(retention);
+                            live_generation = None;
+                        }
+                    }
+                    // Roll back the live entry to nothing.
+                    _ => {
+                        if let Some(generation) = live_generation {
+                            r.rollback("shared", generation, None);
+                            live_generation = None;
+                        }
+                    }
+                }
+            }
+        }
     }
 }

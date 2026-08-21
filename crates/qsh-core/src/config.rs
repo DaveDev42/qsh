@@ -329,10 +329,11 @@ pub struct IdentityConfig {
 }
 
 /// `[listen]` section — `qsh listen`, the reverse-mode controller
-/// (`docs/CLI.md` §6.13, `docs/design/protocol.md` §11-2).
+/// (`docs/CLI.md` §6.13, `docs/design/protocol.md` §11-2/§11-4).
 ///
-/// `PLAN.md` Step 3 PR 3a wires `bind`/`allow_advertised_names` only;
-/// `stale_retention` (§11-4) is Step 4 scope and is not read yet.
+/// `PLAN.md` Step 3 PR 3a wired `bind`/`allow_advertised_names`. Step 4 adds
+/// `stale_retention`, read by [`reverse::listen::Listen`]'s stale-eviction
+/// sweeper (`crates/qsh-core/src/reverse/listen.rs`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct ListenConfig {
@@ -346,15 +347,83 @@ pub struct ListenConfig {
     /// squatting prevention wins unless an operator opts in
     /// (`docs/design/protocol.md` §11-2).
     pub allow_advertised_names: bool,
+    /// How long a registration whose connection died stays visible as
+    /// `state: "stale"` before the controller removes it, in seconds
+    /// (`docs/design/protocol.md` §11-4, `docs/CLI.md` §6.13). Unset ⇒
+    /// [`ListenConfig::DEFAULT_STALE_RETENTION_SECS`] (120 s). Validated
+    /// against `[reverse].backoff_max_ms` by [`ListenConfig::stale_retention`]
+    /// — see that method's doc for why.
+    pub stale_retention: Option<u64>,
+}
+
+impl ListenConfig {
+    /// Default stale retention: 120 s (`docs/design/protocol.md` §11-4,
+    /// `docs/CLI.md` §6.13).
+    pub const DEFAULT_STALE_RETENTION_SECS: u64 = 120;
+
+    /// The multiple of `[reverse].backoff_max_ms` [`ListenConfig::stale_retention`]
+    /// requires `stale_retention` to clear (`docs/design/protocol.md` §11-4:
+    /// `stale_retention > backoff_max_ms × 3`).
+    pub const STALE_RETENTION_BACKOFF_MULTIPLE: u32 = 3;
+
+    /// Defaulted and validated stale retention, checked against `backoff_max`
+    /// — the *other* section's already-validated [`ReverseConfig::backoff`]
+    /// ceiling, taken as a parameter here rather than read from a sibling
+    /// `Config::reverse` field so this section stays ignorant of its
+    /// sibling's shape (`Config::stale_retention` below is the one call site
+    /// that wires the two together, the same split
+    /// `reverse::listen::run_listen_unix` already keeps between config
+    /// sections).
+    ///
+    /// **Why `× 3`:** a target's worst-case re-registration delay is
+    /// `backoff_max_ms` (the exponential backoff ceiling) plus jitter —
+    /// bounded well under `backoff_max_ms × 2`. `stale_retention` must clear
+    /// that with real headroom or the entry is evicted while a legitimate
+    /// reconnect is still in flight, which would make `qsh hosts` show a
+    /// host as gone right as it is about to come back. The extra margin
+    /// beyond `× 2` is reserved for Step 8's re-attach wait, which needs to
+    /// observe the *stale* state (not a vanished entry) for long enough to
+    /// still be waiting when the reconnect lands. Fails closed
+    /// (`CONFIG_ERROR`, non-retryable) rather than silently clamping —
+    /// the same discipline [`ReverseConfig::backoff`] applies to its own
+    /// knobs.
+    pub fn stale_retention(
+        &self,
+        backoff_max: std::time::Duration,
+    ) -> Result<std::time::Duration, OpError> {
+        let secs = self
+            .stale_retention
+            .unwrap_or(Self::DEFAULT_STALE_RETENTION_SECS);
+        if secs == 0 {
+            return Err(Self::stale_retention_config_error(
+                "[listen].stale_retention must be greater than 0",
+            ));
+        }
+        let retention = std::time::Duration::from_secs(secs);
+        let floor = backoff_max.saturating_mul(Self::STALE_RETENTION_BACKOFF_MULTIPLE);
+        if retention <= floor {
+            return Err(Self::stale_retention_config_error(format!(
+                "[listen].stale_retention ({secs}s) must be greater than \
+                 [reverse].backoff_max_ms × {} ({}ms)",
+                Self::STALE_RETENTION_BACKOFF_MULTIPLE,
+                floor.as_millis(),
+            )));
+        }
+        Ok(retention)
+    }
+
+    fn stale_retention_config_error(message: impl Into<String>) -> OpError {
+        OpError::new(ErrorCode::ConfigError, message).with_retryable(false)
+    }
 }
 
 /// `[reverse]` section — `qsh reverse <controller>`, the reverse-mode
-/// target (`docs/CLI.md` §6.13, `docs/design/protocol.md` §11-2).
+/// target (`docs/CLI.md` §6.13, `docs/design/protocol.md` §11-2, §11-4).
 ///
-/// `PLAN.md` Step 3 PR 3a wires `offered_name` only — `controller` parses
-/// but is not read by any code path (see its own field doc); the
-/// backoff/heartbeat knobs (§11-4) are Step 4 scope and are not read yet
-/// either.
+/// `PLAN.md` Step 3 PR 3a wired `offered_name` only — `controller` parses
+/// but is not read by any code path (see its own field doc). `PLAN.md`
+/// Step 4 adds the backoff knobs below, read by the reconnect loop in
+/// `reverse::target::run_reverse`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct ReverseConfig {
@@ -377,9 +446,119 @@ pub struct ReverseConfig {
     /// this peer *and* the controller's `[listen].allow_advertised_names`
     /// is set — see `reverse::admit::admit`.
     pub offered_name: Option<String>,
+    /// Delay before the first re-dial after the reconnect loop judges the
+    /// connection to the controller dead, in milliseconds. Doubles on each
+    /// further failure up to [`ReverseConfig::backoff`]'s `max`
+    /// (`docs/design/protocol.md` §11-4 — the multiplier itself is fixed
+    /// at 2, not configurable). Unset ⇒
+    /// [`ReverseConfig::DEFAULT_BACKOFF_INITIAL_MS`] (500 ms).
+    pub backoff_initial_ms: Option<u64>,
+    /// Ceiling the backoff delay never exceeds, in milliseconds. Unset ⇒
+    /// [`ReverseConfig::DEFAULT_BACKOFF_MAX_MS`] (30 s) —
+    /// `[listen].stale_retention`'s documented default (120 s) is sized
+    /// against this default specifically (`docs/design/protocol.md`
+    /// §11-4: `stale_retention > backoff_max_ms × 3`).
+    pub backoff_max_ms: Option<u64>,
+    /// `±` jitter applied to every backoff delay, as a whole-number
+    /// percentage. Unset ⇒ [`ReverseConfig::DEFAULT_BACKOFF_JITTER_PCT`]
+    /// (20, i.e. `±20%`).
+    pub backoff_jitter_pct: Option<u8>,
+}
+
+/// Effective, validated `[reverse]` backoff parameters
+/// (`docs/design/protocol.md` §11-4), returned by [`ReverseConfig::backoff`].
+/// The multiplier is fixed at 2 and is not a field here — nothing in the
+/// CLI/config contract makes it configurable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BackoffLimits {
+    /// Delay before the first re-dial after a connection death.
+    pub initial: std::time::Duration,
+    /// Ceiling the (pre-jitter) delay never exceeds.
+    pub max: std::time::Duration,
+    /// `±` jitter applied to each delay, as a percentage in `0..100`.
+    pub jitter_pct: u8,
+}
+
+impl ReverseConfig {
+    /// Default initial backoff: 500 ms (`docs/design/protocol.md` §11-4).
+    pub const DEFAULT_BACKOFF_INITIAL_MS: u64 = 500;
+    /// Default backoff ceiling: 30 s (`docs/design/protocol.md` §11-4).
+    pub const DEFAULT_BACKOFF_MAX_MS: u64 = 30_000;
+    /// Default backoff jitter: `±20%` (`docs/design/protocol.md` §11-4).
+    pub const DEFAULT_BACKOFF_JITTER_PCT: u8 = 20;
+    /// Upper bound on `backoff_max_ms` (and therefore `backoff_initial_ms`,
+    /// which is validated `<= max_ms` below) — 24 hours, wildly more
+    /// generous than any real reconnect ceiling but small enough that
+    /// `target::jitter`'s `u128 → i64` millisecond cast and its
+    /// `millis * offset_pct` multiply (`offset_pct` bounded to `±99` by the
+    /// `< 100` check below) never come close to overflowing (adversarial
+    /// review finding: an unbounded config value let that arithmetic wrap
+    /// or go negative, producing a zero-length backoff that busy-loops
+    /// redials — exactly what this validation exists to fail closed on
+    /// instead).
+    const MAX_BACKOFF_MS: u64 = 24 * 60 * 60 * 1000;
+
+    /// Defaulted and validated backoff parameters. Fails closed
+    /// (`CONFIG_ERROR`, non-retryable) on nonsense rather than silently
+    /// clamping it: a `0` initial delay would busy-loop redials, a `max`
+    /// below `initial` is a contradiction, a jitter `≥ 100%` can swing a
+    /// delay down to (or past) zero, defeating backoff's entire purpose,
+    /// and a `max` past [`Self::MAX_BACKOFF_MS`] risks the same zero-delay
+    /// failure through integer overflow in `target::jitter` instead.
+    pub fn backoff(&self) -> Result<BackoffLimits, OpError> {
+        let initial_ms = self
+            .backoff_initial_ms
+            .unwrap_or(Self::DEFAULT_BACKOFF_INITIAL_MS);
+        let max_ms = self.backoff_max_ms.unwrap_or(Self::DEFAULT_BACKOFF_MAX_MS);
+        let jitter_pct = self
+            .backoff_jitter_pct
+            .unwrap_or(Self::DEFAULT_BACKOFF_JITTER_PCT);
+        if initial_ms == 0 {
+            return Err(Self::backoff_config_error(
+                "[reverse].backoff_initial_ms must be greater than 0",
+            ));
+        }
+        if max_ms < initial_ms {
+            return Err(Self::backoff_config_error(format!(
+                "[reverse].backoff_max_ms ({max_ms}) must be >= backoff_initial_ms ({initial_ms})"
+            )));
+        }
+        if max_ms > Self::MAX_BACKOFF_MS {
+            return Err(Self::backoff_config_error(format!(
+                "[reverse].backoff_max_ms ({max_ms}) must be <= {} (24h)",
+                Self::MAX_BACKOFF_MS
+            )));
+        }
+        if jitter_pct >= 100 {
+            return Err(Self::backoff_config_error(format!(
+                "[reverse].backoff_jitter_pct ({jitter_pct}) must be < 100"
+            )));
+        }
+        Ok(BackoffLimits {
+            initial: std::time::Duration::from_millis(initial_ms),
+            max: std::time::Duration::from_millis(max_ms),
+            jitter_pct,
+        })
+    }
+
+    fn backoff_config_error(message: impl Into<String>) -> OpError {
+        OpError::new(ErrorCode::ConfigError, message).with_retryable(false)
+    }
 }
 
 impl Config {
+    /// Defaulted and validated `[listen].stale_retention`, checked against
+    /// this same config's `[reverse].backoff_max_ms` — the one call site
+    /// that wires [`ListenConfig::stale_retention`] to
+    /// [`ReverseConfig::backoff`] (`docs/design/protocol.md` §11-4). Used by
+    /// `reverse::listen::run_listen_unix` before constructing the
+    /// controller's stale sweeper — fail closed on either section's
+    /// nonsense before any resource is created.
+    pub fn stale_retention(&self) -> Result<std::time::Duration, OpError> {
+        let backoff = self.reverse.backoff()?;
+        self.listen.stale_retention(backoff.max)
+    }
+
     /// Load `<config_dir>/config.toml`. A missing file is not an error —
     /// it yields [`Config::default`]. A malformed file is a hard
     /// `CONFIG_ERROR` (fail closed on ambiguous configuration).
@@ -530,6 +709,195 @@ mod tests {
         let reverse_default = ReverseConfig::default();
         assert_eq!(reverse_default.controller, None);
         assert_eq!(reverse_default.offered_name, None);
+    }
+
+    #[test]
+    fn reverse_backoff_keys_use_the_documented_names_and_defaults() {
+        // architecture.md §7 / protocol.md §11-4 / PLAN Step 4:
+        // `[reverse] backoff_initial_ms(500) · backoff_max_ms(30000) ·
+        // backoff_jitter_pct(±20)`.
+        let defaults = ReverseConfig::default().backoff().unwrap();
+        assert_eq!(defaults.initial, std::time::Duration::from_millis(500));
+        assert_eq!(defaults.max, std::time::Duration::from_millis(30_000));
+        assert_eq!(defaults.jitter_pct, 20);
+
+        let reverse: ReverseConfig = toml::from_str(
+            "backoff_initial_ms = 100\nbackoff_max_ms = 2000\nbackoff_jitter_pct = 10\n",
+        )
+        .unwrap();
+        let limits = reverse.backoff().unwrap();
+        assert_eq!(limits.initial, std::time::Duration::from_millis(100));
+        assert_eq!(limits.max, std::time::Duration::from_millis(2000));
+        assert_eq!(limits.jitter_pct, 10);
+    }
+
+    #[test]
+    fn reverse_backoff_rejects_nonsense_rather_than_clamping() {
+        let zero_initial = ReverseConfig {
+            backoff_initial_ms: Some(0),
+            ..Default::default()
+        };
+        let err = zero_initial.backoff().unwrap_err();
+        assert_eq!(err.code, ErrorCode::ConfigError);
+        assert!(!err.retryable);
+
+        let max_below_initial = ReverseConfig {
+            backoff_initial_ms: Some(1000),
+            backoff_max_ms: Some(500),
+            ..Default::default()
+        };
+        let err = max_below_initial.backoff().unwrap_err();
+        assert_eq!(err.code, ErrorCode::ConfigError);
+
+        // Regression for the adversarial review finding: an unbounded
+        // `backoff_max_ms` risked integer overflow in `target::jitter`'s
+        // millisecond arithmetic, which could produce a zero-length
+        // backoff and busy-loop redials — exactly the failure mode this
+        // whole function exists to fail closed on instead of silently
+        // producing.
+        let max_past_the_cap = ReverseConfig {
+            backoff_max_ms: Some(ReverseConfig::MAX_BACKOFF_MS + 1),
+            ..Default::default()
+        };
+        let err = max_past_the_cap.backoff().unwrap_err();
+        assert_eq!(err.code, ErrorCode::ConfigError);
+        assert!(!err.retryable);
+
+        // Exactly at the cap is still fine — only past it is nonsense.
+        let max_at_the_cap = ReverseConfig {
+            backoff_max_ms: Some(ReverseConfig::MAX_BACKOFF_MS),
+            ..Default::default()
+        };
+        assert!(max_at_the_cap.backoff().is_ok());
+
+        let jitter_at_100 = ReverseConfig {
+            backoff_jitter_pct: Some(100),
+            ..Default::default()
+        };
+        assert_eq!(
+            jitter_at_100.backoff().unwrap_err().code,
+            ErrorCode::ConfigError
+        );
+        let jitter_over_100 = ReverseConfig {
+            backoff_jitter_pct: Some(200),
+            ..Default::default()
+        };
+        assert_eq!(
+            jitter_over_100.backoff().unwrap_err().code,
+            ErrorCode::ConfigError
+        );
+
+        // A jitter of exactly 0 (no jitter at all) is legitimate, not
+        // nonsense — only `>= 100` is rejected.
+        let no_jitter = ReverseConfig {
+            backoff_jitter_pct: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(no_jitter.backoff().unwrap().jitter_pct, 0);
+    }
+
+    #[test]
+    fn stale_retention_key_uses_the_documented_name_and_default() {
+        // architecture.md §7 / CLI.md §6.13 / protocol.md §11-4 / PLAN Step
+        // 4: `[listen].stale_retention`, default 120s, comfortably clearing
+        // the default `[reverse].backoff_max_ms` (30s) × 3 floor (90s).
+        let default_max = ReverseConfig::default().backoff().unwrap().max;
+        assert_eq!(
+            ListenConfig::default()
+                .stale_retention(default_max)
+                .unwrap(),
+            std::time::Duration::from_secs(120)
+        );
+
+        let listen: ListenConfig = toml::from_str("stale_retention = 200\n").unwrap();
+        assert_eq!(
+            listen.stale_retention(default_max).unwrap(),
+            std::time::Duration::from_secs(200)
+        );
+    }
+
+    #[test]
+    fn stale_retention_rejects_nonsense_rather_than_clamping() {
+        let zero = ListenConfig {
+            stale_retention: Some(0),
+            ..Default::default()
+        };
+        let err = zero
+            .stale_retention(std::time::Duration::from_secs(30))
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::ConfigError);
+        assert!(!err.retryable);
+
+        // `docs/design/protocol.md` §11-4: `stale_retention` must clear
+        // `backoff_max_ms × 3`. Exactly at the floor is still nonsense
+        // (`>`, not `>=`).
+        let at_floor = ListenConfig {
+            stale_retention: Some(90),
+            ..Default::default()
+        };
+        let err = at_floor
+            .stale_retention(std::time::Duration::from_secs(30))
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::ConfigError);
+
+        let below_floor = ListenConfig {
+            stale_retention: Some(60),
+            ..Default::default()
+        };
+        assert_eq!(
+            below_floor
+                .stale_retention(std::time::Duration::from_secs(30))
+                .unwrap_err()
+                .code,
+            ErrorCode::ConfigError
+        );
+
+        // Comfortably above the floor is fine.
+        let above_floor = ListenConfig {
+            stale_retention: Some(91),
+            ..Default::default()
+        };
+        assert_eq!(
+            above_floor
+                .stale_retention(std::time::Duration::from_secs(30))
+                .unwrap(),
+            std::time::Duration::from_secs(91)
+        );
+    }
+
+    #[test]
+    fn config_stale_retention_wires_reverse_backoff_max_into_listen_validation() {
+        // The one call site that couples the two sections
+        // (`Config::stale_retention`) — a config whose `stale_retention`
+        // clears the *default* backoff ceiling but not a configured, larger
+        // one must fail closed.
+        let mut config = Config {
+            listen: ListenConfig {
+                stale_retention: Some(100),
+                ..Default::default()
+            },
+            reverse: ReverseConfig {
+                backoff_max_ms: Some(40_000), // floor: 120s
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let err = config.stale_retention().unwrap_err();
+        assert_eq!(err.code, ErrorCode::ConfigError);
+
+        config.listen.stale_retention = Some(121);
+        assert_eq!(
+            config.stale_retention().unwrap(),
+            std::time::Duration::from_secs(121)
+        );
+
+        // A malformed `[reverse]` section is reported through the same
+        // call, not silently ignored.
+        config.reverse.backoff_initial_ms = Some(0);
+        assert_eq!(
+            config.stale_retention().unwrap_err().code,
+            ErrorCode::ConfigError
+        );
     }
 
     #[test]

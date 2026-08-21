@@ -1590,7 +1590,11 @@ impl Server {
             capabilities: crate::handshake::negotiated_capabilities(&peer_hello),
         };
 
-        self.serve_control(conn, ctl, ctx).await
+        // `None`: a forward `qsh serve` host relies on the *client's* own
+        // `ops/session.rs` recovery driver to notice a dead path — nobody
+        // here needs to watch this connection's own liveness
+        // (`serve_control`'s `probe` doc comment).
+        self.serve_control(conn, ctl, ctx, None).await
     }
 
     /// Drive the dispatch loop over an already-negotiated control stream
@@ -1606,11 +1610,40 @@ impl Server {
     /// `ReversePairHarness`, `PLAN.md` M3 Step 3 PR 3b's role-axis-
     /// independence proof), which needs this reachable from outside the
     /// crate — hence `pub`, not `pub(crate)`.
+    ///
+    /// `probe`, when `Some`, wires this connection's own outbound liveness
+    /// `Ping`/`Pong` correlation (`docs/design/protocol.md` §10/§11-4,
+    /// `PLAN.md` M3 Step 4 "target 재접속"): a [`ControlPinger`] is built
+    /// from the given [`crate::client::pathwatch::PathWatch`] over this
+    /// call's own `reply_tx` (so a probe queues behind whatever this
+    /// connection is already sending, exactly like every other reply —
+    /// `ControlPinger`'s own doc comment), [`drive_probes`] is spawned into
+    /// this call's `blocking` set (so it is aborted alongside every other
+    /// per-connection task on the way out, never outliving the
+    /// connection), and every inbound [`ControlMessage`] is offered to
+    /// [`ControlPinger::record`] before it reaches [`Self::dispatch`] — a
+    /// correlated `Pong` is consumed there and never dispatched (there is
+    /// nothing for `dispatch` to do with a `Pong` either way); an inbound
+    /// `Ping` this pinger didn't send counts as bare liveness only (under
+    /// symmetric probing it is the peer's own probe loop, never real
+    /// traffic — `ControlPinger::record`'s doc comment), and everything
+    /// else counts as this connection's own session traffic
+    /// ([`crate::client::pathwatch::PathWatch::traffic`]), matching the
+    /// module doc's "any inbound traffic … proves the path carries
+    /// packets". `None` (forward `qsh serve` hosts, and `qsh-testkit`'s
+    /// pair harness) leaves this call byte-for-byte what it was before
+    /// M3 Step 4 — a peer `Ping` still gets an ordinary `Pong` reply via
+    /// [`Self::dispatch`], there is just nobody watching *this*
+    /// connection's own liveness from the host side.
     pub async fn serve_control(
         self: Arc<Self>,
         conn: &Connection,
         mut ctl: FramedStream,
         ctx: ConnCtx,
+        probe: Option<(
+            crate::client::pathwatch::PathWatch,
+            Arc<tokio::sync::Notify>,
+        )>,
     ) -> Result<(), ConnError> {
         // Control messages are handled inline, in arrival order, so the
         // control stream keeps its ordering guarantee for mutating ops. The
@@ -1645,6 +1678,19 @@ impl Server {
         let inflight = Arc::new(tokio::sync::Semaphore::new(MAX_INFLIGHT_REQUESTS_PER_CONN));
         let mut blocking: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
 
+        // This connection's own outbound liveness probing (`probe`'s doc
+        // comment above): built over `reply_tx` so a `Ping` queues exactly
+        // like any other reply, and `drive_probes` is owned by `blocking`
+        // so it is aborted alongside every other per-connection task when
+        // this function returns (`blocking.shutdown()` below) rather than
+        // outliving the connection.
+        let pinger = probe.map(|(watch, probes)| {
+            let pinger = Arc::new(ControlPinger::new(watch, reply_tx.clone()));
+            let driver = pinger.clone();
+            blocking.spawn(async move { drive_probes(driver, probes).await });
+            pinger
+        });
+
         let (writes_tx, mut writes_rx) =
             tokio::sync::mpsc::channel::<PendingWrite>(MAX_INFLIGHT_REQUESTS_PER_CONN);
         {
@@ -1671,6 +1717,22 @@ impl Server {
                 tokio::select! {
                     msg = ctl.recv.recv::<ControlMessage>() => match msg {
                         Ok(Some(msg)) => {
+                            if let Some(pinger) = &pinger {
+                                // A correlated `Pong` is this pinger's own
+                                // answer — consumed, and never reaches
+                                // `dispatch` (which has nothing to do with
+                                // a `Pong` anyway, `Body::Pong(_) => None`
+                                // below). Anything else clears every
+                                // outstanding probe and is reported to
+                                // `watch` — bare liveness for an inbound
+                                // `Ping` (under symmetric probing that is
+                                // the peer's own probe loop, not real
+                                // traffic), full traffic for everything
+                                // else. See [`ControlPinger::record`].
+                                if pinger.record(&msg) {
+                                    continue;
+                                }
+                            }
                             if let Some(control_message::Body::SessionWrite(req)) = &msg.body {
                                 // Reserve the queue slot *before* authorizing,
                                 // so a full backlog never leaves a lease taken
@@ -2213,6 +2275,248 @@ fn map_hello_error(err: crate::handshake::HelloError) -> ConnError {
         // peer-triggerable from Step 3 onward (registration/ACL decline),
         // so it maps to a real `ConnError` variant rather than panicking.
         HelloError::Rejected(e) => ConnError::Rejected(e),
+    }
+}
+
+// ---------------------------------------------------------------------
+// Outbound liveness probing (M3 Step 4, `PLAN.md` "target 재접속" Stage A)
+// ---------------------------------------------------------------------
+
+/// The host role's counterpart to the client attach's control pump
+/// (`ops/session.rs`'s `pump_attach_control`): sends this connection's own
+/// liveness `Ping`s and correlates the `Pong`s that answer them, so
+/// [`crate::client::pathwatch::PathWatch`] — until this step wired only
+/// into a client attach — can watch a connection this process is the
+/// *host* role on. Legitimate under `docs/design/protocol.md` §11's
+/// preamble: TLS role (who dialed) and QSH role (who serves) are separate
+/// axes, and nothing about "I am the host on this connection" says the
+/// host cannot also be the one asking "are you still there".
+///
+/// The judgment policy itself — two cadences, RTT-scaled deadline,
+/// 3-strike, consumer-stall-is-not-death — is entirely
+/// [`crate::client::pathwatch`]'s and is untouched by this step
+/// (`docs/design/protocol.md` §10). `ControlPinger` is only the adapter
+/// that lets the host role feed that policy: it turns a `Verdict::Probe`
+/// into an actual `Ping` on the wire (via [`Self::send_probe`]) and turns
+/// the matching `Pong` back into [`PathWatch::inbound`] (via
+/// [`Self::observe`]).
+///
+/// ## Why this doesn't fight `serve_control`
+///
+/// [`Server::serve_control`]'s `select!` loop is the *only* task that ever
+/// touches `ctl.recv`/`ctl.send` directly (that function's own doc
+/// comment). `ControlPinger` never reaches around that split:
+///
+/// - **Outbound.** [`Self::send_probe`] does not write to the wire. It
+///   hands a freshly-numbered `Ping` to the same `reply_tx` queue every
+///   dispatch reply already funnels through (`serve_control`'s "All
+///   replies funnel back through `reply_rx`" comment), so a probe takes
+///   its turn behind whatever the connection is already sending instead of
+///   racing it for the write half. `send(..).await` rather than
+///   `try_send`, matching the backpressure every other seam onto this
+///   queue already uses (`pump_attach_control`'s `session.send_ping()`,
+///   `drive_registered_session`'s `session.send_ping()`): `PathState::verdict`
+///   counts a probe as a strike the moment it decides to send one — before
+///   this method ever runs — so silently dropping it on a momentarily-full
+///   queue would spend that strike on a `Ping` that never reached the
+///   wire, and three such drops is a false `Verdict::Dead` on a connection
+///   whose only fault was a backed-up reply queue. Blocking this call
+///   instead means a probe under real backpressure goes out (late) rather
+///   than vanishing; it only ever runs on [`drive_probes`]'s own task, so
+///   blocking it never stalls `serve_control`'s own select loop.
+/// - **Inbound.** `serve_control`'s read arm stays the only reader of
+///   `ctl.recv`. [`Self::observe`] is a plain, non-blocking method meant to
+///   be called with every decoded [`ControlMessage`] *before* it reaches
+///   [`Server::dispatch`]: a `true` return means this was this pinger's
+///   own `Pong` and the caller must not also hand it to `dispatch` (there
+///   is nothing for `dispatch` to do with it either way — it already
+///   treats every `Pong` as a reply needing none — `observe` just gets
+///   first look so a correlated one can update `PathWatch` before falling
+///   through). A `Pong` whose `request_id` this pinger never allocated
+///   returns `false` and is left exactly as unsolicited as `dispatch`
+///   already treats every `Pong` today (`Server::dispatch`'s
+///   `Body::Pong(_) => None` arm) — this step does not change what an
+///   unrecognised `Pong` does, only what a recognised one now does.
+///
+/// ## Status: wired on the target side only
+///
+/// [`Server::serve_control`] is the sole constructor: when its `probe`
+/// argument is `Some((watch, probes))` it builds a `ControlPinger` over
+/// `watch`, spawns [`drive_probes`] against it (owned by its own
+/// `blocking` `JoinSet`), and its own read arm calls
+/// [`ControlPinger::record`] on every inbound `ControlMessage` before
+/// `dispatch` ever sees it. `reverse/target.rs`'s `run_reverse_unix` is the
+/// only caller that passes `Some(..)` today — the target watching the one
+/// connection it dialed to its controller — so this is symmetric probing
+/// from the target's side. `reverse/listen.rs`'s
+/// `drive_registered_session` (the controller watching each connection it
+/// has registered) runs the *other* half of the same
+/// [`crate::client::pathwatch::watch_path`]/`PathWatch` policy but does not
+/// go through `ControlPinger` at all: it drives `Session::send_ping`/
+/// `send_pong` directly against its own `select!` loop, with no
+/// `request_id` correlation, since a controller only ever has one
+/// outstanding probe of its own at a time on a connection it does not
+/// otherwise write to.
+pub struct ControlPinger {
+    next_request_id: std::sync::atomic::AtomicU64,
+    outstanding: Mutex<std::collections::HashSet<u64>>,
+    watch: crate::client::pathwatch::PathWatch,
+    out: tokio::sync::mpsc::Sender<ControlMessage>,
+}
+
+impl ControlPinger {
+    /// Build a pinger for one connection's outbound probes, writing
+    /// through `out` (that connection's `reply_tx`, once wired) and
+    /// reporting answers onto `watch`.
+    pub fn new(
+        watch: crate::client::pathwatch::PathWatch,
+        out: tokio::sync::mpsc::Sender<ControlMessage>,
+    ) -> Self {
+        Self {
+            next_request_id: std::sync::atomic::AtomicU64::new(1),
+            outstanding: Mutex::new(std::collections::HashSet::new()),
+            watch,
+            out,
+        }
+    }
+
+    /// The [`PathWatch`](crate::client::pathwatch::PathWatch) this pinger
+    /// feeds — the caller wiring this in (`watch_path`'s other caller)
+    /// shares the same handle.
+    pub fn watch(&self) -> &crate::client::pathwatch::PathWatch {
+        &self.watch
+    }
+
+    /// Allocate a fresh `request_id` — monotonic per connection, matching
+    /// the allocation discipline `client::Session::request` already uses
+    /// for its own outbound requests (`client/mod.rs`) — remember it as
+    /// outstanding, and queue a `Ping` carrying it, waiting for room in the
+    /// outbound queue if there is none right now (the module doc's
+    /// "Outbound" note). Returns the id (tests correlate on it); `None`
+    /// only once the connection is already gone (the outbound queue's
+    /// receiver dropped) — in that case the id is un-registered from
+    /// `outstanding` again, since no `Ping` carrying it ever went out.
+    pub async fn send_probe(&self) -> Option<u64> {
+        let id = self
+            .next_request_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.outstanding
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(id);
+        let msg = ControlMessage::new(id, control_message::Body::Ping(wire::Ping {}));
+        if self.out.send(msg).await.is_err() {
+            self.outstanding
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&id);
+            return None;
+        }
+        Some(id)
+    }
+
+    /// Feed one inbound control message. `true` means this was this
+    /// pinger's own `Pong` — the caller must not also route it to
+    /// `dispatch` — and [`PathWatch::inbound`] has already been reported.
+    /// `false` covers everything else, including a `Pong` whose
+    /// `request_id` was never one of ours (dropped, unchanged from today's
+    /// `dispatch` behavior — see the module doc's "Inbound" note) and a
+    /// duplicate delivery of a `Pong` this pinger already consumed once.
+    pub fn observe(&self, msg: &ControlMessage) -> bool {
+        let Some(control_message::Body::Pong(_)) = &msg.body else {
+            return false;
+        };
+        let matched = self
+            .outstanding
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&msg.request_id);
+        if matched {
+            self.watch.inbound();
+        }
+        matched
+    }
+
+    /// Any inbound control message that is *not* one of this pinger's own
+    /// correlated `Pong`s — the fallback branch the caller falls into once
+    /// [`Self::observe`] returns `false` — still proves the path carries
+    /// packets, and [`crate::client::pathwatch::PathState::observe_inbound`]
+    /// already treats that as answering every probe outstanding (it resets
+    /// the strike counter unconditionally, not per-id). `outstanding` here
+    /// is a separate ledger kept only to correlate a *specific* `Pong` to
+    /// the `Ping` it answers (`Self::observe`'s reordering guarantee), so
+    /// without this it would never shrink for an id whose `Ping` was never
+    /// answered, or whose `send_probe` call lost the race with the
+    /// connection closing, even once the connection is proven alive by
+    /// other means. Clearing it here — but never inside `observe` itself,
+    /// which must keep tracking every other still-outstanding id so a
+    /// reordered `Pong` for an *earlier* probe still correlates — closes
+    /// that leak without disturbing correlation.
+    pub fn note_inbound(&self) {
+        self.outstanding
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+    }
+
+    /// Feed one inbound [`ControlMessage`] end-to-end and report it to
+    /// [`Self::watch`]. `true` means [`Self::observe`] consumed it as this
+    /// pinger's own correlated `Pong` — the caller must not also dispatch
+    /// it, same contract as `observe` alone. `false` means [`Self::note_inbound`]
+    /// ran (clearing every still-outstanding id, since this message proves
+    /// the path regardless of whether it was ours) and the message was
+    /// reported onward: a `Ping` or an *uncorrelated* `Pong` as bare
+    /// liveness — under symmetric probing (both ends of a registered
+    /// connection running their own `PathWatch`, `PLAN.md` M3 Step 4) an
+    /// inbound `Ping` this pinger did not send is the *peer's* probe loop
+    /// asking the same question back, never real session traffic, so
+    /// treating it as activity would re-arm `active_window` on every reply
+    /// and pin both peers to the fast cadence forever
+    /// (`PathState::observe_inbound`'s doc comment names the identical
+    /// failure for an inbound `Pong`). An uncorrelated `Pong` gets the same
+    /// treatment for the same reason: `note_inbound` above clears
+    /// `outstanding` on *every* non-correlated message, so a peer `Ping`
+    /// landing between our own `Ping` and its answering `Pong` makes that
+    /// `Pong` arrive uncorrelated here too — it is still just this
+    /// watchdog talking to itself, not session use. Everything else is
+    /// full [`PathWatch::traffic`].
+    pub fn record(&self, msg: &ControlMessage) -> bool {
+        if self.observe(msg) {
+            return true;
+        }
+        self.note_inbound();
+        match &msg.body {
+            Some(control_message::Body::Ping(_)) | Some(control_message::Body::Pong(_)) => {
+                self.watch.inbound()
+            }
+            _ => self.watch.traffic(),
+        }
+        false
+    }
+}
+
+/// Send this connection's outbound liveness `Ping`s when
+/// [`crate::client::pathwatch::watch_path`]'s watchdog asks for one.
+/// Pairs with `watch_path(source, watch, probes)`: `probes` is the same
+/// [`tokio::sync::Notify`] both are given, so a `Verdict::Probe` wakes this
+/// loop rather than the watchdog writing to the wire itself — the same
+/// split `ops/session.rs`'s `pump_attach_control` keeps on the client side,
+/// for the same cancel-safety reason (`ProbeSource`'s doc comment,
+/// `pathwatch.rs`).
+///
+/// Runs until `probes` (and every clone of it) is dropped — ordinarily for
+/// as long as `serve_control` is driving the connection this pinger
+/// belongs to.
+pub async fn drive_probes(pinger: Arc<ControlPinger>, probes: Arc<tokio::sync::Notify>) {
+    loop {
+        probes.notified().await;
+        // `None` only once the outbound queue's receiver is gone — the
+        // connection this pinger belongs to is already done, and every
+        // future `send_probe` would fail the same way, so stop rather than
+        // spin on `notified()` forever with nothing left to send to.
+        if pinger.send_probe().await.is_none() {
+            return;
+        }
     }
 }
 
@@ -4088,5 +4392,322 @@ mod tests {
             Some(session_read_event::Body::Closed(c)) if c.reason == "ttl_expired" && c.seq == 9
         ));
         assert!(rfc3339_after(Duration::from_secs(60)).ends_with('Z'));
+    }
+
+    // ------------------------------------------------------------------
+    // ControlPinger (M3 Step 4 Stage A) — `PLAN.md` "L2 유닛 테스트" list:
+    // request_id monotonic per connection, timeout judgment on a paused
+    // clock, unsolicited Pong dropped, correlation across interleaved
+    // inbound traffic. No `sleep()` anywhere below.
+    // ------------------------------------------------------------------
+
+    use crate::client::pathwatch::{PathWatch, PathWatchConfig, ProbeSource, watch_path};
+
+    fn pinger() -> (ControlPinger, tokio::sync::mpsc::Receiver<ControlMessage>) {
+        let (tx, rx) = tokio::sync::mpsc::channel(MAX_INFLIGHT_REQUESTS_PER_CONN);
+        (
+            ControlPinger::new(PathWatch::new(PathWatchConfig::default()), tx),
+            rx,
+        )
+    }
+
+    #[tokio::test]
+    async fn request_ids_are_monotonic_per_connection() {
+        let (pinger, _out) = pinger();
+        let mut ids = Vec::new();
+        for _ in 0..5 {
+            ids.push(pinger.send_probe().await.unwrap());
+        }
+        assert_eq!(
+            ids,
+            vec![1, 2, 3, 4, 5],
+            "each probe on one connection must get a fresh, increasing id"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn send_probe_backpressures_on_a_full_queue_instead_of_dropping_silently() {
+        // The regression finding `4` (M3 Step 4 review): `PathState::verdict`
+        // counts a probe as a strike the moment it decides to send one, so
+        // a `send_probe` that silently drops on a momentarily-full queue
+        // spends that strike on a `Ping` that never reached the wire.
+        // `send_probe` must instead wait for room, exactly like every other
+        // seam onto this queue (`serve_control`'s "All replies funnel back
+        // through `reply_rx`" doc).
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let filler = tx.clone();
+        let pinger = ControlPinger::new(PathWatch::new(PathWatchConfig::default()), tx);
+        filler
+            .try_send(ControlMessage::new(
+                0,
+                control_message::Body::SessionList(wire::SessionList {}),
+            ))
+            .expect("capacity-1 queue must accept the first message");
+
+        let mut pending = Box::pin(pinger.send_probe());
+        // A bounded deadline backstop under a paused clock, not a sleep
+        // standing in for ordering (`docs/design/testing.md` L2): nothing
+        // else is runnable, so this resolves the instant tokio proves the
+        // future is still pending — it never advances any real wall time.
+        assert!(
+            tokio::time::timeout(Duration::from_secs(3600), &mut pending)
+                .await
+                .is_err(),
+            "send_probe must not resolve while the outbound queue is full — a full queue is \
+             backpressure, not a license to drop the probe"
+        );
+
+        // Drain the queue: room exists now, so the pending probe can land.
+        let filler_msg = rx
+            .recv()
+            .await
+            .expect("the filler message must still be queued");
+        assert_eq!(filler_msg.request_id, 0);
+        let id = pending
+            .await
+            .expect("send_probe must complete once the queue has room, not be dropped");
+        let queued = rx
+            .recv()
+            .await
+            .expect("the probe itself must have been queued, not silently discarded");
+        assert_eq!(queued.request_id, id);
+        assert!(matches!(queued.body, Some(control_message::Body::Ping(_))));
+    }
+
+    #[tokio::test]
+    async fn send_probe_queues_a_ping_carrying_its_own_id() {
+        let (pinger, mut out) = pinger();
+        let id = pinger.send_probe().await.unwrap();
+        let queued = out.try_recv().expect("send_probe must queue something");
+        assert_eq!(queued.request_id, id);
+        assert!(matches!(queued.body, Some(control_message::Body::Ping(_))));
+    }
+
+    #[tokio::test]
+    async fn a_pong_for_an_unknown_request_id_is_dropped() {
+        let (pinger, _out) = pinger();
+        let _ours = pinger.send_probe().await.unwrap();
+        // Never one of ours: nowhere near the counter's range.
+        let stray = ControlMessage::new(999_999, control_message::Body::Pong(wire::Pong {}));
+        assert!(
+            !pinger.observe(&stray),
+            "an unsolicited Pong must not be reported as a correlated answer"
+        );
+        assert!(
+            !pinger.watch().is_dead(),
+            "observing a stray Pong must not perturb this pinger's watch at all"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_non_pong_message_is_never_treated_as_an_answer() {
+        let (pinger, _out) = pinger();
+        let id = pinger.send_probe().await.unwrap();
+        // Same request_id, but not a `Pong` — must not be mistaken for the
+        // answer to our own probe.
+        let echo =
+            ControlMessage::new(id, control_message::Body::SessionList(wire::SessionList {}));
+        assert!(!pinger.observe(&echo));
+    }
+
+    #[tokio::test]
+    async fn correlation_survives_interleaved_traffic_and_reordering() {
+        let (pinger, _out) = pinger();
+        let first = pinger.send_probe().await.unwrap();
+        let second = pinger.send_probe().await.unwrap();
+
+        // Unrelated inbound traffic between the probes going out and
+        // either being answered.
+        let unrelated_request = ControlMessage::new(
+            900,
+            control_message::Body::SessionList(wire::SessionList {}),
+        );
+        assert!(!pinger.observe(&unrelated_request));
+        let foreign_pong = ControlMessage::new(4_242, control_message::Body::Pong(wire::Pong {}));
+        assert!(!pinger.observe(&foreign_pong));
+
+        // The second probe's answer arrives first (realistic under
+        // reordering) — it must correlate to its own id, not the first's.
+        assert!(pinger.observe(&ControlMessage::new(
+            second,
+            control_message::Body::Pong(wire::Pong {})
+        )));
+        // The first, answered later, still correlates.
+        assert!(pinger.observe(&ControlMessage::new(
+            first,
+            control_message::Body::Pong(wire::Pong {})
+        )));
+        // Both already consumed: a duplicate delivery of either answers
+        // nothing a second time.
+        assert!(!pinger.observe(&ControlMessage::new(
+            first,
+            control_message::Body::Pong(wire::Pong {})
+        )));
+        assert!(!pinger.observe(&ControlMessage::new(
+            second,
+            control_message::Body::Pong(wire::Pong {})
+        )));
+    }
+
+    #[tokio::test]
+    async fn note_inbound_clears_every_outstanding_id_even_ones_never_answered() {
+        let (pinger, _out) = pinger();
+        let leaked = pinger.send_probe().await.unwrap();
+        let _also_outstanding = pinger.send_probe().await.unwrap();
+
+        // Some other inbound message proves the path without answering
+        // either probe by id (e.g. ordinary session traffic, or an
+        // uncorrelated `Ping` from the peer's own probe loop).
+        pinger.note_inbound();
+
+        // Both ids are gone — a late `Pong` for either no longer
+        // correlates, because the connection has already proven itself
+        // alive by other means and holding them further would only leak.
+        assert!(
+            !pinger.observe(&ControlMessage::new(
+                leaked,
+                control_message::Body::Pong(wire::Pong {})
+            )),
+            "note_inbound must clear ids that were never individually answered"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cadence_survives_a_reply_storm_of_uncorrelated_pings() {
+        // The regression `finding 1` (M3 Step 4 review) named: symmetric
+        // probing must not pin a registered connection to the fast
+        // cadence forever. Simulates the peer's own probe loop hammering
+        // this side with `Ping`s (never this pinger's own — `record`
+        // never sees a `Pong`) while nothing else happens, and asserts the
+        // idle cadence is still reached — exactly
+        // `pathwatch.rs`'s own `a_healthy_idle_path_falls_to_the_slow_cadence`
+        // guard, but through `ControlPinger::record` rather than
+        // `PathState` directly.
+        let (pinger, _out) = pinger();
+        let watch = pinger.watch().clone();
+        let cfg = *watch.config();
+
+        let mut request_id = 0u64;
+        let mut elapsed = Duration::ZERO;
+        while elapsed < cfg.active_window + Duration::from_secs(1) {
+            tokio::time::advance(Duration::from_millis(100)).await;
+            elapsed += Duration::from_millis(100);
+            request_id += 1;
+            let ping = ControlMessage::new(request_id, control_message::Body::Ping(wire::Ping {}));
+            assert!(!pinger.record(&ping));
+        }
+
+        assert_eq!(
+            watch.cadence(),
+            cfg.idle_probe_interval,
+            "a stream of inbound Pings alone must not hold this side's watch on the fast cadence"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cadence_survives_a_reply_storm_of_uncorrelated_pongs() {
+        // The Pong half of the same regression: `note_inbound` clears
+        // `outstanding` on *every* non-correlated inbound message, so a
+        // peer `Ping` landing between our own `Ping` and its answering
+        // `Pong` makes that `Pong` arrive with nothing left to match —
+        // `record` must still treat it as bare liveness
+        // (`PathState::observe_inbound`), never as `traffic`, or the
+        // watch never reaches the idle cadence on a perfectly quiet
+        // connection.
+        let (pinger, _out) = pinger();
+        let watch = pinger.watch().clone();
+        let cfg = *watch.config();
+
+        let mut request_id = 0u64;
+        let mut elapsed = Duration::ZERO;
+        while elapsed < cfg.active_window + Duration::from_secs(1) {
+            tokio::time::advance(Duration::from_millis(100)).await;
+            elapsed += Duration::from_millis(100);
+            request_id += 1;
+            // Never correlated: this pinger never allocated `request_id`
+            // through `send_probe`, so `observe` always misses and this
+            // falls through to `record`'s fallback match.
+            let pong = ControlMessage::new(request_id, control_message::Body::Pong(wire::Pong {}));
+            assert!(!pinger.record(&pong));
+        }
+
+        assert_eq!(
+            watch.cadence(),
+            cfg.idle_probe_interval,
+            "a stream of uncorrelated inbound Pongs alone must not hold this side's watch on \
+             the fast cadence"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_correlated_pong_clears_strikes_the_same_way_answered_traffic_always_has() {
+        use crate::client::pathwatch::Verdict;
+
+        let (pinger, mut out) = pinger();
+        let watch = pinger.watch().clone();
+
+        // Silence past the fast cadence earns a strike (mirrors
+        // `pathwatch.rs`'s own `silence_earns_probes_and_then_a_verdict`).
+        tokio::time::advance(watch.config().probe_interval + Duration::from_millis(1)).await;
+        assert_eq!(watch.verdict(Duration::from_millis(1)), Verdict::Probe);
+
+        // Answer it through the pinger's correlation path rather than
+        // `PathWatch::inbound` directly — the point of this test is that
+        // `ControlPinger::observe` is what reaches `inbound`, not that
+        // `inbound` itself clears strikes (already covered in
+        // `pathwatch.rs`).
+        let id = pinger.send_probe().await.unwrap();
+        let queued = out.try_recv().expect("send_probe must have queued a Ping");
+        assert_eq!(queued.request_id, id);
+        assert!(pinger.observe(&ControlMessage::new(
+            id,
+            control_message::Body::Pong(wire::Pong {})
+        )));
+
+        // Immediately after, the path is not silent — the pending strike
+        // must not compound and the connection must not be declared dead
+        // even after another `probe_interval` of quiet.
+        tokio::time::advance(watch.config().probe_interval).await;
+        assert_ne!(watch.verdict(Duration::from_millis(1)), Verdict::Dead);
+    }
+
+    /// A stub `ProbeSource` that never closes on its own — the death in
+    /// this test must come purely from unanswered probes going silent,
+    /// exactly like a real connection whose packets stop arriving without
+    /// QUIC itself noticing anything (`pathwatch.rs`'s module doc).
+    #[derive(Clone)]
+    struct NeverCloses;
+
+    impl ProbeSource for NeverCloses {
+        async fn closed(&self) {
+            std::future::pending::<()>().await
+        }
+
+        fn rtt(&self) -> Duration {
+            Duration::from_millis(1)
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unanswered_probes_are_judged_dead_on_a_paused_clock() {
+        let watch = PathWatch::new(PathWatchConfig::default());
+        let (tx, mut out) = tokio::sync::mpsc::channel(MAX_INFLIGHT_REQUESTS_PER_CONN);
+        let pinger = Arc::new(ControlPinger::new(watch.clone(), tx));
+        let probes = Arc::new(tokio::sync::Notify::new());
+
+        // Nobody ever answers a queued Ping — the outbound queue is
+        // drained (as `serve_control`'s writer would) but no reply comes
+        // back, which is exactly "the path stopped carrying packets".
+        let drain = tokio::spawn(async move { while out.recv().await.is_some() {} });
+        let watchdog = tokio::spawn(watch_path(NeverCloses, watch.clone(), probes.clone()));
+        let driver = tokio::spawn(drive_probes(pinger.clone(), probes));
+
+        tokio::time::timeout(Duration::from_secs(5), watch.dead())
+            .await
+            .expect("a connection whose probes are never answered must be judged dead");
+
+        watchdog.await.unwrap();
+        driver.abort();
+        drain.abort();
     }
 }

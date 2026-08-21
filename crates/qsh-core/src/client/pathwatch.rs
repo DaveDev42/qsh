@@ -413,12 +413,61 @@ impl Drop for StallGuard {
     }
 }
 
+/// What [`watch_path`] needs from the connection carrying probes: an
+/// unambiguous "this is gone" signal, and the RTT that scales the death
+/// deadline ([`PathWatchConfig::dead_after`]). Nothing about *sending* a
+/// probe lives here — deliberately: on both roles, writing to the control
+/// stream is owned by a single task for cancel-safety reasons (see
+/// `ops/session.rs`'s `pump_attach_control` doc comment on why
+/// `Session::next_event` is unsafe to call from a `select!` arm that can be
+/// cancelled), so `watch_path` only ever *asks* for a probe (the `probes`
+/// `Notify` parameter below) and never writes one itself.
+///
+/// This is the seam M3 Step 4 exists to add: until now the only
+/// implementation was the client attach's own `qsh_transport::Connection`
+/// (below), because `PathWatch`/`watch_path` were wired only into
+/// `ops/session.rs`'s attach/recovery driver. The host role's own
+/// connection handle (`server::ConnCtx`'s `conn_id` aside, the host holds a
+/// plain `qsh_transport::Connection` too — `reverse/target.rs`'s
+/// `run_reverse` and `server::Server::serve_connection` both do) satisfies
+/// this trait through the exact same blanket impl: closed-ness and RTT are
+/// role-agnostic properties of the transport connection, not of who is
+/// dialing whom. What *is* new for the host role is the other half of the
+/// loop — who answers `Verdict::Probe` by actually writing a `Ping` and
+/// correlating the `Pong` — and that lives in `server::ControlPinger`
+/// (`server/mod.rs`), not here: the judgment policy in this module is
+/// unchanged.
+pub trait ProbeSource: Send + Sync + 'static {
+    /// Resolves when the underlying connection is unambiguously gone —
+    /// QUIC close, reset, or (in the limit) the 45 s idle timeout. No
+    /// probing is useful past this point.
+    fn closed(&self) -> impl std::future::Future<Output = ()> + Send;
+
+    /// Current smoothed RTT, used to scale [`PathWatchConfig::dead_after`].
+    fn rtt(&self) -> Duration;
+}
+
+impl ProbeSource for qsh_transport::Connection {
+    async fn closed(&self) {
+        // The specific `quinn::ConnectionError` is diagnostic-only here —
+        // `watch_path`'s caller learns "dead", not "why", the same way a
+        // silence-based verdict never learns why either.
+        let _ = qsh_transport::Connection::closed(self).await;
+    }
+
+    fn rtt(&self) -> Duration {
+        self.quinn().stats().path.rtt
+    }
+}
+
 /// Drive one attach's watchdog until the path dies or the attach ends.
 ///
 /// `probes` wakes the task that owns the control stream, which is the only
-/// place a `Ping` can be written from.
-pub async fn watch_path(
-    conn: qsh_transport::Connection,
+/// place a `Ping` can be written from. `source` is generic over
+/// [`ProbeSource`] so the same judgment policy drives either role's
+/// connection — see that trait's doc comment.
+pub async fn watch_path<S: ProbeSource>(
+    source: S,
     watch: PathWatch,
     probes: std::sync::Arc<tokio::sync::Notify>,
 ) {
@@ -431,7 +480,7 @@ pub async fn watch_path(
         tokio::select! {
             // The unambiguous case: QUIC itself gave up, or the peer
             // closed. No probing needed, and no reason to wait for a tick.
-            _ = conn.closed() => {
+            () = source.closed() => {
                 tracing::debug!("attach connection closed; path is dead");
                 watch.declare_dead();
                 return;
@@ -443,7 +492,7 @@ pub async fn watch_path(
             () = watch.woken() => continue,
             () = tokio::time::sleep(period) => {}
         }
-        let rtt = conn.quinn().stats().path.rtt;
+        let rtt = source.rtt();
         match watch.verdict(rtt) {
             Verdict::Healthy => {}
             // `notify_one` keeps a permit if the control pump is busy, so
@@ -708,5 +757,41 @@ mod tests {
                 .is_err(),
             "a path nobody declared dead must not resolve"
         );
+    }
+
+    /// A stub that never closes and reports a fixed RTT — stands in for
+    /// whatever a host-role prober will wrap ([`server::ControlPinger`]'s
+    /// module doc, M3 Step 4). Exists to prove [`watch_path`] is generic
+    /// over [`ProbeSource`] in fact, not just in the trait's shape: a type
+    /// with no `qsh_transport::Connection` inside it can still drive the
+    /// exact same watchdog policy.
+    #[derive(Clone)]
+    struct NeverCloses;
+
+    impl ProbeSource for NeverCloses {
+        async fn closed(&self) {
+            std::future::pending::<()>().await
+        }
+
+        fn rtt(&self) -> Duration {
+            LAN
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn watch_path_is_generic_over_the_probe_source() {
+        let watch = PathWatch::new(cfg());
+        let probes = Arc::new(tokio::sync::Notify::new());
+        let watchdog = tokio::spawn(watch_path(NeverCloses, watch.clone(), probes));
+        // No answer ever arrives, so silence alone must reach a verdict —
+        // exactly the policy `silence_earns_probes_and_then_a_verdict`
+        // already covers for `PathState` directly; this proves the same
+        // outcome survives going through the generic `watch_path` task.
+        tokio::time::timeout(Duration::from_secs(5), watch.dead())
+            .await
+            .expect("an unanswered stub path must be declared dead");
+        watchdog
+            .await
+            .expect("watch_path must return once it declares death");
     }
 }

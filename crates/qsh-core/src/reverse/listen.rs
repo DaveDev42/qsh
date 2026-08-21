@@ -27,6 +27,7 @@
 use std::collections::HashMap;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use qsh_proto::ErrorCode;
 use qsh_proto::wire::{self, Hello};
@@ -42,8 +43,10 @@ use crate::acl::Authorizer;
 #[cfg(unix)]
 use crate::audit::FileAuditSink;
 use crate::audit::{AuditRecord, AuditSink};
-#[cfg(unix)]
+use crate::broker::Clock;
+#[cfg(any(unix, test))]
 use crate::broker::SystemClock;
+use crate::client::pathwatch::{PathWatch, PathWatchConfig, watch_path};
 use crate::client::{ControlIn, Session};
 use crate::config::{Config, Paths};
 use crate::identity::LoadedIdentity;
@@ -53,6 +56,14 @@ use crate::trust::SharedTrustStore;
 
 use super::admit::{AdmitRequest, admit};
 use super::registry::{self, RegisterOutcome, Registry};
+
+/// How often [`Listen::run_stale_sweeper`] checks the registry for stale
+/// entries whose `[listen].stale_retention` has elapsed
+/// (`docs/design/protocol.md` §11-4). Mirrors [`crate::broker::REAPER_TICK`]'s
+/// exact shape — a periodic driver calling a pure, clock-checked sweep — at
+/// a tighter interval, proportionate to the much shorter default retention
+/// (120 s here vs. the broker's 24 h default TTL).
+pub const STALE_SWEEP_TICK: Duration = Duration::from_secs(5);
 
 /// Close code for the connection a NAT-rebind reconnect displaces
 /// (`docs/design/protocol.md` §11-2's "same-fingerprint replace"). Local to
@@ -134,6 +145,11 @@ async fn run_listen_unix(
     shutdown: impl std::future::Future<Output = ()>,
 ) -> Result<(), OpError> {
     let bind = resolve_bind(bind_flag, config)?;
+    // Validated before any resource (socket, registry, sweeper task)
+    // exists — a nonsensical `[listen].stale_retention`/`[reverse].backoff_max_ms`
+    // combination must fail closed at startup, not surface later as a
+    // half-initialized controller.
+    let stale_retention = config.stale_retention()?;
     let trust = SharedTrustStore::open(paths.trust_file())?;
     let listener = Listener::bind(bind, identity.local, trust).map_err(|err| {
         OpError::new(
@@ -150,13 +166,17 @@ async fn run_listen_unix(
     on_bound(actual);
 
     let audit = Arc::new(FileAuditSink::new(paths.audit_log()));
-    let registry = Registry::new(Arc::new(SystemClock), config.listen.allow_advertised_names);
+    let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+    let registry = Registry::new(clock.clone(), config.listen.allow_advertised_names);
     let listen = Listen::new(
         registry,
         Arc::new(AllowAllPinned),
         audit,
         identity.identity.device_id.clone(),
+        clock,
+        stale_retention,
     );
+    tokio::spawn(Listen::run_stale_sweeper(Arc::downgrade(&listen)));
     tracing::info!(
         device_id = %identity.identity.device_id,
         fingerprint = %identity.identity.fingerprint,
@@ -165,6 +185,317 @@ async fn run_listen_unix(
     );
     listen.run(listener, shutdown).await;
     Ok(())
+}
+
+/// The live-connection table [`Listen::finish_registration`] publishes into
+/// and [`Listen::drive_registered_session`] retires from — keyed by `name`
+/// alone, generation carried in the value, generic over `T` so the
+/// race-freedom argument below is unit-testable without a real
+/// [`Connection`] (this module's tests use a small mock).
+///
+/// **`PLAN.md` M3 Step 4 (4) — the Step 3 race debt this fixes.** The old
+/// shape keyed `conns` by `(name, generation)` and published a new
+/// connection with a separate insert-then-remove sequence: insert
+/// `(name, new_generation)`, then — if [`Registry::admit`]'s
+/// `replaced_generation` said so — remove `(name, old_generation)` and
+/// close what came back. Two concurrent same-fingerprint registrations
+/// whose `admit()` calls land in one order but whose `finish_registration`
+/// continuations resume in the *other* order could each publish under a
+/// distinct `(name, generation)` key with no relationship enforced between
+/// them — the second continuation's `remove` could find nothing (the first
+/// hadn't inserted yet) and close nothing, leaving that generation's
+/// connection permanently unreferenced: never the table's current entry,
+/// never closed by anyone.
+///
+/// Keying by `name` alone removes the two-step gap entirely: publishing is
+/// one `HashMap::insert`, so whichever call actually lands second
+/// necessarily sees what the first one left behind, in the same critical
+/// section it installs its own value in. [`ConnTable::publish`]'s
+/// generation guard is what makes that safe to rely on regardless of
+/// *which* call happens to run second — see its own doc comment for the
+/// two-registration replay this was built against.
+struct ConnTable<T> {
+    inner: Mutex<HashMap<String, (u64, T)>>,
+}
+
+/// What a caller of [`ConnTable::publish`] must do with the result.
+enum Published<T> {
+    /// This call's value is now `name`'s occupant. `Some` is whatever it
+    /// replaced — the caller closes that (never its own value).
+    Installed(Option<T>),
+    /// A `generation` at least as new was already published under `name`
+    /// before this call ran, so this call's value never became the
+    /// occupant. The caller must close *its own* value instead — nothing
+    /// else references it, so leaving it open would leak exactly the
+    /// connection [`ConnTable`]'s own doc comment describes.
+    Superseded(T),
+}
+
+impl<T> ConnTable<T> {
+    fn new() -> Self {
+        Self {
+            inner: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, (u64, T)>> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Publish `(generation, value)` under `name` — installing it only if
+    /// `generation` is strictly newer than whatever is currently there (or
+    /// nothing is). One `HashMap::insert` under this table's own lock: no
+    /// read-then-write gap for a second concurrent caller to land inside
+    /// ([`ConnTable`]'s own doc comment).
+    ///
+    /// **Replay of the race this fixes**, both possible continuation
+    /// orders, starting from a pre-existing occupant at generation `0` and
+    /// two concurrent same-fingerprint registrations whose `admit()` calls
+    /// (elsewhere, strictly ordered by [`Registry`]'s own lock) produced
+    /// generations `1` then `2`:
+    ///
+    /// - Continuations run in `admit()` order (`1` then `2`): `1` finds `0`
+    ///   installs, hands back `0` to close. `2` finds `1`, installs, hands
+    ///   back `1` to close. Final occupant: `2`. Closed: `0`, `1`.
+    /// - Continuations run in the *other* order (`2` then `1`, the bug
+    ///   scenario): `2` finds `0`, installs, hands back `0` to close. `1`
+    ///   finds `2` — not newer than its own `1` — so it does **not**
+    ///   install; it gets its own value back as [`Published::Superseded`]
+    ///   and must close *that*. Final occupant: `2`. Closed: `0`, `1`.
+    ///
+    /// Both orders converge on the same end state — the highest generation
+    /// open, every other value closed exactly once, nothing leaked.
+    fn publish(&self, name: String, generation: u64, value: T) -> Published<T> {
+        let mut table = self.lock();
+        match table.get(&name) {
+            Some((existing, _)) if *existing >= generation => Published::Superseded(value),
+            _ => Published::Installed(table.insert(name, (generation, value)).map(|(_, v)| v)),
+        }
+    }
+
+    /// Remove `name`'s entry iff it is still exactly `generation` — the
+    /// same "only touch what I still believe is mine" guard
+    /// [`Registry::mark_stale`]/[`Registry::rollback`] apply registry-side.
+    /// Returns whether it was removed: `false` means a newer registration
+    /// already superseded this one (which already got its own `"replaced"`
+    /// event — the caller must not also treat this as a fresh loss).
+    fn remove_if(&self, name: &str, generation: u64) -> bool {
+        let mut table = self.lock();
+        let matches = matches!(table.get(name), Some((g, _)) if *g == generation);
+        if matches {
+            table.remove(name);
+        }
+        matches
+    }
+
+    fn len(&self) -> usize {
+        self.lock().len()
+    }
+
+    /// The generation currently published under `name`, if any. A
+    /// non-mutating peek — used only to check whether a connection is
+    /// still actually the live occupant before restoring metadata that
+    /// describes it (see [`rollback_target`]).
+    fn occupant_generation(&self, name: &str) -> Option<u64> {
+        self.lock().get(name).map(|(g, _)| *g)
+    }
+}
+
+/// Decide what [`Registry::rollback`] should actually restore.
+/// [`RegisterOutcome::replaced_entry`] is a *snapshot* taken at `admit()`
+/// time — by the time a failed `Hello` reply triggers a rollback
+/// (`Listen::register_connection`'s error branch), the connection that
+/// snapshot describes may have already died on its own and removed itself
+/// from `conns` (its watchdog declared the path dead and
+/// [`Listen::drive_registered_session`] ran `conns.remove_if`), or a
+/// further registration may have replaced it again. Restoring the
+/// snapshot verbatim in either case would put a `Live` registry row back
+/// with no connection behind it — and nothing would ever mark it stale,
+/// since `mark_stale` needs a drive loop to call it, and that loop already
+/// exited (adversarial review finding: "a permanent phantom host").
+///
+/// So the snapshot is only trustworthy while `conns` still shows it as
+/// `name`'s current occupant — otherwise the rollback must free the name,
+/// exactly like a rollback of a *fresh* (non-replacing) registration
+/// already does for `replaced: None`.
+fn rollback_target<T>(
+    conns: &ConnTable<T>,
+    name: &str,
+    replaced: Option<registry::ReverseEntry>,
+) -> Option<registry::ReverseEntry> {
+    replaced.filter(|prev| conns.occupant_generation(name) == Some(prev.generation))
+}
+
+#[cfg(test)]
+mod conn_table_tests {
+    use super::*;
+
+    /// A cheap stand-in for [`Connection`] — an id plus a shared log of
+    /// which ids got "closed" — so [`ConnTable::publish`]'s race-freedom
+    /// claim is testable without a real QUIC connection ([`ConnTable`] is
+    /// generic exactly so this is possible).
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct MockConn(u32);
+
+    fn close(log: &Mutex<Vec<u32>>, conn: MockConn) {
+        log.lock().unwrap_or_else(|e| e.into_inner()).push(conn.0);
+    }
+
+    /// Both possible continuation orders described in [`ConnTable::publish`]'s
+    /// own doc comment converge on the same end state. `order` selects which
+    /// of the two concurrent registrations' `finish_registration` calls
+    /// reaches `publish` first — the whole point being that it must not
+    /// matter which one does.
+    fn replay(publish_gen2_first: bool) -> (u32, Vec<u32>) {
+        let table = ConnTable::new();
+        let log = Mutex::new(Vec::new());
+        // Pre-existing occupant at generation 0 — the connection a fresh
+        // reconnect (generation 1) is about to replace.
+        match table.publish("name".to_string(), 0, MockConn(0)) {
+            Published::Installed(None) => {}
+            other => panic!("first publish must install cleanly: {other:?}"),
+        }
+
+        let call = |generation: u64, id: u32| match table.publish(
+            "name".to_string(),
+            generation,
+            MockConn(id),
+        ) {
+            Published::Installed(old) => {
+                if let Some(old) = old {
+                    close(&log, old);
+                }
+            }
+            Published::Superseded(mine) => close(&log, mine),
+        };
+
+        if publish_gen2_first {
+            call(2, 2);
+            call(1, 1);
+        } else {
+            call(1, 1);
+            call(2, 2);
+        }
+
+        let occupant = table.lock().get("name").map(|(g, _)| *g).unwrap();
+        let mut closed = log.into_inner().unwrap_or_else(|e| e.into_inner());
+        closed.sort_unstable();
+        (occupant as u32, closed)
+    }
+
+    impl std::fmt::Debug for Published<MockConn> {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                Published::Installed(old) => write!(f, "Installed({old:?})"),
+                Published::Superseded(v) => write!(f, "Superseded({v:?})"),
+            }
+        }
+    }
+
+    #[test]
+    fn admit_order_continuation_order_ends_with_the_newest_generation_open() {
+        let (occupant, closed) = replay(false);
+        assert_eq!(occupant, 2, "the newest generation must be the occupant");
+        assert_eq!(closed, vec![0, 1], "everything else closed exactly once");
+    }
+
+    #[test]
+    fn reversed_continuation_order_still_ends_with_the_newest_generation_open() {
+        // This is the exact scenario `PLAN.md` M3 Step 4 (4) names: the
+        // higher-generation registration's `finish_registration` reaches
+        // `publish` first. The old `(name, generation)`-keyed table leaked
+        // generation 1's connection here; this table must not.
+        let (occupant, closed) = replay(true);
+        assert_eq!(occupant, 2, "the newest generation must be the occupant");
+        assert_eq!(
+            closed,
+            vec![0, 1],
+            "generation 1's own connection must close itself, not leak"
+        );
+    }
+
+    #[test]
+    fn remove_if_only_removes_a_matching_generation() {
+        let table: ConnTable<MockConn> = ConnTable::new();
+        table.publish("name".to_string(), 0, MockConn(0));
+        assert!(
+            !table.remove_if("name", 1),
+            "generation mismatch must not remove"
+        );
+        assert_eq!(table.len(), 1);
+        assert!(table.remove_if("name", 0), "matching generation removes");
+        assert_eq!(table.len(), 0);
+    }
+
+    #[test]
+    fn remove_if_on_an_unknown_name_is_a_no_op() {
+        let table: ConnTable<MockConn> = ConnTable::new();
+        assert!(!table.remove_if("nobody-home", 0));
+    }
+
+    fn sample_entry(generation: u64) -> registry::ReverseEntry {
+        registry::ReverseEntry {
+            name: "name".to_string(),
+            fingerprint: "sha256:abc".to_string(),
+            principal: "device:target".to_string(),
+            address: "127.0.0.1:0".parse().unwrap(),
+            capabilities: Vec::new(),
+            registered_at: "2026-01-01T00:00:00Z".to_string(),
+            generation,
+            state: registry::EntryState::Live,
+            stale_since: None,
+        }
+    }
+
+    // `rollback_target` — the fix for the adversarial-review "permanent
+    // phantom host" finding (`Listen::register_connection`'s rollback
+    // branch): a `RegisterOutcome::replaced_entry` snapshot must only be
+    // restored while `conns` still backs it with a live connection.
+
+    #[test]
+    fn rollback_target_keeps_the_snapshot_while_its_connection_is_still_the_occupant() {
+        let table = ConnTable::new();
+        table.publish("name".to_string(), 0, MockConn(0));
+        let prev = sample_entry(0);
+        assert_eq!(
+            rollback_target(&table, "name", Some(prev.clone())),
+            Some(prev),
+            "the connection it describes is still live — safe to restore"
+        );
+    }
+
+    #[test]
+    fn rollback_target_drops_the_snapshot_once_its_connection_already_exited() {
+        // Nothing published under `name`: the connection this snapshot
+        // describes already ran its own `remove_if` and removed itself —
+        // e.g. its watchdog declared the path dead in the window between
+        // the admission this snapshot came from and the rollback.
+        let table: ConnTable<MockConn> = ConnTable::new();
+        let prev = sample_entry(0);
+        assert_eq!(
+            rollback_target(&table, "name", Some(prev)),
+            None,
+            "restoring a Live entry with no connection behind it must never happen"
+        );
+    }
+
+    #[test]
+    fn rollback_target_drops_the_snapshot_once_a_further_generation_replaced_it() {
+        let table = ConnTable::new();
+        table.publish("name".to_string(), 2, MockConn(2));
+        let prev = sample_entry(0);
+        assert_eq!(
+            rollback_target(&table, "name", Some(prev)),
+            None,
+            "generation 2 is the real occupant now — generation 0 must not come back"
+        );
+    }
+
+    #[test]
+    fn rollback_target_passes_a_fresh_registrations_none_through_unchanged() {
+        let table: ConnTable<MockConn> = ConnTable::new();
+        assert_eq!(rollback_target(&table, "name", None), None);
+    }
 }
 
 /// The controller: registry + policy + audit + the live-connection table
@@ -181,9 +512,23 @@ pub struct Listen {
     authorizer: Arc<dyn Authorizer>,
     audit: Arc<dyn AuditSink>,
     device_name: String,
-    /// Live registered connections, keyed by `(name, generation)` — never
-    /// in [`Registry`] (module docs).
-    conns: Mutex<HashMap<(String, u64), Connection>>,
+    /// Live registered connections, keyed by name — never in [`Registry`]
+    /// (module docs). See [`ConnTable`]'s own docs for why `name` alone,
+    /// not `(name, generation)`.
+    conns: ConnTable<Connection>,
+    /// The same clock [`Registry`] was built with — [`Listen::run_stale_sweeper`]
+    /// needs it too (to pace its own tick), so it is threaded through here
+    /// rather than exposed off [`Registry`] just for that.
+    clock: Arc<dyn Clock>,
+    /// Defaulted and validated `[listen].stale_retention`
+    /// (`docs/design/protocol.md` §11-4, [`crate::config::ListenConfig::stale_retention`]).
+    stale_retention: Duration,
+    /// How often [`Listen::run_stale_sweeper`] wakes to check for
+    /// retention-expired entries. [`STALE_SWEEP_TICK`] in production;
+    /// injectable so an L3/L4 test that actually wants to observe a sweep
+    /// fire does not have to pay `STALE_SWEEP_TICK`'s real wall-clock cost
+    /// to do it (`Listen::new`'s doc comment).
+    sweep_tick: Duration,
 }
 
 impl std::fmt::Debug for Listen {
@@ -195,19 +540,54 @@ impl std::fmt::Debug for Listen {
 }
 
 impl Listen {
-    /// Build a controller with the given registry, policy and audit sink.
+    /// Build a controller with the given registry, policy, audit sink, and
+    /// stale-eviction parameters. `clock` should be the same clock `registry`
+    /// was built with (`Listen::clock`'s doc comment) — production callers
+    /// share one `Arc<dyn Clock>` between the two constructions exactly the
+    /// way `run_listen_unix` does. [`Self::new`] paces
+    /// [`Self::run_stale_sweeper`] at the production [`STALE_SWEEP_TICK`]; a
+    /// test that actually wants to observe a sweep fire without paying that
+    /// real wall-clock cost uses [`Self::new_with_sweep_tick`] instead
+    /// ([`sweep_tick`](Self::sweep_tick)'s own doc comment).
     pub fn new(
         registry: Registry,
         authorizer: Arc<dyn Authorizer>,
         audit: Arc<dyn AuditSink>,
         device_name: impl Into<String>,
+        clock: Arc<dyn Clock>,
+        stale_retention: Duration,
+    ) -> Arc<Self> {
+        Self::new_with_sweep_tick(
+            registry,
+            authorizer,
+            audit,
+            device_name,
+            clock,
+            stale_retention,
+            STALE_SWEEP_TICK,
+        )
+    }
+
+    /// [`Self::new`] with a caller-chosen sweep tick — the injection point
+    /// [`sweep_tick`](Self::sweep_tick)'s doc comment promises.
+    pub fn new_with_sweep_tick(
+        registry: Registry,
+        authorizer: Arc<dyn Authorizer>,
+        audit: Arc<dyn AuditSink>,
+        device_name: impl Into<String>,
+        clock: Arc<dyn Clock>,
+        stale_retention: Duration,
+        sweep_tick: Duration,
     ) -> Arc<Self> {
         Arc::new(Self {
             registry,
             authorizer,
             audit,
             device_name: device_name.into(),
-            conns: Mutex::new(HashMap::new()),
+            conns: ConnTable::new(),
+            clock,
+            stale_retention,
+            sweep_tick,
         })
     }
 
@@ -220,7 +600,37 @@ impl Listen {
     /// Number of live connections this controller currently holds
     /// (tests/diagnostics).
     pub fn live_connections(&self) -> usize {
-        self.conns.lock().unwrap_or_else(|e| e.into_inner()).len()
+        self.conns.len()
+    }
+
+    /// Sweep stale, retention-expired registry entries until this
+    /// controller is dropped (`this` holds only a [`std::sync::Weak`], the
+    /// same shape [`crate::broker::Broker::run_reaper`] uses). Spawn this
+    /// on a task alongside [`Listen::run`]. Uses [`Listen::clock`], so
+    /// `tokio::time::pause()`/`TestClock` drive it deterministically — see
+    /// [`Registry::sweep_expired`] for the pure logic this only paces.
+    pub async fn run_stale_sweeper(this: std::sync::Weak<Self>) {
+        loop {
+            let Some(listen) = this.upgrade() else {
+                return;
+            };
+            let clock = listen.clock.clone();
+            let sweep_tick = listen.sweep_tick;
+            drop(listen);
+            clock.sleep(sweep_tick).await;
+            let Some(listen) = this.upgrade() else {
+                return;
+            };
+            for entry in listen.registry.sweep_expired(listen.stale_retention) {
+                RegistrationEvent {
+                    event: "expired",
+                    host: &entry.name,
+                    fingerprint: &entry.fingerprint,
+                    generation: Some(entry.generation),
+                }
+                .emit();
+            }
+        }
     }
 
     /// The `Hello` this controller sends on every connection —
@@ -315,11 +725,14 @@ impl Listen {
                 // undoing exactly what `admit` did, nothing more.
                 if let Some(outcome) = outcome_cell.into_inner().unwrap_or_else(|e| e.into_inner())
                 {
-                    self.registry.rollback(
-                        &outcome.entry.name,
-                        outcome.entry.generation,
-                        outcome.replaced_entry,
-                    );
+                    // `rollback_target` drops `replaced_entry` back to
+                    // `None` if the connection it describes is no longer
+                    // `conns`'s live occupant for this name — see its own
+                    // doc comment.
+                    let replaced =
+                        rollback_target(&self.conns, &outcome.entry.name, outcome.replaced_entry);
+                    self.registry
+                        .rollback(&outcome.entry.name, outcome.entry.generation, replaced);
                 }
                 conn.close(
                     qsh_transport::endpoint::CLOSE_CODE_PROTOCOL,
@@ -429,11 +842,13 @@ impl Listen {
         }
     }
 
-    /// Publish the registered connection into [`Listen::conns`], close any
-    /// connection it replaced (NAT-rebind reconnect — insert the new entry
-    /// *before* closing the old one, so the name is never briefly
-    /// unroutable), then drive the connection as CLIENT role until it
-    /// dies.
+    /// Publish the registered connection into [`Listen::conns`], close
+    /// whatever it replaced, then drive the connection as CLIENT role until
+    /// it dies. Race-free regardless of what order two concurrent
+    /// same-fingerprint registrations' calls to this method happen to run
+    /// in — [`ConnTable::publish`]'s doc comment (`PLAN.md` M3 Step 4 (4),
+    /// fixing the KNOWN RACE PR 3b left here — see git blame for that
+    /// comment's history).
     async fn finish_registration(
         self: Arc<Self>,
         conn: Connection,
@@ -445,46 +860,23 @@ impl Listen {
         let fingerprint = outcome.entry.fingerprint.clone();
         let generation = outcome.entry.generation;
 
-        // KNOWN RACE, deferred to Step 4 (`PLAN.md` M3 Step 3 review — LOW,
-        // deliberately not fixed here): `Registry::admit` (called from
-        // `decide_registration`, before this method runs) is atomic per
-        // call, but the *this* table below is only populated later, after
-        // `handshake::respond` has finished flushing the `Hello` reply —
-        // so two concurrent same-fingerprint registrations can have their
-        // `admit()` calls ordered A-then-B (generation 0→1→2) while their
-        // `finish_registration` continuations run B-then-A. B's `remove`
-        // below then finds nothing at generation 1 (A has not inserted it
-        // yet) and closes nothing; A's unconditional `insert` afterward
-        // publishes generation 1's connection into `conns` with no
-        // registry entry pointing at it any more — a live connection the
-        // table now leaks forever (never closed, never removed) instead of
-        // the intended "replace closes the superseded connection"
-        // guarantee this method's own doc comment promises. Acceptable for
-        // Step 3: nothing in this step's product code ever fires two
-        // concurrent registrations from one target — a real `qsh reverse`
-        // holds exactly one connection and registers once
-        // (`reverse/target.rs`'s module docs); only Step 4's reconnect
-        // loop, which can legitimately race a stale connection's death
-        // against a fresh re-dial, exercises the controller-side replace
-        // path enough to hit this. Step 4 MUST close that window (e.g. by
-        // moving the `conns` publish inside the same critical section
-        // `admit()` already holds, or by re-checking the table under lock
-        // before trusting `replaced_generation`).
-        {
-            let mut conns = self.conns.lock().unwrap_or_else(|e| e.into_inner());
-            conns.insert((name.clone(), generation), conn.clone());
-        }
-        if let Some(replaced_generation) = outcome.replaced_generation {
-            let old = self
-                .conns
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(&(name.clone(), replaced_generation));
-            if let Some(old_conn) = old {
+        match self.conns.publish(name.clone(), generation, conn.clone()) {
+            Published::Installed(Some(old_conn)) => {
                 // `Connection::close` is idempotent — safe even if the old
                 // connection is already mid-close on its own (e.g. the
                 // peer hung up right as it reconnected).
                 old_conn.close(CLOSE_CODE_REPLACED, b"replaced by a newer registration");
+            }
+            Published::Installed(None) => {}
+            Published::Superseded(_) => {
+                // A newer generation already published under `name` before
+                // this call ran (`ConnTable::publish`'s doc comment) — this
+                // connection lost the race and must never be driven as
+                // this name's live connection. Closing it here, rather
+                // than leaving it to be discovered later, is what keeps it
+                // from leaking: nothing else references it.
+                conn.close(CLOSE_CODE_REPLACED, b"superseded by a newer registration");
+                return;
             }
         }
 
@@ -497,11 +889,30 @@ impl Listen {
     /// (`docs/design/protocol.md` §11-3: registration grants reachability,
     /// never authority) — it never opens sessions, so the only things to
     /// do here are answer a peer `Ping` and refuse every request-shaped
-    /// frame with `UNSUPPORTED`, creating nothing either way. Runs until
-    /// the connection ends, then removes this generation's table entry —
-    /// unless a newer registration already did (the `remove` returning
-    /// `None` is exactly that: [`Listen::finish_registration`] already
-    /// emitted `"replaced"` for it, so this must not also emit `"lost"`).
+    /// frame with `UNSUPPORTED`, creating nothing either way.
+    ///
+    /// **Step 4: the controller's own liveness watch.** This is the small
+    /// probe driver `PLAN.md` M3 Step 4 (b) calls for — reusing
+    /// [`PathWatchConfig`]'s judgment policy unchanged, watching this
+    /// connection through Stage A's role-agnostic `ProbeSource` blanket
+    /// impl on [`Connection`]. Shaped exactly like `ops/session.rs`'s
+    /// `pump_attach_control`: [`watch_path`] runs as its own task and only
+    /// ever *asks* for a probe via `probes`, this loop is the sole writer
+    /// on `session`'s control stream (`Session::send_ping`/`send_pong`), a
+    /// `Pong` is bare liveness (`PathWatch::inbound`) while everything else
+    /// inbound is liveness *and* activity (`PathWatch::traffic`). When
+    /// [`PathWatch::dead`] fires, the loop exits exactly like a read error
+    /// would.
+    ///
+    /// On exit, this generation's [`Listen::conns`] entry is removed —
+    /// unless a newer registration already replaced it
+    /// ([`ConnTable::remove_if`] returning `false` is exactly that:
+    /// [`Listen::finish_registration`] already emitted `"replaced"` for it,
+    /// so this must not also emit `"lost"`) — and, only when it was still
+    /// this generation's entry, [`Registry::mark_stale`] transitions the
+    /// registry entry and a `"lost"` diagnostic is emitted. Actual removal
+    /// after `[listen].stale_retention` is [`Listen::run_stale_sweeper`]'s
+    /// job, not this method's.
     async fn drive_registered_session(
         self: Arc<Self>,
         mut session: Session,
@@ -509,34 +920,72 @@ impl Listen {
         fingerprint: String,
         generation: u64,
     ) {
+        let watch = PathWatch::new(PathWatchConfig::default());
+        let probes = Arc::new(tokio::sync::Notify::new());
+        let watchdog = tokio::spawn(watch_path(
+            session.connection().clone(),
+            watch.clone(),
+            probes.clone(),
+        ));
+
         loop {
-            match session.next_control().await {
-                Ok(Some(ControlIn::Ping { request_id })) => {
-                    if session.send_pong(request_id).await.is_err() {
+            tokio::select! {
+                biased;
+                () = watch.dead() => break,
+                () = probes.notified() => {
+                    if session.send_ping().await.is_err() {
                         break;
                     }
                 }
-                Ok(Some(ControlIn::Request { request_id })) => {
-                    if session.reject_unsupported(request_id).await.is_err() {
-                        break;
+                message = session.next_control() => {
+                    match message {
+                        // The answer to our own liveness probe — proof the
+                        // path carries packets, nothing more (mirrors
+                        // `pump_attach_control`'s identical comment: counting
+                        // this as activity would keep the watchdog inside the
+                        // active window forever).
+                        Ok(Some(ControlIn::Pong)) => watch.inbound(),
+                        // Symmetric probing (Step 4): with a `PathWatch`
+                        // driving *both* ends of a registered connection,
+                        // every `Ping` reaching this arm is the target's
+                        // own probe loop (`server::drive_probes`) asking
+                        // the same liveness question this side is asking
+                        // it — never real session traffic, since this
+                        // driver never opens sessions (this method's own
+                        // doc comment). Counting it as activity
+                        // (`PathWatch::traffic`) would re-arm
+                        // `active_window` on every reply and pin this
+                        // watch to the fast cadence forever — the same
+                        // failure mode `PathState::observe_inbound`'s doc
+                        // comment already names for an inbound `Pong`,
+                        // just from the other message direction. Bare
+                        // liveness only.
+                        Ok(Some(ControlIn::Ping { request_id })) => {
+                            watch.inbound();
+                            if session.send_pong(request_id).await.is_err() {
+                                break;
+                            }
+                        }
+                        Ok(Some(ControlIn::Request { request_id })) => {
+                            watch.traffic();
+                            if session.reject_unsupported(request_id).await.is_err() {
+                                break;
+                            }
+                        }
+                        // The controller opened nothing, so no
+                        // `SessionEvent` is ever its own — unreachable in
+                        // practice, but still counts as traffic if it ever
+                        // arrives.
+                        Ok(Some(ControlIn::Event(_))) => watch.traffic(),
+                        Ok(None) | Err(_) => break,
                     }
                 }
-                // The controller has nothing to react to on either of
-                // these — it opened nothing, so no `SessionEvent` is ever
-                // its own, and it never sends a `Ping` of its own on this
-                // connection (Step 4 adds that liveness driver).
-                Ok(Some(ControlIn::Event(_))) | Ok(Some(ControlIn::Pong)) => {}
-                Ok(None) | Err(_) => break,
             }
         }
+        watchdog.abort();
 
-        let still_live = self
-            .conns
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&(name.clone(), generation))
-            .is_some();
-        if still_live {
+        let still_live = self.conns.remove_if(&name, generation);
+        if still_live && self.registry.mark_stale(&name, generation).is_some() {
             RegistrationEvent {
                 event: "lost",
                 host: &name,
@@ -576,42 +1025,32 @@ fn diag_host(offered_name: &str) -> &str {
 /// contract — the message *is* the JSON.
 pub const TARGET: &str = "qsh::reverse";
 
-/// One `registered`/`denied`/`replaced`/`lost` line
-/// (`docs/design/protocol.md` §11-2/§11-4's vocabulary — `expired`/`retry`
-/// are Step 4). Fields are exactly `event`/`host`/`fingerprint`/
-/// `generation`: no payload, no token, matching the audit record's own
-/// structural-only discipline (`docs/design/architecture.md` §6).
+/// One `registered`/`denied`/`replaced`/`lost`/`expired` line
+/// (`docs/design/protocol.md` §11-2/§11-4's vocabulary — `retry` is
+/// `reverse/target.rs`'s own `ReconnectEvent`, the target's side of the
+/// same tracing target, never emitted here). Fields are exactly
+/// `event`/`host`/`fingerprint`/`generation`: no payload, no token,
+/// matching the audit record's own structural-only discipline
+/// (`docs/design/architecture.md` §6). Built with `serde_json`, never
+/// hand-formatted (`docs/CLI.md` §6.13) — the same shape
+/// `reverse/target.rs`'s `ReconnectEvent` already uses.
+#[derive(serde::Serialize)]
 struct RegistrationEvent<'a> {
     event: &'static str,
     host: &'a str,
     fingerprint: &'a str,
     /// Absent when nothing was ever assigned one (`"denied"` before a name
     /// resolved far enough to reach [`Registry::admit`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
     generation: Option<u64>,
 }
 
 impl RegistrationEvent<'_> {
-    /// Compact JSON, no trailing newline, keys in a fixed order — same
-    /// discipline as [`crate::telemetry::RecoveryReport::to_json_line`].
-    fn to_json_line(&self) -> String {
-        let host = serde_json::Value::String(self.host.to_string());
-        let fingerprint = serde_json::Value::String(self.fingerprint.to_string());
-        match self.generation {
-            Some(generation) => format!(
-                r#"{{"event":"{}","host":{host},"fingerprint":{fingerprint},"generation":{generation}}}"#,
-                self.event,
-            ),
-            None => format!(
-                r#"{{"event":"{}","host":{host},"fingerprint":{fingerprint}}}"#,
-                self.event,
-            ),
-        }
-    }
-
     /// Emit the record on [`TARGET`] at `INFO`. The typed fields ride
     /// along for a structural tracing consumer; the message is the exact
     /// JSON line a stderr-reading campaign script parses whole.
     fn emit(&self) {
+        let line = serde_json::to_string(self).unwrap_or_else(|_| "{}".to_string());
         tracing::info!(
             target: TARGET,
             event = self.event,
@@ -619,7 +1058,7 @@ impl RegistrationEvent<'_> {
             fingerprint = self.fingerprint,
             generation = self.generation,
             "{}",
-            self.to_json_line()
+            line
         );
     }
 }
@@ -659,44 +1098,123 @@ mod tests {
 
     #[test]
     fn registration_event_json_line_has_the_documented_field_set() {
-        let with_generation = RegistrationEvent {
+        let with_generation = serde_json::to_string(&RegistrationEvent {
             event: "registered",
             host: "personal-mac",
             fingerprint: "sha256:abc",
             generation: Some(0),
-        }
-        .to_json_line();
+        })
+        .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&with_generation).unwrap();
         assert_eq!(parsed["event"], "registered");
         assert_eq!(parsed["host"], "personal-mac");
         assert_eq!(parsed["fingerprint"], "sha256:abc");
         assert_eq!(parsed["generation"], 0);
 
-        let without_generation = RegistrationEvent {
+        let without_generation = serde_json::to_string(&RegistrationEvent {
             event: "denied",
             host: "-",
             fingerprint: "sha256:abc",
             generation: None,
-        }
-        .to_json_line();
+        })
+        .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&without_generation).unwrap();
         assert_eq!(parsed["event"], "denied");
         assert!(parsed.get("generation").is_none());
     }
 
-    #[tokio::test]
-    async fn listen_wires_device_name_and_starts_with_no_live_connections() {
-        let registry = Registry::new(Arc::new(crate::broker::TestClock::new()), false);
-        let listen = Listen::new(
+    #[test]
+    fn registration_event_json_line_covers_the_expired_event() {
+        // Step 4 addition: `Listen::run_stale_sweeper` emits this on the
+        // same tracing target/shape as every other `RegistrationEvent`.
+        let line = serde_json::to_string(&RegistrationEvent {
+            event: "expired",
+            host: "personal-mac",
+            fingerprint: "sha256:abc",
+            generation: Some(3),
+        })
+        .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(parsed["event"], "expired");
+        assert_eq!(parsed["generation"], 3);
+    }
+
+    fn test_listen() -> Arc<Listen> {
+        let registry = Registry::new(Arc::new(SystemClock), false);
+        Listen::new(
             registry,
             Arc::new(AllowAllPinned),
             Arc::new(crate::audit::NullAuditSink),
             "hermes",
-        );
+            Arc::new(SystemClock),
+            Duration::from_secs(120),
+        )
+    }
+
+    #[tokio::test]
+    async fn listen_wires_device_name_and_starts_with_no_live_connections() {
+        let listen = test_listen();
         assert_eq!(listen.local_hello().device_name, "hermes");
         assert!(listen.local_hello().reverse.is_none());
         assert_eq!(listen.live_connections(), 0);
         assert!(listen.registry().snapshot().is_empty());
+    }
+
+    /// `Listen::run_stale_sweeper` — `docs/design/testing.md` L2, no real
+    /// `sleep()` — removes a stale, retention-expired entry and stops on
+    /// its own once the last `Arc<Listen>` drops. Both the registry's
+    /// retention clock and the sweeper's own tick pacing are
+    /// [`SystemClock`], which is `tokio::time::pause()`-steerable
+    /// (`broker::clock`'s module docs) — the exact shape
+    /// `broker::run_reaper_uses_the_injected_clock_and_stops_with_the_broker`
+    /// already establishes for the sibling reaper.
+    #[tokio::test(start_paused = true)]
+    async fn run_stale_sweeper_removes_a_retention_expired_entry() {
+        let listen = test_listen();
+        let outcome = listen
+            .registry()
+            .admit(
+                "widget".to_string(),
+                registry::AdmittedEntry {
+                    fingerprint: "sha256:a",
+                    principal: "device:widget",
+                    address: "127.0.0.1:4433".parse().unwrap(),
+                    capabilities: vec![],
+                },
+            )
+            .expect("registers");
+        listen
+            .registry()
+            .mark_stale("widget", outcome.entry.generation)
+            .expect("goes stale");
+
+        let sweeper = tokio::spawn(Listen::run_stale_sweeper(Arc::downgrade(&listen)));
+
+        // Retention (120s) hasn't elapsed yet — still present, across
+        // several of the sweeper's own ticks.
+        tokio::time::advance(Duration::from_secs(60)).await;
+        for _ in 0..5 {
+            tokio::task::yield_now().await;
+        }
+        assert!(listen.registry().get("widget").is_some(), "not due yet");
+
+        // Past retention, and past at least one more of the sweeper's own
+        // ticks.
+        tokio::time::advance(Duration::from_secs(61) + STALE_SWEEP_TICK).await;
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+            if listen.registry().get("widget").is_none() {
+                break;
+            }
+        }
+        assert!(listen.registry().get("widget").is_none(), "swept away");
+
+        drop(listen);
+        tokio::time::advance(STALE_SWEEP_TICK).await;
+        tokio::time::timeout(Duration::from_secs(5), sweeper)
+            .await
+            .expect("sweeper must stop once the last Arc<Listen> drops")
+            .unwrap();
     }
 
     /// `docs/CLI.md` §6.13's Windows gate, mechanically: `run_listen`
