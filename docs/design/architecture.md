@@ -100,7 +100,7 @@ $XDG_RUNTIME_DIR/qsh/     # (없으면 state 하위 run/, 0700) per-process UDS:
 
 | Crate | 버전 | 근거 |
 |---|---|---|
-| quinn | 0.11.x, **≥ 0.11.14** | 원격 DoS 수정 포함. per-stream priority + fair queuing, `Endpoint::rebind()` migration |
+| quinn-proto | 0.11.x, **≥ 0.11.14** | 원격 DoS 수정 포함(RUSTSEC-2026-0037; advisory 대상은 파사드 `quinn`이 아니라 `quinn-proto`). per-stream priority + fair queuing, `Endpoint::rebind()` migration |
 | rustls | 0.23 (aws-lc-rs) | 커스텀 `danger` verifier trait로 pin+CA 이중 모드 구현 |
 | rcgen | 0.14 | 디바이스 cert / private CA 발급 |
 | prost / prost-build | 0.14 | control 메시지 직렬화 — unknown-field 무시 네이티브, `.proto`가 리뷰·fuzz 문법 ([ADR-0001](../adr/0001-custom-quic-protocol.md)) |

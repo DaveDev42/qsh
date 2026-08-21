@@ -30,6 +30,7 @@ pub mod signal;
 
 use std::collections::HashMap;
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -130,6 +131,13 @@ pub enum BrokerError {
     /// The session actor is gone (→ `INTERNAL`).
     #[error("session actor stopped")]
     Gone,
+    /// Lost the race against [`Broker::close_all`]: the caller's
+    /// `session.open` reached the registry lock after draining had already
+    /// been committed (→ `RESOURCE_EXHAUSTED`). Nothing was spawned — the
+    /// same outcome `require_not_draining`'s ordinary, earlier check gives,
+    /// just for the narrow window that check alone cannot close.
+    #[error("qsh serve is shutting down: refusing new sessions")]
+    Draining,
 }
 
 /// Factory/spawn `io::Error` → [`BrokerError`]: `Unsupported` is a policy
@@ -315,6 +323,15 @@ const ECHO_PIPE_BUFFER: usize = 64 * 1024;
 /// `session.closed`; the reaper drops them afterwards.
 pub struct Broker {
     registry: Mutex<HashMap<SessionId, SessionHandle>>,
+    /// Set once, by [`Broker::close_all`], and never cleared. Only ever
+    /// read or written while `registry`'s lock is held (`open_with`'s and
+    /// `close_all`'s own comments) — that is what makes "admission is
+    /// closed" and "the live-session snapshot was taken" a single atomic
+    /// event, so a `session.open` racing a SIGTERM drain either loses
+    /// before spawning anything or is guaranteed to land in the snapshot.
+    /// A plain `bool` would do; `AtomicBool` only so reading it doesn't
+    /// need `&mut`.
+    draining: AtomicBool,
     clock: Arc<dyn Clock>,
     config: BrokerConfig,
     factory: Arc<dyn SourceFactory>,
@@ -344,6 +361,7 @@ impl Broker {
     ) -> Arc<Self> {
         Arc::new(Self {
             registry: Mutex::new(HashMap::new()),
+            draining: AtomicBool::new(false),
             resume: ResumeRegistry::new(Arc::clone(&clock)),
             clock,
             config,
@@ -426,6 +444,24 @@ impl Broker {
         spec: &SessionSpec,
         source: Box<dyn SessionSource>,
     ) -> Result<SessionHandle, BrokerError> {
+        // Held from the draining check through the registry insert below,
+        // spanning `SessionActor::create` (which spawns the real child —
+        // synchronous, no `.await`, so this never holds the lock across a
+        // suspend point). This is what closes the race against
+        // `Broker::close_all`'s own snapshot, which takes the same lock to
+        // set `draining` and read the registry together: with both sides
+        // serialized on one lock, a `session.open` either observes
+        // `draining` before spawning anything (and refuses, orphaning
+        // nothing) or completes its insert strictly before `close_all`
+        // takes its snapshot (and is included in it) — there is no window
+        // where the caller believes it opened a session `close_all` never
+        // saw. `require_not_draining`'s check in `server/mod.rs` is the
+        // cheap fast path for the ordinary case; this is the backstop for
+        // the race that check alone cannot close.
+        let mut registry = self.lock();
+        if self.draining.load(Ordering::Acquire) {
+            return Err(BrokerError::Draining);
+        }
         let id = SessionId::generate_at(self.clock.wall_now());
         let created_at = self.now_rfc3339();
         let (handle, actor) = SessionActor::create(
@@ -442,7 +478,7 @@ impl Broker {
         )
         .map_err(spawn_error)?;
         tokio::spawn(actor.run());
-        self.lock().insert(id, handle.clone());
+        registry.insert(id, handle.clone());
         Ok(handle)
     }
 
@@ -468,6 +504,45 @@ impl Broker {
         // naming an id that never existed (CLI.md §6.4, protocol.md §10-2).
         self.resume.forget(id);
         Ok(handle.info().last_sequence)
+    }
+
+    /// Close every live session through the same procedure as
+    /// [`Broker::close`] — signal escalation, `session.closed{reason}`
+    /// emission, resume-credential forgetting — concurrently, so the host's
+    /// SIGTERM drain (`docs/CLI.md` §6.12, ADR-0003) does not take N times
+    /// as long as one session's close for N sessions. Mirrors
+    /// [`Broker::reap_once`]'s `doomed` loop, which the same escalation-time
+    /// argument already applies to.
+    ///
+    /// Also flips [`Broker::draining`](Broker) — under the same registry
+    /// lock this snapshot is taken with — so `session.open` is refused from
+    /// this call forward with no gap `open_with`'s own comment doesn't
+    /// already cover. Idempotent and safe to call again afterwards (a
+    /// second pass's snapshot is empty, a cheap no-op); the caller is still
+    /// responsible for having stopped admitting `session.attach`, which is
+    /// not gated at this layer.
+    pub async fn close_all(&self, reason: CloseReason) {
+        let handles: Vec<(SessionId, SessionHandle)> = {
+            let registry = self.lock();
+            self.draining.store(true, Ordering::Release);
+            registry
+                .iter()
+                .filter(|(_, h)| h.closed_at().is_none())
+                .map(|(id, h)| (id.clone(), h.clone()))
+                .collect()
+        };
+        let mut joins = tokio::task::JoinSet::new();
+        for (id, handle) in handles {
+            joins.spawn(async move {
+                handle.close(reason, None).await;
+                id
+            });
+        }
+        while let Some(res) = joins.join_next().await {
+            if let Ok(id) = res {
+                self.resume.forget(&id);
+            }
+        }
     }
 
     /// Release any writer lease held by `conn` across every session
@@ -697,6 +772,13 @@ pub trait SessionBackend: Send + Sync {
     /// their children survive (architecture.md §3 rule c).
     fn release_connection(&self, conn: ConnectionId) -> BoxFuture<'_, ()>;
 
+    /// Close every live session at once, through the same procedure
+    /// [`close`](Self::close) uses for one — the host's SIGTERM drain
+    /// (`docs/CLI.md` §6.12, ADR-0003). The caller must already have
+    /// stopped admitting new `session.open`/`session.attach`, or a session
+    /// created concurrently is not covered.
+    fn drain(&self, reason: CloseReason) -> BoxFuture<'_, ()>;
+
     /// The resume TTL an unattached session lives for (`[serve].resume_ttl`)
     /// — what the host reports as `SessionOpened.expires_at`.
     fn resume_ttl(&self) -> Duration;
@@ -851,6 +933,10 @@ impl SessionBackend for Broker {
 
     fn release_connection(&self, conn: ConnectionId) -> BoxFuture<'_, ()> {
         Box::pin(Broker::release_connection(self, conn))
+    }
+
+    fn drain(&self, reason: CloseReason) -> BoxFuture<'_, ()> {
+        Box::pin(Broker::close_all(self, reason))
     }
 
     fn resume_ttl(&self) -> Duration {
@@ -1158,6 +1244,67 @@ mod tests {
         assert_eq!(h1.info().writer, None);
         assert_eq!(h2.info().writer, None);
         assert_eq!(broker.session_count(), 2, "sessions survive lease loss");
+    }
+
+    /// `close_all` is `close`, applied to every live session at once: same
+    /// `session.closed` emission, same resume-credential forgetting,
+    /// nothing left running afterwards.
+    #[tokio::test]
+    async fn close_all_closes_every_live_session_and_forgets_its_credential() {
+        let (broker, _clock) = test_broker(Duration::from_secs(3600));
+        let (h1, _p1) = open_pipe(&broker);
+        let (h2, _p2) = open_pipe(&broker);
+        let id1 = sid(&h1);
+        let id2 = sid(&h2);
+        let peer = PeerFingerprint::new([9u8; PEER_FINGERPRINT_LEN]);
+        let token1 = SessionBackend::issue_resume(&*broker, &id1, peer);
+        assert_eq!(broker.session_count(), 2);
+
+        within(broker.close_all(CloseReason::Closed)).await;
+
+        assert_eq!(broker.session_count(), 0);
+        assert!(matches!(broker.get(&id1), Err(BrokerError::NotFound)));
+        assert!(matches!(broker.get(&id2), Err(BrokerError::NotFound)));
+        assert_eq!(
+            SessionBackend::verify_resume(&*broker, &id1, token1.expose(), peer),
+            Err(ResumeDenied),
+            "a session closed by drain forgets its credential exactly like an explicit close"
+        );
+        let out = within(SessionBackend::pull(
+            broker.as_ref(),
+            &id1,
+            Cursor::from_offset(0),
+            1024,
+            Duration::ZERO,
+        ))
+        .await
+        .unwrap();
+        assert!(matches!(
+            out.events.last(),
+            Some(ReplayEvent::Control {
+                event: ControlEvent::Closed {
+                    reason: CloseReason::Closed
+                },
+                ..
+            })
+        ));
+        // Idempotent: a second pass finds nothing left to close.
+        within(broker.close_all(CloseReason::Closed)).await;
+    }
+
+    /// The [`SessionBackend`] seam a future out-of-process supervisor would
+    /// implement, exercised the same way `Server::drain` calls it.
+    #[tokio::test]
+    async fn backend_drain_closes_every_session_via_the_trait_object() {
+        let (broker, _clock) = test_broker(Duration::from_secs(3600));
+        let backend: Arc<dyn SessionBackend> = broker.clone();
+        let id = backend.open(&SessionSpec::default()).unwrap();
+        assert_eq!(backend.list().len(), 1);
+
+        within(backend.drain(CloseReason::Closed)).await;
+
+        assert!(backend.list().is_empty());
+        assert!(matches!(backend.get(&id), Err(BrokerError::NotFound)));
     }
 
     #[tokio::test]

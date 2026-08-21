@@ -9,11 +9,17 @@ same session across connections instead of starting a new one. There is no
 relay and no account — QSH connects directly to a user-provided routable
 hostname or IP address.
 
-**Status:** pre-alpha. M1 (walking skeleton) is done: `qsh init` /
-`qsh serve` / `qsh trust add` / `qsh exec host --json -- cmd` work end to end
-over QUIC + TLS 1.3 mutual authentication with pinned certificates
-(PRD v0.4, CLI contract v0.4). Interactive PTY sessions and resume land in
-M2. Not for production use.
+**Status:** pre-alpha. M1 (walking skeleton) and M2 (session broker, PTY,
+migration and resume) are done: `qsh init` / `qsh serve` / `qsh trust add` /
+`qsh exec host --json -- cmd` and interactive PTY sessions (`qsh dave@host`,
+detach, `qsh attach <name>/<session-id>`, resume across a connection loss)
+all work end to end over QUIC + TLS 1.3 mutual authentication with pinned
+certificates (PRD v0.5, CLI contract v0.8). M3 (reverse connections) is in
+progress: `qsh listen`/`qsh reverse` register a NAT-hidden target with a
+controller today, but only registration — no reconnect-with-backoff loop yet
+(a dropped path ends the registration rather than retrying it) and no CLI
+command can open a session on a reverse-registered target yet (that needs
+the `localctl` multiplexer, still to come in M3). Not for production use.
 
 ## Quick start (M1: run a command on a pinned host)
 
@@ -47,12 +53,15 @@ line to `$XDG_STATE_HOME/qsh/audit.log`. Config lives in
 `$XDG_CONFIG_HOME/qsh` (`identity.toml`, `trust.toml`, `config.toml`);
 override both with `QSH_CONFIG_DIR` / `QSH_STATE_DIR`.
 
-## Usage (target UX — M2 and later)
+## Usage
 
 ```bash
-qsh dave@host              # interactive shell (M2)
-qsh -L 8080:localhost:80 dave@host   # local port forward (M4)
-qsh mcp                    # expose QSH as an MCP server (M6)
+qsh dave@host                        # interactive shell — works today (M2)
+qsh attach box/01K0SESSION           # reattach a detached session — works today (M2)
+qsh listen                           # reverse-mode controller — registers targets today (M3, no reconnect loop yet)
+qsh reverse box                      # reverse-mode target, dials `box` (M3, no reconnect loop yet)
+qsh -L 8080:localhost:80 dave@host   # local port forward — not yet (M4)
+qsh mcp                              # expose QSH as an MCP server — not yet (M6)
 ```
 
 ## Documents
@@ -90,8 +99,8 @@ The binary is named `qsh`; its crates.io package is `qsh-cli` (the name `qsh` wa
 |---|---|---|
 | M0 | Decisions, workspace scaffold, CI | Done |
 | M1 | Walking skeleton (`init`/`serve`/`exec --json`, mTLS, JSON envelope) | Done |
-| M2 | Session broker, PTY, migration and resume | Next |
-| M3 | Reverse connections (`listen`/`reverse`/`attach`) | Planned |
+| M2 | Session broker, PTY, migration and resume | Done |
+| M3 | Reverse connections (`listen`/`reverse`/`attach`) | In progress |
 | M4 | Port forwarding (`-L`/`-R`) | Planned |
 | M5 | ACL and audit | Planned |
 | M6 | MCP adapter | Planned |
@@ -104,24 +113,47 @@ Per-milestone scope, in/out boundaries and acceptance criteria live in
 
 ## Known limitations (MVP, by design)
 
-- Restarting the `qsh serve` listener terminates detached sessions. A
-  separate session supervisor is planned after MVP
-  ([ADR-0003](docs/adr/0003-sessions-in-listener.md)).
+- Restarting the `qsh serve`/`qsh reverse` listener terminates detached
+  sessions — a session lives only as long as the process that opened it. A
+  clean SIGTERM does drain gracefully now: no new `session.open`/
+  `session.attach`/`exec.run` is admitted from the signal forward, and every
+  live session runs its normal close procedure. This is best-effort, not an
+  unconditional guarantee: `session.closed` delivery to an attached consumer
+  is bounded by a short flush window rather than awaited outright, and the
+  whole drain gives up after a generous but finite timeout (logging a
+  warning) rather than hang the process forever on one wedged session — so
+  under a slow/congested consumer or a stuck child, a shell can still
+  outlive the process in the worst case. A restart is still the end of the
+  session, not a resume point. A separate session supervisor is planned
+  after MVP ([ADR-0003](docs/adr/0003-sessions-in-listener.md)).
 - Windows is P1 for the client and P2 for the host — not supported yet. PTY
   code is gated `#![cfg(unix)]`. CI does build, lint and run the portable
   test subset on `windows-latest` so the tree keeps compiling there, but
   POSIX-only behaviour (signal exits, process-group kill) is not exercised
   and nothing is promised for Windows.
 - Until the policy engine lands (M5), the host authorizes **every** pinned
-  peer for `exec.run` (allow-all-pinned). Peers that authenticate through a
-  trusted CA (`[[ca]]` in `trust.toml`) connect but get `PERMISSION_DENIED`;
-  anything else is refused at the TLS handshake. Pin only devices you would
-  give a shell to.
+  peer for **every** operation (allow-all-pinned) — not just `exec.run`:
+  a pinned peer can open/attach/write any session, and (M3) register as a
+  reverse target's controller (`host.reverse`) or dial in as one. There is
+  no per-peer scoping yet. Peers that authenticate through a trusted CA
+  (`[[ca]]` in `trust.toml`) connect but get `PERMISSION_DENIED`; anything
+  else is refused at the TLS handshake. Pin only devices you would give a
+  shell to.
+- `qsh trust remove` only stops **future** handshakes from succeeding —
+  it does not affect a connection that is already established. A peer you
+  just removed keeps whatever sessions/access it already has until its
+  connection drops and it has to re-handshake.
 - `exec.run` returns the whole output in one envelope, so it is capped at
   64 MiB of stdout+stderr (`RESOURCE_EXHAUSTED` beyond that). Streaming
-  output is a session feature (M2).
+  output is a session feature (available via `qsh session read`/`qsh
+  dave@host`, M2).
 - Host names are resolved through the trust store (`qsh trust add <name>
   --address …`) until the host directory arrives in M7.
+- `qsh listen`/`qsh reverse` (M3) register a target with a controller over
+  a live connection, but there is no reconnect loop yet — a dropped path
+  ends the registration rather than retrying it — and no CLI command can
+  actually open a session on a reverse-registered target yet (that needs
+  the `localctl` multiplexer, still to come in M3).
 
 ## Product boundary
 

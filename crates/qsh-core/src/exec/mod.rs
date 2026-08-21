@@ -6,6 +6,22 @@
 //! `ExecExit`; `ExecExit` is the last frame; the stream is then finished.
 //! The child is only spawned by [`run_exec`], which the server calls **after**
 //! the ACL check passed and the ticket was redeemed — never earlier.
+//!
+//! Environment hygiene below is **unix-only** (`docs/CLI.md`): the child does
+//! not inherit the `qsh serve` process environment at all — no `TERM`, no
+//! `LANG`/`LC_*`/`TZ` passthrough, unlike an interactive PTY session
+//! (`pty::posix::build_env`) — and `HOME`/`USER`/`LOGNAME`/`SHELL`/`PATH`
+//! are pinned from the password database, with the caller's `env` layered
+//! under them and unable to override them. "Mirrors `pty::posix`" below
+//! means exactly `pty::pinned_identity_env`, the narrow helper that
+//! computes those five pinned *values* — not `build_env`'s broader
+//! locale/`TERM` passthrough, which `exec.run` deliberately does not share:
+//! a scripted remote command gets a small, deterministic environment
+//! instead of whatever locale the `qsh serve` process happens to run under.
+//! Windows (P2, unsupported) has no password-database account to pin these
+//! to, so none of this applies there: the child inherits the full
+//! `qsh serve` process environment and the caller's `env` is layered on top
+//! unfiltered, `PATH` included — see [`run_exec`]'s `#[cfg(not(unix))]` arm.
 
 use std::process::Stdio;
 use std::time::Duration;
@@ -121,7 +137,6 @@ pub async fn run_exec(
 
     let mut cmd = Command::new(program);
     cmd.args(args)
-        .envs(spec.env.iter().map(|(k, v)| (k, v)))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -130,6 +145,55 @@ pub async fn run_exec(
     {
         // Own process group so a timeout kill reaches the whole tree.
         cmd.process_group(0);
+    }
+
+    // Environment hygiene (`docs/CLI.md`: `exec.run` does not implicitly
+    // inherit the `qsh serve` process environment, and `HOME`/`USER`/
+    // `LOGNAME`/`SHELL`/`PATH` are host-pinned on every path — the *values*
+    // mirror `pty::posix::pinned_identity_env`, not its `build_env`'s
+    // broader `TERM`/`LANG`/`LC_*` passthrough, which this path skips on
+    // purpose, module docs above). Windows has no password-database account
+    // to pin these to, so this is unix-only; `qsh serve`'s own env still
+    // reaches the child there (pre-existing, unchanged behavior for the
+    // sole non-PTY-host platform).
+    #[cfg(unix)]
+    {
+        let pinned = match crate::pty::pinned_identity_env() {
+            Ok(pinned) => pinned,
+            Err(err) => {
+                let msg = format!("qsh: cannot resolve host account: {err}\n");
+                send.send(&ExecFrame::stderr(msg.into_bytes())).await?;
+                send.send(&ExecFrame::exec_exit(126, None)).await?;
+                let _ = send.finish();
+                return Ok(ExecOutcome {
+                    exit_code: 126,
+                    signal: None,
+                    timed_out: false,
+                });
+            }
+        };
+        cmd.env_clear();
+        for (k, v) in &spec.env {
+            // Same entry-shape filter as `pty::posix::build_env`: an `=` in
+            // the key is not rejected by `Command::env` — it is emitted
+            // verbatim into envp as a second `PATH=`/`HOME=`/... entry,
+            // which a shell child resolves as an *override* of the pinned
+            // one below (later envp entry wins). Filtering by exact key
+            // name alone (`PINNED_ENV.contains`) does not catch that; the
+            // key has to be valid first.
+            if k.is_empty() || k.contains('=') || k.contains('\0') || v.contains('\0') {
+                continue; // not a valid environment entry; drop silently
+            }
+            if crate::pty::PINNED_ENV.contains(&k.as_str()) {
+                continue; // the caller cannot override a host-pinned key
+            }
+            cmd.env(k, v);
+        }
+        cmd.envs(pinned);
+    }
+    #[cfg(not(unix))]
+    {
+        cmd.envs(spec.env.iter().map(|(k, v)| (k, v)));
     }
 
     let mut child = match cmd.spawn() {

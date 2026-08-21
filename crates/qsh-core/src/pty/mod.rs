@@ -59,6 +59,12 @@ mod posix;
 #[cfg(unix)]
 pub use posix::{PtyFactory, PtySource, login_name};
 
+/// Host-pinned identity env, reused by `crate::exec` so `exec.run` pins
+/// `HOME`/`USER`/`LOGNAME`/`SHELL`/`PATH` the same way this PTY spawn path
+/// does (`docs/CLI.md`: pinned "어느 경로에서도").
+#[cfg(unix)]
+pub(crate) use posix::{PINNED_ENV, pinned_identity_env};
+
 /// L5 PTY end-to-end tests (`docs/design/testing.md`), unix only.
 #[cfg(all(test, unix))]
 mod tests;

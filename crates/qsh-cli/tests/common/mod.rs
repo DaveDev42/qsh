@@ -311,6 +311,56 @@ impl ServeGuard {
         self.child.id()
     }
 
+    /// Send `signal` to the child — unlike [`finish`](Self::finish), this
+    /// does not kill it, so a caller testing a *graceful* shutdown path
+    /// (SIGTERM drain, `docs/CLI.md` §6.12) can watch the child exit on its
+    /// own. Unix only: `nix` (this crate's `[target.'cfg(unix)']`
+    /// dependency) is not linked on Windows, exactly like
+    /// `session_kill9.rs`'s own signal use.
+    #[cfg(unix)]
+    pub fn signal(&self, signal: nix::sys::signal::Signal) {
+        let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(self.child.id() as i32), signal);
+    }
+
+    /// Wait up to `timeout` for the child to exit **on its own** — no kill.
+    /// `Some` once it has, `None` if `timeout` passed first. Complements
+    /// [`signal`](Self::signal): send SIGTERM, then bound how long the
+    /// drain it triggers is allowed to take.
+    pub fn wait_timeout(&mut self, timeout: Duration) -> Option<std::process::ExitStatus> {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if let Ok(Some(status)) = self.child.try_wait() {
+                return Some(status);
+            }
+            if std::time::Instant::now() >= deadline {
+                return None;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Everything the child wrote, once it is known to be gone (after
+    /// [`wait_timeout`](Self::wait_timeout) returned `Some`) — joins the
+    /// reader threads without touching the process itself, unlike
+    /// [`finish`](Self::finish).
+    pub fn captured(&mut self) -> ServeOutput {
+        for reader in self.readers.drain(..) {
+            let _ = reader.join();
+        }
+        ServeOutput {
+            stdout: self
+                .stdout
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
+            stderr: self
+                .stderr
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
+        }
+    }
+
     /// Stop the child and return everything it wrote. Idempotent.
     pub fn finish(&mut self) -> ServeOutput {
         let _ = self.child.kill();

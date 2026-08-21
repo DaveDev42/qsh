@@ -598,37 +598,32 @@ fn run_serve(ops: &Ops, bind: Option<&str>) -> i32 {
             eprintln!("qsh serve: shutting down");
             0
         }
-        Err(err) => {
-            if let Err(io_err) = human::print_error(&err) {
-                eprintln!("qsh {SERVE_MODE}: failed to write output: {io_err}");
-            }
-            EXIT_RUNTIME_FAILURE
-        }
+        Err(err) => report_long_running_setup_error(SERVE_MODE, &err),
     }
 }
 
 /// Whether `command` is one of the long-running modes whose setup failures
-/// must stay off stdout entirely (`docs/CLI.md` §2.4, §6.13), and if so,
-/// which mode name to report under. `None` for every ordinary operation
-/// (including `qsh serve`, which pre-dates this dispatch and is unchanged
-/// here), which keeps using [`report_error`]'s JSON-envelope path. A pure
-/// function so the routing decision itself is unit-testable without a real
-/// `Ops::from_env()` failure (which would need process-global environment
-/// mutation to provoke).
+/// must stay off stdout entirely (`docs/CLI.md` §2.2, §6.12, §6.13), and if
+/// so, which mode name to report under. `None` for every ordinary
+/// operation, which keeps using [`report_error`]'s JSON-envelope path. A
+/// pure function so the routing decision itself is unit-testable without a
+/// real `Ops::from_env()` failure (which would need process-global
+/// environment mutation to provoke).
 fn long_running_setup_mode(command: &Option<Command>) -> Option<&'static str> {
     match command {
+        Some(Command::Serve { .. }) => Some(SERVE_MODE),
         Some(Command::Listen { .. }) => Some(LISTEN_MODE),
         Some(Command::Reverse { .. }) => Some(REVERSE_MODE),
         _ => None,
     }
 }
 
-/// Report an [`OpError`] for `qsh listen`/`qsh reverse` — stderr only,
-/// never `report_error`'s JSON-envelope path, because these two
-/// long-running modes have no envelope at all and stdout must see zero
-/// bytes on every path (`docs/CLI.md` §2.4, §6.13). Shared by
-/// [`run_listen`]/[`run_reverse`]'s own runtime-failure arms and by
-/// [`run`]'s pre-dispatch `Ops::from_env()` failure, so the two paths
+/// Report an [`OpError`] for `qsh serve`/`qsh listen`/`qsh reverse` —
+/// stderr only, never `report_error`'s JSON-envelope path, because these
+/// three long-running modes have no envelope at all and stdout must see
+/// zero bytes on every path (`docs/CLI.md` §2.2, §6.12, §6.13). Shared by
+/// [`run_serve`]/[`run_listen`]/[`run_reverse`]'s own runtime-failure arms
+/// and by [`run`]'s pre-dispatch `Ops::from_env()` failure, so the paths
 /// cannot drift apart.
 fn report_long_running_setup_error(mode: &'static str, err: &OpError) -> i32 {
     if let Err(io_err) = human::print_error(err) {
@@ -1027,19 +1022,25 @@ mod tests {
         assert_eq!(parsed["host"], "widget");
     }
 
-    /// `docs/CLI.md` §2.4/§6.13: `qsh listen`/`qsh reverse` write zero
-    /// bytes to stdout on every path, envelope included — even a setup
-    /// failure this early (`Ops::from_env()`, before `run_listen`/
-    /// `run_reverse` exist to apply their own stderr-only error path).
-    /// `run`'s dispatch on an `Ops::from_env()` failure must therefore
-    /// route these two to [`report_long_running_setup_error`] (stderr
-    /// only) rather than [`report_error`] (which prints a `qsh.cli/v1`
-    /// envelope to stdout whenever `--json`/`--jsonl` was passed —
-    /// adversarial review finding). This pins the routing decision itself;
-    /// `report_long_running_setup_error`'s own body is `human::print_error`
-    /// verbatim, already proven stderr-only.
+    /// `docs/CLI.md` §2.2/§6.12/§6.13: `qsh serve`/`qsh listen`/`qsh
+    /// reverse` write zero bytes to stdout on every path, envelope
+    /// included — even a setup failure this early (`Ops::from_env()`,
+    /// before `run_serve`/`run_listen`/`run_reverse` exist to apply their
+    /// own stderr-only error path). `run`'s dispatch on an
+    /// `Ops::from_env()` failure must therefore route all three to
+    /// [`report_long_running_setup_error`] (stderr only) rather than
+    /// [`report_error`] (which prints a `qsh.cli/v1` envelope to stdout
+    /// whenever `--json`/`--jsonl` was passed — `qsh serve` did exactly
+    /// this until the PLAN.md Step 3.5 audit follow-up caught it). This
+    /// pins the routing decision itself; `report_long_running_setup_error`'s
+    /// own body is `human::print_error` verbatim, already proven
+    /// stderr-only.
     #[test]
-    fn ops_from_env_failure_routes_listen_and_reverse_off_the_envelope_path() {
+    fn ops_from_env_failure_routes_serve_listen_and_reverse_off_the_envelope_path() {
+        assert_eq!(
+            long_running_setup_mode(&Some(Command::Serve { bind: None })),
+            Some(SERVE_MODE)
+        );
         assert_eq!(
             long_running_setup_mode(&Some(Command::Listen { bind: None })),
             Some(LISTEN_MODE)
@@ -1051,12 +1052,8 @@ mod tests {
             })),
             Some(REVERSE_MODE)
         );
-        // Every ordinary operation (and `qsh serve`, unchanged here) keeps
-        // using `report_error`'s envelope path.
-        assert_eq!(
-            long_running_setup_mode(&Some(Command::Serve { bind: None })),
-            None
-        );
+        // Every ordinary operation keeps using `report_error`'s envelope
+        // path.
         assert_eq!(long_running_setup_mode(&Some(Command::Version)), None);
         assert_eq!(long_running_setup_mode(&None), None);
     }

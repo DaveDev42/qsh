@@ -194,3 +194,30 @@ fn serve_writes_nothing_to_stdout_even_at_high_verbosity() {
         output.stderr
     );
 }
+
+/// The failure twin of the test above: `qsh --json serve` against a sandbox
+/// with no identity yet fails in setup, *before* `run_serve` ever builds a
+/// runtime or binds a listener (`ops.load_identity()?` is the first
+/// fallible call). This is the path that used to print a `qsh.cli/v1`
+/// envelope to stdout (`report_long_running_setup_error`'s own module docs)
+/// — `--json` must not change that: these three long-running modes have no
+/// envelope at all, so a setup failure is stderr-only just like the success
+/// path above, with `qsh serve`'s own diagnostic line, not JSON.
+#[test]
+fn serve_json_setup_failure_writes_nothing_to_stdout() {
+    let host = Sandbox::new(); // deliberately uninitialized: no identity
+    let output = host.qsh(&["--json", "serve"]);
+
+    assert!(
+        output.stdout.is_empty(),
+        "qsh --json serve wrote to stdout on a setup failure: {:?}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert_eq!(exit_code(&output), 255, "stderr: {:#?}", output.stderr);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("no device identity"), "stderr: {stderr:?}");
+    assert!(
+        serde_json::from_str::<Value>(stderr.trim()).is_err(),
+        "the stderr diagnostic must be a human line, not a JSON envelope: {stderr:?}"
+    );
+}

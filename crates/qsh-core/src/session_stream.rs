@@ -57,6 +57,20 @@ pub const SESSION_STREAM_PULL_BYTES: usize = 4 * wire::SESSION_CHUNK_MAX;
 /// immediately on an append.
 pub const SESSION_STREAM_PULL_WAIT: Duration = Duration::from_secs(30);
 
+/// How long [`output_pump`] waits for `Closed` after `Exit`, once, before
+/// giving up. An explicit `session.close`/SIGTERM drain on a still-running
+/// session appends both as one actor operation (`begin_close`/
+/// `mark_closed`) and they almost always land in the very next `pull()`
+/// batch together — this covers the rare case they do not. A **child that
+/// exits on its own** is different: no caller closed it, so `Closed` only
+/// ever comes from the TTL reaper, which will not run at all while this
+/// pump's attach token is held (`Broker::ttl_reap_reason`) — waiting
+/// indefinitely there would hold the token, and the reaper, hostage
+/// forever. `docs/CLI.md` §6.4 agrees for the sibling `--follow` consumer
+/// of the same ring: it ends the moment it sees `session.exit` and does not
+/// wait for the reaper's later `session.closed{reason:"exit"}` either.
+const EXIT_CLOSED_GRACE: Duration = Duration::from_secs(2);
+
 /// Depth of the queue between the two pumps and the single frame writer.
 pub const SESSION_STREAM_QUEUE: usize = 64;
 
@@ -235,14 +249,20 @@ async fn output_pump(
     frames: mpsc::Sender<SessionFrame>,
     events: Option<mpsc::Sender<ControlMessage>>,
 ) -> Result<(), SessionStreamError> {
+    // Set once `Exit` has been seen with no `Closed` in the same batch —
+    // gives exactly one more, short-waited pull a chance to catch a
+    // `Closed` that landed a moment later, then gives up regardless
+    // ([`EXIT_CLOSED_GRACE`]'s docs: the ordinary self-exit case has no
+    // `Closed` coming at all while this pump holds the attach token).
+    let mut exit_grace_used = false;
     loop {
+        let wait = if exit_grace_used {
+            EXIT_CLOSED_GRACE
+        } else {
+            SESSION_STREAM_PULL_WAIT
+        };
         let out = match sessions
-            .pull(
-                &id,
-                cursor,
-                SESSION_STREAM_PULL_BYTES,
-                SESSION_STREAM_PULL_WAIT,
-            )
+            .pull(&id, cursor, SESSION_STREAM_PULL_BYTES, wait)
             .await
         {
             Ok(out) => out,
@@ -252,6 +272,7 @@ async fn output_pump(
             Err(err) => return Err(err.into()),
         };
         cursor = out.next;
+        let mut exited_this_batch = false;
         for event in out.events {
             match event {
                 ReplayEvent::Output { sequence, data } => {
@@ -284,7 +305,25 @@ async fn output_pump(
                                 SessionFrame::exit(sequence, exit_code.unwrap_or(-1), signal),
                             )
                             .await?;
-                            return Ok(());
+                            // Not terminal on its own: an explicit
+                            // `session.close` (or the SIGTERM drain) on a
+                            // still-*running* session appends `Exit` then
+                            // `Closed` as one actor operation
+                            // (`broker::session`'s `begin_close`/
+                            // `mark_closed`) — almost always landing in this
+                            // very `pull()` batch together. Returning here
+                            // would silently drop the `Closed` `notify` a
+                            // couple of loop iterations away, leaving an
+                            // attached consumer never told the session is
+                            // gone (an L5 real-process test, not this
+                            // module's own unit tests, is what caught it —
+                            // see `serve_sigterm_drain.rs`). `EXIT_CLOSED_GRACE`
+                            // below covers that, bounded — a child that
+                            // exited on its own with nobody having called
+                            // `session.close` has no `Closed` coming while
+                            // this pump holds the attach token, so waiting
+                            // past the grace is a self-deadlock, not a fix.
+                            exited_this_batch = true;
                         }
                         // Always the last ring entry; nothing follows it.
                         ControlEvent::Closed { .. } => return Ok(()),
@@ -294,6 +333,15 @@ async fn output_pump(
                     }
                 }
             }
+        }
+        if exited_this_batch {
+            exit_grace_used = true;
+        } else if exit_grace_used {
+            // The grace pull came back with no `Closed` (and no fresh
+            // `Exit`, which cannot recur): nobody is going to close this
+            // session while we keep waiting. Give up rather than hold the
+            // attach token — and the TTL reaper it blocks — forever.
+            return Ok(());
         }
     }
 }
