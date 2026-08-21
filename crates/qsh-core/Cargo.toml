@@ -8,6 +8,11 @@ license.workspace = true
 [dependencies]
 qsh-proto.workspace = true
 qsh-transport.workspace = true
+# `prost::Message` is named directly by `localctl/frame.rs`'s generic
+# conduit send/recv (`docs/design/protocol.md` §5, §11-3) — a lightweight,
+# sans-IO leaf dependency `qsh-proto` already carries; naming it here does
+# not cross the workspace-crate dependency matrix `xtask arch` enforces.
+prost.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true

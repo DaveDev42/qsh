@@ -23,6 +23,13 @@
 //! drain [`crate::handshake::respond`] already applies
 //! (`crate::handshake::REJECTION_DRAIN_TIMEOUT`) before the caller closes
 //! the connection — nothing here re-implements that ordering.
+//!
+//! [`run_listen_unix`] also binds this process's `localctl` UDS admin
+//! socket (`crate::localctl::daemon`, `PLAN.md` M3 Step 5 (a)) alongside
+//! the QUIC listener and runs its accept loop for as long as
+//! [`Listen::run`]'s does, unlinking the socket immediately after — on a
+//! clean shutdown and on the QUIC listener dying on its own alike, so the
+//! socket file never outlives this process.
 
 use std::collections::HashMap;
 use std::net::{SocketAddr, ToSocketAddrs};
@@ -50,6 +57,8 @@ use crate::client::pathwatch::{PathWatch, PathWatchConfig, watch_path};
 use crate::client::{ControlIn, Session};
 use crate::config::{Config, Paths};
 use crate::identity::LoadedIdentity;
+#[cfg(unix)]
+use crate::localctl::daemon::{LocalctlDaemon, LocalctlListener};
 use crate::ops::OpError;
 #[cfg(unix)]
 use crate::trust::SharedTrustStore;
@@ -150,14 +159,37 @@ async fn run_listen_unix(
     // combination must fail closed at startup, not surface later as a
     // half-initialized controller.
     let stale_retention = config.stale_retention()?;
-    let trust = SharedTrustStore::open(paths.trust_file())?;
+
+    // localctl (`PLAN.md` M3 Step 5 (a)): bind this process's UDS admin
+    // socket before the QUIC listener, so a runtime directory whose
+    // permissions this process cannot pin to 0700 fails the whole startup
+    // closed rather than leaving a QUIC listener half-serving with no
+    // local control surface behind it.
+    let pid = std::process::id();
+    let localctl_bound = LocalctlListener::bind(paths, pid)?;
+    let localctl_socket_path = localctl_bound.socket_path.clone();
+
+    // From here on, every fallible step must unlink `localctl_socket_path`
+    // before returning its error — the socket already exists on disk once
+    // `LocalctlListener::bind` above succeeded, and nothing past this point
+    // has taken ownership of cleaning it up the way the accept-loop tail
+    // below does. Without this, a `qsh listen` that fails to come up at all
+    // (bad trust store, port already in use, …) would leave a `<pid>.sock`
+    // behind that nothing will ever unlink — `PLAN.md` M3 Step 5 (a)'s "the
+    // socket must not outlive the process" on every exit path, not only the
+    // clean-shutdown one the accept loop's own tail covers.
+    let trust = SharedTrustStore::open(paths.trust_file()).inspect_err(|_| {
+        let _ = std::fs::remove_file(&localctl_socket_path);
+    })?;
     let listener = Listener::bind(bind, identity.local, trust).map_err(|err| {
+        let _ = std::fs::remove_file(&localctl_socket_path);
         OpError::new(
             ErrorCode::ConfigError,
             format!("cannot listen on {bind}: {err}"),
         )
     })?;
     let actual = listener.local_addr().map_err(|err| {
+        let _ = std::fs::remove_file(&localctl_socket_path);
         OpError::new(
             ErrorCode::Internal,
             format!("cannot read bound address: {err}"),
@@ -181,9 +213,35 @@ async fn run_listen_unix(
         device_id = %identity.identity.device_id,
         fingerprint = %identity.identity.fingerprint,
         %actual,
+        socket = %localctl_socket_path.display(),
         "qsh listen listening"
     );
+
+    // The localctl daemon reads only through `Listen::registry` — never
+    // `Listen`'s live connection table — so it shares no lock with the
+    // Step 4 probe driver/sweeper, which only ever touch `conns`
+    // (`reverse/listen.rs` module docs: the two are separate locks, never
+    // held together by any caller). Its accept loop's lifetime is tied to
+    // the QUIC accept loop's below, not to a second, independent read of
+    // `shutdown`: whichever way `listen.run` below ends — a clean
+    // shutdown, or the QUIC endpoint dying on its own — the localctl loop
+    // is told to stop and the socket is unlinked immediately after, so it
+    // can never outlive this process on any exit path, including SIGTERM
+    // (`run_listen`'s caller drives `shutdown` from `shutdown_signal()`).
+    let (localctl_shutdown_tx, localctl_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let localctl_daemon = LocalctlDaemon::new(listen.clone());
+    let localctl_task = tokio::spawn(localctl_daemon.run(localctl_bound, async move {
+        let _ = localctl_shutdown_rx.await;
+    }));
+
     listen.run(listener, shutdown).await;
+
+    let _ = localctl_shutdown_tx.send(());
+    if let Err(join_err) = localctl_task.await {
+        tracing::warn!(%join_err, "localctl daemon task panicked");
+    }
+    let _ = std::fs::remove_file(&localctl_socket_path);
+
     Ok(())
 }
 
@@ -1215,6 +1273,120 @@ mod tests {
             .await
             .expect("sweeper must stop once the last Arc<Listen> drops")
             .unwrap();
+    }
+
+    /// `PLAN.md` M3 Step 5 (a): the localctl socket this process bound must
+    /// not outlive it. Drives the real `run_listen`/`run_listen_unix` end
+    /// to end — a genuine on-disk identity via `identity::init`/
+    /// `identity::load` (`File` key-store mode, so nothing touches an OS
+    /// credential store) — rather than constructing `Listen` directly the
+    /// way `qsh_testkit::reverse::ReverseHarness` does, because this test
+    /// is specifically about `run_listen_unix`'s own composition of the
+    /// localctl accept loop with the QUIC one's drain, which `ReverseHarness`
+    /// does not build at all (it calls `Listen::new`/`Listen::run` straight,
+    /// never `run_listen`/`LocalctlListener`).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_listen_unix_unlinks_its_localctl_socket_on_shutdown() {
+        let dir = tempfile::tempdir().unwrap();
+        // `.with_runtime_dir` pins the localctl socket inside this test's
+        // own tempdir, independent of `$XDG_RUNTIME_DIR` — otherwise this
+        // and the sibling test below both bind at
+        // `$XDG_RUNTIME_DIR/qsh/<this-process's-pid>.sock` (both tests
+        // share one process pid under plain `cargo test`), racing each
+        // other's bind/unlink and leaking into the real runtime directory
+        // (adversarial review finding).
+        let paths = Paths::new(dir.path().join("config"), dir.path().join("state"))
+            .with_runtime_dir(dir.path().join("run"));
+        crate::identity::init(&paths, qsh_proto::KeyStoreMode::File).expect("identity::init");
+        let identity = crate::identity::load(&paths)
+            .expect("identity::load")
+            .expect("identity was just created");
+
+        let socket_path = paths.localctl_socket(std::process::id());
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let (bound_tx, bound_rx) = tokio::sync::oneshot::channel::<()>();
+        let run_paths = paths.clone();
+        let task = tokio::spawn(async move {
+            run_listen(
+                &run_paths,
+                &Config::default(),
+                identity,
+                Some("127.0.0.1:0"),
+                move |_addr| {
+                    let _ = bound_tx.send(());
+                },
+                async move {
+                    let _ = shutdown_rx.await;
+                },
+            )
+            .await
+        });
+
+        bound_rx.await.expect("qsh listen bound");
+        assert!(
+            socket_path.exists(),
+            "localctl socket must exist once the daemon is up"
+        );
+
+        let _ = shutdown_tx.send(());
+        task.await
+            .expect("run_listen task did not panic")
+            .expect("run_listen exits cleanly on shutdown");
+
+        assert!(
+            !socket_path.exists(),
+            "localctl socket must be unlinked once shutdown has drained"
+        );
+    }
+
+    /// `PLAN.md` M3 Step 5 (a): "unlinks the socket on every exit path", not
+    /// only the clean-shutdown one the previous test covers. Corrupts
+    /// `trust.toml` so `SharedTrustStore::open` — the first fallible step
+    /// *after* `LocalctlListener::bind` already created the socket file —
+    /// fails startup outright; the socket must still not be left behind.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_listen_unix_unlinks_its_localctl_socket_when_startup_fails_after_binding_it() {
+        let dir = tempfile::tempdir().unwrap();
+        // See the sibling test above for why `.with_runtime_dir` is
+        // required here rather than optional.
+        let paths = Paths::new(dir.path().join("config"), dir.path().join("state"))
+            .with_runtime_dir(dir.path().join("run"));
+        crate::identity::init(&paths, qsh_proto::KeyStoreMode::File).expect("identity::init");
+        let identity = crate::identity::load(&paths)
+            .expect("identity::load")
+            .expect("identity was just created");
+
+        // Written after `identity::init` (which creates `config_dir`) so
+        // this lands exactly where `Paths::trust_file` looks — malformed
+        // TOML, not a missing file, since a missing trust file is a normal
+        // empty store (`TrustStore::load`), not a startup failure.
+        std::fs::write(paths.trust_file(), b"this is not valid toml [[[").unwrap();
+
+        let socket_path = paths.localctl_socket(std::process::id());
+        assert!(
+            !socket_path.exists(),
+            "nothing has bound this pid's socket yet"
+        );
+
+        let err = run_listen(
+            &paths,
+            &Config::default(),
+            identity,
+            Some("127.0.0.1:0"),
+            |_addr| panic!("must fail before the QUIC listener ever reports bound"),
+            std::future::pending::<()>(),
+        )
+        .await
+        .expect_err("a corrupt trust store must fail startup");
+        assert_eq!(err.code, ErrorCode::ConfigError);
+
+        assert!(
+            !socket_path.exists(),
+            "the localctl socket bound before the failing step must not survive it"
+        );
     }
 
     /// `docs/CLI.md` §6.13's Windows gate, mechanically: `run_listen`

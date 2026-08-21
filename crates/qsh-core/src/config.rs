@@ -35,6 +35,24 @@ pub struct Paths {
     pub config_dir: PathBuf,
     /// `~/.local/state/qsh` by default: audit log and other mutable state.
     pub state_dir: PathBuf,
+    /// Test/embedding-only override for [`Paths::runtime_dir`], bypassing
+    /// the `$XDG_RUNTIME_DIR` environment lookup entirely. `None` (the
+    /// default from every constructor) means "resolve from the process
+    /// environment as documented".
+    ///
+    /// Exists because `runtime_dir()` reads `$XDG_RUNTIME_DIR` from the
+    /// *process* environment (unlike `config_dir`/`state_dir`, which are
+    /// resolved once by the caller and stored), so a `Paths` built from a
+    /// tempdir does **not**, on its own, keep localctl sockets inside that
+    /// tempdir on a machine where `$XDG_RUNTIME_DIR` happens to be set
+    /// (any Linux desktop/SSH session under systemd-logind, WSL2+systemd,
+    /// most CI images) — every `localctl`/`reverse::listen` unit test binds
+    /// a real socket at `paths.localctl_socket(pid)` and must not do that
+    /// outside its own tempdir (adversarial review finding: without this,
+    /// those tests raced and unlinked sockets in the ambient runtime
+    /// directory, including a real resident `qsh listen`'s). Set with
+    /// [`Paths::with_runtime_dir`].
+    runtime_dir_override: Option<PathBuf>,
 }
 
 impl Paths {
@@ -43,7 +61,19 @@ impl Paths {
         Self {
             config_dir: config_dir.into(),
             state_dir: state_dir.into(),
+            runtime_dir_override: None,
         }
+    }
+
+    /// Pin [`Paths::runtime_dir`] to `dir`, independent of
+    /// `$XDG_RUNTIME_DIR` and the `state_dir/run` fallback. For tests (and
+    /// any other embedding) that need a deterministic, sandboxed location
+    /// for localctl sockets regardless of what the host process's
+    /// environment happens to export — see [`Paths::runtime_dir_override`]'s
+    /// doc for why this is necessary rather than merely convenient.
+    pub fn with_runtime_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.runtime_dir_override = Some(dir.into());
+        self
     }
 
     /// Resolve from the environment:
@@ -80,6 +110,7 @@ impl Paths {
         Ok(Self {
             config_dir,
             state_dir,
+            runtime_dir_override: None,
         })
     }
 
@@ -126,6 +157,48 @@ impl Paths {
     /// [`Paths::resume_file`] (ADR-0007 "원자성·durability·동시성").
     pub fn resume_lock_file(&self) -> PathBuf {
         self.state_dir.join("resume.json.lock")
+    }
+
+    /// Runtime directory for this machine's localctl UDS sockets:
+    /// `$XDG_RUNTIME_DIR/qsh` when that variable is set (and non-empty),
+    /// else `<state_dir>/run` (`docs/design/architecture.md` §7).
+    ///
+    /// This is a **two-tier** rule, unlike `config_dir`/`state_dir`'s
+    /// three-tier one ([`Paths::from_env`]) — the documented contract has
+    /// no `$QSH_RUNTIME_DIR` override, only the XDG variable and the
+    /// state-dir fallback, so this method does not invent one.
+    ///
+    /// The daemon (`qsh listen`) is responsible for creating this
+    /// directory with mode 0700 ([`ensure_private_dir`]) before binding a
+    /// socket in it and for unlinking its socket on exit; this method only
+    /// computes the path, so both the daemon and a discovering CLI process
+    /// agree on where to look whether or not the directory exists yet — a
+    /// missing runtime directory just means no `qsh listen` has ever run
+    /// here (`localctl::client::candidate_sockets`, `#[cfg(unix)]`-only,
+    /// treats it the same way).
+    pub fn runtime_dir(&self) -> PathBuf {
+        if let Some(dir) = &self.runtime_dir_override {
+            return dir.clone();
+        }
+        self.runtime_dir_from(|key| std::env::var_os(key).map(PathBuf::from))
+    }
+
+    /// The env-independent core of [`Paths::runtime_dir`], so the
+    /// precedence rule can be tested without mutating process-global state
+    /// (same technique as [`Paths::from_lookup`]).
+    fn runtime_dir_from(&self, get: impl Fn(&str) -> Option<PathBuf>) -> PathBuf {
+        get("XDG_RUNTIME_DIR")
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(|dir| dir.join("qsh"))
+            .unwrap_or_else(|| self.state_dir.join("run"))
+    }
+
+    /// `<runtime_dir>/<pid>.sock` — the localctl UDS path a `qsh listen`
+    /// daemon with this pid binds, and a CLI process connects to
+    /// (`docs/design/architecture.md` §7, `docs/design/protocol.md`
+    /// §11-3).
+    pub fn localctl_socket(&self, pid: u32) -> PathBuf {
+        self.runtime_dir().join(format!("{pid}.sock"))
     }
 }
 
@@ -635,6 +708,59 @@ mod tests {
         assert_eq!(paths.trust_file(), PathBuf::from("/c/trust.toml"));
         assert_eq!(paths.identity_dir(), PathBuf::from("/c/identity"));
         assert_eq!(paths.audit_log(), PathBuf::from("/s/audit.log"));
+    }
+
+    #[test]
+    fn runtime_dir_prefers_xdg_runtime_dir_over_the_state_dir_fallback() {
+        // architecture.md §7: `$XDG_RUNTIME_DIR/qsh` — no `$QSH_RUNTIME_DIR`
+        // override exists in the documented contract (unlike config/state).
+        let paths = Paths::new("/c", "/s");
+        let dir = paths.runtime_dir_from(lookup(&[("XDG_RUNTIME_DIR", "/run/user/1000")]));
+        assert_eq!(dir, PathBuf::from("/run/user/1000/qsh"));
+    }
+
+    #[test]
+    fn runtime_dir_falls_back_to_state_dir_run_when_xdg_runtime_dir_is_unset_or_empty() {
+        let paths = Paths::new("/c", "/s");
+        assert_eq!(paths.runtime_dir_from(lookup(&[])), PathBuf::from("/s/run"));
+        // An explicitly empty value is treated the same as unset (same
+        // discipline `Paths::from_lookup`'s `resolve` closure applies).
+        assert_eq!(
+            paths.runtime_dir_from(lookup(&[("XDG_RUNTIME_DIR", "")])),
+            PathBuf::from("/s/run")
+        );
+    }
+
+    #[test]
+    fn localctl_socket_is_pid_dot_sock_under_the_runtime_dir() {
+        // Deliberately does not exercise the env-reading `runtime_dir()`
+        // (adversarial review finding: doing so made this test's outcome
+        // depend on whatever `$XDG_RUNTIME_DIR` the process happened to
+        // inherit — reproducibly failing under `cargo nextest
+        // run --workspace` on any Linux/WSL2 systemd-logind session). Pin
+        // the join logic through the deterministic override instead —
+        // `runtime_dir_prefers_xdg_runtime_dir_over_the_state_dir_fallback`
+        // and `runtime_dir_falls_back_to_state_dir_run_when_xdg_runtime_dir_is_unset_or_empty`
+        // already cover the env-precedence rule via the pure
+        // `runtime_dir_from` function.
+        let paths = Paths::new("/c", "/s").with_runtime_dir("/s/run");
+        assert_eq!(
+            paths.localctl_socket(4242),
+            PathBuf::from("/s/run/4242.sock")
+        );
+    }
+
+    #[test]
+    fn with_runtime_dir_overrides_both_env_and_the_state_dir_fallback() {
+        // The override must win even when `$XDG_RUNTIME_DIR` is also
+        // present in the lookup closure — it is a stronger, test-only
+        // pin, not merely another fallback tier.
+        let paths = Paths::new("/c", "/s").with_runtime_dir("/tmp/sandboxed/run");
+        assert_eq!(paths.runtime_dir(), PathBuf::from("/tmp/sandboxed/run"));
+        assert_eq!(
+            paths.localctl_socket(4242),
+            PathBuf::from("/tmp/sandboxed/run/4242.sock")
+        );
     }
 
     #[test]
