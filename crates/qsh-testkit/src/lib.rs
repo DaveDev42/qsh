@@ -9,12 +9,22 @@
 //!   ordinary PR regression tests instead of a manual campaign.
 //! - [`fixtures`]: golden-fixture loader for `crates/qsh-cli/tests/fixtures`
 //!   (L6).
+//! - [`reverse`]: in-process reverse-mode harness (L3) — a `qsh listen`
+//!   controller plus the raw dial primitives to play a `qsh reverse`
+//!   target's wire role, and [`reverse::ReversePairHarness`], the
+//!   role-swapped counterpart of [`loopback::LoopbackHarness`] used to
+//!   prove role-axis independence (`PLAN.md` M3 Step 3, PR 3b).
+//! - [`pair`]: [`pair::HostedPair`], the trait that lets one scenario body
+//!   run unmodified against both harnesses above.
 //!
 //! This crate may depend on any workspace crate.
 
 pub mod chaos;
 pub mod fixtures;
 pub mod loopback;
+pub mod pair;
+pub mod reverse;
 
 pub use chaos::{ChaosPolicy, ChaosProxy, ChaosStats, DelayDist};
 pub use loopback::{LoopbackHarness, TestIdentity, make_identity};
+pub use pair::HostedPair;

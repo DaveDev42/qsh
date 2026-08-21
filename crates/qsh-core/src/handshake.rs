@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use qsh_proto::ErrorCode;
 use qsh_proto::wire::{self, ControlMessage, Hello, control_message, response};
-use qsh_transport::{Connection, FramedStream, StreamError};
+use qsh_transport::{Connection, FramedSend, FramedStream, StreamError};
 use thiserror::Error;
 
 /// How long a peer has to complete its half of the `Hello` exchange:
@@ -33,6 +33,19 @@ use thiserror::Error;
 /// value; `docs/design/protocol.md` does not itself specify this timeout,
 /// so no section is cited here).
 pub const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Bound on the wait, after writing a rejection error frame, for the peer to
+/// actually receive it before [`respond`] returns and its caller tears the
+/// connection down (`PLAN.md` M3 Step 3, "거부 error frame의 전달 보장").
+///
+/// `serve_connection`-style callers used to call `conn.close()` immediately
+/// after `respond()` returned `Err`, which could beat the just-written frame
+/// off the wire — a peer would see `ApplicationClosed` instead of
+/// `UNSUPPORTED`/`INVALID_ARGUMENT`/`PERMISSION_DENIED` (a pre-existing race
+/// a raw-QUIC probe proved in Step 2's review, not introduced by it). Short
+/// and finite: a hostile peer that never acks the frame must not be able to
+/// hold a responder open indefinitely by simply not reading.
+pub const REJECTION_DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Errors from the shared `Hello` exchange. Neither [`initiate`] nor
 /// [`respond`] surfaces this type to callers directly for logs/JSON —
@@ -246,8 +259,32 @@ where
         .map_err(|_| HelloError::Timeout)??;
     let mut ctl = FramedStream::control(send, recv);
     ctl.send.set_priority(wire::PRIORITY_CONTROL);
-    let peer_hello = respond_on(&mut ctl, make_local_hello).await?;
-    Ok((ctl, peer_hello))
+    match respond_on(&mut ctl, make_local_hello).await {
+        Ok(peer_hello) => Ok((ctl, peer_hello)),
+        // Both of these arms already wrote an error frame inside
+        // `respond_on` — give it a bounded chance to actually reach the
+        // peer before this returns and the caller (rightly) tears the
+        // connection down. Every other `Err` arm (`Timeout`,
+        // `ClosedBeforeHello`, `ExpectedHello`) never wrote a byte, so
+        // there is nothing to drain.
+        Err(err @ (HelloError::VersionMismatch | HelloError::Rejected(_))) => {
+            drain_rejection(&mut ctl.send).await;
+            Err(err)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+/// See [`REJECTION_DRAIN_TIMEOUT`]. `finish()` signals FIN on the error
+/// frame we just wrote; `stopped()` resolves once the peer has acknowledged
+/// every byte (or reset the stream) — either outcome means the frame
+/// actually reached the peer's QUIC stack, not just our own send buffer.
+/// Best-effort: any outcome (ok, already-closed, or timeout) just falls
+/// through to the caller's own `conn.close()`.
+async fn drain_rejection(send: &mut FramedSend) {
+    if send.finish().is_ok() {
+        let _ = tokio::time::timeout(REJECTION_DRAIN_TIMEOUT, send.stopped()).await;
+    }
 }
 
 #[cfg(test)]

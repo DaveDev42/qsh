@@ -84,6 +84,18 @@ impl FramedSend {
     pub fn set_priority(&self, priority: i32) {
         let _ = self.send.set_priority(priority);
     }
+
+    /// Wait for the peer to acknowledge every byte written so far, or to
+    /// stop the stream — whichever comes first. Used after
+    /// [`finish`](Self::finish) to give a just-written frame (typically a
+    /// rejection error frame) a real chance to reach the peer before the
+    /// caller tears down the connection (`docs/design/protocol.md` §11-2's
+    /// delivery guarantee, `PLAN.md` M3 Step 3). This method itself waits as
+    /// long as quinn does — callers bound it with their own timeout so a
+    /// peer that never acks can never wedge them here.
+    pub async fn stopped(&self) {
+        let _ = self.send.stopped().await;
+    }
 }
 
 /// Receiving half of a framed stream.

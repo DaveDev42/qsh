@@ -1,0 +1,685 @@
+//! In-process reverse-mode harness (`docs/design/testing.md` L3, `PLAN.md`
+//! Step 3, PR 3b): a `qsh listen` controller plus the raw dial primitives a
+//! test needs to play the `qsh reverse` target's wire role.
+//!
+//! [`ReverseHarness`] builds the controller the same way
+//! [`qsh_core::reverse::listen::run_listen`] does — bind, trust, registry,
+//! [`Listen::new`] — except it keeps the `Arc<Listen>` handle `run_listen`
+//! itself never returns (it blocks forever inside its own accept loop). A
+//! test needs that handle: `Listen::registry`/`Listen::live_connections`
+//! are how `reverse/listen.rs`'s own module docs say a test should observe
+//! registration state, instead of scraping stderr. This mirrors
+//! [`crate::loopback::LoopbackHarness`], which for the identical reason
+//! builds `Server::new(..)` directly rather than calling `serve::run_serve`.
+//!
+//! Two ways to play the target side of a connection:
+//!
+//! - [`ReverseHarness::initiate`]/[`ReverseHarness::register`] — dial +
+//!   [`qsh_core::handshake::initiate`] with a caller-built `Hello`, handing
+//!   back the raw [`Connection`]/[`FramedStream`] so a test can read the
+//!   *actual* reply frame (never just an `Err`) and keep driving the
+//!   connection afterward. Every negative/deny/conflict-path assertion in
+//!   `reverse_loopback.rs` is built on this — it is what proves a rejection
+//!   arrived as a real error frame the peer received, not a bare connection
+//!   close (`PLAN.md` M3 Step 3, "거부 error frame의 전달 보장"). It is also
+//!   the only way to exercise the "controller role discipline" scenarios:
+//!   nothing in Step 3's product code ever makes a real `qsh reverse`
+//!   process send a request *to* its controller (that is wire-legal per
+//!   `docs/design/protocol.md` §11 header but has no producer yet), so a
+//!   test has to hold the pen itself.
+//! - [`ReverseHarness::run_target`] — the real
+//!   [`qsh_core::reverse::target::run_reverse`], for scenarios that want
+//!   the genuine CLI-facing entry point end to end (real on-disk
+//!   `trust.toml`, real `host_runtime`).
+
+use std::future::Future;
+use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use qsh_core::acl::{AllowAllPinned, Authorizer};
+use qsh_core::audit::{AuditRecord, MemoryAuditSink};
+use qsh_core::broker::{Broker, BrokerConfig, PeerFingerprint, PipeFactory, SystemClock};
+use qsh_core::client::Session;
+use qsh_core::config::{Config, Paths};
+use qsh_core::handshake::{self, HelloError};
+use qsh_core::identity::{Identity, LoadedIdentity};
+use qsh_core::ops::OpError;
+pub use qsh_core::reverse::listen::Listen;
+use qsh_core::reverse::registry::Registry;
+pub use qsh_core::reverse::registry::{EntryState, ReverseEntry};
+use qsh_core::reverse::target::run_reverse;
+use qsh_core::server::{ConnCtx, Server};
+use qsh_core::trust::TrustStore;
+use qsh_proto::KeyStoreKind;
+use qsh_proto::wire::{self, Hello};
+use qsh_transport::{
+    Connection, DialError, Dialed, Dialer, FramedStream, Listener, Principal, StaticTrust,
+};
+use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
+
+use crate::loopback::{TestIdentity, make_identity};
+use crate::pair::HostedPair;
+
+/// A `qsh listen` controller bound on `127.0.0.1:0` — see module docs for
+/// why this is built by hand rather than by calling
+/// [`qsh_core::reverse::listen::run_listen`].
+pub struct ReverseHarness {
+    /// The controller itself — `registry()`/`live_connections()` are how a
+    /// test observes registration state without scraping stderr.
+    pub listen: Arc<Listen>,
+    /// The controller's bound address — what a target dials.
+    pub addr: SocketAddr,
+    /// Every audit record the controller produced.
+    pub audit: Arc<MemoryAuditSink>,
+    /// The controller's own identity. Its SPKI fingerprint is what a
+    /// target's trust store must pin to reach this controller at all.
+    pub controller: TestIdentity,
+    task: tokio::task::JoinHandle<()>,
+    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl ReverseHarness {
+    /// A controller with the interim allow-all-pinned policy,
+    /// `allow_advertised_names = false`, and an empty inbound trust store —
+    /// a test adds whichever target identities it needs via
+    /// [`Self::start_with`] instead.
+    pub async fn start() -> Self {
+        Self::start_with(Arc::new(AllowAllPinned), false, StaticTrust::empty()).await
+    }
+
+    /// A controller with a caller-chosen policy, `allow_advertised_names`
+    /// setting, and inbound trust store — the target identities this
+    /// controller authenticates at the QUIC layer. This is also what feeds
+    /// the registry's trust-store-alias resolution: `reverse::admit::admit`
+    /// derives the alias from exactly this same `(AuthPath::Pin,
+    /// Principal::Device(name))` pin, so pinning `target` here under
+    /// `"widget"` is what makes `"widget"` the name a registration
+    /// resolves to.
+    pub async fn start_with(
+        authorizer: Arc<dyn Authorizer>,
+        allow_advertised_names: bool,
+        trust: StaticTrust,
+    ) -> Self {
+        let controller = make_identity();
+        let listener = Listener::bind(
+            "127.0.0.1:0".parse().expect("addr"),
+            controller.local.clone(),
+            Arc::new(trust),
+        )
+        .expect("bind controller");
+        let addr = listener.local_addr().expect("local addr");
+        let audit = Arc::new(MemoryAuditSink::new());
+        let registry = Registry::new(Arc::new(SystemClock), allow_advertised_names);
+        let listen = Listen::new(registry, authorizer, audit.clone(), "controller-device");
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(listen.clone().run(listener, async move {
+            let _ = rx.await;
+        }));
+        Self {
+            listen,
+            addr,
+            audit,
+            controller,
+            task,
+            shutdown: Some(tx),
+        }
+    }
+
+    /// A `Dialer` for `target`, trusting only this controller — the same
+    /// one-directional pin shape [`crate::loopback::LoopbackHarness`] uses
+    /// for its own `dialer` field.
+    pub fn dialer_for(&self, target: &TestIdentity) -> Dialer {
+        let trust = StaticTrust::empty().with_pin(
+            self.controller.fingerprint,
+            Principal::Device("controller".into()),
+        );
+        Dialer::new(target.local.clone(), Arc::new(trust))
+    }
+
+    /// Dial the controller as `target`. Unlike [`Self::initiate`], this
+    /// does not panic on a rejected dial — the L1 matrix case (an
+    /// untrusted target whose mTLS handshake never reaches `Hello`) needs
+    /// the raw [`DialError`].
+    pub async fn dial(&self, target: &TestIdentity) -> Result<Dialed, DialError> {
+        self.dialer_for(target).dial(self.addr, "127.0.0.1").await
+    }
+
+    /// Dial the controller as `target` and run the raw initiator half of
+    /// the `Hello` exchange with a caller-built `Hello` — the primitive
+    /// every raw registration/negative-path test in `reverse_loopback.rs`
+    /// is built from.
+    ///
+    /// `Err(HelloError::Remote{..})` is a real error frame the controller
+    /// wrote and [`handshake::respond`]'s bounded drain already flushed —
+    /// never a bare connection close (`PLAN.md` M3 Step 3, "거부 error
+    /// frame의 전달 보장"). The returned [`Dialed`] must be kept alive for
+    /// as long as the connection is used (its `endpoint` docs).
+    pub async fn initiate(
+        &self,
+        target: &TestIdentity,
+        hello: Hello,
+    ) -> Result<(Dialed, FramedStream, Hello), HelloError> {
+        let dialed = self
+            .dial(target)
+            .await
+            .unwrap_or_else(|err| panic!("dial controller {}: {err:?}", self.addr));
+        let (ctl, peer_hello) = handshake::initiate(&dialed.connection, hello).await?;
+        Ok((dialed, ctl, peer_hello))
+    }
+
+    /// [`Self::initiate`] with the ordinary `Hello.reverse` a `qsh reverse`
+    /// process sends: full `WIRE_MINOR_VERSIONS`/`LOCAL_CAPABILITIES`, empty
+    /// `ReverseRegistration.capabilities` (`v1.proto`: empty means "same as
+    /// `Hello.capabilities`").
+    pub async fn register(
+        &self,
+        target: &TestIdentity,
+        offered_name: &str,
+    ) -> Result<(Dialed, FramedStream, Hello), HelloError> {
+        self.initiate(target, reverse_hello(offered_name)).await
+    }
+
+    /// Build the temp [`Paths`] + on-disk `trust.toml` (pinning this
+    /// controller's address+fingerprint under `controller_alias`) a real
+    /// [`run_reverse`] invocation needs.
+    fn target_paths(&self, controller_alias: &str) -> (tempfile::TempDir, Paths) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = Paths::new(dir.path().join("config"), dir.path().join("state"));
+        let mut trust = TrustStore::default();
+        trust.add_peer(
+            controller_alias,
+            Some(self.addr.to_string()),
+            self.controller.fingerprint,
+            "2026-01-01T00:00:00Z".to_string(),
+        );
+        trust
+            .save(&paths.trust_file())
+            .expect("save target trust.toml");
+        (dir, paths)
+    }
+
+    /// Run the real [`qsh_core::reverse::target::run_reverse`] as `target`,
+    /// pinning this controller under `controller_alias` in a fresh on-disk
+    /// trust store. Blocks until `shutdown` resolves or the connection dies
+    /// — a caller spawns this and drives it with its own shutdown channel,
+    /// the same shape [`Self::start_with`] uses for the controller.
+    pub async fn run_target(
+        &self,
+        target: &TestIdentity,
+        device_id: &str,
+        controller_alias: &str,
+        offered_name: Option<&str>,
+        shutdown: impl Future<Output = ()>,
+    ) -> Result<(), OpError> {
+        let (_dir, paths) = self.target_paths(controller_alias);
+        let config = Config::default();
+        let identity = loaded_identity(target, device_id);
+        run_reverse(
+            &paths,
+            &config,
+            identity,
+            controller_alias,
+            offered_name,
+            shutdown,
+        )
+        .await
+    }
+
+    /// Stop the controller and wait for it to drain.
+    pub async fn shutdown(mut self) {
+        if let Some(tx) = self.shutdown.take() {
+            let _ = tx.send(());
+        }
+        let _ = (&mut self.task).await;
+    }
+}
+
+impl Drop for ReverseHarness {
+    fn drop(&mut self) {
+        if let Some(tx) = self.shutdown.take() {
+            let _ = tx.send(());
+        }
+        self.task.abort();
+    }
+}
+
+/// The `Hello` a `qsh reverse` target sends: full negotiation fields plus
+/// `Hello.reverse` with empty `capabilities` (`v1.proto`: "same as
+/// `Hello.capabilities`").
+pub fn reverse_hello(offered_name: &str) -> Hello {
+    Hello {
+        versions: wire::WIRE_MINOR_VERSIONS.to_vec(),
+        device_name: "target".to_string(),
+        capabilities: wire::LOCAL_CAPABILITIES
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        reverse: Some(wire::ReverseRegistration {
+            offered_name: offered_name.to_string(),
+            capabilities: Vec::new(),
+        }),
+    }
+}
+
+/// A `Hello` with **no** `Hello.reverse` — an ordinary forward peer's
+/// negotiation. Used to probe `qsh listen`'s "absent registration" refusal
+/// and, dialed at a forward host instead, has no bearing there at all
+/// (that is the point of the *other* negative path, which uses
+/// [`reverse_hello`] against a forward [`crate::loopback::LoopbackHarness`]
+/// host).
+pub fn forward_hello() -> Hello {
+    Hello {
+        versions: wire::WIRE_MINOR_VERSIONS.to_vec(),
+        device_name: "peer".to_string(),
+        capabilities: wire::LOCAL_CAPABILITIES
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        reverse: None,
+    }
+}
+
+/// Build a [`LoadedIdentity`] straight from a [`TestIdentity`], bypassing
+/// `identity::init`/a key store entirely — [`run_reverse`] only needs the
+/// shape, and every field it is built from ([`Identity::device_id`]/
+/// `fingerprint`/`cert_der`, [`LoadedIdentity::local`]) is already sitting
+/// in `test` from [`crate::loopback::make_identity`].
+pub fn loaded_identity(test: &TestIdentity, device_id: &str) -> LoadedIdentity {
+    LoadedIdentity {
+        identity: Identity {
+            device_id: device_id.to_string(),
+            fingerprint: test.fingerprint,
+            key_store: KeyStoreKind::File,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            cert_der: test.cert_der.clone(),
+        },
+        local: test.local.clone(),
+    }
+}
+
+/// Poll `f` until it returns `Some`, or panic after `timeout`. A bounded,
+/// event-driven substitute for a fixed `sleep()`
+/// (`docs/design/testing.md`: "sleep() 전면 금지") for the handful of
+/// registration/audit-visibility assertions in this harness that have no
+/// dedicated notification channel to await instead — a real
+/// [`ReverseHarness::run_target`] registers on a task this caller does not
+/// otherwise synchronize with, so its effect on [`Listen::registry`] or
+/// [`ReverseHarness::audit`] has to be observed by polling.
+pub async fn wait_for<T>(timeout: Duration, mut f: impl FnMut() -> Option<T>) -> T {
+    tokio::time::timeout(timeout, async {
+        loop {
+            if let Some(v) = f() {
+                return v;
+            }
+            // A poll interval inside a `tokio::time::timeout`-bounded loop,
+            // not the unconditioned fixed delay `docs/design/testing.md`
+            // bans — same distinction `qsh-cli/tests/common/mod.rs`'s
+            // `wait_for_audit` draws for its own deadline-bounded poll.
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("condition not observed within {timeout:?}"))
+}
+
+/// [`wait_for`] specialized to "at least `n` audit records exist yet".
+pub async fn wait_for_audit_records(
+    audit: &MemoryAuditSink,
+    n: usize,
+    timeout: Duration,
+) -> Vec<AuditRecord> {
+    wait_for(timeout, || {
+        let records = audit.records();
+        (records.len() >= n).then_some(records)
+    })
+    .await
+}
+
+// ==========================================================================
+// ReversePairHarness — the role-swapped counterpart of
+// `crate::loopback::LoopbackHarness`, for the mechanical proof of
+// role-axis independence (`PLAN.md` M3 Step 3 PR 3b: "기존
+// session_loopback·attach_loopback·resume_loopback 시나리오를 정방향/역방향
+// dial 두 방향으로 파라미터화").
+// ==========================================================================
+
+/// A connected pair with the dial direction reversed relative to
+/// [`crate::loopback::LoopbackHarness`]: the party that *dials* — playing
+/// "target" — owns the broker/pipes/audit/[`Server`] and serves requests;
+/// the party that *accepts* — playing "controller" — drives them with a
+/// client-role [`Session`]. Same shape [`Listen::finish_registration`]
+/// builds in the real product (`reverse/listen.rs`'s module docs: a
+/// successful registration "makes this connection CLIENT role"), reused
+/// here without going through [`Listen`]/[`Registry`] at all.
+///
+/// **Deliberately bypasses admission.** This is not a second
+/// registration-path harness — [`ReverseHarness`] above already owns that
+/// (name resolution, conflicts, `host.reverse`, the negative paths). Here
+/// the target dials straight in with a plain `Hello` (`reverse: None`) and
+/// the controller's responder accepts unconditionally: the only thing under
+/// test through this type is that `qsh_core`'s session/attach/resume `Ops`
+/// code, driven from the CLIENT-role side of a connection the HOST-role
+/// side happened to dial, behaves identically to the forward direction.
+///
+/// **Structurally single-peer, by construction — not a harness
+/// limitation.** A forward host ([`crate::loopback::LoopbackHarness`]) is a
+/// [`Listener`]: any number of distinct principals can dial in, which is
+/// exactly what `resume_loopback.rs`'s three credential-theft/no-steal
+/// scenarios need (an "owner" and a "thief"/"other" device reaching the
+/// *same* host). A reverse target has no listener at all — its one and
+/// only peer, for the lifetime of the process, is the controller it dialed
+/// to register with (`docs/CLI.md` §6.13, `reverse/target.rs`'s module
+/// docs). There is consequently no reverse-mode way to get a second,
+/// distinct principal to the same target-host's broker without inventing a
+/// topology Step 3 does not build (two simultaneous registrations from one
+/// target); that is *why*, not just *that*, those three scenarios stay
+/// forward-only in `resume_loopback.rs` (named exclusions there, with this
+/// paragraph cited).
+/// Bound on [`ReversePairHarness::connect`]'s wait for the controller's
+/// accept loop to enqueue a dialed connection. Same order of magnitude as
+/// `reverse_loopback.rs`'s own `TIMEOUT` — a real in-process QUIC round
+/// trip; generous slack, not a budget anyone should need in full. Without
+/// this, a broken accept loop turns one bad connection into an unbounded
+/// `.recv().await` that burns the entire CI job timeout instead of failing
+/// just this one test (harness race-hygiene review finding).
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+pub struct ReversePairHarness {
+    /// The target's host-role dispatcher.
+    pub server: Arc<Server>,
+    /// The target's session broker.
+    pub broker: Arc<Broker>,
+    /// The target's pipe-backed session sources.
+    pub pipes: Arc<PipeFactory>,
+    /// Every audit record the target produced.
+    pub audit: Arc<MemoryAuditSink>,
+    controller_addr: SocketAddr,
+    /// The target's dialer, trusting only the controller.
+    dialer: Dialer,
+    /// Controller-side `(Connection, ctl, peer_hello)` triples, one per
+    /// connection the accept loop finished negotiating, in accept order.
+    /// [`AsyncMutex`] (not [`Mutex`]) because [`Self::connect`] holds the
+    /// guard across the `.recv().await`.
+    accepted: AsyncMutex<mpsc::UnboundedReceiver<(Connection, FramedStream, Hello)>>,
+    /// The target-side `serve_control` task per connection — nothing reads
+    /// these back; they exist so [`Drop`] can abort them instead of leaking
+    /// tasks past a test that never spent every session it opened.
+    target_tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    accept_task: tokio::task::JoinHandle<()>,
+    accept_shutdown: Option<oneshot::Sender<()>>,
+}
+
+impl ReversePairHarness {
+    /// A pair with the interim allow-all-pinned policy.
+    pub async fn start() -> Self {
+        Self::start_with(Arc::new(AllowAllPinned)).await
+    }
+
+    /// A pair with a caller-chosen policy on the target's [`Server`] — the
+    /// ACL the controller (client role) is checked against, symmetric with
+    /// [`crate::loopback::LoopbackHarness::start_with`].
+    pub async fn start_with(authorizer: Arc<dyn Authorizer>) -> Self {
+        let target = make_identity();
+        let controller = make_identity();
+
+        // The controller's listener pins the target — only the target may
+        // ever dial in.
+        let controller_trust =
+            StaticTrust::empty().with_pin(target.fingerprint, Principal::Device("target".into()));
+        let listener = Listener::bind(
+            "127.0.0.1:0".parse().expect("addr"),
+            controller.local.clone(),
+            Arc::new(controller_trust),
+        )
+        .expect("bind controller");
+        let controller_addr = listener.local_addr().expect("local addr");
+
+        // The target's dialer pins the controller right back — a target
+        // never registers with an unpinned controller. Pinned as
+        // `device:laptop`, matching `LoopbackHarness`'s forward-direction
+        // client pin: the shared `session_loopback.rs`/`attach_loopback.rs`/
+        // `resume_loopback.rs` scenario bodies assert the audited/writer
+        // principal by this exact literal in both directions — the point
+        // being that the *same* string appears regardless of which side
+        // dialed, not that the name "controller" would somehow be wrong.
+        let target_trust = StaticTrust::empty()
+            .with_pin(controller.fingerprint, Principal::Device("laptop".into()));
+        let dialer = Dialer::new(target.local.clone(), Arc::new(target_trust));
+
+        let pipes = Arc::new(PipeFactory::new(64 * 1024));
+        let broker = Broker::new(
+            Arc::new(SystemClock),
+            BrokerConfig {
+                replay_bytes: 64 * 1024,
+                resume_ttl: Duration::from_secs(3600),
+                close_grace: Duration::from_millis(100),
+            },
+            pipes.clone(),
+        );
+        tokio::spawn(Broker::run_reaper(Arc::downgrade(&broker)));
+        let audit = Arc::new(MemoryAuditSink::new());
+        let server = Server::new(authorizer, audit.clone(), broker.clone(), "target");
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let controller_hello = Hello {
+            versions: wire::WIRE_MINOR_VERSIONS.to_vec(),
+            device_name: "controller".to_string(),
+            capabilities: wire::LOCAL_CAPABILITIES
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            reverse: None,
+        };
+        let accept_task = tokio::spawn(controller_accept_loop(
+            listener,
+            tx,
+            controller_hello,
+            async move {
+                let _ = shutdown_rx.await;
+            },
+        ));
+
+        Self {
+            server,
+            broker,
+            pipes,
+            audit,
+            controller_addr,
+            dialer,
+            accepted: AsyncMutex::new(rx),
+            target_tasks: Mutex::new(Vec::new()),
+            accept_task,
+            accept_shutdown: Some(shutdown_tx),
+        }
+    }
+
+    /// Dial the controller as the target, negotiate as the *host* role
+    /// (`handshake::initiate` — the target is the transport dialer, same as
+    /// a real `qsh reverse`), spawn the target's dispatch loop on the
+    /// result, and hand back the *controller's* accepted counterpart —
+    /// the client-role `(Connection, ctl, peer_hello)` a caller wraps into
+    /// [`Session::from_control`] or drives raw.
+    async fn connect(&self) -> (Connection, FramedStream, Hello) {
+        let dialed = self
+            .dialer
+            .dial(self.controller_addr, "127.0.0.1")
+            .await
+            .unwrap_or_else(|err| {
+                panic!("target dials controller {}: {err:?}", self.controller_addr)
+            });
+        let target_hello = Hello {
+            versions: wire::WIRE_MINOR_VERSIONS.to_vec(),
+            device_name: "target".to_string(),
+            capabilities: wire::LOCAL_CAPABILITIES
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            reverse: None,
+        };
+        let (ctl, controller_hello) = handshake::initiate(&dialed.connection, target_hello)
+            .await
+            .unwrap_or_else(|err| panic!("target negotiates with controller: {err:?}"));
+
+        let conn = dialed.connection.clone();
+        let ctx = ConnCtx {
+            principal: conn.principal().clone(),
+            auth_path: conn.auth_path(),
+            peer_fingerprint: conn
+                .peer_fingerprint()
+                .map(|fp| PeerFingerprint::new(*fp.as_bytes())),
+            peer_addr: conn.remote_address(),
+            conn_id: conn.stable_id(),
+            capabilities: handshake::negotiated_capabilities(&controller_hello),
+        };
+        let server = self.server.clone();
+        let conn_id = ctx.conn_id;
+        let handle = tokio::spawn(async move {
+            // Errors end up here whenever the caller closes the connection
+            // — ordinary teardown, nothing to report. Unlike a real `qsh
+            // reverse` process (which exits the moment its one connection
+            // dies, so nothing needs cleaning up — `reverse/target.rs`'s
+            // module docs), this harness's `Server`/broker outlive any one
+            // connection (`Self::session` is called repeatedly against the
+            // same pair), so it has to do the cleanup `Server::
+            // serve_connection` would have done for a forward host:
+            // `serve_control` alone never releases writer leases or drops
+            // pending tickets on its own.
+            let _ = server.clone().serve_control(&conn, ctl, ctx).await;
+            server.purge_connection(conn_id).await;
+        });
+        self.target_tasks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(handle);
+        // `dialed` (and its endpoint) is dropped here — the same convention
+        // `LoopbackHarness::session`/`raw_session` already rely on
+        // (`Dialed::endpoint`'s own docs: dropping it does not close the
+        // connection).
+
+        let mut accepted = self.accepted.lock().await;
+        tokio::time::timeout(CONNECT_TIMEOUT, accepted.recv())
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "controller accept loop did not enqueue the target's \
+                     connection within {CONNECT_TIMEOUT:?}"
+                )
+            })
+            .expect("the controller accepted the target's connection")
+    }
+
+    /// The client-role (controller) [`Session`] driving ops against this
+    /// pair's target-host — [`HostedPair::session`]'s reverse
+    /// implementation.
+    pub async fn session(&self) -> Session {
+        let (conn, ctl, peer_hello) = self.connect().await;
+        Session::from_control(conn, ctl, peer_hello)
+    }
+
+    /// [`Self::session`] without the [`Session`] wrapper —
+    /// [`HostedPair::raw_session`]'s reverse implementation.
+    pub async fn raw_session(&self) -> (Connection, FramedStream) {
+        let (conn, ctl, _peer_hello) = self.connect().await;
+        (conn, ctl)
+    }
+
+    /// Stop the controller's accept loop and wait for it to drain. Target
+    /// tasks (one `serve_control` per connection) are not joined here — a
+    /// caller has already ended every session/connection it opened by the
+    /// time it calls this, the same way `LoopbackHarness::shutdown` does
+    /// not join per-connection work either; [`Drop`] aborts any stragglers.
+    pub async fn shutdown(mut self) {
+        if let Some(tx) = self.accept_shutdown.take() {
+            let _ = tx.send(());
+        }
+        let _ = (&mut self.accept_task).await;
+    }
+}
+
+impl Drop for ReversePairHarness {
+    fn drop(&mut self) {
+        if let Some(tx) = self.accept_shutdown.take() {
+            let _ = tx.send(());
+        }
+        self.accept_task.abort();
+        for handle in self
+            .target_tasks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .drain(..)
+        {
+            handle.abort();
+        }
+    }
+}
+
+/// The controller's accept loop: for every inbound connection (the target
+/// dialing in), run the app-level `Hello` exchange as *responder* — client
+/// role — with a fixed, unconditional `local_hello`, then publish the
+/// negotiated triple on `tx`. Deliberately has no admission/registry logic
+/// at all (module docs on [`ReversePairHarness`]) — the one thing this loop
+/// decides is "accept every peer this listener's trust store already
+/// verified at the TLS layer".
+async fn controller_accept_loop(
+    listener: Listener,
+    tx: mpsc::UnboundedSender<(Connection, FramedStream, Hello)>,
+    local_hello: Hello,
+    shutdown: impl Future<Output = ()>,
+) {
+    tokio::pin!(shutdown);
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => break,
+            incoming = listener.accept() => {
+                let Some(incoming) = incoming else { break };
+                let tx = tx.clone();
+                let local_hello = local_hello.clone();
+                tokio::spawn(async move {
+                    let Ok(conn) = incoming.accept().await else {
+                        return;
+                    };
+                    let Ok((ctl, peer_hello)) =
+                        handshake::respond(&conn, |_peer_hello| Ok(local_hello.clone())).await
+                    else {
+                        return;
+                    };
+                    let _ = tx.send((conn, ctl, peer_hello));
+                });
+            }
+        }
+    }
+    listener.close(0, b"shutdown");
+    listener.endpoint().wait_idle().await;
+}
+
+impl HostedPair for ReversePairHarness {
+    fn server(&self) -> &Arc<Server> {
+        &self.server
+    }
+
+    fn broker(&self) -> &Arc<Broker> {
+        &self.broker
+    }
+
+    fn pipes(&self) -> &Arc<PipeFactory> {
+        &self.pipes
+    }
+
+    fn audit(&self) -> &Arc<MemoryAuditSink> {
+        &self.audit
+    }
+
+    async fn session(&self) -> Session {
+        ReversePairHarness::session(self).await
+    }
+
+    async fn raw_session(&self) -> (Connection, FramedStream) {
+        ReversePairHarness::raw_session(self).await
+    }
+
+    async fn shutdown(self) {
+        ReversePairHarness::shutdown(self).await
+    }
+}

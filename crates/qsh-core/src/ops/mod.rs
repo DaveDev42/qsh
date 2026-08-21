@@ -346,25 +346,11 @@ impl Ops {
             )
         })?;
         let trust = self.open_trust()?;
-        let peer = trust.snapshot().find(host).cloned().ok_or_else(|| {
-            OpError::new(
-                ErrorCode::HostNotFound,
-                format!(
-                    "host {host:?} is not in the trust store; pin it with `qsh trust add {host} --address <host:port> --fingerprint sha256:...`"
-                ),
-            )
-        })?;
-        if peer.address.is_empty() {
-            return Err(OpError::new(
-                ErrorCode::HostNotFound,
-                format!("host {host:?} has no address recorded in the trust store"),
-            ));
-        }
-        let server_name = server_name_for(&peer.address);
+        let (address, server_name) = resolve_peer_address(&trust.snapshot(), host)?;
         Ok(PeerTarget {
             identity,
             trust,
-            address: peer.address,
+            address,
             server_name,
         })
     }
@@ -433,8 +419,11 @@ impl Ops {
     }
 }
 
-/// Resolve `host:port` to its first socket address.
-async fn resolve_one(address: &str) -> Result<SocketAddr, OpError> {
+/// Resolve `host:port` to its first socket address. `pub(crate)` — Step 3's
+/// `qsh reverse` (`crate::reverse::target::run_reverse`) reuses this exact
+/// resolution instead of a second copy of it, for the same reason
+/// [`resolve_peer_address`] just below is split out.
+pub(crate) async fn resolve_one(address: &str) -> Result<SocketAddr, OpError> {
     let mut addrs = tokio::net::lookup_host(address).await.map_err(|err| {
         OpError::new(
             ErrorCode::ConnectionFailed,
@@ -447,6 +436,38 @@ async fn resolve_one(address: &str) -> Result<SocketAddr, OpError> {
             format!("{address} resolved to no addresses"),
         )
     })
+}
+
+/// The `(address, server_name)` half of [`Ops::resolve_peer`] that touches
+/// no identity — split out so a caller that already holds its own
+/// [`LoadedIdentity`] can reuse the trust-store lookup without a second
+/// synchronous identity load of its own. `qsh reverse` (`PLAN.md` M3 Step
+/// 3, `crate::reverse::target::run_reverse`) is that caller: it loads
+/// identity once, outside any runtime, ahead of a reconnect loop that must
+/// not reopen the keystore per dial (`docs/design/protocol.md` §11-4), so
+/// it cannot go through [`Ops::resolve_peer`] itself (which always loads
+/// identity synchronously — safe only when called before a runtime
+/// exists, per that method's own doc).
+pub(crate) fn resolve_peer_address(
+    trust: &TrustStore,
+    host: &str,
+) -> Result<(String, String), OpError> {
+    let peer = trust.find(host).cloned().ok_or_else(|| {
+        OpError::new(
+            ErrorCode::HostNotFound,
+            format!(
+                "host {host:?} is not in the trust store; pin it with `qsh trust add {host} --address <host:port> --fingerprint sha256:...`"
+            ),
+        )
+    })?;
+    if peer.address.is_empty() {
+        return Err(OpError::new(
+            ErrorCode::HostNotFound,
+            format!("host {host:?} has no address recorded in the trust store"),
+        ));
+    }
+    let server_name = server_name_for(&peer.address);
+    Ok((peer.address, server_name))
 }
 
 /// SNI value for a dial. The verifier ignores it entirely

@@ -2184,6 +2184,18 @@ async fn pump_attach_control(
                             return;
                         }
                     }
+                    // Unreachable in practice on a forward attach (the
+                    // host never sends a request back to its client), but
+                    // must still be answered rather than dropped — the
+                    // same `UNSUPPORTED`/zero-resource contract
+                    // `reverse/listen.rs` relies on for the reverse
+                    // direction (`ControlIn::Request`'s docs).
+                    ControlIn::Request { request_id } => {
+                        watch.traffic();
+                        if session.reject_unsupported(request_id).await.is_err() {
+                            return;
+                        }
+                    }
                     // `Exited` also arrives as a data frame, which is the
                     // authoritative copy; emitting both would duplicate a
                     // terminal event in the JSONL stream.

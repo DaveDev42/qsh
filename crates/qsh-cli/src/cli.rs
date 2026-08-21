@@ -181,6 +181,37 @@ pub enum Command {
         #[arg(long, value_name = "IP:PORT")]
         bind: Option<String>,
     },
+
+    /// Run the reverse-mode controller: accept dial-in registrations from
+    /// `qsh reverse` and serve them as hosts (`docs/CLI.md` §6.13).
+    /// Foreground only; the bound address and registration events go to
+    /// stderr.
+    Listen {
+        /// Listen address (`ip:port`). Overrides `[listen].bind` in
+        /// `config.toml`; defaults to `[::]:4433` — the same default as
+        /// `qsh serve`, so running both roles on one host needs an
+        /// explicit `--bind` on at least one of them.
+        #[arg(long, value_name = "IP:PORT")]
+        bind: Option<String>,
+    },
+
+    /// Dial `<controller>` and register this device as a reverse target,
+    /// once — no reconnect loop yet (`docs/CLI.md` §6.13). On success this
+    /// process serves the connection as a host, the same broker/writer-lease
+    /// discipline as `qsh serve`.
+    Reverse {
+        /// Trust-store alias of the controller to dial (`qsh trust list`).
+        controller: String,
+
+        /// Name to register under. Only takes effect when the controller
+        /// has no trust-store alias for this peer and its
+        /// `[listen].allow_advertised_names` is set; otherwise the
+        /// controller assigns the name from its own trust store, ignoring
+        /// this. Defaults to `[reverse].offered_name`, then this device's
+        /// identity.
+        #[arg(long, value_name = "NAME")]
+        offered_name: Option<String>,
+    },
 }
 
 /// Arguments of `qsh exec`.
@@ -482,6 +513,49 @@ mod tests {
             Command::Serve { bind } => assert_eq!(bind.as_deref(), Some("127.0.0.1:0")),
             other => panic!("expected serve, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn listen_bind_is_optional() {
+        let cli = Cli::try_parse_from(["qsh", "listen"]).unwrap();
+        assert!(matches!(
+            cli.command.unwrap(),
+            Command::Listen { bind: None }
+        ));
+        let cli = Cli::try_parse_from(["qsh", "listen", "--bind", "127.0.0.1:0"]).unwrap();
+        match cli.command.unwrap() {
+            Command::Listen { bind } => assert_eq!(bind.as_deref(), Some("127.0.0.1:0")),
+            other => panic!("expected listen, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reverse_requires_controller_and_offered_name_is_optional() {
+        let cli = Cli::try_parse_from(["qsh", "reverse", "personal-mac"]).unwrap();
+        match cli.command.unwrap() {
+            Command::Reverse {
+                controller,
+                offered_name,
+            } => {
+                assert_eq!(controller, "personal-mac");
+                assert!(offered_name.is_none());
+            }
+            other => panic!("expected reverse, got {other:?}"),
+        }
+        let cli =
+            Cli::try_parse_from(["qsh", "reverse", "personal-mac", "--offered-name", "phone"])
+                .unwrap();
+        match cli.command.unwrap() {
+            Command::Reverse {
+                controller,
+                offered_name,
+            } => {
+                assert_eq!(controller, "personal-mac");
+                assert_eq!(offered_name.as_deref(), Some("phone"));
+            }
+            other => panic!("expected reverse, got {other:?}"),
+        }
+        assert!(Cli::try_parse_from(["qsh", "reverse"]).is_err());
     }
 
     #[test]

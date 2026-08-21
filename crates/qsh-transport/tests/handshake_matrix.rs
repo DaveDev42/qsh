@@ -26,6 +26,24 @@
 //! | 14 | CA-signed server leaf with no qsh SAN URI                 | client `LocalRejected{NoPrincipal}` |
 //! | 15 | mixed: client by pin, server by CA                        | OK |
 //! | 16 | client presents no certificate at all                     | handshake fails, no `Connection` |
+//!
+//! **`PLAN.md` M3 Step 3 (c)'s "reverse dial, 비신뢰 target" row is
+//! deliberately not case 17 here.** At this layer a `qsh listen` accepting
+//! an untrusted `qsh reverse` target is mechanically identical to cases
+//! 2/3/7/8 above (an untrusted peer's cert fails verification against the
+//! listener's trust store) — bind direction is irrelevant to `Listener`.
+//! What the PLAN row actually needs asserted is that this failure is
+//! recorded as a handshake-level deny (`AuditRecord::handshake_rejected`,
+//! `action == "connect"`) and *never* reaches a `host.reverse` audit line
+//! — a claim about `qsh_core::audit`, which this crate cannot depend on
+//! (`CLAUDE.md`'s dependency matrix: `qsh-transport` → `qsh-proto` only,
+//! enforced by `xtask arch`). Adding a 17th case here would only
+//! duplicate an already-covered rejection shape, not the thing the row is
+//! actually for. The real assertion lives in
+//! `crates/qsh-testkit/tests/reverse_loopback.rs`'s
+//! `reverse_dial_untrusted_target_fails_handshake_before_registration` —
+//! the one place a real `Listen` controller and `qsh_core::audit` are
+//! both available together.
 
 use std::net::SocketAddr;
 use std::sync::Arc;

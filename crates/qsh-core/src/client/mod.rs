@@ -72,8 +72,11 @@ pub const EXEC_OUTPUT_MAX: usize = 64 * 1024 * 1024;
 /// Map [`crate::handshake::HelloError`] onto the initiator's pre-existing
 /// [`ClientError`] surface, preserving every message exactly as it read
 /// before the handshake exchange moved into `handshake.rs` (PLAN M3 Step 2
-/// (d) — zero observable behavior change).
-fn map_hello_error(err: crate::handshake::HelloError) -> ClientError {
+/// (d) — zero observable behavior change). `pub(crate)` — Step 3's `qsh
+/// reverse` (`crate::reverse::target::run_reverse`) is another
+/// `handshake::initiate` caller and reuses this exact mapping (chained into
+/// `ops::exec::map_client_error`) rather than a second copy of it.
+pub(crate) fn map_hello_error(err: crate::handshake::HelloError) -> ClientError {
     use crate::handshake::HelloError;
     match err {
         HelloError::Timeout => ClientError::HelloTimeout,
@@ -539,6 +542,12 @@ impl Session {
                 Some(ControlIn::Event(ev)) => return Ok(Some(ev)),
                 Some(ControlIn::Ping { request_id }) => self.send_pong(request_id).await?,
                 Some(ControlIn::Pong) => {}
+                // See `ControlIn::Request`'s docs: unreachable on a
+                // forward attach in practice, but answered rather than
+                // dropped.
+                Some(ControlIn::Request { request_id }) => {
+                    self.reject_unsupported(request_id).await?
+                }
             }
         }
     }
@@ -564,8 +573,19 @@ impl Session {
                     request_id: msg.request_id,
                 },
                 Some(control_message::Body::Pong(_)) => ControlIn::Pong,
-                // Responses to requests nobody is waiting for: ignore.
-                _ => continue,
+                // A response to a request nobody here is waiting for
+                // (`request()` reads its own correlated reply directly, not
+                // through this loop): ignore, not a request needing an
+                // answer.
+                Some(control_message::Body::Response(_)) => continue,
+                // Everything else the oneof can carry is request-shaped —
+                // `Hello` (unexpected after the handshake), every
+                // `session_*`/`exec_start` request, or an unknown/reserved
+                // control number decoding to `body: None` — and this
+                // client role serves none of it (see `ControlIn::Request`).
+                _ => ControlIn::Request {
+                    request_id: msg.request_id,
+                },
             }));
         }
     }
@@ -577,6 +597,26 @@ impl Session {
             .send(&ControlMessage::new(
                 request_id,
                 control_message::Body::Pong(wire::Pong {}),
+            ))
+            .await?;
+        Ok(())
+    }
+
+    /// Answer an inbound [`ControlIn::Request`] with `UNSUPPORTED` —
+    /// creates no resource, same as every other refusal at this seam
+    /// (`docs/design/protocol.md` §11-3). The forward client never has one
+    /// to answer in practice; `qsh listen` (`PLAN.md` M3 Step 3) is the
+    /// first real caller.
+    pub async fn reject_unsupported(&mut self, request_id: u64) -> Result<(), ClientError> {
+        self.ctl
+            .send
+            .send(&ControlMessage::error(
+                request_id,
+                wire::Error::new(
+                    ErrorCode::Unsupported,
+                    "this connection's client role does not serve requests",
+                    false,
+                ),
             ))
             .await?;
         Ok(())
@@ -624,6 +664,25 @@ pub enum ControlIn {
     },
     /// The peer answered a [`Session::send_ping`].
     Pong,
+    /// An inbound REQUEST-shaped frame this client role does not serve: a
+    /// `session.*`/`exec.run` request, a stray `Hello`, or an unknown/
+    /// reserved control number (`body: None`) — everything the wire oneof
+    /// can carry other than `Event`/`Ping`/`Pong`/a correlated `Response`.
+    /// Answer with [`Session::reject_unsupported`], which creates no
+    /// resource either way.
+    ///
+    /// Before M3 this variant was unreachable — a plain forward `qsh
+    /// <host>`/`qsh exec` peer (the host) never sends a request back to
+    /// its client. `qsh listen` (`PLAN.md` Step 3) is the first real
+    /// producer: on a registered reverse connection the *controller* is
+    /// the client role, and the peer (the target, now a host) can still
+    /// legally attempt a request — `docs/design/protocol.md` §11-3:
+    /// registration grants reachability, never authority, so it must be
+    /// representable here instead of silently dropped.
+    Request {
+        /// Correlation id to answer with [`Session::reject_unsupported`].
+        request_id: u64,
+    },
 }
 
 /// Assembled result of a remote exec.

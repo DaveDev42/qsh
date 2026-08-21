@@ -12,6 +12,22 @@
 //!
 //! Every wait is a real round trip under a wall-clock deadline — no
 //! sleep-based synchronisation.
+//!
+//! **Role-axis parametrization (`PLAN.md` M3 Step 3 PR 3b).** The first
+//! three scenarios are generic `async fn<P: HostedPair>(h: P)`, each run
+//! once against [`LoopbackHarness`] (forward) and once against
+//! [`ReversePairHarness`] (reverse) with an identical body — the mechanical
+//! proof that resume's `Ops` code never learns which side dialed. The last
+//! three (`a_stolen_credential_is_useless_to_a_different_peer`,
+//! `an_attach_without_a_credential_is_refused_by_the_host`,
+//! `no_steal_conflicts_with_a_foreign_lease_and_spends_no_credential`) stay
+//! forward-only — a **named exclusion**, not a silent one:
+//! [`ReversePairHarness`]'s own module docs explain why a reverse target
+//! structurally cannot have a *second, distinct* principal reach the same
+//! host (it has exactly one peer, ever — the controller it dialed to
+//! register with), which is exactly the shape these three scenarios need
+//! (an "owner" and a "thief"/"other" device racing for the same session on
+//! one host).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,15 +37,18 @@ use qsh_core::broker::PipeHandle;
 use qsh_core::client::{ClientError, Session};
 use qsh_proto::ErrorCode;
 use qsh_proto::wire::{self, StreamHeader, session_frame};
+use qsh_testkit::HostedPair;
 use qsh_testkit::loopback::{LoopbackHarness, make_identity};
+use qsh_testkit::reverse::ReversePairHarness;
 use qsh_transport::{Dialer, FramedStream, Principal, StaticTrust};
 
 /// Wall-clock ceiling for anything that should resolve in milliseconds.
 /// A miss is a hang, which is a failure, not flake.
 const DEADLINE: Duration = Duration::from_secs(20);
 
-/// The harness' replay ring (`LoopbackHarness`): what the ring still holds
-/// is what a resume can still be given.
+/// The harness' replay ring: what the ring still holds is what a resume
+/// can still be given. Both [`LoopbackHarness`] and [`ReversePairHarness`]
+/// build a 64 KiB ring.
 const RING_BYTES: usize = 64 * 1024;
 
 fn open_req() -> wire::SessionOpen {
@@ -55,12 +74,12 @@ fn attach_req(session_id: &str, token: Vec<u8>, last_output_seq: u64) -> wire::S
 /// Open a session and redeem its `SESSION_DATA` ticket, the way the first
 /// attach does. Returns the open reply, the child side of the pipe, and
 /// the live data stream.
-async fn open_and_attach(
-    h: &LoopbackHarness,
+async fn open_and_attach<P: HostedPair>(
+    h: &P,
     s: &mut Session,
 ) -> (wire::SessionOpened, PipeHandle, FramedStream) {
     let opened = s.session_open(open_req()).await.expect("session.open");
-    let pipe = h.pipes.take().expect("pipe handle");
+    let pipe = h.pipes().take().expect("pipe handle");
     let data = redeem(s, opened.ticket.clone()).await;
     (opened, pipe, data)
 }
@@ -94,7 +113,8 @@ async fn attach(
 }
 
 /// A second pinned device: its own dialer, its own connection, its own
-/// principal.
+/// principal. Forward-topology-specific (module docs) — used only by the
+/// three forward-only multi-principal scenarios below.
 async fn other_device(
     h: &LoopbackHarness,
     identity: &qsh_testkit::loopback::TestIdentity,
@@ -148,9 +168,11 @@ fn hex(bytes: &[u8]) -> String {
 /// of its connection, and the bytes stitched at `L` across the break are
 /// byte-identical to the stream a reader that never disconnected would
 /// have seen.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_resumed_attach_stitches_the_stream_exactly_at_the_last_delivered_offset() {
-    let h = LoopbackHarness::start().await;
+async fn a_resumed_attach_stitches_the_stream_exactly_at_the_last_delivered_offset<
+    P: HostedPair,
+>(
+    h: P,
+) {
     let mut first = h.session().await;
     let (opened, mut pipe, mut data) = open_and_attach(&h, &mut first).await;
 
@@ -242,7 +264,7 @@ async fn a_resumed_attach_stitches_the_stream_exactly_at_the_last_delivered_offs
     // adds one — the behavioural version is
     // `record_has_only_structural_fields`, and `resume_secrecy.rs` covers
     // the log/JSON surfaces properly.
-    let audit = serde_json::to_string(&h.audit.records()).expect("audit records serialise");
+    let audit = serde_json::to_string(&h.audit().records()).expect("audit records serialise");
     for token in [&opened.resume_token, &attached.new_resume_token] {
         assert!(
             !audit.contains(&hex(token)),
@@ -256,13 +278,31 @@ async fn a_resumed_attach_stitches_the_stream_exactly_at_the_last_delivered_offs
     h.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_resumed_attach_stitches_the_stream_exactly_at_the_last_delivered_offset_forward() {
+    a_resumed_attach_stitches_the_stream_exactly_at_the_last_delivered_offset(
+        LoopbackHarness::start().await,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_resumed_attach_stitches_the_stream_exactly_at_the_last_delivered_offset_reverse() {
+    a_resumed_attach_stitches_the_stream_exactly_at_the_last_delivered_offset(
+        ReversePairHarness::start().await,
+    )
+    .await;
+}
+
 /// A resume that asks for an offset the ring has evicted opens with a
 /// `Gap` naming where the stream can actually continue, and then continues
 /// from exactly there. The client is told output was lost; it is never
 /// silently handed a different stream.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_request_older_than_the_ring_opens_with_a_gap_and_resumes_from_available_from() {
-    let h = LoopbackHarness::start().await;
+async fn a_request_older_than_the_ring_opens_with_a_gap_and_resumes_from_available_from<
+    P: HostedPair,
+>(
+    h: P,
+) {
     let mut first = h.session().await;
     let (opened, mut pipe, mut data) = open_and_attach(&h, &mut first).await;
 
@@ -340,14 +380,28 @@ async fn a_request_older_than_the_ring_opens_with_a_gap_and_resumes_from_availab
     h.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_older_than_the_ring_opens_with_a_gap_and_resumes_from_available_from_forward() {
+    a_request_older_than_the_ring_opens_with_a_gap_and_resumes_from_available_from(
+        LoopbackHarness::start().await,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_older_than_the_ring_opens_with_a_gap_and_resumes_from_available_from_reverse() {
+    a_request_older_than_the_ring_opens_with_a_gap_and_resumes_from_available_from(
+        ReversePairHarness::start().await,
+    )
+    .await;
+}
+
 /// Input that was sent but never acknowledged is retransmitted after a
 /// resume — and the child must not see it twice. The dedup cursor lives in
 /// the session, keyed by the input stream a resumed attach inherits
 /// (protocol.md §10-5); this is what proves the reattach inherited it
 /// instead of starting a fresh axis.
-#[tokio::test(flavor = "multi_thread")]
-async fn retransmitted_input_is_applied_exactly_once_across_a_resume() {
-    let h = LoopbackHarness::start().await;
+async fn retransmitted_input_is_applied_exactly_once_across_a_resume<P: HostedPair>(h: P) {
     let mut first = h.session().await;
     let (opened, mut pipe, mut data) = open_and_attach(&h, &mut first).await;
 
@@ -419,6 +473,24 @@ async fn retransmitted_input_is_applied_exactly_once_across_a_resume() {
     second.close();
     h.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn retransmitted_input_is_applied_exactly_once_across_a_resume_forward() {
+    retransmitted_input_is_applied_exactly_once_across_a_resume(LoopbackHarness::start().await)
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn retransmitted_input_is_applied_exactly_once_across_a_resume_reverse() {
+    retransmitted_input_is_applied_exactly_once_across_a_resume(ReversePairHarness::start().await)
+        .await;
+}
+
+// ==========================================================================
+// Forward-only: multi-principal scenarios (module docs above — a reverse
+// target has exactly one peer, ever, so there is no reverse-mode analogue
+// of "a second, distinct device reaches the same host").
+// ==========================================================================
 
 /// A credential is bound to the peer it was issued to (protocol.md §10-2,
 /// PRD §9). A different device holding a stolen token is refused — and
