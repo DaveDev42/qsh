@@ -205,7 +205,7 @@ control 핸드셰이크를 `crates/qsh-core/src/handshake.rs`로 추출한다:
 
 **Controller stale 처리.** 연결이 죽으면 엔트리를 즉시 삭제하지 않고 `state = "stale"`로 표시했다가 `[listen].stale_retention` 후 제거한다 — `docs/design/protocol.md` §11-4의 "host 목록에서 stale 처리"의 구현이며, 사라진 host를 조용히 없애는 대신 "있었다가 끊겼다"를 보여 준다. **기본값은 target의 backoff 상한에 종속된다**: 재등록 최악 지연 ≈ `backoff_max_ms`(30 s) + jitter이므로 그보다 확실히 커야 재attach 대기(Step 8)가 의미를 갖는다. 기본 **120 s**로 두고 그 결합(`stale_retention > backoff_max_ms × 3`)을 config 검증과 주석으로 고정한다(§4.2).
 
-**Step 3에서 넘어온 race 부채 2건, 이 step이 반드시 해소한다.** `reverse/listen.rs`의 `Listen::finish_registration`(동시 same-fingerprint 재등록 시 `admit()` 순서와 `conns` 테이블 publish 순서가 어긋나 대체된 연결이 close되지 않고 영구히 leak될 수 있음)과 `reverse/target.rs`의 `run_reverse`(`serve_control` 종료 후 `purge_connection`을 호출하지 않고, `shutdown` 분기가 `select!`로 `serve_control`을 mid-flight에 취소해 `server/mod.rs`가 문서화한 join-before-purge 순서를 건너뜀) — Step 3에서는 단발 등록 + 프로세스 종료로 가려지지만 이 step의 재접속 루프가 그 가림을 없앤다(두 자리 모두 코드에 주석으로 표시돼 있다).
+**Step 3에서 넘어온 race 부채, 이 step이 반드시 해소한다.** ① `reverse/listen.rs`의 `Listen::finish_registration`(동시 same-fingerprint 재등록 시 `admit()` 순서와 `conns` 테이블 publish 순서가 어긋나 대체된 연결이 close되지 않고 영구히 leak될 수 있음), ② `reverse/target.rs`의 `run_reverse`가 `serve_control` 종료 후 `purge_connection`을 호출하지 않는 것. (원래 ②에 묶여 있던 "shutdown 분기가 `serve_control`을 mid-flight에 취소" 절반은 Step 3.5의 SIGTERM drain 배선이 `serve_control`을 `tokio::spawn` + drain 후 join하는 구조로 바꾸며 이미 해소했다 — 남은 것은 purge 호출 자체다.) Step 3에서는 단발 등록 + 프로세스 종료로 가려지지만 이 step의 재접속 루프가 그 가림을 없앤다(두 자리 모두 코드에 주석으로 표시돼 있다).
 
 **(b) crate/모듈/파일:**
 - `crates/qsh-core/src/reverse/target.rs` (확장 — 재접속 루프, backoff+jitter, liveness probe 배선)

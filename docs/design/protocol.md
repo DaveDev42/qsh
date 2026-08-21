@@ -10,7 +10,7 @@
 
 | 항목 | 결정 |
 |---|---|
-| QUIC 스택 | quinn **≥ 0.11.14** (0.11.14 미만은 원격 DoS 취약점) + rustls 0.23 (aws-lc-rs provider) + tokio |
+| QUIC 스택 | quinn (`quinn-proto` **≥ 0.11.14**; 그 미만은 원격 DoS 취약점) + rustls 0.23 (aws-lc-rs provider) + tokio |
 | ALPN | `qsh/1` — 호환 파괴 시 `qsh/2`, 추가적 확장은 capability로 |
 | 직렬화 | control message = protobuf(prost), 터널 payload = raw bytes |
 | 0-RTT | 사용 안 함 (replay 위험) |
@@ -20,7 +20,7 @@
 
 ## 2. QUIC 스택과 전송 설정
 
-- **quinn 선정 근거:** 순수 Rust·tokio 네이티브·사실상의 커뮤니티 표준. 결정적으로 per-stream 송신 우선순위(`SendStream::set_priority(i32)`)와 fair queuing(`TransportConfig::send_fairness`)을 제공해 "느린 터널이 PTY를 막지 않는다"(PRD §13)를 스케줄러 레벨에서 구현할 수 있다. s2n-quic은 커스텀 인증서 검증(pin+CA 이중 모드)이 provider 추상화 탓에 번거롭고, quiche는 sans-IO C 스타일이라 이벤트 루프·타이머·소켓을 직접 소유해야 한다. **quinn은 반드시 0.11.14 이상으로 고정한다.**
+- **quinn 선정 근거:** 순수 Rust·tokio 네이티브·사실상의 커뮤니티 표준. 결정적으로 per-stream 송신 우선순위(`SendStream::set_priority(i32)`)와 fair queuing(`TransportConfig::send_fairness`)을 제공해 "느린 터널이 PTY를 막지 않는다"(PRD §13)를 스케줄러 레벨에서 구현할 수 있다. s2n-quic은 커스텀 인증서 검증(pin+CA 이중 모드)이 provider 추상화 탓에 번거롭고, quiche는 sans-IO C 스타일이라 이벤트 루프·타이머·소켓을 직접 소유해야 한다. **`quinn-proto`는 반드시 0.11.14 이상으로 고정한다**(RUSTSEC-2026-0037의 advisory 대상은 파사드 `quinn`이 아니라 `quinn-proto`다).
 - **Connection migration:** 서버측 passive migration(NAT rebind 등, path validation 포함)은 quinn이 자동 처리. 클라이언트는 인터페이스 변화 감지 시 `Endpoint::rebind(new_socket)`으로 active migration. migration은 **지연 최적화일 뿐**이며 실패해도 무방하다 — correctness는 resume(§8)이 보장한다. migration 성공에 의존하는 설계를 하지 않는다.
 - **keep-alive 15s / max_idle_timeout 45s:** 15s는 일반적인 30s UDP NAT binding timeout보다 짧아 역방향 target의 장수명 연결을 NAT 뒤에서 유지한다. 절전한 노트북은 45s 후 연결이 죽지만 **세션은 유지**된다(그것이 분리 설계의 목적). 절전 복귀 시 클라이언트는 monotonic clock 점프/PTO 실패로 죽은 연결을 즉시 버리고 재다이얼→resume한다. idle timeout을 키워 "QUIC 레벨에서 절전 생존"을 추구하지 않는다(listener 메모리 낭비 + 설계와 충돌).
 - **0-RTT 금지:** QSH의 control message는 전부 부수효과가 있다(`exec`, `session.write`, tunnel open). 0-RTT early data는 on-path 공격자가 재전송할 수 있으므로 절대 받지 않는다 — 클라이언트는 `into_0rtt()`를 호출하지 않고 서버는 early data를 활성화하지 않는다. TLS 세션 티켓(1-RTT resumption)은 성능상 켤 수 있으나, **티켓 기반 재개에서도 클라이언트 인증서 재검증이 보장되는지 확인**하고 의심스러우면 `NoServerSessionStorage`로 티켓을 끈다. 연결은 장수명이므로 handshake 지연은 중요하지 않다.

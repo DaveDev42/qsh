@@ -66,6 +66,97 @@ async fn exec_env_is_passed_to_the_remote_command() {
     assert_eq!(r.exit_code, 0);
 }
 
+/// `docs/CLI.md`: "클라이언트 프로세스의 환경을 암묵적으로 상속시키지
+/// 않는다" — the child must not see the `qsh serve` process's own
+/// environment, only `--env`/pinned. Unix only: the pinning is a
+/// password-database concept (`pty::pinned_identity_env`); Windows keeps
+/// the pre-existing inherited-env behavior (`crates/qsh-core/src/exec/mod.rs`).
+///
+/// Uses `CARGO_PKG_NAME` as the marker rather than planting one with
+/// `std::env::set_var`: this binary is one process shared by every test in
+/// the file (`#[tokio::test(flavor = "multi_thread")]`), and mutating
+/// process-global env from one test while others are concurrently inside
+/// tokio/quinn/libc calls on other threads is a data race `set_var` is
+/// `unsafe` for precisely because of — real under plain `cargo test`
+/// (CLAUDE.md's own first-listed command), not just `cargo nextest run`'s
+/// one-process-per-test isolation. `CARGO_PKG_NAME` needs no mutation: it is
+/// already set in this process's environment by whichever of `cargo
+/// test`/`cargo nextest run` launched it (verified empirically), so it is
+/// exactly the kind of "real serve-process env var" this test needs to
+/// prove does *not* reach the child.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn exec_does_not_leak_the_serve_process_environment() {
+    assert!(
+        std::env::var("CARGO_PKG_NAME").is_ok(),
+        "test process must have inherited CARGO_PKG_NAME for this assertion to be meaningful"
+    );
+    let h = LoopbackHarness::start().await;
+    let mut s = h.session().await;
+    let r = s
+        .exec(
+            &spec(&["sh", "-c", "printf '[%s]' \"$CARGO_PKG_NAME\""]),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        r.stdout, b"[]",
+        "the qsh serve process env must not reach the exec.run child"
+    );
+    assert_eq!(r.exit_code, 0);
+}
+
+/// `docs/CLI.md`: "`HOME`/`USER`/`LOGNAME`/`SHELL`/`PATH`는 어느
+/// 경로에서도 호스트가 고정한다" — a client-supplied `PATH` decides which
+/// binary `argv[0]` resolves to, so it must be ignored, not merged.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn exec_env_cannot_override_the_pinned_path() {
+    let h = LoopbackHarness::start().await;
+    let mut s = h.session().await;
+    let mut sp = spec(&["sh", "-c", "printf %s \"$PATH\""]);
+    sp.env = vec![("PATH".into(), "/evil".into())];
+    let r = s.exec(&sp, None).await.unwrap();
+    let path = String::from_utf8_lossy(&r.stdout).into_owned();
+    assert_ne!(
+        path, "/evil",
+        "a client PATH override must be ignored: {path}"
+    );
+    assert!(
+        path.contains("/bin"),
+        "PATH must still be pinned to the host baseline: {path}"
+    );
+    assert_eq!(r.exit_code, 0);
+}
+
+/// The exact-key guard above is not enough on its own: `Command::env` does
+/// not reject `=` inside a key, so a key of `"PATH=..."` is not equal to
+/// `"PATH"` and slips past a check that only compares full key strings —
+/// while still landing in the child's envp as a second `PATH=` entry that a
+/// shell resolves as an override of the pinned one (later entry wins). This
+/// is the same entry-shape rule `pty::posix::build_env` already applies to
+/// the PTY spawn path.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn exec_env_key_containing_equals_cannot_smuggle_a_path_override() {
+    let h = LoopbackHarness::start().await;
+    let mut s = h.session().await;
+    let mut sp = spec(&["sh", "-c", "printf %s \"$PATH\""]);
+    sp.env = vec![("PATH=/evil".into(), "".into())];
+    let r = s.exec(&sp, None).await.unwrap();
+    let path = String::from_utf8_lossy(&r.stdout).into_owned();
+    assert!(
+        !path.contains("/evil"),
+        "an '=' in the env key must not smuggle a PATH override: {path}"
+    );
+    assert!(
+        path.contains("/bin"),
+        "PATH must still be pinned to the host baseline: {path}"
+    );
+    assert_eq!(r.exit_code, 0);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn exec_stdin_forwarding_and_large_output() {
     let h = LoopbackHarness::start().await;

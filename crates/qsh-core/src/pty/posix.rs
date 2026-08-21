@@ -51,7 +51,9 @@ const PASSTHROUGH_ENV: &[&str] = &["LANG", "LANGUAGE", "TZ"];
 /// against the child's `PATH`, so a client-supplied `PATH` would let the
 /// client pick *which* binary a policy-approved command name runs (M5 ACL
 /// choke point). `PATH` grows only through the login shell's own profile.
-const PINNED_ENV: &[&str] = &["HOME", "USER", "LOGNAME", "SHELL", "PATH"];
+/// `crate::exec` (`exec.run`, no PTY) pins the same five keys the same way
+/// — `pub(crate)` so it can reuse this list instead of duplicating it.
+pub(crate) const PINNED_ENV: &[&str] = &["HOME", "USER", "LOGNAME", "SHELL", "PATH"];
 
 /// The production [`SourceFactory`]: one [`PtySource`] per session.
 #[derive(Debug, Default, Clone, Copy)]
@@ -350,9 +352,8 @@ pub(crate) fn login_home() -> io::Result<String> {
     current_account().map(|a| a.home)
 }
 
-/// The child's full environment, in application order (later wins in
-/// `CommandBuilder`, and the pinned identity keys are re-asserted last).
-fn build_env(spec: &SessionSpec, account: &Account, shell: &str) -> Vec<(String, String)> {
+/// The five [`PINNED_ENV`] keys, valued for `account`/`shell`.
+fn pinned_pairs(account: &Account, shell: &str) -> Vec<(String, String)> {
     let pinned: Vec<(String, String)> = vec![
         ("HOME".into(), account.home.clone()),
         ("USER".into(), account.name.clone()),
@@ -361,6 +362,24 @@ fn build_env(spec: &SessionSpec, account: &Account, shell: &str) -> Vec<(String,
         ("PATH".into(), DEFAULT_PATH.into()),
     ];
     debug_assert!(pinned.iter().all(|(k, _)| PINNED_ENV.contains(&k.as_str())));
+    pinned
+}
+
+/// The [`PINNED_ENV`] keys for `exec.run` (`crate::exec`), which has no PTY
+/// spec and no shell-override test hook — always the account's own login
+/// shell. Mirrors this module's PTY spawn path so the two never drift
+/// (`docs/CLI.md` "HOME/USER/LOGNAME/SHELL/PATH는 어느 경로에서도 호스트가
+/// 고정한다").
+pub(crate) fn pinned_identity_env() -> io::Result<Vec<(String, String)>> {
+    let account = current_account()?;
+    let shell = account.login_shell();
+    Ok(pinned_pairs(&account, &shell))
+}
+
+/// The child's full environment, in application order (later wins in
+/// `CommandBuilder`, and the pinned identity keys are re-asserted last).
+fn build_env(spec: &SessionSpec, account: &Account, shell: &str) -> Vec<(String, String)> {
+    let pinned = pinned_pairs(account, shell);
     let mut env: Vec<(String, String)> = vec![(
         "TERM".into(),
         spec.term

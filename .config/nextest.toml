@@ -1,0 +1,11 @@
+# `cargo nextest run` configuration. Local defaults otherwise — this only
+# adds a bound so a genuine deadlock terminates instead of hanging CI up to
+# the job-level timeout (`docs/ROADMAP.md` 2026-08-21 audit A13, PLAN.md
+# Step 3.5 PR ①).
+[profile.default]
+# A test that runs past 60s is flagged as slow (a warning, not a failure);
+# one still running after 3 such periods (180s) is a deadlock, not a slow
+# test, and gets terminated. 60s is generous on purpose — several suites
+# (mobility, chaos, e2e) legitimately take tens of seconds; the point is a
+# bound, not a tight one.
+slow-timeout = { period = "60s", terminate-after = 3 }

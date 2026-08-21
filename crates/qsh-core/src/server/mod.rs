@@ -28,6 +28,7 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -63,6 +64,44 @@ pub const HEADER_TIMEOUT: Duration = Duration::from_secs(10);
 pub const TICKET_TTL: Duration = Duration::from_secs(30);
 /// Ticket size in bytes (128-bit random).
 pub const TICKET_LEN: usize = 16;
+
+/// Upper bound on [`Server::drain`]'s wait for every session to close.
+///
+/// The ordinary case is already bounded without this: sessions close
+/// concurrently ([`crate::broker::Broker::close_all`]), so the wall-clock
+/// cost of draining any number of them is one session's own close
+/// escalation — up to three `[serve].close_grace_ms` periods (CLI.md §6.7),
+/// 15 s at the documented default. This is *defense in depth* for the case
+/// a session's close never returns at all (a wedged PTY reap, a stuck
+/// actor) — past it, `drain` stops waiting so the process can still exit,
+/// rather than hang the SIGTERM shutdown forever on one session. Four times
+/// the default per-session bound: generous enough not to cut a legitimate
+/// escalation short under scheduler contention, finite so "drain never
+/// returns" cannot happen.
+pub const DRAIN_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Grace period [`Server::drain`] waits, after every session has closed,
+/// before returning to a caller that is about to force-close the
+/// connection/listener out from under whatever is still in flight.
+///
+/// `drain` only guarantees the broker's replay ring carries
+/// `session.closed` (`Broker::close_all`'s own return) — *delivering* that
+/// entry to an attached consumer is a second, decoupled hop:
+/// `session_stream.rs`'s `output_pump` has to wake on the ring, `notify()`
+/// it onto this connection's control-stream reply queue, and
+/// `Server::serve_control`'s loop has to actually write it to the wire.
+/// None of that is awaited by `drain` itself, so a caller that closes the
+/// connection the instant `drain` returns (`Server::run`, `reverse::target`)
+/// can — and, absent this, empirically does — win that race: the peer sees
+/// the connection die instead of the `session.closed` it was owed (an L5
+/// real-process test, not a unit test, is what catches this — the in-crate
+/// unit tests below call `drain` against the broker directly and never
+/// exercise the wire hop at all). Same shape of problem as
+/// [`crate::handshake::REJECTION_DRAIN_TIMEOUT`] (let one last queued frame
+/// actually leave before the stream goes away), same order of magnitude:
+/// generous for one small in-process handoff plus one local write, not a
+/// promise against a peer or path that is genuinely gone.
+pub const DRAIN_FLUSH_GRACE: Duration = Duration::from_millis(500);
 
 /// Stream reset code: the `StreamHeader` was missing, unknown, or its
 /// ticket was invalid/expired/foreign/of the wrong kind.
@@ -243,6 +282,11 @@ pub struct Server {
     sessions: Arc<dyn SessionBackend>,
     device_name: String,
     tickets: Mutex<HashMap<[u8; TICKET_LEN], Ticket>>,
+    /// Set once by [`Server::drain`] (SIGTERM, `docs/CLI.md` §6.12,
+    /// ADR-0003). Checked at the top of `session.open`/`session.attach`,
+    /// before any other gate — draining is a hard stop this host applies to
+    /// every connection it still holds, not a per-request policy decision.
+    draining: AtomicBool,
 }
 
 impl std::fmt::Debug for Server {
@@ -268,6 +312,7 @@ impl Server {
             sessions,
             device_name: device_name.into(),
             tickets: Mutex::new(HashMap::new()),
+            draining: AtomicBool::new(false),
         })
     }
 
@@ -465,6 +510,14 @@ impl Server {
             return *denied;
         }
 
+        // ---- Drain gate (CLI.md §6.12, ADR-0003): after the ACL decision,
+        // same placement as `session.open`/`session.attach` — otherwise
+        // `exec.run` would keep admitting brand-new host processes for the
+        // whole drain window while sessions are being torn down around it.
+        if let Err(reply) = self.require_not_draining(request_id) {
+            return *reply;
+        }
+
         // ---- Allowed: issue a single-use ticket. Nothing spawned yet. ----
         let spec = ExecSpec {
             argv: req.argv.clone(),
@@ -516,6 +569,56 @@ impl Server {
                 "session_id must be 1..=64 URL-safe characters",
             )))
         }
+    }
+
+    /// SIGTERM graceful drain (`docs/CLI.md` §6.12, ADR-0003): refuse every
+    /// `session.open`/`session.attach` arriving on a connection this host
+    /// already holds, from the moment [`Server::drain`] is called.
+    /// `RESOURCE_EXHAUSTED` rather than a new code (CLI.md §3.3:
+    /// "server-side limit exceeded") — the host's capacity for new sessions
+    /// is now zero — and non-retryable, because retrying against this same
+    /// process cannot ever succeed again.
+    fn require_not_draining(&self, request_id: u64) -> Result<(), Box<ControlMessage>> {
+        if self.draining.load(Ordering::Acquire) {
+            return Err(Box::new(ControlMessage::error(
+                request_id,
+                wire::Error::new(
+                    ErrorCode::ResourceExhausted,
+                    "qsh serve is shutting down: refusing new sessions",
+                    false,
+                ),
+            )));
+        }
+        Ok(())
+    }
+
+    /// Drain the host: refuse every new `session.open`/`session.attach`
+    /// from this call forward, then close every live session through the
+    /// same procedure `session.close` uses — signal escalation,
+    /// `session.closed{reason:"closed"}` to every attached consumer,
+    /// `close_grace_ms` per step (CLI.md §6.7) — so no PTY child outlives
+    /// the process (§6.12, ADR-0003).
+    ///
+    /// Bounded by [`DRAIN_TIMEOUT`] as a last resort; not otherwise. Setting
+    /// the flag before closing sessions (rather than relying on the accept
+    /// loop having already stopped) is what covers a request racing in on a
+    /// connection this host had already accepted. Idempotent — a second
+    /// call finds nothing left to close.
+    pub async fn drain(&self) {
+        self.draining.store(true, Ordering::Release);
+        if tokio::time::timeout(DRAIN_TIMEOUT, self.sessions.drain(CloseReason::Closed))
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                timeout_secs = DRAIN_TIMEOUT.as_secs(),
+                "qsh serve drain: timed out waiting for every session to close; exiting anyway"
+            );
+        }
+        // See [`DRAIN_FLUSH_GRACE`]: every session is closed in the broker
+        // at this point, but delivering that to an attached consumer is a
+        // separate hop this call has not waited for.
+        tokio::time::sleep(DRAIN_FLUSH_GRACE).await;
     }
 
     /// Common preamble of every session op: the peer must have negotiated
@@ -578,6 +681,16 @@ impl Server {
         if let Err(denied) = self.authorize(ctx, request_id, Action::SessionOpen, SESSION_RESOURCE)
         {
             return *denied;
+        }
+
+        // ---- Drain gate, same placement as `session.attach`: after the
+        // ACL decision so `authorize`'s audit record is still written for a
+        // request arriving during drain — the gate creates no resource
+        // either way, so there is nothing to save by short-circuiting
+        // earlier, and doing so would make `RESOURCE_EXHAUSTED` vs.
+        // `PERMISSION_DENIED` an oracle for host shutdown state. ----
+        if let Err(reply) = self.require_not_draining(request_id) {
+            return *reply;
         }
 
         // ---- `user@` hint (CLI.md §7): only after the ACL decision, so an
@@ -1047,15 +1160,19 @@ impl Server {
             return *denied;
         }
 
-        // ---- Resource bound, same as `exec.run` and `session.open`. ----
+        // ---- Resource bound and drain gate, same reasoning as
+        // `exec.run`/`session.open`. ----
         //
-        // Placed *after* the credential and the ACL rather than before
-        // them, unlike the other two: `RESOURCE_EXHAUSTED` before the
-        // identity gate would be an answer a peer with no credential can
+        // Both placed *after* the credential and the ACL rather than
+        // before them, unlike the capability check above: either answer
+        // before the identity gate is one a peer with no credential could
         // tell apart from `AUTH_FAILED`, and protocol.md §10-2 requires
         // that every pre-identity refusal look the same. Placed before the
         // lease probe and the rotation, so a refused attach still spends
         // no credential and moves nothing.
+        if let Err(reply) = self.require_not_draining(request_id) {
+            return *reply;
+        }
         if let Err(reply) = self.check_ticket_budget(ctx, request_id) {
             return *reply;
         }
@@ -1234,7 +1351,7 @@ impl Server {
     // ------------------------------------------------------------------
 
     /// Accept loop. Runs until `shutdown` resolves or the listener closes,
-    /// then closes the endpoint and waits for it to drain.
+    /// then [`drain`](Self::drain)s the host and closes the endpoint.
     pub async fn run(
         self: Arc<Self>,
         listener: Listener,
@@ -1251,6 +1368,11 @@ impl Server {
                 }
             }
         }
+        // SIGTERM graceful drain (CLI.md §6.12, ADR-0003) runs *before* the
+        // listener closes: closing it first would sever every control
+        // stream — including the ones carrying `session.closed` to an
+        // attached consumer — before `drain` gets a chance to send it.
+        self.drain().await;
         listener.close(0, b"shutdown");
         listener.endpoint().wait_idle().await;
     }
@@ -1724,6 +1846,11 @@ fn broker_error(request_id: u64, err: BrokerError) -> ControlMessage {
             (ErrorCode::SessionConflict, false)
         }
         BrokerError::Backpressure => (ErrorCode::ResourceExhausted, true),
+        // Same code as `require_not_draining`'s own refusal (this is the
+        // rare race that check alone cannot close, `Broker::open_with`'s
+        // comment) and non-retryable for the same reason: retrying against
+        // this process cannot ever succeed again.
+        BrokerError::Draining => (ErrorCode::ResourceExhausted, false),
         // A policy/platform refusal, not a failure — nothing was spawned
         // (no PTY backend on this host, or a foreign `user` hint; CLI.md §7).
         BrokerError::Unsupported(_) => (ErrorCode::Unsupported, false),
@@ -3106,6 +3233,136 @@ mod tests {
         assert_eq!(recs.len(), 1);
         assert_eq!(recs[0].decision, "deny");
         assert_eq!(recs[0].action, "session.attach");
+    }
+
+    // ---- SIGTERM graceful drain (CLI.md §6.12, ADR-0003) --------------
+
+    /// [`Server::drain`] closes every live session through the broker's
+    /// ordinary close procedure — `session.closed{reason:"closed"}` lands
+    /// in the ring exactly like an explicit `session.close` would.
+    #[tokio::test]
+    async fn drain_closes_every_live_session_with_reason_closed() {
+        let rig = allow_rig();
+        let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
+        let (id1, _ticket1, _pipe1) = open_session(&rig, &ctx).await;
+        let (id2, _ticket2, _pipe2) = open_session(&rig, &ctx).await;
+        assert_eq!(rig.broker.session_count(), 2);
+
+        rig.server.drain().await;
+
+        assert_eq!(rig.broker.session_count(), 0);
+        for id in [id1, id2] {
+            let out = SessionBackend::pull(
+                rig.broker.as_ref(),
+                &SessionId(id),
+                Cursor::from_offset(0),
+                1024,
+                Duration::ZERO,
+            )
+            .await
+            .unwrap();
+            assert!(matches!(
+                out.events.last(),
+                Some(ReplayEvent::Control {
+                    event: ControlEvent::Closed {
+                        reason: CloseReason::Closed
+                    },
+                    ..
+                })
+            ));
+        }
+    }
+
+    /// Once draining, `session.open` is refused — `RESOURCE_EXHAUSTED`,
+    /// never a session created.
+    #[tokio::test]
+    async fn draining_refuses_a_new_open_before_creating_a_session() {
+        let rig = allow_rig();
+        let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
+
+        rig.server.drain().await;
+
+        let reply = rig.server.dispatch(&ctx, &session_open(10)).await.unwrap();
+        assert_eq!(error_code(&reply), Some(ErrorCode::ResourceExhausted));
+        assert_eq!(
+            rig.broker.session_count(),
+            0,
+            "a refused open must not create a session, draining or not"
+        );
+    }
+
+    /// The gate an in-flight `session.open`/`session.attach` races against:
+    /// `require_not_draining` has to refuse a session that is *still live*,
+    /// not only one `drain` already finished closing — otherwise the only
+    /// window it would ever cover is the instant after every session is
+    /// already gone, where `session.attach`'s credential check fails first
+    /// on its own (`AuthFailed`, protocol.md §10-2) and never reaches it.
+    ///
+    /// The session's source ignores `SIGHUP`, so [`Broker::close_all`]'s
+    /// per-session `close` parks on the injected clock instead of finishing
+    /// immediately — the real-world equivalent of a child slow to react to
+    /// the first escalation step, held open here on purpose to observe
+    /// `draining = true` with the victim session still in the registry and
+    /// its credential still valid.
+    #[tokio::test]
+    async fn draining_refuses_a_still_live_attach_mid_drain() {
+        let grace = Duration::from_secs(5);
+        let rig = rig_with(
+            Arc::new(AllowAllPinned),
+            Arc::new(PipeFactory::with_ignored_signals(64 * 1024, &[Signal::Hup])),
+            grace,
+        );
+        let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
+        let (opened, _pipe) = open_session_full(&rig, &ctx).await;
+        let pending_before = rig.server.pending_tickets();
+
+        let server = rig.server.clone();
+        let draining = tokio::spawn(async move { server.drain().await });
+        // Let `drain` set the flag and `close_all` send its HUP; the ignored
+        // signal leaves `close` parked on `clock.sleep(grace)`, not finished.
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert!(!draining.is_finished(), "drain must still be in flight");
+        assert_eq!(
+            rig.broker.session_count(),
+            1,
+            "the victim session must still be live for this test to mean anything"
+        );
+
+        let attach_reply = rig
+            .server
+            .dispatch(
+                &ctx,
+                &ControlMessage::new(
+                    11,
+                    control_message::Body::SessionAttach(wire::SessionAttach {
+                        session_id: opened.session_id.clone(),
+                        resume_token: opened.resume_token.clone(),
+                        mode: wire::AttachMode::Rw as i32,
+                        ..Default::default()
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            error_code(&attach_reply),
+            Some(ErrorCode::ResourceExhausted),
+            "a live session must still be refused while draining, not silently attachable"
+        );
+        assert_eq!(
+            rig.server.pending_tickets(),
+            pending_before,
+            "a refused attach mints no ticket"
+        );
+
+        // Escalate past the ignored HUP: the pipe does not ignore TERM, so
+        // one more grace period is all `close` needs to finish, and the
+        // spawned `drain` task — and the test — can end cleanly.
+        rig.clock.advance(grace);
+        draining.await.expect("drain task did not panic");
+        assert_eq!(rig.broker.session_count(), 0);
     }
 
     /// `no_steal` (protocol.md §10, for "신중한 자동화") has to survive the

@@ -166,40 +166,55 @@ async fn run_reverse_unix(
     };
 
     // KNOWN RACE, deferred to Step 4 (`PLAN.md` M3 Step 3 review — LOW,
-    // deliberately not fixed here): two gaps against `server/mod.rs`'s
-    // documented discipline (`Server::serve_connection`'s own shape —
-    // `serve_connection_inner` to completion, *then*
-    // `purge_connection(conn_id).await`, always):
-    //   (a) neither arm below ever calls `purge_connection` — a real
-    //       `Server::serve_connection` always does, right after
-    //       `serve_control` returns, to drop this connection's tickets and
-    //       release any writer lease it held.
-    //   (b) the `shutdown` arm races `serve_control` in the same `select!`,
-    //       so a shutdown mid-flight cancels `serve_control` instead of
-    //       letting it reach its own `blocking.shutdown()` join (the exact
-    //       ordering `serve_control`'s module docs above call out as *why*
-    //       `purge_connection` can safely observe the connection's final
-    //       state) — even if this call site did add a `purge_connection`
-    //       here, a cancelled `serve_control` would make it race the
-    //       parked tasks it never got to join.
-    // Acceptable for Step 3: registration is single-shot and this process
-    // exits immediately after this `select!` resolves either way (no
-    // reconnect loop yet), so the leak is reclaimed by process exit before
-    // anything could observe it — there is no second connection on this
-    // process for a stale lease to block. Step 4's reconnect loop removes
-    // that cover (the process keeps running and re-registers), so Step 4
-    // MUST add the join-before-purge ordering `serve_connection` already
-    // has, here.
+    // deliberately not fixed here): `purge_connection` is never called on
+    // either exit below — a real `Server::serve_connection` always calls it
+    // right after `serve_control` returns, to drop this connection's
+    // tickets and release any writer lease it held. Acceptable for Step 3:
+    // registration is single-shot and this process exits immediately after
+    // the `select!` below resolves either way (no reconnect loop yet), so
+    // the leak is reclaimed by process exit before anything could observe
+    // it — there is no second connection on this process for a stale lease
+    // to block. Step 4's reconnect loop removes that cover (the process
+    // keeps running and re-registers), so Step 4 MUST add the
+    // join-before-purge ordering `serve_connection` already has, here.
+    //
+    // `serve_control` is `tokio::spawn`ed rather than raced directly against
+    // `shutdown` in the `select!` below, on purpose: it is the sole writer
+    // of `session.closed` onto this connection's control stream (via
+    // `reply_tx`/`reply_rx`, `server/mod.rs`'s module docs), and `drain()`
+    // only *queues* that event — delivering it needs `serve_control`'s loop
+    // still running to actually flush it to the wire. Racing it directly
+    // (as an earlier version of this function did) would drop that future
+    // the instant `shutdown` resolves, cancelling the only writer before
+    // `drain` even starts — the same shape `Server::run` avoids by
+    // `tokio::spawn`ing `accept_and_serve` instead of awaiting it inline.
+    let mut serve_control = tokio::spawn({
+        let server = runtime.server.clone();
+        let conn = conn.clone();
+        async move { server.serve_control(&conn, ctl, ctx).await }
+    });
     tokio::pin!(shutdown);
     tokio::select! {
         _ = &mut shutdown => {
+            // SIGTERM graceful drain (`docs/CLI.md` §6.12, ADR-0003):
+            // this process *is* a host (`host_runtime` above), so it owes
+            // the same drain `qsh serve` runs before it exits — refuse new
+            // sessions, close every live one, send `session.closed` to
+            // whoever is attached. `serve_control` keeps running as its own
+            // task through this, so it can still deliver that event before
+            // the connection closes below.
+            runtime.server.drain().await;
             conn.close(0, b"shutdown");
+            // Let `serve_control` observe the closed connection and return
+            // rather than leaving it dangling past this function.
+            let _ = serve_control.await;
             Ok(())
         }
-        result = runtime.server.clone().serve_control(&conn, ctl, ctx) => {
-            let detail = match &result {
-                Ok(()) => "connection closed".to_string(),
-                Err(err) => err.to_string(),
+        joined = &mut serve_control => {
+            let detail = match joined {
+                Ok(Ok(())) => "connection closed".to_string(),
+                Ok(Err(err)) => err.to_string(),
+                Err(join_err) => format!("serve_control task failed: {join_err}"),
             };
             tracing::warn!(controller, %detail, "qsh reverse: connection to the controller ended");
             Err(OpError::new(
