@@ -41,6 +41,17 @@ pub use generated::*;
 /// of this.
 pub const LOCAL_WAIT_MAX: Duration = Duration::from_secs(60);
 
+/// The only `LocalHello.version` this build speaks, on both ends of a
+/// localctl conduit — `qsh.local.v1` has had exactly one version since
+/// Step 1's contract freeze. Centralized here (rather than duplicated as a
+/// private constant in the CLI-process client and re-derived by the daemon)
+/// so the two ends cannot silently drift, and so the daemon has a single
+/// canonical value to check `LocalHello.version` against: `qsh listen` is a
+/// resident daemon that can genuinely outlive a CLI upgrade, so a future
+/// version bump on one end while the other is still running is the normal
+/// case this field exists to fail closed on, not an edge case.
+pub const LOCAL_HELLO_VERSION: u32 = 1;
+
 /// Encode a `qsh.local.v1` message as one length-prefixed frame, under the
 /// same [`CONTROL_FRAME_MAX`] cap the wire control stream uses — "§5와
 /// 동일한 frame layer" (`docs/design/protocol.md` §11-3): the *parser* is
@@ -400,6 +411,11 @@ mod tests {
         // edit to one does not silently drift from the other's documented
         // rationale.
         assert_eq!(LOCAL_WAIT_MAX, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn local_hello_version_is_one() {
+        assert_eq!(LOCAL_HELLO_VERSION, 1);
     }
 
     #[test]

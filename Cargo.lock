@@ -2034,6 +2034,7 @@ dependencies = [
  "libc",
  "portable-pty",
  "proptest",
+ "prost",
  "qsh-proto",
  "qsh-transport",
  "rand 0.9.5",

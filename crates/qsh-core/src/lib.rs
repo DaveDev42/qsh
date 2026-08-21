@@ -20,6 +20,13 @@ pub mod config;
 pub mod exec;
 pub mod handshake;
 pub mod identity;
+// localctl (UDS IPC to this machine's resident `qsh listen` daemon) has no
+// meaning on Windows — no daemon, no socket, no peer credential concept —
+// so the whole module tree compiles out there rather than growing internal
+// platform splits (`crates/qsh-core/src/localctl/mod.rs` module docs,
+// `docs/CLI.md` §6.13, `PLAN.md` M3 Step 5).
+#[cfg(unix)]
+pub mod localctl;
 pub mod ops;
 pub mod pty;
 pub mod resume;

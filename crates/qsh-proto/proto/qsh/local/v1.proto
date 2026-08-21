@@ -49,15 +49,29 @@
 // stream identity is always the in-band header the receiver reads first, so
 // a local-only kind has no reason to exist in the frozen remote vocabulary.
 //
-// Every daemon-to-client frame on a localctl conduit — the reply to a
-// `LocalHello` and the reply to a `LOCAL_ADMIN` request alike — is exactly
-// one `LocalResponse`. This mirrors `qsh.wire.v1.Response`'s `oneof body`
-// envelope deliberately: two structurally distinct success payloads
-// (`LocalHelloAck{string,string,...}`) and a failure payload
-// (`LocalError{string,string}`) that happen to share the same field shapes
-// are not safely distinguishable on the wire without a discriminator —
-// `LocalResponse` is that discriminator, so a caller never has to guess
-// which reply type it received.
+// Every daemon-to-client frame on a localctl conduit — whether it answers a
+// `LOCAL_CONTROL`/`LOCAL_STREAM` `LocalHello` or a `LOCAL_ADMIN` request —
+// is exactly one `LocalResponse`. This mirrors `qsh.wire.v1.Response`'s
+// `oneof body` envelope deliberately: several structurally distinct
+// success payloads (`LocalHelloAck{string,string,...}`,
+// `LocalHostListResult{...}`) and a failure payload
+// (`LocalError{string,string}`) that happen to share overlapping field
+// shapes are not safely distinguishable on the wire without a
+// discriminator — `LocalResponse` is that discriminator, so a caller never
+// has to guess which reply type it received.
+//
+// **`LocalHelloAck` is a `LOCAL_CONTROL`/`LOCAL_STREAM`-only reply.** Both
+// of those kinds name a specific registered host in `LocalHello.host`, and
+// every field `LocalHelloAck` carries (`host`, `peer_fingerprint`,
+// `generation`, `capabilities`) is a fact about that one host's live
+// registration — see `LocalHelloAck`'s own doc. `LOCAL_ADMIN` is, by its
+// own definition below, "never about any particular host": `LocalHello.host`
+// is ignored for it, so there is no host for a `LocalHelloAck` to describe.
+// A `LOCAL_ADMIN` conduit instead pipelines its `LocalHello` straight into
+// the specific request that follows (e.g. `LocalHostList`) and answers with
+// exactly one `LocalResponse` for that request — never a `LocalHelloAck`
+// first. (`docs/design/protocol.md` §11-3 states this split explicitly;
+// PR 5a's daemon/client implement and test it this way.)
 
 syntax = "proto3";
 
@@ -108,7 +122,8 @@ message LocalResponse {
   }
 }
 
-// The daemon's success reply to a `LocalHello`.
+// The daemon's success reply to a `LOCAL_CONTROL`/`LOCAL_STREAM`
+// `LocalHello` (never sent for `LOCAL_ADMIN` — see this file's header).
 message LocalHelloAck {
   // The resolved host alias (echoes `LocalHello.host`).
   string host = 1;

@@ -114,14 +114,33 @@ pub fn run(workspace_root: &Path) -> Result<()> {
     }
 }
 
-/// A ban on naming `forbidden` anywhere under `dir` (relative to the
+/// Where a [`ModuleBan`] applies.
+enum Scope {
+    /// Every `.rs` file under this workspace-relative directory, recursively.
+    Dir(&'static str),
+    /// Exactly this one workspace-relative file — not its whole directory,
+    /// so a sibling file in the same module (e.g. the transport bridge) can
+    /// stay exempt.
+    File(&'static str),
+}
+
+impl Scope {
+    /// The workspace-relative path string, for lookup/dedup keys.
+    fn path(&self) -> &'static str {
+        match self {
+            Scope::Dir(p) | Scope::File(p) => p,
+        }
+    }
+}
+
+/// A ban on naming `forbidden` anywhere within `scope` (relative to the
 /// workspace root). Enforced at source granularity, unlike the manifest
 /// matrix.
 struct ModuleBan {
-    /// Directory (workspace-relative) the ban applies to, recursively.
-    dir: &'static str,
+    /// Where the ban applies: a whole directory (recursively) or one file.
+    scope: Scope,
     /// The token (a crate name in Rust path form, or a `crate::` path) that
-    /// must not appear in any `.rs` file under `dir`, comments excluded.
+    /// must not appear in any in-scope `.rs` file, comments excluded.
     forbidden: &'static str,
     /// Why, for the failure message.
     reason: &'static str,
@@ -138,46 +157,123 @@ const BROKER_DIR: &str = "crates/qsh-core/src/broker";
 const BROKER_REASON: &str = "the SessionBackend seam must not name a transport type (ADR-0003); \
      keep the broker transport-free so a supervisor can implement it over IPC";
 
+/// The six-token set PLAN.md M3 Step 5(a) reuses verbatim from `BROKER_DIR`
+/// for `localctl`'s other transport-free surfaces.
+const BROKER_TOKEN_SET: [&str; 6] = [
+    "qsh_transport",
+    "quinn",
+    "rustls",
+    "crate::Principal",
+    "crate::Fingerprint",
+    "crate::client",
+];
+
+/// `localctl/client.rs` (CLI-process side) is pure UDS + `qsh-proto`
+/// framing and must never reach for a transport type; `localctl/frame.rs`
+/// is the shared conduit codec underneath it and is bound by the same rule.
+/// `localctl/daemon.rs` is the bridge to QUIC and is deliberately *not*
+/// listed here — file scope, not the directory, is what lets it stay
+/// exempt (PLAN.md M3 Step 5(a)).
+const LOCALCTL_FRAME_FILE: &str = "crates/qsh-core/src/localctl/frame.rs";
+const LOCALCTL_CLIENT_FILE: &str = "crates/qsh-core/src/localctl/client.rs";
+const LOCALCTL_TRANSPORT_REASON: &str = "localctl/{frame,client}.rs are pure UDS + qsh-proto framing on the CLI-process side; \
+     localctl/daemon.rs is the transport bridge and is deliberately exempt (PLAN.md M3 Step 5(a))";
+
+/// `reverse/registry.rs` holds `ReverseEntry` metadata only (Step 3 already
+/// narrowed it — the live `client::Session` stays in `reverse/listen.rs`),
+/// so it can carry the same six-token ban as the broker: `crate::client`
+/// staying clean here is the mechanical proof that a `ReverseEntry` never
+/// holds a live session.
+const REGISTRY_FILE: &str = "crates/qsh-core/src/reverse/registry.rs";
+const REGISTRY_REASON: &str = "reverse/registry.rs is metadata-only (Step 3); it must not hold a live client::Session or \
+     name a transport type — same token set as BROKER_DIR (PLAN.md M3 Step 5(a))";
+
+/// `qsh-cli/src` never opens a UDS socket directly — it goes through
+/// `qsh-core`'s `localctl::client`. Scope is `src/` only, not the crate
+/// root: `crates/qsh-cli/tests/localctl_perms.rs` pokes UDS permissions
+/// directly and legitimately needs `UnixStream` (PLAN.md M3 Step 5(a)).
+const CLI_SRC_DIR: &str = "crates/qsh-cli/src";
+const CLI_SRC_REASON: &str = "qsh-cli talks to a daemon only through qsh-core's localctl client, never by opening a UDS \
+     socket itself (PLAN.md M3 Step 5(a)); crates/qsh-cli/tests is out of scope for this rule";
+
 fn module_bans() -> Vec<ModuleBan> {
-    [
-        "qsh_transport",
-        "quinn",
-        "rustls",
-        "crate::Principal",
-        "crate::Fingerprint",
-        "crate::client",
-    ]
-    .into_iter()
-    .map(|forbidden| ModuleBan {
-        dir: BROKER_DIR,
-        forbidden,
-        reason: BROKER_REASON,
-    })
-    .collect()
+    let mut bans: Vec<ModuleBan> = BROKER_TOKEN_SET
+        .into_iter()
+        .map(|forbidden| ModuleBan {
+            scope: Scope::Dir(BROKER_DIR),
+            forbidden,
+            reason: BROKER_REASON,
+        })
+        .collect();
+
+    for file in [LOCALCTL_FRAME_FILE, LOCALCTL_CLIENT_FILE] {
+        for forbidden in ["qsh_transport", "quinn", "rustls"] {
+            bans.push(ModuleBan {
+                scope: Scope::File(file),
+                forbidden,
+                reason: LOCALCTL_TRANSPORT_REASON,
+            });
+        }
+    }
+
+    for forbidden in BROKER_TOKEN_SET {
+        bans.push(ModuleBan {
+            scope: Scope::File(REGISTRY_FILE),
+            forbidden,
+            reason: REGISTRY_REASON,
+        });
+    }
+
+    for forbidden in ["UnixStream", "UnixListener"] {
+        bans.push(ModuleBan {
+            scope: Scope::Dir(CLI_SRC_DIR),
+            forbidden,
+            reason: CLI_SRC_REASON,
+        });
+    }
+
+    bans
 }
 
 /// Enforce every [`ModuleBan`], appending a violation line per offending
 /// occurrence.
 fn check_module_bans(workspace_root: &Path, violations: &mut Vec<String>) -> Result<()> {
-    let mut checked_dirs = std::collections::BTreeSet::new();
+    let mut reported_missing = std::collections::BTreeSet::new();
     for ban in module_bans() {
-        let dir = workspace_root.join(ban.dir);
-        if !dir.is_dir() {
-            if !checked_dirs.insert(ban.dir) {
-                continue; // reported once per directory
+        let target = workspace_root.join(ban.scope.path());
+        let files: Vec<PathBuf> = match ban.scope {
+            Scope::Dir(dir) => {
+                if !target.is_dir() {
+                    if reported_missing.insert(dir) {
+                        // The directory is expected to exist once its
+                        // consumer lands; a missing directory is itself a
+                        // regression worth flagging.
+                        violations.push(format!(
+                            "module-ban target {} does not exist (xtask/src/arch.rs)",
+                            target.display()
+                        ));
+                    }
+                    continue;
+                }
+                let mut files = Vec::new();
+                collect_rs_files(&target, &mut files)
+                    .with_context(|| format!("scanning {}", target.display()))?;
+                files.sort();
+                files
             }
-            // The directory is expected to exist once the broker lands; a
-            // missing directory is itself a regression worth flagging.
-            violations.push(format!(
-                "module-ban target {} does not exist (xtask/src/arch.rs)",
-                dir.display()
-            ));
-            continue;
-        }
-        let mut files = Vec::new();
-        collect_rs_files(&dir, &mut files)
-            .with_context(|| format!("scanning {}", dir.display()))?;
-        files.sort();
+            Scope::File(file) => {
+                if !target.is_file() {
+                    if reported_missing.insert(file) {
+                        violations.push(format!(
+                            "module-ban target {} does not exist (xtask/src/arch.rs)",
+                            target.display()
+                        ));
+                    }
+                    continue;
+                }
+                vec![target.clone()]
+            }
+        };
         for file in files {
             let text =
                 fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
@@ -268,9 +364,13 @@ mod tests {
 
         let mut violations = Vec::new();
         check_module_bans(root.path(), &mut violations).unwrap();
-        assert_eq!(violations.len(), 1, "{violations:?}");
-        assert!(violations[0].contains("session.rs:1"));
-        assert!(violations[0].contains("qsh_transport"));
+        let hits: Vec<_> = violations
+            .iter()
+            .filter(|v| v.contains("session.rs"))
+            .collect();
+        assert_eq!(hits.len(), 1, "{violations:?}");
+        assert!(hits[0].contains("session.rs:1"));
+        assert!(hits[0].contains("qsh_transport"));
     }
 
     /// Prose mentioning the crate in a doc comment must NOT trip the ban —
@@ -290,7 +390,8 @@ mod tests {
 
         let mut violations = Vec::new();
         check_module_bans(root.path(), &mut violations).unwrap();
-        assert!(violations.is_empty(), "{violations:?}");
+        let hits: Vec<_> = violations.iter().filter(|v| v.contains("mod.rs")).collect();
+        assert!(hits.is_empty(), "{violations:?}");
     }
 
     /// The crate-root re-export of a transport type (`crate::Principal`)
@@ -309,10 +410,14 @@ mod tests {
 
         let mut violations = Vec::new();
         check_module_bans(root.path(), &mut violations).unwrap();
-        assert_eq!(violations.len(), 3, "{violations:?}");
-        assert!(violations.iter().any(|v| v.contains("crate::Principal")));
-        assert!(violations.iter().any(|v| v.contains("crate::client")));
-        assert!(violations.iter().any(|v| v.contains("quinn")));
+        let hits: Vec<_> = violations
+            .iter()
+            .filter(|v| v.contains("lease.rs"))
+            .collect();
+        assert_eq!(hits.len(), 3, "{violations:?}");
+        assert!(hits.iter().any(|v| v.contains("crate::Principal")));
+        assert!(hits.iter().any(|v| v.contains("crate::client")));
+        assert!(hits.iter().any(|v| v.contains("quinn")));
     }
 
     /// A nested module file is scanned too.
@@ -325,24 +430,166 @@ mod tests {
 
         let mut violations = Vec::new();
         check_module_bans(root.path(), &mut violations).unwrap();
-        assert_eq!(violations.len(), 1, "{violations:?}");
-        assert!(violations[0].contains("inner.rs"));
+        let hits: Vec<_> = violations
+            .iter()
+            .filter(|v| v.contains("inner.rs"))
+            .collect();
+        assert_eq!(hits.len(), 1, "{violations:?}");
     }
 
-    /// A missing broker directory is itself flagged (the ban target must
-    /// exist once the broker lands).
+    /// Every configured module-ban target that doesn't exist is flagged
+    /// once — not once per token bound to it (the ban targets must exist
+    /// once their consumers land: `BROKER_DIR`, the two `localctl` files,
+    /// `REGISTRY_FILE`, and `CLI_SRC_DIR`).
     #[test]
-    fn module_ban_flags_a_missing_target() {
+    fn module_ban_flags_each_missing_target_exactly_once() {
         let root = tempfile::tempdir().unwrap();
         let mut violations = Vec::new();
         check_module_bans(root.path(), &mut violations).unwrap();
-        assert_eq!(violations.len(), 1, "{violations:?}");
-        assert!(violations[0].contains("does not exist"));
+        assert_eq!(violations.len(), 5, "{violations:?}");
+        assert!(
+            violations.iter().all(|v| v.contains("does not exist")),
+            "{violations:?}"
+        );
     }
 
-    /// The real workspace broker must be transport-free.
+    /// `localctl/frame.rs` and `client.rs` ban `qsh_transport`/`quinn`/
+    /// `rustls` — but `daemon.rs`, the transport bridge, is deliberately
+    /// exempt because the ban is file-scoped, not directory-scoped.
     #[test]
-    fn real_broker_is_transport_free() {
+    fn module_ban_flags_transport_in_localctl_frame_and_client_but_daemon_is_exempt() {
+        let root = tempfile::tempdir().unwrap();
+        let localctl = root.path().join("crates/qsh-core/src/localctl");
+        fs::create_dir_all(&localctl).unwrap();
+        fs::write(
+            localctl.join("frame.rs"),
+            "use qsh_transport::Connection;\n",
+        )
+        .unwrap();
+        fs::write(
+            localctl.join("client.rs"),
+            "fn f() { let _ = quinn::Endpoint::client; }\n",
+        )
+        .unwrap();
+        fs::write(
+            localctl.join("daemon.rs"),
+            "use qsh_transport::Connection;\nuse quinn::Endpoint;\nuse rustls::ClientConfig;\n",
+        )
+        .unwrap();
+
+        let mut violations = Vec::new();
+        check_module_bans(root.path(), &mut violations).unwrap();
+
+        // Match on `<file>:<line>` (the violation's location prefix), not a
+        // bare filename — the shared reason string itself mentions
+        // `daemon.rs` in prose, which would otherwise false-positive here.
+        let frame_hits: Vec<_> = violations
+            .iter()
+            .filter(|v| v.contains("frame.rs:"))
+            .collect();
+        let client_hits: Vec<_> = violations
+            .iter()
+            .filter(|v| v.contains("client.rs:"))
+            .collect();
+        let daemon_hits: Vec<_> = violations
+            .iter()
+            .filter(|v| v.contains("daemon.rs:"))
+            .collect();
+
+        assert_eq!(frame_hits.len(), 1, "{violations:?}");
+        assert!(frame_hits[0].contains("qsh_transport"));
+        assert_eq!(client_hits.len(), 1, "{violations:?}");
+        assert!(client_hits[0].contains("quinn"));
+        assert!(
+            daemon_hits.is_empty(),
+            "daemon.rs is the transport bridge and must stay exempt: {violations:?}"
+        );
+    }
+
+    /// `reverse/registry.rs` bans the same six-token set as `BROKER_DIR` —
+    /// a sibling file in the same directory (e.g. `listen.rs`, the live
+    /// bridge) is not in scope for this rule.
+    #[test]
+    fn module_ban_flags_a_leak_in_reverse_registry_but_not_its_sibling_listen_rs() {
+        let root = tempfile::tempdir().unwrap();
+        let reverse = root.path().join("crates/qsh-core/src/reverse");
+        fs::create_dir_all(&reverse).unwrap();
+        fs::write(
+            reverse.join("registry.rs"),
+            "use crate::client::Session;\nfn f() { let _ = quinn::Endpoint::client; }\n",
+        )
+        .unwrap();
+        fs::write(
+            reverse.join("listen.rs"),
+            "use qsh_transport::Connection; // legitimate: listen.rs is the live bridge\n",
+        )
+        .unwrap();
+
+        let mut violations = Vec::new();
+        check_module_bans(root.path(), &mut violations).unwrap();
+
+        let registry_hits: Vec<_> = violations
+            .iter()
+            .filter(|v| v.contains("registry.rs"))
+            .collect();
+        let listen_hits: Vec<_> = violations
+            .iter()
+            .filter(|v| v.contains("listen.rs"))
+            .collect();
+
+        assert_eq!(registry_hits.len(), 2, "{violations:?}");
+        assert!(registry_hits.iter().any(|v| v.contains("crate::client")));
+        assert!(registry_hits.iter().any(|v| v.contains("quinn")));
+        assert!(
+            listen_hits.is_empty(),
+            "listen.rs is not in scope for the registry rule: {violations:?}"
+        );
+    }
+
+    /// `qsh-cli/src` bans `UnixStream`/`UnixListener` — but the ban is
+    /// scoped to `src/` only, so `crates/qsh-cli/tests/localctl_perms.rs`
+    /// (which legitimately needs `UnixStream` to probe UDS permissions) is
+    /// unaffected.
+    #[test]
+    fn module_ban_flags_uds_apis_under_cli_src_but_tests_are_exempt() {
+        let root = tempfile::tempdir().unwrap();
+        let cli_src = root.path().join("crates/qsh-cli/src");
+        fs::create_dir_all(&cli_src).unwrap();
+        fs::write(cli_src.join("main.rs"), "use tokio::net::UnixStream;\n").unwrap();
+
+        let cli_tests = root.path().join("crates/qsh-cli/tests");
+        fs::create_dir_all(&cli_tests).unwrap();
+        fs::write(
+            cli_tests.join("localctl_perms.rs"),
+            "use tokio::net::UnixStream;\nuse tokio::net::UnixListener;\n",
+        )
+        .unwrap();
+
+        let mut violations = Vec::new();
+        check_module_bans(root.path(), &mut violations).unwrap();
+
+        let src_hits: Vec<_> = violations
+            .iter()
+            .filter(|v| v.contains("main.rs"))
+            .collect();
+        let test_hits: Vec<_> = violations
+            .iter()
+            .filter(|v| v.contains("localctl_perms.rs"))
+            .collect();
+
+        assert_eq!(src_hits.len(), 1, "{violations:?}");
+        assert!(src_hits[0].contains("UnixStream"));
+        assert!(
+            test_hits.is_empty(),
+            "crates/qsh-cli/tests is out of scope for this rule: {violations:?}"
+        );
+    }
+
+    /// The real workspace tree must respect every module ban: the broker,
+    /// `localctl/{frame,client}.rs` (with `daemon.rs` exempt),
+    /// `reverse/registry.rs`, and `qsh-cli/src`.
+    #[test]
+    fn real_tree_respects_all_module_bans() {
         let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let mut violations = Vec::new();
         check_module_bans(workspace_root, &mut violations).unwrap();
