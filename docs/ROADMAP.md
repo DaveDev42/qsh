@@ -1,8 +1,8 @@
 # QSH 로드맵
 
 **상태:** 확정 (구현과 어긋나는 내용을 발견하면 이 문서를 먼저 갱신한다)
-**작성일:** 2026-08-17
-**현재 위치:** M2 완료 (2026-08-19) → **다음은 M3**
+**작성일:** 2026-08-17 · **개정:** 2026-08-21 — 프로덕션 준비도 감사(HEAD `1d5d1b0`) 반영: M3/M5/M7/M8/M9 범위·수용 기준 증보, "마일스톤 마감 공통 절차" 신설. 새 마일스톤은 만들지 않았다 — 감사가 찾은 갭 전부를 기존 마일스톤에 명시 귀속시킨 것이 이 개정의 전부다.
+**현재 위치:** M3 진행 중 (Step 3까지 랜딩, 2026-08-21)
 
 이 문서는 P0 MVP까지의 canonical 마일스톤 기록이다. 각 마일스톤의 "수용 기준"이 곧 그 마일스톤의 **완료 정의(Definition of Done)** 다 — 수용 기준을 통과하는 테스트/시연 없이는 마일스톤을 닫지 않는다. SC 번호는 PRD §15 성공 기준의 순번이다 (SC1: 신규 두 장비 5분 내 연결, SC2: 한 명령 접속, SC3: 네트워크 전환 ≥95% 유지/resume, SC4: resume 가능한 단절에서 output 무손실, SC5: client crash가 remote PTY를 죽이지 않음, SC6: 모든 privileged op의 ACL 추적성, SC7: 공개 beta 전 독립 보안 리뷰).
 
@@ -21,6 +21,13 @@
 7. **M1부터 지켜야 할 선행 불변식** (기능은 나중이어도 구조는 지금): (a) 모든 출력 바이트는 생성 지점에서 sequence 태깅 (M2 replay의 전제), (b) 모든 op 앞에 `Authorizer::check(principal, action, resource)` 호출 + audit 기록, (c) connection 방향(initiator/responder)과 세션 역할(controller/target)을 독립 축으로 유지 (M3 reverse의 전제).
 
 ## 2. 마일스톤
+
+### 마일스톤 마감 공통 절차 (2026-08-21 감사 개정)
+
+모든 마일스톤은 자신의 수용 기준에 더해 다음 두 검사를 통과해야 닫힌다. 근거: M2가 자기 계약 두 건(SIGTERM drain — `docs/CLI.md` §6.12의 "(M2, ADR-0003)" 태그 문장, exec 환경 위생 — 같은 문서의 pinned env 문장)을 어긴 채 Done으로 표시될 수 있었던 구조적 원인은, DoD 목록과 구속 문서의 마일스톤 태그를 대조하는 절차가 없었다는 것이다.
+
+1. **구속 문서 태그 대조** — `docs/CLI.md`·`docs/PRD.md`·`docs/adr/`에서 이 마일스톤 번호가 태그되었거나 이 마일스톤이 구현한 기능을 계약으로 확정한 문장을 전수 대조해, 각각이 (i) DoD 항목으로 검증되었거나 (ii) 후속 마일스톤에 명시 귀속된 유예임을 확인한다. 어느 쪽도 아닌 문장이 하나라도 있으면 마일스톤을 닫지 않는다.
+2. **README 동기화** — README(SC1의 산출물)의 기능 목록·Known limitations·인터임 위험 고지를 마일스톤 종료 시점의 실제 동작·권한과 일치시킨다. 인터임 고지가 실제 권한보다 좁으면 그 자체가 결함이다.
 
 ### M0 — 결정·스캐폴드·CI ✅ 완료 (2026-08-17)
 
@@ -51,14 +58,18 @@
   - **클라이언트를 `yes` 실행 중 `kill -9` → reattach → last_seq부터 이어붙인 결과가 기준 stream과 byte-identical** (SC4). remote PTY와 자식 프로세스는 클라이언트 사망에 생존 (SC5). (`crates/qsh-cli/tests/session_kill9.rs` — 실제 attach 프로세스 SIGKILL, ring 밖 producer-corpus oracle 포함.)
   - Chaos proxy `repath()` → connection migration으로 세션 무중단; `sever()` → 2초 내 재dial + resume. (`crates/qsh-cli/tests/attach_recovery.rs` — driver 자신의 `qsh::recovery` 레코드로 단언, `DETECTION_CEILING`으로 감지 예산의 순환 참조 차단.)
   - 실기기 Wi-Fi↔테더링 전환 20회 수동 캠페인, recovery 필드 기록 (SC3 조기 측정). (2026-08-19 수행, `docs/campaigns/m2-mobility.md` — path 사망 10회 전부 자동 resume·세션 사망 0·gap 0으로 SC4/SC5 실기기 확인; 예산 내 복구 1/10은 Tailscale underlay 재경로(~4–5 s)가 지배 요인으로 M8 백로그 이관, qsh 자체 resume은 233–1076 ms. SC3 판정은 M8 N ≥ 60.)
+- **사후 감사 (2026-08-21):** 완료 표시 후 감사에서 M2 귀속 계약 부채 2건 발견 — ① `qsh serve`의 SIGTERM graceful drain 미구현(`docs/CLI.md` §6.12 "(M2, ADR-0003)" 문장 위반; SIGTERM 시 PTY 자식이 고아로 살아남음이 실측 확인됨), ② `exec.run`이 serve 프로세스 환경을 `env_clear` 없이 상속하고 client가 `PATH`를 지정할 수 있음(같은 문서의 "호스트가 고정한다" 문장 위반). 상환은 M3의 감사 개정분(PLAN.md Step 3.5)이 소유한다. 재발 방지가 위 "마일스톤 마감 공통 절차" 1번이다.
 - **크기:** 5ew
 
-### M3 — 역방향 (다음)
+### M3 — 역방향 (진행 중)
 
 - **범위:** `qsh listen`(controller), `qsh reverse controller`(target, 등록 + heartbeat + 백오프 재접속), `host.reverse` ACL action 검사 지점, reverse host가 `hosts`에 `connection_mode:"reverse"`로 표시, `qsh attach <name>`이 역방향 연결 위에서 동작. 연결 방향/세션 역할 축 실사용.
+- **감사 개정 (2026-08-21) 추가 범위:** ① **M2 계약 부채 상환** — `qsh serve`(및 M3의 두 상주 모드) SIGTERM graceful drain(`docs/CLI.md` §6.12 문장의 이행)과 `exec.run` 환경 위생(`env_clear` + 호스트 고정 key 재적용). ② **세션 소유권 P0** — `session.control` action(write/resize)을 세션 opener principal에 결합. PRD §6이 조회·읽기·종료는 교차 기기 ACL 범위로 명시 허용하므로 결합 대상은 control 값 op뿐이다. M5 정책 어휘(resource-ownership 축)의 선행 결정이며, M5로 미루면 정책 어휘가 소유자 개념 없이 먼저 굳는다.
 - **명시적 out:** relay, NAT traversal, discovery.
 - **수용 기준 (DoD):** NAT 뒤 target이 `qsh reverse` → controller에서 `qsh attach`로 target의 셸 획득. target 네트워크를 60초 차단 → 재등록되고 **같은 세션**이 resume. `qsh hosts --json`이 forward/reverse를 함께 반환(§6.1). controller reachability 요구가 docs와 doctor 메시지에 명시.
-- **크기:** 2ew
+  - **(감사 개정)** 자식 셸이 살아 있는 `qsh serve`에 SIGTERM → 전 세션 close 절차 → `session.closed{reason:"closed"}` 송신 → drain 완료 후 잔존 자식 process group 0 (L5 실프로세스 테스트). `exec.run` 자식에서 serve 환경 마커가 보이지 않고 client의 `PATH` 지정이 무시됨.
+  - **(감사 개정)** 타 principal 세션에 대한 `session.write/resize`가 거부되고 audit에 deny가 남음(소유권 P0). 병렬 동시 등록(같은/다른 fingerprint)·병렬 다중 세션 경합 테스트가 존재 — 순차 시나리오만으로 마일스톤을 닫지 않는다.
+- **크기:** 2ew + 0.5ew(감사 개정분)
 
 ### M4 — 터널
 
@@ -70,7 +81,9 @@
 ### M5 — ACL 정책 + audit
 
 - **범위:** TOML 정책 로더, principal 매칭(fingerprint·CA 발급 user/device), action wildcard(`session.*` 형태, 후행 `.*`만), default-deny, PRD §9 action 전체(미구현 기능의 `forward.socks`/`file.*`는 정의하되 항상 deny), `qsh acl check`, 전 privileged op의 구조화 audit.
+- **감사 개정 (2026-08-21) 추가 범위:** ① **audit 수명주기** — "audit 완전성"에서 한 걸음 더: `[audit]` config(회전·크기 상한·retention), 런타임 스레드 밖 비동기 쓰기(현재 동기 blocking I/O), 디스크 만실 시 fail-closed 정책(현재 ENOSPC fail-open). ② **resource-ownership 축** — M3가 넣은 opener-principal P0 결합을 정책 어휘로 승격(리소스에 소유자 개념, 정책이 owner 기준으로 매칭 가능). ③ **거부 메시지 균일성** — deny 응답이 거부된 action/capability를 노출하지 않게 통일. 선례는 `reverse/admit.rs`의 단일 문면 테스트이고, 현재 forward 경로(`server/mod.rs`)의 deny 메시지는 action 이름을 노출한다 — interim allow-all에서는 정보량 0이지만 M5 정책이 켜지는 순간 capability 열거 oracle이 된다.
 - **수용 기준 (DoD):** `qsh acl check` 결과 == 실제 enforcement 결과 (같은 코드 경로임을 표 기반 테스트로 증명). **op registry를 열거해 audit 레코드 없는 op가 있으면 실패하는 테스트** (SC6). Property test: 임의 정책에서 어떤 rule도 커버하지 않는 action은 반드시 Deny.
+  - **(감사 개정)** 모든 `PERMISSION_DENIED` 응답 문면이 동일함을 op 전수로 단언하는 테스트. audit 수명주기 동작 테스트(회전 트리거·상한 준수·디스크 만실 fail-closed).
 - **크기:** 2ew
 
 ### M6 — MCP adapter
@@ -82,20 +95,25 @@
 ### M7 — Trust UX·profiles·doctor
 
 - **범위:** invite code pairing(ADR-0002: 단회용·10분 TTL·TLS exporter channel binding), private CA(`qsh cert`), host profile/config, `qsh doctor`(UDP probe·경로·cert 만료·keystore·PATH 상 타 qsh 경고 등), `qsh capabilities`/`qsh schema --json`, 첫 실행 경험, man page·설치 문서.
+- **감사 개정 (2026-08-21) 추가 범위:** ① **`trust remove`의 유효 범위 결정** — 현재 semantics(살아 있는 연결에는 무효, 다음 handshake부터 적용)를 즉시 종료로 바꾸거나, 현행 유지를 선택하면 그 사실을 구속 문서·README·doctor가 명시 고지한다. 유예된 revocation UX(아래 명시적 out)와 별개로, **유예 기간의 실제 동작을 문서화하는 것은 유예할 수 없다.** ② pairing 안내 문구에 대역 외 fingerprint 대조 경로("이 지문을 다른 채널로 상대와 대조하라")를 포함. ③ `qsh version --json`에 빌드/커밋 식별자 추가(additive).
 - **명시적 out:** cert rotation/revocation UX, background service 설치, QR.
 - **수용 기준 (DoD):** **스톱워치 테스트 — 한 번도 설정한 적 없는 두 장비가 README만 보고 `qsh user@host`까지 5분 이내, 독립 3회 측정·기록** (SC1, SC2). doctor가 UDP 차단/경로 없음/비신뢰 peer/만료 cert/keystore 부재(headless)/clock skew를 각각 실행 가능한 메시지 + 안정된 JSON code로 진단. `qsh capabilities --json` == checked-in fixture (scope-creep tripwire).
+  - **(감사 개정)** `trust remove` 후 기존 연결·신규 handshake 각각의 동작이 테스트로 고정되고 문서·doctor 고지와 일치.
 - **크기:** 2.5ew
 
 ### M8 — Hardening
 
 - **범위:** cargo-fuzz 타깃 + corpus + OSS-Fuzz 제출, stateful broker fuzzer, 24h soak, fd/메모리 누수 게이트, **실기기 mobility 캠페인**, perf 게이트, threat model 문서, **wire format freeze**, 외부 보안 리뷰 착수.
+- **감사 개정 (2026-08-21) 추가 범위 — 적대적 부하 게이트:** 인터넷에 직접 노출되는 데몬에 현재 방어선이 하나도 없다(주소 검증 없음·연결 수 무제한·세션 수 무제한·`receive_window: VarInt::MAX`). ① `Incoming::retry()` 주소 검증(스푸핑 Initial 1패킷당 상태 생성 차단), ② accept 동시성 상한과 source rate limit, ③ `[serve].max_sessions`와 principal별 세션 쿼터 — 초과는 `RESOURCE_EXHAUSTED`(CLI.md §3.3 기정의 어휘), ④ M5가 구현한 audit 수명주기의 부하 하 검증(스푸핑 flood → 세션 없는 audit 쓰기 → 디스크 만실 → resume 실패 연쇄의 차단). 그 외: handshake matrix에 **ALPN 불일치** 케이스 추가(§4의 "application 상태 생성 전 실패" 불변식을 의존성 상속이 아니라 테스트로 고정 — wire freeze 전에), device 개인키 프로세스 상주 사본의 `Zeroizing` 적용, TUI 펌프 스레드 spawn 실패 panic 제거(보안 리뷰 준비 항목).
 - **수용 기준 (DoD):** parser 타깃당 누적 ≥72 fuzz-hours 무crash. 24h/100-session soak: idle listener ≤30MB, 세션당 buffer ≤8MB, fd 무증가. **실기기 Wi-Fi↔테더링 ≥60회(macOS+Linux)에서 자동 유지+resume ≥95%, migrated/resumed 분해 보고** (SC3 — 통과 기준은 사전 정의: idle timeout에 기대지 않는 2초 내 재dial). 프로토콜 스펙 freeze 후 독립 리뷰 계약 (SC7 — 리뷰는 리드타임이 있으므로 M5 시점에 예약).
+  - **(감사 개정)** **적대적 부하 하네스** — 협조적 soak과 별도 게이트: 스푸핑 Initial flood·대량 연결·principal당 세션 폭주 각각에서 선언된 상한이 실제로 강제되고(`RESOURCE_EXHAUSTED`/거부), 부하 중·후 idle listener RSS/fd가 soak과 같은 bound를 지키며, 기존 세션의 PTY echo가 살아 있음.
 - **크기:** 3ew
 
 ### M9 — 릴리스
 
 - **범위:** 설치 스크립트/cargo-dist 검토, Homebrew tap, macOS codesign + notarization, musl static Linux 빌드, SLSA provenance, 클린 VM smoke, beta 문서. crates.io publish gate 해제(`qsh-cli`).
 - **수용 기준 (DoD):** 클린 macOS arm64/x86_64·Linux arm64/x86_64에서 brew/curl 설치 → 동작. Gatekeeper가 notarized 바이너리를 차단하지 않음. musl static 바이너리가 구형 glibc 배포판에서 실행.
+  - **(감사 개정 2026-08-21)** "동작"의 정의는 `version --json`이 아니라 **기능 스모크**다: init → trust → `exec --json` 왕복 + PTY 셸 획득 + detach→attach resume이 배포되는 release 프로파일 바이너리로 통과. 근거: 현재 CI의 전 기능 테스트는 dev 프로파일이고 release 바이너리는 기능 테스트 0건으로 출고된다. release 태그 전 CI에서 `--release` 프로파일 통합 테스트를 최소 1회 돌린다.
 - **크기:** 1.5ew (notarization은 Apple 계정 리드타임 — M8 중 시작)
 
 ## 3. 유예 가드레일 (P1/P2 경계)

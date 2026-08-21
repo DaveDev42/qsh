@@ -7,6 +7,7 @@
 `docs/ROADMAP.md` "M3 — 역방향" 절 인용:
 
 > - **범위:** `qsh listen`(controller), `qsh reverse controller`(target, 등록 + heartbeat + 백오프 재접속), `host.reverse` ACL action 검사 지점, reverse host가 `hosts`에 `connection_mode:"reverse"`로 표시, `qsh attach <name>`이 역방향 연결 위에서 동작. 연결 방향/세션 역할 축 실사용.
+> - **감사 개정 (2026-08-21) 추가 범위:** ① **M2 계약 부채 상환** — `qsh serve`(및 M3의 두 상주 모드) SIGTERM graceful drain(`docs/CLI.md` §6.12 문장의 이행)과 `exec.run` 환경 위생(`env_clear` + 호스트 고정 key 재적용). ② **세션 소유권 P0** — `session.control` action(write/resize)을 세션 opener principal에 결합.
 > - **명시적 out:** relay, NAT traversal, discovery.
 
 ### DoD 체크리스트 (`docs/ROADMAP.md` M3 "수용 기준" 인용)
@@ -15,10 +16,12 @@
 - [ ] target 네트워크를 60초 차단 → 재등록되고 **같은 세션**이 resume.
 - [ ] `qsh hosts --json`이 forward/reverse를 함께 반환(§6.1).
 - [ ] controller reachability 요구가 docs와 doctor 메시지에 명시.
+- [ ] **(감사 개정)** 자식 셸이 살아 있는 `qsh serve`에 SIGTERM → 전 세션 close 절차 → `session.closed{reason:"closed"}` 송신 → drain 완료 후 잔존 자식 process group 0 (L5 실프로세스 테스트). `exec.run` 자식에서 serve 환경 마커가 보이지 않고 client의 `PATH` 지정이 무시됨.
+- [ ] **(감사 개정)** 타 principal 세션에 대한 `session.write/resize`가 거부되고 audit에 deny가 남음(소유권 P0). 병렬 동시 등록(같은/다른 fingerprint)·병렬 다중 세션 경합 테스트가 존재.
 
-M3 크기: 2ew (`docs/ROADMAP.md` M3 "크기").
+M3 크기: 2ew + 0.5ew(감사 개정분) (`docs/ROADMAP.md` M3 "크기").
 
-**DoD 1의 마감 도구를 미리 못박는다.** 낡은 `qsh attach <host-name>` 산문은 이 계획 밖에 **5곳** 남아 있다 — `docs/PRD.md:102`(`qsh attach company-mac`), `docs/ROADMAP.md:58`(M3 범위 줄의 `qsh attach <name>`), `docs/design/protocol.md` §11-3(`qsh attach company-mac`), `docs/design/architecture.md` §3(`qsh attach <reverse-host>`), `docs/adr/0003-sessions-in-listener.md`의 2026-08-18 추기(`qsh attach <reverse-host>`). 전부 `docs/CLI.md` §7 확정 **이전**의 산문이다. 현재 계약에서 `qsh attach`의 인자는 `session_ref`이고(§7, §7.1, PRD §11의 `qsh attach <session-ref>`), 슬래시 없는 host 이름으로 새 셸을 얻는 form은 `qsh [user@]<host>`다. M3는 **새 CLI form을 만들지 않는다**(§4.1 #1) — `<name>`이 forward든 reverse든 같은 host alias가 되게 만드는 것이 이 마일스톤의 일이고, DoD 1은 `qsh <name>`(신규 세션) + `qsh attach <name>/<session_id>`(재attach) 두 실프로세스 시나리오가 Step 7에서 마감한다. 위 5곳 중 Step 1이 `protocol.md` §11-3·`architecture.md` §3의 예시를 이 두 form으로 교체하고, Step 9가 `PRD.md` §6을 교체하며, ADR-0003 추기에는 결정을 재론하지 않고 표기만 정정하는 한 줄을 더한다. `ROADMAP.md:58`의 범위 줄 정정은 코드가 아니라 로드맵 문서 소유자의 몫이므로 §5 완료 절차 2번이 마감 조건으로 남긴다.
+**DoD 1의 마감 도구를 미리 못박는다.** 낡은 `qsh attach <host-name>` 산문은 이 계획 밖에 **5곳** 남아 있다 — `docs/PRD.md:102`(`qsh attach company-mac`), `docs/ROADMAP.md:66`(M3 범위 줄의 `qsh attach <name>`), `docs/design/protocol.md` §11-3(`qsh attach company-mac`), `docs/design/architecture.md` §3(`qsh attach <reverse-host>`), `docs/adr/0003-sessions-in-listener.md`의 2026-08-18 추기(`qsh attach <reverse-host>`). 전부 `docs/CLI.md` §7 확정 **이전**의 산문이다. 현재 계약에서 `qsh attach`의 인자는 `session_ref`이고(§7, §7.1, PRD §11의 `qsh attach <session-ref>`), 슬래시 없는 host 이름으로 새 셸을 얻는 form은 `qsh [user@]<host>`다. M3는 **새 CLI form을 만들지 않는다**(§4.1 #1) — `<name>`이 forward든 reverse든 같은 host alias가 되게 만드는 것이 이 마일스톤의 일이고, DoD 1은 `qsh <name>`(신규 세션) + `qsh attach <name>/<session_id>`(재attach) 두 실프로세스 시나리오가 Step 7에서 마감한다. 위 5곳 중 Step 1이 `protocol.md` §11-3·`architecture.md` §3의 예시를 이 두 form으로 교체하고, Step 9가 `PRD.md` §6을 교체하며, ADR-0003 추기에는 결정을 재론하지 않고 표기만 정정하는 한 줄을 더한다. `ROADMAP.md:66`의 범위 줄 정정은 코드가 아니라 로드맵 문서 소유자의 몫이므로 §5 완료 절차 2번이 마감 조건으로 남긴다.
 
 **M3가 새로 만드는 것은 방향뿐이다.** 세션 broker·PTY·resume·writer lease·replay ring·recovery 텔레메트리는 M2가 끝냈고, `docs/design/protocol.md` §11-4가 "target의 세션들은 재등록과 무관하게 유지되고 §10으로 resume된다"고 못박았으므로 **M3에 새 resume 로직은 없다**. M3가 지는 것은 (i) 연결 방향(initiator/responder)과 세션 역할(host/client)의 분리를 구조에서 실사용으로 바꾸는 일, (ii) 등록·인가·이름 배정·재등록 루프, (iii) 상주 `qsh listen` 데몬과 CLI 프로세스 사이의 `localctl` IPC — 세 가지다.
 
@@ -164,6 +167,29 @@ control 핸드셰이크를 `crates/qsh-core/src/handshake.rs`로 추출한다:
 **(d) 완료 판정:** in-process 하네스에서 등록이 성공하고 거부 경로가 아무것도 만들지 않는다. `Action::ALL`이 6종이고 action 문자열 하드코딩 0건. 파라미터화한 loopback 스위트가 양방향 green. `qsh listen`이 bind 주소와 등록 이벤트를 stderr로 보고하고 stdout에는 한 바이트도 쓰지 않는다. `qsh reverse`가 controller 도달 실패 시 `CONNECTION_FAILED` 진단 + exit 255. Windows leg의 nextest green(`reverse/`의 unix 전용 코드가 `cfg(unix)`로 빠지고 나머지가 컴파일·통과).
 
 **(e) 인용:** `docs/design/protocol.md` §11 머리말(대칭 원칙)·§11-2(인증서로만 인증, `host.reverse` 검사, 이름 배정과 name-squatting 방지, audit), §11-3(등록은 도달성만), §3(principal은 항상 인증서에서), §9(형태 검사 규율), `docs/CLI.md` §2.2·§2.4·§2.5·§6.8·§6.12(장기 실행 모드 계약의 형식)·§6.13, `docs/PRD.md` §9(action 목록·인증 전 리소스 생성 금지), §11(명령 체계), `docs/design/architecture.md` §6(단일 choke point·default deny·`auth_path`), `docs/ROADMAP.md` §1 원칙 5번, §2 M5 범위.
+
+---
+
+### Step 3.5 — 감사 개정분: M2 계약 부채 상환 + 세션 소유권 P0 (`docs/ROADMAP.md` 2026-08-21 개정)
+
+**(a) 범위:** 2026-08-21 프로덕션 준비도 감사(HEAD `1d5d1b0`)가 M3에 귀속시킨 작업. **실행 순서는 Step 3 직후, Step 4 착수 전이다** — A1의 drain 경로는 Step 4가 완성하는 `qsh listen`/`qsh reverse` 상주 프로세스가 그대로 상속해야 하고(뒤에 넣으면 세 상주 모드를 두 번 고친다), 소유권 P0는 M5 정책 어휘의 선행 결정이라 M5 설계가 시작되기 전에 코드에 존재해야 한다. 두 PR로 올린다.
+
+**PR ① — 계약 부채 상환.**
+
+- **SIGTERM graceful drain** (`docs/CLI.md` §6.12 "(M2, ADR-0003)" 문장의 이행): `qsh serve` SIGTERM 수신 → 신규 attach·open 거부 → 전 세션에 §6.7 close 절차(SIGHUP→TERM→KILL, `close_grace_ms`, reaping) → 붙어 있는 소비자에 `session.closed{reason:"closed"}`(§6.4) → endpoint 상한부 drain → 종료. `qsh listen`/`qsh reverse`의 shutdown 경로도 같은 절차를 태운다(Step 3의 shutdown future가 그 자리다). **L5 실프로세스 테스트**: 자식 셸(process group)이 살아 있는 serve에 SIGTERM → drain 후 잔존 process group 0 단언 — 현재 HEAD는 PTY 자식이 고아로 살아남음이 실측돼 있다(감사 A1).
+- **`exec.run` 환경 위생** (`docs/CLI.md` "…클라이언트 프로세스의 환경을 암묵적으로 상속시키지 않는다. `HOME`/`USER`/`LOGNAME`/`SHELL`/`PATH`는 어느 경로에서도 호스트가 고정한다"의 이행): spawn 전 `env_clear()` 후 호스트 고정 key 재적용, caller `--env`는 그 위 overlay이되 고정 5종은 덮어쓸 수 없다. 테스트: serve 프로세스에 심은 마커 env가 exec 자식에 보이지 않음 + `--env PATH=...`가 무시됨(고정 key 우선).
+- **README 동기화(A8)**: 기능 목록·Known limitations·인터임 위험 고지를 현 HEAD와 일치. "마일스톤 마감 공통 절차" 2번의 소급 적용이다.
+- **quinn 플로어 문서 정정**(감사 기각 심의 1): `docs/design/protocol.md` 2곳과 `docs/design/architecture.md` 1곳이 버전 플로어(≥ 0.11.14)의 대상 크레이트를 파사드 `quinn`으로 잘못 지목 — 실제 advisory(RUSTSEC-2026-0037) 대상은 `quinn-proto`이고 lock은 0.11.16(패치됨)이다. 대상 크레이트명만 정정한다(구속 문서이므로 방치 불가 — 미래 유지보수자가 파사드 버전만 보고 오판한다).
+- **CI 위생(A13)**: `.config/nextest.toml`에 slow-timeout — 진짜 deadlock 시 CI가 job timeout까지 매달리는 것을 방지.
+- **선재 결함 정리**: `qsh serve --json`의 early-failure(`Ops::from_env()`)가 stdout envelope을 오염하는 버그를 PR 3b가 listen/reverse에 깐 stderr-only 경로로 통일(§2.2·§6.12 — 장기 실행 모드의 stdout은 0바이트).
+
+**PR ② — 세션 소유권 P0 (감사 A2).** broker 세션에 opener principal을 기록하고 `session.control` action(write/resize)의 인가를 opener와 대조 — 불일치는 `PERMISSION_DENIED`(admit.rs 선례의 균일 문면, 어떤 세션이 누구 소유인지 비노출). 경계는 PRD §6이 긋는다: 조회·읽기·종료는 교차 기기 ACL 범위로 명시 허용이므로 결합 대상이 **아니다**. `docs/CLI.md` §6.3에 소유권 결합을 한 줄로 명시(additive, 계약 문서 먼저). 테스트: 두 principal loopback에서 타인 세션 write/resize 거부 + audit deny, 소유자 통과, read/close는 종전대로 ACL만.
+
+**(c) 빚지는 테스트:** 위 각 항목에 병기. 추가로 ROADMAP M3 DoD 감사 개정 2번째 항목의 **병렬 경합 테스트**(동시 등록 same/different fingerprint, 동시 다중 세션)는 Step 4가 재접속 루프와 함께 소유한다 — replace 경로의 실제 생산자가 Step 4에서 생기기 때문이다(Step 3이 이월한 race 부채 2건과 같은 자리).
+
+**(d) 완료 판정:** 두 PR 각각 §2 공통 게이트 green. L5 drain 테스트·env 위생 테스트·소유권 테스트 green. ROADMAP M3 DoD의 감사 개정 1번째 항목이 닫힌다(2번째 항목의 경합 테스트는 Step 4 완료 판정으로 이월).
+
+**(e) 인용:** `docs/CLI.md` §2.2·§6.3·§6.4·§6.7·§6.12, `docs/PRD.md` §6(기기 결합·교차 기기 허용 범위)·§9, ADR-0003, ADR-0007, `docs/ROADMAP.md` M2 사후 감사·M3 감사 개정·마일스톤 마감 공통 절차.
 
 ---
 
@@ -446,6 +472,6 @@ M2의 attach driver는 "감지 → rebind → 재dial → `SessionAttach`"를 �
 ## 5. 완료 절차
 
 1. §1의 DoD 체크리스트 4항목 전건 통과를 **실제 테스트 실행 로그**로 확인한다(체크박스는 근거가 green일 때만 표시하고, 각 항목에 "어느 Step이 심고 어느 테스트가 무엇을 단언하는지"를 M2본과 같은 상세도로 적는다). DoD 2의 60초 게이트는 `acceptance` job의 성공 로그가 정본이다.
-2. `docs/ROADMAP.md`의 "현재 위치" 줄과 M3 절 상태 표기를 "M3 완료"로 갱신하고, 같은 편집에서 M3 범위 줄의 `qsh attach <name>`(`ROADMAP.md:58`, §1이 지적한 5곳 중 하나)을 `qsh <name>`/`qsh attach <name>/<session_id>`로 정정한다(로드맵 자체는 이 계획 문서가 아니라 로드맵 문서 소유자가 갱신 — PLAN.md는 이 절차를 지시만 하고 ROADMAP.md를 대신 수정하지 않는다).
+2. `docs/ROADMAP.md`의 "현재 위치" 줄과 M3 절 상태 표기를 "M3 완료"로 갱신하고, 같은 편집에서 M3 범위 줄의 `qsh attach <name>`(`ROADMAP.md:66`, §1이 지적한 5곳 중 하나)을 `qsh <name>`/`qsh attach <name>/<session_id>`로 정정한다(로드맵 자체는 이 계획 문서가 아니라 로드맵 문서 소유자가 갱신 — PLAN.md는 이 절차를 지시만 하고 ROADMAP.md를 대신 수정하지 않는다).
 3. Step 1·8·9가 갱신한 정본 문서(`docs/CLI.md`, `docs/design/protocol.md`, `docs/design/architecture.md`, `docs/design/testing.md`, `docs/PRD.md`, `README.md`)와 최종 구현 사이에 어긋남이 남아 있지 않은지 마감 전에 한 번 대조한다 — 어긋나면 **문서를 먼저 고치고** 코드를 맞춘다(각 문서 머리말의 규칙).
 4. 이 PLAN.md를 M4("터널") 실행 계획으로 전면 교체한다 — 과거 M3 계획은 git 이력에만 남긴다. §3의 "M4에 넘기는 것" 네 항목을 그 계획의 입력으로 옮긴다.
