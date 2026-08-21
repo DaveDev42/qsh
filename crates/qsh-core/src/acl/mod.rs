@@ -34,16 +34,23 @@ pub enum Action {
     SessionAttach,
     /// Drive a session (`session.write`, `session.resize`, `session.close`).
     SessionControl,
+    /// Register as a reverse host on a `qsh listen` controller
+    /// (`host.reverse`). Not an operation — the connection-time check a
+    /// reverse target's `Hello.reverse` is put through before it becomes a
+    /// registry entry (`docs/design/protocol.md` §11-2, `docs/CLI.md`
+    /// §2.5).
+    HostReverse,
 }
 
 impl Action {
     /// Every action this build can evaluate, in a stable order.
-    pub const ALL: [Action; 5] = [
+    pub const ALL: [Action; 6] = [
         Action::ExecRun,
         Action::SessionOpen,
         Action::SessionList,
         Action::SessionAttach,
         Action::SessionControl,
+        Action::HostReverse,
     ];
 
     /// The dotted action string used in `acl.toml` and audit records
@@ -55,6 +62,7 @@ impl Action {
             Action::SessionList => "session.list",
             Action::SessionAttach => "session.attach",
             Action::SessionControl => "session.control",
+            Action::HostReverse => "host.reverse",
         }
     }
 }
@@ -221,6 +229,7 @@ mod tests {
         assert_eq!(Action::SessionList.as_str(), "session.list");
         assert_eq!(Action::SessionAttach.as_str(), "session.attach");
         assert_eq!(Action::SessionControl.as_str(), "session.control");
+        assert_eq!(Action::HostReverse.as_str(), "host.reverse");
         let strings: std::collections::BTreeSet<&str> =
             Action::ALL.iter().map(|a| a.as_str()).collect();
         assert_eq!(strings.len(), Action::ALL.len(), "distinct strings");

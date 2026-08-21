@@ -74,31 +74,59 @@ pub async fn run_serve(
     })?;
     on_bound(actual);
 
-    let audit = Arc::new(FileAuditSink::new(paths.audit_log()));
-    // The session broker outlives every connection (architecture.md §3);
-    // the TTL reaper stops on its own once the broker is dropped. Sessions
-    // are PTY-backed on unix; elsewhere the factory answers UNSUPPORTED
-    // without spawning anything (Windows host is P2 — README limitations).
-    let broker = Broker::new(
-        Arc::new(SystemClock),
-        BrokerConfig::from_serve(&config.serve),
-        crate::pty::factory(),
-    );
-    tokio::spawn(Broker::run_reaper(Arc::downgrade(&broker)));
-    let server = Server::new(
-        Arc::new(AllowAllPinned),
-        audit,
-        broker,
-        identity.identity.device_id.clone(),
-    );
+    let runtime = host_runtime(paths, config, identity.identity.device_id.clone());
     tracing::info!(
         device_id = %identity.identity.device_id,
         fingerprint = %identity.identity.fingerprint,
         %actual,
         "qsh serve listening"
     );
-    server.run(listener, shutdown).await;
+    runtime.server.run(listener, shutdown).await;
     Ok(())
+}
+
+/// An authorized, broker-backed host, ready to `dispatch` requests over any
+/// control stream (`docs/design/architecture.md` §3, §6).
+///
+/// [`host_runtime`] is the one place that assembles this — shared by `qsh
+/// serve` here and, from `PLAN.md` Step 3 PR 3b, `qsh reverse`: a reverse
+/// target *is* a host, just one that dialed out instead of accepting a
+/// connection, so it reuses the exact same broker/audit/authorizer
+/// construction rather than a second copy of it (`docs/CLI.md` §6.13: the
+/// sessions a reverse target serves follow the same broker/writer-lease
+/// discipline as `qsh serve`'s).
+#[derive(Clone)]
+pub struct HostRuntime {
+    /// The host, ready for `server.run(..)` (forward) or
+    /// `server.serve_control(..)` (reverse, on an already-dialed
+    /// connection).
+    pub server: Arc<Server>,
+    /// The audit sink `server` writes to — exposed so a caller that needs
+    /// to record connection-level decisions of its own (e.g. Step 3's
+    /// `host.reverse` registration choke point) writes to the same log.
+    pub audit: Arc<FileAuditSink>,
+}
+
+/// Build a [`HostRuntime`]: session broker (with its TTL reaper spawned),
+/// the interim `AllowAllPinned` policy (`docs/ROADMAP.md`'s M1–M4 posture),
+/// a file audit sink at `paths.audit_log()`, and the `Server` that ties
+/// them together under `device_id`.
+///
+/// The broker outlives every connection (`docs/design/architecture.md`
+/// §3); its TTL reaper stops on its own once the returned `Server` (and the
+/// broker `Arc` inside it) is dropped. Sessions are PTY-backed on unix;
+/// elsewhere the factory answers `UNSUPPORTED` without spawning anything
+/// (Windows host is P2 — README limitations).
+pub fn host_runtime(paths: &Paths, config: &Config, device_id: impl Into<String>) -> HostRuntime {
+    let audit = Arc::new(FileAuditSink::new(paths.audit_log()));
+    let broker = Broker::new(
+        Arc::new(SystemClock),
+        BrokerConfig::from_serve(&config.serve),
+        crate::pty::factory(),
+    );
+    tokio::spawn(Broker::run_reaper(Arc::downgrade(&broker)));
+    let server = Server::new(Arc::new(AllowAllPinned), audit.clone(), broker, device_id);
+    HostRuntime { server, audit }
 }
 
 #[cfg(test)]
@@ -129,5 +157,15 @@ mod tests {
         );
         let err = resolve_bind(Some("not an address"), &config).unwrap_err();
         assert_eq!(err.code, ErrorCode::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn host_runtime_wires_device_id_and_a_shared_audit_sink() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path(), dir.path());
+        let runtime = host_runtime(&paths, &Config::default(), "hermes");
+        assert_eq!(runtime.server.local_hello(None).device_name, "hermes");
+        assert_eq!(runtime.audit.path(), paths.audit_log());
+        assert_eq!(runtime.server.pending_tickets(), 0);
     }
 }

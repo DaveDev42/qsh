@@ -23,6 +23,7 @@ pub mod identity;
 pub mod ops;
 pub mod pty;
 pub mod resume;
+pub mod reverse;
 pub mod serve;
 pub mod server;
 pub mod session_stream;

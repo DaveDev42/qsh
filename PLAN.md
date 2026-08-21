@@ -401,7 +401,7 @@ M2의 attach driver는 "감지 → rebind → 재dial → `SessionAttach`"를 �
 
 - **데몬 멀티플렉서가 M3의 유일한 신규 상태 기계다.** request_id 재매핑·event 라우팅·conduit 수명은 버그가 **조용한 오배송**으로 나타나는 종류의 코드이고, 응답이 다른 CLI에게 가면 세션 내용이 잘못된 프로세스로 새는 보안 사건이다. 그래서 Step 6을 attach·e2e와 분리했고, 유닛 테스트를 "두 conduit이 같은 peer_request_id를 쓴다"는 **적대적** 케이스로 쓴다. 이 코드는 M8 stateful fuzzer 후보로 백로그에 남긴다.
 - **"등록 = 권한"의 혼동.** 이 마일스톤에서 가장 값비싼 오해다. 감시: `PERMISSION_DENIED`를 내는 주체가 **target**임을 단언하는 Step 6의 테스트가 살아 있는가(§11-3).
-- **Name-squatting.** 등록 이름은 controller의 통제 하에 있어야 한다. 감시: `offered_name`이 인증·이름 확정 어느 경로에도 기본으로 들어가지 않는가, `allow_advertised_names=false`가 기본인가, 이름 충돌이 조용한 덮어쓰기가 아닌가.
+- **Name-squatting.** 등록 이름은 controller의 통제 하에 있어야 한다. 감시: `offered_name`이 인증·이름 확정 어느 경로에도 기본으로 들어가지 않는가, `allow_advertised_names=false`가 기본인가, 이름 충돌이 조용한 덮어쓰기가 아닌가. **알려진 latent gap(Step 3 검증이 발굴, 의도적 유예):** `allow_advertised_names=true`일 때 `offered_name`을 trust-store alias 네임스페이스와 대조하지 않는다 — registry는 설계상 trust store를 쥐지 않으므로 오프라인 pinned peer의 alias를 CA-path peer가 선점하는 것을 충돌 검사(live 등록만 봄)가 막지 못한다. interim `AllowAllPinned`가 모든 비-Pin peer를 choke point에서 거부하므로 M1–M4에서는 도달 불가이며, **M5 정책 엔진이 CA principal을 허용할 수 있게 되는 시점**(또는 Step 5 `resolve_host_route`가 이름 우선순위를 정의하는 시점)에 이름 네임스페이스 통합 검사로 갚는다. `reverse/registry.rs`의 advertised-name 분기 주석에도 동일 내용을 기록했다.
 - **localctl의 신뢰 경계.** 소켓 권한 + peer credential 이중 방어, "localctl은 새 권한을 부여하지 않는다"는 문서 문장, 그리고 데몬이 CLI가 보낸 principal 유사 정보를 **어디에서도 신뢰하지 않는가**(principal은 항상 TLS에서 — §3).
 - **데몬 다중성.** 조회는 감추지 않고(두 항목 반환), 라우팅은 fail closed(`INVALID_ARGUMENT`). 감시: 조용한 임의 선택이 코드에 생기지 않는가, 그리고 목록·단건·라우팅이 **같은 함수**를 공유하는가.
 - **writer lease의 결합 대상이 데몬 연결이라는 관찰 가능한 차이.** CLI 사망이 lease를 즉시 풀지 않고 `no_steal` 자동화가 정방향과 다르게 `SESSION_CONFLICT`를 본다. 감추지 않고 CLI.md §6.13에 문서화하고 여기서 감시한다.

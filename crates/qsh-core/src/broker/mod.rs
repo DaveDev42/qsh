@@ -33,9 +33,6 @@ use std::io;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
-use time::OffsetDateTime;
-use time::format_description::well_known::Rfc3339;
-
 use crate::config::ServeConfig;
 
 pub use clock::{BoxFuture, Clock, SystemClock, TestClock};
@@ -377,16 +374,7 @@ impl Broker {
     }
 
     fn now_rfc3339(&self) -> String {
-        let secs = self
-            .clock
-            .wall_now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        OffsetDateTime::from_unix_timestamp(secs as i64)
-            .ok()
-            .and_then(|t| t.format(&Rfc3339).ok())
-            .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_string())
+        crate::config::rfc3339_of(self.clock.wall_now())
     }
 
     /// Look a live session up by id. A closed session is
