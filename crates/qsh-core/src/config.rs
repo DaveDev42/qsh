@@ -15,6 +15,7 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use qsh_proto::{ErrorCode, KeyStoreMode};
 use serde::Deserialize;
@@ -229,6 +230,26 @@ pub fn now_rfc3339() -> String {
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
 }
 
+/// RFC 3339, second precision, formatted from an explicit `t` rather than
+/// "now" — for callers that hold their own injected clock (`docs/design/
+/// testing.md` L2) instead of reading the system clock directly.
+///
+/// Shared by `broker::Broker::now_rfc3339` and
+/// `reverse::registry::Registry::admit`, which both need "seconds since
+/// epoch, formatted as RFC 3339, falling back to the Unix epoch string on
+/// out-of-range input" and previously carried byte-for-byte copies of this
+/// body.
+pub(crate) fn rfc3339_of(t: SystemTime) -> String {
+    let secs = t
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    OffsetDateTime::from_unix_timestamp(secs as i64)
+        .ok()
+        .and_then(|t| t.format(&Rfc3339).ok())
+        .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_string())
+}
+
 /// `config.toml` (`docs/design/architecture.md` §7).
 ///
 /// Every field is optional and unknown keys are ignored: a newer build's
@@ -240,6 +261,10 @@ pub struct Config {
     pub serve: ServeConfig,
     /// `[identity]` — device identity settings.
     pub identity: IdentityConfig,
+    /// `[listen]` — reverse-mode controller settings (`qsh listen`).
+    pub listen: ListenConfig,
+    /// `[reverse]` — reverse-mode target settings (`qsh reverse`).
+    pub reverse: ReverseConfig,
 }
 
 /// `[serve]` section.
@@ -301,6 +326,44 @@ impl ServeConfig {
 pub struct IdentityConfig {
     /// Private-key store preference; `qsh init --key-store` wins over it.
     pub key_store: Option<KeyStoreMode>,
+}
+
+/// `[listen]` section — `qsh listen`, the reverse-mode controller
+/// (`docs/CLI.md` §6.13, `docs/design/protocol.md` §11-2).
+///
+/// `PLAN.md` Step 3 PR 3a wires `bind`/`allow_advertised_names` only;
+/// `stale_retention` (§11-4) is Step 4 scope and is not read yet.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct ListenConfig {
+    /// Listen address. `qsh listen --bind` wins over this, which wins over
+    /// the `[::]:4433` default — the same default `qsh serve` uses, so
+    /// running both roles on one host requires an explicit `--bind`
+    /// (`docs/CLI.md` §6.13).
+    pub bind: Option<String>,
+    /// Whether a reverse target with no trust-store alias may register
+    /// under its self-reported `offered_name`. Default `false`: name-
+    /// squatting prevention wins unless an operator opts in
+    /// (`docs/design/protocol.md` §11-2).
+    pub allow_advertised_names: bool,
+}
+
+/// `[reverse]` section — `qsh reverse <controller>`, the reverse-mode
+/// target (`docs/CLI.md` §6.13, `docs/design/protocol.md` §11-2).
+///
+/// `PLAN.md` Step 3 PR 3a wires `controller`/`offered_name` only; the
+/// backoff/heartbeat knobs (§11-4) are Step 4 scope and are not read yet.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct ReverseConfig {
+    /// Trust-store alias of the controller to dial. The `qsh reverse
+    /// <controller>` positional argument wins over this.
+    pub controller: Option<String>,
+    /// Name this target offers itself as. `--offered-name` wins over this.
+    /// Only takes effect when the controller has no trust-store alias for
+    /// this peer *and* the controller's `[listen].allow_advertised_names`
+    /// is set — see `reverse::admit::admit`.
+    pub offered_name: Option<String>,
 }
 
 impl Config {
@@ -428,6 +491,49 @@ mod tests {
             std::time::Duration::from_secs(24 * 3600)
         );
         assert_eq!(empty.close_grace(), std::time::Duration::from_millis(5000));
+    }
+
+    #[test]
+    fn listen_and_reverse_keys_use_the_documented_names_and_defaults() {
+        // architecture.md §7 / CLI.md §6.13 / PLAN Step 3 PR 3a:
+        // `[listen] bind · allow_advertised_names` and `[reverse]
+        // controller · offered_name`. Pin the documented spellings and the
+        // `allow_advertised_names = false` default (name-squatting
+        // prevention wins unless explicitly opted into).
+        let listen: ListenConfig =
+            toml::from_str("bind = \"[::]:5000\"\nallow_advertised_names = true\n").unwrap();
+        assert_eq!(listen.bind.as_deref(), Some("[::]:5000"));
+        assert!(listen.allow_advertised_names);
+
+        let listen_default = ListenConfig::default();
+        assert_eq!(listen_default.bind, None);
+        assert!(!listen_default.allow_advertised_names);
+
+        let reverse: ReverseConfig =
+            toml::from_str("controller = \"personal-mac\"\noffered_name = \"phone\"\n").unwrap();
+        assert_eq!(reverse.controller.as_deref(), Some("personal-mac"));
+        assert_eq!(reverse.offered_name.as_deref(), Some("phone"));
+
+        let reverse_default = ReverseConfig::default();
+        assert_eq!(reverse_default.controller, None);
+        assert_eq!(reverse_default.offered_name, None);
+    }
+
+    #[test]
+    fn config_file_parses_listen_and_reverse_sections() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path(), dir.path());
+        std::fs::write(
+            paths.config_file(),
+            "[listen]\nbind = \"127.0.0.1:5000\"\nallow_advertised_names = true\n\n\
+             [reverse]\ncontroller = \"personal-mac\"\noffered_name = \"phone\"\n",
+        )
+        .unwrap();
+        let config = Config::load(&paths).unwrap();
+        assert_eq!(config.listen.bind.as_deref(), Some("127.0.0.1:5000"));
+        assert!(config.listen.allow_advertised_names);
+        assert_eq!(config.reverse.controller.as_deref(), Some("personal-mac"));
+        assert_eq!(config.reverse.offered_name.as_deref(), Some("phone"));
     }
 
     #[test]

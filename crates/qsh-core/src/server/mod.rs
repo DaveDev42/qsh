@@ -389,6 +389,12 @@ impl Server {
             .authorizer
             .check(&ctx.principal, ctx.auth_path, action, resource);
         // No request id: a stream is not a control-stream request.
+        // TODO(next behavior-change window): this is a connection-level
+        // decision, not a reply to request `0` — migrate to
+        // `AuditRecord::connection_level` (`request_id: "-"`) alongside
+        // `reverse::admit`, which already does. Left as `0` here because
+        // this audit output is live in production and changing it is a
+        // behavior change outside this PR's zero-behavior-change scope.
         self.audit.record(&AuditRecord::now(
             0,
             &ctx.principal,

@@ -63,6 +63,36 @@ impl AuditRecord {
 }
 
 impl AuditRecord {
+    /// A connection-level authorization decision: allow *or* deny, but
+    /// never a reply to a specific control-stream request, so `request_id`
+    /// is `"-"` (the field doc above reserves that value for exactly this
+    /// case, and [`AuditRecord::handshake_rejected`] already honors the
+    /// same convention) rather than a numeric id — indistinguishable
+    /// otherwise from a peer-chosen wire request `0`.
+    ///
+    /// `server::Server::authorize_stream` predates this constructor and
+    /// still passes a literal `0` for the same kind of decision; migrating
+    /// it is left for the next behavior-change window rather than folded
+    /// into this fix (see the comment at that call site).
+    pub fn connection_level(
+        principal: &qsh_transport::Principal,
+        action: Action,
+        resource: &str,
+        decision: Decision,
+        peer_addr: std::net::SocketAddr,
+    ) -> Self {
+        Self {
+            ts: now_rfc3339(),
+            request_id: "-".to_string(),
+            principal: principal.to_string(),
+            action: action.as_str().to_string(),
+            resource: resource.to_string(),
+            decision: decision.as_str().to_string(),
+            rule: None,
+            peer_addr: peer_addr.to_string(),
+        }
+    }
+
     /// A connection-level deny: the peer never got past the TLS handshake
     /// (no client cert, unpinned, expired…). There is no principal — the
     /// whole point is that none could be established — so `principal` is
