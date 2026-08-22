@@ -1,0 +1,13 @@
+{
+  "command": "host.get",
+  "data": {
+    "address": "<address>",
+    "connection_mode": "forward",
+    "device_id": "<device_id>",
+    "name": "personal-mac",
+    "state": "unknown"
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

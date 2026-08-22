@@ -10,19 +10,19 @@ use std::io::{self, IsTerminal, Read, Write};
 
 use clap::{CommandFactory as _, Parser};
 use qsh_core::{
-    ExecRunOp, ExecStdin, IdentityInitOp, OpError, Operation, Ops, SessionAttachOp, SessionCloseOp,
-    SessionGetOp, SessionListOp, SessionOpenOp, SessionReadOp, SessionResizeOp, SessionWriteOp,
-    TrustAddOp, TrustListOp, TrustRemoveOp, VersionOp,
+    ExecRunOp, ExecStdin, HostGetOp, HostListOp, IdentityInitOp, OpError, Operation, Ops,
+    SessionAttachOp, SessionCloseOp, SessionGetOp, SessionListOp, SessionOpenOp, SessionReadOp,
+    SessionResizeOp, SessionWriteOp, TrustAddOp, TrustListOp, TrustRemoveOp, VersionOp,
 };
 use qsh_proto::{
-    ErrorCode, ExecRunReq, IdentityInitReq, SessionCloseReq, SessionGetReq, SessionListReq,
-    SessionOpenReq, SessionReadReq, SessionResizeReq, SessionWriteReq, TrustAddReq,
+    ErrorCode, ExecRunReq, HostGetReq, IdentityInitReq, SessionCloseReq, SessionGetReq,
+    SessionListReq, SessionOpenReq, SessionReadReq, SessionResizeReq, SessionWriteReq, TrustAddReq,
 };
 use serde::Serialize;
 use tracing_subscriber::EnvFilter;
 
 use cli::{
-    AttachArgs, Cli, Command, DEFAULT_ESCAPE_CHAR, EscapeChar, ExecArgs, SessionCmd,
+    AttachArgs, Cli, Command, DEFAULT_ESCAPE_CHAR, EscapeChar, ExecArgs, HostCmd, SessionCmd,
     SessionReadArgs, SessionWriteArgs, TrustAddArgs, TrustCmd,
 };
 use render::{human, json, json::Envelope};
@@ -288,6 +288,18 @@ fn run(cli: &Cli) -> i32 {
             TrustRemoveOp::COMMAND,
             ops.trust_remove(name),
             human::print_trust_remove,
+        ),
+        Command::Hosts => finish(
+            cli,
+            HostListOp::COMMAND,
+            ops.host_list(),
+            human::print_hosts,
+        ),
+        Command::Host(HostCmd::Get { name }) => finish(
+            cli,
+            HostGetOp::COMMAND,
+            ops.host_get(HostGetReq { name: name.clone() }),
+            human::print_host,
         ),
         Command::Exec(args) => run_exec(cli, &ops, args),
         Command::Attach(AttachArgs {
@@ -855,6 +867,8 @@ fn command_name(cli: &Cli) -> &'static str {
         Command::Trust(TrustCmd::Add(_)) => TrustAddOp::COMMAND,
         Command::Trust(TrustCmd::List) => TrustListOp::COMMAND,
         Command::Trust(TrustCmd::Remove { .. }) => TrustRemoveOp::COMMAND,
+        Command::Hosts => HostListOp::COMMAND,
+        Command::Host(HostCmd::Get { .. }) => HostGetOp::COMMAND,
         Command::Exec(_) => ExecRunOp::COMMAND,
         Command::Attach(_) => SessionAttachOp::COMMAND,
         Command::Session(SessionCmd::Open(_)) => SessionOpenOp::COMMAND,

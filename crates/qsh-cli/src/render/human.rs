@@ -8,9 +8,9 @@ use std::io::{self, Write};
 
 use qsh_core::{ExecRunOutput, OpError, SessionReadOutput};
 use qsh_proto::{
-    IdentityInitData, Session, SessionCloseData, SessionEvent, SessionListData, SessionOpenData,
-    SessionResizeData, SessionWriteData, TrustAddData, TrustListData, TrustPeer, TrustRemoveData,
-    VersionData,
+    Host, HostListData, IdentityInitData, Session, SessionCloseData, SessionEvent, SessionListData,
+    SessionOpenData, SessionResizeData, SessionWriteData, TrustAddData, TrustListData, TrustPeer,
+    TrustRemoveData, VersionData,
 };
 
 /// Print `qsh <version>` to stdout.
@@ -99,6 +99,60 @@ pub fn print_trust_remove(data: &TrustRemoveData) -> io::Result<()> {
     } else {
         writeln!(stdout, "{} not found (nothing to do)", data.name)
     }
+}
+
+/// Print the host table (`qsh hosts`, `docs/CLI.md` §6.1). The same name
+/// appearing once per `connection_mode` is expected, not deduplicated —
+/// `Ops::host_list` never merges forward and reverse entries.
+pub fn print_hosts(data: &HostListData) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    if data.hosts.is_empty() {
+        return writeln!(stdout, "no hosts");
+    }
+
+    let width = |header: &str, field: fn(&Host) -> &str| {
+        data.hosts
+            .iter()
+            .map(|h| field(h).chars().count())
+            .chain(std::iter::once(header.chars().count()))
+            .max()
+            .unwrap_or(0)
+    };
+    let name_w = width("NAME", |h| &h.name);
+    let mode_w = width("MODE", |h| &h.connection_mode);
+    let state_w = width("STATE", |h| &h.state);
+
+    writeln!(
+        stdout,
+        "{:name_w$}  {:mode_w$}  {:state_w$}  ADDRESS",
+        "NAME", "MODE", "STATE"
+    )?;
+    for host in &data.hosts {
+        writeln!(
+            stdout,
+            "{:name_w$}  {:mode_w$}  {:state_w$}  {}",
+            sanitize(&host.name),
+            sanitize(&host.connection_mode),
+            sanitize(&host.state),
+            sanitize(&host.address),
+        )?;
+    }
+    Ok(())
+}
+
+/// Print one host (`qsh host get <name>`) — the route
+/// [`qsh_core::Ops::resolve_host_route`] would actually use.
+pub fn print_host(data: &Host) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    writeln!(stdout, "name:            {}", sanitize(&data.name))?;
+    writeln!(
+        stdout,
+        "connection_mode: {}",
+        sanitize(&data.connection_mode)
+    )?;
+    writeln!(stdout, "state:           {}", sanitize(&data.state))?;
+    writeln!(stdout, "address:         {}", sanitize(&data.address))?;
+    writeln!(stdout, "device_id:       {}", sanitize(&data.device_id))
 }
 
 /// `qsh exec` in human mode is a passthrough: the remote command's stdout

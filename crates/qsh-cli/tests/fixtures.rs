@@ -27,9 +27,9 @@ use std::path::PathBuf;
 
 use common::{Fleet, HOST_ALIAS, Sandbox};
 use qsh_proto::{
-    ErrorCode, ExecRunData, IdentityInitData, Session, SessionCloseData, SessionListData,
-    SessionOpenData, SessionReadData, SessionResizeData, SessionWriteData, TrustAddData,
-    TrustListData, TrustRemoveData, VersionData,
+    ErrorCode, ExecRunData, Host, HostListData, IdentityInitData, Session, SessionCloseData,
+    SessionListData, SessionOpenData, SessionReadData, SessionResizeData, SessionWriteData,
+    TrustAddData, TrustListData, TrustRemoveData, VersionData,
 };
 use qsh_testkit::fixtures;
 use schemars::schema_for;
@@ -98,6 +98,8 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "trust.list.json",
     "trust.remove.json",
     "trust.remove.absent.json",
+    "host.list.json",
+    "host.get.json",
     "exec.run.json",
     "exec.run.signal.json",
     "error.INVALID_ARGUMENT.json",
@@ -209,6 +211,20 @@ fn golden_local_fixtures() {
     let (code, listed) = sandbox.json(&["trust", "list", "--json"]);
     assert_eq!(code, 0, "{listed}");
     check("trust.list.json", listed);
+
+    // `host.list`/`host.get` (`docs/CLI.md` §6.1) forward-only: no
+    // localctl daemon runs in this sandbox (`Sandbox::command` scrubs
+    // `XDG_RUNTIME_DIR` and no `<state_dir>/run` directory exists), so the
+    // reverse source is empty and this is a pure local read — no dial, no
+    // network round trip, which is exactly why it lives in this
+    // `sandbox`-only test rather than `golden_remote_fixtures`.
+    let (code, hosts) = sandbox.json(&["hosts", "--json"]);
+    assert_eq!(code, 0, "{hosts}");
+    check("host.list.json", hosts);
+
+    let (code, host) = sandbox.json(&["host", "get", "personal-mac", "--json"]);
+    assert_eq!(code, 0, "{host}");
+    check("host.get.json", host);
 
     let (code, removed) = sandbox.json(&["trust", "remove", "personal-mac", "--json"]);
     assert_eq!(code, 0, "{removed}");
@@ -632,6 +648,8 @@ fn data_schema(command: &str) -> Option<Value> {
             "trust.add" => schema_for!(TrustAddData),
             "trust.list" => schema_for!(TrustListData),
             "trust.remove" => schema_for!(TrustRemoveData),
+            "host.list" => schema_for!(HostListData),
+            "host.get" => schema_for!(Host),
             "exec.run" => schema_for!(ExecRunData),
             // M2 session ops (fixtures land with Step 3/5; registered now so
             // the first session fixture validates instead of panicking).

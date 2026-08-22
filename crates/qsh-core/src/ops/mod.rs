@@ -18,9 +18,11 @@ use crate::identity::LoadedIdentity;
 use crate::trust::{SharedTrustStore, TrustStore};
 
 pub mod exec;
+pub mod host;
 pub mod session;
 
 pub use exec::{ExecRunOp, ExecRunOutput, ExecStdin};
+pub use host::{HostGetOp, HostListOp, HostRoute};
 pub use session::{
     AttachHandle, DetachFlush, RecoveryConfig, SESSION_WRITE_MAX, SessionAttachOp,
     SessionAttachStream, SessionCloseOp, SessionGetOp, SessionListOp, SessionOpenOp, SessionReadOp,
