@@ -404,12 +404,83 @@ impl ReverseHarness {
         .await
     }
 
+    /// Bind and run a localctl UDS admin daemon on top of this harness's
+    /// own [`Listen`] — the same [`LocalctlListener::bind`] +
+    /// [`LocalctlDaemon::run`] wiring `reverse/listen.rs`'s
+    /// `run_listen_unix` does, except [`ReverseHarness`] is built by hand
+    /// rather than through [`crate::reverse::listen::run_listen`] (module
+    /// docs), so nothing attaches a localctl socket unless a caller asks
+    /// for one here. `PLAN.md` M3 Step 5 (c)'s owed L3 proof — `qsh
+    /// hosts`/`host.get` merging forward + live reverse into one array,
+    /// then flipping to `"stale"` once the connection dies — needs a real
+    /// socket [`qsh_core::localctl::client::admin_host_list_all`] can
+    /// discover; `paths.runtime_dir()` is where it is bound (`<pid>.sock`,
+    /// `std::process::id()` — this test process genuinely is alive for as
+    /// long as the daemon runs, exactly like a real `qsh listen` process),
+    /// and a caller's own `Ops` must read from that same directory for the
+    /// two to ever meet.
+    #[cfg(unix)]
+    pub async fn attach_localctl(&self, paths: &Paths) -> LocalctlHandle {
+        use qsh_core::localctl::daemon::{LocalctlDaemon, LocalctlListener};
+        let pid = std::process::id();
+        let bound = LocalctlListener::bind(paths, pid).expect("bind localctl socket");
+        let socket_path = bound.socket_path.clone();
+        let daemon = LocalctlDaemon::new(self.listen.clone());
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(daemon.run(bound, async move {
+            let _ = rx.await;
+        }));
+        LocalctlHandle {
+            socket_path,
+            task,
+            shutdown: Some(tx),
+        }
+    }
+
     /// Stop the controller and wait for it to drain.
     pub async fn shutdown(mut self) {
         if let Some(tx) = self.shutdown.take() {
             let _ = tx.send(());
         }
         let _ = (&mut self.task).await;
+    }
+}
+
+/// The localctl daemon [`ReverseHarness::attach_localctl`] binds — kept
+/// separate from [`ReverseHarness`] itself so the many
+/// `reverse_loopback.rs`/`reverse_chaos.rs` scenarios that never touch
+/// localctl at all pay nothing for it (no socket, no extra task).
+#[cfg(unix)]
+pub struct LocalctlHandle {
+    /// The bound socket's absolute path (`<runtime_dir>/<pid>.sock`) — the
+    /// same path a caller's own `Paths::runtime_dir()` must resolve to for
+    /// `admin_host_list_all` to ever find this daemon.
+    pub socket_path: std::path::PathBuf,
+    task: tokio::task::JoinHandle<()>,
+    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+#[cfg(unix)]
+impl LocalctlHandle {
+    /// Stop the daemon's accept loop and wait for it to drain. Does not
+    /// unlink the socket file itself — same division of labor
+    /// `run_listen_unix` draws between the daemon task and its caller's own
+    /// cleanup, and a test's tempdir is removed wholesale on drop anyway.
+    pub async fn shutdown(mut self) {
+        if let Some(tx) = self.shutdown.take() {
+            let _ = tx.send(());
+        }
+        let _ = (&mut self.task).await;
+    }
+}
+
+#[cfg(unix)]
+impl Drop for LocalctlHandle {
+    fn drop(&mut self) {
+        if let Some(tx) = self.shutdown.take() {
+            let _ = tx.send(());
+        }
+        self.task.abort();
     }
 }
 

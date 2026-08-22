@@ -147,6 +147,15 @@ pub enum Command {
     #[command(subcommand)]
     Trust(TrustCmd),
 
+    /// List every host visible to this machine: trust-store-pinned forward
+    /// hosts and this machine's live reverse registrations, together
+    /// (`docs/CLI.md` §6.1). Never dials.
+    Hosts,
+
+    /// Look up one host.
+    #[command(subcommand)]
+    Host(HostCmd),
+
     /// Run a command on a pinned host and return its output.
     ///
     /// The remote exit code becomes qsh's exit code (255 is clamped to
@@ -271,6 +280,18 @@ pub enum TrustCmd {
     /// Remove a pinned peer. Idempotent.
     Remove {
         /// The peer alias to unpin.
+        name: String,
+    },
+}
+
+/// `qsh host …` subcommands (`docs/CLI.md` §6.1).
+#[derive(Debug, Subcommand)]
+pub enum HostCmd {
+    /// Resolve one host name to the route this machine would actually use
+    /// for it — live reverse registration if there is one, else the
+    /// forward pin, else `HOST_NOT_FOUND` (`docs/CLI.md` §6.1).
+    Get {
+        /// Host alias.
         name: String,
     },
 }

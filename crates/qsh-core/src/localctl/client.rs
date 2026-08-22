@@ -19,6 +19,7 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use qsh_proto::ErrorCode;
 use qsh_proto::local::{
@@ -26,6 +27,7 @@ use qsh_proto::local::{
     LocalResponse, LocalStreamKind, local_response,
 };
 use tokio::net::UnixStream;
+use tokio::task::JoinSet;
 
 use crate::localctl::frame::LocalConduit;
 use crate::ops::OpError;
@@ -175,70 +177,30 @@ pub async fn discover<T>(
     let candidates =
         candidate_sockets(runtime_dir).map_err(|err| io_error("list", runtime_dir, &err))?;
     for (pid, sock) in candidates {
-        match tokio::time::timeout(PROBE_TIMEOUT, UnixStream::connect(&sock)).await {
-            Ok(Ok(stream)) => {
-                match tokio::time::timeout(PROBE_TIMEOUT, probe(stream)).await {
-                    Ok(Ok(DiscoverOutcome::Found(value))) => return Ok(value),
-                    Ok(Ok(DiscoverOutcome::NotFound)) => {
-                        tracing::debug!(pid, "localctl discover: candidate said not-found");
-                        continue;
-                    }
-                    Ok(Err(err)) => {
-                        tracing::debug!(pid, %err, "localctl discover: candidate probe failed");
-                        continue;
-                    }
-                    Err(_elapsed) => {
-                        // A daemon that accepted but never answered would
-                        // otherwise wedge every remaining candidate behind
-                        // it forever — one misbehaving daemon must not
-                        // hide the others (this function's own doc, and
-                        // `docs/CLI.md` §6.2). Its socket is left alone:
-                        // an unresponsive-but-connectable daemon is not
-                        // provably dead, so nothing here unlinks it.
-                        tracing::warn!(
-                            pid,
-                            "localctl discover: candidate accepted but never answered within {:?}; skipping",
-                            PROBE_TIMEOUT
-                        );
-                        continue;
-                    }
-                }
-            }
-            Ok(Err(err)) if err.kind() == io::ErrorKind::ConnectionRefused => {
-                // ECONNREFUSED is *not* proof the daemon is dead: on
-                // macOS/BSD a live listener whose accept backlog is full
-                // reports it exactly this way, and even on Linux a
-                // just-`bind`-not-yet-`listen`ing socket can produce it
-                // for an instant. Only unlink when the pid the socket's
-                // own filename names (`<pid>.sock`,
-                // `docs/design/architecture.md` §7) is actually gone —
-                // `kill(pid, 0)` returning `ESRCH` is the one thing that
-                // proves that (adversarial review finding: unconditional
-                // unlink here could delete a live, merely-busy daemon's
-                // socket, permanently orphaning it from `qsh hosts` and
-                // Step 6 routing until a manual restart).
-                if process_is_verifiably_dead(pid) {
-                    let _ = std::fs::remove_file(&sock);
-                } else {
-                    tracing::debug!(
-                        pid,
-                        "localctl discover: connection refused but pid {pid} is still alive; \
-                         leaving its socket in place"
-                    );
-                }
-                continue;
+        let Some(stream) = connect_candidate(pid, &sock).await else {
+            continue;
+        };
+        match tokio::time::timeout(PROBE_TIMEOUT, probe(stream)).await {
+            Ok(Ok(DiscoverOutcome::Found(value))) => return Ok(value),
+            Ok(Ok(DiscoverOutcome::NotFound)) => {
+                tracing::debug!(pid, "localctl discover: candidate said not-found");
             }
             Ok(Err(err)) => {
-                tracing::debug!(pid, %err, "localctl discover: could not connect to candidate");
-                continue;
+                tracing::debug!(pid, %err, "localctl discover: candidate probe failed");
             }
             Err(_elapsed) => {
-                // `connect(2)` on a UDS does not block on the network, so
-                // this branch is defensive rather than expected — but a
-                // stuck connect must not be able to wedge discovery any
-                // more than a stuck probe can.
-                tracing::warn!(pid, "localctl discover: connect to candidate timed out");
-                continue;
+                // A daemon that accepted but never answered would
+                // otherwise wedge every remaining candidate behind it
+                // forever — one misbehaving daemon must not hide the
+                // others (this function's own doc, and `docs/CLI.md`
+                // §6.2). Its socket is left alone: an
+                // unresponsive-but-connectable daemon is not provably
+                // dead, so nothing here unlinks it.
+                tracing::warn!(
+                    pid,
+                    "localctl discover: candidate accepted but never answered within {:?}; skipping",
+                    PROBE_TIMEOUT
+                );
             }
         }
     }
@@ -248,13 +210,209 @@ pub async fn discover<T>(
     ))
 }
 
+/// One candidate daemon's answer when [`admin_host_list_all`] asks *every*
+/// socket on this machine for its current reverse registrations.
+///
+/// Unlike [`discover`] (stop at the first match — a routing probe only
+/// ever needs one answer), `Ops::host_list`'s reverse source needs the
+/// union across every live daemon, so this tries all of them and reports
+/// what each one said (`PLAN.md` M3 Step 5 (a): "reverse — 이 머신의
+/// localctl 데몬들에 등록된 엔트리의 합집합").
+#[derive(Debug, PartialEq, Eq)]
+pub struct DaemonHostList {
+    /// The daemon's pid — from its own `<pid>.sock` filename
+    /// (`docs/design/architecture.md` §7).
+    pub pid: u32,
+    /// The daemon's localctl socket path, kept for a routing caller that
+    /// needs to speak to this exact daemon again (Step 6).
+    pub socket: PathBuf,
+    /// Hosts this daemon currently has registered, live or stale — never
+    /// filtered here (`docs/CLI.md` §6.2's "부분 실패를 감추지 않는다"
+    /// discipline applies to the merge, not this probe).
+    pub hosts: Vec<LocalHost>,
+}
+
+/// Ask every localctl socket on this machine for its `LocalHostList`,
+/// skipping any that is unreachable, refused, or silent — a dead or
+/// misbehaving daemon is dropped from the result, never turned into an
+/// error (`docs/CLI.md` §6.1: "`host.list`는 dial하지 않는다... 잠든
+/// 노트북 한 대가 목록을 느리게 만들지 않는다"). No candidates at all (or
+/// an unreadable runtime directory) is an empty list, the normal "no `qsh
+/// listen` running" state — never an error a caller has to special-case.
+///
+/// Every candidate is probed **concurrently**, each under
+/// [`ADMIN_LIST_CANDIDATE_TIMEOUT`], so the total wall-clock cost of a
+/// listing is bounded by that one deadline regardless of how many sockets
+/// exist — a serial loop would let a wedged daemon early in pid-ascending
+/// order add its own timeout on top of every candidate behind it
+/// (adversarial review finding: measured 60.015 s for one wedged socket,
+/// serially, before this existed; N wedged sockets would have been N×60 s).
+/// Results are re-sorted by pid afterward so the returned order matches the
+/// pid-ascending order candidates were discovered in, independent of which
+/// connect happened to finish first.
+///
+/// Reuses [`connect_candidate`]'s stale-socket-unlink discipline (the same
+/// one [`discover`] applies), so a crashed daemon's leftover socket gets
+/// cleaned up here too, not only on the routing path.
+pub async fn admin_host_list_all(runtime_dir: &Path) -> Vec<DaemonHostList> {
+    let candidates = match candidate_sockets(runtime_dir) {
+        Ok(candidates) => candidates,
+        Err(err) => {
+            // `warn!` (not `debug!`, the CLI's default level): a caller
+            // must be able to see *why* the reverse source came back empty
+            // without raising verbosity, mirroring `session.list`'s
+            // fan-out `unreachable` reporting discipline (`docs/CLI.md`
+            // §6.2's "부분 실패를 감추지 않는다") — the runtime dir being
+            // unreadable is a partial-result cause, not routine noise
+            // (adversarial review finding: this was invisible at any
+            // normal verbosity).
+            tracing::warn!(
+                %err,
+                "localctl admin_host_list_all: could not list the runtime dir; \
+                 treating as no daemons (host.list never fails closed on this)"
+            );
+            return Vec::new();
+        }
+    };
+
+    let mut set = JoinSet::new();
+    for (pid, socket) in candidates {
+        set.spawn(async move {
+            match tokio::time::timeout(
+                ADMIN_LIST_CANDIDATE_TIMEOUT,
+                admin_host_list_one(pid, socket),
+            )
+            .await
+            {
+                Ok(outcome) => outcome,
+                Err(_elapsed) => {
+                    // A daemon that accepted but never answered would
+                    // otherwise hold up this whole listing until
+                    // `PROBE_TIMEOUT` (60 s, a *routing*-probe budget) —
+                    // `host.list` is a pure local read (`docs/CLI.md`
+                    // §6.1) and must not stall anywhere near that long on
+                    // one silent socket.
+                    tracing::warn!(
+                        pid,
+                        "localctl admin_host_list_all: candidate did not answer within {:?}; \
+                         skipping it (host.list never fails closed)",
+                        ADMIN_LIST_CANDIDATE_TIMEOUT
+                    );
+                    None
+                }
+            }
+        });
+    }
+
+    let mut out = Vec::new();
+    while let Some(joined) = set.join_next().await {
+        if let Some(daemon) = joined.expect("admin_host_list_all: a candidate probe task panicked")
+        {
+            out.push(daemon);
+        }
+    }
+    out.sort_by_key(|daemon| daemon.pid);
+    out
+}
+
+/// One candidate's connect-then-ask, for [`admin_host_list_all`]'s
+/// per-candidate task. Split out so the timeout wrapped around it in the
+/// caller has a single, clearly-bounded unit of work to apply to.
+async fn admin_host_list_one(pid: u32, socket: PathBuf) -> Option<DaemonHostList> {
+    let stream = connect_candidate(pid, &socket).await?;
+    match admin_host_list_over(stream).await {
+        Ok(hosts) => Some(DaemonHostList { pid, socket, hosts }),
+        Err(err) => {
+            // `warn!`, not `debug!` — same reasoning as the runtime-dir
+            // branch above: a daemon answering with an error (e.g. a
+            // rejected admin query) is a dropped partial result, and
+            // dropping it silently at the CLI's default log level would
+            // make a live-but-erroring daemon indistinguishable from one
+            // that was never registered (adversarial review finding).
+            tracing::warn!(
+                pid,
+                %err,
+                "localctl admin_host_list_all: candidate answered with an error; \
+                 skipping it (host.list never fails closed)"
+            );
+            None
+        }
+    }
+}
+
+/// Connect to one discovery candidate, applying the same bounded-wait and
+/// stale-socket-unlink discipline both [`discover`] and
+/// [`admin_host_list_all`] need: an `ECONNREFUSED` candidate is unlinked
+/// only when its own pid is verifiably dead (never a live-but-busy
+/// daemon — see the inline comment below), and a `connect(2)` that hangs
+/// (defensive; UDS connects don't block on the network) or never completes
+/// within [`PROBE_TIMEOUT`] is treated as unreachable rather than allowed
+/// to wedge the caller. `None` means "skip this candidate".
+async fn connect_candidate(pid: u32, sock: &Path) -> Option<UnixStream> {
+    match tokio::time::timeout(PROBE_TIMEOUT, UnixStream::connect(sock)).await {
+        Ok(Ok(stream)) => Some(stream),
+        Ok(Err(err)) if err.kind() == io::ErrorKind::ConnectionRefused => {
+            // ECONNREFUSED is *not* proof the daemon is dead: on
+            // macOS/BSD a live listener whose accept backlog is full
+            // reports it exactly this way, and even on Linux a
+            // just-`bind`-not-yet-`listen`ing socket can produce it for
+            // an instant. Only unlink when the pid the socket's own
+            // filename names (`<pid>.sock`, `docs/design/architecture.md`
+            // §7) is actually gone — `kill(pid, 0)` returning `ESRCH` is
+            // the one thing that proves that (adversarial review finding:
+            // unconditional unlink here could delete a live, merely-busy
+            // daemon's socket, permanently orphaning it from `qsh hosts`
+            // and Step 6 routing until a manual restart).
+            if process_is_verifiably_dead(pid) {
+                let _ = std::fs::remove_file(sock);
+            } else {
+                tracing::debug!(
+                    pid,
+                    "localctl: connection refused but pid {pid} is still alive; leaving its \
+                     socket in place"
+                );
+            }
+            None
+        }
+        Ok(Err(err)) => {
+            tracing::debug!(pid, %err, "localctl: could not connect to candidate");
+            None
+        }
+        Err(_elapsed) => {
+            // `connect(2)` on a UDS does not block on the network, so this
+            // branch is defensive rather than expected — but a stuck
+            // connect must not be able to wedge a caller any more than a
+            // stuck probe can.
+            tracing::warn!(pid, "localctl: connect to candidate timed out");
+            None
+        }
+    }
+}
+
 /// Bound on how long [`discover`] waits for any single candidate's
 /// `connect`/probe round trip before moving on — the ceiling
 /// `qsh_proto::local::LOCAL_WAIT_MAX` already defines for "a caller must
 /// not be able to pin a daemon slot open indefinitely" (`qsh/local/v1.proto`),
 /// reused here for the symmetric client-side guarantee: no single candidate
 /// may pin *discovery itself* open indefinitely.
-const PROBE_TIMEOUT: std::time::Duration = qsh_proto::local::LOCAL_WAIT_MAX;
+const PROBE_TIMEOUT: Duration = qsh_proto::local::LOCAL_WAIT_MAX;
+
+/// Per-candidate deadline for [`admin_host_list_all`]'s connect-then-ask
+/// round trip — deliberately **not** [`PROBE_TIMEOUT`]. `PROBE_TIMEOUT` is
+/// `qsh_proto::local::LOCAL_WAIT_MAX`, the ceiling for a caller who is
+/// *deliberately* willing to wait for a reverse registration to appear
+/// (`LocalHello.wait_ms`'s clamp); reusing it here was a category error
+/// (adversarial review finding) — the `LOCAL_ADMIN` exchange this path
+/// drives sends `wait_ms: 0` ("a local admin query never needs to wait",
+/// `admin_host_list_over_inner`), and `admin_host_list_all` backs
+/// `host.list`/`host.get`, a "pure local read" that `docs/CLI.md` §6.1
+/// promises never dials and never stalls on a sleeping peer. A same-machine
+/// UDS round trip normally completes in well under a millisecond; this
+/// bound only exists to cap a silent or wedged daemon's cost, so it can
+/// afford to be generous against CI scheduling jitter while staying nowhere
+/// near long enough to read as "hung" (measured regression before this
+/// existed: 60.015 s per wedged socket, serially).
+const ADMIN_LIST_CANDIDATE_TIMEOUT: Duration = Duration::from_millis(1000);
 
 /// Whether the process named by `pid` — the pid `<pid>.sock`'s own
 /// filename already carries — is provably gone, via `kill(pid, 0)`
@@ -285,6 +443,8 @@ fn process_is_verifiably_dead(pid: u32) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
+
     use tokio::net::UnixListener;
 
     use super::*;
@@ -666,5 +826,188 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.code, ErrorCode::HostNotFound);
+    }
+
+    // ---- `admin_host_list_all` — union across every daemon, bounded ----
+    // (adversarial review: this had zero direct coverage, and its own
+    // timeout stalled 60 s per wedged socket, serially)
+
+    #[tokio::test]
+    async fn admin_host_list_all_unions_across_two_live_daemons() {
+        let dir = tempfile::tempdir().unwrap();
+        let low = dir.path().join("10.sock");
+        let high = dir.path().join("20.sock");
+
+        let low_hosts = vec![sample_host("from-low-pid")];
+        let high_hosts = vec![sample_host("from-high-pid")];
+        let low_daemon = spawn_fake_admin_daemon(
+            UnixListener::bind(&low).unwrap(),
+            local_response::Body::HostListResult(LocalHostListResult {
+                hosts: low_hosts.clone(),
+            }),
+        );
+        let high_daemon = spawn_fake_admin_daemon(
+            UnixListener::bind(&high).unwrap(),
+            local_response::Body::HostListResult(LocalHostListResult {
+                hosts: high_hosts.clone(),
+            }),
+        );
+
+        let mut result = admin_host_list_all(dir.path()).await;
+        result.sort_by_key(|d| d.pid);
+        assert_eq!(result.len(), 2, "both live daemons must contribute");
+        assert_eq!(result[0].pid, 10);
+        assert_eq!(result[0].hosts, low_hosts);
+        assert_eq!(result[1].pid, 20);
+        assert_eq!(result[1].hosts, high_hosts);
+
+        low_daemon.await.unwrap();
+        high_daemon.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn admin_host_list_all_skips_a_daemon_that_answers_with_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let bad = dir.path().join("30.sock");
+        let good = dir.path().join("40.sock");
+
+        let bad_daemon = spawn_fake_admin_daemon(
+            UnixListener::bind(&bad).unwrap(),
+            local_response::Body::Error(LocalError::from_code(
+                ErrorCode::PermissionDenied,
+                "not allowed",
+            )),
+        );
+        let expected = vec![sample_host("still-listed")];
+        let good_daemon = spawn_fake_admin_daemon(
+            UnixListener::bind(&good).unwrap(),
+            local_response::Body::HostListResult(LocalHostListResult {
+                hosts: expected.clone(),
+            }),
+        );
+
+        let result = admin_host_list_all(dir.path()).await;
+        assert_eq!(
+            result.len(),
+            1,
+            "a daemon answering with an error must be dropped, not turned into a failure"
+        );
+        assert_eq!(result[0].pid, 40);
+        assert_eq!(result[0].hosts, expected);
+
+        bad_daemon.await.unwrap();
+        good_daemon.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn admin_host_list_all_with_no_candidates_is_an_empty_list() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(admin_host_list_all(dir.path()).await, Vec::new());
+    }
+
+    /// The regression this whole group of tests exists for: a socket that
+    /// accepts the conduit and then never answers must not be able to
+    /// stall the listing anywhere near [`PROBE_TIMEOUT`] (60 s) — measured
+    /// wall-clock, not virtual time, because the defect under test was a
+    /// real per-candidate wall-clock cost (adversarial review: 60.015 s
+    /// with one wedged socket before `ADMIN_LIST_CANDIDATE_TIMEOUT`
+    /// existed).
+    #[tokio::test]
+    async fn admin_host_list_all_does_not_stall_on_a_silent_daemon() {
+        let dir = tempfile::tempdir().unwrap();
+        let silent = dir.path().join("50.sock");
+        let silent_listener = UnixListener::bind(&silent).unwrap();
+        let silent_daemon = tokio::spawn(async move {
+            let (_stream, _addr) = silent_listener.accept().await.unwrap();
+            // Accept the conduit, then never read or write — exactly the
+            // "daemon wedged after accept" shape the adversarial review
+            // reproduced against a real `qsh hosts` invocation.
+            std::future::pending::<()>().await
+        });
+
+        let start = Instant::now();
+        let result = admin_host_list_all(dir.path()).await;
+        let elapsed = start.elapsed();
+
+        assert_eq!(result, Vec::new(), "a silent daemon contributes nothing");
+        assert!(
+            elapsed < ADMIN_LIST_CANDIDATE_TIMEOUT * 2,
+            "admin_host_list_all took {elapsed:?} against one silent daemon — \
+             ADMIN_LIST_CANDIDATE_TIMEOUT is {ADMIN_LIST_CANDIDATE_TIMEOUT:?}"
+        );
+
+        silent_daemon.abort();
+    }
+
+    /// Two silent daemons must cost roughly the same as one — proving the
+    /// candidates are probed concurrently rather than serially (a serial
+    /// loop would cost ~2×[`ADMIN_LIST_CANDIDATE_TIMEOUT`] here, and the
+    /// pre-fix code cost ~2×`PROBE_TIMEOUT`, i.e. two full minutes).
+    #[tokio::test]
+    async fn admin_host_list_all_probes_multiple_silent_daemons_concurrently() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemons = Vec::new();
+        for pid in [60, 61] {
+            let sock = dir.path().join(format!("{pid}.sock"));
+            let listener = UnixListener::bind(&sock).unwrap();
+            daemons.push(tokio::spawn(async move {
+                let (_stream, _addr) = listener.accept().await.unwrap();
+                std::future::pending::<()>().await
+            }));
+        }
+
+        let start = Instant::now();
+        let result = admin_host_list_all(dir.path()).await;
+        let elapsed = start.elapsed();
+
+        assert_eq!(result, Vec::new());
+        assert!(
+            elapsed < ADMIN_LIST_CANDIDATE_TIMEOUT * 2,
+            "two silent daemons took {elapsed:?} — candidates are not being probed \
+             concurrently (serial cost would be ~2×{ADMIN_LIST_CANDIDATE_TIMEOUT:?})"
+        );
+
+        for daemon in daemons {
+            daemon.abort();
+        }
+    }
+
+    /// The same silent-daemon-does-not-hide-others discipline `discover`
+    /// already proves, on `admin_host_list_all`'s union path instead of
+    /// `discover`'s stop-at-first-match path.
+    #[tokio::test]
+    async fn admin_host_list_all_returns_the_healthy_daemon_despite_a_silent_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let silent = dir.path().join("70.sock");
+        let healthy = dir.path().join("71.sock");
+
+        let silent_listener = UnixListener::bind(&silent).unwrap();
+        let silent_daemon = tokio::spawn(async move {
+            let (_stream, _addr) = silent_listener.accept().await.unwrap();
+            std::future::pending::<()>().await
+        });
+
+        let expected = vec![sample_host("healthy-answered")];
+        let healthy_daemon = spawn_fake_admin_daemon(
+            UnixListener::bind(&healthy).unwrap(),
+            local_response::Body::HostListResult(LocalHostListResult {
+                hosts: expected.clone(),
+            }),
+        );
+
+        let start = Instant::now();
+        let result = admin_host_list_all(dir.path()).await;
+        let elapsed = start.elapsed();
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].pid, 71);
+        assert_eq!(result[0].hosts, expected);
+        assert!(
+            elapsed < ADMIN_LIST_CANDIDATE_TIMEOUT * 2,
+            "took {elapsed:?} with one silent daemon present"
+        );
+
+        silent_daemon.abort();
+        healthy_daemon.await.unwrap();
     }
 }

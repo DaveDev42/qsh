@@ -97,6 +97,16 @@ impl Sandbox {
             .env("QSH_STATE_DIR", &self.state)
             .env_remove("XDG_CONFIG_HOME")
             .env_remove("XDG_STATE_HOME")
+            // `host.list`'s reverse source scans `Paths::runtime_dir()` for
+            // `<pid>.sock` candidates (`docs/design/architecture.md` §7):
+            // without this, a sandboxed test would inherit whatever
+            // `XDG_RUNTIME_DIR` the CI runner/dev box happens to export and
+            // could stumble onto an unrelated process's socket there.
+            // Scrubbed here so every sandbox falls back deterministically
+            // to `<state_dir>/run` (`Paths::runtime_dir`'s documented
+            // two-tier rule) — the same reason `localctl_perms.rs`'s
+            // `ListenGuard` scrubs it for its own `qsh listen` child.
+            .env_remove("XDG_RUNTIME_DIR")
             .env_remove("QSH_LOG")
             .env_remove("RUST_LOG");
         command
