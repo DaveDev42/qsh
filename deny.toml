@@ -7,7 +7,14 @@ targets = []
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
-ignore = []
+ignore = [
+    # TEMPORARY — remove once the sparse index converges. arrayref had every
+    # version yanked and immediately un-yanked on 2026-08-20 (~09:15Z; the
+    # crates.io API canonically reports yanked=false for 0.3.9), but the
+    # index view CI runners fetch still carried the stale yank more than an
+    # hour later, failing the gate on data the registry itself has retracted.
+    { crate = "arrayref@0.3.9", reason = "spurious: canonically un-yanked, stale index view in CI" },
+]
 
 [licenses]
 allow = [
