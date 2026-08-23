@@ -11,6 +11,8 @@ mod common;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use common::{Fleet, HOST_ALIAS, Sandbox, ServeGuard, exit_code};
+#[cfg(unix)]
+use common::{ListenGuard, ReverseGuard, hosts_array, poll_until};
 use serde_json::Value;
 
 /// A command that writes plenty of interleaved stdout and stderr.
@@ -173,6 +175,105 @@ fn a_noisy_follow_keeps_every_stdout_line_a_complete_json_event() {
         !String::from_utf8_lossy(&output.stderr).contains("line200"),
         "{label}: session output must never leak into the diagnostics"
     );
+}
+
+/// The reverse-route counterpart of the test above (`PLAN.md` M3 Step 7
+/// DoD 1): the session op is served over `LOCAL_CONTROL`/`LOCAL_STREAM`
+/// (Step 6/7's local daemon splice) instead of a direct QUIC connection,
+/// which is a completely different code path all the way from the CLI's
+/// route resolution down through the byte-transparent UDS↔QUIC pump in
+/// `localctl/daemon.rs::serve_stream` — purity here is not implied by the
+/// forward-route test above.
+#[cfg(unix)]
+#[test]
+fn a_noisy_follow_over_a_reverse_route_keeps_every_stdout_line_a_complete_json_event() {
+    let controller = Sandbox::initialized();
+    let target = Sandbox::initialized();
+    let target_fp = target.fingerprint();
+    let controller_fp = controller.fingerprint();
+
+    const NAME: &str = "reverse-noisy";
+    controller.trust_add(NAME, None, &target_fp);
+    let listen = ListenGuard::start(&controller);
+    target.trust_add("hub", Some(listen.addr()), &controller_fp);
+    let reverse = ReverseGuard::start(&target, "hub");
+
+    poll_until(
+        "the reverse registration to appear reachable",
+        std::time::Duration::from_secs(15),
+        || {
+            hosts_array(&controller)
+                .iter()
+                .any(|h| {
+                    h["name"] == NAME
+                        && h["connection_mode"] == "reverse"
+                        && h["state"] == "reachable"
+                })
+                .then_some(())
+        },
+    );
+
+    let (code, opened) =
+        controller.json(&["session", "open", NAME, "--json", "--", "sh", "-c", NOISY]);
+    assert_eq!(code, 0, "{opened}");
+    let session_ref = opened["data"]["session_ref"].as_str().expect("session_ref");
+
+    let label = "reverse route: session read --follow -vv --jsonl";
+    let output = controller.qsh(&[
+        "session",
+        "read",
+        session_ref,
+        "-vv",
+        "--jsonl",
+        "--follow",
+        "--after",
+        "0",
+    ]);
+    assert_eq!(exit_code(&output), 0, "{label}");
+
+    let events = parse_stdout_events(&output.stdout, label);
+    assert!(
+        events.len() > 1,
+        "{label}: a followed session is a stream, not one envelope"
+    );
+    assert!(
+        events.iter().all(|e| e["session_ref"] == session_ref),
+        "{label}: every event names its session"
+    );
+    assert_eq!(
+        events.last().expect("events")["type"],
+        "session.exit",
+        "{label}: the follow ends on the child's exit"
+    );
+
+    let mut bytes = Vec::new();
+    for event in events.iter().filter(|e| e["type"] == "session.output") {
+        bytes.extend_from_slice(
+            &BASE64
+                .decode(event["data_b64"].as_str().expect("data_b64"))
+                .expect("data_b64 is Base64"),
+        );
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(text.contains("line1"), "{label}: {text:?}");
+    assert!(text.contains("line200"), "{label}: {text:?}");
+    assert!(text.contains("e200"), "{label}: {text:?}");
+
+    // Unlike the forward-route test above, `-vv` here genuinely produces
+    // no stderr output at all (verified empirically): a `LOCAL_CONTROL`
+    // round trip is a short, already-established UDS conduit with no
+    // connection-setup spans of its own to log at `debug` — there is
+    // nothing wrong with that (purity does not require stderr to be
+    // non-empty, only that *whatever* lands on stdout is pure JSON), so
+    // this test does not assert on stderr's contents, only that no
+    // session payload ever reaches it if it *is* written.
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains("line200"),
+        "{label}: session output must never leak into the diagnostics"
+    );
+
+    reverse.shut_down();
+    drop(listen);
 }
 
 /// `qsh serve` has no envelope at all: stdout stays empty no matter how

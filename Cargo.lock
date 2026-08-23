@@ -2037,6 +2037,7 @@ dependencies = [
  "prost",
  "qsh-proto",
  "qsh-transport",
+ "quinn",
  "rand 0.9.5",
  "rcgen",
  "serde",

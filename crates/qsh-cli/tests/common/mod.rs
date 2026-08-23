@@ -481,6 +481,206 @@ pub const AUDIT_KEYS: &[&str] = &[
     "peer_addr",
 ];
 
+/// The stderr line `qsh listen` prints once it is up (`main.rs`'s
+/// `run_listen`) — shared by every test binary that spawns a real `qsh
+/// listen` process (`hosts_reverse.rs`, `localctl_perms.rs` each keep
+/// their own private copy of this constant and the guard below for
+/// reasons documented in their own module docs; this `pub` copy is for
+/// `reverse_e2e.rs`, `exit_code_matrix.rs` and `jsonl_purity.rs`, which
+/// have no such reason to duplicate it three more times).
+#[cfg(unix)]
+const LISTEN_LISTENING_PREFIX: &str = "qsh listen: listening on ";
+
+/// How long we wait for `qsh listen` to report its bound address —
+/// mirrors [`ServeGuard`]'s own budget.
+#[cfg(unix)]
+const LISTEN_START_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// A running real `qsh listen` child (the reverse-mode controller),
+/// killed on drop.
+#[cfg(unix)]
+pub struct ListenGuard {
+    child: Child,
+    addr: String,
+}
+
+#[cfg(unix)]
+impl ListenGuard {
+    /// Start `qsh listen --bind 127.0.0.1:0` in `sandbox` and wait
+    /// (bounded) for it to report the address it actually bound.
+    pub fn start(sandbox: &Sandbox) -> Self {
+        Self::start_with(sandbox, "127.0.0.1:0")
+    }
+
+    /// Like [`start`](Self::start), with an explicit `--bind` value —
+    /// e.g. a fixed port, to provoke a real `EADDRINUSE` bind conflict.
+    pub fn start_with(sandbox: &Sandbox, bind: &str) -> Self {
+        let mut child = sandbox
+            .command(&["listen", "--bind", bind])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("failed to spawn qsh listen");
+
+        if let Some(mut out) = child.stdout.take() {
+            thread::spawn(move || {
+                let _ = std::io::copy(&mut out, &mut std::io::sink());
+            });
+        }
+
+        let stderr = child.stderr.take().expect("listen stderr pipe");
+        let (tx, rx) = mpsc::channel::<String>();
+        thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                if let Some(addr) = line.strip_prefix(LISTEN_LISTENING_PREFIX) {
+                    let _ = tx.send(addr.to_string());
+                }
+            }
+        });
+        let addr = rx
+            .recv_timeout(LISTEN_START_TIMEOUT)
+            .expect("qsh listen never reported a bound address");
+
+        Self { child, addr }
+    }
+
+    /// Attempt to start `qsh listen --bind <bind>`, but do not block
+    /// waiting for a "listening on" line — for a bind-conflict scenario
+    /// where the child is expected to fail setup and exit instead.
+    /// Returns the finished [`Output`] once the child exits (bounded).
+    pub fn run_to_completion(sandbox: &Sandbox, bind: &str, extra: &[&str]) -> Output {
+        let mut args: Vec<&str> = extra.to_vec();
+        args.extend_from_slice(&["listen", "--bind", bind]);
+        sandbox.qsh(&args)
+    }
+
+    /// The `host:port` the child actually bound.
+    pub fn addr(&self) -> &str {
+        &self.addr
+    }
+
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ListenGuard {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// A running real `qsh reverse` child (the reverse-mode target), killed on
+/// drop. [`Self::shut_down`] sends `SIGTERM` and waits (bounded) for the
+/// graceful-shutdown path so a caller does not have to wait out QUIC's
+/// idle timeout for a clean disconnect to register (mirrors
+/// `hosts_reverse.rs`'s own private `ReverseGuard`).
+#[cfg(unix)]
+pub struct ReverseGuard {
+    child: Child,
+}
+
+#[cfg(unix)]
+impl ReverseGuard {
+    /// `qsh reverse <controller>` in `sandbox`. Never blocks waiting for
+    /// registration to succeed — the target retries forever on its own
+    /// (`docs/design/protocol.md` §11-4), so callers poll the
+    /// *controller's* view (`hosts_array`) instead.
+    pub fn start(sandbox: &Sandbox, controller: &str) -> Self {
+        Self::start_with(sandbox, &["reverse", controller])
+    }
+
+    /// Like [`start`](Self::start), with the full argv (e.g. plus
+    /// `--offered-name` or a verbosity flag).
+    pub fn start_with(sandbox: &Sandbox, args: &[&str]) -> Self {
+        let mut child = sandbox
+            .command(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("failed to spawn qsh reverse");
+        if let Some(mut out) = child.stdout.take() {
+            thread::spawn(move || {
+                let _ = std::io::copy(&mut out, &mut std::io::sink());
+            });
+        }
+        if let Some(mut err) = child.stderr.take() {
+            thread::spawn(move || {
+                let _ = std::io::copy(&mut err, &mut std::io::sink());
+            });
+        }
+        Self { child }
+    }
+
+    /// This process's pid — for an "owns no listening socket" assertion
+    /// from outside the process (`lsof`/`/proc`).
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
+    /// `SIGTERM`, then wait up to 5s for the child to actually exit —
+    /// bounded, never a bare kill-and-hope.
+    pub fn shut_down(mut self) {
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(self.child.id() as i32),
+            nix::sys::signal::Signal::SIGTERM,
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if matches!(self.child.try_wait(), Ok(Some(_))) {
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+                return;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ReverseGuard {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// `qsh hosts --json` in `sandbox`, asserted to succeed, returning the
+/// `data.hosts` array — shared by every reverse-registration test that
+/// needs to poll the controller's live view (mirrors `hosts_reverse.rs`'s
+/// own private helper of the same name).
+pub fn hosts_array(sandbox: &Sandbox) -> Vec<Value> {
+    let (code, envelope) = sandbox.json(&["hosts", "--json"]);
+    assert_eq!(code, 0, "{envelope}");
+    envelope["data"]["hosts"]
+        .as_array()
+        .expect("data.hosts array")
+        .clone()
+}
+
+/// Poll `f` — a bare, uncached read every time — until it returns `Some`,
+/// or fail after `deadline` (a hard deadline, never a fixed sleep standing
+/// in for one; mirrors `wait_for_audit`/`hosts_reverse.rs::poll_until`).
+pub fn poll_until<T>(what: &str, deadline: Duration, mut f: impl FnMut() -> Option<T>) -> T {
+    let until = std::time::Instant::now() + deadline;
+    loop {
+        if let Some(value) = f() {
+            return value;
+        }
+        if std::time::Instant::now() >= until {
+            panic!("timed out waiting for {what}");
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
 /// Block until `host`'s audit log contains a record matching `predicate`,
 /// or fail after a bounded deadline.
 ///

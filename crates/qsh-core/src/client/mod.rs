@@ -12,7 +12,7 @@ use qsh_proto::wire::{
     self, ControlMessage, ExecFrame, ExecStart, ExecStarted, Hello, SessionFrame, StreamHeader,
     control_message, exec_frame, response, session_frame,
 };
-use qsh_transport::{Connection, FramedRecv, FramedSend, FramedStream, StreamError};
+use qsh_transport::{Connection, FramedStream, StreamError};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
@@ -29,7 +29,7 @@ pub mod link;
 pub mod pathwatch;
 pub mod reconnect;
 
-use link::ControlLink;
+use link::{ControlLink, DataKillSwitch, DataRecv, DataSend};
 
 /// How long to wait for the peer's `Hello`. Single definition now lives in
 /// [`crate::handshake`]; re-exported here so this path stays stable.
@@ -126,13 +126,25 @@ pub fn map_hello_error(err: crate::handshake::HelloError) -> ClientError {
 /// [`ControlLink::Local`](link::ControlLink::Local) (the reverse route,
 /// `PLAN.md` M3 Step 6): a CLI process relaying through its resident
 /// daemon is not itself a QUIC endpoint on the underlying connection, so
-/// there is no [`Connection`] to hold. That leg has no data-stream conduit
-/// yet either (`LOCAL_STREAM` is a later step), so [`Self::exec`] and
-/// [`Self::open_attach_stream`] fail closed with [`ClientError::Unsupported`]
-/// rather than reach for it — see [`Self::require_connection`].
+/// there is no [`Connection`] to hold. [`Self::exec`] stays forward-only
+/// (`exec.run` has no reverse leg to open) and fails closed with
+/// [`ClientError::Unsupported`] there — see [`Self::require_connection`].
+/// [`Self::open_attach_stream`] does not: on this leg it opens a fresh
+/// `LOCAL_STREAM` conduit to the same daemon socket and host `local`
+/// recorded (`PLAN.md` M3 Step 7).
 pub struct Session {
     conn: Option<Connection>,
     link: ControlLink,
+    /// The daemon socket and host alias [`Self::link`]'s `LOCAL_CONTROL`
+    /// conduit came from — `Some` exactly when `conn` is `None`. Recorded
+    /// so a later [`Self::open_attach_stream`] can open a fresh
+    /// `LOCAL_STREAM` conduit to that *same* daemon for that *same* host
+    /// without this module having to thread a
+    /// [`crate::ops::LocalRoute`] through (which would reach backwards
+    /// from `client` into `ops`, the wrong dependency direction —
+    /// `CLAUDE.md`'s workspace map).
+    #[cfg(unix)]
+    local: Option<(std::path::PathBuf, String)>,
     next_request_id: u64,
     /// Capabilities both sides support.
     pub capabilities: Vec<String>,
@@ -170,6 +182,8 @@ impl Session {
         Self {
             conn: Some(conn),
             link: ControlLink::Quic(ctl),
+            #[cfg(unix)]
+            local: None,
             next_request_id: 1,
             capabilities: crate::handshake::negotiated_capabilities(&peer_hello),
             peer_device_name: peer_hello.device_name,
@@ -189,10 +203,12 @@ impl Session {
         conduit: ControlConduit,
         capabilities: Vec<String>,
         host: String,
+        socket: std::path::PathBuf,
     ) -> Self {
         Self {
             conn: None,
             link: ControlLink::Local(conduit),
+            local: Some((socket, host.clone())),
             next_request_id: 1,
             capabilities,
             peer_device_name: host,
@@ -213,22 +229,91 @@ impl Session {
             .expect("connection() is never called on a reverse-route (LOCAL_CONTROL) Session")
     }
 
-    /// The connection [`Self::exec`]/[`Self::open_attach_stream`] open a
-    /// data stream on — `Err(Unsupported)` on the reverse route (see
-    /// [`Self`]'s own doc), never a panic: unlike [`Self::connection`],
-    /// these two are reachable on a reverse-linked `Session` in principle
-    /// (nothing about the six value ops calls them, but nothing stops a
-    /// future caller from trying), so failing closed with a typed error
-    /// is the fail-closed default M3 Step 6 leaves in place until Step 7's
-    /// `LOCAL_STREAM` data-stream conduit lands.
+    /// The connection [`Self::exec`] opens its `EXEC_DATA` stream on —
+    /// `Err(Unsupported)` on the reverse route (see [`Self`]'s own doc),
+    /// never a panic: unlike [`Self::connection`], `exec` is reachable on
+    /// a reverse-linked `Session` in principle (nothing about the six
+    /// value ops calls it, but nothing stops a future caller from
+    /// trying). `exec.run` has no reverse leg at all — only
+    /// [`Self::open_attach_stream`] gained one in M3 Step 7 (via
+    /// [`Self::open_data_link`], which does not use this method) — so
+    /// this typed-error fail-closed default stays exactly as M3 Step 6
+    /// left it.
     fn require_connection(&self) -> Result<&Connection, ClientError> {
         self.conn.as_ref().ok_or_else(|| {
             ClientError::Unsupported(
-                "this session has no QUIC connection (reverse LOCAL_CONTROL leg); data streams \
-                 over a reverse route land in M3 Step 7"
+                "this session has no QUIC connection (reverse LOCAL_CONTROL leg); exec has no \
+                 reverse leg"
                     .into(),
             )
         })
+    }
+
+    /// Open this attach's `SESSION_DATA` link and send `header` as its
+    /// first frame — a QUIC bidi stream on the forward route (unchanged
+    /// since M1), or a fresh `LOCAL_STREAM` conduit to the same daemon
+    /// [`Self::local`]'s `LOCAL_CONTROL` handshake came from on the
+    /// reverse route (`PLAN.md` M3 Step 7). The third element is a
+    /// hard-stop primitive for [`crate::ops::session::AttachHandle::detach`]
+    /// — live only on the reverse route (`link::DataKillSwitch`'s own
+    /// doc explains why the forward route needs no equivalent of its
+    /// own: closing [`Self::connection`] already does that job there).
+    async fn open_data_link(
+        &self,
+        header: &StreamHeader,
+    ) -> Result<(DataSend, DataRecv, DataKillSwitch), ClientError> {
+        if let Some(conn) = self.conn.as_ref() {
+            let (send, recv) = conn.open_bi().await?;
+            let mut data = FramedStream::data(send, recv);
+            data.send.set_priority(wire::PRIORITY_SESSION_DATA);
+            data.send.send(header).await?;
+            let (send, recv) = data.split();
+            return Ok((
+                DataSend::Quic(send),
+                DataRecv::Quic(recv),
+                DataKillSwitch::default(),
+            ));
+        }
+        self.open_local_data_link(header).await
+    }
+
+    /// [`Self::open_data_link`]'s reverse-route branch: a fresh
+    /// `LOCAL_STREAM` conduit to [`Self::local`]'s daemon socket and host
+    /// (`crate::localctl::client::open_stream` sends `header` itself —
+    /// see that function's own doc for why).
+    #[cfg(unix)]
+    async fn open_local_data_link(
+        &self,
+        header: &StreamHeader,
+    ) -> Result<(DataSend, DataRecv, DataKillSwitch), ClientError> {
+        let Some((socket, host)) = self.local.as_ref() else {
+            return Err(ClientError::Protocol(
+                "reverse-route session has no LOCAL_CONTROL daemon socket recorded".into(),
+            ));
+        };
+        let handshake = crate::localctl::client::open_stream(socket, host, header)
+            .await
+            .map_err(link::op_error_to_client_error)?;
+        let kill = DataKillSwitch::new(handshake.socket);
+        Ok((
+            DataSend::Local(handshake.send),
+            DataRecv::Local(handshake.recv),
+            kill,
+        ))
+    }
+
+    /// Windows twin of [`Self::open_local_data_link`]: unreachable in
+    /// practice (`Self::local` is always `None` there — localctl/UDS does
+    /// not exist on that platform, `link::ControlLink`'s own doc), kept so
+    /// [`Self::open_data_link`]'s `None` branch compiles everywhere.
+    #[cfg(not(unix))]
+    async fn open_local_data_link(
+        &self,
+        _header: &StreamHeader,
+    ) -> Result<(DataSend, DataRecv, DataKillSwitch), ClientError> {
+        Err(ClientError::Unsupported(
+            "this platform has no LOCAL_CONTROL/LOCAL_STREAM carrier".into(),
+        ))
     }
 
     fn has_capability(&self, cap: &str) -> bool {
@@ -562,24 +647,23 @@ impl Session {
     }
 
     /// The data half: redeem `attached`'s ticket on a fresh
-    /// `SESSION_DATA` stream.
+    /// `SESSION_DATA` link (`PLAN.md` M3 Step 7: a QUIC stream on the
+    /// forward route, a `LOCAL_STREAM` conduit on the reverse route —
+    /// [`Self::open_data_link`]).
     pub async fn open_attach_stream(
         &mut self,
         attached: wire::SessionAttached,
     ) -> Result<Attached, ClientError> {
-        let (send, recv) = self.require_connection()?.open_bi().await?;
-        let mut data = FramedStream::data(send, recv);
-        data.send.set_priority(wire::PRIORITY_SESSION_DATA);
-        data.send
-            .send(&StreamHeader::session_data(attached.ticket.clone()))
+        let (send, recv, kill) = self
+            .open_data_link(&StreamHeader::session_data(attached.ticket.clone()))
             .await?;
-        let (send, recv) = data.split();
         Ok(Attached {
             replay_from: attached.replay_from,
             writer_lease: attached.writer_lease,
             expires_at: attached.expires_at,
             new_resume_token: attached.new_resume_token,
             input_from: attached.input_seq,
+            kill,
             writer: AttachWriter {
                 send,
                 // Continue the host's axis, not a private one: this is what
@@ -825,6 +909,13 @@ pub struct Attached {
     /// the host applied on the stream it left, so its un-acked tail can be
     /// retransmitted without the child seeing a byte twice.
     pub input_from: u64,
+    /// A synchronous, any-thread hard-stop for this attach's data link —
+    /// live only on the reverse route, a no-op otherwise
+    /// (`link::DataKillSwitch`'s own doc). `crate::ops::session`'s
+    /// `RecoveryLink` is built from this right after `open_attach_stream`
+    /// returns, before [`Self::split`] hands the writer/reader off to the
+    /// attach driver.
+    pub(crate) kill: DataKillSwitch,
     writer: AttachWriter,
     reader: AttachReader,
 }
@@ -900,7 +991,7 @@ impl Attached {
 
 /// Client → host half of an attach stream.
 pub struct AttachWriter {
-    send: FramedSend,
+    send: DataSend,
     input_seq: u64,
 }
 
@@ -936,13 +1027,13 @@ impl AttachWriter {
     /// connection next has to establish that for itself, which on this
     /// stream is what [`AttachEvent::InputAck`] is for.
     pub fn finish(mut self) {
-        let _ = self.send.finish();
+        self.send.finish();
     }
 }
 
 /// Host → client half of an attach stream.
 pub struct AttachReader {
-    recv: FramedRecv,
+    recv: DataRecv,
 }
 
 impl AttachReader {
@@ -1019,4 +1110,188 @@ async fn pump_stdin(
         }
     }
     send.send(&ExecFrame::stdin_eof()).await
+}
+
+// `Session::from_local_control`/`open_local_data_link` are unix-only
+// (`crate::localctl` is a `#[cfg(unix)]` module — `lib.rs`), so the whole
+// module is rather than gating each test individually.
+#[cfg(all(test, unix))]
+mod reverse_tests {
+    use qsh_proto::local::{
+        LocalHello, LocalHelloAck, LocalResponse, LocalStreamKind, local_response,
+    };
+    use tokio::net::UnixListener;
+
+    use super::*;
+    use crate::localctl::frame::LocalConduit;
+
+    /// A `from_local_control` [`Session`]'s [`Session::open_attach_stream`]
+    /// dials a **fresh** `LOCAL_STREAM` conduit to the exact same daemon
+    /// socket and host its `LOCAL_CONTROL` handshake came from
+    /// (`Self::local`'s own doc) — proven end to end against a fake daemon
+    /// that serves both conduit kinds, one after the other, on the same
+    /// socket path.
+    #[tokio::test]
+    async fn open_attach_stream_on_a_reverse_session_reaches_the_same_daemon_socket_and_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("reverse-attach.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+
+        let daemon = tokio::spawn(async move {
+            // First conduit: LOCAL_CONTROL, exactly what
+            // `dial_reverse`/`open_control` produce.
+            let (stream, _addr) = listener.accept().await.unwrap();
+            let mut control = LocalConduit::new(stream);
+            let hello: LocalHello = control.recv().await.unwrap().unwrap();
+            assert_eq!(hello.kind, LocalStreamKind::LocalControl as i32);
+            assert_eq!(hello.host, "phone");
+            control
+                .send(&LocalResponse {
+                    body: Some(local_response::Body::HelloAck(LocalHelloAck {
+                        host: "phone".to_string(),
+                        peer_fingerprint: "sha256:EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE"
+                            .to_string(),
+                        generation: 1,
+                        capabilities: Vec::new(),
+                    })),
+                })
+                .await
+                .unwrap();
+
+            // Second conduit, same socket path: LOCAL_STREAM, opened by
+            // `open_attach_stream` — proves it is a fresh conduit to the
+            // *same* daemon/host rather than reusing the control conduit
+            // or dialing somewhere else.
+            let (stream, _addr) = listener.accept().await.unwrap();
+            let mut data = LocalConduit::new(stream);
+            let hello: LocalHello = data.recv().await.unwrap().unwrap();
+            assert_eq!(hello.kind, LocalStreamKind::LocalStream as i32);
+            assert_eq!(hello.host, "phone");
+            data.send(&LocalResponse {
+                body: Some(local_response::Body::HelloAck(LocalHelloAck {
+                    host: "phone".to_string(),
+                    peer_fingerprint: "sha256:EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE"
+                        .to_string(),
+                    generation: 1,
+                    capabilities: Vec::new(),
+                })),
+            })
+            .await
+            .unwrap();
+            let header: wire::StreamHeader = data.recv().await.unwrap().unwrap();
+            assert_eq!(header.stream_kind(), Some(wire::StreamKind::SessionData));
+            header.ticket
+        });
+
+        let handshake = crate::localctl::client::open_control(&sock, "phone", 0)
+            .await
+            .unwrap();
+        let mut session = Session::from_local_control(
+            handshake.conduit,
+            handshake.capabilities,
+            handshake.host,
+            sock.clone(),
+        );
+
+        let attached = session
+            .open_attach_stream(wire::SessionAttached {
+                ticket: vec![7, 7, 7],
+                new_resume_token: Vec::new(),
+                replay_from: 0,
+                writer_lease: true,
+                expires_at: String::new(),
+                input_seq: 0,
+            })
+            .await
+            .unwrap();
+        // A live `LOCAL_STREAM` conduit, not the forward route's
+        // synchronous no-op — `DataKillSwitch::kill`'s own doc.
+        attached.kill.kill();
+
+        let seen_ticket = daemon.await.unwrap();
+        assert_eq!(seen_ticket, vec![7, 7, 7]);
+    }
+
+    /// `AttachHandle::detach` on the reverse route ends the attach's own
+    /// `LOCAL_STREAM` conduit synchronously — no connection, no runtime,
+    /// no cooperation from the daemon needed (`DataKillSwitch::kill`'s own
+    /// doc). Killing it must be a clean, typed end of conduit on the
+    /// reader's side, never a panic or a hang.
+    #[tokio::test]
+    async fn killing_a_reverse_attachs_data_conduit_ends_the_reader_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("reverse-kill.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+
+        let daemon = tokio::spawn(async move {
+            let (stream, _addr) = listener.accept().await.unwrap();
+            let mut control = LocalConduit::new(stream);
+            let _hello: LocalHello = control.recv().await.unwrap().unwrap();
+            control
+                .send(&LocalResponse {
+                    body: Some(local_response::Body::HelloAck(LocalHelloAck {
+                        host: "phone".to_string(),
+                        peer_fingerprint: "sha256:FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
+                            .to_string(),
+                        generation: 1,
+                        capabilities: Vec::new(),
+                    })),
+                })
+                .await
+                .unwrap();
+
+            let (stream, _addr) = listener.accept().await.unwrap();
+            let mut data = LocalConduit::new(stream);
+            let _hello: LocalHello = data.recv().await.unwrap().unwrap();
+            data.send(&LocalResponse {
+                body: Some(local_response::Body::HelloAck(LocalHelloAck {
+                    host: "phone".to_string(),
+                    peer_fingerprint: "sha256:FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
+                        .to_string(),
+                    generation: 1,
+                    capabilities: Vec::new(),
+                })),
+            })
+            .await
+            .unwrap();
+            let _header: wire::StreamHeader = data.recv().await.unwrap().unwrap();
+            // Never write, never close from this side — the reader on the
+            // other end must unblock from `kill()` alone.
+            std::future::pending::<()>().await
+        });
+
+        let handshake = crate::localctl::client::open_control(&sock, "phone", 0)
+            .await
+            .unwrap();
+        let mut session = Session::from_local_control(
+            handshake.conduit,
+            handshake.capabilities,
+            handshake.host,
+            sock.clone(),
+        );
+        let attached = session
+            .open_attach_stream(wire::SessionAttached {
+                ticket: vec![1],
+                new_resume_token: Vec::new(),
+                replay_from: 0,
+                writer_lease: true,
+                expires_at: String::new(),
+                input_seq: 0,
+            })
+            .await
+            .unwrap();
+        let kill = attached.kill.clone();
+        let (_writer, mut reader) = attached.split();
+
+        kill.kill();
+        let end = tokio::time::timeout(Duration::from_secs(5), reader.next())
+            .await
+            .expect("kill() must unblock the reader promptly, not hang");
+        assert!(
+            end.unwrap().is_none(),
+            "a killed conduit must end cleanly, not error"
+        );
+
+        daemon.abort();
+    }
 }

@@ -19,14 +19,17 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
+use prost::Message;
 use qsh_proto::ErrorCode;
+use qsh_proto::frame::{DATA_FRAME_MAX, FrameDecoder};
 use qsh_proto::local::{
     LOCAL_HELLO_VERSION, LocalError, LocalHello, LocalHost, LocalHostList, LocalHostListResult,
     LocalResponse, LocalStreamKind, local_response,
 };
-use qsh_proto::wire::ControlMessage;
+use qsh_proto::wire::{self, ControlMessage};
 use tokio::net::UnixStream;
 use tokio::task::JoinSet;
 
@@ -230,6 +233,274 @@ impl ControlConduit {
     pub(crate) async fn recv(&mut self) -> Result<Option<ControlMessage>, OpError> {
         self.conduit.recv().await
     }
+}
+
+/// Open a `LOCAL_STREAM` conduit to the daemon listening on `socket_path`
+/// for `host`, send `header` as the conduit's one framed message, then hand
+/// back a raw byte-level split — the CLI-process-side half of
+/// `crate::localctl::daemon::LocalctlDaemon::serve_stream`'s splice
+/// (`docs/design/protocol.md` §11-3, `PLAN.md` M3 Step 7).
+///
+/// `header` is sent **by this function**, not the caller: exactly like
+/// [`open_control`] consuming its own `LocalHelloAck`, the shape of the
+/// very next frame on a fresh `LOCAL_STREAM` conduit is dictated entirely
+/// by the daemon-side protocol (`serve_stream`'s own doc — "the next frame
+/// from the CLI is the wire `StreamHeader`"), so there is nothing a caller
+/// could usefully vary about *how* it is sent, only *what* it says. The
+/// daemon answers a well-formed `SESSION_DATA` header with silence (it
+/// moves straight to the raw splice, `serve_stream`'s own doc), so this
+/// function does not wait for anything after sending it — matching
+/// `client::Session::open_attach_stream`'s forward-route sibling, which
+/// likewise never waits for a target-side ack of the header it writes.
+pub(crate) async fn open_stream(
+    socket_path: &Path,
+    host: &str,
+    header: &wire::StreamHeader,
+) -> Result<DataHandshake, OpError> {
+    let stream = UnixStream::connect(socket_path)
+        .await
+        .map_err(|err| io_error("connect", socket_path, &err))?;
+    open_stream_over(stream, host, header).await
+}
+
+/// Same exchange as [`open_stream`], over an already-connected conduit —
+/// split out for the same reason [`open_control_over`] is: tests drive the
+/// handshake without a real `connect(2)`.
+pub(crate) async fn open_stream_over(
+    stream: UnixStream,
+    host: &str,
+    header: &wire::StreamHeader,
+) -> Result<DataHandshake, OpError> {
+    match tokio::time::timeout(PROBE_TIMEOUT, open_stream_over_inner(stream, host, header)).await {
+        Ok(result) => result,
+        Err(_elapsed) => Err(OpError::new(
+            ErrorCode::ConnectionFailed,
+            format!(
+                "localctl: daemon accepted the LOCAL_STREAM conduit but never answered within \
+                 {PROBE_TIMEOUT:?}"
+            ),
+        )),
+    }
+}
+
+async fn open_stream_over_inner(
+    stream: UnixStream,
+    host: &str,
+    header: &wire::StreamHeader,
+) -> Result<DataHandshake, OpError> {
+    let mut conduit = LocalConduit::new(stream);
+    conduit
+        .send(&LocalHello {
+            version: LOCAL_HELLO_VERSION,
+            kind: LocalStreamKind::LocalStream as i32,
+            host: host.to_string(),
+            wait_ms: 0,
+        })
+        .await?;
+    let response: LocalResponse = conduit.recv().await?.ok_or_else(|| {
+        OpError::new(
+            ErrorCode::ConnectionFailed,
+            "localctl: daemon closed the conduit without answering the LOCAL_STREAM LocalHello",
+        )
+    })?;
+    match response.body {
+        Some(local_response::Body::HelloAck(_ack)) => {}
+        Some(local_response::Body::Error(err)) => return Err(remote_error(err)),
+        _ => {
+            return Err(OpError::new(
+                ErrorCode::ConnectionFailed,
+                "localctl: daemon answered the LOCAL_STREAM LocalHello with an unexpected \
+                 response",
+            ));
+        }
+    }
+    conduit.send(header).await?;
+    // From here on this conduit never speaks framed `qsh.local.v1` again —
+    // `into_raw` hands back the still-open stream plus whatever bytes of
+    // the peer's first `SessionFrame` the last `read()` already swallowed
+    // alongside the header (`LocalConduit::into_raw`'s own doc; the daemon
+    // sends nothing back on success, so any such bytes can only be the
+    // CLI's *own* next write racing this same read, not a reply).
+    let (stream, prefetched) = conduit.into_raw();
+    // One `Arc` shared by both halves plus [`DataHandshake::socket`] (a
+    // third clone a caller can keep for a synchronous, any-thread
+    // hard-stop — `crate::client::link::DataKillSwitch`'s own doc explains
+    // why that needs its own held reference rather than a bare fd):
+    // `shutdown(2)` on any one of the three ends the whole socket, and the
+    // fd stays allocated for as long as *any* clone is alive, so a
+    // hard-stop can never race a `Drop` elsewhere into hitting a reused
+    // descriptor.
+    let socket = Arc::new(stream);
+    let mut dec = FrameDecoder::new(DATA_FRAME_MAX);
+    dec.push(&prefetched);
+    Ok(DataHandshake {
+        send: DataSendHalf {
+            socket: socket.clone(),
+        },
+        recv: DataRecvHalf {
+            socket: socket.clone(),
+            dec,
+            buf: vec![0u8; 16 * 1024],
+        },
+        socket,
+    })
+}
+
+/// What a successful [`open_stream`]/[`open_stream_over`] handshake
+/// produced.
+pub(crate) struct DataHandshake {
+    pub send: DataSendHalf,
+    pub recv: DataRecvHalf,
+    /// A third, independent clone of the same socket [`send`](Self::send)
+    /// and [`recv`](Self::recv) share — for
+    /// `crate::client::link::DataKillSwitch`, built one layer up
+    /// (`crate::client::mod`'s `Session::open_local_data_link`) so this
+    /// transport-free file never has to name that cross-platform type
+    /// (`crate::localctl` module docs' dependency direction: this module
+    /// is depended on, never the reverse).
+    pub socket: Arc<UnixStream>,
+}
+
+/// Client → daemon half of a `LOCAL_STREAM` conduit, once its header has
+/// been sent — raw `qsh.wire.v1` frames (in practice, `SessionFrame`s)
+/// written straight to the socket, capped at [`DATA_FRAME_MAX`]: the same
+/// cap `qsh_transport::control::FramedSend::data` enforces on the far side
+/// of the daemon's splice, so a frame this process is willing to send is
+/// exactly a frame the target's own decoder is willing to accept
+/// (`docs/design/protocol.md` §7, §11-3).
+///
+/// Reads and writes through `&self` — [`UnixStream::writable`]/
+/// [`UnixStream::try_write`] rather than an owned, exclusive
+/// `AsyncWrite` — precisely so this half, [`DataRecvHalf`] and
+/// `DataKillSwitch` can all hold independent clones of the *same* `Arc`
+/// and run concurrently without a mutable-borrow conflict between them
+/// (see [`open_stream_over_inner`]'s own doc on why that matters).
+pub(crate) struct DataSendHalf {
+    socket: Arc<UnixStream>,
+}
+
+impl DataSendHalf {
+    /// Encode + frame + write one message.
+    pub(crate) async fn send<M: Message>(&mut self, msg: &M) -> Result<(), OpError> {
+        let wire =
+            wire::encode_framed(msg, DATA_FRAME_MAX).map_err(|err| conduit_error("encode", err))?;
+        write_all(&self.socket, &wire)
+            .await
+            .map_err(|err| conduit_error("write", err))
+    }
+
+    /// Half-close: shut the write direction of the underlying socket down.
+    /// Synchronous, no runtime needed — the same nature
+    /// [`qsh_transport::control::FramedSend::finish`] has (queues the FIN,
+    /// does not wait for it): the daemon's own read on its end of this
+    /// same UDS pair sees a clean EOF and relays it onward as a QUIC
+    /// `finish` on the target's data stream (`crate::localctl::daemon`'s
+    /// `pump_uds_to_quic`, "UDS EOF -> QUIC finish").
+    pub(crate) fn finish(&self) {
+        unsafe {
+            libc::shutdown(as_raw_fd(&self.socket), libc::SHUT_WR);
+        }
+    }
+}
+
+/// Daemon → client half of a `LOCAL_STREAM` conduit, once its header has
+/// been sent. See [`DataSendHalf`]'s own doc for why this reads through
+/// `&self` rather than an owned, exclusive half.
+pub(crate) struct DataRecvHalf {
+    socket: Arc<UnixStream>,
+    dec: FrameDecoder,
+    buf: Vec<u8>,
+}
+
+impl DataRecvHalf {
+    /// Read the next message. `Ok(None)` on a clean end-of-conduit (the
+    /// daemon closed its end at a frame boundary — a `QUIC FIN` relayed
+    /// onward, `pump_quic_to_uds`'s "QUIC FIN/reset -> UDS shutdown" —
+    /// with nothing pending); a truncated final frame is
+    /// [`ErrorCode::ConnectionFailed`], the same framing-lost treatment
+    /// [`LocalConduit::recv`] gives it.
+    pub(crate) async fn recv<M: Message + Default>(&mut self) -> Result<Option<M>, OpError> {
+        loop {
+            if let Some(payload) = self
+                .dec
+                .next_frame()
+                .map_err(|err| conduit_error("frame", err))?
+            {
+                let msg =
+                    M::decode(payload.as_slice()).map_err(|err| conduit_error("decode", err))?;
+                return Ok(Some(msg));
+            }
+            let n = read_some(&self.socket, &mut self.buf)
+                .await
+                .map_err(|err| conduit_error("read", err))?;
+            if n == 0 {
+                let buffered = self.dec.buffered();
+                return if buffered == 0 {
+                    Ok(None)
+                } else {
+                    Err(conduit_error(
+                        "read",
+                        format!("conduit ended mid-frame ({buffered} bytes buffered)"),
+                    ))
+                };
+            }
+            // Without this the bytes just read sit in `self.buf` and are
+            // never seen by `self.dec` — `next_frame()` above would find
+            // nothing, forever, on every subsequent loop no matter how
+            // much data actually arrives.
+            self.dec.push(&self.buf[..n]);
+        }
+    }
+}
+
+/// Write all of `buf` to `socket`'s send direction, via the readiness-based
+/// `writable`/`try_write` pair rather than [`tokio::io::AsyncWriteExt`] —
+/// the latter needs a `&mut UnixStream`, which an `Arc`-shared socket
+/// cannot hand out to more than one owner at a time.
+async fn write_all(socket: &UnixStream, mut buf: &[u8]) -> io::Result<()> {
+    while !buf.is_empty() {
+        socket.writable().await?;
+        match socket.try_write(buf) {
+            Ok(n) => buf = &buf[n..],
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => continue,
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(())
+}
+
+/// Read at least one byte (or report a clean EOF as `Ok(0)`) from
+/// `socket`'s receive direction. See [`write_all`]'s own doc for why this
+/// is readiness-based rather than [`tokio::io::AsyncReadExt`].
+async fn read_some(socket: &UnixStream, buf: &mut [u8]) -> io::Result<usize> {
+    loop {
+        socket.readable().await?;
+        match socket.try_read(buf) {
+            Ok(n) => return Ok(n),
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => continue,
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+/// The raw fd a `shutdown(2)` targets — `AsRawFd` needs `std::os::fd`,
+/// unix-only, which this whole module already is (`crate::localctl`'s own
+/// `#[cfg(unix)]` gate in `lib.rs`), so no further cfg is needed here.
+fn as_raw_fd(socket: &UnixStream) -> std::os::fd::RawFd {
+    use std::os::fd::AsRawFd as _;
+    socket.as_raw_fd()
+}
+
+/// Wrap a `LOCAL_STREAM` data-conduit I/O failure as
+/// [`ErrorCode::ConnectionFailed`] — the same code
+/// [`crate::localctl::frame`]'s own `conduit_error` uses for the identical
+/// reason (a broken local IPC conduit to this machine's own daemon plays
+/// the same role an unreachable controller plays on the forward route).
+fn conduit_error(step: &str, err: impl std::fmt::Display) -> OpError {
+    OpError::new(
+        ErrorCode::ConnectionFailed,
+        format!("localctl data conduit {step} failed: {err}"),
+    )
 }
 
 /// Convert a `LocalError` the daemon sent us into an [`OpError`], preserving
