@@ -671,6 +671,22 @@ fn run_listen(ops: &Ops, bind: Option<&str>) -> i32 {
             bind,
             |addr| {
                 eprintln!("qsh listen: listening on {addr}");
+                // `docs/CLI.md` §6.13's "Controller reachability 요구":
+                // reverse only makes the *target* reachable through NAT —
+                // this controller must still be dialable at `addr` by
+                // every target. `qsh_core::doctor::CONTROLLER_UNREACHABLE`
+                // is the single source of truth for that reminder's
+                // wording (doctor.rs's own docs, docs/CLI.md §6.13's "같은
+                // 상수를 qsh listen 시작 배너 ... 함께 소비한다") — this
+                // banner renders it verbatim rather than forking its own
+                // paraphrase, same as the target's connection-failure path
+                // below (adversarial review finding, M3 Step 9: a second
+                // hardcoded copy here could silently drift from the
+                // constant with no test catching it).
+                eprintln!("qsh listen: targets must be able to reach {addr} directly over UDP");
+                let diag = qsh_core::doctor::CONTROLLER_UNREACHABLE;
+                eprintln!("qsh listen: {}", diag.message);
+                eprintln!("qsh listen: {}", diag.remedy);
             },
             shutdown_signal(),
         ))
@@ -703,12 +719,24 @@ fn run_reverse(ops: &Ops, controller: &str, offered_name: Option<&str>) -> i32 {
             .enable_all()
             .build()
             .map_err(|err| OpError::new(ErrorCode::Internal, format!("runtime: {err}")))?;
-        runtime.block_on(qsh_core::reverse::target::run_reverse(
+        runtime.block_on(qsh_core::reverse::target::run_reverse_observed(
             ops.paths(),
             &config,
             identity,
             controller,
             offered_name,
+            |_runtime| {},
+            // `qsh_core::doctor::CONTROLLER_UNREACHABLE` fires at most
+            // once per process (`run_reverse_observed`'s own docs — the
+            // once-only guard lives in qsh-core, this closure only
+            // renders it): the first failed dial/registration attempt,
+            // never once per backoff retry (`docs/CLI.md` §6.13,
+            // `PLAN.md` M3 Step 9).
+            || {
+                let diag = qsh_core::doctor::CONTROLLER_UNREACHABLE;
+                eprintln!("qsh reverse: {}", diag.message);
+                eprintln!("qsh reverse: {}", diag.remedy);
+            },
             shutdown_signal(),
         ))
     })();

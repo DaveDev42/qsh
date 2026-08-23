@@ -99,10 +99,15 @@ qsh listen
 qsh reverse controller.example.com
 
 # Controller
-qsh attach company-mac
+qsh <name>                      # 새 세션
+qsh attach <name>/<session_id>  # 재attach
 ```
 
-역방향 접속에도 target에서 controller까지 직접 연결 가능한 경로가 필요하다.
+역방향 접속에도 target에서 controller까지 직접 연결 가능한 경로가 필요하다 — 이는 M3 이후에도 여전히 유효한 제약이다: 역방향은 NAT 뒤 target을 도달 가능하게 만들 뿐, controller 자신은 여전히 direct-reachable해야 한다. relay·NAT traversal·discovery는 P0의 명시적 범위 밖이다(ROADMAP.md M3). 이 제약의 정본 문안(`qsh-core::doctor::CONTROLLER_UNREACHABLE`, `docs/CLI.md` §6.13이 렌더 지점을 명시)은 다음과 같다:
+
+> Reverse attach needs a directly reachable UDP path from the target to the controller. QSH provides no relay, NAT traversal, or discovery — that is out of scope for P0.
+>
+> Put the controller on a publicly routable address, a forwarded port, or an existing overlay such as WireGuard or Tailscale. If the controller itself is behind NAT, M3 has no answer for that.
 
 ### 세션 복구
 
