@@ -1667,8 +1667,16 @@ impl AttachContext {
 /// field's own doc on `AttachContext` for why the value must survive
 /// across that boundary rather than being reset per-`LocalReconnect`.
 struct ReverseRoute {
+    // `host`/`socket`/`generation` are read only by the `#[cfg(unix)]`
+    // `local_reattach`/`LocalReconnect` dial path; the struct is still
+    // constructed on every platform, so they are dead — not absent — on
+    // Windows. (`registration_wait_ms` below stays live everywhere: the
+    // recovery-report getter that reads it is not gated.)
+    #[cfg_attr(not(unix), allow(dead_code))]
     host: String,
+    #[cfg_attr(not(unix), allow(dead_code))]
     socket: std::path::PathBuf,
+    #[cfg_attr(not(unix), allow(dead_code))]
     generation: std::sync::atomic::AtomicU64,
     /// Milliseconds the most recently *completed* [`LocalReconnect`] wait
     /// spent blocked on the daemon's new-generation registration before it
@@ -1713,6 +1721,9 @@ impl ReverseKill {
     /// Install a new kill switch, handing back the one it replaced so the
     /// caller can decide whether it is still worth killing explicitly
     /// (mirrors [`Link::replace`]).
+    // Only the `#[cfg(unix)]` `LocalReconnect` recovery swap calls this;
+    // `kill`/`new` above are used cross-platform, `replace` is not.
+    #[cfg_attr(not(unix), allow(dead_code))]
     fn replace(&self, new: DataKillSwitch) -> DataKillSwitch {
         std::mem::replace(&mut *lock(&self.0), new)
     }
