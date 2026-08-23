@@ -301,15 +301,45 @@ async fn a_dying_conduits_in_flight_entry_is_fully_removed() {
             other => panic!("expected SessionOpened, got {other:?}"),
         };
 
-        // A long-poll with nothing new to report: genuinely in flight on
-        // this conduit until either output arrives or the conduit dies —
-        // fire-and-forget, deliberately never read.
+        // Drain whatever the freshly-opened shell has already written (its
+        // prompt) and learn the current output cursor, so the long-poll
+        // below has genuinely nothing to answer and stays in flight rather
+        // than being satisfied the instant it arrives. A read anchored at
+        // `after: 0` returns immediately whenever any output already
+        // exists — the initial prompt does — which raced the in-flight
+        // assertion into a flake (the read round-tripped before the 2 ms
+        // poll ever observed it outstanding, consistently on faster CI
+        // runners). This drain is bounded, not a fixed sleep.
         send(
             &mut dying,
             2,
             control_message::Body::SessionRead(wire::SessionRead {
-                session_id,
+                session_id: session_id.clone(),
                 after: 0,
+                max_bytes: 0,
+                wait_ms: 200,
+                ctl_after: 0,
+            }),
+        )
+        .await;
+        let next_after = match recv(&mut dying).await.body {
+            Some(control_message::Body::Response(wire::Response {
+                body: Some(response::Body::SessionReadResult(result)),
+                ..
+            })) => result.next_after,
+            other => panic!("expected a SessionReadResult draining initial output, got {other:?}"),
+        };
+
+        // Now a long-poll starting *past* everything the session has
+        // produced so far: an idle shell writes nothing more, so this is
+        // genuinely in flight on this conduit until the conduit dies —
+        // fire-and-forget, deliberately never read.
+        send(
+            &mut dying,
+            3,
+            control_message::Body::SessionRead(wire::SessionRead {
+                session_id,
+                after: next_after,
                 max_bytes: 0,
                 wait_ms: 5_000,
                 ctl_after: 0,
