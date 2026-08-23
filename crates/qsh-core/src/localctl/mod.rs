@@ -64,6 +64,13 @@
 //! supervisor needs `SessionBackend` (ADR-0003) and this IPC layer to
 //! already be proven transport-free.
 //!
+//! [`mux`] (`PLAN.md` M3 Step 6, Stage A1) is the pure `request_id`
+//! remapping and event-routing table [`daemon`] drives once it starts
+//! multiplexing several `LOCAL_CONTROL` conduits onto one reverse QUIC
+//! connection — it names no transport type at all (not even indirectly)
+//! and has no async, no lock, no socket; see its own module docs for the
+//! invariant it enforces.
+//!
 //! Every type here lives behind `#[cfg(unix)]` (see the `pub mod
 //! localctl;` declaration in `lib.rs`) — localctl (UDS, peer credentials)
 //! has no meaning on Windows, so this whole module tree compiles out there
@@ -83,3 +90,4 @@
 pub mod client;
 pub mod daemon;
 pub mod frame;
+pub mod mux;

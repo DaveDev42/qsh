@@ -43,6 +43,47 @@ pub(crate) struct PeerTarget {
     pub server_name: String,
 }
 
+/// Where `Ops::connect`/`connect_target` (`crate::ops::session`) actually
+/// reach `host` through — the dial-time counterpart of
+/// [`host::HostRoute`], resolved by [`Ops::resolve_route`] (`PLAN.md` M3
+/// Step 6). `HostRoute` is what `host.get`/the human renderer *display*;
+/// `PeerRoute` is what a connection is actually built over, carrying the
+/// identity/trust material `HostRoute` deliberately does not (routing and
+/// display share one decision, `host::resolve_route`, but only one of
+/// their two callers ever needs a private key in hand).
+pub(crate) enum PeerRoute {
+    /// Dial the peer directly over QUIC (forward route).
+    Forward(PeerTarget),
+    /// Relay through this machine's resident `qsh listen` daemon (reverse
+    /// route).
+    Reverse(LocalRoute),
+}
+
+/// Everything a reverse dial needs: which daemon (by its localctl socket)
+/// and which of its registered hosts (by the alias name `LocalHello.host`
+/// carries) to ask for.
+///
+/// Deliberately **not** carrying the fingerprint [`host::HostRoute::Reverse`]
+/// observed at resolution time — [`crate::ops::session::Connected::peer_fingerprint`]
+/// (the ADR-0007 presentation-condition input) must be the value *this*
+/// connection's own `LocalHelloAck` reports, not a possibly-stale one read
+/// moments earlier during routing (`docs/design/protocol.md` §11-3, `PLAN.md`
+/// M3 Step 6's "Connected::peer_fingerprint() on the reverse leg returns
+/// LocalHelloAck.peer_fingerprint" rule).
+pub(crate) struct LocalRoute {
+    /// The host alias to ask the daemon for (`LocalHello.host`).
+    // Only ever read by `ops/session.rs`'s `dial_reverse`, `#[cfg(unix)]`
+    // (localctl/UDS is unix-only) — `resolve_route` below still
+    // *constructs* a `LocalRoute` on every platform (it mirrors
+    // `HostRoute::Reverse` unconditionally), so the fields are genuinely
+    // unread, not unconstructed, on Windows.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub host: String,
+    /// The daemon's localctl socket path.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub socket: std::path::PathBuf,
+}
+
 /// How long the `trust.add` fingerprint probe waits for a handshake before
 /// reporting `CONNECTION_FAILED`. Deliberately shorter than the transport's
 /// default dial timeout: this dial is expected to fail (we trust nothing),
@@ -355,6 +396,31 @@ impl Ops {
             address,
             server_name,
         })
+    }
+
+    /// Resolve `host` to a [`PeerRoute`] — the routing decision
+    /// [`Self::resolve_host_route`] already makes (live reverse
+    /// registration beats a forward pin), turned into what
+    /// `Ops::connect`/`connect_target` (`crate::ops::session`) need to
+    /// actually build a connection over either link (`PLAN.md` M3 Step 6).
+    ///
+    /// **Sync, and not callable from inside a running Tokio runtime** —
+    /// same caveat as [`Self::resolve_peer`] (identity loads synchronously
+    /// on the forward branch, which a platform key store will not hand
+    /// over from inside one) and [`Self::resolve_host_route`] (whose own
+    /// doc this delegates to). Called from `Ops::connect`/`connect_target`
+    /// *before* either builds its own runtime for the dial — sequential,
+    /// not nested, runtimes: [`Self::resolve_host_route`]'s throwaway
+    /// probe runtime is built and torn down here, before the dial's own
+    /// multi-thread runtime exists.
+    pub(crate) fn resolve_route(&self, host: &str) -> Result<PeerRoute, OpError> {
+        match self.resolve_host_route(host)? {
+            HostRoute::Forward { .. } => Ok(PeerRoute::Forward(self.resolve_peer(host)?)),
+            HostRoute::Reverse { socket, .. } => Ok(PeerRoute::Reverse(LocalRoute {
+                host: host.to_string(),
+                socket,
+            })),
+        }
     }
 
     /// Dial `address` once with an empty trust store and report the
@@ -709,5 +775,183 @@ mod tests {
         assert_eq!(server_name_for("[::1]:4433"), "::1");
         assert_eq!(server_name_for("example.com"), "example.com");
         assert_eq!(server_name_for(":4433"), "qsh");
+    }
+
+    // ---- `Ops::resolve_route` — `PeerRoute` selection (`PLAN.md` M3
+    // Step 6) ----
+    //
+    // `resolve_route` is a thin `HostRoute` -> `PeerRoute` mapping over
+    // the same routing decision `resolve_host_route`/
+    // `resolve_host_route_async` already make and already test
+    // exhaustively at the `HostRoute` level (`crate::ops::host`'s own
+    // test module). What these add is proof the *mapping* itself is
+    // right: a forward `HostRoute` becomes a fully resolved `PeerTarget`
+    // (identity loaded, address/server_name carried through
+    // `resolve_peer`), a reverse `HostRoute` becomes the `LocalRoute`
+    // `Ops::connect_reverse` actually dials with (host alias + that
+    // daemon's own socket, nothing else), and not-found/duplicate stay
+    // plain error propagation through the mapping.
+    //
+    // `resolve_route` is sync — same identity-load constraint as
+    // `resolve_peer` — so on the reverse/duplicate cases below the fake
+    // `LOCAL_ADMIN` daemon has to live on its own OS thread with its own
+    // runtime (mirroring a real `qsh listen` process), never on the
+    // test's own thread: calling `resolve_route` from inside a runtime
+    // that already exists is exactly the "cannot start a runtime from
+    // within a runtime" hazard `resolve_host_route`'s own doc flags.
+
+    fn resolve_route_ops(dir: &std::path::Path) -> Ops {
+        let paths =
+            Paths::new(dir.join("config"), dir.join("state")).with_runtime_dir(dir.join("run"));
+        Ops::new(paths)
+    }
+
+    #[test]
+    fn resolve_route_not_found_is_host_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let ops = resolve_route_ops(dir.path());
+
+        let err = match ops.resolve_route("nowhere") {
+            Err(err) => err,
+            Ok(_) => panic!("expected an error for an unknown host"),
+        };
+        assert_eq!(err.code, ErrorCode::HostNotFound);
+    }
+
+    #[test]
+    fn resolve_route_forward_resolves_a_peer_target_with_the_pinned_address() {
+        let dir = tempfile::tempdir().unwrap();
+        let ops = resolve_route_ops(dir.path());
+        ops.identity_init(file_mode()).unwrap();
+        let fingerprint = qsh_transport::Fingerprint::of_spki_der(b"peer").to_string();
+        ops.trust_add(TrustAddReq {
+            name: "mac".into(),
+            address: Some("mac.example.com:4433".into()),
+            fingerprint: Some(fingerprint),
+        })
+        .unwrap();
+
+        match ops.resolve_route("mac").unwrap() {
+            PeerRoute::Forward(target) => {
+                assert_eq!(target.address, "mac.example.com:4433");
+                assert_eq!(target.server_name, "mac.example.com");
+            }
+            PeerRoute::Reverse(_) => panic!("expected a forward route"),
+        }
+    }
+
+    #[cfg(unix)]
+    fn sample_local_host(name: &str) -> qsh_proto::local::LocalHost {
+        qsh_proto::local::LocalHost {
+            name: name.to_string(),
+            address: "203.0.113.5:51820".to_string(),
+            state: "reachable".to_string(),
+            fingerprint: qsh_transport::Fingerprint::of_spki_der(b"reverse-peer").to_string(),
+            capabilities: vec!["pty".to_string()],
+            generation: 1,
+            registered_at: "2026-08-22T00:00:00Z".to_string(),
+        }
+    }
+
+    /// Bind a one-shot fake `LOCAL_ADMIN` daemon at `<pid>.sock` under
+    /// `runtime_dir`, answering exactly one `LocalHostList` with `hosts`,
+    /// on its own OS thread with its own runtime — see this section's own
+    /// header for why it cannot share the test's thread/runtime.
+    #[cfg(unix)]
+    fn spawn_fake_admin_daemon_thread(
+        runtime_dir: &std::path::Path,
+        pid: u32,
+        hosts: Vec<qsh_proto::local::LocalHost>,
+    ) -> std::thread::JoinHandle<()> {
+        std::fs::create_dir_all(runtime_dir).unwrap();
+        let sock = runtime_dir.join(format!("{pid}.sock"));
+        // Bind synchronously, on the caller's thread, before handing off:
+        // `resolve_route` must never race the socket file into existence.
+        let std_listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        std_listener.set_nonblocking(true).unwrap();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async move {
+                let listener = tokio::net::UnixListener::from_std(std_listener).unwrap();
+                let (stream, _addr) = listener.accept().await.unwrap();
+                let mut conduit = crate::localctl::frame::LocalConduit::new(stream);
+                let _hello: qsh_proto::local::LocalHello = conduit.recv().await.unwrap().unwrap();
+                let _req: qsh_proto::local::LocalHostList = conduit.recv().await.unwrap().unwrap();
+                conduit
+                    .send(&qsh_proto::local::LocalResponse {
+                        body: Some(qsh_proto::local::local_response::Body::HostListResult(
+                            qsh_proto::local::LocalHostListResult { hosts },
+                        )),
+                    })
+                    .await
+                    .unwrap();
+            });
+        })
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn resolve_route_reverse_returns_the_local_route_to_the_live_daemon() {
+        let dir = tempfile::tempdir().unwrap();
+        let ops = resolve_route_ops(dir.path());
+        let runtime_dir = ops.paths().runtime_dir();
+        let daemon =
+            spawn_fake_admin_daemon_thread(&runtime_dir, 100, vec![sample_local_host("phone")]);
+
+        match ops.resolve_route("phone").unwrap() {
+            PeerRoute::Reverse(route) => {
+                assert_eq!(route.host, "phone");
+                assert_eq!(route.socket, runtime_dir.join("100.sock"));
+            }
+            PeerRoute::Forward(_) => panic!("expected a reverse route"),
+        }
+        daemon.join().unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn resolve_route_reverse_prefers_the_live_daemon_over_a_forward_pin() {
+        let dir = tempfile::tempdir().unwrap();
+        let ops = resolve_route_ops(dir.path());
+        ops.identity_init(file_mode()).unwrap();
+        let fingerprint = qsh_transport::Fingerprint::of_spki_der(b"forward-pin").to_string();
+        ops.trust_add(TrustAddReq {
+            name: "phone".into(),
+            address: Some("stale.example.com:4433".into()),
+            fingerprint: Some(fingerprint),
+        })
+        .unwrap();
+        let runtime_dir = ops.paths().runtime_dir();
+        let daemon =
+            spawn_fake_admin_daemon_thread(&runtime_dir, 100, vec![sample_local_host("phone")]);
+
+        match ops.resolve_route("phone").unwrap() {
+            PeerRoute::Reverse(route) => assert_eq!(route.host, "phone"),
+            PeerRoute::Forward(_) => {
+                panic!("a live reverse registration must beat a forward pin")
+            }
+        }
+        daemon.join().unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn resolve_route_duplicate_live_daemons_is_invalid_argument() {
+        let dir = tempfile::tempdir().unwrap();
+        let ops = resolve_route_ops(dir.path());
+        let runtime_dir = ops.paths().runtime_dir();
+        let a = spawn_fake_admin_daemon_thread(&runtime_dir, 100, vec![sample_local_host("dup")]);
+        let b = spawn_fake_admin_daemon_thread(&runtime_dir, 101, vec![sample_local_host("dup")]);
+
+        let err = match ops.resolve_route("dup") {
+            Err(err) => err,
+            Ok(_) => panic!("expected an error for two live daemons holding the same name"),
+        };
+        assert_eq!(err.code, ErrorCode::InvalidArgument);
+        a.join().unwrap();
+        b.join().unwrap();
     }
 }
