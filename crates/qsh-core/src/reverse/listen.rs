@@ -89,6 +89,9 @@ pub const STALE_SWEEP_TICK: Duration = Duration::from_secs(5);
 /// small enough that a re-registration a few hundred milliseconds into a
 /// re-dial's backoff is still noticed promptly, large enough that a full
 /// `wait_ms` window of waiting never becomes a hot loop.
+// Consumed only by `control_hub_wait`/`connection_for_wait`, both `#[cfg(unix)]`
+// (localctl is a Unix-domain socket) — dead, not absent, on Windows.
+#[cfg_attr(not(unix), allow(dead_code))]
 const HUB_WAIT_POLL: Duration = Duration::from_millis(75);
 
 /// Close code for the connection a NAT-rebind reconnect displaces
