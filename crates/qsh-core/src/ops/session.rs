@@ -28,7 +28,8 @@ use qsh_transport::Dialer;
 use crate::client::link::DataKillSwitch;
 use crate::client::pathwatch::{PathWatch, PathWatchConfig, watch_path};
 use crate::client::reconnect::{
-    OutputCursor, PathBinder, PendingInput, REDIAL_DEADLINE, Recovered, ResumeError, recover,
+    OutputCursor, PathBinder, PendingInput, REDIAL_DEADLINE, Reconnect, ReconnectFuture, Recovered,
+    ResumeError, recover,
 };
 use crate::client::{AttachEvent, ClientError, ControlIn, Session};
 use crate::ops::exec::{map_client_error, map_dial_error};
@@ -120,12 +121,30 @@ pub struct RecoveryConfig {
     pub migration: bool,
     /// How many times a detected death is recovered from before the attach
     /// gives up and reports the error. Each attempt is separately bounded
-    /// by [`REDIAL_DEADLINE`] and separately recorded in the recovery
-    /// telemetry, so a campaign counts attempts, not outcomes.
+    /// by its route's [`Reconnect::attempt_deadline`] — [`REDIAL_DEADLINE`]
+    /// on the forward route, `registration_wait` + [`REDIAL_DEADLINE`] on
+    /// the reverse route (`LocalReconnect::attempt_deadline`) so a single
+    /// attempt can legitimately cover the whole wait for a new
+    /// registration — and separately recorded in the recovery telemetry,
+    /// so a campaign counts attempts, not outcomes.
     pub attempts: u32,
     /// Whether to recover at all. Off makes a dead path end the attach the
     /// way it did before recovery existed.
     pub enabled: bool,
+    /// Reverse-route only (`LocalReconnect`, `PLAN.md` M3 Step 8): the
+    /// ceiling on how long a single reconnect wait asks the daemon to
+    /// block for a new-generation live registration
+    /// (`LocalHello.wait_ms`, clamped again on the daemon side to
+    /// `qsh_proto::local::LOCAL_WAIT_MAX` regardless of what is sent
+    /// here — this is this *client's* budget, not a second copy of that
+    /// clamp). Unread on the forward route: [`DialReconnect`] never
+    /// looks at it. Deliberately **not** [`REDIAL_DEADLINE`] — that 2 s
+    /// budget covers the resume *after* a registration is observed
+    /// (`docs/design/protocol.md` §11-4's "재등록 시점부터 resume 완료까지
+    /// 2초"), while this covers the wait *for* one, which can legitimately
+    /// run for as long as the target's own reconnect backoff
+    /// (`backoff_max_ms`, default 30 s) takes.
+    pub registration_wait: Duration,
 }
 
 impl Default for RecoveryConfig {
@@ -135,6 +154,7 @@ impl Default for RecoveryConfig {
             migration: true,
             attempts: 3,
             enabled: true,
+            registration_wait: qsh_proto::local::LOCAL_WAIT_MAX,
         }
     }
 }
@@ -543,14 +563,20 @@ impl Ops {
         // re-dials from inside one — there is no equivalent re-dial on
         // the reverse branch (`RecoveryLink`'s own doc), so nothing there
         // ever needs it back.
-        let (mut conn, target) = match self.resolve_route(&r.host)? {
+        let (mut conn, target, reverse_route) = match self.resolve_route(&r.host)? {
             PeerRoute::Forward(target) => {
                 let conn = self.connect_target(&target)?;
-                (conn, Some(target))
+                (conn, Some(target), None)
             }
             PeerRoute::Reverse(route) => {
-                let conn = self.connect_reverse(&route)?;
-                (conn, None)
+                let (conn, generation) = self.connect_reverse(&route)?;
+                let reverse_route = ReverseRoute {
+                    host: route.host.clone(),
+                    socket: route.socket,
+                    generation: std::sync::atomic::AtomicU64::new(generation),
+                    registration_wait_ms: std::sync::atomic::AtomicU64::new(u64::MAX),
+                };
+                (conn, None, Some(reverse_route))
             }
         };
         // No verified fingerprint means nothing to bind a credential to.
@@ -654,7 +680,9 @@ impl Ops {
         // `ConnectedLink::Reverse`'s own doc).
         let link = match &conn.link {
             ConnectedLink::Forward(fwd) => RecoveryLink::Forward(fwd.clone()),
-            ConnectedLink::Reverse { .. } => RecoveryLink::Reverse(attached.kill.clone()),
+            ConnectedLink::Reverse { .. } => {
+                RecoveryLink::Reverse(ReverseKill::new(attached.kill.clone()))
+            }
         };
         let ctx = Arc::new(AttachContext {
             target,
@@ -668,6 +696,7 @@ impl Ops {
             recovery: self.recovery,
             finished: finished.clone(),
             applied_input,
+            reverse_route,
         });
         let driver = conn
             .runtime()
@@ -842,7 +871,12 @@ impl Ops {
     fn connect(&self, host: &str) -> Result<Connected, OpError> {
         match self.resolve_route(host)? {
             PeerRoute::Forward(target) => self.connect_target(&target),
-            PeerRoute::Reverse(route) => self.connect_reverse(&route),
+            // Generation is only ever needed to seed a `session.attach`'s
+            // recovery baseline (`Self::connect_reverse`'s own doc) — none
+            // of this method's six value-op callers attach anything.
+            PeerRoute::Reverse(route) => {
+                self.connect_reverse(&route).map(|(conn, _generation)| conn)
+            }
         }
     }
 
@@ -878,18 +912,26 @@ impl Ops {
     /// connection to the peer — so, unlike [`Self::connect_target`],
     /// there is nothing that must happen before this method's own runtime
     /// exists.
+    /// Returns the registration `generation` observed at connect time
+    /// alongside [`Connected`] — [`Self::session_attach`]'s reverse arm
+    /// needs it to seed [`AttachContext`]'s reverse-route baseline (Step
+    /// 8's `LocalReconnect` input); every other caller of
+    /// [`Self::connect`] discards it.
     #[cfg(unix)]
-    fn connect_reverse(&self, route: &LocalRoute) -> Result<Connected, OpError> {
+    fn connect_reverse(&self, route: &LocalRoute) -> Result<(Connected, u64), OpError> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .map_err(|err| OpError::new(ErrorCode::Internal, format!("runtime: {err}")))?;
         match runtime.block_on(dial_reverse(route)) {
-            Ok((session, peer_fingerprint)) => Ok(Connected {
-                runtime: Some(runtime),
-                link: ConnectedLink::Reverse { peer_fingerprint },
-                session: Some(session),
-            }),
+            Ok((session, peer_fingerprint, generation)) => Ok((
+                Connected {
+                    runtime: Some(runtime),
+                    link: ConnectedLink::Reverse { peer_fingerprint },
+                    session: Some(session),
+                },
+                generation,
+            )),
             Err(err) => {
                 runtime.shutdown_timeout(CLOSE_DRAIN);
                 Err(err)
@@ -903,7 +945,7 @@ impl Ops {
     /// always returns empty), so this exists only so `connect`'s match
     /// compiles — it is unreachable in practice.
     #[cfg(not(unix))]
-    fn connect_reverse(&self, _route: &LocalRoute) -> Result<Connected, OpError> {
+    fn connect_reverse(&self, _route: &LocalRoute) -> Result<(Connected, u64), OpError> {
         Err(OpError::new(
             ErrorCode::Unsupported,
             "reverse routing (localctl) is not available on this platform",
@@ -951,27 +993,58 @@ async fn dial_peer(
 
 /// Open a `LOCAL_CONTROL` conduit to `route`'s daemon and build a
 /// [`Session`] over it — the async half of [`Ops::connect_reverse`], split
-/// out the same way [`dial_peer`] is. `wait_ms: 0`: [`Ops::resolve_route`]
-/// already observed a *live* registration before this is ever called
-/// (`crate::localctl::client::open_control`'s own doc), so there is
-/// nothing to wait for here.
+/// out the same way [`dial_peer`] is. `wait_ms: 0`, `known_generation:
+/// None`: [`Ops::resolve_route`] already observed a *live* registration
+/// before this is ever called (`crate::localctl::client::open_control`'s
+/// own doc), so there is nothing to wait for and no prior generation to
+/// gate on here — [`dial_reverse_wait`] is the Step 8 sibling that does
+/// both.
 ///
-/// Returns the ack's `peer_fingerprint` alongside the session —
-/// [`Connected::peer_fingerprint`] on the reverse leg is exactly this
-/// value (`docs/adr/`'s ADR-0007 presentation condition, `PLAN.md` M3
-/// Step 6), never re-derived from a QUIC connection this process does not
-/// itself hold.
+/// Returns the ack's `peer_fingerprint` and `generation` alongside the
+/// session — [`Connected::peer_fingerprint`] on the reverse leg is exactly
+/// this `peer_fingerprint` value (`docs/adr/`'s ADR-0007 presentation
+/// condition, `PLAN.md` M3 Step 6), never re-derived from a QUIC
+/// connection this process does not itself hold; `generation` seeds
+/// [`AttachContext`]'s reverse-route baseline that Step 8's
+/// `LocalReconnect` waits past.
 #[cfg(unix)]
-async fn dial_reverse(route: &LocalRoute) -> Result<(Session, Option<String>), OpError> {
-    let handshake = crate::localctl::client::open_control(&route.socket, &route.host, 0).await?;
-    let peer_fingerprint = Some(handshake.peer_fingerprint);
+async fn dial_reverse(route: &LocalRoute) -> Result<(Session, Option<String>, u64), OpError> {
+    dial_reverse_wait(route, 0, None).await
+}
+
+/// [`dial_reverse`], generalized with the two inputs Step 8's
+/// `LocalReconnect` needs on top of a first attach's `wait_ms: 0,
+/// known_generation: None`: how long to wait for a *live* registration
+/// (`LOCAL_WAIT_MAX`-clamped by the daemon, `crate::localctl::client::open_control`'s
+/// own doc) and which generation it must be strictly newer than
+/// (`qsh/local/v1.proto`'s `LocalHello.known_generation` doc). Opens both
+/// the `LOCAL_CONTROL` conduit this returns *and* nothing else — the data
+/// conduit is a separate `open_stream` call the caller makes once it has
+/// something to attach.
+#[cfg(unix)]
+async fn dial_reverse_wait(
+    route: &LocalRoute,
+    wait_ms: u32,
+    known_generation: Option<u64>,
+) -> Result<(Session, Option<String>, u64), OpError> {
+    let handshake = crate::localctl::client::open_control(
+        &route.socket,
+        &route.host,
+        wait_ms,
+        known_generation,
+    )
+    .await?;
+    let peer_fingerprint = Some(handshake.peer_fingerprint.clone());
+    let generation = handshake.generation;
     let session = Session::from_local_control(
         handshake.conduit,
         handshake.capabilities,
         handshake.host,
         route.socket.clone(),
+        handshake.peer_fingerprint,
+        handshake.generation,
     );
-    Ok((session, peer_fingerprint))
+    Ok((session, peer_fingerprint, generation))
 }
 
 /// How long a torn-down connection's QUIC close frames get to drain.
@@ -1564,6 +1637,16 @@ struct AttachContext {
     /// been handed them (`crate::session_stream`), and a connection closed
     /// in between drops whatever the host had not read yet.
     applied_input: tokio::sync::watch::Sender<u64>,
+    /// `Some` only on the reverse route — the mirror image of
+    /// [`Self::target`]'s "`Some` only on forward". Step 8's
+    /// [`LocalReconnect`] input: which daemon to ask, and the highest
+    /// registration generation this attach has ridden so far. Seeded at
+    /// connect time by [`Ops::session_attach`]'s reverse arm from
+    /// `LocalHelloAck.generation`, then advanced by every successful
+    /// `LocalReconnect` landing — so a *second* leg death after a
+    /// recovery waits past the generation the recovery itself landed on,
+    /// never the original one again.
+    reverse_route: Option<ReverseRoute>,
 }
 
 impl AttachContext {
@@ -1572,37 +1655,103 @@ impl AttachContext {
     }
 }
 
+/// [`AttachContext::reverse_route`]'s payload: which daemon socket and
+/// host alias to reconnect to (`LocalHello.host`, `LocalRoute`'s own
+/// fields — kept here as an owned copy rather than a borrow because this
+/// outlives the `session_attach` call that resolved them), and the
+/// generation baseline [`LocalReconnect`] must wait past. The generation
+/// is interior-mutable (not just `u64`) because it is shared, through the
+/// one `Arc<AttachContext>` every leg of this attach holds, between
+/// whichever `LocalReconnect` is currently running and the next one
+/// `drive_attach`'s gate builds after a *subsequent* leg death — see the
+/// field's own doc on `AttachContext` for why the value must survive
+/// across that boundary rather than being reset per-`LocalReconnect`.
+struct ReverseRoute {
+    host: String,
+    socket: std::path::PathBuf,
+    generation: std::sync::atomic::AtomicU64,
+    /// Milliseconds the most recently *completed* [`LocalReconnect`] wait
+    /// spent blocked on the daemon's new-generation registration before it
+    /// could redeem the resume credential — measured across the wait
+    /// only, not the redemption that follows it. This is Step 8's
+    /// `registration_wait_ms` telemetry *input*: `docs/CLI.md` §6.4 names
+    /// the field, and wiring it into the emitted `qsh::recovery` record is
+    /// a later step's job, not this one's — this field only has to make
+    /// the number available to whatever reads it next.
+    /// `u64::MAX` means "no `LocalReconnect` wait has completed yet on
+    /// this route" (the field's zero value would be indistinguishable
+    /// from a wait that resolved instantly, which the daemon's own
+    /// immediate-hit branch can genuinely do).
+    registration_wait_ms: std::sync::atomic::AtomicU64,
+}
+
+/// The reverse route's swappable hard-stop — the [`DataKillSwitch`]
+/// counterpart to [`Link`]'s swappable endpoint/connection pair, and for
+/// exactly the same reason ([`Link`]'s own doc: "every `AttachHandle` a
+/// frontend already took — and the teardown path — must keep reaching the
+/// live one"). Before Step 8 the reverse route never rebuilt a leg, so a
+/// bare, un-swappable `DataKillSwitch` was enough; Step 8's
+/// [`LocalReconnect`] lands a *new* `LOCAL_STREAM` conduit with its own
+/// kill switch on every successful recovery, and every clone of
+/// [`RecoveryLink::Reverse`] — [`AttachContext::link`]'s and
+/// [`AttachHandle::link`]'s alike — has to observe that swap, not go on
+/// killing the conduit that already died. One shared cell, exactly the
+/// shape [`Link`] already uses.
+#[derive(Clone, Default)]
+struct ReverseKill(Arc<std::sync::Mutex<DataKillSwitch>>);
+
+impl ReverseKill {
+    fn new(kill: DataKillSwitch) -> Self {
+        Self(Arc::new(std::sync::Mutex::new(kill)))
+    }
+
+    /// Shut the *current* conduit down — see [`DataKillSwitch::kill`].
+    fn kill(&self) {
+        lock(&self.0).kill();
+    }
+
+    /// Install a new kill switch, handing back the one it replaced so the
+    /// caller can decide whether it is still worth killing explicitly
+    /// (mirrors [`Link::replace`]).
+    fn replace(&self, new: DataKillSwitch) -> DataKillSwitch {
+        std::mem::replace(&mut *lock(&self.0), new)
+    }
+}
+
 /// What an attach's [`AttachContext::link`]/[`AttachHandle::link`] rides —
 /// the forward route's swappable [`Link`], or, on the reverse route
-/// (`PLAN.md` M3 Step 7), just this one attach's own `LOCAL_STREAM`
-/// hard-stop.
+/// (`PLAN.md` M3 Step 7), this attach's own `LOCAL_STREAM` hard-stop,
+/// swappable since Step 8 ([`ReverseKill`]'s own doc).
 ///
-/// **No recovery on the reverse leg in M3 Step 7.** The forward route's
-/// migrate-or-resume machinery ([`recover_attach`], [`reattach`],
-/// [`watch_path`]) is built entirely on a QUIC `Connection` this one
-/// attach owns exclusively — probeable for liveness, swappable for a
-/// fresh dial, and safe to hand a full `close()` to because nothing else
-/// is riding it. None of that holds on the reverse route: the
-/// `Connection` a target sees is its *one* long-lived registration to the
-/// controller, shared by every attach every daemon-relayed CLI process
-/// has open to it, so there is nothing attach-scoped to probe, nothing to
-/// swap in a resume, and closing it would end every other client's
-/// session too. `drive_attach` gates every recovery attempt on
-/// `matches!(ctx.link, RecoveryLink::Forward(_))`, so `recover_attach` and
-/// `reattach` are simply never invoked with a `Reverse` link — a link
-/// death there ends the attach with a typed error (`LegEnd::Broken`'s
-/// existing path), never a panic, an `unreachable!`, or a hang. Step 8
-/// adds a `Reconnect` for this route.
+/// **Recovery on the reverse leg since Step 8** rides a different seam
+/// than the forward route's, because the underlying transport really is
+/// different: the forward route's migrate-or-resume machinery
+/// ([`recover_attach`], [`reattach`], [`watch_path`]) is built on a QUIC
+/// `Connection` this one attach owns exclusively — probeable for
+/// liveness, swappable for a fresh dial, and safe to hand a full
+/// `close()` to because nothing else is riding it. None of that holds on
+/// the reverse route: the `Connection` a target sees is its *one*
+/// long-lived registration to the controller, shared by every attach
+/// every daemon-relayed CLI process has open to it, so there is nothing
+/// attach-scoped to probe or migrate — only [`LocalReconnect`]'s wait-
+/// then-reattach applies (`recover_attach`'s `link: None` branch, its own
+/// doc). `drive_attach`'s gate still reads `&ctx.link` to decide *which*
+/// [`Reconnect`] to build, but both branches now reach [`recover_attach`]
+/// when `ctx.recovery.enabled` — a link death that recovery cannot use
+/// (disabled, or `LocalReconnect` exhausted, `PLAN.md` M3 Step 8) still
+/// ends the attach with a typed error (`LegEnd::Broken`'s existing path),
+/// never a panic, an `unreachable!`, or a hang.
 #[derive(Clone)]
 enum RecoveryLink {
     /// The forward route: a real, swappable QUIC endpoint/connection pair
     /// (recovery-capable — [`Link`]'s own doc).
     Forward(Link),
     /// The reverse route: this attach's own `LOCAL_STREAM` conduit,
-    /// killable synchronously from any thread
-    /// (`crate::client::link::DataKillSwitch`'s own doc) — no
-    /// `Connection`, no `Endpoint`, nothing recovery could probe or swap.
-    Reverse(DataKillSwitch),
+    /// killable synchronously from any thread and swappable across a
+    /// recovery ([`ReverseKill`]'s own doc) — no `Connection`, no
+    /// `Endpoint`, nothing [`recover_attach`]'s migration half could
+    /// probe (it never tries to on this route — its own doc).
+    Reverse(ReverseKill),
 }
 
 /// How one leg of an attach ended.
@@ -1824,42 +1973,38 @@ async fn drive_attach(
             };
             // A connection the frontend closed on purpose (a detach) is not
             // a path that died, and recovering from it would resurrect an
-            // attach the user just ended. And a `RecoveryLink::Reverse`
-            // has no recovery to attempt at all — `RecoveryLink`'s own
-            // doc — so this is also the gate that keeps `recover_attach`
-            // and `reattach` forward-only: a `Link` is pulled out of
-            // `ctx.link` right here, once, so neither of those functions
-            // ever has to fail on (or panic on, or silently no-op) a
-            // route that cannot recover.
-            let forward_link = match &ctx.link {
-                RecoveryLink::Forward(link) if ctx.recovery.enabled && !ctx.finished() => {
-                    link.clone()
-                }
-                _ => {
-                    if let Some(err) = recoverable {
-                        let _ = events.send(Err(map_client_error(err))).await;
-                    }
-                    return;
-                }
-            };
-            drop(watchdog);
-
-            match recover_attach(
-                &ctx,
-                &forward_link,
-                leg_survived,
-                &watch,
-                &probes,
-                &pending,
-                &cursor,
-                &mut pumps,
-            )
-            .await
+            // attach the user just ended — checked identically on both
+            // routes. Which `Reconnect` `recover_attach` gets built with is
+            // the one thing that still depends on the route (`RecoveryLink`'s
+            // own doc): the forward route redials itself (`DialReconnect`),
+            // the reverse route waits for the target's own re-dial to land
+            // as a new registration generation (`LocalReconnect`, Step 8).
+            let recovery = if let RecoveryLink::Forward(link) = &ctx.link
+                && ctx.recovery.enabled
+                && !ctx.finished()
             {
-                Recovery::SameLeg => {
+                let forward_link = link.clone();
+                drop(watchdog);
+                let reconnector =
+                    DialReconnect::new(ctx.clone(), forward_link.clone(), pending.clone());
+                let recovery = recover_attach(
+                    &ctx,
+                    Some(&forward_link),
+                    leg_survived,
+                    &watch,
+                    &probes,
+                    &cursor,
+                    &mut pumps,
+                    &reconnector,
+                )
+                .await;
+                if matches!(recovery, Recovery::SameLeg) {
                     // Migrated: the connection, both streams and every
                     // cursor are exactly as they were. Re-arm the watchdog
-                    // and keep reading the same stream.
+                    // and keep reading the same stream. Only the forward
+                    // route can ever produce this (`recover_attach`'s own
+                    // doc on its `link: None` branch), so it is handled
+                    // here rather than in the route-agnostic match below.
                     watch.revive();
                     watchdog = AbortOnDrop(tokio::spawn(watch_path(
                         forward_link.connection(),
@@ -1867,6 +2012,50 @@ async fn drive_attach(
                         probes.clone(),
                     )));
                     continue;
+                }
+                recovery
+            } else if let RecoveryLink::Reverse(_) = &ctx.link
+                && ctx.recovery.enabled
+                && !ctx.finished()
+            {
+                drop(watchdog);
+                let reconnector = LocalReconnect::new(ctx.clone(), pending.clone());
+                recover_attach(
+                    &ctx,
+                    None,
+                    leg_survived,
+                    &watch,
+                    &probes,
+                    &cursor,
+                    &mut pumps,
+                    &reconnector,
+                )
+                .await
+            } else {
+                if let Some(err) = recoverable {
+                    let _ = events.send(Err(map_client_error(err))).await;
+                }
+                return;
+            };
+
+            match recovery {
+                Recovery::SameLeg => {
+                    // Structurally reachable only from the forward branch
+                    // above, which already `continue`d before getting
+                    // here — a typed error rather than `unreachable!()` so
+                    // a future `Reconnect` implementation that breaks that
+                    // invariant fails closed instead of panicking
+                    // (`docs/design/testing.md`; `PLAN.md` M3 Step 8's
+                    // "recovery == migrated must be impossible on the
+                    // reverse leg").
+                    let _ = events
+                        .send(Err(OpError::new(
+                            ErrorCode::Internal,
+                            "recovery reported a migrated connection on a route with no \
+                             migration",
+                        )))
+                        .await;
+                    return;
                 }
                 Recovery::NewLeg(new_session, new_attached) => {
                     // Last check before the new leg is installed: a detach
@@ -1953,6 +2142,387 @@ async fn read_leg(
     }
 }
 
+/// The forward route's [`Reconnect`]: re-dial the peer directly.
+///
+/// Owns exactly what the forward route's reconnect step needs — the
+/// [`Link`] to redial on and, through `ctx.target`, the [`PeerTarget`] to
+/// dial — plus the one piece of state that has to survive a cancelled
+/// attempt: a redemption [`spawn_reattach`] started that a timed-out
+/// caller walked away from. That adoption logic used to live inline in
+/// [`recover_attach`]'s loop as a bare `&mut Option<ReattachTask>`; it is
+/// moved here verbatim, not rewritten, so the behaviour — a second
+/// attempt finds and awaits the *same* in-flight task rather than starting
+/// a second redemption of the same single-use resume token
+/// (`spawn_reattach`'s own doc) — is unchanged.
+struct DialReconnect {
+    ctx: Arc<AttachContext>,
+    link: Link,
+    pending: Arc<std::sync::Mutex<PendingInput>>,
+    /// The in-flight redemption, if a previous attempt's deadline stopped
+    /// waiting on it without stopping it. A `tokio::sync::Mutex` because
+    /// [`Reconnect::reconnect`] has to hold the guard across the `.await`
+    /// on the task handle: that is what lets the *outer* `recover()`
+    /// timeout cancel this future while leaving the handle in the slot for
+    /// the next attempt to pick back up, exactly as the bare `&mut`
+    /// binding it replaces did.
+    in_flight: tokio::sync::Mutex<Option<ReattachTask>>,
+}
+
+impl DialReconnect {
+    fn new(
+        ctx: Arc<AttachContext>,
+        link: Link,
+        pending: Arc<std::sync::Mutex<PendingInput>>,
+    ) -> Self {
+        Self {
+            ctx,
+            link,
+            pending,
+            in_flight: tokio::sync::Mutex::new(None),
+        }
+    }
+}
+
+impl Reconnect for DialReconnect {
+    fn has_pending(&self) -> bool {
+        // Never contended at the point `recover_attach` calls this: it
+        // asks at the top of a loop iteration, after any previous
+        // `reconnect()` future has either run to completion (which clears
+        // the slot below) or been dropped by the outer deadline (which
+        // drops this guard along with it). A `try_lock` failure here would
+        // itself be the bug, not a legitimate "still pending" answer.
+        self.in_flight
+            .try_lock()
+            .map(|guard| guard.is_some())
+            .unwrap_or(false)
+    }
+
+    fn reconnect(&self, last_output_seq: u64) -> ReconnectFuture<'_> {
+        Box::pin(async move {
+            let mut in_flight = self.in_flight.lock().await;
+            let handle = in_flight.get_or_insert_with(|| {
+                spawn_reattach(
+                    self.ctx.clone(),
+                    self.link.clone(),
+                    self.pending.clone(),
+                    last_output_seq,
+                )
+            });
+            let joined = handle.await;
+            // Reached only when the redemption finished, so a
+            // cancellation above (the recovery deadline firing while this
+            // `.await` was pending) leaves the handle in the slot for the
+            // next attempt to adopt.
+            *in_flight = None;
+            match joined {
+                Ok(result) => result,
+                Err(err) => Err(ResumeError::Local(OpError::new(
+                    ErrorCode::Internal,
+                    format!("the resume task did not finish: {err}"),
+                ))),
+            }
+        })
+    }
+}
+
+/// The reverse route's [`Reconnect`] (`PLAN.md` M3 Step 8,
+/// `docs/design/protocol.md` §11-4's Reattach mapping): no dial of its own
+/// to make — [`RecoveryLink`]'s own doc explains why there is no
+/// `Connection` here to redial — instead it waits for *the target's own*
+/// re-dial to land as a new registration `generation` on the daemon
+/// (`Listen::control_hub_wait`, via [`dial_reverse_wait`]), then performs
+/// §10 Reattach steps 2–5 on the fresh `LOCAL_CONTROL`/`LOCAL_STREAM`
+/// conduit pair that registration's handshake hands back.
+///
+/// Mirrors [`DialReconnect`]'s in-flight adoption (`Self::in_flight`) for
+/// the same reason: the wait for a new generation can legitimately run
+/// well past a single [`REDIAL_DEADLINE`] window (the target's own
+/// backoff climbs to `backoff_max_ms`, default 30 s), so a caller whose
+/// attempt deadline fires must only stop *waiting* on the underlying
+/// task, never cancel it outright — cancelling it mid-redemption would
+/// either orphan a resume token this device can no longer reach (the same
+/// "credential critical section" `docs/design/protocol.md` §10 names for
+/// the forward route) or, worse, let the *next* attempt spawn a second,
+/// concurrent wait racing the first for the same single-use token.
+struct LocalReconnect {
+    ctx: Arc<AttachContext>,
+    pending: Arc<std::sync::Mutex<PendingInput>>,
+    /// Same shape and purpose as [`DialReconnect::in_flight`] — see that
+    /// field's doc for why a `tokio::sync::Mutex` held across the
+    /// `.await` is what lets the outer deadline stop waiting without
+    /// stopping the work.
+    in_flight: tokio::sync::Mutex<Option<LocalReattachTask>>,
+}
+
+impl LocalReconnect {
+    fn new(ctx: Arc<AttachContext>, pending: Arc<std::sync::Mutex<PendingInput>>) -> Self {
+        Self {
+            ctx,
+            pending,
+            in_flight: tokio::sync::Mutex::new(None),
+        }
+    }
+}
+
+impl Reconnect for LocalReconnect {
+    fn has_pending(&self) -> bool {
+        // Same reasoning as `DialReconnect::has_pending`: never contended
+        // at the point `recover_attach` asks.
+        self.in_flight
+            .try_lock()
+            .map(|guard| guard.is_some())
+            .unwrap_or(false)
+    }
+
+    fn reconnect(&self, last_output_seq: u64) -> ReconnectFuture<'_> {
+        Box::pin(async move {
+            let mut in_flight = self.in_flight.lock().await;
+            let handle = in_flight.get_or_insert_with(|| {
+                spawn_local_reattach(self.ctx.clone(), self.pending.clone(), last_output_seq)
+            });
+            let joined = handle.await;
+            *in_flight = None;
+            match joined {
+                Ok(result) => result,
+                Err(err) => Err(ResumeError::Local(OpError::new(
+                    ErrorCode::Internal,
+                    format!("the reverse resume task did not finish: {err}"),
+                ))),
+            }
+        })
+    }
+
+    /// The wait [`local_reattach`] measured and stored on
+    /// [`ReverseRoute::registration_wait_ms`] before this call's
+    /// `reconnect` future resolved — `local_reattach` records it
+    /// unconditionally, on both the success and the error path, so by
+    /// the time `reconnect` above has returned either way the value is
+    /// already there to read. The `u64::MAX` sentinel (no
+    /// [`LocalReconnect`] wait has landed on this route yet — the case
+    /// where the outer [`REDIAL_DEADLINE`] fired before this attempt's
+    /// `local_reattach` got as far as its own store, which can only
+    /// happen on the very first attempt) folds to `0` here rather than
+    /// leaking a nonsense millisecond count into the telemetry line.
+    fn registration_wait_ms(&self) -> u64 {
+        let Some(route) = self.ctx.reverse_route.as_ref() else {
+            return 0;
+        };
+        match route
+            .registration_wait_ms
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            u64::MAX => 0,
+            ms => ms,
+        }
+    }
+
+    /// `ctx.recovery.registration_wait` (the ceiling `local_reattach` asks
+    /// the daemon to block for, `RecoveryConfig::registration_wait`'s own
+    /// doc) plus [`REDIAL_DEADLINE`] for the resume steps that follow a
+    /// registration — exactly the budget split `RecoveryConfig::registration_wait`
+    /// promises ("that 2 s budget covers the resume *after* a registration
+    /// is observed … while this covers the wait *for* one"). Without this
+    /// override `recover`'s default [`REDIAL_DEADLINE`] would cut the wait
+    /// itself off after 2 s regardless of `registration_wait`, silently
+    /// breaking that promise (`Reconnect::attempt_deadline`'s own doc).
+    fn attempt_deadline(&self) -> Duration {
+        self.ctx
+            .recovery
+            .registration_wait
+            .saturating_add(REDIAL_DEADLINE)
+    }
+}
+
+/// A reverse redemption in flight: the [`local_reattach`] the recovery is
+/// waiting on — the reverse-route twin of [`ReattachTask`].
+type LocalReattachTask =
+    tokio::task::JoinHandle<Result<(Session, crate::client::Attached), ResumeError>>;
+
+/// Run [`local_reattach`] on a task of its own — the reverse-route twin of
+/// [`spawn_reattach`], for the identical reason: the recovery deadline may
+/// stop *waiting* for it without stopping it, so the redemption inside it
+/// always runs to `store.put`.
+fn spawn_local_reattach(
+    ctx: Arc<AttachContext>,
+    pending: Arc<std::sync::Mutex<PendingInput>>,
+    last_output_seq: u64,
+) -> LocalReattachTask {
+    tokio::spawn(async move { local_reattach(&ctx, &pending, last_output_seq).await })
+}
+
+/// [`reattach`]'s reverse-route twin: wait for the target's re-registration
+/// instead of redialing, then redeem the resume credential, persist its
+/// successor, open the data stream and retransmit unacked input — exactly
+/// §10 Reattach steps 2–5, unchanged (`PLAN.md` M3 Step 8's "새 resume
+/// 로직을 만들지 않는다").
+///
+/// Only ever invoked through [`spawn_local_reattach`], on a
+/// [`RecoveryLink::Reverse`] attach (`recover_attach`'s reverse call site
+/// builds a [`LocalReconnect`] only when `ctx.link` already is one) — the
+/// `ctx.reverse_route`/`ctx.link` mismatches this function bails out on
+/// below are defence in depth against a future call site breaking that
+/// pairing, not a path this function's only caller can currently reach.
+#[cfg(unix)]
+async fn local_reattach(
+    ctx: &Arc<AttachContext>,
+    pending: &Arc<std::sync::Mutex<PendingInput>>,
+    last_output_seq: u64,
+) -> Result<(Session, crate::client::Attached), ResumeError> {
+    // Same cheapest-first check `reattach` opens with: a detach that raced
+    // the recovery must not spend a wait, a redemption, and a durable
+    // write on a session the user already left.
+    if ctx.finished() {
+        return Err(abandoned());
+    }
+    let Some(route) = ctx.reverse_route.as_ref() else {
+        // `AttachContext::reverse_route` and `ctx.link`'s
+        // `RecoveryLink::Reverse` variant are seeded together, from the
+        // same `session_attach` reverse arm (`ReverseRoute`'s own doc on
+        // `AttachContext`) — never one without the other. Fail closed
+        // instead of panicking if that invariant is ever broken.
+        return Err(ResumeError::Local(OpError::new(
+            ErrorCode::Internal,
+            "reverse recovery attempted with no reverse route recorded on this attach",
+        )));
+    };
+    let RecoveryLink::Reverse(kill) = &ctx.link else {
+        return Err(ResumeError::Local(OpError::new(
+            ErrorCode::Internal,
+            "reverse recovery attempted on an attach whose link is not the reverse route",
+        )));
+    };
+    // The generation baseline this wait must land strictly past —
+    // `Listen::control_hub_wait`'s own doc on why "still sitting at
+    // exactly this generation" is the dead registration, not a live one.
+    let known_generation = route.generation.load(std::sync::atomic::Ordering::Acquire);
+    let local_route = LocalRoute {
+        host: route.host.clone(),
+        socket: route.socket.clone(),
+    };
+    let wait_ms = u32::try_from(ctx.recovery.registration_wait.as_millis()).unwrap_or(u32::MAX);
+    let wait_started = std::time::Instant::now();
+    let dialed = dial_reverse_wait(&local_route, wait_ms, Some(known_generation)).await;
+    // Recorded regardless of outcome: a failed wait still spent this long
+    // finding that out, and a campaign that only ever sees successes
+    // cannot tell a fast target from a slow one it happened to catch
+    // failing for an unrelated reason.
+    let waited_ms = u64::try_from(wait_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    route
+        .registration_wait_ms
+        .store(waited_ms, std::sync::atomic::Ordering::Release);
+    let (mut session, peer_fingerprint, generation) = dialed?;
+    // Never proceed on the old generation. `control_hub_wait`'s own
+    // strictly-greater gate already guarantees this on the daemon side;
+    // this is defence in depth on the client side against a future daemon
+    // regression silently handing back the very connection whose death
+    // this recovery exists to repair.
+    if generation <= known_generation {
+        return Err(ResumeError::Local(OpError::new(
+            ErrorCode::Internal,
+            "daemon handed back a registration generation that did not advance past the one \
+             this attach already rode",
+        )));
+    }
+    let store = ResumeStore::new(&ctx.paths);
+    // `dial_reverse_wait` always reports `Some` (`LocalHelloAck.peer_fingerprint`
+    // is not optional on the wire) — handled as fail-closed `None` here
+    // anyway rather than unwrapped, exactly as the first-attach path
+    // (`Ops::session_attach`) already treats an absent fingerprint: no
+    // verified peer means nothing to bind a credential to.
+    let Some(peer) = peer_fingerprint else {
+        return Err(NoToken::PeerMismatch.into_error(&ctx.session_ref).into());
+    };
+    let token = match store.take_for(&ctx.session_ref, &peer) {
+        Ok(token) => token,
+        Err(why) => return Err(why.into_error(&ctx.session_ref).into()),
+    };
+    let attached = session
+        .attach_request(wire::SessionAttach {
+            session_id: ctx.session_id.clone(),
+            resume_token: token.expose().to_vec(),
+            last_output_seq,
+            mode: wire::AttachMode::Rw as i32,
+            no_steal: ctx.no_steal,
+        })
+        .await
+        .inspect_err(|err| {
+            // Same non-distinguishing treatment as every other resume
+            // path: whether the session is gone or the credential is
+            // stale is deliberately indistinguishable to the peer.
+            if let ClientError::Remote { code, .. } = err
+                && matches!(code, ErrorCode::AuthFailed | ErrorCode::SessionNotFound)
+            {
+                let _ = store.forget(&ctx.session_ref);
+            }
+        })?;
+    // Durable before the stream is touched (ADR-0007) — identical to
+    // `reattach`'s ordering.
+    if let Some(successor) = StoredToken::from_slice(&attached.new_resume_token)
+        && let Err(err) = store.put(
+            &ctx.session_ref,
+            &ctx.host,
+            &ctx.session_id,
+            successor,
+            &peer,
+            &attached.expires_at,
+        )
+    {
+        let _ = store.forget(&ctx.session_ref);
+        return Err(err.into());
+    }
+    let mut attached = session.open_attach_stream(attached).await?;
+    // Re-assert the last geometry the frontend asked for — identical
+    // reasoning to `reattach`.
+    let window = *lock(&ctx.window);
+    if let Some((cols, rows)) = window {
+        attached.resize(cols, rows).await?;
+    }
+    let replay = lock(pending).rebase(attached.input_from)?.to_vec();
+    if !replay.is_empty() {
+        attached.send_input(&replay).await?;
+    }
+    // Last gate before this leg becomes *the* leg: a detach that landed
+    // while this was being built must not have its freshly built
+    // replacement installed behind it. The successor credential is
+    // already durable, so the session stays attachable — only this leg is
+    // dropped, exactly as `reattach`'s own closing gate does.
+    if ctx.finished() {
+        return Err(abandoned());
+    }
+    // Advance the generation baseline before the old kill switch is
+    // silenced, so a concurrent read of `route.generation` (there is
+    // none today — only this one `LocalReconnect` ever runs at a time,
+    // Step 8's own single-flight design — but this ordering costs
+    // nothing and keeps the invariant true even if that ever changes)
+    // never observes the new leg installed under the old generation.
+    route
+        .generation
+        .store(generation, std::sync::atomic::Ordering::Release);
+    // Only now, with the new leg working, is the old conduit let go —
+    // `reattach`'s "only now is the old connection let go" ordering,
+    // ported to the reverse route's hard-stop primitive.
+    let old_kill = kill.replace(attached.kill.clone());
+    old_kill.kill();
+    Ok((session, attached))
+}
+
+/// Windows twin of [`local_reattach`]: unreachable in practice (no
+/// `RecoveryLink::Reverse` attach exists off unix — `Ops::connect_reverse`'s
+/// non-unix arm always fails first), kept only so `LocalReconnect`'s
+/// `Reconnect` impl compiles on every platform.
+#[cfg(not(unix))]
+async fn local_reattach(
+    ctx: &Arc<AttachContext>,
+    _pending: &Arc<std::sync::Mutex<PendingInput>>,
+    _last_output_seq: u64,
+) -> Result<(Session, crate::client::Attached), ResumeError> {
+    let _ = ctx;
+    Err(ResumeError::Local(OpError::new(
+        ErrorCode::Unsupported,
+        "reverse routing (localctl) is not available on this platform",
+    )))
+}
+
 /// What one recovery produced.
 #[allow(clippy::large_enum_variant, reason = "short-lived, moved once")]
 enum Recovery {
@@ -1974,37 +2544,46 @@ enum Recovery {
 /// Recover one detected path death: migrate if that is enough, otherwise
 /// re-dial and resume, retrying up to [`RecoveryConfig::attempts`] times.
 ///
-/// Every attempt is bounded by [`REDIAL_DEADLINE`] and recorded on
-/// `qsh::recovery` by [`recover`] itself, so a failed attempt is a campaign
-/// datapoint rather than a silence.
+/// Every attempt is bounded by `reconnect.attempt_deadline()` ([`REDIAL_DEADLINE`]
+/// on the forward route, wider on the reverse route — see
+/// [`Reconnect::attempt_deadline`]) and recorded on `qsh::recovery` by
+/// [`recover`] itself, so a failed attempt is a campaign datapoint rather
+/// than a silence.
 ///
 /// `leg_survived` says whether the old leg's streams are still worth
 /// keeping ([`LegEnd::leg_survived`]). When they are not, the migration
 /// half is skipped outright: probing the connection would answer "alive"
 /// and return [`Recovery::SameLeg`], which is a broken reader handed back
 /// to a caller that will fail on it again with no backoff.
+///
+/// `link` is `Some` only on the forward route (`Step 8`: this function is
+/// now shared with the reverse route too, unlike before Step 8, when it
+/// was forward-only and took a bare `&Link`). `None` disables migration
+/// unconditionally, regardless of `leg_survived`/`ctx.recovery.migration`
+/// — there is no `Connection` to probe or rebind on the reverse route
+/// (`RecoveryLink`'s own doc), so every attempt falls straight through to
+/// `reconnect`. In practice `leg_survived` is already always `false` on
+/// that route (reverse's [`spawn_watchdog`] never produces
+/// [`LegEnd::PathDead`], the only end [`LegEnd::leg_survived`] answers
+/// `true` for), so this is defence in depth, not the only thing standing
+/// between a reverse leg and a migration attempt.
 #[allow(
     clippy::too_many_arguments,
-    reason = "one more than before Step 7 (`link`, the forward `Link` `drive_attach`'s gate \
-              already extracted from `ctx.link` — bundling it into `ctx` would put a \
-              `RecoveryLink` back where a plain `Link` is what every callee actually needs)"
+    reason = "one more than before Step 8 (`reconnect`, the `Reconnect` seam the forward call \
+              site builds a `DialReconnect` for — bundling it into `ctx` would put a route- \
+              specific reconnect step back where `RecoveryLink` already keeps the routes apart)"
 )]
 async fn recover_attach(
     ctx: &Arc<AttachContext>,
-    link: &Link,
+    link: Option<&Link>,
     leg_survived: bool,
     watch: &PathWatch,
     probes: &Arc<tokio::sync::Notify>,
-    pending: &Arc<std::sync::Mutex<PendingInput>>,
     cursor: &Arc<std::sync::Mutex<OutputCursor>>,
     pumps: &mut LegPumps,
+    reconnect: &dyn Reconnect,
 ) -> Recovery {
     let mut last: Option<OpError> = None;
-    // A redemption a previous attempt's deadline walked away from. It is
-    // still running, it holds the session's only credential, and the next
-    // attempt adopts it rather than starting a second redemption of the
-    // same single-use token. See [`spawn_reattach`].
-    let mut in_flight: Option<ReattachTask> = None;
     for attempt in 0..ctx.recovery.attempts.max(1) {
         // Re-checked on every attempt, not once before the loop: a `~d`
         // that lands mid-recovery must end the attach, not be answered
@@ -2022,45 +2601,50 @@ async fn recover_attach(
         // Only the first attempt still has a live leg behind it, so only
         // the first can migrate: after a re-dial has been attempted the
         // old connection and its control stream are gone. And only a leg
-        // whose streams outlived the failure can be kept at all.
-        let live_leg = leg_survived && attempt == 0 && in_flight.is_none();
-        let binder = link.endpoint();
+        // whose streams outlived the failure can be kept at all. `link`
+        // being `None` (the reverse route) forces this `false` too — see
+        // this function's own doc.
+        let live_leg = link.is_some() && leg_survived && attempt == 0 && !reconnect.has_pending();
+        let binder = link.map(Link::endpoint);
         let migration = live_leg && ctx.recovery.migration;
+        let path_binder: Option<&dyn PathBinder> = if migration {
+            binder.as_ref().map(|b| b as &dyn PathBinder)
+        } else {
+            None
+        };
         let last_output_seq = lock(cursor).last_seq();
-        let task = &mut in_flight;
 
         let outcome = recover(
             &ctx.session_ref,
-            migration.then_some(&binder as &dyn PathBinder),
+            path_binder,
+            reconnect.attempt_deadline(),
             || {
                 let watch = watch.clone();
                 let probes = probes.clone();
-                let rtt = link.connection().quinn().stats().path.rtt;
-                async move { live_leg && probe_alive(&watch, &probes, rtt).await }
+                // `None` only when `link` is `None` (the reverse route),
+                // in which case `live_leg` is already forced `false`
+                // above — so `rtt.is_none()` short-circuits the `&&`
+                // below before `probe_alive` would ever need a value.
+                let rtt = link.map(|link| link.connection().quinn().stats().path.rtt);
+                async move {
+                    match rtt {
+                        Some(rtt) => live_leg && probe_alive(&watch, &probes, rtt).await,
+                        None => false,
+                    }
+                }
             },
             || async {
                 // Past the point of no return for this leg: stop the pumps
                 // (which is what releases the command queue and the
                 // `Session`) before building a replacement.
                 pumps.stop().await;
-                let joined = {
-                    let handle = task.get_or_insert_with(|| {
-                        spawn_reattach(ctx.clone(), link.clone(), pending.clone(), last_output_seq)
-                    });
-                    handle.await
-                };
-                // Reached only when the redemption finished, so a
-                // cancellation above leaves the handle in the slot for the
-                // next attempt to adopt.
-                *task = None;
-                match joined {
-                    Ok(result) => result,
-                    Err(err) => Err(ResumeError::Local(OpError::new(
-                        ErrorCode::Internal,
-                        format!("the resume task did not finish: {err}"),
-                    ))),
-                }
+                reconnect.reconnect(last_output_seq).await
             },
+            // Read only after the attempt above has resolved (`recover`'s
+            // own doc) — `0` on the forward route, the reverse route's
+            // measured re-registration wait on the other
+            // (`Reconnect::registration_wait_ms`'s own doc).
+            || reconnect.registration_wait_ms(),
         )
         .await;
 
@@ -2256,11 +2840,11 @@ fn map_resume_error(err: ResumeError) -> OpError {
     match err {
         ResumeError::Local(err) => err,
         ResumeError::Client(err) => map_client_error(err),
-        ResumeError::Deadline => OpError::new(
+        ResumeError::Deadline(deadline) => OpError::new(
             ErrorCode::ConnectionFailed,
             format!(
                 "the session's path died and was not recovered within {} ms",
-                REDIAL_DEADLINE.as_millis()
+                deadline.as_millis()
             ),
         ),
         other @ (ResumeError::UnackedInputOverflow { .. }
@@ -2956,19 +3540,29 @@ mod tests {
         assert_eq!(SessionCloseOp::COMMAND, "session.close");
     }
 
-    /// `drive_attach`'s "no recovery on the reverse leg" gate
-    /// (`RecoveryLink`'s own doc), proven end to end: a real reverse
-    /// `Session`/`Attached` pair whose `LOCAL_STREAM` data conduit breaks
-    /// (not a clean close — a mid-frame EOF, so `read_leg` reports
-    /// [`LegEnd::Broken`]) must end the attach with one typed [`OpError`]
-    /// on the events channel and *return*, never call [`recover_attach`]
-    /// (which would panic reaching for a `Link` a `Reverse` context
-    /// doesn't have), never hang. `ctx.recovery.enabled` is left at its
-    /// default `true` deliberately — the gate must hold on the *type* of
-    /// link, not on whether recovery is configured on.
+    /// `drive_attach`'s reverse gate with recovery turned **off**
+    /// (`RecoveryLink`'s own doc): a real reverse `Session`/`Attached`
+    /// pair whose `LOCAL_STREAM` data conduit breaks (not a clean close —
+    /// a mid-frame EOF, so `read_leg` reports [`LegEnd::Broken`]) must end
+    /// the attach with one typed [`OpError`] on the events channel and
+    /// *return*, never call [`recover_attach`], never hang. Before Step 8
+    /// this was true unconditionally — the reverse route had no
+    /// `Reconnect` at all — so this test used to leave
+    /// `ctx.recovery.enabled` at its default `true` on purpose (nothing
+    /// consumed it). Since Step 8 wired `RecoveryLink::Reverse` through
+    /// the same [`recover_attach`] the forward route uses (via
+    /// [`LocalReconnect`]), that default would now attempt a real
+    /// recovery instead of ending the attach immediately, so this test
+    /// sets `enabled: false` explicitly to keep testing exactly what its
+    /// name says: the immediate, no-recovery fail-closed path. The
+    /// recovery-**enabled** counterpart —
+    /// [`reverse_leg_link_death_with_recovery_exhausted_ends_the_attach_with_a_typed_error_never_a_panic_or_hang`]
+    /// — proves the same typed-error/never-hang property once a real
+    /// `LocalReconnect` attempt is in play and exhausts its budget.
     #[cfg(unix)]
     #[tokio::test]
-    async fn reverse_leg_link_death_ends_the_attach_with_a_typed_error_never_a_panic_or_hang() {
+    async fn reverse_leg_link_death_with_recovery_disabled_ends_the_attach_with_a_typed_error_never_a_panic_or_hang()
+     {
         use qsh_proto::local::{LocalHello, LocalHelloAck, LocalResponse, local_response};
         use tokio::net::UnixListener;
 
@@ -3024,7 +3618,7 @@ mod tests {
             std::future::pending::<()>().await
         });
 
-        let handshake = crate::localctl::client::open_control(&sock, "phone", 0)
+        let handshake = crate::localctl::client::open_control(&sock, "phone", 0, None)
             .await
             .unwrap();
         let mut session = Session::from_local_control(
@@ -3032,6 +3626,8 @@ mod tests {
             handshake.capabilities,
             handshake.host,
             sock.clone(),
+            handshake.peer_fingerprint,
+            handshake.generation,
         );
         let attached = session
             .open_attach_stream(wire::SessionAttached {
@@ -3045,7 +3641,7 @@ mod tests {
             .await
             .unwrap();
 
-        let link = RecoveryLink::Reverse(attached.kill.clone());
+        let link = RecoveryLink::Reverse(ReverseKill::new(attached.kill.clone()));
         let paths = crate::config::Paths::new(dir.path().join("config"), dir.path().join("state"));
         let (applied_input, _) = tokio::sync::watch::channel(0u64);
         let ctx = Arc::new(AttachContext {
@@ -3057,9 +3653,15 @@ mod tests {
             no_steal: false,
             link,
             window: Arc::new(std::sync::Mutex::new(None)),
-            recovery: RecoveryConfig::default(),
+            // Recovery off — this test proves the immediate fail-closed
+            // path, not `LocalReconnect` (this fn's own doc).
+            recovery: RecoveryConfig {
+                enabled: false,
+                ..RecoveryConfig::default()
+            },
             finished: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             applied_input,
+            reverse_route: None,
         });
         let (_commands_tx, commands_rx) = tokio::sync::mpsc::channel(4);
         let (events_tx, mut events_rx) = tokio::sync::mpsc::channel(4);
@@ -3078,6 +3680,162 @@ mod tests {
         assert!(
             reported.is_err(),
             "a broken reverse-leg link must be reported as an error, got {reported:?}"
+        );
+
+        daemon.abort();
+    }
+
+    /// `drive_attach`'s reverse gate with recovery turned **on** (Step 8):
+    /// the counterpart to
+    /// [`reverse_leg_link_death_with_recovery_disabled_ends_the_attach_with_a_typed_error_never_a_panic_or_hang`].
+    /// Same broken `LOCAL_STREAM` data conduit, but this time
+    /// `ctx.recovery.enabled` is `true`, so `drive_attach` now builds a
+    /// [`LocalReconnect`] and drives it through [`recover_attach`]. The
+    /// fake daemon in this test never accepts a third UDS connection (it
+    /// blocks in `std::future::pending()` after handing out the first
+    /// attach's control/data conduits), so the wait for a new-generation
+    /// registration never resolves — with `attempts: 1` this exhausts
+    /// [`recover_attach`]'s single attempt inside one [`REDIAL_DEADLINE`]
+    /// window (~2 s of real wall-clock time, the same bound the forward
+    /// route's own unit tests already accept — `docs/design/testing.md`'s
+    /// `sleep()`-free discipline binds the PR-gate chaos/acceptance
+    /// suites, not this crate's internal unit tests) and the attach still
+    /// ends with exactly one typed [`OpError`] on the events channel,
+    /// never a panic, never `recovery == "migrated"` (`RecoveryLink`'s own
+    /// doc — there is no `Link` on this route for `recover_attach` to
+    /// reach for), never a hang past the outer 10 s test timeout.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reverse_leg_link_death_with_recovery_exhausted_ends_the_attach_with_a_typed_error_never_a_panic_or_hang()
+     {
+        use qsh_proto::local::{LocalHello, LocalHelloAck, LocalResponse, local_response};
+        use tokio::net::UnixListener;
+
+        use crate::localctl::frame::LocalConduit;
+
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("drive-attach-reverse-recovery.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+
+        let daemon = tokio::spawn(async move {
+            let (stream, _addr) = listener.accept().await.unwrap();
+            let mut control = LocalConduit::new(stream);
+            let _hello: LocalHello = control.recv().await.unwrap().unwrap();
+            control
+                .send(&LocalResponse {
+                    body: Some(local_response::Body::HelloAck(LocalHelloAck {
+                        host: "phone".to_string(),
+                        peer_fingerprint: "sha256:1111111111111111111111111111111111111111111"
+                            .to_string(),
+                        generation: 1,
+                        capabilities: Vec::new(),
+                    })),
+                })
+                .await
+                .unwrap();
+
+            let (stream, _addr) = listener.accept().await.unwrap();
+            let mut data = LocalConduit::new(stream);
+            let _hello: LocalHello = data.recv().await.unwrap().unwrap();
+            data.send(&LocalResponse {
+                body: Some(local_response::Body::HelloAck(LocalHelloAck {
+                    host: "phone".to_string(),
+                    peer_fingerprint: "sha256:1111111111111111111111111111111111111111111"
+                        .to_string(),
+                    generation: 1,
+                    capabilities: Vec::new(),
+                })),
+            })
+            .await
+            .unwrap();
+            let _header: wire::StreamHeader = data.recv().await.unwrap().unwrap();
+            let (mut raw, _prefetched) = data.into_raw();
+            use tokio::io::AsyncWriteExt as _;
+            raw.write_all(&[0, 0, 0, 50]).await.unwrap();
+            drop(raw);
+            // No third accept, ever — a `LocalReconnect` wait against this
+            // socket blocks until this test's own deadline cancels it.
+            std::future::pending::<()>().await
+        });
+
+        let handshake = crate::localctl::client::open_control(&sock, "phone", 0, None)
+            .await
+            .unwrap();
+        let mut session = Session::from_local_control(
+            handshake.conduit,
+            handshake.capabilities,
+            handshake.host,
+            sock.clone(),
+            handshake.peer_fingerprint,
+            handshake.generation,
+        );
+        let attached = session
+            .open_attach_stream(wire::SessionAttached {
+                ticket: vec![1],
+                new_resume_token: Vec::new(),
+                replay_from: 0,
+                writer_lease: true,
+                expires_at: String::new(),
+                input_seq: 0,
+            })
+            .await
+            .unwrap();
+
+        let link = RecoveryLink::Reverse(ReverseKill::new(attached.kill.clone()));
+        let paths = crate::config::Paths::new(dir.path().join("config"), dir.path().join("state"));
+        let (applied_input, _) = tokio::sync::watch::channel(0u64);
+        let ctx = Arc::new(AttachContext {
+            target: None,
+            host: "phone".to_string(),
+            session_id: "01REVERSERECOVERY".to_string(),
+            session_ref: "phone/01REVERSERECOVERY".to_string(),
+            paths,
+            no_steal: false,
+            link,
+            window: Arc::new(std::sync::Mutex::new(None)),
+            // A single attempt is enough to prove "exhausted -> typed
+            // error, never a hang" without the test paying for
+            // `RecoveryConfig::default()`'s three attempts' worth of
+            // `REDIAL_DEADLINE` windows.
+            recovery: RecoveryConfig {
+                enabled: true,
+                attempts: 1,
+                migration: false,
+                registration_wait: Duration::from_millis(50),
+                ..RecoveryConfig::default()
+            },
+            finished: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            applied_input,
+            reverse_route: Some(ReverseRoute {
+                host: "phone".to_string(),
+                socket: sock.clone(),
+                // Matches the ack's `generation: 1` above: `LocalReconnect`
+                // must wait for something strictly greater, which this
+                // fake daemon never produces.
+                generation: std::sync::atomic::AtomicU64::new(1),
+                registration_wait_ms: std::sync::atomic::AtomicU64::new(u64::MAX),
+            }),
+        });
+        let (_commands_tx, commands_rx) = tokio::sync::mpsc::channel(4);
+        let (events_tx, mut events_rx) = tokio::sync::mpsc::channel(4);
+
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            drive_attach(ctx, session, attached, commands_rx, events_tx),
+        )
+        .await
+        .expect(
+            "drive_attach must return once LocalReconnect exhausts its attempts, not hang \
+             forever",
+        );
+
+        let reported = events_rx
+            .recv()
+            .await
+            .expect("drive_attach must report the exhausted recovery on the events channel");
+        assert!(
+            reported.is_err(),
+            "an exhausted reverse recovery must be reported as an error, got {reported:?}"
         );
 
         daemon.abort();

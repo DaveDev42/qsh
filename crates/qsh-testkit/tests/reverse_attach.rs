@@ -36,27 +36,36 @@
 //! here is proving the **daemon's splice** relays that property
 //! byte-for-byte rather than reinventing the wire-level proof.
 //!
-//! **Why the steal/no_steal scenario injects its "foreign" lease holder
-//! directly on the broker** rather than dialing a second, genuinely
-//! distinct connection: on the reverse route every local CLI reaches the
-//! target over the *one* physical QUIC connection the registration
-//! opened (`ConnCtx.conn_id` is `conn.stable_id()`, fixed for the whole
-//! registration's life) — the same structural fact
-//! `qsh_testkit::reverse::ReversePairHarness`'s own module doc calls
-//! "structurally single-peer, by construction — not a harness
-//! limitation." `broker::lease::WriterLease::take` keys a lease strictly
-//! by `ConnectionId`, so two attaches relayed through the same daemon
-//! registration are, from the broker's point of view, the same connection
-//! re-acquiring its own lease — never a conflict, steal or no. This file
-//! does not fight that; it proves the thing that *is* true on this leg
-//! (a plain reattach never conflicts with itself) and reaches the genuine
-//! cross-connection conflict the same deterministic way
-//! `resume_loopback.rs`'s own
-//! `no_steal_conflicts_with_a_foreign_lease_and_spends_no_credential` does:
-//! by calling `SessionHandle::take_lease` on the broker directly, which
-//! that test's own doc establishes is "the broker's own take_lease [that]
-//! does not gate on identity" — a legitimate way to place a foreign
-//! holder without inventing a topology the product does not build.
+//! **Why the steal/no_steal scenario ([`steal_scenario`]) injects its
+//! "foreign" lease holder directly on the broker** rather than dialing a
+//! second, genuinely distinct connection: it wants a *different
+//! principal*, and every local CLI process on the reverse route presents
+//! the *same* principal (the daemon's one pinned identity) — no topology
+//! this test could dial produces a foreign principal on `revhost`, forward
+//! or reverse. Reaching that cross-*principal* conflict the same
+//! deterministic way `resume_loopback.rs`'s own
+//! `no_steal_conflicts_with_a_foreign_lease_and_spends_no_credential` does
+//! — calling `SessionHandle::take_lease` on the broker directly — is a
+//! legitimate way to place a foreign holder without inventing a topology
+//! the product does not build.
+//!
+//! **[`two_real_reverse_attaches_demote_each_other_scenario`] is the
+//! reverse-route counterpart this file used to be unable to write at
+//! all.** Earlier, `broker::lease::WriterLease::take` keyed a lease
+//! strictly by the physical `ConnectionId`, identical for every local CLI
+//! process relayed through one daemon registration (`ConnCtx.conn_id` is
+//! `conn.stable_id()`, fixed for the whole registration's life) — so two
+//! *real* attaches over `revhost` were, from the broker's point of view,
+//! indistinguishable from the same connection re-acquiring its own lease:
+//! never a conflict, steal or no, and never a `writer_changed` broadcast.
+//! `Server::handle_data_stream` now derives the writer-lease identity from
+//! each redeemed ticket (`crate::server::attach_lease_owner`'s own doc) —
+//! single-use and unique per `session.open`/`session.attach` call — while
+//! still releasing on the *physical* connection's death
+//! (`broker::lease::LeaseHolder::physical`'s own doc), so two concurrent
+//! reverse attaches are told apart for steal/demotion purposes exactly
+//! like two forward ones, and a dead registration still frees whichever
+//! one currently holds the lease.
 //!
 //! `#![cfg(unix)]`: localctl (UDS) is unix-only, same gating as every
 //! other localctl testkit file.
@@ -239,6 +248,11 @@ impl Rig {
             peer_addr: conn.remote_address(),
             conn_id: conn.stable_id(),
             capabilities: handshake::negotiated_capabilities(&peer_hello),
+            // A real registration via `ReverseHarness::register` (this
+            // fn's own doc) — every local CLI process the controller
+            // relays for shares this one connection
+            // (`ConnCtx::is_reverse_registration`'s own doc).
+            is_reverse_registration: true,
         };
         let server = self.server.clone();
         let conn_id = ctx.conn_id;
@@ -594,6 +608,107 @@ fn detach_reattach_scenario(ops: &Ops, host: &str, pipes: &PipeFactory) {
     .expect("session.close");
 }
 
+// ===========================================================================
+// Scenario 2b (reverse-only) — two *real* concurrent attaches over the
+// *same* reverse registration must still steal-and-demote each other, not
+// silently co-hold the lease.
+// ===========================================================================
+
+/// Unlike [`steal_scenario`] above, this drives two genuine
+/// `Ops::session_attach` calls end to end over `revhost`'s real
+/// `LOCAL_STREAM` splice rather than planting a foreign holder directly on
+/// the broker — the scenario this file's module doc used to say the
+/// reverse route could not distinguish (`WriterLease::take` keyed strictly
+/// by the physical `ConnectionId`, identical for every local CLI process
+/// relayed through one daemon registration). `Server::handle_data_stream`
+/// now derives the writer-lease identity from each redeemed ticket instead
+/// (`crate::server::attach_lease_owner`'s own doc), so two attaches on the
+/// same registration are distinguishable exactly like two attaches on two
+/// separate forward connections.
+fn two_real_reverse_attaches_demote_each_other_scenario(ops: &Ops, pipes: &PipeFactory) {
+    let rt = tokio::runtime::Runtime::new().expect("throwaway runtime");
+    let opened = ops.session_open(open_req("revhost")).expect("session.open");
+    let mut pipe = pipes.take().expect("pipe handle");
+
+    let mut first = attach(ops, &opened.session_ref, false).expect("first attach");
+    assert!(
+        first.writer_lease(),
+        "the first attach with nothing else held gets the lease"
+    );
+    match first.next_event().expect("event").expect("ok") {
+        SessionEvent::WriterChanged { .. } => {}
+        other => panic!("expected the first attach's own WriterChanged, got {other:?}"),
+    }
+
+    // A second, fully independent `LOCAL_STREAM` conduit attaching to the
+    // *same* session over the *same* reverse registration connection.
+    let second = attach(ops, &opened.session_ref, false).expect("second attach");
+    assert!(
+        second.writer_lease(),
+        "steal-by-default hands the second attach the lease"
+    );
+
+    // `first` must be told it was demoted — the whole reason
+    // `session.writer_changed` exists — not silently left believing it is
+    // still the writer. Before the fix this never arrived: `changed` was
+    // `false` (the "same connection re-acquiring its own lease" branch),
+    // which suppresses the broadcast entirely.
+    match first
+        .next_event()
+        .expect("event before demotion notice")
+        .expect("ok")
+    {
+        SessionEvent::WriterChanged { .. } => {}
+        other => panic!("first attach must see a WriterChanged when the second steals: {other:?}"),
+    }
+
+    // Prove it structurally, not just via the notice: `first`'s own Input
+    // must now be dropped on the floor (demoted to read-only, protocol.md
+    // §10) rather than reaching the PTY. `write` on a demoted attach still
+    // returns `Ok` (queuing succeeds client-side; the drop happens
+    // server-side and is still acked so the peer's stream stays
+    // contiguous) — so the proof has to be in what the PTY actually
+    // receives, not in `write`'s return value.
+    let dropped_marker = b"FROM-FIRST-MUST-NOT-ARRIVE";
+    first
+        .write(dropped_marker.to_vec())
+        .expect("a demoted attach's write is still accepted client-side");
+    let live_marker = b"FROM-SECOND";
+    second
+        .write(live_marker.to_vec())
+        .expect("write from the current writer");
+
+    let got = rt.block_on(read_child_input(&mut pipe, live_marker.len()));
+    assert_eq!(
+        got, live_marker,
+        "the demoted attach's input must never reach the PTY ahead of the current writer's \
+         (this must equal the current writer's marker with nothing prepended — the old \
+         co-holding bug would have delivered `first`'s bytes here too)"
+    );
+
+    first.close();
+    second.close();
+    ops.session_close(SessionCloseReq {
+        session_ref: opened.session_ref,
+        signal: None,
+    })
+    .expect("session.close");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn two_real_reverse_attaches_over_the_same_registration_demote_each_other() {
+    let fx = setup(Arc::new(AllowAllPinned)).await;
+    let pipes = fx.rig.pipes.clone();
+
+    blocking("two reverse attaches", {
+        let ops = fx.ops.clone();
+        move || two_real_reverse_attaches_demote_each_other_scenario(&ops, &pipes)
+    })
+    .await;
+
+    fx.teardown().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn detaching_leaves_the_session_running_and_a_reattach_replays_the_retained_ring() {
     let fx = setup(Arc::new(AllowAllPinned)).await;
@@ -633,6 +748,7 @@ async fn connect_control(socket_path: &Path, host: &str) -> LocalConduit<UnixStr
             kind: LocalStreamKind::LocalControl as i32,
             host: host.to_string(),
             wait_ms: 0,
+            known_generation: None,
         })
         .await
         .expect("send LocalHello");
@@ -659,6 +775,7 @@ async fn connect_stream(socket_path: &Path, host: &str) -> LocalConduit<UnixStre
             kind: LocalStreamKind::LocalStream as i32,
             host: host.to_string(),
             wait_ms: 0,
+            known_generation: None,
         })
         .await
         .expect("send LocalHello");

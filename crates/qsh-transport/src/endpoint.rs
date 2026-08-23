@@ -28,6 +28,20 @@ pub const MAX_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 /// gets no response should fail fast).
 pub const DEFAULT_DIAL_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Peer-advertised cap on concurrently open bidirectional streams per
+/// connection, set explicitly rather than left at quinn's own default
+/// (100 as of quinn-proto 0.11) — one registration connection
+/// (`qsh reverse`) carries a persistent `LOCAL_CONTROL` relay stream plus
+/// one QUIC bidi stream per live `LOCAL_STREAM` attach splice
+/// (`qsh-core::localctl::daemon`'s `serve_stream`), and that daemon's own
+/// `MAX_CONCURRENT_LOCAL_STREAM_CONDUITS` pool cap (256) must always bite
+/// *before* this transport-level limit does — otherwise `open_bi` parks
+/// against the peer's own cap instead of answering the daemon's clean,
+/// bounded `ErrorCode::ResourceExhausted`. Set comfortably above that pool
+/// (headroom for the control stream and a few forward-route attaches on
+/// the same connection).
+pub const MAX_CONCURRENT_BIDI_STREAMS: u32 = 1024;
+
 /// QUIC application close code sent when the peer's principal cannot be
 /// re-derived after the handshake (should be unreachable — the verifier
 /// already ran — but fail closed).
@@ -135,6 +149,7 @@ fn transport_config() -> quinn::TransportConfig {
             .try_into()
             .expect("45s fits in a QUIC idle timeout VarInt"),
     ));
+    tc.max_concurrent_bidi_streams(MAX_CONCURRENT_BIDI_STREAMS.into());
     tc
 }
 

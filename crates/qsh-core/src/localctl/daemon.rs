@@ -195,7 +195,28 @@ const MAX_CONCURRENT_LOCAL_CONTROL_CONDUITS: usize = 256;
 /// [`MAX_CONCURRENT_LOCAL_CONTROL_CONDUITS`] is its own pool — a burst of
 /// long-lived data streams must never starve `LOCAL_ADMIN`/`LOCAL_CONTROL`
 /// of a permit, or vice versa.
+///
+/// Kept comfortably under `qsh_transport`'s own
+/// `max_concurrent_bidi_streams` (set well above this pool specifically so
+/// this cap is always the one that bites first, `endpoint.rs`'s own doc):
+/// a peer permit exhausted at the transport layer instead of here means
+/// `open_bi` parks in [`OPEN_DATA_STREAM_TIMEOUT`] and then fails closed
+/// with [`RESET_CODE_LOCAL_CONDUIT_FAILED`] rather than answering the
+/// clean, bounded [`ErrorCode::ResourceExhausted`] this pool exists to
+/// produce.
 const MAX_CONCURRENT_LOCAL_STREAM_CONDUITS: usize = 256;
+
+/// Bound on [`quinn::Connection::open_bi`] in [`LocalctlDaemon::serve_stream`]
+/// — opening a stream on an already-established, healthy connection is
+/// normally near-instant; a wait this long only happens when the peer's
+/// own concurrent-stream limit is exhausted (`MAX_CONCURRENT_LOCAL_STREAM_CONDUITS`'s
+/// doc explains why that should not happen before this pool's own cap
+/// does). Bounding it at all is the point: an unbounded `await` here holds
+/// the stream permit acquired just before it forever, so a peer at its
+/// limit would silently wedge every later `LOCAL_STREAM` attach behind
+/// this one instead of the `ResourceExhausted` envelope callers can act
+/// on.
+const OPEN_DATA_STREAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Reset code the `LOCAL_STREAM` splice sends on the QUIC side when the
 /// UDS side ended abnormally (a read error, not a clean EOF) — the honest
@@ -205,6 +226,17 @@ const MAX_CONCURRENT_LOCAL_STREAM_CONDUITS: usize = 256;
 /// the daemon's own local-IPC leg, before the target is even involved in
 /// the failure).
 const RESET_CODE_LOCAL_CONDUIT_FAILED: u32 = 0x2005;
+
+/// `STOP_SENDING`/reset code the `LOCAL_STREAM` splice's two pumps send
+/// on the QUIC side when their *sibling* leg ends first — the local CLI
+/// conduit is a single logical peer, so once either half of it is gone
+/// the other half is never coming back either, and holding a QUIC bidi
+/// stream half-open waiting for input/output nobody will ever supply is
+/// exactly the leak `pump_uds_to_quic`/`pump_quic_to_uds`'s cross-leg
+/// cancellation exists to close (a detach otherwise pins one of
+/// [`MAX_CONCURRENT_LOCAL_STREAM_CONDUITS`] forever on an idle session —
+/// see the two functions' own docs).
+const RESET_CODE_LOCAL_PEER_GONE: u32 = 0x2006;
 
 /// Delay the accept loop pays after a failed `accept()` before retrying —
 /// long enough that a persistent failure (EMFILE/ENFILE) does not spin the
@@ -459,7 +491,13 @@ impl LocalctlDaemon {
                 match self.control_permits.clone().try_acquire_owned() {
                     Ok(_control_permit) => {
                         drop(handshake_permit);
-                        self.serve_control(&hello.host, conduit).await;
+                        self.serve_control(
+                            &hello.host,
+                            hello.wait_ms,
+                            hello.known_generation,
+                            conduit,
+                        )
+                        .await;
                     }
                     Err(_) => {
                         let _ = conduit
@@ -480,7 +518,8 @@ impl LocalctlDaemon {
             LocalStreamKind::LocalStream => match self.stream_permits.clone().try_acquire_owned() {
                 Ok(_stream_permit) => {
                     drop(handshake_permit);
-                    self.serve_stream(&hello.host, conduit).await;
+                    self.serve_stream(&hello.host, hello.wait_ms, hello.known_generation, conduit)
+                        .await;
                 }
                 Err(_) => {
                     let _ = conduit
@@ -541,11 +580,16 @@ impl LocalctlDaemon {
     /// `LOCAL_CONTROL`: relay `qsh.wire.v1` `ControlMessage`/`Response`
     /// between this conduit and `host`'s live reverse QUIC control stream
     /// (`docs/design/protocol.md` §11-3, `PLAN.md` M3 Step 6). Resolves
-    /// `host` in [`Listen::control_hub`] first — live gets a
+    /// `host` in [`Listen::control_hub_wait`] first — live (and, when
+    /// `wait_ms > 0`, a registration that arrives within the wait window —
+    /// `PLAN.md` M3 Step 8's daemon-side half of `LocalReconnect`) gets a
     /// `LocalHelloAck` and this conduit is registered with its
-    /// [`crate::reverse::listen::ControlHub`]; stale or unknown gets
-    /// `HOST_NOT_FOUND` and nothing else (`LocalHello.wait_ms` is not yet
-    /// honored for a stale entry — Step 8 adds `LocalReconnect`).
+    /// [`crate::reverse::listen::ControlHub`]; nothing found by the
+    /// deadline gets `HOST_NOT_FOUND` and nothing else. `known_generation`
+    /// gates *which* live registration counts — see
+    /// [`Listen::control_hub_wait`]'s own doc for why `None` (every pre-
+    /// Step-8 caller) is unchanged from the old immediate-only behavior
+    /// and `Some(g)` never accepts a hub still at generation `g` itself.
     ///
     /// After the ack, this loop is the *only* reader/writer of `conduit`'s
     /// UDS stream: every inbound `ControlMessage` is either a `Ping`
@@ -560,8 +604,19 @@ impl LocalctlDaemon {
     /// conduit이 명확한 typed error로 함께 끝난다": closing this UDS stream
     /// here gives the CLI-side `Session` reading it the same
     /// `ClientError::Protocol` a genuinely dead QUIC control stream would).
-    async fn serve_control(&self, host: &str, mut conduit: LocalConduit<UnixStream>) {
-        let Some(hub) = self.listen.control_hub(host) else {
+    async fn serve_control(
+        &self,
+        host: &str,
+        wait_ms: u32,
+        known_generation: Option<u64>,
+        mut conduit: LocalConduit<UnixStream>,
+    ) {
+        let deadline = clamp_wait(wait_ms);
+        let Some(hub) = self
+            .listen
+            .control_hub_wait(host, known_generation, deadline)
+            .await
+        else {
             let _ = conduit
                 .send(&LocalResponse {
                     body: Some(local_response::Body::Error(LocalError::from_code(
@@ -699,9 +754,11 @@ impl LocalctlDaemon {
     }
 
     /// `LOCAL_STREAM` (`M3 Step 7`): after the same `HOST_NOT_FOUND`/
-    /// `LocalHelloAck` handshake [`Self::serve_control`] uses, read
-    /// exactly one wire `StreamHeader{SESSION_DATA, ticket}` frame, open a
-    /// fresh QUIC bidi stream on `host`'s live connection at
+    /// `LocalHelloAck` handshake [`Self::serve_control`] uses (including
+    /// its `wait_ms`/`known_generation` wait, `PLAN.md` M3 Step 8 — the
+    /// data-conduit half of `LocalReconnect`'s new leg), read exactly one
+    /// wire `StreamHeader{SESSION_DATA, ticket}` frame, open a fresh QUIC
+    /// bidi stream on `host`'s live connection at
     /// [`wire::PRIORITY_SESSION_DATA`], forward the header verbatim, and
     /// become a raw byte-level pump both ways
     /// (`docs/design/protocol.md` §11-3, §12). Never parses a
@@ -709,8 +766,19 @@ impl LocalctlDaemon {
     /// target's job; a forged or expired ticket is the target's reset,
     /// relayed to the CLI exactly as any other QUIC-side termination
     /// would be (module docs' kind table).
-    async fn serve_stream(&self, host: &str, mut conduit: LocalConduit<UnixStream>) {
-        let Some((conn, hub)) = self.listen.connection_for(host) else {
+    async fn serve_stream(
+        &self,
+        host: &str,
+        wait_ms: u32,
+        known_generation: Option<u64>,
+        mut conduit: LocalConduit<UnixStream>,
+    ) {
+        let deadline = clamp_wait(wait_ms);
+        let Some((conn, hub)) = self
+            .listen
+            .connection_for_wait(host, known_generation, deadline)
+            .await
+        else {
             let _ = conduit
                 .send(&LocalResponse {
                     body: Some(local_response::Body::Error(LocalError::from_code(
@@ -743,13 +811,15 @@ impl LocalctlDaemon {
         // slot open indefinitely) — a same-uid peer that completes the
         // handshake and then never sends the follow-up header would
         // otherwise hold this conduit's permit forever.
-        let header = match tokio::time::timeout(
-            LOCAL_WAIT_MAX,
-            conduit.recv::<wire::StreamHeader>(),
-        )
-        .await
-        {
-            Ok(Ok(Some(header))) => header,
+        //
+        // Read as raw, still-unparsed payload bytes
+        // (`LocalConduit::recv_payload`'s own doc) — decoded once here for
+        // this function's own checks, but *those bytes*, not a re-encode
+        // of the decoded struct, are what get forwarded onto the QUIC data
+        // stream below, so an additive `StreamHeader` field this build
+        // does not know about survives the relay untouched.
+        let raw_header = match tokio::time::timeout(LOCAL_WAIT_MAX, conduit.recv_payload()).await {
+            Ok(Ok(Some(raw))) => raw,
             Ok(Ok(None)) | Ok(Err(_)) => return,
             Err(_elapsed) => {
                 tracing::warn!(
@@ -758,6 +828,10 @@ impl LocalctlDaemon {
                 );
                 return;
             }
+        };
+        let header: wire::StreamHeader = match wire::decode_msg(&raw_header) {
+            Ok(header) => header,
+            Err(_) => return,
         };
 
         if !is_session_data_header(&header) {
@@ -776,33 +850,82 @@ impl LocalctlDaemon {
             return;
         }
 
+        // The local conduit's own cap (`CONTROL_FRAME_MAX`, 256 KiB) is
+        // wider than the QUIC data stream's (`DATA_FRAME_MAX`, 64 KiB) —
+        // a header accepted on the way in is not automatically forward-
+        // able on the way out. Checked here, against the *raw* bytes,
+        // before anything is opened on QUIC (nothing here inspects why a
+        // legitimate `StreamHeader` would ever be this large; it fails
+        // closed either way).
+        if raw_header.len() > qsh_proto::frame::DATA_FRAME_MAX {
+            let _ = conduit
+                .send(&LocalResponse {
+                    body: Some(local_response::Body::Error(LocalError::from_code(
+                        ErrorCode::InvalidArgument,
+                        "LOCAL_STREAM's StreamHeader exceeds the data stream's frame cap",
+                    ))),
+                })
+                .await;
+            return;
+        }
+
         // From here on this conduit never speaks framed `qsh.local.v1`
         // again — `into_raw` hands back the UDS stream plus whatever bytes
         // of the *next* frame the last `read()` already swallowed
         // alongside the header (`LocalConduit::into_raw`'s own doc).
         let (uds, prefetched) = conduit.into_raw();
 
-        let (mut quic_send, quic_recv) = match conn.open_bi().await {
-            Ok(pair) => pair,
-            Err(err) => {
+        // Bounded ([`OPEN_DATA_STREAM_TIMEOUT`]'s own doc): this task is
+        // already holding the `LOCAL_STREAM` permit acquired before
+        // `serve_stream` was spawned, and an unbounded `await` here would
+        // hold it — silently, with no envelope ever reaching the caller —
+        // for as long as the peer connection's own concurrent-stream limit
+        // stays exhausted.
+        let (mut quic_send, quic_recv) = match tokio::time::timeout(
+            OPEN_DATA_STREAM_TIMEOUT,
+            conn.open_bi(),
+        )
+        .await
+        {
+            Ok(Ok(pair)) => pair,
+            Ok(Err(err)) => {
                 tracing::warn!(
                     %err,
                     %host,
                     "localctl: LOCAL_STREAM failed to open a data stream on this host's connection"
                 );
+                // A sentinel byte, never a clean close: nothing on
+                // QUIC ever opened, but the CLI already believes the
+                // handshake succeeded and is reading for `SessionFrame`s
+                // (`docs/CLI.md`'s "link death ends the attach with a
+                // clear typed error" — same reasoning as
+                // `pump_quic_to_uds`'s own ambiguous-boundary case).
+                let mut uds = uds;
+                let _ = uds.write_all(&[0u8]).await;
+                return;
+            }
+            Err(_elapsed) => {
+                tracing::warn!(
+                    %host,
+                    "localctl: LOCAL_STREAM's open_bi did not complete within \
+                     {OPEN_DATA_STREAM_TIMEOUT:?}; the peer connection's own concurrent-\
+                     stream limit is likely exhausted"
+                );
+                let mut uds = uds;
+                let _ = uds.write_all(&[0u8]).await;
                 return;
             }
         };
         let _ = quic_send.set_priority(wire::PRIORITY_SESSION_DATA);
 
-        let header_bytes = match wire::encode_framed(&header, qsh_proto::frame::DATA_FRAME_MAX) {
+        // Re-framed from the raw payload bytes already validated above —
+        // never re-encoded from the decoded `header` struct (this
+        // function's own doc: that would silently drop any field this
+        // build's `StreamHeader` does not know about).
+        let header_bytes = match qsh_proto::frame::encode_frame(&raw_header) {
             Ok(bytes) => bytes,
             Err(err) => {
-                // The header just round-tripped through `conduit.recv`,
-                // so re-encoding it failing is not something this build
-                // can produce in practice; fail closed rather than open
-                // half a spliced stream.
-                tracing::warn!(%err, "localctl: LOCAL_STREAM failed to re-encode its own header");
+                tracing::warn!(%err, "localctl: LOCAL_STREAM failed to re-frame its own header");
                 let _ = quic_send.reset(quinn::VarInt::from_u32(RESET_CODE_LOCAL_CONDUIT_FAILED));
                 return;
             }
@@ -815,9 +938,22 @@ impl LocalctlDaemon {
         }
 
         let (uds_read, uds_write) = uds.into_split();
+        // One local UDS conduit is a single logical peer: once either
+        // direction of it ends, the other is never coming back either
+        // (`RESET_CODE_LOCAL_PEER_GONE`'s own doc). These two one-shot
+        // channels are how each pump tells its sibling that promptly
+        // instead of leaving it blocked on a `read()` that will now never
+        // resolve — without this, `tokio::join!` below would only return
+        // once *both* legs end on their own, and on an idle session
+        // nothing ever wakes the QUIC→UDS leg once the UDS→QUIC leg sees
+        // the CLI detach (this daemon task, its `_stream_permit` and the
+        // QUIC bidi stream would all leak for as long as the session
+        // stays idle — see the two pumps' own docs).
+        let (uds_gone_tx, uds_gone_rx) = tokio::sync::oneshot::channel();
+        let (quic_gone_tx, quic_gone_rx) = tokio::sync::oneshot::channel();
         tokio::join!(
-            pump_uds_to_quic(uds_read, quic_send),
-            pump_quic_to_uds(quic_recv, uds_write),
+            pump_uds_to_quic(uds_read, quic_send, uds_gone_tx, quic_gone_rx),
+            pump_quic_to_uds(quic_recv, uds_write, quic_gone_tx, uds_gone_rx),
         );
     }
 
@@ -841,31 +977,55 @@ impl LocalctlDaemon {
 /// UDS error -> QUIC reset" — the daemon distinguishes only "no more
 /// data" from "something went wrong", never the data itself). A QUIC
 /// write failure (the target reset or stopped this stream from its own
-/// end) simply ends this direction — the sibling direction is unaffected
-/// and runs to its own completion independently, exactly like
-/// `tokio::io::copy_bidirectional`'s half-duplex-close behavior.
+/// end) simply ends this direction on its own.
+///
+/// Either way `done_tx` fires once this leg is done, and `cancel_rx` is
+/// raced against every read so the *sibling* leg ending first — the
+/// local CLI conduit going away entirely, or the target ending its own
+/// output — ends this one promptly too, instead of leaving it parked on
+/// a `read()` that has no reason left to ever resolve (module docs'
+/// cross-leg cancellation; see `serve_stream`'s call site).
 async fn pump_uds_to_quic(
     mut uds_read: tokio::net::unix::OwnedReadHalf,
     mut quic_send: quinn::SendStream,
+    done_tx: tokio::sync::oneshot::Sender<()>,
+    mut cancel_rx: tokio::sync::oneshot::Receiver<()>,
 ) {
     use tokio::io::AsyncReadExt as _;
 
     let mut buf = [0u8; 16 * 1024];
     loop {
-        match uds_read.read(&mut buf).await {
-            Ok(0) => {
-                let _ = quic_send.finish();
+        tokio::select! {
+            biased;
+            _ = &mut cancel_rx => {
+                // The QUIC→UDS leg already ended (target gone, or the
+                // target ended its own output) — nothing this leg could
+                // still relay would ever be read on the other end, so
+                // abandon it rather than wait for a UDS read that may
+                // never come (an idle CLI that is still attached but has
+                // typed nothing is exactly this case).
+                let _ = quic_send.reset(quinn::VarInt::from_u32(RESET_CODE_LOCAL_PEER_GONE));
                 return;
             }
-            Ok(n) => {
-                if quic_send.write_all(&buf[..n]).await.is_err() {
+            r = uds_read.read(&mut buf) => match r {
+                Ok(0) => {
+                    let _ = quic_send.finish();
+                    let _ = done_tx.send(());
                     return;
                 }
-            }
-            Err(_) => {
-                let _ = quic_send.reset(quinn::VarInt::from_u32(RESET_CODE_LOCAL_CONDUIT_FAILED));
-                return;
-            }
+                Ok(n) => {
+                    if quic_send.write_all(&buf[..n]).await.is_err() {
+                        let _ = done_tx.send(());
+                        return;
+                    }
+                }
+                Err(_) => {
+                    let _ =
+                        quic_send.reset(quinn::VarInt::from_u32(RESET_CODE_LOCAL_CONDUIT_FAILED));
+                    let _ = done_tx.send(());
+                    return;
+                }
+            },
         }
     }
 }
@@ -874,38 +1034,113 @@ async fn pump_uds_to_quic(
 /// half of the data stream back onto the localctl conduit, again never
 /// parsed.
 ///
-/// Both a clean QUIC FIN and a QUIC reset surface through
-/// [`quinn::RecvStream`]'s own inherent `read` (`Ok(None)` vs. an `Err` —
-/// this shadows, and is used instead of, the blanket `AsyncRead` impl),
-/// and both get the same response here — shutting down the UDS write half
-/// (HARD RULES: "QUIC FIN/reset -> UDS shutdown"; unlike the sibling
-/// direction there is nothing to distinguish, since both cases mean
-/// identically "the target has nothing more to say").
+/// A clean QUIC FIN (`Ok(None)`) and a QUIC reset/connection failure
+/// (`Err`) surface through [`quinn::RecvStream`]'s own inherent `read`
+/// (not `AsyncReadExt`'s — it shadows the trait method) and both end this
+/// pump by shutting down the UDS write half (HARD RULES: "QUIC FIN/reset
+/// -> UDS shutdown"). They must not, however, become the same *observable
+/// outcome* on the local reader's side of that shutdown: a reverse-leg
+/// `session.attach` promises "link death ends the attach with a clear
+/// typed error" (`docs/CLI.md` §6.13), and a plain UDS EOF at a frame
+/// boundary is indistinguishable from a normal end from
+/// [`crate::localctl::client::DataRecvHalf::recv`]'s point of view.
+///
+/// So the two cases are told apart the only place they safely can be: at
+/// the *frame* layer, not the payload layer. `dec` is a purely mechanical
+/// shadow of the same [`qsh_proto::frame`] boundary-tracking
+/// `DataRecvHalf::recv` itself does on the other end of this splice —
+/// pushed bytes, drained complete frames, contents never inspected past
+/// that (this still never learns what the bytes mean; it only ever learns
+/// where one length-prefixed record ends and the next begins, exactly
+/// like `LocalConduit`'s own handshake framing already does on this same
+/// conduit). On a clean FIN, `dec` is always at a frame boundary (the
+/// target does not FIN mid-frame) and nothing extra is written. On an
+/// `Err`, if `dec` shows a frame already truncated, the client's own
+/// decoder will independently observe the same truncation and there is
+/// nothing to add; but if `dec` is *also* sitting exactly on a boundary —
+/// the "looks clean" case that silently ate every prior reset — one
+/// sentinel byte is written before the shutdown. That byte can never
+/// complete a real frame (a lone byte is never enough to satisfy a
+/// pending 4-byte length header, let alone a payload), so it only ever
+/// forces [`crate::localctl::client::DataRecvHalf::recv`]'s existing
+/// "conduit ended mid-frame" branch — the same `LegEnd::Broken` path
+/// (`crate::ops::session`) a literal truncated frame already takes,
+/// never a corrupted-but-decodable payload.
+///
+/// Like the sibling direction, `done_tx` fires once this leg is done and
+/// `cancel_rx` is raced against every read so the UDS→QUIC leg ending
+/// first (the CLI detached) ends this one promptly too, instead of
+/// blocking on target output that may never come on an idle session.
 async fn pump_quic_to_uds(
     mut quic_recv: quinn::RecvStream,
     mut uds_write: tokio::net::unix::OwnedWriteHalf,
+    done_tx: tokio::sync::oneshot::Sender<()>,
+    mut cancel_rx: tokio::sync::oneshot::Receiver<()>,
 ) {
-    // `quinn::RecvStream`'s own inherent `read` (not `AsyncReadExt`'s —
-    // it shadows the trait method): `Ok(None)` is a clean FIN, `Err` a
-    // reset/connection failure. Both get the same treatment below.
     let mut buf = [0u8; 16 * 1024];
+    let mut dec = qsh_proto::frame::FrameDecoder::new(qsh_proto::frame::DATA_FRAME_MAX);
     loop {
-        match quic_recv.read(&mut buf).await {
-            Ok(None) => {
-                let _ = uds_write.shutdown().await;
+        tokio::select! {
+            biased;
+            _ = &mut cancel_rx => {
+                // The UDS→QUIC leg already ended — the local CLI conduit
+                // is gone, so nothing arriving on this stream from here
+                // on would ever be delivered anywhere. `stop()` tells the
+                // target that directly (a real `STOP_SENDING`, not just a
+                // local shutdown), which is what lets an idle target's
+                // own output pump notice and release its session's
+                // attach token instead of holding it open indefinitely
+                // (`session_stream::write_frames`'s own doc).
+                let _ = quic_recv.stop(quinn::VarInt::from_u32(RESET_CODE_LOCAL_PEER_GONE));
+                let _ = done_tx.send(());
                 return;
             }
-            Ok(Some(n)) => {
-                if uds_write.write_all(&buf[..n]).await.is_err() {
+            r = quic_recv.read(&mut buf) => match r {
+                Ok(None) => {
+                    let _ = uds_write.shutdown().await;
+                    let _ = done_tx.send(());
                     return;
                 }
-            }
-            Err(_) => {
-                let _ = uds_write.shutdown().await;
-                return;
-            }
+                Ok(Some(n)) => {
+                    if uds_write.write_all(&buf[..n]).await.is_err() {
+                        let _ = done_tx.send(());
+                        return;
+                    }
+                    // Mechanical bookkeeping only — drain whatever
+                    // complete frames these bytes finish, never look at
+                    // their content.
+                    dec.push(&buf[..n]);
+                    while matches!(dec.next_frame(), Ok(Some(_))) {}
+                }
+                Err(_) => {
+                    // `Err(_)` from `next_frame` (an oversize declared
+                    // length) also means "not cleanly at a boundary" for
+                    // this purpose — treat it the same as leftover
+                    // buffered bytes and skip the sentinel; the client's
+                    // own decoder will already see the same truncation
+                    // independently.
+                    if dec.buffered() == 0 {
+                        let _ = uds_write.write_all(&[0u8]).await;
+                    }
+                    let _ = uds_write.shutdown().await;
+                    let _ = done_tx.send(());
+                    return;
+                }
+            },
         }
     }
+}
+
+/// Clamp a caller's `LocalHello.wait_ms` to [`LOCAL_WAIT_MAX`] — the same
+/// ceiling discipline `qsh/local/v1.proto`'s own doc on the field promises
+/// ("a *ceiling*, not a rejection"), applied at the one place both
+/// [`LocalctlDaemon::serve_control`] and [`LocalctlDaemon::serve_stream`]
+/// need it. `0` maps to [`Duration::ZERO`] — a single, immediate check,
+/// exactly the behavior every pre-Step-8 caller (which never sets
+/// `wait_ms`) already gets from [`Listen::control_hub_wait`]'s zero-
+/// deadline branch.
+fn clamp_wait(wait_ms: u32) -> std::time::Duration {
+    std::time::Duration::from_millis(u64::from(wait_ms)).min(LOCAL_WAIT_MAX)
 }
 
 /// Whether `header` is the one shape `LOCAL_STREAM`'s first post-ack frame
@@ -1238,6 +1473,7 @@ mod tests {
                 kind: LocalStreamKind::LocalUnspecified as i32,
                 host: String::new(),
                 wait_ms: 0,
+                known_generation: None,
             })
             .await
             .unwrap();
@@ -1280,6 +1516,7 @@ mod tests {
                 kind: LocalStreamKind::LocalControl as i32,
                 host: "some-host".to_string(),
                 wait_ms: 0,
+                known_generation: None,
             })
             .await
             .unwrap();
@@ -1320,6 +1557,7 @@ mod tests {
                 kind: LocalStreamKind::LocalStream as i32,
                 host: "some-host".to_string(),
                 wait_ms: 0,
+                known_generation: None,
             })
             .await
             .unwrap();
@@ -1424,6 +1662,7 @@ mod tests {
                 kind: LocalStreamKind::LocalAdmin as i32,
                 host: String::new(),
                 wait_ms: 0,
+                known_generation: None,
             })
             .await
             .unwrap();
@@ -1566,6 +1805,7 @@ mod tests {
                 kind: LocalStreamKind::LocalAdmin as i32,
                 host: String::new(),
                 wait_ms: 0,
+                known_generation: None,
             })
             .await
             .unwrap();
@@ -1582,6 +1822,7 @@ mod tests {
                 kind: LocalStreamKind::LocalAdmin as i32,
                 host: String::new(),
                 wait_ms: 0,
+                known_generation: None,
             })
             .await
             .unwrap();
@@ -1598,6 +1839,75 @@ mod tests {
         }
 
         drop(holder);
+        let _ = shutdown_tx.send(());
+        task.await.unwrap();
+    }
+
+    /// [`LOCAL_STREAM`]'s own pool answers the same explicit
+    /// `LocalError{RESOURCE_EXHAUSTED}` at its cap, not a silent close —
+    /// the `LOCAL_STREAM` twin of
+    /// `local_admin_at_the_admin_pools_cap_answers_resource_exhausted_not_a_silent_drop`
+    /// above (adversarial review finding: this arm — `serve_authorized_conduit`'s
+    /// `LocalStreamKind::LocalStream => ... Err(_) => ...ResourceExhausted`
+    /// — had no test of its own; only the pools' *capacity independence*
+    /// was pinned, never this specific dispatch arm firing). The one
+    /// stream permit is held directly rather than via a live parked
+    /// `LOCAL_STREAM` conduit (unlike the admin test's holder): holding a
+    /// `LOCAL_STREAM` permit open via the wire would mean parking inside
+    /// `serve_stream`'s `connection_for_wait` — a real wait loop this
+    /// crate's unit tests have no live reverse registration to eventually
+    /// resolve, so it would hang for `LOCAL_WAIT_MAX` instead of exiting
+    /// promptly. Grabbing the permit straight from the semaphore proves
+    /// exactly the same dispatch-arm behavior without that wait.
+    #[tokio::test]
+    async fn local_stream_at_the_stream_pools_cap_answers_resource_exhausted_not_a_silent_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = tmp_paths(&dir);
+        let bound = LocalctlListener::bind(&paths, 9012).unwrap();
+        let socket_path = bound.socket_path.clone();
+        let daemon = LocalctlDaemon::with_pool_sizes(
+            test_listen(),
+            MAX_CONCURRENT_LOCAL_ADMIN_QUERIES,
+            MAX_CONCURRENT_LOCAL_CONTROL_CONDUITS,
+            1,
+        );
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(daemon.clone().run(bound, async move {
+            let _ = shutdown_rx.await;
+        }));
+
+        // Hold the daemon's one `LOCAL_STREAM` permit directly — this is
+        // the same `Arc<Semaphore>` `serve_authorized_conduit`'s
+        // `LocalStreamKind::LocalStream` arm acquires from, so a second
+        // connection's `try_acquire_owned` there is guaranteed to fail
+        // exactly as it would with a real held conduit.
+        let _held = daemon.stream_permits.clone().try_acquire_owned().unwrap();
+
+        let stream = UnixStream::connect(&socket_path).await.unwrap();
+        let mut conduit = LocalConduit::new(stream);
+        conduit
+            .send(&LocalHello {
+                version: LOCAL_HELLO_VERSION,
+                kind: LocalStreamKind::LocalStream as i32,
+                host: "irrelevant-host".to_string(),
+                wait_ms: 0,
+                known_generation: None,
+            })
+            .await
+            .unwrap();
+        let response: LocalResponse = tokio::time::timeout(Duration::from_secs(5), conduit.recv())
+            .await
+            .expect("the daemon must answer promptly, not hang")
+            .unwrap()
+            .expect("a real envelope, not a silent close");
+        match response.body {
+            Some(local_response::Body::Error(err)) => {
+                assert_eq!(err.error_code(), ErrorCode::ResourceExhausted);
+            }
+            other => panic!("expected LocalError(RESOURCE_EXHAUSTED), got {other:?}"),
+        }
+
+        drop(_held);
         let _ = shutdown_tx.send(());
         task.await.unwrap();
     }

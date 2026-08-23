@@ -13,7 +13,12 @@
 //! - tracing target [`TARGET`] (`qsh::recovery`), level `INFO`,
 //! - rendered as a **single line of JSON** — the message *is* the JSON, so
 //!   a campaign script can `grep '"recovery"'` and parse the line whole,
-//! - fields exactly `recovery`, `time_to_recovery_ms`, `session_ref`.
+//! - fields `recovery`, `time_to_recovery_ms`, `session_ref` (M2), plus
+//!   the additive `registration_wait_ms` (M3 Step 8, `docs/CLI.md` §6.4):
+//!   `0` on the forward route, the measured re-registration wait on the
+//!   reverse route. The `recovery` value set (`migrated`/`resumed`/
+//!   `failed`) does not change — this is a field addition, not a new
+//!   outcome.
 //!
 //! It is **not** a `qsh.event/v1` event and never reaches stdout: stdout
 //! carries the contract envelope alone (CLI.md §2.2), and promoting
@@ -22,7 +27,10 @@
 //!
 //! There is no field here that could carry a secret. `session_ref` is the
 //! same public handle `qsh session list` prints; there is no token field,
-//! no PTY content, no principal.
+//! no PTY content, no principal. `registration_wait_ms` is a plain
+//! duration — it says nothing about *why* the wait happened, so it cannot
+//! leak a resume token, a generation number, or anything else scoped to
+//! this attach.
 
 use std::fmt;
 use std::time::Duration;
@@ -87,17 +95,40 @@ pub struct RecoveryReport {
     pub time_to_recovery_ms: u64,
     /// The session this is about (`<host-alias>/<session_id>`, ADR-0007).
     pub session_ref: String,
+    /// Milliseconds this recovery spent blocked on the target's
+    /// re-registration before the resume itself could even start —
+    /// `0` on the forward route (`DialReconnect`), which never waits on
+    /// anything but its own dial; the measured wait on the reverse route
+    /// (`LocalReconnect`, `PLAN.md` M3 Step 8, `docs/design/protocol.md`
+    /// §11-4's Reattach mapping). Additive field (`docs/CLI.md` §6.4):
+    /// added after the three fields M2 shipped, so an M2-era consumer
+    /// that only reads those three keeps working unchanged. This is a
+    /// **decomposition** of [`Self::time_to_recovery_ms`], not a second
+    /// clock — `time_to_recovery_ms - registration_wait_ms` is the
+    /// budget the resume itself actually spent, which is what lets a
+    /// reverse-route recovery be judged against the same 2 s the forward
+    /// route already is, instead of also being charged for the target's
+    /// own backoff.
+    pub registration_wait_ms: u64,
 }
 
 impl RecoveryReport {
-    /// Assemble a report.
-    pub fn new(recovery: Recovery, elapsed: Duration, session_ref: impl Into<String>) -> Self {
+    /// Assemble a report. `registration_wait_ms` is `0` for every route
+    /// that never waits on a re-registration (the forward route, always);
+    /// see the field's own doc.
+    pub fn new(
+        recovery: Recovery,
+        elapsed: Duration,
+        session_ref: impl Into<String>,
+        registration_wait_ms: u64,
+    ) -> Self {
         Self {
             recovery,
             // Saturating: a nonsense duration should skew a datapoint, not
             // panic a reconnect loop.
             time_to_recovery_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
             session_ref: session_ref.into(),
+            registration_wait_ms,
         }
     }
 
@@ -109,12 +140,16 @@ impl RecoveryReport {
         // and writing it out fixes the key order (serde_json's map sorts)
         // so a later field cannot silently reshuffle the line. Only
         // `session_ref` is free-form, so only it needs escaping.
+        // `registration_wait_ms` is appended last — after the three keys
+        // M2 shipped — so an existing prefix-matching consumer sees no
+        // change to the keys it already knows.
         let session_ref = serde_json::Value::String(self.session_ref.clone());
         format!(
-            r#"{{"recovery":"{}","time_to_recovery_ms":{},"session_ref":{}}}"#,
+            r#"{{"recovery":"{}","time_to_recovery_ms":{},"session_ref":{},"registration_wait_ms":{}}}"#,
             self.recovery.as_str(),
             self.time_to_recovery_ms,
-            session_ref
+            session_ref,
+            self.registration_wait_ms
         )
     }
 
@@ -131,6 +166,7 @@ impl RecoveryReport {
             recovery = self.recovery.as_str(),
             time_to_recovery_ms = self.time_to_recovery_ms,
             session_ref = %self.session_ref,
+            registration_wait_ms = self.registration_wait_ms,
             "{}",
             self.to_json_line()
         );
@@ -163,9 +199,18 @@ impl RecoveryTimer {
         self.started.elapsed()
     }
 
-    /// Resolve, emit and return the report.
-    pub fn finish(self, recovery: Recovery) -> RecoveryReport {
-        let report = RecoveryReport::new(recovery, self.started.elapsed(), self.session_ref);
+    /// Resolve, emit and return the report. `registration_wait_ms` is the
+    /// portion of the elapsed time (if any) that was spent waiting on a
+    /// re-registration rather than performing the resume itself — see
+    /// [`RecoveryReport::registration_wait_ms`]. Forward-route callers
+    /// always pass `0`.
+    pub fn finish(self, recovery: Recovery, registration_wait_ms: u64) -> RecoveryReport {
+        let report = RecoveryReport::new(
+            recovery,
+            self.started.elapsed(),
+            self.session_ref,
+            registration_wait_ms,
+        );
         report.emit();
         report
     }
@@ -181,21 +226,47 @@ mod tests {
             Recovery::Resumed,
             Duration::from_millis(412),
             "mac/01K0ABCD",
+            0,
         );
         let line = report.to_json_line();
         assert!(!line.contains('\n'), "must be one line: {line}");
         assert_eq!(
             line,
-            r#"{"recovery":"resumed","time_to_recovery_ms":412,"session_ref":"mac/01K0ABCD"}"#
+            r#"{"recovery":"resumed","time_to_recovery_ms":412,"session_ref":"mac/01K0ABCD","registration_wait_ms":0}"#
         );
 
         let parsed: serde_json::Value = serde_json::from_str(&line).expect("pure JSON");
         let obj = parsed.as_object().expect("object");
-        // Exactly the three documented fields — nothing that could carry a
+        // Exactly the four documented fields — nothing that could carry a
         // token, a principal or PTY bytes has crept in.
         let mut keys: Vec<_> = obj.keys().map(String::as_str).collect();
         keys.sort_unstable();
-        assert_eq!(keys, ["recovery", "session_ref", "time_to_recovery_ms"]);
+        assert_eq!(
+            keys,
+            [
+                "recovery",
+                "registration_wait_ms",
+                "session_ref",
+                "time_to_recovery_ms"
+            ]
+        );
+    }
+
+    /// The additive field is not always zero: a reverse-route recovery
+    /// carries its measured re-registration wait, and the wait can be
+    /// read back out of the line exactly as written in.
+    #[test]
+    fn a_nonzero_registration_wait_round_trips_through_the_line() {
+        let report = RecoveryReport::new(
+            Recovery::Resumed,
+            Duration::from_millis(900),
+            "mac/01K0ABCD",
+            650,
+        );
+        let line = report.to_json_line();
+        let parsed: serde_json::Value = serde_json::from_str(&line).expect("pure JSON");
+        assert_eq!(parsed["registration_wait_ms"], 650);
+        assert_eq!(parsed["time_to_recovery_ms"], 900);
     }
 
     #[test]
@@ -209,9 +280,10 @@ mod tests {
     #[test]
     fn a_timer_measures_from_start_to_finish() {
         let timer = RecoveryTimer::start("mac/01K0");
-        let report = timer.finish(Recovery::Migrated);
+        let report = timer.finish(Recovery::Migrated, 0);
         assert_eq!(report.recovery, Recovery::Migrated);
         assert_eq!(report.session_ref, "mac/01K0");
+        assert_eq!(report.registration_wait_ms, 0);
         // No sleep, no wall-clock assumption: the only invariant a
         // monotonic clock owes us here is that it did not run backwards.
         assert!(report.time_to_recovery_ms < 60_000);
@@ -219,7 +291,7 @@ mod tests {
 
     #[test]
     fn an_absurd_duration_saturates_instead_of_panicking() {
-        let report = RecoveryReport::new(Recovery::Failed, Duration::MAX, "mac/01K0");
+        let report = RecoveryReport::new(Recovery::Failed, Duration::MAX, "mac/01K0", 0);
         assert_eq!(report.time_to_recovery_ms, u64::MAX);
     }
 }

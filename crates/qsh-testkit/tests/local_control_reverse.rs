@@ -63,6 +63,7 @@ async fn connect_control(socket_path: &Path, host: &str) -> LocalConduit<UnixStr
             kind: LocalStreamKind::LocalControl as i32,
             host: host.to_string(),
             wait_ms: 0,
+            known_generation: None,
         })
         .await
         .expect("send LocalHello");
@@ -97,7 +98,7 @@ async fn recv(conduit: &mut LocalConduit<UnixStream>) -> wire::ControlMessage {
         .expect("conduit stayed open")
 }
 
-fn open_sh() -> wire::SessionOpen {
+fn open_session() -> wire::SessionOpen {
     wire::SessionOpen {
         argv: vec!["sh".to_string()],
         env: Default::default(),
@@ -148,7 +149,12 @@ async fn two_conduits_with_the_same_peer_request_id_each_get_their_own_reply() {
             control_message::Body::SessionList(wire::SessionList {}),
         )
         .await;
-        send(&mut b, 7, control_message::Body::SessionOpen(open_sh())).await;
+        send(
+            &mut b,
+            7,
+            control_message::Body::SessionOpen(open_session()),
+        )
+        .await;
 
         let ra = recv(&mut a).await;
         let rb = recv(&mut b).await;
@@ -291,7 +297,12 @@ async fn a_dying_conduits_in_flight_entry_is_fully_removed() {
 
         let mut dying = connect_control(&localctl.socket_path, "widget").await;
 
-        send(&mut dying, 1, control_message::Body::SessionOpen(open_sh())).await;
+        send(
+            &mut dying,
+            1,
+            control_message::Body::SessionOpen(open_session()),
+        )
+        .await;
         let opened = recv(&mut dying).await;
         let session_id = match opened.body {
             Some(control_message::Body::Response(wire::Response {

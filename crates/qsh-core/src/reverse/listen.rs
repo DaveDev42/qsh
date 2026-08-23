@@ -81,12 +81,42 @@ use super::registry::{self, RegisterOutcome, Registry};
 /// (120 s here vs. the broker's 24 h default TTL).
 pub const STALE_SWEEP_TICK: Duration = Duration::from_secs(5);
 
+/// Poll interval for [`Listen::control_hub_wait`]/[`Listen::connection_for_wait`]
+/// — Step 8's reverse recovery waiting for a new-generation registration.
+/// `PLAN.md` M3 Step 8 (b) sanctions a bounded poll as an acceptable
+/// substitute for a per-name wakeup, and this is the interval the daemon-
+/// side `wait_ms`/`LOCAL_WAIT_MAX` (60 s) window is checked against —
+/// small enough that a re-registration a few hundred milliseconds into a
+/// re-dial's backoff is still noticed promptly, large enough that a full
+/// `wait_ms` window of waiting never becomes a hot loop.
+const HUB_WAIT_POLL: Duration = Duration::from_millis(75);
+
 /// Close code for the connection a NAT-rebind reconnect displaces
 /// (`docs/design/protocol.md` §11-2's "same-fingerprint replace"). Local to
 /// this module — the meaning is registration-specific, not a transport
 /// concern, so it does not belong in `qsh-transport`
 /// (`docs/design/architecture.md` §1).
 const CLOSE_CODE_REPLACED: u32 = 0x1003;
+
+/// Close code `drive_registered_session` uses when its own [`watch_path`]
+/// declares this connection's path dead — the controller-side twin of
+/// `reverse::target`'s identical `CLOSE_CODE_PATH_DEAD` (same value, same
+/// meaning, duplicated rather than shared for the same reason
+/// `CLOSE_CODE_REPLACED` above is local to this module: registration
+/// semantics, not a transport concern). Without an explicit close here, a
+/// silently-severed path leaves the QUIC connection object technically
+/// alive — nothing tells quinn to give up on it — so any stream still
+/// reading on it (in particular a `LOCAL_STREAM` splice pump relaying this
+/// host's session data, `M3 Step 7`) blocks until quinn's own
+/// unconfigurable `max_idle_timeout` (`docs/design/protocol.md` §10, 45 s)
+/// finally kills it. That is exactly the "late idle-timeout" recovery
+/// Step 8 (i) criterion ⑤ forbids: `mark_hub_dead`/`ConnTable::remove_if`
+/// below already stop *new* `LOCAL_CONTROL` work promptly, but do nothing
+/// for streams already open on the connection object itself — only
+/// closing the connection does that (`reverse::target`'s own identical
+/// `watch.dead()` arm makes the same argument for `serve_control`'s
+/// blocking read).
+const CLOSE_CODE_PATH_DEAD: u32 = 0x1004;
 
 /// Resolve the bind address: CLI flag > `config.toml` `[listen].bind` >
 /// [`crate::serve::DEFAULT_BIND`] — the same default `qsh serve` uses
@@ -1448,6 +1478,92 @@ impl Listen {
         Some((conn, hub))
     }
 
+    /// [`Self::control_hub`], but willing to wait: Step 8's reverse
+    /// recovery (`docs/design/protocol.md` §11-4's "controller 측 attach
+    /// driver... registry에서 그 host의 새 generation 등록을 기다렸다가").
+    ///
+    /// `known_generation` is the caller's `LocalHello.known_generation`
+    /// (`qsh/local/v1.proto`'s own doc on that field): `None` accepts any
+    /// live hub immediately, exactly like [`Self::control_hub`] — every
+    /// pre-Step-8 caller (a first `LOCAL_CONTROL`/`LOCAL_STREAM` open,
+    /// `wait_ms = 0`) takes this branch and observes no behavior change.
+    /// `Some(g)` requires a hub whose generation is strictly greater than
+    /// `g` — a hub still sitting at exactly `g` is the very registration
+    /// whose connection `LocalReconnect` watched die, and handing it back
+    /// would silently resume the caller onto a dead connection instead of
+    /// the live one it is waiting for (this method's whole job).
+    ///
+    /// Polls [`Self::hubs`] on [`Self::clock`] (so `TestClock` drives this
+    /// deterministically in tests, `docs/design/testing.md` L2) at
+    /// [`HUB_WAIT_POLL`] — a plain [`ConnTable`] has no per-name wakeup to
+    /// block on instead (this method's own module has no `Notify` keyed by
+    /// registration name), and `PLAN.md` M3 Step 8 (b) sanctions a bounded
+    /// poll as an acceptable substitute for exactly this reason. Gives up
+    /// and returns `None` the moment either `deadline` elapses *or* the
+    /// name is no longer known to [`Self::registry`] at all (evicted by
+    /// [`Registry::sweep_expired`] — no later poll within `deadline` could
+    /// ever find a satisfying hub once the name itself is gone, so this
+    /// stops waiting on it rather than spinning uselessly to the deadline;
+    /// `docs/design/protocol.md` §11-4's `stale_retention` is what actually
+    /// bounds that case in practice, this check is just not wasting the
+    /// caller's remaining budget once it has already fired).
+    #[cfg(unix)]
+    pub async fn control_hub_wait(
+        &self,
+        name: &str,
+        known_generation: Option<u64>,
+        deadline: Duration,
+    ) -> Option<Arc<ControlHub>> {
+        let satisfies = |hub: &Arc<ControlHub>| match known_generation {
+            Some(seen) => hub.generation > seen,
+            None => true,
+        };
+        let start = self.clock.now();
+        loop {
+            if let Some(hub) = self.hubs.get(name) {
+                if satisfies(&hub) {
+                    return Some(hub);
+                }
+            } else if self.registry.get(name).is_none() {
+                // Never registered, or already swept — no poll between now
+                // and `deadline` can change that.
+                return None;
+            }
+            let elapsed = self.clock.now().saturating_duration_since(start);
+            if elapsed >= deadline {
+                return None;
+            }
+            self.clock
+                .sleep(HUB_WAIT_POLL.min(deadline - elapsed))
+                .await;
+        }
+    }
+
+    /// [`Self::connection_for`], but waiting exactly the way
+    /// [`Self::control_hub_wait`] does — the `LOCAL_STREAM` sibling Step
+    /// 8's `LocalReconnect` needs after its `LOCAL_CONTROL` wait already
+    /// landed on the new generation (`crate::localctl::daemon::serve_stream`'s
+    /// call site).
+    ///
+    /// Generation-matches the connection to *the hub this call itself
+    /// returned* (never re-resolves `known_generation` against `conns`
+    /// directly) — the same reasoning [`Self::connection_for`]'s own doc
+    /// gives for why hub and connection must come from one fixed
+    /// generation, not two independent lookups.
+    #[cfg(unix)]
+    pub async fn connection_for_wait(
+        &self,
+        name: &str,
+        known_generation: Option<u64>,
+        deadline: Duration,
+    ) -> Option<(Connection, Arc<ControlHub>)> {
+        let hub = self
+            .control_hub_wait(name, known_generation, deadline)
+            .await?;
+        let conn = self.conns.get_matching(name, hub.generation)?;
+        Some((conn, hub))
+    }
+
     /// Sweep stale, retention-expired registry entries until this
     /// controller is dropped (`this` holds only a [`std::sync::Weak`], the
     /// same shape [`crate::broker::Broker::run_reaper`] uses). Spawn this
@@ -1808,7 +1924,14 @@ impl Listen {
         loop {
             tokio::select! {
                 biased;
-                () = watch.dead() => break,
+                () = watch.dead() => {
+                    // `CLOSE_CODE_PATH_DEAD`'s own doc: without this, a
+                    // `LOCAL_STREAM` splice pump still reading on this
+                    // connection blocks until quinn's 45 s idle timeout,
+                    // not this watchdog's own detection budget.
+                    session.connection().close(CLOSE_CODE_PATH_DEAD, b"path unresponsive");
+                    break;
+                }
                 () = probes.notified() => {
                     if session.send_ping().await.is_err() {
                         break;
@@ -2189,6 +2312,230 @@ mod tests {
             Arc::new(SystemClock),
             Duration::from_secs(120),
         )
+    }
+
+    /// [`test_listen`], but on an injectable [`crate::broker::TestClock`]
+    /// shared between the registry and `Listen` itself — the same sharing
+    /// [`Listen::new`]'s own doc requires of every caller — so
+    /// [`Listen::control_hub_wait`]'s poll loop advances only when a test
+    /// calls [`crate::broker::TestClock::advance`], never on real wall
+    /// time (`docs/design/testing.md` L2, `PLAN.md` M3 Step 8 (c)).
+    #[cfg(unix)]
+    fn test_listen_with_clock(clock: Arc<crate::broker::TestClock>) -> Arc<Listen> {
+        let registry = Registry::new(clock.clone(), false);
+        Listen::new(
+            registry,
+            Arc::new(AllowAllPinned),
+            Arc::new(crate::audit::NullAuditSink),
+            "hermes",
+            clock,
+            Duration::from_secs(120),
+        )
+    }
+
+    /// Registers `name` in `listen`'s registry (so
+    /// [`Listen::control_hub_wait`] does not take its "name unknown, stop
+    /// waiting" exit early) and returns the `generation` the registry
+    /// assigned — the first admission under a fresh name, always `0`
+    /// ([`ConnTable`]'s own doc: "starting from a pre-existing occupant at
+    /// generation `0`").
+    #[cfg(unix)]
+    fn admit(listen: &Listen, name: &str) -> u64 {
+        listen
+            .registry()
+            .admit(
+                name.to_string(),
+                registry::AdmittedEntry {
+                    fingerprint: "sha256:test",
+                    principal: "device:test",
+                    address: "127.0.0.1:4433".parse().unwrap(),
+                    capabilities: vec![],
+                },
+            )
+            .expect("registers")
+            .entry
+            .generation
+    }
+
+    /// Publishes a bare [`ControlHub`] at `generation` under `name` —
+    /// exactly what [`Listen::finish_registration`] does after a real
+    /// `LOCAL_CONTROL` registration handshake, minus the handshake itself
+    /// (`PLAN.md` M3 Step 8 (c)'s unit tests exercise
+    /// [`Listen::control_hub_wait`] directly, not the daemon frame loop
+    /// around it — that path is covered at L3 by
+    /// `crates/qsh-testkit/tests/local_control_reverse.rs`).
+    #[cfg(unix)]
+    fn publish_hub(listen: &Listen, name: &str, generation: u64) -> Arc<ControlHub> {
+        let hub = ControlHub::new(
+            name.to_string(),
+            "sha256:test".to_string(),
+            generation,
+            vec![],
+        );
+        listen
+            .hubs
+            .publish(name.to_string(), generation, hub.clone());
+        hub
+    }
+
+    /// **L2 — old generation never satisfies the wait.**
+    ///
+    /// `PLAN.md` M3 Step 8 (c): "옛 `generation`의 등록으로는 진행하지 않음".
+    /// A hub is live under `name`, but still sitting at exactly the
+    /// generation [`LocalReconnect`] already rode to death — the dead
+    /// registration the recovery exists to wait *past*, not settle for.
+    /// [`Listen::control_hub_wait`] must not resolve on it: it stays
+    /// pending across several of its own poll ticks, and once the
+    /// deadline elapses with nothing newer ever registering, it gives up
+    /// with `None` — the same outcome
+    /// `crate::localctl::daemon`'s `LOCAL_CONTROL` serve path turns into
+    /// `ErrorCode::HostNotFound` (daemon.rs's own doc on this call site).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn control_hub_wait_does_not_resolve_on_a_registration_still_at_the_known_generation() {
+        let clock = Arc::new(crate::broker::TestClock::new());
+        let listen = test_listen_with_clock(clock.clone());
+        let known_generation = admit(&listen, "widget");
+        publish_hub(&listen, "widget", known_generation);
+
+        let deadline = Duration::from_millis(500);
+        let waiter = {
+            let listen = listen.clone();
+            tokio::spawn(async move {
+                listen
+                    .control_hub_wait("widget", Some(known_generation), deadline)
+                    .await
+            })
+        };
+
+        // Several poll ticks' worth of clock movement, still short of the
+        // deadline: the still-at-`known_generation` hub must not have
+        // resolved the wait.
+        for _ in 0..3 {
+            clock.advance(HUB_WAIT_POLL);
+            for _ in 0..10 {
+                tokio::task::yield_now().await;
+            }
+        }
+        assert!(
+            !waiter.is_finished(),
+            "a hub still at the known generation must not satisfy the wait"
+        );
+
+        // Past the deadline, with nothing newer ever having registered.
+        clock.advance(deadline);
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        let outcome = tokio::time::timeout(Duration::from_secs(5), waiter)
+            .await
+            .expect("control_hub_wait must give up once its deadline elapses")
+            .expect("the wait task did not panic");
+        assert!(
+            outcome.is_none(),
+            "an old-generation-only registration must time out to None, not resolve"
+        );
+    }
+
+    /// **L2 — a within-window newer generation resolves the wait.**
+    ///
+    /// `PLAN.md` M3 Step 8 (c): "새 generation 등록을 기다렸다가... 대기하고".
+    /// The same scenario as the previous test, except a strictly newer
+    /// generation registers before the deadline — [`LocalReconnect`]'s own
+    /// production path, driven here without a real target re-dial or a
+    /// real daemon frame loop (`docs/design/protocol.md` §11-4's mapping
+    /// paragraph: "controller의 attach driver는 새 세대 등록을 기다린다").
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn control_hub_wait_resolves_once_a_strictly_newer_generation_registers() {
+        let clock = Arc::new(crate::broker::TestClock::new());
+        let listen = test_listen_with_clock(clock.clone());
+        let known_generation = admit(&listen, "widget");
+        publish_hub(&listen, "widget", known_generation);
+
+        let deadline = Duration::from_secs(5);
+        let waiter = {
+            let listen = listen.clone();
+            tokio::spawn(async move {
+                listen
+                    .control_hub_wait("widget", Some(known_generation), deadline)
+                    .await
+            })
+        };
+
+        // Let the wait take its first poll and go to sleep on the
+        // still-stale hub, well short of the deadline.
+        clock.advance(HUB_WAIT_POLL);
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert!(!waiter.is_finished(), "must still be waiting");
+
+        // The target's own re-dial lands as a new registration generation.
+        let new_generation = known_generation + 1;
+        let published = publish_hub(&listen, "widget", new_generation);
+
+        // One more poll tick wakes the loop onto the fresh hub.
+        clock.advance(HUB_WAIT_POLL);
+        let hub = tokio::time::timeout(Duration::from_secs(5), waiter)
+            .await
+            .expect("control_hub_wait must resolve once a newer generation is live")
+            .expect("the wait task did not panic")
+            .expect("a strictly newer generation must satisfy the wait");
+        assert_eq!(
+            hub.generation, new_generation,
+            "the resolved hub must be the newer generation, not the old one"
+        );
+        assert!(
+            Arc::ptr_eq(&hub, &published),
+            "must be the same hub instance published"
+        );
+    }
+
+    /// **L2 — window-exceeded with no registration at all times out.**
+    ///
+    /// `PLAN.md` M3 Step 8 (b): "창이 지나면 `HOST_NOT_FOUND`". No hub is
+    /// ever published under `name` (the target never re-dials within the
+    /// window) — [`Listen::control_hub_wait`] keeps polling, because the
+    /// registry still knows the name (it went stale, not gone), and gives
+    /// up at exactly its deadline rather than early or late.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn control_hub_wait_times_out_when_nothing_ever_registers() {
+        let clock = Arc::new(crate::broker::TestClock::new());
+        let listen = test_listen_with_clock(clock.clone());
+        // Registered (so the registry-gone early exit does not fire), but
+        // no `ControlHub` is ever published — the registration went stale
+        // and nothing re-dialed.
+        admit(&listen, "widget");
+
+        let deadline = Duration::from_millis(300);
+        let waiter = {
+            let listen = listen.clone();
+            tokio::spawn(async move { listen.control_hub_wait("widget", None, deadline).await })
+        };
+
+        for _ in 0..2 {
+            clock.advance(HUB_WAIT_POLL);
+            for _ in 0..10 {
+                tokio::task::yield_now().await;
+            }
+        }
+        assert!(!waiter.is_finished(), "must still be within the deadline");
+
+        clock.advance(deadline);
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        let outcome = tokio::time::timeout(Duration::from_secs(5), waiter)
+            .await
+            .expect("control_hub_wait must give up once its deadline elapses")
+            .expect("the wait task did not panic");
+        assert!(
+            outcome.is_none(),
+            "no registration within the window must time out to None (daemon maps this to \
+             HostNotFound, `crate::localctl::daemon`'s LOCAL_CONTROL serve path)"
+        );
     }
 
     #[tokio::test]

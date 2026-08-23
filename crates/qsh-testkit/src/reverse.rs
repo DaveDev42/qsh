@@ -781,6 +781,16 @@ impl ReversePairHarness {
             peer_addr: conn.remote_address(),
             conn_id: conn.stable_id(),
             capabilities: handshake::negotiated_capabilities(&controller_hello),
+            // Deliberately `false`: this harness dials a *fresh* physical
+            // connection per `Self::session` call (this fn's own doc) — it
+            // is a role-axis-independence proof, not a stand-in for a real
+            // `qsh listen` daemon multiplexing many local CLI processes
+            // over *one* connection, so it must not be mistaken for one
+            // (`ConnCtx::is_reverse_registration`'s own doc — a real
+            // registration is `qsh-testkit/tests/reverse_attach.rs`'s and
+            // `reverse_session_ops.rs`'s `register_reverse`, built off
+            // `ReverseHarness::register` against the real registry).
+            is_reverse_registration: false,
         };
         let server = self.server.clone();
         let conn_id = ctx.conn_id;

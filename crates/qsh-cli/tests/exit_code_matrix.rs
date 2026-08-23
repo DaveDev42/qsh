@@ -631,10 +631,22 @@ fn qsh_reverse_registration_refusal_retries_forever_and_never_writes_stdout() {
 
     let mut reverse = CapturedReverse::start(&target, "hub");
 
-    // Bounded observation window: several backoff attempts' worth of time,
-    // well under a single QUIC dial's own timeout — long enough to prove
-    // "still retrying", nowhere near long enough to look like a hang.
-    std::thread::sleep(std::time::Duration::from_secs(3));
+    // Deadline-polled, not a fixed sleep (no `sleep()`-as-synchronization
+    // — this suite spawns many real `qsh listen`/`qsh reverse`/`qsh serve`
+    // children concurrently, so a fixed short sleep is a flake on a loaded
+    // box on the way in and wasted wall-clock time on a fast one): wait
+    // until at least one refused attempt and one structured retry event
+    // have actually been logged, bounded well past what a single dial +
+    // refusal + backoff should ever take.
+    poll_until(
+        "a refused registration attempt and a retry event to be logged",
+        std::time::Duration::from_secs(15),
+        || {
+            let stderr_bytes = reverse.stderr_so_far();
+            let stderr = String::from_utf8_lossy(&stderr_bytes);
+            (stderr.contains("AUTH_FAILED") && stderr.contains("\"event\":\"retry\"")).then_some(())
+        },
+    );
 
     assert!(
         matches!(reverse.child.try_wait(), Ok(None)),
@@ -644,16 +656,6 @@ fn qsh_reverse_registration_refusal_retries_forever_and_never_writes_stdout() {
         reverse.stdout_so_far().is_empty(),
         "qsh reverse must never write to stdout, refused or not: {:?}",
         String::from_utf8_lossy(&reverse.stdout_so_far())
-    );
-    let stderr_bytes = reverse.stderr_so_far();
-    let stderr = String::from_utf8_lossy(&stderr_bytes);
-    assert!(
-        stderr.contains("AUTH_FAILED"),
-        "expected at least one refused attempt logged: {stderr:?}"
-    );
-    assert!(
-        stderr.contains("\"event\":\"retry\""),
-        "expected a structured retry event: {stderr:?}"
     );
 
     reverse.shut_down();

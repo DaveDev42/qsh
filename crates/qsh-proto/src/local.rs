@@ -136,13 +136,17 @@ mod tests {
             any::<i32>(),
             "[a-zA-Z0-9._-]{0,64}",
             any::<u32>(),
+            proptest::option::of(any::<u64>()),
         )
-            .prop_map(|(version, kind, host, wait_ms)| LocalHello {
-                version,
-                kind,
-                host,
-                wait_ms,
-            })
+            .prop_map(
+                |(version, kind, host, wait_ms, known_generation)| LocalHello {
+                    version,
+                    kind,
+                    host,
+                    wait_ms,
+                    known_generation,
+                },
+            )
     }
 
     fn arb_local_hello_ack() -> impl Strategy<Value = LocalHelloAck> {

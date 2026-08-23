@@ -303,7 +303,7 @@ mod tests {
             conduit.send(&echoed).await.unwrap();
         });
 
-        let handshake = crate::localctl::client::open_control(&sock, "phone", 0)
+        let handshake = crate::localctl::client::open_control(&sock, "phone", 0, None)
             .await
             .unwrap();
         let mut link = ControlLink::Local(handshake.conduit);

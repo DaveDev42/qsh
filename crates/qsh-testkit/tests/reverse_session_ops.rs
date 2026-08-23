@@ -201,6 +201,11 @@ impl TargetRig {
             peer_addr: conn.remote_address(),
             conn_id: conn.stable_id(),
             capabilities: handshake::negotiated_capabilities(&peer_hello),
+            // A real registration via `ReverseHarness::register` (this
+            // fn's own doc) — every local CLI process the controller
+            // relays for shares this one connection
+            // (`ConnCtx::is_reverse_registration`'s own doc).
+            is_reverse_registration: true,
         };
         let server = self.server.clone();
         let conn_id = ctx.conn_id;

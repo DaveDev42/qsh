@@ -93,6 +93,21 @@ message LocalHello {
   // waits for (e.g. a pending registration) is a later step's concern —
   // this field only carries the caller's request.
   uint32 wait_ms = 4;
+  // The registration `generation` (`LocalHelloAck.generation`) this caller
+  // already saw for `host`, if any (`docs/design/protocol.md` §11-4's
+  // reverse Reattach mapping, `PLAN.md` M3 Step 8). Unset means "no
+  // baseline — any live registration satisfies this," the existing
+  // behavior every M3 Step 6/7 caller keeps by simply never setting this
+  // field. Set means "wait for a registration strictly newer than this
+  // one": a live hub at exactly `known_generation` does not satisfy the
+  // wait, because that is the very connection `LocalReconnect` watched
+  // die — a caller that has this field set is by definition retrying
+  // after that generation's connection failed, and must never be handed
+  // that same, already-dead generation back. Proto3 `optional` (explicit
+  // field presence) rather than a plain `uint64` precisely because `0` is
+  // a real generation (a host's very first registration) and must stay
+  // distinguishable from "not set."
+  optional uint64 known_generation = 5;
 }
 
 // What a localctl connection is for. `LOCAL_UNSPECIFIED` (the proto3

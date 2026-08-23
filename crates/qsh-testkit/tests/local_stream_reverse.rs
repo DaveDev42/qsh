@@ -59,6 +59,7 @@ use qsh_core::acl::AllowAllPinned;
 use qsh_core::localctl::frame::LocalConduit;
 use qsh_core::server::TICKET_LEN;
 use qsh_core::{Paths, Principal};
+use qsh_proto::ErrorCode;
 use qsh_proto::local::{
     LOCAL_HELLO_VERSION, LocalHello, LocalResponse, LocalStreamKind, local_response,
 };
@@ -102,6 +103,7 @@ async fn connect_control(socket_path: &Path, host: &str) -> LocalConduit<UnixStr
             kind: LocalStreamKind::LocalControl as i32,
             host: host.to_string(),
             wait_ms: 0,
+            known_generation: None,
         })
         .await
         .expect("send LocalHello");
@@ -132,6 +134,7 @@ async fn connect_stream(socket_path: &Path, host: &str) -> LocalConduit<UnixStre
             kind: LocalStreamKind::LocalStream as i32,
             host: host.to_string(),
             wait_ms: 0,
+            known_generation: None,
         })
         .await
         .expect("send LocalHello");
@@ -395,17 +398,80 @@ async fn a_forged_ticket_on_local_stream_is_rejected_promptly_never_a_hang() {
             .await
             .expect("a forged ticket must be rejected promptly, never hang");
         match outcome {
-            // The daemon relayed the target's reset as a clean shutdown of
-            // this direction of the conduit.
-            Ok(None) => {}
+            // `pump_quic_to_uds`'s frame-boundary sentinel byte (daemon.rs)
+            // turns exactly this case — a target reset with nothing
+            // written yet, i.e. a "looks clean" boundary — into a forced
+            // mid-frame conduit error on the client's decoder, never a
+            // clean `Ok(None)`: link death (including a rejected ticket)
+            // must surface as a typed error, never as an indistinguishable
+            // normal end (`docs/CLI.md` §6.13's "명확한 typed error").
+            Err(_conduit_error) => {}
+            Ok(None) => {
+                panic!(
+                    "a forged ticket's rejection must surface as a typed error, not a clean \
+                     end indistinguishable from the session exiting normally"
+                )
+            }
             Ok(Some(frame)) => {
                 panic!("a forged ticket must never be answered as if it redeemed: {frame:?}")
             }
-            // A framing error from a reset racing a partial write is an
-            // equally honest way for this to surface — what must never
-            // happen is silence, which the outer `timeout` already ruled
-            // out.
-            Err(_conduit_error) => {}
+        }
+
+        let _ = shutdown_tx.send(());
+    };
+
+    let (result, ()) = tokio::join!(run_fut, test_fut);
+    result.expect("run_target must exit cleanly on shutdown");
+    localctl.shutdown().await;
+    harness.shutdown().await;
+}
+
+/// A `LOCAL_STREAM` conduit's first post-ack frame must be a `SESSION_DATA`
+/// `StreamHeader` (HARD RULES: "a non-`SESSION_DATA` or missing header ->
+/// `LocalError` `INVALID_ARGUMENT`, nothing opened on QUIC") — the real,
+/// end-to-end version of `crate::localctl::daemon`'s own unit test
+/// `only_a_session_data_header_passes_the_local_stream_shape_check`, which
+/// only exercises `is_session_data_header` as a pure function against a
+/// synthetic `StreamHeader` and proves nothing about the real conduit path
+/// (adversarial review finding: mutating away the guard in `serve_stream`
+/// leaves every existing test green). This drives the actual daemon.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_non_session_data_header_on_local_stream_is_invalid_argument_nothing_opened_on_quic() {
+    let target = make_identity();
+    let harness =
+        ReverseHarness::start_with(Arc::new(AllowAllPinned), false, pin(&target, "widget")).await;
+    let (_dir, paths) = fresh_paths();
+    let localctl = harness.attach_localctl(&paths).await;
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let run_fut = harness.run_target(&target, "device-id", "controller", None, async {
+        let _ = shutdown_rx.await;
+    });
+
+    let test_fut = async {
+        wait_for(TIMEOUT, || harness.listen.registry().get("widget")).await;
+
+        let mut data = connect_stream(&localctl.socket_path, "widget").await;
+        // `EXEC_DATA`, not `SESSION_DATA` — the one shape `LOCAL_STREAM`
+        // must refuse before ever touching QUIC.
+        data.send(&wire::StreamHeader::exec_data(vec![0xBBu8; TICKET_LEN]))
+            .await
+            .expect("send StreamHeader");
+
+        let response: LocalResponse = tokio::time::timeout(TIMEOUT, data.recv())
+            .await
+            .expect("must answer promptly, never hang")
+            .expect("conduit stays open long enough to answer")
+            .expect("daemon must answer on this same framed conduit, not go raw");
+        match response.body {
+            Some(local_response::Body::Error(err)) => {
+                assert_eq!(
+                    err.error_code(),
+                    ErrorCode::InvalidArgument,
+                    "wrong error code: {err:?}"
+                );
+            }
+            other => panic!("expected a LocalError{{INVALID_ARGUMENT}}, got {other:?}"),
         }
 
         let _ = shutdown_tx.send(());
