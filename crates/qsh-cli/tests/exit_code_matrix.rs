@@ -9,6 +9,8 @@
 mod common;
 
 use common::{Fleet, HOST_ALIAS, Sandbox, exit_code, sole_envelope};
+#[cfg(unix)]
+use common::{ListenGuard, ReverseGuard, hosts_array, poll_until};
 
 /// What a scenario produces, independent of output mode.
 enum Outcome {
@@ -72,7 +74,60 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
     all_dead.init();
     all_dead.trust_add("deadport", Some("127.0.0.1:0"), &fleet.host_fingerprint);
 
-    let cases = [
+    // A real duplicate-name routing conflict (`PLAN.md` M3 Step 7 DoD 1,
+    // `Ops::host.host.get`'s `resolve_route`): the *same* controller
+    // machine — one `QSH_CONFIG_DIR`/`QSH_STATE_DIR`, so one trust store
+    // and one `runtime_dir` — runs **two** independent `qsh listen`
+    // daemons (`hosts_reverse.rs`'s own `dup` rig proves the merge-by-name
+    // rule with one daemon `+` one forward pin; this is Step 7's new
+    // case, two *live reverse* holders of the same name at once). Both
+    // daemons resolve the same pinned fingerprint to the same name
+    // ("dup"), so once the one target dials into both, `host.list`'s
+    // reverse source (`admin_host_list_all`, unioned across every socket
+    // under `runtime_dir`) sees two live, independent claims on "dup" —
+    // exactly `ops::host`'s own
+    // `resolve_host_route_async_is_invalid_argument_when_two_daemons_both_hold_it_live`
+    // unit test, reproduced here against two real OS processes instead of
+    // two fake admin daemons.
+    #[cfg(unix)]
+    let dup_controller = Sandbox::initialized();
+    #[cfg(unix)]
+    let dup_target = Sandbox::initialized();
+    // Bound to `_` in each guard's own binding (not a block) so normal
+    // end-of-function `Drop` order kills every child — no `mem::forget`,
+    // no leaked processes; these just need to outlive the `host get dup`
+    // case below, exactly like `fleet`/`rogue`/`all_dead` above.
+    #[cfg(unix)]
+    let (_listen_a, _listen_b, _reverse_a, _reverse_b) = {
+        let target_fp = dup_target.fingerprint();
+        let controller_fp = dup_controller.fingerprint();
+        dup_controller.trust_add("dup", None, &target_fp);
+        let listen_a = ListenGuard::start(&dup_controller);
+        let listen_b = ListenGuard::start(&dup_controller);
+        dup_target.trust_add("hub-a", Some(listen_a.addr()), &controller_fp);
+        dup_target.trust_add("hub-b", Some(listen_b.addr()), &controller_fp);
+        let reverse_a = ReverseGuard::start(&dup_target, "hub-a");
+        let reverse_b = ReverseGuard::start(&dup_target, "hub-b");
+        poll_until(
+            "both live reverse registrations of \"dup\" to appear",
+            std::time::Duration::from_secs(15),
+            || {
+                let hosts = hosts_array(&dup_controller);
+                let live_dups = hosts
+                    .iter()
+                    .filter(|h| h["name"] == "dup" && h["connection_mode"] == "reverse")
+                    .count();
+                (live_dups == 2).then_some(())
+            },
+        );
+        (listen_a, listen_b, reverse_a, reverse_b)
+    };
+
+    // `mut` is only needed for the `#[cfg(unix)] cases.push(..)` below —
+    // unused (and clippy-denied) on the Windows leg, where that push is
+    // compiled out entirely.
+    #[cfg_attr(not(unix), allow(unused_mut))]
+    let mut cases = vec![
         Case {
             name: "usage: exec with no command after `--`",
             sandbox: &fleet.client,
@@ -234,6 +289,14 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
         },
     ];
 
+    #[cfg(unix)]
+    cases.push(Case {
+        name: "host get: duplicate name held live by two reverse daemons at once",
+        sandbox: &dup_controller,
+        args: &["host", "get", "dup"],
+        outcome: Outcome::Fails("INVALID_ARGUMENT"),
+    });
+
     for case in &cases {
         check(case);
     }
@@ -339,4 +402,245 @@ fn check(case: &Case<'_>) {
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------
+// `qsh attach` on an unregistered host — deliberately **not** a `Case`
+// row above. `run_interactive` (`main.rs`) answers `--json` with a
+// hard-coded `UNSUPPORTED` (`tui::json_mode_unsupported`) *before* it ever
+// calls `Ops::connect`/`resolve_route` — a pre-existing, Step-7-unrelated
+// design fact (`docs/CLI.md` §7: interactive commands have no JSON form
+// at all). `check`'s machinery requires the json-mode envelope's
+// `error.code` to equal the human-mode one, which this command structurally
+// cannot satisfy (json mode never reaches host resolution to report
+// `HOST_NOT_FOUND` in the first place) — so this is its own human-mode-
+// only assertion, the same "separate assertion, not a matrix row" shape
+// `PLAN.md` already prescribes for the reverse-refusal/listen-conflict
+// cases below.
+// ---------------------------------------------------------------------
+
+#[test]
+fn attach_on_an_unregistered_host_is_host_not_found_and_stdout_stays_empty() {
+    let sandbox = Sandbox::initialized();
+    let output = sandbox.qsh(&["attach", "nowhere/01K0SESSION"]);
+
+    assert_eq!(exit_code(&output), EXIT_RUNTIME_FAILURE, "{output:?}");
+    assert!(
+        output.stdout.is_empty(),
+        "attach's routing failure must never write to stdout: {:?}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "expected exactly one stderr line: {stderr:?}"
+    );
+    assert!(
+        lines[0].contains("(HOST_NOT_FOUND)"),
+        "stderr must name HOST_NOT_FOUND: {stderr:?}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// `qsh listen` bind conflict and `qsh reverse` registration refusal:
+// separate assertions, not matrix rows — neither `Command::Listen` nor
+// `Command::Reverse` produces a `qsh.cli/v1` envelope at all
+// (`report_long_running_setup_error`'s own module docs), so they cannot
+// be expressed as an `Outcome` the shared `check()` machinery understands.
+// ---------------------------------------------------------------------
+
+#[cfg(unix)]
+#[test]
+fn qsh_listen_bind_conflict_is_one_stderr_line_exit_255_and_zero_stdout() {
+    let sandbox = Sandbox::initialized();
+    let holder = ListenGuard::start(&sandbox);
+
+    let output = ListenGuard::run_to_completion(&sandbox, holder.addr(), &[]);
+
+    assert_eq!(exit_code(&output), EXIT_RUNTIME_FAILURE, "{output:?}");
+    assert!(
+        output.stdout.is_empty(),
+        "a bind conflict must never write to stdout: {:?}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "expected exactly one stderr line: {stderr:?}"
+    );
+    assert!(
+        lines[0].starts_with("qsh: cannot listen on"),
+        "stderr: {stderr:?}"
+    );
+    assert!(lines[0].contains("(CONFIG_ERROR)"), "stderr: {stderr:?}");
+
+    drop(holder);
+}
+
+/// A running `qsh -v reverse <controller>` child with both streams fully
+/// captured — deliberately not `common::ReverseGuard` (which discards its
+/// child's output), since this scenario's entire point is inspecting
+/// stdout/stderr while the process is still alive and retrying.
+#[cfg(unix)]
+struct CapturedReverse {
+    child: std::process::Child,
+    stdout: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    stderr: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+}
+
+#[cfg(unix)]
+impl CapturedReverse {
+    fn start(sandbox: &Sandbox, controller: &str) -> Self {
+        // Incremental line reads, not `read_to_end` — the whole point of
+        // this struct is inspecting output *while the process is still
+        // running*, and `read_to_end` would block on the pipe until the
+        // child closes it (i.e. exits), which this scenario's process
+        // deliberately never does on its own.
+        use std::io::BufRead as _;
+        let mut child = sandbox
+            .command(&["-v", "reverse", controller])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn qsh reverse");
+        let stdout = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let stderr = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let out_pipe = child.stdout.take().expect("stdout pipe");
+        let err_pipe = child.stderr.take().expect("stderr pipe");
+        {
+            let sink = std::sync::Arc::clone(&stdout);
+            std::thread::spawn(move || {
+                for line in std::io::BufReader::new(out_pipe)
+                    .lines()
+                    .map_while(Result::ok)
+                {
+                    let mut buf = sink.lock().unwrap_or_else(|e| e.into_inner());
+                    buf.extend_from_slice(line.as_bytes());
+                    buf.push(b'\n');
+                }
+            });
+        }
+        {
+            let sink = std::sync::Arc::clone(&stderr);
+            std::thread::spawn(move || {
+                for line in std::io::BufReader::new(err_pipe)
+                    .lines()
+                    .map_while(Result::ok)
+                {
+                    let mut buf = sink.lock().unwrap_or_else(|e| e.into_inner());
+                    buf.extend_from_slice(line.as_bytes());
+                    buf.push(b'\n');
+                }
+            });
+        }
+        Self {
+            child,
+            stdout,
+            stderr,
+        }
+    }
+
+    fn stdout_so_far(&self) -> Vec<u8> {
+        self.stdout
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    fn stderr_so_far(&self) -> Vec<u8> {
+        self.stderr
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// `SIGTERM`, bounded wait for the graceful-shutdown line, same
+    /// discipline as `hosts_reverse.rs::ReverseGuard::shut_down`.
+    fn shut_down(mut self) {
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(self.child.id() as i32),
+            nix::sys::signal::Signal::SIGTERM,
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if matches!(self.child.try_wait(), Ok(Some(_))) {
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for CapturedReverse {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// A controller the target does **not** pin — `qsh reverse`'s registration
+/// attempt is refused (`AUTH_FAILED`, unpinned peer) on every attempt. Per
+/// `reverse/target.rs`'s own module docs ("Registration is the target's
+/// only reachability path, so it is never fatal"), this is **not** a
+/// one-shot setup failure: the process retries forever with backoff and
+/// never exits on its own — the opposite shape from `qsh listen`'s bind
+/// conflict above. What this test actually pins down (deviating from the
+/// task brief's literal "exit 255" framing, which does not hold for this
+/// scenario as landed in Step 4 — see this stage's own reported
+/// deviations) is the two guarantees that *do* hold unconditionally for a
+/// long-running setup mode: stdout stays byte-for-byte empty no matter how
+/// many attempts fail, and the process is still alive (retrying, not
+/// crashed, not hung on the first attempt) well past the time a single
+/// dial could plausibly take.
+#[cfg(unix)]
+#[test]
+fn qsh_reverse_registration_refusal_retries_forever_and_never_writes_stdout() {
+    let controller = Sandbox::initialized();
+    let target = Sandbox::initialized();
+    let controller_fp = controller.fingerprint();
+    // Deliberately no `controller.trust_add` for the target's fingerprint
+    // — every attempt is refused.
+    let listen = ListenGuard::start(&controller);
+    target.trust_add("hub", Some(listen.addr()), &controller_fp);
+
+    let mut reverse = CapturedReverse::start(&target, "hub");
+
+    // Bounded observation window: several backoff attempts' worth of time,
+    // well under a single QUIC dial's own timeout — long enough to prove
+    // "still retrying", nowhere near long enough to look like a hang.
+    std::thread::sleep(std::time::Duration::from_secs(3));
+
+    assert!(
+        matches!(reverse.child.try_wait(), Ok(None)),
+        "a refused registration must not end the process — it retries forever"
+    );
+    assert!(
+        reverse.stdout_so_far().is_empty(),
+        "qsh reverse must never write to stdout, refused or not: {:?}",
+        String::from_utf8_lossy(&reverse.stdout_so_far())
+    );
+    let stderr_bytes = reverse.stderr_so_far();
+    let stderr = String::from_utf8_lossy(&stderr_bytes);
+    assert!(
+        stderr.contains("AUTH_FAILED"),
+        "expected at least one refused attempt logged: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("\"event\":\"retry\""),
+        "expected a structured retry event: {stderr:?}"
+    );
+
+    reverse.shut_down();
+    drop(listen);
 }

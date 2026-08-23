@@ -25,6 +25,7 @@ use qsh_proto::{
 };
 use qsh_transport::Dialer;
 
+use crate::client::link::DataKillSwitch;
 use crate::client::pathwatch::{PathWatch, PathWatchConfig, watch_path};
 use crate::client::reconnect::{
     OutputCursor, PathBinder, PendingInput, REDIAL_DEADLINE, Recovered, ResumeError, recover,
@@ -532,11 +533,26 @@ impl Ops {
     pub fn session_attach(&self, req: SessionAttachReq) -> Result<SessionAttachStream, OpError> {
         let r = parse_session_ref(&req.session_ref)?;
         let store = ResumeStore::new(&self.paths);
-        // Resolved once and kept: resolution loads the device key, which a
-        // platform key store will not hand over from inside a runtime, and
-        // a recovery re-dials from inside one.
-        let target = self.resolve_peer(&r.host)?;
-        let mut conn = self.connect_target(&target)?;
+        // Route-aware (`PLAN.md` M3 Step 7): a live reverse registration
+        // relays through this machine's `qsh listen` daemon, exactly like
+        // every other `Ops::connect` caller since Step 6 — this was the
+        // one holdout still pinned to `resolve_peer`/`connect_target`
+        // (forward-only). `target` is kept only on the forward branch:
+        // resolution loads the device key, which a platform key store
+        // will not hand over from inside a runtime, and a recovery
+        // re-dials from inside one — there is no equivalent re-dial on
+        // the reverse branch (`RecoveryLink`'s own doc), so nothing there
+        // ever needs it back.
+        let (mut conn, target) = match self.resolve_route(&r.host)? {
+            PeerRoute::Forward(target) => {
+                let conn = self.connect_target(&target)?;
+                (conn, Some(target))
+            }
+            PeerRoute::Reverse(route) => {
+                let conn = self.connect_reverse(&route)?;
+                (conn, None)
+            }
+        };
         // No verified fingerprint means nothing to bind a credential to.
         // Fail closed rather than present a token to an unidentified peer.
         let Some(peer) = conn.peer_fingerprint() else {
@@ -628,6 +644,18 @@ impl Ops {
         // or below it is already the host's, so a detach with nothing typed
         // since has nothing to wait for.
         let (applied_input, _) = tokio::sync::watch::channel(attached.input_from);
+        // What `AttachHandle::detach`/the recovery loop actually hold onto
+        // to end or rebuild this attach's transport (`RecoveryLink`'s own
+        // doc): the forward route's swappable `Link` on the forward
+        // branch, or a hard-stop for this attach's own `LOCAL_STREAM`
+        // conduit on the reverse branch — `attached.kill`, set by
+        // `Session::open_attach_stream` moments ago, never `conn.link`
+        // (which on the reverse route carries nothing usable here; see
+        // `ConnectedLink::Reverse`'s own doc).
+        let link = match &conn.link {
+            ConnectedLink::Forward(fwd) => RecoveryLink::Forward(fwd.clone()),
+            ConnectedLink::Reverse { .. } => RecoveryLink::Reverse(attached.kill.clone()),
+        };
         let ctx = Arc::new(AttachContext {
             target,
             host: r.host.clone(),
@@ -635,7 +663,7 @@ impl Ops {
             session_ref: session_ref.clone(),
             paths: self.paths.clone(),
             no_steal: req.no_steal,
-            link: conn.forward_link(),
+            link: link.clone(),
             window: Arc::new(std::sync::Mutex::new(None)),
             recovery: self.recovery,
             finished: finished.clone(),
@@ -659,6 +687,7 @@ impl Ops {
             writer_lease,
             renewal: resume_ttl.map(|ttl| RenewalSchedule::new(ttl, std::time::Instant::now())),
             expires_at,
+            link,
         })
     }
 
@@ -936,8 +965,12 @@ async fn dial_peer(
 async fn dial_reverse(route: &LocalRoute) -> Result<(Session, Option<String>), OpError> {
     let handshake = crate::localctl::client::open_control(&route.socket, &route.host, 0).await?;
     let peer_fingerprint = Some(handshake.peer_fingerprint);
-    let session =
-        Session::from_local_control(handshake.conduit, handshake.capabilities, handshake.host);
+    let session = Session::from_local_control(
+        handshake.conduit,
+        handshake.capabilities,
+        handshake.host,
+        route.socket.clone(),
+    );
     Ok((session, peer_fingerprint))
 }
 
@@ -1108,6 +1141,13 @@ pub struct SessionAttachStream {
     /// host's window did not parse and there is nothing to schedule from.
     renewal: Option<RenewalSchedule>,
     expires_at: String,
+    /// What [`Self::handle`] hands each [`AttachHandle`] — computed once
+    /// at `session_attach` and kept here rather than re-derived from
+    /// `conn` on every call, because the reverse route's half
+    /// (`attached.kill`) only ever exists for the instant right after
+    /// `open_attach_stream` returns (`crate::ops::session::RecoveryLink`'s
+    /// own doc).
+    link: RecoveryLink,
 }
 
 /// Ends an attach the same way whether it was closed or merely dropped:
@@ -1304,7 +1344,7 @@ impl SessionAttachStream {
     pub fn handle(&self) -> AttachHandle {
         AttachHandle {
             commands: self.commands.clone(),
-            link: self.conn.forward_link(),
+            link: self.link.clone(),
             finished: self.stop.finished.clone(),
             detaching: self.stop.detaching.clone(),
         }
@@ -1328,7 +1368,7 @@ impl SessionAttachStream {
 #[derive(Clone)]
 pub struct AttachHandle {
     commands: tokio::sync::mpsc::Sender<AttachCommand>,
-    link: Link,
+    link: RecoveryLink,
     finished: Arc<std::sync::atomic::AtomicBool>,
     /// Held for as long as a detach is flushing, so the thread that owns
     /// the stream cannot tear the driver down mid-flush. See
@@ -1430,7 +1470,16 @@ impl AttachHandle {
         } else {
             DetachFlush::Unconfirmed
         };
-        self.link.connection().close(0, b"detach");
+        // Forward: closing the connection is what makes `next_event`
+        // return and the host release the writer lease (this doc's own
+        // opening paragraph). Reverse: there is no connection this attach
+        // owns alone to close (`RecoveryLink`'s own doc) — the hard-stop
+        // is this attach's own `LOCAL_STREAM` conduit going away locally,
+        // which needs no cooperation from the daemon or the peer either.
+        match &self.link {
+            RecoveryLink::Forward(link) => link.connection().close(0, b"detach"),
+            RecoveryLink::Reverse(kill) => kill.kill(),
+        }
         outcome
     }
 
@@ -1477,14 +1526,21 @@ impl Drop for AbortOnDrop {
 /// loads the device key, which platform key stores refuse to hand over from
 /// inside a runtime, and a recovery re-dials from inside one.
 struct AttachContext {
-    target: PeerTarget,
+    /// `Some` only on the forward route — `session_attach`'s own doc on
+    /// why the reverse route never resolves one of these at all.
+    /// [`reattach`] (the only reader) is reachable only when
+    /// [`Self::link`] is [`RecoveryLink::Forward`] (`drive_attach`'s "no
+    /// recovery on the reverse leg" gate), so this being `None` there is
+    /// never actually observed.
+    target: Option<PeerTarget>,
     host: String,
     session_id: String,
     session_ref: String,
     paths: crate::config::Paths,
     no_steal: bool,
-    /// The connection the attach is riding; a resume swaps it in place.
-    link: Link,
+    /// The transport this attach's hard-stop and recovery ride —
+    /// [`RecoveryLink`]'s own doc.
+    link: RecoveryLink,
     /// The last window size the frontend asked for, if it ever did.
     ///
     /// A `Resize` is written straight through and is not part of the
@@ -1514,6 +1570,39 @@ impl AttachContext {
     fn finished(&self) -> bool {
         self.finished.load(std::sync::atomic::Ordering::Acquire)
     }
+}
+
+/// What an attach's [`AttachContext::link`]/[`AttachHandle::link`] rides —
+/// the forward route's swappable [`Link`], or, on the reverse route
+/// (`PLAN.md` M3 Step 7), just this one attach's own `LOCAL_STREAM`
+/// hard-stop.
+///
+/// **No recovery on the reverse leg in M3 Step 7.** The forward route's
+/// migrate-or-resume machinery ([`recover_attach`], [`reattach`],
+/// [`watch_path`]) is built entirely on a QUIC `Connection` this one
+/// attach owns exclusively — probeable for liveness, swappable for a
+/// fresh dial, and safe to hand a full `close()` to because nothing else
+/// is riding it. None of that holds on the reverse route: the
+/// `Connection` a target sees is its *one* long-lived registration to the
+/// controller, shared by every attach every daemon-relayed CLI process
+/// has open to it, so there is nothing attach-scoped to probe, nothing to
+/// swap in a resume, and closing it would end every other client's
+/// session too. `drive_attach` gates every recovery attempt on
+/// `matches!(ctx.link, RecoveryLink::Forward(_))`, so `recover_attach` and
+/// `reattach` are simply never invoked with a `Reverse` link — a link
+/// death there ends the attach with a typed error (`LegEnd::Broken`'s
+/// existing path), never a panic, an `unreachable!`, or a hang. Step 8
+/// adds a `Reconnect` for this route.
+#[derive(Clone)]
+enum RecoveryLink {
+    /// The forward route: a real, swappable QUIC endpoint/connection pair
+    /// (recovery-capable — [`Link`]'s own doc).
+    Forward(Link),
+    /// The reverse route: this attach's own `LOCAL_STREAM` conduit,
+    /// killable synchronously from any thread
+    /// (`crate::client::link::DataKillSwitch`'s own doc) — no
+    /// `Connection`, no `Endpoint`, nothing recovery could probe or swap.
+    Reverse(DataKillSwitch),
 }
 
 /// How one leg of an attach ended.
@@ -1604,6 +1693,34 @@ impl Drop for LegPumps {
     }
 }
 
+/// Start (or, on the reverse route, deliberately not start) the path
+/// watchdog for one leg.
+///
+/// Forward: [`watch_path`] polls the real QUIC `Connection` this attach's
+/// [`RecoveryLink::Forward`] holds, exactly as before Step 7. Reverse:
+/// there is no connection this attach owns alone to probe (`RecoveryLink`'s
+/// own doc) — the returned task simply never completes, so `watch.dead()`
+/// never fires and [`read_leg`]'s `select!` is decided purely by the
+/// `LOCAL_STREAM` conduit's own reader (a clean end is [`LegEnd::Ended`],
+/// an error is [`LegEnd::Broken`] — both already handled with no recovery
+/// attempted, since `drive_attach`'s gate only ever calls [`recover_attach`]
+/// on a `Forward` link).
+fn spawn_watchdog(
+    link: &RecoveryLink,
+    watch: PathWatch,
+    probes: Arc<tokio::sync::Notify>,
+) -> AbortOnDrop {
+    match link {
+        RecoveryLink::Forward(link) => {
+            AbortOnDrop(tokio::spawn(watch_path(link.connection(), watch, probes)))
+        }
+        RecoveryLink::Reverse(_) => AbortOnDrop(tokio::spawn(async move {
+            let _ = (watch, probes);
+            std::future::pending::<()>().await;
+        })),
+    }
+}
+
 /// Drive one attach for its whole life, across as many connections as it
 /// takes (`docs/design/protocol.md` §2, §10; `PLAN.md` M2 Step 7 (a)).
 ///
@@ -1680,11 +1797,7 @@ async fn drive_attach(
                 )),
             }),
         };
-        let mut watchdog = AbortOnDrop(tokio::spawn(watch_path(
-            ctx.link.connection(),
-            watch.clone(),
-            probes.clone(),
-        )));
+        let mut watchdog = spawn_watchdog(&ctx.link, watch.clone(), probes.clone());
 
         loop {
             let end = read_leg(&mut reader, &cursor, &pending, &watch, &ctx, &events).await;
@@ -1711,17 +1824,29 @@ async fn drive_attach(
             };
             // A connection the frontend closed on purpose (a detach) is not
             // a path that died, and recovering from it would resurrect an
-            // attach the user just ended.
-            if ctx.finished() || !ctx.recovery.enabled {
-                if let Some(err) = recoverable {
-                    let _ = events.send(Err(map_client_error(err))).await;
+            // attach the user just ended. And a `RecoveryLink::Reverse`
+            // has no recovery to attempt at all — `RecoveryLink`'s own
+            // doc — so this is also the gate that keeps `recover_attach`
+            // and `reattach` forward-only: a `Link` is pulled out of
+            // `ctx.link` right here, once, so neither of those functions
+            // ever has to fail on (or panic on, or silently no-op) a
+            // route that cannot recover.
+            let forward_link = match &ctx.link {
+                RecoveryLink::Forward(link) if ctx.recovery.enabled && !ctx.finished() => {
+                    link.clone()
                 }
-                return;
-            }
+                _ => {
+                    if let Some(err) = recoverable {
+                        let _ = events.send(Err(map_client_error(err))).await;
+                    }
+                    return;
+                }
+            };
             drop(watchdog);
 
             match recover_attach(
                 &ctx,
+                &forward_link,
                 leg_survived,
                 &watch,
                 &probes,
@@ -1737,7 +1862,7 @@ async fn drive_attach(
                     // and keep reading the same stream.
                     watch.revive();
                     watchdog = AbortOnDrop(tokio::spawn(watch_path(
-                        ctx.link.connection(),
+                        forward_link.connection(),
                         watch.clone(),
                         probes.clone(),
                     )));
@@ -1858,8 +1983,15 @@ enum Recovery {
 /// half is skipped outright: probing the connection would answer "alive"
 /// and return [`Recovery::SameLeg`], which is a broken reader handed back
 /// to a caller that will fail on it again with no backoff.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one more than before Step 7 (`link`, the forward `Link` `drive_attach`'s gate \
+              already extracted from `ctx.link` — bundling it into `ctx` would put a \
+              `RecoveryLink` back where a plain `Link` is what every callee actually needs)"
+)]
 async fn recover_attach(
     ctx: &Arc<AttachContext>,
+    link: &Link,
     leg_survived: bool,
     watch: &PathWatch,
     probes: &Arc<tokio::sync::Notify>,
@@ -1892,7 +2024,7 @@ async fn recover_attach(
         // old connection and its control stream are gone. And only a leg
         // whose streams outlived the failure can be kept at all.
         let live_leg = leg_survived && attempt == 0 && in_flight.is_none();
-        let binder = ctx.link.endpoint();
+        let binder = link.endpoint();
         let migration = live_leg && ctx.recovery.migration;
         let last_output_seq = lock(cursor).last_seq();
         let task = &mut in_flight;
@@ -1903,7 +2035,7 @@ async fn recover_attach(
             || {
                 let watch = watch.clone();
                 let probes = probes.clone();
-                let rtt = ctx.link.connection().quinn().stats().path.rtt;
+                let rtt = link.connection().quinn().stats().path.rtt;
                 async move { live_leg && probe_alive(&watch, &probes, rtt).await }
             },
             || async {
@@ -1913,7 +2045,7 @@ async fn recover_attach(
                 pumps.stop().await;
                 let joined = {
                     let handle = task.get_or_insert_with(|| {
-                        spawn_reattach(ctx.clone(), pending.clone(), last_output_seq)
+                        spawn_reattach(ctx.clone(), link.clone(), pending.clone(), last_output_seq)
                     });
                     handle.await
                 };
@@ -1989,17 +2121,25 @@ type ReattachTask =
 /// redemption always runs to `store.put`.
 fn spawn_reattach(
     ctx: Arc<AttachContext>,
+    link: Link,
     pending: Arc<std::sync::Mutex<PendingInput>>,
     last_output_seq: u64,
 ) -> ReattachTask {
-    tokio::spawn(async move { reattach(&ctx, &pending, last_output_seq).await })
+    tokio::spawn(async move { reattach(&ctx, &link, &pending, last_output_seq).await })
 }
 
 /// Rebuild a dead attach on a fresh connection: dial, redeem the resume
 /// credential, persist its successor, open the data stream, and retransmit
 /// the input the host never acknowledged (`docs/design/protocol.md` §10).
+///
+/// `link` is the same forward [`Link`] `drive_attach`'s gate already pulled
+/// out of `ctx.link` — never re-derived here, and never itself the reverse
+/// route's kind, because [`recover_attach`] (this function's only caller,
+/// via [`spawn_reattach`]) is never invoked with one (`RecoveryLink`'s own
+/// doc).
 async fn reattach(
     ctx: &Arc<AttachContext>,
+    link: &Link,
     pending: &Arc<std::sync::Mutex<PendingInput>>,
     last_output_seq: u64,
 ) -> Result<(Session, crate::client::Attached), ResumeError> {
@@ -2009,7 +2149,16 @@ async fn reattach(
     if ctx.finished() {
         return Err(abandoned());
     }
-    let (endpoint, connection, mut session) = dial_peer(&ctx.target).await?;
+    // `ctx.target` is `Some` on every forward-route attach (the only kind
+    // that ever reaches `reattach` — this fn's own doc), and `None` only
+    // on the reverse route, which never resolves one at all
+    // (`session_attach`'s own doc). `AttachContext::target`'s doc names
+    // this same invariant.
+    let target = ctx
+        .target
+        .as_ref()
+        .expect("reattach only runs on the forward route, which always resolves a PeerTarget");
+    let (endpoint, connection, mut session) = dial_peer(target).await?;
     let store = ResumeStore::new(&ctx.paths);
     let Some(peer) = connection.peer_fingerprint().map(|fp| fp.to_string()) else {
         connection.close(0, b"unverified");
@@ -2089,7 +2238,7 @@ async fn reattach(
         return Err(abandoned());
     }
     // Only now, with the new leg working, is the old connection let go.
-    let (old_endpoint, old_connection) = ctx.link.replace(endpoint, connection);
+    let (old_endpoint, old_connection) = link.replace(endpoint, connection);
     old_connection.close(0, b"superseded");
     drop(old_endpoint);
     Ok((session, attached))
@@ -2512,24 +2661,6 @@ impl Connected {
         self.session.take()
     }
 
-    /// The forward route's swappable `Link` — every caller of this is on
-    /// the attach path (`Ops::session_attach`), which only ever connects
-    /// via [`Ops::connect_target`] directly and so is forward-only until
-    /// M3 Step 7 adds a reverse attach leg. Panics rather than threading an
-    /// `OpError` through every caller for a state Step 6 never produces
-    /// here — the same "provably unreachable, so fail loud rather than
-    /// spread a Result nobody can actually hit" choice
-    /// [`Session::connection`] makes for the symmetric reverse case.
-    fn forward_link(&self) -> Link {
-        match &self.link {
-            ConnectedLink::Forward(link) => link.clone(),
-            ConnectedLink::Reverse { .. } => unreachable!(
-                "session_attach only ever connects over the forward route (M3 Step 7 adds \
-                 reverse attach)"
-            ),
-        }
-    }
-
     /// `sha256:…` fingerprint of the peer this connection verified — the
     /// identity a resume credential is bound to (protocol.md §10-2). Not
     /// an authorization input: the host authorizes on the mTLS principal.
@@ -2823,5 +2954,132 @@ mod tests {
         assert_eq!(SessionWriteOp::COMMAND, "session.write");
         assert_eq!(SessionResizeOp::COMMAND, "session.resize");
         assert_eq!(SessionCloseOp::COMMAND, "session.close");
+    }
+
+    /// `drive_attach`'s "no recovery on the reverse leg" gate
+    /// (`RecoveryLink`'s own doc), proven end to end: a real reverse
+    /// `Session`/`Attached` pair whose `LOCAL_STREAM` data conduit breaks
+    /// (not a clean close — a mid-frame EOF, so `read_leg` reports
+    /// [`LegEnd::Broken`]) must end the attach with one typed [`OpError`]
+    /// on the events channel and *return*, never call [`recover_attach`]
+    /// (which would panic reaching for a `Link` a `Reverse` context
+    /// doesn't have), never hang. `ctx.recovery.enabled` is left at its
+    /// default `true` deliberately — the gate must hold on the *type* of
+    /// link, not on whether recovery is configured on.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reverse_leg_link_death_ends_the_attach_with_a_typed_error_never_a_panic_or_hang() {
+        use qsh_proto::local::{LocalHello, LocalHelloAck, LocalResponse, local_response};
+        use tokio::net::UnixListener;
+
+        use crate::localctl::frame::LocalConduit;
+
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("drive-attach-reverse-death.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+
+        let daemon = tokio::spawn(async move {
+            let (stream, _addr) = listener.accept().await.unwrap();
+            let mut control = LocalConduit::new(stream);
+            let _hello: LocalHello = control.recv().await.unwrap().unwrap();
+            control
+                .send(&LocalResponse {
+                    body: Some(local_response::Body::HelloAck(LocalHelloAck {
+                        host: "phone".to_string(),
+                        peer_fingerprint: "sha256:1111111111111111111111111111111111111111111"
+                            .to_string(),
+                        generation: 1,
+                        capabilities: Vec::new(),
+                    })),
+                })
+                .await
+                .unwrap();
+
+            let (stream, _addr) = listener.accept().await.unwrap();
+            let mut data = LocalConduit::new(stream);
+            let _hello: LocalHello = data.recv().await.unwrap().unwrap();
+            data.send(&LocalResponse {
+                body: Some(local_response::Body::HelloAck(LocalHelloAck {
+                    host: "phone".to_string(),
+                    peer_fingerprint: "sha256:1111111111111111111111111111111111111111111"
+                        .to_string(),
+                    generation: 1,
+                    capabilities: Vec::new(),
+                })),
+            })
+            .await
+            .unwrap();
+            let _header: wire::StreamHeader = data.recv().await.unwrap().unwrap();
+            let (mut raw, _prefetched) = data.into_raw();
+            // A declared frame length with no payload behind it at
+            // all — a broken conduit, not a clean end: `DataRecvHalf`
+            // reports this as `ConnectionFailed`, never `Ok(None)`.
+            use tokio::io::AsyncWriteExt as _;
+            raw.write_all(&[0, 0, 0, 50]).await.unwrap();
+            drop(raw);
+            // Keep the control conduit's peer alive for the rest of the
+            // test — nothing on it is expected to arrive, but dropping it
+            // early would end the control leg too and confound which leg
+            // `drive_attach` actually reported the error for.
+            std::future::pending::<()>().await
+        });
+
+        let handshake = crate::localctl::client::open_control(&sock, "phone", 0)
+            .await
+            .unwrap();
+        let mut session = Session::from_local_control(
+            handshake.conduit,
+            handshake.capabilities,
+            handshake.host,
+            sock.clone(),
+        );
+        let attached = session
+            .open_attach_stream(wire::SessionAttached {
+                ticket: vec![1],
+                new_resume_token: Vec::new(),
+                replay_from: 0,
+                writer_lease: true,
+                expires_at: String::new(),
+                input_seq: 0,
+            })
+            .await
+            .unwrap();
+
+        let link = RecoveryLink::Reverse(attached.kill.clone());
+        let paths = crate::config::Paths::new(dir.path().join("config"), dir.path().join("state"));
+        let (applied_input, _) = tokio::sync::watch::channel(0u64);
+        let ctx = Arc::new(AttachContext {
+            target: None,
+            host: "phone".to_string(),
+            session_id: "01REVERSEDEATH".to_string(),
+            session_ref: "phone/01REVERSEDEATH".to_string(),
+            paths,
+            no_steal: false,
+            link,
+            window: Arc::new(std::sync::Mutex::new(None)),
+            recovery: RecoveryConfig::default(),
+            finished: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            applied_input,
+        });
+        let (_commands_tx, commands_rx) = tokio::sync::mpsc::channel(4);
+        let (events_tx, mut events_rx) = tokio::sync::mpsc::channel(4);
+
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            drive_attach(ctx, session, attached, commands_rx, events_tx),
+        )
+        .await
+        .expect("drive_attach must return promptly on a broken reverse leg, not hang");
+
+        let reported = events_rx
+            .recv()
+            .await
+            .expect("drive_attach must report the broken leg on the events channel");
+        assert!(
+            reported.is_err(),
+            "a broken reverse-leg link must be reported as an error, got {reported:?}"
+        );
+
+        daemon.abort();
     }
 }

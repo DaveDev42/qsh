@@ -89,6 +89,24 @@ impl FrameDecoder {
         self.buf.len()
     }
 
+    /// Drain and return whatever bytes are currently buffered but not yet
+    /// resolved into a complete frame, leaving the decoder empty.
+    ///
+    /// Exists for the one place a QSH byte stream deliberately switches
+    /// from this length-prefixed framing to raw byte-level use partway
+    /// through: localctl's `LOCAL_STREAM` conduit reads exactly one
+    /// [`wire::StreamHeader`]-shaped frame and then becomes a raw QUIC
+    /// splice (`docs/design/protocol.md` §11-3) — a single `read()` off
+    /// the socket routinely returns more bytes than just that header
+    /// frame, and this hands back whatever of the next frame it already
+    /// swallowed so the caller can feed it into the splice instead of
+    /// silently dropping it.
+    ///
+    /// [`wire::StreamHeader`]: crate::wire::StreamHeader
+    pub fn take_remaining(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.buf)
+    }
+
     /// Try to decode one complete frame from the buffered bytes.
     ///
     /// - `Ok(None)`: not enough bytes buffered yet for a full frame.
@@ -167,6 +185,28 @@ mod tests {
                 assert_eq!(result, None, "should not decode before last byte");
             }
         }
+    }
+
+    #[test]
+    fn take_remaining_drains_bytes_past_the_last_complete_frame() {
+        let mut wire = encode_frame(b"header").unwrap();
+        wire.extend_from_slice(b"leftover raw bytes");
+
+        let mut dec = FrameDecoder::new(CONTROL_FRAME_MAX);
+        dec.push(&wire);
+        assert_eq!(dec.next_frame().unwrap(), Some(b"header".to_vec()));
+
+        let remaining = dec.take_remaining();
+        assert_eq!(remaining, b"leftover raw bytes".to_vec());
+        // Draining leaves nothing behind for a later frame to
+        // half-assemble from.
+        assert_eq!(dec.buffered(), 0);
+    }
+
+    #[test]
+    fn take_remaining_on_an_empty_decoder_is_an_empty_vec() {
+        let mut dec = FrameDecoder::new(CONTROL_FRAME_MAX);
+        assert_eq!(dec.take_remaining(), Vec::<u8>::new());
     }
 
     #[test]

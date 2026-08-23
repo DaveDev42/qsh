@@ -90,6 +90,26 @@ impl<S: AsyncRead + AsyncWrite + Unpin> LocalConduit<S> {
             self.dec.push(&self.buf[..n]);
         }
     }
+
+    /// Consume this conduit once framed `qsh.local.v1` I/O on it is done,
+    /// handing back the still-open underlying stream plus any bytes
+    /// already read off it but not yet resolved into a frame.
+    ///
+    /// `LOCAL_STREAM`'s serve path (`crate::localctl::daemon`) is the one
+    /// caller: after reading exactly one wire `StreamHeader` frame via
+    /// [`Self::recv`], the conduit stops speaking framed messages
+    /// entirely and becomes a raw byte splice onto a QUIC data stream
+    /// (`docs/design/protocol.md` §11-3). The splice must start with
+    /// whatever [`qsh_proto::frame::FrameDecoder`] already buffered past
+    /// that header — one `read()` routinely returns more than one
+    /// frame's worth of bytes — or however much of the caller's next
+    /// write landed in that same read is silently dropped.
+    pub fn into_raw(self) -> (S, Vec<u8>) {
+        let LocalConduit {
+            stream, mut dec, ..
+        } = self;
+        (stream, dec.take_remaining())
+    }
 }
 
 /// Wrap any localctl framing failure as [`ErrorCode::ConnectionFailed`] —
@@ -153,6 +173,55 @@ mod tests {
         let received: LocalHello = daemon.recv().await.unwrap().unwrap();
         let sent = write.await.unwrap();
         assert_eq!(received, sent);
+    }
+
+    #[tokio::test]
+    async fn into_raw_hands_back_bytes_already_read_past_the_last_frame() {
+        // A single `write_all` on the client side, sized so both the
+        // header frame and the start of the next (raw, unframed) payload
+        // land in the daemon's one `read()` call — exactly the situation
+        // `into_raw` exists for.
+        let (mut client_end, daemon_end) = tokio::io::duplex(4096);
+        let mut daemon = LocalConduit::new(daemon_end);
+
+        let hello = LocalHello {
+            version: 1,
+            kind: LocalStreamKind::LocalStream as i32,
+            host: "some-host".to_string(),
+            wait_ms: 0,
+        };
+        let mut wire = encode_local(&hello).unwrap();
+        wire.extend_from_slice(b"raw bytes after the frame");
+        client_end.write_all(&wire).await.unwrap();
+
+        let received: LocalHello = daemon.recv().await.unwrap().unwrap();
+        assert_eq!(received, hello);
+
+        let (_stream, leftover) = daemon.into_raw();
+        assert_eq!(leftover, b"raw bytes after the frame".to_vec());
+    }
+
+    #[tokio::test]
+    async fn into_raw_with_nothing_buffered_past_the_frame_is_empty() {
+        let (mut client_end, daemon_end) = tokio::io::duplex(4096);
+        let mut daemon = LocalConduit::new(daemon_end);
+
+        let hello = LocalHello {
+            version: 1,
+            kind: LocalStreamKind::LocalStream as i32,
+            host: "some-host".to_string(),
+            wait_ms: 0,
+        };
+        client_end
+            .write_all(&encode_local(&hello).unwrap())
+            .await
+            .unwrap();
+
+        let received: LocalHello = daemon.recv().await.unwrap().unwrap();
+        assert_eq!(received, hello);
+
+        let (_stream, leftover) = daemon.into_raw();
+        assert!(leftover.is_empty());
     }
 
     #[tokio::test]

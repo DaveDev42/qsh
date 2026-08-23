@@ -1423,6 +1423,31 @@ impl Listen {
         self.hubs.get(name)
     }
 
+    /// The live QUIC [`Connection`] and [`ControlHub`] for `name`'s
+    /// *current* live registration, generation-matched to each other —
+    /// `crate::localctl::daemon`'s `LOCAL_STREAM` serve path needs both:
+    /// the hub for `LocalHelloAck`'s fields, the connection to open the
+    /// spliced data stream on (`PLAN.md` M3 Step 7).
+    ///
+    /// Looking each up independently (a `control_hub` call plus a
+    /// separate `conns` lookup) could momentarily pair a hub from one
+    /// generation with a connection from a different one during the
+    /// narrow window [`Self::hubs`]'s own doc comment describes; this
+    /// method instead fixes the hub's generation first and requires the
+    /// connection to still be published under exactly that generation,
+    /// `None` otherwise — the same "stale and unknown are
+    /// indistinguishable" contract [`Self::control_hub`] already
+    /// documents, extended to cover the pair. Two separate lock
+    /// acquisitions (`ConnTable::get`/`get_matching` each take and
+    /// release their own), never held across an `.await` — both return
+    /// owned clones.
+    #[cfg(unix)]
+    pub fn connection_for(&self, name: &str) -> Option<(Connection, Arc<ControlHub>)> {
+        let hub = self.hubs.get(name)?;
+        let conn = self.conns.get_matching(name, hub.generation)?;
+        Some((conn, hub))
+    }
+
     /// Sweep stale, retention-expired registry entries until this
     /// controller is dropped (`this` holds only a [`std::sync::Weak`], the
     /// same shape [`crate::broker::Broker::run_reaper`] uses). Spawn this

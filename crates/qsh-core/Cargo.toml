@@ -8,6 +8,17 @@ license.workspace = true
 [dependencies]
 qsh-proto.workspace = true
 qsh-transport.workspace = true
+# `quinn::SendStream`/`RecvStream` are named directly by `localctl/daemon.rs`
+# (`cfg(unix)`-only, `crate::localctl` mod declaration): the `LOCAL_STREAM`
+# splice (`PLAN.md` M3 Step 7) opens a raw QUIC bidi stream on a live
+# `qsh-transport::Connection` and pumps bytes on it without going through
+# `qsh-transport::FramedSend`/`FramedRecv` (those only speak framed
+# messages, not arbitrary raw bytes) — `daemon.rs` is arch-lint's
+# documented transport-bridge exemption (`xtask arch`'s `LOCALCTL_*`
+# constants), so naming `quinn` here does not cross the workspace-crate
+# dependency matrix (that matrix only tracks `qsh-*` crates). Already a
+# transitive dependency via `qsh-transport`, same lockfile entry.
+quinn.workspace = true
 # `prost::Message` is named directly by `localctl/frame.rs`'s generic
 # conduit send/recv (`docs/design/protocol.md` §5, §11-3) — a lightweight,
 # sans-IO leaf dependency `qsh-proto` already carries; naming it here does

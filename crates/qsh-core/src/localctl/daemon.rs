@@ -18,24 +18,21 @@
 //!   mismatch (or a failed credential lookup) is rejected silently, with no
 //!   attempt to speak the protocol to a peer this process does not trust
 //!   (`crate::localctl` module docs: "localctl grants no new authority").
-//!   Only `LOCAL_ADMIN` is served in this PR — `LocalHostList` answers from
-//!   [`Listen::registry`]'s current snapshot, stale entries included, never
-//!   dialing anything (`docs/CLI.md` §6.2's "부분 실패를 감추지 않는다"
-//!   discipline: a listing never blocks on reachability). No `LocalHelloAck`
-//!   is ever sent on this conduit kind — `LOCAL_ADMIN` pipelines its
-//!   `LocalHello` straight into `LocalHostList` and answers with exactly
-//!   one `LocalResponse` (`docs/design/protocol.md` §11-3, `qsh/local/v1.proto`
-//!   header: `LocalHelloAck` is a `LOCAL_CONTROL`/`LOCAL_STREAM`-only reply,
-//!   since every one of its fields is a fact about a specific registered
-//!   host and `LOCAL_ADMIN` names none). `LOCAL_CONTROL`/
-//!   `LOCAL_STREAM` are recognized-but-not-yet-served kinds — Step 6's job
-//!   ("localctl의 두 번째 소비자... 이것이 M3의 유일한 신규 상태 기계") — and
-//!   answer `UNSUPPORTED` rather than hanging or forwarding anything. An
-//!   unspecified/unrecognized `LocalHello.kind` answers `INVALID_ARGUMENT`.
-//!   Neither path ever calls `Authorizer::check` or an audit sink for the
-//!   conduit itself, and never trusts anything the CLI side sent about its
-//!   own identity — only the OS-level credential this module checked at
-//!   accept time (`crate::localctl` module docs).
+//!   All three defined conduit kinds are served (`docs/CLI.md` §6.2's "부분
+//!   실패를 감추지 않는다" discipline underlies all of them):
+//!
+//!   | kind | served by | shape |
+//!   |---|---|---|
+//!   | `LOCAL_ADMIN` | [`LocalctlDaemon::serve_admin`] | one `LocalHostList` request → one `LocalResponse`, from [`Listen::registry`]'s current snapshot, stale entries included, never dialing anything. No `LocalHelloAck` — its fields describe a specific registered host and `LOCAL_ADMIN` names none. |
+//!   | `LOCAL_CONTROL` (`M3 Step 6`) | [`LocalctlDaemon::serve_control`] | `LocalHelloAck`, then a long-lived `qsh.wire.v1` `ControlMessage` relay for `hello.host`'s live [`ControlHub`](crate::reverse::listen::ControlHub) — one conduit per attached CLI process, for as long as it runs. |
+//!   | `LOCAL_STREAM` (`M3 Step 7`) | [`LocalctlDaemon::serve_stream`] | `LocalHelloAck`, then exactly one wire `StreamHeader{SESSION_DATA, ticket}` frame, then a raw byte-level splice onto a fresh QUIC bidi stream on `hello.host`'s live connection — the daemon never parses anything past that header (module docs' own "grants no new authority": it neither redeems nor inspects the ticket, the target does). |
+//!
+//!   An unspecified/unrecognized `LocalHello.kind` answers
+//!   `INVALID_ARGUMENT`. None of the three paths ever calls
+//!   `Authorizer::check` or an audit sink for the conduit itself, and none
+//!   trusts anything the CLI side sent about its own identity — only the
+//!   OS-level credential this module checked at accept time
+//!   (`crate::localctl` module docs).
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -48,6 +45,7 @@ use qsh_proto::local::{
     local_response,
 };
 use qsh_proto::wire;
+use tokio::io::AsyncWriteExt as _;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Semaphore;
 
@@ -189,6 +187,25 @@ const MAX_CONCURRENT_LOCAL_ADMIN_QUERIES: usize = 64;
 /// discovery for the same permit.
 const MAX_CONCURRENT_LOCAL_CONTROL_CONDUITS: usize = 256;
 
+/// Upper bound on concurrent `LOCAL_STREAM` conduits (`M3 Step 7`) — one
+/// per active attach data stream, each held open for as long as that
+/// attach runs, exactly like [`MAX_CONCURRENT_LOCAL_CONTROL_CONDUITS`]'s
+/// `LOCAL_CONTROL` conduits (indeed the two grow together in practice: a
+/// live attach is one of each). Its own pool for the same reason
+/// [`MAX_CONCURRENT_LOCAL_CONTROL_CONDUITS`] is its own pool — a burst of
+/// long-lived data streams must never starve `LOCAL_ADMIN`/`LOCAL_CONTROL`
+/// of a permit, or vice versa.
+const MAX_CONCURRENT_LOCAL_STREAM_CONDUITS: usize = 256;
+
+/// Reset code the `LOCAL_STREAM` splice sends on the QUIC side when the
+/// UDS side ended abnormally (a read error, not a clean EOF) — the honest
+/// signal that sync with the local peer was lost, distinct from
+/// [`crate::server::RESET_CODE_BAD_HEADER`] and friends (those describe
+/// *why the target itself* rejected a stream; this describes a failure on
+/// the daemon's own local-IPC leg, before the target is even involved in
+/// the failure).
+const RESET_CODE_LOCAL_CONDUIT_FAILED: u32 = 0x2005;
+
 /// Delay the accept loop pays after a failed `accept()` before retrying —
 /// long enough that a persistent failure (EMFILE/ENFILE) does not spin the
 /// loop hot burning CPU and flooding stderr, short enough that a single
@@ -210,6 +227,9 @@ pub struct LocalctlDaemon {
     /// Separate from both the handshake pool and [`Self::admin_permits`]
     /// — see [`MAX_CONCURRENT_LOCAL_CONTROL_CONDUITS`]'s doc.
     control_permits: Arc<Semaphore>,
+    /// Separate from the handshake pool and both sibling pools — see
+    /// [`MAX_CONCURRENT_LOCAL_STREAM_CONDUITS`]'s doc.
+    stream_permits: Arc<Semaphore>,
 }
 
 impl LocalctlDaemon {
@@ -219,17 +239,24 @@ impl LocalctlDaemon {
             listen,
             MAX_CONCURRENT_LOCAL_ADMIN_QUERIES,
             MAX_CONCURRENT_LOCAL_CONTROL_CONDUITS,
+            MAX_CONCURRENT_LOCAL_STREAM_CONDUITS,
         )
     }
 
     /// [`Self::new`] with explicitly chosen pool sizes — tests use this to
-    /// saturate one of the two independent permit pools without needing
+    /// saturate one of the three independent permit pools without needing
     /// hundreds of real connections.
-    fn with_pool_sizes(listen: Arc<Listen>, admin: usize, control: usize) -> Arc<Self> {
+    fn with_pool_sizes(
+        listen: Arc<Listen>,
+        admin: usize,
+        control: usize,
+        stream: usize,
+    ) -> Arc<Self> {
         Arc::new(Self {
             listen,
             admin_permits: Arc::new(Semaphore::new(admin)),
             control_permits: Arc::new(Semaphore::new(control)),
+            stream_permits: Arc::new(Semaphore::new(stream)),
         })
     }
 
@@ -447,18 +474,38 @@ impl LocalctlDaemon {
                     }
                 }
             }
-            // `LOCAL_STREAM` is a real, defined kind this daemon does not
-            // serve yet (Step 7 — attach data streams, deliberately not
-            // bundled with Step 6's control relay, `PLAN.md`'s own split);
-            // answering explicitly here, rather than falling through to a
-            // bare connection close, keeps every reachable kind on the
-            // "gets an envelope back" side of the module docs' contract.
-            _ => {
+            // `LOCAL_STREAM` (`M3 Step 7`): the attach data splice, its
+            // own pool for the same reason `LOCAL_CONTROL` has one
+            // (`MAX_CONCURRENT_LOCAL_STREAM_CONDUITS`'s doc).
+            LocalStreamKind::LocalStream => match self.stream_permits.clone().try_acquire_owned() {
+                Ok(_stream_permit) => {
+                    drop(handshake_permit);
+                    self.serve_stream(&hello.host, conduit).await;
+                }
+                Err(_) => {
+                    let _ = conduit
+                        .send(&LocalResponse {
+                            body: Some(local_response::Body::Error(LocalError::from_code(
+                                ErrorCode::ResourceExhausted,
+                                "too many concurrent LOCAL_STREAM conduits on this daemon; \
+                                     retry shortly",
+                            ))),
+                        })
+                        .await;
+                }
+            },
+            // `classify_stream_kind` only ever hands back a known,
+            // non-`Unspecified` variant (its own doc/test coverage) —
+            // every real kind is matched above, so this is unreachable in
+            // practice; answered explicitly rather than with `unreachable!()`
+            // so a future new variant this match has not been updated for
+            // fails as "gets an envelope back", not a panic.
+            LocalStreamKind::LocalUnspecified => {
                 let _ = conduit
                     .send(&LocalResponse {
                         body: Some(local_response::Body::Error(LocalError::from_code(
-                            ErrorCode::Unsupported,
-                            "this daemon does not yet serve this localctl conduit kind",
+                            ErrorCode::InvalidArgument,
+                            "LocalHello.kind is unset or not a value this daemon recognizes",
                         ))),
                     })
                     .await;
@@ -651,6 +698,129 @@ impl LocalctlDaemon {
         hub.unregister_conduit(conduit_id);
     }
 
+    /// `LOCAL_STREAM` (`M3 Step 7`): after the same `HOST_NOT_FOUND`/
+    /// `LocalHelloAck` handshake [`Self::serve_control`] uses, read
+    /// exactly one wire `StreamHeader{SESSION_DATA, ticket}` frame, open a
+    /// fresh QUIC bidi stream on `host`'s live connection at
+    /// [`wire::PRIORITY_SESSION_DATA`], forward the header verbatim, and
+    /// become a raw byte-level pump both ways
+    /// (`docs/design/protocol.md` §11-3, §12). Never parses a
+    /// `SessionFrame`, never redeems or inspects `ticket` — that is the
+    /// target's job; a forged or expired ticket is the target's reset,
+    /// relayed to the CLI exactly as any other QUIC-side termination
+    /// would be (module docs' kind table).
+    async fn serve_stream(&self, host: &str, mut conduit: LocalConduit<UnixStream>) {
+        let Some((conn, hub)) = self.listen.connection_for(host) else {
+            let _ = conduit
+                .send(&LocalResponse {
+                    body: Some(local_response::Body::Error(LocalError::from_code(
+                        ErrorCode::HostNotFound,
+                        format!("{host} is not a currently reachable registered host"),
+                    ))),
+                })
+                .await;
+            return;
+        };
+
+        let (ack_host, peer_fingerprint, generation, capabilities) = hub.ack_fields();
+        if conduit
+            .send(&LocalResponse {
+                body: Some(local_response::Body::HelloAck(LocalHelloAck {
+                    host: ack_host,
+                    peer_fingerprint,
+                    generation,
+                    capabilities,
+                })),
+            })
+            .await
+            .is_err()
+        {
+            return;
+        }
+
+        // Bounded by the same ceiling the `LocalHello` read itself is
+        // bounded by (`LOCAL_WAIT_MAX`'s own doc: no caller pins a daemon
+        // slot open indefinitely) — a same-uid peer that completes the
+        // handshake and then never sends the follow-up header would
+        // otherwise hold this conduit's permit forever.
+        let header = match tokio::time::timeout(
+            LOCAL_WAIT_MAX,
+            conduit.recv::<wire::StreamHeader>(),
+        )
+        .await
+        {
+            Ok(Ok(Some(header))) => header,
+            Ok(Ok(None)) | Ok(Err(_)) => return,
+            Err(_elapsed) => {
+                tracing::warn!(
+                    "localctl: LOCAL_STREAM peer connected but never sent a StreamHeader within \
+                     {LOCAL_WAIT_MAX:?}; closing"
+                );
+                return;
+            }
+        };
+
+        if !is_session_data_header(&header) {
+            // Nothing opened on QUIC — the whole point of checking the
+            // kind before `open_bi` (HARD RULES: "a non-SESSION_DATA or
+            // missing header -> LocalError INVALID_ARGUMENT, nothing
+            // opened on QUIC").
+            let _ = conduit
+                .send(&LocalResponse {
+                    body: Some(local_response::Body::Error(LocalError::from_code(
+                        ErrorCode::InvalidArgument,
+                        "LOCAL_STREAM's first frame must be a SESSION_DATA StreamHeader",
+                    ))),
+                })
+                .await;
+            return;
+        }
+
+        // From here on this conduit never speaks framed `qsh.local.v1`
+        // again — `into_raw` hands back the UDS stream plus whatever bytes
+        // of the *next* frame the last `read()` already swallowed
+        // alongside the header (`LocalConduit::into_raw`'s own doc).
+        let (uds, prefetched) = conduit.into_raw();
+
+        let (mut quic_send, quic_recv) = match conn.open_bi().await {
+            Ok(pair) => pair,
+            Err(err) => {
+                tracing::warn!(
+                    %err,
+                    %host,
+                    "localctl: LOCAL_STREAM failed to open a data stream on this host's connection"
+                );
+                return;
+            }
+        };
+        let _ = quic_send.set_priority(wire::PRIORITY_SESSION_DATA);
+
+        let header_bytes = match wire::encode_framed(&header, qsh_proto::frame::DATA_FRAME_MAX) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                // The header just round-tripped through `conduit.recv`,
+                // so re-encoding it failing is not something this build
+                // can produce in practice; fail closed rather than open
+                // half a spliced stream.
+                tracing::warn!(%err, "localctl: LOCAL_STREAM failed to re-encode its own header");
+                let _ = quic_send.reset(quinn::VarInt::from_u32(RESET_CODE_LOCAL_CONDUIT_FAILED));
+                return;
+            }
+        };
+        if quic_send.write_all(&header_bytes).await.is_err() {
+            return;
+        }
+        if !prefetched.is_empty() && quic_send.write_all(&prefetched).await.is_err() {
+            return;
+        }
+
+        let (uds_read, uds_write) = uds.into_split();
+        tokio::join!(
+            pump_uds_to_quic(uds_read, quic_send),
+            pump_quic_to_uds(quic_recv, uds_write),
+        );
+    }
+
     /// Whether `stream`'s connecting peer is this process's own euid — the
     /// only fact localctl ever authorizes on (`crate::localctl` module
     /// docs). Runs before any frame is read.
@@ -658,6 +828,95 @@ impl LocalctlDaemon {
         let cred = stream.peer_cred()?;
         Ok(peer_is_authorized(cred.uid(), daemon_euid()))
     }
+}
+
+/// `LOCAL_STREAM`'s UDS → QUIC leg: relay raw bytes read off the localctl
+/// conduit's read half onto the just-opened `SESSION_DATA` QUIC send
+/// stream, without ever parsing them (module docs' kind table: "the
+/// daemon never parses anything past that header").
+///
+/// A clean UDS EOF (the CLI half-closed its write side — nothing more is
+/// ever coming from it) finishes the QUIC stream gracefully; a UDS read
+/// error resets it abruptly instead (HARD RULES: "UDS EOF -> QUIC finish;
+/// UDS error -> QUIC reset" — the daemon distinguishes only "no more
+/// data" from "something went wrong", never the data itself). A QUIC
+/// write failure (the target reset or stopped this stream from its own
+/// end) simply ends this direction — the sibling direction is unaffected
+/// and runs to its own completion independently, exactly like
+/// `tokio::io::copy_bidirectional`'s half-duplex-close behavior.
+async fn pump_uds_to_quic(
+    mut uds_read: tokio::net::unix::OwnedReadHalf,
+    mut quic_send: quinn::SendStream,
+) {
+    use tokio::io::AsyncReadExt as _;
+
+    let mut buf = [0u8; 16 * 1024];
+    loop {
+        match uds_read.read(&mut buf).await {
+            Ok(0) => {
+                let _ = quic_send.finish();
+                return;
+            }
+            Ok(n) => {
+                if quic_send.write_all(&buf[..n]).await.is_err() {
+                    return;
+                }
+            }
+            Err(_) => {
+                let _ = quic_send.reset(quinn::VarInt::from_u32(RESET_CODE_LOCAL_CONDUIT_FAILED));
+                return;
+            }
+        }
+    }
+}
+
+/// `LOCAL_STREAM`'s QUIC → UDS leg: relay raw bytes read off the target's
+/// half of the data stream back onto the localctl conduit, again never
+/// parsed.
+///
+/// Both a clean QUIC FIN and a QUIC reset surface through
+/// [`quinn::RecvStream`]'s own inherent `read` (`Ok(None)` vs. an `Err` —
+/// this shadows, and is used instead of, the blanket `AsyncRead` impl),
+/// and both get the same response here — shutting down the UDS write half
+/// (HARD RULES: "QUIC FIN/reset -> UDS shutdown"; unlike the sibling
+/// direction there is nothing to distinguish, since both cases mean
+/// identically "the target has nothing more to say").
+async fn pump_quic_to_uds(
+    mut quic_recv: quinn::RecvStream,
+    mut uds_write: tokio::net::unix::OwnedWriteHalf,
+) {
+    // `quinn::RecvStream`'s own inherent `read` (not `AsyncReadExt`'s —
+    // it shadows the trait method): `Ok(None)` is a clean FIN, `Err` a
+    // reset/connection failure. Both get the same treatment below.
+    let mut buf = [0u8; 16 * 1024];
+    loop {
+        match quic_recv.read(&mut buf).await {
+            Ok(None) => {
+                let _ = uds_write.shutdown().await;
+                return;
+            }
+            Ok(Some(n)) => {
+                if uds_write.write_all(&buf[..n]).await.is_err() {
+                    return;
+                }
+            }
+            Err(_) => {
+                let _ = uds_write.shutdown().await;
+                return;
+            }
+        }
+    }
+}
+
+/// Whether `header` is the one shape `LOCAL_STREAM`'s first post-ack frame
+/// is allowed to be — see [`LocalctlDaemon::serve_stream`]'s doc for why
+/// `header.stream_kind() != Some(SessionData)` is refused (HARD RULES: "a
+/// non-SESSION_DATA or missing header -> LocalError INVALID_ARGUMENT,
+/// nothing opened on QUIC"). Split out purely so the check is unit-testable
+/// in isolation — see its own test's doc for why the full path needs more
+/// than this crate's unit tests can stand up.
+fn is_session_data_header(header: &wire::StreamHeader) -> bool {
+    header.stream_kind() == Some(wire::StreamKind::SessionData)
 }
 
 /// The pure comparison [`LocalctlDaemon::authorized_peer`] reduces to, once
@@ -1036,13 +1295,13 @@ mod tests {
         task.await.unwrap();
     }
 
-    /// `LOCAL_STREAM` is the one kind this daemon still genuinely does not
-    /// serve (Step 7 — attach data streams) — it must keep answering
-    /// `UNSUPPORTED` rather than hanging or being silently dropped, the
-    /// exact contract the pre-Step-6 test above used to cover for both
-    /// kinds at once.
+    /// `LOCAL_STREAM` (`M3 Step 7`) is served, so an unregistered host now
+    /// gets the same `HOST_NOT_FOUND` `LOCAL_CONTROL` already answers —
+    /// never a hang, never `UNSUPPORTED` (the pre-Step-7 contract the
+    /// test this replaces used to cover), and never anything opened on
+    /// QUIC.
     #[tokio::test]
-    async fn local_stream_is_answered_unsupported_not_forwarded_or_hung() {
+    async fn local_stream_for_an_unknown_host_is_host_not_found_not_forwarded_or_hung() {
         let dir = tempfile::tempdir().unwrap();
         let paths = tmp_paths(&dir);
         let bound = LocalctlListener::bind(&paths, 9009).unwrap();
@@ -1067,13 +1326,44 @@ mod tests {
         let response: LocalResponse = conduit.recv().await.unwrap().unwrap();
         match response.body {
             Some(local_response::Body::Error(err)) => {
-                assert_eq!(err.error_code(), ErrorCode::Unsupported);
+                assert_eq!(err.error_code(), ErrorCode::HostNotFound);
             }
             other => panic!("expected LocalError, got {other:?}"),
         }
 
         let _ = shutdown_tx.send(());
         task.await.unwrap();
+    }
+
+    /// [`serve_stream`](LocalctlDaemon::serve_stream)'s header-shape check
+    /// reduces to this pure comparison, split out for the same reason
+    /// [`peer_is_authorized`] is split out from [`LocalctlDaemon::authorized_peer`]:
+    /// reaching the check itself through a real conduit requires a *live*
+    /// registered QUIC connection (`Listen::connection_for` — `HOST_NOT_FOUND`
+    /// comes first otherwise), which this crate's own unit tests cannot
+    /// stand up without the machinery `crates/qsh-testkit`'s `ReverseHarness`
+    /// exists for; that harness's `local_stream_reverse.rs` test proves
+    /// the full end-to-end contract ("bad header -> `INVALID_ARGUMENT`,
+    /// nothing opened on QUIC") against a genuine connection, while this
+    /// pins the decision that governs it in isolation.
+    #[test]
+    fn only_a_session_data_header_passes_the_local_stream_shape_check() {
+        assert!(is_session_data_header(&wire::StreamHeader::session_data(
+            vec![1, 2, 3]
+        )));
+        assert!(!is_session_data_header(&wire::StreamHeader::exec_data(
+            vec![1, 2, 3]
+        )));
+        // A kind value this build does not recognize at all — `stream_kind()`
+        // returns `None`, which must be rejected exactly like a
+        // recognized-but-wrong kind, never treated as acceptable by
+        // default.
+        assert!(!is_session_data_header(&wire::StreamHeader {
+            kind: 99,
+            ticket: Vec::new(),
+            host: String::new(),
+            port: 0,
+        }));
     }
 
     // ---- the peer-credential gate must actually stop the conduit
@@ -1183,39 +1473,57 @@ mod tests {
         task.await.unwrap();
     }
 
-    // ---- LOCAL_ADMIN/LOCAL_CONTROL draw from independent permit pools
-    // (adversarial review finding: before this split, long-lived
-    // LOCAL_CONTROL conduits shared the same accept-time pool as brief
-    // LOCAL_ADMIN discovery round trips, so enough concurrent sessions
-    // silently starved routing discovery of a connection at all) ----
+    // ---- LOCAL_ADMIN/LOCAL_CONTROL/LOCAL_STREAM draw from independent
+    // permit pools (adversarial review finding: before the first split,
+    // long-lived LOCAL_CONTROL conduits shared the same accept-time pool
+    // as brief LOCAL_ADMIN discovery round trips, so enough concurrent
+    // sessions silently starved routing discovery of a connection at
+    // all; LOCAL_STREAM (`M3 Step 7`) gets the same treatment) ----
 
-    /// Structural pin, independent of any real conduit traffic: the two
-    /// pools never share capacity in either direction.
+    /// Structural pin, independent of any real conduit traffic: the three
+    /// pools never share capacity in any direction.
     #[test]
-    fn admin_and_control_pools_are_independent_semaphores() {
-        let daemon = LocalctlDaemon::with_pool_sizes(test_listen(), 3, 5);
+    fn admin_control_and_stream_pools_are_independent_semaphores() {
+        let daemon = LocalctlDaemon::with_pool_sizes(test_listen(), 3, 5, 7);
         assert_eq!(daemon.admin_permits.available_permits(), 3);
         assert_eq!(daemon.control_permits.available_permits(), 5);
+        assert_eq!(daemon.stream_permits.available_permits(), 7);
 
         // Exhaust the admin pool entirely.
         let held: Vec<_> = (0..3)
             .map(|_| daemon.admin_permits.clone().try_acquire_owned().unwrap())
             .collect();
         assert_eq!(daemon.admin_permits.available_permits(), 0);
-        // The control pool must be completely unaffected.
+        // The other two pools must be completely unaffected.
         assert_eq!(
             daemon.control_permits.available_permits(),
             5,
             "exhausting the admin pool must never touch the control pool's capacity"
         );
+        assert_eq!(
+            daemon.stream_permits.available_permits(),
+            7,
+            "exhausting the admin pool must never touch the stream pool's capacity"
+        );
 
         drop(held);
-        // Symmetrically, exhausting control must never touch admin.
-        let _held_control: Vec<_> = (0..5)
+        // Symmetrically, exhausting control must never touch admin or
+        // stream.
+        let held_control: Vec<_> = (0..5)
             .map(|_| daemon.control_permits.clone().try_acquire_owned().unwrap())
             .collect();
         assert_eq!(daemon.admin_permits.available_permits(), 3);
         assert_eq!(daemon.control_permits.available_permits(), 0);
+        assert_eq!(daemon.stream_permits.available_permits(), 7);
+
+        drop(held_control);
+        // And exhausting stream must never touch admin or control.
+        let _held_stream: Vec<_> = (0..7)
+            .map(|_| daemon.stream_permits.clone().try_acquire_owned().unwrap())
+            .collect();
+        assert_eq!(daemon.admin_permits.available_permits(), 3);
+        assert_eq!(daemon.control_permits.available_permits(), 5);
+        assert_eq!(daemon.stream_permits.available_permits(), 0);
     }
 
     /// At the `LOCAL_ADMIN` pool's own cap, a new connection now gets an
@@ -1239,6 +1547,7 @@ mod tests {
             test_listen(),
             1,
             MAX_CONCURRENT_LOCAL_CONTROL_CONDUITS,
+            MAX_CONCURRENT_LOCAL_STREAM_CONDUITS,
         );
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         let task = tokio::spawn(daemon.run(bound, async move {
