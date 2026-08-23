@@ -147,49 +147,194 @@ fn required_by_strict(binary: &str) -> bool {
     value.split(',').any(|name| name.trim() == binary)
 }
 
-/// Assert (from **outside** the process — no cooperation from the target
-/// required or trusted) that `pid` owns no listening socket at all: the
-/// literal test of "behind NAT by construction" — the only path back to
-/// this process is the connection it dialed out itself.
-///
-/// Method: `lsof -nP -p <pid> -iTCP -sTCP:LISTEN` must report nothing.
-/// UDP is not asserted the same way because BSD sockets have no `LISTEN`
-/// state for `SOCK_DGRAM` at all — a bound UDP socket used purely to send
-/// packets out and receive replies on the same 4-tuple (exactly what the
-/// QUIC client role here does) is not "a listener" in the sense this
-/// assertion means, and `lsof` has no `-sUDP:LISTEN` filter to even ask
-/// the question the TCP branch asks. What proves the UDP side instead:
-/// `qsh reverse` never calls `qsh_transport`'s server-bind path at all
-/// (only `qsh listen`/`qsh serve` do — `main.rs::run_reverse` dials via
-/// `Dialer::dial`, a QUIC *client* endpoint, and never prints a
-/// "listening on" line, unlike `run_listen`/`run_serve`), which this test
-/// also asserts by construction: the argv spawned for the target below is
-/// literally `["reverse", CONTROLLER_ALIAS]` — no `--bind`, no `listen`,
-/// no `serve` anywhere in it.
-fn assert_owns_no_listening_socket(pid: u32) {
-    if locate("lsof").is_none() {
-        assert!(
-            !required_by_strict("lsof"),
-            "QSH_ACCEPTANCE_STRICT requires lsof, but it is not installed on this runner"
-        );
-        eprintln!("SKIP: lsof is not installed on this runner; cannot assert no-listener");
-        return;
-    }
+/// What [`owned_sockets_via_lsof`]/[`owned_sockets_via_proc`] report about
+/// one pid's open sockets — protocol-classified, not merely "some socket
+/// exists", so the caller can tell a legitimate outbound QUIC client
+/// socket from an accidental extra listener.
+struct OwnedSockets {
+    /// Count of TCP sockets in `LISTEN` state. QSH never speaks TCP at
+    /// all, so this must always be `0`.
+    tcp_listeners: usize,
+    /// Count of UDP sockets, listening or not (`SOCK_DGRAM` has no
+    /// `LISTEN` state to filter on — module doc below). `qsh reverse`
+    /// opens exactly one: its own outbound QUIC client dial endpoint. A
+    /// second one is exactly what a regression that also opened a
+    /// `qsh_transport` server-bind endpoint on the target would produce,
+    /// so this is the check that actually catches that mutation — the
+    /// TCP-only check above cannot, by construction, since QSH has no TCP
+    /// path for it to ever see.
+    udp: usize,
+}
+
+/// `lsof -nP -a -p <pid> -iTCP -sTCP:LISTEN` / `-iUDP`. `None` if `lsof`
+/// is not on `PATH`.
+fn owned_sockets_via_lsof(pid: u32) -> Option<OwnedSockets> {
+    locate("lsof")?;
     // `-a` ANDs the selection options together; without it `lsof` ORs
     // `-p`/`-i`, which would list every listening socket on the whole
     // machine, not just this pid's (confirmed empirically on this host —
     // omitting `-a` fails the assertion on totally unrelated processes).
-    let output = Command::new("lsof")
+    let tcp = Command::new("lsof")
         .args(["-nP", "-a", "-p", &pid.to_string(), "-iTCP", "-sTCP:LISTEN"])
         .output()
-        .expect("run lsof");
-    // lsof exits non-zero when nothing matches the filter — that is the
-    // pass case here, not a tool failure. What matters is stdout is empty.
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.trim().is_empty(),
+        .expect("run lsof -iTCP");
+    let udp = Command::new("lsof")
+        .args(["-nP", "-a", "-p", &pid.to_string(), "-iUDP"])
+        .output()
+        .expect("run lsof -iUDP");
+    // lsof exits non-zero when nothing matches the filter — a tool
+    // outcome, not a failure to run; only stdout line counts matter here.
+    let tcp_listeners = String::from_utf8_lossy(&tcp.stdout)
+        .lines()
+        .filter(|line| !line.starts_with("COMMAND"))
+        .count();
+    let udp_lines = String::from_utf8_lossy(&udp.stdout)
+        .lines()
+        .filter(|line| !line.starts_with("COMMAND"))
+        .count();
+    Some(OwnedSockets {
+        tcp_listeners,
+        udp: udp_lines,
+    })
+}
+
+/// `/proc`-based fallback for runners without `lsof` (common on minimal
+/// Linux CI images) — so the "no listening socket" half of DoD 1 is
+/// enforced on every runner by default, not only under
+/// `QSH_ACCEPTANCE_STRICT`. `None` on any platform without `/proc/<pid>`
+/// (e.g. macOS — `lsof` is standard there, so the caller falls back to
+/// [`owned_sockets_via_lsof`] first and only reaches here as the second
+/// choice).
+///
+/// Method: collect the socket inodes `pid` holds open fds on (via
+/// `/proc/<pid>/fd/*` symlinks, each pointing at `socket:[<inode>]` for a
+/// socket fd), then cross-reference those inodes against
+/// `/proc/net/{tcp,tcp6}` (state `0A` hex = `LISTEN`) and
+/// `/proc/net/{udp,udp6}` (every row — `SOCK_DGRAM` has no listen state).
+/// `/proc/net/*` is namespace-scoped, not machine-global, so this is
+/// exactly as selective as `lsof -a -p <pid>` is.
+fn owned_sockets_via_proc(pid: u32) -> Option<OwnedSockets> {
+    let fd_dir = format!("/proc/{pid}/fd");
+    let entries = std::fs::read_dir(&fd_dir).ok()?;
+    let mut inodes = std::collections::HashSet::new();
+    for entry in entries.flatten() {
+        let Ok(target) = std::fs::read_link(entry.path()) else {
+            continue;
+        };
+        let Some(name) = target.to_str() else {
+            continue;
+        };
+        let Some(inode) = name
+            .strip_prefix("socket:[")
+            .and_then(|rest| rest.strip_suffix(']'))
+        else {
+            continue;
+        };
+        if let Ok(inode) = inode.parse::<u64>() {
+            inodes.insert(inode);
+        }
+    }
+
+    fn count_matching(
+        path: &str,
+        inodes: &std::collections::HashSet<u64>,
+        listen_only: bool,
+    ) -> usize {
+        let Ok(contents) = std::fs::read_to_string(path) else {
+            return 0;
+        };
+        contents
+            .lines()
+            .skip(1) // header row
+            .filter(|line| {
+                let fields: Vec<&str> = line.split_whitespace().collect();
+                // `/proc/net/{tcp,udp}[6]` columns: sl local_address rem_address
+                // st tx_queue:rx_queue tr:tm->when retrnsmt uid timeout inode ...
+                let Some(state) = fields.get(3) else {
+                    return false;
+                };
+                let Some(inode) = fields.get(9).and_then(|s| s.parse::<u64>().ok()) else {
+                    return false;
+                };
+                if !inodes.contains(&inode) {
+                    return false;
+                }
+                !listen_only || *state == "0A"
+            })
+            .count()
+    }
+
+    let tcp_listeners = count_matching("/proc/net/tcp", &inodes, true)
+        + count_matching("/proc/net/tcp6", &inodes, true);
+    let udp = count_matching("/proc/net/udp", &inodes, false)
+        + count_matching("/proc/net/udp6", &inodes, false);
+    Some(OwnedSockets { tcp_listeners, udp })
+}
+
+/// The live process command line for `pid`, via `ps` — portable across
+/// macOS and Linux, unlike `/proc/<pid>/cmdline`. A *runtime-observed*
+/// check, not the "we wrote the argv this way in the test source" prose
+/// the previous version of this assertion relied on: this reads back what
+/// the OS actually recorded for the running process.
+fn owned_command_line(pid: u32) -> Option<String> {
+    let output = Command::new("ps")
+        .args(["-o", "command=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let cmd = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if cmd.is_empty() { None } else { Some(cmd) }
+}
+
+/// Assert (from **outside** the process — no cooperation from the target
+/// required or trusted) that `pid` owns no listening socket at all, and
+/// that its own argv never asked to bind one: the literal test of "behind
+/// NAT by construction" — the only path back to this process is the
+/// connection it dialed out itself.
+///
+/// Two independent checks, both enforced whenever a collector is
+/// available (default, not opt-in — see [`owned_sockets_via_proc`]'s
+/// doc): zero TCP listeners (QSH never speaks TCP, so this is always
+/// true) and **exactly one** UDP socket (the target's own outbound QUIC
+/// client dial — never zero, since it must have dialed the controller to
+/// register at all, and never more than one, since a second UDP socket is
+/// exactly what a regression that opened a `qsh_transport` server-bind
+/// endpoint on the target would produce). Plus a runtime argv check: the
+/// process's actual command line, read back via `ps`, must contain
+/// neither `listen` nor `serve` nor `--bind`.
+fn assert_owns_no_listening_socket(pid: u32) {
+    if let Some(cmd) = owned_command_line(pid) {
+        assert!(
+            !cmd.contains("listen") && !cmd.contains("serve") && !cmd.contains("--bind"),
+            "the reverse target's own argv looks like it asked to bind a listener: {cmd:?}"
+        );
+    }
+
+    let sockets = owned_sockets_via_lsof(pid).or_else(|| owned_sockets_via_proc(pid));
+    let Some(sockets) = sockets else {
+        assert!(
+            !required_by_strict("lsof"),
+            "QSH_ACCEPTANCE_STRICT requires a socket-listing tool (lsof or /proc), but neither \
+             is available on this runner"
+        );
+        eprintln!(
+            "SKIP: neither lsof nor /proc is available on this runner; cannot assert no-listener"
+        );
+        return;
+    };
+    assert_eq!(
+        sockets.tcp_listeners, 0,
         "the reverse target owns a listening TCP socket (pid {pid}), which breaks the NAT \
-         story entirely:\n{stdout}"
+         story entirely"
+    );
+    assert_eq!(
+        sockets.udp, 1,
+        "the reverse target owns {} UDP socket(s) (pid {pid}), expected exactly 1 (its own \
+         outbound QUIC client dial) — a different count means either it never dialed out, or \
+         it opened a listening endpoint of its own, either way breaking the NAT story",
+        sockets.udp
     );
 }
 
@@ -284,6 +429,13 @@ fn a_real_target_behind_nat_registers_and_a_local_client_attaches_detaches_and_r
     // Reattach: a second terminal, same reverse route, picks the session
     // back up.
     let mut client = Client::spawn(&controller, &["attach", &session_ref]);
+    // Continuity, not merely "a shell answered": the pre-detach output
+    // must be replayed from the session's retained ring before anything
+    // new is typed — proving this is the *same* shell with its own
+    // scrollback, not a coincidentally-successful fresh one
+    // (`sessions.len() == 1` above already rules out a second session,
+    // but says nothing about the pty's own continuity).
+    client.expect("QSH-E2E-LOGIN-OK");
     client.round_trip("QSH-E2E-REATTACH");
     client.type_("exit\r");
     client.expect_exit(0);

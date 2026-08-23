@@ -32,6 +32,12 @@ tempfile.workspace = true
 jsonschema.workspace = true
 schemars.workspace = true
 qsh-testkit.workspace = true
+# Reverse-route acceptance harness only (`crates/qsh-cli/tests/reverse_blackout.rs`):
+# pinning a `StaticTrust` for `qsh_testkit::reverse::ReverseHarness` needs the
+# transport-level types directly. A dev-dependency, so `xtask arch`'s
+# manifest matrix (which reads only `[dependencies]`) does not see it —
+# `qsh-cli`'s production code still never depends on `qsh-transport`.
+qsh-transport.workspace = true
 
 # The expect harness runs `qsh` itself under a pty so the termios path
 # really executes (`docs/design/testing.md` L5).

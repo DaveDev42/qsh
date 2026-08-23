@@ -185,6 +185,13 @@ impl SessionStream {
             events,
         )));
 
+        // Set once `writer` ends on its own — the peer sent `STOP_SENDING`
+        // (`write_frames`'s own `send.stopped()` race) or a write failed —
+        // so the trailing cleanup below knows not to poll that already-
+        // completed `JoinHandle` a second time (`AbortOnDrop`'s `.0` is a
+        // plain `tokio::task::JoinHandle`, and polling one again past
+        // completion is not something this code relies on being safe).
+        let mut writer_done = false;
         let result = {
             let input = input_pump(
                 sessions,
@@ -202,18 +209,45 @@ impl SessionStream {
                     // owed its output, so the stream lives until the
                     // output pump is done. (Losing the writer lease does
                     // *not* land here: that only demotes the attach to
-                    // read-only, it keeps reading input.)
-                    Ok(()) => (&mut output.0).await.unwrap_or(Ok(())),
+                    // read-only, it keeps reading input.) *Or* until the
+                    // write side notices nobody is listening any more —
+                    // see the `writer` arm below, which is exactly as
+                    // valid a reason to stop here as `output` finishing:
+                    // an idle session's `output_pump` can sit forever with
+                    // nothing new to pull, and would otherwise never learn
+                    // that the peer detached with no more output ever
+                    // coming (the localctl `LOCAL_STREAM` splice's own
+                    // cross-leg cancellation is exactly what triggers
+                    // this on the reverse route).
+                    Ok(()) => tokio::select! {
+                        r = &mut output.0 => r.unwrap_or(Ok(())),
+                        r = &mut writer.0 => {
+                            writer_done = true;
+                            r.unwrap_or(Ok(())).map_err(SessionStreamError::from)
+                        }
+                    },
                     Err(err) => Err(err),
                 },
                 // `Exit`/`Closed`: the last frame has been queued.
                 r = &mut output.0 => r.unwrap_or(Ok(())),
+                // See the comment on the nested arm above — the write
+                // side can end first too, most commonly on the reverse
+                // route where a detached peer's data conduit is gone
+                // long before `input`/`output` would otherwise notice.
+                r = &mut writer.0 => {
+                    writer_done = true;
+                    r.unwrap_or(Ok(())).map_err(SessionStreamError::from)
+                }
             }
         };
         // Every sender is dropped by now, so the writer drains the queue,
-        // FINs the stream and returns.
+        // FINs the stream and returns — unless it already ended on its
+        // own above, in which case awaiting it again would poll an
+        // already-completed `JoinHandle`.
         drop(output);
-        let _ = (&mut writer.0).await;
+        if !writer_done {
+            let _ = (&mut writer.0).await;
+        }
         drop(attached);
         result
     }
@@ -231,14 +265,37 @@ impl<T> Drop for AbortOnDrop<T> {
 }
 
 /// The single owner of the send half.
+///
+/// Races draining `frames` against [`FramedSend::stopped`] — which
+/// resolves only when the peer sends `STOP_SENDING` (or the stream/
+/// connection is already gone), never merely on an ordinary ack of bytes
+/// already written (`quinn`'s own `send_stream_stopped`: `Ok(None)` for an
+/// already-closed stream, `Ok(Some(code))` for a real `STOP_SENDING`,
+/// otherwise it keeps waiting). A peer that will never read another byte
+/// here — most commonly a reverse-route localctl `LOCAL_STREAM` conduit
+/// whose CLI end already detached (`localctl::daemon`'s cross-leg
+/// cancellation resets the corresponding `RecvStream`, which the QUIC
+/// layer turns into `STOP_SENDING` on this end) — is exactly as good a
+/// reason to stop as the queue itself ending, and unlike a *forward*
+/// attach's own connection loss, nothing else here would ever notice on
+/// an idle session otherwise: `output_pump` can sit forever finding no
+/// new bytes to pull, and would hold this stream's `AttachToken` (and the
+/// TTL suspension it implies) open indefinitely on the peer's behalf.
 async fn write_frames(
     send: &mut FramedSend,
     mut frames: mpsc::Receiver<SessionFrame>,
 ) -> Result<(), StreamError> {
-    while let Some(frame) = frames.recv().await {
-        send.send(&frame).await?;
+    loop {
+        tokio::select! {
+            frame = frames.recv() => {
+                match frame {
+                    Some(frame) => send.send(&frame).await?,
+                    None => return Ok(()),
+                }
+            }
+            () = send.stopped() => return Ok(()),
+        }
     }
-    Ok(())
 }
 
 /// Cursor pull loop: replay ring → `Output`/`Gap`/`Exit` frames.

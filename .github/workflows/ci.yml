@@ -93,6 +93,15 @@ jobs:
       - run: cargo nextest run -p qsh-cli --test tui_expect
         env:
           QSH_ACCEPTANCE_STRICT: bash,zsh,vim,tmux
+      # The literal 60-second reverse-route blackout (`PLAN.md` M3 Step 8
+      # (b)/(d), `docs/ROADMAP.md` M3 DoD 2). `QSH_ACCEPTANCE_SLOW` is what
+      # keeps this out of the PR-gated unit suite (`docs/design/testing.md`'s
+      # "no sleep()" discipline names this test as the one deliberate
+      # exception) while still making it an always-on gate here, the same
+      # way `QSH_ACCEPTANCE_STRICT` does above for the interactive shell set.
+      - run: cargo nextest run -p qsh-cli --test reverse_blackout
+        env:
+          QSH_ACCEPTANCE_SLOW: 1
 
   arch:
     name: arch-lint (${{ matrix.os }})

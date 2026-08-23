@@ -311,6 +311,10 @@ async fn run_reverse_unix(
             peer_addr: conn.remote_address(),
             conn_id: conn.stable_id(),
             capabilities: crate::handshake::negotiated_capabilities(&peer_hello),
+            // This *is* a real `qsh reverse` registration — the one site
+            // that sets this `true` (`ConnCtx::is_reverse_registration`'s
+            // own doc).
+            is_reverse_registration: true,
         };
         let conn_id = ctx.conn_id;
 

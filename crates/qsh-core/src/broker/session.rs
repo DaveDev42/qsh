@@ -309,7 +309,12 @@ enum Command {
     },
     TakeLease {
         principal: String,
+        /// Comparison identity — `lease::LeaseHolder::conn`'s own doc.
         conn: ConnectionId,
+        /// Release-on-death connection — `lease::LeaseHolder::physical`'s
+        /// own doc. Equal to `conn` for every caller except
+        /// [`SessionHandle::take_lease_owned`].
+        physical: ConnectionId,
         no_steal: bool,
         resp: oneshot::Sender<TakeOutcome>,
     },
@@ -580,18 +585,38 @@ impl SessionHandle {
             .is_some_and(|h| h.principal != principal)
     }
 
-    /// Try to take the writer lease. See [`WriterLease::take`].
+    /// Try to take the writer lease. See [`WriterLease::take`]. Identity
+    /// and release-on-death connection are the same value (`conn`) here —
+    /// see [`Self::take_lease_owned`] for the reverse-route case where a
+    /// finer identity than the physical connection is needed.
     pub async fn take_lease(
         &self,
         principal: impl Into<String>,
         conn: ConnectionId,
         no_steal: bool,
     ) -> Result<TakeOutcome, WriteError> {
+        self.take_lease_owned(principal, conn, conn, no_steal).await
+    }
+
+    /// [`Self::take_lease`], with the comparison identity (`owner`) and the
+    /// release-on-death connection (`physical`) given separately. See
+    /// [`WriterLease::take_owned`]'s doc for why the two can differ (a
+    /// reverse-route `SESSION_DATA` stream's `owner` is derived from its
+    /// single-use ticket, never from the daemon's shared registration
+    /// connection).
+    pub async fn take_lease_owned(
+        &self,
+        principal: impl Into<String>,
+        owner: ConnectionId,
+        physical: ConnectionId,
+        no_steal: bool,
+    ) -> Result<TakeOutcome, WriteError> {
         let (resp, rx) = oneshot::channel();
         self.inbox
             .send(Command::TakeLease {
                 principal: principal.into(),
-                conn,
+                conn: owner,
+                physical,
                 no_steal,
                 resp,
             })
@@ -1045,12 +1070,20 @@ impl ActorState {
             Command::TakeLease {
                 principal,
                 conn,
+                physical,
                 no_steal,
                 resp,
             } => {
-                let outcome = self.shared.meta().lease.take(&principal, conn, no_steal);
+                let outcome = self
+                    .shared
+                    .meta()
+                    .lease
+                    .take_owned(&principal, conn, physical, no_steal);
                 if let TakeOutcome::Acquired { changed: true, .. } = &outcome {
-                    self.lease_conn = Some(conn);
+                    // Tracks the *physical* connection, consistent with
+                    // `ReleaseConnection` below (also physical-keyed) —
+                    // never the finer `conn`/owner identity.
+                    self.lease_conn = Some(physical);
                     self.shared.push_control(ControlEvent::WriterChanged {
                         writer: Some(principal.clone()),
                     });

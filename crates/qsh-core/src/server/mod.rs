@@ -176,6 +176,40 @@ pub struct ConnCtx {
     pub conn_id: usize,
     /// Capabilities negotiated in `Hello` (intersection).
     pub capabilities: Vec<String>,
+    /// Whether this connection is a `qsh reverse` target's own long-lived
+    /// registration to a `qsh listen` daemon (`reverse/target.rs`'s own
+    /// `ConnCtx` construction — the only site that sets this `true`) —
+    /// **not** merely "the connection identifies as reverse" (`qsh
+    /// serve`/`ReversePairHarness` never do; `Hello.reverse` is refused
+    /// outright at `serve_connection_inner`).
+    ///
+    /// The one thing this decides: whether a `SESSION_DATA` stream's
+    /// writer-lease identity (`attach_lease_owner`, `handle_data_stream`)
+    /// is derived from the redeemed ticket instead of `connection_id()`.
+    /// A real registration is genuinely shared — every local CLI process a
+    /// `qsh listen` daemon relays for opens its own `SESSION_DATA` stream
+    /// on this *one* physical connection, so `connection_id()` alone
+    /// cannot tell two concurrent attaches apart
+    /// (`WriterLease::take_owned`'s own doc). Every other connection this
+    /// crate ever builds a `ConnCtx` for — a forward `qsh serve` client,
+    /// or a test harness that reaches this dispatch loop by a different
+    /// route (`qsh-testkit`'s `LoopbackHarness`/`ReversePairHarness`,
+    /// which dial a *fresh* connection per logical session on purpose,
+    /// `ReversePairHarness`'s own module doc) — is one physical connection
+    /// per attach, so `connection_id()` is already a correct, stable
+    /// per-attach identity there; diverging from it for those would only
+    /// desynchronize an attach's own `SessionStream` from a `session
+    /// write`/`session resize` value op issued on that *same* connection
+    /// (both derive their lease identity independently, and only
+    /// `connection_id()` is guaranteed to agree on both sides of that
+    /// split) — exactly the regression a blanket ticket-derived identity
+    /// caused before this field existed (adversarial review fixer
+    /// finding: `a_stolen_lease_demotes_the_attach_to_read_only_and_a_steal_back_resumes_it`
+    /// hung on both the forward *and* reverse variant, since neither
+    /// route's harness actually multiplexes a connection — the bug was
+    /// never reverse-specific, it just happened to be introduced while
+    /// fixing a reverse-specific one).
+    pub is_reverse_registration: bool,
 }
 
 impl ConnCtx {
@@ -1588,6 +1622,10 @@ impl Server {
             peer_addr: conn.remote_address(),
             conn_id: conn.stable_id(),
             capabilities: crate::handshake::negotiated_capabilities(&peer_hello),
+            // A forward `qsh serve` connection: `Hello.reverse` was
+            // refused above, so this is never a shared registration
+            // (`ConnCtx::is_reverse_registration`'s own doc).
+            is_reverse_registration: false,
         };
 
         // `None`: a forward `qsh serve` host relies on the *client's* own
@@ -1911,11 +1949,46 @@ impl Server {
                 // a no-op, so this is idempotent for an attach ticket — and
                 // still honours `no_steal` if the lease changed hands
                 // between the reply and this stream.
+                //
+                // `owner` is derived from the ticket, not
+                // `ctx.connection_id()`, but **only** on a real reverse
+                // registration (`ConnCtx::is_reverse_registration`'s own
+                // doc): there, every local CLI process's data stream is
+                // redeemed on the daemon's one shared registration
+                // connection, so the physical connection alone cannot
+                // tell two concurrent attaches apart
+                // (`WriterLease::take_owned`'s own doc). Every other
+                // connection this crate ever attaches over is already one
+                // physical connection per attach, so `ctx.connection_id()`
+                // is already a correct, stable identity there — and has
+                // to stay `owner` on those routes, because a `session
+                // write`/`session resize` value op issued on that *same*
+                // connection (`Server::prepare_session_write`) derives its
+                // own lease identity independently, straight from
+                // `ctx.connection_id()`, with no ticket in sight to agree
+                // on: diverging this attach's identity from that on a
+                // route where they are the same physical asker would
+                // desynchronize the two the moment either one re-takes
+                // the lease (adversarial review fixer finding: exactly
+                // this desync hung a steal-back on *both* the forward and
+                // reverse variant of
+                // `a_stolen_lease_demotes_the_attach_to_read_only_and_a_steal_back_resumes_it`,
+                // neither of which actually multiplexes a connection).
+                // `physical` stays `ctx.connection_id()` unconditionally
+                // either way, so a dead connection — reverse registration
+                // or forward attach alike — still releases whichever
+                // attach currently holds the lease.
+                let owner = if ctx.is_reverse_registration {
+                    attach_lease_owner(&header.ticket)
+                } else {
+                    ctx.connection_id()
+                };
                 match self
                     .sessions
-                    .take_lease(
+                    .take_lease_owned(
                         &session_id,
                         ctx.principal.to_string(),
+                        owner,
                         ctx.connection_id(),
                         no_steal,
                     )
@@ -1947,7 +2020,15 @@ impl Server {
                 let pump = SessionStream {
                     sessions: Arc::clone(&self.sessions),
                     session_id: session_id.clone(),
-                    conn: ctx.connection_id(),
+                    // The same `owner` `take_lease_owned` above just took
+                    // the lease as (this is the `is_held_by` check on
+                    // every subsequent `Input`/`Resize` frame on *this*
+                    // stream) — ticket-derived on a real reverse
+                    // registration, `ctx.connection_id()` everywhere else,
+                    // matching whichever identity a `session write`/
+                    // `session resize` value op on this same connection
+                    // would also use.
+                    conn: owner,
                     cursor: Cursor::from_offset(replay_from),
                     input_stream,
                     input_from,
@@ -1980,6 +2061,33 @@ impl Server {
 // ----------------------------------------------------------------------
 // helpers: wire ⇄ broker
 // ----------------------------------------------------------------------
+
+/// The writer-lease *identity* a `SESSION_DATA` stream on a real reverse
+/// registration (`ConnCtx::is_reverse_registration`) takes its lease as
+/// (`WriterLease::take_owned`'s own doc), derived from the single-use
+/// ticket it just redeemed rather than the physical connection it arrived
+/// on. A ticket is minted fresh by exactly one `session.open`/
+/// `session.attach` call and is removed from [`Server::redeem_ticket`]'s
+/// table on redemption, so distinct attaches — including two concurrent
+/// reverse attaches sharing one daemon registration connection — always
+/// derive distinct identities here, while the *same* attach's own
+/// subsequent `Input`/`Resize` frames (which never re-derive this; they
+/// reuse the value stashed on `SessionStream::conn`) keep comparing equal
+/// to themselves. Every other route keeps `ctx.connection_id()` as its
+/// owner instead (this function's call site) — see
+/// `ConnCtx::is_reverse_registration`'s own doc for why only a real
+/// registration needs this.
+///
+/// Deliberately not cryptographically strong — this is bookkeeping for the
+/// single-writer UX invariant, not an authorization boundary (the ACL
+/// choke point and the ticket redemption above it already gate access);
+/// only the ticket's *entropy*, not its unlinkability, matters here.
+fn attach_lease_owner(ticket: &[u8]) -> ConnectionId {
+    let mut half = [0u8; 8];
+    let n = ticket.len().min(half.len());
+    half[..n].copy_from_slice(&ticket[..n]);
+    ConnectionId(u64::from_le_bytes(half))
+}
 
 /// The control messages that may block for a long time — the `SessionRead`
 /// long-poll (up to [`SESSION_READ_MAX_WAIT`]) and `SessionClose` (the
@@ -2540,6 +2648,7 @@ mod tests {
             peer_addr: "127.0.0.1:5000".parse().unwrap(),
             conn_id: 42,
             capabilities: caps.iter().map(|s| s.to_string()).collect(),
+            is_reverse_registration: false,
         }
     }
 

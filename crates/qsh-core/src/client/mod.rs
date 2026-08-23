@@ -145,6 +145,16 @@ pub struct Session {
     /// `CLAUDE.md`'s workspace map).
     #[cfg(unix)]
     local: Option<(std::path::PathBuf, String)>,
+    /// The `LOCAL_CONTROL` leg's own `LocalHelloAck` identity —
+    /// `(peer_fingerprint, generation)` — `Some` exactly when
+    /// [`Self::local`] is `Some`. Compared against the `LOCAL_STREAM`
+    /// conduit's own ack in [`Self::open_local_data_link`] so a
+    /// registration that died and reconnected (or was superseded)
+    /// between the two handshakes is caught as a stale route rather than
+    /// silently opening a data stream against a peer the control leg
+    /// never actually bound to (see that method's own doc).
+    #[cfg(unix)]
+    local_ack: Option<(String, u64)>,
     next_request_id: u64,
     /// Capabilities both sides support.
     pub capabilities: Vec<String>,
@@ -184,6 +194,8 @@ impl Session {
             link: ControlLink::Quic(ctl),
             #[cfg(unix)]
             local: None,
+            #[cfg(unix)]
+            local_ack: None,
             next_request_id: 1,
             capabilities: crate::handshake::negotiated_capabilities(&peer_hello),
             peer_device_name: peer_hello.device_name,
@@ -204,11 +216,14 @@ impl Session {
         capabilities: Vec<String>,
         host: String,
         socket: std::path::PathBuf,
+        peer_fingerprint: String,
+        generation: u64,
     ) -> Self {
         Self {
             conn: None,
             link: ControlLink::Local(conduit),
             local: Some((socket, host.clone())),
+            local_ack: Some((peer_fingerprint, generation)),
             next_request_id: 1,
             capabilities,
             peer_device_name: host,
@@ -294,6 +309,27 @@ impl Session {
         let handshake = crate::localctl::client::open_stream(socket, host, header)
             .await
             .map_err(link::op_error_to_client_error)?;
+        // Fail closed on a stale route (`CLAUDE.md`'s "fail closed on any
+        // ambiguous auth/ACL state"): if the registration died and came
+        // back — or was superseded by a new one — between this session's
+        // `LOCAL_CONTROL` handshake and this `LOCAL_STREAM` one, the two
+        // acks disagree, and redeeming the ticket anyway would only reach
+        // `redeem_ticket` on a target whose per-connection ticket table
+        // never saw it, surfacing as an opaque stream reset instead of
+        // this diagnosable stale-route error.
+        if let Some((expected_fingerprint, expected_generation)) = self.local_ack.as_ref()
+            && (&handshake.peer_fingerprint != expected_fingerprint
+                || handshake.generation != *expected_generation)
+        {
+            return Err(ClientError::Remote {
+                code: ErrorCode::HostNotFound,
+                message: format!(
+                    "{host}'s registration changed between the control and data \
+                     handshakes (stale route)"
+                ),
+                retryable: true,
+            });
+        }
         let kill = DataKillSwitch::new(handshake.socket);
         Ok((
             DataSend::Local(handshake.send),
@@ -1183,7 +1219,7 @@ mod reverse_tests {
             header.ticket
         });
 
-        let handshake = crate::localctl::client::open_control(&sock, "phone", 0)
+        let handshake = crate::localctl::client::open_control(&sock, "phone", 0, None)
             .await
             .unwrap();
         let mut session = Session::from_local_control(
@@ -1191,6 +1227,8 @@ mod reverse_tests {
             handshake.capabilities,
             handshake.host,
             sock.clone(),
+            handshake.peer_fingerprint,
+            handshake.generation,
         );
 
         let attached = session
@@ -1260,7 +1298,7 @@ mod reverse_tests {
             std::future::pending::<()>().await
         });
 
-        let handshake = crate::localctl::client::open_control(&sock, "phone", 0)
+        let handshake = crate::localctl::client::open_control(&sock, "phone", 0, None)
             .await
             .unwrap();
         let mut session = Session::from_local_control(
@@ -1268,6 +1306,8 @@ mod reverse_tests {
             handshake.capabilities,
             handshake.host,
             sock.clone(),
+            handshake.peer_fingerprint,
+            handshake.generation,
         );
         let attached = session
             .open_attach_stream(wire::SessionAttached {

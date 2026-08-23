@@ -62,14 +62,39 @@ impl<S: AsyncRead + AsyncWrite + Unpin> LocalConduit<S> {
     /// before any payload-sized buffer is allocated
     /// (`docs/design/protocol.md` §5).
     pub async fn recv<M: Message + Default>(&mut self) -> Result<Option<M>, OpError> {
+        let Some(payload) = self.recv_payload().await? else {
+            return Ok(None);
+        };
+        let msg = decode_local(&payload).map_err(|err| conduit_error("decode", err))?;
+        Ok(Some(msg))
+    }
+
+    /// [`Self::recv`], stopping one layer short of decoding: hands back
+    /// the de-framed payload bytes exactly as they arrived, still
+    /// unparsed.
+    ///
+    /// `LOCAL_STREAM`'s `SESSION_DATA` header is the one caller
+    /// (`crate::localctl::daemon::LocalctlDaemon::serve_stream`): it needs
+    /// the decoded [`wire::StreamHeader`](qsh_proto::wire::StreamHeader)
+    /// to run its own checks (`kind`, `ticket`), but what it *forwards*
+    /// onto the QUIC data stream has to be relayed verbatim, not
+    /// decode-then-re-encode — prost drops any field this build's
+    /// `StreamHeader` does not know about, which would silently strip an
+    /// additive field a newer `qsh` client set (`docs/CLI.md`'s
+    /// additive-only wire contract is only meaningful if an intermediary
+    /// that does not understand a field still forwards it byte-exact).
+    /// This method is how the same bytes end up in both places: decoded
+    /// once from this return value for the daemon's own checks, and
+    /// re-framed unchanged (never re-encoded from the decoded struct) for
+    /// the QUIC side.
+    pub(crate) async fn recv_payload(&mut self) -> Result<Option<Vec<u8>>, OpError> {
         loop {
             if let Some(payload) = self
                 .dec
                 .next_frame()
                 .map_err(|err| conduit_error("frame", err))?
             {
-                let msg = decode_local(&payload).map_err(|err| conduit_error("decode", err))?;
-                return Ok(Some(msg));
+                return Ok(Some(payload));
             }
             let n = self
                 .stream
@@ -145,6 +170,7 @@ mod tests {
             kind: LocalStreamKind::LocalAdmin as i32,
             host: String::new(),
             wait_ms: 0,
+            known_generation: None,
         };
         client.send(&hello).await.unwrap();
 
@@ -165,6 +191,7 @@ mod tests {
             kind: LocalStreamKind::LocalControl as i32,
             host: "personal-mac".to_string(),
             wait_ms: 250,
+            known_generation: None,
         };
         let write = tokio::spawn(async move {
             client.send(&hello).await.unwrap();
@@ -189,6 +216,7 @@ mod tests {
             kind: LocalStreamKind::LocalStream as i32,
             host: "some-host".to_string(),
             wait_ms: 0,
+            known_generation: None,
         };
         let mut wire = encode_local(&hello).unwrap();
         wire.extend_from_slice(b"raw bytes after the frame");
@@ -211,6 +239,7 @@ mod tests {
             kind: LocalStreamKind::LocalStream as i32,
             host: "some-host".to_string(),
             wait_ms: 0,
+            known_generation: None,
         };
         client_end
             .write_all(&encode_local(&hello).unwrap())

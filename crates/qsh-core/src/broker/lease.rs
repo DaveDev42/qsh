@@ -36,8 +36,29 @@ pub struct LeaseHolder {
     /// Principal string of the holder (`device:…` / `user:…` / `fp:…`,
     /// `docs/CLI.md` §5 `Session.writer`).
     pub principal: String,
-    /// Connection the lease is bound to.
+    /// **Identity** the holder is compared against for "is this the same
+    /// taker re-acquiring" / "does this asker hold the lease" (`take`'s own
+    /// first-arm check, [`WriterLease::is_held_by`]). For a forward attach
+    /// or a `session write` value op this is the same value as `physical`
+    /// below — one physical connection is one asker there. It differs only
+    /// for a reverse-route `SESSION_DATA` stream ([`WriterLease::take_owned`]'s
+    /// own doc): every local CLI process routed through one `qsh listen`
+    /// daemon redeems its ticket on that daemon's *one* shared physical
+    /// registration connection, so `physical` alone cannot tell two
+    /// concurrent reverse attaches apart — without a finer identity here,
+    /// the second attach's `take` would hit this struct's own `conn ==
+    /// conn` short-circuit meant for "the same asker again" and silently
+    /// co-hold the lease with the first, `no_steal` included (both
+    /// findings this field exists to close).
     pub conn: ConnectionId,
+    /// **Physical** connection the lease is released on when it dies
+    /// ([`WriterLease::release_connection`], driven only by
+    /// `Server::purge_connection` at whole-connection teardown). Always
+    /// the real transport connection, even when `conn` above is a finer,
+    /// synthetic per-attach identity layered on top of it — a dead
+    /// physical connection must release every lease it is behind, however
+    /// many synthetic identities were multiplexed over it.
+    pub physical: ConnectionId,
 }
 
 /// Result of [`WriterLease::take`].
@@ -83,9 +104,41 @@ impl WriterLease {
     }
 
     /// Try to take the lease for `principal` on `conn`. See module docs.
+    /// Identity and release-on-death connection are the same value here —
+    /// the ordinary case, where one physical connection is one asker. See
+    /// [`Self::take_owned`] for the reverse-route case where they differ.
     pub fn take(&mut self, principal: &str, conn: ConnectionId, no_steal: bool) -> TakeOutcome {
+        self.take_owned(principal, conn, conn, no_steal)
+    }
+
+    /// [`Self::take`], with the comparison identity (`owner`) and the
+    /// release-on-death connection (`physical`) given separately.
+    ///
+    /// Exists for one reason: a reverse-route `SESSION_DATA` stream's
+    /// `physical` connection is the `qsh listen` daemon's one shared
+    /// registration to the target, identical for every local CLI process
+    /// currently attached through it (`docs/CLI.md` §6.13's "writer lease는
+    /// 데몬의 connection에 묶인다" — true of *release*, not of *identity*).
+    /// Passing that shared value as `owner` too would make every such
+    /// attach hit this lease's own "same asker re-acquiring" short-circuit
+    /// against every other one, so no `no_steal` conflict and no
+    /// `displaced`/`changed` demotion could ever fire between two
+    /// concurrent reverse attaches — both would silently believe they hold
+    /// the lease and write into the same PTY. The caller
+    /// (`Server::handle_data_stream`) instead derives `owner` from the
+    /// single-use ticket the stream redeemed, which is unique per
+    /// `session.open`/`session.attach` call and therefore per attach, while
+    /// still passing the true `physical` connection so a dead registration
+    /// releases whichever attach currently holds the lease.
+    pub fn take_owned(
+        &mut self,
+        principal: &str,
+        owner: ConnectionId,
+        physical: ConnectionId,
+        no_steal: bool,
+    ) -> TakeOutcome {
         match &self.holder {
-            Some(h) if h.conn == conn => TakeOutcome::Acquired {
+            Some(h) if h.conn == owner => TakeOutcome::Acquired {
                 displaced: None,
                 changed: false,
             },
@@ -95,7 +148,8 @@ impl WriterLease {
             _ => {
                 let displaced = self.holder.replace(LeaseHolder {
                     principal: principal.to_string(),
-                    conn,
+                    conn: owner,
+                    physical,
                 });
                 TakeOutcome::Acquired {
                     displaced,
@@ -105,10 +159,12 @@ impl WriterLease {
         }
     }
 
-    /// Release the lease if `conn` holds it. Returns the released holder
+    /// Release the lease if `physical` holds it — the real transport
+    /// connection, never the finer `conn`/owner identity
+    /// ([`LeaseHolder::physical`]'s own doc). Returns the released holder
     /// (⇒ broadcast `writer_changed{writer: null}`).
-    pub fn release_connection(&mut self, conn: ConnectionId) -> Option<LeaseHolder> {
-        if self.is_held_by(conn) {
+    pub fn release_connection(&mut self, physical: ConnectionId) -> Option<LeaseHolder> {
+        if self.holder.as_ref().is_some_and(|h| h.physical == physical) {
             self.holder.take()
         } else {
             None
@@ -149,7 +205,8 @@ mod tests {
             TakeOutcome::Acquired {
                 displaced: Some(LeaseHolder {
                     principal: "device:a".into(),
-                    conn: A
+                    conn: A,
+                    physical: A
                 }),
                 changed: true
             }
@@ -167,7 +224,8 @@ mod tests {
             TakeOutcome::Conflict {
                 holder: LeaseHolder {
                     principal: "device:a".into(),
-                    conn: A
+                    conn: A,
+                    physical: A
                 }
             }
         );
@@ -190,7 +248,8 @@ mod tests {
             TakeOutcome::Acquired {
                 displaced: Some(LeaseHolder {
                     principal: "device:a".into(),
-                    conn: A
+                    conn: A,
+                    physical: A
                 }),
                 changed: true
             }
@@ -221,7 +280,8 @@ mod tests {
             lease.release_connection(A),
             Some(LeaseHolder {
                 principal: "device:a".into(),
-                conn: A
+                conn: A,
+                physical: A
             })
         );
         assert!(lease.holder().is_none());

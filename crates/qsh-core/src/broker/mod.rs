@@ -801,6 +801,20 @@ pub trait SessionBackend: Send + Sync {
         no_steal: bool,
     ) -> BoxFuture<'_, Result<TakeOutcome, BrokerError>>;
 
+    /// [`Self::take_lease`], with the comparison identity (`owner`) and the
+    /// release-on-death connection (`physical`) given separately —
+    /// `SessionHandle::take_lease_owned`'s own doc. Used only by the
+    /// `SESSION_DATA` redemption path (`Server::handle_data_stream`), never
+    /// by the `session.write` value op.
+    fn take_lease_owned(
+        &self,
+        id: &SessionId,
+        principal: String,
+        owner: ConnectionId,
+        physical: ConnectionId,
+        no_steal: bool,
+    ) -> BoxFuture<'_, Result<TakeOutcome, BrokerError>>;
+
     /// Close a session (see [`Broker::close`]); resolves to the final
     /// output offset. `signal` overrides the first escalation step; the
     /// dispatch edge parses it with [`Signal::parse`] and answers
@@ -978,6 +992,23 @@ impl SessionBackend for Broker {
         Box::pin(async move {
             handle?
                 .take_lease(principal, conn, no_steal)
+                .await
+                .map_err(map_write_error)
+        })
+    }
+
+    fn take_lease_owned(
+        &self,
+        id: &SessionId,
+        principal: String,
+        owner: ConnectionId,
+        physical: ConnectionId,
+        no_steal: bool,
+    ) -> BoxFuture<'_, Result<TakeOutcome, BrokerError>> {
+        let handle = Broker::get(self, id);
+        Box::pin(async move {
+            handle?
+                .take_lease_owned(principal, owner, physical, no_steal)
                 .await
                 .map_err(map_write_error)
         })

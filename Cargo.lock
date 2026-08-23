@@ -2013,6 +2013,7 @@ dependencies = [
  "qsh-core",
  "qsh-proto",
  "qsh-testkit",
+ "qsh-transport",
  "schemars",
  "serde",
  "serde_json",

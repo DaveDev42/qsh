@@ -27,16 +27,21 @@
 //!   buffering: input that cannot be replayed after a break is input the
 //!   user believes they typed and the shell never saw.
 //!
-//! The whole recovery runs under [`REDIAL_DEADLINE`]. That bound is the
-//! difference between "qsh recovered" and "QUIC's 45 s idle timeout
-//! eventually fired and something reconnected" — `docs/design/testing.md`
-//! L4 defines the latter as a failure, so it is enforced here in code
+//! The whole recovery runs under a deadline ([`REDIAL_DEADLINE`] on the
+//! forward route, which redials the peer itself; a route-supplied,
+//! possibly wider bound on any route whose reconnect step waits on
+//! something other than its own dial — see `Reconnect::attempt_deadline`).
+//! That bound is the difference between "qsh recovered" and "QUIC's 45 s
+//! idle timeout eventually fired and something reconnected" —
+//! `docs/design/testing.md` L4 defines the latter as a failure, so it is
+//! enforced here in code
 //! rather than described in a comment.
 
 use std::collections::VecDeque;
 use std::future::Future;
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::pin::Pin;
 use std::time::Duration;
 
 use thiserror::Error;
@@ -84,9 +89,15 @@ pub enum ResumeError {
         /// Oldest offset still retransmittable.
         oldest: u64,
     },
-    /// Neither migration nor re-dial finished inside [`REDIAL_DEADLINE`].
-    #[error("recovery exceeded the {} ms deadline", REDIAL_DEADLINE.as_millis())]
-    Deadline,
+    /// Neither migration nor re-dial finished inside the attempt's
+    /// deadline ([`REDIAL_DEADLINE`] on the forward route,
+    /// [`Reconnect::attempt_deadline`]'s override on the reverse route).
+    /// Carries the deadline that was actually applied so the message
+    /// (`map_resume_error`, `crate::ops::session`) reports what really
+    /// happened rather than always naming [`REDIAL_DEADLINE`] even on a
+    /// route that waited far longer than that by design.
+    #[error("recovery exceeded the {} ms deadline", .0.as_millis())]
+    Deadline(Duration),
     /// The re-dial or the `session.attach` itself failed.
     #[error(transparent)]
     Client(#[from] ClientError),
@@ -122,6 +133,100 @@ impl PathBinder for qsh_transport::Endpoint {
         let socket = std::net::UdpSocket::bind(bind)?;
         qsh_transport::Endpoint::rebind(self, socket)?;
         self.local_addr()
+    }
+}
+
+/// What [`Reconnect::reconnect`] returns: a boxed, `Send` future producing
+/// a fresh attach or the reason it could not be built.
+pub type ReconnectFuture<'a> = Pin<
+    Box<dyn Future<Output = Result<(super::Session, super::Attached), ResumeError>> + Send + 'a>,
+>;
+
+/// The one step in a recovery that the forward and reverse routes cannot
+/// share: producing a fresh, resumed attach.
+///
+/// Everything else in a recovery — detecting the death, backing off
+/// between attempts, the [`REDIAL_DEADLINE`] budget, and the
+/// `qsh::recovery` telemetry — is identical for both routes and lives in
+/// [`recover`]. What differs is *how* a new `(Session, Attached)` pair
+/// resumed at `last_output_seq` gets built: the forward route dials the
+/// peer itself (`DialReconnect`, `crate::ops::session`), the reverse route
+/// has no dial of its own to make and instead waits for the target to
+/// re-register with the daemon (`LocalReconnect`, added in a later step).
+/// A trait — rather than a closure, as `recover` itself still takes for
+/// the migration probe — because an implementation may need to carry
+/// state across attempts (the forward route's in-flight redemption task,
+/// which a timed-out attempt must be able to adopt rather than abandon:
+/// see `spawn_reattach`'s doc for why that task can never simply be
+/// dropped).
+///
+/// The `Send + Sync` bound and the boxed-future return (rather than an
+/// `async fn`) are here because this trait is used as `&dyn Reconnect` —
+/// `qsh-core` has no `async_trait` dependency, so a trait object requires
+/// the desugaring done by hand.
+pub trait Reconnect: Send + Sync {
+    /// Whether a previous, uncompleted [`reconnect`](Reconnect::reconnect)
+    /// call is still running and would be adopted rather than restarted by
+    /// the next call.
+    ///
+    /// Used only to decide whether an attempt still has a "live leg" worth
+    /// migration-probing: once a reconnect is in flight there is no leg
+    /// left to save. Default `false` — a route with nothing that must
+    /// survive a cancelled `.await` never needs to override it.
+    fn has_pending(&self) -> bool {
+        false
+    }
+
+    /// Produce a fresh attach resumed at `last_output_seq`
+    /// (`docs/design/protocol.md` §10 Reattach steps 1–5, or whatever the
+    /// implementation's route maps those steps to).
+    fn reconnect(&self, last_output_seq: u64) -> ReconnectFuture<'_>;
+
+    /// Milliseconds the most recently *completed*
+    /// [`reconnect`](Reconnect::reconnect) call spent blocked on
+    /// something outside `qsh`'s own control before the resume itself
+    /// could even begin — Step 8's reverse-route wait for the target's
+    /// next registration (`LocalReconnect`, `docs/design/protocol.md`
+    /// §11-4's Reattach mapping; `docs/CLI.md` §6.4's
+    /// `registration_wait_ms`). [`recover`] reads this only after its
+    /// attempt has resolved, so it always reflects the wait the just-
+    /// finished call actually measured, never one still in flight.
+    ///
+    /// Default `0` — the forward route (`DialReconnect`) never waits on
+    /// anything but its own dial, so it never overrides this.
+    fn registration_wait_ms(&self) -> u64 {
+        0
+    }
+
+    /// The ceiling [`recover`] applies to one attempt of this route's
+    /// [`reconnect`](Reconnect::reconnect).
+    ///
+    /// Default [`REDIAL_DEADLINE`] — the forward route redials the peer
+    /// itself, so the whole attempt (redial + resume) is properly held to
+    /// that 2 s budget and never overrides this.
+    ///
+    /// The reverse route (`LocalReconnect`, `PLAN.md` M3 Step 8) *does*
+    /// override it: `RecoveryConfig::registration_wait`'s own doc is
+    /// explicit that the 2 s budget covers only "the resume *after* a
+    /// registration is observed" (`docs/design/protocol.md` §11-4's "재등록
+    /// 시점부터 resume 완료까지 2초"), not the wait *for* one, which can
+    /// legitimately run as long as the target's own reconnect backoff.
+    /// Folding that wait into a flat [`REDIAL_DEADLINE`] here would silently
+    /// break that promise: the wait would be cut off after 2 s regardless
+    /// of `registration_wait`, and the in-flight redemption task
+    /// (`LocalReconnect::in_flight`) would be adopted and re-awaited by
+    /// every subsequent attempt in slices no bigger than 2 s each — which
+    /// only ever adds up to the full wait if `RecoveryConfig::attempts` is
+    /// inflated well past its production default to compensate (exactly
+    /// the gap a reviewer of this step's first draft caught: the shipped
+    /// default of 3 attempts gives up after roughly 7 s of wall time,
+    /// nowhere near the 60 s blackout the milestone's DoD requires).
+    /// Overriding this method instead lets a *single* attempt's deadline
+    /// legitimately cover the whole registration wait, so the 2 s budget
+    /// this const still names goes exactly where the doc always said it
+    /// would: the resume steps after registration, not the wait for it.
+    fn attempt_deadline(&self) -> Duration {
+        REDIAL_DEADLINE
     }
 }
 
@@ -168,17 +273,29 @@ impl<T> RecoveryOutcome<T> {
 /// `binder` is the migration aid: `None`, or a rebind that fails, simply
 /// skips that middle step. `reattach` re-dials and performs
 /// `session.attach` with the resume credential; whatever it returns is
-/// handed back in [`Recovered::Resumed`].
+/// handed back in [`Recovered::Resumed`]. `registration_wait_ms` is read
+/// exactly once, after `reattach` (if it ran at all) has resolved — it is
+/// the [`Reconnect`] implementation's own
+/// [`registration_wait_ms`](Reconnect::registration_wait_ms), threaded
+/// through as a plain getter rather than the trait object itself because
+/// the actual reconnect call already went through `reattach`'s closure
+/// (built by the caller, which is what lets it also stop the pumps first —
+/// see `recover_attach`'s call site); this is only ever asked *after*.
 ///
-/// The entire sequence is bounded by [`REDIAL_DEADLINE`]. Overrunning it
-/// is [`Recovery::Failed`], even if the attach would have succeeded a
+/// The entire sequence is bounded by `deadline` — [`REDIAL_DEADLINE`] on
+/// the forward route, wider on the reverse route so the registration wait
+/// it also has to cover does not get cut off (`Reconnect::attempt_deadline`'s
+/// own doc; the caller passes `reconnect.attempt_deadline()` here). Overrunning
+/// it is [`Recovery::Failed`], even if the attach would have succeeded a
 /// moment later: a late recovery is the failure mode this deadline exists
 /// to name.
-pub async fn recover<P, PFut, R, RFut, T, E>(
+pub async fn recover<P, PFut, R, RFut, T, E, G>(
     session_ref: &str,
     binder: Option<&dyn PathBinder>,
+    deadline: Duration,
     mut probe: P,
     reattach: R,
+    registration_wait_ms: G,
 ) -> RecoveryOutcome<T>
 where
     P: FnMut() -> PFut,
@@ -186,6 +303,7 @@ where
     R: FnOnce() -> RFut,
     RFut: Future<Output = Result<T, E>>,
     E: Into<ResumeError>,
+    G: FnOnce() -> u64,
 {
     let timer = RecoveryTimer::start(session_ref);
 
@@ -216,9 +334,9 @@ where
         reattach().await.map(Recovered::Resumed).map_err(Into::into)
     };
 
-    let outcome = match tokio::time::timeout(REDIAL_DEADLINE, attempt).await {
+    let outcome = match tokio::time::timeout(deadline, attempt).await {
         Ok(outcome) => outcome,
-        Err(_) => Err(ResumeError::Deadline),
+        Err(_) => Err(ResumeError::Deadline(deadline)),
     };
 
     let recovery = match &outcome {
@@ -226,7 +344,7 @@ where
         Ok(Recovered::Resumed(_)) => Recovery::Resumed,
         Err(_) => Recovery::Failed,
     };
-    let report = timer.finish(recovery);
+    let report = timer.finish(recovery, registration_wait_ms());
     RecoveryOutcome { outcome, report }
 }
 
@@ -618,17 +736,20 @@ mod tests {
         let out: RecoveryOutcome<&str> = recover(
             "mac/01K0",
             Some(&binder),
+            REDIAL_DEADLINE,
             || async { true },
             || async {
                 panic!("must not re-dial when the connection is alive");
                 #[allow(unreachable_code)]
                 Ok::<&str, ClientError>("")
             },
+            || 0,
         )
         .await;
         assert!(matches!(out.outcome, Ok(Recovered::Migrated)));
         assert_eq!(out.report.recovery, Recovery::Migrated);
         assert_eq!(out.report.session_ref, "mac/01K0");
+        assert_eq!(out.report.registration_wait_ms, 0);
     }
 
     #[tokio::test]
@@ -639,6 +760,7 @@ mod tests {
         let out: RecoveryOutcome<&str> = recover(
             "mac/01K0",
             Some(&binder),
+            REDIAL_DEADLINE,
             || {
                 let answer = answers.next().expect("probed more than twice");
                 async move { answer }
@@ -648,6 +770,7 @@ mod tests {
                 #[allow(unreachable_code)]
                 Ok::<&str, ClientError>("")
             },
+            || 0,
         )
         .await;
         assert!(matches!(out.outcome, Ok(Recovered::Migrated)));
@@ -660,12 +783,15 @@ mod tests {
         let out = recover(
             "mac/01K0",
             Some(&binder),
+            REDIAL_DEADLINE,
             || async { false },
             || async { Ok::<_, ClientError>("attached") },
+            || 0,
         )
         .await;
         assert!(matches!(out.outcome, Ok(Recovered::Resumed("attached"))));
         assert_eq!(out.report.recovery, Recovery::Resumed);
+        assert_eq!(out.report.registration_wait_ms, 0);
     }
 
     #[tokio::test]
@@ -676,12 +802,15 @@ mod tests {
         let out = recover(
             "mac/01K0",
             Some(&binder),
+            REDIAL_DEADLINE,
             || async { false },
             || async { Ok::<_, ClientError>("attached") },
+            || 0,
         )
         .await;
         assert!(matches!(out.outcome, Ok(Recovered::Resumed("attached"))));
         assert_eq!(out.report.recovery, Recovery::Resumed);
+        assert_eq!(out.report.registration_wait_ms, 0);
     }
 
     #[tokio::test]
@@ -689,8 +818,10 @@ mod tests {
         let out = recover(
             "mac/01K0",
             None,
+            REDIAL_DEADLINE,
             || async { false },
             || async { Ok::<_, ClientError>("attached") },
+            || 0,
         )
         .await;
         assert!(matches!(out.outcome, Ok(Recovered::Resumed("attached"))));
@@ -702,20 +833,26 @@ mod tests {
         let out: RecoveryOutcome<&str> = recover(
             "mac/01K0",
             None,
+            REDIAL_DEADLINE,
             || async { false },
             || async {
                 tokio::time::sleep(REDIAL_DEADLINE * 2).await;
                 Ok::<_, ClientError>("too late")
             },
+            || 0,
         )
         .await;
-        assert!(matches!(out.outcome, Err(ResumeError::Deadline)), "{out:?}");
+        assert!(
+            matches!(out.outcome, Err(ResumeError::Deadline(_))),
+            "{out:?}"
+        );
         assert_eq!(out.report.recovery, Recovery::Failed);
         assert_eq!(
             out.report.time_to_recovery_ms,
             REDIAL_DEADLINE.as_millis() as u64,
             "the record must show the deadline, not the wall time of the test"
         );
+        assert_eq!(out.report.registration_wait_ms, 0);
     }
 
     #[tokio::test(start_paused = true)]
@@ -723,11 +860,13 @@ mod tests {
         let out = recover(
             "mac/01K0",
             None,
+            REDIAL_DEADLINE,
             || async { false },
             || async {
                 tokio::time::sleep(Duration::from_millis(350)).await;
                 Ok::<_, ClientError>("attached")
             },
+            || 0,
         )
         .await;
         assert!(out.is_recovered());
@@ -737,5 +876,26 @@ mod tests {
             "{:?}",
             out.report
         );
+    }
+
+    /// `recover` reads `registration_wait_ms` from the closure it is
+    /// handed — proof, independent of any particular [`Reconnect`]
+    /// implementation, that the value a route reports actually reaches
+    /// the emitted report rather than being silently dropped on the floor
+    /// (`docs/CLI.md` §6.4: forward always `0`, reverse the measured
+    /// wait).
+    #[tokio::test]
+    async fn a_nonzero_registration_wait_reaches_the_report() {
+        let out = recover(
+            "mac/01K0",
+            None,
+            REDIAL_DEADLINE,
+            || async { false },
+            || async { Ok::<_, ClientError>("attached") },
+            || 640,
+        )
+        .await;
+        assert!(out.is_recovered());
+        assert_eq!(out.report.registration_wait_ms, 640);
     }
 }

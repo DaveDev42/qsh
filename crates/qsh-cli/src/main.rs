@@ -955,6 +955,7 @@ mod tests {
             Recovery::Resumed,
             std::time::Duration::from_millis(412),
             "mac/01K0ABCD",
+            0,
         );
         let expected = report.to_json_line();
         let lines = capture(None, false, || report.emit());
@@ -981,7 +982,8 @@ mod tests {
     /// recovery stream like every other one.
     #[test]
     fn quiet_and_an_explicit_log_level_both_silence_it() {
-        let report = RecoveryReport::new(Recovery::Failed, std::time::Duration::ZERO, "mac/01K0");
+        let report =
+            RecoveryReport::new(Recovery::Failed, std::time::Duration::ZERO, "mac/01K0", 0);
         assert!(capture(None, true, || report.emit()).is_empty(), "-q");
         assert!(
             capture(Some("off"), false, || report.emit()).is_empty(),

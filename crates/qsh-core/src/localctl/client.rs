@@ -77,6 +77,7 @@ async fn admin_host_list_over_inner(stream: UnixStream) -> Result<Vec<LocalHost>
             kind: LocalStreamKind::LocalAdmin as i32,
             host: String::new(), // ignored for LOCAL_ADMIN (qsh/local/v1.proto)
             wait_ms: 0,          // a local admin query never needs to wait
+            known_generation: None, // no host, so no generation to gate on
         })
         .await?;
     conduit.send(&LocalHostList {}).await?;
@@ -109,18 +110,22 @@ async fn admin_host_list_over_inner(stream: UnixStream) -> Result<Vec<LocalHost>
 /// daemon to `LOCAL_WAIT_MAX`, `qsh/local/v1.proto`); Step 6's own callers
 /// pass `0` (`Ops::resolve_host_route`/`resolve_host_route_async` already
 /// resolved a *live* registration before this is ever called — there is
-/// nothing to wait for yet). A later step's `LocalReconnect` wait is a
-/// nonzero `wait_ms` on top of this same primitive, not a reason to change
-/// it.
+/// nothing to wait for yet). `known_generation` is `LocalHello.known_generation`
+/// verbatim (`qsh/local/v1.proto`'s own doc on that field) — `None` for
+/// every such caller (no baseline: anything live satisfies them), `Some(g)`
+/// for `LocalReconnect` (`crate::ops::session`, M3 Step 8), which is by
+/// definition retrying after generation `g`'s connection just died and must
+/// never be handed that same generation back.
 pub(crate) async fn open_control(
     socket_path: &Path,
     host: &str,
     wait_ms: u32,
+    known_generation: Option<u64>,
 ) -> Result<ControlHandshake, OpError> {
     let stream = UnixStream::connect(socket_path)
         .await
         .map_err(|err| io_error("connect", socket_path, &err))?;
-    open_control_over(stream, host, wait_ms).await
+    open_control_over(stream, host, wait_ms, known_generation).await
 }
 
 /// Same exchange as [`open_control`], over an already-connected conduit —
@@ -130,10 +135,11 @@ pub(crate) async fn open_control_over(
     stream: UnixStream,
     host: &str,
     wait_ms: u32,
+    known_generation: Option<u64>,
 ) -> Result<ControlHandshake, OpError> {
     match tokio::time::timeout(
         PROBE_TIMEOUT,
-        open_control_over_inner(stream, host, wait_ms),
+        open_control_over_inner(stream, host, wait_ms, known_generation),
     )
     .await
     {
@@ -152,6 +158,7 @@ async fn open_control_over_inner(
     stream: UnixStream,
     host: &str,
     wait_ms: u32,
+    known_generation: Option<u64>,
 ) -> Result<ControlHandshake, OpError> {
     let mut conduit = LocalConduit::new(stream);
     conduit
@@ -160,6 +167,7 @@ async fn open_control_over_inner(
             kind: LocalStreamKind::LocalControl as i32,
             host: host.to_string(),
             wait_ms,
+            known_generation,
         })
         .await?;
 
@@ -197,12 +205,9 @@ pub(crate) struct ControlHandshake {
     pub conduit: ControlConduit,
     pub host: String,
     pub peer_fingerprint: String,
-    /// Registration generation at the moment of this ack. No M3 Step 6
-    /// caller reads it yet — kept because it is Step 8's `LocalReconnect`
-    /// input (detecting a re-registration across a dropped reverse
-    /// connection), and re-adding it to the wire round trip later would be
-    /// a bigger diff than carrying it unread for two steps.
-    #[allow(dead_code)]
+    /// Registration generation at the moment of this ack — Step 8's
+    /// `LocalReconnect` input (`crate::ops::session::dial_reverse_wait`),
+    /// detecting a re-registration across a dropped reverse connection.
     pub generation: u64,
     pub capabilities: Vec<String>,
 }
@@ -295,6 +300,12 @@ async fn open_stream_over_inner(
             kind: LocalStreamKind::LocalStream as i32,
             host: host.to_string(),
             wait_ms: 0,
+            // The data conduit never waits on its own — by the time
+            // `LocalReconnect` opens this, its `LOCAL_CONTROL` conduit has
+            // already landed on a live, newer-than-`known_generation`
+            // registration (`open_control`'s own doc), so there is nothing
+            // left to gate this second conduit on.
+            known_generation: None,
         })
         .await?;
     let response: LocalResponse = conduit.recv().await?.ok_or_else(|| {
@@ -303,8 +314,8 @@ async fn open_stream_over_inner(
             "localctl: daemon closed the conduit without answering the LOCAL_STREAM LocalHello",
         )
     })?;
-    match response.body {
-        Some(local_response::Body::HelloAck(_ack)) => {}
+    let ack = match response.body {
+        Some(local_response::Body::HelloAck(ack)) => ack,
         Some(local_response::Body::Error(err)) => return Err(remote_error(err)),
         _ => {
             return Err(OpError::new(
@@ -313,7 +324,7 @@ async fn open_stream_over_inner(
                  response",
             ));
         }
-    }
+    };
     conduit.send(header).await?;
     // From here on this conduit never speaks framed `qsh.local.v1` again —
     // `into_raw` hands back the still-open stream plus whatever bytes of
@@ -343,6 +354,8 @@ async fn open_stream_over_inner(
             buf: vec![0u8; 16 * 1024],
         },
         socket,
+        peer_fingerprint: ack.peer_fingerprint,
+        generation: ack.generation,
     })
 }
 
@@ -359,6 +372,20 @@ pub(crate) struct DataHandshake {
     /// (`crate::localctl` module docs' dependency direction: this module
     /// is depended on, never the reverse).
     pub socket: Arc<UnixStream>,
+    /// This `LOCAL_STREAM` conduit's own `LocalHelloAck.peer_fingerprint`
+    /// — compared by [`crate::client::mod`]'s `open_local_data_link`
+    /// against the fingerprint the session's own `LOCAL_CONTROL` leg
+    /// recorded, so a registration that died and came back between the
+    /// two handshakes (or was superseded by a new one) is caught here as
+    /// a stale route, fail-closed, rather than reaching `redeem_ticket` on
+    /// a target whose per-connection ticket table never saw this ticket
+    /// (adversarial review finding: "fail closed on any ambiguous auth/ACL
+    /// state", `CLAUDE.md`).
+    pub peer_fingerprint: String,
+    /// This conduit's own `LocalHelloAck.generation` — same comparison as
+    /// [`Self::peer_fingerprint`], for the case where the peer reconnected
+    /// with the *same* fingerprint but a new registration generation.
+    pub generation: u64,
 }
 
 /// Client → daemon half of a `LOCAL_STREAM` conduit, once its header has
@@ -973,7 +1000,7 @@ mod tests {
             }),
         );
 
-        let handshake = open_control(&sock, "personal-mac", 0).await.unwrap();
+        let handshake = open_control(&sock, "personal-mac", 0, None).await.unwrap();
         assert_eq!(handshake.host, "personal-mac");
         assert_eq!(
             handshake.peer_fingerprint,
@@ -1011,7 +1038,7 @@ mod tests {
             )),
         );
 
-        let err = open_control(&sock, "phone", 0).await.err().unwrap();
+        let err = open_control(&sock, "phone", 0, None).await.err().unwrap();
         assert_eq!(err.code, ErrorCode::HostNotFound);
         assert_eq!(
             err.message,
@@ -1039,7 +1066,7 @@ mod tests {
             )),
         );
 
-        let err = open_control(&sock, "phone", 0).await.err().unwrap();
+        let err = open_control(&sock, "phone", 0, None).await.err().unwrap();
         assert_eq!(err.code, ErrorCode::Unsupported);
         assert_eq!(err.message, "unsupported LocalHello version");
         daemon.await.unwrap();
@@ -1061,7 +1088,7 @@ mod tests {
             local_response::Body::HostListResult(LocalHostListResult { hosts: Vec::new() }),
         );
 
-        let err = open_control(&sock, "phone", 0).await.err().unwrap();
+        let err = open_control(&sock, "phone", 0, None).await.err().unwrap();
         assert_eq!(err.code, ErrorCode::ConnectionFailed);
         daemon.await.unwrap();
     }

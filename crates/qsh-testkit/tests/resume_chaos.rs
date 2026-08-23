@@ -127,6 +127,7 @@ async fn a_severed_path_is_redialed_and_resumed_inside_the_deadline() {
         // No binder: this path is gone for good, so migration is not on the
         // table. Correctness comes from resume alone — which is the point.
         None,
+        REDIAL_DEADLINE,
         || async { false },
         || async {
             let mut fresh = h.session().await;
@@ -145,6 +146,7 @@ async fn a_severed_path_is_redialed_and_resumed_inside_the_deadline() {
             let (bytes, _) = read_output(&mut stream, 1).await;
             Ok::<_, ClientError>((fresh, attached, stream, bytes))
         },
+        || 0,
     )
     .await;
     // ---- and ends here ----
@@ -270,6 +272,7 @@ async fn a_repath_survives_as_a_migration_with_nothing_to_resume() {
         recover(
             &session_ref,
             None,
+            REDIAL_DEADLINE,
             // A real round trip on the existing connection. It is also
             // what *causes* the migration to complete: the host learns the
             // new peer address from a packet arriving on it, so a probe
@@ -285,6 +288,7 @@ async fn a_repath_survives_as_a_migration_with_nothing_to_resume() {
                 #[allow(unreachable_code)]
                 Ok::<(), ClientError>(())
             },
+            || 0,
         )
         .await
     };

@@ -178,12 +178,16 @@ fn a_noisy_follow_keeps_every_stdout_line_a_complete_json_event() {
 }
 
 /// The reverse-route counterpart of the test above (`PLAN.md` M3 Step 7
-/// DoD 1): the session op is served over `LOCAL_CONTROL`/`LOCAL_STREAM`
-/// (Step 6/7's local daemon splice) instead of a direct QUIC connection,
-/// which is a completely different code path all the way from the CLI's
-/// route resolution down through the byte-transparent UDS↔QUIC pump in
-/// `localctl/daemon.rs::serve_stream` — purity here is not implied by the
-/// forward-route test above.
+/// DoD 1): `session open`/`session read --follow` are both value ops, so
+/// this drives them over the `LOCAL_CONTROL` relay (`localctl/daemon.rs`'s
+/// `serve_control`) instead of a direct QUIC connection — a completely
+/// different route from the CLI's own process all the way to the target
+/// than the forward-route test above, so purity here is not implied by
+/// it. This does **not** exercise `LOCAL_STREAM`/`serve_stream`'s raw
+/// byte splice (that path only carries an interactive attach's
+/// `SESSION_DATA` stream, never a value op) — that path's own stdout
+/// purity is exercised by `reverse_e2e.rs`'s interactive-attach scenario
+/// instead, which drives a real pty rather than `--jsonl`.
 #[cfg(unix)]
 #[test]
 fn a_noisy_follow_over_a_reverse_route_keeps_every_stdout_line_a_complete_json_event() {
