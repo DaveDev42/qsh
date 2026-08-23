@@ -127,21 +127,29 @@ pub async fn run_reverse(
         controller,
         offered_name_flag,
         |_runtime| {},
+        || {},
         shutdown,
     )
     .await
 }
 
-/// [`run_reverse`], plus a hook that fires exactly once — synchronously,
-/// before the first dial — with the long-lived host runtime (broker
-/// included, `docs/design/architecture.md` §3) the reconnect loop below
-/// builds and then reuses across every attempt. `run_reverse` itself is
-/// this function with a no-op hook; the CLI entry point never needs the
-/// runtime handle, only a test that wants to observe session state *across*
-/// a reconnect does (`crates/qsh-testkit/tests/reverse_chaos.rs`), and it
-/// otherwise has no way to reach the one broker instance this call keeps
-/// alive underneath every redial. Mirrors [`super::listen::run_listen`]'s
-/// `on_bound` hook in shape.
+/// [`run_reverse`], plus two hooks: `on_runtime` fires exactly once —
+/// synchronously, before the first dial — with the long-lived host runtime
+/// (broker included, `docs/design/architecture.md` §3) the reconnect loop
+/// below builds and then reuses across every attempt. `run_reverse` itself
+/// is this function with no-op hooks; the CLI entry point supplies
+/// `on_runtime` as a no-op (it never needs the runtime handle — only a
+/// test that wants to observe session state *across* a reconnect does,
+/// `crates/qsh-testkit/tests/reverse_chaos.rs`) but wires `on_unreachable`
+/// up to a one-time stderr diagnostic (`PLAN.md` M3 Step 9, `docs/CLI.md`
+/// §6.13). `on_unreachable` fires at most once per call, the first time an
+/// attempt fails to dial/register (module docs, `run_reverse_unix`'s
+/// reconnect loop) — never once per backoff retry; a doctor-item render
+/// belongs to `qsh-cli`, so this only signals *that* a first failure
+/// happened, never *what to print* (`qsh_core::doctor::
+/// CONTROLLER_UNREACHABLE` stays the one render surface owns the text).
+/// Mirrors [`super::listen::run_listen`]'s `on_bound` hook in shape.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_reverse_observed(
     paths: &Paths,
     config: &Config,
@@ -149,6 +157,7 @@ pub async fn run_reverse_observed(
     controller: &str,
     offered_name_flag: Option<&str>,
     on_runtime: impl FnOnce(&crate::serve::HostRuntime),
+    on_unreachable: impl FnOnce(),
     shutdown: impl std::future::Future<Output = ()>,
 ) -> Result<(), OpError> {
     // Twin cfg blocks as alternative tail expressions — the exact shape
@@ -163,6 +172,7 @@ pub async fn run_reverse_observed(
             controller,
             offered_name_flag,
             on_runtime,
+            on_unreachable,
             shutdown,
         );
         Err(super::listen::windows_unsupported())
@@ -176,6 +186,7 @@ pub async fn run_reverse_observed(
             controller,
             offered_name_flag,
             on_runtime,
+            on_unreachable,
             shutdown,
         )
         .await
@@ -195,6 +206,7 @@ const CLOSE_CODE_PATH_DEAD: u32 = 0x1004;
 /// `docs/CLI.md` §6.13's Windows gate (module docs on
 /// [`super::listen::windows_unsupported`]) — this is the target's half.
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 async fn run_reverse_unix(
     paths: &Paths,
     config: &Config,
@@ -202,6 +214,7 @@ async fn run_reverse_unix(
     controller: &str,
     offered_name_flag: Option<&str>,
     on_runtime: impl FnOnce(&crate::serve::HostRuntime),
+    on_unreachable: impl FnOnce(),
     shutdown: impl std::future::Future<Output = ()>,
 ) -> Result<(), OpError> {
     let device_id = identity.identity.device_id.clone();
@@ -248,6 +261,21 @@ async fn run_reverse_unix(
     let mut backoff = Backoff::new(backoff_limits, rand::rngs::StdRng::from_os_rng());
     tokio::pin!(shutdown);
 
+    // `Option` rather than a bare `FnOnce()` in scope: the loop below can
+    // reach the `Err` arm many times across the process lifetime (every
+    // backoff retry, every future redial after a connection that once
+    // succeeded later dies), but `on_unreachable` must fire at most once
+    // per invocation, and only for a genuine first-attempt failure
+    // (`PLAN.md` M3 Step 9 — a `qsh reverse` process must not re-print the
+    // controller-reachability diagnostic on every retry, and must not
+    // print it at all once the controller has proven reachable by
+    // accepting a registration). `Option::take` turns the `FnOnce` into
+    // something callable from a loop body without changing its "called at
+    // most once" contract; the `Ok` arm below additionally sets this to
+    // `None` outright so a later redial failure — after the controller
+    // was already reachable once — never fires it.
+    let mut on_unreachable = Some(on_unreachable);
+
     loop {
         let attempt = tokio::select! {
             _ = &mut shutdown => {
@@ -261,6 +289,27 @@ async fn run_reverse_unix(
             Ok(v) => v,
             Err(err) => {
                 tracing::warn!(controller, %err, "qsh reverse: registration attempt failed");
+                // Gated to the FIRST failed connection attempt of a fresh
+                // process, before any registration has ever succeeded:
+                // `dial_and_register` collapses DNS failures,
+                // refused/blackholed UDP, and TLS rejections into the same
+                // `OpError` today, so there is no protocol-level signal
+                // this loop could switch on to fire only for the
+                // reachability-class case the diagnostic describes without
+                // a wire change (`PLAN.md` M3 Step 9 documents this choice
+                // explicitly). The first attempt of a fresh `qsh reverse`
+                // process is the one moment a controller that is simply
+                // unreachable and a controller having a bad day look
+                // identical from here, and it is also the moment an
+                // operator most needs the reachability reminder — so this
+                // is where it fires, once, and (the `Ok` arm's `None`
+                // assignment below) never once the controller has proven
+                // itself reachable by accepting a registration — a later
+                // redial failure after that is a benign reconnect blip
+                // (mobility, sleep/wake), not a reachability problem.
+                if let Some(hook) = on_unreachable.take() {
+                    hook();
+                }
                 let delay = backoff.next_delay();
                 ReconnectEvent {
                     event: "retry",
@@ -278,7 +327,16 @@ async fn run_reverse_unix(
         };
         // A registration the controller actually accepted: the next
         // failure (if any) starts backoff over from `backoff_initial_ms`
-        // again (`docs/design/protocol.md` §11-4).
+        // again (`docs/design/protocol.md` §11-4). Also permanently
+        // disarms `on_unreachable`: it must fire only for a genuine
+        // first-attempt failure (the comment above this match), never for
+        // a later redial after a connection that once worked — a benign
+        // reconnect blip (mobility, a sleep/wake) is exactly the case
+        // `docs/design/testing.md` L2's reconnect story exists to survive,
+        // and printing "controller unreachable" for it would be a false
+        // alarm the controller has already disproved by having accepted
+        // this same target once (adversarial review finding, M3 Step 9).
+        on_unreachable = None;
         backoff.reset();
 
         // Must outlive the connection (`Dialer::dial`'s own docs).
@@ -628,6 +686,7 @@ mod tests {
                 controller,
                 None,
                 |_runtime| {},
+                || {},
                 std::future::pending::<()>(),
             );
             assert_send(fut);

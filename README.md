@@ -154,6 +154,12 @@ Per-milestone scope, in/out boundaries and acceptance criteria live in
   ends the registration rather than retrying it — and no CLI command can
   actually open a session on a reverse-registered target yet (that needs
   the `localctl` multiplexer, still to come in M3).
+- Reverse attach needs a directly reachable path from the target to the
+  controller:
+
+  > Reverse attach needs a directly reachable UDP path from the target to the controller. QSH provides no relay, NAT traversal, or discovery — that is out of scope for P0.
+  >
+  > Put the controller on a publicly routable address, a forwarded port, or an existing overlay such as WireGuard or Tailscale. If the controller itself is behind NAT, M3 has no answer for that.
 
 ## Product boundary
 

@@ -323,6 +323,39 @@ impl ReverseHarness {
             config,
             self.addr,
             |_runtime| {},
+            || {},
+            shutdown,
+        )
+        .await
+    }
+
+    /// [`Self::run_target_with_config`], plus a hook that fires at most
+    /// once, the first time an attempt to reach `controller_alias` fails —
+    /// the same `on_unreachable` [`run_reverse_observed`] exposes, wired
+    /// through so a test can assert `qsh-core`'s once-only guard directly
+    /// (`PLAN.md` M3 Step 9's "exactly once" test) without spawning a real
+    /// `qsh reverse` process.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn run_target_observing_unreachable(
+        &self,
+        target: &TestIdentity,
+        device_id: &str,
+        controller_alias: &str,
+        offered_name: Option<&str>,
+        config: &Config,
+        dial_addr: SocketAddr,
+        on_unreachable: impl FnOnce(),
+        shutdown: impl Future<Output = ()>,
+    ) -> Result<(), OpError> {
+        self.run_target_via(
+            target,
+            device_id,
+            controller_alias,
+            offered_name,
+            config,
+            dial_addr,
+            |_runtime| {},
+            on_unreachable,
             shutdown,
         )
         .await
@@ -369,12 +402,14 @@ impl ReverseHarness {
             config,
             chaos.addr(),
             on_runtime,
+            || {},
             shutdown,
         )
         .await
     }
 
-    /// The building block [`Self::run_target_with_config`] and
+    /// The building block [`Self::run_target_with_config`],
+    /// [`Self::run_target_observing_unreachable`] and
     /// [`Self::run_target_through_chaos`] share: build a target trust.toml
     /// pinning `dial_addr` under `controller_alias`, then run the real
     /// [`run_reverse_observed`].
@@ -388,6 +423,7 @@ impl ReverseHarness {
         config: &Config,
         dial_addr: SocketAddr,
         on_runtime: impl FnOnce(&HostRuntime),
+        on_unreachable: impl FnOnce(),
         shutdown: impl Future<Output = ()>,
     ) -> Result<(), OpError> {
         let (_dir, paths) = self.target_paths_at(controller_alias, dial_addr);
@@ -399,6 +435,7 @@ impl ReverseHarness {
             controller_alias,
             offered_name,
             on_runtime,
+            on_unreachable,
             shutdown,
         )
         .await

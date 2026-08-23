@@ -17,6 +17,7 @@ pub mod audit;
 pub mod broker;
 pub mod client;
 pub mod config;
+pub mod doctor;
 pub mod exec;
 pub mod handshake;
 pub mod identity;
@@ -39,6 +40,7 @@ pub mod trust;
 
 pub use client::pathwatch::PathWatchConfig;
 pub use config::{Config, Paths, now_rfc3339};
+pub use doctor::{CONTROLLER_UNREACHABLE, Diagnostic, DiagnosticId};
 pub use identity::{Identity, KeyStore, KeyStoreError, LoadedIdentity};
 pub use ops::{
     AttachHandle, DetachFlush, ExecRunOp, ExecRunOutput, ExecStdin, HostGetOp, HostListOp,
