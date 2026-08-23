@@ -437,9 +437,24 @@ fn attach_on_an_unregistered_host_is_host_not_found_and_stdout_stays_empty() {
         1,
         "expected exactly one stderr line: {stderr:?}"
     );
+    // The error the single stderr line names is the one platform-difference
+    // in this command: on unix, interactive attach reaches route
+    // resolution and reports `HOST_NOT_FOUND` for the missing registration;
+    // on Windows the PTY/TTY path is `cfg(unix)`, so `run_interactive`
+    // answers `UNSUPPORTED` ("needs a POSIX terminal") *before* it ever
+    // reaches host resolution — interactive mode is the PTY/TTY path, which
+    // is `cfg(unix)` (`docs/CLI.md` §7 human interactive mode) — a
+    // pre-existing platform fact, not a Step-7 regression. Everything else
+    // this test pins (exit 255, empty stdout, exactly one stderr line) is
+    // identical on both, so the assertion branches only on the code name.
+    let expected_code = if cfg!(unix) {
+        "(HOST_NOT_FOUND)"
+    } else {
+        "(UNSUPPORTED)"
+    };
     assert!(
-        lines[0].contains("(HOST_NOT_FOUND)"),
-        "stderr must name HOST_NOT_FOUND: {stderr:?}"
+        lines[0].contains(expected_code),
+        "stderr must name {expected_code}: {stderr:?}"
     );
 }
 
