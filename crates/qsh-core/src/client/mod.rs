@@ -17,9 +17,19 @@ use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::exec::ExecSpec;
+// `crate::localctl` is `#[cfg(unix)]`-only (`lib.rs`) — this whole reverse
+// (`LOCAL_CONTROL`) leg is unix-only, mirroring `ops/session.rs`'s own
+// `connect_reverse`/`dial_reverse` twin-cfg discipline (Windows leg trap
+// (b): an ungated import consumed only by unix-only code trips
+// `unused_imports` under Windows clippy).
+#[cfg(unix)]
+use crate::localctl::client::ControlConduit;
 
+pub mod link;
 pub mod pathwatch;
 pub mod reconnect;
+
+use link::ControlLink;
 
 /// How long to wait for the peer's `Hello`. Single definition now lives in
 /// [`crate::handshake`]; re-exported here so this path stays stable.
@@ -111,9 +121,18 @@ pub fn map_hello_error(err: crate::handshake::HelloError) -> ClientError {
 }
 
 /// A negotiated connection: control stream open, `Hello` exchanged.
+///
+/// `conn` is `None` exactly when [`Self::link`] is
+/// [`ControlLink::Local`](link::ControlLink::Local) (the reverse route,
+/// `PLAN.md` M3 Step 6): a CLI process relaying through its resident
+/// daemon is not itself a QUIC endpoint on the underlying connection, so
+/// there is no [`Connection`] to hold. That leg has no data-stream conduit
+/// yet either (`LOCAL_STREAM` is a later step), so [`Self::exec`] and
+/// [`Self::open_attach_stream`] fail closed with [`ClientError::Unsupported`]
+/// rather than reach for it — see [`Self::require_connection`].
 pub struct Session {
-    conn: Connection,
-    ctl: FramedStream,
+    conn: Option<Connection>,
+    link: ControlLink,
     next_request_id: u64,
     /// Capabilities both sides support.
     pub capabilities: Vec<String>,
@@ -149,17 +168,67 @@ impl Session {
     /// up with a `Session` through the same construction.
     pub fn from_control(conn: Connection, ctl: FramedStream, peer_hello: Hello) -> Self {
         Self {
-            conn,
-            ctl,
+            conn: Some(conn),
+            link: ControlLink::Quic(ctl),
             next_request_id: 1,
             capabilities: crate::handshake::negotiated_capabilities(&peer_hello),
             peer_device_name: peer_hello.device_name,
         }
     }
 
+    /// Build a [`Session`] over a `LOCAL_CONTROL` conduit already past its
+    /// `LocalHelloAck` (`crate::localctl::client::open_control`) — the
+    /// reverse-route sibling of [`Self::from_control`]
+    /// (`docs/design/protocol.md` §11-3, `PLAN.md` M3 Step 6). There is no
+    /// `Hello` exchange on this leg (the daemon already negotiated one
+    /// with the peer on the CLI process's behalf), so `capabilities` and
+    /// `peer_device_name` come straight from the ack instead —
+    /// `LocalHelloAck.capabilities` and `.host` respectively.
+    #[cfg(unix)]
+    pub(crate) fn from_local_control(
+        conduit: ControlConduit,
+        capabilities: Vec<String>,
+        host: String,
+    ) -> Self {
+        Self {
+            conn: None,
+            link: ControlLink::Local(conduit),
+            next_request_id: 1,
+            capabilities,
+            peer_device_name: host,
+        }
+    }
+
     /// The underlying connection.
+    ///
+    /// Only ever `None` on the reverse route (see [`Self`]'s own doc);
+    /// every daemon-side session (`crate::reverse::listen`, always dialed
+    /// to a real target) and every forward CLI session is `Some`, so this
+    /// panics rather than returning `Option<&Connection>` — a signature
+    /// change every existing caller (all forward/daemon-side) would have
+    /// to thread through for a case that provably cannot reach them.
     pub fn connection(&self) -> &Connection {
-        &self.conn
+        self.conn
+            .as_ref()
+            .expect("connection() is never called on a reverse-route (LOCAL_CONTROL) Session")
+    }
+
+    /// The connection [`Self::exec`]/[`Self::open_attach_stream`] open a
+    /// data stream on — `Err(Unsupported)` on the reverse route (see
+    /// [`Self`]'s own doc), never a panic: unlike [`Self::connection`],
+    /// these two are reachable on a reverse-linked `Session` in principle
+    /// (nothing about the six value ops calls them, but nothing stops a
+    /// future caller from trying), so failing closed with a typed error
+    /// is the fail-closed default M3 Step 6 leaves in place until Step 7's
+    /// `LOCAL_STREAM` data-stream conduit lands.
+    fn require_connection(&self) -> Result<&Connection, ClientError> {
+        self.conn.as_ref().ok_or_else(|| {
+            ClientError::Unsupported(
+                "this session has no QUIC connection (reverse LOCAL_CONTROL leg); data streams \
+                 over a reverse route land in M3 Step 7"
+                    .into(),
+            )
+        })
     }
 
     fn has_capability(&self, cap: &str) -> bool {
@@ -173,26 +242,19 @@ impl Session {
     ) -> Result<wire::Response, ClientError> {
         let request_id = self.next_request_id;
         self.next_request_id += 1;
-        self.ctl
-            .send
+        self.link
             .send(&ControlMessage::new(request_id, body))
             .await?;
         loop {
-            let msg = self
-                .ctl
-                .recv
-                .recv::<ControlMessage>()
-                .await?
-                .ok_or_else(|| {
-                    ClientError::Protocol("peer closed control stream mid-request".into())
-                })?;
+            let msg = self.link.recv().await?.ok_or_else(|| {
+                ClientError::Protocol("peer closed control stream mid-request".into())
+            })?;
             match msg.body {
                 Some(control_message::Body::Response(resp)) if msg.request_id == request_id => {
                     return Ok(resp);
                 }
                 Some(control_message::Body::Ping(_)) => {
-                    self.ctl
-                        .send
+                    self.link
                         .send(&ControlMessage::new(
                             msg.request_id,
                             control_message::Body::Pong(wire::Pong {}),
@@ -249,7 +311,7 @@ impl Session {
         let started_msg = self.exec_start(spec).await?;
 
         // Data stream: header first, then pump.
-        let (send, recv) = self.conn.open_bi().await?;
+        let (send, recv) = self.require_connection()?.open_bi().await?;
         let mut data = FramedStream::data(send, recv);
         data.send.set_priority(wire::PRIORITY_EXEC_DATA);
         data.send
@@ -505,7 +567,7 @@ impl Session {
         &mut self,
         attached: wire::SessionAttached,
     ) -> Result<Attached, ClientError> {
-        let (send, recv) = self.conn.open_bi().await?;
+        let (send, recv) = self.require_connection()?.open_bi().await?;
         let mut data = FramedStream::data(send, recv);
         data.send.set_priority(wire::PRIORITY_SESSION_DATA);
         data.send
@@ -566,7 +628,7 @@ impl Session {
     /// future at any poll and lose nothing.
     pub async fn next_control(&mut self) -> Result<Option<ControlIn>, ClientError> {
         loop {
-            let Some(msg) = self.ctl.recv.recv::<ControlMessage>().await? else {
+            let Some(msg) = self.link.recv().await? else {
                 return Ok(None);
             };
             return Ok(Some(match msg.body {
@@ -594,14 +656,12 @@ impl Session {
 
     /// Answer a peer `Ping`.
     pub async fn send_pong(&mut self, request_id: u64) -> Result<(), ClientError> {
-        self.ctl
-            .send
+        self.link
             .send(&ControlMessage::new(
                 request_id,
                 control_message::Body::Pong(wire::Pong {}),
             ))
-            .await?;
-        Ok(())
+            .await
     }
 
     /// Answer an inbound [`ControlIn::Request`] with `UNSUPPORTED` —
@@ -610,8 +670,7 @@ impl Session {
     /// to answer in practice; `qsh listen` (`PLAN.md` M3 Step 3) is the
     /// first real caller.
     pub async fn reject_unsupported(&mut self, request_id: u64) -> Result<(), ClientError> {
-        self.ctl
-            .send
+        self.link
             .send(&ControlMessage::error(
                 request_id,
                 wire::Error::new(
@@ -620,8 +679,7 @@ impl Session {
                     false,
                 ),
             ))
-            .await?;
-        Ok(())
+            .await
     }
 
     /// Send a liveness `Ping`; the peer answers with a `Pong` that arrives
@@ -635,20 +693,61 @@ impl Session {
     pub async fn send_ping(&mut self) -> Result<(), ClientError> {
         let request_id = self.next_request_id;
         self.next_request_id += 1;
-        self.ctl
-            .send
+        self.link
             .send(&ControlMessage::new(
                 request_id,
                 control_message::Body::Ping(wire::Ping {}),
             ))
-            .await?;
-        Ok(())
+            .await
     }
 
-    /// Finish the control stream and close the connection cleanly.
+    /// Finish the control link and close the underlying connection, if
+    /// this session has one (see [`Self`]'s own doc on `conn`).
     pub fn close(mut self) {
-        let _ = self.ctl.send.finish();
-        self.conn.close(0, b"done");
+        self.link.finish();
+        if let Some(conn) = self.conn.take() {
+            conn.close(0, b"done");
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Raw control-message I/O (M3 Step 6): the reverse controller's
+    // `LOCAL_CONTROL` relay (`crate::reverse::listen`, `crate::localctl`)
+    // needs to forward an already-built `ControlMessage` verbatim under an
+    // id *it* chooses (the multiplexer's `daemon_request_id`,
+    // `docs/design/protocol.md` §11-3's "request_id 재매핑"), and needs to
+    // see every inbound frame — including a correlated `Response`, which
+    // [`Self::request`]/[`Self::next_control`] both consume internally
+    // (the former to resolve its own call, the latter by design: its doc
+    // comment notes `request()` owns response correlation). Neither
+    // existing pair fits a caller that must multiplex many *concurrent*
+    // logical requests over this one physical control stream while also
+    // never dropping an interleaved `SessionEvent` — so these two methods
+    // are additive raw primitives, not replacements: every existing
+    // caller of `request`/`next_control`/`next_event` is unchanged and
+    // must keep being the *only* reader/writer of a `Session` it uses that
+    // way (this pair is for a caller — today, only the reverse
+    // controller's per-host driver — that instead becomes the *sole*
+    // reader/writer for its `Session` and does its own classification of
+    // every inbound frame, `Response` included).
+    //
+    /// Send an already-built `ControlMessage` verbatim, bypassing this
+    /// `Session`'s own internal id counter entirely (that counter is
+    /// otherwise only advanced by [`Self::request`]/[`Self::send_ping`],
+    /// whose replies this caller is not using — see this section's docs).
+    pub async fn send_control_message(&mut self, msg: &ControlMessage) -> Result<(), ClientError> {
+        self.link.send(msg).await
+    }
+
+    /// Read the next inbound `ControlMessage` whole — `request_id` and
+    /// `body` both, `Response` included — with **no** classification and
+    /// **no** answer written on the caller's behalf (not even a peer
+    /// `Ping`, unlike [`Self::next_event`]): the caller (see this
+    /// section's docs) decides everything, including liveness replies,
+    /// itself. `Ok(None)` on a clean end-of-stream, matching
+    /// [`Self::next_control`]'s own contract.
+    pub async fn next_control_message(&mut self) -> Result<Option<ControlMessage>, ClientError> {
+        self.link.recv().await
     }
 }
 

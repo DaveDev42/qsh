@@ -26,6 +26,7 @@ use qsh_proto::local::{
     LOCAL_HELLO_VERSION, LocalError, LocalHello, LocalHost, LocalHostList, LocalHostListResult,
     LocalResponse, LocalStreamKind, local_response,
 };
+use qsh_proto::wire::ControlMessage;
 use tokio::net::UnixStream;
 use tokio::task::JoinSet;
 
@@ -90,6 +91,144 @@ async fn admin_host_list_over_inner(stream: UnixStream) -> Result<Vec<LocalHost>
             ErrorCode::ConnectionFailed,
             "localctl: daemon answered LocalHostList with an unexpected response",
         )),
+    }
+}
+
+/// Open a `LOCAL_CONTROL` conduit to the daemon listening on `socket_path`
+/// for `host`, and consume its `LocalHelloAck` — the CLI-process-side half
+/// of `docs/design/protocol.md` §11-3's relay: after this returns, the
+/// [`ControlConduit`] it hands back carries the exact same
+/// `qsh.wire.v1::ControlMessage`/`Response` pair a QUIC control stream to
+/// `host` would (`crate::client::link::ControlLink::Local` is the seam
+/// that plugs this into a `client::Session`, `PLAN.md` M3 Step 6).
+///
+/// `wait_ms` is passed straight through to `LocalHello` (clamped by the
+/// daemon to `LOCAL_WAIT_MAX`, `qsh/local/v1.proto`); Step 6's own callers
+/// pass `0` (`Ops::resolve_host_route`/`resolve_host_route_async` already
+/// resolved a *live* registration before this is ever called — there is
+/// nothing to wait for yet). A later step's `LocalReconnect` wait is a
+/// nonzero `wait_ms` on top of this same primitive, not a reason to change
+/// it.
+pub(crate) async fn open_control(
+    socket_path: &Path,
+    host: &str,
+    wait_ms: u32,
+) -> Result<ControlHandshake, OpError> {
+    let stream = UnixStream::connect(socket_path)
+        .await
+        .map_err(|err| io_error("connect", socket_path, &err))?;
+    open_control_over(stream, host, wait_ms).await
+}
+
+/// Same exchange as [`open_control`], over an already-connected conduit —
+/// split out for the same reason [`admin_host_list_over`] is: tests drive
+/// the handshake without a real `connect(2)`.
+pub(crate) async fn open_control_over(
+    stream: UnixStream,
+    host: &str,
+    wait_ms: u32,
+) -> Result<ControlHandshake, OpError> {
+    match tokio::time::timeout(
+        PROBE_TIMEOUT,
+        open_control_over_inner(stream, host, wait_ms),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_elapsed) => Err(OpError::new(
+            ErrorCode::ConnectionFailed,
+            format!(
+                "localctl: daemon accepted the LOCAL_CONTROL conduit but never answered within \
+                 {PROBE_TIMEOUT:?}"
+            ),
+        )),
+    }
+}
+
+async fn open_control_over_inner(
+    stream: UnixStream,
+    host: &str,
+    wait_ms: u32,
+) -> Result<ControlHandshake, OpError> {
+    let mut conduit = LocalConduit::new(stream);
+    conduit
+        .send(&LocalHello {
+            version: LOCAL_HELLO_VERSION,
+            kind: LocalStreamKind::LocalControl as i32,
+            host: host.to_string(),
+            wait_ms,
+        })
+        .await?;
+
+    let response: LocalResponse = conduit.recv().await?.ok_or_else(|| {
+        OpError::new(
+            ErrorCode::ConnectionFailed,
+            "localctl: daemon closed the conduit without answering the LOCAL_CONTROL LocalHello",
+        )
+    })?;
+    match response.body {
+        Some(local_response::Body::HelloAck(ack)) => Ok(ControlHandshake {
+            conduit: ControlConduit { conduit },
+            host: ack.host,
+            peer_fingerprint: ack.peer_fingerprint,
+            generation: ack.generation,
+            capabilities: ack.capabilities,
+        }),
+        Some(local_response::Body::Error(err)) => Err(remote_error(err)),
+        _ => Err(OpError::new(
+            ErrorCode::ConnectionFailed,
+            "localctl: daemon answered the LOCAL_CONTROL LocalHello with an unexpected response",
+        )),
+    }
+}
+
+/// What a successful [`open_control`]/[`open_control_over`] handshake
+/// produced: the live [`ControlConduit`] plus the registration facts its
+/// `LocalHelloAck` carried (`qsh/local/v1.proto`'s `LocalHelloAck` doc
+/// comment) — `peer_fingerprint` in particular is the ADR-0007
+/// presentation-condition input on the reverse leg
+/// (`crate::ops::session::Connected::peer_fingerprint`), since the CLI
+/// process is not itself a TLS endpoint on the underlying connection and
+/// has no other way to learn it.
+pub(crate) struct ControlHandshake {
+    pub conduit: ControlConduit,
+    pub host: String,
+    pub peer_fingerprint: String,
+    /// Registration generation at the moment of this ack. No M3 Step 6
+    /// caller reads it yet — kept because it is Step 8's `LocalReconnect`
+    /// input (detecting a re-registration across a dropped reverse
+    /// connection), and re-adding it to the wire round trip later would be
+    /// a bigger diff than carrying it unread for two steps.
+    #[allow(dead_code)]
+    pub generation: u64,
+    pub capabilities: Vec<String>,
+}
+
+/// A live `LOCAL_CONTROL` conduit, past its `LocalHelloAck` — carries
+/// `qsh.wire.v1::ControlMessage` frames verbatim in both directions
+/// (`qsh/local/v1.proto`'s file-level doc: "이 connection 은 그 정확히 같은
+/// qsh.wire.v1 ControlMessage/Response pair 를 나른다"). Deliberately a
+/// thin wrapper — everything about *when* to send what and how to
+/// correlate a reply belongs to `crate::client::Session`
+/// (`crate::client::link::ControlLink::Local` holds one of these), not
+/// here; this file stays "connect and hand back a channel," matching
+/// [`admin_host_list_over`]'s own shape.
+pub(crate) struct ControlConduit {
+    conduit: LocalConduit<UnixStream>,
+}
+
+impl ControlConduit {
+    /// Send one `ControlMessage` verbatim.
+    pub(crate) async fn send(&mut self, msg: &ControlMessage) -> Result<(), OpError> {
+        self.conduit.send(msg).await
+    }
+
+    /// Read the next `ControlMessage`. `Ok(None)` on a clean end of the
+    /// conduit (the daemon closed it — a dead conduit, or `serve_control`
+    /// ending it because `host`'s reverse connection died,
+    /// `docs/design/protocol.md` §11-3).
+    pub(crate) async fn recv(&mut self) -> Result<Option<ControlMessage>, OpError> {
+        self.conduit.recv().await
     }
 }
 
@@ -445,6 +584,7 @@ fn process_is_verifiably_dead(pid: u32) -> bool {
 mod tests {
     use std::time::Instant;
 
+    use qsh_proto::local::LocalHelloAck;
     use tokio::net::UnixListener;
 
     use super::*;
@@ -518,6 +658,140 @@ mod tests {
         let err = admin_host_list(&sock).await.unwrap_err();
         assert_eq!(err.code, ErrorCode::HostNotFound);
         assert_eq!(err.message, "no such registration");
+        daemon.await.unwrap();
+    }
+
+    // ---- `open_control` / `ControlConduit` (M3 Step 6) ----
+
+    /// Spawn a one-shot fake daemon: reads one `LOCAL_CONTROL` `LocalHello`
+    /// off `listener`, asserts it against `expect_host`, and answers with
+    /// whatever `LocalResponse` body the caller supplies — the
+    /// `LOCAL_CONTROL` sibling of [`spawn_fake_admin_daemon`].
+    fn spawn_fake_control_daemon(
+        listener: UnixListener,
+        expect_host: &'static str,
+        body: local_response::Body,
+    ) -> tokio::task::JoinHandle<LocalConduit<UnixStream>> {
+        tokio::spawn(async move {
+            let (stream, _addr) = listener.accept().await.unwrap();
+            let mut conduit = LocalConduit::new(stream);
+            let hello: LocalHello = conduit.recv().await.unwrap().unwrap();
+            assert_eq!(hello.kind, LocalStreamKind::LocalControl as i32);
+            assert_eq!(hello.host, expect_host);
+            conduit
+                .send(&LocalResponse { body: Some(body) })
+                .await
+                .unwrap();
+            conduit
+        })
+    }
+
+    #[tokio::test]
+    async fn open_control_ack_happy_path_carries_the_ack_fields_and_the_conduit_relays_after() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("200.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+        let daemon = spawn_fake_control_daemon(
+            listener,
+            "personal-mac",
+            local_response::Body::HelloAck(LocalHelloAck {
+                host: "personal-mac".to_string(),
+                peer_fingerprint: "sha256:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB".to_string(),
+                generation: 3,
+                capabilities: vec!["pty".to_string()],
+            }),
+        );
+
+        let handshake = open_control(&sock, "personal-mac", 0).await.unwrap();
+        assert_eq!(handshake.host, "personal-mac");
+        assert_eq!(
+            handshake.peer_fingerprint,
+            "sha256:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+        );
+        assert_eq!(handshake.capabilities, vec!["pty".to_string()]);
+        let mut daemon_conduit = daemon.await.unwrap();
+
+        // Past the ack, the conduit carries `wire::ControlMessage` verbatim
+        // in both directions (`qsh/local/v1.proto`'s file doc) — prove it
+        // round-trips one, the way a real `session.get` request/response
+        // pair would.
+        let mut conduit = handshake.conduit;
+        let ping = qsh_proto::wire::ControlMessage::new(
+            7,
+            qsh_proto::wire::control_message::Body::Ping(qsh_proto::wire::Ping {}),
+        );
+        conduit.send(&ping).await.unwrap();
+        let received: qsh_proto::wire::ControlMessage =
+            daemon_conduit.recv().await.unwrap().unwrap();
+        assert_eq!(received, ping);
+    }
+
+    #[tokio::test]
+    async fn open_control_maps_a_local_error_verbatim() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("201.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+        let daemon = spawn_fake_control_daemon(
+            listener,
+            "phone",
+            local_response::Body::Error(LocalError::from_code(
+                ErrorCode::HostNotFound,
+                "phone is not a currently reachable registered host",
+            )),
+        );
+
+        let err = open_control(&sock, "phone", 0).await.err().unwrap();
+        assert_eq!(err.code, ErrorCode::HostNotFound);
+        assert_eq!(
+            err.message,
+            "phone is not a currently reachable registered host"
+        );
+        daemon.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn open_control_maps_a_version_or_kind_rejection_the_same_way_as_any_local_error() {
+        // The daemon rejects a `LocalHello` it cannot serve (bad version,
+        // or a `kind` it does not support) with the same `LocalError`
+        // envelope as any other refusal — `open_control` has no special
+        // case for these, they are just another remote error to map
+        // verbatim (`crate::localctl::client::remote_error`).
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("202.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+        let daemon = spawn_fake_control_daemon(
+            listener,
+            "phone",
+            local_response::Body::Error(LocalError::from_code(
+                ErrorCode::Unsupported,
+                "unsupported LocalHello version",
+            )),
+        );
+
+        let err = open_control(&sock, "phone", 0).await.err().unwrap();
+        assert_eq!(err.code, ErrorCode::Unsupported);
+        assert_eq!(err.message, "unsupported LocalHello version");
+        daemon.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn open_control_treats_an_unexpected_response_body_as_connection_failed() {
+        // A `LOCAL_ADMIN`-shaped reply (`HostListResult`) on a
+        // `LOCAL_CONTROL` conduit is not a `LocalError` — it's a
+        // protocol-shape violation, not a "the daemon refused" answer, so
+        // it maps to `ConnectionFailed` rather than being misread as
+        // success.
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("203.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+        let daemon = spawn_fake_control_daemon(
+            listener,
+            "phone",
+            local_response::Body::HostListResult(LocalHostListResult { hosts: Vec::new() }),
+        );
+
+        let err = open_control(&sock, "phone", 0).await.err().unwrap();
+        assert_eq!(err.code, ErrorCode::ConnectionFailed);
         daemon.await.unwrap();
     }
 

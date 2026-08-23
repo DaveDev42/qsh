@@ -331,14 +331,44 @@ impl Ops {
         resolve_route(&reverse, &store, name)
     }
 
+    /// The async twin of [`Self::resolve_host_route`] — same decision
+    /// (delegates to the same pure [`resolve_route`]), but never builds or
+    /// blocks on its own runtime, so it is safe to call from *inside* one
+    /// that already exists (`PLAN.md` M3 Step 6's async seam).
+    ///
+    /// `Ops::connect` (`crate::ops::session`) does **not** need this seam
+    /// today: it calls the sync [`Self::resolve_host_route`] from
+    /// `Ops::resolve_route` *before* `connect_target`/`connect_reverse`
+    /// build their own dial runtime, so the throwaway probe runtime this
+    /// resolves with and the dial's own multi-thread runtime are
+    /// sequential, never nested — no caller on the current CLI/MCP-less
+    /// call graph reaches `connect` from inside an already-running
+    /// runtime (`main` is a plain sync `fn`). This method exists as the
+    /// seam for the caller that eventually will run inside one — a future
+    /// async host (an MCP adapter, or any other async entry point) that
+    /// needs the same routing decision without the sync method's "cannot
+    /// start a runtime from within a runtime" hazard — so that caller
+    /// never has to reach for `crates/qsh-testkit/tests/host_list_reverse.rs`'s
+    /// `spawn_blocking` workaround the way today's sync-only callers do.
+    pub async fn resolve_host_route_async(&self, name: &str) -> Result<HostRoute, OpError> {
+        let reverse = self.reverse_host_entries_async().await;
+        let store = TrustStore::load(&self.paths.trust_file())?;
+        resolve_route(&reverse, &store, name)
+    }
+
     /// The reverse source: the union of `LocalHostList` across every
     /// localctl daemon discovered on this machine — unix only, since
     /// localctl (UDS) has no meaning on Windows (`docs/CLI.md` §6.13:
     /// Windows `qsh hosts` returns forward hosts only, not an error).
+    ///
+    /// Sync wrapper around [`Self::reverse_host_entries_async`]: builds a
+    /// throwaway current-thread runtime and `block_on`s it, exactly the
+    /// way [`Self::resolve_host_route`] always has — this method is that
+    /// runtime-management, factored out so the async logic itself lives in
+    /// exactly one place.
     fn reverse_host_entries(&self) -> Vec<ReverseHostEntry> {
         #[cfg(unix)]
         {
-            let runtime_dir = self.paths().runtime_dir();
             let runtime = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -358,26 +388,41 @@ impl Ops {
                     return Vec::new();
                 }
             };
-            runtime.block_on(async {
-                crate::localctl::client::admin_host_list_all(&runtime_dir)
-                    .await
-                    .into_iter()
-                    .flat_map(|daemon| {
-                        let pid = daemon.pid;
-                        let socket = daemon.socket;
-                        daemon.hosts.into_iter().map(move |local| ReverseHostEntry {
-                            pid,
-                            socket: socket.clone(),
-                            local,
-                        })
-                    })
-                    .collect()
-            })
+            runtime.block_on(self.reverse_host_entries_async())
         }
         #[cfg(not(unix))]
         {
             Vec::new()
         }
+    }
+
+    /// The truly-async half of [`Self::reverse_host_entries`] — no runtime
+    /// of its own, so it is safe to `.await` directly from inside a
+    /// caller's own runtime (see [`Self::resolve_host_route_async`]).
+    #[cfg(unix)]
+    async fn reverse_host_entries_async(&self) -> Vec<ReverseHostEntry> {
+        let runtime_dir = self.paths().runtime_dir();
+        crate::localctl::client::admin_host_list_all(&runtime_dir)
+            .await
+            .into_iter()
+            .flat_map(|daemon| {
+                let pid = daemon.pid;
+                let socket = daemon.socket;
+                daemon.hosts.into_iter().map(move |local| ReverseHostEntry {
+                    pid,
+                    socket: socket.clone(),
+                    local,
+                })
+            })
+            .collect()
+    }
+
+    /// Windows twin of [`Self::reverse_host_entries_async`]: localctl (UDS)
+    /// has no meaning there, so the reverse source is always empty
+    /// (`docs/CLI.md` §6.13).
+    #[cfg(not(unix))]
+    async fn reverse_host_entries_async(&self) -> Vec<ReverseHostEntry> {
+        Vec::new()
     }
 }
 
@@ -636,4 +681,126 @@ mod tests {
         assert_eq!(reverse.connection_mode, "reverse");
         assert_eq!(reverse.state, "reachable");
     }
+
+    // ---- `resolve_host_route_async` (`PLAN.md` M3 Step 6's async seam) ----
+    //
+    // `#[cfg(unix)]`: localctl (UDS, `tokio::net::UnixListener`) is
+    // unix-only, same gate as `crate::localctl` itself (`lib.rs`) —
+    // Windows leg trap (b), an ungated `#[cfg(test)]` item under
+    // `--all-targets` breaks the Windows leg exactly like ungated
+    // production code would.
+    //
+    // These drive the seam `Ops::connect`/`connect_target` (`crate::ops::
+    // session`) actually use, straight from a `#[tokio::test]` worker
+    // thread with **no** `spawn_blocking` bridge — proving it is genuinely
+    // safe to `.await` from inside a runtime that already exists, which is
+    // exactly the hazard the sync `resolve_host_route`'s own doc comment
+    // flags. Where a live registration matters, a hand-rolled `LOCAL_ADMIN`
+    // fake daemon (mirroring `localctl::client`'s own test idiom) stands in
+    // for a real `qsh listen` process — no `qsh-testkit`/`ReverseHarness`
+    // here, since `qsh-core` deliberately does not dev-depend on it.
+    #[cfg(unix)]
+    mod reverse_route_async_tests {
+        use super::*;
+        use tokio::net::UnixListener;
+
+        use crate::config::Paths;
+
+        /// Bind a one-shot fake `LOCAL_ADMIN` daemon at `<pid>.sock` under
+        /// `runtime_dir`, answering exactly one `LocalHostList` with `hosts`.
+        fn spawn_fake_admin_daemon(
+            runtime_dir: &std::path::Path,
+            pid: u32,
+            hosts: Vec<LocalHost>,
+        ) -> tokio::task::JoinHandle<()> {
+            std::fs::create_dir_all(runtime_dir).unwrap();
+            let sock = runtime_dir.join(format!("{pid}.sock"));
+            let listener = UnixListener::bind(&sock).unwrap();
+            tokio::spawn(async move {
+                let (stream, _addr) = listener.accept().await.unwrap();
+                let mut conduit = crate::localctl::frame::LocalConduit::new(stream);
+                let _hello: qsh_proto::local::LocalHello = conduit.recv().await.unwrap().unwrap();
+                let _req: qsh_proto::local::LocalHostList = conduit.recv().await.unwrap().unwrap();
+                conduit
+                    .send(&qsh_proto::local::LocalResponse {
+                        body: Some(qsh_proto::local::local_response::Body::HostListResult(
+                            qsh_proto::local::LocalHostListResult { hosts },
+                        )),
+                    })
+                    .await
+                    .unwrap();
+            })
+        }
+
+        fn ops_at(runtime_dir: &std::path::Path, trust: &TrustStore) -> Ops {
+            let paths = Paths::new(runtime_dir.join("config"), runtime_dir.join("state"))
+                .with_runtime_dir(runtime_dir.join("run"));
+            trust.save(&paths.trust_file()).unwrap();
+            Ops::new(paths)
+        }
+
+        #[tokio::test]
+        async fn resolve_host_route_async_is_host_not_found_with_no_pin_and_no_daemon() {
+            let dir = tempfile::tempdir().unwrap();
+            let ops = ops_at(dir.path(), &TrustStore::default());
+
+            let err = ops.resolve_host_route_async("nowhere").await.unwrap_err();
+            assert_eq!(err.code, ErrorCode::HostNotFound);
+        }
+
+        #[tokio::test]
+        async fn resolve_host_route_async_returns_the_forward_pin_when_nothing_is_live() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = forward_store("mac", "mac.example.com:4433", FP_A);
+            let ops = ops_at(dir.path(), &store);
+
+            let route = ops.resolve_host_route_async("mac").await.unwrap();
+            assert!(matches!(route, HostRoute::Forward { .. }), "{route:?}");
+        }
+
+        #[tokio::test]
+        async fn resolve_host_route_async_prefers_a_live_reverse_daemon_over_a_forward_pin() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = forward_store("mac", "mac.example.com:4433", FP_A);
+            let ops = ops_at(dir.path(), &store);
+            let daemon = spawn_fake_admin_daemon(
+                &ops.paths().runtime_dir(),
+                100,
+                vec![sample_local("mac", "reachable", FP_B)],
+            );
+
+            let route = ops.resolve_host_route_async("mac").await.unwrap();
+            match route {
+                HostRoute::Reverse {
+                    pid, fingerprint, ..
+                } => {
+                    assert_eq!(pid, 100);
+                    assert_eq!(fingerprint, FP_B);
+                }
+                other => panic!("expected a live reverse route, got {other:?}"),
+            }
+            daemon.await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn resolve_host_route_async_is_invalid_argument_when_two_daemons_both_hold_it_live() {
+            let dir = tempfile::tempdir().unwrap();
+            let ops = ops_at(dir.path(), &TrustStore::default());
+            let a = spawn_fake_admin_daemon(
+                &ops.paths().runtime_dir(),
+                100,
+                vec![sample_local("dup", "reachable", FP_A)],
+            );
+            let b = spawn_fake_admin_daemon(
+                &ops.paths().runtime_dir(),
+                101,
+                vec![sample_local("dup", "reachable", FP_B)],
+            );
+
+            let err = ops.resolve_host_route_async("dup").await.unwrap_err();
+            assert_eq!(err.code, ErrorCode::InvalidArgument);
+            a.await.unwrap();
+            b.await.unwrap();
+        }
+    } // mod reverse_route_async_tests
 }

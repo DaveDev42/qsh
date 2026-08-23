@@ -56,7 +56,14 @@ const UPDATE_ENV: &str = "QSH_UPDATE_FIXTURES";
 const DEFERRED: &[(&str, &str)] = &[
     (
         "PERMISSION_DENIED",
-        "M5 policy engine (the M1–M4 interim policy is allow-all-pinned)",
+        "M5 policy engine (the M1–M4 interim policy is allow-all-pinned) still \
+         leaves no *CLI-reachable* deterministic producer: M3 Step 6 gave this \
+         code its first real producer — a `DenyAll`-policied target refusing an \
+         unauthorized principal's `session.open` relayed over the reverse \
+         (`localctl`) route, `crates/qsh-testkit/tests/reverse_session_ops.rs` \
+         — but that producer lives at the `qsh-testkit` in-process harness \
+         level, not behind `CARGO_BIN_EXE_qsh`, so there is still no \
+         `qsh.cli/v1` envelope for this file to capture",
     ),
     (
         "RESUME_GAP",
@@ -71,11 +78,21 @@ const DEFERRED: &[(&str, &str)] = &[
     ),
     (
         "RESOURCE_EXHAUSTED",
-        "two producers, neither cheap to stage: `exec.run` output past \
-         `EXEC_OUTPUT_MAX` (64 MiB, since M1 — deterministic but a fixture \
-         would push 64 MiB through the harness for one envelope), and the \
-         broker's full input queue (`BrokerError::Backpressure`, M2), which \
-         needs a child that has stopped draining its pty",
+        "three producers, none cheap to stage behind a CLI-binary envelope: \
+         `exec.run` output past `EXEC_OUTPUT_MAX` (64 MiB, since M1 — \
+         deterministic but a fixture would push 64 MiB through the harness \
+         for one envelope), the broker's full input queue \
+         (`BrokerError::Backpressure`, M2), which needs a child that has \
+         stopped draining its pty, and — new in M3 Step 6 — a `LOCAL_CONTROL` \
+         conduit's per-conduit in-flight cap (`MAX_INFLIGHT_PER_CONDUIT`, \
+         `crates/qsh-core/src/localctl/mux.rs`), which does have a \
+         deterministic testkit-level producer \
+         (`crates/qsh-core/src/localctl/mux.rs`'s own \
+         `cap_exhausted_on_one_conduit_does_not_affect_another` and its \
+         adversarial proptest) but, like the other two, only at the \
+         `qsh-testkit`/`qsh-core` in-process level — no \
+         `CARGO_BIN_EXE_qsh` path drives a conduit past 64 in-flight \
+         requests to capture a `qsh.cli/v1` envelope",
     ),
     (
         "UNSUPPORTED",

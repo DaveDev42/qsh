@@ -256,6 +256,15 @@ fn no_localctl_message_type_or_source_file_ever_names_a_resume_token() {
             "localctl/daemon.rs",
             include_str!("../../qsh-core/src/localctl/daemon.rs"),
         ),
+        (
+            // M3 Step 6: the pure (conduit, peer_request_id) <->
+            // daemon_request_id remap table (`crate::localctl::mux`) —
+            // added after this sweep's file list was first written, and
+            // just as covered by the HARD RULE ("resume_secrecy sweeps
+            // localctl/*.rs") as every other file in this module.
+            "localctl/mux.rs",
+            include_str!("../../qsh-core/src/localctl/mux.rs"),
+        ),
     ];
     for (name, source) in module_sources {
         assert!(

@@ -31,7 +31,7 @@ use crate::client::reconnect::{
 };
 use crate::client::{AttachEvent, ClientError, ControlIn, Session};
 use crate::ops::exec::{map_client_error, map_dial_error};
-use crate::ops::{OpError, Operation, Ops, PeerTarget};
+use crate::ops::{LocalRoute, OpError, Operation, Ops, PeerRoute, PeerTarget};
 use crate::resume::{NoToken, ResumeStore, StoredToken};
 
 /// Upper bound on the input one `session.write` accepts (`--stdin` or
@@ -635,7 +635,7 @@ impl Ops {
             session_ref: session_ref.clone(),
             paths: self.paths.clone(),
             no_steal: req.no_steal,
-            link: conn.link.clone(),
+            link: conn.forward_link(),
             window: Arc::new(std::sync::Mutex::new(None)),
             recovery: self.recovery,
             finished: finished.clone(),
@@ -801,12 +801,24 @@ impl Ops {
     /// This is what the streaming ops (`session read --follow`,
     /// `session.attach`) sit on — they need many round trips on one
     /// connection, where a value op needs exactly one.
+    ///
+    /// Routes via [`Ops::resolve_route`] (`PLAN.md` M3 Step 6): a live
+    /// reverse registration relays through this machine's `qsh listen`
+    /// daemon ([`Self::connect_reverse`]); otherwise this is exactly the
+    /// forward dial it always was, via [`Self::connect_target`]. Every
+    /// caller of `connect` — the six value ops and [`Ops::session_reader`]
+    /// — gets this transparently; `session.attach`'s own
+    /// [`Self::connect_target`] call stays forward-only (M3 Step 7 adds
+    /// its reverse leg).
     fn connect(&self, host: &str) -> Result<Connected, OpError> {
-        let target = self.resolve_peer(host)?;
-        self.connect_target(&target)
+        match self.resolve_route(host)? {
+            PeerRoute::Forward(target) => self.connect_target(&target),
+            PeerRoute::Reverse(route) => self.connect_reverse(&route),
+        }
     }
 
-    /// [`connect`](Self::connect) for a peer already resolved.
+    /// [`connect`](Self::connect) for a peer already resolved, forward
+    /// route only.
     ///
     /// An attach resolves its peer once and keeps the result, because the
     /// resolution loads the device key — which must not happen inside a
@@ -819,7 +831,7 @@ impl Ops {
         match runtime.block_on(dial_peer(target)) {
             Ok((endpoint, connection, session)) => Ok(Connected {
                 runtime: Some(runtime),
-                link: Link::new(endpoint, connection),
+                link: ConnectedLink::Forward(Link::new(endpoint, connection)),
                 session: Some(session),
             }),
             Err(err) => {
@@ -827,6 +839,46 @@ impl Ops {
                 Err(err)
             }
         }
+    }
+
+    /// [`connect`](Self::connect)'s reverse-route branch: relay through
+    /// this machine's resident `qsh listen` daemon over a `LOCAL_CONTROL`
+    /// conduit instead of dialing the peer directly (`PLAN.md` M3 Step 6).
+    /// No identity load here — the CLI process presents no certificate of
+    /// its own on this leg, the daemon already holds the live mTLS
+    /// connection to the peer — so, unlike [`Self::connect_target`],
+    /// there is nothing that must happen before this method's own runtime
+    /// exists.
+    #[cfg(unix)]
+    fn connect_reverse(&self, route: &LocalRoute) -> Result<Connected, OpError> {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .map_err(|err| OpError::new(ErrorCode::Internal, format!("runtime: {err}")))?;
+        match runtime.block_on(dial_reverse(route)) {
+            Ok((session, peer_fingerprint)) => Ok(Connected {
+                runtime: Some(runtime),
+                link: ConnectedLink::Reverse { peer_fingerprint },
+                session: Some(session),
+            }),
+            Err(err) => {
+                runtime.shutdown_timeout(CLOSE_DRAIN);
+                Err(err)
+            }
+        }
+    }
+
+    /// Windows twin of [`Self::connect_reverse`]: localctl (UDS) has no
+    /// meaning there, and [`Ops::resolve_route`] never actually produces
+    /// [`PeerRoute::Reverse`] on that platform (`Ops::host::reverse_host_entries_async`
+    /// always returns empty), so this exists only so `connect`'s match
+    /// compiles — it is unreachable in practice.
+    #[cfg(not(unix))]
+    fn connect_reverse(&self, _route: &LocalRoute) -> Result<Connected, OpError> {
+        Err(OpError::new(
+            ErrorCode::Unsupported,
+            "reverse routing (localctl) is not available on this platform",
+        ))
     }
 }
 
@@ -866,6 +918,27 @@ async fn dial_peer(
             Err(map_client_error(err))
         }
     }
+}
+
+/// Open a `LOCAL_CONTROL` conduit to `route`'s daemon and build a
+/// [`Session`] over it — the async half of [`Ops::connect_reverse`], split
+/// out the same way [`dial_peer`] is. `wait_ms: 0`: [`Ops::resolve_route`]
+/// already observed a *live* registration before this is ever called
+/// (`crate::localctl::client::open_control`'s own doc), so there is
+/// nothing to wait for here.
+///
+/// Returns the ack's `peer_fingerprint` alongside the session —
+/// [`Connected::peer_fingerprint`] on the reverse leg is exactly this
+/// value (`docs/adr/`'s ADR-0007 presentation condition, `PLAN.md` M3
+/// Step 6), never re-derived from a QUIC connection this process does not
+/// itself hold.
+#[cfg(unix)]
+async fn dial_reverse(route: &LocalRoute) -> Result<(Session, Option<String>), OpError> {
+    let handshake = crate::localctl::client::open_control(&route.socket, &route.host, 0).await?;
+    let peer_fingerprint = Some(handshake.peer_fingerprint);
+    let session =
+        Session::from_local_control(handshake.conduit, handshake.capabilities, handshake.host);
+    Ok((session, peer_fingerprint))
 }
 
 /// How long a torn-down connection's QUIC close frames get to drain.
@@ -1231,7 +1304,7 @@ impl SessionAttachStream {
     pub fn handle(&self) -> AttachHandle {
         AttachHandle {
             commands: self.commands.clone(),
-            link: self.conn.link.clone(),
+            link: self.conn.forward_link(),
             finished: self.stop.finished.clone(),
             detaching: self.stop.detaching.clone(),
         }
@@ -1598,6 +1671,7 @@ async fn drive_attach(
                 stop: Some(ctl_stop),
                 handle: tokio::spawn(pump_attach_control(
                     session,
+                    ctx.session_id.clone(),
                     ctx.session_ref.clone(),
                     events.clone(),
                     watch.clone(),
@@ -2172,6 +2246,7 @@ async fn await_applied(applied: &tokio::sync::watch::Sender<u64>, target: u64) -
 /// ever cancelled.
 async fn pump_attach_control(
     mut session: Session,
+    session_id: String,
     session_ref: String,
     events: tokio::sync::mpsc::Sender<Result<SessionEvent, OpError>>,
     watch: PathWatch,
@@ -2222,6 +2297,24 @@ async fn pump_attach_control(
                     // terminal event in the JSONL stream.
                     ControlIn::Event(event) => {
                         watch.traffic();
+                        // Defensive on a forward attach today (one
+                        // connection per session, so the peer only ever
+                        // has this session's events to send) and load-bearing
+                        // the moment this pump runs over a shared
+                        // `ControlLink::Local` control stream, where a
+                        // `session.writer_changed` is broadcast to every
+                        // conduit of the host regardless of which session
+                        // it names (`crate::localctl::mux::ControlMux::route_event`).
+                        // `docs/design/protocol.md` §11-3's own rule:
+                        // "구독자 쪽 클라이언트도 낯선 session_id의 event는
+                        // 방어적으로 무시한다" — without this, an event for
+                        // a different session would be re-stamped with
+                        // *this* session's `session_ref` and emitted as a
+                        // fabricated `qsh.event/v1` line (adversarial
+                        // review finding).
+                        if event.session_id != session_id {
+                            continue;
+                        }
                         if let Some(json) = control_event_json(&session_ref, event) {
                             let _stalled = watch.stalled();
                             if events.send(Ok(json)).await.is_err() {
@@ -2304,12 +2397,38 @@ fn control_event_json(session_ref: &str, event: wire::SessionEvent) -> Option<Se
 struct Connected {
     /// `None` only between [`Connected::close`] and the drop.
     runtime: Option<tokio::runtime::Runtime>,
-    /// The endpoint and connection currently carrying this attach. Shared
-    /// and swappable because a recovery replaces both underneath handles
-    /// that were taken before it happened.
-    link: Link,
+    /// The endpoint and connection currently carrying this attach — the
+    /// forward route's swappable pair — or, on the reverse route, the
+    /// facts a `LOCAL_CONTROL` handshake produced instead of one
+    /// (`PLAN.md` M3 Step 6).
+    link: ConnectedLink,
     /// `None` only after the session was consumed by the teardown.
     session: Option<Session>,
+}
+
+/// Which of [`PeerRoute`](crate::ops::PeerRoute)'s two carriers this
+/// [`Connected`] rides.
+enum ConnectedLink {
+    /// The forward route: a real, swappable QUIC endpoint/connection pair
+    /// (recovery-capable — see [`Link`]'s own doc).
+    Forward(Link),
+    /// The reverse route: relayed through this machine's `qsh listen`
+    /// daemon over a `LOCAL_CONTROL` conduit. There is no separate
+    /// endpoint/connection for this leg to hold — [`Connected::close`]'s
+    /// `session.close()` alone tears the conduit down — so this variant
+    /// carries only what [`Connected::peer_fingerprint`] needs: the
+    /// `LocalHelloAck.peer_fingerprint` this connection's own handshake
+    /// reported (`None` only if the daemon's ack omitted it, which never
+    /// happens on a live registration but is not this type's job to
+    /// assume).
+    // Only ever constructed by `connect_reverse`'s `#[cfg(unix)]` body
+    // (localctl/UDS is unix-only) in the non-test lib build — the
+    // Windows twin returns `Err` before ever reaching a `Connected`, so
+    // this variant is genuinely unconstructed there outside `#[cfg(test)]`
+    // (where a unit test builds it directly to pin
+    // `Connected::peer_fingerprint`'s reverse-leg behavior).
+    #[cfg_attr(not(unix), allow(dead_code))]
+    Reverse { peer_fingerprint: Option<String> },
 }
 
 /// The endpoint/connection pair an attach is riding right now.
@@ -2393,32 +2512,73 @@ impl Connected {
         self.session.take()
     }
 
+    /// The forward route's swappable `Link` — every caller of this is on
+    /// the attach path (`Ops::session_attach`), which only ever connects
+    /// via [`Ops::connect_target`] directly and so is forward-only until
+    /// M3 Step 7 adds a reverse attach leg. Panics rather than threading an
+    /// `OpError` through every caller for a state Step 6 never produces
+    /// here — the same "provably unreachable, so fail loud rather than
+    /// spread a Result nobody can actually hit" choice
+    /// [`Session::connection`] makes for the symmetric reverse case.
+    fn forward_link(&self) -> Link {
+        match &self.link {
+            ConnectedLink::Forward(link) => link.clone(),
+            ConnectedLink::Reverse { .. } => unreachable!(
+                "session_attach only ever connects over the forward route (M3 Step 7 adds \
+                 reverse attach)"
+            ),
+        }
+    }
+
     /// `sha256:…` fingerprint of the peer this connection verified — the
     /// identity a resume credential is bound to (protocol.md §10-2). Not
     /// an authorization input: the host authorizes on the mTLS principal.
+    ///
+    /// Forward: read straight off this connection's own TLS-verified peer.
+    /// Reverse: the `LocalHelloAck.peer_fingerprint` this leg's own
+    /// handshake reported — the daemon's TLS-verified peer for *this*
+    /// registration, which is the ADR-0007 presentation-condition input on
+    /// that leg since the CLI process is not itself a TLS endpoint on the
+    /// underlying connection (`PLAN.md` M3 Step 6).
     fn peer_fingerprint(&self) -> Option<String> {
-        self.link
-            .connection()
-            .peer_fingerprint()
-            .map(|fp| fp.to_string())
+        match &self.link {
+            ConnectedLink::Forward(link) => link
+                .connection()
+                .peer_fingerprint()
+                .map(|fp| fp.to_string()),
+            ConnectedLink::Reverse { peer_fingerprint } => peer_fingerprint.clone(),
+        }
     }
 
     /// Close the control stream and the connection, then let the QUIC close
-    /// frames drain.
+    /// frames drain (forward route) — or just the control stream (reverse
+    /// route: there is no separate connection here to close, and no QUIC
+    /// close frame of this process's own to drain).
     fn close(mut self) {
         let Some(runtime) = self.runtime.take() else {
             return;
         };
         let session = self.session.take();
-        let (endpoint, connection) = self.link.get();
-        runtime.block_on(async move {
-            if let Some(session) = session {
-                session.close();
+        match &self.link {
+            ConnectedLink::Forward(link) => {
+                let (endpoint, connection) = link.get();
+                runtime.block_on(async move {
+                    if let Some(session) = session {
+                        session.close();
+                    }
+                    connection.close(0, b"done");
+                    drop(connection);
+                    endpoint.wait_idle().await;
+                });
             }
-            connection.close(0, b"done");
-            drop(connection);
-            endpoint.wait_idle().await;
-        });
+            ConnectedLink::Reverse { .. } => {
+                runtime.block_on(async move {
+                    if let Some(session) = session {
+                        session.close();
+                    }
+                });
+            }
+        }
         runtime.shutdown_timeout(CLOSE_DRAIN);
     }
 }
@@ -2429,7 +2589,9 @@ impl Drop for Connected {
         // panic / early-return path.
         if let Some(runtime) = self.runtime.take() {
             self.session.take();
-            self.link.connection().close(0, b"done");
+            if let ConnectedLink::Forward(link) = &self.link {
+                link.connection().close(0, b"done");
+            }
             runtime.shutdown_timeout(CLOSE_DRAIN);
         }
     }
@@ -2615,6 +2777,41 @@ mod tests {
             MIGRATION_PROBE_MAX,
             "and it is capped: the deadline it is spent from is 2 s"
         );
+    }
+
+    /// `Connected::peer_fingerprint` on the reverse leg must be exactly
+    /// the value that leg's own `LOCAL_CONTROL` handshake reported —
+    /// never re-derived from a QUIC connection this process does not
+    /// itself hold (ADR-0007's presentation condition, `PLAN.md` M3
+    /// Step 6). `dial_reverse` is what actually produces that value from
+    /// a live `LocalHelloAck` (exercised end-to-end by
+    /// `crate::client::link`'s and `crate::localctl::client`'s own
+    /// handshake tests); this pins the narrower claim that
+    /// `ConnectedLink::Reverse`'s carried value round-trips through
+    /// `peer_fingerprint()` unchanged, with no runtime/session needed to
+    /// observe it.
+    #[test]
+    fn connected_peer_fingerprint_on_the_reverse_leg_is_exactly_the_acks_value() {
+        let connected = Connected {
+            runtime: None,
+            link: ConnectedLink::Reverse {
+                peer_fingerprint: Some("sha256:deadbeefdeadbeefdeadbeefdeadbeef".to_string()),
+            },
+            session: None,
+        };
+        assert_eq!(
+            connected.peer_fingerprint(),
+            Some("sha256:deadbeefdeadbeefdeadbeefdeadbeef".to_string())
+        );
+
+        let no_fingerprint = Connected {
+            runtime: None,
+            link: ConnectedLink::Reverse {
+                peer_fingerprint: None,
+            },
+            session: None,
+        };
+        assert_eq!(no_fingerprint.peer_fingerprint(), None);
     }
 
     #[test]

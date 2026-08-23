@@ -43,15 +43,18 @@ use std::sync::Arc;
 
 use qsh_proto::ErrorCode;
 use qsh_proto::local::{
-    LOCAL_HELLO_VERSION, LOCAL_WAIT_MAX, LocalError, LocalHello, LocalHost, LocalHostList,
-    LocalHostListResult, LocalResponse, LocalStreamKind, classify_stream_kind, local_response,
+    LOCAL_HELLO_VERSION, LOCAL_WAIT_MAX, LocalError, LocalHello, LocalHelloAck, LocalHost,
+    LocalHostList, LocalHostListResult, LocalResponse, LocalStreamKind, classify_stream_kind,
+    local_response,
 };
+use qsh_proto::wire;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Semaphore;
 
 use crate::config::{Paths, ensure_private_dir};
+use crate::localctl::mux::{MessageKind, classify};
 use crate::ops::OpError;
-use crate::reverse::listen::Listen;
+use crate::reverse::listen::{ConduitInbound, HubSendError, Listen};
 use crate::reverse::registry::{EntryState, ReverseEntry};
 
 use super::frame::LocalConduit;
@@ -149,19 +152,42 @@ fn bind_error(path: &Path, err: &io::Error) -> OpError {
     )
 }
 
-/// Upper bound on conduits this daemon serves concurrently — not a wire
-/// contract value (unlike [`LOCAL_WAIT_MAX`]), just this process's own
-/// resource-hygiene ceiling on spawned tasks and fds. Deliberately the same
-/// magnitude as [`crate::server::MAX_INFLIGHT_REQUESTS_PER_CONN`] (a
-/// different axis: that one bounds in-flight *requests on one connection*,
-/// this one bounds concurrent *conduits on this whole daemon*) rather than
-/// an unrelated number invented for this file. Step 6 adds a genuinely
-/// wire-documented per-conduit in-flight request cap on top of this; this
-/// one exists because PR 5a's accept loop had no bound at all (adversarial
-/// review finding: an unbounded burst of same-uid connections that never
-/// wrote a byte pinned a task and fd per connection for the daemon's
-/// lifetime).
-const MAX_CONCURRENT_LOCALCTL_CONDUITS: usize = 64;
+/// Upper bound on connections *still being handshaked* (peer-cred check
+/// through `LocalHello`/kind classification) — not a wire contract value
+/// (unlike [`LOCAL_WAIT_MAX`]), just this process's own resource-hygiene
+/// ceiling on spawned tasks and fds during the brief pre-classification
+/// window. Deliberately the same magnitude as
+/// [`crate::server::MAX_INFLIGHT_REQUESTS_PER_CONN`] rather than an
+/// unrelated number invented for this file (PR 5a's accept loop had no
+/// bound at all — adversarial review finding: an unbounded burst of
+/// same-uid connections that never wrote a byte pinned a task and fd per
+/// connection for the daemon's lifetime).
+///
+/// This permit is released as soon as [`LocalctlDaemon::serve_authorized_conduit`]
+/// classifies `LocalHello.kind` and hands the conduit off to its
+/// kind-specific pool ([`MAX_CONCURRENT_LOCAL_ADMIN_QUERIES`]/
+/// [`MAX_CONCURRENT_LOCAL_CONTROL_CONDUITS`]) — it never bounds how long a
+/// classified conduit itself runs (adversarial review finding: Step 6 made
+/// `LOCAL_CONTROL` conduits long-lived, up to the whole life of a `session
+/// read --follow`; sharing one pool across the brief handshake, brief
+/// `LOCAL_ADMIN` round trips, and those long-lived sessions let enough
+/// concurrent sessions silently starve new `LOCAL_ADMIN` discovery — the
+/// very query `resolve_host_route` depends on — of a connection at all).
+const MAX_CONCURRENT_LOCALCTL_HANDSHAKES: usize = 64;
+
+/// Upper bound on concurrent `LOCAL_ADMIN` round trips (`qsh hosts`/`host
+/// get`/routing discovery) — its own pool, entirely separate from
+/// [`MAX_CONCURRENT_LOCAL_CONTROL_CONDUITS`], so a daemon saturated with
+/// long-lived control sessions never blocks a fresh discovery query.
+const MAX_CONCURRENT_LOCAL_ADMIN_QUERIES: usize = 64;
+
+/// Upper bound on concurrent `LOCAL_CONTROL` conduits — these are
+/// long-lived (one per attached CLI process, for as long as it runs), so
+/// this pool is sized generously above [`MAX_CONCURRENT_LOCAL_ADMIN_QUERIES`]
+/// rather than sharing it: ordinary use (many concurrent `session read
+/// --follow`/interactive attaches) must never compete with `LOCAL_ADMIN`
+/// discovery for the same permit.
+const MAX_CONCURRENT_LOCAL_CONTROL_CONDUITS: usize = 256;
 
 /// Delay the accept loop pays after a failed `accept()` before retrying —
 /// long enough that a persistent failure (EMFILE/ENFILE) does not spin the
@@ -177,26 +203,51 @@ const ACCEPT_ERROR_BACKOFF: std::time::Duration = std::time::Duration::from_mill
 /// together).
 pub struct LocalctlDaemon {
     listen: Arc<Listen>,
+    /// Separate from the handshake pool acquired in [`Self::run`] — see
+    /// [`MAX_CONCURRENT_LOCAL_ADMIN_QUERIES`]'s doc for why `LOCAL_ADMIN`
+    /// must never compete with `LOCAL_CONTROL` for the same permit.
+    admin_permits: Arc<Semaphore>,
+    /// Separate from both the handshake pool and [`Self::admin_permits`]
+    /// — see [`MAX_CONCURRENT_LOCAL_CONTROL_CONDUITS`]'s doc.
+    control_permits: Arc<Semaphore>,
 }
 
 impl LocalctlDaemon {
     /// Build a daemon answering from `listen`'s registry.
     pub fn new(listen: Arc<Listen>) -> Arc<Self> {
-        Arc::new(Self { listen })
+        Self::with_pool_sizes(
+            listen,
+            MAX_CONCURRENT_LOCAL_ADMIN_QUERIES,
+            MAX_CONCURRENT_LOCAL_CONTROL_CONDUITS,
+        )
+    }
+
+    /// [`Self::new`] with explicitly chosen pool sizes — tests use this to
+    /// saturate one of the two independent permit pools without needing
+    /// hundreds of real connections.
+    fn with_pool_sizes(listen: Arc<Listen>, admin: usize, control: usize) -> Arc<Self> {
+        Arc::new(Self {
+            listen,
+            admin_permits: Arc::new(Semaphore::new(admin)),
+            control_permits: Arc::new(Semaphore::new(control)),
+        })
     }
 
     /// Accept loop: run until `shutdown` resolves, spawning one task per
-    /// accepted connection, up to [`MAX_CONCURRENT_LOCALCTL_CONDUITS`]
-    /// concurrently. A single failed `accept` is logged (after a brief
-    /// backoff — see [`ACCEPT_ERROR_BACKOFF`]'s doc) and does not end the
-    /// loop — one bad connection attempt must not take the whole daemon
-    /// down.
+    /// accepted connection, up to [`MAX_CONCURRENT_LOCALCTL_HANDSHAKES`]
+    /// concurrently *while unclassified* — [`Self::serve_authorized_conduit`]
+    /// releases this permit the moment it knows `LocalHello.kind` and
+    /// switches to that kind's own pool, so this bound never limits how
+    /// many classified conduits run at once. A single failed `accept` is
+    /// logged (after a brief backoff — see [`ACCEPT_ERROR_BACKOFF`]'s doc)
+    /// and does not end the loop — one bad connection attempt must not
+    /// take the whole daemon down.
     pub async fn run(
         self: Arc<Self>,
         bound: LocalctlListener,
         shutdown: impl std::future::Future<Output = ()>,
     ) {
-        let permits = Arc::new(Semaphore::new(MAX_CONCURRENT_LOCALCTL_CONDUITS));
+        let permits = Arc::new(Semaphore::new(MAX_CONCURRENT_LOCALCTL_HANDSHAKES));
         tokio::pin!(shutdown);
         loop {
             tokio::select! {
@@ -215,13 +266,12 @@ impl LocalctlDaemon {
                                 Ok(permit) => {
                                     let this = self.clone();
                                     tokio::spawn(async move {
-                                        this.serve_conduit(stream).await;
-                                        drop(permit);
+                                        this.serve_conduit(stream, permit).await;
                                     });
                                 }
                                 Err(_) => {
                                     tracing::warn!(
-                                        "localctl: at the concurrent-conduit cap ({MAX_CONCURRENT_LOCALCTL_CONDUITS}); \
+                                        "localctl: at the handshake cap ({MAX_CONCURRENT_LOCALCTL_HANDSHAKES}); \
                                          dropping a new connection"
                                     );
                                 }
@@ -246,9 +296,14 @@ impl LocalctlDaemon {
     /// return path here is a plain function return — nothing in this
     /// module ever panics on a malformed or unexpected peer message
     /// (`PLAN.md` M3 Step 5: "never a panic or a hang").
-    async fn serve_conduit(self: Arc<Self>, stream: UnixStream) {
+    async fn serve_conduit(
+        self: Arc<Self>,
+        stream: UnixStream,
+        handshake_permit: tokio::sync::OwnedSemaphorePermit,
+    ) {
         let authorized = Self::authorized_peer(&stream);
-        self.serve_authorized_conduit(stream, authorized).await;
+        self.serve_authorized_conduit(stream, authorized, handshake_permit)
+            .await;
     }
 
     /// The rest of [`Self::serve_conduit`], taking the peer-credential
@@ -268,6 +323,7 @@ impl LocalctlDaemon {
         self: Arc<Self>,
         stream: UnixStream,
         authorized: io::Result<bool>,
+        handshake_permit: tokio::sync::OwnedSemaphorePermit,
     ) {
         match authorized {
             Ok(true) => {}
@@ -341,13 +397,62 @@ impl LocalctlDaemon {
         };
 
         match kind {
-            LocalStreamKind::LocalAdmin => self.serve_admin(conduit).await,
-            // `LOCAL_CONTROL`/`LOCAL_STREAM` are real, defined kinds this
-            // daemon does not serve yet (`PLAN.md` M3 Step 6 — "localctl의
-            // 두 번째 소비자... 이것이 M3의 유일한 신규 상태 기계"); answering
-            // explicitly here, rather than falling through to a bare
-            // connection close, keeps every reachable kind on the "gets an
-            // envelope back" side of the module docs' contract.
+            // Kind is known — hand off from the shared handshake pool to
+            // this kind's own pool (`MAX_CONCURRENT_LOCAL_ADMIN_QUERIES`'s
+            // doc: `LOCAL_ADMIN` must never be starved by long-lived
+            // `LOCAL_CONTROL` conduits sharing one pool with it,
+            // adversarial review finding). At that pool's own cap, answer
+            // `RESOURCE_EXHAUSTED` explicitly rather than silently closing
+            // — `admin_host_list_all`/`resolve_host_route` must be able to
+            // tell "daemon saturated" apart from "no such host"
+            // (`docs/CLI.md` §6.2's "부분 실패를 감추지 않는다").
+            LocalStreamKind::LocalAdmin => match self.admin_permits.clone().try_acquire_owned() {
+                Ok(_admin_permit) => {
+                    drop(handshake_permit);
+                    self.serve_admin(conduit).await;
+                }
+                Err(_) => {
+                    let _ = conduit
+                        .send(&LocalResponse {
+                            body: Some(local_response::Body::Error(LocalError::from_code(
+                                ErrorCode::ResourceExhausted,
+                                "too many concurrent LOCAL_ADMIN queries on this daemon; retry shortly",
+                            ))),
+                        })
+                        .await;
+                }
+            },
+            // `M3 Step 6`: the daemon's second localctl consumer — a
+            // control session for `hello.host` (module docs, `PLAN.md`
+            // M3 Step 6's "localctl의 두 번째 소비자... 이것이 M3의 유일한
+            // 신규 상태 기계"). Long-lived, so it gets its own pool
+            // (`MAX_CONCURRENT_LOCAL_CONTROL_CONDUITS`) rather than the
+            // brief handshake pool.
+            LocalStreamKind::LocalControl => {
+                match self.control_permits.clone().try_acquire_owned() {
+                    Ok(_control_permit) => {
+                        drop(handshake_permit);
+                        self.serve_control(&hello.host, conduit).await;
+                    }
+                    Err(_) => {
+                        let _ = conduit
+                            .send(&LocalResponse {
+                                body: Some(local_response::Body::Error(LocalError::from_code(
+                                    ErrorCode::ResourceExhausted,
+                                    "too many concurrent LOCAL_CONTROL conduits on this daemon; \
+                                     retry shortly",
+                                ))),
+                            })
+                            .await;
+                    }
+                }
+            }
+            // `LOCAL_STREAM` is a real, defined kind this daemon does not
+            // serve yet (Step 7 — attach data streams, deliberately not
+            // bundled with Step 6's control relay, `PLAN.md`'s own split);
+            // answering explicitly here, rather than falling through to a
+            // bare connection close, keeps every reachable kind on the
+            // "gets an envelope back" side of the module docs' contract.
             _ => {
                 let _ = conduit
                     .send(&LocalResponse {
@@ -384,6 +489,166 @@ impl LocalctlDaemon {
                 })),
             })
             .await;
+    }
+
+    /// `LOCAL_CONTROL`: relay `qsh.wire.v1` `ControlMessage`/`Response`
+    /// between this conduit and `host`'s live reverse QUIC control stream
+    /// (`docs/design/protocol.md` §11-3, `PLAN.md` M3 Step 6). Resolves
+    /// `host` in [`Listen::control_hub`] first — live gets a
+    /// `LocalHelloAck` and this conduit is registered with its
+    /// [`crate::reverse::listen::ControlHub`]; stale or unknown gets
+    /// `HOST_NOT_FOUND` and nothing else (`LocalHello.wait_ms` is not yet
+    /// honored for a stale entry — Step 8 adds `LocalReconnect`).
+    ///
+    /// After the ack, this loop is the *only* reader/writer of `conduit`'s
+    /// UDS stream: every inbound `ControlMessage` is either a `Ping`
+    /// (answered locally, never forwarded — `Self`'s module docs) or
+    /// forwarded through the hub (`RESOURCE_EXHAUSTED` answered locally,
+    /// on this conduit only, if the hub's per-conduit cap is already hit);
+    /// every hub delivery ([`ConduitInbound`]) becomes exactly one
+    /// outbound frame. Ends on a UDS read error/EOF (this conduit's own
+    /// death — the hub's in-flight work for it is unregistered) or a
+    /// [`ConduitInbound::HostDead`] delivery (the host's reverse
+    /// connection died — `docs/design/protocol.md` §11-3's "그 host의 모든
+    /// conduit이 명확한 typed error로 함께 끝난다": closing this UDS stream
+    /// here gives the CLI-side `Session` reading it the same
+    /// `ClientError::Protocol` a genuinely dead QUIC control stream would).
+    async fn serve_control(&self, host: &str, mut conduit: LocalConduit<UnixStream>) {
+        let Some(hub) = self.listen.control_hub(host) else {
+            let _ = conduit
+                .send(&LocalResponse {
+                    body: Some(local_response::Body::Error(LocalError::from_code(
+                        ErrorCode::HostNotFound,
+                        format!("{host} is not a currently reachable registered host"),
+                    ))),
+                })
+                .await;
+            return;
+        };
+
+        let (ack_host, peer_fingerprint, generation, capabilities) = hub.ack_fields();
+        if conduit
+            .send(&LocalResponse {
+                body: Some(local_response::Body::HelloAck(LocalHelloAck {
+                    host: ack_host,
+                    peer_fingerprint,
+                    generation,
+                    capabilities,
+                })),
+            })
+            .await
+            .is_err()
+        {
+            return;
+        }
+
+        let (conduit_id, mut inbox) = hub.register_conduit();
+
+        loop {
+            tokio::select! {
+                biased;
+                incoming = conduit.recv::<wire::ControlMessage>() => {
+                    let msg = match incoming {
+                        Ok(Some(msg)) => msg,
+                        Ok(None) | Err(_) => break,
+                    };
+                    let request_id = msg.request_id;
+                    let Some(body) = msg.body else {
+                        // Empty/unrecognized on this conduit — nothing to
+                        // relay; answer this one request only.
+                        let reply = wire::ControlMessage::new(
+                            request_id,
+                            wire::control_message::Body::Response(wire::Response {
+                                body: Some(wire::response::Body::Error(wire::Error::new(
+                                    ErrorCode::InvalidArgument,
+                                    "empty ControlMessage body",
+                                    false,
+                                ))),
+                            }),
+                        );
+                        if conduit.send(&reply).await.is_err() {
+                            break;
+                        }
+                        continue;
+                    };
+                    match classify(&body) {
+                        // Never forwarded onto the QUIC connection —
+                        // liveness is the daemon's own job (module docs,
+                        // `docs/design/protocol.md` §11-3).
+                        MessageKind::Ping => {
+                            let pong = wire::ControlMessage::new(
+                                request_id,
+                                wire::control_message::Body::Pong(wire::Pong {}),
+                            );
+                            if conduit.send(&pong).await.is_err() {
+                                break;
+                            }
+                        }
+                        MessageKind::Request => match hub.send_request(conduit_id, request_id, body) {
+                            Ok(()) => {}
+                            Err(HubSendError::Exhausted) => {
+                                let reply = wire::ControlMessage::new(
+                                    request_id,
+                                    wire::control_message::Body::Response(wire::Response {
+                                        body: Some(wire::response::Body::Error(wire::Error::new(
+                                            ErrorCode::ResourceExhausted,
+                                            "too many in-flight requests on this control conduit",
+                                            true,
+                                        ))),
+                                    }),
+                                );
+                                if conduit.send(&reply).await.is_err() {
+                                    break;
+                                }
+                            }
+                            Err(HubSendError::HostDead) => break,
+                        },
+                        // A conduit sent a body shape it must never send
+                        // (`Pong`/`Response`/`SessionEvent`/`Hello`) —
+                        // answered locally on this conduit only, exactly
+                        // like the empty-body case above; never touches
+                        // the hub or the shared QUIC connection
+                        // (`classify`'s own doc comment, adversarial
+                        // review finding).
+                        MessageKind::Invalid => {
+                            let reply = wire::ControlMessage::new(
+                                request_id,
+                                wire::control_message::Body::Response(wire::Response {
+                                    body: Some(wire::response::Body::Error(wire::Error::new(
+                                        ErrorCode::InvalidArgument,
+                                        "this ControlMessage body is not a shape a conduit may send",
+                                        false,
+                                    ))),
+                                }),
+                            );
+                            if conduit.send(&reply).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+                inbound = inbox.recv() => {
+                    let outgoing = match inbound {
+                        Some(ConduitInbound::Response { peer_request_id, body }) => {
+                            wire::ControlMessage::new(
+                                peer_request_id,
+                                wire::control_message::Body::Response(body),
+                            )
+                        }
+                        Some(ConduitInbound::Event(event)) => wire::ControlMessage::new(
+                            0,
+                            wire::control_message::Body::SessionEvent(event),
+                        ),
+                        Some(ConduitInbound::HostDead) | None => break,
+                    };
+                    if conduit.send(&outgoing).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+
+        hub.unregister_conduit(conduit_id);
     }
 
     /// Whether `stream`'s connecting peer is this process's own euid — the
@@ -729,8 +994,15 @@ mod tests {
         task.await.unwrap();
     }
 
+    /// `M3 Step 6` gave `LOCAL_CONTROL` a real serve path
+    /// ([`LocalctlDaemon::serve_control`]) — an unregistered/unknown host
+    /// now answers `HOST_NOT_FOUND`, not the pre-Step-6 blanket
+    /// `UNSUPPORTED` this test used to assert (it predates that landing;
+    /// updated here rather than left to bit-rot green on a wrong
+    /// assertion). `LOCAL_STREAM` is the kind still genuinely unserved —
+    /// see the sibling test right below.
     #[tokio::test]
-    async fn local_control_is_answered_unsupported_not_forwarded_or_hung() {
+    async fn local_control_for_an_unknown_host_is_host_not_found_not_forwarded_or_hung() {
         let dir = tempfile::tempdir().unwrap();
         let paths = tmp_paths(&dir);
         let bound = LocalctlListener::bind(&paths, 9008).unwrap();
@@ -747,6 +1019,46 @@ mod tests {
             .send(&LocalHello {
                 version: 1,
                 kind: LocalStreamKind::LocalControl as i32,
+                host: "some-host".to_string(),
+                wait_ms: 0,
+            })
+            .await
+            .unwrap();
+        let response: LocalResponse = conduit.recv().await.unwrap().unwrap();
+        match response.body {
+            Some(local_response::Body::Error(err)) => {
+                assert_eq!(err.error_code(), ErrorCode::HostNotFound);
+            }
+            other => panic!("expected LocalError, got {other:?}"),
+        }
+
+        let _ = shutdown_tx.send(());
+        task.await.unwrap();
+    }
+
+    /// `LOCAL_STREAM` is the one kind this daemon still genuinely does not
+    /// serve (Step 7 — attach data streams) — it must keep answering
+    /// `UNSUPPORTED` rather than hanging or being silently dropped, the
+    /// exact contract the pre-Step-6 test above used to cover for both
+    /// kinds at once.
+    #[tokio::test]
+    async fn local_stream_is_answered_unsupported_not_forwarded_or_hung() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = tmp_paths(&dir);
+        let bound = LocalctlListener::bind(&paths, 9009).unwrap();
+        let socket_path = bound.socket_path.clone();
+        let daemon = LocalctlDaemon::new(test_listen());
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(daemon.run(bound, async move {
+            let _ = shutdown_rx.await;
+        }));
+
+        let stream = UnixStream::connect(&socket_path).await.unwrap();
+        let mut conduit = LocalConduit::new(stream);
+        conduit
+            .send(&LocalHello {
+                version: 1,
+                kind: LocalStreamKind::LocalStream as i32,
                 host: "some-host".to_string(),
                 wait_ms: 0,
             })
@@ -777,7 +1089,10 @@ mod tests {
         // A literal `Ok(false)` stands in for the OS-level check reporting
         // a mismatched euid — see `serve_authorized_conduit`'s doc for why
         // this is the seam that makes the negative case testable at all.
-        let task = tokio::spawn(daemon.serve_authorized_conduit(server_side, Ok(false)));
+        let handshake_permits = Arc::new(Semaphore::new(1));
+        let handshake_permit = handshake_permits.try_acquire_owned().unwrap();
+        let task =
+            tokio::spawn(daemon.serve_authorized_conduit(server_side, Ok(false), handshake_permit));
 
         // The client side never sends a `LocalHello` — if the gate were
         // deleted (as the adversarial mutation check did), the daemon
@@ -864,6 +1179,116 @@ mod tests {
              open indefinitely"
         );
 
+        let _ = shutdown_tx.send(());
+        task.await.unwrap();
+    }
+
+    // ---- LOCAL_ADMIN/LOCAL_CONTROL draw from independent permit pools
+    // (adversarial review finding: before this split, long-lived
+    // LOCAL_CONTROL conduits shared the same accept-time pool as brief
+    // LOCAL_ADMIN discovery round trips, so enough concurrent sessions
+    // silently starved routing discovery of a connection at all) ----
+
+    /// Structural pin, independent of any real conduit traffic: the two
+    /// pools never share capacity in either direction.
+    #[test]
+    fn admin_and_control_pools_are_independent_semaphores() {
+        let daemon = LocalctlDaemon::with_pool_sizes(test_listen(), 3, 5);
+        assert_eq!(daemon.admin_permits.available_permits(), 3);
+        assert_eq!(daemon.control_permits.available_permits(), 5);
+
+        // Exhaust the admin pool entirely.
+        let held: Vec<_> = (0..3)
+            .map(|_| daemon.admin_permits.clone().try_acquire_owned().unwrap())
+            .collect();
+        assert_eq!(daemon.admin_permits.available_permits(), 0);
+        // The control pool must be completely unaffected.
+        assert_eq!(
+            daemon.control_permits.available_permits(),
+            5,
+            "exhausting the admin pool must never touch the control pool's capacity"
+        );
+
+        drop(held);
+        // Symmetrically, exhausting control must never touch admin.
+        let _held_control: Vec<_> = (0..5)
+            .map(|_| daemon.control_permits.clone().try_acquire_owned().unwrap())
+            .collect();
+        assert_eq!(daemon.admin_permits.available_permits(), 3);
+        assert_eq!(daemon.control_permits.available_permits(), 0);
+    }
+
+    /// At the `LOCAL_ADMIN` pool's own cap, a new connection now gets an
+    /// explicit `LocalError{RESOURCE_EXHAUSTED}` envelope rather than
+    /// being silently closed before ever being read — the distinction
+    /// `admin_host_list_all`/`resolve_host_route` need to tell "daemon
+    /// saturated" apart from "no such host" (`docs/CLI.md` §6.2).
+    /// Held-open connections are real `LOCAL_ADMIN` conduits parked
+    /// mid-handshake (hello sent, `LocalHostList` body deliberately
+    /// withheld) rather than a live `LOCAL_CONTROL` host, which needs a
+    /// real reverse QUIC registration this crate's own unit tests cannot
+    /// stand up — `crates/qsh-testkit/tests/local_control_reverse.rs`
+    /// covers the same pool end to end over a real reverse connection.
+    #[tokio::test]
+    async fn local_admin_at_the_admin_pools_cap_answers_resource_exhausted_not_a_silent_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = tmp_paths(&dir);
+        let bound = LocalctlListener::bind(&paths, 9011).unwrap();
+        let socket_path = bound.socket_path.clone();
+        let daemon = LocalctlDaemon::with_pool_sizes(
+            test_listen(),
+            1,
+            MAX_CONCURRENT_LOCAL_CONTROL_CONDUITS,
+        );
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(daemon.run(bound, async move {
+            let _ = shutdown_rx.await;
+        }));
+
+        // Occupy the single admin permit: send `LocalHello` and then never
+        // send the follow-up `LocalHostList` — `serve_admin` blocks
+        // forever on that read, holding the permit for as long as this
+        // stream stays open.
+        let holder = UnixStream::connect(&socket_path).await.unwrap();
+        let mut holder = LocalConduit::new(holder);
+        holder
+            .send(&LocalHello {
+                version: LOCAL_HELLO_VERSION,
+                kind: LocalStreamKind::LocalAdmin as i32,
+                host: String::new(),
+                wait_ms: 0,
+            })
+            .await
+            .unwrap();
+
+        // Give the accept loop a moment to actually acquire the admin
+        // permit before this connection races it.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let stream = UnixStream::connect(&socket_path).await.unwrap();
+        let mut conduit = LocalConduit::new(stream);
+        conduit
+            .send(&LocalHello {
+                version: LOCAL_HELLO_VERSION,
+                kind: LocalStreamKind::LocalAdmin as i32,
+                host: String::new(),
+                wait_ms: 0,
+            })
+            .await
+            .unwrap();
+        let response: LocalResponse = tokio::time::timeout(Duration::from_secs(5), conduit.recv())
+            .await
+            .expect("the daemon must answer promptly, not hang")
+            .unwrap()
+            .expect("a real envelope, not a silent close");
+        match response.body {
+            Some(local_response::Body::Error(err)) => {
+                assert_eq!(err.error_code(), ErrorCode::ResourceExhausted);
+            }
+            other => panic!("expected LocalError(RESOURCE_EXHAUSTED), got {other:?}"),
+        }
+
+        drop(holder);
         let _ = shutdown_tx.send(());
         task.await.unwrap();
     }
