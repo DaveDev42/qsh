@@ -48,11 +48,22 @@ pub enum Action {
     /// `tunnel.open` local → `forward.local` row). The resource is the
     /// requested destination, `"host:port"`.
     ForwardLocal,
+    /// Bind a listener on this host for a peer's remote forward
+    /// (`forward.remote`, `-R`). This one *is* the ordinary control-stream
+    /// choke point — `RemoteForwardOpen` is checked before the listener is
+    /// bound, the same shape every other privileged op uses (`docs/design/
+    /// protocol.md` §7's `RemoteForwardOpen`, `docs/CLI.md` §2.5's
+    /// `tunnel.open` remote → `forward.remote` row). The resource is the
+    /// requested bind address, `"bind_host:bind_port"`. Passing this check
+    /// is necessary but not sufficient to bind: the loopback-only
+    /// constraint enforced right after is a separate, non-ACL host
+    /// constraint (`PLAN.md` M4 Step 4) — see `crate::tunnel::remote`.
+    ForwardRemote,
 }
 
 impl Action {
     /// Every action this build can evaluate, in a stable order.
-    pub const ALL: [Action; 7] = [
+    pub const ALL: [Action; 8] = [
         Action::ExecRun,
         Action::SessionOpen,
         Action::SessionList,
@@ -60,6 +71,7 @@ impl Action {
         Action::SessionControl,
         Action::HostReverse,
         Action::ForwardLocal,
+        Action::ForwardRemote,
     ];
 
     /// The dotted action string used in `acl.toml` and audit records
@@ -73,6 +85,7 @@ impl Action {
             Action::SessionControl => "session.control",
             Action::HostReverse => "host.reverse",
             Action::ForwardLocal => "forward.local",
+            Action::ForwardRemote => "forward.remote",
         }
     }
 }
@@ -241,6 +254,7 @@ mod tests {
         assert_eq!(Action::SessionControl.as_str(), "session.control");
         assert_eq!(Action::HostReverse.as_str(), "host.reverse");
         assert_eq!(Action::ForwardLocal.as_str(), "forward.local");
+        assert_eq!(Action::ForwardRemote.as_str(), "forward.remote");
         let strings: std::collections::BTreeSet<&str> =
             Action::ALL.iter().map(|a| a.as_str()).collect();
         assert_eq!(strings.len(), Action::ALL.len(), "distinct strings");
@@ -250,6 +264,10 @@ mod tests {
         assert!(
             Action::ALL.contains(&Action::ForwardLocal),
             "forward.local must be in Action::ALL"
+        );
+        assert!(
+            Action::ALL.contains(&Action::ForwardRemote),
+            "forward.remote must be in Action::ALL"
         );
         assert_eq!(Decision::Allow.as_str(), "allow");
         assert_eq!(Decision::Deny.as_str(), "deny");

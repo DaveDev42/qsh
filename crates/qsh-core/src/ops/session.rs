@@ -550,7 +550,29 @@ impl Ops {
     /// (`docs/CLI.md` §6.3). The successor token the host returns is made
     /// durable **before** the stream is used, because it is
     /// single-generation: losing it orphans the session.
-    pub fn session_attach(&self, req: SessionAttachReq) -> Result<SessionAttachStream, OpError> {
+    ///
+    /// `remote_forward_specs` (`PLAN.md` M4 Step 4's interactive `-R`) is
+    /// processed **inside** this call, before the attach driver is
+    /// spawned — not left to a later method on the returned
+    /// [`SessionAttachStream`] the way [`SessionAttachStream::
+    /// open_local_forwards`] is. The reason is [`Connected::run`]: each
+    /// `-R` spec costs a real `RemoteForwardOpen` control round trip, and
+    /// that needs the connection's [`Session`], but a few lines below
+    /// this point `Connected::take_session` moves that `Session` into the
+    /// spawned `drive_attach` task for the rest of the attach's life —
+    /// after which `Connected::run` can only ever answer `Internal`
+    /// ("connection already closed"), because there is no session left to
+    /// run a request on. `-L` never hits this because
+    /// [`SessionAttachStream::open_local_forwards`] only needs the raw
+    /// [`Connected::connection`], which the driver never takes. Pass an
+    /// empty slice for a plain attach or `-L`-only one; the resulting
+    /// [`qsh_proto::Tunnel`] DTOs come back through
+    /// [`SessionAttachStream::take_remote_forward_tunnels`].
+    pub fn session_attach(
+        &self,
+        req: SessionAttachReq,
+        remote_forward_specs: &[wire::ForwardSpec],
+    ) -> Result<SessionAttachStream, OpError> {
         let r = parse_session_ref(&req.session_ref)?;
         let store = ResumeStore::new(&self.paths);
         // Route-aware (`PLAN.md` M3 Step 7): a live reverse registration
@@ -657,6 +679,71 @@ impl Ops {
                 return Err(err);
             }
         };
+        // `-R`: send each `RemoteForwardOpen` now, while `conn` still owns
+        // its `Session` — this method's own doc explains why this cannot
+        // wait until after the attach driver is spawned below. All-or-
+        // nothing, the same discipline `SessionAttachStream::
+        // open_local_forwards` uses for `-L`: a spec that fails after
+        // earlier ones in this same call already opened a listener on the
+        // peer sends `RemoteForwardClose` for each of them (best-effort —
+        // their teardown is not this call's failure to report), because
+        // dropping this side's bookkeeping alone would leave the peer's
+        // listener bound with nobody left to dial its `TCP_ACCEPTED`
+        // streams.
+        let (remote_acceptor, remote_tunnels) = if remote_forward_specs.is_empty() {
+            (None, Vec::new())
+        } else {
+            // Same reverse-route refusal as `open_local_forwards`, and for
+            // the same reason: this leg needs a raw QUIC connection of its
+            // own to spawn the `TCP_ACCEPTED` acceptor on (`PLAN.md` M4
+            // Step 5).
+            let Some(connection) = conn.connection() else {
+                conn.close();
+                return Err(OpError::new(
+                    ErrorCode::Unsupported,
+                    "remote forwards over a reverse connection are not implemented yet",
+                ));
+            };
+            let acceptor =
+                conn.runtime()
+                    .block_on(crate::tunnel::remote::RemoteForwardAcceptor::spawn(
+                        connection,
+                    ));
+            let mut opened_ids: Vec<String> = Vec::with_capacity(remote_forward_specs.len());
+            let mut tunnels = Vec::with_capacity(remote_forward_specs.len());
+            let mut open_err = None;
+            for spec in remote_forward_specs {
+                let open_req = crate::ops::tunnel::remote_forward_open_from_spec(spec);
+                match conn.run(move |s| Box::pin(s.rfwd_open(open_req))) {
+                    Ok(opened) => {
+                        acceptor.register(
+                            opened.forward_id.clone(),
+                            spec.host.clone(),
+                            spec.host_port,
+                        );
+                        opened_ids.push(opened.forward_id.clone());
+                        tunnels.push(crate::ops::tunnel::remote_tunnel_dto(
+                            spec, &opened, &r.host,
+                        ));
+                    }
+                    Err(err) => {
+                        open_err = Some(err);
+                        break;
+                    }
+                }
+            }
+            if let Some(err) = open_err {
+                for forward_id in opened_ids {
+                    acceptor.unregister(&forward_id);
+                    let close_req = wire::RemoteForwardClose { forward_id };
+                    let _ = conn.run(move |s| Box::pin(s.rfwd_close(close_req)));
+                }
+                conn.close();
+                return Err(err);
+            }
+            (Some(acceptor), tunnels)
+        };
+
         let session = conn
             .take_session()
             .ok_or_else(|| OpError::new(ErrorCode::Internal, "attach lost its control stream"))?;
@@ -708,6 +795,8 @@ impl Ops {
                 driver,
             },
             forwards: Vec::new(),
+            remote_acceptor,
+            remote_tunnels,
             conn,
             store: ResumeStore::new(&self.paths),
             events: events_rx,
@@ -1210,6 +1299,31 @@ pub struct SessionAttachStream {
     /// ordering is also the whole `-L` teardown story — the listeners die
     /// with the attach, no daemon and no close RPC (`PLAN.md` M4 §4.1 #1).
     forwards: Vec<crate::tunnel::LocalForwardHandle>,
+    /// The `-R` remote forwards opened on this attach, if any — one shared
+    /// [`crate::tunnel::remote::RemoteForwardAcceptor`] for every `-R` spec
+    /// on this attach (`PLAN.md` M4 Step 4): a single `TCP_ACCEPTED`
+    /// dispatcher per connection is not an optimization, it is the only
+    /// correct shape once more than one `-R` shares a connection (that
+    /// type's own doc explains why two independent accept loops would
+    /// misroute each other's streams). Declared **before** `conn` for the
+    /// same reason `forwards` is: its accept task runs on `conn`'s runtime.
+    /// Set by [`Ops::session_attach`] itself, not by a method on this
+    /// type — see that method's own doc for why the `RemoteForwardOpen`
+    /// round trips cannot wait until after this value exists.
+    ///
+    /// Never read again after this: it is held purely for its `Drop`
+    /// (aborts the `TCP_ACCEPTED` dispatcher task, same one-drop teardown
+    /// `forwards`'s handles use) — `rustc`'s `dead_code` lint cannot see a
+    /// field kept alive only for its destructor, hence the `allow` below.
+    #[allow(dead_code)]
+    remote_acceptor: Option<crate::tunnel::remote::RemoteForwardAcceptor>,
+    /// The `qsh.cli/v1` [`Tunnel`](qsh_proto::Tunnel) DTO for each `-R`
+    /// spec [`Ops::session_attach`] already opened, waiting for
+    /// [`Self::take_remote_forward_tunnels`] to hand them to the frontend
+    /// to render — the same information `-L`'s [`Self::open_local_forwards`]
+    /// returns directly, split out here only because `-R`'s RPCs cannot
+    /// run this late (this struct's own doc on `remote_acceptor`).
+    remote_tunnels: Vec<qsh_proto::Tunnel>,
     conn: Connected,
     /// See [`SessionReader::store`].
     store: ResumeStore,
@@ -1374,6 +1488,18 @@ impl SessionAttachStream {
         let tunnels = started.iter().map(|f| f.tunnel(&host)).collect();
         self.forwards.extend(started);
         Ok(tunnels)
+    }
+
+    /// This attach's `-R` remote forward [`Tunnel`](qsh_proto::Tunnel)
+    /// DTOs, for the frontend to render — one per spec, in the order
+    /// passed to [`Ops::session_attach`], which is where the actual
+    /// `RemoteForwardOpen` round trips already happened (this method's own
+    /// struct field doc, [`SessionAttachStream::remote_acceptor`], says
+    /// why they cannot happen here instead). Takes the vec, so a second
+    /// call sees nothing left — there is exactly one batch to hand over,
+    /// same as `-L`'s single [`Self::open_local_forwards`] call.
+    pub fn take_remote_forward_tunnels(&mut self) -> Vec<qsh_proto::Tunnel> {
+        std::mem::take(&mut self.remote_tunnels)
     }
 
     /// The session being attached.
@@ -3296,7 +3422,13 @@ impl Link {
 
 impl Connected {
     /// Run one request closure on the live session.
-    fn run<T, F>(&mut self, f: F) -> Result<T, OpError>
+    ///
+    /// `pub(crate)`, not private: `crate::ops::tunnel`'s `-R` requester leg
+    /// (`PLAN.md` M4 Step 4) needs the same one-request-closure shape
+    /// `session_open`/`attach_request`/etc. already use here, for
+    /// `Session::rfwd_open`/`rfwd_close` — a sibling `ops` module, not a
+    /// descendant of this one, so plain module-private is not enough.
+    pub(crate) fn run<T, F>(&mut self, f: F) -> Result<T, OpError>
     where
         F: for<'a> FnOnce(
             &'a mut Session,

@@ -203,11 +203,19 @@ struct TunnelGuard {
 }
 
 impl TunnelGuard {
-    /// Start the child and return it together with the single envelope it
-    /// prints before it starts holding.
+    /// Start a `"local"`-mode (`--local`) child. See [`Self::start_mode`]
+    /// for the general form `--remote` also uses.
     fn start(client: &Sandbox, spec: &str) -> (Self, Value) {
+        Self::start_mode(client, "--local", spec)
+    }
+
+    /// Start the child and return it together with the single envelope it
+    /// prints before it starts holding. `flag` is `"--local"` or
+    /// `"--remote"` (`docs/CLI.md` §6.9) — the two are mutually exclusive
+    /// on `qsh tunnel open`, so exactly one is ever passed.
+    fn start_mode(client: &Sandbox, flag: &str, spec: &str) -> (Self, Value) {
         let mut command: Command =
-            client.command(&["tunnel", "open", HOST_ALIAS, "--local", spec, "--json"]);
+            client.command(&["tunnel", "open", HOST_ALIAS, flag, spec, "--json"]);
         let mut child = command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -265,8 +273,12 @@ fn drain_stderr(child: &mut Child) -> String {
     text
 }
 
-/// The host's `forward.local` audit records for `destination`, once there
-/// are at least `want` of them — then asserted to be exactly `want`.
+/// The host's `action` audit records for `resource`, once there are at
+/// least `want` of them — then asserted to be exactly `want`. `action` is
+/// `"forward.local"` (`-L`) or `"forward.remote"` (`-R`,
+/// `crate::acl::Action::ForwardRemote`); `resource` is the destination for
+/// the former and the bound `bind_host:bind_port` for the latter
+/// (`docs/design/protocol.md` §7's two choke points).
 ///
 /// Polled with a hard deadline rather than read once: the host writes
 /// these from another process, so a decision that has been *made* (the
@@ -274,17 +286,15 @@ fn drain_stderr(child: &mut Child) -> String {
 /// from being *on disk*. Waiting for `want` and then demanding exactly
 /// `want` is what makes "one decision per tunnel connection" a real
 /// assertion instead of a race.
-fn forward_audit(host: &Sandbox, destination: &str, want: usize) -> Vec<Value> {
+fn forward_audit(host: &Sandbox, action: &str, resource: &str, want: usize) -> Vec<Value> {
     let records = common::poll_until(
-        &format!("{want} forward.local record(s) for {destination}"),
+        &format!("{want} {action} record(s) for {resource}"),
         IO_TIMEOUT,
         || {
             let records: Vec<Value> = host
                 .audit_records()
                 .into_iter()
-                .filter(|record| {
-                    record["action"] == "forward.local" && record["resource"] == destination
-                })
+                .filter(|record| record["action"] == action && record["resource"] == resource)
                 .collect();
             (records.len() >= want).then_some(records)
         },
@@ -292,7 +302,7 @@ fn forward_audit(host: &Sandbox, destination: &str, want: usize) -> Vec<Value> {
     assert_eq!(
         records.len(),
         want,
-        "expected exactly {want} forward.local record(s) for {destination}, got {records:#?}"
+        "expected exactly {want} {action} record(s) for {resource}, got {records:#?}"
     );
     records
 }
@@ -339,7 +349,7 @@ fn the_interactive_form_forwards_a_local_port_to_the_remote_destination() {
 
     // The host audited the decision, structurally and once per connection.
     let destination = format!("127.0.0.1:{}", echo.port());
-    let records = forward_audit(&fleet.host, &destination, 1);
+    let records = forward_audit(&fleet.host, "forward.local", &destination, 1);
     let record = &records[0];
     assert_eq!(record["decision"], "allow");
     assert_eq!(record["principal"], CLIENT_PRINCIPAL);
@@ -351,7 +361,7 @@ fn the_interactive_form_forwards_a_local_port_to_the_remote_destination() {
     assert_eq!(back, b"second");
     // Each tunnel connection owes its own decision: the ticket exception
     // in `docs/design/protocol.md` §7 is per stream, not per session.
-    let _ = forward_audit(&fleet.host, &destination, 2);
+    let _ = forward_audit(&fleet.host, "forward.local", &destination, 2);
 
     client.type_("exit\r");
     let _ = client.session.expect(expectrl::Eof);
@@ -360,6 +370,80 @@ fn the_interactive_form_forwards_a_local_port_to_the_remote_destination() {
     let listener = common::poll_until("the forwarded port to be released", IO_TIMEOUT, || {
         TcpListener::bind(("127.0.0.1", local_port)).ok()
     });
+    drop(listener);
+}
+
+/// **DoD 2 (forward leg).** `qsh [user@]host -R <rport>:127.0.0.1:<echo>`
+/// under a real terminal: `-R`'s mirror image of the test above — a TCP
+/// write to the **host's** bound port reaches the destination back on
+/// *this* machine and comes back, while the shell on the same connection
+/// keeps working (`PLAN.md` M4 Step 4 (c) L5, `docs/design/protocol.md`
+/// §7).
+#[test]
+fn the_interactive_form_forwards_a_remote_port_back_to_the_requesters_destination() {
+    let fleet = Fleet::start();
+    let echo = start_echo();
+    let remote_port = free_port();
+    let spec = format!("{remote_port}:127.0.0.1:{}", echo.port());
+
+    let mut client = PtyClient::spawn(&fleet.client, &[HOST_ALIAS, "-R", &spec]);
+
+    // Same deterministic "the listener is bound" signal as `-L`'s own
+    // test, `print_forward_started`'s shared line — only the direction of
+    // the arrow is reversed, because `-R`'s `bind` is the host's address
+    // and `forward_to` is this side's own destination
+    // (`crate::ops::tunnel::remote_tunnel_dto`'s own doc).
+    client.expect(&format!(
+        "qsh: forwarding 127.0.0.1:{remote_port} -> 127.0.0.1:{} on {HOST_ALIAS}",
+        echo.port()
+    ));
+
+    let sent = payload();
+    let back =
+        round_trip(remote_port, sent.clone()).expect("round trip through the remote forward");
+    assert_eq!(
+        back.len(),
+        sent.len(),
+        "the forward returned {} of {} bytes",
+        back.len(),
+        sent.len()
+    );
+    assert!(back == sent, "the forward corrupted the payload");
+
+    // The session on the same connection is unaffected — a tunnel that
+    // starved or wedged the PTY would show up here too
+    // (`docs/design/protocol.md` §12).
+    client.shell_round_trip("QSH-RFORWARD");
+
+    // `RemoteForwardOpen` is authorized once, at open — not once per
+    // accepted connection (`crates/qsh-testkit/tests/tunnel_remote_loopback.rs`'s
+    // `one_remote_forward_serves_several_connections` establishes the same
+    // thing at L3), so a second round trip through the same forward adds
+    // no second audit line.
+    let resource = format!("127.0.0.1:{remote_port}");
+    let records = forward_audit(&fleet.host, "forward.remote", &resource, 1);
+    let record = &records[0];
+    assert_eq!(record["decision"], "allow");
+    assert_eq!(record["principal"], CLIENT_PRINCIPAL);
+    assert_eq!(record["resource"], resource.as_str());
+
+    let back = round_trip(remote_port, b"second".to_vec()).expect("second round trip");
+    assert_eq!(back, b"second");
+    let _ = forward_audit(&fleet.host, "forward.remote", &resource, 1);
+
+    client.type_("exit\r");
+    let _ = client.session.expect(expectrl::Eof);
+
+    // The forward dies with the client process: the host releases the
+    // port it bound, the same connection-bound lifecycle
+    // `docs/design/protocol.md` §3 promises and
+    // `tunnel_remote_loopback.rs`'s `abandoning_the_connection_closes_the_hosts_listener`
+    // proves directly against `Server::purge_connection`.
+    let listener = common::poll_until(
+        "the host to release the bound remote-forward port",
+        IO_TIMEOUT,
+        || TcpListener::bind(("127.0.0.1", remote_port)).ok(),
+    );
     drop(listener);
 }
 
@@ -400,7 +484,67 @@ fn tunnel_open_reports_the_bound_forward_and_holds_it() {
     assert!(back == sent, "the held tunnel corrupted the payload");
 
     let destination = format!("127.0.0.1:{}", echo.port());
-    let records = forward_audit(&fleet.host, &destination, 1);
+    let records = forward_audit(&fleet.host, "forward.local", &destination, 1);
+    assert_eq!(records[0]["decision"], "allow");
+
+    assert!(tunnel.is_running(), "the holder exited while serving");
+    let rest = tunnel.finish();
+    assert!(
+        rest.is_empty(),
+        "machine mode printed more than one stdout line: {rest:?}"
+    );
+}
+
+/// `qsh tunnel open host --remote … --json`: `-R`'s mirror image of the
+/// test above (`PLAN.md` M4 Step 4). The host binds `rport` on its own
+/// loopback and forwards each connection it accepts back to the
+/// *requester* — this test process — as a `TCP_ACCEPTED` stream; the
+/// requester leg then dials `127.0.0.1:<echo>` itself and splices
+/// (`docs/design/protocol.md` §7). Bytes reaching the echo server and
+/// coming back prove the whole path: `RemoteForwardOpen`, the host's
+/// `forward.remote` choke point, the loopback bind, `TCP_ACCEPTED`, and
+/// the requester's own dial-and-splice (`crate::tunnel::remote::
+/// RemoteForwardAcceptor`, this crate's own unit tests for which stop at
+/// the dispatcher — only a real shipped-binary round trip proves the
+/// dial seam and the CLI wiring on top of it too).
+#[test]
+fn tunnel_open_remote_forwards_a_host_port_back_to_the_requesters_destination() {
+    let fleet = Fleet::start();
+    let echo = start_echo();
+    let remote_port = free_port();
+    let spec = format!("{remote_port}:127.0.0.1:{}", echo.port());
+
+    let (mut tunnel, envelope) = TunnelGuard::start_mode(&fleet.client, "--remote", &spec);
+    assert_eq!(envelope["ok"], true, "{envelope}");
+    assert_eq!(envelope["command"], "tunnel.open");
+    let data = &envelope["data"];
+    assert_eq!(data["mode"], "remote");
+    assert_eq!(data["host"], HOST_ALIAS);
+    // `bind` is where the *peer* bound (`crate::ops::tunnel::
+    // remote_tunnel_dto`'s own doc) — the host, not this process.
+    assert_eq!(data["bind"], format!("127.0.0.1:{remote_port}"));
+    // `forward_to` is this side's own local dial target.
+    assert_eq!(data["forward_to"], format!("127.0.0.1:{}", echo.port()));
+    assert_eq!(data["actual_port"], remote_port, "{envelope}");
+    assert!(
+        data["tunnel_id"].as_str().is_some_and(|id| !id.is_empty()),
+        "{envelope}"
+    );
+
+    let sent = payload();
+    let back =
+        round_trip(remote_port, sent.clone()).expect("round trip through the held remote forward");
+    assert!(
+        back == sent,
+        "the held remote forward corrupted the payload"
+    );
+
+    // The choke point's resource is `bind_host:bind_port` — the *peer's*
+    // bound address, not the requester's dial target
+    // (`crate::server::Server::authorize_and_bind_remote_forward`'s own
+    // doc).
+    let resource = format!("127.0.0.1:{remote_port}");
+    let records = forward_audit(&fleet.host, "forward.remote", &resource, 1);
     assert_eq!(records[0]["decision"], "allow");
 
     assert!(tunnel.is_running(), "the holder exited while serving");
@@ -432,7 +576,12 @@ fn a_forward_to_a_dead_destination_delivers_nothing_and_survives() {
 
     // The dial was still authorized before it was attempted — the failure
     // is the destination's, not the gate's.
-    let records = forward_audit(&fleet.host, &format!("127.0.0.1:{dead}"), 1);
+    let records = forward_audit(
+        &fleet.host,
+        "forward.local",
+        &format!("127.0.0.1:{dead}"),
+        1,
+    );
     assert_eq!(records[0]["decision"], "allow");
 
     // One refused connection must not end the forward.

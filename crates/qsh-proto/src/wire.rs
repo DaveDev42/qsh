@@ -1773,6 +1773,21 @@ mod tests {
         }
         // A realistic-shaped id.
         assert!(valid_forward_id("fwd_01K0EXAMPLE-token"));
+        // Control characters and terminal escapes: refused outright, so a
+        // caller that shape-checks a peer's `forward_id` at ingress never
+        // has to sanitize it afterwards (this check is strictly stronger
+        // than `sanitize_peer_text`). These are the shapes that would
+        // otherwise reach an operator's terminal through a log line —
+        // `crate::wire::sanitize_peer_text`'s own doc names them.
+        assert!(!valid_forward_id("a\u{1b}[31mb"));
+        assert!(!valid_forward_id("\u{1b}]0;pwned\u{7}"));
+        assert!(!valid_forward_id("fwd\nqsh: forged line"));
+        assert!(!valid_forward_id("fwd\r-1"));
+        assert!(!valid_forward_id("fwd\u{0}-1"));
+        assert!(!valid_forward_id("fwd\t1"));
+        // A ULID — the shape the host actually mints
+        // (`qsh_core::server::Server::handle_rfwd_open`).
+        assert!(valid_forward_id("01ARZ3NDEKTSV4RRFFQ69G5FAV"));
     }
 
     // ---- sanitize_peer_text ------------------------------------------------

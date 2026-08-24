@@ -570,7 +570,7 @@ fn loopback_bind_addr(bind: Option<&str>, port: u16) -> Result<SocketAddr, Local
 /// exhaustion (another task closing an fd) costs one stall nobody notices,
 /// long enough that a sustained one costs ~20 attempts a second instead of
 /// millions.
-const ACCEPT_BACKOFF: Duration = Duration::from_millis(50);
+pub(crate) const ACCEPT_BACKOFF: Duration = Duration::from_millis(50);
 
 /// Errnos that mean "this `accept()` ran out of a resource", for the ones
 /// with no stable [`io::ErrorKind`] to match on yet (`EMFILE`, `ENFILE`,
@@ -629,8 +629,14 @@ const ACCEPT_PER_CONNECTION_ERRNOS: &[i32] = &[];
 /// `accept()` error is about a single pending connection or a momentary
 /// shortage, and treating those as fatal would let any local client take
 /// the operator's whole forward down.
+///
+/// `pub(crate)`: [`crate::tunnel::remote`]'s host-side accept loop
+/// (`PLAN.md` M4 Step 4) reuses this table verbatim rather than
+/// duplicating it — a `-R` listener owes the exact same liveness
+/// discipline as a `-L` listener, and there is only one place that logic
+/// should be able to drift.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AcceptDisposition {
+pub(crate) enum AcceptDisposition {
     /// One pending connection died on the way in, or a signal interrupted
     /// the syscall. The listener never noticed — retry immediately.
     Retry,
@@ -644,7 +650,7 @@ enum AcceptDisposition {
 }
 
 /// Classify an `accept()` failure — see [`AcceptDisposition`].
-fn accept_disposition(err: &io::Error) -> AcceptDisposition {
+pub(crate) fn accept_disposition(err: &io::Error) -> AcceptDisposition {
     match err.kind() {
         io::ErrorKind::ConnectionAborted | io::ErrorKind::Interrupted => {
             return AcceptDisposition::Retry;

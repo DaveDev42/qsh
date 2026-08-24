@@ -75,6 +75,13 @@ pub enum Attach {
         // read there — dead, not absent, on Windows.
         #[cfg_attr(not(unix), allow(dead_code))]
         forwards: Vec<String>,
+        /// `-R` remote forward specs, unparsed
+        /// (`qsh_core::parse_remote_forwards` turns them into specs;
+        /// `PLAN.md` M4 Step 4). Same scope as `forwards` — only this
+        /// form carries them, and only the `#[cfg(unix)]` driver reads
+        /// them.
+        #[cfg_attr(not(unix), allow(dead_code))]
+        remote_forwards: Vec<String>,
     },
     /// `qsh attach <session-ref>` — attach to a session already running.
     Existing {

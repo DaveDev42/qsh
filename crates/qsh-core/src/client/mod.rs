@@ -647,6 +647,77 @@ impl Session {
         }
     }
 
+    // ------------------------------------------------------------------
+    // `-R` remote forward control messages (M4 Step 4). Neither carries a
+    // capability gate — like a local forward's ticket-less `TCP_CONNECT`,
+    // these are authorized on the peer at the choke point
+    // (`crate::server::Server::authorize_and_bind_remote_forward`), not
+    // negotiated as a peer feature (`crate::acl::Action::ForwardRemote`'s
+    // own doc). [`Self::request`] rather than [`Self::session_request`]
+    // for exactly that reason: the latter's `CAP_SESSION` gate does not
+    // apply here.
+    // ------------------------------------------------------------------
+
+    /// `RemoteForwardOpen`: ask the peer to bind `req.bind_host:req.
+    /// bind_port` and forward each connection it accepts back to us as a
+    /// `TCP_ACCEPTED` stream. The peer's own loopback-only enforcement and
+    /// `forward.remote` ACL check both happen before it ever replies —
+    /// success here means a listener already exists on the peer.
+    pub async fn rfwd_open(
+        &mut self,
+        req: wire::RemoteForwardOpen,
+    ) -> Result<wire::RemoteForwardOpened, ClientError> {
+        let resp = self.request(control_message::Body::RfwdOpen(req)).await?;
+        match resp.body {
+            // The `forward_id` is host-minted but peer-supplied *to us*,
+            // and from here it becomes this side's dispatch-table key and
+            // the `Tunnel` DTO's `tunnel_id` (`crate::ops::tunnel::
+            // remote_tunnel_dto`). It is held to the shape `v1.proto`
+            // states for it (`wire::valid_forward_id`) at this ingress, so
+            // a peer cannot seat an unusable — or terminal-hostile — id in
+            // either place. Rejecting here also keeps the requester's own
+            // `TCP_ACCEPTED` ticket check (`crate::tunnel::remote::
+            // handle_accepted_stream`) from being the first thing to
+            // notice, which would show up as a forward that silently never
+            // carries a connection.
+            Some(response::Body::RfwdOpened(opened))
+                if wire::valid_forward_id(&opened.forward_id) =>
+            {
+                Ok(opened)
+            }
+            Some(response::Body::RfwdOpened(_)) => Err(ClientError::Protocol(
+                "RemoteForwardOpened carried a malformed forward_id".into(),
+            )),
+            Some(response::Body::Error(e)) => Err(ClientError::Remote {
+                code: e.error_code(),
+                message: e.message,
+                retryable: e.retryable,
+            }),
+            Some(other) => Err(unexpected("RemoteForwardOpen", &other)),
+            None => Err(ClientError::Protocol(
+                "empty response to RemoteForwardOpen".into(),
+            )),
+        }
+    }
+
+    /// `RemoteForwardClose`: ask the peer to close the listener it opened
+    /// for `req.forward_id` and tear down every connection it is
+    /// currently serving. Bare success carries no payload
+    /// (`v1.proto`'s own comment on the message) — a `None` response body
+    /// is the success case, not a protocol error.
+    pub async fn rfwd_close(&mut self, req: wire::RemoteForwardClose) -> Result<(), ClientError> {
+        let resp = self.request(control_message::Body::RfwdClose(req)).await?;
+        match resp.body {
+            None => Ok(()),
+            Some(response::Body::Error(e)) => Err(ClientError::Remote {
+                code: e.error_code(),
+                message: e.message,
+                retryable: e.retryable,
+            }),
+            Some(other) => Err(unexpected("RemoteForwardClose", &other)),
+        }
+    }
+
     /// `session.attach` (stream op): authorize the attach, then open the
     /// `SESSION_DATA` stream and redeem the ticket on it. The returned
     /// [`Attached`] is the live stream; the control stream stays with this

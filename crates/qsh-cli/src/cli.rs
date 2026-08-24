@@ -92,6 +92,24 @@ pub struct InteractiveArgs {
         requires = "target"
     )]
     pub local_forward: Vec<String>,
+
+    /// Remote forward `[bind:]rport:host:hport`, repeatable: ask the peer
+    /// to bind `rport` (loopback-only — `docs/PRD.md` §9) and forward each
+    /// connection it accepts back to `host:hport` **on this machine**
+    /// (`docs/CLI.md` §6.9). The two legs are swapped relative to `-L`;
+    /// see [`Self::local_forward`]'s own doc for the lifecycle this shares
+    /// with it — same holder, same teardown, no daemon.
+    ///
+    /// Same reasoning as [`Self::local_forward`] for not being a clap
+    /// `value_parser`: `qsh_core::parse_remote_forwards` decides the
+    /// `docs/CLI.md` §3.3 code, not clap's usage-error path.
+    #[arg(
+        short = 'R',
+        value_name = "SPEC",
+        action = ArgAction::Append,
+        requires = "target"
+    )]
+    pub remote_forward: Vec<String>,
 }
 
 /// A parsed `[user@]host` target (`docs/CLI.md` §7).
@@ -272,9 +290,28 @@ pub struct TunnelOpenArgs {
     pub host: String,
 
     /// Local forward `[bind:]listen_port:host:host_port` — same grammar
-    /// as the interactive `-L` (`docs/CLI.md` §6.9).
-    #[arg(short = 'L', long, value_name = "SPEC")]
-    pub local: String,
+    /// as the interactive `-L` (`docs/CLI.md` §6.9). Exactly one of
+    /// `--local`/`--remote` is required.
+    #[arg(
+        short = 'L',
+        long,
+        value_name = "SPEC",
+        conflicts_with = "remote",
+        required_unless_present = "remote"
+    )]
+    pub local: Option<String>,
+
+    /// Remote forward `[bind:]rport:host:hport` — same grammar as the
+    /// interactive `-R` (`docs/CLI.md` §6.9). Exactly one of
+    /// `--local`/`--remote` is required.
+    #[arg(
+        short = 'R',
+        long,
+        value_name = "SPEC",
+        conflicts_with = "local",
+        required_unless_present = "local"
+    )]
+    pub remote: Option<String>,
 }
 
 /// Arguments of `qsh exec`.
@@ -564,11 +601,48 @@ mod tests {
         assert!(Cli::try_parse_from(["qsh", "hosts", "-L", "8080:localhost:3000"]).is_err());
     }
 
-    /// `qsh tunnel open` takes a bare host and one `--local`/`-L` spec
-    /// (`docs/CLI.md` §6.9); the spec is required, because a tunnel with
-    /// no forward is nothing.
+    /// `-R` is `-L`'s twin: repeatable, scoped to the interactive form,
+    /// unparsed by clap for the same reason (`docs/CLI.md` §6.9), and free
+    /// to coexist with `-L` on the same invocation — `PLAN.md` M4 Step 4
+    /// calls them "companion flags" of the interactive form, not mutually
+    /// exclusive.
     #[test]
-    fn tunnel_open_takes_a_bare_host_and_a_local_spec() {
+    fn remote_forward_is_repeatable_scoped_to_the_interactive_form_and_coexists_with_local() {
+        let cli = Cli::try_parse_from([
+            "qsh",
+            "dave@box",
+            "-R",
+            "9000:127.0.0.1:22",
+            "-L",
+            "8080:localhost:3000",
+            "-R",
+            "127.0.0.1:9001:127.0.0.1:23",
+        ])
+        .unwrap();
+        assert_eq!(
+            cli.interactive.remote_forward,
+            vec![
+                "9000:127.0.0.1:22".to_string(),
+                "127.0.0.1:9001:127.0.0.1:23".to_string(),
+            ]
+        );
+        assert_eq!(
+            cli.interactive.local_forward,
+            vec!["8080:localhost:3000".to_string()]
+        );
+
+        assert!(Cli::try_parse_from(["qsh", "-R", "9000:127.0.0.1:22"]).is_err());
+        assert!(
+            Cli::try_parse_from(["qsh", "attach", "box/01K0", "-R", "9000:127.0.0.1:22"]).is_err()
+        );
+    }
+
+    /// `qsh tunnel open` takes a bare host and exactly one of
+    /// `--local`/`-L` or `--remote`/`-R` (`docs/CLI.md` §6.9) — neither,
+    /// or both, is a clap usage error (exit 2), because a tunnel with no
+    /// forward — or two contradictory ones — is nothing.
+    #[test]
+    fn tunnel_open_takes_a_bare_host_and_exactly_one_of_local_or_remote() {
         let cli = Cli::try_parse_from([
             "qsh",
             "tunnel",
@@ -581,7 +655,8 @@ mod tests {
         match cli.command.unwrap() {
             Command::Tunnel(TunnelCmd::Open(args)) => {
                 assert_eq!(args.host, "box");
-                assert_eq!(args.local, "8080:localhost:3000");
+                assert_eq!(args.local.as_deref(), Some("8080:localhost:3000"));
+                assert_eq!(args.remote, None);
             }
             other => panic!("expected tunnel open, got {other:?}"),
         }
@@ -589,8 +664,33 @@ mod tests {
         let cli =
             Cli::try_parse_from(["qsh", "tunnel", "open", "box", "-L", "1:h:2", "--json"]).unwrap();
         assert!(cli.wants_json());
+
+        let cli = Cli::try_parse_from([
+            "qsh",
+            "tunnel",
+            "open",
+            "box",
+            "--remote",
+            "9000:127.0.0.1:22",
+        ])
+        .unwrap();
+        match cli.command.unwrap() {
+            Command::Tunnel(TunnelCmd::Open(args)) => {
+                assert_eq!(args.local, None);
+                assert_eq!(args.remote.as_deref(), Some("9000:127.0.0.1:22"));
+            }
+            other => panic!("expected tunnel open, got {other:?}"),
+        }
+        // `-R` is the short form of the same flag.
+        assert!(Cli::try_parse_from(["qsh", "tunnel", "open", "box", "-R", "1:h:2"]).is_ok());
+
         assert!(Cli::try_parse_from(["qsh", "tunnel", "open", "box"]).is_err());
         assert!(Cli::try_parse_from(["qsh", "tunnel", "open", "-L", "1:h:2"]).is_err());
+        // Both at once is a usage error, not a "last one wins".
+        assert!(
+            Cli::try_parse_from(["qsh", "tunnel", "open", "box", "-L", "1:h:2", "-R", "3:h:4",])
+                .is_err()
+        );
     }
 
     #[test]

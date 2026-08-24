@@ -6,8 +6,10 @@
 //! (`docs/design/architecture.md` §1's dependency matrix), so this crate's
 //! own unit tests cannot use that harness.
 
-use std::sync::Arc;
+use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 
+use crate::tunnel::remote::{BindHostResolver, LookupFuture};
 use qsh_transport::{
     CertificateDer, Connection, Dialer, Fingerprint, Listener, LocalIdentity, Principal,
     StaticTrust,
@@ -50,4 +52,48 @@ pub(crate) async fn loopback_pair() -> (Connection, Connection) {
         async { dialer.dial(addr, "127.0.0.1").await.unwrap().connection },
     );
     (client, server)
+}
+
+/// A [`BindHostResolver`] that answers from a script and counts how
+/// many times it was asked. The count is the point: it is what turns
+/// "the address bound is the address validated" into an assertion
+/// instead of a comment. A resolver whose answers *change* between
+/// calls is exactly the peer-controlled DNS zone
+/// `crate::tunnel::remote::resolve_loopback_bind_addr`'s own doc describes.
+pub(crate) struct ScriptedResolver {
+    answers: Mutex<std::collections::VecDeque<Vec<SocketAddr>>>,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl ScriptedResolver {
+    /// `answers[n]` is what the `n`-th lookup gets; a lookup past the
+    /// end of the script reuses the last answer (so a caller that
+    /// resolves once cannot accidentally "pass" by running out).
+    pub(crate) fn new(answers: Vec<Vec<SocketAddr>>) -> Self {
+        Self {
+            answers: Mutex::new(answers.into()),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    pub(crate) fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl BindHostResolver for ScriptedResolver {
+    fn lookup<'a>(&'a self, _host: &'a str, _port: u16) -> LookupFuture<'a> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let mut answers = self.answers.lock().unwrap_or_else(|e| e.into_inner());
+        let answer = if answers.len() > 1 {
+            answers.pop_front().unwrap_or_default()
+        } else {
+            answers.front().cloned().unwrap_or_default()
+        };
+        Box::pin(async move { Ok(answer) })
+    }
+}
+
+pub(crate) fn addr(s: &str) -> SocketAddr {
+    s.parse().expect("test address literal")
 }

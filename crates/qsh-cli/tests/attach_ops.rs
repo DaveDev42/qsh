@@ -87,10 +87,13 @@ fn open(ops: &Ops, argv: &[&str]) -> String {
 /// Attach to `session_ref`, stealing the writer lease if one is held (what
 /// the interactive client does).
 fn attach(ops: &Ops, session_ref: &str) -> Result<SessionAttachStream, OpError> {
-    ops.session_attach(SessionAttachReq {
-        session_ref: session_ref.to_string(),
-        no_steal: false,
-    })
+    ops.session_attach(
+        SessionAttachReq {
+            session_ref: session_ref.to_string(),
+            no_steal: false,
+        },
+        &[],
+    )
 }
 
 /// Drain events until the accumulated output contains `needle`, returning

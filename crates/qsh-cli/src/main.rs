@@ -264,6 +264,7 @@ fn run(cli: &Cli) -> i32 {
                 host: target.host.clone(),
                 user: target.user.clone(),
                 forwards: cli.interactive.local_forward.clone(),
+                remote_forwards: cli.interactive.remote_forward.clone(),
             },
             cli.interactive.escape_char,
         );
@@ -593,10 +594,24 @@ fn remote_exit_code_to_process_exit(remote: i32) -> i32 {
 ///   §2.2), and a success line followed by a failure line would break
 ///   every parser of it.
 fn run_tunnel_open(cli: &Cli, ops: &Ops, args: &TunnelOpenArgs) -> i32 {
-    // Parsing (and the loopback-bind rule) lives in `qsh-core`: this
-    // frontend only shuttles the already-parsed halves into the request
-    // the contract defines (`docs/CLI.md` §6.9).
-    let specs = match qsh_core::parse_local_forwards(std::slice::from_ref(&args.local)) {
+    // Exactly one of `--local`/`--remote` reaches here: clap's
+    // `conflicts_with`/`required_unless_present` on both flags
+    // (`cli.rs`'s `TunnelOpenArgs`) already ruled out both `None` and
+    // both `Some` as usage errors before argument parsing even finished.
+    let (mode, spec_str) = match (&args.local, &args.remote) {
+        (Some(spec), None) => ("local", spec),
+        (None, Some(spec)) => ("remote", spec),
+        _ => unreachable!("clap enforces exactly one of --local/--remote"),
+    };
+    // Parsing (and, for `"local"`, the loopback-bind rule) lives in
+    // `qsh-core`: this frontend only shuttles the already-parsed halves
+    // into the request the contract defines (`docs/CLI.md` §6.9).
+    let parsed = if mode == "local" {
+        qsh_core::parse_local_forwards(std::slice::from_ref(spec_str))
+    } else {
+        qsh_core::parse_remote_forwards(std::slice::from_ref(spec_str))
+    };
+    let specs = match parsed {
         Ok(specs) => specs,
         Err(err) => return report_error(cli, TunnelOpenOp::COMMAND, &err),
     };
@@ -609,7 +624,7 @@ fn run_tunnel_open(cli: &Cli, ops: &Ops, args: &TunnelOpenArgs) -> i32 {
     };
     let request = TunnelOpenReq {
         host: args.host.clone(),
-        mode: "local".to_string(),
+        mode: mode.to_string(),
         bind: spec.bind.clone(),
         listen_port: u32::from(spec.listen_port),
         forward_host: spec.host.clone(),

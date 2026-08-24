@@ -805,10 +805,13 @@ fn a_sigkilled_client_loses_no_bytes_and_the_session_survives_it() {
     // that died of SIGKILL has no cursor left to present, which is the
     // whole reason `L` is recovered from the pty here.
     let mut stream = ops
-        .session_attach(SessionAttachReq {
-            session_ref: session_ref.clone(),
-            no_steal: false,
-        })
+        .session_attach(
+            SessionAttachReq {
+                session_ref: session_ref.clone(),
+                no_steal: false,
+            },
+            &[],
+        )
         .expect("a reattach after the client was killed");
     assert_eq!(
         stream.replay_from(),

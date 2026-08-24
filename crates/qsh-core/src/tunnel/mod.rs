@@ -36,9 +36,11 @@ use crate::client::ClientError;
 use crate::client::link::{DataKillSwitch, DataLink, DataRecv, DataSend};
 
 pub use local::{LocalForwardError, LocalForwardHandle};
+pub use remote::RemoteForwardAcceptor;
 
 pub(crate) mod dial;
 pub(crate) mod local;
+pub(crate) mod remote;
 pub(crate) mod splice;
 #[cfg(test)]
 pub(crate) mod testutil;
