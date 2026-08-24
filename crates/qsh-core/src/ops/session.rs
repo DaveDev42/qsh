@@ -707,6 +707,7 @@ impl Ops {
                 detaching,
                 driver,
             },
+            forwards: Vec::new(),
             conn,
             store: ResumeStore::new(&self.paths),
             events: events_rx,
@@ -868,7 +869,7 @@ impl Ops {
     /// — gets this transparently; `session.attach`'s own
     /// [`Self::connect_target`] call stays forward-only (M3 Step 7 adds
     /// its reverse leg).
-    fn connect(&self, host: &str) -> Result<Connected, OpError> {
+    pub(crate) fn connect(&self, host: &str) -> Result<Connected, OpError> {
         match self.resolve_route(host)? {
             PeerRoute::Forward(target) => self.connect_target(&target),
             // Generation is only ever needed to seed a `session.attach`'s
@@ -1202,6 +1203,13 @@ pub struct SessionAttachStream {
     /// with `finished` still false, and the driver reads its own teardown
     /// as a path death and starts re-dialing.
     stop: AttachStop,
+    /// The `-L` local forwards opened on this attach, if any
+    /// ([`Self::open_local_forwards`]). Declared **before** `conn`
+    /// deliberately: each handle's drop aborts its accept loop on `conn`'s
+    /// runtime, so they must go while that runtime is still there. That
+    /// ordering is also the whole `-L` teardown story — the listeners die
+    /// with the attach, no daemon and no close RPC (`PLAN.md` M4 §4.1 #1).
+    forwards: Vec<crate::tunnel::LocalForwardHandle>,
     conn: Connected,
     /// See [`SessionReader::store`].
     store: ResumeStore,
@@ -1309,6 +1317,65 @@ impl RenewalSchedule {
 }
 
 impl SessionAttachStream {
+    /// Bind and start this attach's `-L` local forwards (`PLAN.md` M4
+    /// Step 3; `docs/CLI.md` §7 "`-L`/`-R`은 이 대화형 form의 companion
+    /// flag이지 별도 명령이 아니다").
+    ///
+    /// The forwards ride **this attach's** connection and are owned by
+    /// this stream, so they live exactly as long as the interactive
+    /// session and die with it — the foreground holder model (§4.1 #1),
+    /// with no daemon and no orphaned bound port. Nothing here is
+    /// authorized locally: each forwarded TCP connection is authorized by
+    /// the peer, inline at stream open, before the peer dials anything
+    /// (`docs/design/protocol.md` §7).
+    ///
+    /// Binding is all-or-nothing: a spec that fails drops every listener
+    /// this call already bound, so a partially-established `-L` set never
+    /// survives into the session. Call it **before** the frontend takes
+    /// the terminal — a bind failure is an ordinary typed error, and the
+    /// caller should report it rather than half-start a session.
+    ///
+    /// Returns the [`qsh_proto::Tunnel`] DTO of each forward, in `specs`
+    /// order, for
+    /// the frontend to render.
+    pub fn open_local_forwards(
+        &mut self,
+        specs: &[qsh_proto::wire::ForwardSpec],
+    ) -> Result<Vec<qsh_proto::Tunnel>, OpError> {
+        if specs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let host = parse_session_ref(&self.session_ref)?.host;
+        // A `-L` needs a raw QUIC stream of its own; the reverse route has
+        // no connection here to open one on (`Connected::connection`).
+        // Fail closed rather than pretend (`PLAN.md` M4 Step 5).
+        let Some(connection) = self.conn.connection() else {
+            return Err(OpError::new(
+                ErrorCode::Unsupported,
+                "local forwards over a reverse connection are not implemented yet",
+            ));
+        };
+        let started = {
+            let runtime = self.conn.runtime();
+            let mut started = Vec::with_capacity(specs.len());
+            for spec in specs {
+                // On `Err` the loop returns, dropping every handle in
+                // `started` — each drop closes its listener.
+                let handle = runtime
+                    .block_on(crate::tunnel::LocalForwardHandle::start(
+                        spec,
+                        connection.clone(),
+                    ))
+                    .map_err(crate::ops::tunnel::map_local_forward_error)?;
+                started.push(handle);
+            }
+            started
+        };
+        let tunnels = started.iter().map(|f| f.tunnel(&host)).collect();
+        self.forwards.extend(started);
+        Ok(tunnels)
+    }
+
     /// The session being attached.
     pub fn session_ref(&self) -> &str {
         &self.session_ref
@@ -3138,7 +3205,11 @@ fn control_event_json(session_ref: &str, event: wire::SessionEvent) -> Option<Se
 /// A dialed, negotiated peer connection held open across calls, with its
 /// own runtime — the backbone of both the value ops (one call, then
 /// [`close`](Connected::close)) and the streaming ops (many calls).
-struct Connected {
+///
+/// `pub(crate)` only so the sibling `crate::ops::tunnel` module can hold
+/// one for a foreground tunnel (`PLAN.md` M4 Step 3); nothing outside
+/// `crate::ops` can name it.
+pub(crate) struct Connected {
     /// `None` only between [`Connected::close`] and the drop.
     runtime: Option<tokio::runtime::Runtime>,
     /// The endpoint and connection currently carrying this attach — the
@@ -3243,8 +3314,9 @@ impl Connected {
     }
 
     /// The runtime this connection lives on, for callers that drive their
-    /// own tasks on it (the attach driver).
-    fn runtime(&self) -> &tokio::runtime::Runtime {
+    /// own tasks on it (the attach driver, and a `-L` forward's accept
+    /// loop).
+    pub(crate) fn runtime(&self) -> &tokio::runtime::Runtime {
         self.runtime
             .as_ref()
             .expect("runtime is only taken by close()")
@@ -3276,11 +3348,26 @@ impl Connected {
         }
     }
 
+    /// The QUIC connection underneath, on the forward route only.
+    ///
+    /// `None` on the reverse route, where this process is not a QUIC
+    /// endpoint at all — its peer traffic is relayed by the resident `qsh
+    /// listen` daemon over a `LOCAL_STREAM` conduit
+    /// ([`ConnectedLink::Reverse`]). A caller that needs a raw byte pipe
+    /// of its own (a tunnel splice) has to refuse there rather than
+    /// improvise, which is what `PLAN.md` M4 Step 5 exists to fix.
+    pub(crate) fn connection(&self) -> Option<qsh_transport::Connection> {
+        match &self.link {
+            ConnectedLink::Forward(link) => Some(link.connection()),
+            ConnectedLink::Reverse { .. } => None,
+        }
+    }
+
     /// Close the control stream and the connection, then let the QUIC close
     /// frames drain (forward route) — or just the control stream (reverse
     /// route: there is no separate connection here to close, and no QUIC
     /// close frame of this process's own to drain).
-    fn close(mut self) {
+    pub(crate) fn close(mut self) {
         let Some(runtime) = self.runtime.take() else {
             return;
         };

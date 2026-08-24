@@ -57,13 +57,20 @@ const DEFERRED: &[(&str, &str)] = &[
     (
         "PERMISSION_DENIED",
         "M5 policy engine (the M1–M4 interim policy is allow-all-pinned) still \
-         leaves no *CLI-reachable* deterministic producer: M3 Step 6 gave this \
-         code its first real producer — a `DenyAll`-policied target refusing an \
-         unauthorized principal's `session.open` relayed over the reverse \
-         (`localctl`) route, `crates/qsh-testkit/tests/reverse_session_ops.rs` \
-         — but that producer lives at the `qsh-testkit` in-process harness \
-         level, not behind `CARGO_BIN_EXE_qsh`, so there is still no \
-         `qsh.cli/v1` envelope for this file to capture",
+         leaves no *CLI-reachable* deterministic producer, and it now has two \
+         producers that are envelope-less for different reasons. (1) M3 Step 6: \
+         a `DenyAll`-policied target refusing an unauthorized principal's \
+         `session.open` relayed over the reverse (`localctl`) route, \
+         `crates/qsh-testkit/tests/reverse_session_ops.rs` — that one lives at \
+         the `qsh-testkit` in-process harness level, not behind \
+         `CARGO_BIN_EXE_qsh`. (2) M4 Step 3: the host's inline `forward.local` \
+         deny on a `TCP_CONNECT` stream (`docs/design/protocol.md` §7, \
+         `crates/qsh-testkit/tests/tunnel_loopback.rs`) — that one *is* \
+         reachable from the binary, but it is a per-connection event on an \
+         already-open tunnel, delivered as a `ConnectResult{ok:false}` on the \
+         stream and surfaced to the operator on stderr; the command's own \
+         envelope (`tunnel.open`, already printed) is `ok: true`, so there is \
+         still no `qsh.cli/v1` error envelope for this file to capture",
     ),
     (
         "RESUME_GAP",

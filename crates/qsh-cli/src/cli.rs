@@ -53,9 +53,11 @@ impl Cli {
 
 /// The root-level arguments of the interactive form, `qsh [user@]host`.
 ///
-/// `--escape-char` `requires` the target, so it is a clap usage error
-/// (exit `2`) on any other command — `docs/CLI.md` §7 scopes the flag to
-/// `qsh [user@]host` and `qsh attach`.
+/// `--escape-char` and `-L` both `requires` the target, so either is a
+/// clap usage error (exit `2`) on any other command — `docs/CLI.md` §7
+/// scopes `--escape-char` to `qsh [user@]host` and `qsh attach`, and `-L`
+/// to `qsh [user@]host` alone (the standalone tunnel form is
+/// `qsh tunnel open`, §6.9).
 #[derive(Debug, Args)]
 pub struct InteractiveArgs {
     /// Pinned host to open an interactive session on, optionally prefixed
@@ -68,6 +70,28 @@ pub struct InteractiveArgs {
     /// when stdin is a terminal.
     #[arg(long, value_name = "CHAR", value_parser = parse_escape_char, requires = "target")]
     pub escape_char: Option<EscapeChar>,
+
+    /// Local forward `[bind:]listen_port:host:host_port`, repeatable:
+    /// open `listen_port` on this machine and forward each connection to
+    /// `host:host_port` as seen from the peer. `bind` defaults to (and is
+    /// restricted to) loopback.
+    ///
+    /// The listener lives exactly as long as this interactive session and
+    /// dies with the process (`docs/CLI.md` §6.14) — there is no daemon
+    /// and nothing to close.
+    ///
+    /// Deliberately **not** parsed by a clap `value_parser`: a malformed
+    /// spec is an `INVALID_ARGUMENT` operation error (exit `255`, with a
+    /// `qsh.cli/v1` envelope in machine mode), not a clap usage error
+    /// (exit `2`), and `qsh_core::parse_local_forwards` is the single
+    /// place that decides which code a spec earns (`docs/CLI.md` §6.9).
+    #[arg(
+        short = 'L',
+        value_name = "SPEC",
+        action = ArgAction::Append,
+        requires = "target"
+    )]
+    pub local_forward: Vec<String>,
 }
 
 /// A parsed `[user@]host` target (`docs/CLI.md` §7).
@@ -204,6 +228,10 @@ pub enum Command {
         bind: Option<String>,
     },
 
+    /// Manage tunnels (`docs/CLI.md` §6.9).
+    #[command(subcommand)]
+    Tunnel(TunnelCmd),
+
     /// Dial `<controller>` and register this device as a reverse target,
     /// once — no reconnect loop yet (`docs/CLI.md` §6.13). On success this
     /// process serves the connection as a host, the same broker/writer-lease
@@ -221,6 +249,32 @@ pub enum Command {
         #[arg(long, value_name = "NAME")]
         offered_name: Option<String>,
     },
+}
+
+/// `qsh tunnel …` subcommands (`docs/CLI.md` §6.9).
+#[derive(Debug, Subcommand)]
+pub enum TunnelCmd {
+    /// Open a tunnel to a pinned host and hold it open.
+    ///
+    /// This is a *value* operation that then blocks: the `Tunnel` envelope
+    /// is emitted once, and the tunnel lives for as long as this
+    /// foreground process does (`docs/CLI.md` §6.14). Ctrl-C ends it.
+    Open(TunnelOpenArgs),
+}
+
+/// Arguments of `qsh tunnel open`.
+///
+/// Bare host only — no `user@` (`docs/CLI.md` §7: this form sends no
+/// `SessionOpen`, so there is no login hint to carry).
+#[derive(Debug, Args)]
+pub struct TunnelOpenArgs {
+    /// Host alias from the trust store (`qsh trust list`).
+    pub host: String,
+
+    /// Local forward `[bind:]listen_port:host:host_port` — same grammar
+    /// as the interactive `-L` (`docs/CLI.md` §6.9).
+    #[arg(short = 'L', long, value_name = "SPEC")]
+    pub local: String,
 }
 
 /// Arguments of `qsh exec`.
@@ -466,6 +520,77 @@ mod tests {
             other => panic!("expected init, got {other:?}"),
         }
         assert!(Cli::try_parse_from(["qsh", "init", "--key-store", "keychain"]).is_err());
+    }
+
+    /// `-L` is repeatable, scoped to the interactive form, and left
+    /// **unparsed** by clap so a malformed spec is an `INVALID_ARGUMENT`
+    /// operation error (exit 255) rather than a clap usage error (exit 2)
+    /// — `docs/CLI.md` §6.9, and this flag's own doc.
+    #[test]
+    fn local_forward_is_repeatable_and_scoped_to_the_interactive_form() {
+        let cli = Cli::try_parse_from([
+            "qsh",
+            "dave@box",
+            "-L",
+            "8080:localhost:3000",
+            "-L",
+            "127.0.0.1:9090:db.internal:5432",
+        ])
+        .unwrap();
+        assert!(cli.command.is_none());
+        assert_eq!(
+            cli.interactive.local_forward,
+            vec![
+                "8080:localhost:3000".to_string(),
+                "127.0.0.1:9090:db.internal:5432".to_string(),
+            ]
+        );
+
+        // Garbage is accepted by clap and refused later, with a code.
+        assert_eq!(
+            Cli::try_parse_from(["qsh", "box", "-L", "nonsense"])
+                .unwrap()
+                .interactive
+                .local_forward,
+            vec!["nonsense".to_string()]
+        );
+        // …but only on the form that has a target: `-L` is not a global
+        // flag, and `qsh attach` takes none (`docs/CLI.md` §7).
+        assert!(Cli::try_parse_from(["qsh", "-L", "8080:localhost:3000"]).is_err());
+        assert!(
+            Cli::try_parse_from(["qsh", "attach", "box/01K0", "-L", "8080:localhost:3000"])
+                .is_err()
+        );
+        assert!(Cli::try_parse_from(["qsh", "hosts", "-L", "8080:localhost:3000"]).is_err());
+    }
+
+    /// `qsh tunnel open` takes a bare host and one `--local`/`-L` spec
+    /// (`docs/CLI.md` §6.9); the spec is required, because a tunnel with
+    /// no forward is nothing.
+    #[test]
+    fn tunnel_open_takes_a_bare_host_and_a_local_spec() {
+        let cli = Cli::try_parse_from([
+            "qsh",
+            "tunnel",
+            "open",
+            "box",
+            "--local",
+            "8080:localhost:3000",
+        ])
+        .unwrap();
+        match cli.command.unwrap() {
+            Command::Tunnel(TunnelCmd::Open(args)) => {
+                assert_eq!(args.host, "box");
+                assert_eq!(args.local, "8080:localhost:3000");
+            }
+            other => panic!("expected tunnel open, got {other:?}"),
+        }
+        // `-L` is the short form of the same flag.
+        let cli =
+            Cli::try_parse_from(["qsh", "tunnel", "open", "box", "-L", "1:h:2", "--json"]).unwrap();
+        assert!(cli.wants_json());
+        assert!(Cli::try_parse_from(["qsh", "tunnel", "open", "box"]).is_err());
+        assert!(Cli::try_parse_from(["qsh", "tunnel", "open", "-L", "1:h:2"]).is_err());
     }
 
     #[test]

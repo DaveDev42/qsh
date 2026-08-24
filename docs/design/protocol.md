@@ -72,9 +72,15 @@ connection당 **control 스트림 1개** + 리소스별 스트림. 비-control �
 | Tunnel (local fwd) | local listener 쪽, TCP 연결당 1개 | bidi | `StreamHeader{TCP_CONNECT, host, port}` → `ConnectResult{ok, code, message}` → (ok면) raw bytes |
 | Tunnel (remote fwd) | remote port를 bind한 쪽, accept당 1개 | bidi | `StreamHeader{TCP_ACCEPTED, forward_id}` → raw bytes |
 
-**Ticket:** `SESSION_DATA`/`EXEC_DATA`용 ticket은 128-bit 난수, **해당 control 요청이 ACL을 통과한 뒤에만 발급**, 단회용, 30s 만료. 스트림이 인가받지 않은 리소스에 붙는 것을 구조적으로 차단한다("인증·인가 전 리소스 생성 금지", PRD §9). 유일한 예외는 `TCP_CONNECT`(local forward) — per-connection RPC 왕복을 피하려 스트림 오픈 시점에 `forward.local` ACL을 inline 검사하고, 거부 시 아무것도 dial하지 않고 스트림을 reset한다.
+**Ticket:** `SESSION_DATA`/`EXEC_DATA`용 ticket은 128-bit 난수, **해당 control 요청이 ACL을 통과한 뒤에만 발급**, 단회용, 30s 만료. 스트림이 인가받지 않은 리소스에 붙는 것을 구조적으로 차단한다("인증·인가 전 리소스 생성 금지", PRD §9). 유일한 예외는 `TCP_CONNECT`(local forward) — per-connection RPC 왕복을 피하려 스트림 오픈 시점에 `forward.local` ACL을 inline 검사하고, 거부 시 아무것도 dial하지 않는다(거부 teardown은 아래).
 
 **`ConnectResult`(§9의 data-stream message, `qsh.wire.v1`):** `{ bool ok = 1; string code = 2; string message = 3; }`. frame layer는 위와 같은 §5 재사용(`u32`-BE length prefix + prost, `DATA_FRAME_MAX` 상한)이며, `ok = true` 이후로는 frame 없이 raw bytes로 전환된다(§5의 터널 스트림 예외). `ok = false`일 때 `code`는 CLI.md §3.3 어휘에서 온다 — dial 실패는 `CONNECTION_FAILED`, 위 inline ACL 거부는 `PERMISSION_DENIED`.
+
+**거부 teardown(`TCP_CONNECT`):** 거부는 `ConnectResult{ok:false, code}`를 **먼저 쓰고**, 송신 half를 `finish()`로 닫고, 수신 half를 사유에 맞는 코드로 `stop()`한다 — `PERMISSION_DENIED`면 `FORBIDDEN`(0x2003), `INVALID_ARGUMENT`면 `BAD_HEADER`(0x2001), 목적지가 그냥 받아주지 않은 경우는 누구의 프로토콜 오류도 아니므로 0이다. **송신 half를 reset하지 않는 것이 요점이다**: QUIC `RESET_STREAM`은 아직 전달되지 않은 스트림 데이터를 버리므로, 방금 쓴 `ConnectResult`를 reset이 그대로 파괴할 수 있다 — 이 절이 요구하는 "요청자가 거부 사유를 `code`로 읽는다"가 전달 경쟁에 걸린다. 그렇다고 거부가 느슨해지지는 않는다. dial은 0건이고, splice는 시작되지 않으며, 수신 half가 stop된 스트림에는 요청자가 더 쓸 수 없다 — 거부는 그대로 종단이다. 구현은 `crates/qsh-core/src/server/mod.rs`의 `handle_tcp_connect`.
+
+**splice 중단 신호:** `ok = true` 이후 raw byte 구간이 오류로 끊기면 잘린 전송이 정상 EOF로 보여서는 안 된다 — 응용은 그 차이를 탐지할 수 없고, 그것이 조용한 데이터 손실이다. 그래서 splice는 실패 시 QUIC 스트림을 `RESET_STREAM`/`STOP_SENDING` 코드 `0x2007`로 reset하고 로컬 TCP 소켓은 `SO_LINGER 0`으로 닫아 RST를 보낸다. 양쪽 응용이 관측하는 것은 연결 오류이며, 그것이 사실이다. 정상 종료는 반대로 방향별 half-close다 — 한 방향의 EOF는 그 방향 writer만 닫고(QUIC `finish()` / `shutdown(SHUT_WR)`) 반대 방향은 자기 EOF까지 계속 흐른다(`nc -N`, HTTP request body, tunnel 위의 `git`). `0x2007`은 `RESET_CODE_*`와 같은 내부 코드이지 wire 계약이 아니다 — peer가 알아야 할 것은 "정상 종료가 아니다" 하나이고 그건 reset 자체가 전달한다. 구현은 `crates/qsh-core/src/tunnel/splice.rs`.
+
+**동시성 상한:** 한 연결이 동시에 여는 `TCP_CONNECT` 스트림 수는 연결 전체의 bidi 스트림 상한(`MAX_CONCURRENT_BIDI_STREAMS = 1024`, `crates/qsh-transport/src/endpoint.rs`)이 그대로 묶는다 — 동시 터널 스트림과 그것이 붙잡는 upstream fd는 연결당 1024개로 유계이고, 그 peer는 애초에 mTLS로 pin된 상대다(M1–M4 interim allow-all-pinned). 이보다 좁은 **터널 전용** 할당량(principal별·forward별)은 M5 정책 엔진 범위이며 M4는 만들지 않는다.
 
 **`forward_id`:** remote forward(`-R`)가 host 쪽에 뜬 listener에 들어온 accept 하나하나를 식별하는, host가 발급하는 opaque URL-safe 문자열이다. peer가 audit field로 쓸 수 있으므로 `session_id`와 같은 규율을 적용한다 — ACL choke point 이전에 모양(`1..=64` 바이트, `[A-Za-z0-9_-]`)을 검사하고 아니면 `INVALID_ARGUMENT`다(§9 "세션 id는 모양부터 검사한다"와 동일 패턴, `qsh-proto::wire`가 검증기를 제공한다). `TCP_ACCEPTED` 스트림은 이 `forward_id`를 `StreamHeader.ticket`에 담아 나른다.
 

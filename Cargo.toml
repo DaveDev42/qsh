@@ -39,7 +39,7 @@ quinn = { version = "0.11", default-features = false, features = ["runtime-tokio
 rustls = { version = "0.23", default-features = false, features = ["std", "aws_lc_rs", "logging", "tls12"] }
 rustls-webpki = { version = "0.103", default-features = false, features = ["std", "aws-lc-rs"] }
 x509-parser = "0.18"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "process", "sync", "time", "net", "signal", "io-std"] }
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "io-util", "process", "sync", "time", "net", "signal", "io-std"] }
 
 # identity / crypto hygiene
 rcgen = { version = "0.14", default-features = false, features = ["pem", "aws_lc_rs"] }

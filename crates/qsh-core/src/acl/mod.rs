@@ -40,17 +40,26 @@ pub enum Action {
     /// registry entry (`docs/design/protocol.md` §11-2, `docs/CLI.md`
     /// §2.5).
     HostReverse,
+    /// Dial a destination on this host's behalf for a peer's local forward
+    /// (`forward.local`, `-L`). Not a control-stream operation either: it
+    /// is the check a peer-opened `TCP_CONNECT` tunnel stream is put
+    /// through **inline, before anything is dialed** — protocol.md §7's
+    /// sole exception to the ticket rule (`docs/CLI.md` §2.5's
+    /// `tunnel.open` local → `forward.local` row). The resource is the
+    /// requested destination, `"host:port"`.
+    ForwardLocal,
 }
 
 impl Action {
     /// Every action this build can evaluate, in a stable order.
-    pub const ALL: [Action; 6] = [
+    pub const ALL: [Action; 7] = [
         Action::ExecRun,
         Action::SessionOpen,
         Action::SessionList,
         Action::SessionAttach,
         Action::SessionControl,
         Action::HostReverse,
+        Action::ForwardLocal,
     ];
 
     /// The dotted action string used in `acl.toml` and audit records
@@ -63,6 +72,7 @@ impl Action {
             Action::SessionAttach => "session.attach",
             Action::SessionControl => "session.control",
             Action::HostReverse => "host.reverse",
+            Action::ForwardLocal => "forward.local",
         }
     }
 }
@@ -230,9 +240,17 @@ mod tests {
         assert_eq!(Action::SessionAttach.as_str(), "session.attach");
         assert_eq!(Action::SessionControl.as_str(), "session.control");
         assert_eq!(Action::HostReverse.as_str(), "host.reverse");
+        assert_eq!(Action::ForwardLocal.as_str(), "forward.local");
         let strings: std::collections::BTreeSet<&str> =
             Action::ALL.iter().map(|a| a.as_str()).collect();
         assert_eq!(strings.len(), Action::ALL.len(), "distinct strings");
+        // `ALL` is what an M5 policy file will be validated against, so a
+        // new action that never made it into the array is a silent hole:
+        // name the newcomer explicitly rather than trusting the count.
+        assert!(
+            Action::ALL.contains(&Action::ForwardLocal),
+            "forward.local must be in Action::ALL"
+        );
         assert_eq!(Decision::Allow.as_str(), "allow");
         assert_eq!(Decision::Deny.as_str(), "deny");
         assert!(Decision::Allow.is_allow());
