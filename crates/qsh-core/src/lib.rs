@@ -37,6 +37,7 @@ pub mod server;
 pub mod session_stream;
 pub mod telemetry;
 pub mod trust;
+pub mod tunnel;
 
 pub use client::pathwatch::PathWatchConfig;
 pub use config::{Config, Paths, now_rfc3339};

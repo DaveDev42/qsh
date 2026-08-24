@@ -28,8 +28,8 @@
 //! business logic" rule).
 
 use prost::Message;
-use qsh_proto::wire::ControlMessage;
-use qsh_transport::{FramedRecv, FramedSend, FramedStream};
+use qsh_proto::wire::{ControlMessage, StreamHeader};
+use qsh_transport::{Connection, FramedRecv, FramedSend, FramedStream};
 
 // `crate::localctl` is `#[cfg(unix)]`-only (`lib.rs`) — the `Local`
 // carrier this file adds exists only there; `Quic` (unchanged since M1)
@@ -252,6 +252,95 @@ impl DataRecv {
             DataRecv::Quic(recv) => Ok(recv.recv::<M>().await?),
             #[cfg(unix)]
             DataRecv::Local(recv) => recv.recv::<M>().await.map_err(op_error_to_client_error),
+        }
+    }
+}
+
+/// A carrier this process can open a **fresh** data stream on — the same
+/// forward/reverse axis as [`ControlLink`] and [`DataSend`]/[`DataRecv`],
+/// but where those two represent a stream already opened, this borrows
+/// what opening *another* one needs (the live connection, or the daemon
+/// socket + host name), so more than one call site can open data streams
+/// the same way without each having to know both carriers' handshakes
+/// (`PLAN.md` M4 Step 2 — [`crate::tunnel::open_stream`] is the first such
+/// second call site; [`crate::client::Session::open_data_link`] predates
+/// this type and is left as its own inline forward/reverse match rather
+/// than rebuilt on top of it, so this addition changes no observable
+/// session behavior).
+///
+/// Deliberately an enum, never a generic type parameter or an ADR-0005
+/// `Transport`/`StreamMux` trait object — see [`ControlLink`]'s own doc for
+/// why that axis split is the house style here, not a trait.
+///
+/// `#[allow(dead_code)]`-adjacent items below: nothing outside
+/// `crate::tunnel`'s own tests calls this yet — `PLAN.md` M4 Step 2 lands
+/// only the seam, Step 3/4 add the local/remote forward business logic
+/// that actually opens tunnel streams through it.
+#[allow(dead_code)]
+pub(crate) enum DataLink<'a> {
+    /// A live QUIC connection dialed straight to the peer (forward route).
+    Quic(&'a Connection),
+    /// This machine's resident `qsh listen` daemon socket, plus the host
+    /// name it should relay the new `LOCAL_STREAM` conduit to (reverse
+    /// route). `#[cfg(unix)]`: see [`ControlLink::Local`]'s own doc — the
+    /// same reasoning applies verbatim.
+    #[cfg(unix)]
+    Local {
+        /// The daemon's UDS socket path.
+        socket: &'a std::path::Path,
+        /// The registered host name to relay to.
+        host: &'a str,
+    },
+}
+
+#[allow(dead_code)]
+impl DataLink<'_> {
+    /// Open a fresh data stream and send `header` as its first frame,
+    /// applying quinn's per-stream `priority` (`docs/design/protocol.md`
+    /// §12) on the forward route. The reverse `LOCAL_STREAM` conduit has
+    /// no QUIC-level notion of send priority of its own, so `priority` is
+    /// silently dropped on this route today — it is accepted here
+    /// uniformly so callers do not need to special-case which carrier
+    /// they hold, but the daemon does **not** yet apply the caller's
+    /// intended priority on its behalf: `crate::localctl::daemon`'s
+    /// `serve_stream` unconditionally opens the relayed QUIC stream at
+    /// `wire::PRIORITY_SESSION_DATA` and, as of M3, hard-rejects any
+    /// non-`SESSION_DATA` header before opening anything on QUIC. Giving
+    /// the daemon a priority/kind-aware relay path (so a tunnel header
+    /// routed over this carrier rides at `PRIORITY_TUNNEL` instead) is
+    /// `PLAN.md` M4 Step 5 PR 5a's job, not this seam's — this Step 2 seam
+    /// only fixes the call shape so callers don't need to know which
+    /// carrier they hold.
+    pub(crate) async fn open_stream(
+        &self,
+        header: &StreamHeader,
+        priority: i32,
+    ) -> Result<(DataSend, DataRecv, DataKillSwitch), ClientError> {
+        match self {
+            DataLink::Quic(conn) => {
+                let (send, recv) = conn.open_bi().await?;
+                let mut data = FramedStream::data(send, recv);
+                data.send.set_priority(priority);
+                data.send.send(header).await?;
+                let (send, recv) = data.split();
+                Ok((
+                    DataSend::Quic(send),
+                    DataRecv::Quic(recv),
+                    DataKillSwitch::default(),
+                ))
+            }
+            #[cfg(unix)]
+            DataLink::Local { socket, host } => {
+                let handshake = crate::localctl::client::open_stream(socket, host, header)
+                    .await
+                    .map_err(op_error_to_client_error)?;
+                let kill = DataKillSwitch::new(handshake.socket.clone());
+                Ok((
+                    DataSend::Local(handshake.send),
+                    DataRecv::Local(handshake.recv),
+                    kill,
+                ))
+            }
         }
     }
 }
