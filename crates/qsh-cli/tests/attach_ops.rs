@@ -278,11 +278,21 @@ fn detaching_leaves_the_session_running_and_re_attachable() {
 /// Aborting the driver there loses them, which is the one thing `~d` may
 /// not do (`docs/CLI.md` §7, `docs/PRD.md` §8).
 ///
-/// Made deterministic with `SIGSTOP`: a stopped host cannot acknowledge
-/// anything, so the detach is certain to still be waiting when `close` is
-/// called and the only open question is whether `close` waits for it. The
-/// assertion is deliberately a fraction of the flush bound, so it measures
-/// "the teardown waited" rather than the constant's exact value.
+/// Asserted as an ordering rather than a duration. The detacher stamps
+/// the instant `detach` returned, which is after it dropped the teardown
+/// gate, and the teardown stamps the instant `close` returned; the first
+/// must come before the second. A `close` that honors the gate cannot
+/// return before the detach it is waiting out, and a `close` that skips
+/// the gate returns while the flush is still running, which brings the
+/// two stamps back inverted.
+///
+/// A wall-clock threshold does not work here, because the flush is not
+/// guaranteed to be slow. `SIGSTOP` keeps the host from acknowledging,
+/// but a driver that has already returned never reads the detach marker
+/// at all, and the dropped acknowledgement channel answers `Unconfirmed`
+/// at once (ubuntu-24.04-arm CI, 2026-08-24). Both are correct detaches;
+/// only the ordering separates a teardown that waited from one that cut
+/// a flush short.
 #[test]
 fn a_teardown_waits_out_a_detach_that_is_still_flushing() {
     let fleet = Fleet::start();
@@ -297,7 +307,7 @@ fn a_teardown_waits_out_a_detach_that_is_still_flushing() {
     );
     let host = nix::unistd::Pid::from_raw(fleet.serve.pid() as i32);
 
-    let (waited, outcome) = with_deadline("teardown vs. detach", move || {
+    let (closed, released, outcome) = with_deadline("teardown vs. detach", move || {
         let mut stream = attach(&ops, &session_ref).expect("attach");
         stream.write(b"one\n".to_vec()).expect("write");
         read_until(&mut stream, "ECHO:one");
@@ -311,7 +321,13 @@ fn a_teardown_waits_out_a_detach_that_is_still_flushing() {
 
         let handle = stream.handle();
         let probe = stream.handle();
-        let detacher = std::thread::spawn(move || handle.detach());
+        let detacher = std::thread::spawn(move || {
+            let outcome = handle.detach();
+            // Stamped once `detach` has returned, so once it has dropped
+            // the teardown gate: the earliest instant a `close` waiting on
+            // that gate could have been let through.
+            (outcome, std::time::Instant::now())
+        });
         // Wait until the detach provably holds the teardown gate — a
         // thread-start handshake is not enough. `close()` and `detach()`
         // meet at a mutex, and on a loaded box the spawning thread can
@@ -328,19 +344,20 @@ fn a_teardown_waits_out_a_detach_that_is_still_flushing() {
             std::thread::yield_now();
         }
 
-        let started = std::time::Instant::now();
         stream.close();
-        let waited = started.elapsed();
+        let closed = std::time::Instant::now();
 
         // Let the host run again so the fleet tears down normally.
         nix::sys::signal::kill(host, nix::sys::signal::Signal::SIGCONT).expect("resume the host");
-        let outcome = detacher.join().expect("the detaching thread panicked");
-        (waited, outcome)
+        let (outcome, released) = detacher.join().expect("the detaching thread panicked");
+        (closed, released, outcome)
     });
 
     assert!(
-        waited >= Duration::from_secs(1),
-        "close() returned after {waited:?}, so it abandoned a detach that was still flushing"
+        closed >= released,
+        "close() returned {:?} before the detach released the teardown gate, \
+         so it cut short a flush that was still running",
+        released - closed
     );
     // A host that never acknowledged cannot be reported as delivered.
     assert_eq!(outcome, qsh_core::DetachFlush::Unconfirmed);
