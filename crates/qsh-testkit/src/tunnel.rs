@@ -34,9 +34,10 @@ use std::sync::Arc;
 
 use qsh_core::acl::{AllowAllPinned, Authorizer};
 use qsh_core::audit::MemoryAuditSink;
-use qsh_core::tunnel::LocalForwardHandle;
+use qsh_core::client::Session;
+use qsh_core::tunnel::{LocalForwardHandle, RemoteForwardAcceptor};
 use qsh_proto::wire::{
-    ConnectResult, ForwardDirection, ForwardSpec, PRIORITY_TUNNEL, StreamHeader, StreamKind,
+    self, ConnectResult, ForwardDirection, ForwardSpec, PRIORITY_TUNNEL, StreamHeader, StreamKind,
 };
 use qsh_transport::{Connection, FramedRecv, FramedSend, FramedStream};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -181,6 +182,53 @@ impl TunnelHarness {
             .expect("bind local forward")
     }
 
+    /// Open a `-R` remote forward the production way (`PLAN.md` M4 Step 4):
+    /// a **fresh** [`Session`] to the host (not
+    /// [`Self::connection`]/[`Self::tcp_connect`]'s — a `-R` forward gets
+    /// its own connection here for the same reason `qsh tunnel_open`'s
+    /// `ForwardDirection::Remote` arm does not reuse anything, and so the
+    /// requester-leg-death tests below can kill *this* connection without
+    /// taking the harness's `TCP_CONNECT` connection down with it) sends
+    /// `RemoteForwardOpen{bind_host: "", forward_host, forward_port}`
+    /// (empty `bind_host` = the wire default = loopback,
+    /// `docs/design/protocol.md` §7), spawns the real
+    /// [`RemoteForwardAcceptor`] on that connection, and registers the
+    /// `forward_id` the host minted — exactly
+    /// [`qsh_core::ops::Ops::tunnel_open`]'s `ForwardDirection::Remote`
+    /// arm, called directly rather than through `Ops`'s host-registry
+    /// (which this in-process harness has no config/`Paths` for).
+    pub async fn remote_forward(
+        &self,
+        forward_host: &str,
+        forward_port: u16,
+    ) -> RemoteForwardBinding {
+        let mut session = self.host.session().await;
+        let connection = session.connection().clone();
+        let acceptor = RemoteForwardAcceptor::spawn(connection).await;
+        let opened = session
+            .rfwd_open(wire::RemoteForwardOpen {
+                bind_host: String::new(),
+                bind_port: 0,
+                forward_host: forward_host.to_string(),
+                forward_port: u32::from(forward_port),
+            })
+            .await
+            .expect("RemoteForwardOpen");
+        acceptor.register(
+            opened.forward_id.clone(),
+            forward_host.to_string(),
+            forward_port,
+        );
+        let actual_port =
+            u16::try_from(opened.actual_port).expect("actual_port fits u16 on loopback");
+        RemoteForwardBinding {
+            forward_id: opened.forward_id,
+            actual_port,
+            session,
+            acceptor,
+        }
+    }
+
     /// Open one `TCP_CONNECT` stream by hand and return the host's
     /// [`ConnectResult`] verbatim.
     ///
@@ -238,6 +286,62 @@ impl TunnelHarness {
     /// Stop the host and drain it.
     pub async fn shutdown(self) {
         self.host.shutdown().await;
+    }
+}
+
+/// A live `-R` remote forward, from [`TunnelHarness::remote_forward`].
+///
+/// Owns the requester leg end to end: the [`Session`] `RemoteForwardOpen`/
+/// `RemoteForwardClose` ride, and the [`RemoteForwardAcceptor`] dispatching
+/// this connection's `TCP_ACCEPTED` streams. The *host's* listener is not
+/// owned by this value — it lives on the harness's [`LoopbackHarness`]
+/// (`crate::server::Server::remote_forwards`) — so tearing it down needs
+/// either [`Self::close`] (asks the host, the ordinary path) or
+/// [`Self::abandon`] (kills the connection without asking, the "requester
+/// vanished" path `crate::server::Server::purge_connection` exists for).
+pub struct RemoteForwardBinding {
+    forward_id: String,
+    actual_port: u16,
+    session: Session,
+    acceptor: RemoteForwardAcceptor,
+}
+
+impl RemoteForwardBinding {
+    /// The loopback address **on the host** this forward bound — connect
+    /// here to reach whatever the requester leg dials on each accept.
+    pub fn host_addr(&self) -> SocketAddr {
+        SocketAddr::from(([127, 0, 0, 1], self.actual_port))
+    }
+
+    /// The host-minted `forward_id` this binding was registered under.
+    pub fn forward_id(&self) -> &str {
+        &self.forward_id
+    }
+
+    /// Ask the host to close this forward's listener
+    /// (`RemoteForwardClose`), and stop this side's own dispatch first —
+    /// the same order [`qsh_core::ops::TunnelHold::close`] uses, so a
+    /// `TCP_ACCEPTED` racing the close can never land after this side
+    /// stopped expecting one.
+    pub async fn close(mut self) {
+        self.acceptor.unregister(&self.forward_id);
+        self.session
+            .rfwd_close(wire::RemoteForwardClose {
+                forward_id: self.forward_id.clone(),
+            })
+            .await
+            .expect("RemoteForwardClose");
+    }
+
+    /// Kill the connection this forward rides **without** sending
+    /// `RemoteForwardClose` — a requester that crashed or lost its network
+    /// rather than one that closed cleanly. The host has no
+    /// `RemoteForwardClose` to react to here; its cleanup is
+    /// connection-bound (`crate::server::Server::purge_connection`, called
+    /// from `serve_connection` once the connection's own task ends for any
+    /// reason), which is the thing this method exists to provoke.
+    pub fn abandon(self) {
+        self.session.connection().close(0, b"abandoned");
     }
 }
 

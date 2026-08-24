@@ -41,20 +41,23 @@ pub fn run(ops: &Ops, what: Attach, escape: Option<u8>) -> Result<i32, OpError> 
     // a running remote shell to find out about (`docs/CLI.md` §6.9,
     // `PLAN.md` M4 §4.1 #3). The listeners themselves come up after the
     // attach, because they ride its connection.
-    let (session_ref, opened, forward_specs) = match what {
+    let (session_ref, opened, forward_specs, remote_forward_specs) = match what {
         Attach::Open {
             host,
             user,
             forwards,
+            remote_forwards,
         } => {
             let specs = qsh_core::parse_local_forwards(&forwards)?;
+            let remote_specs = qsh_core::parse_remote_forwards(&remote_forwards)?;
             (
                 open_session(ops, open_request(host, user, size))?,
                 true,
                 specs,
+                remote_specs,
             )
         }
-        Attach::Existing { session_ref } => (session_ref, false, Vec::new()),
+        Attach::Existing { session_ref } => (session_ref, false, Vec::new(), Vec::new()),
     };
     // From here on a failure on the freshly opened path would strand a
     // real remote shell, so every early return names it: sessions outlive
@@ -71,8 +74,12 @@ pub fn run(ops: &Ops, what: Attach, escape: Option<u8>) -> Result<i32, OpError> 
         err
     };
 
+    // `-R`'s `RemoteForwardOpen` round trips happen **inside**
+    // `session_attach` itself, before its attach driver takes the control
+    // stream (`Ops::session_attach`'s own doc) — so the specs go in here,
+    // not as a later call on `stream`.
     let mut stream = ops
-        .session_attach(attach_request(session_ref.clone()))
+        .session_attach(attach_request(session_ref.clone()), &remote_forward_specs)
         .map_err(orphan)?;
 
     // The `-L` listeners: bound before the terminal goes raw, so a bind
@@ -84,6 +91,12 @@ pub fn run(ops: &Ops, what: Attach, escape: Option<u8>) -> Result<i32, OpError> 
         // A renderer call, not an `eprintln!`: the announcement goes
         // through the same sanitizing path every other human line does,
         // because `forward_to` is operator-supplied text.
+        let _ = human::print_forward_started(&tunnel);
+    }
+    // `-R` remote forwards: already opened above (all-or-nothing, same as
+    // `-L`'s bind above, `PLAN.md` M4 Step 4) — this just collects the
+    // DTOs to render.
+    for tunnel in stream.take_remote_forward_tunnels() {
         let _ = human::print_forward_started(&tunnel);
     }
 

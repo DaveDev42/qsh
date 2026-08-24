@@ -54,6 +54,7 @@ use crate::broker::{
 use crate::exec::{ExecSpec, run_exec};
 use crate::session_stream::SessionStream;
 use crate::tunnel::dial::{SystemDialer, TunnelDialer};
+use crate::tunnel::remote::{BindHostResolver, RemoteForwardBinder, SystemBinder, SystemResolver};
 use crate::tunnel::splice::splice_tcp_quic;
 
 /// How long a peer has to send its `Hello` (and open the control stream).
@@ -318,6 +319,21 @@ pub struct Server {
     sessions: Arc<dyn SessionBackend>,
     device_name: String,
     tickets: Mutex<HashMap<[u8; TICKET_LEN], Ticket>>,
+    /// Live remote-forward listeners, keyed by the owning connection's
+    /// `conn_id` and then by `forward_id` — `PLAN.md` M4 Step 4's
+    /// connection-bound lifetime ("`RemoteForwardClose{forward_id}` 또는
+    /// 연결 종료 시 리스너를 닫는다"). The value is the accept loop's own
+    /// task handle ([`crate::tunnel::remote::serve_remote_forward`]);
+    /// aborting it drops the [`tokio::net::TcpListener`] it owns, which is
+    /// the whole teardown — nothing else to release, the same shape as
+    /// [`crate::tunnel::local::LocalForwardHandle`]'s `Drop`. Keying by
+    /// `conn_id` first is what makes [`Server::handle_rfwd_close`]'s
+    /// lookup a structural ownership check: a `forward_id` minted for one
+    /// connection is simply not found under another connection's map, with
+    /// no separate ACL re-check needed to enforce that (`docs/CLI.md`
+    /// §2.5's full owning-peer semantics for `tunnel.close` land in
+    /// `PLAN.md` M4 Step 5's `Ops::tunnel_close`).
+    remote_forwards: Mutex<HashMap<usize, HashMap<String, tokio::task::JoinHandle<()>>>>,
     /// Set once by [`Server::drain`] (SIGTERM, `docs/CLI.md` §6.12,
     /// ADR-0003). Checked at the top of `session.open`/`session.attach`,
     /// before any other gate — draining is a hard stop this host applies to
@@ -348,6 +364,7 @@ impl Server {
             sessions,
             device_name: device_name.into(),
             tickets: Mutex::new(HashMap::new()),
+            remote_forwards: Mutex::new(HashMap::new()),
             draining: AtomicBool::new(false),
         })
     }
@@ -441,20 +458,35 @@ impl Server {
                     false,
                 ),
             )),
-            // Tunnel control (`RemoteForwardOpen`/`Close`, wire 40/41) is
-            // realized in the contract at M4 Step 1; the host handler lands
-            // at M4 Step 4/5. Until then it is an un-negotiated feature and
-            // draws UNSUPPORTED (CLI.md §3.3) — the same reply these tags
-            // produced as `body: None` before realization.
-            Some(control_message::Body::RfwdOpen(_))
-            | Some(control_message::Body::RfwdClose(_)) => Some(ControlMessage::error(
+            // `RemoteForwardOpen` (M4 Step 4) needs a live `Connection` to
+            // open the `TCP_ACCEPTED` streams its listener will hand out —
+            // something no `dispatch` caller has (`dispatch`'s own module
+            // doc: "pure with respect to transport"). `Server::serve_control`
+            // intercepts it before it ever reaches this match, the same
+            // shape as the `SessionWrite` special case just above in that
+            // loop, and calls `Server::handle_rfwd_open` (which does have
+            // one) directly. A caller that dispatches this body straight
+            // (every unit test in this file included) has no connection to
+            // open anything on, so it draws `UNSUPPORTED` here — the ACL +
+            // loopback choke point itself is still fully unit-testable, via
+            // `Server::authorize_and_bind_remote_forward` directly, which
+            // needs no connection either.
+            Some(control_message::Body::RfwdOpen(_)) => Some(ControlMessage::error(
                 request_id,
                 wire::Error::new(
                     ErrorCode::Unsupported,
-                    "remote forward not yet supported",
+                    "remote forward open requires a live connection; \
+                     not answerable by direct dispatch",
                     false,
                 ),
             )),
+            // `RemoteForwardClose` needs no connection — closing a listener
+            // is a lookup in `Server::remote_forwards` plus an abort, both
+            // conn-id-scoped — so it is handled inline here like every
+            // other control op.
+            Some(control_message::Body::RfwdClose(req)) => {
+                Some(self.handle_rfwd_close(ctx, request_id, req))
+            }
             // No body this build understands. prost drops unknown fields,
             // so a reserved (25 `SessionSignal`) or future control number
             // decodes to `body: None` exactly like an empty message;
@@ -1506,14 +1538,27 @@ impl Server {
         if matches { tickets.remove(&key) } else { None }
     }
 
-    /// The connection is gone: drop every ticket issued to it and release
-    /// every writer lease it held. Sessions (and their children) survive —
-    /// that is the point of the broker (architecture.md §3 rule c).
+    /// The connection is gone: drop every ticket issued to it, abort every
+    /// remote-forward listener it opened (`PLAN.md` M4 Step 4's
+    /// connection-bound lifetime — see [`Server::remote_forwards`]'s own
+    /// doc), and release every writer lease it held. Sessions (and their
+    /// children) survive — that is the point of the broker
+    /// (architecture.md §3 rule c).
     pub async fn purge_connection(&self, conn_id: usize) {
         self.tickets
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .retain(|_, p| p.conn_id != conn_id);
+        if let Some(forwards) = self
+            .remote_forwards
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&conn_id)
+        {
+            for (_, task) in forwards {
+                task.abort();
+            }
+        }
         self.sessions
             .release_connection(ConnectionId(conn_id as u64))
             .await;
@@ -1808,6 +1853,19 @@ impl Server {
                                 }
                                 continue;
                             }
+                            // `RemoteForwardOpen` needs a live `Connection`
+                            // to open this forward's future `TCP_ACCEPTED`
+                            // streams on — `dispatch` has none
+                            // (`Server::handle_rfwd_open`'s own doc), so it
+                            // is intercepted here, the same shape as the
+                            // `SessionWrite` special case just above.
+                            if let Some(control_message::Body::RfwdOpen(req)) = &msg.body {
+                                let reply = self
+                                    .handle_rfwd_open(&ctx, conn, msg.request_id, req)
+                                    .await;
+                                ctl.send.send(&reply).await?;
+                                continue;
+                            }
                             if !is_long_poll(&msg) {
                                 if let Some(reply) = self.dispatch(&ctx, &msg).await {
                                     ctl.send.send(&reply).await?;
@@ -2087,6 +2145,261 @@ impl Server {
                 tracing::debug!(principal = %ctx.principal, %resource, %err, "tunnel dial failed");
                 Err(connect_rejected(err.code(), err.to_string()))
             }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // remote forward (`-R`), M4 Step 4 — `RemoteForwardOpen`/`Close`
+    // ------------------------------------------------------------------
+
+    /// The `forward.remote` choke point, factored out of
+    /// [`Server::handle_rfwd_open`] so it is unit-testable with **no
+    /// transport connection at all** — mirrors
+    /// [`Server::authorize_and_dial_tunnel`]'s shape exactly, one gate
+    /// later:
+    ///
+    /// 1. shape-check the request (nothing created, no decision made);
+    /// 2. [`Server::authorize`] — `Authorizer::check` + one [`AuditRecord`]
+    ///    line for allow *and* deny alike, `Action::ForwardRemote` on
+    ///    `bind_host:bind_port` (`PLAN.md` M4 Step 4's choke point);
+    /// 3. **loopback enforcement** —
+    ///    `crate::tunnel::remote::resolve_loopback_bind_addr`, which
+    ///    resolves `bind_host` **once** and hands back the very address it
+    ///    validated, so step 4 binds exactly what step 3 approved (that
+    ///    function's own doc explains why a second resolution would be a
+    ///    peer-steerable bypass, not a theoretical one). Deliberately
+    ///    **after** the ACL gate and **not itself one**: a principal that
+    ///    holds `forward.remote` outright still cannot bind non-loopback,
+    ///    because this is a request constraint the host applies to every
+    ///    principal alike, never a per-principal permission
+    ///    (`crate::acl::Action::ForwardRemote`'s own doc,
+    ///    `crate::tunnel::remote`'s module doc). A failure here is
+    ///    therefore [`ErrorCode::InvalidArgument`] — a bad request — never
+    ///    `PermissionDenied`, which would claim this principal specifically
+    ///    was refused;
+    /// 4. `binder.bind(...)` — unreachable unless steps 2 *and* 3 both
+    ///    passed. Nothing before this point ever creates a socket.
+    ///
+    /// Returns the bound listener; minting a `forward_id`, spawning the
+    /// accept loop and registering it are [`Server::handle_rfwd_open`]'s
+    /// job, because those need a [`Connection`] this function is
+    /// deliberately never given (see that method's own doc).
+    pub(crate) async fn authorize_and_bind_remote_forward(
+        &self,
+        ctx: &ConnCtx,
+        request_id: u64,
+        req: &wire::RemoteForwardOpen,
+        resolver: &dyn BindHostResolver,
+        binder: &dyn RemoteForwardBinder,
+    ) -> Result<tokio::net::TcpListener, Box<ControlMessage>> {
+        // (1) Shape. A malformed request never becomes an ACL decision or a
+        // socket, same discipline as `authorize_and_dial_tunnel`'s own (1).
+        let Ok(bind_port) = u16::try_from(req.bind_port) else {
+            return Err(Box::new(invalid_argument(
+                request_id,
+                "bind_port out of range",
+            )));
+        };
+        let Ok(forward_port) = u16::try_from(req.forward_port) else {
+            return Err(Box::new(invalid_argument(
+                request_id,
+                "forward_port out of range",
+            )));
+        };
+        if req.forward_host.is_empty() || forward_port == 0 {
+            return Err(Box::new(invalid_argument(
+                request_id,
+                "forward_host and forward_port are required",
+            )));
+        }
+
+        // (2) THE gate. `bind_host:bind_port` is the ACL resource — the
+        // canonical bracketed form, same helper and same reasoning
+        // `authorize_and_dial_tunnel`'s own resource string uses. An empty
+        // `bind_host` (no `bind:` prefix — the ordinary `-R rport:host:
+        // hport` shape) is the wire default for loopback
+        // (`crate::tunnel::remote::resolve_loopback_bind_addr`'s own doc),
+        // so it is displayed as the address it actually binds rather than
+        // literally empty — the same substitution
+        // `crate::ops::tunnel::remote_tunnel_dto` already makes, so the
+        // audit line names the address this forward really binds instead
+        // of a resource string no policy or operator could act on.
+        //
+        // `bind_host` is peer-supplied text on its way into an audit
+        // record and a log line, so it is sanitized first: a raw one could
+        // carry ANSI/OSC escapes into an operator's terminal or forge
+        // extra lines in an audit sink
+        // (`qsh_proto::wire::sanitize_peer_text`'s own doc, the same
+        // treatment Step 3 gave peer tunnel text). Sanitizing cannot widen
+        // what binds — a host name carrying control characters resolves to
+        // nothing, and only the raw string is ever handed to the resolver.
+        let display_bind_host = if req.bind_host.is_empty() {
+            "127.0.0.1".to_string()
+        } else {
+            wire::sanitize_peer_text(&req.bind_host)
+        };
+        let resource = wire::format_host_port(&display_bind_host, bind_port);
+        self.authorize(ctx, request_id, Action::ForwardRemote, &resource)?;
+
+        // (3) Loopback-only bind — see this function's own doc for why
+        // this is `InvalidArgument`, never `PermissionDenied`. One
+        // resolution decides it, and the address it returns is the address
+        // step (4) binds: no second lookup can slip a routable address in
+        // behind the check. A resolve failure is folded into "not
+        // loopback": there is nothing to bind either way, and the caller
+        // learns the same thing a genuinely non-loopback answer would tell
+        // it.
+        let addr =
+            crate::tunnel::remote::resolve_loopback_bind_addr(resolver, &req.bind_host, bind_port)
+                .await
+                .map_err(|err| Box::new(invalid_argument(request_id, err.to_string())))?;
+
+        // (4) Only now may a resource come into existence.
+        binder.bind(addr).await.map_err(|err| {
+            Box::new(ControlMessage::error(
+                request_id,
+                wire::Error::new(
+                    ErrorCode::ConnectionFailed,
+                    format!("failed to bind {addr}: {err}"),
+                    false,
+                ),
+            ))
+        })
+    }
+
+    /// Full production handling of `RemoteForwardOpen`: the choke point
+    /// ([`Server::authorize_and_bind_remote_forward`]) plus the parts that
+    /// need a live [`Connection`] — minting the `forward_id`, spawning
+    /// [`crate::tunnel::remote::serve_remote_forward`], and registering it
+    /// in [`Server::remote_forwards`] for [`Server::handle_rfwd_close`]/
+    /// [`Server::purge_connection`] to find later.
+    ///
+    /// Called only from [`Server::serve_control`]'s message loop — the one
+    /// place a [`Connection`] to open this forward's future `TCP_ACCEPTED`
+    /// streams on is actually available (`dispatch`'s own RfwdOpen arm
+    /// documents why it cannot do this itself).
+    async fn handle_rfwd_open(
+        &self,
+        ctx: &ConnCtx,
+        conn: &Connection,
+        request_id: u64,
+        req: &wire::RemoteForwardOpen,
+    ) -> ControlMessage {
+        let listener = match self
+            .authorize_and_bind_remote_forward(ctx, request_id, req, &SystemResolver, &SystemBinder)
+            .await
+        {
+            Ok(listener) => listener,
+            Err(reply) => return *reply,
+        };
+        let actual_port = match listener.local_addr() {
+            Ok(addr) => addr.port(),
+            Err(err) => {
+                // Bound but unreadable back — treat the listener as
+                // unusable; dropping it here (end of scope) closes it, so
+                // this is still a clean "nothing left running" failure.
+                return ControlMessage::error(
+                    request_id,
+                    wire::Error::new(
+                        ErrorCode::ConnectionFailed,
+                        format!("bound remote-forward listener has no local address: {err}"),
+                        false,
+                    ),
+                );
+            }
+        };
+
+        let forward_id = ulid::Ulid::new().to_string();
+        let task = tokio::spawn(crate::tunnel::remote::serve_remote_forward(
+            listener,
+            conn.clone(),
+            forward_id.clone().into_bytes(),
+        ));
+        self.remote_forwards
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(ctx.conn_id)
+            .or_default()
+            .insert(forward_id.clone(), task);
+
+        // `bind_host` is peer-supplied text on its way to a log line, so
+        // it is sanitized (`authorize_and_bind_remote_forward`'s step (2)
+        // makes the same substitution for the audit resource, and for the
+        // same reason). `forward_id` is host-minted here — a ULID, so
+        // `wire::valid_forward_id` holds by construction; the test
+        // `minted_forward_ids_satisfy_the_wire_shape` pins that.
+        tracing::info!(
+            principal = %ctx.principal,
+            %forward_id,
+            bind_host = %wire::sanitize_peer_text(&req.bind_host),
+            actual_port,
+            "tunnel: remote forward opened"
+        );
+
+        ControlMessage::response(
+            request_id,
+            response::Body::RfwdOpened(wire::RemoteForwardOpened {
+                forward_id,
+                actual_port: u32::from(actual_port),
+            }),
+        )
+    }
+
+    /// `RemoteForwardClose`: abort and drop this connection's own
+    /// `forward_id` (`Server::remote_forwards`'s own doc explains why the
+    /// `conn_id`-scoped lookup already is the ownership check). Unknown to
+    /// this connection — never opened, already closed, or opened by a
+    /// different one — draws `InvalidArgument` rather than silently
+    /// succeeding, so a caller does not mistake "nothing happened" for
+    /// "closed". `docs/CLI.md` §2.5's full owning-peer semantics for
+    /// `tunnel.close` (as an `Ops` surface) are `PLAN.md` M4 Step 5 scope;
+    /// this is the wire-level primitive that step builds on.
+    fn handle_rfwd_close(
+        &self,
+        ctx: &ConnCtx,
+        request_id: u64,
+        req: &wire::RemoteForwardClose,
+    ) -> ControlMessage {
+        // Shape first, before this peer-supplied string is used to look
+        // anything up, tear anything down, or reach a log line
+        // (`qsh_proto::wire::valid_forward_id`, the same "check shape
+        // before it becomes a resource or an audit field" discipline
+        // `valid_host_name` states and `valid_session_id` follows). Every
+        // id this map can hold is a host-minted ULID, which satisfies the
+        // predicate by construction, so a malformed one could only ever
+        // have missed — but it must miss *without* being touched. Past
+        // this point the id is `[A-Za-z0-9_-]{1,64}`, strictly stronger
+        // than sanitizing, so the success line below logs it as it is.
+        if !wire::valid_forward_id(&req.forward_id) {
+            tracing::warn!(
+                principal = %ctx.principal,
+                forward_id_len = req.forward_id.len(),
+                "tunnel: malformed forward_id on RemoteForwardClose"
+            );
+            return invalid_argument(request_id, "malformed forward_id");
+        }
+        let removed = self
+            .remote_forwards
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_mut(&ctx.conn_id)
+            .and_then(|forwards| forwards.remove(&req.forward_id));
+        match removed {
+            Some(task) => {
+                task.abort();
+                tracing::info!(
+                    principal = %ctx.principal,
+                    forward_id = req.forward_id,
+                    "tunnel: remote forward closed"
+                );
+                // Bare success (`v1.proto`'s own comment on
+                // `RemoteForwardClose`: "no dedicated payload").
+                ControlMessage::new(
+                    request_id,
+                    control_message::Body::Response(wire::Response { body: None }),
+                )
+            }
+            None => invalid_argument(request_id, "no such forward_id on this connection"),
         }
     }
 
@@ -3269,13 +3582,26 @@ mod tests {
             assert_eq!(rig.server.pending_tickets(), 0);
             assert_eq!(rig.broker.session_count(), 0);
         }
-        // Tunnel control (40/41) is realized now, so it decodes to a real
-        // (empty) body rather than None — but the host handler is M4 Step
-        // 4/5, so until then it draws the same UNSUPPORTED reply by a
-        // dedicated dispatch arm, creating nothing and auditing nothing.
-        for body in [
-            control_message::Body::RfwdOpen(wire::RemoteForwardOpen::default()),
-            control_message::Body::RfwdClose(wire::RemoteForwardClose::default()),
+        // Tunnel control (40/41) is realized (M4 Step 1) and now has real
+        // host handlers (M4 Step 4). `RfwdOpen` still draws `UNSUPPORTED`
+        // from a *bare* `dispatch` call specifically — not because the op
+        // is unimplemented, but because opening a remote forward needs a
+        // live `Connection` this call has none of
+        // (`Server::handle_rfwd_open`'s own doc; the real path is
+        // `serve_control`'s early interception, covered by
+        // `rfwd_open_end_to_end_streams_tcp_accepted_then_close_tears_down`).
+        // `RfwdClose` needs no connection, so `dispatch` runs it for real —
+        // an unregistered `forward_id` (the zero value `default()` gives)
+        // is `INVALID_ARGUMENT`, not `UNSUPPORTED`.
+        for (body, want) in [
+            (
+                control_message::Body::RfwdOpen(wire::RemoteForwardOpen::default()),
+                ErrorCode::Unsupported,
+            ),
+            (
+                control_message::Body::RfwdClose(wire::RemoteForwardClose::default()),
+                ErrorCode::InvalidArgument,
+            ),
         ] {
             assert!(
                 ControlMessage::new(7, body.clone()).body.is_some(),
@@ -3289,7 +3615,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(reply.request_id, 7);
-            assert_eq!(error_code(&reply), Some(ErrorCode::Unsupported));
+            assert_eq!(error_code(&reply), Some(want));
             assert!(rig.audit.records().is_empty());
             assert_eq!(rig.server.pending_tickets(), 0);
             assert_eq!(rig.broker.session_count(), 0);
@@ -5438,5 +5764,529 @@ mod tests {
                 "no ACL decision was made, so no audit line: {header:?}"
             );
         }
+    }
+
+    // ------------------------------------------------------------------
+    // remote forward (`-R`), M4 Step 4 — choke point + accept loop
+    // ------------------------------------------------------------------
+
+    fn rfwd_open(
+        bind_host: &str,
+        bind_port: u32,
+        forward_host: &str,
+        forward_port: u32,
+    ) -> wire::RemoteForwardOpen {
+        wire::RemoteForwardOpen {
+            bind_host: bind_host.to_string(),
+            bind_port,
+            forward_host: forward_host.to_string(),
+            forward_port,
+        }
+    }
+
+    /// A [`RemoteForwardBinder`] that counts every call before doing
+    /// anything else, so "the host bound nothing" is an assertion and not
+    /// a hope — the remote-forward twin of `CountingDialer` above. With
+    /// `real: true` it makes a real loopback bind (so the allow path is
+    /// proved end-to-end); otherwise every bind fails, standing in for a
+    /// destination that must never be touched.
+    struct CountingBinder {
+        calls: std::sync::atomic::AtomicUsize,
+        /// Every address `bind` was asked for, in order — so a test can
+        /// assert not just *how many* binds happened but *which address*
+        /// each one was for. That distinction is the whole content of
+        /// "the address bound is the address validated".
+        attempted: std::sync::Mutex<Vec<SocketAddr>>,
+        real: bool,
+    }
+
+    impl CountingBinder {
+        fn refusing() -> Self {
+            Self {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                attempted: std::sync::Mutex::new(Vec::new()),
+                real: false,
+            }
+        }
+
+        fn real() -> Self {
+            Self {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                attempted: std::sync::Mutex::new(Vec::new()),
+                real: true,
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+
+        fn attempted(&self) -> Vec<SocketAddr> {
+            self.attempted
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+        }
+    }
+
+    impl RemoteForwardBinder for CountingBinder {
+        fn bind<'a>(&'a self, addr: SocketAddr) -> crate::tunnel::remote::BindFuture<'a> {
+            // Count first: a caller that bound before checking the ACL
+            // (or the loopback gate) would be recorded here even if the
+            // bind then failed — the same discriminating shape
+            // `CountingDialer::dial`'s own doc explains.
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.attempted
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(addr);
+            let real = self.real;
+            Box::pin(async move {
+                if real {
+                    tokio::net::TcpListener::bind(addr).await
+                } else {
+                    Err(std::io::Error::other("mock binder refuses everything"))
+                }
+            })
+        }
+    }
+
+    /// The security core of M4 Step 4, the remote-forward twin of
+    /// `tcp_connect_denied_dials_nothing_and_reports_permission_denied`:
+    /// under a denying policy, `RemoteForwardOpen` must bind **zero**
+    /// listeners (`docs/PRD.md` §9, `docs/design/protocol.md` §13) and be
+    /// refused with `PERMISSION_DENIED`, with one audit line naming
+    /// `forward.remote`.
+    #[tokio::test]
+    async fn rfwd_open_denied_binds_nothing_and_reports_permission_denied() {
+        let rig = rig(Arc::new(DenyAll));
+        let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
+        let binder = CountingBinder::refusing();
+
+        let req = rfwd_open("127.0.0.1", 0, "127.0.0.1", 5432);
+        let rejection = rig
+            .server
+            .authorize_and_bind_remote_forward(&ctx, 1, &req, &SystemResolver, &binder)
+            .await
+            .expect_err("a denied forward.remote must not bind");
+
+        assert_eq!(
+            binder.calls(),
+            0,
+            "the host must not bind before (or after) a forward.remote deny"
+        );
+        assert_eq!(error_code(&rejection), Some(ErrorCode::PermissionDenied));
+
+        let recs = rig.audit.records();
+        assert_eq!(recs.len(), 1, "exactly one audit line per decision");
+        assert_eq!(recs[0].action, "forward.remote");
+        assert_eq!(recs[0].decision, "deny");
+        assert_eq!(
+            recs[0].resource, "127.0.0.1:0",
+            "the audited resource is bind_host:bind_port, never the requester's own destination"
+        );
+    }
+
+    /// **DoD 2's closing assertion.** A non-loopback `bind_host` is
+    /// refused even under an allow-everything policy: loopback-only is a
+    /// request constraint, not a principal permission
+    /// (`Server::authorize_and_bind_remote_forward`'s own doc,
+    /// `crate::acl::Action::ForwardRemote`'s). Every non-loopback case
+    /// binds **zero** listeners and reports `INVALID_ARGUMENT` over an
+    /// `allow` audit decision (the ACL gate itself passed; only the
+    /// separate loopback gate refused); every loopback case — including
+    /// the empty-string wire default and `localhost` — binds **exactly
+    /// once**, to a genuinely loopback address.
+    #[tokio::test]
+    async fn rfwd_open_loopback_table_binds_only_the_loopback_cases() {
+        let non_loopback = ["0.0.0.0", "::", "203.0.113.9", "192.168.1.10"];
+        // Not `127.0.0.53`: it *classifies* as loopback (the whole
+        // `127.0.0.0/8` block does — `resolve_loopback_bind_addr`'s own
+        // `loopback_bind_host_table` test already proves that in
+        // isolation), but actually binding it depends on the runner
+        // having that address assigned to an interface, which only Linux
+        // does by default — macOS refuses it with `EADDRNOTAVAIL`. This
+        // table only needs one genuinely-bindable loopback case per
+        // platform to prove the choke point calls `bind` at all.
+        let loopback = ["127.0.0.1", "::1", "localhost", ""];
+
+        for bind_host in non_loopback {
+            let rig = allow_rig();
+            let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
+            let binder = CountingBinder::refusing();
+            let req = rfwd_open(bind_host, 0, "127.0.0.1", 5432);
+
+            let rejection = rig
+                .server
+                .authorize_and_bind_remote_forward(&ctx, 1, &req, &SystemResolver, &binder)
+                .await
+                .expect_err("a non-loopback bind must be refused");
+
+            assert_eq!(binder.calls(), 0, "{bind_host:?} must bind nothing");
+            assert_eq!(
+                error_code(&rejection),
+                Some(ErrorCode::InvalidArgument),
+                "{bind_host:?} must be INVALID_ARGUMENT, not PERMISSION_DENIED — \
+                 this principal DOES hold forward.remote"
+            );
+            let recs = rig.audit.records();
+            assert_eq!(recs.len(), 1, "{bind_host:?}");
+            assert_eq!(recs[0].action, "forward.remote", "{bind_host:?}");
+            assert_eq!(
+                recs[0].decision, "allow",
+                "{bind_host:?}: the ACL decision itself was an allow — only \
+                 the non-ACL loopback gate refused this request"
+            );
+        }
+
+        for bind_host in loopback {
+            let rig = allow_rig();
+            let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
+            let binder = CountingBinder::real();
+            let req = rfwd_open(bind_host, 0, "127.0.0.1", 5432);
+
+            let listener = rig
+                .server
+                .authorize_and_bind_remote_forward(&ctx, 1, &req, &SystemResolver, &binder)
+                .await
+                .unwrap_or_else(|err| panic!("{bind_host:?} must bind: {err:?}"));
+
+            assert_eq!(binder.calls(), 1, "{bind_host:?} must bind exactly once");
+            assert!(
+                listener.local_addr().unwrap().ip().is_loopback(),
+                "{bind_host:?} must bind a loopback address"
+            );
+            let recs = rig.audit.records();
+            assert_eq!(recs.len(), 1, "{bind_host:?}");
+            assert_eq!(recs[0].action, "forward.remote", "{bind_host:?}");
+            assert_eq!(recs[0].decision, "allow", "{bind_host:?}");
+        }
+    }
+
+    /// **The check-then-use regression guard, at the choke point.** The
+    /// loopback gate and the bind must agree on one address, because
+    /// `bind_host` arrives verbatim in the peer's `RemoteForwardOpen`: a
+    /// peer that controls a DNS zone can answer loopback to one lookup and
+    /// a routable address to the next with nothing but a short TTL or
+    /// round-robin — no host compromise required — and an
+    /// authenticated-but-restricted peer escalating to a non-loopback bind
+    /// is precisely what DoD 2 exists to prevent.
+    ///
+    /// So: a resolver whose first answer is loopback and whose second is
+    /// routable must produce **zero** non-loopback binds. It is resolved
+    /// exactly once, and the only address `bind` is ever asked for is the
+    /// one that answer certified.
+    ///
+    /// Mutation-checked: reintroducing a second resolution between the
+    /// check and the bind makes this test fail (the bind is attempted on
+    /// `203.0.113.9`, which is both non-loopback and unbindable here).
+    #[tokio::test]
+    async fn rfwd_open_binds_the_address_it_validated_never_a_second_resolution() {
+        let rig = allow_rig();
+        let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
+        let binder = CountingBinder::real();
+        let resolver = crate::tunnel::testutil::ScriptedResolver::new(vec![
+            vec![crate::tunnel::testutil::addr("127.0.0.1:0")],
+            vec![crate::tunnel::testutil::addr("203.0.113.9:0")],
+        ]);
+        let req = rfwd_open("rebinder.example", 0, "127.0.0.1", 5432);
+
+        let listener = rig
+            .server
+            .authorize_and_bind_remote_forward(&ctx, 1, &req, &resolver, &binder)
+            .await
+            .expect("the validated answer was loopback, so the bind must succeed");
+
+        assert_eq!(
+            resolver.calls(),
+            1,
+            "bind_host must be resolved exactly once per RemoteForwardOpen"
+        );
+        assert_eq!(
+            binder.attempted(),
+            vec![crate::tunnel::testutil::addr("127.0.0.1:0")],
+            "the only address bound must be the one the loopback gate validated"
+        );
+        assert!(
+            binder.attempted().iter().all(|a| a.ip().is_loopback()),
+            "zero non-loopback binds"
+        );
+        assert!(listener.local_addr().unwrap().ip().is_loopback());
+    }
+
+    /// The other half of the same seam: a resolver whose (single) answer
+    /// set mixes loopback with a routable address is refused whole, and
+    /// binds nothing at all — "some resolved address is loopback" is not a
+    /// safety property (`crate::tunnel::remote::all_loopback`'s own doc).
+    #[tokio::test]
+    async fn rfwd_open_mixed_answer_set_binds_nothing() {
+        let rig = allow_rig();
+        let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
+        let binder = CountingBinder::refusing();
+        let resolver = crate::tunnel::testutil::ScriptedResolver::new(vec![vec![
+            crate::tunnel::testutil::addr("127.0.0.1:0"),
+            crate::tunnel::testutil::addr("203.0.113.9:0"),
+        ]]);
+        let req = rfwd_open("split.example", 0, "127.0.0.1", 5432);
+
+        let rejection = rig
+            .server
+            .authorize_and_bind_remote_forward(&ctx, 1, &req, &resolver, &binder)
+            .await
+            .expect_err("a split-horizon answer must be refused");
+
+        assert_eq!(binder.calls(), 0, "nothing may be bound");
+        assert_eq!(error_code(&rejection), Some(ErrorCode::InvalidArgument));
+    }
+
+    /// A malformed request (empty/zero-port destination, out-of-range
+    /// ports) is refused on shape, before the ACL is consulted: nothing
+    /// to decide about, so no audit line is invented and nothing is bound
+    /// — the remote-forward twin of
+    /// `tcp_connect_malformed_destination_is_invalid_argument_and_dials_nothing`.
+    #[tokio::test]
+    async fn rfwd_open_malformed_request_is_invalid_argument_and_binds_nothing() {
+        for req in [
+            rfwd_open("127.0.0.1", 0, "", 80),
+            rfwd_open("127.0.0.1", 0, "127.0.0.1", 0),
+            rfwd_open("127.0.0.1", 0, "127.0.0.1", 70_000),
+            rfwd_open("127.0.0.1", 70_000, "127.0.0.1", 80),
+        ] {
+            let rig = allow_rig();
+            let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
+            let binder = CountingBinder::refusing();
+
+            let rejection = rig
+                .server
+                .authorize_and_bind_remote_forward(&ctx, 1, &req, &SystemResolver, &binder)
+                .await
+                .expect_err("a malformed request is never bound");
+
+            assert_eq!(binder.calls(), 0, "{req:?}");
+            assert_eq!(error_code(&rejection), Some(ErrorCode::InvalidArgument));
+            assert!(
+                rig.audit.records().is_empty(),
+                "no ACL decision was made, so no audit line: {req:?}"
+            );
+        }
+    }
+
+    /// The full production path — the part
+    /// `authorize_and_bind_remote_forward`'s own unit tests above cannot
+    /// exercise, because it takes no `Connection` by construction
+    /// (`Server::handle_rfwd_open`'s own doc): a bound listener's accepted
+    /// connection becomes a `TCP_ACCEPTED` stream on the peer, carrying
+    /// the minted `forward_id` as its ticket, opened with no handshake
+    /// reply to wait for (`crate::tunnel::remote`'s module doc). Then
+    /// `RemoteForwardClose` tears the listener down, and closing it again
+    /// finds nothing.
+    #[tokio::test]
+    async fn rfwd_open_end_to_end_streams_tcp_accepted_then_close_tears_down() {
+        let (client_conn, host_conn) = crate::tunnel::testutil::loopback_pair().await;
+        let rig = allow_rig();
+        let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
+
+        // `forward_host`/`forward_port` are the *requester's* destination
+        // (Step 4's client leg, out of this stage's scope) — the host
+        // never dials them, so any shape-valid value is fine here.
+        let req = rfwd_open("127.0.0.1", 0, "127.0.0.1", 9);
+        let reply = rig.server.handle_rfwd_open(&ctx, &host_conn, 7, &req).await;
+        let response::Body::RfwdOpened(opened) = response_body(&reply) else {
+            panic!("expected RfwdOpened, got {reply:?}");
+        };
+        assert!(!opened.forward_id.is_empty());
+        assert_ne!(
+            opened.actual_port, 0,
+            "a port-0 request resolves to a real port"
+        );
+
+        let bound: SocketAddr = format!("127.0.0.1:{}", opened.actual_port).parse().unwrap();
+        let _tcp = tokio::net::TcpStream::connect(bound).await.unwrap();
+
+        let (send, recv) = client_conn.accept_bi().await.unwrap();
+        let mut framed = FramedStream::data(send, recv);
+        let header: StreamHeader = framed
+            .recv
+            .recv()
+            .await
+            .unwrap()
+            .expect("TCP_ACCEPTED header");
+        assert_eq!(header.stream_kind(), Some(StreamKind::TcpAccepted));
+        assert_eq!(
+            header.ticket,
+            opened.forward_id.as_bytes(),
+            "the ticket is the forward_id, verbatim"
+        );
+
+        let close = wire::RemoteForwardClose {
+            forward_id: opened.forward_id.clone(),
+        };
+        let closed = rig.server.handle_rfwd_close(&ctx, 8, &close);
+        assert!(
+            matches!(
+                &closed.body,
+                Some(control_message::Body::Response(wire::Response {
+                    body: None
+                }))
+            ),
+            "RemoteForwardClose succeeds with a bare Response, no dedicated payload: {closed:?}"
+        );
+
+        let again = rig.server.handle_rfwd_close(&ctx, 9, &close);
+        assert_eq!(
+            error_code(&again),
+            Some(ErrorCode::InvalidArgument),
+            "closing an already-closed forward_id finds nothing"
+        );
+
+        drop(host_conn);
+        drop(client_conn);
+    }
+
+    /// A `forward_id` on `RemoteForwardClose` arrives **from the peer**,
+    /// so it is shape-checked (`qsh_proto::wire::valid_forward_id`) before
+    /// it is used to look anything up, tear anything down, or reach a log
+    /// line. A malformed one is `INVALID_ARGUMENT` and leaves the live
+    /// forward it was aimed at untouched — including the escape-sequence
+    /// and control-character shapes, which must never reach an operator's
+    /// terminal through the host's own logs.
+    #[tokio::test]
+    async fn rfwd_close_malformed_forward_id_is_invalid_argument_and_closes_nothing() {
+        let (client_conn, host_conn) = crate::tunnel::testutil::loopback_pair().await;
+        let rig = allow_rig();
+        let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
+
+        let req = rfwd_open("127.0.0.1", 0, "127.0.0.1", 9);
+        let reply = rig.server.handle_rfwd_open(&ctx, &host_conn, 7, &req).await;
+        let response::Body::RfwdOpened(opened) = response_body(&reply) else {
+            panic!("expected RfwdOpened, got {reply:?}");
+        };
+
+        for id in [
+            "",
+            "a\u{1b}[31mb",
+            "fwd\nqsh: forged line",
+            "fwd\u{0}-1",
+            "fwd.1",
+            &"x".repeat(65),
+        ] {
+            let close = wire::RemoteForwardClose {
+                forward_id: id.to_string(),
+            };
+            let reply = rig.server.handle_rfwd_close(&ctx, 8, &close);
+            assert_eq!(
+                error_code(&reply),
+                Some(ErrorCode::InvalidArgument),
+                "{id:?} must be refused on shape"
+            );
+        }
+
+        // Untouched: the real forward still closes cleanly afterwards.
+        let close = wire::RemoteForwardClose {
+            forward_id: opened.forward_id.clone(),
+        };
+        let closed = rig.server.handle_rfwd_close(&ctx, 9, &close);
+        assert!(
+            matches!(
+                &closed.body,
+                Some(control_message::Body::Response(wire::Response {
+                    body: None
+                }))
+            ),
+            "the live forward must survive every malformed close: {closed:?}"
+        );
+
+        drop(host_conn);
+        drop(client_conn);
+    }
+
+    /// The host-minted side of the same predicate: the `forward_id` this
+    /// host issues is a ULID, which satisfies
+    /// `qsh_proto::wire::valid_forward_id` by construction — so the peer's
+    /// own `RemoteForwardClose` and its `TCP_ACCEPTED` tickets can be held
+    /// to that shape without ever refusing an id this host itself minted.
+    #[test]
+    fn minted_forward_ids_satisfy_the_wire_shape() {
+        for _ in 0..64 {
+            let id = ulid::Ulid::new().to_string();
+            assert!(
+                wire::valid_forward_id(&id),
+                "a minted forward_id must satisfy the wire shape: {id:?}"
+            );
+        }
+    }
+
+    /// `RemoteForwardOpen` genuinely cannot be answered by a bare
+    /// `dispatch` call — there is no `Connection` to open this forward's
+    /// future `TCP_ACCEPTED` streams on — so it draws `UNSUPPORTED`
+    /// there, documented at the match arm itself. The real path is
+    /// `Server::serve_control`'s early interception calling
+    /// `Server::handle_rfwd_open` directly, exercised above.
+    #[tokio::test]
+    async fn dispatch_rfwd_open_with_no_connection_is_unsupported() {
+        let rig = allow_rig();
+        let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
+        let req = rfwd_open("127.0.0.1", 0, "127.0.0.1", 5432);
+        let msg = ControlMessage::new(3, control_message::Body::RfwdOpen(req));
+
+        let reply = rig.server.dispatch(&ctx, &msg).await.unwrap();
+
+        assert_eq!(error_code(&reply), Some(ErrorCode::Unsupported));
+    }
+
+    /// `RemoteForwardClose`, unlike `RemoteForwardOpen`, needs no
+    /// connection — it is a lookup in `Server::remote_forwards` plus an
+    /// abort — so it is handled by `dispatch` itself, end to end.
+    #[tokio::test]
+    async fn dispatch_rfwd_close_unknown_forward_is_invalid_argument() {
+        let rig = allow_rig();
+        let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
+        let msg = ControlMessage::new(
+            4,
+            control_message::Body::RfwdClose(wire::RemoteForwardClose {
+                forward_id: "nope".to_string(),
+            }),
+        );
+
+        let reply = rig.server.dispatch(&ctx, &msg).await.unwrap();
+
+        assert_eq!(error_code(&reply), Some(ErrorCode::InvalidArgument));
+    }
+
+    /// The connection-bound lifetime half of `PLAN.md` M4 Step 4 (b): a
+    /// dead connection's remote forwards are aborted and forgotten by
+    /// `purge_connection`, the same way its tickets and writer leases are
+    /// — nothing keyed to a `conn_id` outlives that connection.
+    #[tokio::test]
+    async fn purge_connection_removes_and_aborts_this_connections_remote_forwards() {
+        let (client_conn, host_conn) = crate::tunnel::testutil::loopback_pair().await;
+        let rig = allow_rig();
+        let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
+
+        let req = rfwd_open("127.0.0.1", 0, "127.0.0.1", 9);
+        let _reply = rig.server.handle_rfwd_open(&ctx, &host_conn, 1, &req).await;
+
+        assert!(
+            rig.server
+                .remote_forwards
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(&ctx.conn_id),
+            "the forward must be registered before purge"
+        );
+
+        rig.server.purge_connection(ctx.conn_id).await;
+
+        assert!(
+            !rig.server
+                .remote_forwards
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(&ctx.conn_id),
+            "purge_connection must remove every remote forward this connection opened"
+        );
+
+        drop(host_conn);
+        drop(client_conn);
     }
 }

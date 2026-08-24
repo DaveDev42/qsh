@@ -82,7 +82,11 @@ connection당 **control 스트림 1개** + 리소스별 스트림. 비-control �
 
 **동시성 상한:** 한 연결이 동시에 여는 `TCP_CONNECT` 스트림 수는 연결 전체의 bidi 스트림 상한(`MAX_CONCURRENT_BIDI_STREAMS = 1024`, `crates/qsh-transport/src/endpoint.rs`)이 그대로 묶는다 — 동시 터널 스트림과 그것이 붙잡는 upstream fd는 연결당 1024개로 유계이고, 그 peer는 애초에 mTLS로 pin된 상대다(M1–M4 interim allow-all-pinned). 이보다 좁은 **터널 전용** 할당량(principal별·forward별)은 M5 정책 엔진 범위이며 M4는 만들지 않는다.
 
+**이 상한이 덮지 않는 것 — remote forward 리스너 개수.** 위 1024는 *스트림* 상한이고, `RemoteForwardOpen`이 여는 것은 스트림이 아니라 listener다: 한 요청이 control 스트림 위의 요청-응답 한 번으로 처리되고(§ 위 "인가 순서" 문단), 그 결과 host에 TCP listener 하나·fd 하나·`serve_remote_forward` task 하나가 뜬다. `forward.remote`를 가진 principal이 서로 다른 `bind_port`로 `RemoteForwardOpen`을 반복해서 보내는 것은 매번 이 1024 상한과 무관한 새 control 요청-응답일 뿐이라, 동시에 열려 있는 listener 수는 M4에서 **어떤 상한에도 걸리지 않는다** — 스트림·fd 예산도, principal·forward별 할당량도 없다. 이 갭을 좁히는 터널 전용 할당량은 바로 위 문단이 말하는 M5 정책 엔진 범위이고, M4는 그 도래 전까지 listener 개수를 의도적으로 무제한으로 남긴다(`PLAN.md` §4 감시 항목).
+
 **`forward_id`:** remote forward(`-R`)가 host 쪽에 뜬 listener에 들어온 accept 하나하나를 식별하는, host가 발급하는 opaque URL-safe 문자열이다. peer가 audit field로 쓸 수 있으므로 `session_id`와 같은 규율을 적용한다 — ACL choke point 이전에 모양(`1..=64` 바이트, `[A-Za-z0-9_-]`)을 검사하고 아니면 `INVALID_ARGUMENT`다(§9 "세션 id는 모양부터 검사한다"와 동일 패턴, `qsh-proto::wire`가 검증기를 제공한다). `TCP_ACCEPTED` 스트림은 이 `forward_id`를 `StreamHeader.ticket`에 담아 나른다.
+
+**`RemoteForwardOpen`의 인가 순서:** `TCP_CONNECT`와 달리 `RemoteForwardOpen`은 control 왕복이 있는 요청-응답이므로 인라인 검사로 도망칠 이유가 없다 — 리스너를 bind하기 전에 control 요청 하나로 `Authorizer::check(principal, auth_path, Action::ForwardRemote, "bind_host:bind_port")` + audit을 거치고, 통과한 뒤에도 loopback 강제가 **별도 단계**로 남는다: `bind_host`가 loopback(`127.0.0.0/8`·`::1`, 이름은 해석 후 판정)이 아니면 `INVALID_ARGUMENT`고 소켓은 하나도 뜨지 않는다. 두 단계는 판정 성격이 다르다 — 앞은 principal이 `forward.remote`를 가졌는지(ACL, `PERMISSION_DENIED`), 뒤는 그 principal이 **가졌어도** 통과 못 하는 host 쪽 요청 제약(`INVALID_ARGUMENT`, `docs/PRD.md` §9)이다. 순서는 항상 authorize → loopback 검사 → bind 하나뿐이고, 앞 두 단계 중 하나라도 실패하면 그 뒤 단계는 실행되지 않는다(구현은 `crates/qsh-core/src/server/mod.rs`의 `authorize_and_bind_remote_forward`). **정방향 연결의 `TCP_ACCEPTED` 방향:** bind한 listener에 들어온 accept마다 host(요청 수신자)가 `StreamHeader{TCP_ACCEPTED, forward_id}`를 host → 요청자 방향으로 연다 — `SESSION_DATA`/`TCP_CONNECT`처럼 요청을 보낸 쪽이 여는 것이 아니라, 리소스(bind한 소켓)를 실제로 쥔 쪽이 여는 것이다. 역방향 연결 위에서 이 방향이 뒤집히지 않고 그대로 유지되는 이유(target이 여전히 여는 쪽)는 §11의 대칭 원칙 문단이 다룬다.
 
 ## 8. Sequence 시맨틱 (wire 관점)
 
@@ -161,9 +165,10 @@ message ControlMessage {
                                             //   INVALID_ARGUMENT(host-side policy, parser는 모양만 검사,
                                             //   CLI.md §6.9); ACL forward.remote
                                             // -> RemoteForwardOpened{forward_id, actual_port}
-    RemoteForwardClose  rfwd_close = 41;    // forward_id; ACL forward.remote — 성공 시 Response payload
-                                            //   variant는 M4 Step 1 범위 밖이다(host-side 처리 구현 단계에서
-                                            //   확정, 아래 Response oneof는 지금 rfwd_opened=4만 realize한다)
+    RemoteForwardClose  rfwd_close = 41;    // forward_id; ACL forward.remote — 성공은 bare Response
+                                            //   {body: None}(전용 payload 없음, M4 Step 4에서 확정 —
+                                            //   아래 Response oneof는 rfwd_opened=4만 realize하고
+                                            //   rfwd_close 전용 variant는 만들지 않는다)
 
     Ping                ping = 50;
     Pong                pong = 51;

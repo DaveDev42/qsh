@@ -409,10 +409,13 @@ fn open_shell(ops: &Ops) -> String {
 }
 
 fn attach(ops: &Ops, session_ref: &str) -> SessionAttachStream {
-    ops.session_attach(SessionAttachReq {
-        session_ref: session_ref.to_string(),
-        no_steal: false,
-    })
+    ops.session_attach(
+        SessionAttachReq {
+            session_ref: session_ref.to_string(),
+            no_steal: false,
+        },
+        &[],
+    )
     .expect("session.attach")
 }
 

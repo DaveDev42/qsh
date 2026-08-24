@@ -350,10 +350,13 @@ fn open_req(host: &str) -> SessionOpenReq {
 }
 
 fn attach(ops: &Ops, session_ref: &str, no_steal: bool) -> Result<SessionAttachStream, OpError> {
-    ops.session_attach(SessionAttachReq {
-        session_ref: session_ref.to_string(),
-        no_steal,
-    })
+    ops.session_attach(
+        SessionAttachReq {
+            session_ref: session_ref.to_string(),
+            no_steal,
+        },
+        &[],
+    )
 }
 
 fn decode_b64(s: &str) -> Vec<u8> {

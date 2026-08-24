@@ -453,6 +453,8 @@ qsh tunnel close <tunnel-id> --json
 
 **Spec grammar.** `--local`(`-L`)과 `--remote`(`-R`)는 같은 grammar를 공유한다: `[bind:]listen_port:host:host_port`(예: `8080:localhost:3000`, IPv6 bind는 `[::1]:8080:localhost:3000`처럼 대괄호로 감싼다). `listen_port`/`host_port`는 `1..=65535`만 유효하며 `0`과 `65536`은 파싱 단계에서 `INVALID_ARGUMENT`다. 이 grammar를 파싱하는 `qsh-proto::wire::parse_forward_spec`은 sans-IO 순수 함수이고 **모양만** 검사한다 — non-loopback `bind`도 grammar상으로는 유효하게 파싱된다. `-L`은 로컬 머신에서 `listen_port`를 열고 들어오는 각 TCP 연결마다 host에 `host:host_port`로 dial을 요청하며, `bind`를 생략하면 loopback에 bind한다. `-R`은 반대 방향이다: host가 자신의 `listen_port`를 열고 들어오는 각 연결을 로컬 머신의 `host:host_port`로 되돌려 보낸다 — **non-loopback `-R` bind는 host 쪽에서 `INVALID_ARGUMENT`로 거부된다**(parser는 모양만 검사하고, loopback-only는 파서가 아니라 host가 강제하는 policy다).
 
+`-R`은 리스너를 bind하기 전에 두 층을 순서대로 통과해야 한다: 먼저 host가 `forward.remote`(§2.5)로 principal을 ACL 평가하고, 거부면 `PERMISSION_DENIED`이며 아무것도 뜨지 않는다. 통과한 뒤에야 위 loopback 강제가 적용되고, 위반이면 `INVALID_ARGUMENT`다(마찬가지로 아무것도 뜨지 않는다). 두 거부는 층이 다르다는 점이 핵심이다 — 하나는 그 principal이 `forward.remote`를 가졌는지 판정하는 ACL이고, 다른 하나는 `forward.remote`를 **가진** principal에게도 예외 없이 적용되는 host 쪽 요청 제약이다(`docs/PRD.md` §9).
+
 **JSON envelope.** `tunnel.open`의 `data`는 아래 `Tunnel` 하나다:
 
 ```json

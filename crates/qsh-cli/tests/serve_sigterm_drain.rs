@@ -176,10 +176,13 @@ fn sigterm_drains_the_session_and_leaves_no_orphan() {
             .session_ref;
 
         let mut stream = ops
-            .session_attach(SessionAttachReq {
-                session_ref: session_ref.clone(),
-                no_steal: false,
-            })
+            .session_attach(
+                SessionAttachReq {
+                    session_ref: session_ref.clone(),
+                    no_steal: false,
+                },
+                &[],
+            )
             .expect("session.attach");
 
         // ---- a real child, whose pid we can ask the OS about ----
