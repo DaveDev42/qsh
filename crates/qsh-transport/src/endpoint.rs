@@ -42,6 +42,29 @@ pub const DEFAULT_DIAL_TIMEOUT: Duration = Duration::from_secs(10);
 /// the same connection).
 pub const MAX_CONCURRENT_BIDI_STREAMS: u32 = 1024;
 
+/// Connection-wide per-stream receive window (`docs/design/protocol.md`
+/// §12's bufferbloat defense (a)), sized for tunnel throughput (~2-4 MiB
+/// per the PLAN). **Quinn 0.11 limitation, not a design choice:**
+/// `quinn_proto::TransportConfig` only exposes a single connection-wide
+/// [`quinn::TransportConfig::stream_receive_window`] — there is no
+/// per-stream-*kind* asymmetric window (PTY ~256 KiB vs. tunnel ~2-4 MiB,
+/// as `PLAN.md` M4 Step 2 and `protocol.md` §12 describe it). PTY
+/// protection is instead delivered by [`qsh_proto::wire::PRIORITY_TUNNEL`]
+/// (queue *order*) plus [`send_fairness`](quinn::TransportConfig::send_fairness)
+/// and BBR (queue *depth*) below — exactly the "우선순위(priority) + 큐
+/// 깊이(window/BBR)" pairing §12 calls for, just without a second,
+/// smaller window carved out for session data specifically. If a future
+/// quinn release adds a per-stream-type window, prefer it over this
+/// connection-wide value and update this doc.
+///
+/// The specific value (4 MiB) is **provisional** (`PLAN.md` M4 §4.2, a
+/// measure-then-fix constant). A single connection-wide window pulls the
+/// two M4 perf DoDs in opposite directions — DoD 3 (tunnel throughput ≥
+/// 80% of raw-quinn) wants it large, DoD 4 (PTY echo p95 under a saturated
+/// tunnel) wants it small — so its final value is validated and tuned by
+/// M4 Step 7's saturated-tunnel-vs-PTY-echo perf gate, not fixed here.
+pub const TUNNEL_STREAM_RECEIVE_WINDOW: u32 = 4 * 1024 * 1024;
+
 /// QUIC application close code sent when the peer's principal cannot be
 /// re-derived after the handshake (should be unreachable — the verifier
 /// already ran — but fail closed).
@@ -150,6 +173,15 @@ fn transport_config() -> quinn::TransportConfig {
             .expect("45s fits in a QUIC idle timeout VarInt"),
     ));
     tc.max_concurrent_bidi_streams(MAX_CONCURRENT_BIDI_STREAMS.into());
+    // Tunnel/backpressure config (`docs/design/protocol.md` §12,
+    // `PLAN.md` M4 Step 2) — priority (queue order, applied per-stream at
+    // the call site: `qsh_transport::control::FramedSend::set_priority`,
+    // `qsh_proto::wire::PRIORITY_TUNNEL`) plus these three connection-level
+    // knobs (queue depth), so a saturated tunnel cannot starve PTY chunks
+    // buffered behind it:
+    tc.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
+    tc.send_fairness(true);
+    tc.stream_receive_window(quinn::VarInt::from_u32(TUNNEL_STREAM_RECEIVE_WINDOW));
     tc
 }
 
@@ -499,5 +531,37 @@ impl Incoming {
                 Err(AcceptError::Unverified(reason))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// (b) `send_fairness` and the tunnel-sized `stream_receive_window`
+    /// are actually set on the `TransportConfig` every dial/listen builds
+    /// (`docs/design/protocol.md` §12, `PLAN.md` M4 Step 2) —
+    /// `TransportConfig`'s congestion controller has no public getter
+    /// (quinn-proto stores it as `Arc<dyn ControllerFactory>`, `Debug`
+    /// explicitly excludes it — see [`TUNNEL_STREAM_RECEIVE_WINDOW`]'s own
+    /// doc), so the BBR selection itself is asserted indirectly: every
+    /// existing forward/reverse loopback test in this workspace dials and
+    /// listens through this exact `transport_config()`, so a
+    /// `congestion_controller_factory` call that panicked or silently
+    /// no-op'd would already show up there.
+    #[test]
+    fn transport_config_sets_send_fairness_and_tunnel_receive_window() {
+        let tc = transport_config();
+        let debug = format!("{tc:?}");
+        assert!(
+            debug.contains("send_fairness: true"),
+            "expected send_fairness: true in {debug:?}"
+        );
+        assert!(
+            debug.contains(&format!(
+                "stream_receive_window: {TUNNEL_STREAM_RECEIVE_WINDOW}"
+            )),
+            "expected stream_receive_window: {TUNNEL_STREAM_RECEIVE_WINDOW} in {debug:?}"
+        );
     }
 }

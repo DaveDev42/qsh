@@ -85,6 +85,15 @@ impl FramedSend {
         let _ = self.send.set_priority(priority);
     }
 
+    /// Read back the priority [`set_priority`](Self::set_priority) most
+    /// recently set — `Err` only once the stream has already closed
+    /// (`quinn::SendStream::priority`'s own contract). Test-only today
+    /// (`crate::tunnel`'s `PRIORITY_TUNNEL` assertion, `PLAN.md` M4 Step
+    /// 2): production code never needs to read this back, only set it.
+    pub fn priority(&self) -> Result<i32, quinn::ClosedStream> {
+        self.send.priority()
+    }
+
     /// Wait for the peer to acknowledge every byte written so far, or to
     /// stop the stream — whichever comes first. Used after
     /// [`finish`](Self::finish) to give a just-written frame (typically a
