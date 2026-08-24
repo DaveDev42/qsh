@@ -37,6 +37,8 @@ Keystore는 trait 뒤에: 유닛 테스트는 in-memory 구현, 플랫폼별로 
 
 M3부터는 같은 계층에 역방향 하네스(`qsh-testkit::reverse::ReverseHarness` — 한 프로세스 안에 controller listener + target dialer, `127.0.0.1:0`)가 더해져 등록·role 축 독립성(정방향/역방향 파라미터화된 loopback)·headless session op를 검증한다.
 
+**M4 터널 loopback 하네스.** 같은 계층에 터널 전용 harness가 더해진다 — 한 프로세스 안에서 실제 TCP listener(`127.0.0.1:0`)를 열고, 실제 QUIC connection 위에서 `RemoteForwardOpen`/`Close`·`TCP_CONNECT`→`ConnectResult`→raw splice 전체 경로(local/remote 양방향)를 subprocess 없이 구동한다. `-L`/`-R` 각각에 대해 실제 바이트 왕복(echo 서버로 round-trip)을 단언하고, `ConnectResult{ok:false}` 경로(dial 실패 → `CONNECTION_FAILED`, inline ACL 거부 → `PERMISSION_DENIED`)도 이 계층에서 커버한다. 실제 listener/splice 구현은 M4 이후 Step에서 채워지므로, M4 Step 1에서는 이 harness가 `qsh-proto`의 `ConnectResult`/`RemoteForwardOpen`/`RemoteForwardOpened`/`RemoteForwardClose` 타입과 `parse_forward_spec`을 대상으로 encode/decode·grammar 테스트만 갖는다.
+
 ## L4 — Network fault injection: in-process UDP chaos proxy (`qsh-testkit`)
 
 **설계:** `UdpSocket` 2개를 쥔 tokio task + seed 가능한 `ChaosPolicy`. 클라이언트는 proxy로 dial하고 proxy가 서버로 중계한다.
@@ -49,6 +51,7 @@ M3부터는 같은 계층에 역방향 하네스(`qsh-testkit::reverse::ReverseH
 | **`repath()`** — client측 소켓을 새 포트로 rebind | **NAT rebind / Wi-Fi→LTE 전환이 서버에게 보이는 모습 그대로.** 실제 인터페이스를 건드리지 않고 QUIC path validation을 구동 |
 | **`sever()`** — client측 소켓 완전 폐쇄 | 재dial + session resume 강제 (또 하나의 복구 경로) |
 | **`sever()`** — target→controller leg (`ReverseHarness`의 chaos 변형, M3) | target의 재등록 backoff 루프, controller의 stale 처리·`generation` 단조 증가 (`docs/design/protocol.md` §11-4) |
+| **`repath()`/`sever()`(M4, 터널)** — 터널이 열려 있는 QUIC connection에 동일 fault 적용 | **터널은 migration 아래에서 생존해야 한다**(connection이 살아남는 한 splice된 TCP 연결도 살아남음, §12 receive window/BBR 튜닝의 대상 그 자체)와 **`sever()` 아래에서는 깨끗이 teardown돼야 한다**(CLI.md §6.14 holder lifetime — 재수립 없이 local listener/remote 등록이 닫히고, 열려 있던 개별 TCP 연결이 좀비로 남지 않음)를 함께 검증. splice/재연결 구현 자체는 M4 이후 Step 몫이므로 이 행은 그 Step에서 채워진다 |
 
 **대안 대비 선택 근거:** `iptables`/`pfctl`은 root 필요·플랫폼 분기·GHA macOS에서 불안정. 실제 인터페이스 전환은 CI 자동화 불가. transport trait mock은 mock을 테스트하는 것 — migration은 실제 path validation의 속성이다. proxy는 `seeded(u64)`로 재현 가능하며 실패 메시지에 seed를 출력한다.
 
@@ -91,7 +94,7 @@ CLI.md §11이 명시적으로 초대하는, 레버리지가 가장 큰 계층.
 | `frame_decode` | raw bytes → frame splitter | 최우선 |
 | `control_message` | frame → 시맨틱 파싱 | |
 | `roundtrip` | structure-aware `Arbitrary` → encode → decode → eq | 시간당 버그 최저가 |
-| 문자열 파서류 | `session_ref`, `-L 8080:host:3000` 파싱 | |
+| 문자열 파서류 | `session_ref`, `parse_forward_spec`(`-L`/`-R` grammar, `qsh-proto::wire`, M4) 파싱 | sans-IO 순수 함수라 이 계층에 바로 얹힌다 — port 범위(`1..=65535`)·IPv6 대괄호·`bind` 유무 조합을 구조 인지(arbitrary) 변형으로 커버 |
 | `json_envelope` | MCP tool 인자 (agent가 주는 입력) | |
 | `broker_ops` | **stateful**: byte열 → op 시퀀스(append/read/attach/detach/tick) vs 모델 oracle | **M2에서 주입 가능한 clock을 설계해야 가능** |
 
@@ -103,6 +106,8 @@ ACL glob 평가기는 fuzz보다 property test가 적합 (`session.*`가 `sessio
 
 - Soak: 24h 수다스러운 세션(메모리 유계), 100 동시 세션(listener RSS ≤ 30MB idle 목표), 10k connect/disconnect 사이클(fd·세션 누수 0), Linux ASAN/LSAN으로 통합 스위트 1회.
 - **Perf는 절대값이 아니라 비율로 게이트:** raw-quinn 기준 throughput을 **같은 프로세스, 같은 실행에서** 측정한 뒤 터널 ≥ 80%를 단언 — runner 무관하므로 실제로 CI 가능. PTY p95 산식: (client 수신 시각 − pty write 시각 − 측정된 loopback RTT) < 10ms. **Perf는 nightly + 추세 기록 + 관대한 임계치로만 — PR 게이트 금지** (공유 runner의 flake가 무시 습관을 만든다).
+
+**M4 perf-gate 긴장의 해소 방향(PLAN.md §4.1 #7 — 문서화만, 실제 반영은 Step 7).** 위 "PR 게이트 금지"라는 일반 원칙과 `docs/design/protocol.md` §12가 M4 수용 기준으로 요구하는 "포화 터널 + PTY echo p95 < 10ms" CI 조기 도입은 문면상 충돌한다. M4에서 결정된 해소 방향은 두 지표를 분리하는 것이다: **비율 throughput**(raw-quinn 대비 터널 ≥ 80%)은 같은 프로세스·같은 실행의 결정적 측정이므로 runner flake에 노출되지 않는다 — 이 지표는 **acceptance job**(`crates/qsh-testkit/tests/reverse_resume_chaos.rs`류가 아니라 별도 M4 perf 테스트, `ci-ok`가 `needs`로 요구하는 그 job)에서 **strict 게이트**로 돈다. **echo-under-load p95**(포화 터널 아래에서의 PTY echo 지연)는 공유 runner의 wall-clock 변동에 노출되므로 nightly 추세 기록에 남되, **acceptance job에도 관대한 임계치로 게이트**를 하나 추가한다 — 이 둘 다 **PR 단위 테스트 스위트(일반 `cargo test`/`cargo nextest run`)에는 넣지 않는다.** 이는 L4의 "60초 DoD 이중 게이트"(`reverse_blackout.rs` — `QSH_ACCEPTANCE_SLOW` 하 acceptance job)와 같은 패턴이다: PR마다 태우지 않으면서도 DoD 문구를 실측으로 검증한다. **이 문단은 방향만 문서화한다** — 위 "Perf는 nightly + 추세 기록 + 관대한 임계치로만 — PR 게이트 금지" 문구 자체와 CI 워크플로 반영은 아직 이 상태 그대로이며, 실제로 acceptance job에 두 게이트를 추가하는 작업은 M4 Step 7에서 수행한다.
 
 ## CI 규율
 

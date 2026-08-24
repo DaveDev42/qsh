@@ -439,9 +439,23 @@ impl Server {
                     false,
                 ),
             )),
+            // Tunnel control (`RemoteForwardOpen`/`Close`, wire 40/41) is
+            // realized in the contract at M4 Step 1; the host handler lands
+            // at M4 Step 4/5. Until then it is an un-negotiated feature and
+            // draws UNSUPPORTED (CLI.md §3.3) — the same reply these tags
+            // produced as `body: None` before realization.
+            Some(control_message::Body::RfwdOpen(_))
+            | Some(control_message::Body::RfwdClose(_)) => Some(ControlMessage::error(
+                request_id,
+                wire::Error::new(
+                    ErrorCode::Unsupported,
+                    "remote forward not yet supported",
+                    false,
+                ),
+            )),
             // No body this build understands. prost drops unknown fields,
-            // so a reserved (25 `SessionSignal`, 40/41) or future control
-            // number decodes to `body: None` exactly like an empty message;
+            // so a reserved (25 `SessionSignal`) or future control number
+            // decodes to `body: None` exactly like an empty message;
             // CLI.md §2.4 / protocol.md §9 require UNSUPPORTED for those,
             // and CLI.md §3.3 assigns un-negotiated features the same code.
             None => Some(ControlMessage::error(
@@ -2969,8 +2983,12 @@ mod tests {
     }
 
     /// Reserved control number 25 (`SessionSignal`, CLI.md §2.4) and any
-    /// other unknown number decode to `body: None` and are answered
-    /// UNSUPPORTED without creating anything.
+    /// still-unknown number decode to `body: None` and are answered
+    /// UNSUPPORTED without creating anything. Tags 40/41 are NO LONGER in
+    /// that set — M4 Step 1 realized them as `RemoteForwardOpen`/`Close`, so
+    /// prost decodes them to a real (empty) body and they take a dedicated
+    /// UNSUPPORTED arm until the host handler lands (M4 Step 4/5); that path
+    /// is covered separately below.
     #[tokio::test]
     async fn reserved_and_unknown_control_numbers_are_unsupported() {
         // request_id = 7 (field 1 varint), then field N (LEN) with an empty
@@ -2991,7 +3009,7 @@ mod tests {
             b.push(0x00);
             b
         }
-        for field in [25u32, 40, 41, 200] {
+        for field in [25u32, 200] {
             let msg: ControlMessage = wire::decode_msg(&raw_with_field(field)).unwrap();
             assert_eq!(msg.request_id, 7);
             assert!(
@@ -3007,6 +3025,31 @@ mod tests {
                 Some(ErrorCode::Unsupported),
                 "field {field}"
             );
+            assert!(rig.audit.records().is_empty());
+            assert_eq!(rig.server.pending_tickets(), 0);
+            assert_eq!(rig.broker.session_count(), 0);
+        }
+        // Tunnel control (40/41) is realized now, so it decodes to a real
+        // (empty) body rather than None — but the host handler is M4 Step
+        // 4/5, so until then it draws the same UNSUPPORTED reply by a
+        // dedicated dispatch arm, creating nothing and auditing nothing.
+        for body in [
+            control_message::Body::RfwdOpen(wire::RemoteForwardOpen::default()),
+            control_message::Body::RfwdClose(wire::RemoteForwardClose::default()),
+        ] {
+            assert!(
+                ControlMessage::new(7, body.clone()).body.is_some(),
+                "40/41 are realized, not dropped to None"
+            );
+            let rig = allow_rig();
+            let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
+            let reply = rig
+                .server
+                .dispatch(&ctx, &ControlMessage::new(7, body))
+                .await
+                .unwrap();
+            assert_eq!(reply.request_id, 7);
+            assert_eq!(error_code(&reply), Some(ErrorCode::Unsupported));
             assert!(rig.audit.records().is_empty());
             assert_eq!(rig.server.pending_tickets(), 0);
             assert_eq!(rig.broker.session_count(), 0);
