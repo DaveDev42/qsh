@@ -16,6 +16,10 @@
 //!   prove role-axis independence (`PLAN.md` M3 Step 3, PR 3b).
 //! - [`pair`]: [`pair::HostedPair`], the trait that lets one scenario body
 //!   run unmodified against both harnesses above.
+//! - [`tunnel`]: in-process loopback **tunnel** harness (L3) — a
+//!   [`loopback::LoopbackHarness`] host plus a client `-L` listener plus a
+//!   local echo destination, so a forwarded byte's whole path is one
+//!   process (`PLAN.md` M4 Step 3).
 //!
 //! This crate may depend on any workspace crate.
 
@@ -24,7 +28,9 @@ pub mod fixtures;
 pub mod loopback;
 pub mod pair;
 pub mod reverse;
+pub mod tunnel;
 
 pub use chaos::{ChaosPolicy, ChaosProxy, ChaosStats, DelayDist};
 pub use loopback::{LoopbackHarness, TestIdentity, make_identity};
 pub use pair::HostedPair;
+pub use tunnel::{EchoServer, TunnelHarness};

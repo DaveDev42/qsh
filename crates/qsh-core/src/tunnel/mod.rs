@@ -2,10 +2,14 @@
 //! §7 "스트림 배치", §12 "우선순위와 backpressure"; `docs/design/architecture.md`
 //! §8's quinn selection rationale).
 //!
-//! This module is deliberately empty except for [`open_stream`] — no
-//! listener, no dial, no splice, no ACL check (all Step 3/4's job). What it
-//! *does* fix, ahead of any tunnel business logic landing, is that opening
-//! a tunnel data stream is symmetric across:
+//! [`open_stream`] itself stays deliberately bare — no listener, no dial,
+//! no splice, no ACL check (those are its submodules' and
+//! `crate::server`'s, added by M4 Step 3: [`dial`] the destination dialer
+//! seam the host's inline `forward.local` gate calls *after* it authorizes,
+//! [`splice`] the raw byte pipe a tunnel becomes past its handshake, and
+//! [`local`] the requester's `-L` listener). What this seam *does* fix,
+//! ahead of any tunnel business logic landing, is that opening a tunnel
+//! data stream is symmetric across:
 //!
 //! - **carrier** — a forward QUIC connection dialed straight to the peer,
 //!   or a reverse `LOCAL_STREAM` conduit to this machine's resident `qsh
@@ -31,6 +35,14 @@ use qsh_proto::wire::{PRIORITY_TUNNEL, StreamHeader};
 use crate::client::ClientError;
 use crate::client::link::{DataKillSwitch, DataLink, DataRecv, DataSend};
 
+pub use local::{LocalForwardError, LocalForwardHandle};
+
+pub(crate) mod dial;
+pub(crate) mod local;
+pub(crate) mod splice;
+#[cfg(test)]
+pub(crate) mod testutil;
+
 /// Open a tunnel data stream (`StreamHeader{TCP_CONNECT}` or
 /// `StreamHeader{TCP_ACCEPTED}`) on `link`, sending `header` as its first
 /// frame and applying [`PRIORITY_TUNNEL`] (`docs/design/protocol.md` §12).
@@ -42,10 +54,8 @@ use crate::client::link::{DataKillSwitch, DataLink, DataRecv, DataSend};
 /// as `TCP_CONNECT`'s first reply) — converting it to a raw byte splice
 /// past that point is Step 3/4's job, not this seam's.
 ///
-/// `#[allow(dead_code)]`: nothing outside this module's own tests calls it
-/// yet — `PLAN.md` M4 Step 2 lands only the seam, Step 3/4 add the local/
-/// remote forward business logic that actually opens tunnel streams.
-#[allow(dead_code)]
+/// Called by [`local::LocalForward`] once per forwarded TCP connection
+/// (M4 Step 3); Step 4/5 add the `TCP_ACCEPTED` callers.
 pub(crate) async fn open_stream(
     link: &DataLink<'_>,
     header: &StreamHeader,
@@ -55,59 +65,10 @@ pub(crate) async fn open_stream(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use qsh_proto::wire::StreamKind;
-    use qsh_transport::{
-        CertificateDer, Dialer, Fingerprint, Listener, LocalIdentity, Principal, StaticTrust,
-    };
 
     use super::*;
-
-    /// A same-process, mutually-pinned forward-route connection pair — the
-    /// same shape `qsh_testkit::loopback`'s harness builds, hand-rolled
-    /// here because `qsh-testkit` depends on `qsh-core` (never the
-    /// reverse, `docs/design/architecture.md` §1's dependency matrix), so
-    /// this crate's own tests cannot reach for it. Used to prove
-    /// [`open_stream`] actually applies [`PRIORITY_TUNNEL`] on a real QUIC
-    /// stream, and that the seam round-trips over a live connection.
-    fn self_signed() -> (LocalIdentity, Fingerprint) {
-        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).expect("keygen");
-        let params = rcgen::CertificateParams::new(Vec::<String>::new()).expect("params");
-        let cert = params.self_signed(&key).expect("self-sign");
-        let der = CertificateDer::from(cert.der().to_vec());
-        let fingerprint = Fingerprint::of_cert_der(&der).expect("fingerprint");
-        (
-            LocalIdentity {
-                cert_chain: vec![der],
-                key_pkcs8_der: key.serialize_der(),
-            },
-            fingerprint,
-        )
-    }
-
-    async fn loopback_pair() -> (qsh_transport::Connection, qsh_transport::Connection) {
-        let (client_id, client_fp) = self_signed();
-        let (server_id, server_fp) = self_signed();
-        let server_trust =
-            StaticTrust::empty().with_pin(client_fp, Principal::Device("laptop".into()));
-        let client_trust =
-            StaticTrust::empty().with_pin(server_fp, Principal::Device("box".into()));
-
-        let listener = Listener::bind(
-            "127.0.0.1:0".parse().unwrap(),
-            server_id,
-            Arc::new(server_trust),
-        )
-        .unwrap();
-        let addr = listener.local_addr().unwrap();
-        let dialer = Dialer::new(client_id, Arc::new(client_trust));
-        let (server, client) = tokio::join!(
-            async { listener.accept().await.unwrap().accept().await.unwrap() },
-            async { dialer.dial(addr, "127.0.0.1").await.unwrap().connection },
-        );
-        (client, server)
-    }
+    use crate::tunnel::testutil::loopback_pair;
 
     /// (a) `open_stream` opens with quinn send priority ==
     /// [`PRIORITY_TUNNEL`] — read back directly off the local `SendStream`

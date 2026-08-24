@@ -589,11 +589,16 @@ pub struct Tunnel {
     pub mode: String,
     /// The `[bind:]listen_port` half of the forward spec, as bound.
     pub bind: String,
-    /// The `host:host_port` half of the forward spec — the dial target.
+    /// The `host:host_port` half of the forward spec — the dial target, in
+    /// the canonical form [`crate::wire::format_host_port`] produces (an
+    /// IPv6 literal is bracketed: `"[::1]:5432"`).
     pub forward_to: String,
-    /// The kernel-assigned port when the requested listen port was `0`;
-    /// `None` when the requested port was used as given, or the tunnel is
-    /// not yet bound.
+    /// The port actually bound — the kernel-assigned one for a `0`
+    /// request, and the requested one when it was granted as asked
+    /// (`docs/CLI.md` §6.9's `Tunnel` example carries it for a fixed-port
+    /// forward). Optional because a tunnel that is not bound yet has no
+    /// port to report; a producer that knows the bound port always fills
+    /// it, so a reader never has to fall back to splitting `bind`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actual_port: Option<u32>,
     /// Host alias this tunnel is on (`Ops`-filled; never present on the

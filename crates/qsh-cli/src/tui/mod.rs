@@ -64,6 +64,17 @@ pub enum Attach {
         /// The `user@` hint, checked by the host against its own login
         /// name (`docs/CLI.md` §7).
         user: Option<String>,
+        /// `-L` local forward specs, unparsed
+        /// (`qsh_core::parse_local_forwards` is what turns them into
+        /// specs and decides their error code — `docs/CLI.md` §6.9). Only
+        /// this form carries them: `qsh attach` takes no `-L`, and the
+        /// standalone tunnel form is `qsh tunnel open`.
+        // Read only by the `#[cfg(unix)]` driver below (`tui::unix::run`);
+        // the Windows `run` refuses the whole interactive form before it
+        // could look at a forward, so the field is constructed but never
+        // read there — dead, not absent, on Windows.
+        #[cfg_attr(not(unix), allow(dead_code))]
+        forwards: Vec<String>,
     },
     /// `qsh attach <session-ref>` — attach to a session already running.
     Existing {
@@ -116,8 +127,11 @@ pub fn run(_ops: &Ops, what: Attach, _escape: Option<u8>) -> Result<i32, OpError
         Attach::Open {
             host,
             user: Some(user),
+            ..
         } => format!("{user}@{host}"),
-        Attach::Open { host, user: None } => host.clone(),
+        Attach::Open {
+            host, user: None, ..
+        } => host.clone(),
         Attach::Existing { session_ref } => session_ref.clone(),
     };
     Err(OpError::new(

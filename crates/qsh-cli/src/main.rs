@@ -12,18 +12,20 @@ use clap::{CommandFactory as _, Parser};
 use qsh_core::{
     ExecRunOp, ExecStdin, HostGetOp, HostListOp, IdentityInitOp, OpError, Operation, Ops,
     SessionAttachOp, SessionCloseOp, SessionGetOp, SessionListOp, SessionOpenOp, SessionReadOp,
-    SessionResizeOp, SessionWriteOp, TrustAddOp, TrustListOp, TrustRemoveOp, VersionOp,
+    SessionResizeOp, SessionWriteOp, TrustAddOp, TrustListOp, TrustRemoveOp, TunnelOpenOp,
+    VersionOp,
 };
 use qsh_proto::{
     ErrorCode, ExecRunReq, HostGetReq, IdentityInitReq, SessionCloseReq, SessionGetReq,
     SessionListReq, SessionOpenReq, SessionReadReq, SessionResizeReq, SessionWriteReq, TrustAddReq,
+    TunnelOpenReq,
 };
 use serde::Serialize;
 use tracing_subscriber::EnvFilter;
 
 use cli::{
     AttachArgs, Cli, Command, DEFAULT_ESCAPE_CHAR, EscapeChar, ExecArgs, HostCmd, SessionCmd,
-    SessionReadArgs, SessionWriteArgs, TrustAddArgs, TrustCmd,
+    SessionReadArgs, SessionWriteArgs, TrustAddArgs, TrustCmd, TunnelCmd, TunnelOpenArgs,
 };
 use render::{human, json, json::Envelope};
 
@@ -261,6 +263,7 @@ fn run(cli: &Cli) -> i32 {
             tui::Attach::Open {
                 host: target.host.clone(),
                 user: target.user.clone(),
+                forwards: cli.interactive.local_forward.clone(),
             },
             cli.interactive.escape_char,
         );
@@ -320,6 +323,7 @@ fn run(cli: &Cli) -> i32 {
             ops.session_list(SessionListReq { host: host.clone() }),
             human::print_session_list,
         ),
+        Command::Tunnel(TunnelCmd::Open(args)) => run_tunnel_open(cli, &ops, args),
         Command::Serve { bind } => run_serve(&ops, bind.as_deref()),
         Command::Listen { bind } => run_listen(&ops, bind.as_deref()),
         Command::Reverse {
@@ -570,6 +574,77 @@ fn remote_exit_code_to_process_exit(remote: i32) -> i32 {
         code @ 0..=254 => code,
         _ => EXIT_REMOTE_CLAMPED,
     }
+}
+
+/// `qsh tunnel open <host> --local <spec>` — open one tunnel and hold it
+/// (`docs/CLI.md` §6.9, §6.14).
+///
+/// Two-phase on purpose, and the only command shaped like this: the
+/// `Tunnel` envelope is emitted **once**, up front, exactly like any value
+/// operation — and then this process blocks, because the foreground
+/// process *is* the tunnel's holder (`PLAN.md` M4 §4.1 #1: no client
+/// daemon). Consequences this function is careful about:
+///
+/// - stdout is **flushed** before blocking. It is block-buffered when it
+///   is a pipe, and a caller reading the envelope to learn the bound port
+///   would otherwise wait for a flush that only happens at exit.
+/// - the end of the tunnel is reported on **stderr**, never as a second
+///   envelope: machine mode is one JSON line per command (`docs/CLI.md`
+///   §2.2), and a success line followed by a failure line would break
+///   every parser of it.
+fn run_tunnel_open(cli: &Cli, ops: &Ops, args: &TunnelOpenArgs) -> i32 {
+    // Parsing (and the loopback-bind rule) lives in `qsh-core`: this
+    // frontend only shuttles the already-parsed halves into the request
+    // the contract defines (`docs/CLI.md` §6.9).
+    let specs = match qsh_core::parse_local_forwards(std::slice::from_ref(&args.local)) {
+        Ok(specs) => specs,
+        Err(err) => return report_error(cli, TunnelOpenOp::COMMAND, &err),
+    };
+    let Some(spec) = specs.first() else {
+        return report_error(
+            cli,
+            TunnelOpenOp::COMMAND,
+            &OpError::new(ErrorCode::InvalidArgument, "no forward spec"),
+        );
+    };
+    let request = TunnelOpenReq {
+        host: args.host.clone(),
+        mode: "local".to_string(),
+        bind: spec.bind.clone(),
+        listen_port: u32::from(spec.listen_port),
+        forward_host: spec.host.clone(),
+        forward_port: u32::from(spec.host_port),
+    };
+    let hold = match ops.tunnel_open(request) {
+        Ok(hold) => hold,
+        Err(err) => return report_error(cli, TunnelOpenOp::COMMAND, &err),
+    };
+    let rendered = if cli.wants_json() {
+        match serde_json::to_value(hold.tunnel()) {
+            Ok(value) => emit(Envelope::success(TunnelOpenOp::COMMAND, value).print()),
+            Err(err) => {
+                eprintln!("qsh: failed to encode result: {err}");
+                EXIT_IO_FAILURE
+            }
+        }
+    } else {
+        emit(human::print_tunnel_open(hold.tunnel()))
+    };
+    if rendered != 0 {
+        // Could not even report the tunnel; do not go on to hold one
+        // nobody was told about. Dropping `hold` closes it.
+        return rendered;
+    }
+    if let Err(err) = io::stdout().flush() {
+        eprintln!("qsh: failed to write output: {err}");
+        return EXIT_IO_FAILURE;
+    }
+    eprintln!("qsh tunnel open: holding; press Ctrl-C to close");
+    let err = hold.hold();
+    if let Err(io_err) = human::print_error(&err) {
+        eprintln!("qsh tunnel open: failed to write output: {io_err}");
+    }
+    EXIT_RUNTIME_FAILURE
 }
 
 /// `qsh serve` — long-running host mode. Not an operation: no envelope,
@@ -906,6 +981,7 @@ fn command_name(cli: &Cli) -> &'static str {
         Command::Session(SessionCmd::Resize { .. }) => SessionResizeOp::COMMAND,
         Command::Session(SessionCmd::Close { .. }) => SessionCloseOp::COMMAND,
         Command::Sessions { .. } => SessionListOp::COMMAND,
+        Command::Tunnel(TunnelCmd::Open(_)) => TunnelOpenOp::COMMAND,
         Command::Serve { .. } => SERVE_MODE,
         Command::Listen { .. } => LISTEN_MODE,
         Command::Reverse { .. } => REVERSE_MODE,

@@ -10,7 +10,7 @@ use qsh_core::{ExecRunOutput, OpError, SessionReadOutput};
 use qsh_proto::{
     Host, HostListData, IdentityInitData, Session, SessionCloseData, SessionEvent, SessionListData,
     SessionOpenData, SessionResizeData, SessionWriteData, TrustAddData, TrustListData, TrustPeer,
-    TrustRemoveData, VersionData,
+    TrustRemoveData, Tunnel, VersionData,
 };
 
 /// Print `qsh <version>` to stdout.
@@ -363,6 +363,44 @@ pub(crate) fn sanitize(text: &str) -> String {
             }
         })
         .collect()
+}
+
+/// Print one opened tunnel (`qsh tunnel open`, `docs/CLI.md` §6.9).
+///
+/// One line, the bound address first, because that is the thing the
+/// operator has to point a client at — and with a `0` listen port it is
+/// the only place the kernel-assigned port appears.
+pub fn print_tunnel_open(tunnel: &Tunnel) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    writeln!(
+        stdout,
+        "{} -> {} on {} ({})",
+        sanitize(&tunnel.bind),
+        sanitize(&tunnel.forward_to),
+        sanitize(&tunnel.host),
+        sanitize(&tunnel.tunnel_id)
+    )
+}
+
+/// Announce a started `-L` forward on **stderr** (`qsh [user@]host -L …`).
+///
+/// stderr, not stdout: on the interactive form stdout is the remote
+/// terminal's (`docs/CLI.md` §2.2). Structural only — a destination and a
+/// bound address, never a byte of what the tunnel carries.
+// Called only from `crate::tui::unix`, the `#[cfg(unix)]` interactive
+// driver (`tui::run` is `UNSUPPORTED` on Windows, so no `-L` listener is
+// ever started there) — dead, not absent, on Windows. `print_tunnel_open`
+// above stays live everywhere: `run_tunnel_open` in `main.rs` is not gated.
+#[cfg_attr(not(unix), allow(dead_code))]
+pub fn print_forward_started(tunnel: &Tunnel) -> io::Result<()> {
+    let mut stderr = io::stderr().lock();
+    writeln!(
+        stderr,
+        "qsh: forwarding {} -> {} on {}",
+        sanitize(&tunnel.bind),
+        sanitize(&tunnel.forward_to),
+        sanitize(&tunnel.host)
+    )
 }
 
 /// Print a human-readable error line to stderr.

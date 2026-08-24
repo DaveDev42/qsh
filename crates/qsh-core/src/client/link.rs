@@ -231,6 +231,26 @@ impl DataSend {
             DataSend::Local(send) => send.finish(),
         }
     }
+
+    /// End this stream's framed phase and surrender the raw QUIC send
+    /// stream, for the one caller that needs an unframed byte pipe: a
+    /// tunnel stream past its handshake (`docs/design/protocol.md` §5, §7,
+    /// [`crate::tunnel::splice`]).
+    ///
+    /// `Err(self)` — never a panic — for the reverse `LOCAL_STREAM`
+    /// carrier, which has no single QUIC stream to surrender (its bytes
+    /// are relayed frame-by-frame through this machine's daemon). Splicing
+    /// a tunnel over that carrier is `PLAN.md` M4 Step 5's job; until then
+    /// the caller reports the refusal rather than mis-splicing, and
+    /// returning the value back keeps the stream alive to be torn down
+    /// properly.
+    pub(crate) fn into_raw_quic(self) -> Result<quinn::SendStream, Self> {
+        match self {
+            DataSend::Quic(send) => Ok(send.into_raw()),
+            #[cfg(unix)]
+            other @ DataSend::Local(_) => Err(other),
+        }
+    }
 }
 
 /// See [`DataSend`]'s own doc — this is its receive-half sibling.
@@ -252,6 +272,22 @@ impl DataRecv {
             DataRecv::Quic(recv) => Ok(recv.recv::<M>().await?),
             #[cfg(unix)]
             DataRecv::Local(recv) => recv.recv::<M>().await.map_err(op_error_to_client_error),
+        }
+    }
+
+    /// The receive-half sibling of [`DataSend::into_raw_quic`], returning
+    /// the raw QUIC stream **and** the handshake residue behind it — bytes
+    /// the peer pipelined after its last framed message, which
+    /// [`qsh_transport::FramedRecv::into_raw`]'s own doc explains must be
+    /// delivered ahead of everything read from the stream afterwards.
+    ///
+    /// `Err(self)` for the reverse `LOCAL_STREAM` carrier, for the same
+    /// reason as the send half.
+    pub(crate) fn into_raw_quic(self) -> Result<(quinn::RecvStream, Vec<u8>), Self> {
+        match self {
+            DataRecv::Quic(recv) => Ok(recv.into_raw()),
+            #[cfg(unix)]
+            other @ DataRecv::Local(_) => Err(other),
         }
     }
 }

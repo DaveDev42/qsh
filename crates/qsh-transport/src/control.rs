@@ -105,6 +105,22 @@ impl FramedSend {
     pub async fn stopped(&self) {
         let _ = self.send.stopped().await;
     }
+
+    /// End this stream's framed phase and surrender the raw QUIC send
+    /// stream underneath it.
+    ///
+    /// The one place a QSH stream deliberately stops being length-prefixed
+    /// partway through: a tunnel stream is framed only for its handshake
+    /// (`StreamHeader`, then `ConnectResult`) and is a raw, unframed byte
+    /// pipe from there on (`docs/design/protocol.md` §5, §7). Callers must
+    /// have already written every frame they intend to write — nothing
+    /// written through the returned stream is framed, so a caller that
+    /// still owes the peer a frame would silently corrupt the handshake.
+    /// See [`FramedRecv::into_raw`] for the receive half, which has the
+    /// subtler obligation.
+    pub fn into_raw(self) -> SendStream {
+        self.send
+    }
 }
 
 /// Receiving half of a framed stream.
@@ -159,6 +175,31 @@ impl FramedRecv {
     /// Stop reading and tell the peer we are not interested in more data.
     pub fn stop(&mut self, code: u32) {
         let _ = self.recv.stop(quinn::VarInt::from_u32(code));
+    }
+
+    /// End this stream's framed phase and surrender the raw QUIC receive
+    /// stream **plus every byte already read past the last complete
+    /// frame**.
+    ///
+    /// The receive-half sibling of [`FramedSend::into_raw`], and the half
+    /// where the transition is easy to get wrong: one `read()` off the
+    /// QUIC stream routinely returns more than the frame the caller asked
+    /// for, so by the time [`recv`](Self::recv) has handed back a tunnel's
+    /// `StreamHeader`/`ConnectResult` this decoder may already be holding
+    /// the first bytes of the raw payload that followed it. Those bytes
+    /// are returned here as the second element and **must be delivered
+    /// ahead of anything subsequently read from the returned
+    /// [`RecvStream`]** — dropping them silently truncates the tunnel, and
+    /// re-reading the stream without them reorders it.
+    ///
+    /// The residue is exhaustive: [`Self::recv`] pushes every byte it
+    /// reads straight into the frame decoder and keeps `self.buf` purely
+    /// as scratch, so the decoder's own buffer
+    /// ([`FrameDecoder::take_remaining`]) is the only place unconsumed
+    /// bytes can be.
+    pub fn into_raw(mut self) -> (RecvStream, Vec<u8>) {
+        let residue = self.dec.take_remaining();
+        (self.recv, residue)
     }
 }
 

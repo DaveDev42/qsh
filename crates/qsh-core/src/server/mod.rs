@@ -53,6 +53,8 @@ use crate::broker::{
 };
 use crate::exec::{ExecSpec, run_exec};
 use crate::session_stream::SessionStream;
+use crate::tunnel::dial::{SystemDialer, TunnelDialer};
+use crate::tunnel::splice::splice_tcp_quic;
 
 /// How long a peer has to send its `Hello` (and open the control stream).
 /// Single definition now lives in [`crate::handshake`]; re-exported here so
@@ -1872,6 +1874,222 @@ impl Server {
         result
     }
 
+    /// Host side of a local forward (`-L`): a peer-opened `TCP_CONNECT`
+    /// stream asking this host to dial `header.host:header.port` and splice
+    /// the bytes.
+    ///
+    /// **Why the ACL check is inline here and not at the control-stream
+    /// choke point** (`docs/design/protocol.md` §7, `PLAN.md` M4 Step 3):
+    /// every other data stream must first redeem a ticket that a control
+    /// request already got authorized for, which is what makes "no resource
+    /// before authorization" structural. `TCP_CONNECT` is §7's *sole*
+    /// exception — one TCP connection through the forward would otherwise
+    /// cost a full control-stream RPC round-trip before its first byte,
+    /// which is exactly the latency a port forward exists to avoid. The
+    /// exception is to the *ticket*, never to the authorization: this
+    /// function runs [`Authorizer::check`] + [`AuditRecord`] as the very
+    /// first thing it does with the destination, and only a `Decision::
+    /// Allow` can reach the dialer below. On a deny nothing is dialed, no
+    /// socket exists, and the stream is refused — the same posture the
+    /// ticket would have enforced, moved inline (`docs/PRD.md` §9,
+    /// `docs/design/architecture.md` §6).
+    ///
+    /// **Concurrency bound.** Nothing here caps how many `TCP_CONNECT`
+    /// streams one connection may have in flight, because the transport
+    /// already does: `qsh_transport::endpoint::MAX_CONCURRENT_BIDI_STREAMS`
+    /// (1024) is the peer's whole bidi-stream allowance, so concurrent
+    /// tunnel splices — and the upstream fds they hold open — are bounded
+    /// at 1024 per connection, on a peer that is mTLS-pinned to begin with
+    /// (the M1-M4 interim allow-all-pinned posture). A *tunnel-specific*
+    /// quota tighter than that connection-wide cap (per principal, per
+    /// forward) is M5 policy-engine scope, not something to invent here
+    /// (`docs/design/protocol.md` §7 "동시성 상한").
+    async fn handle_tcp_connect(
+        &self,
+        ctx: &ConnCtx,
+        mut stream: FramedStream,
+        header: &StreamHeader,
+    ) {
+        // Tunnel bytes must never outrank a PTY chunk in the local send
+        // queue (`docs/design/protocol.md` §12). Set before anything is
+        // written on this stream, including the `ConnectResult`.
+        stream.send.set_priority(wire::PRIORITY_TUNNEL);
+
+        // `SystemDialer::default()` carries the production
+        // `TUNNEL_DIAL_TIMEOUT`; only tests ever build one with a
+        // different bound.
+        let dialed = self
+            .authorize_and_dial_tunnel(ctx, header, &SystemDialer::default())
+            .await;
+
+        let upstream = match dialed {
+            Err(rejection) => {
+                // §7 requires the requester learn *why*, so the refusal is
+                // a `ConnectResult` frame and a clean FIN — `reset()` here
+                // would discard the frame we just wrote and leave the peer
+                // guessing. The refusal is still terminal: the receive half
+                // is stopped, nothing was dialed, nothing is spliced.
+                // The teardown signal alongside it is picked to match the
+                // reason, so a peer reading only the QUIC code is not
+                // misinformed: a policy refusal is `FORBIDDEN`, a
+                // malformed destination is `BAD_HEADER`, and a destination
+                // that simply would not accept is nobody's protocol error
+                // — code 0, "we are just done reading".
+                let stop_code = match rejection.code.parse::<ErrorCode>() {
+                    Ok(ErrorCode::PermissionDenied) => RESET_CODE_FORBIDDEN,
+                    Ok(ErrorCode::InvalidArgument) => RESET_CODE_BAD_HEADER,
+                    _ => 0,
+                };
+                let _ = stream.send.send(&rejection).await;
+                let _ = stream.send.finish();
+                stream.recv.stop(stop_code);
+                return;
+            }
+            Ok(upstream) => {
+                if stream
+                    .send
+                    .send(&wire::ConnectResult {
+                        ok: true,
+                        code: String::new(),
+                        message: String::new(),
+                    })
+                    .await
+                    .is_err()
+                {
+                    // Peer went away between the dial and the reply; drop
+                    // the freshly-dialed socket rather than splice into
+                    // nothing.
+                    return;
+                }
+                upstream
+            }
+        };
+
+        // Framing ends with the `ConnectResult{ok:true}` just written: from
+        // here this stream is a raw, unframed byte pipe in both directions
+        // (`docs/design/protocol.md` §5, §7), so both halves are
+        // surrendered to `crate::tunnel::splice`, which copies bytes
+        // without parsing or logging a single one of them (`CLAUDE.md`
+        // "never log payload"). `into_raw` on the receive half also hands
+        // back whatever the requester pipelined behind its `StreamHeader`
+        // frame — bytes already read into the frame decoder, which the
+        // splice must write to the destination *first* or the forwarded
+        // connection loses its own first bytes.
+        let (send, recv) = stream.split();
+        let (raw_recv, residue) = recv.into_raw();
+        let outcome = splice_tcp_quic(upstream, send.into_raw(), raw_recv, residue).await;
+
+        // Structural only: destination and byte counts, never payload
+        // (`PLAN.md` M4 §4 "터널 payload 로그 금지" — `SpliceStats` has no
+        // field a payload byte could hide in).
+        match outcome {
+            // `sent`/`received` are **this end's** view of the tunnel, the
+            // same convention the requester's own log uses
+            // (`crate::tunnel::local::LocalForward::run`): `sent` is what
+            // this process pushed into the tunnel stream, `received` is
+            // what it took out of it. So the field-to-label mapping is
+            // identical on both ends — `local_to_remote` is always the
+            // splice's TCP-socket-to-tunnel direction, hence always
+            // `sent` — even though "local" names a different socket on
+            // each end (here the dialed destination, there the local
+            // application). Reading one tunnel's two logs, this host's
+            // `received` is the requester's `sent` and vice versa, which
+            // is what endpoint-relative counters are supposed to say.
+            Ok(stats) => tracing::debug!(
+                principal = %ctx.principal,
+                host = header.host,
+                port = header.port,
+                sent = stats.local_to_remote,
+                received = stats.remote_to_local,
+                "tunnel: local forward closed"
+            ),
+            Err(err) => tracing::debug!(
+                principal = %ctx.principal,
+                host = header.host,
+                port = header.port,
+                %err,
+                "tunnel: local forward aborted"
+            ),
+        }
+    }
+
+    /// The `forward.local` gate, factored out of [`Server::handle_tcp_connect`]
+    /// so it is testable with no transport at all: **authorize, then — and
+    /// only then — dial**.
+    ///
+    /// Order is the whole contract of this function:
+    /// 1. shape-check the destination (nothing created, no decision made);
+    /// 2. [`Server::authorize_stream`] — `Authorizer::check` + one
+    ///    [`AuditRecord`] line for allow *and* deny alike;
+    /// 3. `dialer.dial(...)` — unreachable unless step 2 returned allow.
+    ///
+    /// A local forward's destination is chosen by the requester and is
+    /// **not** restricted here (unlike `-R`'s loopback-only bind, Step 4):
+    /// `host:port` is the ACL resource, so restricting destinations is the
+    /// policy engine's job (M5), not this code's.
+    ///
+    /// `Err` is the [`wire::ConnectResult`] to hand the requester verbatim.
+    pub(crate) async fn authorize_and_dial_tunnel(
+        &self,
+        ctx: &ConnCtx,
+        header: &StreamHeader,
+        dialer: &dyn TunnelDialer,
+    ) -> Result<tokio::net::TcpStream, wire::ConnectResult> {
+        // (1) Shape. A malformed destination never becomes an ACL decision
+        // (there is nothing to decide *about*) and never becomes a socket
+        // — same discipline as `docs/design/protocol.md` §9's "check the
+        // shape of a session id before the choke point".
+        let Ok(port) = u16::try_from(header.port) else {
+            return Err(connect_rejected(
+                ErrorCode::InvalidArgument,
+                "destination port out of range",
+            ));
+        };
+        if header.host.is_empty() || port == 0 {
+            return Err(connect_rejected(
+                ErrorCode::InvalidArgument,
+                "destination host and port are required",
+            ));
+        }
+        // Canonical `host:port` — bracketed for an IPv6 literal, which
+        // `parse_forward_spec` delivers bracket-stripped, so a plain
+        // `format!` would build the unsplittable `::1:5432`. This string
+        // is the ACL resource *and* the audit field, and M5's policy
+        // engine will pattern-match rules against it, so the canonical
+        // form is pinned in the contract crate rather than improvised
+        // here (`qsh_proto::wire::format_host_port`).
+        let resource = wire::format_host_port(&header.host, port);
+
+        // (2) THE gate. Nothing exists yet: no socket, no resolver call, no
+        // file descriptor of any kind. `authorize_stream` is the same
+        // helper `SESSION_DATA`'s inline attach check uses — it decides and
+        // writes the audit line for both outcomes (SC6: every privileged op
+        // leaves an audit record).
+        if !self.authorize_stream(ctx, Action::ForwardLocal, &resource) {
+            // Deliberately the same wording as the control-stream
+            // `PERMISSION_DENIED` (`Server::permission_denied`): a denial
+            // must not tell the peer *which* rule refused it.
+            return Err(connect_rejected(
+                ErrorCode::PermissionDenied,
+                format!(
+                    "peer is not allowed to {} on this host",
+                    Action::ForwardLocal
+                ),
+            ));
+        }
+
+        // (3) Only now may a resource come into existence.
+        match dialer.dial(&header.host, port).await {
+            Ok(upstream) => Ok(upstream),
+            Err(err) => {
+                // The destination, not the payload: safe to log, and the
+                // only thing about this tunnel that ever is.
+                tracing::debug!(principal = %ctx.principal, %resource, %err, "tunnel dial failed");
+                Err(connect_rejected(err.code(), err.to_string()))
+            }
+        }
+    }
+
     /// Admit a peer-opened data stream: read the header, redeem the ticket
     /// for that stream kind, run the exec. Anything else resets the stream
     /// without touching any resource.
@@ -1891,6 +2109,15 @@ impl Server {
                     return;
                 }
             };
+        // `TCP_CONNECT` is the one stream kind that carries **no ticket**
+        // (`docs/design/protocol.md` §7: "유일한 예외는 `TCP_CONNECT`"), so it
+        // branches off before ticket redemption — see
+        // [`Server::handle_tcp_connect`] for why the ACL check is inline
+        // here instead of at the control-stream choke point.
+        if header.stream_kind() == Some(StreamKind::TcpConnect) {
+            self.handle_tcp_connect(&ctx, stream, &header).await;
+            return;
+        }
         let kind = match header.stream_kind() {
             Some(kind @ (StreamKind::ExecData | StreamKind::SessionData)) => kind,
             _ => {
@@ -2639,6 +2866,19 @@ pub async fn drive_probes(pinger: Arc<ControlPinger>, probes: Arc<tokio::sync::N
         if pinger.send_probe().await.is_none() {
             return;
         }
+    }
+}
+
+/// The only place a rejecting [`wire::ConnectResult`] is built, so every
+/// `TCP_CONNECT` refusal carries a code from the single [`ErrorCode`] enum
+/// (`CLAUDE.md` "Error codes come from the single `ErrorCode` enum") and
+/// never an ad-hoc string. `message` is host-authored prose about the
+/// *request* — never a payload byte, never key material.
+fn connect_rejected(code: ErrorCode, message: impl Into<String>) -> wire::ConnectResult {
+    wire::ConnectResult {
+        ok: false,
+        code: code.as_str().to_string(),
+        message: message.into(),
     }
 }
 
@@ -4861,5 +5101,342 @@ mod tests {
         watchdog.await.unwrap();
         driver.abort();
         drain.abort();
+    }
+
+    // ---------------------------------------------------------------
+    // `forward.local` — the inline ACL on a peer-opened `TCP_CONNECT`
+    // stream (`PLAN.md` M4 Step 3, `docs/design/protocol.md` §7,
+    // `docs/design/testing.md` L2).
+    // ---------------------------------------------------------------
+
+    fn tcp_connect_header(host: &str, port: u32) -> StreamHeader {
+        StreamHeader {
+            kind: StreamKind::TcpConnect as i32,
+            // §7's ticket exception: a `TCP_CONNECT` stream carries none.
+            ticket: Vec::new(),
+            host: host.to_string(),
+            port,
+        }
+    }
+
+    /// A [`TunnelDialer`] that counts every call before doing anything
+    /// else, so "the host dialed nothing" is an assertion and not a hope.
+    /// With `target: Some(addr)` it makes a real loopback connection (so
+    /// the allow path is proved end-to-end, not stubbed); with `None`
+    /// every dial fails, standing in for a refused destination.
+    struct CountingDialer {
+        calls: std::sync::atomic::AtomicUsize,
+        target: Option<SocketAddr>,
+    }
+
+    impl CountingDialer {
+        fn refusing() -> Self {
+            Self {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                target: None,
+            }
+        }
+
+        fn to(target: SocketAddr) -> Self {
+            Self {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                target: Some(target),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl TunnelDialer for CountingDialer {
+        fn dial<'a>(&'a self, _host: &'a str, _port: u16) -> crate::tunnel::dial::DialFuture<'a> {
+            // Count first: an implementation that dialed before checking
+            // the ACL would be recorded here even if the dial then failed.
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let target = self.target;
+            Box::pin(async move {
+                match target {
+                    Some(addr) => tokio::net::TcpStream::connect(addr)
+                        .await
+                        .map_err(crate::tunnel::dial::DialError::Connect),
+                    None => Err(crate::tunnel::dial::DialError::Connect(
+                        std::io::Error::new(
+                            std::io::ErrorKind::ConnectionRefused,
+                            "mock dialer refuses everything",
+                        ),
+                    )),
+                }
+            })
+        }
+    }
+
+    /// The security core of M4 Step 3: under a denying policy a
+    /// `TCP_CONNECT` stream must reach **zero** dials (`docs/PRD.md` §9,
+    /// `docs/design/protocol.md` §13's "socket creation is 0 on the
+    /// un-authorized path"), and be refused with `PERMISSION_DENIED`.
+    ///
+    /// Discriminating by construction: the dial counter is incremented as
+    /// the very first statement of `CountingDialer::dial`, before the
+    /// returned future can even fail, so an implementation that dialed
+    /// first and consulted the ACL afterwards — the exact ordering bug
+    /// this test exists for — would land `calls == 1` here and fail, and
+    /// would fail identically whether that speculative dial succeeded or
+    /// not. `..._allowed_dials_exactly_once...` below proves the counter
+    /// is wired at all (it reaches 1 there), so `0` here is a real
+    /// observation and not a counter that never moves.
+    #[tokio::test]
+    async fn tcp_connect_denied_dials_nothing_and_reports_permission_denied() {
+        let rig = rig(Arc::new(DenyAll));
+        let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
+        let dialer = CountingDialer::refusing();
+
+        let header = tcp_connect_header("db.internal", 5432);
+        let rejection = rig
+            .server
+            .authorize_and_dial_tunnel(&ctx, &header, &dialer)
+            .await
+            .expect_err("a denied forward.local must not yield a socket");
+
+        assert_eq!(
+            dialer.calls(),
+            0,
+            "the host must not dial before (or after) a forward.local deny"
+        );
+        assert!(!rejection.ok);
+        assert_eq!(rejection.code, ErrorCode::PermissionDenied.as_str());
+
+        let recs = rig.audit.records();
+        assert_eq!(recs.len(), 1, "exactly one audit line per decision");
+        assert_eq!(recs[0].action, "forward.local");
+        assert_eq!(recs[0].decision, "deny");
+        assert_eq!(
+            recs[0].resource, "db.internal:5432",
+            "the audited resource is the requested destination"
+        );
+    }
+
+    /// The host's whole `TCP_CONNECT` leg over a real QUIC stream (M4
+    /// Step 3): header → gate → dial → `ConnectResult{ok:true}` → **raw
+    /// byte splice**, with a real loopback destination on the far end. The
+    /// three earlier tests stop at the gate; this one is the only place the
+    /// bytes actually move, and it asserts the two things the splice can
+    /// silently get wrong:
+    ///
+    /// 1. **Residue.** The requester writes payload immediately behind its
+    ///    `StreamHeader` frame, so the host's framed reader has very likely
+    ///    already swallowed those bytes by the time the header decodes
+    ///    (`qsh_transport::FramedRecv::into_raw`). They must reach the
+    ///    destination *first* — a splice that ignored the decoder's
+    ///    leftovers would drop `"pipelined-"` here and echo only `"tail"`.
+    /// 2. **Half-close.** The requester finishes its send half while still
+    ///    reading. The host must translate that into a `shutdown(SHUT_WR)`
+    ///    on the destination socket — not a teardown — and keep the other
+    ///    direction running: the destination answers the EOF with a
+    ///    farewell (`"bye"`), which can only reach the requester if the
+    ///    half-closed tunnel is still alive in that direction.
+    #[tokio::test]
+    async fn tcp_connect_allowed_splices_raw_bytes_both_ways() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // A destination that echoes until EOF, then half-closes back.
+        let echo = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let echo_addr = echo.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _peer) = echo.accept().await.unwrap();
+            let mut buf = [0u8; 512];
+            loop {
+                match sock.read(&mut buf).await.unwrap() {
+                    0 => break,
+                    n => sock.write_all(&buf[..n]).await.unwrap(),
+                }
+            }
+            // Answer the half-close: a destination that speaks after its
+            // peer stopped speaking is exactly what a teardown-on-first-EOF
+            // splice would silence.
+            sock.write_all(b"bye").await.unwrap();
+            sock.shutdown().await.unwrap();
+        });
+
+        let (client, host_conn) = crate::tunnel::testutil::loopback_pair().await;
+        let rig = allow_rig();
+        let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
+        let header = tcp_connect_header("127.0.0.1", u32::from(echo_addr.port()));
+
+        // Requester: open the stream, send the header, and pipeline
+        // payload straight behind it without waiting for the verdict.
+        let (send, recv) = client.open_bi().await.unwrap();
+        let mut framed = FramedStream::data(send, recv);
+        framed.send.send(&header).await.unwrap();
+        let (send, mut recv) = framed.split();
+        let mut raw_send = send.into_raw();
+        raw_send.write_all(b"pipelined-").await.unwrap();
+
+        // Host: exactly what `handle_data_stream` does — read the header
+        // off the stream, then hand both to `handle_tcp_connect`.
+        let server = rig.server.clone();
+        // A clone: the last `Connection` handle's drop closes the whole
+        // QUIC connection with application code 0, discarding stream data
+        // the peer has not read yet — so the test keeps its own handle
+        // alive until it has drained everything.
+        let host_handle = host_conn.clone();
+        let host_side = tokio::spawn(async move {
+            let (send, recv) = host_handle.accept_bi().await.unwrap();
+            let mut framed = FramedStream::data(send, recv);
+            let header: StreamHeader = framed.recv.recv().await.unwrap().expect("header frame");
+            server.handle_tcp_connect(&ctx, framed, &header).await;
+        });
+
+        let result: wire::ConnectResult = recv.recv().await.unwrap().expect("ConnectResult");
+        assert!(
+            result.ok,
+            "an allowed forward.local must connect: {result:?}"
+        );
+
+        raw_send.write_all(b"tail").await.unwrap();
+        raw_send.finish().unwrap();
+        let (mut raw_recv, residue) = recv.into_raw();
+        assert!(
+            residue.is_empty(),
+            "the host sends nothing behind ConnectResult"
+        );
+        // `quinn::RecvStream` has its own inherent `read_to_end(limit)`,
+        // which shadows `AsyncReadExt::read_to_end`.
+        let got = raw_recv.read_to_end(4096).await.unwrap();
+        assert_eq!(
+            got, b"pipelined-tailbye",
+            "every byte, in order, exactly once: the payload pipelined \
+             behind the header frame, the payload after it, and the \
+             destination's answer to the half-close"
+        );
+
+        host_side.await.unwrap();
+        drop(host_conn);
+
+        let recs = rig.audit.records();
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].action, "forward.local");
+        assert_eq!(recs[0].decision, "allow");
+    }
+
+    /// The `forward.local` resource an IPv6 destination earns is
+    /// bracketed — `[::1]:5432`, not the unsplittable `::1:5432` that
+    /// plain concatenation produces. This string is what M5's policy
+    /// engine will pattern-match rules against and what the audit record
+    /// carries, so its canonical form is asserted here rather than
+    /// discovered later (`qsh_proto::wire::format_host_port`).
+    #[tokio::test]
+    async fn tcp_connect_audits_an_ipv6_destination_in_bracketed_form() {
+        let rig = rig(Arc::new(DenyAll));
+        let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
+        let dialer = CountingDialer::refusing();
+
+        // What `parse_forward_spec` actually delivers: an IPv6 literal
+        // with its brackets already stripped off the `[::1]` token.
+        let header = tcp_connect_header("::1", 5432);
+        let rejection = rig
+            .server
+            .authorize_and_dial_tunnel(&ctx, &header, &dialer)
+            .await
+            .expect_err("a denied forward.local must not yield a socket");
+
+        assert_eq!(dialer.calls(), 0);
+        assert_eq!(rejection.code, ErrorCode::PermissionDenied.as_str());
+
+        let recs = rig.audit.records();
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].action, "forward.local");
+        assert_eq!(recs[0].decision, "deny");
+        assert_eq!(
+            recs[0].resource, "[::1]:5432",
+            "an IPv6 ACL resource must be splittable back into host and port"
+        );
+    }
+
+    /// The allow leg of the same gate: one dial, after the decision, and
+    /// an `allow` audit line carrying `forward.local`. The dial is a real
+    /// loopback connection, so `Ok` here means an actual socket exists.
+    #[tokio::test]
+    async fn tcp_connect_allowed_dials_exactly_once_and_audits_forward_local() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let rig = allow_rig();
+        let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
+        let dialer = CountingDialer::to(addr);
+
+        let header = tcp_connect_header("127.0.0.1", u32::from(addr.port()));
+        let upstream = rig
+            .server
+            .authorize_and_dial_tunnel(&ctx, &header, &dialer)
+            .await
+            .expect("an allowed forward.local dials the destination");
+
+        assert_eq!(dialer.calls(), 1, "exactly one dial per TCP_CONNECT");
+        let (accepted, _peer) = listener.accept().await.unwrap();
+        drop(accepted);
+        drop(upstream);
+
+        let recs = rig.audit.records();
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].action, "forward.local");
+        assert_eq!(recs[0].decision, "allow");
+        assert_eq!(recs[0].resource, format!("127.0.0.1:{}", addr.port()));
+    }
+
+    /// An authorized destination that will not accept: the requester gets
+    /// `CONNECTION_FAILED` (`docs/CLI.md` §3.3), and the `allow` decision
+    /// is still audited — a failed dial is not a policy event.
+    #[tokio::test]
+    async fn tcp_connect_dial_failure_reports_connection_failed() {
+        let rig = allow_rig();
+        let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
+        let dialer = CountingDialer::refusing();
+
+        let header = tcp_connect_header("127.0.0.1", 9);
+        let rejection = rig
+            .server
+            .authorize_and_dial_tunnel(&ctx, &header, &dialer)
+            .await
+            .expect_err("a refused destination is not a socket");
+
+        assert_eq!(dialer.calls(), 1);
+        assert!(!rejection.ok);
+        assert_eq!(rejection.code, ErrorCode::ConnectionFailed.as_str());
+
+        let recs = rig.audit.records();
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].action, "forward.local");
+        assert_eq!(recs[0].decision, "allow");
+    }
+
+    /// A malformed destination is refused on shape, before the ACL is
+    /// consulted: nothing to decide about, so no audit line is invented
+    /// and — as on every other refusal — nothing is dialed
+    /// (`docs/design/protocol.md` §9's "check the shape first" pattern).
+    #[tokio::test]
+    async fn tcp_connect_malformed_destination_is_invalid_argument_and_dials_nothing() {
+        for header in [
+            tcp_connect_header("", 80),
+            tcp_connect_header("localhost", 0),
+            tcp_connect_header("localhost", 70_000),
+        ] {
+            let rig = allow_rig();
+            let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
+            let dialer = CountingDialer::refusing();
+
+            let rejection = rig
+                .server
+                .authorize_and_dial_tunnel(&ctx, &header, &dialer)
+                .await
+                .expect_err("a malformed destination is never dialed");
+
+            assert_eq!(dialer.calls(), 0, "{header:?}");
+            assert_eq!(rejection.code, ErrorCode::InvalidArgument.as_str());
+            assert!(
+                rig.audit.records().is_empty(),
+                "no ACL decision was made, so no audit line: {header:?}"
+            );
+        }
     }
 }

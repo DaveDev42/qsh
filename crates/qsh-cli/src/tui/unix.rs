@@ -35,9 +35,26 @@ pub fn run(ops: &Ops, what: Attach, escape: Option<u8>) -> Result<i32, OpError> 
     // Authorization, session creation and the attach all happen here, in
     // `Ops`, before a single byte of terminal state is touched: a refused
     // attach must leave the operator's terminal exactly as it found it.
-    let (session_ref, opened) = match what {
-        Attach::Open { host, user } => (open_session(ops, open_request(host, user, size))?, true),
-        Attach::Existing { session_ref } => (session_ref, false),
+    //
+    // `-L` specs are parsed and policy-checked *first*, before a session
+    // exists: a malformed or non-loopback spec must not cost the operator
+    // a running remote shell to find out about (`docs/CLI.md` §6.9,
+    // `PLAN.md` M4 §4.1 #3). The listeners themselves come up after the
+    // attach, because they ride its connection.
+    let (session_ref, opened, forward_specs) = match what {
+        Attach::Open {
+            host,
+            user,
+            forwards,
+        } => {
+            let specs = qsh_core::parse_local_forwards(&forwards)?;
+            (
+                open_session(ops, open_request(host, user, size))?,
+                true,
+                specs,
+            )
+        }
+        Attach::Existing { session_ref } => (session_ref, false, Vec::new()),
     };
     // From here on a failure on the freshly opened path would strand a
     // real remote shell, so every early return names it: sessions outlive
@@ -57,6 +74,18 @@ pub fn run(ops: &Ops, what: Attach, escape: Option<u8>) -> Result<i32, OpError> 
     let mut stream = ops
         .session_attach(attach_request(session_ref.clone()))
         .map_err(orphan)?;
+
+    // The `-L` listeners: bound before the terminal goes raw, so a bind
+    // failure is an ordinary error report on a terminal that was never
+    // touched. They are owned by `stream`, so they die with this attach
+    // and with this process — no daemon, nothing to close (`docs/CLI.md`
+    // §6.14).
+    for tunnel in stream.open_local_forwards(&forward_specs).map_err(orphan)? {
+        // A renderer call, not an `eprintln!`: the announcement goes
+        // through the same sanitizing path every other human line does,
+        // because `forward_to` is operator-supplied text.
+        let _ = human::print_forward_started(&tunnel);
+    }
 
     // Adopt this terminal's size before the shell draws anything. On the
     // freshly opened path this is what `session.open` already recorded; on

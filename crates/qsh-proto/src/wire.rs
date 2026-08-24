@@ -308,6 +308,66 @@ pub fn valid_forward_id(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
 }
 
+/// Replace every control character except `\t` in peer-supplied prose with
+/// `U+FFFD`.
+///
+/// For the strings the shape checks above cannot constrain: free-form text
+/// a peer authored and this side may end up *displaying* — a
+/// [`ConnectResult`]'s `code`/`message`, most sharply, because the
+/// interactive `-L` form prints tunnel diagnostics onto a terminal it has
+/// just put in raw mode. Without this a malicious or compromised host can
+/// embed ANSI/OSC escape sequences in a refusal and move the operator's
+/// cursor, repaint their screen, retitle their window, or forge extra
+/// lines of `qsh` output.
+///
+/// Same rule as the CLI renderer's own `sanitize` (`crates/qsh-cli/src/
+/// render/human.rs`), and deliberately the same *shape* of rule: replace,
+/// never drop, so the text's length still tells the operator something was
+/// there. Lives in `qsh-proto` because the escaping hazard belongs to the
+/// contract string itself — `qsh-core` displays these too and may not
+/// depend on `qsh-cli` (`docs/design/architecture.md` §1).
+///
+/// It sanitizes for *display*; it is not a validator and never widens what
+/// a caller chose to print.
+pub fn sanitize_peer_text(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_control() && c != '\t' {
+                '\u{FFFD}'
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
+/// Render a forward destination as the canonical `host:port` string:
+/// `"db.internal:5432"`, `"127.0.0.1:5432"`, and — the case plain
+/// concatenation gets wrong — `"[::1]:5432"` for an IPv6 literal.
+///
+/// [`parse_forward_spec`] strips the brackets off a `[::1]` token
+/// ([`ForwardSpec::host`] is "a bracket-stripped IPv6 literal"), so
+/// `format!("{host}:{port}")` on an IPv6 destination produces `::1:5432`
+/// — a string no reader can split back into a host and a port, and one
+/// that collides with a *different* address's rendering.
+///
+/// This matters beyond cosmetics: the host's inline `forward.local` check
+/// uses this string as its ACL **resource** and audit field, and M5's
+/// policy engine will pattern-match rules against it. Ambiguity in that
+/// string is ambiguity in a policy decision, so the canonical form is
+/// pinned here, in the contract crate, next to the parser that produced
+/// the halves.
+pub fn format_host_port(host: &str, port: u16) -> String {
+    // Classification, not string inspection: only something that really
+    // parses as an IPv6 address needs brackets, and an already-bracketed
+    // host does not re-parse (so it is left exactly as given).
+    if host.parse::<std::net::Ipv6Addr>().is_ok() {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
 /// Direction of a `-L`/`-R` port forward (`docs/CLI.md` §6.9, M4).
 /// [`parse_forward_spec`] cannot infer this from the spec string alone (the
 /// grammar is identical for both) — it comes from which flag the caller
@@ -1713,6 +1773,69 @@ mod tests {
         }
         // A realistic-shaped id.
         assert!(valid_forward_id("fwd_01K0EXAMPLE-token"));
+    }
+
+    // ---- sanitize_peer_text ------------------------------------------------
+
+    /// A peer's free-form prose must not be able to drive the terminal it
+    /// is displayed on: escapes, newlines and carriage returns all become
+    /// `U+FFFD`, tabs and ordinary (including non-ASCII) text survive.
+    #[test]
+    fn sanitize_peer_text_neutralizes_terminal_escapes() {
+        assert_eq!(sanitize_peer_text(""), "");
+        assert_eq!(
+            sanitize_peer_text("peer is not allowed"),
+            "peer is not allowed"
+        );
+        assert_eq!(sanitize_peer_text("한글 ok\tkept"), "한글 ok\tkept");
+        // A CSI colour run, a forged extra `qsh:` line, and an OSC window
+        // retitle — the three shapes a hostile `ConnectResult.message`
+        // would reach for.
+        assert_eq!(
+            sanitize_peer_text("a\u{1b}[31mred\u{1b}[0m\nqsh: forged\r\u{7}"),
+            "a\u{FFFD}[31mred\u{FFFD}[0m\u{FFFD}qsh: forged\u{FFFD}\u{FFFD}"
+        );
+        assert_eq!(
+            sanitize_peer_text("\u{1b}]0;pwned\u{7}"),
+            "\u{FFFD}]0;pwned\u{FFFD}"
+        );
+        // Replacement, not deletion: the length in chars is preserved, so
+        // the operator can see that something was removed.
+        assert_eq!(sanitize_peer_text("\u{1b}\u{1b}\u{1b}").chars().count(), 3);
+    }
+
+    // ---- format_host_port --------------------------------------------------
+
+    /// The inverse of the parser's bracket stripping: an IPv6 destination
+    /// round-trips back to an unambiguous `[addr]:port`, and everything
+    /// else is left alone.
+    #[test]
+    fn format_host_port_brackets_only_ipv6_literals() {
+        assert_eq!(format_host_port("db.internal", 5432), "db.internal:5432");
+        assert_eq!(format_host_port("127.0.0.1", 5432), "127.0.0.1:5432");
+        assert_eq!(format_host_port("localhost", 3000), "localhost:3000");
+        assert_eq!(format_host_port("*", 80), "*:80");
+        // The whole point: `::1:5432` cannot be split back, `[::1]:5432`
+        // can.
+        assert_eq!(format_host_port("::1", 5432), "[::1]:5432");
+        assert_eq!(format_host_port("::", 80), "[::]:80");
+        assert_eq!(format_host_port("2001:db8::1", 443), "[2001:db8::1]:443");
+        // IPv4-mapped IPv6 still classifies as IPv6, and must not be
+        // confused with the bare IPv4 address.
+        assert_eq!(
+            format_host_port("::ffff:127.0.0.1", 22),
+            "[::ffff:127.0.0.1]:22"
+        );
+        assert_ne!(
+            format_host_port("::ffff:127.0.0.1", 22),
+            format_host_port("127.0.0.1", 22)
+        );
+        // Already bracketed input is not double-bracketed.
+        assert_eq!(format_host_port("[::1]", 5432), "[::1]:5432");
+        // What a parsed spec's host actually looks like, end to end.
+        let spec = parse_forward_spec("8080:[::1]:5432").unwrap();
+        assert_eq!(spec.host, "::1");
+        assert_eq!(format_host_port(&spec.host, spec.host_port), "[::1]:5432");
     }
 
     // ---- parse_forward_spec -----------------------------------------------
