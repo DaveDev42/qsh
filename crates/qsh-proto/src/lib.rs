@@ -36,5 +36,7 @@ pub use types::{
     Session, SessionAttachReq, SessionCloseData, SessionCloseReq, SessionGetReq, SessionListData,
     SessionListReq, SessionOpenData, SessionOpenReq, SessionReadData, SessionReadReq,
     SessionResizeData, SessionResizeReq, SessionWriteData, SessionWriteReq, TrustAddData,
-    TrustAddReq, TrustListData, TrustPeer, TrustRemoveData, UnreachableHost, VersionData,
+    TrustAddReq, TrustListData, TrustPeer, TrustRemoveData, Tunnel, TunnelCloseData,
+    TunnelCloseReq, TunnelListData, TunnelListReq, TunnelOpenData, TunnelOpenReq, UnreachableHost,
+    VersionData,
 };

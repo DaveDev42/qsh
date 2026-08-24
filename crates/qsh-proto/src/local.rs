@@ -204,6 +204,32 @@ mod tests {
             .prop_map(|hosts| LocalHostListResult { hosts })
     }
 
+    fn arb_local_tunnel() -> impl Strategy<Value = LocalTunnel> {
+        (
+            "[a-zA-Z0-9_-]{1,64}",
+            "(local|remote)",
+            ".{0,64}",
+            ".{0,64}",
+            any::<u32>(),
+            "[a-zA-Z0-9._-]{0,64}",
+        )
+            .prop_map(|(tunnel_id, mode, bind, forward_to, actual_port, host)| {
+                LocalTunnel {
+                    tunnel_id,
+                    mode,
+                    bind,
+                    forward_to,
+                    actual_port,
+                    host,
+                }
+            })
+    }
+
+    fn arb_local_tunnel_list_result() -> impl Strategy<Value = LocalTunnelListResult> {
+        proptest::collection::vec(arb_local_tunnel(), 0..4)
+            .prop_map(|tunnels| LocalTunnelListResult { tunnels })
+    }
+
     fn arb_local_response() -> impl Strategy<Value = LocalResponse> {
         prop_oneof![
             arb_local_hello_ack().prop_map(|m| LocalResponse {
@@ -211,6 +237,9 @@ mod tests {
             }),
             arb_local_host_list_result().prop_map(|m| LocalResponse {
                 body: Some(local_response::Body::HostListResult(m)),
+            }),
+            arb_local_tunnel_list_result().prop_map(|m| LocalResponse {
+                body: Some(local_response::Body::TunnelListResult(m)),
             }),
             arb_local_error().prop_map(|m| LocalResponse {
                 body: Some(local_response::Body::Error(m)),
@@ -274,6 +303,11 @@ mod tests {
         }
 
         #[test]
+        fn local_tunnel_list_result_roundtrips(m in arb_local_tunnel_list_result()) {
+            roundtrip_and_canonical(&m);
+        }
+
+        #[test]
         fn local_response_roundtrips(m in arb_local_response()) {
             roundtrip_and_canonical(&m);
         }
@@ -285,6 +319,11 @@ mod tests {
 
         #[test]
         fn local_host_list_result_prefixes_are_incomplete(m in arb_local_host_list_result()) {
+            prefixes_are_incomplete(&m);
+        }
+
+        #[test]
+        fn local_tunnel_list_result_prefixes_are_incomplete(m in arb_local_tunnel_list_result()) {
             prefixes_are_incomplete(&m);
         }
 
@@ -302,6 +341,8 @@ mod tests {
             let _ = decode_local::<LocalError>(&bytes);
             let _ = decode_local::<LocalHostList>(&bytes);
             let _ = decode_local::<LocalHostListResult>(&bytes);
+            let _ = decode_local::<LocalTunnelList>(&bytes);
+            let _ = decode_local::<LocalTunnelListResult>(&bytes);
             let _ = decode_local::<LocalResponse>(&bytes);
         }
 
@@ -427,5 +468,12 @@ mod tests {
         // LocalHostList{} carries no data; round-trip through the frame
         // layer still holds for the empty message.
         roundtrip_and_canonical(&LocalHostList {});
+    }
+
+    #[test]
+    fn local_tunnel_list_request_has_no_fields() {
+        // LocalTunnelList{} (M4, `qsh tunnels`) carries no data, same as
+        // LocalHostList{} above.
+        roundtrip_and_canonical(&LocalTunnelList {});
     }
 }

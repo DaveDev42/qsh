@@ -146,7 +146,12 @@ pub fn classify(body: &control_message::Body) -> MessageKind {
         | control_message::Body::SessionResize(_)
         | control_message::Body::SessionClose(_)
         | control_message::Body::SessionAttach(_)
-        | control_message::Body::ExecStart(_) => MessageKind::Request,
+        | control_message::Body::ExecStart(_)
+        // Tunnel control relayed CLI -> host (M4; the host answers it,
+        // Step 4/5). A conduit legitimately sends these, so they are
+        // Requests like the session ops above, not Invalid.
+        | control_message::Body::RfwdOpen(_)
+        | control_message::Body::RfwdClose(_) => MessageKind::Request,
     }
 }
 

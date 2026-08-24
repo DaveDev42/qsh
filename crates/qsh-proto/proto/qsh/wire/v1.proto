@@ -9,17 +9,18 @@
 //   * `Response.Error.code` uses the CLI.md §3.3 error-code strings verbatim.
 //
 // Scope so far: the M1 walking skeleton (Hello, Response/Error,
-// ExecStart/ExecStarted, StreamHeader, ExecFrame, Ping/Pong) plus the M2
-// session surface (session_* control messages, SessionEvent, SessionFrame)
-// plus the M3 reverse-registration field (Hello.reverse).
-// Tunnel (M4) and reverse (M3) tags are `reserved` here so a later
-// milestone cannot accidentally take them for something else — protoc /
-// protox reject a field that reuses a reserved number. Filling a
-// `reserved` tag with the exact message it was reserved for (as M3 does
-// below for `Hello.reverse`) is not a violation of the additive-only rule
-// above — the reservation named its eventual occupant, so this is that
-// reservation being realized, not a tag being reused for a different
-// meaning.
+// ExecStart/ExecStarted, StreamHeader, ExecFrame, Ping/Pong), the M2
+// session surface (session_* control messages, SessionEvent, SessionFrame),
+// the M3 reverse-registration field (Hello.reverse), and the M4 tunnel
+// control surface (RemoteForwardOpen/Close/Opened, ConnectResult).
+// A still-`reserved` tag is left that way so a later milestone cannot
+// accidentally take it for something else — protoc / protox reject a field
+// that reuses a reserved number. Filling a `reserved` tag with the exact
+// message it was reserved for (as M3 did for `Hello.reverse`, and M4 Step 1
+// does below for `ControlMessage` 40/41 and `Response` 4) is not a
+// violation of the additive-only rule above — the reservation named its
+// eventual occupant, so this is that reservation being realized, not a tag
+// being reused for a different meaning.
 
 syntax = "proto3";
 
@@ -36,8 +37,7 @@ message ControlMessage {
   uint64 request_id = 1;
   // 25 was SessionSignal in early sketches; it is P1 and deliberately left
   //    undefined in v1 (a host answers UNSUPPORTED to it, CLI.md §2.4).
-  // 40–41 are RemoteForwardOpen/Close (M4).
-  reserved 25, 40, 41;
+  reserved 25;
   oneof body {
     Hello         hello          = 10;
     Response      response       = 11;
@@ -54,6 +54,14 @@ message ControlMessage {
     SessionWrite  session_write  = 28;
 
     ExecStart     exec_start     = 30;
+
+    // Tunnel control (M4). Both requests are authorized against the ACL
+    // action in CLI.md §2.5 (forward.local / forward.remote) before any
+    // resource — listener bind, dial — is created (CLAUDE.md "Never create
+    // a resource ... before authorization succeeds"). Realizes the tags
+    // this oneof's header comment reserved for exactly these messages.
+    RemoteForwardOpen  rfwd_open  = 40;
+    RemoteForwardClose rfwd_close = 41;
 
     Ping          ping           = 50;
     Pong          pong           = 51;
@@ -111,12 +119,13 @@ message ReverseRegistration {
 // The reply to a request. Exactly one body variant is set: either the typed
 // success payload matching the request, or Error.
 message Response {
-  // 4 is `RemoteForwardOpened rfwd_opened` (M4).
-  reserved 4;
   oneof body {
     SessionOpened     session_opened      = 1;  // session_open
     SessionAttached   session_attached    = 2;  // session_attach
     ExecStarted       exec_started        = 3;  // exec_start
+    // Realizes the tag this oneof's header comment reserved for exactly
+    // this message (M4).
+    RemoteForwardOpened rfwd_opened       = 4;  // rfwd_open
     SessionReadResult session_read_result = 5;  // session_read
     SessionListResult session_list_result = 6;  // session_list
     SessionInfo       session_info        = 7;  // session_get
@@ -152,6 +161,46 @@ message ExecStart {
 message ExecStarted {
   string exec_id = 1;
   bytes ticket = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Tunnel control messages (M4, `docs/CLI.md` §6.9). `forward_id` is an
+// opaque, URL-safe id issued by the host for a bound remote listener — same
+// shape discipline as `session_id` (`wire::valid_forward_id`), because it
+// becomes an ACL resource and an audit field the moment a peer sends it
+// back. It is carried again in `StreamHeader.ticket` on the `TCP_ACCEPTED`
+// stream the host opens for each accepted connection (§9 comment above
+// `StreamHeader`).
+// ---------------------------------------------------------------------------
+
+// Request: open a `-R` remote-forward listener on the peer (op
+// `tunnel.open`, ACL `forward.remote`). The host binds `bind_host:bind_port`
+// and, for each connection it accepts there, opens a `TCP_ACCEPTED`
+// data stream back to the requester; the requester dials
+// `forward_host:forward_port` for that stream (protocol.md §7, §9 — the
+// requester is the dialing side on this leg, the reverse of `-L`).
+// Non-loopback `bind_host` is *shape*-valid (this message does not encode
+// policy); the host enforces loopback-only before binding
+// (`docs/PRD.md` §9, PLAN.md M4 §4.1 #5).
+message RemoteForwardOpen {
+  string bind_host = 1;
+  uint32 bind_port = 2;
+  string forward_host = 3;
+  uint32 forward_port = 4;
+}
+
+// Success payload for RemoteForwardOpen. `actual_port` is the kernel-chosen
+// port when `bind_port` was 0.
+message RemoteForwardOpened {
+  string forward_id = 1;
+  uint32 actual_port = 2;
+}
+
+// Request: close a previously-opened remote forward (op `tunnel.close`,
+// same ownership check as every `tunnel.*` op, CLI.md §2.5). Answered with
+// a bare success `Response` (no dedicated payload) or `Error`.
+message RemoteForwardClose {
+  string forward_id = 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -400,6 +449,27 @@ message StreamHeader {
   // TCP_CONNECT only.
   string host = 3;
   uint32 port = 4;
+}
+
+// ---------------------------------------------------------------------------
+// Tunnel data streams (M4). A `TCP_CONNECT` stream (opened by the dialing
+// side named in `StreamHeader.host`/`port`) carries exactly one
+// `ConnectResult` as its first frame after `StreamHeader`, framed the same
+// way as every other data-stream message (§5: u32-BE length prefix + prost,
+// under `DATA_FRAME_MAX`). After an `ok` result the stream immediately
+// becomes a raw, unframed byte splice in both directions — no further
+// `ConnectResult`, no further length prefixes, protocol.md §7. A
+// `TCP_ACCEPTED` stream carries no `ConnectResult`: it *is* the accepted
+// leg, opened only after the peer already knows the accept succeeded.
+// ---------------------------------------------------------------------------
+
+message ConnectResult {
+  bool ok = 1;
+  // Empty when `ok`. CLI.md §3.3 vocabulary: a failed dial is
+  // `CONNECTION_FAILED`; an inline ACL rejection (protocol.md §7's ticket
+  // exception for `TCP_CONNECT`) is `PERMISSION_DENIED`.
+  string code = 2;
+  string message = 3;
 }
 
 // ---------------------------------------------------------------------------

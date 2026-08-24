@@ -567,6 +567,102 @@ pub struct TrustRemoveData {
     pub removed: bool,
 }
 
+// ---------------------------------------------------------------------------
+// tunnel.* (`docs/CLI.md` §6.9, M4)
+// ---------------------------------------------------------------------------
+
+/// A tunnel entry as returned by `tunnel.open`/`tunnels`/`tunnel.close`
+/// (`docs/CLI.md` §6.9, "Tunnel").
+///
+/// This is the JSON DTO: the wire `RemoteForwardOpen`/`RemoteForwardOpened`
+/// and the localctl `LocalTunnel` carry `tunnel_id`/`mode`/`bind`/
+/// `forward_to`/`actual_port` only, and the client `Ops` layer adds `host`
+/// from its own local alias knowledge — the same pattern `Session.host`
+/// uses over the wire `SessionInfo` (ADR-0007).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct Tunnel {
+    /// Opaque handle for `tunnel.close` / filtering `tunnels`.
+    pub tunnel_id: String,
+    /// Open string set: `"local"` (`-L`) or `"remote"` (`-R`) — same
+    /// open-string discipline as `Host.connection_mode` (`docs/CLI.md`
+    /// §10).
+    pub mode: String,
+    /// The `[bind:]listen_port` half of the forward spec, as bound.
+    pub bind: String,
+    /// The `host:host_port` half of the forward spec — the dial target.
+    pub forward_to: String,
+    /// The kernel-assigned port when the requested listen port was `0`;
+    /// `None` when the requested port was used as given, or the tunnel is
+    /// not yet bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actual_port: Option<u32>,
+    /// Host alias this tunnel is on (`Ops`-filled; never present on the
+    /// wire — ADR-0007, same rule as `Session.host`).
+    pub host: String,
+}
+
+/// Request for `tunnel.open` (`docs/CLI.md` §6.9, `-L`/`-R`). `mode`
+/// selects the direction (`"local"` for `-L`, `"remote"` for `-R` —
+/// `wire::ForwardDirection`'s JSON mirror); `bind`/`listen_port`/
+/// `forward_host`/`forward_port` are the already-parsed halves of the
+/// `[bind:]listen_port:host:host_port` spec (`wire::parse_forward_spec`
+/// parses the raw CLI string into these before a request is built — this
+/// type never carries the unparsed string).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TunnelOpenReq {
+    /// Host alias.
+    pub host: String,
+    /// `"local"` or `"remote"`.
+    pub mode: String,
+    /// The `[bind:]` prefix, when present; `None` = caller-side default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bind: Option<String>,
+    /// The `listen_port` component.
+    pub listen_port: u32,
+    /// The `host` component of the forward spec (the dial target host —
+    /// distinct from this request's own `host` field, which is the QSH
+    /// peer).
+    pub forward_host: String,
+    /// The `host_port` component of the forward spec.
+    pub forward_port: u32,
+}
+
+/// Data payload of a successful `tunnel.open`: the opened tunnel, exactly
+/// the shape `tunnels`/`tunnel.close` also return — same "the data payload
+/// is a [`Tunnel`]" pattern `HostGetReq`/`SessionGetReq` already use for
+/// their respective single-entity gets.
+pub type TunnelOpenData = Tunnel;
+
+/// Request for `tunnel.list` (`qsh tunnels`, `docs/CLI.md` §6.9). No
+/// filters — every tunnel visible under the caller's ownership is
+/// returned.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+pub struct TunnelListReq {}
+
+/// Data payload of `tunnel.list`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TunnelListData {
+    /// Every tunnel visible to this caller.
+    pub tunnels: Vec<Tunnel>,
+}
+
+/// Request for `tunnel.close` (`docs/CLI.md` §6.9).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TunnelCloseReq {
+    /// Opaque tunnel handle.
+    pub tunnel_id: String,
+}
+
+/// Data payload of `tunnel.close`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TunnelCloseData {
+    /// Opaque tunnel handle that was asked to be closed.
+    pub tunnel_id: String,
+    /// `true` if a tunnel was closed; `false` if none existed with that id
+    /// (idempotent, same pattern as `TrustRemoveData::removed`).
+    pub closed: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -698,6 +794,12 @@ mod tests {
         let _ = schemars::schema_for!(HostListReq);
         let _ = schemars::schema_for!(HostListData);
         let _ = schemars::schema_for!(HostGetReq);
+        let _ = schemars::schema_for!(Tunnel);
+        let _ = schemars::schema_for!(TunnelOpenReq);
+        let _ = schemars::schema_for!(TunnelListReq);
+        let _ = schemars::schema_for!(TunnelListData);
+        let _ = schemars::schema_for!(TunnelCloseReq);
+        let _ = schemars::schema_for!(TunnelCloseData);
         for schema in session_schemas() {
             // Every session contract type is an object schema with at least
             // one property (none of them is a bare alias or an empty struct).
@@ -999,5 +1101,152 @@ mod tests {
             serde_json::to_value(&req).unwrap(),
             serde_json::json!({"name": "personal-mac"})
         );
+    }
+
+    // ---- tunnel.* (M4) --------------------------------------------------
+
+    #[test]
+    fn tunnel_matches_documented_shape() {
+        let t = Tunnel {
+            tunnel_id: "tun_01K0EXAMPLE".into(),
+            mode: "local".into(),
+            bind: "127.0.0.1:8080".into(),
+            forward_to: "localhost:3000".into(),
+            actual_port: Some(8080),
+            host: "personal-mac".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&t).unwrap(),
+            serde_json::json!({
+                "tunnel_id": "tun_01K0EXAMPLE",
+                "mode": "local",
+                "bind": "127.0.0.1:8080",
+                "forward_to": "localhost:3000",
+                "actual_port": 8080,
+                "host": "personal-mac"
+            })
+        );
+        // `actual_port` is omitted, not null, when unset.
+        let t = Tunnel {
+            actual_port: None,
+            ..t
+        };
+        let json = serde_json::to_value(&t).unwrap();
+        assert!(json.get("actual_port").is_none());
+        let back: Tunnel = serde_json::from_value(json).unwrap();
+        assert_eq!(back, t);
+    }
+
+    #[test]
+    fn tunnel_open_req_matches_documented_shape() {
+        let req = TunnelOpenReq {
+            host: "personal-mac".into(),
+            mode: "remote".into(),
+            bind: Some("0.0.0.0".into()),
+            listen_port: 8080,
+            forward_host: "localhost".into(),
+            forward_port: 3000,
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["mode"], "remote");
+        assert_eq!(json["bind"], "0.0.0.0");
+        let back: TunnelOpenReq = serde_json::from_value(json).unwrap();
+        assert_eq!(back, req);
+
+        // `bind` omits when absent (`-L`/`-R` without an explicit bind).
+        let req = TunnelOpenReq { bind: None, ..req };
+        assert!(serde_json::to_value(&req).unwrap().get("bind").is_none());
+    }
+
+    #[test]
+    fn tunnel_open_data_is_a_tunnel() {
+        // TunnelOpenData is a type alias, not a distinct struct — the data
+        // payload of a successful `tunnel.open` is exactly a `Tunnel`
+        // (`HostGetReq`/`SessionGetReq`'s "data payload is a `Host`/
+        // `Session`" pattern).
+        let data: TunnelOpenData = Tunnel {
+            tunnel_id: "tun_01K0EXAMPLE".into(),
+            mode: "local".into(),
+            bind: "127.0.0.1:8080".into(),
+            forward_to: "localhost:3000".into(),
+            actual_port: None,
+            host: "personal-mac".into(),
+        };
+        let _: Tunnel = data;
+    }
+
+    #[test]
+    fn tunnel_list_req_is_empty_object() {
+        assert_eq!(
+            serde_json::to_value(TunnelListReq {}).unwrap(),
+            serde_json::json!({})
+        );
+        let _: TunnelListReq = serde_json::from_value(serde_json::json!({})).unwrap();
+    }
+
+    #[test]
+    fn tunnel_list_data_wraps_tunnels_array() {
+        let local = Tunnel {
+            tunnel_id: "tun_local".into(),
+            mode: "local".into(),
+            bind: "127.0.0.1:8080".into(),
+            forward_to: "localhost:3000".into(),
+            actual_port: Some(8080),
+            host: "personal-mac".into(),
+        };
+        let remote = Tunnel {
+            tunnel_id: "tun_remote".into(),
+            mode: "remote".into(),
+            bind: "127.0.0.1:9000".into(),
+            forward_to: "localhost:22".into(),
+            actual_port: Some(9000),
+            host: "laptop".into(),
+        };
+        let data = TunnelListData {
+            tunnels: vec![local.clone(), remote.clone()],
+        };
+        let json = serde_json::to_value(&data).unwrap();
+        assert_eq!(json["tunnels"][0]["mode"], "local");
+        assert_eq!(json["tunnels"][1]["mode"], "remote");
+        let back: TunnelListData = serde_json::from_value(json).unwrap();
+        assert_eq!(back, data);
+    }
+
+    #[test]
+    fn tunnel_close_req_and_data_match_documented_shape() {
+        let req = TunnelCloseReq {
+            tunnel_id: "tun_01K0EXAMPLE".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&req).unwrap(),
+            serde_json::json!({"tunnel_id": "tun_01K0EXAMPLE"})
+        );
+        let data = TunnelCloseData {
+            tunnel_id: "tun_01K0EXAMPLE".into(),
+            closed: true,
+        };
+        assert_eq!(
+            serde_json::to_value(&data).unwrap(),
+            serde_json::json!({"tunnel_id": "tun_01K0EXAMPLE", "closed": true})
+        );
+    }
+
+    /// `mode` is an open string, same discipline as `Host.connection_mode`
+    /// / `KeyStoreMode` — `"local"`/`"remote"` round-trip, and an unknown
+    /// value (e.g. a future SOCKS-adjacent mode) still deserializes rather
+    /// than hard-failing an older client reading a newer peer's JSON.
+    #[test]
+    fn tunnel_mode_is_an_open_string() {
+        for mode in ["local", "remote", "future_mode"] {
+            let json = serde_json::json!({
+                "tunnel_id": "tun_x",
+                "mode": mode,
+                "bind": "127.0.0.1:1",
+                "forward_to": "h:1",
+                "host": "h"
+            });
+            let t: Tunnel = serde_json::from_value(json).unwrap();
+            assert_eq!(t.mode, mode);
+        }
     }
 }

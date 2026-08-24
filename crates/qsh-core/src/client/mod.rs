@@ -1129,6 +1129,7 @@ fn response_kind(body: &response::Body) -> &'static str {
         response::Body::SessionWritten(_) => "SessionWritten",
         response::Body::SessionResized(_) => "SessionResized",
         response::Body::SessionClosed(_) => "SessionClosed",
+        response::Body::RfwdOpened(_) => "RemoteForwardOpened",
     }
 }
 

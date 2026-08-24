@@ -290,6 +290,241 @@ pub fn valid_host_name(name: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
+/// Shape of a `forward_id` (`RemoteForwardOpened.forward_id`,
+/// `RemoteForwardClose.forward_id`, and — carried again — `StreamHeader.
+/// ticket` on a `TCP_ACCEPTED` stream): `1..=64` bytes of
+/// `[A-Za-z0-9_-]` (URL-safe, no `.`  — unlike [`valid_host_name`] this is
+/// an opaque host-issued token, not a display name).
+///
+/// Same "check shape before it becomes an ACL resource or audit field"
+/// discipline as [`valid_host_name`] (this fn's own doc, `PLAN.md` M4 §4.1):
+/// a `forward_id` a peer sends back is never trusted until it passes this
+/// check, so an oversized or oddly-charactered string a confused or hostile
+/// peer echoes back can never inflate an audit record.
+pub fn valid_forward_id(id: &str) -> bool {
+    (1..=64).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+}
+
+/// Direction of a `-L`/`-R` port forward (`docs/CLI.md` §6.9, M4).
+/// [`parse_forward_spec`] cannot infer this from the spec string alone (the
+/// grammar is identical for both) — it comes from which flag the caller
+/// parsed, so [`ForwardSpec::direction`] defaults to [`ForwardDirection::Local`]
+/// and a `-R` caller must set it explicitly after parsing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ForwardDirection {
+    /// `-L`: the requester (client) binds `bind:listen_port` locally; for
+    /// each connection accepted there it dials `host:host_port` on the
+    /// peer.
+    #[default]
+    Local,
+    /// `-R`: the peer (host) binds `bind:listen_port`; for each connection
+    /// it accepts there, the *requester* dials `host:host_port` — the two
+    /// legs are swapped relative to `Local`.
+    Remote,
+}
+
+/// A parsed `-L`/`-R` forward spec (`docs/CLI.md` §6.9, M4) — the result of
+/// [`parse_forward_spec`]. Shape-only: this type and its parser carry no
+/// policy (e.g. "remote binds must be loopback"); that is host-side ACL
+/// policy enforced later, not here (this struct's fields' own docs, `PLAN.md`
+/// M4 §4.1 #5).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ForwardSpec {
+    /// `-L` or `-R`. Defaults to [`ForwardDirection::Local`] from
+    /// [`parse_forward_spec`] alone — see that type's doc.
+    pub direction: ForwardDirection,
+    /// The `[bind:]` prefix, when present. `None` means the caller-side
+    /// default (loopback) applies — which side's default (client listener
+    /// vs. host listener) and whether a non-default bind is even allowed
+    /// is policy this parser does not decide.
+    pub bind: Option<String>,
+    /// The `listen_port` component: `1..=65535`.
+    pub listen_port: u16,
+    /// The `host` component: a bracket-stripped IPv6 literal, an IPv4
+    /// literal, a DNS-shaped hostname, or `"*"`.
+    pub host: String,
+    /// The `host_port` component: `1..=65535`.
+    pub host_port: u16,
+}
+
+/// One colon-delimited token of a forward spec, tagged with whether it was
+/// written inside `[...]` brackets (only legal for an IPv6 literal) — the
+/// distinction the validators below need but plain string splitting throws
+/// away.
+#[derive(Debug, Clone, Copy)]
+enum ForwardSpecToken<'a> {
+    Plain(&'a str),
+    Bracketed(&'a str),
+}
+
+impl<'a> ForwardSpecToken<'a> {
+    /// The token's text with any surrounding brackets already stripped.
+    fn inner(self) -> &'a str {
+        match self {
+            ForwardSpecToken::Plain(s) | ForwardSpecToken::Bracketed(s) => s,
+        }
+    }
+}
+
+/// Split a forward spec into its colon-delimited tokens, treating a
+/// `[...]`-bracketed run as one token even though its contents (an IPv6
+/// literal) themselves contain colons. Returns `None` on any malformed
+/// bracket/colon structure (unmatched `[`/`]`, an empty token, a stray `[`
+/// or `]` inside a plain token, or a trailing separator) — never panics.
+fn tokenize_forward_spec(spec: &str) -> Option<Vec<ForwardSpecToken<'_>>> {
+    if spec.is_empty() {
+        return None;
+    }
+    let mut tokens = Vec::new();
+    let bytes = spec.as_bytes();
+    let len = bytes.len();
+    let mut i = 0usize;
+    loop {
+        if i >= len {
+            // Reached here only via a trailing ':' with nothing after it —
+            // every other path `break`s once the final token is consumed.
+            return None;
+        }
+        if bytes[i] == b'[' {
+            let close_rel = spec[i + 1..].find(']')?;
+            let close = i + 1 + close_rel;
+            let inner = &spec[i + 1..close];
+            if inner.is_empty() {
+                return None;
+            }
+            tokens.push(ForwardSpecToken::Bracketed(inner));
+            i = close + 1;
+            if i == len {
+                break;
+            }
+            if bytes[i] != b':' {
+                return None;
+            }
+            i += 1;
+        } else {
+            match spec[i..].find(':') {
+                Some(rel) => {
+                    let tok = &spec[i..i + rel];
+                    if tok.is_empty() || tok.contains(['[', ']']) {
+                        return None;
+                    }
+                    tokens.push(ForwardSpecToken::Plain(tok));
+                    i += rel + 1;
+                }
+                None => {
+                    let tok = &spec[i..];
+                    if tok.is_empty() || tok.contains(['[', ']']) {
+                        return None;
+                    }
+                    tokens.push(ForwardSpecToken::Plain(tok));
+                    break;
+                }
+            }
+        }
+    }
+    Some(tokens)
+}
+
+/// Shape of a `bind`/`host` token: a bracketed token must be a valid IPv6
+/// literal; a plain token is a `1..=253`-byte run of
+/// `[A-Za-z0-9._-]`, or the bare wildcard `"*"`.
+fn valid_forward_host_token(tok: ForwardSpecToken<'_>) -> bool {
+    match tok {
+        ForwardSpecToken::Bracketed(s) => s.parse::<std::net::Ipv6Addr>().is_ok(),
+        ForwardSpecToken::Plain(s) => {
+            !s.is_empty()
+                && s.len() <= 253
+                && (s == "*"
+                    || s.bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_')))
+        }
+    }
+}
+
+/// Parse a `1..=65535` port from a plain (never bracketed) token. Rejects
+/// `"0"` and anything `> 65535` (including `"65536"`) by construction: both
+/// fail to fit a nonzero `u16`.
+fn parse_forward_port(raw: &str) -> Option<u16> {
+    match raw.parse::<u16>() {
+        Ok(0) | Err(_) => None,
+        Ok(port) => Some(port),
+    }
+}
+
+/// Parse a `-L`/`-R` forward spec: `[bind:]listen_port:host:host_port`
+/// (`docs/CLI.md` §6.9), e.g. `"8080:localhost:3000"` or
+/// `"[::1]:8080:localhost:3000"`. Pure grammar/shape parsing — sans-IO, no
+/// policy: a non-loopback `bind` parses `Ok` exactly like a loopback one,
+/// because whether a non-loopback `-R` bind is *allowed* is host-side ACL
+/// policy decided in a later milestone step, not something this parser can
+/// or should know (`PLAN.md` M4 §4.1 #5). The returned [`ForwardSpec`]'s
+/// `direction` is always [`ForwardDirection::Local`] — set it explicitly
+/// after parsing when the caller is handling `-R` (see that field's doc).
+///
+/// Returns [`Error`] with [`ErrorCode::InvalidArgument`] for anything that
+/// does not fit the grammar: not exactly 3 or 4 colon-separated parts, a
+/// port outside `1..=65535`, an empty or malformed host/bind, unmatched
+/// `[`/`]`, or a bracketed listen/host port.
+pub fn parse_forward_spec(spec: &str) -> Result<ForwardSpec, Error> {
+    fn invalid(detail: impl std::fmt::Display) -> Error {
+        Error::from_code(ErrorCode::InvalidArgument, detail.to_string())
+    }
+
+    let tokens = tokenize_forward_spec(spec)
+        .ok_or_else(|| invalid(format!("malformed forward spec {spec:?}")))?;
+
+    let (bind_tok, listen_tok, host_tok, host_port_tok) = match tokens.as_slice() {
+        [listen, host, host_port] => (None, *listen, *host, *host_port),
+        [bind, listen, host, host_port] => (Some(*bind), *listen, *host, *host_port),
+        other => {
+            return Err(invalid(format!(
+                "expected 3 or 4 colon-separated parts in {spec:?}, found {}",
+                other.len()
+            )));
+        }
+    };
+
+    if let Some(tok) = bind_tok
+        && !valid_forward_host_token(tok)
+    {
+        return Err(invalid(format!(
+            "invalid bind host {:?} in {spec:?}",
+            tok.inner()
+        )));
+    }
+    if !valid_forward_host_token(host_tok) {
+        return Err(invalid(format!(
+            "invalid host {:?} in {spec:?}",
+            host_tok.inner()
+        )));
+    }
+    let ForwardSpecToken::Plain(listen_raw) = listen_tok else {
+        return Err(invalid(format!(
+            "listen port must not be bracketed in {spec:?}"
+        )));
+    };
+    let ForwardSpecToken::Plain(host_port_raw) = host_port_tok else {
+        return Err(invalid(format!(
+            "host port must not be bracketed in {spec:?}"
+        )));
+    };
+    let listen_port = parse_forward_port(listen_raw)
+        .ok_or_else(|| invalid(format!("invalid listen port {listen_raw:?} in {spec:?}")))?;
+    let host_port = parse_forward_port(host_port_raw)
+        .ok_or_else(|| invalid(format!("invalid host port {host_port_raw:?} in {spec:?}")))?;
+
+    Ok(ForwardSpec {
+        direction: ForwardDirection::default(),
+        bind: bind_tok.map(|t| t.inner().to_string()),
+        listen_port,
+        host: host_tok.inner().to_string(),
+        host_port,
+    })
+}
+
 impl StreamHeader {
     /// Header for an exec data stream carrying `ticket`.
     pub fn exec_data(ticket: Vec<u8>) -> Self {
@@ -537,6 +772,43 @@ mod tests {
         (".{0,26}", arb_bytes(16)).prop_map(|(exec_id, ticket)| ExecStarted { exec_id, ticket })
     }
 
+    // -- tunnel control (M4) --
+
+    fn arb_forward_id() -> impl Strategy<Value = String> {
+        "[A-Za-z0-9_-]{1,64}"
+    }
+
+    fn arb_remote_forward_open() -> impl Strategy<Value = RemoteForwardOpen> {
+        (".{0,64}", any::<u32>(), ".{0,64}", any::<u32>()).prop_map(
+            |(bind_host, bind_port, forward_host, forward_port)| RemoteForwardOpen {
+                bind_host,
+                bind_port,
+                forward_host,
+                forward_port,
+            },
+        )
+    }
+
+    fn arb_remote_forward_opened() -> impl Strategy<Value = RemoteForwardOpened> {
+        (arb_forward_id(), any::<u32>()).prop_map(|(forward_id, actual_port)| RemoteForwardOpened {
+            forward_id,
+            actual_port,
+        })
+    }
+
+    fn arb_remote_forward_close() -> impl Strategy<Value = RemoteForwardClose> {
+        arb_forward_id().prop_map(|forward_id| RemoteForwardClose { forward_id })
+    }
+
+    fn arb_connect_result() -> impl Strategy<Value = ConnectResult> {
+        (
+            any::<bool>(),
+            "(|CONNECTION_FAILED|PERMISSION_DENIED)",
+            ".{0,64}",
+        )
+            .prop_map(|(ok, code, message)| ConnectResult { ok, code, message })
+    }
+
     // -- session control (M2) --
 
     fn arb_session_id() -> impl Strategy<Value = String> {
@@ -739,6 +1011,7 @@ mod tests {
             )),
             any::<u64>()
                 .prop_map(|final_seq| response::Body::SessionClosed(SessionClosed { final_seq })),
+            arb_remote_forward_opened().prop_map(response::Body::RfwdOpened),
             arb_error().prop_map(response::Body::Error),
         ];
         proptest::option::of(body).prop_map(|body| Response { body })
@@ -788,6 +1061,8 @@ mod tests {
                 SessionWrite { session_id, data }
             )),
             arb_exec_start().prop_map(Body::ExecStart),
+            arb_remote_forward_open().prop_map(Body::RfwdOpen),
+            arb_remote_forward_close().prop_map(Body::RfwdClose),
             Just(Body::Ping(Ping {})),
             Just(Body::Pong(Pong {})),
             arb_session_event().prop_map(Body::SessionEvent),
@@ -902,6 +1177,36 @@ mod tests {
             roundtrip_via_frame(&m, DATA_FRAME_MAX);
         }
 
+        // -- M4 tunnel messages (`docs/design/testing.md` L0): `decode(encode(m))
+        // == m` plus canonical encoding for each — none of the four carry a
+        // map field, so (unlike `ControlMessage` in general) canonical
+        // encoding holds directly, the same reasoning as
+        // `hello_encoding_is_canonical` above. --
+
+        #[test]
+        fn remote_forward_open_roundtrips_and_is_canonical(m in arb_remote_forward_open()) {
+            roundtrip_via_frame(&m, CONTROL_FRAME_MAX);
+            assert_canonical_via_frame(&m, CONTROL_FRAME_MAX);
+        }
+
+        #[test]
+        fn remote_forward_opened_roundtrips_and_is_canonical(m in arb_remote_forward_opened()) {
+            roundtrip_via_frame(&m, CONTROL_FRAME_MAX);
+            assert_canonical_via_frame(&m, CONTROL_FRAME_MAX);
+        }
+
+        #[test]
+        fn remote_forward_close_roundtrips_and_is_canonical(m in arb_remote_forward_close()) {
+            roundtrip_via_frame(&m, CONTROL_FRAME_MAX);
+            assert_canonical_via_frame(&m, CONTROL_FRAME_MAX);
+        }
+
+        #[test]
+        fn connect_result_roundtrips_and_is_canonical(m in arb_connect_result()) {
+            roundtrip_via_frame(&m, DATA_FRAME_MAX);
+            assert_canonical_via_frame(&m, DATA_FRAME_MAX);
+        }
+
         #[test]
         fn exec_frame_roundtrips(m in arb_exec_frame()) {
             roundtrip_via_frame(&m, DATA_FRAME_MAX);
@@ -958,6 +1263,10 @@ mod tests {
             let _ = decode_msg::<StreamHeader>(&bytes);
             let _ = decode_msg::<ExecFrame>(&bytes);
             let _ = decode_msg::<SessionFrame>(&bytes);
+            let _ = decode_msg::<RemoteForwardOpen>(&bytes);
+            let _ = decode_msg::<RemoteForwardOpened>(&bytes);
+            let _ = decode_msg::<RemoteForwardClose>(&bytes);
+            let _ = decode_msg::<ConnectResult>(&bytes);
         }
 
         /// Bit-flipped valid encodings never panic and, when they decode,
@@ -1374,6 +1683,166 @@ mod tests {
         }
     }
 
+    // ---- valid_forward_id ------------------------------------------------
+
+    #[test]
+    fn valid_forward_id_boundary_table() {
+        // Empty: too short.
+        assert!(!valid_forward_id(""));
+        // Exactly 64 bytes: allowed; 65 bytes: refused.
+        assert!(valid_forward_id(&"a".repeat(64)));
+        assert!(!valid_forward_id(&"a".repeat(65)));
+        // Unlike `valid_host_name`, `.` is *not* in the alphabet — a
+        // `forward_id` is an opaque URL-safe token, not a display name.
+        assert!(!valid_forward_id("."));
+        assert!(!valid_forward_id("fwd.01"));
+        // Path-traversal-shaped / separator input stays refused.
+        assert!(!valid_forward_id("../"));
+        assert!(!valid_forward_id("/"));
+        assert!(!valid_forward_id("fwd/id"));
+        assert!(!valid_forward_id("fwd id"));
+        // Unicode falls outside the ASCII alphabet.
+        assert!(!valid_forward_id("café"));
+        // Every allowed byte, exhaustively.
+        for b in (b'A'..=b'Z').chain(b'a'..=b'z').chain(b'0'..=b'9') {
+            let s = (b as char).to_string();
+            assert!(valid_forward_id(&s), "byte {b} ({s:?}) should be allowed");
+        }
+        for c in ['_', '-'] {
+            assert!(valid_forward_id(&c.to_string()));
+        }
+        // A realistic-shaped id.
+        assert!(valid_forward_id("fwd_01K0EXAMPLE-token"));
+    }
+
+    // ---- parse_forward_spec -----------------------------------------------
+
+    #[test]
+    fn parse_forward_spec_three_part_has_no_bind() {
+        let spec = parse_forward_spec("8080:localhost:3000").unwrap();
+        assert_eq!(spec.direction, ForwardDirection::Local);
+        assert_eq!(spec.bind, None);
+        assert_eq!(spec.listen_port, 8080);
+        assert_eq!(spec.host, "localhost");
+        assert_eq!(spec.host_port, 3000);
+    }
+
+    #[test]
+    fn parse_forward_spec_four_part_has_bind() {
+        let spec = parse_forward_spec("0.0.0.0:8080:localhost:3000").unwrap();
+        assert_eq!(spec.bind.as_deref(), Some("0.0.0.0"));
+        assert_eq!(spec.listen_port, 8080);
+        assert_eq!(spec.host, "localhost");
+        assert_eq!(spec.host_port, 3000);
+    }
+
+    #[test]
+    fn parse_forward_spec_ipv6_bind_brackets() {
+        let spec = parse_forward_spec("[::1]:8080:localhost:3000").unwrap();
+        assert_eq!(spec.bind.as_deref(), Some("::1"));
+        assert_eq!(spec.listen_port, 8080);
+        assert_eq!(spec.host, "localhost");
+        assert_eq!(spec.host_port, 3000);
+    }
+
+    #[test]
+    fn parse_forward_spec_ipv6_host_brackets_without_bind() {
+        // Three logical parts even though the host segment is bracketed:
+        // token *count* (not bracket presence) decides bind-vs-no-bind.
+        let spec = parse_forward_spec("8080:[::1]:3000").unwrap();
+        assert_eq!(spec.bind, None);
+        assert_eq!(spec.listen_port, 8080);
+        assert_eq!(spec.host, "::1");
+        assert_eq!(spec.host_port, 3000);
+    }
+
+    #[test]
+    fn parse_forward_spec_ipv6_bind_and_host_brackets() {
+        let spec = parse_forward_spec("[::1]:8080:[::2]:3000").unwrap();
+        assert_eq!(spec.bind.as_deref(), Some("::1"));
+        assert_eq!(spec.host, "::2");
+    }
+
+    #[test]
+    fn parse_forward_spec_rejects_port_zero_and_65536() {
+        for spec in ["0:localhost:3000", "8080:localhost:0"] {
+            assert_eq!(
+                parse_forward_spec(spec).unwrap_err().error_code(),
+                ErrorCode::InvalidArgument,
+                "spec {spec:?}"
+            );
+        }
+        for spec in ["65536:localhost:3000", "8080:localhost:65536"] {
+            assert_eq!(
+                parse_forward_spec(spec).unwrap_err().error_code(),
+                ErrorCode::InvalidArgument,
+                "spec {spec:?}"
+            );
+        }
+        // The boundary values immediately on either side of the rejected
+        // ones are accepted.
+        assert!(parse_forward_spec("1:localhost:65535").is_ok());
+    }
+
+    #[test]
+    fn parse_forward_spec_rejects_empty_host() {
+        for spec in ["8080::3000", "8080:[]:3000", ":8080:localhost:3000"] {
+            assert_eq!(
+                parse_forward_spec(spec).unwrap_err().error_code(),
+                ErrorCode::InvalidArgument,
+                "spec {spec:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_forward_spec_accepts_non_loopback_bind_shape_only() {
+        // The parser knows no policy: a non-loopback bind is shape-valid.
+        // Loopback-only enforcement is host-side (PLAN.md M4 §4.1 #5,
+        // implemented in a later milestone step, not here).
+        let spec = parse_forward_spec("0.0.0.0:8080:localhost:3000").unwrap();
+        assert_eq!(spec.bind.as_deref(), Some("0.0.0.0"));
+        let spec = parse_forward_spec("203.0.113.5:8080:localhost:3000").unwrap();
+        assert_eq!(spec.bind.as_deref(), Some("203.0.113.5"));
+    }
+
+    #[test]
+    fn parse_forward_spec_rejects_garbage() {
+        for spec in [
+            "",
+            "garbage",
+            "8080",
+            "8080:localhost",
+            "a:b:8080:localhost:3000",
+            "8080:localhost:3000:extra",
+            "8080:localhost:3000:",
+            ":",
+            "[::1:8080:localhost:3000",
+            "[]:8080:localhost:3000",
+            "8080:localhost:abc",
+            "abc:localhost:3000",
+            "[8080]:localhost:3000",
+            "8080:local host:3000",
+        ] {
+            assert_eq!(
+                parse_forward_spec(spec).unwrap_err().error_code(),
+                ErrorCode::InvalidArgument,
+                "spec {spec:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_forward_spec_direction_defaults_local_caller_sets_remote() {
+        let spec = parse_forward_spec("8080:localhost:3000").unwrap();
+        assert_eq!(spec.direction, ForwardDirection::Local);
+        let spec = ForwardSpec {
+            direction: ForwardDirection::Remote,
+            ..spec
+        };
+        assert_eq!(spec.direction, ForwardDirection::Remote);
+    }
+
     #[test]
     fn golden_exec_exit_frame() {
         let msg = ExecFrame::exec_exit(7, None);
@@ -1487,6 +1956,126 @@ mod tests {
             }),
         );
         roundtrip_via_frame(&msg, CONTROL_FRAME_MAX);
+    }
+
+    // ---- golden vectors: M4 tags 40/41/4 realized (mechanical proof the
+    // realization is additive — the golden tests above for Hello, the
+    // plain error Response, SessionOpen and the SessionEvent-carrying
+    // ControlMessage are unchanged by this file's edits and still pass
+    // byte-for-byte, since none of them touch tags 40/41/4; these four are
+    // the new tags' own golden vectors) --------------------------------
+
+    #[test]
+    fn golden_remote_forward_open_frame() {
+        let msg = ControlMessage::new(
+            4,
+            control_message::Body::RfwdOpen(RemoteForwardOpen {
+                bind_host: "0.0.0.0".into(),
+                bind_port: 8080,
+                forward_host: "localhost".into(),
+                forward_port: 3000,
+            }),
+        );
+        let wire = encode_control(&msg).unwrap();
+        assert_eq!(
+            hex(&wire),
+            "0000001f0804c2021a" // frame len 31 | request_id=4 | field 40 (rfwd_open) len 26
+                .to_owned()
+                + "0a07302e302e302e30" // bind_host "0.0.0.0"
+                + "10903f" // bind_port 8080
+                + "1a096c6f63616c686f7374" // forward_host "localhost"
+                + "20b817" // forward_port 3000
+        );
+        let mut dec = FrameDecoder::new(CONTROL_FRAME_MAX);
+        dec.push(&wire);
+        let back: ControlMessage = decode_msg(&dec.next_frame().unwrap().unwrap()).unwrap();
+        assert_eq!(back, msg);
+    }
+
+    #[test]
+    fn golden_remote_forward_close_frame() {
+        let msg = ControlMessage::new(
+            5,
+            control_message::Body::RfwdClose(RemoteForwardClose {
+                forward_id: "fwd_01K0EXAMPLE".into(),
+            }),
+        );
+        let wire = encode_control(&msg).unwrap();
+        assert_eq!(
+            hex(&wire),
+            "000000160805ca0211" // frame len 22 | request_id=5 | field 41 (rfwd_close) len 17
+                .to_owned()
+                + "0a0f6677645f30314b304558414d504c45" // forward_id "fwd_01K0EXAMPLE"
+        );
+        let mut dec = FrameDecoder::new(CONTROL_FRAME_MAX);
+        dec.push(&wire);
+        let back: ControlMessage = decode_msg(&dec.next_frame().unwrap().unwrap()).unwrap();
+        assert_eq!(back, msg);
+    }
+
+    #[test]
+    fn golden_remote_forward_opened_response_frame() {
+        let msg = ControlMessage::response(
+            6,
+            response::Body::RfwdOpened(RemoteForwardOpened {
+                forward_id: "fwd_01K0EXAMPLE".into(),
+                actual_port: 8080,
+            }),
+        );
+        let wire = encode_control(&msg).unwrap();
+        assert_eq!(
+            hex(&wire),
+            "0000001a08065a16" // frame len 26 | request_id=6 | field 11 (Response) len 22
+                .to_owned()
+                + "2214" // field 4 (rfwd_opened) len 20
+                + "0a0f6677645f30314b304558414d504c45" // forward_id "fwd_01K0EXAMPLE"
+                + "10903f" // actual_port 8080
+        );
+        let mut dec = FrameDecoder::new(CONTROL_FRAME_MAX);
+        dec.push(&wire);
+        let back: ControlMessage = decode_msg(&dec.next_frame().unwrap().unwrap()).unwrap();
+        assert_eq!(back, msg);
+    }
+
+    #[test]
+    fn golden_connect_result_ok_frame() {
+        let msg = ConnectResult {
+            ok: true,
+            code: String::new(),
+            message: String::new(),
+        };
+        let wire = encode_framed(&msg, DATA_FRAME_MAX).unwrap();
+        assert_eq!(
+            hex(&wire),
+            "00000002" // frame len 2
+                .to_owned()
+                + "0801" // ok = true
+        );
+        let mut dec = FrameDecoder::new(DATA_FRAME_MAX);
+        dec.push(&wire);
+        let back: ConnectResult = decode_msg(&dec.next_frame().unwrap().unwrap()).unwrap();
+        assert_eq!(back, msg);
+    }
+
+    #[test]
+    fn golden_connect_result_err_frame() {
+        let msg = ConnectResult {
+            ok: false,
+            code: "CONNECTION_FAILED".into(),
+            message: "dial refused".into(),
+        };
+        let wire = encode_framed(&msg, DATA_FRAME_MAX).unwrap();
+        assert_eq!(
+            hex(&wire),
+            "00000021" // frame len 33 | `ok` omitted (proto3 default false)
+                .to_owned()
+                + "1211434f4e4e454354494f4e5f4641494c4544" // code "CONNECTION_FAILED"
+                + "1a0c6469616c2072656675736564" // message "dial refused"
+        );
+        let mut dec = FrameDecoder::new(DATA_FRAME_MAX);
+        dec.push(&wire);
+        let back: ConnectResult = decode_msg(&dec.next_frame().unwrap().unwrap()).unwrap();
+        assert_eq!(back, msg);
     }
 
     fn hex(bytes: &[u8]) -> String {

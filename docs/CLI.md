@@ -451,7 +451,26 @@ qsh tunnels --json
 qsh tunnel close <tunnel-id> --json
 ```
 
-`-D`(SOCKS5 dynamic forwarding, `forward.socks`)는 CLI 인자로 parsing되지만 P0에서는 항상 `UNSUPPORTED` 오류를 반환한다. 구현은 P1이다.
+**Spec grammar.** `--local`(`-L`)과 `--remote`(`-R`)는 같은 grammar를 공유한다: `[bind:]listen_port:host:host_port`(예: `8080:localhost:3000`, IPv6 bind는 `[::1]:8080:localhost:3000`처럼 대괄호로 감싼다). `listen_port`/`host_port`는 `1..=65535`만 유효하며 `0`과 `65536`은 파싱 단계에서 `INVALID_ARGUMENT`다. 이 grammar를 파싱하는 `qsh-proto::wire::parse_forward_spec`은 sans-IO 순수 함수이고 **모양만** 검사한다 — non-loopback `bind`도 grammar상으로는 유효하게 파싱된다. `-L`은 로컬 머신에서 `listen_port`를 열고 들어오는 각 TCP 연결마다 host에 `host:host_port`로 dial을 요청하며, `bind`를 생략하면 loopback에 bind한다. `-R`은 반대 방향이다: host가 자신의 `listen_port`를 열고 들어오는 각 연결을 로컬 머신의 `host:host_port`로 되돌려 보낸다 — **non-loopback `-R` bind는 host 쪽에서 `INVALID_ARGUMENT`로 거부된다**(parser는 모양만 검사하고, loopback-only는 파서가 아니라 host가 강제하는 policy다).
+
+**JSON envelope.** `tunnel.open`의 `data`는 아래 `Tunnel` 하나다:
+
+```json
+{
+  "tunnel_id": "01K0TUNNEL",
+  "mode": "local",
+  "bind": "127.0.0.1:8080",
+  "forward_to": "localhost:3000",
+  "actual_port": 8080,
+  "host": "personal-mac"
+}
+```
+
+`mode`는 §10과 같은 열린 문자열(open string)이며 `∈ {"local", "remote"}`(`connection_mode`와 같은 패턴 — 값 집합이 늘어나도 type 변경이 아니다). `actual_port`는 optional이다 — bind 시점에 실제로 배정된 port를 돌려주는 field로, ephemeral(`0`) 요청이거나 요청 port를 그대로 못 받았을 때 요청값과 달라질 수 있다. `host`는 클라이언트 `Ops`가 채우는 alias field이며 wire에는 없다 — `Session.host`/`session_ref`와 같은 패턴이다(§5, [ADR-0007](adr/0007-session-ref-and-resume-token-custody.md)). `bind`의 모양은 요청과 결과에서 다르다 — `tunnel.open` 요청(`TunnelOpenReq.bind`)에서는 `[bind:]` prefix만 담아 host-only(예: `"127.0.0.1"`, 생략 시 `None` = 호출자 쪽 default)이지만, 위 `Tunnel.bind`처럼 결과에서는 `listen_port`를 합친 host:port 전체(예: `"127.0.0.1:8080"`)다 — `Tunnel`에는 별도 `listen_port` field가 없으므로 fixed-port forward(요청 port가 그대로 배정되어 `actual_port`가 생략되는 경우)에서도 실제로 bind된 port가 `bind`에 남아있게 하기 위함이다.
+
+`tunnels`(`tunnel.list`)의 `data`는 `{"tunnels": [Tunnel, …]}`이고, `tunnel.close`의 `data`는 `{"tunnel_id": "...", "closed": true}`다.
+
+`-D`(SOCKS5 dynamic forwarding, `forward.socks`)는 CLI 인자로 parsing되지만 P0에서는 항상 `UNSUPPORTED`(message가 P1으로 미뤄졌음을 밝힌다)로 거부된다 — envelope data에는 절대 도달하지 않는다. 구현은 P1이다.
 
 ### 6.10 Schema와 capability
 
@@ -616,6 +635,10 @@ qsh reverse <controller> [--offered-name <name>]
 - **Controller 측 writer lease 결합 (M3 Step 6).** live 역방향 등록으로 뜨는 host를 향한 controller 쪽의 `qsh session ...`(value op 6종: open/get/list/read/write/resize/close)는 그 명령을 실행한 CLI 프로세스 자신의 QUIC connection이 아니라, 상주 `qsh listen` 데몬이 target과 유지하는 그 **하나의** reverse connection을 `LOCAL_CONTROL` conduit(`docs/design/protocol.md` §11-3)으로 relay해서 나간다. **대화형 attach(`qsh <name>`/`qsh attach <name>/<id>`)도 M3 Step 7부터 이 경로를 탄다.** `Ops::session_attach`는 route-aware해졌다(`Ops::connect`로 host route를 먼저 resolve하고, 그 결과가 live 역방향 등록이면 forward의 `connect_target`이 아니라 이 §의 `LOCAL_CONTROL` conduit으로 향한다); ticket을 실제로 redeem하는 data 스트림도 이제 `LOCAL_STREAM` conduit(위 conduit 모델 문단, `docs/design/protocol.md` §11-3)로 역방향에서 열린다 — 데몬은 그 conduit 위에서 `LocalHello`/`LocalHelloAck` 교환 뒤 wire `StreamHeader{SESSION_DATA, ticket}`를 받아 host의 QUIC connection 위에 새 bidi stream을 열고 그 뒤로는 순수 byte splice로만 동작한다(SessionFrame을 파싱하지도, payload를 로그하지도 않는다). 아래 lease 결합 규칙은 지금 이 value op·stream op 양쪽 모두에 참이다: 위 항목의 "writer lease를 쥐는 connection이 데몬의 reverse connection에 결합된다"는 target 쪽 서술의 controller 쪽 대응이다 — target이 실제로 보는 유일한 connection은 데몬의 것이므로, **writer lease는 데몬의 connection에 묶이지, lease를 요청한 CLI 프로세스 자체에는 묶이지 않는다.** 그 CLI 프로세스가 죽어도(터미널 종료, `Ctrl-C`, 비정상 종료) 데몬의 reverse connection이 살아 있는 한 lease는 자동 해제되지 않는다 — forward 세션(§5, architecture.md §3)의 "소유 connection이 죽으면 lease가 자동 해제"라는 기대가 reverse 경로에서는 CLI 프로세스 단위가 아니라 데몬 connection 단위로 적용된다는 뜻이다. **동시 attach 격리.** 이 lease를 실제로 쥐는지 판정하는 identity는 물리 connection(`ctx.connection_id()`)이 아니라 그 attach가 redeem한 단발성 ticket에서 유도된다(`WriterLease::take_owned`) — 그렇지 않으면 한 데몬을 거치는 모든 local CLI가 같은 물리 connection을 공유하는 탓에 서로 다른 두 attach가 같은 identity로 오인되어 조용히 lease를 공동 소유하고 (`no_steal`이 걸려 있어도) 서로의 keystroke를 같은 PTY에 섞어 넣는다. 반면 `no_steal`이 충돌 여부를 판단하는 기준은 여전히 **principal뿐**이다(architecture.md §3(b)). reverse 경로에서 한 데몬을 relay로 쓰는 모든 local CLI 프로세스는 — 어느 프로세스가 열었든 — 항상 그 데몬의 reverse connection과 같은 controller principal로 인증되므로, "타 principal이 lease를 쥐고 있다"는 `no_steal` 충돌의 전제 자체가 reverse 경로 안에서는 성립하지 않는다(`session.write`가 opener 결합 때문에 이미 이 규칙을 재현할 수 없는 것과 같은 이유, 바로 위 architecture.md §3(b) 인용). 즉 죽은 CLI가 남긴 lease는 자동 해제되지 않지만, 다음 attach는 대화형이든 `no_steal`을 쓰는 자동화든 관계없이 항상 그 lease를 이어받는다 — `SESSION_CONFLICT`는 이 reverse 시나리오에서는 발생하지 않는다.
 - **역방향 attach에는 아직 recovery/reconnect가 없다 (M3 Step 7).** Forward 경로의 attach는 connection이 끊겨도 (`docs/CLI.md` 이 절 밖의) 자동 재접속·resume 시도를 갖지만, `LOCAL_STREAM`/`LOCAL_CONTROL` conduit 위의 역방향 attach는 그 driver가 아직 없다 — 데몬의 reverse connection이나 conduit 자체가 죽으면 attach는 그 즉시 명확한 typed error로 끝난다(panic도, 무한 대기도 아니다). 세션 자체는 forward와 동일하게 살아남는다(broker가 쥐고 있고, connection 수명과 분리돼 있다 — architecture.md §3); 사용자가 다시 `qsh attach <name>/<id>`를 실행하면 데몬의 reverse connection이 살아 있는 한 정상적으로 재attach된다. 이 driver는 M3 Step 8에서 forward와 같은 `Reconnect` 추상 위에 통합될 예정이다.
 
+### 6.14 Holder lifetime
+
+터널의 local listener(`-L`) 또는 remote 등록(`-R`, host가 bind)은 그것을 연 CLI 프로세스가 살아 있는 동안만 존재한다 — 별도 client daemon은 두지 않는다(M4 Step 1 결정): `qsh serve`/`qsh listen`(§6.12·§6.13)과 달리 터널은 그 자체로 장기 실행 모드가 아니라, 터널을 연 **interactive foreground 프로세스**(대화형 `qsh [user@]host -L …/-R …` 또는 foreground로 유지되는 `qsh tunnel open --json`)에 수명이 결합된다. 그 프로세스가 끝나거나(Ctrl-C, 터미널 종료) 밑에 깔린 QUIC connection이 죽으면, 그 프로세스가 쥔 모든 터널이 함께 끝난다 — 진행 중이던 개별 TCP 연결은 끊기고, local listener/remote 등록 자체가 재수립 없이 사라진다(§7 대화형 attach의 세션과 달리, 터널 listener/등록은 connection 수명과 분리되지 않는다 — splice된 개별 TCP 연결의 생존 여부는 M4 이후 splice 구현 단계의 몫이다). 다시 쓰려면 새 `tunnel.open`이 필요하다.
+
 ## 7. Human interactive mode
 
 다음 명령은 위의 session operation을 조합한 편의 인터페이스다.
@@ -623,6 +646,8 @@ qsh reverse <controller> [--offered-name <name>]
 ```bash
 qsh dave@personal-mac
 qsh attach <session-ref>
+qsh personal-mac -L 8080:localhost:3000
+qsh personal-mac -R 9000:localhost:9000
 ```
 
 Interactive mode는 terminal raw mode, window resize와 signal forwarding을 처리한다. 세션 생성·읽기·쓰기의 권한과 동작은 machine-readable command와 동일하다.
@@ -632,6 +657,8 @@ Interactive mode는 terminal raw mode, window resize와 signal forwarding을 처
 **전달되는 환경변수.** 대화형 form은 로컬 터미널을 재현하는 데 필요한 것만 보낸다: `TERM`은 `SessionOpen.term`으로, locale(`LANG`, `LANGUAGE`, `LC_ALL`, `LC_CTYPE`, `LC_COLLATE`) 중 클라이언트 프로세스에 설정된 것은 `SessionOpen.env` overlay로 전달한다(architecture.md §4). 이는 **대화형 form 한정** 동작이다 — `qsh session open`·`qsh exec`·MCP는 호출자가 명시한 `--env`만 보내며, 클라이언트 프로세스의 환경을 암묵적으로 상속시키지 않는다. `HOME`/`USER`/`LOGNAME`/`SHELL`/`PATH`는 어느 경로에서도 호스트가 고정한다.
 
 **`user@`의 의미.** 원격 셸은 항상 **`qsh serve`를 실행한 OS 계정**으로 실행된다 — MVP에는 user switching이 없고, ACL principal은 항상 인증서에서 나온다(§2.5, protocol.md §3). `user@`는 SSH 근육 기억을 위해 받아들이며 생략해도 된다(`qsh personal-mac`). 지정하면 `SessionOpen`에 선택 hint로 전달되고, 호스트는 그 값이 serve 계정의 login name과 다르면 세션을 만들지 않고 `UNSUPPORTED`(message: user switching is not supported)로 거부한다 — fail closed. 즉 `user@`는 "이 계정이어야 한다"는 단언이지 계정 선택이 아니다(PRD §6). 검사 순서는 **ACL `session.open` → `user` hint → spawn**이다: 인가되지 않은 peer는 hint 값과 무관하게 항상 `PERMISSION_DENIED`를 받고(계정명 비노출, audit는 ACL 판정만 기록), `UNSUPPORTED`는 인가된 peer에게만 반환된다. 비교는 serve 계정의 login name과 정확 일치(case-sensitive)다. `user@`는 `qsh [user@]host` 형태(`-L`/`-R` 플래그를 동반한 경우 포함 — 모두 `SessionOpen`을 보낸다)에서만 받으며, `qsh exec`/`qsh session open`/`qsh tunnel open`은 bare host만 받는다.
+
+**`-L`/`-R`은 이 대화형 form의 companion flag이지 별도 명령이 아니다.** `qsh [user@]host -L …`/`-R …`는 여전히 대화형 셸을 여는 `qsh [user@]host` 그 자체이며 — 위 문단대로 `SessionOpen`을 보내고 §4의 exit code 규칙을 그대로 따르는 실제 interactive 세션이 열린다 — 거기에 하나 이상의 터널(§6.9)이 **곁들여** 열릴 뿐이다. `-L`/`-R`이 세션 없이 터널만 여는 경로는 없다: 터널만 필요하고 셸은 필요 없으면 machine-mode `qsh tunnel open --json`(§6.9)을 쓴다 — 이쪽은 `SessionOpen`을 전혀 보내지 않고 `tunnel.open` 하나만 나간다. 두 경로 모두 홀더는 그 명령을 실행한 foreground CLI 프로세스다(§6.14).
 
 **Detach와 escape 시퀀스.** SSH와 같은 방식의 tilde escape를 쓴다. escape 문자는 **행의 시작에서만** 인식되며, 그 외 위치의 `~`는 그대로 원격 PTY로 전달된다. raw mode에는 line discipline이 없으므로 "행의 시작"은 *세션 시작 직후이거나, 클라이언트가 마지막으로 원격에 전달한 byte가 CR(`\r`, 0x0D) 또는 LF(`\n`, 0x0A)인 상태*로 정의한다.
 
@@ -654,6 +681,8 @@ QSH operation은 두 종류로 나뉜다.
 - **Stream operation**: 하나의 duplex byte channel을 열고 유지하는 operation. `session.attach`가 유일한 stream op이며, resume(`last_sequence` 기반) semantics를 갖는 duplex channel을 반환한다.
 
 `qsh dave@personal-mac`와 `qsh attach <session-ref>` 같은 interactive attach는 내부적으로 이 `session.attach` 하나의 streaming operation 위에 구현된다. `session.read`/`session.write`는 machine-facing value operation으로 별도 존재하며, `--follow --jsonl`(§6.4)도 같은 streaming source에서 값을 공급받는다. attach와 read/write 사이에 별도 business logic은 없다.
+
+`tunnel.open`(§6.9)은 이 분류에서 value operation이다 — envelope은 터널이 열렸다는 사실과 메타데이터(`Tunnel`)만 한 번 반환하고 즉시 끝난다. 터널을 오가는 실제 TCP payload는 JSON envelope 층에 전혀 노출되지 않는 wire-level data 스트림(`TCP_CONNECT`/`TCP_ACCEPTED`, protocol.md §7·§9)이며, `session.attach`와 달리 이 문서의 stream operation 개념에 속하지 않는다 — 이 streaming byte channel은 `qsh-core`가 로컬 TCP 연결과 host 사이에서 직접 splice하고, CLI operation 계층은 그 존재를 모른다.
 
 ## 8. MCP server
 

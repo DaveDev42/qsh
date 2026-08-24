@@ -16,9 +16,9 @@ xtask (arch-lint — workspace 멤버, 위 매트릭스를 빌드 실패로 강�
 
 | Crate | 책임 | 금지 사항 |
 |---|---|---|
-| `qsh-proto` | 계약 계층: frame codec(`frame.rs`), `ErrorCode`(`error.rs`), JSON 계약 타입(`types.rs`), `qsh.event/v1` 이벤트(`event.rs`), prost wire 메시지(M1부터 `proto/qsh/wire/v1.proto`). sans-IO, async 없음 — fuzz 표면 | I/O, async, 상위 crate 의존 |
+| `qsh-proto` | 계약 계층: frame codec(`frame.rs`), `ErrorCode`(`error.rs`), JSON 계약 타입(`types.rs` — `Tunnel`/`TunnelOpenReq`/…, M4부터), `qsh.event/v1` 이벤트(`event.rs`), prost wire 메시지(M1부터 `proto/qsh/wire/v1.proto`, M4부터 `RemoteForwardOpen`/`Opened`/`Close`·`ConnectResult`), forward-spec 파서(`wire.rs::parse_forward_spec`, M4부터). sans-IO, async 없음 — fuzz 표면 | I/O, async, 상위 crate 의존 |
 | `qsh-transport` | quinn/rustls glue: endpoint 구성, ALPN, `QshPeerVerifier`, keep-alive/rebind, `Transport` trait 구현 | 세션·ACL·비즈니스 로직 |
-| `qsh-core` | 모든 비즈니스 로직: typed `Ops` façade, `server::dispatch`(ACL choke point), session broker, PTY, exec/tunnel, identity/trust/pairing, ACL/audit, config, doctor, localctl | 렌더링, 프로토콜 프레임 파싱(qsh-proto 위임) |
+| `qsh-core` | 모든 비즈니스 로직: typed `Ops` façade, `server::dispatch`(ACL choke point), session broker, PTY, exec/tunnel(`tunnel/` 모듈, §3), identity/trust/pairing, ACL/audit, config, doctor, localctl | 렌더링, 프로토콜 프레임 파싱(qsh-proto 위임) |
 | `qsh-cli` | 패키지 `qsh-cli`, 바이너리 `qsh`. 얇은 frontend만: clap, human/JSON/JSONL 렌더러, interactive TUI, MCP adapter(M6) | 인증·ACL·세션 로직 일체 (CLI.md §11) |
 | `qsh-testkit` | 통합 하네스, chaos proxy, fixture 도구 ([testing.md](testing.md)) | — |
 
@@ -57,6 +57,8 @@ Broker
 - **Child 종료:** waitpid 관찰 → 종료 이벤트를 ring에 기록 → 세션은 `exited` 상태로 남아 늦게 온 reader도 `session.exit` 이벤트를 수신한 뒤 TTL(같은 `[serve].resume_ttl`, exit 시점 기준)로 정리된다(`session.closed{reason:"exit"}`).
 - **제어 event의 전달:** `session.exit`/`session.writer_changed`/`session.closed`는 ring에 **zero-length 제어 엔트리**로 append되어 `pull()`이 output과 전순서로 섞어 반환한다(`sequence` = append 시점 offset, offset 증가 없음) — 단발 pull·`--follow`·MCP long-poll이 모두 같은 순서를 본다. attach 중인 connection에는 같은 event를 control 스트림 `SessionEvent`로도 보낸다. `writer_changed`는 모든 read 소비자에게 broadcast된다(CLI.md §6.4).
 - **Supervisor seam:** broker는 `SessionBackend` trait(open/attach/pull/write/resize/close/list) 뒤에 있고 transport 타입을 import하지 않는다. per-process UDS 제어 소켓 계층(`localctl` — `$XDG_RUNTIME_DIR/qsh/<pid>.sock`, 동일 frame layer)이 `qsh tunnels` 류의 프로세스 간 조회를 담당하며, P1에서 별도 supervisor 프로세스가 같은 trait를 UDS 너머로 제공하면 drop-in 교체된다. **`localctl`은 M2가 아니라 첫 소비자가 있는 M3(역방향)에서 도입한다** — M3의 첫 소비자는 **2종**이다: controller의 `qsh hosts`가 상주 `qsh listen` 데몬의 live 역방향 등록을 `LOCAL_ADMIN` conduit(`LocalHostList`)로 조회하는 경로와, `qsh <name>`(신규 세션)/`qsh attach <name>/<session_id>`(재attach)가 `LOCAL_CONTROL` conduit로 데몬이 쥔 역방향 연결 위에 `SessionOpen`/`SessionAttach`를 보내는 경로(protocol.md §11-3)다. `qsh tunnels`(M4)는 그 다음 소비자다. M2에서는 소비자 없는 IPC 계층을 깔지 않고 `SessionBackend` seam의 순수성(transport import 0)만 지킨다 ([ADR-0003](../adr/0003-sessions-in-listener.md) 결과 절 2026-08-18 추기).
+
+- **터널 로직의 위치 (M4):** `qsh tunnels`가 실제로 소비하는 코드는 새 `crates/qsh-core/src/tunnel/` 모듈에 산다 — session broker와 나란히 있는 별도 서브시스템이며 broker의 `SessionBackend` seam을 재사용하지 않는다(터널은 broker가 관리하는 재개형 리소스가 아니라 CLI 프로세스 수명에 결합된 리소스, CLI.md §6.14). 하위 구성은 `local`(local forward: 로컬 TCP listener → host에 `TCP_CONNECT` 요청 → `ConnectResult` 수신), `remote`(remote forward: host 쪽 loopback bind → `TCP_ACCEPTED` accept → controller/opener에 relay), `splice`(두 방향 공통의 raw byte pump, `tokio::io::copy_bidirectional` 계열 — protocol.md §12의 우선순위 band `tunnel/file: 0`과 `send_fairness(true)` 아래에서 돈다)로 나뉜다. M4 Step 1(contract layer)은 이 모듈이 소비할 wire/JSON 계약(`qsh-proto`)만 확정하며, 모듈 자체의 구현은 이후 Step(listener/dial/splice)의 몫이다.
 
 ## 4. PTY
 
