@@ -313,6 +313,7 @@ M4가 실제로 지는 것은 (i) 두 방향의 forward(`-L` local→remote / `-
 - **우선순위/window 튜닝이 세션을 해치지 않는가.** Step 2가 비대칭 window·BBR를 켜면서 세션 backpressure·resume 거동이 바뀌면 M2/M3의 자산을 깨는 것이다. 감시: Step 2 완료 판정의 "기존 테스트 무수정 green".
 - **Windows leg.** 터널 host/relay 경로는 `cfg(unix)` 위에 선다. 감시: 전 타깃 clippy green과 **Windows leg의 nextest green**이 매 step 완료 조건에 있는가, client-측 `-L` 로컬 bind의 Windows 가능 여부가 §4.1 #1 결정과 일관되게 처리됐는가.
 - **holder 수명 모델(§4.1 #1)의 파급.** foreground form으로 확정됐으므로 Step 3·5의 CLI 표면·Windows 거동·`tunnel close`/`tunnels` 의미가 이 결정에 정합해야 한다. 감시: Step 1이 이 결정을 `.proto`·정본 문서에 **실제로 못박는가**(구현이 뒤에서 resident holder를 발명하지 않기).
+- **M3 자산의 flake가 M4 step 완료를 막는 경우(Step 3에서 실측).** `qsh-cli::attach_ops a_teardown_waits_out_a_detach_that_is_still_flushing`이 Step 3 CI의 `ubuntu-24.04-arm` leg만 red로 만들었다. Step 3 회귀가 아니라 M3 테스트 자체의 결함이다. 원인은 `waited >= 1s`라는 벽시계 단언인데, detach의 flush가 2초(`DETACH_FLUSH`)를 쓰는 것은 드라이버가 detach 마커를 실제로 읽었을 때뿐이고, 드라이버가 이미 반환한 뒤라면 ack 채널이 끊겨 `recv_timeout`이 즉시 `Disconnected`를 준다. 이것도 정상 detach다. 단언을 시간이 아니라 순서로 바꿔 고쳤다(close는 detach가 gate를 놓은 뒤에만 반환한다). 남은 감시: 같은 드라이버-부재 상황에서 사전조건 루프의 `!detacher.is_finished()` 단언이 대신 터질 수 있다. CI에 나타나면 degenerate한 setup을 실패로 처리하지 말고 그 자체를 다뤄야 한다.
 
 ### 4.1 이 계획이 확정한 결정 (Step 1이 정본 문서에 기록한다)
 
