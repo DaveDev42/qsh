@@ -293,6 +293,23 @@ impl ControlMux {
         Ok(daemon_request_id)
     }
 
+    /// Allocate a fresh, globally-unique `daemon_request_id` for a request
+    /// that is not attributed to any conduit at all — the daemon acting on
+    /// its own authority rather than relaying on a specific conduit's
+    /// behalf. [`ControlHub::admin_close_forward`](crate::reverse::listen::ControlHub::admin_close_forward)
+    /// (`PLAN.md` M4 Step 5 PR 5b) is the one caller: an admin-authorized
+    /// `tunnel.close` sends `RemoteForwardClose` without waiting for or
+    /// correlating the reply, so unlike [`Self::map_outbound`] this never
+    /// touches `inflight`/`per_conduit` — whatever reply eventually comes
+    /// back resolves to nothing in [`Self::map_inbound`] and is dropped
+    /// exactly the way a dead conduit's orphaned reply already is, which
+    /// is the correct outcome here since nothing is waiting for it.
+    pub fn next_bare_request_id(&mut self) -> u64 {
+        let id = self.next_daemon_request_id;
+        self.next_daemon_request_id += 1;
+        id
+    }
+
     /// Resolve a `Response`'s `daemon_request_id` back to the
     /// `(conduit, peer_request_id)` that minted it, removing the entry —
     /// the daemon restores `peer_request_id` onto the `Response` and

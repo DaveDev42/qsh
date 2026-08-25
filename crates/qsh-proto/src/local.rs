@@ -42,15 +42,26 @@ pub use generated::*;
 pub const LOCAL_WAIT_MAX: Duration = Duration::from_secs(60);
 
 /// The only `LocalHello.version` this build speaks, on both ends of a
-/// localctl conduit — `qsh.local.v1` has had exactly one version since
-/// Step 1's contract freeze. Centralized here (rather than duplicated as a
+/// localctl conduit. Centralized here (rather than duplicated as a
 /// private constant in the CLI-process client and re-derived by the daemon)
 /// so the two ends cannot silently drift, and so the daemon has a single
 /// canonical value to check `LocalHello.version` against: `qsh listen` is a
 /// resident daemon that can genuinely outlive a CLI upgrade, so a future
 /// version bump on one end while the other is still running is the normal
 /// case this field exists to fail closed on, not an edge case.
-pub const LOCAL_HELLO_VERSION: u32 = 1;
+///
+/// **2 (M4 Step 5 PR 5b, bumped from 1).** `LOCAL_ADMIN`'s second frame
+/// changed shape — a bare, fieldless `LocalHostList{}` (which encodes to
+/// zero bytes, `tests::local_host_list_and_tunnel_list_are_wire_identical_which_is_exactly_why_local_admin_request_exists`'s
+/// own proof) became a `LocalAdminRequest{oneof body}` envelope so the
+/// same conduit kind could also carry `TunnelList`/`TunnelClose`. Zero
+/// bytes is not a valid `LocalAdminRequest` (`body: None`), so an old CLI
+/// talking to a new resident daemon would otherwise get a confusing
+/// `INVALID_ARGUMENT` ("LocalAdminRequest has no body set") instead of
+/// the clean, actionable version-mismatch `UNSUPPORTED` this field exists
+/// to produce (adversarial-review finding — a wire-shape change on a
+/// conduit kind with no other version signal must bump this).
+pub const LOCAL_HELLO_VERSION: u32 = 2;
 
 /// Encode a `qsh.local.v1` message as one length-prefixed frame, under the
 /// same [`CONTROL_FRAME_MAX`] cap the wire control stream uses — "§5와
@@ -230,6 +241,28 @@ mod tests {
             .prop_map(|tunnels| LocalTunnelListResult { tunnels })
     }
 
+    fn arb_local_tunnel_close() -> impl Strategy<Value = LocalTunnelClose> {
+        "[a-zA-Z0-9_-]{1,64}".prop_map(|tunnel_id| LocalTunnelClose { tunnel_id })
+    }
+
+    fn arb_local_tunnel_close_result() -> impl Strategy<Value = LocalTunnelCloseResult> {
+        any::<bool>().prop_map(|closed| LocalTunnelCloseResult { closed })
+    }
+
+    fn arb_local_admin_request() -> impl Strategy<Value = LocalAdminRequest> {
+        prop_oneof![
+            Just(LocalAdminRequest {
+                body: Some(local_admin_request::Body::HostList(LocalHostList {})),
+            }),
+            Just(LocalAdminRequest {
+                body: Some(local_admin_request::Body::TunnelList(LocalTunnelList {})),
+            }),
+            arb_local_tunnel_close().prop_map(|m| LocalAdminRequest {
+                body: Some(local_admin_request::Body::TunnelClose(m)),
+            }),
+        ]
+    }
+
     fn arb_local_response() -> impl Strategy<Value = LocalResponse> {
         prop_oneof![
             arb_local_hello_ack().prop_map(|m| LocalResponse {
@@ -247,6 +280,9 @@ mod tests {
             // (`qsh/local/v1.proto`'s own doc).
             Just(LocalResponse {
                 body: Some(local_response::Body::ClaimGranted(LocalClaimGranted {})),
+            }),
+            arb_local_tunnel_close_result().prop_map(|m| LocalResponse {
+                body: Some(local_response::Body::TunnelCloseResult(m)),
             }),
             arb_local_error().prop_map(|m| LocalResponse {
                 body: Some(local_response::Body::Error(m)),
@@ -315,6 +351,21 @@ mod tests {
         }
 
         #[test]
+        fn local_tunnel_close_roundtrips(m in arb_local_tunnel_close()) {
+            roundtrip_and_canonical(&m);
+        }
+
+        #[test]
+        fn local_tunnel_close_result_roundtrips(m in arb_local_tunnel_close_result()) {
+            roundtrip_and_canonical(&m);
+        }
+
+        #[test]
+        fn local_admin_request_roundtrips(m in arb_local_admin_request()) {
+            roundtrip_and_canonical(&m);
+        }
+
+        #[test]
         fn local_response_roundtrips(m in arb_local_response()) {
             roundtrip_and_canonical(&m);
         }
@@ -335,6 +386,11 @@ mod tests {
         }
 
         #[test]
+        fn local_admin_request_prefixes_are_incomplete(m in arb_local_admin_request()) {
+            prefixes_are_incomplete(&m);
+        }
+
+        #[test]
         fn local_response_prefixes_are_incomplete(m in arb_local_response()) {
             prefixes_are_incomplete(&m);
         }
@@ -350,6 +406,9 @@ mod tests {
             let _ = decode_local::<LocalHostListResult>(&bytes);
             let _ = decode_local::<LocalTunnelList>(&bytes);
             let _ = decode_local::<LocalTunnelListResult>(&bytes);
+            let _ = decode_local::<LocalTunnelClose>(&bytes);
+            let _ = decode_local::<LocalTunnelCloseResult>(&bytes);
+            let _ = decode_local::<LocalAdminRequest>(&bytes);
             let _ = decode_local::<LocalResponse>(&bytes);
         }
 
@@ -466,8 +525,15 @@ mod tests {
     }
 
     #[test]
-    fn local_hello_version_is_one() {
-        assert_eq!(LOCAL_HELLO_VERSION, 1);
+    fn local_hello_version_is_two() {
+        // Bumped from 1 in M4 Step 5 PR 5b (adversarial-review finding):
+        // `LOCAL_ADMIN`'s second frame changed shape (bare `LocalHostList{}`
+        // -> `LocalAdminRequest{oneof body}`), and this field exists
+        // precisely so that a version skew across a resident daemon and a
+        // just-upgraded (or just-downgraded) CLI fails closed with a clear
+        // `UNSUPPORTED` instead of a confusing `INVALID_ARGUMENT` decoded
+        // from the old, now-incompatible empty-frame shape.
+        assert_eq!(LOCAL_HELLO_VERSION, 2);
     }
 
     #[test]
@@ -482,5 +548,22 @@ mod tests {
         // LocalTunnelList{} (M4, `qsh tunnels`) carries no data, same as
         // LocalHostList{} above.
         roundtrip_and_canonical(&LocalTunnelList {});
+    }
+
+    #[test]
+    fn local_host_list_and_tunnel_list_are_wire_identical_which_is_exactly_why_local_admin_request_exists()
+     {
+        // The discriminator problem `LocalAdminRequest`'s own doc states:
+        // two different fieldless message *types* encode to the exact
+        // same (empty) bytes, so a bare top-level request would be
+        // ambiguous the instant a `LOCAL_ADMIN` conduit could be asked
+        // more than one kind of question.
+        use prost::Message;
+        assert_eq!(LocalHostList {}.encode_to_vec(), Vec::<u8>::new());
+        assert_eq!(LocalTunnelList {}.encode_to_vec(), Vec::<u8>::new());
+        assert_eq!(
+            LocalHostList {}.encode_to_vec(),
+            LocalTunnelList {}.encode_to_vec()
+        );
     }
 }

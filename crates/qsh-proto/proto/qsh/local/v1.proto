@@ -143,7 +143,28 @@ message LocalResponse {
     // LOCAL_STREAM reply to a `StreamHeader{TCP_ACCEPTED}` claim that the
     // daemon granted (M4 Step 5 PR 5a).
     LocalClaimGranted claim_granted = 4;
+    // LOCAL_ADMIN reply to LocalTunnelClose (M4 Step 5 PR 5b, `qsh tunnel
+    // close`).
+    LocalTunnelCloseResult tunnel_close_result = 5;
     LocalError error = 15;
+  }
+}
+
+// LOCAL_ADMIN request envelope (M4 Step 5 PR 5b) — the request-side twin
+// of `LocalResponse`, existing for the same reason: `LocalHostList` and
+// `LocalTunnelList` are both fieldless messages and therefore encode to
+// the exact same zero bytes on the wire, so nothing about a frame's bytes
+// can tell them apart without an explicit discriminator once a `LOCAL_ADMIN`
+// conduit can be asked more than one kind of question. Every `LOCAL_ADMIN`
+// conduit's second frame (after `LocalHello`) is exactly one
+// `LocalAdminRequest`, never a bare `LocalHostList`/`LocalTunnelList`/
+// `LocalTunnelClose` — mirrors `LocalResponse`'s own doc comment on this
+// same discriminator problem, one direction earlier.
+message LocalAdminRequest {
+  oneof body {
+    LocalHostList host_list = 1;
+    LocalTunnelList tunnel_list = 2;
+    LocalTunnelClose tunnel_close = 3;
   }
 }
 
@@ -249,4 +270,25 @@ message LocalTunnel {
   uint32 actual_port = 5;
   // Host alias this tunnel is on.
   string host = 6;
+}
+
+// LOCAL_ADMIN request: close a tunnel this resident daemon holds, by
+// `tunnel_id` (== `forward_id` — `crate::types::Tunnel.tunnel_id`'s own
+// doc on there being no second ID space). Only ever matches a `"remote"`
+// mode forward: a `"local"` mode listener registers no `forward_id`
+// daemon-side at all (`LocalTunnel.mode`'s own doc), so `tunnel.close` on
+// one of those ids always answers `closed: false` here — closing that
+// tunnel is instead just the opening CLI process exiting or being killed
+// (`docs/CLI.md` §6.14's ordinary rule).
+message LocalTunnelClose {
+  string tunnel_id = 1;
+}
+
+// Success reply to LocalTunnelClose.
+message LocalTunnelCloseResult {
+  // `true` if a forward registration was found and closed; `false` if
+  // `tunnel_id` named nothing this daemon currently holds (never
+  // registered, already closed, or a `"local"` mode id) — idempotent, not
+  // an error (`qsh_proto::TunnelCloseData::closed`'s own doc).
+  bool closed = 1;
 }

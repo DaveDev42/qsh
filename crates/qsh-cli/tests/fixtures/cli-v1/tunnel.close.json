@@ -1,0 +1,10 @@
+{
+  "command": "tunnel.close",
+  "data": {
+    "closed": false,
+    "tunnel_id": "<tunnel_id>"
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

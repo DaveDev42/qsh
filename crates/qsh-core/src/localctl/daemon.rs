@@ -23,7 +23,7 @@
 //!
 //!   | kind | served by | shape |
 //!   |---|---|---|
-//!   | `LOCAL_ADMIN` | [`LocalctlDaemon::serve_admin`] | one `LocalHostList` request → one `LocalResponse`, from [`Listen::registry`]'s current snapshot, stale entries included, never dialing anything. No `LocalHelloAck` — its fields describe a specific registered host and `LOCAL_ADMIN` names none. |
+//!   | `LOCAL_ADMIN` | [`LocalctlDaemon::serve_admin`] | one `LocalAdminRequest` (`HostList` / `TunnelList` / `TunnelClose`, M4 Step 5 PR 5b) → one `LocalResponse`, from [`Listen::registry`]'s current snapshot or [`Listen::hubs_snapshot`]'s live forwards, stale entries included, never dialing anything. No `LocalHelloAck` — its fields describe a specific registered host and `LOCAL_ADMIN` names none. |
 //!   | `LOCAL_CONTROL` (`M3 Step 6`) | [`LocalctlDaemon::serve_control`] | `LocalHelloAck`, then a long-lived `qsh.wire.v1` `ControlMessage` relay for `hello.host`'s live [`ControlHub`](crate::reverse::listen::ControlHub) — one conduit per attached CLI process, for as long as it runs. |
 //!   | `LOCAL_STREAM` (`M3 Step 7`) | [`LocalctlDaemon::serve_stream`] | `LocalHelloAck`, then exactly one wire `StreamHeader{SESSION_DATA, ticket}` frame, then a raw byte-level splice onto a fresh QUIC bidi stream on `hello.host`'s live connection — the daemon never parses anything past that header (module docs' own "grants no new authority": it neither redeems nor inspects the ticket, the target does). |
 //!
@@ -40,9 +40,10 @@ use std::sync::Arc;
 
 use qsh_proto::ErrorCode;
 use qsh_proto::local::{
-    LOCAL_HELLO_VERSION, LOCAL_WAIT_MAX, LocalClaimGranted, LocalError, LocalHello, LocalHelloAck,
-    LocalHost, LocalHostList, LocalHostListResult, LocalResponse, LocalStreamKind,
-    classify_stream_kind, local_response,
+    LOCAL_HELLO_VERSION, LOCAL_WAIT_MAX, LocalAdminRequest, LocalClaimGranted, LocalError,
+    LocalHello, LocalHelloAck, LocalHost, LocalHostListResult, LocalResponse, LocalStreamKind,
+    LocalTunnel, LocalTunnelCloseResult, LocalTunnelListResult, classify_stream_kind,
+    local_admin_request, local_response,
 };
 use qsh_proto::wire;
 use tokio::io::AsyncWriteExt as _;
@@ -552,15 +553,49 @@ impl LocalctlDaemon {
         }
     }
 
-    /// `LOCAL_ADMIN`: read the (fieldless) `LocalHostList` request and
-    /// answer with this controller's current registry snapshot — every
-    /// entry, live or stale, never filtered and never dialed
-    /// (`docs/CLI.md` §6.2, module docs).
+    /// `LOCAL_ADMIN`: read one [`LocalAdminRequest`] and answer with
+    /// exactly one [`LocalResponse`] — `HostList`
+    /// ([`Self::serve_admin_host_list`], `PLAN.md` M3 Step 5) / `TunnelList`
+    /// ([`Self::serve_admin_tunnel_list`], `PLAN.md` M4 Step 5 PR 5b) /
+    /// `TunnelClose` ([`Self::serve_admin_tunnel_close`], same PR). The
+    /// request is read through the `LocalAdminRequest` envelope, not a bare
+    /// top-level message (`qsh/local/v1.proto`'s own doc on that type: two
+    /// of these three request shapes are fieldless and therefore wire-
+    /// identical, so a bare top-level message could never tell them
+    /// apart).
     async fn serve_admin(&self, mut conduit: LocalConduit<UnixStream>) {
-        match conduit.recv::<LocalHostList>().await {
-            Ok(Some(LocalHostList {})) => {}
+        let request = match conduit.recv::<LocalAdminRequest>().await {
+            Ok(Some(request)) => request,
             Ok(None) | Err(_) => return,
+        };
+        match request.body {
+            Some(local_admin_request::Body::HostList(_)) => {
+                self.serve_admin_host_list(conduit).await;
+            }
+            Some(local_admin_request::Body::TunnelList(_)) => {
+                self.serve_admin_tunnel_list(conduit).await;
+            }
+            Some(local_admin_request::Body::TunnelClose(close)) => {
+                self.serve_admin_tunnel_close(conduit, &close.tunnel_id)
+                    .await;
+            }
+            None => {
+                let _ = conduit
+                    .send(&LocalResponse {
+                        body: Some(local_response::Body::Error(LocalError::from_code(
+                            ErrorCode::InvalidArgument,
+                            "LocalAdminRequest has no body set",
+                        ))),
+                    })
+                    .await;
+            }
         }
+    }
+
+    /// `HostList` arm of [`Self::serve_admin`]: this controller's current
+    /// registry snapshot — every entry, live or stale, never filtered and
+    /// never dialed (`docs/CLI.md` §6.2, module docs).
+    async fn serve_admin_host_list(&self, mut conduit: LocalConduit<UnixStream>) {
         let hosts = self
             .listen
             .registry()
@@ -573,6 +608,100 @@ impl LocalctlDaemon {
                 body: Some(local_response::Body::HostListResult(LocalHostListResult {
                     hosts,
                 })),
+            })
+            .await;
+    }
+
+    /// `TunnelList` arm of [`Self::serve_admin`] (`PLAN.md` M4 Step 5 PR
+    /// 5b, `qsh tunnels`): every forward this controller currently holds,
+    /// across every registered reverse host — structural fields only
+    /// ([`crate::reverse::listen::ForwardSummary`]'s own doc), never a
+    /// payload byte. `host` is filled in from the name each
+    /// [`Listen::hubs_snapshot`] entry is keyed under, the same "this
+    /// table's own key is the alias" pattern [`to_local_host`] relies on
+    /// for `LocalHost.name`.
+    async fn serve_admin_tunnel_list(&self, mut conduit: LocalConduit<UnixStream>) {
+        let tunnels = self
+            .listen
+            .hubs_snapshot()
+            .into_iter()
+            .flat_map(|(host, hub)| {
+                hub.list_forwards()
+                    .into_iter()
+                    .map(move |forward| LocalTunnel {
+                        tunnel_id: forward.forward_id,
+                        mode: forward.mode.to_string(),
+                        bind: forward.bind,
+                        forward_to: forward.forward_to,
+                        actual_port: forward.actual_port,
+                        host: host.clone(),
+                    })
+            })
+            .collect();
+        let _ = conduit
+            .send(&LocalResponse {
+                body: Some(local_response::Body::TunnelListResult(
+                    LocalTunnelListResult { tunnels },
+                )),
+            })
+            .await;
+    }
+
+    /// `TunnelClose` arm of [`Self::serve_admin`] (`PLAN.md` M4 Step 5 PR
+    /// 5b, `qsh tunnel close <id>`): search every registered reverse
+    /// host's hub for `tunnel_id` and close it via
+    /// [`ControlHub::admin_close_forward`](crate::reverse::listen::ControlHub::admin_close_forward)
+    /// — that method's own doc is where the "who may ask the daemon to do
+    /// this" authorization decision (`docs/CLI.md` §2.5's owning-peer
+    /// clause) actually lives; this arm only has to find the right hub.
+    /// `closed: false` (never an error) when no hub currently holds
+    /// `tunnel_id` — same idempotent-not-error shape every other
+    /// `tunnel.close`-on-an-unknown-id outcome has.
+    ///
+    /// **Ambiguity is refused, not resolved by picking one (adversarial-
+    /// review finding).** `tunnel_id` is `forward_id`, which is
+    /// target-minted (`ControlHub`'s own §11-3 doc: shape-checked by
+    /// [`wire::valid_forward_id`] only, never guaranteed unique *across*
+    /// hosts — only within one hub's own table). `LocalTunnelClose` has
+    /// no `host` to disambiguate with (unlike [`LocalTunnel::host`] on the
+    /// listing side), so if the id names a live forward on **more than
+    /// one** registered host's hub at once, there is no principled way to
+    /// pick the intended one from this call alone. The old shape
+    /// (`Iterator::any`, first match over a `HashMap`'s nondeterministic
+    /// iteration order) silently closed whichever hub happened to be
+    /// checked first — a real, if narrow, "closes the wrong host's
+    /// tunnel" failure mode a colliding id (accidental, or a non-ULID-
+    /// minting peer) could trigger. Refusing instead follows this
+    /// codebase's own default (`CLAUDE.md`: "Fail closed on any ambiguous
+    /// auth/ACL state") — no forward is torn down, `closed: false`, and a
+    /// structural warning names the id and the match count only (never a
+    /// host or any payload).
+    async fn serve_admin_tunnel_close(
+        &self,
+        mut conduit: LocalConduit<UnixStream>,
+        tunnel_id: &str,
+    ) {
+        let hubs = self.listen.hubs_snapshot();
+        let closed = match crate::reverse::listen::tunnel_close_target(&hubs, tunnel_id) {
+            crate::reverse::listen::TunnelCloseTarget::None => false,
+            crate::reverse::listen::TunnelCloseTarget::One(hub) => {
+                hub.admin_close_forward(tunnel_id)
+            }
+            crate::reverse::listen::TunnelCloseTarget::Ambiguous(count) => {
+                tracing::warn!(
+                    tunnel_id,
+                    hosts = count,
+                    "qsh::localctl: tunnel_id matched forwards on more than one registered \
+                     host; refusing to guess which one — closing none (fail closed)"
+                );
+                false
+            }
+        };
+        let _ = conduit
+            .send(&LocalResponse {
+                body: Some(local_response::Body::TunnelCloseResult(
+                    LocalTunnelCloseResult { closed },
+                )),
             })
             .await;
     }
@@ -1973,7 +2102,7 @@ mod tests {
         let mut conduit = LocalConduit::new(stream);
         conduit
             .send(&LocalHello {
-                version: 1,
+                version: LOCAL_HELLO_VERSION,
                 kind: LocalStreamKind::LocalUnspecified as i32,
                 host: String::new(),
                 wait_ms: 0,
@@ -2016,7 +2145,7 @@ mod tests {
         let mut conduit = LocalConduit::new(stream);
         conduit
             .send(&LocalHello {
-                version: 1,
+                version: LOCAL_HELLO_VERSION,
                 kind: LocalStreamKind::LocalControl as i32,
                 host: "some-host".to_string(),
                 wait_ms: 0,
@@ -2057,7 +2186,7 @@ mod tests {
         let mut conduit = LocalConduit::new(stream);
         conduit
             .send(&LocalHello {
-                version: 1,
+                version: LOCAL_HELLO_VERSION,
                 kind: LocalStreamKind::LocalStream as i32,
                 host: "some-host".to_string(),
                 wait_ms: 0,
@@ -2275,7 +2404,7 @@ mod tests {
     /// `admin_host_list_all`/`resolve_host_route` need to tell "daemon
     /// saturated" apart from "no such host" (`docs/CLI.md` §6.2).
     /// Held-open connections are real `LOCAL_ADMIN` conduits parked
-    /// mid-handshake (hello sent, `LocalHostList` body deliberately
+    /// mid-handshake (hello sent, `LocalAdminRequest` body deliberately
     /// withheld) rather than a live `LOCAL_CONTROL` host, which needs a
     /// real reverse QUIC registration this crate's own unit tests cannot
     /// stand up — `crates/qsh-testkit/tests/local_control_reverse.rs`
@@ -2298,7 +2427,7 @@ mod tests {
         }));
 
         // Occupy the single admin permit: send `LocalHello` and then never
-        // send the follow-up `LocalHostList` — `serve_admin` blocks
+        // send the follow-up `LocalAdminRequest` — `serve_admin` blocks
         // forever on that read, holding the permit for as long as this
         // stream stays open.
         let holder = UnixStream::connect(&socket_path).await.unwrap();

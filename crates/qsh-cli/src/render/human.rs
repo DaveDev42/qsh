@@ -10,7 +10,7 @@ use qsh_core::{ExecRunOutput, OpError, SessionReadOutput};
 use qsh_proto::{
     Host, HostListData, IdentityInitData, Session, SessionCloseData, SessionEvent, SessionListData,
     SessionOpenData, SessionResizeData, SessionWriteData, TrustAddData, TrustListData, TrustPeer,
-    TrustRemoveData, Tunnel, VersionData,
+    TrustRemoveData, Tunnel, TunnelCloseData, TunnelListData, VersionData,
 };
 
 /// Print `qsh <version>` to stdout.
@@ -380,6 +380,61 @@ pub fn print_tunnel_open(tunnel: &Tunnel) -> io::Result<()> {
         sanitize(&tunnel.host),
         sanitize(&tunnel.tunnel_id)
     )
+}
+
+/// Print the tunnel table (`qsh tunnels`, `docs/CLI.md` §6.9). Only ever
+/// daemon-held reverse-route tunnels — `Ops::tunnel_list`'s own doc on why
+/// a forward-route `qsh tunnel open` is never listed here.
+pub fn print_tunnels(data: &TunnelListData) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    if data.tunnels.is_empty() {
+        return writeln!(stdout, "no tunnels");
+    }
+
+    let width = |header: &str, field: fn(&Tunnel) -> &str| {
+        data.tunnels
+            .iter()
+            .map(|t| field(t).chars().count())
+            .chain(std::iter::once(header.chars().count()))
+            .max()
+            .unwrap_or(0)
+    };
+    let id_w = width("TUNNEL_ID", |t| &t.tunnel_id);
+    let mode_w = width("MODE", |t| &t.mode);
+    let bind_w = width("BIND", |t| &t.bind);
+    let fwd_w = width("FORWARD_TO", |t| &t.forward_to);
+
+    writeln!(
+        stdout,
+        "{:id_w$}  {:mode_w$}  {:bind_w$}  {:fwd_w$}  HOST",
+        "TUNNEL_ID", "MODE", "BIND", "FORWARD_TO"
+    )?;
+    for tunnel in &data.tunnels {
+        writeln!(
+            stdout,
+            "{:id_w$}  {:mode_w$}  {:bind_w$}  {:fwd_w$}  {}",
+            sanitize(&tunnel.tunnel_id),
+            sanitize(&tunnel.mode),
+            sanitize(&tunnel.bind),
+            sanitize(&tunnel.forward_to),
+            sanitize(&tunnel.host),
+        )?;
+    }
+    Ok(())
+}
+
+/// Print the outcome of `qsh tunnel close`.
+pub fn print_tunnel_close(data: &TunnelCloseData) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    if data.closed {
+        writeln!(stdout, "closed {}", sanitize(&data.tunnel_id))
+    } else {
+        writeln!(
+            stdout,
+            "{} not found (nothing to do)",
+            sanitize(&data.tunnel_id)
+        )
+    }
 }
 
 /// Announce a started `-L` forward on **stderr** (`qsh [user@]host -L …`).

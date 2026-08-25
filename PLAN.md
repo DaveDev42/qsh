@@ -323,6 +323,7 @@ M4가 실제로 지는 것은 (i) 두 방향의 forward(`-L` local→remote / `-
   - **unregister가 pending_rfwd_open_claim_tokens를 즉시 안 지운다(F6, 위생).** 성장 누수는 아니고 (target 응답 시 정리) 토큰 바이트가 쓸모없어진 뒤에도 잠시 상주하는 문제.
   - **NotOwner 응답이 forward_id 존재 oracle이 될 수 있다(F7, 정보성).** forward_id가 128-bit ULID라 지금은 무해. 5b가 `LocalTunnelList`로 id를 노출하기 시작하면 permit 과금이 owner 기준이라는 점과 함께 재검토할 것.
   잔여 중 즉시 수정 대상 2건(F5 registration 스쿼팅 가드, F2 고아 parked claim의 permit 누수)은 5a 후속 커밋으로 처리한다 — 기록만 하고 넘어가기엔 상주 데몬의 수명에 직접 닿는다.
+- **PR 5b 처리 기록과 신규 백로그(2026-08-25).** F5·F2는 후속 커밋으로 수정 완료(48fc38f). F7은 5b가 `LocalTunnelList`로 same-uid 조회 경로를 정식 제공하면서 무의미해졌다(코드 주석에 기록). F3은 여전히 열려 있다 — `LocalTunnel`에 liveness field가 없어 listing만으로는 기아 상태를 못 보인다(M5 할당량 설계에서 wire field 추가와 함께). 신규 백로그 1건: **죽은 claim conduit의 재수립 op이 없다(P1).** reverse `-R`의 CLI가 죽으면 listener는 데몬에 살아남지만 claim conduit이 없어 이후 `TCP_ACCEPTED`는 전부 즉시 reset된다. 같은 `forward_id`를 다시 claim하려면 `RemoteForwardOpen`이 기존 id를 받아들이는 새 wire 의미가 필요해 5b 범위 밖이었다(CLI.md §6.14가 "그런 op은 아직 없다"로 명문화). 현재 유일한 회복 경로는 `tunnel close` 후 새 `-R`. P1에서 wire 설계와 함께 다룬다.
 
 ### 4.1 이 계획이 확정한 결정 (Step 1이 정본 문서에 기록한다)
 

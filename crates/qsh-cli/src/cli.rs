@@ -250,6 +250,13 @@ pub enum Command {
     #[command(subcommand)]
     Tunnel(TunnelCmd),
 
+    /// List every tunnel this machine's resident `qsh listen` daemon(s)
+    /// currently hold (`docs/CLI.md` §6.9, `tunnel.list`). Never dials.
+    /// A forward-route tunnel opened by a standalone `qsh tunnel open`
+    /// process is not visible here — it has no resident holder to be
+    /// listed by (`Ops::tunnel_list`'s own doc).
+    Tunnels,
+
     /// Dial `<controller>` and register this device as a reverse target,
     /// once — no reconnect loop yet (`docs/CLI.md` §6.13). On success this
     /// process serves the connection as a host, the same broker/writer-lease
@@ -278,6 +285,18 @@ pub enum TunnelCmd {
     /// is emitted once, and the tunnel lives for as long as this
     /// foreground process does (`docs/CLI.md` §6.14). Ctrl-C ends it.
     Open(TunnelOpenArgs),
+
+    /// Close a tunnel by id (`docs/CLI.md` §6.9, `tunnel.close`).
+    ///
+    /// Only ever reaches a daemon-held reverse-route (`-R over reverse`)
+    /// forward — a forward-route tunnel's only "close" is its holding
+    /// process exiting (`docs/CLI.md` §6.14). Idempotent: closing an id
+    /// nothing currently holds answers `closed: false`, not an error.
+    Close {
+        /// The `tunnel_id` from that tunnel's `tunnel.open`/`tunnels`
+        /// entry.
+        tunnel_id: String,
+    },
 }
 
 /// Arguments of `qsh tunnel open`.

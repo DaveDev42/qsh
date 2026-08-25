@@ -48,8 +48,8 @@ pub use ops::{
     HostRoute, IdentityInitOp, OpError, Operation, Ops, RecoveryConfig, SessionAttachOp,
     SessionAttachStream, SessionCloseOp, SessionGetOp, SessionListOp, SessionOpenOp, SessionReadOp,
     SessionReadOutput, SessionReader, SessionResizeOp, SessionWriteOp, TrustAddOp, TrustListOp,
-    TrustRemoveOp, TunnelHold, TunnelOpenOp, VersionOp, parse_local_forwards,
-    parse_remote_forwards,
+    TrustRemoveOp, TunnelCloseOp, TunnelHold, TunnelListOp, TunnelOpenOp, VersionOp,
+    parse_local_forwards, parse_remote_forwards,
 };
 pub use trust::{SharedTrustStore, TrustStore};
 

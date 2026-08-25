@@ -429,6 +429,22 @@ impl<T: Clone> ConnTable<T> {
             _ => None,
         }
     }
+
+    /// Every current occupant, by name — [`Listen::hubs_snapshot`]'s own
+    /// use (`PLAN.md` M4 Step 5 PR 5b's `LocalTunnelList`/admin
+    /// `tunnel.close`): unlike [`Self::get`]/[`Self::get_matching`], which
+    /// answer "the one host I already know the name of", these two admin
+    /// requests carry no host at all and must consider every live
+    /// registration this controller currently holds, the same "no host
+    /// named, consider everything live" shape [`Registry::snapshot`]
+    /// already has for [`LocalHostList`](qsh_proto::local::LocalHostList).
+    #[cfg_attr(not(unix), allow(dead_code))]
+    fn snapshot(&self) -> Vec<(String, T)> {
+        self.lock()
+            .iter()
+            .map(|(name, (_, v))| (name.clone(), v.clone()))
+            .collect()
+    }
 }
 
 /// Decide what [`Registry::rollback`] should actually restore.
@@ -874,6 +890,93 @@ struct ForwardRegistration {
     /// the one whose death sweeps it ([`ControlHub::unregister_conduit`]).
     owner: ConduitId,
     seat: ClaimSeat,
+    /// Structural facts about this forward — never payload, exactly the
+    /// kind of record `Server::authorize_and_bind_remote_forward`'s own
+    /// audit line keeps host-side — kept so `LocalTunnelList`
+    /// (`PLAN.md` M4 Step 5 PR 5b) has something to build a
+    /// [`qsh_proto::local::LocalTunnel`] from: the Step 4 residual
+    /// `PLAN.md` §4 records ("audit 기록이 '요청한 주소'지 '실제로 bind한
+    /// 주소'가 아니다... `qsh tunnels`가 bind된 주소를 사용자에게 보여주기
+    /// 시작하는 지점이라 같은 정보가 어차피 필요하다") lands here.
+    meta: ForwardMeta,
+}
+
+/// The structural half of [`ForwardRegistration`] — everything
+/// `LocalTunnelList` reports about one forward, and nothing else: no
+/// payload byte has ever passed through this type.
+#[cfg(unix)]
+#[derive(Debug, Clone)]
+struct ForwardMeta {
+    /// Always `"remote"`: only `-R`'s host-bound listener ever registers a
+    /// `forward_id` in [`HubState::forwards`] at all — `-L over reverse`'s
+    /// per-connection `TCP_CONNECT`s carry no `forward_id` and never touch
+    /// this table (`HubState::forwards`'s own doc; `docs/CLI.md` §6.9's
+    /// `Tunnel.mode` vocabulary). Kept as an explicit field, not a literal
+    /// at the `LocalTunnel` call site, so nothing there has to re-derive
+    /// this claim.
+    mode: &'static str,
+    /// The address actually bound on this hub's own host machine —
+    /// `bind_host` (defaulted to `127.0.0.1` exactly the way
+    /// `crate::ops::tunnel::remote_tunnel_dto`'s client-side DTO already
+    /// does, for the same reason: an unspecified request bind means
+    /// loopback) joined with `RemoteForwardOpened.actual_port`, the
+    /// kernel-assigned port when `bind_port` was `0`. This is the address
+    /// that exists, not the one the request asked for.
+    bind: String,
+    /// The same bound port `bind` already carries, kept as a bare `u32`
+    /// too so `LocalTunnel.actual_port` (`qsh/local/v1.proto`) never has
+    /// to re-parse it back out of the formatted `bind` string — the two
+    /// are always constructed together from the one
+    /// `RemoteForwardOpened.actual_port` value.
+    actual_port: u32,
+    /// Where the requester (the controller CLI, on either route) dials
+    /// each `TCP_ACCEPTED` — `RemoteForwardOpen.forward_host`:
+    /// `forward_port` verbatim.
+    forward_to: String,
+}
+
+/// [`ControlHub::list_forwards`]'s per-forward answer — a plain, owned
+/// copy of [`ForwardMeta`] plus the `forward_id` key it was stored under,
+/// so `crate::localctl::daemon`'s `LocalTunnelList` handling
+/// (`PLAN.md` M4 Step 5 PR 5b) has a named type to map into
+/// [`qsh_proto::local::LocalTunnel`] rather than an anonymous tuple.
+///
+/// **F3 residual, still open (`PLAN.md` M4 §4).** A forward past this
+/// hub's per-conduit parked-claim share (`MAX_PARKED_CLAIMS_PER_CONDUIT`,
+/// `docs/design/protocol.md` §11-3's "이 pool은 나뉘어 있다" paragraph) —
+/// the "9th forward" scenario — registers exactly like a healthy one:
+/// `RemoteForwardOpen` still succeeds, [`Self::list_forwards`] still
+/// reports it, and none of the five fields below distinguish it from a
+/// forward whose claim loop actually holds a permit and is parked
+/// waiting. `qsh tunnels` therefore does **not** close this observability
+/// gap — a starved forward still looks, from this listing alone,
+/// identical to a working one; the only signal today remains the daemon's
+/// own `tracing::warn!` when a claim is refused for lack of a permit. This
+/// type has no room for a claim/liveness field without a wire change
+/// (`qsh/local/v1.proto`'s `LocalTunnel` would need a new field), so
+/// closing this gap for real is left to M5's quota work, per `PLAN.md`'s
+/// own framing — this comment is that "still open, not silently dropped"
+/// record, not a fix.
+#[cfg(unix)]
+pub(crate) struct ForwardSummary {
+    pub(crate) forward_id: String,
+    pub(crate) mode: &'static str,
+    pub(crate) bind: String,
+    pub(crate) actual_port: u32,
+    pub(crate) forward_to: String,
+}
+
+/// The address half of an in-flight `RemoteForwardOpen`, captured by
+/// [`ControlHub::send_request`] alongside its claim token — see
+/// [`HubState::pending_rfwd_opens`]'s own doc for why the two are one
+/// entry rather than two maps.
+#[cfg(unix)]
+#[derive(Debug, Default)]
+struct PendingRfwdOpen {
+    claim_token: Vec<u8>,
+    bind_host: String,
+    forward_host: String,
+    forward_port: u32,
 }
 
 /// This hub's parked-claim pool: the [`MAX_PARKED_CLAIMS_PER_HUB`]
@@ -1048,16 +1151,28 @@ struct HubState {
     /// the seat decides *who may be delivered to*
     /// ([`ControlHub::claim_tcp_accepted`], re-checked on every wake).
     forwards: HashMap<String, ForwardRegistration>,
-    /// `daemon_request_id -> claim_token` for an in-flight `RemoteForwardOpen`
-    /// only — captured by [`ControlHub::send_request`] from the request
-    /// body itself (`wire::RemoteForwardOpen::claim_token`) and consumed
-    /// by [`ControlHub::deliver_response`] the instant the matching
+    /// `daemon_request_id -> (claim_token, requested address/target)` for
+    /// an in-flight `RemoteForwardOpen` only — captured by
+    /// [`ControlHub::send_request`] from the request body itself
+    /// (`wire::RemoteForwardOpen`'s own fields) and consumed by
+    /// [`ControlHub::deliver_response`] the instant the matching
     /// `RemoteForwardOpened` registers a *new* `forward_id`, mirroring
     /// `pending_attach_subscriptions`/`pending_rfwd_closes` exactly. A
     /// conduit's death before the reply arrives orphans its entry here
     /// exactly the way it orphans a pending attach subscription — left
     /// alone; nothing here holds a resource that needs releasing.
-    pending_rfwd_open_claim_tokens: HashMap<u64, Vec<u8>>,
+    ///
+    /// **One entry, not two maps** (the same discipline
+    /// [`HubState::forwards`]'s own doc states for owner/seat): the claim
+    /// token and the request's address fields are both facts about the
+    /// same in-flight `RemoteForwardOpen`, read together by the same
+    /// registration arm in [`ControlHub::deliver_response`]
+    /// (`PLAN.md` M4 Step 5 PR 5b — [`ForwardRegistration::meta`] is
+    /// built from the address half, [`ClaimSeat::seat`] from the token
+    /// half) — splitting them across two maps would reopen exactly the
+    /// divergence hazard that doc warns about, just for a second pair of
+    /// fields.
+    pending_rfwd_opens: HashMap<u64, PendingRfwdOpen>,
     /// `daemon_request_id -> forward_id` for an in-flight `RemoteForwardClose`
     /// only — mirrors `pending_attach_subscriptions` exactly (a
     /// `RemoteForwardClose` request already names the forward it is
@@ -1244,7 +1359,7 @@ impl ControlHub {
                 pending_attach_subscriptions: HashMap::new(),
                 long_poll_ids: HashSet::new(),
                 forwards: HashMap::new(),
-                pending_rfwd_open_claim_tokens: HashMap::new(),
+                pending_rfwd_opens: HashMap::new(),
                 pending_rfwd_closes: HashMap::new(),
                 tunnel_queue: HashMap::new(),
                 dead: false,
@@ -1443,6 +1558,20 @@ impl ControlHub {
         // protect. An id this hub does not know is *not* refused — it may
         // be a close racing its own `RemoteForwardOpened`, and the target
         // is the right place to answer for an id nobody here holds.
+        //
+        // **F7 residual (`PLAN.md` M4 §4).** `HubSendError::NotOwner` vs.
+        // "unknown id, forwarded anyway" is, in principle, a `forward_id`
+        // existence oracle for a same-uid caller that has to *guess* a
+        // `forward_id` it does not already hold — flagged informational
+        // pre-5b because `forward_id` is a 128-bit ULID, so guessing one
+        // is infeasible regardless. PR 5b's own `LocalTunnelList`
+        // ([`Self::list_forwards`]) makes this concern moot rather than
+        // worse: any same-uid caller who could mount this oracle already
+        // has a strictly more direct route to the same fact — ask the
+        // daemon for the list and read every live `forward_id` off it
+        // outright, no guessing or `NotOwner`/timing inference required.
+        // Nothing here needed to change; this comment is the "reviewed
+        // and still acceptable" record `PLAN.md` asked for.
         if let wire::control_message::Body::RfwdClose(close) = &body
             && state.forwards.contains_key(&close.forward_id)
             && !state.is_forward_owner(&close.forward_id, conduit)
@@ -1475,7 +1604,7 @@ impl ControlHub {
             // allocated `daemon_request_id`, so `deliver_response` can
             // seat it atomically alongside the registration the instant
             // the matching `RemoteForwardOpened` comes back —
-            // `HubState::pending_rfwd_open_claim_tokens`'s own doc.
+            // `HubState::pending_rfwd_opens`'s own doc.
             //
             // **Finding 5 fix — `mem::take`, not `.clone()`.** `claim_token`
             // is a purely requester-local capability
@@ -1500,9 +1629,15 @@ impl ControlHub {
             // `qsh/wire/v1.proto` for why the field is not removed from
             // the message outright.
             let claim_token = std::mem::take(&mut open.claim_token);
-            state
-                .pending_rfwd_open_claim_tokens
-                .insert(daemon_request_id, claim_token);
+            state.pending_rfwd_opens.insert(
+                daemon_request_id,
+                PendingRfwdOpen {
+                    claim_token,
+                    bind_host: open.bind_host.clone(),
+                    forward_host: open.forward_host.clone(),
+                    forward_port: open.forward_port,
+                },
+            );
         }
         drop(state);
         self.outbound_tx
@@ -1545,9 +1680,7 @@ impl ControlHub {
             .pending_attach_subscriptions
             .remove(&daemon_request_id);
         let pending_rfwd_close = state.pending_rfwd_closes.remove(&daemon_request_id);
-        let pending_claim_token = state
-            .pending_rfwd_open_claim_tokens
-            .remove(&daemon_request_id);
+        let pending_rfwd_open = state.pending_rfwd_opens.remove(&daemon_request_id);
         let Some((conduit, peer_request_id)) = state.mux.map_inbound(daemon_request_id) else {
             drop(state);
             // The conduit that asked for this died before the reply
@@ -1616,18 +1749,19 @@ impl ControlHub {
             // and could never be claimed. Silent, and exactly the
             // misdelivery-class failure this registry exists to prevent.
             //
-            // `pending_claim_token` is `Some` for precisely the ids whose
+            // `pending_rfwd_open` is `Some` for precisely the ids whose
             // outbound body was an `RfwdOpen`: `send_request` inserts into
-            // `pending_rfwd_open_claim_tokens` on that arm and nowhere
-            // else, and it inserts the `mem::take`n token even when that
-            // token is empty — so a legitimate open that carried none is
-            // `Some(empty)`, still reaches the seating arm below, and is
-            // still seated permanently unclaimable by `ClaimSeat::seat`
-            // (the empty-means-unclaimable path is unchanged). `None`
-            // means the target answered something that was never an open:
+            // `pending_rfwd_opens` on that arm and nowhere else, and it
+            // inserts the `mem::take`n token even when that token is
+            // empty — so a legitimate open that carried none is
+            // `Some(PendingRfwdOpen { claim_token: empty, .. })`, still
+            // reaches the seating arm below, and is still seated
+            // permanently unclaimable by `ClaimSeat::seat` (the
+            // empty-means-unclaimable path is unchanged). `None` means
+            // the target answered something that was never an open:
             // nothing is registered, and the id stays free for whoever
             // legitimately opens it later.
-            Some(wire::response::Body::RfwdOpened(_)) if pending_claim_token.is_none() => {
+            Some(wire::response::Body::RfwdOpened(_)) if pending_rfwd_open.is_none() => {
                 // The `forward_id` is deliberately not logged here: on
                 // this path it is unvalidated peer text (the arms below
                 // reach `wire::valid_forward_id` only once this one has
@@ -1649,9 +1783,9 @@ impl ControlHub {
                 // `conduit` from `daemon_request_id` — never lazily on
                 // whichever `claim_tcp_accepted` call happens to arrive
                 // first, and never as two independently-mutable maps. The
-                // token seated is exactly what `pending_claim_token`
-                // above took out of `pending_rfwd_open_claim_tokens` —
-                // the bytes *this conduit's own request* carried in
+                // token seated is exactly what `pending_rfwd_open`
+                // above took out of `pending_rfwd_opens` — the bytes
+                // *this conduit's own request* carried in
                 // `RemoteForwardOpen.claim_token`
                 // (`RemoteForwardAcceptor::spawn_reverse` mints it,
                 // `RemoteForwardAcceptor::claim_token`'s doc requires the
@@ -1675,7 +1809,8 @@ impl ControlHub {
                 // still closable by its owner) but no claim for it can
                 // ever succeed and `deliver_tcp_accepted` refuses to
                 // queue anything for it at all.
-                let seat = ClaimSeat::seat(pending_claim_token.unwrap_or_default());
+                let pending = pending_rfwd_open.unwrap_or_default();
+                let seat = ClaimSeat::seat(pending.claim_token);
                 if !seat.is_claimable() {
                     tracing::warn!(
                         forward_id = %opened.forward_id,
@@ -1683,11 +1818,43 @@ impl ControlHub {
                          token; registering it as permanently unclaimable"
                     );
                 }
+                // Structural snapshot for `LocalTunnelList` (`PLAN.md` M4
+                // Step 5 PR 5b, `ForwardMeta`'s own doc): `bind` is the
+                // address that actually exists — the request's
+                // `bind_host` (defaulted to loopback, same rule the
+                // requester-side DTO applies) joined with the *bound*
+                // port `RemoteForwardOpened.actual_port` reports, never
+                // the raw requested `bind_port`.
+                let bind_host = if pending.bind_host.is_empty() {
+                    "127.0.0.1".to_string()
+                } else {
+                    pending.bind_host
+                };
+                // `opened.actual_port` is peer-supplied and not validated
+                // to fit a real port range before this point. Clamp once
+                // and reuse that single `u16` for both `bind`'s port and
+                // `meta.actual_port` below — never clamp one and leave
+                // the other raw (adversarial-review finding: those two
+                // fields disagreeing breaks `docs/CLI.md` §6.9's own
+                // stated invariant that a reader never has to re-derive
+                // one from the other).
+                let actual_port_u16 = u16::try_from(opened.actual_port).unwrap_or(u16::MAX);
+                let bind = wire::format_host_port(&bind_host, actual_port_u16);
+                let forward_to = wire::format_host_port(
+                    &pending.forward_host,
+                    u16::try_from(pending.forward_port).unwrap_or(u16::MAX),
+                );
                 state.forwards.insert(
                     opened.forward_id.clone(),
                     ForwardRegistration {
                         owner: conduit,
                         seat,
+                        meta: ForwardMeta {
+                            mode: "remote",
+                            bind,
+                            actual_port: u32::from(actual_port_u16),
+                            forward_to,
+                        },
                     },
                 );
             }
@@ -1920,9 +2087,99 @@ impl ControlHub {
             ForwardRegistration {
                 owner,
                 seat: ClaimSeat::seat(token.clone()),
+                meta: ForwardMeta {
+                    mode: "remote",
+                    bind: "127.0.0.1:0".to_string(),
+                    actual_port: 0,
+                    forward_to: "localhost:0".to_string(),
+                },
             },
         );
         token
+    }
+
+    /// Every forward this hub currently holds, as one [`ForwardSummary`]
+    /// each — `crate::localctl::daemon`'s `LocalTunnelList`
+    /// handling (`PLAN.md` M4 Step 5 PR 5b) maps each into a
+    /// [`qsh_proto::local::LocalTunnel`], filling `host` itself from the
+    /// name this hub is registered under (the same "this table's own key
+    /// is the alias" fact `to_local_host` already relies on for
+    /// `LocalHost.name`). Read-only — a snapshot, exactly like
+    /// [`Registry::snapshot`], never a lock held across anything else.
+    pub(crate) fn list_forwards(&self) -> Vec<ForwardSummary> {
+        self.lock()
+            .forwards
+            .iter()
+            .map(|(forward_id, registration)| ForwardSummary {
+                forward_id: forward_id.clone(),
+                mode: registration.meta.mode,
+                bind: registration.meta.bind.clone(),
+                actual_port: registration.meta.actual_port,
+                forward_to: registration.meta.forward_to.clone(),
+            })
+            .collect()
+    }
+
+    /// Close `forward_id` on this hub's **own authority** — the daemon's
+    /// `LOCAL_ADMIN` `tunnel.close` handling (`PLAN.md` M4 Step 5 PR 5b),
+    /// deliberately a *different* path from [`Self::send_request`]'s
+    /// `RfwdClose` relay, which is owner-conduit-gated
+    /// (`docs/design/protocol.md` §11-3's "close도 소유 conduit만 할 수
+    /// 있다"). That gate exists to stop one **data**-plane conduit from
+    /// tearing down another's live registration/in-flight splices — it
+    /// says nothing about who may *ask the daemon itself* to close a
+    /// forward, and `docs/CLI.md` §2.5's "해당 tunnel의 소유 peer이면 허용"
+    /// is a peer-identity statement: every same-uid local process
+    /// authenticates to this daemon as the one controller principal that
+    /// opened the reverse connection in the first place (`localctl`'s own
+    /// same-uid accept check is that trust boundary,
+    /// `docs/design/architecture.md` §7), so a *second* CLI process
+    /// asking to close a forward the *first* one opened is still the
+    /// owning peer asking — `qsh tunnel close <id>` (a brand-new process,
+    /// `docs/CLI.md` §6.9's own usage example has no `--host`) could never
+    /// work for a daemon-held forward otherwise. This method therefore
+    /// acts with the daemon's own authority rather than pretending to be
+    /// the opening conduit: it removes the registration and resets every
+    /// queued arrival **first** (so no other conduit can be handed
+    /// anything for `forward_id` from the instant this call is made,
+    /// strictly *strengthening* the misdelivery invariant rather than
+    /// weakening it), then best-effort notifies the target with
+    /// `RemoteForwardClose` on a bare, uncorrelated `daemon_request_id`
+    /// ([`ControlMux::next_bare_request_id`]'s own doc) — nothing here
+    /// waits for or depends on that notification landing.
+    ///
+    /// `false` when `forward_id` names nothing this hub currently holds
+    /// (never registered, already closed, or its owning conduit already
+    /// dead) — no resource touched, nothing sent, matching every other
+    /// `tunnel.close`-on-an-unknown-id outcome (`qsh_proto::TunnelCloseData::closed`'s
+    /// own doc: idempotent, not an error).
+    pub(crate) fn admin_close_forward(&self, forward_id: &str) -> bool {
+        let (found, arrivals, daemon_request_id) = {
+            let mut state = self.lock();
+            if !state.forwards.contains_key(forward_id) {
+                return false;
+            }
+            state.forwards.remove(forward_id);
+            let arrivals = state.tunnel_queue.remove(forward_id).unwrap_or_default();
+            let daemon_request_id = state.mux.next_bare_request_id();
+            (true, arrivals, daemon_request_id)
+        };
+        debug_assert!(found);
+        // Same wake as `unregister_conduit`'s own sweep — a claimant
+        // parked on exactly this `forward_id` must not sit out its whole
+        // wait budget holding a `ClaimPool` permit for a registration
+        // this call just removed (`unregister_conduit`'s F2 doc).
+        self.tunnel_notify.notify_waiters();
+        for arrival in arrivals {
+            arrival.reset(RESET_CODE_TUNNEL_UNKNOWN_FORWARD);
+        }
+        let _ = self.outbound_tx.send((
+            daemon_request_id,
+            wire::control_message::Body::RfwdClose(wire::RemoteForwardClose {
+                forward_id: forward_id.to_string(),
+            }),
+        ));
+        true
     }
 
     /// Queue a `TCP_ACCEPTED` stream the target just opened for
@@ -2202,12 +2459,141 @@ impl ControlHub {
     }
 }
 
+/// [`tunnel_close_target`]'s result: which hub (if any, and if
+/// unambiguous) `crate::localctl::daemon::LocalctlDaemon::serve_admin_tunnel_close`
+/// should act on. Hand-implements [`std::fmt::Debug`] (below) rather than
+/// deriving it — [`ControlHub`] itself is not `Debug` (it holds live
+/// sockets/tasks, and this whole relay's own discipline is never to log
+/// its state as a blob — every log site names specific structural fields
+/// instead), so `One`'s variant just prints its host-agnostic shape.
+pub(crate) enum TunnelCloseTarget<'a> {
+    /// No registered host's hub currently holds `tunnel_id`.
+    None,
+    /// Exactly one hub holds it — the ordinary, unambiguous case.
+    One(&'a Arc<ControlHub>),
+    /// `tunnel_id` matched a live forward on more than one registered
+    /// host's hub at once — carries the match count for the caller's
+    /// structural warning log, never the hosts or the id's holder.
+    Ambiguous(usize),
+}
+
+impl std::fmt::Debug for TunnelCloseTarget<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TunnelCloseTarget::None => write!(f, "TunnelCloseTarget::None"),
+            TunnelCloseTarget::One(_) => write!(f, "TunnelCloseTarget::One(..)"),
+            TunnelCloseTarget::Ambiguous(n) => write!(f, "TunnelCloseTarget::Ambiguous({n})"),
+        }
+    }
+}
+
+/// Pure decision function behind
+/// `LocalctlDaemon::serve_admin_tunnel_close` (`PLAN.md` M4 Step 5 PR
+/// 5b, `qsh tunnel close <id>`) — factored out here, next to
+/// [`ControlHub::list_forwards`]/[`ControlHub::admin_close_forward`], so
+/// it can be unit-tested with this module's own `test_hub`/
+/// `register_forward_for_test` seams rather than a real
+/// `LocalConduit`/UDS round trip.
+///
+/// **Ambiguity is refused, not resolved by picking one (adversarial-
+/// review finding).** `tunnel_id` is `forward_id`, which is target-minted
+/// (this module's own §11-3 doc: shape-checked by
+/// [`wire::valid_forward_id`] only, never guaranteed unique *across*
+/// hosts — only within one hub's own table, `Self::deliver_response`'s
+/// "같은 forward_id가 두 번째로 도착하면" paragraph). `LocalTunnelClose`
+/// has no `host` to disambiguate with (unlike `LocalTunnel.host` on the
+/// listing side), so if the id names a live forward on **more than one**
+/// registered host's hub at once, there is no principled way to pick the
+/// intended one from this call alone. Scanning with `Iterator::any` and
+/// taking the first match over a `HashMap`'s nondeterministic iteration
+/// order would silently close whichever hub happened to be checked first
+/// — a real, if narrow, "closes the wrong host's tunnel" failure mode a
+/// colliding id (accidental, or a non-ULID-minting peer) could trigger.
+/// Refusing instead follows this codebase's own default (`CLAUDE.md`:
+/// "Fail closed on any ambiguous auth/ACL state").
+pub(crate) fn tunnel_close_target<'a>(
+    hubs: &'a [(String, Arc<ControlHub>)],
+    tunnel_id: &str,
+) -> TunnelCloseTarget<'a> {
+    let mut matches = hubs.iter().filter(|(_, hub)| {
+        hub.list_forwards()
+            .iter()
+            .any(|forward| forward.forward_id == tunnel_id)
+    });
+    match (matches.next(), matches.next()) {
+        (None, _) => TunnelCloseTarget::None,
+        (Some((_, hub)), None) => TunnelCloseTarget::One(hub),
+        (Some(_), Some(_)) => TunnelCloseTarget::Ambiguous(2 + matches.count()),
+    }
+}
+
 #[cfg(all(test, unix))]
 mod control_hub_tests {
     use super::*;
 
     fn hub() -> Arc<ControlHub> {
         ControlHub::new("widget".into(), "sha256:deadbeef".into(), 1, Vec::new())
+    }
+
+    /// The ordinary case: `tunnel_id` lives on exactly one of several
+    /// registered hosts' hubs.
+    #[test]
+    fn tunnel_close_target_finds_the_one_hub_that_holds_the_id() {
+        let hub_a = hub();
+        let hub_b = hub();
+        let (conduit_a, _rx_a) = hub_a.register_conduit();
+        hub_a.register_forward_for_test("fid-on-a", conduit_a);
+
+        let hubs = vec![("host-a".to_string(), hub_a), ("host-b".to_string(), hub_b)];
+        match tunnel_close_target(&hubs, "fid-on-a") {
+            TunnelCloseTarget::One(hub) => assert!(Arc::ptr_eq(hub, &hubs[0].1)),
+            other => panic!("expected exactly one match, got {other:?}"),
+        }
+    }
+
+    /// An id nothing holds is `None`, not an error and not a match —
+    /// `LocalTunnelCloseResult::closed`'s idempotent-not-error contract
+    /// starts here.
+    #[test]
+    fn tunnel_close_target_of_an_unknown_id_is_none() {
+        let hub_a = hub();
+        let hubs = vec![("host-a".to_string(), hub_a)];
+        assert!(matches!(
+            tunnel_close_target(&hubs, "never-registered"),
+            TunnelCloseTarget::None
+        ));
+    }
+
+    /// **The regression this whole function exists for.** The same
+    /// `forward_id` string registered on two different hosts' hubs at
+    /// once (a colliding/adversarial peer, or — pre-fix — the astronomically
+    /// unlikely accidental ULID collision) must refuse to pick one rather
+    /// than silently closing whichever hub iteration happened to visit
+    /// first. Before this fix, `serve_admin_tunnel_close`'s
+    /// `Iterator::any` shape closed on the first match — this asserts the
+    /// fixed shape instead: `Ambiguous(2)`, and — mutation-checked —
+    /// `TunnelCloseTarget::One` would make this test fail immediately,
+    /// since a `HashMap`-sourced `hubs_snapshot()`'s order is not fixed
+    /// and either hub could be "first".
+    #[test]
+    fn tunnel_close_target_refuses_to_guess_between_two_colliding_hosts() {
+        let hub_a = hub();
+        let hub_b = hub();
+        let (conduit_a, _rx_a) = hub_a.register_conduit();
+        let (conduit_b, _rx_b) = hub_b.register_conduit();
+        hub_a.register_forward_for_test("collided-id", conduit_a);
+        hub_b.register_forward_for_test("collided-id", conduit_b);
+
+        let hubs = vec![("host-a".to_string(), hub_a), ("host-b".to_string(), hub_b)];
+        match tunnel_close_target(&hubs, "collided-id") {
+            TunnelCloseTarget::Ambiguous(2) => {}
+            other => panic!("expected Ambiguous(2), got {other:?}"),
+        }
+        // And neither hub's registration was touched by the decision
+        // itself (`tunnel_close_target` never calls `admin_close_forward`
+        // — that is the caller's job, only after seeing `One`).
+        assert_eq!(hubs[0].1.forward_registry_len(), 1);
+        assert_eq!(hubs[1].1.forward_registry_len(), 1);
     }
 
     fn read_body(after: u64) -> wire::control_message::Body {
@@ -2793,6 +3179,19 @@ impl Listen {
     #[cfg(unix)]
     pub fn control_hub(&self, name: &str) -> Option<Arc<ControlHub>> {
         self.hubs.get(name)
+    }
+
+    /// Every currently-registered host's `(name, hub)`, live or not —
+    /// `crate::localctl::daemon`'s `LOCAL_ADMIN` handling for
+    /// `LocalTunnelList`/admin `tunnel.close` (`PLAN.md` M4 Step 5 PR
+    /// 5b), which — unlike [`Self::control_hub`] — has no single host
+    /// name to look up: `qsh tunnels`/`qsh tunnel close <id>` name no
+    /// host at all (`docs/CLI.md` §6.9's own usage examples), so this
+    /// controller must consider every live registration it holds, the
+    /// same shape [`Self::registry`]'s own `snapshot` gives `LocalHostList`.
+    #[cfg(unix)]
+    pub fn hubs_snapshot(&self) -> Vec<(String, Arc<ControlHub>)> {
+        self.hubs.snapshot()
     }
 
     /// The live QUIC [`Connection`] and [`ControlHub`] for `name`'s
@@ -4421,6 +4820,111 @@ mod tests {
         );
     }
 
+    // ------------------------------------------------------------------
+    // `LocalTunnelList`/`LocalTunnelClose` (`PLAN.md` M4 Step 5 PR 5b) —
+    // `list_forwards`/`admin_close_forward`'s own registry-level behavior.
+    // The full wire-level round trip through a real localctl daemon and
+    // `Ops::tunnel_list`/`Ops::tunnel_close` is
+    // `crates/qsh-testkit/tests/reverse_tunnel.rs`'s
+    // `tunnel_list_and_close_manage_a_daemon_held_remote_forward` (L3), not
+    // this crate's unit tests.
+    // ------------------------------------------------------------------
+
+    /// [`ControlHub::list_forwards`] answers with exactly the structural
+    /// fields [`ForwardSummary`] declares — `forward_id`/`mode`/`bind`/
+    /// `actual_port`/`forward_to` — and nothing else: the type itself has
+    /// no field a claim token (or any other capability/payload byte)
+    /// could ever ride in, so `crate::localctl::daemon`'s `LocalTunnelList`
+    /// handling built on top of it structurally cannot leak one either
+    /// (`docs/design/testing.md` L2's "never leaks tokens/payload").
+    /// [`ControlHub::register_forward_for_test`]'s own token — a fresh
+    /// random ULID, distinct from every hardcoded field below — is
+    /// asserted absent from every string field as a belt-and-suspenders
+    /// runtime check on top of that type-level guarantee.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn list_forwards_reports_only_structural_fields_never_the_claim_token() {
+        let hub = test_hub();
+        let (conduit, _rx) = hub.register_conduit();
+        let token = hub.register_forward_for_test("fid-list", conduit);
+        let token_text = String::from_utf8(token).expect("test token is ASCII");
+
+        let forwards = hub.list_forwards();
+        assert_eq!(forwards.len(), 1);
+        let summary = &forwards[0];
+        assert_eq!(summary.forward_id, "fid-list");
+        assert_eq!(summary.mode, "remote");
+        for field in [
+            summary.forward_id.as_str(),
+            summary.mode,
+            summary.bind.as_str(),
+            summary.forward_to.as_str(),
+        ] {
+            assert!(
+                !field.contains(&token_text),
+                "a LocalTunnelList-bound field must never carry the claim token, got {field:?}"
+            );
+        }
+    }
+
+    /// [`ControlHub::admin_close_forward`] (`PLAN.md` M4 Step 5 PR 5b): the
+    /// daemon's own-authority close path — the one `Ops::tunnel_close`
+    /// drives over a `LOCAL_ADMIN` conduit, deliberately never the owning
+    /// `LOCAL_CONTROL` conduit's own `RfwdClose` relay
+    /// (`docs/design/protocol.md` §11-3's owner-conduit gate on
+    /// [`ControlHub::send_request`], unchanged and untested here).
+    /// Registered by one conduit, closed by asking the hub directly —
+    /// exactly the shape a brand-new `qsh tunnel close <id>` process
+    /// always has (`Ops::tunnel_close`'s own doc on why this is not the
+    /// owning conduit). Proves: the registration is gone the instant this
+    /// returns; the target is notified with exactly one `RfwdClose`
+    /// naming the right `forward_id`, never a second one; and closing is
+    /// idempotent — an unknown id, or the same id again, is `false`, not
+    /// an error, and sends nothing further.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn admin_close_forward_removes_the_registration_and_notifies_the_target_exactly_once() {
+        let hub = test_hub();
+        let mut outbound_rx = hub
+            .take_outbound_receiver()
+            .expect("a fresh hub owns its own outbound receiver");
+        let (conduit, _rx) = hub.register_conduit();
+        let _token = hub.register_forward_for_test("fid-close", conduit);
+        assert_eq!(hub.forward_registry_len(), 1);
+
+        // An id nothing registered: no-op, touches nothing.
+        assert!(!hub.admin_close_forward("never-registered"));
+        assert_eq!(hub.forward_registry_len(), 1);
+
+        assert!(hub.admin_close_forward("fid-close"));
+        assert_eq!(
+            hub.forward_registry_len(),
+            0,
+            "the registration must be gone the instant admin_close_forward returns"
+        );
+        assert!(hub.forward_owner("fid-close").is_none());
+
+        let (_daemon_request_id, body) = outbound_rx
+            .recv()
+            .await
+            .expect("the target must be notified with an outbound RfwdClose");
+        match body {
+            wire::control_message::Body::RfwdClose(close) => {
+                assert_eq!(close.forward_id, "fid-close");
+            }
+            other => panic!("expected RfwdClose, got {other:?}"),
+        }
+        assert!(
+            outbound_rx.try_recv().is_err(),
+            "exactly one notification must be sent, never a second"
+        );
+
+        // Idempotent: closing the same id again is `false`, not an error,
+        // and sends nothing further.
+        assert!(!hub.admin_close_forward("fid-close"));
+        assert!(outbound_rx.try_recv().is_err());
+    }
+
     /// **The adversarial byte-level edition of the proof above**
     /// (`PLAN.md` M4 Step 5 (a)'s own framing: misdelivery here is "a
     /// security incident, not a bug"). Two conduits, two `forward_id`s,
@@ -5596,7 +6100,7 @@ mod tests {
     /// reads back `b"peer-must-never-see-this"`, failing the first
     /// assertion) and the *local* seat must still have it, unchanged
     /// (mutation check: change the `mem::take` to simply drop the value
-    /// instead of feeding it to `pending_rfwd_open_claim_tokens`, and the
+    /// instead of feeding it to `pending_rfwd_opens`, and the
     /// real-token claim at the end gets refused, failing the last
     /// assertion) — proving this is a relocation, not a loss.
     #[cfg(unix)]
@@ -5826,7 +6330,7 @@ mod tests {
     /// and the same `forward_id` is then opened and claimed end to end by
     /// its rightful conduit.
     ///
-    /// Mutation check: drop the `pending_claim_token.is_none()` arm from
+    /// Mutation check: drop the `pending_rfwd_open.is_none()` arm from
     /// `deliver_response` and the first assertion fails —
     /// `forward_registry_len()` is 1, the squatted registration owned by
     /// conduit A.
