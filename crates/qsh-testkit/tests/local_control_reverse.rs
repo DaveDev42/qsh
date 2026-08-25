@@ -348,6 +348,14 @@ async fn a_dying_conduits_in_flight_entry_is_fully_removed() {
         // produced so far: an idle shell writes nothing more, so this is
         // genuinely in flight on this conduit until the conduit dies —
         // fire-and-forget, deliberately never read.
+        // `wait_ms` bounds the window in which the request is observably
+        // in flight: once it elapses, the daemon answers the long-poll
+        // with an empty timeout result and `total_in_flight()` drops back
+        // to 0 on its own. 5s matched `TIMEOUT` exactly, so one scheduling
+        // stall on a loaded CI runner (seen on the macos-15-intel leg,
+        // 2026-08-25) could burn the whole window before the poll below
+        // ever observed it. Both the window and the waits are generous
+        // now; the happy path still finishes in milliseconds.
         send(
             &mut dying,
             3,
@@ -355,17 +363,18 @@ async fn a_dying_conduits_in_flight_entry_is_fully_removed() {
                 session_id,
                 after: next_after,
                 max_bytes: 0,
-                wait_ms: 5_000,
+                wait_ms: 60_000,
                 ctl_after: 0,
             }),
         )
         .await;
 
-        wait_for(TIMEOUT, || (hub.total_in_flight() >= 1).then_some(())).await;
+        let generous = Duration::from_secs(30);
+        wait_for(generous, || (hub.total_in_flight() >= 1).then_some(())).await;
 
         drop(dying); // the conduit dies mid-request
 
-        wait_for(TIMEOUT, || (hub.total_in_flight() == 0).then_some(())).await;
+        wait_for(generous, || (hub.total_in_flight() == 0).then_some(())).await;
 
         let _ = shutdown_tx.send(());
     };
