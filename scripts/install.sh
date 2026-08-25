@@ -76,25 +76,31 @@ https://github.com/${QSH_REPO}/releases and unzip it."
     esac
 }
 
-# Resolves the tag of the latest release by following the redirect that
-# /releases/latest issues, since the archive filename embeds the tag. The
-# redirect must land on a /releases/tag/<tag> URL; anything else (a repo
-# with no releases redirecting to the releases index, an interstitial) is
-# treated as "no tag found" rather than guessed at.
+# Resolves the tag of the latest release, since the archive filename
+# embeds the tag. First choice is the redirect that /releases/latest
+# issues — no rate limit, but GitHub excludes prereleases from it, so
+# while only prereleases exist it points at the releases index instead of
+# a tag. When the redirect does not land on /releases/tag/<tag>, fall
+# back to the API and take the newest release of any kind, prereleases
+# included. Anything still ambiguous is "no tag found", never a guess.
 resolve_latest_tag() {
     redirect="$(curl -fsSL -o /dev/null -w '%{url_effective}' \
-        "https://github.com/${QSH_REPO}/releases/latest")" ||
-        die "failed to reach https://github.com/${QSH_REPO}/releases/latest \
-(network error, or no release has been published yet). Set QSH_VERSION to \
-pick a tag explicitly."
+        "https://github.com/${QSH_REPO}/releases/latest")" || redirect=""
 
     case "$redirect" in
-        */releases/tag/?*) ;;
-        *) die "https://github.com/${QSH_REPO}/releases/latest did not resolve \
-to a release tag (got: ${redirect}). Set QSH_VERSION to pick a tag explicitly." ;;
+        */releases/tag/?*)
+            echo "${redirect##*/}"
+            return 0
+            ;;
     esac
 
-    echo "${redirect##*/}"
+    tag="$(curl -fsSL "https://api.github.com/repos/${QSH_REPO}/releases?per_page=1" |
+        awk -F'"' '/"tag_name":/ { print $4; exit }')" || tag=""
+    [ -n "$tag" ] ||
+        die "could not resolve the latest release of ${QSH_REPO} (no release \
+published yet, or the GitHub API was unreachable or rate limited). Set \
+QSH_VERSION to pick a tag explicitly."
+    echo "$tag"
 }
 
 main() {
