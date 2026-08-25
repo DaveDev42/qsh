@@ -64,7 +64,11 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+// The reverse claim loop's backoff decision is the only consumer, and it
+// is `cfg(unix)` with the rest of the reverse leg.
+#[cfg(unix)]
+use std::time::Instant;
 
 use qsh_proto::wire::{StreamHeader, StreamKind, sanitize_peer_text, valid_forward_id};
 use thiserror::Error;
