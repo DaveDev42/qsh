@@ -2,7 +2,7 @@
 
 **상태:** 확정 (구현과 어긋나는 내용을 발견하면 이 문서를 먼저 갱신한다)
 **작성일:** 2026-08-17 · **개정:** 2026-08-21 — 프로덕션 준비도 감사(HEAD `1d5d1b0`) 반영: M3/M5/M7/M8/M9 범위·수용 기준 증보, "마일스톤 마감 공통 절차" 신설. 새 마일스톤은 만들지 않았다 — 감사가 찾은 갭 전부를 기존 마일스톤에 명시 귀속시킨 것이 이 개정의 전부다.
-**현재 위치:** M3 진행 중 (Step 3까지 랜딩, 2026-08-21)
+**현재 위치:** M4 진행 중 (Step 5 PR 5a까지 랜딩, 2026-08-25)
 
 이 문서는 P0 MVP까지의 canonical 마일스톤 기록이다. 각 마일스톤의 "수용 기준"이 곧 그 마일스톤의 **완료 정의(Definition of Done)** 다 — 수용 기준을 통과하는 테스트/시연 없이는 마일스톤을 닫지 않는다. SC 번호는 PRD §15 성공 기준의 순번이다 (SC1: 신규 두 장비 5분 내 연결, SC2: 한 명령 접속, SC3: 네트워크 전환 ≥95% 유지/resume, SC4: resume 가능한 단절에서 output 무손실, SC5: client crash가 remote PTY를 죽이지 않음, SC6: 모든 privileged op의 ACL 추적성, SC7: 공개 beta 전 독립 보안 리뷰).
 
@@ -61,7 +61,7 @@
 - **사후 감사 (2026-08-21):** 완료 표시 후 감사에서 M2 귀속 계약 부채 2건 발견 — ① `qsh serve`의 SIGTERM graceful drain 미구현(`docs/CLI.md` §6.12 "(M2, ADR-0003)" 문장 위반; SIGTERM 시 PTY 자식이 고아로 살아남음이 실측 확인됨), ② `exec.run`이 serve 프로세스 환경을 `env_clear` 없이 상속하고 client가 `PATH`를 지정할 수 있음(같은 문서의 "호스트가 고정한다" 문장 위반). 상환은 M3의 감사 개정분(PLAN.md Step 3.5)이 소유한다. 재발 방지가 위 "마일스톤 마감 공통 절차" 1번이다.
 - **크기:** 5ew
 
-### M3 — 역방향 (진행 중)
+### M3 — 역방향 ✅ 완료 (2026-08-24)
 
 - **범위:** `qsh listen`(controller), `qsh reverse controller`(target, 등록 + heartbeat + 백오프 재접속), `host.reverse` ACL action 검사 지점, reverse host가 `hosts`에 `connection_mode:"reverse"`로 표시, `qsh attach <name>`이 역방향 연결 위에서 동작. 연결 방향/세션 역할 축 실사용.
 - **감사 개정 (2026-08-21) 추가 범위:** ① **M2 계약 부채 상환** — `qsh serve`(및 M3의 두 상주 모드) SIGTERM graceful drain(`docs/CLI.md` §6.12 문장의 이행)과 `exec.run` 환경 위생(`env_clear` + 호스트 고정 key 재적용). ② **세션 소유권 P0** — `session.control` action(write/resize)을 세션 opener principal에 결합. PRD §6이 조회·읽기·종료는 교차 기기 ACL 범위로 명시 허용하므로 결합 대상은 control 값 op뿐이다. M5 정책 어휘(resource-ownership 축)의 선행 결정이며, M5로 미루면 정책 어휘가 소유자 개념 없이 먼저 굳는다.
@@ -71,7 +71,7 @@
   - **(감사 개정)** 타 principal 세션에 대한 `session.write/resize`가 거부되고 audit에 deny가 남음(소유권 P0). 병렬 동시 등록(같은/다른 fingerprint)·병렬 다중 세션 경합 테스트가 존재 — 순차 시나리오만으로 마일스톤을 닫지 않는다.
 - **크기:** 2ew + 0.5ew(감사 개정분)
 
-### M4 — 터널
+### M4 — 터널 (진행 중)
 
 - **범위:** `-L`/`-R`, `qsh tunnel open/close`, `qsh tunnels`. TCP 연결당 QUIC stream 1개, stream 우선순위로 PTY 보호, remote forward는 loopback bind만(§9). forward/reverse 연결 양쪽에서 동작.
 - **명시적 out:** SOCKS `-D`(P1), file copy, UDP forwarding.

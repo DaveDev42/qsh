@@ -6,6 +6,10 @@ on:
     tags:
       - "v*"
 
+# Least privilege by default; the release job opts up to contents: write.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -40,7 +44,83 @@ jobs:
         shell: bash
         run: ./target/${{ matrix.target }}/release/qsh${{ matrix.ext }} version --json
 
+      # Archive naming (qsh-<tag>-<target>.tar.gz / .zip) is a contract with
+      # scripts/install.sh — keep the two in sync if you change this.
+      - name: Package archive (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          asset="qsh-${{ github.ref_name }}-${{ matrix.target }}.tar.gz"
+          tar czf "$asset" -C "target/${{ matrix.target }}/release" qsh
+          echo "ASSET=$asset" >> "$GITHUB_ENV"
+
+      - name: Package archive (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $asset = "qsh-${{ github.ref_name }}-${{ matrix.target }}.zip"
+          Compress-Archive -Path "target/${{ matrix.target }}/release/qsh.exe" -DestinationPath $asset
+          Add-Content -Path $env:GITHUB_ENV -Value "ASSET=$asset"
+
       - uses: actions/upload-artifact@v7
         with:
-          name: qsh-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/qsh${{ matrix.ext }}
+          name: ${{ env.ASSET }}
+          path: ${{ env.ASSET }}
+          # Default is a warning, which would ship a release quietly missing
+          # a platform. A packaging step that produced nothing is a failure.
+          if-no-files-found: error
+
+  release:
+    name: release
+    needs: build
+    runs-on: ubuntu-24.04
+    # Only cut a GitHub Release on an actual tag push; workflow_dispatch
+    # runs (e.g. against a branch) build and smoke-test only.
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        working-directory: dist
+        run: sha256sum -- * > SHA256SUMS
+
+      # Semver: anything after a `-` in the version is a prerelease
+      # identifier (v0.1.0-alpha.1, v0.1.0-rc.2). A bare v0.1.0 is not.
+      - name: Determine prerelease flag
+        id: meta
+        run: |
+          set -euo pipefail
+          tag="${{ github.ref_name }}"
+          if [[ "$tag" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          prerelease_flag=()
+          if [[ "${{ steps.meta.outputs.prerelease }}" == "true" ]]; then
+            prerelease_flag=(--prerelease)
+          fi
+          tag="${{ github.ref_name }}"
+          # Re-running the workflow on an existing tag replaces the assets
+          # rather than failing on "release already exists".
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/* --clobber
+          else
+            gh release create "$tag" dist/* \
+              --title "$tag" \
+              --generate-notes \
+              "${prerelease_flag[@]}"
+          fi
