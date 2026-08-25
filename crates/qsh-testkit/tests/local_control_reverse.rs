@@ -289,10 +289,13 @@ async fn a_dying_conduits_in_flight_entry_is_fully_removed() {
 
     let test_fut = async {
         wait_for(TIMEOUT, || harness.listen.registry().get("widget")).await;
-        let hub = harness
-            .listen
-            .control_hub("widget")
-            .expect("a live registration must have a hub");
+        // The registry entry is written by `admit()` during the control
+        // handshake, while the hub is published only after the handshake
+        // returns (`Listen::hubs`'s second, separately-locked publish) —
+        // so "registry has it" does not yet imply "hub has it", and this
+        // test reads the hub. Wait for the observable actually read
+        // (seen flaking on the macos-14 CI leg, 2026-08-25).
+        let hub = wait_for(TIMEOUT, || harness.listen.control_hub("widget")).await;
         assert_eq!(hub.total_in_flight(), 0);
 
         let mut dying = connect_control(&localctl.socket_path, "widget").await;
