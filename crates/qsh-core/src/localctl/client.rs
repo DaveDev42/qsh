@@ -252,31 +252,78 @@ impl ControlConduit {
 /// by the daemon-side protocol (`serve_stream`'s own doc — "the next frame
 /// from the CLI is the wire `StreamHeader`"), so there is nothing a caller
 /// could usefully vary about *how* it is sent, only *what* it says. The
-/// daemon answers a well-formed `SESSION_DATA` header with silence (it
-/// moves straight to the raw splice, `serve_stream`'s own doc), so this
-/// function does not wait for anything after sending it — matching
-/// `client::Session::open_attach_stream`'s forward-route sibling, which
-/// likewise never waits for a target-side ack of the header it writes.
+/// daemon answers a well-formed `SESSION_DATA`/`TCP_CONNECT` header with
+/// silence (it moves straight to the raw splice, `serve_stream`'s own
+/// doc), so this function does not wait for anything after sending it —
+/// matching `client::Session::open_attach_stream`'s forward-route sibling,
+/// which likewise never waits for a target-side ack of the header it
+/// writes. (`TCP_ACCEPTED` is the one kind that *is* answered — always,
+/// with exactly one frame; see [`open_stream_with_wait`].) Convenience
+/// wrapper over [`open_stream_with_wait`] for every caller that has
+/// nothing to wait on (`SESSION_DATA`, `TCP_CONNECT`).
 pub(crate) async fn open_stream(
     socket_path: &Path,
     host: &str,
     header: &wire::StreamHeader,
 ) -> Result<DataHandshake, OpError> {
+    open_stream_with_wait(socket_path, host, header, 0).await
+}
+
+/// [`open_stream`], but with `LocalHello.wait_ms` threaded through rather
+/// than fixed at `0` — the one caller that needs it is `TCP_ACCEPTED`'s
+/// requester-side claim over a reverse route
+/// (`crate::tunnel::remote`'s reverse claim loop, `PLAN.md` M4 Step 5 (a)):
+/// the daemon's `serve_tcp_accepted` reuses this exact `wait_ms` as its
+/// [`ControlHub::claim_tcp_accepted`](crate::reverse::listen::ControlHub::claim_tcp_accepted)
+/// budget (`crate::localctl::daemon`'s `serve_stream`, `clamp_wait`), so
+/// this is how a claim long-polls instead of busy-spinning a fresh conduit
+/// per attempt. Clamped by the daemon to `LOCAL_WAIT_MAX` regardless of
+/// what is sent (`qsh/local/v1.proto`'s own doc on the field).
+///
+/// `TCP_ACCEPTED` is also the one header kind that gets an answer at all:
+/// the daemon always frames exactly one `LocalResponse` for it before any
+/// raw byte flows — `LocalClaimGranted` on success, `LocalError` on every
+/// failure, a timeout being one of those failures rather than silence
+/// (`docs/design/protocol.md` §11-3's "TCP_ACCEPTED claim leg의 요청/응답").
+/// That is what makes the claim decidable: the reader consumes a fixed one
+/// frame and switches to raw, instead of trying to classify bytes by
+/// content or read success out of how long nothing arrived.
+pub(crate) async fn open_stream_with_wait(
+    socket_path: &Path,
+    host: &str,
+    header: &wire::StreamHeader,
+    wait_ms: u32,
+) -> Result<DataHandshake, OpError> {
     let stream = UnixStream::connect(socket_path)
         .await
         .map_err(|err| io_error("connect", socket_path, &err))?;
-    open_stream_over(stream, host, header).await
+    open_stream_over_with_wait(stream, host, header, wait_ms).await
 }
 
-/// Same exchange as [`open_stream`], over an already-connected conduit —
-/// split out for the same reason [`open_control_over`] is: tests drive the
-/// handshake without a real `connect(2)`.
-pub(crate) async fn open_stream_over(
+/// Same exchange as [`open_stream`]/[`open_stream_with_wait`], over an
+/// already-connected conduit — split out for the same reason
+/// [`open_control_over`] is: tests drive the handshake without a real
+/// `connect(2)`. `wait_ms` explicit rather than a separate zero-wait
+/// wrapper, since every current caller of the "already connected" form is
+/// a test that names its own wait budget (`0` for the ordinary
+/// `SESSION_DATA`/`TCP_CONNECT` handshake tests, a real value for a
+/// `TCP_ACCEPTED` claim test).
+pub(crate) async fn open_stream_over_with_wait(
     stream: UnixStream,
     host: &str,
     header: &wire::StreamHeader,
+    wait_ms: u32,
 ) -> Result<DataHandshake, OpError> {
-    match tokio::time::timeout(PROBE_TIMEOUT, open_stream_over_inner(stream, host, header)).await {
+    match tokio::time::timeout(
+        // A long claim wait is a *deliberately* long-parked read, not a
+        // hung conduit — the handshake timeout must cover it, or a real
+        // `wait_ms` claim would be torn down by the probe timeout meant
+        // for an unresponsive daemon.
+        Duration::from_millis(u64::from(wait_ms)) + PROBE_TIMEOUT,
+        open_stream_over_inner(stream, host, header, wait_ms),
+    )
+    .await
+    {
         Ok(result) => result,
         Err(_elapsed) => Err(OpError::new(
             ErrorCode::ConnectionFailed,
@@ -292,6 +339,7 @@ async fn open_stream_over_inner(
     stream: UnixStream,
     host: &str,
     header: &wire::StreamHeader,
+    wait_ms: u32,
 ) -> Result<DataHandshake, OpError> {
     let mut conduit = LocalConduit::new(stream);
     conduit
@@ -299,7 +347,7 @@ async fn open_stream_over_inner(
             version: LOCAL_HELLO_VERSION,
             kind: LocalStreamKind::LocalStream as i32,
             host: host.to_string(),
-            wait_ms: 0,
+            wait_ms,
             // The data conduit never waits on its own — by the time
             // `LocalReconnect` opens this, its `LOCAL_CONTROL` conduit has
             // already landed on a live, newer-than-`known_generation`
@@ -326,6 +374,52 @@ async fn open_stream_over_inner(
         }
     };
     conduit.send(header).await?;
+
+    // `TCP_ACCEPTED` is the one header kind the daemon answers at all
+    // after this point, and it always answers: exactly one framed
+    // `LocalResponse` — `LocalClaimGranted` if the claim was granted, a
+    // `LocalError` otherwise, with a timeout being one of those errors
+    // rather than silence (`docs/design/protocol.md` §11-3's
+    // "TCP_ACCEPTED claim leg의 요청/응답",
+    // `crate::localctl::daemon::LocalctlDaemon::serve_tcp_accepted`).
+    // So this reads a fixed *one* frame and then switches to raw. It
+    // never inspects byte content to decide whether something is a frame
+    // (any byte sequence can be read as a length prefix, so that question
+    // is not decidable) and never reads silence as success (a granted
+    // claim onto an idle connection and a slow failure are the same
+    // silence). The wait itself needs no budget of its own: the daemon's
+    // *total* wait across connecting and claiming is capped at the very
+    // `wait_ms` this conduit sent — `crate::localctl::daemon::serve_stream`
+    // splits that one budget between `connection_for_wait` and the parked
+    // claim rather than handing the claim a second full `wait_ms` after
+    // the first phase already spent part of it (adversarial-review
+    // finding: an orphaned claim outliving this conduit's own timeout
+    // could steal an arrival meant for a later retry) — and
+    // `open_stream_over_with_wait`'s `wait_ms + PROBE_TIMEOUT` wrapper
+    // already bounds a daemon that hangs instead of answering that
+    // budget.
+    //
+    // Every other kind (`SESSION_DATA`, `TCP_CONNECT`) is answered with
+    // silence unconditionally and reads nothing here.
+    if header.stream_kind() == Some(wire::StreamKind::TcpAccepted) {
+        let claim: LocalResponse = conduit.recv().await?.ok_or_else(|| {
+            OpError::new(
+                ErrorCode::ConnectionFailed,
+                "localctl: daemon closed the conduit without answering the TCP_ACCEPTED claim",
+            )
+        })?;
+        match claim.body {
+            Some(local_response::Body::ClaimGranted(_)) => {}
+            Some(local_response::Body::Error(err)) => return Err(remote_error(err)),
+            _ => {
+                return Err(OpError::new(
+                    ErrorCode::ConnectionFailed,
+                    "localctl: TCP_ACCEPTED claim answered with an unexpected framed response",
+                ));
+            }
+        }
+    }
+
     // From here on this conduit never speaks framed `qsh.local.v1` again —
     // `into_raw` hands back the still-open stream plus whatever bytes of
     // the peer's first `SessionFrame` the last `read()` already swallowed
@@ -428,6 +522,19 @@ impl DataSendHalf {
             libc::shutdown(as_raw_fd(&self.socket), libc::SHUT_WR);
         }
     }
+
+    /// Surrender this send half as a raw byte writer, for the one caller
+    /// that needs an unframed pipe past its handshake: a tunnel stream
+    /// relayed over the reverse `LOCAL_STREAM` conduit
+    /// (`crate::tunnel::splice::splice_tcp_uds`, `PLAN.md` M4 Step 5 (a)) —
+    /// the `Local` carrier's counterpart to
+    /// [`qsh_transport::control::FramedSend::into_raw`], which the forward
+    /// `Quic` carrier surrenders instead.
+    pub(crate) fn into_raw(self) -> RawUdsWrite {
+        RawUdsWrite {
+            socket: self.socket,
+        }
+    }
 }
 
 /// Daemon → client half of a `LOCAL_STREAM` conduit, once its header has
@@ -476,6 +583,100 @@ impl DataRecvHalf {
             // nothing, forever, on every subsequent loop no matter how
             // much data actually arrives.
             self.dec.push(&self.buf[..n]);
+        }
+    }
+
+    /// Surrender this recv half as a raw byte reader, plus whatever bytes
+    /// of the peer's first post-handshake payload the last `read()` already
+    /// swallowed — the receive-half sibling of [`DataSendHalf::into_raw`],
+    /// mirroring [`LocalConduit::into_raw`](crate::localctl::frame::LocalConduit::into_raw)'s
+    /// exact residue contract: `self.dec`'s [`FrameDecoder::take_remaining`]
+    /// is precisely "bytes already read off the socket but not yet
+    /// resolved into a frame", which past the tunnel handshake is tunnel
+    /// payload, not a frame in progress.
+    pub(crate) fn into_raw(self) -> (RawUdsRead, Vec<u8>) {
+        let DataRecvHalf {
+            socket, mut dec, ..
+        } = self;
+        (RawUdsRead { socket }, dec.take_remaining())
+    }
+}
+
+/// Client → daemon raw byte writer, past a `LOCAL_STREAM` conduit's framed
+/// handshake — [`DataSendHalf::into_raw`]'s return type, and the `Local`
+/// carrier's counterpart to a raw `quinn::SendStream`
+/// ([`DataSend::into_raw_quic`](crate::client::link::DataSend::into_raw_quic)).
+/// Backed by the same `Arc<UnixStream>` [`DataSendHalf`] held, so this is
+/// still just one of up to three live clones of one socket
+/// ([`open_stream_over_inner`]'s own doc) — dropping this one only drops
+/// this clone's reference, exactly like every other clone.
+pub(crate) struct RawUdsWrite {
+    socket: Arc<UnixStream>,
+}
+
+impl tokio::io::AsyncWrite for RawUdsWrite {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<io::Result<usize>> {
+        loop {
+            std::task::ready!(self.socket.poll_write_ready(cx))?;
+            match self.socket.try_write(buf) {
+                Ok(n) => return std::task::Poll::Ready(Ok(n)),
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => continue,
+                Err(err) => return std::task::Poll::Ready(Err(err)),
+            }
+        }
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        // Every successful `try_write` above already handed its bytes to
+        // the kernel — there is no userspace buffer here to flush, the
+        // same reason tokio's own `impl AsyncWrite for UnixStream` answers
+        // this the same way.
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        // Half-close, synchronous and immediate — [`DataSendHalf::finish`]'s
+        // own doc on why `SHUT_WR` on the shared socket is the whole
+        // teardown a tunnel's clean end needs on this carrier.
+        unsafe {
+            libc::shutdown(as_raw_fd(&self.socket), libc::SHUT_WR);
+        }
+        std::task::Poll::Ready(Ok(()))
+    }
+}
+
+/// Daemon → client raw byte reader — [`DataRecvHalf::into_raw`]'s return
+/// type, the receive-half sibling of [`RawUdsWrite`].
+pub(crate) struct RawUdsRead {
+    socket: Arc<UnixStream>,
+}
+
+impl tokio::io::AsyncRead for RawUdsRead {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        loop {
+            std::task::ready!(self.socket.poll_read_ready(cx))?;
+            match self.socket.try_read(buf.initialize_unfilled()) {
+                Ok(n) => {
+                    buf.advance(n);
+                    return std::task::Poll::Ready(Ok(()));
+                }
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => continue,
+                Err(err) => return std::task::Poll::Ready(Err(err)),
+            }
         }
     }
 }

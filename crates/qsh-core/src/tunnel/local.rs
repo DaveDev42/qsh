@@ -76,11 +76,19 @@ pub(crate) enum ForwardCarrier {
     Quic(qsh_transport::Connection),
     /// This machine's resident `qsh listen` daemon socket plus the host
     /// name to relay to (reverse route) — see [`DataLink::Local`].
-    /// Constructing this is legal, but splicing over it is refused with
-    /// [`ForwardConnError::CarrierNotRaw`] until `PLAN.md` M4 Step 5
-    /// teaches the daemon to relay tunnel streams.
+    /// `-L over reverse`, `PLAN.md` M4 Step 5 (a): each forwarded
+    /// connection opens its own `TCP_CONNECT` over a fresh `LOCAL_STREAM`
+    /// conduit, and past `ConnectResult{ok:true}` splices raw bytes with
+    /// [`crate::tunnel::splice::splice_tcp_uds`] — the reverse carrier's
+    /// counterpart to [`ForwardCarrier::Quic`]'s `splice_tcp_quic`.
+    ///
+    /// Constructing and splicing over this variant is complete as of this
+    /// stage (`PLAN.md` M4 Step 5 (a)) — only its *call site* is not: the
+    /// interactive `-L`/standalone `tunnel_open` entry points still always
+    /// pick [`ForwardCarrier::Quic`], deciding the route is `ops`'s job
+    /// (`PLAN.md` M4 Step 5 PR 5b), not this module's.
     #[cfg(unix)]
-    #[allow(dead_code)] // consumed by Step 5 (`-L over reverse`)
+    #[allow(dead_code)] // wired up by PR 5b's route-aware `Ops` entry points
     Local {
         /// The daemon's UDS socket path.
         socket: std::path::PathBuf,
@@ -173,9 +181,14 @@ pub(crate) enum ForwardConnError {
     /// either way.
     #[error("peer closed the tunnel stream without a ConnectResult")]
     NoConnectResult,
-    /// The carrier cannot surrender a raw byte pipe: a local forward over
-    /// the reverse `LOCAL_STREAM` conduit, which is `PLAN.md` M4 Step 5.
-    #[error("local forwards over a reverse connection land in M4 Step 5")]
+    /// The carrier cannot surrender the raw byte pipe [`forward_connection`]
+    /// expected for it. Not reachable in practice — `carrier`'s variant and
+    /// `carrier.link()`'s variant always agree, so the matching
+    /// `into_raw_quic`/`into_raw_local` call always succeeds — but kept as
+    /// a real, reported variant rather than `unreachable!()` so a future
+    /// carrier this splice does not yet know how to pump fails loudly
+    /// instead of panicking a live connection's task.
+    #[error("this tunnel carrier cannot surrender a raw byte pipe")]
     CarrierNotRaw,
     /// The byte pipe itself broke mid-transfer.
     #[error(transparent)]
@@ -365,11 +378,49 @@ impl LocalForwardHandle {
         spec: &ForwardSpec,
         connection: qsh_transport::Connection,
     ) -> Result<Self, LocalForwardError> {
+        Self::start_with_carrier(spec, ForwardCarrier::Quic(connection)).await
+    }
+
+    /// [`Self::start`]'s reverse-route sibling, `-L over reverse`
+    /// (`PLAN.md` M4 Step 5 (a)): each connection accepted on this
+    /// forward's listener relays through `socket_path` (this machine's
+    /// resident `qsh listen` daemon's UDS socket) to `host`'s live reverse
+    /// registration, instead of dialing a QUIC connection directly. See
+    /// [`ForwardCarrier::Local`]'s own doc for the wire shape this opens
+    /// per connection.
+    ///
+    /// `pub`, not `pub(crate)` — the same Stage D widening
+    /// [`crate::tunnel::RemoteForwardAcceptor::spawn_reverse`] already
+    /// got: `crates/qsh-testkit/tests/reverse_tunnel.rs` (L3, Step 5 (a))
+    /// drives the real `-L over reverse` requester leg end to end rather
+    /// than re-implementing it, which needs this callable from outside
+    /// `qsh-core`. `Ops`'s route-aware entry point (PR 5b) is still the
+    /// only *production* caller.
+    #[cfg(unix)]
+    pub async fn start_reverse(
+        spec: &ForwardSpec,
+        socket_path: std::path::PathBuf,
+        host: String,
+    ) -> Result<Self, LocalForwardError> {
+        Self::start_with_carrier(
+            spec,
+            ForwardCarrier::Local {
+                socket: socket_path,
+                host,
+            },
+        )
+        .await
+    }
+
+    async fn start_with_carrier(
+        spec: &ForwardSpec,
+        carrier: ForwardCarrier,
+    ) -> Result<Self, LocalForwardError> {
         let forward = LocalForward::bind(spec).await?;
         let bind = forward.local_addr();
         let (host, host_port) = forward.destination();
         let forward_to = (host.to_string(), host_port);
-        let carrier = Arc::new(ForwardCarrier::Quic(connection));
+        let carrier = Arc::new(carrier);
         Ok(Self {
             tunnel_id: ulid::Ulid::new().to_string(),
             bind,
@@ -490,15 +541,35 @@ async fn forward_connection(
     }
 
     // Past `ConnectResult{ok:true}` the stream is a raw byte pipe (§5, §7):
-    // hand both halves to the splice, along with any payload the peer
-    // already pipelined behind the `ConnectResult` frame — which
-    // `into_raw_quic` returns and the splice must write first.
-    let (Ok(raw_send), Ok((raw_recv, residue))) = (send.into_raw_quic(), recv.into_raw_quic())
-    else {
-        kill.kill();
-        return Err(abort_local(tcp, ForwardConnError::CarrierNotRaw));
-    };
-    Ok(splice_tcp_quic(tcp, raw_send, raw_recv, residue).await?)
+    // hand both halves to the splice for whichever carrier this connection
+    // actually opened its stream on — `carrier`'s own variant decides
+    // which raw conversion must succeed, so the two always agree; the
+    // `CarrierNotRaw` arm exists only as a defensive fallback
+    // (`ForwardConnError::CarrierNotRaw`'s own doc), never a reachable
+    // outcome. Either way any payload the peer already pipelined behind
+    // the `ConnectResult` frame (`into_raw_quic`/`into_raw_local`'s
+    // residue) is what the splice must write first.
+    match carrier {
+        ForwardCarrier::Quic(_) => {
+            let (Ok(raw_send), Ok((raw_recv, residue))) =
+                (send.into_raw_quic(), recv.into_raw_quic())
+            else {
+                kill.kill();
+                return Err(abort_local(tcp, ForwardConnError::CarrierNotRaw));
+            };
+            Ok(splice_tcp_quic(tcp, raw_send, raw_recv, residue).await?)
+        }
+        #[cfg(unix)]
+        ForwardCarrier::Local { .. } => {
+            let (Ok(raw_send), Ok((raw_recv, residue))) =
+                (send.into_raw_local(), recv.into_raw_local())
+            else {
+                kill.kill();
+                return Err(abort_local(tcp, ForwardConnError::CarrierNotRaw));
+            };
+            Ok(crate::tunnel::splice::splice_tcp_uds(tcp, raw_send, raw_recv, residue).await?)
+        }
+    }
 }
 
 /// End an accepted local connection the way a *failed* tunnel must end it,

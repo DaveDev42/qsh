@@ -241,6 +241,13 @@ mod tests {
             arb_local_tunnel_list_result().prop_map(|m| LocalResponse {
                 body: Some(local_response::Body::TunnelListResult(m)),
             }),
+            // Empty message, but the *envelope* around it still has to
+            // round-trip byte-canonically — `LocalClaimGranted` carries its
+            // whole meaning in which oneof arm is set
+            // (`qsh/local/v1.proto`'s own doc).
+            Just(LocalResponse {
+                body: Some(local_response::Body::ClaimGranted(LocalClaimGranted {})),
+            }),
             arb_local_error().prop_map(|m| LocalResponse {
                 body: Some(local_response::Body::Error(m)),
             }),

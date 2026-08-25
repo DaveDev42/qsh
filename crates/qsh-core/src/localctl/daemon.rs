@@ -40,9 +40,9 @@ use std::sync::Arc;
 
 use qsh_proto::ErrorCode;
 use qsh_proto::local::{
-    LOCAL_HELLO_VERSION, LOCAL_WAIT_MAX, LocalError, LocalHello, LocalHelloAck, LocalHost,
-    LocalHostList, LocalHostListResult, LocalResponse, LocalStreamKind, classify_stream_kind,
-    local_response,
+    LOCAL_HELLO_VERSION, LOCAL_WAIT_MAX, LocalClaimGranted, LocalError, LocalHello, LocalHelloAck,
+    LocalHost, LocalHostList, LocalHostListResult, LocalResponse, LocalStreamKind,
+    classify_stream_kind, local_response,
 };
 use qsh_proto::wire;
 use tokio::io::AsyncWriteExt as _;
@@ -703,6 +703,34 @@ impl LocalctlDaemon {
                                     break;
                                 }
                             }
+                            // Adversarial-review hole 3: this conduit
+                            // asked to close a `forward_id` another
+                            // conduit on this hub owns. Nothing was
+                            // allocated and nothing reached the target
+                            // (`ControlHub::send_request`'s own
+                            // `NotOwner` doc — the daemon is the only
+                            // component that can tell two CLI conduits
+                            // apart, so refusing here is the only place
+                            // it can be refused at all). Answered on this
+                            // conduit only, exactly like the exhaustion
+                            // case above; the owning conduit never learns
+                            // the attempt happened and its registration is
+                            // untouched.
+                            Err(HubSendError::NotOwner) => {
+                                let reply = wire::ControlMessage::new(
+                                    request_id,
+                                    wire::control_message::Body::Response(wire::Response {
+                                        body: Some(wire::response::Body::Error(wire::Error::new(
+                                            ErrorCode::PermissionDenied,
+                                            "this forward is owned by another client on this host",
+                                            false,
+                                        ))),
+                                    }),
+                                );
+                                if conduit.send(&reply).await.is_err() {
+                                    break;
+                                }
+                            }
                             Err(HubSendError::HostDead) => break,
                         },
                         // A conduit sent a body shape it must never send
@@ -774,6 +802,29 @@ impl LocalctlDaemon {
         mut conduit: LocalConduit<UnixStream>,
     ) {
         let deadline = clamp_wait(wait_ms);
+        // `deadline` is the CLI's *one* total wait budget for this whole
+        // call, not a per-phase allowance handed out fresh at each step
+        // (adversarial-review finding: `serve_tcp_accepted` used to
+        // receive this same `deadline` value unmodified, so a call that
+        // had already spent real time parked in `connection_for_wait`
+        // below — the ordinary case right after a target reconnects and
+        // its hub has not republished yet — got a *second* full
+        // `deadline` for its `claim_tcp_accepted` park, doubling the
+        // daemon's total wait past what the CLI's own
+        // `wait_ms + PROBE_TIMEOUT` timeout (`localctl::client::
+        // open_stream_over_with_wait`) is actually bounded by. A claim
+        // still parked after the CLI has given up and retried on a fresh
+        // conduit is an orphan that can win the race for an arrival the
+        // retry was waiting for. `wait_start` is measured on
+        // `tokio::time`'s clock (not the injectable `Clock` trait) on
+        // purpose: [`ControlHub::claim_tcp_accepted`]'s own parked wait
+        // is a raw `tokio::time::timeout`, and [`Listen::connection_for_wait`]'s
+        // poll sleeps through [`crate::broker::SystemClock`], which
+        // itself wraps the same tokio timer in production — so this is
+        // the one clock both phases already answer to, paused/advanced
+        // together under `tokio::time::pause()` in a test exactly the way
+        // production timing composes.
+        let wait_start = tokio::time::Instant::now();
         let Some((conn, hub)) = self
             .listen
             .connection_for_wait(host, known_generation, deadline)
@@ -834,21 +885,60 @@ impl LocalctlDaemon {
             Err(_) => return,
         };
 
-        if !is_session_data_header(&header) {
-            // Nothing opened on QUIC — the whole point of checking the
-            // kind before `open_bi` (HARD RULES: "a non-SESSION_DATA or
-            // missing header -> LocalError INVALID_ARGUMENT, nothing
-            // opened on QUIC").
-            let _ = conduit
-                .send(&LocalResponse {
-                    body: Some(local_response::Body::Error(LocalError::from_code(
-                        ErrorCode::InvalidArgument,
-                        "LOCAL_STREAM's first frame must be a SESSION_DATA StreamHeader",
-                    ))),
-                })
+        // `M4 Step 5`: `LOCAL_STREAM` now carries three header kinds, not
+        // just `SESSION_DATA` — `docs/design/protocol.md` §11-3's
+        // "터널 conduit은 새 LocalStreamKind를 얻지 않는다": `TCP_CONNECT`
+        // takes the exact same open-a-fresh-QUIC-bidi-and-splice path as
+        // `SESSION_DATA` below (this daemon never distinguishes a session
+        // byte from a tunnel byte — both are opaque past the header), and
+        // `TCP_ACCEPTED` is different in kind, not degree — no `open_bi`
+        // at all, because the QUIC stream it splices onto already exists
+        // (the target opened it; `Listen::run_tunnel_accept_loop`
+        // accepted it) — so it is handled by
+        // [`Self::serve_tcp_accepted`] and returns before any of the
+        // `open_bi` machinery below ever runs.
+        let is_tunnel_connect = match header.stream_kind() {
+            Some(wire::StreamKind::SessionData) => false,
+            Some(wire::StreamKind::TcpConnect) => true,
+            Some(wire::StreamKind::TcpAccepted) => {
+                // What is left of the *one* `deadline` budget after
+                // `connection_for_wait` above (and the header read just
+                // above this match) already spent part of it —
+                // `wait_start`'s own doc on why handing `serve_tcp_accepted`
+                // a second full `deadline` here would let its parked claim
+                // outlive the CLI's own timeout. Saturating: a slow
+                // handshake that already ate the whole budget hands the
+                // claim `Duration::ZERO`, which still runs
+                // `claim_tcp_accepted`'s first, pre-`await` check (an
+                // already-queued arrival is still granted at once) but
+                // never actually parks.
+                self.serve_tcp_accepted(
+                    &hub,
+                    &header,
+                    deadline.saturating_sub(wait_start.elapsed()),
+                    conduit,
+                )
                 .await;
-            return;
-        }
+                return;
+            }
+            _ => {
+                // Nothing opened on QUIC — the whole point of checking
+                // the kind before `open_bi` (HARD RULES: "a non-
+                // SESSION_DATA/TCP_CONNECT/TCP_ACCEPTED or missing header
+                // -> LocalError INVALID_ARGUMENT, nothing opened on
+                // QUIC").
+                let _ = conduit
+                    .send(&LocalResponse {
+                        body: Some(local_response::Body::Error(LocalError::from_code(
+                            ErrorCode::InvalidArgument,
+                            "LOCAL_STREAM's first frame must be a SESSION_DATA, TCP_CONNECT, or \
+                             TCP_ACCEPTED StreamHeader",
+                        ))),
+                    })
+                    .await;
+                return;
+            }
+        };
 
         // The local conduit's own cap (`CONTROL_FRAME_MAX`, 256 KiB) is
         // wider than the QUIC data stream's (`DATA_FRAME_MAX`, 64 KiB) —
@@ -868,6 +958,35 @@ impl LocalctlDaemon {
                 .await;
             return;
         }
+
+        // `PLAN.md` M4 Step 5 (a)'s hub cap: a `TCP_CONNECT` splice is
+        // about to commit a fresh QUIC bidi stream on this host's shared
+        // reverse connection, so it draws from the same
+        // `MAX_TUNNEL_STREAMS_PER_HUB` pool `TCP_ACCEPTED` streams do
+        // (`ControlHub::try_acquire_tunnel_permit`'s own doc) — never for
+        // `SESSION_DATA`, which this cap does not bound. Held for the
+        // whole splice, released only when this function returns (the
+        // binding lives to the end of scope, past the `tokio::join!`
+        // below).
+        let _tunnel_permit = if is_tunnel_connect {
+            match hub.try_acquire_tunnel_permit() {
+                Some(permit) => Some(permit),
+                None => {
+                    let _ = conduit
+                        .send(&LocalResponse {
+                            body: Some(local_response::Body::Error(LocalError::from_code(
+                                ErrorCode::ResourceExhausted,
+                                "too many concurrent tunnel streams on this host's reverse \
+                                 connection; retry shortly",
+                            ))),
+                        })
+                        .await;
+                    return;
+                }
+            }
+        } else {
+            None
+        };
 
         // From here on this conduit never speaks framed `qsh.local.v1`
         // again — `into_raw` hands back the UDS stream plus whatever bytes
@@ -916,7 +1035,17 @@ impl LocalctlDaemon {
                 return;
             }
         };
-        let _ = quic_send.set_priority(wire::PRIORITY_SESSION_DATA);
+        // `PLAN.md` M4 Step 5 (a): a relayed `TCP_CONNECT` rides at
+        // `PRIORITY_TUNNEL`, same as a direct-connect tunnel stream
+        // (`crate::tunnel::open_stream`) — a saturated tunnel must not
+        // outrank session data in this daemon's own send queue either
+        // (`docs/design/protocol.md` §12). Only `SESSION_DATA` keeps the
+        // session-data priority this call already applied before Step 5.
+        let _ = quic_send.set_priority(if is_tunnel_connect {
+            wire::PRIORITY_TUNNEL
+        } else {
+            wire::PRIORITY_SESSION_DATA
+        });
 
         // Re-framed from the raw payload bytes already validated above —
         // never re-encoded from the decoded `header` struct (this
@@ -938,6 +1067,27 @@ impl LocalctlDaemon {
         }
 
         let (uds_read, uds_write) = uds.into_split();
+
+        if is_tunnel_connect {
+            // `TCP_CONNECT`'s post-handshake body is unframed tunnel
+            // payload, not `SessionFrame`s — `tunnel_splice_uds_quic`'s
+            // own doc on why it cannot reuse `pump_uds_to_quic`/
+            // `pump_quic_to_uds` below. The header and any UDS-side
+            // prefetch were already flushed onto `quic_send` above, and
+            // nothing has been read from the freshly opened `quic_recv`
+            // yet, so both legs start with an empty prefix here.
+            tunnel_splice_uds_quic(
+                uds_read,
+                uds_write,
+                quic_send,
+                quic_recv,
+                Vec::new(),
+                Vec::new(),
+            )
+            .await;
+            return;
+        }
+
         // One local UDS conduit is a single logical peer: once either
         // direction of it ends, the other is never coming back either
         // (`RESET_CODE_LOCAL_PEER_GONE`'s own doc). These two one-shot
@@ -955,6 +1105,215 @@ impl LocalctlDaemon {
             pump_uds_to_quic(uds_read, quic_send, uds_gone_tx, quic_gone_rx),
             pump_quic_to_uds(quic_recv, uds_write, quic_gone_tx, uds_gone_rx),
         );
+    }
+
+    /// `TCP_ACCEPTED`'s side of the `LOCAL_STREAM` conduit
+    /// (`docs/design/protocol.md` §11-3's `-R over reverse` path,
+    /// `PLAN.md` M4 Step 5 (a)): the CLI names the `forward_id` it wants
+    /// to claim (`header.ticket`), this waits up to `deadline` — already
+    /// [`serve_stream`](Self::serve_stream)'s original wait budget
+    /// *minus* whatever `connection_for_wait` and the header read already
+    /// spent, never a fresh window of its own (its call site's own doc) —
+    /// for a queued [`crate::reverse::listen::ControlHub::claim_tcp_accepted`]
+    /// arrival, and — once one shows up — splices it onto this conduit,
+    /// forwarding the QUIC-side handshake residue the target already
+    /// pipelined as that leg's prefix. Unlike `TCP_CONNECT`, this leg
+    /// never calls `open_bi`: the QUIC stream it splices onto already
+    /// exists (the target opened it), so there is no `open_bi` timeout,
+    /// no header to forward onto QUIC (the target's own `TCP_ACCEPTED`
+    /// header already made it there — `Listen::handle_tcp_accepted_stream`
+    /// consumed it), and the `MAX_TUNNEL_STREAMS_PER_HUB` permit
+    /// `claim_tcp_accepted` hands back travels with the arrival rather
+    /// than being acquired again here.
+    ///
+    /// `forward_id` is shape-checked with `qsh_proto::wire::valid_forward_id`
+    /// **before** the registry lookup — a malformed ticket never reaches
+    /// `claim_tcp_accepted` at all, so it can never coincidentally match a
+    /// live registration by some later coercion (`PLAN.md` M4 Step 5 (a)'s
+    /// "shape-check before lookup" requirement, mirroring every other
+    /// peer-ingress `forward_id` check in this tree).
+    ///
+    /// An unrecognized or never-arriving `forward_id` and a malformed one
+    /// answer the *same* observable outcome to the CLI — `LocalError` —
+    /// though different codes (`InvalidArgument` for shape, `Timeout` for
+    /// "nothing arrived") — never a partial pipe, never a splice onto
+    /// nothing (this method's only two exits before a splice starts are
+    /// both a bare `LocalError` and a `return`).
+    ///
+    /// **Exactly one framed `LocalResponse` always leaves this method
+    /// before any raw byte does** — `LocalClaimGranted` on success, a
+    /// `LocalError` on every failure above, and a timeout is one of those
+    /// failures rather than silence (`docs/design/protocol.md` §11-3's
+    /// "TCP_ACCEPTED claim leg의 요청/응답"). That invariant is what lets the
+    /// claiming CLI read a fixed one frame and then switch to raw, instead
+    /// of trying to tell a frame from tunnel payload by its content or a
+    /// success from a failure by how long nothing arrived — neither of
+    /// which is decidable, and both of which corrupt or kill live tunnel
+    /// connections when guessed wrong.
+    async fn serve_tcp_accepted(
+        &self,
+        hub: &Arc<crate::reverse::listen::ControlHub>,
+        header: &wire::StreamHeader,
+        deadline: std::time::Duration,
+        mut conduit: LocalConduit<UnixStream>,
+    ) {
+        // `header.ticket` is `forward_id`, a NUL byte, then this
+        // claimant's opaque claim token
+        // (`crate::reverse::listen::ControlHub::claim_tcp_accepted`'s own
+        // doc on why a token is required at all — adversarial-review
+        // finding: knowing `forward_id` alone must not be enough to claim
+        // it). `forward_id` can never itself contain a NUL
+        // (`wire::valid_forward_id`'s charset is `[A-Za-z0-9_-]`), so
+        // splitting on the *first* NUL unambiguously separates the two;
+        // an absent separator is rejected the same way a malformed
+        // `forward_id` is. `crate::tunnel::remote::claim_ticket` is the
+        // one place that builds this exact `forward_id\0token` shape, so
+        // the two sides can never drift.
+        let ticket = &header.ticket;
+        let Some(nul_at) = ticket.iter().position(|&b| b == 0) else {
+            let _ = conduit
+                .send(&LocalResponse {
+                    body: Some(local_response::Body::Error(LocalError::from_code(
+                        ErrorCode::InvalidArgument,
+                        "TCP_ACCEPTED StreamHeader's ticket is missing its claim-token separator",
+                    ))),
+                })
+                .await;
+            return;
+        };
+        let (forward_id_bytes, rest) = ticket.split_at(nul_at);
+        let claim_token = &rest[1..];
+        let forward_id = match std::str::from_utf8(forward_id_bytes) {
+            Ok(id) if wire::valid_forward_id(id) => id.to_string(),
+            _ => {
+                let _ = conduit
+                    .send(&LocalResponse {
+                        body: Some(local_response::Body::Error(LocalError::from_code(
+                            ErrorCode::InvalidArgument,
+                            "TCP_ACCEPTED StreamHeader's ticket is not a valid forward_id",
+                        ))),
+                    })
+                    .await;
+                return;
+            }
+        };
+
+        // `PLAN.md` M4 Step 5 adversarial-review finding: a parked claim
+        // holds this conduit's `MAX_CONCURRENT_LOCAL_STREAM_CONDUITS`
+        // permit for its *entire* wait budget with nothing bounding how
+        // many of *this hub's* claims can be parked at once — one CLI
+        // opening many long-`wait_ms` claims against one host could alone
+        // exhaust that daemon-wide pool. Keyed by the conduit that owns
+        // `forward_id` so the pool is *divided*, not merely capped
+        // (`MAX_PARKED_CLAIMS_PER_CONDUIT`'s own doc: one CLI's ordinary
+        // steady state — one parked claim per registered `-R`, re-armed
+        // forever — must not be able to hold every permit on this host).
+        // Acquired and released around
+        // exactly the parked wait below, never held any longer — a denial
+        // here never touches `hub.claim_tcp_accepted` at all, so it never
+        // parks in the first place. "Held any longer" is enforced by an
+        // explicit `drop` right after the wait ends (below), not by
+        // scope: this binding is *not* `_`-prefixed on purpose, because
+        // letting it live to the end of this async fn — as it would by
+        // default, since the live splice runs to completion inside this
+        // same function — would silently cap concurrent *live* reverse
+        // tunnels at `MAX_PARKED_CLAIMS_PER_HUB` instead of at
+        // `MAX_TUNNEL_STREAMS_PER_HUB`, which is the limit that actually
+        // belongs to the splice (`_permit` below, bound from
+        // `hub.claim_tcp_accepted`'s return and held across the splice on
+        // purpose — see its own comment near `tunnel_splice_uds_quic`).
+        let Some(claim_permit) = hub.try_acquire_claim_permit(&forward_id) else {
+            let _ = conduit
+                .send(&LocalResponse {
+                    body: Some(local_response::Body::Error(LocalError::from_code(
+                        ErrorCode::ResourceExhausted,
+                        "too many concurrent TCP_ACCEPTED claims on this host's reverse \
+                         connection",
+                    ))),
+                })
+                .await;
+            return;
+        };
+
+        let Some((quic_send, quic_recv, residue, _permit)) = hub
+            .claim_tcp_accepted(&forward_id, claim_token, deadline)
+            .await
+        else {
+            // The wait is over (it failed), so `claim_permit`'s job is
+            // done here too — this arm `return`s immediately below,
+            // which drops it at scope exit. No explicit `drop` needed on
+            // this arm; the success arm below is the one that needs it,
+            // because that arm does *not* return next — it runs the live
+            // splice, which must not be scoped by this permit.
+            //
+            // Covers both "this hub never registered that forward_id"
+            // and "it was registered but nothing arrived before the
+            // deadline" — `ControlHub::claim_tcp_accepted`'s own doc on
+            // why the caller cannot and need not tell them apart. Either
+            // way: no splice, nothing claimed.
+            let _ = conduit
+                .send(&LocalResponse {
+                    body: Some(local_response::Body::Error(LocalError::from_code(
+                        ErrorCode::Timeout,
+                        "no TCP_ACCEPTED arrived for this forward_id within the wait budget",
+                    ))),
+                })
+                .await;
+            return;
+        };
+
+        // The parked wait is over and it succeeded — `claim_permit`'s job
+        // ends here. Release it now, before the live splice below, so
+        // concurrent *live* reverse tunnels are bounded only by
+        // `MAX_TUNNEL_STREAMS_PER_HUB` (`_permit`, held across the splice
+        // on purpose) and never by `MAX_PARKED_CLAIMS_PER_HUB` — the two
+        // limits guard different resources (parked waits vs. live
+        // splices) and must not be conflated by one outliving its scope.
+        drop(claim_permit);
+
+        // The claim is granted — say so, in one explicit frame, before a
+        // single raw byte moves (`docs/design/protocol.md` §11-3's
+        // "TCP_ACCEPTED claim leg의 요청/응답": the daemon always answers a
+        // `TCP_ACCEPTED` header with exactly one `LocalResponse`, success
+        // or failure, never with silence). The claimer cannot infer this
+        // any other way: raw payload is not distinguishable from a frame
+        // by its content, and a granted claim onto a connection that has
+        // not spoken yet is not distinguishable from a slow failure by
+        // silence. This frame is the discriminator.
+        //
+        // A write failure here means the CLI conduit is already gone. The
+        // arrival was claimed out of the queue and nothing else will ever
+        // pick it up, so it is reset rather than dropped — the target's
+        // accepted TCP connection learns promptly that its peer went away
+        // instead of hanging on a stream nobody will ever read.
+        if conduit
+            .send(&LocalResponse {
+                body: Some(local_response::Body::ClaimGranted(LocalClaimGranted {})),
+            })
+            .await
+            .is_err()
+        {
+            let mut quic_send = quic_send;
+            let mut quic_recv = quic_recv;
+            let _ = quic_send.reset(quinn::VarInt::from_u32(RESET_CODE_LOCAL_PEER_GONE));
+            let _ = quic_recv.stop(quinn::VarInt::from_u32(RESET_CODE_LOCAL_PEER_GONE));
+            return;
+        }
+
+        // From here on this conduit never speaks framed `qsh.local.v1`
+        // again, same as the `TCP_CONNECT`/`SESSION_DATA` legs above.
+        let (uds, prefetched) = conduit.into_raw();
+        let (uds_read, uds_write) = uds.into_split();
+        // `_permit` (bound above, held here) must outlive the splice — it
+        // is what keeps this stream counted against
+        // `MAX_TUNNEL_STREAMS_PER_HUB` for its whole life, not just its
+        // time queued (`crate::reverse::listen::TunnelArrival`'s own
+        // doc), so it stays alive across the `.await` below and drops
+        // only once `tunnel_splice_uds_quic` returns.
+        tunnel_splice_uds_quic(
+            uds_read, uds_write, quic_send, quic_recv, prefetched, residue,
+        )
+        .await;
     }
 
     /// Whether `stream`'s connecting peer is this process's own euid — the
@@ -1131,6 +1490,149 @@ async fn pump_quic_to_uds(
     }
 }
 
+/// Drop-driven reset guard for the QUIC half of a tunnel splice
+/// (`TunnelQuicGuard`) — the mirror of
+/// `crate::tunnel::splice::SpliceGuard`'s reasoning, scoped to just the
+/// QUIC side because that is the half whose peer (the real network target
+/// on the other end of `hello.host`'s connection) must never mistake a
+/// truncated relay for a clean end. The UDS side is a process-local relay
+/// hop to this same host's CLI process with no equivalent abrupt-close
+/// signal available through tokio (`SpliceGuard`'s own doc on why only a
+/// real `TcpStream` gets the `SO_LINGER 0` treatment) — losing the
+/// clean/abrupt distinction there does not create data loss or
+/// misdelivery, only a coarser signal to a process on this same machine.
+///
+/// Armed for the whole splice and disarmed only once both directions have
+/// finished cleanly (`tunnel_splice_uds_quic`'s own call site) — so a task
+/// abort mid-transfer (daemon shutdown, this host's connection replaced)
+/// resets this stream via `Drop` exactly like a hand-written error path
+/// would, instead of a bare `SendStream`/`RecvStream` drop finishing it
+/// cleanly.
+struct TunnelQuicGuard {
+    send: Option<quinn::SendStream>,
+    recv: Option<quinn::RecvStream>,
+}
+
+impl TunnelQuicGuard {
+    /// The clean-finish path: both directions already told their peers
+    /// the truth via `pump`'s own half-closes.
+    fn disarm(mut self) {
+        self.send.take();
+        self.recv.take();
+    }
+}
+
+impl Drop for TunnelQuicGuard {
+    fn drop(&mut self) {
+        if let Some(mut send) = self.send.take() {
+            let _ = send.reset(quinn::VarInt::from_u32(
+                crate::tunnel::splice::RESET_CODE_TUNNEL_ABORT,
+            ));
+        }
+        if let Some(mut recv) = self.recv.take() {
+            let _ = recv.stop(quinn::VarInt::from_u32(
+                crate::tunnel::splice::RESET_CODE_TUNNEL_ABORT,
+            ));
+        }
+    }
+}
+
+/// `LOCAL_STREAM`'s tunnel body (`TCP_CONNECT`'s post-handshake bytes,
+/// `TCP_ACCEPTED`'s whole body) — a raw, **unframed** byte splice between
+/// this conduit's UDS halves and the paired QUIC data stream halves,
+/// `PLAN.md` M4 Step 5 (a).
+///
+/// This is deliberately *not* [`pump_uds_to_quic`]/[`pump_quic_to_uds`]
+/// above: that pair is `SESSION_DATA`-specific — it layers
+/// `qsh_proto::frame`-boundary bookkeeping and a disambiguating sentinel
+/// byte onto the relay so a truncation is never mistaken for a clean
+/// `SessionFrame` end (`pump_quic_to_uds`'s own doc), which is safe
+/// *because* session data is itself a stream of length-prefixed messages.
+/// Tunnel payload has no such structure — it is arbitrary application
+/// bytes (someone's TCP stream) with no frame boundaries at all. Reusing
+/// that pair here would not merely fail to help; the injected sentinel
+/// byte would be a real, wrong byte spliced into the tunnel — corruption,
+/// not disambiguation.
+///
+/// So this leg follows `crate::tunnel::splice`'s model instead, reusing
+/// its exact `pump` primitive: each direction runs to its own end
+/// independently rather than being cancelled the moment its sibling ends
+/// (unlike the `SESSION_DATA` pair's cross-leg cancellation) — half-close
+/// matters for a forwarded TCP connection (an HTTP request body, `nc -N`)
+/// the same way `crate::tunnel::splice::splice_tcp_quic`'s own doc
+/// requires for the direct-connect leg. `up_prefix`/`down_prefix` are
+/// each leg's own handshake residue, if any (`TCP_CONNECT`'s UDS-side
+/// prefetch was already flushed onto `quic_send` by the caller before
+/// this is reached, so it always passes `Vec::new()` for both;
+/// `TCP_ACCEPTED`'s QUIC-side residue is real and passed as
+/// `down_prefix` — `crate::localctl::daemon::LocalctlDaemon::serve_tcp_accepted`'s
+/// call site).
+///
+/// On any read/write error on either leg, [`TunnelQuicGuard`] resets the
+/// QUIC side with `crate::tunnel::splice::RESET_CODE_TUNNEL_ABORT` — the
+/// same code the direct-connect splice uses for an identical truncation —
+/// so the target never mistakes a lost connection for a clean end.
+async fn tunnel_splice_uds_quic(
+    mut uds_read: tokio::net::unix::OwnedReadHalf,
+    mut uds_write: tokio::net::unix::OwnedWriteHalf,
+    quic_send: quinn::SendStream,
+    quic_recv: quinn::RecvStream,
+    up_prefix: Vec<u8>,
+    down_prefix: Vec<u8>,
+) {
+    let mut guard = TunnelQuicGuard {
+        send: Some(quic_send),
+        recv: Some(quic_recv),
+    };
+
+    // Scoped so both futures — and the borrows of the guard's two handles
+    // they hold — are dropped before `guard` is touched again below,
+    // mirroring `splice_tcp_quic`'s own structure exactly.
+    let (up, down) = {
+        let up = crate::tunnel::splice::pump(
+            &mut uds_read,
+            guard.send.as_mut().expect("armed"),
+            &up_prefix,
+        );
+        let down = crate::tunnel::splice::pump(
+            guard.recv.as_mut().expect("armed"),
+            &mut uds_write,
+            &down_prefix,
+        );
+        tokio::pin!(up, down);
+
+        let mut up_res: Option<io::Result<u64>> = None;
+        let mut down_res: Option<io::Result<u64>> = None;
+        while up_res.is_none() || down_res.is_none() {
+            tokio::select! {
+                r = &mut up, if up_res.is_none() => {
+                    let failed = r.is_err();
+                    up_res = Some(r);
+                    if failed {
+                        break;
+                    }
+                }
+                r = &mut down, if down_res.is_none() => {
+                    let failed = r.is_err();
+                    down_res = Some(r);
+                    if failed {
+                        break;
+                    }
+                }
+            }
+        }
+        (up_res, down_res)
+    };
+
+    if matches!(up, Some(Ok(_))) && matches!(down, Some(Ok(_))) {
+        // Clean end on both directions: nothing left to reset.
+        guard.disarm();
+    }
+    // Otherwise `guard` falls out of scope still armed, and its `Drop`
+    // resets the QUIC side — the same truncation teardown
+    // `splice_tcp_quic`'s doc describes, applied to this relay hop.
+}
+
 /// Clamp a caller's `LocalHello.wait_ms` to [`LOCAL_WAIT_MAX`] — the same
 /// ceiling discipline `qsh/local/v1.proto`'s own doc on the field promises
 /// ("a *ceiling*, not a rejection"), applied at the one place both
@@ -1143,13 +1645,15 @@ fn clamp_wait(wait_ms: u32) -> std::time::Duration {
     std::time::Duration::from_millis(u64::from(wait_ms)).min(LOCAL_WAIT_MAX)
 }
 
-/// Whether `header` is the one shape `LOCAL_STREAM`'s first post-ack frame
-/// is allowed to be — see [`LocalctlDaemon::serve_stream`]'s doc for why
-/// `header.stream_kind() != Some(SessionData)` is refused (HARD RULES: "a
-/// non-SESSION_DATA or missing header -> LocalError INVALID_ARGUMENT,
-/// nothing opened on QUIC"). Split out purely so the check is unit-testable
-/// in isolation — see its own test's doc for why the full path needs more
-/// than this crate's unit tests can stand up.
+/// Whether `header` is `LOCAL_STREAM`'s original (pre-M4) shape —
+/// `SESSION_DATA` — kept as a small, unit-testable check on
+/// `wire::StreamHeader::stream_kind()`'s classification even though
+/// `LocalctlDaemon::serve_stream` itself now inlines the full three-way
+/// `SESSION_DATA`/`TCP_CONNECT`/`TCP_ACCEPTED` match directly (`PLAN.md`
+/// M4 Step 5 (a)) rather than calling out to this helper. Test-only: the
+/// production classification lives in `serve_stream`'s own match, not
+/// here.
+#[cfg(test)]
 fn is_session_data_header(header: &wire::StreamHeader) -> bool {
     header.stream_kind() == Some(wire::StreamKind::SessionData)
 }
