@@ -284,6 +284,7 @@ async fn a_denied_remote_forward_open_binds_nothing_and_is_audited() {
             bind_port: 0,
             forward_host: "127.0.0.1".to_string(),
             forward_port: u32::from(h.echo.port()),
+            claim_token: Vec::new(),
         })
         .await;
     let err = result.expect_err("DenyAll must refuse RemoteForwardOpen");
@@ -316,6 +317,7 @@ async fn a_non_loopback_bind_host_is_refused_and_binds_nothing() {
             bind_port: 0,
             forward_host: "127.0.0.1".to_string(),
             forward_port: u32::from(h.echo.port()),
+            claim_token: Vec::new(),
         })
         .await;
     let err = result.expect_err("non-loopback bind_host must be refused");

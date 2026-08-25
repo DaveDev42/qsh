@@ -117,6 +117,21 @@ pub(crate) fn remote_forward_open_from_spec(spec: &ForwardSpec) -> wire::RemoteF
         bind_port: u32::from(spec.listen_port),
         forward_host: spec.host.clone(),
         forward_port: u32::from(spec.host_port),
+        // Forward (direct-connect) route never touches `ControlHub` —
+        // only the reverse route's own call site (not yet wired into
+        // `Ops::session_attach`; `-R over reverse` still answers
+        // `ErrorCode::Unsupported`) has a claim token to put here.
+        //
+        // **Do not reuse this builder for the reverse route as it
+        // stands.** An empty `claim_token` is not a "no capability
+        // needed" marker there: `crate::reverse::listen::ControlHub`
+        // registers such a forward as *permanently unclaimable*
+        // (`ClaimSeat`'s own doc — an absent capability is a refusal,
+        // never a pass), so its `TCP_ACCEPTED` streams are reset rather
+        // than delivered to anyone. Whoever wires `-R over reverse` must
+        // pass `RemoteForwardAcceptor::claim_token`'s bytes here, on the
+        // same request that names the forward.
+        claim_token: Vec::new(),
     }
 }
 

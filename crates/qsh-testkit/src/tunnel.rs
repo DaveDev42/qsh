@@ -211,6 +211,7 @@ impl TunnelHarness {
                 bind_port: 0,
                 forward_host: forward_host.to_string(),
                 forward_port: u32::from(forward_port),
+                claim_token: Vec::new(),
             })
             .await
             .expect("RemoteForwardOpen");

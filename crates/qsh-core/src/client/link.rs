@@ -238,17 +238,29 @@ impl DataSend {
     /// [`crate::tunnel::splice`]).
     ///
     /// `Err(self)` — never a panic — for the reverse `LOCAL_STREAM`
-    /// carrier, which has no single QUIC stream to surrender (its bytes
-    /// are relayed frame-by-frame through this machine's daemon). Splicing
-    /// a tunnel over that carrier is `PLAN.md` M4 Step 5's job; until then
-    /// the caller reports the refusal rather than mis-splicing, and
-    /// returning the value back keeps the stream alive to be torn down
-    /// properly.
+    /// carrier, which has no single QUIC stream to surrender: its raw
+    /// counterpart is [`Self::into_raw_local`] instead
+    /// (`crate::tunnel::splice::splice_tcp_uds`, `PLAN.md` M4 Step 5 (a)).
+    /// A caller that holds the wrong carrier gets its value back rather
+    /// than a panic, so the stream stays alive to be torn down properly.
     pub(crate) fn into_raw_quic(self) -> Result<quinn::SendStream, Self> {
         match self {
             DataSend::Quic(send) => Ok(send.into_raw()),
             #[cfg(unix)]
             other @ DataSend::Local(_) => Err(other),
+        }
+    }
+
+    /// [`Self::into_raw_quic`]'s mirror for the reverse `LOCAL_STREAM`
+    /// carrier — surrenders the raw UDS byte writer
+    /// [`crate::tunnel::splice::splice_tcp_uds`] pumps a tunnel's unframed
+    /// payload onto. `Err(self)` for the forward `Quic` carrier, same
+    /// reasoning as [`Self::into_raw_quic`]'s own doc, reversed.
+    #[cfg(unix)]
+    pub(crate) fn into_raw_local(self) -> Result<crate::localctl::client::RawUdsWrite, Self> {
+        match self {
+            DataSend::Local(send) => Ok(send.into_raw()),
+            other @ DataSend::Quic(_) => Err(other),
         }
     }
 }
@@ -281,13 +293,25 @@ impl DataRecv {
     /// [`qsh_transport::FramedRecv::into_raw`]'s own doc explains must be
     /// delivered ahead of everything read from the stream afterwards.
     ///
-    /// `Err(self)` for the reverse `LOCAL_STREAM` carrier, for the same
-    /// reason as the send half.
+    /// `Err(self)` for the reverse `LOCAL_STREAM` carrier — its raw
+    /// counterpart is [`Self::into_raw_local`].
     pub(crate) fn into_raw_quic(self) -> Result<(quinn::RecvStream, Vec<u8>), Self> {
         match self {
             DataRecv::Quic(recv) => Ok(recv.into_raw()),
             #[cfg(unix)]
             other @ DataRecv::Local(_) => Err(other),
+        }
+    }
+
+    /// [`Self::into_raw_quic`]'s mirror for the reverse `LOCAL_STREAM`
+    /// carrier — see [`DataSend::into_raw_local`]'s own doc.
+    #[cfg(unix)]
+    pub(crate) fn into_raw_local(
+        self,
+    ) -> Result<(crate::localctl::client::RawUdsRead, Vec<u8>), Self> {
+        match self {
+            DataRecv::Local(recv) => Ok(recv.into_raw()),
+            other @ DataRecv::Quic(_) => Err(other),
         }
     }
 }
@@ -352,6 +376,32 @@ impl DataLink<'_> {
         header: &StreamHeader,
         priority: i32,
     ) -> Result<(DataSend, DataRecv, DataKillSwitch), ClientError> {
+        self.open_stream_with_wait(header, priority, 0).await
+    }
+
+    /// [`Self::open_stream`], but with the reverse route's `LocalHello.wait_ms`
+    /// threaded through rather than fixed at `0`. Every caller before
+    /// `PLAN.md` M4 Step 5 (a) had nothing to wait on (`open_stream`'s own
+    /// doc — a live registration or a fresh dial, never a queued arrival),
+    /// so `open_stream` stays the zero-wait default; `crate::tunnel::remote`'s
+    /// `-R over reverse` claim loop is the one caller that needs a real
+    /// budget, to long-poll a `TCP_ACCEPTED{forward_id}` claim instead of
+    /// busy-opening a fresh conduit per attempt
+    /// (`crate::localctl::client::open_stream_with_wait`'s own doc). On the
+    /// forward `Quic` carrier `wait_ms` is accepted uniformly but has
+    /// nothing to apply to — a fresh `open_bi()` never waits on anything.
+    // `wait_ms` is read only by the `#[cfg(unix)]` `Local` arm below — the
+    // `Quic` arm never waits on anything (this doc comment's own "nothing
+    // to apply to"), so on Windows (no `Local` variant at all) the
+    // parameter goes unused. Dead, not absent, on that platform — same
+    // idiom as `HUB_WAIT_POLL` (`reverse/listen.rs`).
+    #[cfg_attr(not(unix), allow(unused_variables))]
+    pub(crate) async fn open_stream_with_wait(
+        &self,
+        header: &StreamHeader,
+        priority: i32,
+        wait_ms: u32,
+    ) -> Result<(DataSend, DataRecv, DataKillSwitch), ClientError> {
         match self {
             DataLink::Quic(conn) => {
                 let (send, recv) = conn.open_bi().await?;
@@ -367,9 +417,10 @@ impl DataLink<'_> {
             }
             #[cfg(unix)]
             DataLink::Local { socket, host } => {
-                let handshake = crate::localctl::client::open_stream(socket, host, header)
-                    .await
-                    .map_err(op_error_to_client_error)?;
+                let handshake =
+                    crate::localctl::client::open_stream_with_wait(socket, host, header, wait_ms)
+                        .await
+                        .map_err(op_error_to_client_error)?;
                 let kill = DataKillSwitch::new(handshake.socket.clone());
                 Ok((
                     DataSend::Local(handshake.send),

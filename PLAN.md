@@ -317,6 +317,13 @@ M4가 실제로 지는 것은 (i) 두 방향의 forward(`-L` local→remote / `-
 - **M3 자산의 flake가 M4 step 완료를 막는 경우(Step 3에서 실측).** `qsh-cli::attach_ops a_teardown_waits_out_a_detach_that_is_still_flushing`이 Step 3 CI의 `ubuntu-24.04-arm` leg만 red로 만들었다. Step 3 회귀가 아니라 M3 테스트 자체의 결함이다. 원인은 `waited >= 1s`라는 벽시계 단언인데, detach의 flush가 2초(`DETACH_FLUSH`)를 쓰는 것은 드라이버가 detach 마커를 실제로 읽었을 때뿐이고, 드라이버가 이미 반환한 뒤라면 ack 채널이 끊겨 `recv_timeout`이 즉시 `Disconnected`를 준다. 이것도 정상 detach다. 단언을 시간이 아니라 순서로 바꿔 고쳤다(close는 detach가 gate를 놓은 뒤에만 반환한다). 남은 감시: 같은 드라이버-부재 상황에서 사전조건 루프의 `!detacher.is_finished()` 단언이 대신 터질 수 있다. CI에 나타나면 degenerate한 setup을 실패로 처리하지 말고 그 자체를 다뤄야 한다.
 - **audit 기록이 '요청한 주소'지 '실제로 bind한 주소'가 아니다(Step 4 적대적 검토 잔여).** `forward.remote` 인가는 `bind_host:bind_port`를 요청 그대로 평가한다. 이건 맞다 — 커널이 배정한 ephemeral 포트를 알려면 먼저 bind해야 하고, 그건 '인가 전 리소스 생성 금지'를 정면으로 어긴다. 문제는 판정이 아니라 흔적이다. `RemoteForwardOpen{bind_host:"localhost", bind_port:0}`은 audit에 `localhost:0`으로 남지만 실제로 뜬 소켓은 `127.0.0.1:<ephemeral>`이라, 사고 조사에서 기록만 보고는 무엇이 열렸는지 알 수 없다. 인가 기록은 지금 형태를 유지하고, bind 성공 시점의 실제 주소를 남기는 구조적 기록을 Step 5에서 더한다(`qsh tunnels`가 bind된 주소를 사용자에게 보여주기 시작하는 지점이라 같은 정보가 어차피 필요하다). payload는 여전히 남기지 않는다.
 
+- **PR 5a 최종 회귀 검사의 잔여 findings — 전부 가용성, isolation 아님(기록 확정).** 세 라운드의 적대적 검증 끝에 격리 불변식 4개(같은 lock 안의 admits_claim+pop, sealed ClaimSeat, 양방향 owner-checked close, 단일 forwards map)는 유지가 확인됐다. 남은 것들:
+  - **per-conduit share가 principal이 아니라 conduit 단위다(F1).** 한 CLI 프로세스가 LOCAL_CONTROL conduit을 여러 개 열면(상한 256) share를 우회해 hub pool 전체를 채울 수 있다. protocol.md §11-3의 "conduit(=CLI 프로세스)" 괄호는 코드가 강제하지 않는 등식이다. principal 단위 할당량은 M5 정책 엔진의 입력 — 리스너 무제한 항목과 같은 설계 회의에서 다룬다.
+  - **동시 `-R` 8개 상한과 그 너머의 조용한 실패(F3), tunnel-stream pool의 share 부재(F4).** 둘 다 M5 할당량 설계 입력. F3은 9번째 forward가 경합에서 계속 지는 동안 사용자에게 warn 로그 외 아무 신호가 없다는 UX 문제를 포함한다 — 5b의 `qsh tunnels`가 상태를 보여주기 시작하면 재평가.
+  - **unregister가 pending_rfwd_open_claim_tokens를 즉시 안 지운다(F6, 위생).** 성장 누수는 아니고 (target 응답 시 정리) 토큰 바이트가 쓸모없어진 뒤에도 잠시 상주하는 문제.
+  - **NotOwner 응답이 forward_id 존재 oracle이 될 수 있다(F7, 정보성).** forward_id가 128-bit ULID라 지금은 무해. 5b가 `LocalTunnelList`로 id를 노출하기 시작하면 permit 과금이 owner 기준이라는 점과 함께 재검토할 것.
+  잔여 중 즉시 수정 대상 2건(F5 registration 스쿼팅 가드, F2 고아 parked claim의 permit 누수)은 5a 후속 커밋으로 처리한다 — 기록만 하고 넘어가기엔 상주 데몬의 수명에 직접 닿는다.
+
 ### 4.1 이 계획이 확정한 결정 (Step 1이 정본 문서에 기록한다)
 
 | # | 질문 | 초안 결정 | 정본 | 확정도 |

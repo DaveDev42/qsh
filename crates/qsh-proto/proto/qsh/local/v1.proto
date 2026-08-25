@@ -140,6 +140,9 @@ message LocalResponse {
     LocalHostListResult host_list_result = 2;
     // LOCAL_ADMIN reply to LocalTunnelList (M4, `qsh tunnels`).
     LocalTunnelListResult tunnel_list_result = 3;
+    // LOCAL_STREAM reply to a `StreamHeader{TCP_ACCEPTED}` claim that the
+    // daemon granted (M4 Step 5 PR 5a).
+    LocalClaimGranted claim_granted = 4;
     LocalError error = 15;
   }
 }
@@ -175,6 +178,26 @@ message LocalError {
   string code = 1;
   string message = 2;
 }
+
+// The daemon's success reply to a `LOCAL_STREAM`
+// `StreamHeader{TCP_ACCEPTED, ticket=forward_id}` claim: this conduit has
+// been spliced onto the claimed `TCP_ACCEPTED` QUIC stream, and every byte
+// after this frame is that stream's raw payload
+// (`docs/design/protocol.md` §11-3, "TCP_ACCEPTED claim leg의 요청/응답").
+//
+// Deliberately empty, and deliberately *sent at all*. Empty because the
+// claimer already named the `forward_id` it asked for and the daemon knows
+// nothing else about the connection — it never parses tunnel payload, so
+// there is no fact it could carry here. Sent because the alternative —
+// letting a granted claim be inferred from the daemon simply starting to
+// pump raw bytes — is undecidable in both directions: any byte sequence
+// can be read as a length prefix, so payload cannot be told apart from a
+// frame by its content, and a granted claim onto an idle connection cannot
+// be told apart from a slow failure by silence. This frame is the
+// discriminator, exactly as `LocalResponse` itself is the discriminator
+// between reply *types*. Failure keeps the existing `LocalError` path, so
+// the claim leg's answer is always exactly one frame, never zero.
+message LocalClaimGranted {}
 
 // LOCAL_ADMIN request: list the daemon's currently-registered reverse
 // hosts.

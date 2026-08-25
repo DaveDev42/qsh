@@ -153,7 +153,9 @@ fn conduit_error(step: &str, err: impl std::fmt::Display) -> OpError {
 
 #[cfg(test)]
 mod tests {
-    use qsh_proto::local::{LocalHello, LocalStreamKind};
+    use qsh_proto::local::{
+        LocalClaimGranted, LocalHello, LocalResponse, LocalStreamKind, local_response,
+    };
 
     use super::*;
 
@@ -297,6 +299,107 @@ mod tests {
             err.message.contains("mid-frame"),
             "message: {}",
             err.message
+        );
+    }
+
+    // ---- the TCP_ACCEPTED claim leg's frame -> raw boundary -----------
+    //
+    // `docs/design/protocol.md` §11-3 ("TCP_ACCEPTED claim leg의 요청/응답")
+    // makes the daemon answer every claim with exactly one framed
+    // `LocalResponse` and start raw tunnel payload immediately after it.
+    // The reader's whole job is therefore: read one frame, then hand the
+    // rest to the splice **in order**. These pin that down against the two
+    // ways it can go wrong — losing residue that shared a `read()` with the
+    // frame, and reordering it.
+
+    fn claim_granted() -> LocalResponse {
+        LocalResponse {
+            body: Some(local_response::Body::ClaimGranted(LocalClaimGranted {})),
+        }
+    }
+
+    #[tokio::test]
+    async fn one_frame_then_raw_preserves_order_across_read_boundaries() {
+        // The write is deliberately torn in the middle of the frame's own
+        // 4-byte length prefix, and the second chunk then carries the rest
+        // of the frame *plus the entire payload*. That shape forces both
+        // properties at once:
+        //   - a `read()` that resolves a frame only after an earlier,
+        //     incomplete one (the decoder must carry state across reads);
+        //   - a `read()` that straddles the frame/raw boundary and leaves
+        //     a large, order-sensitive residue behind it.
+        // A residue of one or two bytes would pass even if the residue
+        // were handed back reversed, so it is sized to make that
+        // detectable.
+        let (mut client_end, daemon_end) = tokio::io::duplex(4096);
+        let mut reader = LocalConduit::new(daemon_end);
+
+        let payload: Vec<u8> = (0u8..=255).cycle().take(700).collect();
+        let mut wire = encode_local(&claim_granted()).unwrap();
+        wire.extend_from_slice(&payload);
+
+        let feeder = tokio::spawn(async move {
+            client_end.write_all(&wire[..3]).await.unwrap();
+            tokio::task::yield_now().await;
+            client_end.write_all(&wire[3..]).await.unwrap();
+            client_end
+        });
+
+        let resp: LocalResponse = reader.recv().await.unwrap().unwrap();
+        assert!(matches!(
+            resp.body,
+            Some(local_response::Body::ClaimGranted(_))
+        ));
+
+        // Drain the rest exactly as the real caller does: residue first,
+        // then whatever is still on the socket.
+        let (mut stream, mut got) = reader.into_raw();
+        assert!(
+            got.len() > 64,
+            "the test is only meaningful if a substantial residue crossed the boundary with the \
+             frame; got {}",
+            got.len()
+        );
+        while got.len() < payload.len() {
+            let mut buf = [0u8; 64];
+            let n = stream.read(&mut buf).await.unwrap();
+            assert_ne!(n, 0, "peer closed before the whole payload arrived");
+            got.extend_from_slice(&buf[..n]);
+        }
+        let _client_end = feeder.await.unwrap();
+
+        assert_eq!(
+            got, payload,
+            "every raw byte after the claim frame must arrive once, in order"
+        );
+    }
+
+    #[tokio::test]
+    async fn raw_payload_that_looks_like_a_frame_flows_through_untouched() {
+        // Leading zero bytes: read as a BE u32 this is a small, in-cap
+        // declared length, and the "payload" after it is a zero tag, which
+        // prost rejects — the exact shape the deleted content-classifying
+        // claim race mistook for a frame and then re-ordered while trying
+        // to put back. Nothing here may look at these bytes at all: the
+        // one frame was already consumed, so all of this is residue.
+        let (mut client_end, daemon_end) = tokio::io::duplex(4096);
+        let mut reader = LocalConduit::new(daemon_end);
+
+        let payload = vec![0x00u8, 0x00, 0x00, 0x01, 0x00, 0xFF, 0x00, 0x00, 0x00, 0x09];
+        let mut wire = encode_local(&claim_granted()).unwrap();
+        wire.extend_from_slice(&payload);
+        client_end.write_all(&wire).await.unwrap();
+
+        let resp: LocalResponse = reader.recv().await.unwrap().unwrap();
+        assert!(matches!(
+            resp.body,
+            Some(local_response::Body::ClaimGranted(_))
+        ));
+
+        let (_stream, residue) = reader.into_raw();
+        assert_eq!(
+            residue, payload,
+            "raw payload is never parsed, never re-framed, never reordered"
         );
     }
 }

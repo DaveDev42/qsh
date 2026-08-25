@@ -65,6 +65,27 @@ pub(crate) async fn open_stream(
     link.open_stream(header, PRIORITY_TUNNEL).await
 }
 
+/// [`open_stream`], but long-polling the reverse route's claim wait
+/// instead of the zero-wait default — the one caller is
+/// [`remote::RemoteForwardAcceptor`]'s `-R over reverse` claim loop,
+/// waiting on a `TCP_ACCEPTED{forward_id}` arrival
+/// (`crate::client::link::DataLink::open_stream_with_wait`'s own doc,
+/// `PLAN.md` M4 Step 5 (a)).
+///
+/// That one caller lives inside `remote::RemoteForwardAcceptor`'s
+/// `#[cfg(unix)]` reverse-claim dispatch (localctl is a Unix-domain
+/// socket), so this function itself is dead — not absent — on Windows;
+/// same idiom as `HUB_WAIT_POLL` (`reverse/listen.rs`).
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(crate) async fn open_stream_with_wait(
+    link: &DataLink<'_>,
+    header: &StreamHeader,
+    wait_ms: u32,
+) -> Result<(DataSend, DataRecv, DataKillSwitch), ClientError> {
+    link.open_stream_with_wait(header, PRIORITY_TUNNEL, wait_ms)
+        .await
+}
+
 #[cfg(test)]
 mod tests {
     use qsh_proto::wire::StreamKind;
@@ -148,7 +169,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn tunnel_stream_opens_symmetrically_over_the_reverse_data_link() {
-        use qsh_proto::local::{LocalHelloAck, LocalResponse, local_response};
+        use qsh_proto::local::{LocalClaimGranted, LocalHelloAck, LocalResponse, local_response};
         use tokio::net::UnixListener;
 
         let dir = tempfile::tempdir().unwrap();
@@ -172,8 +193,21 @@ mod tests {
                 .unwrap();
             let header: StreamHeader = conduit.recv().await.unwrap().unwrap();
             assert_eq!(header.stream_kind(), Some(StreamKind::TcpAccepted));
-            // Nothing more to do — an empty pipe, closed immediately, is
-            // exactly what this seam-level test asks for.
+            // A real daemon always answers a `TCP_ACCEPTED` claim with
+            // exactly one framed `LocalResponse` before any raw byte
+            // (`docs/design/protocol.md` §11-3's "TCP_ACCEPTED claim
+            // leg의 요청/응답", `LocalctlDaemon::serve_tcp_accepted`'s own
+            // doc) — this fake daemon must do the same, or the client
+            // side correctly treats the connection closing with no
+            // answer as a failure rather than a granted, silent claim.
+            conduit
+                .send(&LocalResponse {
+                    body: Some(local_response::Body::ClaimGranted(LocalClaimGranted {})),
+                })
+                .await
+                .unwrap();
+            // Nothing more to do — an empty pipe, closed immediately after
+            // the grant, is exactly what this seam-level test asks for.
         });
 
         let header = StreamHeader {

@@ -187,6 +187,38 @@ message RemoteForwardOpen {
   uint32 bind_port = 2;
   string forward_host = 3;
   uint32 forward_port = 4;
+  // Opaque, requester-minted claim credential for the reverse route's
+  // `TCP_ACCEPTED` claim leg (`docs/design/protocol.md` §11-3,
+  // adversarial-review finding A: claiming must check that the claiming
+  // conduit is the registered owner, not merely that it knows a live
+  // `forward_id`). Never inspected or compared by the target, and never
+  // actually transmitted to it either (adversarial-review finding 5): this
+  // field exists solely for the requester-side `qsh listen` daemon
+  // (`crate::reverse::listen::ControlHub::send_request`) to capture and
+  // seat atomically alongside the registration itself
+  // (`ControlHub::deliver_response`), closing the window a token seated
+  // lazily on the first `claim_tcp_accepted` call would otherwise leave
+  // open to a same-uid adversary that calls first. `send_request`
+  // `mem::take`s it out of this message the moment it captures it, before
+  // the (now-empty-here) `body` is ever handed to the outbound channel
+  // `Listen::drive_registered_session` actually serializes onto the QUIC
+  // connection — so the bytes that reach the peer never carry it,
+  // regardless of what the requesting CLI process originally sent.
+  //
+  // Kept on this message rather than moved onto a genuinely local-only
+  // one: `LOCAL_CONTROL` has no message shape of its own to carry it on
+  // instead — that conduit relays the *exact* `ControlMessage`/`Response`
+  // pair that crosses the QUIC control stream, verbatim, in both
+  // directions (`qsh/local/v1.proto`'s own header paragraph on
+  // `LOCAL_CONTROL`; `LocalctlDaemon::serve_control`'s
+  // `conduit.recv::<wire::ControlMessage>()` has no per-body-variant
+  // branch to hang a separate local envelope off of). Giving this one
+  // field a side channel would mean inventing a new discriminator on that
+  // conduit for it alone — a real protocol change, not a field move, and
+  // one that would need its own design pass rather than riding in on a
+  // hygiene fix. Empty on the forward (direct-connect) route, which never
+  // touches `ControlHub` at all.
+  bytes claim_token = 5;
 }
 
 // Success payload for RemoteForwardOpen. `actual_port` is the kernel-chosen

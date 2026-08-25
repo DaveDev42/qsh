@@ -33,15 +33,21 @@
 
 use std::collections::HashMap;
 #[cfg(unix)]
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+#[cfg(unix)]
+use std::time::Instant;
 
 use qsh_proto::ErrorCode;
 use qsh_proto::wire::{self, Hello};
 use qsh_transport::{AcceptError, Connection, FramedStream, Incoming, Listener};
+#[cfg(unix)]
+use quinn::{RecvStream, SendStream};
 use tokio::sync::mpsc;
+#[cfg(unix)]
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 
 // The next four imports are consumed only by the unix entry point (and
 // this module's tests) — on the Windows lib build nothing constructs a
@@ -492,6 +498,228 @@ const CONDUIT_INBOX_CAPACITY: usize = 256;
 #[cfg(unix)]
 const MAX_INFLIGHT_LONG_POLL_PER_HUB: usize = 16;
 
+/// Upper bound on tunnel data streams this hub carries **at once** —
+/// every `TCP_CONNECT` splice `crate::localctl::daemon::LocalctlDaemon::serve_stream`
+/// opens on this hub's connection, plus every `TCP_ACCEPTED` stream the
+/// target opens back (accepted by [`Listen::run_tunnel_accept_loop`]),
+/// summed across every `LOCAL_STREAM` conduit of every CLI process
+/// attached to this host — modelled directly on
+/// [`MAX_INFLIGHT_LONG_POLL_PER_HUB`]'s own reasoning (`PLAN.md` M4 Step
+/// 5 (a)): the tunnels of every CLI process on this host share the one
+/// physical reverse connection's `MAX_CONCURRENT_BIDI_STREAMS` budget
+/// (`crates/qsh-transport/src/endpoint.rs`), so a per-conduit cap alone
+/// cannot stop one greedy `-L`/`-R` from starving every other conduit of
+/// this host — including its own `LOCAL_CONTROL` request/response traffic
+/// and every other conduit's session/exec data streams, all riding the
+/// same connection. 64 is chosen the same way
+/// `MAX_CONCURRENT_LOCAL_STREAM_CONDUITS` was (`localctl/daemon.rs`'s own
+/// doc): comfortably under the transport's per-connection stream ceiling
+/// (1024, `docs/design/protocol.md`'s own "동시성 상한" note on
+/// `TCP_CONNECT`), generous enough that ordinary use (a handful of `-L`/
+/// `-R` forwards, each carrying a handful of concurrent connections)
+/// never comes close, and small enough that no combination of conduits on
+/// this host can approach the transport's own limit and start starving
+/// `LOCAL_CONTROL`/`SESSION_DATA` traffic that shares the connection.
+/// Held for the *whole* life of a tunnel stream — from the moment this
+/// hub commits to it (`open_bi` about to run, or a `TCP_ACCEPTED` stream
+/// just accepted and queued for its claimant) until the splice ends — not
+/// just its handshake, because an unclaimed backlog of accepted-but-not-
+/// yet-spliced connections is exactly as much of a held QUIC stream as an
+/// active one ([`TunnelArrival`]'s own doc).
+#[cfg(unix)]
+const MAX_TUNNEL_STREAMS_PER_HUB: usize = 64;
+
+/// Upper bound on concurrently *parked* `TCP_ACCEPTED` claims per hub —
+/// [`ControlHub::claim_permits`]'s own doc on the distinct resource this
+/// bounds (a `serve_tcp_accepted` wait, not a relayed stream) and the
+/// finding it closes. Deliberately smaller than [`MAX_TUNNEL_STREAMS_PER_HUB`]:
+/// a legitimate `-R` claim loop keeps at most a small, fixed number of
+/// claims outstanding at once per registered forward (`crate::tunnel::
+/// remote::claim_remote_forward_reverse`'s own doc: one persistent claim
+/// per `forward_id`, immediately re-armed), so this only needs headroom
+/// for several forwards on one host, not for the whole relayed-stream
+/// budget — and it must stay well under the daemon-wide
+/// `MAX_CONCURRENT_LOCAL_STREAM_CONDUITS` (256) so a single host at its
+/// own cap can never come close to exhausting that pool for every other
+/// host.
+#[cfg(unix)]
+const MAX_PARKED_CLAIMS_PER_HUB: usize = 32;
+
+/// The share of [`MAX_PARKED_CLAIMS_PER_HUB`] any **one** owning conduit
+/// (in practice: one CLI process's `LOCAL_CONTROL` conduit, the one that
+/// opened the `forward_id`s being claimed) may hold parked at once —
+/// `MAX_PARKED_CLAIMS_PER_HUB / 4`, so no single conduit can ever take
+/// more than a quarter of this hub's pool and at least four conduits'
+/// claim loops always coexist at *full* share, with any number coexisting
+/// at ordinary use.
+///
+/// **Why a share is needed at all, on top of the hub ceiling**
+/// (adversarial review finding): the ceiling alone bounds an *attack* but
+/// not ordinary operation, because the steady state of a healthy `-R` is
+/// to sit holding a permit. `crate::tunnel::remote::claim_remote_forward_reverse`
+/// keeps exactly one long-poll parked per registered `forward_id` and
+/// re-arms it the instant it returns (its own doc), so a CLI running
+/// `MAX_PARKED_CLAIMS_PER_HUB` reverse forwards would hold *every* permit
+/// on this host essentially forever and every other CLI's `-R` claim
+/// would be refused for as long as it kept them — normal operation
+/// starving normal operation, which no cap alone can answer. The pool has
+/// to be divided, not merely bounded.
+///
+/// 8 is the quarter share rather than a smaller one because it is the
+/// same "generous for real use, far under the shared budget" reasoning
+/// [`MAX_PARKED_CLAIMS_PER_HUB`] itself is sized by, one level down: one
+/// parked claim per registered `forward_id` means a share of 8 covers a
+/// single CLI running eight concurrent reverse forwards against one host,
+/// already well past ordinary use, while still leaving three quarters of
+/// the hub for everyone else.
+#[cfg(unix)]
+const MAX_PARKED_CLAIMS_PER_CONDUIT: usize = MAX_PARKED_CLAIMS_PER_HUB / 4;
+
+#[cfg(unix)]
+const _: () = assert!(
+    MAX_PARKED_CLAIMS_PER_HUB.is_multiple_of(MAX_PARKED_CLAIMS_PER_CONDUIT)
+        && MAX_PARKED_CLAIMS_PER_HUB / MAX_PARKED_CLAIMS_PER_CONDUIT >= 4,
+    "the per-conduit share must divide the hub pool into at least four full shares, or one \
+     conduit at its own share could still deny the hub to everyone else"
+);
+
+/// Reset code for a `TCP_ACCEPTED` stream this hub will not carry:
+/// malformed shape, or a `forward_id` this hub never registered (already
+/// closed, never opened, or — the ordinary race
+/// [`crate::tunnel::remote`]'s own `RemoteForwardAcceptor` doc already
+/// describes for the direct-connect leg — opened but not yet registered
+/// here). Distinct from [`RESET_CODE_TUNNEL_HUB_EXHAUSTED`] so a target
+/// inspecting the QUIC error code can tell the two apart, though neither
+/// is a documented wire contract (`crate::tunnel::splice`'s own doc on
+/// why these codes are internal, like `crate::localctl::daemon`'s
+/// `0x2005`/`0x2006` and `crate::tunnel::remote`'s `0x2008`/`0x2009`).
+#[cfg(unix)]
+const RESET_CODE_TUNNEL_UNKNOWN_FORWARD: u32 = 0x200A;
+
+/// How long a `TCP_ACCEPTED` arrival may sit in [`HubState::tunnel_queue`]
+/// unclaimed before [`ControlHub::sweep_expired_arrivals`] resets it and
+/// gives its [`MAX_TUNNEL_STREAMS_PER_HUB`] permit back.
+///
+/// **Why queued arrivals need a life at all** (adversarial review
+/// finding): a queued arrival pins one hub tunnel permit *and* one live
+/// QUIC bidi stream ([`TunnelArrival`]'s own doc on why the permit is
+/// held for the queued time too), and until this existed a queue drained
+/// only on a successful claim, on [`ControlHub::unregister_conduit`], or
+/// on an owner-checked close — so a claimant that was merely slow, or
+/// starved, or simply never came back left its backlog holding hub
+/// capacity indefinitely, and that backlog is charged against
+/// [`MAX_TUNNEL_STREAMS_PER_HUB`], i.e. against *every other* CLI's
+/// tunnels on this host, not just its own.
+///
+/// 30 s is chosen to be orders of magnitude above the drain rate a
+/// healthy claimant actually achieves and still far below any budget an
+/// unhealthy one can hold this hub for. A registered `-R`'s claim loop
+/// keeps one long-poll parked at all times and re-arms it immediately
+/// (`crate::tunnel::remote::claim_remote_forward_reverse`), so an
+/// ordinary arrival is claimed in well under a millisecond, and even a
+/// full [`MAX_TUNNEL_STREAMS_PER_HUB`] backlog whose every claim is being
+/// refused and retried on `crate::tunnel::remote`'s
+/// `REVERSE_CLAIM_RETRY_BACKOFF` (200 ms) drains in ~13 s — inside this
+/// budget, so contention slows a claimant down without costing it its
+/// connections.
+#[cfg(unix)]
+const MAX_QUEUED_TUNNEL_ARRIVAL_AGE: Duration = Duration::from_secs(30);
+
+/// How often [`Listen::run_tunnel_arrival_sweeper`] wakes to enforce
+/// [`MAX_QUEUED_TUNNEL_ARRIVAL_AGE`] — the reason an arrival's real worst
+/// case is that age plus one interval rather than exactly that age. Small
+/// relative to the age (so the overshoot is a rounding error, not a
+/// second budget) and coarse in absolute terms (so a hub with an empty
+/// queue — the overwhelmingly common case — costs one uncontended lock
+/// acquisition every few seconds and nothing else).
+#[cfg(unix)]
+const TUNNEL_ARRIVAL_SWEEP_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Reset code for a queued `TCP_ACCEPTED` stream that reached
+/// [`MAX_QUEUED_TUNNEL_ARRIVAL_AGE`] with nobody having claimed it.
+/// Distinct from [`RESET_CODE_TUNNEL_UNKNOWN_FORWARD`] (the id was real
+/// and still registered — the *claimant* never came) and from
+/// [`RESET_CODE_TUNNEL_HUB_EXHAUSTED`] (this one was admitted, and held
+/// capacity for its whole life), so a target correlating QUIC error codes
+/// can tell "nobody was listening for you" from "you were refused at the
+/// door". Like its siblings it is internal, not a wire contract
+/// (`crate::tunnel::splice`'s own doc).
+#[cfg(unix)]
+const RESET_CODE_TUNNEL_CLAIM_EXPIRED: u32 = 0x200C;
+
+/// Reset code for a `TCP_ACCEPTED` stream that named a real, still-
+/// registered `forward_id` but arrived while this hub was already at
+/// [`MAX_TUNNEL_STREAMS_PER_HUB`] — refused before it is ever queued for
+/// a claimant, so the cap is exact rather than advisory (`ErrorCode::
+/// ResourceExhausted`'s CLI-facing edition of the same refusal is what
+/// `crate::localctl::daemon`'s `TCP_CONNECT` leg answers when it hits
+/// this same semaphore).
+#[cfg(unix)]
+const RESET_CODE_TUNNEL_HUB_EXHAUSTED: u32 = 0x200B;
+
+/// One `TCP_ACCEPTED` stream the target opened for a `forward_id` this
+/// hub still recognizes, queued for whichever `LOCAL_STREAM` conduit
+/// claims that exact `forward_id` next
+/// ([`ControlHub::deliver_tcp_accepted`]/[`ControlHub::claim_tcp_accepted`]).
+///
+/// Carries the [`MAX_TUNNEL_STREAMS_PER_HUB`] permit this stream
+/// consumed the moment it was accepted — not acquired again at claim
+/// time — so the cap counts a queued-but-unclaimed backlog exactly the
+/// same as an actively splicing stream (both hold one of this
+/// connection's real QUIC bidi stream slots); dropping a [`TunnelArrival`]
+/// that was never claimed (a conduit died first, or the whole hub did)
+/// releases the permit automatically along with the streams themselves.
+#[cfg(unix)]
+pub(crate) struct TunnelArrival {
+    send: SendStream,
+    recv: RecvStream,
+    /// Bytes the target had already pipelined past its own `StreamHeader`
+    /// frame by the time [`Listen::run_tunnel_accept_loop`] read the
+    /// header off `recv` — `qsh_transport::FramedRecv::into_raw`'s own
+    /// doc on why these must lead whatever the claimant's splice
+    /// subsequently reads from `recv` directly, not be dropped or
+    /// reordered behind it. A `TCP_ACCEPTED` stream carries no
+    /// handshake past its header (`v1.proto`'s own comment: "it *is* the
+    /// accepted leg"), so the target may already be mid-transfer by the
+    /// time this arrival is even queued, let alone claimed.
+    residue: Vec<u8>,
+    /// When [`ControlHub::deliver_tcp_accepted`] queued this arrival —
+    /// the only input [`ControlHub::sweep_expired_arrivals`] needs, and
+    /// the reason a queue is drained strictly from its front: arrivals
+    /// are pushed in `Instant::now()` order onto the back of a `VecDeque`,
+    /// so a queue is always sorted oldest-first and the first
+    /// non-expired entry ends the scan.
+    queued_at: Instant,
+    _permit: OwnedSemaphorePermit,
+}
+
+#[cfg(unix)]
+impl TunnelArrival {
+    /// Reset both halves with `code` rather than letting them drop bare —
+    /// a bare `SendStream`/`RecvStream` drop finishes/stops *cleanly*
+    /// (quinn's own `Drop`), which would tell the target this accepted
+    /// connection ended normally when in fact nobody on the controller
+    /// side ever spliced it to anything (`crate::tunnel::splice`'s module
+    /// doc: "a truncated transfer that looks like a clean EOF is data
+    /// loss the application cannot detect" — the same discipline applies
+    /// to a stream that never started, not just one that was cut off
+    /// mid-transfer).
+    fn reset(mut self, code: u32) {
+        let _ = self.send.reset(quinn::VarInt::from_u32(code));
+        let _ = self.recv.stop(quinn::VarInt::from_u32(code));
+    }
+
+    /// Unpack for the claimant to splice — **including** the permit
+    /// ([`MAX_TUNNEL_STREAMS_PER_HUB`]'s own doc: this stream stays
+    /// counted against the cap for its whole life, splice included, not
+    /// just its time in [`HubState::tunnel_queue`]). The caller must hold
+    /// the returned permit alive for as long as it drives the splice and
+    /// drop it only once that is done.
+    fn into_parts(self) -> (SendStream, RecvStream, Vec<u8>, OwnedSemaphorePermit) {
+        (self.send, self.recv, self.residue, self._permit)
+    }
+}
+
 /// Whether a `ControlMessage` body a conduit is relaying is one of the
 /// target's long-poll-classified requests (mirrors
 /// `crate::server::is_long_poll`, which this module may not import —
@@ -546,6 +774,230 @@ pub enum HubSendError {
     /// death: the conduit is about to receive (or may already have
     /// received) [`ConduitInbound::HostDead`].
     HostDead,
+    /// This conduit asked to close a `forward_id` that belongs to a
+    /// *different* conduit on this hub (adversarial-review hole 3).
+    /// Nothing was allocated and nothing was sent — the request never
+    /// reaches the target, which could not have distinguished the two
+    /// conduits itself. The caller answers `PERMISSION_DENIED` on this
+    /// conduit alone.
+    NotOwner,
+}
+
+/// The one claim token that may ever claim a given `forward_id`'s
+/// `TCP_ACCEPTED` arrivals — deliberately a type, not a bare `Vec<u8>`,
+/// because the invariant it carries is what an adversarial review found
+/// missing twice in a row: an *empty* seat used to match any same-uid
+/// claimant that presented an empty token, i.e. a capability that
+/// silently degraded to "anyone" while the surrounding code still read as
+/// though it were protected.
+///
+/// The inner field is private to this module, so the only way to build a
+/// seat anywhere in this crate is [`ClaimSeat::seat`], and the only way
+/// to test one is [`ClaimSeat::admits`] — a future edit cannot construct
+/// a claimable-but-empty seat, and cannot compare tokens by hand and get
+/// the empty case wrong, because it has no access to the bytes at all.
+#[cfg(unix)]
+mod claim_seat {
+    /// See the module-level type doc above the `mod` keyword.
+    #[derive(Clone, Debug)]
+    pub(super) struct ClaimSeat {
+        /// Invariant, enforced by [`ClaimSeat::seat`] being the only
+        /// constructor and this field being private: `Some(t)` implies
+        /// `!t.is_empty()`. `None` means *permanently unclaimable* — a
+        /// registration whose originating `RemoteForwardOpen` carried no
+        /// claim token at all. Unclaimable is a terminal state: nothing
+        /// re-seats it later (the hub cannot mint one itself — there is
+        /// no wire round trip that could ever echo a hub-minted token
+        /// back to the requester, so a minted token would lock the
+        /// rightful owner out just as hard), so such a registration
+        /// exists only to keep its `forward_id` reserved and sweepable,
+        /// never to hand a stream to anyone.
+        token: Option<Vec<u8>>,
+    }
+
+    impl ClaimSeat {
+        /// Seat exactly the bytes the originating `RemoteForwardOpen`
+        /// carried. Empty in, permanently unclaimable out — an absent or
+        /// empty capability is a refusal, never a pass.
+        pub(super) fn seat(token: Vec<u8>) -> Self {
+            if token.is_empty() {
+                Self { token: None }
+            } else {
+                Self { token: Some(token) }
+            }
+        }
+
+        /// Whether `presented` may claim this seat. Fails closed on both
+        /// halves of the empty case: an unclaimable seat admits nothing,
+        /// and an empty presented token is refused even against a seat
+        /// that holds real bytes (belt and braces — a non-empty seat can
+        /// never equal an empty slice anyway, but this is the line a
+        /// future edit is most likely to loosen).
+        pub(super) fn admits(&self, presented: &[u8]) -> bool {
+            match &self.token {
+                Some(seated) => !presented.is_empty() && seated.as_slice() == presented,
+                None => false,
+            }
+        }
+
+        /// Whether this registration can ever hand a stream to anyone —
+        /// `false` for the permanently-unclaimable seat above.
+        /// [`super::ControlHub::deliver_tcp_accepted`] refuses to *queue*
+        /// for an unclaimable registration at all, so an arrival for one
+        /// is reset immediately instead of occupying a hub tunnel permit
+        /// and a live QUIC stream until the owning conduit happens to die.
+        pub(super) fn is_claimable(&self) -> bool {
+            self.token.is_some()
+        }
+    }
+}
+
+#[cfg(unix)]
+use claim_seat::ClaimSeat;
+
+/// One live `forward_id` registration: the conduit that owns it and the
+/// single [`ClaimSeat`] that may ever take its arrivals, as **one entry**
+/// rather than two parallel maps (adversarial-review finding: two maps
+/// keyed by the same string can diverge, and every path that mutated only
+/// one of them was a hole — the close arm that removed both without an
+/// owner check, and the claim path that re-checked ownership against the
+/// *owner* map while the *token* map was the one that mattered). Inserted
+/// and removed as a unit, so "registered" and "has a seat" are the same
+/// fact and no edit can separate them.
+#[cfg(unix)]
+#[derive(Debug)]
+struct ForwardRegistration {
+    /// The `LOCAL_CONTROL` conduit whose `RemoteForwardOpen` minted this
+    /// `forward_id` — the only conduit that may close it
+    /// ([`ControlHub::send_request`]'s `RfwdClose` arm and
+    /// [`ControlHub::deliver_response`]'s close arm both check it) and
+    /// the one whose death sweeps it ([`ControlHub::unregister_conduit`]).
+    owner: ConduitId,
+    seat: ClaimSeat,
+}
+
+/// This hub's parked-claim pool: the [`MAX_PARKED_CLAIMS_PER_HUB`]
+/// ceiling and the [`MAX_PARKED_CLAIMS_PER_CONDUIT`] share enforced
+/// **together**, in one non-blocking `try_acquire`, under a small mutex
+/// of its own (never `HubState`'s — see [`ControlHub::claim_permits`]).
+/// A plain `Semaphore` cannot express the share, and the share is what
+/// keeps one CLI's perfectly ordinary steady state from denying `-R` to
+/// every other CLI on this host ([`MAX_PARKED_CLAIMS_PER_CONDUIT`]'s own
+/// doc).
+///
+/// **This accounting is fairness, never authorization.** The `owner` it
+/// keys on is read out of [`HubState::forwards`] read-only and is
+/// advisory: a permit means "you may park", never "you may be delivered
+/// to". The single place a claimant's right to an arrival is decided
+/// stays [`HubState::admits_claim`], evaluated under the same lock
+/// acquisition that pops the arrival, on every wake, against the current
+/// seat ([`ControlHub::claim_tcp_accepted`]'s own doc) — nothing here
+/// participates in that decision, and a permit granted against a stale,
+/// absent or someone else's owner buys nothing but a wait that
+/// `admits_claim` then refuses.
+///
+/// That is also why keying the share on the *owning* conduit is safe
+/// rather than a lever a hostile same-uid conduit could pull on someone
+/// else's share: parking for any length of time requires passing
+/// `admits_claim`, i.e. presenting the seated claim token. A claim with
+/// the wrong token is refused on `claim_tcp_accepted`'s first iteration,
+/// before it ever awaits, and its permit is released immediately — so it
+/// can occupy another conduit's share only for the microseconds that
+/// refusal takes, never durably.
+#[cfg(unix)]
+#[derive(Default)]
+struct ClaimPoolState {
+    /// Permits outstanding across every bucket — the hub-wide ceiling's
+    /// own accounting, kept as a running count rather than summed from
+    /// `per_owner` so the ceiling can never drift from the shares.
+    total: usize,
+    /// `owner -> permits outstanding`. `None` is the bucket for a claim
+    /// whose `forward_id` resolved to no live registration at the moment
+    /// its permit was taken; such a claim is refused by `admits_claim`
+    /// without ever awaiting, but it gets a bucket of its own — bounded
+    /// by the same share — rather than a free pass, so the one window in
+    /// which it could park (the id becoming registered, to a token the
+    /// claimant somehow already holds, between the permit and the claim)
+    /// is bounded exactly like every other. Entries are removed when they
+    /// hit zero, so this map is never larger than the ceiling.
+    per_owner: HashMap<Option<ConduitId>, usize>,
+}
+
+#[cfg(unix)]
+#[derive(Default)]
+struct ClaimPool {
+    slots: Mutex<ClaimPoolState>,
+}
+
+#[cfg(unix)]
+impl ClaimPool {
+    /// One permit for `owner`, or `None` when either the hub ceiling or
+    /// `owner`'s own share is already spent. Never blocks and never
+    /// queues — the same "fail the next one immediately" discipline
+    /// [`ControlHub::try_acquire_tunnel_permit`]'s doc states, now with
+    /// two reasons to fail that are deliberately indistinguishable to the
+    /// caller (both answer the one `ErrorCode::ResourceExhausted` the
+    /// hub-wide refusal already answered, so this adds no new observable
+    /// class).
+    fn try_acquire(self: &Arc<Self>, owner: Option<ConduitId>) -> Option<ClaimPermit> {
+        let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        if slots.total >= MAX_PARKED_CLAIMS_PER_HUB {
+            return None;
+        }
+        let held = slots.per_owner.get(&owner).copied().unwrap_or(0);
+        if held >= MAX_PARKED_CLAIMS_PER_CONDUIT {
+            return None;
+        }
+        // Only ever inserted on the granting path, so a refused acquire
+        // leaves no entry behind for an owner that holds nothing.
+        slots.per_owner.insert(owner, held + 1);
+        slots.total += 1;
+        Some(ClaimPermit {
+            pool: self.clone(),
+            owner,
+        })
+    }
+
+    /// Give one permit back. Every [`ClaimPermit`] was minted by
+    /// [`Self::try_acquire`] (its fields are private, so there is no
+    /// other way to build one), which means the bucket being released
+    /// always exists and `total` always counts it — the `saturating_sub`
+    /// and the `if let` are belt and braces against a future edit, not
+    /// live cases.
+    fn release(&self, owner: Option<ConduitId>) {
+        let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        slots.total = slots.total.saturating_sub(1);
+        if let Some(held) = slots.per_owner.get_mut(&owner) {
+            *held -= 1;
+            if *held == 0 {
+                slots.per_owner.remove(&owner);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn held_total(&self) -> usize {
+        self.slots.lock().unwrap_or_else(|e| e.into_inner()).total
+    }
+}
+
+/// One parked claim's slot in [`ClaimPool`] — released on drop, exactly
+/// like the [`OwnedSemaphorePermit`] it replaces, so
+/// `crate::localctl::daemon`'s `serve_tcp_accepted` keeps its existing
+/// discipline of dropping it explicitly the instant the parked wait ends
+/// (its own comment on why the live splice must be bounded by
+/// [`MAX_TUNNEL_STREAMS_PER_HUB`] instead).
+#[cfg(unix)]
+pub(crate) struct ClaimPermit {
+    pool: Arc<ClaimPool>,
+    owner: Option<ConduitId>,
+}
+
+#[cfg(unix)]
+impl Drop for ClaimPermit {
+    fn drop(&mut self) {
+        self.pool.release(self.owner);
+    }
 }
 
 #[cfg(unix)]
@@ -569,6 +1021,66 @@ struct HubState {
     /// by design (its own module docs) and must not learn what a
     /// `wire::control_message::Body` is.
     long_poll_ids: HashSet<u64>,
+    /// `forward_id -> its one [`ForwardRegistration`]` — the
+    /// safety-critical table `PLAN.md` M4 Step 5 (a) names: the *only*
+    /// place a `forward_id` is ever attributed to a conduit, populated by
+    /// [`ControlHub::deliver_response`] the moment (not later) the
+    /// matching `RemoteForwardOpened` comes back, and swept in full by
+    /// [`ControlHub::unregister_conduit`] the moment that conduit dies —
+    /// the same "every insert has exactly one removal" discipline
+    /// `ControlMux`'s own module doc states for its table, extended to
+    /// this one. A `forward_id` absent here is unregistered (never
+    /// opened, already closed, or its owner already dead) and every
+    /// tunnel-relay path treats that identically:
+    /// [`ControlHub::deliver_tcp_accepted`] refuses to queue a stream for
+    /// it, and a `LOCAL_STREAM` claim for it is refused before it can
+    /// wait.
+    ///
+    /// **Owner and claim seat are one entry, never two maps**
+    /// (adversarial-review holes 1 and 3): the conduit that owns a
+    /// `forward_id` and the one token that may claim it are inserted,
+    /// checked and removed together, under this hub's single `state`
+    /// mutex, so there is no window in which one exists without the
+    /// other and no path that can mutate one while reasoning about the
+    /// other. Ownership decides *who may close* (both
+    /// [`ControlHub::send_request`]'s `RfwdClose` arm and
+    /// [`ControlHub::deliver_response`]'s close arm compare against it);
+    /// the seat decides *who may be delivered to*
+    /// ([`ControlHub::claim_tcp_accepted`], re-checked on every wake).
+    forwards: HashMap<String, ForwardRegistration>,
+    /// `daemon_request_id -> claim_token` for an in-flight `RemoteForwardOpen`
+    /// only — captured by [`ControlHub::send_request`] from the request
+    /// body itself (`wire::RemoteForwardOpen::claim_token`) and consumed
+    /// by [`ControlHub::deliver_response`] the instant the matching
+    /// `RemoteForwardOpened` registers a *new* `forward_id`, mirroring
+    /// `pending_attach_subscriptions`/`pending_rfwd_closes` exactly. A
+    /// conduit's death before the reply arrives orphans its entry here
+    /// exactly the way it orphans a pending attach subscription — left
+    /// alone; nothing here holds a resource that needs releasing.
+    pending_rfwd_open_claim_tokens: HashMap<u64, Vec<u8>>,
+    /// `daemon_request_id -> forward_id` for an in-flight `RemoteForwardClose`
+    /// only — mirrors `pending_attach_subscriptions` exactly (a
+    /// `RemoteForwardClose` request already names the forward it is
+    /// closing; the response is a bare success with no payload of its
+    /// own, `v1.proto`'s own comment on the message, so this is the only
+    /// way [`ControlHub::deliver_response`] can tell *which* `forward_id`
+    /// a bare-success `Response` is closing). Consumed there once the
+    /// matching `Response` arrives, success or not; a conduit's death
+    /// orphans an entry here exactly the way it orphans a pending attach
+    /// subscription — left alone, since nothing here holds a resource
+    /// that needs releasing (the *forward's* resource is
+    /// `forwards`/`tunnel_queue`, released by
+    /// [`ControlHub::unregister_conduit`] regardless of whether a close
+    /// was ever in flight).
+    pending_rfwd_closes: HashMap<u64, String>,
+    /// `forward_id -> TCP_ACCEPTED streams already accepted and waiting
+    /// for a `LOCAL_STREAM` conduit to claim them`
+    /// ([`ControlHub::deliver_tcp_accepted`]/[`ControlHub::claim_tcp_accepted`]).
+    /// An entry only ever exists for a `forward_id` also present in
+    /// `forwards` — [`ControlHub::unregister_conduit`] removes both
+    /// together, in the same locked section, so there is no window where
+    /// one outlives the other.
+    tunnel_queue: HashMap<String, VecDeque<TunnelArrival>>,
     /// Set once, by [`ControlHub::mark_dead`], and never cleared —
     /// [`ControlHub::register_conduit`] checks it under the same lock it
     /// registers under, so a conduit that resolves this hub via
@@ -579,6 +1091,51 @@ struct HubState {
     /// hub whose drive loop is already gone and hanging forever with no
     /// timeout on this leg (adversarial review finding).
     dead: bool,
+}
+
+#[cfg(unix)]
+impl HubState {
+    /// **The one place a presented claim token is ever compared against a
+    /// seat** (adversarial-review hole 1: the previous shape validated the
+    /// token once, at entry to [`ControlHub::claim_tcp_accepted`], and
+    /// then re-checked something *else* — mere registration — inside the
+    /// wait loop, after popping the arrival. A registration re-seated
+    /// while a claimant was parked therefore handed the new owner's
+    /// arrival to the old claimant: a textbook check-then-use, sitting on
+    /// this PR's central security invariant).
+    ///
+    /// Callers must call this under the same lock acquisition that
+    /// performs the handover, and must not pop anything from
+    /// [`Self::tunnel_queue`] before it returns `true` — the guarantee
+    /// this function exists to provide is that a token is validated
+    /// against the *current* seat at the instant an arrival changes
+    /// hands, not at some earlier instant that a concurrent re-seat can
+    /// invalidate.
+    ///
+    /// Fails closed on every ambiguity: an unregistered `forward_id`, a
+    /// registration whose seat is permanently unclaimable
+    /// ([`ClaimSeat`]'s own doc), and an empty presented token all return
+    /// `false`, indistinguishable from one another.
+    fn admits_claim(&self, forward_id: &str, presented: &[u8]) -> bool {
+        self.forwards
+            .get(forward_id)
+            .is_some_and(|registration| registration.seat.admits(presented))
+    }
+
+    /// Whether `conduit` is the conduit that opened `forward_id` — the
+    /// check every teardown path owes (adversarial-review hole 3: the
+    /// close arm tore down `forward_id` for whichever conduit's
+    /// `RemoteForwardClose` happened to be answered, never comparing
+    /// against the conduit `ControlMux::map_inbound` had just resolved,
+    /// so any conduit could delete another conduit's registration and
+    /// reset its queued arrivals). `false` for an unregistered id too, so
+    /// a non-owner's close is indistinguishable from a close for an id
+    /// this hub never knew.
+    fn is_forward_owner(&self, forward_id: &str, conduit: ConduitId) -> bool {
+        self.forwards
+            .get(forward_id)
+            .is_some_and(|registration| registration.owner == conduit)
+    }
 }
 
 /// The `LOCAL_CONTROL` relay for one registered host's live reverse
@@ -621,6 +1178,46 @@ pub struct ControlHub {
     /// one hub per registration generation) — see
     /// [`Self::take_outbound_receiver`].
     outbound_rx: Mutex<Option<mpsc::UnboundedReceiver<(u64, wire::control_message::Body)>>>,
+    /// [`MAX_TUNNEL_STREAMS_PER_HUB`] permits — a plain `Semaphore`, not
+    /// folded into `state`'s `Mutex`, because acquiring one races real
+    /// I/O (`open_bi` on the `TCP_CONNECT` leg) that must never run while
+    /// holding `state`'s lock (`Self`'s own module doc: nothing here ever
+    /// holds `state` across an `.await`).
+    tunnel_permits: Arc<Semaphore>,
+    /// The parked-claim pool — [`MAX_PARKED_CLAIMS_PER_HUB`] permits
+    /// hub-wide, of which any one owning conduit may hold at most
+    /// [`MAX_PARKED_CLAIMS_PER_CONDUIT`] ([`ClaimPool`]) — held only
+    /// while a `LOCAL_STREAM` `TCP_ACCEPTED` claim is parked inside
+    /// [`Self::claim_tcp_accepted`]'s wait (`crate::localctl::daemon`'s
+    /// `serve_tcp_accepted` acquires one *before* calling it and drops it
+    /// the instant the call returns, granted or not). A separate
+    /// `Semaphore` from `tunnel_permits`: that one bounds *relayed tunnel
+    /// bytes* (a `TCP_CONNECT`/`TCP_ACCEPTED` stream actually carrying, or
+    /// about to carry, a splice); this one bounds *parked waits*, a
+    /// distinct resource — the daemon-wide
+    /// `MAX_CONCURRENT_LOCAL_STREAM_CONDUITS` permit `serve_authorized_conduit`
+    /// already acquired for this conduit is held for the parked call's
+    /// *entire* budget (up to `LOCAL_WAIT_MAX`) whether or not anything
+    /// ever arrives, so with no per-hub bound of its own one CLI opening
+    /// many long-`wait_ms` claims against one host could alone exhaust
+    /// that daemon-wide pool and starve every other CLI and every other
+    /// host's `SESSION_DATA`/`TCP_CONNECT` conduits too (adversarial
+    /// review finding). Sized independently of `tunnel_permits` on
+    /// purpose — a parked wait holds no QUIC resource at all, so there is
+    /// no reason the two caps need to match. Not a `Semaphore`, because a
+    /// semaphore can express the ceiling but not the per-conduit share,
+    /// and the share is the half that keeps *ordinary* use (one parked
+    /// claim per registered `-R`, re-armed forever) from starving every
+    /// other CLI on this host — [`MAX_PARKED_CLAIMS_PER_CONDUIT`]'s own
+    /// doc.
+    claim_permits: Arc<ClaimPool>,
+    /// Broadcasts every [`ControlHub::deliver_tcp_accepted`] call to every
+    /// [`ControlHub::claim_tcp_accepted`] currently waiting — each waiter
+    /// re-checks only its own `forward_id`'s queue on wake
+    /// ([`Self::claim_tcp_accepted`]'s own doc explains why a shared,
+    /// rather than per-`forward_id`, `Notify` is both correct and
+    /// sufficient at this scale).
+    tunnel_notify: Notify,
 }
 
 #[cfg(unix)]
@@ -643,10 +1240,17 @@ impl ControlHub {
                 inboxes: HashMap::new(),
                 pending_attach_subscriptions: HashMap::new(),
                 long_poll_ids: HashSet::new(),
+                forwards: HashMap::new(),
+                pending_rfwd_open_claim_tokens: HashMap::new(),
+                pending_rfwd_closes: HashMap::new(),
+                tunnel_queue: HashMap::new(),
                 dead: false,
             }),
             outbound_tx,
             outbound_rx: Mutex::new(Some(outbound_rx)),
+            tunnel_permits: Arc::new(Semaphore::new(MAX_TUNNEL_STREAMS_PER_HUB)),
+            claim_permits: Arc::new(ClaimPool::default()),
+            tunnel_notify: Notify::new(),
         })
     }
 
@@ -724,9 +1328,20 @@ impl ControlHub {
 
     /// Tear down `conduit`: removes everything it owns from the
     /// multiplexer (in-flight requests, event subscriptions —
-    /// `ControlMux::unregister_conduit`'s own contract) and drops its
-    /// inbox sender. Idempotent — safe to call from both the conduit's
-    /// own EOF path and a concurrent host-death sweep racing it.
+    /// `ControlMux::unregister_conduit`'s own contract), drops its inbox
+    /// sender, and — `PLAN.md` M4 Step 5 (a)'s misdelivery-prevention
+    /// requirement — removes **every** `forward_id` this conduit owns
+    /// from [`HubState::forwards`] and resets every `TCP_ACCEPTED`
+    /// stream still queued for one of them in [`HubState::tunnel_queue`]
+    /// (`RESET_CODE_TUNNEL_UNKNOWN_FORWARD`: from this instant those ids
+    /// are exactly as unregistered as one that never existed, so a
+    /// straggling `TCP_ACCEPTED` for one that arrives moments later is
+    /// rejected by [`Self::deliver_tcp_accepted`] the ordinary way — no
+    /// separate bookkeeping needed there). No leaked registry entry, no
+    /// leaked QUIC stream, and no entry ever outlives the conduit that
+    /// owns it. Idempotent — safe to call from both the conduit's own EOF
+    /// path and a concurrent host-death sweep racing it (a conduit with
+    /// no forwards removes nothing extra).
     pub fn unregister_conduit(&self, conduit: ConduitId) {
         let mut state = self.lock();
         let dropped_ids = state.mux.unregister_conduit(conduit);
@@ -747,6 +1362,27 @@ impl ControlHub {
             // budget far faster than the target's own permits actually
             // free up, defeating the cap's entire purpose.
         }
+        let orphaned_forward_ids: Vec<String> = state
+            .forwards
+            .iter()
+            .filter(|(_, registration)| registration.owner == conduit)
+            .map(|(forward_id, _)| forward_id.clone())
+            .collect();
+        let mut orphaned_arrivals = Vec::new();
+        for forward_id in &orphaned_forward_ids {
+            // One entry, so owner and claim seat leave together — there
+            // is no second map that could keep a stale seat alive for a
+            // `forward_id` string a later registration reuses
+            // (`HubState::forwards`'s own doc).
+            state.forwards.remove(forward_id);
+            if let Some(queue) = state.tunnel_queue.remove(forward_id) {
+                orphaned_arrivals.extend(queue);
+            }
+        }
+        drop(state);
+        for arrival in orphaned_arrivals {
+            arrival.reset(RESET_CODE_TUNNEL_UNKNOWN_FORWARD);
+        }
     }
 
     /// Forward `conduit`'s request (`peer_request_id`, `body`) onto this
@@ -761,7 +1397,7 @@ impl ControlHub {
         &self,
         conduit: ConduitId,
         peer_request_id: u64,
-        body: wire::control_message::Body,
+        mut body: wire::control_message::Body,
     ) -> Result<(), HubSendError> {
         let mut state = self.lock();
         let is_long_poll = is_long_poll_body(&body);
@@ -775,6 +1411,24 @@ impl ControlHub {
         if is_long_poll && state.long_poll_ids.len() >= MAX_INFLIGHT_LONG_POLL_PER_HUB {
             return Err(HubSendError::Exhausted);
         }
+        // **Adversarial-review hole 3, the outbound half.** A
+        // `RemoteForwardClose` naming a `forward_id` this hub has
+        // registered to a *different* conduit is refused here, before a
+        // `daemon_request_id` is minted and before anything reaches the
+        // shared QUIC connection: the daemon is the only component in the
+        // system that can tell one CLI's conduit from another's (the
+        // target sees a single connection and cannot), so if the relay
+        // forwarded it the target would dutifully close another CLI's
+        // forward and there would be nothing left for the inbound half to
+        // protect. An id this hub does not know is *not* refused — it may
+        // be a close racing its own `RemoteForwardOpened`, and the target
+        // is the right place to answer for an id nobody here holds.
+        if let wire::control_message::Body::RfwdClose(close) = &body
+            && state.forwards.contains_key(&close.forward_id)
+            && !state.is_forward_owner(&close.forward_id, conduit)
+        {
+            return Err(HubSendError::NotOwner);
+        }
         let daemon_request_id = state
             .mux
             .map_outbound(conduit, peer_request_id)
@@ -786,6 +1440,49 @@ impl ControlHub {
             state
                 .pending_attach_subscriptions
                 .insert(daemon_request_id, SessionId(attach.session_id.clone()));
+        }
+        if let wire::control_message::Body::RfwdClose(close) = &body {
+            // Mirrors the `SessionAttach` case just above — see
+            // `HubState::pending_rfwd_closes`'s own doc for why this is
+            // the only way `deliver_response` can attribute a bare-
+            // success `Response` to the `forward_id` it is closing.
+            state
+                .pending_rfwd_closes
+                .insert(daemon_request_id, close.forward_id.clone());
+        }
+        if let wire::control_message::Body::RfwdOpen(open) = &mut body {
+            // Finding A fix: captured here, under the same lock that just
+            // allocated `daemon_request_id`, so `deliver_response` can
+            // seat it atomically alongside the registration the instant
+            // the matching `RemoteForwardOpened` comes back —
+            // `HubState::pending_rfwd_open_claim_tokens`'s own doc.
+            //
+            // **Finding 5 fix — `mem::take`, not `.clone()`.** `claim_token`
+            // is a purely requester-local capability
+            // (`wire::RemoteForwardOpen::claim_token`'s own doc: the
+            // target never inspects or compares it) that exists solely so
+            // *this* seat can be minted; it has no business reaching the
+            // peer at all. `LOCAL_CONTROL` has no message shape of its
+            // own to carry it on instead — this conduit relays the
+            // *exact* `qsh.wire.v1.ControlMessage`/`Response` pair that
+            // crosses the QUIC control stream verbatim
+            // (`qsh/local/v1.proto`'s own header, `LocalctlDaemon::
+            // serve_control`'s `conduit.recv::<wire::ControlMessage>()`
+            // at `localctl/daemon.rs`), so taking it here — rather than
+            // leaving it in `open` for `.clone()` to copy and the real
+            // send below to carry unmodified — is what actually keeps it
+            // off the wire: `body` below, the exact value
+            // [`Listen::drive_registered_session`]'s `recv_outbound` arm
+            // serializes onto the live QUIC connection to the peer, no
+            // longer has it once this line runs, regardless of what the
+            // requesting CLI process originally sent on its local
+            // conduit. See `claim_token`'s own field doc in
+            // `qsh/wire/v1.proto` for why the field is not removed from
+            // the message outright.
+            let claim_token = std::mem::take(&mut open.claim_token);
+            state
+                .pending_rfwd_open_claim_tokens
+                .insert(daemon_request_id, claim_token);
         }
         drop(state);
         self.outbound_tx
@@ -827,13 +1524,19 @@ impl ControlHub {
         let pending_session_id = state
             .pending_attach_subscriptions
             .remove(&daemon_request_id);
+        let pending_rfwd_close = state.pending_rfwd_closes.remove(&daemon_request_id);
+        let pending_claim_token = state
+            .pending_rfwd_open_claim_tokens
+            .remove(&daemon_request_id);
         let Some((conduit, peer_request_id)) = state.mux.map_inbound(daemon_request_id) else {
             drop(state);
             // The conduit that asked for this died before the reply
             // arrived (`ControlMux::unregister_conduit` already cleared
             // its table entry) — dropped, unconditionally, including a
             // `SessionOpened` body (see this method's own doc comment for
-            // why that is correct, not a leak).
+            // why that is correct, not a leak). It already swept
+            // `forwards`/`tunnel_queue` for this conduit too, so
+            // there is nothing left here to register or remove either.
             return;
         };
         let subscribe_to = match &resp.body {
@@ -846,8 +1549,139 @@ impl ControlHub {
         if let Some(session_id) = subscribe_to {
             state.mux.subscribe(conduit, session_id);
         }
+        // Tunnel forward-id registry bookkeeping (`PLAN.md` M4 Step 5
+        // (a)): registration happens *here*, under the same lock that
+        // just resolved `conduit` from `daemon_request_id`, the instant
+        // the target's `RemoteForwardOpened` answers the request this
+        // conduit issued — never later, and never attributed to any
+        // conduit but the one `map_inbound` just proved issued it. A
+        // malformed `forward_id` is never seated (peer-ingress shape
+        // discipline, `qsh_proto::wire::valid_forward_id`) — the relay
+        // does not trust the target to always hand back a well-shaped id
+        // it never itself asked for. A `RemoteForwardClose` succeeding
+        // (bare `None` body, matched via `pending_rfwd_close`) is the
+        // mirror-image teardown, queued arrivals included.
+        //
+        // **Duplicate `forward_id` is rejected, never adopted**
+        // (adversarial review finding): `forward_id` is target-minted
+        // (`ulid::Ulid::new()`, `Server::handle_rfwd_open`) and
+        // practically unique, but this relay must not *trust* that — a
+        // second `RemoteForwardOpened` naming an id already present in
+        // `forwards` would otherwise silently move ownership to
+        // whichever conduit's request happened to be answered second,
+        // handing a different conduit's live registration (and, unclaimed
+        // queued arrivals with it) to a conduit that never opened it. The
+        // first registration owns the id until it is explicitly closed;
+        // every later `RemoteForwardOpened` for the same id is logged and
+        // dropped on the floor — not inserted, and not an error reported
+        // to anyone, since the *requesting* conduit for this duplicate
+        // reply already has its own distinct, valid registration recorded
+        // moments earlier under this same `daemon_request_id`'s own first
+        // answer; only a target minting the same id twice (a bug or an
+        // adversarial target) reaches this branch at all.
+        let mut closed_arrivals = Vec::new();
+        match &resp.body {
+            Some(wire::response::Body::RfwdOpened(opened))
+                if wire::valid_forward_id(&opened.forward_id)
+                    && !state.forwards.contains_key(&opened.forward_id) =>
+            {
+                // **Ownership fix (adversarial-review findings A and 2):**
+                // owner and claim seat are seated *atomically*, as one
+                // entry, in the same critical section that resolved
+                // `conduit` from `daemon_request_id` — never lazily on
+                // whichever `claim_tcp_accepted` call happens to arrive
+                // first, and never as two independently-mutable maps. The
+                // token seated is exactly what `pending_claim_token`
+                // above took out of `pending_rfwd_open_claim_tokens` —
+                // the bytes *this conduit's own request* carried in
+                // `RemoteForwardOpen.claim_token`
+                // (`RemoteForwardAcceptor::spawn_reverse` mints it,
+                // `RemoteForwardAcceptor::claim_token`'s doc requires the
+                // caller send it before calling `register`) — never a
+                // value invented here: minting a *different* token at
+                // this point would seat a secret the requester can never
+                // learn (there is no wire round trip that echoes it back)
+                // and would lock every future claim out, itself included.
+                //
+                // **An absent or empty token is a refusal, not a
+                // wildcard** (hole 2): a request that carried none
+                // (`ops::tunnel::remote_forward_open_from_spec`'s empty
+                // placeholder is the live example) used to seat an
+                // *empty* token, and an empty seat matched any same-uid
+                // claimant presenting an empty token — a capability that
+                // silently meant "anyone". `ClaimSeat::seat` maps empty
+                // to the permanently-unclaimable seat instead: the
+                // `forward_id` is still recorded (so it stays attributed
+                // to this conduit, is swept when it dies, cannot be
+                // adopted by a duplicate `RemoteForwardOpened`, and is
+                // still closable by its owner) but no claim for it can
+                // ever succeed and `deliver_tcp_accepted` refuses to
+                // queue anything for it at all.
+                let seat = ClaimSeat::seat(pending_claim_token.unwrap_or_default());
+                if !seat.is_claimable() {
+                    tracing::warn!(
+                        forward_id = %opened.forward_id,
+                        "qsh::tunnel: RemoteForwardOpened for a request that carried no claim \
+                         token; registering it as permanently unclaimable"
+                    );
+                }
+                state.forwards.insert(
+                    opened.forward_id.clone(),
+                    ForwardRegistration {
+                        owner: conduit,
+                        seat,
+                    },
+                );
+            }
+            Some(wire::response::Body::RfwdOpened(opened))
+                if wire::valid_forward_id(&opened.forward_id) =>
+            {
+                tracing::warn!(
+                    forward_id = %opened.forward_id,
+                    "qsh::tunnel: duplicate RemoteForwardOpened for an already-registered \
+                     forward_id; keeping the first registration, ignoring this one"
+                );
+            }
+            None if pending_rfwd_close.is_some() => {
+                let forward_id = pending_rfwd_close.as_deref().unwrap_or_default();
+                // **Adversarial-review hole 3, the inbound half.** The
+                // sibling `RfwdOpened` arm above is careful never to move
+                // a registration to a conduit that did not open it; this
+                // arm must be exactly as careful about *removing* one. A
+                // successful `RemoteForwardClose` tears down
+                // `forward_id`'s registration and resets every arrival
+                // still queued for it — so answering it without comparing
+                // the closing conduit against the registered owner let
+                // any conduit delete another conduit's forward and kill
+                // its in-flight streams. `send_request` already refuses to
+                // relay such a close at all, so reaching here means the
+                // registration changed hands (or appeared) between the
+                // request going out and its answer coming back: still a
+                // non-owner, still refused. A close from a non-owner
+                // changes nothing and is indistinguishable from a close
+                // for an id this hub never knew — both fall through
+                // having mutated no state, and the `Response` itself is
+                // still delivered to the conduit that asked, verbatim.
+                if state.is_forward_owner(forward_id, conduit) {
+                    state.forwards.remove(forward_id);
+                    if let Some(queue) = state.tunnel_queue.remove(forward_id) {
+                        closed_arrivals.extend(queue);
+                    }
+                } else {
+                    tracing::warn!(
+                        forward_id = %forward_id,
+                        "qsh::tunnel: RemoteForwardClose answered for a forward_id this conduit \
+                         does not own; registry left untouched"
+                    );
+                }
+            }
+            _ => {}
+        }
         let inbox = state.inboxes.get(&conduit).cloned();
         drop(state);
+        for arrival in closed_arrivals {
+            arrival.reset(RESET_CODE_TUNNEL_UNKNOWN_FORWARD);
+        }
         let Some(inbox) = inbox else {
             return;
         };
@@ -915,6 +1749,397 @@ impl ControlHub {
                 let _ = inbox.try_send(ConduitInbound::HostDead);
             }
             self.unregister_conduit(conduit);
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // Tunnel relay (`PLAN.md` M4 Step 5, PR 5a). Both directions the
+    // `LOCAL_STREAM` conduit carries (`docs/design/protocol.md` §11-3):
+    // `TCP_CONNECT` (`crate::localctl::daemon::LocalctlDaemon::serve_stream`
+    // opens the QUIC bidi itself, so it only needs a permit from
+    // [`Self::try_acquire_tunnel_permit`]) and `TCP_ACCEPTED` (the target
+    // opens the QUIC bidi; [`Listen::run_tunnel_accept_loop`] accepts it
+    // and hands it to [`Self::deliver_tcp_accepted`], `serve_stream`'s
+    // `TCP_ACCEPTED` arm claims it via [`Self::claim_tcp_accepted`]).
+    // ----------------------------------------------------------------
+
+    /// Acquire one of this hub's [`MAX_TUNNEL_STREAMS_PER_HUB`] permits,
+    /// or `None` at the cap — the caller's cue to answer
+    /// `ErrorCode::ResourceExhausted` (`TCP_CONNECT`, before `open_bi` —
+    /// `crate::localctl::daemon`) or reset the stream with
+    /// [`RESET_CODE_TUNNEL_HUB_EXHAUSTED`] (`TCP_ACCEPTED`, before it is
+    /// ever queued — [`Self::deliver_tcp_accepted`]'s call site) rather
+    /// than commit the resource. Never blocks: `try_acquire`, not
+    /// `acquire` — a hub at its cap must fail the *next* stream
+    /// immediately, not queue callers behind whichever ones happen to
+    /// finish first.
+    pub(crate) fn try_acquire_tunnel_permit(&self) -> Option<OwnedSemaphorePermit> {
+        self.tunnel_permits.clone().try_acquire_owned().ok()
+    }
+
+    /// Acquire one parked-claim permit for `forward_id`'s owning conduit,
+    /// or `None` when either this hub's [`MAX_PARKED_CLAIMS_PER_HUB`]
+    /// ceiling or that owner's own [`MAX_PARKED_CLAIMS_PER_CONDUIT`]
+    /// share is spent — the caller's cue to answer
+    /// `ErrorCode::ResourceExhausted` *before* ever calling
+    /// [`Self::claim_tcp_accepted`], the same "fail the next one
+    /// immediately, never queue behind it" discipline
+    /// [`Self::try_acquire_tunnel_permit`]'s own doc states, applied to
+    /// the distinct resource [`ControlHub::claim_permits`]'s doc
+    /// describes.
+    ///
+    /// The owner is resolved read-only, in its own lock acquisition that
+    /// ends before the pool's is taken (the two are never nested, so
+    /// there is no lock-order hazard against anything else that touches
+    /// `state`), and is **fairness accounting only** — [`ClaimPool`]'s
+    /// own doc on why nothing here is or can become an authorization
+    /// decision. An unregistered `forward_id` resolves to `None`, its own
+    /// bucket, and is then refused by [`HubState::admits_claim`] inside
+    /// the claim itself exactly as before: this call never distinguishes
+    /// "no such forward" from "nothing arrived" for the caller, and does
+    /// not change which claims succeed — only how many may wait at once.
+    pub(crate) fn try_acquire_claim_permit(&self, forward_id: &str) -> Option<ClaimPermit> {
+        let owner = self
+            .lock()
+            .forwards
+            .get(forward_id)
+            .map(|registration| registration.owner);
+        self.claim_permits.try_acquire(owner)
+    }
+
+    /// Only for tests: whether `forward_id` currently resolves to a live
+    /// registration, and to which conduit — the adversarial cross-conduit
+    /// coverage this table exists for (`PLAN.md` M4 Step 5 (a)) needs to
+    /// assert on ownership directly, not just on observable splice
+    /// behavior.
+    #[cfg(test)]
+    fn forward_owner(&self, forward_id: &str) -> Option<ConduitId> {
+        self.lock()
+            .forwards
+            .get(forward_id)
+            .map(|registration| registration.owner)
+    }
+
+    /// Only for tests: whether `forward_id` is registered *and* holds a
+    /// seat that can ever admit a claimant — the direct assertion hole 2
+    /// owes (`ClaimSeat`'s own doc): a registration is either claimable
+    /// with a real token or permanently unclaimable, never "claimable by
+    /// anyone presenting nothing".
+    #[cfg(test)]
+    fn forward_is_claimable(&self, forward_id: &str) -> bool {
+        self.lock()
+            .forwards
+            .get(forward_id)
+            .is_some_and(|registration| registration.seat.is_claimable())
+    }
+
+    /// Only for tests: the total number of live `forward_id` registrations
+    /// this hub currently holds, across every conduit — the precise
+    /// "the registry is empty afterwards, not just that the happy path
+    /// still works" assertion a conduit-death sweep owes (`PLAN.md` M4
+    /// Step 5 (a)): checking each id individually proves only that the
+    /// ids a test happened to think of are gone, never that nothing else
+    /// was left behind.
+    #[cfg(test)]
+    fn forward_registry_len(&self) -> usize {
+        self.lock().forwards.len()
+    }
+
+    /// Only for tests: seat a `forward_id -> conduit` registration
+    /// directly, without driving a whole `RemoteForwardOpen`/`Opened`
+    /// round trip through [`Self::send_request`]/[`Self::deliver_response`]
+    /// — the tunnel-relay unit coverage this hub owes
+    /// (`docs/design/testing.md` L2) drives [`Self::deliver_tcp_accepted`]/
+    /// [`Self::claim_tcp_accepted`] directly and only needs a registered
+    /// id to exist first, not the control-message plumbing that would
+    /// normally produce one.
+    #[cfg(test)]
+    fn register_forward_for_test(&self, forward_id: &str, owner: ConduitId) -> Vec<u8> {
+        let token = ulid::Ulid::new().to_string().into_bytes();
+        let mut state = self.lock();
+        state.forwards.insert(
+            forward_id.to_string(),
+            ForwardRegistration {
+                owner,
+                seat: ClaimSeat::seat(token.clone()),
+            },
+        );
+        token
+    }
+
+    /// Queue a `TCP_ACCEPTED` stream the target just opened for
+    /// `forward_id`, for whichever `LOCAL_STREAM` conduit claims it next
+    /// (`Self::claim_tcp_accepted`). `permit` is the
+    /// [`Self::try_acquire_tunnel_permit`] the caller already acquired —
+    /// threaded in rather than acquired here so the caller can reset the
+    /// stream with [`RESET_CODE_TUNNEL_HUB_EXHAUSTED`] *before* ever
+    /// reaching this call when none was available, never after ([`Self`]'s
+    /// own module doc on why the cap must be exact).
+    ///
+    /// **The one invariant this whole relay exists to hold**
+    /// (`PLAN.md` M4 Step 5 (a)): a `forward_id` this hub does not
+    /// currently recognize as registered — never opened, already closed,
+    /// or its owning conduit already dead — is refused here,
+    /// unconditionally, before the stream is queued for anyone. There is
+    /// no path from an unrecognized id to a splice, and no path for one
+    /// `forward_id`'s arrival to reach a different `forward_id`'s
+    /// claimant: every lookup and every insert in this method is keyed by
+    /// the exact string the caller passed, never a position, an order, or
+    /// a count.
+    ///
+    /// `Err` means `forward_id` names no currently-registered forward on
+    /// this hub — the caller gets its
+    /// `send`/`recv`/`permit` back, still unpacked in the returned
+    /// [`TunnelArrival`], specifically so it can [`TunnelArrival::reset`]
+    /// them with a real error code — this method itself must never be the
+    /// place a rejected stream's ownership silently ends, since a bare
+    /// drop here would finish/stop the streams *cleanly* rather than
+    /// reset them ([`TunnelArrival::reset`]'s own doc on why that
+    /// distinction matters).
+    pub(crate) fn deliver_tcp_accepted(
+        &self,
+        forward_id: &str,
+        send: SendStream,
+        recv: RecvStream,
+        residue: Vec<u8>,
+        permit: OwnedSemaphorePermit,
+    ) -> Result<(), TunnelArrival> {
+        let arrival = TunnelArrival {
+            send,
+            recv,
+            residue,
+            queued_at: Instant::now(),
+            _permit: permit,
+        };
+        let mut state = self.lock();
+        // Registered *and* claimable — a permanently-unclaimable
+        // registration ([`ClaimSeat`]'s own doc) is refused here exactly
+        // like an unknown id, so an arrival for one is reset immediately
+        // instead of occupying a hub tunnel permit and a live QUIC stream
+        // in a queue nobody can ever legitimately drain.
+        if !state
+            .forwards
+            .get(forward_id)
+            .is_some_and(|registration| registration.seat.is_claimable())
+        {
+            return Err(arrival);
+        }
+        state
+            .tunnel_queue
+            .entry(forward_id.to_string())
+            .or_default()
+            .push_back(arrival);
+        drop(state);
+        self.tunnel_notify.notify_waiters();
+        Ok(())
+    }
+
+    /// Wait up to `wait` for a `TCP_ACCEPTED` stream queued for
+    /// `forward_id` — a stream already sitting in
+    /// [`HubState::tunnel_queue`] is returned immediately; otherwise this
+    /// waits for [`Self::deliver_tcp_accepted`] to notify.
+    ///
+    /// **Ownership, not just existence** (adversarial review finding: two
+    /// lenses independently caught that ownership gated *delivery* but
+    /// this method checked only that `forward_id` was registered to
+    /// *someone*, so any same-uid conduit that merely knew a live
+    /// `forward_id` could claim another CLI's arrivals — precisely the
+    /// cross-conduit misdelivery this whole relay exists to prevent).
+    /// `claim_token` is the caller's half of the binding
+    /// [`ForwardRegistration`]'s seat describes: the token is seated once,
+    /// atomically, when [`Self::deliver_response`] registers the
+    /// `forward_id` — never by a claimant — and every claim attempt,
+    /// including the rightful owner's own next one and the adversarial
+    /// case of a different conduit presenting a different token, is
+    /// checked against exactly that seated value by
+    /// [`HubState::admits_claim`] **under the same lock acquisition that
+    /// would hand the arrival over, on every wake** (hole 1: validating
+    /// once at entry and then popping first and re-checking something
+    /// else afterwards let a registration re-seated during a parked wait
+    /// deliver the new owner's arrival to the old claimant). A mismatch
+    /// returns `None`, indistinguishable from an unregistered id (the
+    /// caller has no more use for telling the two apart than it already
+    /// has for "unregistered" vs "timed out", this method's own next
+    /// paragraph). `crate::localctl::daemon`'s
+    /// `serve_tcp_accepted` derives `claim_token` from the same
+    /// `forward_id\0token` ticket it parses `forward_id` out of, minted
+    /// once per [`crate::tunnel::remote::RemoteForwardAcceptor`] instance
+    /// and reused for every claim attempt that instance makes, so a
+    /// legitimate claim loop's own repeat attempts always present the
+    /// same bytes.
+    ///
+    /// Returns `None` when `forward_id` is not currently registered at
+    /// all, when it is registered but to a seat these bytes do not match
+    /// (including a registration re-seated mid-wait, and a
+    /// permanently-unclaimable one — re-checked on every wake, not just
+    /// the first, since the owning conduit can die or be replaced while
+    /// this call is waiting: `Self::unregister_conduit`'s sweep), and when the
+    /// wait simply times out — the caller cannot and need not tell the
+    /// two apart (`crate::localctl::daemon`'s `TCP_ACCEPTED` arm answers
+    /// the same `ErrorCode::Timeout` either way, matching every other
+    /// `LOCAL_STREAM`/`LOCAL_CONTROL` bounded wait in this file).
+    ///
+    /// Uses [`Notify::notified`]'s documented `enable()` pattern (create
+    /// the notification future and register it as a waiter *before*
+    /// re-checking the queue) rather than a bare check-then-`.await` —
+    /// `notify_waiters` (unlike `notify_one`) wakes only futures that are
+    /// already registered at the moment it runs, so checking first and
+    /// registering second would lose a delivery that lands in between.
+    pub(crate) async fn claim_tcp_accepted(
+        &self,
+        forward_id: &str,
+        claim_token: &[u8],
+        wait: Duration,
+    ) -> Option<(SendStream, RecvStream, Vec<u8>, OwnedSemaphorePermit)> {
+        let wait_for_arrival = async {
+            loop {
+                let notified = self.tunnel_notify.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                {
+                    let mut state = self.lock();
+                    // **Hole 1 fix — the invariant, not an extra check.**
+                    // The presented token is validated against the
+                    // *current* seat under the same lock acquisition that
+                    // hands an arrival over, on every wake rather than
+                    // once at entry, and *before* the queue is touched:
+                    // an arrival never leaves `tunnel_queue` until this
+                    // has returned `true`, so there is no pop-then-check
+                    // window in which a re-seated registration's arrival
+                    // can be handed to the previous seat's claimant. This
+                    // subsumes the entry-time check the previous shape
+                    // did separately (the first iteration runs before any
+                    // await, so a mismatched or unregistered id is still
+                    // refused immediately, not after waiting out `wait`),
+                    // and it subsumes the old "is it still registered"
+                    // re-check too, since an unregistered id has no seat
+                    // and therefore admits nobody.
+                    if !state.admits_claim(forward_id, claim_token) {
+                        return None;
+                    }
+                    if let Some(queue) = state.tunnel_queue.get_mut(forward_id)
+                        && let Some(arrival) = queue.pop_front()
+                    {
+                        return Some(arrival.into_parts());
+                    }
+                }
+                notified.await;
+            }
+        };
+        tokio::time::timeout(wait, wait_for_arrival)
+            .await
+            .unwrap_or(None)
+    }
+
+    /// Reset every queued `TCP_ACCEPTED` arrival that has sat unclaimed
+    /// for [`MAX_QUEUED_TUNNEL_ARRIVAL_AGE`], returning how many were
+    /// expired — [`Listen::run_tunnel_arrival_sweeper`] drives this on
+    /// [`TUNNEL_ARRIVAL_SWEEP_INTERVAL`] for as long as this hub's
+    /// connection lives.
+    ///
+    /// **What it releases.** Both halves of what a queued arrival pins:
+    /// the [`MAX_TUNNEL_STREAMS_PER_HUB`] permit it has held since it was
+    /// accepted (dropped with the [`TunnelArrival`], so the slot returns
+    /// to the pool every other CLI on this host draws from) and the live
+    /// QUIC bidi stream itself.
+    ///
+    /// **Visibly, never silently.** Each expiry is a
+    /// [`TunnelArrival::reset`] with [`RESET_CODE_TUNNEL_CLAIM_EXPIRED`]
+    /// plus one `warn`, never a bare drop — a bare drop finishes/stops
+    /// the stream *cleanly*, telling the target this accepted connection
+    /// ended normally when in fact nobody ever spliced it
+    /// ([`TunnelArrival::reset`]'s own doc), which is exactly the
+    /// undetectable data loss `crate::tunnel::splice`'s module doc
+    /// forbids. The log names the `forward_id` and the age only: an id is
+    /// `[A-Za-z0-9_-]{1,64}` by construction here (it matched a live
+    /// registration to have been queued at all) and payload is never
+    /// parsed, let alone logged, on this path — the same purity
+    /// `PLAN.md` M4 Step 5 (a) states for the whole relay.
+    ///
+    /// **What it does not touch.** Only [`HubState::tunnel_queue`]
+    /// entries, and only their expired *front* elements. The
+    /// `forward_id`'s [`ForwardRegistration`] — its owner and its seat —
+    /// is left exactly as it was: an idle `-R` whose backlog aged out is
+    /// still a live, claimable forward, and the next arrival for it is
+    /// queued normally. Emptied queues are removed, which preserves
+    /// [`HubState::forwards`]'s invariant that a `tunnel_queue` entry
+    /// only ever exists for a registered id (it only ever removes).
+    pub(crate) fn sweep_expired_arrivals(&self) -> usize {
+        let now = Instant::now();
+        let mut expired: Vec<(String, TunnelArrival)> = Vec::new();
+        {
+            let mut state = self.lock();
+            state.tunnel_queue.retain(|forward_id, queue| {
+                while queue.front().is_some_and(|arrival| {
+                    now.saturating_duration_since(arrival.queued_at)
+                        >= MAX_QUEUED_TUNNEL_ARRIVAL_AGE
+                }) {
+                    let arrival = queue
+                        .pop_front()
+                        .expect("the front was just observed to exist");
+                    expired.push((forward_id.clone(), arrival));
+                }
+                !queue.is_empty()
+            });
+        }
+        let count = expired.len();
+        for (forward_id, arrival) in expired {
+            let age = now.saturating_duration_since(arrival.queued_at);
+            tracing::warn!(
+                forward_id,
+                age_ms = age.as_millis() as u64,
+                "qsh::reverse: queued TCP_ACCEPTED went unclaimed past its budget; resetting it \
+                 and returning its hub tunnel permit"
+            );
+            arrival.reset(RESET_CODE_TUNNEL_CLAIM_EXPIRED);
+        }
+        count
+    }
+
+    /// Only for tests: how many permits this hub's tunnel-stream pool
+    /// currently has free — the direct assertion the expiry path owes
+    /// (`PLAN.md` M4 Step 5 (a)'s hub cap): proving an expired arrival
+    /// released its permit needs the pool's own count, not merely that
+    /// some later acquire happened to succeed.
+    #[cfg(test)]
+    fn tunnel_permits_available(&self) -> usize {
+        self.tunnel_permits.available_permits()
+    }
+
+    /// Only for tests: how many arrivals are queued for `forward_id`.
+    #[cfg(test)]
+    fn queued_arrival_count(&self, forward_id: &str) -> usize {
+        self.lock()
+            .tunnel_queue
+            .get(forward_id)
+            .map_or(0, |queue| queue.len())
+    }
+
+    /// Only for tests: how many parked-claim permits are outstanding
+    /// across every bucket of this hub's [`ClaimPool`].
+    #[cfg(test)]
+    fn parked_claims_held(&self) -> usize {
+        self.claim_permits.held_total()
+    }
+
+    /// Only for tests: pretend every queued arrival was queued `by`
+    /// earlier than it was, so the *real* [`Self::sweep_expired_arrivals`]
+    /// and the *real* [`MAX_QUEUED_TUNNEL_ARRIVAL_AGE`] can be exercised
+    /// deterministically — rather than either sleeping out a 30 s budget
+    /// or pausing tokio's clock underneath a live quinn connection, whose
+    /// own idle/loss timers would then fire inside the jump and tear the
+    /// stream down for an unrelated reason, hiding the very reset this
+    /// coverage exists to observe.
+    #[cfg(test)]
+    fn backdate_queued_arrivals_for_test(&self, by: Duration) {
+        let mut state = self.lock();
+        for queue in state.tunnel_queue.values_mut() {
+            for arrival in queue.iter_mut() {
+                arrival.queued_at = arrival
+                    .queued_at
+                    .checked_sub(by)
+                    .expect("test backdating must stay within the monotonic clock's range");
+            }
         }
     }
 }
@@ -1061,6 +2286,62 @@ mod control_hub_tests {
             hub.send_request(b, 1, read_body(1)).is_ok(),
             "once the target's own reply actually arrives, the hub-wide budget \
              must be released"
+        );
+    }
+
+    fn rfwd_open_body() -> wire::control_message::Body {
+        wire::control_message::Body::RfwdOpen(wire::RemoteForwardOpen::default())
+    }
+
+    fn rfwd_opened_response(forward_id: &str) -> wire::Response {
+        wire::Response {
+            body: Some(wire::response::Body::RfwdOpened(
+                wire::RemoteForwardOpened {
+                    forward_id: forward_id.to_string(),
+                    actual_port: 0,
+                },
+            )),
+        }
+    }
+
+    /// **Finding: a duplicate `forward_id` must not silently transfer
+    /// ownership.** `forward_id` is target-minted (`ulid::Ulid::new()`)
+    /// and practically unique, but this relay must not trust that: a
+    /// second `RemoteForwardOpened` naming an id already registered to
+    /// conduit A, answering a *different* request conduit B issued, must
+    /// leave A as the owner — never silently hand B the registration (and
+    /// with it, any arrival already queued for it).
+    #[tokio::test]
+    async fn a_duplicate_forward_id_does_not_transfer_ownership_to_a_later_registrant() {
+        let hub = hub();
+        let (conduit_a, _rx_a) = hub.register_conduit();
+        let (conduit_b, _rx_b) = hub.register_conduit();
+        let mut outbound = hub
+            .take_outbound_receiver()
+            .expect("hub has an outbound receiver");
+
+        hub.send_request(conduit_a, 0, rfwd_open_body()).unwrap();
+        let (daemon_request_id_a, _) = outbound.recv().await.expect("queued send");
+        hub.send_request(conduit_b, 0, rfwd_open_body()).unwrap();
+        let (daemon_request_id_b, _) = outbound.recv().await.expect("queued send");
+
+        hub.deliver_response(daemon_request_id_a, rfwd_opened_response("fid-dup"));
+        assert_eq!(
+            hub.forward_owner("fid-dup"),
+            Some(conduit_a),
+            "conduit_a's registration must seat first"
+        );
+
+        // The target (bug, or adversary) answers conduit_b's own,
+        // separate request with the *same* forward_id conduit_a already
+        // holds. Mutation-check target: deleting this rejection and
+        // letting the `insert` run unconditionally again is exactly what
+        // would make this test fail.
+        hub.deliver_response(daemon_request_id_b, rfwd_opened_response("fid-dup"));
+        assert_eq!(
+            hub.forward_owner("fid-dup"),
+            Some(conduit_a),
+            "a duplicate forward_id must never move ownership away from its first registrant"
         );
     }
 
@@ -1908,6 +3189,15 @@ impl Listen {
             watch.clone(),
             probes.clone(),
         ));
+        // `PLAN.md` M4 Step 5 (a): the only kind of peer-initiated bidi
+        // stream this connection legitimately carries is a `TCP_ACCEPTED`
+        // the target opens for a `-R` this hub's own conduits registered
+        // (module docs' kind table for every stream `serve_stream`
+        // itself opens instead). Its own task, exactly like `watchdog` —
+        // see [`Self::spawn_tunnel_accept_loop`]'s doc for the unix/
+        // non-unix split.
+        let tunnel_accept_task =
+            self.spawn_tunnel_accept_loop(session.connection().clone(), &name, generation);
 
         // `M3 Step 6`: this loop is the one and only reader/writer of
         // `session`'s control stream (this method's own long-standing
@@ -2031,6 +3321,9 @@ impl Listen {
             }
         }
         watchdog.abort();
+        if let Some(task) = tunnel_accept_task {
+            task.abort();
+        }
 
         self.mark_hub_dead(&name, generation);
 
@@ -2144,6 +3437,213 @@ impl Listen {
 
     #[cfg(not(unix))]
     fn remove_hub_if(&self, _name: &str, _generation: u64) {}
+
+    /// Spawn [`Self::run_tunnel_accept_loop`] for this generation's hub,
+    /// if it still has one (the same tiny window [`Self::hubs`]'s own doc
+    /// comment describes) — `None` here just means no `TCP_ACCEPTED`
+    /// stream can ever be delivered for this generation, not a startup
+    /// failure worth surfacing; a `-R` opened through it would simply
+    /// have nowhere to register a `forward_id` either.
+    #[cfg(unix)]
+    fn spawn_tunnel_accept_loop(
+        &self,
+        conn: Connection,
+        name: &str,
+        generation: u64,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        let hub = self.hubs.get_matching(name, generation)?;
+        Some(tokio::spawn(Listen::run_tunnel_accept_loop(conn, hub)))
+    }
+
+    #[cfg(not(unix))]
+    fn spawn_tunnel_accept_loop(
+        &self,
+        _conn: Connection,
+        _name: &str,
+        _generation: u64,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        None
+    }
+
+    /// Accept every peer-initiated bidi stream on `conn` for as long as
+    /// it lives — on a registered reverse connection that is, exactly,
+    /// every `TCP_ACCEPTED` stream the target opens for one of this
+    /// hub's registered `forward_id`s (`PLAN.md` M4 Step 5 (a),
+    /// `docs/design/protocol.md` §11-3's "-R(remote forward)이 역방향 위에서
+    /// 도는 경로"). Ends on its own — no cancellation token needed — the
+    /// moment `accept_bi` reports the connection is gone; the caller
+    /// (`Self::drive_registered_session`) also aborts this task's handle
+    /// explicitly the moment its own loop exits, so a connection that
+    /// dies by some path other than `accept_bi` noticing (e.g. this
+    /// generation replaced by a newer one, `CLOSE_CODE_REPLACED`) does
+    /// not leave this loop parked on a connection nothing else is using.
+    ///
+    /// Each accepted stream is handled on its own spawned task
+    /// ([`Self::handle_tcp_accepted_stream`]) so one slow/adversarial
+    /// header never blocks the next `accept_bi` — the same reasoning
+    /// [`crate::tunnel::remote::dispatch_remote_forwards`]'s doc gives for
+    /// the direct-connect leg's mirror-image accept loop.
+    #[cfg(unix)]
+    async fn run_tunnel_accept_loop(conn: Connection, hub: Arc<ControlHub>) {
+        // The queued-arrival sweeper lives exactly as long as this loop
+        // does — its own task rather than a `select!` arm here, so
+        // nothing can make `accept_bi`'s future be dropped mid-poll, and
+        // guarded by [`AbortOnDrop`] rather than joined, because this
+        // loop is normally ended by the caller's `.abort()` and an
+        // aborted task's locals are dropped at its next poll point (which
+        // is what runs the guard). Same lifetime, same connection: a hub
+        // whose connection is gone has already had every queue drained by
+        // `ControlHub::mark_dead`'s per-conduit sweep, so there is
+        // nothing left for a sweeper to do past this point.
+        let _sweeper = AbortOnDrop(tokio::spawn(Listen::run_tunnel_arrival_sweeper(
+            hub.clone(),
+        )));
+        loop {
+            match conn.accept_bi().await {
+                Ok((send, recv)) => {
+                    tokio::spawn(Listen::handle_tcp_accepted_stream(send, recv, hub.clone()));
+                }
+                Err(_) => return,
+            }
+        }
+    }
+
+    /// Enforce [`MAX_QUEUED_TUNNEL_ARRIVAL_AGE`] on this hub's queued
+    /// `TCP_ACCEPTED` arrivals every [`TUNNEL_ARRIVAL_SWEEP_INTERVAL`]
+    /// ([`ControlHub::sweep_expired_arrivals`]'s own doc on why a queued
+    /// arrival needs a bounded life at all). Never ends on its own —
+    /// [`Self::run_tunnel_accept_loop`]'s `AbortOnDrop` guard ends it,
+    /// whether that loop returned or was aborted.
+    ///
+    /// `MissedTickBehavior::Delay`: if the runtime is busy enough that a
+    /// tick is missed, the next sweep should be one interval *later*, not
+    /// a burst of catch-up sweeps that each take this hub's lock for
+    /// nothing.
+    #[cfg(unix)]
+    async fn run_tunnel_arrival_sweeper(hub: Arc<ControlHub>) {
+        let mut ticker = tokio::time::interval(TUNNEL_ARRIVAL_SWEEP_INTERVAL);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            hub.sweep_expired_arrivals();
+        }
+    }
+
+    /// One accepted stream's whole life on this leg: read its
+    /// `StreamHeader` (bounded by `crate::server::HEADER_TIMEOUT`, the
+    /// same bound the direct-connect requester leg uses for the identical
+    /// read), require `TCP_ACCEPTED` and a shape-valid `forward_id`
+    /// ticket (`qsh_proto::wire::valid_forward_id` — checked **before**
+    /// the registry lookup, `PLAN.md` M4 Step 5 (a)), take a
+    /// [`MAX_TUNNEL_STREAMS_PER_HUB`] permit, then hand it to
+    /// [`ControlHub::deliver_tcp_accepted`]. Every rejection path resets
+    /// the stream and touches nothing else — no permit taken for a
+    /// malformed header, no queue entry for an unregistered id, no partial
+    /// pipe ever started (`PLAN.md` M4 Step 5 (a)'s explicit requirement).
+    ///
+    /// Never logs the ticket's bytes on a rejection, only its length — the
+    /// same `qsh_proto::wire::sanitize_peer_text` discipline
+    /// `crate::tunnel::remote::handle_accepted_stream`'s identical check
+    /// documents, and for the identical reason: past `valid_forward_id`
+    /// the string is `[A-Za-z0-9_-]{1,64}` by construction and safe to
+    /// log as-is, but a string that *failed* the check is arbitrary
+    /// peer-controlled text.
+    #[cfg(unix)]
+    async fn handle_tcp_accepted_stream(send: SendStream, recv: RecvStream, hub: Arc<ControlHub>) {
+        let mut stream = qsh_transport::FramedStream::data(send, recv);
+        let header: wire::StreamHeader = match tokio::time::timeout(
+            crate::server::HEADER_TIMEOUT,
+            stream.recv.recv::<wire::StreamHeader>(),
+        )
+        .await
+        {
+            Ok(Ok(Some(h))) => h,
+            _ => {
+                stream.send.reset(crate::server::RESET_CODE_BAD_HEADER);
+                stream.recv.stop(crate::server::RESET_CODE_BAD_HEADER);
+                return;
+            }
+        };
+        if header.stream_kind() != Some(wire::StreamKind::TcpAccepted) {
+            tracing::debug!(
+                kind = header.kind,
+                "qsh::reverse: unexpected peer-opened stream kind on a registered connection"
+            );
+            stream.send.reset(crate::server::RESET_CODE_BAD_HEADER);
+            stream.recv.stop(crate::server::RESET_CODE_BAD_HEADER);
+            return;
+        }
+        let forward_id = match String::from_utf8(header.ticket.clone()) {
+            Ok(id) if wire::valid_forward_id(&id) => id,
+            _ => {
+                tracing::warn!(
+                    ticket_len = header.ticket.len(),
+                    "qsh::reverse: TCP_ACCEPTED with a malformed forward_id ticket"
+                );
+                stream.send.reset(RESET_CODE_TUNNEL_UNKNOWN_FORWARD);
+                stream.recv.stop(RESET_CODE_TUNNEL_UNKNOWN_FORWARD);
+                return;
+            }
+        };
+        let Some(permit) = hub.try_acquire_tunnel_permit() else {
+            tracing::warn!(
+                forward_id,
+                "qsh::reverse: this hub's tunnel-stream cap is exhausted; rejecting TCP_ACCEPTED"
+            );
+            stream.send.reset(RESET_CODE_TUNNEL_HUB_EXHAUSTED);
+            stream.recv.stop(RESET_CODE_TUNNEL_HUB_EXHAUSTED);
+            return;
+        };
+
+        // Past this point the stream is a raw byte pipe — same residue
+        // handoff `crate::tunnel::remote::handle_accepted_stream`'s
+        // identical `TCP_ACCEPTED` leg documents. `residue` cannot be
+        // written anywhere yet: nobody has claimed this `forward_id` —
+        // possibly nobody ever will — so it travels inside the queued
+        // [`TunnelArrival`] instead of being flushed here.
+        let (send_half, recv_half) = stream.split();
+        let raw_send = send_half.into_raw();
+        let (raw_recv, residue) = recv_half.into_raw();
+        if let Err(rejected) =
+            hub.deliver_tcp_accepted(&forward_id, raw_send, raw_recv, residue, permit)
+        {
+            // `deliver_tcp_accepted` never inserted anything and handed
+            // the streams straight back, still owning their permit — this
+            // is the ordinary, expected race
+            // `crate::tunnel::remote::RESET_CODE_UNKNOWN_FORWARD`'s own
+            // doc describes for the direct-connect leg's mirror-image
+            // case (a `TCP_ACCEPTED` outrunning the control round trip
+            // that would have registered it, or simply arriving after the
+            // forward was already closed) — not necessarily a hostile
+            // one, but rejected identically either way: reset, nothing
+            // spliced, permit released.
+            tracing::warn!(
+                forward_id,
+                "qsh::reverse: TCP_ACCEPTED for an unregistered forward_id"
+            );
+            rejected.reset(RESET_CODE_TUNNEL_UNKNOWN_FORWARD);
+        }
+        // `Ok(())`: queued in `hub`'s `tunnel_queue`, owning its permit,
+        // for `ControlHub::claim_tcp_accepted` to hand to a `LOCAL_STREAM`
+        // conduit — nothing further to do on this task.
+    }
+}
+
+/// Aborts the task it holds when dropped — including when the task that
+/// *owns* it is itself aborted, since tokio's cancellation drops a task's
+/// locals at its next poll point. Same shape and same purpose as
+/// `crate::session_stream`'s and `crate::ops::session`'s own guards of
+/// this name; kept local rather than shared because it is three lines and
+/// each copy states the lifetime it guards
+/// ([`Listen::run_tunnel_accept_loop`]'s sweeper, here).
+#[cfg(unix)]
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+#[cfg(unix)]
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 /// [`Listen::drive_registered_session`]'s `select!` arm for its hub's
@@ -2757,5 +4257,1496 @@ mod tests {
         .await
         .expect_err("non-unix must refuse to run");
         assert_eq!(err.code, ErrorCode::Unsupported);
+    }
+
+    // ------------------------------------------------------------------
+    // Tunnel relay registry (`PLAN.md` M4 Step 5, PR 5a). `PLAN.md`'s own
+    // framing: "the central risk of this PR is silent misdelivery" — a
+    // `forward_id` resolving to the wrong conduit's splice is a security
+    // incident, not a bug. These tests exercise
+    // [`ControlHub::deliver_tcp_accepted`]/[`ControlHub::claim_tcp_accepted`]/
+    // [`ControlHub::unregister_conduit`] and [`Listen::handle_tcp_accepted_stream`]
+    // directly — the full wire-level round trip through a real reverse
+    // connection and daemon `LOCAL_STREAM` conduit is
+    // `crates/qsh-testkit/tests/reverse_tunnel.rs`'s job (L3), not this
+    // crate's unit tests (the same split `local_stream_at_the_stream_pools_cap_...`
+    // above already draws for `LOCAL_STREAM`'s own cap).
+    // ------------------------------------------------------------------
+
+    #[cfg(unix)]
+    fn test_hub() -> Arc<ControlHub> {
+        ControlHub::new("widget".into(), "sha256:test".into(), 1, Vec::new())
+    }
+
+    /// A `TCP_ACCEPTED` naming a `forward_id` this hub never registered —
+    /// never opened, already closed, or its owner already dead — must be
+    /// refused by [`ControlHub::deliver_tcp_accepted`] itself, before
+    /// anything is queued: `PLAN.md`'s "an unknown ... forward_id causes
+    /// a stream reset and nothing else". The rejected [`TunnelArrival`]
+    /// comes straight back to the caller (never silently dropped —
+    /// [`ControlHub::deliver_tcp_accepted`]'s own doc on why a bare drop
+    /// here would be wrong), and the registry gained no trace of the
+    /// unknown id.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn deliver_tcp_accepted_refuses_an_unregistered_forward_id_and_queues_nothing() {
+        let hub = test_hub();
+        let (client, _server) = crate::tunnel::testutil::loopback_pair().await;
+        let (send, recv) = client.open_bi().await.unwrap();
+        let permit = hub
+            .try_acquire_tunnel_permit()
+            .expect("a fresh hub is under its cap");
+
+        let rejected = hub
+            .deliver_tcp_accepted("never-registered", send, recv, Vec::new(), permit)
+            .expect_err("an unregistered forward_id must never be queued");
+        assert!(hub.forward_owner("never-registered").is_none());
+
+        // The caller (here, standing in for `handle_tcp_accepted_stream`'s
+        // own rejection path) is responsible for resetting it — prove the
+        // handles really did come back usable, not consumed.
+        rejected.reset(0x9999);
+    }
+
+    /// **The central proof this whole registry exists for**
+    /// (`PLAN.md` M4 Step 5 (a)): a `forward_id` registered by one conduit
+    /// never resolves to a different conduit's claim, even when a real
+    /// arrival is sitting in the hub's queue for the *other* id at the
+    /// exact moment of the claim. Two conduits, two distinct
+    /// `forward_id`s, one arrival delivered only for the first — the
+    /// second conduit's claim on its own id must see nothing, and the
+    /// first conduit's claim on its own id must see exactly the arrival
+    /// it registered.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_forward_id_never_resolves_to_a_different_conduits_registration() {
+        let hub = test_hub();
+        let (conduit_a, _rx_a) = hub.register_conduit();
+        let (conduit_b, _rx_b) = hub.register_conduit();
+        let token_a = hub.register_forward_for_test("fid-a", conduit_a);
+        let token_b = hub.register_forward_for_test("fid-b", conduit_b);
+
+        let (client, server) = crate::tunnel::testutil::loopback_pair().await;
+        let (mut target_send, target_recv) = client.open_bi().await.unwrap();
+        // A QUIC peer only learns a stream exists once a frame referencing
+        // it actually arrives — `accept_bi` below would otherwise block
+        // forever waiting on a stream the client never told it about.
+        target_send.write_all(b"x").await.unwrap();
+        let (daemon_send, daemon_recv) = server.accept_bi().await.unwrap();
+        drop(target_send);
+        drop(target_recv);
+        let permit = hub.try_acquire_tunnel_permit().unwrap();
+        assert!(
+            hub.deliver_tcp_accepted("fid-a", daemon_send, daemon_recv, Vec::new(), permit)
+                .is_ok(),
+            "fid-a is registered to conduit_a, so this must be accepted"
+        );
+
+        // conduit_b's own id must not see conduit_a's arrival, however
+        // briefly it waits.
+        let claimed_by_b = hub
+            .claim_tcp_accepted("fid-b", &token_b, Duration::from_millis(50))
+            .await;
+        assert!(
+            claimed_by_b.is_none(),
+            "fid-b must never resolve to fid-a's queued arrival"
+        );
+
+        // fid-a's own claim still succeeds — proving the arrival really
+        // was queued, just never reachable under the wrong id.
+        let claimed_by_a = hub
+            .claim_tcp_accepted("fid-a", &token_a, Duration::from_millis(50))
+            .await;
+        assert!(
+            claimed_by_a.is_some(),
+            "fid-a's own claim must still see the arrival it registered"
+        );
+    }
+
+    /// **The adversarial byte-level edition of the proof above**
+    /// (`PLAN.md` M4 Step 5 (a)'s own framing: misdelivery here is "a
+    /// security incident, not a bug"). Two conduits, two `forward_id`s,
+    /// two independent target connections, both queued and both claimed
+    /// *concurrently* — and then every leg carries a payload that names
+    /// its own `forward_id` in the clear, in both directions at once. If
+    /// a single byte of fid-a's traffic ever reached fid-b's claimed
+    /// stream (or vice versa), the marker comparisons below catch it
+    /// directly — a leak here is detectable, not merely improbable.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn distinguishable_payloads_never_cross_between_two_conduits_claimed_forwards() {
+        let hub = test_hub();
+        let (conduit_a, _rx_a) = hub.register_conduit();
+        let (conduit_b, _rx_b) = hub.register_conduit();
+        let token_a = hub.register_forward_for_test("fid-a", conduit_a);
+        let token_b = hub.register_forward_for_test("fid-b", conduit_b);
+
+        // Two independent loopback QUIC pairs — separate connections, so
+        // there is no shared transport-level state between "target a" and
+        // "target b" beyond the hub itself.
+        let (client_a, server_a) = crate::tunnel::testutil::loopback_pair().await;
+        let (client_b, server_b) = crate::tunnel::testutil::loopback_pair().await;
+
+        async fn open_target(client: &Connection) -> (SendStream, RecvStream) {
+            let (mut send, recv) = client.open_bi().await.unwrap();
+            // A QUIC peer only learns a stream exists once a frame
+            // referencing it actually arrives.
+            send.write_all(b"x").await.unwrap();
+            (send, recv)
+        }
+
+        let (mut target_send_a, mut target_recv_a) = open_target(&client_a).await;
+        let (mut target_send_b, mut target_recv_b) = open_target(&client_b).await;
+        let (daemon_send_a, daemon_recv_a) = server_a.accept_bi().await.unwrap();
+        let (daemon_send_b, daemon_recv_b) = server_b.accept_bi().await.unwrap();
+
+        let permit_a = hub.try_acquire_tunnel_permit().unwrap();
+        let permit_b = hub.try_acquire_tunnel_permit().unwrap();
+        hub.deliver_tcp_accepted("fid-a", daemon_send_a, daemon_recv_a, Vec::new(), permit_a)
+            .unwrap_or_else(|_| panic!("fid-a is registered"));
+        hub.deliver_tcp_accepted("fid-b", daemon_send_b, daemon_recv_b, Vec::new(), permit_b)
+            .unwrap_or_else(|_| panic!("fid-b is registered"));
+
+        // Claim both concurrently — interleaved, not sequential — so a
+        // bug that only shows up under a race (a shared cursor, a
+        // single-slot cache instead of a genuine per-id queue) has a
+        // chance to fire.
+        let (claimed_a, claimed_b) = tokio::join!(
+            hub.claim_tcp_accepted("fid-a", &token_a, Duration::from_secs(5)),
+            hub.claim_tcp_accepted("fid-b", &token_b, Duration::from_secs(5)),
+        );
+        let (mut daemon_send_a, mut daemon_recv_a, _, _permit_a) =
+            claimed_a.expect("fid-a's own arrival must be claimable");
+        let (mut daemon_send_b, mut daemon_recv_b, _, _permit_b) =
+            claimed_b.expect("fid-b's own arrival must be claimable");
+
+        // Drain `open_target`'s single sentinel byte off each claimed
+        // stream before the real payload exchange below — it exists only
+        // to make `accept_bi` observe the stream, and is not part of
+        // either marker.
+        let mut sentinel = [0u8; 1];
+        daemon_recv_a.read_exact(&mut sentinel).await.unwrap();
+        daemon_recv_b.read_exact(&mut sentinel).await.unwrap();
+
+        const MARKER_A: &[u8] = b"PAYLOAD-BELONGS-TO-FID-A-ONLY";
+        const MARKER_B: &[u8] = b"PAYLOAD-BELONGS-TO-FID-B-ONLY";
+
+        // Both directions, both ids, fully interleaved.
+        let (w1, w2, w3, w4) = tokio::join!(
+            target_send_a.write_all(MARKER_A),
+            target_send_b.write_all(MARKER_B),
+            daemon_send_a.write_all(MARKER_A),
+            daemon_send_b.write_all(MARKER_B),
+        );
+        w1.unwrap();
+        w2.unwrap();
+        w3.unwrap();
+        w4.unwrap();
+
+        let mut buf_daemon_a = vec![0u8; MARKER_A.len()];
+        let mut buf_daemon_b = vec![0u8; MARKER_B.len()];
+        let mut buf_target_a = vec![0u8; MARKER_A.len()];
+        let mut buf_target_b = vec![0u8; MARKER_B.len()];
+        let (r1, r2, r3, r4) = tokio::join!(
+            daemon_recv_a.read_exact(&mut buf_daemon_a),
+            daemon_recv_b.read_exact(&mut buf_daemon_b),
+            target_recv_a.read_exact(&mut buf_target_a),
+            target_recv_b.read_exact(&mut buf_target_b),
+        );
+        r1.unwrap();
+        r2.unwrap();
+        r3.unwrap();
+        r4.unwrap();
+
+        assert_eq!(
+            buf_daemon_a, MARKER_A,
+            "fid-a's claimed stream must see exactly fid-a's payload, never fid-b's"
+        );
+        assert_eq!(
+            buf_daemon_b, MARKER_B,
+            "fid-b's claimed stream must see exactly fid-b's payload, never fid-a's"
+        );
+        assert_eq!(
+            buf_target_a, MARKER_A,
+            "fid-a's target must see exactly its own daemon-side reply"
+        );
+        assert_eq!(
+            buf_target_b, MARKER_B,
+            "fid-b's target must see exactly its own daemon-side reply"
+        );
+    }
+
+    /// **The other half of "one conduit registers, the other tries to
+    /// claim"**: even the *legitimate* claimant's own two racing attempts
+    /// for the same `forward_id` (the same [`crate::tunnel::remote::
+    /// RemoteForwardAcceptor`] instance, hence the same claim token —
+    /// ownership alone, `Self::claim_tcp_accepted`'s own doc, does not
+    /// serialize concurrent attempts by the id's rightful owner) must
+    /// never both win: a single queued arrival is handed to exactly one
+    /// claimant, never duplicated to two racing callers — duplicating it
+    /// would itself be a byte leak, the same payload spliced into two
+    /// different processes.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_single_queued_arrival_is_won_by_exactly_one_of_two_racing_claimants() {
+        let hub = test_hub();
+        let (conduit_a, _rx_a) = hub.register_conduit();
+        let token_a = hub.register_forward_for_test("fid-a", conduit_a);
+
+        let (client, server) = crate::tunnel::testutil::loopback_pair().await;
+        let (mut target_send, _target_recv) = client.open_bi().await.unwrap();
+        target_send.write_all(b"x").await.unwrap();
+        let (daemon_send, daemon_recv) = server.accept_bi().await.unwrap();
+        let permit = hub.try_acquire_tunnel_permit().unwrap();
+        hub.deliver_tcp_accepted("fid-a", daemon_send, daemon_recv, Vec::new(), permit)
+            .unwrap_or_else(|_| panic!("fid-a is registered"));
+
+        // Two concurrent claimants for the *same* id, presenting the
+        // *same* (real, registered) claim token — modeling the legitimate
+        // owner's own two racing attempts, not an adversarial conduit
+        // (that case has its own dedicated test below).
+        let (first, second) = tokio::join!(
+            hub.claim_tcp_accepted("fid-a", &token_a, Duration::from_millis(200)),
+            hub.claim_tcp_accepted("fid-a", &token_a, Duration::from_millis(200)),
+        );
+        let winners = [first.is_some(), second.is_some()];
+        assert_eq!(
+            winners.iter().filter(|w| **w).count(),
+            1,
+            "exactly one of two racing claimants must win the single queued arrival, got {winners:?}"
+        );
+    }
+
+    /// **The BLOCKER this ownership check exists to close** (adversarial
+    /// review finding, rated the most important of the batch: "claiming
+    /// does not check ownership"). The registry already gated
+    /// *delivery* — `deliver_tcp_accepted` refuses an id it never
+    /// registered — but before this test's own fix, nothing gated
+    /// *claiming*: `claim_tcp_accepted` only checked that `forward_id`
+    /// resolved to *some* registration, not that the caller was the one
+    /// who held it. Conduit B here knows conduit A's `forward_id` — the
+    /// adversarial premise the finding names verbatim — and presents its
+    /// own, different claim token. It must be refused outright, without
+    /// ever seeing the queue, and conduit A's own subsequent claim (its
+    /// *first*, seating its token as this id's owner) must still succeed
+    /// untouched by B's attempt.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_conduit_that_only_knows_another_conduits_forward_id_cannot_claim_it() {
+        let hub = test_hub();
+        let (conduit_a, _rx_a) = hub.register_conduit();
+        let (_conduit_b, _rx_b) = hub.register_conduit();
+        let token_a = hub.register_forward_for_test("fid-a", conduit_a);
+
+        let (client, server) = crate::tunnel::testutil::loopback_pair().await;
+        let (mut target_send, _target_recv) = client.open_bi().await.unwrap();
+        target_send.write_all(b"x").await.unwrap();
+        let (daemon_send, daemon_recv) = server.accept_bi().await.unwrap();
+        let permit = hub.try_acquire_tunnel_permit().unwrap();
+        hub.deliver_tcp_accepted("fid-a", daemon_send, daemon_recv, Vec::new(), permit)
+            .unwrap_or_else(|_| panic!("fid-a is registered to conduit_a"));
+
+        // Conduit B never registered "fid-a" and holds no token for it —
+        // it merely *knows the string* (leaked, guessed, or otherwise
+        // obtained out of band) and tries to claim it with a token of its
+        // own choosing (necessarily different from the real, hub-minted
+        // `token_a`, which B never learned).
+        let stolen = hub
+            .claim_tcp_accepted("fid-a", b"conduit-b-token", Duration::from_millis(100))
+            .await;
+        assert!(
+            stolen.is_none(),
+            "a conduit that never registered fid-a must never claim its arrival, no matter what \
+             token it presents"
+        );
+
+        // The real owner's own claim, presenting the token registration
+        // actually seated, must be entirely unaffected by B's attempt
+        // above.
+        let claimed_by_owner = hub
+            .claim_tcp_accepted("fid-a", &token_a, Duration::from_millis(100))
+            .await;
+        assert!(
+            claimed_by_owner.is_some(),
+            "fid-a's real registrant must still be able to claim its own arrival after an \
+             adversarial attempt"
+        );
+    }
+
+    /// [`ControlHub::claim_tcp_accepted`]'s ownership check, mutation-checked:
+    /// with the `Some(existing) if existing.as_slice() == claim_token`
+    /// guard weakened to accept any token once one is merely present, the
+    /// adversarial test above must fail. This test pins the *shape* of
+    /// the check a second, independent way: the claim token that matters
+    /// is the one [`ControlHub::register_forward_for_test`] (standing in
+    /// for [`ControlHub::deliver_response`]'s own registration arm) seats
+    /// *atomically at registration* — never one a claimant supplies and
+    /// has accepted merely for being first, which is exactly the race
+    /// finding A closed. A mismatched token is refused immediately,
+    /// before any wait, and the id itself stays registered.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_token_not_seated_at_registration_is_refused_and_the_real_one_still_works() {
+        let hub = test_hub();
+        let (conduit_a, _rx_a) = hub.register_conduit();
+        let token_a = hub.register_forward_for_test("fid-a", conduit_a);
+
+        // A token nobody ever registered — not even a first, unclaimed
+        // attempt at seating one, since registration (not claiming) is
+        // now the only place a token is ever seated. Given a generous
+        // budget, it must still be refused *fast*, proving the denial
+        // happens at the ownership check itself, before any wait, rather
+        // than as a timeout that would also (for the wrong reason)
+        // satisfy a bare `is_none` assertion.
+        let started = std::time::Instant::now();
+        let mismatched = hub
+            .claim_tcp_accepted("fid-a", b"wrong-token", Duration::from_secs(5))
+            .await;
+        assert!(
+            mismatched.is_none(),
+            "a token that does not match the one seated at registration must be refused"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "a token mismatch must be rejected immediately, not after waiting out the full \
+             5s budget"
+        );
+        assert!(
+            hub.forward_owner("fid-a").is_some(),
+            "a claim-token mismatch must not deregister the forward_id itself"
+        );
+
+        // No arrival was ever queued, so even the *real* token times out
+        // rather than errors — proving the mismatch above was rejected
+        // for being the wrong token, not because fid-a itself had become
+        // unclaimable for some other reason.
+        let real_token_result = hub
+            .claim_tcp_accepted("fid-a", &token_a, Duration::from_millis(20))
+            .await;
+        assert!(
+            real_token_result.is_none(),
+            "no arrival was ever queued, so even the real token's claim must time out, not error"
+        );
+    }
+
+    /// [`ControlHub::unregister_conduit`]'s tunnel-registry sweep
+    /// (`PLAN.md` M4 Step 5 (a)): every `forward_id` the dying conduit
+    /// owned is removed and every `TCP_ACCEPTED` stream still queued for
+    /// one of them is reset — but a *different* conduit's own
+    /// registration is untouched by that same call.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unregister_conduit_sweeps_its_own_forwards_and_resets_queued_streams_but_spares_others()
+     {
+        let hub = test_hub();
+        let (conduit_a, _rx_a) = hub.register_conduit();
+        let (conduit_b, _rx_b) = hub.register_conduit();
+        hub.register_forward_for_test("fid-a", conduit_a);
+        hub.register_forward_for_test("fid-b", conduit_b);
+
+        let (client, server) = crate::tunnel::testutil::loopback_pair().await;
+        let (mut target_send, mut target_recv) = client.open_bi().await.unwrap();
+        // See the sibling test above for why `accept_bi` needs this first.
+        target_send.write_all(b"x").await.unwrap();
+        let (daemon_send, daemon_recv) = server.accept_bi().await.unwrap();
+        let permit = hub.try_acquire_tunnel_permit().unwrap();
+        assert!(
+            hub.deliver_tcp_accepted("fid-a", daemon_send, daemon_recv, Vec::new(), permit)
+                .is_ok(),
+            "fid-a is registered"
+        );
+
+        hub.unregister_conduit(conduit_a);
+
+        assert!(
+            hub.forward_owner("fid-a").is_none(),
+            "conduit_a's forward_id must be swept the instant it dies"
+        );
+        assert_eq!(
+            hub.forward_owner("fid-b"),
+            Some(conduit_b),
+            "a sibling conduit's own registration must survive conduit_a's teardown"
+        );
+
+        // The queued stream for fid-a must have been reset, not silently
+        // dropped clean — a bare drop finishes/stops a QUIC stream
+        // cleanly (`TunnelArrival::reset`'s own doc), which would tell
+        // whoever opened it "this ended normally" about a forward that in
+        // fact was torn down out from under it.
+        let mut buf = [0u8; 8];
+        let read = tokio::time::timeout(Duration::from_secs(5), target_recv.read(&mut buf))
+            .await
+            .expect("the reset must be observed promptly, not hang");
+        match read {
+            Err(quinn::ReadError::Reset(code)) => {
+                assert_eq!(
+                    code,
+                    quinn::VarInt::from_u32(RESET_CODE_TUNNEL_UNKNOWN_FORWARD),
+                    "a swept forward's queued stream must reset with the documented code"
+                );
+            }
+            other => panic!("expected a stream reset, got {other:?}"),
+        }
+    }
+
+    /// The stronger form of the sweep proof above: a conduit that owns
+    /// *several* `forward_id`s (not just one) loses every one of them the
+    /// instant it dies, and the registry is verifiably left with zero
+    /// trace of it — not merely "the two ids this test happened to check
+    /// are gone" (`PLAN.md` M4 Step 5 (a): "conduit death removes every
+    /// forward_id it owned"). [`ControlHub::forward_registry_len`] is
+    /// the precise, exhaustive assertion; per-id [`ControlHub::forward_owner`]
+    /// checks alone could pass even if the sweep leaked some other id
+    /// nobody thought to check.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unregister_conduit_leaves_zero_trace_of_a_conduit_that_owned_several_forwards() {
+        let hub = test_hub();
+        let (conduit_a, _rx_a) = hub.register_conduit();
+        let (conduit_b, _rx_b) = hub.register_conduit();
+        hub.register_forward_for_test("fid-a1", conduit_a);
+        hub.register_forward_for_test("fid-a2", conduit_a);
+        hub.register_forward_for_test("fid-a3", conduit_a);
+        hub.register_forward_for_test("fid-b", conduit_b);
+        assert_eq!(hub.forward_registry_len(), 4);
+
+        // Queue a real arrival for two of conduit_a's three ids, so the
+        // sweep's reset behavior is proven for more than a single
+        // straggler.
+        let (client, server) = crate::tunnel::testutil::loopback_pair().await;
+        let mut queued_targets = Vec::new();
+        for fid in ["fid-a1", "fid-a2"] {
+            let (mut target_send, target_recv) = client.open_bi().await.unwrap();
+            target_send.write_all(b"x").await.unwrap();
+            let (daemon_send, daemon_recv) = server.accept_bi().await.unwrap();
+            let permit = hub.try_acquire_tunnel_permit().unwrap();
+            hub.deliver_tcp_accepted(fid, daemon_send, daemon_recv, Vec::new(), permit)
+                .unwrap_or_else(|_| panic!("{fid} is registered"));
+            queued_targets.push(target_recv);
+        }
+
+        hub.unregister_conduit(conduit_a);
+
+        // Precise, not spot-checked: the registry holds exactly
+        // conduit_b's one surviving id, nothing else.
+        assert_eq!(
+            hub.forward_registry_len(),
+            1,
+            "every one of conduit_a's forward_ids must be gone, leaving only conduit_b's"
+        );
+        for fid in ["fid-a1", "fid-a2", "fid-a3"] {
+            assert!(hub.forward_owner(fid).is_none(), "{fid} must be swept");
+        }
+        assert_eq!(
+            hub.forward_owner("fid-b"),
+            Some(conduit_b),
+            "a sibling conduit's own registration must survive conduit_a's teardown"
+        );
+
+        // Both queued arrivals — not just the first — were reset, never
+        // left to drop clean.
+        for mut target_recv in queued_targets {
+            let mut buf = [0u8; 8];
+            let read = tokio::time::timeout(Duration::from_secs(5), target_recv.read(&mut buf))
+                .await
+                .expect("the reset must be observed promptly, not hang");
+            match read {
+                Err(quinn::ReadError::Reset(code)) => {
+                    assert_eq!(
+                        code,
+                        quinn::VarInt::from_u32(RESET_CODE_TUNNEL_UNKNOWN_FORWARD),
+                        "every swept forward's queued stream must reset with the documented code"
+                    );
+                }
+                other => panic!("expected a stream reset, got {other:?}"),
+            }
+        }
+    }
+
+    /// [`MAX_TUNNEL_STREAMS_PER_HUB`] is exact, not advisory
+    /// (`PLAN.md` M4 Step 5 (a)'s hub cap): the `(cap+1)`th
+    /// [`ControlHub::try_acquire_tunnel_permit`] call is refused while
+    /// every permit up to the cap is still held, and releasing one frees
+    /// exactly one slot back.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn tunnel_permit_cap_is_exact_not_advisory() {
+        let hub = test_hub();
+        let mut held = Vec::new();
+        for _ in 0..MAX_TUNNEL_STREAMS_PER_HUB {
+            held.push(
+                hub.try_acquire_tunnel_permit()
+                    .expect("every permit up to the cap must be grantable"),
+            );
+        }
+        assert!(
+            hub.try_acquire_tunnel_permit().is_none(),
+            "the (cap+1)th tunnel stream must be refused, not silently admitted"
+        );
+
+        held.pop();
+        assert!(
+            hub.try_acquire_tunnel_permit().is_some(),
+            "releasing one held permit must free exactly one slot"
+        );
+    }
+
+    /// The cap must refuse only the stream that overflows it — it must
+    /// never corrupt or block delivery for streams already admitted, and
+    /// once a slot frees, a *different* conduit's registered forward must
+    /// be able to use it immediately (`PLAN.md` M4 Step 5 (a): exceeding
+    /// the cap "does not wedge the hub for other conduits").
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn exceeding_the_hub_cap_refuses_the_new_stream_without_wedging_the_hub_for_others() {
+        let hub = test_hub();
+        let (conduit_a, _rx_a) = hub.register_conduit();
+        let (conduit_b, _rx_b) = hub.register_conduit();
+        let token_a = hub.register_forward_for_test("fid-a", conduit_a);
+        let token_b = hub.register_forward_for_test("fid-b", conduit_b);
+
+        // Fill the cap to one below the limit with permits standing in
+        // for other conduits' already-admitted tunnel streams.
+        let mut held: Vec<_> = (0..MAX_TUNNEL_STREAMS_PER_HUB - 1)
+            .map(|_| hub.try_acquire_tunnel_permit().unwrap())
+            .collect();
+
+        // fid-a takes the one remaining slot and is delivered normally —
+        // proving a near-full cap does not itself disturb an admission
+        // that still fits.
+        let (client, server) = crate::tunnel::testutil::loopback_pair().await;
+        let (mut target_send_a, _target_recv_a) = client.open_bi().await.unwrap();
+        target_send_a.write_all(b"x").await.unwrap();
+        let (daemon_send_a, daemon_recv_a) = server.accept_bi().await.unwrap();
+        let permit_a = hub
+            .try_acquire_tunnel_permit()
+            .expect("the last free slot must still be grantable");
+        hub.deliver_tcp_accepted("fid-a", daemon_send_a, daemon_recv_a, Vec::new(), permit_a)
+            .unwrap_or_else(|_| panic!("fid-a fits exactly at the cap"));
+
+        // The hub is now saturated. A new stream must be refused —
+        // observably, deterministically — rather than hang or wedge the
+        // whole hub.
+        assert!(
+            hub.try_acquire_tunnel_permit().is_none(),
+            "the hub is saturated; a new permit must be refused, not granted"
+        );
+
+        // fid-a's already-admitted arrival is unaffected by the refusal
+        // above — still claimable, proving the cap rejection is scoped to
+        // the one overflowing attempt, not a hub-wide stall.
+        let claimed_a = hub
+            .claim_tcp_accepted("fid-a", &token_a, Duration::from_secs(5))
+            .await;
+        assert!(
+            claimed_a.is_some(),
+            "an already-admitted stream must not be disturbed by a sibling's cap refusal"
+        );
+
+        // Free exactly one of the "other conduits'" held permits — fid-b
+        // must now succeed, proving the hub recovers rather than staying
+        // wedged once any capacity returns.
+        held.pop();
+        let (mut target_send_b, target_recv_b) = client.open_bi().await.unwrap();
+        target_send_b.write_all(b"x").await.unwrap();
+        let (daemon_send_b, daemon_recv_b) = server.accept_bi().await.unwrap();
+        let permit_b = hub
+            .try_acquire_tunnel_permit()
+            .expect("freeing one held permit must free exactly one slot back");
+        hub.deliver_tcp_accepted("fid-b", daemon_send_b, daemon_recv_b, Vec::new(), permit_b)
+            .unwrap_or_else(|_| panic!("fid-b must be admitted once capacity returns"));
+        let claimed_b = hub
+            .claim_tcp_accepted("fid-b", &token_b, Duration::from_secs(5))
+            .await;
+        assert!(
+            claimed_b.is_some(),
+            "fid-b must be claimable once the hub has recovered capacity"
+        );
+        drop(held);
+        drop(target_recv_b);
+    }
+
+    /// [`MAX_PARKED_CLAIMS_PER_HUB`] is exact, not advisory — the
+    /// distinct resource `crate::localctl::daemon::LocalctlDaemon::serve_tcp_accepted`
+    /// acquires *before* ever calling [`ControlHub::claim_tcp_accepted`]
+    /// (finding E: a parked claim holds a `MAX_CONCURRENT_LOCAL_STREAM_CONDUITS`
+    /// permit for its whole wait budget with nothing bounding how many of
+    /// *this hub's* claims can be parked at once — a `(cap+1)`th
+    /// parked claim must be refused, not queued behind the ones already
+    /// parked).
+    ///
+    /// Driven through as many owning conduits as the hub's pool divides
+    /// into, because one conduit can no longer reach the ceiling by
+    /// itself ([`MAX_PARKED_CLAIMS_PER_CONDUIT`]) — the ceiling is what
+    /// this test is about, and it must still be exact once the shares
+    /// that fill it are spread across their owners.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn claim_permit_hub_ceiling_is_exact_not_advisory() {
+        let hub = test_hub();
+        let shares = MAX_PARKED_CLAIMS_PER_HUB / MAX_PARKED_CLAIMS_PER_CONDUIT;
+        let mut held = Vec::new();
+        let mut forward_ids = Vec::new();
+        // Inboxes kept alive for the whole test: a dropped receiver is not
+        // what unregisters a conduit, but keeping them mirrors the live
+        // CLIs these conduits stand in for.
+        let mut inboxes = Vec::new();
+        for n in 0..shares {
+            let (conduit, rx) = hub.register_conduit();
+            inboxes.push(rx);
+            let forward_id = format!("fid-{n}");
+            hub.register_forward_for_test(&forward_id, conduit);
+            for _ in 0..MAX_PARKED_CLAIMS_PER_CONDUIT {
+                held.push(
+                    hub.try_acquire_claim_permit(&forward_id)
+                        .expect("every permit up to each owner's own share must be grantable"),
+                );
+            }
+            forward_ids.push(forward_id);
+        }
+        assert_eq!(
+            hub.parked_claims_held(),
+            MAX_PARKED_CLAIMS_PER_HUB,
+            "the shares must add up to exactly the hub ceiling, with nothing double-counted"
+        );
+
+        // A fresh owner, well inside its own untouched share, is refused:
+        // the ceiling binds independently of the shares.
+        let (late, _rx_late) = hub.register_conduit();
+        hub.register_forward_for_test("fid-late", late);
+        assert!(
+            hub.try_acquire_claim_permit("fid-late").is_none(),
+            "the (cap+1)th parked claim must be refused, not silently admitted, even for an \
+             owner holding none of its own share"
+        );
+
+        held.pop();
+        assert!(
+            hub.try_acquire_claim_permit("fid-late").is_some(),
+            "releasing one held parked-claim permit must free exactly one slot"
+        );
+        drop(inboxes);
+        drop(forward_ids);
+    }
+
+    /// **The fairness finding this share exists to close.** The steady
+    /// state of a healthy `-R` is to *sit* holding a parked-claim permit
+    /// (`crate::tunnel::remote::claim_remote_forward_reverse`: one
+    /// long-poll per registered `forward_id`, re-armed the instant it
+    /// returns), so a hub-wide pool with no per-owner share is exhausted
+    /// by ordinary use: one CLI running [`MAX_PARKED_CLAIMS_PER_HUB`]
+    /// reverse forwards would hold every permit on this host essentially
+    /// forever and every other CLI's `-R` would be refused for as long as
+    /// it kept them — normal operation starving normal operation.
+    ///
+    /// Conduit A here parks as many claims as it can across *many* of its
+    /// own forwards — the shape of the real starvation, not a single
+    /// forward's loop — and conduit B, which has done nothing wrong, must
+    /// still be able to park and claim its own forward *without A giving
+    /// anything back*. The ceiling still holds at the same time: A is
+    /// capped at its share, far below the pool.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn one_conduit_cannot_take_more_than_its_share_or_block_another_conduits_claim() {
+        let hub = test_hub();
+        let (conduit_a, _rx_a) = hub.register_conduit();
+        let (conduit_b, _rx_b) = hub.register_conduit();
+        let token_b = hub.register_forward_for_test("fid-b", conduit_b);
+
+        // Conduit A runs many reverse forwards and parks a claim on each,
+        // the way a real claim loop does — and keeps going past its share.
+        let a_forwards: Vec<String> = (0..MAX_PARKED_CLAIMS_PER_HUB)
+            .map(|n| {
+                let forward_id = format!("fid-a{n}");
+                hub.register_forward_for_test(&forward_id, conduit_a);
+                forward_id
+            })
+            .collect();
+        let held: Vec<_> = a_forwards
+            .iter()
+            .filter_map(|forward_id| hub.try_acquire_claim_permit(forward_id))
+            .collect();
+
+        assert_eq!(
+            held.len(),
+            MAX_PARKED_CLAIMS_PER_CONDUIT,
+            "one conduit must be held to its own share no matter how many distinct forwards it \
+             spreads its claims across"
+        );
+        // ("a share equal to the pool would be no share at all" is
+        // asserted at the constants themselves, in a `const _` next to
+        // `MAX_PARKED_CLAIMS_PER_CONDUIT` — a compile error there, not a
+        // test failure here.)
+
+        // Conduit B, entirely uninvolved, parks its own claim — with A
+        // still holding every permit it was allowed. Nothing was freed.
+        let claim_permit_b = hub
+            .try_acquire_claim_permit("fid-b")
+            .expect("a conduit sitting at its own share must not deny another conduit a claim");
+
+        // ...and the claim actually completes, end to end, against a real
+        // queued arrival: the share bounds *waiting*, never delivery.
+        let (client, server) = crate::tunnel::testutil::loopback_pair().await;
+        let (mut target_send_b, _target_recv_b) = client.open_bi().await.unwrap();
+        target_send_b.write_all(b"x").await.unwrap();
+        let (daemon_send_b, daemon_recv_b) = server.accept_bi().await.unwrap();
+        let tunnel_permit_b = hub.try_acquire_tunnel_permit().unwrap();
+        hub.deliver_tcp_accepted(
+            "fid-b",
+            daemon_send_b,
+            daemon_recv_b,
+            Vec::new(),
+            tunnel_permit_b,
+        )
+        .unwrap_or_else(|_| panic!("fid-b is registered to conduit_b"));
+        let claimed_b = hub
+            .claim_tcp_accepted("fid-b", &token_b, Duration::from_secs(5))
+            .await;
+        assert!(
+            claimed_b.is_some(),
+            "conduit B must be able to claim its own forward while conduit A sits at its share"
+        );
+
+        // The hub ceiling is still the outer bound: A's share plus B's one
+        // claim is all that is outstanding, and the pool is nowhere near
+        // spent — the share divided it, it did not inflate it.
+        assert_eq!(
+            hub.parked_claims_held(),
+            MAX_PARKED_CLAIMS_PER_CONDUIT + 1,
+            "no permit may be conjured by spreading claims across forwards or conduits"
+        );
+
+        drop(claim_permit_b);
+        drop(held);
+    }
+
+    /// A queued `TCP_ACCEPTED` nobody ever claims must not pin this hub's
+    /// capacity forever (adversarial review finding): each queued arrival
+    /// holds one [`MAX_TUNNEL_STREAMS_PER_HUB`] permit and one live QUIC
+    /// stream, and before [`ControlHub::sweep_expired_arrivals`] existed a
+    /// queue drained only on a successful claim, a conduit death, or an
+    /// owner-checked close — so one starved or slow claimant's backlog
+    /// was charged against *every other* CLI's tunnels on this host with
+    /// no bound on how long.
+    ///
+    /// Proves all three halves of the fix: the arrival is expired only
+    /// once it is actually old, its permit comes back to the pool, and
+    /// the stream is **reset with a real code** rather than dropped clean
+    /// (a bare drop would tell the target this connection ended normally —
+    /// [`TunnelArrival::reset`]'s own doc). The registration itself must
+    /// survive: an idle `-R` whose backlog aged out is still a live
+    /// forward.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_queued_arrival_nobody_claims_expires_resetting_its_stream_and_freeing_its_permit() {
+        let hub = test_hub();
+        let (conduit_a, _rx_a) = hub.register_conduit();
+        let token_a = hub.register_forward_for_test("fid-a", conduit_a);
+
+        let (client, server) = crate::tunnel::testutil::loopback_pair().await;
+        let (mut target_send, mut target_recv) = client.open_bi().await.unwrap();
+        // See the sibling tests above for why `accept_bi` needs this first.
+        target_send.write_all(b"x").await.unwrap();
+        let (daemon_send, daemon_recv) = server.accept_bi().await.unwrap();
+        let permit = hub.try_acquire_tunnel_permit().unwrap();
+        hub.deliver_tcp_accepted("fid-a", daemon_send, daemon_recv, Vec::new(), permit)
+            .unwrap_or_else(|_| panic!("fid-a is registered"));
+        assert_eq!(
+            hub.tunnel_permits_available(),
+            MAX_TUNNEL_STREAMS_PER_HUB - 1,
+            "a queued arrival holds a real hub tunnel permit for its whole queued life"
+        );
+
+        // A fresh arrival is not expired — the sweep must bound the wait,
+        // not shorten it to nothing.
+        assert_eq!(
+            hub.sweep_expired_arrivals(),
+            0,
+            "an arrival that has just been queued must not be swept"
+        );
+        assert_eq!(hub.queued_arrival_count("fid-a"), 1);
+
+        hub.backdate_queued_arrivals_for_test(
+            MAX_QUEUED_TUNNEL_ARRIVAL_AGE + Duration::from_secs(1),
+        );
+        assert_eq!(
+            hub.sweep_expired_arrivals(),
+            1,
+            "an arrival past its budget must be expired"
+        );
+
+        // Both resources are back: the permit and the stream.
+        assert_eq!(
+            hub.tunnel_permits_available(),
+            MAX_TUNNEL_STREAMS_PER_HUB,
+            "expiring an arrival must return its hub tunnel permit to the pool every other CLI \
+             on this host draws from"
+        );
+        assert_eq!(
+            hub.queued_arrival_count("fid-a"),
+            0,
+            "the expired arrival must leave the queue, not merely be marked"
+        );
+        let mut buf = [0u8; 8];
+        let read = tokio::time::timeout(Duration::from_secs(5), target_recv.read(&mut buf))
+            .await
+            .expect("the reset must be observed promptly, not hang");
+        match read {
+            Err(quinn::ReadError::Reset(code)) => {
+                assert_eq!(
+                    code,
+                    quinn::VarInt::from_u32(RESET_CODE_TUNNEL_CLAIM_EXPIRED),
+                    "an expired arrival must reset visibly, with its own documented code — never \
+                     drop clean, which would report a normal end for a connection nobody spliced"
+                );
+            }
+            other => panic!("expected a stream reset, got {other:?}"),
+        }
+
+        // The forward itself is untouched: still owned, still claimable,
+        // just with nothing queued for it now.
+        assert_eq!(
+            hub.forward_owner("fid-a"),
+            Some(conduit_a),
+            "expiring a backlog must not close the forward it belonged to"
+        );
+        assert!(
+            hub.claim_tcp_accepted("fid-a", &token_a, Duration::from_millis(50))
+                .await
+                .is_none(),
+            "the expired arrival must be gone from the queue, so a later claim waits for a new \
+             one rather than being handed a stream that was already reset"
+        );
+    }
+
+    /// Send `header` on a fresh bidi stream `conn` opens, mirroring
+    /// exactly what a real target's `TCP_ACCEPTED` leg writes
+    /// (`crate::tunnel::remote`'s own `open_fake_tcp_accepted` test
+    /// helper plays back the identical handshake for the direct-connect
+    /// leg). Returns the target-side halves so a test can observe how
+    /// [`Listen::handle_tcp_accepted_stream`] answered.
+    #[cfg(unix)]
+    async fn open_fake_target_tcp_accepted(
+        conn: &Connection,
+        ticket: &[u8],
+    ) -> (quinn::SendStream, quinn::RecvStream) {
+        let (send, recv) = conn.open_bi().await.unwrap();
+        let mut framed = qsh_transport::FramedStream::data(send, recv);
+        framed
+            .send
+            .send(&wire::StreamHeader {
+                kind: wire::StreamKind::TcpAccepted as i32,
+                ticket: ticket.to_vec(),
+                host: String::new(),
+                port: 0,
+            })
+            .await
+            .unwrap();
+        let (send, recv) = framed.split();
+        (send.into_raw(), recv.into_raw().0)
+    }
+
+    /// `PLAN.md` M4 Step 5 (a): "shape-check with `wire::valid_forward_id`
+    /// before the lookup". A `TCP_ACCEPTED` whose ticket fails that shape
+    /// check must never reach [`ControlHub::deliver_tcp_accepted`] at
+    /// all — proven here by registering `"not valid!"` (space and `!` are
+    /// outside `[A-Za-z0-9_-]`) to a real conduit first: if the shape
+    /// check were skipped, this delivery would succeed.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn handle_tcp_accepted_stream_rejects_a_malformed_ticket_before_any_registry_lookup() {
+        assert!(!wire::valid_forward_id("not valid!"));
+        let hub = test_hub();
+        let (conduit, _rx) = hub.register_conduit();
+        hub.register_forward_for_test("not valid!", conduit);
+
+        let (client, server) = crate::tunnel::testutil::loopback_pair().await;
+        let (_target_send, mut target_recv) =
+            open_fake_target_tcp_accepted(&client, b"not valid!").await;
+        let (daemon_send, daemon_recv) = server.accept_bi().await.unwrap();
+
+        Listen::handle_tcp_accepted_stream(daemon_send, daemon_recv, hub.clone()).await;
+
+        let mut buf = [0u8; 8];
+        let read = tokio::time::timeout(Duration::from_secs(5), target_recv.read(&mut buf))
+            .await
+            .expect("a malformed ticket must be rejected promptly, not hang");
+        match read {
+            Err(quinn::ReadError::Reset(code)) => {
+                assert_eq!(
+                    code,
+                    quinn::VarInt::from_u32(RESET_CODE_TUNNEL_UNKNOWN_FORWARD)
+                );
+            }
+            other => panic!("expected a stream reset, got {other:?}"),
+        }
+        // No permit was ever spent and no queue entry was ever created for
+        // the malformed ticket's literal bytes — the cap is fully intact.
+        assert_eq!(
+            hub.tunnel_permits.available_permits(),
+            MAX_TUNNEL_STREAMS_PER_HUB
+        );
+    }
+
+    /// A `TCP_ACCEPTED` naming a real, currently-registered `forward_id`
+    /// is queued by [`Listen::handle_tcp_accepted_stream`] and reachable
+    /// by [`ControlHub::claim_tcp_accepted`] for exactly that id —
+    /// the ordinary, successful path this whole relay exists to serve.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn handle_tcp_accepted_stream_queues_a_registered_forward_id_for_its_conduit_to_claim() {
+        let hub = test_hub();
+        let (conduit, _rx) = hub.register_conduit();
+        let token_a = hub.register_forward_for_test("fid-a", conduit);
+
+        let (client, server) = crate::tunnel::testutil::loopback_pair().await;
+        let (_target_send, _target_recv) = open_fake_target_tcp_accepted(&client, b"fid-a").await;
+        let (daemon_send, daemon_recv) = server.accept_bi().await.unwrap();
+
+        Listen::handle_tcp_accepted_stream(daemon_send, daemon_recv, hub.clone()).await;
+
+        let claimed = hub
+            .claim_tcp_accepted("fid-a", &token_a, Duration::from_secs(5))
+            .await;
+        assert!(
+            claimed.is_some(),
+            "a registered forward_id's TCP_ACCEPTED must be claimable"
+        );
+    }
+
+    /// `PLAN.md` M4 Step 5 (a)'s hub cap applies to the `TCP_ACCEPTED`
+    /// ingress path too, not just `TCP_CONNECT`: a `TCP_ACCEPTED` naming
+    /// a real registered `forward_id` that arrives while this hub is
+    /// already at [`MAX_TUNNEL_STREAMS_PER_HUB`] is reset with
+    /// [`RESET_CODE_TUNNEL_HUB_EXHAUSTED`] before it is ever queued — the
+    /// cap is exact even for a legitimately-registered id.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn handle_tcp_accepted_stream_at_the_hub_cap_resets_rather_than_queues() {
+        let hub = test_hub();
+        let (conduit, _rx) = hub.register_conduit();
+        let token_a = hub.register_forward_for_test("fid-a", conduit);
+        let _held: Vec<_> = (0..MAX_TUNNEL_STREAMS_PER_HUB)
+            .map(|_| hub.try_acquire_tunnel_permit().unwrap())
+            .collect();
+
+        let (client, server) = crate::tunnel::testutil::loopback_pair().await;
+        let (_target_send, mut target_recv) =
+            open_fake_target_tcp_accepted(&client, b"fid-a").await;
+        let (daemon_send, daemon_recv) = server.accept_bi().await.unwrap();
+
+        Listen::handle_tcp_accepted_stream(daemon_send, daemon_recv, hub.clone()).await;
+
+        let mut buf = [0u8; 8];
+        let read = tokio::time::timeout(Duration::from_secs(5), target_recv.read(&mut buf))
+            .await
+            .expect("a hub-exhausted rejection must be prompt, not hang");
+        match read {
+            Err(quinn::ReadError::Reset(code)) => {
+                assert_eq!(
+                    code,
+                    quinn::VarInt::from_u32(RESET_CODE_TUNNEL_HUB_EXHAUSTED)
+                );
+            }
+            other => panic!("expected a stream reset, got {other:?}"),
+        }
+        assert!(
+            hub.claim_tcp_accepted("fid-a", &token_a, Duration::from_millis(50))
+                .await
+                .is_none(),
+            "the rejected arrival must never have been queued"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // **Ownership: who may claim, who may close** (adversarial-review
+    // round 2 — the three holes that made `isolation_holds` false). Every
+    // test below is written from conduit B's side: B knows conduit A's
+    // `forward_id` (leaked, guessed, or simply observed) and tries to be
+    // delivered to, or to tear down, something that is not its own.
+    // `PLAN.md` M4 Step 5 (a)'s framing applies verbatim — misdelivery
+    // here is a security incident, not a bug.
+    // ------------------------------------------------------------------
+
+    /// A `RemoteForwardOpen` carrying `token`, so a test can drive a real
+    /// registration through [`ControlHub::send_request`]/
+    /// [`ControlHub::deliver_response`] — the only path that ever seats
+    /// one in production — instead of the `register_forward_for_test`
+    /// shortcut.
+    #[cfg(unix)]
+    fn rfwd_open_body_with_token(token: &[u8]) -> wire::control_message::Body {
+        wire::control_message::Body::RfwdOpen(wire::RemoteForwardOpen {
+            claim_token: token.to_vec(),
+            ..Default::default()
+        })
+    }
+
+    /// The `RemoteForwardOpened` a target answers with — this module's
+    /// own copy of `control_hub_tests`' identical helper (a sibling test
+    /// module's private items are not in scope here).
+    #[cfg(unix)]
+    fn rfwd_opened_response(forward_id: &str) -> wire::Response {
+        wire::Response {
+            body: Some(wire::response::Body::RfwdOpened(
+                wire::RemoteForwardOpened {
+                    forward_id: forward_id.to_string(),
+                    actual_port: 0,
+                },
+            )),
+        }
+    }
+
+    #[cfg(unix)]
+    fn rfwd_close_body(forward_id: &str) -> wire::control_message::Body {
+        wire::control_message::Body::RfwdClose(wire::RemoteForwardClose {
+            forward_id: forward_id.to_string(),
+        })
+    }
+
+    /// Queue one real `TCP_ACCEPTED` arrival for `forward_id` off a fresh
+    /// loopback pair. The returned tuple keeps both connections and the
+    /// target-side halves alive, so a test can observe whether that
+    /// stream was ever reset (`TunnelArrival::reset`) — dropping the
+    /// connection instead would make every read fail for the wrong
+    /// reason.
+    #[cfg(unix)]
+    async fn queue_one_arrival(
+        hub: &Arc<ControlHub>,
+        forward_id: &str,
+    ) -> (Connection, Connection, SendStream, RecvStream) {
+        let (client, server) = crate::tunnel::testutil::loopback_pair().await;
+        let (mut target_send, target_recv) = client.open_bi().await.unwrap();
+        // A QUIC peer only learns a stream exists once a frame
+        // referencing it actually arrives.
+        target_send.write_all(b"x").await.unwrap();
+        let (daemon_send, daemon_recv) = server.accept_bi().await.unwrap();
+        let permit = hub
+            .try_acquire_tunnel_permit()
+            .expect("a fresh hub is under its cap");
+        hub.deliver_tcp_accepted(forward_id, daemon_send, daemon_recv, Vec::new(), permit)
+            .unwrap_or_else(|_| panic!("{forward_id} must be registered and claimable here"));
+        (client, server, target_send, target_recv)
+    }
+
+    /// **Hole 1 — the check-then-use one.** Before this fix
+    /// [`ControlHub::claim_tcp_accepted`] validated the presented token
+    /// exactly once, at entry, and then — inside the wait — *popped* the
+    /// arrival and re-checked only that the id was still registered to
+    /// *someone*. So a claimant that parked while it legitimately owned
+    /// `fid-x`, and stayed parked while `fid-x` was closed and re-opened
+    /// by a different conduit, woke up and was handed the **new owner's**
+    /// stream. This is the interleaving verbatim: A parks, the id is
+    /// re-seated to B mid-wait, the arrival lands, and A wakes.
+    ///
+    /// A must leave with nothing, and B — the conduit that actually owns
+    /// the id at the moment the arrival exists — must be able to claim
+    /// it afterwards, proving the arrival was never consumed by A's wake.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_forward_id_re_seated_mid_wait_never_delivers_to_the_conduit_that_parked_first() {
+        let hub = test_hub();
+        let (conduit_a, _rx_a) = hub.register_conduit();
+        let (conduit_b, _rx_b) = hub.register_conduit();
+        let token_a = hub.register_forward_for_test("fid-x", conduit_a);
+
+        // A parks: nothing is queued for fid-x yet, and A's token is (for
+        // now) the seated one, so this reaches the wait rather than being
+        // refused at once.
+        let parked = tokio::spawn({
+            let hub = Arc::clone(&hub);
+            let token_a = token_a.clone();
+            async move {
+                hub.claim_tcp_accepted("fid-x", &token_a, Duration::from_secs(5))
+                    .await
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // fid-x is closed and re-opened while A sleeps: the id is
+        // re-seated to conduit B, with B's own, different token.
+        let token_b = hub.register_forward_for_test("fid-x", conduit_b);
+        assert_ne!(token_a, token_b, "the re-seat must mint a different token");
+
+        // The target opens a TCP_ACCEPTED for the *new* registration.
+        // This is what wakes A.
+        let _arrival = queue_one_arrival(&hub, "fid-x").await;
+
+        let woken = tokio::time::timeout(Duration::from_secs(5), parked)
+            .await
+            .expect("the parked claimant must wake, not hang")
+            .expect("the parked claim task must not panic");
+        assert!(
+            woken.is_none(),
+            "a claimant parked under the *previous* seat must be refused when it wakes — \
+             the token has to be re-validated against the current seat at the moment the \
+             arrival changes hands, never once at entry"
+        );
+
+        let claimed_by_b = hub
+            .claim_tcp_accepted("fid-x", &token_b, Duration::from_secs(5))
+            .await;
+        assert!(
+            claimed_by_b.is_some(),
+            "the arrival belongs to the current seat and must still be there for it — if A's \
+             wake had consumed it, this is the assertion that catches the misdelivery"
+        );
+    }
+
+    /// The same interleaving with the **owner unchanged** — hole 1's
+    /// nastier half, and the reason the re-validation is against the
+    /// *seat* and not against `ForwardRegistration::owner`. Conduit A
+    /// closes `fid-x` and re-opens it (a new
+    /// [`crate::tunnel::remote::RemoteForwardAcceptor`] instance, hence a
+    /// new claim token) while an older claim of its own is still parked.
+    /// A check that compared only the owning conduit would happily hand
+    /// the new instance's stream to the stale one; only comparing the
+    /// token catches it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_stale_claim_is_refused_even_when_the_re_seat_keeps_the_same_owner() {
+        let hub = test_hub();
+        let (conduit_a, _rx_a) = hub.register_conduit();
+        let stale_token = hub.register_forward_for_test("fid-x", conduit_a);
+
+        let parked = tokio::spawn({
+            let hub = Arc::clone(&hub);
+            let stale_token = stale_token.clone();
+            async move {
+                hub.claim_tcp_accepted("fid-x", &stale_token, Duration::from_secs(5))
+                    .await
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Same conduit, same id, brand-new instance and therefore a
+        // brand-new token.
+        let fresh_token = hub.register_forward_for_test("fid-x", conduit_a);
+        assert_ne!(stale_token, fresh_token);
+        assert_eq!(
+            hub.forward_owner("fid-x"),
+            Some(conduit_a),
+            "the owner is deliberately unchanged — only the seat moved"
+        );
+
+        let _arrival = queue_one_arrival(&hub, "fid-x").await;
+
+        let woken = tokio::time::timeout(Duration::from_secs(5), parked)
+            .await
+            .expect("the parked claimant must wake, not hang")
+            .expect("the parked claim task must not panic");
+        assert!(
+            woken.is_none(),
+            "a stale token must be refused on wake even when the owning conduit never changed"
+        );
+        assert!(
+            hub.claim_tcp_accepted("fid-x", &fresh_token, Duration::from_secs(5))
+                .await
+                .is_some(),
+            "the current seat's own claim must still find the arrival"
+        );
+    }
+
+    /// **Hole 2 — the capability that defaulted to "anyone".** A
+    /// `RemoteForwardOpen` that carried no `claim_token` used to seat an
+    /// *empty* token, and an empty seat matched any same-uid conduit
+    /// presenting an empty token — worse than no capability at all,
+    /// because the surrounding code read as though it were protected.
+    /// Driven through the real `send_request`/`deliver_response` path,
+    /// with `wire::RemoteForwardOpen::default()`'s empty token — exactly
+    /// what `ops::tunnel::remote_forward_open_from_spec` produces today.
+    ///
+    /// The registration is kept (so the id stays attributed to its
+    /// conduit, is swept when that conduit dies, and cannot be adopted by
+    /// a duplicate `RemoteForwardOpened`) but is **permanently
+    /// unclaimable**: no token claims it, an empty one least of all, and
+    /// no arrival is ever queued for it — so it holds no hub permit and
+    /// no live QUIC stream on the strength of a capability nobody holds.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_open_that_carried_no_claim_token_is_registered_permanently_unclaimable() {
+        let hub = test_hub();
+        let (conduit_a, _rx_a) = hub.register_conduit();
+        let mut outbound = hub
+            .take_outbound_receiver()
+            .expect("hub has an outbound receiver");
+
+        hub.send_request(conduit_a, 0, rfwd_open_body_with_token(b""))
+            .unwrap();
+        let (open_id, _) = outbound.recv().await.expect("queued send");
+        hub.deliver_response(open_id, rfwd_opened_response("fid-empty"));
+
+        assert_eq!(
+            hub.forward_owner("fid-empty"),
+            Some(conduit_a),
+            "the id is still registered and still attributable to the conduit that opened it"
+        );
+        assert!(
+            !hub.forward_is_claimable("fid-empty"),
+            "an open that carried no claim token must never end up with a token that passes"
+        );
+
+        // The exact adversarial move: present the same nothing the
+        // registration carried.
+        let started = std::time::Instant::now();
+        assert!(
+            hub.claim_tcp_accepted("fid-empty", b"", Duration::from_secs(5))
+                .await
+                .is_none(),
+            "an empty presented token must be refused, never matched against an empty seat"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "the refusal must come from the seat check, not from waiting out the whole budget"
+        );
+        assert!(
+            hub.claim_tcp_accepted("fid-empty", b"guessed", Duration::from_millis(50))
+                .await
+                .is_none(),
+            "and no other token claims it either — unclaimable is terminal"
+        );
+
+        // Nothing is ever queued for it, so it cannot pin a hub tunnel
+        // permit or a live QUIC stream waiting for a claimant that can
+        // never come.
+        let (client, server) = crate::tunnel::testutil::loopback_pair().await;
+        let (mut target_send, _target_recv) = client.open_bi().await.unwrap();
+        target_send.write_all(b"x").await.unwrap();
+        let (daemon_send, daemon_recv) = server.accept_bi().await.unwrap();
+        let permit = hub.try_acquire_tunnel_permit().unwrap();
+        let rejected = hub
+            .deliver_tcp_accepted("fid-empty", daemon_send, daemon_recv, Vec::new(), permit)
+            .expect_err("an unclaimable registration must be refused exactly like an unknown id");
+        rejected.reset(RESET_CODE_TUNNEL_UNKNOWN_FORWARD);
+        assert_eq!(
+            hub.tunnel_permits.available_permits(),
+            MAX_TUNNEL_STREAMS_PER_HUB,
+            "the refused arrival must give its permit straight back"
+        );
+    }
+
+    /// **Finding 5 — `claim_token` never reaches the outbound channel,**
+    /// i.e. never reaches the bytes [`Listen::drive_registered_session`]'s
+    /// `recv_outbound` arm actually serializes onto the live QUIC
+    /// connection to the peer. Driven through the same real
+    /// `send_request`/`deliver_response` path the two tests above use,
+    /// with a real, distinguishable token — so this cannot pass by
+    /// accident the way an empty-token test could.
+    ///
+    /// Both halves of the claim matter: the *outbound* copy must have lost
+    /// it (this is the actual fix — mutation check: revert `send_request`'s
+    /// `mem::take` back to `.clone()` and `open_body.claim_token` below
+    /// reads back `b"peer-must-never-see-this"`, failing the first
+    /// assertion) and the *local* seat must still have it, unchanged
+    /// (mutation check: change the `mem::take` to simply drop the value
+    /// instead of feeding it to `pending_rfwd_open_claim_tokens`, and the
+    /// real-token claim at the end gets refused, failing the last
+    /// assertion) — proving this is a relocation, not a loss.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_claim_token_is_taken_off_the_body_actually_sent_to_the_peer() {
+        let hub = test_hub();
+        let (conduit_a, _rx_a) = hub.register_conduit();
+        let mut outbound = hub
+            .take_outbound_receiver()
+            .expect("hub has an outbound receiver");
+
+        const TOKEN: &[u8] = b"peer-must-never-see-this";
+        hub.send_request(conduit_a, 0, rfwd_open_body_with_token(TOKEN))
+            .unwrap();
+        let (open_id, sent_body) = outbound.recv().await.expect("queued send");
+        let open_body = match sent_body {
+            wire::control_message::Body::RfwdOpen(open) => open,
+            other => panic!("expected RfwdOpen, got {other:?}"),
+        };
+        assert!(
+            open_body.claim_token.is_empty(),
+            "the body actually handed to the outbound channel — what a real reverse driver \
+             loop would serialize onto the wire to the target — must never carry claim_token, \
+             got {:?}",
+            open_body.claim_token
+        );
+
+        // Not lost — relocated: `deliver_response` still seats the real
+        // token, and only the real token claims the resulting
+        // registration.
+        hub.deliver_response(open_id, rfwd_opened_response("fid-taken"));
+        assert!(
+            hub.claim_tcp_accepted("fid-taken", b"wrong-token", Duration::from_millis(50))
+                .await
+                .is_none(),
+            "a wrong token must still be refused — taking claim_token off the outbound body \
+             must not have widened the seat"
+        );
+        let _arrival = queue_one_arrival(&hub, "fid-taken").await;
+        assert!(
+            hub.claim_tcp_accepted("fid-taken", TOKEN, Duration::from_secs(5))
+                .await
+                .is_some(),
+            "the real token, captured locally before it was taken off the outbound body, must \
+             still claim the arrival"
+        );
+    }
+
+    /// Hole 2's exhaustive half: **no registration this hub can produce,
+    /// by any path, ever ends up with a token an empty claim matches** —
+    /// and an empty presented token is refused against every seat, not
+    /// just against the unclaimable one. All three producers are covered:
+    /// a real token over the wire path, no token over the wire path, and
+    /// the `register_forward_for_test` shortcut the other unit tests use.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_empty_claim_token_is_refused_against_every_seat_this_hub_can_hold() {
+        let hub = test_hub();
+        let (conduit_a, _rx_a) = hub.register_conduit();
+        let mut outbound = hub
+            .take_outbound_receiver()
+            .expect("hub has an outbound receiver");
+
+        hub.send_request(conduit_a, 0, rfwd_open_body_with_token(b"real-token"))
+            .unwrap();
+        let (with_token_id, _) = outbound.recv().await.expect("queued send");
+        hub.deliver_response(with_token_id, rfwd_opened_response("fid-token"));
+
+        hub.send_request(conduit_a, 1, rfwd_open_body_with_token(b""))
+            .unwrap();
+        let (no_token_id, _) = outbound.recv().await.expect("queued send");
+        hub.deliver_response(no_token_id, rfwd_opened_response("fid-none"));
+
+        hub.register_forward_for_test("fid-shortcut", conduit_a);
+
+        assert_eq!(
+            hub.forward_registry_len(),
+            3,
+            "all three registrations exist — this test is about their seats, not their presence"
+        );
+        for forward_id in ["fid-token", "fid-none", "fid-shortcut"] {
+            // Timed on purpose. A bare `is_none()` here would pass even
+            // if the empty token were *admitted*, because no arrival is
+            // queued and an admitted claim simply parks until its budget
+            // runs out — the assertion would prove nothing. Given five
+            // seconds and asserting the answer comes back inside one,
+            // only an actual refusal at the seat check can satisfy it.
+            let started = std::time::Instant::now();
+            let claimed = hub
+                .claim_tcp_accepted(forward_id, b"", Duration::from_secs(5))
+                .await;
+            assert!(
+                claimed.is_none(),
+                "{forward_id}: an empty claim token must never pass, whatever the seat holds"
+            );
+            assert!(
+                started.elapsed() < Duration::from_secs(1),
+                "{forward_id}: an empty claim token must be refused at the seat check, not merely time out"
+            );
+        }
+        assert!(
+            hub.forward_is_claimable("fid-token") && hub.forward_is_claimable("fid-shortcut"),
+            "a registration whose open carried a real token stays claimable by that token"
+        );
+        assert!(
+            !hub.forward_is_claimable("fid-none"),
+            "and only the one that carried nothing is unclaimable"
+        );
+    }
+
+    /// **Hole 3 — any conduit could tear down any forward.** The
+    /// `RemoteForwardClose` arm removed the registration and reset every
+    /// queued arrival without ever comparing against the conduit
+    /// `ControlMux::map_inbound` had just resolved, so conduit B could
+    /// delete conduit A's forward and kill A's in-flight streams. Both
+    /// halves are proven here:
+    ///
+    /// 1. **inbound** — B's close is answered `success` by the target at
+    ///    a moment when the id is registered to A (B sent it before the
+    ///    id existed, which is the one shape the relay must still
+    ///    forward): nothing may change, and A's queued arrival must
+    ///    survive un-reset and still be claimable.
+    /// 2. **outbound** — once the id *is* registered to A, B's next close
+    ///    is refused before a `daemon_request_id` is even minted and
+    ///    without a byte reaching the target, which cannot tell the two
+    ///    conduits apart itself.
+    ///
+    /// And the guard refuses non-owners rather than everyone: A's own
+    /// close of its own forward still tears it down.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_conduit_can_neither_relay_nor_land_a_close_for_another_conduits_forward() {
+        let hub = test_hub();
+        let (conduit_a, _rx_a) = hub.register_conduit();
+        let (conduit_b, _rx_b) = hub.register_conduit();
+        let mut outbound = hub
+            .take_outbound_receiver()
+            .expect("hub has an outbound receiver");
+
+        // B asks to close "fid-a" before it exists — an id this hub does
+        // not know is relayed (it may be a close racing its own open, and
+        // the target is the right place to answer for it), so B really
+        // does hold a live `daemon_request_id` for a close of that id.
+        hub.send_request(conduit_b, 0, rfwd_close_body("fid-a"))
+            .expect("a close for an unknown id is relayed, not refused");
+        let (close_id_b, _) = outbound.recv().await.expect("queued send");
+
+        // A opens fid-a for real.
+        hub.send_request(conduit_a, 1, rfwd_open_body_with_token(b"token-a"))
+            .unwrap();
+        let (open_id_a, _) = outbound.recv().await.expect("queued send");
+        hub.deliver_response(open_id_a, rfwd_opened_response("fid-a"));
+        assert_eq!(hub.forward_owner("fid-a"), Some(conduit_a));
+
+        // ... and an arrival is queued for A, waiting to be claimed.
+        let (_client, _server, _target_send, mut target_recv) =
+            queue_one_arrival(&hub, "fid-a").await;
+
+        // (1) B's close lands, answered success, while A owns the id.
+        hub.deliver_response(close_id_b, wire::Response { body: None });
+
+        assert_eq!(
+            hub.forward_owner("fid-a"),
+            Some(conduit_a),
+            "a close from a conduit that does not own the id must change nothing"
+        );
+        assert!(
+            hub.forward_is_claimable("fid-a"),
+            "and must not disturb its seat either"
+        );
+        let mut buf = [0u8; 8];
+        let quiet =
+            tokio::time::timeout(Duration::from_millis(200), target_recv.read(&mut buf)).await;
+        assert!(
+            quiet.is_err(),
+            "the owner's queued stream must not be reset by a stranger's close, got {quiet:?}"
+        );
+        assert!(
+            hub.claim_tcp_accepted("fid-a", b"token-a", Duration::from_secs(5))
+                .await
+                .is_some(),
+            "and the owner must still be able to claim the arrival that was waiting for it"
+        );
+
+        // (2) B tries again now that the id is registered to A: refused
+        // before anything is allocated, and nothing reaches the target.
+        assert!(
+            matches!(
+                hub.send_request(conduit_b, 2, rfwd_close_body("fid-a")),
+                Err(HubSendError::NotOwner)
+            ),
+            "a close for another conduit's forward must be refused, not relayed"
+        );
+        let leaked = tokio::time::timeout(Duration::from_millis(100), outbound.recv()).await;
+        assert!(
+            leaked.is_err(),
+            "nothing may reach the target — it cannot tell the two conduits apart, got {leaked:?}"
+        );
+
+        // The owner's own close still works: this is a non-owner guard,
+        // not a blanket refusal.
+        hub.send_request(conduit_a, 3, rfwd_close_body("fid-a"))
+            .expect("the owner's own close must still be relayed");
+        let (close_id_a, _) = outbound.recv().await.expect("queued send");
+        hub.deliver_response(close_id_a, wire::Response { body: None });
+        assert!(
+            hub.forward_owner("fid-a").is_none(),
+            "the owner's own close must tear its own registration down"
+        );
     }
 }

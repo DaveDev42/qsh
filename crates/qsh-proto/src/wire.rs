@@ -839,14 +839,24 @@ mod tests {
     }
 
     fn arb_remote_forward_open() -> impl Strategy<Value = RemoteForwardOpen> {
-        (".{0,64}", any::<u32>(), ".{0,64}", any::<u32>()).prop_map(
-            |(bind_host, bind_port, forward_host, forward_port)| RemoteForwardOpen {
-                bind_host,
-                bind_port,
-                forward_host,
-                forward_port,
-            },
+        (
+            ".{0,64}",
+            any::<u32>(),
+            ".{0,64}",
+            any::<u32>(),
+            proptest::collection::vec(any::<u8>(), 0..32),
         )
+            .prop_map(
+                |(bind_host, bind_port, forward_host, forward_port, claim_token)| {
+                    RemoteForwardOpen {
+                        bind_host,
+                        bind_port,
+                        forward_host,
+                        forward_port,
+                        claim_token,
+                    }
+                },
+            )
     }
 
     fn arb_remote_forward_opened() -> impl Strategy<Value = RemoteForwardOpened> {
@@ -2112,6 +2122,7 @@ mod tests {
                 bind_port: 8080,
                 forward_host: "localhost".into(),
                 forward_port: 3000,
+                claim_token: Vec::new(),
             }),
         );
         let wire = encode_control(&msg).unwrap();

@@ -2292,8 +2292,8 @@ impl Server {
             Ok(listener) => listener,
             Err(reply) => return *reply,
         };
-        let actual_port = match listener.local_addr() {
-            Ok(addr) => addr.port(),
+        let actual_addr = match listener.local_addr() {
+            Ok(addr) => addr,
             Err(err) => {
                 // Bound but unreadable back — treat the listener as
                 // unusable; dropping it here (end of scope) closes it, so
@@ -2308,6 +2308,26 @@ impl Server {
                 );
             }
         };
+        let actual_port = actual_addr.port();
+
+        // Structural record at bind success (`PLAN.md` §4.1's Step 4
+        // adversarial-review carryover): the authorization record above
+        // (`authorize_and_bind_remote_forward`'s step (2)) names the
+        // *requested* `bind_host:bind_port` and has to — a kernel-assigned
+        // ephemeral port is not knowable before a bind, and authorizing it
+        // would mean creating the resource before authorization succeeds.
+        // That leaves an incident reader unable to tell what was actually
+        // opened from `localhost:0`. This is the other half: op,
+        // principal, result, and the address the kernel actually handed
+        // back — nothing payload-shaped ever reaches this line, only what
+        // `TcpListener::local_addr` reports.
+        tracing::info!(
+            op = "forward.remote.bind",
+            result = "ok",
+            principal = %ctx.principal,
+            %actual_addr,
+            "tunnel: remote-forward listener bound"
+        );
 
         let forward_id = ulid::Ulid::new().to_string();
         let task = tokio::spawn(crate::tunnel::remote::serve_remote_forward(
@@ -5781,6 +5801,7 @@ mod tests {
             bind_port,
             forward_host: forward_host.to_string(),
             forward_port,
+            claim_token: Vec::new(),
         }
     }
 
