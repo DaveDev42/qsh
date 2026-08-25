@@ -1211,8 +1211,11 @@ pub struct ControlHub {
     /// other CLI on this host — [`MAX_PARKED_CLAIMS_PER_CONDUIT`]'s own
     /// doc.
     claim_permits: Arc<ClaimPool>,
-    /// Broadcasts every [`ControlHub::deliver_tcp_accepted`] call to every
-    /// [`ControlHub::claim_tcp_accepted`] currently waiting — each waiter
+    /// Broadcasts every [`ControlHub::deliver_tcp_accepted`] call — and
+    /// every [`ControlHub::unregister_conduit`] sweep, which removes
+    /// registrations out from under whoever is parked on them (finding
+    /// F2, in that method) — to every [`ControlHub::claim_tcp_accepted`]
+    /// currently waiting; each waiter
     /// re-checks only its own `forward_id`'s queue on wake
     /// ([`Self::claim_tcp_accepted`]'s own doc explains why a shared,
     /// rather than per-`forward_id`, `Notify` is both correct and
@@ -1380,6 +1383,23 @@ impl ControlHub {
             }
         }
         drop(state);
+        // **Finding F2 — wake whoever was parked on what this sweep just
+        // removed.** `claim_tcp_accepted` re-validates `admits_claim` on
+        // every wake (its own doc), but `tunnel_notify` is the only thing
+        // that ever wakes it and until now only `deliver_tcp_accepted`
+        // rang it. A daemon task parked on a forward removed here would
+        // therefore sit out the rest of its wait budget (up to
+        // `qsh_proto::local::LOCAL_WAIT_MAX`) holding a `ClaimPool` permit
+        // in a bucket keyed by a `ConduitId` that is never reissued — the
+        // hub-wide pool shrinking with no live conduit holding anything,
+        // repeatable until the pool is empty. Woken, such a claimant finds
+        // no registration, `admits_claim` refuses, it returns `None` and
+        // its `ClaimPermit` releases on drop, returning capacity to both
+        // its bucket and the hub total (`ClaimPool::release`). Rung
+        // unconditionally: `notify_waiters` wakes claimants on other
+        // conduits' forwards too, which costs them one re-check under the
+        // lock before they park again.
+        self.tunnel_notify.notify_waiters();
         for arrival in orphaned_arrivals {
             arrival.reset(RESET_CODE_TUNNEL_UNKNOWN_FORWARD);
         }
@@ -1581,6 +1601,44 @@ impl ControlHub {
         // adversarial target) reaches this branch at all.
         let mut closed_arrivals = Vec::new();
         match &resp.body {
+            // **Finding F5 — an answer only counts against the request it
+            // answers.** The arms below used to register a `forward_id` on
+            // the strength of an `RfwdOpened` *body* alone, with nothing
+            // establishing that the request being answered was a
+            // `RemoteForwardOpen` at all. A target answering some
+            // unrelated request of this conduit's (a `SessionRead`, say)
+            // with `RfwdOpened { forward_id: Z }` therefore squatted Z: it
+            // was seated under whichever conduit made that unrelated
+            // request and — having no pending token to seat — seated
+            // permanently unclaimable, so the conduit that later
+            // legitimately opened Z fell into the duplicate-rejection arm
+            // below and was left holding a forward that never registered
+            // and could never be claimed. Silent, and exactly the
+            // misdelivery-class failure this registry exists to prevent.
+            //
+            // `pending_claim_token` is `Some` for precisely the ids whose
+            // outbound body was an `RfwdOpen`: `send_request` inserts into
+            // `pending_rfwd_open_claim_tokens` on that arm and nowhere
+            // else, and it inserts the `mem::take`n token even when that
+            // token is empty — so a legitimate open that carried none is
+            // `Some(empty)`, still reaches the seating arm below, and is
+            // still seated permanently unclaimable by `ClaimSeat::seat`
+            // (the empty-means-unclaimable path is unchanged). `None`
+            // means the target answered something that was never an open:
+            // nothing is registered, and the id stays free for whoever
+            // legitimately opens it later.
+            Some(wire::response::Body::RfwdOpened(_)) if pending_claim_token.is_none() => {
+                // The `forward_id` is deliberately not logged here: on
+                // this path it is unvalidated peer text (the arms below
+                // reach `wire::valid_forward_id` only once this one has
+                // been passed), while `daemon_request_id` is daemon-minted
+                // and safe.
+                tracing::warn!(
+                    daemon_request_id,
+                    "qsh::tunnel: RemoteForwardOpened answering a request that was not a \
+                     RemoteForwardOpen; registering nothing"
+                );
+            }
             Some(wire::response::Body::RfwdOpened(opened))
                 if wire::valid_forward_id(&opened.forward_id)
                     && !state.forwards.contains_key(&opened.forward_id) =>
@@ -5748,5 +5806,222 @@ mod tests {
             hub.forward_owner("fid-a").is_none(),
             "the owner's own close must tear its own registration down"
         );
+    }
+
+    /// **Finding F5 — a target cannot squat a `forward_id` by answering
+    /// the wrong request.** The `RfwdOpened` arm of
+    /// [`ControlHub::deliver_response`] used to fire on any
+    /// `daemon_request_id` whatsoever, so a misbehaving target could
+    /// answer an ordinary, unrelated request (a `SessionRead` here —
+    /// long-poll, correlated, entirely routine) with
+    /// `RemoteForwardOpened { forward_id: Z }` and have Z registered
+    /// under whichever conduit made that request. With no pending open
+    /// there was no token to seat, so Z landed permanently unclaimable —
+    /// and the conduit that later legitimately opened Z hit the
+    /// duplicate-rejection arm, kept no registration of its own, and was
+    /// left with a forward that silently never worked.
+    ///
+    /// Both halves are asserted: the unsolicited answer registers
+    /// *nothing at all* (registry length, not just "this id is absent"),
+    /// and the same `forward_id` is then opened and claimed end to end by
+    /// its rightful conduit.
+    ///
+    /// Mutation check: drop the `pending_claim_token.is_none()` arm from
+    /// `deliver_response` and the first assertion fails —
+    /// `forward_registry_len()` is 1, the squatted registration owned by
+    /// conduit A.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_rfwd_opened_answering_a_request_that_was_never_an_open_registers_nothing() {
+        let hub = test_hub();
+        let (conduit_a, _rx_a) = hub.register_conduit();
+        let (conduit_b, _rx_b) = hub.register_conduit();
+        let mut outbound = hub
+            .take_outbound_receiver()
+            .expect("hub has an outbound receiver");
+
+        // Conduit A issues something that is not a forward open at all.
+        hub.send_request(
+            conduit_a,
+            0,
+            wire::control_message::Body::SessionRead(wire::SessionRead {
+                session_id: "sess-1".into(),
+                ..Default::default()
+            }),
+        )
+        .expect("an ordinary session read is relayed");
+        let (read_id, _) = outbound.recv().await.expect("queued send");
+
+        // The target answers that read with a forward-open reply.
+        hub.deliver_response(read_id, rfwd_opened_response("fid-squat"));
+
+        assert_eq!(
+            hub.forward_registry_len(),
+            0,
+            "a RemoteForwardOpened answering a request that was never a RemoteForwardOpen must \
+             register nothing — under the answering conduit or anyone else"
+        );
+        assert!(
+            hub.forward_owner("fid-squat").is_none(),
+            "and the squatted id must be owned by nobody"
+        );
+
+        // The id is therefore still free, and its rightful opener gets a
+        // real, claimable registration rather than the duplicate-rejection
+        // path and a forward that never works.
+        hub.send_request(conduit_b, 0, rfwd_open_body_with_token(b"token-b"))
+            .unwrap();
+        let (open_id, _) = outbound.recv().await.expect("queued send");
+        hub.deliver_response(open_id, rfwd_opened_response("fid-squat"));
+        assert_eq!(
+            hub.forward_owner("fid-squat"),
+            Some(conduit_b),
+            "the conduit that legitimately opened the id must own it"
+        );
+        assert!(
+            hub.forward_is_claimable("fid-squat"),
+            "and its seat must hold the token its own open carried, not be dead on arrival"
+        );
+        let _arrival = queue_one_arrival(&hub, "fid-squat").await;
+        assert!(
+            hub.claim_tcp_accepted("fid-squat", b"token-b", Duration::from_secs(5))
+                .await
+                .is_some(),
+            "the rightful owner must be able to claim its arrivals end to end"
+        );
+
+        // The gate is "was there a pending open", never "was the token
+        // non-empty": an open that carried no token still registers, still
+        // permanently unclaimable (`ClaimSeat::seat`), exactly as before.
+        hub.send_request(conduit_b, 1, rfwd_open_body_with_token(b""))
+            .unwrap();
+        let (empty_open_id, _) = outbound.recv().await.expect("queued send");
+        hub.deliver_response(empty_open_id, rfwd_opened_response("fid-empty-open"));
+        assert_eq!(
+            hub.forward_owner("fid-empty-open"),
+            Some(conduit_b),
+            "an open carrying an empty claim token is still a pending open and must still \
+             register — the F5 gate must not have swallowed the empty-token path"
+        );
+        assert!(
+            !hub.forward_is_claimable("fid-empty-open"),
+            "and it must stay permanently unclaimable, exactly as it was before the gate"
+        );
+    }
+
+    /// **Finding F2 — an orphaned parked claim must not hold its permit
+    /// for its whole budget.** [`ControlHub::unregister_conduit`] removes
+    /// a dead conduit's registrations and resets its queued arrivals, but
+    /// nothing woke the claimants parked in
+    /// [`ControlHub::claim_tcp_accepted`] on those very forwards. Each
+    /// such claimant sat out the rest of its wait budget (up to
+    /// `qsh_proto::local::LOCAL_WAIT_MAX`) still holding its
+    /// [`ClaimPool`] permit, in a bucket keyed by a [`ConduitId`] that is
+    /// never reissued — so the hub-wide pool shrank with no live conduit
+    /// holding anything, and repeating it emptied the pool outright.
+    ///
+    /// Driven at the hub ceiling, across as many conduits as the pool
+    /// divides into, because that is the shape of the exhaustion: every
+    /// permit on this hub held by conduits that are all dead. The window
+    /// asserted is one second of a sixty-second budget — a claimant that
+    /// merely times out cannot satisfy it.
+    ///
+    /// Mutation check: remove `unregister_conduit`'s
+    /// `tunnel_notify.notify_waiters()` and the parked claimants never
+    /// wake — the bounded `timeout` around the join handle fails with
+    /// "must wake when its forward is swept".
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
+    async fn unregister_conduit_wakes_the_claims_parked_on_the_forwards_it_sweeps() {
+        let hub = test_hub();
+        let shares = MAX_PARKED_CLAIMS_PER_HUB / MAX_PARKED_CLAIMS_PER_CONDUIT;
+        let mut conduits = Vec::new();
+        let mut inboxes = Vec::new();
+        let mut parked = Vec::new();
+
+        // Fill the hub pool exactly, the way real claim loops do: one
+        // parked claim per registered forward, each holding the permit
+        // `LocalctlDaemon::serve_tcp_accepted` acquires before it calls
+        // `claim_tcp_accepted` and drops the instant that call returns.
+        for c in 0..shares {
+            let (conduit, rx) = hub.register_conduit();
+            inboxes.push(rx);
+            conduits.push(conduit);
+            for n in 0..MAX_PARKED_CLAIMS_PER_CONDUIT {
+                let forward_id = format!("fid-{c}-{n}");
+                let token = hub.register_forward_for_test(&forward_id, conduit);
+                let permit = hub
+                    .try_acquire_claim_permit(&forward_id)
+                    .expect("every permit up to each owner's own share must be grantable");
+                let hub_for_task = Arc::clone(&hub);
+                parked.push(tokio::spawn(async move {
+                    let claimed = hub_for_task
+                        .claim_tcp_accepted(&forward_id, &token, Duration::from_secs(60))
+                        .await;
+                    drop(permit);
+                    claimed
+                }));
+            }
+        }
+        // Let every spawned claim actually reach its wait.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            hub.parked_claims_held(),
+            MAX_PARKED_CLAIMS_PER_HUB,
+            "the pool must start out exactly spent — this test is about giving it back"
+        );
+
+        // Every one of those conduits dies.
+        for conduit in conduits {
+            hub.unregister_conduit(conduit);
+        }
+
+        for handle in parked {
+            let woken = tokio::time::timeout(Duration::from_secs(1), handle)
+                .await
+                .expect(
+                    "a claim parked on a forward whose conduit just died must wake when its \
+                     forward is swept, not sit out its whole wait budget holding a permit",
+                )
+                .expect("the parked claim task must not panic");
+            assert!(
+                woken.is_none(),
+                "a swept forward admits nobody — the woken claimant must leave with nothing"
+            );
+        }
+        assert_eq!(
+            hub.parked_claims_held(),
+            0,
+            "every permit must be back in the hub pool, not stranded in the bucket of a \
+             ConduitId that will never be reissued"
+        );
+
+        // ...and the restored capacity is real: a different, live conduit
+        // can take a full share and park on its own forward.
+        let (late, _rx_late) = hub.register_conduit();
+        let late_token = hub.register_forward_for_test("fid-late", late);
+        let late_permits: Vec<_> = (0..MAX_PARKED_CLAIMS_PER_CONDUIT)
+            .map(|_| {
+                hub.try_acquire_claim_permit("fid-late")
+                    .expect("a live conduit must be able to park once the dead ones let go")
+            })
+            .collect();
+        let late_claim = tokio::spawn({
+            let hub = Arc::clone(&hub);
+            async move {
+                hub.claim_tcp_accepted("fid-late", &late_token, Duration::from_secs(60))
+                    .await
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !late_claim.is_finished(),
+            "the late conduit's claim must reach the wait — parked on its own live forward, \
+             not refused"
+        );
+
+        late_claim.abort();
+        drop(late_permits);
+        drop(inboxes);
     }
 }
