@@ -78,6 +78,27 @@ pub fn normalize(mut value: serde_json::Value) -> serde_json::Value {
                                 *text = mask_session_ref(text);
                             }
                         }
+                        // A tunnel's `tunnel_id` is a freshly-minted ULID
+                        // every run (`crate::tunnel::LocalForwardHandle`'s
+                        // own field) — masked the same "keep the shape,
+                        // drop the value" way `session_id` is.
+                        "tunnel_id" => *child = serde_json::Value::String("<tunnel_id>".into()),
+                        // The ephemeral local port `tunnel.open`'s own test
+                        // picks fresh every run lands in `Tunnel.bind`
+                        // (`"127.0.0.1:<port>"`) — same masking `message`
+                        // already applies to a loopback port embedded in
+                        // free text, reused here for a field that is
+                        // *only* ever an address.
+                        "bind" => {
+                            if let serde_json::Value::String(text) = child {
+                                *text = mask_loopback_ports(text);
+                            }
+                        }
+                        // The kernel-assigned port a fresh `free_port()`
+                        // picked, echoed back verbatim in `actual_port` —
+                        // same "shape, not value" masking `duration_ms`
+                        // gets.
+                        "actual_port" => *child = serde_json::Value::from(0),
                         // The binary's own version churns on every release;
                         // the fixture asserts the *shape*, and `schemas`
                         // (right next to it) still pins the contract ids.

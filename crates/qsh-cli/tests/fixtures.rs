@@ -23,13 +23,17 @@
 mod common;
 
 use std::collections::BTreeSet;
+use std::io::BufRead as _;
+use std::net::TcpListener;
 use std::path::PathBuf;
+use std::process::Stdio;
 
 use common::{Fleet, HOST_ALIAS, Sandbox};
 use qsh_proto::{
     ErrorCode, ExecRunData, Host, HostListData, IdentityInitData, Session, SessionCloseData,
     SessionListData, SessionOpenData, SessionReadData, SessionResizeData, SessionWriteData,
-    TrustAddData, TrustListData, TrustRemoveData, VersionData,
+    TrustAddData, TrustListData, TrustRemoveData, TunnelCloseData, TunnelListData, TunnelOpenData,
+    VersionData,
 };
 use qsh_testkit::fixtures;
 use schemars::schema_for;
@@ -156,6 +160,9 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "session.close.json",
     "error.SESSION_NOT_FOUND.json",
     "error.SESSION_CONFLICT.json",
+    "tunnel.open.json",
+    "tunnel.list.json",
+    "tunnel.close.json",
 ];
 
 // ---------------------------------------------------------------------------
@@ -350,6 +357,81 @@ fn golden_remote_fixtures() {
     ]);
     assert_eq!(code, 255, "{trust_required}");
     check("error.TRUST_REQUIRED.json", trust_required);
+}
+
+/// `tunnel.open`/`tunnel.list`/`tunnel.close` (`docs/CLI.md` §6.9, `PLAN.md`
+/// M4 Step 5 PR 5b).
+///
+/// `tunnel.open` needs a real peer (`Fleet`) — the `Tunnel` envelope it
+/// prints is the DoD 1 shape (`docs/CLI.md` §6.9's own example), captured
+/// from the standalone `qsh tunnel open --json` machine-mode form (not the
+/// interactive `-L`/PTY one `tunnel_e2e.rs` covers). The forward
+/// destination is never dialed at open time (only per accepted
+/// connection), so it does not need to exist for this fixture — `--local`
+/// only has to bind.
+///
+/// `tunnel.list`/`tunnel.close` need no peer at all here: both are pure
+/// local reads/asks against this machine's localctl daemons
+/// (`Ops::tunnel_list`/`Ops::tunnel_close`'s own docs), and
+/// `Sandbox::command` scrubs `XDG_RUNTIME_DIR` exactly as it does for
+/// `host.list` (`golden_local_fixtures`'s own comment) — no daemon exists
+/// in this sandbox, so `tunnels` is the ordinary empty-list state and
+/// `tunnel close` on a made-up id is the ordinary `closed: false` state.
+/// Both are real, deterministic outcomes, not placeholders — the
+/// daemon-held non-empty case is `crates/qsh-testkit/tests/reverse_tunnel.rs`'s
+/// L3 job, which drives an actual resident daemon.
+#[test]
+fn golden_tunnel_fixtures() {
+    let fleet = Fleet::start();
+    let port = free_port();
+
+    let mut command = fleet.client.command(&[
+        "tunnel",
+        "open",
+        HOST_ALIAS,
+        "--local",
+        &format!("{port}:localhost:1"),
+        "--json",
+    ]);
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn qsh tunnel open");
+    let mut stdout = std::io::BufReader::new(child.stdout.take().expect("tunnel open stdout"));
+    let mut line = String::new();
+    stdout.read_line(&mut line).expect("read the envelope line");
+    assert!(!line.trim().is_empty(), "qsh tunnel open printed nothing");
+    let opened: Value =
+        serde_json::from_str(line.trim()).unwrap_or_else(|e| panic!("not JSON: {e}: {line:?}"));
+    assert_eq!(opened["ok"], true, "{opened}");
+    assert_eq!(opened["data"]["mode"], "local", "{opened}");
+    check("tunnel.open.json", opened);
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let (code, listed) = fleet.client.json(&["tunnels", "--json"]);
+    assert_eq!(code, 0, "{listed}");
+    assert_eq!(listed["data"]["tunnels"].as_array().map(Vec::len), Some(0));
+    check("tunnel.list.json", listed);
+
+    let (code, closed) = fleet
+        .client
+        .json(&["tunnel", "close", "01NOSUCHTUNNEL", "--json"]);
+    assert_eq!(code, 0, "{closed}");
+    assert_eq!(closed["data"]["closed"], false, "{closed}");
+    check("tunnel.close.json", closed);
+}
+
+/// Pick a free TCP port on loopback by binding `:0` and reading it back —
+/// same technique `tunnel_e2e.rs`'s own `free_port` uses, duplicated here
+/// (fixture generation is deliberately self-contained, `fixtures.rs`'s own
+/// module doc) rather than shared through `common`.
+fn free_port() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind to pick a free port");
+    listener.local_addr().expect("picked port").port()
 }
 
 /// The `session.*` value ops against a real `qsh serve` (PTY-backed
@@ -698,6 +780,9 @@ fn data_schema(command: &str) -> Option<Value> {
             "session.write" => schema_for!(SessionWriteData),
             "session.resize" => schema_for!(SessionResizeData),
             "session.close" => schema_for!(SessionCloseData),
+            "tunnel.open" => schema_for!(TunnelOpenData),
+            "tunnel.list" => schema_for!(TunnelListData),
+            "tunnel.close" => schema_for!(TunnelCloseData),
             _ => return None,
         }
         .to_value(),

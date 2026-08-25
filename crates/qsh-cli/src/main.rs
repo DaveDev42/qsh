@@ -12,13 +12,13 @@ use clap::{CommandFactory as _, Parser};
 use qsh_core::{
     ExecRunOp, ExecStdin, HostGetOp, HostListOp, IdentityInitOp, OpError, Operation, Ops,
     SessionAttachOp, SessionCloseOp, SessionGetOp, SessionListOp, SessionOpenOp, SessionReadOp,
-    SessionResizeOp, SessionWriteOp, TrustAddOp, TrustListOp, TrustRemoveOp, TunnelOpenOp,
-    VersionOp,
+    SessionResizeOp, SessionWriteOp, TrustAddOp, TrustListOp, TrustRemoveOp, TunnelCloseOp,
+    TunnelListOp, TunnelOpenOp, VersionOp,
 };
 use qsh_proto::{
     ErrorCode, ExecRunReq, HostGetReq, IdentityInitReq, SessionCloseReq, SessionGetReq,
     SessionListReq, SessionOpenReq, SessionReadReq, SessionResizeReq, SessionWriteReq, TrustAddReq,
-    TunnelOpenReq,
+    TunnelCloseReq, TunnelListReq, TunnelOpenReq,
 };
 use serde::Serialize;
 use tracing_subscriber::EnvFilter;
@@ -325,6 +325,20 @@ fn run(cli: &Cli) -> i32 {
             human::print_session_list,
         ),
         Command::Tunnel(TunnelCmd::Open(args)) => run_tunnel_open(cli, &ops, args),
+        Command::Tunnel(TunnelCmd::Close { tunnel_id }) => finish(
+            cli,
+            TunnelCloseOp::COMMAND,
+            ops.tunnel_close(TunnelCloseReq {
+                tunnel_id: tunnel_id.clone(),
+            }),
+            human::print_tunnel_close,
+        ),
+        Command::Tunnels => finish(
+            cli,
+            TunnelListOp::COMMAND,
+            ops.tunnel_list(TunnelListReq {}),
+            human::print_tunnels,
+        ),
         Command::Serve { bind } => run_serve(&ops, bind.as_deref()),
         Command::Listen { bind } => run_listen(&ops, bind.as_deref()),
         Command::Reverse {
@@ -997,6 +1011,8 @@ fn command_name(cli: &Cli) -> &'static str {
         Command::Session(SessionCmd::Close { .. }) => SessionCloseOp::COMMAND,
         Command::Sessions { .. } => SessionListOp::COMMAND,
         Command::Tunnel(TunnelCmd::Open(_)) => TunnelOpenOp::COMMAND,
+        Command::Tunnel(TunnelCmd::Close { .. }) => TunnelCloseOp::COMMAND,
+        Command::Tunnels => TunnelListOp::COMMAND,
         Command::Serve { .. } => SERVE_MODE,
         Command::Listen { .. } => LISTEN_MODE,
         Command::Reverse { .. } => REVERSE_MODE,

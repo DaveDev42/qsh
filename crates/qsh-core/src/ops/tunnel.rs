@@ -7,8 +7,10 @@
 //! form's forwards ride the attach's own connection). M4 Step 4 (this
 //! addition) lands `"remote"` mode the same way, with
 //! [`Ops::session_attach`]'s `remote_forward_specs` parameter as its
-//! interactive twin. `tunnel.list`/`tunnel.close` belong to Step 5 and are
-//! absent rather than stubbed.
+//! interactive twin. M4 Step 5 PR 5b lands `tunnel.list`/`tunnel.close`
+//! ([`Ops::tunnel_list`]/[`Ops::tunnel_close`]) and route-awareness for
+//! `tunnel.open` (forward *and* reverse connections, via
+//! [`Ops::tunnel_open_reverse`]).
 //!
 //! **Holder model** (`PLAN.md` M4 §4.1 #1, `docs/CLI.md` §6.14).
 //! `tunnel.open` is a *value* operation that returns one envelope
@@ -35,7 +37,10 @@
 //! `TCP_ACCEPTED` streams come back.
 
 use qsh_proto::wire::{self, ForwardDirection, ForwardSpec, parse_forward_spec};
-use qsh_proto::{ErrorCode, Tunnel, TunnelOpenReq};
+use qsh_proto::{
+    ErrorCode, Tunnel, TunnelCloseData, TunnelCloseReq, TunnelListData, TunnelListReq,
+    TunnelOpenReq,
+};
 
 use crate::ops::session::Connected;
 use crate::ops::{OpError, Operation, Ops};
@@ -46,6 +51,20 @@ use crate::tunnel::{LocalForwardError, LocalForwardHandle};
 pub struct TunnelOpenOp;
 impl Operation for TunnelOpenOp {
     const COMMAND: &'static str = "tunnel.open";
+}
+
+/// The `tunnel.list` operation (`qsh tunnels`, `docs/CLI.md` §6.9, `PLAN.md`
+/// M4 Step 5 PR 5b).
+pub struct TunnelListOp;
+impl Operation for TunnelListOp {
+    const COMMAND: &'static str = "tunnel.list";
+}
+
+/// The `tunnel.close` operation (`qsh tunnel close <id>`, `docs/CLI.md`
+/// §6.9, `PLAN.md` M4 Step 5 PR 5b).
+pub struct TunnelCloseOp;
+impl Operation for TunnelCloseOp {
+    const COMMAND: &'static str = "tunnel.close";
 }
 
 /// Parse `-L` spec strings into [`ForwardSpec`]s, refusing anything that
@@ -117,20 +136,20 @@ pub(crate) fn remote_forward_open_from_spec(spec: &ForwardSpec) -> wire::RemoteF
         bind_port: u32::from(spec.listen_port),
         forward_host: spec.host.clone(),
         forward_port: u32::from(spec.host_port),
-        // Forward (direct-connect) route never touches `ControlHub` —
-        // only the reverse route's own call site (not yet wired into
-        // `Ops::session_attach`; `-R over reverse` still answers
-        // `ErrorCode::Unsupported`) has a claim token to put here.
+        // Forward (direct-connect) route never touches `ControlHub`, so
+        // this builder leaves the field empty — there is no claimant
+        // other than this process's own live QUIC connection.
         //
-        // **Do not reuse this builder for the reverse route as it
-        // stands.** An empty `claim_token` is not a "no capability
+        // **A reverse-route caller MUST overwrite this field before
+        // sending.** An empty `claim_token` is not a "no capability
         // needed" marker there: `crate::reverse::listen::ControlHub`
         // registers such a forward as *permanently unclaimable*
         // (`ClaimSeat`'s own doc — an absent capability is a refusal,
         // never a pass), so its `TCP_ACCEPTED` streams are reset rather
-        // than delivered to anyone. Whoever wires `-R over reverse` must
-        // pass `RemoteForwardAcceptor::claim_token`'s bytes here, on the
-        // same request that names the forward.
+        // than delivered to anyone. `Ops::tunnel_open_reverse` (`PLAN.md`
+        // M4 Step 5 PR 5b) does exactly that: it builds the request with
+        // this function and then overwrites `claim_token` with
+        // `RemoteForwardAcceptor::claim_token`'s bytes before sending.
         claim_token: Vec::new(),
     }
 }
@@ -154,13 +173,22 @@ pub(crate) fn remote_tunnel_dto(
     host: &str,
 ) -> Tunnel {
     let bind_host = spec.bind.as_deref().unwrap_or("127.0.0.1");
+    // `opened.actual_port` is peer-supplied (`RemoteForwardOpened`, sent
+    // by the target we just asked to bind a port) and not validated to
+    // fit a real port range before this point. Clamp once, to the same
+    // `u16`, and reuse that single value for *both* `bind`'s port and
+    // `actual_port` below — never clamp one and leave the other raw,
+    // which would make the two fields disagree about which port is
+    // actually bound (adversarial-review finding: `docs/CLI.md` §6.9's
+    // own stated invariant is that they always agree, precisely so a
+    // reader never has to re-derive one from the other).
     let actual_port = u16::try_from(opened.actual_port).unwrap_or(u16::MAX);
     Tunnel {
         tunnel_id: opened.forward_id.clone(),
         mode: "remote".to_string(),
         bind: wire::format_host_port(bind_host, actual_port),
         forward_to: wire::format_host_port(&spec.host, spec.host_port),
-        actual_port: Some(opened.actual_port),
+        actual_port: Some(u32::from(actual_port)),
         host: host.to_string(),
     }
 }
@@ -207,7 +235,6 @@ pub struct TunnelHold {
     /// reintroduce).
     forward: ForwardResource,
     conn: Connected,
-    connection: qsh_transport::Connection,
     tunnel: Tunnel,
 }
 
@@ -226,40 +253,40 @@ impl TunnelHold {
     /// connection carrying the tunnel closing (the only signal a
     /// `"remote"` mode has on this side — the listener lives on the peer,
     /// which has no fatal-error channel back to this side other than the
-    /// connection itself, `PLAN.md` M4 Step 5's `tunnel.list`/close being
-    /// what eventually gives that a name). Neither is a normal end — a
-    /// deliberate end is the process exiting or this value being dropped,
-    /// which never reaches here — so this always returns an error.
+    /// connection itself). Neither is a normal end — a deliberate end is
+    /// the process exiting or this value being dropped, which never
+    /// reaches here — so this always returns an error.
     ///
     /// Individual forwarded connections failing (a refusal, a dead
     /// destination, a broken pipe) do **not** end the tunnel; they are
     /// logged structurally and accepting continues.
+    ///
+    /// "The connection carrying the tunnel closing" is [`Connected::
+    /// wait_dead`] on *either* route (`PLAN.md` M4 Step 5 PR 5b) —
+    /// forward route: the QUIC connection's own close future, exactly as
+    /// before; reverse route: the `LOCAL_CONTROL` conduit's own clean-end/
+    /// error, which is this side's only way to learn the reverse
+    /// registration died. The runtime handle is taken up front (rather
+    /// than borrowing `self.conn.runtime()` for the duration) because the
+    /// async block below also needs `&mut self.conn` for `wait_dead`, and
+    /// the two borrows cannot coexist.
     pub fn hold(mut self) -> OpError {
+        let handle = self.conn.runtime().handle().clone();
         let err = {
-            let runtime = self.conn.runtime();
             let forward = &mut self.forward;
-            let connection = &self.connection;
-            runtime.block_on(async move {
+            let conn = &mut self.conn;
+            handle.block_on(async move {
                 match forward {
-                    ForwardResource::Local(handle) => {
+                    ForwardResource::Local(local) => {
                         tokio::select! {
-                            err = handle.wait() => OpError::new(
+                            err = local.wait() => OpError::new(
                                 ErrorCode::ConnectionFailed,
                                 format!("the local forward's listener failed: {err}"),
                             ),
-                            err = connection.closed() => OpError::new(
-                                ErrorCode::ConnectionFailed,
-                                format!("the connection carrying this tunnel closed: {err}"),
-                            ),
+                            err = conn.wait_dead() => err,
                         }
                     }
-                    ForwardResource::Remote { .. } => {
-                        let err = connection.closed().await;
-                        OpError::new(
-                            ErrorCode::ConnectionFailed,
-                            format!("the connection carrying this tunnel closed: {err}"),
-                        )
-                    }
+                    ForwardResource::Remote { .. } => conn.wait_dead().await,
                 }
             })
         };
@@ -308,19 +335,26 @@ impl Ops {
     /// [`TunnelHold::tunnel`] once and then [`TunnelHold::hold`]s it.
     pub fn tunnel_open(&self, req: TunnelOpenReq) -> Result<TunnelHold, OpError> {
         let spec = spec_from_request(&req)?;
-        let mut conn = self.connect(&req.host)?;
-        let Some(connection) = conn.connection() else {
-            conn.close();
-            return Err(OpError::new(
-                ErrorCode::Unsupported,
-                "tunnels over a reverse connection are not implemented yet",
-            ));
-        };
+        let conn = self.connect(&req.host)?;
+        match conn.connection() {
+            Some(connection) => Self::tunnel_open_forward(conn, connection, &spec, &req.host),
+            None => Self::tunnel_open_reverse(conn, &spec, &req.host),
+        }
+    }
+
+    /// Forward route: dial the peer's QUIC connection directly — exactly
+    /// [`Self::tunnel_open`]'s original (pre-Step-5) body, unchanged.
+    fn tunnel_open_forward(
+        mut conn: Connected,
+        connection: qsh_transport::Connection,
+        spec: &ForwardSpec,
+        host: &str,
+    ) -> Result<TunnelHold, OpError> {
         match spec.direction {
             ForwardDirection::Local => {
                 let forward = match conn
                     .runtime()
-                    .block_on(LocalForwardHandle::start(&spec, connection.clone()))
+                    .block_on(LocalForwardHandle::start(spec, connection))
                 {
                     Ok(forward) => forward,
                     Err(err) => {
@@ -328,10 +362,9 @@ impl Ops {
                         return Err(map_local_forward_error(err));
                     }
                 };
-                let tunnel = forward.tunnel(&req.host);
+                let tunnel = forward.tunnel(host);
                 Ok(TunnelHold {
                     conn,
-                    connection,
                     forward: ForwardResource::Local(forward),
                     tunnel,
                 })
@@ -339,8 +372,8 @@ impl Ops {
             ForwardDirection::Remote => {
                 let acceptor = conn
                     .runtime()
-                    .block_on(RemoteForwardAcceptor::spawn(connection.clone()));
-                let open_req = remote_forward_open_from_spec(&spec);
+                    .block_on(RemoteForwardAcceptor::spawn(connection));
+                let open_req = remote_forward_open_from_spec(spec);
                 let opened = match conn.run(move |s| Box::pin(s.rfwd_open(open_req))) {
                     Ok(opened) => opened,
                     Err(err) => {
@@ -349,10 +382,9 @@ impl Ops {
                     }
                 };
                 acceptor.register(opened.forward_id.clone(), spec.host.clone(), spec.host_port);
-                let tunnel = remote_tunnel_dto(&spec, &opened, &req.host);
+                let tunnel = remote_tunnel_dto(spec, &opened, host);
                 Ok(TunnelHold {
                     conn,
-                    connection,
                     forward: ForwardResource::Remote {
                         acceptor,
                         forward_id: opened.forward_id,
@@ -361,6 +393,300 @@ impl Ops {
                 })
             }
         }
+    }
+
+    /// Reverse route (`PLAN.md` M4 Step 5 PR 5b): relay through this
+    /// machine's resident `qsh listen` daemon over the `LOCAL_STREAM`
+    /// conduit instead of a QUIC connection this process does not hold.
+    /// `"local"` mode: [`LocalForwardHandle::start_reverse`] — each
+    /// forwarded TCP connection opens its own `TCP_CONNECT`-carrying
+    /// `LOCAL_STREAM` conduit, same as the forward route's per-connection
+    /// stream, just relayed. `"remote"` mode:
+    /// [`RemoteForwardAcceptor::spawn_reverse`] mints this holder's own
+    /// claim token *before* `RemoteForwardOpen` is sent — the daemon seats
+    /// whatever `claim_token` that request carries as the only credential
+    /// that may ever claim the resulting `forward_id`'s `TCP_ACCEPTED`
+    /// arrivals (`crate::reverse::listen::ForwardRegistration`'s own doc;
+    /// [`remote_forward_open_from_spec`]'s forward-route build leaves this
+    /// field empty on purpose, so it is overwritten here, never reused).
+    ///
+    /// Windows has no localctl (UDS) and `Ops::resolve_route` never
+    /// produces a reverse route there (`Ops::connect_reverse`'s own
+    /// Windows twin), so `conn.connection()` returning `None` — this
+    /// function's only caller — is unreachable in practice on that
+    /// platform; the `#[cfg(not(unix))]` twin below exists only so the
+    /// match in [`Self::tunnel_open`] compiles there.
+    #[cfg(unix)]
+    fn tunnel_open_reverse(
+        mut conn: Connected,
+        spec: &ForwardSpec,
+        host: &str,
+    ) -> Result<TunnelHold, OpError> {
+        let Some((socket, route_host)) = conn.reverse_route() else {
+            conn.close();
+            return Err(OpError::new(
+                ErrorCode::Internal,
+                "reverse connection is missing its localctl route",
+            ));
+        };
+        let socket = socket.to_path_buf();
+        let route_host = route_host.to_string();
+        match spec.direction {
+            ForwardDirection::Local => {
+                let forward = match conn
+                    .runtime()
+                    .block_on(LocalForwardHandle::start_reverse(spec, socket, route_host))
+                {
+                    Ok(forward) => forward,
+                    Err(err) => {
+                        conn.close();
+                        return Err(map_local_forward_error(err));
+                    }
+                };
+                let tunnel = forward.tunnel(host);
+                Ok(TunnelHold {
+                    conn,
+                    forward: ForwardResource::Local(forward),
+                    tunnel,
+                })
+            }
+            ForwardDirection::Remote => {
+                let acceptor = conn
+                    .runtime()
+                    .block_on(RemoteForwardAcceptor::spawn_reverse(socket, route_host));
+                let claim_token = acceptor.claim_token().unwrap_or_default().to_vec();
+                let mut open_req = remote_forward_open_from_spec(spec);
+                open_req.claim_token = claim_token;
+                let opened = match conn.run(move |s| Box::pin(s.rfwd_open(open_req))) {
+                    Ok(opened) => opened,
+                    Err(err) => {
+                        conn.close();
+                        return Err(err);
+                    }
+                };
+                // Reverse-route `register()` starts this `forward_id`'s
+                // claim loop via a bare `tokio::spawn`
+                // ([`RemoteForwardAcceptor::register`]'s own doc), which
+                // panics ("no reactor running") unless called from inside
+                // an entered Tokio runtime. `qsh-cli`'s `fn main()` is
+                // plain synchronous -- there is no ambient runtime on this
+                // thread outside a `block_on` call -- so this must be
+                // driven through `conn.runtime()` exactly like
+                // `spawn_reverse` a few lines above
+                // ([`RemoteForwardAcceptor::spawn`]'s own doc names the
+                // exact failure mode this call site reproduced until this
+                // fix: "the `qsh-cli` `tunnel_e2e` L5 suite panicking with
+                // 'no reactor running'").
+                conn.runtime().block_on(async {
+                    acceptor.register(opened.forward_id.clone(), spec.host.clone(), spec.host_port);
+                });
+                let tunnel = remote_tunnel_dto(spec, &opened, host);
+                Ok(TunnelHold {
+                    conn,
+                    forward: ForwardResource::Remote {
+                        acceptor,
+                        forward_id: opened.forward_id,
+                    },
+                    tunnel,
+                })
+            }
+        }
+    }
+
+    /// Windows twin — see [`Self::tunnel_open_reverse`]'s own doc on why
+    /// this is unreachable in practice rather than dead code.
+    #[cfg(not(unix))]
+    fn tunnel_open_reverse(
+        conn: Connected,
+        _spec: &ForwardSpec,
+        _host: &str,
+    ) -> Result<TunnelHold, OpError> {
+        conn.close();
+        Err(OpError::new(
+            ErrorCode::Unsupported,
+            "reverse routing (localctl) is not available on this platform",
+        ))
+    }
+
+    /// `tunnel.list` (`qsh tunnels`, `docs/CLI.md` §6.9, `PLAN.md` M4 Step
+    /// 5 PR 5b): every tunnel visible to this caller.
+    ///
+    /// Only ever the daemon-held reverse source — the direct structural
+    /// twin of [`crate::ops::host::Ops::host_list`]'s reverse source
+    /// ([`crate::localctl::client::admin_tunnel_list_all`], the twin of
+    /// `admin_host_list_all`). A forward-route `-L`/`-R` opened by a
+    /// standalone `qsh tunnel open` has **no** entry here: that tunnel's
+    /// only holder is the CLI process that opened it (`docs/CLI.md` §6.14's
+    /// ordinary rule — no resident client daemon), and there is no IPC
+    /// surface by which a second, later `qsh tunnels` process could reach
+    /// into a first, unrelated process's memory to ask it anything
+    /// (`PLAN.md` M4 §3 non-goals: "client-측 상주 터널 데몬(미확정)").
+    /// This is a real, deliberate visibility gap, not an oversight — the
+    /// only tunnels a resident `qsh listen` daemon can report on are the
+    /// ones *it* holds, and only `-R over reverse` ever registers a
+    /// `forward_id` with a daemon at all
+    /// ([`qsh_proto::local::LocalTunnel::mode`]'s own doc:
+    /// [`crate::reverse::listen::ForwardMeta::mode`] is always
+    /// `"remote"`).
+    ///
+    /// Never dials anything and never fails closed on an unreachable or
+    /// absent daemon — an empty list is the ordinary "no reverse
+    /// connections right now" state, not an error (`docs/CLI.md` §6.9:
+    /// same "부분 실패를 감추지 않는다" discipline `host.list` already
+    /// documents, applied here to tunnels instead of hosts).
+    pub fn tunnel_list(&self, _req: TunnelListReq) -> Result<TunnelListData, OpError> {
+        Ok(TunnelListData {
+            tunnels: self.reverse_tunnel_entries(),
+        })
+    }
+
+    /// `tunnel.close <id>` (`docs/CLI.md` §6.9, `PLAN.md` M4 Step 5 PR
+    /// 5b): ask every localctl daemon on this machine to close `tunnel_id`
+    /// and report whether any of them held it.
+    ///
+    /// **Ownership decision** (`docs/CLI.md` §2.5: "해당 tunnel의 소유
+    /// peer이면 허용"). The wire-level owning-peer check already exists
+    /// and is unchanged by this op: `Server::handle_rfwd_close`
+    /// (`crates/qsh-core/src/server/mod.rs`) scopes `RemoteForwardClose`
+    /// to the *connection* that opened it, and on the reverse route the
+    /// resident daemon is the sole holder of that one reverse connection
+    /// per host, so every `RfwdClose` this op eventually causes to be sent
+    /// still goes out on exactly that connection. What this op decides is
+    /// a *different*, purely local question the wire-level check has
+    /// nothing to say about: which local CLI process — this one, running
+    /// as a brand-new `qsh tunnel close <id>` invocation, distinct from
+    /// whichever process ran the original `tunnel.open` — is allowed to
+    /// ask the daemon to do that at all. `ControlHub::admin_close_forward`
+    /// (`crate::reverse::listen`) answers it: `localctl`'s same-uid accept
+    /// check (`crate::localctl` module docs, `docs/design/architecture.md`
+    /// §7) is already the trust boundary every local process crosses to
+    /// talk to this daemon in the first place, so a second same-uid
+    /// process asking to close a forward the first one opened is still
+    /// the owning peer asking — anything stricter (e.g. requiring the same
+    /// live conduit) would make `qsh tunnel close <id>` unable to ever
+    /// work for a daemon-held forward, since `docs/CLI.md` §6.9's own
+    /// usage example has no `--host`/process-affinity argument for it to
+    /// reconnect through. This does not weaken the *data*-plane
+    /// misdelivery invariant PR 5a built (`docs/design/protocol.md`
+    /// §11-3's owner-conduit gate on `RfwdClose` *relay*) — that gate
+    /// still applies unchanged to `Self::close` (forward route,
+    /// `TunnelHold::close`) and to any other conduit's own `RfwdClose`;
+    /// this op instead acts with the *daemon's own authority*, tearing the
+    /// registration down locally first (so nothing can be misdelivered to
+    /// it from the instant this call is made) before best-effort notifying
+    /// the target — see `admin_close_forward`'s own doc for the full
+    /// argument.
+    ///
+    /// No resource is created by this op ever, on any path — closing is
+    /// pure teardown, so there is no "authorize before creating" ordering
+    /// concern here the way there is for `tunnel.open`.
+    ///
+    /// Idempotent: `closed: false` (never an error) when `tunnel_id` names
+    /// nothing any reachable daemon currently holds — never registered,
+    /// already closed, a `"local"` mode id (never registered daemon-side
+    /// at all), or a forward-route id (no daemon involved,
+    /// [`Self::tunnel_list`]'s own doc) — same shape
+    /// [`qsh_proto::TunnelCloseData::closed`]'s own doc requires.
+    pub fn tunnel_close(&self, req: TunnelCloseReq) -> Result<TunnelCloseData, OpError> {
+        let closed = self.admin_close_tunnel(&req.tunnel_id);
+        Ok(TunnelCloseData {
+            tunnel_id: req.tunnel_id,
+            closed,
+        })
+    }
+
+    #[cfg(unix)]
+    fn reverse_tunnel_entries(&self) -> Vec<Tunnel> {
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(err) => {
+                // Never fail `tunnel.list` over this — same "one daemon
+                // this machine cannot even start a runtime for must not
+                // hide every other tunnel" discipline `host.list` already
+                // applies (`crate::ops::host::Ops::reverse_host_entries`).
+                tracing::warn!(
+                    %err,
+                    "tunnel.list: failed to start an async runtime for the reverse source; \
+                     reporting no tunnels"
+                );
+                return Vec::new();
+            }
+        };
+        runtime.block_on(self.reverse_tunnel_entries_async())
+    }
+
+    #[cfg(unix)]
+    async fn reverse_tunnel_entries_async(&self) -> Vec<Tunnel> {
+        let runtime_dir = self.paths().runtime_dir();
+        crate::localctl::client::admin_tunnel_list_all(&runtime_dir)
+            .await
+            .into_iter()
+            .flat_map(|daemon| daemon.tunnels.into_iter().map(to_tunnel_dto))
+            .collect()
+    }
+
+    /// Windows twin: localctl (UDS) has no meaning there, so the reverse
+    /// source — the only source `tunnel.list` has — is always empty
+    /// (`docs/CLI.md` §6.13).
+    #[cfg(not(unix))]
+    fn reverse_tunnel_entries(&self) -> Vec<Tunnel> {
+        Vec::new()
+    }
+
+    #[cfg(unix)]
+    fn admin_close_tunnel(&self, tunnel_id: &str) -> bool {
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(err) => {
+                tracing::warn!(
+                    %err,
+                    "tunnel.close: failed to start an async runtime for the localctl fan-out; \
+                     reporting not closed"
+                );
+                return false;
+            }
+        };
+        let runtime_dir = self.paths().runtime_dir();
+        runtime.block_on(crate::localctl::client::admin_tunnel_close_all(
+            &runtime_dir,
+            tunnel_id,
+        ))
+    }
+
+    /// Windows twin: localctl (UDS) has no meaning there, so there is no
+    /// daemon to ask and nothing is ever closed by this op
+    /// (`docs/CLI.md` §6.13). This is not a gap on Windows specifically:
+    /// `tunnel_open_reverse`'s own Windows twin already means no `"remote"`
+    /// forward is ever daemon-held there in the first place.
+    #[cfg(not(unix))]
+    fn admin_close_tunnel(&self, _tunnel_id: &str) -> bool {
+        false
+    }
+}
+
+/// Map a daemon-reported [`qsh_proto::local::LocalTunnel`] to the JSON
+/// [`Tunnel`] DTO `tunnel.list` returns — a plain field-for-field copy;
+/// `host` is already filled in by the daemon
+/// (`LocalctlDaemon::serve_admin_tunnel_list`'s own doc), unlike
+/// `host.list`'s reverse source, which fills it from the client-side
+/// registration name instead (there is no per-entry ambiguity to resolve
+/// here: one `LocalTunnel` is always exactly one forward on exactly one
+/// host).
+#[cfg(unix)]
+fn to_tunnel_dto(local: qsh_proto::local::LocalTunnel) -> Tunnel {
+    Tunnel {
+        tunnel_id: local.tunnel_id,
+        mode: local.mode,
+        bind: local.bind,
+        forward_to: local.forward_to,
+        actual_port: Some(local.actual_port),
+        host: local.host,
     }
 }
 
@@ -517,5 +843,50 @@ mod tests {
     #[test]
     fn no_specs_parse_to_no_forwards() {
         assert!(parse_local_forwards(&[]).unwrap().is_empty());
+    }
+
+    /// **Regression (adversarial-review finding).** `RemoteForwardOpened
+    /// .actual_port` is peer-supplied and not range-checked before this
+    /// point — a buggy or hostile target can send any `u32`. Before this
+    /// fix, `bind`'s port was clamped to `u16::MAX` on overflow while
+    /// `Tunnel.actual_port` kept the raw, un-clamped value, so the two
+    /// fields could name two different "actual" ports for the same
+    /// tunnel (`docs/CLI.md` §6.9's own stated invariant is that they
+    /// always agree). This asserts they still agree once clamped.
+    #[test]
+    fn remote_tunnel_dto_clamps_bind_and_actual_port_to_the_same_value() {
+        let spec = ForwardSpec {
+            direction: ForwardDirection::Remote,
+            bind: None,
+            listen_port: 9000,
+            host: "db.internal".to_string(),
+            host_port: 5432,
+        };
+        for out_of_range in [65_536u32, u32::MAX] {
+            let opened = wire::RemoteForwardOpened {
+                forward_id: "fwd-test".to_string(),
+                actual_port: out_of_range,
+            };
+            let tunnel = remote_tunnel_dto(&spec, &opened, "box");
+            assert_eq!(
+                tunnel.actual_port,
+                Some(u32::from(u16::MAX)),
+                "actual_port must be clamped, not left raw, for {out_of_range}"
+            );
+            assert_eq!(
+                tunnel.bind,
+                wire::format_host_port("127.0.0.1", u16::MAX),
+                "bind's port for {out_of_range}"
+            );
+        }
+
+        // The ordinary in-range case is untouched: no spurious clamping.
+        let opened = wire::RemoteForwardOpened {
+            forward_id: "fwd-test".to_string(),
+            actual_port: 9000,
+        };
+        let tunnel = remote_tunnel_dto(&spec, &opened, "box");
+        assert_eq!(tunnel.actual_port, Some(9000));
+        assert_eq!(tunnel.bind, wire::format_host_port("127.0.0.1", 9000));
     }
 }

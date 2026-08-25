@@ -64,7 +64,7 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use qsh_proto::wire::{StreamHeader, StreamKind, sanitize_peer_text, valid_forward_id};
 use thiserror::Error;
@@ -1152,11 +1152,46 @@ impl Drop for DrainClaimAttemptOnDrop {
 /// *ordinary* outcome (nothing arrived within this attempt's budget,
 /// `crate::localctl::daemon`'s `serve_tcp_accepted`'s own doc on why an
 /// unregistered and a merely-idle `forward_id` answer the same way) and
-/// is not logged or backed off — claiming again *is* the wait. Any other
-/// error gets a short backoff so a genuinely unreachable daemon is
-/// retried, not hammered. A claim task ending via `JoinError` (panic) is
-/// treated the same as any other failed attempt — logged, backed off, and
-/// retried — rather than silently stalling the loop.
+/// is not logged or backed off *when the attempt actually spent its
+/// budget waiting* — claiming again is the wait. Any other error gets a
+/// short backoff so a genuinely unreachable daemon is retried, not
+/// hammered. A claim task ending via `JoinError` (panic) is treated the
+/// same as any other failed attempt — logged, backed off, and retried —
+/// rather than silently stalling the loop.
+///
+/// **Fast-timeout guard (adversarial-review finding, `PLAN.md` M4 Step 5
+/// PR 5b: a third party — `qsh tunnel close`, via
+/// `crate::reverse::listen::ControlHub::admin_close_forward` — can remove
+/// this loop's `forward_id` registration without ending this loop's own
+/// conduit).** Once that happens, `admits_claim` is `false` for every
+/// future attempt and `crate::reverse::listen::ControlHub::claim_tcp_accepted`
+/// returns `None` on its very first poll, before any `.await` — so the
+/// attempt resolves to `Timeout` in microseconds instead of after the
+/// real ~60s (`qsh_proto::local::LOCAL_WAIT_MAX`) budget. Treating that
+/// the same as an ordinary exhausted-budget timeout turns this loop into
+/// an unbounded hot spin of UDS connect + `LocalHello` + `StreamHeader`
+/// for as long as the process lives. Distinguishing the two without a
+/// wire change: a `Timeout` whose attempt took under
+/// [`FAST_TIMEOUT_THRESHOLD`] cannot have genuinely waited out the
+/// budget, so it gets the same [`REVERSE_CLAIM_RETRY_BACKOFF`] every
+/// other failure mode gets; only a `Timeout` that actually spent close to
+/// the full budget is the ordinary long-poll outcome and is retried at
+/// once.
+#[cfg(unix)]
+const FAST_TIMEOUT_THRESHOLD: Duration = Duration::from_secs(1);
+
+/// The decision [`FAST_TIMEOUT_THRESHOLD`]'s doc describes, pulled out as
+/// a pure function so it is unit-testable without driving the real
+/// `select!` loop: `true` means the just-finished attempt could not have
+/// genuinely waited out [`REVERSE_CLAIM_WAIT_MS`]'s ~60s budget, so it
+/// must be a registration that vanished out from under this loop (the
+/// only way `claim_tcp_accepted` returns before its first `.await`) — get
+/// backed off like every other failure, not retried instantly.
+#[cfg(unix)]
+fn timeout_needs_backoff(elapsed: Duration) -> bool {
+    elapsed < FAST_TIMEOUT_THRESHOLD
+}
+
 #[cfg(unix)]
 async fn claim_remote_forward_reverse(
     socket: std::path::PathBuf,
@@ -1173,6 +1208,7 @@ async fn claim_remote_forward_reverse(
         port: 0,
     };
     let mut tasks = DrainSplicesOnDrop(JoinSet::new());
+    let mut attempt_started = Instant::now();
     let mut claim_handle = DrainClaimAttemptOnDrop::new(
         spawn_claim_attempt(socket.clone(), daemon_host.clone(), header.clone()),
         host.clone(),
@@ -1186,12 +1222,16 @@ async fn claim_remote_forward_reverse(
                         tasks
                             .0
                             .spawn(handle_reverse_claim(send, recv, kill, host.clone(), port));
+                        attempt_started = Instant::now();
                         spawn_claim_attempt(socket.clone(), daemon_host.clone(), header.clone())
                     }
-                    Ok(Err(ClientError::Remote { code: qsh_proto::ErrorCode::Timeout, .. })) => {
+                    Ok(Err(ClientError::Remote { code: qsh_proto::ErrorCode::Timeout, .. }))
+                        if !timeout_needs_backoff(attempt_started.elapsed()) =>
+                    {
                         // Nothing arrived within this attempt's budget —
                         // the ordinary long-poll outcome. Claim again
                         // right away.
+                        attempt_started = Instant::now();
                         spawn_claim_attempt(socket.clone(), daemon_host.clone(), header.clone())
                     }
                     Ok(Err(err)) => {
@@ -1201,6 +1241,7 @@ async fn claim_remote_forward_reverse(
                             "qsh::tunnel: reverse TCP_ACCEPTED claim failed, retrying"
                         );
                         tokio::time::sleep(REVERSE_CLAIM_RETRY_BACKOFF).await;
+                        attempt_started = Instant::now();
                         spawn_claim_attempt(socket.clone(), daemon_host.clone(), header.clone())
                     }
                     Err(join_err) => {
@@ -1212,6 +1253,7 @@ async fn claim_remote_forward_reverse(
                             );
                         }
                         tokio::time::sleep(REVERSE_CLAIM_RETRY_BACKOFF).await;
+                        attempt_started = Instant::now();
                         spawn_claim_attempt(socket.clone(), daemon_host.clone(), header.clone())
                     }
                 };
@@ -1302,6 +1344,41 @@ mod tests {
 
     use super::*;
     use crate::tunnel::testutil::{ScriptedResolver, addr, loopback_pair};
+
+    // ---- timeout_needs_backoff: the busy-loop guard (adversarial-review
+    // finding — `qsh tunnel close` on a still-claimed reverse forward left
+    // its claim loop spinning with no backoff at all) ------------------
+
+    /// The regression this whole function exists for: a `Timeout` that
+    /// came back in well under the ~60s wait budget cannot have genuinely
+    /// waited it out — `claim_tcp_accepted` only returns that fast when
+    /// `admits_claim` was already `false` before the first `.await`
+    /// (registration removed out from under this loop, e.g. by
+    /// `ControlHub::admin_close_forward`). Before this fix, every
+    /// `Timeout` retried instantly regardless — this is the exact
+    /// condition (`elapsed` near zero) that turned into an unbounded hot
+    /// spin.
+    #[cfg(unix)]
+    #[test]
+    fn a_near_instant_timeout_needs_backoff() {
+        assert!(
+            timeout_needs_backoff(Duration::from_millis(0)),
+            "a Timeout with ~0 elapsed is the fast-path (unregistered) case and must back off"
+        );
+        assert!(timeout_needs_backoff(Duration::from_millis(5)));
+        assert!(timeout_needs_backoff(Duration::from_millis(500)));
+    }
+
+    /// The ordinary case must be left alone: a `Timeout` that actually
+    /// spent close to the real ~60s wait budget is the long-poll draining
+    /// normally, and retrying at once *is* the wait — backing it off too
+    /// would silently slow down every healthy `-R`'s throughput.
+    #[cfg(unix)]
+    #[test]
+    fn a_genuine_long_poll_timeout_does_not_need_backoff() {
+        assert!(!timeout_needs_backoff(FAST_TIMEOUT_THRESHOLD));
+        assert!(!timeout_needs_backoff(Duration::from_secs(60)));
+    }
 
     // ---- all_loopback: the pure fold, network-free -------------------
 

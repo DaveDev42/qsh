@@ -30,7 +30,10 @@ pub use session::{
     SessionReadOutput, SessionReader, SessionRef, SessionResizeOp, SessionWriteOp,
     make_session_ref, parse_session_ref,
 };
-pub use tunnel::{TunnelHold, TunnelOpenOp, parse_local_forwards, parse_remote_forwards};
+pub use tunnel::{
+    TunnelCloseOp, TunnelHold, TunnelListOp, TunnelOpenOp, parse_local_forwards,
+    parse_remote_forwards,
+};
 
 /// Everything a remote call needs to reach a pinned host: our identity,
 /// the trust evaluator, and where to dial.

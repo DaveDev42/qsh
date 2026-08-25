@@ -1,0 +1,9 @@
+{
+  "command": "tunnel.list",
+  "data": {
+    "tunnels": []
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

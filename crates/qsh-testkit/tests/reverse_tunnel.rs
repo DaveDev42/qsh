@@ -1465,3 +1465,293 @@ async fn a_claim_started_before_registration_gets_only_its_declared_wait_ms_not_
     localctl.shutdown().await;
     harness.shutdown().await;
 }
+
+// ------------------------------------------------------------------
+// (v) `Ops::tunnel_list`/`Ops::tunnel_close` (`PLAN.md` M4 Step 5 PR 5b) —
+// qsh-level, against a real daemon-held `-R over reverse` forward.
+// ------------------------------------------------------------------
+
+/// Pick a free TCP port on loopback by binding `:0` and reading it back —
+/// same technique `crates/qsh-cli/tests/fixtures.rs`'s own `free_port`
+/// uses. `Ops::tunnel_open`'s `TunnelOpenReq::listen_port` must be
+/// `1..=65535` (`crate::ops::tunnel`'s own `port` helper) — unlike the raw
+/// wire `RemoteForwardOpen.bind_port`, which this file's other `-R`
+/// helpers ([`ReverseRemoteRoute::open`]) can and do send as `0` to ask
+/// the target for a kernel-assigned port, the `Ops`/CLI-facing grammar has
+/// no such request-a-free-port spelling (`docs/CLI.md` §6.9's `-R` grammar
+/// takes a concrete `rport`), so this test picks one itself instead.
+fn free_port() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind to pick a free port");
+    listener.local_addr().expect("picked port").port()
+}
+
+/// [`Ops::tunnel_list`] off the calling thread — same
+/// `spawn_blocking` bridge `host_list_reverse.rs` uses for
+/// [`Ops::host_list`], and for the identical reason (`Ops::tunnel_list`
+/// builds and blocks on its own current-thread runtime internally,
+/// `crate::ops::tunnel::Ops::reverse_tunnel_entries`'s own doc).
+async fn tunnel_list(ops: &qsh_core::Ops) -> Result<qsh_proto::TunnelListData, qsh_core::OpError> {
+    let ops = ops.clone();
+    tokio::task::spawn_blocking(move || ops.tunnel_list(qsh_proto::TunnelListReq {}))
+        .await
+        .expect("spawn_blocking join")
+}
+
+/// [`Ops::tunnel_close`] off the calling thread — same bridge, same
+/// reason.
+async fn tunnel_close(
+    ops: &qsh_core::Ops,
+    tunnel_id: &str,
+) -> Result<qsh_proto::TunnelCloseData, qsh_core::OpError> {
+    let ops = ops.clone();
+    let tunnel_id = tunnel_id.to_string();
+    tokio::task::spawn_blocking(move || ops.tunnel_close(qsh_proto::TunnelCloseReq { tunnel_id }))
+        .await
+        .expect("spawn_blocking join")
+}
+
+/// The full owed PR 5b L3 scenario (`PLAN.md` M4 Step 5 PR 5b (c)):
+/// `Ops::tunnel_open --remote` over the reverse route registers a forward
+/// with the target's resident-daemon-adjacent hub; a *second*, independent
+/// `Ops::tunnel_list` call (not the one that opened it — the same
+/// process-independence `Ops::tunnel_close`'s own doc argues from) reports
+/// it with the address it *actually* bound, which is live and reachable;
+/// `Ops::tunnel_close` tears it down — the listing empties, a repeat close
+/// is the ordinary idempotent `closed: false`, and the bound address stops
+/// accepting connections once the target has processed the relayed
+/// `RemoteForwardClose`.
+///
+/// The tunnel is held open (not `hold()`ed — nothing here waits for the
+/// tunnel to end) on a dedicated blocking-pool thread for the scenario's
+/// duration, released only once every assertion below is done — exactly
+/// [`TunnelHold`](qsh_core::TunnelHold)'s own contract: the resource lives
+/// only as long as something keeps the value alive.
+#[tokio::test(flavor = "multi_thread")]
+async fn tunnel_list_and_close_manage_a_daemon_held_remote_forward() {
+    let target = make_identity();
+    let harness =
+        ReverseHarness::start_with(Arc::new(AllowAllPinned), false, pin(&target, "widget")).await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let paths = qsh_core::Paths::new(dir.path().join("config"), dir.path().join("state"))
+        .with_runtime_dir(dir.path().join("run"));
+    // `Ops::tunnel_open`'s route resolution loads `trust.toml` regardless
+    // of whether the reverse source ends up winning (`resolve_route`'s own
+    // "reverse wins over a forward pin" — it still reads the store to
+    // check) — an empty-but-present store, same as `host_list_reverse.rs`'s
+    // own `ops_with_forward_pin` always writes one.
+    qsh_core::TrustStore::default()
+        .save(&paths.trust_file())
+        .expect("save empty trust.toml");
+    let ops = qsh_core::Ops::new(paths);
+    let localctl = harness.attach_localctl(ops.paths()).await;
+    let echo = EchoServer::start().await.expect("bind echo server");
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let run_fut = harness.run_target(&target, "device-id", "controller", None, async {
+        let _ = shutdown_rx.await;
+    });
+
+    let test_fut = async {
+        wait_for(TIMEOUT, || harness.listen.registry().get("widget")).await;
+
+        // Hold the tunnel open on a blocking-pool thread — `Ops::tunnel_open`
+        // is sync and spins its own runtime internally, exactly like
+        // `Ops::host_list` (`tunnel_list`/`tunnel_close`'s own helpers,
+        // above).
+        let ops_hold = ops.clone();
+        let echo_port = echo.port();
+        let (tunnel_tx, tunnel_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let hold_task = tokio::task::spawn_blocking(move || {
+            let hold = ops_hold
+                .tunnel_open(qsh_proto::TunnelOpenReq {
+                    host: "widget".to_string(),
+                    mode: "remote".to_string(),
+                    bind: None,
+                    listen_port: u32::from(free_port()),
+                    forward_host: "127.0.0.1".to_string(),
+                    forward_port: u32::from(echo_port),
+                })
+                .expect("tunnel_open --remote over reverse");
+            let _ = tunnel_tx.send(hold.tunnel().clone());
+            // Block here — not `hold.hold()` — until the scenario below is
+            // done with the resource: this thread's only job is to keep
+            // `TunnelHold` alive (and therefore the forward registered)
+            // for exactly as long as the test needs it.
+            let _ = release_rx.recv();
+            hold.close();
+        });
+        let opened = tunnel_rx.await.expect("tunnel_open reported its Tunnel");
+        assert_eq!(opened.mode, "remote");
+        assert_eq!(opened.host, "widget");
+        assert_eq!(
+            opened.forward_to,
+            qsh_proto::wire::format_host_port("127.0.0.1", echo_port)
+        );
+
+        // `tunnel_list` reports the same forward, from a *second*,
+        // independent `Ops::tunnel_list` call — never the one that opened
+        // it — with the address that actually got bound.
+        let listed = tunnel_list(&ops).await.expect("tunnel.list");
+        assert_eq!(listed.tunnels.len(), 1, "{:?}", listed.tunnels);
+        let entry = &listed.tunnels[0];
+        assert_eq!(entry.tunnel_id, opened.tunnel_id);
+        assert_eq!(entry.mode, "remote");
+        assert_eq!(entry.bind, opened.bind);
+        assert_eq!(entry.forward_to, opened.forward_to);
+        assert_eq!(entry.host, "widget");
+
+        // The address `tunnel_list` reported is real and live: dial it
+        // and round-trip a payload through the target's echo server.
+        let bind_addr: SocketAddr = entry.bind.parse().expect("bind is a real socket address");
+        let payload = b"tunnel.list reports a real, live bound address".to_vec();
+        let got = TunnelHarness::round_trip(bind_addr, payload.clone())
+            .await
+            .expect("round trip through the listed bind address");
+        assert_eq!(got, payload);
+
+        // `tunnel_close` tears it down: `closed: true` the first time, the
+        // registry empties, and a second close on the same id is the
+        // ordinary idempotent `closed: false` — never an error.
+        let closed = tunnel_close(&ops, &opened.tunnel_id)
+            .await
+            .expect("tunnel.close");
+        assert!(closed.closed, "{closed:?}");
+        assert_eq!(closed.tunnel_id, opened.tunnel_id);
+
+        let after = tunnel_list(&ops).await.expect("tunnel.list after close");
+        assert!(after.tunnels.is_empty(), "{:?}", after.tunnels);
+
+        let closed_again = tunnel_close(&ops, &opened.tunnel_id)
+            .await
+            .expect("tunnel.close again");
+        assert!(
+            !closed_again.closed,
+            "closing twice must be idempotent, not an error"
+        );
+
+        // The target processes the relayed `RemoteForwardClose`
+        // asynchronously (`ControlHub::admin_close_forward`'s own doc:
+        // "best-effort... nothing here waits for or depends on that
+        // notification landing") — poll until the bound address stops
+        // accepting rather than asserting on the first attempt.
+        tokio::time::timeout(TIMEOUT, async {
+            loop {
+                match tokio::time::timeout(
+                    Duration::from_millis(200),
+                    tokio::net::TcpStream::connect(bind_addr),
+                )
+                .await
+                {
+                    Ok(Ok(_)) => tokio::time::sleep(Duration::from_millis(20)).await,
+                    _ => return,
+                }
+            }
+        })
+        .await
+        .expect("the target's listener must be torn down after tunnel_close");
+
+        release_tx
+            .send(())
+            .expect("tell the holder task to stop holding");
+        hold_task.await.expect("hold task join");
+
+        let _ = shutdown_tx.send(());
+    };
+
+    let (result, ()) = tokio::join!(run_fut, test_fut);
+    result.expect("run_target must exit cleanly on shutdown");
+    localctl.shutdown().await;
+    harness.shutdown().await;
+}
+
+/// Regression for the panic an adversarial review caught in `Ops::
+/// tunnel_open`'s reverse `-R` leg: `RemoteForwardAcceptor::register`
+/// starts its claim loop with a bare `tokio::spawn`
+/// (`RemoteForwardAcceptor::register`'s own doc), which requires an
+/// ambient Tokio runtime context on the calling thread. The scenario
+/// above (and every other L3 test in this file) drives `Ops::tunnel_open`
+/// from `tokio::task::spawn_blocking`, whose worker threads *do* carry
+/// runtime context -- so it cannot catch this. The real `qsh` binary's
+/// `fn main()` is plain synchronous with **no** `#[tokio::main]` and no
+/// ambient runtime at all (`crates/qsh-cli/src/main.rs`); this test
+/// reproduces that exact shape with `std::thread::spawn` instead, which
+/// panicked with "there is no reactor running, must be called from the
+/// context of a Tokio 1.x runtime" at
+/// `crates/qsh-core/src/tunnel/remote.rs:668` before the fix wrapped the
+/// `register()` call in `conn.runtime().block_on(...)`.
+#[tokio::test(flavor = "multi_thread")]
+async fn tunnel_open_remote_over_reverse_survives_a_thread_with_no_ambient_tokio_runtime() {
+    let target = make_identity();
+    let harness =
+        ReverseHarness::start_with(Arc::new(AllowAllPinned), false, pin(&target, "widget")).await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let paths = qsh_core::Paths::new(dir.path().join("config"), dir.path().join("state"))
+        .with_runtime_dir(dir.path().join("run"));
+    qsh_core::TrustStore::default()
+        .save(&paths.trust_file())
+        .expect("save empty trust.toml");
+    let ops = qsh_core::Ops::new(paths);
+    let localctl = harness.attach_localctl(ops.paths()).await;
+    let echo = EchoServer::start().await.expect("bind echo server");
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let run_fut = harness.run_target(&target, "device-id", "controller", None, async {
+        let _ = shutdown_rx.await;
+    });
+
+    let test_fut = async {
+        wait_for(TIMEOUT, || harness.listen.registry().get("widget")).await;
+
+        let ops_hold = ops.clone();
+        let echo_port = echo.port();
+        let (tunnel_tx, tunnel_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        // `std::thread::spawn`, deliberately not `tokio::task::spawn_blocking`
+        // -- no ambient Tokio runtime on this thread at all, the same shape
+        // `qsh-cli`'s synchronous `fn main()` calls `Ops::tunnel_open` from.
+        let hold_thread = std::thread::spawn(move || {
+            let hold = ops_hold
+                .tunnel_open(qsh_proto::TunnelOpenReq {
+                    host: "widget".to_string(),
+                    mode: "remote".to_string(),
+                    bind: None,
+                    listen_port: u32::from(free_port()),
+                    forward_host: "127.0.0.1".to_string(),
+                    forward_port: u32::from(echo_port),
+                })
+                .expect("tunnel_open --remote over reverse, off any Tokio runtime");
+            let _ = tunnel_tx.send(hold.tunnel().clone());
+            let _ = release_rx.recv();
+            hold.close();
+        });
+        let opened = tunnel_rx
+            .await
+            .expect("tunnel_open reported its Tunnel without panicking");
+        assert_eq!(opened.mode, "remote");
+
+        // The claim loop the off-runtime `register()` call started must
+        // actually be running: dial the bound address and round-trip a
+        // payload through the target's echo server.
+        let bind_addr: SocketAddr = opened.bind.parse().expect("bind is a real socket address");
+        let payload = b"off-runtime register() still claims TCP_ACCEPTED".to_vec();
+        let got = TunnelHarness::round_trip(bind_addr, payload.clone())
+            .await
+            .expect("round trip through the tunnel opened off any Tokio runtime");
+        assert_eq!(got, payload);
+
+        release_tx
+            .send(())
+            .expect("tell the holder thread to stop holding");
+        hold_thread
+            .join()
+            .expect("holder thread must not panic -- this is the regression this test guards");
+
+        let _ = shutdown_tx.send(());
+    };
+
+    let (result, ()) = tokio::join!(run_fut, test_fut);
+    result.expect("run_target must exit cleanly on shutdown");
+    localctl.shutdown().await;
+    harness.shutdown().await;
+}

@@ -1,0 +1,14 @@
+{
+  "command": "tunnel.open",
+  "data": {
+    "actual_port": 0,
+    "bind": "127.0.0.1:<port>",
+    "forward_to": "localhost:1",
+    "host": "box",
+    "mode": "local",
+    "tunnel_id": "<tunnel_id>"
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

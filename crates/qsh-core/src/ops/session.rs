@@ -1017,7 +1017,11 @@ impl Ops {
             Ok((session, peer_fingerprint, generation)) => Ok((
                 Connected {
                     runtime: Some(runtime),
-                    link: ConnectedLink::Reverse { peer_fingerprint },
+                    link: ConnectedLink::Reverse {
+                        peer_fingerprint,
+                        socket: route.socket.clone(),
+                        host: route.host.clone(),
+                    },
                     session: Some(session),
                 },
                 generation,
@@ -3369,7 +3373,24 @@ enum ConnectedLink {
     // (where a unit test builds it directly to pin
     // `Connected::peer_fingerprint`'s reverse-leg behavior).
     #[cfg_attr(not(unix), allow(dead_code))]
-    Reverse { peer_fingerprint: Option<String> },
+    Reverse {
+        peer_fingerprint: Option<String>,
+        /// This machine's resident `qsh listen` daemon's localctl socket
+        /// and the registered host alias this leg is for — exactly
+        /// [`LocalRoute`]'s two fields, carried forward from
+        /// [`Ops::connect_reverse`] rather than re-resolved, because
+        /// re-resolving could name a *different* daemon/registration than
+        /// the one this specific `Connected`'s `LOCAL_CONTROL` conduit is
+        /// actually talking to. [`Connected::reverse_route`] is the only
+        /// reader — `crate::ops::tunnel`'s route-aware `tunnel_open`
+        /// (`PLAN.md` M4 Step 5 PR 5b), which needs both to open the
+        /// per-connection `LOCAL_STREAM` conduits
+        /// [`crate::tunnel::LocalForwardHandle::start_reverse`] and
+        /// [`crate::tunnel::remote::RemoteForwardAcceptor::spawn_reverse`]
+        /// take.
+        socket: std::path::PathBuf,
+        host: String,
+    },
 }
 
 /// The endpoint/connection pair an attach is riding right now.
@@ -3476,7 +3497,9 @@ impl Connected {
                 .connection()
                 .peer_fingerprint()
                 .map(|fp| fp.to_string()),
-            ConnectedLink::Reverse { peer_fingerprint } => peer_fingerprint.clone(),
+            ConnectedLink::Reverse {
+                peer_fingerprint, ..
+            } => peer_fingerprint.clone(),
         }
     }
 
@@ -3492,6 +3515,83 @@ impl Connected {
         match &self.link {
             ConnectedLink::Forward(link) => Some(link.connection()),
             ConnectedLink::Reverse { .. } => None,
+        }
+    }
+
+    /// The reverse-route carrier [`crate::ops::tunnel`]'s route-aware
+    /// `tunnel_open` needs to open its own `LOCAL_STREAM` conduits
+    /// (`PLAN.md` M4 Step 5 PR 5b) — this machine's resident `qsh listen`
+    /// daemon socket and the registered host alias, i.e. exactly
+    /// [`ConnectedLink::Reverse`]'s two extra fields. `None` on the
+    /// forward route (the mirror image of [`Self::connection`] being
+    /// `None` on the reverse route) — a caller branches on one or the
+    /// other, never both.
+    #[cfg(unix)]
+    pub(crate) fn reverse_route(&self) -> Option<(&std::path::Path, &str)> {
+        match &self.link {
+            ConnectedLink::Forward(_) => None,
+            ConnectedLink::Reverse { socket, host, .. } => Some((socket.as_path(), host.as_str())),
+        }
+    }
+
+    /// Wait until this connection ends, and say why — the one signal
+    /// [`crate::ops::tunnel::TunnelHold::hold`] blocks on for as long as
+    /// the tunnel it holds is alive (`docs/CLI.md` §6.14).
+    ///
+    /// Forward route: [`qsh_transport::Connection::closed`], the QUIC
+    /// connection's own close future. Reverse route: there is no such
+    /// object on this side ([`Self::connection`]'s own doc), so this
+    /// drives [`Session::next_control`] in a loop instead — `Ok(None)` is
+    /// the daemon ending the `LOCAL_CONTROL` conduit, which is also how
+    /// this side learns its reverse registration died
+    /// (`crate::client::link::ControlLink::recv`'s own doc,
+    /// `docs/design/protocol.md` §11-3), and any `Err` is the conduit
+    /// itself failing. `next_control` performs no write (unlike
+    /// [`Session::next_event`], which answers a peer `Ping` inline), so
+    /// this is safe to run with nothing else touching the session — which
+    /// is exactly `tunnel_open`'s reverse-route `Connected`, since it is
+    /// never attached to any session and issues only the occasional
+    /// `RfwdOpen`/`RfwdClose` request on it. A message that is not a
+    /// clean end or an error (there should never legitimately be one on
+    /// this bare value-op connection) is simply discarded and the loop
+    /// keeps waiting — the same "nothing here to answer" posture every
+    /// other bare value-op `Connected` already has, forward or reverse.
+    pub(crate) async fn wait_dead(&mut self) -> OpError {
+        match &self.link {
+            ConnectedLink::Forward(link) => {
+                let err = link.connection().closed().await;
+                OpError::new(
+                    ErrorCode::ConnectionFailed,
+                    format!("the connection carrying this tunnel closed: {err}"),
+                )
+            }
+            ConnectedLink::Reverse { .. } => {
+                let Some(session) = self.session.as_mut() else {
+                    return OpError::new(
+                        ErrorCode::ConnectionFailed,
+                        "the reverse connection carrying this tunnel is already closed",
+                    );
+                };
+                loop {
+                    match session.next_control().await {
+                        Ok(None) => {
+                            return OpError::new(
+                                ErrorCode::ConnectionFailed,
+                                "the reverse connection carrying this tunnel closed",
+                            );
+                        }
+                        Ok(Some(_)) => continue,
+                        Err(err) => {
+                            return OpError::new(
+                                ErrorCode::ConnectionFailed,
+                                format!(
+                                    "the reverse connection carrying this tunnel failed: {err}"
+                                ),
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -3741,6 +3841,8 @@ mod tests {
             runtime: None,
             link: ConnectedLink::Reverse {
                 peer_fingerprint: Some("sha256:deadbeefdeadbeefdeadbeefdeadbeef".to_string()),
+                socket: std::path::PathBuf::from("/tmp/qsh-test.sock"),
+                host: "box".to_string(),
             },
             session: None,
         };
@@ -3753,6 +3855,8 @@ mod tests {
             runtime: None,
             link: ConnectedLink::Reverse {
                 peer_fingerprint: None,
+                socket: std::path::PathBuf::from("/tmp/qsh-test.sock"),
+                host: "box".to_string(),
             },
             session: None,
         };

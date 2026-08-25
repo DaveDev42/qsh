@@ -26,8 +26,10 @@ use prost::Message;
 use qsh_proto::ErrorCode;
 use qsh_proto::frame::{DATA_FRAME_MAX, FrameDecoder};
 use qsh_proto::local::{
-    LOCAL_HELLO_VERSION, LocalError, LocalHello, LocalHost, LocalHostList, LocalHostListResult,
-    LocalResponse, LocalStreamKind, local_response,
+    LOCAL_HELLO_VERSION, LocalAdminRequest, LocalError, LocalHello, LocalHost, LocalHostList,
+    LocalHostListResult, LocalResponse, LocalStreamKind, LocalTunnel, LocalTunnelClose,
+    LocalTunnelCloseResult, LocalTunnelList, LocalTunnelListResult, local_admin_request,
+    local_response,
 };
 use qsh_proto::wire::{self, ControlMessage};
 use tokio::net::UnixStream;
@@ -70,17 +72,12 @@ pub async fn admin_host_list_over(stream: UnixStream) -> Result<Vec<LocalHost>, 
 }
 
 async fn admin_host_list_over_inner(stream: UnixStream) -> Result<Vec<LocalHost>, OpError> {
-    let mut conduit = LocalConduit::new(stream);
+    let mut conduit = open_admin_conduit(stream).await?;
     conduit
-        .send(&LocalHello {
-            version: LOCAL_HELLO_VERSION,
-            kind: LocalStreamKind::LocalAdmin as i32,
-            host: String::new(), // ignored for LOCAL_ADMIN (qsh/local/v1.proto)
-            wait_ms: 0,          // a local admin query never needs to wait
-            known_generation: None, // no host, so no generation to gate on
+        .send(&LocalAdminRequest {
+            body: Some(local_admin_request::Body::HostList(LocalHostList {})),
         })
         .await?;
-    conduit.send(&LocalHostList {}).await?;
 
     let response: LocalResponse = conduit.recv().await?.ok_or_else(|| {
         OpError::new(
@@ -94,6 +91,147 @@ async fn admin_host_list_over_inner(stream: UnixStream) -> Result<Vec<LocalHost>
         _ => Err(OpError::new(
             ErrorCode::ConnectionFailed,
             "localctl: daemon answered LocalHostList with an unexpected response",
+        )),
+    }
+}
+
+/// Open a `LOCAL_ADMIN` conduit and send its `LocalHello` — the shared
+/// first half of every admin exchange ([`admin_host_list_over_inner`],
+/// [`admin_tunnel_list_over_inner`], [`admin_tunnel_close_over_inner`]),
+/// split out so the three request bodies that follow it
+/// ([`LocalAdminRequest`]'s three oneof arms) are the only thing each
+/// caller still has to write itself.
+async fn open_admin_conduit(stream: UnixStream) -> Result<LocalConduit<UnixStream>, OpError> {
+    let mut conduit = LocalConduit::new(stream);
+    conduit
+        .send(&LocalHello {
+            version: LOCAL_HELLO_VERSION,
+            kind: LocalStreamKind::LocalAdmin as i32,
+            host: String::new(), // ignored for LOCAL_ADMIN (qsh/local/v1.proto)
+            wait_ms: 0,          // a local admin query never needs to wait
+            known_generation: None, // no host, so no generation to gate on
+        })
+        .await?;
+    Ok(conduit)
+}
+
+/// Open a `LOCAL_ADMIN` conduit to the daemon listening on `socket_path`
+/// and return its current tunnel registrations (`PLAN.md` M4 Step 5 PR
+/// 5b's `LocalTunnelList`/`LocalTunnelListResult` round trip — the direct
+/// structural twin of [`admin_host_list`]).
+///
+/// This talks to exactly the one socket named, same as [`admin_host_list`]
+/// — "try every socket on this machine and merge the results" is
+/// [`admin_tunnel_list_all`]'s job.
+pub async fn admin_tunnel_list(socket_path: &Path) -> Result<Vec<LocalTunnel>, OpError> {
+    let stream = UnixStream::connect(socket_path)
+        .await
+        .map_err(|err| io_error("connect", socket_path, &err))?;
+    admin_tunnel_list_over(stream).await
+}
+
+/// Same exchange as [`admin_tunnel_list`], over an already-connected
+/// conduit — split out for tests, same as [`admin_host_list_over`].
+pub async fn admin_tunnel_list_over(stream: UnixStream) -> Result<Vec<LocalTunnel>, OpError> {
+    match tokio::time::timeout(PROBE_TIMEOUT, admin_tunnel_list_over_inner(stream)).await {
+        Ok(result) => result,
+        Err(_elapsed) => Err(OpError::new(
+            ErrorCode::ConnectionFailed,
+            format!(
+                "localctl: daemon accepted the conduit but never answered LocalTunnelList \
+                 within {PROBE_TIMEOUT:?}"
+            ),
+        )),
+    }
+}
+
+async fn admin_tunnel_list_over_inner(stream: UnixStream) -> Result<Vec<LocalTunnel>, OpError> {
+    let mut conduit = open_admin_conduit(stream).await?;
+    conduit
+        .send(&LocalAdminRequest {
+            body: Some(local_admin_request::Body::TunnelList(LocalTunnelList {})),
+        })
+        .await?;
+
+    let response: LocalResponse = conduit.recv().await?.ok_or_else(|| {
+        OpError::new(
+            ErrorCode::ConnectionFailed,
+            "localctl: daemon closed the conduit without answering LocalTunnelList",
+        )
+    })?;
+    match response.body {
+        Some(local_response::Body::TunnelListResult(LocalTunnelListResult { tunnels })) => {
+            Ok(tunnels)
+        }
+        Some(local_response::Body::Error(err)) => Err(remote_error(err)),
+        _ => Err(OpError::new(
+            ErrorCode::ConnectionFailed,
+            "localctl: daemon answered LocalTunnelList with an unexpected response",
+        )),
+    }
+}
+
+/// Open a `LOCAL_ADMIN` conduit to `socket_path` and ask it to close
+/// `tunnel_id` (`PLAN.md` M4 Step 5 PR 5b's `LocalTunnelClose`/
+/// `LocalTunnelCloseResult` round trip). `Ok(true)` if this daemon held
+/// and closed it, `Ok(false)` if `tunnel_id` named nothing here — same
+/// idempotent-not-error shape [`crate::reverse::listen::ControlHub::
+/// admin_close_forward`]'s own doc gives, since that is exactly what
+/// answers this on the daemon side.
+pub async fn admin_tunnel_close(socket_path: &Path, tunnel_id: &str) -> Result<bool, OpError> {
+    let stream = UnixStream::connect(socket_path)
+        .await
+        .map_err(|err| io_error("connect", socket_path, &err))?;
+    admin_tunnel_close_over(stream, tunnel_id).await
+}
+
+/// Same exchange as [`admin_tunnel_close`], over an already-connected
+/// conduit — split out for tests, same as [`admin_host_list_over`].
+pub async fn admin_tunnel_close_over(stream: UnixStream, tunnel_id: &str) -> Result<bool, OpError> {
+    match tokio::time::timeout(
+        PROBE_TIMEOUT,
+        admin_tunnel_close_over_inner(stream, tunnel_id),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_elapsed) => Err(OpError::new(
+            ErrorCode::ConnectionFailed,
+            format!(
+                "localctl: daemon accepted the conduit but never answered LocalTunnelClose \
+                 within {PROBE_TIMEOUT:?}"
+            ),
+        )),
+    }
+}
+
+async fn admin_tunnel_close_over_inner(
+    stream: UnixStream,
+    tunnel_id: &str,
+) -> Result<bool, OpError> {
+    let mut conduit = open_admin_conduit(stream).await?;
+    conduit
+        .send(&LocalAdminRequest {
+            body: Some(local_admin_request::Body::TunnelClose(LocalTunnelClose {
+                tunnel_id: tunnel_id.to_string(),
+            })),
+        })
+        .await?;
+
+    let response: LocalResponse = conduit.recv().await?.ok_or_else(|| {
+        OpError::new(
+            ErrorCode::ConnectionFailed,
+            "localctl: daemon closed the conduit without answering LocalTunnelClose",
+        )
+    })?;
+    match response.body {
+        Some(local_response::Body::TunnelCloseResult(LocalTunnelCloseResult { closed })) => {
+            Ok(closed)
+        }
+        Some(local_response::Body::Error(err)) => Err(remote_error(err)),
+        _ => Err(OpError::new(
+            ErrorCode::ConnectionFailed,
+            "localctl: daemon answered LocalTunnelClose with an unexpected response",
         )),
     }
 }
@@ -978,6 +1116,168 @@ async fn admin_host_list_one(pid: u32, socket: PathBuf) -> Option<DaemonHostList
     }
 }
 
+/// One candidate daemon's answer when [`admin_tunnel_list_all`] asks
+/// *every* socket on this machine for its currently-held tunnels — the
+/// direct structural twin of [`DaemonHostList`].
+#[derive(Debug, PartialEq, Eq)]
+pub struct DaemonTunnelList {
+    /// The daemon's pid — from its own `<pid>.sock` filename.
+    pub pid: u32,
+    /// The daemon's localctl socket path — kept for [`Ops::tunnel_close`]
+    /// (`crate::ops::tunnel`), which (unlike `host.list`) may need to
+    /// speak to this exact daemon again to close what it just listed.
+    pub socket: PathBuf,
+    /// Tunnels this daemon currently holds — always `"remote"` mode
+    /// ([`qsh_proto::local::LocalTunnel::mode`]'s own doc: a `"local"`
+    /// mode forward registers no `forward_id` daemon-side at all).
+    pub tunnels: Vec<LocalTunnel>,
+}
+
+/// Ask every localctl socket on this machine for its `LocalTunnelList` —
+/// the direct structural twin of [`admin_host_list_all`], same
+/// "unreachable/silent daemon is dropped, never an error" discipline
+/// (`docs/CLI.md` §6.9's `tunnels` never dials any peer and never fails
+/// closed on a sleeping daemon, the same reasoning `host.list` already
+/// documents).
+pub async fn admin_tunnel_list_all(runtime_dir: &Path) -> Vec<DaemonTunnelList> {
+    let candidates = match candidate_sockets(runtime_dir) {
+        Ok(candidates) => candidates,
+        Err(err) => {
+            tracing::warn!(
+                %err,
+                "localctl admin_tunnel_list_all: could not list the runtime dir; \
+                 treating as no daemons (tunnel.list never fails closed on this)"
+            );
+            return Vec::new();
+        }
+    };
+
+    let mut set = JoinSet::new();
+    for (pid, socket) in candidates {
+        set.spawn(async move {
+            match tokio::time::timeout(
+                ADMIN_LIST_CANDIDATE_TIMEOUT,
+                admin_tunnel_list_one(pid, socket),
+            )
+            .await
+            {
+                Ok(outcome) => outcome,
+                Err(_elapsed) => {
+                    tracing::warn!(
+                        pid,
+                        "localctl admin_tunnel_list_all: candidate did not answer within {:?}; \
+                         skipping it (tunnel.list never fails closed)",
+                        ADMIN_LIST_CANDIDATE_TIMEOUT
+                    );
+                    None
+                }
+            }
+        });
+    }
+
+    let mut out = Vec::new();
+    while let Some(joined) = set.join_next().await {
+        if let Some(daemon) =
+            joined.expect("admin_tunnel_list_all: a candidate probe task panicked")
+        {
+            out.push(daemon);
+        }
+    }
+    out.sort_by_key(|daemon| daemon.pid);
+    out
+}
+
+/// One candidate's connect-then-ask, for [`admin_tunnel_list_all`]'s
+/// per-candidate task.
+async fn admin_tunnel_list_one(pid: u32, socket: PathBuf) -> Option<DaemonTunnelList> {
+    let stream = connect_candidate(pid, &socket).await?;
+    match admin_tunnel_list_over(stream).await {
+        Ok(tunnels) => Some(DaemonTunnelList {
+            pid,
+            socket,
+            tunnels,
+        }),
+        Err(err) => {
+            tracing::warn!(
+                pid,
+                %err,
+                "localctl admin_tunnel_list_all: candidate answered with an error; \
+                 skipping it (tunnel.list never fails closed)"
+            );
+            None
+        }
+    }
+}
+
+/// Ask every localctl socket on this machine to close `tunnel_id`, and
+/// report whether *any* of them held and closed it
+/// (`crate::ops::tunnel::Ops::tunnel_close` doesn't know in advance which
+/// daemon — if any — is holding a given `forward_id`, so this tries them
+/// all, the same fan-out [`admin_tunnel_list_all`] uses, rather than
+/// requiring a `--host` the CLI grammar (`docs/CLI.md` §6.9) doesn't
+/// carry). A daemon this machine cannot reach is skipped, never turned
+/// into an error — same "never fails closed on a sleeping daemon"
+/// discipline as every other admin fan-out here; `tunnel.close` on an id
+/// nothing currently holds answers `Ok(false)`, not an error
+/// ([`qsh_proto::TunnelCloseData::closed`]'s own doc: idempotent).
+pub async fn admin_tunnel_close_all(runtime_dir: &Path, tunnel_id: &str) -> bool {
+    let candidates = match candidate_sockets(runtime_dir) {
+        Ok(candidates) => candidates,
+        Err(err) => {
+            tracing::warn!(
+                %err,
+                "localctl admin_tunnel_close_all: could not list the runtime dir; \
+                 treating as no daemons (tunnel.close never fails closed on this)"
+            );
+            return false;
+        }
+    };
+
+    let mut set = JoinSet::new();
+    for (pid, socket) in candidates {
+        let tunnel_id = tunnel_id.to_string();
+        set.spawn(async move {
+            let Some(stream) = connect_candidate(pid, &socket).await else {
+                return false;
+            };
+            match tokio::time::timeout(
+                ADMIN_LIST_CANDIDATE_TIMEOUT,
+                admin_tunnel_close_over(stream, &tunnel_id),
+            )
+            .await
+            {
+                Ok(Ok(closed)) => closed,
+                Ok(Err(err)) => {
+                    tracing::warn!(
+                        pid,
+                        %err,
+                        "localctl admin_tunnel_close_all: candidate answered with an error; \
+                         treating as not closed there"
+                    );
+                    false
+                }
+                Err(_elapsed) => {
+                    tracing::warn!(
+                        pid,
+                        "localctl admin_tunnel_close_all: candidate did not answer within {:?}; \
+                         treating as not closed there",
+                        ADMIN_LIST_CANDIDATE_TIMEOUT
+                    );
+                    false
+                }
+            }
+        });
+    }
+
+    let mut any_closed = false;
+    while let Some(joined) = set.join_next().await {
+        if joined.expect("admin_tunnel_close_all: a candidate probe task panicked") {
+            any_closed = true;
+        }
+    }
+    any_closed
+}
+
 /// Connect to one discovery candidate, applying the same bounded-wait and
 /// stale-socket-unlink discipline both [`discover`] and
 /// [`admin_host_list_all`] need: an `ECONNREFUSED` candidate is unlinked
@@ -1101,11 +1401,13 @@ mod tests {
     }
 
     /// Spawn a one-shot fake daemon on `path`: reads a `LocalHello` +
-    /// `LocalHostList` request off `LOCAL_ADMIN`, and answers with
-    /// whatever `LocalResponse` body the caller supplies. No real `qsh
-    /// listen` process anywhere in these tests — this is `docs/design/
-    /// testing.md` L2 "no real daemon needed" for the discovery/framing
-    /// contract, not an L3 harness.
+    /// `LocalAdminRequest` off `LOCAL_ADMIN`, and answers with whatever
+    /// `LocalResponse` body the caller supplies — whichever request arm
+    /// arrives (`HostList`/`TunnelList`/`TunnelClose`), since this probes
+    /// the shared envelope/framing contract, not one specific request's
+    /// content. No real `qsh listen` process anywhere in these tests —
+    /// this is `docs/design/testing.md` L2 "no real daemon needed" for the
+    /// discovery/framing contract, not an L3 harness.
     fn spawn_fake_admin_daemon(
         listener: UnixListener,
         body: local_response::Body,
@@ -1115,7 +1417,7 @@ mod tests {
             let mut conduit = LocalConduit::new(stream);
             let hello: LocalHello = conduit.recv().await.unwrap().unwrap();
             assert_eq!(hello.kind, LocalStreamKind::LocalAdmin as i32);
-            let _req: LocalHostList = conduit.recv().await.unwrap().unwrap();
+            let _req: LocalAdminRequest = conduit.recv().await.unwrap().unwrap();
             conduit
                 .send(&LocalResponse { body: Some(body) })
                 .await
@@ -1157,6 +1459,99 @@ mod tests {
         let err = admin_host_list(&sock).await.unwrap_err();
         assert_eq!(err.code, ErrorCode::HostNotFound);
         assert_eq!(err.message, "no such registration");
+        daemon.await.unwrap();
+    }
+
+    /// Same fake-daemon harness, but asserting the request arm the daemon
+    /// actually received — proving [`admin_host_list`]/[`admin_tunnel_list`]/
+    /// [`admin_tunnel_close`] each put their request in the *matching*
+    /// `LocalAdminRequest` oneof arm, not just that some frame arrived
+    /// (`qsh/local/v1.proto`'s own doc on why this envelope exists at
+    /// all).
+    fn spawn_fake_admin_daemon_asserting(
+        listener: UnixListener,
+        expect: fn(&local_admin_request::Body) -> bool,
+        body: local_response::Body,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let (stream, _addr) = listener.accept().await.unwrap();
+            let mut conduit = LocalConduit::new(stream);
+            let _hello: LocalHello = conduit.recv().await.unwrap().unwrap();
+            let req: LocalAdminRequest = conduit.recv().await.unwrap().unwrap();
+            assert!(
+                req.body.as_ref().is_some_and(expect),
+                "unexpected LocalAdminRequest body: {req:?}"
+            );
+            conduit
+                .send(&LocalResponse { body: Some(body) })
+                .await
+                .unwrap();
+        })
+    }
+
+    #[tokio::test]
+    async fn admin_tunnel_list_round_trips_through_a_fake_daemon() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("110.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+        let expected = vec![LocalTunnel {
+            tunnel_id: "01ABCDEF".to_string(),
+            mode: "remote".to_string(),
+            bind: "127.0.0.1:5432".to_string(),
+            forward_to: "localhost:5432".to_string(),
+            actual_port: 5432,
+            host: "box".to_string(),
+        }];
+        let daemon = spawn_fake_admin_daemon_asserting(
+            listener,
+            |body| matches!(body, local_admin_request::Body::TunnelList(_)),
+            local_response::Body::TunnelListResult(LocalTunnelListResult {
+                tunnels: expected.clone(),
+            }),
+        );
+
+        let tunnels = admin_tunnel_list(&sock).await.unwrap();
+        assert_eq!(tunnels, expected);
+        daemon.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn admin_tunnel_close_round_trips_through_a_fake_daemon() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("111.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+        let daemon = spawn_fake_admin_daemon_asserting(
+            listener,
+            |body| {
+                matches!(
+                    body,
+                    local_admin_request::Body::TunnelClose(LocalTunnelClose { tunnel_id })
+                        if tunnel_id == "01ABCDEF"
+                )
+            },
+            local_response::Body::TunnelCloseResult(LocalTunnelCloseResult { closed: true }),
+        );
+
+        let closed = admin_tunnel_close(&sock, "01ABCDEF").await.unwrap();
+        assert!(closed);
+        daemon.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn admin_tunnel_close_surfaces_a_remote_error_verbatim() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("112.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+        let daemon = spawn_fake_admin_daemon(
+            listener,
+            local_response::Body::Error(LocalError::from_code(
+                ErrorCode::PermissionDenied,
+                "not the owning peer",
+            )),
+        );
+
+        let err = admin_tunnel_close(&sock, "01ABCDEF").await.unwrap_err();
+        assert_eq!(err.code, ErrorCode::PermissionDenied);
         daemon.await.unwrap();
     }
 
