@@ -2466,6 +2466,7 @@ impl ControlHub {
 /// sockets/tasks, and this whole relay's own discipline is never to log
 /// its state as a blob — every log site names specific structural fields
 /// instead), so `One`'s variant just prints its host-agnostic shape.
+#[cfg(unix)]
 pub(crate) enum TunnelCloseTarget<'a> {
     /// No registered host's hub currently holds `tunnel_id`.
     None,
@@ -2477,6 +2478,7 @@ pub(crate) enum TunnelCloseTarget<'a> {
     Ambiguous(usize),
 }
 
+#[cfg(unix)]
 impl std::fmt::Debug for TunnelCloseTarget<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -2511,6 +2513,7 @@ impl std::fmt::Debug for TunnelCloseTarget<'_> {
 /// colliding id (accidental, or a non-ULID-minting peer) could trigger.
 /// Refusing instead follows this codebase's own default (`CLAUDE.md`:
 /// "Fail closed on any ambiguous auth/ACL state").
+#[cfg(unix)]
 pub(crate) fn tunnel_close_target<'a>(
     hubs: &'a [(String, Arc<ControlHub>)],
     tunnel_id: &str,
