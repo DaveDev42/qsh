@@ -15,7 +15,7 @@ One binary (`qsh`) is both ends: it serves, and it connects.
 
 ## Status
 
-Pre-alpha, version 0.1.0, no release cut yet. **Not for production use.**
+Pre-alpha. **Not for production use.**
 
 M0 through M3 are done and M4 (port forwarding) is partway through. What
 works end to end today:
@@ -42,9 +42,10 @@ posture](#security-posture) before you pin anything.
 
 ## Install
 
-Prebuilt binaries are attached to each [GitHub
-release](https://github.com/DaveDev42/qsh/releases). No release exists yet,
-so for now the source build below is the only path. Once one is cut:
+Prebuilt binaries for macOS (arm64, x86_64) and Linux (x86_64,
+aarch64) are attached to each [GitHub
+release](https://github.com/DaveDev42/qsh/releases). One line installs the
+latest:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/DaveDev42/qsh/main/scripts/install.sh | sh
