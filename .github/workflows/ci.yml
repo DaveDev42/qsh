@@ -102,6 +102,26 @@ jobs:
       - run: cargo nextest run -p qsh-cli --test reverse_blackout
         env:
           QSH_ACCEPTANCE_SLOW: 1
+      # M4 Step 7 DoD 3/4 (`PLAN.md` M4 Step 7 (d), `docs/design/testing.md`
+      # L10): the same standing-gate shape as the two steps above, applied
+      # to the tunnel perf DoDs instead of an interactive/timing one.
+      # `QSH_ACCEPTANCE_STRICT` is what asserts the literal DoD 3 ratio
+      # (≥0.80, not the lenient 0.5 smoke tier) and turns DoD 4's gate on
+      # (it has no strict/smoke split — see that test's own module doc).
+      # Both harnesses are platform-neutral (no `cfg(unix)` in their call
+      # path — `LocalForwardHandle::start`'s plain forward route and the
+      # pipe-backed `PipeFactory` session stand-in both already run on
+      # Windows in the ordinary `test` job's matrix), so this asserts the
+      # thresholds, not just a compile check — the Windows leg's own
+      # coverage is the `test`/`clippy`/`arch` matrix jobs' unconditional
+      # `cargo nextest run --workspace`/`clippy --all-targets`, which build
+      # and skip-run these same two binaries there.
+      - run: cargo nextest run -p qsh-testkit --test tunnel_throughput
+        env:
+          QSH_ACCEPTANCE_STRICT: 1
+      - run: cargo nextest run -p qsh-testkit --test tunnel_echo_under_load
+        env:
+          QSH_ACCEPTANCE_STRICT: 1
 
   arch:
     name: arch-lint (${{ matrix.os }})

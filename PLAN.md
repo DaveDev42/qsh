@@ -255,6 +255,11 @@ M4가 실제로 지는 것은 (i) 두 방향의 forward(`-L` local→remote / `-
 
 **(e) 인용:** `docs/design/protocol.md` §12(우선순위·bufferbloat·"CI 조기 도입, M4 수용 기준"), §2(BBR·fairness), `docs/PRD.md` §13(느린 터널이 PTY를 block하지 않음·throughput ≥80%)·§15(idle listener·perf 목표), `docs/design/testing.md` L9/L10(비율 게이트·p95 산식·"perf PR 게이트 금지"의 개정)·CI 규율(`SO_RCVBUF`), `docs/ROADMAP.md` M4 DoD 3·4.
 
+**(a)-추기 — 실측 및 최종값 (2026-08-27, adversarial review 반영).**
+- **상수 최종값.** `TUNNEL_STREAM_RECEIVE_WINDOW = 2 MiB`(§12 대역 2–4 MB 내, quinn 기본 STREAM_RWND 1,250,000 초과) — Step 2 잠정치 4 MiB에서 하향. 첫 구현이 골랐던 128 KiB는 기각: connection-wide라 연결 위 모든 스트림(PTY/exec/replay 포함)의 처리량 상한(≈2.6 MB/s@50ms)이 되고, loopback 기준 DoD 3 게이트는 기준선과 터널 다리가 같은 window를 공유해 이 리그레션을 구조적으로 못 본다 — 그래서 `qsh-transport`에 floor assertion(quinn 기본값 1,250,000 이상)을 별도로 뒀다. UDP 소켓 버퍼는 window와 분리, OS 기본값을 절대 낮추지 않는 하향 ladder(8/4/2/1 MiB, `bind_tuned_udp_socket`) — dial·listen·migration rebind(`qsh-core::client::reconnect`) 세 경로 통일(첫 구현의 고정 128 KiB는 macOS 기본 768 KiB를 6배 축소하는 역방향이었음). `SEND_DEPTH_CAP_BYTES = 128 KiB`(`qsh_core::tunnel::splice`) — §12 비대칭의 실제 구현체(송신측 큐 깊이/양보 주기).
+- **DoD 3 게이트를 실패 가능하게.** raw-quinn 기준선을 qsh 자체 `transport_config()`가 아닌 stock quinn(`TransportConfig::default()`, 신규 `dial_stock_transport`/`bind_stock_transport`)으로 교체하고 trial을 raw/tunnel 교대 실행으로 바꿔 runner drift를 상쇄. 최종 상수 기준 STRICT 6회 ratio {0.899, 0.927, 0.942, 0.945, 0.909, 0.938} — strict 0.80 유지(§4.2 초안 그대로), smoke 0.50 유지.
+- **DoD 4 방향/지표 수정 + 실측.** 포화 방향을 host→client로 교정(신규 `FloodServer` — PTY 출력과 실제로 경쟁하는 곳은 호스트의 송신 스케줄러), 지표를 client 기점 진짜 왕복(`margin = (recv−send) − rtt`)으로 교체(구 지표는 편도 leg에서 왕복 RTT를 빼는 차원 오류 — min=0.000ms가 그 지문). cap 없이 2 MiB에서 p95=30.579ms로 우선순위 band 단독 부족이 실측 확인 → cap 256 KiB p95=10.085ms(미달), 64 KiB p95=5.480ms이나 DoD 3 ratio 0.799 이탈, **128 KiB 채택**: 6회 p95 {7.919, 7.621, 7.672, 7.766, 7.146, 7.589}ms, 같은 실행의 DoD 3 ratio 전부 floor 상회. 1GB 고정 바이트 대신 **15s 시간-유계 + MIN_SAMPLES=200 floor** 채택(CI 시간 예산, M3 60s blackout 선례 아래).
+
 ---
 
 ### Step 8 — 터널의 resume/chaos 거동 확정 + 문서·README 동기화 + M4 마감
@@ -342,7 +347,7 @@ M4가 실제로 지는 것은 (i) 두 방향의 forward(`-L` local→remote / `-
 
 ### 4.2 구현 중 확정할 값 (측정 후 상수화)
 
-문서가 값을 정하지 않았고 계약도 아닌 것들. 구현 시 정하고 **해당 step의 (a)에 실측 근거와 함께 추기**한다: 터널 스트림 receive window(초안 2–4 MB)와 PTY window(초안 256 KiB)의 실제 값, `MAX_TUNNEL_STREAMS_PER_HUB`(reverse relay 상한, 초안 M3 `MAX_INFLIGHT_LONG_POLL_PER_HUB`과 정합), `-D`의 정확한 "P1" 메시지 문구(**확정**: "SOCKS dynamic forwarding (-D) is a P1 feature", `qsh-core`의 `DYNAMIC_FORWARD_UNSUPPORTED_MESSAGE` — Step 6), non-loopback `-R` 거부 메시지 문구, remote forward 리스너의 연결-손실 시 자동 재발행 여부(초안: 요청자가 재연결 후 재발행 — 자동 아님), DoD 3의 80% 마진에 대한 flake 여유(초안: strict 0.80, smoke는 0.5로 관대), DoD 4의 1GB를 시간-유계로 대체할지(초안: 고정 바이트 vs 고정 시간 — CI 시간 예산과 함께 결정).
+문서가 값을 정하지 않았고 계약도 아닌 것들. 구현 시 정하고 **해당 step의 (a)에 실측 근거와 함께 추기**한다: 터널 스트림 receive window(**확정**: connection-wide 2 MiB + splice 송신측 depth cap 128 KiB — 수신측 per-kind 비대칭은 quinn 0.11에 API가 없어 불가, Step 7 (a)-추기와 `protocol.md` §12 참조), `MAX_TUNNEL_STREAMS_PER_HUB`(reverse relay 상한, 초안 M3 `MAX_INFLIGHT_LONG_POLL_PER_HUB`과 정합), `-D`의 정확한 "P1" 메시지 문구(**확정**: "SOCKS dynamic forwarding (-D) is a P1 feature", `qsh-core`의 `DYNAMIC_FORWARD_UNSUPPORTED_MESSAGE` — Step 6), non-loopback `-R` 거부 메시지 문구, remote forward 리스너의 연결-손실 시 자동 재발행 여부(초안: 요청자가 재연결 후 재발행 — 자동 아님), DoD 3의 80% 마진에 대한 flake 여유(**확정**: strict 0.80·smoke 0.50 초안 그대로 — 최종 상수 실측 ratio 0.90±0.03, Step 7), DoD 4의 1GB를 시간-유계로 대체(**확정**: 15s 시간-유계 + MIN_SAMPLES=200 floor — Step 7).
 
 ## 5. 완료 절차
 

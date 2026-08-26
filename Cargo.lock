@@ -2096,6 +2096,7 @@ dependencies = [
  "rustls",
  "rustls-webpki",
  "sha2",
+ "socket2",
  "thiserror 2.0.20",
  "time",
  "tokio",
