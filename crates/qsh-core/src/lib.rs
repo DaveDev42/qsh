@@ -49,7 +49,7 @@ pub use ops::{
     SessionAttachStream, SessionCloseOp, SessionGetOp, SessionListOp, SessionOpenOp, SessionReadOp,
     SessionReadOutput, SessionReader, SessionResizeOp, SessionWriteOp, TrustAddOp, TrustListOp,
     TrustRemoveOp, TunnelCloseOp, TunnelHold, TunnelListOp, TunnelOpenOp, VersionOp,
-    parse_local_forwards, parse_remote_forwards,
+    dynamic_forward_unsupported, parse_local_forwards, parse_remote_forwards,
 };
 pub use trust::{SharedTrustStore, TrustStore};
 

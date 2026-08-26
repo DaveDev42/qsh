@@ -5,6 +5,20 @@
 //!
 //! One `qsh serve` host is shared by the whole table — the scenarios differ
 //! in what the *client* does, not in how the host is configured.
+//!
+//! **`tunnel.close` on a nonexistent id is idempotent, not a failure.**
+//! `qsh-core`'s `Ops::tunnel_close` (`ops/tunnel.rs`) never returns `Err`,
+//! and `docs/CLI.md` §6.9 now states this explicitly: closing an id
+//! nothing holds is idempotent — `ok: true`, `data.closed: false` — the
+//! same pattern §6.11 states for `trust.remove` ("존재하지 않는 이름을
+//! 제거하는 것도 오류가 아니라 멱등이다"). `qsh-proto`'s
+//! `TunnelCloseData::closed` doc (`types.rs:~665`) says the same thing at
+//! the wire-type level. This file encodes that as the idempotent
+//! `Succeeds(0)` + `data.closed == false` row below, not a `Fails` row.
+//! `PLAN.md:220`'s Step 6(a) draft table once listed a failure row here
+//! ("존재하지 않는 `tunnel close <id>` → 255/적절 코드"); that line has
+//! been amended in this same change to match the contract instead of
+//! needing a follow-up edit.
 
 mod common;
 
@@ -287,6 +301,71 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
             args: &["session", "open", HOST_ALIAS],
             outcome: Outcome::Fails("AUTH_FAILED"),
         },
+        Case {
+            // `Ops::tunnel_open`'s pre-flight is `spec_from_request` then
+            // `self.connect(&req.host)` — the same `HOST_NOT_FOUND`
+            // resolution every other unpinned-host row in this table
+            // exercises, just reached through `tunnel.open` instead
+            // (`docs/CLI.md` §6.9, `PLAN.md` M4 Step 6).
+            name: "tunnel open: unresolved host",
+            sandbox: &fleet.client,
+            args: &[
+                "tunnel",
+                "open",
+                "nowhere",
+                "--local",
+                "18080:localhost:3000",
+            ],
+            outcome: Outcome::Fails("HOST_NOT_FOUND"),
+        },
+        Case {
+            // Loopback-only for `-R` is host-side, not a client
+            // pre-flight (`qsh_core::parse_remote_forwards`'s own doc:
+            // "a non-loopback `-R` therefore parses `Ok` here and fails
+            // later, on the peer's `RemoteForwardOpened`/`Error` reply").
+            // This row drives that real round trip against `fleet`'s
+            // live host — a genuine CLI-binary-reachable producer, not a
+            // host-side-only path the harness cannot exercise
+            // (`docs/design/protocol.md` §7, `docs/PRD.md` §9).
+            name: "tunnel open: non-loopback -R bind rejected by the peer",
+            sandbox: &fleet.client,
+            args: &[
+                "tunnel",
+                "open",
+                HOST_ALIAS,
+                "--remote",
+                "0.0.0.0:19000:localhost:9",
+            ],
+            outcome: Outcome::Fails("INVALID_ARGUMENT"),
+        },
+        Case {
+            // `-D` refuses before `Ops::tunnel_open` is even called
+            // (`main.rs`'s `run_tunnel_open`), so no peer round trip
+            // happens here at all — included in this table anyway
+            // because it is exactly the kind of envelope-producing
+            // failure this matrix exists to pin (`docs/CLI.md` §6.9,
+            // `PLAN.md` M4 Step 6, DoD 5).
+            name: "tunnel open: -D is UNSUPPORTED",
+            sandbox: &fleet.client,
+            args: &["tunnel", "open", HOST_ALIAS, "--dynamic", "1080"],
+            outcome: Outcome::Fails("UNSUPPORTED"),
+        },
+        Case {
+            // `tunnel.close` is idempotent by contract (`docs/CLI.md`
+            // §6.9's `data.closed` shape, mirroring `trust.remove`'s own
+            // idempotent-delete precedent at §6.11) — closing an id
+            // nothing holds is `ok:true`/`data.closed:false`/exit `0`,
+            // never an error (`qsh-core`'s `Ops::tunnel_close` never
+            // returns `Err`). `PLAN.md`'s Step 6 draft table expected a
+            // failure row here; `docs/CLI.md` wins the conflict
+            // (`CLAUDE.md` "when PLAN.md and CLI.md conflict, CLI.md
+            // wins") — see this file's module doc; `PLAN.md:220` was
+            // amended in this same change.
+            name: "tunnel close: nonexistent id is a no-op, not a failure",
+            sandbox: &fleet.client,
+            args: &["tunnel", "close", "01K0NOSUCHTUNNEL"],
+            outcome: Outcome::Succeeds(0),
+        },
     ];
 
     #[cfg(unix)]
@@ -300,6 +379,19 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
     for case in &cases {
         check(case);
     }
+
+    // The generic `Succeeds(0)` check above only asserts `ok:true`; the
+    // idempotent-delete shape (`docs/CLI.md` §6.9, this file's own module
+    // doc on the `PLAN.md` conflict) needs its own look at `data.closed`.
+    let args = ["tunnel", "close", "01K0NOSUCHTUNNEL", "--json"];
+    let out = fleet.client.qsh(&args);
+    assert_eq!(exit_code(&out), 0, "tunnel close nonexistent id: {out:?}");
+    let envelope = sole_envelope(&out.stdout, &args);
+    assert_eq!(envelope["ok"], true, "{envelope}");
+    assert_eq!(
+        envelope["data"]["closed"], false,
+        "tunnel close on an id nothing holds must report closed:false, not an error: {envelope}"
+    );
 
     // `qsh sessions` with no host fans out over every pinned host that has
     // an address (here: the live host plus the unreachable `deadport`).
@@ -455,6 +547,59 @@ fn attach_on_an_unregistered_host_is_host_not_found_and_stdout_stays_empty() {
     assert!(
         lines[0].contains(expected_code),
         "stderr must name {expected_code}: {stderr:?}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// Interactive `-D` — deliberately **not** a `Case` row above, for the
+// same reason as the attach test just above: the two output modes
+// disagree *on purpose*. `docs/CLI.md` §7 (~line 662) states that
+// `--json`/`--jsonl` on either interactive form is refused with
+// `INVALID_ARGUMENT` **before a session is even opened**, because the
+// interactive form has no machine mode at all; §6.9 separately states
+// that `-D` itself is always `UNSUPPORTED`. `run_interactive` (`main.rs`)
+// checks `wants_json` first and the `-D` refusal second, so with
+// `--json`/`--jsonl` present the §7 gate answers `INVALID_ARGUMENT` and
+// `-D`'s own `UNSUPPORTED` never gets a turn — human mode is the only
+// place `-D`'s `UNSUPPORTED` is observable. `check`'s machinery asserts
+// the *same* `error.code` in both modes, which this command structurally
+// cannot satisfy, so it gets its own two-part assertion instead of a
+// matrix row.
+// ---------------------------------------------------------------------
+
+#[test]
+fn interactive_dash_d_is_unsupported_in_human_mode_but_json_mode_wins_on_precedence() {
+    let sandbox = Sandbox::initialized();
+
+    // Human mode: nothing outranks `-D` here, so its own `UNSUPPORTED`
+    // (`docs/CLI.md` §6.9) is what stderr names.
+    let human = sandbox.qsh(&[HOST_ALIAS, "-D", "1080"]);
+    assert_eq!(exit_code(&human), EXIT_RUNTIME_FAILURE, "{human:?}");
+    assert!(
+        human.stdout.is_empty(),
+        "interactive -D refusal must never write to stdout: {:?}",
+        String::from_utf8_lossy(&human.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&human.stderr);
+    assert!(
+        stderr.contains("(UNSUPPORTED)"),
+        "stderr must name UNSUPPORTED: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("P1"),
+        "stderr must carry the -D P1 message: {stderr:?}"
+    );
+
+    // Machine mode: §7's json-mode gate answers first, so the envelope
+    // names `INVALID_ARGUMENT`, not `-D`'s own `UNSUPPORTED`.
+    let args = [HOST_ALIAS, "-D", "1080", "--json"];
+    let json = sandbox.qsh(&args);
+    assert_eq!(exit_code(&json), EXIT_RUNTIME_FAILURE, "{json:?}");
+    let envelope = sole_envelope(&json.stdout, &args);
+    assert_eq!(envelope["ok"], false, "{envelope}");
+    assert_eq!(
+        envelope["error"]["code"], "INVALID_ARGUMENT",
+        "§7 must win over §6.9's -D refusal when --json is present: {envelope}"
     );
 }
 

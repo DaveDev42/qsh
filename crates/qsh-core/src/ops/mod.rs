@@ -31,8 +31,8 @@ pub use session::{
     make_session_ref, parse_session_ref,
 };
 pub use tunnel::{
-    TunnelCloseOp, TunnelHold, TunnelListOp, TunnelOpenOp, parse_local_forwards,
-    parse_remote_forwards,
+    TunnelCloseOp, TunnelHold, TunnelListOp, TunnelOpenOp, dynamic_forward_unsupported,
+    parse_local_forwards, parse_remote_forwards,
 };
 
 /// Everything a remote call needs to reach a pinned host: our identity,

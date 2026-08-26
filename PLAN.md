@@ -215,9 +215,9 @@ M4가 실제로 지는 것은 (i) 두 방향의 forward(`-L` local→remote / `-
 
 **(a) 범위:** P1 유예 표면을 계약대로 닫고, M4가 새로 낸 오류 경로를 exit-code/jsonl 게이트에 등록한다.
 
-**`-D` stub.** `-D [bind:]port`를 `InteractiveArgs`(및 `qsh tunnel open`의 해당 flag)에 clap으로 추가해 **파싱은 되되**, 실행 시 항상 `UNSUPPORTED` + "SOCKS dynamic forwarding (-D) is a P1 feature"(정확 문구는 §4.2에서 확정) 메시지를 내고 **리소스 생성 0**(리스너 bind 없음). `forward.socks` ACL action은 M4가 만들지 않는다 — `-D`는 ACL 이전 CLI/negotiation 계층에서 `UNSUPPORTED`이고, `forward.socks` 어휘는 M5가 "정의하되 항상 deny"로 승격한다(`docs/ROADMAP.md` M5 범위). `docs/CLI.md` §6.9의 "`-D`는 parsing되되 P0에서 `UNSUPPORTED`" 문장의 이행.
+**`-D` stub.** `-D [bind:]port`를 `InteractiveArgs`(및 `qsh tunnel open`의 해당 flag)에 clap으로 추가해 **파싱은 되되**, 실행 시 항상 `UNSUPPORTED` + "SOCKS dynamic forwarding (-D) is a P1 feature" 메시지를 내고 **리소스 생성 0**(리스너 bind 없음) — §4.2에서 확정한 문구이며 `qsh-core`의 `DYNAMIC_FORWARD_UNSUPPORTED_MESSAGE` 상수가 정본이다. `forward.socks` ACL action은 M4가 만들지 않는다 — `-D`는 ACL 이전 CLI/negotiation 계층에서 `UNSUPPORTED`이고, `forward.socks` 어휘는 M5가 "정의하되 항상 deny"로 승격한다(`docs/ROADMAP.md` M5 범위). `docs/CLI.md` §6.9의 "`-D`는 parsing되되 P0에서 `UNSUPPORTED`" 문장의 이행. 대화형 form 한정으로 우선순위가 하나 더 있다: `--json`/`--jsonl`이 동반되면 `-D`의 `UNSUPPORTED`보다 §7의 `INVALID_ARGUMENT`가 우선한다 — 대화형 form에는 애초에 machine mode가 없기 때문이다(adversarial review 결정, `docs/CLI.md` §6.9 갱신 반영).
 
-**계약 표면 마감.** exit-code matrix(`exit_code_matrix.rs`)에 envelope를 내는 터널 op 행 추가(미해석 host `tunnel open` → 255/`HOST_NOT_FOUND`, non-loopback `-R` → 255/`INVALID_ARGUMENT`, `-D` → 255/`UNSUPPORTED`, 존재하지 않는 `tunnel close <id>` → 255/적절 코드). `--jsonl` 순수성 스위트에 터널 진행 중(`qsh::tunnel` stderr 진단이 도는) 세션 행 추가 — stdout이 여전히 순수 JSON. §2 DEFERRED 규율(H1)에 따라 이 step에서 `UNSUPPORTED` 등이 처음 CLI 바이너리 envelope를 얻으면 fixture 추가 + `DEFERRED` 제거.
+**계약 표면 마감.** exit-code matrix(`exit_code_matrix.rs`)에 envelope를 내는 터널 op 행 추가(미해석 host `tunnel open` → 255/`HOST_NOT_FOUND`, non-loopback `-R` → 255/`INVALID_ARGUMENT`, `-D` → 255/`UNSUPPORTED`, 존재하지 않는 `tunnel close <id>` → 0/`ok:true, data.closed:false` — `docs/CLI.md` §6.9의 멱등 계약; 초안에 적어 두었던 255는 CLI.md가 확정한 계약에 밀려 폐기한다). `--jsonl` 순수성 스위트에 터널 진행 중(`qsh::tunnel` stderr 진단이 도는) 세션 행 추가 — stdout이 여전히 순수 JSON. §2 DEFERRED 규율(H1)에 따라 이 step에서 `UNSUPPORTED` 등이 처음 CLI 바이너리 envelope를 얻으면 fixture 추가 + `DEFERRED` 제거.
 
 **(b) crate/모듈/파일:**
 - `crates/qsh-cli/src/cli.rs` (확장 — `-D` flag, 반복 가능; `InteractiveArgs`·`TunnelOpenArgs`)
@@ -342,7 +342,7 @@ M4가 실제로 지는 것은 (i) 두 방향의 forward(`-L` local→remote / `-
 
 ### 4.2 구현 중 확정할 값 (측정 후 상수화)
 
-문서가 값을 정하지 않았고 계약도 아닌 것들. 구현 시 정하고 **해당 step의 (a)에 실측 근거와 함께 추기**한다: 터널 스트림 receive window(초안 2–4 MB)와 PTY window(초안 256 KiB)의 실제 값, `MAX_TUNNEL_STREAMS_PER_HUB`(reverse relay 상한, 초안 M3 `MAX_INFLIGHT_LONG_POLL_PER_HUB`과 정합), `-D`의 정확한 "P1" 메시지 문구, non-loopback `-R` 거부 메시지 문구, remote forward 리스너의 연결-손실 시 자동 재발행 여부(초안: 요청자가 재연결 후 재발행 — 자동 아님), DoD 3의 80% 마진에 대한 flake 여유(초안: strict 0.80, smoke는 0.5로 관대), DoD 4의 1GB를 시간-유계로 대체할지(초안: 고정 바이트 vs 고정 시간 — CI 시간 예산과 함께 결정).
+문서가 값을 정하지 않았고 계약도 아닌 것들. 구현 시 정하고 **해당 step의 (a)에 실측 근거와 함께 추기**한다: 터널 스트림 receive window(초안 2–4 MB)와 PTY window(초안 256 KiB)의 실제 값, `MAX_TUNNEL_STREAMS_PER_HUB`(reverse relay 상한, 초안 M3 `MAX_INFLIGHT_LONG_POLL_PER_HUB`과 정합), `-D`의 정확한 "P1" 메시지 문구(**확정**: "SOCKS dynamic forwarding (-D) is a P1 feature", `qsh-core`의 `DYNAMIC_FORWARD_UNSUPPORTED_MESSAGE` — Step 6), non-loopback `-R` 거부 메시지 문구, remote forward 리스너의 연결-손실 시 자동 재발행 여부(초안: 요청자가 재연결 후 재발행 — 자동 아님), DoD 3의 80% 마진에 대한 flake 여유(초안: strict 0.80, smoke는 0.5로 관대), DoD 4의 1GB를 시간-유계로 대체할지(초안: 고정 바이트 vs 고정 시간 — CI 시간 예산과 함께 결정).
 
 ## 5. 완료 절차
 

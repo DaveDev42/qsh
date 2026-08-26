@@ -1,0 +1,12 @@
+{
+  "command": "tunnel.open",
+  "error": {
+    "code": "UNSUPPORTED",
+    "details": null,
+    "message": "SOCKS dynamic forwarding (-D) is a P1 feature",
+    "retryable": false
+  },
+  "ok": false,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

@@ -110,6 +110,23 @@ pub struct InteractiveArgs {
         requires = "target"
     )]
     pub remote_forward: Vec<String>,
+
+    /// SOCKS5 dynamic forwarding `[bind:]port`, repeatable. Parses, but
+    /// P0 always refuses it with `UNSUPPORTED` before this session (or
+    /// anything else on the command line) is opened — implementation is
+    /// P1 (`docs/CLI.md` §6.9, `docs/ROADMAP.md` M4 "명시적 out").
+    ///
+    /// Not shape-checked here for the same reason as
+    /// [`Self::local_forward`]/[`Self::remote_forward`]: the refusal is
+    /// unconditional, so there is nothing a `value_parser` could reject
+    /// that this flag's own handling would not refuse anyway.
+    #[arg(
+        short = 'D',
+        value_name = "SPEC",
+        action = ArgAction::Append,
+        requires = "target"
+    )]
+    pub dynamic_forward: Vec<String>,
 }
 
 /// A parsed `[user@]host` target (`docs/CLI.md` §7).
@@ -310,27 +327,36 @@ pub struct TunnelOpenArgs {
 
     /// Local forward `[bind:]listen_port:host:host_port` — same grammar
     /// as the interactive `-L` (`docs/CLI.md` §6.9). Exactly one of
-    /// `--local`/`--remote` is required.
+    /// `--local`/`--remote`/`--dynamic` is required.
     #[arg(
         short = 'L',
         long,
         value_name = "SPEC",
         conflicts_with = "remote",
-        required_unless_present = "remote"
+        required_unless_present_any = ["remote", "dynamic"]
     )]
     pub local: Option<String>,
 
     /// Remote forward `[bind:]rport:host:hport` — same grammar as the
     /// interactive `-R` (`docs/CLI.md` §6.9). Exactly one of
-    /// `--local`/`--remote` is required.
+    /// `--local`/`--remote`/`--dynamic` is required.
     #[arg(
         short = 'R',
         long,
         value_name = "SPEC",
         conflicts_with = "local",
-        required_unless_present = "local"
+        required_unless_present_any = ["local", "dynamic"]
     )]
     pub remote: Option<String>,
+
+    /// SOCKS5 dynamic forwarding `[bind:]port`, repeatable — a third,
+    /// independent mode: it does not fold into `--local`/`--remote`'s
+    /// mutual exclusion (`PLAN.md` M4 Step 6). Parses, but always answers
+    /// `UNSUPPORTED` before opening a connection to `host` or doing
+    /// anything `--local`/`--remote` would have — implementation is P1
+    /// (`docs/CLI.md` §6.9).
+    #[arg(short = 'D', long, value_name = "SPEC", action = ArgAction::Append)]
+    pub dynamic: Vec<String>,
 }
 
 /// Arguments of `qsh exec`.
