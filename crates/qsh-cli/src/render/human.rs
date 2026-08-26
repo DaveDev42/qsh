@@ -13,6 +13,8 @@ use qsh_proto::{
     TrustRemoveData, Tunnel, TunnelCloseData, TunnelListData, VersionData,
 };
 
+use crate::stderr_note;
+
 /// Print `qsh <version>` to stdout.
 pub fn print_version(data: &VersionData) -> io::Result<()> {
     let mut stdout = io::stdout().lock();
@@ -170,7 +172,7 @@ pub fn print_exec(output: &ExecRunOutput) -> io::Result<()> {
         stdout.flush()?;
     }
     if let Some(signal) = &output.data.signal {
-        eprintln!("qsh: remote command terminated by {}", sanitize(signal));
+        stderr_note!("qsh: remote command terminated by {}", sanitize(signal));
     }
     Ok(())
 }
@@ -204,7 +206,7 @@ pub fn print_session_list(data: &SessionListData) -> io::Result<()> {
     // Hosts the fan-out could not reach are a stderr diagnostic, never a
     // table row (`docs/CLI.md` §2.2, §6.2).
     for h in &data.unreachable {
-        eprintln!(
+        stderr_note!(
             "qsh: {}: unreachable: {} ({})",
             sanitize(&h.host),
             sanitize(&h.message),

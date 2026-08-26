@@ -15,6 +15,7 @@ use qsh_proto::event::SessionEvent;
 use qsh_proto::{ErrorCode, SessionOpenReq};
 
 use crate::render::human;
+use crate::stderr_note;
 
 use super::term::{self, RawMode};
 use super::{Attach, Escape, attach_request, escape_help, open_request};
@@ -65,7 +66,7 @@ pub fn run(ops: &Ops, what: Attach, escape: Option<u8>) -> Result<i32, OpError> 
     // about is only findable through `qsh sessions`.
     let orphan = |err: OpError| -> OpError {
         if opened {
-            eprintln!(
+            stderr_note!(
                 "qsh: the session is still running as {session_ref}; \
                  reattach with `qsh attach {session_ref}` or end it with \
                  `qsh session close {session_ref}`"
@@ -234,7 +235,7 @@ fn pump_events(stream: &mut SessionAttachStream, detached: &AtomicBool, raw: boo
 fn finish(outcome: Outcome) -> Result<i32, OpError> {
     match outcome {
         Outcome::Detached => {
-            eprintln!("qsh: detached; the session keeps running");
+            stderr_note!("qsh: detached; the session keeps running");
             Ok(0)
         }
         // Remote `0..=254` verbatim, remote `255` clamped to `254`, exactly
@@ -246,7 +247,7 @@ fn finish(outcome: Outcome) -> Result<i32, OpError> {
         // client never learned.
         Outcome::Exit { code, signal } => {
             if let Some(signal) = &signal {
-                eprintln!(
+                stderr_note!(
                     "qsh: the remote process was terminated by {}",
                     human::sanitize(signal)
                 );
@@ -258,7 +259,7 @@ fn finish(outcome: Outcome) -> Result<i32, OpError> {
             Ok(crate::remote_exit_code_to_process_exit(remote))
         }
         Outcome::Closed(reason) => {
-            eprintln!("qsh: the session was closed ({})", human::sanitize(&reason));
+            stderr_note!("qsh: the session was closed ({})", human::sanitize(&reason));
             Ok(crate::EXIT_RUNTIME_FAILURE)
         }
         Outcome::Lost => Err(OpError::new(
