@@ -58,6 +58,43 @@ const REVERSE_MODE: &str = "reverse";
 /// Usage error exit code (`docs/CLI.md` §4), matching clap's own.
 const EXIT_USAGE: i32 = 2;
 
+/// `eprintln!`, minus the abort: `eprintln!` panics the process when
+/// stderr is gone — EPIPE once whatever spawned us drops the pipe, a
+/// closed terminal, logrotate — and a long-lived `qsh listen`/`qsh serve`
+/// must never die over a diagnostic line (latent since M3: the listen
+/// daemon exited 101 whenever its stderr reader went away between two
+/// startup lines). Diagnostics are best-effort everywhere in this crate:
+/// loss is acceptable, death is not.
+macro_rules! stderr_note {
+    ($($arg:tt)*) => {{
+        use ::std::io::Write as _;
+        let _ = writeln!(::std::io::stderr(), $($arg)*);
+    }};
+}
+pub(crate) use stderr_note;
+
+/// stderr for the tracing `human` layer, with write errors swallowed.
+///
+/// `tracing_subscriber`'s fmt layer reports a writer failure through
+/// `eprintln!`, which itself panics when stderr is closed — the same
+/// daemon-killing class as a raw `eprintln!` (see [`stderr_note`]).
+/// Swallowing the error here means that fallback can never fire.
+struct LossyStderr;
+
+impl Write for LossyStderr {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        // Claim the full buffer even on failure: a partial-write retry
+        // loop against a dead stderr is only more chances to fail.
+        let _ = io::stderr().write_all(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        let _ = io::stderr().flush();
+        Ok(())
+    }
+}
+
 fn main() {
     // `Cli::parse()` exits with code 2 on usage errors and 0 on
     // `--help`/`--version`, per clap's default behavior.
@@ -117,7 +154,7 @@ fn init_tracing(cli: &Cli) {
     let reverse_target = qsh_core::reverse::listen::TARGET;
     let reverse_default = format!("{default},{reverse_target}=info");
     let human = tracing_subscriber::fmt::layer()
-        .with_writer(io::stderr)
+        .with_writer(|| LossyStderr)
         .with_target(false)
         .with_filter(env_filter(spec.as_deref(), default))
         .with_filter(tracing_subscriber::filter::filter_fn(|meta| {
@@ -584,7 +621,7 @@ fn run_exec(cli: &Cli, ops: &Ops, args: &ExecArgs) -> i32 {
         match serde_json::to_value(&output.data) {
             Ok(value) => Envelope::success(ExecRunOp::COMMAND, value).print(),
             Err(err) => {
-                eprintln!("qsh: failed to encode result: {err}");
+                stderr_note!("qsh: failed to encode result: {err}");
                 return EXIT_IO_FAILURE;
             }
         }
@@ -592,7 +629,7 @@ fn run_exec(cli: &Cli, ops: &Ops, args: &ExecArgs) -> i32 {
         human::print_exec(&output)
     };
     if let Err(err) = rendered {
-        eprintln!("qsh: failed to write output: {err}");
+        stderr_note!("qsh: failed to write output: {err}");
         return EXIT_IO_FAILURE;
     }
     remote_exit_code_to_process_exit(output.data.remote_exit_code)
@@ -695,7 +732,7 @@ fn run_tunnel_open(cli: &Cli, ops: &Ops, args: &TunnelOpenArgs) -> i32 {
         match serde_json::to_value(hold.tunnel()) {
             Ok(value) => emit(Envelope::success(TunnelOpenOp::COMMAND, value).print()),
             Err(err) => {
-                eprintln!("qsh: failed to encode result: {err}");
+                stderr_note!("qsh: failed to encode result: {err}");
                 EXIT_IO_FAILURE
             }
         }
@@ -708,13 +745,13 @@ fn run_tunnel_open(cli: &Cli, ops: &Ops, args: &TunnelOpenArgs) -> i32 {
         return rendered;
     }
     if let Err(err) = io::stdout().flush() {
-        eprintln!("qsh: failed to write output: {err}");
+        stderr_note!("qsh: failed to write output: {err}");
         return EXIT_IO_FAILURE;
     }
-    eprintln!("qsh tunnel open: holding; press Ctrl-C to close");
+    stderr_note!("qsh tunnel open: holding; press Ctrl-C to close");
     let err = hold.hold();
     if let Err(io_err) = human::print_error(&err) {
-        eprintln!("qsh tunnel open: failed to write output: {io_err}");
+        stderr_note!("qsh tunnel open: failed to write output: {io_err}");
     }
     EXIT_RUNTIME_FAILURE
 }
@@ -746,15 +783,15 @@ fn run_serve(ops: &Ops, bind: Option<&str>) -> i32 {
             identity,
             bind,
             |addr| {
-                eprintln!("qsh serve: listening on {addr}");
-                eprintln!("qsh serve: identity {device_id} fingerprint {fingerprint}");
+                stderr_note!("qsh serve: listening on {addr}");
+                stderr_note!("qsh serve: identity {device_id} fingerprint {fingerprint}");
             },
             shutdown_signal(),
         ))
     })();
     match result {
         Ok(()) => {
-            eprintln!("qsh serve: shutting down");
+            stderr_note!("qsh serve: shutting down");
             0
         }
         Err(err) => report_long_running_setup_error(SERVE_MODE, &err),
@@ -786,7 +823,7 @@ fn long_running_setup_mode(command: &Option<Command>) -> Option<&'static str> {
 /// cannot drift apart.
 fn report_long_running_setup_error(mode: &'static str, err: &OpError) -> i32 {
     if let Err(io_err) = human::print_error(err) {
-        eprintln!("qsh {mode}: failed to write output: {io_err}");
+        stderr_note!("qsh {mode}: failed to write output: {io_err}");
     }
     EXIT_RUNTIME_FAILURE
 }
@@ -817,7 +854,7 @@ fn run_listen(ops: &Ops, bind: Option<&str>) -> i32 {
             identity,
             bind,
             |addr| {
-                eprintln!("qsh listen: listening on {addr}");
+                stderr_note!("qsh listen: listening on {addr}");
                 // `docs/CLI.md` §6.13's "Controller reachability 요구":
                 // reverse only makes the *target* reachable through NAT —
                 // this controller must still be dialable at `addr` by
@@ -830,17 +867,17 @@ fn run_listen(ops: &Ops, bind: Option<&str>) -> i32 {
                 // below (adversarial review finding, M3 Step 9: a second
                 // hardcoded copy here could silently drift from the
                 // constant with no test catching it).
-                eprintln!("qsh listen: targets must be able to reach {addr} directly over UDP");
+                stderr_note!("qsh listen: targets must be able to reach {addr} directly over UDP");
                 let diag = qsh_core::doctor::CONTROLLER_UNREACHABLE;
-                eprintln!("qsh listen: {}", diag.message);
-                eprintln!("qsh listen: {}", diag.remedy);
+                stderr_note!("qsh listen: {}", diag.message);
+                stderr_note!("qsh listen: {}", diag.remedy);
             },
             shutdown_signal(),
         ))
     })();
     match result {
         Ok(()) => {
-            eprintln!("qsh listen: shutting down");
+            stderr_note!("qsh listen: shutting down");
             0
         }
         Err(err) => report_long_running_setup_error(LISTEN_MODE, &err),
@@ -881,15 +918,15 @@ fn run_reverse(ops: &Ops, controller: &str, offered_name: Option<&str>) -> i32 {
             // `PLAN.md` M3 Step 9).
             || {
                 let diag = qsh_core::doctor::CONTROLLER_UNREACHABLE;
-                eprintln!("qsh reverse: {}", diag.message);
-                eprintln!("qsh reverse: {}", diag.remedy);
+                stderr_note!("qsh reverse: {}", diag.message);
+                stderr_note!("qsh reverse: {}", diag.remedy);
             },
             shutdown_signal(),
         ))
     })();
     match result {
         Ok(()) => {
-            eprintln!("qsh reverse: shutting down");
+            stderr_note!("qsh reverse: shutting down");
             0
         }
         Err(err) => report_long_running_setup_error(REVERSE_MODE, &err),
@@ -942,7 +979,7 @@ fn run_trust_add(cli: &Cli, ops: &Ops, args: &TrustAddArgs) -> i32 {
         match prompt_for_pin(&args.name, err) {
             Prompt::Accepted(fingerprint) => result = ops.trust_add(request(Some(fingerprint))),
             Prompt::Declined => {
-                eprintln!("aborted");
+                stderr_note!("aborted");
                 return EXIT_RUNTIME_FAILURE;
             }
             // Not a terminal, or the error carried no observation: fall
@@ -1017,7 +1054,7 @@ fn finish<T: Serialize>(
                 match serde_json::to_value(&data) {
                     Ok(value) => emit(Envelope::success(command, value).print()),
                     Err(err) => {
-                        eprintln!("qsh: failed to encode result: {err}");
+                        stderr_note!("qsh: failed to encode result: {err}");
                         EXIT_IO_FAILURE
                     }
                 }
@@ -1071,7 +1108,7 @@ fn report_error(cli: &Cli, command: &'static str, err: &OpError) -> i32 {
         human::print_error(err)
     };
     if let Err(io_err) = result {
-        eprintln!("qsh: failed to write output: {io_err}");
+        stderr_note!("qsh: failed to write output: {io_err}");
     }
     EXIT_RUNTIME_FAILURE
 }
@@ -1082,7 +1119,7 @@ fn emit(result: std::io::Result<()>) -> i32 {
     match result {
         Ok(()) => 0,
         Err(err) => {
-            eprintln!("qsh: failed to write output: {err}");
+            stderr_note!("qsh: failed to write output: {err}");
             EXIT_IO_FAILURE
         }
     }
