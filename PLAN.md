@@ -1,361 +1,452 @@
-# PLAN.md — M4 실행 계획
+# PLAN.md — M5 실행 계획
 
-> **main 세션이 M4 플래닝 에이전트의 초안을 검토·확정한 실행 계획이다(2026-08-24).** ROADMAP M4 범위·수용 기준을 실행 순서로 분해했고, 이 문서가 완료된 M3용 계획을 전면 교체한다. §4.1의 열린 결정 두 건은 보수적(범위 확대 없는) 기본값으로 채택했다 — **#1(holder 수명):** interactive foreground form이 DoD 1/2를 마감하고 새 client 상주 데몬은 만들지 않는다(상주 holder 채택은 별도 범위 승격이 필요 — silent addition 금지). **#7(perf 게이트):** 두 perf DoD를 M3 `acceptance` job 선례대로 상시 게이트하며, 이를 위한 `docs/design/testing.md` L10 개정은 **Step 7에서** 적용한다 — 그 전(Step 1–6)까지 이 개정은 veto 가능하다.
+> **M5 플래닝 에이전트의 초안이다(2026-08-27). main 세션의 검토·확정 전에는 실행 지시가 아니다.** ROADMAP M5 범위·감사 개정·수용 기준을 실행 순서로 분해했고, 확정되면 이 문서가 완료된 M4용 계획을 전면 교체한다. §4.1의 열린 결정은 전부 **보수적(현행 권한 경계를 넓히지 않는) 기본값**으로 채택해 두었다 — **#1(acl.toml 부재 시 거동):** 전량 deny + 시작 시 운영자 진단, 자동 생성 없음. **#2(정책 행의 auth_path):** 선택 키, 생략 시 `pin` — M1–M4가 실제로 허용하던 경계를 그대로 보존하고 CA 경로 확대는 명시 opt-in. **#3(소유권 기본값):** 소유자 있는 리소스의 action은 `scope = "owned"`가 기본이고 `"any"`가 명시 확대. 세 결정 모두 "정책 엔진이 켜지는 순간 권한이 조용히 넓어지지 않는다"는 한 원칙의 세 얼굴이며, 어느 하나라도 반대로 뒤집으면 그것은 별도 범위 승격이다.
 
-이 문서는 **현재 마일스톤(M4 — 터널)의 실행 계획**이다. 마일스톤 정의(범위·수용 기준·크기)의 정본은 항상 [`docs/ROADMAP.md`](docs/ROADMAP.md)이며, 이 문서는 그 정의를 바꾸지 않고 실행 순서로 분해한다. **M4가 Done 처리되면 이 문서는 다음 마일스톤(M5 — ACL 정책 + audit)의 계획으로 전면 교체된다** — living doc이며 과거 마일스톤의 실행 기록으로 남기지 않는다.
+이 문서는 **현재 마일스톤(M5 — ACL 정책 + audit)의 실행 계획**이다. 마일스톤 정의(범위·수용 기준·크기)의 정본은 항상 [`docs/ROADMAP.md`](docs/ROADMAP.md)이며, 이 문서는 그 정의를 바꾸지 않고 실행 순서로 분해한다. **M5가 Done 처리되면 이 문서는 다음 마일스톤(M6 — MCP adapter)의 계획으로 전면 교체된다** — living doc이며 과거 마일스톤의 실행 기록으로 남기지 않는다.
 
-## 1. M4 목표 요약
+## 1. M5 목표 요약
 
-`docs/ROADMAP.md` "M4 — 터널" 절 인용:
+`docs/ROADMAP.md` "M5 — ACL 정책 + audit" 절 인용:
 
-> - **범위:** `-L`/`-R`, `qsh tunnel open/close`, `qsh tunnels`. TCP 연결당 QUIC stream 1개, stream 우선순위로 PTY 보호, remote forward는 loopback bind만(§9). forward/reverse 연결 양쪽에서 동작.
-> - **명시적 out:** SOCKS `-D`(P1), file copy, UDP forwarding.
-> - **수용 기준 (DoD):** `-L 8080:localhost:3000` 후 `curl localhost:8080` 도달. `-R` non-loopback bind 요청이 **거부**되는 명시적 테스트. Throughput ≥ 동일 프로세스에서 측정한 raw-quinn 기준의 80%. **1GB 포화 터널과 병행한 PTY echo p95 < RTT + 10ms** (§13). `-D 1080` → `UNSUPPORTED` + "P1" 메시지.
+> - **범위:** TOML 정책 로더, principal 매칭(fingerprint·CA 발급 user/device), action wildcard(`session.*` 형태, 후행 `.*`만), default-deny, PRD §9 action 전체(미구현 기능의 `forward.socks`/`file.*`는 정의하되 항상 deny), `qsh acl check`, 전 privileged op의 구조화 audit.
+> - **감사 개정 (2026-08-21) 추가 범위:** ① **audit 수명주기** — "audit 완전성"에서 한 걸음 더: `[audit]` config(회전·크기 상한·retention), 런타임 스레드 밖 비동기 쓰기(현재 동기 blocking I/O), 디스크 만실 시 fail-closed 정책(현재 ENOSPC fail-open). ② **resource-ownership 축** — M3가 넣은 opener-principal P0 결합을 정책 어휘로 승격(리소스에 소유자 개념, 정책이 owner 기준으로 매칭 가능). ③ **거부 메시지 균일성** — deny 응답이 거부된 action/capability를 노출하지 않게 통일. 선례는 `reverse/admit.rs`의 단일 문면 테스트이고, 현재 forward 경로(`server/mod.rs`)의 deny 메시지는 action 이름을 노출한다 — interim allow-all에서는 정보량 0이지만 M5 정책이 켜지는 순간 capability 열거 oracle이 된다.
+> - **수용 기준 (DoD):** `qsh acl check` 결과 == 실제 enforcement 결과 (같은 코드 경로임을 표 기반 테스트로 증명). **op registry를 열거해 audit 레코드 없는 op가 있으면 실패하는 테스트** (SC6). Property test: 임의 정책에서 어떤 rule도 커버하지 않는 action은 반드시 Deny.
+>   - **(감사 개정)** 모든 `PERMISSION_DENIED` 응답 문면이 동일함을 op 전수로 단언하는 테스트. audit 수명주기 동작 테스트(회전 트리거·상한 준수·디스크 만실 fail-closed).
 > - **크기:** 2ew
 
-### DoD 체크리스트 (`docs/ROADMAP.md` M4 "수용 기준" 인용)
+### DoD 체크리스트 (`docs/ROADMAP.md` M5 "수용 기준" 인용)
 
-- [x] **DoD 1** — `-L 8080:localhost:3000` 후 `curl localhost:8080`이 원격 `:3000`에 도달(실프로세스 e2e). Step 3이 심고 Step 5가 reverse까지 확장 — `crates/qsh-cli/tests/tunnel_e2e.rs`의 `the_interactive_form_forwards_a_local_port_to_the_remote_destination`(대화형 -L, 실 TCP 왕복)·`tunnel_open_reports_the_bound_forward_and_holds_it`(standalone holder). 2026-08-27 전체 스위트 981/981 green에 포함.
-- [x] **DoD 2** — `-R`의 non-loopback bind 요청이 **거부**됨을 단언하는 명시적 테스트(loopback-only 강제, §9). Step 4가 심음 — CLI 레벨 `a_non_loopback_bind_is_refused_before_a_session_exists`(exit-code matrix 행 포함) + unit 레벨 `non_loopback_bind_is_refused_and_binds_nothing`·`loopback_bind_host_table`(`crates/qsh-core/src/tunnel/remote.rs`). 거부 문구는 Step 8의 L6 게이트(`crates/qsh-core/tests/tunnel_docs.rs`)가 `REMOTE_FORWARD_LOOPBACK_ONLY_MESSAGE` 상수에 핀.
-- [x] **DoD 3** — 터널 throughput ≥ **동일 프로세스·동일 실행**에서 측정한 raw-quinn 기준의 80%(비율 게이트, `docs/design/testing.md` L10). Step 7이 심음 — `crates/qsh-testkit/tests/tunnel_throughput.rs` `tunnel_throughput_meets_raw_quinn_ratio`(stock-quinn baseline·interleaved trials·strict 0.80). 정본 로그: CI `acceptance` job run 32986938847 (2026-08-26, `QSH_ACCEPTANCE_STRICT=1`, PASS 5.3s); 로컬 실측 ratio 0.899–0.945 (Step 7 (a)-추기).
-- [x] **DoD 4** — 포화 터널과 병행한 PTY echo p95 < 측정 RTT + 10 ms(통합 벤치마크, `docs/design/protocol.md` §12·`docs/PRD.md` §13; 1GB는 §4.2 확정대로 15s 시간-유계 + MIN_SAMPLES=200으로 대체). Step 7이 심음 — `crates/qsh-testkit/tests/tunnel_echo_under_load.rs` `tunnel_saturated_pty_echo_p95_under_measured_rtt_plus_10ms`(FloodServer host→client 포화 = 측정 방향과 일치, client 발신 진짜 왕복 − quinn path RTT). 정본 로그: 같은 acceptance run (PASS 15.6s — 15s 측정 창 완주); 로컬 실측 p95 7.1–7.9 ms.
-- [x] **DoD 5** — `-D 1080` → `UNSUPPORTED` + "P1" 메시지(flag는 parsing되되 리소스 생성 0). Step 6이 심음 — `crates/qsh-cli/tests/dynamic_forward_stub.rs`의 `dynamic_forward_on_tunnel_open_is_unsupported_and_binds_nothing`(포트 재바인드로 리소스 0 증명)·`dynamic_forward_on_the_interactive_form_creates_no_session_even_combined_with_local_forward`. 메시지 문구는 Step 8의 L6 게이트가 `DYNAMIC_FORWARD_UNSUPPORTED_MESSAGE` 상수에 핀. `error.UNSUPPORTED.json` fixture 등록(DEFERRED 해제, Step 6).
+- [ ] **DoD 1** — `qsh acl check` 결과 == 실제 enforcement 결과, **같은 코드 경로임을 표 기반 테스트로 증명**. Step 7이 마감한다 — `Ops::acl_check`가 enforcement가 쓰는 바로 그 `Policy::decide`를 호출하고(두 번째 평가기 금지), 표 기반 테스트가 (정책 × principal × auth_path × action × resource) 행마다 CLI envelope의 `decision`과 loopback 하네스의 실제 거동(허용/거부)이 일치함을 단언.
+- [ ] **DoD 2** — **op registry를 열거해 audit 레코드 없는 op가 있으면 실패하는 테스트**(SC6). Step 8이 마감한다 — 프로덕션 코드에 사는 op registry(현재는 테스트 안에만 있는 손-작성 표뿐)를 만들고, 각 항목을 실제로 구동해 audit 레코드 유무·action 일치를 단언. `handle_rfwd_close`(현재 무인가·무audit)가 이 테스트가 잡아야 할 실제 갭이다.
+- [ ] **DoD 3** — Property test: **임의 정책에서 어떤 rule도 커버하지 않는 action은 반드시 Deny**. Step 2가 마감한다(엔진이 배선되기 전, 순수 평가기 단계에서).
+- [ ] **DoD 4 (감사 개정)** — 모든 `PERMISSION_DENIED` 응답 **문면이 동일**함을 **op 전수**로 단언하는 테스트. Step 4가 마감한다.
+- [ ] **DoD 5 (감사 개정)** — **audit 수명주기 동작 테스트**(회전 트리거·상한 준수·디스크 만실 fail-closed). Step 3이 마감한다.
 
-M4 크기: 2ew (`docs/ROADMAP.md` M4 "크기").
+M5 크기: 2ew (`docs/ROADMAP.md` M5 "크기"). 이 크기에 대한 정직한 평가는 §4.3에 있다 — 감사 개정 3축과 M4 이관 5건을 더하면 2ew를 넘으며, 무엇을 먼저 세우고 무엇을 명시 이관하는지를 그 절이 제안한다.
 
 ### 이 마일스톤이 새로 만드는 것 / 이미 있는 것
 
-**M4가 새로 만드는 것은 "raw byte 파이프 = QUIC bidi 스트림"이라는 두 번째 데이터-스트림 종류와, 그것을 role/방향과 무관하게 여는 대칭 스트림-오픈 경로뿐이다.** 아래는 이미 있어 M4가 **발명하지 않는다**:
+**M5가 새로 만드는 것은 "정책"이라는 데이터와 그것을 읽는 평가기, 그리고 audit이 실제로 신뢰할 수 있는 기록이 되게 하는 수명주기뿐이다.** 아래는 이미 있어 M5가 **발명하지 않는다**:
 
-- **우선순위 band 상수** — `PRIORITY_CONTROL(200) > PRIORITY_SESSION_DATA(100) > PRIORITY_EXEC_DATA(50) > PRIORITY_TUNNEL(0)`이 `crates/qsh-proto/src/wire.rs`에 이미 있고(§12, `send_priority_band_matches_protocol_md_12` 테스트가 순서를 고정), `qsh_transport::control`의 `set_priority(i32)`도 이미 있다. M4는 이 상수를 **터널 스트림에 실제로 적용**하고 `send_fairness`·비대칭 receive window·BBR를 transport 설정에 켠다.
-- **`StreamKind::TCP_CONNECT(3)`·`TCP_ACCEPTED(4)`와 `StreamHeader{kind, ticket, host, port}`** — proto에 이미 정의돼 있다(`crates/qsh-proto/proto/qsh/wire/v1.proto`). M4는 이 kind에 **의미를 붙일 뿐** 새 enum 값을 만들지 않는다.
-- **역방향 role 축·localctl seam·`ControlLink`/`DataLink` enum·`resolve_host_route`** — M3가 깔았다. `-R over reverse`(연결 방향 ⊥ 세션 역할, M3의 핵심 불변식)가 재작업 없이 얹히는 것이 M3 시퀀싱의 존재 이유(`docs/ROADMAP.md` §1 원칙 4번)다. M4는 localctl에 **터널 conduit(세 번째 소비자)** 을 더한다.
-- **세션 broker·replay ring·writer lease** — 터널은 이 중 어느 것도 쓰지 않는다. 터널 스트림은 replay 대상이 아니다(ADR-0004는 세션 output ring 전용) — 그 사실이 §3(resume 거동)의 설계 전제다.
-- **ErrorCode 전 어휘** — `UNSUPPORTED`·`PERMISSION_DENIED`·`INVALID_ARGUMENT`·`RESOURCE_EXHAUSTED`·`CONNECTION_FAILED`·`HOST_NOT_FOUND`가 전부 `docs/CLI.md` §3.3에 이미 있다. **M4는 새 `ErrorCode`를 만들지 않는다**(`CLAUDE.md` "never invent an ad hoc error string").
+- **인가 지점 전부.** `Authorizer::check(principal, auth_path, action, resource)`는 M1부터 있고(`crates/qsh-core/src/acl/mod.rs`), 호출 지점은 네 곳(`server/mod.rs`의 `authorize`·`authorize_stream`·`authorize_session_control`, `reverse/admit.rs`의 `admit`)이며 전부 **리소스 생성 이전**이다. M5는 이 지점을 옮기지 않는다 — `check`가 돌려주는 값이 `AllowAllPinned`의 상수 판정에서 정책 판정으로 바뀔 뿐이다(`docs/ROADMAP.md` §1 원칙 5: "지점은 M1부터, 엔진은 M5").
+- **action 어휘 8종과 `Action::ALL`.** `exec.run`·`session.open`·`session.list`·`session.attach`·`session.control`·`host.reverse`·`forward.local`·`forward.remote`가 이미 `as_str()` 문자열까지 `docs/CLI.md` §2.5 표와 일치한다. M5는 여기에 PRD §9의 나머지 3종(`forward.socks`·`file.read`·`file.write`)을 **정의하되 항상 deny**로 더할 뿐이다.
+- **audit 레코드 타입과 그 "payload 무기록" 속성.** `AuditRecord{ts, request_id, principal, action, resource, decision, rule, peer_addr}`가 이미 있고, argv·PTY·키를 담을 **필드 자체가 없다**(`crates/qsh-core/src/audit.rs` 머리말 — 규율이 아니라 타입 수준 속성). `rule: Option<u32>`은 이미 "M5+"로 예약된 채 항상 `null`이다 — M5는 이 필드를 **채운다**.
+- **소유권 결합의 원형.** `opener_key(principal, auth_path) = "{auth_path:?}:{principal}"`(`server/mod.rs:2746`)과 `require_opener`(`:648`)가 M3에서 `session.control`에 이미 붙었다. M5는 이것을 발명하지 않고 **정책 어휘로 승격**한다(감사 개정 ②).
+- **단일 문면 deny의 선례.** `reverse::registry::host_reverse_denied()`(`registry.rs:511`)와 그것을 세 실패 경로에 대해 단언하는 `every_permission_denied_refusal_carries_the_identical_message()`(`reverse/admit.rs:319`)가 이미 있다. M5는 이 패턴을 **전 op로 일반화**한다(감사 개정 ③).
+- **config·trust 파일의 로딩 관용구.** `Config::load`(`config.rs:635`)와 `TrustStore::load`(`trust/mod.rs:70`)가 "부재 → default, 파손 → `CONFIG_ERROR`"를 이미 확립했다. M5는 이 관용구를 **그대로 베끼지 않는다** — acl.toml의 "부재"는 default가 아니라 전량 deny다(§4.1 #1).
+- **ErrorCode 전 어휘.** `PERMISSION_DENIED`·`CONFIG_ERROR`·`INVALID_ARGUMENT`가 전부 `docs/CLI.md` §3.3에 있다. **M5는 새 `ErrorCode`를 만들지 않는다**(`CLAUDE.md` "never invent an ad hoc error string").
 
-M4가 실제로 지는 것은 (i) 두 방향의 forward(`-L` local→remote / `-R` remote→local)를 forward·reverse **연결 양쪽**에서 동작시키기, (ii) 새 ACL action 2종(`forward.local`·`forward.remote`)과 그 두 개의 **서로 다른** 인가 지점(remote=choke point / local=스트림-오픈 inline), (iii) 포화 터널이 PTY를 굶기지 않음을 스케줄러+벤치로 증명, (iv) 연결 손실·migration 하 터널의 정의된 거동 — 넷이다.
+M5가 실제로 지는 것은 (i) `acl.toml`이라는 새 신뢰 입력 표면과 그 평가기, (ii) enforcement가 상수 판정에서 정책 판정으로 **뒤집히는 단 한 번의 전환**과 그 마이그레이션 이야기, (iii) audit이 "쓰였다고 믿는 기록"에서 "쓰이지 않으면 서비스가 거부되는 기록"으로 바뀌는 수명주기, (iv) 정책이 켜지는 순간 정보 oracle이 되는 두 표면(거부 문면·소유권 판정)의 봉인 — 넷이다.
 
 ## 2. 작업 분해 (Step 1..8)
 
-원칙: **모든 step은 완료 시점에 `cargo fmt --all` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo test`(또는 `cargo nextest run`) / `cargo run -p xtask -- arch` / `cargo deny check` 전부 green을 유지해야 한다.** 이 게이트를 통과하지 못한 상태로 다음 step으로 넘어가지 않는다(`CLAUDE.md` "Before committing"). clippy는 CI 5개 runner의 모든 타깃에서 green이어야 하고, **Windows leg는 clippy뿐 아니라 전체 `cargo nextest run --workspace` + doc-test가 돈다**(`docs/design/testing.md` "현재 상태") — M4가 도입하는 로컬 TCP 리스너·splice·localctl 터널 conduit은 전부 `cfg(unix)`이므로 `cfg` 게이트를 빠뜨리면 컴파일이 아니라 **테스트 단계**에서 Windows leg가 조용히 깨진다. 각 step의 완료 판정은 Windows leg의 nextest green을 포함한다.
+원칙: **모든 step은 완료 시점에 `cargo fmt --all` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo test`(또는 `cargo nextest run`) / `cargo run -p xtask -- arch` / `cargo deny check` 전부 green을 유지해야 한다.** 이 게이트를 통과하지 못한 상태로 다음 step으로 넘어가지 않는다(`CLAUDE.md` "Before committing"). clippy는 CI 5개 runner의 모든 타깃에서 green이어야 하고, **Windows leg는 clippy뿐 아니라 전체 `cargo nextest run --workspace` + doc-test가 돈다**(`docs/design/testing.md` "현재 상태"). M5가 만지는 코드 대부분(정책 평가기·audit 수명주기·`acl check`)은 플랫폼 무관이라 M4보다 Windows 노출은 작지만, audit 파일 회전의 `0o600`/`0o700` 검사와 rename 의미론은 `cfg(unix)` 분기를 가진다 — 각 step의 완료 판정은 Windows leg의 nextest green을 포함한다.
 
-각 step은 독립적으로 리뷰 가능한 PR 하나 크기다(예외는 Step 5 — 두 PR로 나누는 경계를 명시한다). 순서는 **계약 → 우선순위·대칭 스트림 배선 → local forward → remote forward → reverse 위 양방향 + `qsh tunnels`/`close` → `-D` stub·계약 표면 마감 → perf 게이트 → resume/chaos 거동·문서**이며, 그 안에서 위험한 미지수를 앞으로 당겼다:
+각 step은 독립적으로 리뷰 가능한 PR 하나 크기다(예외는 Step 6 — 전환 step이라 두 PR로 나누는 경계를 명시한다). 순서는 **계약·어휘 → 순수 평가기 → audit 수명주기 → 거부 문면 봉인 → 소유권 축 → enforcement 전환 → `acl check` → SC6 registry·마감**이며, 그 안에서 다음 네 가지가 순서를 지배한다:
 
-1. **Step 1이 계약을 종이로 먼저 확정한다.** M4의 진짜 미지수 — (a) `reserved` 태그(`ControlMessage` 40·41, `Response` 4)를 어떤 메시지로 채우는가, (b) 로컬 forward의 인가가 왜 choke point가 아니라 스트림-오픈 inline인가(§7 ticket 예외), (c) `ConnectResult`가 아직 proto에 없다(§7 표에만 산문으로 존재), (d) **`tunnel.open`이 operation(즉시 envelope 반환)인가 foreground blocking인가** — 이 터널 holder 수명 모델이 M4 전체 모양을 가른다(§4.1 #1 — foreground form 채택), (e) `-R over reverse`의 스트림 방향 매핑 — 을 `.proto`와 정본 문서에 못박아 구현이 계약을 발명하지 못하게 한다.
-2. **위험한 novel 케이스(`-R over reverse`)를 마지막에 처음 생각하지 않는다.** M3 시퀀싱 원칙 4번이 "`-R over reverse connection`이 진짜 흥미로운 케이스"라고 지목한 그 조합(연결 방향과 세션 역할의 독립)을 Step 1이 **설계로 확정**하고 Step 2가 **스트림-오픈을 대칭으로 배선**한 뒤, Step 5가 실물화한다. Step 3–4의 forward-전용 코드가 role에 결합되면 Step 5가 재작업이 되므로, Step 2에서 "터널 스트림은 어느 role이든 열 수 있다"를 구조로 고정한다.
-3. **ACL 두 지점을 Step 3·4가 각각 최초로 실물화한다.** `forward.remote`는 리소스(remote listener bind) 생성 **이전** choke point(Step 4), `forward.local`은 per-connection RPC 왕복을 피하려 **스트림-오픈 시점 inline**(Step 3, §7의 유일한 ticket 예외). 두 지점 모두 "인가 전 리소스 생성 금지"(PRD §9)를 지키는지가 각 step의 보안 게이트다.
-4. **Perf 게이트(Step 7)는 DoD 3·4를 닫지만 그 설계는 Step 1·2에서 확정한다** — 우선순위 band·비대칭 window가 Step 2에 없으면 Step 7의 echo-under-load가 통과할 수 없고, testing.md L10의 "perf는 PR 게이트 금지"와 ROADMAP M4 DoD·protocol.md §12의 "CI 조기 도입"의 긴장을 Step 1이 **acceptance job 게이트로** 해소한다(§4.1 #7, M3의 60초 blackout 선례 그대로).
+1. **어휘와 문법이 종이로 먼저 확정된다(Step 1).** M5의 진짜 미지수 — (a) `acl.toml`의 정확한 문법과 principal 문자열이 `auth_path`와 어떻게 갈리는가, (b) `forward.socks`/`file.*`의 "항상 deny"가 **어느 층**에서 강제되는가(wildcard `forward.*`가 socks를 삼키지 못하게 하려면 rule 매칭 **이전**이어야 한다), (c) `acl.check`가 operation 목록(`docs/CLI.md` §2.4)에 없다, (d) `[audit]` 섹션이 `architecture.md` §7 레이아웃에는 있으나 `Config` 구조체에는 없다 — 를 `.toml` 문법·JSON DTO·정본 문서에 못박아 구현이 계약을 발명하지 못하게 한다.
+2. **엔진은 배선 전에 완성된다(Step 2).** DoD 3의 property test는 정책 엔진이 순수 평가기인 동안에만 값싸게 쓸 수 있다. `AllowAllPinned`가 여전히 프로덕션 정책인 상태로 평가기를 완성하면, Step 6의 전환은 "어느 생성자를 바꾸는가" 하나만 남은 리뷰 가능한 커밋이 된다.
+3. **enforcement 전환은 정확히 한 step이고, 그 앞에 감사 개정 3축이 전부 서 있다(Step 3·4·5 → 6).** 정책이 켜지기 **전에** audit이 신뢰 가능해야(①) 전환 이후의 거부가 조사 가능하고, 거부 문면이 균일해야(③) 정책이 capability 열거 oracle이 되지 않으며, 소유권이 정책 어휘가 되어야(②) 전환이 M3의 P0 결합을 우회하지 않는다. 세 축을 전환 뒤로 미루면 그 사이 창(window) 동안 정확히 ROADMAP이 경고한 결함이 실재하게 된다.
+4. **`acl check`는 엔진 뒤에 온다(Step 7).** DoD 1은 "같은 코드 경로"를 요구하므로, 평가기가 하나로 존재한 뒤에 그 위에 얇은 조회 op을 얹는 것만이 이 DoD를 구조로 만족시킨다 — 순서를 뒤집으면 설명용 평가기와 강제용 평가기가 갈라진다.
 
-`docs/ROADMAP.md` 시퀀싱 원칙 4번("역방향(M3)이 터널(M4)보다 먼저 — 터널은 role 모델 위에 얹힌다")이 이 마일스톤이 M3 뒤에 오는 이유이고, 원칙 5번("인가 **지점**은 M1부터, 정책 **엔진**은 M5")이 Step 3·4가 `forward.local`/`forward.remote` **검사 지점**만 넣고 정책 파일은 M5로 미루는 근거다.
+`docs/ROADMAP.md` §1 원칙 5번("인가 **지점**은 M1부터, 정책 **엔진**은 M5")이 이 마일스톤의 존재 이유이고, 같은 문서 §1 원칙 7번 (b)("모든 op 앞에 `Authorizer::check` + audit 기록")가 DoD 2(SC6 registry)가 **지금** 기계화되어야 하는 이유다 — M1부터 지켰다고 믿어 온 불변식을 처음으로 열거해 증명하는 것이 이 마일스톤이다.
 
 ### 전 step 공통 계약 규율
 
-- `qsh.cli/v1`·`qsh.event/v1`은 **additive-only**(optional 필드·새 event type·열린 문자열의 새 값만; 삭제·type 변경·의미 변경은 `/v2`), `crates/qsh-cli/tests/fixtures/cli-v1/`의 fixture는 **append-only**(기존 파일 편집·삭제 금지) — `docs/CLI.md` §10, `docs/design/testing.md` L6, `CLAUDE.md` "Contract stability rules". M4의 신규 fixture는 `tunnel.open.json`·`tunnel.list.json`·`tunnel.close.json`(append-only 신규)이며, `error.UNSUPPORTED.json`·`error.PERMISSION_DENIED.json`·`error.INVALID_ARGUMENT.json`·`error.RESOURCE_EXHAUSTED.json`가 이 마일스톤에서 처음 **CLI 바이너리 envelope 경로**를 얻는다면 append-only로 추가하고 `crates/qsh-cli/tests/fixtures.rs`의 `DEFERRED`에서 제거해 `REQUIRED_FIXTURES`에 등록한다(각 step의 (d)가 어느 코드가 어느 경로를 얻는지 §2 DEFERRED 규율(M3 H1과 동형)로 명시한다).
-- wire(`qsh.wire.v1`)는 "additive only within v1 — never renumber or reuse a field/tag"(`v1.proto` 머리말). **`reserved` 태그를 그 태그가 예약된 바로 그 메시지로 채우는 것은 위반이 아니다** — 머리말이 "Tunnel (M4) and reverse (M3) tags are `reserved` here so a later milestone cannot accidentally take them"라고 용도를 명시했고, `ControlMessage.reserved 40, 41`·`Response.reserved 4`는 각각 그 자리의 주석이 이미 "RemoteForwardOpen/Close (M4)"·"RemoteForwardOpened rfwd_opened (M4)"라고 이름을 박아 두었다. Step 1이 예약된 의미를 실현할 뿐이다(M3 Step 1이 `Hello.reverse`로 한 것과 동형).
-- **M4는 새 `ErrorCode`를 만들지 않는다.** loopback 아닌 remote bind = `INVALID_ARGUMENT`(요청 모양/제약 위반; 같은 principal이 `forward.remote`를 가져도 통과 못 함 — ACL 판정이 아니다), `forward.local`/`forward.remote` 거부 = `PERMISSION_DENIED`, `-D`/SOCKS = `UNSUPPORTED`, 미해석 host = `HOST_NOT_FOUND`, dial 실패·remote 연결 실패 = `CONNECTION_FAILED`, 터널 in-flight/리스너 상한 초과 = `RESOURCE_EXHAUSTED`, 미지 `forward_id`로의 `TCP_ACCEPTED`·만료 ticket = `INVALID_ARGUMENT`. 전부 `docs/CLI.md` §3.3 어휘다.
-- 기계 모드 stdout은 순수 JSON만(`docs/CLI.md` §2.2). M4가 새로 만드는 진단(`qsh::tunnel`)은 전부 **stderr 한 줄 JSON**이며 payload(터널을 흐르는 바이트)·host:port 이외의 내용을 갖지 않는다 — **터널 payload는 어디에도 로그하지 않는다**(splice는 파싱도 로그도 하지 않는 순수 파이프, `CLAUDE.md` "Never log ... PTY/command contents"의 터널 판).
-- 테스트는 `sleep()` 금지, chaos는 seeded(실패 메시지에 seed 출력), 포트는 0 바인딩(`docs/design/testing.md` CI 규율). Step 7의 perf 게이트만 벽시계/처리량을 쓰며 그 격리 방법(같은-프로세스 비율·acceptance job)을 그 step이 명시한다.
-- **리소스는 인가 후에만 생성한다** — 로컬 리스너 bind, remote 리스너 bind, target dial, ticket 발급 전부 해당 ACL 통과 뒤에만(`docs/PRD.md` §9 "인증 전에는 PTY, exec 또는 tunnel resource를 생성하지 않는다", `docs/design/protocol.md` §7, `CLAUDE.md` "Never create a resource ... before authorization succeeds"). local forward는 `TCP_CONNECT` 스트림 오픈 시점에 `forward.local`을 inline 검사하고 **거부 시 아무것도 dial하지 않고 스트림을 종단**시킨다(§7 "거부 teardown").
-- **Windows leg.** 로컬 TCP 리스너·splice·localctl(UDS) 터널 conduit·remote bind는 host 역할 경로이고 M3의 `cfg(unix)` 경계 위에 선다. Windows에서 `qsh tunnel open`/`qsh tunnels`/`qsh tunnel close`와 `-L`/`-R`가 실제로 리스너를 세우는 host/relay 경로는 unix 전용이다 — client-측 `-L` 로컬 bind가 Windows에서 가능한지는 §4.1 #1의 holder 모델 결정에 종속되며, 그 전까지 Windows에서 관련 서브커맨드는 리소스 생성 없이 `UNSUPPORTED` + exit 255다(M3 `qsh listen`/`qsh reverse`와 같은 규율). `-D`는 플랫폼 무관하게 `UNSUPPORTED`다.
+- `qsh.cli/v1`·`qsh.event/v1`은 **additive-only**(optional 필드·새 event type·열린 문자열의 새 값만; 삭제·type 변경·의미 변경은 `/v2`), `crates/qsh-cli/tests/fixtures/cli-v1/`의 fixture는 **append-only**(기존 파일 편집·삭제 금지) — `docs/CLI.md` §10, `docs/design/testing.md` L6, `CLAUDE.md` "Contract stability rules". M5의 신규 fixture는 `acl.check.allow.json`·`acl.check.deny.json`(신규)과 **`error.PERMISSION_DENIED.json`**(신규 — Step 6이 `DEFERRED`에서 제거하고 `REQUIRED_FIXTURES`에 등록)이다. `acl.check`라는 **새 operation 이름을 §2.4 목록에 더하는 것은 additive**다(열린 목록에 값 추가 — `docs/CLI.md` §10과 M3의 `connection_mode` 선례).
+- **거부 문면(`error.message`)은 계약이 아니다.** `docs/CLI.md` §3.2가 "`message`는 사람을 위한 설명이다. 자동화는 `code`와 구조화된 `details`만 사용해야 한다"고 못박았으므로, Step 4의 문면 통일은 `qsh.cli/v1` 호환성 사건이 아니다. 다만 §3.2의 **예시 문안**(`"peer is not allowed to attach to this session"`)은 새 상수와 어긋나게 되므로 Step 1이 정본 문서에서 먼저 갱신한다(각 문서 머리말의 "구현이 어긋나면 문서를 먼저 갱신").
+- **M5는 새 `ErrorCode`를 만들지 않는다.** 정책 거부 = `PERMISSION_DENIED`(항상 동일 문면), acl.toml 부재·파손 = 운영자에게 `CONFIG_ERROR`(원격 peer에게는 절대 노출되지 않는다 — §4.1 #4), `acl check`의 잘못된 인자 = `INVALID_ARGUMENT`, `forward.socks`/`file.*` = `PERMISSION_DENIED`(기능 미구현이 아니라 **정책상 항상 거부**이므로 `UNSUPPORTED`가 아니다 — `-D` 플래그 자체의 `UNSUPPORTED`와는 층이 다르다, §4.1 #5).
+- 기계 모드 stdout은 순수 JSON만(`docs/CLI.md` §2.2). M5가 새로 만드는 운영자 진단(정책 로드 실패, audit degraded)은 전부 **stderr 한 줄 JSON**(tracing target `qsh::acl`·`qsh::audit`)이며 정책 내용·principal 목록을 덤프하지 않는다.
+- **audit 레코드는 구조적이다.** `op`·`principal`·`resource`·`decision`·`rule`만 남기고 payload·argv·키·정책 파일 원문은 어느 필드로도 남기지 않는다(`crates/qsh-core/src/audit.rs` 머리말, `CLAUDE.md` "audit records are structural"). M5가 필드를 하나라도 더하면(`auth_path`) `record_has_only_structural_fields` 테스트의 key 열거를 함께 갱신해 그 속성이 계속 기계 검사되게 한다.
+- **리소스는 인가 후에만 생성한다** — M5는 이 순서를 새로 만들지 않지만 **깨뜨릴 수 있다**: 정책 로딩이 첫 요청 시점의 lazy load가 되면 "로드 중 판정 불가" 창이 생기고, 그 창에서 fail-open하면 M1부터의 불변식이 무너진다. 정책은 **프로세스 시작 시 1회** 로드하고, 로드 실패는 그 자체로 전량 deny다(§4.1 #1·#6).
+- 테스트는 `sleep()` 금지, chaos는 seeded, 포트는 0 바인딩(`docs/design/testing.md` CI 규율). Step 3의 회전·ENOSPC 테스트는 실디스크를 채우지 않고 **주입형 sink**(쓰기 실패를 반환하는 테스트 double)와 tempdir로 결정적으로 돌린다.
 
 ---
 
-### Step 1 — 계약 확정: 터널 wire 메시지(`reserved` 실현) + `ConnectResult` + forward-spec 파서 + JSON `Tunnel` 타입 + localctl 터널 conduit + 정본 문서 갱신
+### Step 1 — 계약 확정: action 어휘 완성(PRD §9 전체) + `acl.toml` 문법 + `acl.check` operation·JSON DTO + `[audit]` config 계약 + 정본 문서 갱신
 
-**(a) 범위:** M4가 구현 중에 발명하면 안 되는 것을 전부 이 step에서 계약으로 고정한다. 코드는 `qsh-proto`(sans-IO)와 문서만 건드린다.
+**(a) 범위:** M5가 구현 중에 발명하면 안 되는 것을 전부 이 step에서 계약으로 고정한다. 코드는 `qsh-proto`(계약 타입)와 `qsh-core`의 어휘(`acl::Action`)·config 구조체, 그리고 문서만 건드린다. **평가기도, 로더도, 배선도 이 step에는 없다.**
 
-*wire (`crates/qsh-proto/proto/qsh/wire/v1.proto`)*:
-- `ControlMessage`의 `reserved 40, 41;`에서 40·41을 꺼내 `RemoteForwardOpen rfwd_open = 40;`·`RemoteForwardClose rfwd_close = 41;`로 정의(25는 `SessionSignal` P1로 **남긴다** — 이 예약은 건드리지 않는다). `Response`의 `reserved 4;`를 `RemoteForwardOpened rfwd_opened = 4;`로 정의.
-- 신규 메시지: `RemoteForwardOpen { string bind_host = 1; uint32 bind_port = 2; string forward_host = 3; uint32 forward_port = 4; }`(§7·§9의 산문을 실제 정의로 승격 — `bind_host`는 host가 bind할 주소, 기본·강제 loopback; `forward_host:forward_port`는 요청자 측으로 되돌릴 목적지), `RemoteForwardOpened { string forward_id = 1; uint32 actual_port = 2; }`, `RemoteForwardClose { string forward_id = 1; }`.
-- **`ConnectResult` 신규**(§7 표가 `StreamHeader{TCP_CONNECT} → ConnectResult → raw bytes`라고 산문으로만 정한 것을 proto에 실물화): local forward 스트림에서 host가 target dial 결과를 요청자에게 알리는 data-스트림 메시지 `ConnectResult { bool ok = 1; string code = 2; string message = 3; }`(`code`는 `docs/CLI.md` §3.3 어휘 — dial 실패=`CONNECTION_FAILED`, inline ACL 거부=`PERMISSION_DENIED`). frame layer는 §5 재사용(u32-BE + prost, `DATA_FRAME_MAX`); ok 이후로는 frame 없이 raw bytes.
-- **`forward_id`의 모양·정체**: host가 발급하는 opaque·URL-safe 문자열(session_id와 같은 규율 — peer가 audit field로 만들기 전에 크기를 묶는다). `TCP_ACCEPTED` 스트림의 `StreamHeader.ticket`에 이 `forward_id`가 실린다(§9 주석대로).
+*action 어휘 완성 (`crates/qsh-core/src/acl/mod.rs`)*: `Action`에 `ForwardSocks`(`"forward.socks"`)·`FileRead`(`"file.read"`)·`FileWrite`(`"file.write"`)를 더해 PRD §9의 11종을 전부 채우고 `ALL`을 `[Action; 11]`로 늘린다. 이 셋은 **항상 deny**이므로 그 성질을 타입에 박는다 — `Action::is_always_denied()`(또는 `Action::implemented()`의 역) 하나를 두고, 평가기가 **rule 매칭 이전에** 이 술어로 먼저 거부하도록 Step 2가 구현한다. 어휘만으로는 부족하다는 것이 이 설계의 핵심이다: `allow = ["forward.*"]`라고 쓴 정책은 wildcard 매칭만으로는 `forward.socks`를 삼키므로, "정의하되 항상 deny"(`docs/ROADMAP.md` §3 유예 가드레일 표)는 **매칭 층이 아니라 그 앞의 게이트**여야 성립한다.
 
-*forward-spec 파서(`crates/qsh-proto`의 순수 함수)*: `wire::parse_forward_spec(&str) -> Result<ForwardSpec, wire::Error>`를 계약 계층에 둔다 — `-L`/`-R`가 받는 `[bind:]listen_port:host:host_port` 문법(예 `8080:localhost:3000`, `[::1]:8080:localhost:3000`)을 파싱하는 **순수** 함수. `L8` fuzz 타깃이 이미 이 파서를 지목("`-L 8080:host:3000` 파싱")하므로 sans-IO여야 한다. 포트 범위·host 모양·IPv6 대괄호를 검증하고, non-loopback `bind`는 파서가 **거부하지 않는다**(모양은 유효; loopback-only **정책** 강제는 host 측 Step 4의 몫 — 파서는 정책을 모른다). remote(`-R`)와 local(`-L`)은 host가 dial하는 쪽이 반대이므로 방향 enum을 결과에 담는다.
+*`acl.toml` 문법 확정 (문서 + 파서 계약)*: PRD §9의 예시를 실제 문법으로 승격한다.
 
-*JSON 계약 (`crates/qsh-proto/src/types.rs`)*: `Tunnel` DTO 신규 — `{ tunnel_id, mode: "local"|"remote", bind, forward_to, actual_port: Option<u32>, host }`(`host`는 클라이언트 `Ops`가 채우는 alias, wire에 없음 — ADR-0007 규율). `TunnelOpenReq`·`TunnelOpenData(Tunnel)`·`TunnelListReq{}`·`TunnelListData{ tunnels: Vec<Tunnel> }`·`TunnelCloseReq{ tunnel_id }`·`TunnelCloseData{ tunnel_id, closed: bool }`. 값 어휘: `mode ∈ {"local","remote"}`(열린 문자열, `connection_mode`와 동형). **`-D`(SOCKS)는 이 타입에 값을 만들지 않는다** — 파싱 후 항상 `UNSUPPORTED`이므로 envelope의 `data`에 도달하지 못한다(Step 6).
+```toml
+[[acl]]
+principal = "user:dave"        # "device:<name>" | "user:<name>" | "fp:<sha256-hex>"
+auth_path = "pin"              # optional — "pin" | "ca". 생략 시 "pin" (§4.1 #2)
+allow     = ["session.*", "exec.run", "forward.local"]
+scope     = "owned"            # optional — "owned" | "any". 생략 시 "owned" (§4.1 #3)
+```
 
-*IPC (`crates/qsh-proto/proto/qsh/local/v1.proto`, `qsh.local.v1` 확장)*: `qsh tunnels`(localctl 세 번째 소비자, architecture.md §3이 "`qsh tunnels` 류의 프로세스 간 조회"라고 이미 이름 지은 그 경로)와 터널 스트림 relay를 위한 additive 메시지 — `LocalTunnelList{}` / `LocalTunnelListResult{ repeated LocalTunnel tunnels }` / `LocalTunnel{ tunnel_id, mode, bind, forward_to, actual_port, host }`, 그리고 `LocalResponse{oneof body}`에 `tunnel_list_result` variant 추가(M3의 응답 envelope 단일화 규율 그대로). **터널 데이터 conduit**은 새 `LocalStreamKind`를 만들지 않는다 — M3의 `LOCAL_STREAM`이 이미 "다음 frame이 wire `StreamHeader`인 data 스트림"이므로 `StreamHeader{TCP_CONNECT|TCP_ACCEPTED}`도 같은 conduit kind로 흐른다(§4.1 #6의 "`StreamKind`에 UDS 전용 값 추가 금지"를 로컬 계층에도 적용). 이 해석을 `local/v1.proto` 머리말과 protocol.md §11-3에 한 문장으로 명문화한다.
+- **principal 매칭은 정확 일치**다(`docs/design/architecture.md` §6). `Principal`의 `Display`(`device:<name>`/`user:<name>`/`fp:<...>`, `crates/qsh-transport/src/identity.rs`)와 문자열 비교이며, `user:dave`는 `user:dave2`에 매칭되지 않는다(`docs/design/testing.md` L8 마지막 문단이 지목한 그 property).
+- **action wildcard는 후행 `.*`만**이다(같은 §6 — 중간 glob 금지, `qsh acl check`의 설명 가능성 유지). `session.*`는 `session.`으로 시작하는 action에 매칭된다. 어휘가 닫힌 집합(`Action::ALL`)이므로 `session.control.escalate` 같은 가상의 깊은 이름 문제는 **애초에 발생하지 않는다** — 그 대신 로더가 `Action::ALL`의 어느 것에도 매칭되지 않는 패턴을 **로드 시점 `CONFIG_ERROR`**로 거부한다(오타가 조용히 무권한 rule이 되지 않게).
+- **`auth_path`**: 정책 행이 pin 경로로 인증된 peer에만 적용되는지 CA 경로도 포함하는지. 생략 시 `"pin"`(§4.1 #2). 이 키가 필요한 이유는 `Principal` 하나로는 pin과 CA를 구별할 수 없기 때문이며(`qsh-transport::tls::AuthPath` 문서, `server::opener_key`가 이미 같은 이유로 `auth_path`를 소유권 키에 접어 넣는다), 구별하지 않으면 CA가 발급한 `qsh://device/hermes` leaf가 pinned `device:hermes`의 권한을 그대로 상속한다.
+- **`scope`**: 소유자 개념이 있는 리소스(세션·remote forward)에 대한 action을 소유자에게만 허용할지(`"owned"`, 기본) 임의 소유자에게 허용할지(`"any"`). 소유자 개념이 없는 action(`exec.run`·`host.reverse`·`forward.local`)에는 무의미하며 무시된다(문서에 명시). Step 5가 구현한다.
+- **평가 순서**(정본으로 못박는다): ① 항상-deny action 게이트 → ② principal 정확 일치 + `auth_path` 일치 → ③ action 패턴 매칭 → ④ `scope` 판정 → 매칭 rule 없으면 **Deny**. 매칭된 rule의 배열 index가 `AuditRecord.rule`이 되고 `acl check`의 `rule`이 된다. rule은 **첫 매칭이 이긴다**(deny rule은 없다 — allow-only 문법이므로 순서 의존 정책 충돌이 존재하지 않는다).
+
+*JSON 계약 (`crates/qsh-proto/src/types.rs`)*: `AclCheckReq { principal: String, action: String, resource: Option<String>, auth_path: Option<String> }`, `AclCheckData { principal, action, resource, auth_path, decision: "allow"|"deny", rule: Option<u32>, policy: AclPolicyRef }`, `AclPolicyRef { path: String, rules: u32, loaded: bool }`. `decision`·`auth_path`는 `connection_mode`와 동형의 **열린 문자열**이다. `policy.loaded=false`는 acl.toml이 없거나 파손된 상태를 운영자에게 그대로 보여 준다(그때 `decision`은 항상 `"deny"`).
+
+*Operation 이름 (`docs/CLI.md` §2.4·§2.5)*: `acl.check`를 operation 목록에 추가하고, §2.5 매핑 표의 마지막 행("인가 불요 — local operation")에 `acl.check`를 넣는다 — 이 op은 **이 머신의 정책 파일을 이 머신에서 조회**하는 것이지 원격 peer가 요청하는 operation이 아니다. `qsh serve`가 원격으로 노출하는 표면이 아님을 §2.5와 §6에 명시한다(원격 peer에게 정책 조회를 허용하면 그 자체가 capability 열거 oracle이다).
+
+*`[audit]` config 계약 (`crates/qsh-core/src/config.rs` + `docs/design/architecture.md` §7)*: `architecture.md` §7의 레이아웃 줄에 이미 `[audit]`이 적혀 있으나 `Config` 구조체에는 없다. 이 step이 `AuditConfig`를 정의한다 — `path`(기본 `Paths::audit_log()`), `max_bytes`(회전 트리거, 기본 제안 64 MiB), `retain`(회전본 보관 개수, 기본 제안 5), `queue_depth`(비동기 writer의 유계 큐, 기본 제안 1024). **`fail_closed` 노브는 두지 않는다** — ROADMAP은 이것을 옵션이 아니라 정책 변경("디스크 만실 시 fail-closed 정책")으로 쓴다. 값의 최종 확정은 §4.2.
+  `architecture.md` §6이 언급하는 opt-in `audit.log_argv`는 **M5에서 구현하지 않는다**(§3) — argv를 audit에 넣는 것은 "payload 무기록"의 타입 수준 속성을 깨는 변경이라 별도 결정이 필요하다.
 
 *정본 문서 갱신(구현 전에)*:
-- `docs/CLI.md` — §6.9(Tunnel): 지금은 명령 예시뿐이므로 `tunnel.open`/`tunnels`/`tunnel.close`의 **JSON envelope `data` 형태**(위 `Tunnel` DTO), `-L`/`-R` spec 문법, `-D`가 파싱되되 `UNSUPPORTED`+"P1"임을, 그리고 **holder 수명 모델**(§4.1 #1 결정)을 확정. §2.5 — `tunnel.open`(local)→`forward.local`, `tunnel.open`(remote)→`forward.remote`, `tunnel.close`/`tunnel.list`→"소유 peer이면 허용" 매핑은 **이미 있으므로 건드리지 않는다**(M4는 이 계약을 이행). §4/§7.1 — `qsh [user@]host`의 `-L`/`-R` 동반 형(§6 line 634의 "모두 `SessionOpen`을 보낸다"의 실현)과, `-L`/`-R`가 세션까지 여는지 터널만 여는지 확정. 신규 §6.14(또는 §6.9 확장) "장기 실행/holder 거동" — 터널 리스너의 수명이 무엇에 결합되는지(holder 프로세스/데몬 연결), 연결 손실 시 거동(§3).
-- `docs/design/protocol.md` — §7 표의 `ConnectResult`를 실제 메시지 참조로, `forward_id` 발급·모양 규칙 명문화. §9 스케치를 `RemoteForwardOpen/Close/Opened`·`ConnectResult` 실제 정의와 일치. §11-3에 **터널 conduit이 `LOCAL_STREAM`을 재사용**함과 `-R over reverse`의 스트림 방향 매핑(아래 §4.1 #4)을 추가. §12 — 비대칭 receive window·`send_fairness(true)`·BBR가 Step 2의 구현 대상임을 명시(현재 산문은 "대응 (a)(b)(c)"로만 있음).
-- `docs/design/architecture.md` — §3 "`qsh tunnels`(M4)는 그 다음 소비자다"를 실현으로 갱신, 터널 로직이 `qsh-core`의 어디에 사는지(신규 `crates/qsh-core/src/tunnel/` 모듈 — local/remote/splice) 기술. §1 crate 책임 표의 "exec/tunnel"이 실제 코드로 채워짐을 반영.
-- `docs/design/testing.md` — L3에 터널 loopback 하네스 행, L4에 터널 chaos(migration 하 생존·sever 하 정리) 행, **L9/L10 perf 게이트와 M4 DoD의 긴장 해소를 명문화**(§4.1 #7: 비율 throughput은 same-process 결정적 테스트로 acceptance job에서 strict, echo-under-load p95는 acceptance job 게이트 — PR 유닛 스위트에는 넣지 않는다), L8 fuzz에 `parse_forward_spec` 타깃 확인.
+- `docs/CLI.md` — §2.4에 `acl.check` 추가, §2.5 "인가 불요" 행에 `acl.check` 추가, §3.2 예시 error `message`를 Step 4의 균일 문면으로 교체, **신규 §6.15 `qsh acl check`** 계약(인자·`data` 형태·human 출력·exit code), §6.12/§6.13에 "정책 파일이 없거나 파손이면 시작 시 운영자 진단 + 전량 deny" 문단 추가.
+- `docs/design/architecture.md` — §6을 실현으로 갱신: acl.toml 평가 순서(위 5단계), `auth_path`·`scope` 키의 존재와 기본값, audit 레코드 필드 목록에 `auth_path` 추가, audit이 **fail-closed**임을 명문화(현재 §6은 "결정당 한 줄"만 말하고 실패 시 거동을 말하지 않는다). §7의 `[audit]` 줄을 실제 키 목록으로 확장.
+- `docs/design/protocol.md` — §7의 두 문장("이보다 좁은 터널 전용 할당량(principal별·forward별)은 **M5 정책 엔진 범위**", "이 갭을 좁히는 터널 전용 할당량은 … M5 정책 엔진 범위")을 **M8 적대적 부하 게이트 귀속으로 정정**한다(§4.1 #7 — ROADMAP M5 DoD에 할당량 기준이 없고 M8 감사 개정 ③이 `[serve].max_sessions`·principal별 쿼터를 소유한다). 문서를 먼저 고치고 구현은 만들지 않는다.
+- `docs/design/testing.md` — L2에 "정책 평가기 property(default-deny·wildcard·principal 정확 일치)" 행, L6에 "`acl check` fixture + 거부 문면 상수-문서 일치 게이트(`tunnel_docs.rs`/`doctor_docs.rs` 선례)" 행, L8의 마지막 문단("ACL glob 평가기는 fuzz보다 property test가 적합")을 M5 실현으로 갱신, 신규 "audit 수명주기(회전·retention·쓰기 실패 fail-closed)" 행.
+- `docs/PRD.md` — §9는 **바꾸지 않는다**(구속 문서, M5는 이행할 뿐). 다만 §9의 TOML 예시와 Step 1이 확정한 문법이 어긋나면 그때는 PRD가 정본이므로 문법을 PRD에 맞춘다.
 
 **(b) crate/모듈/파일:**
-- `crates/qsh-proto/proto/qsh/wire/v1.proto` (확장 — `RemoteForwardOpen/Close/Opened`, `ConnectResult`, `reserved 40/41/4` 실현)
-- `crates/qsh-proto/proto/qsh/local/v1.proto` (확장 — `LocalTunnelList`/`LocalTunnelListResult`/`LocalTunnel`, `LocalResponse`에 variant)
-- `crates/qsh-proto/src/wire.rs` (확장 — `parse_forward_spec`, `ForwardSpec`, `valid_forward_id` 또는 기존 `valid_host_name` 재사용 판단; `PRIORITY_TUNNEL`은 무변경)
-- `crates/qsh-proto/src/types.rs` (확장 — `Tunnel` DTO + 6개 req/data 타입)
-- `docs/CLI.md`, `docs/design/protocol.md`, `docs/design/architecture.md`, `docs/design/testing.md` (갱신)
-- **(구현 중 확인된 필연적 파급, 계획 반영):** `oneof` variant를 실현하면 하위 crate의 **exhaustive `match`가 컴파일 에러**가 된다(`E0004`) — 계약만 바꿔도 workspace가 빌드되려면 이 arm들을 함께 채워야 한다. Step 1은 따라서 다음 최소 arm을 포함한다(동작 무변화 — 터널 핸들러는 Step 3–5): `crates/qsh-core/src/server/mod.rs`(`dispatch`: `RfwdOpen`/`RfwdClose` → `UNSUPPORTED`, 실현 전 `body:None`이 내던 것과 같은 응답, 리소스·audit 0), `crates/qsh-core/src/localctl/mux.rs`(`classify`: 두 메시지를 `Request`군에 — CLI→host relay 대상), `crates/qsh-core/src/client/mod.rs`(`response_kind`: `RfwdOpened` 진단 라벨). 아울러 `server::tests::reserved_and_unknown_control_numbers_are_unsupported` 유닛 테스트는 "40/41이 `None`으로 디코드된다"는 이제-거짓인 가정을 갱신한다(40/41은 실현됐으므로 실제 empty body로 디코드되고 전용 arm이 `UNSUPPORTED`로 답함을 별도 커버 — golden 바이트-불변 vector는 무변경). M3 `Hello.reverse` 실현도 같은 파급을 가졌다.
+- `crates/qsh-core/src/acl/mod.rs` (확장 — `Action` 3종 추가, `ALL: [Action; 11]`, `is_always_denied()`)
+- `crates/qsh-proto/src/types.rs` (확장 — `AclCheckReq`/`AclCheckData`/`AclPolicyRef`)
+- `crates/qsh-core/src/config.rs` (확장 — `AuditConfig`, `Config`에 `audit` 필드; `[acl]` 섹션은 두지 않는다 — 정책은 `config.toml`이 아니라 `acl.toml`이라는 별도 파일이다(`architecture.md` §7))
+- `docs/CLI.md`, `docs/design/architecture.md`, `docs/design/protocol.md`, `docs/design/testing.md` (갱신)
+- **(파급 주의):** `Action::ALL`의 크기가 8→11이 되면 `Action::ALL`을 배열 길이로 쓰는 코드·테스트가 함께 갱신된다(`acl/mod.rs`의 `action_and_decision_strings`가 이미 "count에 기대지 말고 이름을 명시하라"고 써 두었으므로 그 규율대로 새 3종을 이름으로 단언한다). 새 variant는 아직 어느 호출 지점도 갖지 않으므로 dispatch에는 파급이 없다.
 
-**(c) 빚지는 테스트 (`docs/design/testing.md` L0):** `RemoteForwardOpen/Close/Opened`·`ConnectResult`·`LocalTunnel*` 전 메시지의 `decode(encode(m)) == m` roundtrip(proptest), canonical encoding, truncation·allocation-bound·bit-flip(§13 fuzz 계획), `parse_forward_spec` 경계 표(3-part/4-part/IPv6 대괄호/포트 0·65536/빈 host/non-loopback bind는 **파싱 성공**(정책은 파서 밖)/쓰레기 입력은 `Error`), `forward_id` 모양 검사. **golden vector**: 기존 `Hello`·`Response`·`ControlMessage` 인코딩이 40·41·4 태그를 채운 뒤에도 **기존 필드는 바이트 단위 불변**(additive의 기계적 증거) + `reserved`가 채워진 새 메시지 golden 1종씩.
+**(c) 빚지는 테스트 (`docs/design/testing.md` L0·L2·L6):** 새 3종의 `as_str()` 문자열이 PRD §9 목록과 일치(하드코딩 0), `Action::ALL`이 11종 전부를 포함하고 문자열이 중복되지 않음, `is_always_denied()`가 정확히 그 3종에 참, `AclCheckReq`/`AclCheckData`의 serde roundtrip + schemars 스키마 생성, `AuditConfig`의 TOML 파싱(부재 시 기본값·미지 키 무시 — `docs/CLI.md` §2.3), `[audit]` 기본값이 문서 값과 일치하는 단언. **문서 일치 게이트**: PRD §9의 action 11종 목록과 `Action::ALL`이 어긋나면 실패하는 L6 테스트(`crates/qsh-core/tests/acl_docs.rs` 신규 — `tunnel_docs.rs`/`doctor_docs.rs`와 동형).
 
-**(d) 완료 판정:** L0 green. 기존 fixture·golden 전부 바이트 단위 불변. `xtask arch` green(`qsh-proto`는 여전히 무의존). 위 문서 갱신이 같은 PR에 포함(각 문서 머리말의 "구현이 어긋나면 문서를 먼저 갱신" 규칙). Windows leg의 nextest green(신규 코드는 `qsh-proto`뿐이라 unix 분기 없음 — 이후 step의 기준선). **DEFERRED 판정:** 이 step은 계약만 깔고 어떤 `ErrorCode`도 새 CLI envelope 경로를 얻지 않으므로 `fixtures.rs`의 `DEFERRED`는 무변경.
+**(d) 완료 판정:** L0/L2/L6 green. **관찰 가능한 동작 변화 0** — `AllowAllPinned`가 여전히 프로덕션 정책이므로 기존 테스트가 하나도 수정되지 않고 green, 기존 fixture 바이트 단위 불변. `xtask arch` green(`qsh-proto`는 여전히 무의존, 새 DTO는 계약 타입뿐). Windows leg nextest green. 위 문서 갱신이 같은 PR에 포함. **DEFERRED 판정:** 이 step은 어떤 `ErrorCode`도 새 CLI envelope 경로를 얻지 않으므로 `crates/qsh-cli/tests/fixtures.rs`의 `DEFERRED`는 무변경.
 
-**(e) 인용:** `docs/design/protocol.md` §5(frame layer 상한·raw byte 예외), §7(스트림 배치·ticket 규율·`TCP_CONNECT` inline ACL 예외), §9(proto 스케치의 40·41·4·`StreamHeader`), §11-3(localctl conduit), §12(우선순위), §13(fuzz 계획), §14(transport 불가지), `docs/CLI.md` §2.2·§2.4·§2.5·§3.3·§6.9·§10, `docs/PRD.md` §9(action 목록·인증 전 리소스 금지)·§13(포트 포워딩)·§15, `docs/design/architecture.md` §1·§2·§3, ADR-0004(replay는 세션 전용 → 터널 비대상), ADR-0005(transport 불가지·`StreamMux`), ADR-0007(`Tunnel.host`는 `Ops`가 조립).
+**(e) 인용:** `docs/PRD.md` §9(action 11종·principal 정의·TOML 예시·인증 전 리소스 금지), `docs/CLI.md` §2.3·§2.4·§2.5·§3.2·§3.3·§10, `docs/design/architecture.md` §6(정확 일치·후행 `.*`·default deny·fail closed·audit 필드)·§7(config·state 경로), `docs/design/testing.md` L2·L6·L8, `docs/ROADMAP.md` M5 범위·§1 원칙 5·§3 유예 가드레일 표(`forward.socks`·`file.*` "정의·항상 deny").
 
 ---
 
-### Step 2 — 우선순위 band·비대칭 window 적용 + 대칭 터널 스트림-오픈 seam (동작 변화 최소 리팩터)
+### Step 2 — 정책 엔진: `acl.toml` 로더 + 순수 평가기 + **default-deny property test** — **DoD 3**
 
-**(a) 범위:** 터널 코드를 한 줄도 넣기 전에 (i) 우선순위/backpressure 설정을 실물화하고 (ii) "터널 스트림은 어느 role이든 연다"는 대칭성을 seam으로 고정한다. 이 두 가지가 없으면 Step 5(`-R over reverse`)와 Step 7(echo-under-load)이 재작업 또는 실패가 된다.
+**(a) 범위:** Step 1이 종이로 확정한 문법을 `qsh-core` 안의 **순수 평가기**로 실물화한다. 이 step은 **아무것도 배선하지 않는다** — 프로덕션은 여전히 `AllowAllPinned`다. 그래서 이 step의 완료 판정에 "기존 테스트 무수정 green"이 들어간다.
 
-**우선순위·backpressure(§12 대응 (a)(b)(c)의 실물화).** transport 설정에서: (a) per-stream 비대칭 receive window — 터널 스트림 ~2–4 MB, PTY(세션 data) ~256 KiB(`crates/qsh-transport`의 `TransportConfig`), (b) BBR congestion control 선택, (c) 터널 스트림에 `set_priority(PRIORITY_TUNNEL=0)` 적용 + `TransportConfig::send_fairness(true)`로 터널 간 round-robin. 세션/exec 스트림의 우선순위는 **기존 값 그대로**(이 리팩터는 관찰 가능한 세션 거동을 바꾸지 않는다). 근거: `docs/design/protocol.md` §12 "포화 터널이 PTY chunk를 지연시키지 못한다"는 **큐 순서(priority)와 큐 깊이(window/BBR) 둘 다** 있어야 성립한다.
+**로더(`crates/qsh-core/src/acl/load.rs` 신규).** `PolicySource::load(paths) -> PolicyLoad`. 세 상태를 **명시적으로** 구별한다: `Loaded(Policy)` / `Missing` / `Invalid(OpError{CONFIG_ERROR})`. `Config::load`(`config.rs:635`)의 "부재 → default" 관용구를 **의도적으로 따르지 않는다** — 정책 파일의 부재는 "기본 설정"이 아니라 "아직 아무에게도 권한을 주지 않았다"이며, `architecture.md` §6이 "acl.toml이 없거나 파싱 불가 → 전부 deny + 운영자에게 `CONFIG_ERROR` 노출"이라고 이미 못박았다. 세 상태 모두 유효 정책은 각각 `Policy` / `DenyAll` / `DenyAll`이고, **부분 로드는 없다**(rule 하나가 파손이면 파일 전체가 `Invalid` — 반쯤 적용된 정책은 운영자가 읽은 파일과 다른 것을 강제한다).
 
-**대칭 스트림-오픈 seam.** 현재 비-control 스트림 오픈은 role에 결합돼 있을 수 있으므로(session data는 attach하는 쪽이 연다), 터널 스트림을 여는 `open_stream(conn_or_link, StreamHeader) -> FramedThenRaw` 진입점을 M3의 `ControlLink`/`DataLink` enum(QUIC vs 로컬 IPC) 위에 두어 **어느 role이든** `TCP_CONNECT`(요청자 측이 연다)·`TCP_ACCEPTED`(bind한 측이 연다)를 열 수 있게 한다. 여기서 갈라지는 코드가 생기면 Step 5의 `-R over reverse`가 즉시 재작업이 된다 — M3 Step 2가 control 핸드셰이크에 한 것과 동형의 "축 분리".
+**평가기(`crates/qsh-core/src/acl/policy.rs` 신규).** `Policy { rules: Vec<Rule> }`, `Rule { principal: String, auth_path: AuthPath, allow: Vec<ActionPattern>, scope: Scope }`, `ActionPattern::{Exact(Action), Prefix(&'static str)}`. 핵심 진입점은 하나다:
 
-**이 step은 터널 비즈니스 로직을 넣지 않는다** — 리스너도 splice도 ACL도 없다. 우선순위 설정과 스트림-오픈 seam만 깐다.
+```
+Policy::decide(&self, principal: &Principal, auth_path: AuthPath, action: Action, resource: ResourceRef<'_>) -> Verdict
+Verdict { decision: Decision, rule: Option<u32> }
+```
+
+`Authorizer` trait이 `Decision`만 돌려주므로(`acl/mod.rs:123`) **trait 시그니처를 `Verdict` 반환으로 바꾼다** — `AuditRecord.rule`을 채우려면 판정과 함께 매칭 rule index가 나와야 하고, 이것은 Rust 내부 API이지 계약이 아니다(§4.1 #8). `AllowAllPinned`·`DenyAll`은 `rule: None`을 돌려주도록 기계적으로 갱신한다. `ResourceRef`는 이 step에서는 `{ id: &str }`뿐이고 `owner` 필드는 Step 5가 더한다(그때 `scope`도 살아난다) — 지금은 `scope`를 파싱·보존만 하고 판정에 쓰지 않으며, 그 사실을 코드 주석과 테스트로 못박는다.
+
+**항상-deny 게이트.** `action.is_always_denied()`가 참이면 rule을 **한 줄도 보기 전에** `Verdict{Deny, rule: None}`이다. `allow = ["forward.*"]`도, `allow = ["forward.socks"]`를 직접 쓴 정책도 통과하지 못한다. 후자의 경우 로더가 로드 시점에 운영자 경고를 stderr에 한 줄 남긴다(정책 파일이 주지 못할 권한을 주려 하고 있다는 사실은 조용히 넘어갈 일이 아니다) — 그러나 `CONFIG_ERROR`로 시작을 막지는 않는다(존재하는 action 이름이므로 문법 오류가 아니다).
 
 **(b) crate/모듈/파일:**
-- `crates/qsh-transport/src/*.rs` (확장 — 비대칭 window·BBR·`send_fairness`; 터널 스트림에 `set_priority` 적용 지점)
-- `crates/qsh-core/src/client/link.rs` (확장 — `DataLink`에 raw-byte 파이프 오픈 진입점; M3의 enum 재사용, generic화 금지 — M3 Step 6 규율)
-- `crates/qsh-core/src/tunnel/mod.rs` (신규 — 빈 모듈 + `open_stream` seam 시그니처만; 구현은 Step 3–4)
+- `crates/qsh-core/src/acl/load.rs` (신규 — `PolicySource`, `PolicyLoad`, TOML 파싱, 패턴 검증)
+- `crates/qsh-core/src/acl/policy.rs` (신규 — `Policy`/`Rule`/`ActionPattern`/`Scope`/`Verdict`, `Policy::decide`, `impl Authorizer for Policy`)
+- `crates/qsh-core/src/acl/mod.rs` (확장 — `Authorizer::check` → `Verdict` 반환, `ResourceRef` 도입, 재수출)
+- `crates/qsh-core/src/server/mod.rs`·`reverse/admit.rs` (기계적 갱신 — 네 호출 지점이 `Verdict`를 받아 `decision`을 쓰고 `rule`을 `AuditRecord`에 전달; 동작 변화 없음)
+- `crates/qsh-core/src/audit.rs` (확장 — `AuditRecord::now`/`connection_level`가 `rule: Option<u32>`을 인자로 받는다; `auth_path` 필드 추가는 Step 3과 함께)
 
-**(c) 빚지는 테스트 (`docs/design/testing.md` L3):** 기존 loopback 스위트 전부 **무수정 green**(우선순위/window 조정이 세션 거동을 바꾸지 않음). 우선순위 band이 스트림에 실제로 적용됨을 `set_priority` 호출 지점 유닛으로 단언(값이 `PRIORITY_TUNNEL`). `send_fairness`·window 설정이 `TransportConfig`에 존재함을 단언. 대칭 seam이 forward·reverse `DataLink` 양쪽에서 컴파일·동작(빈 파이프 오픈 → 즉시 닫기).
+**(c) 빚지는 테스트 (`docs/design/testing.md` L2·L8):**
+- **DoD 3 — default-deny property**: `proptest`로 임의의 `Policy`(임의 principal 문자열·임의 패턴 집합·임의 `auth_path`)와 임의의 `(principal, auth_path, action)`을 생성해, **어떤 rule도 그 action을 커버하지 않으면 반드시 `Deny`**임을 단언. 커버 판정은 평가기와 독립한 naive oracle(패턴을 문자열로 전개해 `Action::ALL`과 대조)로 계산해 평가기와 대조한다.
+- wildcard property: `session.*`는 `session.open`/`list`/`attach`/`control`에 매칭하고 `exec.run`·`host.reverse`에는 매칭하지 않는다. 접두가 `.`에서 끊기지 않는 매칭(예: `session*`)은 문법상 존재하지 않는다(로더가 거부).
+- principal property: `user:dave`가 `user:dave2`·`user:dav`·`device:dave`에 매칭되지 않는다(정확 일치).
+- `auth_path` property: `auth_path` 생략 rule은 `AuthPath::Ca` 요청을 절대 허용하지 않는다.
+- 항상-deny: `forward.socks`·`file.read`·`file.write`는 `allow = ["forward.*", "file.*", "session.*", "exec.run"]`처럼 최대한 관대한 정책 아래서도 `Deny`이고 `rule: None`이다.
+- 로더: 부재 → `Missing`(유효 정책 `DenyAll`), 파손 TOML → `Invalid(CONFIG_ERROR)`, 미지 action 패턴 → `Invalid`, 미지 키는 무시(`docs/CLI.md` §2.3), 빈 `[[acl]]` 배열 → `Loaded`이되 모든 판정이 `Deny`.
+- rule index: 여러 rule이 매칭 가능할 때 **첫 매칭의 index**가 나온다.
 
-**(d) 완료 판정:** **관찰 가능한 세션 동작 변화 0** — 기존 테스트가 하나도 수정되지 않고 green, golden·`version --json` fixture 바이트 단위 불변. 터널 스트림이 열리면 priority 0으로 열림을 단언. `xtask arch` green. Windows leg nextest green.
+**(d) 완료 판정:** **DoD 3 green.** **관찰 가능한 동작 변화 0** — 기존 테스트가 하나도 수정되지 않고 green(단, `Authorizer::check` 시그니처 변경에 따른 **기계적** 갱신은 허용하고 그 diff가 순수 기계적임을 리뷰에서 확인), fixture 바이트 단위 불변. `Policy`가 프로덕션의 어느 생성자에도 아직 나타나지 않음을 grep으로 확인(전환은 Step 6). `xtask arch` green. Windows leg nextest green. **DEFERRED 판정:** 무변경.
 
-**(e) 인용:** `docs/design/protocol.md` §2(quinn `set_priority`·`send_fairness` 근거), §12(우선순위 band·bufferbloat·비대칭 window·BBR), §14(transport 불가지), `docs/design/architecture.md` §8(quinn-proto per-stream priority + fair queuing), `docs/design/testing.md` L3, ADR-0005.
+**(e) 인용:** `docs/design/architecture.md` §6(정확 일치·후행 `.*` only·default deny·fail closed·acl.toml 부재 시 전량 deny), `docs/PRD.md` §9(TOML 형태·principal 정의), `docs/CLI.md` §2.3(미지 키 무시)·§2.5, `docs/design/testing.md` L2·L8("ACL glob 평가기는 fuzz보다 property test가 적합"), `docs/ROADMAP.md` M5 범위·DoD 3.
 
 ---
 
-### Step 3 — Local forward (`-L`): 로컬 리스너 + `TCP_CONNECT` 스트림 + **inline `forward.local` ACL** + splice — **DoD 1(local leg)**
+### Step 3 — audit 수명주기(감사 개정 ①): 비동기 writer + 회전·크기 상한·retention + **쓰기 실패 fail-closed** — **DoD 5**
 
-**(a) 범위:** forward 연결 위의 `-L`을 완성한다. reverse 위의 `-L`은 Step 5, remote(`-R`)는 Step 4다.
+**(a) 범위:** ROADMAP 감사 개정 ①을 전부 이 step이 진다. 정책 전환(Step 6)보다 **먼저** 오는 이유는 하나다 — 정책이 켜진 뒤의 거부는 조사 가능해야 하고, 지금의 audit은 조사 가능하지 않다: 디스크가 차면 `tracing::error!` 한 줄 남기고 **레코드를 조용히 버린다**(`crates/qsh-core/src/audit.rs`의 `FileAuditSink::record` — `AuditSink::record`가 `()`를 반환하므로 호출자가 실패를 **구조적으로 관측할 수 없다**).
 
-**ACL.** `acl::Action`에 `ForwardLocal`(`as_str() == "forward.local"`)을 추가하고 `Action::ALL`을 (M3의 6종 + 이 step) 늘린다(`docs/PRD.md` §9 최소 action, `docs/CLI.md` §2.5). 정책은 여전히 interim `AllowAllPinned`(M5가 TOML 엔진).
+**비동기 쓰기.** 현재 `FileAuditSink::append`는 레코드마다 `OpenOptions::open` + `write_all` 두 번을 **동기 blocking I/O**로 수행하고, 이 호출은 `Server::authorize`류가 `async fn` 핸들러 안에서 부르므로 그대로 tokio worker 스레드를 막는다. 이 step은 `record()`를 **유계 채널로의 enqueue**로 바꾸고 전용 writer task(또는 `spawn_blocking` 전용 스레드) 하나가 파일 핸들을 **열어 둔 채** 순차 append한다. 파일 핸들을 유지하는 것이 회전 회계(누적 바이트)의 전제이기도 하다.
 
-**요청자(client) 측.** `-L [bind:]lport:host:hport`를 `parse_forward_spec`(Step 1)로 파싱해 로컬 TCP 리스너를 bind한다(기본 loopback bind — client 로컬 리스너의 non-loopback bind 정책은 §4.1 #3, 기본 loopback). 리스너에 들어온 TCP 연결마다 QUIC bidi 스트림을 `open_stream(link, StreamHeader{TCP_CONNECT, host, port})`로 열고, host의 `ConnectResult`를 읽어 `ok`면 이후 양방향 raw-byte splice(`copy_bidirectional` — frame 없음, 파싱·로그 없음), `ok=false`면 로컬 TCP 소켓을 그 `code`에 맞게 정리한다. 스트림 우선순위 `PRIORITY_TUNNEL`(Step 2).
+**회전·상한·retention.** writer가 누적 바이트를 세다가 `[audit].max_bytes`를 넘으면 `audit.log` → `audit.log.1`로 rename하고 새 파일을 `0o600`으로 연다; `audit.log.N`은 `retain` 개를 넘으면 가장 오래된 것부터 unlink한다. rename 기반이므로 열린 핸들이 있는 독자가 있어도 안전하고, 부분 줄이 남지 않는다(항상 줄 경계에서 회전).
 
-**host 측 — inline ACL(§7의 유일한 ticket 예외).** `TCP_CONNECT` 스트림을 받으면 **아무것도 dial하기 전에** `Authorizer::check(principal, auth_path, Action::ForwardLocal, resource = "host:port")` + `AuditRecord::now`를 호출한다. deny면 `ConnectResult{ok:false, code:"PERMISSION_DENIED"}`를 쓴 뒤 스트림을 종단시키고, **dial 0**이다(teardown 상세는 `docs/design/protocol.md` §7 "거부 teardown" — 방금 쓴 frame의 전달을 파괴하지 않도록 송신 half는 `finish()`, 수신 half는 사유별 코드로 `stop()`). allow면 `host:port`를 dial(loopback 목적지가 지배적이지만 목적지 제약은 local forward엔 없다 — 목적지는 요청자가 정한다), 성공 시 `ConnectResult{ok:true}` 후 splice, 실패 시 `ConnectResult{ok:false, code:"CONNECTION_FAILED"}`. **이것이 이 마일스톤이 지는 SC6 지분의 절반**(모든 privileged op에 audit 라인). per-connection RPC 왕복을 피하려 choke point가 아니라 스트림-오픈 inline인 이유를 코드 주석에 §7 인용으로 남긴다.
+**fail-closed(ROADMAP ①의 핵심).** `AuditSink::record`가 `Result<(), AuditError>`를 반환하도록 trait을 바꾸고, 네 인가 지점이 **판정 결과와 무관하게** 기록 실패를 **거부**로 처리한다. 실패의 정의는 둘이다: (i) 유계 큐가 가득 참(backpressure), (ii) writer가 치명적 I/O 오류(ENOSPC·EROFS 등)를 만나 **degraded 래치**가 걸림 — 래치는 이후 성공적 쓰기가 일어나야 풀린다. 두 경우 모두 peer에게는 Step 4의 **균일 `PERMISSION_DENIED`**가 나가고(감사 불가 상태를 peer가 구별할 수 있으면 그 자체가 신호다), 운영자에게는 stderr 진단(`qsh::audit`, degraded 진입·해제 각 1회)이 나간다. 순서는 **판정 → 기록 시도 → (기록 성공 시에만) 리소스 생성**이며, `authorize_session_control`이 이미 확립한 "단일 terminal 레코드" 규율을 그대로 유지한다.
+  fail-closed의 경계: **handshake 거부 레코드**(`AuditRecord::handshake_rejected`)는 이미 연결을 거부하는 경로라 fail-closed가 자명하고, 기록 실패가 거부를 뒤집을 여지가 없다 — 이 경로는 enqueue 실패를 진단만 남기고 거부를 유지한다(더 안전한 쪽으로만 실패한다).
 
-**CLI 표면.** 두 표면 중 이 step이 여는 것은 §4.1 #1의 holder 결정에 종속된다(§4.1 #1 — foreground form 채택). 기본 계획: (i) `qsh [user@]host -L spec`(interactive form — PRD §131-135의 `qsh -L 8080:localhost:3000 dave@personal-mac` 그대로) — 세션 TUI가 살아 있는 동안 리스너가 살고 프로세스와 함께 죽는다(foreground, 새 데몬 불요). 이 form이 **DoD 1의 마감 도구**다. (ii) `qsh tunnel open host --local spec [--json]` — envelope를 반환하는 operation; holder 모델이 확정되면(§4.1 #1) 이 step 또는 Step 5가 실물화한다.
+**`auth_path` 필드 추가.** 레코드에 `auth_path`(`"pin"`/`"ca"`)를 더한다 — 구조적 필드이고 payload가 아니며, pin/CA가 같은 principal 문자열을 낼 수 있는 이상(§4.1 #2) 이것 없이는 사고 조사에서 "누가"를 복원할 수 없다. `record_has_only_structural_fields`의 key 열거와 `architecture.md` §6 필드 목록을 함께 갱신한다.
 
 **(b) crate/모듈/파일:**
-- `crates/qsh-core/src/acl/mod.rs` (확장 — `Action::ForwardLocal`, `ALL`, `as_str`)
-- `crates/qsh-core/src/tunnel/local.rs` (신규 — 로컬 리스너 accept 루프, `TCP_CONNECT` 오픈, splice)
-- `crates/qsh-core/src/tunnel/splice.rs` (신규 — `copy_bidirectional` 래퍼, 우선순위·에러 정리)
-- `crates/qsh-core/src/server/mod.rs` 또는 dispatch (확장 — `TCP_CONNECT` 스트림의 inline `forward.local` 검사 + dial)
-- `crates/qsh-cli/src/cli.rs`, `src/main.rs` (확장 — `InteractiveArgs`에 `-L`(반복 가능) 추가; `Command::Tunnel(TunnelCmd::Open)` 얇은 진입점)
-- `crates/qsh-testkit/src/tunnel.rs` (신규 — loopback 터널 하네스: 한 프로세스에 host + client + 로컬 echo 서버)
-- **(구현 중 확인된 계약 표면 미결, Step 6 귀속):** `qsh tunnel open --json`의 exit code가 envelope와 어긋난다 — 이 명령은 `ok: true` envelope를 먼저 찍고 foreground로 터널을 쥔 뒤, hold가 끝나면 기계가 읽을 수 있는 종료 사유 없이 `EXIT_RUNTIME_FAILURE`(255)로 빠진다(`crates/qsh-cli/src/main.rs` 643행 부근). envelope와 exit code를 정합시키는 일은 Step 6의 exit-code matrix 몫이고 그 step의 범위가 이미 "계약 표면 마감(exit-code matrix·jsonl 순수성)"이므로, Step 3은 이 어긋남을 고치지 않고 **명시 유예**로 기록한다.
-- **(구현 중 확인된 fixture 미결, Step 6 귀속):** `tunnel.open.json` golden fixture가 없다. `tunnel open --json`이 이제 진짜 envelope를 내지만, fixture를 뜨려면 `crates/qsh-testkit/src/fixtures.rs`의 `normalize`에 volatile field 세 개(`tunnel_id`는 ULID, `bind`·`forward_to`는 ephemeral 포트를 담는다)를 위한 arm이 새로 필요하다. fixture는 append-only라 나중에 추가해도 비용이 0이고 L5 e2e가 이미 그 envelope를 필드 단위로 단언하므로, 이 fixture는 계약 표면을 마감하는 Step 6에 귀속한다.
-- **(구현 중 확정된 판정 2건, 계획 반영):** (1) workspace `tokio` floor를 `1`에서 `1.53`으로 올렸다 — splice의 RST teardown이 쓰는 비-deprecated `TcpStream::set_zero_linger`가 그 버전에서 온다. 새 의존은 없고(`tokio`는 이미 workspace 의존), `Cargo.lock`은 이미 1.53.1이며 `cargo deny check` green이다. **채택.** (2) `SystemDialer`가 resolve와 connect를 나누면서 `CONNECTION_FAILED` 외에 `HOST_NOT_FOUND`도 낼 수 있다 — 둘 다 이 마일스톤의 오류 어휘에 이미 있는 `ErrorCode` 값이고(`docs/CLI.md` §3.3) 새 코드는 만들지 않았다. **채택.**
+- `crates/qsh-core/src/audit.rs` (대폭 확장 — `AuditSink::record -> Result`, `AuditError`, `AuditRecord.auth_path`, `AuditRecord::now`/`connection_level`/`handshake_rejected` 시그니처)
+- `crates/qsh-core/src/audit/writer.rs` (신규 — 유계 큐 + writer task + 회전/retention + degraded 래치)
+- `crates/qsh-core/src/config.rs` (확장 — Step 1의 `AuditConfig` 값이 실제로 소비되는 지점)
+- `crates/qsh-core/src/serve.rs` (확장 — `host_runtime`이 `FileAuditSink::new(path)` 대신 config 기반 회전 sink를 만들고 writer task를 띄운다; `HostRuntime.audit`의 타입 갱신)
+- `crates/qsh-core/src/server/mod.rs`·`reverse/admit.rs` (확장 — `record()` 실패를 deny로 처리, 네 지점 전부)
+- `crates/qsh-core/src/audit.rs`의 `MemoryAuditSink`·`NullAuditSink` (갱신 — `Result` 반환; 신규 `FailingAuditSink`(테스트 double)로 ENOSPC를 결정적으로 주입)
+- **(부수 정리, 이 step에 귀속):** `Server::authorize_stream`이 연결 수준 결정에 `request_id: 0`을 하드코딩하는 알려진 불일치(`audit.rs:73-76`의 "next behavior-change window" 주석)를 `AuditRecord::connection_level`(`request_id: "-"`)로 마이그레이션한다 — 이 step이 바로 그 behavior-change window이고, SC6 registry(Step 8)가 레코드를 열거하기 전에 표기가 통일돼 있어야 한다.
 
-**(c) 빚지는 테스트 (`docs/design/testing.md` L2·L3·L5):** L2 — inline ACL 유닛: `DenyAll` 하에서 `TCP_CONNECT`이 dial을 **한 번도** 호출하지 않고 §7의 거부 teardown으로 스트림을 종단(계측 mock으로 "dial 0건" 단언 — `fuzz_stream_header`의 "ACL 미통과 경로에서 socket 생성 0건" 불변식의 실물, §13), audit에 `action="forward.local"` allow/deny 라인. L3 — `crates/qsh-testkit/tests/tunnel_loopback.rs`: 로컬 echo 서버를 띄우고 client가 `-L`로 bind한 로컬 포트에 쓰면 echo가 왕복함, 목적지 dial 실패 시 `ConnectResult{ok:false, CONNECTION_FAILED}`. L5 — `crates/qsh-cli/tests/tunnel_e2e.rs`(DoD 1 마감): 실프로세스 `qsh serve` host + `qsh host -L 8080:127.0.0.1:<echo>` interactive client(pty 아래 `expectrl`) + host 측 echo 서버 → 로컬 8080에 `curl`/TCP write가 원격 echo에 도달. **port 0 bind로 실제 포트를 얻어** DoD의 `8080`은 예시일 뿐임을 하네스가 파라미터화.
+**(c) 빚지는 테스트 (`docs/design/testing.md` L2·L6 + 신규 audit 행):**
+- **DoD 5 — 회전 트리거**: `max_bytes`를 작게 준 tempdir sink에 레코드를 밀어 넣어 `audit.log.1`이 생기고 `audit.log`가 새로 시작됨, 모든 줄이 유효 JSON이며 **줄이 잘리지 않음**, 회전 경계에서 레코드 유실 0(총 레코드 수 == 모든 파일의 줄 합).
+- **DoD 5 — 상한 준수**: `retain = 2`에서 회전 3회 후 파일이 `audit.log`+`audit.log.1`+`audit.log.2`뿐이고 그 이상은 unlink됨. 디렉터리 총 바이트가 `max_bytes * (retain + 1)`의 유계 안.
+- **DoD 5 — 디스크 만실 fail-closed**: `FailingAuditSink`(ENOSPC 반환)를 물린 `Server`에서 **정상적으로 허용되어야 할** op(예: `AllowAllPinned` 아래 pinned peer의 `session.open`)가 `PERMISSION_DENIED`로 거부되고 **세션이 하나도 생기지 않음**을 단언. degraded 해제 후 같은 op이 성공함도 단언(래치가 영구가 아님).
+- 큐 포화: `queue_depth`를 1로 두고 writer를 정지시킨 상태에서 두 번째 결정이 거부됨(backpressure = fail-closed).
+- 비동기성: 인가 경로에서 파일 I/O가 호출 스레드를 막지 않음 — writer를 막아 둔 상태에서도 `record()`가 즉시 반환(큐 여유가 있는 동안)함을 단언. `sleep()` 없이 채널 신호로.
+- 권한: 회전으로 새로 생긴 파일도 `0o600`, 디렉터리 `0o700`(`cfg(unix)`).
+- `auth_path` 필드가 레코드에 실리고 key 열거 테스트가 갱신됨.
 
-**(d) 완료 판정:** **DoD 1(local leg) green** — forward 연결 위 `-L`로 로컬 포트가 원격 목적지에 도달. inline ACL이 dial 이전이고 거부 시 리소스 0. `Action::ALL`에 `forward.local` 포함·문자열 하드코딩 0. 렌더러/CLI에 인가·splice 로직 0줄(splice는 `qsh-core`). Windows leg nextest green(`tunnel/`은 `cfg(unix)` — Windows에서 컴파일만). **DEFERRED 판정:** `PERMISSION_DENIED`가 inline forward.local deny로 **producer**를 얻는다 — (c)의 테스트가 CLI 바이너리 `--json` envelope 캡처면 fixture 추가 + `DEFERRED` 제거, testkit 레벨뿐이면 사유 문자열만 갱신(M3 H1 규율).
+**(d) 완료 판정:** **DoD 5 green.** 정책은 여전히 `AllowAllPinned`(전환은 Step 6) — 그러나 **동작 변화가 하나 있다**: audit을 쓸 수 없으면 이제 거부한다. 이는 ROADMAP ①이 명시적으로 요구한 변화이므로 조용한 회귀가 아니며, README "Known limitations"에 해당 문장을 이 step에서 추가한다. 기존 테스트 중 audit 실패를 무시하던 것이 있으면 갱신하고 그 목록을 PR 본문에 남긴다. Windows leg nextest green(rename·unlink 의미론의 `cfg` 분기 확인). **DEFERRED 판정:** `PERMISSION_DENIED`는 여전히 CLI 바이너리 envelope 경로를 얻지 못한다(이 경로는 `qsh serve` 내부 상태를 CLI에서 강제할 수단이 없다) — `DEFERRED` 무변경, 사유 문자열에 "audit degraded도 producer지만 CLI에서 결정적으로 유발 불가"를 추기.
 
-**(e) 인용:** `docs/design/protocol.md` §7(`TCP_CONNECT` inline `forward.local` 예외·`ConnectResult`), §5(raw byte 파이프), §12(우선순위), `docs/CLI.md` §2.5(`tunnel.open` local→`forward.local`)·§4·§6.9·§7, `docs/PRD.md` §9(인증 전 리소스 금지·action 목록), §13, `docs/design/architecture.md` §6(단일 choke point·`auth_path`)·§3, `docs/ROADMAP.md` M4 DoD 1·§1 원칙 5.
+**(e) 인용:** `docs/ROADMAP.md` M5 감사 개정 ①·DoD(감사 개정 2번째 문장), `docs/design/architecture.md` §6(결정당 한 줄 JSONL·필드 목록·"오류 시 개방은 존재하지 않는다")·§7(state 경로), `docs/PRD.md` §9(로그에 key·PTY·command 내용 무기록)·§15 SC6, `docs/CLI.md` §2.2(stdout 순수성)·§3.3, `docs/design/testing.md` CI 규율(sleep 금지·tempdir), `CLAUDE.md` "Fail closed on any ambiguous auth/ACL state".
 
 ---
 
-### Step 4 — Remote forward (`-R`): `RemoteForwardOpen` choke-point + **loopback-only bind** + `TCP_ACCEPTED` 스트림 — **DoD 2**
+### Step 4 — 거부 문면 균일성(감사 개정 ③): 단일 상수 + **op 전수 단언** — **DoD 4**
 
-**(a) 범위:** forward 연결 위의 `-R`을 완성한다. reverse 위의 `-R`(진짜 novel 케이스)은 Step 5다.
+**(a) 범위:** ROADMAP 감사 개정 ③. 오늘 프로덕션에는 **서로 다른 세 가지 거부 문면**이 있다:
+1. `Server::permission_denied`(`server/mod.rs:609`)의 `format!("peer is not allowed to {action} on this host")` — **action 이름이 그대로 박힌다**. `forward.local`의 inline 거부(`:2130`)가 같은 문안을 복제한다. `crates/qsh-testkit/tests/session_loopback.rs:566`이 이 문자열을 바이트 단위로 핀하고 있다.
+2. `reverse::registry::host_reverse_denied()`(`registry.rs:511`)의 고정 문자열 — 한 seam 안에서는 균일하지만 문자열 안에 `host.reverse`가 들어 있다.
+3. `localctl` 데몬의 `HubSendError::NotOwner` → `"this forward is owned by another client on this host"`(`localctl/daemon.rs:848`).
 
-**ACL.** `acl::Action`에 `ForwardRemote`(`"forward.remote"`) 추가, `ALL` 늘림.
+interim allow-all에서는 정보량이 0이지만, 정책이 켜지는 순간 1과 2는 **capability 열거 oracle**이 된다: 거부된 요청마다 "너에게 없는 권한의 이름"을 알려 주는 것이기 때문이다.
 
-**요청자(client) 측.** `-R [bind:]rport:host:hport`를 파싱해 `RemoteForwardOpen{bind_host, bind_port=rport, forward_host=host, forward_port=hport}`를 control 스트림으로 보낸다. host의 `RemoteForwardOpened{forward_id, actual_port}` 또는 `Error`를 받는다. 이후 host가 여는 `TCP_ACCEPTED{forward_id}` 스트림을 accept해 `host:hport`(요청자 로컬)로 dial하고 splice — **요청자가 이 leg에선 목적지를 dial하는 쪽**이다.
+**해결.** `qsh-core`에 단일 상수를 둔다 — `qsh_core::acl::PERMISSION_DENIED_MESSAGE`, 제안 문안 **`"peer is not allowed to perform this operation on this host"`**(action·capability·리소스·principal 어느 것도 담지 않는다; 최종 문안은 §4.2). 1과 2의 모든 생성 지점이 이 상수 하나를 쓰고, `Server::permission_denied(request_id, action)`은 `action`을 **audit 기록용으로만** 받고 문면에는 쓰지 않는다(시그니처는 유지 — audit 레코드의 action은 여전히 정확해야 한다).
 
-**host 측 — choke point ACL + loopback 강제.** `RemoteForwardOpen`을 받으면 **리스너 bind 이전** `Authorizer::check(principal, auth_path, Action::ForwardRemote, resource = "bind_host:bind_port")` + audit(`server::dispatch`의 기존 choke point 패턴 복제 — session/exec op와 같은 자리). deny면 `Error{PERMISSION_DENIED}`, **bind 0**. 통과 후 **loopback 강제**: `bind_host`가 loopback(`127.0.0.0/8`·`::1`)이 아니면 `Error{INVALID_ARGUMENT, "remote forward binds loopback only"}` — **bind 0**(`docs/PRD.md` §9 "Remote forwarding은 기본적으로 loopback에만 bind한다", **DoD 2**). loopback이면 bind하고 `forward_id` 발급, `RemoteForwardOpened{forward_id, actual_port}` 반환(`actual_port`는 bind_port 0 요청 시 커널 배정 포트). bind한 리스너에 들어온 연결마다 `open_stream(link, StreamHeader{TCP_ACCEPTED, forward_id})`로 요청자에게 스트림을 **연다**(host가 여는 쪽). `RemoteForwardClose{forward_id}` 또는 연결 종료 시 리스너를 닫는다(연결-결합 수명, §3).
-
-**loopback-only가 ACL이 아니라 `INVALID_ARGUMENT`인 이유**를 주석·문서에 못박는다: 같은 principal이 `forward.remote`를 **가져도** non-loopback bind는 통과 못 한다 — 이것은 principal 판정(ACL)이 아니라 요청 제약(host 하드코딩)이다. non-loopback bind(ssh `GatewayPorts` 류)는 §3 명시적 non-goal(P1). **DoD 2의 명시적 거부 테스트**가 이 지점을 단언한다.
+**균일성의 경계(중요).** 3(localctl `NotOwner`)은 **통일 대상이 아니다.** 그 거부는 원격 peer가 아니라 **같은 uid의 로컬 프로세스**에게 가고, localctl은 인가 계층이 아니라 로컬 머신 신뢰 경계이며(`docs/design/protocol.md` §11-3 "localctl은 인가 계층이 아니다", same-uid `SO_PEERCRED` 검사), 그 수신자에게 유용한 정보를 감추는 것은 보안 이득 없이 UX만 해친다. 이 경계를 코드 주석과 `architecture.md` §6에 명문화하고, DoD 4의 전수 테스트는 **원격 peer에게 나가는 거부**만을 대상으로 정의한다 — 그렇지 않으면 테스트가 로컬 진단을 지워 버린다.
 
 **(b) crate/모듈/파일:**
-- `crates/qsh-core/src/acl/mod.rs` (확장 — `Action::ForwardRemote`)
-- `crates/qsh-core/src/tunnel/remote.rs` (신규 — `RemoteForwardOpen` 처리, loopback 강제, remote 리스너 accept, `TCP_ACCEPTED` 오픈)
-- `crates/qsh-core/src/server/mod.rs`/dispatch (확장 — `RemoteForwardOpen/Close` 라우팅, choke point)
-- `crates/qsh-core/src/client/mod.rs` (확장 — `RemoteForwardOpened` 수신 + `TCP_ACCEPTED` accept + 요청자 측 dial)
-- `crates/qsh-cli/src/cli.rs`, `src/main.rs` (확장 — `-R`, `qsh tunnel open --remote`)
+- `crates/qsh-core/src/acl/mod.rs` (확장 — `PERMISSION_DENIED_MESSAGE` 상수 + 그 근거 문서)
+- `crates/qsh-core/src/server/mod.rs` (수정 — `permission_denied`, `authorize_and_dial_tunnel`의 복제 문안, `require_opener` 경유 거부)
+- `crates/qsh-core/src/reverse/registry.rs`·`reverse/admit.rs` (수정 — `host_reverse_denied()`가 상수를 쓴다)
+- `crates/qsh-core/src/tunnel/local.rs` (확인 — `ConnectResult{code:"PERMISSION_DENIED"}`의 `message` 경로도 상수를 쓴다)
+- `crates/qsh-testkit/tests/session_loopback.rs` (갱신 — 바이트 단위 핀을 새 상수 참조로; 테스트는 fixture가 아니므로 편집 가능)
+- `crates/qsh-core/tests/acl_docs.rs` (확장 — 상수 == `docs/CLI.md` §3.2 예시 문안 일치 게이트, `tunnel_docs.rs` 선례)
+- `docs/CLI.md` §3.2 (예시 갱신 — Step 1이 이미 반영)
 
-**(c) 빚지는 테스트 (`docs/design/testing.md` L2·L3·L5):** L2 — choke point 유닛: `DenyAll` 하 `RemoteForwardOpen`이 리스너를 **한 번도 bind하지 않음**(mock으로 "bind 0" 단언), audit `action="forward.remote"` allow/deny. **loopback 강제 표**: `127.0.0.1`/`::1`/`localhost`(해석 후 loopback) → 허용; `0.0.0.0`/`::`/공인 IP/실제 인터페이스 주소 → `INVALID_ARGUMENT` + **bind 0**(**DoD 2**). L3 — `crates/qsh-testkit/tests/tunnel_remote_loopback.rs`: host가 loopback 포트를 bind하고, host 측에서 그 포트에 연결하면 요청자 측 echo에 도달, `RemoteForwardClose`로 리스너가 닫힘. L5 — `qsh serve` host + `qsh host -R <rport>:127.0.0.1:<echo>` client의 실프로세스 왕복.
+**(c) 빚지는 테스트 (`docs/design/testing.md` L2·L6):**
+- **DoD 4 — op 전수 단언**: `Action::ALL`(항상-deny 3종 포함)과 **원격 peer 대면 거부를 낼 수 있는 모든 seam**(control-stream op 전부 + `TCP_CONNECT` inline + `host.reverse` 등록)을 표로 열거해, `DenyAll` 정책 아래 각 항목을 구동하고 **`error.code == PERMISSION_DENIED` && `error.message == PERMISSION_DENIED_MESSAGE`**를 바이트 단위로 단언. 표에 빠진 seam이 생기지 않도록, 이 표는 Step 8의 op registry와 **같은 registry를 소비**한다(두 벌의 표를 만들지 않는다 — 그것이 M4가 지적한 "손-작성 표가 테스트 안에만 산다" 문제의 재발이다).
+- 소유권 거부와 정책 거부가 구별 불가: 같은 세션에 대해 (i) 정책이 `session.control`을 안 준 principal과 (ii) 정책은 줬지만 opener가 아닌 principal의 거부가 **바이트 단위로 동일**(M3가 이미 확립한 성질의 M5판 재확인, `server/mod.rs:604`의 주석 그대로).
+- 존재 oracle 부재 재확인: 없는 session_id와 남의 session_id가 같은 응답(기존 `denied_session_ops_create_nothing_and_do_not_disclose_existence` 유지).
+- localctl `NotOwner` 문면은 **바뀌지 않았음**을 단언(경계가 의도적임을 테스트로 고정).
 
-**(d) 완료 판정:** **DoD 2 green**(non-loopback `-R` bind가 `INVALID_ARGUMENT`로 거부되고 bind 0을 단언하는 명시적 테스트). forward 연결 위 `-R`로 host 측 loopback 포트가 요청자 목적지에 도달. choke point가 bind 이전. `Action::ALL`에 `forward.remote` 포함. Windows leg nextest green. **DEFERRED 판정:** `PERMISSION_DENIED`(forward.remote deny)·`INVALID_ARGUMENT`(non-loopback)가 producer를 얻음 — CLI envelope 캡처 여부로 fixture/DEFERRED 처리(H1).
+**(d) 완료 판정:** **DoD 4 green.** 정책은 여전히 `AllowAllPinned`. `PERMISSION_DENIED_MESSAGE` 외의 원격 대면 deny 문안이 트리에 남아 있지 않음을 (c)의 전수 테스트가 보장. `xtask arch` green. Windows leg nextest green. **DEFERRED 판정:** 무변경(여전히 CLI envelope producer 없음).
 
-**(e) 인용:** `docs/design/protocol.md` §7(`TCP_ACCEPTED`·`RemoteForwardOpen`), §9, §11 머리말(대칭 — 요청 수신자가 자기 ACL 평가), `docs/CLI.md` §2.5(`tunnel.open` remote→`forward.remote`)·§6.9, `docs/PRD.md` §9(loopback bind·인증 전 리소스 금지), §13, `docs/design/architecture.md` §6(choke point는 리소스 생성 이전), `docs/ROADMAP.md` M4 DoD 2·범위(§9 loopback).
+**(e) 인용:** `docs/ROADMAP.md` M5 감사 개정 ③·DoD(감사 개정 1번째 문장), `docs/CLI.md` §3.2(`message`는 사람용, 자동화는 `code`/`details`만)·§3.3, `docs/design/protocol.md` §10-2(non-distinguishing 오류 정책)·§11-3(localctl은 인가 계층이 아니다), `docs/design/architecture.md` §6, `crates/qsh-core/src/reverse/registry.rs:497-510`(단일 문면 선례의 근거 문서), `docs/design/testing.md` L6.
 
 ---
 
-### Step 5 — reverse 연결 위 `-L`/`-R` + localctl 터널 conduit + `qsh tunnels`/`qsh tunnel close` — **"forward/reverse 양쪽" 범위 마감**
+### Step 5 — resource-ownership 축(감사 개정 ②): 소유자 개념의 정책 어휘 승격 + `forward_id` 소유(M4 이관 (iv))
 
-> **이 step은 두 PR로 올린다.** (i) **PR 5a — reverse 위 터널 데이터 경로**: localctl `LOCAL_STREAM` conduit이 `TCP_CONNECT`/`TCP_ACCEPTED`를 relay, `-R over reverse`의 스트림 방향(host=target이 여는 `TCP_ACCEPTED`가 데몬을 거쳐 controller CLI로) 실물화. 완료 판정 = reverse 하네스 위에서 `-L`·`-R` 양방향 splice green. (ii) **PR 5b — 관리 op**: `Ops::tunnel_open`/`tunnel_list`/`tunnel_close`, `LocalTunnelList` admin, `qsh tunnels`/`qsh tunnel close`, 렌더러, fixture. 완료 판정 = 아래 (d). 두 PR 모두 §2 공통 게이트를 각각 통과.
+**(a) 범위:** ROADMAP 감사 개정 ②. M3가 넣은 opener-principal 결합은 지금 **정책 밖의 하드코딩된 두 번째 게이트**다(`require_opener`, `server/mod.rs:648`) — 정책이 그것을 표현할 수 없고, 운영자가 끄거나 넓힐 수도 없으며, `qsh acl check`가 설명할 수도 없다. M5는 이것을 정책 어휘로 승격한다.
 
-**(a) 범위:** M4의 **진짜 흥미로운 케이스**(ROADMAP §1 원칙 4번). M3가 깐 role 축(연결 방향 ⊥ 세션 역할)과 localctl seam 위에 터널을 얹어 **forward·reverse 연결 양쪽에서** 동작시킨다.
+**소유자 있는 리소스의 정의(정본으로 못박는다).** 두 종류뿐이다.
+- **세션** — 소유자는 `opener_key(principal, auth_path)`(이미 `SessionInfo.opener`에 저장, `broker/session.rs:159`).
+- **remote forward(`-R`)** — 소유자는 `RemoteForwardOpen`을 보낸 연결의 principal. 오늘은 소유권이 **principal이 아니라 `ConnCtx::conn_id`로만** 표현되고(`Server::remote_forwards`, `handle_rfwd_close` `server/mod.rs:2377`), `RemoteForwardClose`는 **인가도 audit도 거치지 않는다**. 이 step이 그 갭을 닫는다: 등록 시 principal을 함께 기록하고, `RemoteForwardClose`를 `Action::ForwardRemote` + 소유권 판정의 choke point로 만들며, allow/deny 양쪽에 audit 레코드를 남긴다. 이것이 M4 §3 이관 (iv)의 **host 쪽** 답이다.
 
-**`-R over reverse`가 왜 novel인가.** reverse 토폴로지에서 **target = host(dialer)**, **controller = client(responder)**다. controller에서 `-R`을 걸면 "**host(=target)** 측에 포트를 bind하고 **client(=controller)** 측으로 되돌린다"는 뜻이다. §11 대칭 원칙상 controller(client role)가 `RemoteForwardOpen`을 target(host role)에게 보내고, target이 loopback 포트를 bind해 `TCP_ACCEPTED{forward_id}` 스트림을 **controller 쪽으로 연다** — 그런데 그 스트림은 target→controller **reverse** QUIC 연결 위를 흐르고, controller의 CLI 프로세스는 TLS endpoint가 아니라 상주 `qsh listen` 데몬을 거친다. 따라서 데몬은 target이 연 `TCP_ACCEPTED` 스트림을 받아 **해당 `forward_id`를 등록한 CLI conduit으로** relay해야 한다. 이것이 M3 Step 6의 request_id 재매핑·event 라우팅과 동형의 **세 번째 다중화 상태**다. `-L over reverse`는 대칭: controller(client)가 자기 로컬 포트를 bind하고 연결마다 `TCP_CONNECT`을 target(host)에게 데몬 relay로 보낸다.
+**정책 어휘.** Step 1이 확정한 rule 키 `scope ∈ {"owned"(기본), "any"}`가 살아난다. `ResourceRef`에 `owner: Option<&str>`을 더하고, 평가기는 매칭된 rule의 `scope`가 `"owned"`이면 `owner == Some(현재 요청자의 opener_key)`일 때만 `Allow`한다. `owner: None`(소유자 개념이 없는 리소스)에는 `scope`가 적용되지 않는다. **기본이 `"owned"`인 이유**: M3의 P0 결합을 그대로 보존하고, 정책이 켜지는 순간 "남의 세션에 쓸 수 있게" 조용히 넓어지지 않게 하기 위함이다(§4.1 #3). `"any"`는 명시적 opt-in이며 그 자체로 감사 대상이다.
 
-**localctl 터널 conduit(PR 5a).** M3의 `LOCAL_STREAM` conduit(다음 frame이 wire `StreamHeader`인 data 스트림)을 재사용 — `StreamHeader{TCP_CONNECT}`/`{TCP_ACCEPTED}`도 같은 conduit으로 흐른다(Step 1이 명문화). 데몬은 (i) CLI가 `LOCAL_STREAM`+`TCP_CONNECT`을 열면 host QUIC 연결 위에 새 bidi를 열어 byte splice, (ii) target이 reverse 연결 위에서 `TCP_ACCEPTED{forward_id}` 스트림을 열면 그 `forward_id`를 `RemoteForwardOpen 시 등록해 둔 CLI conduit`으로 splice. **데몬은 터널 payload를 파싱·로그하지 않는다**(M3의 세션 splice와 같은 순수성). in-flight 터널 스트림 총량은 `MAX_INFLIGHT_LONG_POLL_PER_HUB`와 동형의 hub 상한(`MAX_TUNNEL_STREAMS_PER_HUB`)으로 묶어 한 CLI가 공유 reverse 연결을 소진하지 못하게 한다.
+**`require_opener`의 운명.** 삭제하지 않는다 — **평가기 안으로 옮긴다.** `authorize_session_control`이 하던 "ACL → 소유권 → 단일 terminal 레코드"는 이제 `Policy::decide` 한 번으로 끝나고(rule index와 함께), `require_opener`는 broker에서 owner를 조회해 `ResourceRef`를 채우는 얇은 조회 함수로 축소된다. 조회가 애매하면(broker `NotFound` 이외의 오류) 지금처럼 **deny**다(`CLAUDE.md` fail-closed). `NotFound`는 지금처럼 존재 oracle을 만들지 않기 위해 통과시키고 후속 broker 호출이 `SESSION_NOT_FOUND`를 낸다 — 이 미묘한 규율은 `server/mod.rs:648`의 기존 주석이 정본이며 그대로 보존한다.
 
-**관리 op(PR 5b).** `Ops::tunnel_open`(route-aware — `resolve_host_route`로 forward/reverse 갈라짐, M3 Step 6의 `Ops::connect` 패턴 그대로)·`tunnel_list`·`tunnel_close`. `qsh tunnels`는 localctl `LocalTunnelList`로 상주 데몬이 쥔 터널을 조회(architecture.md §3의 "`qsh tunnels`는 그 다음 소비자"). `qsh tunnel close <id>`는 소유 검사("해당 tunnel의 소유 peer이면 허용", §2.5) 후 local forward면 로컬 리스너 close, remote forward면 `RemoteForwardClose{forward_id}` 송신. **holder 수명 모델(§4.1 #1, foreground 채택)이 이 op들의 정확한 의미를 정한다** — reverse 경로는 상주 `qsh listen` 데몬이 자연스러운 holder이고, forward 경로의 standalone `qsh tunnel open` holder는 §4.1 #1 결정에 종속된다.
-
-**writer lease/소유 불변식(M3 Step 6에서 상속).** 터널은 writer lease를 쓰지 않지만(세션 전용), reverse 경로에서 터널 리스너의 수명이 **데몬의 reverse 연결**에 결합된다는 성질은 세션과 같다(CLI가 죽어도 데몬 연결이 살아 있으면 리스너 유지; reverse 연결이 죽으면 §3대로 정리). 이 관찰 가능한 차이를 `docs/CLI.md` §6.13/§6.9에 문서화한다.
+**적용 범위의 경계.** PRD §6은 조회·읽기·종료를 교차 기기 ACL 범위로 **명시 허용**한다 — 따라서 `session.get`/`read`/`list`/`open`/`attach`는 `scope`의 대상이 아니고(그 결정은 M3가 이미 내렸다), `session.control`(write/resize/close)과 `forward.remote`(close)만 소유권을 본다. `tunnel.close`/`tunnel.list`의 "소유 peer이면 허용"(`docs/CLI.md` §2.5)이 드디어 host 쪽에서 강제되는 지점이 이 step이다.
+  **데몬 쪽 `forward_id` 소유(conduit 축)는 건드리지 않는다.** `reverse::listen::ControlHub`의 `owner: ConduitId` 판정은 "target이 구별하지 못하는 두 로컬 CLI 중 누가 진짜 소유자인가"를 정하는 **로컬 머신 축**이고, ACL principal 축과 직교한다(`docs/design/protocol.md` §11-3의 `admin_close_forward` 문단이 이 직교성을 이미 명문화했다). 두 축을 합치려는 시도는 이 step의 비목표이며 §3에 재기록한다.
 
 **(b) crate/모듈/파일:**
-- `crates/qsh-core/src/localctl/daemon.rs`, `client.rs` (확장 — 터널 conduit relay, `forward_id`↔conduit 등록표, `LocalTunnelList`)
-- `crates/qsh-core/src/tunnel/{local,remote}.rs` (확장 — link 경유로 route-aware)
-- `crates/qsh-core/src/ops/tunnel.rs` (신규 — `TunnelOpenOp`/`TunnelListOp`/`TunnelCloseOp` 마커 + `Ops::tunnel_*`; `ops/host.rs`가 템플릿)
-- `crates/qsh-core/src/ops/mod.rs` (확장 — `pub mod tunnel;`, `Ops` 메서드)
-- `crates/qsh-cli/src/cli.rs`, `src/main.rs`, `src/render/{human,json}.rs` (확장 — `Command::Tunnel(TunnelCmd)`, `Command::Tunnels`)
-- `crates/qsh-cli/tests/fixtures/cli-v1/{tunnel.open,tunnel.list,tunnel.close}.json` (신규 append-only)
-- `crates/qsh-testkit/src/tunnel.rs` (확장 — reverse 하네스 위 터널: target(host) ← 데몬 ← CLI 3자)
-- `docs/CLI.md` §6.9/§6.13, `docs/design/protocol.md` §11-3 (갱신 — 규칙이 Step 1 기술과 어긋나면 문서 먼저)
+- `crates/qsh-core/src/acl/policy.rs` (확장 — `Scope` 판정, `ResourceRef.owner`)
+- `crates/qsh-core/src/acl/mod.rs` (확장 — `ResourceRef`)
+- `crates/qsh-core/src/server/mod.rs` (수정 — `authorize_session_control` 단순화, `require_opener` 축소, `handle_rfwd_close`에 choke point + audit 신설, `remote_forwards`에 owner principal 기록)
+- `crates/qsh-core/src/broker/session.rs`·`broker/mod.rs` (확인 — `SessionInfo.opener` 조회 경로)
+- `docs/design/architecture.md` §6, `docs/CLI.md` §2.5(`tunnel.close` 행에 host 쪽 강제 지점 명시), `docs/design/protocol.md` §7(`RemoteForwardClose`의 인가 순서 신설 — 지금은 §7이 `RemoteForwardOpen`의 순서만 적고 close는 적지 않는다)
 
-**(c) 빚지는 테스트 (`docs/design/testing.md` L2·L3·L6):** L2 — 터널 relay **적대적** 유닛(M3 mux 규율 상속): 두 CLI conduit이 각자의 `forward_id` 스트림을 받고 **교차 splice 0건**(잘못된 conduit으로 새지 않음), conduit 사망 시 대응 QUIC 스트림 reset + `forward_id` 등록표 전량 정리, hub 상한 초과 시 `RESOURCE_EXHAUSTED`. L3 — `crates/qsh-testkit/tests/reverse_tunnel.rs`: `ReverseHarness` 위에서 (i) `-L over reverse`(controller 로컬 포트 → target host echo), (ii) **`-R over reverse`**(controller가 `RemoteForwardOpen` → target이 loopback bind → `TCP_ACCEPTED`가 데몬 거쳐 controller CLI로 → controller 목적지 echo 왕복), (iii) target이 여는 `TCP_ACCEPTED` 스트림이 **올바른 conduit으로만** 도착. **role 축 독립성의 기계적 증명**: forward/reverse 두 route로 **같은 시나리오 함수**를 파라미터화. L6 — 신규 fixture 3종이 schemars 스키마 통과 + 기존 fixture 전부 유효(append-only), 생성 스키마·fixture·localctl 프레임에 payload/토큰 문자열 부재.
+**(c) 빚지는 테스트 (`docs/design/testing.md` L2·L3):**
+- `scope = "owned"`(기본) 아래: opener가 아닌 principal의 `session.write`/`resize`/`close`가 거부되고 audit에 `session.control` deny가 남음(M3 DoD의 M5판 재확인, 이제 정책 경로로).
+- `scope = "any"` 아래: 같은 요청이 허용되고 audit에 `rule` index가 남음 — 그리고 이 확대가 **명시적으로 쓰인 정책에서만** 일어남을 단언.
+- `RemoteForwardClose`: 다른 principal(다른 연결)이 남의 `forward_id`를 닫으려 하면 거부 + audit deny + **등록이 그대로 살아 있음**. 소유자의 close는 허용 + audit allow. 미지 `forward_id`는 지금처럼 `INVALID_ARGUMENT`(존재 oracle 금지).
+- `forward_id` 소유가 conn_id가 아니라 principal 기준임: 같은 principal의 **다른 연결**이 close할 수 있는지 여부를 표로 고정한다(초안: 허용 — principal이 소유자이지 연결이 소유자가 아니다; `docs/CLI.md` §2.5 "소유 **peer**"의 문자 그대로. §4.2에서 확정).
+- `owner: None` 리소스(`exec.run`·`host.reverse`·`forward.local`)에서 `scope`가 판정을 바꾸지 않음.
 
-**(d) 완료 판정:** **"forward/reverse 연결 양쪽에서 동작" 범위 마감** — `-L`·`-R`가 두 route로 결정적 green. `qsh tunnels`가 데몬이 쥔 터널을 조회하고 `qsh tunnel close`가 소유 검사 후 닫음. `qsh-cli`에 인가·splice·소켓 로직 0줄(arch-lint 강제 — M3의 UDS ban을 터널 relay에도 확장). Windows leg nextest green(터널 relay·host 경로는 `cfg(unix)`). **DEFERRED 판정:** `RESOURCE_EXHAUSTED`(hub 상한)·`PERMISSION_DENIED`가 producer를 얻음 — CLI envelope 캡처 여부로 처리(H1).
+**(d) 완료 판정:** 위 테스트 green. `RemoteForwardClose`가 더 이상 무인가·무audit이 아님(Step 8의 SC6 registry가 이 갭을 잡을 준비가 됨). M3의 소유권 P0 거동이 **바뀌지 않았음**(기본값 `"owned"`가 그것을 재현). `xtask arch` green. Windows leg nextest green. **DEFERRED 판정:** 무변경.
 
-**(e) 인용:** `docs/design/protocol.md` §7·§11 머리말(대칭·요청 수신자가 자기 ACL 평가)·§11-3(localctl conduit·다중화·`LOCAL_STREAM`), §12, `docs/CLI.md` §2.5(`tunnel.close`/`tunnel.list` 소유 peer)·§6.9·§6.13·§11(frontend 제약), `docs/design/architecture.md` §2·§3(`qsh tunnels`는 다음 소비자·Supervisor seam), `docs/ROADMAP.md` M4 범위(forward/reverse 양쪽)·§1 원칙 4·5, ADR-0005·ADR-0007.
+**(e) 인용:** `docs/ROADMAP.md` M5 감사 개정 ②·M3 감사 개정 ②(소유권 P0가 "M5 정책 어휘의 선행 결정"이라고 이미 선언), `docs/PRD.md` §6(조회·읽기·종료는 교차 기기 허용)·§9, `docs/CLI.md` §2.5(`tunnel.close`/`tunnel.list` 행)·§6.3(opener 결합 문단), `docs/design/protocol.md` §7·§11-3(conduit 축과 principal 축의 직교성), `docs/design/architecture.md` §6, `crates/qsh-core/src/server/mod.rs:2734-2748`(`opener_key`의 근거 문서).
 
 ---
 
-### Step 6 — `-D`(SOCKS) UNSUPPORTED stub + 계약 표면 마감(exit-code matrix·jsonl 순수성) — **DoD 5**
+### Step 6 — **enforcement 전환**: `AllowAllPinned` → 정책 엔진 (2개 생성 지점) + 마이그레이션 이야기 + `error.PERMISSION_DENIED.json`
 
-**(a) 범위:** P1 유예 표면을 계약대로 닫고, M4가 새로 낸 오류 경로를 exit-code/jsonl 게이트에 등록한다.
+> **이 step은 두 PR로 올린다.** (i) **PR 6a — 전환 자체**: `serve::host_runtime`(`serve.rs:128`)과 `reverse::listen`(`listen.rs:251`)의 `Arc::new(AllowAllPinned)`를 정책 로딩으로 교체, 시작 시 운영자 진단, README·문서 동기화. 완료 판정 = 아래 (d)의 앞 네 항목. (ii) **PR 6b — 계약 표면 마감**: `error.PERMISSION_DENIED.json` fixture 추가 + `DEFERRED` 항목 제거 + exit-code matrix 행 추가. 완료 판정 = (d)의 나머지. 두 PR 모두 §2 공통 게이트를 각각 통과.
 
-**`-D` stub.** `-D [bind:]port`를 `InteractiveArgs`(및 `qsh tunnel open`의 해당 flag)에 clap으로 추가해 **파싱은 되되**, 실행 시 항상 `UNSUPPORTED` + "SOCKS dynamic forwarding (-D) is a P1 feature" 메시지를 내고 **리소스 생성 0**(리스너 bind 없음) — §4.2에서 확정한 문구이며 `qsh-core`의 `DYNAMIC_FORWARD_UNSUPPORTED_MESSAGE` 상수가 정본이다. `forward.socks` ACL action은 M4가 만들지 않는다 — `-D`는 ACL 이전 CLI/negotiation 계층에서 `UNSUPPORTED`이고, `forward.socks` 어휘는 M5가 "정의하되 항상 deny"로 승격한다(`docs/ROADMAP.md` M5 범위). `docs/CLI.md` §6.9의 "`-D`는 parsing되되 P0에서 `UNSUPPORTED`" 문장의 이행. 대화형 form 한정으로 우선순위가 하나 더 있다: `--json`/`--jsonl`이 동반되면 `-D`의 `UNSUPPORTED`보다 §7의 `INVALID_ARGUMENT`가 우선한다 — 대화형 form에는 애초에 machine mode가 없기 때문이다(adversarial review 결정, `docs/CLI.md` §6.9 갱신 반영).
+**(a) 범위:** M5에서 유일하게 **관찰 가능한 권한 경계가 바뀌는** step이다. 그래서 앞의 다섯 step이 전부 "동작 변화 0"으로 설계됐고, 이 step의 diff는 리뷰어가 "무엇이 언제부터 거부되기 시작하는가"만 보면 되도록 좁다.
 
-**계약 표면 마감.** exit-code matrix(`exit_code_matrix.rs`)에 envelope를 내는 터널 op 행 추가(미해석 host `tunnel open` → 255/`HOST_NOT_FOUND`, non-loopback `-R` → 255/`INVALID_ARGUMENT`, `-D` → 255/`UNSUPPORTED`, 존재하지 않는 `tunnel close <id>` → 0/`ok:true, data.closed:false` — `docs/CLI.md` §6.9의 멱등 계약; 초안에 적어 두었던 255는 CLI.md가 확정한 계약에 밀려 폐기한다). `--jsonl` 순수성 스위트에 터널 진행 중(`qsh::tunnel` stderr 진단이 도는) 세션 행 추가 — stdout이 여전히 순수 JSON. §2 DEFERRED 규율(H1)에 따라 이 step에서 `UNSUPPORTED` 등이 처음 CLI 바이너리 envelope를 얻으면 fixture 추가 + `DEFERRED` 제거.
+**전환 지점은 정확히 둘이다.** `AllowAllPinned`가 프로덕션에 나타나는 곳은 `crates/qsh-core/src/serve.rs:128`(`host_runtime` — `qsh serve`와 `qsh reverse` 둘 다 이 팩토리를 쓴다, `reverse/target.rs:241`)과 `crates/qsh-core/src/reverse/listen.rs:251`(controller의 `host.reverse` 판정)뿐이다. 둘 다 `PolicySource::load(paths)`의 결과를 `Arc<dyn Authorizer>`로 세운다.
+
+**마이그레이션 이야기(acl.toml 없이 업그레이드하는 사용자에게 무슨 일이 일어나는가).** 정본이 이미 답을 정해 두었다 — `docs/design/architecture.md` §6: "acl.toml이 없거나 파싱 불가 → **전부 deny** + 운영자에게 `CONFIG_ERROR` 노출. '오류 시 개방'은 존재하지 않는다." 따라서 M4까지의 사용자가 acl.toml 없이 M5 바이너리를 띄우면 **모든 원격 op이 거부된다**. 이것은 결함이 아니라 default-deny의 정의이고(`docs/PRD.md` §9), 그 대신 M5는 그 전환이 **조용하지 않도록** 세 가지를 진다:
+1. **시작 시 진단.** `qsh serve`/`qsh listen`/`qsh reverse`가 정책 없음/파손을 stderr에 **한 번** 구조화 진단으로 낸다 — 정확한 파일 경로, `CONFIG_ERROR` 코드, 그리고 **복사해 붙일 수 있는 최소 정책 예시**(그 머신의 pinned peer 이름을 실제로 채워서). 상수는 `qsh-core`에 두고 README·문서와의 일치를 L6 게이트로 고정한다(`doctor.rs`의 `CONTROLLER_UNREACHABLE` 선례 그대로).
+2. **자동 생성 금지.** acl.toml을 자동으로 만들어 주지 않는다. allow-all-pinned를 파일로 자동 기록하는 것은 interim 임시 조치를 **영구 부여 권한으로 승격**하는 일이고, 운영자의 결정 없이 권한이 생기는 것은 M4가 금지한 "silent addition"과 같은 범주다.
+3. **사전 검증 경로.** `qsh acl check`(Step 7)로 재시작 **전에** 정책을 확인할 수 있다. 순서상 Step 7이 뒤에 오므로, 6a의 진단 문안은 "`qsh acl check`로 확인하라"를 Step 7 완료 시점에 추가한다(6a에서는 파일 경로와 예시까지).
+
+**CA 경로 peer의 지위 변화.** 오늘 README는 "CA로 인증한 peer는 handshake는 통과하되 모든 op에서 `PERMISSION_DENIED`"라고 고지한다(`AllowAllPinned`가 `AuthPath::Ca`를 거부하므로). M5 이후 CA peer는 **정책이 명시적으로 `auth_path = "ca"` rule을 쓴 경우에만** 권한을 얻는다(§4.1 #2의 기본값이 `"pin"`이므로 기본으로는 여전히 전량 거부). README의 그 문단을 이 step이 갱신한다.
+
+**정책은 시작 시 1회 로드하고 hot reload는 없다.** 실행 중 acl.toml을 고쳐도 다음 재시작까지 적용되지 않으며, 이 사실을 `docs/CLI.md` §6.12/§6.13과 README에 **명시 고지**한다 — M7 감사 개정 ①이 `trust remove`에 대해 요구한 것과 같은 규율("유예 기간의 실제 동작을 문서화하는 것은 유예할 수 없다"). hot reload 자체는 §3의 비목표다.
+
+**`error.PERMISSION_DENIED.json`(PR 6b).** `crates/qsh-cli/tests/fixtures.rs`의 `DEFERRED` 첫 항목이 스스로 조건을 적어 두었다: "Discharge this one the moment `Fleet`/an equivalent gains a way to run the real binary under a denying policy — it needs a fixture then, not a place on this list." 정책 파일 + `$QSH_CONFIG_DIR`만으로 실바이너리를 거부 정책 아래 띄울 수 있게 되므로(새 CLI 노브 불요) 이 조건이 충족된다. `qsh tunnel open --remote --json`을 거부 정책 아래 실행해 나오는 최상위 error envelope를 fixture로 뜨고, `DEFERRED`에서 제거해 `REQUIRED_FIXTURES`에 등록하며, exit-code matrix(`crates/qsh-cli/tests/exit_code_matrix.rs`)에 human/JSON 양 모드 행을 더한다.
 
 **(b) crate/모듈/파일:**
-- `crates/qsh-cli/src/cli.rs` (확장 — `-D` flag, 반복 가능; `InteractiveArgs`·`TunnelOpenArgs`)
-- `crates/qsh-cli/src/main.rs` 또는 `qsh-core` (확장 — `-D` → `UNSUPPORTED` 경로, 리소스 0)
-- `crates/qsh-cli/tests/exit_code_matrix.rs`, `tests/jsonl_purity.rs` (확장)
-- `crates/qsh-cli/tests/fixtures/cli-v1/error.UNSUPPORTED.json` 등 (신규 append-only, 필요 시)
+- `crates/qsh-core/src/serve.rs` (수정 — `host_runtime`이 정책을 로드; 로드 실패 시 진단 + `DenyAll`)
+- `crates/qsh-core/src/reverse/listen.rs` (수정 — 같은 로딩)
+- `crates/qsh-core/src/acl/load.rs` (확장 — 운영자 진단 상수 `ACL_POLICY_MISSING`/`ACL_POLICY_INVALID`)
+- `crates/qsh-cli/src/main.rs` (확장 — 시작 배너에 진단 렌더; **인가 로직 0줄**, 상수 출력만)
+- `crates/qsh-cli/tests/fixtures.rs`·`fixtures/cli-v1/error.PERMISSION_DENIED.json`(신규)·`exit_code_matrix.rs` (PR 6b)
+- `crates/qsh-testkit/src/*` (확장 — 하네스가 acl.toml을 심을 수 있게; 기존 tempdir config 경로 재사용)
+- `README.md`(Security posture 전면 갱신, Known limitations의 "No policy engine before M5" 제거·hot reload 부재 추가), `docs/CLI.md` §6.12·§6.13
+- **(파급 주의):** 기존 통합 테스트 다수가 "pinned peer면 다 된다"를 암묵 전제로 한다. 이 step은 하네스에 **명시적 허용 정책을 심는** 것으로 그 전제를 되살린다(테스트마다 개별 수정이 아니라 하네스 한 곳). 어느 테스트가 정책을 심어야 하는지는 이 step의 PR 본문에 목록으로 남긴다 — 조용히 통과시키는 편법(예: 테스트 전용 allow-all 기본값)은 금지다.
 
-**(c) 빚지는 테스트 (`docs/design/testing.md` L6):** `-D 1080` → exit 255 + `ok:false` + `error.code == "UNSUPPORTED"` + 메시지에 "P1", **리스너 bind 0**(mock/포트 미점유 단언). exit-code matrix가 human/JSON 두 모드에서 같은 exit code. jsonl 순수성이 터널 진행 중에도 유지.
+**(c) 빚지는 테스트 (`docs/design/testing.md` L2·L3·L5·L6):**
+- acl.toml 부재로 시작한 host에 pinned peer가 `exec.run`을 시도 → `PERMISSION_DENIED`(균일 문면) + **자식 프로세스 0** + audit deny 1줄. 시작 진단이 stderr에 정확히 한 번.
+- 파손 acl.toml → 같은 결과이되 진단 코드가 `CONFIG_ERROR`이고 **stdout은 한 바이트도 오염되지 않음**(`docs/CLI.md` §2.2).
+- 최소 허용 정책(`principal = "device:<peer>"`, `allow = ["exec.run"]`) → `exec.run`만 통과하고 `session.open`은 거부, audit에 각각 allow/deny와 `rule: 0`.
+- CA 경로: `auth_path` 생략 rule 아래 CA 인증 peer는 전량 거부; `auth_path = "ca"` rule을 명시하면 통과.
+- controller 쪽: acl.toml 없는 `qsh listen`에 `qsh reverse`가 등록 시도 → `host.reverse` deny + 등록 0(`reverse/admit.rs`의 기존 불변식이 정책 경로에서도 성립).
+- **PR 6b**: `error.PERMISSION_DENIED.json` fixture가 스키마 검증 통과, `ErrorCode` 전수 도달성 테스트에서 `DEFERRED` 밖으로 이동, exit-code matrix가 human/JSON 양 모드에서 동일 exit code.
 
-**(d) 완료 판정:** **DoD 5 green**(`-D 1080` → `UNSUPPORTED` + "P1", 리소스 0). exit-code matrix·jsonl 게이트에 터널 행이 들어감. `forward.socks` Action이 M4에 생기지 않음(M5 몫). Windows leg nextest green(`-D` stub은 플랫폼 무관 — Windows에서도 실행됨). **DEFERRED 판정:** `UNSUPPORTED`가 CLI envelope producer를 얻으면 fixture 등록.
+**(d) 완료 판정:** 정책 엔진이 프로덕션 정책이다(`AllowAllPinned`가 프로덕션 생성자에서 사라졌음을 grep으로 확인 — 테스트 double로는 남는다). 마이그레이션 3종(진단·자동생성 금지·사전 검증 안내)이 코드와 문서에 실재. README가 실제 권한과 일치(마감 절차 2의 선행). hot reload 부재가 명시 고지됨. `error.PERMISSION_DENIED.json` 등록 + `DEFERRED`에서 제거. Windows leg nextest green. **DEFERRED 판정:** `PERMISSION_DENIED` **제거**(producer 확보) — 이것이 M5가 `DEFERRED` 목록을 실제로 줄이는 유일한 항목이다.
 
-**(e) 인용:** `docs/CLI.md` §2.4(long-running vs operation)·§3.3(`UNSUPPORTED`)·§4(exit code)·§6.9(`-D` parsing되되 UNSUPPORTED)·§7(flag scope), `docs/PRD.md` §11(`-D` P1)·§9(`forward.socks`는 M5 어휘), `docs/design/testing.md` L6, `docs/ROADMAP.md` M4 DoD 5·명시적 out(SOCKS P1)·M5 범위(`forward.socks` 항상 deny).
+**(e) 인용:** `docs/design/architecture.md` §6("acl.toml이 없거나 파싱 불가 → 전부 deny + `CONFIG_ERROR`"), `docs/PRD.md` §9(default-deny·인증 전 리소스 금지), `docs/CLI.md` §2.2·§3.3·§6.12·§6.13·§10, `docs/ROADMAP.md` M5 범위·§2 마감 공통 절차 2(README 동기화)·M7 감사 개정 ①(유예 기간의 실제 동작을 문서화하는 것은 유예할 수 없다), `crates/qsh-cli/tests/fixtures.rs`의 `DEFERRED` PERMISSION_DENIED 항목(자기 해제 조건), `CLAUDE.md` "ACL is default-deny".
 
 ---
 
-### Step 7 — Perf 게이트: throughput ≥ raw-quinn 80%(same-process) + 1GB 포화 터널 병행 PTY echo p95 — **DoD 3·4**
+### Step 7 — `qsh acl check`: **enforcement와 같은 코드 경로** + 표 기반 동치 증명 — **DoD 1**
 
-**(a) 범위:** M4의 두 성능 DoD를 닫는다. testing.md L10("perf는 PR 게이트 금지")과 ROADMAP M4 DoD·protocol.md §12("CI 조기 도입, M4 수용 기준")의 긴장을 **M3의 60초 blackout 이중 게이트 선례**로 해소한다(§4.1 #7).
+**(a) 범위:** DoD 1을 마감한다. 핵심은 기능이 아니라 **구조**다: 설명용 평가기를 따로 만드는 순간 DoD 1은 영원히 "지금은 같다"라는 주장이 되고, 두 경로는 반드시 갈라진다.
 
-**DoD 3 — throughput 비율(same-process, 결정적).** 같은 프로세스·같은 실행에서 (i) raw-quinn bidi 스트림으로 N바이트, (ii) 터널 스트림으로 같은 N바이트를 전송해 처리량 비율을 재고 **터널 ≥ raw-quinn × 0.80**을 단언. testing.md L10이 "runner 무관하므로 실제로 CI 가능"이라 명시한 유일한 CI-able perf 형태 — 절대값이 아니라 비율이라 공유 runner에서도 안정적. GHA macOS runner의 작은 UDP 소켓 버퍼는 `SO_RCVBUF` 명시 설정으로 보정(testing.md CI 규율).
+**Ops.** `Ops::acl_check(AclCheckReq) -> Result<AclCheckData, OpError>`(`crates/qsh-core/src/ops/acl.rs` 신규). 이 op은 **로컬**이다 — 이 머신의 `acl.toml`을 Step 2의 `PolicySource::load`로 읽어 Step 2의 `Policy::decide`를 **그대로** 호출한다. 원격 왕복도, 두 번째 평가기도 없다. 입력 `principal`/`action`/`auth_path` 문자열은 파싱해 `Principal`/`Action`/`AuthPath`로 바꾸고, 어휘에 없는 값은 `INVALID_ARGUMENT`(어떤 action이 존재하는지는 `--help`와 `qsh schema`가 알려 주므로 이 거부는 oracle이 아니다). `resource` 생략 시 소유자 없는 리소스로 평가하고, `--owner`를 주면 `scope` 판정까지 설명한다(§4.2 — `--owner` 표면을 M5에 넣을지).
 
-**DoD 4 — 포화 터널 병행 PTY echo p95(통합 벤치).** 1GB(또는 시간-유계 등가) 포화 터널 전송과 **동시에** PTY echo 왕복을 반복 측정해 **p95 < 측정 loopback RTT + 10 ms**를 단언. 산식은 testing.md L10 그대로: `(client 수신 시각 − pty write 시각 − 측정된 loopback RTT) < 10 ms`. loopback RTT를 측정값으로 빼므로 runner 절대속도에 관대하다. 이 벤치가 Step 2의 우선순위 band·비대칭 window·BBR·`send_fairness`가 실제로 PTY를 보호함을 증명한다(§12 bufferbloat 대응의 검증).
+**CLI.** `qsh acl check --principal device:hermes --action session.open [--resource <id>] [--auth-path pin|ca] [--json]`. human 렌더는 한 줄(`allow (rule 0)` / `deny`)에 정책 파일 경로를 stderr 힌트로, `--json`은 `AclCheckData` envelope. 렌더러에는 **인가 로직 0줄**(`CLAUDE.md` arch rules) — `Ops`가 판정하고 렌더러는 문자열만 만든다.
 
-**게이트 배치(§4.1 #7).** 두 측정 모두 **PR 유닛 스위트에 넣지 않는다**(testing.md L10 "PR 게이트 금지"). 대신 M3의 `acceptance` job(= `ci-ok`가 `needs`로 요구) 위에 `QSH_ACCEPTANCE_SLOW`/`QSH_ACCEPTANCE_STRICT`로 게이트한다 — 상시 게이트이되 매 PR의 유닛 시간을 태우지 않는다. **이것은 testing.md L10 "perf는 nightly only"에 대한 명시적 개정**이므로 그 문장을 "비율 throughput과 echo-under-load p95는 M4 수용 기준으로 `acceptance` job에서 상시 게이트; 절대 throughput 추세는 여전히 nightly"로 고친다(§4.1 #7, 문서 먼저). PR 유닛에는 우선순위·window 설정이 존재함을 확인하는 **저비용 smoke**(Step 2가 이미 가진 것)만 둔다.
+**DoD 1의 증명 방식.** 두 겹으로 한다.
+- **구조적**: `Ops::acl_check`가 호출하는 함수와 `Server::authorize`가 호출하는 함수가 **동일 심볼**임을 타입으로 강제한다 — `Policy::decide` 하나만 `pub(crate)`로 존재하고 `Authorizer for Policy`도 그것을 부른다. 두 번째 진입점이 생기면 컴파일 단계에서 눈에 띄도록 모듈 경계를 좁힌다.
+- **표 기반(ROADMAP 문구 그대로)**: (정책 파일 × principal × auth_path × action × resource/owner)의 행렬을 표로 두고, 각 행에 대해 (i) `qsh acl check --json`의 `decision`/`rule`과 (ii) 같은 정책으로 띄운 loopback 하네스에서 **실제 op을 실행한 결과**(성공 / `PERMISSION_DENIED`)와 (iii) 그 op이 남긴 audit 레코드의 `decision`/`rule`이 **셋 다 일치**함을 단언. 세 번째가 중요하다 — `acl check`와 enforcement가 같아도 audit이 다른 것을 기록하면 SC6가 거짓이 된다.
 
 **(b) crate/모듈/파일:**
-- `crates/qsh-testkit/tests/tunnel_throughput.rs` (신규 — same-process raw-quinn vs 터널 비율, DoD 3)
-- `crates/qsh-cli/tests/tunnel_echo_under_load.rs` 또는 `qsh-testkit` (신규 — 포화 터널 병행 PTY echo p95, DoD 4)
-- `.github/workflows/ci.yml` (확장 — `acceptance` job에 두 게이트 추가)
-- `docs/design/testing.md` L10 (개정 — 위 게이트 배치)
+- `crates/qsh-core/src/ops/acl.rs` (신규 — `Ops::acl_check`, `COMMAND = "acl.check"`)
+- `crates/qsh-core/src/ops/mod.rs` (확장 — 모듈 등록)
+- `crates/qsh-cli/src/cli.rs`·`src/main.rs`·`src/render/` (확장 — `Command::Acl(AclCmd::Check)`, human/JSON 렌더)
+- `crates/qsh-cli/tests/fixtures/cli-v1/acl.check.allow.json`·`acl.check.deny.json` (신규, append-only)
+- `crates/qsh-cli/tests/fixtures.rs` (확장 — `REQUIRED_FIXTURES`에 두 파일 추가)
+- `docs/CLI.md` §6.15 (Step 1이 이미 계약을 적었고 이 step이 구현을 맞춘다)
 
-**(c) 빚지는 테스트 (`docs/design/testing.md` L9/L10):** 위 두 게이트. 비율 게이트는 seed·반복으로 flake 방어, echo 게이트는 loopback RTT 측정을 테스트 내에서 수행(외부 상수 금지). 두 게이트 모두 실패 메시지에 실측 수치·비율을 출력.
+**(c) 빚지는 테스트 (`docs/design/testing.md` L2·L5·L6):**
+- **DoD 1 — 표 기반 동치**: 위 (a)의 3-way 일치 표. 행에는 최소한 (허용/거부/wildcard 매칭/항상-deny action/`auth_path` 불일치/`scope=owned`의 소유자·비소유자/정책 파일 부재) 7종을 포함.
+- `acl check`가 **정책을 변경하지 않음**(읽기 전용) — 실행 전후 acl.toml mtime·내용 불변.
+- 원격 노출 없음: `acl.check`가 wire `ControlMessage`의 어느 variant로도 나가지 않음(원격 peer가 정책을 조회할 수 없다).
+- fixture 2종이 스키마 검증 통과, `qsh schema --json`이 새 타입을 서빙(M7 구현 대상이므로 스키마 생성만 확인).
+- 잘못된 action 이름 → `INVALID_ARGUMENT` + exit `2`(§4 exit code 계약).
 
-**(d) 완료 판정:** **DoD 3·4 green** — `acceptance` job 로그가 두 수용 기준의 정본. 비율 부등식·p95 부등식이 주석이 아니라 assertion. testing.md L10 개정이 같은 PR에 포함. Windows leg nextest green(perf 하네스가 unix 전용이면 컴파일만; 가능하면 throughput 비율은 플랫폼 무관하게 실행).
+**(d) 완료 판정:** **DoD 1 green.** `acl check`의 판정 경로가 enforcement와 같은 함수임이 구조로 강제됨. 렌더러/CLI에 인가 로직 0줄(`xtask arch` green). fixture 2종 등록. Windows leg nextest green(이 op은 플랫폼 무관 — Windows에서도 `acl check`가 동작해야 한다: 정책 파일 읽기와 순수 평가뿐이므로 `cfg(unix)` 분기가 없어야 한다).
 
-**(e) 인용:** `docs/design/protocol.md` §12(우선순위·bufferbloat·"CI 조기 도입, M4 수용 기준"), §2(BBR·fairness), `docs/PRD.md` §13(느린 터널이 PTY를 block하지 않음·throughput ≥80%)·§15(idle listener·perf 목표), `docs/design/testing.md` L9/L10(비율 게이트·p95 산식·"perf PR 게이트 금지"의 개정)·CI 규율(`SO_RCVBUF`), `docs/ROADMAP.md` M4 DoD 3·4.
-
-**(a)-추기 — 실측 및 최종값 (2026-08-27, adversarial review 반영).**
-- **상수 최종값.** `TUNNEL_STREAM_RECEIVE_WINDOW = 2 MiB`(§12 대역 2–4 MB 내, quinn 기본 STREAM_RWND 1,250,000 초과) — Step 2 잠정치 4 MiB에서 하향. 첫 구현이 골랐던 128 KiB는 기각: connection-wide라 연결 위 모든 스트림(PTY/exec/replay 포함)의 처리량 상한(≈2.6 MB/s@50ms)이 되고, loopback 기준 DoD 3 게이트는 기준선과 터널 다리가 같은 window를 공유해 이 리그레션을 구조적으로 못 본다 — 그래서 `qsh-transport`에 floor assertion(quinn 기본값 1,250,000 이상)을 별도로 뒀다. UDP 소켓 버퍼는 window와 분리, OS 기본값을 절대 낮추지 않는 하향 ladder(8/4/2/1 MiB, `bind_tuned_udp_socket`) — dial·listen·migration rebind(`qsh-core::client::reconnect`) 세 경로 통일(첫 구현의 고정 128 KiB는 macOS 기본 768 KiB를 6배 축소하는 역방향이었음). `SEND_DEPTH_CAP_BYTES = 128 KiB`(`qsh_core::tunnel::splice`) — §12 비대칭의 실제 구현체(송신측 큐 깊이/양보 주기).
-- **DoD 3 게이트를 실패 가능하게.** raw-quinn 기준선을 qsh 자체 `transport_config()`가 아닌 stock quinn(`TransportConfig::default()`, 신규 `dial_stock_transport`/`bind_stock_transport`)으로 교체하고 trial을 raw/tunnel 교대 실행으로 바꿔 runner drift를 상쇄. 최종 상수 기준 STRICT 6회 ratio {0.899, 0.927, 0.942, 0.945, 0.909, 0.938} — strict 0.80 유지(§4.2 초안 그대로), smoke 0.50 유지.
-- **DoD 4 방향/지표 수정 + 실측.** 포화 방향을 host→client로 교정(신규 `FloodServer` — PTY 출력과 실제로 경쟁하는 곳은 호스트의 송신 스케줄러), 지표를 client 기점 진짜 왕복(`margin = (recv−send) − rtt`)으로 교체(구 지표는 편도 leg에서 왕복 RTT를 빼는 차원 오류 — min=0.000ms가 그 지문). cap 없이 2 MiB에서 p95=30.579ms로 우선순위 band 단독 부족이 실측 확인 → cap 256 KiB p95=10.085ms(미달), 64 KiB p95=5.480ms이나 DoD 3 ratio 0.799 이탈, **128 KiB 채택**: 6회 p95 {7.919, 7.621, 7.672, 7.766, 7.146, 7.589}ms, 같은 실행의 DoD 3 ratio 전부 floor 상회. 1GB 고정 바이트 대신 **15s 시간-유계 + MIN_SAMPLES=200 floor** 채택(CI 시간 예산, M3 60s blackout 선례 아래).
+**(e) 인용:** `docs/ROADMAP.md` M5 범위(`qsh acl check`)·DoD 1, `docs/CLI.md` §2.1·§2.4·§2.5·§4(exit code)·§6.15·§11(세 frontend가 같은 typed operation), `docs/design/architecture.md` §1(렌더러에 ACL 로직 0)·§2(typed op layer)·§6("평가와 `qsh acl check` 설명 가능성 유지"가 후행 `.*`만 허용하는 이유), `CLAUDE.md` "Renderers and the MCP adapter contain zero auth/ACL/session logic".
 
 ---
 
-### Step 8 — 터널의 resume/chaos 거동 확정 + 문서·README 동기화 + M4 마감
+### Step 8 — **op registry 열거 + audit 완전성**(SC6) + 문서·README 최종 동기화 + M5 마감 — **DoD 2**
 
-**(a) 범위:** 연결 손실·migration 하 열린 터널의 **정의된 거동**을 테스트로 못박고, 문서·README를 M4 실태에 맞춘다. "마일스톤 마감 공통 절차"(ROADMAP §2)의 이행이다.
+**(a) 범위:** DoD 2를 마감하고 마일스톤을 닫는다. 오늘 "모든 privileged op에 audit 레코드가 있다"는 **믿음**이다 — 열거하는 것이 아무것도 없고, 유일하게 비슷한 것은 `server/mod.rs:3818`의 세션 op만 다루는 손-작성 `match`이며 그것은 `#[cfg(test)]` 안에만 산다. 실제로 `handle_rfwd_close`는 M4 내내 인가도 audit도 없었다(Step 5가 닫는다).
 
-**터널의 resume 거동(정의 + 테스트).** 터널은 세션과 **다르게** 산다 — replay ring이 없으므로(ADR-0004는 세션 output 전용) byte-exact resume이 **불가능**하다. 정의:
-- **migration(QUIC path rebind, chaos `repath()`)**: 같은 QUIC 연결이므로 터널 스트림이 **투명하게 생존**한다 — 진행 중 전송이 path 전환을 넘어 이어진다. 이것이 quinn migration의 이득이며 별도 코드 불요. 테스트로 단언한다.
-- **연결 손실 → 재dial/resume(chaos `sever()`)**: PTY 세션은 §10으로 resume하지만 **터널 스트림은 resume하지 않는다** — in-flight 터널 TCP 연결은 로컬 소켓을 정리해 **깨끗하게 종료**(hang·panic 금지, 명확한 종료). 리스너 수명: local forward 리스너는 holder(§4.1 #1)가 살아 있으면 유지되지만, **forward 자체는 recovery를 넘지 못한다** — 재연결 후 그 리스너로 들어온 새 TCP 연결은 즉시·깨끗하게 reset된다(hang·무한 대기 금지). forward를 다시 쓰려면 재시작해야 한다(아래 추기); remote forward 리스너는 연결에 결합되므로 연결 손실 시 host가 정리하고, 요청자는 재연결 후 `RemoteForwardOpen`을 재발행해야 한다(자동 재발행 여부는 §4.2에서 확정). reverse 경로에선 데몬의 reverse 연결이 죽으면 그 host의 모든 터널 conduit이 명확한 typed error로 함께 끝난다(M3 Step 6의 conduit-사망 규율 상속).
-- **PTY와의 공존**: 같은 연결 위 세션이 resume하는 동안 터널이 깨끗이 정리되고, 세션 resume이 터널 정리에 막히지 않음을 단언(우선순위·독립 스트림의 성질).
+**op registry(프로덕션 코드).** `crates/qsh-core/src/acl/registry.rs` 신규 — 모든 privileged op을 **하나의 표**로 선언한다: `OpSpec { op: &'static str, action: Action, resource_kind: ResourceKind, owned: bool }`. `op`은 `docs/CLI.md` §2.4의 dotted 이름(또는 operation이 아닌 seam은 `host.reverse`·`forward.local`처럼 §2.5가 쓰는 이름)이고, `action`은 §2.5 매핑 표의 오른쪽 열이다. dispatch가 이 표를 **소비**하게 만들어 표와 코드가 갈라지지 않게 한다(최소한 각 핸들러가 `OpSpec`을 참조해 action을 얻도록).
 
-> **(a)-추기 — sever 후 리스너 거동의 확정 (2026-08-27, 구현 대조).** 이 절의 초안은 "재연결 후 새 TCP 연결이 새 스트림을 연다"고 썼으나, 구현 대조 결과 이는 성립하지 않으며 **성립하지 않는 쪽을 M4의 확정 거동으로 채택한다.** 근거: `crates/qsh-core/src/tunnel/local.rs`의 `ForwardCarrier::Quic`은 forward가 시작된 시점 연결의 **의도된 스냅샷**이고(문서화된 설계 — "a forward has to be restarted across a recovery"), recovery가 교체하는 attach의 `Link`를 참조하지 않는다. `docs/ROADMAP.md` M4 DoD·`docs/PRD.md` 어디에도 recovery 후 forward 생존 약속이 없으므로, 초안 문장은 계약이 아니라 계획 단계의 낙관이었다. 실측(tunnel_chaos.rs 테스트 2): sever+resume 후 리스너는 accept를 계속 받고, 새 연결은 즉시 `ConnectionReset`으로 끝난다 — hang도 silent loss도 없다. 테스트는 이 거동을 그대로 고정하되, `ForwardCarrier`가 훗날 live-carrier로 바뀌어 왕복이 성공하게 되면 명시적 panic("update this assertion")으로 개정을 강제하는 트랩을 포함한다. **forward-route live carrier**(attach의 현재 연결을 추적해 -L forward가 recovery를 넘어 신규 연결을 서비스하는 것 — `ops/session.rs` `Link`·`tunnel/local.rs` `ForwardCarrier`·`ops/tunnel.rs` 호출부·reverse acceptor 대응 지점을 관통하는 설계 변경)는 §3 "M5에 넘기는 것" (v)로 명시 이관한다. remote forward의 `RemoteForwardOpen` 재발행은 초안대로 **수동**으로 확정한다(자동 재발행 없음 — 같은 이관 항목의 일부).
+**세 층의 열거 테스트.**
+1. **계약 대조(L6)**: registry의 (op → action) 쌍이 `docs/CLI.md` §2.5 매핑 표와 정확히 일치. 문서에 있는 행이 registry에 없거나 그 반대면 실패(`tunnel_docs.rs`/`doctor_docs.rs` 선례).
+2. **인가 대조**: `Server::dispatch`의 `control_message::Body` variant 전수와 registry를 대조해, **인가가 필요 없는 variant는 명시 목록**(`Ping`·`Hello`·`SessionEvent`)에만 있고 나머지는 전부 registry에 있음을 단언. 새 wire variant가 생기면 이 테스트가 즉시 실패한다 — 그것이 M1 원칙 7(b)를 기계화하는 방법이다.
+3. **DoD 2 — audit 완전성**: registry의 각 항목을 **실제로 구동**해(허용 정책 1회 + 거부 정책 1회) `MemoryAuditSink`에 정확히 그 `action`의 레코드가 남았고 `decision`이 기대와 일치함을 단언. 레코드가 0건인 항목이 하나라도 있으면 실패. `Action::ALL` 중 항상-deny 3종은 아직 op이 없으므로 registry에 op 항목이 없고, 그 사실을 **명시 예외 목록**으로 선언한다(사유 문자열 포함 — `DEFERRED` 규율과 같은 형태로, 조용한 구멍이 되지 않게).
 
-**문서·README.** `README.md` 기능 목록에 터널(`-L`/`-R`, loopback-only remote, `-D` P1) 추가·Known limitations(비-loopback remote bind 없음·SOCKS 없음·UDP forwarding 없음·터널은 resume 안 됨, migration은 생존) 갱신. `docs/CLI.md`·`docs/design/protocol.md`·`docs/design/architecture.md`가 Step 1–7에서 갱신된 것과 최종 구현 사이 어긋남 없는지 마감 대조. **구속 문서 태그 대조**(ROADMAP §2 절차 1): `docs/CLI.md`·`docs/PRD.md`·`docs/adr/`에서 M4로 태그됐거나 M4가 계약으로 확정한 문장이 전부 DoD로 검증됐거나 후속 마일스톤에 명시 귀속된 유예인지 확인.
+**최종 동기화.**
+- `README.md`: "Security posture" 절이 정책 엔진을 전제로 다시 쓰인다(무엇이 기본으로 거부되는가, acl.toml을 어디에 두는가, CA peer의 지위, hot reload 부재, audit 회전·fail-closed의 운영 함의). "Known limitations"에서 "No policy engine before M5"를 제거하고 새 한계(정책 hot reload 없음, principal별 쿼터 없음 — M8, `audit.log_argv` 미구현)를 추가.
+- `docs/design/testing.md`: M5가 실제로 심은 테스트 층(정책 property·audit 수명주기·문면 전수·op registry)을 "현재 상태" 문단에 반영.
+- `docs/ROADMAP.md`: "현재 위치"와 M5 절 상태 표기 갱신은 **로드맵 문서 소유자의 몫**이다 — 이 계획은 지시만 하고 대신 수정하지 않는다.
 
 **(b) crate/모듈/파일:**
-- `crates/qsh-testkit/tests/tunnel_chaos.rs` (신규 — `repath()` 생존·`sever()` 정리, seeded)
-- `crates/qsh-testkit/src/tunnel.rs`, `src/reverse.rs` (확장 — 터널 다리에 chaos proxy)
-- `README.md`, `docs/CLI.md`, `docs/design/{protocol,architecture,testing}.md` (마감 대조·갱신)
+- `crates/qsh-core/src/acl/registry.rs` (신규 — `OpSpec`, `OP_REGISTRY`, 예외 목록)
+- `crates/qsh-core/src/server/mod.rs`·`reverse/admit.rs`·`tunnel/*` (수정 — 핸들러가 registry에서 action을 얻는다; 문자열·enum 하드코딩 제거)
+- `crates/qsh-core/tests/acl_registry.rs` (신규 — 위 3층 테스트)
+- `crates/qsh-core/tests/acl_docs.rs` (확장 — §2.5 표 대조)
+- `README.md`, `docs/design/testing.md`
 
-**(c) 빚지는 테스트 (`docs/design/testing.md` L4·L6):** L4 — chaos: `repath()` 중 터널 전송이 byte-loss 0으로 이어짐(migration 생존), `sever()` 후 in-flight 터널이 명확히 종료되고 **같은 연결의 PTY 세션은 §10으로 resume**함(공존), reverse 연결 사망 시 그 host의 터널 conduit 전량 typed error 종료. L6 — README/문서 문구와 코드 상수(예: `-D`의 "P1" 메시지, loopback-only 메시지)가 일치(M3 Step 9의 doctor-docs 게이트와 동형; 갈라짐 방지).
+**(c) 빚지는 테스트 (`docs/design/testing.md` L2·L6):** 위 3층. 더해서 Step 4의 전수 문면 테스트가 **같은 registry를 소비**하도록 리팩터(표 두 벌 금지). 그리고 registry가 비어 있거나 예외 목록이 registry를 통째로 삼키는 퇴화 상태를 실패로 처리하는 sanity 단언(예외 목록 크기 < registry 크기).
 
-**(d) 완료 판정:** 터널 resume/chaos 거동이 assertion으로 고정(migration 생존·sever 정리·PTY 공존). README·구속 문서가 M4 실태와 일치(태그 대조 통과). Windows leg nextest green. **DEFERRED 최종 판정:** M4 종료 시점의 `fixtures.rs` `DEFERRED` 상태를 §2 규율로 확정(어느 코드가 CLI envelope를 얻었고 어느 것이 유예인지).
+**(d) 완료 판정:** **DoD 2 green.** §1의 DoD 5항목 전건 통과가 실제 테스트 실행 로그로 확인됨. README·testing.md가 실태와 일치. `xtask arch` green. Windows leg nextest green. **DEFERRED 판정:** 무변경(Step 6이 이미 `PERMISSION_DENIED`를 뺐다).
 
-**(e) 인용:** `docs/design/protocol.md` §2(migration은 지연 최적화)·§10(세션 resume은 터널 비대상)·§11-3(conduit 사망), ADR-0004(replay 세션 전용), `docs/design/testing.md` L4(chaos `repath`/`sever`)·L6, `docs/CLI.md` §6.9·§6.13, `docs/ROADMAP.md` M4 범위·§2 마일스톤 마감 공통 절차, `docs/PRD.md` §13.
+**(e) 인용:** `docs/ROADMAP.md` M5 DoD 2(SC6)·§1 원칙 7(b)·§2 마감 공통 절차 1·2, `docs/PRD.md` §15 SC6("모든 privileged op의 ACL 추적성"), `docs/CLI.md` §2.4·§2.5(정본 매핑 표), `docs/design/architecture.md` §6(단일 choke point), `docs/design/testing.md` L6.
 
----
+## 3. 명시적 non-goals (M6+ / P1 유예)
 
-## 3. 명시적 non-goals (M5+ / P1 유예)
+`docs/ROADMAP.md` M5 절에는 "명시적 out" 항목이 없다 — 아래는 M5 범위·DoD 문면과 다른 조항에서 파생한 경계다. **경계를 적어 두지 않으면 정책 엔진은 무한히 자란다.**
 
-`docs/ROADMAP.md` M4 절 "명시적 out" 인용: **SOCKS `-D`(P1), file copy, UDP forwarding.**
+- **정책 hot reload / `SIGHUP` 재로드** — 정책은 프로세스 시작 시 1회 로드. 실행 중 파일 변경은 재시작까지 무효이며 이 사실을 명시 고지한다(Step 6). 재로드는 살아 있는 연결의 권한을 중간에 바꾸는 문제(=`trust remove`가 M7 감사 개정 ①에서 다루는 것과 같은 종류)를 열므로 그 결정과 함께 다뤄야 한다.
+- **principal별·forward별 할당량(쿼터)** — `RESOURCE_EXHAUSTED`로 강제되는 상한은 **M8 적대적 부하 게이트**의 것이다(`docs/ROADMAP.md` M8 감사 개정 ③: `[serve].max_sessions`·principal별 세션 쿼터). `docs/design/protocol.md` §7의 두 문장이 이것을 "M5 정책 엔진 범위"라고 적고 있으나 ROADMAP M5 DoD에는 대응 기준이 없다 — Step 1이 그 문장을 M8 귀속으로 **정정**한다(§4.1 #7). M5는 쿼터를 만들지 않는다.
+- **resource 패턴 매칭** — PRD §9의 정책 문법에는 principal과 action만 있다. "이 세션 id에만", "이 포트 범위에만" 같은 resource 조건은 M5에 없다. `resource`는 audit 기록과 `scope` 소유권 판정에만 쓰인다.
+- **deny rule / 순서 의존 정책** — 문법은 allow-only다. deny rule을 넣는 순간 순서 의미론과 "왜 거부됐는가"의 설명이 폭발하고, `qsh acl check`의 설명 가능성(architecture.md §6이 후행 `.*`만 허용하는 바로 그 이유)이 무너진다.
+- **principal 그룹·역할·상속** — `[[acl]]` 행은 principal 하나에 대응한다. 그룹은 P1 이상.
+- **`audit.log_argv` opt-in** — `architecture.md` §6이 유일한 예외로 이름 지어 두었으나 M5는 구현하지 않는다. argv를 레코드에 넣는 것은 "payload 무기록"의 타입 수준 속성을 깨는 변경이라 별도 결정(ADR 후보)이 필요하다.
+- **audit 원격 전송·syslog·구조화 sink 플러그인** — 파일 JSONL 하나뿐(`architecture.md` §6).
+- **`qsh doctor`의 ACL/audit 진단 항목** — doctor는 M7이다(`docs/ROADMAP.md` M7 범위). M5는 시작 시 진단만 내고, 그 상수를 M7 doctor가 소비할 수 있게 `qsh-core`에 둔다(`doctor::CONTROLLER_UNREACHABLE` 선례).
+- **MCP tool로서의 `acl.check` 노출** — MCP adapter는 M6다. Step 1이 정한 DTO가 M6에서 그대로 tool schema가 된다.
+- **`ControlLink`/`DataLink` enum → `Transport`/`StreamMux` trait 전환(ADR-0005 P0 부채)** — M3가 남기고 M4가 다시 넘긴 미이행 부채. M5도 트리거하지 않는다. 이 부채의 존재를 여기 재기록해 P1의 입력으로 넘긴다.
+- **SOCKS(`-D`)·file copy·UDP forwarding의 구현** — 그대로 P1/P2. M5가 하는 것은 `forward.socks`·`file.read`·`file.write` **어휘를 정의하고 항상 deny로 강제**하는 것까지다(`docs/ROADMAP.md` §3 유예 가드레일 표의 문자 그대로).
 
-추가로 M4 범위에 넣지 않는 항목(같은 문서의 다른 조항에서 파생):
+### M4가 넘긴 다섯 항목의 처리 (M4 PLAN §3 "M5에 넘기는 것")
 
-- **SOCKS5 dynamic forwarding(`-D`, P1)** — flag는 parsing되되 항상 `UNSUPPORTED`(Step 6). `forward.socks` ACL action은 M4가 만들지 않고 **M5가 "정의하되 항상 deny"로 승격**한다(`docs/ROADMAP.md` M5 범위). 리스너 bind·SOCKS 상태 기계 0줄.
-- **file copy(`file.read`/`file.write`)·UDP forwarding** — P1/P2. `file.*` 어휘도 M5가 "정의하되 항상 deny"로만 넣는다.
-- **non-loopback remote bind(ssh `GatewayPorts` 류)** — remote forward는 loopback-only(§9, DoD 2). 공인 인터페이스 bind는 P1 이상; M4는 non-loopback 요청을 `INVALID_ARGUMENT`로 **거부**만 한다.
-- **agent forwarding·X11 forwarding** — `docs/PRD.md` 명시적 out.
-- **ACL 정책 엔진(M5)** — `acl.toml` 로더·wildcard·`qsh acl check`. M4가 추가하는 것은 `Action::ForwardLocal`·`ForwardRemote` variant와 그 두 검사 지점뿐이고 정책은 여전히 `AllowAllPinned`.
-- **client-측 상주 터널 데몬(미확정)** — §4.1 #1이 forward 경로의 standalone `qsh tunnel open` holder를 foreground로 확정하면 M4는 새 client 데몬을 만들지 않는다. resident holder 모델(B안)이 채택되면 그것은 별도 범위로 명시 승격해야 하며 **silent addition 금지**.
-- **background service 설치·자동 시작** — M7 이후(`docs/PRD.md` 명시적 out).
-- **`ControlLink`/`DataLink` enum → `Transport`/`StreamMux` trait 전환(ADR-0005 P0 부채)** — M3가 남긴 미이행 부채. M4는 터널 스트림을 이 enum 위에 얹되 trait 전환을 **트리거하지 않는다**(P1 TCP가 세 번째 구현으로 올 때). 이 부채의 존재를 여기 재기록해 M5/P1의 입력으로 넘긴다.
-- **`session.signal`(wire 25)** — 그대로 P1 유예. Step 1은 `reserved 25`를 건드리지 않는다.
-- **실기기 mobility 캠페인의 터널 leg** — M8. M4의 chaos·perf 게이트는 기능적 정확성/비율 검증이지 SC3의 통계 측정이 아니다.
-
-**M5에 넘기는 것(지금 기록해 둔다):** (i) `forward.socks`·`file.*` 어휘의 "정의하되 항상 deny" 승격, (ii) `forward.local`/`forward.remote`의 TOML 정책 매칭(현재 검사 지점만 존재), (iii) 터널 관련 op 전수의 audit 완전성(SC6)이 M5의 op-registry 열거 테스트에 포함되는지 확인, (iv) reverse 경로 터널의 소유권 축(M3가 넣은 opener-principal 결합을 터널 `forward_id` 소유로 확장할지 — `tunnel.close`의 "소유 peer" 판정). (v) **forward-route live carrier** — `ForwardCarrier::Quic`의 스냅샷을 attach의 현재 `Link`를 추적하는 live 뷰로 교체해, holder가 살아 있는 -L forward가 recovery 후에도 신규 연결을 서비스하게 하는 것(Step 8 (a)-추기의 확정 유예; -R 자동 재발행 여부도 이때 함께 재론).
+| M4 이관 항목 | M5에서의 처리 |
+|---|---|
+| (i) `forward.socks`·`file.*` 어휘의 "정의하되 항상 deny" 승격 | **Step 1이 어휘를, Step 2가 강제를 진다.** 어휘만으로는 부족하다는 발견(wildcard `forward.*`가 socks를 삼킨다)이 Step 2의 "rule 매칭 이전 게이트" 설계의 근거다. |
+| (ii) `forward.local`/`forward.remote`의 TOML 정책 매칭 | **Step 2(평가기) + Step 6(전환)이 진다.** 두 action은 이미 `Action::ALL`에 있으므로 새 어휘가 아니라 정책이 그것을 매칭하게 되는 문제다. |
+| (iii) 터널 관련 op 전수의 audit 완전성(SC6)이 op-registry 열거 테스트에 포함되는가 | **Step 8이 진다 — 그리고 답은 "포함돼야 하며, 지금은 구멍이 있다"다.** `handle_rfwd_close`(`server/mod.rs:2377`)는 인가도 audit도 없다. Step 5가 그 갭을 닫고 Step 8의 registry가 재발을 막는다. |
+| (iv) reverse 경로 터널의 소유권 축(`forward_id` 소유로 확장할지) | **Step 5가 진다, 축을 나눠서.** host 쪽 `forward_id` 소유는 principal 축으로 승격하고 정책이 본다. 데몬 쪽 conduit 소유(`ControlHub`의 `owner: ConduitId`)는 **로컬 머신 축**이라 그대로 둔다 — 두 축의 직교성은 `docs/design/protocol.md` §11-3이 이미 명문화했고, 합치려는 시도는 비목표다. |
+| (v) forward-route live carrier(`ForwardCarrier::Quic`의 스냅샷 → live 뷰) | **M5 범위 밖 — 재유예한다.** ROADMAP M5의 범위·DoD 어디에도 터널 carrier 항목이 없고, 이것은 ACL/audit이 아니라 터널 recovery 의미론의 설계 변경이다(`ops/session.rs` `Link`·`tunnel/local.rs` `ForwardCarrier`·`ops/tunnel.rs`·reverse acceptor를 관통). M4가 이 거동을 이미 테스트로 고정했고(`tunnel_chaos.rs`의 개정 강제 트랩) README가 사용자에게 고지하고 있으므로 **조용히 사라지지는 않는다.** §5 마감 절차가 이 항목을 `docs/ROADMAP.md` §3 유예 가드레일 표(또는 M8 백로그)에 **소유자를 지정해 등재**할 것을 요구한다 — PLAN.md에서 PLAN.md로만 전달되면 언젠가 증발한다. `-R`의 자동 재발행 없음도 같은 항목의 일부로 함께 등재한다. |
 
 ## 4. 리스크와 감시 항목
 
-`docs/ROADMAP.md` §4 "일정 리스크" 및 architecture.md §9 중 M4 직결 항목 + M4 고유 감시:
+`docs/ROADMAP.md` §4 "일정 리스크" 및 architecture.md §9 중 M5 직결 항목 + M5 고유 감시:
 
-- **인가 전 리소스 생성(가장 값비싼 오류).** 터널은 리소스 생성 지점이 **둘**(remote bind=choke point / local dial=스트림 inline)이라 M3보다 표면이 넓다. 감시: (a) `DenyAll` 하에서 `RemoteForwardOpen`이 bind 0·`TCP_CONNECT`이 dial 0임을 **계측 mock으로 단언**하는 테스트가 살아 있는가(구두 약속이면 지켜지지 않는다), (b) local forward의 inline 검사가 `ConnectResult` 이전이고 거부 시 dial 0이고 §7의 거부 teardown으로 종단되는가, (c) `fuzz_stream_header`의 "ACL 미통과 경로에서 리소스 생성 0" 불변식에 터널 socket이 포함되는가.
-- **loopback-only 우회.** DoD 2의 핵심. 감시: `bind_host` 해석 후 loopback 판정이 문자열 비교가 아니라 실제 주소 분류인가(`localhost`→`127.0.0.1`, `0.0.0.0`/`::` 거부), 그리고 `forward.remote`를 가진 principal도 non-loopback을 통과 못 하는가(ACL과 제약의 분리).
-- **remote forward 리스너 개수가 M4에서 무제한이다.** `forward.remote`를 가진 principal이 `RemoteForwardOpen`을 반복해서 보내면 매번 새 TCP listener·fd·`serve_remote_forward` task가 뜬다. `docs/design/protocol.md` §7의 "동시성 상한"(`MAX_CONCURRENT_BIDI_STREAMS = 1024`)은 concurrent `TCP_CONNECT`/`TCP_ACCEPTED` **스트림** 수만 묶을 뿐 listener 개수에는 적용되지 않는다 — 확인 완료(§7 본문에 이 구분을 명문화했다). principal별·forward별 할당량은 M5 정책 엔진 범위(§3 non-goals)이고 M4는 만들지 않는다. 감시: M5 착수 시 이 갭이 실제로 할당량 설계 입력에 들어가는가, 그 전까지 이 무제한이 CHANGELOG/보안 노트 등 사용자 대면 문서에서 조용히 "완료"로 읽히지 않는가.
-- **터널 relay의 조용한 오배송(reverse 경로).** M3 mux와 같은 종류 — 한 CLI의 `forward_id` 스트림이 다른 CLI conduit으로 splice되면 **터널 내용이 잘못된 프로세스로 새는 보안 사건**이다. 감시: Step 5의 "두 conduit 교차 splice 0건" 적대적 테스트가 살아 있는가, conduit 사망 시 `forward_id` 등록표가 전량 정리되는가(누수 금지). 이 코드는 M8 stateful fuzzer 후보로 백로그에 남긴다.
-- **`-R over reverse`의 스트림 방향 혼동.** target(host)이 여는 `TCP_ACCEPTED`가 reverse 연결 위를 흘러 데몬을 거쳐 CLI로 가는 경로가 정확한가. 감시: Step 1이 이 매핑을 protocol.md §11-3에 명문화했는가, Step 5의 `-R over reverse` L3 테스트가 실제로 존재하고 forward/reverse 파라미터화로 role 독립성을 증명하는가.
-- **터널 payload 로그 금지.** splice는 순수 파이프 — 파싱도 로그도 하지 않는다. 감시: `qsh::tunnel` 진단이 host:port·forward_id·이벤트만 담고 payload byte를 담을 **필드 자체가 없는가**(M3 audit의 타입 수준 속성과 동형).
-- **perf 게이트의 flake와 CI 시간.** DoD 3·4는 `acceptance` job에만 있고 PR 유닛에는 없다(testing.md L10). 감시: 비율 게이트가 절대값이 아니라 비율인가(runner 무관), echo 게이트가 loopback RTT를 실측하는가(외부 상수 금지), PR 유닛 총시간이 M3 대비 유의미하게 늘지 않는가.
-- **우선순위/window 튜닝이 세션을 해치지 않는가.** Step 2가 비대칭 window·BBR를 켜면서 세션 backpressure·resume 거동이 바뀌면 M2/M3의 자산을 깨는 것이다. 감시: Step 2 완료 판정의 "기존 테스트 무수정 green".
-- **Windows leg.** 터널 host/relay 경로는 `cfg(unix)` 위에 선다. 감시: 전 타깃 clippy green과 **Windows leg의 nextest green**이 매 step 완료 조건에 있는가, client-측 `-L` 로컬 bind의 Windows 가능 여부가 §4.1 #1 결정과 일관되게 처리됐는가.
-- **holder 수명 모델(§4.1 #1)의 파급.** foreground form으로 확정됐으므로 Step 3·5의 CLI 표면·Windows 거동·`tunnel close`/`tunnels` 의미가 이 결정에 정합해야 한다. 감시: Step 1이 이 결정을 `.proto`·정본 문서에 **실제로 못박는가**(구현이 뒤에서 resident holder를 발명하지 않기).
-- **M3 자산의 flake가 M4 step 완료를 막는 경우(Step 3에서 실측).** `qsh-cli::attach_ops a_teardown_waits_out_a_detach_that_is_still_flushing`이 Step 3 CI의 `ubuntu-24.04-arm` leg만 red로 만들었다. Step 3 회귀가 아니라 M3 테스트 자체의 결함이다. 원인은 `waited >= 1s`라는 벽시계 단언인데, detach의 flush가 2초(`DETACH_FLUSH`)를 쓰는 것은 드라이버가 detach 마커를 실제로 읽었을 때뿐이고, 드라이버가 이미 반환한 뒤라면 ack 채널이 끊겨 `recv_timeout`이 즉시 `Disconnected`를 준다. 이것도 정상 detach다. 단언을 시간이 아니라 순서로 바꿔 고쳤다(close는 detach가 gate를 놓은 뒤에만 반환한다). 남은 감시: 같은 드라이버-부재 상황에서 사전조건 루프의 `!detacher.is_finished()` 단언이 대신 터질 수 있다. CI에 나타나면 degenerate한 setup을 실패로 처리하지 말고 그 자체를 다뤄야 한다.
-- **audit 기록이 '요청한 주소'지 '실제로 bind한 주소'가 아니다(Step 4 적대적 검토 잔여).** `forward.remote` 인가는 `bind_host:bind_port`를 요청 그대로 평가한다. 이건 맞다 — 커널이 배정한 ephemeral 포트를 알려면 먼저 bind해야 하고, 그건 '인가 전 리소스 생성 금지'를 정면으로 어긴다. 문제는 판정이 아니라 흔적이다. `RemoteForwardOpen{bind_host:"localhost", bind_port:0}`은 audit에 `localhost:0`으로 남지만 실제로 뜬 소켓은 `127.0.0.1:<ephemeral>`이라, 사고 조사에서 기록만 보고는 무엇이 열렸는지 알 수 없다. 인가 기록은 지금 형태를 유지하고, bind 성공 시점의 실제 주소를 남기는 구조적 기록을 Step 5에서 더한다(`qsh tunnels`가 bind된 주소를 사용자에게 보여주기 시작하는 지점이라 같은 정보가 어차피 필요하다). payload는 여전히 남기지 않는다.
-
-- **PR 5a 최종 회귀 검사의 잔여 findings — 전부 가용성, isolation 아님(기록 확정).** 세 라운드의 적대적 검증 끝에 격리 불변식 4개(같은 lock 안의 admits_claim+pop, sealed ClaimSeat, 양방향 owner-checked close, 단일 forwards map)는 유지가 확인됐다. 남은 것들:
-  - **per-conduit share가 principal이 아니라 conduit 단위다(F1).** 한 CLI 프로세스가 LOCAL_CONTROL conduit을 여러 개 열면(상한 256) share를 우회해 hub pool 전체를 채울 수 있다. protocol.md §11-3의 "conduit(=CLI 프로세스)" 괄호는 코드가 강제하지 않는 등식이다. principal 단위 할당량은 M5 정책 엔진의 입력 — 리스너 무제한 항목과 같은 설계 회의에서 다룬다.
-  - **동시 `-R` 8개 상한과 그 너머의 조용한 실패(F3), tunnel-stream pool의 share 부재(F4).** 둘 다 M5 할당량 설계 입력. F3은 9번째 forward가 경합에서 계속 지는 동안 사용자에게 warn 로그 외 아무 신호가 없다는 UX 문제를 포함한다 — 5b의 `qsh tunnels`가 상태를 보여주기 시작하면 재평가.
-  - **unregister가 pending_rfwd_open_claim_tokens를 즉시 안 지운다(F6, 위생).** 성장 누수는 아니고 (target 응답 시 정리) 토큰 바이트가 쓸모없어진 뒤에도 잠시 상주하는 문제.
-  - **NotOwner 응답이 forward_id 존재 oracle이 될 수 있다(F7, 정보성).** forward_id가 128-bit ULID라 지금은 무해. 5b가 `LocalTunnelList`로 id를 노출하기 시작하면 permit 과금이 owner 기준이라는 점과 함께 재검토할 것.
-  잔여 중 즉시 수정 대상 2건(F5 registration 스쿼팅 가드, F2 고아 parked claim의 permit 누수)은 5a 후속 커밋으로 처리한다 — 기록만 하고 넘어가기엔 상주 데몬의 수명에 직접 닿는다.
-- **PR 5b 처리 기록과 신규 백로그(2026-08-25).** F5·F2는 후속 커밋으로 수정 완료(48fc38f). F7은 5b가 `LocalTunnelList`로 same-uid 조회 경로를 정식 제공하면서 무의미해졌다(코드 주석에 기록). F3은 여전히 열려 있다 — `LocalTunnel`에 liveness field가 없어 listing만으로는 기아 상태를 못 보인다(M5 할당량 설계에서 wire field 추가와 함께). 신규 백로그 1건: **죽은 claim conduit의 재수립 op이 없다(P1).** reverse `-R`의 CLI가 죽으면 listener는 데몬에 살아남지만 claim conduit이 없어 이후 `TCP_ACCEPTED`는 전부 즉시 reset된다. 같은 `forward_id`를 다시 claim하려면 `RemoteForwardOpen`이 기존 id를 받아들이는 새 wire 의미가 필요해 5b 범위 밖이었다(CLI.md §6.14가 "그런 op은 아직 없다"로 명문화). 현재 유일한 회복 경로는 `tunnel close` 후 새 `-R`. P1에서 wire 설계와 함께 다룬다.
+- **정책이 켜지는 순간 무언가가 조용히 넓어진다(가장 값비싼 오류).** M5의 위험 방향은 M4와 반대다 — M4는 "인가 전에 리소스를 만들까"였고 M5는 "정책이 의도보다 많이 허용할까"다. 감시: (a) `auth_path` 기본값이 `pin`이라 CA peer가 자동으로 권한을 얻지 않는가(§4.1 #2), (b) `scope` 기본값이 `owned`라 M3의 소유권 P0가 보존되는가(§4.1 #3), (c) 항상-deny 3종이 **어떤 wildcard로도** 통과하지 못하는가, (d) 테스트 하네스가 편의를 위해 allow-all 기본값을 심어 (a)–(c)를 무력화하지 않는가 — Step 6의 하네스 변경은 **명시 정책 심기**여야 하고 테스트 전용 우회 기본값이어서는 안 된다.
+- **acl.toml이 새로운 신뢰 입력 표면이다.** 지금까지 host가 파싱하는 신뢰 불가 입력은 wire뿐이었고 그것은 sans-IO `qsh-proto`에 격리돼 fuzz된다. acl.toml은 **운영자가 쓰는** 파일이라 적대적 입력은 아니지만, 파싱 실패의 처리(부분 로드 금지·fail closed)와 자원 소비(거대한 rule 배열)는 여전히 문제다. 감시: 부분 로드 경로가 존재하지 않는가, rule 수·패턴 길이에 상한이 있는가, 평가가 rule 수에 선형이고 요청당 파일 I/O가 0인가(시작 시 1회 로드).
+- **audit fail-closed가 서비스 거부 벡터가 된다.** 디스크를 채울 수 있는 상대(또는 그저 가득 찬 디스크)가 host 전체를 거부 상태로 만든다. 이것은 ROADMAP이 의도한 트레이드오프이지만(감사 없는 서비스보다 서비스 없는 감사가 낫다) 그 대가는 **문서화돼야** 한다. 감시: README·`architecture.md` §6에 이 트레이드오프가 명시됐는가, degraded 진입이 운영자에게 즉시 보이는가(stderr 1회 + M7 doctor 후보), 회전·retention이 디스크를 유계로 만들어 자기 유발 DoS를 줄이는가, M8 적대적 부하 게이트 ④("M5가 구현한 audit 수명주기의 부하 하 검증")가 이 항목을 입력으로 받는가.
+- **`acl check`와 enforcement의 분기(DoD 1의 핵심 위험).** "지금은 같다"는 코드 리뷰의 주장이지 불변식이 아니다. 감시: 평가 진입점이 프로덕션에 정확히 하나인가(grep으로 확인 가능한 형태로 유지), Step 7의 3-way 표(check · 실제 거동 · audit 레코드)가 살아 있는가, 새 op을 추가할 때 표에 행이 강제로 늘어나는 구조인가.
+- **op registry가 문서와 갈라진다.** registry는 CLI.md §2.5 매핑 표의 코드 복제본이고, 복제본은 갈라진다. 감시: L6 문서 대조 테스트가 양방향(문서→코드, 코드→문서)인가, 새 wire variant가 registry 없이 dispatch에 추가될 수 있는가(불가능해야 한다).
+- **거부 문면 통일이 로컬 진단까지 지운다.** ③의 과잉 적용 위험. 감시: 전수 테스트의 대상이 "원격 peer 대면 거부"로 정의됐는가, localctl `NotOwner` 문면이 의도적으로 남았음을 테스트가 고정하는가.
+- **`Authorizer::check` 시그니처 변경의 파급(Step 2).** trait 반환 타입이 바뀌면 네 호출 지점과 모든 테스트 double이 함께 움직인다. 감시: Step 2의 diff가 **순수 기계적**인가(판정 로직이 그 커밋에서 바뀌면 리뷰가 불가능해진다), `AllowAllPinned`가 여전히 정확히 같은 판정을 내는가.
+- **기존 통합 스위트의 암묵 전제(Step 6).** "pinned면 다 된다"를 전제한 테스트가 다수다. 감시: 어느 테스트가 정책을 심게 됐는지 PR 본문에 목록이 있는가, 그 목록이 "정책을 심어야 할 곳"과 "정책 없이도 통과해야 할 곳(=거부를 단언하는 테스트)"을 구별하는가.
+- **SC7 외부 보안 리뷰 예약(`docs/ROADMAP.md` §4 리스크 5).** "리뷰는 M5 시점에 예약하고 wire format을 리뷰 ~6주 전에 freeze"가 명시돼 있다. 코드 작업이 아니라 **일정 작업**이며 M5 안에서 잊히기 쉽다. §5 마감 절차에 항목으로 넣었다.
+- **Windows leg.** M5 코드 대부분이 플랫폼 무관이라는 것이 오히려 함정이다 — audit 회전의 rename/unlink와 파일 모드는 `cfg(unix)` 분기를 갖고, `acl check`는 **Windows에서도 동작해야 한다**(정책 파일 읽기와 순수 평가뿐이므로 unix 분기가 있으면 그것이 버그다). 감시: 매 step 완료 조건에 Windows nextest green이 있는가.
 
 ### 4.1 이 계획이 확정한 결정 (Step 1이 정본 문서에 기록한다)
 
 | # | 질문 | 초안 결정 | 정본 | 확정도 |
 |---|---|---|---|---|
-| 1 | `qsh tunnel open`이 operation(즉시 envelope)인가 foreground blocking인가 / forward 경로에 client 상주 데몬이 필요한가 | **초안:** DoD 1/2는 **interactive `qsh [user@]host -L/-R` foreground form**(PRD §131-135)이 마감(새 데몬 불요). standalone `qsh tunnel open`은 foreground blocking(envelope 1줄 출력 후 hold), reverse 경로는 상주 `qsh listen` 데몬이 holder. `qsh tunnels`/`tunnel close`는 데몬 있는 경우(reverse)에 완전, forward foreground는 SIGTERM/close로 종료 | CLI.md §6.9·§2.4, PRD §11·§13 | **확정**(main 채택: foreground form이 DoD 1/2 마감, 새 client 데몬 불요; 상주 holder는 별도 범위 승격 필요) |
-| 2 | `reserved` 태그를 채우는 것이 additive 위반인가 | 아니다 — `ControlMessage 40/41`·`Response 4`는 주석이 이미 "(M4)"로 이름을 박아 둔 예약의 실현(M3 `Hello.reverse`와 동형) | wire/v1.proto 머리말, protocol.md §9 | 확정 |
-| 3 | local forward 리스너의 client-측 bind 기본값 | 기본 loopback bind. non-loopback local bind(다른 기기가 이 로컬 포트를 쓰게)의 정책은 M4 범위 밖(loopback 고정, 필요 시 P1) | CLI.md §6.9, PRD §13 | 확정(main 채택: loopback 기본) |
-| 4 | `-R over reverse`의 스트림 방향 매핑 | controller(client role)가 `RemoteForwardOpen`을 target(host)에게 보냄 → target이 loopback bind → target이 `TCP_ACCEPTED{forward_id}`를 **reverse 연결 위로** 열고 데몬이 등록한 CLI conduit으로 relay. `-L over reverse`는 대칭(controller가 로컬 bind, `TCP_CONNECT`을 데몬 relay로 target에) | protocol.md §11-3, §7 | 확정(문서화 필요) |
-| 5 | loopback 아닌 remote bind의 오류 코드 | `INVALID_ARGUMENT`(요청 제약 위반 — 같은 principal이 `forward.remote`를 가져도 통과 못 함; ACL 판정이 아니다). `UNSUPPORTED`가 아닌 이유: 기능 미구현이 아니라 정책상 금지 | CLI.md §3.3, PRD §9 | 확정(main 채택: `INVALID_ARGUMENT` — 정책상 금지이지 미구현 아님) |
-| 6 | 터널 데이터 conduit의 localctl kind | 새 `LocalStreamKind` 없음 — M3의 `LOCAL_STREAM`(다음 frame이 wire `StreamHeader`)을 재사용(`TCP_CONNECT`/`TCP_ACCEPTED`도 같은 conduit). `StreamKind`에 UDS 전용 값 추가 금지(§4.1 #6 M3 규율 상속) | protocol.md §11-3, local/v1.proto | 확정 |
-| 7 | perf DoD를 무엇이 게이트하나 (testing.md L10 "PR 게이트 금지" vs protocol.md §12 "CI 조기 도입" vs ROADMAP M4 DoD) | **비율 throughput(same-process)과 echo-under-load p95 모두 `acceptance` job 상시 게이트**(M3 60초 blackout 선례), PR 유닛에는 저비용 smoke만. testing.md L10을 이 취지로 **개정**(문서 먼저) — 절대 throughput 추세만 nightly | testing.md L10, protocol.md §12, ROADMAP M4 DoD 3·4 | 확정(main 채택; testing.md L10 개정은 Step 7 적용 — Step 1–6 동안 veto 가능) |
-| 8 | `ConnectResult`가 proto에 없다 | Step 1이 신규 정의(§7 표가 산문으로만 참조하던 것). frame layer §5 재사용, ok 이후 raw bytes | protocol.md §7, wire/v1.proto | 확정 |
-| 9 | 새 ErrorCode가 필요한가 | 아니다 — `UNSUPPORTED`·`PERMISSION_DENIED`·`INVALID_ARGUMENT`·`RESOURCE_EXHAUSTED`·`CONNECTION_FAILED`·`HOST_NOT_FOUND` 전부 §3.3에 이미 있음 | CLI.md §3.3, error.rs | 확정 |
-| 10 | `-L`/`-R`가 세션까지 여는가 | interactive `qsh [user@]host -L/-R`는 `SessionOpen`을 보냄(CLI.md §6 line 634 — 세션 + 터널). standalone `qsh tunnel open`은 bare host(세션 없음, 터널만) | CLI.md §7·§6.9 line 634 | 확정 |
+| 1 | acl.toml이 없는 채로 업그레이드한 사용자에게 무슨 일이 일어나는가 | **전량 deny.** `architecture.md` §6이 이미 "없거나 파싱 불가 → 전부 deny + 운영자에게 `CONFIG_ERROR`"로 정해 두었다. 대신 (a) 시작 시 파일 경로·복사 가능한 최소 정책을 포함한 진단 1회, (b) **자동 생성 금지**(allow-all-pinned를 파일로 굳히는 것은 interim을 영구 권한으로 승격하는 silent addition), (c) `qsh acl check`로 재시작 전 검증 | architecture.md §6, PRD §9, CLI.md §6.12·§6.13, README | **확정 — main 세션 승인 (2026-08-27).** 정본이 이미 pin한 결정의 이행이며, 사용자 대면 파괴성은 Step 6의 마이그레이션 3종(진단·자동생성 금지·사전 검증)이 짊어진다 |
+| 2 | 정책 행이 pin/CA 경로를 구별하는가 | 구별한다. `[[acl]]`에 optional `auth_path = "pin"\|"ca"`, **생략 시 `"pin"`**. 근거: `Principal` 하나로는 pin과 CA를 구별할 수 없고(`AuthPath` 문서), `opener_key`가 이미 같은 이유로 auth_path를 소유권 키에 접어 넣었으며, 기본을 `"pin"`으로 두면 M1–M4가 실제로 허용하던 경계가 그대로 보존된다 | PRD §9, architecture.md §6, protocol.md §3, `acl/mod.rs` 머리말 | **확정 — main 세션 승인 (2026-08-27).** acl.toml 자체가 M5 신설 표면이라 additive 문제가 없고, 기본 `"pin"`이 기존 실효 경계를 보존한다. Step 1이 PRD §9 예시를 이 키까지 포함해 갱신한다 |
+| 3 | 소유권을 정책이 어떻게 표현하는가 | rule 키 `scope = "owned"(기본) \| "any"`. 소유자 있는 리소스(세션·remote forward)에만 적용. 기본 `"owned"`가 M3의 P0 결합을 그대로 재현하고 `"any"`는 명시 확대 | ROADMAP M5 감사 개정 ②, M3 감사 개정 ②, PRD §6 | 초안 확정 |
+| 4 | acl.toml 부재/파손을 **원격 peer**가 알 수 있는가 | 없다. peer에게는 언제나 균일 `PERMISSION_DENIED`가 나가고 `CONFIG_ERROR`는 **운영자 대면**(stderr 진단·`qsh acl check`)에만 나타난다. architecture.md §6의 "운영자에게 `CONFIG_ERROR` 노출"을 이 뜻으로 읽는다 — peer에게 노출하면 그것이 곧 host 설정 상태 oracle이다 | architecture.md §6, ROADMAP M5 감사 개정 ③ | 확정 |
+| 5 | `forward.socks`/`file.*` 거부의 오류 코드 | `PERMISSION_DENIED`(정책상 항상 거부). `-D` **플래그** 자체가 내는 `UNSUPPORTED`(M4 Step 6, 기능 미구현)와는 층이 다르며 둘 다 유지된다 — CLI는 플래그 단계에서 `UNSUPPORTED`로 끝나므로 action은 실무상 도달하지 않지만, wire로 직접 말하는 peer에게는 action 게이트가 답한다 | CLI.md §3.3·§6.9, ROADMAP §3 유예 가드레일 | 확정 |
+| 6 | 정책 로딩 시점 | 프로세스 시작 시 1회. lazy load 금지(첫 요청 시 로드하면 "판정 불가" 창이 생기고 그 창의 fail-open이 M1부터의 불변식을 깬다). hot reload는 §3 비목표 | architecture.md §6, CLAUDE.md fail-closed | 확정 |
+| 7 | 터널 할당량(principal별·forward별)은 M5인가 M8인가 | **M8.** ROADMAP M5 DoD에 쿼터 기준이 없고 M8 감사 개정 ③이 `[serve].max_sessions`·principal별 쿼터를 소유한다. `protocol.md` §7의 "M5 정책 엔진 범위" 두 문장을 Step 1이 M8 귀속으로 정정한다(문서를 먼저 고친다). **정정은 삭제가 아니라 이관이다** — 같은 커밋에서 `docs/ROADMAP.md` M8 감사 개정 ③의 범위 문장에 터널 전용 할당량(principal별·forward별 + remote-forward listener 개수 상한, protocol.md §7의 무상한 갭)을 명시 추가해 소유자를 함께 옮긴다. 무소유 갭 금지 | ROADMAP M5 DoD·M8 감사 개정 ③, protocol.md §7 | **확정 — main 세션 승인 (2026-08-27),** 좌측의 이관 조건부 |
+| 8 | `Authorizer::check`가 rule index를 돌려주도록 시그니처를 바꾸는가 | 바꾼다(`Decision` → `Verdict{decision, rule}`). `AuditRecord.rule`이 M5+로 예약된 채 비어 있고 `acl check`가 같은 값을 보여야 하므로 판정과 rule은 한 번에 나와야 한다. Rust 내부 API이지 계약이 아니다 | audit.rs `rule` 필드 문서, architecture.md §6 | 확정 |
+| 9 | `acl.check`를 원격 peer가 호출할 수 있는가 | 없다. 로컬 operation이며 §2.5의 "인가 불요" 행에 들어간다. 원격 정책 조회는 그 자체가 capability 열거 oracle | CLI.md §2.5, ROADMAP M5 감사 개정 ③ | 확정 |
+| 10 | 거부 문면 통일의 대상 범위 | **원격 peer 대면 거부만.** localctl(same-uid 로컬 프로세스) 거부는 인가 계층이 아니라 로컬 머신 신뢰 경계라 통일 대상이 아니며, 그 경계를 테스트로 고정한다 | protocol.md §11-3, architecture.md §6 | 확정 |
 
-### 4.2 구현 중 확정할 값 (측정 후 상수화)
+### 4.2 구현 중 확정할 값 (측정·검토 후 상수화)
 
-문서가 값을 정하지 않았고 계약도 아닌 것들. 구현 시 정하고 **해당 step의 (a)에 실측 근거와 함께 추기**한다: 터널 스트림 receive window(**확정**: connection-wide 2 MiB + splice 송신측 depth cap 128 KiB — 수신측 per-kind 비대칭은 quinn 0.11에 API가 없어 불가, Step 7 (a)-추기와 `protocol.md` §12 참조), `MAX_TUNNEL_STREAMS_PER_HUB`(reverse relay 상한, 초안 M3 `MAX_INFLIGHT_LONG_POLL_PER_HUB`과 정합), `-D`의 정확한 "P1" 메시지 문구(**확정**: "SOCKS dynamic forwarding (-D) is a P1 feature", `qsh-core`의 `DYNAMIC_FORWARD_UNSUPPORTED_MESSAGE` — Step 6), non-loopback `-R` 거부 메시지 문구, remote forward 리스너의 연결-손실 시 자동 재발행 여부(초안: 요청자가 재연결 후 재발행 — 자동 아님), DoD 3의 80% 마진에 대한 flake 여유(**확정**: strict 0.80·smoke 0.50 초안 그대로 — 최종 상수 실측 ratio 0.90±0.03, Step 7), DoD 4의 1GB를 시간-유계로 대체(**확정**: 15s 시간-유계 + MIN_SAMPLES=200 floor — Step 7).
+문서가 값을 정하지 않았고 계약도 아닌 것들. 구현 시 정하고 **해당 step의 (a)에 근거와 함께 추기**한다:
+
+- **균일 거부 문면의 최종 문안** (초안 `"peer is not allowed to perform this operation on this host"`) — Step 4. action·리소스·principal 어느 것도 담지 않는다는 성질만 불변이다.
+- **`[audit].max_bytes` / `retain` / `queue_depth` 기본값** (초안 64 MiB / 5 / 1024) — Step 3. `max_bytes * (retain+1)`이 상시 디스크 예산이므로 두 값은 같이 정한다.
+- **정책 파일 상한** (rule 수·행당 패턴 수·문자열 길이) — Step 2. 운영자 파일이라 적대적이지는 않지만 상한 없는 파싱은 두지 않는다.
+- **`forward_id` 소유가 principal 기준인가 connection 기준인가** (초안: principal — `docs/CLI.md` §2.5의 "소유 **peer**"의 문자 그대로, 같은 principal의 다른 연결도 close 가능) — Step 5. 이 선택은 사용자 가시적이므로 §6.9/§6.14 문안 갱신을 동반한다.
+- **`qsh acl check`의 `--owner` 표면을 M5에 넣는가** (초안: 넣는다 — `scope` 판정을 설명할 수 없으면 DoD 1의 "표 기반 증명"이 소유권 행을 커버하지 못한다) — Step 7.
+- **시작 진단이 최소 정책 예시에 실제 peer 이름을 채우는가** (초안: 채운다 — trust store의 pinned peer가 이미 로컬 정보이고, 붙여넣기 가능한 예시가 마이그레이션 마찰을 실제로 줄인다) — Step 6. 다만 진단은 stderr이고 stdout 순수성을 해치지 않는다.
+- **audit degraded 래치의 해제 조건** (초안: 다음 성공적 쓰기 — 주기적 재시도 없이 다음 결정 시도에서 자연히 재시도된다) — Step 3.
+
+### 4.3 크기 정직성 — 2ew에 들어가는가
+
+ROADMAP M5 크기는 **2ew**다. 이 계획이 세는 작업은 (i) 본 범위 4덩이(로더·평가기·`acl check`·구조화 audit), (ii) 감사 개정 3축(수명주기·소유권·문면), (iii) M4 이관 4건(다섯 번째는 §3이 재유예), (iv) 전환의 하네스 파급이다. **정직한 평가: 감사 개정 ①(audit 수명주기)과 ②(소유권 축)를 각각 온전한 step으로 세우면 2ew를 넘는다.** M3가 감사 개정분에 +0.5ew를 별도 계상한 선례가 있다(`docs/ROADMAP.md` M3 "크기: 2ew + 0.5ew(감사 개정분)").
+
+범위를 **줄이자는 제안이 아니다** — ROADMAP 수용 기준은 정의상 DoD이고 감사 개정분은 그 안에 들어 있다. 제안은 두 가지다.
+1. **크기 표기를 실태에 맞춘다.** `docs/ROADMAP.md` M5의 "크기: 2ew"를 M3와 같은 형식(`2ew + Xew(감사 개정분)`)으로 갱신할 것을 로드맵 소유자에게 제안한다. 이 계획은 로드맵을 대신 수정하지 않는다.
+2. **압박이 오면 잘라낼 곳은 정해져 있다.** 우선순위는 **Step 1·2·3·4·6·8 > Step 5 > Step 7의 부가 표면**이다. 근거: DoD 5항목 중 Step 5(소유권 축)만이 DoD 문면에 직접 대응하는 항목이 없고(감사 개정 ② 자체는 범위 문장이지 수용 기준 문장이 아니다), 나머지는 전부 DoD 하나씩을 마감한다. 다만 Step 5를 미루면 `handle_rfwd_close`의 무인가·무audit 갭이 남고 그것은 **DoD 2(SC6 registry)가 실패로 잡는다** — 즉 Step 5를 잘라내는 선택은 DoD 2를 통과시키기 위해 registry에 예외를 파는 것을 뜻하며, 그것은 조용한 축소다. **따라서 Step 5는 잘라낼 수 있는 것이 아니라 "미루면 DoD 2가 막는" 항목으로 취급한다.** 실제로 잘라낼 여지는 Step 7의 `--owner` 표면과 Step 3의 `queue_depth` 튜닝 정도뿐이며, 그 이상은 마일스톤 재정의다.
 
 ## 5. 완료 절차
 
-1. §1의 DoD 체크리스트 5항목 전건 통과를 **실제 테스트 실행 로그**로 확인한다(체크박스는 근거가 green일 때만; 각 항목에 "어느 Step이 심고 어느 테스트가 무엇을 단언하는지"를 M3본과 같은 상세도로 적는다). DoD 3·4의 perf 게이트는 `acceptance` job 성공 로그가 정본.
-2. **구속 문서 태그 대조**(ROADMAP §2 절차 1): `docs/CLI.md`·`docs/PRD.md`·`docs/adr/`에서 M4로 태그됐거나 M4가 계약으로 확정한 문장이 전부 DoD로 검증됐거나 후속(M5) 유예로 명시 귀속됐는지 전수 대조. 어느 쪽도 아닌 문장이 하나라도 있으면 M4를 닫지 않는다.
-3. **README 동기화**(ROADMAP §2 절차 2): 기능 목록·Known limitations·인터임 위험 고지를 M4 실태와 일치. 인터임 고지가 실제 권한보다 좁으면 그 자체가 결함.
-4. `docs/ROADMAP.md`의 "현재 위치" 줄과 M4 절 상태 표기를 "M4 완료"로 갱신(로드맵 문서 소유자의 몫 — PLAN.md는 지시만 하고 대신 수정하지 않는다).
-5. Step 1·7·8이 갱신한 정본 문서와 최종 구현 사이 어긋남 최종 대조 — 어긋나면 **문서를 먼저 고치고** 코드를 맞춘다(각 문서 머리말 규칙).
-6. 이 PLAN.md를 M5("ACL 정책 + audit") 실행 계획으로 전면 교체 — 과거 M4 계획은 git 이력에만. §3의 "M5에 넘기는 것" 네 항목을 그 계획의 입력으로 옮긴다.
+1. §1의 DoD 체크리스트 5항목 전건 통과를 **실제 테스트 실행 로그**로 확인한다(체크박스는 근거가 green일 때만; 각 항목에 "어느 Step이 심고 어느 테스트가 무엇을 단언하는지"를 M4본과 같은 상세도로 적는다).
+2. **구속 문서 태그 대조**(ROADMAP §2 절차 1): `docs/CLI.md`·`docs/PRD.md`·`docs/adr/`에서 M5로 태그됐거나 M5가 계약으로 확정한 문장이 전부 DoD로 검증됐거나 후속(M6/M7/M8/P1) 유예로 명시 귀속됐는지 전수 대조. 특히 PRD §9의 action 11종·TOML 예시·default-deny 문장, CLI.md §2.5 매핑 표 전 행, architecture.md §6 전 문장이 대상이다. 어느 쪽도 아닌 문장이 하나라도 있으면 M5를 닫지 않는다.
+3. **README 동기화**(ROADMAP §2 절차 2): "Security posture"가 정책 엔진 실태와 일치하고, Known limitations가 새 한계(hot reload 없음·쿼터 없음·`audit.log_argv` 미구현·audit fail-closed의 운영 함의)를 담는다. **인터임 고지가 실제 권한보다 좁으면 그 자체가 결함**이라는 규칙은 이번에는 반대 방향으로도 적용된다 — "allow-all among pinned peers"가 남아 있으면 실제보다 **넓은** 고지가 된다.
+4. **M4 이관 (v)의 등재 확인**: forward-route live carrier와 `-R` 자동 재발행 부재가 `docs/ROADMAP.md` §3 유예 가드레일 표 또는 M8 백로그에 **소유자와 함께** 등재됐는지 확인한다(§3 표). PLAN.md에서 PLAN.md로만 넘기지 않는다.
+5. **SC7 외부 보안 리뷰 예약**(`docs/ROADMAP.md` §4 리스크 5: "리뷰는 M5 시점에 예약"): 리뷰 계약·일정을 잡고 wire freeze(M8) 시점과의 6주 리드타임을 확인한다. 코드가 아니라 일정 산출물이며, M5 마감 체크리스트에 남긴다.
+6. `docs/ROADMAP.md`의 "현재 위치" 줄과 M5 절 상태 표기를 "M5 완료"로 갱신하고, §4.3의 크기 표기 제안을 함께 판단한다(로드맵 문서 소유자의 몫 — PLAN.md는 지시만 하고 대신 수정하지 않는다).
+7. Step 1·6·8이 갱신한 정본 문서와 최종 구현 사이 어긋남 최종 대조 — 어긋나면 **문서를 먼저 고치고** 코드를 맞춘다(각 문서 머리말 규칙).
+8. 이 PLAN.md를 M6("MCP adapter") 실행 계획으로 전면 교체 — 과거 M5 계획은 git 이력에만. §3의 비목표 중 M6 입력(`acl.check`의 MCP tool 노출, `Ops` 타입에서 생성되는 tool schema)을 그 계획의 입력으로 옮긴다.
