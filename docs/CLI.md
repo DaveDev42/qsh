@@ -451,7 +451,7 @@ qsh tunnels --json
 qsh tunnel close <tunnel-id> --json
 ```
 
-**Spec grammar.** `--local`(`-L`)과 `--remote`(`-R`)는 같은 grammar를 공유한다: `[bind:]listen_port:host:host_port`(예: `8080:localhost:3000`, IPv6 bind는 `[::1]:8080:localhost:3000`처럼 대괄호로 감싼다). `listen_port`/`host_port`는 `1..=65535`만 유효하며 `0`과 `65536`은 파싱 단계에서 `INVALID_ARGUMENT`다. 이 grammar를 파싱하는 `qsh-proto::wire::parse_forward_spec`은 sans-IO 순수 함수이고 **모양만** 검사한다 — non-loopback `bind`도 grammar상으로는 유효하게 파싱된다. `-L`은 로컬 머신에서 `listen_port`를 열고 들어오는 각 TCP 연결마다 host에 `host:host_port`로 dial을 요청하며, `bind`를 생략하면 loopback에 bind한다. `-R`은 반대 방향이다: host가 자신의 `listen_port`를 열고 들어오는 각 연결을 로컬 머신의 `host:host_port`로 되돌려 보낸다 — **non-loopback `-R` bind는 host 쪽에서 `INVALID_ARGUMENT`로 거부된다**(parser는 모양만 검사하고, loopback-only는 파서가 아니라 host가 강제하는 policy다).
+**Spec grammar.** `--local`(`-L`)과 `--remote`(`-R`)는 같은 grammar를 공유한다: `[bind:]listen_port:host:host_port`(예: `8080:localhost:3000`, IPv6 bind는 `[::1]:8080:localhost:3000`처럼 대괄호로 감싼다). `listen_port`/`host_port`는 `1..=65535`만 유효하며 `0`과 `65536`은 파싱 단계에서 `INVALID_ARGUMENT`다. 이 grammar를 파싱하는 `qsh-proto::wire::parse_forward_spec`은 sans-IO 순수 함수이고 **모양만** 검사한다 — non-loopback `bind`도 grammar상으로는 유효하게 파싱된다. `-L`은 로컬 머신에서 `listen_port`를 열고 들어오는 각 TCP 연결마다 host에 `host:host_port`로 dial을 요청하며, `bind`를 생략하면 loopback에 bind한다. `-R`은 반대 방향이다: host가 자신의 `listen_port`를 열고 들어오는 각 연결을 로컬 머신의 `host:host_port`로 되돌려 보낸다 — **non-loopback `-R` bind는 host 쪽에서 `INVALID_ARGUMENT`로 거부된다**(parser는 모양만 검사하고, loopback-only는 파서가 아니라 host가 강제하는 policy다). 그 거부의 `message`는 정확히 "remote forward binds loopback only"다(`qsh_core::tunnel::REMOTE_FORWARD_LOOPBACK_ONLY_MESSAGE`, `docs/design/testing.md` L6 — README와 이 문구가 그 상수와 어긋나면 CI가 실패한다).
 
 `-R`은 리스너를 bind하기 전에 두 층을 순서대로 통과해야 한다: 먼저 host가 `forward.remote`(§2.5)로 principal을 ACL 평가하고, 거부면 `PERMISSION_DENIED`이며 아무것도 뜨지 않는다. 통과한 뒤에야 위 loopback 강제가 적용되고, 위반이면 `INVALID_ARGUMENT`다(마찬가지로 아무것도 뜨지 않는다). 두 거부는 층이 다르다는 점이 핵심이다 — 하나는 그 principal이 `forward.remote`를 가졌는지 판정하는 ACL이고, 다른 하나는 `forward.remote`를 **가진** principal에게도 예외 없이 적용되는 host 쪽 요청 제약이다(`docs/PRD.md` §9).
 
@@ -474,7 +474,7 @@ qsh tunnel close <tunnel-id> --json
 
 **Holder 수명은 route에 따라 갈린다.** forward route에서는 tunnel(`-L`/`-R` 모두)이 그것을 연 CLI 프로세스에 수명이 결합된다(§6.14). **reverse route의 `-R`만은 다르다** — target의 listener는 그 CLI가 아니라 상주 `qsh listen` 데몬이 쥔 reverse connection에 결합돼, CLI가 죽어도 살아남고 reverse connection이 죽어야 함께 죽는다(§6.13·§6.14 예외 문단, `docs/design/protocol.md` §11-3).
 
-`-D`(SOCKS5 dynamic forwarding, `forward.socks`)는 CLI 인자로 parsing되지만 P0에서는 항상 `UNSUPPORTED`(message가 P1으로 미뤄졌음을 밝힌다)로 거부된다 — envelope data에는 절대 도달하지 않는다. 구현은 P1이다. 스펠링은 두 곳에 있고 둘 다 반복 가능하다 — 대화형 form의 `-D <[bind:]port>`와 `tunnel open`의 `-D`/`--dynamic <[bind:]port>`. 값은 P0에서 전혀 parsing되지 않는다 — 어떤 값을 주든 동일한 `UNSUPPORTED` 거부 한 건으로 수렴한다. 대화형 form에는 우선순위가 하나 더 얹힌다: `--json`/`--jsonl`이 함께 오면 `-D`와 무관하게 §7의 `INVALID_ARGUMENT`가 우선한다 — 대화형 form에는 애초에 machine mode가 없기 때문이다.
+`-D`(SOCKS5 dynamic forwarding, `forward.socks`)는 CLI 인자로 parsing되지만 P0에서는 항상 `UNSUPPORTED`(`message`는 정확히 "SOCKS dynamic forwarding (-D) is a P1 feature" — `qsh_core::ops::tunnel::DYNAMIC_FORWARD_UNSUPPORTED_MESSAGE`, `docs/design/testing.md` L6 게이트 대상)로 거부된다 — envelope data에는 절대 도달하지 않는다. 구현은 P1이다. 스펠링은 두 곳에 있고 둘 다 반복 가능하다 — 대화형 form의 `-D <[bind:]port>`와 `tunnel open`의 `-D`/`--dynamic <[bind:]port>`. 값은 P0에서 전혀 parsing되지 않는다 — 어떤 값을 주든 동일한 `UNSUPPORTED` 거부 한 건으로 수렴한다. 대화형 form에는 우선순위가 하나 더 얹힌다: `--json`/`--jsonl`이 함께 오면 `-D`와 무관하게 §7의 `INVALID_ARGUMENT`가 우선한다 — 대화형 form에는 애초에 machine mode가 없기 때문이다.
 
 ### 6.10 Schema와 capability
 
