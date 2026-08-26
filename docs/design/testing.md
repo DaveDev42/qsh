@@ -30,6 +30,8 @@ Keystore는 trait 뒤에: 유닛 테스트는 in-memory 구현, 플랫폼별로 
 - Writer lease: 획득 / 재attach 시 steal·`SESSION_CONFLICT` 규칙 / connection 사망 시 해제 / TTL 만료.
 - **TTL·시간 관련 테스트는 전부 `tokio::time::pause()`.** **테스트 스위트 전체에서 `sleep()` 전면 금지** — 이벤트 통지 + `timeout`으로 대체한다. 네트워크 프로젝트의 flaky 스위트는 팀이 빨간불을 무시하게 훈련시킨다.
 - Fuzz를 위해 broker에 **주입 가능한 clock**을 M2 설계 시점부터 넣는다 (L8의 stateful fuzzer 전제).
+- **정책 평가기 property(M5, `PLAN.md` Step 2 — DoD 3):** default-deny(임의 정책에서 어떤 rule도 커버하지 않는 action은 반드시 Deny), wildcard(trailing `.*`만 매칭 — 중간 glob이나 항상-deny 3종을 삼키지 않음), principal 정확 일치(`user:dave`는 `user:dave2`에 매칭되지 않음)를 순수 함수 위의 property test로 검증한다. 정책이 `acl.toml` 로더가 만든 순수 평가기(네트워크·I/O 없음)인 동안에만 이 계층에서 값싸게 돈다.
+- **Audit 수명주기(M5, `PLAN.md` Step 3 — DoD 5):** 회전 트리거(`max_bytes` 초과 시 실제로 회전)·retention 준수(`retain` 개수만 남음)·쓰기 실패 fail-closed(주입형 실패 sink로 디스크 만실을 시뮬레이션 — 실디스크를 채우지 않는다, CI 규율 참고)를 순수 로직으로 검증한다. tempdir + 주입 가능한 clock/sink로 결정적이며 `sleep()` 없음.
 
 ## L3 — Transport (in-process loopback QUIC)
 
@@ -82,6 +84,7 @@ CLI.md §11이 명시적으로 초대하는, 레버리지가 가장 큰 계층.
 - **노출 금지 field:** 생성된 JSON Schema와 모든 fixture·테스트 산출 envelope·JSONL event에 `resume_token`(및 토큰류 key 이름) 문자열이 존재하지 않음을 단언한다 — ADR-0007 결정 2의 기계적 게이트.
 - **Exit-code matrix:** (시나리오 → exit code, `ok`, `error.code`) 표를 human/JSON **양 모드에서** 실행, exit code가 모드와 무관하게 동일함을 단언 — §4의 "output mode에 따라 exit code 의미가 달라져서는 안 된다"의 문자 그대로의 테스트.
 - **JSONL 순수성:** 시끄러운 세션을 `-vv --jsonl`로 실행, stdout의 모든 줄이 완전한 JSON object로 파싱됨을 단언.
+- **`acl check` fixture + 거부 문면 상수-문서 일치 게이트(M5):** `acl.check.allow.json`·`acl.check.deny.json`(신규 fixture, `PLAN.md` M5 Step 1 공통 계약 규율)이 `acl check`가 실제 enforcement와 같은 코드 경로임을 값으로 보여준다. 거부 문면(Step 4의 균일 상수)이 `README.md`/`docs/CLI.md`에 축자 인용되는지는 `tunnel_docs.rs`/`doctor_docs.rs` 선례와 동형인 anti-drift 테스트가 고정한다 — `crates/qsh-core/tests/acl_docs.rs`(M5 Step 1)는 이미 같은 원리로 `Action::ALL` ↔ PRD §9 action 목록의 드리프트를 잡는다.
 
 ## L7 — MCP conformance
 
@@ -98,7 +101,7 @@ CLI.md §11이 명시적으로 초대하는, 레버리지가 가장 큰 계층.
 | `json_envelope` | MCP tool 인자 (agent가 주는 입력) | |
 | `broker_ops` | **stateful**: byte열 → op 시퀀스(append/read/attach/detach/tick) vs 모델 oracle | **M2에서 주입 가능한 clock을 설계해야 가능** |
 
-ACL glob 평가기는 fuzz보다 property test가 적합 (`session.*`가 `session.control.escalate`에 매칭되는가? `user:dave`가 `user:dave2`에 매칭되지 않는가?).
+ACL glob 평가기는 fuzz보다 property test가 적합하다(위 L2 "정책 평가기 property" 행이 M5 Step 2의 실현 지점) — action 어휘가 PRD §9의 닫힌 11종(`Action::ALL`)이고 wildcard가 trailing `.*`만 허용되도록 M5 Step 1이 못박았으므로(`docs/design/architecture.md` §6), `session.control.escalate` 같은 가상의 깊은 이름 문제는 애초에 발생하지 않는다 — 로더가 `Action::ALL`의 어느 것에도 매칭되지 않는 패턴을 로드 시점 `CONFIG_ERROR`로 거부한다. property로 직접 표현할 질문은: `session.*`가 `session.control`에 매칭되는가? `forward.*`를 가진 정책에서도 `forward.socks`는 여전히 deny인가(항상-deny 게이트가 wildcard 매칭보다 먼저 적용)? `user:dave`가 `user:dave2`에 매칭되지 않는가?
 
 **Corpus는 checked-in하고 일반 유닛 테스트로 전 플랫폼에서 상시 replay** — fuzzing이 돌지 않는 동안에도 발견된 crash가 고정된 상태로 유지된다. 공개 beta 전 타깃당 누적 72시간 + OSS-Fuzz 제출 (무료이며 SC7 리뷰의 신뢰 신호).
 

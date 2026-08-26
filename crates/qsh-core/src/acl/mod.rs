@@ -59,11 +59,30 @@ pub enum Action {
     /// constraint enforced right after is a separate, non-ACL host
     /// constraint (`PLAN.md` M4 Step 4) — see `crate::tunnel::remote`.
     ForwardRemote,
+    /// Dial a destination through a SOCKS5 proxy on this host's behalf
+    /// (`forward.socks`, `-D`). PRD §9 defines the vocabulary now, but the
+    /// feature itself is P1 and unimplemented (`docs/ROADMAP.md` §3
+    /// deferred-feature guardrail table) — this action is **always denied**
+    /// regardless of any `acl.toml` rule, see [`Action::is_always_denied`].
+    /// The CLI already refuses `-D` at the flag layer with `UNSUPPORTED`
+    /// (M4 Step 6); this action gate is what answers a peer that speaks the
+    /// wire directly, bypassing the CLI.
+    ForwardSocks,
+    /// Read a file over a (not-yet-defined) file-transfer operation
+    /// (`file.read`). PRD §9 vocabulary, P1-deferred, **always denied** —
+    /// same guardrail as [`Action::ForwardSocks`].
+    FileRead,
+    /// Write a file over a (not-yet-defined) file-transfer operation
+    /// (`file.write`). PRD §9 vocabulary, P1-deferred, **always denied** —
+    /// same guardrail as [`Action::ForwardSocks`].
+    FileWrite,
 }
 
 impl Action {
-    /// Every action this build can evaluate, in a stable order.
-    pub const ALL: [Action; 8] = [
+    /// Every action this build can evaluate, in a stable order — the full
+    /// PRD §9 vocabulary (`crates/qsh-core/tests/acl_docs.rs` fails CI if
+    /// this ever drifts from that list).
+    pub const ALL: [Action; 11] = [
         Action::ExecRun,
         Action::SessionOpen,
         Action::SessionList,
@@ -72,6 +91,9 @@ impl Action {
         Action::HostReverse,
         Action::ForwardLocal,
         Action::ForwardRemote,
+        Action::ForwardSocks,
+        Action::FileRead,
+        Action::FileWrite,
     ];
 
     /// The dotted action string used in `acl.toml` and audit records
@@ -86,7 +108,28 @@ impl Action {
             Action::HostReverse => "host.reverse",
             Action::ForwardLocal => "forward.local",
             Action::ForwardRemote => "forward.remote",
+            Action::ForwardSocks => "forward.socks",
+            Action::FileRead => "file.read",
+            Action::FileWrite => "file.write",
         }
+    }
+
+    /// Whether this action is denied unconditionally, independent of any
+    /// `acl.toml` rule — the closed set of PRD §9 actions that are defined
+    /// but not implemented in P0 (`docs/ROADMAP.md` §3 deferred-feature
+    /// guardrail table: `forward.socks`, `file.read`, `file.write`).
+    ///
+    /// The M5 policy evaluator (`PLAN.md` Step 2) must apply this gate
+    /// **before** wildcard rule matching, not fold it into matching itself:
+    /// an operator's `allow = ["forward.*"]` would otherwise silently
+    /// swallow `forward.socks` too, since trailing-`.*` wildcard matching
+    /// alone cannot express "defined but never allowed" — only this
+    /// upfront gate can.
+    pub fn is_always_denied(self) -> bool {
+        matches!(
+            self,
+            Action::ForwardSocks | Action::FileRead | Action::FileWrite
+        )
     }
 }
 
@@ -247,7 +290,7 @@ mod tests {
     #[test]
     fn action_and_decision_strings() {
         assert_eq!(Action::ExecRun.as_str(), "exec.run");
-        // CLI.md §2.5 mapping table, verbatim.
+        // CLI.md §2.5 mapping table / PRD §9, verbatim.
         assert_eq!(Action::SessionOpen.as_str(), "session.open");
         assert_eq!(Action::SessionList.as_str(), "session.list");
         assert_eq!(Action::SessionAttach.as_str(), "session.attach");
@@ -255,9 +298,16 @@ mod tests {
         assert_eq!(Action::HostReverse.as_str(), "host.reverse");
         assert_eq!(Action::ForwardLocal.as_str(), "forward.local");
         assert_eq!(Action::ForwardRemote.as_str(), "forward.remote");
+        assert_eq!(Action::ForwardSocks.as_str(), "forward.socks");
+        assert_eq!(Action::FileRead.as_str(), "file.read");
+        assert_eq!(Action::FileWrite.as_str(), "file.write");
         let strings: std::collections::BTreeSet<&str> =
             Action::ALL.iter().map(|a| a.as_str()).collect();
         assert_eq!(strings.len(), Action::ALL.len(), "distinct strings");
+        // PRD §9 lists exactly 11 actions; pin the count directly rather
+        // than only the distinctness above, so a future removal (as
+        // opposed to a duplicate) is caught here too.
+        assert_eq!(Action::ALL.len(), 11, "PRD §9 defines 11 actions");
         // `ALL` is what an M5 policy file will be validated against, so a
         // new action that never made it into the array is a silent hole:
         // name the newcomer explicitly rather than trusting the count.
@@ -269,9 +319,56 @@ mod tests {
             Action::ALL.contains(&Action::ForwardRemote),
             "forward.remote must be in Action::ALL"
         );
+        assert!(
+            Action::ALL.contains(&Action::ForwardSocks),
+            "forward.socks must be in Action::ALL"
+        );
+        assert!(
+            Action::ALL.contains(&Action::FileRead),
+            "file.read must be in Action::ALL"
+        );
+        assert!(
+            Action::ALL.contains(&Action::FileWrite),
+            "file.write must be in Action::ALL"
+        );
         assert_eq!(Decision::Allow.as_str(), "allow");
         assert_eq!(Decision::Deny.as_str(), "deny");
         assert!(Decision::Allow.is_allow());
         assert!(!Decision::Deny.is_allow());
+    }
+
+    #[test]
+    fn is_always_denied_is_exactly_the_p1_deferred_trio() {
+        // docs/ROADMAP.md §3 deferred-feature guardrail table: exactly
+        // `forward.socks`/`file.read`/`file.write` are "defined but always
+        // denied" — every other action is a normal, policy-evaluated one.
+        let always_denied: std::collections::HashSet<Action> = Action::ALL
+            .iter()
+            .copied()
+            .filter(|a| a.is_always_denied())
+            .collect();
+        assert_eq!(
+            always_denied,
+            std::collections::HashSet::from([
+                Action::ForwardSocks,
+                Action::FileRead,
+                Action::FileWrite,
+            ])
+        );
+        for a in [Action::ForwardSocks, Action::FileRead, Action::FileWrite] {
+            assert!(a.is_always_denied(), "{a} must be always-denied");
+        }
+        for a in [
+            Action::ExecRun,
+            Action::SessionOpen,
+            Action::SessionList,
+            Action::SessionAttach,
+            Action::SessionControl,
+            Action::HostReverse,
+            Action::ForwardLocal,
+            Action::ForwardRemote,
+        ] {
+            assert!(!a.is_always_denied(), "{a} must not be always-denied");
+        }
     }
 }

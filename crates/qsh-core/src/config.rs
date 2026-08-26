@@ -338,6 +338,12 @@ pub struct Config {
     pub listen: ListenConfig,
     /// `[reverse]` — reverse-mode target settings (`qsh reverse`).
     pub reverse: ReverseConfig,
+    /// `[audit]` — audit log lifecycle settings (rotation, retention, async
+    /// writer queue depth; `docs/design/architecture.md` §7, `PLAN.md` M5
+    /// Step 1). No `[acl]` section exists — policy lives in the separate
+    /// `acl.toml` file, not `config.toml` (same file/`Config` split
+    /// `trust.toml` already has).
+    pub audit: AuditConfig,
 }
 
 /// `[serve]` section.
@@ -399,6 +405,69 @@ impl ServeConfig {
 pub struct IdentityConfig {
     /// Private-key store preference; `qsh init --key-store` wins over it.
     pub key_store: Option<KeyStoreMode>,
+}
+
+/// `[audit]` section — audit log lifecycle (`docs/design/architecture.md`
+/// §6/§7, `PLAN.md` M5 Step 1). Contract only in this step: no rotation, no
+/// async writer, no fail-closed-on-write-failure behavior is wired yet
+/// (`crates/qsh-core/src/audit.rs` is unchanged) — M5 Step 3 reads these
+/// values. Deliberately has **no `fail_closed` knob**: `docs/ROADMAP.md`
+/// treats disk-full fail-closed as a fixed policy, not an operator option.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct AuditConfig {
+    /// Audit log path. Unset ⇒ [`Paths::audit_log`] (`<state_dir>/audit.log`).
+    pub path: Option<String>,
+    /// Rotation trigger, in bytes: once the active log reaches this size it
+    /// is rotated. Unset ⇒ [`AuditConfig::DEFAULT_MAX_BYTES`] (64 MiB).
+    pub max_bytes: Option<u64>,
+    /// Number of rotated log files kept alongside the active one. Unset ⇒
+    /// [`AuditConfig::DEFAULT_RETAIN`] (5).
+    pub retain: Option<u32>,
+    /// Bounded queue depth of the async audit writer. Unset ⇒
+    /// [`AuditConfig::DEFAULT_QUEUE_DEPTH`] (1024).
+    pub queue_depth: Option<u32>,
+}
+
+impl AuditConfig {
+    /// Default rotation trigger: 64 MiB (`docs/design/architecture.md` §7,
+    /// `PLAN.md` M5 §4.2).
+    pub const DEFAULT_MAX_BYTES: u64 = 64 * 1024 * 1024;
+    /// Default retained rotated files: 5.
+    pub const DEFAULT_RETAIN: u32 = 5;
+    /// Default async writer queue depth: 1024.
+    pub const DEFAULT_QUEUE_DEPTH: u32 = 1024;
+
+    /// Effective audit log path — `paths.audit_log()` unless overridden.
+    pub fn path(&self, paths: &Paths) -> PathBuf {
+        self.path
+            .as_ref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| paths.audit_log())
+    }
+
+    /// Effective rotation trigger (never `0` — treated as the default the
+    /// same way `[serve].replay_bytes = 0` degrades to its default).
+    pub fn max_bytes(&self) -> u64 {
+        match self.max_bytes {
+            Some(n) if n > 0 => n,
+            _ => Self::DEFAULT_MAX_BYTES,
+        }
+    }
+
+    /// Effective retained-file count.
+    pub fn retain(&self) -> u32 {
+        self.retain.unwrap_or(Self::DEFAULT_RETAIN)
+    }
+
+    /// Effective async writer queue depth (never `0`, same "0 degrades to
+    /// default" discipline as [`AuditConfig::max_bytes`]).
+    pub fn queue_depth(&self) -> u32 {
+        match self.queue_depth {
+            Some(n) if n > 0 => n,
+            _ => Self::DEFAULT_QUEUE_DEPTH,
+        }
+    }
 }
 
 /// `[listen]` section — `qsh listen`, the reverse-mode controller
@@ -809,6 +878,68 @@ mod tests {
             std::time::Duration::from_secs(24 * 3600)
         );
         assert_eq!(empty.close_grace(), std::time::Duration::from_millis(5000));
+    }
+
+    #[test]
+    fn audit_keys_use_the_documented_names_and_defaults() {
+        // architecture.md §7 / §6, PLAN.md M5 Step 1: `[audit] path ·
+        // max_bytes(64 MiB) · retain(5) · queue_depth(1024)`, and no
+        // `fail_closed` knob — that is fixed policy, not configurable.
+        let audit: AuditConfig = toml::from_str(
+            "path = \"/custom/audit.log\"\nmax_bytes = 1048576\nretain = 3\nqueue_depth = 64\n",
+        )
+        .unwrap();
+        let paths = Paths::new("/c", "/s");
+        assert_eq!(audit.path(&paths), PathBuf::from("/custom/audit.log"));
+        assert_eq!(audit.max_bytes(), 1_048_576);
+        assert_eq!(audit.retain(), 3);
+        assert_eq!(audit.queue_depth(), 64);
+
+        // Defaults: absent ⇒ Paths::audit_log() / 64 MiB / 5 / 1024.
+        let empty = AuditConfig::default();
+        assert_eq!(empty.path, None);
+        assert_eq!(empty.path(&paths), paths.audit_log());
+        assert_eq!(empty.max_bytes(), 64 * 1024 * 1024);
+        assert_eq!(empty.retain(), 5);
+        assert_eq!(empty.queue_depth(), 1024);
+        assert_eq!(AuditConfig::DEFAULT_MAX_BYTES, 64 * 1024 * 1024);
+        assert_eq!(AuditConfig::DEFAULT_RETAIN, 5);
+        assert_eq!(AuditConfig::DEFAULT_QUEUE_DEPTH, 1024);
+
+        // `0` degrades to the default, same discipline as
+        // `ServeConfig::replay_bytes`.
+        let zeroed = AuditConfig {
+            max_bytes: Some(0),
+            queue_depth: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(zeroed.max_bytes(), 64 * 1024 * 1024);
+        assert_eq!(zeroed.queue_depth(), 1024);
+    }
+
+    #[test]
+    fn audit_config_is_absent_by_default_and_ignores_unknown_keys() {
+        // A `config.toml` with no `[audit]` section at all parses to
+        // `AuditConfig::default()` (docs/CLI.md §2.3 unknown-field
+        // tolerance's mirror image: an absent *known* section is not an
+        // error either), and an unrecognized key inside `[audit]` is
+        // ignored rather than failing the parse — same idiom
+        // `config_file_is_parsed_and_unknown_keys_ignored` already checks
+        // for `[future]`.
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path(), dir.path());
+        std::fs::write(paths.config_file(), "[identity]\nkey_store = \"file\"\n").unwrap();
+        let config = Config::load(&paths).unwrap();
+        assert_eq!(config.audit, AuditConfig::default());
+
+        std::fs::write(
+            paths.config_file(),
+            "[audit]\nmax_bytes = 2048\nunknown_future_key = \"x\"\n",
+        )
+        .unwrap();
+        let config = Config::load(&paths).unwrap();
+        assert_eq!(config.audit.max_bytes(), 2048);
+        assert_eq!(config.audit.retain(), AuditConfig::DEFAULT_RETAIN);
     }
 
     #[test]
