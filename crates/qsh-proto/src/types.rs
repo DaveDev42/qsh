@@ -681,7 +681,7 @@ pub struct TunnelCloseData {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AclCheckReq {
     /// Principal string to evaluate — `device:<name>` | `user:<name>` |
-    /// `fp:<sha256-hex>` (`docs/PRD.md` §9).
+    /// `fp:sha256:<base64>` (`docs/PRD.md` §9).
     pub principal: String,
     /// Dotted action string, one of the 11 PRD §9 actions
     /// (`qsh_core::acl::Action::as_str`).

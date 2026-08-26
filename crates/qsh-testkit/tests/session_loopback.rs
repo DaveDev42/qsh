@@ -615,8 +615,11 @@ impl qsh_core::acl::Authorizer for AllowAllAnyAuthPath {
         _auth_path: qsh_transport::AuthPath,
         _action: Action,
         _resource: &str,
-    ) -> qsh_core::acl::Decision {
-        qsh_core::acl::Decision::Allow
+    ) -> qsh_core::acl::Verdict {
+        qsh_core::acl::Verdict {
+            decision: qsh_core::acl::Decision::Allow,
+            rule: None,
+        }
     }
 }
 

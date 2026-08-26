@@ -267,6 +267,10 @@ interim allow-all에서는 정보량이 0이지만, 정책이 켜지는 순간 1
 
 **전환 지점은 정확히 둘이다.** `AllowAllPinned`가 프로덕션에 나타나는 곳은 `crates/qsh-core/src/serve.rs:128`(`host_runtime` — `qsh serve`와 `qsh reverse` 둘 다 이 팩토리를 쓴다, `reverse/target.rs:241`)과 `crates/qsh-core/src/reverse/listen.rs:251`(controller의 `host.reverse` 판정)뿐이다. 둘 다 `PolicySource::load(paths)`의 결과를 `Arc<dyn Authorizer>`로 세운다.
 
+**검증 라운드 이월 노트 (Step 2 adversarial, 2026-08-27).** 두 가지를 이 step에서 재확인한다:
+1. **항상-deny 게이트는 `Policy::decide` 안에만 있다.** interim `AllowAllPinned`는 3종(`forward.socks`/`file.read`/`file.write`)을 Pin peer에 허용하는 형태지만, 오늘 프로덕션 코드에는 그 `Action`을 생성하는 op이 없어 도달 불가함을 grep으로 확인했다. 전환으로 `Policy`가 유일 정책이 되는 순간 게이트가 유일 방어가 된다 — 6a에서 wire 경로 기준 3종 거부를 테스트로 1건 이상 확인한다.
+2. **acl.toml 파일 모드는 읽기 시 검증하지 않는다**(쓰기 시에만 검사하는 기존 posture, `config.rs`). world-writable acl.toml이 그대로 수용된다 — 6a의 시작 진단에 모드 경고를 넣을지 결정하고, 넣지 않으면 non-goal로 명시 기록한다.
+
 **마이그레이션 이야기(acl.toml 없이 업그레이드하는 사용자에게 무슨 일이 일어나는가).** 정본이 이미 답을 정해 두었다 — `docs/design/architecture.md` §6: "acl.toml이 없거나 파싱 불가 → **전부 deny** + 운영자에게 `CONFIG_ERROR` 노출. '오류 시 개방'은 존재하지 않는다." 따라서 M4까지의 사용자가 acl.toml 없이 M5 바이너리를 띄우면 **모든 원격 op이 거부된다**. 이것은 결함이 아니라 default-deny의 정의이고(`docs/PRD.md` §9), 그 대신 M5는 그 전환이 **조용하지 않도록** 세 가지를 진다:
 1. **시작 시 진단.** `qsh serve`/`qsh listen`/`qsh reverse`가 정책 없음/파손을 stderr에 **한 번** 구조화 진단으로 낸다 — 정확한 파일 경로, `CONFIG_ERROR` 코드, 그리고 **복사해 붙일 수 있는 최소 정책 예시**(그 머신의 pinned peer 이름을 실제로 채워서). 상수는 `qsh-core`에 두고 README·문서와의 일치를 L6 게이트로 고정한다(`doctor.rs`의 `CONTROLLER_UNREACHABLE` 선례 그대로).
 2. **자동 생성 금지.** acl.toml을 자동으로 만들어 주지 않는다. allow-all-pinned를 파일로 자동 기록하는 것은 interim 임시 조치를 **영구 부여 권한으로 승격**하는 일이고, 운영자의 결정 없이 권한이 생기는 것은 M4가 금지한 "silent addition"과 같은 범주다.

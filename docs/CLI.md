@@ -663,7 +663,7 @@ qsh acl check --principal <principal> --action <action> [--resource <resource>] 
 
 인자:
 
-- `--principal <principal>` (필수): 평가할 principal 문자열(`device:<name>` | `user:<name>` | `fp:<sha256-hex>`, `docs/PRD.md` §9). 모양이 셋 중 어느 것과도 맞지 않으면 `INVALID_ARGUMENT`.
+- `--principal <principal>` (필수): 평가할 principal 문자열(`device:<name>` | `user:<name>` | `fp:sha256:<base64>`, `docs/PRD.md` §9). 모양이 셋 중 어느 것과도 맞지 않으면 `INVALID_ARGUMENT`.
 - `--action <action>` (필수): PRD §9의 11종 action 중 하나(닷 표기, 예 `session.open`). 어휘에 없는 값은 `INVALID_ARGUMENT`(정책 로더가 잘못된 wildcard 패턴을 거부하는 것과 같은 층 — 오타가 조용히 통과하지 않는다).
 - `--resource <resource>` (선택): action이 겨냥하는 리소스 식별자. 생략하면 리소스 개념이 없는 action으로 평가한다.
 - `--auth-path <pin|ca>` (선택): 생략 시 `acl.toml` 자체의 기본값(`"pin"`, `PLAN.md` M5 §4.1 #2)을 적용한 것과 동일하게 평가한다.

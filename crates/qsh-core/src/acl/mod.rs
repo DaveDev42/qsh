@@ -19,6 +19,32 @@ use std::fmt;
 
 use qsh_transport::{AuthPath, Principal};
 
+mod load;
+mod policy;
+
+// F8 (M5 Step 2 adversarial review) asked whether `ActionPattern` (and,
+// to stay lint-consistent, its `Policy`/`Rule`/`Scope`/`PolicySource`/
+// `PolicyLoad` neighbors — `Rule.allow: Vec<ActionPattern>` etc. would
+// otherwise leak a narrower-than-its-container type and trip
+// `private_interfaces` under `-D warnings`) should drop from `pub` to
+// `pub(crate)`, since nothing outside `qsh-core` names any of them today.
+// Tried it: `cargo build -p qsh-core --lib` (i.e. the plain library
+// target `--all-targets` also builds, distinct from the test target)
+// then reports every item in this whole family as `dead_code` — rustc
+// exempts genuinely `pub` items from that lint on the theory that a
+// downstream crate might use them, but a `pub(crate)` item needs an
+// actual in-crate caller, and `PLAN.md` M5 Step 6 — not this step — is
+// what wires `PolicySource::load`/`Policy` into a production
+// `Authorizer` slot. That would fail this step's `-D warnings` gate for
+// a purely cosmetic visibility narrowing, so these stay `pub` (REBUTTED
+// half of F8; see the fixer's report). The actual fix — making
+// `ActionPattern::Prefix` unforgeable — is [`policy::FamilyPrefix`]'s
+// private field and `pub(crate)` constructor, which holds regardless of
+// `ActionPattern` itself being nameable: no external crate can obtain a
+// `FamilyPrefix` to put one in, `pub` enum or not.
+pub use load::{PolicyLoad, PolicySource};
+pub use policy::{ActionPattern, Policy, Rule, Scope, Verdict};
+
 /// ACL action vocabulary (`docs/CLI.md` §2.5, PRD §9). Only the actions a
 /// milestone can actually evaluate are listed; new ones are added when
 /// their operations land.
@@ -163,6 +189,19 @@ impl Decision {
     }
 }
 
+/// A resource identifier passed to [`Policy::decide`] — just an opaque id
+/// in this step (`PLAN.md` M5 Step 2). `PLAN.md` M5 Step 5 adds an
+/// `owner` field once `scope` starts being evaluated; until then this is
+/// a thin wrapper so `Policy::decide`'s signature doesn't have to change
+/// again when that field lands.
+#[derive(Debug, Clone, Copy)]
+pub struct ResourceRef<'a> {
+    /// Free-form resource identifier (e.g. `"exec"`, a session id,
+    /// `"host:port"`) — the same string every [`Authorizer::check`] caller
+    /// already passes.
+    pub id: &'a str,
+}
+
 /// The single interface every privileged operation is gated by.
 ///
 /// Implementations must be pure with respect to resources: a check never
@@ -171,13 +210,18 @@ pub trait Authorizer: Send + Sync + 'static {
     /// Decide whether `principal` (authenticated via `auth_path`) may
     /// perform `action` on `resource`. `resource` is a free-form identifier
     /// (e.g. `"exec"`, a session id).
+    ///
+    /// Returns a [`Verdict`], not a bare [`Decision`]: the matching rule's
+    /// index (when one matched) travels with the decision so callers can
+    /// pass it straight to [`crate::audit::AuditRecord`] without a second
+    /// lookup (`PLAN.md` M5 §4.1 #8).
     fn check(
         &self,
         principal: &Principal,
         auth_path: AuthPath,
         action: Action,
         resource: &str,
-    ) -> Decision;
+    ) -> Verdict;
 }
 
 /// M1 interim policy: every *pinned* principal is allowed every action;
@@ -193,10 +237,18 @@ impl Authorizer for AllowAllPinned {
         auth_path: AuthPath,
         _action: Action,
         _resource: &str,
-    ) -> Decision {
-        match auth_path {
+    ) -> Verdict {
+        let decision = match auth_path {
             AuthPath::Pin => Decision::Allow,
             AuthPath::Ca => Decision::Deny,
+        };
+        // No policy engine behind this constant-time interim rule, so no
+        // rule index — `rule: None` is the mechanical, behavior-preserving
+        // update `PLAN.md` M5 Step 2's `Authorizer::check` signature
+        // change forces here.
+        Verdict {
+            decision,
+            rule: None,
         }
     }
 }
@@ -213,8 +265,11 @@ impl Authorizer for DenyAll {
         _auth_path: AuthPath,
         _action: Action,
         _resource: &str,
-    ) -> Decision {
-        Decision::Deny
+    ) -> Verdict {
+        Verdict {
+            decision: Decision::Deny,
+            rule: None,
+        }
     }
 }
 
@@ -232,7 +287,8 @@ mod tests {
                 AuthPath::Pin,
                 Action::ExecRun,
                 "exec"
-            ),
+            )
+            .decision,
             Decision::Allow
         );
         assert_eq!(
@@ -241,7 +297,8 @@ mod tests {
                 AuthPath::Pin,
                 Action::ExecRun,
                 "exec"
-            ),
+            )
+            .decision,
             Decision::Allow
         );
         // CA-asserted user: not pinned → denied under the interim policy.
@@ -251,7 +308,8 @@ mod tests {
                 AuthPath::Ca,
                 Action::ExecRun,
                 "exec"
-            ),
+            )
+            .decision,
             Decision::Deny
         );
     }
@@ -262,12 +320,14 @@ mod tests {
         // Device principal that *looks* pinned but was never pinned. The
         // interim policy must key on the auth path, not the principal shape.
         assert_eq!(
-            AllowAllPinned.check(
-                &Principal::Device("laptop".into()),
-                AuthPath::Ca,
-                Action::ExecRun,
-                "exec"
-            ),
+            AllowAllPinned
+                .check(
+                    &Principal::Device("laptop".into()),
+                    AuthPath::Ca,
+                    Action::ExecRun,
+                    "exec"
+                )
+                .decision,
             Decision::Deny
         );
     }
@@ -276,12 +336,14 @@ mod tests {
     fn deny_all_denies_everything() {
         for path in [AuthPath::Pin, AuthPath::Ca] {
             assert_eq!(
-                DenyAll.check(
-                    &Principal::Device("x".into()),
-                    path,
-                    Action::ExecRun,
-                    "exec"
-                ),
+                DenyAll
+                    .check(
+                        &Principal::Device("x".into()),
+                        path,
+                        Action::ExecRun,
+                        "exec"
+                    )
+                    .decision,
                 Decision::Deny
             );
         }
@@ -369,6 +431,43 @@ mod tests {
             Action::ForwardRemote,
         ] {
             assert!(!a.is_always_denied(), "{a} must not be always-denied");
+        }
+    }
+
+    #[test]
+    fn action_vocabulary_has_no_cross_family_string_prefixes() {
+        // F5 (M5 Step 2 adversarial review): the dot-boundary invariant
+        // every `ActionPattern::Prefix` match (`starts_with`) leans on —
+        // no action's string is a strict prefix of another's, and every
+        // action's family segment (up to and including its first `.`) is
+        // a real, non-empty dotted family. Today's 11-action vocabulary
+        // happens to satisfy this by construction, which made the
+        // dot-boundary mutation class (matching by raw `starts_with`
+        // instead of a dot-bounded prefix) inert against every other
+        // test in this crate — this test is what would actually catch a
+        // future action name that broke the invariant.
+        for a in Action::ALL {
+            for b in Action::ALL {
+                if a == b {
+                    continue;
+                }
+                assert!(
+                    !b.as_str().starts_with(a.as_str()),
+                    "{a} is a strict prefix of {b}, which would make a `{a}` rule \
+                     accidentally cover {b} too"
+                );
+            }
+            let full = a.as_str();
+            let dot = full.find('.').unwrap_or_else(|| panic!("{a} has no dot"));
+            let prefix = &full[..=dot];
+            assert!(
+                prefix.ends_with('.'),
+                "{a}'s family prefix must end with '.'"
+            );
+            assert!(
+                prefix.len() > 1,
+                "{a}'s family prefix must have a non-empty stem before the dot"
+            );
         }
     }
 }

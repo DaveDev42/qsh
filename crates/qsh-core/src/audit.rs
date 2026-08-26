@@ -40,13 +40,19 @@ pub struct AuditRecord {
 }
 
 impl AuditRecord {
-    /// Build a record for a decision made now.
+    /// Build a record for a decision made now. `rule` is the matching
+    /// policy rule's index (`Verdict::rule`, M5+) — `None` under the
+    /// interim allow-all-pinned policy, or when the decision didn't come
+    /// from a rule match at all (an always-deny gate, an ownership
+    /// refusal, a credential failure — anything upstream or downstream of
+    /// `Authorizer::check` itself).
     pub fn now(
         request_id: u64,
         principal: &qsh_transport::Principal,
         action: Action,
         resource: &str,
         decision: Decision,
+        rule: Option<u32>,
         peer_addr: std::net::SocketAddr,
     ) -> Self {
         Self {
@@ -56,7 +62,7 @@ impl AuditRecord {
             action: action.as_str().to_string(),
             resource: resource.to_string(),
             decision: decision.as_str().to_string(),
-            rule: None,
+            rule,
             peer_addr: peer_addr.to_string(),
         }
     }
@@ -79,6 +85,7 @@ impl AuditRecord {
         action: Action,
         resource: &str,
         decision: Decision,
+        rule: Option<u32>,
         peer_addr: std::net::SocketAddr,
     ) -> Self {
         Self {
@@ -88,7 +95,7 @@ impl AuditRecord {
             action: action.as_str().to_string(),
             resource: resource.to_string(),
             decision: decision.as_str().to_string(),
-            rule: None,
+            rule,
             peer_addr: peer_addr.to_string(),
         }
     }
@@ -249,6 +256,7 @@ mod tests {
             Action::ExecRun,
             "exec",
             Decision::Allow,
+            None,
             "127.0.0.1:4433".parse().unwrap(),
         )
     }
