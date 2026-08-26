@@ -50,6 +50,59 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 /// point, not a contract.
 const SPLICE_BUF_LEN: usize = 64 * 1024;
 
+/// Bound on bytes [`pump`] copies in one direction before it explicitly
+/// hands control back to the async runtime (`docs/design/protocol.md`
+/// §12's bufferbloat defense — the send-side depth cap the priority band
+/// alone was not enough for; see M4 Step 7's measured evidence below).
+///
+/// Quinn's own per-stream flow control lets a single direction write far
+/// more than this before *quinn* ever blocks it — up to the connection's
+/// `stream_receive_window`
+/// ([`qsh_transport::endpoint::TUNNEL_STREAM_RECEIVE_WINDOW`], 2 MiB as
+/// of M4 Step 7) — because `write_all` only blocks once the peer's
+/// granted window is exhausted, not once "enough" has been queued for
+/// send. Left unbounded, [`pump`]'s tight `read` → `write_all` loop can
+/// hand quinn many iterations' worth of one stream's bytes back-to-back
+/// with no intervening yield point, which crowds out *newly*-ready,
+/// higher-priority streams even though `set_priority` correctly ranks
+/// them: priority only decides which *already-pending* stream quinn's
+/// packet builder picks next, not how often the packet builder — and
+/// therefore quinn's own connection-driver task — gets scheduled to ask.
+///
+/// **Measured evidence (M4 Step 7 DoD 4).** The saturated-tunnel-vs-PTY-
+/// echo gate (`crates/qsh-testkit/tests/tunnel_echo_under_load.rs`),
+/// fixed to saturate host→client (the direction that actually contends
+/// with PTY output on the host's own send scheduler) and to measure a
+/// genuine client-originated round trip, first measured p95=30.579ms
+/// (min=0.132ms, max=74.883ms) at the 2 MiB window with no send-side
+/// cap — a clear DoD 4 miss despite the priority band and the 2 MiB
+/// window (both already in place). Three cap sizes were tried against
+/// both DoD 3 (throughput ratio) and DoD 4 (echo p95) together, since
+/// they pull in opposite directions (a smaller cap yields more often,
+/// which helps p95 but adds per-chunk scheduling overhead that eats into
+/// raw throughput):
+///
+/// - 256 KiB (four [`SPLICE_BUF_LEN`] chunks): p95=10.085ms — still a
+///   DoD 4 miss, just barely.
+/// - 64 KiB (one chunk, yield after every `pump` iteration): p95 as low
+///   as 5.480ms, comfortably under DoD 4's bar, but repeated runs pushed
+///   DoD 3's throughput ratio down to 0.799 — under its 0.80 floor — on
+///   one of three trials. Too aggressive: the extra yields cede the
+///   runtime often enough to cost measurable tunnel throughput.
+/// - **128 KiB (two chunks) — the value kept.** Five combined DoD 3 +
+///   DoD 4 runs all passed both gates with margin: DoD 3 ratio
+///   {0.899, 0.927, 0.942, 0.945, 0.909} (floor 0.80, and stable well
+///   above the 0.85 "no threshold change needed" bar); DoD 4 p95
+///   {7.919, 7.621, 7.672, 7.766, 7.146} ms (bar <10ms).
+///
+/// 128 KiB applies uniformly to every [`pump`] direction, including the
+/// two that never touch quinn (`splice_tcp_uds`'s UDS halves) — an extra
+/// yield point on a plain TCP/UDS copy is harmless (fairness with
+/// whatever else is on that runtime), so a single constant is simpler to
+/// reason about than threading a "this direction matters" flag through
+/// every call site.
+const SEND_DEPTH_CAP_BYTES: u64 = 128 * 1024;
+
 /// QUIC application error code used to reset a tunnel stream whose splice
 /// died mid-transfer. Internal (like `crate::server`'s `RESET_CODE_*` and
 /// `crate::localctl::daemon`'s `0x2005`/`0x2006`), not a documented wire
@@ -118,6 +171,7 @@ where
         copied += prefix.len() as u64;
     }
     let mut buf = vec![0u8; SPLICE_BUF_LEN];
+    let mut since_yield = 0u64;
     loop {
         let n = from.read(&mut buf).await?;
         if n == 0 {
@@ -125,6 +179,17 @@ where
         }
         to.write_all(&buf[..n]).await?;
         copied += n as u64;
+        // Send-side depth cap (`SEND_DEPTH_CAP_BYTES`'s own doc) — an
+        // explicit yield every so often, not just whatever yield points
+        // `read`/`write_all` happen to hit on their own, so a fast source
+        // (already-buffered TCP/UDS data, nothing to wait for) cannot run
+        // many iterations back-to-back with no scheduling opportunity for
+        // anything else on this runtime.
+        since_yield += n as u64;
+        if since_yield >= SEND_DEPTH_CAP_BYTES {
+            since_yield = 0;
+            tokio::task::yield_now().await;
+        }
     }
     let _ = to.shutdown().await;
     Ok(copied)

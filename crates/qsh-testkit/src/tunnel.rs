@@ -110,6 +110,135 @@ impl Drop for EchoServer {
     }
 }
 
+/// A TCP sink on `127.0.0.1:0` for exactly one connection: reads and
+/// discards every byte, counting them as it goes. Used by the perf
+/// benchmarks (`PLAN.md` M4 Step 7, DoD 3/4) that want to saturate the
+/// *forward* direction only — an [`EchoServer`]'s own reply writes would
+/// contend for the same tunnel/QUIC bandwidth the benchmark is trying to
+/// measure, muddying a one-directional throughput number.
+pub struct DiscardServer {
+    addr: SocketAddr,
+    total: Arc<std::sync::atomic::AtomicU64>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl DiscardServer {
+    /// Bind and accept exactly one connection, discarding everything it
+    /// sends. The returned receiver resolves with the final byte count
+    /// once that connection's read side reaches EOF — a real signal that
+    /// the splice's own half-close propagated all the way through (client
+    /// write-shutdown → requester leg → tunnel stream finish → host leg →
+    /// this socket), not a polled guess (`docs/design/testing.md` CI
+    /// 규율: no `sleep()`-based synchronisation).
+    pub async fn start() -> io::Result<(Self, tokio::sync::oneshot::Receiver<u64>)> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let total = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let counter = Arc::clone(&total);
+        let task = tokio::spawn(async move {
+            let Ok((mut stream, _peer)) = listener.accept().await else {
+                return;
+            };
+            let mut buf = vec![0u8; 256 * 1024];
+            loop {
+                match stream.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        counter.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+            }
+            let _ = done_tx.send(counter.load(std::sync::atomic::Ordering::Relaxed));
+        });
+        Ok((Self { addr, total, task }, done_rx))
+    }
+
+    /// The address a forward's destination should point at.
+    pub fn addr(&self) -> SocketAddr {
+        self.addr
+    }
+
+    /// Bytes discarded so far — live, for a saturation loop that wants to
+    /// report progress without waiting for EOF.
+    pub fn total_bytes(&self) -> u64 {
+        self.total.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl Drop for DiscardServer {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+/// One outbound `write_all` per iteration of [`FloodServer`]'s loop — an
+/// implementation-detail chunk size (how the infinite output stream is
+/// segmented for the syscall), not a contract on the transfer itself.
+const FLOOD_CHUNK_BYTES: usize = 4 * 1024 * 1024;
+
+/// A TCP source on `127.0.0.1:0` for exactly one connection: writes a
+/// shared buffer in a loop until the peer closes or a write fails — the
+/// converse of [`DiscardServer`]. Used by the M4 DoD 4 saturation
+/// benchmark (`crates/qsh-testkit/tests/tunnel_echo_under_load.rs`) to
+/// saturate the **host→client** direction of a `-L` tunnel: point the
+/// forward's destination at this server, and the bulk bytes it emits ride
+/// the tunnel stream *back toward the client* — landing on the **host's**
+/// send scheduler, where `PRIORITY_TUNNEL` bulk competes with
+/// `PRIORITY_SESSION_DATA` PTY output for priority (`docs/design/protocol.md`
+/// §12), instead of the client's. A [`DiscardServer`]-fed forward instead
+/// saturates the client's own send scheduler, which is the wrong party —
+/// the client never has PTY output competing with anything.
+pub struct FloodServer {
+    addr: SocketAddr,
+    total: Arc<std::sync::atomic::AtomicU64>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl FloodServer {
+    /// Bind and start flooding the first connection accepted. The
+    /// returned receiver resolves with the final byte count once the
+    /// connection's write side errors (the peer closed) — the flood's own
+    /// analogue of [`DiscardServer`]'s EOF signal.
+    pub async fn start() -> io::Result<(Self, tokio::sync::oneshot::Receiver<u64>)> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let total = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let counter = Arc::clone(&total);
+        let task = tokio::spawn(async move {
+            let Ok((mut stream, _peer)) = listener.accept().await else {
+                return;
+            };
+            let chunk = vec![0xcd_u8; FLOOD_CHUNK_BYTES];
+            loop {
+                if stream.write_all(&chunk).await.is_err() {
+                    break;
+                }
+                counter.fetch_add(chunk.len() as u64, std::sync::atomic::Ordering::Relaxed);
+            }
+            let _ = done_tx.send(counter.load(std::sync::atomic::Ordering::Relaxed));
+        });
+        Ok((Self { addr, total, task }, done_rx))
+    }
+
+    /// The address a forward's destination should point at.
+    pub fn addr(&self) -> SocketAddr {
+        self.addr
+    }
+
+    /// Bytes written so far — live, mirroring [`DiscardServer::total_bytes`].
+    pub fn total_bytes(&self) -> u64 {
+        self.total.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl Drop for FloodServer {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
 /// A loopback port with nothing behind it: bound to learn the number, then
 /// released. Connecting to it is refused, which is how a test provokes the
 /// host's `CONNECTION_FAILED` without depending on an unroutable address

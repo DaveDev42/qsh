@@ -130,7 +130,13 @@ impl PathBinder for qsh_transport::Endpoint {
             SocketAddr::V4(_) => (Ipv4Addr::UNSPECIFIED, 0).into(),
             SocketAddr::V6(_) => (Ipv6Addr::UNSPECIFIED, 0).into(),
         };
-        let socket = std::net::UdpSocket::bind(bind)?;
+        // `bind_tuned_udp_socket` (not a plain `std::net::UdpSocket::bind`)
+        // so a post-migration socket keeps the same OS buffer tuning and
+        // dual-stack-v6 handling (`true`, mirroring `Dialer::dial`) the
+        // original dial got — otherwise a migration would silently reset
+        // the connection back to whatever the OS grants a bare bind by
+        // default.
+        let socket = qsh_transport::bind_tuned_udp_socket(bind, true)?;
         qsh_transport::Endpoint::rebind(self, socket)?;
         self.local_addr()
     }

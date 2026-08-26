@@ -8,12 +8,14 @@
 //! [`Connection`]; a `Connection` always carries the peer's verified
 //! [`Principal`], computed from the certificate chain — never from wire data.
 
+use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use socket2::{Domain, Protocol, Socket, Type};
 use thiserror::Error;
 
 use crate::identity::{Fingerprint, Principal};
@@ -43,27 +45,46 @@ pub const DEFAULT_DIAL_TIMEOUT: Duration = Duration::from_secs(10);
 pub const MAX_CONCURRENT_BIDI_STREAMS: u32 = 1024;
 
 /// Connection-wide per-stream receive window (`docs/design/protocol.md`
-/// §12's bufferbloat defense (a)), sized for tunnel throughput (~2-4 MiB
-/// per the PLAN). **Quinn 0.11 limitation, not a design choice:**
-/// `quinn_proto::TransportConfig` only exposes a single connection-wide
-/// [`quinn::TransportConfig::stream_receive_window`] — there is no
-/// per-stream-*kind* asymmetric window (PTY ~256 KiB vs. tunnel ~2-4 MiB,
-/// as `PLAN.md` M4 Step 2 and `protocol.md` §12 describe it). PTY
-/// protection is instead delivered by [`qsh_proto::wire::PRIORITY_TUNNEL`]
-/// (queue *order*) plus [`send_fairness`](quinn::TransportConfig::send_fairness)
-/// and BBR (queue *depth*) below — exactly the "우선순위(priority) + 큐
-/// 깊이(window/BBR)" pairing §12 calls for, just without a second,
-/// smaller window carved out for session data specifically. If a future
-/// quinn release adds a per-stream-type window, prefer it over this
-/// connection-wide value and update this doc.
+/// §12's bufferbloat defense (a)), sized for tunnel throughput (`protocol.md`
+/// §12's sanctioned 2–4 MB tunnel band). **Quinn 0.11 limitation, not a
+/// design choice:** `quinn_proto::TransportConfig` only exposes a single
+/// connection-wide [`quinn::TransportConfig::stream_receive_window`] —
+/// there is no per-stream-*kind* asymmetric window (PTY ~256 KiB vs.
+/// tunnel ~2-4 MiB, as `PLAN.md` M4 Step 2 and `protocol.md` §12
+/// originally drafted it). Every stream on the connection — PTY session
+/// data, exec, the replay ring's own stream, and tunnel/file — gets this
+/// same window; PTY protection instead comes from
+/// [`qsh_proto::wire::PRIORITY_TUNNEL`] (queue *order*, §12's priority
+/// band) plus a send-side depth cap in `qsh_core::tunnel`'s splice path
+/// (`SEND_DEPTH_CAP_BYTES`, queue *depth* at the application layer,
+/// `docs/design/protocol.md` §12's final note on where the asymmetry
+/// actually lives). M4 Step 7 needed both: the priority band alone left
+/// DoD 4 (saturated-tunnel-vs-PTY-echo p95) at p95=30.579ms against a
+/// <10ms bar; the depth cap is what closed the gap (see
+/// `SEND_DEPTH_CAP_BYTES`'s own doc for the measured before/after). If a
+/// future quinn release adds a per-stream-type window, prefer it over
+/// this connection-wide value and update this doc.
 ///
-/// The specific value (4 MiB) is **provisional** (`PLAN.md` M4 §4.2, a
-/// measure-then-fix constant). A single connection-wide window pulls the
-/// two M4 perf DoDs in opposite directions — DoD 3 (tunnel throughput ≥
-/// 80% of raw-quinn) wants it large, DoD 4 (PTY echo p95 under a saturated
-/// tunnel) wants it small — so its final value is validated and tuned by
-/// M4 Step 7's saturated-tunnel-vs-PTY-echo perf gate, not fixed here.
-pub const TUNNEL_STREAM_RECEIVE_WINDOW: u32 = 4 * 1024 * 1024;
+/// **Why 2 MiB, not larger or smaller.** The window is a hard ceiling on
+/// single-stream throughput over a real (non-loopback) path: at most
+/// `window / RTT` bytes/sec can be in flight unacked on one stream, so a
+/// window sized for a fast LAN starves a WAN tunnel and a window sized
+/// for a slow WAN wastes memory on a fast link. §12's 2–4 MB band is
+/// chosen against a representative broadband/mobile RTT (~50 ms): 2 MiB /
+/// 50 ms ≈ 42 MB/s, comfortably above what a single forwarded TCP
+/// connection needs. M4 Step 7's saturated-tunnel-vs-PTY-echo perf gate
+/// (`crates/qsh-testkit/tests/tunnel_echo_under_load.rs` and
+/// `tunnel_throughput.rs`) first tried the low end of that reasoning —
+/// 128 KiB — and rejected it: 128 KiB / 50 ms ≈ 2.6 MB/s, a throughput
+/// ceiling *every* stream on the connection now shares, PTY/exec/replay
+/// included, not just tunnel/file. The loopback ratio gate (DoD 3) cannot
+/// see this regression — both its raw-quinn baseline and its tunnel leg
+/// share the one connection-wide window either way — which is exactly why
+/// this constant needs a floor assertion in code (see this module's
+/// tests), not just a passing perf number. 2 MiB is the value that
+/// landed: inside §12's sanctioned band, and above quinn's own default
+/// `STREAM_RWND` (1,250,000 bytes) rather than below it.
+pub const TUNNEL_STREAM_RECEIVE_WINDOW: u32 = 2 * 1024 * 1024;
 
 /// QUIC application close code sent when the peer's principal cannot be
 /// re-derived after the handshake (should be unreachable — the verifier
@@ -183,6 +204,125 @@ fn transport_config() -> quinn::TransportConfig {
     tc.send_fairness(true);
     tc.stream_receive_window(quinn::VarInt::from_u32(TUNNEL_STREAM_RECEIVE_WINDOW));
     tc
+}
+
+/// Descending candidate ladder for the UDP socket buffer tuning below.
+/// Deliberately **decoupled** from [`TUNNEL_STREAM_RECEIVE_WINDOW`]: the
+/// window is a QUIC-level flow-control ceiling tuned against the M4 perf
+/// DoDs (and, per that constant's own doc, may need to come *down* to
+/// protect PTY latency), while this ladder is a queue-*depth* floor one
+/// layer below it (the OS socket) that must never shrink — a socket
+/// buffer smaller than whatever window is in effect would itself become
+/// the bottleneck a bufferbloat-sensitive stream queues behind, defeating
+/// the point regardless of which window value wins. Kept independent
+/// (and always ≥ the current window) rather than derived from it, so a
+/// future window change can never accidentally shrink this.
+const SOCKET_BUFFER_LADDER_BYTES: [usize; 4] = [
+    8 * 1024 * 1024,
+    4 * 1024 * 1024,
+    2 * 1024 * 1024,
+    1024 * 1024,
+];
+
+/// Try each rung of [`SOCKET_BUFFER_LADDER_BYTES`], largest first, keeping
+/// the first rung whose OS-granted result beats what the OS already had
+/// before this function touched it (`get`/`set` are `recv_buffer_size`/
+/// `set_recv_buffer_size` or the `send_*` pair). **Never reduces the
+/// buffer:** a candidate at or below the already-granted default is
+/// skipped outright (never handed to `set`), and a rung whose `set`
+/// either fails or is silently clamped back down to (or below) the
+/// default is undone by re-asserting the default before the next
+/// (smaller) rung is tried — so a clamped-low attempt can never leave the
+/// socket worse off than it started, and this function is safe to call
+/// even on a platform whose default already exceeds every rung.
+///
+/// **Why independently sized ladders per direction, not one shared call.**
+/// macOS grants a default `SO_RCVBUF` of ~768 KiB but a default
+/// `SO_SNDBUF` of only ~9 KiB — the two directions differ by two orders
+/// of magnitude on the same platform, so a single fixed request applied
+/// to both (this file's previous approach: a flat 128 KiB for both) was a
+/// measured **6x reduction** of macOS's own recv default, the opposite of
+/// what `docs/design/testing.md`'s CI 규율 ("GHA macOS runner는 UDP 소켓
+/// 버퍼 기본값이 작다") exists to guard against. Sizing each direction
+/// from its own read-back default, independently, is what keeps a
+/// well-provisioned platform's default from ever being *reduced* by this
+/// tuning.
+fn tune_socket_buffer(
+    socket: &Socket,
+    get: impl Fn(&Socket) -> io::Result<usize>,
+    set: impl Fn(&Socket, usize) -> io::Result<()>,
+) {
+    let Ok(default) = get(socket) else {
+        // Can't read the baseline back — nothing safe to compare against,
+        // so leave the socket untouched rather than risk a reduction.
+        return;
+    };
+    for candidate in SOCKET_BUFFER_LADDER_BYTES {
+        if candidate <= default {
+            // Never call `set` with a value at or below the read-back
+            // default — either it would be a no-op or, on a platform that
+            // honors requests literally instead of clamping them up, a
+            // reduction.
+            continue;
+        }
+        if set(socket, candidate).is_err() {
+            continue;
+        }
+        match get(socket) {
+            Ok(granted) if granted > default => return,
+            _ => {
+                // Didn't stick, or the OS granted something at/below the
+                // default — restore before trying a smaller rung.
+                let _ = set(socket, default);
+            }
+        }
+    }
+}
+
+/// Bind a UDP socket at `addr` with [`tune_socket_buffer`] applied
+/// independently to each direction, in place of
+/// `quinn::Endpoint::client`/`::server`'s own internal bind (which offers
+/// no way to ask for a bigger buffer). `dual_stack_v6` mirrors
+/// `quinn::Endpoint::client`'s own best-effort `IPV6_V6ONLY` handling for
+/// a wildcard v6 bind — `Listener::bind` never asked for this (its
+/// `Endpoint::server` precedent didn't either), so only
+/// [`Dialer::dial`]'s replacement passes `true`. Also used by
+/// `qsh_core::client::reconnect`'s migration rebind (`PathBinder`), so a
+/// post-migration socket keeps the same tuning and dual-stack behavior
+/// the original dial got.
+///
+/// Every step here is best-effort except the bind itself: a platform that
+/// refuses (or silently caps) the buffer request keeps its own default,
+/// which only degrades *how fast* a loopback benchmark can measure, never
+/// correctness (`crates/qsh-testkit/tests/tunnel_throughput.rs`'s own
+/// module doc walks through why the M4 DoD 3 ratio gate is tolerant of
+/// this either way).
+pub fn bind_tuned_udp_socket(
+    addr: SocketAddr,
+    dual_stack_v6: bool,
+) -> io::Result<std::net::UdpSocket> {
+    let domain = if addr.is_ipv6() {
+        Domain::IPV6
+    } else {
+        Domain::IPV4
+    };
+    let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
+    if dual_stack_v6 && addr.is_ipv6() {
+        let _ = socket.set_only_v6(false);
+    }
+    tune_socket_buffer(
+        &socket,
+        Socket::recv_buffer_size,
+        Socket::set_recv_buffer_size,
+    );
+    tune_socket_buffer(
+        &socket,
+        Socket::send_buffer_size,
+        Socket::set_send_buffer_size,
+    );
+    socket.set_nonblocking(true)?;
+    socket.bind(&addr.into())?;
+    Ok(socket.into())
 }
 
 fn crypto_provider() -> Arc<rustls::crypto::CryptoProvider> {
@@ -340,11 +480,41 @@ impl Dialer {
     /// principal attached, plus the endpoint (which must outlive the
     /// connection).
     pub async fn dial(&self, addr: SocketAddr, server_name: &str) -> Result<Dialed, DialError> {
+        self.dial_inner(addr, server_name, transport_config()).await
+    }
+
+    /// Test/benchmark-only escape hatch: identical to [`Self::dial`] —
+    /// same TLS/identity plumbing, same socket tuning — except the
+    /// `TransportConfig` is quinn's own stock `TransportConfig::default()`
+    /// instead of qsh's tuned `transport_config()` (no BBR override, no
+    /// `send_fairness`, no widened `stream_receive_window`). Exists for
+    /// the M4 DoD 3 throughput gate
+    /// (`crates/qsh-testkit/tests/tunnel_throughput.rs`), which needs an
+    /// *untuned* quinn baseline to compare qsh's tuning against — without
+    /// this, the gate's raw-quinn leg would share `transport_config()`
+    /// with the tunnel leg, and the ratio would only ever measure
+    /// `qsh-core`'s splice overhead, never whether the transport tuning
+    /// itself helps.
+    pub async fn dial_stock_transport(
+        &self,
+        addr: SocketAddr,
+        server_name: &str,
+    ) -> Result<Dialed, DialError> {
+        self.dial_inner(addr, server_name, quinn::TransportConfig::default())
+            .await
+    }
+
+    async fn dial_inner(
+        &self,
+        addr: SocketAddr,
+        server_name: &str,
+        transport: quinn::TransportConfig,
+    ) -> Result<Dialed, DialError> {
         let verifier = Arc::new(QshPeerVerifier::new(self.evaluator.clone()));
         let tls = client_tls_config(&self.identity, verifier.clone())?;
         let quic = QuicClientConfig::try_from(tls).map_err(SetupError::from)?;
         let mut client_config = quinn::ClientConfig::new(Arc::new(quic));
-        client_config.transport_config(Arc::new(transport_config()));
+        client_config.transport_config(Arc::new(transport));
 
         // Bind in the remote's address family so we never rely on
         // dual-stack sockets.
@@ -352,8 +522,15 @@ impl Dialer {
             IpAddr::V4(_) => (Ipv4Addr::UNSPECIFIED, 0).into(),
             IpAddr::V6(_) => (Ipv6Addr::UNSPECIFIED, 0).into(),
         };
-        let mut endpoint = quinn::Endpoint::client(bind)
+        let socket = bind_tuned_udp_socket(bind, true)
             .map_err(|source| SetupError::Bind { addr: bind, source })?;
+        let mut endpoint = quinn::Endpoint::new(
+            quinn::EndpointConfig::default(),
+            None,
+            socket,
+            Arc::new(quinn::TokioRuntime),
+        )
+        .map_err(|source| SetupError::Bind { addr: bind, source })?;
         endpoint.set_default_client_config(client_config);
 
         let connecting = endpoint.connect(addr, server_name)?;
@@ -461,13 +638,41 @@ impl Listener {
         identity: LocalIdentity,
         evaluator: Arc<dyn TrustEvaluator>,
     ) -> Result<Self, SetupError> {
+        Self::bind_inner(bind, identity, evaluator, transport_config())
+    }
+
+    /// Test/benchmark-only escape hatch — see
+    /// [`Dialer::dial_stock_transport`]'s own doc. Identical to
+    /// [`Self::bind`] except the `TransportConfig` is quinn's stock
+    /// `TransportConfig::default()`.
+    pub fn bind_stock_transport(
+        bind: SocketAddr,
+        identity: LocalIdentity,
+        evaluator: Arc<dyn TrustEvaluator>,
+    ) -> Result<Self, SetupError> {
+        Self::bind_inner(bind, identity, evaluator, quinn::TransportConfig::default())
+    }
+
+    fn bind_inner(
+        bind: SocketAddr,
+        identity: LocalIdentity,
+        evaluator: Arc<dyn TrustEvaluator>,
+        transport: quinn::TransportConfig,
+    ) -> Result<Self, SetupError> {
         let verifier = Arc::new(QshPeerVerifier::new(evaluator));
         let tls = server_tls_config(&identity, verifier.clone())?;
         let quic = QuicServerConfig::try_from(tls)?;
         let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(quic));
-        server_config.transport_config(Arc::new(transport_config()));
-        let endpoint = quinn::Endpoint::server(server_config, bind)
+        server_config.transport_config(Arc::new(transport));
+        let socket = bind_tuned_udp_socket(bind, false)
             .map_err(|source| SetupError::Bind { addr: bind, source })?;
+        let endpoint = quinn::Endpoint::new(
+            quinn::EndpointConfig::default(),
+            Some(server_config),
+            socket,
+            Arc::new(quinn::TokioRuntime),
+        )
+        .map_err(|source| SetupError::Bind { addr: bind, source })?;
         Ok(Self { endpoint, verifier })
     }
 
@@ -562,6 +767,39 @@ mod tests {
                 "stream_receive_window: {TUNNEL_STREAM_RECEIVE_WINDOW}"
             )),
             "expected stream_receive_window: {TUNNEL_STREAM_RECEIVE_WINDOW} in {debug:?}"
+        );
+    }
+
+    /// M4 Step 7's loud regression guard for
+    /// [`TUNNEL_STREAM_RECEIVE_WINDOW`]: the DoD 3 loopback throughput
+    /// ratio gate (`crates/qsh-testkit/tests/tunnel_throughput.rs`)
+    /// structurally *cannot* catch a window regression — even with a
+    /// stock-quinn baseline (`Dialer::dial_stock_transport`), a loopback
+    /// path's near-zero RTT means almost any window value clears the
+    /// ratio floor; window strangling only shows up over a real RTT. So
+    /// this constant needs a plain floor assertion here instead: quinn
+    /// 0.11's own default `stream_receive_window`
+    /// (`quinn_proto::TransportConfig::default()`, i.e. `STREAM_RWND`) is
+    /// 1,250,000 bytes, and this constant must never regress *below*
+    /// quinn's own untuned default — doing so would mean qsh's "tuning"
+    /// made every stream's flow-control window worse than doing nothing.
+    #[test]
+    fn tunnel_stream_receive_window_never_regresses_below_quinns_own_default() {
+        const QUINN_DEFAULT_STREAM_RWND: u32 = 1_250_000;
+        // `black_box` on both sides: without it, this is a comparison of
+        // two `const`s and clippy's `assertions_on_constants` (correctly)
+        // flags a constant-folded assertion as pointless. The whole point
+        // here *is* that both are compile-time constants — the assertion
+        // still needs to run so a future edit to either one is caught.
+        assert!(
+            std::hint::black_box(TUNNEL_STREAM_RECEIVE_WINDOW)
+                >= std::hint::black_box(QUINN_DEFAULT_STREAM_RWND),
+            "TUNNEL_STREAM_RECEIVE_WINDOW ({TUNNEL_STREAM_RECEIVE_WINDOW}) must stay at or \
+             above quinn's own default STREAM_RWND ({QUINN_DEFAULT_STREAM_RWND}) — the DoD 3 \
+             loopback ratio gate cannot see a window regression (both its baseline and tunnel \
+             legs run over ~0 RTT, where almost any window clears the ratio floor), so this \
+             floor is the only thing standing between a bad edit and a silently strangled \
+             stream on a real (non-loopback) path"
         );
     }
 }

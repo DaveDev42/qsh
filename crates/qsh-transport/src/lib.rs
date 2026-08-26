@@ -24,7 +24,7 @@ pub mod tls;
 pub use control::{FramedRecv, FramedSend, FramedStream, StreamError};
 pub use endpoint::{
     AcceptError, Connection, DialError, Dialed, Dialer, Incoming, Listener, LocalIdentity,
-    SetupError,
+    SetupError, bind_tuned_udp_socket,
 };
 pub use identity::{Fingerprint, FingerprintParseError, Principal};
 pub use tls::{
