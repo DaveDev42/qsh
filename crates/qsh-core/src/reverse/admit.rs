@@ -113,6 +113,9 @@ pub fn admit(
                 Action::HostReverse,
                 resource,
                 Decision::Deny,
+                // Pre-choke-point: name resolution failed, never reached
+                // `Authorizer::check`, so no rule index applies.
+                None,
                 req.address,
             ));
             return Err(err);
@@ -121,7 +124,7 @@ pub fn admit(
     };
 
     // ---- ACL choke point: decide + audit BEFORE any resource. ----
-    let decision = authorizer.check(req.principal, req.auth_path, Action::HostReverse, &name);
+    let verdict = authorizer.check(req.principal, req.auth_path, Action::HostReverse, &name);
     // A connection-level decision, not a reply to a control-stream
     // request — `AuditRecord::connection_level` records `request_id: "-"`
     // (mirroring `AuditRecord::handshake_rejected`'s convention) so it can
@@ -130,10 +133,11 @@ pub fn admit(
         req.principal,
         Action::HostReverse,
         &name,
-        decision,
+        verdict.decision,
+        verdict.rule,
         req.address,
     ));
-    if !decision.is_allow() {
+    if !verdict.is_allow() {
         // Identical opaque message to both `resolve_name` denial cases
         // above — see `host_reverse_denied`'s docs.
         return Err(host_reverse_denied());
@@ -364,8 +368,11 @@ mod tests {
     /// `AllowAllPinned` ACL outcome for non-`Pin` peers.
     struct AllowEverything;
     impl Authorizer for AllowEverything {
-        fn check(&self, _: &Principal, _: AuthPath, _: Action, _: &str) -> Decision {
-            Decision::Allow
+        fn check(&self, _: &Principal, _: AuthPath, _: Action, _: &str) -> crate::acl::Verdict {
+            crate::acl::Verdict {
+                decision: Decision::Allow,
+                rule: None,
+            }
         }
     }
 

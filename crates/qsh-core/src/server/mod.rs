@@ -512,7 +512,7 @@ impl Server {
     /// exactly like [`Server::authorize`], then answers yes/no — the caller
     /// resets the stream, which is non-distinguishing by construction.
     fn authorize_stream(&self, ctx: &ConnCtx, action: Action, resource: &str) -> bool {
-        let decision = self
+        let verdict = self
             .authorizer
             .check(&ctx.principal, ctx.auth_path, action, resource);
         // No request id: a stream is not a control-stream request.
@@ -527,10 +527,11 @@ impl Server {
             &ctx.principal,
             action,
             resource,
-            decision,
+            verdict.decision,
+            verdict.rule,
             ctx.peer_addr,
         ));
-        decision.is_allow()
+        verdict.is_allow()
     }
 
     fn authorize(
@@ -540,7 +541,7 @@ impl Server {
         action: Action,
         resource: &str,
     ) -> Result<(), Box<ControlMessage>> {
-        let decision = self
+        let verdict = self
             .authorizer
             .check(&ctx.principal, ctx.auth_path, action, resource);
         self.audit.record(&AuditRecord::now(
@@ -548,10 +549,11 @@ impl Server {
             &ctx.principal,
             action,
             resource,
-            decision,
+            verdict.decision,
+            verdict.rule,
             ctx.peer_addr,
         ));
-        if !decision.is_allow() {
+        if !verdict.is_allow() {
             return Err(Box::new(Self::permission_denied(request_id, action)));
         }
         Ok(())
@@ -572,16 +574,17 @@ impl Server {
         request_id: u64,
         id: &SessionId,
     ) -> Result<(), Box<ControlMessage>> {
-        let decision =
+        let verdict =
             self.authorizer
                 .check(&ctx.principal, ctx.auth_path, Action::SessionControl, &id.0);
-        if !decision.is_allow() {
+        if !verdict.is_allow() {
             self.audit.record(&AuditRecord::now(
                 request_id,
                 &ctx.principal,
                 Action::SessionControl,
                 &id.0,
-                decision,
+                verdict.decision,
+                verdict.rule,
                 ctx.peer_addr,
             ));
             return Err(Box::new(Self::permission_denied(
@@ -596,6 +599,7 @@ impl Server {
             Action::SessionControl,
             &id.0,
             Decision::Allow,
+            verdict.rule,
             ctx.peer_addr,
         ));
         Ok(())
@@ -665,12 +669,16 @@ impl Server {
         if is_opener {
             return Ok(());
         }
+        // Not a policy-rule decision — an ownership refusal, a separate
+        // gate from `Authorizer::check` (this function's own doc) — so
+        // there is no rule index to carry.
         self.audit.record(&AuditRecord::now(
             request_id,
             &ctx.principal,
             Action::SessionControl,
             &id.0,
             Decision::Deny,
+            None,
             ctx.peer_addr,
         ));
         Err(Box::new(Self::permission_denied(
@@ -1350,6 +1358,10 @@ impl Server {
                     Action::SessionAttach,
                     &req.session_id,
                     crate::acl::Decision::Deny,
+                    // Not a policy-rule decision — a credential-
+                    // verification failure upstream of `Authorizer::
+                    // check`, so no rule index applies.
+                    None,
                     ctx.peer_addr,
                 ));
                 tracing::warn!(

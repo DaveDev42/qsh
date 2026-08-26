@@ -137,6 +137,12 @@ impl Paths {
         self.config_dir.join("trust.toml")
     }
 
+    /// `<config_dir>/acl.toml` (`docs/design/architecture.md` §7,
+    /// `crate::acl::load::PolicySource`). serve/listen roles only.
+    pub fn acl_file(&self) -> PathBuf {
+        self.config_dir.join("acl.toml")
+    }
+
     /// `<config_dir>/identity`.
     pub fn identity_dir(&self) -> PathBuf {
         self.config_dir.join("identity")
