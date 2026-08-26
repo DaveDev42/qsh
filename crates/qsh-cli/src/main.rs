@@ -13,7 +13,7 @@ use qsh_core::{
     ExecRunOp, ExecStdin, HostGetOp, HostListOp, IdentityInitOp, OpError, Operation, Ops,
     SessionAttachOp, SessionCloseOp, SessionGetOp, SessionListOp, SessionOpenOp, SessionReadOp,
     SessionResizeOp, SessionWriteOp, TrustAddOp, TrustListOp, TrustRemoveOp, TunnelCloseOp,
-    TunnelListOp, TunnelOpenOp, VersionOp,
+    TunnelListOp, TunnelOpenOp, VersionOp, dynamic_forward_unsupported,
 };
 use qsh_proto::{
     ErrorCode, ExecRunReq, HostGetReq, IdentityInitReq, SessionCloseReq, SessionGetReq,
@@ -361,6 +361,23 @@ fn run_interactive(cli: &Cli, ops: &Ops, what: tui::Attach, escape: Option<Escap
     if cli.wants_json() {
         return report_error(cli, command, &tui::json_mode_unsupported());
     }
+    // `-D` is refused before anything else on this command line — before
+    // `SessionOpen`, before `-L`/`-R` are even looked at (`docs/CLI.md`
+    // §6.9, `PLAN.md` M4 Step 6, DoD 5): fail-closed ordering means a
+    // `-D` alongside a session/`-L`/`-R` request must not let any of the
+    // rest through first, so this has to happen before `tui::run` ever
+    // touches a session or a target — the zero-resource property holds
+    // just as it did when this check lived in `run`. It sits *after* the
+    // `wants_json` gate above, though: `docs/CLI.md` §7 wins over §6.9's
+    // `-D` refusal when `--json`/`--jsonl` is present, because the
+    // interactive form has no machine mode at all — that has to be the
+    // first thing reported no matter what else is wrong with the command
+    // line. Only the bare `qsh [user@]host` form ever populates
+    // `dynamic_forward` (`qsh attach` has no `-D`), so this is a no-op on
+    // the `Attach::Existing` path.
+    if !cli.interactive.dynamic_forward.is_empty() {
+        return report_error(cli, command, &dynamic_forward_unsupported());
+    }
     let EscapeChar(escape) = escape.unwrap_or(DEFAULT_ESCAPE_CHAR);
     match tui::run(ops, what, escape) {
         Ok(code) => code,
@@ -608,14 +625,40 @@ fn remote_exit_code_to_process_exit(remote: i32) -> i32 {
 ///   §2.2), and a success line followed by a failure line would break
 ///   every parser of it.
 fn run_tunnel_open(cli: &Cli, ops: &Ops, args: &TunnelOpenArgs) -> i32 {
-    // Exactly one of `--local`/`--remote` reaches here: clap's
-    // `conflicts_with`/`required_unless_present` on both flags
-    // (`cli.rs`'s `TunnelOpenArgs`) already ruled out both `None` and
-    // both `Some` as usage errors before argument parsing even finished.
+    // `-D` is checked before anything else here, same fail-closed
+    // ordering as the interactive form's own check above: whichever of
+    // `--local`/`--remote` also happens to be given, `-D` wins and
+    // nothing gets as far as `Ops::tunnel_open` (`docs/CLI.md` §6.9,
+    // `PLAN.md` M4 Step 6, DoD 5). That is "whichever", not "both": `-L`
+    // and `-R` together never reach this function at all — clap's
+    // `conflicts_with` on both flags (`cli.rs`'s `TunnelOpenArgs`)
+    // rejects that combination as a usage error (exit `2`) during
+    // argument parsing, before `-D` or anything else here runs.
+    if !args.dynamic.is_empty() {
+        return report_error(cli, TunnelOpenOp::COMMAND, &dynamic_forward_unsupported());
+    }
+    // Exactly one of `--local`/`--remote` is expected here: clap's
+    // `conflicts_with`/`required_unless_present_any` on both flags
+    // (`cli.rs`'s `TunnelOpenArgs`) already rule out both `None` and
+    // both `Some` as usage errors before argument parsing even finishes
+    // (the third option, `--dynamic`, was just ruled out above). The `_`
+    // arm below is a fail-closed backstop rather than a trusted
+    // invariant: if that guarantee ever slips — a future flag change, a
+    // clap upgrade that loosens a constraint — this refuses the command
+    // with `INVALID_ARGUMENT` instead of panicking or guessing a mode.
     let (mode, spec_str) = match (&args.local, &args.remote) {
         (Some(spec), None) => ("local", spec),
         (None, Some(spec)) => ("remote", spec),
-        _ => unreachable!("clap enforces exactly one of --local/--remote"),
+        _ => {
+            return report_error(
+                cli,
+                TunnelOpenOp::COMMAND,
+                &OpError::new(
+                    ErrorCode::InvalidArgument,
+                    "exactly one of --local/--remote is required",
+                ),
+            );
+        }
     };
     // Parsing (and, for `"local"`, the loopback-bind rule) lives in
     // `qsh-core`: this frontend only shuttles the already-parsed halves

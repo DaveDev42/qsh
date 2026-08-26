@@ -67,6 +67,34 @@ impl Operation for TunnelCloseOp {
     const COMMAND: &'static str = "tunnel.close";
 }
 
+/// The exact `docs/CLI.md` §6.9 disclosure text for `-D`'s P0 refusal
+/// (`PLAN.md` M4 Step 6, DoD 5). This is the single place the wording
+/// lives — `qsh-cli`'s two call sites (`InteractiveArgs`'s bare
+/// `qsh host -D …` and `TunnelOpenArgs`'s `qsh tunnel open … --dynamic`)
+/// both go through [`dynamic_forward_unsupported`] rather than each
+/// formatting their own string, so the exit-code matrix and the golden
+/// `error.UNSUPPORTED.json` fixture check one wording, not two that could
+/// drift apart.
+pub const DYNAMIC_FORWARD_UNSUPPORTED_MESSAGE: &str =
+    "SOCKS dynamic forwarding (-D) is a P1 feature";
+
+/// `-D`/SOCKS dynamic forwarding's P0 stub (`docs/CLI.md` §6.9,
+/// `docs/ROADMAP.md` M4 "명시적 out", `PLAN.md` M4 Step 6, DoD 5).
+///
+/// Always `UNSUPPORTED`, unconditionally — there is no spec to parse, no
+/// bind to attempt, and no ACL check: `forward.socks` is not an M4
+/// `Action` (M5 promotes it to "defined, always deny",
+/// `docs/ROADMAP.md` M5 scope), so this sits *before* the ACL/connect
+/// layer entirely, at what `PLAN.md` calls the "CLI/negotiation layer" —
+/// both `qsh-cli` call sites invoke this before calling
+/// [`Ops::tunnel_open`]/[`Ops::session_attach`] at all, so no connection,
+/// session, or listener exists on this path (`docs/PRD.md` §9, "no
+/// resource before authorization" — trivially true here because nothing
+/// downstream of this call ever runs).
+pub fn dynamic_forward_unsupported() -> OpError {
+    OpError::new(ErrorCode::Unsupported, DYNAMIC_FORWARD_UNSUPPORTED_MESSAGE)
+}
+
 /// Parse `-L` spec strings into [`ForwardSpec`]s, refusing anything that
 /// could not be bound, **before** any resource — local or remote —
 /// exists.

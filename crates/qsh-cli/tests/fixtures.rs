@@ -119,13 +119,6 @@ const DEFERRED: &[(&str, &str)] = &[
          `CARGO_BIN_EXE_qsh` path drives a conduit past 64 in-flight \
          requests to capture a `qsh.cli/v1` envelope",
     ),
-    (
-        "UNSUPPORTED",
-        "produced since M2 Step 6 by the `qsh user@host` hint refusal, but \
-         the interactive form has no machine mode (`docs/CLI.md` §7), so \
-         there is no envelope to capture; `tui_expect.rs` asserts the code \
-         reaches the user on stderr instead",
-    ),
     ("REMOTE_ERROR", "no deterministic producer"),
     ("INTERNAL", "no deterministic producer"),
 ];
@@ -160,6 +153,7 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "session.close.json",
     "error.SESSION_NOT_FOUND.json",
     "error.SESSION_CONFLICT.json",
+    "error.UNSUPPORTED.json",
     "tunnel.open.json",
     "tunnel.list.json",
     "tunnel.close.json",
@@ -299,6 +293,29 @@ fn golden_local_fixtures() {
     let (code, config_error) = uninitialized.json(&["exec", HOST_ALIAS, "--json", "--", "true"]);
     assert_eq!(code, 255, "{config_error}");
     check("error.CONFIG_ERROR.json", config_error);
+
+    // `-D`'s stub refusal (`docs/CLI.md` §6.9, `PLAN.md` M4 Step 6, DoD 5)
+    // is `UNSUPPORTED`'s first CLI-binary envelope producer (`fixtures.rs`
+    // module doc, `DEFERRED`'s former `UNSUPPORTED` entry). It needs no
+    // identity or peer at all — `main.rs`'s `run_tunnel_open` refuses `-D`
+    // before ever calling `Ops::tunnel_open`, so a brand-new, uninitialized
+    // sandbox proves the same thing `a_non_loopback_bind_is_refused_before…`
+    // proves for `-L` in `tunnel_e2e.rs`: nothing downstream ran.
+    let no_identity = Sandbox::new();
+    let (code, dynamic_forward) = no_identity.json(&[
+        "tunnel",
+        "open",
+        "irrelevant-host",
+        "--dynamic",
+        "1080",
+        "--json",
+    ]);
+    assert_eq!(code, 255, "{dynamic_forward}");
+    assert_eq!(
+        dynamic_forward["error"]["code"], "UNSUPPORTED",
+        "{dynamic_forward}"
+    );
+    check("error.UNSUPPORTED.json", dynamic_forward);
 }
 
 /// The dial-timeout path. Split out because it is the one scenario that

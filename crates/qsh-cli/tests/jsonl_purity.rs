@@ -14,6 +14,18 @@ use common::{Fleet, HOST_ALIAS, Sandbox, ServeGuard, exit_code};
 #[cfg(unix)]
 use common::{ListenGuard, ReverseGuard, hosts_array, poll_until};
 use serde_json::Value;
+#[cfg(unix)]
+use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+#[cfg(unix)]
+use std::net::{TcpListener, TcpStream};
+#[cfg(unix)]
+use std::process::Stdio;
+#[cfg(unix)]
+use std::sync::{Arc, Mutex};
+#[cfg(unix)]
+use std::thread;
+#[cfg(unix)]
+use std::time::Duration;
 
 /// A command that writes plenty of interleaved stdout and stderr.
 const NOISY: &str = "for i in $(seq 1 200); do echo line$i; echo e$i >&2; done";
@@ -325,4 +337,170 @@ fn serve_json_setup_failure_writes_nothing_to_stdout() {
         serde_json::from_str::<Value>(stderr.trim()).is_err(),
         "the stderr diagnostic must be a human line, not a JSON envelope: {stderr:?}"
     );
+}
+
+/// A tunnel in progress produces `qsh::tunnel` diagnostics on stderr while
+/// it splices real traffic (`crates/qsh-core/src/tunnel/local.rs`'s
+/// accept/close `tracing::debug!`s, `PLAN.md` M4 Step 6) — a completely
+/// different code path from every value op above — and stdout must still
+/// carry nothing but the one `tunnel.open` envelope for as long as the
+/// process holds (`docs/CLI.md` §6.14: it blocks in `TunnelHold::hold`
+/// right after printing that envelope), so "every stdout line is pure
+/// JSON" here specifically means "there is never a second line".
+///
+/// Forward-route only (client-side `-L` bind), like `tunnel_e2e.rs` — the
+/// client-side local listener is the one part of M4's tunnel stack this
+/// file's other tests do not need, so this test alone carries the `unix`
+/// gate (`PLAN.md` M4 Windows-leg note: the tunnel relay/host path is
+/// `cfg(unix)`).
+#[cfg(unix)]
+#[test]
+fn a_tunnel_in_progress_keeps_stdout_pure_json_while_qsh_tunnel_diagnostics_land_on_stderr() {
+    let fleet = Fleet::start();
+
+    // A plain loopback echo destination standing in for "a service on the
+    // host" — mirrors `tunnel_e2e.rs`'s own `start_echo`, duplicated
+    // rather than shared for the same self-containment reason
+    // `fixtures.rs`'s `free_port` gives its own copy.
+    let echo = TcpListener::bind("127.0.0.1:0").expect("bind echo destination");
+    let echo_port = echo.local_addr().expect("echo addr").port();
+    thread::spawn(move || {
+        for stream in echo.incoming() {
+            let Ok(stream) = stream else { break };
+            thread::spawn(move || {
+                let mut reader = stream.try_clone().expect("clone echo socket");
+                let mut writer = stream;
+                let _ = std::io::copy(&mut reader, &mut writer);
+                let _ = writer.shutdown(std::net::Shutdown::Write);
+            });
+        }
+    });
+
+    for (label, mode, verbosity) in [
+        ("--jsonl -vv", "--jsonl", "-vv"),
+        ("--json -vvv", "--json", "-vvv"),
+    ] {
+        let listen_port = TcpListener::bind("127.0.0.1:0")
+            .expect("pick a free listen port")
+            .local_addr()
+            .expect("port")
+            .port();
+        let spec = format!("{listen_port}:127.0.0.1:{echo_port}");
+
+        let mut child = fleet
+            .client
+            .command(&[
+                "tunnel", "open", HOST_ALIAS, "--local", &spec, verbosity, mode,
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap_or_else(|e| panic!("{label}: spawn qsh tunnel open: {e}"));
+
+        let stdout = child.stdout.take().expect("stdout pipe");
+        let stderr = child.stderr.take().expect("stderr pipe");
+
+        let stdout_lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let stdout_reader = Arc::clone(&stdout_lines);
+        let stdout_thread = thread::spawn(move || {
+            let reader = BufReader::new(stdout);
+            for line in reader.lines() {
+                let Ok(line) = line else { break };
+                stdout_reader.lock().unwrap().push(line);
+            }
+        });
+
+        // Appended line-by-line, not `read_to_string`ed in one shot: a
+        // single blocking read would only ever update the shared buffer
+        // once the pipe hits EOF (i.e. once the child has already
+        // exited), which would make the `poll_until` below wait for
+        // diagnostics that can never appear before the kill that is
+        // supposed to happen *after* seeing them.
+        let stderr_text: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+        let stderr_reader = Arc::clone(&stderr_text);
+        let stderr_thread = thread::spawn(move || {
+            let reader = BufReader::new(stderr);
+            for line in reader.lines() {
+                let Ok(line) = line else { break };
+                let mut text = stderr_reader.lock().unwrap();
+                text.push_str(&line);
+                text.push('\n');
+            }
+        });
+
+        // The envelope line is only printed after the listener actually
+        // binds and is flushed before the process blocks in `hold()`
+        // (`run_tunnel_open`'s own doc) — wait for it before dialing.
+        poll_until(
+            &format!("{label}: the tunnel.open envelope line"),
+            Duration::from_secs(10),
+            || (!stdout_lines.lock().unwrap().is_empty()).then_some(()),
+        );
+
+        // Drive a couple of connections through the forward, each
+        // producing its own accept/close diagnostic on `qsh::tunnel` at
+        // `-vv`+.
+        for i in 0..2u8 {
+            let mut conn = TcpStream::connect(("127.0.0.1", listen_port))
+                .unwrap_or_else(|e| panic!("{label}: connect to the forward #{i}: {e}"));
+            conn.set_read_timeout(Some(Duration::from_secs(30)))
+                .expect("set read timeout");
+            let payload = format!("jsonl-purity-{i}").into_bytes();
+            let mut writer = conn.try_clone().expect("clone forward socket");
+            let sender_payload = payload.clone();
+            let sender = thread::spawn(move || -> std::io::Result<()> {
+                writer.write_all(&sender_payload)?;
+                writer.flush()?;
+                writer.shutdown(std::net::Shutdown::Write)
+            });
+            let mut back = Vec::new();
+            conn.read_to_end(&mut back)
+                .unwrap_or_else(|e| panic!("{label}: read #{i}: {e}"));
+            sender
+                .join()
+                .expect("sender thread panicked")
+                .unwrap_or_else(|e| panic!("{label}: write #{i}: {e}"));
+            assert_eq!(back, payload, "{label}: echo #{i} mismatched");
+        }
+
+        poll_until(
+            &format!("{label}: qsh::tunnel diagnostics on stderr"),
+            Duration::from_secs(10),
+            || {
+                stderr_text
+                    .lock()
+                    .unwrap()
+                    .contains("qsh::tunnel")
+                    .then_some(())
+            },
+        );
+
+        let _ = child.kill();
+        let _ = child.wait();
+        stdout_thread.join().expect("stdout reader thread");
+        stderr_thread.join().expect("stderr reader thread");
+
+        let lines = stdout_lines.lock().unwrap();
+        assert_eq!(
+            lines.len(),
+            1,
+            "{label}: exactly one tunnel.open envelope, no more, while holding: {lines:?}"
+        );
+        let envelope: Value = serde_json::from_str(&lines[0])
+            .unwrap_or_else(|e| panic!("{label}: stdout line is not JSON: {e}: {:?}", lines[0]));
+        assert_eq!(envelope["schema"], "qsh.cli/v1", "{label}");
+        assert_eq!(envelope["command"], "tunnel.open", "{label}");
+        assert_eq!(envelope["ok"], true, "{label}: {envelope}");
+
+        let stderr = stderr_text.lock().unwrap();
+        assert!(
+            stderr.contains("qsh::tunnel"),
+            "{label}: expected qsh::tunnel diagnostics on stderr, got {stderr:?}"
+        );
+        assert!(
+            !stderr.contains("jsonl-purity"),
+            "{label}: tunnel payload leaked into diagnostics: {stderr:?}"
+        );
+    }
 }
