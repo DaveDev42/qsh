@@ -76,10 +76,13 @@ Broker
 
 ## 6. ACL 엔진과 audit
 
-- 정책은 `acl.toml`(PRD §9 형태). principal은 정확 일치(연결의 `Principal`과 대조), action은 정확 일치 또는 **trailing `.*` wildcard만** 허용한다(중간 glob 금지 — 평가와 `qsh acl check` 설명 가능성 유지).
-- **Default deny, fail closed:** 매칭 allow 없음 → `PERMISSION_DENIED`; acl.toml이 없거나 파싱 불가 → 전부 deny + 운영자에게 `CONFIG_ERROR` 노출. "오류 시 개방"은 존재하지 않는다.
+- 정책은 `acl.toml`(PRD §9 형태, `[[acl]] principal · auth_path? · allow · scope?` — 문법 정본은 `PLAN.md` M5 Step 1). action 어휘는 PRD §9의 닫힌 11종(`qsh_core::acl::Action::ALL`)이며, 그중 `forward.socks`·`file.read`·`file.write`는 **정의는 되어 있으나 항상 deny**다(`docs/ROADMAP.md` §3 유예 가드레일 표, `Action::is_always_denied`). principal은 정확 일치(연결의 `Principal`과 대조), action은 정확 일치 또는 **trailing `.*` wildcard만** 허용한다(중간 glob 금지 — 평가와 `qsh acl check` 설명 가능성 유지).
+- **평가 순서(정본):** ① 항상-deny action 게이트(`Action::is_always_denied`) — **wildcard 매칭보다 먼저** 적용된다, 그렇지 않으면 `allow = ["forward.*"]`가 `forward.socks`까지 삼킨다. ② principal 정확 일치 + `auth_path` 일치. ③ action 패턴 매칭(정확 일치 또는 trailing `.*`). ④ `scope` 판정(소유자 개념이 있는 action에만 적용). 이 중 하나라도 매칭에 실패하면 다음 rule로 넘어가고, 끝까지 아무 rule도 매칭하지 않으면 **Deny**다. rule은 **첫 매칭이 이긴다**(allow-only 문법이므로 순서 의존 충돌은 존재하지 않는다) — 매칭된 rule의 배열 index가 `AuditRecord.rule`과 `acl check`의 `rule`이 된다.
+- **`auth_path` 키:** 정책 행이 pin 경로로 인증한 peer에만 적용되는지 CA 경로도 포함하는지(`"pin"` | `"ca"`). 생략 시 `"pin"`(`PLAN.md` M5 §4.1 #2) — `Principal` 모양만으로는 pin/CA를 구별할 수 없고(CA 발급 leaf도 `qsh://device/…` SAN으로 `Device` principal을 낼 수 있다), 기본을 `"pin"`으로 두면 M1–M4가 실제로 허용하던 경계가 그대로 보존된다.
+- **`scope` 키:** 소유자 개념이 있는 리소스(세션·remote forward)에 대한 action을 소유자에게만 허용할지(`"owned"`, 기본) 임의 소유자에게 허용할지(`"any"`). 소유자 개념이 없는 action(`exec.run`·`host.reverse`·`forward.local`)에는 무의미하며 무시된다. 기본 `"owned"`가 M3의 opener-principal 소유권 P0를 그대로 재현한다.
+- **Default deny, fail closed:** 매칭 allow 없음 → `PERMISSION_DENIED`; acl.toml이 없거나 파싱 불가 → 전부 deny + 운영자에게 `CONFIG_ERROR` 노출(원격 peer에게는 절대 노출되지 않는다 — 노출하면 그 자체가 host 설정 상태 oracle이다, `PLAN.md` M5 §4.1 #4). "오류 시 개방"은 존재하지 않는다. 정책은 **프로세스 시작 시 1회** 로드한다 — lazy load는 하지 않는다: 첫 요청 시점의 로드는 "판정 불가" 창을 만들고, 그 창에서 fail-open하면 인증 전 리소스 금지 불변식이 깨진다.
 - **단일 choke point:** 호스트 측 `server::dispatch`가 디코딩된 모든 요청에 대해 `Authorizer::check(principal, auth_path, action, resource)`를 **리소스 생성(PTY spawn/exec fork/socket bind/ticket 발급) 이전에** 호출한다. `auth_path`(`Pin`|`Ca`)는 transport가 principal과 함께 connection에 부착하는 "어떤 신뢰 경로로 인증됐는가"이며, principal 모양으로는 복원할 수 없다(CA 발급 leaf도 `qsh://device/…` SAN으로 `device:` principal을 낼 수 있다) — M1 임시 정책 allow-all-**pinned**는 이 값으로만 판정한다. 클라이언트 측 코드와 렌더러에는 ACL 로직이 0이며, MCP는 같은 dispatch를 타므로 자동 상속된다. op → 필요 ACL action 매핑은 CLI.md의 매핑 표가 정본이다.
-- **Audit:** 결정당 한 줄 JSONL(`$XDG_STATE_HOME/qsh/audit.log`) — ts, request_id, principal, action, resource, decision, rule index, peer_addr. 레코드 타입에 argv·PTY 내용·키를 담을 **필드 자체가 없어** "내용 무기록"이 규율이 아니라 타입 수준 속성이다(opt-in `audit.log_argv`만 예외).
+- **Audit:** 결정당 한 줄 JSONL(`$XDG_STATE_HOME/qsh/audit.log`) — ts, request_id, principal, action, resource, decision, rule index, `auth_path`, peer_addr. 레코드 타입에 argv·PTY 내용·키를 담을 **필드 자체가 없어** "내용 무기록"이 규율이 아니라 타입 수준 속성이다(opt-in `audit.log_argv`만 예외, M5에서는 구현하지 않는다). **Audit은 fail-closed다:** 쓰기가 실패하면(디스크 만실 등) 그 뒤의 인가 판정은 감사 없이 조용히 허용되지 않는다 — 감사 없는 서비스보다 서비스 없는 감사가 낫다는 트레이드오프이며, `[audit]`의 회전·retention(§7)이 상시 디스크 예산을 유계로 만들어 이 fail-closed 자체가 자기 유발 서비스 거부가 되는 폭을 줄인다. 수명주기(회전·비동기 쓰기·이 fail-closed 동작 자체)의 구현은 `PLAN.md` M5 Step 3.
 
 ## 7. Config·state·runtime 경로
 
@@ -87,7 +90,7 @@ macOS/Linux 동일 (ssh 스타일 예측 가능성; `~/Library/…` 미사용):
 
 ```
 ~/.config/qsh/            # $QSH_CONFIG_DIR → $XDG_CONFIG_HOME/qsh → 이 경로
-├── config.toml           # [serve] bind·replay_bytes·resume_ttl·close_grace_ms / [identity] key_store / [audit] / [listen] bind·allow_advertised_names(기본 false)·stale_retention(기본 120s) / [reverse] controller·offered_name·backoff_initial_ms(500)·backoff_max_ms(30000)·backoff_jitter_pct(±20)
+├── config.toml           # [serve] bind·replay_bytes·resume_ttl·close_grace_ms / [identity] key_store / [audit] path·max_bytes(64MiB)·retain(5)·queue_depth(1024) / [listen] bind·allow_advertised_names(기본 false)·stale_retention(기본 120s) / [reverse] controller·offered_name·backoff_initial_ms(500)·backoff_max_ms(30000)·backoff_jitter_pct(±20)
 ├── hosts.toml            # [[host]] name·address·user  → host.list (M7 도입; 그 전까지 host 해석은 trust.toml의 pinned peer가 단일 출처. `user`는 M7에서도 계정 선택이 아니라 CLI.md §7의 assertion hint — 불일치 시 UNSUPPORTED)
 ├── trust.toml            # pinned peers + CAs
 ├── acl.toml              # serve/listen 역할만 읽음

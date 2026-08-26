@@ -668,6 +668,76 @@ pub struct TunnelCloseData {
     pub closed: bool,
 }
 
+// ---------------------------------------------------------------------------
+// acl.check (`docs/CLI.md` §6.15, M5 Step 1 — contract only: no evaluator or
+// loader exists yet, `PLAN.md` M5 Step 1 (a). This is a **local**
+// operation — it evaluates this host's own `acl.toml` against the given
+// inputs and is never dispatched to a remote peer (`docs/CLI.md` §2.5's
+// "인가 불요" row, ROADMAP M5 감사 개정 ③: a remote-visible policy query
+// would itself be a capability-enumeration oracle).
+// ---------------------------------------------------------------------------
+
+/// Request for `acl.check` (`qsh acl check`, `docs/CLI.md` §6.15).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AclCheckReq {
+    /// Principal string to evaluate — `device:<name>` | `user:<name>` |
+    /// `fp:<sha256-hex>` (`docs/PRD.md` §9).
+    pub principal: String,
+    /// Dotted action string, one of the 11 PRD §9 actions
+    /// (`qsh_core::acl::Action::as_str`).
+    pub action: String,
+    /// Resource identifier the action would target (e.g. a session id, a
+    /// `host:port`); `None` when the action carries none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource: Option<String>,
+    /// Auth path to assume the principal authenticated over — open string,
+    /// same discipline as [`Host::connection_mode`] (`docs/CLI.md` §10).
+    /// `None` = the policy's own default (`"pin"`, `PLAN.md` M5 §4.1 #2)
+    /// applies, matching what an unqualified `acl.toml` row means.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_path: Option<String>,
+}
+
+/// Data payload of `acl.check` (`docs/CLI.md` §6.15).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AclCheckData {
+    /// Echoes [`AclCheckReq::principal`].
+    pub principal: String,
+    /// Echoes [`AclCheckReq::action`].
+    pub action: String,
+    /// Echoes [`AclCheckReq::resource`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource: Option<String>,
+    /// Echoes [`AclCheckReq::auth_path`] as actually evaluated (the
+    /// defaulted value when the request omitted it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_path: Option<String>,
+    /// Open string: `"allow"` | `"deny"` (`qsh_core::acl::Decision::as_str`,
+    /// same open-string discipline as [`Host::connection_mode`]).
+    pub decision: String,
+    /// Index of the matching policy rule; `None` when no rule matched
+    /// (always true for a `"deny"` decision) or when no policy is loaded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule: Option<u32>,
+    /// Which policy file this decision was evaluated against.
+    pub policy: AclPolicyRef,
+}
+
+/// Which `acl.toml` an `acl.check` decision was evaluated against
+/// (`docs/CLI.md` §6.15).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AclPolicyRef {
+    /// Absolute path to the policy file, whether or not it loaded.
+    pub path: String,
+    /// Number of rules the loaded policy has; `0` when `loaded` is `false`.
+    pub rules: u32,
+    /// `false` when `acl.toml` is missing or failed to parse — every
+    /// decision is `"deny"` in that state (`PLAN.md` M5 §4.1 #1), and this
+    /// is how an operator distinguishes "denied by a rule" from "denied
+    /// because there is no policy at all".
+    pub loaded: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1253,5 +1323,124 @@ mod tests {
             let t: Tunnel = serde_json::from_value(json).unwrap();
             assert_eq!(t.mode, mode);
         }
+    }
+
+    // ---- acl.check (M5) --------------------------------------------------
+
+    #[test]
+    fn acl_check_req_omits_empty_optionals() {
+        let req = AclCheckReq {
+            principal: "user:dave".into(),
+            action: "exec.run".into(),
+            resource: None,
+            auth_path: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&req).unwrap(),
+            serde_json::json!({"principal": "user:dave", "action": "exec.run"})
+        );
+        let back: AclCheckReq = serde_json::from_value(serde_json::json!({
+            "principal": "user:dave",
+            "action": "exec.run"
+        }))
+        .unwrap();
+        assert_eq!(back, req);
+
+        // Both optionals present round-trip too.
+        let full = AclCheckReq {
+            principal: "device:hermes".into(),
+            action: "forward.local".into(),
+            resource: Some("localhost:5432".into()),
+            auth_path: Some("ca".into()),
+        };
+        let json = serde_json::to_value(&full).unwrap();
+        assert_eq!(json["resource"], "localhost:5432");
+        assert_eq!(json["auth_path"], "ca");
+        let back: AclCheckReq = serde_json::from_value(json).unwrap();
+        assert_eq!(back, full);
+    }
+
+    #[test]
+    fn acl_check_data_matches_documented_shape() {
+        let data = AclCheckData {
+            principal: "user:dave".into(),
+            action: "exec.run".into(),
+            resource: Some("exec".into()),
+            auth_path: Some("pin".into()),
+            decision: "allow".into(),
+            rule: Some(0),
+            policy: AclPolicyRef {
+                path: "/Users/dave/.config/qsh/acl.toml".into(),
+                rules: 2,
+                loaded: true,
+            },
+        };
+        let json = serde_json::to_value(&data).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "principal": "user:dave",
+                "action": "exec.run",
+                "resource": "exec",
+                "auth_path": "pin",
+                "decision": "allow",
+                "rule": 0,
+                "policy": {
+                    "path": "/Users/dave/.config/qsh/acl.toml",
+                    "rules": 2,
+                    "loaded": true
+                }
+            })
+        );
+        let back: AclCheckData = serde_json::from_value(json).unwrap();
+        assert_eq!(back, data);
+
+        // A deny with no loaded policy: `resource`/`auth_path`/`rule` all
+        // omit when absent rather than serializing as `null`.
+        let denied = AclCheckData {
+            resource: None,
+            auth_path: None,
+            decision: "deny".into(),
+            rule: None,
+            policy: AclPolicyRef {
+                path: "/Users/dave/.config/qsh/acl.toml".into(),
+                rules: 0,
+                loaded: false,
+            },
+            ..data
+        };
+        let json = serde_json::to_value(&denied).unwrap();
+        assert!(json.get("resource").is_none());
+        assert!(json.get("auth_path").is_none());
+        assert!(json.get("rule").is_none());
+        assert_eq!(json["decision"], "deny");
+        assert_eq!(json["policy"]["loaded"], false);
+        let back: AclCheckData = serde_json::from_value(json).unwrap();
+        assert_eq!(back, denied);
+    }
+
+    #[test]
+    fn acl_check_data_decision_is_an_open_string() {
+        // Same open-string discipline as `Host.connection_mode`/`Tunnel.mode`
+        // (`docs/CLI.md` §10) — an unrecognized value still round-trips
+        // rather than hard-failing an older client reading a newer peer.
+        for decision in ["allow", "deny", "future_decision"] {
+            let json = serde_json::json!({
+                "principal": "user:dave",
+                "action": "exec.run",
+                "decision": decision,
+                "policy": {"path": "/x/acl.toml", "rules": 0, "loaded": false}
+            });
+            let d: AclCheckData = serde_json::from_value(json).unwrap();
+            assert_eq!(d.decision, decision);
+        }
+    }
+
+    #[test]
+    fn contract_types_have_json_schemas_for_acl_check() {
+        // Smoke: schema generation must not panic for the M5 contract types.
+        let _ = schemars::schema_for!(AclCheckReq);
+        let _ = schemars::schema_for!(AclCheckData);
+        let _ = schemars::schema_for!(AclPolicyRef);
     }
 }

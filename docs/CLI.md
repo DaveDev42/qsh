@@ -83,12 +83,15 @@ trust.add
 trust.list
 trust.remove
 doctor.run
+acl.check
 schema.get
 capabilities.get
 version.get
 ```
 
 `session.attach`는 value operation이 아니라 stream operation이다 (§7.1 참고). CLI subcommand 표기(`qsh hosts`, `qsh session open` 등)와 이 dotted 이름은 서로 다른 계층이며, envelope의 `command` field·audit record·MCP mapping은 항상 이 dotted 이름을 사용한다.
+
+`acl.check`(§6.15, M5)는 원격 peer가 요청하는 operation이 아니라 **이 머신 자신의** `acl.toml`을 로컬에서 조회하는 op이다 — §2.5의 "인가 불요" 행이 다른 local-only operation들과 함께 명시한다.
 
 `qsh serve`, `qsh listen`, `qsh reverse`는 operation이 아니라 장기 실행 모드(long-running mode)다. 단일 요청/응답 계약이 없으며 이 목록에 포함되지 않는다.
 
@@ -108,7 +111,7 @@ ACL action은 인가(authorization) 어휘로, operation 이름과는 별개 차
 | `tunnel.open` (local forward) | `forward.local` |
 | `tunnel.open` (remote forward) | `forward.remote` |
 | `tunnel.close`, `tunnel.list` | 해당 tunnel의 소유 peer이면 허용 (`forward.*` 부여로 충분) |
-| `host.list`, `host.get`, `identity.init`, `trust.*`, `doctor.run`, `schema.get`, `capabilities.get`, `version.get` | 인가 불요 — local operation으로 원격 peer의 ACL 평가 대상이 아님 |
+| `host.list`, `host.get`, `identity.init`, `trust.*`, `doctor.run`, `acl.check`, `schema.get`, `capabilities.get`, `version.get` | 인가 불요 — local operation으로 원격 peer의 ACL 평가 대상이 아님 |
 
 향후 예약: streaming file copy → `file.read`/`file.write`, SOCKS(`-D`) → `forward.socks`.
 
@@ -148,6 +151,8 @@ ACL action은 인가(authorization) 어휘로, operation 이름과는 별개 차
 ```
 
 `message`는 사람을 위한 설명이다. 자동화는 `code`와 구조화된 `details`만 사용해야 한다.
+
+> 위 예시의 `message` 문안(`"peer is not allowed to attach to this session"`)은 M5 Step 4가 정하는 균일 거부 문면으로 교체될 예정이다 — 원격 peer 대면 `PERMISSION_DENIED`는 거부된 action/capability를 노출하지 않도록 통일되며(`docs/ROADMAP.md` M5 감사 개정 ③, `PLAN.md` M5 Step 4), 최종 문안은 그 step에서 확정한다(`PLAN.md` M5 §4.2). `message`는 계약이 아니므로(위 문단) 이 교체는 `qsh.cli/v1` 호환성 사건이 아니다.
 
 ### 3.3 기본 오류 코드
 
@@ -614,6 +619,7 @@ qsh serve --bind <ip:port>
 - 시작 시 실제로 bind된 주소를 stderr에 출력한다 — stdout은 §2.2 규칙에 따라 JSON 계약 전용이므로 여기서는 쓰지 않는다.
 - listener 재시작 시 세션 소실에 대해서는 README의 [Known limitations](../README.md#known-limitations-mvp-by-design)를 참고한다.
 - **SIGTERM drain(M2, ADR-0003):** 신규 attach·open을 거부한 뒤 모든 세션에 §6.7의 close 절차(SIGHUP→TERM→KILL, `close_grace_ms`)를 적용하고, 붙어 있는 소비자에게 `session.closed{reason: "closed"}`(§6.4)를 보낸 다음 종료한다 — 세션은 프로세스와 함께 끝나며 고아 셸을 남기지 않는다.
+- **정책 파일 진단(M5).** 시작 시 `acl.toml`을 1회 읽는다(hot reload 없음). 파일이 없거나 파싱에 실패하면 리소스를 생성하지 않고 원격 peer 대면으로는 시작하지 않는다 — 그 상태에서 실제로 도달하는 모든 인가 판정은 항상 `deny`다(`docs/design/architecture.md` §6, `PLAN.md` M5 §4.1 #1). 운영자에게는 stderr에 파일 경로와 복사해 붙일 수 있는 최소 정책 예시를 담은 진단을 한 번 출력한다(tracing target `qsh::acl`, 한 줄 JSON, 정책 내용은 덤프하지 않음) — `acl.toml`을 자동으로 만들지는 않는다(§4.1 #1 (b): interim allow-all-pinned 경계를 파일로 영구화하는 것은 의도치 않은 권한 확대다). 재시작 전 정책을 검증하려면 §6.15의 `qsh acl check`를 쓴다.
 
 ### 6.13 장기 실행 모드: `qsh listen` / `qsh reverse`
 
@@ -632,6 +638,7 @@ qsh reverse <controller> [--offered-name <name>]
 
   같은 상수를 `qsh listen` 시작 배너, `README.md`의 "Known limitations", 그리고 이 절이 함께 소비한다 — 문안 정본이 여러 벌 생기지 않는다. M7의 `doctor.run`(§6.11)도 `code: "controller_unreachable"`을 그대로 소비할 예정이다.
 - `--bind`의 우선순위: CLI flag > `[listen].bind` > 기본값 `[::]:4433` — `qsh serve`(§6.12)와 **기본값이 같다**. 한 머신에서 두 역할을 겸하려면 명시적 `--bind`가 필요하고, 충돌은 조용한 오작동이 아니라 즉시·명시적 실패(stderr 진단 + exit `255`)다.
+- **정책 파일 진단(M5).** `qsh serve`(§6.12)와 동일한 규율이다 — `qsh listen`/`qsh reverse` 둘 다 시작 시 `acl.toml`을 1회 읽고, 없거나 파싱 불가면 리소스를 생성하지 않으며 그 상태에서 도달하는 모든 인가 판정은 항상 `deny`다(`docs/design/architecture.md` §6, `PLAN.md` M5 §4.1 #1). 운영자에게는 stderr에 파일 경로와 최소 정책 예시를 담은 진단을 한 번 출력하고(tracing target `qsh::acl`, 한 줄 JSON), 자동 생성은 하지 않는다. `qsh listen`은 controller로서 `host.reverse` 등록 요청을, `qsh reverse`는 target으로서 그 연결 위에서 relay되는 세션 op을 각각 자기 자신의 `acl.toml`로 평가한다.
 - 시작 시 실제로 bind된 주소와 등록 이벤트(`registered|denied|replaced|lost|expired|retry`)를 stderr에 구조화 진단(tracing target `qsh::reverse`, 한 줄 JSON, payload·토큰 field 없음)으로 출력한다 — stdout에는 §2.2 규칙에 따라 한 바이트도 쓰지 않는다.
 - `qsh reverse <controller>`의 `<controller>`는 trust store alias다(§6.8의 host→주소 해석과 동일 — M7 이전에는 trust.toml pinned peer가 단일 출처). 등록에 성공하면 그 연결 위에서 host 역할로 동작하며, 서비스하는 세션은 `qsh serve`와 같은 broker·writer lease 규율을 그대로 따른다. **관찰 가능한 차이는 writer lease를 쥐는 connection이 상주 `qsh listen` 데몬이 유지하는 역방향 connection에 결합된다는 점이다** — 그 connection이 죽으면(재접속 루프가 새 connection을 세우기 전) lease는 forward 세션과 동일하게 자동 해제된다(architecture.md §3).
 - `qsh listen`/`qsh reverse` 둘 다 Windows에서는 리소스를 생성하지 않고 `UNSUPPORTED` + exit `255`다 — localctl(UDS)과 host 역할(PTY)이 `cfg(unix)`이기 때문이다. Windows의 `qsh hosts`는 forward host만 반환하며(데몬 개념 없음) 오류가 아니다.
@@ -645,6 +652,49 @@ qsh reverse <controller> [--offered-name <name>]
 터널의 local listener(`-L`) 또는 remote 등록(`-R`, host가 bind)은 그것을 연 CLI 프로세스가 살아 있는 동안만 존재한다 — 터널 전용의 별도 client daemon은 두지 않는다(M4 Step 1 결정): `qsh serve`/`qsh listen`(§6.12·§6.13)과 달리 터널은 그 자체로 장기 실행 모드가 아니라, 터널을 연 **interactive foreground 프로세스**(대화형 `qsh [user@]host -L …/-R …` 또는 foreground로 유지되는 `qsh tunnel open --json`)에 수명이 결합된다. (아래 reverse route `-R` 예외는 이 규칙을 어기지 않는다 — 새 daemon을 두는 것이 아니라, session op이 이미 §6.13에서 쓰는 **기존** `qsh listen` 데몬의 reverse connection을 carrier로 재사용할 뿐이다.) 그 프로세스가 끝나거나(Ctrl-C, 터미널 종료) 밑에 깔린 QUIC connection이 죽으면, 그 프로세스가 쥔 모든 터널이 함께 끝난다 — 진행 중이던 개별 TCP 연결은 끊기고, local listener/remote 등록 자체가 재수립 없이 사라진다(§7 대화형 attach의 세션과 달리, 터널 listener/등록은 connection 수명과 분리되지 않는다 — splice된 개별 TCP 연결의 생존 여부는 M4 이후 splice 구현 단계의 몫이다). 다시 쓰려면 새 `tunnel.open`이 필요하다.
 
 **예외 — reverse route 위의 `-R`(M4 Step 5 PR 5a).** 위 규칙은 그 tunnel의 control 요청(`RemoteForwardOpen`)을 **어느 QUIC connection이 실어 날랐는가**를 홀더로 삼는다는 관찰로 다시 읽을 수 있다 — forward route에서는 CLI 프로세스가 직접 dial한 connection이 그것이므로 둘의 수명이 그냥 같다. reverse route에서는 다르다: CLI 프로세스는 QUIC connection을 전혀 쥐지 않고 상주 `qsh listen` 데몬의 `LOCAL_CONTROL` conduit(§6.13)으로 `RemoteForwardOpen`을 relay할 뿐이며, 실제로 그 요청을 나르는 것은 그 CLI가 아니라 **데몬이 유지하는 하나의 reverse connection**이다 — target 쪽에서 그 listener를 "이 connection이 살아 있는 동안" 것으로 등록하는 대상도 바로 그 connection이다(`crates/qsh-core/src/server/mod.rs`의 `Server::remote_forwards`, connection-bound). 그래서 reverse route 위의 `-R`은 그것을 연 CLI 프로세스가 죽어도(Ctrl-C, 터미널 종료) target의 listener는 살아남는다 — 죽는 것은 reverse connection 자체가 끊어질 때뿐이다(`docs/design/protocol.md` §11-3의 `forward_id`→conduit 등록표 문단). 다만 그 CLI가 지녔던 `LOCAL_STREAM` claim conduit도 함께 죽으므로, target이 그 뒤 여는 `TCP_ACCEPTED`는 데몬에서 받을 conduit이 없어 즉시 reset된다 — listener는 살아 있지만 그 accept를 로컬 목적지로 이어줄 소비자가 없는 상태이며, 이 상태를 해소하려면(=다시 claim하려면) 새 `tunnel.open`으로 같은 `forward_id`를 재등록하는 op이 필요하다 — 그런 op은 아직 없다(M4 Step 5 PR 5b가 실제로 구현한 것은 이것이 아니다: `PLAN.md`의 PR 5b 범위 목록은 이 재등록 op을 포함하지 않았고, 구현하려면 `RemoteForwardOpen`이 기존 `forward_id`를 받아들이는 새 wire 의미가 필요해 범위 밖이었다 — P1 백로그). PR 5b가 실제로 제공하는 유일한 회복 경로는 `qsh tunnel close <id>`(§6.9)로 등록 자체를 닫아 target의 listener까지 해제하고, 새 `forward_id`로 처음부터 `-R`을 다시 여는 것뿐이다 — 같은 포트를 재사용하려는 claim conduit 재수립은 아니다. `-L`은 이 예외에 해당하지 않는다 — reverse route에서도 local listener(bind)는 여전히 그것을 연 CLI 프로세스 자신의 소켓이고, 데몬은 그 위를 오가는 개별 `TCP_CONNECT` 스트림의 carrier일 뿐 listener의 홀더가 아니다.
+
+### 6.15 `qsh acl check` (M5)
+
+```bash
+qsh acl check --principal <principal> --action <action> [--resource <resource>] [--auth-path pin|ca] --json
+```
+
+`acl.check`는 §2.4·§2.5가 명시하듯 **로컬 operation**이다 — 원격 peer가 요청할 수 없고, 이 머신 자신의 `acl.toml`을 이 머신에서 조회한다. 원격으로 정책 조회를 허용하면 그 자체가 capability 열거 oracle이 되기 때문이다(`docs/ROADMAP.md` M5 감사 개정 ③). `qsh serve`/`qsh listen`/`qsh reverse`가 실제로 강제하는 것과 **같은 평가기**를 호출하므로(`PLAN.md` M5 DoD 1), 이 명령의 결과는 실제 enforcement 결과의 신뢰할 수 있는 예측이다 — 재시작 전 정책을 검증하는 용도(§6.12·§6.13의 정책 파일 진단 문단)로 쓴다.
+
+인자:
+
+- `--principal <principal>` (필수): 평가할 principal 문자열(`device:<name>` | `user:<name>` | `fp:<sha256-hex>`, `docs/PRD.md` §9). 모양이 셋 중 어느 것과도 맞지 않으면 `INVALID_ARGUMENT`.
+- `--action <action>` (필수): PRD §9의 11종 action 중 하나(닷 표기, 예 `session.open`). 어휘에 없는 값은 `INVALID_ARGUMENT`(정책 로더가 잘못된 wildcard 패턴을 거부하는 것과 같은 층 — 오타가 조용히 통과하지 않는다).
+- `--resource <resource>` (선택): action이 겨냥하는 리소스 식별자. 생략하면 리소스 개념이 없는 action으로 평가한다.
+- `--auth-path <pin|ca>` (선택): 생략 시 `acl.toml` 자체의 기본값(`"pin"`, `PLAN.md` M5 §4.1 #2)을 적용한 것과 동일하게 평가한다.
+
+`data`는 `AclCheckData`(`crates/qsh-proto/src/types.rs`)다:
+
+```json
+{
+  "schema": "qsh.cli/v1",
+  "request_id": "01K0EXAMPLE",
+  "command": "acl.check",
+  "ok": true,
+  "data": {
+    "principal": "user:dave",
+    "action": "exec.run",
+    "resource": "exec",
+    "auth_path": "pin",
+    "decision": "allow",
+    "rule": 0,
+    "policy": {
+      "path": "/Users/dave/.config/qsh/acl.toml",
+      "rules": 2,
+      "loaded": true
+    }
+  }
+}
+```
+
+`decision`은 `Host.connection_mode`와 같은 열린 문자열 규율(§10)로 `"allow"`/`"deny"`다. `rule`은 매칭된 정책 행의 배열 index이며, 아무 행도 매칭하지 않았거나(항상 `"deny"`를 동반) 정책이 로드되지 않은 경우 `null`이다. `policy.loaded: false`는 `acl.toml`이 없거나 파싱에 실패한 상태를 그대로 보여준다 — 그 상태에서는 `decision`이 항상 `"deny"`다(§6.12·§6.13의 정책 파일 진단, `PLAN.md` M5 §4.1 #1). `qsh acl check`는 이 상태를 오류로 만들지 않는다 — 조회는 성공했고(`ok: true`), 다만 조회된 사실이 "정책 없음"일 뿐이다.
+
+`--principal`/`--action`이 잘못된 모양이 아닌 한 `acl.check` 자체는 실패하지 않는다(exit `0`, §4). human mode 출력은 한 줄 요약(`allow`/`deny` + 근거 rule index 또는 "no policy loaded")이다.
 
 ## 7. Human interactive mode
 
