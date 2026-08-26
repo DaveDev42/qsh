@@ -36,7 +36,7 @@ use crate::client::ClientError;
 use crate::client::link::{DataKillSwitch, DataLink, DataRecv, DataSend};
 
 pub use local::{LocalForwardError, LocalForwardHandle};
-pub use remote::RemoteForwardAcceptor;
+pub use remote::{REMOTE_FORWARD_LOOPBACK_ONLY_MESSAGE, RemoteForwardAcceptor};
 
 pub(crate) mod dial;
 pub(crate) mod local;

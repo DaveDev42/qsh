@@ -118,6 +118,16 @@ impl BindHostResolver for SystemResolver {
     }
 }
 
+/// The exact `docs/CLI.md` §6.9 / `README.md` wording for a non-loopback
+/// `-R` bind's `INVALID_ARGUMENT` refusal (`PLAN.md` M4 Step 8's L6
+/// doc-consistency gate, the same discipline M3 Step 9 applied to
+/// `qsh_core::doctor::CONTROLLER_UNREACHABLE`). [`NotLoopback`]'s
+/// `Display` is defined in terms of this constant rather than its own
+/// literal so the two cannot drift apart — `crates/qsh-core/tests/
+/// tunnel_docs.rs` pins docs to this single source, not to a second copy
+/// of the string.
+pub const REMOTE_FORWARD_LOOPBACK_ONLY_MESSAGE: &str = "remote forward binds loopback only";
+
 /// A `bind_host` this host will not bind for anyone: it is not loopback,
 /// or it named nothing at all.
 ///
@@ -128,9 +138,16 @@ impl BindHostResolver for SystemResolver {
 /// this to [`qsh_proto::ErrorCode::InvalidArgument`], never
 /// `PermissionDenied` (this module's own doc on why loopback-only is a
 /// request constraint and not an ACL decision).
-#[derive(Debug, Error)]
-#[error("remote forward binds loopback only")]
+#[derive(Debug)]
 pub(crate) struct NotLoopback;
+
+impl std::fmt::Display for NotLoopback {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(REMOTE_FORWARD_LOOPBACK_ONLY_MESSAGE)
+    }
+}
+
+impl std::error::Error for NotLoopback {}
 
 /// Bound on how long resolving a peer-supplied `bind_host` may take
 /// before [`resolve_loopback_bind_addr`] gives up and reports it as not

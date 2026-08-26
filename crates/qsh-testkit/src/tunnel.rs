@@ -273,7 +273,31 @@ impl TunnelHarness {
     /// Start with a custom policy — how a test provokes the host's inline
     /// `forward.local` denial (`docs/design/protocol.md` §7).
     pub async fn start_with(authorizer: Arc<dyn Authorizer>) -> Self {
-        let host = LoopbackHarness::start_with(authorizer).await;
+        Self::start_inner(LoopbackHarness::start_with(authorizer).await).await
+    }
+
+    /// Start with the interim allow-all-pinned policy, reachable only
+    /// through a seeded chaos proxy (`docs/design/testing.md` L4,
+    /// `PLAN.md` M4 Step 8 (a)/(b)) — the tunnel-flavored twin of
+    /// [`LoopbackHarness::start_chaotic`], for `repath()`/`sever()`
+    /// scenarios that need a live tunnel splice riding the same connection
+    /// the fault is injected on. [`Self::connection`] (and so
+    /// [`Self::local_forward`]/[`Self::remote_forward`]) dials through the
+    /// proxy transparently, exactly like `raw_session`'s own `dial()` call
+    /// does under [`LoopbackHarness::start_chaotic`].
+    pub async fn start_chaotic(policy: crate::chaos::ChaosPolicy) -> Self {
+        Self::start_chaotic_with(Arc::new(AllowAllPinned), policy).await
+    }
+
+    /// [`Self::start_chaotic`] with a custom policy engine.
+    pub async fn start_chaotic_with(
+        authorizer: Arc<dyn Authorizer>,
+        policy: crate::chaos::ChaosPolicy,
+    ) -> Self {
+        Self::start_inner(LoopbackHarness::start_chaotic_with(authorizer, policy).await).await
+    }
+
+    async fn start_inner(host: LoopbackHarness) -> Self {
         // `raw_session`, not `session`: a local forward needs a live,
         // handshaken connection and nothing else — no PTY session is
         // involved, and `TCP_CONNECT` carries no ticket (§7's sole ticket
@@ -291,6 +315,25 @@ impl TunnelHarness {
     /// The client's connection to the host — the carrier a `-L` rides.
     pub fn connection(&self) -> Connection {
         self.connection.clone()
+    }
+
+    /// The chaos proxy in front of this harness's host. Panics unless the
+    /// harness was started with [`Self::start_chaotic`].
+    pub fn chaos(&self) -> &crate::chaos::ChaosProxy {
+        self.host.chaos()
+    }
+
+    /// The one-line context every chaos assertion message must carry —
+    /// passthrough of [`LoopbackHarness::context`].
+    pub fn chaos_context(&self) -> String {
+        self.host.context()
+    }
+
+    /// [`Self::chaos_context`] plus a freshly read [`crate::chaos::ChaosStats`]
+    /// — passthrough of [`LoopbackHarness::detail`]. Call it at the
+    /// assertion site.
+    pub fn chaos_detail(&self) -> String {
+        self.host.detail()
     }
 
     /// Every audit record the host produced.

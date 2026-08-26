@@ -2,7 +2,7 @@
 
 **상태:** 확정 (구현과 어긋나는 내용을 발견하면 이 문서를 먼저 갱신한다)
 **작성일:** 2026-08-17 · **개정:** 2026-08-21 — 프로덕션 준비도 감사(HEAD `1d5d1b0`) 반영: M3/M5/M7/M8/M9 범위·수용 기준 증보, "마일스톤 마감 공통 절차" 신설. 새 마일스톤은 만들지 않았다 — 감사가 찾은 갭 전부를 기존 마일스톤에 명시 귀속시킨 것이 이 개정의 전부다.
-**현재 위치:** M4 진행 중 (Step 7까지 랜딩 — 남은 것은 Step 8 resume/chaos + 마감, 2026-08-27)
+**현재 위치:** M4 완료 (2026-08-27) — 다음은 M5 (ACL 정책 + audit)
 
 이 문서는 P0 MVP까지의 canonical 마일스톤 기록이다. 각 마일스톤의 "수용 기준"이 곧 그 마일스톤의 **완료 정의(Definition of Done)** 다 — 수용 기준을 통과하는 테스트/시연 없이는 마일스톤을 닫지 않는다. SC 번호는 PRD §15 성공 기준의 순번이다 (SC1: 신규 두 장비 5분 내 연결, SC2: 한 명령 접속, SC3: 네트워크 전환 ≥95% 유지/resume, SC4: resume 가능한 단절에서 output 무손실, SC5: client crash가 remote PTY를 죽이지 않음, SC6: 모든 privileged op의 ACL 추적성, SC7: 공개 beta 전 독립 보안 리뷰).
 
@@ -71,12 +71,13 @@
   - **(감사 개정)** 타 principal 세션에 대한 `session.write/resize`가 거부되고 audit에 deny가 남음(소유권 P0). 병렬 동시 등록(같은/다른 fingerprint)·병렬 다중 세션 경합 테스트가 존재 — 순차 시나리오만으로 마일스톤을 닫지 않는다.
 - **크기:** 2ew + 0.5ew(감사 개정분)
 
-### M4 — 터널 (진행 중)
+### M4 — 터널 ✅ 완료 (2026-08-27)
 
 - **범위:** `-L`/`-R`, `qsh tunnel open/close`, `qsh tunnels`. TCP 연결당 QUIC stream 1개, stream 우선순위로 PTY 보호, remote forward는 loopback bind만(§9). forward/reverse 연결 양쪽에서 동작.
 - **명시적 out:** SOCKS `-D`(P1), file copy, UDP forwarding.
 - **수용 기준 (DoD):** `-L 8080:localhost:3000` 후 `curl localhost:8080` 도달. `-R` non-loopback bind 요청이 **거부**되는 명시적 테스트. Throughput ≥ 동일 프로세스에서 측정한 raw-quinn 기준의 80%. **1GB 포화 터널과 병행한 PTY echo p95 < RTT + 10ms** (§13). `-D 1080` → `UNSUPPORTED` + "P1" 메시지.
 - **크기:** 2ew
+- **마감 노트 (2026-08-27):** DoD 5항목 전건 테스트 증거로 통과(PLAN.md M4판 §1 체크리스트 — perf 게이트 정본은 CI `acceptance` run 32986938847). 마감 절차 1·2(태그 대조·README 동기화) 완료 — 구속 문서 충돌 0건. Step 8이 확정한 resume 의미론: migration(path rebind)은 터널을 투명 생존시키고, 연결 손실→resume에서 터널 스트림은 깨끗이 종료된다(세션만 §10 resume). **forward-route live carrier**(-L forward가 recovery 후에도 신규 연결을 서비스) 는 구현하지 않기로 확정하고 M5 입력으로 명시 이관 — 근거는 PLAN.md M4판 Step 8 (a)-추기(git 이력).
 
 ### M5 — ACL 정책 + audit
 

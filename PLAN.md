@@ -15,11 +15,11 @@
 
 ### DoD 체크리스트 (`docs/ROADMAP.md` M4 "수용 기준" 인용)
 
-- [ ] **DoD 1** — `-L 8080:localhost:3000` 후 `curl localhost:8080`이 원격 `:3000`에 도달(실프로세스 e2e).
-- [ ] **DoD 2** — `-R`의 non-loopback bind 요청이 **거부**됨을 단언하는 명시적 테스트(loopback-only 강제, §9).
-- [ ] **DoD 3** — 터널 throughput ≥ **동일 프로세스·동일 실행**에서 측정한 raw-quinn 기준의 80%(비율 게이트, `docs/design/testing.md` L10).
-- [ ] **DoD 4** — **1GB 포화 터널과 병행한 PTY echo p95 < 측정 loopback RTT + 10 ms**(통합 벤치마크, `docs/design/protocol.md` §12·`docs/PRD.md` §13).
-- [ ] **DoD 5** — `-D 1080` → `UNSUPPORTED` + "P1" 메시지(flag는 parsing되되 리소스 생성 0).
+- [x] **DoD 1** — `-L 8080:localhost:3000` 후 `curl localhost:8080`이 원격 `:3000`에 도달(실프로세스 e2e). Step 3이 심고 Step 5가 reverse까지 확장 — `crates/qsh-cli/tests/tunnel_e2e.rs`의 `the_interactive_form_forwards_a_local_port_to_the_remote_destination`(대화형 -L, 실 TCP 왕복)·`tunnel_open_reports_the_bound_forward_and_holds_it`(standalone holder). 2026-08-27 전체 스위트 981/981 green에 포함.
+- [x] **DoD 2** — `-R`의 non-loopback bind 요청이 **거부**됨을 단언하는 명시적 테스트(loopback-only 강제, §9). Step 4가 심음 — CLI 레벨 `a_non_loopback_bind_is_refused_before_a_session_exists`(exit-code matrix 행 포함) + unit 레벨 `non_loopback_bind_is_refused_and_binds_nothing`·`loopback_bind_host_table`(`crates/qsh-core/src/tunnel/remote.rs`). 거부 문구는 Step 8의 L6 게이트(`crates/qsh-core/tests/tunnel_docs.rs`)가 `REMOTE_FORWARD_LOOPBACK_ONLY_MESSAGE` 상수에 핀.
+- [x] **DoD 3** — 터널 throughput ≥ **동일 프로세스·동일 실행**에서 측정한 raw-quinn 기준의 80%(비율 게이트, `docs/design/testing.md` L10). Step 7이 심음 — `crates/qsh-testkit/tests/tunnel_throughput.rs` `tunnel_throughput_meets_raw_quinn_ratio`(stock-quinn baseline·interleaved trials·strict 0.80). 정본 로그: CI `acceptance` job run 32986938847 (2026-08-26, `QSH_ACCEPTANCE_STRICT=1`, PASS 5.3s); 로컬 실측 ratio 0.899–0.945 (Step 7 (a)-추기).
+- [x] **DoD 4** — 포화 터널과 병행한 PTY echo p95 < 측정 RTT + 10 ms(통합 벤치마크, `docs/design/protocol.md` §12·`docs/PRD.md` §13; 1GB는 §4.2 확정대로 15s 시간-유계 + MIN_SAMPLES=200으로 대체). Step 7이 심음 — `crates/qsh-testkit/tests/tunnel_echo_under_load.rs` `tunnel_saturated_pty_echo_p95_under_measured_rtt_plus_10ms`(FloodServer host→client 포화 = 측정 방향과 일치, client 발신 진짜 왕복 − quinn path RTT). 정본 로그: 같은 acceptance run (PASS 15.6s — 15s 측정 창 완주); 로컬 실측 p95 7.1–7.9 ms.
+- [x] **DoD 5** — `-D 1080` → `UNSUPPORTED` + "P1" 메시지(flag는 parsing되되 리소스 생성 0). Step 6이 심음 — `crates/qsh-cli/tests/dynamic_forward_stub.rs`의 `dynamic_forward_on_tunnel_open_is_unsupported_and_binds_nothing`(포트 재바인드로 리소스 0 증명)·`dynamic_forward_on_the_interactive_form_creates_no_session_even_combined_with_local_forward`. 메시지 문구는 Step 8의 L6 게이트가 `DYNAMIC_FORWARD_UNSUPPORTED_MESSAGE` 상수에 핀. `error.UNSUPPORTED.json` fixture 등록(DEFERRED 해제, Step 6).
 
 M4 크기: 2ew (`docs/ROADMAP.md` M4 "크기").
 
@@ -268,8 +268,10 @@ M4가 실제로 지는 것은 (i) 두 방향의 forward(`-L` local→remote / `-
 
 **터널의 resume 거동(정의 + 테스트).** 터널은 세션과 **다르게** 산다 — replay ring이 없으므로(ADR-0004는 세션 output 전용) byte-exact resume이 **불가능**하다. 정의:
 - **migration(QUIC path rebind, chaos `repath()`)**: 같은 QUIC 연결이므로 터널 스트림이 **투명하게 생존**한다 — 진행 중 전송이 path 전환을 넘어 이어진다. 이것이 quinn migration의 이득이며 별도 코드 불요. 테스트로 단언한다.
-- **연결 손실 → 재dial/resume(chaos `sever()`)**: PTY 세션은 §10으로 resume하지만 **터널 스트림은 resume하지 않는다** — in-flight 터널 TCP 연결은 로컬 소켓을 정리해 **깨끗하게 종료**(hang·panic 금지, 명확한 종료). 리스너 수명: local forward 리스너는 holder(§4.1 #1)가 살아 있으면 유지되어 재연결 후 새 TCP 연결이 새 스트림을 연다; remote forward 리스너는 연결에 결합되므로 연결 손실 시 host가 정리하고, 요청자는 재연결 후 `RemoteForwardOpen`을 재발행해야 한다(자동 재발행 여부는 §4.2에서 확정). reverse 경로에선 데몬의 reverse 연결이 죽으면 그 host의 모든 터널 conduit이 명확한 typed error로 함께 끝난다(M3 Step 6의 conduit-사망 규율 상속).
+- **연결 손실 → 재dial/resume(chaos `sever()`)**: PTY 세션은 §10으로 resume하지만 **터널 스트림은 resume하지 않는다** — in-flight 터널 TCP 연결은 로컬 소켓을 정리해 **깨끗하게 종료**(hang·panic 금지, 명확한 종료). 리스너 수명: local forward 리스너는 holder(§4.1 #1)가 살아 있으면 유지되지만, **forward 자체는 recovery를 넘지 못한다** — 재연결 후 그 리스너로 들어온 새 TCP 연결은 즉시·깨끗하게 reset된다(hang·무한 대기 금지). forward를 다시 쓰려면 재시작해야 한다(아래 추기); remote forward 리스너는 연결에 결합되므로 연결 손실 시 host가 정리하고, 요청자는 재연결 후 `RemoteForwardOpen`을 재발행해야 한다(자동 재발행 여부는 §4.2에서 확정). reverse 경로에선 데몬의 reverse 연결이 죽으면 그 host의 모든 터널 conduit이 명확한 typed error로 함께 끝난다(M3 Step 6의 conduit-사망 규율 상속).
 - **PTY와의 공존**: 같은 연결 위 세션이 resume하는 동안 터널이 깨끗이 정리되고, 세션 resume이 터널 정리에 막히지 않음을 단언(우선순위·독립 스트림의 성질).
+
+> **(a)-추기 — sever 후 리스너 거동의 확정 (2026-08-27, 구현 대조).** 이 절의 초안은 "재연결 후 새 TCP 연결이 새 스트림을 연다"고 썼으나, 구현 대조 결과 이는 성립하지 않으며 **성립하지 않는 쪽을 M4의 확정 거동으로 채택한다.** 근거: `crates/qsh-core/src/tunnel/local.rs`의 `ForwardCarrier::Quic`은 forward가 시작된 시점 연결의 **의도된 스냅샷**이고(문서화된 설계 — "a forward has to be restarted across a recovery"), recovery가 교체하는 attach의 `Link`를 참조하지 않는다. `docs/ROADMAP.md` M4 DoD·`docs/PRD.md` 어디에도 recovery 후 forward 생존 약속이 없으므로, 초안 문장은 계약이 아니라 계획 단계의 낙관이었다. 실측(tunnel_chaos.rs 테스트 2): sever+resume 후 리스너는 accept를 계속 받고, 새 연결은 즉시 `ConnectionReset`으로 끝난다 — hang도 silent loss도 없다. 테스트는 이 거동을 그대로 고정하되, `ForwardCarrier`가 훗날 live-carrier로 바뀌어 왕복이 성공하게 되면 명시적 panic("update this assertion")으로 개정을 강제하는 트랩을 포함한다. **forward-route live carrier**(attach의 현재 연결을 추적해 -L forward가 recovery를 넘어 신규 연결을 서비스하는 것 — `ops/session.rs` `Link`·`tunnel/local.rs` `ForwardCarrier`·`ops/tunnel.rs` 호출부·reverse acceptor 대응 지점을 관통하는 설계 변경)는 §3 "M5에 넘기는 것" (v)로 명시 이관한다. remote forward의 `RemoteForwardOpen` 재발행은 초안대로 **수동**으로 확정한다(자동 재발행 없음 — 같은 이관 항목의 일부).
 
 **문서·README.** `README.md` 기능 목록에 터널(`-L`/`-R`, loopback-only remote, `-D` P1) 추가·Known limitations(비-loopback remote bind 없음·SOCKS 없음·UDP forwarding 없음·터널은 resume 안 됨, migration은 생존) 갱신. `docs/CLI.md`·`docs/design/protocol.md`·`docs/design/architecture.md`가 Step 1–7에서 갱신된 것과 최종 구현 사이 어긋남 없는지 마감 대조. **구속 문서 태그 대조**(ROADMAP §2 절차 1): `docs/CLI.md`·`docs/PRD.md`·`docs/adr/`에서 M4로 태그됐거나 M4가 계약으로 확정한 문장이 전부 DoD로 검증됐거나 후속 마일스톤에 명시 귀속된 유예인지 확인.
 
@@ -303,7 +305,7 @@ M4가 실제로 지는 것은 (i) 두 방향의 forward(`-L` local→remote / `-
 - **`session.signal`(wire 25)** — 그대로 P1 유예. Step 1은 `reserved 25`를 건드리지 않는다.
 - **실기기 mobility 캠페인의 터널 leg** — M8. M4의 chaos·perf 게이트는 기능적 정확성/비율 검증이지 SC3의 통계 측정이 아니다.
 
-**M5에 넘기는 것(지금 기록해 둔다):** (i) `forward.socks`·`file.*` 어휘의 "정의하되 항상 deny" 승격, (ii) `forward.local`/`forward.remote`의 TOML 정책 매칭(현재 검사 지점만 존재), (iii) 터널 관련 op 전수의 audit 완전성(SC6)이 M5의 op-registry 열거 테스트에 포함되는지 확인, (iv) reverse 경로 터널의 소유권 축(M3가 넣은 opener-principal 결합을 터널 `forward_id` 소유로 확장할지 — `tunnel.close`의 "소유 peer" 판정).
+**M5에 넘기는 것(지금 기록해 둔다):** (i) `forward.socks`·`file.*` 어휘의 "정의하되 항상 deny" 승격, (ii) `forward.local`/`forward.remote`의 TOML 정책 매칭(현재 검사 지점만 존재), (iii) 터널 관련 op 전수의 audit 완전성(SC6)이 M5의 op-registry 열거 테스트에 포함되는지 확인, (iv) reverse 경로 터널의 소유권 축(M3가 넣은 opener-principal 결합을 터널 `forward_id` 소유로 확장할지 — `tunnel.close`의 "소유 peer" 판정). (v) **forward-route live carrier** — `ForwardCarrier::Quic`의 스냅샷을 attach의 현재 `Link`를 추적하는 live 뷰로 교체해, holder가 살아 있는 -L forward가 recovery 후에도 신규 연결을 서비스하게 하는 것(Step 8 (a)-추기의 확정 유예; -R 자동 재발행 여부도 이때 함께 재론).
 
 ## 4. 리스크와 감시 항목
 

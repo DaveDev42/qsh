@@ -17,8 +17,8 @@ One binary (`qsh`) is both ends: it serves, and it connects.
 
 Pre-alpha. **Not for production use.**
 
-M0 through M3 are done and M4 (port forwarding) is partway through. What
-works end to end today:
+M0 through M3 are done, and M4 (port forwarding) has landed what its
+acceptance criteria ask for. What works end to end today:
 
 - `qsh exec host -- cmd`, in human mode or as a single `qsh.cli/v1` JSON
   envelope with the remote exit code, stdout and stderr.
@@ -29,13 +29,13 @@ works end to end today:
   (`qsh listen` / `qsh reverse`) and you attach to it through that
   controller. The target reconnects with backoff when the link dies.
 - `-L` and `-R` port forwards, over forward connections and over reverse
-  ones.
+  ones, plus the standalone `qsh tunnel open`/`qsh tunnels`/
+  `qsh tunnel close` machine-mode commands.
 
-What is not there yet: the tunnel management commands `qsh tunnels` and
-`qsh tunnel close` (documented in `docs/CLI.md` §6.9, not yet in the binary),
-`-D` SOCKS forwarding (P1, and the `UNSUPPORTED` stub for it has not landed
-either, so `-D` is currently a clap usage error), the throughput and latency
-gates M4 owes, and the MCP adapter.
+`-D` (SOCKS5 dynamic forwarding) parses on both the interactive and
+`tunnel open` forms but always answers `UNSUPPORTED` with the message
+"SOCKS dynamic forwarding (-D) is a P1 feature". The MCP adapter is
+still M6.
 
 Authorization is the other unfinished half: read [Security
 posture](#security-posture) before you pin anything.
@@ -161,7 +161,8 @@ qsh box -R 9000:localhost:9000           # host's :9000 reaches this machine's :
 
 Both are repeatable, both share the grammar `[bind:]listen_port:host:host_port`,
 and both bind loopback by default. A non-loopback bind on `-R` is refused by
-the host with `INVALID_ARGUMENT`, no matter what the ACL says.
+the host with `INVALID_ARGUMENT` ("remote forward binds loopback only"), no
+matter what the ACL says.
 
 For a tunnel with no shell attached, use the machine-mode form. It emits one
 `tunnel.open` envelope and then blocks until you interrupt it:
@@ -169,11 +170,18 @@ For a tunnel with no shell attached, use the machine-mode form. It emits one
 ```bash
 qsh tunnel open box --local 8080:localhost:3000 --json
 qsh tunnel open box --remote 9000:localhost:9000 --json
+qsh tunnels --json                       # tunnels a resident daemon holds
+qsh tunnel close <tunnel-id> --json
 ```
 
 A tunnel lives as long as the process holding it, with one exception: an
 `-R` listener over a reverse connection is held by the resident `qsh listen`
-daemon, so it survives the CLI and dies with the reverse connection.
+daemon, so it survives the CLI and dies with the reverse connection. `qsh
+tunnels`/`qsh tunnel close` only see and act on what a daemon holds, so a
+plain foreground `-L`/`-R` never shows up there; closing one of those means
+interrupting the process that opened it. See [Known
+limitations](#known-limitations) for what happens to a tunnel across a
+dropped connection; it is not the same as what happens to a session.
 
 ### Reverse connections
 
@@ -262,7 +270,7 @@ already taken on crates.io. The workspace stays `publish = false` until M9.
 | M1 | Walking skeleton (`init`/`serve`/`exec --json`, mTLS, JSON envelope) | Done |
 | M2 | Session broker, PTY, migration and resume | Done |
 | M3 | Reverse connections (`listen`/`reverse`/`attach`) | Done |
-| M4 | Port forwarding (`-L`/`-R`) | In progress |
+| M4 | Port forwarding (`-L`/`-R`) | Done |
 | M5 | ACL and audit | Planned |
 | M6 | MCP adapter | Planned |
 | M7 | Trust UX, host profiles, `doctor` | Planned |
@@ -289,10 +297,22 @@ Some of these are MVP scope decisions, some are unfinished work.
   or a stuck child, a shell can still outlive the process. A separate
   session supervisor is planned after MVP
   ([ADR-0003](docs/adr/0003-sessions-in-listener.md)).
-- Port forwarding is half-built. `-L` and `-R` work on forward and reverse
-  connections, but `qsh tunnels` and `qsh tunnel close` are specified and
-  not yet implemented, `-D` is neither implemented nor stubbed, and the
-  throughput and PTY-latency gates M4 owes have not been run.
+- A tunnel does not resume the way a session does. `-L` and `-R` work over
+  both forward and reverse connections, `qsh tunnels`/`qsh tunnel close`
+  manage what a resident daemon holds, and `-D` (SOCKS5 dynamic forwarding)
+  parses but always answers `UNSUPPORTED` — implementation is P1, and there
+  is no SOCKS proxy or UDP forwarding either. Remote forwards bind loopback
+  only; a non-loopback `bind` is refused, ACL notwithstanding. What a
+  tunnel does not have is a session's replay ring: a connection that drops
+  and later resumes ends any in-flight tunnel TCP connection cleanly rather
+  than replaying it. An `-L` listener survives that if the process holding
+  it is still alive, but the forward itself does not — a new connection
+  into that listener after the reconnect gets a clean reset until you
+  restart the forward. An `-R` registration has to be reopened by hand; it
+  is never reissued automatically. QUIC path migration is a different
+  case from a drop-and-resume: switching networks without losing the
+  connection outright (Wi-Fi to tethering, a changed IP) carries an open
+  tunnel through transparently, the same as it does a session.
 - No policy engine before M5, so it is allow-all among pinned peers. See
   [Security posture](#security-posture).
 - `qsh trust remove` only affects future handshakes. A peer you removed
@@ -308,7 +328,9 @@ Some of these are MVP scope decisions, some are unfinished work.
   option until M7.
 - Windows is P1 for the client and P2 for the host. PTY code is gated
   `#[cfg(unix)]`, and so is reverse mode: `qsh listen` and `qsh reverse`
-  return `UNSUPPORTED` there rather than running. CI builds, lints and runs
+  return `UNSUPPORTED` there rather than running. A tunnel over a reverse
+  connection needs that same daemon and inherits the restriction; `-D` is
+  `UNSUPPORTED` on every platform regardless. CI builds, lints and runs
   the portable test subset on `windows-latest` so the tree keeps compiling,
   but POSIX-only behavior such as signal exits and process-group kill is
   never exercised there.
