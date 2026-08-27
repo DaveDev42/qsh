@@ -315,6 +315,18 @@ Some of these are MVP scope decisions, some are unfinished work.
   tunnel through transparently, the same as it does a session.
 - No policy engine before M5, so it is allow-all among pinned peers. See
   [Security posture](#security-posture).
+- The audit log is fail-closed: `qsh serve`/`qsh reverse` deny an
+  otherwise-allowed `session.open`, `exec.run`, or `host.reverse`
+  registration rather than let it through with no durable audit record —
+  a full disk, a permissions problem on the audit directory, or a writer
+  backlogged past its bounded queue all deny in the same way a policy
+  refusal does. There is no override; recording an authorization decision
+  is a precondition for granting it, not best-effort logging alongside it.
+  While the audit log is unwritable, every privileged operation is denied,
+  full stop — there is no degraded-but-serving mode. Recovery is automatic:
+  once the audit log is writable again, the writer's own background retry
+  clears the condition and operations start succeeding again on their own,
+  with no restart and no operator action needed.
 - `qsh trust remove` only affects future handshakes. A peer you removed
   keeps whatever sessions and access it already holds until its connection
   drops and it has to handshake again.

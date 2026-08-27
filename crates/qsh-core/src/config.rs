@@ -414,11 +414,12 @@ pub struct IdentityConfig {
 }
 
 /// `[audit]` section — audit log lifecycle (`docs/design/architecture.md`
-/// §6/§7, `PLAN.md` M5 Step 1). Contract only in this step: no rotation, no
-/// async writer, no fail-closed-on-write-failure behavior is wired yet
-/// (`crates/qsh-core/src/audit.rs` is unchanged) — M5 Step 3 reads these
-/// values. Deliberately has **no `fail_closed` knob**: `docs/ROADMAP.md`
-/// treats disk-full fail-closed as a fixed policy, not an operator option.
+/// §6/§7, `PLAN.md` M5 Step 1/3). `crate::serve::host_runtime` reads these
+/// values to build the rotating, bounded-queue writer
+/// (`crate::audit::RotatingAuditSink::spawn`): `max_bytes`/`retain` govern
+/// its rotation and retention, `queue_depth` its backpressure bound.
+/// Deliberately has **no `fail_closed` knob**: `docs/ROADMAP.md` treats
+/// disk-full fail-closed as a fixed policy, not an operator option.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct AuditConfig {

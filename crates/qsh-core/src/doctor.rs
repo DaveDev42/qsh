@@ -21,6 +21,7 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiagnosticId {
     ControllerUnreachable,
+    AuditPathUnwritable,
 }
 
 /// A stable diagnostic: a machine `code`, a human `message` explaining the
@@ -53,6 +54,45 @@ pub const CONTROLLER_UNREACHABLE: Diagnostic = Diagnostic {
     remedy: "Put the controller on a publicly routable address, a forwarded port, or an existing overlay such as WireGuard or Tailscale. If the controller itself is behind NAT, M3 has no answer for that.",
 };
 
+/// `PLAN.md` M5 Step 3 (F9): the configured `[audit].path` cannot currently
+/// be appended to — the same failure class
+/// [`crate::audit::RotatingAuditSink`] latches degraded on
+/// (`docs/design/architecture.md` §6's audit fail-closed policy). Lets an
+/// operator catch a permissions or disk-space problem ahead of time rather
+/// than discover it only once a privileged operation starts getting denied.
+pub const AUDIT_PATH_UNWRITABLE: Diagnostic = Diagnostic {
+    id: DiagnosticId::AuditPathUnwritable,
+    code: "audit_path_unwritable",
+    message: "The configured audit log path could not be opened for append. Privileged operations (session.open, exec.run, host.reverse) are denied while the audit log is unwritable — that is fail-closed by design, not a bug.",
+    remedy: "Check the audit log directory's permissions and available disk space, then retry. There is no override: recording the decision is a precondition for granting it, and the writer clears this on its own once writing succeeds again.",
+};
+
+/// `PLAN.md` M5 Step 3 (F9): attempts to open `path` for append, creating
+/// the parent directory and the file itself if either is missing —
+/// exactly what [`crate::audit::RotatingAuditSink`]'s writer thread does
+/// on every fresh open. `true` means the current process could actually
+/// write an audit record right now; `false` (any I/O error) means
+/// [`AUDIT_PATH_UNWRITABLE`] applies. Structural signal only — never reads
+/// or logs the file's content, and never writes any bytes of its own past
+/// creating an empty file.
+///
+/// Best-effort and outside the write path itself: this is a point-in-time
+/// probe for an operator or a startup banner, not something
+/// `RotatingAuditSink::record` consults — that would reintroduce exactly
+/// the extra I/O per decision the async writer thread exists to avoid.
+pub fn probe_audit_path_writable(path: &std::path::Path) -> bool {
+    if let Some(parent) = path.parent()
+        && std::fs::create_dir_all(parent).is_err()
+    {
+        return false;
+    }
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -64,5 +104,37 @@ mod tests {
             DiagnosticId::ControllerUnreachable
         );
         assert_eq!(CONTROLLER_UNREACHABLE.code, "controller_unreachable");
+    }
+
+    #[test]
+    fn audit_path_unwritable_code_is_the_stable_snake_case_string() {
+        assert_eq!(AUDIT_PATH_UNWRITABLE.id, DiagnosticId::AuditPathUnwritable);
+        assert_eq!(AUDIT_PATH_UNWRITABLE.code, "audit_path_unwritable");
+    }
+
+    #[test]
+    fn probe_audit_path_writable_creates_missing_parents_and_reports_true() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state").join("audit.log");
+        assert!(!path.parent().unwrap().exists());
+        assert!(probe_audit_path_writable(&path));
+        assert!(path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_audit_path_writable_reports_false_for_an_unwritable_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        std::fs::create_dir(&state).unwrap();
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let path = state.join("audit.log");
+        assert!(!probe_audit_path_writable(&path));
+        // Repair, prove the probe recovers too — mirrors the writer's own
+        // "no override, clears on its own" behavior (F9).
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(probe_audit_path_writable(&path));
     }
 }

@@ -197,6 +197,8 @@ Verdict { decision: Decision, rule: Option<u32> }
 2. `reverse::registry::host_reverse_denied()`(`registry.rs:511`)의 고정 문자열 — 한 seam 안에서는 균일하지만 문자열 안에 `host.reverse`가 들어 있다.
 3. `localctl` 데몬의 `HubSendError::NotOwner` → `"this forward is owned by another client on this host"`(`localctl/daemon.rs:848`).
 
+**(Step 3 이월, 2026-08-27)** Step 3의 fail-closed로 **audit-degraded 상태가 문면 1의 새 producer가 됐다** — allow 판정이어도 기록 실패면 `"peer is not allowed to {action} on this host"`가 나간다(검증 라운드 실측). 이 step의 단일 상수 전환은 이 seam(4개 인가 지점의 기록-실패 분기)도 반드시 포함해야 한다.
+
 interim allow-all에서는 정보량이 0이지만, 정책이 켜지는 순간 1과 2는 **capability 열거 oracle**이 된다: 거부된 요청마다 "너에게 없는 권한의 이름"을 알려 주는 것이기 때문이다.
 
 **해결.** `qsh-core`에 단일 상수를 둔다 — `qsh_core::acl::PERMISSION_DENIED_MESSAGE`, 제안 문안 **`"peer is not allowed to perform this operation on this host"`**(action·capability·리소스·principal 어느 것도 담지 않는다; 최종 문안은 §4.2). 1과 2의 모든 생성 지점이 이 상수 하나를 쓰고, `Server::permission_denied(request_id, action)`은 `action`을 **audit 기록용으로만** 받고 문면에는 쓰지 않는다(시그니처는 유지 — audit 레코드의 action은 여전히 정확해야 한다).
