@@ -4,10 +4,16 @@
 //! The *point* of authorization exists from M1: every request the host
 //! dispatches passes through [`Authorizer::check`] **before** any resource
 //! (child process, ticket, PTY, socket) is created. The *policy engine*
-//! (`acl.toml`, principal/wildcard matching) lands in M5; until then the
-//! only policy is [`AllowAllPinned`]: any peer authenticated by a trust-store
-//! pin is allowed everything, everyone else is denied. Nothing here ever
-//! "fails open" — an unknown or unpinned principal is a deny.
+//! (`acl.toml`, principal/wildcard matching, [`Policy`]/[`load::load_or_deny`])
+//! is production-wired from M5 Step 6: `crate::serve::host_runtime` and
+//! `crate::reverse::listen`'s controller both build their [`Authorizer`]
+//! from `acl.toml` now, falling back to [`DenyAll`] — never to
+//! [`AllowAllPinned`] — when no usable policy could be loaded. Nothing here
+//! ever "fails open" — an unknown or unpinned principal is a deny, and so
+//! is every principal at all until an operator writes a policy down.
+//! [`AllowAllPinned`] itself survives only as the M1–M4 interim policy's
+//! historical implementation and a test double; no production constructor
+//! reaches for it any more.
 //!
 //! "Pinned" is a property of *how* the peer authenticated
 //! ([`AuthPath::Pin`]), not of what its principal looks like: a CA-issued
@@ -43,7 +49,11 @@ mod registry;
 // private field and `pub(crate)` constructor, which holds regardless of
 // `ActionPattern` itself being nameable: no external crate can obtain a
 // `FamilyPrefix` to put one in, `pub` enum or not.
-pub use load::{PolicyLoad, PolicySource};
+pub use load::{
+    ACL_POLICY_INVALID_CODE, ACL_POLICY_MISSING_CODE, ACL_STARTUP_DENIED_CLAUSE,
+    ACL_STARTUP_HEADLINE, ACL_STARTUP_NO_AUTOGEN, PolicyLoad, PolicySource, StartupDiagnostic,
+    load_or_deny,
+};
 pub use policy::{ActionPattern, Policy, Rule, Scope, Verdict};
 pub use registry::{DENY_SEAMS, DenySeam, SeamKind};
 
@@ -311,9 +321,13 @@ pub fn opener_key(principal: &Principal, auth_path: AuthPath) -> String {
     format!("{auth_path:?}:{principal}")
 }
 
-/// M1 interim policy: every *pinned* principal is allowed every action;
+/// M1–M4 interim policy: every *pinned* principal is allowed every action;
 /// principals authenticated any other way (CA-asserted users) are denied.
-/// Replaced by the `acl.toml` engine in M5.
+/// Replaced in every production constructor by the `acl.toml` engine
+/// (`load::load_or_deny`) as of M5 Step 6 — kept only as a test double now
+/// (e.g. `crates/qsh-testkit`'s in-process harnesses, which construct their
+/// own `Authorizer` directly and were never routed through
+/// `load_or_deny`).
 ///
 /// Reproduces M3's opener-principal ownership P0 for `resource.owner:
 /// Some(_)` (`PLAN.md` M5 Step 5's interim-invariant requirement: this

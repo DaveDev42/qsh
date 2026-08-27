@@ -269,6 +269,35 @@ impl ReverseHarness {
         trust
             .save(&paths.trust_file())
             .expect("save target trust.toml");
+        // `PLAN.md` M5 Step 6: `run_reverse_observed` runs the *real*
+        // `host_runtime`/`load_or_deny` production wiring, not a stub
+        // authorizer — unlike this harness's controller side (`start_with`
+        // takes `Arc<dyn Authorizer>` directly), the target side default-
+        // denies without an `acl.toml` of its own next to the `trust.toml`
+        // just written above. Grant the controller principal the same
+        // full non-always-denied vocabulary the pre-M5 `AllowAllPinned`
+        // gave every pinned peer, so every existing scenario built on this
+        // harness keeps behaving the way it did before the flip.
+        std::fs::write(
+            paths.acl_file(),
+            format!(
+                "[[acl]]\nprincipal = \"device:{controller_alias}\"\nallow = [\"exec.run\", \
+                 \"session.open\", \"session.list\", \"session.attach\", \"session.control\", \
+                 \"host.reverse\", \"forward.local\", \"forward.remote\"]\n"
+            ),
+        )
+        .expect("write target acl.toml");
+        // F8 (`PLAN.md` M5 Step 6 PR 6a adversarial ④): `fs::write`
+        // inherits the process umask — a group-writable planted
+        // `acl.toml` would spuriously trip the F7 group-/world-writable
+        // warning on any runner whose umask leaves the group-write bit
+        // set. Pin it to owner-only explicitly.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ =
+                std::fs::set_permissions(paths.acl_file(), std::fs::Permissions::from_mode(0o600));
+        }
         (dir, paths)
     }
 

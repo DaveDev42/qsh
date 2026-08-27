@@ -786,6 +786,16 @@ fn run_serve(ops: &Ops, bind: Option<&str>) -> i32 {
                 stderr_note!("qsh serve: listening on {addr}");
                 stderr_note!("qsh serve: identity {device_id} fingerprint {fingerprint}");
             },
+            // `PLAN.md` M5 Step 6: `acl.toml` policy loads once, here, at
+            // startup — `qsh_core::acl::StartupDiagnostic::render` is the
+            // single source of truth for the wording; this closure only
+            // prints it, holding no ACL logic of its own (`CLAUDE.md`'s
+            // crate boundary).
+            |runtime| {
+                if let Some(diag) = &runtime.policy_diagnostic {
+                    stderr_note!("qsh serve: {}", diag.render());
+                }
+            },
             shutdown_signal(),
         ))
     })();
@@ -872,6 +882,13 @@ fn run_listen(ops: &Ops, bind: Option<&str>) -> i32 {
                 stderr_note!("qsh listen: {}", diag.message);
                 stderr_note!("qsh listen: {}", diag.remedy);
             },
+            // `PLAN.md` M5 Step 6: fires at most once, only when `acl.toml`
+            // did not produce a usable policy — `rendered` is already the
+            // complete banner (`qsh_core::acl::StartupDiagnostic::render`);
+            // this closure prints it verbatim, no ACL logic here.
+            |rendered| {
+                stderr_note!("qsh listen: {rendered}");
+            },
             shutdown_signal(),
         ))
     })();
@@ -909,7 +926,16 @@ fn run_reverse(ops: &Ops, controller: &str, offered_name: Option<&str>) -> i32 {
             identity,
             controller,
             offered_name,
-            |_runtime| {},
+            // `PLAN.md` M5 Step 6: a reverse target is a host
+            // (`crate::serve::host_runtime`) — its own `acl.toml` gates the
+            // sessions it serves the controller, loaded once here, not per
+            // reconnect (`on_runtime` fires exactly once, before the first
+            // dial, `run_reverse_observed`'s own docs).
+            |runtime| {
+                if let Some(diag) = &runtime.policy_diagnostic {
+                    stderr_note!("qsh reverse: {}", diag.render());
+                }
+            },
             // `qsh_core::doctor::CONTROLLER_UNREACHABLE` fires at most
             // once per process (`run_reverse_observed`'s own docs — the
             // once-only guard lives in qsh-core, this closure only

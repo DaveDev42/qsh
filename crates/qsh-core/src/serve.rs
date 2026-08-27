@@ -8,7 +8,7 @@ use std::sync::Arc;
 use qsh_proto::ErrorCode;
 use qsh_transport::Listener;
 
-use crate::acl::AllowAllPinned;
+use crate::acl::{StartupDiagnostic, load_or_deny};
 use crate::audit::RotatingAuditSink;
 use crate::broker::{Broker, BrokerConfig, SystemClock};
 use crate::config::{Config, Paths};
@@ -52,6 +52,7 @@ pub async fn run_serve(
     identity: LoadedIdentity,
     bind_flag: Option<&str>,
     on_bound: impl FnOnce(SocketAddr),
+    on_runtime: impl FnOnce(&HostRuntime),
     shutdown: impl std::future::Future<Output = ()>,
 ) -> Result<(), OpError> {
     let bind = resolve_bind(bind_flag, config)?;
@@ -75,6 +76,7 @@ pub async fn run_serve(
     on_bound(actual);
 
     let runtime = host_runtime(paths, config, identity.identity.device_id.clone());
+    on_runtime(&runtime);
     tracing::info!(
         device_id = %identity.identity.device_id,
         fingerprint = %identity.identity.fingerprint,
@@ -120,19 +122,34 @@ pub struct HostRuntime {
     /// to record connection-level decisions of its own (e.g. Step 3's
     /// `host.reverse` registration choke point) writes to the same log.
     pub audit: Arc<RotatingAuditSink>,
+    /// `Some` when `acl.toml` could not be turned into a usable policy
+    /// (missing or invalid) — `server`'s authorizer is [`crate::acl::DenyAll`]
+    /// in that case, and the caller (`qsh-cli`'s `run_serve`/`run_reverse`
+    /// wrappers) must print [`StartupDiagnostic::render`]'s output to
+    /// stderr exactly once (`PLAN.md` M5 Step 6). `None` when a real
+    /// [`crate::acl::Policy`] loaded.
+    pub policy_diagnostic: Option<StartupDiagnostic>,
 }
 
 /// Build a [`HostRuntime`]: session broker (with its TTL reaper spawned),
-/// the interim `AllowAllPinned` policy (`docs/ROADMAP.md`'s M1–M4 posture),
-/// the rotating, bounded-queue audit sink at `[audit]`'s configured path
-/// (`crate::audit::RotatingAuditSink`, `PLAN.md` M5 Step 3), and the
-/// `Server` that ties them together under `device_id`.
+/// the `acl.toml`-backed policy this process resolved at startup
+/// ([`load_or_deny`] — falls back to `DenyAll` plus a
+/// [`HostRuntime::policy_diagnostic`] on anything short of a clean load,
+/// `PLAN.md` M5 Step 6; replaces the M1–M4 `AllowAllPinned` interim
+/// posture), the rotating, bounded-queue audit sink at `[audit]`'s
+/// configured path (`crate::audit::RotatingAuditSink`, `PLAN.md` M5 Step
+/// 3), and the `Server` that ties them together under `device_id`.
 ///
 /// The broker outlives every connection (`docs/design/architecture.md`
 /// §3); its TTL reaper stops on its own once the returned `Server` (and the
 /// broker `Arc` inside it) is dropped. Sessions are PTY-backed on unix;
 /// elsewhere the factory answers `UNSUPPORTED` without spawning anything
 /// (Windows host is P2 — README limitations).
+///
+/// Policy loads exactly once, here, at process start — never hot-reloaded
+/// (`docs/CLI.md` §6.12/§6.13, `PLAN.md` M5 §4.1 #6): a reverse target
+/// calls this once per process too (`crate::reverse::target::run_reverse_unix`),
+/// not once per reconnect, for the same reason.
 pub fn host_runtime(paths: &Paths, config: &Config, device_id: impl Into<String>) -> HostRuntime {
     let audit = Arc::new(RotatingAuditSink::spawn(
         config.audit.path(paths),
@@ -146,8 +163,13 @@ pub fn host_runtime(paths: &Paths, config: &Config, device_id: impl Into<String>
         crate::pty::factory(),
     );
     tokio::spawn(Broker::run_reaper(Arc::downgrade(&broker)));
-    let server = Server::new(Arc::new(AllowAllPinned), audit.clone(), broker, device_id);
-    HostRuntime { server, audit }
+    let (authorizer, policy_diagnostic) = load_or_deny(paths);
+    let server = Server::new(authorizer, audit.clone(), broker, device_id);
+    HostRuntime {
+        server,
+        audit,
+        policy_diagnostic,
+    }
 }
 
 #[cfg(test)]
