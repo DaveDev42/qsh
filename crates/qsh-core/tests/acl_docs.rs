@@ -31,8 +31,9 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use qsh_core::acl::{
-    ACL_POLICY_INVALID_CODE, ACL_POLICY_MISSING_CODE, ACL_STARTUP_DENIED_CLAUSE,
-    ACL_STARTUP_HEADLINE, ACL_STARTUP_NO_AUTOGEN, Action, PERMISSION_DENIED_MESSAGE,
+    ACL_POLICY_INVALID_CODE, ACL_POLICY_MISSING_CODE, ACL_STARTUP_CHECK_HINT,
+    ACL_STARTUP_DENIED_CLAUSE, ACL_STARTUP_HEADLINE, ACL_STARTUP_NO_AUTOGEN, Action,
+    PERMISSION_DENIED_MESSAGE,
 };
 
 /// The repo root, reached from `CARGO_MANIFEST_DIR` (`crates/qsh-core`) the
@@ -186,6 +187,7 @@ fn readme_quotes_the_acl_startup_diagnostic_wording_verbatim() {
         ACL_STARTUP_HEADLINE,
         ACL_STARTUP_DENIED_CLAUSE,
         ACL_STARTUP_NO_AUTOGEN,
+        ACL_STARTUP_CHECK_HINT,
         ACL_POLICY_MISSING_CODE,
         ACL_POLICY_INVALID_CODE,
     ] {
@@ -204,6 +206,7 @@ fn cli_md_quotes_the_acl_startup_diagnostic_wording_verbatim() {
         ACL_STARTUP_HEADLINE,
         ACL_STARTUP_DENIED_CLAUSE,
         ACL_STARTUP_NO_AUTOGEN,
+        ACL_STARTUP_CHECK_HINT,
         ACL_POLICY_MISSING_CODE,
         ACL_POLICY_INVALID_CODE,
     ] {

@@ -31,12 +31,12 @@ pub mod wire;
 pub use error::ErrorCode;
 pub use event::SessionEvent;
 pub use types::{
-    CLI_SCHEMA_V1, CliEnvelope, CliError, EnvVar, ExecRunData, ExecRunReq, Host, HostGetReq,
-    HostListData, HostListReq, IdentityInitData, IdentityInitReq, KeyStoreKind, KeyStoreMode,
-    Session, SessionAttachReq, SessionCloseData, SessionCloseReq, SessionGetReq, SessionListData,
-    SessionListReq, SessionOpenData, SessionOpenReq, SessionReadData, SessionReadReq,
-    SessionResizeData, SessionResizeReq, SessionWriteData, SessionWriteReq, TrustAddData,
-    TrustAddReq, TrustListData, TrustPeer, TrustRemoveData, Tunnel, TunnelCloseData,
-    TunnelCloseReq, TunnelListData, TunnelListReq, TunnelOpenData, TunnelOpenReq, UnreachableHost,
-    VersionData,
+    AclCheckData, AclCheckReq, AclPolicyRef, CLI_SCHEMA_V1, CliEnvelope, CliError, EnvVar,
+    ExecRunData, ExecRunReq, Host, HostGetReq, HostListData, HostListReq, IdentityInitData,
+    IdentityInitReq, KeyStoreKind, KeyStoreMode, Session, SessionAttachReq, SessionCloseData,
+    SessionCloseReq, SessionGetReq, SessionListData, SessionListReq, SessionOpenData,
+    SessionOpenReq, SessionReadData, SessionReadReq, SessionResizeData, SessionResizeReq,
+    SessionWriteData, SessionWriteReq, TrustAddData, TrustAddReq, TrustListData, TrustPeer,
+    TrustRemoveData, Tunnel, TunnelCloseData, TunnelCloseReq, TunnelListData, TunnelListReq,
+    TunnelOpenData, TunnelOpenReq, UnreachableHost, VersionData,
 };

@@ -8,9 +8,10 @@ use std::io::{self, Write};
 
 use qsh_core::{ExecRunOutput, OpError, SessionReadOutput};
 use qsh_proto::{
-    Host, HostListData, IdentityInitData, Session, SessionCloseData, SessionEvent, SessionListData,
-    SessionOpenData, SessionResizeData, SessionWriteData, TrustAddData, TrustListData, TrustPeer,
-    TrustRemoveData, Tunnel, TunnelCloseData, TunnelListData, VersionData,
+    AclCheckData, Host, HostListData, IdentityInitData, Session, SessionCloseData, SessionEvent,
+    SessionListData, SessionOpenData, SessionResizeData, SessionWriteData, TrustAddData,
+    TrustListData, TrustPeer, TrustRemoveData, Tunnel, TunnelCloseData, TunnelListData,
+    VersionData,
 };
 
 use crate::stderr_note;
@@ -155,6 +156,29 @@ pub fn print_host(data: &Host) -> io::Result<()> {
     writeln!(stdout, "state:           {}", sanitize(&data.state))?;
     writeln!(stdout, "address:         {}", sanitize(&data.address))?;
     writeln!(stdout, "device_id:       {}", sanitize(&data.device_id))
+}
+
+/// Print `qsh acl check`'s verdict (`docs/CLI.md` §6.15) — one line to
+/// stdout, exactly the shape (a)/§4 asks for: `"allow (rule 0)"` when a
+/// rule matched, bare `"deny"`/`"allow"` when the decision stands without
+/// one (always the case for `"deny"`), or `"deny (no policy loaded)"` when
+/// `acl.toml` is missing or failed to parse. Zero authorization logic
+/// here — every field is already decided by `Ops::acl_check`; this only
+/// formats it. The policy file path is a separate stderr hint, not part
+/// of the one-line stdout summary.
+pub fn print_acl_check(data: &AclCheckData) -> io::Result<()> {
+    let decision = sanitize(&data.decision);
+    let line = if !data.policy.loaded {
+        format!("{decision} (no policy loaded)")
+    } else if let Some(rule) = data.rule {
+        format!("{decision} (rule {rule})")
+    } else {
+        decision
+    };
+    let mut stdout = io::stdout().lock();
+    writeln!(stdout, "{line}")?;
+    stderr_note!("qsh: acl.toml path: {}", sanitize(&data.policy.path));
+    Ok(())
 }
 
 /// `qsh exec` in human mode is a passthrough: the remote command's stdout

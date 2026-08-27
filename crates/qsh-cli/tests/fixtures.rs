@@ -30,10 +30,10 @@ use std::process::Stdio;
 
 use common::{CLIENT_ALIAS, Fleet, HOST_ALIAS, Sandbox, ServeGuard};
 use qsh_proto::{
-    ErrorCode, ExecRunData, Host, HostListData, IdentityInitData, Session, SessionCloseData,
-    SessionListData, SessionOpenData, SessionReadData, SessionResizeData, SessionWriteData,
-    TrustAddData, TrustListData, TrustRemoveData, TunnelCloseData, TunnelListData, TunnelOpenData,
-    VersionData,
+    AclCheckData, ErrorCode, ExecRunData, Host, HostListData, IdentityInitData, Session,
+    SessionCloseData, SessionListData, SessionOpenData, SessionReadData, SessionResizeData,
+    SessionWriteData, TrustAddData, TrustListData, TrustRemoveData, TunnelCloseData,
+    TunnelListData, TunnelOpenData, VersionData,
 };
 use qsh_testkit::fixtures;
 use schemars::schema_for;
@@ -150,6 +150,8 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "tunnel.list.json",
     "tunnel.close.json",
     "error.PERMISSION_DENIED.json",
+    "acl.check.allow.json",
+    "acl.check.deny.json",
 ];
 
 // ---------------------------------------------------------------------------
@@ -309,6 +311,49 @@ fn golden_local_fixtures() {
         "{dynamic_forward}"
     );
     check("error.UNSUPPORTED.json", dynamic_forward);
+
+    // `acl check` (`docs/CLI.md` §6.15, `PLAN.md` M5 Step 7) is local and
+    // needs no identity (`Ops::from_env` only resolves paths), so a fresh,
+    // uninitialized sandbox works — it gets its own hand-written
+    // `acl.toml`: one rule for `device:laptop` that allows `session.open`
+    // only, so the same policy file produces both an "allow (rule 0)" and
+    // a "no rule matched" deny fixture.
+    let acl_sandbox = Sandbox::new();
+    std::fs::write(
+        acl_sandbox.config_dir().join("acl.toml"),
+        "[[acl]]\nprincipal = \"device:laptop\"\nallow = [\"session.open\"]\n",
+    )
+    .expect("write acl.toml fixture policy");
+
+    let (code, allow) = acl_sandbox.json(&[
+        "acl",
+        "check",
+        "--principal",
+        "device:laptop",
+        "--action",
+        "session.open",
+        "--resource",
+        "exec",
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{allow}");
+    assert_eq!(allow["data"]["decision"], "allow", "{allow}");
+    check("acl.check.allow.json", allow);
+
+    let (code, deny) = acl_sandbox.json(&[
+        "acl",
+        "check",
+        "--principal",
+        "device:laptop",
+        "--action",
+        "exec.run",
+        "--resource",
+        "exec",
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{deny}");
+    assert_eq!(deny["data"]["decision"], "deny", "{deny}");
+    check("acl.check.deny.json", deny);
 }
 
 /// The dial-timeout path. Split out because it is the one scenario that
@@ -838,6 +883,7 @@ fn data_schema(command: &str) -> Option<Value> {
             "tunnel.open" => schema_for!(TunnelOpenData),
             "tunnel.list" => schema_for!(TunnelListData),
             "tunnel.close" => schema_for!(TunnelCloseData),
+            "acl.check" => schema_for!(AclCheckData),
             _ => return None,
         }
         .to_value(),

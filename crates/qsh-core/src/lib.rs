@@ -44,12 +44,13 @@ pub use config::{Config, Paths, now_rfc3339};
 pub use doctor::{CONTROLLER_UNREACHABLE, Diagnostic, DiagnosticId};
 pub use identity::{Identity, KeyStore, KeyStoreError, LoadedIdentity};
 pub use ops::{
-    AttachHandle, DetachFlush, ExecRunOp, ExecRunOutput, ExecStdin, HostGetOp, HostListOp,
-    HostRoute, IdentityInitOp, OpError, Operation, Ops, RecoveryConfig, SessionAttachOp,
-    SessionAttachStream, SessionCloseOp, SessionGetOp, SessionListOp, SessionOpenOp, SessionReadOp,
-    SessionReadOutput, SessionReader, SessionResizeOp, SessionWriteOp, TrustAddOp, TrustListOp,
-    TrustRemoveOp, TunnelCloseOp, TunnelHold, TunnelListOp, TunnelOpenOp, VersionOp,
-    dynamic_forward_unsupported, parse_local_forwards, parse_remote_forwards,
+    AclCheckOp, AttachHandle, DetachFlush, ExecRunOp, ExecRunOutput, ExecStdin, HostGetOp,
+    HostListOp, HostRoute, IdentityInitOp, OpError, Operation, Ops, RecoveryConfig,
+    SessionAttachOp, SessionAttachStream, SessionCloseOp, SessionGetOp, SessionListOp,
+    SessionOpenOp, SessionReadOp, SessionReadOutput, SessionReader, SessionResizeOp,
+    SessionWriteOp, TrustAddOp, TrustListOp, TrustRemoveOp, TunnelCloseOp, TunnelHold,
+    TunnelListOp, TunnelOpenOp, VersionOp, dynamic_forward_unsupported, parse_local_forwards,
+    parse_remote_forwards,
 };
 pub use trust::{SharedTrustStore, TrustStore};
 

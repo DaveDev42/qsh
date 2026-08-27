@@ -696,6 +696,17 @@ pub struct AclCheckReq {
     /// applies, matching what an unqualified `acl.toml` row means.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_path: Option<String>,
+    /// Principal that owns `resource`, so `scope = "owned"` rows can be
+    /// evaluated too (`docs/CLI.md` §6.15, `PLAN.md` M5 §4.2's `--owner`
+    /// decision — additive, M5 Step 7). `None` evaluates `resource` as
+    /// unowned, the only behavior before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    /// Auth path [`Self::owner`] authenticated over — same open-string,
+    /// default-on-omission discipline as [`Self::auth_path`], and
+    /// meaningless without [`Self::owner`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_auth_path: Option<String>,
 }
 
 /// Data payload of `acl.check` (`docs/CLI.md` §6.15).
@@ -721,6 +732,15 @@ pub struct AclCheckData {
     pub rule: Option<u32>,
     /// Which policy file this decision was evaluated against.
     pub policy: AclPolicyRef,
+    /// Echoes [`AclCheckReq::owner`] (M5 Step 7, additive). Never the
+    /// folded `opener_key` string — always the unfolded principal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    /// Echoes [`AclCheckReq::owner_auth_path`] as actually evaluated (the
+    /// defaulted value when `owner` was given but this was omitted);
+    /// `None` whenever [`Self::owner`] itself is `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_auth_path: Option<String>,
 }
 
 /// Which `acl.toml` an `acl.check` decision was evaluated against
@@ -1334,6 +1354,8 @@ mod tests {
             action: "exec.run".into(),
             resource: None,
             auth_path: None,
+            owner: None,
+            owner_auth_path: None,
         };
         assert_eq!(
             serde_json::to_value(&req).unwrap(),
@@ -1346,18 +1368,89 @@ mod tests {
         .unwrap();
         assert_eq!(back, req);
 
-        // Both optionals present round-trip too.
+        // Every optional present round-trips too.
         let full = AclCheckReq {
             principal: "device:hermes".into(),
             action: "forward.local".into(),
             resource: Some("localhost:5432".into()),
             auth_path: Some("ca".into()),
+            owner: Some("device:mac".into()),
+            owner_auth_path: Some("pin".into()),
         };
         let json = serde_json::to_value(&full).unwrap();
         assert_eq!(json["resource"], "localhost:5432");
         assert_eq!(json["auth_path"], "ca");
+        assert_eq!(json["owner"], "device:mac");
+        assert_eq!(json["owner_auth_path"], "pin");
         let back: AclCheckReq = serde_json::from_value(json).unwrap();
         assert_eq!(back, full);
+    }
+
+    /// M5 Step 7's `--owner`/`--owner-auth-path` surface (`PLAN.md` M5
+    /// §4.2): additive on both `AclCheckReq` and `AclCheckData`, and
+    /// `owner_auth_path` omits (never `null`) whenever `owner` itself is
+    /// absent — the pairing is meaningless without an owner to pair with.
+    #[test]
+    fn acl_check_owner_fields_are_additive_and_round_trip() {
+        let req = AclCheckReq {
+            principal: "user:dave".into(),
+            action: "session.control".into(),
+            resource: Some("sess-1".into()),
+            auth_path: None,
+            owner: Some("user:dave".into()),
+            owner_auth_path: None,
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["owner"], "user:dave");
+        assert!(
+            json.get("owner_auth_path").is_none(),
+            "owner_auth_path omits when absent from the request, not null: {json}"
+        );
+        let back: AclCheckReq = serde_json::from_value(json).unwrap();
+        assert_eq!(back, req);
+
+        // An old client's JSON (no `owner`/`owner_auth_path` keys at all)
+        // still deserializes — additive means a prior producer's output
+        // stays valid input.
+        let legacy: AclCheckReq = serde_json::from_value(serde_json::json!({
+            "principal": "user:dave",
+            "action": "exec.run"
+        }))
+        .unwrap();
+        assert_eq!(legacy.owner, None);
+        assert_eq!(legacy.owner_auth_path, None);
+
+        let data = AclCheckData {
+            principal: "user:dave".into(),
+            action: "session.control".into(),
+            resource: Some("sess-1".into()),
+            auth_path: Some("pin".into()),
+            decision: "allow".into(),
+            rule: Some(0),
+            policy: AclPolicyRef {
+                path: "/x/acl.toml".into(),
+                rules: 1,
+                loaded: true,
+            },
+            owner: Some("user:dave".into()),
+            owner_auth_path: Some("pin".into()),
+        };
+        let json = serde_json::to_value(&data).unwrap();
+        assert_eq!(json["owner"], "user:dave");
+        assert_eq!(json["owner_auth_path"], "pin");
+        let back: AclCheckData = serde_json::from_value(json).unwrap();
+        assert_eq!(back, data);
+
+        // `owner: None` ⇒ `owner_auth_path` must also omit, never a
+        // dangling default the caller never asked to evaluate.
+        let unowned = AclCheckData {
+            owner: None,
+            owner_auth_path: None,
+            ..data
+        };
+        let json = serde_json::to_value(&unowned).unwrap();
+        assert!(json.get("owner").is_none());
+        assert!(json.get("owner_auth_path").is_none());
     }
 
     #[test]
@@ -1374,6 +1467,8 @@ mod tests {
                 rules: 2,
                 loaded: true,
             },
+            owner: None,
+            owner_auth_path: None,
         };
         let json = serde_json::to_value(&data).unwrap();
         assert_eq!(

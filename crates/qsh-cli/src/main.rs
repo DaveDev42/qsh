@@ -10,22 +10,23 @@ use std::io::{self, IsTerminal, Read, Write};
 
 use clap::{CommandFactory as _, Parser};
 use qsh_core::{
-    ExecRunOp, ExecStdin, HostGetOp, HostListOp, IdentityInitOp, OpError, Operation, Ops,
-    SessionAttachOp, SessionCloseOp, SessionGetOp, SessionListOp, SessionOpenOp, SessionReadOp,
-    SessionResizeOp, SessionWriteOp, TrustAddOp, TrustListOp, TrustRemoveOp, TunnelCloseOp,
-    TunnelListOp, TunnelOpenOp, VersionOp, dynamic_forward_unsupported,
+    AclCheckOp, ExecRunOp, ExecStdin, HostGetOp, HostListOp, IdentityInitOp, OpError, Operation,
+    Ops, SessionAttachOp, SessionCloseOp, SessionGetOp, SessionListOp, SessionOpenOp,
+    SessionReadOp, SessionResizeOp, SessionWriteOp, TrustAddOp, TrustListOp, TrustRemoveOp,
+    TunnelCloseOp, TunnelListOp, TunnelOpenOp, VersionOp, dynamic_forward_unsupported,
 };
 use qsh_proto::{
-    ErrorCode, ExecRunReq, HostGetReq, IdentityInitReq, SessionCloseReq, SessionGetReq,
-    SessionListReq, SessionOpenReq, SessionReadReq, SessionResizeReq, SessionWriteReq, TrustAddReq,
-    TunnelCloseReq, TunnelListReq, TunnelOpenReq,
+    AclCheckReq, ErrorCode, ExecRunReq, HostGetReq, IdentityInitReq, SessionCloseReq,
+    SessionGetReq, SessionListReq, SessionOpenReq, SessionReadReq, SessionResizeReq,
+    SessionWriteReq, TrustAddReq, TunnelCloseReq, TunnelListReq, TunnelOpenReq,
 };
 use serde::Serialize;
 use tracing_subscriber::EnvFilter;
 
 use cli::{
-    AttachArgs, Cli, Command, DEFAULT_ESCAPE_CHAR, EscapeChar, ExecArgs, HostCmd, SessionCmd,
-    SessionReadArgs, SessionWriteArgs, TrustAddArgs, TrustCmd, TunnelCmd, TunnelOpenArgs,
+    AclCmd, AttachArgs, Cli, Command, DEFAULT_ESCAPE_CHAR, EscapeChar, ExecArgs, HostCmd,
+    SessionCmd, SessionReadArgs, SessionWriteArgs, TrustAddArgs, TrustCmd, TunnelCmd,
+    TunnelOpenArgs,
 };
 use render::{human, json, json::Envelope};
 
@@ -341,6 +342,19 @@ fn run(cli: &Cli) -> i32 {
             HostGetOp::COMMAND,
             ops.host_get(HostGetReq { name: name.clone() }),
             human::print_host,
+        ),
+        Command::Acl(AclCmd::Check(args)) => finish(
+            cli,
+            AclCheckOp::COMMAND,
+            ops.acl_check(AclCheckReq {
+                principal: args.principal.clone(),
+                action: args.action.clone(),
+                resource: args.resource.clone(),
+                auth_path: args.auth_path.clone(),
+                owner: args.owner.clone(),
+                owner_auth_path: args.owner_auth_path.clone(),
+            }),
+            human::print_acl_check,
         ),
         Command::Exec(args) => run_exec(cli, &ops, args),
         Command::Attach(AttachArgs {
@@ -1107,6 +1121,7 @@ fn command_name(cli: &Cli) -> &'static str {
         Command::Trust(TrustCmd::Remove { .. }) => TrustRemoveOp::COMMAND,
         Command::Hosts => HostListOp::COMMAND,
         Command::Host(HostCmd::Get { .. }) => HostGetOp::COMMAND,
+        Command::Acl(AclCmd::Check(_)) => AclCheckOp::COMMAND,
         Command::Exec(_) => ExecRunOp::COMMAND,
         Command::Attach(_) => SessionAttachOp::COMMAND,
         Command::Session(SessionCmd::Open(_)) => SessionOpenOp::COMMAND,

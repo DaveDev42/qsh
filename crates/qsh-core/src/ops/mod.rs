@@ -17,11 +17,13 @@ use crate::config::{Config, Paths, now_rfc3339};
 use crate::identity::LoadedIdentity;
 use crate::trust::{SharedTrustStore, TrustStore};
 
+pub mod acl;
 pub mod exec;
 pub mod host;
 pub mod session;
 pub mod tunnel;
 
+pub use acl::AclCheckOp;
 pub use exec::{ExecRunOp, ExecRunOutput, ExecStdin};
 pub use host::{HostGetOp, HostListOp, HostRoute};
 pub use session::{

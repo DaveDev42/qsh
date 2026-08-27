@@ -259,6 +259,12 @@ pub const ACL_STARTUP_DENIED_CLAUSE: &str = "every request is denied until this 
 /// [`ACL_STARTUP_HEADLINE`].
 pub const ACL_STARTUP_NO_AUTOGEN: &str = "acl.toml is never auto-generated — create it by hand";
 
+/// [`StartupDiagnostic::render`]'s closing hint: how to verify a fix
+/// *before* restarting (`PLAN.md` M5 §4.1 #1(c)'s migration-story
+/// obligation, closed by M5 Step 7's `qsh acl check` — same evaluator as
+/// enforcement, `docs/CLI.md` §6.15). See [`ACL_STARTUP_HEADLINE`].
+pub const ACL_STARTUP_CHECK_HINT: &str = "verify a fix before restarting: qsh acl check";
+
 /// The exactly-once, operator-facing startup banner `PLAN.md` M5 Step 6
 /// requires whenever `acl.toml` did not produce a usable [`Policy`] —
 /// [`PolicyLoad::Missing`] or [`PolicyLoad::Invalid`]. [`load_or_deny`]
@@ -314,6 +320,8 @@ impl StartupDiagnostic {
             "\n{ACL_STARTUP_NO_AUTOGEN}. minimal example:\n{}",
             self.example
         ));
+        out.push('\n');
+        out.push_str(ACL_STARTUP_CHECK_HINT);
         out
     }
 }
@@ -1303,6 +1311,7 @@ mod tests {
             ACL_STARTUP_HEADLINE,
             ACL_STARTUP_DENIED_CLAUSE,
             ACL_STARTUP_NO_AUTOGEN,
+            ACL_STARTUP_CHECK_HINT,
         ] {
             assert!(
                 rendered.contains(fragment),

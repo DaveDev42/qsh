@@ -26,7 +26,7 @@ pub use endpoint::{
     AcceptError, Connection, DialError, Dialed, Dialer, Incoming, Listener, LocalIdentity,
     SetupError, bind_tuned_udp_socket,
 };
-pub use identity::{Fingerprint, FingerprintParseError, Principal};
+pub use identity::{Fingerprint, FingerprintParseError, Principal, PrincipalParseError};
 pub use tls::{
     AuthPath, Observation, PeerRole, QshPeerVerifier, RejectReason, StaticTrust, TrustEvaluator,
     VerifiedPeer,
