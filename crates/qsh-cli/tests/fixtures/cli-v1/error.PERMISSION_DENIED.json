@@ -1,0 +1,12 @@
+{
+  "command": "tunnel.open",
+  "error": {
+    "code": "PERMISSION_DENIED",
+    "details": null,
+    "message": "peer is not allowed to perform this operation on this host",
+    "retryable": false
+  },
+  "ok": false,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

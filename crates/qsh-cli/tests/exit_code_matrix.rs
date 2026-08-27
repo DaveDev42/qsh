@@ -22,7 +22,7 @@
 
 mod common;
 
-use common::{Fleet, HOST_ALIAS, Sandbox, exit_code, sole_envelope};
+use common::{CLIENT_ALIAS, Fleet, HOST_ALIAS, Sandbox, ServeGuard, exit_code, sole_envelope};
 #[cfg(unix)]
 use common::{ListenGuard, ReverseGuard, hosts_array, poll_until};
 
@@ -87,6 +87,21 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
     let all_dead = Sandbox::new();
     all_dead.init();
     all_dead.trust_add("deadport", Some("127.0.0.1:0"), &fleet.host_fingerprint);
+
+    // `PLAN.md` M5 Step 6 PR 6b: `PERMISSION_DENIED`'s own row. A host
+    // with no `acl.toml` at all (`ServeGuard::start_without_policy`,
+    // `common/mod.rs`) loads `DenyAll` and refuses `forward.remote` at its
+    // ACL gate before any reply goes out — the same shape `fixtures.rs`'s
+    // `golden_permission_denied_fixture` uses to capture the envelope;
+    // this row instead proves the exit code this file exists to pin: the
+    // same 255 in both human and `--json` mode.
+    let denied_host = Sandbox::new();
+    let denied_client = Sandbox::new();
+    let denied_host_fp = denied_host.fingerprint();
+    let denied_client_fp = denied_client.fingerprint();
+    denied_host.trust_add(CLIENT_ALIAS, None, &denied_client_fp);
+    let denied_serve = ServeGuard::start_without_policy(&denied_host, &[]);
+    denied_client.trust_add(HOST_ALIAS, Some(denied_serve.addr()), &denied_host_fp);
 
     // A real duplicate-name routing conflict (`PLAN.md` M3 Step 7 DoD 1,
     // `Ops::host.host.get`'s `resolve_route`): the *same* controller
@@ -337,6 +352,25 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
                 "0.0.0.0:19000:localhost:9",
             ],
             outcome: Outcome::Fails("INVALID_ARGUMENT"),
+        },
+        Case {
+            // `PLAN.md` M5 Step 6 PR 6b: `forward.remote`'s ACL gate
+            // (`Server::authorize_and_bind_remote_forward`) runs *before*
+            // the loopback-only check above and before any reply goes
+            // out, so a denying host (`denied_host`/`denied_client`, no
+            // `acl.toml` at all — `DenyAll`) answers `PERMISSION_DENIED`
+            // on `tunnel.open`'s own top-level envelope, not a mid-tunnel
+            // side channel.
+            name: "tunnel open --remote: denied by policy (no acl.toml)",
+            sandbox: &denied_client,
+            args: &[
+                "tunnel",
+                "open",
+                HOST_ALIAS,
+                "--remote",
+                "9000:localhost:9000",
+            ],
+            outcome: Outcome::Fails("PERMISSION_DENIED"),
         },
         Case {
             // `-D` refuses before `Ops::tunnel_open` is even called
