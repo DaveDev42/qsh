@@ -1,11 +1,30 @@
 name: CI
 
-# Every push to main and every pull request runs the full gate set on all
-# three desktop platforms (Linux x64/arm64, macOS arm64/x64, Windows x64).
-# The gates are exactly the ones `CLAUDE.md` requires before a commit:
-# fmt, clippy -D warnings, tests, arch-lint, cargo-deny — plus the
-# interactive acceptance set, which needs binaries installed to be more
-# than a row of skips (see the `acceptance` job).
+# Every push to main and every pull request runs the gate set `CLAUDE.md`
+# requires before a commit: fmt, clippy -D warnings, tests, arch-lint,
+# cargo-deny — plus the interactive acceptance set, which needs binaries
+# installed to be more than a row of skips (see the `acceptance` job).
+#
+# The matrix is trimmed to the legs that carry unique signal (2026-08-27,
+# runner-time diet — the repo is public so none of this is billed, but
+# ~8 redundant job-minutes per push bought nothing):
+# - `test` runs on Linux x64/arm64, macOS arm64, Windows x64. The
+#   macOS *Intel* leg is gone: it never caught a failure the other legs
+#   missed, x86_64-unix semantics are the Linux leg's job, macOS API
+#   coverage is macos-14's, and release.yml still builds + smoke-runs
+#   x86_64-apple-darwin on every tag.
+# - `clippy` runs on Linux + Windows only. Lints are overwhelmingly
+#   platform-independent; the Windows leg is kept because it has real
+#   unique surface (`cfg(not(unix))` dead_code — precedents 8897b2f,
+#   7890a5d). macOS-cfg code still compiles under `-D warnings` in the
+#   macOS `test` leg (setup-rust-toolchain sets RUSTFLAGS), so plain
+#   rustc warnings there still fail CI; only macOS-unique *clippy* lints
+#   are forgone, and none has ever fired.
+# - Doc tests and arch-lint run once, on Linux: both are
+#   platform-independent by construction (doc examples have no cfg
+#   branches today; arch-lint reads Cargo.toml dependency direction,
+#   which cannot differ by OS — xtask itself still builds everywhere via
+#   clippy/test `--all-targets`).
 
 on:
   push:
@@ -42,7 +61,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-14, macos-15-intel, windows-latest]
+        os: [ubuntu-24.04, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
@@ -54,7 +73,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-14, macos-15-intel, windows-latest]
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-14, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
@@ -64,8 +83,10 @@ jobs:
           tool: nextest
       # nextest: one process per test — required for the PTY/process tests.
       - run: cargo nextest run --workspace --no-fail-fast
-      # Doc tests are not run by nextest.
-      - run: cargo test --workspace --doc
+      # Doc tests are not run by nextest. Platform-independent, so once
+      # on Linux is enough (header comment).
+      - if: matrix.os == 'ubuntu-24.04'
+        run: cargo test --workspace --doc
 
   # The interactive acceptance set (`PLAN.md` M2 DoD 2) as a *standing*
   # gate. The suite skips an acceptance item whose binary is missing, which
@@ -124,12 +145,8 @@ jobs:
           QSH_ACCEPTANCE_STRICT: 1
 
   arch:
-    name: arch-lint (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-24.04, windows-latest]
-    runs-on: ${{ matrix.os }}
+    name: arch-lint
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
       - uses: actions-rust-lang/setup-rust-toolchain@v1
