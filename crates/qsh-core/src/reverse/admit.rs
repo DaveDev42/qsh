@@ -108,8 +108,12 @@ pub fn admit(
             } else {
                 req.offered_name
             };
-            audit.record(&AuditRecord::connection_level(
+            // Already denying (pre-choke-point failure): a failure to
+            // record this deny doesn't change the outcome, only the
+            // diagnostic.
+            let _ = audit.record(&AuditRecord::connection_level(
                 req.principal,
+                req.auth_path,
                 Action::HostReverse,
                 resource,
                 Decision::Deny,
@@ -129,15 +133,19 @@ pub fn admit(
     // request — `AuditRecord::connection_level` records `request_id: "-"`
     // (mirroring `AuditRecord::handshake_rejected`'s convention) so it can
     // never be confused with a peer-chosen wire request `0`.
-    audit.record(&AuditRecord::connection_level(
+    let recorded = audit.record(&AuditRecord::connection_level(
         req.principal,
+        req.auth_path,
         Action::HostReverse,
         &name,
         verdict.decision,
         verdict.rule,
         req.address,
     ));
-    if !verdict.is_allow() {
+    // Fail-closed: an allow verdict that failed to make it into the audit
+    // log is denied — never register the reverse listener without a
+    // durable record of having authorized it.
+    if !verdict.is_allow() || recorded.is_err() {
         // Identical opaque message to both `resolve_name` denial cases
         // above — see `host_reverse_denied`'s docs.
         return Err(host_reverse_denied());
@@ -178,7 +186,7 @@ mod tests {
 
     use super::*;
     use crate::acl::{AllowAllPinned, DenyAll};
-    use crate::audit::MemoryAuditSink;
+    use crate::audit::{FailingAuditSink, MemoryAuditSink};
     use crate::broker::TestClock;
 
     fn addr() -> SocketAddr {
@@ -445,6 +453,48 @@ mod tests {
             records[0].request_id, "-",
             "connection-level decision, never a wire request id"
         );
+    }
+
+    // ---- disk-full fail-closed: `PLAN.md` M5 Step 3(c), the fourth of the
+    // "four authorization points" (`PLAN.md` §1) alongside `Server::
+    // authorize`/`authorize_stream`/`authorize_session_control`. ----
+
+    #[test]
+    fn allowed_registration_fails_closed_when_the_audit_sink_cannot_record_it() {
+        let f = fixture(true);
+        let authorizer = AllowAllPinned;
+        let principal = Principal::Device("personal-mac".into());
+        let audit = FailingAuditSink::new();
+
+        // Policy would allow this peer, but the audit sink cannot durably
+        // record the decision — fail-closed: denied, and no entry is
+        // created (`Registry::admit` never runs).
+        audit.fail();
+        let err = admit(
+            &f.registry,
+            &authorizer,
+            &audit,
+            req(&principal, AuthPath::Pin, fp(b"a"), ""),
+        )
+        .expect_err("audit failure denies even a policy-allowed registration");
+        assert_eq!(err.code, ErrorCode::PermissionDenied);
+        assert!(
+            f.registry.snapshot().is_empty(),
+            "no entry created while the audit sink is degraded"
+        );
+
+        // The writer recovers: the same policy-allowed request now
+        // succeeds, and only now does an entry exist.
+        audit.clear();
+        let outcome = admit(
+            &f.registry,
+            &authorizer,
+            &audit,
+            req(&principal, AuthPath::Pin, fp(b"a"), ""),
+        )
+        .expect("registration succeeds once the audit sink recovers");
+        assert_eq!(outcome.entry.name, "personal-mac");
+        assert_eq!(f.registry.snapshot().len(), 1);
     }
 
     // ---- audit lines carry action="host.reverse" on both outcomes ----

@@ -474,6 +474,7 @@ pub const AUDIT_KEYS: &[&str] = &[
     "ts",
     "request_id",
     "principal",
+    "auth_path",
     "action",
     "resource",
     "decision",

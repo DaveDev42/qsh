@@ -57,7 +57,7 @@ use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 use crate::acl::AllowAllPinned;
 use crate::acl::Authorizer;
 #[cfg(unix)]
-use crate::audit::FileAuditSink;
+use crate::audit::RotatingAuditSink;
 use crate::audit::{AuditRecord, AuditSink};
 use crate::broker::Clock;
 #[cfg(unix)]
@@ -243,7 +243,24 @@ async fn run_listen_unix(
     })?;
     on_bound(actual);
 
-    let audit = Arc::new(FileAuditSink::new(paths.audit_log()));
+    // F7 (`PLAN.md` M5 Step 3 arbitration): the controller shares the same
+    // config-driven `RotatingAuditSink` construction `serve.rs`'s
+    // `host_runtime` uses — `[audit]`'s `path`/`max_bytes`/`retain`/
+    // `queue_depth` all apply here too, rather than `FileAuditSink`'s
+    // fixed, unrotated `paths.audit_log()`. `qsh listen` and `qsh serve`/
+    // `qsh reverse` (`crate::serve::host_runtime`) default to the exact
+    // same path, which is safe now that F6 gives `RotatingAuditSink`
+    // multi-writer rotation locking.
+    let audit = Arc::new(RotatingAuditSink::spawn(
+        config.audit.path(paths),
+        config.audit.max_bytes(),
+        config.audit.retain(),
+        config.audit.queue_depth(),
+    ));
+    // Kept past `Listen::new` (which takes ownership of a clone below) so
+    // the shutdown tail can wait on it directly — see the F2 comment near
+    // `listen.run(..)`.
+    let audit_for_shutdown = audit.clone();
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     let registry = Registry::new(clock.clone(), config.listen.allow_advertised_names);
     let listen = Listen::new(
@@ -287,6 +304,18 @@ async fn run_listen_unix(
         tracing::warn!(%join_err, "localctl daemon task panicked");
     }
     let _ = std::fs::remove_file(&localctl_socket_path);
+
+    // F2 (`PLAN.md` M5 Step 3): `Listen::run` detaches each accepted
+    // connection's task the same way `server::Server::run` does — a
+    // straggler can still hold its own `Arc<Listen>` clone (and thus,
+    // through it, `Listen::audit`) for a moment after `run` returns. By
+    // this point `listen.run(..)` has already consumed this function's own
+    // `Arc<Listen>` and `localctl_task.await` has joined the only other
+    // clone this function itself handed out, so `audit_for_shutdown` is
+    // the one reference left to wait out — best effort, not a guarantee,
+    // see `wait_for_sole_owner`'s docs.
+    crate::audit::wait_for_sole_owner(&audit_for_shutdown, crate::audit::AUDIT_SHUTDOWN_GRACE)
+        .await;
 
     Ok(())
 }
@@ -3392,8 +3421,16 @@ impl Listen {
                     AcceptError::Unverified(reason) => format!("{reason:?}").to_lowercase(),
                     _ => "handshake".to_string(),
                 };
-                self.audit
-                    .record(&AuditRecord::handshake_rejected(peer, &category));
+                // Already rejecting the connection outright: a failure to
+                // record it doesn't change the outcome, only the
+                // diagnostic — same exception as
+                // `server::Server::accept_and_serve`.
+                if let Err(audit_err) = self
+                    .audit
+                    .record(&AuditRecord::handshake_rejected(peer, &category))
+                {
+                    tracing::warn!(%peer, %audit_err, "failed to record handshake rejection");
+                }
                 tracing::warn!(%peer, %err, "connection rejected");
             }
         }

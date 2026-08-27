@@ -9,7 +9,7 @@ use qsh_proto::ErrorCode;
 use qsh_transport::Listener;
 
 use crate::acl::AllowAllPinned;
-use crate::audit::FileAuditSink;
+use crate::audit::RotatingAuditSink;
 use crate::broker::{Broker, BrokerConfig, SystemClock};
 use crate::config::{Config, Paths};
 use crate::identity::LoadedIdentity;
@@ -81,7 +81,22 @@ pub async fn run_serve(
         %actual,
         "qsh serve listening"
     );
+    // `Server::run` takes `self: Arc<Self>` by value — this call already
+    // consumes and (once the accept loop exits) drops `runtime.server`
+    // internally, so nothing of this function's own is keeping `Server`
+    // alive once `.await` resolves; only `runtime.audit` survives.
     runtime.server.run(listener, shutdown).await;
+    // F2 (`PLAN.md` M5 Step 3): `Server::run`'s accept loop detaches each
+    // connection's task (`tokio::spawn`, no `JoinSet`) and `drain()` only
+    // waits for the broker's own sessions, not those tasks themselves — so
+    // a straggler can still hold its own `Arc<Server>` clone (and thus,
+    // through it, the one shared `Server::audit` field) for a moment after
+    // `run` returns. Give it a bounded grace period to drop it before this
+    // function's own `runtime.audit` goes out of scope, so
+    // `RotatingAuditSink::drop`'s final bounded flush is more likely to run
+    // promptly once every remaining clone is gone. Best effort, not a
+    // guarantee — see `wait_for_sole_owner`'s docs.
+    crate::audit::wait_for_sole_owner(&runtime.audit, crate::audit::AUDIT_SHUTDOWN_GRACE).await;
     Ok(())
 }
 
@@ -104,13 +119,14 @@ pub struct HostRuntime {
     /// The audit sink `server` writes to — exposed so a caller that needs
     /// to record connection-level decisions of its own (e.g. Step 3's
     /// `host.reverse` registration choke point) writes to the same log.
-    pub audit: Arc<FileAuditSink>,
+    pub audit: Arc<RotatingAuditSink>,
 }
 
 /// Build a [`HostRuntime`]: session broker (with its TTL reaper spawned),
 /// the interim `AllowAllPinned` policy (`docs/ROADMAP.md`'s M1–M4 posture),
-/// a file audit sink at `paths.audit_log()`, and the `Server` that ties
-/// them together under `device_id`.
+/// the rotating, bounded-queue audit sink at `[audit]`'s configured path
+/// (`crate::audit::RotatingAuditSink`, `PLAN.md` M5 Step 3), and the
+/// `Server` that ties them together under `device_id`.
 ///
 /// The broker outlives every connection (`docs/design/architecture.md`
 /// §3); its TTL reaper stops on its own once the returned `Server` (and the
@@ -118,7 +134,12 @@ pub struct HostRuntime {
 /// elsewhere the factory answers `UNSUPPORTED` without spawning anything
 /// (Windows host is P2 — README limitations).
 pub fn host_runtime(paths: &Paths, config: &Config, device_id: impl Into<String>) -> HostRuntime {
-    let audit = Arc::new(FileAuditSink::new(paths.audit_log()));
+    let audit = Arc::new(RotatingAuditSink::spawn(
+        config.audit.path(paths),
+        config.audit.max_bytes(),
+        config.audit.retain(),
+        config.audit.queue_depth(),
+    ));
     let broker = Broker::new(
         Arc::new(SystemClock),
         BrokerConfig::from_serve(&config.serve),

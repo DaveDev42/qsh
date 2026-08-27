@@ -85,7 +85,19 @@ const DEFERRED: &[(&str, &str)] = &[
          deferred only because nothing today can force the deny through the \
          real binary — `qsh serve`'s M1–M4 policy is hardcoded allow-all-pinned \
          with no CLI knob to swap in `DenyAll`, so the cited test proves the \
-         choke point at the `qsh-core` unit level, not the CLI envelope. \
+         choke point at the `qsh-core` unit level, not the CLI envelope. (4) \
+         M5 Step 3: the audit-writer fail-closed deny — an otherwise-allowed \
+         decision refused because `crate::audit::RotatingAuditSink` could not \
+         durably record it (`crates/qsh-core/src/audit/writer.rs`, \
+         `crates/qsh-core/src/server/mod.rs`'s `session_open_fails_closed_\
+         when_the_audit_sink_cannot_record_an_allow`) — is a fourth, distinct \
+         producer, proven at the same `qsh-core` unit level as (3) with a \
+         `FailingAuditSink` test double. It has no CLI-reachable path either: \
+         forcing the real writer thread into `AuditError::QueueFull` or \
+         `AuditError::Degraded` from outside the process (filling a queue \
+         depth of 1024, or making the audit directory unwritable mid-run \
+         under `Fleet`) is not deterministic, so it stays on this list beside \
+         (1)-(3) rather than getting a fixture that would flake. \
          Discharge this one the moment `Fleet`/an equivalent gains a way to run \
          the real binary under a denying policy — it needs a fixture then, not \
          a place on this list",

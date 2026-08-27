@@ -5,16 +5,91 @@
 //! or key material — "payload is never logged" is a property of the type,
 //! not a discipline. Adding such a field is a design change (opt-in
 //! `audit.log_argv` is the only sanctioned exception, and it is not in M1).
+//!
+//! **Fail-closed (`PLAN.md` M5 Step 3).** [`AuditSink::record`] returns a
+//! [`Result`]: a caller that cannot durably record a decision must not
+//! treat it as allowed. The production sink is [`writer::RotatingAuditSink`]
+//! — a bounded-queue, rotating, degraded-latching writer thread — and the
+//! four authorization choke points (`server::Server::authorize`/
+//! `authorize_stream`/`authorize_session_control`, `reverse::admit::admit`)
+//! all turn a `record` failure into a denial regardless of what the policy
+//! verdict itself was. The one sanctioned exception is
+//! [`AuditRecord::handshake_rejected`]: that path is already rejecting the
+//! connection, so a failed enqueue there gets a diagnostic, never a changed
+//! outcome (there is nothing left to fail closed *toward*).
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
+use qsh_transport::AuthPath;
 use serde::{Deserialize, Serialize};
 
 use crate::acl::{Action, Decision};
 use crate::config::now_rfc3339;
+
+pub mod writer;
+
+pub use writer::RotatingAuditSink;
+
+/// `PLAN.md` M5 Step 3, F2: how long [`wait_for_sole_owner`] gives a
+/// straggling `Arc` clone to drop before giving up. Generous enough for a
+/// detached per-connection task to finish unwinding, finite enough to
+/// never meaningfully delay process shutdown.
+pub const AUDIT_SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
+
+/// Bounded, best-effort wait for `arc` to become the sole owner of its
+/// value before the caller drops its own clone (`PLAN.md` M5 Step 3, F2).
+///
+/// `RotatingAuditSink::drop`'s final bounded flush of whatever is still
+/// `pending` only runs once every clone is gone — but neither
+/// `server::Server::run`'s nor `reverse::listen::Listen::run`'s accept
+/// loops track (let alone join) the per-connection tasks they
+/// `tokio::spawn` (`docs/design/architecture.md` §3: only the broker's own
+/// sessions are drained), so a task still mid-unwind can hold its own
+/// `Arc<dyn AuditSink>` clone alive for a little while after `run(..)`
+/// itself returns. This gives such a straggler up to `grace` to drop its
+/// clone before the caller (`serve::run_serve`/`reverse::listen::
+/// run_listen_unix`) drops its own — best effort, not a guarantee: gives
+/// up and returns anyway past the deadline, because shutdown must never
+/// hang on one wedged task. Whichever clone turns out to be the last one,
+/// `RotatingAuditSink::drop` still performs its own final flush.
+pub async fn wait_for_sole_owner<T: ?Sized>(arc: &Arc<T>, grace: Duration) {
+    let deadline = tokio::time::Instant::now() + grace;
+    while Arc::strong_count(arc) > 1 {
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Why [`AuditSink::record`] could not accept a record. Exactly two shapes
+/// (`PLAN.md` M5 Step 3): the writer's bounded queue is at capacity, or the
+/// writer is latched degraded after a fatal write failure (disk full,
+/// read-only filesystem, …). Either way the record is not durable, so a
+/// caller gating a privileged operation on it must deny.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum AuditError {
+    /// The bounded writer queue had no room for this record (backpressure).
+    #[error("audit queue is full")]
+    QueueFull,
+    /// The writer is degraded: its most recent write failed and no
+    /// subsequent write has yet succeeded.
+    #[error("audit writer is degraded (a previous write failed)")]
+    Degraded,
+}
+
+/// `"pin"` / `"ca"` — the open string [`AuditRecord::auth_path`] and
+/// `acl.toml`'s own `auth_path` key share (`docs/PRD.md` §9).
+fn auth_path_str(auth_path: AuthPath) -> &'static str {
+    match auth_path {
+        AuthPath::Pin => "pin",
+        AuthPath::Ca => "ca",
+    }
+}
 
 /// One audit line. Fields are exactly those listed in architecture.md §6.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,6 +110,13 @@ pub struct AuditRecord {
     /// Index of the matching policy rule (M5+); `null` under the interim
     /// allow-all-pinned policy.
     pub rule: Option<u32>,
+    /// How the peer authenticated: `"pin"` or `"ca"` (`docs/design/
+    /// architecture.md` §6), or `"-"` when no principal was established at
+    /// all ([`AuditRecord::handshake_rejected`]). Structural, like every
+    /// other field — a `Principal` alone cannot tell a pin from a CA leaf
+    /// asserting the same name, so this is what lets an investigation tell
+    /// them apart after the fact.
+    pub auth_path: String,
     /// Peer socket address at decision time.
     pub peer_addr: String,
 }
@@ -46,9 +128,17 @@ impl AuditRecord {
     /// from a rule match at all (an always-deny gate, an ownership
     /// refusal, a credential failure — anything upstream or downstream of
     /// `Authorizer::check` itself).
+    ///
+    /// Eight positional arguments (over clippy's default seven): every one
+    /// of them is a distinct structural field this record carries by
+    /// contract (`docs/design/architecture.md` §6's field list, byte for
+    /// byte) — a builder would only spread the same eight names across
+    /// more call-site lines, not reduce what a caller has to get right.
+    #[allow(clippy::too_many_arguments)]
     pub fn now(
         request_id: u64,
         principal: &qsh_transport::Principal,
+        auth_path: AuthPath,
         action: Action,
         resource: &str,
         decision: Decision,
@@ -63,6 +153,7 @@ impl AuditRecord {
             resource: resource.to_string(),
             decision: decision.as_str().to_string(),
             rule,
+            auth_path: auth_path_str(auth_path).to_string(),
             peer_addr: peer_addr.to_string(),
         }
     }
@@ -75,13 +166,9 @@ impl AuditRecord {
     /// case, and [`AuditRecord::handshake_rejected`] already honors the
     /// same convention) rather than a numeric id — indistinguishable
     /// otherwise from a peer-chosen wire request `0`.
-    ///
-    /// `server::Server::authorize_stream` predates this constructor and
-    /// still passes a literal `0` for the same kind of decision; migrating
-    /// it is left for the next behavior-change window rather than folded
-    /// into this fix (see the comment at that call site).
     pub fn connection_level(
         principal: &qsh_transport::Principal,
+        auth_path: AuthPath,
         action: Action,
         resource: &str,
         decision: Decision,
@@ -96,15 +183,16 @@ impl AuditRecord {
             resource: resource.to_string(),
             decision: decision.as_str().to_string(),
             rule,
+            auth_path: auth_path_str(auth_path).to_string(),
             peer_addr: peer_addr.to_string(),
         }
     }
 
     /// A connection-level deny: the peer never got past the TLS handshake
     /// (no client cert, unpinned, expired…). There is no principal — the
-    /// whole point is that none could be established — so `principal` is
-    /// `"-"`, `action` is `"connect"` and `resource` is the coarse
-    /// rejection category (never a detailed reason).
+    /// whole point is that none could be established — so `principal` and
+    /// `auth_path` are both `"-"`, `action` is `"connect"` and `resource` is
+    /// the coarse rejection category (never a detailed reason).
     pub fn handshake_rejected(peer_addr: std::net::SocketAddr, category: &str) -> Self {
         Self {
             ts: now_rfc3339(),
@@ -114,22 +202,34 @@ impl AuditRecord {
             resource: category.to_string(),
             decision: Decision::Deny.as_str().to_string(),
             rule: None,
+            auth_path: "-".to_string(),
             peer_addr: peer_addr.to_string(),
         }
     }
 }
 
 /// Where audit lines go. Implementations must never block the caller for
-/// long and must never panic on I/O errors (audit failure is logged, not
-/// fatal — refusing service because the audit disk is full is a separate
-/// policy decision that M1 does not make).
+/// long and must never panic on I/O errors. A failure is not logged and
+/// swallowed: it is returned, and every privileged-operation choke point
+/// treats it as a denial (`PLAN.md` M5 Step 3 — this is the audit
+/// fail-closed policy `docs/design/architecture.md` §6 documents).
 pub trait AuditSink: Send + Sync + 'static {
-    /// Append one record.
-    fn record(&self, record: &AuditRecord);
+    /// Append one record. `Err` means the record is not durable — the
+    /// caller must not proceed as though the decision it describes was
+    /// recorded.
+    fn record(&self, record: &AuditRecord) -> Result<(), AuditError>;
 }
 
-/// Append-only JSONL file sink. Creates the parent directory (0700) and the
-/// file (0600) on first use.
+/// Append-only JSONL file sink: opens the file fresh on every call (no
+/// handle held across appends), so it has no rotation/retention and no
+/// backpressure of its own — every write is its own attempt, with no
+/// "queue full" failure mode. Still fail-closed: a write failure is
+/// reported as [`AuditError::Degraded`], never silently dropped. Every
+/// production choke point uses [`RotatingAuditSink`] instead (`qsh serve`/
+/// `qsh reverse` via `serve::host_runtime`, and `qsh listen`'s controller
+/// as of `PLAN.md` M5 Step 3 F7) — this stays as the simplest-possible
+/// sink for callers that just want one, mainly this crate's own tests.
+/// Creates the parent directory (0700) and the file (0600) on first use.
 #[derive(Debug)]
 pub struct FileAuditSink {
     path: PathBuf,
@@ -163,23 +263,36 @@ impl FileAuditSink {
             opts.mode(0o600);
         }
         let mut file = opts.open(&self.path)?;
-        file.write_all(line.as_bytes())?;
-        file.write_all(b"\n")
+        // F3: payload and the trailing newline as ONE buffer, ONE
+        // `write_all` — two separate calls (as this used to be) leave a
+        // window where the payload lands but the newline doesn't, which
+        // would torn-merge with whatever the next call appends.
+        let mut buf = Vec::with_capacity(line.len() + 1);
+        buf.extend_from_slice(line.as_bytes());
+        buf.push(b'\n');
+        file.write_all(&buf)
     }
 }
 
 impl AuditSink for FileAuditSink {
-    fn record(&self, record: &AuditRecord) {
+    fn record(&self, record: &AuditRecord) -> Result<(), AuditError> {
         let line = match serde_json::to_string(record) {
             Ok(line) => line,
             Err(err) => {
-                tracing::error!(%err, "audit: failed to encode record");
-                return;
+                tracing::error!(target: "qsh::audit", %err, "audit: failed to encode record");
+                return Err(AuditError::Degraded);
             }
         };
         if let Err(err) = self.append(&line) {
-            tracing::error!(%err, path = %self.path.display(), "audit: failed to append");
+            tracing::error!(
+                target: "qsh::audit",
+                %err,
+                path = %self.path.display(),
+                "audit: failed to append; denying the operation this record was for"
+            );
+            return Err(AuditError::Degraded);
         }
+        Ok(())
     }
 }
 
@@ -213,11 +326,12 @@ impl MemoryAuditSink {
 }
 
 impl AuditSink for MemoryAuditSink {
-    fn record(&self, record: &AuditRecord) {
+    fn record(&self, record: &AuditRecord) -> Result<(), AuditError> {
         self.records
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(record.clone());
+        Ok(())
     }
 }
 
@@ -227,7 +341,69 @@ impl AuditSink for MemoryAuditSink {
 pub struct NullAuditSink;
 
 impl AuditSink for NullAuditSink {
-    fn record(&self, _record: &AuditRecord) {}
+    fn record(&self, _record: &AuditRecord) -> Result<(), AuditError> {
+        Ok(())
+    }
+}
+
+/// Deterministic test double that fails every `record()` call on demand
+/// (`PLAN.md` M5 Step 3's disk-full fail-closed tests) — an ENOSPC-class
+/// failure without touching a real filesystem or the bounded-queue/writer
+/// machinery [`RotatingAuditSink`] actually uses. `#[cfg(test)]` and
+/// `pub(crate)`: it is a correctness fixture, never a production sink, but
+/// is shared across this crate's own test modules (`server::mod::tests`,
+/// `reverse::admit::tests`), which see it because `cfg(test)` is set for
+/// the whole crate under `cargo test`.
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub(crate) struct FailingAuditSink {
+    failing: std::sync::atomic::AtomicBool,
+    records: Mutex<Vec<AuditRecord>>,
+}
+
+#[cfg(test)]
+impl FailingAuditSink {
+    /// A sink that accepts every record until [`Self::fail`] is called.
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Start failing every subsequent `record()` call.
+    pub(crate) fn fail(&self) {
+        self.failing
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Stop failing — later `record()` calls succeed again. The latch is
+    /// not permanent (`PLAN.md` M5 §4.2's "다음 성공적 쓰기" recovery rule);
+    /// this is the test-side equivalent of that recovery.
+    pub(crate) fn clear(&self) {
+        self.failing
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Everything actually recorded (i.e. every call made while not
+    /// failing).
+    pub(crate) fn records(&self) -> Vec<AuditRecord> {
+        self.records
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+}
+
+#[cfg(test)]
+impl AuditSink for FailingAuditSink {
+    fn record(&self, record: &AuditRecord) -> Result<(), AuditError> {
+        if self.failing.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(AuditError::Degraded);
+        }
+        self.records
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(record.clone());
+        Ok(())
+    }
 }
 
 fn create_private_dir(dir: &Path) -> std::io::Result<()> {
@@ -253,6 +429,7 @@ mod tests {
         AuditRecord::now(
             7,
             &Principal::Device("laptop".into()),
+            AuthPath::Pin,
             Action::ExecRun,
             "exec",
             Decision::Allow,
@@ -272,6 +449,7 @@ mod tests {
             keys,
             [
                 "action",
+                "auth_path",
                 "decision",
                 "peer_addr",
                 "principal",
@@ -285,6 +463,7 @@ mod tests {
         assert_eq!(value["action"], "exec.run");
         assert_eq!(value["decision"], "allow");
         assert_eq!(value["request_id"], "7");
+        assert_eq!(value["auth_path"], "pin");
         assert!(value["rule"].is_null());
     }
 
@@ -293,8 +472,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state").join("audit.log");
         let sink = FileAuditSink::new(&path);
-        sink.record(&sample());
-        sink.record(&sample());
+        sink.record(&sample()).unwrap();
+        sink.record(&sample()).unwrap();
         let text = fs::read_to_string(&path).unwrap();
         let lines: Vec<_> = text.lines().collect();
         assert_eq!(lines.len(), 2);
@@ -316,10 +495,55 @@ mod tests {
         }
     }
 
+    /// `FileAuditSink` is fail-closed too, not just `RotatingAuditSink`
+    /// (`PLAN.md` M5 Step 3): a write it cannot perform is `Err`, never a
+    /// swallowed `tracing::error!` with the call site none the wiser. Kept
+    /// as the simplest-possible sink for callers that want one (tests)
+    /// even though `reverse::listen`'s controller itself moved onto
+    /// `RotatingAuditSink` (F7). A directory at the log path makes
+    /// `OpenOptions::open` fail deterministically (EISDIR), no real
+    /// disk-full condition required.
+    #[test]
+    fn file_sink_returns_err_when_the_path_cannot_be_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.log");
+        fs::create_dir(&path).unwrap();
+        let sink = FileAuditSink::new(&path);
+        assert_eq!(sink.record(&sample()), Err(AuditError::Degraded));
+    }
+
     #[test]
     fn now_rfc3339_has_second_precision_and_z_suffix() {
         let ts = now_rfc3339();
         assert!(ts.ends_with('Z'), "{ts}");
         assert_eq!(ts.len(), "2026-08-17T00:00:00Z".len(), "{ts}");
+    }
+
+    // ---- F2: wait_for_sole_owner ---------------------------------------
+
+    #[tokio::test]
+    async fn wait_for_sole_owner_returns_immediately_when_already_sole_owner() {
+        let arc = Arc::new(NullAuditSink);
+        // No other clone exists: the loop's own condition is false on the
+        // very first check, so this returns without ever sleeping.
+        wait_for_sole_owner(&arc, Duration::from_secs(10)).await;
+    }
+
+    #[tokio::test]
+    async fn wait_for_sole_owner_gives_up_after_grace_when_a_clone_is_still_held() {
+        let arc = Arc::new(NullAuditSink);
+        let _still_held = arc.clone();
+        let grace = Duration::from_millis(30);
+        let start = std::time::Instant::now();
+        wait_for_sole_owner(&arc, grace).await;
+        assert!(
+            start.elapsed() >= grace,
+            "must wait out the full grace period while a clone is held"
+        );
+        assert_eq!(
+            Arc::strong_count(&arc),
+            2,
+            "gives up rather than blocking forever"
+        );
     }
 }

@@ -515,23 +515,22 @@ impl Server {
         let verdict = self
             .authorizer
             .check(&ctx.principal, ctx.auth_path, action, resource);
-        // No request id: a stream is not a control-stream request.
-        // TODO(next behavior-change window): this is a connection-level
-        // decision, not a reply to request `0` — migrate to
-        // `AuditRecord::connection_level` (`request_id: "-"`) alongside
-        // `reverse::admit`, which already does. Left as `0` here because
-        // this audit output is live in production and changing it is a
-        // behavior change outside this PR's zero-behavior-change scope.
-        self.audit.record(&AuditRecord::now(
-            0,
+        // No request id: a stream is not a control-stream request, so this
+        // is a connection-level record (`request_id: "-"`), same as
+        // `reverse::admit`.
+        let recorded = self.audit.record(&AuditRecord::connection_level(
             &ctx.principal,
+            ctx.auth_path,
             action,
             resource,
             verdict.decision,
             verdict.rule,
             ctx.peer_addr,
         ));
-        verdict.is_allow()
+        // Fail-closed (`CLAUDE.md` "never create a resource before
+        // authorization succeeds"): an unrecorded allow is treated as a
+        // deny, same as an unrecorded allow at every other choke point.
+        verdict.is_allow() && recorded.is_ok()
     }
 
     fn authorize(
@@ -544,16 +543,20 @@ impl Server {
         let verdict = self
             .authorizer
             .check(&ctx.principal, ctx.auth_path, action, resource);
-        self.audit.record(&AuditRecord::now(
+        let recorded = self.audit.record(&AuditRecord::now(
             request_id,
             &ctx.principal,
+            ctx.auth_path,
             action,
             resource,
             verdict.decision,
             verdict.rule,
             ctx.peer_addr,
         ));
-        if !verdict.is_allow() {
+        // Fail-closed: an allow verdict that failed to make it into the
+        // audit log is denied — never create the resource this authorizes
+        // without a durable record of having authorized it.
+        if !verdict.is_allow() || recorded.is_err() {
             return Err(Box::new(Self::permission_denied(request_id, action)));
         }
         Ok(())
@@ -578,9 +581,12 @@ impl Server {
             self.authorizer
                 .check(&ctx.principal, ctx.auth_path, Action::SessionControl, &id.0);
         if !verdict.is_allow() {
-            self.audit.record(&AuditRecord::now(
+            // Already denying: a failure to record this deny doesn't
+            // change the outcome, only the diagnostic.
+            let _ = self.audit.record(&AuditRecord::now(
                 request_id,
                 &ctx.principal,
+                ctx.auth_path,
                 Action::SessionControl,
                 &id.0,
                 verdict.decision,
@@ -593,15 +599,25 @@ impl Server {
             )));
         }
         self.require_opener(ctx, request_id, id)?;
-        self.audit.record(&AuditRecord::now(
+        let recorded = self.audit.record(&AuditRecord::now(
             request_id,
             &ctx.principal,
+            ctx.auth_path,
             Action::SessionControl,
             &id.0,
             Decision::Allow,
             verdict.rule,
             ctx.peer_addr,
         ));
+        // Fail-closed: this is the terminal allow record for the combined
+        // policy + ownership decision — an allow that failed to land in
+        // the audit log flips to denied, same as `Self::authorize`.
+        if recorded.is_err() {
+            return Err(Box::new(Self::permission_denied(
+                request_id,
+                Action::SessionControl,
+            )));
+        }
         Ok(())
     }
 
@@ -671,10 +687,13 @@ impl Server {
         }
         // Not a policy-rule decision — an ownership refusal, a separate
         // gate from `Authorizer::check` (this function's own doc) — so
-        // there is no rule index to carry.
-        self.audit.record(&AuditRecord::now(
+        // there is no rule index to carry. Already denying: a failure to
+        // record this deny doesn't change the outcome, only the
+        // diagnostic.
+        let _ = self.audit.record(&AuditRecord::now(
             request_id,
             &ctx.principal,
+            ctx.auth_path,
             Action::SessionControl,
             &id.0,
             Decision::Deny,
@@ -1352,9 +1371,13 @@ impl Server {
             Err(_) => {
                 // Structural only — the record names the op, the principal
                 // and the decision, never the credential (CLAUDE.md).
-                self.audit.record(&AuditRecord::now(
+                // Already denying (same exception as `handshake_rejected`):
+                // a failure to record this deny doesn't change the
+                // outcome, only the diagnostic.
+                let _ = self.audit.record(&AuditRecord::now(
                     request_id,
                     &ctx.principal,
+                    ctx.auth_path,
                     Action::SessionAttach,
                     &req.session_id,
                     crate::acl::Decision::Deny,
@@ -1634,8 +1657,16 @@ impl Server {
                     }
                     _ => "handshake".to_string(),
                 };
-                self.audit
-                    .record(&AuditRecord::handshake_rejected(peer, &category));
+                // Already rejecting the connection outright: a failure to
+                // record it doesn't change the outcome (there is nothing
+                // left to deny), only the diagnostic — same exception as
+                // the resume-credential deny above.
+                if let Err(audit_err) = self
+                    .audit
+                    .record(&AuditRecord::handshake_rejected(peer, &category))
+                {
+                    tracing::warn!(%peer, %audit_err, "failed to record handshake rejection");
+                }
                 tracing::warn!(%peer, %err, "connection rejected");
             }
         }
@@ -3231,7 +3262,7 @@ fn connect_rejected(code: ErrorCode, message: impl Into<String>) -> wire::Connec
 mod tests {
     use super::*;
     use crate::acl::{AllowAllPinned, DenyAll};
-    use crate::audit::MemoryAuditSink;
+    use crate::audit::{FailingAuditSink, MemoryAuditSink};
     use crate::broker::{
         Broker, BrokerConfig, PipeFactory, PipeHandle, RESUME_TOKEN_LEN, SessionState, SourceExit,
         TestClock,
@@ -3549,6 +3580,62 @@ mod tests {
         assert_eq!(error_code(&reply), Some(ErrorCode::Unsupported));
         assert!(rig.audit.records().is_empty());
         assert_eq!(rig.server.pending_tickets(), 0);
+    }
+
+    /// `PLAN.md` M5 Step 3(c) "disk-full fail-closed": an
+    /// `AllowAllPinned`-eligible peer's `session.open` is denied — and no
+    /// session is created — while the audit sink cannot durably record the
+    /// allow, then succeeds once the sink recovers. Exercises
+    /// `Server::authorize`, the first of the four fail-closed choke points
+    /// (`PLAN.md` §1's "four authorization points").
+    #[tokio::test]
+    async fn session_open_fails_closed_when_the_audit_sink_cannot_record_an_allow() {
+        let clock = TestClock::new();
+        let pipes = Arc::new(PipeFactory::new(64 * 1024));
+        let broker = Broker::new(
+            Arc::new(clock.clone()),
+            BrokerConfig {
+                replay_bytes: 64 * 1024,
+                resume_ttl: Duration::from_secs(3600),
+                close_grace: Duration::from_millis(100),
+            },
+            pipes.clone(),
+        );
+        let audit = Arc::new(FailingAuditSink::new());
+        let server = Server::new(
+            Arc::new(AllowAllPinned),
+            audit.clone(),
+            broker.clone(),
+            "host",
+        );
+        let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
+
+        // Policy would allow this peer — but the audit sink cannot durably
+        // record the decision, so the choke point denies it rather than
+        // create a session with no durable record of having authorized it.
+        audit.fail();
+        let reply = server.dispatch(&ctx, &session_open(1)).await.unwrap();
+        assert_eq!(error_code(&reply), Some(ErrorCode::PermissionDenied));
+        assert_eq!(
+            broker.session_count(),
+            0,
+            "no session created while the audit sink is degraded"
+        );
+
+        // The writer recovers: the same policy-allowed request now
+        // succeeds, and only now does a session exist.
+        audit.clear();
+        let reply = server.dispatch(&ctx, &session_open(2)).await.unwrap();
+        assert!(matches!(
+            response_body(&reply),
+            response::Body::SessionOpened(_)
+        ));
+        assert_eq!(broker.session_count(), 1);
+        assert_eq!(
+            audit.records().len(),
+            1,
+            "the denied attempt was never durably recorded, only the recovered allow"
+        );
     }
 
     /// An unsolicited SessionEvent (host → client only) is dropped.
