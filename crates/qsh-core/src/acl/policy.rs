@@ -18,8 +18,11 @@
 //!    an [`AuthPath::Ca`] request (`PLAN.md` M5 §4.1 #2).
 //! 3. Action pattern match — exact or trailing-`.*` family wildcard
 //!    (`ActionPattern::matches`).
-//! 4. `scope` is **parsed and preserved on every [`Rule`] but not
-//!    evaluated here** — see [`Policy::decide`]'s doc for why.
+//! 4. `scope` judgment (`PLAN.md` M5 Step 5): `Scope::Any` always passes.
+//!    `Scope::Owned` (the default) passes only when `resource.owner` is
+//!    `None` (no owner concept — never filtered either way) or equals the
+//!    requester's own [`super::opener_key`] — see [`Policy::decide`]'s
+//!    doc for the rationale.
 //!
 //! First matching rule wins (allow-only grammar, so there is no
 //! conflict to resolve by priority) and its array index becomes
@@ -27,7 +30,7 @@
 
 use qsh_transport::{AuthPath, Principal};
 
-use super::{Action, Authorizer, Decision, ResourceRef};
+use super::{Action, Authorizer, Decision, ResourceRef, opener_key};
 
 /// A validated action-family prefix — dot included, non-empty stem —
 /// the only value [`ActionPattern::Prefix`] can hold. `FamilyPrefix` is
@@ -93,13 +96,19 @@ impl ActionPattern {
 /// Whether a `scope`-bearing rule applies to any instance of a resource or
 /// only ones `principal` owns. `PLAN.md` M5 §4.1 #3's default is
 /// [`Scope::Owned`] — the safe default that reproduces M3's
-/// opener-principal binding once something evaluates it.
+/// opener-principal binding.
 ///
-/// **Parsed and preserved by every [`Rule`], not evaluated by
-/// [`Policy::decide`] in this step** (`PLAN.md` M5 Step 2 (a)):
-/// [`ResourceRef`] carries no owner concept until Step 5 adds one, so
-/// there is nothing yet to compare `scope` against. Pinned by this
-/// module's `scope_is_parsed_and_preserved_but_not_yet_evaluated` test.
+/// **Evaluated by [`Policy::decide`]'s ④ since `PLAN.md` M5 Step 5**: a
+/// matched rule with `scope = "owned"` allows only when the resource's
+/// owner ([`ResourceRef::owner`]) equals the requester's own
+/// [`super::opener_key`] — `owner: None` (a resource kind with no owner
+/// concept: `exec.run`, `host.reverse`, `forward.local`) is never filtered
+/// either way, so `scope` is meaningless-but-harmless on those rows.
+/// Before Step 5, [`ResourceRef`] carried no owner concept at all, so this
+/// was parsed and preserved on every [`Rule`] but never consulted; that
+/// Step 2-era behavior is now pinned by this module's
+/// `scope_owned_is_not_evaluated_when_the_resource_has_no_owner` test
+/// instead, since `owner: None` is still exactly "unfiltered".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Scope {
     /// Only the resource's owner (Step 5) — the default.
@@ -122,8 +131,8 @@ pub struct Rule {
     /// Action patterns this rule grants (never empty — the loader rejects
     /// a rule with no `allow` entries).
     pub allow: Vec<ActionPattern>,
-    /// Ownership scope. Parsed and preserved; not evaluated until
-    /// `PLAN.md` M5 Step 5 (see [`Scope`]'s doc).
+    /// Ownership scope, evaluated since `PLAN.md` M5 Step 5 (see
+    /// [`Scope`]'s doc).
     pub scope: Scope,
 }
 
@@ -164,11 +173,17 @@ impl Policy {
     /// Decide `action` on `resource` for `principal` (authenticated via
     /// `auth_path`), per the module-level canonical evaluation order.
     ///
-    /// `resource` is accepted (not yet inspected) because `scope` is not
-    /// evaluated here — see [`Scope`]'s doc for why. It exists on this
-    /// signature now, ahead of Step 5 actually using it, so Step 5's diff
-    /// is "read `resource.owner`", not "change every call site's
-    /// signature again".
+    /// `resource.owner` only matters for a rule whose `scope` is the
+    /// default `"owned"`: such a rule allows an owned resource
+    /// (`resource.owner: Some(_)`) only when that owner is this same
+    /// requester's own [`opener_key`] — a different principal's session or
+    /// remote forward keeps denying under `scope = "owned"` exactly as
+    /// M3's hardcoded `require_opener` gate did, now as an ordinary policy
+    /// judgment instead of a second, separate check
+    /// (`docs/design/architecture.md` §6, `PLAN.md` M5 Step 5 (a)). A
+    /// resource with no owner concept at all (`resource.owner: None` —
+    /// `exec.run`/`host.reverse`/`forward.local`) is never filtered by
+    /// `scope` either way, `"owned"` or `"any"`.
     pub fn decide(
         &self,
         principal: &Principal,
@@ -176,7 +191,6 @@ impl Policy {
         action: Action,
         resource: ResourceRef<'_>,
     ) -> Verdict {
-        let _ = resource;
         // ① Always-deny gate — before any rule is looked at, so no
         // wildcard or explicit exact pattern can reach it.
         if action.is_always_denied() {
@@ -195,7 +209,17 @@ impl Policy {
             if !rule.allow.iter().any(|pattern| pattern.matches(action)) {
                 continue;
             }
-            // ④ `scope` is intentionally not consulted — see doc above.
+            // ④ `scope` judgment — see this method's own doc. `Scope::Any`
+            // always passes; `Scope::Owned` passes when the resource has
+            // no owner to begin with, or when it does and this requester
+            // is it.
+            let scope_ok = match (rule.scope, resource.owner) {
+                (Scope::Any, _) | (Scope::Owned, None) => true,
+                (Scope::Owned, Some(owner)) => owner == opener_key(principal, auth_path),
+            };
+            if !scope_ok {
+                continue;
+            }
             let index = u32::try_from(index).expect(
                 "rule index fits u32: crate::acl::load bounds rule count far below u32::MAX",
             );
@@ -217,9 +241,9 @@ impl Authorizer for Policy {
         principal: &Principal,
         auth_path: AuthPath,
         action: Action,
-        resource: &str,
+        resource: ResourceRef<'_>,
     ) -> Verdict {
-        self.decide(principal, auth_path, action, ResourceRef { id: resource })
+        self.decide(principal, auth_path, action, resource)
     }
 }
 
@@ -275,7 +299,8 @@ mod tests {
         };
         let principal = Principal::User("dave".into());
         for action in [Action::ForwardSocks, Action::FileRead, Action::FileWrite] {
-            let verdict = policy.decide(&principal, AuthPath::Pin, action, ResourceRef { id: "r" });
+            let verdict =
+                policy.decide(&principal, AuthPath::Pin, action, ResourceRef::unowned("r"));
             assert_eq!(verdict.decision, Decision::Deny, "{action} must be denied");
             assert_eq!(verdict.rule, None, "{action} must carry no rule index");
         }
@@ -286,7 +311,7 @@ mod tests {
             &principal,
             AuthPath::Pin,
             Action::ForwardLocal,
-            ResourceRef { id: "r" },
+            ResourceRef::unowned("r"),
         );
         assert_eq!(allowed.decision, Decision::Allow);
         assert_eq!(allowed.rule, Some(0));
@@ -310,7 +335,7 @@ mod tests {
                 &principal,
                 AuthPath::Pin,
                 Action::ExecRun,
-                ResourceRef { id: "r" },
+                ResourceRef::unowned("r"),
             );
             assert_eq!(
                 verdict.decision,
@@ -324,7 +349,7 @@ mod tests {
             &dave,
             AuthPath::Pin,
             Action::ExecRun,
-            ResourceRef { id: "r" },
+            ResourceRef::unowned("r"),
         );
         assert_eq!(verdict.decision, Decision::Allow);
     }
@@ -347,7 +372,7 @@ mod tests {
             &dave,
             AuthPath::Ca,
             Action::SessionOpen,
-            ResourceRef { id: "r" },
+            ResourceRef::unowned("r"),
         );
         assert_eq!(
             via_ca.decision,
@@ -358,7 +383,7 @@ mod tests {
             &dave,
             AuthPath::Pin,
             Action::SessionOpen,
-            ResourceRef { id: "r" },
+            ResourceRef::unowned("r"),
         );
         assert_eq!(via_pin.decision, Decision::Allow);
     }
@@ -389,7 +414,7 @@ mod tests {
             &dave,
             AuthPath::Pin,
             Action::ExecRun,
-            ResourceRef { id: "r" },
+            ResourceRef::unowned("r"),
         );
         assert_eq!(verdict.decision, Decision::Allow);
         assert_eq!(
@@ -400,11 +425,14 @@ mod tests {
     }
 
     #[test]
-    fn scope_is_parsed_and_preserved_but_not_yet_evaluated() {
-        // `ResourceRef` has no owner field until Step 5, so nothing here
-        // *can* tell "dave's session" from "someone else's session" —
-        // `scope = "owned"` must not, by itself, cause a denial. This is
-        // the explicit pin `PLAN.md` M5 Step 2 (c) asks for.
+    fn scope_owned_is_not_evaluated_when_the_resource_has_no_owner() {
+        // `resource.owner: None` (no owner concept at all — `exec.run`/
+        // `host.reverse`/`forward.local`) is never filtered by `scope`,
+        // "owned" or "any" alike — this is the Step 2-era behavior
+        // (`ResourceRef` then had no owner field to compare at all), still
+        // exactly correct now that `scope` is actually evaluated (`PLAN.md`
+        // M5 Step 5), since an absent owner can never fail an ownership
+        // comparison.
         let dave = Principal::User("dave".into());
         let policy = Policy {
             rules: vec![rule(
@@ -419,14 +447,140 @@ mod tests {
                 &dave,
                 AuthPath::Pin,
                 Action::SessionControl,
-                ResourceRef { id: resource },
+                ResourceRef::unowned(resource),
             );
             assert_eq!(
                 verdict.decision,
                 Decision::Allow,
-                "scope=owned must not filter by resource id in Step 2 — resource {resource:?}"
+                "scope=owned must not filter an unowned resource — resource {resource:?}"
             );
         }
+    }
+
+    /// The headline `PLAN.md` M5 Step 5 behavior: `scope = "owned"` (the
+    /// default) denies a request whose principal is not the resource's
+    /// recorded owner, even though principal/auth_path/action all matched.
+    #[test]
+    fn scope_owned_denies_a_request_from_a_different_owner() {
+        let dave = Principal::User("dave".into());
+        let policy = Policy {
+            rules: vec![rule(
+                "user:dave",
+                AuthPath::Pin,
+                vec![ActionPattern::Exact(Action::SessionControl)],
+            )],
+        };
+        let someone_elses_session = opener_key(&Principal::User("alice".into()), AuthPath::Pin);
+        let verdict = policy.decide(
+            &dave,
+            AuthPath::Pin,
+            Action::SessionControl,
+            ResourceRef {
+                id: "sess-1",
+                owner: Some(&someone_elses_session),
+            },
+        );
+        assert_eq!(verdict.decision, Decision::Deny);
+        assert_eq!(
+            verdict.rule, None,
+            "a scope-refused match carries no rule index"
+        );
+    }
+
+    /// The other half: the resource's actual owner is admitted.
+    #[test]
+    fn scope_owned_allows_the_resources_own_owner() {
+        let dave = Principal::User("dave".into());
+        let policy = Policy {
+            rules: vec![rule(
+                "user:dave",
+                AuthPath::Pin,
+                vec![ActionPattern::Exact(Action::SessionControl)],
+            )],
+        };
+        let daves_own_key = opener_key(&dave, AuthPath::Pin);
+        let verdict = policy.decide(
+            &dave,
+            AuthPath::Pin,
+            Action::SessionControl,
+            ResourceRef {
+                id: "sess-1",
+                owner: Some(&daves_own_key),
+            },
+        );
+        assert_eq!(verdict.decision, Decision::Allow);
+        assert_eq!(verdict.rule, Some(0));
+    }
+
+    /// `scope = "any"` is the explicit widening: it admits a resource owned
+    /// by someone else entirely, and only an operator writing that value
+    /// into `acl.toml` can turn it on — the default stays `"owned"`
+    /// (`PLAN.md` M5 §4.1 #3).
+    #[test]
+    fn scope_any_admits_a_foreign_owner() {
+        let dave = Principal::User("dave".into());
+        let mut widened = rule(
+            "user:dave",
+            AuthPath::Pin,
+            vec![ActionPattern::Exact(Action::SessionControl)],
+        );
+        widened.scope = Scope::Any;
+        let policy = Policy {
+            rules: vec![widened],
+        };
+        let someone_elses_session = opener_key(&Principal::User("alice".into()), AuthPath::Pin);
+        let verdict = policy.decide(
+            &dave,
+            AuthPath::Pin,
+            Action::SessionControl,
+            ResourceRef {
+                id: "sess-1",
+                owner: Some(&someone_elses_session),
+            },
+        );
+        assert_eq!(
+            verdict.decision,
+            Decision::Allow,
+            "scope=any must admit a resource owned by a different principal"
+        );
+        assert_eq!(verdict.rule, Some(0));
+    }
+
+    /// `opener_key` folds `auth_path` in, so a scope-owned rule that
+    /// matched a request over `AuthPath::Ca` must not treat that request as
+    /// the owner of a resource actually opened over `AuthPath::Pin`, even
+    /// when the principal string is identical — the same CA-leaf-spoofing
+    /// concern `session_loopback.rs`'s
+    /// `ca_leaf_asserting_the_opener_principal_is_still_denied_ownership`
+    /// pins end to end.
+    #[test]
+    fn scope_owned_does_not_let_a_different_auth_path_assert_the_same_principals_ownership() {
+        let laptop_over_ca = Principal::Device("laptop".into());
+        let mut ca_rule = rule(
+            "device:laptop",
+            AuthPath::Ca,
+            vec![ActionPattern::Exact(Action::SessionControl)],
+        );
+        ca_rule.auth_path = AuthPath::Ca;
+        let policy = Policy {
+            rules: vec![ca_rule],
+        };
+        // The resource's real owner authenticated over the pin, not the CA.
+        let real_owner_key = opener_key(&Principal::Device("laptop".into()), AuthPath::Pin);
+        let verdict = policy.decide(
+            &laptop_over_ca,
+            AuthPath::Ca,
+            Action::SessionControl,
+            ResourceRef {
+                id: "sess-1",
+                owner: Some(&real_owner_key),
+            },
+        );
+        assert_eq!(
+            verdict.decision,
+            Decision::Deny,
+            "a CA-authenticated request must not inherit a pinned owner's identity"
+        );
     }
 
     #[test]
@@ -545,12 +699,17 @@ mod tests {
     }
 
     /// Whether *some* rule in `policy` covers `(principal, auth_path,
-    /// action)`, independent of [`Policy::decide`]'s own matching logic.
+    /// action, resource)`, independent of [`Policy::decide`]'s own
+    /// matching logic — `resource`'s scope test (`PLAN.md` M5 Step 5)
+    /// included, spelled out again here the same direct way `principal`/
+    /// `auth_path` already were, rather than calling any of `decide`'s own
+    /// helpers.
     fn oracle_covers(
         policy: &Policy,
         principal: &Principal,
         auth_path: AuthPath,
         action: Action,
+        resource: ResourceRef<'_>,
     ) -> bool {
         let principal_str = principal.to_string();
         policy.rules.iter().any(|rule| {
@@ -560,6 +719,10 @@ mod tests {
                     .allow
                     .iter()
                     .any(|pattern| expand(pattern).contains(&action))
+                && match (rule.scope, resource.owner) {
+                    (Scope::Any, _) | (Scope::Owned, None) => true,
+                    (Scope::Owned, Some(owner)) => owner == opener_key(principal, auth_path),
+                }
         })
     }
 
@@ -570,14 +733,37 @@ mod tests {
         /// in particular, whenever the oracle finds no covering rule, the
         /// evaluator MUST deny. The always-deny trio is asserted to
         /// override any oracle coverage, since no rule can grant it.
+        ///
+        /// `owner_kind` (`PLAN.md` M5 Step 5) draws the resource into one
+        /// of the three shapes `decide`'s ④ actually distinguishes: no
+        /// owner at all, this exact requester as owner, or some other
+        /// principal as owner. The "other" owner is built from
+        /// `arb_principal_name`'s bare-name pool with no `auth_path:`
+        /// prefix folded in, so it can never accidentally collide with a
+        /// real `opener_key` output (always `"{auth_path:?}:{principal}"`,
+        /// which itself always contains a `device:`/`user:`/`fp:sha256:`
+        /// segment) — a genuinely foreign owner every time, not merely a
+        /// different string that happens not to match today's pool.
         #[test]
         fn decide_agrees_with_naive_coverage_oracle(
             policy in arb_policy(),
             principal in arb_principal(),
             auth_path in arb_auth_path(),
             action in arb_action(),
+            owner_kind in 0u8..3,
+            foreign_owner_name in arb_principal_name(),
         ) {
-            let verdict = policy.decide(&principal, auth_path, action, ResourceRef { id: "r" });
+            let foreign_owner = format!("{auth_path:?}:{foreign_owner_name}");
+            let owner: Option<String> = match owner_kind {
+                0 => None,
+                1 => Some(opener_key(&principal, auth_path)),
+                _ => Some(foreign_owner),
+            };
+            let resource = match owner.as_deref() {
+                Some(owner) => ResourceRef { id: "r", owner: Some(owner) },
+                None => ResourceRef::unowned("r"),
+            };
+            let verdict = policy.decide(&principal, auth_path, action, resource);
             // F4 (M5 Step 2 adversarial review): the literal P1-deferred
             // trio, spelled out again here rather than calling
             // `Action::is_always_denied()` — the very function `decide`
@@ -590,14 +776,15 @@ mod tests {
                 prop_assert_eq!(verdict.decision, Decision::Deny);
                 prop_assert_eq!(verdict.rule, None);
             } else {
-                let covered = oracle_covers(&policy, &principal, auth_path, action);
+                let covered = oracle_covers(&policy, &principal, auth_path, action, resource);
                 prop_assert_eq!(
                     verdict.is_allow(),
                     covered,
-                    "evaluator/oracle disagreement for {} over {:?} on {}",
+                    "evaluator/oracle disagreement for {} over {:?} on {} (owner {:?})",
                     principal,
                     auth_path,
-                    action
+                    action,
+                    resource.owner,
                 );
                 if !covered {
                     prop_assert_eq!(verdict.decision, Decision::Deny);
@@ -633,7 +820,7 @@ mod tests {
             let policy = Policy {
                 rules: vec![rule(&a.to_string(), AuthPath::Pin, vec![ActionPattern::Exact(action)])],
             };
-            let verdict = policy.decide(&b, AuthPath::Pin, action, ResourceRef { id: "r" });
+            let verdict = policy.decide(&b, AuthPath::Pin, action, ResourceRef::unowned("r"));
             prop_assert_eq!(verdict.decision, Decision::Deny);
         }
     }

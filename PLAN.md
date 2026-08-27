@@ -240,7 +240,8 @@ interim allow-all에서는 정보량이 0이지만, 정책이 켜지는 순간 1
 
 **`require_opener`의 운명.** 삭제하지 않는다 — **평가기 안으로 옮긴다.** `authorize_session_control`이 하던 "ACL → 소유권 → 단일 terminal 레코드"는 이제 `Policy::decide` 한 번으로 끝나고(rule index와 함께), `require_opener`는 broker에서 owner를 조회해 `ResourceRef`를 채우는 얇은 조회 함수로 축소된다. 조회가 애매하면(broker `NotFound` 이외의 오류) 지금처럼 **deny**다(`CLAUDE.md` fail-closed). `NotFound`는 지금처럼 존재 oracle을 만들지 않기 위해 통과시키고 후속 broker 호출이 `SESSION_NOT_FOUND`를 낸다 — 이 미묘한 규율은 `server/mod.rs:648`의 기존 주석이 정본이며 그대로 보존한다.
 
-**적용 범위의 경계.** PRD §6은 조회·읽기·종료를 교차 기기 ACL 범위로 **명시 허용**한다 — 따라서 `session.get`/`read`/`list`/`open`/`attach`는 `scope`의 대상이 아니고(그 결정은 M3가 이미 내렸다), `session.control`(write/resize/close)과 `forward.remote`(close)만 소유권을 본다. `tunnel.close`/`tunnel.list`의 "소유 peer이면 허용"(`docs/CLI.md` §2.5)이 드디어 host 쪽에서 강제되는 지점이 이 step이다.
+**적용 범위의 경계.** PRD §6은 조회·읽기·종료를 교차 기기 ACL 범위로 **명시 허용**한다 — 따라서 `session.get`/`read`/`list`/`open`/`attach`는 `scope`의 대상이 아니고(그 결정은 M3가 이미 내렸다), `session.control`(write/resize/close)과 `forward.remote`(close)만 소유권을 본다.
+  **(a)-추기 — 검증 라운드 P0 arbitration (2026-08-27).** 위 문장의 "(write/resize/close)"는 이 문단 첫 문장이 스스로 인용한 PRD §6의 "**종료** 교차 기기 허용"과 모순되는 내부 오류다. 확정: **`session.close`는 `Action::SessionControl`을 공유하되 `scope` 판정에서 면제된다** — PRD §6이 binding이고(CLAUDE.md), M3가 이미 그렇게 구현해 기존 테스트가 핀하고 있으며(close 비결합), 이 step의 (d) 불변식("M3 거동 불변")과도 그쪽만 정합이다. 죽은 기기의 세션을 다른 기기에서 정리하는 것이 PRD가 보호하는 핵심 시나리오다. 따라서 (c) 첫 항목의 `close`도 "거부"가 아니라 "허용(면제 핀)"으로 읽는다. 정책 어휘로 cross-close를 막을 수 없다는 사실은 운영자 대면 문서(§6 계열)에 명시하고, 필요해지면 새 ADR로 어휘를 추가한다. `tunnel.close`/`tunnel.list`의 "소유 peer이면 허용"(`docs/CLI.md` §2.5)이 드디어 host 쪽에서 강제되는 지점이 이 step이다.
   **데몬 쪽 `forward_id` 소유(conduit 축)는 건드리지 않는다.** `reverse::listen::ControlHub`의 `owner: ConduitId` 판정은 "target이 구별하지 못하는 두 로컬 CLI 중 누가 진짜 소유자인가"를 정하는 **로컬 머신 축**이고, ACL principal 축과 직교한다(`docs/design/protocol.md` §11-3의 `admin_close_forward` 문단이 이 직교성을 이미 명문화했다). 두 축을 합치려는 시도는 이 step의 비목표이며 §3에 재기록한다.
 
 **(b) crate/모듈/파일:**
@@ -435,7 +436,7 @@ interim allow-all에서는 정보량이 0이지만, 정책이 켜지는 순간 1
 - **균일 거부 문면의 최종 문안** (초안 `"peer is not allowed to perform this operation on this host"`) — Step 4. action·리소스·principal 어느 것도 담지 않는다는 성질만 불변이다. **확정 — main 세션 (2026-08-27): 초안 그대로.** 불변 성질을 충족하고, 짧으며, 기존 문면들과 어휘 연속성이 있다.
 - **`[audit].max_bytes` / `retain` / `queue_depth` 기본값** (초안 64 MiB / 5 / 1024) — Step 3. `max_bytes * (retain+1)`이 상시 디스크 예산이므로 두 값은 같이 정한다.
 - **정책 파일 상한** (rule 수·행당 패턴 수·문자열 길이) — Step 2. 운영자 파일이라 적대적이지는 않지만 상한 없는 파싱은 두지 않는다.
-- **`forward_id` 소유가 principal 기준인가 connection 기준인가** (초안: principal — `docs/CLI.md` §2.5의 "소유 **peer**"의 문자 그대로, 같은 principal의 다른 연결도 close 가능) — Step 5. 이 선택은 사용자 가시적이므로 §6.9/§6.14 문안 갱신을 동반한다.
+- **`forward_id` 소유가 principal 기준인가 connection 기준인가** (초안: principal — `docs/CLI.md` §2.5의 "소유 **peer**"의 문자 그대로, 같은 principal의 다른 연결도 close 가능) — Step 5. 이 선택은 사용자 가시적이므로 §6.9/§6.14 문안 갱신을 동반한다. **확정 — main 세션 (2026-08-27): 초안 그대로(principal 기준).** §2.5 "소유 peer"의 문자적 의미와 일치하고, 이 제품의 전제 자체가 연결 수명과 리소스 수명의 분리(resume, §10)라 conn_id는 소유 축으로 부적합하다. 다만 오늘의 remote forward는 소유 연결이 죽으면 `purge_connection`이 함께 철거하므로, principal 축의 실효 이익은 "재접속 후 close"가 아니라 **같은 principal의 동시 두 번째 연결**과 세션 소유권 어휘와의 통일성이다(검증 라운드 P2 지적 반영 — 코드 주석도 이 실효 이익으로 정정).
 - **`qsh acl check`의 `--owner` 표면을 M5에 넣는가** (초안: 넣는다 — `scope` 판정을 설명할 수 없으면 DoD 1의 "표 기반 증명"이 소유권 행을 커버하지 못한다) — Step 7.
 - **시작 진단이 최소 정책 예시에 실제 peer 이름을 채우는가** (초안: 채운다 — trust store의 pinned peer가 이미 로컬 정보이고, 붙여넣기 가능한 예시가 마이그레이션 마찰을 실제로 줄인다) — Step 6. 다만 진단은 stderr이고 stdout 순수성을 해치지 않는다.
 - **audit degraded 래치의 해제 조건** (초안: 다음 성공적 쓰기 — 주기적 재시도 없이 다음 결정 시도에서 자연히 재시도된다) — Step 3.

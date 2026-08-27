@@ -15,7 +15,7 @@ use std::net::SocketAddr;
 use qsh_proto::ErrorCode;
 use qsh_transport::{AuthPath, Principal};
 
-use crate::acl::{Action, Authorizer, Decision};
+use crate::acl::{Action, Authorizer, Decision, ResourceRef};
 use crate::audit::{AuditRecord, AuditSink};
 use crate::ops::OpError;
 
@@ -128,7 +128,12 @@ pub fn admit(
     };
 
     // ---- ACL choke point: decide + audit BEFORE any resource. ----
-    let verdict = authorizer.check(req.principal, req.auth_path, Action::HostReverse, &name);
+    let verdict = authorizer.check(
+        req.principal,
+        req.auth_path,
+        Action::HostReverse,
+        ResourceRef::unowned(&name),
+    );
     // A connection-level decision, not a reply to a control-stream
     // request — `AuditRecord::connection_level` records `request_id: "-"`
     // (mirroring `AuditRecord::handshake_rejected`'s convention) so it can
@@ -376,7 +381,13 @@ mod tests {
     /// `AllowAllPinned` ACL outcome for non-`Pin` peers.
     struct AllowEverything;
     impl Authorizer for AllowEverything {
-        fn check(&self, _: &Principal, _: AuthPath, _: Action, _: &str) -> crate::acl::Verdict {
+        fn check(
+            &self,
+            _: &Principal,
+            _: AuthPath,
+            _: Action,
+            _: ResourceRef<'_>,
+        ) -> crate::acl::Verdict {
             crate::acl::Verdict {
                 decision: Decision::Allow,
                 rule: None,

@@ -44,7 +44,7 @@ use thiserror::Error;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-use crate::acl::{Action, Authorizer, Decision};
+use crate::acl::{Action, Authorizer, Decision, ResourceRef, opener_key};
 use crate::audit::{AuditRecord, AuditSink};
 use crate::broker::{
     BrokerError, CloseReason, ConnectionId, ControlEvent, Cursor, FIRST_INPUT_STREAM,
@@ -311,6 +311,45 @@ pub enum ServerError {
     Setup(#[from] qsh_transport::SetupError),
 }
 
+/// One live remote-forward listener, everything [`Server::handle_rfwd_close`]
+/// and [`Server::purge_connection`] need about it (`PLAN.md` M5 Step 5 (a)
+/// restructured this from a `conn_id`-first nested map — see
+/// [`Server::remote_forwards`]'s own doc for why).
+struct RemoteForwardEntry {
+    /// The connection that opened this forward — [`Server::
+    /// purge_connection`]'s own axis, orthogonal to `owner` (a connection
+    /// dying tears down every forward *it* opened, regardless of who else
+    /// might share that principal).
+    conn_id: usize,
+    /// The opening principal's [`opener_key`] — the ACL ownership axis
+    /// [`Server::handle_rfwd_close`] checks. Principal-based, not
+    /// `conn_id`-based (`PLAN.md` M5 Step 5 §4.2, `docs/CLI.md` §2.5's
+    /// "소유 peer" wording taken literally) — but *not* because a forward
+    /// outlives its opening connection: it does not. [`Server::
+    /// purge_connection`] tears down every forward its `conn_id` (above)
+    /// opened the moment that connection dies, so "the same principal
+    /// reconnects after a resume" is not a scenario `RemoteForwardClose`
+    /// can ever actually reach (F7, M5 Step 5 adversarial review). The
+    /// operative benefit is the *concurrent* case instead: the same
+    /// principal holding a **second, still-live** connection — a fresh
+    /// `qsh` invocation, a second terminal, anything else authenticating as
+    /// the same device while the first connection is untouched — can close
+    /// a forward it opened on the first, which is exactly what
+    /// `remote_forward_close_allows_the_same_principal_from_a_different_connection`
+    /// (`crates/qsh-testkit/tests/tunnel_remote_loopback.rs`) drives and
+    /// proves. Keying on principal instead of `conn_id` also keeps this
+    /// axis the same vocabulary `session.control`'s ownership gate uses —
+    /// `opener_key` is shared, not reimplemented — so the win here is
+    /// consistency with that gate, not surviving a connection's death.
+    owner: String,
+    /// The accept loop's own task handle
+    /// ([`crate::tunnel::remote::serve_remote_forward`]); aborting it drops
+    /// the [`tokio::net::TcpListener`] it owns, which is the whole
+    /// teardown — nothing else to release, the same shape as
+    /// [`crate::tunnel::local::LocalForwardHandle`]'s `Drop`.
+    task: tokio::task::JoinHandle<()>,
+}
+
 /// The host: policy + audit + ticket registry + session backend. Shared
 /// across connections.
 pub struct Server {
@@ -319,21 +358,22 @@ pub struct Server {
     sessions: Arc<dyn SessionBackend>,
     device_name: String,
     tickets: Mutex<HashMap<[u8; TICKET_LEN], Ticket>>,
-    /// Live remote-forward listeners, keyed by the owning connection's
-    /// `conn_id` and then by `forward_id` — `PLAN.md` M4 Step 4's
-    /// connection-bound lifetime ("`RemoteForwardClose{forward_id}` 또는
-    /// 연결 종료 시 리스너를 닫는다"). The value is the accept loop's own
-    /// task handle ([`crate::tunnel::remote::serve_remote_forward`]);
-    /// aborting it drops the [`tokio::net::TcpListener`] it owns, which is
-    /// the whole teardown — nothing else to release, the same shape as
-    /// [`crate::tunnel::local::LocalForwardHandle`]'s `Drop`. Keying by
-    /// `conn_id` first is what makes [`Server::handle_rfwd_close`]'s
-    /// lookup a structural ownership check: a `forward_id` minted for one
-    /// connection is simply not found under another connection's map, with
-    /// no separate ACL re-check needed to enforce that (`docs/CLI.md`
-    /// §2.5's full owning-peer semantics for `tunnel.close` land in
-    /// `PLAN.md` M4 Step 5's `Ops::tunnel_close`).
-    remote_forwards: Mutex<HashMap<usize, HashMap<String, tokio::task::JoinHandle<()>>>>,
+    /// Live remote-forward listeners, keyed by `forward_id` — flat, not
+    /// nested under the owning connection's `conn_id`, since `PLAN.md` M5
+    /// Step 5 made forward ownership principal-based rather than
+    /// connection-based (`RemoteForwardEntry::owner`'s own doc): a
+    /// `conn_id`-first map could only ever express "this connection's own
+    /// forwards", which is too narrow an ownership axis once the same
+    /// principal reconnecting on a fresh connection must still be able to
+    /// close what it opened. [`Server::handle_rfwd_close`] looks a
+    /// `forward_id` up here, checks `Action::ForwardRemote` +
+    /// `RemoteForwardEntry::owner` through the ordinary `scope = "owned"`
+    /// choke point (`Server::authorize_owned`), and only then removes it;
+    /// [`Server::purge_connection`] instead filters by
+    /// `RemoteForwardEntry::conn_id`, its own, connection-bound axis
+    /// (`PLAN.md` M4 Step 4's "`RemoteForwardClose{forward_id}` 또는 연결
+    /// 종료 시 리스너를 닫는다").
+    remote_forwards: Mutex<HashMap<String, RemoteForwardEntry>>,
     /// Set once by [`Server::drain`] (SIGTERM, `docs/CLI.md` §6.12,
     /// ADR-0003). Checked at the top of `session.open`/`session.attach`,
     /// before any other gate — draining is a hard stop this host applies to
@@ -480,10 +520,10 @@ impl Server {
                     false,
                 ),
             )),
-            // `RemoteForwardClose` needs no connection — closing a listener
-            // is a lookup in `Server::remote_forwards` plus an abort, both
-            // conn-id-scoped — so it is handled inline here like every
-            // other control op.
+            // `RemoteForwardClose` needs no connection — it is an ACL
+            // choke point (`Server::authorize_owned`, `PLAN.md` M5 Step 5)
+            // over a `Server::remote_forwards` lookup plus an abort — so it
+            // is handled inline here like every other control op.
             Some(control_message::Body::RfwdClose(req)) => {
                 Some(self.handle_rfwd_close(ctx, request_id, req))
             }
@@ -512,9 +552,12 @@ impl Server {
     /// exactly like [`Server::authorize`], then answers yes/no — the caller
     /// resets the stream, which is non-distinguishing by construction.
     fn authorize_stream(&self, ctx: &ConnCtx, action: Action, resource: &str) -> bool {
-        let verdict = self
-            .authorizer
-            .check(&ctx.principal, ctx.auth_path, action, resource);
+        let verdict = self.authorizer.check(
+            &ctx.principal,
+            ctx.auth_path,
+            action,
+            ResourceRef::unowned(resource),
+        );
         // No request id: a stream is not a control-stream request, so this
         // is a connection-level record (`request_id: "-"`), same as
         // `reverse::admit`.
@@ -540,9 +583,12 @@ impl Server {
         action: Action,
         resource: &str,
     ) -> Result<(), Box<ControlMessage>> {
-        let verdict = self
-            .authorizer
-            .check(&ctx.principal, ctx.auth_path, action, resource);
+        let verdict = self.authorizer.check(
+            &ctx.principal,
+            ctx.auth_path,
+            action,
+            ResourceRef::unowned(resource),
+        );
         let recorded = self.audit.record(&AuditRecord::now(
             request_id,
             &ctx.principal,
@@ -562,61 +608,79 @@ impl Server {
         Ok(())
     }
 
-    /// `Action::SessionControl` on `id`, **then** [`Self::require_opener`] —
-    /// the combined gate `session.write`/`session.resize` call instead of
-    /// [`Self::authorize`], so the two decisions land as a single terminal
-    /// audit record rather than [`Self::authorize`]'s unconditional allow
-    /// record followed by a second, contradicting `require_opener` deny for
-    /// the same request (`PLAN.md` Step 3.5 PR② review: a foreign
-    /// principal's refused write must not also read as an `allow` in the
-    /// audit log — see `crates/qsh-testkit/tests/session_loopback.rs`'s
-    /// `session_control_binds_write_and_resize_to_the_opener`).
+    /// `Action::SessionControl` on `id`, with ownership folded into the
+    /// same decision as an ordinary `scope = "owned"` policy judgment
+    /// (`PLAN.md` M5 Step 5 (a), `docs/design/architecture.md` §6's ④):
+    /// [`Self::require_opener`] is now a thin broker lookup that fills
+    /// [`ResourceRef::owner`] for [`Self::authorize_owned`], not a second
+    /// gate run after the fact — so there is exactly one
+    /// [`Authorizer::check`] call and exactly one terminal audit record per
+    /// request, the same "single decision, single record" property the old
+    /// two-step version (`Self::authorize` + a separate `require_opener`
+    /// deny) had to work to preserve (`PLAN.md` Step 3.5 PR② review: a
+    /// foreign principal's refused write must not also read as an `allow`
+    /// in the audit log — see
+    /// `crates/qsh-testkit/tests/session_loopback.rs`'s
+    /// `session_control_binds_write_and_resize_to_the_opener`), now true by
+    /// construction instead of by careful sequencing.
     fn authorize_session_control(
         &self,
         ctx: &ConnCtx,
         request_id: u64,
         id: &SessionId,
     ) -> Result<(), Box<ControlMessage>> {
-        let verdict =
-            self.authorizer
-                .check(&ctx.principal, ctx.auth_path, Action::SessionControl, &id.0);
-        if !verdict.is_allow() {
-            // Already denying: a failure to record this deny doesn't
-            // change the outcome, only the diagnostic.
-            let _ = self.audit.record(&AuditRecord::now(
-                request_id,
-                &ctx.principal,
-                ctx.auth_path,
-                Action::SessionControl,
-                &id.0,
-                verdict.decision,
-                verdict.rule,
-                ctx.peer_addr,
-            ));
-            return Err(Box::new(Self::permission_denied(
-                request_id,
-                Action::SessionControl,
-            )));
-        }
-        self.require_opener(ctx, request_id, id)?;
+        // `require_opener` itself denies (and audits) on an ambiguous
+        // broker lookup failure — see its own doc. A `NotFound` id passes
+        // through as `owner: None`, same as any other unowned resource,
+        // so the ACL decision below still runs and the caller's own
+        // subsequent broker call is what eventually answers
+        // `SESSION_NOT_FOUND` — this function never invents that answer.
+        let owner = self.require_opener(ctx, request_id, id)?;
+        self.authorize_owned(
+            ctx,
+            request_id,
+            Action::SessionControl,
+            ResourceRef {
+                id: &id.0,
+                owner: owner.as_deref(),
+            },
+        )
+    }
+
+    /// [`Self::authorize`]'s owner-aware sibling (`PLAN.md` M5 Step 5): one
+    /// [`Authorizer::check`] call over a [`ResourceRef`] that already
+    /// carries `owner`, and exactly one terminal audit record either way.
+    /// Its two callers are [`Self::authorize_session_control`] (owner from
+    /// [`Self::require_opener`]'s broker lookup) and
+    /// [`Self::handle_rfwd_close`] (owner from `Server::remote_forwards`'s
+    /// own registration record) — both need a `ResourceRef` [`Self::
+    /// authorize`] cannot build, since that helper always passes
+    /// [`ResourceRef::unowned`].
+    fn authorize_owned(
+        &self,
+        ctx: &ConnCtx,
+        request_id: u64,
+        action: Action,
+        resource: ResourceRef<'_>,
+    ) -> Result<(), Box<ControlMessage>> {
+        let verdict = self
+            .authorizer
+            .check(&ctx.principal, ctx.auth_path, action, resource);
         let recorded = self.audit.record(&AuditRecord::now(
             request_id,
             &ctx.principal,
             ctx.auth_path,
-            Action::SessionControl,
-            &id.0,
-            Decision::Allow,
+            action,
+            resource.id,
+            verdict.decision,
             verdict.rule,
             ctx.peer_addr,
         ));
-        // Fail-closed: this is the terminal allow record for the combined
+        // Fail-closed: this is the terminal record for the combined
         // policy + ownership decision — an allow that failed to land in
         // the audit log flips to denied, same as `Self::authorize`.
-        if recorded.is_err() {
-            return Err(Box::new(Self::permission_denied(
-                request_id,
-                Action::SessionControl,
-            )));
+        if !verdict.is_allow() || recorded.is_err() {
+            return Err(Box::new(Self::permission_denied(request_id, action)));
         }
         Ok(())
     }
@@ -644,73 +708,81 @@ impl Server {
         )
     }
 
-    /// `session.control`'s ownership binding (audit A2 P0, `PLAN.md` Step
-    /// 3.5 PR②, PRD §6): `session.write`/`session.resize` are refused to
-    /// every principal but the one that opened the session. Runs **after**
-    /// [`Server::authorize`]'s ACL decision, so an ownership deny is a
-    /// second, independent gate — never a substitute for policy.
+    /// `session.control`'s ownership *lookup* (audit A2 P0, `PLAN.md` Step
+    /// 3.5 PR②, PRD §6, M5 Step 5 (a)): finds the session's recorded
+    /// opener, for [`Self::authorize_session_control`] to fold into the
+    /// `ResourceRef` it hands the ordinary `Authorizer::check` call — the
+    /// actual `scope = "owned"` comparison against it now lives in the
+    /// authorizer (`AllowAllPinned::check`/`Policy::decide`), not here.
+    /// Named `require_opener` still: `PLAN.md` M5 Step 5 (a) keeps the name
+    /// across this shrink from "the ownership gate itself" to "the thin
+    /// broker lookup that feeds it".
     ///
-    /// A session this host cannot find is left alone: existence is decided
-    /// by the caller's own subsequent broker call
+    /// A session this host cannot find is left alone (`Ok(None)`):
+    /// existence is decided by the caller's own subsequent broker call
     /// ([`SessionBackend::get`]/`take_lease`/`resize`), never invented here
     /// — inventing a denial for "no such session" would make this gate an
     /// oracle the ACL choke point deliberately is not (`session.write`/
     /// `resize` already answer `SESSION_NOT_FOUND` for an unknown id, same
-    /// as before this check existed).
+    /// as before this check existed). `owner: None` also happens to be
+    /// exactly the "no owner concept" shape every unowned resource uses
+    /// (`ResourceRef`'s own doc), so the ACL decision that follows treats a
+    /// not-yet-found session the same way it treats `exec.run` — never
+    /// filtered by scope — which is what lets this passthrough work without
+    /// a special case in the authorizer.
+    ///
+    /// Any *other* lookup failure (an out-of-process `SessionBackend`
+    /// timing out, say) is ambiguous, not "no such session", and
+    /// `CLAUDE.md`'s "fail closed on any ambiguous auth/ACL state" applies:
+    /// this function denies (and writes the sole audit record for that
+    /// denial itself — its caller never reaches its own `Authorizer::check`
+    /// call in this branch, so there is still exactly one terminal record)
+    /// rather than silently waving the request through.
     ///
     /// `session.get`/`read`/`close`/`list`, `session.open` and
-    /// `session.attach` are **not** gated here — PRD §6 keeps them
-    /// cross-device within ACL scope, and attach is already device-bound by
-    /// its resume credential (ADR-0007).
+    /// `session.attach` are **not** gated by ownership at all — PRD §6
+    /// keeps them cross-device within ACL scope, and attach is already
+    /// device-bound by its resume credential (ADR-0007) — so nothing calls
+    /// this outside [`Self::authorize_session_control`].
     ///
-    /// Compares [`opener_key`], not `ctx.principal` alone: `Principal` by
+    /// The returned owner is the session's recorded [`opener_key`] — a
+    /// `(principal, auth_path)` pair folded at `session.open` time (see
+    /// that handler's own call), not `ctx.principal` alone: `Principal` by
     /// itself cannot tell a pin from a CA leaf asserting the same name
     /// (`qsh-transport::tls::AuthPath`'s own doc), so a bare principal
-    /// match would let a CA-issued leaf assert a pinned opener's identity
-    /// the moment M5's policy admits any CA-authenticated peer here.
-    ///
-    /// Writes **only** the deny record (on refusal); [`Self::
-    /// authorize_session_control`], its sole caller, writes the terminal
-    /// allow. It never writes an allow of its own.
+    /// string would let a CA-issued leaf assert a pinned opener's identity
+    /// the moment the authorizer that compares it admits any
+    /// CA-authenticated peer for `session.control` at all.
     fn require_opener(
         &self,
         ctx: &ConnCtx,
         request_id: u64,
         id: &SessionId,
-    ) -> Result<(), Box<ControlMessage>> {
-        // `NotFound` alone is left alone — existence is decided by the
-        // caller's own subsequent broker call, per the doc above. Any other
-        // lookup failure (an out-of-process `SessionBackend` timing out,
-        // say) is ambiguous, not "no such session", and CLAUDE.md's "fail
-        // closed on any ambiguous auth/ACL state" applies: it denies rather
-        // than silently waving the request through.
-        let is_opener = match self.sessions.get(id) {
-            Ok(info) => info.opener == opener_key(&ctx.principal, ctx.auth_path),
-            Err(BrokerError::NotFound) => return Ok(()),
-            Err(_) => false,
-        };
-        if is_opener {
-            return Ok(());
+    ) -> Result<Option<String>, Box<ControlMessage>> {
+        match self.sessions.get(id) {
+            Ok(info) => Ok(Some(info.opener)),
+            // `NotFound` alone is left alone — existence is decided by the
+            // caller's own subsequent broker call, per the doc above.
+            Err(BrokerError::NotFound) => Ok(None),
+            // Ambiguous, not "no such session": fail closed. Not a
+            // policy-rule decision, so there is no rule index to carry.
+            Err(_) => {
+                let _ = self.audit.record(&AuditRecord::now(
+                    request_id,
+                    &ctx.principal,
+                    ctx.auth_path,
+                    Action::SessionControl,
+                    &id.0,
+                    Decision::Deny,
+                    None,
+                    ctx.peer_addr,
+                ));
+                Err(Box::new(Self::permission_denied(
+                    request_id,
+                    Action::SessionControl,
+                )))
+            }
         }
-        // Not a policy-rule decision — an ownership refusal, a separate
-        // gate from `Authorizer::check` (this function's own doc) — so
-        // there is no rule index to carry. Already denying: a failure to
-        // record this deny doesn't change the outcome, only the
-        // diagnostic.
-        let _ = self.audit.record(&AuditRecord::now(
-            request_id,
-            &ctx.principal,
-            ctx.auth_path,
-            Action::SessionControl,
-            &id.0,
-            Decision::Deny,
-            None,
-            ctx.peer_addr,
-        ));
-        Err(Box::new(Self::permission_denied(
-            request_id,
-            Action::SessionControl,
-        )))
     }
 
     fn handle_exec_start(&self, ctx: &ConnCtx, request_id: u64, req: &ExecStart) -> ControlMessage {
@@ -1148,13 +1220,34 @@ impl Server {
     }
 
     /// The non-parking half of `session.write`: ACL `session.control` on
-    /// the session id and the opener binding
-    /// ([`Server::authorize_session_control`], `PLAN.md` Step 3.5 PR②),
-    /// then take the writer lease. `TakeOutcome::Conflict` below can no
-    /// longer be produced by a *foreign* principal — every caller that
-    /// reaches this line is already the session's opener — so it is
-    /// unreachable through `session.write` now (architecture.md §3 rule
-    /// (b) predates this gate; see that doc's amendment note).
+    /// the session id and ownership
+    /// ([`Server::authorize_session_control`], `PLAN.md` Step 3.5 PR②/M5
+    /// Step 5), then take the writer lease with `no_steal: true` fixed
+    /// (below) regardless of what the ACL layer decided. Under the default
+    /// `scope = "owned"` (M3's P0, still what `AllowAllPinned` and every
+    /// `acl.toml` row without an explicit `scope = "any"` enforce), the
+    /// ownership check above already narrows every caller reaching this
+    /// line to the session's own opener, so `TakeOutcome::Conflict` can
+    /// never actually fire here — the lease's live holder is that same
+    /// opener too (architecture.md §3 rule (b)'s amendment note). An
+    /// explicit `scope = "any"` grant (M5 Step 5) reopens that path: a
+    /// foreign principal can now pass the ACL gate above. Whether it then
+    /// reaches `Conflict` here depends on the lease already being *live*
+    /// (F3, M5 Step 5 adversarial review): if the opener has already
+    /// written or attached first, the foreign principal's own write lands
+    /// on that live lease and `no_steal: true` — unconditional — refuses it
+    /// with `Conflict`, so `scope` widens ACL admission only, never the
+    /// writer-lease's own never-silently-steal-from-someone-else guarantee.
+    /// But a lease nobody has taken yet (fresh out of `session.open`,
+    /// `WriterLease::new()`) has no live holder to conflict with, so a
+    /// foreign principal that reaches this line *first* just takes it — and
+    /// it is the **opener's own subsequent write** that then meets
+    /// `Conflict` instead
+    /// (`session_write_scope_any_lets_a_foreign_first_writer_take_the_free_lease`,
+    /// `crates/qsh-testkit/tests/session_loopback.rs`). This residual
+    /// window is the documented trade-off, not a bug: `scope` only ever
+    /// decides who may *reach* the lease, never who wins a race for a free
+    /// one. The two gates are independent on purpose.
     ///
     /// Everything here is bounded — the session actor's loop never blocks
     /// on the child — so this side is safe to run inline on the control
@@ -1298,6 +1391,30 @@ impl Server {
                 }
             },
         };
+        // Deliberately the *unowned* path — `Self::authorize`, not
+        // `Self::authorize_session_control` — even though `close` shares
+        // `Action::SessionControl` with `write`/`resize`. This is an
+        // **exemption**, not a gap (F1, M5 Step 5 adversarial review,
+        // arbitrated): PRD §6's 세션 복구 section is explicit that a device
+        // without this session's resume credential can still act on it —
+        // "다른 장비에서는 `qsh sessions`에 보이더라도 attach는
+        // `SESSION_NOT_FOUND`이며, 조회·읽기·종료는 ACL 범위에서 가능하다" — and
+        // M3 already shipped `close` cross-device
+        // (`session_control_binding_does_not_reach_get_read_or_close`,
+        // `crates/qsh-testkit/tests/session_loopback.rs`). This step's own
+        // invariant is "no behavior change" to that: a `scope = "owned"`
+        // rule still narrows `write`/`resize` to the opener
+        // (`Self::authorize_session_control`, above) but never narrows
+        // `close`, on purpose. The scenario this serves: a laptop that
+        // opened a session goes dark (lid closed, battery dead, network
+        // partition) and a desktop sharing the same principal set —
+        // granted `session.control`, not necessarily the opener — needs to
+        // reap the orphaned child rather than wait out `resume_ttl`. No
+        // ACL vocabulary restricts *who* may close *whose* session today;
+        // narrowing that would need a new action (e.g. splitting
+        // `session.control` so `close` has its own scope-able name) decided
+        // by its own ADR, not a silent reinterpretation of this choke
+        // point.
         if let Err(denied) =
             self.authorize(ctx, request_id, Action::SessionControl, &req.session_id)
         {
@@ -1591,14 +1708,28 @@ impl Server {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .retain(|_, p| p.conn_id != conn_id);
-        if let Some(forwards) = self
-            .remote_forwards
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&conn_id)
+        // `conn_id`-scoped, not `owner`-scoped (`Server::remote_forwards`'s
+        // own doc): a dead connection tears down every forward *it*
+        // opened, regardless of whether the same principal still has a
+        // live connection elsewhere. Block-scoped (not a trailing
+        // `drop(forwards)`) so the `MutexGuard` — never `Send` — provably
+        // cannot straddle the `.await` below: rustc's drop-tracking
+        // sometimes can't see past a `for` loop that a `drop()` call ends a
+        // guard's liveness, and flags the whole future `!Send` regardless.
         {
-            for (_, task) in forwards {
-                task.abort();
+            let mut forwards = self
+                .remote_forwards
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let dying: Vec<String> = forwards
+                .iter()
+                .filter(|(_, entry)| entry.conn_id == conn_id)
+                .map(|(forward_id, _)| forward_id.clone())
+                .collect();
+            for forward_id in dying {
+                if let Some(entry) = forwards.remove(&forward_id) {
+                    entry.task.abort();
+                }
             }
         }
         self.sessions
@@ -2382,12 +2513,21 @@ impl Server {
             conn.clone(),
             forward_id.clone().into_bytes(),
         ));
+        // Recorded under this connection's authenticated `(principal,
+        // auth_path)`, not `ctx.conn_id` alone — the ACL ownership axis
+        // `Server::handle_rfwd_close` checks (`Server::remote_forwards`'s
+        // own doc, `PLAN.md` M5 Step 5 (a)).
         self.remote_forwards
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .entry(ctx.conn_id)
-            .or_default()
-            .insert(forward_id.clone(), task);
+            .insert(
+                forward_id.clone(),
+                RemoteForwardEntry {
+                    conn_id: ctx.conn_id,
+                    owner: opener_key(&ctx.principal, ctx.auth_path),
+                    task,
+                },
+            );
 
         // `bind_host` is peer-supplied text on its way to a log line, so
         // it is sanitized (`authorize_and_bind_remote_forward`'s step (2)
@@ -2412,31 +2552,62 @@ impl Server {
         )
     }
 
-    /// `RemoteForwardClose`: abort and drop this connection's own
-    /// `forward_id` (`Server::remote_forwards`'s own doc explains why the
-    /// `conn_id`-scoped lookup already is the ownership check). Unknown to
-    /// this connection — never opened, already closed, or opened by a
-    /// different one — draws `InvalidArgument` rather than silently
-    /// succeeding, so a caller does not mistake "nothing happened" for
-    /// "closed". `docs/CLI.md` §2.5's full owning-peer semantics for
-    /// `tunnel.close` (as an `Ops` surface) are `PLAN.md` M4 Step 5 scope;
-    /// this is the wire-level primitive that step builds on.
+    /// `RemoteForwardClose`: the `Action::ForwardRemote` choke point
+    /// (`PLAN.md` M5 Step 5 (a)) over this `forward_id`'s registered
+    /// owner, then — only on a pass — abort and drop it.
+    ///
+    /// In order:
+    ///
+    /// 1. **Shape** — before this peer-supplied string is used to look
+    ///    anything up, tear anything down, reach an ACL decision, or reach
+    ///    a log line (`qsh_proto::wire::valid_forward_id`, the same "check
+    ///    shape before it becomes a resource or an audit field" discipline
+    ///    `valid_host_name` states and `valid_session_id` follows).
+    /// 2. **Owner lookup** — a read-only peek at `Server::remote_forwards`
+    ///    for this `forward_id`'s recorded owner, `None` if this host has
+    ///    no such forward at all (already closed, never opened, or a
+    ///    peer-supplied id that never existed). This step decides nothing
+    ///    by itself and changes no wire-visible behavior on its own — it
+    ///    only fills [`ResourceRef::owner`] for step 3, so a `DenyAll`
+    ///    host still answers `PERMISSION_DENIED` for an unknown
+    ///    `forward_id` exactly as it would for a real one (the choke point
+    ///    fires **before** the existence question is ever answered on the
+    ///    wire — no "which failure mode" oracle).
+    /// 3. **The choke point proper** — [`Self::authorize_owned`],
+    ///    `Action::ForwardRemote` on `forward_id` with the owner from step
+    ///    2. `owner: None` (no such forward) is never filtered by scope
+    ///    (`ResourceRef`'s own doc), so this step's own verdict depends
+    ///    only on the ordinary policy match for that case — never a
+    ///    manufactured allow or deny. A different principal than the one
+    ///    that opened it is refused here under `scope = "owned"`,
+    ///    byte-identically to any other `PERMISSION_DENIED`
+    ///    (`crate::acl::PERMISSION_DENIED_MESSAGE`'s own doc) — but the
+    ///    *same* principal reconnected on a different `conn_id` is still
+    ///    the forward's owner (`RemoteForwardEntry::owner`'s own doc) and
+    ///    passes.
+    /// 4. **Remove** — only reachable past a pass at step 3. `None` here
+    ///    (nothing to remove) is `InvalidArgument`, not a second
+    ///    `PermissionDenied`: by this point the request already cleared
+    ///    the ACL choke point (owner was `None`, so `scope` admitted it
+    ///    unconditionally), so "no such forward_id" is an ordinary bad
+    ///    request, the same shape `session.write`/`resize` already give an
+    ///    unknown `session_id` past their own ownership gate.
+    ///
+    /// `docs/CLI.md` §2.5's full owning-peer semantics for `tunnel.close`
+    /// (as an `Ops` surface) are `PLAN.md` M4 Step 5 scope; this is the
+    /// wire-level primitive that step builds on.
     fn handle_rfwd_close(
         &self,
         ctx: &ConnCtx,
         request_id: u64,
         req: &wire::RemoteForwardClose,
     ) -> ControlMessage {
-        // Shape first, before this peer-supplied string is used to look
-        // anything up, tear anything down, or reach a log line
-        // (`qsh_proto::wire::valid_forward_id`, the same "check shape
-        // before it becomes a resource or an audit field" discipline
-        // `valid_host_name` states and `valid_session_id` follows). Every
-        // id this map can hold is a host-minted ULID, which satisfies the
-        // predicate by construction, so a malformed one could only ever
-        // have missed — but it must miss *without* being touched. Past
-        // this point the id is `[A-Za-z0-9_-]{1,64}`, strictly stronger
-        // than sanitizing, so the success line below logs it as it is.
+        // (1) Shape. Every id this map can hold is a host-minted ULID,
+        // which satisfies the predicate by construction, so a malformed
+        // one could only ever have missed — but it must miss *without*
+        // being touched. Past this point the id is `[A-Za-z0-9_-]{1,64}`,
+        // strictly stronger than sanitizing, so the success line below
+        // logs it as it is.
         if !wire::valid_forward_id(&req.forward_id) {
             tracing::warn!(
                 principal = %ctx.principal,
@@ -2445,15 +2616,39 @@ impl Server {
             );
             return invalid_argument(request_id, "malformed forward_id");
         }
+
+        // (2) Owner lookup — decides nothing, only fills `ResourceRef`.
+        let owner = self
+            .remote_forwards
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&req.forward_id)
+            .map(|entry| entry.owner.clone());
+
+        // (3) THE gate.
+        if let Err(reply) = self.authorize_owned(
+            ctx,
+            request_id,
+            Action::ForwardRemote,
+            ResourceRef {
+                id: &req.forward_id,
+                owner: owner.as_deref(),
+            },
+        ) {
+            return *reply;
+        }
+
+        // (4) Allowed: remove and abort, or (an unknown id, which always
+        // has `owner: None` and so always cleared step 3) answer that
+        // there was nothing to close.
         let removed = self
             .remote_forwards
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .get_mut(&ctx.conn_id)
-            .and_then(|forwards| forwards.remove(&req.forward_id));
+            .remove(&req.forward_id);
         match removed {
-            Some(task) => {
-                task.abort();
+            Some(entry) => {
+                entry.task.abort();
                 tracing::info!(
                     principal = %ctx.principal,
                     forward_id = req.forward_id,
@@ -2466,7 +2661,7 @@ impl Server {
                     control_message::Body::Response(wire::Response { body: None }),
                 )
             }
-            None => invalid_argument(request_id, "no such forward_id on this connection"),
+            None => invalid_argument(request_id, "no such forward_id"),
         }
     }
 
@@ -2776,22 +2971,6 @@ fn broker_error(request_id: u64, err: BrokerError) -> ControlMessage {
         request_id,
         wire::Error::new(code, err.to_string(), retryable),
     )
-}
-
-/// The string [`SessionBackend::open`]'s `opener` records, and
-/// [`Server::require_opener`] later compares against: the authenticated
-/// `(principal, auth_path)` pair, not `principal` alone (`PLAN.md` Step 3.5
-/// PR②'s ownership binding, PRD §6). `Principal`'s `Display` cannot be
-/// trusted on its own — a CA-issued leaf may legitimately assert the same
-/// `qsh://device/…` name a trust-store pin does (`qsh-transport::tls::
-/// AuthPath`'s own doc comment) — so folding `auth_path` into the key is
-/// what keeps a pinned opener's identity from being re-assertable by any
-/// CA-chained leaf that happens to share its principal. `SessionInfo.opener`
-/// stays a plain `String` (never a `qsh_transport` type) so the
-/// `SessionBackend` seam can still cross a process boundary (broker/mod.rs
-/// `SessionBackend` doc).
-fn opener_key(principal: &Principal, auth_path: AuthPath) -> String {
-    format!("{auth_path:?}:{principal}")
 }
 
 /// Narrow the wire's `uint32` window size to the broker's `u16`. `0` means
@@ -6374,8 +6553,12 @@ mod tests {
     }
 
     /// `RemoteForwardClose`, unlike `RemoteForwardOpen`, needs no
-    /// connection — it is a lookup in `Server::remote_forwards` plus an
-    /// abort — so it is handled by `dispatch` itself, end to end.
+    /// connection — it is an ACL choke point over a `Server::
+    /// remote_forwards` lookup plus an abort — so it is handled by
+    /// `dispatch` itself, end to end. An unknown `forward_id` has
+    /// `owner: None`, so under `AllowAllPinned` (this test's `allow_rig`)
+    /// the choke point admits it unconditionally and the refusal below is
+    /// step 4's ordinary "nothing to remove", not a `PermissionDenied`.
     #[tokio::test]
     async fn dispatch_rfwd_close_unknown_forward_is_invalid_argument() {
         let rig = allow_rig();
@@ -6403,14 +6586,17 @@ mod tests {
         let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
 
         let req = rfwd_open("127.0.0.1", 0, "127.0.0.1", 9);
-        let _reply = rig.server.handle_rfwd_open(&ctx, &host_conn, 1, &req).await;
+        let reply = rig.server.handle_rfwd_open(&ctx, &host_conn, 1, &req).await;
+        let response::Body::RfwdOpened(opened) = response_body(&reply) else {
+            panic!("expected RfwdOpened, got {reply:?}");
+        };
 
         assert!(
             rig.server
                 .remote_forwards
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .contains_key(&ctx.conn_id),
+                .contains_key(&opened.forward_id),
             "the forward must be registered before purge"
         );
 
@@ -6421,7 +6607,7 @@ mod tests {
                 .remote_forwards
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .contains_key(&ctx.conn_id),
+                .contains_key(&opened.forward_id),
             "purge_connection must remove every remote forward this connection opened"
         );
 

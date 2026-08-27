@@ -39,11 +39,11 @@ use qsh_core::tunnel::{LocalForwardHandle, RemoteForwardAcceptor};
 use qsh_proto::wire::{
     self, ConnectResult, ForwardDirection, ForwardSpec, PRIORITY_TUNNEL, StreamHeader, StreamKind,
 };
-use qsh_transport::{Connection, FramedRecv, FramedSend, FramedStream};
+use qsh_transport::{Connection, FramedRecv, FramedSend, FramedStream, StaticTrust};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
 
-use crate::loopback::LoopbackHarness;
+use crate::loopback::{LoopbackHarness, TestIdentity};
 
 /// A TCP echo server on `127.0.0.1:0` — the tunnel's destination.
 ///
@@ -274,6 +274,23 @@ impl TunnelHarness {
     /// `forward.local` denial (`docs/design/protocol.md` §7).
     pub async fn start_with(authorizer: Arc<dyn Authorizer>) -> Self {
         Self::start_inner(LoopbackHarness::start_with(authorizer).await).await
+    }
+
+    /// Start with a custom policy, a caller-provided client identity and a
+    /// caller-provided host trust store — the tunnel-flavored twin of
+    /// [`LoopbackHarness::start_custom`]. For a test that needs a *second*,
+    /// distinct principal pinned on the same host (`PLAN.md` M5 Step 5's
+    /// `forward.remote.close` ownership tests: one identity opens the `-R`
+    /// forward via [`Self::remote_forward`], another — pinned here too —
+    /// dials separately to prove it cannot close a forward it does not
+    /// own).
+    pub async fn start_custom(
+        authorizer: Arc<dyn Authorizer>,
+        client: TestIdentity,
+        server_trust: StaticTrust,
+    ) -> Self {
+        Self::start_inner(LoopbackHarness::start_custom(authorizer, client, server_trust).await)
+            .await
     }
 
     /// Start with the interim allow-all-pinned policy, reachable only

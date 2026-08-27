@@ -15,7 +15,9 @@
 
 use std::sync::Arc;
 
-use qsh_core::acl::{Action, AllowAllPinned, DenyAll, PERMISSION_DENIED_MESSAGE};
+use qsh_core::acl::{
+    Action, ActionPattern, AllowAllPinned, DenyAll, PERMISSION_DENIED_MESSAGE, Policy, Rule, Scope,
+};
 use qsh_core::client::{ClientError, Session};
 use qsh_proto::ErrorCode;
 use qsh_proto::wire::{self, StreamHeader, session_read_event};
@@ -603,21 +605,33 @@ async fn session_control_binds_write_and_resize_to_the_opener() {
 }
 
 /// Not a real posture — `AllowAllPinned` denies every CA-authenticated
-/// peer for good (`acl/mod.rs` doc) — but exactly what `require_opener`'s
-/// own doc says the ownership binding must survive: a future M5 policy
-/// that admits a CA-authenticated peer for `session.control` too.
+/// peer for good (`acl/mod.rs` doc) — but exactly what the ownership
+/// binding must survive: a future M5 policy that admits a CA-authenticated
+/// peer for `session.control` too. Since M5 Step 5, ownership is no longer
+/// `require_opener`'s own business — it shrank to a thin broker lookup
+/// that fills `ResourceRef::owner` — so this double has to do its own
+/// `scope="owned"` comparison, the same formula `AllowAllPinned` and
+/// `Policy::decide` use, to still prove the point.
 struct AllowAllAnyAuthPath;
 
 impl qsh_core::acl::Authorizer for AllowAllAnyAuthPath {
     fn check(
         &self,
-        _principal: &Principal,
-        _auth_path: qsh_transport::AuthPath,
+        principal: &Principal,
+        auth_path: qsh_transport::AuthPath,
         _action: Action,
-        _resource: &str,
+        resource: qsh_core::acl::ResourceRef<'_>,
     ) -> qsh_core::acl::Verdict {
+        let owned = match resource.owner {
+            Some(owner) => owner == qsh_core::acl::opener_key(principal, auth_path),
+            None => true,
+        };
         qsh_core::acl::Verdict {
-            decision: qsh_core::acl::Decision::Allow,
+            decision: if owned {
+                qsh_core::acl::Decision::Allow
+            } else {
+                qsh_core::acl::Decision::Deny
+            },
             rule: None,
         }
     }
@@ -692,6 +706,118 @@ async fn ca_leaf_asserting_the_opener_principal_is_still_denied_ownership() {
     h.shutdown().await;
 }
 
+/// `scope = "any"` (`PLAN.md` M5 §4.1 #3) is the explicit escape hatch from
+/// the `scope = "owned"` default the two tests above pin: a real `Policy`
+/// (not a test double, not `AllowAllPinned`'s hardcoded posture) can grant
+/// a non-owner `session.control` over someone else's session. This is
+/// `Policy::decide`'s own ④ scope judgment (`acl/policy.rs`), evaluated
+/// live since `PLAN.md` M5 Step 5.
+///
+/// **`resize`, not `write`, is this test's clean witness.** `session.write`
+/// carries a *second*, ACL-independent gate — the writer lease, taken with
+/// `no_steal: true` fixed (`Server::prepare_session_write`,
+/// `docs/design/architecture.md` §3's "Writer lease" (b)). A brand-new
+/// session's lease starts free (`WriterLease::new()` — nothing seeds it at
+/// `session.open`, only an actual attach/write ever takes it), and
+/// `no_steal` on a *free* lease is a plain acquire (`lease.rs`'s own
+/// `no_steal_conflicts_with_a_live_holder_of_another_principal` test names
+/// the boundary condition precisely: "of another principal" — no holder at
+/// all does not conflict). So this test has the owner write first,
+/// deliberately, to seed the lease before desktop ever touches it — only
+/// then does desktop's own `write` attempt land on a *live* foreign-held
+/// lease and demonstrate the guarantee. `session.resize` touches no lease at
+/// all (`Server::handle_session_resize`), so it needs no such setup and is
+/// the op that proves the ACL widening in isolation.
+#[tokio::test(flavor = "multi_thread")]
+async fn session_control_scope_any_widens_to_a_non_owner_when_explicitly_granted() {
+    let owner = make_identity();
+    let other = make_identity();
+    let server_trust = StaticTrust::empty()
+        .with_pin(owner.fingerprint, Principal::Device("laptop".into()))
+        .with_pin(other.fingerprint, Principal::Device("desktop".into()));
+    let policy = Policy {
+        rules: vec![
+            Rule {
+                principal: "device:laptop".to_string(),
+                auth_path: qsh_transport::AuthPath::Pin,
+                allow: vec![
+                    ActionPattern::Exact(Action::SessionOpen),
+                    ActionPattern::Exact(Action::SessionList),
+                    ActionPattern::Exact(Action::SessionAttach),
+                    ActionPattern::Exact(Action::SessionControl),
+                ],
+                scope: Scope::Owned,
+            },
+            Rule {
+                principal: "device:desktop".to_string(),
+                auth_path: qsh_transport::AuthPath::Pin,
+                allow: vec![ActionPattern::Exact(Action::SessionControl)],
+                scope: Scope::Any,
+            },
+        ],
+    };
+    let h = LoopbackHarness::start_custom(Arc::new(policy), owner, server_trust).await;
+
+    let mut s = h.session().await;
+    let opened = s.session_open(open_req(&["sh"])).await.unwrap();
+    let id = opened.session_id.clone();
+    let _pipe = h.pipes().take().expect("pipe handle for the session");
+
+    // The owner writes first, on a still-free lease — a plain acquire that
+    // makes "laptop" the live holder. Without this, desktop's own write
+    // below would just be the lease's first-ever claimant and succeed
+    // trivially, proving nothing about the no_steal guarantee.
+    assert_eq!(s.session_write(&id, b"y".to_vec()).await.unwrap(), 1);
+
+    let mut desktop = other_device(&h, &other).await;
+
+    // Explicit `scope = "any"` widens `session.control` past the opener —
+    // `resize` touches no writer lease, so it now succeeds outright instead
+    // of `PERMISSION_DENIED` (contrast `session_control_binds_write_and_
+    // resize_to_the_opener`'s `scope = "owned"` default, above).
+    let audit_before_resize = h.audit().records().len();
+    assert_eq!(desktop.session_resize(&id, 80, 24).await.unwrap(), (80, 24));
+
+    // F8 (M5 Step 5 adversarial review, PLAN.md DoD): the widened op's own
+    // audit record names the *rule* that admitted it, not just "an allow
+    // happened somewhere" — `Some(1)` is this policy's `desktop`/
+    // `scope = "any"` row (index 1, above), the concrete rule a reader of
+    // the audit log would need to confirm this was the deliberate widening
+    // and not some other rule accidentally matching.
+    let resize_rec = &h.audit().records()[audit_before_resize];
+    assert_eq!(resize_rec.principal, "device:desktop");
+    assert_eq!(resize_rec.action, Action::SessionControl.as_str());
+    assert_eq!(resize_rec.decision, "allow");
+    assert_eq!(resize_rec.rule, Some(1), "{resize_rec:?}");
+
+    // `write` also clears the ACL gate now — but the owner's live writer
+    // lease still refuses to hand itself to a different principal
+    // (`no_steal: true` fixed, independent of ACL scope): `SESSION_CONFLICT`,
+    // not `PERMISSION_DENIED` and not a successful `bytes_written`.
+    let err = desktop
+        .session_write(&id, b"x".to_vec())
+        .await
+        .expect_err("the writer lease must still refuse a foreign principal");
+    match err {
+        ClientError::Remote { code, .. } => {
+            assert_eq!(
+                code,
+                ErrorCode::SessionConflict,
+                "scope=\"any\" widens ACL admission, not the writer lease's own guarantee"
+            );
+        }
+        other => panic!("expected remote SESSION_CONFLICT, got {other:?}"),
+    }
+
+    // The owner's own write is still unaffected — re-taking the lease it
+    // already holds, on the same connection, is a no-op.
+    assert_eq!(s.session_write(&id, b"z".to_vec()).await.unwrap(), 1);
+
+    desktop.close();
+    s.close();
+    h.shutdown().await;
+}
+
 /// PRD §6's boundary, pinned so a future change cannot silently widen the
 /// ownership binding: unlike `write`/`resize` above, `session.get`/`read`/
 /// `close` stay cross-device, decided by ACL alone — a non-owner succeeds
@@ -734,6 +860,205 @@ async fn session_control_binding_does_not_reach_get_read_or_close() {
         .session_close(&id, None)
         .await
         .expect("session.close stays cross-device (PRD §6)");
+
+    desktop.close();
+    s.close();
+    h.shutdown().await;
+}
+
+/// F1 arbitration (M5 Step 5 adversarial review, PRD §6, `PLAN.md` M5 Step
+/// 5 (a)): `session.close` shares `Action::SessionControl` with
+/// `write`/`resize`, but is **deliberately exempt** from `scope` —
+/// PRD §6's "조회·읽기·종료는 ACL 범위에서 가능하다" requires cross-device close so
+/// a dead device's sessions can still be reaped from another one. Under a
+/// **real `Policy`** (not `AllowAllPinned`'s hardcoded stand-in) with an
+/// explicit `scope = "owned"` rule for the non-owner: `write`/`resize` are
+/// refused with the uniform `PERMISSION_DENIED` and audited as
+/// `session.control` denies (same as
+/// `session_control_binds_write_and_resize_to_the_opener`, above, just
+/// under a live policy engine this time), while `close` is allowed,
+/// audited as an allow, and actually tears the session down.
+///
+/// This is also the only place `Policy::decide`'s `(Scope::Owned,
+/// Some(owner))` arm (`acl/policy.rs`) is exercised end to end outside
+/// `AllowAllPinned`'s duplicate hardcoded formula (F4, M5 Step 5
+/// adversarial review): flip that arm to fail-open and the `write`/
+/// `resize` assertions below start failing, which is this test's
+/// mutation-kill surface.
+#[tokio::test(flavor = "multi_thread")]
+async fn session_close_is_exempt_from_scope_owned_while_write_and_resize_are_not() {
+    let owner = make_identity();
+    let other = make_identity();
+    let server_trust = StaticTrust::empty()
+        .with_pin(owner.fingerprint, Principal::Device("laptop".into()))
+        .with_pin(other.fingerprint, Principal::Device("desktop".into()));
+    let policy = Policy {
+        rules: vec![
+            Rule {
+                principal: "device:laptop".to_string(),
+                auth_path: qsh_transport::AuthPath::Pin,
+                allow: vec![
+                    ActionPattern::Exact(Action::SessionOpen),
+                    ActionPattern::Exact(Action::SessionList),
+                    ActionPattern::Exact(Action::SessionAttach),
+                    ActionPattern::Exact(Action::SessionControl),
+                ],
+                scope: Scope::Owned,
+            },
+            // `desktop` gets `session.control` under the *default*
+            // `scope = "owned"` — the same posture `acl.toml` ships with
+            // unless a row explicitly says `scope = "any"`
+            // (`docs/design/architecture.md` §6).
+            Rule {
+                principal: "device:desktop".to_string(),
+                auth_path: qsh_transport::AuthPath::Pin,
+                allow: vec![ActionPattern::Exact(Action::SessionControl)],
+                scope: Scope::Owned,
+            },
+        ],
+    };
+    let h = LoopbackHarness::start_custom(Arc::new(policy), owner, server_trust).await;
+
+    let mut s = h.session().await;
+    let opened = s.session_open(open_req(&["sh"])).await.unwrap();
+    let id = opened.session_id.clone();
+    let _pipe = h.pipes().take().expect("pipe handle for the session");
+
+    let mut desktop = other_device(&h, &other).await;
+
+    // write/resize: gated exactly like `session_control_binds_write_and_
+    // resize_to_the_opener`, but under a real `Policy` instead of
+    // `AllowAllPinned`.
+    for (name, result) in [
+        (
+            "write",
+            desktop.session_write(&id, b"x".to_vec()).await.map(|_| ()),
+        ),
+        (
+            "resize",
+            desktop.session_resize(&id, 80, 24).await.map(|_| ()),
+        ),
+    ] {
+        match result {
+            Err(ClientError::Remote { code, message, .. }) => {
+                assert_eq!(code, ErrorCode::PermissionDenied, "{name}");
+                assert_eq!(message, PERMISSION_DENIED_MESSAGE, "{name}");
+            }
+            other => panic!("{name}: expected PERMISSION_DENIED, got {other:?}"),
+        }
+    }
+
+    // close: NOT gated — PRD §6's cross-device exemption, alive under a
+    // real policy engine, not just `AllowAllPinned`'s hardcoded posture.
+    desktop
+        .session_close(&id, None)
+        .await
+        .expect("session.close is exempt from scope=\"owned\" (PRD §6)");
+
+    // It actually happened: the owner can no longer find the session.
+    let err = s.session_get(&id).await.unwrap_err();
+    assert_eq!(remote_code(err), ErrorCode::SessionNotFound);
+
+    let desktop_recs: Vec<_> = h
+        .audit()
+        .records()
+        .into_iter()
+        .filter(|r| r.principal == "device:desktop")
+        .collect();
+    assert_eq!(desktop_recs.len(), 3, "{desktop_recs:?}");
+    assert!(
+        desktop_recs
+            .iter()
+            .all(|r| r.action == Action::SessionControl.as_str() && r.resource == id)
+    );
+    assert_eq!(
+        desktop_recs
+            .iter()
+            .map(|r| r.decision.as_str())
+            .collect::<Vec<_>>(),
+        vec!["deny", "deny", "allow"],
+        "write, resize deny; close allow — {desktop_recs:?}"
+    );
+
+    desktop.close();
+    s.close();
+    h.shutdown().await;
+}
+
+/// F3 arbitration (M5 Step 5 adversarial review, `docs/design/
+/// architecture.md` §3's "Writer lease" (b)): the `no_steal: true` backstop
+/// only refuses a *live* lease held by someone else — a lease starts free
+/// at `session.open`, and `no_steal` on a free lease is a plain acquire
+/// (`lease.rs`'s own `no_steal_conflicts_with_a_live_holder_of_another_
+/// principal` test names the boundary precisely: "of another principal",
+/// no holder at all does not conflict). Contrast `session_control_scope_
+/// any_widens_to_a_non_owner_when_explicitly_granted`, above, where the
+/// owner deliberately writes *first* to seed the lease before desktop ever
+/// touches it — here nobody writes first, so under `scope = "any"` a
+/// foreign principal that reaches the ACL gate before the owner ever does
+/// just takes the free lease, and it is the **owner's own subsequent
+/// write** that then hits `SESSION_CONFLICT`. This is the documented
+/// residual window the backstop leaves open, not a bug: `scope` only
+/// widens who can *reach* the lease, never who wins a race for a free one.
+#[tokio::test(flavor = "multi_thread")]
+async fn session_write_scope_any_lets_a_foreign_first_writer_take_the_free_lease() {
+    let owner = make_identity();
+    let other = make_identity();
+    let server_trust = StaticTrust::empty()
+        .with_pin(owner.fingerprint, Principal::Device("laptop".into()))
+        .with_pin(other.fingerprint, Principal::Device("desktop".into()));
+    let policy = Policy {
+        rules: vec![
+            Rule {
+                principal: "device:laptop".to_string(),
+                auth_path: qsh_transport::AuthPath::Pin,
+                allow: vec![
+                    ActionPattern::Exact(Action::SessionOpen),
+                    ActionPattern::Exact(Action::SessionList),
+                    ActionPattern::Exact(Action::SessionAttach),
+                    ActionPattern::Exact(Action::SessionControl),
+                ],
+                scope: Scope::Owned,
+            },
+            Rule {
+                principal: "device:desktop".to_string(),
+                auth_path: qsh_transport::AuthPath::Pin,
+                allow: vec![ActionPattern::Exact(Action::SessionControl)],
+                scope: Scope::Any,
+            },
+        ],
+    };
+    let h = LoopbackHarness::start_custom(Arc::new(policy), owner, server_trust).await;
+
+    let mut s = h.session().await;
+    let opened = s.session_open(open_req(&["sh"])).await.unwrap();
+    let id = opened.session_id.clone();
+    let _pipe = h.pipes().take().expect("pipe handle for the session");
+
+    // Nobody has written yet — the lease is still free. `desktop` writes
+    // first and just takes it: `scope = "any"` clears the ACL gate, and a
+    // free lease has no live holder of *another* principal to conflict
+    // with.
+    let mut desktop = other_device(&h, &other).await;
+    assert_eq!(desktop.session_write(&id, b"x".to_vec()).await.unwrap(), 1);
+
+    // The owner's own write now lands on a live lease a *different*
+    // principal holds — the backstop bites here, on the owner, not on
+    // desktop.
+    let err = s
+        .session_write(&id, b"y".to_vec())
+        .await
+        .expect_err("the owner must not silently steal desktop's live lease either");
+    match err {
+        ClientError::Remote { code, .. } => {
+            assert_eq!(
+                code,
+                ErrorCode::SessionConflict,
+                "the free-lease race, not a policy denial — the owner clears the ACL gate fine"
+            );
+        }
+        other => panic!("expected remote SESSION_CONFLICT, got {other:?}"),
+    }
 
     desktop.close();
     s.close();

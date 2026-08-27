@@ -143,16 +143,17 @@ pub struct SessionInfo {
     pub created_at: String,
     /// Highest cumulative output offset so far.
     pub last_sequence: u64,
-    /// The identity that opened this session — `server::opener_key`'s
+    /// The identity that opened this session — `crate::acl::opener_key`'s
     /// output (`session.open`'s authenticated `(principal, auth_path)`, not
     /// `ctx.principal.to_string()` alone: see that function's doc for why).
     /// Never surfaced in `session.get`/`list` JSON (`session_info_to_wire`
     /// does not map it) — internal to the `session.control` ownership check
-    /// (`PLAN.md` Step 3.5 PR②, PRD §6). `Broker::open`/`open_with` (as
-    /// opposed to `open_as`, which is what `SessionBackend::open` — the
-    /// only production path — always calls) leave this `String::new()`:
-    /// no `opener_key` output is ever empty, so a session created that way
-    /// is refused by the ownership check for every principal, permanently.
+    /// (`PLAN.md` Step 3.5 PR②, PRD §6, M5 Step 5). `Broker::open`/
+    /// `open_with` (as opposed to `open_as`, which is what `SessionBackend::
+    /// open` — the only production path — always calls) leave this
+    /// `String::new()`: no `opener_key` output is ever empty, so a session
+    /// created that way is refused by the ownership check for every
+    /// principal, permanently.
     /// That is fine for a test double that never drives `session.write`/
     /// `resize` through the wire dispatcher, but is a footgun for any
     /// other caller — prefer `open_as`.
