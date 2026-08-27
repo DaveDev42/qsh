@@ -28,7 +28,7 @@ use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::Stdio;
 
-use common::{Fleet, HOST_ALIAS, Sandbox};
+use common::{CLIENT_ALIAS, Fleet, HOST_ALIAS, Sandbox, ServeGuard};
 use qsh_proto::{
     ErrorCode, ExecRunData, Host, HostListData, IdentityInitData, Session, SessionCloseData,
     SessionListData, SessionOpenData, SessionReadData, SessionResizeData, SessionWriteData,
@@ -58,50 +58,6 @@ const UPDATE_ENV: &str = "QSH_UPDATE_FIXTURES";
 /// because a stale "the next milestone will do it" hides a code that
 /// quietly became reachable (`docs/design/testing.md` L6).
 const DEFERRED: &[(&str, &str)] = &[
-    (
-        "PERMISSION_DENIED",
-        "M5 policy engine (the M1–M4 interim policy is allow-all-pinned) still \
-         leaves no *CLI-reachable* deterministic producer. Three producers exist \
-         in source, none staged behind `CARGO_BIN_EXE_qsh` yet, for three \
-         different reasons. (1) M3 Step 6: a `DenyAll`-policied target refusing \
-         an unauthorized principal's `session.open` relayed over the reverse \
-         (`localctl`) route, `crates/qsh-testkit/tests/reverse_session_ops.rs` \
-         — that one lives at the `qsh-testkit` in-process harness level, not \
-         behind `CARGO_BIN_EXE_qsh`. (2) M4 Step 3: the host's inline \
-         `forward.local` deny on a `TCP_CONNECT` stream (`docs/design/protocol.md` \
-         §7, `crates/qsh-testkit/tests/tunnel_loopback.rs`) — that one *is* \
-         reachable from the binary, but it is a per-connection event on an \
-         already-open tunnel, delivered as a `ConnectResult{ok:false}` on the \
-         stream and surfaced to the operator on stderr; the command's own \
-         envelope (`tunnel.open`, already printed) is `ok: true`, so there is \
-         still no `qsh.cli/v1` error envelope for this one to capture. (3) M4 \
-         Step 4: the host's `RemoteForwardOpen` choke point denying \
-         `forward.remote` (`crates/qsh-core/src/server/mod.rs`, \
-         `rfwd_open_denied_binds_nothing_and_reports_permission_denied`) — \
-         unlike (1) and (2), this one is *not* structurally envelope-less: the \
-         ACL check gates before any reply goes out, so on `qsh tunnel open \
-         --remote --json` a deny here would be this command's own top-level \
-         `qsh.cli/v1` error envelope, not a mid-tunnel side channel. It stays \
-         deferred only because nothing today can force the deny through the \
-         real binary — `qsh serve`'s M1–M4 policy is hardcoded allow-all-pinned \
-         with no CLI knob to swap in `DenyAll`, so the cited test proves the \
-         choke point at the `qsh-core` unit level, not the CLI envelope. (4) \
-         M5 Step 3: the audit-writer fail-closed deny — an otherwise-allowed \
-         decision refused because `crate::audit::RotatingAuditSink` could not \
-         durably record it (`crates/qsh-core/src/audit/writer.rs`, \
-         `crates/qsh-core/src/server/mod.rs`'s `session_open_fails_closed_\
-         when_the_audit_sink_cannot_record_an_allow`) — is a fourth, distinct \
-         producer, proven at the same `qsh-core` unit level as (3) with a \
-         `FailingAuditSink` test double. It has no CLI-reachable path either: \
-         forcing the real writer thread into `AuditError::QueueFull` or \
-         `AuditError::Degraded` from outside the process (filling a queue \
-         depth of 1024, or making the audit directory unwritable mid-run \
-         under `Fleet`) is not deterministic, so it stays on this list beside \
-         (1)-(3) rather than getting a fixture that would flake. \
-         Discharge this one the moment `Fleet`/an equivalent gains a way to run \
-         the real binary under a denying policy — it needs a fixture then, not \
-         a place on this list",
-    ),
     (
         "RESUME_GAP",
         "event-only by contract (`docs/CLI.md` §3.3): leaving the replay \
@@ -141,9 +97,12 @@ const DEFERRED: &[(&str, &str)] = &[
          `a_queued_arrival_nobody_claims_expires_resetting_its_stream_and_freeing_its_permit`, \
          but at the cap `TCP_CONNECT` answers `ErrorCode::ResourceExhausted` \
          as a `ConnectResult{ok:false}` on the tunnel data stream — \
-         structurally envelope-less the same way the PERMISSION_DENIED \
-         entry above's items (1)/(2) are, since the command's own \
-         `tunnel.open` envelope is already printed and stays `ok: true` — \
+         structurally envelope-less the same way `-L`'s per-connection \
+         `forward.local` deny is (a `ConnectResult{ok:false}` on an \
+         already-open tunnel's data stream — see \
+         `golden_permission_denied_fixture`'s doc for that contrast), \
+         since the command's own `tunnel.open` envelope is already \
+         printed and stays `ok: true` — \
          and `TCP_ACCEPTED` never reaches `ErrorCode` at all: \
          `handle_tcp_accepted_stream_at_the_hub_cap_resets_rather_than_queues` \
          shows the cap answered with a raw QUIC stream reset \
@@ -190,6 +149,7 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "tunnel.open.json",
     "tunnel.list.json",
     "tunnel.close.json",
+    "error.PERMISSION_DENIED.json",
 ];
 
 // ---------------------------------------------------------------------------
@@ -364,6 +324,51 @@ fn golden_connection_failed_fixture() {
     assert_eq!(code, 255, "{value}");
     assert_eq!(value["error"]["code"], "CONNECTION_FAILED");
     check("error.CONNECTION_FAILED.json", value);
+}
+
+/// `PERMISSION_DENIED`'s first CLI-binary envelope producer (`PLAN.md` M5
+/// Step 6 PR 6b) — the former `DEFERRED` entry's own self-discharge
+/// condition: "the moment `Fleet`/an equivalent gains a way to run the real
+/// binary under a denying policy". `ServeGuard::start_without_policy`
+/// (`common/mod.rs`, landed by PR 6a) is exactly that — a host with no
+/// `acl.toml` at all loads `DenyAll` (`docs/design/architecture.md` §6),
+/// which denies every action including ones no rule ever names.
+///
+/// `tunnel open --remote` is the producer named in that entry's item (3):
+/// the peer's `forward.remote` ACL gate
+/// (`Server::authorize_and_bind_remote_forward`) runs *before* any reply
+/// goes out, so the deny is `tunnel.open`'s own top-level envelope, not a
+/// mid-tunnel side channel the way `-L`'s per-connection refusal is (item
+/// (2), still envelope-less). The spec is `docs/CLI.md` §6.9's own canonical
+/// `-R` example (`qsh tunnel open server --remote 9000:localhost:9000
+/// --json`) — loopback, so nothing about the bind itself is in question;
+/// only the ACL gate that runs ahead of it is.
+#[test]
+fn golden_permission_denied_fixture() {
+    let host = Sandbox::new();
+    let client = Sandbox::new();
+    let host_fp = host.fingerprint();
+    let client_fp = client.fingerprint();
+    host.trust_add(CLIENT_ALIAS, None, &client_fp);
+    let serve = ServeGuard::start_without_policy(&host, &[]);
+    client.trust_add(HOST_ALIAS, Some(serve.addr()), &host_fp);
+
+    let (code, denied) = client.json(&[
+        "tunnel",
+        "open",
+        HOST_ALIAS,
+        "--remote",
+        "9000:localhost:9000",
+        "--json",
+    ]);
+    assert_eq!(code, 255, "{denied}");
+    assert_eq!(denied["ok"], false, "{denied}");
+    assert_eq!(denied["error"]["code"], "PERMISSION_DENIED", "{denied}");
+    assert!(
+        denied["data"].is_null(),
+        "a denied op must carry no data: {denied}"
+    );
+    check("error.PERMISSION_DENIED.json", denied);
 }
 
 /// Everything that needs a live peer on the other end.
