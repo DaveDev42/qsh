@@ -130,6 +130,7 @@ impl RotatingAuditSink {
     /// latch on its own, deterministically, without paying [`RETRY_TICK`]'s
     /// real one-second cost.
     #[cfg(test)]
+    #[cfg_attr(not(unix), allow(dead_code))]
     fn spawn_joinable_with_retry_tick(
         path: impl Into<PathBuf>,
         max_bytes: u64,
@@ -959,6 +960,7 @@ mod tests {
     // the writer thread is a real, separately spawned OS thread, and only
     // a *global* default is visible from a thread that never called
     // `with_default`/`set_default` itself.
+    #[cfg_attr(not(unix), allow(dead_code))]
     mod capture {
         use std::sync::{Arc, Mutex};
 
