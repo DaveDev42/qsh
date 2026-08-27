@@ -591,7 +591,16 @@ impl RotatingFile {
     /// closed *toward*, the caller already has the original write error to
     /// act on.
     fn repair_partial_write(&self) {
-        if let Some(file) = self.file.as_ref() {
+        if self.file.is_none() {
+            return;
+        }
+        // Truncate through a fresh write-mode handle, not the held append
+        // handle: on Windows an append-mode handle carries FILE_APPEND_DATA
+        // without FILE_WRITE_DATA, so `set_len` (SetEndOfFile) on it fails
+        // with PermissionDenied — the repair would silently do nothing.
+        // A second handle is safe next to the append handle on every
+        // platform (append mode repositions to the real EOF at each write).
+        if let Ok(file) = OpenOptions::new().write(true).open(&self.active_path) {
             let _ = file.set_len(self.bytes_written);
         }
     }
