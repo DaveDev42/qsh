@@ -143,7 +143,7 @@ ACL action은 인가(authorization) 어휘로, operation 이름과는 별개 차
   "ok": false,
   "error": {
     "code": "PERMISSION_DENIED",
-    "message": "peer is not allowed to attach to this session",
+    "message": "peer is not allowed to perform this operation on this host",
     "retryable": false,
     "details": {}
   }
@@ -152,7 +152,7 @@ ACL action은 인가(authorization) 어휘로, operation 이름과는 별개 차
 
 `message`는 사람을 위한 설명이다. 자동화는 `code`와 구조화된 `details`만 사용해야 한다.
 
-> 위 예시의 `message` 문안(`"peer is not allowed to attach to this session"`)은 M5 Step 4가 정하는 균일 거부 문면으로 교체될 예정이다 — 원격 peer 대면 `PERMISSION_DENIED`는 거부된 action/capability를 노출하지 않도록 통일되며(`docs/ROADMAP.md` M5 감사 개정 ③, `PLAN.md` M5 Step 4), 최종 문안은 그 step에서 확정한다(`PLAN.md` M5 §4.2). `message`는 계약이 아니므로(위 문단) 이 교체는 `qsh.cli/v1` 호환성 사건이 아니다.
+> 위 예시의 `message` 문안은 M5 Step 4가 확정한 균일 거부 문면이다(`crates/qsh-core/src/acl/mod.rs`의 `PERMISSION_DENIED_MESSAGE`) — 원격 peer 대면 `PERMISSION_DENIED`는 어느 인가 지점(정책 거부, 소유권 거부, 감사 기록 실패에 의한 fail-closed 거부)에서 왔든 거부된 action/capability/resource/principal을 노출하지 않고 이 문장 그대로 나간다(`docs/ROADMAP.md` M5 감사 개정 ③, `PLAN.md` M5 Step 4 §4.2). `message`는 계약이 아니므로(위 문단) 이 문안 자체는 `qsh.cli/v1` 호환성 대상이 아니지만, 상수와의 일치는 CI가 지킨다(`crates/qsh-core/tests/acl_docs.rs`).
 
 ### 3.3 기본 오류 코드
 

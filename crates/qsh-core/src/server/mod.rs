@@ -622,16 +622,23 @@ impl Server {
     }
 
     /// The `PERMISSION_DENIED` reply for `action`. The **only** place this
-    /// wording is built, so [`Server::authorize`]'s policy deny and
-    /// [`Server::require_opener`]'s ownership deny are byte-identical — a
-    /// peer must not be able to tell "the policy forbids this" from "this
-    /// session exists but is someone else's" (`PLAN.md` Step 3.5 PR②).
+    /// wording is built, so [`Server::authorize`]'s policy deny,
+    /// [`Server::require_opener`]'s ownership deny, and every audit-
+    /// record-failure fail-closed deny are byte-identical — a peer must
+    /// not be able to tell "the policy forbids this" from "this session
+    /// exists but is someone else's" from "the audit log failed to write"
+    /// (`PLAN.md` Step 3.5 PR②, M5 Step 4 §4.2). The reply body is always
+    /// [`crate::acl::PERMISSION_DENIED_MESSAGE`] verbatim — `action` never
+    /// reaches the wire (that would turn the message into a capability-
+    /// enumeration oracle, see that constant's doc) and is used only for
+    /// a host-side `tracing` diagnostic, never logged to the peer.
     fn permission_denied(request_id: u64, action: Action) -> ControlMessage {
+        tracing::debug!(%request_id, %action, "denying: PERMISSION_DENIED");
         ControlMessage::error(
             request_id,
             wire::Error::new(
                 ErrorCode::PermissionDenied,
-                format!("peer is not allowed to {action} on this host"),
+                crate::acl::PERMISSION_DENIED_MESSAGE,
                 false,
             ),
         )
@@ -2167,15 +2174,12 @@ impl Server {
         // writes the audit line for both outcomes (SC6: every privileged op
         // leaves an audit record).
         if !self.authorize_stream(ctx, Action::ForwardLocal, &resource) {
-            // Deliberately the same wording as the control-stream
-            // `PERMISSION_DENIED` (`Server::permission_denied`): a denial
-            // must not tell the peer *which* rule refused it.
+            // The same constant the control-stream `PERMISSION_DENIED`
+            // uses (`Server::permission_denied`): a denial must not tell
+            // the peer *which* rule refused it.
             return Err(connect_rejected(
                 ErrorCode::PermissionDenied,
-                format!(
-                    "peer is not allowed to {} on this host",
-                    Action::ForwardLocal
-                ),
+                crate::acl::PERMISSION_DENIED_MESSAGE,
             ));
         }
 
@@ -3621,6 +3625,21 @@ mod tests {
             0,
             "no session created while the audit sink is degraded"
         );
+        // F8 (M5 Step 4 adversarial review): the degraded-deny reply must
+        // carry the exact same wire message as an ordinary policy deny —
+        // a peer must not be able to tell "the audit sink is degraded"
+        // from "policy said no" by reading `message` (`PERMISSION_DENIED_
+        // MESSAGE`'s own doc, `Server::permission_denied`'s doc).
+        match &reply.body {
+            Some(control_message::Body::Response(wire::Response {
+                body: Some(response::Body::Error(e)),
+            })) => assert_eq!(
+                e.message,
+                crate::acl::PERMISSION_DENIED_MESSAGE,
+                "fail-closed audit-degraded deny must use the uniform message, byte for byte"
+            ),
+            other => panic!("expected an error response, got {other:?}"),
+        }
 
         // The writer recovers: the same policy-allowed request now
         // succeeds, and only now does a session exist.

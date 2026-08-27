@@ -32,7 +32,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use qsh_core::acl::AllowAllPinned;
+use qsh_core::acl::{AllowAllPinned, PERMISSION_DENIED_MESSAGE};
 use qsh_core::broker::PipeHandle;
 use qsh_core::client::{ClientError, Session};
 use qsh_proto::ErrorCode;
@@ -656,10 +656,7 @@ async fn no_steal_conflicts_with_a_foreign_lease_and_spends_no_credential() {
     {
         Err(ClientError::Remote { code, message, .. }) => {
             assert_eq!(code, ErrorCode::PermissionDenied);
-            assert_eq!(
-                message,
-                "peer is not allowed to session.control on this host"
-            );
+            assert_eq!(message, PERMISSION_DENIED_MESSAGE);
         }
         other => panic!("expected a foreign principal's write to be PERMISSION_DENIED: {other:?}"),
     }

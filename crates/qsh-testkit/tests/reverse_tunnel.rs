@@ -1186,6 +1186,76 @@ fn assert_resource_exhausted(answer: LocalResponse, elapsed: Duration, what: &st
 }
 
 // ------------------------------------------------------------------
+// localctl `NotOwner` — a same-uid trust boundary, deliberately not
+// `crate::acl::PERMISSION_DENIED_MESSAGE` (`PLAN.md` M5 Step 4 §4.2,
+// `docs/design/protocol.md` §11-3's "close도 소유 conduit만 할 수 있다").
+// ------------------------------------------------------------------
+
+/// A second `LOCAL_CONTROL` conduit that does not own `forward_id` gets
+/// `PERMISSION_DENIED` with the wording this path has always used, pinned
+/// here so a future edit to `crate::acl::PERMISSION_DENIED_MESSAGE` can
+/// never silently start being reused for this same-uid local-trust
+/// refusal — the two are deliberately separate axes
+/// (`crate::acl::PERMISSION_DENIED_MESSAGE`'s own doc). The owner's own
+/// close still succeeds afterward: this is a non-owner guard, not a
+/// blanket refusal on the id.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_non_owning_conduits_close_is_refused_with_the_pinned_notowner_message() {
+    with_registered_widget(|socket_path| async move {
+        let mut owner = connect_control(&socket_path, "widget").await;
+        let opened = open_remote_forward(&mut owner, 1, b"owner-token").await;
+
+        let mut stranger = connect_control(&socket_path, "widget").await;
+        send_control(
+            &mut stranger,
+            1,
+            control_message::Body::RfwdClose(wire::RemoteForwardClose {
+                forward_id: opened.forward_id.clone(),
+            }),
+        )
+        .await;
+        let reply = recv_control_response(&mut stranger).await;
+        match reply.body {
+            Some(control_message::Body::Response(wire::Response {
+                body: Some(response::Body::Error(err)),
+                ..
+            })) => {
+                assert_eq!(err.error_code(), qsh_proto::ErrorCode::PermissionDenied);
+                assert_eq!(
+                    err.message, "this forward is owned by another client on this host",
+                    "the localctl NotOwner wording must stay pinned independently of \
+                     crate::acl::PERMISSION_DENIED_MESSAGE"
+                );
+            }
+            other => panic!("expected a PERMISSION_DENIED error, got {other:?}"),
+        }
+        drop(stranger);
+
+        // The owner's own close still works.
+        send_control(
+            &mut owner,
+            2,
+            control_message::Body::RfwdClose(wire::RemoteForwardClose {
+                forward_id: opened.forward_id,
+            }),
+        )
+        .await;
+        let reply = recv_control_response(&mut owner).await;
+        assert!(
+            matches!(
+                reply.body,
+                Some(control_message::Body::Response(wire::Response {
+                    body: None,
+                    ..
+                }))
+            ),
+            "the owner's own close must still succeed, got {reply:?}"
+        );
+    })
+    .await;
+}
+
+// ------------------------------------------------------------------
 // (vi) Finding C — a detached [`spawn_claim_attempt`] must not be
 // silently lost if it is granted an arrival *after* its owning claim
 // loop (`claim_remote_forward_reverse`) was already torn down by

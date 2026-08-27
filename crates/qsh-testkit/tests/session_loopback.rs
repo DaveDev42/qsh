@@ -15,7 +15,7 @@
 
 use std::sync::Arc;
 
-use qsh_core::acl::{Action, AllowAllPinned, DenyAll};
+use qsh_core::acl::{Action, AllowAllPinned, DenyAll, PERMISSION_DENIED_MESSAGE};
 use qsh_core::client::{ClientError, Session};
 use qsh_proto::ErrorCode;
 use qsh_proto::wire::{self, StreamHeader, session_read_event};
@@ -566,7 +566,7 @@ async fn session_control_binds_write_and_resize_to_the_opener() {
             Err(ClientError::Remote { code, message, .. }) => {
                 assert_eq!(code, ErrorCode::PermissionDenied, "{name}");
                 assert_eq!(
-                    message, "peer is not allowed to session.control on this host",
+                    message, PERMISSION_DENIED_MESSAGE,
                     "{name}: message must match an ACL policy deny byte-for-byte"
                 );
             }
@@ -672,7 +672,7 @@ async fn ca_leaf_asserting_the_opener_principal_is_still_denied_ownership() {
         ClientError::Remote { code, message, .. } => {
             assert_eq!(code, ErrorCode::PermissionDenied);
             assert_eq!(
-                message, "peer is not allowed to session.control on this host",
+                message, PERMISSION_DENIED_MESSAGE,
                 "byte-identical to a policy deny — no ownership oracle"
             );
         }
