@@ -217,6 +217,291 @@ async fn abandoning_the_connection_closes_the_hosts_listener() {
     h.shutdown().await;
 }
 
+/// `RemoteForwardClose` is an ACL choke point since `PLAN.md` M5 Step 5,
+/// not a bare connection-scoped lookup: a principal that did not open a
+/// forward is refused with the uniform `PERMISSION_DENIED`, the forward
+/// survives the refusal untouched, and the refusal is audited under
+/// `forward.remote` like every other decision on this action
+/// (`Server::handle_rfwd_close` reuses `Action::ForwardRemote`, not a
+/// second action, for the close). `desktop` here **is** granted
+/// `forward.remote` (`AllowAllPinned`) — it just isn't this forward's
+/// owner — so a real-but-foreign `forward_id` and a merely unknown one are
+/// *not* the same failure mode for it (F2, M5 Step 5 adversarial review,
+/// narrowing an earlier "no existence oracle, real or fake, byte-for-byte
+/// identical" overstatement that only holds for a peer with **no**
+/// `forward.remote` grant at all — see
+/// `remote_forward_close_is_indistinguishable_real_vs_fake_for_an_
+/// ungranted_peer`, below, for that case): the foreign real id is refused
+/// at the ACL gate itself (`PERMISSION_DENIED`), while an unknown id
+/// clears that gate (`owner: None` is never filtered by `scope`) and only
+/// then meets the ordinary "no such forward_id" `INVALID_ARGUMENT` past
+/// it. The genuine owner's own close still succeeds afterward.
+#[tokio::test(flavor = "multi_thread")]
+async fn remote_forward_close_denies_a_different_principal_and_leaves_it_alive() {
+    let owner = qsh_testkit::loopback::make_identity();
+    let other = qsh_testkit::loopback::make_identity();
+    let server_trust = qsh_transport::StaticTrust::empty()
+        .with_pin(
+            owner.fingerprint,
+            qsh_transport::Principal::Device("laptop".into()),
+        )
+        .with_pin(
+            other.fingerprint,
+            qsh_transport::Principal::Device("desktop".into()),
+        );
+    let h = TunnelHarness::start_custom(
+        std::sync::Arc::new(qsh_core::acl::AllowAllPinned),
+        owner,
+        server_trust,
+    )
+    .await;
+    let forward = h.remote_forward("127.0.0.1", h.echo.port()).await;
+    let addr = forward.host_addr();
+    let forward_id = forward.forward_id().to_string();
+
+    // A second, distinct principal pinned on the same host, dialed by
+    // hand — the same pattern `session_loopback.rs`'s own `other_device`
+    // uses (no shared helper across these two test binaries: each is its
+    // own crate).
+    let client_trust = qsh_transport::StaticTrust::empty().with_pin(
+        h.host.server_identity.fingerprint,
+        qsh_transport::Principal::Device("box".into()),
+    );
+    let dialer = qsh_transport::Dialer::new(other.local.clone(), std::sync::Arc::new(client_trust));
+    let dialed = dialer
+        .dial(h.host.addr, "127.0.0.1")
+        .await
+        .expect("the second device is pinned");
+    let mut desktop = qsh_core::client::Session::negotiate(dialed.connection, "desktop")
+        .await
+        .expect("negotiate");
+
+    let err = desktop
+        .rfwd_close(qsh_proto::wire::RemoteForwardClose {
+            forward_id: forward_id.clone(),
+        })
+        .await
+        .expect_err("a non-owner must not be able to close someone else's forward");
+    match err {
+        qsh_core::client::ClientError::Remote { code, message, .. } => {
+            assert_eq!(code, ErrorCode::PermissionDenied);
+            assert_eq!(
+                message,
+                qsh_core::acl::PERMISSION_DENIED_MESSAGE,
+                "byte-identical to a policy deny — no ownership oracle"
+            );
+        }
+        other => panic!("expected remote PERMISSION_DENIED, got {other:?}"),
+    }
+
+    // The forward survives the refused close untouched.
+    assert_eq!(
+        TunnelHarness::round_trip(addr, b"still alive".to_vec())
+            .await
+            .expect("round trip"),
+        b"still alive"
+    );
+
+    let audit = forward_remote(&h);
+    assert!(
+        audit.iter().any(|r| r.principal == "device:desktop"
+            && r.decision == "deny"
+            && r.resource == forward_id),
+        "{audit:?}"
+    );
+
+    // The other half of the granted-peer matrix (F2, M5 Step 5 adversarial
+    // review): `desktop` closing a merely *unknown* `forward_id` is a
+    // different wire answer than closing the real-but-foreign one above —
+    // `INVALID_ARGUMENT`, not `PERMISSION_DENIED` — because an unknown id
+    // has no recorded owner and so is never filtered by `scope` at all; it
+    // clears the ACL gate and only then meets the ordinary "nothing to
+    // remove" refusal.
+    let unknown_err = desktop
+        .rfwd_close(qsh_proto::wire::RemoteForwardClose {
+            forward_id: "01FAKEFORWARDID0000000000".to_string(),
+        })
+        .await
+        .expect_err("an unknown forward_id is a bad request, not a silent success");
+    match unknown_err {
+        qsh_core::client::ClientError::Remote { code, message, .. } => {
+            assert_eq!(code, ErrorCode::InvalidArgument);
+            assert_eq!(message, "no such forward_id");
+        }
+        other => panic!("expected remote INVALID_ARGUMENT, got {other:?}"),
+    }
+
+    desktop.close();
+
+    // The genuine owner's own close still succeeds.
+    forward.close().await;
+
+    let audit = forward_remote(&h);
+    assert!(
+        audit.iter().any(|r| r.principal == "device:laptop"
+            && r.decision == "allow"
+            && r.resource == forward_id),
+        "{audit:?}"
+    );
+
+    h.shutdown().await;
+}
+
+/// The narrower claim `docs/CLI.md` §6.9 and `docs/design/protocol.md` §7
+/// actually make (F2, M5 Step 5 adversarial review): a peer with **no**
+/// `forward.remote` grant at all cannot distinguish a real-but-foreign
+/// `forward_id` from a fabricated one — both are refused at the
+/// principal-match step, before `scope` (or anything else about the
+/// `forward_id` itself) is ever consulted, so both get the byte-identical
+/// `PERMISSION_DENIED`. Contrast the test above,
+/// `remote_forward_close_denies_a_different_principal_and_leaves_it_alive`,
+/// where `desktop` *is* granted `forward.remote` and the two cases ARE
+/// distinguishable (`PERMISSION_DENIED` vs `INVALID_ARGUMENT`) — the same
+/// documented trade-off `docs/CLI.md` §6.3 already accepts for
+/// `session.write`/`resize` (`session_loopback.rs`'s
+/// `denied_peer_cannot_learn_whether_a_session_exists` is that suite's
+/// ungranted-peer pair).
+#[tokio::test(flavor = "multi_thread")]
+async fn remote_forward_close_is_indistinguishable_real_vs_fake_for_an_ungranted_peer() {
+    let owner = qsh_testkit::loopback::make_identity();
+    let other = qsh_testkit::loopback::make_identity();
+    let server_trust = qsh_transport::StaticTrust::empty()
+        .with_pin(
+            owner.fingerprint,
+            qsh_transport::Principal::Device("laptop".into()),
+        )
+        .with_pin(
+            other.fingerprint,
+            qsh_transport::Principal::Device("desktop".into()),
+        );
+    // `desktop` has no `forward.remote` grant at all — the ungranted case.
+    let policy = qsh_core::acl::Policy {
+        rules: vec![qsh_core::acl::Rule {
+            principal: "device:laptop".to_string(),
+            auth_path: qsh_transport::AuthPath::Pin,
+            allow: vec![qsh_core::acl::ActionPattern::Exact(
+                qsh_core::acl::Action::ForwardRemote,
+            )],
+            scope: qsh_core::acl::Scope::Owned,
+        }],
+    };
+    let h = TunnelHarness::start_custom(std::sync::Arc::new(policy), owner, server_trust).await;
+    let forward = h.remote_forward("127.0.0.1", h.echo.port()).await;
+    let real_id = forward.forward_id().to_string();
+
+    let client_trust = qsh_transport::StaticTrust::empty().with_pin(
+        h.host.server_identity.fingerprint,
+        qsh_transport::Principal::Device("box".into()),
+    );
+    let dialer = qsh_transport::Dialer::new(other.local.clone(), std::sync::Arc::new(client_trust));
+    let dialed = dialer
+        .dial(h.host.addr, "127.0.0.1")
+        .await
+        .expect("the second device is pinned");
+    let mut desktop = qsh_core::client::Session::negotiate(dialed.connection, "desktop")
+        .await
+        .expect("negotiate");
+
+    let real_err = desktop
+        .rfwd_close(qsh_proto::wire::RemoteForwardClose {
+            forward_id: real_id,
+        })
+        .await
+        .expect_err("an ungranted peer must not close any forward");
+    let fake_err = desktop
+        .rfwd_close(qsh_proto::wire::RemoteForwardClose {
+            forward_id: "01FAKEFORWARDID0000000000".to_string(),
+        })
+        .await
+        .expect_err("an ungranted peer must not learn a forward_id is fake either");
+
+    match (&real_err, &fake_err) {
+        (
+            qsh_core::client::ClientError::Remote {
+                code: c1,
+                message: m1,
+                ..
+            },
+            qsh_core::client::ClientError::Remote {
+                code: c2,
+                message: m2,
+                ..
+            },
+        ) => {
+            assert_eq!(c1, c2);
+            assert_eq!(m1, m2);
+            assert_eq!(*c1, ErrorCode::PermissionDenied);
+            assert_eq!(m1.as_str(), qsh_core::acl::PERMISSION_DENIED_MESSAGE);
+        }
+        other => panic!("expected byte-identical remote PERMISSION_DENIED, got {other:?}"),
+    }
+
+    // The forward survives — an ungranted peer's refused close (real or
+    // fake) never touches anything.
+    assert_eq!(
+        TunnelHarness::round_trip(forward.host_addr(), b"still alive".to_vec())
+            .await
+            .expect("round trip"),
+        b"still alive"
+    );
+
+    desktop.close();
+    forward.close().await;
+    h.shutdown().await;
+}
+
+/// `RemoteForwardClose`'s ownership axis is the *principal* that opened the
+/// forward, not the connection it rode in on (`PLAN.md` M5 Step 5 §4.2,
+/// `docs/CLI.md` §2.5): the same principal reconnecting on a brand-new
+/// connection can still close its own forward — unlike
+/// `Server::purge_connection`'s `conn_id`-scoped teardown
+/// (`abandoning_the_connection_closes_the_hosts_listener`, above), which is
+/// a different axis entirely.
+#[tokio::test(flavor = "multi_thread")]
+async fn remote_forward_close_allows_the_same_principal_from_a_different_connection() {
+    let h = TunnelHarness::start().await;
+    let forward = h.remote_forward("127.0.0.1", h.echo.port()).await;
+    let addr = forward.host_addr();
+    let forward_id = forward.forward_id().to_string();
+    assert_eq!(
+        TunnelHarness::round_trip(addr, b"alive".to_vec())
+            .await
+            .expect("round trip"),
+        b"alive"
+    );
+
+    // A fresh connection, the same pinned identity ("device:laptop") —
+    // not the connection that opened the forward.
+    let mut second = h.host.session().await;
+    second
+        .rfwd_close(qsh_proto::wire::RemoteForwardClose { forward_id })
+        .await
+        .expect("the same principal on a different connection can close its own forward");
+
+    let rebound = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match TcpListener::bind(addr).await {
+                Ok(listener) => return listener,
+                Err(_still_held) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+            }
+        }
+    })
+    .await
+    .expect("RemoteForwardClose from a different connection must still release the port");
+    assert_eq!(rebound.local_addr().expect("rebound addr"), addr);
+    drop(rebound);
+
+    second.close();
+    // The forward's own connection never sent the close — just release
+    // what this binding still holds (its now-redundant dispatch
+    // registration and session), the same teardown a requester that lost
+    // its original connection would go through.
+    forward.abandon();
+    h.shutdown().await;
+}
+
 /// A connection the requester leg cannot dial — the destination it
 /// registered is a reserved-but-empty port — does not kill the forward:
 /// the accepted TCP connection on the host side just sees its

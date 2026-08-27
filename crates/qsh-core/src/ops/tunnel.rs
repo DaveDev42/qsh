@@ -575,11 +575,17 @@ impl Ops {
     /// **Ownership decision** (`docs/CLI.md` §2.5: "해당 tunnel의 소유
     /// peer이면 허용"). The wire-level owning-peer check already exists
     /// and is unchanged by this op: `Server::handle_rfwd_close`
-    /// (`crates/qsh-core/src/server/mod.rs`) scopes `RemoteForwardClose`
-    /// to the *connection* that opened it, and on the reverse route the
-    /// resident daemon is the sole holder of that one reverse connection
-    /// per host, so every `RfwdClose` this op eventually causes to be sent
-    /// still goes out on exactly that connection. What this op decides is
+    /// (`crates/qsh-core/src/server/mod.rs`) scopes `RemoteForwardClose` to
+    /// the **principal** that opened it (`RemoteForwardEntry::owner`, its
+    /// own doc — an `opener_key`, not a `conn_id`; F6, M5 Step 5
+    /// adversarial review corrected this doc's earlier "scoped to the
+    /// connection" premise), so every `RfwdClose` this op eventually causes
+    /// the daemon to send still passes that check regardless of which live
+    /// connection instance actually carries it — the resident daemon
+    /// authenticates to this host as the same device identity on the
+    /// reverse connection or on any replacement resume opens for it, so
+    /// this does not even need "the daemon is the sole holder of one
+    /// connection" to hold. What this op decides is
     /// a *different*, purely local question the wire-level check has
     /// nothing to say about: which local CLI process — this one, running
     /// as a brand-new `qsh tunnel close <id>` invocation, distinct from

@@ -500,7 +500,7 @@ mod tests {
             &Principal::Device("laptop".into()),
             AuthPath::Pin,
             Action::ExecRun,
-            ResourceRef { id: "exec" },
+            ResourceRef::unowned("exec"),
         );
         assert_eq!(verdict.decision, Decision::Deny);
         assert_eq!(verdict.rule, None);
@@ -537,7 +537,7 @@ mod tests {
             &Principal::User("dave".into()),
             AuthPath::Pin,
             Action::ForwardSocks,
-            ResourceRef { id: "x" },
+            ResourceRef::unowned("x"),
         );
         assert_eq!(verdict.decision, Decision::Deny);
         assert_eq!(verdict.rule, None);

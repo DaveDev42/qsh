@@ -17,12 +17,7 @@
 //! [`SeamKind::TunnelInline`]/[`SeamKind::ReverseRegistration`] row, or the
 //! wire-shape-appropriate equivalent (a stream reset with the right code
 //! and a real audit deny record) for the message-less
-//! [`SeamKind::StreamReset`] row. One thing is excluded on exactly that
-//! ground, not by oversight:
-//!
-//! - `RemoteForwardClose` (`forward.remote.close`) has no authorization
-//!   check at all yet (`PLAN.md` M5 Step 5 closes this gap) — there is no
-//!   seam here to enumerate until that step lands.
+//! [`SeamKind::StreamReset`] row.
 //!
 //! The session-data reattach inline gate (`Server::handle_data_stream`'s
 //! `SessionData` ticket branch, `authorize_stream` on
@@ -148,6 +143,27 @@ pub const DENY_SEAMS: &[DenySeam] = &[
         action: Action::ForwardRemote,
         kind: SeamKind::ControlStreamOp,
     },
+    // `RemoteForwardClose`'s choke point (`PLAN.md` M5 Step 5 closes what
+    // used to be a gap here — see this module's own former exclusion
+    // note, still in history). Named `"forward.remote.close"`, not
+    // `"tunnel.close"`: `docs/CLI.md` §2.4's `tunnel.close` is an `Ops`-
+    // layer operation that also covers a purely local `-L` teardown (no
+    // wire op, no host-side ACL check at all — `TunnelHold::close`), so
+    // using it here would wrongly imply this row gates that too. It is
+    // also not simply `"forward.remote"` again: that name is already
+    // this array's `RfwdOpen` row, and both `RfwdOpen`/`RfwdClose` are
+    // checked against the very same `Action::ForwardRemote` (`PLAN.md`
+    // M5 Step 5 (a): ownership, not a new action, is what changes) — two
+    // distinct wire ops sharing one `Action` need two distinct row names,
+    // the same reason `session.write`/`session.resize`/`session.close`
+    // are three rows under one `Action::SessionControl` rather than one.
+    // `".close"` mirrors the wire message name (`RemoteForwardClose`)
+    // directly off its sibling `"forward.remote"` row.
+    DenySeam {
+        name: "forward.remote.close",
+        action: Action::ForwardRemote,
+        kind: SeamKind::ControlStreamOp,
+    },
     DenySeam {
         name: "forward.local",
         action: Action::ForwardLocal,
@@ -213,6 +229,7 @@ mod tests {
                 "session.resize",
                 "session.close",
                 "forward.remote",
+                "forward.remote.close",
                 "forward.local",
                 "host.reverse",
                 "session.attach@data-stream",
@@ -221,7 +238,7 @@ mod tests {
              deliberate seam addition/removal, update this list as part of \
              that change; otherwise a row silently changed shape"
         );
-        assert_eq!(DENY_SEAMS.len(), 13, "DENY_SEAMS row count drifted");
+        assert_eq!(DENY_SEAMS.len(), 14, "DENY_SEAMS row count drifted");
     }
 
     /// F1(a) (M5 Step 4 adversarial review) — the registry's coverage
@@ -346,10 +363,7 @@ mod tests {
             Body::SessionWrite(_) => BodyClassification::Seam("session.write"),
             Body::ExecStart(_) => BodyClassification::Seam("exec.run"),
             Body::RfwdOpen(_) => BodyClassification::Seam("forward.remote"),
-            Body::RfwdClose(_) => BodyClassification::NoAuthorizationSurface(
-                "no authorization check exists at this seam yet — PLAN.md M5 \
-                 Step 5 closes this gap, this module's own doc",
-            ),
+            Body::RfwdClose(_) => BodyClassification::Seam("forward.remote.close"),
             Body::Ping(_) => BodyClassification::NoAuthorizationSurface(
                 "keepalive, answered unconditionally with no ACL check",
             ),

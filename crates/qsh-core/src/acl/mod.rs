@@ -193,13 +193,15 @@ impl Decision {
 
 /// The exact, invariant text of every remote-facing `PERMISSION_DENIED`
 /// refusal (`PLAN.md` M5 Step 4 §4.2). Every seam that can answer a peer
-/// with [`qsh_proto::ErrorCode::PermissionDenied`] — the four
-/// authorization choke points (`Server::authorize`,
-/// `Server::authorize_stream`, `Server::authorize_session_control`,
-/// `reverse::admit::admit`), their audit-record-failure fail-closed
-/// branches (`PLAN.md` M5 Step 3), and the `forward.local` inline
-/// `TCP_CONNECT` gate — uses this constant verbatim and nothing else.
-/// [`registry::DENY_SEAMS`] is the enumeration of every such seam; a
+/// with [`qsh_proto::ErrorCode::PermissionDenied`] — the authorization
+/// choke points (`Server::authorize`, `Server::authorize_stream`, and
+/// `Server::authorize`'s owner-aware sibling `Server::authorize_owned`
+/// behind both `Server::authorize_session_control` and
+/// `Server::handle_rfwd_close`'s `RemoteForwardClose` gate, `PLAN.md` M5
+/// Step 5; `reverse::admit::admit`), their audit-record-failure
+/// fail-closed branches (`PLAN.md` M5 Step 3), and the `forward.local`
+/// inline `TCP_CONNECT` gate — uses this constant verbatim and nothing
+/// else. [`registry::DENY_SEAMS`] is the enumeration of every such seam; a
 /// remote-facing deny seam added without a row there is a defect.
 ///
 /// Why one opaque sentence instead of a message naming the action,
@@ -216,11 +218,13 @@ impl Decision {
 /// depend on (`docs/CLI.md` §3.2). This message carries no information
 /// beyond the code — it never names the action, the capability, the
 /// resource, or the principal — and it is byte-identical whether the
-/// request was refused by policy, by a session-ownership check
-/// (`Server::require_opener`), or by an audit-record failure forcing
-/// fail-closed: the non-distinguishing error policy `docs/design/
-/// protocol.md` §10-2 requires (re-pinned for `session.control` in
-/// `crates/qsh-testkit/tests/session_loopback.rs`).
+/// request was refused by an ordinary policy rule, by a `scope = "owned"`
+/// ownership mismatch (`PLAN.md` M5 Step 5 — evaluated inside the same
+/// [`Authorizer::check`] call as everything else since that step, fed by
+/// `Server::require_opener`'s thin broker lookup), or by an audit-record
+/// failure forcing fail-closed: the non-distinguishing error policy
+/// `docs/design/protocol.md` §10-2 requires (re-pinned for
+/// `session.control` in `crates/qsh-testkit/tests/session_loopback.rs`).
 ///
 /// `localctl`'s `NotOwner` refusal ("this forward is owned by another
 /// client on this host", [`crate::localctl::daemon`]) is deliberately
@@ -232,17 +236,36 @@ impl Decision {
 pub const PERMISSION_DENIED_MESSAGE: &str =
     "peer is not allowed to perform this operation on this host";
 
-/// A resource identifier passed to [`Policy::decide`] — just an opaque id
-/// in this step (`PLAN.md` M5 Step 2). `PLAN.md` M5 Step 5 adds an
-/// `owner` field once `scope` starts being evaluated; until then this is
-/// a thin wrapper so `Policy::decide`'s signature doesn't have to change
-/// again when that field lands.
+/// A resource identifier passed to [`Policy::decide`], plus (`PLAN.md` M5
+/// Step 5) that resource's owner, when it has one. `owner` is the
+/// [`opener_key`] of whichever principal/auth_path pair created the
+/// resource — a session's broker-recorded opener, or a remote forward's
+/// registering principal — and is `None` for every resource kind that has
+/// no owner concept at all (`exec.run`, `host.reverse`, `forward.local`:
+/// [`Scope`](policy::Scope)'s own doc). `scope = "owned"` compares this
+/// field against the requester's own `opener_key`; a resource with
+/// `owner: None` is never affected by `scope` either way, which is what
+/// lets a not-yet-existing resource (e.g. `session.control` racing a
+/// session the broker cannot find) pass through unfiltered instead of
+/// being invented into a false deny (`Server::require_opener`'s own doc).
 #[derive(Debug, Clone, Copy)]
 pub struct ResourceRef<'a> {
     /// Free-form resource identifier (e.g. `"exec"`, a session id,
     /// `"host:port"`) — the same string every [`Authorizer::check`] caller
     /// already passes.
     pub id: &'a str,
+    /// This resource's owner key ([`opener_key`]), or `None` for a
+    /// resource kind that has no owner concept.
+    pub owner: Option<&'a str>,
+}
+
+impl<'a> ResourceRef<'a> {
+    /// A resource with no owner concept — every call site but the two
+    /// ownership-aware ones (`Server::authorize_session_control`,
+    /// `Server::handle_rfwd_close`) construct their `ResourceRef` this way.
+    pub fn unowned(id: &'a str) -> Self {
+        Self { id, owner: None }
+    }
 }
 
 /// The single interface every privileged operation is gated by.
@@ -251,8 +274,7 @@ pub struct ResourceRef<'a> {
 /// creates, reserves or touches anything — it only decides.
 pub trait Authorizer: Send + Sync + 'static {
     /// Decide whether `principal` (authenticated via `auth_path`) may
-    /// perform `action` on `resource`. `resource` is a free-form identifier
-    /// (e.g. `"exec"`, a session id).
+    /// perform `action` on `resource`.
     ///
     /// Returns a [`Verdict`], not a bare [`Decision`]: the matching rule's
     /// index (when one matched) travels with the decision so callers can
@@ -263,34 +285,70 @@ pub trait Authorizer: Send + Sync + 'static {
         principal: &Principal,
         auth_path: AuthPath,
         action: Action,
-        resource: &str,
+        resource: ResourceRef<'_>,
     ) -> Verdict;
+}
+
+/// The opener/ownership key folding `(principal, auth_path)` into the one
+/// string every owned [`ResourceRef::owner`] carries and every `scope =
+/// "owned"` comparison is made against (`PLAN.md` M5 Step 5, `Scope`'s own
+/// doc). Not `principal.to_string()` alone: a CA-issued leaf may legally
+/// assert the same principal a trust-store pin does
+/// (`qsh_transport::AuthPath`'s own doc), so folding `auth_path` in is
+/// what keeps a pinned opener's identity from being re-assertable by any
+/// CA-chained leaf that happens to share its principal.
+///
+/// Lived as a private `server::opener_key` since M3 (Step 3.5 PR②); moved
+/// here when M5 Step 5 promoted the ownership comparison itself from a
+/// `Server`-private post-check into the policy vocabulary
+/// ([`Policy::decide`], [`AllowAllPinned::check`]). `pub`, not
+/// `pub(crate)`: `crates/qsh-testkit`'s test doubles that reproduce this
+/// same comparison for a hypothetical wider-admitting [`Authorizer`] (e.g.
+/// `session_loopback.rs`'s `AllowAllAnyAuthPath`) need it too, and
+/// `qsh-testkit` is allowed to depend on anything in `qsh-core`
+/// (`CLAUDE.md`'s crate dependency matrix).
+pub fn opener_key(principal: &Principal, auth_path: AuthPath) -> String {
+    format!("{auth_path:?}:{principal}")
 }
 
 /// M1 interim policy: every *pinned* principal is allowed every action;
 /// principals authenticated any other way (CA-asserted users) are denied.
 /// Replaced by the `acl.toml` engine in M5.
+///
+/// Reproduces M3's opener-principal ownership P0 for `resource.owner:
+/// Some(_)` (`PLAN.md` M5 Step 5's interim-invariant requirement: this
+/// stand-in has to behave as `scope = "owned"` for every owned resource,
+/// since it is what production still runs until Step 6 wires a real
+/// `Policy` in) — a pinned principal is allowed every *unowned* action
+/// unconditionally, but an owned one only when it is also the resource's
+/// own owner. `resource.owner: None` is never filtered, same as
+/// [`Policy::decide`]'s ④.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct AllowAllPinned;
 
 impl Authorizer for AllowAllPinned {
     fn check(
         &self,
-        _principal: &Principal,
+        principal: &Principal,
         auth_path: AuthPath,
         _action: Action,
-        _resource: &str,
+        resource: ResourceRef<'_>,
     ) -> Verdict {
-        let decision = match auth_path {
-            AuthPath::Pin => Decision::Allow,
-            AuthPath::Ca => Decision::Deny,
+        let pinned = matches!(auth_path, AuthPath::Pin);
+        let owned = match resource.owner {
+            Some(owner) => owner == opener_key(principal, auth_path),
+            None => true,
         };
         // No policy engine behind this constant-time interim rule, so no
         // rule index — `rule: None` is the mechanical, behavior-preserving
         // update `PLAN.md` M5 Step 2's `Authorizer::check` signature
         // change forces here.
         Verdict {
-            decision,
+            decision: if pinned && owned {
+                Decision::Allow
+            } else {
+                Decision::Deny
+            },
             rule: None,
         }
     }
@@ -307,7 +365,7 @@ impl Authorizer for DenyAll {
         _principal: &Principal,
         _auth_path: AuthPath,
         _action: Action,
-        _resource: &str,
+        _resource: ResourceRef<'_>,
     ) -> Verdict {
         Verdict {
             decision: Decision::Deny,
@@ -329,7 +387,7 @@ mod tests {
                 &Principal::Device("laptop".into()),
                 AuthPath::Pin,
                 Action::ExecRun,
-                "exec"
+                ResourceRef::unowned("exec")
             )
             .decision,
             Decision::Allow
@@ -339,7 +397,7 @@ mod tests {
                 &Principal::Fingerprint(Fingerprint::of_spki_der(b"k")),
                 AuthPath::Pin,
                 Action::ExecRun,
-                "exec"
+                ResourceRef::unowned("exec")
             )
             .decision,
             Decision::Allow
@@ -350,7 +408,7 @@ mod tests {
                 &Principal::User("dave".into()),
                 AuthPath::Ca,
                 Action::ExecRun,
-                "exec"
+                ResourceRef::unowned("exec")
             )
             .decision,
             Decision::Deny
@@ -368,7 +426,7 @@ mod tests {
                     &Principal::Device("laptop".into()),
                     AuthPath::Ca,
                     Action::ExecRun,
-                    "exec"
+                    ResourceRef::unowned("exec")
                 )
                 .decision,
             Decision::Deny
@@ -384,12 +442,78 @@ mod tests {
                         &Principal::Device("x".into()),
                         path,
                         Action::ExecRun,
-                        "exec"
+                        ResourceRef::unowned("exec")
                     )
                     .decision,
                 Decision::Deny
             );
         }
+    }
+
+    /// `PLAN.md` M5 Step 5's interim invariant: `AllowAllPinned` must keep
+    /// denying a non-owner on an owned resource exactly as M3's hardcoded
+    /// `require_opener` gate did — production still runs this authorizer,
+    /// not a real `Policy`, until Step 6.
+    #[test]
+    fn allow_all_pinned_denies_a_pinned_non_owner_on_an_owned_resource() {
+        let acl = AllowAllPinned;
+        let owner_key = opener_key(&Principal::Device("laptop".into()), AuthPath::Pin);
+        let verdict = acl.check(
+            &Principal::Device("desktop".into()),
+            AuthPath::Pin,
+            Action::SessionControl,
+            ResourceRef {
+                id: "sess-1",
+                owner: Some(&owner_key),
+            },
+        );
+        assert_eq!(verdict.decision, Decision::Deny);
+
+        // The owner itself is unaffected.
+        let verdict = acl.check(
+            &Principal::Device("laptop".into()),
+            AuthPath::Pin,
+            Action::SessionControl,
+            ResourceRef {
+                id: "sess-1",
+                owner: Some(&owner_key),
+            },
+        );
+        assert_eq!(verdict.decision, Decision::Allow);
+    }
+
+    /// An owned resource never leaks to a request with a *different*
+    /// `auth_path` even when the principal string matches — `opener_key`
+    /// folds `auth_path` in for exactly this reason (its own doc).
+    #[test]
+    fn allow_all_pinned_denies_a_ca_leaf_asserting_the_pinned_owners_principal() {
+        let acl = AllowAllPinned;
+        let owner_key = opener_key(&Principal::Device("laptop".into()), AuthPath::Pin);
+        let verdict = acl.check(
+            &Principal::Device("laptop".into()),
+            AuthPath::Ca,
+            Action::SessionControl,
+            ResourceRef {
+                id: "sess-1",
+                owner: Some(&owner_key),
+            },
+        );
+        assert_eq!(verdict.decision, Decision::Deny);
+    }
+
+    /// `resource.owner: None` (`exec.run`, `host.reverse`, `forward.local`
+    /// — no owner concept) is never filtered by ownership: a pinned peer
+    /// is allowed regardless of who "owns" it, because nothing does.
+    #[test]
+    fn allow_all_pinned_never_filters_an_unowned_resource() {
+        let acl = AllowAllPinned;
+        let verdict = acl.check(
+            &Principal::Device("desktop".into()),
+            AuthPath::Pin,
+            Action::ExecRun,
+            ResourceRef::unowned("exec"),
+        );
+        assert_eq!(verdict.decision, Decision::Allow);
     }
 
     #[test]

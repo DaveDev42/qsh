@@ -59,7 +59,7 @@ use std::sync::Arc;
 
 use qsh_core::acl::{
     Action, Authorizer, DENY_SEAMS, Decision, DenyAll, DenySeam, PERMISSION_DENIED_MESSAGE,
-    SeamKind, Verdict,
+    ResourceRef, SeamKind, Verdict,
 };
 use qsh_core::audit::MemoryAuditSink;
 use qsh_core::broker::{PeerFingerprint, SessionBackend, SessionId, SessionSpec};
@@ -140,6 +140,19 @@ async fn drive_control_stream_op(s: &mut Session, name: &str) -> Result<(), Clie
             })
             .await
             .map(|_| ()),
+        // A well-formed but nonexistent `forward_id` — under `DenyAll` the
+        // ACL gate (`Server::authorize_owned`, `PLAN.md` M5 Step 5) always
+        // runs first, so this still hits `PERMISSION_DENIED`, never
+        // `INVALID_ARGUMENT`'s existence tell (`Server::handle_rfwd_close`'s
+        // own doc: unknown-id resources are `owner: None`, never filtered
+        // by scope, so a `DenyAll`/`Policy` verdict for one is identical to
+        // a real forward's).
+        "forward.remote.close" => {
+            s.rfwd_close(wire::RemoteForwardClose {
+                forward_id: "01FAKEFORWARDID0000000000".to_string(),
+            })
+            .await
+        }
         other => panic!(
             "drive_control_stream_op: DENY_SEAMS has a ControlStreamOp row {other:?} with no \
              driver in this match — teach acl_uniformity.rs how to drive it"
@@ -305,7 +318,7 @@ impl Authorizer for OpenOnlyDenyAttach {
         _principal: &Principal,
         _auth_path: AuthPath,
         action: Action,
-        _resource: &str,
+        _resource: ResourceRef<'_>,
     ) -> Verdict {
         let decision = if action == Action::SessionOpen {
             Decision::Allow
