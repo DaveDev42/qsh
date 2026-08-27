@@ -15,13 +15,19 @@
 //! ([`PolicyLoad::Invalid`]) — a half-applied policy would enforce
 //! something the operator never wrote down and never reviewed.
 //!
-//! Nothing here is called by any production constructor yet — that wiring
-//! is `PLAN.md` M5 Step 6's job. This module and [`super::policy`] can be
-//! fully exercised (including property tests) without it.
+//! [`load_or_deny`] is `PLAN.md` M5 Step 6's production wiring: the one
+//! function `crate::serve::host_runtime` and
+//! `crate::reverse::listen::run_listen_unix` both call to turn this
+//! module's [`PolicyLoad`] into a real [`super::Authorizer`], falling back
+//! to [`super::DenyAll`] (plus a [`StartupDiagnostic`] the caller must
+//! surface) on anything short of [`PolicyLoad::Loaded`]. Everything above
+//! it — [`PolicySource`] itself and [`super::policy`] — was, and remains,
+//! fully exercisable (including property tests) on its own.
 
 use std::fs::File;
 use std::io::{self, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use qsh_proto::ErrorCode;
 use qsh_transport::AuthPath;
@@ -29,9 +35,10 @@ use serde::Deserialize;
 
 use crate::config::Paths;
 use crate::ops::OpError;
+use crate::trust::TrustStore;
 
 use super::policy::FamilyPrefix;
-use super::{Action, ActionPattern, Policy, Rule, Scope};
+use super::{Action, ActionPattern, Authorizer, DenyAll, Policy, Rule, Scope};
 
 /// Hard caps on `acl.toml` shape, enforced before any rule is evaluated.
 /// `acl.toml` is operator-authored, not adversarial input (`PLAN.md` M5
@@ -111,6 +118,20 @@ impl PolicySource {
             Err(err) if err.kind() == io::ErrorKind::NotFound => return PolicyLoad::Missing,
             Err(err) => return PolicyLoad::Invalid(read_error(path, &err)),
         };
+        // Arbitrated (`PLAN.md` M5 Step 6): warn, never deny, on a
+        // group-/world-writable `acl.toml`. Denying would turn a permissions
+        // slip into a second way to lock an operator out mid-incident —
+        // exactly the moment they most need `acl.toml` to still load.
+        // Staying silent would hide a real local risk instead: any other
+        // uid on this host with write access to the file this process
+        // trusts can grant itself anything the policy is capable of
+        // granting. Non-fatal and independent of whether the file goes on
+        // to parse — fires whenever the file exists, on every load
+        // outcome. Windows ACL checking is an explicit non-goal: Windows'
+        // permission model has no analogue to the unix rwx bits this reads,
+        // and `docs/ROADMAP.md` already defers the Windows host role to P2.
+        #[cfg(unix)]
+        warn_if_group_or_world_writable(path, &file);
         // Cheap early-out on a regular file's reported size. This is NOT
         // the enforcement boundary (F2, M5 Step 2 adversarial review): a
         // FIFO, a symlink to `/dev/zero`, or any other path whose `stat`
@@ -180,6 +201,185 @@ impl PolicySource {
             ),
         }
     }
+}
+
+/// Unix half of the group-/world-writable warning installed in
+/// [`PolicySource::load_path`] — see that call site's comment for the
+/// warn-not-deny rationale. `tracing::warn!`, same target and structural-
+/// fields-only discipline as this module's other two diagnostics (F1/F7,
+/// the `capture` test helper below exercises both).
+#[cfg(unix)]
+fn warn_if_group_or_world_writable(path: &Path, file: &File) {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(metadata) = file.metadata() else {
+        return;
+    };
+    let mode = metadata.permissions().mode() & 0o777;
+    if mode & 0o022 != 0 {
+        tracing::warn!(
+            target: "qsh::acl",
+            path = %path.display(),
+            mode = format!("{mode:03o}"),
+            "acl.toml is group- or world-writable; anyone else with write access to this file \
+             can grant themselves anything this policy is capable of granting"
+        );
+    }
+}
+
+/// Machine-stable code word for [`PolicyLoad::Missing`]'s startup
+/// diagnostic ([`load_or_deny`]) — distinct from [`ACL_POLICY_INVALID_CODE`]
+/// so an operator (or a script watching stderr) can tell "never configured"
+/// apart from "configured wrong" at a glance, the same way `doctor.rs`'s
+/// `DiagnosticId` variants stay distinct. Not a [`qsh_proto::ErrorCode`]:
+/// both states already carry [`ErrorCode::ConfigError`] on the operator-
+/// facing side ([`PolicyLoad::Invalid`]'s own doc) — this is a second,
+/// finer axis for the human-facing startup banner only, never sent to a
+/// peer (a remote peer only ever sees the uniform `PERMISSION_DENIED`,
+/// `PLAN.md` M5 §4.1 #4).
+pub const ACL_POLICY_MISSING_CODE: &str = "acl_policy_missing";
+
+/// Machine-stable code word for [`PolicyLoad::Invalid`]'s startup
+/// diagnostic. See [`ACL_POLICY_MISSING_CODE`].
+pub const ACL_POLICY_INVALID_CODE: &str = "acl_policy_invalid";
+
+/// [`StartupDiagnostic::render`]'s headline fragment (F4, `PLAN.md` M5
+/// Step 6 PR 6a adversarial ②) — pulled out to a named const, rather than
+/// inlined in the `format!` below, so `crates/qsh-core/tests/acl_docs.rs`
+/// can pin it against `README.md`/`docs/CLI.md` byte-for-byte
+/// (`doctor.rs`'s `CONTROLLER_UNREACHABLE` precedent: the wording's one
+/// source of truth is code, and the docs are gated to match it, not the
+/// other way around).
+pub const ACL_STARTUP_HEADLINE: &str = "no usable acl.toml policy";
+
+/// [`StartupDiagnostic::render`]'s "nothing is granted yet" clause. See
+/// [`ACL_STARTUP_HEADLINE`].
+pub const ACL_STARTUP_DENIED_CLAUSE: &str = "every request is denied until this is fixed";
+
+/// [`StartupDiagnostic::render`]'s no-auto-generation sentence. See
+/// [`ACL_STARTUP_HEADLINE`].
+pub const ACL_STARTUP_NO_AUTOGEN: &str = "acl.toml is never auto-generated — create it by hand";
+
+/// The exactly-once, operator-facing startup banner `PLAN.md` M5 Step 6
+/// requires whenever `acl.toml` did not produce a usable [`Policy`] —
+/// [`PolicyLoad::Missing`] or [`PolicyLoad::Invalid`]. [`load_or_deny`]
+/// composes this; `qsh-cli` prints [`StartupDiagnostic::render`]'s output
+/// verbatim, once, and holds no ACL logic of its own (`CLAUDE.md`'s crate
+/// boundary: renderers carry zero auth/ACL logic).
+///
+/// Deliberately not `crate::doctor::Diagnostic`'s all-`&'static str` shape:
+/// this diagnostic's content is inherently dynamic — the exact `acl.toml`
+/// path this process resolved, and (`Invalid` only) the load error's
+/// line-number-only detail, reusing [`OpError::message`] rather than
+/// composing a second copy of it (this crate's F1 discipline: never a
+/// second, possibly-drifted no-content-echo implementation).
+#[derive(Debug, Clone)]
+pub struct StartupDiagnostic {
+    /// [`ACL_POLICY_MISSING_CODE`] or [`ACL_POLICY_INVALID_CODE`].
+    pub code: &'static str,
+    /// The exact path this process looked at (`paths.acl_file()`).
+    pub path: PathBuf,
+    /// [`PolicyLoad::Invalid`]'s line-number-only detail. Never dumps raw
+    /// source lines from the file; the only echo is a bounded (<=128-byte,
+    /// single-line-escaped) grammar token from the offending rule (unknown
+    /// action pattern / `auth_path` / scope — the deliberate Step 2
+    /// carve-out `parse_rule` documents at its three `unknown ... {other:?}`
+    /// arms). `None` for [`PolicyLoad::Missing`], which has nothing to
+    /// explain beyond "the file does not exist".
+    pub detail: Option<String>,
+    /// A copy-pasteable minimal `acl.toml` body, pre-filled with this
+    /// machine's actual pinned peer names from the trust store when it has
+    /// any (`PLAN.md` M5 §4.2: local information, stderr only, never sent
+    /// to a peer).
+    pub example: String,
+}
+
+impl StartupDiagnostic {
+    /// Compose the full stderr banner as one string. `qsh-cli` prints this
+    /// verbatim — never re-derives, paraphrases, or partially prints it, so
+    /// "exactly once" holds without a second source of truth that could
+    /// drift from this one.
+    pub fn render(&self) -> String {
+        let mut out = format!(
+            "{ACL_STARTUP_HEADLINE} ({}); {ACL_STARTUP_DENIED_CLAUSE}\n\
+             acl.toml path: {}\n\
+             error code: {}",
+            self.code,
+            self.path.display(),
+            ErrorCode::ConfigError.as_str(),
+        );
+        if let Some(detail) = &self.detail {
+            out.push_str(&format!("\ndetail: {detail}"));
+        }
+        out.push_str(&format!(
+            "\n{ACL_STARTUP_NO_AUTOGEN}. minimal example:\n{}",
+            self.example
+        ));
+        out
+    }
+}
+
+/// Load `acl.toml` and turn the result straight into an [`Authorizer`] for
+/// a production call site (`PLAN.md` M5 Step 6 — the only two callers are
+/// `crate::serve::host_runtime` and `crate::reverse::listen::run_listen_unix`'s
+/// controller side). [`PolicyLoad::Loaded`] becomes the real [`Policy`];
+/// every other outcome becomes [`DenyAll`] plus a [`StartupDiagnostic`] the
+/// caller must surface exactly once — fail-closed, never silent
+/// (`docs/design/architecture.md` §6: "오류 시 개방은 존재하지 않는다").
+///
+/// Reads `paths.trust_file()` independently of any trust handle the caller
+/// may already hold (and may already have moved into `Listener::bind` by
+/// the time this runs) — tolerant of a trust-store load failure via
+/// `unwrap_or_default()`, since a broken `trust.toml` is a different,
+/// already-reported failure elsewhere and must not blank out this
+/// diagnostic's own message.
+pub fn load_or_deny(paths: &Paths) -> (Arc<dyn Authorizer>, Option<StartupDiagnostic>) {
+    match PolicySource::load(paths) {
+        PolicyLoad::Loaded(policy) => (Arc::new(policy), None),
+        PolicyLoad::Missing => (
+            Arc::new(DenyAll),
+            Some(StartupDiagnostic {
+                code: ACL_POLICY_MISSING_CODE,
+                path: paths.acl_file(),
+                detail: None,
+                example: minimal_policy_example(paths),
+            }),
+        ),
+        PolicyLoad::Invalid(err) => (
+            Arc::new(DenyAll),
+            Some(StartupDiagnostic {
+                code: ACL_POLICY_INVALID_CODE,
+                path: paths.acl_file(),
+                detail: Some(err.message),
+                example: minimal_policy_example(paths),
+            }),
+        ),
+    }
+}
+
+/// Build the copy-pasteable minimal-policy example embedded in
+/// [`StartupDiagnostic::render`]: one `[[acl]]` block per pinned peer in
+/// `paths.trust_file()` (`PLAN.md` M5 §4.2: fill the machine's actual
+/// pinned peer names in), or a single generic placeholder row when the
+/// trust store has no pins yet (a fresh install before the first `qsh
+/// trust add`).
+fn minimal_policy_example(paths: &Paths) -> String {
+    const EXAMPLE_ALLOW: &str = "[\"exec.run\", \"session.open\", \"session.list\", \"session.attach\", \"session.control\"]";
+    let names: Vec<String> = TrustStore::load(&paths.trust_file())
+        .unwrap_or_default()
+        .peers()
+        .iter()
+        .map(|peer| peer.name.clone())
+        .collect();
+    if names.is_empty() {
+        return format!("[[acl]]\nprincipal = \"device:<name>\"\nallow = {EXAMPLE_ALLOW}\n");
+    }
+    let mut out = String::new();
+    for name in names {
+        out.push_str(&format!(
+            "[[acl]]\nprincipal = \"device:{name}\"\nallow = {EXAMPLE_ALLOW}\n"
+        ));
+    }
+    out
 }
 
 fn read_error(path: &Path, err: &io::Error) -> OpError {
@@ -322,8 +522,16 @@ fn parse_rule(index: usize, raw: RawRule) -> Result<Rule, String> {
     let mut allow = Vec::with_capacity(raw.allow.len());
     for pattern in &raw.allow {
         if pattern.len() > caps::MAX_PATTERN_LEN {
+            // F1 (`PLAN.md` M5 Step 6 PR 6a adversarial ①): unlike the
+            // three deliberate Step 2 grammar-token echoes below (unknown
+            // action pattern/auth_path/scope — bounded to <=128 bytes by
+            // construction, since that is exactly the cap those shapes
+            // pass), an over-length pattern has no such bound: it can be
+            // anything up to the 1MiB file cap. Report only its byte
+            // length and the rule index — never the content itself.
             return Err(format!(
-                "rule {index}: action pattern {pattern:?} exceeds {} bytes",
+                "rule {index}: action pattern of {} bytes exceeds {} bytes",
+                pattern.len(),
                 caps::MAX_PATTERN_LEN
             ));
         }
@@ -964,5 +1172,406 @@ mod tests {
             capture_qsh_acl_events("[[acl]]\nprincipal = \"user:dave\"\nallow = [\"exec.run\"]\n");
         assert!(matches!(load, PolicyLoad::Loaded(_)));
         assert!(events.is_empty(), "{events:?}");
+    }
+
+    // ---------------------------------------------------------------
+    // M5 Step 6 owed test (6): the group-/world-writable warning
+    // (`warn_if_group_or_world_writable`) — non-fatal, fires once, never
+    // on an owner-only file. Unix-only: the check itself is `#[cfg(unix)]`.
+    // ---------------------------------------------------------------
+
+    #[test]
+    #[cfg(unix)]
+    fn world_writable_acl_toml_loads_but_warns_once() {
+        // F7 (`PLAN.md` M5 Step 6 PR 6a adversarial ④): table-driven over
+        // the mode matrix so the group-writable bit *alone* is pinned, not
+        // just the world-writable case — a mutation narrowing the mask
+        // from `& 0o022` to `& 0o002` (other-write only) would still catch
+        // 0o666/0o602 (both other-writable) but must be caught here by
+        // 0o660 (group-writable, NOT other-writable), which the narrowed
+        // mask would wrongly wave through as silent.
+        use std::os::unix::fs::PermissionsExt;
+        let cases: &[(u32, bool)] = &[
+            (0o666, true),  // group- and world-writable
+            (0o660, true),  // group-writable only
+            (0o602, true),  // world-writable only
+            (0o600, false), // owner-only: no warning
+        ];
+        for &(mode, should_warn) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            write_acl(
+                dir.path(),
+                "[[acl]]\nprincipal = \"user:dave\"\nallow = [\"exec.run\"]\n",
+            );
+            std::fs::set_permissions(
+                dir.path().join("acl.toml"),
+                std::fs::Permissions::from_mode(mode),
+            )
+            .unwrap();
+            let sink = std::sync::Arc::new(capture::Sink::default());
+            let sub = capture::Sub(sink.clone());
+            let load = tracing::subscriber::with_default(sub, || {
+                PolicySource::load(&paths_with(dir.path()))
+            });
+            assert!(
+                load.as_loaded().is_some(),
+                "{mode:03o}: a group-/world-writable file still loads — warning, not a deny"
+            );
+            let events: Vec<_> = sink
+                .events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(target, _)| target == "qsh::acl")
+                .cloned()
+                .collect();
+            if should_warn {
+                assert_eq!(
+                    events.len(),
+                    1,
+                    "{mode:03o}: exactly one warning, got {events:?}"
+                );
+                assert!(events[0].1.contains("mode="), "{mode:03o}: {events:?}");
+                assert!(events[0].1.contains("path="), "{mode:03o}: {events:?}");
+            } else {
+                assert!(
+                    events.is_empty(),
+                    "{mode:03o}: must stay silent, got {events:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn owner_only_acl_toml_does_not_warn() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        write_acl(
+            dir.path(),
+            "[[acl]]\nprincipal = \"user:dave\"\nallow = [\"exec.run\"]\n",
+        );
+        std::fs::set_permissions(
+            dir.path().join("acl.toml"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let sink = std::sync::Arc::new(capture::Sink::default());
+        let sub = capture::Sub(sink.clone());
+        let load =
+            tracing::subscriber::with_default(sub, || PolicySource::load(&paths_with(dir.path())));
+        assert!(load.as_loaded().is_some());
+        let events: Vec<_> = sink
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(target, _)| target == "qsh::acl")
+            .cloned()
+            .collect();
+        assert!(events.is_empty(), "0600 must stay silent: {events:?}");
+    }
+
+    // ---------------------------------------------------------------
+    // `load_or_deny` / `StartupDiagnostic` — the production wiring itself.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn load_or_deny_on_missing_file_denies_and_names_the_missing_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let (authorizer, diag) = load_or_deny(&paths_with(dir.path()));
+        let verdict = authorizer.check(
+            &Principal::Device("laptop".into()),
+            AuthPath::Pin,
+            Action::ExecRun,
+            ResourceRef::unowned("exec"),
+        );
+        assert_eq!(verdict.decision, Decision::Deny);
+        let diag = diag.expect("a missing acl.toml must produce a diagnostic");
+        assert_eq!(diag.code, ACL_POLICY_MISSING_CODE);
+        assert_eq!(diag.path, paths_with(dir.path()).acl_file());
+        assert!(diag.detail.is_none());
+        let rendered = diag.render();
+        assert!(rendered.contains(ACL_POLICY_MISSING_CODE));
+        assert!(rendered.contains(ErrorCode::ConfigError.as_str()));
+        assert!(rendered.contains("[[acl]]"));
+        // The other half of the F4 L6 gate (`acl_docs.rs` pins the docs to
+        // these consts): pin `render()` itself to them too, so the banner
+        // cannot silently stop emitting a fragment the docs still quote
+        // verbatim as its wording.
+        for fragment in [
+            ACL_STARTUP_HEADLINE,
+            ACL_STARTUP_DENIED_CLAUSE,
+            ACL_STARTUP_NO_AUTOGEN,
+        ] {
+            assert!(
+                rendered.contains(fragment),
+                "render() must emit {fragment:?} (docs quote it as the banner's wording)"
+            );
+        }
+    }
+
+    #[test]
+    fn load_or_deny_on_invalid_file_denies_and_carries_a_content_free_detail() {
+        // F3 (`PLAN.md` M5 Step 6 PR 6a adversarial ①): table-driven over
+        // every distinct way `PolicySource::load_path` can produce
+        // `PolicyLoad::Invalid`, not just the TOML-syntax shape this test
+        // used to cover alone. `SENTINEL` sits inside a full raw source
+        // line of the file for every shape, so "the raw line never
+        // survives into `render()`" is actually exercised per-shape
+        // instead of assumed to generalize from one.
+        const SENTINEL: &str = "SUPERSECRETPINVALUE0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
+        struct Case {
+            name: &'static str,
+            text: String,
+            /// The exact raw source line (no trailing `\n`) the sentinel
+            /// sits on — must never appear anywhere in `detail`/`render()`,
+            /// for every shape without exception.
+            raw_line: String,
+            /// `Some(token)` for the three Step 2 grammar-token carve-outs
+            /// (this file's F1 doc comment, `parse_rule`'s three
+            /// `unknown ... {other:?}`/`{pattern:?}` arms): `detail` DOES
+            /// echo `token` verbatim, but bounded (<=128 bytes) and
+            /// single-line. `None` for every other shape, where nothing
+            /// from the file survives into `detail` at all.
+            grammar_token: Option<String>,
+        }
+
+        let over_length_pattern = SENTINEL.repeat(3);
+        assert!(
+            over_length_pattern.len() > caps::MAX_PATTERN_LEN,
+            "test setup: the over-length pattern must actually exceed the cap"
+        );
+        let unknown_action = format!("{SENTINEL}.bogus");
+
+        let cases = [
+            Case {
+                name: "toml syntax error",
+                text: format!(
+                    "[[acl]]\nprincipal = \"fp:sha256:{SENTINEL}\nallow = [\"exec.run\"]\n"
+                ),
+                raw_line: format!("principal = \"fp:sha256:{SENTINEL}"),
+                grammar_token: None,
+            },
+            Case {
+                name: "unknown action pattern",
+                text: format!(
+                    "[[acl]]\nprincipal = \"user:dave\"\nallow = [\"{unknown_action}\"]\n"
+                ),
+                raw_line: format!("allow = [\"{unknown_action}\"]"),
+                grammar_token: Some(unknown_action.clone()),
+            },
+            Case {
+                name: "unknown auth_path",
+                text: format!(
+                    "[[acl]]\nprincipal = \"user:dave\"\nauth_path = \"{SENTINEL}\"\n\
+                     allow = [\"exec.run\"]\n"
+                ),
+                raw_line: format!("auth_path = \"{SENTINEL}\""),
+                grammar_token: Some(SENTINEL.to_string()),
+            },
+            Case {
+                name: "unknown scope",
+                text: format!(
+                    "[[acl]]\nprincipal = \"user:dave\"\nscope = \"{SENTINEL}\"\n\
+                     allow = [\"exec.run\"]\n"
+                ),
+                raw_line: format!("scope = \"{SENTINEL}\""),
+                grammar_token: Some(SENTINEL.to_string()),
+            },
+            Case {
+                name: "over-length action pattern",
+                text: format!(
+                    "[[acl]]\nprincipal = \"user:dave\"\nallow = [\"{over_length_pattern}\"]\n"
+                ),
+                raw_line: format!("allow = [\"{over_length_pattern}\"]"),
+                grammar_token: None,
+            },
+            Case {
+                name: "serde type error",
+                text: format!(
+                    "[[acl]]\nprincipal = \"user:dave\"\nallow = [\"exec.run\"]\n\
+                     # {SENTINEL}\nauth_path = 12345\n"
+                ),
+                raw_line: format!("# {SENTINEL}"),
+                grammar_token: None,
+            },
+            Case {
+                name: "missing field",
+                text: format!("[[acl]]\nprincipal = \"user:{SENTINEL}\"\n"),
+                raw_line: format!("principal = \"user:{SENTINEL}\""),
+                grammar_token: None,
+            },
+        ];
+
+        for case in cases {
+            let dir = tempfile::tempdir().unwrap();
+            write_acl(dir.path(), &case.text);
+            let (authorizer, diag) = load_or_deny(&paths_with(dir.path()));
+            let verdict = authorizer.check(
+                &Principal::Device("laptop".into()),
+                AuthPath::Pin,
+                Action::ExecRun,
+                ResourceRef::unowned("exec"),
+            );
+            assert_eq!(
+                verdict.decision,
+                Decision::Deny,
+                "{}: an invalid acl.toml must deny",
+                case.name
+            );
+            let diag = diag.unwrap_or_else(|| {
+                panic!(
+                    "{}: an invalid acl.toml must produce a diagnostic",
+                    case.name
+                )
+            });
+            assert_eq!(diag.code, ACL_POLICY_INVALID_CODE, "{}", case.name);
+            let detail = diag
+                .detail
+                .as_ref()
+                .unwrap_or_else(|| panic!("{}: Invalid always carries a detail", case.name));
+            let rendered = diag.render();
+
+            assert!(
+                !detail.contains(&case.raw_line) && !rendered.contains(&case.raw_line),
+                "{}: raw acl.toml source line leaked into the diagnostic: {detail:?}",
+                case.name
+            );
+
+            match &case.grammar_token {
+                None => {
+                    assert!(
+                        !detail.contains(SENTINEL) && !rendered.contains(SENTINEL),
+                        "{}: diagnostic must be content-free, got detail={detail:?}",
+                        case.name
+                    );
+                }
+                Some(token) => {
+                    assert!(
+                        detail.contains(token.as_str()),
+                        "{}: the documented grammar-token carve-out must still echo the \
+                         token, got detail={detail:?}",
+                        case.name
+                    );
+                    assert!(
+                        token.len() <= caps::MAX_PATTERN_LEN,
+                        "{}: test setup: grammar token must fit the documented <=128-byte \
+                         bound",
+                        case.name
+                    );
+                    assert!(
+                        !detail.contains('\n'),
+                        "{}: the grammar-token carve-out must stay single-line: {detail:?}",
+                        case.name
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn load_or_deny_on_loaded_policy_has_no_diagnostic_and_evaluates_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        write_acl(
+            dir.path(),
+            "[[acl]]\nprincipal = \"device:laptop\"\nallow = [\"exec.run\"]\n",
+        );
+        let (authorizer, diag) = load_or_deny(&paths_with(dir.path()));
+        assert!(diag.is_none());
+        let verdict = authorizer.check(
+            &Principal::Device("laptop".into()),
+            AuthPath::Pin,
+            Action::ExecRun,
+            ResourceRef::unowned("exec"),
+        );
+        assert_eq!(verdict.decision, Decision::Allow);
+        let verdict = authorizer.check(
+            &Principal::Device("laptop".into()),
+            AuthPath::Pin,
+            Action::SessionOpen,
+            ResourceRef::unowned("s1"),
+        );
+        assert_eq!(verdict.decision, Decision::Deny);
+    }
+
+    // ---------------------------------------------------------------
+    // M5 Step 6 owed test (4): the CA-path round trip through the real
+    // `load_or_deny` pipeline — a rule with no `auth_path` (defaults to
+    // `pin`) never grants a CA-authenticated peer anything, and an
+    // explicit `auth_path = "ca"` rule does. No CA issuance harness exists
+    // at the real-binary level yet (private CA is M6 scope,
+    // `crate::trust`'s own module doc), so this exercises the same
+    // `AuthPath` distinction `crates/qsh-cli/tests/acl_enforcement.rs`'s
+    // owed tests (1)/(2)/(3)/(5) exercise for the pin path, through the
+    // one function production actually calls (`load_or_deny`), not just
+    // `Policy::decide` against a hand-built `Policy` (`policy.rs`'s own
+    // `auth_path`-sensitive tests already cover that half in isolation).
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn load_or_deny_ca_path_round_trip_default_denies_explicit_ca_allows() {
+        let dir = tempfile::tempdir().unwrap();
+        write_acl(
+            dir.path(),
+            "[[acl]]\nprincipal = \"user:dave\"\nallow = [\"exec.run\"]\n\n\
+             [[acl]]\nprincipal = \"user:carol\"\nauth_path = \"ca\"\nallow = [\"exec.run\"]\n",
+        );
+        let (authorizer, diag) = load_or_deny(&paths_with(dir.path()));
+        assert!(diag.is_none());
+
+        // `dave`'s rule has no `auth_path` — defaults to `pin` (F6(b)'s own
+        // discipline) — so a CA-authenticated `dave` is denied even though
+        // the principal string matches a real rule.
+        let verdict = authorizer.check(
+            &Principal::User("dave".into()),
+            AuthPath::Ca,
+            Action::ExecRun,
+            ResourceRef::unowned("exec"),
+        );
+        assert_eq!(verdict.decision, Decision::Deny, "no implicit CA grant");
+        // The same principal, pinned, is allowed — the rule it omitted
+        // `auth_path` for.
+        let verdict = authorizer.check(
+            &Principal::User("dave".into()),
+            AuthPath::Pin,
+            Action::ExecRun,
+            ResourceRef::unowned("exec"),
+        );
+        assert_eq!(verdict.decision, Decision::Allow);
+
+        // `carol`'s rule explicitly names `auth_path = "ca"`: a
+        // CA-authenticated `carol` is allowed, but a *pinned* `carol` is
+        // not — the rule never claimed to cover that path.
+        let verdict = authorizer.check(
+            &Principal::User("carol".into()),
+            AuthPath::Ca,
+            Action::ExecRun,
+            ResourceRef::unowned("exec"),
+        );
+        assert_eq!(verdict.decision, Decision::Allow);
+        let verdict = authorizer.check(
+            &Principal::User("carol".into()),
+            AuthPath::Pin,
+            Action::ExecRun,
+            ResourceRef::unowned("exec"),
+        );
+        assert_eq!(verdict.decision, Decision::Deny, "the rule never named pin");
+    }
+
+    #[test]
+    fn minimal_policy_example_fills_in_actual_pinned_peer_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut trust = crate::trust::TrustStore::default();
+        trust.add_peer(
+            "laptop",
+            None,
+            qsh_transport::Fingerprint::of_spki_der(b"k"),
+            "2026-01-01T00:00:00Z".to_string(),
+        );
+        trust.save(&dir.path().join("trust.toml")).unwrap();
+        let example = minimal_policy_example(&paths_with(dir.path()));
+        assert!(example.contains("device:laptop"), "{example:?}");
     }
 }

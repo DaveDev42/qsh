@@ -23,6 +23,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use qsh_core::TrustStore;
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -194,6 +195,66 @@ impl Default for Sandbox {
     }
 }
 
+/// `PLAN.md` M5 Step 6: production flipped from "any pinned peer, any
+/// action" ([`qsh_core::acl::AllowAllPinned`]) to default-deny — an
+/// `acl.toml`-backed policy, or `DenyAll` when none loads. Every real-
+/// binary fixture that used to get the old interim policy for free now
+/// needs an explicit `acl.toml` of its own, or every op it drives fails
+/// closed with `PERMISSION_DENIED`.
+///
+/// This is the one place that plants it: writes one `[[acl]]` rule per
+/// principal already pinned in `sandbox`'s `trust.toml` (as of this call),
+/// granting every action an ordinary E2E fixture needs (the full non-
+/// always-denied vocabulary, `scope` left at its `"owned"` default) — the
+/// same shape `AllowAllPinned` granted a pinned peer, reproduced as a real
+/// policy file instead of an interim hardcoded rule.
+///
+/// A no-op when `sandbox` has no pins yet (nothing to write a rule for) or
+/// when `acl.toml` already exists (a test that wrote its own — e.g. a
+/// minimal-policy or CA-path scenario — is never clobbered by this
+/// convenience). [`ServeGuard`]/[`ListenGuard`]/[`ReverseGuard`]'s
+/// ordinary `start`/`start_with` call this automatically, right before
+/// spawning; a test that deliberately wants the default-deny posture
+/// (no `acl.toml` at all) uses each guard's `*_without_policy` variant
+/// instead, which skips this call outright.
+///
+/// `pub` (not private) because `hosts_reverse.rs` keeps its own
+/// `ListenGuard`/`ReverseGuard` pair — deliberately not shared with this
+/// module's, see that file's module doc — and needs the same one-time
+/// planting for the controller side of its live `host.reverse`
+/// registration to be admitted at all.
+pub fn plant_allow_all_acl(sandbox: &Sandbox) {
+    let acl_path = sandbox.config_dir().join("acl.toml");
+    if acl_path.exists() {
+        return;
+    }
+    let names: Vec<String> = TrustStore::load(&sandbox.config_dir().join("trust.toml"))
+        .map(|store| store.peers().iter().map(|peer| peer.name.clone()).collect())
+        .unwrap_or_default();
+    if names.is_empty() {
+        return;
+    }
+    let mut text = String::new();
+    for name in names {
+        text.push_str(&format!(
+            "[[acl]]\nprincipal = \"device:{name}\"\nallow = [\"exec.run\", \"session.open\", \
+             \"session.list\", \"session.attach\", \"session.control\", \"host.reverse\", \
+             \"forward.local\", \"forward.remote\"]\n\n"
+        ));
+    }
+    std::fs::write(&acl_path, text).expect("write fixture acl.toml");
+    // F8 (`PLAN.md` M5 Step 6 PR 6a adversarial ④): `fs::write` inherits
+    // the process umask (0o664 under the common `022`/`002` umask) — a
+    // group-writable planted `acl.toml` would spuriously trip the F7
+    // group-/world-writable warning on any runner with that umask. Pin it
+    // to owner-only explicitly instead of depending on the ambient umask.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&acl_path, std::fs::Permissions::from_mode(0o600));
+    }
+}
+
 /// The exit code of a finished child, which on Unix is absent only when it
 /// died of a signal — never expected here.
 pub fn exit_code(output: &Output) -> i32 {
@@ -257,6 +318,20 @@ impl ServeGuard {
     /// Like [`start`](Self::start) with extra leading arguments (e.g.
     /// `-vv`).
     pub fn start_with(host: &Sandbox, extra: &[&str]) -> Self {
+        plant_allow_all_acl(host);
+        Self::spawn(host, extra)
+    }
+
+    /// Like [`start_with`](Self::start_with), but never plants an
+    /// `acl.toml` — for a test whose whole point is the default-deny
+    /// posture an absent policy produces (`PLAN.md` M5 Step 6's owed
+    /// tests: no acl.toml at all, or a deliberately corrupt one the test
+    /// writes itself before calling this).
+    pub fn start_without_policy(host: &Sandbox, extra: &[&str]) -> Self {
+        Self::spawn(host, extra)
+    }
+
+    fn spawn(host: &Sandbox, extra: &[&str]) -> Self {
         let mut args: Vec<&str> = extra.to_vec();
         args.extend_from_slice(&["serve", "--bind", "127.0.0.1:0"]);
         let mut child = host
@@ -503,6 +578,15 @@ const LISTEN_START_TIMEOUT: Duration = Duration::from_secs(10);
 pub struct ListenGuard {
     child: Child,
     addr: String,
+    /// Every stderr line the child has printed so far (F6, `PLAN.md` M5
+    /// Step 6 PR 6a adversarial ④) — mirrors [`ServeGuard`]'s own retained
+    /// stderr, which the pre-fix version of this guard discarded outright
+    /// (`std::io::copy(.., &mut std::io::sink())`), leaving the
+    /// controller's own startup-diagnostic banner unobservable to any test
+    /// (a mutation deleting that `on_policy_diagnostic` call entirely
+    /// still passed every existing test green — the gap this field
+    /// closes).
+    stderr: Arc<Mutex<Vec<String>>>,
 }
 
 #[cfg(unix)]
@@ -516,6 +600,18 @@ impl ListenGuard {
     /// Like [`start`](Self::start), with an explicit `--bind` value —
     /// e.g. a fixed port, to provoke a real `EADDRINUSE` bind conflict.
     pub fn start_with(sandbox: &Sandbox, bind: &str) -> Self {
+        plant_allow_all_acl(sandbox);
+        Self::spawn(sandbox, bind)
+    }
+
+    /// Like [`start_with`](Self::start_with), but never plants an
+    /// `acl.toml` — see [`ServeGuard::start_without_policy`] for why a
+    /// test reaches for this instead.
+    pub fn start_without_policy(sandbox: &Sandbox, bind: &str) -> Self {
+        Self::spawn(sandbox, bind)
+    }
+
+    fn spawn(sandbox: &Sandbox, bind: &str) -> Self {
         let mut child = sandbox
             .command(&["listen", "--bind", bind])
             .stdin(Stdio::null())
@@ -530,20 +626,41 @@ impl ListenGuard {
             });
         }
 
-        let stderr = child.stderr.take().expect("listen stderr pipe");
+        let stderr_pipe = child.stderr.take().expect("listen stderr pipe");
+        let stderr = Arc::new(Mutex::new(Vec::new()));
         let (tx, rx) = mpsc::channel::<String>();
-        thread::spawn(move || {
-            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                if let Some(addr) = line.strip_prefix(LISTEN_LISTENING_PREFIX) {
-                    let _ = tx.send(addr.to_string());
+        {
+            let sink = Arc::clone(&stderr);
+            thread::spawn(move || {
+                for line in BufReader::new(stderr_pipe).lines().map_while(Result::ok) {
+                    if let Some(addr) = line.strip_prefix(LISTEN_LISTENING_PREFIX) {
+                        let _ = tx.send(addr.to_string());
+                    }
+                    sink.lock().unwrap_or_else(|e| e.into_inner()).push(line);
                 }
-            }
-        });
+            });
+        }
         let addr = rx
             .recv_timeout(LISTEN_START_TIMEOUT)
             .expect("qsh listen never reported a bound address");
 
-        Self { child, addr }
+        Self {
+            child,
+            addr,
+            stderr,
+        }
+    }
+
+    /// A snapshot of every stderr line the child has printed so far (F6,
+    /// `PLAN.md` M5 Step 6 PR 6a adversarial ④) — unlike
+    /// [`ServeGuard::captured`]/[`ServeGuard::finish`], this does not stop
+    /// or join the child: a caller asserts against a live controller
+    /// (`ListenGuard` has no `finish`; [`Drop`] just kills it).
+    pub fn stderr_lines(&self) -> Vec<String> {
+        self.stderr
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Attempt to start `qsh listen --bind <bind>`, but do not block
@@ -597,6 +714,18 @@ impl ReverseGuard {
     /// Like [`start`](Self::start), with the full argv (e.g. plus
     /// `--offered-name` or a verbosity flag).
     pub fn start_with(sandbox: &Sandbox, args: &[&str]) -> Self {
+        plant_allow_all_acl(sandbox);
+        Self::spawn(sandbox, args)
+    }
+
+    /// Like [`start_with`](Self::start_with), but never plants an
+    /// `acl.toml` — see [`ServeGuard::start_without_policy`] for why a
+    /// test reaches for this instead.
+    pub fn start_without_policy(sandbox: &Sandbox, args: &[&str]) -> Self {
+        Self::spawn(sandbox, args)
+    }
+
+    fn spawn(sandbox: &Sandbox, args: &[&str]) -> Self {
         let mut child = sandbox
             .command(args)
             .stdin(Stdio::null())

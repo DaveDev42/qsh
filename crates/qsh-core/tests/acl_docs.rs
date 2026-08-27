@@ -30,7 +30,10 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use qsh_core::acl::{Action, PERMISSION_DENIED_MESSAGE};
+use qsh_core::acl::{
+    ACL_POLICY_INVALID_CODE, ACL_POLICY_MISSING_CODE, ACL_STARTUP_DENIED_CLAUSE,
+    ACL_STARTUP_HEADLINE, ACL_STARTUP_NO_AUTOGEN, Action, PERMISSION_DENIED_MESSAGE,
+};
 
 /// The repo root, reached from `CARGO_MANIFEST_DIR` (`crates/qsh-core`) the
 /// same way every other doc-reading integration test in this workspace
@@ -161,4 +164,53 @@ fn architecture_md_quotes_the_permission_denied_message_verbatim() {
         "docs/design/architecture.md §6 itself (not merely somewhere in the file) \
          must quote PERMISSION_DENIED_MESSAGE verbatim"
     );
+}
+
+// ---------------------------------------------------------------------
+// F4 (`PLAN.md` M5 Step 6 PR 6a adversarial ②): the L6 doc-consistency
+// gate the migration story (1) owed and never got — `doctor_docs.rs`'s
+// `CONTROLLER_UNREACHABLE` precedent, applied to
+// `qsh_core::acl::StartupDiagnostic::render`'s fixed wording. `render()`
+// composes its output FROM these consts (`crates/qsh-core/src/acl/
+// load.rs`) rather than inlining the literal text, so there is exactly
+// one place the wording can drift from — and this gate is what stops that
+// drift from reaching README.md/docs/CLI.md silently. A whole-file
+// `.contains` (not section-scoped) mirrors `doctor_docs.rs` itself, which
+// this gate is explicitly modeled on.
+// ---------------------------------------------------------------------
+
+#[test]
+fn readme_quotes_the_acl_startup_diagnostic_wording_verbatim() {
+    let readme = read_doc("README.md");
+    for fragment in [
+        ACL_STARTUP_HEADLINE,
+        ACL_STARTUP_DENIED_CLAUSE,
+        ACL_STARTUP_NO_AUTOGEN,
+        ACL_POLICY_MISSING_CODE,
+        ACL_POLICY_INVALID_CODE,
+    ] {
+        assert!(
+            readme.contains(fragment),
+            "README.md's security posture section must quote {fragment:?} verbatim \
+             (StartupDiagnostic::render's fixed wording)"
+        );
+    }
+}
+
+#[test]
+fn cli_md_quotes_the_acl_startup_diagnostic_wording_verbatim() {
+    let cli_md = read_doc("docs/CLI.md");
+    for fragment in [
+        ACL_STARTUP_HEADLINE,
+        ACL_STARTUP_DENIED_CLAUSE,
+        ACL_STARTUP_NO_AUTOGEN,
+        ACL_POLICY_MISSING_CODE,
+        ACL_POLICY_INVALID_CODE,
+    ] {
+        assert!(
+            cli_md.contains(fragment),
+            "docs/CLI.md §6.12 must quote {fragment:?} verbatim \
+             (StartupDiagnostic::render's fixed wording)"
+        );
+    }
 }

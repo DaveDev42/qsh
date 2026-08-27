@@ -53,7 +53,11 @@ use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 // this module's tests) — on the Windows lib build nothing constructs a
 // controller, so ungated they would trip `unused_imports` under the
 // Windows leg's `clippy -D warnings` (same gating as `tui/mod.rs`).
-#[cfg(any(unix, test))]
+// `AllowAllPinned` itself is test-only now (M5 Step 6): production builds
+// its `Authorizer` from `acl::load_or_deny` below, never this interim
+// stand-in — the test module's `test_listen`/`test_listen_with_clock`
+// helpers are the only remaining callers.
+#[cfg(test)]
 use crate::acl::AllowAllPinned;
 use crate::acl::Authorizer;
 #[cfg(unix)]
@@ -154,13 +158,19 @@ pub fn resolve_bind(flag: Option<&str>, config: &Config) -> Result<SocketAddr, O
 ///
 /// `identity` must already be loaded synchronously before entering the
 /// runtime, exactly like [`crate::serve::run_serve`]. `on_bound` receives
-/// the actual bound address once the listener is up.
+/// the actual bound address once the listener is up. `on_policy_diagnostic`
+/// fires at most once, after `on_bound` and before the accept loop starts
+/// admitting registrations, and only when `acl.toml` did not produce a
+/// usable policy — with the already-rendered
+/// [`crate::acl::StartupDiagnostic::render`] text (`PLAN.md` M5 Step 6);
+/// `qsh-cli` prints it verbatim and holds no ACL logic of its own.
 pub async fn run_listen(
     paths: &Paths,
     config: &Config,
     identity: LoadedIdentity,
     bind_flag: Option<&str>,
     on_bound: impl FnOnce(SocketAddr),
+    on_policy_diagnostic: impl FnOnce(&str),
     shutdown: impl std::future::Future<Output = ()>,
 ) -> Result<(), OpError> {
     // Twin cfg blocks as alternative tail expressions — the exact shape
@@ -168,12 +178,29 @@ pub async fn run_listen(
     // clippy's `needless_return` on the Windows leg (probed empirically).
     #[cfg(not(unix))]
     {
-        let _ = (paths, config, identity, bind_flag, on_bound, shutdown);
+        let _ = (
+            paths,
+            config,
+            identity,
+            bind_flag,
+            on_bound,
+            on_policy_diagnostic,
+            shutdown,
+        );
         Err(windows_unsupported())
     }
     #[cfg(unix)]
     {
-        run_listen_unix(paths, config, identity, bind_flag, on_bound, shutdown).await
+        run_listen_unix(
+            paths,
+            config,
+            identity,
+            bind_flag,
+            on_bound,
+            on_policy_diagnostic,
+            shutdown,
+        )
+        .await
     }
 }
 
@@ -197,6 +224,7 @@ async fn run_listen_unix(
     identity: LoadedIdentity,
     bind_flag: Option<&str>,
     on_bound: impl FnOnce(SocketAddr),
+    on_policy_diagnostic: impl FnOnce(&str),
     shutdown: impl std::future::Future<Output = ()>,
 ) -> Result<(), OpError> {
     let bind = resolve_bind(bind_flag, config)?;
@@ -263,9 +291,22 @@ async fn run_listen_unix(
     let audit_for_shutdown = audit.clone();
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     let registry = Registry::new(clock.clone(), config.listen.allow_advertised_names);
+    // `PLAN.md` M5 Step 6: the controller's `host.reverse` choke point
+    // (`super::admit::admit`) is gated by the same `acl.toml`-backed
+    // policy `crate::serve::host_runtime` builds for `qsh serve`/`qsh
+    // reverse` — `load_or_deny` falls back to `DenyAll` (never
+    // `AllowAllPinned`) plus a diagnostic on anything short of a clean
+    // load. Read independently of `trust` above (already moved into
+    // `Listener::bind`): `load_or_deny` opens `paths.trust_file()` itself
+    // to fill the diagnostic's example policy with this machine's actual
+    // pins.
+    let (authorizer, policy_diagnostic) = crate::acl::load_or_deny(paths);
+    if let Some(diag) = &policy_diagnostic {
+        on_policy_diagnostic(&diag.render());
+    }
     let listen = Listen::new(
         registry,
-        Arc::new(AllowAllPinned),
+        authorizer,
         audit,
         identity.identity.device_id.clone(),
         clock,
@@ -4646,6 +4687,11 @@ mod tests {
                 move |_addr| {
                     let _ = bound_tx.send(());
                 },
+                // No acl.toml in this test's tempdir: the missing-policy
+                // diagnostic fires, but this test is about the localctl
+                // socket's lifecycle, not authorization, so the rendered
+                // text is discarded.
+                |_diag| {},
                 async move {
                     let _ = shutdown_rx.await;
                 },
@@ -4706,6 +4752,7 @@ mod tests {
             identity,
             Some("127.0.0.1:0"),
             |_addr| panic!("must fail before the QUIC listener ever reports bound"),
+            |_diag| panic!("must fail before the policy diagnostic is ever composed"),
             std::future::pending::<()>(),
         )
         .await
@@ -4749,6 +4796,7 @@ mod tests {
             identity,
             None,
             |_addr| {},
+            |_diag| {},
             std::future::pending::<()>(),
         )
         .await

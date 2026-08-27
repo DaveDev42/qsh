@@ -214,14 +214,45 @@ present a certificate and both ends check the other's fingerprint against
 the trust store. Anything that fails to authenticate is rejected during the
 handshake, before a session, tunnel, or listener exists.
 
-Authorization is the part that is not finished. The policy engine is M5.
-Until it lands, a host that authenticated a pinned peer authorizes that peer
-for everything: opening and attaching sessions, writing to them,
-opening tunnels, registering as a reverse controller or dialing in as one.
-There is no per-peer scoping. Peers that authenticate through a trusted CA
-(`[[ca]]` in `trust.toml`) complete the handshake and then get
-`PERMISSION_DENIED` on every operation. Pin only devices you would hand a
-shell to.
+Authorization is `acl.toml`: a small, principal-scoped rule file at
+`<config_dir>/acl.toml`. It is default-deny — a host with no `acl.toml`,
+or one that fails to parse, denies every operation from every peer, full
+stop. There is no fallback to "any pinned peer gets everything" any more,
+and qsh never creates or edits the file for you; an operator writes it by
+hand. Each rule names a principal (`user:<name>`, `device:<name>`, or
+`fp:sha256:<fingerprint>`), the auth path it applies to (`pin`, the
+default when omitted, or `ca`), and the actions it grants — an exact name
+like `exec.run`, or a trailing-wildcard family like `session.*`. A peer
+that authenticates through a trusted CA (`[[ca]]` in `trust.toml`) gets
+exactly what a rule with an explicit `auth_path = "ca"` grants it; a rule
+that omits `auth_path` (the pin default) never matches a CA-authenticated
+peer, even when the principal string is identical. `forward.socks`,
+`file.read`, and `file.write` are defined in the action vocabulary but
+always denied regardless of any rule — those operations are P1,
+unimplemented. Every refusal a remote peer sees is the same opaque
+`PERMISSION_DENIED` message, whether it came from a missing rule, a
+policy file that failed to load, or an audit-write failure.
+
+The policy loads once, when `qsh serve`/`qsh listen`/`qsh reverse` starts
+— there is no hot reload, so an edit to `acl.toml` only takes effect on
+the next restart. If the file is missing or invalid at startup, the
+process still comes up (it still answers, it just denies everything) and
+prints a diagnostic to stderr exactly once: `no usable acl.toml policy`,
+`every request is denied until this is fixed`, the exact path it looked
+at, the `CONFIG_ERROR` code, a copy-pasteable minimal policy filled in
+with this machine's actual pinned peers, and
+`acl.toml is never auto-generated — create it by hand`. The diagnostic's
+`code` field tells the two causes apart: `acl_policy_missing` (no file)
+versus `acl_policy_invalid` (parse/validation failure). It never dumps
+raw source lines from the file; the only echo is a bounded (≤128-byte,
+single-line-escaped) grammar token from the offending rule (unknown
+action pattern / `auth_path` / scope). On unix, a group- or
+world-writable `acl.toml` also gets a one-time stderr warning rather than
+a refusal to load it: an operator locked out of their own host by a
+permissions slip has no way back in if loading it denied instead of
+warned. Windows ACL checking is out of scope. Pin only devices you would
+hand a shell to, and write down what you actually want each of them to
+be able to do.
 
 ## Documents
 
@@ -313,8 +344,9 @@ Some of these are MVP scope decisions, some are unfinished work.
   case from a drop-and-resume: switching networks without losing the
   connection outright (Wi-Fi to tethering, a changed IP) carries an open
   tunnel through transparently, the same as it does a session.
-- No policy engine before M5, so it is allow-all among pinned peers. See
-  [Security posture](#security-posture).
+- `acl.toml` has no hot reload: an edit only takes effect the next time
+  `qsh serve`/`qsh listen`/`qsh reverse` starts, and qsh never creates or
+  edits the file for you. See [Security posture](#security-posture).
 - The audit log is fail-closed: `qsh serve`/`qsh reverse` deny an
   otherwise-allowed `session.open`, `exec.run`, or `host.reverse`
   registration rather than let it through with no durable audit record —

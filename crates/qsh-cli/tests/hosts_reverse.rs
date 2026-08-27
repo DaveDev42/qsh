@@ -84,6 +84,12 @@ struct ListenGuard {
 
 impl ListenGuard {
     fn start(sandbox: &Sandbox) -> Self {
+        // `PLAN.md` M5 Step 6: `qsh listen` now default-denies `host.reverse`
+        // registrations without an `acl.toml` of its own — this struct is
+        // deliberately not `common::ListenGuard` (see this file's module
+        // doc), so it does not get that guard's automatic planting for
+        // free and has to call the same choke point directly.
+        common::plant_allow_all_acl(sandbox);
         let mut child = sandbox
             .command(&["listen", "--bind", "127.0.0.1:0"])
             .stdin(Stdio::null())
