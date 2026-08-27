@@ -1,0 +1,19 @@
+{
+  "command": "acl.check",
+  "data": {
+    "action": "session.open",
+    "auth_path": "pin",
+    "decision": "allow",
+    "policy": {
+      "loaded": true,
+      "path": "<path>",
+      "rules": 1
+    },
+    "principal": "device:laptop",
+    "resource": "exec",
+    "rule": 0
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

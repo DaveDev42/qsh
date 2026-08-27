@@ -184,7 +184,24 @@ impl Policy {
     /// resource with no owner concept at all (`resource.owner: None` —
     /// `exec.run`/`host.reverse`/`forward.local`) is never filtered by
     /// `scope` either way, `"owned"` or `"any"`.
-    pub fn decide(
+    ///
+    /// `pub(crate)`, not `pub` (`PLAN.md` M5 Step 7 DoD 1): the structural
+    /// half of "`acl check` runs the same code path as enforcement" is that
+    /// this is the **only** evaluator, and the only way to make that a
+    /// compiler-enforced fact rather than a code-review claim is to make it
+    /// impossible for any second evaluator to exist outside this crate.
+    /// With this narrowed, the entire workspace has exactly two call sites
+    /// of `Policy::decide`: [`Authorizer for Policy`](Policy)'s own `check`
+    /// (production enforcement, `crate::server::Server::authorize` and
+    /// siblings, via `Arc<dyn Authorizer>`) and `crate::ops::acl::Ops::
+    /// acl_check` — both inside `qsh-core`, both calling this one method. A
+    /// second, explaining-only evaluator would have to either reimplement
+    /// this method's body (visibly duplicated logic, not a second call to
+    /// this one) or live inside `qsh-core` too, where it would show up
+    /// next to these two in a workspace-wide `grep -rn '\.decide(\|Policy::decide'`
+    /// — the mechanical check `PLAN.md` §4's "acl check와 enforcement의
+    /// 분기" risk item asks for.
+    pub(crate) fn decide(
         &self,
         principal: &Principal,
         auth_path: AuthPath,

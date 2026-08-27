@@ -235,6 +235,52 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
             outcome: Outcome::Fails("INVALID_ARGUMENT"),
         },
         Case {
+            // `PLAN.md` M5 Step 7 (c): a name outside `Action::ALL`'s
+            // vocabulary is `INVALID_ARGUMENT` in both output modes — the
+            // deliberate deviation from the Step 7 draft's literal "exit
+            // `2`" text is that this is an `OpError` (exit `255`, this
+            // file's `EXIT_RUNTIME_FAILURE`), not a clap usage error (exit
+            // `2`): `--action`'s value is syntactically well-formed (a
+            // plain string), just outside the runtime vocabulary, the same
+            // "`INVALID_ARGUMENT` op error, not a clap usage error"
+            // precedent `cli.rs`'s own `-L`/`-R` flag docs already state.
+            // The rejection happens before any `acl.toml` load (`ops/
+            // acl.rs`), so which sandbox runs this is irrelevant to the
+            // outcome — `fleet.client` is reused rather than adding a new
+            // one.
+            name: "acl check: action name outside the vocabulary",
+            sandbox: &fleet.client,
+            args: &[
+                "acl",
+                "check",
+                "--principal",
+                "device:laptop",
+                "--action",
+                "not.a.real.action",
+            ],
+            outcome: Outcome::Fails("INVALID_ARGUMENT"),
+        },
+        Case {
+            // §6.15's other vocabulary edge: a principal matching none of
+            // the three shapes (`device:`/`user:`/`fp:sha256:`). Pinned
+            // here at the op level, not only by `qsh-transport`'s
+            // `FromStr` unit test — `Ops::acl_check` mapping the parse
+            // error to `INVALID_ARGUMENT` (rather than, say, falling back
+            // to a raw device principal) is exactly the kind of seam a
+            // unit test one layer down cannot see.
+            name: "acl check: principal outside the vocabulary",
+            sandbox: &fleet.client,
+            args: &[
+                "acl",
+                "check",
+                "--principal",
+                "not-a-principal",
+                "--action",
+                "exec.run",
+            ],
+            outcome: Outcome::Fails("INVALID_ARGUMENT"),
+        },
+        Case {
             name: "usage: session close with an unknown signal",
             sandbox: &fleet.client,
             args: &["session", "close", "box/01K0SESSION", "--signal", "STOP"],

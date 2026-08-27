@@ -55,6 +55,12 @@ pub fn normalize(mut value: serde_json::Value) -> serde_json::Value {
                         }
                         "duration_ms" => *child = serde_json::Value::from(0),
                         "config_dir" => *child = serde_json::Value::String("<config_dir>".into()),
+                        // `AclPolicyRef.path` is this sandbox's own tempdir
+                        // `acl.toml` absolute path — volatile per run, same
+                        // "shape, not value" masking `config_dir` gets.
+                        // Unambiguous: no other JSON field in the contract
+                        // is literally named `"path"`.
+                        "path" => *child = serde_json::Value::String("<path>".into()),
                         "device_id" => *child = serde_json::Value::String("<device_id>".into()),
                         "fingerprint" | "observed_fingerprint" => {
                             *child = serde_json::Value::String("<fingerprint>".into())

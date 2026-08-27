@@ -343,7 +343,9 @@ interim allow-all에서는 정보량이 0이지만, 정책이 켜지는 순간 1
 - `acl check`가 **정책을 변경하지 않음**(읽기 전용) — 실행 전후 acl.toml mtime·내용 불변.
 - 원격 노출 없음: `acl.check`가 wire `ControlMessage`의 어느 variant로도 나가지 않음(원격 peer가 정책을 조회할 수 없다).
 - fixture 2종이 스키마 검증 통과, `qsh schema --json`이 새 타입을 서빙(M7 구현 대상이므로 스키마 생성만 확인).
-- 잘못된 action 이름 → `INVALID_ARGUMENT` + exit `2`(§4 exit code 계약).
+- 잘못된 action 이름 → `INVALID_ARGUMENT` + exit `2`(§4 exit code 계약). **확정 — main 세션 (2026-08-28): exit `255`로 정정.** §4의 `2`는 clap 층의 syntax 거부이고, 어휘 밖 값은 `Ops`가 거부하는 `OpError`라 runtime 실패 `255`다 — 기존 exit-code matrix의 모든 `INVALID_ARGUMENT` 행이 이미 이 해석으로 핀돼 있고(`-L`/`-R` 선례 포함), 이 명령 하나만 `2`로 하면 code↔exit 대응이 명령마다 갈라진다. 이 줄의 "exit 2"는 PLAN이 §4를 잘못 옮긴 것이다. 같은 확정: 항상-deny 행의 실구동 leg는 wire producer가 없어(P1) `PolicySource::load`+`Authorizer::check` 교차로 대체 — Step 4 registry 앵커가 도달 불가를 컴파일 타임에 고정하고 있으므로 3-way의 셋째 leg(audit)는 그 행에서 성립 불가가 아니라 무대상이다.
+
+**검증 라운드 확정 — Step 7 adversarial (2026-08-28, main 세션 arbitration).** FIX-THEN-SHIP(P0 0·P1 2·P2 8) 처분: ① 문서화된 기본값 2종(`--owner-auth-path`=pin, `--auth-path`=pin)이 mutation에 무저항으로 실증돼 명시값과의 동치 단언으로 핀한다. ② §6.15의 "`rule`은 null" 문장은 wire가 key 자체를 생략하는 실제와 어긋나 생략으로 정정(owner 문장과 통일). ③ 표에 Invalid(파손 acl.toml) 행을 추가해 3-way를 9행으로 — Missing만 있던 로더 축을 닫는다. ④ `--owner-auth-path`는 clap `requires`로 `--owner` 없이 오면 usage 거부. ⑤ acl check가 Missing/Invalid를 구별하지 못하는 것은 §6.15가 이미 정직하게 문서화한 한계로 수용하되, 파스 상세의 정본이 시작 진단(§6.12/§6.13)임을 §6.15에 한 문장으로 명시(op 자체에 상세 표면 추가는 하지 않는다 — 계약 성장 없이 M7 doctor 통합에서 재평가). ⑥ enforcement 전용 fail-closed 층(audit 기록 실패 시 allow→deny 반전, owner 조회 실패 deny)으로 acl check의 allow 예측만 뒤집힐 수 있음을 §6.15에 명시 — deny 예측은 항상 신뢰 가능. ⑦ 표 행의 acl.toml 심기도 0o600 고정(umask 002 러너의 경고 오발 방지, 6a F8과 동일).
 
 **(d) 완료 판정:** **DoD 1 green.** `acl check`의 판정 경로가 enforcement와 같은 함수임이 구조로 강제됨. 렌더러/CLI에 인가 로직 0줄(`xtask arch` green). fixture 2종 등록. Windows leg nextest green(이 op은 플랫폼 무관 — Windows에서도 `acl check`가 동작해야 한다: 정책 파일 읽기와 순수 평가뿐이므로 `cfg(unix)` 분기가 없어야 한다).
 
@@ -444,8 +446,8 @@ interim allow-all에서는 정보량이 0이지만, 정책이 켜지는 순간 1
 - **`[audit].max_bytes` / `retain` / `queue_depth` 기본값** (초안 64 MiB / 5 / 1024) — Step 3. `max_bytes * (retain+1)`이 상시 디스크 예산이므로 두 값은 같이 정한다.
 - **정책 파일 상한** (rule 수·행당 패턴 수·문자열 길이) — Step 2. 운영자 파일이라 적대적이지는 않지만 상한 없는 파싱은 두지 않는다.
 - **`forward_id` 소유가 principal 기준인가 connection 기준인가** (초안: principal — `docs/CLI.md` §2.5의 "소유 **peer**"의 문자 그대로, 같은 principal의 다른 연결도 close 가능) — Step 5. 이 선택은 사용자 가시적이므로 §6.9/§6.14 문안 갱신을 동반한다. **확정 — main 세션 (2026-08-27): 초안 그대로(principal 기준).** §2.5 "소유 peer"의 문자적 의미와 일치하고, 이 제품의 전제 자체가 연결 수명과 리소스 수명의 분리(resume, §10)라 conn_id는 소유 축으로 부적합하다. 다만 오늘의 remote forward는 소유 연결이 죽으면 `purge_connection`이 함께 철거하므로, principal 축의 실효 이익은 "재접속 후 close"가 아니라 **같은 principal의 동시 두 번째 연결**과 세션 소유권 어휘와의 통일성이다(검증 라운드 P2 지적 반영 — 코드 주석도 이 실효 이익으로 정정).
-- **`qsh acl check`의 `--owner` 표면을 M5에 넣는가** (초안: 넣는다 — `scope` 판정을 설명할 수 없으면 DoD 1의 "표 기반 증명"이 소유권 행을 커버하지 못한다) — Step 7.
-- **시작 진단이 최소 정책 예시에 실제 peer 이름을 채우는가** (초안: 채운다 — trust store의 pinned peer가 이미 로컬 정보이고, 붙여넣기 가능한 예시가 마이그레이션 마찰을 실제로 줄인다) — Step 6. 다만 진단은 stderr이고 stdout 순수성을 해치지 않는다.
+- **`qsh acl check`의 `--owner` 표면을 M5에 넣는가** (초안: 넣는다 — `scope` 판정을 설명할 수 없으면 DoD 1의 "표 기반 증명"이 소유권 행을 커버하지 못한다) — Step 7. **확정 — main 세션 (2026-08-27): 초안 그대로 넣는다.** Step 5가 scope 판정을 이미 가동했으므로(owned 기본), `--owner` 없는 `acl check`는 소유권 행에서 enforcement와 다른 답을 낼 수 없고 그것은 DoD 1의 반례다. 표면은 `--owner <principal>` + `--owner-auth-path <pin|ca>`(생략 시 `pin` — rule 기본값과 같은 이유)이고, 접힘은 Ops가 프로덕션 `acl::opener_key`를 **그대로** 호출해 만든다 — opener_key의 내부 인코딩(`{auth_path:?}` Debug 포맷)은 CLI 표면·계약에 절대 노출하지 않고, 접힘 구현이 두 벌 생기지도 않는다. §6.15에는 `--owner`가 아직 없으므로 Step 7이 **문서 먼저**(추가는 additive) 갱신한 뒤 구현을 맞춘다.
+- **시작 진단이 최소 정책 예시에 실제 peer 이름을 채우는가** (초안: 채운다 — trust store의 pinned peer가 이미 로컬 정보이고, 붙여넣기 가능한 예시가 마이그레이션 마찰을 실제로 줄인다) — Step 6. 다만 진단은 stderr이고 stdout 순수성을 해치지 않는다. **확정 — Step 6a 구현 완료 (2026-08-27): 초안 그대로.** trust.toml 부재·파손 시에는 generic placeholder로 우아하게 강등(검증 라운드 실증).
 - **audit degraded 래치의 해제 조건** (초안: 다음 성공적 쓰기 — 주기적 재시도 없이 다음 결정 시도에서 자연히 재시도된다) — Step 3.
 
 ### 4.3 크기 정직성 — 2ew에 들어가는가

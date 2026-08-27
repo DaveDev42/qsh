@@ -206,6 +206,10 @@ pub enum Command {
     #[command(subcommand)]
     Trust(TrustCmd),
 
+    /// Inspect the ACL policy (`docs/CLI.md` §6.15).
+    #[command(subcommand)]
+    Acl(AclCmd),
+
     /// List every host visible to this machine: trust-store-pinned forward
     /// hosts and this machine's live reverse registrations, together
     /// (`docs/CLI.md` §6.1). Never dials.
@@ -418,6 +422,56 @@ pub enum TrustCmd {
         /// The peer alias to unpin.
         name: String,
     },
+}
+
+/// `qsh acl …` subcommands (`docs/CLI.md` §6.15).
+#[derive(Debug, Subcommand)]
+pub enum AclCmd {
+    /// Evaluate this machine's own `acl.toml` against a hypothetical
+    /// request, using the exact same evaluator `qsh serve`/`qsh listen`/
+    /// `qsh reverse` enforce with (`PLAN.md` M5 DoD 1) — a reliable
+    /// prediction of what enforcement would decide, without a restart.
+    /// Local only: never reaches a remote peer (`docs/CLI.md` §6.15).
+    Check(AclCheckArgs),
+}
+
+/// Arguments of `qsh acl check` (`docs/CLI.md` §6.15).
+#[derive(Debug, Args)]
+pub struct AclCheckArgs {
+    /// Principal string to evaluate: `device:<name>` | `user:<name>` |
+    /// `fp:sha256:<base64>` (`docs/PRD.md` §9). A shape outside this
+    /// vocabulary is `INVALID_ARGUMENT`.
+    #[arg(long, value_name = "PRINCIPAL")]
+    pub principal: String,
+
+    /// Dotted action, one of the 11 PRD §9 actions (e.g. `session.open`).
+    /// A name outside the vocabulary is `INVALID_ARGUMENT`.
+    #[arg(long, value_name = "ACTION")]
+    pub action: String,
+
+    /// Resource identifier the action would target. Omit to evaluate an
+    /// unowned resource.
+    #[arg(long, value_name = "RESOURCE")]
+    pub resource: Option<String>,
+
+    /// Auth path the principal is assumed to have authenticated over.
+    /// Omit to use `acl.toml`'s own default (`"pin"`).
+    #[arg(long = "auth-path", value_name = "pin|ca")]
+    pub auth_path: Option<String>,
+
+    /// Principal that owns `--resource`, so `scope = "owned"` rows can be
+    /// evaluated too (`PLAN.md` M5 §4.2). Omit to evaluate `--resource` as
+    /// unowned.
+    #[arg(long, value_name = "PRINCIPAL")]
+    pub owner: Option<String>,
+
+    /// Auth path `--owner` is assumed to have authenticated over. Only
+    /// meaningful together with `--owner`; omit to default to `"pin"`.
+    /// `requires = "owner"` mirrors [`InteractiveArgs::escape_char`]'s own
+    /// `requires = "target"` (`docs/CLI.md` §6.15): giving this alone is a
+    /// clap usage error (exit `2`), not a silently-ignored no-op.
+    #[arg(long = "owner-auth-path", value_name = "pin|ca", requires = "owner")]
+    pub owner_auth_path: Option<String>,
 }
 
 /// `qsh host …` subcommands (`docs/CLI.md` §6.1).

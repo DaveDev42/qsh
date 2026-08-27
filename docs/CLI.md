@@ -621,7 +621,7 @@ qsh serve --bind <ip:port>
 - 시작 시 실제로 bind된 주소를 stderr에 출력한다 — stdout은 §2.2 규칙에 따라 JSON 계약 전용이므로 여기서는 쓰지 않는다.
 - listener 재시작 시 세션 소실에 대해서는 README의 [Known limitations](../README.md#known-limitations-mvp-by-design)를 참고한다.
 - **SIGTERM drain(M2, ADR-0003):** 신규 attach·open을 거부한 뒤 모든 세션에 §6.7의 close 절차(SIGHUP→TERM→KILL, `close_grace_ms`)를 적용하고, 붙어 있는 소비자에게 `session.closed{reason: "closed"}`(§6.4)를 보낸 다음 종료한다 — 세션은 프로세스와 함께 끝나며 고아 셸을 남기지 않는다.
-- **정책 파일 진단(M5).** 시작 시 `acl.toml`을 1회 읽는다(hot reload 없음). 파일이 없거나 파싱에 실패해도 프로세스는 뜨고 bind하지만, 그 상태에서 도달하는 모든 인가 판정은 항상 `deny`이고 어떤 리소스(세션·터널·등록)도 생성되지 않는다(`docs/design/architecture.md` §6, `PLAN.md` M5 §4.1 #1). 운영자에게는 stderr에 `no usable acl.toml policy`, `every request is denied until this is fixed`, 파일 경로, `CONFIG_ERROR` 코드, 복사해 붙일 수 있는 최소 정책 예시(이 머신에 실제로 pin된 peer 이름을 채운), `acl.toml is never auto-generated — create it by hand`를 담은 진단을 한 번 출력한다 — 진단의 `code` 필드는 `acl_policy_missing`(파일 부재)과 `acl_policy_invalid`(파싱·검증 실패) 두 code word로 두 원인을 구분한다 — core(`crates/qsh-core/src/acl/load.rs`의 `StartupDiagnostic::render`)가 조립한 완성 문자열을 CLI가 그대로 stderr에 쓰는 평문 블록이다(tracing JSON 라인이 아니다). §6.13이 인용하는 `qsh-core::doctor::CONTROLLER_UNREACHABLE`과 공통점은 딱 하나다 — 문안 정본은 core에 있고 CLI는 인가 로직 0줄로 출력만 한다는 것. `doctor::Diagnostic`에는 `render()`가 없어 CLI가 `message`/`remedy` 두 필드를 직접 조립해 쓴다는 점에서 조립 방식 자체는 다르다. 정책 파일의 원본 소스 라인은 절대 덤프하지 않는다 — 유일한 echo는 문제 rule의 문법 토큰(≤128바이트, 한 줄 이스케이프) 3종(unknown action/auth_path/scope)뿐이다. `acl.toml`을 자동으로 만들지는 않는다(§4.1 #1 (b): interim allow-all-pinned 경계를 파일로 영구화하는 것은 의도치 않은 권한 확대다). 재시작 전 정책을 검증하려면 §6.15의 `qsh acl check`를 쓴다.
+- **정책 파일 진단(M5).** 시작 시 `acl.toml`을 1회 읽는다(hot reload 없음). 파일이 없거나 파싱에 실패해도 프로세스는 뜨고 bind하지만, 그 상태에서 도달하는 모든 인가 판정은 항상 `deny`이고 어떤 리소스(세션·터널·등록)도 생성되지 않는다(`docs/design/architecture.md` §6, `PLAN.md` M5 §4.1 #1). 운영자에게는 stderr에 `no usable acl.toml policy`, `every request is denied until this is fixed`, 파일 경로, `CONFIG_ERROR` 코드, 복사해 붙일 수 있는 최소 정책 예시(이 머신에 실제로 pin된 peer 이름을 채운), `acl.toml is never auto-generated — create it by hand`, `verify a fix before restarting: qsh acl check`를 담은 진단을 한 번 출력한다 — 진단의 `code` 필드는 `acl_policy_missing`(파일 부재)과 `acl_policy_invalid`(파싱·검증 실패) 두 code word로 두 원인을 구분한다 — core(`crates/qsh-core/src/acl/load.rs`의 `StartupDiagnostic::render`)가 조립한 완성 문자열을 CLI가 그대로 stderr에 쓰는 평문 블록이다(tracing JSON 라인이 아니다). §6.13이 인용하는 `qsh-core::doctor::CONTROLLER_UNREACHABLE`과 공통점은 딱 하나다 — 문안 정본은 core에 있고 CLI는 인가 로직 0줄로 출력만 한다는 것. `doctor::Diagnostic`에는 `render()`가 없어 CLI가 `message`/`remedy` 두 필드를 직접 조립해 쓴다는 점에서 조립 방식 자체는 다르다. 정책 파일의 원본 소스 라인은 절대 덤프하지 않는다 — 유일한 echo는 문제 rule의 문법 토큰(≤128바이트, 한 줄 이스케이프) 3종(unknown action/auth_path/scope)뿐이다. `acl.toml`을 자동으로 만들지는 않는다(§4.1 #1 (b): interim allow-all-pinned 경계를 파일로 영구화하는 것은 의도치 않은 권한 확대다). 재시작 전 정책을 검증하려면 §6.15의 `qsh acl check`를 쓴다.
 
 ### 6.13 장기 실행 모드: `qsh listen` / `qsh reverse`
 
@@ -658,10 +658,10 @@ qsh reverse <controller> [--offered-name <name>]
 ### 6.15 `qsh acl check` (M5)
 
 ```bash
-qsh acl check --principal <principal> --action <action> [--resource <resource>] [--auth-path pin|ca] --json
+qsh acl check --principal <principal> --action <action> [--resource <resource>] [--auth-path pin|ca] [--owner <principal>] [--owner-auth-path pin|ca] --json
 ```
 
-`acl.check`는 §2.4·§2.5가 명시하듯 **로컬 operation**이다 — 원격 peer가 요청할 수 없고, 이 머신 자신의 `acl.toml`을 이 머신에서 조회한다. 원격으로 정책 조회를 허용하면 그 자체가 capability 열거 oracle이 되기 때문이다(`docs/ROADMAP.md` M5 감사 개정 ③). `qsh serve`/`qsh listen`/`qsh reverse`가 실제로 강제하는 것과 **같은 평가기**를 호출하므로(`PLAN.md` M5 DoD 1), 이 명령의 결과는 실제 enforcement 결과의 신뢰할 수 있는 예측이다 — 재시작 전 정책을 검증하는 용도(§6.12·§6.13의 정책 파일 진단 문단)로 쓴다.
+`acl.check`는 §2.4·§2.5가 명시하듯 **로컬 operation**이다 — 원격 peer가 요청할 수 없고, 이 머신 자신의 `acl.toml`을 이 머신에서 조회한다. 원격으로 정책 조회를 허용하면 그 자체가 capability 열거 oracle이 되기 때문이다(`docs/ROADMAP.md` M5 감사 개정 ③). `qsh serve`/`qsh listen`/`qsh reverse`가 실제로 강제하는 것과 **같은 평가기**를 호출하므로(`PLAN.md` M5 DoD 1), 이 명령의 결과는 실제 enforcement 결과의 신뢰할 수 있는 예측이다 — 재시작 전 정책을 검증하는 용도(§6.12·§6.13의 정책 파일 진단 문단)로 쓴다. 이 예측에는 한계가 둘 있다. `policy.loaded: false`는 파일이 아예 없는 경우와 파싱에 실패한 경우를 구별하지 않으며, 파싱 실패의 상세(어떤 rule의 어떤 토큰이 문제였는지)는 `acl check`가 아니라 §6.12·§6.13의 시작 진단이 정본이다 — `acl check` 자신은 그 상세를 출력하지 않는다. 그리고 enforcement에는 이 평가기 위에 fail-closed 층이 하나 더 있어서, audit 기록 자체가 실패하면 `allow` 판정이 `deny`로 뒤집히고 세션 소유자 조회가 실패해도 `deny`로 처리된다(`crates/qsh-core/src/server/mod.rs`) — 그래서 `acl check`의 `allow` 예측은 실제 운영 상태에 따라 `deny`로 뒤집힐 수 있지만, `deny` 예측이 `allow`로 뒤집히는 일은 없다.
 
 인자:
 
@@ -669,6 +669,8 @@ qsh acl check --principal <principal> --action <action> [--resource <resource>] 
 - `--action <action>` (필수): PRD §9의 11종 action 중 하나(닷 표기, 예 `session.open`). 어휘에 없는 값은 `INVALID_ARGUMENT`(정책 로더가 잘못된 wildcard 패턴을 거부하는 것과 같은 층 — 오타가 조용히 통과하지 않는다).
 - `--resource <resource>` (선택): action이 겨냥하는 리소스 식별자. 생략하면 리소스 개념이 없는 action으로 평가한다.
 - `--auth-path <pin|ca>` (선택): 생략 시 `acl.toml` 자체의 기본값(`"pin"`, `PLAN.md` M5 §4.1 #2)을 적용한 것과 동일하게 평가한다.
+- `--owner <principal>` (선택, M5 Step 7 — additive): `--resource`의 소유자 principal. `scope = "owned"`(rule의 기본값) 행이 실제로 적용되려면 소유자가 있어야 하므로, `--owner` 없이는 그런 행이 항상 "소유자 없는 리소스"로 평가되어 무조건 통과한다 — enforcement가 소유자를 아는 상황(예: 이미 열린 세션에 대한 `session.control`)을 재현하려면 필요하다. 생략하면 이전과 동일하게 `--resource`를 소유자 없는 리소스로 평가한다.
+- `--owner-auth-path <pin|ca>` (선택, `--owner`와 함께일 때만 의미 있음): `--owner`가 인증했다고 가정할 auth path. 생략 시 `"pin"`. 접힘은 enforcement가 실제로 쓰는 프로덕션 `opener_key`(`crates/qsh-core/src/acl/mod.rs`)를 그대로 호출해 만들며, 그 내부 인코딩은 CLI 표면이나 계약에 절대 노출되지 않는다 — `--owner`/`--owner-auth-path`는 그 인코딩 이전의 평문 principal/auth-path 문자열이다. `--owner` 없이 `--owner-auth-path`만 단독으로 주는 것은 clap이 usage 오류로 거부한다(exit `2`) — `--escape-char`/`-L`이 `target` 없이는 거부되는 것(§7)과 같은 `requires` 관계다.
 
 `data`는 `AclCheckData`(`crates/qsh-proto/src/types.rs`)다:
 
@@ -694,7 +696,7 @@ qsh acl check --principal <principal> --action <action> [--resource <resource>] 
 }
 ```
 
-`decision`은 `Host.connection_mode`와 같은 열린 문자열 규율(§10)로 `"allow"`/`"deny"`다. `rule`은 매칭된 정책 행의 배열 index이며, 아무 행도 매칭하지 않았거나(항상 `"deny"`를 동반) 정책이 로드되지 않은 경우 `null`이다. `policy.loaded: false`는 `acl.toml`이 없거나 파싱에 실패한 상태를 그대로 보여준다 — 그 상태에서는 `decision`이 항상 `"deny"`다(§6.12·§6.13의 정책 파일 진단, `PLAN.md` M5 §4.1 #1). `qsh acl check`는 이 상태를 오류로 만들지 않는다 — 조회는 성공했고(`ok: true`), 다만 조회된 사실이 "정책 없음"일 뿐이다.
+`decision`은 `Host.connection_mode`와 같은 열린 문자열 규율(§10)로 `"allow"`/`"deny"`다. `rule`은 매칭된 정책 행의 배열 index이며, 아무 행도 매칭하지 않았거나(항상 `"deny"`를 동반) 정책이 로드되지 않은 경우 `null`이 아니라 필드 자체가 나타나지 않는다(`owner`/`owner_auth_path` 생략과 같은 규율 — `qsh.cli/v1`은 additive-only, `CLAUDE.md`). `policy.loaded: false`는 `acl.toml`이 없거나 파싱에 실패한 상태를 그대로 보여준다 — 그 상태에서는 `decision`이 항상 `"deny"`다(§6.12·§6.13의 정책 파일 진단, `PLAN.md` M5 §4.1 #1). `qsh acl check`는 이 상태를 오류로 만들지 않는다 — 조회는 성공했고(`ok: true`), 다만 조회된 사실이 "정책 없음"일 뿐이다. `owner`/`owner_auth_path`(M5 Step 7 — additive)는 `--owner`/`--owner-auth-path`를 그대로 echo하며, 둘 다 생략됐을 때는 필드 자체가 나타나지 않는다(`qsh.cli/v1`은 additive-only, `CLAUDE.md`).
 
 `--principal`/`--action`이 잘못된 모양이 아닌 한 `acl.check` 자체는 실패하지 않는다(exit `0`, §4). human mode 출력은 한 줄 요약(`allow`/`deny` + 근거 rule index 또는 "no policy loaded")이다.
 

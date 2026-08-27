@@ -22,6 +22,7 @@
 //! reports the path alongside the principal and policy must use it.
 
 use std::fmt;
+use std::str::FromStr;
 
 use qsh_transport::{AuthPath, Principal};
 
@@ -50,9 +51,9 @@ mod registry;
 // `ActionPattern` itself being nameable: no external crate can obtain a
 // `FamilyPrefix` to put one in, `pub` enum or not.
 pub use load::{
-    ACL_POLICY_INVALID_CODE, ACL_POLICY_MISSING_CODE, ACL_STARTUP_DENIED_CLAUSE,
-    ACL_STARTUP_HEADLINE, ACL_STARTUP_NO_AUTOGEN, PolicyLoad, PolicySource, StartupDiagnostic,
-    load_or_deny,
+    ACL_POLICY_INVALID_CODE, ACL_POLICY_MISSING_CODE, ACL_STARTUP_CHECK_HINT,
+    ACL_STARTUP_DENIED_CLAUSE, ACL_STARTUP_HEADLINE, ACL_STARTUP_NO_AUTOGEN, PolicyLoad,
+    PolicySource, StartupDiagnostic, load_or_deny,
 };
 pub use policy::{ActionPattern, Policy, Rule, Scope, Verdict};
 pub use registry::{DENY_SEAMS, DenySeam, SeamKind};
@@ -174,6 +175,27 @@ impl Action {
 impl fmt::Display for Action {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+/// Failure to parse an action string.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[error("invalid action {0:?}: not one of the PRD §9 action vocabulary")]
+pub struct ActionParseError(pub String);
+
+impl FromStr for Action {
+    type Err = ActionParseError;
+
+    /// Exact match against [`Action::ALL`] only — never a `acl.toml`-style
+    /// trailing-`.*` family wildcard (`qsh acl check --action` names one
+    /// concrete action to evaluate, the same way a real request's wire
+    /// action always does; wildcards are a policy-file-only grammar,
+    /// `crate::acl::load::parse_action_pattern`'s own territory).
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Action::ALL
+            .into_iter()
+            .find(|action| action.as_str() == s)
+            .ok_or_else(|| ActionParseError(s.to_string()))
     }
 }
 
@@ -578,6 +600,18 @@ mod tests {
         assert_eq!(Decision::Deny.as_str(), "deny");
         assert!(Decision::Allow.is_allow());
         assert!(!Decision::Deny.is_allow());
+    }
+
+    #[test]
+    fn action_from_str_round_trips_action_all_and_rejects_wildcards_and_garbage() {
+        for action in Action::ALL {
+            assert_eq!(action.as_str().parse::<Action>().unwrap(), action);
+        }
+        // A `.*` family wildcard is `acl.toml` grammar, not a concrete
+        // action `--action` accepts.
+        for bad in ["session.*", "session.open2", "SESSION.OPEN", "", "exec"] {
+            assert!(bad.parse::<Action>().is_err(), "{bad:?}");
+        }
     }
 
     #[test]

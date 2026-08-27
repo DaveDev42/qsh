@@ -241,7 +241,8 @@ prints a diagnostic to stderr exactly once: `no usable acl.toml policy`,
 `every request is denied until this is fixed`, the exact path it looked
 at, the `CONFIG_ERROR` code, a copy-pasteable minimal policy filled in
 with this machine's actual pinned peers, and
-`acl.toml is never auto-generated — create it by hand`. The diagnostic's
+`acl.toml is never auto-generated — create it by hand`, and finally
+`verify a fix before restarting: qsh acl check`. The diagnostic's
 `code` field tells the two causes apart: `acl_policy_missing` (no file)
 versus `acl_policy_invalid` (parse/validation failure). It never dumps
 raw source lines from the file; the only echo is a bounded (≤128-byte,
