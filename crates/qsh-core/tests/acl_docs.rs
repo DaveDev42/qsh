@@ -1,6 +1,8 @@
 //! Doc-prose == code-vocabulary anti-drift gate for `Action::ALL`
 //! (`PLAN.md` M5 Step 1 (c), L6 — the same discipline `tunnel_docs.rs`/
-//! `doctor_docs.rs` already apply to wording constants).
+//! `doctor_docs.rs` already apply to wording constants), plus the same
+//! discipline applied to `PERMISSION_DENIED_MESSAGE` (`PLAN.md` M5 Step 4
+//! (c)).
 //!
 //! `docs/PRD.md` §9 is the **binding** action vocabulary (`CLAUDE.md`
 //! "docs/PRD.md and docs/CLI.md are the binding contract" — PRD wins if
@@ -10,14 +12,25 @@
 //! drift from the other silently. A wording/vocabulary edit on either side
 //! that is not mirrored on the other fails CI instead of shipping quietly.
 //!
+//! [`qsh_core::acl::PERMISSION_DENIED_MESSAGE`] is quoted verbatim in
+//! `docs/CLI.md` §3.2's example envelope and in `docs/design/
+//! architecture.md` §6's own prose — a byte-for-byte substring check in
+//! the `tunnel_docs.rs`/`doctor_docs.rs` mould, not a loose keyword match.
+//! Both checks are scoped to the specific section (§3.2 / §6), sliced from
+//! its heading to the next `#`-heading, not the whole file: a whole-file
+//! `.contains` would still pass if the constant only showed up somewhere
+//! unrelated (a stray HTML comment, a different section entirely) while
+//! the section that is actually supposed to quote it drifted (F5, M5 Step
+//! 4 adversarial review).
+//!
 //! Deliberately has no `#[cfg(unix)]` anywhere — both sides are pure data
-//! (an enum's `as_str()` and a markdown file), so this runs on the Windows
-//! CI leg too (`PLAN.md` M3 Step 9 (d)'s precedent).
+//! (an enum's `as_str()`, a `&str` constant, and markdown files), so this
+//! runs on the Windows CI leg too (`PLAN.md` M3 Step 9 (d)'s precedent).
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use qsh_core::acl::Action;
+use qsh_core::acl::{Action, PERMISSION_DENIED_MESSAGE};
 
 /// The repo root, reached from `CARGO_MANIFEST_DIR` (`crates/qsh-core`) the
 /// same way every other doc-reading integration test in this workspace
@@ -73,6 +86,30 @@ fn is_dotted_action_shape(token: &str) -> bool {
     is_lower_alpha(head) && is_lower_alpha(tail)
 }
 
+/// Slice `doc` from `heading` (matched verbatim, e.g. `"### 3.2 실패"`) up
+/// to — but not including — the next line starting with `#` at any level,
+/// generalizing [`prd_section_9_actions`]'s own "to the next heading"
+/// trick so a doc-quoting check can assert a constant appears *inside* the
+/// one section it claims to, not merely somewhere in the file (F5, M5
+/// Step 4 adversarial review — a whole-file `.contains` would still pass
+/// if the constant showed up anywhere else, e.g. a stray comment near an
+/// unrelated section, while the section that is actually supposed to
+/// quote it silently drifted). Skipping `heading.len()` bytes before
+/// searching for `"\n#"` is what stops this from immediately matching the
+/// heading's own leading `#`; it is always a valid UTF-8 boundary because
+/// `heading` was located by an exact substring match at `start`.
+fn heading_section_slice<'a>(doc: &'a str, heading: &str) -> &'a str {
+    let start = doc
+        .find(heading)
+        .unwrap_or_else(|| panic!("doc must have a {heading:?} heading"));
+    let rest = &doc[start..];
+    let end = rest[heading.len()..]
+        .find("\n#")
+        .map(|i| i + heading.len())
+        .unwrap_or(rest.len());
+    &rest[..end]
+}
+
 #[test]
 fn prd_section_9_lists_at_least_the_eleven_actions() {
     // Sanity check on the extractor itself before trusting the equality
@@ -98,5 +135,30 @@ fn action_all_matches_prd_section_9_exactly() {
         "Action::ALL and docs/PRD.md §9's action list have drifted apart — \
          PRD.md is binding (CLAUDE.md); conform the code, not the doc \
          (unless PRD.md itself needs a proposed ADR, per CLAUDE.md)"
+    );
+}
+
+#[test]
+fn cli_md_quotes_the_permission_denied_message_verbatim() {
+    let cli_md = read_doc("docs/CLI.md");
+    let section = heading_section_slice(&cli_md, "### 3.2 실패");
+    assert!(
+        section.contains(PERMISSION_DENIED_MESSAGE),
+        "docs/CLI.md §3.2 itself (not merely somewhere in the file) must quote \
+         PERMISSION_DENIED_MESSAGE verbatim"
+    );
+}
+
+/// F5's second gate (M5 Step 4 adversarial review): the same
+/// section-scoped check for `docs/design/architecture.md` §6, which quotes
+/// the constant in its own "거부 문면 균일성" bullet.
+#[test]
+fn architecture_md_quotes_the_permission_denied_message_verbatim() {
+    let architecture_md = read_doc("docs/design/architecture.md");
+    let section = heading_section_slice(&architecture_md, "## 6. ACL 엔진과 audit");
+    assert!(
+        section.contains(PERMISSION_DENIED_MESSAGE),
+        "docs/design/architecture.md §6 itself (not merely somewhere in the file) \
+         must quote PERMISSION_DENIED_MESSAGE verbatim"
     );
 }

@@ -21,6 +21,7 @@ use qsh_transport::{AuthPath, Principal};
 
 mod load;
 mod policy;
+mod registry;
 
 // F8 (M5 Step 2 adversarial review) asked whether `ActionPattern` (and,
 // to stay lint-consistent, its `Policy`/`Rule`/`Scope`/`PolicySource`/
@@ -44,6 +45,7 @@ mod policy;
 // `FamilyPrefix` to put one in, `pub` enum or not.
 pub use load::{PolicyLoad, PolicySource};
 pub use policy::{ActionPattern, Policy, Rule, Scope, Verdict};
+pub use registry::{DENY_SEAMS, DenySeam, SeamKind};
 
 /// ACL action vocabulary (`docs/CLI.md` §2.5, PRD §9). Only the actions a
 /// milestone can actually evaluate are listed; new ones are added when
@@ -188,6 +190,47 @@ impl Decision {
         matches!(self, Decision::Allow)
     }
 }
+
+/// The exact, invariant text of every remote-facing `PERMISSION_DENIED`
+/// refusal (`PLAN.md` M5 Step 4 §4.2). Every seam that can answer a peer
+/// with [`qsh_proto::ErrorCode::PermissionDenied`] — the four
+/// authorization choke points (`Server::authorize`,
+/// `Server::authorize_stream`, `Server::authorize_session_control`,
+/// `reverse::admit::admit`), their audit-record-failure fail-closed
+/// branches (`PLAN.md` M5 Step 3), and the `forward.local` inline
+/// `TCP_CONNECT` gate — uses this constant verbatim and nothing else.
+/// [`registry::DENY_SEAMS`] is the enumeration of every such seam; a
+/// remote-facing deny seam added without a row there is a defect.
+///
+/// Why one opaque sentence instead of a message naming the action,
+/// capability, or resource that was refused: once the M5 policy engine
+/// (`PLAN.md` Step 6) evaluates real `acl.toml` rules, a message that
+/// names *what* was denied turns every refusal into a one-bit oracle. A
+/// peer that cannot yet see a session, a forward, or a capability could
+/// otherwise walk the action vocabulary one probe at a time and read
+/// back its own missing permissions from the wording alone —
+/// `session.write` worked, `session.resize` said "peer is not allowed
+/// to session.resize", therefore resize (and only resize) is off. The
+/// wire's `PermissionDenied` `code` already tells the caller *that* it
+/// was denied; `code` is the only part of the envelope automation may
+/// depend on (`docs/CLI.md` §3.2). This message carries no information
+/// beyond the code — it never names the action, the capability, the
+/// resource, or the principal — and it is byte-identical whether the
+/// request was refused by policy, by a session-ownership check
+/// (`Server::require_opener`), or by an audit-record failure forcing
+/// fail-closed: the non-distinguishing error policy `docs/design/
+/// protocol.md` §10-2 requires (re-pinned for `session.control` in
+/// `crates/qsh-testkit/tests/session_loopback.rs`).
+///
+/// `localctl`'s `NotOwner` refusal ("this forward is owned by another
+/// client on this host", [`crate::localctl::daemon`]) is deliberately
+/// **not** this constant: it is a same-uid local trust boundary between
+/// two local clients of one host's daemon, not a remote peer's
+/// authorization outcome (`docs/design/protocol.md` §11-3, "localctl은
+/// 인가 계층이 아니다"). Unifying the two would blur an axis the protocol
+/// keeps separate on purpose.
+pub const PERMISSION_DENIED_MESSAGE: &str =
+    "peer is not allowed to perform this operation on this host";
 
 /// A resource identifier passed to [`Policy::decide`] — just an opaque id
 /// in this step (`PLAN.md` M5 Step 2). `PLAN.md` M5 Step 5 adds an
@@ -431,6 +474,39 @@ mod tests {
             Action::ForwardRemote,
         ] {
             assert!(!a.is_always_denied(), "{a} must not be always-denied");
+        }
+    }
+
+    /// F6 (M5 Step 4 adversarial review): a machine-checked pin of
+    /// [`PERMISSION_DENIED_MESSAGE`]'s own non-distinguishing invariant
+    /// (the constant's doc comment, in prose) — the literal wording is
+    /// exactly the fixed sentence, and it contains none of the tokens a
+    /// future edit might accidentally reintroduce to name what was
+    /// denied: no action string from today's vocabulary, no brace (no
+    /// interpolated field ever crept in), and none of `"session"`/
+    /// `"forward"`/`"exec"`/`"host."` beyond what the fixed wording itself
+    /// legitimately contains (it does say "host", bare, as in "on this
+    /// host" — never "host.", which would suggest a `host.*` action name).
+    #[test]
+    fn permission_denied_message_names_no_action_and_stays_the_fixed_wording() {
+        assert_eq!(
+            PERMISSION_DENIED_MESSAGE, "peer is not allowed to perform this operation on this host",
+            "PERMISSION_DENIED_MESSAGE must stay exactly this literal — any edit here is a \
+             deliberate wording change, not a drift"
+        );
+        for action in Action::ALL {
+            assert!(
+                !PERMISSION_DENIED_MESSAGE.contains(action.as_str()),
+                "PERMISSION_DENIED_MESSAGE must not name {action} — that would turn the \
+                 refusal into a capability-enumeration oracle (see the constant's own doc)"
+            );
+        }
+        for token in ["{", "}", "session", "forward", "exec", "host."] {
+            assert!(
+                !PERMISSION_DENIED_MESSAGE.contains(token),
+                "PERMISSION_DENIED_MESSAGE must not contain {token:?} — the fixed wording \
+                 has no interpolated field and names no action family"
+            );
         }
     }
 

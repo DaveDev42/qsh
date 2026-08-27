@@ -496,22 +496,23 @@ fn validate_offered_name_shape(offered_name: &str) -> Result<(), OpError> {
 
 /// The one `PERMISSION_DENIED` refusal every failure mode at the
 /// `host.reverse` seam returns: no principal, no resource, no hint of
-/// *which* check failed. Mirrors `Server::authorize`'s deliberately opaque
-/// idiom (`crates/qsh-core/src/server/mod.rs`, `"peer is not allowed to
-/// {action} on this host"` — `docs/design/architecture.md` §6) so that a
-/// peer probing this seam cannot distinguish "no trust-store alias", "alias
-/// failed shape validation" (this file, [`Registry::resolve_name`]), or
-/// "denied by ACL policy" (`super::admit`'s choke point) from one another —
-/// any of those distinctions would leak whether this peer's certificate is
-/// pinned or let it learn the controller's configuration posture
-/// (adversarial review finding). `super::admit` reuses this exact function
-/// for its choke-point deny so all refusals at this seam read identically;
-/// operator-facing detail belongs in the audit record instead
+/// *which* check failed. Uses the same
+/// [`crate::acl::PERMISSION_DENIED_MESSAGE`] every other authorization
+/// choke point does (`crates/qsh-core/src/server/mod.rs`'s
+/// `Server::permission_denied`, `docs/design/architecture.md` §6) so that
+/// a peer probing this seam cannot distinguish "no trust-store alias",
+/// "alias failed shape validation" (this file, [`Registry::resolve_name`]),
+/// or "denied by ACL policy" (`super::admit`'s choke point) from one
+/// another — any of those distinctions would leak whether this peer's
+/// certificate is pinned or let it learn the controller's configuration
+/// posture (adversarial review finding). `super::admit` reuses this exact
+/// function for its choke-point deny so all refusals at this seam read
+/// identically; operator-facing detail belongs in the audit record instead
 /// (`docs/design/architecture.md` §6), never in this message.
 pub(crate) fn host_reverse_denied() -> OpError {
     OpError::new(
         ErrorCode::PermissionDenied,
-        "peer is not allowed to host.reverse on this host",
+        crate::acl::PERMISSION_DENIED_MESSAGE,
     )
     .with_retryable(false)
 }

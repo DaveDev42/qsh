@@ -203,6 +203,8 @@ interim allow-all에서는 정보량이 0이지만, 정책이 켜지는 순간 1
 
 **해결.** `qsh-core`에 단일 상수를 둔다 — `qsh_core::acl::PERMISSION_DENIED_MESSAGE`, 제안 문안 **`"peer is not allowed to perform this operation on this host"`**(action·capability·리소스·principal 어느 것도 담지 않는다; 최종 문안은 §4.2). 1과 2의 모든 생성 지점이 이 상수 하나를 쓰고, `Server::permission_denied(request_id, action)`은 `action`을 **audit 기록용으로만** 받고 문면에는 쓰지 않는다(시그니처는 유지 — audit 레코드의 action은 여전히 정확해야 한다).
 
+**(a)-추기 — 구현 확정 (2026-08-27).** ① DoD 4의 seam 표는 `qsh_core::acl::DENY_SEAMS`(acl/registry.rs)로 실재화 — Step 8 SC6이 같은 표를 소비한다. ② **항상-deny 3종은 registry에 행이 없다**: 오늘 프로덕션 코드에 그 `Action`을 생성하는 wire op이 없어 구동 가능한 seam 자체가 부재하다(Step 2 라운드 grep 실증). 이 제외는 registry의 앵커 테스트(DENY_SEAMS 커버 action == `Action::ALL` − 3종)가 명문으로 고정하며, wire op이 생기는 순간 그 테스트가 실패해 행 추가를 강제한다. Step 6이 wire 경로 3종 거부를 재확인한다(검증 라운드 이월 노트). ③ SessionData 재접속 게이트(stream-reset seam, RESET_CODE_FORBIDDEN)는 문면 없는 wire 형상이라 균일성 의무가 "reset code + audit deny 레코드"로 정의된다 — registry에 StreamReset kind로 등재.
+
 **균일성의 경계(중요).** 3(localctl `NotOwner`)은 **통일 대상이 아니다.** 그 거부는 원격 peer가 아니라 **같은 uid의 로컬 프로세스**에게 가고, localctl은 인가 계층이 아니라 로컬 머신 신뢰 경계이며(`docs/design/protocol.md` §11-3 "localctl은 인가 계층이 아니다", same-uid `SO_PEERCRED` 검사), 그 수신자에게 유용한 정보를 감추는 것은 보안 이득 없이 UX만 해친다. 이 경계를 코드 주석과 `architecture.md` §6에 명문화하고, DoD 4의 전수 테스트는 **원격 peer에게 나가는 거부**만을 대상으로 정의한다 — 그렇지 않으면 테스트가 로컬 진단을 지워 버린다.
 
 **(b) crate/모듈/파일:**
@@ -430,7 +432,7 @@ interim allow-all에서는 정보량이 0이지만, 정책이 켜지는 순간 1
 
 문서가 값을 정하지 않았고 계약도 아닌 것들. 구현 시 정하고 **해당 step의 (a)에 근거와 함께 추기**한다:
 
-- **균일 거부 문면의 최종 문안** (초안 `"peer is not allowed to perform this operation on this host"`) — Step 4. action·리소스·principal 어느 것도 담지 않는다는 성질만 불변이다.
+- **균일 거부 문면의 최종 문안** (초안 `"peer is not allowed to perform this operation on this host"`) — Step 4. action·리소스·principal 어느 것도 담지 않는다는 성질만 불변이다. **확정 — main 세션 (2026-08-27): 초안 그대로.** 불변 성질을 충족하고, 짧으며, 기존 문면들과 어휘 연속성이 있다.
 - **`[audit].max_bytes` / `retain` / `queue_depth` 기본값** (초안 64 MiB / 5 / 1024) — Step 3. `max_bytes * (retain+1)`이 상시 디스크 예산이므로 두 값은 같이 정한다.
 - **정책 파일 상한** (rule 수·행당 패턴 수·문자열 길이) — Step 2. 운영자 파일이라 적대적이지는 않지만 상한 없는 파싱은 두지 않는다.
 - **`forward_id` 소유가 principal 기준인가 connection 기준인가** (초안: principal — `docs/CLI.md` §2.5의 "소유 **peer**"의 문자 그대로, 같은 principal의 다른 연결도 close 가능) — Step 5. 이 선택은 사용자 가시적이므로 §6.9/§6.14 문안 갱신을 동반한다.

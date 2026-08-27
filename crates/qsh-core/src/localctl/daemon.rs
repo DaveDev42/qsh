@@ -846,6 +846,15 @@ impl LocalctlDaemon {
                             // the attempt happened and its registration is
                             // untouched.
                             Err(HubSendError::NotOwner) => {
+                                // Deliberately NOT `crate::acl::
+                                // PERMISSION_DENIED_MESSAGE`: this is the
+                                // same-uid local trust boundary between two
+                                // local clients of this daemon, not the
+                                // remote-peer authorization layer that
+                                // constant is reserved for (`docs/design/
+                                // protocol.md` §11-3, `PLAN.md` M5 Step 4
+                                // §4.2 — `crate::acl::
+                                // PERMISSION_DENIED_MESSAGE`'s own doc).
                                 let reply = wire::ControlMessage::new(
                                     request_id,
                                     wire::control_message::Body::Response(wire::Response {
