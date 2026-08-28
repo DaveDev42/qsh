@@ -4,20 +4,24 @@
 //! must never leak an `rmcp` type into `qsh-core`'s `Ops` signatures
 //! (architecture.md §9 risk 4's own monitoring bullet).
 //!
-//! M6 Step 1 (`PLAN.md` "계약·의존성 확정") lands only the contract-level
+//! M6 Step 1 (`PLAN.md` "계약·의존성 확정") landed the contract-level
 //! surface this file's own tests substantiate — the tool↔op mapping table
 //! and small, compiled probes of the five draft decisions in `PLAN.md`
-//! §4.1. The stdio server itself (`ServerHandler::list_tools`/`call_tool`
-//! wired to `Ops`) is Step 2/3; nothing in this module is reachable from
-//! `main()` yet, hence the blanket allow below (lifted once Step 2 wires a
-//! `qsh mcp` subcommand to it — the same scaffolding-ahead-of-wiring
-//! pattern `crates/qsh-core/src/tunnel/local.rs`'s
-//! `// wired up by PR 5b's route-aware Ops entry points` uses).
-#![allow(dead_code)]
-
+//! §4.1. M6 Step 2 (this file's [`QshMcpServer`]/[`serve_stdio`]) wires
+//! that surface to a real `rmcp` stdio server: `qsh mcp` (`crate::cli`'s
+//! `Command::Mcp`, dispatched by `crate::main`'s `run_mcp`) now reaches
+//! [`serve_stdio`], which serves `initialize`/`tools/list` for real.
+//! `call_tool` is still Step 3's job — see [`QshMcpServer`]'s
+//! `ServerHandler` impl for why this step deliberately leaves it as
+//! rmcp's own default rather than stubbing a "not wired yet" response.
 use std::sync::Arc;
 
-use rmcp::model::{JsonObject, Tool};
+use rmcp::model::{
+    Implementation, JsonObject, ListToolsResult, PaginatedRequestParams, ServerCapabilities,
+    ServerInfo, Tool,
+};
+use rmcp::service::{RequestContext, RoleServer};
+use rmcp::{ErrorData as McpError, ServerHandler};
 
 /// The `docs/CLI.md` §8.2 tool↔op mapping, realized as a code constant
 /// (`PLAN.md` M6 Step 1 (c)) — 12 pairs, in the same order as the doc
@@ -32,6 +36,17 @@ use rmcp::model::{JsonObject, Tool};
 /// `mcp_tool_map_matches_cli_md_section_8_2_bidirectionally` (below) is
 /// the L6 gate: a row added here without a matching `docs/CLI.md` §8.2 row
 /// (or vice versa) fails `cargo test`.
+///
+/// Not yet read by any non-test production path: [`tool_schemas`] hardcodes
+/// its own per-type calls (Rust generics need the concrete `*Req` type at
+/// each call site, not a runtime string), so this step's `list_tools` never
+/// dereferences this table at runtime. Step 3's `call_tool` router is the
+/// production reader (`name` → `op` → the `Ops` method to call) — the
+/// individual allow below is temporary to that step, not permanent.
+#[allow(
+    dead_code,
+    reason = "read by Step 3's call_tool router; production-unreachable until then, cross-checked against docs/CLI.md §8.2 by this module's own tests in the meantime"
+)]
 pub const TOOL_MAP: &[(&str, &str)] = &[
     ("list_hosts", "host.list"),
     ("get_host", "host.get"),
@@ -87,6 +102,106 @@ pub fn tool_schemas() -> Vec<Tool> {
 /// macro-driven `#[tool_router]` server would use internally.
 fn tool<T: schemars::JsonSchema + 'static>(name: &'static str) -> Tool {
     Tool::new_with_raw(name, None, Arc::new(JsonObject::new())).with_input_schema::<T>()
+}
+
+/// [`tool_schemas`], sorted by tool name — `tools/list`'s own wire
+/// ordering (`PLAN.md` §4.1 #2, confirmed by this step: the checked-in
+/// `crates/qsh-cli/tests/fixtures/mcp/tools_list.json` pins this exact
+/// order). [`TOOL_MAP`]/[`tool_schemas`] themselves stay in the
+/// `docs/CLI.md` §8.2 doc-table order because the L6 gate above zips them
+/// 1:1 against it; this is the one place that reorders for the wire.
+fn tools_list_schemas() -> Vec<Tool> {
+    let mut tools = tool_schemas();
+    tools.sort_by(|a, b| a.name.cmp(&b.name));
+    tools
+}
+
+/// The `qsh mcp` server (`docs/CLI.md` §8, `PLAN.md` M6 Step 2). Holds no
+/// state: `get_info`/`list_tools` need none, and `call_tool` is
+/// deliberately left unimplemented here (see the `ServerHandler` impl
+/// below) — Step 3 adds an `Ops` field and wires real dispatch.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct QshMcpServer;
+
+impl ServerHandler for QshMcpServer {
+    /// Declares the `tools` capability and reports **this** build's own
+    /// identity. Without this override, `ServerInfo::default()`'s
+    /// `Implementation::from_build_env()` would report `rmcp`'s own crate
+    /// name/version (`env!("CARGO_CRATE_NAME")` expands inside the `rmcp`
+    /// crate itself, not this one) — a confusing "server" for a real MCP
+    /// client to show a user.
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(Implementation::new("qsh", env!("CARGO_PKG_VERSION")))
+    }
+
+    /// `docs/CLI.md` §8.2's 12 tools, alphabetically (`tools_list_schemas`,
+    /// `PLAN.md` §4.1 #2). No pagination: 12 tools is under any client's
+    /// page size, so `request`/`next_cursor` go unused.
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, McpError> {
+        Ok(ListToolsResult::with_all_items(tools_list_schemas()))
+    }
+
+    // `call_tool` is deliberately **not** overridden — Step 3's job
+    // (`PLAN.md` M6 Step 2 (a) item ①). The inherited default
+    // (`rmcp::handler::server`'s `server_handler_methods!` macro body,
+    // `rmcp-3.1.4/src/handler/server.rs`) answers every `tools/call` with
+    // a JSON-RPC **protocol** error (`-32601 Method not found`,
+    // `CallToolRequestMethod` = `"tools/call"`) rather than a tool-scoped
+    // `CallToolResult`. That is the safer of the two shapes this step
+    // could ship, for two reasons:
+    //
+    // 1. A hand-rolled per-tool `CallToolResult::structured_error`
+    //    "not wired yet" stub would invent an interim contract surface no
+    //    `qsh-proto` `ErrorCode` backs — this project bans ad hoc error
+    //    strings outside that one enum (`CLAUDE.md`: "Error codes come
+    //    from the single `ErrorCode` enum in `qsh-proto` — never an ad
+    //    hoc error string elsewhere"). "This tool has no implementation
+    //    yet" is not an *operation outcome* in the first place (no `Ops`
+    //    method ever ran), so routing it through `CallToolResult`'s
+    //    success-shaped structured-content channel — the same channel
+    //    `PLAN.md` §4.1 #3 reserves for a real `OpError` — would
+    //    misrepresent a missing implementation as an operation that ran
+    //    and failed.
+    // 2. It is exactly the idiom every other unimplemented
+    //    `ServerHandler` method in this same trait already uses
+    //    (`get_prompt`, `read_resource`, `set_level`, …): a protocol
+    //    `Method not found`. `list_tools`'s own declaration of 12 real
+    //    tools is not misleading alongside it — the MCP spec's `tools`
+    //    capability only promises `tools/list` is meaningful, and a
+    //    client that calls `tools/call` before this handler is complete
+    //    gets an honest, standard "not there yet" instead of a
+    //    fabricated success-shaped result or (worse) a hang.
+    //
+    // `crates/qsh-cli/tests/mcp_conformance.rs` asserts this behavior
+    // against the real binary: `tools/call` for a real, listed tool name
+    // still comes back `-32601`, not a hang and not a mangled stdout byte.
+}
+
+/// `qsh mcp`'s entry point (`docs/CLI.md` §8.1): serve the stdio transport
+/// until the peer closes stdin (EOF) or the connection otherwise ends.
+/// Blocks; `main.rs`'s `run_mcp` supplies the async runtime, the same
+/// shape `qsh_core::serve::run_serve`/`run_listen`/`run_reverse` use for
+/// their own long-running modes.
+///
+/// No SIGINT/SIGTERM handling here on purpose: `qsh mcp` holds no resource
+/// of its own to drain on the way out — no session, no listener; Step 3's
+/// tool calls are each a single `Ops` round trip, the same shape the CLI
+/// frontend's own commands already are — so the OS's default signal
+/// disposition (process exit) is already correct, and the only *graceful*
+/// shutdown this transport promises is "stdin closed", which is this
+/// function's own loop exit.
+pub async fn serve_stdio() -> std::io::Result<()> {
+    let transport = rmcp::transport::io::stdio();
+    let service = rmcp::serve_server(QshMcpServer, transport)
+        .await
+        .map_err(std::io::Error::other)?;
+    service.waiting().await.map_err(std::io::Error::other)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -310,5 +425,43 @@ mod tests {
     #[test]
     fn stdio_transport_pair_is_constructible_under_the_pinned_feature_set() {
         let (_stdin, _stdout) = rmcp::transport::io::stdio();
+    }
+
+    /// `docs/CLI.md` §8: the server must declare the `tools` capability
+    /// (otherwise `tools/list`/`tools/call` are self-inconsistent with
+    /// `get_info`) and must not leak `rmcp`'s own crate identity in place
+    /// of this build's (see [`QshMcpServer::get_info`]'s own doc).
+    #[test]
+    fn get_info_declares_tools_and_reports_this_crates_own_identity() {
+        let info = QshMcpServer.get_info();
+        assert!(
+            info.capabilities.tools.is_some(),
+            "must declare the tools capability: {info:?}"
+        );
+        assert_eq!(info.server_info.name, "qsh");
+        assert_eq!(info.server_info.version, env!("CARGO_PKG_VERSION"));
+    }
+
+    /// `PLAN.md` §4.1 #2: `tools/list`'s wire order is alphabetical by
+    /// tool name, not [`TOOL_MAP`]'s doc-table order — and it is still
+    /// exactly the same 12 tools [`TOOL_MAP`] names, none dropped or
+    /// added by the reorder.
+    #[test]
+    fn tools_list_output_is_alphabetical_and_covers_every_tool_map_row() {
+        let sorted = tools_list_schemas();
+        assert_eq!(sorted.len(), TOOL_MAP.len());
+        let names: Vec<&str> = sorted.iter().map(|t| t.name.as_ref()).collect();
+        let mut expected = names.clone();
+        expected.sort_unstable();
+        assert_eq!(
+            names, expected,
+            "tools/list must be sorted by tool name (PLAN.md §4.1 #2)"
+        );
+        let mapped: HashSet<&str> = TOOL_MAP.iter().map(|(tool, _)| *tool).collect();
+        let listed: HashSet<&str> = names.iter().copied().collect();
+        assert_eq!(
+            listed, mapped,
+            "tools_list_schemas must be a reordering of TOOL_MAP, not a different set"
+        );
     }
 }
