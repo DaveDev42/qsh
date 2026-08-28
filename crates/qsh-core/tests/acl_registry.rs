@@ -1102,7 +1102,10 @@ mod source_scan {
     /// slice on a literal, verbatim string is the cheapest way to
     /// guarantee that.
     fn server_mod_production_source() -> String {
-        let full = read_doc("crates/qsh-core/src/server/mod.rs");
+        // CRLF-normalized: the Windows CI runner checks sources out with
+        // `\r\n` endings, which would keep the `\n`-joined marker below
+        // from ever matching (and panic this scan on every Windows run).
+        let full = read_doc("crates/qsh-core/src/server/mod.rs").replace("\r\n", "\n");
         let marker = "\n#[cfg(test)]\nmod tests {";
         let end = full.find(marker).unwrap_or_else(|| {
             panic!("server/mod.rs must still have a #[cfg(test)] mod tests block")
