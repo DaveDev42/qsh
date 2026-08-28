@@ -3,6 +3,7 @@
 //! result (`docs/CLI.md` §11).
 
 mod cli;
+mod mcp;
 mod render;
 mod tui;
 
