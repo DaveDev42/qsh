@@ -57,6 +57,11 @@ const LISTEN_MODE: &str = "listen";
 /// no envelope (`docs/CLI.md` §6.13).
 const REVERSE_MODE: &str = "reverse";
 
+/// The name `qsh mcp` reports in diagnostics. Not an operation — it has no
+/// envelope; stdout carries only JSON-RPC frames for as long as the
+/// process runs (`docs/CLI.md` §8.1, §2.2).
+const MCP_MODE: &str = "mcp";
+
 /// Usage error exit code (`docs/CLI.md` §4), matching clap's own.
 const EXIT_USAGE: i32 = 2;
 
@@ -397,6 +402,7 @@ fn run(cli: &Cli) -> i32 {
             controller,
             offered_name,
         } => run_reverse(&ops, controller, offered_name.as_deref()),
+        Command::Mcp => run_mcp(),
     }
 }
 
@@ -835,6 +841,7 @@ fn long_running_setup_mode(command: &Option<Command>) -> Option<&'static str> {
         Some(Command::Serve { .. }) => Some(SERVE_MODE),
         Some(Command::Listen { .. }) => Some(LISTEN_MODE),
         Some(Command::Reverse { .. }) => Some(REVERSE_MODE),
+        Some(Command::Mcp) => Some(MCP_MODE),
         _ => None,
     }
 }
@@ -971,6 +978,48 @@ fn run_reverse(ops: &Ops, controller: &str, offered_name: Option<&str>) -> i32 {
             0
         }
         Err(err) => report_long_running_setup_error(REVERSE_MODE, &err),
+    }
+}
+
+/// `qsh mcp` — serve MCP tools over stdio (`docs/CLI.md` §8, `PLAN.md` M6
+/// Step 2). Not an operation: no envelope, nothing on stdout but JSON-RPC
+/// frames, same shape as [`run_serve`]/[`run_listen`]/[`run_reverse`].
+///
+/// No identity/config load here — unlike `serve`/`listen`/`reverse`, `qsh
+/// mcp` is not a host runtime (it never accepts a peer connection or
+/// enforces `acl.toml`; `docs/design/architecture.md` §6's ACL choke point
+/// stays on the host-dispatch side). Its `Ops` calls (Step 3) go out the
+/// same way the CLI frontend's already do, so there is no
+/// `qsh_core::acl::StartupDiagnostic` for this process to print — nothing
+/// here is silently skipping one.
+///
+/// Diagnostics: [`stderr_note!`] only, and [`init_tracing`]'s subscriber is
+/// already stderr-only regardless of `-v`/`-vv`/`-q` (`LossyStderr`), which
+/// is what keeps stdout pure JSON-RPC even at `-vv` (`docs/CLI.md` §8.1,
+/// DoD 5) — nothing MCP-specific was needed to get that.
+fn run_mcp() -> i32 {
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(err) => {
+            return report_long_running_setup_error(
+                MCP_MODE,
+                &OpError::new(ErrorCode::Internal, format!("runtime: {err}")),
+            );
+        }
+    };
+    stderr_note!("qsh mcp: serving tools over stdio");
+    match runtime.block_on(mcp::serve_stdio()) {
+        Ok(()) => {
+            stderr_note!("qsh mcp: shutting down");
+            0
+        }
+        Err(err) => report_long_running_setup_error(
+            MCP_MODE,
+            &OpError::new(ErrorCode::Internal, format!("mcp: {err}")),
+        ),
     }
 }
 
@@ -1138,6 +1187,7 @@ fn command_name(cli: &Cli) -> &'static str {
         Command::Serve { .. } => SERVE_MODE,
         Command::Listen { .. } => LISTEN_MODE,
         Command::Reverse { .. } => REVERSE_MODE,
+        Command::Mcp => MCP_MODE,
     }
 }
 
@@ -1327,6 +1377,7 @@ mod tests {
             })),
             Some(REVERSE_MODE)
         );
+        assert_eq!(long_running_setup_mode(&Some(Command::Mcp)), Some(MCP_MODE));
         // Every ordinary operation keeps using `report_error`'s envelope
         // path.
         assert_eq!(long_running_setup_mode(&Some(Command::Version)), None);

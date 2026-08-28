@@ -295,6 +295,12 @@ pub enum Command {
         #[arg(long, value_name = "NAME")]
         offered_name: Option<String>,
     },
+
+    /// Serve MCP tools over stdio (`docs/CLI.md` §8). Not an operation: no
+    /// envelope, nothing on stdout but JSON-RPC frames — every diagnostic
+    /// goes to stderr, exactly like `qsh serve`/`qsh listen`/`qsh reverse`
+    /// (`docs/CLI.md` §8.1, §2.2). No flags: MVP is stdio-only.
+    Mcp,
 }
 
 /// `qsh tunnel …` subcommands (`docs/CLI.md` §6.9).
@@ -901,6 +907,14 @@ mod tests {
             other => panic!("expected reverse, got {other:?}"),
         }
         assert!(Cli::try_parse_from(["qsh", "reverse"]).is_err());
+    }
+
+    /// `qsh mcp` (`docs/CLI.md` §8.1) takes no arguments.
+    #[test]
+    fn mcp_takes_no_arguments() {
+        let cli = Cli::try_parse_from(["qsh", "mcp"]).unwrap();
+        assert!(matches!(cli.command.unwrap(), Command::Mcp));
+        assert!(Cli::try_parse_from(["qsh", "mcp", "extra"]).is_err());
     }
 
     #[test]

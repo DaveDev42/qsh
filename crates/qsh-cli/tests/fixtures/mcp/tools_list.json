@@ -1,0 +1,392 @@
+{
+  "id": 2,
+  "jsonrpc": "2.0",
+  "result": {
+    "tools": [
+      {
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "session_ref": {
+              "description": "Opaque session handle.",
+              "type": "string"
+            },
+            "signal": {
+              "description": "First signal of the HUP → TERM → KILL escalation, canonical\n`SIGTERM` form (`--signal`, one of HUP|INT|QUIT|TERM|USR1|USR2|KILL);\n`None` = default (SIGHUP).",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "session_ref"
+          ],
+          "type": "object"
+        },
+        "name": "close_session"
+      },
+      {
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "tunnel_id": {
+              "description": "Opaque tunnel handle.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "tunnel_id"
+          ],
+          "type": "object"
+        },
+        "name": "close_tunnel"
+      },
+      {
+        "inputSchema": {
+          "$defs": {
+            "EnvVar": {
+              "description": "One `NAME=value` environment entry for [`ExecRunReq::env`].",
+              "properties": {
+                "name": {
+                  "description": "Variable name.",
+                  "type": "string"
+                },
+                "value": {
+                  "description": "Variable value.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name",
+                "value"
+              ],
+              "type": "object"
+            }
+          },
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "argv": {
+              "description": "Program and arguments, passed to the remote verbatim (no shell\nre-interpretation).",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "env": {
+              "description": "Extra environment variables layered over the remote environment.",
+              "items": {
+                "$ref": "#/$defs/EnvVar"
+              },
+              "type": "array"
+            },
+            "host": {
+              "description": "Host name. Until the hosts.toml directory lands (M7) this is resolved\nthrough the trust store's pinned peers (name → address).",
+              "type": "string"
+            },
+            "timeout_ms": {
+              "description": "Whole-operation timeout in milliseconds (`docs/CLI.md` §9). `None`\nmeans no timeout.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "host",
+            "argv"
+          ],
+          "type": "object"
+        },
+        "name": "exec"
+      },
+      {
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "name": {
+              "description": "Host alias.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "type": "object"
+        },
+        "name": "get_host"
+      },
+      {
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "session_ref": {
+              "description": "Opaque session handle as returned by `session.open`/`session.list`.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "session_ref"
+          ],
+          "type": "object"
+        },
+        "name": "get_session"
+      },
+      {
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "type": "object"
+        },
+        "name": "list_hosts"
+      },
+      {
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "host": {
+              "description": "Host alias to list; `None` = every configured host.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "name": "list_sessions"
+      },
+      {
+        "inputSchema": {
+          "$defs": {
+            "EnvVar": {
+              "description": "One `NAME=value` environment entry for [`ExecRunReq::env`].",
+              "properties": {
+                "name": {
+                  "description": "Variable name.",
+                  "type": "string"
+                },
+                "value": {
+                  "description": "Variable value.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name",
+                "value"
+              ],
+              "type": "object"
+            }
+          },
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "argv": {
+              "description": "Program and arguments (`--` argv), passed verbatim — no shell\nre-interpretation. Empty = the remote account's login shell.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "cols": {
+              "description": "Initial terminal width; `None` = remote default.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "env": {
+              "description": "Extra environment variables layered over the remote login-shell\nenvironment.",
+              "items": {
+                "$ref": "#/$defs/EnvVar"
+              },
+              "type": "array"
+            },
+            "host": {
+              "description": "Host alias.",
+              "type": "string"
+            },
+            "rows": {
+              "description": "Initial terminal height; `None` = remote default.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "term": {
+              "description": "`TERM` to export in the session; `None` = remote default.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "user": {
+              "description": "The `user` half of `qsh user@host` — a hint checked against the\nremote serve account's login name (`docs/CLI.md` §7); never an\nidentity (the principal always comes from the certificate).",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "host"
+          ],
+          "type": "object"
+        },
+        "name": "open_session"
+      },
+      {
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "bind": {
+              "description": "The `[bind:]` prefix, when present; `None` = caller-side default.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "forward_host": {
+              "description": "The `host` component of the forward spec (the dial target host —\ndistinct from this request's own `host` field, which is the QSH\npeer).",
+              "type": "string"
+            },
+            "forward_port": {
+              "description": "The `host_port` component of the forward spec.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "host": {
+              "description": "Host alias.",
+              "type": "string"
+            },
+            "listen_port": {
+              "description": "The `listen_port` component.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "mode": {
+              "description": "`\"local\"` or `\"remote\"`.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "host",
+            "mode",
+            "listen_port",
+            "forward_host",
+            "forward_port"
+          ],
+          "type": "object"
+        },
+        "name": "open_tunnel"
+      },
+      {
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "after_sequence": {
+              "default": 0,
+              "description": "Cumulative output byte offset already received (`--after`); the\nreply starts right after it.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "ctl_after": {
+              "description": "Control-entry cursor (`--ctl-after`): the `next_ctl_after` of the\nprevious reply, `0` (the default) for a fresh read. Control events\n(`session.exit`/`writer_changed`/`closed`) carry the offset they were\nappended at and do **not** advance it, so `after_sequence` alone\ncannot express \"I already have the control event positioned at N\";\na poller that does not echo this back sees such an event again on\nevery pull (`docs/CLI.md` §6.4). Additive (`qsh.cli/v1`), so it is\nomitted entirely when unset.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "limit_bytes": {
+              "description": "Maximum output payload bytes in one reply (`--limit-bytes`); `None`\n= server default.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "session_ref": {
+              "description": "Opaque session handle.",
+              "type": "string"
+            },
+            "wait_ms": {
+              "description": "Long-poll wait for new output in milliseconds (`--wait`); `None` =\nreturn immediately.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "session_ref"
+          ],
+          "type": "object"
+        },
+        "name": "read_session"
+      },
+      {
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "cols": {
+              "description": "New terminal width.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "rows": {
+              "description": "New terminal height.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "session_ref": {
+              "description": "Opaque session handle.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "session_ref",
+            "cols",
+            "rows"
+          ],
+          "type": "object"
+        },
+        "name": "resize_session"
+      },
+      {
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "data_b64": {
+              "description": "Bytes to inject as terminal input, standard Base64 (`--data-b64`, or\nraw stdin encoded by the CLI for `--stdin`).",
+              "type": "string"
+            },
+            "session_ref": {
+              "description": "Opaque session handle.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "session_ref",
+            "data_b64"
+          ],
+          "type": "object"
+        },
+        "name": "write_session"
+      }
+    ]
+  }
+}
