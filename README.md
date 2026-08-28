@@ -303,7 +303,7 @@ already taken on crates.io. The workspace stays `publish = false` until M9.
 | M2 | Session broker, PTY, migration and resume | Done |
 | M3 | Reverse connections (`listen`/`reverse`/`attach`) | Done |
 | M4 | Port forwarding (`-L`/`-R`) | Done |
-| M5 | ACL and audit | Planned |
+| M5 | ACL and audit | Done |
 | M6 | MCP adapter | Planned |
 | M7 | Trust UX, host profiles, `doctor` | Planned |
 | M8 | Hardening (fuzz, soak, real-device mobility campaign) | Planned |

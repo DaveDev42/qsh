@@ -2,7 +2,7 @@
 
 **상태:** 확정 (구현과 어긋나는 내용을 발견하면 이 문서를 먼저 갱신한다)
 **작성일:** 2026-08-17 · **개정:** 2026-08-21 — 프로덕션 준비도 감사(HEAD `1d5d1b0`) 반영: M3/M5/M7/M8/M9 범위·수용 기준 증보, "마일스톤 마감 공통 절차" 신설. 새 마일스톤은 만들지 않았다 — 감사가 찾은 갭 전부를 기존 마일스톤에 명시 귀속시킨 것이 이 개정의 전부다.
-**현재 위치:** M4 완료 (2026-08-27) — 다음은 M5 (ACL 정책 + audit)
+**현재 위치:** M5 완료 (2026-08-28) — 다음은 M6 (MCP adapter)
 
 이 문서는 P0 MVP까지의 canonical 마일스톤 기록이다. 각 마일스톤의 "수용 기준"이 곧 그 마일스톤의 **완료 정의(Definition of Done)** 다 — 수용 기준을 통과하는 테스트/시연 없이는 마일스톤을 닫지 않는다. SC 번호는 PRD §15 성공 기준의 순번이다 (SC1: 신규 두 장비 5분 내 연결, SC2: 한 명령 접속, SC3: 네트워크 전환 ≥95% 유지/resume, SC4: resume 가능한 단절에서 output 무손실, SC5: client crash가 remote PTY를 죽이지 않음, SC6: 모든 privileged op의 ACL 추적성, SC7: 공개 beta 전 독립 보안 리뷰).
 
@@ -79,13 +79,14 @@
 - **크기:** 2ew
 - **마감 노트 (2026-08-27):** DoD 5항목 전건 테스트 증거로 통과(PLAN.md M4판 §1 체크리스트 — perf 게이트 정본은 CI `acceptance` run 32986938847). 마감 절차 1·2(태그 대조·README 동기화) 완료 — 구속 문서 충돌 0건. Step 8이 확정한 resume 의미론: migration(path rebind)은 터널을 투명 생존시키고, 연결 손실→resume에서 터널 스트림은 깨끗이 종료된다(세션만 §10 resume). **forward-route live carrier**(-L forward가 recovery 후에도 신규 연결을 서비스) 는 구현하지 않기로 확정하고 M5 입력으로 명시 이관 — 근거는 PLAN.md M4판 Step 8 (a)-추기(git 이력).
 
-### M5 — ACL 정책 + audit
+### M5 — ACL 정책 + audit ✅ 완료 (2026-08-28)
 
 - **범위:** TOML 정책 로더, principal 매칭(fingerprint·CA 발급 user/device), action wildcard(`session.*` 형태, 후행 `.*`만), default-deny, PRD §9 action 전체(미구현 기능의 `forward.socks`/`file.*`는 정의하되 항상 deny), `qsh acl check`, 전 privileged op의 구조화 audit.
 - **감사 개정 (2026-08-21) 추가 범위:** ① **audit 수명주기** — "audit 완전성"에서 한 걸음 더: `[audit]` config(회전·크기 상한·retention), 런타임 스레드 밖 비동기 쓰기(현재 동기 blocking I/O), 디스크 만실 시 fail-closed 정책(현재 ENOSPC fail-open). ② **resource-ownership 축** — M3가 넣은 opener-principal P0 결합을 정책 어휘로 승격(리소스에 소유자 개념, 정책이 owner 기준으로 매칭 가능). ③ **거부 메시지 균일성** — deny 응답이 거부된 action/capability를 노출하지 않게 통일. 선례는 `reverse/admit.rs`의 단일 문면 테스트이고, 현재 forward 경로(`server/mod.rs`)의 deny 메시지는 action 이름을 노출한다 — interim allow-all에서는 정보량 0이지만 M5 정책이 켜지는 순간 capability 열거 oracle이 된다.
 - **수용 기준 (DoD):** `qsh acl check` 결과 == 실제 enforcement 결과 (같은 코드 경로임을 표 기반 테스트로 증명). **op registry를 열거해 audit 레코드 없는 op가 있으면 실패하는 테스트** (SC6). Property test: 임의 정책에서 어떤 rule도 커버하지 않는 action은 반드시 Deny.
   - **(감사 개정)** 모든 `PERMISSION_DENIED` 응답 문면이 동일함을 op 전수로 단언하는 테스트. audit 수명주기 동작 테스트(회전 트리거·상한 준수·디스크 만실 fail-closed).
-- **크기:** 2ew
+- **크기:** 2ew + 0.5ew(감사 개정분 — M3 선례 형식, PLAN.md M5판 §4.3 제안 수용)
+- **마감 노트 (2026-08-28):** DoD 5항목 전건 이름 붙은 테스트로 통과 — ① `acl check` 동치는 `acl_check_equivalence.rs` 9행 3-way 표(check·실거동·audit 레코드)와 `Policy::decide`의 `pub(crate)` 좁힘(비테스트 호출 지점 정확히 2곳)이라는 구조 증명, ② SC6 op registry는 `acl_registry.rs` 3층(CLI.md §2.5 양방향 대조·`Body` variant 전수 분류·13행 실구동 audit 단언) + `acl_registry_audit.rs`(실 QUIC 필요 3행), ③ property test는 `policy.rs`의 naive-coverage-oracle proptest, ④ 문면 균일성은 `acl_uniformity.rs`의 `DENY_SEAMS` 14행 전수(항상-deny 3종은 wire op 부재로 행 없음 — 명시 예외), ⑤ audit 수명주기는 `audit/writer.rs`의 회전·retention·queue 포화·ENOSPC fail-closed 4종. 마감 절차의 태그 대조·README 동기화·정본-구현 최종 대조에서 구속 문서 충돌 0건. enforcement는 Step 6a에서 acl.toml 정책으로 전환됐고 `AllowAllPinned`은 `#[cfg(test)]` 전용으로 강등. M4 이관 (v)(forward-route live carrier·`-R` 자동 재발행 부재)는 §3 유예 가드레일 표에 M8 소유로 등재(이 커밋). **SC7 외부 보안 리뷰 예약은 코드 밖 조직 액션이라 이 저장소에서 완결 불가 — 미완 상태로 명시 이월, 운영자 확인 필요**(리뷰는 wire freeze(M8) 6주 전 예약이 조건, §4 리스크 5).
 
 ### M6 — MCP adapter
 
@@ -130,6 +131,7 @@
 | Multi-attach read-only (P2) | broker에서 거의 공짜로 나옴 — 그래서 위험 | **관찰자(observer) 개념 자체를 만들지 않는다.** writer lease는 P0 필수, 두 번째 attach 정책은 lease 규칙만 따름 |
 | Local echo prediction (P2) | mosh 대비 지연 불평 | P0는 실제 PTY 지연을 측정·공개해 데이터로 대화 (§13의 10ms 예산) |
 | Relay (§14, 별도 제품) | "작은 relay 하나면" | P0 의무는 세션 identity와 transport 분리뿐(resume이 이미 강제). **`--relay` flag는 stub조차 없음** |
+| Forward-route live carrier·`-R` 자동 재발행 (M8 소유) | 터널이 recovery 후에도 신규 연결을 서비스하길 기대 | 연결 손실→resume에서 터널 스트림은 깨끗이 종료된다는 현행 의미론을 M4가 테스트로 고정(`tunnel_chaos.rs`의 개정 강제 트랩)했고 README Known limitations가 고지한다. 변경은 터널 recovery 의미론 재설계라 **M8 백로그 소유** — M4 마감 노트가 M5 입력으로 이관, M5가 범위 밖 판정 후 여기 등재(PLAN.md M5판 §3 (v)) |
 | Cert rotation UX (P1) | 만료 | P0: 만료 30일 전 doctor 경고만 |
 | Service 설치 (P1) | 상시 실행 요구 | launchd/systemd unit은 **문서로만** 제공 |
 | **메타 가드레일** | — | `qsh capabilities --json` == fixture 테스트: 새 capability는 fixture diff로만 추가 가능 (리뷰 가능한 산출물). + ErrorCode 전수 도달성 테스트: 존재하지만 만들 수 없는 코드 금지 |
