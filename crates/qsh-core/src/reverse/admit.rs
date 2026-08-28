@@ -15,7 +15,7 @@ use std::net::SocketAddr;
 use qsh_proto::ErrorCode;
 use qsh_transport::{AuthPath, Principal};
 
-use crate::acl::{Action, Authorizer, Decision, ResourceRef};
+use crate::acl::{Authorizer, Decision, ResourceRef};
 use crate::audit::{AuditRecord, AuditSink};
 use crate::ops::OpError;
 
@@ -114,7 +114,7 @@ pub fn admit(
             let _ = audit.record(&AuditRecord::connection_level(
                 req.principal,
                 req.auth_path,
-                Action::HostReverse,
+                crate::acl::action_of("host.reverse"),
                 resource,
                 Decision::Deny,
                 // Pre-choke-point: name resolution failed, never reached
@@ -131,7 +131,7 @@ pub fn admit(
     let verdict = authorizer.check(
         req.principal,
         req.auth_path,
-        Action::HostReverse,
+        crate::acl::action_of("host.reverse"),
         ResourceRef::unowned(&name),
     );
     // A connection-level decision, not a reply to a control-stream
@@ -141,7 +141,7 @@ pub fn admit(
     let recorded = audit.record(&AuditRecord::connection_level(
         req.principal,
         req.auth_path,
-        Action::HostReverse,
+        crate::acl::action_of("host.reverse"),
         &name,
         verdict.decision,
         verdict.rule,
@@ -190,7 +190,7 @@ mod tests {
     use qsh_transport::Fingerprint;
 
     use super::*;
-    use crate::acl::{AllowAllPinned, DenyAll};
+    use crate::acl::{Action, AllowAllPinned, DenyAll};
     use crate::audit::{FailingAuditSink, MemoryAuditSink};
     use crate::broker::TestClock;
 

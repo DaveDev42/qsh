@@ -56,7 +56,10 @@ pub use load::{
     PolicySource, StartupDiagnostic, load_or_deny,
 };
 pub use policy::{ActionPattern, Policy, Rule, Scope, Verdict};
-pub use registry::{DENY_SEAMS, DenySeam, SeamKind};
+pub use registry::{
+    ALWAYS_DENIED_NO_OP, DENY_SEAMS, DenySeam, OP_REGISTRY, OpSpec, ResourceKind, SeamKind,
+    action_of,
+};
 
 /// ACL action vocabulary (`docs/CLI.md` §2.5, PRD §9). Only the actions a
 /// milestone can actually evaluate are listed; new ones are added when

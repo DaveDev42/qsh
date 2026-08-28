@@ -623,10 +623,17 @@ impl Server {
     /// `crates/qsh-testkit/tests/session_loopback.rs`'s
     /// `session_control_binds_write_and_resize_to_the_opener`), now true by
     /// construction instead of by careful sequencing.
+    /// `action` is the caller's own [`crate::acl::action_of`] lookup
+    /// (`"session.write"`/`"session.resize"`, `PLAN.md` M5 Step 8) — both
+    /// resolve to `Action::SessionControl` today, but sourcing it from the
+    /// registry at each call site (rather than hardcoding the enum
+    /// variant here) is what keeps this shared helper and `OP_REGISTRY`
+    /// from being able to drift silently.
     fn authorize_session_control(
         &self,
         ctx: &ConnCtx,
         request_id: u64,
+        action: Action,
         id: &SessionId,
     ) -> Result<(), Box<ControlMessage>> {
         // `require_opener` itself denies (and audits) on an ambiguous
@@ -635,11 +642,11 @@ impl Server {
         // so the ACL decision below still runs and the caller's own
         // subsequent broker call is what eventually answers
         // `SESSION_NOT_FOUND` — this function never invents that answer.
-        let owner = self.require_opener(ctx, request_id, id)?;
+        let owner = self.require_opener(ctx, request_id, action, id)?;
         self.authorize_owned(
             ctx,
             request_id,
-            Action::SessionControl,
+            action,
             ResourceRef {
                 id: &id.0,
                 owner: owner.as_deref(),
@@ -757,6 +764,7 @@ impl Server {
         &self,
         ctx: &ConnCtx,
         request_id: u64,
+        action: Action,
         id: &SessionId,
     ) -> Result<Option<String>, Box<ControlMessage>> {
         match self.sessions.get(id) {
@@ -771,16 +779,13 @@ impl Server {
                     request_id,
                     &ctx.principal,
                     ctx.auth_path,
-                    Action::SessionControl,
+                    action,
                     &id.0,
                     Decision::Deny,
                     None,
                     ctx.peer_addr,
                 ));
-                Err(Box::new(Self::permission_denied(
-                    request_id,
-                    Action::SessionControl,
-                )))
+                Err(Box::new(Self::permission_denied(request_id, action)))
             }
         }
     }
@@ -809,7 +814,9 @@ impl Server {
         }
 
         // ---- ACL choke point: decide + audit BEFORE any resource. ----
-        if let Err(denied) = self.authorize(ctx, request_id, Action::ExecRun, "exec") {
+        if let Err(denied) =
+            self.authorize(ctx, request_id, crate::acl::action_of("exec.run"), "exec")
+        {
             return *denied;
         }
 
@@ -981,8 +988,12 @@ impl Server {
         }
 
         // ---- ACL choke point: decide + audit BEFORE any resource. ----
-        if let Err(denied) = self.authorize(ctx, request_id, Action::SessionOpen, SESSION_RESOURCE)
-        {
+        if let Err(denied) = self.authorize(
+            ctx,
+            request_id,
+            crate::acl::action_of("session.open"),
+            SESSION_RESOURCE,
+        ) {
             return *denied;
         }
 
@@ -1100,8 +1111,12 @@ impl Server {
         if let Err(reply) = self.require_session_capability(ctx, request_id) {
             return *reply;
         }
-        if let Err(denied) = self.authorize(ctx, request_id, Action::SessionList, SESSION_RESOURCE)
-        {
+        if let Err(denied) = self.authorize(
+            ctx,
+            request_id,
+            crate::acl::action_of("session.list"),
+            SESSION_RESOURCE,
+        ) {
             return *denied;
         }
         let sessions = self
@@ -1129,7 +1144,12 @@ impl Server {
         if let Err(reply) = Self::require_session_id(request_id, &req.session_id) {
             return *reply;
         }
-        if let Err(denied) = self.authorize(ctx, request_id, Action::SessionList, &req.session_id) {
+        if let Err(denied) = self.authorize(
+            ctx,
+            request_id,
+            crate::acl::action_of("session.get"),
+            &req.session_id,
+        ) {
             return *denied;
         }
         match self.sessions.get(&SessionId(req.session_id.clone())) {
@@ -1155,8 +1175,12 @@ impl Server {
         if let Err(reply) = Self::require_session_id(request_id, &req.session_id) {
             return *reply;
         }
-        if let Err(denied) = self.authorize(ctx, request_id, Action::SessionAttach, &req.session_id)
-        {
+        if let Err(denied) = self.authorize(
+            ctx,
+            request_id,
+            crate::acl::action_of("session.read"),
+            &req.session_id,
+        ) {
             return *denied;
         }
         // Clamp, never reject (protocol.md §9): 0 = host default = the cap.
@@ -1266,7 +1290,12 @@ impl Server {
             return Err(Box::new(invalid_argument(request_id, err.to_string())));
         }
         let id = SessionId(req.session_id.clone());
-        self.authorize_session_control(ctx, request_id, &id)?;
+        self.authorize_session_control(
+            ctx,
+            request_id,
+            crate::acl::action_of("session.write"),
+            &id,
+        )?;
         let conn = ctx.connection_id();
         if req.data.is_empty() {
             // Nothing to write: answer without touching the lease, so an
@@ -1350,7 +1379,12 @@ impl Server {
             return invalid_argument(request_id, "cols and rows must be positive");
         }
         let id = SessionId(req.session_id.clone());
-        if let Err(denied) = self.authorize_session_control(ctx, request_id, &id) {
+        if let Err(denied) = self.authorize_session_control(
+            ctx,
+            request_id,
+            crate::acl::action_of("session.resize"),
+            &id,
+        ) {
             return *denied;
         }
         match self.sessions.resize(&id, cols, rows).await {
@@ -1415,9 +1449,12 @@ impl Server {
         // `session.control` so `close` has its own scope-able name) decided
         // by its own ADR, not a silent reinterpretation of this choke
         // point.
-        if let Err(denied) =
-            self.authorize(ctx, request_id, Action::SessionControl, &req.session_id)
-        {
+        if let Err(denied) = self.authorize(
+            ctx,
+            request_id,
+            crate::acl::action_of("session.close"),
+            &req.session_id,
+        ) {
             return *denied;
         }
         let id = SessionId(req.session_id.clone());
@@ -1502,7 +1539,7 @@ impl Server {
                     request_id,
                     &ctx.principal,
                     ctx.auth_path,
-                    Action::SessionAttach,
+                    crate::acl::action_of("session.attach"),
                     &req.session_id,
                     crate::acl::Decision::Deny,
                     // Not a policy-rule decision — a credential-
@@ -1519,8 +1556,12 @@ impl Server {
                 return auth_failed(request_id);
             }
         };
-        if let Err(denied) = self.authorize(ctx, request_id, Action::SessionAttach, &req.session_id)
-        {
+        if let Err(denied) = self.authorize(
+            ctx,
+            request_id,
+            crate::acl::action_of("session.attach"),
+            &req.session_id,
+        ) {
             return *denied;
         }
 
@@ -2304,7 +2345,7 @@ impl Server {
         // helper `SESSION_DATA`'s inline attach check uses — it decides and
         // writes the audit line for both outcomes (SC6: every privileged op
         // leaves an audit record).
-        if !self.authorize_stream(ctx, Action::ForwardLocal, &resource) {
+        if !self.authorize_stream(ctx, crate::acl::action_of("forward.local"), &resource) {
             // The same constant the control-stream `PERMISSION_DENIED`
             // uses (`Server::permission_denied`): a denial must not tell
             // the peer *which* rule refused it.
@@ -2417,7 +2458,12 @@ impl Server {
             wire::sanitize_peer_text(&req.bind_host)
         };
         let resource = wire::format_host_port(&display_bind_host, bind_port);
-        self.authorize(ctx, request_id, Action::ForwardRemote, &resource)?;
+        self.authorize(
+            ctx,
+            request_id,
+            crate::acl::action_of("forward.remote"),
+            &resource,
+        )?;
 
         // (3) Loopback-only bind — see this function's own doc for why
         // this is `InvalidArgument`, never `PermissionDenied`. One
@@ -2629,7 +2675,7 @@ impl Server {
         if let Err(reply) = self.authorize_owned(
             ctx,
             request_id,
-            Action::ForwardRemote,
+            crate::acl::action_of("forward.remote.close"),
             ResourceRef {
                 id: &req.forward_id,
                 owner: owner.as_deref(),
@@ -2751,6 +2797,14 @@ impl Server {
                 // and audit it here, before anything is taken, so a
                 // principal allowed to open but not to attach cannot get an
                 // interactive attach through the back door.
+                //
+                // Deliberately the literal `Action::SessionAttach`, not an
+                // `acl::action_of(...)` lookup: this seam is
+                // `DENY_SEAMS`'s `"session.attach@data-stream"` row, which
+                // has no `OP_REGISTRY` entry of its own (`OpSpec`'s own
+                // doc, `PLAN.md` M5 Step 8) — it shares the control-stream
+                // `session.attach` op's `Action` but is a distinct wire
+                // path with no CLI.md-documented name to look up.
                 if !attach_authorized
                     && !self.authorize_stream(&ctx, Action::SessionAttach, session_id.as_str())
                 {
@@ -4082,18 +4136,23 @@ mod tests {
         assert!(recs.iter().all(|r| r.principal == "device:intruder"));
         let actions: std::collections::BTreeSet<&str> =
             recs.iter().map(|r| r.action.as_str()).collect();
-        assert_eq!(
-            actions,
-            [
-                Action::SessionOpen,
-                Action::SessionList,
-                Action::SessionAttach,
-                Action::SessionControl,
-            ]
-            .iter()
-            .map(|a| a.as_str())
-            .collect()
-        );
+        // The distinct actions among the 7 session ops, sourced from
+        // `OP_REGISTRY` (`PLAN.md` M5 Step 8) rather than named a second
+        // time as `Action` literals — a dedup set, since `session.write`/
+        // `resize`/`close` all resolve to `Action::SessionControl`.
+        let expected_actions: std::collections::BTreeSet<&str> = [
+            "session.open",
+            "session.list",
+            "session.get",
+            "session.read",
+            "session.write",
+            "session.resize",
+            "session.close",
+        ]
+        .iter()
+        .map(|op| crate::acl::action_of(op).as_str())
+        .collect();
+        assert_eq!(actions, expected_actions);
     }
 
     /// Each session op is audited under exactly the action CLI.md §2.5
@@ -4112,12 +4171,25 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(error_code(&reply), None, "{name}: {reply:?}");
+            // `Action`s sourced from `OP_REGISTRY` by dotted op name
+            // (`PLAN.md` M5 Step 8), not named a second time as literals —
+            // `resource` still depends on which sentinel/id shape each op
+            // uses (`OpSpec::resource_kind` documents the shape; the
+            // literal string is still the request's own, same as before).
             let (action, resource) = match name {
-                "open" => (Action::SessionOpen, SESSION_RESOURCE.to_string()),
-                "list" => (Action::SessionList, SESSION_RESOURCE.to_string()),
-                "get" => (Action::SessionList, id.clone()),
-                "read" => (Action::SessionAttach, id.clone()),
-                "write" | "resize" | "close" => (Action::SessionControl, id.clone()),
+                "open" => (
+                    crate::acl::action_of("session.open"),
+                    SESSION_RESOURCE.to_string(),
+                ),
+                "list" => (
+                    crate::acl::action_of("session.list"),
+                    SESSION_RESOURCE.to_string(),
+                ),
+                "get" => (crate::acl::action_of("session.get"), id.clone()),
+                "read" => (crate::acl::action_of("session.read"), id.clone()),
+                "write" => (crate::acl::action_of("session.write"), id.clone()),
+                "resize" => (crate::acl::action_of("session.resize"), id.clone()),
+                "close" => (crate::acl::action_of("session.close"), id.clone()),
                 other => panic!("unexpected op {other}"),
             };
             expected.push((name, action, resource));

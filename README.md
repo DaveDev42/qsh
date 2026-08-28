@@ -359,7 +359,16 @@ Some of these are MVP scope decisions, some are unfinished work.
   full stop — there is no degraded-but-serving mode. Recovery is automatic:
   once the audit log is writable again, the writer's own background retry
   clears the condition and operations start succeeding again on their own,
-  with no restart and no operator action needed.
+  with no restart and no operator action needed. The audit record's
+  fields are structural by design: argv, PTY bytes, and key material never
+  appear in it. `audit.log_argv` is named in the design docs as a
+  sanctioned future exception; M5 does not implement it.
+- There is no per-principal or per-forward quota. A pinned peer with
+  `session.*`/`forward.*` can open as many sessions or remote forwards as
+  it likes, and nothing here caps concurrent sessions, connections, or
+  forwards per principal. M8's adversarial load gate adds that
+  enforcement (`[serve].max_sessions` and a per-principal session cap);
+  the ACL engine itself never will.
 - `qsh trust remove` only affects future handshakes. A peer you removed
   keeps whatever sessions and access it already holds until its connection
   drops and it has to handshake again.
