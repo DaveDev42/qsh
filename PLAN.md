@@ -24,6 +24,8 @@
 
 **(d) 완료 판정:** cargo deny green, 12종 매핑 표가 코드 상수로 실재, §4.1 전 항목 확정 기록.
 
+**(a)-추기 — Step 1 완료 확정 (2026-08-29, main 세션).** ① rmcp `=3.1.4` 정확 pin, `default-features = false`, features `["server", "transport-io"]`만 — client/auth/HTTP 제외. 워크스페이스 schemars 1.x(lock 1.2.2)가 rmcp 요구(`schemars = "1.0"`)를 그대로 만족, 상향 불요. cargo deny: rmcp 유발 신규 중복 경고 0건. ② DTO 감사 결과 12종 전부 기존 `*Req`/`*Data`에 `JsonSchema` 파생이 이미 있어 qsh-proto 수정 0줄 — `SessionReadReq`가 §8.3 예시와 필드명까지 일치(설계 시점에 이미 MCP를 겨냥). ③ 매핑 상수 `TOOL_MAP`은 `crates/qsh-cli/src/mcp/mod.rs` 소속(소비자 단독 축 — `OP_REGISTRY`와 다른 축이라 qsh-core에 두지 않는다). **qsh-cli는 lib 타깃 없는 bin-only crate라 MCP 문서 대조·conformance 계열 중 내부 심볼이 필요한 테스트는 `tests/*.rs`가 아니라 어댑터 모듈 내 `#[cfg(test)]`에 둔다** — Step 2의 실바이너리 conformance 하네스(`tests/mcp_conformance.rs`)는 내부 심볼이 불필요하므로 원계획대로 외부 테스트 파일. ④ §4.1 확정: #1 `=3.1.4`; #2 초안 유지(스키마 결정성은 rmcp `Tool::with_input_schema` 경로 3회 반복 바이트 동일로 실증 — 사전순 정렬 여부는 Step 2에서 fixture 형태로 확정); #3 초안 그대로(`CallToolResult::structured_error` = isError:true + structuredContent, 프로토콜 오류 불개입 — 컴파일 실증); #4 **문면 정정** — "MCP 전용 timeout 인자를 새로 추가하지 않는다"로 좁힌다: `ExecRunReq.timeout_ms`는 §6.8 기존 계약의 상속이지 신규가 아니다; #5 초안 그대로(rmcp stdio는 newline-delimited JSON-RPC — raw `std::process::Command` 하네스 실현 가능, 소스 확인). ⑤ 부수: `chacha20 0.10.1`이 crates.io에서 실제 yank됨(레지스트리 플레이크 아님 — 0.10.2 정상 존재)을 확인하고 `cargo update -p chacha20`으로 0.10.2 이동, deny advisories green 복원 — deny.toml 예외를 파지 않았다(arrayref와 달리 진짜 yank이므로 업데이트가 옳다).
+
 ### Step 2 — `qsh mcp` 골격: stdio 서버 + initialize + tools/list == fixture (DoD 1 전반부, DoD 5)
 
 **(a) 범위:** `qsh mcp` subcommand가 rmcp stdio 서버를 띄운다. tool schema는 schemars가 `*Req`에서 생성. **stdout 순수성이 이 step의 본체다**: 로깅·진단·panic 출력까지 전부 stderr(§8.1), `-vv` 포함. MCP 서버 시작 시 M5 시작 진단(`StartupDiagnostic`)도 stderr로만.

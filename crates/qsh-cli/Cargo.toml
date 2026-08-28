@@ -20,6 +20,29 @@ qsh-proto.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tokio.workspace = true
+# MCP adapter (`docs/design/architecture.md` §2/§8/§9, `docs/CLI.md` §8,
+# `PLAN.md` M6 Step 1). Exact-pinned (not `3` or `3.1`): architecture.md §9
+# risk 4 calls out rmcp's API churn explicitly and the mitigation is an
+# exact version lock, not semver range trust. **`qsh-cli`-only** — never add
+# this to `qsh-proto`/`qsh-transport`/`qsh-core` (architecture.md §1's
+# dependency matrix has no lane for it below the frontend, and the MCP
+# adapter is a `qsh-cli`-only frontend concern per §11). `default-features =
+# false` + explicit `server`(tool routing, requires+enables `schemars`)
+# + `transport-io`(stdio duplex, `docs/CLI.md` §8.1) is the minimum for a
+# stdio-only server — no `client`/`auth`/HTTP transport surface, which this
+# project never uses (MVP is stdio-only, §8.1).
+rmcp = { version = "=3.1.4", default-features = false, features = [
+    "server",
+    "transport-io",
+] }
+# Tool input schemas are generated straight from `qsh-proto`'s `*Req` types
+# (`docs/design/architecture.md` §2 "Req/Data 타입 공유") — production code,
+# not just tests, so this moves out of `[dev-dependencies]` below. Same
+# workspace-pinned `schemars = "1"` `qsh-proto` already derives against;
+# rmcp 3.1.4 itself requires `schemars = "1.0"` (`rmcp-3.1.4/Cargo.toml`),
+# so no version bump was needed (`Cargo.lock` already resolves schemars to
+# 1.2.2, which `^1.0` and workspace `"1"` both accept).
+schemars.workspace = true
 
 # Raw-mode terminal for the interactive TUI (`docs/design/architecture.md`
 # §8). unix-only: `qsh-cli` is also built for `x86_64-pc-windows-msvc`, where
@@ -30,7 +53,6 @@ nix = { workspace = true, features = ["term", "ioctl", "signal"] }
 [dev-dependencies]
 tempfile.workspace = true
 jsonschema.workspace = true
-schemars.workspace = true
 qsh-testkit.workspace = true
 # Test-only, direct transport-level types two integration-test files need
 # and `qsh-core` does not re-export:
