@@ -189,6 +189,211 @@ pub const DENY_SEAMS: &[DenySeam] = &[
     },
 ];
 
+// ---------------------------------------------------------------------
+// `PLAN.md` M5 Step 8 (SC6): the op registry. Every privileged operation
+// this build authorizes, as one table `server::dispatch`'s handlers
+// consume for their `Action` instead of naming it a second time.
+// ---------------------------------------------------------------------
+
+/// The shape of an [`OpSpec`]'s resource string — documentation only, not
+/// consulted by any evaluator (`Action` + [`super::ResourceRef`] remain
+/// the only inputs [`super::Authorizer::check`] sees). Lets a reader tell
+/// "this row's resource is a session id" from "this row's resource is a
+/// dial destination" without re-deriving it from the handler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResourceKind {
+    /// A session id, or the [`super::SESSION_RESOURCE`]-shaped sentinel
+    /// `"session"` for the two ops with no single session to name
+    /// (`session.open`, `session.list`).
+    Session,
+    /// The literal `"exec"` sentinel — `exec.run` has no addressable
+    /// resource narrower than the request itself.
+    Exec,
+    /// A `"host:port"` dial destination chosen by the requester
+    /// (`forward.local`).
+    ForwardDestination,
+    /// A `"bind_host:bind_port"` listen address (`forward.remote`), or a
+    /// host-minted `forward_id` naming an existing one
+    /// (`forward.remote.close`).
+    ForwardBinding,
+    /// The resolved reverse-host name being registered (`host.reverse`).
+    ReverseHost,
+}
+
+/// One row of the op registry: every privileged operation this build
+/// authorizes, its ACL [`Action`], the shape of its resource string, and
+/// whether `scope = "owned"` can narrow it to the resource's own
+/// opener/registering principal.
+///
+/// `op` names a `docs/CLI.md` §2.4 dotted operation for the nine rows that
+/// are one, or the seam's own §2.5-prose name for the four that are not
+/// (`forward.local`, `forward.remote`, `forward.remote.close`,
+/// `host.reverse`) — the exact naming [`DENY_SEAMS`] already uses.
+/// Deliberately not incidental: [`OP_REGISTRY`]'s (op, action) pairs are
+/// exactly [`DENY_SEAMS`]'s minus the one row with no CLI.md-documented
+/// op/seam name of its own (`"session.attach@data-stream"`, the internal
+/// `SessionData` reattach gate — already exhaustively covered by this
+/// module's own `SeamKind::StreamReset` uniformity obligation, so folding
+/// it into this table a second time under a name CLI.md never uses would
+/// only test `Action::SessionAttach` a third time without adding contract
+/// coverage). `tests::op_registry_matches_deny_seams_by_name_and_action`
+/// (below) is the mechanical cross-check that keeps these two tables from
+/// ever being hand-maintained as independent sources of the same fact —
+/// `PLAN.md` M5 Step 8's "표 두 벌 금지".
+#[derive(Debug, Clone, Copy)]
+pub struct OpSpec {
+    /// The op's dotted name (`docs/CLI.md` §2.4/§2.5).
+    pub op: &'static str,
+    /// The ACL action this op is authorized against.
+    pub action: Action,
+    /// The shape of this op's resource string.
+    pub resource_kind: ResourceKind,
+    /// Whether `scope = "owned"` narrows this op to the resource's
+    /// opener/registering principal. `true` only for `session.write`/
+    /// `session.resize` (`Server::authorize_session_control`) and
+    /// `forward.remote.close` (`Server::handle_rfwd_close`) — every other
+    /// row's resource has no owner concept, or (`session.close`) is the
+    /// documented exception that shares `Action::SessionControl` with
+    /// `write`/`resize` but stays outside the ownership bind on purpose
+    /// (`docs/design/architecture.md` §6's "session.control의 예외 —
+    /// close").
+    pub owned: bool,
+}
+
+/// Every privileged operation this build authorizes (`PLAN.md` M5 Step 8,
+/// PRD §15 SC6). See [`OpSpec`]'s own doc for the naming rule and the
+/// relationship to [`DENY_SEAMS`], and [`ALWAYS_DENIED_NO_OP`] for the
+/// three PRD §9 actions deliberately missing from this table.
+pub const OP_REGISTRY: &[OpSpec] = &[
+    OpSpec {
+        op: "session.open",
+        action: Action::SessionOpen,
+        resource_kind: ResourceKind::Session,
+        owned: false,
+    },
+    OpSpec {
+        op: "session.list",
+        action: Action::SessionList,
+        resource_kind: ResourceKind::Session,
+        owned: false,
+    },
+    OpSpec {
+        op: "session.get",
+        action: Action::SessionList,
+        resource_kind: ResourceKind::Session,
+        owned: false,
+    },
+    OpSpec {
+        op: "session.read",
+        action: Action::SessionAttach,
+        resource_kind: ResourceKind::Session,
+        owned: false,
+    },
+    OpSpec {
+        op: "session.attach",
+        action: Action::SessionAttach,
+        resource_kind: ResourceKind::Session,
+        owned: false,
+    },
+    OpSpec {
+        op: "session.write",
+        action: Action::SessionControl,
+        resource_kind: ResourceKind::Session,
+        owned: true,
+    },
+    OpSpec {
+        op: "session.resize",
+        action: Action::SessionControl,
+        resource_kind: ResourceKind::Session,
+        owned: true,
+    },
+    OpSpec {
+        op: "session.close",
+        action: Action::SessionControl,
+        resource_kind: ResourceKind::Session,
+        // Documented exception (`docs/design/architecture.md` §6): shares
+        // `Action::SessionControl` with write/resize but is intentionally
+        // never narrowed by `scope = "owned"` (cross-device close, PRD §6).
+        owned: false,
+    },
+    OpSpec {
+        op: "exec.run",
+        action: Action::ExecRun,
+        resource_kind: ResourceKind::Exec,
+        owned: false,
+    },
+    OpSpec {
+        op: "forward.local",
+        action: Action::ForwardLocal,
+        resource_kind: ResourceKind::ForwardDestination,
+        owned: false,
+    },
+    OpSpec {
+        op: "forward.remote",
+        action: Action::ForwardRemote,
+        resource_kind: ResourceKind::ForwardBinding,
+        owned: false,
+    },
+    OpSpec {
+        op: "forward.remote.close",
+        action: Action::ForwardRemote,
+        resource_kind: ResourceKind::ForwardBinding,
+        owned: true,
+    },
+    OpSpec {
+        op: "host.reverse",
+        action: Action::HostReverse,
+        resource_kind: ResourceKind::ReverseHost,
+        owned: false,
+    },
+];
+
+/// PRD §9 actions with no [`OP_REGISTRY`] row, and why — the always-denied
+/// trio ([`Action::is_always_denied`]) [`DENY_SEAMS`] already excludes for
+/// the identical reason (its own
+/// `deny_seams_cover_every_action_except_the_always_denied_trio` anchor).
+/// Named here too, not merely inherited, so a reader of this table alone
+/// sees the gap and its reason without cross-referencing that test — the
+/// same `DEFERRED`-style discipline `PLAN.md` uses elsewhere: an exclusion
+/// is only legitimate on record, with a reason, never a silent hole.
+pub const ALWAYS_DENIED_NO_OP: &[(Action, &str)] = &[
+    (
+        Action::ForwardSocks,
+        "forward.socks (-D SOCKS proxying) is P1-deferred; no wire op exists yet for a peer \
+         to construct this action (docs/ROADMAP.md §3 deferred-feature guardrail table)",
+    ),
+    (
+        Action::FileRead,
+        "file.read (streaming file copy) is P1-deferred; no wire op exists yet for a peer to \
+         construct this action (docs/ROADMAP.md §3)",
+    ),
+    (
+        Action::FileWrite,
+        "file.write (streaming file copy) is P1-deferred; no wire op exists yet for a peer to \
+         construct this action (docs/ROADMAP.md §3)",
+    ),
+];
+
+/// Look up an [`OpSpec`]'s [`Action`] by [`OpSpec::op`] name — the one
+/// place `server::dispatch`'s handlers (and `reverse::admit::admit`) get
+/// their `Action` from, so a handler and this registry cannot
+/// independently drift (`PLAN.md` M5 Step 8: "dispatch가 이 표를 소비하게
+/// 만들어 표와 코드가 갈라지지 않게 한다"). Every call site names a
+/// `'static` literal straight from [`OP_REGISTRY`], so a mismatch is a bug
+/// the very next test run of that call site catches — never a silent
+/// runtime miss a peer could trigger.
+///
+/// # Panics
+///
+/// If `op` is not a row in [`OP_REGISTRY`].
+pub fn action_of(op: &str) -> Action {
+    OP_REGISTRY
+        .iter()
+        .find(|spec| spec.op == op)
+        .unwrap_or_else(|| panic!("acl::registry::action_of: {op:?} is not a row in OP_REGISTRY"))
+        .action
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -407,5 +612,93 @@ mod tests {
             Body::Pong(Pong::default()),
             Body::SessionEvent(SessionEvent::default()),
         ]
+    }
+
+    // ---- M5 Step 8 (SC6): OP_REGISTRY sanity + the anti-two-tables cross-check ----
+
+    #[test]
+    fn op_registry_is_non_empty() {
+        assert!(!OP_REGISTRY.is_empty());
+    }
+
+    /// Sanity floor `PLAN.md` M5 Step 8 (c) names explicitly: an exclusion
+    /// list that grew to swallow the whole registry would be a silent way
+    /// to defeat DoD 2's audit-completeness sweep (every excluded op is
+    /// one this build never actually authorizes anything for).
+    #[test]
+    fn always_denied_no_op_is_smaller_than_the_registry() {
+        assert!(ALWAYS_DENIED_NO_OP.len() < OP_REGISTRY.len());
+    }
+
+    #[test]
+    fn every_always_denied_no_op_reason_is_non_empty() {
+        for (action, reason) in ALWAYS_DENIED_NO_OP {
+            assert!(
+                !reason.is_empty(),
+                "{action:?}'s ALWAYS_DENIED_NO_OP exclusion needs a one-line reason"
+            );
+        }
+    }
+
+    /// `ALWAYS_DENIED_NO_OP` must name exactly `Action::is_always_denied`'s
+    /// three actions — same anchor `deny_seams_cover_every_action_except_the_always_denied_trio`
+    /// pins for `DENY_SEAMS`, restated here since this exclusion list is
+    /// its own named thing (`OpSpec`'s own doc), not merely inherited.
+    #[test]
+    fn always_denied_no_op_names_exactly_the_always_denied_trio() {
+        let excluded: std::collections::HashSet<Action> =
+            ALWAYS_DENIED_NO_OP.iter().map(|(a, _)| *a).collect();
+        let always_denied: std::collections::HashSet<Action> = Action::ALL
+            .iter()
+            .copied()
+            .filter(|a| a.is_always_denied())
+            .collect();
+        assert_eq!(excluded, always_denied);
+    }
+
+    /// The "표 두 벌 금지" cross-check (`PLAN.md` M5 Step 8 (c)): `OP_REGISTRY`
+    /// and `DENY_SEAMS` must name and authorize the exact same set of seams,
+    /// minus the one internal-only row (`"session.attach@data-stream"`,
+    /// [`OpSpec`]'s own doc explains why) that has no CLI.md-documented
+    /// op/seam name of its own to carry into this table. Nobody can add a
+    /// row to one table with a different `(name, action)` pair than the
+    /// other without this test failing — the two tables cannot be
+    /// hand-maintained as independent sources of the same fact.
+    #[test]
+    fn op_registry_matches_deny_seams_by_name_and_action() {
+        let op_registry_pairs: std::collections::HashSet<(&str, Action)> = OP_REGISTRY
+            .iter()
+            .map(|spec| (spec.op, spec.action))
+            .collect();
+        let deny_seam_pairs: std::collections::HashSet<(&str, Action)> = DENY_SEAMS
+            .iter()
+            .filter(|seam| seam.name != "session.attach@data-stream")
+            .map(|seam| (seam.name, seam.action))
+            .collect();
+        assert_eq!(
+            op_registry_pairs, deny_seam_pairs,
+            "OP_REGISTRY and DENY_SEAMS have drifted: they must name and authorize the \
+             exact same set of seams, minus the internal-only session.attach@data-stream \
+             reattach gate (OpSpec's own doc) — a row added, removed, renamed, or \
+             re-mapped to a different Action in either table must be mirrored in the \
+             other"
+        );
+    }
+
+    /// `action_of` must resolve every row it will ever actually be asked
+    /// for — every op name this crate's own call sites pass it — to
+    /// exactly that row's `Action`. A typo'd literal at a call site (the
+    /// #[should_panic] case) is exactly what `action_of`'s panic is for.
+    #[test]
+    fn action_of_resolves_every_registry_row() {
+        for spec in OP_REGISTRY {
+            assert_eq!(action_of(spec.op), spec.action, "{}", spec.op);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "is not a row in OP_REGISTRY")]
+    fn action_of_panics_on_an_unregistered_name() {
+        let _ = action_of("no.such.op");
     }
 }
