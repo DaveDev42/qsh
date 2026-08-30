@@ -196,6 +196,31 @@ const CLI_SRC_DIR: &str = "crates/qsh-cli/src";
 const CLI_SRC_REASON: &str = "qsh-cli talks to a daemon only through qsh-core's localctl client, never by opening a UDS \
      socket itself (PLAN.md M3 Step 5(a)); crates/qsh-cli/tests is out of scope for this rule";
 
+/// The MCP adapter (`docs/CLI.md` §8.2's own prose: "MCP adapter가 command
+/// string을 만들거나 CLI output을 다시 parse해서는 안 된다. 두 adapter
+/// 모두 같은 Rust operation layer를 직접 호출한다.", `PLAN.md` M6 DoD 4)
+/// must call `Ops` in-process, never shell out to the `qsh` binary and
+/// re-parse its output. Three literal surfaces are banned: the
+/// subprocess-spawning module (`std::process`, so a `use std::process::…`
+/// import is caught at the import line even before any call site);
+/// the constructor call site (`Command::new`, which — being a bare type
+/// name, not a full path — catches `tokio::process::Command::new` the
+/// same way it catches `std::process::Command::new`, so switching to the
+/// async twin does not evade this); and the API a spawned child's stdout
+/// has to go through before its text could be re-parsed (`Stdio::piped`,
+/// shared by both `std::process::Stdio` and `tokio::process::Stdio`).
+/// Scope is the whole `mcp/` directory, tests inline in it (`#[cfg(test)]`
+/// modules) included — unlike `CLI_SRC_DIR`, there is no sibling
+/// `crates/qsh-cli/tests/mcp_conformance.rs`-style carve-out needed here
+/// because that conformance harness lives under `crates/qsh-cli/tests/`,
+/// outside this directory entirely, and *is* allowed a real
+/// `std::process::Command` (`PLAN.md` §4.1 #5 — it spawns the real `qsh
+/// mcp` binary to observe the wire, which is a different concern from the
+/// adapter shelling out to itself).
+const MCP_DIR: &str = "crates/qsh-cli/src/mcp";
+const MCP_REASON: &str = "the MCP adapter must call Ops directly, in-process — never shell out to \
+     `qsh` and re-parse its CLI output (docs/CLI.md §8.2, PLAN.md M6 DoD 4)";
+
 fn module_bans() -> Vec<ModuleBan> {
     let mut bans: Vec<ModuleBan> = BROKER_TOKEN_SET
         .into_iter()
@@ -229,6 +254,14 @@ fn module_bans() -> Vec<ModuleBan> {
             scope: Scope::Dir(CLI_SRC_DIR),
             forbidden,
             reason: CLI_SRC_REASON,
+        });
+    }
+
+    for forbidden in ["std::process", "Command::new", "Stdio::piped"] {
+        bans.push(ModuleBan {
+            scope: Scope::Dir(MCP_DIR),
+            forbidden,
+            reason: MCP_REASON,
         });
     }
 
@@ -296,8 +329,17 @@ fn check_module_bans(workspace_root: &Path, violations: &mut Vec<String>) -> Res
 }
 
 /// Everything before a `//` line comment (doc comments included). Naive but
-/// sufficient for this lint: broker source has no string literal that embeds
-/// `//` before a banned token, and block comments are not used there.
+/// sufficient for this lint: this assumption — no string literal embeds `//`
+/// before a banned token, and no block comments (`/* … */`) are used — has
+/// been re-verified for every scope this lint currently scans (`BROKER_DIR`,
+/// the `localctl` files, `REGISTRY_FILE`, `CLI_SRC_DIR`, and `MCP_DIR`). For
+/// `MCP_DIR` specifically: the only banned-token occurrence anywhere under
+/// `crates/qsh-cli/src/mcp/` is the `///` line comment at
+/// `crates/qsh-cli/src/mcp/mod.rs:805` (`` `std::process::Command` `` in
+/// prose) — no block comments and no token-bearing string literals exist in
+/// that tree. **Adding a new scanned scope requires re-checking this
+/// assumption against that scope's actual source** before trusting this
+/// naive strip on it.
 fn strip_line_comment(line: &str) -> &str {
     match line.find("//") {
         Some(idx) => &line[..idx],
@@ -440,13 +482,13 @@ mod tests {
     /// Every configured module-ban target that doesn't exist is flagged
     /// once — not once per token bound to it (the ban targets must exist
     /// once their consumers land: `BROKER_DIR`, the two `localctl` files,
-    /// `REGISTRY_FILE`, and `CLI_SRC_DIR`).
+    /// `REGISTRY_FILE`, `CLI_SRC_DIR`, and `MCP_DIR`).
     #[test]
     fn module_ban_flags_each_missing_target_exactly_once() {
         let root = tempfile::tempdir().unwrap();
         let mut violations = Vec::new();
         check_module_bans(root.path(), &mut violations).unwrap();
-        assert_eq!(violations.len(), 5, "{violations:?}");
+        assert_eq!(violations.len(), 6, "{violations:?}");
         assert!(
             violations.iter().all(|v| v.contains("does not exist")),
             "{violations:?}"
@@ -585,9 +627,126 @@ mod tests {
         );
     }
 
+    /// `crates/qsh-cli/src/mcp` bans `std::process`/`Command::new`/
+    /// `Stdio::piped` (M6 DoD 4, `MCP_DIR`) — a synthetic adapter file that
+    /// shells out to the `qsh` binary and pipes its stdout for re-parsing
+    /// is flagged on all three tokens, each on the line it actually
+    /// appears on.
+    #[test]
+    fn module_ban_flags_a_subprocess_shell_out_under_mcp() {
+        let root = tempfile::tempdir().unwrap();
+        let mcp = root.path().join("crates/qsh-cli/src/mcp");
+        fs::create_dir_all(&mcp).unwrap();
+        fs::write(
+            mcp.join("evil.rs"),
+            "use std::process::{Command, Stdio};\n\
+             fn shell_out_and_reparse() {\n    \
+             let out = Command::new(\"qsh\").stdout(Stdio::piped()).output().unwrap();\n\
+             }\n",
+        )
+        .unwrap();
+
+        let mut violations = Vec::new();
+        check_module_bans(root.path(), &mut violations).unwrap();
+        let hits: Vec<_> = violations
+            .iter()
+            .filter(|v| v.contains("evil.rs"))
+            .collect();
+        // Line 1 names `std::process` (the `use` path); line 3 names both
+        // `Command::new` and `Stdio::piped`.
+        assert_eq!(hits.len(), 3, "{violations:?}");
+        assert!(
+            hits.iter()
+                .any(|v| v.contains("evil.rs:1") && v.contains("std::process"))
+        );
+        assert!(
+            hits.iter()
+                .any(|v| v.contains("evil.rs:3") && v.contains("Command::new"))
+        );
+        assert!(
+            hits.iter()
+                .any(|v| v.contains("evil.rs:3") && v.contains("Stdio::piped"))
+        );
+    }
+
+    /// Smoke check: a CRLF-line-ended source file (the Windows-checkout
+    /// shape `acl_registry.rs`'s `source_scan` module calls out) must still
+    /// get its violation caught. This is a demonstration, not a
+    /// discriminator — it does **not** pin `text.lines()` as the specific
+    /// choice, and it cannot be turned into one. Swapping `text.lines()`
+    /// for `text.split('\n')` in `check_module_bans` still passes this
+    /// (and every other) xtask test, because the scan matches `ban.forbidden`
+    /// as a substring anywhere within a line, and a trailing `\r` only ever
+    /// sits at the very end of that line — after the token has already
+    /// matched or not — so its presence or absence cannot flip the
+    /// `.contains()` result either way. There is no line content this scan
+    /// could be given that would tell `lines()` and `split('\n')` apart
+    /// here.
+    ///
+    /// This is why this test needs no separate `.replace("\r\n", "\n")`
+    /// step: the M5 precedent in `acl_registry.rs`'s `source_scan` needed
+    /// that replace only because *that* scan does a whole-file, multi-line
+    /// marker substring search (a match can straddle a line boundary), a
+    /// shape where a stray `\r` immediately before the match point could
+    /// matter. This scan is strictly per-line and position-independent
+    /// within the line, so no such step is needed here — not because
+    /// `lines()` was proven necessary, but because the hazard the replace
+    /// step guards against does not exist in this scan's shape.
+    #[test]
+    fn module_ban_catches_a_violation_in_a_crlf_line_ended_file_under_mcp() {
+        let root = tempfile::tempdir().unwrap();
+        let mcp = root.path().join("crates/qsh-cli/src/mcp");
+        fs::create_dir_all(&mcp).unwrap();
+        fs::write(
+            mcp.join("crlf.rs"),
+            "// a comment first\r\nfn f() { let _ = Command::new(\"qsh\"); }\r\n",
+        )
+        .unwrap();
+
+        let mut violations = Vec::new();
+        check_module_bans(root.path(), &mut violations).unwrap();
+        let hits: Vec<_> = violations
+            .iter()
+            .filter(|v| v.contains("crlf.rs"))
+            .collect();
+        assert_eq!(hits.len(), 1, "{violations:?}");
+        assert!(hits[0].contains("crlf.rs:2"));
+        assert!(hits[0].contains("Command::new"));
+    }
+
+    /// Doc-comment prose that merely *mentions* `std::process::Command` or
+    /// `Stdio::piped` — explaining why a *different* file (the conformance
+    /// harness under `crates/qsh-cli/tests/`, out of `MCP_DIR`'s scope) is
+    /// allowed a real one — must not trip this ban; only real code does
+    /// (mirrors `module_ban_ignores_comments`, MCP axis). This is the
+    /// actual shape `crates/qsh-cli/src/mcp/mod.rs` carries today, so this
+    /// test is also the guarantee that adding the MCP ban did not force an
+    /// unwanted comment-wording change there.
+    #[test]
+    fn module_ban_ignores_comments_mentioning_process_apis_under_mcp() {
+        let root = tempfile::tempdir().unwrap();
+        let mcp = root.path().join("crates/qsh-cli/src/mcp");
+        fs::create_dir_all(&mcp).unwrap();
+        fs::write(
+            mcp.join("mod.rs"),
+            "//! A conformance harness can therefore be a bare\n\
+             //! `std::process::Command` with piped stdio (`Stdio::piped`),\n\
+             //! writing/reading newline-delimited JSON-RPC directly — nothing\n\
+             //! this module itself does; `Command::new` never appears in real\n\
+             //! code here.\n\
+             pub fn ok() {}\n",
+        )
+        .unwrap();
+
+        let mut violations = Vec::new();
+        check_module_bans(root.path(), &mut violations).unwrap();
+        let hits: Vec<_> = violations.iter().filter(|v| v.contains("mod.rs")).collect();
+        assert!(hits.is_empty(), "{violations:?}");
+    }
+
     /// The real workspace tree must respect every module ban: the broker,
     /// `localctl/{frame,client}.rs` (with `daemon.rs` exempt),
-    /// `reverse/registry.rs`, and `qsh-cli/src`.
+    /// `reverse/registry.rs`, `qsh-cli/src`, and `qsh-cli/src/mcp`.
     #[test]
     fn real_tree_respects_all_module_bans() {
         let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();

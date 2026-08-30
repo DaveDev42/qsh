@@ -80,6 +80,15 @@
 
 **(d) 완료 판정:** DoD 1·4·5 전건 green. Windows leg 포함(— MCP는 stdio뿐이라 플랫폼 분기가 없어야 정상이고, 있으면 그것이 버그).
 
+**(a)-추기 — Step 5 확정 + 검증 라운드 판정 (2026-08-31, main 세션).** 검증자 발견 P1 0·P2 2·P3 7 판정:
+① **선례 치환 채택** — (a)①의 "M5 `source_scan` 선례"는 xtask에 없고(실위치 `qsh-core/tests/acl_registry.rs`), xtask 기존 `ModuleBan`/`check_module_bans`(주석 제외 줄 단위 스캔, `CLI_SRC_DIR`의 UnixStream 금지 선례)로 대체 구현함을 채택. CRLF 정규화는 별도 `.replace` 불요 — 줄 단위 substring 매칭이라 `\r`이 토큰 위치에 영향 불가(검증자 mutation C로 실증: `lines()`↔`split('\n')` 구분 불가). M5 선례가 replace를 요구한 것은 파일 전체 다중 줄 마커 검색이었기 때문.
+② **금지 3토큰 확정** — `std::process`·`Command::new`·`Stdio::piped`. (a)①의 "CLI output 재파싱 패턴"은 어휘 패턴이 아니라서 기계 게이트 불가 — `Command::new`가 spawn 전부를 막고 `Stdio::piped`가 방어 심층화로 대체함을 채택(P3-5). `std::process` 광폭(exit 포함)은 의도된 보수성으로 유지 — 어댑터가 직접 exit하는 것도 금지 대상이 맞다(P3-1 기각).
+③ **P2-1 수정 지시** — 새 ungated 테스트 doc의 "the one MCP tool" 배타 주장은 거짓(`list_sessions`도 무-cfg·무-dial 성공, 검증자 실측 `{"sessions":[]}`). doc 정정 + 같은 테스트에 `list_sessions` 호출 추가로 Windows 성공 경로 2건화.
+④ **P2-2 수정 지시** — CRLF 유닛 테스트는 회귀 판별력 없음(구조적으로 vacuous). 삭제 대신 doc을 "스모크 시연"으로 정직하게 강등 — CRLF 체크아웃이 게이트를 통과함을 시연할 뿐 `lines()` 선택을 구속하지 않음을 명기.
+⑤ **P3 수정 2건** — (i) P3-3: `strip_line_comment` 정당화 주석이 broker만 근거로 듦 — mcp/ 스코프 확장 반영 + 신규 스코프 추가 시 가정(블록 주석·토큰 포함 문자열 부재) 재확인 필요 명기. (ii) P3-4: fixture 세트 테스트 필터를 `is_file() && !name.starts_with('.') && ends_with(".json")`로 강화 — AppleDouble `._*.json`(SMB/tar 전개) 오탐 실증됨.
+⑥ **P3 기록(무수정)** — P3-2 comment-strip 오탐/미탐 8형 실증(블록 주석·문자열 리터럴 오탐, 줄 분할·`as` 별칭 미탐): arch 규율 lint이지 보안 경계가 아니고 실 트리 오탐 0(mod.rs:805 doc 주석 1건뿐, 라인 주석 처리로 흡수) — 현행 유지. P3-6 음성 테스트의 ban-존재 비결합은 음성 테스트 본질 — 양성 2건이 짝. P3-7 sandbox 격리 회귀는 빈 홈에서 비판별 — 격리 자체는 소스 수준 CONFIRMED(`QSH_CONFIG_DIR` 최우선, config.rs에 cfg(windows) 분기 0)라 수용.
+⑦ **부재 증명 채택** — 게이트 뮤테이션 3종(count 5→6 정합, ban 등록 삭제 시 3 FAIL, strip 항등화 시 3 FAIL — 실 mod.rs:805가 실제 하중), grouped-import 일반형 전부 포착(회피는 `as` 별칭 필요 = 사고 불가형), fixture 양방향 drift 실측 FAIL, `.DS_Store` 무해, CLI.md §8 독립 6행 재검증 일치(trust prompt 도달 경로 부재·Action variant 분리·Ops 공유), `list_hosts` Windows 체인 CONFIRMED(spawn_blocking로 block_on 중첩 없음), 잔재 0.
+
 ### Step 6 — DoD 2 실접속 캠페인 + 마감
 
 **(a) 범위:** Claude Code를 실제 MCP client로 `qsh mcp`에 붙여 원격 명령 실행을 기록한다(수동 1회, 절차·pass 기준을 `docs/campaigns/m6-mcp.md`에 사전 정의 — M2 mobility 캠페인 선례). 이후 §5 마감 절차.

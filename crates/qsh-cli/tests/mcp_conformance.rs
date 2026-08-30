@@ -184,6 +184,27 @@ fn fixture_path(name: &str) -> std::path::PathBuf {
         .join(name)
 }
 
+/// `tests/fixtures/mcp`'s own directory, for the whole-directory contract
+/// check below — `fixture_path` returns one file's path, this is the
+/// listing root.
+fn mcp_fixture_dir() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("mcp")
+}
+
+/// Every fixture this milestone owes under `tests/fixtures/mcp/`
+/// (`fixtures.rs`'s own `REQUIRED_FIXTURES` precedent, `docs/design/
+/// testing.md` L6, applied to the MCP tool-surface tripwire directory
+/// instead of the `qsh.cli/v1` envelope directory — `PLAN.md` M6 Step 2
+/// (a)-추기 ④'s own distinction: MCP fixtures are a tool-surface
+/// tripwire, "append-only" here means "diff-reviewed", not "never grows a
+/// new entry", but every entry it does grow to must be named here so a
+/// silently-missing *or* a silently-unregistered file fails loudly instead
+/// of shrinking (or padding) the covered surface unnoticed).
+const REQUIRED_MCP_FIXTURES: &[&str] = &["tools_list.json"];
+
 fn pretty(value: &Value) -> String {
     serde_json::to_string_pretty(value).expect("encode json")
 }
@@ -1134,6 +1155,96 @@ fn every_advertised_tool_is_routable_with_minimal_arguments() {
     client.assert_stdout_quiescent_after_close();
 }
 
+/// `PLAN.md` M6 Step 2+3 검증 라운드 판정 ⑥(iii) carry-over, re-evaluated at
+/// Step 5 item ④ and corrected by the Step 5 adversarial verification round
+/// (P2-1): `list_hosts` and `list_sessions` are the **two** MCP tools whose
+/// **success** path needs neither a PTY nor `qsh-testkit`'s unix-only
+/// `Fleet`, so this test is deliberately ungated (no `#[cfg(unix)]`) and
+/// runs identically on every CI leg, Windows included.
+///
+/// `HostListReq` has no fields at all (`qsh_proto::types::HostListReq` is a
+/// bare `{}`), and `Ops::host_list` on a fresh, never-`init`ed sandbox only
+/// (a) loads the trust store — `TrustStore::load` treats a missing file as
+/// an empty store, not an error (`crates/qsh-core/src/trust/mod.rs`) — for
+/// the forward-host half, and (b) calls `reverse_host_entries`, which is
+/// `#[cfg(not(unix))]`-gated to an always-empty `Vec` on Windows by design
+/// (`crates/qsh-core/src/ops/host.rs`, `docs/CLI.md` §6.13: "localctl
+/// (UDS)has no meaning there") for the reverse half.
+///
+/// `Ops::session_list` (`crates/qsh-core/src/ops/session.rs:440-495`) is
+/// success-ungated the same way for a different reason: with
+/// `SessionListReq { host: None }` it fans out over every peer in the trust
+/// store, and a fresh sandbox's trust store has zero peers, so the fan-out
+/// loop runs zero iterations — no host is dialed, no PTY or `Fleet` is
+/// touched, `unreachable` stays empty, and the function falls straight
+/// through to `Ok(SessionListData { sessions: [], unreachable: [] })` with
+/// no `cfg` branch anywhere in the path.
+///
+/// Both tools' success paths are real production code paths, not a
+/// platform-conditional stub reached only in this test — so this is a
+/// genuine success, not a faked one, and it is the honest Windows-viable
+/// success-path coverage item ④ asked for.
+#[test]
+fn list_hosts_and_list_sessions_succeed_with_no_pty_and_no_platform_gate() {
+    let sandbox = Sandbox::new();
+    let mut client = McpClient::spawn(&sandbox, &[]);
+    handshake(&mut client);
+
+    client.send(&call_tool_request(TOOLS_CALL_ID, "list_hosts", json!({})));
+    let response = client.recv();
+    assert_eq!(response["id"], TOOLS_CALL_ID, "{response}");
+    assert!(
+        response.get("error").is_none(),
+        "an OpError must never be promoted to a JSON-RPC protocol error: {response}"
+    );
+    let result = &response["result"];
+    assert!(
+        result.get("isError").is_none() || result["isError"] == false,
+        "list_hosts on a fresh, uninitialized sandbox must be a genuine success, not an \
+         error — no PTY, no host, no identity is needed to list an empty host set: {response}"
+    );
+    let structured = &result["structuredContent"];
+    assert!(
+        structured.get("hosts").is_some(),
+        "a successful list_hosts must carry a `hosts` field (HostListData): {response}"
+    );
+    assert_eq!(
+        structured["hosts"],
+        json!([]),
+        "a fresh sandbox has no forward-pinned hosts, and (on every platform, Windows \
+         included — reverse_host_entries is #[cfg(not(unix))]-empty there) no reverse \
+         registrations either: {response}"
+    );
+
+    let list_sessions_id = TOOLS_CALL_ID + 1;
+    client.send(&call_tool_request(
+        list_sessions_id,
+        "list_sessions",
+        json!({}),
+    ));
+    let response = client.recv();
+    assert_eq!(response["id"], list_sessions_id, "{response}");
+    assert!(
+        response.get("error").is_none(),
+        "an OpError must never be promoted to a JSON-RPC protocol error: {response}"
+    );
+    let result = &response["result"];
+    assert!(
+        result.get("isError").is_none() || result["isError"] == false,
+        "list_sessions on a fresh, uninitialized sandbox must be a genuine success, not an \
+         error — the fan-out over an empty trust store dials zero hosts: {response}"
+    );
+    let structured = &result["structuredContent"];
+    assert_eq!(
+        structured["sessions"],
+        json!([]),
+        "a fresh sandbox has no trusted peers, so the session.list fan-out visits zero \
+         hosts and returns no sessions: {response}"
+    );
+
+    client.assert_stdout_quiescent_after_close();
+}
+
 /// `PLAN.md` M6 Step 3 (c), error shape revised by M6 Step 2+3 검증 라운드
 /// 판정 ⑤/F5 — the error-path conformance harness owed for DoD 1: under a
 /// default-deny policy (`ServeGuard::start_without_policy`,
@@ -1706,6 +1817,48 @@ fn stdin_eof_during_a_pending_long_poll_exits_promptly() {
          it must not wait for that long-poll to resolve (measured floor is ~5.5s — rmcp's fixed \
          5s QuitReason::Closed drain + MCP_SHUTDOWN_DRAIN's 500ms — so {BOUND:?} still confirms \
          a regression rather than merely tolerating one)"
+    );
+}
+
+// ---------------------------------------------------------------------
+// Contract check over the whole `tests/fixtures/mcp/` directory (`PLAN.md`
+// M6 Step 5 (a) item ②, `fixtures.rs`'s `every_required_fixture_exists`
+// precedent).
+// ---------------------------------------------------------------------
+
+/// Every file on disk under `tests/fixtures/mcp/` is in
+/// [`REQUIRED_MCP_FIXTURES`], and every entry in [`REQUIRED_MCP_FIXTURES`]
+/// exists on disk — checked as one set-equality so both directions of
+/// drift fail: a fixture deleted out from under the registry (missing) and
+/// a fixture dropped into the directory without ever being registered
+/// (unregistered) are both loud, immediate failures rather than a quietly
+/// shrunk or quietly padded covered surface.
+#[test]
+fn every_mcp_fixture_on_disk_is_registered_and_every_registered_fixture_exists() {
+    let dir = mcp_fixture_dir();
+    // Regular files only, and skip dotfiles before checking the `.json`
+    // suffix: a directory literally named `*.json` would otherwise pass the
+    // suffix filter, and on macOS a `._foo.json` AppleDouble sidecar file
+    // (written alongside `foo.json` by Finder/tar/SMB/USB transfers to
+    // carry the resource fork/xattrs) both ends in `.json` and is a
+    // regular file, so it would false-fail this set-equality check without
+    // the leading-dot exclusion.
+    let present: std::collections::BTreeSet<String> = std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("listing {}: {e}", dir.display()))
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_type().is_ok_and(|ft| ft.is_file()))
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| !name.starts_with('.') && name.ends_with(".json"))
+        .collect();
+    let required: std::collections::BTreeSet<String> = REQUIRED_MCP_FIXTURES
+        .iter()
+        .map(|name| name.to_string())
+        .collect();
+    assert_eq!(
+        present, required,
+        "tests/fixtures/mcp/ and REQUIRED_MCP_FIXTURES have drifted apart — a file present on \
+         only one side means either a fixture went missing or a new one was added without \
+         registering it in REQUIRED_MCP_FIXTURES (this file, near the top)"
     );
 }
 
