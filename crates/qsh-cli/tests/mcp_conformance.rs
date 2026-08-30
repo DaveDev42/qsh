@@ -33,13 +33,21 @@
 mod common;
 
 use std::io::{BufRead, BufReader, Read, Write};
+// The real-`Fleet` E2E scenarios below are `#[cfg(unix)]` (a real PTY host,
+// same convention as this crate's other E2E suites), so everything only they
+// consume — `std::net`, `Fleet`, and the tunnel/echo helpers further down —
+// is gated the same way, or Windows CI's `-D warnings` fails the whole file
+// on dead code (M5 Step 8's CRLF lesson, platform-conditional edition).
+#[cfg(unix)]
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::process::{Child, ChildStdin, ChildStdout, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use common::{CLIENT_ALIAS, Fleet, HOST_ALIAS, Sandbox, ServeGuard};
+#[cfg(unix)]
+use common::Fleet;
+use common::{CLIENT_ALIAS, HOST_ALIAS, Sandbox, ServeGuard};
 use serde_json::{Value, json};
 
 /// `id` of the `initialize` request every scenario below sends first.
@@ -65,6 +73,7 @@ const PERMISSION_DENIED_MESSAGE: &str =
 /// (`tunnel_e2e.rs`'s helpers are private to that file, not `common`).
 /// The accept loop is detached; it lives as long as this test process
 /// (one process per test under `nextest`).
+#[cfg(unix)]
 fn start_echo() -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind the echo server");
     let addr = listener.local_addr().expect("echo server address");
@@ -85,6 +94,7 @@ fn start_echo() -> SocketAddr {
 /// A port nothing is listening on, released before this returns so the
 /// kernel — not this process — is the one that says it was free
 /// (`tunnel_e2e.rs`'s own `free_port`, same small race accepted there).
+#[cfg(unix)]
 fn free_port() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind to pick a free port");
     listener.local_addr().expect("picked port").port()
@@ -93,6 +103,7 @@ fn free_port() -> u16 {
 /// Connect to `127.0.0.1:port`, write `payload`, half-close, and read
 /// everything that comes back — bounded by [`BOUND`] so a forward that
 /// silently drops bytes fails fast instead of hanging the suite.
+#[cfg(unix)]
 fn round_trip(port: u16, payload: &[u8]) -> std::io::Result<Vec<u8>> {
     let mut socket = TcpStream::connect(("127.0.0.1", port))?;
     socket.set_read_timeout(Some(BOUND))?;
@@ -112,6 +123,7 @@ fn round_trip(port: u16, payload: &[u8]) -> std::io::Result<Vec<u8>> {
 /// joined (`crate::tunnel::LocalForwardHandle`'s own `Drop`), so the exact
 /// instant the fd closes is not observable any other way without this
 /// file reaching into `qsh-core` internals it has no business touching.
+#[cfg(unix)]
 fn retry_bounded<T>(mut f: impl FnMut() -> Option<T>, what: &str) -> T {
     let deadline = Instant::now() + BOUND;
     loop {
@@ -1028,6 +1040,7 @@ fn all_twelve_tools_execute_and_match_their_advertised_output_schema() {
 /// 추가 금지" constraint: this is a JSON-level read of the same response
 /// [`initialize_then_tools_list_matches_fixture`] already checks against
 /// the fixture, not a `schemars`/JSON-Schema-validator dependency.
+#[cfg(unix)]
 fn required_fields_by_tool(
     tools_list_response: &Value,
 ) -> std::collections::HashMap<String, Vec<String>> {
@@ -1064,6 +1077,7 @@ fn required_fields_by_tool(
 /// `outputSchema.required` lists — the field just needs to be *present*
 /// (`serde_json::Value::get`, not truthy/non-null: `false`/`0`/`""` are all
 /// legitimate required-field values elsewhere in this contract).
+#[cfg(unix)]
 fn assert_required_fields_present(
     tool_name: &str,
     structured_content: &Value,
