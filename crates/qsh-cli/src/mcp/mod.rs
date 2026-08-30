@@ -254,12 +254,27 @@ impl ServerHandler for QshMcpServer {
     /// doc gave for the stub this replaces).
     ///
     /// `read_session` is wired to a **single** [`qsh_core::Ops::session_read`]
-    /// pull (`docs/CLI.md` §8.3's request/reply shape, one round trip) —
-    /// long-poll cancellation semantics (`docs/CLI.md` §9's "MCP
-    /// cancellation은 local wait 또는 request를 취소") are Step 4's job
-    /// (`PLAN.md` M6 Step 4); nothing here reacts to a client-sent
-    /// `notifications/cancelled` differently for `read_session` than for any
-    /// other tool.
+    /// pull (`docs/CLI.md` §8.3's request/reply shape, one round trip) — no
+    /// MCP-specific long-poll cancellation plumbing lives in this adapter,
+    /// and none needs to (`PLAN.md` M6 Step 4 (a)-추기 item ①). `rmcp-3.1.4`
+    /// `src/service.rs`'s `serve_inner` already keeps a `local_ct_pool`: one
+    /// `CancellationToken` per in-flight request id (declared ~L1347). A
+    /// client-sent `notifications/cancelled` removes that request's token
+    /// from the pool and cancels it (~L1611); when the handler eventually
+    /// finishes and `serve_inner` goes to send the response, it looks the
+    /// id up in the same pool again (~L1478) — gone means cancelled, and
+    /// the response is silently dropped instead of being written to
+    /// stdout. The handler task itself is never aborted: for `read_session`
+    /// specifically, the `spawn_blocking`'d [`qsh_core::Ops::session_read`]
+    /// call (`run_tool`'s own doc on why every `Ops` call gets one) keeps
+    /// running server-side regardless, until data arrives or the host's own
+    /// `SESSION_READ_MAX_WAIT` clamp fires — cancellation integrity (no
+    /// stray response, no double response) is `rmcp`'s structural guarantee,
+    /// not something this adapter implements. Session state, the PTY and the
+    /// writer lease are untouched either way (`docs/CLI.md` §9's cancellation
+    /// semantics) — nothing here reacts to `notifications/cancelled`
+    /// differently for `read_session` than for any other tool, because
+    /// nothing needs to.
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
