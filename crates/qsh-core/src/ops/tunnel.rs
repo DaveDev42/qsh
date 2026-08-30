@@ -36,6 +36,9 @@
 //! side sends the request and, only on success, starts dialing whatever
 //! `TCP_ACCEPTED` streams come back.
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
 use qsh_proto::wire::{self, ForwardDirection, ForwardSpec, parse_forward_spec};
 use qsh_proto::{
     ErrorCode, Tunnel, TunnelCloseData, TunnelCloseReq, TunnelListData, TunnelListReq,
@@ -46,6 +49,32 @@ use crate::ops::session::Connected;
 use crate::ops::{OpError, Operation, Ops};
 use crate::tunnel::remote::RemoteForwardAcceptor;
 use crate::tunnel::{LocalForwardError, LocalForwardHandle};
+
+/// One [`Ops::tunnel_open_and_hold`] registration's close signal
+/// (`PLAN.md` M6 Step 2+3 검증 라운드 판정 ②/F2). The payload is a reply
+/// channel, not `()`: [`Ops::tunnel_close`]'s same-process path
+/// (`close_registered_tunnel_hold`, below) blocks on it, so a caller that
+/// gets `closed: true` back can trust the forward is already torn down —
+/// listener released, peer notified — not merely that a signal was sent
+/// (the E2E requirement task item ②'s "immediate same-port reopen must
+/// succeed" depends on this ordering, not just on the signal existing).
+type TunnelCloseSignal = tokio::sync::oneshot::Sender<std::sync::mpsc::Sender<()>>;
+
+/// [`Ops`]'s shared, [`Ops::clone`]-visible table of every tunnel this
+/// process is holding via [`Ops::tunnel_open_and_hold`], keyed by
+/// `tunnel_id`. `Arc`-backed so every clone of one `Ops` sees the same
+/// registrations — `crate::mcp::QshMcpServer`'s `call_tool` (`qsh-cli`)
+/// clones a fresh `Ops` per tool call, and an `open_tunnel` call's
+/// registration must still be visible to a *later* `close_tunnel` call's
+/// own clone.
+pub(crate) type TunnelHoldRegistry = Arc<Mutex<HashMap<String, TunnelCloseSignal>>>;
+
+/// A fresh, empty [`TunnelHoldRegistry`] — [`Ops::new`]'s own construction
+/// site, kept here so the registry's type and its one legal way to start
+/// empty live next to each other.
+pub(crate) fn new_tunnel_hold_registry() -> TunnelHoldRegistry {
+    Arc::new(Mutex::new(HashMap::new()))
+}
 
 /// The `tunnel.open` operation (`docs/CLI.md` §6.9).
 pub struct TunnelOpenOp;
@@ -266,6 +295,25 @@ pub struct TunnelHold {
     tunnel: Tunnel,
 }
 
+/// The natural-end wait both [`TunnelHold::hold`] and
+/// [`TunnelHold::hold_until_closed`] race against their own close signal
+/// (the latter only) — factored out so the two methods cannot drift on
+/// what "the tunnel ended on its own" means.
+async fn wait_for_end(forward: &mut ForwardResource, conn: &mut Connected) -> OpError {
+    match forward {
+        ForwardResource::Local(local) => {
+            tokio::select! {
+                err = local.wait() => OpError::new(
+                    ErrorCode::ConnectionFailed,
+                    format!("the local forward's listener failed: {err}"),
+                ),
+                err = conn.wait_dead() => err,
+            }
+        }
+        ForwardResource::Remote { .. } => conn.wait_dead().await,
+    }
+}
+
 impl TunnelHold {
     /// The envelope payload for this tunnel — what the frontend renders
     /// and then stops caring about.
@@ -303,23 +351,60 @@ impl TunnelHold {
         let err = {
             let forward = &mut self.forward;
             let conn = &mut self.conn;
+            handle.block_on(wait_for_end(forward, conn))
+        };
+        self.close();
+        err
+    }
+
+    /// Like [`Self::hold`], but also returns early — a deliberate close,
+    /// never treated as a failure — the instant `close_rx` delivers a
+    /// reply channel (`PLAN.md` M6 Step 2+3 검증 라운드 판정 ②/F2).
+    ///
+    /// [`Self::hold`]'s only close mechanism is process death (`docs/CLI.md`
+    /// §6.9's "forward route에서는 tunnel이 그것을 연 CLI 프로세스에 수명이
+    /// 결합된다") — exactly right for `qsh tunnel open`, one process per
+    /// tunnel, but wrong for a long-running host that opens many tunnels
+    /// across many tool calls in one process (`qsh mcp`): killing that
+    /// process to close one tunnel would close all of them. This method is
+    /// [`Ops::tunnel_open_and_hold`]'s only caller — it is what lets a
+    /// *later*, same-process `close_tunnel` reach back into an *earlier*
+    /// `open_tunnel`'s still-live hold.
+    ///
+    /// Either branch tears the tunnel down before returning (`self.close()`,
+    /// same as `hold`). `Some` means the tunnel ended on its own — same
+    /// meaning `hold`'s always-`Err` return carries. `None` means
+    /// `close_rx` delivered a reply channel: this sends `()` back on it
+    /// only *after* `self.close()` has finished, so the caller blocked on
+    /// that reply can trust the forward — listener released, peer notified
+    /// — is really gone, not just that a signal was sent.
+    fn hold_until_closed(
+        mut self,
+        close_rx: tokio::sync::oneshot::Receiver<std::sync::mpsc::Sender<()>>,
+    ) -> Option<OpError> {
+        enum Outcome {
+            Died(OpError),
+            Closed(std::sync::mpsc::Sender<()>),
+        }
+        let handle = self.conn.runtime().handle().clone();
+        let outcome = {
+            let forward = &mut self.forward;
+            let conn = &mut self.conn;
             handle.block_on(async move {
-                match forward {
-                    ForwardResource::Local(local) => {
-                        tokio::select! {
-                            err = local.wait() => OpError::new(
-                                ErrorCode::ConnectionFailed,
-                                format!("the local forward's listener failed: {err}"),
-                            ),
-                            err = conn.wait_dead() => err,
-                        }
-                    }
-                    ForwardResource::Remote { .. } => conn.wait_dead().await,
+                tokio::select! {
+                    err = wait_for_end(forward, conn) => Outcome::Died(err),
+                    Ok(ack_tx) = close_rx => Outcome::Closed(ack_tx),
                 }
             })
         };
         self.close();
-        err
+        match outcome {
+            Outcome::Died(err) => Some(err),
+            Outcome::Closed(ack_tx) => {
+                let _ = ack_tx.send(());
+                None
+            }
+        }
     }
 
     /// Tear the tunnel down: for `"remote"` mode, best-effort ask the peer
@@ -536,6 +621,102 @@ impl Ops {
         ))
     }
 
+    /// `tunnel.open` for a long-running, multi-call host process (`qsh mcp`,
+    /// `PLAN.md` M6 Step 2+3 검증 라운드 판정 ②/F2) rather than a one-shot
+    /// CLI invocation.
+    ///
+    /// [`Self::tunnel_open`] hands back a [`TunnelHold`] and leaves holding
+    /// it entirely to the caller (`docs/CLI.md` §6.14): `qsh tunnel open`
+    /// blocks its own single-purpose process in [`TunnelHold::hold`] and
+    /// relies on process death (Ctrl-C; for a daemon-held reverse `-R`,
+    /// the peer's own `RemoteForwardClose`) as its only close mechanism —
+    /// correct there, because that process holds exactly one tunnel. It
+    /// breaks down for a server that opens many tunnels across many tool
+    /// calls in one long-lived process: killing the process to close one
+    /// tunnel would close all of them, and — for a **forward-route**
+    /// tunnel, `docs/CLI.md` §6.9's own documented holder-model gap
+    /// ("forward route에서 standalone `qsh tunnel open`이 연 터널은 …
+    /// 다른 프로세스의 `qsh tunnels`에는 절대 나타나지 않는다") — there is
+    /// no daemon involved at all for a *different* process to ask through,
+    /// so nothing outside the holding process could ever close it.
+    ///
+    /// This method keeps the tunnel alive on a background thread — for as
+    /// long as this process runs, the same promise §6.14 makes for any
+    /// holder — and registers a close signal for it, keyed by `tunnel_id`,
+    /// in `self`'s own (shared, `Ops::clone()`-visible)
+    /// [`tunnel_holds`](Ops::tunnel_holds) table. [`Self::tunnel_close`]
+    /// checks that table before ever touching the cross-process daemon
+    /// fan-out ([`Self::admin_close_tunnel`]) — so a `close_tunnel` call in
+    /// this *same* process, for a tunnel this *same* process opened this
+    /// way, is truthful (`closed: true` really tears the forward down)
+    /// regardless of route, not only for a daemon-held reverse `-R`. A
+    /// *different* process still cannot see or close a forward-route
+    /// tunnel this way — that part of the documented gap is unchanged,
+    /// because it is a real consequence of "no resident client daemon and
+    /// no tunnel registry" (this module's own top doc), not something an
+    /// in-process table can fix across a process boundary.
+    pub fn tunnel_open_and_hold(&self, req: TunnelOpenReq) -> Result<Tunnel, OpError> {
+        let hold = self.tunnel_open(req)?;
+        let tunnel = hold.tunnel().clone();
+        let (close_tx, close_rx) = tokio::sync::oneshot::channel();
+        self.tunnel_holds
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(tunnel.tunnel_id.clone(), close_tx);
+        let holds = Arc::clone(&self.tunnel_holds);
+        let tunnel_id = tunnel.tunnel_id.clone();
+        std::thread::spawn(move || {
+            let outcome = hold.hold_until_closed(close_rx);
+            if let Some(err) = outcome {
+                // Natural death: nobody is ever going to call
+                // `close_tunnel` for this id and get a signal through, so
+                // remove our own registration — a no-op if
+                // `close_registered_tunnel_hold` already raced us to it
+                // (whichever side observes the entry first wins; removing
+                // an absent key is always safe).
+                holds
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&tunnel_id);
+                tracing::warn!(%err, "qsh: a held tunnel ended on its own");
+            }
+        });
+        Ok(tunnel)
+    }
+
+    /// Same-process half of `tunnel.close` (`PLAN.md` M6 Step 2+3 검증
+    /// 라운드 판정 ②/F2): `true`, with the tunnel already torn down by the
+    /// time this returns, when `tunnel_id` names a hold
+    /// [`Self::tunnel_open_and_hold`] registered in this same `Ops` (any
+    /// clone of it — the registry is shared) and has not already ended on
+    /// its own; `false` otherwise, leaving [`Self::tunnel_close`] to fall
+    /// back to [`Self::admin_close_tunnel`]'s cross-process daemon fan-out.
+    fn close_registered_tunnel_hold(&self, tunnel_id: &str) -> bool {
+        let close_tx = self
+            .tunnel_holds
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(tunnel_id);
+        let Some(close_tx) = close_tx else {
+            return false;
+        };
+        let (ack_tx, ack_rx) = std::sync::mpsc::channel::<()>();
+        if close_tx.send(ack_tx).is_ok() {
+            // Block until the holder thread has actually finished tearing
+            // the tunnel down (`TunnelHold::close`, inside
+            // `hold_until_closed`) — a caller that gets `closed: true`
+            // back must be able to trust the listener is already
+            // released (e.g. reopen the same port immediately), not
+            // merely that a signal was sent.
+            let _ = ack_rx.recv();
+        }
+        // Found and removed either way: the tunnel is gone by the time
+        // this returns, whether this call's signal reached the holder in
+        // time or it had already ended on its own in the same instant
+        // (the send above failing is exactly that race, harmlessly lost).
+        true
+    }
+
     /// `tunnel.list` (`qsh tunnels`, `docs/CLI.md` §6.9, `PLAN.md` M4 Step
     /// 5 PR 5b): every tunnel visible to this caller.
     ///
@@ -622,7 +803,16 @@ impl Ops {
     /// [`Self::tunnel_list`]'s own doc) — same shape
     /// [`qsh_proto::TunnelCloseData::closed`]'s own doc requires.
     pub fn tunnel_close(&self, req: TunnelCloseReq) -> Result<TunnelCloseData, OpError> {
-        let closed = self.admin_close_tunnel(&req.tunnel_id);
+        // Same-process registrations (`Self::tunnel_open_and_hold`, F2)
+        // take priority: if this `Ops` (or a clone of it) is itself
+        // holding `tunnel_id`, that is authoritative and requires no
+        // daemon round trip at all. Only when nothing local matches does
+        // this fall back to the pre-existing cross-process daemon fan-out
+        // — unchanged, still the only path for a reverse-route `-R`
+        // opened by a *different* process (`Self::admin_close_tunnel`'s
+        // own doc).
+        let closed = self.close_registered_tunnel_hold(&req.tunnel_id)
+            || self.admin_close_tunnel(&req.tunnel_id);
         Ok(TunnelCloseData {
             tunnel_id: req.tunnel_id,
             closed,

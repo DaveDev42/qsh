@@ -215,6 +215,11 @@ impl Operation for TrustRemoveOp {
 pub struct Ops {
     paths: Paths,
     recovery: session::RecoveryConfig,
+    /// Every tunnel this process is holding via [`Ops::tunnel_open_and_hold`]
+    /// (`PLAN.md` M6 Step 2+3 검증 라운드 판정 ②/F2) — `Arc`-backed so every
+    /// clone of this `Ops` shares the same table (`tunnel::TunnelHoldRegistry`'s
+    /// own doc).
+    tunnel_holds: tunnel::TunnelHoldRegistry,
 }
 
 impl Ops {
@@ -223,6 +228,7 @@ impl Ops {
         Self {
             paths,
             recovery: session::RecoveryConfig::default(),
+            tunnel_holds: tunnel::new_tunnel_hold_registry(),
         }
     }
 

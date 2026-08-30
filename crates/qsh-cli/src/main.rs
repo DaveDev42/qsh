@@ -146,6 +146,32 @@ fn init_tracing(cli: &Cli) {
         .or_else(|_| std::env::var("RUST_LOG"))
         .ok()
         .filter(|spec| EnvFilter::try_new(spec).is_ok());
+    // `rmcp`'s own `debug!(?request, …)`/`debug!(?result, …)` spans
+    // (`rmcp-3.1.4/src/service.rs`'s `serve_inner`) `Debug`-format the
+    // *entire* JSON-RPC message — a `tools/call` request's `arguments`
+    // (PTY input b64, `exec` argv) or a response's `structuredContent`
+    // (PTY output b64) — at plain `debug` level, so `-vv` (`default ==
+    // "trace"`) would otherwise put PTY/command content on stderr as
+    // `Debug`, violating this crate's "PTY/command 내용 로그 금지" rule
+    // just as much as putting it on stdout would (`docs/CLI.md` §8.1's
+    // *stream* promise says nothing about *content*; `PLAN.md` M6 Step
+    // 2+3 검증 라운드 판정 ①/F1). `rmcp`'s crate-prefixed target (every
+    // span/event above resolves to `rmcp::…`) is clamped to `warn` here,
+    // unconditionally — appended to *both* the flag-derived `default` and
+    // any explicit `QSH_LOG`/`RUST_LOG`, the same "always append a
+    // target-scoped directive so it wins over the coarse level, however
+    // that level was chosen" shape `recovery_default` below uses (for the
+    // opposite reason: making sure a target is *always shown*, not always
+    // hidden) — so neither `-vv` nor a blanket `RUST_LOG=debug` can
+    // surface it. A caller who explicitly names `rmcp=` at a lower level
+    // in their own spec still wins (`EnvFilter`'s per-target directives
+    // are resolved by specificity, not by append order), which is the
+    // deliberate opt-in escape hatch, not a hole in this clamp.
+    const RMCP_TARGET_CLAMP: &str = "rmcp=warn";
+    let default = format!("{default},{RMCP_TARGET_CLAMP}");
+    let default = default.as_str();
+    let spec = spec.map(|spec| format!("{spec},{RMCP_TARGET_CLAMP}"));
+    let spec = spec.as_deref();
     // With no explicit spec, the recovery target sits at `info` whatever
     // `-v` says, because §6.4 fixes the record as visible at *default*
     // verbosity. An explicit spec governs it like anything else.
@@ -163,20 +189,20 @@ fn init_tracing(cli: &Cli) {
     let human = tracing_subscriber::fmt::layer()
         .with_writer(|| LossyStderr)
         .with_target(false)
-        .with_filter(env_filter(spec.as_deref(), default))
+        .with_filter(env_filter(spec, default))
         .with_filter(tracing_subscriber::filter::filter_fn(|meta| {
             meta.target() != qsh_core::telemetry::TARGET
                 && meta.target() != qsh_core::reverse::listen::TARGET
         }));
     let recovery_enabled = !cli.quiet;
     let recovery = RecoveryLayer(StderrLines)
-        .with_filter(env_filter(spec.as_deref(), &recovery_default))
+        .with_filter(env_filter(spec, &recovery_default))
         .with_filter(tracing_subscriber::filter::filter_fn(move |meta| {
             recovery_enabled && meta.target() == qsh_core::telemetry::TARGET
         }));
     let reverse_enabled = !cli.quiet;
     let reverse = RecoveryLayer(StderrLines)
-        .with_filter(env_filter(spec.as_deref(), &reverse_default))
+        .with_filter(env_filter(spec, &reverse_default))
         .with_filter(tracing_subscriber::filter::filter_fn(move |meta| {
             reverse_enabled && meta.target() == reverse_target
         }));
@@ -402,7 +428,7 @@ fn run(cli: &Cli) -> i32 {
             controller,
             offered_name,
         } => run_reverse(&ops, controller, offered_name.as_deref()),
-        Command::Mcp => run_mcp(),
+        Command::Mcp => run_mcp(&ops),
     }
 }
 
@@ -982,14 +1008,17 @@ fn run_reverse(ops: &Ops, controller: &str, offered_name: Option<&str>) -> i32 {
 }
 
 /// `qsh mcp` — serve MCP tools over stdio (`docs/CLI.md` §8, `PLAN.md` M6
-/// Step 2). Not an operation: no envelope, nothing on stdout but JSON-RPC
+/// Step 2/3). Not an operation: no envelope, nothing on stdout but JSON-RPC
 /// frames, same shape as [`run_serve`]/[`run_listen`]/[`run_reverse`].
 ///
-/// No identity/config load here — unlike `serve`/`listen`/`reverse`, `qsh
+/// No identity/config load *here* — unlike `serve`/`listen`/`reverse`, `qsh
 /// mcp` is not a host runtime (it never accepts a peer connection or
 /// enforces `acl.toml`; `docs/design/architecture.md` §6's ACL choke point
-/// stays on the host-dispatch side). Its `Ops` calls (Step 3) go out the
-/// same way the CLI frontend's already do, so there is no
+/// stays on the host-dispatch side). `ops` (Step 3's [`mcp::QshMcpServer`]
+/// field) is the **same** `Ops` every other command in [`run`] already
+/// dialed with (`Ops::from_env()`, this function's caller) — the MCP
+/// adapter's tool calls reach out through it exactly the way the CLI
+/// frontend's own commands do (`docs/CLI.md` §11), so there is no
 /// `qsh_core::acl::StartupDiagnostic` for this process to print — nothing
 /// here is silently skipping one.
 ///
@@ -997,7 +1026,7 @@ fn run_reverse(ops: &Ops, controller: &str, offered_name: Option<&str>) -> i32 {
 /// already stderr-only regardless of `-v`/`-vv`/`-q` (`LossyStderr`), which
 /// is what keeps stdout pure JSON-RPC even at `-vv` (`docs/CLI.md` §8.1,
 /// DoD 5) — nothing MCP-specific was needed to get that.
-fn run_mcp() -> i32 {
+fn run_mcp(ops: &Ops) -> i32 {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -1011,7 +1040,7 @@ fn run_mcp() -> i32 {
         }
     };
     stderr_note!("qsh mcp: serving tools over stdio");
-    match runtime.block_on(mcp::serve_stdio()) {
+    match runtime.block_on(mcp::serve_stdio(ops.clone())) {
         Ok(()) => {
             stderr_note!("qsh mcp: shutting down");
             0

@@ -48,6 +48,15 @@
 
 **(d) 완료 판정:** 11종 전부 하네스에서 1회 이상 실구동. adapter 파일에 `std::process`·CLI 문자열 조립 0건(Step 5의 기계 게이트 전까지는 리뷰로).
 
+**(a)-추기 — Step 2+3 통합 검증 라운드 판정 (2026-08-30, main 세션).** 검증자 발견 P1 3·P2 2·P3 5 전건 판정:
+① **P1-1 채택** — `-vv`에서 rmcp `serve_inner` debug 스팬이 tool call 파라미터(PTY 입력 b64·exec argv)와 결과(PTY 출력 b64)를 stderr에 Debug로 노출하고, handshake 전 `tools/call` 도착 시 `run_mcp` 오류 아크가 verbosity 무관하게 요청 전문을 찍는다 — "PTY/command 내용 로그 금지" 보안 기본 원칙 위반(stdout 아닌 stderr라 DoD 5는 통과했음). 수정: 필터 스펙에 `rmcp=warn` 고정(`recovery_default` 선례) + 오류 아크를 구조적 메시지로(페이로드 미포함) + `-vv` stderr 페이로드 부재(원문·base64 양쪽) 회귀 테스트.
+② **P1-2 채택** — MCP `open_tunnel`의 detached-thread hold가 어떤 레지스트리에도 등록되지 않아 `close_tunnel`이 항상 `closed:false`인데 리스너·포워딩은 살아 있고(거짓 응답), 프로세스 종료 외 해제 수단이 없어 장수명 서버에서 자원 단조 증가. 수정 방향: CLI foreground holder가 close fan-out에 응답하는 것과 같은 메커니즘을 재사용(fixer가 그 메커니즘을 먼저 규명해 보고) — hold 수명 로직은 qsh-core(Ops) 소유, qsh-cli엔 두지 않는다. 선택지 (b)(두 tool UNSUPPORTED 회귀)는 §8.2 개정을 요구해 기각. E2E 의무: open→포워딩 실증→close→`closed:true`+리스너 해제+동일 포트 재open 성공.
+③ **P1-3 채택** — Step 3 (d) 문면("11종 전부 실구동") 미달(5/12)이었고, 검증자 뮤테이션 A(`list_sessions`→`host_list` 교체 + `resize_session` 매치 오타)가 전 테스트 통과로 실증됨. 수정: conformance가 12종 전부 1회 이상 실구동 + 성공 structuredContent를 광고된 outputSchema의 required 목록과 대조 + tools/list 광고 이름 전부가 라우팅됨(-32601 아님)을 단언.
+④ **P2-1 채택** — 12종 전부 `description` 부재. §8.2 표 의미 기반 영문 설명 채움 + L6 게이트에 비어있지 않음 단언 + fixture 재생성(additive).
+⑤ **P2-2 채택, §4.1 #3 이행 방식 정정** — 오류 결과의 `structuredContent`(§3.2 객체)가 그 tool의 outputSchema(성공 `*Data`)와 불일치 — MCP 스펙상 structuredContent는 outputSchema 적합 의무가 있어 엄격 클라이언트 interop 리스크. §4.1 #3 확정문의 문면은 원래 "content에 §3.2 error object"였다: 오류는 `isError:true` + content text JSON(§3.2 객체)만 싣고 **structuredContent를 생략**한다(`structured_error` → `error`). 오류 경로 테스트는 content JSON 파싱으로 §3.2 형태·문면·retryable을 단언하고 structuredContent 부재도 단언.
+⑥ **P3 5건 기록(무수정)** — (i) `arguments`가 비객체이거나 `name` 비문자열이면 rmcp params 층에서 `-32601` 프로토콜 오류(어댑터 밖, 수정 비용 대비 무이득); (ii) `details:null`은 CLI JSON 렌더러와 동일 관행 — 계약 위반 아님; (iii) 실 시나리오 `#[cfg(unix)]`는 crate 기존 관행 — Windows 성공 경로 커버리지 0은 Step 5에서 재평가; (iv) 어댑터 프로덕션 228줄(≤300 목표 내); (v) long-poll의 blocking-pool 스레드 점유·MCP 동시성 상한 부재는 Step 4 입력.
+⑦ 부재 증명(stdout 순수성 11개 시나리오·§8.4 ACL 상속 CLI 트윈 동치·spawn_blocking 동시성 실증·fixture 독립 재검증·뮤테이션 B/C/D 검출·arch 규율)은 검증자 보고서를 근거로 채택. 검증자 최종 런의 `tunnel_chaos` 1건 FAIL은 클린 베이스라인 1145/1145 통과라 하네스 경합 플레이크로 추정 — main 게이트 재실행에서 재확인.
+
 ### Step 4 — `read_session` long-poll + 취소 의미론 (DoD 3)
 
 **(a) 범위:** `read_session`은 cursor-pull primitive의 1회 pull과 1:1이다(architecture.md §3 — 새 스트리밍 경로를 만들지 않는다). `after_sequence`/`ctl_after` 되먹임, `wait_ms` long-poll, `limit_bytes`. 취소(MCP cancellation·client 연결 종료)는 대기 중인 pull만 끊고 세션·PTY는 건드리지 않는다(§8.4·§9).

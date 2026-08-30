@@ -7,21 +7,28 @@
 //! M6 Step 1 (`PLAN.md` "계약·의존성 확정") landed the contract-level
 //! surface this file's own tests substantiate — the tool↔op mapping table
 //! and small, compiled probes of the five draft decisions in `PLAN.md`
-//! §4.1. M6 Step 2 (this file's [`QshMcpServer`]/[`serve_stdio`]) wires
+//! §4.1. M6 Step 2 (this file's [`QshMcpServer`]/[`serve_stdio`]) wired
 //! that surface to a real `rmcp` stdio server: `qsh mcp` (`crate::cli`'s
-//! `Command::Mcp`, dispatched by `crate::main`'s `run_mcp`) now reaches
-//! [`serve_stdio`], which serves `initialize`/`tools/list` for real.
-//! `call_tool` is still Step 3's job — see [`QshMcpServer`]'s
-//! `ServerHandler` impl for why this step deliberately leaves it as
-//! rmcp's own default rather than stubbing a "not wired yet" response.
+//! `Command::Mcp`, dispatched by `crate::main`'s `run_mcp`) reaches
+//! [`serve_stdio`], which serves `initialize`/`tools/list` for real. M6
+//! Step 3 (`QshMcpServer`'s `ServerHandler::call_tool` impl, `run_tool`)
+//! wires the remaining 12 tools to the same [`Ops`] every other `qsh`
+//! command calls — deserialize → `Ops` method (on a blocking-pool thread,
+//! `run_tool`'s own doc on why) → structured content or a §3.2 error
+//! object, never a protocol-level error for an operation outcome.
 use std::sync::Arc;
 
+use qsh_core::{ExecStdin, OpError, Ops};
+use qsh_proto::ErrorCode;
 use rmcp::model::{
-    Implementation, JsonObject, ListToolsResult, PaginatedRequestParams, ServerCapabilities,
-    ServerInfo, Tool,
+    CallToolRequestMethod, CallToolRequestParams, CallToolResponse, CallToolResult, Implementation,
+    JsonObject, ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
 };
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::{ErrorData as McpError, ServerHandler};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+use serde_json::Value;
 
 /// The `docs/CLI.md` §8.2 tool↔op mapping, realized as a code constant
 /// (`PLAN.md` M6 Step 1 (c)) — 12 pairs, in the same order as the doc
@@ -37,15 +44,17 @@ use rmcp::{ErrorData as McpError, ServerHandler};
 /// the L6 gate: a row added here without a matching `docs/CLI.md` §8.2 row
 /// (or vice versa) fails `cargo test`.
 ///
-/// Not yet read by any non-test production path: [`tool_schemas`] hardcodes
-/// its own per-type calls (Rust generics need the concrete `*Req` type at
-/// each call site, not a runtime string), so this step's `list_tools` never
-/// dereferences this table at runtime. Step 3's `call_tool` router is the
-/// production reader (`name` → `op` → the `Ops` method to call) — the
-/// individual allow below is temporary to that step, not permanent.
+/// Not read by any production path, by design, even after Step 3:
+/// [`tool_schemas`] and [`QshMcpServer::call_tool`] both hardcode their own
+/// per-tool call sites instead of looping over this table — Rust generics
+/// need the concrete `*Req`/`*Data` type at each call site, not a runtime
+/// string, and `call_tool`'s router doubles as task item ⑥(a)'s mutation
+/// target precisely because each tool's wiring is one visible match arm
+/// rather than a table lookup a closure map would hide. This table's only
+/// reader is this module's own tests — the doc↔code cross-check below.
 #[allow(
     dead_code,
-    reason = "read by Step 3's call_tool router; production-unreachable until then, cross-checked against docs/CLI.md §8.2 by this module's own tests in the meantime"
+    reason = "cross-checked against docs/CLI.md §8.2 by this module's own tests; never read by production code by design (see doc above)"
 )]
 pub const TOOL_MAP: &[(&str, &str)] = &[
     ("list_hosts", "host.list"),
@@ -80,28 +89,95 @@ pub const TOOL_MAP: &[(&str, &str)] = &[
 /// Order matches [`TOOL_MAP`]; `tools/list`'s own response ordering
 /// (`PLAN.md` §4.1 #2's "tool 이름 사전순 정렬" normalization) is a Step 2
 /// renderer concern, not this function's.
+///
+/// M6 Step 3 addendum (`PLAN.md` Step 2 (a)-추기 ④): every entry also
+/// carries `output_schema`, from the same `*Data` type [`call_tool`]'s
+/// router serializes a success result from — `schema_for!(Data)` through
+/// **rmcp's own** `Tool::with_output_schema::<T>()`, the identical pairing
+/// discipline [`tool`] already uses for `input_schema`/`*Req`. This is the
+/// one behavior change `tools/list`'s fixture sees this step (this
+/// function's own doc, still accurate above: `*Req` changes are the only
+/// *input*-schema scope-creep tripwire; `*Data` changes are this one's).
 pub fn tool_schemas() -> Vec<Tool> {
     vec![
-        tool::<qsh_proto::HostListReq>("list_hosts"),
-        tool::<qsh_proto::HostGetReq>("get_host"),
-        tool::<qsh_proto::SessionListReq>("list_sessions"),
-        tool::<qsh_proto::SessionGetReq>("get_session"),
-        tool::<qsh_proto::SessionOpenReq>("open_session"),
-        tool::<qsh_proto::SessionReadReq>("read_session"),
-        tool::<qsh_proto::SessionWriteReq>("write_session"),
-        tool::<qsh_proto::SessionResizeReq>("resize_session"),
-        tool::<qsh_proto::SessionCloseReq>("close_session"),
-        tool::<qsh_proto::ExecRunReq>("exec"),
-        tool::<qsh_proto::TunnelOpenReq>("open_tunnel"),
-        tool::<qsh_proto::TunnelCloseReq>("close_tunnel"),
+        tool::<qsh_proto::HostListReq>(
+            "list_hosts",
+            "List configured forward hosts and any currently registered reverse hosts, \
+             without dialing or checking reachability for any of them (docs/CLI.md §6.1).",
+        )
+        .with_output_schema::<qsh_proto::HostListData>(),
+        tool::<qsh_proto::HostGetReq>(
+            "get_host",
+            "Look up a single host by its local alias (docs/CLI.md §6.1).",
+        )
+        .with_output_schema::<qsh_proto::Host>(),
+        tool::<qsh_proto::SessionListReq>(
+            "list_sessions",
+            "List sessions on one host, or best-effort fan out across every pinned host \
+             when no host is given (docs/CLI.md §6.2).",
+        )
+        .with_output_schema::<qsh_proto::SessionListData>(),
+        tool::<qsh_proto::SessionGetReq>(
+            "get_session",
+            "Look up a single session by its session_ref (docs/CLI.md §6.2).",
+        )
+        .with_output_schema::<qsh_proto::Session>(),
+        tool::<qsh_proto::SessionOpenReq>(
+            "open_session",
+            "Open a new interactive PTY session on a host, running a login shell or a \
+             given argv (docs/CLI.md §6.3).",
+        )
+        .with_output_schema::<qsh_proto::SessionOpenData>(),
+        tool::<qsh_proto::SessionReadReq>(
+            "read_session",
+            "Pull a session's buffered output and lifecycle events since a given byte \
+             offset, optionally waiting for new data to arrive (docs/CLI.md §6.4).",
+        )
+        .with_output_schema::<qsh_proto::SessionReadData>(),
+        tool::<qsh_proto::SessionWriteReq>(
+            "write_session",
+            "Write bytes to a session's PTY input (docs/CLI.md §6.5).",
+        )
+        .with_output_schema::<qsh_proto::SessionWriteData>(),
+        tool::<qsh_proto::SessionResizeReq>(
+            "resize_session",
+            "Resize a session's PTY to the given terminal column/row dimensions \
+             (docs/CLI.md §6.6).",
+        )
+        .with_output_schema::<qsh_proto::SessionResizeData>(),
+        tool::<qsh_proto::SessionCloseReq>(
+            "close_session",
+            "Terminate a session's entire process group and remove the session from the \
+             host (docs/CLI.md §6.7).",
+        )
+        .with_output_schema::<qsh_proto::SessionCloseData>(),
+        tool::<qsh_proto::ExecRunReq>(
+            "exec",
+            "Run a single non-interactive command on a host and return its captured \
+             stdout/stderr and exit status once it completes (docs/CLI.md §6.8).",
+        )
+        .with_output_schema::<qsh_proto::ExecRunData>(),
+        tool::<qsh_proto::TunnelOpenReq>(
+            "open_tunnel",
+            "Open a local or remote TCP port forward through a host (docs/CLI.md §6.9).",
+        )
+        .with_output_schema::<qsh_proto::TunnelOpenData>(),
+        tool::<qsh_proto::TunnelCloseReq>(
+            "close_tunnel",
+            "Close a previously opened tunnel by its tunnel_id (docs/CLI.md §6.9).",
+        )
+        .with_output_schema::<qsh_proto::TunnelCloseData>(),
     ]
 }
 
-/// One `rmcp::model::Tool`, named `name`, whose input schema is `T`'s —
-/// via `Tool::with_input_schema`, the same generic-type-to-schema path a
+/// One `rmcp::model::Tool`, named `name`, described by `description`
+/// (`PLAN.md` M6 Step 2+3 검증 라운드 판정 ④/F4 — every tool used to carry
+/// `None` here, which a real MCP client would show a human/agent user
+/// choosing among tools with nothing to go on), whose input schema is `T`'s
+/// — via `Tool::with_input_schema`, the same generic-type-to-schema path a
 /// macro-driven `#[tool_router]` server would use internally.
-fn tool<T: schemars::JsonSchema + 'static>(name: &'static str) -> Tool {
-    Tool::new_with_raw(name, None, Arc::new(JsonObject::new())).with_input_schema::<T>()
+fn tool<T: schemars::JsonSchema + 'static>(name: &'static str, description: &'static str) -> Tool {
+    Tool::new(name, description, Arc::new(JsonObject::new())).with_input_schema::<T>()
 }
 
 /// [`tool_schemas`], sorted by tool name — `tools/list`'s own wire
@@ -116,12 +192,26 @@ fn tools_list_schemas() -> Vec<Tool> {
     tools
 }
 
-/// The `qsh mcp` server (`docs/CLI.md` §8, `PLAN.md` M6 Step 2). Holds no
-/// state: `get_info`/`list_tools` need none, and `call_tool` is
-/// deliberately left unimplemented here (see the `ServerHandler` impl
-/// below) — Step 3 adds an `Ops` field and wires real dispatch.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct QshMcpServer;
+/// The `qsh mcp` server (`docs/CLI.md` §8, `PLAN.md` M6 Step 2/3). Holds
+/// exactly one thing: the same [`Ops`] every other `qsh` command dials with
+/// (`main.rs`'s `run_mcp`, built the same way as `run`'s own `Ops::from_env()`
+/// — `docs/CLI.md` §11's "Human, JSON와 MCP adapter는 같은 Rust typed
+/// operation을 호출한다"). `get_info`/`list_tools` never touch it;
+/// `call_tool` (below) is its only reader.
+#[derive(Debug, Clone)]
+pub struct QshMcpServer {
+    ops: Ops,
+}
+
+impl QshMcpServer {
+    /// Bind this server to `ops` — the same handle [`serve_stdio`]'s caller
+    /// (`main.rs`'s `run_mcp`) built from the environment, not a fresh one
+    /// this module constructs itself (no `Paths`/`Config` knowledge belongs
+    /// in the adapter, `docs/CLI.md` §11).
+    pub fn new(ops: Ops) -> Self {
+        Self { ops }
+    }
+}
 
 impl ServerHandler for QshMcpServer {
     /// Declares the `tools` capability and reports **this** build's own
@@ -146,40 +236,211 @@ impl ServerHandler for QshMcpServer {
         Ok(ListToolsResult::with_all_items(tools_list_schemas()))
     }
 
-    // `call_tool` is deliberately **not** overridden — Step 3's job
-    // (`PLAN.md` M6 Step 2 (a) item ①). The inherited default
-    // (`rmcp::handler::server`'s `server_handler_methods!` macro body,
-    // `rmcp-3.1.4/src/handler/server.rs`) answers every `tools/call` with
-    // a JSON-RPC **protocol** error (`-32601 Method not found`,
-    // `CallToolRequestMethod` = `"tools/call"`) rather than a tool-scoped
-    // `CallToolResult`. That is the safer of the two shapes this step
-    // could ship, for two reasons:
-    //
-    // 1. A hand-rolled per-tool `CallToolResult::structured_error`
-    //    "not wired yet" stub would invent an interim contract surface no
-    //    `qsh-proto` `ErrorCode` backs — this project bans ad hoc error
-    //    strings outside that one enum (`CLAUDE.md`: "Error codes come
-    //    from the single `ErrorCode` enum in `qsh-proto` — never an ad
-    //    hoc error string elsewhere"). "This tool has no implementation
-    //    yet" is not an *operation outcome* in the first place (no `Ops`
-    //    method ever ran), so routing it through `CallToolResult`'s
-    //    success-shaped structured-content channel — the same channel
-    //    `PLAN.md` §4.1 #3 reserves for a real `OpError` — would
-    //    misrepresent a missing implementation as an operation that ran
-    //    and failed.
-    // 2. It is exactly the idiom every other unimplemented
-    //    `ServerHandler` method in this same trait already uses
-    //    (`get_prompt`, `read_resource`, `set_level`, …): a protocol
-    //    `Method not found`. `list_tools`'s own declaration of 12 real
-    //    tools is not misleading alongside it — the MCP spec's `tools`
-    //    capability only promises `tools/list` is meaningful, and a
-    //    client that calls `tools/call` before this handler is complete
-    //    gets an honest, standard "not there yet" instead of a
-    //    fabricated success-shaped result or (worse) a hang.
-    //
-    // `crates/qsh-cli/tests/mcp_conformance.rs` asserts this behavior
-    // against the real binary: `tools/call` for a real, listed tool name
-    // still comes back `-32601`, not a hang and not a mangled stdout byte.
+    /// `docs/CLI.md` §8.2's 12 tools, wired for real (`PLAN.md` M6 Step 3).
+    /// Router only: deserialize `arguments` into the tool's `*Req`, call the
+    /// matching [`Ops`] method (item ①), shape the result (item ③) — no
+    /// auth/ACL/session logic lives here (`docs/CLI.md` §11; the host-side
+    /// dispatch this call eventually reaches, `docs/design/architecture.md`
+    /// §6, is the sole ACL choke point, so `docs/CLI.md` §8.4's "각 tool
+    /// call에 일반 CLI와 동일한 ACL을 적용한다" is inherited for free —
+    /// every one of these `Ops` methods is the exact call the CLI frontend's
+    /// own commands already make, nothing MCP-specific added).
+    ///
+    /// An unlisted tool name is still the inherited-default shape from
+    /// before this step: a JSON-RPC **protocol** error
+    /// (`McpError::method_not_found`, `-32601`) — never routed through
+    /// [`run_tool`]'s `CallToolResult` channel, because "no such tool" is
+    /// not an operation outcome either (same reasoning Step 2's own removed
+    /// doc gave for the stub this replaces).
+    ///
+    /// `read_session` is wired to a **single** [`qsh_core::Ops::session_read`]
+    /// pull (`docs/CLI.md` §8.3's request/reply shape, one round trip) —
+    /// long-poll cancellation semantics (`docs/CLI.md` §9's "MCP
+    /// cancellation은 local wait 또는 request를 취소") are Step 4's job
+    /// (`PLAN.md` M6 Step 4); nothing here reacts to a client-sent
+    /// `notifications/cancelled` differently for `read_session` than for any
+    /// other tool.
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, McpError> {
+        let ops = self.ops.clone();
+        let arguments = request.arguments.unwrap_or_default();
+        let result: CallToolResult = match request.name.as_ref() {
+            "list_hosts" => {
+                run_tool(arguments, move |_req: qsh_proto::HostListReq| {
+                    ops.host_list()
+                })
+                .await
+            }
+            "get_host" => {
+                run_tool(arguments, move |req: qsh_proto::HostGetReq| {
+                    ops.host_get(req)
+                })
+                .await
+            }
+            "list_sessions" => {
+                run_tool(arguments, move |req: qsh_proto::SessionListReq| {
+                    ops.session_list(req)
+                })
+                .await
+            }
+            "get_session" => {
+                run_tool(arguments, move |req: qsh_proto::SessionGetReq| {
+                    ops.session_get(req)
+                })
+                .await
+            }
+            "open_session" => {
+                run_tool(arguments, move |req: qsh_proto::SessionOpenReq| {
+                    ops.session_open(req)
+                })
+                .await
+            }
+            "read_session" => {
+                run_tool(arguments, move |req: qsh_proto::SessionReadReq| {
+                    ops.session_read(req).map(|out| out.data)
+                })
+                .await
+            }
+            "write_session" => {
+                run_tool(arguments, move |req: qsh_proto::SessionWriteReq| {
+                    ops.session_write(req)
+                })
+                .await
+            }
+            "resize_session" => {
+                run_tool(arguments, move |req: qsh_proto::SessionResizeReq| {
+                    ops.session_resize(req)
+                })
+                .await
+            }
+            "close_session" => {
+                run_tool(arguments, move |req: qsh_proto::SessionCloseReq| {
+                    ops.session_close(req)
+                })
+                .await
+            }
+            "exec" => {
+                // No MCP tool argument carries remote stdin content
+                // (`TOOL_MAP`'s `ExecRunReq` has none) — `ExecStdin::Closed`
+                // sends EOF immediately, the same choice `main.rs`'s
+                // `run_exec` makes whenever its own stdin is not a pipe.
+                run_tool(arguments, move |req: qsh_proto::ExecRunReq| {
+                    ops.exec_run(req, ExecStdin::Closed).map(|out| out.data)
+                })
+                .await
+            }
+            "open_tunnel" => {
+                // `docs/CLI.md` §6.14: a tunnel's holder is the process
+                // that opened it. `qsh tunnel open --json` is one process
+                // per tunnel, so its own foreground `TunnelHold::hold` call
+                // is enough — process death is the only close mechanism it
+                // ever needs. `qsh mcp` is one *long-running* process
+                // serving many `open_tunnel` calls, so it needs a tunnel's
+                // hold to outlive this call *and* to be independently
+                // closable by a later `close_tunnel` call without taking
+                // the whole server down — `Ops::tunnel_open_and_hold`
+                // (`PLAN.md` M6 Step 2+3 검증 라운드 판정 ②/F2) is that
+                // primitive: it keeps holding on a background thread and
+                // registers a close signal in `Ops`'s own shared registry,
+                // so all of this call site has to do is call it — no hold
+                // lifecycle logic lives in `qsh-cli` at all.
+                run_tool(arguments, move |req: qsh_proto::TunnelOpenReq| {
+                    ops.tunnel_open_and_hold(req)
+                })
+                .await
+            }
+            "close_tunnel" => {
+                run_tool(arguments, move |req: qsh_proto::TunnelCloseReq| {
+                    ops.tunnel_close(req)
+                })
+                .await
+            }
+            _ => return Err(McpError::method_not_found::<CallToolRequestMethod>()),
+        };
+        Ok(result.into())
+    }
+}
+
+/// Deserialize `arguments` into `Req`, run `op` — a **sync** [`Ops`] call —
+/// on a blocking-pool thread, and shape the outcome per `PLAN.md` §4.1 #3 /
+/// M6 Step 3 item ③, error shape revised by M6 Step 2+3 검증 라운드 판정
+/// ⑤/F5: `Ok` becomes [`CallToolResult::structured`], every failure becomes
+/// [`op_error_result`] — content-only, carrying a `qsh_proto::CliError`
+/// (`docs/CLI.md` §3.2's error object, verbatim) — **never** a
+/// protocol-level `Err`, so this function's return type has no `Result` for
+/// a caller to mis-route one into.
+///
+/// The `spawn_blocking` is not an optional efficiency touch: every `Ops`
+/// method (`crates/qsh-core/src/ops/*.rs`) builds and `block_on`s its own
+/// dedicated Tokio runtime internally (`Ops::resolve_host_route`'s own doc,
+/// `crates/qsh-core/src/ops/host.rs`, names the exact hazard — "calling it
+/// from code that is itself already executing inside a Tokio runtime
+/// panics", and predicts "a future async host (an MCP adapter...)" as the
+/// caller that will hit it). `call_tool` already runs inside `qsh mcp`'s own
+/// runtime (`serve_stdio`'s `rmcp::serve_server`), so calling `op` straight
+/// from there would panic; `spawn_blocking` moves it to a thread that is not
+/// driving any runtime's async tasks, sidestepping the hazard the same way
+/// `crates/qsh-testkit/tests/host_list_reverse.rs` already does for the sync
+/// twin of that same method.
+async fn run_tool<Req, Data>(
+    arguments: JsonObject,
+    op: impl FnOnce(Req) -> Result<Data, OpError> + Send + 'static,
+) -> CallToolResult
+where
+    Req: DeserializeOwned + Send + 'static,
+    Data: Serialize + Send + 'static,
+{
+    let req: Req = match serde_json::from_value(Value::Object(arguments)) {
+        Ok(req) => req,
+        Err(err) => {
+            return op_error_result(&OpError::new(
+                ErrorCode::InvalidArgument,
+                format!("invalid tool arguments: {err}"),
+            ));
+        }
+    };
+    match tokio::task::spawn_blocking(move || op(req)).await {
+        Ok(Ok(data)) => match serde_json::to_value(&data) {
+            Ok(value) => CallToolResult::structured(value),
+            Err(err) => op_error_result(&OpError::new(
+                ErrorCode::Internal,
+                format!("qsh mcp: failed to encode tool result: {err}"),
+            )),
+        },
+        Ok(Err(op_err)) => op_error_result(&op_err),
+        Err(join_err) => op_error_result(&OpError::new(
+            ErrorCode::Internal,
+            format!("qsh mcp: tool task failed: {join_err}"),
+        )),
+    }
+}
+
+/// [`OpError`] → `docs/CLI.md` §3.2's error object, carried as
+/// `content[0].text` (a serialized JSON string) on a
+/// [`CallToolResult::error`] — **not** [`CallToolResult::structured_error`]
+/// (`PLAN.md` M6 Step 2+3 검증 라운드 판정 ⑤/F5). `structured_error` sets
+/// `structuredContent` to the error object, but a tool's advertised
+/// `outputSchema` (`tool_schemas`, below) is generated from its success
+/// `*Data` type — an error object does not conform to that schema, so an
+/// MCP client that validates `structuredContent` against `outputSchema` (as
+/// the spec invites) would see this server's own error responses as
+/// protocol violations. `content`-only text carries the identical §3.2 JSON
+/// (byte-for-byte, still parseable by any caller that wants structure) with
+/// no schema claim attached — this is [`run_tool`]'s three failure arms'
+/// one shared shaping point, so they stay byte-identical to each other for
+/// the same `OpError`.
+fn op_error_result(err: &OpError) -> CallToolResult {
+    let error = qsh_proto::CliError {
+        code: err.code.clone(),
+        message: err.message.clone(),
+        retryable: err.retryable,
+        details: err.details.clone(),
+    };
+    let value = serde_json::to_value(&error).expect("CliError always serializes");
+    CallToolResult::error(vec![rmcp::model::ContentBlock::text(value.to_string())])
 }
 
 /// `qsh mcp`'s entry point (`docs/CLI.md` §8.1): serve the stdio transport
@@ -189,19 +450,74 @@ impl ServerHandler for QshMcpServer {
 /// their own long-running modes.
 ///
 /// No SIGINT/SIGTERM handling here on purpose: `qsh mcp` holds no resource
-/// of its own to drain on the way out — no session, no listener; Step 3's
-/// tool calls are each a single `Ops` round trip, the same shape the CLI
-/// frontend's own commands already are — so the OS's default signal
-/// disposition (process exit) is already correct, and the only *graceful*
-/// shutdown this transport promises is "stdin closed", which is this
-/// function's own loop exit.
-pub async fn serve_stdio() -> std::io::Result<()> {
+/// of its own to drain on the way out — no session, no listener; each tool
+/// call is its own `Ops` round trip (`open_tunnel`'s held tunnels,
+/// `qsh_core::Ops::tunnel_open_and_hold`'s own doc, are the one exception,
+/// and they are intentionally *not* drained here either — same "process exit
+/// is already correct" reasoning) — so the OS's default signal disposition
+/// (process exit) is already correct, and the only *graceful* shutdown this
+/// transport promises is "stdin closed", which is this function's own loop
+/// exit.
+///
+/// `ops` is `main.rs`'s `run_mcp`'s own `Ops::from_env()` handle, passed in
+/// rather than built here (`QshMcpServer::new`'s own doc).
+pub async fn serve_stdio(ops: Ops) -> std::io::Result<()> {
     let transport = rmcp::transport::io::stdio();
-    let service = rmcp::serve_server(QshMcpServer, transport)
+    let service = rmcp::serve_server(QshMcpServer::new(ops), transport)
         .await
-        .map_err(std::io::Error::other)?;
-    service.waiting().await.map_err(std::io::Error::other)?;
+        .map_err(redact_handshake_error)?;
+    service.waiting().await.map_err(redact_join_error)?;
     Ok(())
+}
+
+/// Redact the serving loop's own [`tokio::task::JoinError`] the same way
+/// [`redact_handshake_error`] redacts the handshake's — its `Display` can
+/// include a panic payload (whatever `std::panic!` was called with,
+/// wherever inside the serving task it fired), so this keeps only the
+/// structural fact ("cancelled" vs. "panicked"), never that payload.
+fn redact_join_error(join_err: tokio::task::JoinError) -> std::io::Error {
+    let shape = if join_err.is_cancelled() {
+        "the serving task was cancelled"
+    } else {
+        "the serving task panicked"
+    };
+    std::io::Error::other(format!("mcp: {shape}"))
+}
+
+/// Redact an `rmcp` handshake failure before it becomes this function's
+/// `io::Error` (`PLAN.md` M6 Step 2+3 검증 라운드 판정 ①/F1). Two of
+/// `rmcp::service::ServerInitializeError`'s variants
+/// (`rmcp-3.1.4/src/service/server.rs`) `Debug`-format an entire received
+/// JSON-RPC message straight into their own `Display` —
+/// `ExpectedInitializeRequest` fires exactly when a `tools/call` (or
+/// anything else) arrives before `initialize`, and its `{0:?}` is that
+/// message verbatim, arguments included (PTY input b64, `exec` argv).
+/// `main.rs`'s `run_mcp` puts this `io::Error`'s `Display` on stderr via a
+/// plain [`OpError`](crate::main) message, not through `tracing` — so
+/// `init_tracing`'s `rmcp=warn` clamp (the other half of this same finding)
+/// does not cover it, and it would leak *unconditionally*, independent of
+/// `-v`/`-vv`. This keeps only each variant's *shape* — never a payload —
+/// the same "structural, never payload" discipline `docs/PRD.md`
+/// §13/`docs/CLI.md` §11 already hold audit records to.
+fn redact_handshake_error(err: rmcp::service::ServerInitializeError) -> std::io::Error {
+    use rmcp::service::ServerInitializeError as E;
+    let shape = match &err {
+        E::ExpectedInitializeRequest(_) => "the client's first message was not `initialize`",
+        E::ConnectionClosed(_) => "the connection closed before `initialize` finished",
+        E::UnexpectedInitializeResponse(_) => {
+            "the client sent an unexpected message during `initialize`"
+        }
+        E::InitializeFailed(_) => "the `initialize` handshake failed",
+        E::TransportError { .. } => "the stdio transport failed during `initialize`",
+        E::Cancelled => "the `initialize` handshake was cancelled",
+        // `ServerInitializeError` is `#[non_exhaustive]`: a future `rmcp`
+        // version may add a variant this match has not seen — fail closed
+        // to the same redaction discipline rather than a compile error
+        // that would force a choice between "match every future variant
+        // by hand" and "give up and format `{err}` again".
+        _ => "the `initialize` handshake failed",
+    };
+    std::io::Error::other(format!("mcp handshake: {shape}"))
 }
 
 #[cfg(test)]
@@ -209,9 +525,18 @@ mod tests {
     use std::collections::HashSet;
     use std::path::PathBuf;
 
-    use rmcp::model::CallToolResult;
-
     use super::*;
+
+    /// A [`QshMcpServer`] bound to throwaway, never-created directories —
+    /// good enough for the tests in this module, which only exercise
+    /// `get_info`/`list_tools`/schema shape (neither ever touches disk); a
+    /// real dial is a `tests/mcp_conformance.rs` concern (a real `Sandbox`).
+    fn test_server() -> QshMcpServer {
+        QshMcpServer::new(Ops::new(qsh_core::Paths::new(
+            "/nonexistent/qsh-mcp-test/config",
+            "/nonexistent/qsh-mcp-test/state",
+        )))
+    }
 
     fn repo_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -387,26 +712,70 @@ mod tests {
         }
     }
 
-    /// `PLAN.md` §4.1 #3 — `OpError`/`CliError` → MCP tool error surface.
-    /// `rmcp::model::CallToolResult::structured_error` (rmcp 3.1.4,
-    /// `src/model.rs`) is exactly "`isError: true` + content carrying the
-    /// §3.2 error object JSON verbatim" the draft decision describes, with
-    /// no MCP *protocol*-level error (`Err(ErrorData)`) involved — this
-    /// compiles a real `qsh.cli/v1` §3.2 example envelope's `error` object
-    /// through it and checks the shape.
+    /// `PLAN.md` M6 Step 2+3 검증 라운드 판정 ④/F4 — the L6 gate for tool
+    /// descriptions: every one of the 12 tools must carry a non-empty
+    /// `description` (before this fix, [`tool`] hardcoded `None` for all of
+    /// them — a real MCP client has nothing to show a human/agent user
+    /// choosing among tools with `description: null`). Mutation-proof: a
+    /// revert of any one tool back to no description makes this fail.
     #[test]
-    fn op_error_maps_to_a_structured_call_tool_error_without_a_protocol_error() {
+    fn every_tool_has_a_non_empty_description() {
+        for schema in tool_schemas() {
+            let description = schema
+                .description
+                .as_deref()
+                .unwrap_or_else(|| panic!("{}: description must not be None", schema.name));
+            assert!(
+                !description.trim().is_empty(),
+                "{}: description must not be empty/whitespace-only",
+                schema.name
+            );
+        }
+    }
+
+    /// `PLAN.md` §4.1 #3, revised by M6 Step 2+3 검증 라운드 판정 ⑤/F5 —
+    /// `OpError`/`CliError` → MCP tool error surface. `op_error_result`
+    /// (this module) is "`isError: true` + `content[0].text` carrying the
+    /// §3.2 error object JSON verbatim, `structuredContent` absent" — not
+    /// [`CallToolResult::structured_error`] (its own doc, above, explains
+    /// why: an error object does not conform to the tool's
+    /// success-shaped `outputSchema`). This compiles a real `qsh.cli/v1`
+    /// §3.2 example envelope's `error` object through the real function
+    /// under test and checks the shape, including that `structuredContent`
+    /// is `None` — the exact regression `structured_error` would reintroduce
+    /// if it crept back in.
+    #[test]
+    fn op_error_maps_to_a_content_only_call_tool_error_without_structured_content() {
         let cli_error = qsh_proto::CliError {
             code: qsh_proto::ErrorCode::PermissionDenied,
             message: "peer is not allowed to perform this operation on this host".to_string(),
             retryable: false,
             details: serde_json::json!({}),
         };
+        let op_err = OpError {
+            code: cli_error.code.clone(),
+            message: cli_error.message.clone(),
+            retryable: cli_error.retryable,
+            details: cli_error.details.clone(),
+        };
         let value = serde_json::to_value(&cli_error).expect("CliError serializes");
-        let result = CallToolResult::structured_error(value.clone());
+        let result = op_error_result(&op_err);
 
         assert_eq!(result.is_error, Some(true));
-        assert_eq!(result.structured_content, Some(value));
+        assert_eq!(
+            result.structured_content, None,
+            "an error result must not carry structuredContent — the tool's \
+             outputSchema is for its success type, not this error shape"
+        );
+        assert_eq!(result.content.len(), 1);
+        let text = result.content[0]
+            .as_text()
+            .expect("error content must be a text block")
+            .text
+            .clone();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&text).expect("content text must be the §3.2 JSON object");
+        assert_eq!(parsed, value);
     }
 
     /// `PLAN.md` §4.1 #5 — a raw JSON-RPC harness (no `rmcp` client) is
@@ -433,7 +802,7 @@ mod tests {
     /// of this build's (see [`QshMcpServer::get_info`]'s own doc).
     #[test]
     fn get_info_declares_tools_and_reports_this_crates_own_identity() {
-        let info = QshMcpServer.get_info();
+        let info = test_server().get_info();
         assert!(
             info.capabilities.tools.is_some(),
             "must declare the tools capability: {info:?}"
@@ -463,5 +832,69 @@ mod tests {
             listed, mapped,
             "tools_list_schemas must be a reordering of TOOL_MAP, not a different set"
         );
+    }
+
+    /// `PLAN.md` M6 Step 2 (a)-추기 ④ / task item ④: each tool's
+    /// `output_schema` is exactly `schema_for_output::<Data>()` for the
+    /// `*Data` type [`tool_schemas`]'s own doc pairs it with — the identical
+    /// function `Tool::with_output_schema` calls internally
+    /// (`rmcp::handler::server::common::schema_for_output`), so this checks
+    /// the *pairing* [`tool_schemas`] wrote is right, not that rmcp's own
+    /// schema generation works.
+    #[test]
+    fn output_schema_matches_the_paired_data_types_schema() {
+        use rmcp::handler::server::common::schema_for_output;
+
+        let schemas = tool_schemas();
+        let expected: [(&str, Arc<JsonObject>); 12] = [
+            ("list_hosts", schema_for_output::<qsh_proto::HostListData>()),
+            ("get_host", schema_for_output::<qsh_proto::Host>()),
+            (
+                "list_sessions",
+                schema_for_output::<qsh_proto::SessionListData>(),
+            ),
+            ("get_session", schema_for_output::<qsh_proto::Session>()),
+            (
+                "open_session",
+                schema_for_output::<qsh_proto::SessionOpenData>(),
+            ),
+            (
+                "read_session",
+                schema_for_output::<qsh_proto::SessionReadData>(),
+            ),
+            (
+                "write_session",
+                schema_for_output::<qsh_proto::SessionWriteData>(),
+            ),
+            (
+                "resize_session",
+                schema_for_output::<qsh_proto::SessionResizeData>(),
+            ),
+            (
+                "close_session",
+                schema_for_output::<qsh_proto::SessionCloseData>(),
+            ),
+            ("exec", schema_for_output::<qsh_proto::ExecRunData>()),
+            (
+                "open_tunnel",
+                schema_for_output::<qsh_proto::TunnelOpenData>(),
+            ),
+            (
+                "close_tunnel",
+                schema_for_output::<qsh_proto::TunnelCloseData>(),
+            ),
+        ];
+        assert_eq!(schemas.len(), expected.len());
+        for (schema, (name, expected_schema)) in schemas.iter().zip(expected.iter()) {
+            assert_eq!(schema.name.as_ref(), *name);
+            let actual = schema
+                .output_schema
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name} has no output_schema"));
+            assert_eq!(
+                actual, expected_schema,
+                "{name}'s output_schema does not match schema_for_output for its own Data type"
+            );
+        }
     }
 }
