@@ -65,6 +65,15 @@
 
 **(d) 완료 판정:** DoD 3 green. long-poll이 `session read --wait`와 같은 pull 소스를 쓰는 것이 코드 구조로 확인됨.
 
+**(a)-추기 — Step 4 확정 + 검증 라운드 판정 (2026-08-31, main 세션).**
+① **취소 의미론의 실체(구현 확정)**: rmcp 3.1.4가 `notifications/cancelled` 수신 시 요청의 CancellationToken을 `local_ct_pool`에서 제거·취소하고, 응답 송신 시점에 같은 pool을 재조회해 취소된 id의 응답을 조용히 버린다(핸들러 태스크는 abort되지 않음) — 취소 무결성은 rmcp가 구조적으로 보장, 어댑터 추가 코드 0. 잔존 blocking pull은 host clamp(60s)까지 자연 소멸하며 그 결과는 관측 불가. rmcp 마이너 업그레이드 시 이 메커니즘 존속 재확인 필수(§4 리스크 감시 근거).
+② **부수 결함 수정**: pending long-poll 중 stdin EOF 시 암묵 `Drop for Runtime`이 blocking 스레드 join을 무기한 대기해 종료가 최대 60s 지연되던 실결함 → `run_mcp`에 `runtime.shutdown_timeout(500ms)` 명시. A/B 실증: 프레임 전달 5개 조건 동일(무회귀), 종료 지연만 29.7s→5.5s.
+③ **검증 라운드 P2-1 채택** — 전순서 테스트가 `ctl_after` 절반에 맹목: ctl 커서 되먹임을 고정해도 green(ctl 중복 2건 미검출), idle long-poll이 spin으로 퇴화해도 미검출. 수정: 비-output 이벤트 중복 0 단언 + 양 커서 되먹임 시 wait_ms가 실제로 park함을 단언.
+④ **검증 라운드 P2-2 채택(문서 정정)** — "대기 중인 pull만 끊고"(본 계획 (a))·"local wait 또는 request를 취소"(CLI.md §9)는 실동작(응답 억제 + 자연 소멸)보다 강한 서술. 관측 가능 계약(세션·lease 무변경, 취소 응답 부재)은 성립. CLI.md §9에 실의미론 명확화 문장을 추가(additive)하고, mcp/mod.rs의 낡은 "Step 4의 몫" 주석을 실의미론+rmcp 인용으로 교체(P3-1 dangling ref·P3-2 stale doc 동시 해소).
+⑤ **검증 라운드 P2-3 기각(이월)** — 취소가 자원을 회수하지 않고 long-poll 동시성 상한이 없음: 방치된 pull당 ~11 스레드·5 fd·0.86MB가 최대 60s 잔존, 400건 시 4,412 스레드(호스트는 무영향, 정직한 호출은 0.1s 응답 유지, 패닉 0). Ops::session_read의 per-call 런타임+QUIC 구조가 원인이라 어댑터 국소 수정이 아닌 core 구조 결정이고, M6 DoD 문면 밖 + 로컬 신뢰 클라이언트 위협 모델이라 **측정치와 함께 M7 입력으로 이월**(§3 non-goals의 후속 입력). 어댑터 semaphore 캡은 CLI 트윈에 없는 정책을 어댑터에 심는 것이라 기각.
+⑥ **P3-3 채택** — EOF 신속종료 테스트의 7s 단언은 바닥(rmcp 고정 5s drain + 500ms) 위 여유 1.5s뿐: 단언을 BOUND(10s) 미만으로 완화해도 회귀(20s+ 지연)는 확실히 잡힘 — 완화 + 바닥 분해 주석. DoD3 테스트의 실검출 지점이 주석 라벨과 다른 문제(id-pinning이 실검출자)는 취소 직후 "다음 프레임 id ≠ 취소 id" 명시 단언과 주석 정정으로 해소.
+⑦ **부재 증명 채택**: 취소의 세션 상태 무부작용(잔존 pull의 비파괴 소비 실증), 감사 이중 기록 0(41/41), writer lease 무접촉(MCP에선 connection-per-call이라 get_session.writer가 구조적으로 null — write_session 성공이 대리 지표로 타당), 취소 프로토콜 변형 7종 내성, shutdown_timeout 3경계 무회귀, Windows 게이팅 기계 검사 dead_survivors 0. DoD3 테스트는 cancel 제거 시 5/5 실패(실검출 확인).
+
 ### Step 5 — 기계 게이트: arch-lint ban (DoD 4) + conformance 총합 (DoD 1 마감)
 
 **(a) 범위:** ① `xtask arch`에 MCP adapter 규칙 추가: `crates/qsh-cli/src/mcp/` 안에서 `std::process`(subprocess)·`Command::new`·CLI output 재파싱 패턴을 금지하는 소스 게이트(M5 Step 8의 `source_scan` 선례 — CRLF 정규화 포함). ② conformance 하네스에 남은 시나리오 결합, fixture 등록(`REQUIRED_FIXTURES` 규율 준용). ③ `docs/CLI.md` §8 문면과 구현의 최종 대조.

@@ -768,8 +768,8 @@ fn open_write_read_close_session_and_exec_round_trip_through_real_ops() {
     );
 
     // read_session: one pull from the start — a single round trip, not the
-    // long-poll cancellation semantics Step 4 owns (this file's module doc,
-    // `QshMcpServer::call_tool`'s own doc on `read_session`).
+    // long-poll cancellation semantics Step 4 owns
+    // (`QshMcpServer::call_tool`'s own doc, `read_session` paragraph).
     id += 1;
     client.send(&call_tool_request(
         id,
@@ -1206,4 +1206,522 @@ fn stdin_eof_shuts_the_server_down_cleanly() {
     let mut client = McpClient::spawn(&sandbox, &[]);
     handshake(&mut client);
     client.assert_stdout_quiescent_after_close();
+}
+
+/// `PLAN.md` M6 Step 4 (c) — DoD 3: `notifications/cancelled` for an
+/// in-flight `read_session` long-poll must leave the session running and
+/// writable. `rmcp-3.1.4` itself already guarantees the *response* to a
+/// cancelled request is never sent (`crates/qsh-cli/src/mcp/mod.rs`'s
+/// `QshMcpServer::call_tool` doc comment, `read_session` paragraph, has the
+/// source citation: cancelling removes the request's `CancellationToken`
+/// from `serve_inner`'s own `local_ct_pool`, and the same pool is consulted
+/// again when the eventual response would be sent — absent, it is silently
+/// dropped, `rmcp-3.1.4/src/service.rs` lines ~1478-1482) — this test's job
+/// is the *production* half `docs/CLI.md`
+/// §8.4/§9 promise: the cancellation must never reach the session or the
+/// writer lease. Every `recv()` below pins the response id it expects, so a
+/// stray frame for the cancelled request's id interleaving anywhere would
+/// already fail one of these `assert_eq!`s — item ③(i)'s "수신 프레임 전수
+/// 검사" — and `assert_stdout_quiescent_after_close` at the end additionally
+/// proves nothing trails the exchange, including a late cancelled-request
+/// response.
+#[cfg(unix)]
+#[test]
+fn cancelling_a_pending_read_session_leaves_the_session_running_and_writable() {
+    let fleet = Fleet::start();
+    let mut client = McpClient::spawn(&fleet.client, &[]);
+    handshake(&mut client);
+
+    let mut id = TOOLS_CALL_ID;
+    client.send(&call_tool_request(
+        id,
+        "open_session",
+        json!({"host": HOST_ALIAS, "argv": ["sh"]}),
+    ));
+    let response = client.recv();
+    assert_eq!(response["id"], id, "{response}");
+    assert_eq!(response["result"]["isError"], false, "{response}");
+    let session_ref = response["result"]["structuredContent"]["session_ref"]
+        .as_str()
+        .unwrap_or_else(|| panic!("open_session: no session_ref: {response}"))
+        .to_string();
+
+    // Drain whatever is already buffered (shell banner/prompt) with an
+    // immediate pull, so the long-poll below has an empty-pending cursor
+    // and genuinely blocks server-side — a `read_session` that returns
+    // instantly would prove nothing about cancelling an in-flight wait.
+    id += 1;
+    client.send(&call_tool_request(
+        id,
+        "read_session",
+        json!({"session_ref": session_ref, "after_sequence": 0, "wait_ms": 0}),
+    ));
+    let response = client.recv();
+    assert_eq!(response["id"], id, "{response}");
+    assert_eq!(response["result"]["isError"], false, "{response}");
+    let cursor_after = response["result"]["structuredContent"]["next_after"]
+        .as_u64()
+        .expect("next_after");
+    let cursor_ctl_after = response["result"]["structuredContent"]["next_ctl_after"]
+        .as_u64()
+        .expect("next_ctl_after");
+
+    // The long-poll to cancel: nothing arrives on this idle session within
+    // `wait_ms`, so the host genuinely parks this request server-side.
+    id += 1;
+    let cancelled_id = id;
+    client.send(&call_tool_request(
+        id,
+        "read_session",
+        json!({
+            "session_ref": session_ref,
+            "after_sequence": cursor_after,
+            "ctl_after": cursor_ctl_after,
+            "wait_ms": 20_000,
+        }),
+    ));
+    // A generous margin for the request to actually reach the host and
+    // start blocking there before it is cancelled — JSON-RPC messages on
+    // one stdio pipe are processed in the order `rmcp` reads them
+    // (`serve_inner`'s own `select!` loop), so this is a safety margin,
+    // not a correctness requirement.
+    thread::sleep(Duration::from_millis(300));
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/cancelled",
+        "params": {"requestId": cancelled_id, "reason": "test: caller moved on"},
+    }));
+
+    // get_session must answer promptly (never blocked behind the
+    // still-in-flight cancelled read) and report `running` — the session
+    // survival half of DoD 3. The actual detector for a leaked or
+    // out-of-order cancelled-request response, though, is not this timing
+    // check by itself: it is every `assert_eq!`/`assert_ne!` on a response
+    // `id` from here to the end of this test (id-pinning — a stray frame
+    // for `cancelled_id` interleaving anywhere would fail one of them) plus
+    // `assert_stdout_quiescent_after_close` at the very end (which would
+    // catch a *late* cancelled-request response arriving after the
+    // exchange looks done). Both together are what item ③(i)'s "수신 프레임
+    // 전수 검사" means in practice.
+    id += 1;
+    let started = Instant::now();
+    client.send(&call_tool_request(
+        id,
+        "get_session",
+        json!({"session_ref": session_ref}),
+    ));
+    let response = client.recv();
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "get_session must not be blocked behind the cancelled read_session: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(response["id"], id, "{response}");
+    assert_ne!(
+        response["id"], cancelled_id,
+        "must never receive the cancelled request's own response: {response}"
+    );
+    assert_eq!(response["result"]["isError"], false, "{response}");
+    assert_eq!(
+        response["result"]["structuredContent"]["state"], "running",
+        "DoD 3: session must still be running after the cancellation: {response}"
+    );
+
+    // write_session must still succeed — the writer lease was never
+    // touched by the cancelled read (§8.4's "read operation과 별도 권한"
+    // reasoning cuts the other way here: cancelling a *read* must not
+    // touch write authority at all).
+    id += 1;
+    client.send(&call_tool_request(
+        id,
+        "write_session",
+        json!({"session_ref": session_ref, "data_b64": "aGkK"}),
+    ));
+    let response = client.recv();
+    assert_eq!(response["id"], id, "{response}");
+    assert_ne!(
+        response["id"], cancelled_id,
+        "must never receive the cancelled request's own response: {response}"
+    );
+    assert_eq!(response["result"]["isError"], false, "{response}");
+    assert_eq!(
+        response["result"]["structuredContent"]["bytes_written"], 3,
+        "{response}"
+    );
+
+    // A fresh read_session (a new request, not the cancelled one) still
+    // works normally and sees the write's echo.
+    id += 1;
+    client.send(&call_tool_request(
+        id,
+        "read_session",
+        json!({
+            "session_ref": session_ref,
+            "after_sequence": cursor_after,
+            "ctl_after": cursor_ctl_after,
+            "wait_ms": 5_000,
+        }),
+    ));
+    let response = client.recv();
+    assert_eq!(response["id"], id, "{response}");
+    assert_ne!(
+        response["id"], cancelled_id,
+        "must never receive the cancelled request's own response: {response}"
+    );
+    assert_eq!(response["result"]["isError"], false, "{response}");
+    assert!(
+        !response["result"]["structuredContent"]["events"]
+            .as_array()
+            .unwrap_or(&Vec::new())
+            .is_empty(),
+        "the write's echo must still show up after the cancellation: {response}"
+    );
+
+    id += 1;
+    client.send(&call_tool_request(
+        id,
+        "close_session",
+        json!({"session_ref": session_ref}),
+    ));
+    let response = client.recv();
+    assert_eq!(response["id"], id, "{response}");
+    assert_ne!(
+        response["id"], cancelled_id,
+        "must never receive the cancelled request's own response: {response}"
+    );
+    assert_eq!(response["result"]["isError"], false, "{response}");
+
+    // `assert_stdout_quiescent_after_close` is the other half of the
+    // detector the comment above `get_session` describes: it proves
+    // nothing — including a late cancelled-request response — trails this
+    // exchange once the client believes it is done.
+    client.assert_stdout_quiescent_after_close();
+}
+
+/// `PLAN.md` M6 Step 4 (c) — `docs/CLI.md` §8.3's feedback contract: an
+/// agent that feeds `next_after`/`next_ctl_after` back as the next call's
+/// `after_sequence`/`ctl_after` must see every byte exactly once, in order,
+/// even when a small `limit_bytes` forces several pulls to cover one write
+/// (task item ③(ii)'s "3회 이상"). The marker below is written as raw PTY
+/// input **without** a trailing newline — the terminal's line-discipline
+/// echo reproduces it byte-for-byte in the ring immediately (no `sh`
+/// command ever runs, so there is no second, shell-generated copy of it to
+/// confuse the reassembly check) — and contains no two equal 8-byte windows,
+/// so a lost, duplicated, or reordered chunk at a `limit_bytes` boundary
+/// would not silently reassemble into the same string by coincidence.
+///
+/// `PLAN.md` M6 Step 4 (a)-추기 판정③ closes two blind spots the plain
+/// output-reassembly check above cannot see, because `after_sequence`
+/// feedback alone drives it and it never idles: (1) a non-`session.output`
+/// event (`session.writer_changed`, at minimum — every `write_session` call
+/// here is its own connection, so it takes and releases the writer lease
+/// once) delivered more than once because `ctl_after` feedback is broken —
+/// identity is the **whole event JSON**, not a single `sequence` field,
+/// because `session.gap` (`qsh_proto::event::SessionEvent::Gap`) carries no
+/// `sequence` at all, so no one field name is common to every non-output
+/// variant; whole-object equality is the only criterion that works
+/// uniformly, and it is also what real broken-feedback duplicates look like
+/// (byte-identical redelivery, not a mutated copy — measured against a live
+/// server: pinning `ctl_after` to `0` server-side on a multi-write-per-
+/// connection topology reproduced 2 exact-duplicate `session.writer_changed`
+/// entries out of 18 delivered, `0` when fed back correctly). (2) `wait_ms`
+/// degenerating into an instant return instead of a genuine park once both
+/// cursors are idle-correct: the same probe measured a real park
+/// (`elapsed ≈ 2.1s` for a `wait_ms: 2_000` pull with nothing new to
+/// deliver) against a spin (`elapsed ≈ 0.1s`, and a stale
+/// `session.writer_changed` reappearing) the instant `ctl_after` stops being
+/// fed back — exactly the §6.4 failure mode ("a poller that does not echo
+/// this back sees such an event again on every pull") this test's pull loop
+/// alone cannot exercise, because every pull inside it still has marker
+/// bytes left to deliver and never reaches a genuinely idle poll. The park
+/// assertion below closes that gap directly, and is also what this file's
+/// own mutation exercise on `Ops::session_reader`'s `ctl_after` mapping
+/// (`crates/qsh-core/src/ops/session.rs`) actually catches — the duplicate
+/// check above stays green on that specific mutation in this test's own
+/// topology, because `after_sequence` races past the ctl entries' ring
+/// position before any pull revisits them; the park assertion does not have
+/// that blind spot.
+#[cfg(unix)]
+#[test]
+fn read_session_cursor_feedback_reassembles_output_in_total_order() {
+    const MARKER: &str = "0-QRST1-UVWX2-YZAB3-CDEF4-GHIJ5-KLMN6-OPQR7-END";
+    const LIMIT_BYTES: u64 = 8;
+
+    let fleet = Fleet::start();
+    let mut client = McpClient::spawn(&fleet.client, &[]);
+    handshake(&mut client);
+
+    let mut id = TOOLS_CALL_ID;
+    client.send(&call_tool_request(
+        id,
+        "open_session",
+        json!({"host": HOST_ALIAS, "argv": ["sh"]}),
+    ));
+    let response = client.recv();
+    assert_eq!(response["id"], id, "{response}");
+    assert_eq!(response["result"]["isError"], false, "{response}");
+    let session_ref = response["result"]["structuredContent"]["session_ref"]
+        .as_str()
+        .unwrap_or_else(|| panic!("open_session: no session_ref: {response}"))
+        .to_string();
+
+    // Drain the initial banner/prompt so the marker is the only thing the
+    // pull loop below has to reassemble.
+    id += 1;
+    client.send(&call_tool_request(
+        id,
+        "read_session",
+        json!({"session_ref": session_ref, "after_sequence": 0, "wait_ms": 0}),
+    ));
+    let response = client.recv();
+    assert_eq!(response["id"], id, "{response}");
+    assert_eq!(response["result"]["isError"], false, "{response}");
+    let mut after = response["result"]["structuredContent"]["next_after"]
+        .as_u64()
+        .expect("next_after");
+    let mut ctl_after = response["result"]["structuredContent"]["next_ctl_after"]
+        .as_u64()
+        .expect("next_ctl_after");
+
+    id += 1;
+    client.send(&call_tool_request(
+        id,
+        "write_session",
+        json!({"session_ref": session_ref, "data_b64": base64_encode(MARKER.as_bytes())}),
+    ));
+    let response = client.recv();
+    assert_eq!(response["id"], id, "{response}");
+    assert_eq!(response["result"]["isError"], false, "{response}");
+    assert_eq!(
+        response["result"]["structuredContent"]["bytes_written"],
+        MARKER.len() as u64,
+        "{response}"
+    );
+
+    // Pull loop: `LIMIT_BYTES` forces multiple round trips; each pull feeds
+    // the previous reply's own `next_after`/`next_ctl_after` back, never a
+    // locally re-derived cursor (`docs/CLI.md` §8.3).
+    let mut collected = Vec::new();
+    // Every non-`session.output` event seen so far, keyed by its whole JSON
+    // object (see the module doc above for why whole-object identity, not a
+    // single field). A `ctl_after` that is not genuinely fed back re-quotes
+    // the same control entry on a later pull — this is the assertion that
+    // catches it directly.
+    let mut ctl_events_seen: Vec<Value> = Vec::new();
+    let mut pulls = 0usize;
+    let deadline = Instant::now() + BOUND;
+    while collected.len() < MARKER.len() {
+        assert!(
+            Instant::now() < deadline,
+            "pull loop did not converge within {BOUND:?}: collected so far {:?}",
+            String::from_utf8_lossy(&collected)
+        );
+        pulls += 1;
+        id += 1;
+        client.send(&call_tool_request(
+            id,
+            "read_session",
+            json!({
+                "session_ref": session_ref,
+                "after_sequence": after,
+                "ctl_after": ctl_after,
+                "wait_ms": 2_000,
+                "limit_bytes": LIMIT_BYTES,
+            }),
+        ));
+        let response = client.recv();
+        assert_eq!(response["id"], id, "{response}");
+        assert_eq!(response["result"]["isError"], false, "{response}");
+        let structured = &response["result"]["structuredContent"];
+        after = structured["next_after"].as_u64().expect("next_after");
+        ctl_after = structured["next_ctl_after"]
+            .as_u64()
+            .expect("next_ctl_after");
+        for event in structured["events"].as_array().unwrap_or(&Vec::new()) {
+            if event["type"] == "session.output" {
+                collected.extend_from_slice(&base64_decode(
+                    event["data_b64"].as_str().expect("data_b64 is a string"),
+                ));
+            } else {
+                assert!(
+                    !ctl_events_seen.contains(event),
+                    "non-output event delivered more than once — ctl_after feedback broken? \
+                     {event}"
+                );
+                ctl_events_seen.push(event.clone());
+            }
+        }
+    }
+
+    assert!(
+        pulls >= 3,
+        "an {LIMIT_BYTES}-byte limit_bytes covering a {}-byte marker must take at least 3 \
+         pulls, took {pulls}",
+        MARKER.len()
+    );
+    assert_eq!(
+        collected,
+        MARKER.as_bytes(),
+        "reassembled output must equal the marker byte-for-byte, in order, with no loss or \
+         duplication at a limit_bytes boundary: got {:?}",
+        String::from_utf8_lossy(&collected)
+    );
+
+    // Regression guard for the second blind spot the module doc above
+    // describes: `after`/`ctl_after` are now both correctly fed back and
+    // the session is genuinely idle (the marker is fully drained, no `sh`
+    // command ever ran to produce more output). A `wait_ms: 2_000` pull
+    // from here must actually park server-side for close to that long and
+    // come back empty — not degenerate into an instant spin because a
+    // stale control entry looks "new" again (`docs/CLI.md` §6.4).
+    id += 1;
+    let park_started = Instant::now();
+    client.send(&call_tool_request(
+        id,
+        "read_session",
+        json!({
+            "session_ref": session_ref,
+            "after_sequence": after,
+            "ctl_after": ctl_after,
+            "wait_ms": 2_000,
+        }),
+    ));
+    let response = client.recv();
+    let park_elapsed = park_started.elapsed();
+    assert_eq!(response["id"], id, "{response}");
+    assert_eq!(response["result"]["isError"], false, "{response}");
+    assert!(
+        park_elapsed >= Duration::from_millis(1_800),
+        "an idle read_session with wait_ms=2000 and both cursors correctly fed back must \
+         actually park, not spin: returned after {park_elapsed:?} (ctl_after feedback broken?)"
+    );
+    assert!(
+        response["result"]["structuredContent"]["events"]
+            .as_array()
+            .unwrap_or(&Vec::new())
+            .is_empty(),
+        "an idle park pull must return no events: {response}"
+    );
+
+    id += 1;
+    client.send(&call_tool_request(
+        id,
+        "close_session",
+        json!({"session_ref": session_ref}),
+    ));
+    let response = client.recv();
+    assert_eq!(response["id"], id, "{response}");
+    assert_eq!(response["result"]["isError"], false, "{response}");
+
+    client.assert_stdout_quiescent_after_close();
+}
+
+/// `PLAN.md` M6 Step 4 item ③(iii): stdin EOF while a `read_session`
+/// long-poll is genuinely pending must still shut `qsh mcp` down promptly —
+/// not hang until the long-poll's own `wait_ms`/the host's
+/// `SESSION_READ_MAX_WAIT` clamp elapses. Before `main.rs`'s `run_mcp`
+/// gained its explicit `runtime.shutdown_timeout` (this step's production
+/// fix), this scenario reproduced a real hang: `Ops::session_read`'s
+/// blocking network wait has no cancellation hook, so the `spawn_blocking`
+/// thread `run_tool` parks it on keeps running until data arrives or the
+/// clamp fires, and a plain `Drop for Runtime` blocks its caller for that
+/// entire span waiting for the blocking-pool thread to join
+/// (`tokio-1.53.1` `src/runtime/blocking/pool.rs`). `wait_ms` here (20s)
+/// stays comfortably above this file's `BOUND` (10s) precisely so a
+/// regression back to that behavior fails this test rather than merely
+/// slowing it down.
+///
+/// The `elapsed < BOUND` bound below (`PLAN.md` M6 Step 4 (a)-추기 판정⑥)
+/// is not tight against the measured floor — it doesn't need to be. That
+/// floor decomposes as `rmcp-3.1.4`'s own fixed 5s drain timeout on
+/// `QuitReason::Closed` (`src/service.rs`'s `serve_inner`, ~L1728 —
+/// `mcp::serve_stdio`'s `service.waiting()` runs this before `run_mcp` even
+/// reaches its `shutdown_timeout` call) plus `main.rs`'s own
+/// `MCP_SHUTDOWN_DRAIN` (500ms), ≈5.5s measured end-to-end. `BOUND` (10s)
+/// leaves ~4.5s of margin above that floor for CI jitter while staying far
+/// below what a regression actually produces (20s+, `wait_ms`'s own value,
+/// or up to `SESSION_READ_MAX_WAIT`'s 60s) — comfortable on both sides.
+#[cfg(unix)]
+#[test]
+fn stdin_eof_during_a_pending_long_poll_exits_promptly() {
+    let fleet = Fleet::start();
+    let mut client = McpClient::spawn(&fleet.client, &[]);
+    handshake(&mut client);
+
+    let mut id = TOOLS_CALL_ID;
+    client.send(&call_tool_request(
+        id,
+        "open_session",
+        json!({"host": HOST_ALIAS, "argv": ["sh"]}),
+    ));
+    let response = client.recv();
+    assert_eq!(response["result"]["isError"], false, "{response}");
+    let session_ref = response["result"]["structuredContent"]["session_ref"]
+        .as_str()
+        .unwrap_or_else(|| panic!("open_session: no session_ref: {response}"))
+        .to_string();
+
+    // Drain the initial buffer so the long-poll below has nothing pending
+    // and genuinely blocks.
+    id += 1;
+    client.send(&call_tool_request(
+        id,
+        "read_session",
+        json!({"session_ref": session_ref, "after_sequence": 0, "wait_ms": 0}),
+    ));
+    let response = client.recv();
+    assert_eq!(response["result"]["isError"], false, "{response}");
+    let next_after = response["result"]["structuredContent"]["next_after"]
+        .as_u64()
+        .expect("next_after");
+    let next_ctl_after = response["result"]["structuredContent"]["next_ctl_after"]
+        .as_u64()
+        .expect("next_ctl_after");
+
+    id += 1;
+    client.send(&call_tool_request(
+        id,
+        "read_session",
+        json!({
+            "session_ref": session_ref,
+            "after_sequence": next_after,
+            "ctl_after": next_ctl_after,
+            "wait_ms": 20_000,
+        }),
+    ));
+    thread::sleep(Duration::from_millis(300));
+
+    let start = Instant::now();
+    client.close_stdin();
+    let status = client.wait_bounded();
+    let elapsed = start.elapsed();
+    assert!(
+        status.success(),
+        "qsh mcp exited non-zero after stdin EOF with a long-poll pending: {status:?}; stderr:\n{}",
+        client.stderr_so_far()
+    );
+    assert!(
+        elapsed < BOUND,
+        "qsh mcp took {elapsed:?} to exit after stdin EOF with a 20s long-poll still pending — \
+         it must not wait for that long-poll to resolve (measured floor is ~5.5s — rmcp's fixed \
+         5s QuitReason::Closed drain + MCP_SHUTDOWN_DRAIN's 500ms — so {BOUND:?} still confirms \
+         a regression rather than merely tolerating one)"
+    );
+}
+
+/// Small, local base64 helpers so the two tests above do not have to name
+/// `base64::Engine as _`/`STANDARD` at every call site — the same crate the
+/// `F1` regression tests further up in this file already depend on.
+#[cfg(unix)]
+fn base64_encode(bytes: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+#[cfg(unix)]
+fn base64_decode(text: &str) -> Vec<u8> {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD
+        .decode(text)
+        .expect("valid base64")
 }

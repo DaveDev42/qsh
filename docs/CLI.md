@@ -804,6 +804,7 @@ Agent는 응답의 `next_after`/`next_ctl_after`를 다음 호출의 `after_sequ
 - SIGINT는 현재 local operation을 취소한다.
 - Interactive attach의 SIGINT는 기본적으로 remote PTY로 전달하며, detach는 행 시작의 `~d`(또는 `~.`) escape 시퀀스로 한다(§7, `--escape-char`로 변경·비활성화). detach는 세션을 종료하지 않는다.
 - MCP cancellation은 local wait 또는 request를 취소하고 session lifecycle을 변경하지 않는다.
+- MCP 취소의 실제 동작은 해당 요청의 응답 전달 중단이다: MCP server는 취소된 요청에 응답을 보내지 않을 뿐, session·PTY·writer lease는 그대로 유지된다. server 내부에 남은 대기는 host의 wait clamp까지 자연 소멸하며, 그 결과는 어느 client에서도 관측되지 않는다.
 
 ## 10. Compatibility policy
 

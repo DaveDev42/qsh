@@ -1040,7 +1040,45 @@ fn run_mcp(ops: &Ops) -> i32 {
         }
     };
     stderr_note!("qsh mcp: serving tools over stdio");
-    match runtime.block_on(mcp::serve_stdio(ops.clone())) {
+    let result = runtime.block_on(mcp::serve_stdio(ops.clone()));
+    // `runtime.shutdown_timeout` — not a plain `drop(runtime)` — on the way
+    // out (`PLAN.md` M6 Step 4 item ①/③(iii), proved by a real binary: a
+    // `qsh mcp` process with a still-in-flight `read_session` long-poll
+    // (`run_tool`'s `spawn_blocking`, `crate::mcp`'s own doc on why every
+    // `Ops` call needs one) hung well past `mcp::serve_stdio`'s own return
+    // when stdin closed with the default `Drop for Runtime`). The reason:
+    // `Ops::session_read`'s blocking network wait has no cancellation hook
+    // of its own (`Connected::run`'s `runtime.block_on` on its own private,
+    // per-connection runtime — a genuinely new interrupt plumbing into
+    // `qsh-core`'s pull primitive is out of this adapter's scope, `PLAN.md`
+    // M6 Step 4 (a)'s "새 스트리밍 경로를 만들지 않는다"), so once
+    // `spawn_blocking` has started that thread, nothing this crate does can
+    // make it return early — it keeps running until the host's own
+    // `SESSION_READ_MAX_WAIT` clamp (60s) or the requested `wait_ms`,
+    // whichever is sooner. Plain `Runtime::drop` (`tokio-1.53.1`
+    // `src/runtime/blocking/pool.rs`'s `BlockingPool::drop` →
+    // `shutdown(None)`) blocks the *caller* — this function, and therefore
+    // `main`'s `std::process::exit` — for that same span, so a client that
+    // cancels a long-poll and then simply disconnects (`docs/CLI.md` §9's
+    // "MCP cancellation은 local wait 또는 request를 취소하고 session
+    // lifecycle을 변경하지 않는다" — it says nothing about *this* process's
+    // own exit latency) would leave `qsh mcp` visibly hung for up to a
+    // minute. `shutdown_timeout` gives outstanding work `MCP_SHUTDOWN_DRAIN`
+    // to finish — on top of `rmcp`'s own up-to-5s internal drain
+    // (`rmcp-3.1.4/src/service.rs`'s `serve_inner`, already run inside
+    // `mcp::serve_stdio`'s `service.waiting()` before this line), so a tool
+    // call that is genuinely about to finish still gets to send its
+    // response — and then returns regardless, abandoning (not aborting) any
+    // thread still running; the abandoned thread's own result was already
+    // unobservable to any peer (a cancelled request's response is dropped
+    // by `rmcp` itself — `crate::mcp::QshMcpServer::call_tool`'s doc
+    // comment, `read_session` paragraph, has the `local_ct_pool` source
+    // citation; an uncancelled one simply never gets read once this process
+    // has exited), and the OS reclaims the thread the instant
+    // `std::process::exit` tears the process down.
+    const MCP_SHUTDOWN_DRAIN: std::time::Duration = std::time::Duration::from_millis(500);
+    runtime.shutdown_timeout(MCP_SHUTDOWN_DRAIN);
+    match result {
         Ok(()) => {
             stderr_note!("qsh mcp: shutting down");
             0
