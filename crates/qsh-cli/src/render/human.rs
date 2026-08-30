@@ -8,18 +8,54 @@ use std::io::{self, Write};
 
 use qsh_core::{ExecRunOutput, OpError, SessionReadOutput};
 use qsh_proto::{
-    AclCheckData, Host, HostListData, IdentityInitData, Session, SessionCloseData, SessionEvent,
-    SessionListData, SessionOpenData, SessionResizeData, SessionWriteData, TrustAddData,
-    TrustListData, TrustPeer, TrustRemoveData, Tunnel, TunnelCloseData, TunnelListData,
-    VersionData,
+    AclCheckData, CapabilitiesData, Host, HostListData, IdentityInitData, SchemaData, Session,
+    SessionCloseData, SessionEvent, SessionListData, SessionOpenData, SessionResizeData,
+    SessionWriteData, TrustAddData, TrustListData, TrustPeer, TrustRemoveData, Tunnel,
+    TunnelCloseData, TunnelListData, VersionData,
 };
 
 use crate::stderr_note;
 
-/// Print `qsh <version>` to stdout.
+/// Print `qsh <version>` to stdout, plus the build commit when this binary
+/// was compiled with one (`VersionData::build`, `docs/ROADMAP.md` M7 감사
+/// 개정 ③).
 pub fn print_version(data: &VersionData) -> io::Result<()> {
     let mut stdout = io::stdout().lock();
-    writeln!(stdout, "qsh {}", data.version)
+    match &data.build {
+        Some(build) => writeln!(stdout, "qsh {} ({})", data.version, build.commit),
+        None => writeln!(stdout, "qsh {}", data.version),
+    }
+}
+
+/// Print a short summary of `qsh schema` — the supported schema versions
+/// and the commands a schema was generated for. The full JSON Schema
+/// documents are what `--json` returns; human mode is a pointer, not a
+/// dump (`docs/CLI.md` §6.10).
+pub fn print_schema(data: &SchemaData) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    writeln!(stdout, "schemas: {}", data.schemas.join(", "))?;
+    writeln!(stdout, "commands ({}):", data.commands.len())?;
+    for command in data.commands.keys() {
+        writeln!(stdout, "  {command}")?;
+    }
+    Ok(())
+}
+
+/// Print `qsh capabilities [host]`: the capability list, and which host
+/// (if any) it was negotiated with.
+pub fn print_capabilities(data: &CapabilitiesData) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    match &data.host {
+        Some(host) => writeln!(stdout, "capabilities negotiated with {host}:")?,
+        None => writeln!(stdout, "capabilities (local):")?,
+    }
+    if data.capabilities.is_empty() {
+        return writeln!(stdout, "  (none)");
+    }
+    for capability in &data.capabilities {
+        writeln!(stdout, "  {capability}")?;
+    }
+    Ok(())
 }
 
 /// Print the device identity `qsh init` created (or found).

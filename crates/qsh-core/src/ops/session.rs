@@ -18,10 +18,10 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use qsh_proto::event::{EVENT_SCHEMA, SessionEvent};
 use qsh_proto::wire::{self, session_read_event};
 use qsh_proto::{
-    ErrorCode, Session as SessionJson, SessionAttachReq, SessionCloseData, SessionCloseReq,
-    SessionGetReq, SessionListData, SessionListReq, SessionOpenData, SessionOpenReq,
-    SessionReadData, SessionReadReq, SessionResizeData, SessionResizeReq, SessionWriteData,
-    SessionWriteReq, UnreachableHost,
+    CapabilitiesData, CapabilitiesReq, ErrorCode, Session as SessionJson, SessionAttachReq,
+    SessionCloseData, SessionCloseReq, SessionGetReq, SessionListData, SessionListReq,
+    SessionOpenData, SessionOpenReq, SessionReadData, SessionReadReq, SessionResizeData,
+    SessionResizeReq, SessionWriteData, SessionWriteReq, UnreachableHost,
 };
 use qsh_transport::Dialer;
 
@@ -921,6 +921,46 @@ impl Ops {
             session_ref: req.session_ref,
             final_sequence,
         })
+    }
+
+    /// `capabilities.get` (`docs/CLI.md` §6.10, `docs/CLI.md` §2.5 —
+    /// unauthorized, local-only operation, same row as `version.get`).
+    ///
+    /// No `req.host`: this build's own advertised set
+    /// ([`wire::LOCAL_CAPABILITIES`]), unprocessed — deterministic and
+    /// side-effect-free, the fixture-able form `docs/ROADMAP.md` M7's DoD 3
+    /// scope-creep tripwire pins.
+    ///
+    /// With `req.host`: dials and negotiates exactly like every other
+    /// value op ([`Self::call`]) and reports the intersection that
+    /// specific connection's own `Hello` exchange settled on
+    /// ([`Session::capabilities`], computed by
+    /// `crate::handshake::negotiated_capabilities`). There is **no
+    /// dedicated wire request** for this — the negotiated set is a
+    /// byproduct of the handshake every connection already performs
+    /// before any privileged op runs, not a privileged operation of its
+    /// own that a peer's ACL would ever see (`docs/CLI.md` §2.5's "인가
+    /// 불요" row already lists `capabilities.get`, and `OP_REGISTRY`
+    /// — `crate::acl::registry` — has no row for it, on purpose).
+    pub fn capabilities(&self, req: CapabilitiesReq) -> Result<CapabilitiesData, OpError> {
+        match req.host {
+            None => Ok(CapabilitiesData {
+                capabilities: wire::LOCAL_CAPABILITIES
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+                host: None,
+            }),
+            Some(host) => {
+                let capabilities = self.call(&host, |s| {
+                    Box::pin(async move { Ok(s.capabilities.clone()) })
+                })?;
+                Ok(CapabilitiesData {
+                    capabilities,
+                    host: Some(host),
+                })
+            }
+        }
     }
 
     /// Dial `host`, negotiate, run one request closure on the session, and

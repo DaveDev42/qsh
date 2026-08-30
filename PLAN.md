@@ -17,6 +17,16 @@ M6 마감(2026-08-31, ROADMAP M6 마감 노트)과 함께 이 문서는 M7 실�
 
 **(d) 완료 판정:** schema 출력 == fixtures.rs 생성물(동일 소스 구조 증명), capabilities fixture 대조 green, version 필드 additive 검사(기존 fixture 무변경).
 
+**(a)-추기 — Step 1 확정 + 검증 라운드 판정 (2026-08-31, main 세션).** 검증자 발견 P1 0·P2 3·P3 6 판정:
+① **4.1 #1·#2 확정** — version 식별자는 `VersionData.build: Option<BuildInfo{commit}>`(`option_env!("QSH_BUILD_COMMIT")`, 부재 = 키 생략), capabilities fixture는 no-host form(`wire::LOCAL_CAPABILITIES` 축자)만 golden. host form은 기존 `Ops::call`의 handshake 결과 판독 — 신규 wire op 0(§2.5 "인가 불요" 행이 M5 이전부터 예고했음을 git log -L로 확인). 인가 전 리소스 생성 0·audit 흔적 0 실측.
+② **P2-1 수정 지시** — CLI.md §6.10 신설 문면이 "CI는 commit sha를 주입"을 현재형 단언하나 배선 0건, 게다가 주입 시 `version.json` golden이 깨짐(normalize가 build 키 무마스킹, 실증). 수정: (i) normalize()가 `build` 키를 마스킹/제거, (ii) ci.yml에 `QSH_BUILD_COMMIT: ${{ github.sha }}` 실배선 — 문면을 사실로 만든다.
+③ **P2-2 수정 지시** — `CLI_V1_SCHEMA_COMMANDS`는 const→arm 단방향 게이트뿐이라 command 누락이 무증상(mutation 2종 실증 — Step 6의 `doctor.run` 등록 누락을 아무것도 못 잡음). M5 `OP_REGISTRY`↔`DENY_SEAMS` set-equality 선례대로 `Operation` impl 전수와 양방향 대조 + 의도적 제외(`session.attach` — stream op, data envelope 없음)는 사유 명시 목록으로.
+④ **P2-3 수정 지시** — 값-보유 golden fixture(`capabilities.json`, L7 `tools_list.json` 동형)의 "diff 리뷰 필수, append-only 예외" 규율을 testing.md에 additive 명문화. `schema.get` golden 미보유(구조 동등성 테스트로 대체)도 같은 자리에서 채택 기록 — payload가 스텝마다 자라 append-only와 정면충돌, 생성기 정확성은 fixture payload 검증 20/21이 방어.
+⑤ **P3 수정 2건** — §6.10 host form 문면의 reverse route 부정확("실제로 dial" → 직접 연결/reverse 등록 시점 합의 구분 1줄), "20 commands" 오계수 잔존물 정정(실제 21).
+⑥ **P3 기록(무수정)** — §10의 schema deprecation 조회 약속은 대상 0건이라 미이행 무해(첫 deprecation 도입 시 additive 필드로 이행, §5.2 대조 항목); PRD §11의 schema/capability 병합 서술은 CLI.md §6.10이 더 구체적 구속이라 분리 설계 유지; 성공 dial의 host측 audit 무흔적 vs 거부 dial 기록의 비대칭은 M5 기존 설계 — Step 6(doctor) 입력으로 귀속; 서빙 스키마가 omitted-not-null을 인코딩하지 않음(schemars 기본)은 무해한 문서-스키마 간극.
+⑦ **부재 증명 채택** — envelope 무변경·additive 검증(required 미포함, 기존 fixture 무변경), 단일 소스의 실제 방어선 규명(live-comparison은 CLI↔generator만; generator↔reality는 fixture payload 검증이 잡음 — wrong-type mutation 실증), no-host form identity 불요·부작용 0, §3.2 오류 표면 문자 단위 보존, stdout 순수성(32KB 1줄), 게이트 독립 재실행 동수치(1168/1 skipped), 트리 byte-identical 복원.
+⑧ **수정 라운드 마감** — fixer가 ②③④⑤ 전건 반영(완전성 게이트는 4방향: 누락·중첩·유령 등록·유령 제외 + 스캔 붕괴 하한 ≥20; 우주는 M5 acl_registry 소스 스캔 선례 — OP_REGISTRY는 인가 필요 13종만 담아 부적합), mutation 3종(등록 제거 FAIL·EXCLUDED 중첩 FAIL·주입/비주입 왕복 956/1 동일) 전건 기대대로. main 세션 독립 spot-check: normalize의 build 제거 1줄 mutation → `normalize_drops_the_build_key` FAIL(EXIT=100) → byte-identical 원복. ②의 배선은 ci.yml(워크플로 전역 env)에 더해 release.yml에도 main 세션이 추가 — 배포 바이너리가 이 필드의 존재 이유다. 게이트 5종 전건 green(nextest 1172 passed/1 skipped, +4 = 신규 테스트 정확 일치). 잔여: release.yml 실릴리스 검증은 M9 태그 시점에 자연 수행.
+
 ### Step 2 — `trust remove` 의미론 확정 (감사 ①, 유예 불가) + `trust add` address 갱신 경로
 
 **(a) 범위:** ① 현행 semantics(다음 handshake부터 적용, README Known limitations L417-419 문면 == `ops/mod.rs::trust_remove` 실코드)를 유지할지 즉시 종료로 바꿀지 **결정하고 근거를 이 절에 추기**. 어느 쪽이든: 기존 연결 생존/종료 + 신규 handshake 거부 두 동작을 실 QUIC 테스트로 고정, README·CLI.md·doctor 고지(Step 5와 연동) 문면 일치. ② M6 캠페인 백로그: `trust add`가 기존 peer의 address를 갱신하지 못하는 문제(`created:false` 시 무변경) — 갱신 경로를 결정(덮어쓰기 vs 별도 서브커맨드)하고 구현. 멱등성 계약(§6.11) 훼손 없이.

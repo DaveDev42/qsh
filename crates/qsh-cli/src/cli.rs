@@ -192,6 +192,20 @@ pub enum Command {
     /// Print qsh's version and the wire/CLI schemas it understands.
     Version,
 
+    /// Print the JSON Schema of the `qsh.cli/v1` envelope and every
+    /// command's `data` payload (`docs/CLI.md` §6.10) — the same schemas
+    /// golden fixtures are validated against.
+    Schema,
+
+    /// Print this build's supported capabilities, or (with a host) the
+    /// capabilities actually negotiated with that pinned peer
+    /// (`docs/CLI.md` §6.10).
+    Capabilities {
+        /// Pinned host to dial and negotiate with; omit for this build's
+        /// own local/static supported set.
+        host: Option<String>,
+    },
+
     /// Create this device's identity (keypair + self-signed certificate).
     /// Idempotent: re-running reports the existing identity.
     Init {
@@ -652,6 +666,30 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    /// `qsh schema` takes no arguments; `qsh capabilities [host]` takes an
+    /// optional positional (`docs/CLI.md` §6.10) — same shape as
+    /// `qsh sessions [host]`.
+    #[test]
+    fn schema_and_capabilities_parse_per_cli_md() {
+        assert!(matches!(
+            Cli::try_parse_from(["qsh", "schema"]).unwrap().command,
+            Some(Command::Schema)
+        ));
+        assert!(Cli::try_parse_from(["qsh", "schema", "extra"]).is_err());
+
+        assert!(matches!(
+            Cli::try_parse_from(["qsh", "capabilities"])
+                .unwrap()
+                .command,
+            Some(Command::Capabilities { host: None })
+        ));
+        let cli = Cli::try_parse_from(["qsh", "capabilities", "personal-mac"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Capabilities { host: Some(ref h) }) if h == "personal-mac"
+        ));
     }
 
     #[test]

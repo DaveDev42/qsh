@@ -25,18 +25,20 @@ pub mod error;
 pub mod event;
 pub mod frame;
 pub mod local;
+pub mod schema;
 pub mod types;
 pub mod wire;
 
 pub use error::ErrorCode;
 pub use event::SessionEvent;
 pub use types::{
-    AclCheckData, AclCheckReq, AclPolicyRef, CLI_SCHEMA_V1, CliEnvelope, CliError, EnvVar,
-    ExecRunData, ExecRunReq, Host, HostGetReq, HostListData, HostListReq, IdentityInitData,
-    IdentityInitReq, KeyStoreKind, KeyStoreMode, Session, SessionAttachReq, SessionCloseData,
-    SessionCloseReq, SessionGetReq, SessionListData, SessionListReq, SessionOpenData,
-    SessionOpenReq, SessionReadData, SessionReadReq, SessionResizeData, SessionResizeReq,
-    SessionWriteData, SessionWriteReq, TrustAddData, TrustAddReq, TrustListData, TrustPeer,
-    TrustRemoveData, Tunnel, TunnelCloseData, TunnelCloseReq, TunnelListData, TunnelListReq,
-    TunnelOpenData, TunnelOpenReq, UnreachableHost, VersionData,
+    AclCheckData, AclCheckReq, AclPolicyRef, BuildInfo, CLI_SCHEMA_V1, CapabilitiesData,
+    CapabilitiesReq, CliEnvelope, CliError, EnvVar, ExecRunData, ExecRunReq, Host, HostGetReq,
+    HostListData, HostListReq, IdentityInitData, IdentityInitReq, KeyStoreKind, KeyStoreMode,
+    SchemaData, Session, SessionAttachReq, SessionCloseData, SessionCloseReq, SessionGetReq,
+    SessionListData, SessionListReq, SessionOpenData, SessionOpenReq, SessionReadData,
+    SessionReadReq, SessionResizeData, SessionResizeReq, SessionWriteData, SessionWriteReq,
+    TrustAddData, TrustAddReq, TrustListData, TrustPeer, TrustRemoveData, Tunnel, TunnelCloseData,
+    TunnelCloseReq, TunnelListData, TunnelListReq, TunnelOpenData, TunnelOpenReq, UnreachableHost,
+    VersionData,
 };

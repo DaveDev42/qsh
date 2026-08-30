@@ -47,6 +47,19 @@ pub fn normalize(mut value: serde_json::Value) -> serde_json::Value {
     fn walk(v: &mut serde_json::Value) {
         match v {
             serde_json::Value::Object(map) => {
+                // `VersionData.build` (`docs/CLI.md` §6.10) is populated
+                // only when this binary was compiled with
+                // `QSH_BUILD_COMMIT` set — CI injects it (`PLAN.md` M7
+                // Step 1 (a)-추기 ②), a plain local `cargo build` does
+                // not. The checked-in `version.json` fixture was
+                // generated without it, so normalize has to make the
+                // *key itself* environment-independent, not just its
+                // value: dropped entirely rather than masked to a
+                // placeholder, matching the field's own "omitted, not
+                // present-with-any-value" contract (`VersionData::build`'s
+                // own doc). Unambiguous: no other `qsh.cli/v1` contract
+                // type has a field named `build`.
+                map.remove("build");
                 for (k, child) in map.iter_mut() {
                     match k.as_str() {
                         "request_id" => *child = serde_json::Value::String("<request_id>".into()),
@@ -195,6 +208,28 @@ mod tests {
             normalized["error"]["message"],
             "peer 127.0.0.1:<port> is not trusted"
         );
+    }
+
+    /// `PLAN.md` M7 Step 1 (a)-추기 ②: the `build` key must vanish under
+    /// `normalize`, whether or not it was present — a real binary built
+    /// with `QSH_BUILD_COMMIT` set and one built without it must collapse
+    /// to the same normalized shape, since the checked-in `version.json`
+    /// fixture has no `build` key at all.
+    #[test]
+    fn normalize_drops_the_build_key() {
+        let with_build = serde_json::json!({
+            "command": "version.get",
+            "data": {"version": "0.1.0", "schemas": ["qsh.cli/v1"], "build": {"commit": "deadbeef1234"}},
+        });
+        let without_build = serde_json::json!({
+            "command": "version.get",
+            "data": {"version": "0.1.0", "schemas": ["qsh.cli/v1"]},
+        });
+        let normalized_with = normalize(with_build);
+        let normalized_without = normalize(without_build);
+        assert!(normalized_with["data"].get("build").is_none());
+        assert!(normalized_without["data"].get("build").is_none());
+        assert_eq!(normalized_with, normalized_without);
     }
 
     /// Session payload and cumulative offsets depend on what the host's

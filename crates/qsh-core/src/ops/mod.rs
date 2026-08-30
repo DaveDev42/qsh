@@ -8,8 +8,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use qsh_proto::{
-    ErrorCode, IdentityInitData, IdentityInitReq, KeyStoreMode, TrustAddData, TrustAddReq,
-    TrustListData, TrustRemoveData, VersionData,
+    BuildInfo, ErrorCode, IdentityInitData, IdentityInitReq, KeyStoreMode, SchemaData,
+    TrustAddData, TrustAddReq, TrustListData, TrustRemoveData, VersionData,
 };
 use qsh_transport::{DialError, Dialer, Fingerprint, StaticTrust};
 
@@ -177,6 +177,20 @@ impl Operation for VersionOp {
     const COMMAND: &'static str = "version.get";
 }
 
+/// The `schema.get` operation.
+pub struct SchemaOp;
+
+impl Operation for SchemaOp {
+    const COMMAND: &'static str = "schema.get";
+}
+
+/// The `capabilities.get` operation.
+pub struct CapabilitiesOp;
+
+impl Operation for CapabilitiesOp {
+    const COMMAND: &'static str = "capabilities.get";
+}
+
 /// The `identity.init` operation (`qsh init`).
 pub struct IdentityInitOp;
 
@@ -262,10 +276,44 @@ impl Ops {
     }
 
     /// Report this build's version and the wire/CLI schemas it understands.
+    ///
+    /// `build.commit` (`docs/ROADMAP.md` M7 감사 개정 ③) is whatever
+    /// `option_env!("QSH_BUILD_COMMIT")` captured when this binary was
+    /// *compiled* — not read from the environment at call time — so a
+    /// local build with no such variable set reports no `build` field at
+    /// all rather than a fabricated or empty one (`PLAN.md` M7 §4.1 #1).
     pub fn version(&self) -> Result<VersionData, OpError> {
         Ok(VersionData {
             version: env!("CARGO_PKG_VERSION").to_string(),
             schemas: vec!["qsh.cli/v1".to_string(), "qsh.event/v1".to_string()],
+            build: option_env!("QSH_BUILD_COMMIT").map(|commit| BuildInfo {
+                commit: commit.to_string(),
+            }),
+        })
+    }
+
+    /// `schema.get` (`docs/CLI.md` §6.10) — the JSON Schema of the
+    /// `qsh.cli/v1` envelope and every command's `data` payload, generated
+    /// straight from `qsh_proto::schema`: the exact same function
+    /// `crates/qsh-cli/tests/fixtures.rs` validates every golden fixture
+    /// against (`docs/design/testing.md` L6), so this and the fixture
+    /// validator cannot drift apart.
+    pub fn schema(&self) -> Result<SchemaData, OpError> {
+        let commands = qsh_proto::schema::CLI_V1_SCHEMA_COMMANDS
+            .iter()
+            .map(|&command| {
+                let schema = qsh_proto::schema::cli_v1_data_schema(command).unwrap_or_else(|| {
+                    panic!(
+                        "CLI_V1_SCHEMA_COMMANDS names {command:?} with no cli_v1_data_schema arm"
+                    )
+                });
+                (command.to_string(), schema.to_value())
+            })
+            .collect();
+        Ok(SchemaData {
+            schemas: vec!["qsh.cli/v1".to_string(), "qsh.event/v1".to_string()],
+            envelope: qsh_proto::schema::cli_v1_envelope_schema().to_value(),
+            commands,
         })
     }
 
