@@ -43,6 +43,14 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
   RUST_BACKTRACE: short
+  # `VersionData.build.commit` (`docs/CLI.md` §6.10, `PLAN.md` M7 Step 1):
+  # compiled in via `option_env!`, so every job that builds or tests the
+  # workspace needs it in `env`, not just the ones that ship a binary —
+  # `test`'s own build is what `fixtures.rs`'s `version.json` golden
+  # fixture runs against. `qsh_testkit::fixtures::normalize` drops the
+  # `build` key before comparing (`PLAN.md` M7 Step 1 (a)-추기 ②), so this
+  # is safe to set workflow-wide rather than threaded per job.
+  QSH_BUILD_COMMIT: ${{ github.sha }}
 
 jobs:
   fmt:

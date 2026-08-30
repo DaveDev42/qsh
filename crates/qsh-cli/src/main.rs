@@ -11,15 +11,16 @@ use std::io::{self, IsTerminal, Read, Write};
 
 use clap::{CommandFactory as _, Parser};
 use qsh_core::{
-    AclCheckOp, ExecRunOp, ExecStdin, HostGetOp, HostListOp, IdentityInitOp, OpError, Operation,
-    Ops, SessionAttachOp, SessionCloseOp, SessionGetOp, SessionListOp, SessionOpenOp,
-    SessionReadOp, SessionResizeOp, SessionWriteOp, TrustAddOp, TrustListOp, TrustRemoveOp,
-    TunnelCloseOp, TunnelListOp, TunnelOpenOp, VersionOp, dynamic_forward_unsupported,
+    AclCheckOp, CapabilitiesOp, ExecRunOp, ExecStdin, HostGetOp, HostListOp, IdentityInitOp,
+    OpError, Operation, Ops, SchemaOp, SessionAttachOp, SessionCloseOp, SessionGetOp,
+    SessionListOp, SessionOpenOp, SessionReadOp, SessionResizeOp, SessionWriteOp, TrustAddOp,
+    TrustListOp, TrustRemoveOp, TunnelCloseOp, TunnelListOp, TunnelOpenOp, VersionOp,
+    dynamic_forward_unsupported,
 };
 use qsh_proto::{
-    AclCheckReq, ErrorCode, ExecRunReq, HostGetReq, IdentityInitReq, SessionCloseReq,
-    SessionGetReq, SessionListReq, SessionOpenReq, SessionReadReq, SessionResizeReq,
-    SessionWriteReq, TrustAddReq, TunnelCloseReq, TunnelListReq, TunnelOpenReq,
+    AclCheckReq, CapabilitiesReq, ErrorCode, ExecRunReq, HostGetReq, IdentityInitReq,
+    SessionCloseReq, SessionGetReq, SessionListReq, SessionOpenReq, SessionReadReq,
+    SessionResizeReq, SessionWriteReq, TrustAddReq, TunnelCloseReq, TunnelListReq, TunnelOpenReq,
 };
 use serde::Serialize;
 use tracing_subscriber::EnvFilter;
@@ -342,6 +343,13 @@ fn run(cli: &Cli) -> i32 {
 
     match command {
         Command::Version => finish(cli, VersionOp::COMMAND, ops.version(), human::print_version),
+        Command::Schema => finish(cli, SchemaOp::COMMAND, ops.schema(), human::print_schema),
+        Command::Capabilities { host } => finish(
+            cli,
+            CapabilitiesOp::COMMAND,
+            ops.capabilities(CapabilitiesReq { host: host.clone() }),
+            human::print_capabilities,
+        ),
         Command::Init { key_store } => finish(
             cli,
             IdentityInitOp::COMMAND,
@@ -1232,6 +1240,8 @@ fn command_name(cli: &Cli) -> &'static str {
     };
     match command {
         Command::Version => VersionOp::COMMAND,
+        Command::Schema => SchemaOp::COMMAND,
+        Command::Capabilities { .. } => CapabilitiesOp::COMMAND,
         Command::Init { .. } => IdentityInitOp::COMMAND,
         Command::Trust(TrustCmd::Add(_)) => TrustAddOp::COMMAND,
         Command::Trust(TrustCmd::List) => TrustListOp::COMMAND,

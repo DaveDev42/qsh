@@ -12,6 +12,10 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # `VersionData.build.commit` (`docs/CLI.md` §6.10): release binaries are
+  # exactly the ones whose provenance the field exists to answer, so the
+  # release build compiles it in the same way ci.yml does.
+  QSH_BUILD_COMMIT: ${{ github.sha }}
 
 jobs:
   build:

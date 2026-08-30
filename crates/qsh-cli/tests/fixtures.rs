@@ -17,8 +17,13 @@
 //!    milestone that will first produce it. The two lists must be
 //!    disjoint, so adding a fixture for a code forces removing it here.
 //!
-//! `qsh schema --json` itself is M7 (`PLAN.md` §3), so the generated
-//! schemas stay inside this test.
+//! `qsh schema --json` (`PLAN.md` M7 Step 1) serves exactly the schemas
+//! this file validates fixtures against — both sides call
+//! `qsh_proto::schema::{cli_v1_data_schema, cli_v1_envelope_schema}`
+//! (`data_schema` below is a thin wrapper over the former), so there is
+//! only ever one generator, never two hand-maintained copies of the same
+//! table. `schema_command_output_matches_the_single_source_generator`
+//! (below) is the mechanical proof of that, not just a doc claim.
 
 mod common;
 
@@ -29,14 +34,8 @@ use std::path::PathBuf;
 use std::process::Stdio;
 
 use common::{CLIENT_ALIAS, Fleet, HOST_ALIAS, Sandbox, ServeGuard};
-use qsh_proto::{
-    AclCheckData, ErrorCode, ExecRunData, Host, HostListData, IdentityInitData, Session,
-    SessionCloseData, SessionListData, SessionOpenData, SessionReadData, SessionResizeData,
-    SessionWriteData, TrustAddData, TrustListData, TrustRemoveData, TunnelCloseData,
-    TunnelListData, TunnelOpenData, VersionData,
-};
+use qsh_proto::ErrorCode;
 use qsh_testkit::fixtures;
-use schemars::schema_for;
 use serde_json::Value;
 
 /// A deterministic, valid fingerprint (32 bytes, standard Base64) so the
@@ -119,6 +118,7 @@ const DEFERRED: &[(&str, &str)] = &[
 /// loudly instead of shrinking the covered surface.
 const REQUIRED_FIXTURES: &[&str] = &[
     "version.json",
+    "capabilities.json",
     "identity.init.created.json",
     "identity.init.existing.json",
     "trust.add.json",
@@ -220,6 +220,21 @@ fn golden_local_fixtures() {
     let (code, version) = sandbox.json(&["version", "--json"]);
     assert_eq!(code, 0, "{version}");
     check("version.json", version);
+
+    // `qsh capabilities` (no host): this build's own advertised set,
+    // unprocessed (`docs/ROADMAP.md` M7 DoD 3's scope-creep tripwire,
+    // `PLAN.md` M7 §4.1 #2). Unlike every other fixture in this function,
+    // this one is **not** append-only in the strict "never touches again"
+    // sense — its whole purpose is to fail loudly the moment
+    // `wire::LOCAL_CAPABILITIES` changes, the same "diff review required"
+    // discipline `docs/design/testing.md` L7 already documents for MCP's
+    // `tools_list.json`. A deliberate capability change updates this file
+    // with `QSH_UPDATE_FIXTURES=1` and the diff gets reviewed like any
+    // other contract change; it does not get a second, parallel file the
+    // way an ordinary CLI fixture would.
+    let (code, capabilities) = sandbox.json(&["capabilities", "--json"]);
+    assert_eq!(code, 0, "{capabilities}");
+    check("capabilities.json", capabilities);
 
     let (code, created) = sandbox.json(&["init", "--json", "--key-store", "file"]);
     assert_eq!(code, 0, "{created}");
@@ -824,7 +839,7 @@ fn every_fixture_validates_against_the_envelope_schema() {
     if skip_while_regenerating() {
         return;
     }
-    let schema = schema_for!(qsh_proto::CliEnvelope).to_value();
+    let schema = qsh_proto::schema::cli_v1_envelope_schema().to_value();
     let validator = jsonschema::validator_for(&schema).expect("envelope schema is valid");
     for (name, fixture) in fixtures::all_cli_v1() {
         if !validator.is_valid(&fixture) {
@@ -858,36 +873,14 @@ fn every_fixture_payload_validates_against_its_command_schema() {
     }
 }
 
-/// The JSON Schema of the `data` payload of one command, derived from the
-/// same `qsh-proto` type the binary serializes.
+/// The JSON Schema of the `data` payload of one command — a thin wrapper
+/// over [`qsh_proto::schema::cli_v1_data_schema`], the single source
+/// `Ops::schema` (`qsh schema --json`) also reads from
+/// (`crates/qsh-proto/src/schema.rs`, `PLAN.md` M7 Step 1 (b)). Kept as a
+/// local `-> Option<Value>` helper only so every call site below stays
+/// unchanged.
 fn data_schema(command: &str) -> Option<Value> {
-    Some(
-        match command {
-            "version.get" => schema_for!(VersionData),
-            "identity.init" => schema_for!(IdentityInitData),
-            "trust.add" => schema_for!(TrustAddData),
-            "trust.list" => schema_for!(TrustListData),
-            "trust.remove" => schema_for!(TrustRemoveData),
-            "host.list" => schema_for!(HostListData),
-            "host.get" => schema_for!(Host),
-            "exec.run" => schema_for!(ExecRunData),
-            // M2 session ops (fixtures land with Step 3/5; registered now so
-            // the first session fixture validates instead of panicking).
-            "session.list" => schema_for!(SessionListData),
-            "session.get" => schema_for!(Session),
-            "session.open" => schema_for!(SessionOpenData),
-            "session.read" => schema_for!(SessionReadData),
-            "session.write" => schema_for!(SessionWriteData),
-            "session.resize" => schema_for!(SessionResizeData),
-            "session.close" => schema_for!(SessionCloseData),
-            "tunnel.open" => schema_for!(TunnelOpenData),
-            "tunnel.list" => schema_for!(TunnelListData),
-            "tunnel.close" => schema_for!(TunnelCloseData),
-            "acl.check" => schema_for!(AclCheckData),
-            _ => return None,
-        }
-        .to_value(),
-    )
+    qsh_proto::schema::cli_v1_data_schema(command).map(|s| s.to_value())
 }
 
 /// `docs/design/testing.md` L6: every `ErrorCode` variant is either covered
@@ -938,7 +931,7 @@ fn every_error_code_is_covered_by_a_fixture_or_explicitly_deferred() {
 /// that generated a permissive `true` schema would validate anything.
 #[test]
 fn the_generated_schemas_actually_reject_wrong_shapes() {
-    let envelope = schema_for!(qsh_proto::CliEnvelope).to_value();
+    let envelope = qsh_proto::schema::cli_v1_envelope_schema().to_value();
     let validator = jsonschema::validator_for(&envelope).expect("envelope schema is valid");
     for bad in [
         serde_json::json!({}),
@@ -969,4 +962,93 @@ fn the_generated_schemas_actually_reject_wrong_shapes() {
             "the ExecRunData schema accepted {bad}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// `qsh schema --json` / `qsh capabilities [host]` (`PLAN.md` M7 Step 1)
+// ---------------------------------------------------------------------------
+
+/// `qsh schema --json`'s own output has no checked-in golden fixture in
+/// this file (deliberately — see this test's own doc for why), so its
+/// contract is pinned structurally instead: the binary's `data` must equal
+/// what calling `qsh_proto::schema` directly produces, command by command
+/// and for the envelope. That is the actual "one source" claim
+/// (`docs/design/testing.md` L6, `PLAN.md` M7 Step 1 (b)) — not "the two
+/// happen to agree today" but "there is only one generator function and
+/// this command calls it".
+///
+/// No golden `schema.json` fixture: unlike every other command in
+/// `REQUIRED_FIXTURES`, `schema.get`'s payload is a full registry dump
+/// (envelope schema + one schema per known command) that grows every time
+/// a later milestone step adds a new op/type — freezing it byte-for-byte
+/// under the strict append-only rule (`docs/CLI.md` §10, this file's own
+/// module doc) would make the very next PLAN.md step that adds an op a
+/// forced fixture edit. `capabilities.json` above is the opposite case on
+/// purpose: it must stay pinned so an *accidental* surface change is
+/// caught (DoD 3's scope-creep tripwire); `schema.get`'s surface is
+/// *expected* to grow, so this file proves it structurally instead of by
+/// diffing bytes.
+#[test]
+fn schema_command_output_matches_the_single_source_generator() {
+    let sandbox = Sandbox::new();
+    let (code, response) = sandbox.json(&["schema", "--json"]);
+    assert_eq!(code, 0, "{response}");
+
+    let expected_envelope = qsh_proto::schema::cli_v1_envelope_schema().to_value();
+    assert_eq!(response["data"]["envelope"], expected_envelope);
+
+    let commands = response["data"]["commands"]
+        .as_object()
+        .expect("commands is an object");
+    let expected_commands: BTreeSet<&str> = qsh_proto::schema::CLI_V1_SCHEMA_COMMANDS
+        .iter()
+        .copied()
+        .collect();
+    let actual_commands: BTreeSet<String> = commands.keys().cloned().collect();
+    assert_eq!(
+        actual_commands,
+        expected_commands.iter().map(|s| s.to_string()).collect(),
+        "qsh schema --json's commands map must name exactly \
+         qsh_proto::schema::CLI_V1_SCHEMA_COMMANDS"
+    );
+    for command in qsh_proto::schema::CLI_V1_SCHEMA_COMMANDS {
+        let expected = qsh_proto::schema::cli_v1_data_schema(command)
+            .expect("registered command has a schema")
+            .to_value();
+        assert_eq!(
+            commands[*command], expected,
+            "schema.get's schema for {command} does not match \
+             qsh_proto::schema::cli_v1_data_schema({command:?})"
+        );
+    }
+}
+
+/// `qsh capabilities <host>`: no dedicated wire op exists for this
+/// (`crates/qsh-core/src/ops/session.rs`'s `Ops::capabilities` own doc) —
+/// it dials, negotiates `Hello` exactly like every other value op, and
+/// reports the intersection that connection's own handshake settled on.
+/// Both peers in `Fleet` run the exact same build, so the negotiated set
+/// equals `wire::LOCAL_CAPABILITIES` (a proper subset would also be a
+/// valid negotiation outcome against a peer advertising less, but nothing
+/// in this harness constructs one, so equality is the correct assertion
+/// here).
+#[test]
+fn capabilities_host_form_reports_the_negotiated_set() {
+    let fleet = Fleet::start();
+    let (code, response) = fleet.client.json(&["capabilities", HOST_ALIAS, "--json"]);
+    assert_eq!(code, 0, "{response}");
+    assert_eq!(response["command"], "capabilities.get", "{response}");
+    assert_eq!(response["data"]["host"], HOST_ALIAS, "{response}");
+
+    let local: Vec<String> = qsh_proto::wire::LOCAL_CAPABILITIES
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let reported: Vec<String> = response["data"]["capabilities"]
+        .as_array()
+        .expect("capabilities is an array")
+        .iter()
+        .map(|v| v.as_str().expect("capability is a string").to_string())
+        .collect();
+    assert_eq!(reported, local, "{response}");
 }

@@ -85,6 +85,7 @@ CLI.md §11이 명시적으로 초대하는, 레버리지가 가장 큰 계층.
 - **Exit-code matrix:** (시나리오 → exit code, `ok`, `error.code`) 표를 human/JSON **양 모드에서** 실행, exit code가 모드와 무관하게 동일함을 단언 — §4의 "output mode에 따라 exit code 의미가 달라져서는 안 된다"의 문자 그대로의 테스트.
 - **JSONL 순수성:** 시끄러운 세션을 `-vv --jsonl`로 실행, stdout의 모든 줄이 완전한 JSON object로 파싱됨을 단언.
 - **`acl check` fixture + 거부 문면 상수-문서 일치 게이트(M5):** `acl.check.allow.json`·`acl.check.deny.json`(신규 fixture, `PLAN.md` M5 Step 1 공통 계약 규율)이 `acl check`가 실제 enforcement와 같은 코드 경로임을 값으로 보여준다. 거부 문면(Step 4의 균일 상수)이 `README.md`/`docs/CLI.md`에 축자 인용되는지는 `tunnel_docs.rs`/`doctor_docs.rs` 선례와 동형인 anti-drift 테스트가 고정한다 — `crates/qsh-core/tests/acl_docs.rs`(M5 Step 1)는 이미 같은 원리로 `Action::ALL` ↔ PRD §9 action 목록의 드리프트를 잡는다.
+- **값-보유(value-bearing) golden fixture는 append-only의 예외, diff 리뷰가 필수다(M7):** `capabilities.json`(M7 DoD 3 scope-creep tripwire)과 L7의 `tools_list.json`은 파일의 존재가 아니라 안에 든 값 자체가 계약 단언이므로, 보통의 append-only 규율을 따르지 않는다 — `wire::LOCAL_CAPABILITIES`나 MCP tool 목록이 바뀌면 `QSH_UPDATE_FIXTURES=1`로 재생성하고 그 diff를 계약 변경과 같은 무게로 리뷰해야 한다(`fixtures.rs`의 `golden_local_fixtures` 자체 문서). 반대로 `schema.get`은 golden fixture를 두지 않는다: payload가 스텝마다 command 하나씩 자라는 전체 registry dump라 append-only와 정면충돌하기 때문이며, 대신 `every_fixture_payload_validates_against_its_command_schema`의 스키마 검증과 `qsh-cli/tests/fixtures.rs`의 `schema_command_output_matches_the_single_source_generator`(구조 동등성)가 생성기 정확성을 지킨다는 채택 기록이다.
 
 ## L7 — MCP conformance
 

@@ -61,6 +61,26 @@ pub struct VersionData {
     /// Wire/CLI schema identifiers this build understands, e.g.
     /// `"qsh.cli/v1"`, `"qsh.event/v1"`.
     pub schemas: Vec<String>,
+    /// Build identifiers this binary was compiled with, when the build
+    /// environment provided any (`docs/ROADMAP.md` M7 감사 개정 ③, additive).
+    /// Entirely absent — not a present-but-empty object — when nothing was
+    /// injected at compile time: a local `cargo build` typically has none,
+    /// CI supplies one (`PLAN.md` M7 §4.1 #1). Never fabricated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<BuildInfo>,
+}
+
+/// Build identifiers embedded in the binary at compile time
+/// (`VersionData::build`). Currently just `commit`; more fields (e.g. a
+/// build date) can join later without a `/v2` — every field here is its own
+/// additive promise, same as `VersionData.build` itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct BuildInfo {
+    /// Commit id injected via `option_env!("QSH_BUILD_COMMIT")` at compile
+    /// time (no `vergen`-style build script — `PLAN.md` M7 §4.1 #1). Only
+    /// present when that environment variable was set for the build that
+    /// produced this binary.
+    pub commit: String,
 }
 
 /// A host entry as returned by `qsh hosts` / `qsh host get`
@@ -758,6 +778,51 @@ pub struct AclPolicyRef {
     pub loaded: bool,
 }
 
+/// Request for `capabilities.get` (`docs/CLI.md` §6.10, `qsh capabilities
+/// [host]`). No `host`: this build's own advertised capability set. With a
+/// `host`: the capabilities negotiated with that pinned peer's `Hello`
+/// (`docs/design/protocol.md` §9) — the same intersection every value op's
+/// own connection already computes, not a separate wire request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CapabilitiesReq {
+    /// Pinned host to dial and negotiate with; omit for the local/static
+    /// form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+}
+
+/// Data payload of `capabilities.get` (`docs/CLI.md` §6.10).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CapabilitiesData {
+    /// Capability strings, unprocessed (`PLAN.md` M7 §4.1 #2): this
+    /// build's own `Hello.capabilities` advertisement when [`Self::host`]
+    /// is absent, or the negotiated intersection with that peer when it is
+    /// present.
+    pub capabilities: Vec<String>,
+    /// The host this reflects the *negotiated* set for. Absent for the
+    /// local/static form — never present with a value that was not
+    /// actually dialed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+}
+
+/// Data payload of `schema.get` (`docs/CLI.md` §6.10). Serves exactly the
+/// JSON Schemas `crates/qsh-cli/tests/fixtures.rs` generates for golden
+/// fixture validation — one source (`docs/design/testing.md` L6),
+/// `qsh_proto::schema` is where both sides read them from.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SchemaData {
+    /// Wire/CLI schema identifiers this build understands — same list as
+    /// [`VersionData::schemas`].
+    pub schemas: Vec<String>,
+    /// JSON Schema (schemars, draft 2020-12) of the `qsh.cli/v1` envelope
+    /// itself ([`CliEnvelope`]).
+    pub envelope: serde_json::Value,
+    /// JSON Schema of each command's `data` payload, keyed by dotted
+    /// operation name (`docs/CLI.md` §2.4).
+    pub commands: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -767,9 +832,45 @@ mod tests {
         let data = VersionData {
             version: "0.1.0".to_string(),
             schemas: vec!["qsh.cli/v1".to_string(), "qsh.event/v1".to_string()],
+            build: None,
         };
         let json = serde_json::to_string(&data).unwrap();
         let back: VersionData = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, data);
+    }
+
+    /// `docs/ROADMAP.md` M7 감사 개정 ③: `build` is additive, and its
+    /// absence must be an *omitted key* — not `"build": null` and not a
+    /// fabricated empty value — so older/newer readers of `qsh.cli/v1` see
+    /// no field at all rather than a value that looks meaningful.
+    #[test]
+    fn version_data_build_is_omitted_not_null_when_absent() {
+        let data = VersionData {
+            version: "0.1.0".to_string(),
+            schemas: vec!["qsh.cli/v1".to_string()],
+            build: None,
+        };
+        let json = serde_json::to_value(&data).unwrap();
+        assert!(
+            json.get("build").is_none(),
+            "build must be an omitted key when None, not present with any value: {json}"
+        );
+    }
+
+    /// The present case: `build.commit` round-trips as a plain string field,
+    /// additive alongside `version`/`schemas`.
+    #[test]
+    fn version_data_build_present_round_trips() {
+        let data = VersionData {
+            version: "0.1.0".to_string(),
+            schemas: vec!["qsh.cli/v1".to_string()],
+            build: Some(BuildInfo {
+                commit: "deadbeef".to_string(),
+            }),
+        };
+        let json = serde_json::to_value(&data).unwrap();
+        assert_eq!(json["build"]["commit"], "deadbeef");
+        let back: VersionData = serde_json::from_value(json).unwrap();
         assert_eq!(back, data);
     }
 

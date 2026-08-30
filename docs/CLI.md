@@ -487,11 +487,47 @@ qsh tunnel close <tunnel-id> --json
 
 ```bash
 qsh schema --json
+qsh capabilities --json
 qsh capabilities personal-mac --json
 qsh version --json
 ```
 
-`schema`는 CLI가 지원하는 schema version을, `capabilities`는 peer와 negotiation된 기능을 반환한다.
+`schema`는 `qsh.cli/v1` envelope과 각 command의 `data` payload에 대한 JSON Schema(schemars, draft 2020-12 dialect)를 그대로 서빙한다 — golden fixture를 검증하는 것과 **동일한 스키마**다(한 소스, `docs/design/testing.md` L6). `data.schemas`는 이 build가 이해하는 wire/CLI schema 식별자 목록(`version.get`과 동일), `data.envelope`는 envelope 자체의 schema, `data.commands`는 dotted operation 이름(§2.4)을 key로 하는 schema map이다.
+
+```json
+{
+  "schema": "qsh.cli/v1",
+  "request_id": "01K0EXAMPLE",
+  "command": "schema.get",
+  "ok": true,
+  "data": {
+    "schemas": ["qsh.cli/v1", "qsh.event/v1"],
+    "envelope": { "...": "CliEnvelope의 JSON Schema" },
+    "commands": {
+      "version.get": { "...": "VersionData의 JSON Schema" }
+    }
+  }
+}
+```
+
+`capabilities`를 host 없이 호출하면 이 build가 `Hello`에 advertise하는 로컬 capability 집합을 가공 없이 그대로 반환한다 — 이 형태만 checked-in fixture로 고정되어 값이 바뀌면 fixture diff로 드러난다(scope-creep tripwire, `docs/ROADMAP.md` M7 DoD 3). host를 주면 그 host와 negotiation된 `Hello`의 교집합을 반환한다 — forward(pinned) host는 그 주소로 직접 dial해 호출마다 새로 negotiation하고, reverse 등록 host는 이 머신의 `qsh listen`/`qsh reverse` daemon이 이미 들고 있는 연결(등록 시점에 그 daemon과 합의된 capability 집합)을 relay로 읽어 보고할 뿐 이 프로세스가 peer를 직접 dial하지 않는다(`docs/design/architecture.md` §2). 이를 위한 별도 wire request는 없다: 어떤 value operation이든 연결을 여는 순간 이미 수행하는 handshake의 결과를 읽어 보고할 뿐이며, 그래서 `capabilities.get`은 §2.5의 "인가 불요" 행에 다른 local operation들과 함께 있다.
+
+```json
+{
+  "schema": "qsh.cli/v1",
+  "request_id": "01K0EXAMPLE",
+  "command": "capabilities.get",
+  "ok": true,
+  "data": {
+    "capabilities": ["exec", "session", "resume.v1"],
+    "host": "personal-mac"
+  }
+}
+```
+
+host 없이 호출한 결과에는 `host` field가 없다 — omitted, `null`이 아니다.
+
+`version`의 `data.build.commit`은 이 binary가 컴파일될 때 `QSH_BUILD_COMMIT` 환경변수가 있었을 때만 채워지는 additive optional field다(`docs/ROADMAP.md` M7 감사 개정 ③): CI는 commit sha를 주입하고, 그런 변수 없이 만든 local build는 `build` field 자체가 통째로 생략된다 — 조작된 값이나 빈 문자열이 아니라 부재다.
 
 ### 6.11 Identity와 trust
 

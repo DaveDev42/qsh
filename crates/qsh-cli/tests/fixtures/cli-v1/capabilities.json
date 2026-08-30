@@ -1,0 +1,13 @@
+{
+  "command": "capabilities.get",
+  "data": {
+    "capabilities": [
+      "exec",
+      "session",
+      "resume.v1"
+    ]
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}
