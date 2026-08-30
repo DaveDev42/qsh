@@ -4,6 +4,7 @@
   "result": {
     "tools": [
       {
+        "description": "Terminate a session's entire process group and remove the session from the host (docs/CLI.md §6.7).",
         "inputSchema": {
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "properties": {
@@ -24,9 +25,30 @@
           ],
           "type": "object"
         },
-        "name": "close_session"
+        "name": "close_session",
+        "outputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "final_sequence": {
+              "description": "Cumulative output byte offset at removal.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "session_ref": {
+              "description": "Opaque session handle that was closed.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "session_ref",
+            "final_sequence"
+          ],
+          "type": "object"
+        }
       },
       {
+        "description": "Close a previously opened tunnel by its tunnel_id (docs/CLI.md §6.9).",
         "inputSchema": {
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "properties": {
@@ -40,9 +62,28 @@
           ],
           "type": "object"
         },
-        "name": "close_tunnel"
+        "name": "close_tunnel",
+        "outputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "closed": {
+              "description": "`true` if a tunnel was closed; `false` if none existed with that id\n(idempotent, same pattern as `TrustRemoveData::removed`).",
+              "type": "boolean"
+            },
+            "tunnel_id": {
+              "description": "Opaque tunnel handle that was asked to be closed.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "tunnel_id",
+            "closed"
+          ],
+          "type": "object"
+        }
       },
       {
+        "description": "Run a single non-interactive command on a host and return its captured stdout/stderr and exit status once it completes (docs/CLI.md §6.8).",
         "inputSchema": {
           "$defs": {
             "EnvVar": {
@@ -100,9 +141,48 @@
           ],
           "type": "object"
         },
-        "name": "exec"
+        "name": "exec",
+        "outputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "duration_ms": {
+              "description": "Wall-clock duration of the remote execution in milliseconds.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "remote_exit_code": {
+              "description": "The remote process's real exit code (`0..=255`). This is the source\nof truth; the process exit code of `qsh exec` clamps 255 → 254\n(`docs/CLI.md` §4). When the process was killed by a signal this is\n`128 + signo` and [`signal`](Self::signal) names it.",
+              "format": "int32",
+              "type": "integer"
+            },
+            "signal": {
+              "description": "Terminating signal name (e.g. `\"SIGKILL\"`), or `null`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "stderr_b64": {
+              "description": "Remote stderr, standard Base64.",
+              "type": "string"
+            },
+            "stdout_b64": {
+              "description": "Remote stdout, standard Base64.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "stdout_b64",
+            "stderr_b64",
+            "remote_exit_code",
+            "duration_ms"
+          ],
+          "type": "object"
+        }
       },
       {
+        "description": "Look up a single host by its local alias (docs/CLI.md §6.1).",
         "inputSchema": {
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "properties": {
@@ -116,9 +196,43 @@
           ],
           "type": "object"
         },
-        "name": "get_host"
+        "name": "get_host",
+        "outputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "address": {
+              "description": "`host:port` this client dials (forward hosts) or last observed from\n(reverse hosts).",
+              "type": "string"
+            },
+            "connection_mode": {
+              "description": "`\"forward\"` or `\"reverse\"`.",
+              "type": "string"
+            },
+            "device_id": {
+              "description": "The peer's SPKI SHA-256 fingerprint, `sha256:BASE64`\n(`docs/design/architecture.md` §5) — the value pinned in the trust\nstore for a forward host, or the value the daemon TLS-verified for a\nreverse host. Never `Hello.device_name` or any other wire display\nname (`docs/design/protocol.md` §3: identity is never taken from\nwire data), e.g. `\"sha256:BASE64FINGERPRINT\"`.",
+              "type": "string"
+            },
+            "name": {
+              "description": "Local alias for this host.",
+              "type": "string"
+            },
+            "state": {
+              "description": "Reachability, open string set (`docs/CLI.md` §10): `\"reachable\"` |\n`\"stale\"` | `\"unknown\"`. A forward host is never probed for\nreachability in M3, so it always reports `\"unknown\"` — an\nunconfirmed host is never reported as `\"reachable\"`. A live reverse\nregistration (the controller is actively holding an authenticated\nconnection to it) is `\"reachable\"`; a registration whose connection\ndied is `\"stale\"` for the controller's retention window\n(`docs/design/protocol.md` §11-4) before it is dropped.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "address",
+            "connection_mode",
+            "state",
+            "device_id"
+          ],
+          "type": "object"
+        }
       },
       {
+        "description": "Look up a single session by its session_ref (docs/CLI.md §6.2).",
         "inputSchema": {
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "properties": {
@@ -132,16 +246,116 @@
           ],
           "type": "object"
         },
-        "name": "get_session"
+        "name": "get_session",
+        "outputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "created_at": {
+              "description": "RFC 3339 UTC timestamp of session creation.",
+              "type": "string"
+            },
+            "host": {
+              "description": "Host alias this session lives on.",
+              "type": "string"
+            },
+            "last_sequence": {
+              "description": "Cumulative output byte offset produced by this session so far\n(`docs/CLI.md` §2.3); pass straight to `session read --after`.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "session_id": {
+              "description": "Opaque, URL-safe session identifier issued by the host (ULID).",
+              "type": "string"
+            },
+            "session_ref": {
+              "description": "Opaque handle (`<host-alias>/<session_id>`, assembled by `Ops`);\ncallers must not construct or parse this themselves.",
+              "type": "string"
+            },
+            "state": {
+              "description": "Session lifecycle state — open string set: `\"running\"`, `\"exited\"`,\n... (`docs/CLI.md` §10).",
+              "type": "string"
+            },
+            "writer": {
+              "description": "Principal string of the current writer-lease holder\n(`device:…`/`user:…`/`fp:…`), or `null` when no connection holds the\nlease.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "session_ref",
+            "host",
+            "session_id",
+            "state",
+            "created_at",
+            "last_sequence"
+          ],
+          "type": "object"
+        }
       },
       {
+        "description": "List configured forward hosts and any currently registered reverse hosts, without dialing or checking reachability for any of them (docs/CLI.md §6.1).",
         "inputSchema": {
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "type": "object"
         },
-        "name": "list_hosts"
+        "name": "list_hosts",
+        "outputSchema": {
+          "$defs": {
+            "Host": {
+              "description": "A host entry as returned by `qsh hosts` / `qsh host get`\n(`docs/CLI.md` §5, \"Host\").\n\nPlaceholder no longer describes this type: M3 Step 1 is the first thing\nto fix its value vocabulary (below), even though no op emits it and no\nfixture exists for it *yet* (both land in Step 5) — so this is the\n*first definition* of these fields' meaning, not a documented-meaning\nchange that would require `/v2` (`docs/CLI.md` §10). Actual production\n(`host.list`/`host.get`) lands with the M3 reverse registry and `qsh\nlisten`/`qsh reverse` steps later in this milestone; the host *directory*\n(`hosts.toml`) is M7.",
+              "properties": {
+                "address": {
+                  "description": "`host:port` this client dials (forward hosts) or last observed from\n(reverse hosts).",
+                  "type": "string"
+                },
+                "connection_mode": {
+                  "description": "`\"forward\"` or `\"reverse\"`.",
+                  "type": "string"
+                },
+                "device_id": {
+                  "description": "The peer's SPKI SHA-256 fingerprint, `sha256:BASE64`\n(`docs/design/architecture.md` §5) — the value pinned in the trust\nstore for a forward host, or the value the daemon TLS-verified for a\nreverse host. Never `Hello.device_name` or any other wire display\nname (`docs/design/protocol.md` §3: identity is never taken from\nwire data), e.g. `\"sha256:BASE64FINGERPRINT\"`.",
+                  "type": "string"
+                },
+                "name": {
+                  "description": "Local alias for this host.",
+                  "type": "string"
+                },
+                "state": {
+                  "description": "Reachability, open string set (`docs/CLI.md` §10): `\"reachable\"` |\n`\"stale\"` | `\"unknown\"`. A forward host is never probed for\nreachability in M3, so it always reports `\"unknown\"` — an\nunconfirmed host is never reported as `\"reachable\"`. A live reverse\nregistration (the controller is actively holding an authenticated\nconnection to it) is `\"reachable\"`; a registration whose connection\ndied is `\"stale\"` for the controller's retention window\n(`docs/design/protocol.md` §11-4) before it is dropped.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name",
+                "address",
+                "connection_mode",
+                "state",
+                "device_id"
+              ],
+              "type": "object"
+            }
+          },
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "hosts": {
+              "description": "Every host visible to this caller, forward and reverse together.",
+              "items": {
+                "$ref": "#/$defs/Host"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "hosts"
+          ],
+          "type": "object"
+        }
       },
       {
+        "description": "List sessions on one host, or best-effort fan out across every pinned host when no host is given (docs/CLI.md §6.2).",
         "inputSchema": {
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "properties": {
@@ -155,9 +369,105 @@
           },
           "type": "object"
         },
-        "name": "list_sessions"
+        "name": "list_sessions",
+        "outputSchema": {
+          "$defs": {
+            "Session": {
+              "description": "A session entry as returned by `qsh sessions` / `qsh session get`\n(`docs/CLI.md` §5, \"Session\").\n\nThis is the JSON DTO: the wire `SessionInfo` carries\n`session_id/state/writer/created_at/last_sequence` only, and the client\n`Ops` layer adds `session_ref`/`host` from its local alias knowledge\n(ADR-0007).",
+              "properties": {
+                "created_at": {
+                  "description": "RFC 3339 UTC timestamp of session creation.",
+                  "type": "string"
+                },
+                "host": {
+                  "description": "Host alias this session lives on.",
+                  "type": "string"
+                },
+                "last_sequence": {
+                  "description": "Cumulative output byte offset produced by this session so far\n(`docs/CLI.md` §2.3); pass straight to `session read --after`.",
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "session_id": {
+                  "description": "Opaque, URL-safe session identifier issued by the host (ULID).",
+                  "type": "string"
+                },
+                "session_ref": {
+                  "description": "Opaque handle (`<host-alias>/<session_id>`, assembled by `Ops`);\ncallers must not construct or parse this themselves.",
+                  "type": "string"
+                },
+                "state": {
+                  "description": "Session lifecycle state — open string set: `\"running\"`, `\"exited\"`,\n... (`docs/CLI.md` §10).",
+                  "type": "string"
+                },
+                "writer": {
+                  "description": "Principal string of the current writer-lease holder\n(`device:…`/`user:…`/`fp:…`), or `null` when no connection holds the\nlease.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "session_ref",
+                "host",
+                "session_id",
+                "state",
+                "created_at",
+                "last_sequence"
+              ],
+              "type": "object"
+            },
+            "UnreachableHost": {
+              "description": "One host `session.list` could not reach — its alias plus the error it\nwould have produced on its own (`docs/CLI.md` §6.2).",
+              "properties": {
+                "code": {
+                  "description": "`ErrorCode` string of the failure (`CONNECTION_FAILED`, `TIMEOUT`, ...).",
+                  "type": "string"
+                },
+                "host": {
+                  "description": "Host alias.",
+                  "type": "string"
+                },
+                "message": {
+                  "description": "Human-readable explanation. Automation must not parse this.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "host",
+                "code",
+                "message"
+              ],
+              "type": "object"
+            }
+          },
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "sessions": {
+              "description": "Sessions visible under the caller's `session.list` ACL scope.",
+              "items": {
+                "$ref": "#/$defs/Session"
+              },
+              "type": "array"
+            },
+            "unreachable": {
+              "description": "Hosts that could not be asked when `qsh sessions` fans out over\nevery pinned host (`docs/CLI.md` §6.2). Absent/empty when every host\nanswered, and always empty for a single-host request (that is a\nplain error). Additive (`qsh.cli/v1`).",
+              "items": {
+                "$ref": "#/$defs/UnreachableHost"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "sessions"
+          ],
+          "type": "object"
+        }
       },
       {
+        "description": "Open a new interactive PTY session on a host, running a login shell or a given argv (docs/CLI.md §6.3).",
         "inputSchema": {
           "$defs": {
             "EnvVar": {
@@ -237,9 +547,30 @@
           ],
           "type": "object"
         },
-        "name": "open_session"
+        "name": "open_session",
+        "outputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "initial_sequence": {
+              "description": "Cumulative output offset at creation — `0` for a fresh session.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "session_ref": {
+              "description": "Opaque session handle for every later `session.*` call.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "session_ref",
+            "initial_sequence"
+          ],
+          "type": "object"
+        }
       },
       {
+        "description": "Open a local or remote TCP port forward through a host (docs/CLI.md §6.9).",
         "inputSchema": {
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "properties": {
@@ -284,9 +615,52 @@
           ],
           "type": "object"
         },
-        "name": "open_tunnel"
+        "name": "open_tunnel",
+        "outputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "actual_port": {
+              "description": "The port actually bound — the kernel-assigned one for a `0`\nrequest, and the requested one when it was granted as asked\n(`docs/CLI.md` §6.9's `Tunnel` example carries it for a fixed-port\nforward). Optional because a tunnel that is not bound yet has no\nport to report; a producer that knows the bound port always fills\nit, so a reader never has to fall back to splitting `bind`.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "bind": {
+              "description": "The `[bind:]listen_port` half of the forward spec, as bound.",
+              "type": "string"
+            },
+            "forward_to": {
+              "description": "The `host:host_port` half of the forward spec — the dial target, in\nthe canonical form [`crate::wire::format_host_port`] produces (an\nIPv6 literal is bracketed: `\"[::1]:5432\"`).",
+              "type": "string"
+            },
+            "host": {
+              "description": "Host alias this tunnel is on (`Ops`-filled; never present on the\nwire — ADR-0007, same rule as `Session.host`).",
+              "type": "string"
+            },
+            "mode": {
+              "description": "Open string set: `\"local\"` (`-L`) or `\"remote\"` (`-R`) — same\nopen-string discipline as `Host.connection_mode` (`docs/CLI.md`\n§10).",
+              "type": "string"
+            },
+            "tunnel_id": {
+              "description": "Opaque handle for `tunnel.close` / filtering `tunnels`.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "tunnel_id",
+            "mode",
+            "bind",
+            "forward_to",
+            "host"
+          ],
+          "type": "object"
+        }
       },
       {
+        "description": "Pull a session's buffered output and lifecycle events since a given byte offset, optionally waiting for new data to arrive (docs/CLI.md §6.4).",
         "inputSchema": {
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "properties": {
@@ -334,9 +708,241 @@
           ],
           "type": "object"
         },
-        "name": "read_session"
+        "name": "read_session",
+        "outputSchema": {
+          "$defs": {
+            "SessionEvent": {
+              "anyOf": [
+                {
+                  "description": "A chunk of session output.",
+                  "properties": {
+                    "data_b64": {
+                      "description": "Output bytes, base64-encoded.",
+                      "type": "string"
+                    },
+                    "schema": {
+                      "description": "Always [`EVENT_SCHEMA`].",
+                      "type": "string"
+                    },
+                    "sequence": {
+                      "description": "Byte-offset sequence of the *end* of this chunk.",
+                      "format": "uint64",
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "session_ref": {
+                      "description": "Opaque session handle this event belongs to.",
+                      "type": "string"
+                    },
+                    "type": {
+                      "const": "session.output",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "schema",
+                    "session_ref",
+                    "sequence",
+                    "data_b64"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "description": "The requested replay range is no longer available; the reader must\nresync from `available_from`.",
+                  "properties": {
+                    "available_from": {
+                      "description": "Earliest sequence still available in the replay ring.",
+                      "format": "uint64",
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "requested_after": {
+                      "description": "The `--after` sequence the reader asked for.",
+                      "format": "uint64",
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "schema": {
+                      "description": "Always [`EVENT_SCHEMA`].",
+                      "type": "string"
+                    },
+                    "session_ref": {
+                      "description": "Opaque session handle this event belongs to.",
+                      "type": "string"
+                    },
+                    "type": {
+                      "const": "session.gap",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "schema",
+                    "session_ref",
+                    "requested_after",
+                    "available_from"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "description": "The session's process has exited.",
+                  "properties": {
+                    "exit_code": {
+                      "description": "Process exit code, or `null` if terminated by signal.",
+                      "format": "int32",
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "schema": {
+                      "description": "Always [`EVENT_SCHEMA`].",
+                      "type": "string"
+                    },
+                    "sequence": {
+                      "description": "Byte-offset sequence at the moment of exit.",
+                      "format": "uint64",
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "session_ref": {
+                      "description": "Opaque session handle this event belongs to.",
+                      "type": "string"
+                    },
+                    "signal": {
+                      "description": "Signal name that terminated the process, if any.",
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "type": {
+                      "const": "session.exit",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "schema",
+                    "session_ref",
+                    "sequence"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "description": "The writer lease changed hands (stolen by another attach, or\nauto-released because the owning connection died — then\n`writer: null`). Broadcast to every read consumer of the session.",
+                  "properties": {
+                    "schema": {
+                      "description": "Always [`EVENT_SCHEMA`].",
+                      "type": "string"
+                    },
+                    "sequence": {
+                      "description": "Cumulative output byte offset at the moment of the change.",
+                      "format": "uint64",
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "session_ref": {
+                      "description": "Opaque session handle this event belongs to.",
+                      "type": "string"
+                    },
+                    "type": {
+                      "const": "session.writer_changed",
+                      "type": "string"
+                    },
+                    "writer": {
+                      "description": "Principal string of the new lease holder (same format as\n`Session.writer`), or `null` when nobody holds it.",
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "schema",
+                    "session_ref",
+                    "sequence"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "description": "The session was removed from the broker; always the last event for\na `session_ref`.",
+                  "properties": {
+                    "reason": {
+                      "description": "Who removed the session — `\"closed\"` (explicit `session.close` or\nserve drain), `\"exit\"` (child exited, TTL reaper cleaned up) or\n`\"ttl_expired\"` (running session reaped without attach). Open\nset: unknown values mean only \"the session is gone\".",
+                      "type": "string"
+                    },
+                    "schema": {
+                      "description": "Always [`EVENT_SCHEMA`].",
+                      "type": "string"
+                    },
+                    "sequence": {
+                      "description": "Cumulative output byte offset at removal.",
+                      "format": "uint64",
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "session_ref": {
+                      "description": "Opaque session handle this event belongs to.",
+                      "type": "string"
+                    },
+                    "type": {
+                      "const": "session.closed",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "schema",
+                    "session_ref",
+                    "sequence",
+                    "reason"
+                  ],
+                  "type": "object"
+                }
+              ],
+              "description": "One `qsh.event/v1` event, tagged on `type` to match the wire examples in\n`docs/CLI.md` §6.4.\n\nOpen string fields (`Closed::reason`) are modelled as `String`, not as\nenums, because their value sets may grow additively (`docs/CLI.md` §10)."
+            }
+          },
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "events": {
+              "description": "`qsh.event/v1` events (`session.output`/`gap`/`exit`/\n`writer_changed`/`closed`); may be empty when `wait_ms` elapsed.",
+              "items": {
+                "$ref": "#/$defs/SessionEvent"
+              },
+              "type": "array"
+            },
+            "next_after": {
+              "default": 0,
+              "description": "Cursor to resume from: pass back as `after_sequence`. Equal to the\nrequest's `after_sequence` plus the output bytes delivered (or the\nreplay buffer's `available_from` after a gap). Additive\n(`qsh.cli/v1`).",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "next_ctl_after": {
+              "default": 0,
+              "description": "Control-entry half of the resume cursor: pass back as `ctl_after`.\nAdditive (`qsh.cli/v1`).",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "session_ref": {
+              "description": "Opaque session handle the events belong to.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "session_ref",
+            "events"
+          ],
+          "type": "object"
+        }
       },
       {
+        "description": "Resize a session's PTY to the given terminal column/row dimensions (docs/CLI.md §6.6).",
         "inputSchema": {
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "properties": {
@@ -364,9 +970,37 @@
           ],
           "type": "object"
         },
-        "name": "resize_session"
+        "name": "resize_session",
+        "outputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "cols": {
+              "description": "Applied terminal width.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "rows": {
+              "description": "Applied terminal height.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "session_ref": {
+              "description": "Opaque session handle.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "session_ref",
+            "cols",
+            "rows"
+          ],
+          "type": "object"
+        }
       },
       {
+        "description": "Write bytes to a session's PTY input (docs/CLI.md §6.5).",
         "inputSchema": {
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "properties": {
@@ -385,7 +1019,27 @@
           ],
           "type": "object"
         },
-        "name": "write_session"
+        "name": "write_session",
+        "outputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "bytes_written": {
+              "description": "Number of input bytes accepted by the host.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "session_ref": {
+              "description": "Opaque session handle.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "session_ref",
+            "bytes_written"
+          ],
+          "type": "object"
+        }
       }
     ]
   }
