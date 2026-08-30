@@ -2,7 +2,7 @@
 
 **상태:** 확정 (구현과 어긋나는 내용을 발견하면 이 문서를 먼저 갱신한다)
 **작성일:** 2026-08-17 · **개정:** 2026-08-21 — 프로덕션 준비도 감사(HEAD `1d5d1b0`) 반영: M3/M5/M7/M8/M9 범위·수용 기준 증보, "마일스톤 마감 공통 절차" 신설. 새 마일스톤은 만들지 않았다 — 감사가 찾은 갭 전부를 기존 마일스톤에 명시 귀속시킨 것이 이 개정의 전부다.
-**현재 위치:** M5 완료 (2026-08-28) — 다음은 M6 (MCP adapter)
+**현재 위치:** M6 완료 (2026-08-31) — 다음은 M7 (Trust UX·profiles·doctor)
 
 이 문서는 P0 MVP까지의 canonical 마일스톤 기록이다. 각 마일스톤의 "수용 기준"이 곧 그 마일스톤의 **완료 정의(Definition of Done)** 다 — 수용 기준을 통과하는 테스트/시연 없이는 마일스톤을 닫지 않는다. SC 번호는 PRD §15 성공 기준의 순번이다 (SC1: 신규 두 장비 5분 내 연결, SC2: 한 명령 접속, SC3: 네트워크 전환 ≥95% 유지/resume, SC4: resume 가능한 단절에서 output 무손실, SC5: client crash가 remote PTY를 죽이지 않음, SC6: 모든 privileged op의 ACL 추적성, SC7: 공개 beta 전 독립 보안 리뷰).
 
@@ -88,11 +88,12 @@
 - **크기:** 2ew + 0.5ew(감사 개정분 — M3 선례 형식, PLAN.md M5판 §4.3 제안 수용)
 - **마감 노트 (2026-08-28):** DoD 5항목 전건 이름 붙은 테스트로 통과 — ① `acl check` 동치는 `acl_check_equivalence.rs` 9행 3-way 표(check·실거동·audit 레코드)와 `Policy::decide`의 `pub(crate)` 좁힘(비테스트 호출 지점 정확히 2곳)이라는 구조 증명, ② SC6 op registry는 `acl_registry.rs` 3층(CLI.md §2.5 양방향 대조·`Body` variant 전수 분류·13행 실구동 audit 단언) + `acl_registry_audit.rs`(실 QUIC 필요 3행), ③ property test는 `policy.rs`의 naive-coverage-oracle proptest, ④ 문면 균일성은 `acl_uniformity.rs`의 `DENY_SEAMS` 14행 전수(항상-deny 3종은 wire op 부재로 행 없음 — 명시 예외), ⑤ audit 수명주기는 `audit/writer.rs`의 회전·retention·queue 포화·ENOSPC fail-closed 4종. 마감 절차의 태그 대조·README 동기화·정본-구현 최종 대조에서 구속 문서 충돌 0건. enforcement는 Step 6a에서 acl.toml 정책으로 전환됐고 `AllowAllPinned`은 `#[cfg(test)]` 전용으로 강등. M4 이관 (v)(forward-route live carrier·`-R` 자동 재발행 부재)는 §3 유예 가드레일 표에 M8 소유로 등재(이 커밋). **SC7 외부 보안 리뷰 예약은 코드 밖 조직 액션이라 이 저장소에서 완결 불가 — 미완 상태로 명시 이월, 운영자 확인 필요**(리뷰는 wire freeze(M8) 6주 전 예약이 조건, §4 리스크 5).
 
-### M6 — MCP adapter
+### M6 — MCP adapter ✅ 완료 (2026-08-31)
 
 - **범위:** `qsh mcp` stdio, CLI.md §8.2의 tool 12종, tool schema는 CLI와 **동일한 Rust 타입에서 생성**(schemars), long-poll `read_session`, 취소 시맨틱(§8.4), interactive prompt 금지.
 - **수용 기준 (DoD):** stdio conformance 하네스(initialize → tools/list == checked-in fixture → open/write/read/close 시나리오). Claude Code 실접속으로 원격 명령 실행. `read_session` 취소 후 세션 상태 `running` 유지. adapter의 의존성 ban(arch-lint)으로 subprocess/CLI 재파싱 원천 봉쇄. `-vv`에도 stdout에 JSON-RPC 외 바이트 0.
 - **크기:** 1.5ew
+- **마감 노트 (2026-08-31):** DoD 5항목 전건 이름 붙은 증거로 통과 — ① conformance 하네스는 `mcp_conformance.rs`(raw JSON-RPC client, PLAN 4.1 #5 결정대로 rmcp client 비사용): initialize→`tools/list`==`fixtures/mcp/tools_list.json`(12종, `REQUIRED_MCP_FIXTURES` 양방향 set-equality 등록) + open/write/read/close·exec·tunnel 실구동 12종 전수, ② Claude Code 실접속은 `docs/campaigns/m6-mcp.md` — 사전 고정 C1–C5를 2회차 연속 충족, 회차 2는 stream-json의 MCP 프레임 원문으로 nonce 왕복 byte-exact 판정, ③ 취소는 `cancelling_a_pending_read_session_leaves_the_session_running_and_writable`(취소 후 `running`·writer lease 생존·수신 프레임 전수 id-핀·종료 후 stdout 정적) — rmcp 3.1.4 `local_ct_pool` 구조 보장으로 어댑터 취소 코드 0줄, ④ arch-lint ban은 xtask `ModuleBan`에 `crates/qsh-cli/src/mcp/` 스코프 3토큰(`std::process`·`Command::new`·`Stdio::piped`) + 단위 테스트 4건, ⑤ stdout 순수성은 `-vv` 실측 테스트 2건 + rmcp debug-log 페이로드 유출 차단(`rmcp=warn` 클램프, PTY b64·argv가 stderr에도 안 나감). 어댑터에 플랫폼 분기 0(stdio-only 설계 그대로), Windows ungated 성공 경로 2건(list_hosts·list_sessions). 발견·수정된 프로덕션 결함 2건: stdin EOF 후 blocking pool join으로 종료 최대 60s 지연(→`shutdown_timeout(500ms)`, 29.7s→5.5s), forward tunnel `close` 응답의 진실성(→qsh-core `TunnelHoldRegistry`, closed:true == listener 해제 보장). M7 이월: long-poll 취소의 자원 비해제 + 동시성 무상한(400 폴 → 4,412 threads/372MB 실측, PLAN.md M6판 Step 4 판정 ⑤), `acl_check` tool 노출 결정, `action_of` enum화, `trust add`의 address 갱신 경로 부재(캠페인 백로그), rmcp minor 업그레이드 시 `local_ct_pool` 재검증. **SC7 외부 보안 리뷰 예약은 여전히 운영자 액션 미완 — 재이월**(M8 wire freeze 리드타임 소진 중). 마감 태그 대조에서 남긴 판정 2건: §8.3 "다양한 MCP client에서 동일하게 동작"은 표준 JSON-RPC 설계 논증 + client 2종(raw 하네스·Claude Code) 실증으로 지지 — 멀티클라이언트 실측은 DoD 문면 밖이라 추가 조치 없음; §10 "기존 argument 재해석 금지"는 기계 게이트 없이 L7 fixture diff 리뷰 규율로 방어(L6과 동형) — 기계화 비채택.
 
 ### M7 — Trust UX·profiles·doctor
 

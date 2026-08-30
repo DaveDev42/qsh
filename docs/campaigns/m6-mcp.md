@@ -45,24 +45,28 @@ QSH_CONFIG_DIR=$CAMP/client/config QSH_STATE_DIR=$CAMP/client/state \
 QSH_CONFIG_DIR=$CAMP/host/config QSH_STATE_DIR=$CAMP/host/state \
   "$QSH" init --json --key-store file        # -> HOST_FP
 
-# 2. host를 loopback ephemeral 포트에 bind (stderr에서 포트 파싱)
-QSH_CONFIG_DIR=$CAMP/host/config QSH_STATE_DIR=$CAMP/host/state \
-  "$QSH" serve --bind 127.0.0.1:0 2> "$CAMP/serve.log" &
-# serve.log의 "qsh serve: listening on 127.0.0.1:<PORT>" 대기 -> PORT
-
-# 3. 상호 pin (fingerprint 명시 = 완전 비대화형, CLI.md §6.11)
+# 2. host 쪽 trust pin + acl.toml — 반드시 serve 시작 **전에** (실측 교훈:
+#    host는 trust/acl을 시작 시 읽고 hot-reload하지 않는다 — 순서가 뒤면
+#    모든 op이 PERMISSION_DENIED)
 QSH_CONFIG_DIR=$CAMP/host/config QSH_STATE_DIR=$CAMP/host/state \
   "$QSH" trust add laptop --fingerprint "$CLIENT_FP" --json
-QSH_CONFIG_DIR=$CAMP/client/config QSH_STATE_DIR=$CAMP/client/state \
-  "$QSH" trust add box --address "127.0.0.1:$PORT" --fingerprint "$HOST_FP" --json
-
-# 4. host acl.toml — exec.run만 (qsh는 이 파일을 만들어 주지 않는다)
 cat > "$CAMP/host/config/acl.toml" <<ACL
 [[acl]]
 principal = "device:laptop"
 allow = ["exec.run"]
 ACL
 chmod 600 "$CAMP/host/config/acl.toml"
+
+# 3. host를 loopback ephemeral 포트에 bind (stderr에서 포트 파싱)
+QSH_CONFIG_DIR=$CAMP/host/config QSH_STATE_DIR=$CAMP/host/state \
+  "$QSH" serve --bind 127.0.0.1:0 2> "$CAMP/serve.log" &
+# serve.log의 "qsh serve: listening on 127.0.0.1:<PORT>" 대기 -> PORT
+
+# 4. client 쪽 pin — 포트를 안 다음에 (실측 교훈: 이미 있는 peer에
+#    trust add를 다시 실행하면 created:false로 기존 address가 유지된다 —
+#    주소 갱신 용도로 재실행하지 말 것)
+QSH_CONFIG_DIR=$CAMP/client/config QSH_STATE_DIR=$CAMP/client/state \
+  "$QSH" trust add box --address "127.0.0.1:$PORT" --fingerprint "$HOST_FP" --json
 
 # 5. CLI sanity (MCP 이전에 wire 경로부터 확인 — 실패 시 MCP 쪽 원인과 분리)
 QSH_CONFIG_DIR=$CAMP/client/config QSH_STATE_DIR=$CAMP/client/state \
@@ -92,23 +96,41 @@ kill %1                                               # serve 종료 (SIGTERM dr
 - Claude Code가 qsh tool을 모른다 → 핸드셰이크 실패(mcp.json 경로/env 오기, stdout 오염). stderr는 `$CAMP/claude.log`·`qsh mcp` stderr로 교차 확인.
 - `EADDRINUSE` → 2단계에서 ephemeral 포트를 쓰지 않았을 때만 발생 가능.
 
-## 6. 환경 기록 (실행 시 채운다)
+## 6. 환경 기록
 
 | 항목 | 값 |
 |---|---|
-| 날짜(UTC) | — |
-| 조작자 | — |
-| 장비/OS | — |
-| qsh 커밋 SHA | — |
-| Claude Code 버전 | — |
-| 캡처 파일 | — |
+| 날짜(UTC) | 2026-08-30 |
+| 조작자 | Claude (자율 세션), 운영자 계정 dave / Dave-MBP16 |
+| 장비/OS | MacBook Pro (M1 Max), macOS 27.0 (Darwin 27.0.0) |
+| qsh 커밋 SHA | 2f5d21a (릴리스 빌드) |
+| Claude Code 버전 | 2.1.251, headless `claude -p` |
+| 캡처 파일 | 판정 프레임은 본문 §7에 그대로 인용, sandbox(`$CAMP`)는 기록 후 삭제 |
 
 ## 7. 실행 기록
 
 | 회차 | C1 | C2 | C3 | C4 | C5 | 판정 | 비고 |
 |---|---|---|---|---|---|---|---|
-| 1 | — | — | — | — | — | — | — |
+| 1 | ✓ | ✓ | ✓ | ✓ | ✓ | **PASS** | marker `m6-mcp-1788113069`, 14.9s/4턴. C3 증거는 모델 보고(자기일관 b64 인용) — 검증 프레임은 회차 2에서 원문 확보 |
+| 2 | ✓ | ✓ | ✓ | ✓ | ✓ | **PASS** | marker `m6-mcp-r2-1788113200`, 11.6s. `--output-format stream-json`으로 MCP 프레임 원문 캡처(아래) |
+
+회차 2의 검증 프레임 원문 — 모델 서술이 아니라 stream-json의 tool_use/tool_result 이벤트 그대로:
+
+```
+TOOL_USE: mcp__qsh__exec {"host": "box", "argv": ["/bin/echo", "m6-mcp-r2-1788113200"]}
+TOOL_RESULT(verbatim): "{\"duration_ms\":2,\"remote_exit_code\":0,\"signal\":null,
+  \"stderr_b64\":\"\",\"stdout_b64\":\"bTYtbWNwLXIyLTE3ODgxMTMyMDAK\"}"
+```
+
+`bTYtbWNwLXIyLTE3ODgxMTMyMDAK`를 독립 계산한 `base64("m6-mcp-r2-1788113200\n")`과 대조 — byte-exact 일치 (C3). host `acl.toml`은 전 과정에서 `principal = "device:laptop"` / `allow = ["exec.run"]` 한 블록, 0600 (C4). 두 회차 모두 종료 후 `pgrep -f "qsh mcp"` 0건 (C5). CLI sanity(`qsh exec box --json`)는 회차에 앞서 wire 경로를 별도 확인했다(`remote_exit_code:0`).
 
 ## 8. 요약
 
-(실행 후 기입)
+DoD 2 충족 — Claude Code(2.1.251)가 실제 MCP client로 `qsh mcp`에 stdio 접속해 initialize 핸드셰이크를 마치고 `exec` tool로 원격(loopback QUIC) host에서 명령을 실행했으며, nonce marker가 MCP 프레임 원문 기준 byte-exact로 왕복했다. 사전 고정한 C1–C5 전부 2회차 연속 충족, 판정 예산(5분) 대비 실측 15초 내.
+
+방법론 노트(다음 마일스톤이 반복하지 말 것):
+- 최초 절차 초안은 serve를 trust/acl보다 먼저 시작하도록 적었다가 sanity 단계에서 `PERMISSION_DENIED`로 실패했다. host는 trust/acl을 **시작 시 1회** 읽는다 — §4는 실측 순서로 정정됐고, 본 실행(claude 호출) 이전 단계라 회차 판정에는 포함하지 않았다.
+- `qsh trust add`는 기존 peer에 대해 `created:false`로 끝나며 address를 갱신하지 않는다. 포트가 바뀐 뒤 pin을 다시 실행하는 것은 무효 — 처음부터 포트 확정 후 pin해야 한다.
+- headless `claude -p`는 stdin이 열려 있으면 3초 경고를 낸다 — `< /dev/null` 리다이렉트로 제거.
+
+백로그(이 캠페인이 만든 항목): `trust add`의 address 갱신 경로 부재(update 서브커맨드 또는 `--address` 덮어쓰기 결정)는 M7 doctor·capabilities 정비 입력으로 넘긴다.

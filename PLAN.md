@@ -1,132 +1,98 @@
-# PLAN — M6: MCP adapter
+# PLAN.md — M7: Trust UX·profiles·doctor
 
-**전제:** M5 완료(2026-08-28, `docs/ROADMAP.md` 마감 노트). 이 문서는 M6의 실행 계획이며 마일스톤이 닫히면 M7 계획으로 전면 교체된다. 정본 우선순위는 언제나 `docs/CLI.md` §8·§9·§10·§11(계약) > `docs/ROADMAP.md` M6 절(수용 기준) > 이 문서다.
+M6 마감(2026-08-31, ROADMAP M6 마감 노트)과 함께 이 문서는 M7 실행 계획으로 전면 교체됐다. 구속 근거: `docs/ROADMAP.md` M7 절(범위·감사 개정 ①②③·DoD), `docs/PRD.md` §6·§11·§15(SC1/SC2), `docs/adr/0002-pairing-invite-code.md`, `docs/design/architecture.md` §2(trust 이중 모드)·§7(`hosts.toml`). 이 계획과 ROADMAP.md의 편집은 main 세션 전용이다.
 
-**한 줄 요약:** `qsh mcp`(stdio 전용)가 CLI.md §8.2의 tool 12종을 노출한다. tool schema는 CLI와 **같은 Rust 타입**(`qsh-proto`의 `*Req`/`*Data`, schemars)에서 생성하고, adapter는 `Ops`를 직접 호출하는 얇은 층(~300줄, architecture.md §8·§9)이다 — command string 조립도, CLI output 재파싱도, 인증·ACL·세션 로직도 0줄.
+## 1. DoD 체크리스트 (ROADMAP M7)
 
-## 1. DoD 체크리스트 (`docs/ROADMAP.md` M6 수용 기준 문면 그대로)
+- [ ] **DoD 1 — 스톱워치 테스트**: 한 번도 설정한 적 없는 두 장비가 README만 보고 `qsh user@host`까지 5분 이내, 독립 3회 측정·기록 (SC1/SC2, 캠페인 문서 사전 정의).
+- [ ] **DoD 2 — doctor 진단 6종**: UDP 차단/경로 없음/비신뢰 peer/만료 cert/keystore 부재(headless)/clock skew 각각 실행 가능한 메시지 + 안정된 JSON code.
+- [ ] **DoD 3 — `qsh capabilities --json` == checked-in fixture** (scope-creep tripwire).
+- [ ] **DoD 4 (감사 ①) — `trust remove` 유효 범위**: 기존 연결·신규 handshake 각각의 동작이 테스트로 고정되고 문서·doctor 고지와 일치.
 
-- [ ] **DoD 1 — stdio conformance 하네스**: initialize → `tools/list` == checked-in fixture → open/write/read/close 시나리오가 실 바이너리 `qsh mcp`에 대해 통과.
-- [ ] **DoD 2 — Claude Code 실접속으로 원격 명령 실행**: 실제 MCP client 접속 기록(수동 캠페인, 절차·판정 기준 사전 정의).
-- [ ] **DoD 3 — `read_session` 취소 후 세션 상태 `running` 유지** (CLI.md §8.4·§9의 cancellation 의미론).
-- [ ] **DoD 4 — adapter 의존성 ban(arch-lint)**: subprocess 실행·CLI 재파싱을 원천 봉쇄하는 기계 게이트.
-- [ ] **DoD 5 — `-vv`에도 MCP stdout에 JSON-RPC 외 바이트 0** (§8.1: 진단은 전부 stderr).
+## 2. 실행 단계 (PR 단위)
 
-## 2. 실행 순서 (PR 단위)
+### Step 1 — 저위험 노출 3종: version 식별자 + `qsh schema --json` + `qsh capabilities`
 
-### Step 1 — 계약·의존성 확정: rmcp pin + DTO 감사 + 결정 기록
+**(a) 범위:** ① `VersionData`에 빌드/커밋 식별자 additive 추가(감사 ③ — 필드명은 4.1 #1에서 확정). ② `qsh schema --json`: `fixtures.rs`가 이미 schemars로 생성해 검증에만 쓰는 스키마를 CLI 표면으로 서빙(한 소스 원칙, testing.md L82 문면). ③ `qsh capabilities` CLI 계약 확정(§6.10은 현재 예시 한 줄뿐) — peer와 negotiation된 `Hello.capabilities`를 반환하는 op 신설 + fixture 등재(DoD 3). CLI.md 해당 절 신설은 additive.
 
-**(a) 범위:** 코드보다 결정이 먼저다. ① rmcp 3.x 정확 pin + schemars 버전 정합(architecture.md §8 표) — `cargo deny` green 확인. ② tool 12종 ↔ `Ops` 메서드 ↔ `*Req`/`*Data` 타입 전수 감사: 12종 각각에 대응 타입이 `qsh-proto`에 있고 `JsonSchema` derive가 있는지, 없으면 additive로 추가(§10: 기존 field 재해석 금지). ③ §4.1 결정 표의 미확정 항목을 확정해 이 문서에 추기. ④ `tools/list` fixture의 파일 위치·정규화 규칙 확정(`qsh capabilities` fixture 선례).
+**(d) 완료 판정:** schema 출력 == fixtures.rs 생성물(동일 소스 구조 증명), capabilities fixture 대조 green, version 필드 additive 검사(기존 fixture 무변경).
 
-**(b) crate/파일:** `crates/qsh-cli/Cargo.toml`(rmcp 도입 — **adapter는 qsh-cli 소속**, arch 매트릭스 무변경), `crates/qsh-proto/src/types.rs`(JsonSchema 파생 보강, additive만).
+### Step 2 — `trust remove` 의미론 확정 (감사 ①, 유예 불가) + `trust add` address 갱신 경로
 
-**(c) 빚지는 테스트:** 12종 매핑의 문서 대조 게이트(§8.2 표 ↔ 코드 상수, `acl_docs.rs`/`acl_registry.rs` L6 선례 — MCP tool 이름·op 이름 쌍을 양방향 대조).
+**(a) 범위:** ① 현행 semantics(다음 handshake부터 적용, README Known limitations L417-419 문면 == `ops/mod.rs::trust_remove` 실코드)를 유지할지 즉시 종료로 바꿀지 **결정하고 근거를 이 절에 추기**. 어느 쪽이든: 기존 연결 생존/종료 + 신규 handshake 거부 두 동작을 실 QUIC 테스트로 고정, README·CLI.md·doctor 고지(Step 5와 연동) 문면 일치. ② M6 캠페인 백로그: `trust add`가 기존 peer의 address를 갱신하지 못하는 문제(`created:false` 시 무변경) — 갱신 경로를 결정(덮어쓰기 vs 별도 서브커맨드)하고 구현. 멱등성 계약(§6.11) 훼손 없이.
 
-**(d) 완료 판정:** cargo deny green, 12종 매핑 표가 코드 상수로 실재, §4.1 전 항목 확정 기록.
+**(d) 완료 판정:** 두 동작 고정 테스트 green, 세 문서 문면 대조 일치, address 갱신 실측(M6 캠페인 재현 시나리오).
 
-**(a)-추기 — Step 1 완료 확정 (2026-08-29, main 세션).** ① rmcp `=3.1.4` 정확 pin, `default-features = false`, features `["server", "transport-io"]`만 — client/auth/HTTP 제외. 워크스페이스 schemars 1.x(lock 1.2.2)가 rmcp 요구(`schemars = "1.0"`)를 그대로 만족, 상향 불요. cargo deny: rmcp 유발 신규 중복 경고 0건. ② DTO 감사 결과 12종 전부 기존 `*Req`/`*Data`에 `JsonSchema` 파생이 이미 있어 qsh-proto 수정 0줄 — `SessionReadReq`가 §8.3 예시와 필드명까지 일치(설계 시점에 이미 MCP를 겨냥). ③ 매핑 상수 `TOOL_MAP`은 `crates/qsh-cli/src/mcp/mod.rs` 소속(소비자 단독 축 — `OP_REGISTRY`와 다른 축이라 qsh-core에 두지 않는다). **qsh-cli는 lib 타깃 없는 bin-only crate라 MCP 문서 대조·conformance 계열 중 내부 심볼이 필요한 테스트는 `tests/*.rs`가 아니라 어댑터 모듈 내 `#[cfg(test)]`에 둔다** — Step 2의 실바이너리 conformance 하네스(`tests/mcp_conformance.rs`)는 내부 심볼이 불필요하므로 원계획대로 외부 테스트 파일. ④ §4.1 확정: #1 `=3.1.4`; #2 초안 유지(스키마 결정성은 rmcp `Tool::with_input_schema` 경로 3회 반복 바이트 동일로 실증 — 사전순 정렬 여부는 Step 2에서 fixture 형태로 확정); #3 초안 그대로(`CallToolResult::structured_error` = isError:true + structuredContent, 프로토콜 오류 불개입 — 컴파일 실증); #4 **문면 정정** — "MCP 전용 timeout 인자를 새로 추가하지 않는다"로 좁힌다: `ExecRunReq.timeout_ms`는 §6.8 기존 계약의 상속이지 신규가 아니다; #5 초안 그대로(rmcp stdio는 newline-delimited JSON-RPC — raw `std::process::Command` 하네스 실현 가능, 소스 확인). ⑤ 부수: `chacha20 0.10.1`이 crates.io에서 실제 yank됨(레지스트리 플레이크 아님 — 0.10.2 정상 존재)을 확인하고 `cargo update -p chacha20`으로 0.10.2 이동, deny advisories green 복원 — deny.toml 예외를 파지 않았다(arrayref와 달리 진짜 yank이므로 업데이트가 옳다).
+### Step 3 — `hosts.toml` host profile + 첫 실행 경험
 
-### Step 2 — `qsh mcp` 골격: stdio 서버 + initialize + tools/list == fixture (DoD 1 전반부, DoD 5)
+**(a) 범위:** architecture.md §7 문면대로 `hosts.toml`(`[[host]] name·address·user`) 도입 — trust.toml(신뢰)과 분리된 주소 directory. `host.list`/host 해석이 trust.toml 단일 출처에서 hosts.toml 우선으로 확장(우선순위 규칙은 4.1 #4). `user`는 M7에서도 assertion hint일 뿐(불일치 시 `UNSUPPORTED`, PRD §6 user switching 없음 유지). README 첫 실행 절 초안(Step 7 스톱워치의 대본이 된다).
 
-**(a) 범위:** `qsh mcp` subcommand가 rmcp stdio 서버를 띄운다. tool schema는 schemars가 `*Req`에서 생성. **stdout 순수성이 이 step의 본체다**: 로깅·진단·panic 출력까지 전부 stderr(§8.1), `-vv` 포함. MCP 서버 시작 시 M5 시작 진단(`StartupDiagnostic`)도 stderr로만.
+**(d) 완료 판정:** hosts.toml 유무·병합 각 조합의 host 해석 테스트, `qsh hosts`/`qsh host` 출력 계약 additive 검사.
 
-**(b) crate/파일:** `crates/qsh-cli/src/mcp/mod.rs`(신규, ≤300줄 목표), `crates/qsh-cli/src/cli.rs`·`main.rs`(subcommand 배선).
+### Step 4 — invite pairing (ADR-0002 구현)
 
-**(c) 빚지는 테스트:** conformance 하네스 1절 — 실 바이너리 spawn → initialize 왕복 → `tools/list` 응답 == checked-in fixture(`crates/qsh-cli/tests/mcp_conformance.rs` + `tests/fixtures/mcp/tools_list.json`). `-vv` 플래그로 같은 하네스를 돌려 stdout에서 JSON-RPC frame 외 바이트 0 단언(DoD 5).
+**(a) 범위:** `qsh trust invite`/`qsh trust accept <code>` — 고엔트로피 일회용 invite code(10분 TTL), TLS exporter 기반 HMAC proof 교환으로 양방향 pin 동시 설정. CLI 계약(플래그·JSON envelope) 확정 + CLI.md §6.11 확장(additive, L604의 "M7에서 확정" 이행). `--json` 경로는 prompt 금지 — `TRUST_REQUIRED` + `details.fingerprint`(ADR-0002 문면). pairing 안내 문구에 대역 외 fingerprint 대조 경로 포함(감사 ②). wire 추가분은 `docs/design/protocol.md`에 반영 — **M8 wire freeze 전 마지막 프로토콜 확장이므로 스키마를 보수적으로**.
 
-**(d) 완료 판정:** fixture 대조 green. schema에 `*Req` 타입 변경이 그대로 반영됨(fixture diff로만 tool 표면이 바뀔 수 있음 — scope-creep tripwire, ROADMAP §3 메타 가드레일과 같은 원리).
+**(d) 완료 판정:** 실 QUIC 왕복 pairing E2E(성공/TTL 만료/재사용 거부/HMAC 불일치 4상한), `--json` 비대화형 검사, fingerprint fallback(§6.11 기존 경로) 회귀 무손상.
 
-**(a)-추기 — Step 2 완료 확정 (2026-08-29, main 세션).** ① `tools/list` fixture는 **정규화 0**의 원시 JSON-RPC 응답 전체다 — 하네스가 request id를 스스로 pin하고 protocol version도 `"2025-11-25"`로 pin(SEP-2322 `resultType` 문턱 `2026-07-28` 미만이라 rmcp 기본값 변동에도 fixture 형태 불변). §4.1 #2의 "request_id류 마스킹" 예상은 불필요로 판명 — 정렬은 tool 이름 사전순 확정. ② 미배선 `call_tool`은 stub이 아니라 **rmcp 기본 `-32601 Method not found`**(프로토콜 오류)로 둔다 — 임시 stub은 ErrorCode 뒷받침 없는 임의 계약 형태를 발명하는 것이라 단일 ErrorCode 규율 위반이고, 실바이너리 테스트가 이 동작을 고정한다(Step 3가 배선하면서 이 테스트를 성공 경로 테스트로 대체). ③ stdout 순수성은 기존 tracing 구조가 이미 stderr-only라 신규 코드 0 — `-vv` 실바이너리 단언으로 고정. `qsh mcp`는 host runtime이 아니라 `StartupDiagnostic`을 내지 않는다(명시 문서화). ④ **Step 3 범위 추가**: `tool_schemas()`가 `output_schema`를 채우지 않는 갭 발견 — Step 3가 `*Data` 배선과 함께 `Tool::with_output_schema::<Data>()`를 12종에 채우고 conformance가 `schema_for!(Data)`와 묶는다(testing.md L7 문면 대응; fixture는 이때 형태가 바뀌므로 **신규 fixture 추가가 아니라 Step 2 fixture의 의도된 확장**임을 커밋에 명시 — MCP fixture는 qsh.cli/v1 계약 fixture가 아니라 tool 표면 tripwire라 append-only 규율의 적용 방식이 다르다: diff 리뷰 필수). ⑤ 검증 라운드 배치: M6는 step이 M5보다 작아 **Step 2+3 통합 adversarial 1회**를 Step 3 완료 뒤에 돌린다 — call_tool 라우터가 실질 공격면이고 Step 2는 골격이라 결합 검증이 효율·커버리지 모두 낫다(main 세션 결정).
+### Step 5 — private CA `qsh cert` (ADR 선행)
 
-### Step 3 — 값 반환 tool 11종: 역직렬화 → `Ops` → 직렬화
+**(a) 범위:** ① **ADR 신설이 선행** — CA 계층(단일 CA), 서명 대상(device cert, `qsh://device/…` SAN → `device:` principal), user cert 취급, 파일 위치·포맷. 현재는 architecture.md의 부분 결정(pin-or-CA verifier·rcgen)만 있는 백지 표면이다. ② ADR 승인 후 `qsh cert` 최소 표면 구현: CA 생성, device cert 발급, trust store CA 등재. rotation/revocation UX는 명시 out(§3).
 
-**(a) 범위:** `read_session`을 제외한 11종(`list_hosts`/`get_host`/`list_sessions`/`get_session`/`open_session`/`write_session`/`resize_session`/`close_session`/`exec`/`open_tunnel`/`close_tunnel`)을 얇게 배선한다. tool input → `*Req` 역직렬화, `Ops` 호출, `*Data` → tool output. 오류는 `OpError`의 `ErrorCode`·message·retryable을 MCP tool 오류 표면에 보존(§4.1 #3). ACL은 host 쪽 dispatch가 이미 강제한다(architecture.md §6 — adapter에 검사 로직 0줄, §8.4의 "각 tool call에 동일 ACL"은 이 상속을 말한다).
+**(d) 완료 판정:** CA 발급 cert로 실 handshake 성공 + pin 없는 CA-chain 경로 검증 테스트, `fp:`/`device:` principal 매핑 검사, ADR 링크가 CLI.md 신설 절에 명시.
 
-**(b) crate/파일:** `crates/qsh-cli/src/mcp/mod.rs` 확장.
+### Step 6 — `qsh doctor`
 
-**(c) 빚지는 테스트:** conformance 하네스 2절 — open_session → write_session → close_session 실 시나리오(testkit ServeGuard 위, M5가 심는 정책 하네스 그대로). 오류 경로 1종(deny 정책 하에서 open_session → `PERMISSION_DENIED` 보존) — M5의 균일 문면이 MCP 표면에서도 그대로임을 단언.
+**(a) 범위:** `doctor.run` op + `qsh doctor` CLI(§6.11 L604 예약 이행). 진단 항목: DoD 2의 6종 + 기존 core 상수 2종(`controller_unreachable`·`audit_path_unwritable` 소비) + PATH 상 타 qsh 경고 + acl 시작 진단 코드(`acl_policy_missing`/`acl_policy_invalid`) 노출 + Step 2의 trust remove 고지. code 어휘는 4.1 #5에서 사전 고정(안정성 계약).
 
-**(d) 완료 판정:** 11종 전부 하네스에서 1회 이상 실구동. adapter 파일에 `std::process`·CLI 문자열 조립 0건(Step 5의 기계 게이트 전까지는 리뷰로).
+**(d) 완료 판정:** 진단 각각을 실제로 유발하는 테스트(UDP 차단은 협조적 mock, clock skew는 주입) + code 안정성 fixture, 사람 문면에 실행 가능한 다음 행동 포함.
 
-**(a)-추기 — Step 2+3 통합 검증 라운드 판정 (2026-08-30, main 세션).** 검증자 발견 P1 3·P2 2·P3 5 전건 판정:
-① **P1-1 채택** — `-vv`에서 rmcp `serve_inner` debug 스팬이 tool call 파라미터(PTY 입력 b64·exec argv)와 결과(PTY 출력 b64)를 stderr에 Debug로 노출하고, handshake 전 `tools/call` 도착 시 `run_mcp` 오류 아크가 verbosity 무관하게 요청 전문을 찍는다 — "PTY/command 내용 로그 금지" 보안 기본 원칙 위반(stdout 아닌 stderr라 DoD 5는 통과했음). 수정: 필터 스펙에 `rmcp=warn` 고정(`recovery_default` 선례) + 오류 아크를 구조적 메시지로(페이로드 미포함) + `-vv` stderr 페이로드 부재(원문·base64 양쪽) 회귀 테스트.
-② **P1-2 채택** — MCP `open_tunnel`의 detached-thread hold가 어떤 레지스트리에도 등록되지 않아 `close_tunnel`이 항상 `closed:false`인데 리스너·포워딩은 살아 있고(거짓 응답), 프로세스 종료 외 해제 수단이 없어 장수명 서버에서 자원 단조 증가. 수정 방향: CLI foreground holder가 close fan-out에 응답하는 것과 같은 메커니즘을 재사용(fixer가 그 메커니즘을 먼저 규명해 보고) — hold 수명 로직은 qsh-core(Ops) 소유, qsh-cli엔 두지 않는다. 선택지 (b)(두 tool UNSUPPORTED 회귀)는 §8.2 개정을 요구해 기각. E2E 의무: open→포워딩 실증→close→`closed:true`+리스너 해제+동일 포트 재open 성공.
-③ **P1-3 채택** — Step 3 (d) 문면("11종 전부 실구동") 미달(5/12)이었고, 검증자 뮤테이션 A(`list_sessions`→`host_list` 교체 + `resize_session` 매치 오타)가 전 테스트 통과로 실증됨. 수정: conformance가 12종 전부 1회 이상 실구동 + 성공 structuredContent를 광고된 outputSchema의 required 목록과 대조 + tools/list 광고 이름 전부가 라우팅됨(-32601 아님)을 단언.
-④ **P2-1 채택** — 12종 전부 `description` 부재. §8.2 표 의미 기반 영문 설명 채움 + L6 게이트에 비어있지 않음 단언 + fixture 재생성(additive).
-⑤ **P2-2 채택, §4.1 #3 이행 방식 정정** — 오류 결과의 `structuredContent`(§3.2 객체)가 그 tool의 outputSchema(성공 `*Data`)와 불일치 — MCP 스펙상 structuredContent는 outputSchema 적합 의무가 있어 엄격 클라이언트 interop 리스크. §4.1 #3 확정문의 문면은 원래 "content에 §3.2 error object"였다: 오류는 `isError:true` + content text JSON(§3.2 객체)만 싣고 **structuredContent를 생략**한다(`structured_error` → `error`). 오류 경로 테스트는 content JSON 파싱으로 §3.2 형태·문면·retryable을 단언하고 structuredContent 부재도 단언.
-⑥ **P3 5건 기록(무수정)** — (i) `arguments`가 비객체이거나 `name` 비문자열이면 rmcp params 층에서 `-32601` 프로토콜 오류(어댑터 밖, 수정 비용 대비 무이득); (ii) `details:null`은 CLI JSON 렌더러와 동일 관행 — 계약 위반 아님; (iii) 실 시나리오 `#[cfg(unix)]`는 crate 기존 관행 — Windows 성공 경로 커버리지 0은 Step 5에서 재평가; (iv) 어댑터 프로덕션 228줄(≤300 목표 내); (v) long-poll의 blocking-pool 스레드 점유·MCP 동시성 상한 부재는 Step 4 입력.
-⑦ 부재 증명(stdout 순수성 11개 시나리오·§8.4 ACL 상속 CLI 트윈 동치·spawn_blocking 동시성 실증·fixture 독립 재검증·뮤테이션 B/C/D 검출·arch 규율)은 검증자 보고서를 근거로 채택. 검증자 최종 런의 `tunnel_chaos` 1건 FAIL은 클린 베이스라인 1145/1145 통과라 하네스 경합 플레이크로 추정 — main 게이트 재실행에서 재확인.
+### Step 7 — M6 이월 부채 정리 3건
 
-### Step 4 — `read_session` long-poll + 취소 의미론 (DoD 3)
+**(a) 범위:** ① **`Ops::session_read` per-call 런타임+QUIC 구조 결정** — M6 판정 ⑤(방치 pull당 ~11 threads·5 fd·0.86MB ≤60s, 400건 → 4,412 threads/372MB)의 원인. 공유 런타임 vs bounded pull executor 중 구조를 결정하고(4.1 #6) 동일 측정으로 전후 비교. ② `action_of` op 키 enum화(M5 P2-3 이월). ③ `acl_check`의 13번째 MCP tool 노출 **결정**(§8.2 표 additive 개정 선행 — 채택이든 명시 기각이든 이 절에 추기; 조용히 추가하지 않는다).
 
-**(a) 범위:** `read_session`은 cursor-pull primitive의 1회 pull과 1:1이다(architecture.md §3 — 새 스트리밍 경로를 만들지 않는다). `after_sequence`/`ctl_after` 되먹임, `wait_ms` long-poll, `limit_bytes`. 취소(MCP cancellation·client 연결 종료)는 대기 중인 pull만 끊고 세션·PTY는 건드리지 않는다(§8.4·§9).
+**(d) 완료 판정:** ①은 측정 전후표 + 기존 conformance 전건 green(계약 무변경), ②는 컴파일 타임 전수성(match) 확보, ③은 결정 기록 + (채택 시) fixture 개정 diff 리뷰.
 
-**(c) 빚지는 테스트:** conformance 하네스 3절 — read long-poll 중 취소 → `get_session`으로 `running` 확인(DoD 3). `next_after` 되먹임 루프로 출력 전순서 보존 1회.
+### Step 8 — man page·설치 문서 + 스톱워치 캠페인 (DoD 1) + 마감
 
-**(d) 완료 판정:** DoD 3 green. long-poll이 `session read --wait`와 같은 pull 소스를 쓰는 것이 코드 구조로 확인됨.
+**(a) 범위:** man page·설치 문서, README 최종 동기화. `docs/campaigns/m7-stopwatch.md` 사전 정의(M6 캠페인 선례: 기준 먼저 커밋) — 한 번도 설정한 적 없는 두 장비(신선한 sandbox 프로필 2식 또는 실장비 2대), README만 보고 `qsh user@host`까지, 독립 3회, 5분 기준. ROADMAP §4 리스크 3의 "조기·반복" — Step 4(pairing) 착륙 직후 1회 예행 측정을 먼저 수행해 병목을 마감 전에 노출한다. 이후 §5 마감 절차.
 
-**(a)-추기 — Step 4 확정 + 검증 라운드 판정 (2026-08-31, main 세션).**
-① **취소 의미론의 실체(구현 확정)**: rmcp 3.1.4가 `notifications/cancelled` 수신 시 요청의 CancellationToken을 `local_ct_pool`에서 제거·취소하고, 응답 송신 시점에 같은 pool을 재조회해 취소된 id의 응답을 조용히 버린다(핸들러 태스크는 abort되지 않음) — 취소 무결성은 rmcp가 구조적으로 보장, 어댑터 추가 코드 0. 잔존 blocking pull은 host clamp(60s)까지 자연 소멸하며 그 결과는 관측 불가. rmcp 마이너 업그레이드 시 이 메커니즘 존속 재확인 필수(§4 리스크 감시 근거).
-② **부수 결함 수정**: pending long-poll 중 stdin EOF 시 암묵 `Drop for Runtime`이 blocking 스레드 join을 무기한 대기해 종료가 최대 60s 지연되던 실결함 → `run_mcp`에 `runtime.shutdown_timeout(500ms)` 명시. A/B 실증: 프레임 전달 5개 조건 동일(무회귀), 종료 지연만 29.7s→5.5s.
-③ **검증 라운드 P2-1 채택** — 전순서 테스트가 `ctl_after` 절반에 맹목: ctl 커서 되먹임을 고정해도 green(ctl 중복 2건 미검출), idle long-poll이 spin으로 퇴화해도 미검출. 수정: 비-output 이벤트 중복 0 단언 + 양 커서 되먹임 시 wait_ms가 실제로 park함을 단언.
-④ **검증 라운드 P2-2 채택(문서 정정)** — "대기 중인 pull만 끊고"(본 계획 (a))·"local wait 또는 request를 취소"(CLI.md §9)는 실동작(응답 억제 + 자연 소멸)보다 강한 서술. 관측 가능 계약(세션·lease 무변경, 취소 응답 부재)은 성립. CLI.md §9에 실의미론 명확화 문장을 추가(additive)하고, mcp/mod.rs의 낡은 "Step 4의 몫" 주석을 실의미론+rmcp 인용으로 교체(P3-1 dangling ref·P3-2 stale doc 동시 해소).
-⑤ **검증 라운드 P2-3 기각(이월)** — 취소가 자원을 회수하지 않고 long-poll 동시성 상한이 없음: 방치된 pull당 ~11 스레드·5 fd·0.86MB가 최대 60s 잔존, 400건 시 4,412 스레드(호스트는 무영향, 정직한 호출은 0.1s 응답 유지, 패닉 0). Ops::session_read의 per-call 런타임+QUIC 구조가 원인이라 어댑터 국소 수정이 아닌 core 구조 결정이고, M6 DoD 문면 밖 + 로컬 신뢰 클라이언트 위협 모델이라 **측정치와 함께 M7 입력으로 이월**(§3 non-goals의 후속 입력). 어댑터 semaphore 캡은 CLI 트윈에 없는 정책을 어댑터에 심는 것이라 기각.
-⑥ **P3-3 채택** — EOF 신속종료 테스트의 7s 단언은 바닥(rmcp 고정 5s drain + 500ms) 위 여유 1.5s뿐: 단언을 BOUND(10s) 미만으로 완화해도 회귀(20s+ 지연)는 확실히 잡힘 — 완화 + 바닥 분해 주석. DoD3 테스트의 실검출 지점이 주석 라벨과 다른 문제(id-pinning이 실검출자)는 취소 직후 "다음 프레임 id ≠ 취소 id" 명시 단언과 주석 정정으로 해소.
-⑦ **부재 증명 채택**: 취소의 세션 상태 무부작용(잔존 pull의 비파괴 소비 실증), 감사 이중 기록 0(41/41), writer lease 무접촉(MCP에선 connection-per-call이라 get_session.writer가 구조적으로 null — write_session 성공이 대리 지표로 타당), 취소 프로토콜 변형 7종 내성, shutdown_timeout 3경계 무회귀, Windows 게이팅 기계 검사 dead_survivors 0. DoD3 테스트는 cancel 제거 시 5/5 실패(실검출 확인).
+**(d) 완료 판정:** 캠페인 3회 기록 완료(전건 5분 이내), §5 전 항목 완료.
 
-### Step 5 — 기계 게이트: arch-lint ban (DoD 4) + conformance 총합 (DoD 1 마감)
+## 3. 명시적 non-goals (P1 유예 / 타 마일스톤)
 
-**(a) 범위:** ① `xtask arch`에 MCP adapter 규칙 추가: `crates/qsh-cli/src/mcp/` 안에서 `std::process`(subprocess)·`Command::new`·CLI output 재파싱 패턴을 금지하는 소스 게이트(M5 Step 8의 `source_scan` 선례 — CRLF 정규화 포함). ② conformance 하네스에 남은 시나리오 결합, fixture 등록(`REQUIRED_FIXTURES` 규율 준용). ③ `docs/CLI.md` §8 문면과 구현의 최종 대조.
-
-**(d) 완료 판정:** DoD 1·4·5 전건 green. Windows leg 포함(— MCP는 stdio뿐이라 플랫폼 분기가 없어야 정상이고, 있으면 그것이 버그).
-
-**(a)-추기 — Step 5 확정 + 검증 라운드 판정 (2026-08-31, main 세션).** 검증자 발견 P1 0·P2 2·P3 7 판정:
-① **선례 치환 채택** — (a)①의 "M5 `source_scan` 선례"는 xtask에 없고(실위치 `qsh-core/tests/acl_registry.rs`), xtask 기존 `ModuleBan`/`check_module_bans`(주석 제외 줄 단위 스캔, `CLI_SRC_DIR`의 UnixStream 금지 선례)로 대체 구현함을 채택. CRLF 정규화는 별도 `.replace` 불요 — 줄 단위 substring 매칭이라 `\r`이 토큰 위치에 영향 불가(검증자 mutation C로 실증: `lines()`↔`split('\n')` 구분 불가). M5 선례가 replace를 요구한 것은 파일 전체 다중 줄 마커 검색이었기 때문.
-② **금지 3토큰 확정** — `std::process`·`Command::new`·`Stdio::piped`. (a)①의 "CLI output 재파싱 패턴"은 어휘 패턴이 아니라서 기계 게이트 불가 — `Command::new`가 spawn 전부를 막고 `Stdio::piped`가 방어 심층화로 대체함을 채택(P3-5). `std::process` 광폭(exit 포함)은 의도된 보수성으로 유지 — 어댑터가 직접 exit하는 것도 금지 대상이 맞다(P3-1 기각).
-③ **P2-1 수정 지시** — 새 ungated 테스트 doc의 "the one MCP tool" 배타 주장은 거짓(`list_sessions`도 무-cfg·무-dial 성공, 검증자 실측 `{"sessions":[]}`). doc 정정 + 같은 테스트에 `list_sessions` 호출 추가로 Windows 성공 경로 2건화.
-④ **P2-2 수정 지시** — CRLF 유닛 테스트는 회귀 판별력 없음(구조적으로 vacuous). 삭제 대신 doc을 "스모크 시연"으로 정직하게 강등 — CRLF 체크아웃이 게이트를 통과함을 시연할 뿐 `lines()` 선택을 구속하지 않음을 명기.
-⑤ **P3 수정 2건** — (i) P3-3: `strip_line_comment` 정당화 주석이 broker만 근거로 듦 — mcp/ 스코프 확장 반영 + 신규 스코프 추가 시 가정(블록 주석·토큰 포함 문자열 부재) 재확인 필요 명기. (ii) P3-4: fixture 세트 테스트 필터를 `is_file() && !name.starts_with('.') && ends_with(".json")`로 강화 — AppleDouble `._*.json`(SMB/tar 전개) 오탐 실증됨.
-⑥ **P3 기록(무수정)** — P3-2 comment-strip 오탐/미탐 8형 실증(블록 주석·문자열 리터럴 오탐, 줄 분할·`as` 별칭 미탐): arch 규율 lint이지 보안 경계가 아니고 실 트리 오탐 0(mod.rs:805 doc 주석 1건뿐, 라인 주석 처리로 흡수) — 현행 유지. P3-6 음성 테스트의 ban-존재 비결합은 음성 테스트 본질 — 양성 2건이 짝. P3-7 sandbox 격리 회귀는 빈 홈에서 비판별 — 격리 자체는 소스 수준 CONFIRMED(`QSH_CONFIG_DIR` 최우선, config.rs에 cfg(windows) 분기 0)라 수용.
-⑦ **부재 증명 채택** — 게이트 뮤테이션 3종(count 5→6 정합, ban 등록 삭제 시 3 FAIL, strip 항등화 시 3 FAIL — 실 mod.rs:805가 실제 하중), grouped-import 일반형 전부 포착(회피는 `as` 별칭 필요 = 사고 불가형), fixture 양방향 drift 실측 FAIL, `.DS_Store` 무해, CLI.md §8 독립 6행 재검증 일치(trust prompt 도달 경로 부재·Action variant 분리·Ops 공유), `list_hosts` Windows 체인 CONFIRMED(spawn_blocking로 block_on 중첩 없음), 잔재 0.
-
-### Step 6 — DoD 2 실접속 캠페인 + 마감
-
-**(a) 범위:** Claude Code를 실제 MCP client로 `qsh mcp`에 붙여 원격 명령 실행을 기록한다(수동 1회, 절차·pass 기준을 `docs/campaigns/m6-mcp.md`에 사전 정의 — M2 mobility 캠페인 선례). 이후 §5 마감 절차.
-
-**(d) 완료 판정:** 캠페인 기록 완료, §5 전 항목 완료.
-
-## 3. 명시적 non-goals (M7+ / P1 유예)
-
-- **`acl_check`의 MCP tool 노출** — ROADMAP M6 범위는 "§8.2의 tool 12종" 문면이고 §8.2 표에 acl 계열이 없다. M5가 만든 `AclCheckReq`/`AclCheckData`는 노출 준비가 돼 있으나(schemars 파생), 13번째 tool 추가는 §8.2 표 개정(additive)이 선행돼야 하는 **별도 결정**이다 — M7(doctor·capabilities 정비)로 이월. 조용히 추가하지 않는다.
-- **HTTP/SSE transport** — §8.1이 stdio만 명시. P1.
-- **streaming MCP extension** — §8.3이 명시적으로 배제(long-poll 모델).
-- **MCP 쪽 trust prompt·pairing** — §8.4 금지 문면 그대로. pairing UX는 M7.
-- **`ControlLink`/`DataLink` enum → trait 전환(ADR-0005 P0 부채)** — M3→M4→M5가 연쇄 이월한 부채. M6도 트리거하지 않는다(MCP는 transport에 접촉하지 않는다). P1 입력으로 재기록.
-- **`action_of` op 키의 enum 타입화** — M5 Step 8 검증 라운드 P2-3 이월분. MCP tool 이름 상수와 함께 다루면 자연스러우나 M6 DoD와 무관 — 착수는 M6 중 여유가 있을 때만, 없으면 M7.
+- **cert rotation/revocation UX, background service 설치, QR** — ROADMAP M7 명시 out.
+- **`ControlLink`/`DataLink` enum → trait 전환(ADR-0005 P0 부채)** — M3→M6 연쇄 이월. M7도 트리거하지 않는다(trust/doctor는 transport 추상에 접촉하지 않는다). P1 입력으로 재기록.
+- **HTTP/SSE transport, streaming MCP** — M6판 그대로 P1.
+- **revocation의 실시간 전파**(trust remove 즉시 종료를 Step 2가 기각할 경우) — 결정 결과에 따라 P1 재기록.
+- **rmcp minor 업그레이드** — 착수하지 않음. 단 업그레이드가 필요해지는 순간 `local_ct_pool` 취소 구조 재검증이 선행 조건(M6 판정 ① 감시 항목 승계).
 
 ## 4. 리스크와 감시 항목
 
-- **rmcp 3.x API 변동**(architecture.md §9 리스크 4) — 정확 pin + adapter ≤300줄 격리. 감시: adapter 밖으로 rmcp 타입이 새어 나가지 않는가(`Ops` 시그니처에 rmcp 타입 0).
-- **stdout 오염** — 가장 깨지기 쉬운 불변식. tracing 기본 출력·panic hook·M5 시작 진단·`stderr_note!` 계열이 전부 stderr로 가는지. 감시: DoD 5 테스트가 `-vv`로 돈다.
-- **tool schema drift** — schemars 생성 schema는 `*Req` 변경에 자동 추종하므로, 의도치 않은 계약 변경이 fixture diff로만 보인다. 감시: fixture는 append-only 규율이 아니라 **diff 리뷰 필수** 규율(스키마 자체가 바뀌는 것이므로) — 단 기존 field 삭제·재해석이 diff에 보이면 그것은 §10 위반이다.
-- **cancellation 의미론의 회귀** — long-poll 취소가 pull loop 밖 자원(세션·writer lease)을 건드리면 DoD 3이 잡아야 한다. 감시: 취소 후 `running` 단언이 lease 상태까지 보는가.
+- **cert/CA는 진짜 백지** — ADR 없이 구현 착수 금지(Step 5 ①이 게이트). CLI 절도 PRD 한 줄뿐이라 표면 설계 자체가 리스크.
+- **pairing wire 확장은 M8 freeze 직전** — protocol.md 반영 누락이 곧 freeze 결함. 감시: Step 4 (d)에 protocol.md diff 포함.
+- **SC1 스톱워치는 간판 숫자** — 한 번에 몰지 말 것(ROADMAP §4 리스크 3). 감시: Step 4 직후 예행 1회.
+- **capabilities는 scope-creep tripwire** — fixture diff로만 표면이 바뀔 수 있다(M6 tool fixture와 같은 규율).
+- **SC7 외부 보안 리뷰 예약** — 운영자 액션 미완 재이월 중(M5→M6→M7). M8 wire freeze 리드타임 소진 중.
 
 ### 4.1 구현 중 확정할 값 (해당 step (a)에 근거와 함께 추기)
 
 | # | 질문 | 초안 | 확정 시점 |
 |---|---|---|---|
-| 1 | rmcp 정확 버전 | 3.x 최신 안정, minor까지 pin | Step 1 |
-| 2 | `tools/list` fixture 정규화(순서·기본값 직렬화) | tool 이름 사전순 정렬 후 pretty JSON | Step 1 |
-| 3 | `OpError` → MCP 오류 표면 매핑 | tool 실행 오류(`isError: true`) + content에 §3.2 error object 그대로(JSON) — MCP protocol 오류로 승격하지 않음 | Step 1 |
-| 4 | `--timeout` 상당의 tool 인자 | 두지 않음 — `wait_ms`(read_session)만; 나머지는 client cancellation에 맡김(§9) | Step 1 |
-| 5 | conformance 하네스의 client 구현 | rmcp client가 아니라 raw JSON-RPC(stdin/stdout 직접) — 서버가 SDK 아닌 계약을 지키는지 보는 것이므로 | Step 2 |
+| 1 | version 식별자 필드명·소스 | `build.commit`(vergen류 없이 `option_env!` 주입) | Step 1 |
+| 2 | capabilities fixture 범위 | negotiated 리스트 그대로(가공 없음) | Step 1 |
+| 3 | trust remove 의미론 | 현행 유지(다음 handshake부터) + 3문서·doctor 고지 | Step 2 |
+| 4 | hosts.toml vs trust.toml 해석 우선순위 | hosts.toml 우선, 없으면 pinned peer fallback | Step 3 |
+| 5 | doctor JSON code 어휘 | snake_case, 기존 `controller_unreachable` 선례 준용, 전 목록 사전 고정 | Step 6 |
+| 6 | session_read 구조 | Ops 공유 런타임(측정으로 결정) | Step 7 |
+| 7 | invite code 인코딩·엔트로피 | ≥128bit, 사람 전달 가능한 그룹 구분 인코딩 | Step 4 |
 
 ## 5. 완료 절차
 
-1. §1 DoD 5항목 전건을 실제 테스트/캠페인 기록으로 확인(체크박스는 근거 green일 때만).
-2. 구속 문서 태그 대조: CLI.md §8·§9·§10·§11의 M6 관련 전 문장이 검증됐거나 후속 귀속됐는지 전수 대조.
-3. README 갱신: MCP 사용법 절 추가(client 설정 예시 포함), Roadmap 표 M6 → Done.
-4. `docs/design/testing.md` 현재 상태 문단에 M6 테스트 층(conformance 하네스) 반영.
-5. `docs/ROADMAP.md` "현재 위치"·M6 절 갱신 + 마감 노트(로드맵 소유자 몫).
-6. **SC7 외부 보안 리뷰 예약 재확인** — M5 마감 노트가 미완으로 이월한 항목. M8 wire freeze까지의 리드타임이 이번 마일스톤 중에도 소진되고 있다 — 운영자 액션 필요.
-7. 이 PLAN.md를 M7 계획으로 전면 교체(§3의 M7 입력 — acl_check tool 노출 결정, action_of enum화 — 을 그 계획으로 이관).
+1. §1 DoD 4항목 전건을 실제 테스트/캠페인 기록으로 확인(체크박스는 근거 green일 때만).
+2. 구속 문서 태그 대조: CLI.md §6.10·§6.11·§8(13번째 tool 결정 반영 시)·PRD §15의 M7 관련 전 문장 전수 대조.
+3. README 갱신: 첫 실행·pairing·doctor 절 최종화, Roadmap 표 M7 → Done.
+4. `docs/design/testing.md`에 M7 테스트 층 반영(§6 조사 결과 M7 절은 현재 빈칸).
+5. `docs/ROADMAP.md` "현재 위치"·M7 절 갱신 + 마감 노트.
+6. **SC7 외부 보안 리뷰 예약 재확인** — 계속 미완이면 M8 착수 전 운영자 에스컬레이션 필수(리드타임 조건이 이번 마일스톤으로 사실상 만료).
+7. 이 PLAN.md를 M8 계획으로 전면 교체(§3의 P1 재기록 항목 이관 포함).

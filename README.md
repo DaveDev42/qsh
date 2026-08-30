@@ -31,11 +31,13 @@ acceptance criteria ask for. What works end to end today:
 - `-L` and `-R` port forwards, over forward connections and over reverse
   ones, plus the standalone `qsh tunnel open`/`qsh tunnels`/
   `qsh tunnel close` machine-mode commands.
+- `qsh mcp`, an MCP server over stdio that exposes the same 12 operations
+  the CLI uses to MCP clients such as Claude Code. See [MCP
+  server](#mcp-server).
 
 `-D` (SOCKS5 dynamic forwarding) parses on both the interactive and
 `tunnel open` forms but always answers `UNSUPPORTED` with the message
-"SOCKS dynamic forwarding (-D) is a P1 feature". The MCP adapter is
-still M6.
+"SOCKS dynamic forwarding (-D) is a P1 feature".
 
 Authorization is the other unfinished half: read [Security
 posture](#security-posture) before you pin anything.
@@ -207,6 +209,49 @@ controller has no trust-store alias for that peer and its
 `[listen].allow_advertised_names` is set; otherwise the controller names the
 peer from its own trust store.
 
+### MCP server
+
+`qsh mcp` runs an MCP server over stdio. It calls the same typed
+operation layer the CLI does and never shells out to `qsh` itself or
+reparses CLI output. Twelve tools, grouped by what they touch:
+
+- Hosts: `list_hosts`, `get_host`
+- Sessions: `list_sessions`, `get_session`, `open_session`, `read_session`,
+  `write_session`, `resize_session`, `close_session`
+- Exec: `exec`
+- Tunnels: `open_tunnel`, `close_tunnel`
+
+A minimal client config:
+
+```json
+{
+  "mcpServers": {
+    "qsh": {
+      "command": "qsh",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+`QSH_CONFIG_DIR` and `QSH_STATE_DIR` can go in an `env` block, optional,
+to select a profile other than the default; otherwise the server runs as
+whatever identity and trust store `qsh init` already set up for the local
+user.
+
+A tool failure comes back as the same error JSON as the CLI's `--json`
+mode (`code`, `message`, `retryable`, `details`), carried in the tool
+result's content with `isError` set, not as a protocol-level error.
+`read_session` is a long-poll: pass `wait_ms` and feed the response's
+`next_after`/`next_ctl_after` back into the next call, the same cursor
+protocol `qsh session read --wait` uses. Canceling a tool call cancels
+only that in-flight request; the session and its PTY keep running.
+ACL enforcement happens host-side, exactly as it does for the CLI — MCP
+grants no extra access and never opens an interactive trust prompt.
+
+`docs/CLI.md` §8 is the binding contract for tool behavior, cancellation
+and error shape.
+
 ## Security posture
 
 Every connection is QUIC with TLS 1.3 mutual authentication. Both ends
@@ -304,7 +349,7 @@ already taken on crates.io. The workspace stays `publish = false` until M9.
 | M3 | Reverse connections (`listen`/`reverse`/`attach`) | Done |
 | M4 | Port forwarding (`-L`/`-R`) | Done |
 | M5 | ACL and audit | Done |
-| M6 | MCP adapter | Planned |
+| M6 | MCP adapter | Done |
 | M7 | Trust UX, host profiles, `doctor` | Planned |
 | M8 | Hardening (fuzz, soak, real-device mobility campaign) | Planned |
 | M9 | Release (installers, Homebrew, notarization) | Planned |
