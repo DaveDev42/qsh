@@ -7,6 +7,7 @@
 //! ```text
 //! ~/.config/qsh/       # $QSH_CONFIG_DIR → $XDG_CONFIG_HOME/qsh → this
 //! ├── config.toml
+//! ├── hosts.toml       # [[host]] name·address·user (crate::hosts, M7 Step 3)
 //! ├── trust.toml
 //! └── identity/        # device.pem (+ device.key 0600 in file mode)
 //! ~/.local/state/qsh/  # $QSH_STATE_DIR → $XDG_STATE_HOME/qsh → this
@@ -135,6 +136,14 @@ impl Paths {
     /// `<config_dir>/trust.toml`.
     pub fn trust_file(&self) -> PathBuf {
         self.config_dir.join("trust.toml")
+    }
+
+    /// `<config_dir>/hosts.toml` — the host profile address book
+    /// (`docs/design/architecture.md` §7, `PLAN.md` M7 Step 3,
+    /// `crate::hosts::HostsFile`). Read-only in M7: no CLI command writes
+    /// this path.
+    pub fn hosts_file(&self) -> PathBuf {
+        self.config_dir.join("hosts.toml")
     }
 
     /// `<config_dir>/acl.toml` (`docs/design/architecture.md` §7,
@@ -782,6 +791,7 @@ mod tests {
         let paths = Paths::new("/c", "/s");
         assert_eq!(paths.config_file(), PathBuf::from("/c/config.toml"));
         assert_eq!(paths.trust_file(), PathBuf::from("/c/trust.toml"));
+        assert_eq!(paths.hosts_file(), PathBuf::from("/c/hosts.toml"));
         assert_eq!(paths.identity_dir(), PathBuf::from("/c/identity"));
         assert_eq!(paths.audit_log(), PathBuf::from("/s/audit.log"));
     }

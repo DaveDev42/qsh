@@ -89,6 +89,86 @@ cargo build --release -p qsh-cli    # binary at target/release/qsh
 
 `scripts/README.md` covers the installer in more detail.
 
+## First run
+
+Six commands and one small policy file, two machines. This is the literal
+script `docs/campaigns/m7-stopwatch.md` times: two machines that have never
+run `qsh` before, nothing but this section open, stopwatch running from the
+first command.
+
+```bash
+# Host, the machine that will run the shell:
+qsh init --json                              # note "fingerprint" in the output
+```
+
+`acl.toml` loads once, at `qsh serve` startup, with no hot reload: it has to
+exist *before* `serve` runs, or the host denies everything until it's
+restarted. `laptop` below is just the name the client gets pinned under a
+few steps down; the rule can reference it now and take effect once that
+pin exists.
+
+```toml
+# <config_dir>/acl.toml, next to trust.toml: written by hand, qsh never
+# generates this file:
+[[acl]]
+principal = "device:laptop"
+allow = ["session.*"]
+```
+
+```bash
+qsh serve --bind 0.0.0.0:4433               # leave this running
+
+# Client, in a separate terminal on the other machine:
+qsh init --json                              # note this device's fingerprint too
+qsh trust add box --address host.example.com:4433 --fingerprint sha256:<HOST_FP>
+
+# Host, in a second terminal, let the client in. This can happen after
+# "serve" has already started; unlike acl.toml, trust.toml is re-read on
+# every handshake, so no restart is needed:
+qsh trust add laptop --fingerprint sha256:<CLIENT_FP>
+
+# Client, first shell:
+qsh dave@box
+```
+
+Swap `host.example.com:4433` for wherever the host actually listens, and
+the two `sha256:…` fingerprints for what `qsh init --json` printed on each
+side. `box` and `laptop` are names picked for this walkthrough. Call the
+two machines whatever you want. `dave` has to be the account actually
+running `qsh serve` on the host, or the host answers `UNSUPPORTED`; drop
+the `dave@` prefix entirely (`qsh box`) and it always works, since the
+shell runs as that account either way (`user@` only ever asserts, it never
+selects; see [`user@`'s meaning](docs/CLI.md#7-human-interactive-mode)).
+
+Typing the fingerprint by hand is the part most likely to cost time. Drop
+`--fingerprint` from the client's `trust add` and it dials instead, prints
+the fingerprint it observed, and asks you to confirm. It's the same
+trust-on-first-connect flow SSH has for host keys, without needing the
+value copied over some other channel first.
+
+From here, `qsh hosts` lists what this machine can reach, `qsh sessions
+box` lists what's alive on the host, and the [Quick
+start](#quick-start) section below covers detach/reattach, port
+forwards, and reverse connections. Once a name is pinned, an operator who
+wants to skip retyping `user@` or move an address without touching the
+trust store can add it to `hosts.toml` by hand, next to `trust.toml`:
+
+```toml
+# <config_dir>/hosts.toml: read by qsh, never written by it
+[[host]]
+name = "box"
+address = "host.example.com:4433"
+user = "dave"
+```
+
+`hosts.toml`'s address wins over `trust.toml`'s when a name is in both, and
+its `user` fills in when `user@` is left off. Identity is still
+`trust.toml`'s job alone; `hosts.toml` never supplies one. That split cuts
+both ways: write access to `hosts.toml` is the power to redirect a name to
+a different already-pinned peer (mTLS still blocks an unpinned address).
+`qsh hosts --json` reveals such a redirect through `"source": "hosts"`
+(`docs/CLI.md` §5).
+
 ## Quick start
 
 Both machines need the same binary. Start with identity and trust, which is
@@ -428,10 +508,13 @@ Some of these are MVP scope decisions, some are unfinished work.
   comes back in one envelope, and anything beyond the cap is
   `RESOURCE_EXHAUSTED`. Streaming output is a session feature: use
   `qsh session read` or an interactive session.
-- Host names resolve through the trust store. `qsh hosts` and `qsh host`
-  read that store back, but `qsh trust add <name> --address …` is the only
-  way a name gets created, and there is no per-host profile or connection
-  option until M7.
+- Host names resolve through `hosts.toml` first, falling back to the trust
+  store. `qsh hosts` and `qsh host` read both back. `hosts.toml` is
+  read-only from the CLI's side — nothing writes it for you, so `name =
+  "…" / address = "…" / user = "…"` entries are added by hand, next to
+  `trust.toml`. It is a pure address book: identity still comes from the
+  trust store alone, and an entry there for a name with no matching pin
+  dials an address nobody has vouched for.
 - Windows is P1 for the client and P2 for the host. PTY code is gated
   `#[cfg(unix)]`, and so is reverse mode: `qsh listen` and `qsh reverse`
   return `UNSUPPORTED` there rather than running. A tunnel over a reverse

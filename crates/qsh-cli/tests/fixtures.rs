@@ -128,6 +128,8 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "trust.remove.absent.json",
     "host.list.json",
     "host.get.json",
+    "host.list.with_hosts_toml.json",
+    "host.get.with_hosts_toml.json",
     "exec.run.json",
     "exec.run.signal.json",
     "error.INVALID_ARGUMENT.json",
@@ -370,6 +372,82 @@ fn golden_local_fixtures() {
     assert_eq!(code, 0, "{deny}");
     assert_eq!(deny["data"]["decision"], "deny", "{deny}");
     check("acl.check.deny.json", deny);
+}
+
+/// `host.list`/`host.get`'s two new additive fields, `source` and `user`
+/// (`docs/CLI.md` §5, `PLAN.md` M7 Step 3): a `hosts.toml` alongside
+/// `trust.toml` exercises all three `source` values in one sandbox —
+/// `"trust"` (pinned but absent from `hosts.toml`), `"hosts"` (named only
+/// by `hosts.toml`, so unroutable at the trust/TLS layer — same code for
+/// the "named by both, addresses disagree" case, since `source` reports
+/// which side's *address* won, not which side merely names the host,
+/// `PLAN.md` Step 3 (a)-추기 ②), and `"both"` (named by both, addresses
+/// *agree*). `hosts-wins` below exercises the disagreeing-address shape
+/// deliberately — it is the same shape the P2-0 redirect-detection fix
+/// depends on (`docs/CLI.md` §5's threat note), so this golden fixture
+/// doubles as its CLI/JSON-envelope-level proof. Its own sandbox —
+/// `golden_local_fixtures` never writes a `hosts.toml`, which is exactly
+/// the byte-identical-when-absent case
+/// `absent_hosts_toml_is_byte_identical_to_pre_m7_step_3_forward_hosts`
+/// (`ops/host.rs`) already pins at the `qsh-core` level; this is the same
+/// guarantee proven at the CLI/JSON-envelope boundary.
+#[test]
+fn golden_host_fixtures_with_hosts_toml() {
+    let sandbox = Sandbox::new();
+    sandbox.init();
+
+    // Named by `trust.toml` alone -> source: "trust".
+    sandbox.trust_add(
+        "trust-only",
+        Some("trust-only.example.com:4433"),
+        SAMPLE_FINGERPRINT,
+    );
+    // Named by both, addresses *disagree* -> `hosts.toml`'s address wins
+    // and `source` reports "hosts". `trust.toml`'s address here is
+    // deliberately wrong (never dialed by this fixture-only test) to make
+    // the override visible in intent, not just in the normalized-away
+    // `<address>` field.
+    sandbox.trust_add(
+        "hosts-wins",
+        Some("trust-address.example.com:4433"),
+        SAMPLE_FINGERPRINT,
+    );
+    // Named by both, addresses *agree* -> source: "both".
+    sandbox.trust_add(
+        "agree",
+        Some("agree-address.example.com:4433"),
+        SAMPLE_FINGERPRINT,
+    );
+
+    // hosts.toml: `hosts-only` (trust.toml has never heard of this name),
+    // `hosts-wins` (its address here differs from the trust.toml pin
+    // above, and its `user` has no `trust.toml` counterpart to conflict
+    // with since `hosts.toml` is the only source of `user`), and `agree`
+    // (its address here matches the trust.toml pin above exactly).
+    std::fs::write(
+        sandbox.config_dir().join("hosts.toml"),
+        "[[host]]\n\
+         name = \"hosts-wins\"\n\
+         address = \"hosts-address.example.com:4433\"\n\
+         user = \"dave\"\n\
+         \n\
+         [[host]]\n\
+         name = \"hosts-only\"\n\
+         address = \"hosts-only.example.com:4433\"\n\
+         \n\
+         [[host]]\n\
+         name = \"agree\"\n\
+         address = \"agree-address.example.com:4433\"\n",
+    )
+    .expect("write hosts.toml fixture");
+
+    let (code, hosts) = sandbox.json(&["hosts", "--json"]);
+    assert_eq!(code, 0, "{hosts}");
+    check("host.list.with_hosts_toml.json", hosts);
+
+    let (code, host) = sandbox.json(&["host", "get", "hosts-wins", "--json"]);
+    assert_eq!(code, 0, "{host}");
+    check("host.get.with_hosts_toml.json", host);
 }
 
 /// `trust add` re-run for a name already pinned under the *same*

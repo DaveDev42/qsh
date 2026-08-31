@@ -209,16 +209,30 @@
               "type": "string"
             },
             "device_id": {
-              "description": "The peer's SPKI SHA-256 fingerprint, `sha256:BASE64`\n(`docs/design/architecture.md` §5) — the value pinned in the trust\nstore for a forward host, or the value the daemon TLS-verified for a\nreverse host. Never `Hello.device_name` or any other wire display\nname (`docs/design/protocol.md` §3: identity is never taken from\nwire data), e.g. `\"sha256:BASE64FINGERPRINT\"`.",
+              "description": "The peer's SPKI SHA-256 fingerprint, `sha256:BASE64`\n(`docs/design/architecture.md` §5) — the value pinned in the trust\nstore for a forward host, or the value the daemon TLS-verified for a\nreverse host. Never `Hello.device_name` or any other wire display\nname (`docs/design/protocol.md` §3: identity is never taken from\nwire data), e.g. `\"sha256:BASE64FINGERPRINT\"`. This is the identity\n*pinned to this name* — trust.toml's answer to \"who is this name\nsupposed to be\" — never an observation of who currently answers at\n`address` (`PLAN.md` Step 3 (a)-추기 ②): a forward host's `address`\ncan come from `hosts.toml`, which supplies no identity of its own,\nso `device_id` always still names the trust.toml-pinned peer that\nTLS must verify at that address, whichever directory the address\ncame from.",
               "type": "string"
             },
             "name": {
               "description": "Local alias for this host.",
               "type": "string"
             },
+            "source": {
+              "description": "Additive, `PLAN.md` M7 Step 3 — for a `\"forward\"` host, which\ndirectory's *address* was actually used (`PLAN.md` Step 3 (a)-추기\n②; not merely which directory(s) name the host): `\"hosts\"` when\n`hosts.toml` set a non-empty address for this name and it differs\nfrom (or is the only address for) trust.toml's pin; `\"trust\"` when\n`hosts.toml` has no entry, or its address is empty, so trust.toml's\npinned address is the one actually used; `\"both\"` only when both\nsides set the *same* address. `None` for a `\"reverse\"` host (reverse\nregistration is never `hosts.toml`-sourced), and `None` for a\n`\"forward\"` host whenever the whole `hosts.toml` directory has zero\nentries — a deployment that never adopted it sees the identical\npre-M7-Step-3 shape (`docs/CLI.md` §5). Security note: write access\nto `hosts.toml` is the power to redirect a name to a different\nalready-pinned peer (mTLS still blocks an unpinned address) — such a\nredirect is exactly what `source: \"hosts\"` (address differs from\ntrust.toml's pin, or trust.toml has no pin at all) reveals.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "state": {
               "description": "Reachability, open string set (`docs/CLI.md` §10): `\"reachable\"` |\n`\"stale\"` | `\"unknown\"`. A forward host is never probed for\nreachability in M3, so it always reports `\"unknown\"` — an\nunconfirmed host is never reported as `\"reachable\"`. A live reverse\nregistration (the controller is actively holding an authenticated\nconnection to it) is `\"reachable\"`; a registration whose connection\ndied is `\"stale\"` for the controller's retention window\n(`docs/design/protocol.md` §11-4) before it is dropped.",
               "type": "string"
+            },
+            "user": {
+              "description": "Additive, `PLAN.md` M7 Step 3 — `hosts.toml`'s `user` hint for this\nname, if it set one. Never an identity or an account selector, only\never the same `SessionOpen.user` assertion hint `docs/CLI.md` §7\nalready documents; `None` when `hosts.toml` has no entry (or no\n`user`) for this name.",
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [
@@ -305,7 +319,7 @@
         "outputSchema": {
           "$defs": {
             "Host": {
-              "description": "A host entry as returned by `qsh hosts` / `qsh host get`\n(`docs/CLI.md` §5, \"Host\").\n\nPlaceholder no longer describes this type: M3 Step 1 is the first thing\nto fix its value vocabulary (below), even though no op emits it and no\nfixture exists for it *yet* (both land in Step 5) — so this is the\n*first definition* of these fields' meaning, not a documented-meaning\nchange that would require `/v2` (`docs/CLI.md` §10). Actual production\n(`host.list`/`host.get`) lands with the M3 reverse registry and `qsh\nlisten`/`qsh reverse` steps later in this milestone; the host *directory*\n(`hosts.toml`) is M7.",
+              "description": "A host entry as returned by `qsh hosts` / `qsh host get`\n(`docs/CLI.md` §5, \"Host\").\n\nPlaceholder no longer describes this type: M3 Step 1 is the first thing\nto fix its value vocabulary (below), even though no op emits it and no\nfixture exists for it *yet* (both land in Step 5) — so this is the\n*first definition* of these fields' meaning, not a documented-meaning\nchange that would require `/v2` (`docs/CLI.md` §10). Actual production\n(`host.list`/`host.get`) lands with the M3 reverse registry and `qsh\nlisten`/`qsh reverse` steps later in this milestone; `source`/`user`\n(below) are the M7 Step 3 host *directory* (`hosts.toml`) addition,\nadditive-optional on top of this same type.",
               "properties": {
                 "address": {
                   "description": "`host:port` this client dials (forward hosts) or last observed from\n(reverse hosts).",
@@ -316,16 +330,30 @@
                   "type": "string"
                 },
                 "device_id": {
-                  "description": "The peer's SPKI SHA-256 fingerprint, `sha256:BASE64`\n(`docs/design/architecture.md` §5) — the value pinned in the trust\nstore for a forward host, or the value the daemon TLS-verified for a\nreverse host. Never `Hello.device_name` or any other wire display\nname (`docs/design/protocol.md` §3: identity is never taken from\nwire data), e.g. `\"sha256:BASE64FINGERPRINT\"`.",
+                  "description": "The peer's SPKI SHA-256 fingerprint, `sha256:BASE64`\n(`docs/design/architecture.md` §5) — the value pinned in the trust\nstore for a forward host, or the value the daemon TLS-verified for a\nreverse host. Never `Hello.device_name` or any other wire display\nname (`docs/design/protocol.md` §3: identity is never taken from\nwire data), e.g. `\"sha256:BASE64FINGERPRINT\"`. This is the identity\n*pinned to this name* — trust.toml's answer to \"who is this name\nsupposed to be\" — never an observation of who currently answers at\n`address` (`PLAN.md` Step 3 (a)-추기 ②): a forward host's `address`\ncan come from `hosts.toml`, which supplies no identity of its own,\nso `device_id` always still names the trust.toml-pinned peer that\nTLS must verify at that address, whichever directory the address\ncame from.",
                   "type": "string"
                 },
                 "name": {
                   "description": "Local alias for this host.",
                   "type": "string"
                 },
+                "source": {
+                  "description": "Additive, `PLAN.md` M7 Step 3 — for a `\"forward\"` host, which\ndirectory's *address* was actually used (`PLAN.md` Step 3 (a)-추기\n②; not merely which directory(s) name the host): `\"hosts\"` when\n`hosts.toml` set a non-empty address for this name and it differs\nfrom (or is the only address for) trust.toml's pin; `\"trust\"` when\n`hosts.toml` has no entry, or its address is empty, so trust.toml's\npinned address is the one actually used; `\"both\"` only when both\nsides set the *same* address. `None` for a `\"reverse\"` host (reverse\nregistration is never `hosts.toml`-sourced), and `None` for a\n`\"forward\"` host whenever the whole `hosts.toml` directory has zero\nentries — a deployment that never adopted it sees the identical\npre-M7-Step-3 shape (`docs/CLI.md` §5). Security note: write access\nto `hosts.toml` is the power to redirect a name to a different\nalready-pinned peer (mTLS still blocks an unpinned address) — such a\nredirect is exactly what `source: \"hosts\"` (address differs from\ntrust.toml's pin, or trust.toml has no pin at all) reveals.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "state": {
                   "description": "Reachability, open string set (`docs/CLI.md` §10): `\"reachable\"` |\n`\"stale\"` | `\"unknown\"`. A forward host is never probed for\nreachability in M3, so it always reports `\"unknown\"` — an\nunconfirmed host is never reported as `\"reachable\"`. A live reverse\nregistration (the controller is actively holding an authenticated\nconnection to it) is `\"reachable\"`; a registration whose connection\ndied is `\"stale\"` for the controller's retention window\n(`docs/design/protocol.md` §11-4) before it is dropped.",
                   "type": "string"
+                },
+                "user": {
+                  "description": "Additive, `PLAN.md` M7 Step 3 — `hosts.toml`'s `user` hint for this\nname, if it set one. Never an identity or an account selector, only\never the same `SessionOpen.user` assertion hint `docs/CLI.md` §7\nalready documents; `None` when `hosts.toml` has no entry (or no\n`user`) for this name.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 }
               },
               "required": [

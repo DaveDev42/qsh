@@ -14,6 +14,7 @@ use qsh_proto::{
 use qsh_transport::{DialError, Dialer, Fingerprint, StaticTrust};
 
 use crate::config::{Config, Paths, now_rfc3339};
+use crate::hosts::HostsFile;
 use crate::identity::LoadedIdentity;
 use crate::trust::{SharedTrustStore, TrustStore};
 
@@ -449,10 +450,13 @@ impl Ops {
         })
     }
 
-    /// Resolve `host` (a trust-store peer name) to a dial target: loads the
-    /// identity (`CONFIG_ERROR` before `qsh init`) and requires the peer to
-    /// be pinned with an address (`HOST_NOT_FOUND` otherwise). Until the
-    /// hosts directory lands (M7) the trust store is the host directory.
+    /// Resolve `host` to a dial target: loads the identity (`CONFIG_ERROR`
+    /// before `qsh init`) and resolves an address via `hosts.toml`
+    /// layered over the trust store's pinned peers (`PLAN.md` M7 Step 3,
+    /// §4.1 #4 — `hosts.toml` first, trust-store pin as fallback;
+    /// `HOST_NOT_FOUND` when neither source has one). Identity/trust is
+    /// still decided solely by the trust store: this only changes where
+    /// the *address* comes from.
     ///
     /// **Runtime caveat:** loads the identity synchronously — call it
     /// outside a tokio runtime (see [`Ops::load_identity`]).
@@ -464,7 +468,8 @@ impl Ops {
             )
         })?;
         let trust = self.open_trust()?;
-        let (address, server_name) = resolve_peer_address(&trust.snapshot(), host)?;
+        let hosts = HostsFile::load(&self.paths.hosts_file())?;
+        let (address, server_name) = resolve_peer_address(&trust.snapshot(), &hosts, host)?;
         Ok(PeerTarget {
             identity,
             trust,
@@ -583,34 +588,49 @@ pub(crate) async fn resolve_one(address: &str) -> Result<SocketAddr, OpError> {
 
 /// The `(address, server_name)` half of [`Ops::resolve_peer`] that touches
 /// no identity — split out so a caller that already holds its own
-/// [`LoadedIdentity`] can reuse the trust-store lookup without a second
-/// synchronous identity load of its own. `qsh reverse` (`PLAN.md` M3 Step
-/// 3, `crate::reverse::target::run_reverse`) is that caller: it loads
-/// identity once, outside any runtime, ahead of a reconnect loop that must
-/// not reopen the keystore per dial (`docs/design/protocol.md` §11-4), so
-/// it cannot go through [`Ops::resolve_peer`] itself (which always loads
-/// identity synchronously — safe only when called before a runtime
-/// exists, per that method's own doc).
+/// [`LoadedIdentity`] can reuse the trust-store/`hosts.toml` lookup without
+/// a second synchronous identity load of its own. `qsh reverse` (`PLAN.md`
+/// M3 Step 3, `crate::reverse::target::run_reverse`/`dial_and_register`) is
+/// that caller: it loads identity once, outside any runtime, ahead of a
+/// reconnect loop that must not reopen the keystore per dial
+/// (`docs/design/protocol.md` §11-4), so it cannot go through
+/// [`Ops::resolve_peer`] itself (which always loads identity synchronously
+/// — safe only when called before a runtime exists, per that method's own
+/// doc).
+///
+/// Address resolution: `hosts.toml` layered over `trust`'s pinned peers,
+/// via [`host::resolve_forward`] — the exact same decision
+/// [`Ops::host_list`]/[`Ops::resolve_host_route`] make (`PLAN.md` M7 Step
+/// 3, §4.1 #4). Identity/trust is unaffected: the fingerprint a dial
+/// actually presents is still verified solely against `trust` at the TLS
+/// layer ([`qsh_transport::TrustEvaluator::lookup_pin`] is fingerprint-
+/// keyed across the whole store, not scoped to `host`) — `hosts.toml`
+/// supplying an address for a name with no trust peer, or a different
+/// address than trust's own pin, never changes *who* is allowed to answer.
 pub(crate) fn resolve_peer_address(
     trust: &TrustStore,
+    hosts: &HostsFile,
     host: &str,
 ) -> Result<(String, String), OpError> {
-    let peer = trust.find(host).cloned().ok_or_else(|| {
-        OpError::new(
-            ErrorCode::HostNotFound,
-            format!(
-                "host {host:?} is not in the trust store; pin it with `qsh trust add {host} --address <host:port> --fingerprint sha256:...`"
-            ),
-        )
-    })?;
-    if peer.address.is_empty() {
-        return Err(OpError::new(
-            ErrorCode::HostNotFound,
-            format!("host {host:?} has no address recorded in the trust store"),
-        ));
-    }
-    let server_name = server_name_for(&peer.address);
-    Ok((peer.address, server_name))
+    let hosts_has_any = !hosts.entries().is_empty();
+    // Message text is a frozen golden fixture
+    // (`crates/qsh-cli/tests/fixtures/cli-v1/error.HOST_NOT_FOUND.json`,
+    // via `qsh exec nowhere`) — kept byte-identical to the pre-M7-Step-3
+    // wording even though the remedy it names (`qsh trust add`) is now
+    // only one of two ways to fix this (the other being a `hosts.toml`
+    // entry); fixtures are append-only, this is not an editable one.
+    let entry = host::resolve_forward(trust.find(host), hosts.find(host), hosts_has_any)
+        .ok_or_else(|| {
+            OpError::new(
+                ErrorCode::HostNotFound,
+                format!(
+                    "host {host:?} is not in the trust store; pin it with `qsh trust add {host} \
+                     --address <host:port> --fingerprint sha256:...`"
+                ),
+            )
+        })?;
+    let server_name = server_name_for(&entry.address);
+    Ok((entry.address, server_name))
 }
 
 /// SNI value for a dial. The verifier ignores it entirely

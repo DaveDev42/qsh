@@ -41,9 +41,17 @@ M6 마감(2026-08-31, ROADMAP M6 마감 노트)과 함께 이 문서는 M7 실�
 
 ### Step 3 — `hosts.toml` host profile + 첫 실행 경험
 
-**(a) 범위:** architecture.md §7 문면대로 `hosts.toml`(`[[host]] name·address·user`) 도입 — trust.toml(신뢰)과 분리된 주소 directory. `host.list`/host 해석이 trust.toml 단일 출처에서 hosts.toml 우선으로 확장(우선순위 규칙은 4.1 #4). `user`는 M7에서도 assertion hint일 뿐(불일치 시 `UNSUPPORTED`, PRD §6 user switching 없음 유지). README 첫 실행 절 초안(Step 7 스톱워치의 대본이 된다).
+**(a) 범위:** architecture.md §7 문면대로 `hosts.toml`(`[[host]] name·address·user`) 도입 — trust.toml(신뢰)과 분리된 주소 directory. `host.list`/host 해석이 trust.toml 단일 출처에서 hosts.toml 우선으로 확장(우선순위 규칙은 4.1 #4). `user`는 M7에서도 assertion hint일 뿐(불일치 시 `UNSUPPORTED`, PRD §6 user switching 없음 유지). README 첫 실행 절 초안(Step 8 스톱워치의 대본이 된다).
 
 **(d) 완료 판정:** hosts.toml 유무·병합 각 조합의 host 해석 테스트, `qsh hosts`/`qsh host` 출력 계약 additive 검사.
+
+**(a)-추기 — Step 3 확정 + 검증 라운드 판정 (2026-08-31, main 세션).** §4.1 #4 확정: hosts.toml 주소 우선, trust pinned fallback, 신뢰(fingerprint)는 trust.toml 단독 판정 — 실 QUIC 우선순위 테스트로 고정. 구현 증분 14+4 파일, 신규 테스트 25건(1182→1207), 게이트 5종 green(구현자 watchdog 종료로 §G 미기입 — main 세션이 로그 5건으로 직접 확인). tools_list.json 재생성은 값-보유 golden 규율(testing.md L6)대로 main 세션 diff 리뷰 통과(required 무변경, 신규 2필드 ["string","null"]). opus 검증 라운드는 사용자 중단으로 §C 이후 미완 — §A 주장 5건 판정(4 성립, #5 "성립하나 불충분")과 P1 1·P2 3·P3 5는 확보, mutation 실증·게이트 재실행은 fixer 라운드에 승계. 중단 잔재(mutation ① 미원복 1줄)는 main 세션이 원복하고 byte-identical 재확인. 판정:
+① **P1-1 수정 지시** — README "First run"이 acl.toml 단계 누락 + serve 선기동 순서로 M6 캠페인이 기록한 실패 모드(PERMISSION_DENIED)를 재발시킴(실측 재현). acl.toml 작성이 serve 시작 **전**에 오도록 절 재구성(trust add는 Step 2의 내용 기반 재로드 덕에 serve 후라도 무방 — 검증자 실측), "Five commands" 계수 정정. 이 절이 Step 8 스톱워치의 대본이므로 문면 그대로 따라 성공해야 한다.
+② **P2-0+P2-1 수정 지시(한 몸)** — pin 조회가 fingerprint 기준 전역이라 hosts.toml 한 줄로 이름을 기핀 타 peer로 무성 재지향 가능(0700 동일 디렉터리라 신규 권한 계층은 아님 — P1 격하 타당). 잔여 문제는 탐지 창구의 거짓말: 충돌 시 `host get`이 실재하지 않는 (주소, device_id) 조합을 단언하고 `source:"both"`가 충돌을 가림. 수정: **`source` 의미를 주소 승자 기준으로 재정의**(미커밋 필드라 자유) — "hosts"(hosts.toml 주소 채택: trust와 다르거나 trust 무주소), "trust"(trust 주소 채택), "both"(**양쪽이 같은 주소로 일치할 때만**). 이러면 재지향이 `source:"hosts"`로 즉시 드러나고 "both"는 일치의 증언이 된다. device_id 문서에 "이름에 핀된 신원이지 주소 현점유자의 관측이 아니다" 명시, CLI.md §6.1+README에 threat 한 문장(hosts.toml 쓰기 = 기핀 peer로의 이름 재지향 권한; mTLS는 여전히 임의 주소를 막는다), 충돌 시나리오 고정 테스트 + 값-보유 golden 재생성(diff 리뷰).
+③ **P2-2 수정 지시** — exec.rs map_dial_error 직전 주석("주소가 있다 = trust store에 있다")이 Step 3으로 무효 — hosts.toml-only 이름의 LocalRejected는 missing pin인데도 mismatch로 설명. 주석만 실동작 서술로 갱신(계약은 §6.11이 이미 일관 — 검증자 실측).
+④ **P3 수정 2건** — P3-1: CLI.md §6.1에 hosts.toml 신선도 의미론 1-2문장(op 시작 시 해석; attach 재접속은 attach 시점 해석 유지 — trust 내용 기반 재로드와 명시 대비). P3-5: reverse 라우팅에서 hosts.toml user hint가 적용은 되는데 표시는 None인 불일치 — reverse Host emit에도 user를 채워 표시-적용 일치(additive, source는 주소 개념이라 reverse에서 계속 생략), 테스트 1건.
+⑤ **P3 기록(무수정)** — P3-2 human 표에 SOURCE/USER 열 상시 추가는 human 비계약이라 무해; P3-3 serve 측 hosts.toml 비독자는 의도 부합(architecture.md §7에 1줄 명시는 fixer 재량); P3-4 PLAN 오참조는 아래에서 main 세션이 정정.
+⑥ **검증 승계** — 중단으로 미완된 mutation 2종(우선순위 반전 → 우선순위+실연결 테스트 FAIL, user 불일치 우회 → UNSUPPORTED 테스트 FAIL)은 fixer가 표적 cargo test로 실증하고, 수정 후 전체 게이트 5종 재실행. 환경: main 세션이 cargo clean 단행(deps 173GB → 디스크 99% 해소, syspolicyd 부하 근원 제거) — 이번 게이트는 풀 리빌드 1회 비용.
 
 ### Step 4 — invite pairing (ADR-0002 구현)
 

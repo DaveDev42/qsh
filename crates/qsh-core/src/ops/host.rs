@@ -28,11 +28,13 @@
 //! (`ErrorCode::InvalidArgument`) rather than a silent pick — fail closed
 //! in routing, never in listing.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use qsh_proto::local::LocalHost;
-use qsh_proto::{ErrorCode, Host, HostGetReq, HostListData};
+use qsh_proto::{ErrorCode, Host, HostGetReq, HostListData, TrustPeer};
 
+use crate::hosts::{HostEntry, HostsFile};
 use crate::ops::{OpError, Operation, Ops};
 use crate::trust::TrustStore;
 
@@ -73,12 +75,25 @@ pub(crate) struct ReverseHostEntry {
 /// grow their own, divergent rules (`PLAN.md` M3 Step 5).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostRoute {
-    /// Dial the trust-store-pinned address directly.
+    /// Dial directly — the address `hosts.toml`/the trust store pin
+    /// resolves to (`PLAN.md` M7 Step 3, [`resolve_forward`]).
     Forward {
-        /// `host:port` to dial.
+        /// `host:port` to dial — `hosts.toml`'s address when it has this
+        /// name, the trust store pin's address otherwise.
         address: String,
-        /// The pinned SPKI SHA-256 fingerprint.
+        /// The pinned SPKI SHA-256 fingerprint, from the trust store.
+        /// Empty when no trust-store peer shares this name — a
+        /// `hosts.toml`-only entry names an address, never an identity
+        /// (this module's own doc).
         fingerprint: String,
+        /// Which directory's *address* actually won — `"hosts"`/`"trust"`/
+        /// `"both"` (`"both"` only when they agree — [`resolve_forward`]'s
+        /// own doc, `PLAN.md` Step 3 (a)-추기 ②) — or `None` when
+        /// `hosts.toml` has no entries at all (preserves the pre-M7-Step-3
+        /// `Host` shape exactly, `docs/CLI.md` §5).
+        source: Option<String>,
+        /// `hosts.toml`'s `user` hint for this name, if it set one.
+        user: Option<String>,
     },
     /// Relay through this machine's resident `qsh listen` daemon, over its
     /// live reverse registration — the proven-reachable path, preferred
@@ -98,6 +113,19 @@ pub enum HostRoute {
         /// The registration's generation (Step 8's `LocalReconnect` needs
         /// this to detect a re-registration).
         generation: u64,
+        /// `hosts.toml`'s `user` hint for this name, if it set a non-empty
+        /// one — carried through so a reverse-routed name's displayed
+        /// `Host.user` matches what `Ops::session_open`'s
+        /// `resolve_user_hint` actually sends: that helper resolves the
+        /// hint purely from the host *name*, before routing ever decides
+        /// forward vs. reverse, so a reverse route showing `user: None`
+        /// while the hint is genuinely applied would be a display/
+        /// applied-value mismatch (`PLAN.md` Step 3 (a)-추기 ④, P3-5). `source`
+        /// stays `None`/omitted for a reverse route regardless (this
+        /// struct's own field doc on the Forward arm) — `source` is an
+        /// *address* concept and a reverse route's address never comes
+        /// from `hosts.toml`; `user` has no such tie to the address.
+        user: Option<String>,
     },
 }
 
@@ -110,16 +138,21 @@ impl HostRoute {
             HostRoute::Forward {
                 address,
                 fingerprint,
+                source,
+                user,
             } => Host {
                 name: name.to_string(),
                 address,
                 connection_mode: "forward".to_string(),
                 state: "unknown".to_string(),
                 device_id: fingerprint,
+                source,
+                user,
             },
             HostRoute::Reverse {
                 address,
                 fingerprint,
+                user,
                 ..
             } => Host {
                 name: name.to_string(),
@@ -127,48 +160,185 @@ impl HostRoute {
                 connection_mode: "reverse".to_string(),
                 state: "reachable".to_string(),
                 device_id: fingerprint,
+                // A reverse registration is never `hosts.toml`-sourced —
+                // it comes from a live daemon, not either address book
+                // (this struct's own field doc). `user` is not tied to
+                // that — see `HostRoute::Reverse::user`'s own doc.
+                source: None,
+                user,
             },
         }
     }
 }
 
-/// Pure mapping: pinned peers that carry an address become forward `Host`
-/// entries (`docs/CLI.md` §5: "forward source = trust store pinned peers
-/// that have an address"). Split out from any I/O so the merge table
-/// (`PLAN.md` M3 Step 5 (c)) is testable against a hand-built
-/// [`TrustStore`], never a real file.
+/// The resolved forward-route data for one host name, after layering
+/// `hosts.toml` over `trust.toml`'s pinned peers (`PLAN.md` M7 §4.1 #4,
+/// `crate::hosts` module doc): `hosts.toml`'s address wins when both name
+/// this host; the fingerprint always comes from `trust.toml` —
+/// `hosts.toml` never supplies identity, only ever an address/user hint.
 ///
-/// The `!address.is_empty()` filter here is the same "routable pin" rule
-/// [`TrustStore::resolve_host`] applies for a single name — `resolve_route`
-/// below calls that method rather than re-deriving the rule, and
-/// `forward_hosts_and_resolve_route_agree_on_routability` (this module's
-/// tests) pins the two together so a future change to what counts as
-/// routable can't drift silently between listing and routing.
-fn forward_hosts(store: &TrustStore) -> Vec<Host> {
-    store
-        .peers()
-        .iter()
-        .filter(|peer| !peer.address.is_empty())
-        .map(|peer| Host {
-            name: peer.name.clone(),
-            address: peer.address.clone(),
-            connection_mode: "forward".to_string(),
-            state: "unknown".to_string(),
-            device_id: peer.fingerprint.clone(),
+/// `pub(super)`: [`crate::ops::resolve_peer_address`] (`ops/mod.rs`) reuses
+/// this exact struct/function rather than re-deriving the merge rule a
+/// second time — the same "one choke point" discipline `forward_hosts`'s
+/// own doc calls out for [`crate::trust::TrustStore::resolve_host`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ForwardEntry {
+    pub(super) address: String,
+    pub(super) fingerprint: String,
+    pub(super) source: Option<String>,
+    pub(super) user: Option<String>,
+}
+
+/// Layer one name's `hosts.toml` entry over its `trust.toml` pin
+/// (`PLAN.md` M7 §4.1 #4). `None` means neither source has a routable
+/// address for this name.
+///
+/// - **Address:** `hosts.toml`'s address when it has a non-empty one for
+///   this name; the trust pin's address otherwise. An explicit
+///   `hosts.toml` entry with an empty `address` is not routable from
+///   there — falls through to the trust pin exactly like a client-only
+///   pin's own empty address does (`crate::hosts::HostEntry::address`'s
+///   doc).
+/// - **Fingerprint:** always `trust_peer`'s, empty when no trust peer
+///   shares this name — `hosts.toml` never asserts identity.
+/// - **`source`:** which directory's *address* actually won, redefined
+///   post-Step-3-verification (`PLAN.md` Step 3 (a)-추기 ②) away from "which
+///   directory names this host" — the original definition let `"both"`
+///   mean "the two directories disagree on the address" exactly as often
+///   as it meant "they agree", which hid the one thing an operator most
+///   needs `qsh hosts`/`qsh host get` to say out loud: whether `hosts.toml`
+///   silently redirected a pinned name somewhere `trust.toml` never said
+///   (`docs/CLI.md` §6.1's threat paragraph). Now: `"hosts"` when
+///   `hosts.toml`'s address is the one used, because either `trust.toml`
+///   has none for this name or the two addresses differ (`hosts.toml`
+///   always wins a disagreement — the priority rule above — so a
+///   disagreement is exactly a redirect, not an agreement); `"trust"`
+///   when `trust.toml`'s address is the one used, because either
+///   `hosts.toml` has no entry for this name or its entry's address is
+///   empty; `"both"` **only** when both sides name a non-empty address
+///   and the two addresses are identical — the one case that is actually
+///   "they agree", which is the only case the old definition's "both"
+///   claimed to mean but didn't reliably. `None` (not `Some(_)`) whenever
+///   `hosts.toml` has zero entries anywhere in the whole file, so a
+///   deployment that never adopted `hosts.toml` gets byte-identical
+///   `Host` JSON to before M7 Step 3 (`docs/CLI.md` §5's additive-only
+///   contract; pinned by the pre-existing `host.list.json`/
+///   `host.get.json` goldens) — this part of the rule is unchanged by the
+///   redefinition.
+/// - **`user`:** `hosts.toml`'s hint for this name, if it set one —
+///   independent of which address won, since the hint is a property of
+///   the name, not of the winning route.
+pub(super) fn resolve_forward(
+    trust_peer: Option<&TrustPeer>,
+    hosts_entry: Option<&HostEntry>,
+    hosts_has_any: bool,
+) -> Option<ForwardEntry> {
+    let hosts_address = hosts_entry
+        .map(|entry| entry.address.as_str())
+        .filter(|address| !address.is_empty());
+    let trust_address = trust_peer
+        .map(|peer| peer.address.as_str())
+        .filter(|address| !address.is_empty());
+
+    let address = match (hosts_address, trust_address) {
+        (Some(address), _) => address.to_string(),
+        (None, Some(address)) => address.to_string(),
+        (None, None) => return None,
+    };
+
+    // Address-winner based, not name-presence based (this function's own
+    // doc, above) — the `(None, None)` arm is unreachable because the
+    // `address` match above already returned `None` for that case.
+    let source = match (hosts_address, trust_address) {
+        (Some(hosts), Some(trust)) if hosts == trust => "both",
+        (Some(_), _) => "hosts",
+        (None, Some(_)) => "trust",
+        (None, None) => unreachable!("an address above came from one of the two sources"),
+    };
+
+    Some(ForwardEntry {
+        address,
+        fingerprint: trust_peer
+            .map(|peer| peer.fingerprint.clone())
+            .unwrap_or_default(),
+        source: hosts_has_any.then(|| source.to_string()),
+        user: hosts_entry.and_then(|entry| entry.user.clone()),
+    })
+}
+
+/// Pure mapping: every name either `hosts.toml` or a routable `trust.toml`
+/// pin knows about becomes one forward `Host` entry (`docs/CLI.md` §5,
+/// extended `PLAN.md` M7 Step 3 by [`resolve_forward`]). Split out from
+/// any I/O so the merge table (`PLAN.md` M3 Step 5 (c)) is testable
+/// against hand-built [`TrustStore`]/[`HostsFile`] values, never real
+/// files.
+///
+/// Name order: trust pins first (in store order, the pre-M7-Step-3
+/// order), then any `hosts.toml`-only names not already covered, in file
+/// order — keeps the existing goldens' entry order unperturbed when
+/// `hosts.toml` is absent or only restates trust names.
+fn forward_hosts(store: &TrustStore, hosts: &HostsFile) -> Vec<Host> {
+    let hosts_has_any = !hosts.entries().is_empty();
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut names: Vec<&str> = Vec::new();
+    for peer in store.peers() {
+        if seen.insert(peer.name.as_str()) {
+            names.push(peer.name.as_str());
+        }
+    }
+    for entry in hosts.entries() {
+        if seen.insert(entry.name.as_str()) {
+            names.push(entry.name.as_str());
+        }
+    }
+
+    names
+        .into_iter()
+        .filter_map(|name| {
+            let entry = resolve_forward(store.find(name), hosts.find(name), hosts_has_any)?;
+            Some(Host {
+                name: name.to_string(),
+                address: entry.address,
+                connection_mode: "forward".to_string(),
+                state: "unknown".to_string(),
+                device_id: entry.fingerprint,
+                source: entry.source,
+                user: entry.user,
+            })
         })
         .collect()
 }
 
+/// `hosts.toml`'s `user` hint for `name`, if it set a non-empty one — the
+/// exact same lookup+filter [`crate::ops::session::Ops::resolve_user_hint`]
+/// applies (`docs/CLI.md` §7), reused here so a reverse-routed name's
+/// listed/displayed `user` matches what that choke point actually sends
+/// (`PLAN.md` Step 3 (a)-추기 ④, P3-5) — that helper resolves the hint from
+/// the host *name* alone, before routing ever decides forward vs. reverse,
+/// so this module's own reverse-`Host` builders have to do the identical
+/// lookup rather than hard-coding `None`.
+fn hosts_toml_user(hosts: &HostsFile, name: &str) -> Option<String> {
+    hosts
+        .find(name)
+        .and_then(|entry| entry.user.clone())
+        .filter(|user| !user.trim().is_empty())
+}
+
 /// Pure mapping: one reverse-source entry becomes a `Host` (`docs/CLI.md`
 /// §5: reverse `state` is whatever the daemon reported, `device_id` is the
-/// TLS-verified fingerprint).
-fn reverse_host(entry: &ReverseHostEntry) -> Host {
+/// TLS-verified fingerprint). `hosts` is consulted only for [`hosts_toml_user`]
+/// — a reverse route's `source`/address never come from `hosts.toml`.
+fn reverse_host(entry: &ReverseHostEntry, hosts: &HostsFile) -> Host {
     Host {
         name: entry.local.name.clone(),
         address: entry.local.address.clone(),
         connection_mode: "reverse".to_string(),
         state: entry.local.state.clone(),
         device_id: entry.local.fingerprint.clone(),
+        // Never `hosts.toml`-sourced — see `HostRoute::into_host`'s
+        // identical Reverse-arm comment.
+        source: None,
+        user: hosts_toml_user(hosts, &entry.local.name),
     }
 }
 
@@ -177,10 +347,10 @@ fn reverse_host(entry: &ReverseHostEntry) -> Host {
 /// both sources yields two entries; the same name held live by two
 /// daemons still yields two entries (listing never fails closed —
 /// `resolve_host_route` is where routing fails closed instead).
-fn merge_hosts(forward: Vec<Host>, reverse: &[ReverseHostEntry]) -> Vec<Host> {
-    let mut hosts = forward;
-    hosts.extend(reverse.iter().map(reverse_host));
-    hosts
+fn merge_hosts(forward: Vec<Host>, reverse: &[ReverseHostEntry], hosts: &HostsFile) -> Vec<Host> {
+    let mut all = forward;
+    all.extend(reverse.iter().map(|entry| reverse_host(entry, hosts)));
+    all
 }
 
 /// A reverse-source entry counts as "live" for routing purposes when the
@@ -201,6 +371,7 @@ fn is_live(entry: &ReverseHostEntry) -> bool {
 fn resolve_route(
     reverse: &[ReverseHostEntry],
     store: &TrustStore,
+    hosts: &HostsFile,
     name: &str,
 ) -> Result<HostRoute, OpError> {
     if name.trim().is_empty() {
@@ -231,6 +402,7 @@ fn resolve_route(
                 address: entry.local.address.clone(),
                 fingerprint: entry.local.fingerprint.clone(),
                 generation: entry.local.generation,
+                user: hosts_toml_user(hosts, name),
             });
         }
         many => {
@@ -249,18 +421,21 @@ fn resolve_route(
         }
     }
 
-    // Reuses `TrustStore::resolve_host` — the single existing "a pin only
-    // routes when it carries an address" predicate `ops::resolve_peer_address`
-    // (`qsh exec`'s own routing) already applies — rather than
-    // re-implementing the `!address.is_empty()` rule inline a second time.
-    // [`forward_hosts`] below applies the identical rule across every pin
-    // for listing; keeping both on `TrustStore::resolve_host`'s definition
-    // is what keeps listing and routing from growing divergent rules
-    // (adversarial review finding: the two were previously hand-duplicated).
-    if let Some(peer) = store.resolve_host(name) {
+    // Reuses `resolve_forward` — the single existing "layer hosts.toml over
+    // the trust pin" rule `ops::resolve_peer_address` (`qsh exec`'s own
+    // routing) also calls — rather than re-implementing the merge inline a
+    // second time. [`forward_hosts`] above applies the identical rule
+    // across every name for listing; keeping both on `resolve_forward`'s
+    // definition is what keeps listing and routing from growing divergent
+    // rules (the same discipline the pre-M7-Step-3 code already followed
+    // for `TrustStore::resolve_host`).
+    let hosts_has_any = !hosts.entries().is_empty();
+    if let Some(entry) = resolve_forward(store.find(name), hosts.find(name), hosts_has_any) {
         return Ok(HostRoute::Forward {
-            address: peer.address.clone(),
-            fingerprint: peer.fingerprint.clone(),
+            address: entry.address,
+            fingerprint: entry.fingerprint,
+            source: entry.source,
+            user: entry.user,
         });
     }
 
@@ -279,10 +454,11 @@ impl Ops {
     /// local operation (§2.5) — no ACL check, no dial, purely local reads.
     pub fn host_list(&self) -> Result<HostListData, OpError> {
         let store = TrustStore::load(&self.paths.trust_file())?;
-        let forward = forward_hosts(&store);
+        let hosts = HostsFile::load(&self.paths.hosts_file())?;
+        let forward = forward_hosts(&store, &hosts);
         let reverse = self.reverse_host_entries();
         Ok(HostListData {
-            hosts: merge_hosts(forward, &reverse),
+            hosts: merge_hosts(forward, &reverse, &hosts),
         })
     }
 
@@ -328,7 +504,8 @@ impl Ops {
     pub fn resolve_host_route(&self, name: &str) -> Result<HostRoute, OpError> {
         let reverse = self.reverse_host_entries();
         let store = TrustStore::load(&self.paths.trust_file())?;
-        resolve_route(&reverse, &store, name)
+        let hosts = HostsFile::load(&self.paths.hosts_file())?;
+        resolve_route(&reverse, &store, &hosts, name)
     }
 
     /// The async twin of [`Self::resolve_host_route`] — same decision
@@ -353,7 +530,8 @@ impl Ops {
     pub async fn resolve_host_route_async(&self, name: &str) -> Result<HostRoute, OpError> {
         let reverse = self.reverse_host_entries_async().await;
         let store = TrustStore::load(&self.paths.trust_file())?;
-        resolve_route(&reverse, &store, name)
+        let hosts = HostsFile::load(&self.paths.hosts_file())?;
+        resolve_route(&reverse, &store, &hosts, name)
     }
 
     /// The reverse source: the union of `LocalHostList` across every
@@ -461,6 +639,34 @@ mod tests {
         store
     }
 
+    /// The pre-M7-Step-3 shape every test in this module that isn't
+    /// specifically about `hosts.toml` layering keeps using — an absent
+    /// directory, so `source`/`user` stay `None` throughout
+    /// (`resolve_forward`'s own doc).
+    fn no_hosts() -> HostsFile {
+        HostsFile::default()
+    }
+
+    fn hosts_with(entries: &[(&str, &str, Option<&str>)]) -> HostsFile {
+        let toml = entries
+            .iter()
+            .map(|(name, address, user)| match user {
+                Some(user) => format!(
+                    "[[host]]\nname = \"{name}\"\naddress = \"{address}\"\nuser = \"{user}\"\n"
+                ),
+                None => format!("[[host]]\nname = \"{name}\"\naddress = \"{address}\"\n"),
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("hosts.toml");
+        std::fs::write(&path, toml).expect("write hosts.toml");
+        // `HostsFile::load` reads and fully owns its result before `dir`
+        // goes out of scope at the end of this function — nothing in the
+        // returned value references the directory afterward.
+        HostsFile::load(&path).expect("parses")
+    }
+
     const FP_A: &str = "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
     // Not "BBBB…B": an all-`B` run of 43 base64 chars has non-zero trailing
     // bits in its last symbol, which `Fingerprint::from_str`'s canonical
@@ -475,7 +681,7 @@ mod tests {
     #[test]
     fn merge_forward_only() {
         let store = forward_store("mac", "mac.example.com:4433", FP_A);
-        let hosts = merge_hosts(forward_hosts(&store), &[]);
+        let hosts = merge_hosts(forward_hosts(&store, &no_hosts()), &[], &no_hosts());
         assert_eq!(hosts.len(), 1);
         assert_eq!(hosts[0].connection_mode, "forward");
         assert_eq!(hosts[0].state, "unknown");
@@ -484,7 +690,7 @@ mod tests {
     #[test]
     fn merge_reverse_only() {
         let reverse = vec![reverse_entry(100, "phone", "reachable", FP_A)];
-        let hosts = merge_hosts(Vec::new(), &reverse);
+        let hosts = merge_hosts(Vec::new(), &reverse, &no_hosts());
         assert_eq!(hosts.len(), 1);
         assert_eq!(hosts[0].connection_mode, "reverse");
         assert_eq!(hosts[0].state, "reachable");
@@ -494,7 +700,7 @@ mod tests {
     fn merge_same_name_both_sources_yields_two_entries() {
         let store = forward_store("mac", "mac.example.com:4433", FP_A);
         let reverse = vec![reverse_entry(100, "mac", "reachable", FP_B)];
-        let hosts = merge_hosts(forward_hosts(&store), &reverse);
+        let hosts = merge_hosts(forward_hosts(&store, &no_hosts()), &reverse, &no_hosts());
         assert_eq!(hosts.len(), 2, "same name in both sources must not merge");
         let modes: std::collections::BTreeSet<&str> =
             hosts.iter().map(|h| h.connection_mode.as_str()).collect();
@@ -507,7 +713,7 @@ mod tests {
     #[test]
     fn merge_includes_stale_reverse_entries() {
         let reverse = vec![reverse_entry(100, "old-laptop", "stale", FP_A)];
-        let hosts = merge_hosts(Vec::new(), &reverse);
+        let hosts = merge_hosts(Vec::new(), &reverse, &no_hosts());
         assert_eq!(hosts.len(), 1);
         assert_eq!(hosts[0].state, "stale");
     }
@@ -515,9 +721,27 @@ mod tests {
     #[test]
     fn merge_with_no_daemons_is_forward_only_not_an_error() {
         let store = forward_store("mac", "mac.example.com:4433", FP_A);
-        let hosts = merge_hosts(forward_hosts(&store), &[]);
+        let hosts = merge_hosts(forward_hosts(&store, &no_hosts()), &[], &no_hosts());
         assert_eq!(hosts.len(), 1);
         assert_eq!(hosts[0].connection_mode, "forward");
+    }
+
+    #[test]
+    fn merge_carries_the_hosts_toml_user_hint_onto_a_reverse_entry() {
+        // P3-5 (`PLAN.md` Step 3 (a)-추기 ④): `Ops::session_open`'s
+        // `resolve_user_hint` fills the default purely from the host
+        // *name*, before routing ever decides forward vs. reverse — so a
+        // reverse-routed name's listed `Host.user` must match, not show
+        // `None` while the hint is genuinely applied.
+        let reverse = vec![reverse_entry(100, "phone", "reachable", FP_A)];
+        let hosts = hosts_with(&[("phone", "unused.example.com:1", Some("dave"))]);
+        let listed = merge_hosts(Vec::new(), &reverse, &hosts);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].user.as_deref(), Some("dave"));
+        assert_eq!(
+            listed[0].source, None,
+            "source stays a pure address concept — never set for a reverse entry"
+        );
     }
 
     #[test]
@@ -529,7 +753,7 @@ mod tests {
             FP_A.parse().expect("fingerprint"),
             "2026-01-01T00:00:00Z".to_string(),
         );
-        assert!(forward_hosts(&store).is_empty());
+        assert!(forward_hosts(&store, &no_hosts()).is_empty());
     }
 
     #[test]
@@ -554,7 +778,7 @@ mod tests {
             "2026-01-01T00:00:00Z".to_string(),
         );
 
-        let listed: std::collections::BTreeSet<String> = forward_hosts(&store)
+        let listed: std::collections::BTreeSet<String> = forward_hosts(&store, &no_hosts())
             .into_iter()
             .map(|host| host.name)
             .collect();
@@ -563,9 +787,212 @@ mod tests {
             std::collections::BTreeSet::from(["routable".to_string()])
         );
 
-        assert!(resolve_route(&[], &store, "routable").is_ok());
-        let err = resolve_route(&[], &store, "addressless").unwrap_err();
+        assert!(resolve_route(&[], &store, &no_hosts(), "routable").is_ok());
+        let err = resolve_route(&[], &store, &no_hosts(), "addressless").unwrap_err();
         assert_eq!(err.code, ErrorCode::HostNotFound);
+    }
+
+    // ---- hosts.toml priority/merge (`PLAN.md` M7 Step 3, §4.1 #4) ----
+    //
+    // `resolve_forward` (via `forward_hosts`/`resolve_route`, its only two
+    // callers) is the single place this decision is made; these tests pin
+    // every combination the design draft calls out by name: hosts.toml
+    // absent, hosts.toml naming a host trust doesn't, trust naming a host
+    // hosts.toml doesn't, and both naming the same host with different
+    // addresses (hosts.toml's address must win, trust's fingerprint must
+    // still be the one reported).
+
+    #[test]
+    fn absent_hosts_toml_is_byte_identical_to_pre_m7_step_3_forward_hosts() {
+        let store = forward_store("mac", "mac.example.com:4433", FP_A);
+        let hosts = forward_hosts(&store, &no_hosts());
+        assert_eq!(hosts.len(), 1);
+        assert_eq!(hosts[0].address, "mac.example.com:4433");
+        assert_eq!(hosts[0].device_id, FP_A);
+        assert_eq!(
+            hosts[0].source, None,
+            "no hosts.toml entries anywhere -> source stays unset, not Some(\"trust\")"
+        );
+        assert_eq!(hosts[0].user, None);
+    }
+
+    #[test]
+    fn hosts_toml_only_name_is_forward_routable_with_no_fingerprint() {
+        // A name hosts.toml knows and trust.toml has never heard of: still
+        // listed/routable (an address, no identity) — trust alone remains
+        // the authority on *who* answers at that address when actually
+        // dialed (this module's own `HostRoute::Forward::fingerprint` doc).
+        let store = TrustStore::default();
+        let hosts = hosts_with(&[("headless", "headless.example.com:4433", None)]);
+
+        let listed = forward_hosts(&store, &hosts);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].address, "headless.example.com:4433");
+        assert_eq!(
+            listed[0].device_id, "",
+            "no trust peer -> empty fingerprint"
+        );
+        assert_eq!(listed[0].source.as_deref(), Some("hosts"));
+
+        let route = resolve_route(&[], &store, &hosts, "headless").unwrap();
+        assert_eq!(
+            route,
+            HostRoute::Forward {
+                address: "headless.example.com:4433".to_string(),
+                fingerprint: String::new(),
+                source: Some("hosts".to_string()),
+                user: None,
+            }
+        );
+    }
+
+    #[test]
+    fn trust_only_name_reports_source_trust_once_hosts_toml_exists_at_all() {
+        // hosts.toml has *some* entries (for an unrelated name), so
+        // `source` starts appearing at all — a name only trust.toml knows
+        // must then report `"trust"`, not silently omit the field the way
+        // `absent_hosts_toml_is_byte_identical_to_pre_m7_step_3_forward_hosts`
+        // pins for the *no hosts.toml entries anywhere* case.
+        let store = forward_store("mac", "mac.example.com:4433", FP_A);
+        let hosts = hosts_with(&[("phone", "phone.example.com:4433", None)]);
+
+        let listed = forward_hosts(&store, &hosts);
+        let mac = listed.iter().find(|h| h.name == "mac").unwrap();
+        assert_eq!(mac.address, "mac.example.com:4433");
+        assert_eq!(mac.source.as_deref(), Some("trust"));
+        assert_eq!(mac.user, None);
+    }
+
+    #[test]
+    fn hosts_toml_address_wins_over_trust_toml_address_for_the_same_name() {
+        // The one decision `PLAN.md` M7 §4.1 #4 names explicitly:
+        // hosts.toml's address wins; trust.toml's fingerprint is still the
+        // one reported (hosts.toml never supplies identity). The two
+        // addresses disagree here, so under the redefined `source`
+        // (`PLAN.md` Step 3 (a)-추기 ②: which side's *address* won, not
+        // which sides merely *name* the host) this is exactly the
+        // silent-redirect-to-a-different-pinned-peer shape `source` exists
+        // to surface -> `"hosts"`, not `"both"`.
+        let store = forward_store("mac", "stale-trust-address.example.com:4433", FP_A);
+        let hosts = hosts_with(&[("mac", "fresh-hosts-address.example.com:4433", None)]);
+
+        let listed = forward_hosts(&store, &hosts);
+        assert_eq!(
+            listed.len(),
+            1,
+            "same name in both -> one merged entry, not two"
+        );
+        assert_eq!(listed[0].address, "fresh-hosts-address.example.com:4433");
+        assert_eq!(
+            listed[0].device_id, FP_A,
+            "identity still comes from trust.toml alone"
+        );
+        assert_eq!(
+            listed[0].source.as_deref(),
+            Some("hosts"),
+            "addresses disagree -> hosts.toml's address won, not a same-address agreement"
+        );
+
+        let route = resolve_route(&[], &store, &hosts, "mac").unwrap();
+        assert_eq!(
+            route,
+            HostRoute::Forward {
+                address: "fresh-hosts-address.example.com:4433".to_string(),
+                fingerprint: FP_A.to_string(),
+                source: Some("hosts".to_string()),
+                user: None,
+            }
+        );
+    }
+
+    #[test]
+    fn hosts_toml_and_trust_toml_agreeing_on_the_same_address_report_source_both() {
+        // `"both"` is reserved for the case the two sides actually agree —
+        // distinct from `hosts_toml_address_wins_over_trust_toml_address_for_the_same_name`
+        // above, where they disagree and hosts.toml's address wins alone.
+        let store = forward_store("mac", "shared-address.example.com:4433", FP_A);
+        let hosts = hosts_with(&[("mac", "shared-address.example.com:4433", None)]);
+
+        let listed = forward_hosts(&store, &hosts);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].address, "shared-address.example.com:4433");
+        assert_eq!(listed[0].device_id, FP_A);
+        assert_eq!(
+            listed[0].source.as_deref(),
+            Some("both"),
+            "same address on both sides -> \"both\", not just \"hosts\""
+        );
+
+        let route = resolve_route(&[], &store, &hosts, "mac").unwrap();
+        assert_eq!(
+            route,
+            HostRoute::Forward {
+                address: "shared-address.example.com:4433".to_string(),
+                fingerprint: FP_A.to_string(),
+                source: Some("both".to_string()),
+                user: None,
+            }
+        );
+    }
+
+    #[test]
+    fn hosts_toml_user_hint_is_carried_through_forward_hosts_and_resolve_route() {
+        let store = forward_store("mac", "mac.example.com:4433", FP_A);
+        let hosts = hosts_with(&[("mac", "mac.example.com:4433", Some("dave"))]);
+
+        let listed = forward_hosts(&store, &hosts);
+        assert_eq!(listed[0].user.as_deref(), Some("dave"));
+
+        let route = resolve_route(&[], &store, &hosts, "mac").unwrap();
+        match route {
+            HostRoute::Forward { user, .. } => assert_eq!(user.as_deref(), Some("dave")),
+            other => panic!("expected a forward route, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_hosts_toml_entry_with_an_empty_address_falls_back_to_the_trust_pin() {
+        // `crate::hosts::HostEntry::address`'s own doc: an explicit empty
+        // string still parses but is "no route from hosts.toml for this
+        // name" — must fall through to trust.toml's address exactly like a
+        // client-only trust pin's own empty address does.
+        let store = forward_store("mac", "trust-address.example.com:4433", FP_A);
+        let hosts = hosts_with(&[("mac", "", Some("dave"))]);
+
+        let listed = forward_hosts(&store, &hosts);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].address, "trust-address.example.com:4433");
+        assert_eq!(
+            listed[0].source.as_deref(),
+            Some("trust"),
+            "hosts.toml's address is empty (no route) -> trust.toml's address is the one \
+             that actually won, so `source` reports \"trust\" (which side's *address* won), \
+             not \"both\" merely because hosts.toml also names this host"
+        );
+        assert_eq!(
+            listed[0].user.as_deref(),
+            Some("dave"),
+            "the user hint isn't gated on the address actually winning"
+        );
+    }
+
+    #[test]
+    fn hosts_toml_never_makes_an_addressless_client_only_pin_forward_routable_on_its_own_error() {
+        // Sanity check on the "trust remains the sole arbiter of identity"
+        // rule from the other direction: a hosts.toml-only name with an
+        // address is routable (proven above) purely as an address, with no
+        // fingerprint — dialing it still fails closed at the TLS layer
+        // (`TrustEvaluator::lookup_pin` is fingerprint-keyed, not
+        // name-scoped) if no trust peer anywhere shares that fingerprint.
+        // This module has no dial step to assert that with directly; the
+        // fingerprint being empty here is the on-paper proof of it.
+        let store = TrustStore::default();
+        let hosts = hosts_with(&[("ghost", "ghost.example.com:4433", None)]);
+        let route = resolve_route(&[], &store, &hosts, "ghost").unwrap();
+        match route {
+            HostRoute::Forward { fingerprint, .. } => assert_eq!(fingerprint, ""),
+            other => panic!("expected a forward route, got {other:?}"),
+        }
     }
 
     // ---- routing table (`PLAN.md` M3 Step 5 (c)) ----
@@ -579,7 +1006,7 @@ mod tests {
     fn routing_prefers_live_reverse_over_forward_pin() {
         let store = forward_store("mac", "stale-estimate.example.com:4433", FP_A);
         let reverse = vec![reverse_entry(100, "mac", "reachable", FP_B)];
-        let route = resolve_route(&reverse, &store, "mac").unwrap();
+        let route = resolve_route(&reverse, &store, &no_hosts(), "mac").unwrap();
         assert_eq!(
             route,
             HostRoute::Reverse {
@@ -588,6 +1015,7 @@ mod tests {
                 address: "203.0.113.5:51820".to_string(),
                 fingerprint: FP_B.to_string(),
                 generation: 1,
+                user: None,
             }
         );
     }
@@ -597,12 +1025,14 @@ mod tests {
         let store = forward_store("mac", "mac.example.com:4433", FP_A);
         // Only a stale reverse entry — not live, must not win.
         let reverse = vec![reverse_entry(100, "mac", "stale", FP_B)];
-        let route = resolve_route(&reverse, &store, "mac").unwrap();
+        let route = resolve_route(&reverse, &store, &no_hosts(), "mac").unwrap();
         assert_eq!(
             route,
             HostRoute::Forward {
                 address: "mac.example.com:4433".to_string(),
                 fingerprint: FP_A.to_string(),
+                source: None,
+                user: None,
             }
         );
     }
@@ -616,7 +1046,7 @@ mod tests {
         // (adversarial review finding).
         let store = TrustStore::default();
         for name in ["", "   ", "\t"] {
-            let err = resolve_route(&[], &store, name).unwrap_err();
+            let err = resolve_route(&[], &store, &no_hosts(), name).unwrap_err();
             assert_eq!(err.code, ErrorCode::InvalidArgument, "name {name:?}");
         }
     }
@@ -624,7 +1054,7 @@ mod tests {
     #[test]
     fn routing_unregistered_and_unpinned_is_host_not_found() {
         let store = TrustStore::default();
-        let err = resolve_route(&[], &store, "nowhere").unwrap_err();
+        let err = resolve_route(&[], &store, &no_hosts(), "nowhere").unwrap_err();
         assert_eq!(err.code, ErrorCode::HostNotFound);
     }
 
@@ -635,7 +1065,7 @@ mod tests {
             reverse_entry(200, "mac", "reachable", FP_A),
             reverse_entry(100, "mac", "reachable", FP_B),
         ];
-        let err = resolve_route(&reverse, &store, "mac").unwrap_err();
+        let err = resolve_route(&reverse, &store, &no_hosts(), "mac").unwrap_err();
         assert_eq!(err.code, ErrorCode::InvalidArgument);
         assert_eq!(err.details["pids"], serde_json::json!([100, 200]));
     }
@@ -647,7 +1077,7 @@ mod tests {
             reverse_entry(200, "mac", "stale", FP_A),
             reverse_entry(100, "mac", "reachable", FP_B),
         ];
-        let route = resolve_route(&reverse, &store, "mac").unwrap();
+        let route = resolve_route(&reverse, &store, &no_hosts(), "mac").unwrap();
         assert_eq!(
             route,
             HostRoute::Reverse {
@@ -656,6 +1086,7 @@ mod tests {
                 address: "203.0.113.5:51820".to_string(),
                 fingerprint: FP_B.to_string(),
                 generation: 1,
+                user: None,
             }
         );
     }
@@ -665,21 +1096,38 @@ mod tests {
         let forward = HostRoute::Forward {
             address: "mac.example.com:4433".to_string(),
             fingerprint: FP_A.to_string(),
+            source: Some("both".to_string()),
+            user: Some("dave".to_string()),
         }
         .into_host("mac");
         assert_eq!(forward.connection_mode, "forward");
         assert_eq!(forward.state, "unknown");
+        assert_eq!(forward.source.as_deref(), Some("both"));
+        assert_eq!(forward.user.as_deref(), Some("dave"));
 
+        // `user: Some(...)` here too (unlike `source`, which a reverse
+        // route always omits) — P3-5, `into_host`'s Reverse arm must carry
+        // the hint through rather than hard-coding `None`.
         let reverse = HostRoute::Reverse {
             pid: 100,
             socket: PathBuf::from("/run/qsh/100.sock"),
             address: "203.0.113.5:51820".to_string(),
             fingerprint: FP_B.to_string(),
             generation: 3,
+            user: Some("dave".to_string()),
         }
         .into_host("phone");
         assert_eq!(reverse.connection_mode, "reverse");
         assert_eq!(reverse.state, "reachable");
+        assert_eq!(
+            reverse.source, None,
+            "a reverse route is never hosts.toml-sourced"
+        );
+        assert_eq!(
+            reverse.user.as_deref(),
+            Some("dave"),
+            "user is not tied to source — it must still come through"
+        );
     }
 
     // ---- `resolve_host_route_async` (`PLAN.md` M3 Step 6's async seam) ----

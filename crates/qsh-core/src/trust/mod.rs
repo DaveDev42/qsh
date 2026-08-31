@@ -18,9 +18,12 @@
 //! and injects the answer through [`qsh_transport::TrustEvaluator`], which
 //! [`SharedTrustStore`] implements.
 //!
-//! Until the hosts.toml directory lands in M7, the pinned peers here are
-//! also the single source of truth for `qsh exec <host>`'s host → address
-//! resolution ([`TrustStore::resolve_host`], `docs/CLI.md` §6.8).
+//! The pinned peers here are still the sole source of *identity* for every
+//! host — [`TrustStore::resolve_host`] is one input `crate::ops::host`'s
+//! `resolve_forward` layers `crate::hosts::HostsFile` over for `qsh exec
+//! <host>`'s host → address resolution (`PLAN.md` M7 Step 3, §4.1 #4,
+//! `docs/CLI.md` §6.8): `hosts.toml` may supply or override the *address*,
+//! but never the fingerprint — a peer's identity is decided here alone.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -128,9 +131,13 @@ impl TrustStore {
         self.peers.iter().find(|p| p.name == name)
     }
 
-    /// Host → address resolution for `qsh exec <host>` (M7 replaces this
-    /// with `hosts.toml`). Only peers that actually carry a dial address
-    /// resolve.
+    /// This store's own half of host → address resolution: only peers
+    /// that actually carry a dial address resolve. `crate::ops::host`'s
+    /// `resolve_forward` (`PLAN.md` M7 Step 3) is what layers
+    /// `hosts.toml` over this — callers that need the *actual* resolution
+    /// `qsh exec <host>`/`qsh <host>` use should go through that, not
+    /// this method directly, unless they deliberately want the
+    /// trust-only view (e.g. `forward_hosts`' own name enumeration).
     pub fn resolve_host(&self, name: &str) -> Option<&TrustPeer> {
         self.find(name).filter(|p| !p.address.is_empty())
     }

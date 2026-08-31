@@ -92,8 +92,9 @@ pub struct BuildInfo {
 /// *first definition* of these fields' meaning, not a documented-meaning
 /// change that would require `/v2` (`docs/CLI.md` §10). Actual production
 /// (`host.list`/`host.get`) lands with the M3 reverse registry and `qsh
-/// listen`/`qsh reverse` steps later in this milestone; the host *directory*
-/// (`hosts.toml`) is M7.
+/// listen`/`qsh reverse` steps later in this milestone; `source`/`user`
+/// (below) are the M7 Step 3 host *directory* (`hosts.toml`) addition,
+/// additive-optional on top of this same type.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Host {
     /// Local alias for this host.
@@ -117,8 +118,40 @@ pub struct Host {
     /// store for a forward host, or the value the daemon TLS-verified for a
     /// reverse host. Never `Hello.device_name` or any other wire display
     /// name (`docs/design/protocol.md` §3: identity is never taken from
-    /// wire data), e.g. `"sha256:BASE64FINGERPRINT"`.
+    /// wire data), e.g. `"sha256:BASE64FINGERPRINT"`. This is the identity
+    /// *pinned to this name* — trust.toml's answer to "who is this name
+    /// supposed to be" — never an observation of who currently answers at
+    /// `address` (`PLAN.md` Step 3 (a)-추기 ②): a forward host's `address`
+    /// can come from `hosts.toml`, which supplies no identity of its own,
+    /// so `device_id` always still names the trust.toml-pinned peer that
+    /// TLS must verify at that address, whichever directory the address
+    /// came from.
     pub device_id: String,
+    /// Additive, `PLAN.md` M7 Step 3 — for a `"forward"` host, which
+    /// directory's *address* was actually used (`PLAN.md` Step 3 (a)-추기
+    /// ②; not merely which directory(s) name the host): `"hosts"` when
+    /// `hosts.toml` set a non-empty address for this name and it differs
+    /// from (or is the only address for) trust.toml's pin; `"trust"` when
+    /// `hosts.toml` has no entry, or its address is empty, so trust.toml's
+    /// pinned address is the one actually used; `"both"` only when both
+    /// sides set the *same* address. `None` for a `"reverse"` host (reverse
+    /// registration is never `hosts.toml`-sourced), and `None` for a
+    /// `"forward"` host whenever the whole `hosts.toml` directory has zero
+    /// entries — a deployment that never adopted it sees the identical
+    /// pre-M7-Step-3 shape (`docs/CLI.md` §5). Security note: write access
+    /// to `hosts.toml` is the power to redirect a name to a different
+    /// already-pinned peer (mTLS still blocks an unpinned address) — such a
+    /// redirect is exactly what `source: "hosts"` (address differs from
+    /// trust.toml's pin, or trust.toml has no pin at all) reveals.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// Additive, `PLAN.md` M7 Step 3 — `hosts.toml`'s `user` hint for this
+    /// name, if it set one. Never an identity or an account selector, only
+    /// ever the same `SessionOpen.user` assertion hint `docs/CLI.md` §7
+    /// already documents; `None` when `hosts.toml` has no entry (or no
+    /// `user`) for this name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
 }
 
 /// Request for `host.list` (`qsh hosts`, `docs/CLI.md` §6.1). No filters in
@@ -1269,6 +1302,8 @@ mod tests {
             connection_mode: "forward".into(),
             state: "unknown".into(),
             device_id: "sha256:BASE64FINGERPRINT".into(),
+            source: None,
+            user: None,
         };
         assert_eq!(
             serde_json::to_value(&h).unwrap(),
@@ -1281,6 +1316,49 @@ mod tests {
             })
         );
         assert!(h.device_id.starts_with("sha256:"));
+    }
+
+    /// `PLAN.md` M7 Step 3: `source`/`user` are additive-optional —
+    /// `None` omits the key entirely (matches the pre-M7-Step-3 shape
+    /// above byte-for-byte), `Some` serializes it, matching
+    /// `docs/CLI.md` §10's additive-only evolution rule.
+    #[test]
+    fn host_source_and_user_are_additive_optional() {
+        let h = Host {
+            name: "personal-mac".into(),
+            address: "personal-mac.example.com:4433".into(),
+            connection_mode: "forward".into(),
+            state: "unknown".into(),
+            device_id: "sha256:BASE64FINGERPRINT".into(),
+            source: Some("both".into()),
+            user: Some("dave".into()),
+        };
+        assert_eq!(
+            serde_json::to_value(&h).unwrap(),
+            serde_json::json!({
+                "name": "personal-mac",
+                "address": "personal-mac.example.com:4433",
+                "connection_mode": "forward",
+                "state": "unknown",
+                "device_id": "sha256:BASE64FINGERPRINT",
+                "source": "both",
+                "user": "dave"
+            })
+        );
+
+        // Round-trips through a payload that predates these fields —
+        // an old fixture/older peer's JSON deserializes with both `None`,
+        // never a missing-field error.
+        let old_shape = serde_json::json!({
+            "name": "personal-mac",
+            "address": "personal-mac.example.com:4433",
+            "connection_mode": "forward",
+            "state": "unknown",
+            "device_id": "sha256:BASE64FINGERPRINT"
+        });
+        let parsed: Host = serde_json::from_value(old_shape).unwrap();
+        assert_eq!(parsed.source, None);
+        assert_eq!(parsed.user, None);
     }
 
     #[test]
@@ -1300,6 +1378,8 @@ mod tests {
             connection_mode: "forward".into(),
             state: "unknown".into(),
             device_id: "sha256:AAAA".into(),
+            source: None,
+            user: None,
         };
         let reverse = Host {
             name: "laptop".into(),
@@ -1307,6 +1387,8 @@ mod tests {
             connection_mode: "reverse".into(),
             state: "reachable".into(),
             device_id: "sha256:BBBB".into(),
+            source: None,
+            user: None,
         };
         let data = HostListData {
             hosts: vec![forward.clone(), reverse.clone()],

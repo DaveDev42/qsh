@@ -1,9 +1,10 @@
 //! `qsh reverse <controller>` — the reverse-mode target (`docs/CLI.md`
 //! §6.13, `docs/design/protocol.md` §11-3/§11-4, `PLAN.md` Step 3 + Step 4).
 //!
-//! [`run_reverse`] resolves `<controller>` as a trust-store alias (the same
-//! `Ops::resolve_peer` path `qsh <host>`/`qsh exec` use today — hosts.toml
-//! directory lookup is M7), dials it, and runs
+//! [`run_reverse`] resolves `<controller>` via the same `hosts.toml`-over-
+//! `trust.toml` address resolution `Ops::resolve_peer` uses for
+//! `qsh <host>`/`qsh exec` (`PLAN.md` M7 Step 3, §4.1 #4), dials it, and
+//! runs
 //! [`crate::handshake::initiate`] with `Hello{reverse: Some(..)}`. From the
 //! wire's point of view this connection is now indistinguishable from one
 //! `qsh serve` accepted: on success this process *is* a host on it, reusing
@@ -282,7 +283,7 @@ async fn run_reverse_unix(
                 runtime.server.drain().await;
                 return Ok(());
             }
-            result = dial_and_register(&dialer, &trust, controller, &local_hello) => result,
+            result = dial_and_register(&dialer, &trust, paths, controller, &local_hello) => result,
         };
 
         let (dialed, ctl, peer_hello) = match attempt {
@@ -485,18 +486,29 @@ async fn run_reverse_unix(
 }
 
 /// One dial+register attempt: resolve `controller`'s address fresh (it may
-/// have moved since the last attempt — DNS, a dynamic IP), dial, and run
-/// the `Hello.reverse` exchange. Never retries on its own — the reconnect
-/// loop in [`run_reverse_unix`] owns backoff between attempts
-/// (`docs/design/protocol.md` §11-4).
+/// have moved since the last attempt — DNS, a dynamic IP, or an operator
+/// edit to `hosts.toml`), dial, and run the `Hello.reverse` exchange. Never
+/// retries on its own — the reconnect loop in [`run_reverse_unix`] owns
+/// backoff between attempts (`docs/design/protocol.md` §11-4).
+///
+/// Address resolution reloads `hosts.toml` fresh on every attempt (never
+/// cached across retries, unlike `trust`) via the same
+/// [`crate::ops::resolve_peer_address`] `qsh <host>`/`qsh exec` use
+/// (`PLAN.md` M7 Step 3, §4.1 #4: `hosts.toml` first, the trust store's
+/// pin as fallback) — so an operator can repoint a controller's address by
+/// editing `hosts.toml` without restarting this process, the same way it
+/// already tolerates DNS/IP changes.
 #[cfg(unix)]
 async fn dial_and_register(
     dialer: &Dialer,
     trust: &SharedTrustStore,
+    paths: &Paths,
     controller: &str,
     local_hello: &wire::Hello,
 ) -> Result<(Dialed, FramedStream, wire::Hello), OpError> {
-    let (address, server_name) = crate::ops::resolve_peer_address(&trust.snapshot(), controller)?;
+    let hosts = crate::hosts::HostsFile::load(&paths.hosts_file())?;
+    let (address, server_name) =
+        crate::ops::resolve_peer_address(&trust.snapshot(), &hosts, controller)?;
     let addr = crate::ops::resolve_one(&address).await?;
     let dialed = dialer
         .dial(addr, &server_name)

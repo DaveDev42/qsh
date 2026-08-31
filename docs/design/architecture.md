@@ -93,7 +93,7 @@ macOS/Linux 동일 (ssh 스타일 예측 가능성; `~/Library/…` 미사용):
 ```
 ~/.config/qsh/            # $QSH_CONFIG_DIR → $XDG_CONFIG_HOME/qsh → 이 경로
 ├── config.toml           # [serve] bind·replay_bytes·resume_ttl·close_grace_ms / [identity] key_store / [audit] path·max_bytes(64MiB)·retain(5)·queue_depth(1024) / [listen] bind·allow_advertised_names(기본 false)·stale_retention(기본 120s) / [reverse] controller·offered_name·backoff_initial_ms(500)·backoff_max_ms(30000)·backoff_jitter_pct(±20)
-├── hosts.toml            # [[host]] name·address·user  → host.list (M7 도입; 그 전까지 host 해석은 trust.toml의 pinned peer가 단일 출처. `user`는 M7에서도 계정 선택이 아니라 CLI.md §7의 assertion hint — 불일치 시 UNSUPPORTED)
+├── hosts.toml            # [[host]] name·address·user → host.list/host.get/exec/session.open/reverse의 단일 주소 해석 choke point (`crate::ops::host::resolve_forward`, M7 Step 3). hosts.toml 우선, 없으면 trust.toml의 pinned peer로 폴백 — 같은 이름이 양쪽에 있으면 hosts.toml의 address가 이긴다. trust/identity는 항상 trust.toml/fingerprint만으로 결정 — hosts.toml은 순수 주소록이며 trust에 절대 관여하지 않는다. 파일 부재는 빈 디렉터리(에러 아님), 파싱 실패는 CONFIG_ERROR(trust.toml과 동일 실패 형태). M7에서는 read-only — 이 파일을 쓰는 CLI 명령 없음(수동 편집 전용). `user`는 계정 선택이 아니라 CLI.md §7의 assertion hint(명시적 힌트가 항상 우선, hosts.toml은 기본값만 채움) — 서버 측 계정과 불일치 시 UNSUPPORTED. `serve` 쪽은 hosts.toml을 읽지 않는다 — 위 choke point는 전부 클라이언트 쪽(dial하는 프로세스) 경로다
 ├── trust.toml            # pinned peers + CAs
 ├── acl.toml              # serve/listen 역할만 읽음
 └── identity/             # device.pem (+ file-mode일 때 device.key 0600)
