@@ -1,0 +1,16 @@
+{
+  "command": "cert.issue",
+  "data": {
+    "ca": {
+      "created": true,
+      "fingerprint": "<fingerprint>",
+      "name": "local"
+    },
+    "device_id": "<device_id>",
+    "fingerprint": "<fingerprint>",
+    "issued": true
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

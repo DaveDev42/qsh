@@ -220,6 +220,10 @@ pub enum Command {
     #[command(subcommand)]
     Trust(TrustCmd),
 
+    /// Manage the private CA (`docs/adr/0008-private-ca-cert-issuance.md`).
+    #[command(subcommand)]
+    Cert(CertCmd),
+
     /// Inspect the ACL policy (`docs/CLI.md` §6.15).
     #[command(subcommand)]
     Acl(AclCmd),
@@ -428,6 +432,21 @@ fn parse_env_var(value: &str) -> Result<EnvVar, String> {
         }
         _ => Err(format!("expected NAME=VALUE, got {value:?}")),
     }
+}
+
+/// `qsh cert …` subcommands (`docs/adr/0008-private-ca-cert-issuance.md`,
+/// `PLAN.md` M7 Step 5). Both are local-only and idempotent — neither
+/// dials, and neither takes a `device_id`: `cert issue` always promotes
+/// this device's own identity (ADR §5).
+#[derive(Debug, Subcommand)]
+pub enum CertCmd {
+    /// Create the local private CA root (self-signed, `is_ca`). Idempotent:
+    /// re-running reports the existing root.
+    Init,
+    /// CA-sign this device's existing identity and register the CA root in
+    /// `trust.toml`. Idempotent: re-running after this device is already
+    /// CA-issued reports `issued: false` rather than rotating the leaf.
+    Issue,
 }
 
 /// `qsh trust …` subcommands.

@@ -121,6 +121,8 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "capabilities.json",
     "identity.init.created.json",
     "identity.init.existing.json",
+    "cert.init.json",
+    "cert.issue.json",
     "trust.add.json",
     "trust.add.updated.json",
     "trust.list.json",
@@ -248,6 +250,20 @@ fn golden_local_fixtures() {
     let (code, existing) = sandbox.json(&["init", "--json", "--key-store", "file"]);
     assert_eq!(code, 0, "{existing}");
     check("identity.init.existing.json", existing);
+
+    // `qsh cert init`/`qsh cert issue` (`docs/adr/0008-private-ca-cert-issuance.md`,
+    // `PLAN.md` M7 Step 5): local-only, no peer — a private CA root, then
+    // the promotion of this sandbox's own identity to CA-issued.
+    // `device_id`/`fingerprint`/`config_dir` are all masked by
+    // `fixtures::normalize` (fresh key material every run); `ca.name` is
+    // the fixed `"local"` constant, so it stays in the fixture verbatim.
+    let (code, cert_init) = sandbox.json(&["cert", "init", "--json"]);
+    assert_eq!(code, 0, "{cert_init}");
+    check("cert.init.json", cert_init);
+
+    let (code, cert_issue) = sandbox.json(&["cert", "issue", "--json"]);
+    assert_eq!(code, 0, "{cert_issue}");
+    check("cert.issue.json", cert_issue);
 
     let (code, added) = sandbox.json(&[
         "trust",

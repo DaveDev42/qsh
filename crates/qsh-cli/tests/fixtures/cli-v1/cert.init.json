@@ -1,0 +1,11 @@
+{
+  "command": "cert.init",
+  "data": {
+    "config_dir": "<config_dir>",
+    "created": true,
+    "fingerprint": "<fingerprint>"
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

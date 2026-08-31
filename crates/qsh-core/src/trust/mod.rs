@@ -43,9 +43,11 @@ pub use pairing::SharedInviteStore;
 
 /// A private CA root the verifier accepts chains against.
 ///
-/// No CLI surfaces CA entries in M1 (private CA is M6 scope), but the store
-/// loads, saves and serves them so an operator-provisioned `trust.toml`
-/// round-trips without loss.
+/// Written by `qsh cert issue` (`docs/adr/0008-private-ca-cert-issuance.md`,
+/// `PLAN.md` M7 Step 5) via [`TrustStore::add_ca`], and equally loadable
+/// from an operator-provisioned `trust.toml` that was never touched by
+/// `qsh cert` at all — this store only ever *evaluates* `[[ca]]` entries,
+/// it never assumes how one got here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CaEntry {
     /// Operator-chosen label.
@@ -203,6 +205,37 @@ impl TrustStore {
         };
         self.peers.push(peer.clone());
         (peer, true, false)
+    }
+
+    /// Register a private CA root, idempotently (`qsh cert issue`,
+    /// `docs/adr/0008-private-ca-cert-issuance.md` §6 결과: "trust.toml
+    /// [[ca]] 등재는 additive·append-only이며 중복 방지·갱신 semantics는
+    /// trust add(Step 2) 선례를 따른다") — the same created/updated shape
+    /// as [`TrustStore::add_peer`], keyed on `name` instead of
+    /// fingerprint since a CA root has no principal of its own.
+    ///
+    /// Returns `(entry, created, updated)`:
+    /// - **New name:** `created = true`, `updated = false`.
+    /// - **Existing name, identical `cert_pem`:** a pure no-op —
+    ///   `created = false`, `updated = false`. Re-running `qsh cert issue`
+    ///   against the same local CA never rewrites `trust.toml`.
+    /// - **Existing name, a different `cert_pem`:** the stored PEM is
+    ///   overwritten in place — `created = false`, `updated = true`. This
+    ///   only happens by construction from a *local* re-init of the CA
+    ///   under the same name; nothing here fetches or trusts a remote
+    ///   root on the strength of a name match.
+    pub fn add_ca(&mut self, name: impl Into<String>, cert_pem: String) -> (CaEntry, bool, bool) {
+        let name = name.into();
+        if let Some(index) = self.cas.iter().position(|ca| ca.name == name) {
+            if self.cas[index].cert_pem == cert_pem {
+                return (self.cas[index].clone(), false, false);
+            }
+            self.cas[index].cert_pem = cert_pem;
+            return (self.cas[index].clone(), false, true);
+        }
+        let entry = CaEntry { name, cert_pem };
+        self.cas.push(entry.clone());
+        (entry, true, false)
     }
 
     /// Remove the pin named `name`. `false` if there was none (idempotent).
@@ -591,6 +624,59 @@ mod tests {
         assert!(!created);
         assert!(!updated);
         assert_eq!(unchanged.address, "new.example:5555");
+    }
+
+    /// [`TrustStore::add_ca`]'s own created/updated tri-state, mirroring
+    /// [`TrustStore::add_peer`]'s tests: new name creates, same name +
+    /// identical PEM is a pure no-op, same name + a different PEM updates
+    /// in place (`docs/adr/0008-private-ca-cert-issuance.md` §6).
+    #[test]
+    fn add_ca_creates_then_is_idempotent_then_updates_on_a_changed_pem() {
+        let mut store = TrustStore::default();
+        assert!(store.cas().is_empty());
+
+        let pem_a = pem::encode(pem::CERTIFICATE, b"root a");
+        let (entry, created, updated) = store.add_ca("local", pem_a.clone());
+        assert!(created);
+        assert!(!updated);
+        assert_eq!(entry.name, "local");
+        assert_eq!(entry.cert_pem, pem_a);
+        assert_eq!(store.cas().len(), 1);
+
+        // Same name, identical PEM again: a pure no-op.
+        let (again, created, updated) = store.add_ca("local", pem_a.clone());
+        assert!(!created);
+        assert!(!updated);
+        assert_eq!(again, entry);
+        assert_eq!(store.cas().len(), 1);
+
+        // Same name, a different PEM: overwritten in place, not duplicated.
+        let pem_b = pem::encode(pem::CERTIFICATE, b"root b");
+        let (moved, created, updated) = store.add_ca("local", pem_b.clone());
+        assert!(!created, "same name — never re-created");
+        assert!(
+            updated,
+            "a changed PEM under the same name must be reported as updated"
+        );
+        assert_eq!(moved.name, "local");
+        assert_eq!(moved.cert_pem, pem_b);
+        assert_eq!(store.cas().len(), 1, "still one entry, not a duplicate");
+        assert_eq!(store.cas()[0].cert_pem, pem_b);
+    }
+
+    /// A distinct name never collides with an existing one, even if it
+    /// happens to carry the identical PEM (a name, not a fingerprint, is
+    /// the dedup key — a CA root has no principal of its own).
+    #[test]
+    fn add_ca_with_a_distinct_name_never_collides() {
+        let mut store = TrustStore::default();
+        let pem = pem::encode(pem::CERTIFICATE, b"shared root bytes");
+        store.add_ca("local", pem.clone());
+        let (entry, created, updated) = store.add_ca("partner", pem.clone());
+        assert!(created);
+        assert!(!updated);
+        assert_eq!(entry.name, "partner");
+        assert_eq!(store.cas().len(), 2);
     }
 
     #[test]

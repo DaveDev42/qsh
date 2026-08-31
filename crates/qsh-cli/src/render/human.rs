@@ -8,10 +8,11 @@ use std::io::{self, Write};
 
 use qsh_core::{ExecRunOutput, OpError, SessionReadOutput};
 use qsh_proto::{
-    AclCheckData, CapabilitiesData, Host, HostListData, IdentityInitData, SchemaData, Session,
-    SessionCloseData, SessionEvent, SessionListData, SessionOpenData, SessionResizeData,
-    SessionWriteData, TrustAcceptData, TrustAddData, TrustInviteData, TrustListData, TrustPeer,
-    TrustRemoveData, Tunnel, TunnelCloseData, TunnelListData, VersionData,
+    AclCheckData, CapabilitiesData, CertInitData, CertIssueData, Host, HostListData,
+    IdentityInitData, SchemaData, Session, SessionCloseData, SessionEvent, SessionListData,
+    SessionOpenData, SessionResizeData, SessionWriteData, TrustAcceptData, TrustAddData,
+    TrustInviteData, TrustListData, TrustPeer, TrustRemoveData, Tunnel, TunnelCloseData,
+    TunnelListData, VersionData,
 };
 
 use crate::stderr_note;
@@ -73,6 +74,55 @@ pub fn print_init(data: &IdentityInitData) -> io::Result<()> {
         } else {
             "already initialized"
         }
+    )
+}
+
+/// Print the CA root `qsh cert init` created (or found) — no key material,
+/// just the fingerprint and where it lives on disk
+/// (`docs/adr/0008-private-ca-cert-issuance.md` §4).
+pub fn print_cert_init(data: &CertInitData) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    writeln!(stdout, "fingerprint: {}", data.fingerprint)?;
+    writeln!(stdout, "config_dir:  {}", data.config_dir)?;
+    writeln!(
+        stdout,
+        "{}",
+        if data.created {
+            "created"
+        } else {
+            "already initialized"
+        }
+    )
+}
+
+/// Print the outcome of `qsh cert issue` — the device this cert now
+/// authenticates as, and whether the leaf or the `trust.toml [[ca]]`
+/// registration actually changed (both are independently idempotent, see
+/// `Ops::cert_issue`'s own doc).
+pub fn print_cert_issue(data: &CertIssueData) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    writeln!(stdout, "device_id:   {}", data.device_id)?;
+    writeln!(stdout, "fingerprint: {}", data.fingerprint)?;
+    writeln!(
+        stdout,
+        "{}",
+        if data.issued {
+            "issued (CA-signed)"
+        } else {
+            "already CA-issued by this CA"
+        }
+    )?;
+    let ca_verb = if data.ca.created {
+        "registered"
+    } else if data.ca.updated == Some(true) {
+        "updated"
+    } else {
+        "already registered"
+    };
+    writeln!(
+        stdout,
+        "ca: {ca_verb} {} ({})",
+        data.ca.name, data.ca.fingerprint
     )
 }
 

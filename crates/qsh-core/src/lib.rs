@@ -8,6 +8,8 @@
 //!
 //! - [`config`]: config/state path resolution and `config.toml`.
 //! - [`identity`]: device keypair, certificate and the 3-mode key store.
+//! - [`ca`]: the private CA root and device-leaf issuance (`qsh cert`,
+//!   `docs/adr/0008-private-ca-cert-issuance.md`).
 //! - [`trust`]: `trust.toml` — pinned peers, private CA roots, and the
 //!   [`qsh_transport::TrustEvaluator`] the verifier is driven by.
 //! - [`hosts`]: `hosts.toml` — the host profile address book layered over
@@ -17,6 +19,7 @@
 pub mod acl;
 pub mod audit;
 pub mod broker;
+pub mod ca;
 pub mod client;
 pub mod config;
 pub mod doctor;
@@ -49,13 +52,13 @@ pub use doctor::{CONTROLLER_UNREACHABLE, Diagnostic, DiagnosticId};
 pub use hosts::{HostEntry, HostsFile};
 pub use identity::{Identity, KeyStore, KeyStoreError, LoadedIdentity};
 pub use ops::{
-    AclCheckOp, AttachHandle, CapabilitiesOp, DetachFlush, ExecRunOp, ExecRunOutput, ExecStdin,
-    HostGetOp, HostListOp, HostRoute, IdentityInitOp, OpError, Operation, Ops, RecoveryConfig,
-    SchemaOp, SessionAttachOp, SessionAttachStream, SessionCloseOp, SessionGetOp, SessionListOp,
-    SessionOpenOp, SessionReadOp, SessionReadOutput, SessionReader, SessionResizeOp,
-    SessionWriteOp, TrustAcceptOp, TrustAddOp, TrustInviteOp, TrustListOp, TrustRemoveOp,
-    TunnelCloseOp, TunnelHold, TunnelListOp, TunnelOpenOp, VersionOp, dynamic_forward_unsupported,
-    parse_local_forwards, parse_remote_forwards,
+    AclCheckOp, AttachHandle, CapabilitiesOp, CertInitOp, CertIssueOp, DetachFlush, ExecRunOp,
+    ExecRunOutput, ExecStdin, HostGetOp, HostListOp, HostRoute, IdentityInitOp, OpError, Operation,
+    Ops, RecoveryConfig, SchemaOp, SessionAttachOp, SessionAttachStream, SessionCloseOp,
+    SessionGetOp, SessionListOp, SessionOpenOp, SessionReadOp, SessionReadOutput, SessionReader,
+    SessionResizeOp, SessionWriteOp, TrustAcceptOp, TrustAddOp, TrustInviteOp, TrustListOp,
+    TrustRemoveOp, TunnelCloseOp, TunnelHold, TunnelListOp, TunnelOpenOp, VersionOp,
+    dynamic_forward_unsupported, parse_local_forwards, parse_remote_forwards,
 };
 pub use trust::{SharedTrustStore, TrustStore};
 

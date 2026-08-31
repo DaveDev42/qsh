@@ -56,6 +56,12 @@ pub struct Identity {
     pub created_at: String,
     /// DER-encoded device certificate.
     pub cert_der: Vec<u8>,
+    /// SPKI fingerprint of the local CA root that issued
+    /// [`cert_der`](Self::cert_der), if it is CA-issued rather than
+    /// self-signed (`docs/adr/0008-private-ca-cert-issuance.md` §2, `qsh
+    /// cert issue`). `None` for a self-signed identity — the state every
+    /// identity starts in and the only state before M7 Step 5.
+    pub issued_by_ca: Option<String>,
 }
 
 /// An [`Identity`] plus the private key, ready to hand to the transport.
@@ -77,6 +83,12 @@ struct IdentityFile {
     key_store: KeyStoreKind,
     created_at: String,
     fingerprint: String,
+    /// Additive (`docs/adr/0008-private-ca-cert-issuance.md`, M7 Step 5):
+    /// absent on any `identity.toml` written before this field existed,
+    /// which `serde(default)` reads back as `None` — the correct answer,
+    /// since every such identity is self-signed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    issued_by_ca: Option<String>,
 }
 
 /// Create this device's identity if it does not exist yet (idempotent).
@@ -122,6 +134,7 @@ pub fn init(paths: &Paths, mode: KeyStoreMode) -> Result<IdentityInitData, OpErr
         key_store: store,
         created_at: now_rfc3339(),
         fingerprint: generated.fingerprint.to_string(),
+        issued_by_ca: None,
     };
     let text = toml::to_string_pretty(&record).map_err(|err| {
         OpError::new(
@@ -224,7 +237,74 @@ pub fn read_identity(paths: &Paths) -> Result<Option<Identity>, OpError> {
         key_store: record.key_store,
         created_at: record.created_at,
         cert_der,
+        issued_by_ca: record.issued_by_ca,
     }))
+}
+
+/// Promote this device's identity from self-signed to CA-issued: overwrite
+/// `device.pem` in place with `cert_pem` and record `ca_fingerprint` as
+/// its issuer, leaving `device_id`/`key_store`/`created_at` — and the
+/// private key itself — untouched
+/// (`docs/adr/0008-private-ca-cert-issuance.md` §2, §5).
+///
+/// The caller (`crate::ca::issue_device_leaf`) is responsible for the
+/// certificate actually being signed by the CA at `ca_fingerprint` with
+/// this device's own key; this function only persists the result.
+///
+/// Errors `CONFIG_ERROR` if no identity exists yet — `qsh cert issue`
+/// promotes an existing identity, it never creates one (run `qsh init`
+/// first).
+pub fn promote_to_ca_issued(
+    paths: &Paths,
+    cert_pem: &str,
+    cert_der: &[u8],
+    ca_fingerprint: &str,
+) -> Result<Identity, OpError> {
+    let identity_dir = paths.identity_dir();
+    let existing = read_identity(paths)?.ok_or_else(|| {
+        OpError::new(
+            ErrorCode::ConfigError,
+            "no local identity; run `qsh init` first",
+        )
+        .with_retryable(false)
+    })?;
+
+    let fingerprint = Fingerprint::of_cert_der(cert_der).map_err(|err| {
+        OpError::new(
+            ErrorCode::Internal,
+            format!("failed to fingerprint the CA-issued device certificate: {err}"),
+        )
+        .with_retryable(false)
+    })?;
+
+    write_private_file(&identity_dir.join(CERT_FILE), cert_pem.as_bytes())?;
+
+    let record = IdentityFile {
+        device_id: existing.device_id.clone(),
+        key_store: existing.key_store,
+        created_at: existing.created_at.clone(),
+        fingerprint: fingerprint.to_string(),
+        issued_by_ca: Some(ca_fingerprint.to_string()),
+    };
+    let text = toml::to_string_pretty(&record).map_err(|err| {
+        OpError::new(
+            ErrorCode::Internal,
+            format!("failed to encode {IDENTITY_FILE}: {err}"),
+        )
+        .with_retryable(false)
+    })?;
+    // Written last, same crash-safety rule as `init`: the cert is already
+    // on disk, so this record is never a promise the cert cannot keep.
+    write_private_file(&identity_dir.join(IDENTITY_FILE), text.as_bytes())?;
+
+    Ok(Identity {
+        device_id: existing.device_id,
+        fingerprint,
+        key_store: existing.key_store,
+        created_at: existing.created_at,
+        cert_der: cert_der.to_vec(),
+        issued_by_ca: Some(ca_fingerprint.to_string()),
+    })
 }
 
 fn read_cert_der(path: &Path) -> Result<Vec<u8>, OpError> {
@@ -517,5 +597,74 @@ mod tests {
         assert_eq!(data.key_store, KeyStoreKind::File);
         assert!(paths.identity_dir().join(KEY_FILE).is_file());
         assert!(load(&paths).unwrap().is_some());
+    }
+
+    /// Crash-safety regression for the cert-before-record write order
+    /// `promote_to_ca_issued`'s own doc comment promises (mirroring
+    /// `ca::init`'s key-before-cert rule): forces the *second* write
+    /// (`identity.toml`) to fail by pre-occupying its exact atomic-rename
+    /// temp path (`identity.toml.tmp<pid>`) with a directory, so whichever
+    /// file `promote_to_ca_issued` writes first genuinely lands on disk
+    /// before the call errors out — proof of the real order, not an
+    /// assumption about it. If that order were ever reversed (record
+    /// first, cert last), the *record* write — the one whose temp path we
+    /// block — would be attempted first and the call would fail before
+    /// ever touching `device.pem`.
+    #[test]
+    fn promote_to_ca_issued_recovers_from_an_interrupted_record_write() {
+        use rcgen::{CertificateParams, DistinguishedName, DnType, IsCa, KeyPair};
+
+        let (_guard, paths) = temp_paths();
+        let created = init(&paths, KeyStoreMode::File).unwrap();
+        let identity_dir = paths.identity_dir();
+        let original_cert = std::fs::read(identity_dir.join(CERT_FILE)).unwrap();
+
+        // A stand-in "CA-issued" leaf: this test only cares about
+        // `promote_to_ca_issued`'s own write-order crash-safety, not ADR
+        // §2's key-preservation claim (covered by `crate::ca`'s own
+        // tests), so any distinguishable, valid cert will do.
+        let leaf_key = KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+        let mut params = CertificateParams::default();
+        let mut dn = DistinguishedName::new();
+        dn.push(DnType::CommonName, "ca-issued-leaf");
+        params.distinguished_name = dn;
+        params.is_ca = IsCa::NoCa;
+        let leaf_cert = params.self_signed(&leaf_key).unwrap();
+        let leaf_pem = leaf_cert.pem();
+        let leaf_der = leaf_cert.der().to_vec();
+
+        let record_tmp = identity_dir.join(format!("{IDENTITY_FILE}.tmp{}", std::process::id()));
+        std::fs::create_dir(&record_tmp).unwrap();
+
+        let err = match promote_to_ca_issued(&paths, &leaf_pem, &leaf_der, "fake_ca_fp") {
+            Err(err) => err,
+            Ok(_) => {
+                panic!("promote_to_ca_issued must fail while identity.toml's write is blocked")
+            }
+        };
+        assert_eq!(err.code, ErrorCode::ConfigError);
+
+        // The cert must already be on disk: written before the record, so
+        // it survives the record write's failure.
+        let cert_after_failure = std::fs::read(identity_dir.join(CERT_FILE)).unwrap();
+        assert_eq!(cert_after_failure, leaf_pem.as_bytes());
+        assert_ne!(cert_after_failure, original_cert);
+
+        // The record must be untouched by the failed attempt: still the
+        // pre-promotion identity, never a premature `issued_by_ca` claim
+        // over a cert that (from the record's own perspective) hasn't
+        // landed.
+        let stale = read_identity(&paths).unwrap().unwrap();
+        assert_eq!(stale.issued_by_ca, None);
+        assert_eq!(stale.device_id, created.device_id);
+
+        // Clear the blocker and retry: `promote_to_ca_issued` must recover
+        // cleanly into a fully consistent, promoted identity.
+        std::fs::remove_dir(&record_tmp).unwrap();
+        let promoted = promote_to_ca_issued(&paths, &leaf_pem, &leaf_der, "fake_ca_fp").unwrap();
+        assert_eq!(promoted.issued_by_ca.as_deref(), Some("fake_ca_fp"));
+        let final_read = read_identity(&paths).unwrap().unwrap();
+        assert_eq!(final_read.issued_by_ca.as_deref(), Some("fake_ca_fp"));
+        assert_eq!(final_read.cert_der, leaf_der);
     }
 }

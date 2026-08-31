@@ -20,12 +20,14 @@ use crate::identity::LoadedIdentity;
 use crate::trust::{SharedTrustStore, TrustStore};
 
 pub mod acl;
+pub mod cert;
 pub mod exec;
 pub mod host;
 pub mod session;
 pub mod tunnel;
 
 pub use acl::AclCheckOp;
+pub use cert::{CertInitOp, CertIssueOp};
 pub use exec::{ExecRunOp, ExecRunOutput, ExecStdin};
 pub use host::{HostGetOp, HostListOp, HostRoute};
 pub use session::{
