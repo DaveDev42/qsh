@@ -13,14 +13,15 @@ use clap::{CommandFactory as _, Parser};
 use qsh_core::{
     AclCheckOp, CapabilitiesOp, ExecRunOp, ExecStdin, HostGetOp, HostListOp, IdentityInitOp,
     OpError, Operation, Ops, SchemaOp, SessionAttachOp, SessionCloseOp, SessionGetOp,
-    SessionListOp, SessionOpenOp, SessionReadOp, SessionResizeOp, SessionWriteOp, TrustAddOp,
-    TrustListOp, TrustRemoveOp, TunnelCloseOp, TunnelListOp, TunnelOpenOp, VersionOp,
-    dynamic_forward_unsupported,
+    SessionListOp, SessionOpenOp, SessionReadOp, SessionResizeOp, SessionWriteOp, TrustAcceptOp,
+    TrustAddOp, TrustInviteOp, TrustListOp, TrustRemoveOp, TunnelCloseOp, TunnelListOp,
+    TunnelOpenOp, VersionOp, dynamic_forward_unsupported,
 };
 use qsh_proto::{
     AclCheckReq, CapabilitiesReq, ErrorCode, ExecRunReq, HostGetReq, IdentityInitReq,
     SessionCloseReq, SessionGetReq, SessionListReq, SessionOpenReq, SessionReadReq,
-    SessionResizeReq, SessionWriteReq, TrustAddReq, TunnelCloseReq, TunnelListReq, TunnelOpenReq,
+    SessionResizeReq, SessionWriteReq, TrustAcceptReq, TrustAddReq, TrustInviteReq, TunnelCloseReq,
+    TunnelListReq, TunnelOpenReq,
 };
 use serde::Serialize;
 use tracing_subscriber::EnvFilter;
@@ -370,6 +371,21 @@ fn run(cli: &Cli) -> i32 {
             TrustRemoveOp::COMMAND,
             ops.trust_remove(name),
             human::print_trust_remove,
+        ),
+        Command::Trust(TrustCmd::Invite) => finish(
+            cli,
+            TrustInviteOp::COMMAND,
+            ops.trust_invite(TrustInviteReq {}),
+            human::print_trust_invite,
+        ),
+        Command::Trust(TrustCmd::Accept { address, code }) => finish(
+            cli,
+            TrustAcceptOp::COMMAND,
+            ops.trust_accept(TrustAcceptReq {
+                address: address.clone(),
+                code: code.clone(),
+            }),
+            human::print_trust_accept,
         ),
         Command::Hosts => finish(
             cli,
@@ -1246,6 +1262,8 @@ fn command_name(cli: &Cli) -> &'static str {
         Command::Trust(TrustCmd::Add(_)) => TrustAddOp::COMMAND,
         Command::Trust(TrustCmd::List) => TrustListOp::COMMAND,
         Command::Trust(TrustCmd::Remove { .. }) => TrustRemoveOp::COMMAND,
+        Command::Trust(TrustCmd::Invite) => TrustInviteOp::COMMAND,
+        Command::Trust(TrustCmd::Accept { .. }) => TrustAcceptOp::COMMAND,
         Command::Hosts => HostListOp::COMMAND,
         Command::Host(HostCmd::Get { .. }) => HostGetOp::COMMAND,
         Command::Acl(AclCmd::Check(_)) => AclCheckOp::COMMAND,

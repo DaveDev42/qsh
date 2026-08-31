@@ -6,7 +6,7 @@ use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 
 use qsh_proto::ErrorCode;
-use qsh_transport::Listener;
+use qsh_transport::{Listener, TrustEvaluator};
 
 use crate::acl::{StartupDiagnostic, load_or_deny};
 use crate::audit::RotatingAuditSink;
@@ -15,7 +15,7 @@ use crate::config::{Config, Paths};
 use crate::identity::LoadedIdentity;
 use crate::ops::OpError;
 use crate::server::Server;
-use crate::trust::SharedTrustStore;
+use crate::trust::{SharedInviteStore, SharedTrustStore};
 
 /// Default listen address when neither `--bind` nor `[serve].bind` is set.
 pub const DEFAULT_BIND: &str = "[::]:4433";
@@ -57,11 +57,27 @@ pub async fn run_serve(
 ) -> Result<(), OpError> {
     let bind = resolve_bind(bind_flag, config)?;
     let trust = SharedTrustStore::open(paths.trust_file())?;
+    // ADR-0002 / M7 Step 4 (report §B12: forward-host, `qsh serve`, only —
+    // deliberately wired here in `run_serve`, not in the `host_runtime`
+    // `qsh reverse` also shares, since a reverse target never runs
+    // `Server::run`'s own accept loop at all and so could never reach
+    // `serve_pairing_connection` regardless; keeping the attach here keeps
+    // that out-of-scope role's trust store untouched instead of relying on
+    // that reachability argument alone). `trust.attach_pairing` must run
+    // *before* `Listener::bind` below — every accepted connection's TLS
+    // verification reads `pairing_open()` off this same evaluator.
+    let invites = SharedInviteStore::open(paths.invites_file())?;
+    trust.attach_pairing(Arc::clone(&invites));
     // A bind that cannot be satisfied (port in use, privileged port, no
     // such interface) is a configuration problem on this host, not an
     // internal fault: report it as such so `--bind`/`[serve].bind` is the
     // obvious thing to look at.
-    let listener = Listener::bind(bind, identity.local, trust).map_err(|err| {
+    let listener = Listener::bind(
+        bind,
+        identity.local,
+        Arc::clone(&trust) as Arc<dyn TrustEvaluator>,
+    )
+    .map_err(|err| {
         OpError::new(
             ErrorCode::ConfigError,
             format!("cannot listen on {bind}: {err}"),
@@ -76,6 +92,10 @@ pub async fn run_serve(
     on_bound(actual);
 
     let runtime = host_runtime(paths, config, identity.identity.device_id.clone());
+    // Same `trust`/`invites` pair the listener's own evaluator was built
+    // from (report §B9/§B14) — `Server::serve_pairing_connection` pins
+    // through `trust`'s path and redeems through `invites`.
+    runtime.server.set_pairing(trust, invites);
     on_runtime(&runtime);
     tracing::info!(
         device_id = %identity.identity.device_id,

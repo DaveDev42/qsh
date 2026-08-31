@@ -10,8 +10,8 @@ use schemars::{Schema, schema_for};
 use crate::types::{
     AclCheckData, CapabilitiesData, CliEnvelope, ExecRunData, Host, HostListData, IdentityInitData,
     SchemaData, Session, SessionCloseData, SessionListData, SessionOpenData, SessionReadData,
-    SessionResizeData, SessionWriteData, TrustAddData, TrustListData, TrustRemoveData,
-    TunnelCloseData, TunnelListData, TunnelOpenData, VersionData,
+    SessionResizeData, SessionWriteData, TrustAcceptData, TrustAddData, TrustInviteData,
+    TrustListData, TrustRemoveData, TunnelCloseData, TunnelListData, TunnelOpenData, VersionData,
 };
 
 /// Every `docs/CLI.md` §2.4 dotted command name [`cli_v1_data_schema`] has
@@ -34,7 +34,9 @@ pub const CLI_V1_SCHEMA_COMMANDS: &[&str] = &[
     "session.read",
     "session.resize",
     "session.write",
+    "trust.accept",
     "trust.add",
+    "trust.invite",
     "trust.list",
     "trust.remove",
     "tunnel.close",
@@ -69,7 +71,9 @@ pub fn cli_v1_data_schema(command: &str) -> Option<Schema> {
         "session.read" => schema_for!(SessionReadData),
         "session.resize" => schema_for!(SessionResizeData),
         "session.write" => schema_for!(SessionWriteData),
+        "trust.accept" => schema_for!(TrustAcceptData),
         "trust.add" => schema_for!(TrustAddData),
+        "trust.invite" => schema_for!(TrustInviteData),
         "trust.list" => schema_for!(TrustListData),
         "trust.remove" => schema_for!(TrustRemoveData),
         "tunnel.close" => schema_for!(TunnelCloseData),

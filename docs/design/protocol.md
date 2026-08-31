@@ -186,6 +186,10 @@ message ControlMessage {
                                             //   session.closed (CLI.md §6.4). attach 중인 connection에만
                                             //   전송; pull 소비자는 같은 event를 ReplayRing의 제어 엔트리로
                                             //   받는다(architecture.md §3)
+    PairingProof        pairing_proof = 70; // §15(ADR-0002, M7 Step 4). Principal::Pairing 연결에서만
+                                            //   등장 — 그 연결은 Hello/session/tunnel/exec dispatch에
+                                            //   전혀 닿지 않는 전용 responder로만 라우팅된다
+    PairingAccepted     pairing_accepted = 71; // §15. 성공 시에만; 실패는 기존 Error frame 재사용
   }
 }
 
@@ -343,3 +347,72 @@ ADR-0005에 따라 P0 코드는 다음을 지킨다 — 이를 지키면 fallbac
 - 모든 프로토콜 코드는 `Transport`/`StreamMux` trait(open_bi/accept, ordered reliable bytes, 우선순위 힌트)에 대해 작성한다. quinn이 첫 구현일 뿐이다.
 - wire 구조는 QUIC 고유 개념(stream ID, datagram, transport parameter)에 의존하지 않는다. 스트림 정체성은 항상 in-band `StreamHeader`다.
 - `qsh doctor`는 P0부터 UDP reachability probe를 갖는다(차단 환경을 "미스터리"가 아닌 진단 가능한 상태로).
+
+## 15. 페어링 프로토콜 — invite code (ADR-0002, M7 Step 4)
+
+M8 wire freeze 전 마지막 프로토콜 확장이라 스키마를 의도적으로 최소로 유지한다: 새 메시지 둘(`PairingProof`/`PairingAccepted`), 새 `Principal`/`AuthPath` variant 하나(`Pairing`), 그 외에는 기존 frame layer(§5)·직렬화(§6)·`Error`/`ErrorCode` 어휘(CLI.md §3.3)를 그대로 재사용한다. CLI 계약은 CLI.md §6.11.
+
+### 15.1 TLS 게이트 — 세 번째 accept 경로
+
+§3의 `QshPeerVerifier`는 기존 두 경로(pin, private CA 체인) 중 어느 쪽도 통과하지 못한 leaf 인증서를 무조건 거부한다. 페어링은 정의상 서로 한 번도 본 적 없는 상대를 다루므로, 이 거부 앞에 세 번째 경로를 하나 더 둔다: `TrustEvaluator::pairing_open(&self) -> bool`(기본 구현은 `false`)이 `true`를 답하는 동안에만, pin도 CA도 통과하지 못한 leaf가 principal `Pairing`/auth path `Pairing`으로 허용된다. `SharedTrustStore::pairing_open()`은 살아 있는(= `INVITE_RETENTION`, 20분 이내의) invite 레코드가 하나라도 있으면 `true`다 — invite가 하나도 없거나 전부 그 창을 넘기면 즉시 원래의 두-경로 전용 거부로 돌아간다. `qsh listen`/`qsh reverse`는 이 evaluator를 attach하지 않으므로(§15.8) 이 세 번째 경로 자체가 존재하지 않는다.
+
+이 게이트는 **누가 pin됐는지**는 전혀 묻지 않는다 — "지금 이 host에 살아 있는 invite가 있는가"만 묻는다. 실제 인증(이 연결이 그 invite의 secret을 정말로 아는가)은 TLS 계층이 아니라 §15.3의 control-stream 교환이 담당한다.
+
+### 15.2 dispatch 우회 — `Principal::Pairing`은 `Hello`에 닿지 않는다
+
+`Server::serve_connection_inner`는 `handshake::respond`를 부르기 **전에** `conn.principal()`을 검사한다. principal이 `Pairing`이면 그 연결은 `Hello` 교환, `ConnCtx`, `Server::dispatch`, ACL choke point 중 어느 것에도 도달하지 않고 전용 responder(`serve_pairing_connection`)로 곧장 라우팅된다 — 증명을 검증하고, (성공하면) pin하고, 닫는 것 외에는 아무것도 할 수 없는 경로다. "인증·인가 전 리소스 생성 금지"(PRD §9, CLAUDE.md)를 ACL 규칙이 아니라 **도달 가능한 코드 자체의 모양**으로 보장한다 — 페어링 연결의 도달 가능 경로에는 애초에 세션/터널/exec 핸들러가 없다. 일반 연결에서 `PairingProof`/`PairingAccepted`가 도착하면(경로 오용) 기존의 자리를 벗어난 `Hello`와 같은 취급으로 `INVALID_ARGUMENT`다.
+
+### 15.3 채널 바인딩 — TLS exporter
+
+양방향 증명은 이 연결 자체의 RFC 5705 TLS exporter 값(`quinn::Connection::export_keying_material`, 32바이트)에서 유도한다. 레이블은 `b"qsh pairing v1"`(`EXPORTER_LABEL`), context는 항상 빈 값 — exporter 출력 자체가 이미 TLS session/key-share별로 유일하므로 이것으로 채널 바인딩이 충분하다. 이 바인딩의 안전 속성: 두 개의 별도 TLS 세션을 각각 종단하는 MITM은 서로 다른 exporter 값 두 개를 얻으므로, 한쪽 다리에서 유효한 증명이 다른 쪽 다리에서는 검증되지 않는다 — invite secret이 새어 나가지 않는 한, 증명을 한쪽에서 다른 쪽으로 그대로 옮겨 붙일 수 없다.
+
+### 15.4 증명 — 도메인 분리된 두 개의 BLAKE3 keyed hash
+
+`mac_key = blake3::hash(invite_secret)`. 두 방향의 증명은 exporter 값 뒤에 서로 다른 1바이트를 붙여 도메인을 분리한다:
+
+- initiator → responder(`PairingProof.proof`): `blake3::keyed_hash(mac_key, exporter || 0x01)`
+- responder → initiator(`PairingAccepted.proof`): `blake3::keyed_hash(mac_key, exporter || 0x02)`
+
+두 값 다 `mac_key`(즉 invite secret)를 아는 쪽만 만들 수 있고, 어느 한쪽에서 다른 쪽을 유도할 수 없다. 도메인 분리가 필요한 이유는 구현 중 실제로 걸린 문제다: initiator의 dial-time evaluator(`AcceptAnyForPairing`)는 **어떤** 인증서든 받아들인다 — pairing의 진짜 신원 증명은 TLS identity가 아니라 secret 소유이기 때문이다. 만약 responder가 그저 initiator의 `proof` 값을 그대로 돌려보내는 것만으로 `PairingAccepted`가 성립했다면, secret을 전혀 모르는 임의의 endpoint(잘못 입력한 IP, DNS 스푸핑, 악의적 리스너)도 방금 받은 바이트를 그대로 반사하는 것만으로 응답을 위조할 수 있었을 것이다. 두 방향을 다른 도메인으로 분리하면 반사가 통하지 않는다 — responder는 `0x02` 증명을 **독립적으로** 계산해야만 하고, initiator는 이 값을 constant-time으로(`subtle::ConstantTimeEq`) 검증한 뒤에야 responder를 pin한다. 메시지가 도착했다는 사실만으로 pin하는 코드 경로는 없다.
+
+이 절이 보장하는 것은 정확히 "이 연결 상대는 invite secret을 안다"까지다 — 그 이상의 신원 주장은 하지 않는다. secret은 대개 전화 통화나 채팅처럼 사람이 실수하거나 어깨너머로 새어 나갈 수 있는 경로로 전달되므로, 확신을 더 높이고 싶은 operator는 페어링이 끝난 뒤 `trust list`가 보여주는 fingerprint를 out-of-band로(예: 통화 중에 서로 불러 주기) 사후 대조할 수 있다 — pairing 자체가 요구하지는 않는 defense-in-depth 단계다(구현 보고서 F-3; CLI.md §6.11도 같은 안내를 담는다).
+
+### 15.5 상태 기계와 오류 매핑
+
+initiator(`qsh trust accept`)가 control 스트림에 `PairingProof` 하나를 보낸다. responder(`qsh serve`)는 `PairingAccepted`(성공) 또는 기존 `Error` frame(실패) 중 하나만 답하고, 어느 쪽이든 그 직후 연결을 닫는다 — 이 교환은 §9의 일반 `Response` oneof를 타지 않는 pairing 전용의, 의도적으로 더 작은 메시지 모양이다.
+
+| 조건 | 오류 코드(CLI.md §3.3) |
+|---|---|
+| secret이 어떤 살아 있는 invite와도 안 맞음 | `AUTH_FAILED` |
+| 맞는 invite는 있으나 TTL(10분) 초과 | `TRUST_REQUIRED` |
+| 맞는 invite가 이미 redeem됨 | `SESSION_CONFLICT` |
+| 증명은 맞으나 pin 시점 이름 충돌(§15.7) | `SESSION_CONFLICT` |
+| responder의 `PairingAccepted.proof`가 검증 실패 | (initiator 로컬 실패 — 어떤 pin도 하지 않고 거부) |
+
+invite의 TTL(10분, redeem 가능 창)과 §15.1의 retention(20분, TLS 게이트가 열려 있는 창)은 서로 다른 창이다 — TTL이 지나도 retention 안에서는 `pairing_open()`이 계속 `true`이므로, 뒤늦게 dial한 initiator는 "이 host는 애초에 페어링을 지원하지 않는다"처럼 보이는 TLS 단의 뭉뚱그려진 거부 대신 `TRUST_REQUIRED`라는 명확한 신호를 control 스트림 위에서 받는다.
+
+### 15.6 동시 양방향 pin과 충돌
+
+성공하면 두 장치가 **같은 교환** 안에서 서로를 pin한다 — 별도의 `trust add` 왕복이 없다. 두 pin 모두 기존 `TrustStore::add_peer` 경로(Step 2)를 그대로 탄다. responder 쪽 pin은 `SharedInviteStore::redeem`의 `on_matched` 훅으로 시점이 고정된다: 증명이 검증된 **직후**, invite가 소비 처리되기 **전에** 호출되어, 그 훅이 `false`(이름 충돌)를 답하면 `redeem` 자체가 `Rejected`를 반환하고 레코드는 바이트 단위로 그대로 남는다 — 충돌 실패가 invite를 태우지 않는다. initiator 쪽 pin은 이 wire 교환이 끝난 **뒤**, 완전히 로컬에서 별도로 실행된다(`Ops::trust_accept`) — 그래서 이 두 pin 사이에는 원자성이 없다: responder 쪽 pin과 invite 소비가 이미 성공한 뒤에 initiator 자신의 로컬 저장소에서 이름 충돌이 나는 경우, invite는 이미 소비된 채로 그 자리에 남고 initiator는 로컬 충돌을 별도로 해결하고 새 invite를 다시 받아야 한다(구현 보고서 §F가 이 창을 알려진 제약으로 남긴다).
+
+어느 쪽에서 나는 이름 충돌이든, 판정 자체는 항상 크게 실패한다(`SESSION_CONFLICT`) — 상대가 자칭하는 이름이 이미 다른 fingerprint로 로컬에 pin돼 있으면, `trust add`가 같은 상황에서 취하는 조용한 no-op과 달리 페어링은 절대 조용히 넘어가지 않는다(이 Step의 invariant #5; `trust add` 자신의 no-op은 의도적으로 손대지 않는다).
+
+**이미 pin된 상대가 재시도하는 경우(구현 보고서 F-2)는 위 표의 `SESSION_CONFLICT`와 겉모습은 같지만 경로가 다르다.** §15.5의 표는 `serve_pairing_connection`이 실제로 invite store를 조회한 뒤의 판정만 다룬다 — 그런데 initiator가 **이미 이 host에 pin된 신원**으로 재시도하면 그 경로 자체를 타지 않는다: §3의 `verify_core` 우선순위(pin → CA → pairing)가 pin 성공을 먼저 확인하므로, 이 연결은 `Principal::Pairing`이 아니라 보통의 인증된 연결로 분류되고, §15.2가 우회하는 그 일반 `Hello` 교환(`handshake::respond`)으로 들어간다. 거기서 첫 control frame이 여전히 `PairingProof`로 도착하면, `handshake::respond_on`은 이를 `Hello`의 자리를 벗어난 메시지로 취급해 명시적인 `SESSION_CONFLICT`(`retryable: false`) 오류 frame을 쓰고 연결을 닫는다 — invite store는 전혀 건드리지 않는다. 그래서 새 invite를 다시 발급받아도 소용이 없다: 문제는 code나 invite의 상태가 아니라 이 신원이 host에 이미 pin되어 있다는 사실 자체이기 때문이다. 복구하려면 host가 `trust remove`로 기존 pin을 지운 뒤에야 같은 initiator가 새 invite로 다시 페어링할 수 있다(CLI.md §6.11, README Known limitations).
+
+### 15.7 재시작 없는 invite 인식
+
+`qsh serve`는 시작 시점에 `invites.toml`을 한 번 열어 `SharedInviteStore`를 `SharedTrustStore`에 붙인다(`trust.attach_pairing(...)`, `Listener::bind`보다 먼저 — TLS 검증이 참조하는 evaluator와 동일 인스턴스여야 하므로). 이후의 redeem·`pairing_open()` 조회는 매번 파일을 다시 열어 **내용**을 비교한다 — `trust.toml`의 재로드가 따르는 것과 같은 원칙(CLI.md §6.11 `trust.remove` 문단, mtime이 아니라 바이트 비교가 유일한 판정자)이 invite store에도 그대로 적용된다. 별도 프로세스로 실행된 `qsh trust invite`가 파일에 새 invite를 쓰면, 이미 떠 있는 `qsh serve`는 재시작·시그널 없이 바로 다음 연결부터 그 invite를 인식한다.
+
+raw secret은 디스크에 절대 남지 않는다 — `invites.toml`에는 `mac_key`(secret의 BLAKE3 해시)와 생성 시각만 기록되고, 파일 자체는 0600이다.
+
+다만 `mac_key`는 통상적 의미의 "안전하게 해시된 비밀"이 아니라는 점을 분명히 해 둔다(구현 보고서 F-4): §15.4의 두 증명 모두 raw secret이 아니라 `mac_key` 자체를 keyed-hash의 key로 쓰므로, `invites.toml`을 읽을 수 있는 자는 raw secret 없이 `mac_key`만으로 그 invite의 양방향 증명을 전부 계산할 수 있다 — 즉 `mac_key`는 이 invite에 대해 raw secret과 동등한 verifier다. 이 파일을 실제로 지키는 것은 해시 연산이 아니라 순전히 파일 권한(0600)이다: 같은 계정의 다른 프로세스, 백업, 잘못 설정된 sync 등으로 0600이 뚫리면, 그 invite의 TTL이 남아 있는 동안 누구든 그것만으로 페어링을 완료할 수 있다.
+
+TLS 게이트(`pairing_open()`, §15.1)는 redeem 여부를 보지 않고 오직 `INVITE_RETENTION` 창(20분)만 본다 — 그래서 이미 redeem된 invite라도 그 창이 남아 있는 한 `Principal::Pairing` 경로 자체는 계속 열려 있고, 실제 거부(`SESSION_CONFLICT`, §15.5)는 그 다음 단인 redeem 판정에서만 난다. 이 관찰이 뭔가를 뚫는 것은 아니다 — redeem 판정 자체가 여전히 매번 지켜지므로 이미 소비된 invite로 재인증을 완성할 방법은 없다 — 다만 소비 즉시 TLS 게이트까지 함께 닫는 좀 더 좁은 창은 M8 스코프로 남긴다(구현 보고서 F-5). M7에서는 동작 변경이 없다.
+
+### 15.8 범위
+
+이 절은 forward-host(`qsh serve`) 페어링만 다룬다. `qsh listen`/`qsh reverse`(역방향 conduit)는 이 evaluator를 attach하지 않으므로 페어링 대상이 아니다 — reverse target은 애초에 자신의 accept loop을 돌리지 않고 controller에 dial해 들어가는 쪽이라, 이 절의 TLS 게이트(§15.1)에 도달할 경로 자체가 없다.
+
+### 15.9 Fuzzing
+
+`PairingProof`/`PairingAccepted`는 `ControlMessage.body` oneof의 새 variant일 뿐이므로, §13의 `fuzz_control_decode` 타깃(`ControlMessage::decode` 전체를 `arbitrary` structure-aware 변형으로 흔드는 타깃)이 그대로 이 두 메시지도 포함한다 — 별도 타깃이 필요 없다. 이 저장소에는 아직 `fuzz/` 하네스 자체가 실제로 구현되어 있지 않다(§13은 계획 문서다) — 이 Step이 그 계획에 추가하는 표면은 없다는 뜻으로 남긴다.

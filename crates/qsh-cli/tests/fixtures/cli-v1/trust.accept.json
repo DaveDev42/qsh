@@ -1,0 +1,15 @@
+{
+  "command": "trust.accept",
+  "data": {
+    "created": true,
+    "peer": {
+      "added_at": "<timestamp>",
+      "address": "<address>",
+      "fingerprint": "<fingerprint>",
+      "name": "<device_id>"
+    }
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

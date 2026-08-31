@@ -10,8 +10,8 @@ use qsh_core::{ExecRunOutput, OpError, SessionReadOutput};
 use qsh_proto::{
     AclCheckData, CapabilitiesData, Host, HostListData, IdentityInitData, SchemaData, Session,
     SessionCloseData, SessionEvent, SessionListData, SessionOpenData, SessionResizeData,
-    SessionWriteData, TrustAddData, TrustListData, TrustPeer, TrustRemoveData, Tunnel,
-    TunnelCloseData, TunnelListData, VersionData,
+    SessionWriteData, TrustAcceptData, TrustAddData, TrustInviteData, TrustListData, TrustPeer,
+    TrustRemoveData, Tunnel, TunnelCloseData, TunnelListData, VersionData,
 };
 
 use crate::stderr_note;
@@ -141,6 +141,43 @@ pub fn print_trust_remove(data: &TrustRemoveData) -> io::Result<()> {
         writeln!(stdout, "removed {}", data.name)
     } else {
         writeln!(stdout, "{} not found (nothing to do)", data.name)
+    }
+}
+
+/// Print the outcome of `qsh trust invite` (ADR-0002, `docs/CLI.md` §6.11).
+/// The load-bearing line is `accept_command`: the operator copies it
+/// verbatim to the other party (after filling in the placeholder address),
+/// so it is printed on its own line, not folded into a sentence.
+pub fn print_trust_invite(data: &TrustInviteData) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    writeln!(stdout, "invite code: {}", data.code)?;
+    writeln!(stdout, "expires:     {}", data.expires_at)?;
+    writeln!(stdout)?;
+    writeln!(stdout, "Give this command to the other device's operator:")?;
+    writeln!(stdout, "  {}", data.accept_command)
+}
+
+/// Print the outcome of `qsh trust accept` (ADR-0002, `docs/CLI.md` §6.11).
+/// Same verb logic as [`print_trust_add`] — a successful pairing exchange
+/// ends in exactly the same local pin `trust add` would have written.
+pub fn print_trust_accept(data: &TrustAcceptData) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    let verb = if data.created {
+        "pinned"
+    } else if data.updated == Some(true) {
+        "updated"
+    } else {
+        "already pinned"
+    };
+    let peer = &data.peer;
+    if peer.address.is_empty() {
+        writeln!(stdout, "{verb} {} ({})", peer.name, peer.fingerprint)
+    } else {
+        writeln!(
+            stdout,
+            "{verb} {} ({}) [{}]",
+            peer.name, peer.fingerprint, peer.address
+        )
     }
 }
 

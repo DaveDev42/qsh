@@ -126,6 +126,8 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "trust.list.json",
     "trust.remove.json",
     "trust.remove.absent.json",
+    "trust.invite.json",
+    "trust.accept.json",
     "host.list.json",
     "host.get.json",
     "host.list.with_hosts_toml.json",
@@ -263,6 +265,15 @@ fn golden_local_fixtures() {
     let (code, listed) = sandbox.json(&["trust", "list", "--json"]);
     assert_eq!(code, 0, "{listed}");
     check("trust.list.json", listed);
+
+    // `trust invite` (ADR-0002, `PLAN.md` M7 Step 4, `docs/CLI.md` §6.11) is
+    // pure local generation — no dial, no peer — so it belongs here rather
+    // than in `golden_remote_fixtures`. `code`/`expires_at`/`accept_command`
+    // are all volatile (fresh 160-bit secret + creation time every run) and
+    // masked by `fixtures::normalize`.
+    let (code, invited) = sandbox.json(&["trust", "invite", "--json"]);
+    assert_eq!(code, 0, "{invited}");
+    check("trust.invite.json", invited);
 
     // `host.list`/`host.get` (`docs/CLI.md` §6.1) forward-only: no
     // localctl daemon runs in this sandbox (`Sandbox::command` scrubs
@@ -488,6 +499,26 @@ fn golden_trust_add_update_fixture() {
     assert_eq!(updated["data"]["created"], false, "{updated}");
     assert_eq!(updated["data"]["updated"], true, "{updated}");
     check("trust.add.updated.json", updated);
+}
+
+/// `trust accept` (ADR-0002, `PLAN.md` M7 Step 4, `docs/CLI.md` §6.11): a
+/// live pairing round trip against a real `qsh serve`, redeemed with a real
+/// `qsh trust invite --json` code. Own host + client — never `Fleet::start`,
+/// which pre-pins both sides via `--fingerprint` and would defeat pairing's
+/// own premise of two peers that do not already trust each other.
+#[test]
+fn golden_trust_accept_fixture() {
+    let host = Sandbox::initialized();
+    let client = Sandbox::initialized();
+    let serve = ServeGuard::start(&host);
+
+    let (code, invited) = host.json(&["trust", "invite", "--json"]);
+    assert_eq!(code, 0, "{invited}");
+    let invite_code = invited["data"]["code"].as_str().expect("data.code");
+
+    let (code, accepted) = client.json(&["trust", "accept", serve.addr(), invite_code, "--json"]);
+    assert_eq!(code, 0, "{accepted}");
+    check("trust.accept.json", accepted);
 }
 
 /// The dial-timeout path. Split out because it is the one scenario that

@@ -634,6 +634,60 @@ pub struct TrustRemoveData {
     pub removed: bool,
 }
 
+/// Request for `trust.invite` (ADR-0002, M7 Step 4). No fields today — kept
+/// as a struct for symmetry with every other typed request, so a future
+/// optional parameter (e.g. a non-default TTL) is additive, not a new op.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TrustInviteReq {}
+
+/// Data payload of `trust.invite`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TrustInviteData {
+    /// The one-time invite code, Crockford Base32, lowercase, hyphenated
+    /// 4-char groups (`xxxx-xxxx-xxxx-xxxx-xxxx-xxxx-xxxx-xxxx`). Carries no
+    /// address — give it to the other device's operator out of band
+    /// alongside a reachable `host:port` for *this* device.
+    pub code: String,
+    /// RFC 3339 UTC expiry — creation time plus a 10-minute TTL
+    /// (`docs/CLI.md` §6.11).
+    pub expires_at: String,
+    /// The complete command line for the other device to run, with `code`
+    /// already filled in and `<address>` left as a literal placeholder this
+    /// host cannot know on its own (its externally reachable address is a
+    /// deployment fact, not something `trust.invite` observes — the same
+    /// reason `HOST_NOT_FOUND`'s own remedy text uses a placeholder
+    /// address). Human-mode output prints this verbatim; the operator
+    /// substitutes a real `host:port` before sending it to the other party.
+    pub accept_command: String,
+}
+
+/// Request for `trust.accept` (ADR-0002, M7 Step 4): dial `address` and
+/// redeem `code` against the invite it names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TrustAcceptReq {
+    /// `host:port` to dial — the invite-issuing device's reachable address,
+    /// supplied out of band (the code itself never carries one).
+    pub address: String,
+    /// The invite code as displayed by `trust.invite` (case-insensitive,
+    /// hyphens ignored).
+    pub code: String,
+}
+
+/// Data payload of `trust.accept`. Same shape as [`TrustAddData`] — a
+/// successful pairing exchange ends, from this device's perspective, in
+/// exactly the same local pin `trust.add` would have written.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TrustAcceptData {
+    /// The peer pinned as a result of this pairing exchange.
+    pub peer: TrustPeer,
+    /// `true` if this wrote a new pin.
+    pub created: bool,
+    /// `true` if an existing pin's address was updated in place. See
+    /// [`TrustAddData::updated`] for the exact semantics (identical here).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated: Option<bool>,
+}
+
 // ---------------------------------------------------------------------------
 // tunnel.* (`docs/CLI.md` §6.9, M4)
 // ---------------------------------------------------------------------------

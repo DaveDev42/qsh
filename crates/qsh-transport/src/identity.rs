@@ -116,6 +116,19 @@ pub enum Principal {
     /// A peer authenticated by fingerprint alone (no alias): `fp:<sha256:…>`.
     /// Not produced in M1 (every pin has a name) but reserved by the design.
     Fingerprint(Fingerprint),
+    /// A peer admitted only through an open one-time invite window
+    /// (ADR-0002, `docs/design/protocol.md` §15) — not pinned, not
+    /// CA-signed, cryptographically unverified beyond "cert parses and is
+    /// within its validity window". **Never a normal ACL principal**: a
+    /// connection carrying this principal is routed to a dedicated,
+    /// minimal pairing responder (`qsh_core::server::Server::
+    /// serve_connection_inner`) before it ever reaches `Hello`, `ConnCtx`,
+    /// or `Server::dispatch`/ACL — real authentication for such a
+    /// connection is the application-layer HMAC-style proof, not this
+    /// principal. Kept in this enum (rather than a side channel) so
+    /// [`crate::tls::QshPeerVerifier`]'s existing single verification core
+    /// stays the *only* place that decides who a connection is.
+    Pairing,
 }
 
 impl fmt::Display for Principal {
@@ -124,22 +137,25 @@ impl fmt::Display for Principal {
             Principal::Device(name) => write!(f, "device:{name}"),
             Principal::User(name) => write!(f, "user:{name}"),
             Principal::Fingerprint(fp) => write!(f, "fp:{fp}"),
+            Principal::Pairing => write!(f, "pairing"),
         }
     }
 }
 
 /// Failure to parse a principal string.
 #[derive(Debug, Error, PartialEq, Eq)]
-#[error("invalid principal {0:?}: expected device:<name> | user:<name> | fp:sha256:<base64>")]
+#[error(
+    "invalid principal {0:?}: expected device:<name> | user:<name> | fp:sha256:<base64> | pairing"
+)]
 pub struct PrincipalParseError(pub String);
 
 impl FromStr for Principal {
     type Err = PrincipalParseError;
 
-    /// The three shapes [`Principal::Display`](Principal)'s own impl
-    /// produces — `device:<name>`, `user:<name>`, `fp:sha256:<base64>` —
-    /// and nothing else (`docs/CLI.md` §6.15's `acl check --principal`
-    /// validation, `qsh_core::acl::load::has_valid_principal_shape`'s
+    /// The four shapes [`Principal::Display`](Principal)'s own impl
+    /// produces — `device:<name>`, `user:<name>`, `fp:sha256:<base64>`,
+    /// `pairing` — and nothing else (`docs/CLI.md` §6.15's `acl check
+    /// --principal` validation, `qsh_core::acl::load::has_valid_principal_shape`'s
     /// mirror on the `acl.toml` loading side). `device:`/`user:` accept any
     /// non-empty remainder as the name — a full re-validation of the name
     /// grammar `principal_from_san`'s `valid_segment` enforces on a
@@ -148,7 +164,14 @@ impl FromStr for Principal {
     /// (an `acl.toml` rule string is only ever compared byte-for-byte, so
     /// it never has to decode), this constructs a real [`Principal`], so
     /// the fingerprint half must actually parse via [`Fingerprint::from_str`].
+    /// `pairing` (no suffix) parses to [`Principal::Pairing`] — accepted
+    /// here mainly so `qsh acl check --principal pairing` can exercise
+    /// policy against it in tests/diagnostics; a real connection never
+    /// reaches ACL evaluation under this principal (its own doc).
     fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s == "pairing" {
+            return Ok(Principal::Pairing);
+        }
         if let Some(name) = s.strip_prefix("device:") {
             return if name.is_empty() {
                 Err(PrincipalParseError(s.to_string()))
@@ -253,6 +276,7 @@ mod tests {
         assert_eq!(Principal::User("dave".into()).to_string(), "user:dave");
         let fp = Fingerprint::of_spki_der(b"x");
         assert_eq!(Principal::Fingerprint(fp).to_string(), format!("fp:{fp}"));
+        assert_eq!(Principal::Pairing.to_string(), "pairing");
     }
 
     #[test]
@@ -262,6 +286,7 @@ mod tests {
             Principal::Device("laptop".into()),
             Principal::User("dave".into()),
             Principal::Fingerprint(fp),
+            Principal::Pairing,
         ] {
             let s = principal.to_string();
             assert_eq!(s.parse::<Principal>().unwrap(), principal, "{s}");

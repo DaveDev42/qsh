@@ -29,7 +29,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use qsh_proto::ErrorCode;
@@ -379,6 +379,30 @@ pub struct Server {
     /// before any other gate — draining is a hard stop this host applies to
     /// every connection it still holds, not a per-request policy decision.
     draining: AtomicBool,
+    /// This host's own trust store and its open pairing invites (ADR-0002,
+    /// M7 Step 4), set together, once, after construction by
+    /// [`Server::set_pairing`] — `Server::new`'s existing call sites (12 of
+    /// them, across `qsh-core`) must not change shape, so this follows the
+    /// same `OnceLock`-after-construction pattern as
+    /// `trust::SharedTrustStore::attach_pairing`. `None` (never attached —
+    /// every non-`qsh serve` caller, e.g. `qsh-testkit`'s pair harnesses)
+    /// means [`Server::serve_pairing_connection`] is simply never reached:
+    /// a connection only carries `Principal::Pairing` at all when *some*
+    /// evaluator's `pairing_open()` answered `true`, and nothing answers
+    /// `true` without an attached invite store on the trust-evaluator side
+    /// too.
+    pairing: OnceLock<PairingState>,
+}
+
+/// [`Server`]'s own write access to the trust store (to pin a
+/// successfully-paired peer) plus the invite store (to redeem a proof) —
+/// bundled so [`Server::set_pairing`] wires both atomically, since a
+/// running daemon that had one without the other could reach
+/// `Principal::Pairing` (via the trust store's `pairing_open()`) with no
+/// way to actually complete the exchange, or vice versa.
+struct PairingState {
+    trust: Arc<crate::trust::SharedTrustStore>,
+    invites: Arc<crate::trust::SharedInviteStore>,
 }
 
 impl std::fmt::Debug for Server {
@@ -406,7 +430,25 @@ impl Server {
             tickets: Mutex::new(HashMap::new()),
             remote_forwards: Mutex::new(HashMap::new()),
             draining: AtomicBool::new(false),
+            pairing: OnceLock::new(),
         })
+    }
+
+    /// Wire this host's trust store and invite store together so `qsh
+    /// serve`'s connection driver can answer a `Principal::Pairing`
+    /// connection ([`Self::serve_pairing_connection`]): verify the
+    /// initiator's proof against `invites`, and — only once that succeeds —
+    /// pin the peer into `trust`. No-op past the first call —
+    /// `crate::serve`'s startup path calls this exactly once, immediately
+    /// after [`Server::new`], with the *same* `Arc`s the transport layer's
+    /// own `TrustEvaluator` was built from (single source of truth for
+    /// `trust.toml`).
+    pub fn set_pairing(
+        &self,
+        trust: Arc<crate::trust::SharedTrustStore>,
+        invites: Arc<crate::trust::SharedInviteStore>,
+    ) {
+        let _ = self.pairing.set(PairingState { trust, invites });
     }
 
     /// The `Hello` this host sends. `reverse` is `Some` only when this
@@ -495,6 +537,31 @@ impl Server {
                 wire::Error::new(
                     ErrorCode::InvalidArgument,
                     "unexpected Hello after handshake",
+                    false,
+                ),
+            )),
+            // Pairing (ADR-0002, M7 Step 4) has its own, much smaller
+            // dispatch loop (`Server::serve_pairing_connection`), reachable
+            // only on a connection whose principal is `Principal::Pairing`
+            // — `Server::serve_connection_inner` routes such a connection
+            // there *before* it ever reaches this ordinary `Hello`/dispatch
+            // path. A `PairingProof`/`PairingAccepted` arriving here means
+            // an already-authenticated peer sent a pairing message on its
+            // normal connection, which is never valid — refused exactly
+            // like a stray `Hello`, above.
+            Some(control_message::Body::PairingProof(_)) => Some(ControlMessage::error(
+                request_id,
+                wire::Error::new(
+                    ErrorCode::InvalidArgument,
+                    "unexpected PairingProof on an authenticated connection",
+                    false,
+                ),
+            )),
+            Some(control_message::Body::PairingAccepted(_)) => Some(ControlMessage::error(
+                request_id,
+                wire::Error::new(
+                    ErrorCode::InvalidArgument,
+                    "unexpected PairingAccepted on an authenticated connection",
                     false,
                 ),
             )),
@@ -1875,6 +1942,19 @@ impl Server {
     }
 
     async fn serve_connection_inner(self: Arc<Self>, conn: &Connection) -> Result<(), ConnError> {
+        // ADR-0002 / M7 Step 4's structural guarantee (report §B1): a
+        // pairing-authenticated connection never reaches `handshake::
+        // respond`, `ConnCtx`, `Self::dispatch` or the ACL choke point at
+        // all — it is routed to `serve_pairing_connection`, whose only
+        // reachable code path can verify one proof, maybe pin, and close.
+        // This is checked *before* anything else in this function, so "no
+        // resource before pairing verification succeeds" is guaranteed by
+        // the shape of the code, not by an ACL rule a future refactor could
+        // misconfigure or bypass.
+        if *conn.principal() == Principal::Pairing {
+            return self.serve_pairing_connection(conn).await;
+        }
+
         let (ctl, peer_hello) = crate::handshake::respond(conn, |peer_hello| {
             // A forward host does not accept registrations — the
             // symmetric-protocol counterpart of `qsh listen` refusing a
@@ -1916,6 +1996,128 @@ impl Server {
         // here needs to watch this connection's own liveness
         // (`serve_control`'s `probe` doc comment).
         self.serve_control(conn, ctl, ctx, None).await
+    }
+
+    /// Answer a `Principal::Pairing` connection (ADR-0002, `PLAN.md` M7
+    /// Step 4): verify the initiator's proof against this host's own
+    /// invite store, and — only once that verification succeeds — pin the
+    /// initiator into `trust.toml` via the same
+    /// [`crate::trust::TrustStore::add_peer`] path `qsh trust add` uses
+    /// (Step 2's content-based reload picks the write up on this host's own
+    /// [`crate::trust::SharedTrustStore`] without a restart, invariant #6).
+    ///
+    /// This is the *only* code such a connection ever reaches — routed here
+    /// from [`Self::serve_connection_inner`] before `handshake::respond`,
+    /// `ConnCtx` or [`Self::dispatch`] are ever touched, so "no resource
+    /// before pairing verification succeeds" (this step's brief invariant
+    /// #1) is a property of the call graph, not a check a future refactor
+    /// could accidentally bypass.
+    ///
+    /// Unlike `trust add`'s own deliberate silent no-op on a name collision
+    /// (`TrustStore::add_peer`'s own doc, `PLAN.md` M7 Step 2 decision B),
+    /// pairing fails loudly on one (invariant #5): the `try_pin` hook below
+    /// returns `false` on a collision, which `crate::pairing::respond` turns
+    /// into `PairingError::PinCollision` (`SESSION_CONFLICT`) — and because
+    /// that hook runs *before* the matched invite is marked consumed
+    /// (`crate::trust::pairing::SharedInviteStore::redeem`'s `on_matched`),
+    /// the invite is left entirely untouched, so a renamed or removed
+    /// conflicting pin can retry within the same TTL.
+    async fn serve_pairing_connection(self: Arc<Self>, conn: &Connection) -> Result<(), ConnError> {
+        let peer_addr = conn.remote_address();
+
+        // Structurally unreachable under correct startup wiring
+        // (`crate::serve`'s host runtime calls `Server::set_pairing` with
+        // the very evaluator `qsh_transport::TrustEvaluator::pairing_open`
+        // answered `true` from), but a connection has already been admitted
+        // by the time this runs — a misconfigured caller (a stray test
+        // harness, a future embedder) fails closed with a clear diagnostic
+        // rather than panicking.
+        let Some(state) = self.pairing.get() else {
+            tracing::error!(
+                "pairing-principal connection admitted but no pairing store is attached; closing"
+            );
+            let _ = self.audit.record(&AuditRecord::pairing(
+                peer_addr,
+                Decision::Deny,
+                "not-configured",
+            ));
+            conn.close(CLOSE_CODE_PROTOCOL, b"pairing not configured");
+            return Ok(());
+        };
+
+        // Likewise structurally unreachable in practice (mutual TLS always
+        // yields a peer certificate once the handshake itself completed),
+        // but `peer_fingerprint()` is an `Option`, so this stays fail-closed
+        // rather than unwrapping.
+        let Some(observed_fp) = conn.peer_fingerprint() else {
+            tracing::error!("pairing connection has no peer certificate fingerprint; closing");
+            let _ = self.audit.record(&AuditRecord::pairing(
+                peer_addr,
+                Decision::Deny,
+                "no-fingerprint",
+            ));
+            conn.close(CLOSE_CODE_PROTOCOL, b"no peer certificate");
+            return Ok(());
+        };
+
+        let trust = &state.trust;
+        let result =
+            crate::pairing::respond(conn, &state.invites, &self.device_name, |initiator_name| {
+                let path = trust.path();
+                let mut store = match crate::trust::TrustStore::load(path) {
+                    Ok(store) => store,
+                    Err(err) => {
+                        tracing::error!(%err, "failed to load the trust store during pairing");
+                        return false;
+                    }
+                };
+                let (peer, created, updated) = store.add_peer(
+                    initiator_name,
+                    None,
+                    observed_fp,
+                    crate::config::now_rfc3339(),
+                );
+                if !created && !updated && peer.fingerprint != observed_fp.to_string() {
+                    tracing::warn!(
+                        name = %initiator_name,
+                        "pairing declined: name already pinned under a different identity"
+                    );
+                    return false;
+                }
+                if (created || updated)
+                    && let Err(err) = store.save(path)
+                {
+                    tracing::error!(%err, "failed to persist the trust store during pairing");
+                    return false;
+                }
+                true
+            })
+            .await;
+
+        match result {
+            Ok(success) => {
+                tracing::info!(peer = %success.peer_device_name, "pairing succeeded");
+                let _ = self.audit.record(&AuditRecord::pairing(
+                    peer_addr,
+                    Decision::Allow,
+                    &success.peer_device_name,
+                ));
+                conn.close(0, b"paired");
+                Ok(())
+            }
+            Err(err) => {
+                if !err.is_connection_lost() {
+                    let category = pairing_audit_category(&err);
+                    let _ = self.audit.record(&AuditRecord::pairing(
+                        peer_addr,
+                        Decision::Deny,
+                        category,
+                    ));
+                    tracing::warn!(%err, "pairing exchange failed");
+                }
+                Err(ConnError::Pairing(err))
+            }
+        }
     }
 
     /// Drive the dispatch loop over an already-negotiated control stream
@@ -3104,6 +3306,29 @@ fn rfc3339_after(ttl: Duration) -> String {
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
 }
 
+/// A coarse, structural-only label for a failed pairing exchange's audit
+/// record ([`AuditRecord::pairing`]) — never the invite code, proof bytes or
+/// exported keying material, matching every other `PairingError` variant's
+/// own already-redacted `Display`.
+fn pairing_audit_category(err: &crate::pairing::PairingError) -> &'static str {
+    use crate::pairing::PairingError;
+    match err {
+        PairingError::Timeout => "timeout",
+        PairingError::ClosedEarly => "closed-early",
+        PairingError::UnexpectedMessage => "unexpected-message",
+        PairingError::ExporterUnavailable => "exporter-unavailable",
+        PairingError::NoMatch => "no-match",
+        PairingError::Expired => "expired",
+        PairingError::AlreadyConsumed => "already-consumed",
+        PairingError::PinCollision => "pin-collision",
+        PairingError::ResponderProofMismatch => "responder-proof-mismatch",
+        PairingError::Remote { .. } => "remote-error",
+        PairingError::Stream(_) => "stream-error",
+        PairingError::Connection(_) => "connection-error",
+        PairingError::Store(_) => "store-error",
+    }
+}
+
 /// Whether the `user@` hint names the account `qsh serve` runs as
 /// (CLI.md §7: exact, case-sensitive match against the login name from
 /// `getpwuid(geteuid())`, never `$USER`/`$LOGNAME`). Anything that cannot
@@ -3183,10 +3408,26 @@ pub enum ConnError {
     /// never end in a panic).
     #[error("{}: {}", .0.error_code(), .0.message)]
     Rejected(wire::Error),
+    /// The peer's first control message was a `PairingProof` sent to a
+    /// connection this host's TLS layer already recognized via pin or CA
+    /// (report F-2, `docs/design/protocol.md` §15.1's pin/CA priority over
+    /// the pairing fallback) — `handshake::respond_on` already wrote and
+    /// drained an explicit, non-retryable `SESSION_CONFLICT` error frame
+    /// before returning this, so (like [`ConnError::Rejected`]) it exists
+    /// purely for this caller's own logging/close path.
+    #[error("{}: {}", .0.error_code(), .0.message)]
+    AlreadyPaired(wire::Error),
     #[error(transparent)]
     Stream(#[from] qsh_transport::StreamError),
     #[error(transparent)]
     Connection(#[from] qsh_transport::ConnectionError),
+    /// A pairing exchange (ADR-0002, M7 Step 4) ended in failure —
+    /// `crate::pairing::respond` already wrote and drained the
+    /// corresponding wire `Error` frame before returning this, so (like
+    /// [`ConnError::Rejected`]) it exists purely for
+    /// [`Server::serve_pairing_connection`]'s own logging/close path.
+    #[error(transparent)]
+    Pairing(#[from] crate::pairing::PairingError),
 }
 
 impl ConnError {
@@ -3206,7 +3447,9 @@ impl ConnError {
             | ConnError::ClosedBeforeHello
             | ConnError::ExpectedHello
             | ConnError::VersionMismatch
-            | ConnError::Rejected(_) => false,
+            | ConnError::Rejected(_)
+            | ConnError::AlreadyPaired(_) => false,
+            ConnError::Pairing(e) => e.is_connection_lost(),
         }
     }
 }
@@ -3237,6 +3480,7 @@ fn map_hello_error(err: crate::handshake::HelloError) -> ConnError {
         // peer-triggerable from Step 3 onward (registration/ACL decline),
         // so it maps to a real `ConnError` variant rather than panicking.
         HelloError::Rejected(e) => ConnError::Rejected(e),
+        HelloError::AlreadyPaired(e) => ConnError::AlreadyPaired(e),
     }
 }
 

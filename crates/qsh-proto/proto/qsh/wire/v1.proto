@@ -68,6 +68,18 @@ message ControlMessage {
 
     // Asynchronous (request_id = 0), host → attached client.
     SessionEvent  session_event  = 60;
+
+    // One-time invite-code pairing (ADR-0002, M7 Step 4,
+    // docs/design/protocol.md §15). Sent only on a connection whose
+    // principal is Principal::Pairing — the host's connection dispatcher
+    // routes such a connection to a dedicated, minimal responder before it
+    // ever reaches Hello/session/tunnel/exec dispatch (protocol.md §15's
+    // "no resource before verification" invariant); a PairingProof
+    // arriving on an ordinary, already-authenticated connection is refused
+    // (INVALID_ARGUMENT) the same way an out-of-place Hello already is,
+    // above.
+    PairingProof     pairing_proof     = 70;
+    PairingAccepted  pairing_accepted  = 71;
   }
 }
 
@@ -143,6 +155,57 @@ message Error {
   string code = 1;
   string message = 2;
   bool retryable = 3;
+}
+
+// The initiator's (`qsh trust accept`) one and only message on a
+// pairing-authenticated connection's control stream (ADR-0002,
+// docs/design/protocol.md §15). Unlike Hello, this is never answered with a
+// second PairingProof — the responder answers either PairingAccepted
+// (success) or an Error frame (any failure: no live invite matches, the
+// matching invite has expired, or it was already consumed), then the
+// connection is closed either way. Never a Request/Response pair through
+// the `Response` oneof above — pairing intentionally keeps its own, smaller
+// message shape (protocol.md §15's "keep the schema conservative" note).
+message PairingProof {
+  // Label for the pin this creates on the responder's side, self-reported
+  // exactly like Hello.device_name — never an authentication input on its
+  // own (protocol.md §3's rule applies here too: identity is the connection
+  // principal / the proof below, never a wire string).
+  string device_name = 1;
+  // BLAKE3 keyed hash, 32 bytes: `blake3::keyed_hash(mac_key, exporter ||
+  // 0x01)` where `mac_key = blake3::hash(invite_secret)` and `exporter` is
+  // this connection's own `quinn::Connection::export_keying_material`
+  // output under the label/context docs/design/protocol.md §15 fixes (the
+  // channel-binding property invariant: a MITM terminating two separate TLS
+  // sessions gets two different exporter values, so a proof valid on one
+  // leg never verifies on the other). The trailing `0x01` domain-separates
+  // this direction's proof from PairingAccepted.proof's `0x02` below —
+  // see that field's own comment for why this matters.
+  bytes proof = 2;
+}
+
+// The responder's reply to a successfully verified PairingProof — the only
+// success reply on a pairing connection (ADR-0002, protocol.md §15). Any
+// failure instead sends the existing Error frame above (AUTH_FAILED /
+// TRUST_REQUIRED / SESSION_CONFLICT depending on why, docs/CLI.md §3.3).
+message PairingAccepted {
+  // The responder's own device name (the same value its ordinary
+  // Hello.device_name carries), for the initiator's own pin.
+  string device_name = 1;
+  // The responder's own proof, over the same channel: `blake3::keyed_hash(
+  // mac_key, exporter || 0x02)` — domain-separated from PairingProof.proof
+  // (`|| 0x01`) so it cannot be produced by trivially echoing the bytes the
+  // initiator just sent. This is what makes the exchange bidirectional
+  // rather than server-blind: the initiator's own trust evaluator for this
+  // one-shot dial accepts *any* certificate (`crate::pairing::
+  // AcceptAnyForPairing` in qsh-core — the secret is the actual credential,
+  // not the TLS identity), so without an independently-derived value here,
+  // any endpoint the initiator happened to dial could reply
+  // PairingAccepted unconditionally and have its fingerprint pinned as if
+  // it were the invited device. The initiator MUST verify this
+  // constant-time before pinning the responder — never pin on the strength
+  // of the message arriving at all.
+  bytes proof = 2;
 }
 
 // Request: run a non-PTY command on the peer (op `exec.run`).

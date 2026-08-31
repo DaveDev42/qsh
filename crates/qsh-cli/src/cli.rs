@@ -442,6 +442,20 @@ pub enum TrustCmd {
         /// The peer alias to unpin.
         name: String,
     },
+    /// Mint a one-time invite code for another device to pair with this one
+    /// (ADR-0002, `docs/CLI.md` §6.11). No address to reach *this* device is
+    /// known here — the operator supplies one out of band when relaying the
+    /// printed `qsh trust accept` command line.
+    Invite,
+    /// Dial `address`, redeem `code` against its invite, and — on a
+    /// successful mutual proof — pin the peer exactly as `trust add` would
+    /// (ADR-0002, `docs/CLI.md` §6.11).
+    Accept {
+        /// `host:port` of the device that printed `code` via `trust invite`.
+        address: String,
+        /// The invite code, as printed (case-insensitive, hyphens ignored).
+        code: String,
+    },
 }
 
 /// `qsh acl …` subcommands (`docs/CLI.md` §6.15).

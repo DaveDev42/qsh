@@ -48,10 +48,18 @@ fn parse_auth_path(s: &str) -> Result<AuthPath, OpError> {
 }
 
 /// [`AuthPath`] → `"pin"`/`"ca"`, the render direction of [`parse_auth_path`].
+/// [`AuthPath::Pairing`] is unreachable through this op in practice
+/// ([`parse_auth_path`] never produces it — `acl.check` simulates ordinary
+/// ACL decisions only, and pairing never reaches the ACL choke point at
+/// all, `crate::server::Server::serve_pairing_connection`'s own doc), but
+/// the match must stay exhaustive since [`AuthPath`] is a shared transport
+/// type; the arm exists so a hypothetical future caller gets the same
+/// rendering `crate::audit`'s own `auth_path_str` uses, not a panic.
 fn auth_path_str(auth_path: AuthPath) -> &'static str {
     match auth_path {
         AuthPath::Pin => "pin",
         AuthPath::Ca => "ca",
+        AuthPath::Pairing => "pairing",
     }
 }
 

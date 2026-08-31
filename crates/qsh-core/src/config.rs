@@ -152,6 +152,13 @@ impl Paths {
         self.config_dir.join("acl.toml")
     }
 
+    /// `<config_dir>/invites.toml` — open pairing invites (ADR-0002, M7
+    /// Step 4, `crate::trust::pairing::InviteStore`). Never carries the raw
+    /// invite secret, only its `blake3` hash — see that module's doc.
+    pub fn invites_file(&self) -> PathBuf {
+        self.config_dir.join("invites.toml")
+    }
+
     /// `<config_dir>/identity`.
     pub fn identity_dir(&self) -> PathBuf {
         self.config_dir.join("identity")

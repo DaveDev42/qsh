@@ -32,6 +32,7 @@ pub mod identity;
 #[cfg(unix)]
 pub mod localctl;
 pub mod ops;
+pub mod pairing;
 pub mod pty;
 pub mod resume;
 pub mod reverse;
@@ -52,9 +53,9 @@ pub use ops::{
     HostGetOp, HostListOp, HostRoute, IdentityInitOp, OpError, Operation, Ops, RecoveryConfig,
     SchemaOp, SessionAttachOp, SessionAttachStream, SessionCloseOp, SessionGetOp, SessionListOp,
     SessionOpenOp, SessionReadOp, SessionReadOutput, SessionReader, SessionResizeOp,
-    SessionWriteOp, TrustAddOp, TrustListOp, TrustRemoveOp, TunnelCloseOp, TunnelHold,
-    TunnelListOp, TunnelOpenOp, VersionOp, dynamic_forward_unsupported, parse_local_forwards,
-    parse_remote_forwards,
+    SessionWriteOp, TrustAcceptOp, TrustAddOp, TrustInviteOp, TrustListOp, TrustRemoveOp,
+    TunnelCloseOp, TunnelHold, TunnelListOp, TunnelOpenOp, VersionOp, dynamic_forward_unsupported,
+    parse_local_forwards, parse_remote_forwards,
 };
 pub use trust::{SharedTrustStore, TrustStore};
 

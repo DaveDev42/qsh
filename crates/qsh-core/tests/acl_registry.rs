@@ -270,9 +270,9 @@ mod dispatch_surface {
     use super::*;
     use qsh_proto::wire::control_message::Body;
     use qsh_proto::wire::{
-        ExecStart, Hello, Ping, Pong, RemoteForwardClose, RemoteForwardOpen, Response,
-        SessionAttach, SessionClose, SessionEvent, SessionGet, SessionList, SessionOpen,
-        SessionRead, SessionResize, SessionWrite,
+        ExecStart, Hello, PairingAccepted, PairingProof, Ping, Pong, RemoteForwardClose,
+        RemoteForwardOpen, Response, SessionAttach, SessionClose, SessionEvent, SessionGet,
+        SessionList, SessionOpen, SessionRead, SessionResize, SessionWrite,
     };
 
     enum Classification {
@@ -317,6 +317,15 @@ mod dispatch_surface {
             Body::SessionEvent(_) => Classification::NoAuthorizationSurface(
                 "host-to-client only; an inbound one is dropped, never authorized",
             ),
+            Body::PairingProof(_) => Classification::NoAuthorizationSurface(
+                "pairing-only (ADR-0002): reaches a connection whose principal is \
+                 Principal::Pairing, routed to a dedicated pairing responder before \
+                 dispatch/ACL ever run",
+            ),
+            Body::PairingAccepted(_) => Classification::NoAuthorizationSurface(
+                "a reply, produced only by the pairing responder itself; never a request \
+                 a peer sends to be authorized",
+            ),
         }
     }
 
@@ -338,6 +347,8 @@ mod dispatch_surface {
             Body::Ping(Ping::default()),
             Body::Pong(Pong::default()),
             Body::SessionEvent(SessionEvent::default()),
+            Body::PairingProof(PairingProof::default()),
+            Body::PairingAccepted(PairingAccepted::default()),
         ]
     }
 
@@ -346,14 +357,15 @@ mod dispatch_surface {
     /// (already exhaustive) match arms. The brief's own illustrative list
     /// (`Ping`/`Hello`/`SessionEvent`) undercounts: `Response` and `Pong`
     /// are equally never-authorized wire shapes (a reply and an
-    /// unsolicited keepalive echo, never a peer request), so the real,
-    /// code-verified list is five variants, not three.
-    const NO_AUTHORIZATION_NEEDED_REASON_COUNT: usize = 5;
+    /// unsolicited keepalive echo, never a peer request), and M7 Step 4
+    /// added two more (`PairingProof`/`PairingAccepted`, ADR-0002) — so the
+    /// real, code-verified list is seven variants, not three.
+    const NO_AUTHORIZATION_NEEDED_REASON_COUNT: usize = 7;
 
     #[test]
     fn every_control_message_body_variant_needs_authorization_or_is_explicitly_exempt() {
         let samples = all_body_samples();
-        assert_eq!(samples.len(), 16, "Body sample count drifted");
+        assert_eq!(samples.len(), 18, "Body sample count drifted");
 
         let mut needs_op: HashSet<&'static str> = HashSet::new();
         let mut no_auth_count = 0usize;
