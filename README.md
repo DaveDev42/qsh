@@ -207,6 +207,21 @@ connects.
 ```bash
 # On the host, the machine that will run the shell:
 qsh init --json                          # creates the device identity; note "fingerprint"
+```
+
+The host denies every request it has no rule for, so write the policy before
+starting `serve`, which reads it once at startup and never reloads it:
+
+```toml
+# <config_dir>/acl.toml, next to trust.toml: written by hand, qsh never
+# generates this file. "laptop" is the name the client gets pinned under
+# two steps down; the rule can name it before that pin exists:
+[[acl]]
+principal = "device:laptop"
+allow = ["session.*", "exec.run"]
+```
+
+```bash
 qsh serve --bind 0.0.0.0:4433            # foreground; bound address goes to stderr
 
 # On the client:
@@ -239,6 +254,12 @@ Every authorized request is written as one structured line to
 `$XDG_STATE_HOME/qsh/audit.log`. Config lives in `$XDG_CONFIG_HOME/qsh`
 (`identity.toml`, `trust.toml`, `config.toml`). `QSH_CONFIG_DIR` and
 `QSH_STATE_DIR` override both.
+
+The private key does not live in any of those files by default: `init` puts
+it in the OS credential store (Keychain on macOS, Secret Service on Linux)
+and falls back to a 0600 file where none is reachable. `qsh init --key-store
+file` skips the credential store entirely, which is what you want on a shared
+or managed machine (`docs/CLI.md` §6.11).
 
 ### An interactive session that outlives the connection
 
