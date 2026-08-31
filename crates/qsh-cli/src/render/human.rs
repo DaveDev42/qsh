@@ -81,6 +81,10 @@ pub fn print_trust_add(data: &TrustAddData) -> io::Result<()> {
     let mut stdout = io::stdout().lock();
     let verb = if data.created {
         "pinned"
+    } else if data.updated == Some(true) {
+        // M7 Step 2 decision B: same identity, new address, applied
+        // in place (`docs/CLI.md` §6.11's address-refresh path).
+        "updated"
     } else {
         "already pinned"
     };

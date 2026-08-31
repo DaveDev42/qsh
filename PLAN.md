@@ -33,6 +33,12 @@ M6 마감(2026-08-31, ROADMAP M6 마감 노트)과 함께 이 문서는 M7 실�
 
 **(d) 완료 판정:** 두 동작 고정 테스트 green, 세 문서 문면 대조 일치, address 갱신 실측(M6 캠페인 재현 시나리오).
 
+**(a)-추기 — Step 2 확정 + 검증 라운드 판정 (2026-08-31, main 세션).** 구현 결과 결정 A는 무신규로직으로 성립 — `SharedTrustStore`가 M1부터 handshake마다 mtime 확인·변경 시 재로드했고(M6 캠페인의 "시작 시 1회"는 ACL 얘기), 실 QUIC 테스트(trust_lifecycle_live.rs)로 러닝 데몬의 신규 handshake 거부 + 기존 연결 생존을 고정. 결정 B는 `trust add` 덮어쓰기(같은 fp+새 addr → addr만 갱신, `updated` additive 필드; fp 상이 → no-op 유지)로 구현, init_trust.rs 수정은 은폐 아닌 정당한 진화로 판정(단언 완화 0, 시나리오 보존, 계약 문면 동시 문서화). opus 검증 P1 0·P2 2·P3 4:
+① **P2-1 수정 지시** — "기존 연결 생존"이 실노출을 과소 기술: 제거된 peer가 살아남은 연결로 **새** 터널/스트림을 무기한 열 수 있음이 실증됨(authorizer는 시작 시 ACL 1회 로드, trust 재평가는 handshake뿐, 연결 수명 상한 없음). README·CLI.md에 "이미 보유"가 아니라 "협상된 권한 전체(새 스트림·터널 개설 포함)를 연결 종료까지 보유, 강제 종료는 P1" 취지의 정직한 한 문장씩 추가. doctor 고지 문면에도 반영하도록 Step 6 입력으로 귀속.
+② **P2-2 수정 지시** — mtime 전용 무효화는 같은 mtime 창에서 fail-open(실증; APFS 실측 200회 충돌 0건이라 주 플랫폼 미실현, 1–2s 해상도 FS 한정 노출). 판정: 문서를 약화하지 않고 **코드를 강화** — 매 handshake 파일 내용 해시 비교(trust.toml은 소형, TLS handshake 대비 비용 무시 가능)로 무효화를 내용 기반으로 바꿔 README의 "re-reads on every handshake"를 문자 그대로 사실로 만든다. 같은 mtime 내용 변경 반영 회귀 테스트(FileTimes로 mtime 고정) 필수.
+③ **P3 기록(무수정)** — fp 충돌 no-op이 JSON·human 모두 무음(순수 no-op과 구분 불가): 보안 신호 관점 개선 여지가 있으나 §6.11이 방금 명문화한 무변경 계약이라 Step 2에서 확장하지 않고 **Step 4(invite pairing) 입력**으로 귀속; 신규 fixture가 normalize 탓에 주소 변경 값을 못 고정(실 QUIC 테스트가 고정하므로 무해); 스키마 `["boolean","null"]`은 schemars 기본으로 무해; trust store read-modify-write 무잠금(동시 CLI lost update)은 **Step 7 이월 부채 목록에 추가**.
+④ **부재 증명 채택** — TLS 세션 재개/0-RTT 명시 비활성(재개 우회 구멍 없음), resume 주소 무캐시·reverse는 dial 시점 snapshot 해석이라 갱신 영향 없음, mutation 2종(갱신 라인 무력화 → 4레이어 5건 동사, 재로드 무력화 → 실 QUIC 거부 테스트 FAIL — tautology 아님), 독립 재실행 1180/1 일치, 트리 byte-identical 복원.
+
 ### Step 3 — `hosts.toml` host profile + 첫 실행 경험
 
 **(a) 범위:** architecture.md §7 문면대로 `hosts.toml`(`[[host]] name·address·user`) 도입 — trust.toml(신뢰)과 분리된 주소 directory. `host.list`/host 해석이 trust.toml 단일 출처에서 hosts.toml 우선으로 확장(우선순위 규칙은 4.1 #4). `user`는 M7에서도 assertion hint일 뿐(불일치 시 `UNSUPPORTED`, PRD §6 user switching 없음 유지). README 첫 실행 절 초안(Step 7 스톱워치의 대본이 된다).
