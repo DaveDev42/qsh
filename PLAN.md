@@ -52,6 +52,7 @@ M6 마감(2026-08-31, ROADMAP M6 마감 노트)과 함께 이 문서는 M7 실�
 ④ **P3 수정 2건** — P3-1: CLI.md §6.1에 hosts.toml 신선도 의미론 1-2문장(op 시작 시 해석; attach 재접속은 attach 시점 해석 유지 — trust 내용 기반 재로드와 명시 대비). P3-5: reverse 라우팅에서 hosts.toml user hint가 적용은 되는데 표시는 None인 불일치 — reverse Host emit에도 user를 채워 표시-적용 일치(additive, source는 주소 개념이라 reverse에서 계속 생략), 테스트 1건.
 ⑤ **P3 기록(무수정)** — P3-2 human 표에 SOURCE/USER 열 상시 추가는 human 비계약이라 무해; P3-3 serve 측 hosts.toml 비독자는 의도 부합(architecture.md §7에 1줄 명시는 fixer 재량); P3-4 PLAN 오참조는 아래에서 main 세션이 정정.
 ⑥ **검증 승계** — 중단으로 미완된 mutation 2종(우선순위 반전 → 우선순위+실연결 테스트 FAIL, user 불일치 우회 → UNSUPPORTED 테스트 FAIL)은 fixer가 표적 cargo test로 실증하고, 수정 후 전체 게이트 5종 재실행. 환경: main 세션이 cargo clean 단행(deps 173GB → 디스크 99% 해소, syspolicyd 부하 근원 제거) — 이번 게이트는 풀 리빌드 1회 비용.
+⑦ **CI-red 후속(e93368c → Windows red, main 세션 직접 수정)** — user-hint 불일치 테스트가 대화형 attach(`qsh box`) 경유였는데 Windows는 그보다 앞선 POSIX 터미널 게이트가 다른 UNSUPPORTED로 먼저 거부(로그 실측). `session open --json` 경유로 재작성 — `resolve_user_hint`는 3 frontend 공유 단일 choke point(문서화된 사실)라 의도 동일, envelope의 UNSUPPORTED + user-gate 메시지("user switching is not supported")를 단언해 Windows에서도 PTY-unsupported 경로와 구분되는 비공허 검증(서버 user 게이트가 세션 자원 생성보다 선행 — server/mod.rs 실측). 게이트 5종 재green.
 
 ### Step 4 — invite pairing (ADR-0002 구현)
 
