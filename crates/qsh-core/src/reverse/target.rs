@@ -745,6 +745,7 @@ mod tests {
                 key_store: qsh_proto::KeyStoreKind::File,
                 created_at: "2026-01-01T00:00:00Z".into(),
                 cert_der: Vec::new(),
+                issued_by_ca: None,
             },
             local: qsh_transport::LocalIdentity {
                 cert_chain: Vec::new(),

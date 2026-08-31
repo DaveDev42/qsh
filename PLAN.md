@@ -84,6 +84,7 @@ M6 마감(2026-08-31, ROADMAP M6 마감 노트)과 함께 이 문서는 M7 실�
 ④ **P3-4 Step 7 이월(관찰)** — 동시 `cert init` temp 파일 인터리브(ca.key/ca.pem 불일치 가능). `identity::init`과 동일 posture, ADR §5 단일-로컬-device 스코프상 비현실적. Step 7 no-locking 부채에 병기.
 ⑤ **M9 부재-gap 판정** — `issued_by_ca`의 `#[serde(default)]` 제거해도 green이나, serde가 `Option` 누락을 intrinsic하게 `None` 처리하므로 잉여 속성일 뿐(gap 아님). 하위호환은 `init` 왕복 테스트가 `skip_serializing_if` 생략 toml 로드 경로를 실제로 지나 방어 — 수정 불요. belt-and-suspenders로 `serde(default)`는 유지.
 ⑥ **검증 방법 승계** — fixer는 P3-1 회귀 테스트 추가 후 mutation self-verify(쓰기 순서 뒤집어 새 테스트 FAIL 확인) + 게이트 5종 재실행. tree는 baseline(`1c16153c…`) 위 증분(테스트 추가)만.
+⑦ **CI-red 후속(6a83abd → Windows red, main 세션 직접 수정)** — 신규 `Identity.issued_by_ca` 필드가 `reverse/listen.rs`·`reverse/target.rs`의 `#[cfg(not(unix))]` Windows-leg 테스트(Step 3이 심은 positive assertion) 두 `Identity{}` 리터럴에서 누락돼 Windows clippy·nextest가 E0063으로 컴파일 실패(로컬 unix 게이트는 이 cfg 블록을 컴파일하지 않아 놓침 — Step 3 ⑦과 동형 갭). 워크스페이스 전체 `Identity` 리터럴 전수 조사로 정확히 이 2건만 누락 확인(프로덕션 `identity/mod.rs`·testkit는 커버됨), 각 리터럴에 `issued_by_ca: None` 추가. 재발 방지로 `cargo check --target x86_64-pc-windows-gnu -p qsh-core --lib --tests` 크로스 컴파일 실증(EXIT=0, cfg(not(unix)) 모듈까지 E0063 없이 통과) — CI가 컴파일할 대상을 로컬에서 확인. fmt/clippy(unix) 재green.
 
 ### Step 6 — `qsh doctor`
 
