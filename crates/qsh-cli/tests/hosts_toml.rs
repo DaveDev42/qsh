@@ -103,6 +103,19 @@ fn hosts_toml_address_actually_wins_a_live_dial_over_a_stale_trust_toml_pin() {
 /// exactly like an explicit `user@host` mismatch is
 /// (`tui_expect.rs`'s `a_foreign_user_hint_is_refused_without_creating_a_session`),
 /// with no session left behind.
+///
+/// Driven through `qsh session open --json`, not the interactive attach:
+/// `Ops::session_open`'s `resolve_user_hint` is the single default-fill
+/// choke point all three frontends share (its doc comment), and the value
+/// op runs on every platform — the interactive command refuses on
+/// non-POSIX terminals before the hint is ever resolved, which is a
+/// different `UNSUPPORTED` than the one under test. The message assert
+/// stays meaningful on Windows too: a mismatched hint is refused at the
+/// server's user gate (`user switching is not supported…`, before any
+/// session resource), while an absent hint would instead fail later in
+/// PTY creation with `PTY sessions are only supported on POSIX hosts` —
+/// so seeing the user-gate message proves the `hosts.toml` default
+/// genuinely reached the wire.
 #[test]
 fn a_hosts_toml_default_user_mismatch_is_refused_the_same_as_an_explicit_one() {
     let fleet = Fleet::start();
@@ -117,23 +130,23 @@ fn a_hosts_toml_default_user_mismatch_is_refused_the_same_as_an_explicit_one() {
     )
     .expect("write hosts.toml");
 
-    // No `user@` prefix: the request's `user` is `None` until
+    // No `user` argument: the request's `user` is `None` until
     // `Ops::session_open`'s `resolve_user_hint` fills it in from
     // `hosts.toml`.
-    let output = fleet.client.qsh(&[HOST_ALIAS]);
+    let (code, envelope) = fleet
+        .client
+        .json(&["session", "open", HOST_ALIAS, "--json"]);
     assert_eq!(
-        common::exit_code(&output),
-        255,
-        "a refused hosts.toml default is a qsh runtime failure (`docs/CLI.md` §4)"
+        code, 255,
+        "a refused hosts.toml default is a qsh runtime failure (`docs/CLI.md` §4): {envelope}"
     );
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(envelope["error"]["code"], "UNSUPPORTED", "{envelope}");
     assert!(
-        stderr.contains("user switching is not supported"),
-        "stderr was {stderr:?}"
-    );
-    assert!(
-        stderr.contains("UNSUPPORTED"),
-        "the error code must reach the user: {stderr:?}"
+        envelope["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("user switching is not supported"),
+        "the refusal must come from the user gate, not another UNSUPPORTED path: {envelope}"
     );
     assert_eq!(
         session_count(&fleet.client),
