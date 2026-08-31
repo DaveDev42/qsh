@@ -8,11 +8,11 @@
 use schemars::{Schema, schema_for};
 
 use crate::types::{
-    AclCheckData, CapabilitiesData, CertInitData, CertIssueData, CliEnvelope, ExecRunData, Host,
-    HostListData, IdentityInitData, SchemaData, Session, SessionCloseData, SessionListData,
-    SessionOpenData, SessionReadData, SessionResizeData, SessionWriteData, TrustAcceptData,
-    TrustAddData, TrustInviteData, TrustListData, TrustRemoveData, TunnelCloseData, TunnelListData,
-    TunnelOpenData, VersionData,
+    AclCheckData, CapabilitiesData, CertInitData, CertIssueData, CliEnvelope, DoctorData,
+    ExecRunData, Host, HostListData, IdentityInitData, SchemaData, Session, SessionCloseData,
+    SessionListData, SessionOpenData, SessionReadData, SessionResizeData, SessionWriteData,
+    TrustAcceptData, TrustAddData, TrustInviteData, TrustListData, TrustRemoveData,
+    TunnelCloseData, TunnelListData, TunnelOpenData, VersionData,
 };
 
 /// Every `docs/CLI.md` §2.4 dotted command name [`cli_v1_data_schema`] has
@@ -25,6 +25,7 @@ pub const CLI_V1_SCHEMA_COMMANDS: &[&str] = &[
     "capabilities.get",
     "cert.init",
     "cert.issue",
+    "doctor.run",
     "exec.run",
     "host.get",
     "host.list",
@@ -64,6 +65,7 @@ pub fn cli_v1_data_schema(command: &str) -> Option<Schema> {
         "capabilities.get" => schema_for!(CapabilitiesData),
         "cert.init" => schema_for!(CertInitData),
         "cert.issue" => schema_for!(CertIssueData),
+        "doctor.run" => schema_for!(DoctorData),
         "exec.run" => schema_for!(ExecRunData),
         "host.get" => schema_for!(Host),
         "host.list" => schema_for!(HostListData),

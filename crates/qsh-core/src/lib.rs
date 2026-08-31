@@ -52,9 +52,9 @@ pub use doctor::{CONTROLLER_UNREACHABLE, Diagnostic, DiagnosticId};
 pub use hosts::{HostEntry, HostsFile};
 pub use identity::{Identity, KeyStore, KeyStoreError, LoadedIdentity};
 pub use ops::{
-    AclCheckOp, AttachHandle, CapabilitiesOp, CertInitOp, CertIssueOp, DetachFlush, ExecRunOp,
-    ExecRunOutput, ExecStdin, HostGetOp, HostListOp, HostRoute, IdentityInitOp, OpError, Operation,
-    Ops, RecoveryConfig, SchemaOp, SessionAttachOp, SessionAttachStream, SessionCloseOp,
+    AclCheckOp, AttachHandle, CapabilitiesOp, CertInitOp, CertIssueOp, DetachFlush, DoctorOp,
+    ExecRunOp, ExecRunOutput, ExecStdin, HostGetOp, HostListOp, HostRoute, IdentityInitOp, OpError,
+    Operation, Ops, RecoveryConfig, SchemaOp, SessionAttachOp, SessionAttachStream, SessionCloseOp,
     SessionGetOp, SessionListOp, SessionOpenOp, SessionReadOp, SessionReadOutput, SessionReader,
     SessionResizeOp, SessionWriteOp, TrustAcceptOp, TrustAddOp, TrustInviteOp, TrustListOp,
     TrustRemoveOp, TunnelCloseOp, TunnelHold, TunnelListOp, TunnelOpenOp, VersionOp,

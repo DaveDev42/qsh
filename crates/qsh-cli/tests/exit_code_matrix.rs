@@ -181,6 +181,16 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
             outcome: Outcome::Succeeds(0),
         },
         Case {
+            // `docs/CLI.md` §6.17: `doctor.run` exit code is always `0` —
+            // findings are data, never a failure (verify round P3-8: no
+            // `qsh-cli` integration test pinned doctor's exit code/JSON
+            // purity at all before this row).
+            name: "doctor",
+            sandbox: &fleet.client,
+            args: &["doctor"],
+            outcome: Outcome::Succeeds(0),
+        },
+        Case {
             name: "init",
             sandbox: &fresh,
             args: &["init", "--key-store", "file"],

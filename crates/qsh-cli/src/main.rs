@@ -8,18 +8,19 @@ mod render;
 mod tui;
 
 use std::io::{self, IsTerminal, Read, Write};
+use std::time::SystemTime;
 
 use clap::{CommandFactory as _, Parser};
 use qsh_core::{
-    AclCheckOp, CapabilitiesOp, CertInitOp, CertIssueOp, ExecRunOp, ExecStdin, HostGetOp,
+    AclCheckOp, CapabilitiesOp, CertInitOp, CertIssueOp, DoctorOp, ExecRunOp, ExecStdin, HostGetOp,
     HostListOp, IdentityInitOp, OpError, Operation, Ops, SchemaOp, SessionAttachOp, SessionCloseOp,
     SessionGetOp, SessionListOp, SessionOpenOp, SessionReadOp, SessionResizeOp, SessionWriteOp,
     TrustAcceptOp, TrustAddOp, TrustInviteOp, TrustListOp, TrustRemoveOp, TunnelCloseOp,
     TunnelListOp, TunnelOpenOp, VersionOp, dynamic_forward_unsupported,
 };
 use qsh_proto::{
-    AclCheckReq, CapabilitiesReq, CertInitReq, CertIssueReq, ErrorCode, ExecRunReq, HostGetReq,
-    IdentityInitReq, SessionCloseReq, SessionGetReq, SessionListReq, SessionOpenReq,
+    AclCheckReq, CapabilitiesReq, CertInitReq, CertIssueReq, DoctorReq, ErrorCode, ExecRunReq,
+    HostGetReq, IdentityInitReq, SessionCloseReq, SessionGetReq, SessionListReq, SessionOpenReq,
     SessionReadReq, SessionResizeReq, SessionWriteReq, TrustAcceptReq, TrustAddReq, TrustInviteReq,
     TunnelCloseReq, TunnelListReq, TunnelOpenReq,
 };
@@ -350,6 +351,12 @@ fn run(cli: &Cli) -> i32 {
             CapabilitiesOp::COMMAND,
             ops.capabilities(CapabilitiesReq { host: host.clone() }),
             human::print_capabilities,
+        ),
+        Command::Doctor { host } => finish(
+            cli,
+            DoctorOp::COMMAND,
+            ops.doctor(DoctorReq { host: host.clone() }, SystemTime::now()),
+            human::print_doctor,
         ),
         Command::Init { key_store } => finish(
             cli,
@@ -1270,6 +1277,7 @@ fn command_name(cli: &Cli) -> &'static str {
         Command::Version => VersionOp::COMMAND,
         Command::Schema => SchemaOp::COMMAND,
         Command::Capabilities { .. } => CapabilitiesOp::COMMAND,
+        Command::Doctor { .. } => DoctorOp::COMMAND,
         Command::Init { .. } => IdentityInitOp::COMMAND,
         Command::Trust(TrustCmd::Add(_)) => TrustAddOp::COMMAND,
         Command::Trust(TrustCmd::List) => TrustListOp::COMMAND,

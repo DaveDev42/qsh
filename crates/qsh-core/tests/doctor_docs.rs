@@ -18,6 +18,7 @@
 use std::path::PathBuf;
 
 use qsh_core::CONTROLLER_UNREACHABLE;
+use qsh_core::doctor::{CERT_EXPIRING_SOON, TRUST_REMOVE_SCOPE};
 
 /// The repo root, reached from `CARGO_MANIFEST_DIR`
 /// (`crates/qsh-core`) the same way every other doc-reading integration
@@ -69,5 +70,66 @@ fn prd_md_quotes_the_controller_unreachable_diagnostic_verbatim() {
     assert!(
         prd_md.contains(CONTROLLER_UNREACHABLE.remedy),
         "docs/PRD.md §6 must quote CONTROLLER_UNREACHABLE.remedy verbatim"
+    );
+}
+
+// -----------------------------------------------------------------------
+// M7 Step 6 doctor diagnostics (verify round P2-5, `PLAN.md` M7 §4.1
+// L98's completeness gate). Only the two new-in-M7 diagnostics
+// `docs/CLI.md` §6.17's own JSON example already quotes verbatim
+// (`TRUST_REMOVE_SCOPE` and `CERT_EXPIRING_SOON`) get a drift gate here —
+// the other seven new codes are only described in §6.17's table as a
+// paraphrase, not quoted verbatim anywhere in the docs today, so asserting
+// verbatim substring containment for them would fail against current
+// (accurate, just not verbatim) prose rather than catch real drift.
+// README.md is deliberately excluded (main-session decision, `PLAN.md`
+// M7 Step 6 verify-round note): its "Known limitations" section
+// paraphrases these two rather than quoting them.
+// -----------------------------------------------------------------------
+
+#[test]
+fn cli_md_quotes_the_trust_remove_scope_diagnostic_verbatim() {
+    let cli_md = read_doc("docs/CLI.md");
+    assert!(
+        cli_md.contains(TRUST_REMOVE_SCOPE.message),
+        "docs/CLI.md §6.17 must quote TRUST_REMOVE_SCOPE.message verbatim"
+    );
+    assert!(
+        cli_md.contains(TRUST_REMOVE_SCOPE.remedy),
+        "docs/CLI.md §6.17 must quote TRUST_REMOVE_SCOPE.remedy verbatim"
+    );
+}
+
+#[test]
+fn cli_md_quotes_the_cert_expiring_soon_diagnostic_verbatim() {
+    let cli_md = read_doc("docs/CLI.md");
+    assert!(
+        cli_md.contains(CERT_EXPIRING_SOON.message),
+        "docs/CLI.md §6.17 must quote CERT_EXPIRING_SOON.message verbatim"
+    );
+    assert!(
+        cli_md.contains(CERT_EXPIRING_SOON.remedy),
+        "docs/CLI.md §6.17 must quote CERT_EXPIRING_SOON.remedy verbatim"
+    );
+}
+
+/// The stable half of a diagnostic is its `code`, not its prose: `code` is
+/// what operators grep for and what a future `--fail-on` would select on,
+/// and `EXPECTED_DOCTOR_CODES` freezes the set. So while only the two
+/// diagnostics above are pinned word-for-word, every code in the frozen
+/// set must at least be *named* in `docs/CLI.md` — adding a fourteenth
+/// code without documenting it, or renaming one out from under §6.17,
+/// fails here instead of shipping an undocumented finding.
+#[test]
+fn cli_md_names_every_frozen_doctor_code() {
+    let cli_md = read_doc("docs/CLI.md");
+    let undocumented: Vec<&str> = qsh_core::doctor::EXPECTED_DOCTOR_CODES
+        .iter()
+        .copied()
+        .filter(|code| !cli_md.contains(code))
+        .collect();
+    assert!(
+        undocumented.is_empty(),
+        "docs/CLI.md §6.17 must name every frozen doctor code; missing: {undocumented:?}"
     );
 }
