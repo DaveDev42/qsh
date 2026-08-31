@@ -1,0 +1,11 @@
+{
+  "command": "trust.invite",
+  "data": {
+    "accept_command": "<accept_command>",
+    "code": "<code>",
+    "expires_at": "<timestamp>"
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

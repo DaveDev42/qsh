@@ -117,6 +117,14 @@ pub fn map_hello_error(err: crate::handshake::HelloError) -> ClientError {
         HelloError::Rejected(_) => {
             unreachable!("initiate() never invokes a rejecting callback")
         }
+        // `AlreadyPaired` is constructed only by `respond_on` (report F-2)
+        // when the *responder's* first control message is a `PairingProof`
+        // — `initiate_on` never parses its peer's first message as
+        // anything but a reply to its own `Hello`, so this side of the
+        // exchange can never produce it either.
+        HelloError::AlreadyPaired(_) => {
+            unreachable!("initiate() never reads a PairingProof as its own peer's Hello")
+        }
     }
 }
 

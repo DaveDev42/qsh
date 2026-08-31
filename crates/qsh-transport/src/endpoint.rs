@@ -441,6 +441,20 @@ impl Connection {
     pub fn quinn(&self) -> &quinn::Connection {
         &self.inner
     }
+
+    /// RFC 5705 TLS exporter — the channel-binding primitive pairing uses
+    /// to derive its proof (ADR-0002, `docs/design/protocol.md` §15): both
+    /// peers independently compute the same value from their shared TLS
+    /// session, so a proof relayed by a MITM terminating two separate TLS
+    /// sessions never verifies on the leg it didn't originate on.
+    pub fn export_keying_material(
+        &self,
+        output: &mut [u8],
+        label: &[u8],
+        context: &[u8],
+    ) -> Result<(), quinn::crypto::ExportKeyingMaterialError> {
+        self.inner.export_keying_material(output, label, context)
+    }
 }
 
 fn peer_chain(conn: &quinn::Connection) -> Vec<CertificateDer<'static>> {

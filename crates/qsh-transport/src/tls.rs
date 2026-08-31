@@ -41,6 +41,19 @@ pub trait TrustEvaluator: Send + Sync + 'static {
 
     /// DER-encoded private CA root certificates. Empty = CA mode disabled.
     fn ca_roots(&self) -> Vec<CertificateDer<'static>>;
+
+    /// Whether an unpinned, non-CA peer should still be admitted under
+    /// [`Principal::Pairing`] (ADR-0002, one-time invite pairing,
+    /// `docs/design/protocol.md` §15). Default `false` — every existing
+    /// implementor (`StaticTrust`, and any test/probe evaluator) needs no
+    /// change; only `qsh-core`'s `SharedTrustStore` overrides this, backed
+    /// by whether it currently has a live invite record. Checked by
+    /// [`QshPeerVerifier::verify_core`] only *after* both the pin and the
+    /// CA-chain paths have already failed — an evaluator that pins or
+    /// CA-signs a peer is never routed through this fallback.
+    fn pairing_open(&self) -> bool {
+        false
+    }
 }
 
 /// Which side of the handshake the peer certificate is for.
@@ -79,6 +92,11 @@ pub enum AuthPath {
     Pin,
     /// The chain verified to a trusted CA root; principal from the SAN.
     Ca,
+    /// Neither pinned nor CA-signed, admitted only because
+    /// [`TrustEvaluator::pairing_open`] answered `true` (ADR-0002). Carries
+    /// [`Principal::Pairing`] — see that variant's doc for why this is not
+    /// a normal ACL-reachable auth path.
+    Pairing,
 }
 
 /// A peer that passed the verifier: who they are and how we know.
@@ -203,62 +221,87 @@ impl QshPeerVerifier {
             });
         }
 
-        // 2. Private CA chain.
-        let roots = self.evaluator.ca_roots();
-        if roots.is_empty() {
-            return Err((
-                RejectReason::Untrusted,
-                TlsError::InvalidCertificate(CertificateError::UnknownIssuer),
-            ));
-        }
-        let anchors = roots
-            .iter()
-            .map(|der| {
-                webpki::anchor_from_trusted_cert(der)
-                    .map(|anchor| anchor.to_owned())
-                    .map_err(|_| {
-                        (
-                            RejectReason::Untrusted,
-                            TlsError::InvalidCertificate(CertificateError::UnknownIssuer),
-                        )
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let ee = EndEntityCert::try_from(end_entity).map_err(|_| {
-            (
-                RejectReason::Malformed,
-                TlsError::InvalidCertificate(CertificateError::BadEncoding),
+        // 2. Private CA chain. Wrapped in a closure so its several distinct
+        // failure points share one tail check (3, below) instead of each
+        // needing its own copy of it.
+        let ca_result: Result<VerifiedPeer, (RejectReason, TlsError)> = (|| {
+            let roots = self.evaluator.ca_roots();
+            if roots.is_empty() {
+                return Err((
+                    RejectReason::Untrusted,
+                    TlsError::InvalidCertificate(CertificateError::UnknownIssuer),
+                ));
+            }
+            let anchors = roots
+                .iter()
+                .map(|der| {
+                    webpki::anchor_from_trusted_cert(der)
+                        .map(|anchor| anchor.to_owned())
+                        .map_err(|_| {
+                            (
+                                RejectReason::Untrusted,
+                                TlsError::InvalidCertificate(CertificateError::UnknownIssuer),
+                            )
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let ee = EndEntityCert::try_from(end_entity).map_err(|_| {
+                (
+                    RejectReason::Malformed,
+                    TlsError::InvalidCertificate(CertificateError::BadEncoding),
+                )
+            })?;
+            let usage = match role {
+                PeerRole::Server => KeyUsage::server_auth(),
+                PeerRole::Client => KeyUsage::client_auth(),
+            };
+            ee.verify_for_usage(
+                self.algs.all,
+                &anchors,
+                intermediates,
+                now,
+                usage,
+                None,
+                None,
             )
-        })?;
-        let usage = match role {
-            PeerRole::Server => KeyUsage::server_auth(),
-            PeerRole::Client => KeyUsage::client_auth(),
-        };
-        ee.verify_for_usage(
-            self.algs.all,
-            &anchors,
-            intermediates,
-            now,
-            usage,
-            None,
-            None,
-        )
-        .map_err(|e| (RejectReason::Untrusted, webpki_to_tls(e)))?;
+            .map_err(|e| (RejectReason::Untrusted, webpki_to_tls(e)))?;
 
-        // CA path: identity comes from the leaf's SAN URI.
-        match principal_from_san(end_entity) {
-            Ok(Some(principal)) => Ok(VerifiedPeer {
-                principal,
-                auth_path: AuthPath::Ca,
-            }),
-            Ok(None) => Err((
-                RejectReason::NoPrincipal,
-                TlsError::InvalidCertificate(CertificateError::ApplicationVerificationFailure),
-            )),
-            Err(_) => Err((
-                RejectReason::Malformed,
-                TlsError::InvalidCertificate(CertificateError::BadEncoding),
-            )),
+            // CA path: identity comes from the leaf's SAN URI.
+            match principal_from_san(end_entity) {
+                Ok(Some(principal)) => Ok(VerifiedPeer {
+                    principal,
+                    auth_path: AuthPath::Ca,
+                }),
+                Ok(None) => Err((
+                    RejectReason::NoPrincipal,
+                    TlsError::InvalidCertificate(CertificateError::ApplicationVerificationFailure),
+                )),
+                Err(_) => Err((
+                    RejectReason::Malformed,
+                    TlsError::InvalidCertificate(CertificateError::BadEncoding),
+                )),
+            }
+        })();
+
+        // 3. Pairing fallback (ADR-0002, `docs/design/protocol.md` §15):
+        // only reached once both the pin and CA paths above have failed.
+        // The cert already passed the fingerprint/validity-window checks
+        // above this function's pin/CA section, so this only ever admits a
+        // well-formed, currently-valid cert that simply is not (yet)
+        // trusted by either other path — exactly "any new device's own
+        // self-signed identity", which is the case pairing exists for.
+        match ca_result {
+            Ok(v) => Ok(v),
+            Err(err) => {
+                if self.evaluator.pairing_open() {
+                    Ok(VerifiedPeer {
+                        principal: Principal::Pairing,
+                        auth_path: AuthPath::Pairing,
+                    })
+                } else {
+                    Err(err)
+                }
+            }
         }
     }
 
@@ -389,6 +432,7 @@ impl ClientCertVerifier for QshPeerVerifier {
 pub struct StaticTrust {
     pins: Vec<(Fingerprint, Principal)>,
     cas: Vec<CertificateDer<'static>>,
+    pairing_open: bool,
 }
 
 impl StaticTrust {
@@ -410,6 +454,14 @@ impl StaticTrust {
         self.cas.push(root_der);
         self
     }
+
+    /// Toggle the pairing fallback (test-only; production evaluators wire
+    /// this to a real open-invite check — see `SharedTrustStore`).
+    #[must_use]
+    pub fn with_pairing_open(mut self, open: bool) -> Self {
+        self.pairing_open = open;
+        self
+    }
 }
 
 impl TrustEvaluator for StaticTrust {
@@ -422,5 +474,9 @@ impl TrustEvaluator for StaticTrust {
 
     fn ca_roots(&self) -> Vec<CertificateDer<'static>> {
         self.cas.clone()
+    }
+
+    fn pairing_open(&self) -> bool {
+        self.pairing_open
     }
 }

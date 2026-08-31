@@ -90,6 +90,25 @@ pub enum HelloError {
     /// into it.
     #[error("{}: {}", .0.error_code(), .0.message)]
     Rejected(wire::Error),
+    /// The peer's first control message was a `PairingProof` — but this
+    /// connection never routed through `Principal::Pairing`/
+    /// `serve_pairing_connection` at all, because `qsh-transport::tls::
+    /// verify_core`'s pin/CA paths take priority over the pairing fallback
+    /// (`docs/design/protocol.md` §15.1): a peer this host already
+    /// recognizes (pinned, or CA-signed) never reaches
+    /// `TrustEvaluator::pairing_open`, invite or no invite. Report F-2: the
+    /// old behavior here was a silent `ExpectedHello` return with no error
+    /// frame at all, which the initiator (`crate::pairing::accept`) could
+    /// only observe as a bare `ConnectionLost` — `CONNECTION_FAILED` +
+    /// `retryable: true`, an unrecoverable retry loop (no amount of
+    /// retrying, or even a fresh invite, changes this host's pin state). An
+    /// explicit, non-retryable `SESSION_CONFLICT`-coded error frame is
+    /// written and drained instead (like [`Self::Rejected`]), so
+    /// `crate::pairing::accept` surfaces a clean, actionable error. Only
+    /// the host clearing the existing pin (`qsh trust remove`) resolves
+    /// this — never retryable.
+    #[error("{}: {}", .0.error_code(), .0.message)]
+    AlreadyPaired(wire::Error),
     /// The control stream itself failed (read/write/frame/codec).
     #[error(transparent)]
     Stream(#[from] StreamError),
@@ -187,8 +206,28 @@ async fn respond_on<C: HelloChannel>(
         .await
         .map_err(|_| HelloError::Timeout)??
         .ok_or(HelloError::ClosedBeforeHello)?;
-    let Some(control_message::Body::Hello(peer_hello)) = first.body else {
-        return Err(HelloError::ExpectedHello);
+    let peer_hello = match first.body {
+        Some(control_message::Body::Hello(h)) => h,
+        // Report F-2: this connection reached `respond_on` at all only
+        // because `verify_core` admitted it via pin or CA — a pairing-only
+        // connection (`Principal::Pairing`) never runs this exchange
+        // (`Server::serve_connection_inner`'s routing check). A
+        // `PairingProof` here means the peer is retrying `qsh trust
+        // accept` against a host that already has it pinned. Narrowly
+        // scoped to this one body shape — every other non-`Hello` first
+        // frame keeps the pre-existing silent `ExpectedHello` behavior
+        // below, unchanged.
+        Some(control_message::Body::PairingProof(_)) => {
+            let err = wire::Error::new(
+                ErrorCode::SessionConflict,
+                "peer is already trusted; re-pairing requires the host to \
+                 `trust remove` this peer first",
+                false,
+            );
+            let _ = io.send_hello(&ControlMessage::error(0, err.clone())).await;
+            return Err(HelloError::AlreadyPaired(err));
+        }
+        _ => return Err(HelloError::ExpectedHello),
     };
 
     if !wire::WIRE_MINOR_VERSIONS
@@ -261,13 +300,17 @@ where
     ctl.send.set_priority(wire::PRIORITY_CONTROL);
     match respond_on(&mut ctl, make_local_hello).await {
         Ok(peer_hello) => Ok((ctl, peer_hello)),
-        // Both of these arms already wrote an error frame inside
+        // All three of these arms already wrote an error frame inside
         // `respond_on` — give it a bounded chance to actually reach the
         // peer before this returns and the caller (rightly) tears the
         // connection down. Every other `Err` arm (`Timeout`,
         // `ClosedBeforeHello`, `ExpectedHello`) never wrote a byte, so
         // there is nothing to drain.
-        Err(err @ (HelloError::VersionMismatch | HelloError::Rejected(_))) => {
+        Err(
+            err @ (HelloError::VersionMismatch
+            | HelloError::Rejected(_)
+            | HelloError::AlreadyPaired(_)),
+        ) => {
             drain_rejection(&mut ctl.send).await;
             Err(err)
         }
@@ -558,6 +601,67 @@ mod tests {
         // No `Hello` follows: `responder` (and its duplex write half) was
         // dropped when `respond_task` returned, so this is a clean EOF,
         // not a second frame.
+        assert!(matches!(initiator.recv_hello().await, Ok(None)));
+    }
+
+    /// Report F-2 regression: a peer whose first control message is a
+    /// `PairingProof` instead of `Hello` (a `qsh trust accept` retry
+    /// against a host that already has it pinned — `verify_core`'s pin/CA
+    /// priority means this connection never routed through
+    /// `Principal::Pairing` at all, so it ends up here) must get an
+    /// explicit, non-retryable `SESSION_CONFLICT` error frame, not the old
+    /// silent `ExpectedHello` return that left the initiator staring at a
+    /// bare `ConnectionLost`.
+    #[tokio::test]
+    async fn respond_on_pairing_proof_first_sends_session_conflict_no_hello() {
+        let (mut initiator, mut responder) = pair();
+
+        let respond_task = tokio::spawn(async move {
+            respond_on(&mut responder, move |_peer| Ok(hello(&[0], ALL_CAPS))).await
+        });
+
+        initiator
+            .send_hello(&ControlMessage::new(
+                0,
+                control_message::Body::PairingProof(wire::PairingProof {
+                    device_name: "laptop".to_string(),
+                    proof: vec![0u8; 32],
+                }),
+            ))
+            .await
+            .unwrap();
+
+        let resp_result = respond_task.await.unwrap();
+        let sent_err = match resp_result {
+            Err(HelloError::AlreadyPaired(e)) => e,
+            other => panic!("expected Err(HelloError::AlreadyPaired(_)), got {other:?}"),
+        };
+        assert_eq!(sent_err.error_code(), ErrorCode::SessionConflict);
+        assert!(
+            !sent_err.retryable,
+            "a same-peer re-pair can never succeed by retrying — a fresh \
+             invite does not change this host's pin state"
+        );
+
+        let frame = initiator
+            .recv_hello()
+            .await
+            .unwrap()
+            .expect("responder wrote an error frame");
+        assert_eq!(frame.request_id, 0);
+        match frame.body {
+            Some(control_message::Body::Response(wire::Response {
+                body: Some(response::Body::Error(e)),
+            })) => {
+                assert_eq!(e, sent_err);
+                assert_eq!(e.error_code(), ErrorCode::SessionConflict);
+                assert!(!e.retryable);
+            }
+            other => panic!("expected SESSION_CONFLICT error frame, got {other:?}"),
+        }
+
+        // No `Hello` follows: same clean-EOF proof technique as the other
+        // rejection tests in this module.
         assert!(matches!(initiator.recv_hello().await, Ok(None)));
     }
 

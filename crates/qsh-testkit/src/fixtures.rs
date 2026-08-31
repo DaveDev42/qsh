@@ -60,11 +60,34 @@ pub fn normalize(mut value: serde_json::Value) -> serde_json::Value {
                 // own doc). Unambiguous: no other `qsh.cli/v1` contract
                 // type has a field named `build`.
                 map.remove("build");
+                // `TrustInviteData` is the one shape where a bare `"code"`
+                // key means the invite's own display code (fresh random
+                // secret every run) rather than `Error.code` (a stable
+                // `docs/CLI.md` §3.3 string every other fixture asserts
+                // verbatim) — the two share a field name but never a parent
+                // object, so a sibling check on `accept_command` (unique to
+                // `TrustInviteData`) disambiguates without masking
+                // `Error.code` anywhere else.
+                let is_trust_invite_data = map.contains_key("accept_command");
                 for (k, child) in map.iter_mut() {
                     match k.as_str() {
                         "request_id" => *child = serde_json::Value::String("<request_id>".into()),
-                        "added_at" | "created_at" | "ts" => {
+                        "added_at" | "created_at" | "ts" | "expires_at" => {
                             *child = serde_json::Value::String("<timestamp>".into())
+                        }
+                        // ADR-0002/M7 Step 4: a fresh 160-bit secret every
+                        // run, Crockford-encoded (`trust.invite`'s `code`)
+                        // — masked the same "shape, not value" way as every
+                        // other freshly-minted identifier below.
+                        "code" if is_trust_invite_data => {
+                            *child = serde_json::Value::String("<code>".into())
+                        }
+                        // Embeds `code` verbatim (`docs/CLI.md` §6.11's
+                        // copy-pasteable command line) plus the still-open
+                        // `<address>` placeholder, so it is exactly as
+                        // volatile as `code` itself.
+                        "accept_command" => {
+                            *child = serde_json::Value::String("<accept_command>".into())
                         }
                         "duration_ms" => *child = serde_json::Value::from(0),
                         "config_dir" => *child = serde_json::Value::String("<config_dir>".into()),
@@ -75,6 +98,20 @@ pub fn normalize(mut value: serde_json::Value) -> serde_json::Value {
                         // is literally named `"path"`.
                         "path" => *child = serde_json::Value::String("<path>".into()),
                         "device_id" => *child = serde_json::Value::String("<device_id>".into()),
+                        // `trust.accept`'s `data.peer.name` is the *other*
+                        // side's own device id (`Ops::trust_accept` pins the
+                        // responder under `success.peer_device_name`, which
+                        // is that peer's `device_<ULID>` — pairing has no
+                        // human-chosen alias to fall back on). Every other
+                        // fixture's `"name"` is a deterministic, test-chosen
+                        // alias (`"personal-mac"` and friends) and none of
+                        // them coincidentally start with the reserved
+                        // `device_` prefix (`identity::device_id`'s own
+                        // format), so the check is unambiguous without
+                        // threading parent-command context through `walk`.
+                        "name" if matches!(child, serde_json::Value::String(s) if s.starts_with("device_")) => {
+                            *child = serde_json::Value::String("<device_id>".into())
+                        }
                         "fingerprint" | "observed_fingerprint" => {
                             *child = serde_json::Value::String("<fingerprint>".into())
                         }

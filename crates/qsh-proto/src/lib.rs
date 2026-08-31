@@ -16,6 +16,8 @@
 //!   `proto/qsh/local/v1.proto`) and their frame-layer glue — a separate
 //!   package from [`wire`] but sharing its frame layer (M3,
 //!   `docs/design/protocol.md` §11-3).
+//! - [`pairing`]: the invite-code display encoding (Crockford Base32) for
+//!   one-time pairing (ADR-0002, `docs/design/protocol.md` §15).
 //!
 //! Because this crate parses untrusted input from the network, it is the
 //! designated fuzzing surface for the project (`docs/design/protocol.md`
@@ -25,6 +27,7 @@ pub mod error;
 pub mod event;
 pub mod frame;
 pub mod local;
+pub mod pairing;
 pub mod schema;
 pub mod types;
 pub mod wire;
@@ -38,7 +41,7 @@ pub use types::{
     SchemaData, Session, SessionAttachReq, SessionCloseData, SessionCloseReq, SessionGetReq,
     SessionListData, SessionListReq, SessionOpenData, SessionOpenReq, SessionReadData,
     SessionReadReq, SessionResizeData, SessionResizeReq, SessionWriteData, SessionWriteReq,
-    TrustAddData, TrustAddReq, TrustListData, TrustPeer, TrustRemoveData, Tunnel, TunnelCloseData,
-    TunnelCloseReq, TunnelListData, TunnelListReq, TunnelOpenData, TunnelOpenReq, UnreachableHost,
-    VersionData,
+    TrustAcceptData, TrustAcceptReq, TrustAddData, TrustAddReq, TrustInviteData, TrustInviteReq,
+    TrustListData, TrustPeer, TrustRemoveData, Tunnel, TunnelCloseData, TunnelCloseReq,
+    TunnelListData, TunnelListReq, TunnelOpenData, TunnelOpenReq, UnreachableHost, VersionData,
 };

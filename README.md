@@ -146,6 +146,34 @@ the fingerprint it observed, and asks you to confirm. It's the same
 trust-on-first-connect flow SSH has for host keys, without needing the
 value copied over some other channel first.
 
+There's a third way to get two devices trusting each other, next to typing a
+fingerprint and confirming one on first connect: pairing with a one-time
+code. One side prints it, the other redeems it, and both ends up pinned in
+the same exchange.
+
+```bash
+# Host:
+qsh trust invite --json
+# {"data":{"code":"abcd-efgh-jkmn-pqrs-tvwx-yz23-4567-89ab", "expires_at":"…",
+#          "accept_command":"qsh trust accept <address> abcd-efgh-jkmn-pqrs-tvwx-yz23-4567-89ab"}}
+
+# Client, filling in the host's real address:
+qsh trust accept host.example.com:4433 abcd-efgh-jkmn-pqrs-tvwx-yz23-4567-89ab
+```
+
+The code carries no address, just a secret — read it over the phone, paste
+it in a chat, whatever channel is at hand. Knowing it is what gets checked,
+over a TLS-exporter-bound exchange (`docs/design/protocol.md` §15); neither
+side needs the other's fingerprint ahead of time, since possession of the
+secret is the whole proof. That's a different claim from "no need to ever
+check a fingerprint" — the secret still travels over a human channel that
+can be mistyped or overheard, so anyone who wants more assurance than
+"whoever knew the code" can compare `trust list`'s fingerprint out of band
+after pairing, same as they would after any other first connection. It
+works once and expires in ten minutes, and a running `qsh serve` recognizes
+a freshly minted invite without a restart, the same way it picks up `trust
+remove` (`docs/CLI.md` §6.11).
+
 From here, `qsh hosts` lists what this machine can reach, `qsh sessions
 box` lists what's alive on the host, and the [Quick
 start](#quick-start) section below covers detach/reattach, port
@@ -337,7 +365,12 @@ and error shape.
 Every connection is QUIC with TLS 1.3 mutual authentication. Both ends
 present a certificate and both ends check the other's fingerprint against
 the trust store. Anything that fails to authenticate is rejected during the
-handshake, before a session, tunnel, or listener exists.
+handshake, before a session, tunnel, or listener exists. The one narrow,
+time-boxed exception is `qsh trust invite`/`qsh trust accept`: while a
+freshly minted invite is live, an otherwise-unpinned certificate is admitted
+into a dedicated pairing exchange that can do nothing but verify possession
+of the invite's secret and, on success, pin — it never reaches a session,
+tunnel, or listener path (`docs/design/protocol.md` §15).
 
 Authorization is `acl.toml`: a small, principal-scoped rule file at
 `<config_dir>/acl.toml`. It is default-deny — a host with no `acl.toml`,
@@ -504,6 +537,22 @@ Some of these are MVP scope decisions, some are unfinished work.
   the very next connection attempt from the removed peer is rejected
   immediately (`docs/CLI.md` §6.11). Force-closing a peer's
   already-established connection on removal is P1.
+- `qsh trust accept` pins both sides in one exchange, but the two pins are
+  not atomic. The host's pin (and the invite's consumption) happens first,
+  as part of the wire exchange; the client's own local pin happens after,
+  entirely on its own. If the client hits a name collision in its own
+  trust store at that point, the invite is already spent, and the client
+  has to resolve the local collision and get a fresh invite rather than
+  the whole exchange rolling back. A collision on the host's side, during
+  the exchange itself, does roll back cleanly: the invite is left
+  redeemable (`docs/design/protocol.md` §15.6).
+- Retrying `qsh trust accept` against a peer the host already pinned
+  fails as a non-retryable `SESSION_CONFLICT`, and **a fresh invite does
+  not fix it** — the host's pin makes the ordinary mTLS path win before
+  the connection ever reaches invite/pairing logic again, so the invite's
+  own state is not the problem. Recovery is `qsh trust remove` on the
+  host, then a new `trust invite`/`trust accept` round
+  (`docs/design/protocol.md` §15.6, `docs/CLI.md` §6.11).
 - `exec.run` output is capped at 64 MiB. The whole of stdout plus stderr
   comes back in one envelope, and anything beyond the cap is
   `RESOURCE_EXHAUSTED`. Streaming output is a session feature: use

@@ -710,6 +710,8 @@ fn acl_check_never_appears_as_a_control_message_wire_variant() {
             Body::Ping(_) => {}
             Body::Pong(_) => {}
             Body::SessionEvent(_) => {}
+            Body::PairingProof(_) => {}
+            Body::PairingAccepted(_) => {}
         }
     }
     // The function above never runs — its only job is to fail to compile

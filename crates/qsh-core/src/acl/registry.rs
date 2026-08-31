@@ -578,6 +578,18 @@ mod tests {
             Body::SessionEvent(_) => BodyClassification::NoAuthorizationSurface(
                 "host-to-client only; an inbound one is dropped, never authorized",
             ),
+            Body::PairingProof(_) => BodyClassification::NoAuthorizationSurface(
+                "pairing-only: reaches a connection whose principal is \
+                 Principal::Pairing, which Server::serve_connection_inner routes to \
+                 a dedicated pairing responder before Server::dispatch (and ACL) \
+                 ever run; a PairingProof arriving on an already-authenticated \
+                 connection is refused before this classifier even matters \
+                 (Server::dispatch's own arm, ADR-0002)",
+            ),
+            Body::PairingAccepted(_) => BodyClassification::NoAuthorizationSurface(
+                "a reply, produced only by the pairing responder itself; never a \
+                 request a peer sends to be authorized",
+            ),
         }
     }
 
@@ -590,9 +602,9 @@ mod tests {
     fn all_control_message_body_samples() -> Vec<qsh_proto::wire::control_message::Body> {
         use qsh_proto::wire::control_message::Body;
         use qsh_proto::wire::{
-            ExecStart, Hello, Ping, Pong, RemoteForwardClose, RemoteForwardOpen, Response,
-            SessionAttach, SessionClose, SessionEvent, SessionGet, SessionList, SessionOpen,
-            SessionRead, SessionResize, SessionWrite,
+            ExecStart, Hello, PairingAccepted, PairingProof, Ping, Pong, RemoteForwardClose,
+            RemoteForwardOpen, Response, SessionAttach, SessionClose, SessionEvent, SessionGet,
+            SessionList, SessionOpen, SessionRead, SessionResize, SessionWrite,
         };
         vec![
             Body::Hello(Hello::default()),
@@ -611,6 +623,8 @@ mod tests {
             Body::Ping(Ping::default()),
             Body::Pong(Pong::default()),
             Body::SessionEvent(SessionEvent::default()),
+            Body::PairingProof(PairingProof::default()),
+            Body::PairingAccepted(PairingAccepted::default()),
         ]
     }
 

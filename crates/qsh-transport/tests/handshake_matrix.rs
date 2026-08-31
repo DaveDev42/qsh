@@ -26,6 +26,13 @@
 //! | 14 | CA-signed server leaf with no qsh SAN URI                 | client `LocalRejected{NoPrincipal}` |
 //! | 15 | mixed: client by pin, server by CA                        | OK |
 //! | 16 | client presents no certificate at all                     | handshake fails, no `Connection` |
+//! | 17 | server `pairing_open()==true`, client cert pinned nowhere | OK, `Principal::Pairing`/`AuthPath::Pairing` |
+//!
+//! Case 17 is the M7 Step 4 (ADR-0002) addition: the pairing fallback only
+//! ever applies *after* both the pin and CA paths have already failed
+//! (`docs/design/protocol.md` §15) — it must never downgrade a peer that
+//! pin/CA would otherwise have accepted, so the table above (cases 1-16)
+//! is exercised unchanged with `pairing_open()` at its default `false`.
 //!
 //! **`PLAN.md` M3 Step 3 (c)'s "reverse dial, 비신뢰 target" row is
 //! deliberately not case 17 here.** At this layer a `qsh listen` accepting
@@ -783,4 +790,62 @@ async fn case16_no_client_certificate_handshake_fails() {
         server_outcome.is_rejected(),
         "server must reject a client with no certificate: {server_outcome:?}"
     );
+}
+
+// ---------------------------------------------------------------------
+// 17. server pairing_open()==true, client unpinned/uncertified by any CA
+//     -> OK, both sides land on Principal::Pairing / AuthPath::Pairing
+//     (ADR-0002, docs/design/protocol.md §15).
+// ---------------------------------------------------------------------
+#[tokio::test(flavor = "multi_thread")]
+async fn case17_pairing_open_admits_unpinned_peer_as_pairing_principal() {
+    let server = self_signed_valid();
+    let client = self_signed_valid();
+    // Neither side pins or CA-trusts the other at all — only the server's
+    // pairing fallback is open. The client accepts the server on trust for
+    // this test the same way `qsh trust accept`'s dial-time evaluator does
+    // (a separate, deliberately permissive evaluator — see
+    // `AcceptAnyForPairing` in `qsh-core`); here that is modeled directly
+    // with a pin, since what this test is actually proving is the
+    // *server*-side fallback in `verify_core`, not the client's.
+    let server_trust = StaticTrust::empty().with_pairing_open(true);
+    let client_trust =
+        StaticTrust::empty().with_pin(server.fingerprint, Principal::Device("box".into()));
+
+    let (dial_result, server_handle) =
+        run(server.identity, server_trust, client.identity, client_trust).await;
+
+    let dialed = dial_result
+        .expect("dial must succeed even though the server has no pin/CA for this client");
+    assert_eq!(
+        dialed.connection.principal(),
+        &Principal::Device("box".into())
+    );
+    assert_eq!(dialed.connection.auth_path(), AuthPath::Pin);
+
+    dialed.connection.close(0, b"case17 done");
+    let server_outcome = join_server(server_handle).await;
+    assert_eq!(server_outcome.principal(), Some(&Principal::Pairing));
+    assert_eq!(server_outcome.auth_path(), Some(AuthPath::Pairing));
+}
+
+// ---------------------------------------------------------------------
+// 17b. pairing_open()==false (the default) still rejects an unpinned peer
+//      exactly as today -- explicit regression companion to case17, even
+//      though this shape is already covered by case07/case08 above.
+// ---------------------------------------------------------------------
+#[tokio::test(flavor = "multi_thread")]
+async fn case17b_pairing_closed_still_rejects_unpinned_peer() {
+    let server = self_signed_valid();
+    let client = self_signed_valid();
+    let server_trust = StaticTrust::empty(); // pairing_open defaults to false
+    let client_trust =
+        StaticTrust::empty().with_pin(server.fingerprint, Principal::Device("box".into()));
+
+    let (dial_result, server_handle) =
+        run(server.identity, server_trust, client.identity, client_trust).await;
+
+    expect_remote_rejected(dial_result).await;
+    let server_outcome = join_server(server_handle).await;
+    assert!(server_outcome.is_rejected());
 }

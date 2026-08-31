@@ -82,6 +82,8 @@ identity.init
 trust.add
 trust.list
 trust.remove
+trust.invite
+trust.accept
 doctor.run
 acl.check
 schema.get
@@ -686,7 +688,64 @@ qsh trust remove <name> --json
 
 **`trust.remove`의 유효 범위(M7 Step 2, 감사 ①, DoD 4):** 제거는 즉시 적용되지만, 무엇에 즉시 적용되는지가 핵심이다. 러닝 중인 `qsh serve`를 **재시작할 필요 없이** 그 다음 handshake부터 거부가 적용된다 — host는 `trust.toml`을 매 handshake마다 다시 읽어 내용을 대조하므로(파일 바이트 비교가 유일한 판정자다 — `mtime`은 판정에 쓰이지 않고 진단 기록으로만 남으므로, 1–2초 해상도의 파일시스템이라도 내용이 다르면 재로드가 일어난다; 프로세스 시작 시 1회만 읽는 `acl.toml`과는 다르다) `trust remove` 직후의 새 연결 시도는 즉시 `AUTH_FAILED`로 거부된다. 반대로 **이미 확립된 연결**은 이 제거의 영향을 받지 않는다 — 그 peer는 연결의 협상된 권한 전체를 유지한다: 이미 열어 둔 세션뿐 아니라, `qsh serve` 시작 시 로드된 ACL 허용 범위 안에서 새 세션·터널·forward를 여는 능력까지, 연결이 끊기고 다시 handshake해야 하는 시점까지 그대로 유지된다(README "Known limitations" 동일 문면). 살아 있는 연결의 즉시 강제 종료는 P1이다(`docs/ROADMAP.md` §3).
 
-일회용 invite code pairing(`qsh trust invite` 계열, ADR-0002)의 CLI 계약은 M7에서 확정한다. `doctor.run`은 operation 이름만 예약되어 있으며 계약은 M7에서 확정한다. M3가 만드는 진단 항목 상수(`qsh::reverse`의 `event` 값 어휘, `registration_wait_ms` 등)는 M7의 `doctor.run`이 그대로 소비한다 — 계약 확정을 앞당기지 않는다.
+```bash
+qsh trust invite --json
+qsh trust accept <address> <code> --json
+```
+
+`trust.invite`는 이 장치에서 10분 TTL짜리 1회용 invite code를 발급한다(ADR-0002, M7 Step 4). 160-bit CSPRNG secret을 Crockford Base32로 인코딩해 `xxxx-xxxx-xxxx-xxxx-xxxx-xxxx-xxxx-xxxx` 형태(소문자, 4자씩 8그룹)로 보여준다. code 자체에는 주소가 들어 있지 않다 — 이 장치에 닿을 `host:port`는 별도로, out-of-band 경로로 전달해야 한다.
+
+```json
+{
+  "schema": "qsh.cli/v1",
+  "request_id": "01K0EXAMPLE",
+  "command": "trust.invite",
+  "ok": true,
+  "data": {
+    "code": "abcd-efgh-jkmn-pqrs-tvwx-yz23-4567-89ab",
+    "expires_at": "2026-08-31T00:10:00Z",
+    "accept_command": "qsh trust accept <address> abcd-efgh-jkmn-pqrs-tvwx-yz23-4567-89ab"
+  }
+}
+```
+
+human mode는 `accept_command`를 화면에 그대로 찍는다. operator는 `<address>` 자리만 실제 주소로 바꿔 상대에게 전달하면 된다 — 그게 이 필드의 유일한 용도다.
+
+`trust.accept <address> <code>`는 `address`로 dial해 `code`가 가리키는 invite를 redeem한다. 인증의 근거는 TLS identity가 아니라 secret 소유 증명이다: 양쪽은 TLS exporter(RFC 5705 `export_keying_material`)로 채널에 묶인 값을 뽑고, 그 위에 도메인을 분리한 두 개의 BLAKE3 keyed-hash 증명(initiator→responder, responder→initiator)을 constant-time으로 주고받는다. 상대 쪽 증명이 검증되기 전에는 어느 쪽도 pin하지 않는다 — 메시지가 도착했다는 사실만으로 pin하는 경로는 없다.
+
+이 증명이 보장하는 것은 "상대가 invite secret을 안다"까지다 — 그 이상의 신원 주장은 아니다. secret은 전화나 채팅처럼 사람이 개입하는 경로로 전달되는 경우가 많으므로, 더 높은 확신이 필요하면 pairing이 끝난 뒤 `trust list`가 보여주는 fingerprint를 out-of-band로 상대와 사후 대조하는 것도 방법이다 — pairing 자체가 요구하는 단계는 아니고, 원하는 operator가 추가로 얹는 defense-in-depth다(`docs/design/protocol.md` §15.4).
+
+성공하면 두 장치가 같은 교환 안에서 서로를 pin한다. pin은 `trust.add`와 같은 경로(`TrustStore::add_peer`)를 타므로 `trust.accept`의 결과 모양도 `trust.add`와 같다 — 다만 `address`는 `trust.add`의 기본값(생략 시 빈 문자열)과 달리 방금 dial에 성공한 그 주소가 그대로 채워진다: pairing은 항상 실제 연결을 전제하므로 채울 주소가 없는 경우가 없고, 이걸 비워 두면 `qsh exec <name>`(§6.1, §6.8)이 곧바로 `HOST_NOT_FOUND`가 되어 ADR-0002가 노리는 "페어링 후 바로 접속" 경험이 깨진다:
+
+```json
+{
+  "schema": "qsh.cli/v1",
+  "request_id": "01K0EXAMPLE",
+  "command": "trust.accept",
+  "ok": true,
+  "data": {
+    "peer": {
+      "name": "personal-mac",
+      "fingerprint": "sha256:BASE64FINGERPRINT",
+      "address": "192.0.2.10:4433",
+      "added_at": "2026-08-31T00:05:00Z"
+    },
+    "created": true
+  }
+}
+```
+
+invite는 한 번만 redeem된다 — 성공하는 순간 소비되고, **다른** 상대가 같은 code를 다시 쓰면 `SESSION_CONFLICT`다. TTL이 지난 code는 `TRUST_REQUIRED`, secret이 맞지 않는 code(오타, 아직 발급되지 않은 code 등 — 이미 소비된 code와는 다른 오류다)는 `AUTH_FAILED`로 거부한다.
+
+**이미 pin된 상대가 재시도하는 경우는 이 "다시 쓰면 `SESSION_CONFLICT`"와 겉모습은 같지만 원인이 다르다.** 페어링에 성공한 바로 그 상대가 (예: accept 명령을 실수로 두 번 실행해서) 같은 code로 다시 접속을 시도하면, host는 이미 그 신원을 pin해 뒀으므로 TLS 단에서 pin 경로가 먼저 잡혀 이 연결은 애초에 invite/pairing 판정 자체에 닿지 못한다 — 대신 일반 handshake 경로가 이를 자리를 벗어난 메시지로 보고 `SESSION_CONFLICT`(`retryable: false`)로 명시적으로 거부한다. **이때는 새 invite를 발급받아도 소용없다** — code나 invite의 상태가 문제가 아니라 이 신원이 host에 이미 pin되어 있다는 사실 자체가 원인이므로, 복구하려면 host가 `trust remove`로 기존 pin을 먼저 지워야 한다(`docs/design/protocol.md` §15.6, README Known limitations).
+
+pin 시점에 이름 충돌이 생기면 — 상대가 자칭하는 이름이 이미 다른 fingerprint로 pin되어 있으면 — `trust.add`가 같은 상황에서 취하는 조용한 no-op과 달리 pairing은 `SESSION_CONFLICT`로 크게 실패한다. 이 실패는 invite를 소비하지 않는다: 충돌은 pin을 시도한 쪽의 로컬 상태 문제일 뿐이므로, 같은 code를 다른 상대가 곧바로 다시 시도할 수 있다.
+
+`qsh serve`로 이미 떠 있는 데몬은 재시작 없이 새로 발급된 invite를 인식한다 — `trust.remove`(바로 위 문단)가 따르는 것과 같은 content-based reload 원칙이 invite store에도 그대로 적용된다. 이 재로드는 `qsh trust invite`(CLI 프로세스)와 `qsh serve`(daemon)가 같은 `invites.toml`을 서로 다른 프로세스에서 잠금 없이 읽고 쓰는 형태라, 두 프로세스의 쓰기가 정확히 겹치는 좁은 창에서는 한쪽의 갱신이 다른 쪽에 곧바로 반영되지 않을 수 있다(예: 거의 동시에 발급된 두 invite 중 하나가 다음 redeem 조회에서 아직 보이지 않는 경우) — 이후 재시도나 다음 저장 시점에는 다시 수렴하므로 invite가 영구히 사라지지는 않지만, 완전한 파일 잠금은 아직 없다(Step 7 debt로 이월).
+
+`--json` mode에서는 pairing도 interactive prompt를 열지 않는다(§2.1) — 잘못된 code나 인자 오류는 곧바로 오류 envelope로 반환된다.
+
+`doctor.run`은 operation 이름만 예약되어 있으며 계약은 M7에서 확정한다. M3가 만드는 진단 항목 상수(`qsh::reverse`의 `event` 값 어휘, `registration_wait_ms` 등)는 M7의 `doctor.run`이 그대로 소비한다 — 계약 확정을 앞당기지 않는다.
 
 원격 operation(`exec.run`, `session.*`, `tunnel.*`)의 mTLS 실패 오류 경로는 다음과 같다.
 

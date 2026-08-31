@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use qsh_transport::AuthPath;
+use qsh_transport::{AuthPath, Principal};
 use serde::{Deserialize, Serialize};
 
 use crate::acl::{Action, Decision};
@@ -82,12 +82,17 @@ pub enum AuditError {
     Degraded,
 }
 
-/// `"pin"` / `"ca"` — the open string [`AuditRecord::auth_path`] and
-/// `acl.toml`'s own `auth_path` key share (`docs/PRD.md` §9).
+/// `"pin"` / `"ca"` / `"pairing"` — the open string [`AuditRecord::auth_path`]
+/// and `acl.toml`'s own `auth_path` key share (`docs/PRD.md` §9).
+/// `"pairing"` (ADR-0002, M7 Step 4) never appears in an ordinary ACL
+/// decision — a pairing connection never reaches the ACL choke point at all
+/// (`crate::server::Server::serve_pairing_connection`'s own doc) — it only
+/// ever labels the pairing exchange's own audit record.
 fn auth_path_str(auth_path: AuthPath) -> &'static str {
     match auth_path {
         AuthPath::Pin => "pin",
         AuthPath::Ca => "ca",
+        AuthPath::Pairing => "pairing",
     }
 }
 
@@ -203,6 +208,30 @@ impl AuditRecord {
             decision: Decision::Deny.as_str().to_string(),
             rule: None,
             auth_path: "-".to_string(),
+            peer_addr: peer_addr.to_string(),
+        }
+    }
+
+    /// A pairing exchange's outcome (ADR-0002, M7 Step 4,
+    /// `crate::server::Server::serve_pairing_connection`). Pairing has no
+    /// authorization surface at all (`docs/CLI.md` §2.5's
+    /// `NoAuthorizationSurface` classification — a pairing connection never
+    /// reaches the ACL choke point), so this sidesteps [`Action`]/rule the
+    /// same way [`AuditRecord::handshake_rejected`] does. `resource` is a
+    /// coarse, structural-only label — the peer's self-reported device name
+    /// on success, or a failure category (`"no-match"`, `"expired"`, …) on
+    /// failure — **never** the invite code, the proof bytes or the exported
+    /// keying material (architecture.md §6: never log key material).
+    pub fn pairing(peer_addr: std::net::SocketAddr, decision: Decision, resource: &str) -> Self {
+        Self {
+            ts: now_rfc3339(),
+            request_id: "-".to_string(),
+            principal: Principal::Pairing.to_string(),
+            action: "pairing".to_string(),
+            resource: resource.to_string(),
+            decision: decision.as_str().to_string(),
+            rule: None,
+            auth_path: auth_path_str(AuthPath::Pairing).to_string(),
             peer_addr: peer_addr.to_string(),
         }
     }

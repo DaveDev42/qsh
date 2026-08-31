@@ -9,7 +9,8 @@ use std::time::Duration;
 
 use qsh_proto::{
     BuildInfo, ErrorCode, IdentityInitData, IdentityInitReq, KeyStoreMode, SchemaData,
-    TrustAddData, TrustAddReq, TrustListData, TrustRemoveData, VersionData,
+    TrustAcceptData, TrustAcceptReq, TrustAddData, TrustAddReq, TrustInviteData, TrustInviteReq,
+    TrustListData, TrustRemoveData, VersionData,
 };
 use qsh_transport::{DialError, Dialer, Fingerprint, StaticTrust};
 
@@ -204,6 +205,20 @@ pub struct TrustAddOp;
 
 impl Operation for TrustAddOp {
     const COMMAND: &'static str = "trust.add";
+}
+
+/// The `trust.invite` operation (ADR-0002, `PLAN.md` M7 Step 4).
+pub struct TrustInviteOp;
+
+impl Operation for TrustInviteOp {
+    const COMMAND: &'static str = "trust.invite";
+}
+
+/// The `trust.accept` operation (ADR-0002, `PLAN.md` M7 Step 4).
+pub struct TrustAcceptOp;
+
+impl Operation for TrustAcceptOp {
+    const COMMAND: &'static str = "trust.accept";
 }
 
 /// The `trust.list` operation.
@@ -447,6 +462,144 @@ impl Ops {
         Ok(TrustRemoveData {
             name: name.to_string(),
             removed,
+        })
+    }
+
+    /// `trust.invite` — mint a one-time pairing invite (ADR-0002, `PLAN.md`
+    /// M7 Step 4).
+    ///
+    /// The raw secret exists only for the lifetime of this call: it is
+    /// generated, hashed into `invites.toml` (never the raw bytes —
+    /// `crate::trust::pairing`'s own module doc), rendered as the Crockford
+    /// Base32 display code, and zeroized on drop before this returns. `qsh
+    /// serve`'s own `SharedInviteStore` picks up the freshly written invite
+    /// on its very next check, without a restart (Step 2's content-based
+    /// reload, invariant #6). `accept_command` is the exact command line to
+    /// hand the other party — the code alone carries no address (`PLAN.md`
+    /// M7 §4.1 #7), so this is the only place that pairing is complete.
+    pub fn trust_invite(&self, _req: TrustInviteReq) -> Result<TrustInviteData, OpError> {
+        let secret = crate::trust::pairing::generate_secret();
+        let now = std::time::SystemTime::now();
+        let path = self.paths.invites_file();
+        let mut store = crate::trust::pairing::InviteStore::load(&path)?;
+        store.prune(now);
+        let (_created_at, expires_at) = store.add(secret.as_slice(), now);
+        store.save(&path)?;
+
+        let code = qsh_proto::pairing::encode_invite_code(&secret);
+        Ok(TrustInviteData {
+            accept_command: format!("qsh trust accept <address> {code}"),
+            code,
+            expires_at,
+        })
+    }
+
+    /// `trust.accept <address> <code>` — complete a pairing exchange with
+    /// `qsh trust invite`'s counterpart (ADR-0002, `PLAN.md` M7 Step 4).
+    ///
+    /// Dials `address` with a trust evaluator that accepts *any*
+    /// certificate ([`crate::pairing::AcceptAnyForPairing`], report §B3) —
+    /// pairing's real authentication is possession of `code`'s secret,
+    /// proven over a TLS-exporter-bound channel
+    /// ([`crate::pairing::accept`]), never the TLS identity presented. Only
+    /// once the responder's own proof has verified (never on the strength
+    /// of a reply merely arriving — report §B13) is the responder pinned,
+    /// using this connection's own observed fingerprint, via the same
+    /// [`TrustStore::add_peer`] path `qsh trust add` uses. A name collision
+    /// here (the responder's self-reported name already pinned locally
+    /// under a *different* fingerprint) fails loudly with `SESSION_CONFLICT`
+    /// — unlike `trust add`'s own established silent no-op on the same
+    /// underlying case (`TrustStore::add_peer`'s own doc; left untouched).
+    ///
+    /// **Runtime caveat:** loads the identity synchronously — call it
+    /// outside a tokio runtime (see [`Self::load_identity`]).
+    pub fn trust_accept(&self, req: TrustAcceptReq) -> Result<TrustAcceptData, OpError> {
+        let secret = qsh_proto::pairing::parse_invite_code(&req.code).map_err(|err| {
+            OpError::new(ErrorCode::InvalidArgument, err.to_string()).with_retryable(false)
+        })?;
+
+        let Some(loaded) = self.load_identity()? else {
+            return Err(OpError::new(
+                ErrorCode::ConfigError,
+                format!(
+                    "no device identity in {}; run qsh init first",
+                    self.paths.config_dir.display()
+                ),
+            )
+            .with_retryable(false));
+        };
+        let device_name = loaded.identity.device_id.clone();
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .map_err(|err| {
+                OpError::new(
+                    ErrorCode::Internal,
+                    format!("failed to start an async runtime: {err}"),
+                )
+                .with_retryable(false)
+            })?;
+
+        let dialer = Dialer::new(loaded.local, Arc::new(crate::pairing::AcceptAnyForPairing));
+        let server_name = server_name_for(&req.address);
+        let dial_address = req.address.clone();
+
+        let outcome = runtime.block_on(async move {
+            let socket = resolve_one(&dial_address).await?;
+            let dialed = dialer
+                .dial(socket, &server_name)
+                .await
+                .map_err(|err| classify_pairing_dial_failure(err, &dial_address))?;
+            let success = crate::pairing::accept(&dialed.connection, &device_name, &secret)
+                .await
+                .map_err(classify_pairing_exchange_failure)?;
+            let observed_fp = dialed.connection.peer_fingerprint().ok_or_else(|| {
+                OpError::new(
+                    ErrorCode::Internal,
+                    "paired connection reported no peer certificate fingerprint",
+                )
+                .with_retryable(false)
+            })?;
+            dialed.connection.close(0, b"paired");
+            Ok::<_, OpError>((success, observed_fp))
+        });
+        runtime.shutdown_timeout(Duration::from_millis(200));
+        let (success, observed_fp) = outcome?;
+
+        let path = self.paths.trust_file();
+        let mut store = TrustStore::load(&path)?;
+        // Report F-6: pin with the address this exchange just dialed
+        // successfully (`req.address`, the same meaning `trust add
+        // --address` gives it) rather than `None` — otherwise `qsh exec
+        // <peer>` right after a successful pairing would come back
+        // `HOST_NOT_FOUND` (§6.1/§6.8: an address-less pin is never a
+        // dial-address candidate), directly undercutting ADR-0002's SC1
+        // (5-minute pairing to first connection).
+        let (peer, created, updated) = store.add_peer(
+            success.peer_device_name.clone(),
+            Some(req.address.clone()),
+            observed_fp,
+            now_rfc3339(),
+        );
+        if !created && !updated && peer.fingerprint != observed_fp.to_string() {
+            return Err(OpError::new(
+                ErrorCode::SessionConflict,
+                format!(
+                    "paired with {}, but {:?} is already pinned locally under a different \
+                     identity; rename or remove the conflicting entry and retry",
+                    req.address, success.peer_device_name
+                ),
+            )
+            .with_retryable(false));
+        }
+        if created || updated {
+            store.save(&path)?;
+        }
+        Ok(TrustAcceptData {
+            peer,
+            created,
+            updated: (!created).then_some(updated),
         })
     }
 
@@ -699,6 +852,84 @@ fn classify_probe_failure(err: DialError, address: &str) -> OpError {
             format!("failed to build a client endpoint: {err}"),
         )
         .with_retryable(false),
+    }
+}
+
+/// `trust.accept`'s own dial-failure classifier: unlike
+/// [`classify_probe_failure`], the dialer here is
+/// [`crate::pairing::AcceptAnyForPairing`] (accepts *any* fingerprint), so
+/// a [`DialError::LocalRejected`] can only mean the peer's certificate
+/// itself was structurally invalid (malformed, outside its validity
+/// window — `qsh_transport::tls::verify_core`'s unconditional checks, which
+/// run before any trust-evaluator branch), never "untrusted" — there is no
+/// `observed_fingerprint` detail worth reporting since nothing was ever
+/// evaluated against a fingerprint at all.
+fn classify_pairing_dial_failure(err: DialError, address: &str) -> OpError {
+    match err {
+        DialError::LocalRejected { .. } => OpError::new(
+            ErrorCode::AuthFailed,
+            format!("{address}'s certificate could not be verified"),
+        )
+        .with_retryable(false),
+        DialError::RemoteRejected => OpError::new(
+            ErrorCode::AuthFailed,
+            format!("{address} rejected this device's certificate"),
+        )
+        .with_retryable(false),
+        DialError::Timeout(after) => OpError::new(
+            ErrorCode::ConnectionFailed,
+            format!("no response from {address} after {after:?}"),
+        ),
+        DialError::Connect(err) => OpError::new(
+            ErrorCode::ConnectionFailed,
+            format!("cannot dial {address}: {err}"),
+        ),
+        DialError::Failed(err) => OpError::new(
+            ErrorCode::ConnectionFailed,
+            format!("connection to {address} failed: {err}"),
+        ),
+        DialError::Setup(err) => OpError::new(
+            ErrorCode::Internal,
+            format!("failed to build a client endpoint: {err}"),
+        )
+        .with_retryable(false),
+    }
+}
+
+/// Turn a failed [`crate::pairing::accept`] exchange into the `OpError`
+/// `trust.accept` reports. `Remote { code, .. }` is the common case — the
+/// responder already picked one of `AUTH_FAILED`/`TRUST_REQUIRED`/
+/// `SESSION_CONFLICT`/`INTERNAL` via its own `PairingError::as_wire_error`
+/// (report §B7) and this just carries that verdict through unchanged. The
+/// `NoMatch`/`Expired`/`AlreadyConsumed`/`PinCollision` arms are the
+/// responder's own local-matching outcomes and are never constructed by
+/// [`crate::pairing::accept`] itself (only by `respond`) — present here
+/// only so the match stays exhaustive, matching this codebase's existing
+/// style for structurally-unreachable-but-required arms.
+fn classify_pairing_exchange_failure(err: crate::pairing::PairingError) -> OpError {
+    use crate::pairing::PairingError as E;
+    match err {
+        E::Remote {
+            code,
+            message,
+            retryable,
+        } => OpError::new(code, message).with_retryable(retryable),
+        E::NoMatch => OpError::new(ErrorCode::AuthFailed, err.to_string()).with_retryable(false),
+        E::Expired => OpError::new(ErrorCode::TrustRequired, err.to_string()).with_retryable(false),
+        E::AlreadyConsumed | E::PinCollision => {
+            OpError::new(ErrorCode::SessionConflict, err.to_string()).with_retryable(false)
+        }
+        E::ResponderProofMismatch => {
+            OpError::new(ErrorCode::AuthFailed, err.to_string()).with_retryable(false)
+        }
+        E::Timeout => OpError::new(ErrorCode::Timeout, err.to_string()),
+        E::ClosedEarly | E::UnexpectedMessage | E::Stream(_) | E::Connection(_) => {
+            OpError::new(ErrorCode::ConnectionFailed, err.to_string())
+        }
+        E::ExporterUnavailable => {
+            OpError::new(ErrorCode::Internal, err.to_string()).with_retryable(false)
+        }
+        E::Store(op_err) => op_err,
     }
 }
 

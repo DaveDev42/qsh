@@ -27,7 +27,7 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::SystemTime;
 
 use qsh_proto::{ErrorCode, TrustPeer};
@@ -37,6 +37,9 @@ use serde::{Deserialize, Serialize};
 use crate::config::{config_io_error, ensure_private_dir, write_private_file};
 use crate::identity::pem;
 use crate::ops::OpError;
+
+pub mod pairing;
+pub use pairing::SharedInviteStore;
 
 /// A private CA root the verifier accepts chains against.
 ///
@@ -290,6 +293,16 @@ impl Cached {
 pub struct SharedTrustStore {
     path: PathBuf,
     cache: RwLock<Cached>,
+    /// Set once, after construction, by [`SharedTrustStore::attach_pairing`]
+    /// — never at `open()` time, because the pairing store is optional
+    /// (only `qsh serve` wires one; a one-shot dial like `probe_fingerprint`
+    /// never does) and because `Server::new`'s existing call sites must not
+    /// change shape (`PLAN.md` M7 Step 4, same `OnceLock`-after-construction
+    /// pattern `crate::server::Server` uses for its own pairing store).
+    /// `pairing_open()` answers `false` whenever this is unset — identical
+    /// to `TrustEvaluator::pairing_open`'s own default, so an evaluator that
+    /// never attaches one behaves exactly as it did before this step.
+    pairing: OnceLock<Arc<SharedInviteStore>>,
 }
 
 impl std::fmt::Debug for SharedTrustStore {
@@ -312,12 +325,24 @@ impl SharedTrustStore {
         Ok(Arc::new(Self {
             cache: RwLock::new(Cached::new(raw, mtime_of(&path), store)),
             path,
+            pairing: OnceLock::new(),
         }))
     }
 
     /// The file this view is backed by.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Wire an invite store into this trust view's
+    /// [`TrustEvaluator::pairing_open`] answer (`qsh serve`'s startup path,
+    /// `PLAN.md` M7 Step 4). A no-op past the first call — matching every
+    /// other `OnceLock`-after-construction seam in this step (`Server`'s own
+    /// pairing store): a `Server`/`SharedTrustStore` is built once per
+    /// process, so "attach exactly once, right after construction" is the
+    /// only shape that matters in practice.
+    pub fn attach_pairing(&self, store: Arc<SharedInviteStore>) {
+        let _ = self.pairing.set(store);
     }
 
     /// A copy of the current (possibly reloaded) store contents.
@@ -421,6 +446,18 @@ impl TrustEvaluator for SharedTrustStore {
     fn ca_roots(&self) -> Vec<CertificateDer<'static>> {
         self.refresh();
         self.read().cas.clone()
+    }
+
+    /// `true` iff an invite store is attached ([`Self::attach_pairing`])
+    /// and it currently reports at least one record within its retention
+    /// window (`crate::trust::pairing`'s module doc) — `false` (the trait's
+    /// own default) when nothing is attached at all, e.g. a one-shot dial
+    /// evaluator that never calls `attach_pairing`.
+    fn pairing_open(&self) -> bool {
+        match self.pairing.get() {
+            Some(store) => store.pairing_open(SystemTime::now()),
+            None => false,
+        }
     }
 }
 

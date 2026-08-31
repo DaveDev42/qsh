@@ -137,7 +137,15 @@ pub fn classify(body: &control_message::Body) -> MessageKind {
         control_message::Body::Pong(_)
         | control_message::Body::Response(_)
         | control_message::Body::SessionEvent(_)
-        | control_message::Body::Hello(_) => MessageKind::Invalid,
+        | control_message::Body::Hello(_)
+        // Pairing (ADR-0002, M7 Step 4) never runs over `LOCAL_CONTROL` —
+        // it is a direct-connect exchange on its own dedicated,
+        // pairing-only QUIC connection (`Server::serve_pairing_connection`),
+        // not something a reverse-registered conduit relays. A conduit
+        // sending either is never legitimate, same as the other handshake/
+        // reply/event shapes just above.
+        | control_message::Body::PairingProof(_)
+        | control_message::Body::PairingAccepted(_) => MessageKind::Invalid,
         control_message::Body::SessionOpen(_)
         | control_message::Body::SessionGet(_)
         | control_message::Body::SessionList(_)
