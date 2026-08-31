@@ -191,6 +191,36 @@ pub struct InviteStore {
 }
 
 impl InviteStore {
+    /// Acquire the cross-process advisory lock guarding `path`'s whole
+    /// read-modify-write cycle — mirrors [`super::TrustStore::lock`]'s own
+    /// doc (`PLAN.md` M7 Step 7-1, narrowing report F-9's residual
+    /// lost-update window rather than closing it). Every caller must
+    /// acquire this before [`InviteStore::load`] and hold the returned
+    /// guard until after [`InviteStore::save`] returns.
+    ///
+    /// It does not close the window entirely: [`SharedInviteStore::redeem`]
+    /// makes its accept/already-consumed decision and runs its `on_matched`
+    /// pinning side effect *before* it acquires this lock (only the
+    /// `consumed_at` write and the save that follows are inside it), so two
+    /// separate `qsh serve` processes racing the same invite secret can
+    /// both decide "not yet consumed" and both redeem it (this diff's
+    /// cache `RwLock` fully serializes that decision *within* one process,
+    /// which is the deployment this fixes — `PLAN.md` M7 Step 7-1 검증
+    /// 라운드 A4).
+    ///
+    /// **Lock order**: any `RwLock`/`Mutex` the caller already holds must
+    /// be acquired **before** this call, never after —
+    /// [`SharedInviteStore::redeem`] holds its cache `RwLock` across its
+    /// own call into this same discipline; see
+    /// [`crate::config::FileLock`]'s doc for why reversing the order
+    /// risks a deadlock.
+    pub(crate) fn lock(path: &Path) -> Result<crate::config::FileLock, OpError> {
+        if let Some(parent) = path.parent() {
+            ensure_private_dir(parent)?;
+        }
+        crate::config::FileLock::acquire(&crate::config::lock_path_for(path))
+    }
+
     /// Load `path`. A missing file is an empty store, mirroring
     /// [`super::TrustStore::load`].
     pub fn load(path: &Path) -> Result<Self, OpError> {
@@ -215,32 +245,22 @@ impl InviteStore {
 
     /// Write the store to `path` (0600, in a 0700 directory, atomically).
     ///
-    /// **Report F-9.** Two different *processes* read-modify-write this
-    /// same file with no lock: a `qsh trust invite` CLI process
-    /// (`Ops::trust_invite`'s load→prune→add→save) and a running `qsh
-    /// serve`'s own [`SharedInviteStore::redeem`]. `write_private_file`'s
-    /// pid-scoped-temp-file-plus-rename means a write can never be *torn*,
-    /// but it does nothing to stop a *lost update*: without this merge, a
-    /// `trust invite` process that read the file before `redeem` marked a
-    /// record consumed, then saves its own (stale) in-memory copy after
-    /// `redeem`'s write, would overwrite `redeem`'s `consumed_at` right
-    /// back to unset — un-consuming an invite that already pinned a device.
-    /// Immediately before writing, this re-reads whatever is currently on
-    /// disk and merges it in: any record the caller doesn't know about yet
-    /// (minted by the *other* writer since this copy was loaded) is kept
-    /// rather than silently dropped, and a `consumed_at` already recorded
-    /// on disk is never reverted to `None` by a writer whose own copy
-    /// predates it (monotonic on consumption — a completed pairing is
-    /// never allowed to un-happen).
-    ///
-    /// **Not a full fix.** This narrows the lost-update window to the gap
-    /// between this merge-read and the write immediately following it,
-    /// rather than closing it: two writers whose merge-reads both land
-    /// before either one's write can still each observe the same
-    /// pre-image and independently decide their own record is the winner.
-    /// Real file locking is Step 7 debt (`PLAN.md` M7 (a)-추기 ③, carried
-    /// forward from the M6 "trust store no-locking" item, now extended to
-    /// `invites.toml` too).
+    /// **Report F-9, closed by `PLAN.md` M7 Step 7-1.** Two different
+    /// *processes* read-modify-write this same file: a `qsh trust invite`
+    /// CLI process (`Ops::trust_invite`'s load→prune→add→save) and a
+    /// running `qsh serve`'s own [`SharedInviteStore::redeem`]. Both now
+    /// hold [`InviteStore::lock`] across their whole cycle (see that
+    /// method's doc), which is the actual fix — a lost update can no
+    /// longer happen because a second writer's `load` cannot even start
+    /// until the first writer's `save` has returned. The merge below
+    /// predates that lock and is kept as defense in depth (a caller that
+    /// somehow calls `save` without holding the lock — a future mistake,
+    /// not a sanctioned path — still narrows its own lost-update window
+    /// instead of hitting the full F-9 exposure): immediately before
+    /// writing, this re-reads whatever is currently on disk and merges it
+    /// in, keeping any record the caller doesn't know about yet and never
+    /// reverting a `consumed_at` already recorded on disk (monotonic on
+    /// consumption — a completed pairing is never allowed to un-happen).
     pub fn save(&mut self, path: &Path) -> Result<(), OpError> {
         self.merge_consumption_from_disk(path)?;
         if let Some(parent) = path.parent() {
@@ -541,6 +561,13 @@ impl SharedInviteStore {
         let server_proof = record
             .mac_key
             .proof(exported_keying_material, SERVER_PROOF_DOMAIN);
+        // Cross-process lock for the save below, acquired *after* the
+        // cache `RwLock` above — `InviteStore::lock`'s required order
+        // (`crate::config::FileLock`'s doc). `on_matched` (`try_pin`) has
+        // already run and may itself have taken `TrustStore::lock` on a
+        // different path (`trust.toml.lock`, never this one), so there is
+        // no cycle between the two locks.
+        let _lock = InviteStore::lock(&self.path)?;
         cache.store.records[index].consumed_at = Some(rfc3339_at(now));
         cache.store.save(&self.path)?;
         // Keep `cache.raw` in sync with what was just written so the next
@@ -942,5 +969,38 @@ mod tests {
         assert!(!text.contains(&hex_secret));
         // The base64 of the raw secret bytes must not appear either.
         assert!(!text.contains(&BASE64.encode(s.as_ref())));
+    }
+
+    /// Regression for `PLAN.md` M7 Step 7-1's close of report F-9's
+    /// residual lost-update window: 8 threads, each doing a full
+    /// `InviteStore::lock` → `load` → `add` → `save` cycle for a
+    /// distinct invite, must not lose each other's addition — mirrors
+    /// `TrustStore`'s own `concurrent_full_rmw_cycles_do_not_lose_each_others_peers`
+    /// and, further back, `crate::resume`'s
+    /// `concurrent_writers_do_not_lose_each_others_entries`, the
+    /// precedent this lock was lifted from. Before this lock, the F-9
+    /// merge only narrowed the window between two writers' merge-reads
+    /// and their own writes — two merge-reads landing before either
+    /// write could still each decide their own record is the winner.
+    #[test]
+    fn concurrent_full_rmw_cycles_do_not_lose_each_others_invites() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("invites.toml");
+        let now = SystemTime::now();
+        let mut threads = Vec::new();
+        for i in 0..8u8 {
+            let path = path.clone();
+            threads.push(std::thread::spawn(move || {
+                let _lock = InviteStore::lock(&path).unwrap();
+                let mut store = InviteStore::load(&path).unwrap();
+                store.add(&secret(i), now);
+                store.save(&path).unwrap();
+            }));
+        }
+        for t in threads {
+            t.join().expect("writer");
+        }
+        let final_store = InviteStore::load(&path).unwrap();
+        assert_eq!(final_store.records.len(), 8, "a concurrent invite was lost");
     }
 }

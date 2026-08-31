@@ -2064,6 +2064,24 @@ impl Server {
         let result =
             crate::pairing::respond(conn, &state.invites, &self.device_name, |initiator_name| {
                 let path = trust.path();
+                // Whole load→mutate→save under lock, not just the write —
+                // same discipline as `Ops::trust_add`/`trust_remove`
+                // (`TrustStore::lock`'s own doc, `PLAN.md` M7 Step 7-1
+                // S1). This closure runs synchronously inside
+                // `SharedInviteStore::redeem`, which already holds its
+                // cache `RwLock` — that lock is acquired first, this one
+                // second, matching `TrustStore::lock`'s required order.
+                // Blocking here (a `flock` wait, then a small TOML
+                // rewrite) briefly parks the current tokio worker thread;
+                // see `PLAN.md` M7 Step 7-1's report for why that is
+                // accepted rather than moved to `spawn_blocking`.
+                let _lock = match crate::trust::TrustStore::lock(path) {
+                    Ok(lock) => lock,
+                    Err(err) => {
+                        tracing::error!(%err, "failed to lock the trust store during pairing");
+                        return false;
+                    }
+                };
                 let mut store = match crate::trust::TrustStore::load(path) {
                     Ok(store) => store,
                     Err(err) => {

@@ -102,6 +102,12 @@ impl Ops {
         };
 
         let path = self.paths.trust_file();
+        // Whole load→mutate→save under lock, not just the write — same
+        // discipline as `Ops::trust_add`/`trust_remove`/`trust_accept`
+        // (`TrustStore::lock`'s own doc, `PLAN.md` M7 Step 7-1). Acquired
+        // only now, after the local crypto work above (no network I/O
+        // under this lock).
+        let _lock = TrustStore::lock(&path)?;
         let mut store = TrustStore::load(&path)?;
         let (entry, created, updated) = store.add_ca(LOCAL_CA_NAME, root.cert_pem.clone());
         if created || updated {

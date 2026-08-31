@@ -37,6 +37,12 @@ use crate::ops::OpError;
 pub const CA_CERT_FILE: &str = "ca.pem";
 /// File name of the CA private key (PKCS#8 PEM).
 pub const CA_KEY_FILE: &str = "ca.key";
+/// Sidecar lock guarding [`init`]'s whole idempotency-check-plus-write
+/// critical section (`PLAN.md` M7 Step 7-1 S4, carrying forward Step 5's
+/// P3-4 observation): without it, two concurrent `qsh cert init` calls
+/// could interleave so that one writer's `ca.key` ends up paired with the
+/// other writer's `ca.pem` on disk.
+const CA_LOCK_FILE: &str = ".lock";
 
 /// How long a freshly generated CA root is valid. Longer than a device
 /// leaf: re-issuing every device it signed is the only way to rotate it
@@ -83,6 +89,10 @@ pub fn init(paths: &Paths) -> Result<CaInit, OpError> {
     ensure_private_dir(&paths.config_dir)?;
     let ca_dir = paths.ca_dir();
     ensure_private_dir(&ca_dir)?;
+
+    // Whole idempotency-check-plus-write critical section under lock, not
+    // just the writes — see `CA_LOCK_FILE`'s doc.
+    let _lock = crate::config::FileLock::acquire(&ca_dir.join(CA_LOCK_FILE))?;
 
     if let Some(root) = read_root(paths)? {
         return Ok(CaInit {
@@ -402,12 +412,35 @@ mod tests {
     /// Crash-safety regression for the key-before-cert write order the
     /// module doc and `init`'s own inline comment promise: forces the
     /// *second* write (`ca.pem`) to fail by pre-occupying its exact atomic-
-    /// rename temp path (`ca.pem.tmp<pid>`) with a directory, so whichever
-    /// file `init` writes first genuinely lands on disk before the call
-    /// errors out — proof of the real order, not an assumption about it.
-    /// If that order were ever reversed (cert first, key last), the *cert*
-    /// write — the one whose temp path we block — would be attempted
-    /// first and `init` would fail before ever touching `ca.key`.
+    /// rename temp path (`ca.pem.tmp<pid>-<ticket>`) with a directory, so
+    /// whichever file `init` writes first genuinely lands on disk before
+    /// the call errors out — proof of the real order, not an assumption
+    /// about it. If that order were ever reversed (cert first, key last),
+    /// the *cert* write — the one whose temp path we block — would be
+    /// attempted first and `init` would fail before ever touching
+    /// `ca.key`.
+    ///
+    /// The temp path now carries a writer-scoped ticket
+    /// (`crate::config::write_private_file_io`, `PLAN.md` M7 Step 7-1),
+    /// not just the pid, so the exact name isn't derivable from `pid`
+    /// alone any more. `init` makes exactly two `write_private_file`
+    /// calls in a fixed order (key, then cert), so
+    /// `next_write_ticket_for_test() + 1` is exactly the cert write's
+    /// ticket — read *before* calling `init`.
+    ///
+    /// That prediction only holds under a **process-isolated test runner**
+    /// (`cargo nextest run`, this repo's required one —
+    /// `.github/workflows/ci.yml`). `WRITE_TICKET` is a single
+    /// process-global `AtomicU64` (`crate::config`), so under plain `cargo
+    /// test`'s in-process, thread-parallel execution any concurrently
+    /// scheduled sibling test that also calls `write_private_file`/
+    /// `write_private_file_io` can steal the predicted ticket out from
+    /// under this read, and the `panic!` below fires spuriously
+    /// (reproduced 3/3 under `cargo test -p qsh-core --lib` run alongside
+    /// its siblings; `PLAN.md` M7 Step 7-1 검증 라운드 A1). This is a
+    /// known test-isolation limitation of this test, not of the
+    /// production ticket/locking mechanism, which nextest — the actual CI
+    /// and commit-gate runner — validates cleanly.
     #[test]
     fn init_recovers_from_an_interrupted_cert_write() {
         let (_guard, paths) = temp_paths();
@@ -415,7 +448,11 @@ mod tests {
         let ca_dir = paths.ca_dir();
         ensure_private_dir(&ca_dir).unwrap();
 
-        let cert_tmp = ca_dir.join(format!("{CA_CERT_FILE}.tmp{}", std::process::id()));
+        let cert_ticket = crate::config::next_write_ticket_for_test() + 1;
+        let cert_tmp = ca_dir.join(format!(
+            "{CA_CERT_FILE}.tmp{}-{cert_ticket}",
+            std::process::id()
+        ));
         std::fs::create_dir(&cert_tmp).unwrap();
 
         let err = match init(&paths) {
