@@ -745,7 +745,7 @@ pin 시점에 이름 충돌이 생기면 — 상대가 자칭하는 이름이 �
 
 `--json` mode에서는 pairing도 interactive prompt를 열지 않는다(§2.1) — 잘못된 code나 인자 오류는 곧바로 오류 envelope로 반환된다.
 
-`doctor.run`은 operation 이름만 예약되어 있으며 계약은 M7에서 확정한다. M3가 만드는 진단 항목 상수(`qsh::reverse`의 `event` 값 어휘, `registration_wait_ms` 등)는 M7의 `doctor.run`이 그대로 소비한다 — 계약 확정을 앞당기지 않는다.
+`doctor.run`의 전체 계약(§6.17, M7 Step 6)은 진단 코드 13종·envelope 모양·exit code 규칙을 담는다 — 이 절 밖에서는 더 설명하지 않는다.
 
 원격 operation(`exec.run`, `session.*`, `tunnel.*`)의 mTLS 실패 오류 경로는 다음과 같다.
 
@@ -782,7 +782,7 @@ qsh reverse <controller> [--offered-name <name>]
   >
   > Put the controller on a publicly routable address, a forwarded port, or an existing overlay such as WireGuard or Tailscale. If the controller itself is behind NAT, M3 has no answer for that.
 
-  같은 상수를 `qsh listen` 시작 배너, `README.md`의 "Known limitations", 그리고 이 절이 함께 소비한다 — 문안 정본이 여러 벌 생기지 않는다. M7의 `doctor.run`(§6.11)도 `code: "controller_unreachable"`을 그대로 소비할 예정이다.
+  같은 상수를 `qsh listen` 시작 배너, `README.md`의 "Known limitations", 그리고 이 절이 함께 소비한다 — 문안 정본이 여러 벌 생기지 않는다. `qsh doctor`(§6.17)도 `code: "controller_unreachable"`을 그대로 소비한다.
 - `--bind`의 우선순위: CLI flag > `[listen].bind` > 기본값 `[::]:4433` — `qsh serve`(§6.12)와 **기본값이 같다**. 한 머신에서 두 역할을 겸하려면 명시적 `--bind`가 필요하고, 충돌은 조용한 오작동이 아니라 즉시·명시적 실패(stderr 진단 + exit `255`)다.
 - **정책 파일 진단(M5).** `qsh serve`(§6.12)와 동일한 규율이다 — `qsh listen`/`qsh reverse` 둘 다 시작 시 `acl.toml`을 1회 읽고, 없거나 파싱 불가면 리소스를 생성하지 않으며 그 상태에서 도달하는 모든 인가 판정은 항상 `deny`다(`docs/design/architecture.md` §6, `PLAN.md` M5 §4.1 #1). 운영자에게는 stderr에 파일 경로, `CONFIG_ERROR` 코드, 최소 정책 예시를 담은 진단을 한 번 출력하고(§6.12와 같은 평문 블록 — `StartupDiagnostic::render`, tracing JSON 라인이 아니다), 자동 생성은 하지 않는다. `qsh listen`은 controller로서 `host.reverse` 등록 요청을, `qsh reverse`는 target으로서 그 연결 위에서 relay되는 세션 op을 각각 자기 자신의 `acl.toml`로 평가한다.
 - 시작 시 실제로 bind된 주소와 등록 이벤트(`registered|denied|replaced|lost|expired|retry`)를 stderr에 구조화 진단(tracing target `qsh::reverse`, 한 줄 JSON, payload·토큰 field 없음)으로 출력한다 — stdout에는 §2.2 규칙에 따라 한 바이트도 쓰지 않는다.
@@ -899,6 +899,75 @@ qsh cert issue --json
 **`acl.toml` 작성 시 주의.** CA로 인증한 principal을 허용하려는 `[[acl]]` 행은 `auth_path = "ca"`를 **명시**해야 한다 — 이 field를 생략하면 `"pin"`으로 기본값이 매겨져(§6.15의 `--auth-path` 문단과 같은 기본값, `PLAN.md` M5 §4.1 #2) CA로만 인증한 peer는 그 행에 조용히 매칭되지 않는다(default-deny이므로 결과는 `PERMISSION_DENIED`).
 
 pin(`AuthPath::Pin`)과 CA(`AuthPath::Ca`) 양쪽 모두 principal은 똑같이 `device:<id>` 모양이다 — 구별의 근거는 principal이 아니라 audit 기록의 `auth_path`뿐이다(ADR §6).
+
+### 6.17 `qsh doctor` — 배포 진단 (M7 Step 6)
+
+```bash
+qsh doctor [host] --json
+```
+
+`doctor.run`은 §2.4·§2.5가 이미 예약해 둔 대로 **로컬 operation**이다 — 원격 peer가 요청할 수 없고, 이 머신 자신의 identity·ACL 정책·audit 로그·trust store·시계·(best-effort) 네트워크 도달성을 조회해 하나의 report로 묶는다. 인자 없는 `qsh doctor`는 `[reverse].controller`가 설정돼 있으면 그 연결성만 점검하고, `qsh doctor <host>`는 그 pinned host를 추가로 점검한다 — `qsh capabilities [host]`(§6.10)와 같은 UX 형태다.
+
+**exit code는 항상 `0`이다 — finding은 data이지 실패가 아니다.** `qsh acl check`(§6.15, L845)의 선례를 그대로 확장한다: `deny`나 "정책 없음"조차 `acl check` 자체를 실패로 만들지 않듯, `doctor.run`도 아무리 심각한 finding이 나와도 조회 자체는 성공이다(`ok: true`). 건강도는 `data.overall`이 담는다. `doctor.run`이 `Err`(exit `255`)로 실패하는 경우는 doctor 자신이 조회를 시작할 조건조차 없을 때뿐이다 — 대표적으로 `qsh init`을 아직 실행하지 않아 device identity가 없는 경우, 또는 `config.toml`/`hosts.toml`/`trust.toml`이 파싱조차 되지 않는 경우(각 로더가 이미 `CONFIG_ERROR`로 잡는다 — doctor가 별도 code로 다시 잡지 않는다). output mode에 따라 이 규칙이 달라지지 않는다(§4).
+
+`data`는 `DoctorData`(`crates/qsh-proto/src/types.rs`)다:
+
+```json
+{
+  "schema": "qsh.cli/v1",
+  "request_id": "01K0EXAMPLE",
+  "command": "doctor.run",
+  "ok": true,
+  "data": {
+    "overall": "warn",
+    "findings": [
+      {
+        "code": "cert_expiring_soon",
+        "status": "warn",
+        "detail": "A certificate this device relies on expires within 30 days. (this device's own leaf certificate, not_after unix: 1780000000)",
+        "remedy": "Re-issue it ahead of the deadline with `qsh cert issue`."
+      },
+      {
+        "code": "trust_remove_scope",
+        "status": "info",
+        "detail": "trust.toml has at least one pinned peer. `qsh trust remove` only takes effect starting with that peer's next handshake — an already-established connection keeps its entire negotiated authority (including opening brand-new sessions, tunnels and forwards) until that connection drops and has to handshake again.",
+        "remedy": "Force-closing an already-established connection on removal is not implemented (P1). If that matters right now, restart the process holding the connection."
+      }
+    ]
+  }
+}
+```
+
+`overall`은 `Host.connection_mode`와 같은 열린 문자열 규율(§10)로 `"ok"`/`"warn"`/`"error"`다 — `findings` 중 가장 심각한 `status`를 반영한다(`"error"` > `"warn"` > 그 외 `"ok"`). `"info"`만 있거나 `findings`가 비어 있으면 `"ok"`다. `overall`은 개별 finding에는 원칙적으로 나타나지 않는다 — 통과한 점검은 finding 자체를 만들지 않으므로("findings 모델": 재사용 상수 3종이 전부 실패-명명 문자열이라, 통과까지 담으려면 별도 subject-code 어휘가 이중으로 필요해진다), 통과 가시성은 `overall`과 human 렌더의 요약 줄로 얻는다.
+
+`findings`의 각 원소(`DoctorFinding`)는 다음 field를 갖는다:
+
+- `code`: 아래 표의 잠금 어휘(snake_case) 중 하나. shipped 후 **추가만** 가능하다 — 삭제·의미 변경은 `qsh.cli/v1` 위반이라 `/v2`가 필요하다(§10 additive-only 규율).
+- `status`: `"warn"`/`"error"`/`"info"` 중 하나 — `"ok"`는 여기 나타나지 않는다.
+- `detail`: 무엇이 관측됐는지에 대한 사람이 읽을 수 있는 설명(해석된 경로, 관측된 만료 시각 등). 시크릿·PTY/명령 payload는 절대 담지 않는다(`CLAUDE.md`의 보안 기본값).
+- `remedy`: 실행 가능한 다음 행동 한 줄. 없으면 필드 자체가 생략된다(additive-optional, `CapabilitiesData.host`와 같은 규율).
+
+**13종 진단 코드** (재사용 5종·신설 8종 — `PLAN.md` M7 §4.1 #5가 확정한 잠금 어휘):
+
+| `code` | `status` | 무엇을 점검하는가 |
+|---|---|---|
+| `controller_unreachable` | error | `[reverse].controller`가 설정돼 있으면 그 dial이 실패 — reverse는 relay·NAT traversal이 없다(M3 out-of-scope, §6.13). 문면은 `qsh_core::doctor::CONTROLLER_UNREACHABLE`을 그대로 재사용한다(§6.13과 동일 정본) |
+| `udp_egress_blocked` | error | `host` 인자로 준 일반 대상으로의 raw UDP probe가 응답 없이 침묵 타임아웃 — 방화벽이 UDP를 막고 있을 가능성. QSH는 TCP fallback이 없다(P1, ADR-0005) |
+| `no_route` | error | 일반 대상으로의 probe가 OS 레벨에서 즉시 거부됨(경로 자체가 없음) — 침묵 타임아웃(`udp_egress_blocked`)과 구분된다 |
+| `peer_untrusted` | error | `hosts.toml`이 이름을 알지만 `trust.toml`에 그 이름의 pin이 없음 — 그 이름으로 연결하면 `TRUST_REQUIRED`로 실패할 운명이다(정적 교차대조, 위양성 없음) |
+| `cert_expired` | error | device leaf(`identity/device.pem`) 또는 CA root(`ca/ca.pem`)의 `not_after`가 이미 지났음 — `detail`이 어느 쪽인지 밝힌다 |
+| `cert_expiring_soon` | warn | 같은 인증서의 `not_after`가 30일 이내(만료 전)임 — `cert_expired`와 같은 인증서에 대해 상호배타 |
+| `keystore_unavailable` | warn | 플랫폼 키스토어(macOS Keychain / Linux Secret Service)에 도달 불가 — 이미 file store(0600)로 정상 동작 중이므로 기능에는 지장 없음(read-only probe, 실제 키 저장소를 바꾸지 않는다) |
+| `clock_skew` | warn 또는 error | 로컬 시계가 device cert의 backdated `not_before`보다 과거 — `qsh init` 시 준 5분 backdate 여유(`CERT_BACKDATE_MINUTES`)를 넘으면 error, 그 안이면 warn |
+| `audit_path_unwritable` | error | 설정된 `[audit].path`를 append로 열 수 없음 — fail-closed로 privileged operation(`session.open`/`exec.run`/`host.reverse`)이 전부 거부되는 상태. 문면은 `qsh_core::doctor::AUDIT_PATH_UNWRITABLE`을 재사용한다 |
+| `acl_policy_missing` | error | `acl.toml`이 없음 — `qsh serve`/`qsh listen`(§6.12·§6.13)의 시작 진단과 같은 검사·같은 code(`ACL_POLICY_MISSING_CODE`)를 재사용한다. default-deny로 모든 요청이 거부되는 상태 |
+| `acl_policy_invalid` | error | `acl.toml`이 있지만 파싱/검증에 실패함 — 같은 시작 진단(`ACL_POLICY_INVALID_CODE`)을 재사용한다. `detail`이 시작 진단과 같은 banner(경로·오류 코드·오류 상세·예시)를 담는다 |
+| `qsh_path_shadowed` | warn | `$PATH`에서 지금 실행 중인 바이너리(`current_exe`)보다 앞서는 다른 `qsh` 실행파일이 있음 — 맨몸 `qsh`를 실행하면 그 다른 바이너리가 대신 뜬다 |
+| `trust_remove_scope` | info | `trust.toml`에 pin이 하나라도 있으면 상시 노출되는 고지 — `trust remove`의 유효 범위(§6.11)를 다시 알려준다: 제거는 다음 handshake부터만 적용되고, 이미 확립된 연결은 협상된 권한 전체를 연결이 끊길 때까지 유지한다 |
+
+**연결성 진단의 우선순위 규칙.** 한 probe 실패는 항상 code 하나만 낸다: probe 대상이 `[reverse].controller`면 결과와 무관하게 `controller_unreachable`이고, `host` 인자로 준 일반 대상이면 침묵 타임아웃은 `udp_egress_blocked`, OS의 즉시 거부(경로 없음)는 `no_route`다 — 세 code가 한 실패에 동시에 나오는 일은 없다.
+
+**`--fail-on` 플래그는 아직 없다.** severity 임계값 이상일 때 CI 게이트용 nonzero exit을 내는 옵션은 향후 additive 확장 후보이며, 지금은 구현하지 않는다 — 위 exit code 문단대로 지금은 findings의 존재와 무관하게 항상 `0`이다.
 
 ## 7. Human interactive mode
 

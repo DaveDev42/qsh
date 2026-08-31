@@ -8,7 +8,7 @@ use std::io::{self, Write};
 
 use qsh_core::{ExecRunOutput, OpError, SessionReadOutput};
 use qsh_proto::{
-    AclCheckData, CapabilitiesData, CertInitData, CertIssueData, Host, HostListData,
+    AclCheckData, CapabilitiesData, CertInitData, CertIssueData, DoctorData, Host, HostListData,
     IdentityInitData, SchemaData, Session, SessionCloseData, SessionEvent, SessionListData,
     SessionOpenData, SessionResizeData, SessionWriteData, TrustAcceptData, TrustAddData,
     TrustInviteData, TrustListData, TrustPeer, TrustRemoveData, Tunnel, TunnelCloseData,
@@ -57,6 +57,63 @@ pub fn print_capabilities(data: &CapabilitiesData) -> io::Result<()> {
         writeln!(stdout, "  {capability}")?;
     }
     Ok(())
+}
+
+/// Print `qsh doctor [host]` (`docs/CLI.md` §6.17): `overall` first, then
+/// one line per finding in [`DoctorData::findings`]'s own order (whatever
+/// deterministic diagnostic order `Ops::doctor` assembled them in — this
+/// never re-sorts). Zero diagnostic logic here — every field is already
+/// decided by `Ops::doctor`; this only formats it (`CLAUDE.md`'s crate
+/// boundary). `overall` always exits `0` regardless of its value
+/// (`docs/CLI.md` §6.17): a `"warn"`/`"error"` report is still a
+/// successful `doctor.run` call.
+///
+/// `detail` is split into lines *before* sanitizing (verify round P3-6):
+/// `acl_policy_missing`/`acl_policy_invalid`'s detail
+/// (`crate::acl::StartupDiagnostic::render`) is a multi-line banner
+/// (path/error code/detail/minimal `acl.toml` example/hint, `\n`-joined),
+/// and running the old single-line `sanitize` over the whole string turned
+/// every one of those newlines into U+FFFD, flattening the example into
+/// one unreadable line. Splitting first and running `sanitize` on each
+/// resulting line separately keeps its escape-injection defense intact —
+/// every line the user sees is still individually sanitized, this only
+/// stops it from also eating the line breaks *between* them. `--json`
+/// never goes through this function at all, so it is unaffected.
+pub fn print_doctor(data: &DoctorData) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    for line in render_doctor_lines(data) {
+        writeln!(stdout, "{line}")?;
+    }
+    Ok(())
+}
+
+/// The line-by-line body of [`print_doctor`], split out so the
+/// multiline-detail/sanitize-per-line behavior (verify round P3-6) is
+/// testable without a real stdout.
+fn render_doctor_lines(data: &DoctorData) -> Vec<String> {
+    let mut lines = vec![format!("overall: {}", sanitize(&data.overall))];
+    if data.findings.is_empty() {
+        lines.push("no findings".to_string());
+        return lines;
+    }
+    lines.push(format!("{} finding(s):", data.findings.len()));
+    for finding in &data.findings {
+        let mut detail_lines = finding.detail.lines();
+        let first_line = detail_lines.next().unwrap_or("");
+        lines.push(format!(
+            "  [{}] {}: {}",
+            sanitize(&finding.status),
+            sanitize(&finding.code),
+            sanitize(first_line)
+        ));
+        for line in detail_lines {
+            lines.push(format!("      {}", sanitize(line)));
+        }
+        if let Some(remedy) = &finding.remedy {
+            lines.push(format!("    remedy: {}", sanitize(remedy)));
+        }
+    }
+    lines
 }
 
 /// Print the device identity `qsh init` created (or found).
@@ -646,7 +703,8 @@ pub fn print_error(err: &OpError) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::sanitize;
+    use super::{render_doctor_lines, sanitize};
+    use qsh_proto::{DoctorData, DoctorFinding};
 
     #[test]
     fn sanitize_strips_escapes_and_newlines_but_keeps_tabs() {
@@ -654,6 +712,38 @@ mod tests {
         assert_eq!(
             sanitize("a\u{1b}[31mred\u{1b}[0m\nfake line\ttab"),
             "a\u{FFFD}[31mred\u{FFFD}[0m\u{FFFD}fake line\ttab"
+        );
+    }
+
+    /// P3-6 (verify round): a multiline `detail` (the shape
+    /// `acl_policy_missing`/`acl_policy_invalid` findings carry, from
+    /// `crate::acl::StartupDiagnostic::render`) must render one line per
+    /// input line, indented, each independently escape-sanitized — not
+    /// flattened into a single U+FFFD-mangled line the way running
+    /// `sanitize` over the whole string before splitting used to.
+    #[test]
+    fn render_doctor_lines_splits_multiline_detail_and_sanitizes_each_line_independently() {
+        let data = DoctorData {
+            overall: "error".to_string(),
+            findings: vec![DoctorFinding {
+                code: "acl_policy_missing".to_string(),
+                status: "error".to_string(),
+                detail: "line one\nline two\u{1b}[31mred\u{1b}[0m\nline three".to_string(),
+                remedy: Some("do the thing".to_string()),
+            }],
+        };
+
+        let lines = render_doctor_lines(&data);
+        assert_eq!(
+            lines,
+            vec![
+                "overall: error".to_string(),
+                "1 finding(s):".to_string(),
+                "  [error] acl_policy_missing: line one".to_string(),
+                "      line two\u{FFFD}[31mred\u{FFFD}[0m".to_string(),
+                "      line three".to_string(),
+                "    remedy: do the thing".to_string(),
+            ]
         );
     }
 }

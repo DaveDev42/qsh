@@ -980,6 +980,55 @@ pub struct CapabilitiesData {
     pub host: Option<String>,
 }
 
+// ---------------------------------------------------------------------------
+// doctor.run (`docs/CLI.md` §6.17, M7 Step 6). A **local** operation, same
+// discipline as `acl.check` above — it inspects this host's own config,
+// identity, and network reachability and is never dispatched to a remote
+// peer.
+// ---------------------------------------------------------------------------
+
+/// Request for `doctor.run` (`qsh doctor`, `docs/CLI.md` §6.17).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DoctorReq {
+    /// Pinned host to include connectivity diagnostics for, in addition to
+    /// the configured `reverse.controller` target; omit to check only the
+    /// controller (when configured) and this host's own local state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+}
+
+/// Data payload of `doctor.run` (`docs/CLI.md` §6.17).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DoctorData {
+    /// `"ok"` when every finding is informational or absent; `"warn"` when
+    /// the worst finding is `"warn"`; `"error"` when at least one finding
+    /// is `"error"`. Never itself `"info"` — `"ok"` is the empty/all-info
+    /// case (`PLAN.md` M7 §4.1 #6: `"ok"` only ever appears here, never on
+    /// an individual [`DoctorFinding::status`]).
+    pub overall: String,
+    /// One entry per diagnostic that fired. Empty when nothing did.
+    pub findings: Vec<DoctorFinding>,
+}
+
+/// One diagnostic result within `doctor.run`'s [`DoctorData::findings`]
+/// (`docs/CLI.md` §6.17).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DoctorFinding {
+    /// Stable diagnostic code, e.g. `"controller_unreachable"` — the
+    /// vocabulary `docs/CLI.md` §6.17 documents in full
+    /// (`qsh_core::doctor::EXPECTED_DOCTOR_CODES`).
+    pub code: String,
+    /// `"warn"` | `"error"` | `"info"` — never `"ok"` (that value is
+    /// reserved for [`DoctorData::overall`] alone).
+    pub status: String,
+    /// Human-readable explanation of what was checked and what was found.
+    pub detail: String,
+    /// Actionable next step, when the diagnostic has one specific enough to
+    /// state; `None` for a purely informational finding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remedy: Option<String>,
+}
+
 /// Data payload of `schema.get` (`docs/CLI.md` §6.10). Serves exactly the
 /// JSON Schemas `crates/qsh-cli/tests/fixtures.rs` generates for golden
 /// fixture validation — one source (`docs/design/testing.md` L6),
@@ -1877,5 +1926,79 @@ mod tests {
         let _ = schemars::schema_for!(AclCheckReq);
         let _ = schemars::schema_for!(AclCheckData);
         let _ = schemars::schema_for!(AclPolicyRef);
+    }
+
+    #[test]
+    fn doctor_req_omits_host_when_absent_and_round_trips_when_present() {
+        let bare = DoctorReq { host: None };
+        let json = serde_json::to_value(&bare).unwrap();
+        assert!(json.get("host").is_none());
+        let back: DoctorReq = serde_json::from_value(json).unwrap();
+        assert_eq!(back, bare);
+
+        let with_host = DoctorReq {
+            host: Some("web1".to_string()),
+        };
+        let json = serde_json::to_value(&with_host).unwrap();
+        assert_eq!(json["host"], "web1");
+        let back: DoctorReq = serde_json::from_value(json).unwrap();
+        assert_eq!(back, with_host);
+    }
+
+    #[test]
+    fn doctor_req_defaults_host_when_omitted_by_an_older_client() {
+        let json = serde_json::json!({});
+        let req: DoctorReq = serde_json::from_value(json).unwrap();
+        assert_eq!(req, DoctorReq { host: None });
+    }
+
+    #[test]
+    fn doctor_data_round_trips_with_findings_and_omits_remedy_when_absent() {
+        let data = DoctorData {
+            overall: "warn".to_string(),
+            findings: vec![
+                DoctorFinding {
+                    code: "keystore_unavailable".to_string(),
+                    status: "warn".to_string(),
+                    detail: "no platform keystore reachable".to_string(),
+                    remedy: Some("check keychain/secret-service access".to_string()),
+                },
+                DoctorFinding {
+                    code: "controller_unreachable".to_string(),
+                    status: "info".to_string(),
+                    detail: "no reverse.controller configured".to_string(),
+                    remedy: None,
+                },
+            ],
+        };
+        let json = serde_json::to_value(&data).unwrap();
+        assert_eq!(json["overall"], "warn");
+        assert!(json["findings"][0].get("remedy").is_some());
+        assert!(json["findings"][1].get("remedy").is_none());
+        let back: DoctorData = serde_json::from_value(json).unwrap();
+        assert_eq!(back, data);
+    }
+
+    #[test]
+    fn doctor_data_empty_findings_is_overall_ok() {
+        // `overall` is an open string at the wire level (same discipline as
+        // `AclCheckData::decision`) — this only checks that the empty case
+        // round-trips, not that `Ops::doctor` produces it (that belongs to
+        // `qsh_core::ops::doctor`'s own tests).
+        let data = DoctorData {
+            overall: "ok".to_string(),
+            findings: vec![],
+        };
+        let json = serde_json::to_value(&data).unwrap();
+        assert_eq!(json["findings"], serde_json::json!([]));
+        let back: DoctorData = serde_json::from_value(json).unwrap();
+        assert_eq!(back, data);
+    }
+
+    #[test]
+    fn contract_types_have_json_schemas_for_doctor_run() {
+        let _ = schemars::schema_for!(DoctorReq);
+        let _ = schemars::schema_for!(DoctorData);
+        let _ = schemars::schema_for!(DoctorFinding);
     }
 }

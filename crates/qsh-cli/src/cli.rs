@@ -206,6 +206,18 @@ pub enum Command {
         host: Option<String>,
     },
 
+    /// Diagnose this deployment: identity, ACL policy, audit log, trust
+    /// store, clock and (best-effort) network reachability
+    /// (`docs/CLI.md` §6.17). Always exits `0` on a successful run —
+    /// findings are reported as data, not exit status (`overall` field);
+    /// only doctor's own inability to run at all (e.g. no identity yet)
+    /// fails the command.
+    Doctor {
+        /// Additional pinned host to probe connectivity for, beyond
+        /// whatever `[reverse].controller` names.
+        host: Option<String>,
+    },
+
     /// Create this device's identity (keypair + self-signed certificate).
     /// Idempotent: re-running reports the existing identity.
     Init {

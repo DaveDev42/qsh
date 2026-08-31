@@ -41,7 +41,13 @@ pub const KEY_FILE: &str = "device.key";
 /// (`docs/design/architecture.md` §5: "장기(10y) self-signed").
 const CERT_VALIDITY_DAYS: i64 = 3650;
 /// Backdate `not_before` to absorb small clock skew between peers.
-const CERT_BACKDATE_MINUTES: i64 = 5;
+///
+/// `pub(crate)`: `doctor.run`'s `clock_skew` diagnostic (`docs/CLI.md`
+/// §6.17, `crate::ops::doctor`) reuses this exact threshold rather than
+/// hard-coding a second copy of "5 minutes" — a peer this device's clock
+/// could ever plausibly be off by without also invalidating certificates
+/// this device itself just backdated by the same margin.
+pub(crate) const CERT_BACKDATE_MINUTES: i64 = 5;
 
 /// The public half of this device's identity: everything except the key.
 #[derive(Debug, Clone, PartialEq, Eq)]
