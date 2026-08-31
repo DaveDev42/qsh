@@ -564,11 +564,25 @@ pub struct TrustAddReq {
 /// Data payload of `trust.add`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct TrustAddData {
-    /// The (new or pre-existing) pin.
+    /// The (new, pre-existing, or address-updated) pin.
     pub peer: TrustPeer,
     /// `true` if a new pin was written; `false` if `name` was already
-    /// pinned (idempotent — the existing entry is returned unchanged).
+    /// pinned (idempotent).
     pub created: bool,
+    /// `true` if `name` was already pinned under the *same* fingerprint and
+    /// this call changed its stored `address` in place (`docs/CLI.md`
+    /// §6.11's address-refresh path, `PLAN.md` M7 Step 2 decision B —
+    /// e.g. the host's reachable address changed and the operator re-ran
+    /// `trust add` with the same identity and a new `--address`). `false`
+    /// (never `true`) alongside `created: true` — a brand-new pin has
+    /// nothing to update — and also `false` when `name` already existed
+    /// but nothing about it changed: same address, or a *different*
+    /// fingerprint (a fingerprint mismatch is never applied — re-binding an
+    /// identity is a deliberate `remove` then `add`, never a side effect of
+    /// a repeated `trust add`). Additive (`docs/CLI.md` §10): absent on any
+    /// envelope produced before M7 Step 2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated: Option<bool>,
 }
 
 /// Data payload of `trust.list`.
@@ -939,11 +953,27 @@ mod tests {
         let add = TrustAddData {
             peer: peer.clone(),
             created: true,
+            updated: None,
         };
         let json = serde_json::to_value(&add).unwrap();
         assert_eq!(json["peer"]["name"], "personal-mac");
         assert_eq!(json["peer"]["added_at"], "2026-08-17T00:00:00Z");
         assert_eq!(json["created"], true);
+        // Additive (`docs/CLI.md` §10): a fresh pin has nothing to update,
+        // and the key is omitted entirely rather than emitted `null` — an
+        // envelope produced before M7 Step 2 is indistinguishable from one
+        // where `updated` was simply never applicable.
+        assert!(
+            json.as_object().unwrap().get("updated").is_none(),
+            "updated: None must be omitted, not null: {json}"
+        );
+
+        let moved = TrustAddData {
+            peer: peer.clone(),
+            created: false,
+            updated: Some(true),
+        };
+        assert_eq!(serde_json::to_value(&moved).unwrap()["updated"], true);
 
         let list = TrustListData { peers: vec![peer] };
         assert_eq!(

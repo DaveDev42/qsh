@@ -415,8 +415,15 @@ Some of these are MVP scope decisions, some are unfinished work.
   enforcement (`[serve].max_sessions` and a per-principal session cap);
   the ACL engine itself never will.
 - `qsh trust remove` only affects future handshakes. A peer you removed
-  keeps whatever sessions and access it already holds until its connection
-  drops and it has to handshake again.
+  keeps the connection's entire negotiated authority — not just the
+  sessions it already had open, but the ability to open brand-new ones,
+  including new sessions, tunnels, and forwards within the ACL scope
+  loaded when `qsh serve` started — until that connection drops and it
+  has to handshake again. This applies to an already-running `qsh serve`
+  with no restart: the host re-reads `trust.toml` on every handshake, so
+  the very next connection attempt from the removed peer is rejected
+  immediately (`docs/CLI.md` §6.11). Force-closing a peer's
+  already-established connection on removal is P1.
 - `exec.run` output is capped at 64 MiB. The whole of stdout plus stderr
   comes back in one envelope, and anything beyond the cap is
   `RESOURCE_EXHAUSTED`. Streaming output is a session feature: use

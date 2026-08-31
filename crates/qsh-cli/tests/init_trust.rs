@@ -157,7 +157,31 @@ fn trust_add_list_remove_are_idempotent() {
             .ends_with('Z')
     );
 
+    // Same name, same fingerprint, same address: a pure no-op (`data.updated:
+    // false`) — this is what this test's name promises. A *different*
+    // address on an otherwise-identical re-add is a deliberate exception to
+    // that idempotency (M7 Step 2 decision B, `docs/CLI.md` §6.11's
+    // address-refresh path) and has its own coverage below and in
+    // `trust_lifecycle_live.rs`/`fixtures.rs`.
     let (code, again) = sandbox.json(&[
+        "trust",
+        "add",
+        "peer-a",
+        "--address",
+        "127.0.0.1:4433",
+        "--fingerprint",
+        FINGERPRINT,
+        "--json",
+    ]);
+    assert_eq!(code, 0);
+    assert_eq!(again["data"]["created"], false);
+    assert_eq!(again["data"]["updated"], false);
+    assert_eq!(again["data"]["peer"]["address"], "127.0.0.1:4433");
+
+    // The address-refresh exception itself: same name, same fingerprint, a
+    // *different* address updates the pin in place instead of staying a
+    // no-op.
+    let (code, rebound) = sandbox.json(&[
         "trust",
         "add",
         "peer-a",
@@ -168,8 +192,9 @@ fn trust_add_list_remove_are_idempotent() {
         "--json",
     ]);
     assert_eq!(code, 0);
-    assert_eq!(again["data"]["created"], false);
-    assert_eq!(again["data"]["peer"]["address"], "127.0.0.1:4433");
+    assert_eq!(rebound["data"]["created"], false);
+    assert_eq!(rebound["data"]["updated"], true);
+    assert_eq!(rebound["data"]["peer"]["address"], "127.0.0.1:9999");
 
     let (code, listed) = sandbox.json(&["trust", "list", "--json"]);
     assert_eq!(code, 0);

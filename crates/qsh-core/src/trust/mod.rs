@@ -68,12 +68,20 @@ impl TrustStore {
     /// Load `path`. A missing file is an empty store (not an error); a
     /// malformed one is `CONFIG_ERROR` — QSH never guesses at trust.
     pub fn load(path: &Path) -> Result<Self, OpError> {
-        let text = match std::fs::read_to_string(path) {
-            Ok(text) => text,
-            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Self::default()),
-            Err(err) => return Err(config_io_error(path, "read", &err)),
-        };
-        let file: TrustFile = toml::from_str(&text).map_err(|err| {
+        match read_raw(path)? {
+            Some(text) => Self::parse(path, &text),
+            None => Ok(Self::default()),
+        }
+    }
+
+    /// Parse `text` (already-read bytes at `path`, used only for error
+    /// messages). Split out of [`TrustStore::load`] so
+    /// [`SharedTrustStore::refresh`] can reuse it without re-reading a file
+    /// it already has in hand — the content it just read *is* the
+    /// invalidation check (`PLAN.md` M7 Step 2 P2-2), so by the time this
+    /// runs the bytes are already sitting in memory.
+    fn parse(path: &Path, text: &str) -> Result<Self, OpError> {
+        let file: TrustFile = toml::from_str(text).map_err(|err| {
             OpError::new(
                 ErrorCode::ConfigError,
                 format!("invalid trust store {}: {err}", path.display()),
@@ -127,32 +135,64 @@ impl TrustStore {
         self.find(name).filter(|p| !p.address.is_empty())
     }
 
-    /// Pin `name`, idempotently.
+    /// Pin `name`, idempotently — with one deliberate exception (`PLAN.md`
+    /// M7 Step 2 decision B): re-adding an already-pinned name under the
+    /// *same* fingerprint but a *different* `address` overwrites the
+    /// stored address in place (the M6 mobility campaign's backlog item —
+    /// a host that changed its reachable address had no way to update a
+    /// client's pin short of `remove` + `add`).
     ///
-    /// Returns `(peer, created)`. If `name` is already pinned the existing
-    /// entry is returned **unchanged** with `created == false` — even when
-    /// the supplied fingerprint differs. Re-pinning is a deliberate
-    /// operator action (remove, then add), never a side effect of a repeated
-    /// `trust add` (`docs/CLI.md` §6.11).
+    /// Returns `(peer, created, updated)`:
+    /// - **New name:** `created = true`, `updated = false`, `peer` is the
+    ///   freshly written pin.
+    /// - **Existing name, same fingerprint, address unchanged (or none
+    ///   given):** a pure no-op — `created = false`, `updated = false`,
+    ///   `peer` is the existing entry, untouched.
+    /// - **Existing name, same fingerprint, a different address given:**
+    ///   the stored address is overwritten in place — `created = false`,
+    ///   `updated = true`, `peer` is the entry with its new address.
+    ///   `added_at` is left as it was (it records when the *identity* was
+    ///   first pinned, not when the address last changed).
+    /// - **Existing name, a *different* fingerprint:** nothing changes at
+    ///   all — `created = false`, `updated = false`, `peer` is the existing
+    ///   entry, untouched. Re-binding an identity is a deliberate operator
+    ///   action (remove, then add), never a side effect of a repeated
+    ///   `trust add` (`docs/CLI.md` §6.11).
     pub fn add_peer(
         &mut self,
         name: impl Into<String>,
         address: Option<String>,
         fingerprint: Fingerprint,
         now: String,
-    ) -> (TrustPeer, bool) {
+    ) -> (TrustPeer, bool, bool) {
         let name = name.into();
+        let fingerprint = fingerprint.to_string();
         if let Some(existing) = self.find(&name) {
-            return (existing.clone(), false);
+            if existing.fingerprint != fingerprint {
+                return (existing.clone(), false, false);
+            }
+            let Some(new_address) = address else {
+                return (existing.clone(), false, false);
+            };
+            if existing.address == new_address {
+                return (existing.clone(), false, false);
+            }
+            let index = self
+                .peers
+                .iter()
+                .position(|p| p.name == name)
+                .expect("just found by find()");
+            self.peers[index].address = new_address;
+            return (self.peers[index].clone(), false, true);
         }
         let peer = TrustPeer {
             name,
-            fingerprint: fingerprint.to_string(),
+            fingerprint,
             address: address.unwrap_or_default(),
             added_at: now,
         };
         self.peers.push(peer.clone());
-        (peer, true)
+        (peer, true, false)
     }
 
     /// Remove the pin named `name`. `false` if there was none (idempotent).
@@ -196,6 +236,18 @@ impl TrustStore {
 /// The cached, parsed view [`SharedTrustStore`] serves to the verifier.
 #[derive(Debug)]
 struct Cached {
+    /// The exact on-disk text this snapshot was parsed from (`None` for a
+    /// missing file). This — not `mtime` — is the final arbiter of whether
+    /// [`SharedTrustStore::refresh`] reloads: it is compared byte-for-byte
+    /// on *every* refresh call. A filesystem with 1-2s mtime resolution
+    /// (HFS+, exFAT/FAT, some SMB/NFS mounts) can otherwise leave a
+    /// same-tick content change invisible to an mtime-only check
+    /// (`PLAN.md` M7 Step 2 P2-2) — `trust.toml` is small enough that
+    /// reading it in full on every handshake costs nothing next to the TLS
+    /// handshake that triggers it.
+    raw: Option<String>,
+    /// Last observed mtime. No longer gates a reload (`raw` does); kept
+    /// only as non-load-bearing metadata.
     mtime: Option<SystemTime>,
     store: TrustStore,
     pins: Vec<(Fingerprint, Principal)>,
@@ -203,11 +255,12 @@ struct Cached {
 }
 
 impl Cached {
-    fn new(mtime: Option<SystemTime>, store: TrustStore) -> Self {
+    fn new(raw: Option<String>, mtime: Option<SystemTime>, store: TrustStore) -> Self {
         Self {
             pins: store.parsed_pins(),
             cas: store.parsed_cas(),
             store,
+            raw,
             mtime,
         }
     }
@@ -216,9 +269,15 @@ impl Cached {
 /// A process-wide, reload-on-change view of `trust.toml` that satisfies
 /// [`TrustEvaluator`].
 ///
-/// The file's mtime is checked on every lookup and the store is re-read when
-/// it moves, so `qsh trust add` on a *running* `qsh serve` takes effect
-/// without a restart. A failed reload keeps the last good snapshot (a
+/// The file's full content is read and compared on every lookup, and the
+/// store is re-parsed whenever that content differs from the cached
+/// snapshot — not merely when `mtime` moves (`PLAN.md` M7 Step 2 P2-2: an
+/// mtime-only check is fail-open on a 1-2s-resolution filesystem, where two
+/// edits inside the same tick share an mtime). `trust.toml` is small, so
+/// this costs nothing next to the TLS handshake that triggers it. `qsh
+/// trust add`/`remove` on a *running* `qsh serve` therefore takes effect
+/// without a restart, deterministically, regardless of filesystem mtime
+/// resolution. A failed reload keeps the last good snapshot (a
 /// half-written file must not silently un-trust every peer); it never
 /// *widens* trust, because widening requires a successful parse.
 pub struct SharedTrustStore {
@@ -238,9 +297,13 @@ impl SharedTrustStore {
     /// Open (and eagerly load) the trust store at `path`.
     pub fn open(path: impl Into<PathBuf>) -> Result<Arc<Self>, OpError> {
         let path = path.into();
-        let store = TrustStore::load(&path)?;
+        let raw = read_raw(&path)?;
+        let store = match &raw {
+            Some(text) => TrustStore::parse(&path, text)?,
+            None => TrustStore::default(),
+        };
         Ok(Arc::new(Self {
-            cache: RwLock::new(Cached::new(mtime_of(&path), store)),
+            cache: RwLock::new(Cached::new(raw, mtime_of(&path), store)),
             path,
         }))
     }
@@ -260,18 +323,58 @@ impl SharedTrustStore {
         self.cache.read().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Re-read `trust.toml` if its mtime moved since the cached snapshot.
+    /// Re-read `trust.toml` if its on-disk *content* differs from the
+    /// cached snapshot. Compared in full on every call — not gated on
+    /// `mtime` — because `lookup_pin`/`ca_roots` call this on every TLS
+    /// handshake and a coarse-granularity filesystem's mtime can miss a
+    /// same-tick edit (`PLAN.md` M7 Step 2 P2-2). A read failure other
+    /// than "file does not exist" (e.g. a permissions change) keeps the
+    /// last good snapshot rather than un-trusting everyone; a missing file
+    /// reloads as an empty store — fail-closed, mirroring
+    /// [`TrustStore::load`]'s own contract.
     fn refresh(&self) {
-        let current = mtime_of(&self.path);
-        if self.read().mtime == current {
+        let raw = match read_raw(&self.path) {
+            Ok(raw) => raw,
+            Err(err) => {
+                tracing::warn!(
+                    path = %self.path.display(),
+                    %err,
+                    "failed to read the trust store for a refresh; keeping the last good snapshot"
+                );
+                return;
+            }
+        };
+        // Double-checked: a cheap read-lock check first (the common case,
+        // where nothing changed), then re-check under the write lock in
+        // case another thread already applied the same reload.
+        if self.read().raw == raw {
             return;
         }
         let mut cache = self.cache.write().unwrap_or_else(|e| e.into_inner());
-        if cache.mtime == current {
+        if cache.raw == raw {
             return;
         }
-        match TrustStore::load(&self.path) {
-            Ok(store) => *cache = Cached::new(current, store),
+        let parsed = match &raw {
+            Some(text) => TrustStore::parse(&self.path, text),
+            None => Ok(TrustStore::default()),
+        };
+        match parsed {
+            Ok(store) => {
+                // Content changed (we would not be here otherwise) but the
+                // mtime did not move: the coarse-granularity-filesystem
+                // scenario P2-2 identified. Not actionable — the content
+                // check already caught it — but worth a trace for whoever
+                // is debugging a filesystem that behaves this way.
+                let new_mtime = mtime_of(&self.path);
+                if new_mtime.is_some() && new_mtime == cache.mtime {
+                    tracing::debug!(
+                        path = %self.path.display(),
+                        "trust store content changed with no mtime movement \
+                         (coarse filesystem mtime resolution?); reloaded anyway"
+                    );
+                }
+                *cache = Cached::new(raw, new_mtime, store);
+            }
             Err(err) => {
                 tracing::warn!(
                     path = %self.path.display(),
@@ -285,6 +388,17 @@ impl SharedTrustStore {
 
 fn mtime_of(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).ok().and_then(|m| m.modified().ok())
+}
+
+/// Read `path` in full. A missing file is `Ok(None)` (an empty store, not
+/// an error, mirroring [`TrustStore::load`]'s contract); any other read
+/// failure is `Err`.
+fn read_raw(path: &Path) -> Result<Option<String>, OpError> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(config_io_error(path, "read", &err)),
+    }
 }
 
 impl TrustEvaluator for SharedTrustStore {
@@ -316,13 +430,14 @@ mod tests {
         let mut store = TrustStore::default();
         assert!(store.peers().is_empty());
 
-        let (peer, created) = store.add_peer(
+        let (peer, created, updated) = store.add_peer(
             "mac",
             Some("mac.example:4433".into()),
             fp(b"one"),
             "2026-08-17T00:00:00Z".into(),
         );
         assert!(created);
+        assert!(!updated);
         assert_eq!(peer.name, "mac");
         assert_eq!(peer.fingerprint, fp(b"one").to_string());
         assert_eq!(peer.address, "mac.example:4433");
@@ -336,46 +451,108 @@ mod tests {
     }
 
     #[test]
-    fn re_adding_is_idempotent_and_never_overwrites() {
+    fn re_adding_with_the_same_address_is_a_pure_no_op() {
         let mut store = TrustStore::default();
-        let (first, created) = store.add_peer(
+        let (first, created, updated) = store.add_peer(
             "mac",
             Some("a:1".into()),
             fp(b"one"),
             "2026-08-17T00:00:00Z".into(),
         );
         assert!(created);
+        assert!(!updated);
 
-        // Same fingerprint again.
-        let (again, created) = store.add_peer(
+        // Same fingerprint, same address again.
+        let (again, created, updated) = store.add_peer(
             "mac",
             Some("a:1".into()),
             fp(b"one"),
             "2026-08-18T00:00:00Z".into(),
         );
         assert!(!created);
+        assert!(!updated);
         assert_eq!(again, first);
+    }
 
-        // A *different* fingerprint must not silently re-pin.
-        let (conflicting, created) = store.add_peer(
+    /// A *different* fingerprint must not silently re-pin, and must not
+    /// touch the stored address either — a fingerprint mismatch is a hard
+    /// no-op on the whole entry (`PLAN.md` M7 Step 2 decision B: identity
+    /// rebind is a deliberate `remove` + `add`, never a side effect).
+    #[test]
+    fn re_adding_with_a_different_fingerprint_never_overwrites() {
+        let mut store = TrustStore::default();
+        let (first, ..) = store.add_peer(
+            "mac",
+            Some("a:1".into()),
+            fp(b"one"),
+            "2026-08-17T00:00:00Z".into(),
+        );
+
+        let (conflicting, created, updated) = store.add_peer(
             "mac",
             Some("b:2".into()),
             fp(b"two"),
             "2026-08-19T00:00:00Z".into(),
         );
         assert!(!created);
+        assert!(!updated);
         assert_eq!(conflicting, first);
         assert_eq!(store.peers().len(), 1);
         assert_eq!(
             store.find("mac").unwrap().fingerprint,
             fp(b"one").to_string()
         );
+        assert_eq!(store.find("mac").unwrap().address, "a:1");
+    }
+
+    /// M7 Step 2 decision B, the address-refresh path itself: same name,
+    /// same fingerprint, a *different* address overwrites the stored
+    /// address in place — the M6 mobility campaign backlog item (host
+    /// address changed; a client re-runs `trust add` with the same
+    /// identity to follow it) reproduced at the `TrustStore` level.
+    #[test]
+    fn re_adding_with_the_same_fingerprint_and_a_new_address_updates_in_place() {
+        let mut store = TrustStore::default();
+        let (first, created, updated) = store.add_peer(
+            "mac",
+            Some("old.example:4433".into()),
+            fp(b"one"),
+            "2026-08-17T00:00:00Z".into(),
+        );
+        assert!(created);
+        assert!(!updated);
+
+        let (moved, created, updated) = store.add_peer(
+            "mac",
+            Some("new.example:5555".into()),
+            fp(b"one"),
+            "2026-08-19T00:00:00Z".into(),
+        );
+        assert!(!created, "identity already pinned — never re-created");
+        assert!(updated, "address must be reported as updated");
+        assert_eq!(moved.address, "new.example:5555");
+        assert_eq!(moved.name, first.name);
+        assert_eq!(moved.fingerprint, first.fingerprint);
+        // `added_at` records when the *identity* was first pinned, not
+        // when the address last moved — untouched by the update.
+        assert_eq!(moved.added_at, first.added_at);
+        assert_eq!(store.peers().len(), 1, "still one entry, not a duplicate");
+        assert_eq!(store.find("mac"), Some(&moved));
+
+        // Omitting `--address` entirely on a further re-add must not clear
+        // the address back out — only an explicit *different* address
+        // triggers the update path.
+        let (unchanged, created, updated) =
+            store.add_peer("mac", None, fp(b"one"), "2026-08-20T00:00:00Z".into());
+        assert!(!created);
+        assert!(!updated);
+        assert_eq!(unchanged.address, "new.example:5555");
     }
 
     #[test]
     fn address_is_empty_when_absent_and_does_not_resolve_as_a_host() {
         let mut store = TrustStore::default();
-        let (peer, _) = store.add_peer("client-only", None, fp(b"c"), "t".into());
+        let (peer, ..) = store.add_peer("client-only", None, fp(b"c"), "t".into());
         assert_eq!(peer.address, "");
         assert!(store.find("client-only").is_some());
         assert!(store.resolve_host("client-only").is_none());
@@ -472,6 +649,66 @@ mod tests {
             "a changed trust.toml must be picked up without a restart"
         );
         assert_eq!(shared.snapshot().peers().len(), 2);
+    }
+
+    /// **`PLAN.md` M7 Step 2 P2-2, regression.** An mtime-only invalidator
+    /// is fail-open on a coarse-granularity filesystem (HFS+, exFAT/FAT,
+    /// some SMB/NFS mounts, 1-2s resolution): two edits landing in the same
+    /// tick share an mtime, so a check gated on `mtime != cached_mtime`
+    /// alone would never notice the second edit. This pins the file's mtime
+    /// back to its pre-edit value with [`std::fs::FileTimes`] — simulating
+    /// exactly that collision deterministically, no timing dependency — and
+    /// asserts the reload happens anyway, because `refresh` now compares
+    /// full file *content* on every call, never gated on `mtime`.
+    #[test]
+    fn refresh_reloads_on_a_content_change_even_when_the_mtime_does_not_move() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("trust.toml");
+
+        let mut store = TrustStore::default();
+        store.add_peer("first", None, fp(b"one"), "t".into());
+        store.save(&path).unwrap();
+
+        let shared = SharedTrustStore::open(&path).unwrap();
+        assert_eq!(
+            shared.lookup_pin(&fp(b"one")),
+            Some(Principal::Device("first".into()))
+        );
+
+        // The mtime the store was opened with — the value a same-tick edit
+        // on a coarse filesystem would collide on.
+        let pinned_mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+
+        // Different content (peer "second" instead of "first"), written
+        // normally (so its natural mtime is "now", not `pinned_mtime`)...
+        let mut store2 = TrustStore::default();
+        store2.add_peer("second", None, fp(b"two"), "t".into());
+        store2.save(&path).unwrap();
+
+        // ...then pinned back to the exact mtime the cache already has,
+        // reproducing the same-tick collision without depending on the
+        // filesystem's actual timestamp resolution or any sleep.
+        let file = std::fs::File::options().write(true).open(&path).unwrap();
+        file.set_times(std::fs::FileTimes::new().set_modified(pinned_mtime))
+            .unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            pinned_mtime,
+            "test setup: the mtime must be pinned back to the cached value"
+        );
+
+        // mtime is unchanged from the cached snapshot; content is not. The
+        // reload must still happen — content is the final arbiter.
+        assert_eq!(
+            shared.lookup_pin(&fp(b"one")),
+            None,
+            "a same-mtime content change must drop the old pin"
+        );
+        assert_eq!(
+            shared.lookup_pin(&fp(b"two")),
+            Some(Principal::Device("second".into())),
+            "a same-mtime content change must pick up the new pin"
+        );
     }
 
     #[test]

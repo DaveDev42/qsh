@@ -367,6 +367,15 @@ impl Ops {
     /// `details.address`: the caller (human prompt or automation) verifies
     /// that value out of band and re-calls with `--fingerprint`. Nothing is
     /// ever pinned on the strength of what the network said.
+    ///
+    /// Re-adding an already-pinned name is idempotent, with one deliberate
+    /// exception (`PLAN.md` M7 Step 2 decision B, `TrustStore::add_peer`'s
+    /// own doc): the *same* fingerprint with a *different* `--address`
+    /// overwrites the stored address in place (`data.updated: true`,
+    /// `data.created` stays `false`) instead of being a no-op — the M6
+    /// mobility campaign's backlog item. A *different* fingerprint is still
+    /// a hard no-op on the whole entry; re-binding an identity is `trust
+    /// remove` then `trust add`, never a side effect of a repeated call.
     pub fn trust_add(&self, req: TrustAddReq) -> Result<TrustAddData, OpError> {
         let name = req.name.trim().to_string();
         if name.is_empty() {
@@ -405,11 +414,16 @@ impl Ops {
 
         let path = self.paths.trust_file();
         let mut store = TrustStore::load(&path)?;
-        let (peer, created) = store.add_peer(name, req.address, fingerprint, now_rfc3339());
-        if created {
+        let (peer, created, updated) =
+            store.add_peer(name, req.address, fingerprint, now_rfc3339());
+        if created || updated {
             store.save(&path)?;
         }
-        Ok(TrustAddData { peer, created })
+        Ok(TrustAddData {
+            peer,
+            created,
+            updated: (!created).then_some(updated),
+        })
     }
 
     /// `trust.list` — every pinned peer, in store order.
@@ -747,16 +761,19 @@ mod tests {
             })
             .unwrap();
         assert!(added.created);
+        assert_eq!(added.updated, None, "nothing to update on a fresh pin");
         assert_eq!(added.peer.fingerprint, fingerprint);
 
+        // Same fingerprint, same address: a pure no-op.
         let again = ops
             .trust_add(TrustAddReq {
                 name: "mac".into(),
-                address: Some("other:1".into()),
+                address: Some("mac.example:4433".into()),
                 fingerprint: Some(fingerprint.clone()),
             })
             .unwrap();
         assert!(!again.created);
+        assert_eq!(again.updated, Some(false));
         assert_eq!(again.peer, added.peer);
 
         let listed = ops.trust_list().unwrap();
@@ -768,6 +785,81 @@ mod tests {
         let removed_again = ops.trust_remove("mac").unwrap();
         assert!(!removed_again.removed);
         assert!(ops.trust_list().unwrap().peers.is_empty());
+    }
+
+    /// M7 Step 2 decision B: the same identity re-pinned at a new address
+    /// updates the stored address in place instead of being a silent
+    /// no-op (`docs/CLI.md` §6.11) — the M6 mobility campaign backlog item.
+    #[test]
+    fn trust_add_updates_the_address_of_an_identity_it_already_knows() {
+        let (_guard, ops) = temp_ops();
+        let fingerprint = qsh_transport::Fingerprint::of_spki_der(b"peer").to_string();
+
+        let added = ops
+            .trust_add(TrustAddReq {
+                name: "mac".into(),
+                address: Some("old.example:4433".into()),
+                fingerprint: Some(fingerprint.clone()),
+            })
+            .unwrap();
+        assert!(added.created);
+
+        let moved = ops
+            .trust_add(TrustAddReq {
+                name: "mac".into(),
+                address: Some("new.example:5555".into()),
+                fingerprint: Some(fingerprint.clone()),
+            })
+            .unwrap();
+        assert!(!moved.created, "identity already pinned — never re-created");
+        assert_eq!(moved.updated, Some(true));
+        assert_eq!(moved.peer.address, "new.example:5555");
+        assert_eq!(moved.peer.fingerprint, fingerprint);
+        assert_eq!(
+            moved.peer.added_at, added.peer.added_at,
+            "added_at tracks the identity's first pin, not the address move"
+        );
+
+        let listed = ops.trust_list().unwrap();
+        assert_eq!(listed.peers, vec![moved.peer], "no duplicate entry");
+    }
+
+    /// M7 Step 2 decision B, the guardrail half: a *different* fingerprint
+    /// under an already-pinned name changes nothing at all — identity
+    /// rebind stays a deliberate `trust remove` + `trust add`, never a
+    /// side effect of a repeated call (`docs/CLI.md` §6.11's existing
+    /// idempotence contract, preserved).
+    #[test]
+    fn trust_add_rejects_a_different_fingerprint_for_an_already_pinned_name() {
+        let (_guard, ops) = temp_ops();
+        let first_fp = qsh_transport::Fingerprint::of_spki_der(b"first").to_string();
+        let second_fp = qsh_transport::Fingerprint::of_spki_der(b"second").to_string();
+
+        let added = ops
+            .trust_add(TrustAddReq {
+                name: "mac".into(),
+                address: Some("mac.example:4433".into()),
+                fingerprint: Some(first_fp.clone()),
+            })
+            .unwrap();
+        assert!(added.created);
+
+        let rejected = ops
+            .trust_add(TrustAddReq {
+                name: "mac".into(),
+                address: Some("attacker.example:1".into()),
+                fingerprint: Some(second_fp),
+            })
+            .unwrap();
+        assert!(!rejected.created);
+        assert_eq!(rejected.updated, Some(false));
+        assert_eq!(
+            rejected.peer, added.peer,
+            "a fingerprint mismatch must not touch the existing pin at all"
+        );
+
+        let listed = ops.trust_list().unwrap();
+        assert_eq!(listed.peers, vec![added.peer]);
     }
 
     #[test]

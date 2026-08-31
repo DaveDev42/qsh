@@ -122,6 +122,7 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "identity.init.created.json",
     "identity.init.existing.json",
     "trust.add.json",
+    "trust.add.updated.json",
     "trust.list.json",
     "trust.remove.json",
     "trust.remove.absent.json",
@@ -369,6 +370,46 @@ fn golden_local_fixtures() {
     assert_eq!(code, 0, "{deny}");
     assert_eq!(deny["data"]["decision"], "deny", "{deny}");
     check("acl.check.deny.json", deny);
+}
+
+/// `trust add` re-run for a name already pinned under the *same*
+/// fingerprint, but with a *new* `--address` (decision B, `PLAN.md` M7 Step
+/// 2, `docs/CLI.md` §6.11's address-refresh path): `data.created` stays
+/// `false`, and the new additive `data.updated` field is `true`. Its own
+/// sandbox — `golden_local_fixtures` reuses `personal-mac` at a fixed
+/// address for `trust.list.json`/`host.get.json`, and this scenario would
+/// perturb both if it shared that sandbox.
+#[test]
+fn golden_trust_add_update_fixture() {
+    let sandbox = Sandbox::new();
+
+    let (code, added) = sandbox.json(&[
+        "trust",
+        "add",
+        "personal-mac",
+        "--address",
+        "personal-mac.example.com:4433",
+        "--fingerprint",
+        SAMPLE_FINGERPRINT,
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{added}");
+    assert_eq!(added["data"]["created"], true, "{added}");
+
+    let (code, updated) = sandbox.json(&[
+        "trust",
+        "add",
+        "personal-mac",
+        "--address",
+        "personal-mac.example.com:5544",
+        "--fingerprint",
+        SAMPLE_FINGERPRINT,
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{updated}");
+    assert_eq!(updated["data"]["created"], false, "{updated}");
+    assert_eq!(updated["data"]["updated"], true, "{updated}");
+    check("trust.add.updated.json", updated);
 }
 
 /// The dial-timeout path. Split out because it is the one scenario that

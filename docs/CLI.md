@@ -597,7 +597,33 @@ qsh trust remove <name> --json
 }
 ```
 
-이미 같은 이름으로 pin된 경우도 오류가 아니라 멱등이다 — 기존 항목은 그대로 유지되고 `data.created`가 `false`로 돌아온다.
+이미 같은 이름으로 pin된 경우도 오류가 아니라 멱등이다 — `data.created`가 `false`로 돌아온다. 이때 갈리는 경우가 둘 있다(M7 Step 2 결정 B):
+
+- **같은 fingerprint, 다른 `--address`:** 저장된 address를 그 자리에서 갱신한다 — host의 실제 주소가 바뀌었을 때(예: 재기동으로 바인딩 포트가 달라짐, 모바일 캠페인처럼 IP 자체가 바뀜) `trust remove` 없이 같은 identity로 `trust add`를 다시 실행하면 pin이 새 주소를 따라간다. 결과는 `data.updated: true`이고 `data.peer.address`가 새 값이다. `added_at`은 identity가 처음 pin된 시각을 그대로 유지한다(주소가 바뀐 시각이 아니다). `--address`를 아예 생략하면(기존 값을 건드릴 뜻이 없다는 뜻이므로) 아무것도 바뀌지 않는다.
+- **다른 fingerprint:** identity 자체를 바꿔치기하는 것이므로 아무것도 바뀌지 않는다 — address도, fingerprint도 기존 값 그대로다. identity를 다시 묶으려면 `trust remove` 후 `trust add`를 명시적으로 실행해야 한다(반복 호출의 부작용으로는 일어나지 않는다).
+
+두 경우 모두, 그리고 완전한 no-op(같은 fingerprint·같은 address) 재호출도 `data.updated`가 나온다 — 값은 실제로 address가 바뀌었을 때만 `true`, 그 외에는 `false`다. 새 pin(`data.created: true`)에는 `updated` 자체가 없다(적용 대상이 없으므로 키가 생략된다 — additive: M7 Step 2 이전 envelope에는 없던 필드다).
+
+`trust.add` 결과 (같은 identity, 주소만 갱신):
+
+```json
+{
+  "schema": "qsh.cli/v1",
+  "request_id": "01K0EXAMPLE",
+  "command": "trust.add",
+  "ok": true,
+  "data": {
+    "peer": {
+      "name": "personal-mac",
+      "fingerprint": "sha256:BASE64FINGERPRINT",
+      "address": "personal-mac.example.com:5555",
+      "added_at": "2026-08-17T00:00:00Z"
+    },
+    "created": false,
+    "updated": true
+  }
+}
+```
 
 `trust.list` 결과:
 
@@ -636,6 +662,8 @@ qsh trust remove <name> --json
 ```
 
 존재하지 않는 이름을 제거하는 것도 오류가 아니라 멱등이다 — `ok: true`에 `data.removed: false`를 반환한다.
+
+**`trust.remove`의 유효 범위(M7 Step 2, 감사 ①, DoD 4):** 제거는 즉시 적용되지만, 무엇에 즉시 적용되는지가 핵심이다. 러닝 중인 `qsh serve`를 **재시작할 필요 없이** 그 다음 handshake부터 거부가 적용된다 — host는 `trust.toml`을 매 handshake마다 다시 읽어 내용을 대조하므로(파일 바이트 비교가 유일한 판정자다 — `mtime`은 판정에 쓰이지 않고 진단 기록으로만 남으므로, 1–2초 해상도의 파일시스템이라도 내용이 다르면 재로드가 일어난다; 프로세스 시작 시 1회만 읽는 `acl.toml`과는 다르다) `trust remove` 직후의 새 연결 시도는 즉시 `AUTH_FAILED`로 거부된다. 반대로 **이미 확립된 연결**은 이 제거의 영향을 받지 않는다 — 그 peer는 연결의 협상된 권한 전체를 유지한다: 이미 열어 둔 세션뿐 아니라, `qsh serve` 시작 시 로드된 ACL 허용 범위 안에서 새 세션·터널·forward를 여는 능력까지, 연결이 끊기고 다시 handshake해야 하는 시점까지 그대로 유지된다(README "Known limitations" 동일 문면). 살아 있는 연결의 즉시 강제 종료는 P1이다(`docs/ROADMAP.md` §3).
 
 일회용 invite code pairing(`qsh trust invite` 계열, ADR-0002)의 CLI 계약은 M7에서 확정한다. `doctor.run`은 operation 이름만 예약되어 있으며 계약은 M7에서 확정한다. M3가 만드는 진단 항목 상수(`qsh::reverse`의 `event` 값 어휘, `registration_wait_ms` 등)는 M7의 `doctor.run`이 그대로 소비한다 — 계약 확정을 앞당기지 않는다.
 
