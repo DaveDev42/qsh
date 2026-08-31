@@ -205,13 +205,19 @@ Output mode에 따라 exit code 의미가 달라져서는 안 된다. 대화형 
   "address": "personal-mac.example.com:4433",
   "connection_mode": "forward",
   "state": "unknown",
-  "device_id": "sha256:BASE64FINGERPRINT"
+  "device_id": "sha256:BASE64FINGERPRINT",
+  "source": "both",
+  "user": "dave"
 }
 ```
 
 `connection_mode ∈ {"forward", "reverse"}`. `state`는 열린 문자열(§10)이며 `∈ {"reachable", "stale", "unknown"}`: forward host는 도달성을 probe하지 않으므로 항상 `"unknown"`이다 — 확인하지 않은 것을 `"reachable"`로 보고하지 않는다. live 역방향 등록은 `"reachable"`(인증된 연결을 실제로 쥐고 있다), 죽은 등록은 보존 창 동안 `"stale"`이다(§6.13).
 
-`device_id`는 **peer의 SPKI SHA-256 fingerprint 문자열**(`sha256:BASE64`, architecture.md §5의 표기)이다 — forward host는 trust store에 **핀된** fingerprint, reverse host는 상주 데몬이 **TLS로 검증한** peer fingerprint다. `Hello.device_name` 같은 wire 표시 이름은 어떤 경우에도 identity로 쓰지 않는다(protocol.md §3). `Host`는 이전까지 어떤 op도 emit한 적 없는 placeholder였고 fixture도 없었으므로, 위 값 어휘는 field의 **정의**이지 §10이 금지하는 기존 의미의 변경이 아니다.
+`device_id`는 **peer의 SPKI SHA-256 fingerprint 문자열**(`sha256:BASE64`, architecture.md §5의 표기)이다 — forward host는 trust store에 **핀된** fingerprint, reverse host는 상주 데몬이 **TLS로 검증한** peer fingerprint다. `Hello.device_name` 같은 wire 표시 이름은 어떤 경우에도 identity로 쓰지 않는다(protocol.md §3). `Host`는 이전까지 어떤 op도 emit한 적 없는 placeholder였고 fixture도 없었으므로, 위 값 어휘는 field의 **정의**이지 §10이 금지하는 기존 의미의 변경이 아니다. `device_id`는 **이 이름에 핀된 신원**이지 — `address`에 지금 실제로 누가 응답하고 있는지에 대한 관측이 아니다: forward host의 `address`는 `hosts.toml`에서 올 수 있지만 `hosts.toml`은 신원을 전혀 공급하지 않으므로, `address`가 어느 디렉터리에서 왔든 `device_id`는 항상 trust.toml이 그 이름에 핀한 peer를 가리킨다(아래 `source` 문단).
+
+`source`/`user`는 M7 Step 3에서 추가된 **additive-optional** field다(§10) — `hosts.toml` 디렉터리가 전혀 없거나 항목이 하나도 없으면 두 field 모두 생략된다(키 자체가 나타나지 않는다, `null`이 아니라). `hosts.toml`에 항목이 하나라도 있으면 forward host마다 `source ∈ {"hosts", "trust", "both"}`를 보고한다 — 다만 이는 어느 디렉터리가 이 이름을 *아는지*가 아니라 **어느 디렉터리의 `address`가 실제로 이겼는지**를 가리킨다(§6.1 우선순위 참고): `hosts.toml`이 이 이름에 비어 있지 않은 주소를 설정했고 그 값이 `trust.toml`의 pin과 다르거나 `trust.toml`에 아예 pin이 없으면 `"hosts"`, `hosts.toml`에 항목이 없거나 그 주소가 빈 문자열이라 `trust.toml`의 pin된 주소가 그대로 쓰이면 `"trust"`, 양쪽 주소가 **일치할 때만** `"both"`다. reverse host는 항상 `source`가 생략된다 — 역방향 등록은 `hosts.toml`에서 오지 않는다. `user`는 `hosts.toml`이 그 이름에 설정한 hint가 있을 때만 나타나며 §7의 assertion hint와 동일한 의미다(계정 선택이 아니다).
+
+**threat 참고.** `hosts.toml`에 쓰기 권한이 있다는 것은 어떤 이름을 이미 핀된 다른 peer로 돌릴 수 있는 권한이다(mTLS는 여전히 핀되지 않은 주소를 막는다) — 이런 redirect는 `source: "hosts"`로 드러난다(주소가 trust.toml의 pin과 다르거나, trust.toml에 pin이 아예 없는 경우).
 
 ### Session
 
@@ -244,7 +250,22 @@ qsh host get personal-mac --json
 
 `host.list`의 `data`는 `{"hosts": [Host, …]}`(§5 Host 배열)이고 `host.get`의 `data`는 Host 객체 하나다.
 
-`hosts`는 두 데이터 소스를 합쳐 반환한다: 로컬 trust store(`trust.toml`)에 pin된 forward host 전부와, 상주 `qsh listen` 데몬이 현재 쥐고 있는 live 역방향 등록(§6.13). **`host.list`는 dial하지 않는다** — forward host의 도달성은 확인하지 않으므로(§5, `state`는 항상 `"unknown"`) 이 목록은 순수 로컬 조회다. 같은 이름이 forward pin과 reverse 등록 양쪽에 존재하면 `hosts` 배열에 `connection_mode`로 구분되는 **두 항목**으로 나타난다 — 목록에서는 병합하지 않는다. 다만 그 이름으로 실제 연결을 맺을 때(attach, `qsh <name>`)의 **라우팅 우선순위는 live reverse 등록이 우선**이다 — 증명된 도달 가능 경로를 trust store의 추정 주소보다 앞세운다.
+`hosts`는 두 데이터 소스를 합쳐 반환한다: forward host(`hosts.toml`과 `trust.toml`을 아래 우선순위로 합친 결과)와, 상주 `qsh listen` 데몬이 현재 쥐고 있는 live 역방향 등록(§6.13). **`host.list`는 dial하지 않는다** — forward host의 도달성은 확인하지 않으므로(§5, `state`는 항상 `"unknown"`) 이 목록은 순수 로컬 조회다. 같은 이름이 forward host와 reverse 등록 양쪽에 존재하면 `hosts` 배열에 `connection_mode`로 구분되는 **두 항목**으로 나타난다 — 목록에서는 병합하지 않는다. 다만 그 이름으로 실제 연결을 맺을 때(attach, `qsh <name>`)의 **라우팅 우선순위는 live reverse 등록이 우선**이다 — 증명된 도달 가능 경로를 forward host의 추정 주소보다 앞세운다.
+
+**forward host 해석 우선순위 (`hosts.toml` vs `trust.toml`, M7 Step 3):** 같은 이름이 `hosts.toml`과 `trust.toml` 양쪽에 있으면 **`hosts.toml`의 `address`가 이긴다**. `trust.toml`에만 있으면 그 주소를, `hosts.toml`에만 있으면 그 주소를 쓴다. **fingerprint(신원)는 항상 `trust.toml`에서만 온다** — `hosts.toml`은 이름과 주소, `user` hint만 담는 순수 주소록이며 신원 판단에 절대 관여하지 않는다: `hosts.toml`이 어떤 이름에 주소를 대더라도 실제 dial 시 TLS 계층에서 그 주소가 제시한 fingerprint가 trust store 어딘가에 핀되어 있지 않으면 인증은 그대로 실패한다(pin 조회는 이름이 아니라 fingerprint 기준이다). `hosts.toml` 파일이 없거나 비어 있으면 이 절차는 M7 이전과 동일하게 `trust.toml`의 pin이 유일한 출처다. `hosts.toml`은 **read-only 디렉터리**다 — 이를 쓰는 CLI 명령은 없으며 수동으로 직접 편집한다. `hosts.toml`에 쓰기 권한이 있다는 것은 곧 어떤 이름을 이미 핀된 다른 peer로 돌릴 수 있는 권한이다(mTLS는 여전히 핀되지 않은 주소를 막는다) — 그런 redirect는 `host.list`/`host.get`의 `source: "hosts"`로 드러난다(§5).
+
+`hosts.toml`의 주소는 op 시작 시점에 한 번 resolve된다 — session이 열려 있는 동안 파일을 고쳐도 그 session에는 반영되지 않는다. `attach`가 끊긴 연결을 자동으로 재접속할 때도 최초 attach 시점에 resolve된 주소를 계속 쓴다(재resolve 없음). 이는 매 handshake마다 내용을 다시 읽는 `trust.toml`과 대비된다(§6.11 `trust remove` 문단).
+
+**`hosts.toml` 파일 계약.** `<config_dir>/hosts.toml`(`trust.toml`과 같은 디렉터리, architecture.md §7)에 다음 형식으로 둔다.
+
+```toml
+[[host]]
+name = "personal-mac"
+address = "personal-mac.example.com:4433"
+user = "dave"
+```
+
+`name`·`address`는 필수, `user`는 선택이다. 파일이 없으면 빈 디렉터리로 취급한다(오류 아님) — M7 Step 3 도입 이전과 동일하게 `trust.toml`의 pin만으로 동작한다. 파싱 실패(TOML 문법 오류, 필수 필드 누락)는 `CONFIG_ERROR`(`retryable: false`)로, `trust.toml`이 손상됐을 때와 동일한 실패 형태다. 같은 `name`이 여러 번 나오면 첫 항목이 이긴다(`trust.toml`과 같은 규칙). `address`를 빈 문자열로 명시하면 파싱은 되지만 그 이름에 대해 `hosts.toml`은 "주소 없음"으로 취급되어 `trust.toml`의 주소로 폴백한다(`trust.toml`의 client-only pin과 동일한 관례).
 
 ### 6.2 Session 조회
 
@@ -420,7 +441,7 @@ qsh exec personal-mac --json -- uname -a
 qsh exec personal-mac --json --timeout 5000 --env FOO=bar -- sh -c 'echo "$FOO"'
 ```
 
-`host` 인자는 host 이름이다. hosts.toml 기반 host directory가 도입되는 M7 전까지는 trust store(trust.toml)의 pinned peer(name→address)가 host→주소 해석의 단일 출처다.
+`host` 인자는 host 이름이다. host→주소 해석은 §6.1의 우선순위(`hosts.toml` 우선, 없으면 `trust.toml`의 pinned peer로 폴백)를 따른다 — `exec`뿐 아니라 attach·`session open`·`qsh reverse <controller>`의 controller dial까지 모두 이 동일한 해석을 공유한다.
 
 - 실행할 명령은 항상 `--` 뒤에 온다(`--` 이후는 qsh가 해석하지 않는다). `--` 뒤에 명령이 없으면 usage 오류(exit `2`)다.
 - `--timeout <milliseconds>`(§9): 기한 내 종료하지 않으면 remote 프로세스(process group)를 kill하고 `TIMEOUT`(`retryable: true`, `details.timeout_ms`)을 반환한다. 기한은 해석·연결·협상·실행 전체에 하나의 예산으로 적용되고, 종료 후 연결 정리 시간은 포함하지 않는다(제때 끝난 명령이 정리가 느리다고 `TIMEOUT`이 되지 않는다). 호스트도 같은 기한을 스스로 강제하며(`ExecExit.timed_out`), 어느 쪽이 먼저 걸리든 결과는 `TIMEOUT`이다.
@@ -564,7 +585,7 @@ qsh trust list --json
 qsh trust remove <name> --json
 ```
 
-`trust.add`는 fingerprint를 명시하면 연결 없이 peer를 pin한다(provisioning 친화). 이때 `--address`는 선택이며 생략하면 `address`는 빈 문자열로 기록된다 — 단, `qsh exec <name>`의 host→주소 해석(§6.8)은 address가 있는 pin만 대상으로 하므로, 명령을 보낼 host는 address와 함께 pin한다(inbound 전용 peer, 즉 "이 장비에 접속해 올 client"는 fingerprint만으로 충분하다). fingerprint 없이 연결해서 확인하는 방식은 human mode에서만 prompt를 열며, `--json` mode에서는 §2.1 규칙에 따라 prompt 대신 `TRUST_REQUIRED` 오류에 `details.observed_fingerprint`와 `details.address`를 담아 반환한다 — 호출자는 그 값을 검증한 뒤 `--fingerprint`로 재호출한다.
+`trust.add`는 fingerprint를 명시하면 연결 없이 peer를 pin한다(provisioning 친화). 이때 `--address`는 선택이며 생략하면 `address`는 빈 문자열로 기록된다 — 단, `qsh exec <name>`의 host→주소 해석(§6.1, §6.8)은 address가 있는 pin만 이 store 쪽 후보로 삼으므로 명령을 보낼 host는 address와 함께 pin하거나 `hosts.toml`에 주소를 적어 둔다(inbound 전용 peer, 즉 "이 장비에 접속해 올 client"는 fingerprint만으로 충분하다). fingerprint 없이 연결해서 확인하는 방식은 human mode에서만 prompt를 열며 `--json` mode에서는 §2.1 규칙에 따라 prompt 대신 `TRUST_REQUIRED` 오류에 `details.observed_fingerprint`와 `details.address`를 담아 반환한다 — 호출자는 그 값을 검증한 뒤 `--fingerprint`로 재호출한다.
 
 세 명령 모두 통일된 pinned peer 객체를 사용한다:
 
@@ -669,7 +690,7 @@ qsh trust remove <name> --json
 
 원격 operation(`exec.run`, `session.*`, `tunnel.*`)의 mTLS 실패 오류 경로는 다음과 같다.
 
-- `TRUST_REQUIRED`: peer가 trust store에 없음. `details`: `observed_fingerprint`, `address`. `retryable: false`. (M7의 host directory 이전에는 `qsh exec <host>`의 host 자체가 trust store에서 해석되므로 원격 op가 이 코드를 낼 수 없다 — 미등록 host는 `HOST_NOT_FOUND`, pin 불일치는 `AUTH_FAILED`다. M1에서 이 코드의 유일한 생산자는 fingerprint 없는 `trust add`다.)
+- `TRUST_REQUIRED`: peer가 trust store에 없음. `details`: `observed_fingerprint`, `address`. `retryable: false`. (`qsh exec <host>`의 host 이름 자체는 §6.1의 우선순위로 `hosts.toml`/`trust.toml`에서 해석되므로 원격 op가 이 코드를 낼 수 없다 — 미등록 host(양쪽 모두 이 이름의 주소가 없음)는 `HOST_NOT_FOUND`, 주소는 해석됐지만 그 fingerprint가 trust store에 핀되어 있지 않거나 실제 응답이 핀과 다른 경우는 `AUTH_FAILED`다 — `hosts.toml`이 주소를 대더라도 신원 판단은 여전히 trust store 단독이다(§6.1). M1에서 이 코드의 유일한 생산자는 fingerprint 없는 `trust add`다.)
 - `AUTH_FAILED`: certificate 검증 실패(만료, CA 불일치, client certificate 미제시 등). `retryable: false`. 보안상 `details`에는 실패 category만 담고 상세 사유를 노출하지 않는다.
 
 ### 6.12 장기 실행 모드: `qsh serve`
@@ -782,6 +803,8 @@ Interactive mode는 terminal raw mode, window resize와 signal forwarding을 처
 **전달되는 환경변수.** 대화형 form은 로컬 터미널을 재현하는 데 필요한 것만 보낸다: `TERM`은 `SessionOpen.term`으로, locale(`LANG`, `LANGUAGE`, `LC_ALL`, `LC_CTYPE`, `LC_COLLATE`) 중 클라이언트 프로세스에 설정된 것은 `SessionOpen.env` overlay로 전달한다(architecture.md §4). 이는 **대화형 form 한정** 동작이다 — `qsh session open`·`qsh exec`·MCP는 호출자가 명시한 `--env`만 보내며, 클라이언트 프로세스의 환경을 암묵적으로 상속시키지 않는다. `HOME`/`USER`/`LOGNAME`/`SHELL`/`PATH`는 어느 경로에서도 호스트가 고정한다.
 
 **`user@`의 의미.** 원격 셸은 항상 **`qsh serve`를 실행한 OS 계정**으로 실행된다 — MVP에는 user switching이 없고, ACL principal은 항상 인증서에서 나온다(§2.5, protocol.md §3). `user@`는 SSH 근육 기억을 위해 받아들이며 생략해도 된다(`qsh personal-mac`). 지정하면 `SessionOpen`에 선택 hint로 전달되고, 호스트는 그 값이 serve 계정의 login name과 다르면 세션을 만들지 않고 `UNSUPPORTED`(message: user switching is not supported)로 거부한다 — fail closed. 즉 `user@`는 "이 계정이어야 한다"는 단언이지 계정 선택이 아니다(PRD §6). 검사 순서는 **ACL `session.open` → `user` hint → spawn**이다: 인가되지 않은 peer는 hint 값과 무관하게 항상 `PERMISSION_DENIED`를 받고(계정명 비노출, audit는 ACL 판정만 기록), `UNSUPPORTED`는 인가된 peer에게만 반환된다. 비교는 serve 계정의 login name과 정확 일치(case-sensitive)다. `user@`는 `qsh [user@]host` 형태(`-L`/`-R` 플래그를 동반한 경우 포함 — 모두 `SessionOpen`을 보낸다)에서만 받으며, `qsh exec`/`qsh session open`/`qsh tunnel open`은 bare host만 받는다.
+
+**`hosts.toml`의 `user` 기본값 (M7 Step 3).** `user@`를 명시하지 않았고 그 host 이름에 `hosts.toml`이 `user`를 설정해 뒀다면 그 값이 hint로 채워진다 — ssh_config의 `User` directive와 같은 위치의 편의 기능이다. 명시적으로 준 `user@`가 있으면 그것이 항상 이긴다(`hosts.toml`의 값은 덮어쓰지 않는다). 이 기본값 채움은 `qsh [user@]host`뿐 아니라 `qsh session open`·MCP를 포함해 `SessionOpen`을 보내는 모든 경로에 동일하게 적용된다 — 위 문단의 검사(ACL → user hint → spawn, 불일치 시 `UNSUPPORTED`)는 hint의 출처가 명시값이든 `hosts.toml` 기본값이든 완전히 동일하게 작동한다.
 
 **`-L`/`-R`은 이 대화형 form의 companion flag이지 별도 명령이 아니다.** `qsh [user@]host -L …`/`-R …`는 여전히 대화형 셸을 여는 `qsh [user@]host` 그 자체이며 — 위 문단대로 `SessionOpen`을 보내고 §4의 exit code 규칙을 그대로 따르는 실제 interactive 세션이 열린다 — 거기에 하나 이상의 터널(§6.9)이 **곁들여** 열릴 뿐이다. `-L`/`-R`이 세션 없이 터널만 여는 경로는 없다: 터널만 필요하고 셸은 필요 없으면 machine-mode `qsh tunnel open --json`(§6.9)을 쓴다 — 이쪽은 `SessionOpen`을 전혀 보내지 않고 `tunnel.open` 하나만 나간다. 두 경로 모두 홀더는 그 명령을 실행한 foreground CLI 프로세스다(§6.14).
 

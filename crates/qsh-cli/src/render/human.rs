@@ -144,6 +144,14 @@ pub fn print_trust_remove(data: &TrustRemoveData) -> io::Result<()> {
     }
 }
 
+/// `source`/`user` are `None` unless `hosts.toml` supplied them
+/// (`PLAN.md` M7 Step 3) — rendered as `-`, the same placeholder idiom
+/// used across `qsh`'s human tables for "not set", rather than an empty
+/// cell that would be indistinguishable from a column-width bug.
+fn host_field_or_dash(value: &Option<String>) -> &str {
+    value.as_deref().unwrap_or("-")
+}
+
 /// Print the host table (`qsh hosts`, `docs/CLI.md` §6.1). The same name
 /// appearing once per `connection_mode` is expected, not deduplicated —
 /// `Ops::host_list` never merges forward and reverse entries.
@@ -164,20 +172,24 @@ pub fn print_hosts(data: &HostListData) -> io::Result<()> {
     let name_w = width("NAME", |h| &h.name);
     let mode_w = width("MODE", |h| &h.connection_mode);
     let state_w = width("STATE", |h| &h.state);
+    let addr_w = width("ADDRESS", |h| &h.address);
+    let source_w = width("SOURCE", |h| host_field_or_dash(&h.source));
 
     writeln!(
         stdout,
-        "{:name_w$}  {:mode_w$}  {:state_w$}  ADDRESS",
-        "NAME", "MODE", "STATE"
+        "{:name_w$}  {:mode_w$}  {:state_w$}  {:addr_w$}  {:source_w$}  USER",
+        "NAME", "MODE", "STATE", "ADDRESS", "SOURCE"
     )?;
     for host in &data.hosts {
         writeln!(
             stdout,
-            "{:name_w$}  {:mode_w$}  {:state_w$}  {}",
+            "{:name_w$}  {:mode_w$}  {:state_w$}  {:addr_w$}  {:source_w$}  {}",
             sanitize(&host.name),
             sanitize(&host.connection_mode),
             sanitize(&host.state),
             sanitize(&host.address),
+            sanitize(host_field_or_dash(&host.source)),
+            sanitize(host_field_or_dash(&host.user)),
         )?;
     }
     Ok(())
@@ -195,7 +207,17 @@ pub fn print_host(data: &Host) -> io::Result<()> {
     )?;
     writeln!(stdout, "state:           {}", sanitize(&data.state))?;
     writeln!(stdout, "address:         {}", sanitize(&data.address))?;
-    writeln!(stdout, "device_id:       {}", sanitize(&data.device_id))
+    writeln!(stdout, "device_id:       {}", sanitize(&data.device_id))?;
+    writeln!(
+        stdout,
+        "source:          {}",
+        sanitize(host_field_or_dash(&data.source))
+    )?;
+    writeln!(
+        stdout,
+        "user:            {}",
+        sanitize(host_field_or_dash(&data.user))
+    )
 }
 
 /// Print `qsh acl check`'s verdict (`docs/CLI.md` §6.15) — one line to

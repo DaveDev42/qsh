@@ -220,9 +220,16 @@ fn auth_failed(category: &str) -> OpError {
 /// Map a dial failure to the CLI vocabulary (`docs/CLI.md` §6.11 error paths).
 pub(crate) fn map_dial_error(err: DialError, address: &str) -> OpError {
     match err {
-        // The host is in our trust store (that is how we got its address),
-        // so a locally-rejected certificate is a *mismatch*, not a missing
-        // pin: AUTH_FAILED with a coarse category only.
+        // `address` no longer implies a trust store pin for this host
+        // (`PLAN.md` M7 Step 3 (a)-추기 ③): it can come from `hosts.toml`
+        // alone, naming a host trust.toml has never heard of. So a
+        // locally-rejected certificate here can be either a *mismatch*
+        // (the peer answering doesn't match a pin that does exist) or a
+        // *missing pin* (no pin exists at all for whatever fingerprint
+        // answered) — this function can't tell which from `DialError`
+        // alone, and doesn't need to: both map to the same coarse
+        // AUTH_FAILED category (`docs/CLI.md` §6.11 documents this
+        // uniformly, verifier-confirmed no contract change needed here).
         DialError::LocalRejected { reason, .. } => {
             auth_failed(&format!("{reason:?}").to_lowercase())
         }

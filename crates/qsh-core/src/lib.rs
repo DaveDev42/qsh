@@ -10,6 +10,8 @@
 //! - [`identity`]: device keypair, certificate and the 3-mode key store.
 //! - [`trust`]: `trust.toml` — pinned peers, private CA roots, and the
 //!   [`qsh_transport::TrustEvaluator`] the verifier is driven by.
+//! - [`hosts`]: `hosts.toml` — the host profile address book layered over
+//!   `trust`'s pinned peers (`PLAN.md` M7 Step 3). Never a trust source.
 //! - [`ops`]: the typed operation façade.
 
 pub mod acl;
@@ -20,6 +22,7 @@ pub mod config;
 pub mod doctor;
 pub mod exec;
 pub mod handshake;
+pub mod hosts;
 pub mod identity;
 // localctl (UDS IPC to this machine's resident `qsh listen` daemon) has no
 // meaning on Windows — no daemon, no socket, no peer credential concept —
@@ -42,6 +45,7 @@ pub mod tunnel;
 pub use client::pathwatch::PathWatchConfig;
 pub use config::{Config, Paths, now_rfc3339};
 pub use doctor::{CONTROLLER_UNREACHABLE, Diagnostic, DiagnosticId};
+pub use hosts::{HostEntry, HostsFile};
 pub use identity::{Identity, KeyStore, KeyStoreError, LoadedIdentity};
 pub use ops::{
     AclCheckOp, AttachHandle, CapabilitiesOp, DetachFlush, ExecRunOp, ExecRunOutput, ExecStdin,

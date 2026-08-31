@@ -32,6 +32,7 @@ use crate::client::reconnect::{
     ResumeError, recover,
 };
 use crate::client::{AttachEvent, ClientError, ControlIn, Session};
+use crate::hosts::HostsFile;
 use crate::ops::exec::{map_client_error, map_dial_error};
 use crate::ops::{LocalRoute, OpError, Operation, Ops, PeerRoute, PeerTarget};
 use crate::resume::{NoToken, ResumeStore, StoredToken};
@@ -343,13 +344,14 @@ impl Ops {
     /// `session_ref` is the handle for every later call.
     pub fn session_open(&self, req: SessionOpenReq) -> Result<SessionOpenData, OpError> {
         let host = req.host.clone();
+        let user = self.resolve_user_hint(&host, req.user)?;
         let msg = wire::SessionOpen {
             argv: req.argv,
             env: req.env.into_iter().map(|e| (e.name, e.value)).collect(),
             term: req.term.unwrap_or_default(),
             cols: req.cols.unwrap_or(0),
             rows: req.rows.unwrap_or(0),
-            user: req.user,
+            user,
         };
         // Not `call`: the resume credential is bound to the peer that
         // issued it (protocol.md §10-2), so the fingerprint of *this*
@@ -372,6 +374,42 @@ impl Ops {
             session_ref,
             initial_sequence: opened.initial_seq,
         })
+    }
+
+    /// Fill in `SessionOpen.user` (`docs/CLI.md` §7): an explicit hint from
+    /// the caller — `user@host`/an MCP `user` argument — always wins;
+    /// otherwise `hosts.toml`'s `user` entry for `host` fills in as a
+    /// default, if it set a non-empty one (`PLAN.md` M7 Step 3, ssh_config
+    /// `User`-directive-like: a per-name default a caller can still
+    /// override on the command line).
+    ///
+    /// **Still never an identity or an account selector** — exactly the
+    /// same assertion hint `docs/CLI.md` §7 already documents, just with a
+    /// second possible source now. The server-side check this value feeds
+    /// (`SessionOpen.user` against the `qsh serve` OS account's login
+    /// name, mismatch -> `UNSUPPORTED`) is completely unchanged: a
+    /// `hosts.toml`-sourced default that mismatches is rejected exactly
+    /// like an explicit one would be — this only changes what "requested
+    /// user" defaults to before that check ever runs.
+    ///
+    /// Applied uniformly at this single choke point — every
+    /// `session.open` caller (interactive attach, `session open`, and the
+    /// MCP adapter) gets the same default-fill, rather than only the
+    /// interactive command growing it, so the three frontends can't drift
+    /// into different behavior for the same host name.
+    fn resolve_user_hint(
+        &self,
+        host: &str,
+        explicit: Option<String>,
+    ) -> Result<Option<String>, OpError> {
+        if explicit.is_some() {
+            return Ok(explicit);
+        }
+        let hosts = HostsFile::load(&self.paths.hosts_file())?;
+        Ok(hosts
+            .find(host)
+            .and_then(|entry| entry.user.clone())
+            .filter(|user| !user.trim().is_empty()))
     }
 
     /// Persist a freshly issued resume credential, if there is one to
@@ -4213,5 +4251,90 @@ mod tests {
         );
 
         daemon.abort();
+    }
+
+    // ---- `Ops::resolve_user_hint` (`PLAN.md` M7 Step 3, `docs/CLI.md` §7)
+    // ----
+
+    fn user_hint_ops(dir: &std::path::Path) -> Ops {
+        let paths = crate::config::Paths::new(dir.join("config"), dir.join("state"));
+        Ops::new(paths)
+    }
+
+    fn write_hosts_toml(paths: &crate::config::Paths, body: &str) {
+        std::fs::create_dir_all(&paths.config_dir).unwrap();
+        std::fs::write(paths.hosts_file(), body).unwrap();
+    }
+
+    #[test]
+    fn explicit_user_hint_always_wins_over_hosts_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let ops = user_hint_ops(dir.path());
+        write_hosts_toml(
+            ops.paths(),
+            "[[host]]\nname = \"mac\"\naddress = \"mac.example.com:4433\"\nuser = \"fromfile\"\n",
+        );
+
+        let user = ops
+            .resolve_user_hint("mac", Some("explicit".to_string()))
+            .unwrap();
+        assert_eq!(user.as_deref(), Some("explicit"));
+    }
+
+    #[test]
+    fn hosts_toml_user_fills_in_when_no_explicit_hint_is_given() {
+        let dir = tempfile::tempdir().unwrap();
+        let ops = user_hint_ops(dir.path());
+        write_hosts_toml(
+            ops.paths(),
+            "[[host]]\nname = \"mac\"\naddress = \"mac.example.com:4433\"\nuser = \"dave\"\n",
+        );
+
+        let user = ops.resolve_user_hint("mac", None).unwrap();
+        assert_eq!(user.as_deref(), Some("dave"));
+    }
+
+    #[test]
+    fn no_hosts_toml_and_no_explicit_hint_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let ops = user_hint_ops(dir.path());
+        let user = ops.resolve_user_hint("mac", None).unwrap();
+        assert_eq!(user, None);
+    }
+
+    #[test]
+    fn a_hosts_toml_entry_with_no_user_set_is_none_not_an_empty_string() {
+        let dir = tempfile::tempdir().unwrap();
+        let ops = user_hint_ops(dir.path());
+        write_hosts_toml(
+            ops.paths(),
+            "[[host]]\nname = \"mac\"\naddress = \"mac.example.com:4433\"\n",
+        );
+
+        let user = ops.resolve_user_hint("mac", None).unwrap();
+        assert_eq!(user, None);
+    }
+
+    #[test]
+    fn a_different_hosts_toml_name_does_not_leak_its_user_hint() {
+        let dir = tempfile::tempdir().unwrap();
+        let ops = user_hint_ops(dir.path());
+        write_hosts_toml(
+            ops.paths(),
+            "[[host]]\nname = \"phone\"\naddress = \"phone.example.com:4433\"\nuser = \"dave\"\n",
+        );
+
+        let user = ops.resolve_user_hint("mac", None).unwrap();
+        assert_eq!(user, None);
+    }
+
+    #[test]
+    fn malformed_hosts_toml_surfaces_as_config_error_not_a_silent_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let ops = user_hint_ops(dir.path());
+        write_hosts_toml(ops.paths(), "[[host]]\nname = ");
+
+        let err = ops.resolve_user_hint("mac", None).unwrap_err();
+        assert_eq!(err.code, ErrorCode::ConfigError);
     }
 }
