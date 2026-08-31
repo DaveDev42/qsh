@@ -608,6 +608,7 @@ pub fn loaded_identity(test: &TestIdentity, device_id: &str) -> LoadedIdentity {
             key_store: KeyStoreKind::File,
             created_at: "2026-01-01T00:00:00Z".to_string(),
             cert_der: test.cert_der.clone(),
+            issued_by_ca: None,
         },
         local: test.local.clone(),
     }

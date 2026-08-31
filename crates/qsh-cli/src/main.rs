@@ -11,23 +11,23 @@ use std::io::{self, IsTerminal, Read, Write};
 
 use clap::{CommandFactory as _, Parser};
 use qsh_core::{
-    AclCheckOp, CapabilitiesOp, ExecRunOp, ExecStdin, HostGetOp, HostListOp, IdentityInitOp,
-    OpError, Operation, Ops, SchemaOp, SessionAttachOp, SessionCloseOp, SessionGetOp,
-    SessionListOp, SessionOpenOp, SessionReadOp, SessionResizeOp, SessionWriteOp, TrustAcceptOp,
-    TrustAddOp, TrustInviteOp, TrustListOp, TrustRemoveOp, TunnelCloseOp, TunnelListOp,
-    TunnelOpenOp, VersionOp, dynamic_forward_unsupported,
+    AclCheckOp, CapabilitiesOp, CertInitOp, CertIssueOp, ExecRunOp, ExecStdin, HostGetOp,
+    HostListOp, IdentityInitOp, OpError, Operation, Ops, SchemaOp, SessionAttachOp, SessionCloseOp,
+    SessionGetOp, SessionListOp, SessionOpenOp, SessionReadOp, SessionResizeOp, SessionWriteOp,
+    TrustAcceptOp, TrustAddOp, TrustInviteOp, TrustListOp, TrustRemoveOp, TunnelCloseOp,
+    TunnelListOp, TunnelOpenOp, VersionOp, dynamic_forward_unsupported,
 };
 use qsh_proto::{
-    AclCheckReq, CapabilitiesReq, ErrorCode, ExecRunReq, HostGetReq, IdentityInitReq,
-    SessionCloseReq, SessionGetReq, SessionListReq, SessionOpenReq, SessionReadReq,
-    SessionResizeReq, SessionWriteReq, TrustAcceptReq, TrustAddReq, TrustInviteReq, TunnelCloseReq,
-    TunnelListReq, TunnelOpenReq,
+    AclCheckReq, CapabilitiesReq, CertInitReq, CertIssueReq, ErrorCode, ExecRunReq, HostGetReq,
+    IdentityInitReq, SessionCloseReq, SessionGetReq, SessionListReq, SessionOpenReq,
+    SessionReadReq, SessionResizeReq, SessionWriteReq, TrustAcceptReq, TrustAddReq, TrustInviteReq,
+    TunnelCloseReq, TunnelListReq, TunnelOpenReq,
 };
 use serde::Serialize;
 use tracing_subscriber::EnvFilter;
 
 use cli::{
-    AclCmd, AttachArgs, Cli, Command, DEFAULT_ESCAPE_CHAR, EscapeChar, ExecArgs, HostCmd,
+    AclCmd, AttachArgs, CertCmd, Cli, Command, DEFAULT_ESCAPE_CHAR, EscapeChar, ExecArgs, HostCmd,
     SessionCmd, SessionReadArgs, SessionWriteArgs, TrustAddArgs, TrustCmd, TunnelCmd,
     TunnelOpenArgs,
 };
@@ -386,6 +386,18 @@ fn run(cli: &Cli) -> i32 {
                 code: code.clone(),
             }),
             human::print_trust_accept,
+        ),
+        Command::Cert(CertCmd::Init) => finish(
+            cli,
+            CertInitOp::COMMAND,
+            ops.cert_init(CertInitReq {}),
+            human::print_cert_init,
+        ),
+        Command::Cert(CertCmd::Issue) => finish(
+            cli,
+            CertIssueOp::COMMAND,
+            ops.cert_issue(CertIssueReq {}),
+            human::print_cert_issue,
         ),
         Command::Hosts => finish(
             cli,
@@ -1264,6 +1276,8 @@ fn command_name(cli: &Cli) -> &'static str {
         Command::Trust(TrustCmd::Remove { .. }) => TrustRemoveOp::COMMAND,
         Command::Trust(TrustCmd::Invite) => TrustInviteOp::COMMAND,
         Command::Trust(TrustCmd::Accept { .. }) => TrustAcceptOp::COMMAND,
+        Command::Cert(CertCmd::Init) => CertInitOp::COMMAND,
+        Command::Cert(CertCmd::Issue) => CertIssueOp::COMMAND,
         Command::Hosts => HostListOp::COMMAND,
         Command::Host(HostCmd::Get { .. }) => HostGetOp::COMMAND,
         Command::Acl(AclCmd::Check(_)) => AclCheckOp::COMMAND,

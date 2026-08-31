@@ -164,6 +164,15 @@ impl Paths {
         self.config_dir.join("identity")
     }
 
+    /// `<config_dir>/ca` — the private CA's root cert + key
+    /// (`docs/adr/0008-private-ca-cert-issuance.md` §4, `PLAN.md` M7 Step
+    /// 5). Deliberately separate from [`Paths::identity_dir`]: this
+    /// device's own identity and its issuance authority (if any) are
+    /// different threats and belong in different directories.
+    pub fn ca_dir(&self) -> PathBuf {
+        self.config_dir.join("ca")
+    }
+
     /// `<state_dir>/audit.log`.
     pub fn audit_log(&self) -> PathBuf {
         self.state_dir.join("audit.log")

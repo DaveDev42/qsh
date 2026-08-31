@@ -844,6 +844,62 @@ qsh acl check --principal <principal> --action <action> [--resource <resource>] 
 
 `--principal`/`--action`이 잘못된 모양이 아닌 한 `acl.check` 자체는 실패하지 않는다(exit `0`, §4). human mode 출력은 한 줄 요약(`allow`/`deny` + 근거 rule index 또는 "no policy loaded")이다.
 
+### 6.16 `qsh cert` — private CA (M7 Step 5)
+
+```bash
+qsh cert init --json
+qsh cert issue --json
+```
+
+이 device를 자기 자신의 private CA로 만드는 두 명령이다([ADR-0008](adr/0008-private-ca-cert-issuance.md)). intermediate 없이 self-signed root 하나가 device leaf를 직접 서명하는 구조이며, `qsh trust add`/`trust accept`(§6.11)가 다루는 "각 device를 개별로 pin"하는 모델과는 별도의, 병행 가능한 신뢰 축이다 — 한 device가 어느 CA의 root를 신뢰하면 그 CA가 서명한 모든 device를 개별 pin 없이 신뢰한다.
+
+`cert.init`은 `<config_dir>/ca/`(0700)에 `ca.pem`(root 인증서)과 `ca.key`(PKCS#8 PEM private key, 0600)를 생성한다. `identity/`(§6.11의 device identity)와 의도적으로 분리된 디렉터리다 — 이 device가 *서명할 수 있는지*는 이 device *자신이 누구인지*와 다른 threat이기 때문이다. 이미 root가 있으면 새로 만들지 않고 기존 root를 `created: false`로 반환한다(멱등).
+
+```json
+{
+  "schema": "qsh.cli/v1",
+  "request_id": "01K0EXAMPLE",
+  "command": "cert.init",
+  "ok": true,
+  "data": {
+    "fingerprint": "sha256:BASE64FINGERPRINT",
+    "config_dir": "/Users/dave/.config/qsh",
+    "created": true
+  }
+}
+```
+
+`cert.issue`는 이 device의 **로컬 identity만**을 발급 대상으로 한다(ADR §5 — 다른 device나 user cert 발급은 범위 밖, P1) — 이미 있는 device identity(`qsh init`으로 만든 keypair·`device_id`)를 CA로 "승격"한다: 같은 keypair, 같은 `qsh://device/<device_id>` SAN을 CA 서명으로 다시 감싸 `identity/device.pem`을 그 자리에서 교체한다. keypair가 그대로이므로 이 device를 이미 fingerprint로 pin해 둔 다른 peer가 있어도 그 pin은 깨지지 않는다 — fingerprint는 인증서 전체가 아니라 SPKI(공개키)에서만 계산되기 때문이다(architecture.md §5). CA root는 `trust.toml [[ca]]`에 이름 `"local"`로 등록된다(`qsh trust add`와 같은 append-only·dedup 선례 — Step 2).
+
+`qsh init`(§6.11)을 먼저 실행하지 않았거나 `qsh cert init`을 먼저 실행하지 않았으면, 어느 쪽도 조용히 만들어 주지 않고 `CONFIG_ERROR`로 실패한다 — 어느 리소스도 그 전제조건이 충족되기 전에 만들어지지 않는다(§11의 원칙).
+
+```json
+{
+  "schema": "qsh.cli/v1",
+  "request_id": "01K0EXAMPLE",
+  "command": "cert.issue",
+  "ok": true,
+  "data": {
+    "device_id": "device_01K0EXAMPLE",
+    "fingerprint": "sha256:BASE64FINGERPRINT",
+    "issued": true,
+    "ca": {
+      "name": "local",
+      "fingerprint": "sha256:BASE64FINGERPRINT",
+      "created": true
+    }
+  }
+}
+```
+
+`cert.issue`는 두 축이 각각 독립적으로 멱등이다. leaf 재발급 축은 `issued`로 나타난다 — 이미 이 CA가 발급한 leaf라면 다시 서명하지 않고 `issued: false`를 반환한다(`fingerprint`는 이전 호출과 동일). `trust.toml [[ca]]` 등록 축은 `ca.created`/`ca.updated`로 나타나며, `trust.add`(§6.11)와 정확히 같은 모양이다 — 새 이름이면 `created: true`(이때 `updated`는 필드 자체가 생략된다), 이미 등록된 이름에 같은 root PEM이면 순수 no-op(`created: false, updated: false`), 같은 이름에 root가 달라졌으면(로컬 CA를 지우고 다시 `cert init`한 경우뿐이다) `updated: true`로 그 자리에서 덮어쓴다.
+
+**partner의 CA root를 신뢰하려면.** `qsh cert`는 이 device 자신의 CA만 다룬다 — 상대 device가 발급한 CA root를 이 device의 `trust.toml`에 등록하는 op은 아직 없다(ADR §5, out-of-band로 상대의 `ca.pem`을 전달받아 `trust.toml`의 `[[ca]]` 표에 직접 적어 넣는 것이 M7 시점의 유일한 경로다). `trust.toml` 자체는 `qsh cert`가 만들었든 operator가 손으로 적었든 구분 없이 평가한다(trust/mod.rs).
+
+**`acl.toml` 작성 시 주의.** CA로 인증한 principal을 허용하려는 `[[acl]]` 행은 `auth_path = "ca"`를 **명시**해야 한다 — 이 field를 생략하면 `"pin"`으로 기본값이 매겨져(§6.15의 `--auth-path` 문단과 같은 기본값, `PLAN.md` M5 §4.1 #2) CA로만 인증한 peer는 그 행에 조용히 매칭되지 않는다(default-deny이므로 결과는 `PERMISSION_DENIED`).
+
+pin(`AuthPath::Pin`)과 CA(`AuthPath::Ca`) 양쪽 모두 principal은 똑같이 `device:<id>` 모양이다 — 구별의 근거는 principal이 아니라 audit 기록의 `auth_path`뿐이다(ADR §6).
+
 ## 7. Human interactive mode
 
 다음 명령은 위의 session operation을 조합한 편의 인터페이스다.
