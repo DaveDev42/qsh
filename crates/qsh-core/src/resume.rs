@@ -48,7 +48,7 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::broker::RESUME_TOKEN_LEN;
-use crate::config::{Paths, config_io_error, ensure_private_dir, now_rfc3339};
+use crate::config::{FileLock, Paths, config_io_error, ensure_private_dir, now_rfc3339};
 use crate::ops::OpError;
 
 /// Why a stored token could not be presented. Both variants become the
@@ -505,44 +505,6 @@ fn write_durably(path: &Path, body: &[u8]) -> std::io::Result<()> {
         let _ = std::fs::remove_file(&tmp);
     }
     result
-}
-
-/// An exclusive advisory lock held for the duration of one
-/// read-modify-write, on **every** platform.
-///
-/// `std::fs::File::lock` is `flock(2)` on unix — the mechanism ADR-0007
-/// names — and `LockFileEx` on Windows, so the serialisation an MCP server
-/// running next to an interactive attach depends on is real there too
-/// rather than a no-op that quietly loses a rotation.
-struct FileLock {
-    file: std::fs::File,
-}
-
-impl FileLock {
-    fn acquire(path: &Path) -> Result<Self, OpError> {
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create(true).truncate(false);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            options.mode(0o600);
-        }
-        let file = options
-            .open(path)
-            .map_err(|e| config_io_error(path, "open lock file", &e))?;
-        // Blocking exclusive lock: the critical section is a small file
-        // rewrite, and a failed lock would mean losing a rotation.
-        file.lock().map_err(|e| config_io_error(path, "lock", &e))?;
-        Ok(Self { file })
-    }
-}
-
-impl Drop for FileLock {
-    fn drop(&mut self) {
-        // Closing the file releases the lock anyway; being explicit keeps
-        // the critical section obvious.
-        let _ = self.file.unlock();
-    }
 }
 
 #[cfg(test)]

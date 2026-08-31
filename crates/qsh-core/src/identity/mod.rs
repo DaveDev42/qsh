@@ -609,13 +609,36 @@ mod tests {
     /// `promote_to_ca_issued`'s own doc comment promises (mirroring
     /// `ca::init`'s key-before-cert rule): forces the *second* write
     /// (`identity.toml`) to fail by pre-occupying its exact atomic-rename
-    /// temp path (`identity.toml.tmp<pid>`) with a directory, so whichever
-    /// file `promote_to_ca_issued` writes first genuinely lands on disk
-    /// before the call errors out — proof of the real order, not an
-    /// assumption about it. If that order were ever reversed (record
+    /// temp path (`identity.toml.tmp<pid>-<ticket>`) with a directory, so
+    /// whichever file `promote_to_ca_issued` writes first genuinely lands
+    /// on disk before the call errors out — proof of the real order, not
+    /// an assumption about it. If that order were ever reversed (record
     /// first, cert last), the *record* write — the one whose temp path we
     /// block — would be attempted first and the call would fail before
     /// ever touching `device.pem`.
+    ///
+    /// The temp path now carries a writer-scoped ticket
+    /// (`crate::config::write_private_file_io`, `PLAN.md` M7 Step 7-1).
+    /// `promote_to_ca_issued` makes exactly two `write_private_file` calls
+    /// in a fixed order (cert, then record), so
+    /// `next_write_ticket_for_test() + 1` is exactly the record write's
+    /// ticket.
+    ///
+    /// That prediction only holds under a **process-isolated test runner**
+    /// (`cargo nextest run`, this repo's required one —
+    /// `.github/workflows/ci.yml`). `WRITE_TICKET` is a single
+    /// process-global `AtomicU64` (`crate::config`), so under plain `cargo
+    /// test`'s in-process, thread-parallel execution any concurrently
+    /// scheduled sibling test that also calls `write_private_file`/
+    /// `write_private_file_io` can steal the predicted ticket out from
+    /// under this read, and the assertions below can fail spuriously
+    /// (`PLAN.md` M7 Step 7-1 검증 라운드 A1 — this test's sibling in
+    /// `crate::ca` was reproduced 3/3 failing this way under `cargo test`;
+    /// this one wasn't in that sample, but shares the identical
+    /// mechanism). This is a known test-isolation limitation of this
+    /// test, not of the production ticket/locking mechanism, which
+    /// nextest — the actual CI and commit-gate runner — validates
+    /// cleanly.
     #[test]
     fn promote_to_ca_issued_recovers_from_an_interrupted_record_write() {
         use rcgen::{CertificateParams, DistinguishedName, DnType, IsCa, KeyPair};
@@ -639,7 +662,11 @@ mod tests {
         let leaf_pem = leaf_cert.pem();
         let leaf_der = leaf_cert.der().to_vec();
 
-        let record_tmp = identity_dir.join(format!("{IDENTITY_FILE}.tmp{}", std::process::id()));
+        let record_ticket = crate::config::next_write_ticket_for_test() + 1;
+        let record_tmp = identity_dir.join(format!(
+            "{IDENTITY_FILE}.tmp{}-{record_ticket}",
+            std::process::id()
+        ));
         std::fs::create_dir(&record_tmp).unwrap();
 
         let err = match promote_to_ca_issued(&paths, &leaf_pem, &leaf_der, "fake_ca_fp") {

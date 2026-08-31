@@ -102,6 +102,40 @@ impl TrustStore {
         })
     }
 
+    /// Acquire the cross-process advisory lock guarding `path`'s whole
+    /// read-modify-write cycle (`PLAN.md` M7 Step 7-1). Every caller must
+    /// acquire this **before** [`TrustStore::load`] and hold the returned
+    /// guard until after [`TrustStore::save`] — locking only around the
+    /// write (the pre-Step-7-1 state) still lets two writers each load a
+    /// stale copy, mutate it, and have the later `save` silently discard
+    /// the earlier writer's change. Two scenarios this closes:
+    ///
+    /// - **S1** (lost update): a `qsh serve` pairing response loads
+    ///   `trust.toml`, and while it is composing its own save a concurrent
+    ///   `qsh trust remove` finishes its own load→mutate→save first — the
+    ///   pairing response's save then overwrites the file with a copy
+    ///   that still has the just-removed peer in it, silently resurrecting
+    ///   a pin the operator just revoked.
+    /// - **S3** (file corruption): two pairing responses land on the same
+    ///   `qsh serve` process at once (`tokio::spawn` per connection) and
+    ///   both reach `TrustStore::save` around the same time — without a
+    ///   cross-writer lock, [`crate::config::write_private_file_io`]'s
+    ///   writer-scoped temp ticket keeps their temp files from colliding,
+    ///   but the two renames can still interleave so that whichever loses
+    ///   the race clobbers the winner's just-written file with its own
+    ///   stale copy.
+    ///
+    /// **Lock order**: any `RwLock`/`Mutex` the caller already holds must
+    /// be acquired **before** this call, never after — see
+    /// [`crate::config::FileLock`]'s own doc for why reversing it risks a
+    /// deadlock.
+    pub(crate) fn lock(path: &Path) -> Result<crate::config::FileLock, OpError> {
+        if let Some(parent) = path.parent() {
+            ensure_private_dir(parent)?;
+        }
+        crate::config::FileLock::acquire(&crate::config::lock_path_for(path))
+    }
+
     /// Write the store to `path` (0600, in a 0700 directory, atomically).
     pub fn save(&self, path: &Path) -> Result<(), OpError> {
         if let Some(parent) = path.parent() {
@@ -895,5 +929,173 @@ mod tests {
         assert!(shared.snapshot().peers().is_empty());
         assert!(shared.ca_roots().is_empty());
         assert_eq!(shared.lookup_pin(&fp(b"x")), None);
+    }
+
+    /// Regression for `PLAN.md` M7 Step 7-1's S1/general lost-update fix:
+    /// 8 threads, each doing a full `TrustStore::lock` → `load` →
+    /// `add_peer` → `save` cycle for a distinct peer, must not lose each
+    /// other's addition. Locking only around `save` (the pre-Step-7-1
+    /// state) would let a later writer's `save` silently overwrite an
+    /// earlier writer's still-unseen addition with a stale copy —
+    /// mirrors `crate::resume`'s own
+    /// `concurrent_writers_do_not_lose_each_others_entries`, the
+    /// precedent this lock was lifted from.
+    #[test]
+    fn concurrent_full_rmw_cycles_do_not_lose_each_others_peers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("trust.toml");
+        let mut threads = Vec::new();
+        for i in 0..8u8 {
+            let path = path.clone();
+            threads.push(std::thread::spawn(move || {
+                let _lock = TrustStore::lock(&path).unwrap();
+                let mut store = TrustStore::load(&path).unwrap();
+                store.add_peer(
+                    format!("peer-{i}"),
+                    None,
+                    fp(&[i; 4]),
+                    "2026-08-17T00:00:00Z".into(),
+                );
+                store.save(&path).unwrap();
+            }));
+        }
+        for t in threads {
+            t.join().expect("writer");
+        }
+        let final_store = TrustStore::load(&path).unwrap();
+        assert_eq!(
+            final_store.peers().len(),
+            8,
+            "a concurrent read-modify-write lost a peer"
+        );
+    }
+
+    /// Regression for `PLAN.md` M7 Step 7-1's S1 scenario specifically: a
+    /// pairing response's `add_peer` and an operator's concurrent `trust
+    /// remove` must not race into "the removed peer comes back" — the
+    /// worst outcome on this step's list, a revoked trust decision
+    /// silently un-revoking itself. This is the `TrustStore`-level
+    /// equivalent of the real race (`qsh serve`'s pairing responder vs. a
+    /// `qsh trust remove` CLI process); driving the actual server accept
+    /// loop concurrently with a CLI subprocess is integration-test
+    /// territory this crate's unit tests don't reach.
+    #[test]
+    fn a_concurrent_add_never_resurrects_a_concurrent_remove() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("trust.toml");
+
+        let mut seed = TrustStore::default();
+        seed.add_peer(
+            "old-laptop",
+            None,
+            fp(b"old"),
+            "2026-08-17T00:00:00Z".into(),
+        );
+        seed.save(&path).unwrap();
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+
+        let remover = {
+            let path = path.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                let _lock = TrustStore::lock(&path).unwrap();
+                let mut store = TrustStore::load(&path).unwrap();
+                store.remove("old-laptop");
+                store.save(&path).unwrap();
+            })
+        };
+        let adder = {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                let _lock = TrustStore::lock(&path).unwrap();
+                let mut store = TrustStore::load(&path).unwrap();
+                store.add_peer(
+                    "new-device",
+                    None,
+                    fp(b"new"),
+                    "2026-08-17T00:00:01Z".into(),
+                );
+                store.save(&path).unwrap();
+            })
+        };
+        remover.join().expect("remover");
+        adder.join().expect("adder");
+
+        let final_store = TrustStore::load(&path).unwrap();
+        assert!(
+            final_store.find("old-laptop").is_none(),
+            "a removed peer was resurrected by a concurrent pairing write"
+        );
+        assert!(
+            final_store.find("new-device").is_some(),
+            "a concurrent addition was lost"
+        );
+    }
+
+    /// Regression for `PLAN.md` M7 Step 7-1's file-corruption fix in
+    /// `crate::config::write_private_file_io` (the writer-scoped temp
+    /// ticket): many concurrent `save` calls racing the very same path,
+    /// deliberately **without** `TrustStore::lock` — every real call site
+    /// now holds it, but this isolates the temp-file ticket's own
+    /// guarantee from the lock's. Before the ticket, every writer shared
+    /// the same `.tmp<pid>` name: whichever writer's `rename` lost the
+    /// race hit `ENOENT` (its target already moved by the winner) rather
+    /// than a merely lost update, and depending on how the two writers'
+    /// writes interleaved on that one shared inode before either
+    /// renamed, the file that *did* land could carry bytes from more
+    /// than one writer — a corrupt `trust.toml`, not just a stale one.
+    ///
+    /// Repeated 16 times (fresh path each round): a standalone reproduction
+    /// outside this repo (`PLAN.md` M7 Step 7-1 검증 라운드 A5) measured the
+    /// per-round corruption rate at 8/40 (20%) once the ticket is removed —
+    /// a single round only catches a reverted ticket about 4 times out of
+    /// 5. 16 independent rounds raise that to `1 - 0.8^16 ≈ 97%`, without
+    /// which this test's pass/fail is closer to a coin flip than a
+    /// regression gate for the one property this diff is graded on.
+    #[test]
+    fn concurrent_saves_to_the_same_path_never_corrupt_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        const WRITERS: u8 = 24;
+        const ROUNDS: u32 = 16;
+
+        for round in 0..ROUNDS {
+            let path = dir.path().join(format!("trust-{round}.toml"));
+
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(WRITERS as usize));
+            let mut threads = Vec::new();
+            for i in 0..WRITERS {
+                let path = path.clone();
+                let barrier = barrier.clone();
+                threads.push(std::thread::spawn(move || {
+                    let mut store = TrustStore::default();
+                    for j in 0..32u8 {
+                        store.add_peer(
+                            format!("round-{round}-writer-{i}-peer-{j}"),
+                            None,
+                            fp(&[i, j]),
+                            "2026-08-17T00:00:00Z".into(),
+                        );
+                    }
+                    barrier.wait();
+                    store.save(&path).unwrap();
+                    store
+                }));
+            }
+            let candidates: Vec<TrustStore> = threads
+                .into_iter()
+                .map(|t| t.join().expect("writer"))
+                .collect();
+
+            let final_store = TrustStore::load(&path)
+                .expect("the file must always be valid, parseable TOML, never corrupted");
+            assert!(
+                candidates.contains(&final_store),
+                "round {round}: final trust.toml matches none of the writers exactly — \
+                 bytes from two writers were interleaved into it"
+            );
+        }
     }
 }

@@ -276,6 +276,40 @@ pub fn write_private_file(path: &Path, contents: &[u8]) -> Result<(), OpError> {
     write_private_file_io(path, contents).map_err(|err| config_io_error(path, "write", &err))
 }
 
+/// Ticket source for [`write_private_file_io`]'s temp file name — unique
+/// per *writer*, not just per process (mirrors `resume::write_durably`,
+/// where this pattern originated: `PLAN.md` M7 Step 7-1 brief §4③).
+/// Without it, two writers in the same process (`qsh serve` spawns a
+/// `tokio::spawn` task per inbound connection, and two pairing responses
+/// can land at once) racing the same `path` would share the same pid-only
+/// temp name and truncate/interleave each other's bytes — not a lost
+/// update but a **corrupt file**, which is a strictly worse failure for a
+/// TOML store than either writer's update going missing.
+static WRITE_TICKET: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The ticket [`write_private_file_io`]'s *next* call will consume. Lets a
+/// crash-safety test predict the exact temp path a write will use without
+/// racing the write itself or resetting shared state — `ca::init`'s and
+/// `identity::promote_to_ca_issued`'s `*_recovers_from_an_interrupted_*_write`
+/// tests block a specific temp path with a directory to force that write to
+/// fail; once the temp name carries a ticket, they must read this to know
+/// which ticket to block instead of assuming the old pid-only name.
+///
+/// The prediction this enables is only sound under a **process-isolated
+/// test runner** (`cargo nextest run`, this repo's required one —
+/// `.github/workflows/ci.yml`), because [`WRITE_TICKET`] is a single
+/// process-global counter: under plain `cargo test`'s in-process,
+/// thread-parallel execution, any other test scheduled at the same time
+/// that also calls [`write_private_file`]/[`write_private_file_io`] can
+/// consume a ticket between this read and the write it's predicting for,
+/// making the caller's prediction wrong (`PLAN.md` M7 Step 7-1 검증 라운드
+/// A1, reproduced). Callers of this function carry the same caveat in
+/// their own doc comments.
+#[cfg(test)]
+pub(crate) fn next_write_ticket_for_test() -> u64 {
+    WRITE_TICKET.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub(crate) fn write_private_file_io(path: &Path, contents: &[u8]) -> io::Result<()> {
     use std::io::Write as _;
 
@@ -283,9 +317,10 @@ pub(crate) fn write_private_file_io(path: &Path, contents: &[u8]) -> io::Result<
     let file_name = path
         .file_name()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))?;
+    let ticket = WRITE_TICKET.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut tmp = dir.join(file_name);
     tmp.as_mut_os_string()
-        .push(format!(".tmp{}", std::process::id()));
+        .push(format!(".tmp{}-{ticket}", std::process::id()));
 
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);
@@ -322,6 +357,74 @@ pub(crate) fn config_io_error(path: &Path, what: &str, err: &io::Error) -> OpErr
         format!("failed to {what} {}: {err}", path.display()),
     )
     .with_retryable(false)
+}
+
+/// `<path>.lock` — the sidecar advisory-lock path for one file's whole
+/// read-modify-write cycle. Shared naming convention for every
+/// [`FileLock`] site in the config tree (`trust.toml`, `invites.toml`, the
+/// CA directory) — mirrors `audit::writer`'s own `lock_path_for` (a
+/// directory of rotated files, `<active>.<n>`, so `.lock` can never
+/// collide with a rotation slot; here a directory of config files, so
+/// `.lock` can never collide with a real file name either).
+pub(crate) fn lock_path_for(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".lock");
+    PathBuf::from(name)
+}
+
+/// An exclusive advisory lock held for the duration of one
+/// read-modify-write, on **every** platform — promoted from
+/// `crate::resume` (`PLAN.md` M7 Step 7-1 brief §4) so `trust.toml`,
+/// `invites.toml` and the CA root's key+cert pair share the same
+/// mechanism `resume.json` already relies on, instead of each config file
+/// re-deriving its own.
+///
+/// `std::fs::File::lock` is `flock(2)` on unix — the mechanism ADR-0007
+/// names — and `LockFileEx` on Windows, so the serialisation a `qsh
+/// serve` pairing responder running next to an interactive `trust`
+/// command depends on is real there too rather than a no-op that quietly
+/// loses a write.
+///
+/// **Lock ordering.** Every call site in this crate that also holds a
+/// `std::sync::RwLock`/`Mutex` (`SharedInviteStore::redeem`'s cache lock
+/// is the one example today) must acquire that lock **first** and this
+/// one **second**, never the reverse — reversing it risks a deadlock
+/// between a thread waiting on the `RwLock` while holding this file lock,
+/// and another thread (or process) waiting on this file lock while
+/// holding the `RwLock`. Every site in this codebase acquires this lock
+/// directly around a synchronous read-modify-write with no `.await` and
+/// no further lock acquisition inside its critical section, so that
+/// ordering is the only invariant that matters.
+pub(crate) struct FileLock {
+    file: std::fs::File,
+}
+
+impl FileLock {
+    pub(crate) fn acquire(path: &Path) -> Result<Self, OpError> {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let file = options
+            .open(path)
+            .map_err(|e| config_io_error(path, "open lock file", &e))?;
+        // Blocking exclusive lock: every critical section behind this lock
+        // is a small file rewrite (no network I/O, see the call sites'
+        // docs), and a failed lock would mean losing a write outright.
+        file.lock().map_err(|e| config_io_error(path, "lock", &e))?;
+        Ok(Self { file })
+    }
+}
+
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        // Closing the file releases the lock anyway; being explicit keeps
+        // the critical section obvious.
+        let _ = self.file.unlock();
+    }
 }
 
 /// Current UTC time as an RFC 3339 string truncated to whole seconds, e.g.

@@ -433,6 +433,12 @@ impl Ops {
         };
 
         let path = self.paths.trust_file();
+        // Whole load→mutate→save under lock, not just the write — a
+        // concurrent `qsh serve` pairing response or another CLI process
+        // racing this same read-modify-write must not have its change
+        // silently discarded (`TrustStore::lock`'s own doc, `PLAN.md` M7
+        // Step 7-1).
+        let _lock = TrustStore::lock(&path)?;
         let mut store = TrustStore::load(&path)?;
         let (peer, created, updated) =
             store.add_peer(name, req.address, fingerprint, now_rfc3339());
@@ -458,6 +464,8 @@ impl Ops {
     /// error (`removed: false`, idempotent).
     pub fn trust_remove(&self, name: &str) -> Result<TrustRemoveData, OpError> {
         let path = self.paths.trust_file();
+        // See `trust_add`'s identical comment — whole cycle under lock.
+        let _lock = TrustStore::lock(&path)?;
         let mut store = TrustStore::load(&path)?;
         let removed = store.remove(name);
         if removed {
@@ -485,6 +493,11 @@ impl Ops {
         let secret = crate::trust::pairing::generate_secret();
         let now = std::time::SystemTime::now();
         let path = self.paths.invites_file();
+        // Whole load→mutate→save under lock, not just the write — closes
+        // report F-9's residual lost-update window against a concurrent
+        // `qsh serve` redeeming a different invite at the same time
+        // (`InviteStore::lock`'s own doc, `PLAN.md` M7 Step 7-1).
+        let _lock = crate::trust::pairing::InviteStore::lock(&path)?;
         let mut store = crate::trust::pairing::InviteStore::load(&path)?;
         store.prune(now);
         let (_created_at, expires_at) = store.add(secret.as_slice(), now);
@@ -572,6 +585,11 @@ impl Ops {
         let (success, observed_fp) = outcome?;
 
         let path = self.paths.trust_file();
+        // See `trust_add`'s identical comment — whole cycle under lock.
+        // Acquired only now, after the network dial above has already
+        // completed: the critical section stays a small local file
+        // rewrite, never a network wait.
+        let _lock = TrustStore::lock(&path)?;
         let mut store = TrustStore::load(&path)?;
         // Report F-6: pin with the address this exchange just dialed
         // successfully (`req.address`, the same meaning `trust add
@@ -1077,6 +1095,94 @@ mod tests {
 
         let listed = ops.trust_list().unwrap();
         assert_eq!(listed.peers, vec![moved.peer], "no duplicate entry");
+    }
+
+    /// Regression for `PLAN.md` M7 Step 7-1 검증 라운드 A2: `crate::trust`'s
+    /// own concurrency regressions (`concurrent_full_rmw_cycles_do_not_lose_each_others_peers`
+    /// et al.) call `TrustStore::lock`/`load`/`save` directly from test
+    /// threads and never go through `Ops::trust_add` — so a future edit
+    /// that silently dropped the `TrustStore::lock(&path)?` line at the
+    /// real call site (`Ops::trust_add`, this file) would leave the whole
+    /// suite green. This drives that actual call site instead: 8 threads,
+    /// each its own `Ops` bound to the same config directory (a fresh
+    /// `Ops` per thread rather than a shared clone, so the wiring under
+    /// test is the file lock, not any in-process synchronization `Ops`
+    /// might incidentally provide), concurrently `trust_add`ing a distinct
+    /// peer. All 8 must survive.
+    #[test]
+    fn concurrent_trust_add_through_ops_does_not_lose_a_peer() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path().join("config"), dir.path().join("state"));
+
+        let mut threads = Vec::new();
+        for i in 0..8u8 {
+            let ops = Ops::new(paths.clone());
+            let fingerprint = qsh_transport::Fingerprint::of_spki_der(&[i; 4]).to_string();
+            threads.push(std::thread::spawn(move || {
+                ops.trust_add(TrustAddReq {
+                    name: format!("peer-{i}"),
+                    address: None,
+                    fingerprint: Some(fingerprint),
+                })
+                .unwrap();
+            }));
+        }
+        for t in threads {
+            t.join().expect("writer");
+        }
+
+        let listed = Ops::new(paths).trust_list().unwrap();
+        assert_eq!(
+            listed.peers.len(),
+            8,
+            "a concurrent Ops::trust_add lost a peer — the lock wired into the real call \
+             site isn't doing its job"
+        );
+    }
+
+    /// Same regression, `Ops::trust_remove`'s call site instead of
+    /// `trust_add`'s: 8 peers are pre-seeded, then 8 threads each their own
+    /// `Ops` on the same config directory concurrently `trust_remove` a
+    /// distinct one. All 8 removals must land — a lost one would mean a
+    /// peer that was supposed to be unpinned came back because a stale,
+    /// concurrently-loaded snapshot overwrote the file that already
+    /// reflected its removal.
+    #[test]
+    fn concurrent_trust_remove_through_ops_does_not_lose_a_removal() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path().join("config"), dir.path().join("state"));
+
+        let seed = Ops::new(paths.clone());
+        for i in 0..8u8 {
+            let fingerprint = qsh_transport::Fingerprint::of_spki_der(&[i; 4]).to_string();
+            seed.trust_add(TrustAddReq {
+                name: format!("peer-{i}"),
+                address: None,
+                fingerprint: Some(fingerprint),
+            })
+            .unwrap();
+        }
+        assert_eq!(seed.trust_list().unwrap().peers.len(), 8, "seed setup");
+
+        let mut threads = Vec::new();
+        for i in 0..8u8 {
+            let ops = Ops::new(paths.clone());
+            threads.push(std::thread::spawn(move || {
+                let removed = ops.trust_remove(&format!("peer-{i}")).unwrap();
+                assert!(removed.removed, "peer-{i} was not found to remove");
+            }));
+        }
+        for t in threads {
+            t.join().expect("remover");
+        }
+
+        let listed = Ops::new(paths).trust_list().unwrap();
+        assert!(
+            listed.peers.is_empty(),
+            "a concurrent Ops::trust_remove lost a removal (peers left: {:?}) — the lock \
+             wired into the real call site isn't doing its job",
+            listed.peers.iter().map(|p| &p.name).collect::<Vec<_>>()
+        );
     }
 
     /// M7 Step 2 decision B, the guardrail half: a *different* fingerprint
