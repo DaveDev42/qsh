@@ -690,8 +690,8 @@ impl Server {
     /// `crates/qsh-testkit/tests/session_loopback.rs`'s
     /// `session_control_binds_write_and_resize_to_the_opener`), now true by
     /// construction instead of by careful sequencing.
-    /// `action` is the caller's own [`crate::acl::action_of`] lookup
-    /// (`"session.write"`/`"session.resize"`, `PLAN.md` M5 Step 8) — both
+    /// `action` is the caller's own `crate::acl::Op::X.action()` lookup
+    /// (`Op::SessionWrite`/`Op::SessionResize`, `PLAN.md` M5 Step 8) — both
     /// resolve to `Action::SessionControl` today, but sourcing it from the
     /// registry at each call site (rather than hardcoding the enum
     /// variant here) is what keeps this shared helper and `OP_REGISTRY`
@@ -882,7 +882,7 @@ impl Server {
 
         // ---- ACL choke point: decide + audit BEFORE any resource. ----
         if let Err(denied) =
-            self.authorize(ctx, request_id, crate::acl::action_of("exec.run"), "exec")
+            self.authorize(ctx, request_id, crate::acl::Op::ExecRun.action(), "exec")
         {
             return *denied;
         }
@@ -1058,7 +1058,7 @@ impl Server {
         if let Err(denied) = self.authorize(
             ctx,
             request_id,
-            crate::acl::action_of("session.open"),
+            crate::acl::Op::SessionOpen.action(),
             SESSION_RESOURCE,
         ) {
             return *denied;
@@ -1181,7 +1181,7 @@ impl Server {
         if let Err(denied) = self.authorize(
             ctx,
             request_id,
-            crate::acl::action_of("session.list"),
+            crate::acl::Op::SessionList.action(),
             SESSION_RESOURCE,
         ) {
             return *denied;
@@ -1214,7 +1214,7 @@ impl Server {
         if let Err(denied) = self.authorize(
             ctx,
             request_id,
-            crate::acl::action_of("session.get"),
+            crate::acl::Op::SessionGet.action(),
             &req.session_id,
         ) {
             return *denied;
@@ -1245,7 +1245,7 @@ impl Server {
         if let Err(denied) = self.authorize(
             ctx,
             request_id,
-            crate::acl::action_of("session.read"),
+            crate::acl::Op::SessionRead.action(),
             &req.session_id,
         ) {
             return *denied;
@@ -1360,7 +1360,7 @@ impl Server {
         self.authorize_session_control(
             ctx,
             request_id,
-            crate::acl::action_of("session.write"),
+            crate::acl::Op::SessionWrite.action(),
             &id,
         )?;
         let conn = ctx.connection_id();
@@ -1449,7 +1449,7 @@ impl Server {
         if let Err(denied) = self.authorize_session_control(
             ctx,
             request_id,
-            crate::acl::action_of("session.resize"),
+            crate::acl::Op::SessionResize.action(),
             &id,
         ) {
             return *denied;
@@ -1519,7 +1519,7 @@ impl Server {
         if let Err(denied) = self.authorize(
             ctx,
             request_id,
-            crate::acl::action_of("session.close"),
+            crate::acl::Op::SessionClose.action(),
             &req.session_id,
         ) {
             return *denied;
@@ -1606,7 +1606,7 @@ impl Server {
                     request_id,
                     &ctx.principal,
                     ctx.auth_path,
-                    crate::acl::action_of("session.attach"),
+                    crate::acl::Op::SessionAttach.action(),
                     &req.session_id,
                     crate::acl::Decision::Deny,
                     // Not a policy-rule decision — a credential-
@@ -1626,7 +1626,7 @@ impl Server {
         if let Err(denied) = self.authorize(
             ctx,
             request_id,
-            crate::acl::action_of("session.attach"),
+            crate::acl::Op::SessionAttach.action(),
             &req.session_id,
         ) {
             return *denied;
@@ -2565,7 +2565,7 @@ impl Server {
         // helper `SESSION_DATA`'s inline attach check uses — it decides and
         // writes the audit line for both outcomes (SC6: every privileged op
         // leaves an audit record).
-        if !self.authorize_stream(ctx, crate::acl::action_of("forward.local"), &resource) {
+        if !self.authorize_stream(ctx, crate::acl::Op::ForwardLocal.action(), &resource) {
             // The same constant the control-stream `PERMISSION_DENIED`
             // uses (`Server::permission_denied`): a denial must not tell
             // the peer *which* rule refused it.
@@ -2681,7 +2681,7 @@ impl Server {
         self.authorize(
             ctx,
             request_id,
-            crate::acl::action_of("forward.remote"),
+            crate::acl::Op::ForwardRemote.action(),
             &resource,
         )?;
 
@@ -2895,7 +2895,7 @@ impl Server {
         if let Err(reply) = self.authorize_owned(
             ctx,
             request_id,
-            crate::acl::action_of("forward.remote.close"),
+            crate::acl::Op::ForwardRemoteClose.action(),
             ResourceRef {
                 id: &req.forward_id,
                 owner: owner.as_deref(),
@@ -3019,7 +3019,7 @@ impl Server {
                 // interactive attach through the back door.
                 //
                 // Deliberately the literal `Action::SessionAttach`, not an
-                // `acl::action_of(...)` lookup: this seam is
+                // `acl::Op::SessionAttach.action()` lookup: this seam is
                 // `DENY_SEAMS`'s `"session.attach@data-stream"` row, which
                 // has no `OP_REGISTRY` entry of its own (`OpSpec`'s own
                 // doc, `PLAN.md` M5 Step 8) — it shares the control-stream
@@ -4403,16 +4403,16 @@ mod tests {
         // time as `Action` literals — a dedup set, since `session.write`/
         // `resize`/`close` all resolve to `Action::SessionControl`.
         let expected_actions: std::collections::BTreeSet<&str> = [
-            "session.open",
-            "session.list",
-            "session.get",
-            "session.read",
-            "session.write",
-            "session.resize",
-            "session.close",
+            crate::acl::Op::SessionOpen,
+            crate::acl::Op::SessionList,
+            crate::acl::Op::SessionGet,
+            crate::acl::Op::SessionRead,
+            crate::acl::Op::SessionWrite,
+            crate::acl::Op::SessionResize,
+            crate::acl::Op::SessionClose,
         ]
         .iter()
-        .map(|op| crate::acl::action_of(op).as_str())
+        .map(|op| op.action().as_str())
         .collect();
         assert_eq!(actions, expected_actions);
     }
@@ -4440,18 +4440,18 @@ mod tests {
             // literal string is still the request's own, same as before).
             let (action, resource) = match name {
                 "open" => (
-                    crate::acl::action_of("session.open"),
+                    crate::acl::Op::SessionOpen.action(),
                     SESSION_RESOURCE.to_string(),
                 ),
                 "list" => (
-                    crate::acl::action_of("session.list"),
+                    crate::acl::Op::SessionList.action(),
                     SESSION_RESOURCE.to_string(),
                 ),
-                "get" => (crate::acl::action_of("session.get"), id.clone()),
-                "read" => (crate::acl::action_of("session.read"), id.clone()),
-                "write" => (crate::acl::action_of("session.write"), id.clone()),
-                "resize" => (crate::acl::action_of("session.resize"), id.clone()),
-                "close" => (crate::acl::action_of("session.close"), id.clone()),
+                "get" => (crate::acl::Op::SessionGet.action(), id.clone()),
+                "read" => (crate::acl::Op::SessionRead.action(), id.clone()),
+                "write" => (crate::acl::Op::SessionWrite.action(), id.clone()),
+                "resize" => (crate::acl::Op::SessionResize.action(), id.clone()),
+                "close" => (crate::acl::Op::SessionClose.action(), id.clone()),
                 other => panic!("unexpected op {other}"),
             };
             expected.push((name, action, resource));

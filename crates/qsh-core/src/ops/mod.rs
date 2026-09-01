@@ -4,7 +4,7 @@
 //! only translate an [`Ops`] call into their own presentation.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use qsh_proto::{
@@ -254,6 +254,78 @@ pub struct Ops {
     /// clone of this `Ops` shares the same table (`tunnel::TunnelHoldRegistry`'s
     /// own doc).
     tunnel_holds: tunnel::TunnelHoldRegistry,
+    /// The Tokio runtime [`session::Connected::connect_target`]/
+    /// [`session::Connected::connect_reverse`] dial and block on, shared
+    /// across every clone of this `Ops` and every pull on it instead of
+    /// built-and-torn-down per call (`PLAN.md` M7 Step 7-2 ①: a single
+    /// abandoned pull used to cost 11 threads — a whole `num_cpus`-sized
+    /// `Builder::new_multi_thread()` plus a `lookup_host` blocking thread —
+    /// on top of its own QUIC endpoint/socket; measured 11.05
+    /// threads/5.00 fds per in-flight pull before this change).
+    ///
+    /// **Lazy by construction**: nothing builds this until the first
+    /// `connect*` call reaches [`Self::connect_runtime`], so a purely local
+    /// op (`qsh version`, `qsh trust list`, …) never pays for it. `Arc<
+    /// OnceLock<Arc<SharedRuntime>>>`, not a bare `OnceLock`, for two
+    /// reasons — the outer `Arc` lets every `Ops::clone()` share the one
+    /// cell (a `static OnceLock` was considered and rejected: it would
+    /// outlive `Ops` and break test isolation, since `qsh-testkit` builds
+    /// and drops many `Ops` instances with different `Paths` per test), and
+    /// the inner `Arc<SharedRuntime>` lets a [`session::Connected`] hold an
+    /// owned handle that outlives the `&Ops` borrow which created it — a
+    /// bare `&Runtime` borrowed from the cell could not be stored across
+    /// `connect_target`'s return. [`SharedRuntime`] (rather than a bare
+    /// `Runtime`) is what makes the last such `Arc` safe to drop from
+    /// literally anywhere — see its own doc.
+    ///
+    /// Never reused for the `qsh mcp` server's own long-lived runtime
+    /// ([`crate`]'s caller wires that up separately in `qsh-cli`): sharing
+    /// one runtime's blocking-thread pool between "the server accepting MCP
+    /// requests" and "every in-flight pull's blocking work" was measured to
+    /// deadlock around ~256 concurrent pulls, because each pull both
+    /// occupies a blocking-pool thread (the caller's `spawn_blocking`) and
+    /// then asks the *same* pool for another one (`tokio::net::lookup_host`)
+    /// — two independent runtimes keep the two demands on separate pools.
+    connect_runtime: Arc<OnceLock<Arc<SharedRuntime>>>,
+}
+
+/// A [`tokio::runtime::Runtime`] whose `Drop` never blocks.
+///
+/// The plain `Runtime::drop` waits for every worker thread to park before
+/// returning, and that wait **panics** — "Cannot drop a runtime in a
+/// context where blocking is not allowed" — if it happens to run on a
+/// thread that is, at that moment, itself executing inside some async
+/// task (any runtime's, not necessarily this one's). [`Ops::connect_runtime`]
+/// is shared and reference-counted, so its very last `Arc` can be dropped
+/// almost anywhere — in particular, `qsh-testkit`'s loopback fixtures build
+/// an `Ops` inside a `#[tokio::test]` and drop it at the end of that same
+/// async test function, which is exactly such a context (found by this
+/// step's own nextest run: `qsh-testkit::reverse_attach
+/// detaching_leaves_the_session_running_and_a_reattach_replays_the_retained_ring`
+/// failed with precisely that panic before this wrapper existed). Wrapping
+/// every shared handle in this type instead and routing its `Drop` through
+/// [`tokio::runtime::Runtime::shutdown_background`] — documented by tokio
+/// itself as the non-blocking teardown, safe to call from inside another
+/// runtime — fixes it generally, for every current and future caller,
+/// rather than special-casing the one call site the test happened to
+/// exercise.
+#[derive(Debug)]
+pub(crate) struct SharedRuntime(Option<tokio::runtime::Runtime>);
+
+impl std::ops::Deref for SharedRuntime {
+    type Target = tokio::runtime::Runtime;
+
+    fn deref(&self) -> &tokio::runtime::Runtime {
+        self.0.as_ref().expect("runtime is only taken by Drop")
+    }
+}
+
+impl Drop for SharedRuntime {
+    fn drop(&mut self) {
+        if let Some(runtime) = self.0.take() {
+            runtime.shutdown_background();
+        }
+    }
 }
 
 impl Ops {
@@ -263,6 +335,38 @@ impl Ops {
             paths,
             recovery: session::RecoveryConfig::default(),
             tunnel_holds: tunnel::new_tunnel_hold_registry(),
+            connect_runtime: Arc::new(OnceLock::new()),
+        }
+    }
+
+    /// The shared dial runtime, building it on first use.
+    ///
+    /// `std::sync::OnceLock::get_or_try_init` is still unstable (tracking
+    /// issue 109737), so a fallible build cannot use `get_or_init`
+    /// directly; this hand-rolls the same double-checked shape:
+    /// [`OnceLock::get`] first (the fast, already-built path every pull
+    /// after the first takes), and only on a miss does it build a runtime
+    /// and race [`OnceLock::set`] to install it. Losing that race is
+    /// harmless — the loser's freshly built, never-used runtime is simply
+    /// dropped, which [`SharedRuntime`]'s own `Drop` makes safe regardless
+    /// of which context that drop happens to run in.
+    pub(crate) fn connect_runtime(&self) -> Result<Arc<SharedRuntime>, OpError> {
+        if let Some(runtime) = self.connect_runtime.get() {
+            return Ok(Arc::clone(runtime));
+        }
+        let built = Arc::new(SharedRuntime(Some(
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .map_err(|err| OpError::new(ErrorCode::Internal, format!("runtime: {err}")))?,
+        )));
+        match self.connect_runtime.set(Arc::clone(&built)) {
+            Ok(()) => Ok(built),
+            Err(_) => Ok(Arc::clone(
+                self.connect_runtime
+                    .get()
+                    .expect("just set by the winning thread"),
+            )),
         }
     }
 
@@ -978,6 +1082,123 @@ mod tests {
         let data = ops.version().unwrap();
         assert_eq!(data.version, env!("CARGO_PKG_VERSION"));
         assert_eq!(data.schemas, vec!["qsh.cli/v1", "qsh.event/v1"]);
+    }
+
+    /// `PLAN.md` M7 Step 7-2 ①: the shared dial runtime must be **lazy** —
+    /// nothing may build it until a `connect*` call actually reaches
+    /// [`Ops::connect_runtime`], or a purely local command (`qsh version`,
+    /// tested here) would pay for a `num_cpus`-sized `multi_thread`
+    /// runtime it never uses. Reaches into the private `connect_runtime`
+    /// `OnceLock` directly (this test module is `super`'s own, not an
+    /// external caller) rather than inferring laziness indirectly, so a
+    /// regression that starts eagerly building the runtime in `Ops::new`
+    /// is caught here rather than only showing up as a thread-count
+    /// regression under load.
+    #[test]
+    fn connect_runtime_is_lazy_until_first_connect_call() {
+        let (_guard, ops) = temp_ops();
+        assert!(
+            ops.connect_runtime.get().is_none(),
+            "Ops::new must not build the shared dial runtime eagerly"
+        );
+        // A local-only op — no host, no dial — must still leave it unbuilt.
+        ops.version().unwrap();
+        assert!(
+            ops.connect_runtime.get().is_none(),
+            "a local-only op (version.get) must not build the shared dial runtime"
+        );
+        // `qsh trust list` by name — the field doc on `Ops::connect_runtime`
+        // points at it explicitly as a local-only op that must not force
+        // the runtime into existence.
+        ops.trust_list().unwrap();
+        assert!(
+            ops.connect_runtime.get().is_none(),
+            "a local-only op (trust.list) must not build the shared dial runtime"
+        );
+        // The schema surface is local-only too (no host, no dial).
+        ops.schema().unwrap();
+        assert!(
+            ops.connect_runtime.get().is_none(),
+            "a local-only op (schema.get) must not build the shared dial runtime"
+        );
+    }
+
+    /// The other half of `PLAN.md` M7 Step 7-2 ①: once built, the runtime
+    /// is **shared** — every `connect_runtime()` call on the same `Ops`
+    /// (and on every clone of it, since `Ops::clone` only bumps the outer
+    /// `Arc`'s refcount) returns a handle to the exact same
+    /// `tokio::runtime::Runtime`, not a fresh one per call. `Arc::ptr_eq`
+    /// is the direct claim — same allocation, not merely
+    /// equal-by-value — which is what makes a pull's per-call `Builder::
+    /// new_multi_thread()` (the 11-threads-per-pull cost this step
+    /// removes) actually go away.
+    #[test]
+    fn connect_runtime_is_the_same_instance_across_calls_and_clones() {
+        let (_guard, ops) = temp_ops();
+        let first = ops.connect_runtime().unwrap();
+        let second = ops.connect_runtime().unwrap();
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "two connect_runtime() calls on the same Ops must share one Runtime"
+        );
+
+        let cloned = ops.clone();
+        let third = cloned.connect_runtime().unwrap();
+        assert!(
+            Arc::ptr_eq(&first, &third),
+            "Ops::clone must not fork a second dial runtime"
+        );
+
+        // The other direction: a wholly independent `Ops` (its own
+        // `Paths`, not a clone of the first) must NOT share the first's
+        // runtime. The field doc on `Ops::connect_runtime` explicitly
+        // rejects a `static OnceLock` for this reason — it "would outlive
+        // `Ops` and break test isolation" — so this pins that rejection
+        // both ways: same `Ops`/clones share one instance (above), a
+        // second `Ops` gets its own.
+        let (_other_guard, other_ops) = temp_ops();
+        let other = other_ops.connect_runtime().unwrap();
+        assert!(
+            !Arc::ptr_eq(&first, &other),
+            "two independent Ops instances must not share one dial runtime \
+             (a static OnceLock would fail this)"
+        );
+    }
+
+    /// Regression pin for the failure this step's own nextest run caught:
+    /// `qsh-testkit::reverse_attach
+    /// detaching_leaves_the_session_running_and_a_reattach_replays_the_retained_ring`
+    /// panicked with "Cannot drop a runtime in a context where blocking is
+    /// not allowed" the first time `Ops`'s shared runtime shipped as a bare
+    /// `Arc<tokio::runtime::Runtime>`. Root cause: `connect_runtime` is
+    /// reference-counted and shared, so its very last `Arc` can be dropped
+    /// almost anywhere — that fixture builds an `Ops` inside a
+    /// `#[tokio::test]` and drops it before the async test function
+    /// returns, and the plain `Runtime::drop` blocks (panicking if that
+    /// block happens on a thread already executing inside *any* async
+    /// task). [`SharedRuntime`] fixes this generally by routing its `Drop`
+    /// through `Runtime::shutdown_background` instead. This test
+    /// reproduces the minimal shape directly, without going through a full
+    /// loopback fixture: populate the shared-runtime cell, then drop the
+    /// `Ops` that owns it from inside a *different*, already-running
+    /// runtime. Passing (not panicking) is the assertion.
+    #[test]
+    fn dropping_ops_with_a_live_shared_runtime_from_inside_another_runtime_does_not_panic() {
+        let (_guard, ops) = temp_ops();
+        ops.connect_runtime()
+            .expect("build the shared runtime so there is something to drop");
+
+        let outer = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build the outer async context this test drops `ops` from");
+        outer.block_on(async move {
+            // `ops` (and with it, `connect_runtime`'s last `Arc<SharedRuntime>`)
+            // drops here, on a thread `outer` currently has executing this
+            // async block — exactly the context the plain `Runtime::drop`
+            // cannot tolerate.
+            drop(ops);
+        });
     }
 
     #[test]

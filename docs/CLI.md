@@ -1045,6 +1045,16 @@ MVP에서는 stdio transport만 지원한다. MCP stdout에는 protocol frame만
 
 Tool input과 output field는 JSON CLI의 data type과 동일하다. MCP adapter가 command string을 만들거나 CLI output을 다시 parse해서는 안 된다. 두 adapter 모두 같은 Rust operation layer를 직접 호출한다.
 
+**어떤 op이 tool이 되는가.** 원격 host의 상태를 바꾸거나 조회하는 op만 tool로 낸다. 두 부류가 빠진다.
+
+첫째, 이 기계의 로컬 상태를 읽거나 쓰는 op — `identity.init`, `trust.*`, `cert.*`, `doctor.run`, `acl.check`. `host.list`와 `host.get`이 §2.5에서 `acl.check`와 같은 "인가 불요" 행에 있으면서도 앞의 둘만 tool인 이유가 이것이다: 앞의 둘은 도달 가능한 원격 host를 답하고, 뒤는 이 기계의 파일 내용을 답한다.
+
+이 부류의 경계는 §2.5의 행이 아니라 "답이 어느 기계의 사실인가"다. `tunnel.close`(=`close_tunnel`)와 `tunnel.list`는 §2.5에서 한 행에 있지만 앞의 것만 tool이다 — `tunnel.close`는 host 쪽 소유권 검사를 거쳐 원격의 forward를 닫지만, `tunnel.list`는 이 기계의 상주 `qsh listen` daemon이 쥔 hold를 답한다(§6.9). `session.attach`는 아예 다른 이유로 빠진다: value operation이 아니라 stream operation이라(§7.1) value tool 표면에 애초에 후보가 아니다.
+
+둘째, wire contract 자체를 기술하는 introspection op — `schema.get`, `capabilities.get`, `version.get`. `capabilities.get`은 host를 주면 실제로 그 peer와 negotiation한 결과를 답하므로(§6.10) 첫째 기준으로는 걸러지지 않지만, 그 답은 host의 상태가 아니라 두 build 사이의 protocol 합의다 — 에이전트는 그 합의를 이미 tool schema 형태로 받아 들고 있고, 자기가 부를 수 있는 tool 목록보다 더 많은 것을 negotiation 결과에서 알아낼 수 없다. 이 셋은 사람이 버전 불일치를 진단할 때 쓰는 CLI 표면으로 남는다.
+
+`acl.check`를 tool로 내지 않기로 한 결정(M7)의 근거는 정보 노출이 아니라 **정확성**이다. `acl.check`는 호출자 로컬의 `acl.toml`을 평가한다(§6.15). 에이전트가 알고 싶은 것은 "저 host가 나를 허용하는가"인데, 클라이언트 쪽에 `acl.toml`이 없는 정상 배치에서 이 op의 답은 `policy.loaded: false`와 무조건 `deny`다. 에이전트는 이것을 "그 작업은 불가능하다"로 읽는다. 게다가 tool 표면에는 에이전트가 자기 principal을 알아낼 방법이 없다 — `get_host`의 `device_id`는 상대 peer의 신원이다. 로컬 정책을 확인하려면 사람이 `qsh acl check`를 직접 실행한다.
+
 ### 8.3 지속 출력
 
 MVP의 `read_session`은 streaming MCP extension에 의존하지 않는다.

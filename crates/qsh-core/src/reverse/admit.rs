@@ -114,7 +114,7 @@ pub fn admit(
             let _ = audit.record(&AuditRecord::connection_level(
                 req.principal,
                 req.auth_path,
-                crate::acl::action_of("host.reverse"),
+                crate::acl::Op::HostReverse.action(),
                 resource,
                 Decision::Deny,
                 // Pre-choke-point: name resolution failed, never reached
@@ -131,7 +131,7 @@ pub fn admit(
     let verdict = authorizer.check(
         req.principal,
         req.auth_path,
-        crate::acl::action_of("host.reverse"),
+        crate::acl::Op::HostReverse.action(),
         ResourceRef::unowned(&name),
     );
     // A connection-level decision, not a reply to a control-stream
@@ -141,7 +141,7 @@ pub fn admit(
     let recorded = audit.record(&AuditRecord::connection_level(
         req.principal,
         req.auth_path,
-        crate::acl::action_of("host.reverse"),
+        crate::acl::Op::HostReverse.action(),
         &name,
         verdict.decision,
         verdict.rule,

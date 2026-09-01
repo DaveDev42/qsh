@@ -230,7 +230,12 @@ mod section_2_5 {
 
         let registry: HashSet<(String, String)> = OP_REGISTRY
             .iter()
-            .map(|spec| (spec.op.to_string(), spec.action.as_str().to_string()))
+            .map(|spec| {
+                (
+                    spec.op.as_str().to_string(),
+                    spec.action.as_str().to_string(),
+                )
+            })
             .collect();
         assert_eq!(
             registry, expected,
@@ -392,7 +397,7 @@ mod dispatch_surface {
         // Every op the classifier names must be a real OP_REGISTRY row.
         for op in &needs_op {
             assert!(
-                OP_REGISTRY.iter().any(|spec| &spec.op == op),
+                OP_REGISTRY.iter().any(|spec| spec.op.as_str() == *op),
                 "classify() mapped a Body variant to {op:?}, which is not an OP_REGISTRY row"
             );
         }
@@ -403,7 +408,7 @@ mod dispatch_surface {
         // be reached by exactly one variant.
         let wire_reachable: HashSet<&'static str> = OP_REGISTRY
             .iter()
-            .map(|spec| spec.op)
+            .map(|spec| spec.op.as_str())
             .filter(|op| !matches!(*op, "forward.local" | "host.reverse"))
             .collect();
         assert_eq!(
@@ -521,7 +526,9 @@ mod dod2_audit {
         let is_session_sentinel = resource == SESSION_RESOURCE;
         let ok = match spec.resource_kind {
             ResourceKind::Exec => is_exec_sentinel,
-            ResourceKind::Session if matches!(spec.op, "session.open" | "session.list") => {
+            ResourceKind::Session
+                if matches!(spec.op.as_str(), "session.open" | "session.list") =>
+            {
                 is_session_sentinel
             }
             ResourceKind::Session
@@ -533,7 +540,8 @@ mod dod2_audit {
             ok,
             "{}'s declared resource_kind ({:?}) does not match its observed audit resource \
              {resource:?}",
-            spec.op, spec.resource_kind
+            spec.op.as_str(),
+            spec.resource_kind
         );
     }
 
@@ -556,7 +564,7 @@ mod dod2_audit {
     ) -> ControlMessage {
         let spec = OP_REGISTRY
             .iter()
-            .find(|s| s.op == op)
+            .find(|s| s.op.as_str() == op)
             .unwrap_or_else(|| panic!("{op:?} is not an OP_REGISTRY row"));
         let expected_action = spec.action;
         let before = rig.audit.records().len();
@@ -949,7 +957,7 @@ mod dod2_audit {
         fn spec_of(op: &str) -> &'static OpSpec {
             OP_REGISTRY
                 .iter()
-                .find(|s| s.op == op)
+                .find(|s| s.op.as_str() == op)
                 .unwrap_or_else(|| panic!("{op} must be an OP_REGISTRY row"))
         }
         fn expect(spec: &OpSpec) -> (&'static str, Option<ErrorCode>) {
@@ -1059,7 +1067,7 @@ mod dod2_audit {
         assert_eq!(DISPATCH_DRIVABLE_OPS.len(), 10);
         for op in DISPATCH_DRIVABLE_OPS {
             assert!(
-                OP_REGISTRY.iter().any(|spec| &spec.op == op),
+                OP_REGISTRY.iter().any(|spec| spec.op.as_str() == *op),
                 "{op} is in DISPATCH_DRIVABLE_OPS but not in OP_REGISTRY"
             );
         }
@@ -1083,7 +1091,7 @@ mod single_source {
     fn every_op_registry_row_is_driven_somewhere() {
         let mut all: HashSet<&str> = dod2_audit::DISPATCH_DRIVABLE_OPS.iter().copied().collect();
         all.extend(TESTKIT_ONLY_OPS.iter().copied());
-        let registry: HashSet<&str> = OP_REGISTRY.iter().map(|spec| spec.op).collect();
+        let registry: HashSet<&str> = OP_REGISTRY.iter().map(|spec| spec.op.as_str()).collect();
         assert_eq!(
             all, registry,
             "OP_REGISTRY has a row neither this file's DISPATCH_DRIVABLE_OPS nor \
@@ -1166,7 +1174,7 @@ mod source_scan {
         assert!(
             call_sites
                 .iter()
-                .any(|line| line.contains("action_of(\"forward.local\")")),
+                .any(|line| line.contains("Op::ForwardLocal.action()")),
             "one authorize_stream call site must be forward.local's, by name: {call_sites:?}"
         );
         assert!(
@@ -1179,17 +1187,17 @@ mod source_scan {
     }
 
     /// P2-6: every dispatch handler is supposed to get its `Action` from
-    /// `crate::acl::action_of(op)`, not a hardcoded `Action::` variant —
+    /// `crate::acl::Op::X.action()`, not a hardcoded `Action::` variant —
     /// that is what keeps a handler and `OP_REGISTRY` from silently
-    /// drifting apart (`OpSpec`'s own doc, `action_of`'s own doc: "the one
-    /// place ... handlers ... get their Action from, so a handler and
-    /// this registry cannot independently drift"). The one documented
+    /// drifting apart (`OpSpec`'s own doc, `Op::action`'s own doc: "the
+    /// sole replacement for the deleted `action_of`... every production
+    /// call site now writes `Op::X.action()`"). The one documented
     /// exception is `session.attach@data-stream`, which has no
     /// `OP_REGISTRY` row of its own to look up (same doc). This counts
     /// real `Action::` variant literals in the non-test region and pins
     /// that count to exactly one, at that one documented call site — a
     /// handler that starts hardcoding `Action::Whatever` instead of
-    /// calling `action_of` fails here, not silently.
+    /// calling `Op::X.action()` fails here, not silently.
     #[test]
     fn action_variant_literals_are_pinned_to_the_one_documented_exception() {
         let source = server_mod_production_source();
@@ -1201,7 +1209,7 @@ mod source_scan {
             literal_lines.len(),
             1,
             "server/mod.rs's production code must have exactly one Action:: variant \
-             literal — every other handler must route through crate::acl::action_of(op) \
+             literal — every other handler must route through crate::acl::Op::X.action() \
              instead of naming an Action variant directly: {literal_lines:?}"
         );
         assert!(

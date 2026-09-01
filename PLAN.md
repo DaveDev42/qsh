@@ -157,9 +157,96 @@ A2는 `Ops::trust_add`/`trust_remove`를 8스레드로 동시 구동하는 테�
 **main 세션 독립 변이 2건 전건 CAUGHT**(fixer 보고를 그대로 믿지 않고 재현): M1(`ops/mod.rs:441` 잠금 삭제) → EXIT=101 `a concurrent Ops::trust_add lost a peer`; M3(`config.rs`의 `-{ticket}` 제거) → **3/3 EXIT=101**, 전부 round 0에서 즉시 실패(rename ENOENT 경쟁). 검출력 0.2가 사실상 결정론으로 바뀐 것을 실측으로 확인했다. 둘 다 exact-inverse 원복 후 재확인.
 **개인 리뷰**: 정정된 주석 2곳이 정직하다 — `config.rs`는 ticket 예측이 "프로세스 격리 러너 하에서만 성립"함을 CI 파일까지 인용해 적고, `pairing.rs`는 남는 창이 무엇인지(accept/consume 판정과 pinning 부작용이 잠금 **이전**) 명시하면서 **한 프로세스 안에서는 cache RwLock이 그 판정을 완전 직렬화한다**는 실제 배치의 사실도 함께 적는다 — 과소·과대 주장 어느 쪽도 아니다. 영어 주석 안의 한국어 PLAN 절 인용은 M6 선례가 이미 다수라 리포 관행과 일관. **Step 7-1 종료.**
 
+**(a)-추기 — Step 7-2 ③ 착지: 위치를 §8.4 아닌 §8.2로 정정 (2026-09-01, main 세션).** 설계 게이트(위 ③·L141)는 tool 포함 기준을 §8.4(보안)에 신설한다고 했으나 **§8.2(Tool mapping)에 넣었다.** §8.4는 MCP 표면이 무엇을 노출해도 되는지를 다루는 절이고, "어떤 op이 tool이 되는가"는 tool 목록 표 바로 아래에 있어야 다음 사람이 표를 고치려 할 때 읽는다. 기각 근거 문단도 같은 자리에 붙였다.
+
+기준 문면을 게이트 초안보다 **좁혔다**: 초안은 "로컬 config를 읽거나 쓰는 op은 tool이 아니다"로 8개를 한 부류로 묶었는데, `capabilities.get`은 host 인자를 주면 실제로 그 peer와 negotiation한 결과를 답한다(§6.10) — 초안 기준의 **반례**다. 그래서 제외를 두 부류로 갈랐다: ① 로컬 상태 op(`identity.init`·`trust.*`·`cert.*`·`doctor.run`·`acl.check`), ② wire contract introspection(`schema.get`·`capabilities.get`·`version.get`) — 후자가 답하는 것은 host의 상태가 아니라 두 build 사이의 protocol 합의이고, 에이전트는 그 합의를 이미 tool schema로 받아 들고 있다. 규칙에 설명되지 않는 예외를 남기지 않기 위한 정정이며, 결론(tool 12개 유지, `tools_list.json` 무변경)은 게이트와 동일하다.
+
+**(a)-추기 — Step 7-2 ② 설계 게이트: `Op` enum을 유일 표로, `OP_REGISTRY`는 그 투영 (2026-09-01, main 세션).** ②의 결함은 `acl::action_of(op: &str)`(registry.rs:389)가 문자열 선형 탐색 + 런타임 panic이라 **`action_of("sesion.open")` 오타가 컴파일된다**는 것이다 — 그것도 인가 choke point 위에서. 지금 이를 막는 것은 컴파일러가 아니라 `tests/acl_registry.rs`의 **소스 텍스트 매칭 게이트 2건**(`server/mod.rs`를 문자열로 읽어 `Action::` 리터럴을 세고 `action_of("forward.local")` 문자열의 존재를 본다)이다. grep하는 테스트는 리팩터가 줄을 옮기면 무증상으로 무력해지므로 대용품이지 검사가 아니다.
+
+**설계 제약은 "표 두 벌 금지"**(`OpSpec` 자체 doc, M5 Step 8)다 — enum과 `OP_REGISTRY`가 같은 (op, action, resource_kind, owned) 사실을 두 번 적으면 그 규율 위반이고, 순진한 enum화는 정확히 그 함정에 빠진다. 그래서 **match를 유일한 표로 삼는다**: `Op::spec(self) -> OpSpec`을 `const fn` + 전수 `match`로 쓰고, `OP_REGISTRY`는 `&[Op::SessionOpen.spec(), …]` 즉 **그 match의 투영**으로 만든다. variant 추가 시 컴파일 에러가 나는 지점이 표 그 자체가 된다. 이 형태(`const fn`·`match`·const 컨텍스트 호출 `const A: Action = Op::SessionOpen.action();`)는 main 세션이 standalone `rustc`로 직접 컴파일해 stable Rust에서 성립함을 확인했다 — 구현자에게 미검증 설계를 넘기지 않는다.
+
+**소스 텍스트 게이트 2건은 유지**하고 새 문법에 맞게 갱신만 한다. enum화해도 핸들러가 `Action::SessionControl`을 직접 박는 실수는 여전히 가능하므로 `action_variant_literals_are_pinned_to_the_one_documented_exception`은 죽지 않았다 — 컴파일러가 덮는 범위(오타·미등록 이름)와 이 게이트가 덮는 범위(등록표 우회)가 다르다. 반대로 `action_of_panics_on_an_unregistered_name`은 **삭제**한다: "등록되지 않은 이름"이라는 상태가 타입에서 사라지는 것이 이 작업의 목적이므로 그 테스트는 표현 불가능해진다. nextest 수가 그 1건만큼 줄어드는 것이 정상 — 그 외 증감은 원인 보고 대상이다.
+
+**(a)-추기 — Step 7-2 ① 구현 착지 + 측정 전후표 (2026-09-01, main 세션).** 공유 런타임 구현 완료(`ops/mod.rs` +194, `ops/session.rs` +85/-47, 둘 다 qsh-core 내부). 게이트 5종 green(**nextest 1334 passed / 2 skipped** = 기준선 1331 + 신규 3건 정확 일치) + windows-gnu 2종.
+
+**측정(N=40 in-flight `read_session`, 동일 하네스 `$SP/lab/mcp_load.py`, before는 `eb784cc` 격리 worktree 별도 빌드):**
+
+| 지표 | 전 | 후 |
+|---|---:|---:|
+| pull당 threads | 11.03 | **1.00**(순증분) / 1.25(naive) |
+| pull당 fds | 5.00 | 1.10 |
+| pull당 RSS | 1,074 KB | 638 KB |
+| 3초 후 취소 회수 | 없음 | 없음(전후 동일 — 이 축은 이번 스텝 범위 밖) |
+| 65초 clamp 후 | 완전 회수 12/9 | **부분 22/13** |
+
+naive 1.25가 예측 1.00보다 큰 것은 baseline 12스레드가 **공유 런타임 생성 이전** 값이라 델타 50에 1회성 부트스트랩(≈10)이 섞였기 때문 — `(50−10)/40 = 1.00`으로 rtprobe A/B 예측과 정확히 일치하고 N이 클수록 0으로 수렴한다(400건이면 0.975). 구현자가 이 분해를 스스로 적어 naive 수치를 성과로 포장하지 않은 것을 승인한다.
+
+**부수 비용을 정직하게 기록한다**: 65초 clamp 후 완전 회수가 사라졌다(22/13, baseline 12/9 대비 +10/+4). 공유 런타임은 `Ops`가 사는 한 프로세스 수명 내내 산다 — 상시 상주 10워커를 지불하고 pull당 11배 곱셈을 없앤 것이며, 설계 게이트가 이미 인지한 대칭 트레이드오프다. **fd는 여전히 pull당 선형(1.10)** — 공유 런타임은 스레드만 줄이고 QUIC Endpoint/UDP 소켓은 pull마다 새로 연다. M8 이월(L134) 그대로이고 표에 숨기지 않았다.
+
+**구현자가 브리프 밖 실버그를 하나 잡았다 — 승인.** 첫 구현(`Arc<Runtime>` 직접)은 `qsh-testkit::reverse_attach detaching_leaves_the_session_running_…`을 *"Cannot drop a runtime in a context where blocking is not allowed"*로 깼다. 원인: 공유·참조계수 런타임의 **마지막 `Arc`가 어디서 drop될지 통제 불가**인데 `qsh-testkit` fixture는 `#[tokio::test]` 안에서 `Ops`를 만들고 그 async 함수 안에서 drop한다. 기존 불변식("`connect_target`은 sync, 러닝 런타임 안에서 호출되지 않는다")은 **build+block_on에 대한 보장이지 drop에 대한 보장이 아니었다** — 공유화가 이 구분을 처음으로 load-bearing하게 만들었다. 수정은 `SharedRuntime` 래퍼로 `Drop`을 `shutdown_background()`(tokio가 "다른 런타임 안에서 drop"의 공식 해법으로 문서화)에 라우팅. 한 호출부 특례가 아니라 타입 차원 해결이라 옳다.
+
+**main 세션 개인 리뷰 2건.** ① `shutdown_timeout(CLOSE_DRAIN)` 4곳 제거가 QUIC close 드레인을 없앤 것 아닌지 직접 확인 — 아니다. 드레인은 `close()`의 `endpoint.wait_idle().await`가 지고 그건 무변경이며, `shutdown_timeout`은 런타임 잔여 태스크용이었다. 다만 `Drop for Connected`(panic/early-return 경로)는 이제 close 프레임 플러시를 전혀 기다리지 않으므로 **검증 라운드 질문으로 승계**. ② double-checked init에서 경쟁에 진 스레드의 런타임이 bare `Runtime`으로 drop되면 §2 버그가 그대로 재현되는데, 구현은 `set()` **이전에** `SharedRuntime`으로 감싸므로 패자의 drop도 `shutdown_background()`를 탄다 — 코드 판독 확인. 이 순서가 뒤집히면 무증상 회귀이므로 검증 라운드 변이 후보로 넘긴다.
+
+**(a)-추기 — Step 7-2 검증 라운드 판정 (2026-09-01, main 세션).** Workflow 11 에이전트(6차원 병렬 분석 → 직렬 변이 실증 4건 → opus 판정). 게이트 5종 green(nextest 1333 passed / 2 skipped, main 세션 직접 실행)이지만 **P1 1건 — 커밋 불가.** P2 2 / P3 7.
+
+**판정자가 자기 앞 단계 4개 에이전트의 실험 설계를 기각한 것을 승인한다.** A3-5·A6-F1·E1·E3이 모두 `Op::Probe`를 **아무 데도 쓰지 않고** 추가해 "1333 green"을 얻었는데, 그것은 "죽은 코드는 테스트를 안 깬다"는 약한 명제만 증명한다. 판정자는 그 variant를 `handle_session_list`(server/mod.rs:1181-1188)의 **인가 인자로 실제 배선**한 뒤(반환 `Action` 동일 → 런타임 동작 바이트 무변경) 게이트를 돌렸고 fmt·clippy clean에 **1333 passed 전건 green**을 얻었다. 결정적인 것은 **대조군**이다: 같은 변이의 diff 이전 등가물(격리 worktree, HEAD `eb784cc`, `action_of("session.list")`→`action_of("probe")`)에서 `server::tests` **3건이 `registry.rs:393` panic으로 FAIL**한다. 회귀임이 before/after로 증명됐다. E1이 "M5부터 있던 기존 한계"라며 P2로 매긴 것은 **대조군을 안 재서** 나온 판단이므로 기각한다.
+
+**① P1-1 수용 — 조용한 구멍 금지 규율 위반. A안(매크로 파생)으로 닫는다.** 구 `action_of`는 호출마다 `OP_REGISTRY.iter().find(...)`를 지나 **등재가 곧 동작 조건**이었는데, `Op::action()`은 `self.spec().action`만 본다. 기존 감사가 전부 자기 목록(`Op::ALL`·`OP_REGISTRY`)을 순회 시작점으로 삼아 그 목록에 없는 variant는 원천적으로 시야 밖이다. 판정자가 제시한 두 안 중 **A안(`macro_rules! declare_ops` 1회 invocation에서 enum 선언·`ALL`·`as_str`·`spec`·`OP_REGISTRY`를 전부 파생)** 을 택한다 — B안(전수 `match` witness 테스트)은 신규 variant가 테스트 컴파일을 깨서 작성자가 **알아채게** 할 뿐 `Op::ALL`에 넣도록 강제하지 못하는 과속방지턱이고, 안정 Rust에서 variant를 열거하는 유일한 by-construction 수단이 매크로다. 설계 게이트가 건 제약("match를 유일한 표로, 표 두 벌 금지")도 A안에서만 실제로 충족된다. `session.close`의 `owned: false` 예외 주석과 per-variant doc은 `#[$m:meta]`로 보존한다.
+
+**범위 판단**: 이것은 acceptance criteria 초과가 아니다. (d)②가 요구하는 "컴파일 타임 전수성"이 미달인 상태이고, ACL choke point에서 **시끄러운 실패를 무증상으로 바꾼 회귀**는 CLAUDE.md의 "Fail closed on any ambiguous auth/ACL state"와 이 리포가 M5부터 지킨 "제외는 기록될 때만 정당하다"에 정면으로 걸린다.
+
+**② P2-1 수용 — 거짓 주석 2곳.** `registry.rs:225-229`가 "never a second hand-maintained list … by construction"이라, `:295-302`가 "'registered nowhere' stopped being a state this type can hold"라 단언하는데 둘 다 거짓이었다(P1-1 실측이 바로 그 상태를 만들어 인가까지 시켰다). Step 7-1 A1과 같은 계열이며 대상이 ACL 표라는 점만 다르다. A안으로 고치면 두 문장은 **사실이 되므로 그대로 두고**, `Op::ALL` doc의 "establishes" 문장만 정정한다.
+
+**③ P2-2 수용 — `Drop for Connected`의 Arc 조기 drop.** `if self.runtime.take().is_some() { … }`는 `if let`이 아니라 `if EXPR.method()`라 조건식 임시값이 **body 진입 전에** drop된다 — 이 `Connected`의 Arc가 마지막이면 `shutdown_background()`가 quinn endpoint driver를 먼저 내린 뒤에야 `connection.close()`가 호출된다. 판정자가 rustc 1.97.1 edition 2021·2024 양쪽에서 직접 재현했다. 수정은 이름 바인딩으로 drop을 `close()` 뒤로 미루고(6줄), 같은 hunk의 "never shuts the runtime itself down" **절대 표현**을 이 `Connected`의 핸들 하나만 놓는다는 사실 서술로 좁힌다.
+
+**④ P3-2·P3-4 수용(판정자는 수정 불요라 했으나 main 세션이 채택).** 둘 다 **이 diff가 새로 도입한 doc 주장**을 뒷받침하는 3줄짜리 테스트 확장이고, P2-1이 바로 "doc가 단언하는 것을 코드가 안 지킨다"는 결함이라 같은 잣대를 적용한다: `connect_runtime_is_lazy_until_first_connect_call`에 `trust_list`·schema 계열을 추가(필드 doc가 `qsh trust list`를 이름으로 지목한다), `..._same_instance_across_calls_and_clones`에 독립된 두 번째 `Ops::new(other_paths)`로 `Arc::ptr_eq == false`를 추가(필드 doc가 `static OnceLock`을 명시 기각한 근거를 양방향으로 고정).
+
+**⑤ P3-6 수용 — main 세션이 직접 수정한다.** 내가 쓴 §8.2 "두 부류"가 tool 아닌 op 전부를 설명하지 못한다: `tunnel.list`는 tool이 아닌데 같은 §2.5 행의 `tunnel.close`(=`close_tunnel`)는 tool이고, `session.attach`는 어느 부류에도 안 들어간다. 규칙에 설명되지 않는 예외를 남기지 않겠다며 쓴 문단이 정확히 그 결함을 갖고 있었다. 한 줄 추가로 닫는다(결론 불변, fixture 무영향).
+
+**⑥ P3-1 — Q1 미측정으로 명시.** 코드로 확정된 것: MCP 서버 런타임(`qsh-cli/src/main.rs:1073`)과 공유 dial 런타임(`ops/mod.rs:357`)은 별개 인스턴스라 필드 doc가 경고한 "같은 pool을 두 번 요구" 조건이 성립하지 않고, 워크스페이스에 `max_blocking_threads` 오버라이드 0건이며, 60초 long-poll을 무는 것은 MCP pool 스레드이고 공유 pool에서 잡는 건 ms 단위 `lookup_host`다. 하드 데드락 가능성은 구조적으로 낮아 커밋을 막지 않는다. **다만 추론이므로 main 세션이 수정 라운드 후 커밋 전에 N=256·512를 직접 실측한다** — ①의 존재 이유가 부하 특성이므로 부하 질문 하나를 미측정으로 남기고 닫지 않는다.
+
+**⑦ P3-7 Step 8 이월** — `docs/CLI.md` §2.4 operation 목록에 `cert.init`/`cert.issue`가 없다(§6.16은 정식 dotted op으로 문서화). 이 diff 이전부터의 gap이라 여기서 고치지 않고 Step 8(문서 마감) 항목으로 등재한다.
+
+**⑧ 기각 승인 (R-1) — 그리고 그것은 내 절차 결함이다.** A3-6·A5-1이 "워킹 트리 오염"을 P1으로 올렸으나 diff 결함이 아니라 **검증 프로세스 결함**이므로 기각한다. 원인은 내가 A4(완전성 **분석**) 프롬프트에 "실행하지 마라"라고 적으면서 결정적 실험 절차를 함께 넣어둔 것이고, A4가 그대로 실행해 A3·A5·A6이 같은 트리를 읽는 동안 변이가 살아 있었다. 결과는 전부 원복돼 무해했고 최종 sha는 baseline과 일치(총 4회 확인)하지만, 규율을 깬 것은 orchestrator다. 이후 라운드는 변이 차원을 직렬화하거나 차원별 worktree로 격리한다.
+
+**⑨ 검증 방법 승계.** fixer는 P1-1 수정 후 **판정자의 변이를 그대로 재적용**해 A안이면 "표현 불가"(컴파일 에러)임을 실증할 것: `Op::Probe` variant + `spec`/`as_str` arm 추가 + `handle_session_list`의 인가 인자를 `Op::Probe.action()`으로 치환. 게이트 기준선은 nextest **1333 passed / 2 skipped**이며 `cargo test`는 baseline부터 red이므로 게이트로 쓰지 않는다. tree는 baseline(`427a1248…`) 위 증분만.
+
+**(a)-추기 — Step 7-2 수정 라운드 마감 (2026-09-01, main 세션).** 판정 ①~④를 fixer가 이행했고, 그 뒤 fixer가 변이 3(V3) 실행 중 멈춰 **main 세션이 인계받아 마무리**했다. 게이트 6종 green, 트리 sha `03a2f3e3…`.
+
+**P1-1은 두 방향 모두에서 닫혔다.** fixer가 판정자의 변이를 재적용해 실증한 것: (a) `Op::Probe`를 `declare_ops!` invocation 밖에서 참조하면 `error[E0599] no variant … named 'Probe'`로 **컴파일 자체가 안 된다** — variant가 태어나는 곳이 invocation 한 군데뿐이라 "등재 없이 존재"가 표현 불가능한 상태가 됐다. (b) invocation 안에 합법적으로 넣으면 컴파일은 되지만 `op_registry_matches_deny_seams_by_name_and_action`이 즉시 FAIL한다 — `DENY_SEAMS`에 짝이 없기 때문. 이 (b)는 브리프가 요구하지 않은 보충 실험인데, "A안이 새 우회로를 열지 않는다"를 확인해 준다는 점에서 (a)보다 값이 크다.
+
+**main 세션 독립 검증 3건 — fixer 보고를 액면가로 받지 않았다.**
+
+① **호출부 재작성이 충실한가**(기계 대조). HEAD의 `action_of("x")` 20곳과 현재 `Op::X.action()` 20곳이 **같은 줄 번호·같은 순서·같은 op 이름**임을 registry의 variant→dotted name 사상으로 대조해 확인했다. `git grep`이 22건을 세는 것은 `:693` doc과 `:3022` 주석이 예시로 그 형태를 적기 때문이고, 실제 호출부는 20곳이다. `:3029`의 리터럴 `Action::SessionAttach`(문서화된 유일 예외)는 diff에 없다 — 보존됐다.
+
+② **`OpSpec::op`의 `&'static str` → `Op` 타입 변경이 계약 표면에 닿는가.** 닿지 않는다. `registry.rs` 어디에도 serde derive가 없고, `qsh-cli`는 `OP_REGISTRY`를 doc 주석으로만 언급하며(`mcp/mod.rs:35`), 모든 소비처가 `spec.op.as_str()`로 문자열을 되찾는다. `qsh.cli/v1`·fixture 무영향.
+
+③ **독립 변이 2건**(fixer·판정자가 건드리지 않은 축). **변이 A** — `SharedRuntime::drop`을 `shutdown_background()` 대신 평범한 blocking drop으로: `qsh-core`·`qsh-testkit` 두 크레이트 **11건 FAIL**, 전부 *"Cannot drop a runtime in a context where blocking is not allowed"*. 구현자가 새로 쓴 `dropping_ops_with_a_live_shared_runtime_from_inside_another_runtime_does_not_panic`이 정확히 그 패닉을 잡는다 — 새 타입이 테스트로 뒷받침된다. **변이 B** — `Drop for Connected`를 P2-2 수정 이전의 `if EXPR.take().is_some()` 형태로 되돌림: **935 passed, 검출 0건.**
+
+**변이 B의 0건은 결함이 아니라 기록해야 할 제외다.** 그 경로가 밟히려면 `Connected`가 자기를 만든 `Ops`보다 오래 살아 마지막 `Arc`를 쥐어야 하는데, `connect_runtime`의 `OnceLock`이 `Ops` 수명 동안 `Arc` 하나를 영구 보유하므로 현재 어떤 호출자도 그 상태를 만들지 않는다. 관측 가능한 차이도 panic 경로에서 CONNECTION_CLOSE 한 프레임이 덜 나가는 것뿐이고, peer는 idle timeout으로 수렴한다. P2-2 수정은 6줄이고 옳으며 유지하되, **테스트가 아니라 추론이 근거**라는 사실을 여기 남긴다. 억지 테스트를 만들지 않는 쪽을 택한 이유는 재현에 실제 QUIC peer와 crate 내부 타입 접근이 동시에 필요해서, 얻는 것에 비해 대가가 크기 때문이다.
+
+**⑥ Q1 실측 완료 — 커밋 전 약속 이행.** release 빌드로 `qsh mcp` 한 프로세스에 동시 `read_session` long-poll을 N=256·512·700 던지고 스레드/fd/RSS를 표본.
+
+| N | in-flight threads | fds | threads/pull | 65초 후 회수 |
+|---|---|---|---|---|
+| 40 (기존) | 62 | 53 | 1.25 | 22 / 13 |
+| 256 | 278 | 269 | 1.04 | 22 / 13 |
+| 512 | 533 | 524 | 1.02 | 23 / 13 |
+| 700 | **533** | **525** | 0.74 | 210 / 13 |
+
+**데드락도 starvation도 없다.** 필드 doc가 경고한 조건은 성립하지 않는다 — `spawn_blocking`은 MCP 서버 런타임(`main.rs:1073`)이, `lookup_host`는 공유 dial 런타임(`ops/mod.rs:358`)이 각각 자기 pool에서 처리한다.
+
+**대신 천장의 실제 위치가 측정됐다: 512.** N=700에서 스레드가 512와 **똑같은 533에 정체**한다 — 513번째 이후 pull은 시작조차 못 하고 tokio 기본 `max_blocking_threads = 512`가 포화된 MCP pool 뒤에 큐잉된다. 65초 회수가 22가 아닌 210인 것이 그 증거다(늦게 슬롯을 받은 188건이 그때서야 자기 wait를 돌고 있다). 클라이언트에겐 `RESOURCE_EXHAUSTED`가 아니라 **최대 한 wait 주기만큼의 조용한 지연**으로 보인다. 이 숫자는 doc의 추론을 그대로 확인해 준다 — pool을 공유하면 pull당 두 개를 요구하니 ~256, 분리하면 하나씩이라 512. 그리고 이 천장은 **이 diff가 만든 것이 아니다**: 그 `spawn_blocking`은 `qsh-cli/src/mcp/mod.rs:420`에 있고 이번 diff는 `qsh-cli`를 한 줄도 건드리지 않았다.
+
+**M8 이월 2건 추가.** (i) 위 512 천장을 근거 숫자로 삼아 bounded pull executor + `RESOURCE_EXHAUSTED`를 설계한다(기존 이월 항목이 이제 실측 근거를 갖는다). (ii) `Ops::exec`(`ops/exec.rs:81`)는 여전히 호출마다 `new_multi_thread()`를 세운다. ①이 고친 것은 pull 경로(`connect_target`/`connect_reverse`)뿐이고 `exec`는 MCP tool 표면에 있으므로, 동시 `exec` 호출은 아직 호출당 ~11 스레드를 문다. exec는 long-poll이 아니라 노출이 훨씬 작지만 남은 사실이다. (`ops/mod.rs:654`의 pairing 런타임은 일회성 대화형이라 대상 아님.)
+
+**게이트 6종 (main 세션 직접 실행, 전건 rc=0).** fmt / clippy `-D warnings` / **nextest 1333 passed, 2 skipped** / xtask arch / cargo deny / windows-gnu cross-check(qsh-core, qsh-cli). 변이 A·B는 exact-inverse 원복 후 sha `03a2f3e3…` 재확인으로 원복을 증명했고 트리에 마커 0건이다.
+
 ### Step 8 — man page·설치 문서 + 스톱워치 캠페인 (DoD 1) + 마감
 
 **(a) 범위:** man page·설치 문서, README 최종 동기화. `docs/campaigns/m7-stopwatch.md` 사전 정의(M6 캠페인 선례: 기준 먼저 커밋) — 한 번도 설정한 적 없는 두 장비(신선한 sandbox 프로필 2식 또는 실장비 2대), README만 보고 `qsh user@host`까지, 독립 3회, 5분 기준. ROADMAP §4 리스크 3의 "조기·반복" — Step 4(pairing) 착륙 직후 1회 예행 측정을 먼저 수행해 병목을 마감 전에 노출한다. 이후 §5 마감 절차.
+
+**Step 7 이월 문서 항목 2건**(여기서 처리): (i) P3-7 — `docs/CLI.md` §2.4 operation 목록에 `cert.init`/`cert.issue` 등재(§6.16이 이미 정식 dotted op으로 문서화하는데 목록에만 빠져 있다). (ii) `cargo test`는 baseline부터 red이고 CI(`ci.yml:92-93`)도 nextest만 돌리는데 `CLAUDE.md`와 `docs/design/testing.md`는 아직 nextest를 "preferred"로 적는다 — **required**로 문면을 맞춘다. Step 7-1·7-2 두 라운드 모두 에이전트가 `cargo test`를 게이트로 오인할 뻔한 지점이라 문서 결함으로 취급한다.
 
 **(d) 완료 판정:** 캠페인 3회 기록 완료(전건 5분 이내), §5 전 항목 완료.
 

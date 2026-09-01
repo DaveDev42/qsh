@@ -38,7 +38,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use qsh_core::acl::{
-    Action, ActionPattern, AllowAllPinned, DenyAll, OP_REGISTRY, Policy, Rule, Scope, action_of,
+    Action, ActionPattern, AllowAllPinned, DenyAll, OP_REGISTRY, Op, Policy, Rule, Scope,
 };
 use qsh_proto::ErrorCode;
 use qsh_testkit::loopback::{TestIdentity, make_identity};
@@ -63,7 +63,7 @@ fn testkit_only_ops_are_exactly_three_real_registry_rows() {
     assert_eq!(TESTKIT_ONLY_OPS.len(), 3);
     for op in TESTKIT_ONLY_OPS {
         assert!(
-            OP_REGISTRY.iter().any(|spec| &spec.op == op),
+            OP_REGISTRY.iter().any(|spec| spec.op.as_str() == *op),
             "{op} is in TESTKIT_ONLY_OPS but not in OP_REGISTRY"
         );
     }
@@ -75,7 +75,7 @@ fn testkit_only_ops_are_exactly_three_real_registry_rows() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn forward_local_is_audited_allow_and_deny() {
-    let action = action_of("forward.local");
+    let action = Op::ForwardLocal.action();
 
     let allow = TunnelHarness::start().await;
     let result = allow.tcp_connect("127.0.0.1", allow.echo.port()).await;
@@ -109,7 +109,7 @@ async fn forward_local_is_audited_allow_and_deny() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn forward_remote_is_audited_allow_and_deny() {
-    let action = action_of("forward.remote");
+    let action = Op::ForwardRemote.action();
 
     let allow = TunnelHarness::start().await;
     let forward = allow.remote_forward("127.0.0.1", allow.echo.port()).await;
@@ -177,7 +177,7 @@ async fn forward_remote_is_audited_allow_and_deny() {
 async fn forward_remote_close_owned_flag_matches_the_observed_ownership_gate() {
     let spec = OP_REGISTRY
         .iter()
-        .find(|s| s.op == "forward.remote.close")
+        .find(|s| s.op == Op::ForwardRemoteClose)
         .expect("forward.remote.close is an OP_REGISTRY row");
 
     let owner = make_identity();
@@ -250,7 +250,7 @@ async fn forward_remote_close_owned_flag_matches_the_observed_ownership_gate() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn host_reverse_is_audited_allow_and_deny() {
-    let action = action_of("host.reverse");
+    let action = Op::HostReverse.action();
     assert_eq!(action, Action::HostReverse);
 
     let allow_target = make_identity();
