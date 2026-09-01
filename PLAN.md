@@ -268,6 +268,10 @@ naive 1.25가 예측 1.00보다 큰 것은 baseline 12스레드가 **공유 런�
 
 **Step 7 이월 문서 항목 2건**(여기서 처리): (i) P3-7 — `docs/CLI.md` §2.4 operation 목록에 `cert.init`/`cert.issue` 등재(§6.16이 이미 정식 dotted op으로 문서화하는데 목록에만 빠져 있다). (ii) `cargo test`는 baseline부터 red이고 CI(`ci.yml:92-93`)도 nextest만 돌리는데 `CLAUDE.md`와 `docs/design/testing.md`는 아직 nextest를 "preferred"로 적는다 — **required**로 문면을 맞춘다. Step 7-1·7-2 두 라운드 모두 에이전트가 `cargo test`를 게이트로 오인할 뻔한 지점이라 문서 결함으로 취급한다.
 
+**Step 8 후속 — Windows CI 복구(`11c51ae`).** Step 8(`959b4a2`)의 CI가 `test (windows-latest)` 한 레그에서만 깨졌다(run 33473165611, 1067 passed / 1 failed). 로컬 게이트 6종이 green이었으니 플랫폼 특이 문제라는 것까지는 맞았고, 실제 원인은 man page **내용**이 아니라 **체크아웃**이었다. GitHub Windows 러너는 `core.autocrlf=true`라 체크인된 `docs/man/*.1`이 CRLF로 풀리는데 `clap_mangen`은 LF로 쓴다. CI 로그의 assert 바이트 덤프가 그대로 증거다 — left(체크인)에 `13, 10`인 자리가 right(방금 생성)에는 `10`이다. 38장 전부 해당이고 정렬 첫 장 `qsh-acl-check.1`에서 터졌을 뿐이다.
+
+**추정으로 고치지 않고 양쪽 팔을 실측했다.** 대조군 `git clone -c core.autocrlf=true` → 38/38 CRLF(CI 실패 로컬 재현). 처치군 `.gitattributes`(`* text=auto eol=lf`) 추가 후 같은 clone → 0/38, 소스 트리와 바이트 동일. 비교 쪽을 CRLF 관대하게 푸는 선택지도 있었지만 바이트 대조 게이트의 엄밀함을 깎는 대가가 있고, 무엇보다 Windows 개발자가 `cargo xtask man`을 돌리면 38장이 통째로 modified로 뜨는 진짜 문제가 남는다 — 체크아웃 쪽을 고치는 것이 원인 위치다. 추적 파일 중 CRLF가 필요한 것은 없고(`.bat`/`.cmd`/`.ps1` 부재) 전부 이미 인덱스·작업 트리 모두 LF라 재정규화 패스도 필요 없다. CI run 33474230870에서 12개 job 전건 success, Windows 레그가 **1068/1068**로 man page 대조 테스트까지 PASS — 로컬 실험이 예측한 대로다.
+
 **(d) 완료 판정:** 캠페인 3회 기록 완료(전건 5분 이내), §5 전 항목 완료.
 
 ## 3. 명시적 non-goals (P1 유예 / 타 마일스톤)
