@@ -184,11 +184,26 @@ pub const PEER_UNTRUSTED: Diagnostic = Diagnostic {
 /// device leaf or its private CA root — has already passed `not_after`.
 /// Mutually exclusive with [`CERT_EXPIRING_SOON`] for the same
 /// certificate (`crate::ops::doctor` never emits both for one cert).
+///
+/// `remedy` deliberately does not say "re-issue with `qsh cert issue`" for
+/// every case: `Ops::cert_issue` only re-signs when `identity.issued_by_ca`
+/// does not already match the local CA's own fingerprint
+/// (`crate::ops::cert`) — it never looks at `not_after`. So a leaf already
+/// CA-issued (by *this* CA) that has since expired makes `qsh cert issue`
+/// a silent no-op (`issued: false`), and `crate::ca::init` returns any
+/// existing root unchanged regardless of its own expiry, making `qsh cert
+/// init` an equally silent no-op for an expired CA root. Neither command
+/// has a `--force` (out of scope — `docs/ROADMAP.md` lists cert
+/// rotation/revocation UX as P1); the only recovery this build actually
+/// has is deleting the stale material and letting the ordinary idempotent
+/// path regenerate it, the same recipe `identity::read_cert_der`'s own
+/// missing-file error already tells an operator ("re-run qsh init after
+/// removing the identity directory").
 pub const CERT_EXPIRED: Diagnostic = Diagnostic {
     id: DiagnosticId::CertExpired,
     code: "cert_expired",
     message: "A certificate this device relies on has expired.",
-    remedy: "Re-issue the device certificate with `qsh cert issue`, or regenerate the CA root with `qsh cert init`.",
+    remedy: "`qsh cert issue` only re-issues a leaf this CA has not signed yet; on one it already signed, or on the CA root, it and `qsh cert init` are no-ops. Recover by removing `identity/` or `ca/` from the config directory and re-running `qsh init`/`qsh cert init` — peers must then re-pin.",
 };
 
 /// `docs/CLI.md` §6.17, `docs/ROADMAP.md` §4 risk table (L136: "만료 30일
@@ -197,11 +212,15 @@ pub const CERT_EXPIRED: Diagnostic = Diagnostic {
 /// never fire under normal operation — a device leaf is valid for 10
 /// years — which is by design, not a bug (only real-world clock jumps or
 /// an externally supplied certificate make this reachable in practice).
+///
+/// `remedy` carries the identical no-op gap [`CERT_EXPIRED`]'s own doc
+/// works through — "expiring soon" instead of "already expired" changes
+/// nothing about `Ops::cert_issue`/`crate::ca::init`'s idempotency checks.
 pub const CERT_EXPIRING_SOON: Diagnostic = Diagnostic {
     id: DiagnosticId::CertExpiringSoon,
     code: "cert_expiring_soon",
     message: "A certificate this device relies on expires within 30 days.",
-    remedy: "Re-issue it ahead of the deadline with `qsh cert issue`.",
+    remedy: "`qsh cert issue` only re-issues a leaf this CA has not signed yet; on one it already signed, or on the CA root, it and `qsh cert init` are no-ops. Renew ahead of the deadline by removing `identity/` or `ca/` from the config directory and re-running `qsh init`/`qsh cert init` — peers must then re-pin.",
 };
 
 /// `docs/CLI.md` §6.17: the platform credential store (macOS Keychain /

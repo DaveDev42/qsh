@@ -520,7 +520,7 @@ already taken on crates.io. The workspace stays `publish = false` until M9.
 | M4 | Port forwarding (`-L`/`-R`) | Done |
 | M5 | ACL and audit | Done |
 | M6 | MCP adapter | Done |
-| M7 | Trust UX, host profiles, `doctor` | Planned |
+| M7 | Trust UX, host profiles, `doctor` | In progress |
 | M8 | Hardening (fuzz, soak, real-device mobility campaign) | Planned |
 | M9 | Release (installers, Homebrew, notarization) | Planned |
 

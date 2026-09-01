@@ -3339,6 +3339,7 @@ fn pairing_audit_category(err: &crate::pairing::PairingError) -> &'static str {
         PairingError::Expired => "expired",
         PairingError::AlreadyConsumed => "already-consumed",
         PairingError::PinCollision => "pin-collision",
+        PairingError::InvalidDeviceName { .. } => "invalid-device-name",
         PairingError::ResponderProofMismatch => "responder-proof-mismatch",
         PairingError::Remote { .. } => "remote-error",
         PairingError::Stream(_) => "stream-error",

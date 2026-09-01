@@ -94,6 +94,22 @@ pub enum PairingError {
     /// own doc for why this check exists at all.
     #[error("the responder's proof did not verify; refusing to trust it")]
     ResponderProofMismatch,
+    /// The peer-reported `device_name` — `PairingProof.device_name` on the
+    /// responder side, `PairingAccepted.device_name` on the initiator side
+    /// — contained a control character (`char::is_control()`, tab
+    /// included: a device name is a label, not formatted text). Rejected
+    /// at ingest, before any pin, persist, or tracing emission
+    /// (`docs/CLI.md` §6.11, `docs/design/protocol.md` §15.5) — a name
+    /// like this reaching `human.rs`'s `print_trust_*` renderers could
+    /// otherwise overwrite or hide the fingerprint printed right next to
+    /// it, which is exactly the value pairing tells the operator to
+    /// compare out of band. Never carries the rejected value itself, even
+    /// here — only which field was rejected, never what it contained.
+    #[error("{field} contains a control character; device names must not")]
+    InvalidDeviceName {
+        /// Which wire field failed validation.
+        field: &'static str,
+    },
     /// The responder answered with a wire `Error` frame.
     #[error("{code}: {message}")]
     Remote {
@@ -160,10 +176,23 @@ impl PairingError {
             PairingError::AlreadyConsumed | PairingError::PinCollision => {
                 ErrorCode::SessionConflict
             }
+            PairingError::InvalidDeviceName { .. } => ErrorCode::InvalidArgument,
             _ => ErrorCode::Internal,
         };
         wire::Error::new(code, self.to_string(), false)
     }
+}
+
+/// Reject a peer-reported device name containing a control character
+/// (`char::is_control()`, tab included) — applied to both wire directions
+/// before any pin, persist, or tracing emission ever sees the value (see
+/// [`PairingError::InvalidDeviceName`]'s own doc for why). Never echoes
+/// `name` in the error it returns, even on rejection.
+fn reject_control_chars(name: &str, field: &'static str) -> Result<(), PairingError> {
+    if name.chars().any(char::is_control) {
+        return Err(PairingError::InvalidDeviceName { field });
+    }
+    Ok(())
 }
 
 /// A verified pairing exchange's result: the *other* side's self-reported
@@ -235,6 +264,7 @@ pub async fn accept(
             if !bool::from(received.ct_eq(&expected_server_proof)) {
                 return Err(PairingError::ResponderProofMismatch);
             }
+            reject_control_chars(&accepted.device_name, "PairingAccepted.device_name")?;
             Ok(PairingSuccess {
                 peer_device_name: accepted.device_name,
             })
@@ -289,6 +319,14 @@ pub async fn respond(
     let Some(control_message::Body::PairingProof(proof_msg)) = first.body else {
         return Err(PairingError::UnexpectedMessage);
     };
+
+    // Reject a control-character device name before anything else touches
+    // it — before the invite is even looked up, let alone `try_pin`'d or
+    // logged (`PairingError::InvalidDeviceName`'s own doc).
+    if let Err(err) = reject_control_chars(&proof_msg.device_name, "PairingProof.device_name") {
+        drain_rejection(&mut ctl, &err).await;
+        return Err(err);
+    }
 
     let ekm = export_keying_material(conn)?;
     let client_proof: [u8; 32] = match proof_msg.proof.as_slice().try_into() {
@@ -427,5 +465,57 @@ mod tests {
             e2, [0u8; EKM_LEN],
             "the exporter must not degenerate to an all-zero constant"
         );
+    }
+
+    /// Fix A2's ingest guard, at the pure-predicate level: an ordinary
+    /// device name (letters, digits, hyphens, spaces — the shapes every
+    /// existing pairing test in `qsh-testkit/tests/pairing_loopback.rs`
+    /// already uses, e.g. `"laptop"`) must pass, so the guard is not
+    /// over-broad.
+    #[test]
+    fn reject_control_chars_allows_an_ordinary_device_name() {
+        assert!(reject_control_chars("laptop", "PairingProof.device_name").is_ok());
+        assert!(reject_control_chars("Dave's MacBook Pro", "PairingProof.device_name").is_ok());
+    }
+
+    /// The actual threat this guard closes (report background: `human.rs`'s
+    /// `print_trust_accept` prints `{name} ({fingerprint})` on one line —
+    /// an escape sequence or bare `\r` in `name` can overwrite or hide the
+    /// fingerprint printed right after it). Tab is control too (a device
+    /// name is a label, not formatted text), unlike `human::sanitize`'s own
+    /// tab exemption for free-form diagnostic text.
+    #[test]
+    fn reject_control_chars_rejects_escape_sequences_cr_and_tab() {
+        for bad in ["evil\u{1b}[Kname", "evil\rname", "evil\tname", "evil\0name"] {
+            let err = reject_control_chars(bad, "PairingProof.device_name")
+                .expect_err(&format!("{bad:?} must be rejected"));
+            assert!(
+                matches!(
+                    err,
+                    PairingError::InvalidDeviceName {
+                        field: "PairingProof.device_name"
+                    }
+                ),
+                "unexpected error for {bad:?}: {err:?}"
+            );
+            // The rejected value itself must never appear in the error's
+            // own `Display` — only the field name (fail-closed logging
+            // rule: `PairingError::InvalidDeviceName`'s own doc).
+            assert!(
+                !err.to_string().contains("evil"),
+                "the rejected device name must not be echoed: {err}"
+            );
+        }
+    }
+
+    /// [`PairingError::InvalidDeviceName`] must map to `INVALID_ARGUMENT`
+    /// on the wire, not fall through the catch-all `_ => Internal` arm in
+    /// [`PairingError::as_wire_error`].
+    #[test]
+    fn invalid_device_name_maps_to_invalid_argument_on_the_wire() {
+        let err = PairingError::InvalidDeviceName {
+            field: "PairingProof.device_name",
+        };
+        assert_eq!(err.as_wire_error().error_code(), ErrorCode::InvalidArgument);
     }
 }
