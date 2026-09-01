@@ -1,0 +1,7 @@
+# Build context for scripts/stopwatch/Dockerfile is the repository root.
+# These two are the only entries worth excluding: target/ is regularly tens
+# of GB and .git/ carries the whole history, and the build stage needs
+# neither. Everything else is small enough that filtering it would only risk
+# starving a future build of a file it turns out to need.
+target/
+.git/

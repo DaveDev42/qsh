@@ -1,0 +1,39 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH qsh-session-resize 1  "resize 0.1.0" 
+.SH NAME
+qsh\-session\-resize \- Change a session\*(Aqs terminal size
+.SH SYNOPSIS
+\fBqsh session resize\fR [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fB\-\-cols\fR> <\fB\-\-rows\fR> <\fISESSION_REF\fR> 
+.SH DESCRIPTION
+Change a session\*(Aqs terminal size
+.SH OPTIONS
+.TP
+\fB\-\-cols\fR \fI<N>\fR
+New terminal width (1..=65535)
+.TP
+\fB\-\-json\fR
+Emit a single `qsh.cli/v1` JSON envelope on stdout instead of human\-readable text
+.TP
+\fB\-\-jsonl\fR
+Emit newline\-delimited JSON on stdout (reserved for streaming commands; non\-streaming commands emit a single line, same as `\-\-json`)
+.TP
+\fB\-\-rows\fR \fI<N>\fR
+New terminal height (1..=65535)
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Increase diagnostic verbosity on stderr (`\-v` info, `\-vv` debug, `\-vvv` trace). Never affects stdout (`docs/CLI.md` §2.2)
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Suppress diagnostic output on stderr
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.TP
+\fB\-V\fR, \fB\-\-version\fR
+Print version
+.TP
+<\fISESSION_REF\fR>
+Opaque session handle
+.SH VERSION
+v0.1.0

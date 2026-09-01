@@ -2,6 +2,7 @@
 //! product. Run via `cargo xtask <subcommand>` (see `.cargo/config.toml`).
 
 mod arch;
+mod man;
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -27,13 +28,20 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Some("man") => match man::run(workspace_root) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(err) => {
+                eprintln!("xtask man: {err:#}");
+                ExitCode::FAILURE
+            }
+        },
         Some(other) => {
             eprintln!("xtask: unknown subcommand '{other}'");
-            eprintln!("usage: cargo xtask arch");
+            eprintln!("usage: cargo xtask arch|man");
             ExitCode::FAILURE
         }
         None => {
-            eprintln!("usage: cargo xtask arch");
+            eprintln!("usage: cargo xtask arch|man");
             ExitCode::FAILURE
         }
     }

@@ -1,0 +1,44 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH qsh-tunnel-open 1  "open 0.1.0" 
+.SH NAME
+qsh\-tunnel\-open \- Open a tunnel to a pinned host and hold it open
+.SH SYNOPSIS
+\fBqsh tunnel open\fR [\fB\-\-json\fR] [\fB\-L\fR|\fB\-\-local\fR] [\fB\-\-jsonl\fR] [\fB\-R\fR|\fB\-\-remote\fR] [\fB\-D\fR|\fB\-\-dynamic\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fIHOST\fR> 
+.SH DESCRIPTION
+Open a tunnel to a pinned host and hold it open.
+.PP
+This is a *value* operation that then blocks: the `Tunnel` envelope is emitted once, and the tunnel lives for as long as this foreground process does (`docs/CLI.md` §6.14). Ctrl\-C ends it.
+.SH OPTIONS
+.TP
+\fB\-\-json\fR
+Emit a single `qsh.cli/v1` JSON envelope on stdout instead of human\-readable text
+.TP
+\fB\-L\fR, \fB\-\-local\fR \fI<SPEC>\fR
+Local forward `[bind:]listen_port:host:host_port` — same grammar as the interactive `\-L` (`docs/CLI.md` §6.9). Exactly one of `\-\-local`/`\-\-remote`/`\-\-dynamic` is required
+.TP
+\fB\-\-jsonl\fR
+Emit newline\-delimited JSON on stdout (reserved for streaming commands; non\-streaming commands emit a single line, same as `\-\-json`)
+.TP
+\fB\-R\fR, \fB\-\-remote\fR \fI<SPEC>\fR
+Remote forward `[bind:]rport:host:hport` — same grammar as the interactive `\-R` (`docs/CLI.md` §6.9). Exactly one of `\-\-local`/`\-\-remote`/`\-\-dynamic` is required
+.TP
+\fB\-D\fR, \fB\-\-dynamic\fR \fI<SPEC>\fR
+SOCKS5 dynamic forwarding `[bind:]port`, repeatable — a third, independent mode: it does not fold into `\-\-local`/`\-\-remote`\*(Aqs mutual exclusion (`PLAN.md` M4 Step 6). Parses, but always answers `UNSUPPORTED` before opening a connection to `host` or doing anything `\-\-local`/`\-\-remote` would have — implementation is P1 (`docs/CLI.md` §6.9)
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Increase diagnostic verbosity on stderr (`\-v` info, `\-vv` debug, `\-vvv` trace). Never affects stdout (`docs/CLI.md` §2.2)
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Suppress diagnostic output on stderr
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help (see a summary with \*(Aq\-h\*(Aq)
+.TP
+\fB\-V\fR, \fB\-\-version\fR
+Print version
+.TP
+<\fIHOST\fR>
+Host alias from the trust store (`qsh trust list`)
+.SH VERSION
+v0.1.0

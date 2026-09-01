@@ -1,0 +1,48 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH qsh-acl-check 1  "check 0.1.0" 
+.SH NAME
+qsh\-acl\-check \- Evaluate this machine\*(Aqs own `acl.toml` against a hypothetical request, using the exact same evaluator `qsh serve`/`qsh listen`/ `qsh reverse` enforce with (`PLAN.md` M5 DoD 1) — a reliable prediction of what enforcement would decide, without a restart. Local only: never reaches a remote peer (`docs/CLI.md` §6.15)
+.SH SYNOPSIS
+\fBqsh acl check\fR [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-\-resource\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-\-auth\-path\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-owner\fR] [\fB\-\-owner\-auth\-path\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fB\-\-principal\fR> <\fB\-\-action\fR> 
+.SH DESCRIPTION
+Evaluate this machine\*(Aqs own `acl.toml` against a hypothetical request, using the exact same evaluator `qsh serve`/`qsh listen`/ `qsh reverse` enforce with (`PLAN.md` M5 DoD 1) — a reliable prediction of what enforcement would decide, without a restart. Local only: never reaches a remote peer (`docs/CLI.md` §6.15)
+.SH OPTIONS
+.TP
+\fB\-\-json\fR
+Emit a single `qsh.cli/v1` JSON envelope on stdout instead of human\-readable text
+.TP
+\fB\-\-principal\fR \fI<PRINCIPAL>\fR
+Principal string to evaluate: `device:<name>` | `user:<name>` | `fp:sha256:<base64>` (`docs/PRD.md` §9). A shape outside this vocabulary is `INVALID_ARGUMENT`
+.TP
+\fB\-\-action\fR \fI<ACTION>\fR
+Dotted action, one of the 11 PRD §9 actions (e.g. `session.open`). A name outside the vocabulary is `INVALID_ARGUMENT`
+.TP
+\fB\-\-jsonl\fR
+Emit newline\-delimited JSON on stdout (reserved for streaming commands; non\-streaming commands emit a single line, same as `\-\-json`)
+.TP
+\fB\-\-resource\fR \fI<RESOURCE>\fR
+Resource identifier the action would target. Omit to evaluate an unowned resource
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Increase diagnostic verbosity on stderr (`\-v` info, `\-vv` debug, `\-vvv` trace). Never affects stdout (`docs/CLI.md` §2.2)
+.TP
+\fB\-\-auth\-path\fR \fI<pin|ca>\fR
+Auth path the principal is assumed to have authenticated over. Omit to use `acl.toml`\*(Aqs own default (`"pin"`)
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Suppress diagnostic output on stderr
+.TP
+\fB\-\-owner\fR \fI<PRINCIPAL>\fR
+Principal that owns `\-\-resource`, so `scope = "owned"` rows can be evaluated too (`PLAN.md` M5 §4.2). Omit to evaluate `\-\-resource` as unowned
+.TP
+\fB\-\-owner\-auth\-path\fR \fI<pin|ca>\fR
+Auth path `\-\-owner` is assumed to have authenticated over. Only meaningful together with `\-\-owner`; omit to default to `"pin"`. `requires = "owner"` mirrors [`InteractiveArgs::escape_char`]\*(Aqs own `requires = "target"` (`docs/CLI.md` §6.15): giving this alone is a clap usage error (exit `2`), not a silently\-ignored no\-op
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.TP
+\fB\-V\fR, \fB\-\-version\fR
+Print version
+.SH VERSION
+v0.1.0

@@ -1,0 +1,114 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH qsh 1  "qsh 0.1.0" 
+.SH NAME
+qsh \- QSH: a QUIC\-based direct\-connect remote shell
+.SH SYNOPSIS
+\fBqsh\fR [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-escape\-char\fR] [\fB\-L \fR] [\fB\-R \fR] [\fB\-D \fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] [\fI[USER@]HOST\fR] [\fIsubcommands\fR]
+.SH DESCRIPTION
+QSH: a QUIC\-based direct\-connect remote shell
+.SH OPTIONS
+.TP
+\fB\-\-json\fR
+Emit a single `qsh.cli/v1` JSON envelope on stdout instead of human\-readable text
+.TP
+\fB\-\-jsonl\fR
+Emit newline\-delimited JSON on stdout (reserved for streaming commands; non\-streaming commands emit a single line, same as `\-\-json`)
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Increase diagnostic verbosity on stderr (`\-v` info, `\-vv` debug, `\-vvv` trace). Never affects stdout (`docs/CLI.md` §2.2)
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Suppress diagnostic output on stderr
+.TP
+\fB\-\-escape\-char\fR \fI<CHAR>\fR
+Escape character for the line\-start detach sequences (`~d`, `~.`, `~~`, `~?`), or `none` to disable them. Default `~`; only active when stdin is a terminal
+.TP
+\fB\-L\fR \fI<SPEC>\fR
+Local forward `[bind:]listen_port:host:host_port`, repeatable: open `listen_port` on this machine and forward each connection to `host:host_port` as seen from the peer. `bind` defaults to (and is restricted to) loopback.
+
+The listener lives exactly as long as this interactive session and dies with the process (`docs/CLI.md` §6.14) — there is no daemon and nothing to close.
+
+Deliberately **not** parsed by a clap `value_parser`: a malformed spec is an `INVALID_ARGUMENT` operation error (exit `255`, with a `qsh.cli/v1` envelope in machine mode), not a clap usage error (exit `2`), and `qsh_core::parse_local_forwards` is the single place that decides which code a spec earns (`docs/CLI.md` §6.9).
+.TP
+\fB\-R\fR \fI<SPEC>\fR
+Remote forward `[bind:]rport:host:hport`, repeatable: ask the peer to bind `rport` (loopback\-only — `docs/PRD.md` §9) and forward each connection it accepts back to `host:hport` **on this machine** (`docs/CLI.md` §6.9). The two legs are swapped relative to `\-L`; see [`Self::local_forward`]\*(Aqs own doc for the lifecycle this shares with it — same holder, same teardown, no daemon.
+
+Same reasoning as [`Self::local_forward`] for not being a clap `value_parser`: `qsh_core::parse_remote_forwards` decides the `docs/CLI.md` §3.3 code, not clap\*(Aqs usage\-error path.
+.TP
+\fB\-D\fR \fI<SPEC>\fR
+SOCKS5 dynamic forwarding `[bind:]port`, repeatable. Parses, but P0 always refuses it with `UNSUPPORTED` before this session (or anything else on the command line) is opened — implementation is P1 (`docs/CLI.md` §6.9, `docs/ROADMAP.md` M4 "명시적 out").
+
+Not shape\-checked here for the same reason as [`Self::local_forward`]/[`Self::remote_forward`]: the refusal is unconditional, so there is nothing a `value_parser` could reject that this flag\*(Aqs own handling would not refuse anyway.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help (see a summary with \*(Aq\-h\*(Aq)
+.TP
+\fB\-V\fR, \fB\-\-version\fR
+Print version
+.TP
+[\fI[USER@]HOST\fR]
+Pinned host to open an interactive session on, optionally prefixed with the expected remote login name (`dave@personal\-mac`)
+.SH SUBCOMMANDS
+.TP
+qsh\-version(1)
+Print qsh\*(Aqs version and the wire/CLI schemas it understands
+.TP
+qsh\-schema(1)
+Print the JSON Schema of the `qsh.cli/v1` envelope and every command\*(Aqs `data` payload (`docs/CLI.md` §6.10) — the same schemas golden fixtures are validated against
+.TP
+qsh\-capabilities(1)
+Print this build\*(Aqs supported capabilities, or (with a host) the capabilities actually negotiated with that pinned peer (`docs/CLI.md` §6.10)
+.TP
+qsh\-doctor(1)
+Diagnose this deployment: identity, ACL policy, audit log, trust store, clock and (best\-effort) network reachability (`docs/CLI.md` §6.17). Always exits `0` on a successful run — findings are reported as data, not exit status (`overall` field); only doctor\*(Aqs own inability to run at all (e.g. no identity yet) fails the command
+.TP
+qsh\-init(1)
+Create this device\*(Aqs identity (keypair + self\-signed certificate). Idempotent: re\-running reports the existing identity
+.TP
+qsh\-trust(1)
+Manage the trust store (pinned peers)
+.TP
+qsh\-cert(1)
+Manage the private CA (`docs/adr/0008\-private\-ca\-cert\-issuance.md`)
+.TP
+qsh\-acl(1)
+Inspect the ACL policy (`docs/CLI.md` §6.15)
+.TP
+qsh\-hosts(1)
+List every host visible to this machine: trust\-store\-pinned forward hosts and this machine\*(Aqs live reverse registrations, together (`docs/CLI.md` §6.1). Never dials
+.TP
+qsh\-host(1)
+Look up one host
+.TP
+qsh\-exec(1)
+Run a command on a pinned host and return its output
+.TP
+qsh\-attach(1)
+Re\-attach this terminal to a session that is already running
+.TP
+qsh\-session(1)
+Manage sessions: shells that outlive the connection that opened them
+.TP
+qsh\-sessions(1)
+List sessions on one pinned host, or on every pinned host
+.TP
+qsh\-serve(1)
+Run the host: accept connections from pinned peers. Foreground only; the bound address is printed to stderr
+.TP
+qsh\-listen(1)
+Run the reverse\-mode controller: accept dial\-in registrations from `qsh reverse` and serve them as hosts (`docs/CLI.md` §6.13). Foreground only; the bound address and registration events go to stderr
+.TP
+qsh\-tunnel(1)
+Manage tunnels (`docs/CLI.md` §6.9)
+.TP
+qsh\-tunnels(1)
+List every tunnel this machine\*(Aqs resident `qsh listen` daemon(s) currently hold (`docs/CLI.md` §6.9, `tunnel.list`). Never dials. A forward\-route tunnel opened by a standalone `qsh tunnel open` process is not visible here — it has no resident holder to be listed by (`Ops::tunnel_list`\*(Aqs own doc)
+.TP
+qsh\-reverse(1)
+Dial `<controller>` and register this device as a reverse target, once — no reconnect loop yet (`docs/CLI.md` §6.13). On success this process serves the connection as a host, the same broker/writer\-lease discipline as `qsh serve`
+.TP
+qsh\-mcp(1)
+Serve MCP tools over stdio (`docs/CLI.md` §8). Not an operation: no envelope, nothing on stdout but JSON\-RPC frames — every diagnostic goes to stderr, exactly like `qsh serve`/`qsh listen`/`qsh reverse` (`docs/CLI.md` §8.1, §2.2). No flags: MVP is stdio\-only
+.SH VERSION
+v0.1.0

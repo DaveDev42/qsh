@@ -2,10 +2,15 @@
 //! this crate only parses arguments, calls `qsh_core::Ops`, and renders the
 //! result (`docs/CLI.md` §11).
 
-mod cli;
 mod mcp;
 mod render;
 mod tui;
+
+// `cli` lives in this crate's library target now (`src/lib.rs`), not as a
+// `mod cli;` binary-only submodule — that's what lets `xtask` read the
+// real `clap::Command` tree for man-page generation (`xtask/src/man.rs`)
+// without a second, hand-maintained copy of it.
+use qsh_cli::cli;
 
 use std::io::{self, IsTerminal, Read, Write};
 use std::time::SystemTime;

@@ -4,10 +4,10 @@ M6 마감(2026-08-31, ROADMAP M6 마감 노트)과 함께 이 문서는 M7 실�
 
 ## 1. DoD 체크리스트 (ROADMAP M7)
 
-- [ ] **DoD 1 — 스톱워치 테스트**: 한 번도 설정한 적 없는 두 장비가 README만 보고 `qsh user@host`까지 5분 이내, 독립 3회 측정·기록 (SC1/SC2, 캠페인 문서 사전 정의).
-- [ ] **DoD 2 — doctor 진단 6종**: UDP 차단/경로 없음/비신뢰 peer/만료 cert/keystore 부재(headless)/clock skew 각각 실행 가능한 메시지 + 안정된 JSON code.
-- [ ] **DoD 3 — `qsh capabilities --json` == checked-in fixture** (scope-creep tripwire).
-- [ ] **DoD 4 (감사 ①) — `trust remove` 유효 범위**: 기존 연결·신규 handshake 각각의 동작이 테스트로 고정되고 문서·doctor 고지와 일치.
+- [ ] **DoD 1 — 스톱워치 테스트**: 한 번도 설정한 적 없는 두 장비가 README만 보고 `qsh user@host`까지 5분 이내, 독립 3회 측정·기록 (SC1/SC2, 캠페인 문서 사전 정의). **미실행 — 사람이 해야 한다.** 기준은 `docs/campaigns/m7-stopwatch.md`에 사전 고정됐고 예행 1회를 마쳤으며 회차 환경은 `scripts/stopwatch/round.sh`가 준비하지만, 재는 대상이 사람 시간이라(같은 문서 §9) 에이전트가 대신 수행하면 그 문서가 이미 기각한 과소측정을 재생산할 뿐이다.
+- [x] **DoD 2 — doctor 진단 6종**: UDP 차단/경로 없음/비신뢰 peer/만료 cert/keystore 부재(headless)/clock skew 각각 실행 가능한 메시지 + 안정된 JSON code. 근거: Step 6 — `EXPECTED_DOCTOR_CODES` 13종 동결 set-equality, 시각 임계값 경계 테스트, `classify_io_error` errno 분류, CLI.md 축자 문면을 지키는 `doctor_docs.rs`.
+- [x] **DoD 3 — `qsh capabilities --json` == checked-in fixture** (scope-creep tripwire). 근거: Step 1 — fixture 등록 + `CLI_V1_SCHEMA_COMMANDS` 양방향 set-equality(단방향 const→arm 대조로는 등록 누락을 못 잡는다는 것을 mutation으로 확인한 뒤 재작성).
+- [x] **DoD 4 (감사 ①) — `trust remove` 유효 범위**: 기존 연결·신규 handshake 각각의 동작이 테스트로 고정되고 문서·doctor 고지와 일치. 근거: Step 2 — 현행 의미론(다음 handshake부터) 확정 + 3문서·doctor 고지 + 내용 기반 재로드.
 
 ## 2. 실행 단계 (PR 단위)
 
@@ -245,6 +245,26 @@ naive 1.25가 예측 1.00보다 큰 것은 baseline 12스레드가 **공유 런�
 ### Step 8 — man page·설치 문서 + 스톱워치 캠페인 (DoD 1) + 마감
 
 **(a) 범위:** man page·설치 문서, README 최종 동기화. `docs/campaigns/m7-stopwatch.md` 사전 정의(M6 캠페인 선례: 기준 먼저 커밋) — 한 번도 설정한 적 없는 두 장비(신선한 sandbox 프로필 2식 또는 실장비 2대), README만 보고 `qsh user@host`까지, 독립 3회, 5분 기준. ROADMAP §4 리스크 3의 "조기·반복" — Step 4(pairing) 착륙 직후 1회 예행 측정을 먼저 수행해 병목을 마감 전에 노출한다. 이후 §5 마감 절차.
+
+**(a)-추기 — Step 8 착지 (2026-09-01, main 세션).** 문서 5건은 sonnet 에이전트가, DoD 1 캠페인 하네스는 main 세션이 직접 만들었다. 게이트 6종 green, nextest **1334 passed / 2 skipped**(기준선 1333 + man page 대조 1건).
+
+**man page는 생성물로 착지했다.** 손으로 쓰면 `docs/CLI.md` 명령 표의 두 번째 사본이 되므로 `clap_mangen`으로 `qsh-cli`의 실제 `clap::Command` 트리에서 뽑는다(`cargo xtask man` → `docs/man/*.1` 38장, 노드당 1장 — cargo·git이 같은 이유로 쓰는 모양). 이를 위해 `qsh-cli`에 `src/lib.rs`(`pub mod cli;`)를 신설했다. 재생성 대조 테스트(`xtask::man::tests::checked_in_man_pages_match_the_generator`)가 파일 집합과 바이트 내용 양쪽을 본다.
+
+**lib 타깃이 아키텍처를 넓히는가 — 직접 변이로 확인했다.** 전에는 `qsh-cli`에 lib 타깃이 없어 아무도 의존할 수 **없었는데** 이제 표현 가능한 간선이 됐다. `qsh-core`에 `qsh-cli` 의존을 넣어 보니 **cargo가 순환 패키지 의존으로 거부**한다 — arch-lint가 돌기도 전에. `qsh-proto`·`qsh-transport`·`qsh-core`는 전부 `qsh-cli` 아래에 있어 되돌아오는 간선이 곧 순환이고, 순환이 아닌 경로는 매트릭스가 이미 면제하는 `qsh-testkit`과 매트릭스 밖의 `xtask` 둘뿐이다. 실효 아키텍처는 그대로다. 다만 에이전트가 그 보장을 arch-lint에 귀속시켜 놨길래, 실제로 막는 것은 cargo라는 사실로 `lib.rs`의 doc을 정정했다 — 기계가 무엇을 강제하는지 틀리게 적는 것은 이 리포가 Step 7-2에서 P2-1로 다뤘던 결함과 같은 계열이다.
+
+**main 세션이 잡은 에이전트 산출물의 결함 3건.**
+
+① **README의 사실 오류.** "crates.io 패키지 이름이 이미 남에게 선점됐다"고 적었는데 확인해 보니 `qsh-cli`는 **비어 있다**. 선점된 것은 바이너리와 같은 짧은 이름 `qsh`(무관한 `haukened/quicshell` v0.0.2)다. crates.io 설치가 안 되는 진짜 이유는 선점이 아니라 M9까지 `publish = false`인 것이므로 그렇게 고쳤다. 검증 가능한 사실을 검증 없이 README에 적은 사례.
+
+② **`docs/design/testing.md` M7 문단의 사실 오류.** "Step 7-2가 소스텍스트 매칭 게이트 두 벌을 `Op::spec()` exhaustive match로 **대체**했다"고 적었으나 대체하지 않았다 — `authorize_stream_has_exactly_two_production_call_sites`와 `action_variant_literals_are_pinned_to_the_one_documented_exception`은 `tests/acl_registry.rs`에 그대로 살아 있고(:1160, :1202) 새 호출 형태에 맞춰 갱신됐을 뿐이며, 검증 라운드 E5가 검출력 보존을 실증했다. 오타 구멍을 닫는 것은 `Op` 타입 자체다. 문면을 사실대로 고쳤다.
+
+③ 같은 문단에 U+200B 제로폭 공백 1개, 그리고 낡은 baseline 숫자(1333 → 1334). 둘 다 정정.
+
+**man page 대조 게이트 검출력 — main 세션 독립 변이 2건.** 내용 드리프트(clap doc 주석 한 줄 수정) → `docs/man/qsh.1 is stale` FAIL. 파일 집합 드리프트(체크인된 페이지 1장 삭제) → `does not have the same *.1 file set` FAIL. 두 축 모두 잡힌다. 첫 시도는 정규식이 `about = "…"` 형태를 찾다가 매치에 실패해 **변이가 적용되지 않은 채 13 passed**를 봤다 — clap이 doc 주석에서 help를 가져오는 구조라서다. 무변이 green을 검출 실패로 오독하지 않고 다시 돌렸다.
+
+**DoD 1 하네스 — `scripts/stopwatch/`(main 세션).** 캠페인 §3이 "loopback으로 대신하면 두 장비라는 전제가 무너진다"고 못박으므로 컨테이너 두 개를 bridge 네트워크에 띄운다. `round.sh N` 하나가 작업 트리를 빌드하고 회차마다 홈을 비우고 §3의 여섯 조건을 검사한다 — 검사에 qsh 명령을 쓰지 않아 "미리 실행하면 그게 연습"이라는 §3 항목 2의 제약을 지킨다. compose는 안 쓴다(별도 플러그인이라 daemon마다 있으리라는 보장이 없다). 하네스 자체를 한 번 검증했다: 전제 조건 전건 통과 + README "First run" 문면 그대로 실행해 클라이언트가 `dave@box:~$` 원격 프롬프트를 받는 것까지 확인. 컨테이너에는 Secret Service가 없어 keystore 파일 fallback으로 내려가므로 **컨테이너 회차는 실장비 회차보다 관대하다** — 이 비대칭을 `scripts/stopwatch/README.md`와 캠페인 §3에 적어 뒀고, 감추고 유리한 조건만 쓰지 않는다.
+
+**부수 발견 1건(범위 밖, 기록만).** `qsh session open dave@box`는 `user@` 문법을 받지 않아 `HOST_NOT_FOUND`인데(대화형 `qsh dave@box`와 문법이 다르다 — §7), 그 에러 메시지가 `qsh trust add dave@box --address …`를 제안한다. 문자 그대로 "dave@box"라는 이름의 host를 핀하라는 뜻이 되어 오해를 부른다. 대화형 형태에서 유추해 치기 쉬운 실수라 UX 결함이고, 이번 diff가 만든 것이 아니므로 M8 백로그로 넘긴다.
 
 **Step 7 이월 문서 항목 2건**(여기서 처리): (i) P3-7 — `docs/CLI.md` §2.4 operation 목록에 `cert.init`/`cert.issue` 등재(§6.16이 이미 정식 dotted op으로 문서화하는데 목록에만 빠져 있다). (ii) `cargo test`는 baseline부터 red이고 CI(`ci.yml:92-93`)도 nextest만 돌리는데 `CLAUDE.md`와 `docs/design/testing.md`는 아직 nextest를 "preferred"로 적는다 — **required**로 문면을 맞춘다. Step 7-1·7-2 두 라운드 모두 에이전트가 `cargo test`를 게이트로 오인할 뻔한 지점이라 문서 결함으로 취급한다.
 

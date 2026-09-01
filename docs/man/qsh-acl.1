@@ -1,0 +1,34 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH qsh-acl 1  "acl 0.1.0" 
+.SH NAME
+qsh\-acl \- Inspect the ACL policy (`docs/CLI.md` §6.15)
+.SH SYNOPSIS
+\fBqsh acl\fR [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fIsubcommands\fR>
+.SH DESCRIPTION
+Inspect the ACL policy (`docs/CLI.md` §6.15)
+.SH OPTIONS
+.TP
+\fB\-\-json\fR
+Emit a single `qsh.cli/v1` JSON envelope on stdout instead of human\-readable text
+.TP
+\fB\-\-jsonl\fR
+Emit newline\-delimited JSON on stdout (reserved for streaming commands; non\-streaming commands emit a single line, same as `\-\-json`)
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Increase diagnostic verbosity on stderr (`\-v` info, `\-vv` debug, `\-vvv` trace). Never affects stdout (`docs/CLI.md` §2.2)
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Suppress diagnostic output on stderr
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.TP
+\fB\-V\fR, \fB\-\-version\fR
+Print version
+.SH SUBCOMMANDS
+.TP
+qsh\-acl\-check(1)
+Evaluate this machine\*(Aqs own `acl.toml` against a hypothetical request, using the exact same evaluator `qsh serve`/`qsh listen`/ `qsh reverse` enforce with (`PLAN.md` M5 DoD 1) — a reliable prediction of what enforcement would decide, without a restart. Local only: never reaches a remote peer (`docs/CLI.md` §6.15)
+.SH VERSION
+v0.1.0

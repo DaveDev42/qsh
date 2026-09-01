@@ -2,7 +2,7 @@
 
 **상태:** 확정 (구현과 어긋나는 내용을 발견하면 이 문서를 먼저 갱신한다)
 **작성일:** 2026-08-17 · **개정:** 2026-08-21 — 프로덕션 준비도 감사(HEAD `1d5d1b0`) 반영: M3/M5/M7/M8/M9 범위·수용 기준 증보, "마일스톤 마감 공통 절차" 신설. 새 마일스톤은 만들지 않았다 — 감사가 찾은 갭 전부를 기존 마일스톤에 명시 귀속시킨 것이 이 개정의 전부다.
-**현재 위치:** M6 완료 (2026-08-31) — 다음은 M7 (Trust UX·profiles·doctor)
+**현재 위치:** M7 (Trust UX·profiles·doctor) 실행 중 — Step 1–8 전건 착륙, 마감은 사람이 해야 하는 두 항목에 걸려 있다. DoD 2(doctor 진단)·DoD 3(capabilities fixture)·DoD 4(`trust remove` 의미론)는 코드와 테스트로 충족됐고, **DoD 1(스톱워치 3회)은 미실행**이다 — `docs/campaigns/m7-stopwatch.md`가 기준을 사전 고정하고 예행 1회를 마쳤으며 `scripts/stopwatch/`가 회차 환경을 준비하지만, 측정 자체가 사람 시간을 재는 것이라(같은 문서 §9: 스크립트가 대신 채우면 실측이 아니라 과소측정) 자동화로 대체할 수 없다. **SC7 외부 보안 리뷰 예약도 M5→M6→M7 3연속 미완**이며 M8 wire freeze 리드타임이 사실상 만료됐다.
 
 이 문서는 P0 MVP까지의 canonical 마일스톤 기록이다. 각 마일스톤의 "수용 기준"이 곧 그 마일스톤의 **완료 정의(Definition of Done)** 다 — 수용 기준을 통과하는 테스트/시연 없이는 마일스톤을 닫지 않는다. SC 번호는 PRD §15 성공 기준의 순번이다 (SC1: 신규 두 장비 5분 내 연결, SC2: 한 명령 접속, SC3: 네트워크 전환 ≥95% 유지/resume, SC4: resume 가능한 단절에서 output 무손실, SC5: client crash가 remote PTY를 죽이지 않음, SC6: 모든 privileged op의 ACL 추적성, SC7: 공개 beta 전 독립 보안 리뷰).
 

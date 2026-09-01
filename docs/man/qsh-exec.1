@@ -1,0 +1,44 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH qsh-exec 1  "exec 0.1.0" 
+.SH NAME
+qsh\-exec \- Run a command on a pinned host and return its output
+.SH SYNOPSIS
+\fBqsh exec\fR [\fB\-\-json\fR] [\fB\-\-timeout\fR] [\fB\-\-env\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fIHOST\fR> <\fICOMMAND\fR> 
+.SH DESCRIPTION
+Run a command on a pinned host and return its output.
+.PP
+The remote exit code becomes qsh\*(Aqs exit code (255 is clamped to 254); qsh\*(Aqs own failures exit 255. With `\-\-json`, stdout/stderr are returned Base64\-encoded in the envelope; otherwise they are passed through verbatim.
+.SH OPTIONS
+.TP
+\fB\-\-json\fR
+Emit a single `qsh.cli/v1` JSON envelope on stdout instead of human\-readable text
+.TP
+\fB\-\-timeout\fR \fI<MILLISECONDS>\fR
+Give up with `TIMEOUT` if the command has not finished within this many milliseconds. The remote process is killed
+.TP
+\fB\-\-env\fR \fI<NAME=VALUE>\fR
+Extra environment variable for the remote command (`NAME=VALUE`). Repeatable
+.TP
+\fB\-\-jsonl\fR
+Emit newline\-delimited JSON on stdout (reserved for streaming commands; non\-streaming commands emit a single line, same as `\-\-json`)
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Increase diagnostic verbosity on stderr (`\-v` info, `\-vv` debug, `\-vvv` trace). Never affects stdout (`docs/CLI.md` §2.2)
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Suppress diagnostic output on stderr
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help (see a summary with \*(Aq\-h\*(Aq)
+.TP
+\fB\-V\fR, \fB\-\-version\fR
+Print version
+.TP
+<\fIHOST\fR>
+Host alias from the trust store (`qsh trust list`)
+.TP
+<\fICOMMAND\fR>
+The command and its arguments, after `\-\-`
+.SH VERSION
+v0.1.0

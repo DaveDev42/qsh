@@ -25,13 +25,22 @@ QSH is a QUIC-based direct-connect remote shell (single Rust binary `qsh`) that 
 
 ## Commands
 
-- `cargo test` (or `cargo nextest run` if installed — preferred, process isolation matters for PTY tests)
+- `cargo nextest run --workspace` (required, not `cargo test` — see below)
 - `cargo fmt --all`
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo deny check`
 - `cargo run -p xtask -- arch` (arch-lint: enforces the dependency-direction and layering rules below)
 
-**Before committing**, fmt + clippy + test + arch-lint must all be green. Do not commit with any of these failing.
+**`cargo nextest run` is the test gate; plain `cargo test` is not.** Nextest's
+per-test process isolation is a hard requirement here, not a convenience —
+PTY/termios tests and other global-state tests interfere with each other
+inside `cargo test`'s shared-process model, and `cargo test` has been red
+from baseline for exactly that reason since M7 (`acl::load`, `localctl::
+daemon`). CI (`.github/workflows/ci.yml`) only runs nextest. A red
+`cargo test` run tells you nothing about a regression; run nextest on the
+same tree to find out.
+
+**Before committing**, fmt + clippy + nextest + arch-lint must all be green. Do not commit with any of these failing.
 
 ## Workspace map
 
