@@ -1,0 +1,48 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH qsh-session-read 1  "read 0.1.0" 
+.SH NAME
+qsh\-session\-read \- Read session output after a cumulative byte offset
+.SH SYNOPSIS
+\fBqsh session read\fR [\fB\-\-after\fR] [\fB\-\-json\fR] [\fB\-\-ctl\-after\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-\-wait\fR] [\fB\-\-limit\-bytes\fR] [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-follow\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fISESSION_REF\fR> 
+.SH DESCRIPTION
+Read session output after a cumulative byte offset
+.SH OPTIONS
+.TP
+\fB\-\-after\fR \fI<SEQUENCE>\fR [default: 0]
+Cumulative output byte offset already received; the reply starts right after it
+.TP
+\fB\-\-json\fR
+Emit a single `qsh.cli/v1` JSON envelope on stdout instead of human\-readable text
+.TP
+\fB\-\-ctl\-after\fR \fI<ID>\fR [default: 0]
+Control\-entry cursor: the `next_ctl_after` of the previous reply. Control events do not advance `\-\-after`, so a poller that omits this is handed the control event sitting at `\-\-after` on every pull
+.TP
+\fB\-\-jsonl\fR
+Emit newline\-delimited JSON on stdout (reserved for streaming commands; non\-streaming commands emit a single line, same as `\-\-json`)
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Increase diagnostic verbosity on stderr (`\-v` info, `\-vv` debug, `\-vvv` trace). Never affects stdout (`docs/CLI.md` §2.2)
+.TP
+\fB\-\-wait\fR \fI<MILLISECONDS>\fR
+Long\-poll: wait up to this many milliseconds for new output
+.TP
+\fB\-\-limit\-bytes\fR \fI<BYTES>\fR
+Maximum output payload bytes in one reply (the host clamps to its own cap)
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Suppress diagnostic output on stderr
+.TP
+\fB\-\-follow\fR
+Keep printing events until the session exits or is closed
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.TP
+\fB\-V\fR, \fB\-\-version\fR
+Print version
+.TP
+<\fISESSION_REF\fR>
+Opaque session handle
+.SH VERSION
+v0.1.0

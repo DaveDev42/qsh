@@ -8,6 +8,16 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 toml.workspace = true
+clap.workspace = true
+# `cargo xtask man` (docs/man/ generator) — MIT OR Apache-2.0, allowed by
+# deny.toml's [licenses].allow. Used by exactly this one crate, so declared
+# directly here rather than hoisted to [workspace.dependencies], the same
+# precedent `qsh-cli`'s own `rmcp` dependency sets.
+clap_mangen = "0.3"
+# The clap `Command` tree this generates from. See `crates/qsh-cli/src/
+# lib.rs`'s own doc for why this dependency exists and why it does not
+# widen `xtask/src/arch.rs`'s dependency matrix (xtask sits outside it).
+qsh-cli = { path = "../crates/qsh-cli" }
 
 [dev-dependencies]
 tempfile.workspace = true

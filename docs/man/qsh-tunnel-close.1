@@ -1,0 +1,35 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH qsh-tunnel-close 1  "close 0.1.0" 
+.SH NAME
+qsh\-tunnel\-close \- Close a tunnel by id (`docs/CLI.md` §6.9, `tunnel.close`)
+.SH SYNOPSIS
+\fBqsh tunnel close\fR [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fITUNNEL_ID\fR> 
+.SH DESCRIPTION
+Close a tunnel by id (`docs/CLI.md` §6.9, `tunnel.close`).
+.PP
+Only ever reaches a daemon\-held reverse\-route (`\-R over reverse`) forward — a forward\-route tunnel\*(Aqs only "close" is its holding process exiting (`docs/CLI.md` §6.14). Idempotent: closing an id nothing currently holds answers `closed: false`, not an error.
+.SH OPTIONS
+.TP
+\fB\-\-json\fR
+Emit a single `qsh.cli/v1` JSON envelope on stdout instead of human\-readable text
+.TP
+\fB\-\-jsonl\fR
+Emit newline\-delimited JSON on stdout (reserved for streaming commands; non\-streaming commands emit a single line, same as `\-\-json`)
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Increase diagnostic verbosity on stderr (`\-v` info, `\-vv` debug, `\-vvv` trace). Never affects stdout (`docs/CLI.md` §2.2)
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Suppress diagnostic output on stderr
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help (see a summary with \*(Aq\-h\*(Aq)
+.TP
+\fB\-V\fR, \fB\-\-version\fR
+Print version
+.TP
+<\fITUNNEL_ID\fR>
+The `tunnel_id` from that tunnel\*(Aqs `tunnel.open`/`tunnels` entry
+.SH VERSION
+v0.1.0

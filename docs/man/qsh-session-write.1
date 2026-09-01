@@ -1,0 +1,39 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH qsh-session-write 1  "write 0.1.0" 
+.SH NAME
+qsh\-session\-write \- Inject input into a session
+.SH SYNOPSIS
+\fBqsh session write\fR [\fB\-\-json\fR] [\fB\-\-stdin\fR] [\fB\-\-data\-b64\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fISESSION_REF\fR> 
+.SH DESCRIPTION
+Inject input into a session
+.SH OPTIONS
+.TP
+\fB\-\-json\fR
+Emit a single `qsh.cli/v1` JSON envelope on stdout instead of human\-readable text
+.TP
+\fB\-\-stdin\fR
+Send this process\*(Aqs stdin, verbatim, until EOF
+.TP
+\fB\-\-data\-b64\fR \fI<BASE64>\fR
+Send these bytes (standard Base64)
+.TP
+\fB\-\-jsonl\fR
+Emit newline\-delimited JSON on stdout (reserved for streaming commands; non\-streaming commands emit a single line, same as `\-\-json`)
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Increase diagnostic verbosity on stderr (`\-v` info, `\-vv` debug, `\-vvv` trace). Never affects stdout (`docs/CLI.md` §2.2)
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Suppress diagnostic output on stderr
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.TP
+\fB\-V\fR, \fB\-\-version\fR
+Print version
+.TP
+<\fISESSION_REF\fR>
+Opaque session handle
+.SH VERSION
+v0.1.0

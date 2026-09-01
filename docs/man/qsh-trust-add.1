@@ -1,0 +1,39 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH qsh-trust-add 1  "add 0.1.0" 
+.SH NAME
+qsh\-trust\-add \- Pin a peer by name
+.SH SYNOPSIS
+\fBqsh trust add\fR [\fB\-\-address\fR] [\fB\-\-json\fR] [\fB\-\-fingerprint\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fINAME\fR> 
+.SH DESCRIPTION
+Pin a peer by name
+.SH OPTIONS
+.TP
+\fB\-\-address\fR \fI<HOST:PORT>\fR
+`host:port` used to dial this peer. Required when `\-\-fingerprint` is absent, since the fingerprint has to be observed from somewhere
+.TP
+\fB\-\-json\fR
+Emit a single `qsh.cli/v1` JSON envelope on stdout instead of human\-readable text
+.TP
+\fB\-\-fingerprint\fR \fI<FINGERPRINT>\fR
+`sha256:BASE64` fingerprint. When given, the peer is pinned without connecting
+.TP
+\fB\-\-jsonl\fR
+Emit newline\-delimited JSON on stdout (reserved for streaming commands; non\-streaming commands emit a single line, same as `\-\-json`)
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Increase diagnostic verbosity on stderr (`\-v` info, `\-vv` debug, `\-vvv` trace). Never affects stdout (`docs/CLI.md` §2.2)
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Suppress diagnostic output on stderr
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.TP
+\fB\-V\fR, \fB\-\-version\fR
+Print version
+.TP
+<\fINAME\fR>
+Local alias for the peer (also the `device:<name>` principal it authenticates as)
+.SH VERSION
+v0.1.0

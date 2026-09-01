@@ -1,0 +1,49 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH qsh-session 1  "session 0.1.0" 
+.SH NAME
+qsh\-session \- Manage sessions: shells that outlive the connection that opened them
+.SH SYNOPSIS
+\fBqsh session\fR [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fIsubcommands\fR>
+.SH DESCRIPTION
+Manage sessions: shells that outlive the connection that opened them
+.SH OPTIONS
+.TP
+\fB\-\-json\fR
+Emit a single `qsh.cli/v1` JSON envelope on stdout instead of human\-readable text
+.TP
+\fB\-\-jsonl\fR
+Emit newline\-delimited JSON on stdout (reserved for streaming commands; non\-streaming commands emit a single line, same as `\-\-json`)
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Increase diagnostic verbosity on stderr (`\-v` info, `\-vv` debug, `\-vvv` trace). Never affects stdout (`docs/CLI.md` §2.2)
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Suppress diagnostic output on stderr
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.TP
+\fB\-V\fR, \fB\-\-version\fR
+Print version
+.SH SUBCOMMANDS
+.TP
+qsh\-session\-open(1)
+Create a session on a pinned host. Without a command after `\-\-` the remote login shell is started
+.TP
+qsh\-session\-get(1)
+Show one session
+.TP
+qsh\-session\-read(1)
+Read session output after a cumulative byte offset
+.TP
+qsh\-session\-write(1)
+Inject input into a session
+.TP
+qsh\-session\-resize(1)
+Change a session\*(Aqs terminal size
+.TP
+qsh\-session\-close(1)
+Terminate a session\*(Aqs process group and remove the session
+.SH VERSION
+v0.1.0

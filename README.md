@@ -17,8 +17,10 @@ One binary (`qsh`) is both ends: it serves, and it connects.
 
 Pre-alpha. **Not for production use.**
 
-M0 through M3 are done, and M4 (port forwarding) has landed what its
-acceptance criteria ask for. What works end to end today:
+M0 through M6 are done. M7 (trust UX, host profiles, `doctor`) has landed
+the features below; closing the milestone out still needs the stopwatch
+campaign in `docs/campaigns/m7-stopwatch.md` (a dry run so far, not the
+three timed rounds its DoD requires). What works end to end today:
 
 - `qsh exec host -- cmd`, in human mode or as a single `qsh.cli/v1` JSON
   envelope with the remote exit code, stdout and stderr.
@@ -31,16 +33,27 @@ acceptance criteria ask for. What works end to end today:
 - `-L` and `-R` port forwards, over forward connections and over reverse
   ones, plus the standalone `qsh tunnel open`/`qsh tunnels`/
   `qsh tunnel close` machine-mode commands.
+- A default-deny ACL (`acl.toml`) and a fail-closed audit log gate every
+  operation a remote peer requests. See [Security
+  posture](#security-posture).
 - `qsh mcp`, an MCP server over stdio that exposes the same 12 operations
   the CLI uses to MCP clients such as Claude Code. See [MCP
   server](#mcp-server).
+- Three ways to pin a peer: trust-on-first-connect, `qsh trust
+  invite`/`qsh trust accept` pairing with a one-time code, or a private CA
+  (`qsh cert init`/`qsh cert issue`) so a fleet trusts one CA root instead
+  of pinning every device by hand. `hosts.toml` layers addresses and login
+  names on top of whichever one pinned a peer. See [First
+  run](#first-run).
+- `qsh doctor` diagnoses one deployment — identity, ACL policy, audit log,
+  trust store, clock, network reachability — as a single machine-readable
+  report. `qsh schema --json` serves this build's JSON contract the same
+  way, and `qsh capabilities` reports its supported capabilities, or, given
+  a pinned host, what was actually negotiated with that peer.
 
 `-D` (SOCKS5 dynamic forwarding) parses on both the interactive and
 `tunnel open` forms but always answers `UNSUPPORTED` with the message
 "SOCKS dynamic forwarding (-D) is a P1 feature".
-
-Authorization is the other unfinished half: read [Security
-posture](#security-posture) before you pin anything.
 
 ## Install
 
@@ -81,13 +94,36 @@ Note the Windows caveat under [Known limitations](#known-limitations): the
 tree compiles and the portable tests run there, but nothing is promised.
 
 Building from source needs a Rust toolchain. `rust-toolchain.toml` pins
-1.97.1, which is what CI and the release builds use:
+1.97.1, which is what CI and the release builds use. Either build in a
+clone and place the binary yourself:
 
 ```bash
 cargo build --release -p qsh-cli    # binary at target/release/qsh
 ```
 
+or let `cargo install` build and place it in one step, straight from this
+repository:
+
+```bash
+cargo install --locked --git https://github.com/DaveDev42/qsh qsh-cli
+```
+
+There is no `cargo install qsh-cli` from crates.io yet: the workspace is
+`publish = false` until M9, so `--git` (or `--path` against a local clone)
+is the only `cargo install` route today. The package name `qsh-cli` is
+unclaimed and reserved for that release; the shorter name `qsh` is not —
+it belongs to an unrelated project — which is why the crate is `qsh-cli`
+even though the binary it installs is `qsh`.
+
 `scripts/README.md` covers the installer in more detail.
+
+Man pages for every subcommand are generated from the same `clap`
+definitions `--help` uses and live under [`docs/man/`](docs/man/)
+(`cargo xtask man` regenerates them; `docs/design/testing.md` covers the
+test that keeps them from drifting). Nothing installs them onto a system
+`MANPATH` yet — that lands with M9's packaging — so point `man` at a page
+directly instead: `man ./docs/man/qsh.1`, or `man ./docs/man/qsh-trust-add.1`
+for a subcommand.
 
 ## First run
 
