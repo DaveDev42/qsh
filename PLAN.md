@@ -292,9 +292,13 @@ naive 1.25가 예측 1.00보다 큰 것은 baseline 12스레드가 **공유 런�
 
 **처방의 사실성을 코드로 확인했다.** 처방이 "`ca/`를 지우고 `qsh cert init` 재실행"을 시키는데, `add_ca`는 이름 충돌 시 `add_peer`와 **달리 덮어쓴다**(trust/mod.rs:267) — no-op이었다면 처방이 운영자를 더 나쁜 자리로 몰았을 것이다. leaf 경로도 `identity::init`이 부재 시 재생성함을 확인. ADR-0008이 rotation을 P1 범위 밖으로 못박은 것도 대조했다(L52).
 
-**독립 mutation 2종 — 전건 검출.** ① 유입 가드 무력화 → 비자명 검출 2건(실 QUIC loopback의 responder 측 거부 + `Ops::trust_accept`의 initiator 측 거부, 후자는 **검증되는 proof를 가진 rogue responder**가 나쁜 이름을 보내도 `trust.toml`이 생성조차 되지 않음을 단언한다). 가드 함수를 직접 부르는 단위 테스트 1건은 자명 검출로 분리 계상. ② 렌더러 `sanitize` 제거 → 해당 테스트 FAIL. 양쪽 byte-identical 원복. 게이트 6종 green, nextest **1342 passed / 2 skipped**(1334 + 신규 8 = 정확 일치).
+**독립 mutation 2종 — 전건 검출.** ① 유입 가드 무력화 → 비자명 검출 2건(실 QUIC loopback의 responder 측 거부 + `Ops::trust_accept`의 initiator 측 거부, 후자는 **검증되는 proof를 가진 rogue responder**가 나쁜 이름을 보내도 `trust.toml`이 생성조차 되지 않음을 단언한다). 가드 함수를 직접 부르는 단위 테스트 1건은 자명 검출로 분리 계상. ② 렌더러 `sanitize` 제거 → 해당 테스트 FAIL. 양쪽 byte-identical 원복. 게이트 6종 green, nextest **1342 passed / 2 skipped**(1334 + 신규 8 = 정확 일치). CI run 33479926317 12개 job 전건 success(`37e1867`).
 
 **과정 사고 1건(기록).** mutation 원복에 `git checkout <file>`을 썼는데 fixer 변경이 미스테이지 상태라 `pairing.rs`의 Fix A2가 통째로 소실됐다. 같은 세션에 캡처해 둔 diff로 재구성했고, `cargo fmt`가 아무것도 바꾸지 않은 점(포맷 일치)·관련 27건 통과·최종 테스트 수 정확 일치(+8)로 복원이 원본과 동등함을 확인했다. 이후 mutation은 파일 복사본으로 원복했다. 감사하는 사람이 "착지한 코드가 검토된 코드와 같은가"를 물을 수 있으므로 남긴다.
+
+**스윕 2라운드 — 무소득(기록할 가치가 있는 음성 결과).** 1라운드가 다루지 않은 세 면을 마저 훑었다: ① **MCP 어댑터 × M7의 Ops 변경** — M6가 닫힌 뒤 그 아래 facade가 hosts.toml 해석·trust 의미론·pairing·capabilities·cert·doctor로 바뀌었는데 어댑터를 그에 대조한 사람이 없었다. ② **M7 신규 에러 경로의 panic·자원 정리** — 원격/디스크 입력이 닿는 unwrap·조기 반환 시 미해제 자원. ③ **reverse/tunnel × trust·hosts 변경** — M3·M4가 hosts.toml과 내용 기반 재로드 이전에 지어진 코드다. 세 렌즈 모두 빈 배열을 반환했고, 에이전트별 도구 호출 44·67·44건으로 실제 조사를 거친 결과임을 journal로 확인했다(빈 결과를 조사 실패와 구분).
+
+여기서 스윕을 끝낸다. 1라운드가 3건 중 1건을 마감 전 수정 대상으로 건졌고 2라운드가 0건이면 이 표면에서의 수확 체감이 분명하다. 더 돌리는 것은 인수 기준을 넘어가는 일이다.
 
 **(d) 완료 판정:** 캠페인 3회 기록 완료(전건 5분 이내), §5 전 항목 완료.
 
