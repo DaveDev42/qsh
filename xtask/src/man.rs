@@ -85,6 +85,10 @@ mod tests {
     /// same "regenerate and commit the diff" discipline
     /// `crates/qsh-cli/tests/fixtures.rs`'s `QSH_UPDATE_FIXTURES` flow
     /// uses for golden JSON fixtures.
+    ///
+    /// Byte-exact means line endings count, so `.gitattributes` pins the
+    /// working tree to LF — see its own comment for why the Windows CI leg
+    /// failed here before it existed.
     #[test]
     fn checked_in_man_pages_match_the_generator() {
         let root = workspace_root();
