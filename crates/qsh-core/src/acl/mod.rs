@@ -57,8 +57,7 @@ pub use load::{
 };
 pub use policy::{ActionPattern, Policy, Rule, Scope, Verdict};
 pub use registry::{
-    ALWAYS_DENIED_NO_OP, DENY_SEAMS, DenySeam, OP_REGISTRY, OpSpec, ResourceKind, SeamKind,
-    action_of,
+    ALWAYS_DENIED_NO_OP, DENY_SEAMS, DenySeam, OP_REGISTRY, Op, OpSpec, ResourceKind, SeamKind,
 };
 
 /// ACL action vocabulary (`docs/CLI.md` §2.5, PRD §9). Only the actions a

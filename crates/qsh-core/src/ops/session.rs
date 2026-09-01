@@ -1055,21 +1055,13 @@ impl Ops {
     /// resolution loads the device key — which must not happen inside a
     /// runtime — and a recovery re-dials from inside one.
     fn connect_target(&self, target: &PeerTarget) -> Result<Connected, OpError> {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .map_err(|err| OpError::new(ErrorCode::Internal, format!("runtime: {err}")))?;
-        match runtime.block_on(dial_peer(target)) {
-            Ok((endpoint, connection, session)) => Ok(Connected {
-                runtime: Some(runtime),
-                link: ConnectedLink::Forward(Link::new(endpoint, connection)),
-                session: Some(session),
-            }),
-            Err(err) => {
-                runtime.shutdown_timeout(CLOSE_DRAIN);
-                Err(err)
-            }
-        }
+        let runtime = self.connect_runtime()?;
+        let (endpoint, connection, session) = runtime.block_on(dial_peer(target))?;
+        Ok(Connected {
+            runtime: Some(runtime),
+            link: ConnectedLink::Forward(Link::new(endpoint, connection)),
+            session: Some(session),
+        })
     }
 
     /// [`connect`](Self::connect)'s reverse-route branch: relay through
@@ -1087,28 +1079,20 @@ impl Ops {
     /// [`Self::connect`] discards it.
     #[cfg(unix)]
     fn connect_reverse(&self, route: &LocalRoute) -> Result<(Connected, u64), OpError> {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .map_err(|err| OpError::new(ErrorCode::Internal, format!("runtime: {err}")))?;
-        match runtime.block_on(dial_reverse(route)) {
-            Ok((session, peer_fingerprint, generation)) => Ok((
-                Connected {
-                    runtime: Some(runtime),
-                    link: ConnectedLink::Reverse {
-                        peer_fingerprint,
-                        socket: route.socket.clone(),
-                        host: route.host.clone(),
-                    },
-                    session: Some(session),
+        let runtime = self.connect_runtime()?;
+        let (session, peer_fingerprint, generation) = runtime.block_on(dial_reverse(route))?;
+        Ok((
+            Connected {
+                runtime: Some(runtime),
+                link: ConnectedLink::Reverse {
+                    peer_fingerprint,
+                    socket: route.socket.clone(),
+                    host: route.host.clone(),
                 },
-                generation,
-            )),
-            Err(err) => {
-                runtime.shutdown_timeout(CLOSE_DRAIN);
-                Err(err)
-            }
-        }
+                session: Some(session),
+            },
+            generation,
+        ))
     }
 
     /// Windows twin of [`Self::connect_reverse`]: localctl (UDS) has no
@@ -1218,9 +1202,6 @@ async fn dial_reverse_wait(
     );
     Ok((session, peer_fingerprint, generation))
 }
-
-/// How long a torn-down connection's QUIC close frames get to drain.
-const CLOSE_DRAIN: Duration = Duration::from_millis(200);
 
 /// A live cursor on one session's replay ring — the single pull primitive
 /// behind `session read --wait`, `session read --follow` and (M6) the MCP
@@ -3418,8 +3399,14 @@ fn control_event_json(session_ref: &str, event: wire::SessionEvent) -> Option<Se
 /// one for a foreground tunnel (`PLAN.md` M4 Step 3); nothing outside
 /// `crate::ops` can name it.
 pub(crate) struct Connected {
-    /// `None` only between [`Connected::close`] and the drop.
-    runtime: Option<tokio::runtime::Runtime>,
+    /// `None` only between [`Connected::close`] and the drop. Shared with
+    /// every other in-flight `Connected` on this `Ops` (`PLAN.md` M7 Step
+    /// 7-2 ①, [`crate::ops::SharedRuntime`]'s own doc) — never the sole
+    /// owner, so nothing on this type may shut it down; the wrapper (not a
+    /// bare `Runtime`) is also what makes it safe for this field to be
+    /// dropped from any context, including from inside another async
+    /// runtime (as `qsh-testkit`'s fixtures do).
+    runtime: Option<Arc<crate::ops::SharedRuntime>>,
     /// The endpoint and connection currently carrying this attach — the
     /// forward route's swappable pair — or, on the reverse route, the
     /// facts a `LOCAL_CONTROL` handshake produced instead of one
@@ -3549,7 +3536,7 @@ impl Connected {
     /// loop).
     pub(crate) fn runtime(&self) -> &tokio::runtime::Runtime {
         self.runtime
-            .as_ref()
+            .as_deref()
             .expect("runtime is only taken by close()")
     }
 
@@ -3677,6 +3664,17 @@ impl Connected {
     /// frames drain (forward route) — or just the control stream (reverse
     /// route: there is no separate connection here to close, and no QUIC
     /// close frame of this process's own to drain).
+    ///
+    /// The runtime is shared (`PLAN.md` M7 Step 7-2 ①), so this only drops
+    /// this `Connected`'s own `Arc` handle to it — and only after
+    /// `block_on` above has already run `connection.close()` and
+    /// `endpoint.wait_idle()` to completion. If this handle happens to be
+    /// the last `Arc`, `SharedRuntime::drop` (`ops/mod.rs`) does call
+    /// `shutdown_background()`, but only once this function's own use of
+    /// the runtime is done. This also means the `shutdown_timeout
+    /// (CLOSE_DRAIN)` every close used to pay — up to 200ms per call,
+    /// waiting out a runtime this process was about to throw away anyway
+    /// — no longer happens.
     pub(crate) fn close(mut self) {
         let Some(runtime) = self.runtime.take() else {
             return;
@@ -3702,20 +3700,33 @@ impl Connected {
                 });
             }
         }
-        runtime.shutdown_timeout(CLOSE_DRAIN);
     }
 }
 
 impl Drop for Connected {
     fn drop(&mut self) {
         // `close()` already took the runtime on the normal path; this is the
-        // panic / early-return path.
-        if let Some(runtime) = self.runtime.take() {
+        // panic / early-return path. Shared runtime (as in `close()`
+        // above): dropping the `Arc` here releases only this `Connected`'s
+        // own handle — if it happens to be the last one, `SharedRuntime::
+        // drop` (`ops/mod.rs`) does shut the runtime down, via
+        // `shutdown_background()`. `if EXPR.take().is_some() { BODY }` is
+        // not `if let`: the condition expression's temporary is dropped
+        // *before* `BODY` runs, not after, so the `Arc` must be bound by
+        // name and held past `connection.close()` below — otherwise, on
+        // the last-`Arc` path, the runtime's endpoint driver task could be
+        // torn down before the CONNECTION_CLOSE frame requested here even
+        // leaves.
+        let taken = self.runtime.take();
+        if taken.is_some() {
             self.session.take();
             if let ConnectedLink::Forward(link) = &self.link {
                 link.connection().close(0, b"done");
             }
-            runtime.shutdown_timeout(CLOSE_DRAIN);
+            // Only release this `Connected`'s handle after the close
+            // request above has gone out. If this was the last `Arc`,
+            // `shutdown_background()` runs here.
+            drop(taken);
         }
     }
 }

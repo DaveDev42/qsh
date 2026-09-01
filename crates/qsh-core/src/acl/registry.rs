@@ -220,14 +220,133 @@ pub enum ResourceKind {
     ReverseHost,
 }
 
+/// Derives [`Op`], [`Op::ALL`], [`Op::as_str`], [`Op::spec`], and
+/// [`OP_REGISTRY`] from one list of rows given to a single invocation
+/// below — the actual mechanism behind `PLAN.md` M5 Step 8's "표 두 벌
+/// 금지" (`(d)②`). Before this macro existed, the variant list, `ALL`,
+/// and `OP_REGISTRY` were three hand-typed arrays that nothing forced to
+/// agree on *membership*: a variant could be added to the enum and given
+/// a `spec()` arm (so `spec()` itself still compiled — its match already
+/// had no wildcard) while never being added to `ALL`/`OP_REGISTRY`, and
+/// every completeness test still passed because each one enumerates
+/// starting from `Op::ALL` or `OP_REGISTRY` itself rather than from the
+/// `Op` type. A row authorizing real traffic could exist with no entry
+/// in either list — silent by every gate in this module, including the
+/// exhaustive-`match` ones, because none of them starts from a source
+/// that cannot omit a variant. With one invocation as the sole place a
+/// variant name is written, that state is no longer representable: the
+/// enum, `ALL`, and `OP_REGISTRY` cannot disagree on which variants exist
+/// because they are the same macro expansion.
+macro_rules! declare_ops {
+    ($( $(#[$m:meta])* $v:ident => ($name:literal, $act:expr, $rk:expr, $owned:expr) ),+ $(,)?) => {
+        /// The typed key for every privileged operation this build
+        /// authorizes (`PLAN.md` M5 Step 8, PRD §15 SC6) — replaces what
+        /// used to be a bare `&'static str` op name looked up at runtime
+        /// by the now-deleted `action_of`. [`Op::spec`]'s match is
+        /// **the** table (`PLAN.md` M5 Step 8's "표 두 벌 금지"):
+        /// [`OP_REGISTRY`] is only that match's own const projection,
+        /// never a second hand-maintained list, so a row cannot exist in
+        /// one and not the other by construction.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        pub enum Op {
+            $( $(#[$m])* $v ),+
+        }
+
+        impl Op {
+            /// Every [`Op`] variant, in [`OP_REGISTRY`]'s declaration
+            /// order — for exhaustive enumeration. This is not a second
+            /// hand-maintained list: the [`declare_ops!`] invocation
+            /// below derives the variant list, [`Op::as_str`],
+            /// [`Op::spec`], and [`OP_REGISTRY`] from one set of rows, so
+            /// there is no separate membership list a variant can be
+            /// missing from — `declare_ops!`'s own doc has the mechanism
+            /// this replaced.
+            pub const ALL: &'static [Op] = &[ $( Op::$v ),+ ];
+
+            /// The op's dotted name (`docs/CLI.md` §2.4/§2.5) — the exact
+            /// string [`DENY_SEAMS`] and the old string-keyed `action_of`
+            /// used.
+            pub const fn as_str(self) -> &'static str {
+                match self {
+                    $( Op::$v => $name ),+
+                }
+            }
+
+            /// **The one table.** Every other fact about an op — its
+            /// dispatch [`Action`], its resource shape, whether
+            /// `scope = "owned"` narrows it — is read off this match,
+            /// never named a second time (`PLAN.md` M5 Step 8's "표 두
+            /// 벌 금지"; [`OP_REGISTRY`] is this match's own const
+            /// projection, below). This match's exhaustiveness (no
+            /// wildcard arm) is also why `action_of`'s old
+            /// `#[should_panic]` "unregistered name" test was deleted
+            /// outright rather than ported: a `str` key could always
+            /// name something absent from the table, but an `Op`
+            /// variant with no `spec()` arm fails to *compile* —
+            /// "registered nowhere" stopped being a state this type can
+            /// hold.
+            pub const fn spec(self) -> OpSpec {
+                match self {
+                    $( Op::$v => OpSpec {
+                        op: Op::$v,
+                        action: $act,
+                        resource_kind: $rk,
+                        owned: $owned,
+                    } ),+
+                }
+            }
+        }
+
+        /// Every privileged operation this build authorizes (`PLAN.md`
+        /// M5 Step 8, PRD §15 SC6) — the const projection of the same
+        /// [`declare_ops!`] invocation that derives [`Op`] and
+        /// [`Op::ALL`], in that invocation's order. See [`OpSpec`]'s own
+        /// doc for the naming rule and the relationship to
+        /// [`DENY_SEAMS`], and [`ALWAYS_DENIED_NO_OP`] for the three PRD
+        /// §9 actions deliberately missing from this table.
+        pub const OP_REGISTRY: &[OpSpec] = &[ $( Op::$v.spec() ),+ ];
+    };
+}
+
+declare_ops! {
+    SessionOpen => ("session.open", Action::SessionOpen, ResourceKind::Session, false),
+    SessionList => ("session.list", Action::SessionList, ResourceKind::Session, false),
+    SessionGet => ("session.get", Action::SessionList, ResourceKind::Session, false),
+    SessionRead => ("session.read", Action::SessionAttach, ResourceKind::Session, false),
+    SessionAttach => ("session.attach", Action::SessionAttach, ResourceKind::Session, false),
+    SessionWrite => ("session.write", Action::SessionControl, ResourceKind::Session, true),
+    SessionResize => ("session.resize", Action::SessionControl, ResourceKind::Session, true),
+    // Documented exception (`docs/design/architecture.md` §6): shares
+    // `Action::SessionControl` with write/resize but is intentionally
+    // never narrowed by `scope = "owned"` (cross-device close, PRD §6).
+    SessionClose => ("session.close", Action::SessionControl, ResourceKind::Session, false),
+    ExecRun => ("exec.run", Action::ExecRun, ResourceKind::Exec, false),
+    ForwardLocal => ("forward.local", Action::ForwardLocal, ResourceKind::ForwardDestination, false),
+    ForwardRemote => ("forward.remote", Action::ForwardRemote, ResourceKind::ForwardBinding, false),
+    ForwardRemoteClose => ("forward.remote.close", Action::ForwardRemote, ResourceKind::ForwardBinding, true),
+    HostReverse => ("host.reverse", Action::HostReverse, ResourceKind::ReverseHost, false),
+}
+
+impl Op {
+    /// This op's ACL [`Action`] — the sole replacement for the deleted
+    /// `action_of(op: &str) -> Action`. Every production call site now
+    /// writes `Op::X.action()` instead of `action_of("x")`: the typo that
+    /// used to compile and panic at runtime (`action_of("sesion.open")`)
+    /// is now a name the `Op` type simply does not have, caught by rustc
+    /// at the call site instead of by a test run.
+    pub const fn action(self) -> Action {
+        self.spec().action
+    }
+}
+
 /// One row of the op registry: every privileged operation this build
 /// authorizes, its ACL [`Action`], the shape of its resource string, and
 /// whether `scope = "owned"` can narrow it to the resource's own
 /// opener/registering principal.
 ///
-/// `op` names a `docs/CLI.md` §2.4 dotted operation for the nine rows that
-/// are one, or the seam's own §2.5-prose name for the four that are not
-/// (`forward.local`, `forward.remote`, `forward.remote.close`,
+/// [`OpSpec::op`] names a `docs/CLI.md` §2.4 dotted operation for the nine
+/// rows that are one, or the seam's own §2.5-prose name for the four that
+/// are not (`forward.local`, `forward.remote`, `forward.remote.close`,
 /// `host.reverse`) — the exact naming [`DENY_SEAMS`] already uses.
 /// Deliberately not incidental: [`OP_REGISTRY`]'s (op, action) pairs are
 /// exactly [`DENY_SEAMS`]'s minus the one row with no CLI.md-documented
@@ -242,8 +361,9 @@ pub enum ResourceKind {
 /// `PLAN.md` M5 Step 8's "표 두 벌 금지".
 #[derive(Debug, Clone, Copy)]
 pub struct OpSpec {
-    /// The op's dotted name (`docs/CLI.md` §2.4/§2.5).
-    pub op: &'static str,
+    /// The op's key. [`Op::as_str`] gives the `docs/CLI.md` §2.4/§2.5
+    /// dotted name.
+    pub op: Op,
     /// The ACL action this op is authorized against.
     pub action: Action,
     /// The shape of this op's resource string.
@@ -259,94 +379,6 @@ pub struct OpSpec {
     /// close").
     pub owned: bool,
 }
-
-/// Every privileged operation this build authorizes (`PLAN.md` M5 Step 8,
-/// PRD §15 SC6). See [`OpSpec`]'s own doc for the naming rule and the
-/// relationship to [`DENY_SEAMS`], and [`ALWAYS_DENIED_NO_OP`] for the
-/// three PRD §9 actions deliberately missing from this table.
-pub const OP_REGISTRY: &[OpSpec] = &[
-    OpSpec {
-        op: "session.open",
-        action: Action::SessionOpen,
-        resource_kind: ResourceKind::Session,
-        owned: false,
-    },
-    OpSpec {
-        op: "session.list",
-        action: Action::SessionList,
-        resource_kind: ResourceKind::Session,
-        owned: false,
-    },
-    OpSpec {
-        op: "session.get",
-        action: Action::SessionList,
-        resource_kind: ResourceKind::Session,
-        owned: false,
-    },
-    OpSpec {
-        op: "session.read",
-        action: Action::SessionAttach,
-        resource_kind: ResourceKind::Session,
-        owned: false,
-    },
-    OpSpec {
-        op: "session.attach",
-        action: Action::SessionAttach,
-        resource_kind: ResourceKind::Session,
-        owned: false,
-    },
-    OpSpec {
-        op: "session.write",
-        action: Action::SessionControl,
-        resource_kind: ResourceKind::Session,
-        owned: true,
-    },
-    OpSpec {
-        op: "session.resize",
-        action: Action::SessionControl,
-        resource_kind: ResourceKind::Session,
-        owned: true,
-    },
-    OpSpec {
-        op: "session.close",
-        action: Action::SessionControl,
-        resource_kind: ResourceKind::Session,
-        // Documented exception (`docs/design/architecture.md` §6): shares
-        // `Action::SessionControl` with write/resize but is intentionally
-        // never narrowed by `scope = "owned"` (cross-device close, PRD §6).
-        owned: false,
-    },
-    OpSpec {
-        op: "exec.run",
-        action: Action::ExecRun,
-        resource_kind: ResourceKind::Exec,
-        owned: false,
-    },
-    OpSpec {
-        op: "forward.local",
-        action: Action::ForwardLocal,
-        resource_kind: ResourceKind::ForwardDestination,
-        owned: false,
-    },
-    OpSpec {
-        op: "forward.remote",
-        action: Action::ForwardRemote,
-        resource_kind: ResourceKind::ForwardBinding,
-        owned: false,
-    },
-    OpSpec {
-        op: "forward.remote.close",
-        action: Action::ForwardRemote,
-        resource_kind: ResourceKind::ForwardBinding,
-        owned: true,
-    },
-    OpSpec {
-        op: "host.reverse",
-        action: Action::HostReverse,
-        resource_kind: ResourceKind::ReverseHost,
-        owned: false,
-    },
-];
 
 /// PRD §9 actions with no [`OP_REGISTRY`] row, and why — the always-denied
 /// trio ([`Action::is_always_denied`]) [`DENY_SEAMS`] already excludes for
@@ -373,26 +405,6 @@ pub const ALWAYS_DENIED_NO_OP: &[(Action, &str)] = &[
          construct this action (docs/ROADMAP.md §3)",
     ),
 ];
-
-/// Look up an [`OpSpec`]'s [`Action`] by [`OpSpec::op`] name — the one
-/// place `server::dispatch`'s handlers (and `reverse::admit::admit`) get
-/// their `Action` from, so a handler and this registry cannot
-/// independently drift (`PLAN.md` M5 Step 8: "dispatch가 이 표를 소비하게
-/// 만들어 표와 코드가 갈라지지 않게 한다"). Every call site names a
-/// `'static` literal straight from [`OP_REGISTRY`], so a mismatch is a bug
-/// the very next test run of that call site catches — never a silent
-/// runtime miss a peer could trigger.
-///
-/// # Panics
-///
-/// If `op` is not a row in [`OP_REGISTRY`].
-pub fn action_of(op: &str) -> Action {
-    OP_REGISTRY
-        .iter()
-        .find(|spec| spec.op == op)
-        .unwrap_or_else(|| panic!("acl::registry::action_of: {op:?} is not a row in OP_REGISTRY"))
-        .action
-}
 
 #[cfg(test)]
 mod tests {
@@ -682,7 +694,7 @@ mod tests {
     fn op_registry_matches_deny_seams_by_name_and_action() {
         let op_registry_pairs: std::collections::HashSet<(&str, Action)> = OP_REGISTRY
             .iter()
-            .map(|spec| (spec.op, spec.action))
+            .map(|spec| (spec.op.as_str(), spec.action))
             .collect();
         let deny_seam_pairs: std::collections::HashSet<(&str, Action)> = DENY_SEAMS
             .iter()
@@ -699,20 +711,34 @@ mod tests {
         );
     }
 
-    /// `action_of` must resolve every row it will ever actually be asked
-    /// for — every op name this crate's own call sites pass it — to
-    /// exactly that row's `Action`. A typo'd literal at a call site (the
-    /// #[should_panic] case) is exactly what `action_of`'s panic is for.
+    /// Set-equality half of "the match is the one table, `OP_REGISTRY` is
+    /// only its projection": every [`Op`] variant's own [`Op::spec`] names
+    /// itself, and appears in [`OP_REGISTRY`] exactly once. Replaces the
+    /// old `action_of_resolves_every_registry_row` (string-keyed lookup
+    /// sanity) now that a lookup by name cannot fail to begin with.
     #[test]
-    fn action_of_resolves_every_registry_row() {
-        for spec in OP_REGISTRY {
-            assert_eq!(action_of(spec.op), spec.action, "{}", spec.op);
+    fn every_op_variant_is_its_own_spec_row_and_appears_exactly_once_in_op_registry() {
+        for op in Op::ALL {
+            let spec = op.spec();
+            assert_eq!(spec.op, *op, "{op:?}'s own spec() row must name itself");
+            let count = OP_REGISTRY.iter().filter(|s| s.op == *op).count();
+            assert_eq!(
+                count, 1,
+                "{op:?} must appear exactly once in OP_REGISTRY, found {count}"
+            );
         }
+        assert_eq!(
+            Op::ALL.len(),
+            OP_REGISTRY.len(),
+            "Op::ALL and OP_REGISTRY must be the same size"
+        );
     }
 
-    #[test]
-    #[should_panic(expected = "is not a row in OP_REGISTRY")]
-    fn action_of_panics_on_an_unregistered_name() {
-        let _ = action_of("no.such.op");
-    }
+    // `action_of_panics_on_an_unregistered_name` (the old
+    // `#[should_panic]` test for a typo'd/unregistered op-name string) is
+    // deliberately not ported: `action_of(&str) -> Action` is gone, and
+    // with it the state that test existed to catch. `Op::spec`'s match has
+    // no wildcard arm, so "not a row in OP_REGISTRY" is no longer a value
+    // any `Op` can hold — the panic path became unrepresentable, not
+    // merely untested.
 }
