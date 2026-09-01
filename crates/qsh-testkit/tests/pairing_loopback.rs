@@ -295,6 +295,56 @@ async fn pairing_collision_fails_loudly_and_leaves_the_invite_unconsumed() {
     host.shutdown().await;
 }
 
+/// Fix A2 (responder side): the initiator's self-reported device name
+/// (`PairingProof.device_name`) is validated before it ever reaches
+/// `try_pin`, the invite store, or a `tracing` line — a control character
+/// (here `\x1b[K`, a terminal escape) must be rejected with
+/// `INVALID_ARGUMENT` over the wire, and the host's own trust store must
+/// come out of the attempt exactly as empty as it went in (not just "no
+/// error" — the store itself, per this fix's own instruction).
+#[tokio::test(flavor = "multi_thread")]
+async fn pairing_rejects_a_control_character_initiator_device_name() {
+    let host = PairingHost::start().await;
+    assert!(
+        host.trust_snapshot().peers().is_empty(),
+        "sanity: nothing pinned before the attempt"
+    );
+    let secret = host.invite();
+    let laptop = make_identity();
+
+    let dialed = pairing_dialer(laptop.local)
+        .dial(host.addr, "127.0.0.1")
+        .await
+        .expect("dial");
+    let result = qsh_core::pairing::accept(&dialed.connection, "laptop\u{1b}[Kname", &secret).await;
+    let (code, _) = remote_error(&result);
+    assert_eq!(code, ErrorCode::InvalidArgument);
+    assert!(
+        host.trust_snapshot().peers().is_empty(),
+        "a rejected device name must leave the trust store exactly as it was"
+    );
+
+    // The invite itself must be left untouched by the rejection — a retry
+    // with an ordinary name against the very same invite still succeeds
+    // (the positive control: this guard is not over-broad, and rejection
+    // does not burn the invite the way a successful redemption would).
+    let retry_identity = make_identity();
+    let dialed2 = pairing_dialer(retry_identity.local)
+        .dial(host.addr, "127.0.0.1")
+        .await
+        .expect("dial 2");
+    let retried = qsh_core::pairing::accept(&dialed2.connection, "laptop", &secret)
+        .await
+        .expect("the same invite is still redeemable after a rejected device name");
+    assert_eq!(retried.peer_device_name, "host");
+    assert_eq!(
+        host.trust_snapshot().find("laptop").unwrap().fingerprint,
+        retry_identity.fingerprint.to_string()
+    );
+
+    host.shutdown().await;
+}
+
 /// Report §B13's security fix, tested directly: a rogue responder with *no
 /// knowledge of the secret at all* answers `PairingAccepted` unconditionally
 /// (as the original, vulnerable wire shape would have let it get away

@@ -1045,6 +1045,9 @@ fn classify_pairing_exchange_failure(err: crate::pairing::PairingError) -> OpErr
         E::AlreadyConsumed | E::PinCollision => {
             OpError::new(ErrorCode::SessionConflict, err.to_string()).with_retryable(false)
         }
+        E::InvalidDeviceName { .. } => {
+            OpError::new(ErrorCode::InvalidArgument, err.to_string()).with_retryable(false)
+        }
         E::ResponderProofMismatch => {
             OpError::new(ErrorCode::AuthFailed, err.to_string()).with_retryable(false)
         }
@@ -1358,6 +1361,104 @@ mod tests {
             8,
             "a concurrent Ops::trust_add lost a peer — the lock wired into the real call \
              site isn't doing its job"
+        );
+    }
+
+    /// Fix A2 (initiator side), at the layer that actually writes
+    /// `trust.toml`: `Ops::trust_accept` must reject a responder's
+    /// `PairingAccepted.device_name` containing a control character with
+    /// `INVALID_ARGUMENT` *before* ever touching the local trust store —
+    /// even when the responder's own proof genuinely verifies (a rogue or
+    /// misconfigured responder that really does know the invite secret
+    /// must still not get pinned under an escape-sequence name). Proven
+    /// against the store itself (`trust.toml` is never even created), not
+    /// just the returned error — mirroring
+    /// `qsh-testkit/tests/pairing_loopback.rs`'s responder-side sibling of
+    /// this test. The rogue responder here hand-crafts its own wire reply
+    /// (rather than going through `crate::server::Server`) so it can send
+    /// a genuinely verifying proof alongside a bad device name — something
+    /// a real, unmodified `qsh serve` never does, but a modified or
+    /// compromised one could, and the wire format itself does not forbid.
+    #[test]
+    fn trust_accept_rejects_a_control_character_responder_device_name_and_leaves_trust_toml_untouched()
+     {
+        use qsh_proto::pairing::{INVITE_SECRET_LEN, encode_invite_code};
+        use qsh_proto::wire::{self, ControlMessage, control_message};
+        use qsh_transport::{FramedStream, Listener};
+
+        let (dir, ops) = temp_ops();
+        ops.identity_init(file_mode()).unwrap();
+
+        let secret = [0x33u8; INVITE_SECRET_LEN];
+        let code = encode_invite_code(&secret);
+
+        let (rogue_identity, _rogue_fp) = crate::tunnel::testutil::self_signed();
+        // `Listener::bind` itself needs an active Tokio reactor (quinn
+        // registers the socket against `Handle::current()` at bind time),
+        // and this test function is a plain synchronous `#[test]` with none
+        // running on its own thread — so the listener is built inside the
+        // rogue thread's own runtime via `block_on`, then both the runtime
+        // and the already-bound listener move into the spawned thread
+        // together, keeping every later async call on the same reactor.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let listener = rt.block_on(async {
+            Listener::bind(
+                "127.0.0.1:0".parse().unwrap(),
+                rogue_identity,
+                Arc::new(StaticTrust::empty().with_pairing_open(true)),
+            )
+            .unwrap()
+        });
+        let addr = listener.local_addr().unwrap();
+
+        let rogue = std::thread::spawn(move || {
+            rt.block_on(async move {
+                let incoming = listener.accept().await.unwrap();
+                let conn = incoming.accept().await.unwrap();
+                let (send, recv) = conn.accept_bi().await.unwrap();
+                let mut ctl = FramedStream::control(send, recv);
+                let _proof: ControlMessage = ctl.recv.recv().await.unwrap().unwrap();
+
+                // A genuinely verifying proof — computed the same way
+                // `crate::pairing::respond` would — so the initiator has no
+                // reason to reject on that basis; only the device name is
+                // bad here.
+                let mut ekm = [0u8; 32];
+                conn.export_keying_material(&mut ekm, crate::pairing::EXPORTER_LABEL, &[])
+                    .expect("export keying material");
+                let (_client_proof, server_proof) =
+                    crate::trust::pairing::proofs_from_secret(&secret, &ekm);
+
+                ctl.send
+                    .send(&ControlMessage::new(
+                        0,
+                        control_message::Body::PairingAccepted(wire::PairingAccepted {
+                            device_name: "host\u{1b}[2Kname".to_string(),
+                            proof: server_proof.to_vec(),
+                        }),
+                    ))
+                    .await
+                    .expect("send PairingAccepted with a bad device name");
+                if ctl.send.finish().is_ok() {
+                    let _ = tokio::time::timeout(Duration::from_secs(2), ctl.send.stopped()).await;
+                }
+            });
+        });
+
+        let err = ops
+            .trust_accept(TrustAcceptReq {
+                address: addr.to_string(),
+                code,
+            })
+            .expect_err("a control-character responder device name must be rejected");
+        assert_eq!(err.code, ErrorCode::InvalidArgument);
+
+        rogue.join().expect("rogue responder thread");
+
+        assert!(
+            !dir.path().join("config").join("trust.toml").exists(),
+            "the initiator's trust store must be untouched when the responder's \
+             device name is rejected"
         );
     }
 

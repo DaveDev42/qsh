@@ -195,16 +195,7 @@ pub fn print_trust_add(data: &TrustAddData) -> io::Result<()> {
     } else {
         "already pinned"
     };
-    let peer = &data.peer;
-    if peer.address.is_empty() {
-        writeln!(stdout, "{verb} {} ({})", peer.name, peer.fingerprint)
-    } else {
-        writeln!(
-            stdout,
-            "{verb} {} ({}) [{}]",
-            peer.name, peer.fingerprint, peer.address
-        )
-    }
+    writeln!(stdout, "{}", format_trust_pin_line(verb, &data.peer))
 }
 
 /// Print the pinned-peer table.
@@ -232,10 +223,18 @@ pub fn print_trust_list(data: &TrustListData) -> io::Result<()> {
         "NAME", "FINGERPRINT", "ADDRESS"
     )?;
     for peer in &data.peers {
+        // `name_w`/`fp_w`/`addr_w` above are computed over the *raw*
+        // fields, same as `print_hosts` — `sanitize`'s 1:1 char-count
+        // invariant (`sanitize_preserves_char_count_for_control_character_
+        // input`, this module's own test) means the column width is
+        // identical either way, so the widths above never need to change.
         writeln!(
             stdout,
             "{:name_w$}  {:fp_w$}  {:addr_w$}  {}",
-            peer.name, peer.fingerprint, peer.address, peer.added_at
+            sanitize(&peer.name),
+            sanitize(&peer.fingerprint),
+            sanitize(&peer.address),
+            peer.added_at
         )?;
     }
     Ok(())
@@ -245,9 +244,9 @@ pub fn print_trust_list(data: &TrustListData) -> io::Result<()> {
 pub fn print_trust_remove(data: &TrustRemoveData) -> io::Result<()> {
     let mut stdout = io::stdout().lock();
     if data.removed {
-        writeln!(stdout, "removed {}", data.name)
+        writeln!(stdout, "removed {}", sanitize(&data.name))
     } else {
-        writeln!(stdout, "{} not found (nothing to do)", data.name)
+        writeln!(stdout, "{} not found (nothing to do)", sanitize(&data.name))
     }
 }
 
@@ -276,14 +275,29 @@ pub fn print_trust_accept(data: &TrustAcceptData) -> io::Result<()> {
     } else {
         "already pinned"
     };
-    let peer = &data.peer;
+    writeln!(stdout, "{}", format_trust_pin_line(verb, &data.peer))
+}
+
+/// Format one `{verb} {name} ({fingerprint}) [{address}]`-shaped result
+/// line — the identical shape [`print_trust_add`] and [`print_trust_accept`]
+/// both produce (a successful pairing exchange ends in exactly the same
+/// local pin `trust add` would have written), split out so both callers
+/// sanitize the peer-controlled fields in one place instead of twice, and
+/// so the escape-injection defense is testable without a real stdout.
+/// `name`/`fingerprint`/`address` all come from the wire (`fingerprint` is
+/// this device's own observation, but `name` is the peer's self-reported
+/// device name — a peer-controlled field printed on the very line that
+/// also carries the fingerprint the operator is told to compare out of
+/// band, `qsh_core::pairing`'s own doc on why that ordering matters).
+fn format_trust_pin_line(verb: &str, peer: &TrustPeer) -> String {
+    let name = sanitize(&peer.name);
+    let fingerprint = sanitize(&peer.fingerprint);
     if peer.address.is_empty() {
-        writeln!(stdout, "{verb} {} ({})", peer.name, peer.fingerprint)
+        format!("{verb} {name} ({fingerprint})")
     } else {
-        writeln!(
-            stdout,
-            "{verb} {} ({}) [{}]",
-            peer.name, peer.fingerprint, peer.address
+        format!(
+            "{verb} {name} ({fingerprint}) [{}]",
+            sanitize(&peer.address)
         )
     }
 }
@@ -703,8 +717,8 @@ pub fn print_error(err: &OpError) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{render_doctor_lines, sanitize};
-    use qsh_proto::{DoctorData, DoctorFinding};
+    use super::{format_trust_pin_line, render_doctor_lines, sanitize};
+    use qsh_proto::{DoctorData, DoctorFinding, TrustPeer};
 
     #[test]
     fn sanitize_strips_escapes_and_newlines_but_keeps_tabs() {
@@ -712,6 +726,75 @@ mod tests {
         assert_eq!(
             sanitize("a\u{1b}[31mred\u{1b}[0m\nfake line\ttab"),
             "a\u{FFFD}[31mred\u{FFFD}[0m\u{FFFD}fake line\ttab"
+        );
+    }
+
+    /// The invariant every fixed-width table renderer in this module
+    /// (`print_trust_list`, `print_hosts`, `print_tunnels`, `print_session_
+    /// list`) depends on without re-checking it: `sanitize` maps each
+    /// control character to exactly one U+FFFD, one char in for one char
+    /// out, so a column width computed from the *raw* field (as all of the
+    /// above do — `docs/design/architecture.md`'s crate-boundary style,
+    /// cheaper than sanitizing twice) never drifts from the width of the
+    /// *sanitized* text actually written into that column. If `sanitize`
+    /// ever stopped being 1:1 (collapsing a multi-char escape sequence to
+    /// one replacement char, say), every such table would silently
+    /// misalign instead of failing loudly — this test is what fails
+    /// loudly instead.
+    #[test]
+    fn sanitize_preserves_char_count_for_control_character_input() {
+        let s = "a\u{1b}[31mb\u{0}c\td\re\nf";
+        assert_eq!(
+            sanitize(s).chars().count(),
+            s.chars().count(),
+            "sanitize must map each control char to exactly one U+FFFD"
+        );
+    }
+
+    /// Fix A1: a peer-controlled `TrustPeer.name` containing a terminal
+    /// escape sequence and a bare `\r` must not be able to overwrite or
+    /// hide the fingerprint printed right after it on the same line — the
+    /// exact threat `print_trust_accept`'s one-line `{name} ({fingerprint})`
+    /// shape creates for the value pairing tells the operator to compare
+    /// out of band (`docs/CLI.md` §6.11).
+    #[test]
+    fn format_trust_pin_line_sanitizes_the_name_and_keeps_the_fingerprint_intact() {
+        let peer = TrustPeer {
+            name: "evil\u{1b}[Kname\r".to_string(),
+            fingerprint: "sha256:REALFINGERPRINT".to_string(),
+            address: String::new(),
+            added_at: "2026-08-31T00:00:00Z".to_string(),
+        };
+
+        let line = format_trust_pin_line("pinned", &peer);
+
+        assert_eq!(
+            line,
+            "pinned evil\u{FFFD}[Kname\u{FFFD} (sha256:REALFINGERPRINT)"
+        );
+        assert!(
+            line.ends_with("(sha256:REALFINGERPRINT)"),
+            "the fingerprint must remain intact and fully visible on the line: {line:?}"
+        );
+    }
+
+    /// The address branch, and a positive control on the field a legitimate
+    /// peer's own device id always is (alphanumerics, underscores — no
+    /// control characters): nothing is altered.
+    #[test]
+    fn format_trust_pin_line_leaves_an_ordinary_name_untouched() {
+        let peer = TrustPeer {
+            name: "device_01K0EXAMPLE".to_string(),
+            fingerprint: "sha256:REALFINGERPRINT".to_string(),
+            address: "198.51.100.7:4433".to_string(),
+            added_at: "2026-08-31T00:00:00Z".to_string(),
+        };
+
+        let line = format_trust_pin_line("pinned", &peer);
+
+        assert_eq!(
+            line,
+            "pinned device_01K0EXAMPLE (sha256:REALFINGERPRINT) [198.51.100.7:4433]"
         );
     }
 

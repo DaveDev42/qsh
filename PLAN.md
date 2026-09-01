@@ -272,6 +272,30 @@ naive 1.25가 예측 1.00보다 큰 것은 baseline 12스레드가 **공유 런�
 
 **추정으로 고치지 않고 양쪽 팔을 실측했다.** 대조군 `git clone -c core.autocrlf=true` → 38/38 CRLF(CI 실패 로컬 재현). 처치군 `.gitattributes`(`* text=auto eol=lf`) 추가 후 같은 clone → 0/38, 소스 트리와 바이트 동일. 비교 쪽을 CRLF 관대하게 푸는 선택지도 있었지만 바이트 대조 게이트의 엄밀함을 깎는 대가가 있고, 무엇보다 Windows 개발자가 `cargo xtask man`을 돌리면 38장이 통째로 modified로 뜨는 진짜 문제가 남는다 — 체크아웃 쪽을 고치는 것이 원인 위치다. 추적 파일 중 CRLF가 필요한 것은 없고(`.bat`/`.cmd`/`.ps1` 부재) 전부 이미 인덱스·작업 트리 모두 LF라 재정규화 패스도 필요 없다. CI run 33474230870에서 12개 job 전건 success, Windows 레그가 **1068/1068**로 man page 대조 테스트까지 PASS — 로컬 실험이 예측한 대로다.
 
+**(a)-추기 — M7 교차 스텝 스윕 판정 (2026-09-01, main 세션).** 여덟 스텝이 각자 자기 diff에 대해서만 적대적 검증을 받았으므로, **두 스텝이 맞물릴 때만 드러나는 결함**은 구조적으로 아무도 보지 못했다. 126파일·14.4k 삽입이면 그 이음매가 좁지 않다. 5개 렌즈(trust·hosts·ACL 상호작용 / 런타임 수명 / 계약 표면 합집합 / 문서 대 실동작 드리프트 / FS·동시성)로 훑고 각 결과를 적대적으로 반박시켰다. 원 발견 다수 중 3건 생존, main 세션이 전건 코드로 재확인했다. 런타임 수명 렌즈는 무소득 — Step 7-1·7-2가 이미 mutation으로 다진 자리라 예상된 결과다.
+
+**P2 — pairing이 만든 첫 원격 제어 문자열이 터미널에 그대로 나간다.** `PairingProof.device_name`/`PairingAccepted.device_name`은 프로토콜 주석이 "never an authentication input"이라 못박은 자기신고 값인데, `TrustStore::add_peer`에 검증 0으로 들어가(trust/mod.rs:207-242) 양방향 모두 verbatim으로 핀된다(초대자 ops/mod.rs:706, 응답자 server/mod.rs:2092). 그리고 human 렌더러가 그대로 찍는다 — 같은 diff가 추가한 형제 함수 `print_hosts`/`print_host`는 전 필드를 `sanitize()`하는데(human.rs:302-365), trust 쪽 4함수는 빠졌다. `sanitize()`의 doc이 바로 이 위협을 명시하는데도 그렇다.
+
+문제의 무게는 `print_trust_accept`가 `{name} ({fingerprint})`를 **한 줄에** 찍는다는 데 있다(human.rs:281). 이름에 `\x1b[K`나 CR을 넣으면 뒤따르는 fingerprint를 덮거나 감출 수 있고, 그 fingerprint가 바로 ROADMAP 감사 ②가 요구하는 **대역 외 대조 대상**이다. pairing 의식의 보안이 얹혀 있는 그 한 값을 원격이 가릴 수 있다는 뜻이고, 이후 `trust list`마다 재현된다. Step 4 이전에는 `TrustPeer.name`이 항상 운영자 타이핑이라 잠재였다 — Step 4가 처음으로 원격 제어를 준 것이 교차 결함인 이유다.
+
+**감사 추적은 무사하다**(main 세션 확인, 검증자 미추적): `FileAuditSink::record`가 `serde_json::to_string`으로 직렬화하므로(audit.rs:307) 제어문자가 이스케이프되어 감사 줄 위조는 성립하지 않는다. 더 무거운 쪽이 배제됐으므로 등급은 터미널 이스케이프 수준에 머문다.
+
+**수정은 두 층 — 렌더러만으로는 부족하다.** ① 렌더러: trust 4함수에 `sanitize()`(형제 함수와 같은 규율). 이미 핀돼 있는 이름도 덮는다. 폭 계산은 손대지 않는다 — `sanitize`가 제어문자를 U+FFFD로 1:1 치환이라 `chars().count()`가 보존되기 때문인데, 이 불변식을 **단언이 아니라 테스트로** 박게 했다(검증자 제안은 폭 계산도 고치라는 것이었으나 1:1이라 불필요 — 근거 없이 따르지 않는다). ② 유입 choke point: `qsh serve`의 tracing 방출(server/mod.rs:2100, :2117)은 렌더러 밖이고, trust.toml에 독을 남기면 다른 모든 소비자가 노출된다. `pairing.rs`에서 양방향 모두 핀·영속·로그 **이전에** 제어문자 이름을 `INVALID_ARGUMENT`로 거부한다(기존 enum, ad hoc 코드 신설 아님). 거부 로그에 값 자체를 되울리지 않는다.
+
+**범위 밖으로 명시 기록(구현 안 함, M8).** 이름 길이 상한 — 오늘은 `CONTROL_FRAME_MAX` 256 KiB로만 묶여 있다. 그리고 Unicode bidi override/homoglyph 스푸핑 — U+202E류는 `is_control()`이 아니라 이번 가드도 `sanitize()`도 건드리지 않는다. 실증된 벡터는 제어문자이므로 거기까지만 고치고, 남는 구멍을 조용히 덮지 않고 적어 둔다.
+
+**P3 — doctor 처방 2건이 진단한 바로 그 조건에 무효인 명령을 시킨다.** `ca::init`은 루트 파일이 있기만 하면 `not_after`를 보지 않고 `created:false`로 돌아오고(ca.rs:97-102), `cert_issue`의 `already_issued`는 "누가 서명했나"만 볼 뿐 유효한가를 보지 않는다(ops/cert.rs:83-86). 즉 CA 루트 만료와 이미 승격된 leaf 만료 — 이 진단이 실제로 뜨는 두 상태 — 에서 처방 명령이 순수 no-op이다. 스윕은 `CERT_EXPIRED`만 잡았으나 main 세션이 코드를 읽다 **`CERT_EXPIRING_SOON`도 동일 결함**임을 찾았다(doctor.rs:201-206, 승격된 leaf에 대해 똑같이 no-op). 둘 다 고친다. **`--force` 플래그는 만들지 않는다** — cert rotation UX는 ROADMAP이 M7 명시 out으로 잡은 항목이라 그쪽으로 가면 인수 기준을 넘는다. 문면만 실제 복구 절차로 바꾸고 §6.17을 같이 맞춘다(`doctor_docs.rs`가 축자 대조로 강제).
+
+**README 자기모순 1건.** Step 8이 상단 Status를 "M7 has landed the features below"로 고쳐 놓고 같은 파일 Roadmap 표의 M7 행은 `Planned`로 남겼다(README.md:20 vs :523). 검증자는 "마감 커밋이 Done으로 뒤집으니 별건으로 열지 말라"고 판정했고 논리는 맞지만, M7 마감이 사람 대기로 묶여 있어 그동안 사용자 대면 문서가 자기모순으로 남는다. `In progress`로 한 칸만 고친다 — Step 8의 범위가 "README 최종 동기화"였으므로 새 일이 아니라 Step 8 미완의 마무리다.
+
+**수정 라운드 마감 + main 세션 독립 검증.** fixer가 A·B·C 전건 반영. main 세션이 diff 전건을 직접 읽고 **형태 2건을 고쳤다**: 새 doctor 처방 문면이 430·476자로 같은 파일 나머지 진단의 최댓값(228자)의 2배였다 — `qsh doctor` 한 줄로 나가는 문자열로는 벽이라, 근거는 이미 충실한 doc 주석에 두고 운영자 문면은 실행 가능한 핵심만 ~265자로 줄였다(§6.17 예제 동기화).
+
+**처방의 사실성을 코드로 확인했다.** 처방이 "`ca/`를 지우고 `qsh cert init` 재실행"을 시키는데, `add_ca`는 이름 충돌 시 `add_peer`와 **달리 덮어쓴다**(trust/mod.rs:267) — no-op이었다면 처방이 운영자를 더 나쁜 자리로 몰았을 것이다. leaf 경로도 `identity::init`이 부재 시 재생성함을 확인. ADR-0008이 rotation을 P1 범위 밖으로 못박은 것도 대조했다(L52).
+
+**독립 mutation 2종 — 전건 검출.** ① 유입 가드 무력화 → 비자명 검출 2건(실 QUIC loopback의 responder 측 거부 + `Ops::trust_accept`의 initiator 측 거부, 후자는 **검증되는 proof를 가진 rogue responder**가 나쁜 이름을 보내도 `trust.toml`이 생성조차 되지 않음을 단언한다). 가드 함수를 직접 부르는 단위 테스트 1건은 자명 검출로 분리 계상. ② 렌더러 `sanitize` 제거 → 해당 테스트 FAIL. 양쪽 byte-identical 원복. 게이트 6종 green, nextest **1342 passed / 2 skipped**(1334 + 신규 8 = 정확 일치).
+
+**과정 사고 1건(기록).** mutation 원복에 `git checkout <file>`을 썼는데 fixer 변경이 미스테이지 상태라 `pairing.rs`의 Fix A2가 통째로 소실됐다. 같은 세션에 캡처해 둔 diff로 재구성했고, `cargo fmt`가 아무것도 바꾸지 않은 점(포맷 일치)·관련 27건 통과·최종 테스트 수 정확 일치(+8)로 복원이 원본과 동등함을 확인했다. 이후 mutation은 파일 복사본으로 원복했다. 감사하는 사람이 "착지한 코드가 검토된 코드와 같은가"를 물을 수 있으므로 남긴다.
+
 **(d) 완료 판정:** 캠페인 3회 기록 완료(전건 5분 이내), §5 전 항목 완료.
 
 ## 3. 명시적 non-goals (P1 유예 / 타 마일스톤)

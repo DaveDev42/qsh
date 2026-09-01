@@ -743,6 +743,8 @@ invite는 한 번만 redeem된다 — 성공하는 순간 소비되고, **다른
 
 pin 시점에 이름 충돌이 생기면 — 상대가 자칭하는 이름이 이미 다른 fingerprint로 pin되어 있으면 — `trust.add`가 같은 상황에서 취하는 조용한 no-op과 달리 pairing은 `SESSION_CONFLICT`로 크게 실패한다. 이 실패는 invite를 소비하지 않는다: 충돌은 pin을 시도한 쪽의 로컬 상태 문제일 뿐이므로, 같은 code를 다른 상대가 곧바로 다시 시도할 수 있다.
 
+상대가 자칭하는 `device_name`(양쪽 다 — initiator의 `PairingProof.device_name`, responder의 `PairingAccepted.device_name`)에 제어 문자(tab 포함, `char::is_control()`)가 하나라도 있으면 그 자리에서 `INVALID_ARGUMENT`로 거부한다 — 어느 쪽도 pin되지 않고, 거부된 값 자체는 로그에 남기지 않는다. `device_name`은 인증 입력이 아닌 자칭 label일 뿐이지만, human 렌더러가 `{name} ({fingerprint})`를 한 줄에 찍으므로 이스케이프 시퀀스가 그 fingerprint(바로 위 문단이 사후 대조를 권하는 값)를 가리거나 지울 수 있다는 것이 이 거부의 이유다(`docs/design/protocol.md` §15.5).
+
 `qsh serve`로 이미 떠 있는 데몬은 재시작 없이 새로 발급된 invite를 인식한다 — `trust.remove`(바로 위 문단)가 따르는 것과 같은 content-based reload 원칙이 invite store에도 그대로 적용된다. 이 재로드는 `qsh trust invite`(CLI 프로세스)와 `qsh serve`(daemon)가 같은 `invites.toml`을 서로 다른 프로세스에서 잠금 없이 읽고 쓰는 형태라, 두 프로세스의 쓰기가 정확히 겹치는 좁은 창에서는 한쪽의 갱신이 다른 쪽에 곧바로 반영되지 않을 수 있다(예: 거의 동시에 발급된 두 invite 중 하나가 다음 redeem 조회에서 아직 보이지 않는 경우) — 이후 재시도나 다음 저장 시점에는 다시 수렴하므로 invite가 영구히 사라지지는 않지만, 완전한 파일 잠금은 아직 없다(Step 7 debt로 이월).
 
 `--json` mode에서는 pairing도 interactive prompt를 열지 않는다(§2.1) — 잘못된 code나 인자 오류는 곧바로 오류 envelope로 반환된다.
@@ -927,7 +929,7 @@ qsh doctor [host] --json
         "code": "cert_expiring_soon",
         "status": "warn",
         "detail": "A certificate this device relies on expires within 30 days. (this device's own leaf certificate, not_after unix: 1780000000)",
-        "remedy": "Re-issue it ahead of the deadline with `qsh cert issue`."
+        "remedy": "`qsh cert issue` only re-issues a leaf this CA has not signed yet; on one it already signed, or on the CA root, it and `qsh cert init` are no-ops. Renew ahead of the deadline by removing `identity/` or `ca/` from the config directory and re-running `qsh init`/`qsh cert init` — peers must then re-pin."
       },
       {
         "code": "trust_remove_scope",

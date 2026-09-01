@@ -170,7 +170,14 @@ message PairingProof {
   // Label for the pin this creates on the responder's side, self-reported
   // exactly like Hello.device_name — never an authentication input on its
   // own (protocol.md §3's rule applies here too: identity is the connection
-  // principal / the proof below, never a wire string).
+  // principal / the proof below, never a wire string). Any character
+  // satisfying Rust's char::is_control() (tab included — this is a label,
+  // not formatted text) is rejected with INVALID_ARGUMENT before this
+  // value is pinned, persisted, or logged anywhere (docs/CLI.md §6.11,
+  // protocol.md §15.5) — a control character here could otherwise corrupt
+  // the one-line "{name} ({fingerprint})" the CLI's human renderer prints
+  // it next to, hiding or overwriting the fingerprint the operator is told
+  // to compare out of band.
   string device_name = 1;
   // BLAKE3 keyed hash, 32 bytes: `blake3::keyed_hash(mac_key, exporter ||
   // 0x01)` where `mac_key = blake3::hash(invite_secret)` and `exporter` is
@@ -187,10 +194,16 @@ message PairingProof {
 // The responder's reply to a successfully verified PairingProof — the only
 // success reply on a pairing connection (ADR-0002, protocol.md §15). Any
 // failure instead sends the existing Error frame above (AUTH_FAILED /
-// TRUST_REQUIRED / SESSION_CONFLICT depending on why, docs/CLI.md §3.3).
+// TRUST_REQUIRED / SESSION_CONFLICT / INVALID_ARGUMENT depending on why —
+// INVALID_ARGUMENT covers a malformed wire field, e.g. a PairingProof.
+// device_name containing a control character, docs/CLI.md §3.3).
 message PairingAccepted {
   // The responder's own device name (the same value its ordinary
-  // Hello.device_name carries), for the initiator's own pin.
+  // Hello.device_name carries), for the initiator's own pin. Same
+  // control-character rule as PairingProof.device_name above: the
+  // initiator rejects this value (never pinning it) if it contains any
+  // char::is_control() character, for the identical reason — this is the
+  // fingerprint's line-mate in the human renderer too.
   string device_name = 1;
   // The responder's own proof, over the same channel: `blake3::keyed_hash(
   // mac_key, exporter || 0x02)` — domain-separated from PairingProof.proof

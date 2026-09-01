@@ -387,9 +387,12 @@ initiator(`qsh trust accept`)가 control 스트림에 `PairingProof` 하나를 �
 | 맞는 invite는 있으나 TTL(10분) 초과 | `TRUST_REQUIRED` |
 | 맞는 invite가 이미 redeem됨 | `SESSION_CONFLICT` |
 | 증명은 맞으나 pin 시점 이름 충돌(§15.7) | `SESSION_CONFLICT` |
+| `PairingProof.device_name`(responder 측) 또는 `PairingAccepted.device_name`(initiator 측)에 제어 문자(`char::is_control()`, tab 포함)가 있음 | `INVALID_ARGUMENT` — pin·persist·tracing 어느 것도 그 값을 보기 전에 거부, 값 자체는 로그에 남기지 않는다 |
 | responder의 `PairingAccepted.proof`가 검증 실패 | (initiator 로컬 실패 — 어떤 pin도 하지 않고 거부) |
 
 invite의 TTL(10분, redeem 가능 창)과 §15.1의 retention(20분, TLS 게이트가 열려 있는 창)은 서로 다른 창이다 — TTL이 지나도 retention 안에서는 `pairing_open()`이 계속 `true`이므로, 뒤늦게 dial한 initiator는 "이 host는 애초에 페어링을 지원하지 않는다"처럼 보이는 TLS 단의 뭉뚱그려진 거부 대신 `TRUST_REQUIRED`라는 명확한 신호를 control 스트림 위에서 받는다.
+
+`device_name`의 제어 문자 거부(위 표)는 인증이 아니라 표시 안전성 문제다 — `device_name`은 애초에 인증 입력이 아니고(§15 서두, v1.proto 주석), 오직 pin의 label로만 쓰인다. 그런데 CLI human 렌더러(`qsh trust add`/`list`/`accept`)는 `{name} ({fingerprint})`를 한 줄에 찍는다 — 그 fingerprint가 바로 §15.4가 안내하는, operator가 out-of-band로 사후 대조해야 할 값이다. `name`에 터미널 이스케이프 시퀀스나 bare `\r`이 섞이면 같은 줄의 fingerprint를 가리거나 덮어써서 그 대조를 무력화할 수 있으므로, `crate::pairing::accept`/`respond` 양쪽 다 이 값을 pin·persist·tracing 어디에도 넘기기 전에 거부한다(`qsh-core/src/pairing.rs`의 `reject_control_chars`). 길이 상한(현재는 `CONTROL_FRAME_MAX`, 256 KiB에 묶여 있을 뿐)과 유니코드 bidi-override/homoglyph 위장(U+202E 등, `char::is_control()`이 아니라서 이 검사에 걸리지 않는다)은 이 Step의 범위 밖으로 남긴다(M8 backlog).
 
 ### 15.6 동시 양방향 pin과 충돌
 
