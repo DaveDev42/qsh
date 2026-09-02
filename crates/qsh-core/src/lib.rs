@@ -17,6 +17,7 @@
 //! - [`ops`]: the typed operation façade.
 
 pub mod acl;
+pub mod admission;
 pub mod audit;
 pub mod broker;
 pub mod ca;

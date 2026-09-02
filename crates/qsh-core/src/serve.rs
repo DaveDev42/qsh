@@ -184,7 +184,17 @@ pub fn host_runtime(paths: &Paths, config: &Config, device_id: impl Into<String>
     );
     tokio::spawn(Broker::run_reaper(Arc::downgrade(&broker)));
     let (authorizer, policy_diagnostic) = load_or_deny(paths);
-    let server = Server::new(authorizer, audit.clone(), broker, device_id);
+    // `PLAN.md` M8 Step 2: the same operator-configured admission bounds
+    // for every host role this constructs (`qsh serve` and a reverse
+    // target's own accept loop, `crate::reverse::target::run_reverse_unix`
+    // — both are internet-exposed accept loops per the design's own audit
+    // finding).
+    let admission = crate::admission::Gate::new(
+        Arc::new(SystemClock),
+        config.serve.max_concurrent_handshakes(),
+        config.serve.handshake_rate_per_source(),
+    );
+    let server = Server::with_admission(authorizer, audit.clone(), broker, device_id, admission);
     HostRuntime {
         server,
         audit,

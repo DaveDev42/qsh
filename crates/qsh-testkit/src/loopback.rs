@@ -150,7 +150,30 @@ impl LoopbackHarness {
         client: TestIdentity,
         server_trust: StaticTrust,
     ) -> Self {
-        Self::start_inner(authorizer, client, server_trust, None).await
+        Self::start_inner(authorizer, client, server_trust, None, None).await
+    }
+
+    /// [`Self::start`], but with an explicit
+    /// `(max_concurrent_handshakes, handshake_rate_per_source)`
+    /// `crate::admission::Gate` instead of `crate::config::ServeConfig`'s
+    /// defaults (`PLAN.md` M8 Step 2) — the admission integration tests
+    /// (`crates/qsh-testkit/tests/admission.rs`) use a small cap so they
+    /// don't need hundreds of real connections to reach it.
+    pub async fn start_with_admission(
+        max_concurrent_handshakes: usize,
+        handshake_rate_per_source: u32,
+    ) -> Self {
+        let client = make_identity();
+        let server_trust =
+            StaticTrust::empty().with_pin(client.fingerprint, Principal::Device("laptop".into()));
+        Self::start_inner(
+            Arc::new(AllowAllPinned),
+            client,
+            server_trust,
+            None,
+            Some((max_concurrent_handshakes, handshake_rate_per_source)),
+        )
+        .await
     }
 
     /// Start a host the client reaches only through a seeded chaos proxy
@@ -166,7 +189,7 @@ impl LoopbackHarness {
         let client = make_identity();
         let server_trust =
             StaticTrust::empty().with_pin(client.fingerprint, Principal::Device("laptop".into()));
-        Self::start_inner(authorizer, client, server_trust, Some(policy)).await
+        Self::start_inner(authorizer, client, server_trust, Some(policy), None).await
     }
 
     async fn start_inner(
@@ -174,6 +197,7 @@ impl LoopbackHarness {
         client: TestIdentity,
         server_trust: StaticTrust,
         chaos: Option<ChaosPolicy>,
+        admission: Option<(usize, u32)>,
     ) -> Self {
         let server_identity = make_identity();
         let client_trust = StaticTrust::empty()
@@ -197,7 +221,16 @@ impl LoopbackHarness {
             pipes.clone(),
         );
         tokio::spawn(Broker::run_reaper(Arc::downgrade(&broker)));
-        let server = Server::new(authorizer, audit.clone(), broker.clone(), "box");
+        let (max_concurrent_handshakes, handshake_rate_per_source) = admission.unwrap_or((
+            qsh_core::config::ServeConfig::DEFAULT_MAX_CONCURRENT_HANDSHAKES,
+            qsh_core::config::ServeConfig::DEFAULT_HANDSHAKE_RATE_PER_SOURCE,
+        ));
+        let gate = qsh_core::admission::Gate::new(
+            Arc::new(SystemClock),
+            max_concurrent_handshakes,
+            handshake_rate_per_source,
+        );
+        let server = Server::with_admission(authorizer, audit.clone(), broker.clone(), "box", gate);
         let (tx, rx) = tokio::sync::oneshot::channel();
         let conns: Arc<Mutex<Vec<Connection>>> = Arc::new(Mutex::new(Vec::new()));
         let (addr, chaos, task) = match chaos {

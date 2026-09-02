@@ -191,6 +191,61 @@ impl ReverseHarness {
         }
     }
 
+    /// [`Self::start`], but with an explicit
+    /// `(max_concurrent_handshakes, handshake_rate_per_source)`
+    /// `qsh_core::admission::Gate` instead of `crate::config::ServeConfig`'s
+    /// defaults (`PLAN.md` M8 Step 2 verification round, P1-1) — mirrors
+    /// `crate::loopback::LoopbackHarness::start_with_admission` for the
+    /// `Listen` arm. Before this existed, nothing could drive `Listen::run`'s
+    /// real accept loop at a small enough cap/rate to reach admission's
+    /// rejection paths without hundreds of real connections, which is why
+    /// that whole arm shipped with zero admission integration coverage
+    /// (the adversarial verification round's own finding — a mutation that
+    /// deleted `Listen::admit`'s gate check entirely passed 1151/1151).
+    pub async fn start_with_admission(
+        max_concurrent_handshakes: usize,
+        handshake_rate_per_source: u32,
+    ) -> Self {
+        let controller = make_identity();
+        let listener = Listener::bind(
+            "127.0.0.1:0".parse().expect("addr"),
+            controller.local.clone(),
+            Arc::new(StaticTrust::empty()),
+        )
+        .expect("bind controller");
+        let addr = listener.local_addr().expect("local addr");
+        let audit = Arc::new(MemoryAuditSink::new());
+        let clock: Arc<dyn qsh_core::broker::Clock> = Arc::new(SystemClock);
+        let registry = Registry::new(clock.clone(), false);
+        let admission = qsh_core::admission::Gate::new(
+            clock.clone(),
+            max_concurrent_handshakes,
+            handshake_rate_per_source,
+        );
+        let listen = Listen::with_admission(
+            registry,
+            Arc::new(AllowAllPinned),
+            audit.clone(),
+            "controller-device",
+            clock,
+            Duration::from_secs(120),
+            admission,
+        );
+        tokio::spawn(Listen::run_stale_sweeper(Arc::downgrade(&listen)));
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(listen.clone().run(listener, async move {
+            let _ = rx.await;
+        }));
+        Self {
+            listen,
+            addr,
+            audit,
+            controller,
+            task,
+            shutdown: Some(tx),
+        }
+    }
+
     /// A `Dialer` for `target`, trusting only this controller — the same
     /// one-directional pin shape [`crate::loopback::LoopbackHarness`] uses
     /// for its own `dialer` field.

@@ -403,15 +403,70 @@ CI 마감(`d87e76b`): CI run 33601462030 11 job 전부 success(`test (windows-la
 - accept 동시성 상한 + source rate limit.
 - 초과는 거부이며 **자원 생성 전에** 결정한다(CLAUDE.md: 인가 성공 전 자원 생성 금지와 같은 규율).
 
+**(a)-추기 — Step 2 설계 판정 (2026-09-02).** 조사 3분할(44 facts) → opus 설계 제안(scratchpad `step2-design.md`, 21k자)을 다음과 같이 판정한다.
+
+현행 확인: `Listener::accept`(`qsh-transport/src/endpoint.rs:700`)는 `quinn::Incoming`을 그대로 `accept().await` — retry/refuse/ignore/`remote_address_validated` 호출 0건. `bind_inner`(`:670`)는 `max_incoming`·`incoming_buffer_size(_total)`·`retry_token_lifetime`을 quinn 기본(65536 / 10 MiB / 100 MiB / 15 s)으로 둔다. `Server::run`(`server/mod.rs:1854`)과 **`Listen::run`(`reverse/listen.rs:3442`) — 인터넷 노출 accept 루프가 둘**이고 둘 다 무상한 spawn. `quinn::Incoming` drop은 암묵적 `refuse()`라 "침묵"은 반드시 명시 `ignore()`. NEW_TOKEN은 `default-features=false`로 bloom이 꺼져 있고 IP 바인딩이라 mobility에 무용 — 계획에서 제외.
+
+| 결정 | 판정 | 근거 |
+|---|---|---|
+| 계층 | transport = 메커니즘 노출(`remote_address_validated`/`may_retry`/`retry`/`refuse`/`ignore` + bind 상한), core `admission::Gate` = 결정·config·audit | 아키텍처 매트릭스. `AdmissionPolicy` trait을 transport에 넣는 대안은 config·audit·상태를 glue에 끌어들여 기각 |
+| Retry 트리거 | **무조건**(`!remote_address_validated()`이면 항상) | 부하 게이트는 신호가 오르기 전에 이미 키 유도·10 MiB 버퍼 상태를 만든다(부트스트랩 문제). 포화 대응은 한 층 아래 quinn `max_incoming`이 담당. 비용은 신규 연결당 1 RTT, migration 무영향 — m2 캠페인 지배 항이 OS 경로 재수립 4–5 s라 몇 % 수준. **판정은 M8 ≥60회 캠페인**. 부하 게이트 Option B는 escape hatch로만 기록, 구현 안 함 |
+| Retry audit | 없음 | Retry는 거부가 아니라 프로토콜 challenge — audit하면 그게 ④의 audit flood |
+| 동시성 상한 | handshake 중인 연결 수를 `Semaphore` `try_acquire_owned`로(localctl `MAX_CONCURRENT_LOCALCTL_HANDSHAKES` 선례), 상한 도달 시 `refuse()`, `[serve].max_concurrent_handshakes` 기본 64, `0`=기본값(끄는 설정 없음) | 이 지점에 오는 peer는 주소 검증됨 → 빠르고 구별 가능한 실패가 맞다. `ignore()`는 정상 클라이언트를 10 s 타임아웃까지 방치, accept-후-close는 TLS 전체를 지불 |
+| source rate limit | **count-min sketch**(4행×1024열×2세대 `AtomicU32`, 32 KiB 고정), 키 IPv4 /32·IPv6 /64, `[serve].handshake_rate_per_source` 기본 10/s burst 2×, 초과 시 `ignore()`. **추가 요구: 행별 독립 시드 해시**(공격자가 정상 source와 충돌하는 키를 사전 계산 못 하게) | 스푸핑 가능한 키로 자라는 테이블(LRU HashMap)은 그 자체가 DoS 벡터이고 flood 하에서 eviction이 정상 항목을 밀어낸다. 검증된 peer는 sketch를 우회하므로 충돌 오탐은 미검증 Initial에만 걸린다 |
+| 순서 | L0 quinn 사전 차단 → L1 accept → L2 미검증이면 rate-limit(초과 ignore / 통과 retry) → L3 검증됨이면 semaphore(실패 refuse) → L4 spawn·TLS | 거부 경로 어디서도 task·연결·세션·fd 생성 없음 |
+| audit | `AuditRecord::handshake_rejected` 재사용, category `rate_limited`/`at_capacity`, **`count: Option<u32>` 필드 추가**(additive, `skip_serializing_if`), 창(10 s)당 category별 "첫 건 즉시 + 요약 1행" 집계, `tracing::warn!`도 같은 억제 | ④ 연쇄 차단. architecture.md:87 필드 목록 동일 PR에서 갱신. `resource` 문자열에 count를 접붙이는 대안은 어휘를 열거 불가로 만들어 기각 |
+| 오류 표면 | `DialError::Refused`(`ConnectionClosed(0x2)`) 신설, **`ErrorCode::ConnectionFailed` 유지**(retryable), 사람용 메시지만 개선. doctor 코드 추가 없음 | JSON `code`/`retryable` 불변 → `qsh.cli/v1` 무변경. doctor는 로컬 연산이라 원격 포화를 관측 못 함 |
+| `receive_window: VarInt::MAX` | **Step 2로 흡수** — 유한값, DoD 2 "세션당 buffer ≤8 MB" 이하. 구체값은 `stream_receive_window`×동시 스트림 상한에서 도출해 근거와 함께 추기 | ROADMAP 감사 문장에 같이 있고, 이 step이 만지는 파일 한 줄 |
+| `incoming_buffer_size(_total)` | **측정 선행** — accept를 고의 지연시켜 정상 mTLS handshake가 실제 버퍼하는 바이트를 재고 ≥8× 로 설정. 측정 불가면 quinn 기본 유지하고 기록 | 설계자 스스로 "숫자를 눈감고 고르지 말라" |
+| `qsh listen` 루프 | 같은 `Gate` 타입, `[serve]` 값 상속(`[listen]` 별도 키 없음) | 누가 요구하기 전까지 |
+| config 문서 | CLI.md §6.12 인라인 bullet 2개(`[serve]` 표는 없음 — 기존 관행), architecture.md:95 config map 갱신 | additive |
+| ADR | **ADR-0009 작성** — retry-always·/64 키·"0=기본값, off 없음"·audit 집계. 에이전트가 scratchpad에 초안, main 세션이 검토 후 `docs/adr/`에 배치 | 재론이 아니라 신규 결정이지만 미래 세션이 찾을 자리가 필요 |
+| Step 3 훅 | `server/mod.rs:1041`(session open)·`:2532`/`:2626`(tunnel/rfwd authorize) — ACL allow 뒤, 자원 spawn 전. slow-loris(handshake 후 established 무상한)도 Step 3 | 기록만 |
+
+테스트(설계 §8 그대로): transport 4(`fresh_incoming_is_unvalidated`·`retry_forces_a_validated_second_incoming`·`retry_on_validated_incoming_errs`·`server_config_sets_admission_bounds`), core 단위 6(cap/permit 해제/창 회복/ipv6 /64/**forged cardinality 하 상수 크기**/오탐률 <1 %), 통합 4(`admission_cap_refuses_and_creates_nothing`·`legitimate_client_connects_after_flood_subsides`·`admission_rejection_audit_is_aggregated`·`spoofed_initial_flood_creates_no_state` — loopback은 source IP를 못 바꾸므로 키 검증은 단위 테스트 몫이라는 한계 명시). 지속 flood·RSS/fd bound·quota 상호작용은 Step 4.
+
+**(a)-추기 — Step 2 검증 라운드 판정 (2026-09-02, main 세션).** 구현 증분 15 M + 2 신규(`admission.rs` 721줄, `qsh-testkit/tests/admission.rs`), 신규 테스트 18건(1342→1360), 게이트 6종 green, 적합성 검토 무이탈. `incoming_buffer_size`는 지연 accept 측정 4,800 B(5/5 재현)에 13.6× 여유로 64 KiB. opus 적대적 검증(변이 14건 주입·전건 `cmp` 원복, 트리가 구현자 파일 목록과 일치) **11/14 검출 — 방어선 셋이 무증상으로 지워지고 pin 하나가 순환**. 여기에 main 세션 자체 발견 2건(F1·F2). **P1 3 / P2 3 / P3 7 + 가설 3 — 커밋 불가, 수정 라운드.** 판정:
+
+1. **P1-1 `Listen::admit` 무커버리지(M6b 생존: gate를 통째로 우회해도 1151/1151 통과)** — 이행. `ReverseHarness`(`qsh-testkit/src/reverse.rs`)가 실제 `Listen::run`을 돌리므로 쓸 수 있었던 테스트다. Listen 상한 거부 + audit 통합 테스트 신설. `write_admission_audit`의 두 사본(`server/mod.rs`·`listen.rs`)은 한 정의로 합친다 — 독립적으로 변이 가능한 계약 사본을 두지 않는다.
+2. **P1-2 L2→L3 순서 미고정(M4 생존: 미검증 peer가 permit을 먼저 잡아도 951/951)** — 이행. cap=0에서 미검증 peer는 `Retry`(`Refuse` 아님)이고 `available_permits()`가 불변인 단위 테스트. 이 순서가 스푸핑 flood의 permit 고갈과 위조 주소로의 `CONNECTION_REFUSED` 반사를 막는 유일한 장치다.
+3. **P1-3 요약 행 미검증(M7b 생존) + F1 lazy flush** — 이행, 한 묶음. 현행은 요약을 "다음 거부가 창 만료 뒤에 도착할 때"만 내보내므로 flood가 멎으면 마지막 창의 count는 영원히 안 나온다 — 운영자가 가장 보고 싶은 순간이 빠진다. `Gate::flush_expired(now) -> Vec<AuditRecord>` 신설, 두 accept 루프가 `select!` 주기 tick(`AUDIT_AGGREGATION_WINDOW`)마다 호출하고 루프 종료 시 1회 더. 창 상태는 `Mutex<WindowState { start, suppressed }>` 하나로(P3-4의 원자 카운터 drift 동시 해소). 테스트: `TestClock` 단위(거부 n건 → 창 경과 → 요약 1행, `count = n-1`, `peer_addr = "-"`), 통합 2(Server·Listen 각 1 — flood 중단 후 요약 행이 창+여유 안에 파일에 나타남, 상한 20 s 폴링).
+4. **F2 rate 의미론(main 세션)** — 이행. `EPOCH = 1 s`·임계 `rate × 2`는 슬라이딩 창 위에서 **지속 20/s를 통과**시킨다 — CLI.md의 "기본 10/초, burst 2배"와 어긋난다. `EPOCH = 2 s`, 임계 `rate × EPOCH.as_secs()`(= 20): 지속 10/s, 순간 최대 20. 문서·ADR 문면도 그렇게. 회복 테스트는 flood 중단 후 2×EPOCH 대기, probe 간격 ≥ EPOCH. reconnect 케이던스(`REDIAL_DEADLINE` 2 s, 3회 ≈ 7 s에 dial ≤3)는 임계와 한 자릿수 차이라 무관.
+5. **P2-1 bind 상한 pin이 순환(M12 생존: 생산 경로의 setter 셋을 지워도 991/991)** — 이행. 테스트가 `ServerConfig`를 자기 손으로 다시 만들어 그 Debug 문자열을 단언하고 있었다. `pub(crate) fn server_config(...)` 단일 생성 지점을 `bind_inner`와 테스트가 같이 호출.
+6. **P2-2 `INCOMING_BUFFER_SIZE_TOTAL`이 quinn 기본 100 MiB와 동일(무효)** — 이행. retry-always로 Incoming은 accept 루프 한 반복 안에서 동기 해소되므로 합계 버퍼는 루프가 바쁜 찰나에만 자란다 — 100 MiB를 DoD 2의 idle-listener 30 MB 옆에 둘 수 없다. **16 MiB 명시**(64 KiB × 256). 상한 초과 시 quinn 동작(drop/refuse)은 fixer가 vendored 소스로 확인해 주석과 ADR에 적는다.
+7. **P2-3 Retry 토큰 15 s 재사용 → 검증된 시도의 rate는 아무것도 안 막는다** — **Step 3 입력**, Step 2 범위 밖. 실 주소의 공격자가 1 RTT로 토큰을 얻어 15 s 동안 재사용하면 sketch를 우회해 permit 64개를 놓고 경합한다. 검증 peer에 sketch를 다시 걸면 L3 의미(Refuse 대상)가 바뀌고 그건 쿼터 step의 설계 대상이다. 회귀 아님(Step 2 이전보다 엄격히 낫다), 증폭 없음(주소가 실제). `retry_token_lifetime`은 quinn 기본 유지. ADR 한계 절 + Step 3 항목에 명기.
+8. **P3-1 dead code(`RejectReason::as_index`, `Index<RejectReason> for [AuditWindow; 2]`)** — 삭제. 3번의 `WindowState` 개편에 흡수.
+9. **P3-2 `connection_receive_window_never_exceeds_the_roadmap_dod_bound`가 `min(x, 8 MiB) ≤ 8 MiB`(M11에서 안 울림)** — 삭제, ≤8 MiB 단언은 실제 pin(`transport_config_sets_connection_receive_window`)에 합친다.
+10. **P3-3 `rate_limited` 첫 행의 `peer_addr`는 주소 미검증** — 코드 유지, 문서화. 와이어 관측값이라 구조 정보이고 pcap 대조에 필요하다. CLI.md §6.12·ADR에 "rate_limited의 peer_addr는 미검증 주소 — 발신자 증명이 아니다"를 명기.
+11. **P3-4 창 카운터 drift** — 3번에 흡수.
+12. **P3-5 코드 주석 8곳이 아직 없는 ADR을 가리킴** — main 세션이 그 이름 그대로 `docs/adr/0009-admission-defenses.md`에 배치. 코드 무변경.
+13. **P3-6 chaos 하네스(`accept_observed`)가 gate 우회** — 의도된 seam, 유지. retry-always × 경로 단절(M2 시나리오)은 **Step 4 입력**.
+14. **P3-7 `spoofed_initial_flood_creates_no_state`는 quinn AEAD drop 검증**(M1·M4 하에서도 통과) — `host_survives_garbage_initial_flood`로 개명, doc comment에 "gate 커버리지 아님"을 명기. host 안정성 테스트로는 유효하니 파일은 유지.
+15. **H1 `measure_incoming_buffered_bytes_during_delayed_accept`의 `measured × 8 ≤ 64 KiB`는 벽시계 의존**(측정 4,800 = PTO 재전송 4회, 단언 여유 1.7×) — 단언을 `0 < measured ≤ INCOMING_BUFFER_SIZE`로. 그것이 이 설정의 실제 의미(정상 클라이언트를 굶기지 않는다)다. 8× 여유는 측정값과 함께 주석으로. H2(주석이 공격 여유처럼 읽히는 문제 — 실제로는 정상 클라이언트 기아 여유)도 같은 주석에서 바로잡는다.
+16. **H3 §6.12 어휘 doc 대조 테스트 부재** — 이행. `doctor_docs.rs` 선례대로 `admission_docs.rs`: category 2종·config 키 2종·기본값이 CLI.md에 있는지.
+
+수정 라운드 규율은 전과 같다 — 변이 원복은 `cp` 백업 + `cmp`, PLAN/ROADMAP/adr 무편집(ADR 초안은 scratchpad에서 갱신), 게이트 6종 green + nextest 수치, fixer는 반박 가능. 마감 후 main 세션이 위험 diff(두 루프 배선·`WindowState`·`server_config`)를 직접 읽고 독립 변이 1건 이상 찍는다.
+
+**(a)-추기 — Step 2 수정 라운드 마감 (2026-09-03, main 세션).** 수정 라운드는 fixer(sonnet, 반박 가능)가 16항목을 전부 이행했고 적합성 검토(opus)는 16/16 무이탈. 게이트 6종 green, nextest 1360→1366(+2 skipped). 바뀐 것: `Gate::flush_expired`와 `Mutex<WindowState>`로 창 상태를 한 곳에 모음, 두 accept 루프의 `select!`에 주기 tick(10 s)을 두고 루프 종료 시 flush 1회 더, `EPOCH = 2 s`·임계 `rate × 2`, `pub(crate) fn server_config` 단일 생성 지점, `INCOMING_BUFFER_SIZE_TOTAL` 16 MiB(quinn은 합계 초과 시 새 Incoming을 drop — `quinn-proto-0.11.16/src/endpoint.rs:218-227`), `write_admission_audit` 한 정의(`audit.rs:304`), Listen 상한·집계 통합 테스트, `admission_docs.rs`, `host_survives_garbage_initial_flood` 개명, H1 단언 `0 < measured ≤ INCOMING_BUFFER_SIZE`. P2-3·P3-6은 Step 3·4 항목에 이월 입력으로 적었다.
+
+적대적 검증 2라운드(opus, 변이 17건). 1라운드 생존 4건(M4·M6b·M7b·M12)은 전부 검출. 신규 변이 가운데 N1–N5·N8·N9·N11·X1 검출, **N6(루프 종료 flush 삭제)·N7(16 MiB→100 MiB)·N10(`suppressed` 미초기화)·X3(permit을 연결 종료까지 보유) 4건 생존**, X2(lazy 요약 push 삭제)는 하네스 중단으로 미완. 검증자가 X2 도중 "[Request interrupted]"로 재시작돼 처음부터 다시 돌기 시작했기에 main 세션이 워크플로를 정지시키고 트리를 백업(`mut3/`)과 `cmp`·diff sha로 대조한 뒤 전임자 transcript로 표를 확정했다(`step2-adversarial-2.md`). 생존 4건은 모두 코드는 맞고 pin이 없는 종류라 수정 대신 pin 라운드로 돌렸다.
+
+pin 라운드(sonnet). 단위 1건 `gate_record_rejection_and_flush_expired_both_reset_suppressed_not_just_report_it`(N10 두 초기화 경로 + X2), `server_config_sets_admission_bounds`에 리터럴 단언 3개(N7: 16 MiB·64 KiB·4096), 통합 3건 — `admission_permit_is_released_at_handshake_end_not_connection_end`(X3), `admission_on_exit_flush_reports_suppressed_rejections_at_shutdown`과 그 Listen 쌍둥이(N6). 변이 6건(N10a·N10b·X2·N7·X3·N6×2) 전건 FAIL 뒤 원복 PASS. N6 테스트는 첫 판이 틀렸다: `tokio::time::interval`은 첫 tick을 즉시 발화해 tick이 t0·t0+10·t0+20에 오는데, 즉시 dial하면 창 만료점(t0+ε+10)이 두 번째 tick과 밀리초 차라 스케줄링 지터가 결과를 정했다(계측으로 확인, 변이 생존). 첫 dial을 4 s 늦춰(`WINDOW_OPEN_DELAY_FROM_LOOP_START`) 창을 t0+4에 열고 t0+15.5에 종료하니 양쪽 여유가 4 s 이상이다. 느린 머신에서 종료가 늦어지면 세 번째 tick이 대신 flush해 통과하므로 flaky가 아니라 판별력만 잃는 방향. X3의 Listen 쌍둥이는 `ReverseHarness::start_with_admission`이 빈 trust store를 고정해 mTLS 연결을 못 만들어 생략(테스트 doc에 명기, 하네스 시그니처 변경은 별건). 3 crate nextest 1001 passed / 2 skipped.
+
+main 세션 검토. 두 루프 배선(`accept()` 단일 await의 취소 안전성, `select!` 브랜치 셋, 종료 시 flush→drain→close→wait_idle), `WindowState` 로직(mutex 아래 `.await` 없음), `server_config`, 하네스 `start_with_admission` 두 벌을 직접 읽었다. 독립 변이 스팟체크 2건(X3: `drop(permit)`을 `serve_connection` 뒤로 / N6-Listen: `Listen::run` 종료 flush 삭제) — 둘 다 변이 상태에서 FAIL(`admission.rs:621`·`:764` 단언), `cp` 원복 뒤 PASS, 트리는 `mut4` 백업과 `cmp` 일치. ADR-0009는 `docs/adr/0009-admission-defenses.md`에 배치하고 README 색인에 추가했다(초안은 humanize-korean light 경로로 다듬음 — 볼드 48→16, 코드 식별자·수치 무변경). 최종 게이트 6종 green, nextest 1370 passed / 2 skipped(1366→1370, pin 4건). 커밋 후 CI green이 Step 2 마감이다.
+
 #### Step 3 — 적대적 부하 방어선 ③: 세션·터널 쿼터
 
 - `[serve].max_sessions`, principal별 세션 쿼터.
 - **터널 전용 할당량** — principal별·forward별 동시 `TCP_CONNECT` 스트림 수, remote-forward listener 개수 상한. `docs/design/protocol.md` §7이 명시하고 M4·M5 어느 쪽도 만들지 않은 무상한 갭을 여기서 인수한다.
 - 초과는 `RESOURCE_EXHAUSTED`(CLI.md §3.3 기정의 어휘 — 새 코드를 만들지 않는다).
+- **Step 2 이월 P2-3** — Retry 토큰은 15 s 재사용 가능해 검증된 시도의 rate는 sketch를 우회한다(실 주소 공격자가 1 RTT로 토큰을 얻어 permit 64개를 놓고 경합). 검증 peer 기준 rate·쿼터와 `retry_token_lifetime`을 여기서 설계한다. ADR-0009 한계 절 참조.
 
 #### Step 4 — 적대적 부하 하네스 (DoD 5) + audit 수명주기 부하 검증
 
 협조적 soak과 **별도 게이트**다. 감사 개정 ④의 연쇄(스푸핑 flood → 세션 없는 audit 쓰기 → 디스크 만실 → resume 실패)가 차단되는지를 본다. Step 2·3이 선언한 상한이 실제로 강제되는지를 이 하네스가 판정한다.
+
+- **Step 2 이월 P3-6** — retry-always × 경로 단절(chaos 하네스 `accept_observed` seam, M2 시나리오): Retry 왕복 중 경로가 끊길 때 재시도·reconnect 케이던스가 rate 임계와 어떻게 겹치는지.
 
 #### Step 5 — 24h/100-session soak + fd/메모리 게이트 (DoD 2)
 
@@ -463,3 +518,4 @@ M2가 20회를 조기 측정해 SC4/SC5를 실기기로 확인했고 SC3 판정�
 - **DoD 1·2·3은 전부 벽시계**다. 압축되지 않으므로 순서가 곧 일정이다 — Step 1을 가장 먼저 세운 이유.
 - **graceful re-exec(fd 보존 handoff)** 는 ROADMAP §4 리스크 4가 M8 stretch로 비용 산정만 요구한다. 구현은 범위 밖.
 - **notarization은 M9가 아니라 M8 중 시작**(ROADMAP M9 크기 주석). 리드타임 항목이라 6.0과 같은 성질이다.
+- **CI flake (2026-09-02, run 33601809635, docs-only 커밋 `b0da849`)** — `qsh-cli::attach_ops::a_teardown_waits_out_a_detach_that_is_still_flushing`이 `ubuntu-24.04-arm` leg에서만 `left: Applied, right: Unconfirmed`로 실패, 재실행 통과. 테스트는 host를 SIGSTOP한 뒤 detach flush가 ack를 못 받아 `Unconfirmed`이길 기대하는데, 빠른 러너에서는 SIGSTOP 전에 이미 쓴 바이트의 ack가 도착해 `Applied`가 된다 — 제품 결함이 아니라 테스트의 순서 가정(정지 → 쓰기가 아니라 쓰기 → 정지). Step 2 착륙 후 별도 소커밋으로 결정론화(ack가 불가능한 상태를 먼저 만들고 나서 쓰기).
