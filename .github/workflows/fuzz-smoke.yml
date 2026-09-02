@@ -1,0 +1,92 @@
+name: fuzz-smoke
+
+# Build-and-smoke gate for `fuzz/` (M8 DoD: "parser 타깃당 누적 ≥72
+# fuzz-hours 무crash", `docs/ROADMAP.md`). This is NOT that 72-hour
+# accumulation — a background/local-only job, see `fuzz/README.md` — it is
+# a fixed, deterministic `-runs=<N>` pass over every target so a target
+# that fails to build, or that crashes on its own seed corpus, is caught
+# on every push instead of only whenever someone remembers to run it by
+# hand.
+#
+# One job, one build: it loops `cargo fuzz run <t> -- -runs=<N>` over
+# `cargo fuzz list`'s own output rather than a hard-coded target list, so
+# a newly added `fuzz_targets/*.rs` is smoke-tested automatically — no
+# separate matrix leg to remember to add, and no way for a target to
+# silently escape CI by omission from a list here.
+#
+# Kept as its own workflow file, entirely separate from `ci.yml`'s
+# `ci-ok` required-check aggregation, for two reasons:
+# - `fuzz/` needs a nightly toolchain + `cargo-fuzz` install that the six
+#   stable-toolchain gates (`CLAUDE.md`) must never depend on or be slowed
+#   by — a separate job in a separate file can't accidentally end up on
+#   the same dependency chain as `fmt`/`clippy`/`test`/`arch`/`deny`.
+# - It is deliberately non-blocking for now (`continue-on-error: true` on
+#   the run step, not the whole job — a build failure still shows red on
+#   the step, just doesn't fail the job or gate a merge): this is the
+#   harness's first day, the parser surface here is large, and turning a
+#   brand-new nightly-only job into a hard merge gate before anyone has
+#   triaged what "normal" flakiness (if any) looks like on a hosted
+#   runner would just train reviewers to ignore a red check. Flip
+#   `continue-on-error` off once this has run green for a while.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: fuzz-smoke-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  smoke:
+    name: fuzz-smoke
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      # Deliberately does NOT honor the root rust-toolchain.toml (stable
+      # 1.97.1, CLAUDE.md's "toolchain constraint") -- cargo-fuzz needs
+      # nightly's -Z sanitizer flags, which is the whole reason fuzz/ is
+      # kept out of the workspace in the first place (fuzz/README.md).
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: nightly
+          cache-directories: fuzz/target
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      # A fixed run count, not a time limit, per the task's own "CI must
+      # be deterministic" rule -- this is a build-and-crash-check, not a
+      # coverage exercise, so 4096 runs against a seeded corpus is enough
+      # to catch "doesn't build" and "panics on its own seeds" without
+      # making this job's runtime a function of runner load.
+      #
+      # continue-on-error stays on the run step, same non-blocking
+      # posture and same reason as before (see header comment) -- it just
+      # now guards a loop instead of one matrix leg, so a single target's
+      # failure doesn't stop the rest from being smoke-tested, and every
+      # failing target is named in the summary below.
+      - name: Smoke-run every fuzz target
+        id: smoke
+        working-directory: fuzz
+        continue-on-error: true
+        run: |
+          set -u
+          failed=()
+          for t in $(cargo fuzz list); do
+            echo "::group::cargo fuzz run $t -- -runs=4096"
+            if ! cargo fuzz run "$t" -- -runs=4096; then
+              failed+=("$t")
+            fi
+            echo "::endgroup::"
+          done
+          if [ "${#failed[@]}" -gt 0 ]; then
+            echo "Failed targets: ${failed[*]}"
+            exit 1
+          fi

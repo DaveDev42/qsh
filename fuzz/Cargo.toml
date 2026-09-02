@@ -1,0 +1,138 @@
+[package]
+name = "qsh-proto-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+# Standalone cargo-fuzz crate, deliberately OUTSIDE the workspace root's
+# `[workspace]` (see fuzz/README.md). cargo-fuzz requires nightly; the rest
+# of the qsh workspace is stable-pinned (rust-toolchain.toml). An empty
+# `[workspace]` table here stops cargo from trying to fold this crate into
+# the parent workspace when invoked from inside this directory.
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+
+qsh-proto = { path = "../crates/qsh-proto" }
+qsh-transport = { path = "../crates/qsh-transport" }
+serde_json = "1"
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "frame_decoder"
+path = "fuzz_targets/frame_decoder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_control"
+path = "fuzz_targets/decode_control.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_hello"
+path = "fuzz_targets/decode_hello.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_exec_frame"
+path = "fuzz_targets/decode_exec_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_session_frame"
+path = "fuzz_targets/decode_session_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_stream_header"
+path = "fuzz_targets/decode_stream_header.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_local_hello"
+path = "fuzz_targets/decode_local_hello.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_local_admin_request"
+path = "fuzz_targets/decode_local_admin_request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_connect_result"
+path = "fuzz_targets/decode_connect_result.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sanitize_peer_text"
+path = "fuzz_targets/sanitize_peer_text.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "valid_host_name"
+path = "fuzz_targets/valid_host_name.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "valid_forward_id"
+path = "fuzz_targets/valid_forward_id.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parse_invite_code"
+path = "fuzz_targets/parse_invite_code.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parse_forward_spec"
+path = "fuzz_targets/parse_forward_spec.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fingerprint_principal"
+path = "fuzz_targets/fingerprint_principal.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "json_request_types"
+path = "fuzz_targets/json_request_types.rs"
+test = false
+doc = false
+bench = false
