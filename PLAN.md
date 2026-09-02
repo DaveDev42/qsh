@@ -464,6 +464,27 @@ CI 마감(`1b34912`): CI run 33667720455 success, fuzz-smoke run 33667720360 suc
 - 초과는 `RESOURCE_EXHAUSTED`(CLI.md §3.3 기정의 어휘 — 새 코드를 만들지 않는다).
 - **Step 2 이월 P2-3** — Retry 토큰은 15 s 재사용 가능해 검증된 시도의 rate는 sketch를 우회한다(실 주소 공격자가 1 RTT로 토큰을 얻어 permit 64개를 놓고 경합). 검증 peer 기준 rate·쿼터와 `retry_token_lifetime`을 여기서 설계한다. ADR-0009 한계 절 참조.
 
+**(a)-추기 — Step 3 설계 판정 (2026-09-03, main 세션).** 조사 3분할(`step3-facts-A/B/C.md`, 132 facts) → opus 설계(`step3-design.md`, 48k자) → opus 적대적 검토(`step3-critique.md`, P1 4·P2 10·P3 4)를 판정한다. 검토의 사실 주장은 main 세션이 코드에서 다시 확인했다(`is_connection_refused`는 `ConnectionClosed` 0x2만, `CLOSE_CODE_REPLACED = 0x1003`, `AcceptDisposition::Fatal => return`, `Broker::open`/`open_with`의 우회, `fixtures.rs`의 `DEFERRED`, stop code `_ => 0`).
+
+설계의 뼈대는 채택한다: 전부 `qsh-core`, 세션 계수는 broker registry 파생(별도 카운터 금지), 쿼터 지점은 `Broker::open_as` 첫 줄(`factory.create` 앞), 터널 permit은 스플라이스 수명, listener permit은 `RemoteForwardEntry` 소유, wire 변경 0(`Response.Error`·`ConnectResult.code`가 이미 `RESOURCE_EXHAUSTED`를 실을 수 있다), `retryable: true` 통일, `0`=기본값, audit는 `quota_*` category로 첫 건 + 요약(창 구조 공용화·인스턴스 분리), reverse target은 `host_runtime` 상속을 테스트로 고정, P2-3은 검증된 주소 축의 별도 sketch를 permit 앞에, `retry_token_lifetime`은 quinn 기본 유지, ADR-0010 신설. 설계의 중재 요청 10건은 2·3·4·6·7·8·9를 권고안대로 수용하고 1·5·10은 아래처럼 고쳐 수용한다.
+
+1. **커밋 분할(중재 1)** — 수용. 3a: 세션 쿼터 + exec 상한 + P2-3 검증 rate + config·문서 골격 + fixture. 3b: 터널 2종 + 연결 상한(전역·principal·pairing) + 나머지 문서. 각 커밋이 Step 2와 같은 리듬(구현 → opus 변이 검증 → 수정 → pin → main 검토·독립 변이 → 게이트 → 커밋 → CI)을 따로 돈다. ADR-0010 초안은 3a에서 scratchpad에 쓰고 3b 마감 때 main 세션이 배치한다. 코드 주석은 3a부터 `docs/adr/0010-resource-quotas.md`를 가리켜도 된다(Step 2 선례).
+2. **연결 상한의 거부 표면(검토 P1 1·2·3)** — 설계 §2.2의 `CLOSE_CODE_AT_CAPACITY` + `DialError::Refused` 합류는 기각. 0x1003은 이미 `CLOSE_CODE_REPLACED`이고 그 시점엔 QUIC handshake가 끝나 `dial()`이 `Ok`를 돌려준 뒤라 `classify_dial_failure`가 돌지 않는다. `handshake::respond`의 거부 콜백(reverse 등록 거부 선례 `server/mod.rs:2093-2100`, `REJECTION_DRAIN_TIMEOUT`으로 프레임 전달 보장)에서 `wire::Error::new(ErrorCode::ResourceExhausted, …, true)`를 돌려준다. 클라이언트는 `map_hello_error`로 `RESOURCE_EXHAUSTED`·`retryable: true`를 그대로 보고 transport 변경은 0이다. permit은 pairing 분기 뒤·`local_hello` 전송 전에 획득하고 `purge_connection` 뒤에 놓는다(설계 §2.3의 순서 그대로). 이로써 pairing 계수 모순(P1 1)도 사라진다.
+3. **전역 연결 상한(검토 P2 7)** — 설계 §2.6의 이월을 기각하고 이번 스텝(3b)에 넣는다. `Principal::User`는 CA 서명 SAN에서 오므로 CA를 쥔 쪽이 이름을 무한히 만들 수 있고 principal별 상한만으로는 어느 축에도 aggregate bound가 없다. `[serve].max_connections` 기본 512(전역, established·인증 완료 기준). 모든 터널 스트림·listener·세션 open은 살아 있는 연결을 요구하므로 이 하나가 나머지 축의 곱을 유한하게 만든다 — ADR-0010 결정 근거에 "CA posture 하에서 principal 카디널리티는 무한"을 명기하고 §2.1 메모리 상한 논증을 이 상한 위에 다시 쓴다.
+4. **pairing 연결(검토 P2 8)** — 면제 근거를 "`PAIRING_TIMEOUT`(10 s) ×2로 유계"로 정정하고 고정 상수 `MAX_CONCURRENT_PAIRING_CONNECTIONS = 8`(config 키 없음)을 둔다. 초과는 아무것도 만들지 않고 거부하며 표면은 pairing respond 경로의 거부 콜백이다. 미검증 상대가 열 수 있는 유일한 연결 클래스를 무상한으로 두지 않는다.
+5. **exec 동시성(검토 P2 5)** — 3a에 `[serve].max_exec_per_principal` 기본 32를 넣는다. 티켓 예산은 미상환분만 세므로 상환 루프에서 principal당 자식 프로세스가 무상한이다. 순서는 ACL → 쿼터 → spawn, 계수는 살아 있는 자식(RAII permit, 자식 회수 시 drop), category `quota_exec_principal`. 키는 8개가 아니라 9개다: `max_sessions` 256, `max_sessions_per_principal` 32, `max_exec_per_principal` 32, `max_tunnel_streams_per_principal` 256, `max_tunnel_streams_per_forward` 64, `max_remote_forwards_per_principal` 16, `max_connections_per_principal` 32, `max_connections` 512, `validated_rate_per_source` 10.
+6. **터널 키 크기(검토 P2 6)** — 모양 검사에 host 길이 ≤ 255를 추가(`InvalidArgument`, `RESET_CODE_BAD_HEADER`). 불변식 문면은 "엔트리 수 ≤ 상한 그리고 키 크기 ≤ N바이트". dial 타임아웃 동안 permit이 살아 있는 것은 의도다 — in-flight dial도 fd 후보라 세야 한다.
+7. **listener 자기종료 누수(검토 P2 9)** — `serve_remote_forward`가 `Fatal`로 끝날 때 자기 엔트리를 registry에서 지우는 경로(oneshot 또는 완료 감시)를 넣고 U11에 "fatal accept로 listener가 죽은 뒤 재개방 가능"을 추가한다. EMFILE에서 자기유발 영구 거부가 되는 경로를 남기지 않는다.
+8. **락 규율(검토 P2 10)** — ADR-0010에 못 박는다: 쿼터 락은 최말단, 그 아래 다른 락 없음, `.await` 금지(Step 2 `WindowState`와 동형). `purge_connection`은 제거한 엔트리를 `Vec`에 모아 가드 밖에서 drop한다.
+9. **stop code(검토 P3 15)** — `RESET_CODE_RESOURCE_EXHAUSTED` 신설(기존 `RESET_CODE_*`·hub `0x200B`와 겹치지 않는 값), protocol.md §7 코드 표에 등재, I4가 값을 단언한다. 0으로 떨어뜨리면 peer가 쿼터 거부를 dial 실패로 읽는다.
+10. **ADR-0009 근거 문면(검토 P3 16·17)** — ADR-0010에 "0009 근거 절의 '검증된 peer는 sketch를 우회한다' 문장을 좁힌다"를 결정으로 적고 4행 독립 시드의 잔여 오탐 확률을 검증 축에서 다시 계산한다. 정상 dial 1건 = 두 sketch 각 1건 산식과 NAT /32 뒤 동시 클라이언트 가정을 함께 적고 U18 쌍둥이로 "한 소스가 지속 10/s로 dial할 때 두 축 모두 통과"를 고정한다.
+11. **테스트 추가(검토 P2 12·13·14, P3 18)** — ① `saturated_quota_still_answers_permission_denied_to_an_unauthorized_principal`, `quota_rejection_still_leaves_the_acl_allow_audit_line`(ACL → 쿼터 순서 pin). ② `Broker::open`/`open_with`를 공통 예약 헬퍼로 재구현하고 "세 진입점 모두 `factory.create` 전에 예약"을 U3 쌍둥이로. ③ `detached_session_still_holds_quota`. ④ `admission_docs.rs`를 `RejectReason::ALL` 순회로 바꾸고 `validated_rate_per_source` 키·기본값 단언 추가, CLI.md §6.12의 "미검증 Initial의 source당" 문장 정정. 설계 §4.7의 구현자 직접 변이 4건(U3·U15·I4·I10)에 U11 fatal 케이스와 순서 pin ①을 더한다.
+12. **fixture(검토 P2 11)** — `error.RESOURCE_EXHAUSTED.json` 추가는 `fixtures.rs`의 `DEFERRED` 항목 제거·`REQUIRED_FIXTURES` 등록·`max_sessions_per_principal = 1` config를 세운 Sandbox golden 1건을 수반한다. 변경 파일 표에 넣는다.
+13. **§6.4 이월 i·ix(검토 P1 4)** — i(bounded pull executor + `RESOURCE_EXHAUSTED`, 측정 512 천장)는 클라이언트 로컬 자원이라 Step 3의 몫은 어휘 정합(`RESOURCE_EXHAUSTED`·`retryable: true`·`details`는 로컬에서만)뿐이고 executor 상한 자체는 ii·iii(호출당 런타임·fd 증가)와 같은 변경이므로 Step 5로 보낸다. ix(forward-route live carrier·`-R` 자동 재발행)는 쿼터가 생성만 게이트하고 복구 의미론과 직교하므로 Step 5로 보낸다 — 단 3b의 permit 해제가 `purge_connection`에 묶여 있어 resume 뒤 재발행이 permit을 다시 얻을 수 있음을 I6 계열 테스트가 보인다. §6.4 표의 소유 step을 이 판정대로 고친다.
+14. **Step 4 인계** — 설계 §5의 인계 목록에서 전역 연결 상한 항목은 빠지고(3b에서 이행), 나머지(지속 부하 RSS/fd bound, principal당 폭주 하 PTY echo 최종 판정, audit 부피 실측, P3-6 케이던스 겹침, listener당 동시 accept 무상한)는 그대로 Step 4다.
+
+구현 규율은 Step 2와 같다 — 변이 원복은 `cp` 백업 + `cmp`, PLAN/ROADMAP/adr 무편집(ADR 초안은 scratchpad), 게이트 6종 green + nextest 수치 대조, fixer는 반박 가능, 마감 후 main 세션이 위험 diff(예약 헬퍼·permit 수명·거부 콜백·락 순서)를 직접 읽고 독립 변이 1건 이상 찍는다.
+
 #### Step 4 — 적대적 부하 하네스 (DoD 5) + audit 수명주기 부하 검증
 
 협조적 soak과 **별도 게이트**다. 감사 개정 ④의 연쇄(스푸핑 flood → 세션 없는 audit 쓰기 → 디스크 만실 → resume 실패)가 차단되는지를 본다. Step 2·3이 선언한 상한이 실제로 강제되는지를 이 하네스가 판정한다.
@@ -503,7 +524,7 @@ M2가 20회를 조기 측정해 SC4/SC5를 실기기로 확인했고 SC3 판정�
 
 | # | 항목 | 소유 step |
 |---|---|---|
-| i | bounded pull executor + `RESOURCE_EXHAUSTED` (측정된 512 천장) | Step 3·5 |
+| i | bounded pull executor + `RESOURCE_EXHAUSTED` (측정된 512 천장) | Step 5 (Step 3은 어휘 정합만 — 판정 13) |
 | ii | `Ops::exec`(`ops/exec.rs:81`) 호출당 `new_multi_thread()` 런타임 | Step 5 |
 | iii | pull당 fd 선형 증가 | Step 5 |
 | iv | 고아 `.tmp{pid}-{N}` 청소 부재 | Step 5 |
@@ -511,7 +532,7 @@ M2가 20회를 조기 측정해 SC4/SC5를 실기기로 확인했고 SC3 판정�
 | vi | trust store read-modify-write 잠금 부재 | Step 6 |
 | vii | invites.toml CLI/데몬 lock-free 창 | Step 6 |
 | viii | device_name 길이 상한 + Unicode bidi/homoglyph 스푸핑 | Step 6 |
-| ix | forward-route live carrier·`-R` 자동 재발행 (ROADMAP §3 표가 M8 소유로 등재) | Step 3 |
+| ix | forward-route live carrier·`-R` 자동 재발행 (ROADMAP §3 표가 M8 소유로 등재) | Step 5 (판정 13) |
 | x | `ControlLink`/`DataLink` enum → trait 전환 (ADR-0005 P0 부채, M3→M7 연쇄 이월) | P1 재기록 — M8도 트리거하지 않음 |
 
 ### 6.5 리스크
