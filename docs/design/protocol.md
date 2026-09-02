@@ -24,6 +24,7 @@
 - **Connection migration:** 서버측 passive migration(NAT rebind 등, path validation 포함)은 quinn이 자동 처리. 클라이언트는 인터페이스 변화 감지 시 `Endpoint::rebind(new_socket)`으로 active migration. migration은 **지연 최적화일 뿐**이며 실패해도 무방하다 — correctness는 resume(§8)이 보장한다. migration 성공에 의존하는 설계를 하지 않는다.
 - **keep-alive 15s / max_idle_timeout 45s:** 15s는 일반적인 30s UDP NAT binding timeout보다 짧아 역방향 target의 장수명 연결을 NAT 뒤에서 유지한다. 절전한 노트북은 45s 후 연결이 죽지만 **세션은 유지**된다(그것이 분리 설계의 목적). 절전 복귀 시 클라이언트는 monotonic clock 점프/PTO 실패로 죽은 연결을 즉시 버리고 재다이얼→resume한다. idle timeout을 키워 "QUIC 레벨에서 절전 생존"을 추구하지 않는다(listener 메모리 낭비 + 설계와 충돌).
 - **0-RTT 금지:** QSH의 control message는 전부 부수효과가 있다(`exec`, `session.write`, tunnel open). 0-RTT early data는 on-path 공격자가 재전송할 수 있으므로 절대 받지 않는다 — 클라이언트는 `into_0rtt()`를 호출하지 않고 서버는 early data를 활성화하지 않는다. TLS 세션 티켓(1-RTT resumption)은 성능상 켤 수 있으나, **티켓 기반 재개에서도 클라이언트 인증서 재검증이 보장되는지 확인**하고 의심스러우면 `NoServerSessionStorage`로 티켓을 끈다. 연결은 장수명이므로 handshake 지연은 중요하지 않다.
+- **Admission — 주소 검증은 항상 Retry (M8 Step 2, ADR-0009):** 실제 handshake(키 유도·상태 버퍼링)를 시작하기 전에, 주소 검증되지 않은 모든 `Incoming`은 부하와 무관하게 무조건 `Retry`로 되돌린다 — 스푸핑된 출발지는 왕복이 완성되지 않는 한 서버 쪽에 아무 상태도 남기지 못한다. 정상 클라이언트가 새 연결마다 지불하는 비용은 왕복 1회뿐이고, 이미 확립된 연결의 migration(위 항목)은 새 `Incoming`을 만들지 않으므로 전혀 영향받지 않는다. 그 위의 `qsh-core::admission::Gate`(handshake 동시성 상한 + source별 rate limit)는 이 프로토콜 결정과 독립적인 정책층이다.
 
 ## 3. TLS 상호 인증 — `QshPeerVerifier`
 

@@ -501,6 +501,22 @@ pub struct ServeConfig {
     /// Unset ⇒ [`ServeConfig::DEFAULT_CLOSE_GRACE_MS`] (5 s,
     /// `docs/CLI.md` §6.7).
     pub close_grace_ms: Option<u64>,
+    /// Upper bound on connections concurrently *in handshake* — from
+    /// admission through `Incoming::accept()` resolving, released before
+    /// `serve_connection` (`crate::admission::Gate`, `PLAN.md` M8 Step 2,
+    /// `docs/adr/0009-admission-defenses.md`). Unset or `0` ⇒
+    /// [`ServeConfig::DEFAULT_MAX_CONCURRENT_HANDSHAKES`] (64) — same "0
+    /// degrades to default, never unlimited" discipline as
+    /// [`ServeConfig::replay_bytes`]: this defense has no off switch.
+    /// `[listen]` has no key of its own — `Listen::run` reads this same
+    /// value (design arbitration, `PLAN.md` M8 Step 2).
+    pub max_concurrent_handshakes: Option<usize>,
+    /// Per-source rate limit on address-*unvalidated* Initials, in new
+    /// attempts per second (key: IPv4 /32, IPv6 /64; burst 2x, not
+    /// separately configurable). Unset or `0` ⇒
+    /// [`ServeConfig::DEFAULT_HANDSHAKE_RATE_PER_SOURCE`] (10). Same
+    /// no-off-switch discipline as `max_concurrent_handshakes`.
+    pub handshake_rate_per_source: Option<u32>,
 }
 
 impl ServeConfig {
@@ -510,6 +526,13 @@ impl ServeConfig {
     pub const DEFAULT_RESUME_TTL_SECS: u64 = 24 * 60 * 60;
     /// Default close escalation grace: 5 seconds (`docs/CLI.md` §6.7).
     pub const DEFAULT_CLOSE_GRACE_MS: u64 = 5000;
+    /// Default handshake concurrency cap: 64 (`PLAN.md` M8 Step 2 — the
+    /// same magnitude as `localctl::daemon::MAX_CONCURRENT_LOCALCTL_HANDSHAKES`,
+    /// so the codebase tells one story about this class of bound).
+    pub const DEFAULT_MAX_CONCURRENT_HANDSHAKES: usize = 64;
+    /// Default per-source unvalidated-Initial rate: 10/s (`PLAN.md` M8
+    /// Step 2).
+    pub const DEFAULT_HANDSHAKE_RATE_PER_SOURCE: u32 = 10;
 
     /// Effective replay budget (never zero; a `0` in config is treated as
     /// the default rather than an unusable ring).
@@ -530,6 +553,24 @@ impl ServeConfig {
         std::time::Duration::from_millis(
             self.close_grace_ms.unwrap_or(Self::DEFAULT_CLOSE_GRACE_MS),
         )
+    }
+
+    /// Effective handshake concurrency cap (never zero — `0` in config
+    /// degrades to the default, same discipline as
+    /// [`ServeConfig::replay_bytes`]: this defense cannot be switched off).
+    pub fn max_concurrent_handshakes(&self) -> usize {
+        match self.max_concurrent_handshakes {
+            Some(n) if n > 0 => n,
+            _ => Self::DEFAULT_MAX_CONCURRENT_HANDSHAKES,
+        }
+    }
+
+    /// Effective per-source handshake rate (never zero, same discipline).
+    pub fn handshake_rate_per_source(&self) -> u32 {
+        match self.handshake_rate_per_source {
+            Some(n) if n > 0 => n,
+            _ => Self::DEFAULT_HANDSHAKE_RATE_PER_SOURCE,
+        }
     }
 }
 
@@ -1014,6 +1055,29 @@ mod tests {
             std::time::Duration::from_secs(24 * 3600)
         );
         assert_eq!(empty.close_grace(), std::time::Duration::from_millis(5000));
+    }
+
+    #[test]
+    fn admission_keys_use_the_documented_names_and_defaults() {
+        // architecture.md §7 / CLI.md §6.12, PLAN.md M8 Step 2:
+        // `[serve] max_concurrent_handshakes(64) · handshake_rate_per_source(10)`.
+        let serve: ServeConfig =
+            toml::from_str("max_concurrent_handshakes = 8\nhandshake_rate_per_source = 3\n")
+                .unwrap();
+        assert_eq!(serve.max_concurrent_handshakes(), 8);
+        assert_eq!(serve.handshake_rate_per_source(), 3);
+
+        // Defaults: 64 / 10; `0` degrades to the default rather than
+        // meaning "unlimited" — this defense has no off switch.
+        let empty: ServeConfig =
+            toml::from_str("max_concurrent_handshakes = 0\nhandshake_rate_per_source = 0\n")
+                .unwrap();
+        assert_eq!(empty.max_concurrent_handshakes(), 64);
+        assert_eq!(empty.handshake_rate_per_source(), 10);
+
+        let absent = ServeConfig::default();
+        assert_eq!(absent.max_concurrent_handshakes(), 64);
+        assert_eq!(absent.handshake_rate_per_source(), 10);
     }
 
     #[test]

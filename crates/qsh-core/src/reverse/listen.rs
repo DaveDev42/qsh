@@ -304,13 +304,22 @@ async fn run_listen_unix(
     if let Some(diag) = &policy_diagnostic {
         on_policy_diagnostic(&diag.render());
     }
-    let listen = Listen::new(
+    // `[listen]` has no admission keys of its own — it inherits
+    // `[serve].max_concurrent_handshakes`/`handshake_rate_per_source`
+    // (`PLAN.md` M8 Step 2 design arbitration, `docs/CLI.md` §6.12).
+    let admission = crate::admission::Gate::new(
+        clock.clone(),
+        config.serve.max_concurrent_handshakes(),
+        config.serve.handshake_rate_per_source(),
+    );
+    let listen = Listen::with_admission(
         registry,
         authorizer,
         audit,
         identity.identity.device_id.clone(),
         clock,
         stale_retention,
+        admission,
     );
     tokio::spawn(Listen::run_stale_sweeper(Arc::downgrade(&listen)));
     tracing::info!(
@@ -3166,6 +3175,11 @@ pub struct Listen {
     /// fire does not have to pay `STALE_SWEEP_TICK`'s real wall-clock cost
     /// to do it (`Listen::new`'s doc comment).
     sweep_tick: Duration,
+    /// L2-L3 of the L0-L5 admission ordering (`PLAN.md` M8 Step 2,
+    /// `docs/adr/0009-admission-defenses.md`) — same type, same ordering,
+    /// as `crate::server::Server`'s own field; consulted by [`Self::run`]
+    /// before an `Incoming` reaches [`Self::accept_and_register`].
+    admission: crate::admission::Gate,
 }
 
 impl std::fmt::Debug for Listen {
@@ -3185,7 +3199,13 @@ impl Listen {
     /// [`Self::run_stale_sweeper`] at the production [`STALE_SWEEP_TICK`]; a
     /// test that actually wants to observe a sweep fire without paying that
     /// real wall-clock cost uses [`Self::new_with_sweep_tick`] instead
-    /// ([`sweep_tick`](Self::sweep_tick)'s own doc comment).
+    /// ([`sweep_tick`](Self::sweep_tick)'s own doc comment). Its admission
+    /// gate (`PLAN.md` M8 Step 2) defaults to
+    /// `crate::config::ServeConfig`'s own defaults on `clock` — production
+    /// (`run_listen_unix`) instead builds one from the operator's actual
+    /// `[serve]` values (`[listen]` has no admission keys of its own — the
+    /// design arbitration's own call: inherit `[serve]`) via
+    /// [`Self::with_admission`].
     pub fn new(
         registry: Registry,
         authorizer: Arc<dyn Authorizer>,
@@ -3216,6 +3236,62 @@ impl Listen {
         stale_retention: Duration,
         sweep_tick: Duration,
     ) -> Arc<Self> {
+        let admission = crate::admission::Gate::new(
+            clock.clone(),
+            crate::config::ServeConfig::DEFAULT_MAX_CONCURRENT_HANDSHAKES,
+            crate::config::ServeConfig::DEFAULT_HANDSHAKE_RATE_PER_SOURCE,
+        );
+        Self::with_admission_and_sweep_tick(
+            registry,
+            authorizer,
+            audit,
+            device_name,
+            clock,
+            stale_retention,
+            sweep_tick,
+            admission,
+        )
+    }
+
+    /// [`Self::new`] plus an explicit [`crate::admission::Gate`] —
+    /// `run_listen_unix` uses this to build the gate from the operator's
+    /// actual `[serve].max_concurrent_handshakes`/`handshake_rate_per_source`
+    /// (`[listen]` inherits `[serve]`'s admission values, design
+    /// arbitration) instead of the hardcoded defaults [`Self::new`] uses.
+    pub fn with_admission(
+        registry: Registry,
+        authorizer: Arc<dyn Authorizer>,
+        audit: Arc<dyn AuditSink>,
+        device_name: impl Into<String>,
+        clock: Arc<dyn Clock>,
+        stale_retention: Duration,
+        admission: crate::admission::Gate,
+    ) -> Arc<Self> {
+        Self::with_admission_and_sweep_tick(
+            registry,
+            authorizer,
+            audit,
+            device_name,
+            clock,
+            stale_retention,
+            STALE_SWEEP_TICK,
+            admission,
+        )
+    }
+
+    /// [`Self::with_admission`] with a caller-chosen sweep tick — same
+    /// injection point as [`Self::new_with_sweep_tick`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_admission_and_sweep_tick(
+        registry: Registry,
+        authorizer: Arc<dyn Authorizer>,
+        audit: Arc<dyn AuditSink>,
+        device_name: impl Into<String>,
+        clock: Arc<dyn Clock>,
+        stale_retention: Duration,
+        sweep_tick: Duration,
+        admission: crate::admission::Gate,
+    ) -> Arc<Self> {
         Arc::new(Self {
             registry,
             authorizer,
@@ -3227,6 +3303,7 @@ impl Listen {
             clock,
             stale_retention,
             sweep_tick,
+            admission,
         })
     }
 
@@ -3436,26 +3513,75 @@ impl Listen {
         shutdown: impl std::future::Future<Output = ()>,
     ) {
         tokio::pin!(shutdown);
+        // See `crate::server::Server::run`'s identical branch for the full
+        // rationale (`PLAN.md` M8 Step 2 verification round, P1-3/F1):
+        // bounded-latency admission-audit flush, same window, same
+        // `MissedTickBehavior`.
+        let mut audit_flush = tokio::time::interval(crate::admission::AUDIT_AGGREGATION_WINDOW);
+        audit_flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
                 _ = &mut shutdown => break,
                 incoming = listener.accept() => {
                     let Some(incoming) = incoming else { break };
-                    let this = self.clone();
-                    tokio::spawn(async move { this.accept_and_register(incoming).await });
+                    self.clone().admit(incoming);
+                }
+                _ = audit_flush.tick() => {
+                    let records = self.admission.flush_expired(self.admission.now());
+                    crate::audit::write_admission_audit(self.audit.as_ref(), &records);
                 }
             }
         }
+        let records = self.admission.flush_expired(self.admission.now());
+        crate::audit::write_admission_audit(self.audit.as_ref(), &records);
         listener.close(0, b"shutdown");
         listener.endpoint().wait_idle().await;
     }
 
+    /// L2-L4 of the L0-L5 admission ordering — mirrors
+    /// `crate::server::Server::admit` exactly (same `Gate` type, same
+    /// `Decision` mapping); see that method's doc for the full rationale.
+    fn admit(self: Arc<Self>, incoming: Incoming) {
+        let peer = incoming.remote_address();
+        let validated = incoming.remote_address_validated();
+        let now = self.admission.now();
+        match self.admission.decide(peer, validated, now) {
+            crate::admission::Decision::Retry => {
+                if let Err(returned) = incoming.retry() {
+                    returned.ignore();
+                }
+            }
+            crate::admission::Decision::Ignore(_, records) => {
+                crate::audit::write_admission_audit(self.audit.as_ref(), &records);
+                incoming.ignore();
+            }
+            crate::admission::Decision::Refuse(_, records) => {
+                crate::audit::write_admission_audit(self.audit.as_ref(), &records);
+                incoming.refuse();
+            }
+            crate::admission::Decision::Admit(permit) => {
+                tokio::spawn(async move {
+                    self.accept_and_register_permitted(incoming, Some(permit))
+                        .await;
+                });
+            }
+        }
+    }
+
     /// Accept one inbound connection and run the registration handshake on
     /// it. Mirrors [`crate::server::Server::accept_and_serve`]'s
-    /// verify-then-audit shape for a rejected TLS handshake.
-    async fn accept_and_register(self: Arc<Self>, incoming: Incoming) {
+    /// verify-then-audit shape for a rejected TLS handshake. Reached only
+    /// through [`Self::admit`], holding the handshake permit
+    /// [`Self::admission`] handed out.
+    async fn accept_and_register_permitted(
+        self: Arc<Self>,
+        incoming: Incoming,
+        permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    ) {
         let peer = incoming.remote_address();
-        match incoming.accept().await {
+        let result = incoming.accept().await;
+        drop(permit);
+        match result {
             Ok(conn) => self.register_connection(conn).await,
             Err(err) => {
                 let category = match &err {

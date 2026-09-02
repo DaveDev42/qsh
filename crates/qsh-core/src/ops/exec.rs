@@ -234,6 +234,21 @@ pub(crate) fn map_dial_error(err: DialError, address: &str) -> OpError {
             auth_failed(&format!("{reason:?}").to_lowercase())
         }
         DialError::RemoteRejected => auth_failed("remote_rejected"),
+        // `PLAN.md` M8 Step 2: the peer's `admission::Gate` refused an
+        // already address-validated attempt at its concurrency cap.
+        // *Same* `ErrorCode::ConnectionFailed`/`retryable: true` as
+        // `DialError::Failed` below — only the human message differs
+        // (`qsh_transport::DialError::Refused`'s own doc) — so
+        // `qsh.cli/v1`'s `code`/`retryable` are unchanged by this arm
+        // existing.
+        // `DialError::Refused` carries no fields, so a fresh value's own
+        // `Display` (its `#[error(...)]` text) is used rather than
+        // `err.to_string()` — `err` is already consumed by this `match`,
+        // and this way the message can never drift from the transport
+        // crate's own wording without a compile-visible edit right here.
+        DialError::Refused => {
+            OpError::new(ErrorCode::ConnectionFailed, DialError::Refused.to_string())
+        }
         DialError::Timeout(t) => OpError::new(
             ErrorCode::ConnectionFailed,
             format!("no response from {address} within {t:?}"),

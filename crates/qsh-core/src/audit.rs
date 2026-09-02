@@ -124,6 +124,21 @@ pub struct AuditRecord {
     pub auth_path: String,
     /// Peer socket address at decision time.
     pub peer_addr: String,
+    /// How many *additional* rejections a windowed summary record
+    /// collapses (`PLAN.md` M8 Step 2, ADR-0009) — `None` (and omitted
+    /// from the JSONL line entirely, `skip_serializing_if`) on every
+    /// ordinary record, including the first rejection of a new admission
+    /// aggregation window. `Some(n)` only on
+    /// [`AuditRecord::handshake_rejected_summary`]'s own output: one line
+    /// per `(category, 10s window)` standing in for `n` further
+    /// rejections that window already suppressed, so a flood produces
+    /// `O(categories / window)` audit lines instead of one per forged
+    /// packet. Additive — `qsh.cli/v1`/`qsh.event/v1` never carry
+    /// `AuditRecord` directly, but this still follows the same
+    /// never-remove-never-repurpose discipline (`CLAUDE.md`) as every
+    /// other field here, and old readers ignore a key they don't know.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub count: Option<u32>,
 }
 
 impl AuditRecord {
@@ -160,6 +175,7 @@ impl AuditRecord {
             rule,
             auth_path: auth_path_str(auth_path).to_string(),
             peer_addr: peer_addr.to_string(),
+            count: None,
         }
     }
 }
@@ -190,6 +206,7 @@ impl AuditRecord {
             rule,
             auth_path: auth_path_str(auth_path).to_string(),
             peer_addr: peer_addr.to_string(),
+            count: None,
         }
     }
 
@@ -209,6 +226,32 @@ impl AuditRecord {
             rule: None,
             auth_path: "-".to_string(),
             peer_addr: peer_addr.to_string(),
+            count: None,
+        }
+    }
+
+    /// The windowed-summary half of [`AuditRecord::handshake_rejected`]'s
+    /// aggregation (`PLAN.md` M8 Step 2, ADR-0009, `crate::admission::Gate`):
+    /// one record per `(category, 10s window)`, standing in for `count`
+    /// further rejections in that same category and window that were
+    /// suppressed rather than each getting their own line. `peer_addr` is
+    /// always `"-"` — under a spoofed-source flood, recording each
+    /// suppressed rejection's (attacker-controlled, likely forged) address
+    /// would be worthless and unbounded; the *first* rejection of the
+    /// window already recorded a real observed address via
+    /// `handshake_rejected` itself.
+    pub fn handshake_rejected_summary(category: &str, count: u32) -> Self {
+        Self {
+            ts: now_rfc3339(),
+            request_id: "-".to_string(),
+            principal: "-".to_string(),
+            action: "connect".to_string(),
+            resource: category.to_string(),
+            decision: Decision::Deny.as_str().to_string(),
+            rule: None,
+            auth_path: "-".to_string(),
+            peer_addr: "-".to_string(),
+            count: Some(count),
         }
     }
 
@@ -233,6 +276,48 @@ impl AuditRecord {
             rule: None,
             auth_path: auth_path_str(AuthPath::Pairing).to_string(),
             peer_addr: peer_addr.to_string(),
+            count: None,
+        }
+    }
+}
+
+/// Write whatever [`crate::admission::Gate::decide`] (a rejection) or
+/// [`crate::admission::Gate::flush_expired`] (a bounded-latency summary
+/// flush) handed back — 0, 1, or 2 records — logging the same
+/// `tracing::warn!` diagnostic the record itself carries and recording it
+/// through `audit`, warning (not failing the caller) if the write itself
+/// fails.
+///
+/// **The single definition** of this contract (`PLAN.md` M8 Step 2
+/// verification round, P1-1): `crate::server::Server::admit` and
+/// `crate::reverse::listen::Listen::admit` — the two internet-exposed
+/// accept loops — both call this instead of each keeping its own copy.
+/// Before the fix, the two copies were independently mutable: an
+/// adversarial mutation could delete one arm's audit-write entirely and
+/// nothing detected it (the other loop's tests, and the other loop's
+/// copy, were unaffected). Same fail-open-on-audit-failure exception as
+/// every other rejection path in this crate: the connection is already
+/// being rejected, so a failed enqueue changes only the diagnostic, never
+/// the outcome. The `tracing::warn!` follows the same suppression as the
+/// audit record itself — driven by the same (possibly empty) `records`
+/// list — so a throttled flood cannot flood stderr either.
+pub(crate) fn write_admission_audit(audit: &dyn AuditSink, records: &[AuditRecord]) {
+    for record in records {
+        if record.count.is_some() {
+            tracing::warn!(
+                category = %record.resource,
+                count = record.count,
+                "admission rejections aggregated in this window"
+            );
+        } else {
+            tracing::warn!(
+                peer = %record.peer_addr,
+                category = %record.resource,
+                "connection rejected by admission control"
+            );
+        }
+        if let Err(audit_err) = audit.record(record) {
+            tracing::warn!(%audit_err, "failed to record admission rejection");
         }
     }
 }

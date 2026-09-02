@@ -392,6 +392,14 @@ pub struct Server {
     /// `true` without an attached invite store on the trust-evaluator side
     /// too.
     pairing: OnceLock<PairingState>,
+    /// L2-L3 of the L0-L5 admission ordering (`PLAN.md` M8 Step 2,
+    /// `docs/adr/0009-admission-defenses.md`) — consulted by [`Self::run`]
+    /// before an `Incoming` ever reaches [`Self::accept_and_serve`].
+    /// Defaulted to `crate::config::ServeConfig`'s own defaults by
+    /// [`Server::new`]; production (`crate::serve::run_serve`) instead
+    /// builds one from the operator's actual config via
+    /// [`Server::with_admission`].
+    admission: crate::admission::Gate,
 }
 
 /// [`Server`]'s own write access to the trust store (to pin a
@@ -422,6 +430,33 @@ impl Server {
         sessions: Arc<dyn SessionBackend>,
         device_name: impl Into<String>,
     ) -> Arc<Self> {
+        let admission = crate::admission::Gate::new(
+            Arc::new(crate::broker::SystemClock),
+            crate::config::ServeConfig::DEFAULT_MAX_CONCURRENT_HANDSHAKES,
+            crate::config::ServeConfig::DEFAULT_HANDSHAKE_RATE_PER_SOURCE,
+        );
+        Self::with_admission(authorizer, audit, sessions, device_name, admission)
+    }
+
+    /// [`Server::new`] plus an explicit [`crate::admission::Gate`] —
+    /// `crate::serve::run_serve` uses this to build the gate from the
+    /// operator's actual `[serve].max_concurrent_handshakes`/
+    /// `handshake_rate_per_source` (`PLAN.md` M8 Step 2) instead of the
+    /// hardcoded defaults `Server::new` uses. A separate constructor
+    /// rather than a config-file parameter on `Server::new` itself: every
+    /// other call site (a dozen across `qsh-core`/`qsh-testkit`) has no
+    /// need for anything but the defaults, and adding an eleventh
+    /// positional parameter to `new` would just move the same `Arc::new(
+    /// SystemClock)`/`ServeConfig::DEFAULT_*` boilerplate into all of
+    /// them instead of the one production call site that actually varies
+    /// it.
+    pub fn with_admission(
+        authorizer: Arc<dyn Authorizer>,
+        audit: Arc<dyn AuditSink>,
+        sessions: Arc<dyn SessionBackend>,
+        device_name: impl Into<String>,
+        admission: crate::admission::Gate,
+    ) -> Arc<Self> {
         Arc::new(Self {
             authorizer,
             audit,
@@ -431,6 +466,7 @@ impl Server {
             remote_forwards: Mutex::new(HashMap::new()),
             draining: AtomicBool::new(false),
             pairing: OnceLock::new(),
+            admission,
         })
     }
 
@@ -1857,16 +1893,36 @@ impl Server {
         shutdown: impl std::future::Future<Output = ()>,
     ) {
         tokio::pin!(shutdown);
+        // Bounded-latency admission-audit flush (`PLAN.md` M8 Step 2
+        // verification round, P1-3/F1): a flood that stops still gets its
+        // last (possibly partial) aggregation window's summary within one
+        // more tick, instead of only ever flushing lazily on the *next*
+        // rejection — which, once the flood truly ends, may be never.
+        // `MissedTickBehavior::Delay` (not `Burst`): if this loop is ever
+        // busy long enough to miss a tick, catching up with a burst of
+        // ticks would only replay `flush_expired` against a `now` that has
+        // already moved past every window it could still meaningfully
+        // close — a single delayed tick is strictly better here.
+        let mut audit_flush = tokio::time::interval(crate::admission::AUDIT_AGGREGATION_WINDOW);
+        audit_flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
                 _ = &mut shutdown => break,
                 incoming = listener.accept() => {
                     let Some(incoming) = incoming else { break };
-                    let server = self.clone();
-                    tokio::spawn(async move { server.accept_and_serve(incoming, |_| {}).await });
+                    self.clone().admit(incoming);
+                }
+                _ = audit_flush.tick() => {
+                    let records = self.admission.flush_expired(self.admission.now());
+                    crate::audit::write_admission_audit(self.audit.as_ref(), &records);
                 }
             }
         }
+        // One more flush on the way out — a shutdown that lands mid-window
+        // must not strand that window's summary forever (nothing will ever
+        // tick this interval again after this function returns).
+        let records = self.admission.flush_expired(self.admission.now());
+        crate::audit::write_admission_audit(self.audit.as_ref(), &records);
         // SIGTERM graceful drain (CLI.md §6.12, ADR-0003) runs *before* the
         // listener closes: closing it first would sever every control
         // stream — including the ones carrying `session.closed` to an
@@ -1876,22 +1932,85 @@ impl Server {
         listener.endpoint().wait_idle().await;
     }
 
+    /// L2-L4 of the L0-L5 admission ordering (`PLAN.md` M8 Step 2,
+    /// `docs/adr/0009-admission-defenses.md`): consult [`Self::admission`]
+    /// synchronously (`crate::admission::Gate::decide` never awaits) and
+    /// dispatch the `Incoming` accordingly, *before* spawning anything.
+    /// A rejected attempt (`Retry`/`Ignore`/`Refuse`) is therefore
+    /// resolved — and its slab slot freed — without ever costing a task;
+    /// only an admitted attempt is handed to a spawned
+    /// [`Self::accept_and_serve_permitted`], so the (potentially slow) TLS
+    /// handshake runs off this accept loop.
+    fn admit(self: Arc<Self>, incoming: Incoming) {
+        let peer = incoming.remote_address();
+        let validated = incoming.remote_address_validated();
+        let now = self.admission.now();
+        match self.admission.decide(peer, validated, now) {
+            crate::admission::Decision::Retry => {
+                if let Err(returned) = incoming.retry() {
+                    // Should be unreachable — `decide` only returns
+                    // `Retry` when `!validated`, and quinn's own contract
+                    // (`qsh_transport::endpoint`'s
+                    // `retry_on_validated_incoming_errs`) guarantees an
+                    // unvalidated `Incoming` may always retry. Fail safe
+                    // rather than loop: drop the attempt with no state
+                    // left behind.
+                    returned.ignore();
+                }
+            }
+            crate::admission::Decision::Ignore(_, records) => {
+                crate::audit::write_admission_audit(self.audit.as_ref(), &records);
+                incoming.ignore();
+            }
+            crate::admission::Decision::Refuse(_, records) => {
+                crate::audit::write_admission_audit(self.audit.as_ref(), &records);
+                incoming.refuse();
+            }
+            crate::admission::Decision::Admit(permit) => {
+                tokio::spawn(async move {
+                    self.accept_and_serve_permitted(incoming, |_| {}, Some(permit))
+                        .await;
+                });
+            }
+        }
+    }
+
     /// Accept one inbound connection and drive it: run the handshake, audit
     /// a rejection with its category, then serve the verified connection.
     /// `on_accept` observes that connection after verification and before it
     /// is served.
     ///
-    /// [`run`](Self::run) is this plus the accept loop. It is a public seam
-    /// so an alternative accept loop — `qsh-testkit`'s L4 chaos harness runs
-    /// one, to watch the host-side peer address across a migration — reuses
-    /// the rejection/audit path instead of copying it.
+    /// [`run`](Self::run) reaches this only through [`Self::admit`], which
+    /// already consulted [`Self::admission`] and is holding the resulting
+    /// handshake permit. It is still a public seam with no permit
+    /// (`accept_and_serve`, below) so an alternative accept loop —
+    /// `qsh-testkit`'s L4 chaos harness runs one, to watch the host-side
+    /// peer address across a migration — reuses the rejection/audit path
+    /// instead of copying it, without needing a `Gate` of its own.
     pub async fn accept_and_serve(
         self: Arc<Self>,
         incoming: Incoming,
         on_accept: impl FnOnce(&Connection),
     ) {
+        self.accept_and_serve_permitted(incoming, on_accept, None)
+            .await;
+    }
+
+    /// [`Self::accept_and_serve`] plus an optional handshake permit,
+    /// dropped the instant [`qsh_transport::Incoming::accept`] resolves —
+    /// success or failure — and strictly before [`Self::serve_connection`]
+    /// runs (`crate::admission::Decision::Admit`'s own doc: a handshake
+    /// slot must never outlive the handshake itself).
+    async fn accept_and_serve_permitted(
+        self: Arc<Self>,
+        incoming: Incoming,
+        on_accept: impl FnOnce(&Connection),
+        permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    ) {
         let peer = incoming.remote_address();
-        match incoming.accept().await {
+        let result = incoming.accept().await;
+        drop(permit);
+        match result {
             Ok(conn) => {
                 on_accept(&conn);
                 self.serve_connection(conn).await;

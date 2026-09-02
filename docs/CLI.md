@@ -770,6 +770,19 @@ qsh serve --bind <ip:port>
 - listener 재시작 시 세션 소실에 대해서는 README의 [Known limitations](../README.md#known-limitations-mvp-by-design)를 참고한다.
 - **SIGTERM drain(M2, ADR-0003):** 신규 attach·open을 거부한 뒤 모든 세션에 §6.7의 close 절차(SIGHUP→TERM→KILL, `close_grace_ms`)를 적용하고, 붙어 있는 소비자에게 `session.closed{reason: "closed"}`(§6.4)를 보낸 다음 종료한다 — 세션은 프로세스와 함께 끝나며 고아 셸을 남기지 않는다.
 - **정책 파일 진단(M5).** 시작 시 `acl.toml`을 1회 읽는다(hot reload 없음). 파일이 없거나 파싱에 실패해도 프로세스는 뜨고 bind하지만, 그 상태에서 도달하는 모든 인가 판정은 항상 `deny`이고 어떤 리소스(세션·터널·등록)도 생성되지 않는다(`docs/design/architecture.md` §6, `PLAN.md` M5 §4.1 #1). 운영자에게는 stderr에 `no usable acl.toml policy`, `every request is denied until this is fixed`, 파일 경로, `CONFIG_ERROR` 코드, 복사해 붙일 수 있는 최소 정책 예시(이 머신에 실제로 pin된 peer 이름을 채운), `acl.toml is never auto-generated — create it by hand`, `verify a fix before restarting: qsh acl check`를 담은 진단을 한 번 출력한다 — 진단의 `code` 필드는 `acl_policy_missing`(파일 부재)과 `acl_policy_invalid`(파싱·검증 실패) 두 code word로 두 원인을 구분한다 — core(`crates/qsh-core/src/acl/load.rs`의 `StartupDiagnostic::render`)가 조립한 완성 문자열을 CLI가 그대로 stderr에 쓰는 평문 블록이다(tracing JSON 라인이 아니다). §6.13이 인용하는 `qsh-core::doctor::CONTROLLER_UNREACHABLE`과 공통점은 딱 하나다 — 문안 정본은 core에 있고 CLI는 인가 로직 0줄로 출력만 한다는 것. `doctor::Diagnostic`에는 `render()`가 없어 CLI가 `message`/`remedy` 두 필드를 직접 조립해 쓴다는 점에서 조립 방식 자체는 다르다. 정책 파일의 원본 소스 라인은 절대 덤프하지 않는다 — 유일한 echo는 문제 rule의 문법 토큰(≤128바이트, 한 줄 이스케이프) 3종(unknown action/auth_path/scope)뿐이다. `acl.toml`을 자동으로 만들지는 않는다(§4.1 #1 (b): interim allow-all-pinned 경계를 파일로 영구화하는 것은 의도치 않은 권한 확대다). 재시작 전 정책을 검증하려면 §6.15의 `qsh acl check`를 쓴다.
+- **Admission 상한(M8).** 주소 검증되지 않은 Initial은 항상 `Retry`로 되돌려 보낸다(스푸핑 1패킷당
+  상태 생성 차단) — 정상 클라이언트는 새 연결마다 왕복 1회를 더 지불하며, migration은 영향이 없다.
+  `[serve].max_concurrent_handshakes`(기본 64)는 동시에 진행 중인 handshake 수의 상한이고,
+  `[serve].handshake_rate_per_source`(기본 10/초)는 주소 미검증 Initial의 source당 속도 상한이다
+  (키: IPv4 /32, IPv6 /64) — 2초 window에서 지속 10/초까지는 항상 통과하고, window 하나 안에
+  몰린 순간 burst는 최대 20건까지 받아준 뒤 그 이상을 무시한다. 두 값 모두 `0`은 "무제한"이 아니라
+  "기본값"이며, 방어선을 끄는 설정은 없다. 상한 초과는 자원 생성 전 거부이고, 클라이언트에게는
+  `CONNECTION_FAILED`(retryable)로 보인다 — handshake도, 세션도, task도 만들어지지 않는다.
+- 거부는 audit에 구조적으로만 남는다: `action="connect"`, `resource`는 `"rate_limited"` 또는
+  `"at_capacity"`, `principal`/`auth_path`는 `"-"`. `rate_limited`의 첫 행에 실리는 `peer_addr`는
+  주소 검증 이전에 관측된 값이라 스푸핑 가능하다 — 상관관계 확인용일 뿐 발신자 증명은 아니다.
+  `Retry` 발급 자체는 audit하지 않으며, 창(10초)당 category별 1행 + 요약 1행으로 집계된다 — flood가
+  audit flood가 되지 않는다.
 
 ### 6.13 장기 실행 모드: `qsh listen` / `qsh reverse`
 
