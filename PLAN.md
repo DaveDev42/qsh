@@ -2,6 +2,8 @@
 
 M6 마감(2026-08-31, ROADMAP M6 마감 노트)과 함께 이 문서는 M7 실행 계획으로 전면 교체됐다. 구속 근거: `docs/ROADMAP.md` M7 절(범위·감사 개정 ①②③·DoD), `docs/PRD.md` §6·§11·§15(SC1/SC2), `docs/adr/0002-pairing-invite-code.md`, `docs/design/architecture.md` §2(trust 이중 모드)·§7(`hosts.toml`). 이 계획과 ROADMAP.md의 편집은 main 세션 전용이다.
 
+> **2026-09-02 — M8 선행 착수 (문서 순서 예외).** §5.7은 M7 마감 시점에 이 파일을 M8 계획으로 전면 교체하라고 정한다. 그런데 M7의 잔여는 코드가 아니라 사람이 실행해야 하는 두 항목(DoD 1 스톱워치 3회, SC7 예약)뿐이고, M8의 fuzz DoD는 "parser 타깃당 누적 ≥72 fuzz-hours"라 벽시계 시간이 걸린다. 그 시계를 M7 마감까지 세워두면 리드타임을 두 번 잃는다. 그래서 M7 본문(§1–§5)은 감사 기록으로 그대로 두고 M8 계획을 §6으로 병기한다. 전면 교체는 M7 마감 커밋에서 §1–§5를 삭제하고 §6을 승격하는 것으로 수행한다.
+
 ## 1. DoD 체크리스트 (ROADMAP M7)
 
 - [ ] **DoD 1 — 스톱워치 테스트**: 한 번도 설정한 적 없는 두 장비가 README만 보고 `qsh user@host`까지 5분 이내, 독립 3회 측정·기록 (SC1/SC2, 캠페인 문서 사전 정의). **미실행 — 사람이 해야 한다.** 기준은 `docs/campaigns/m7-stopwatch.md`에 사전 고정됐고 예행 1회를 마쳤으며 회차 환경은 `scripts/stopwatch/round.sh`가 준비하지만, 재는 대상이 사람 시간이라(같은 문서 §9) 에이전트가 대신 수행하면 그 문서가 이미 기각한 과소측정을 재생산할 뿐이다.
@@ -339,3 +341,123 @@ naive 1.25가 예측 1.00보다 큰 것은 baseline 12스레드가 **공유 런�
 5. `docs/ROADMAP.md` "현재 위치"·M7 절 갱신 + 마감 노트.
 6. **SC7 외부 보안 리뷰 예약 재확인** — 계속 미완이면 M8 착수 전 운영자 에스컬레이션 필수(리드타임 조건이 이번 마일스톤으로 사실상 만료).
 7. 이 PLAN.md를 M8 계획으로 전면 교체(§3의 P1 재기록 항목 이관 포함).
+
+---
+
+## 6. M8 — Hardening (선행 착수분)
+
+구속 근거: `docs/ROADMAP.md` M8 절(범위·감사 개정 ①②③④·DoD·적대적 부하 하네스), §3 유예 가드레일 표의 M8 소유 행, §4 리스크 1·4·5, `docs/design/protocol.md` §7(터널 무상한 갭)·§15, `docs/PRD.md` SC3/SC7. M7과 마찬가지로 이 절의 편집은 main 세션 전용이다.
+
+### 6.0 착수 전 에스컬레이션 — SC7 (§5.6이 요구한 액션)
+
+§5.6은 "SC7이 계속 미완이면 M8 착수 전 운영자 에스컬레이션 필수"라고 정했고, M8을 여는 지금이 그 시점이다. 상태를 있는 그대로 적는다.
+
+- **외부 보안 리뷰 예약은 M5→M6→M7 3연속 미완**이다. 저장소 안에서 완결할 수 없는 조직 액션이라 에이전트가 대신할 수 없다.
+- 조건은 ROADMAP §4 리스크 5: 리뷰 시작 ~6주 전에 wire format을 freeze한다. **지금 예약해도 freeze는 이미 리뷰 일정을 밀어내는 쪽**이다 — 리드타임이 남아 있지 않다.
+- 결과적으로 남는 선택지는 둘뿐이다. (가) 지금 예약하고 wire freeze(6.7)를 예약일 기준 6주 전으로 앞당긴다. (나) 예약 없이 freeze만 진행하고 리뷰를 M9로 미룬다 — 이 경우 SC7은 릴리스 게이트에서 빠지므로 PRD 개정이 따라야 한다.
+- **판단은 운영자 몫**이고 코드 작업으로 대체되지 않는다. 이 항목이 미해결인 채로 6.7(wire freeze)을 넘기지 않는다.
+
+### 6.1 DoD 체크리스트 (ROADMAP M8)
+
+- [ ] **DoD 1 — fuzz**: parser 타깃당 누적 ≥72 fuzz-hours 무crash.
+- [ ] **DoD 2 — soak**: 24h/100-session에서 idle listener ≤30MB, 세션당 buffer ≤8MB, fd 무증가.
+- [ ] **DoD 3 — 실기기 mobility**: Wi-Fi↔테더링 ≥60회(macOS+Linux) 자동 유지+resume ≥95%, migrated/resumed 분해 보고. 통과 기준은 사전 정의(idle timeout에 기대지 않는 2초 내 재dial). **사람이 실행한다.**
+- [ ] **DoD 4 — wire freeze 후 독립 리뷰 계약** (SC7 — 6.0 참조).
+- [ ] **DoD 5 (감사 개정) — 적대적 부하 하네스**: 스푸핑 Initial flood·대량 연결·principal당 세션 폭주 각각에서 선언된 상한이 실제로 강제되고, 부하 중·후 idle listener RSS/fd가 soak과 같은 bound를 지키며, 기존 세션의 PTY echo가 살아 있음.
+
+### 6.2 실행 단계 (PR 단위)
+
+#### Step 1 — fuzz 인프라: 타깃 + corpus + CI smoke
+
+`crates/qsh-proto`가 CLAUDE.md가 지목한 fuzz 표면이다. DoD 1이 벽시계 시간을 요구하므로 M8에서 가장 먼저 세운다.
+
+- 제약: `rust-toolchain.toml`이 stable 1.97.1로 고정돼 있고 cargo-fuzz는 nightly가 필요하다. `fuzz/`를 워크스페이스 **밖**(자체 빈 `[workspace]` 테이블)에 두어 기존 게이트 6종을 건드리지 않는다. `xtask arch`는 워크스페이스 멤버만 순회하므로 영향이 없다 — 추론이 아니라 실행으로 확인한다.
+- 타깃 단위는 **파서 표면 단위**다. DoD가 "타깃당" 시간을 세므로 타깃 집합 자체가 계약이다.
+- corpus seed는 기존 테스트·fixture의 실제 값에서 뽑는다.
+- CI는 결정적인 `-runs=` 고정 횟수 smoke만 돌린다. 72시간 누적은 CI가 아니라 6.3의 별도 실행이다.
+- 완료 기준: 전 타깃 build+run, libFuzzer 커버리지 카운터가 seed 이상으로 움직임, 게이트 6종 불변.
+
+**(a)-추기 — Step 1 착륙 판정 (2026-09-02).**
+
+착륙물: `fuzz/`(워크스페이스 밖, 자체 빈 `[workspace]`) 타깃 16종 + curated seed 110 파일 + `.github/workflows/fuzz-smoke.yml` + `fuzz/README.md`. 타깃 구성 — 바이트 디코더 8(`frame_decoder` 상태 기계, `decode_control`·`hello`·`exec_frame`·`session_frame`·`stream_header`·`connect_result`, `decode_local_hello`·`local_admin_request`), 문자열 파서 5(`parse_invite_code`·`parse_forward_spec`·`fingerprint_principal`·`valid_host_name`·`valid_forward_id`), 술어 1(`sanitize_peer_text`), JSON 1(`json_request_types` — MCP `arguments`→`types::*Req` 12종, selector byte). `cargo metadata`로 워크스페이스 비멤버 확인, `xtask arch` OK — 추론이 아니라 실행 결과다.
+
+1라운드 조사(3분할, 후보 26개) → 구축(14 타깃) → 검증 2건 병렬. 실행 검증은 14 타깃 전부를 빈 corpus에서 50k runs 돌려 cov 0→N(최소 38, 최대 902)을 확인했고 dud 0. 적대적 리뷰 6항목 중 채택 4: ① `ConnectResult` 디코더 누락(`tunnel/local.rs:518`, `-L` dial 응답을 티켓 없이 wire에서 바로 읽는 유일한 스트림) → 타깃 추가. ② MCP 인자 JSON 역직렬화 미커버(`mcp/mod.rs:411`) — 구축 에이전트가 "JSON은 in-repo 파스 지점 없음"이라 제외했는데 그 근거가 이 경로엔 안 맞았다 → 타깃 추가, `SessionAttachReq`는 MCP 라우팅이 없어 제외(grep으로 확인). ③ corpus 정책 — 측정 실행이 체크인 디렉터리에 2,498개 SHA1-이름 파일을 써넣어 8.3 MB로 불었고 README는 "grown corpus를 유지하라"는 반대 정책을 적고 있었다. 판정: **체크인은 curated seed만, 장기 실행은 쓰기용 grown dir을 첫 인자로**(libFuzzer는 첫 corpus dir에 쓴다) → 2,498개 삭제, README 정책 재작성, 72h 레시피의 하드코딩 14-이름 루프를 `$(cargo fuzz list)`로. ④ CI matrix 14-leg가 같은 크레이트를 14번 sanitizer 빌드하고 타깃 추가 시 조용히 누락 → 단일 job + `cargo fuzz list` 루프 + 실패 수집 후 non-zero exit. 리뷰의 "구축 보고가 corpus 리셋을 거짓 주장" 지적은 병렬 검증의 경쟁 산물(실행 검증 에이전트가 자기 run으로 다시 불렸다고 스스로 보고)이라 사실 판정은 기각, 정책 결정은 그대로 채택. false target·input mapping 지적 0건.
+
+2라운드 검증: 신규 2 타깃 빈 corpus 50k runs cov 0→269 / 0→826, selector 12종을 `mcp/mod.rs` `tool::<…Req>()` 등록과 교차 대조해 일치, `actionlint` 통과, corpus 110 파일·40-hex 이름 0개, 게이트 6종 green(nextest 1342 불변).
+
+main 세션 독립 검증: `frame_decoder`(바이트 보존 단언이 `HEADER_LEN`=4와 일치, `Err` 후 조기 반환은 "oversize 헤더 이후 복구 불가" 계약과 정합, payload 선할당은 명시 단언 대신 rss 상한이 담당)·`fingerprint_principal`·신규 2건을 직접 읽음. 변이 검사 2건 — **MUT-F1** `next_frame`에 `len == 0x1337` panic 주입 → `frame_decoder`가 120 s 캡 안에 검출, 아티팩트 오프셋 6에 `00 00 13 37`(seed에 없는 값을 변이로 합성 — 타깃이 파서에 닿는다는 실증). **MUT-F2** `sanitize_peer_text`에 `ESC [` panic 주입 → `decode_connect_result`가 즉시 검출, 단 아티팩트가 ANSI seed 그 자체라 seed-hit(crash 표면화 경로의 증명이지 탐색력의 증명은 아님). 두 파일 모두 cp 백업과 바이트 동일 복원, `crates/` diff 0줄.
+
+의도적 미커버(기록): `SessionEvent`·`ErrorCode`의 JSON `Deserialize` — 워크스페이스 안에 비테스트 파스 지점이 없다(직접 grep 확인). `resume.rs:375-408`의 salvage JSON 파서 — 로컬 파일이고 qsh-proto 밖이라 이번 타깃 집합 밖, 단 fuzz가 결함을 잘 찾는 모양의 코드라 Step 5(soak)에서 재검토.
+
+미검증: Windows cross-check(G6)는 로컬 macOS에서 통과했으나 fuzz는 워크스페이스 밖이라 영향 경로가 없고, CI Windows leg가 최종 확인.
+
+다음: 이 커밋을 push한 뒤 fuzz 호스트(Dave-Windows-WSL, 8 vCPU / 31 GB, cargo-fuzz 0.13.2 설치 완료)에 clone하고 72 h 시계를 돌린다. 16 타깃 × 72 h를 8 코어로 돌리면 2 배치 = 최소 144 h 벽시계.
+
+#### Step 2 — 적대적 부하 방어선 ①②: 주소 검증 + accept 상한
+
+감사 개정 ①②. 인터넷에 직접 노출되는 데몬에 현재 방어선이 없다.
+
+- `Incoming::retry()` 주소 검증 — 스푸핑 Initial 1패킷당 상태 생성 차단.
+- accept 동시성 상한 + source rate limit.
+- 초과는 거부이며 **자원 생성 전에** 결정한다(CLAUDE.md: 인가 성공 전 자원 생성 금지와 같은 규율).
+
+#### Step 3 — 적대적 부하 방어선 ③: 세션·터널 쿼터
+
+- `[serve].max_sessions`, principal별 세션 쿼터.
+- **터널 전용 할당량** — principal별·forward별 동시 `TCP_CONNECT` 스트림 수, remote-forward listener 개수 상한. `docs/design/protocol.md` §7이 명시하고 M4·M5 어느 쪽도 만들지 않은 무상한 갭을 여기서 인수한다.
+- 초과는 `RESOURCE_EXHAUSTED`(CLI.md §3.3 기정의 어휘 — 새 코드를 만들지 않는다).
+
+#### Step 4 — 적대적 부하 하네스 (DoD 5) + audit 수명주기 부하 검증
+
+협조적 soak과 **별도 게이트**다. 감사 개정 ④의 연쇄(스푸핑 flood → 세션 없는 audit 쓰기 → 디스크 만실 → resume 실패)가 차단되는지를 본다. Step 2·3이 선언한 상한이 실제로 강제되는지를 이 하네스가 판정한다.
+
+#### Step 5 — 24h/100-session soak + fd/메모리 게이트 (DoD 2)
+
+M7 이월 부채가 여기서 만난다: bounded pull executor 부재(측정된 512 천장), pull당 fd 선형 증가, 고아 `.tmp{pid}-{N}` 미청소. soak이 이것들을 드러내는 자리다.
+
+#### Step 6 — wire freeze 선행 정리
+
+freeze 이후에는 고칠 수 없는 것들을 먼저 처리한다.
+
+- handshake matrix에 **ALPN 불일치** 케이스 추가 — "application 상태 생성 전 실패" 불변식을 의존성 상속이 아니라 테스트로 고정한다.
+- device 개인키 프로세스 상주 사본에 `Zeroizing`.
+- TUI 펌프 스레드 spawn 실패 panic 제거.
+- pairing device_name 길이 상한(현재 `CONTROL_FRAME_MAX` 256 KiB로만 묶임)과 Unicode bidi-override·homoglyph 스푸핑 — `docs/design/protocol.md` §15.5가 M8 백로그로 기록한 2건.
+
+#### Step 7 — wire format freeze + threat model + OSS-Fuzz 제출
+
+6.0의 SC7 판단이 선행 조건이다. freeze 문면은 `docs/design/protocol.md`에 박고, threat model은 새 문서로 낸다.
+
+#### Step 8 — perf 게이트
+
+#### Step 9 — 실기기 mobility 캠페인 ≥60회 (DoD 3, 사람 몫)
+
+M2가 20회를 조기 측정해 SC4/SC5를 실기기로 확인했고 SC3 판정을 N≥60으로 미뤄뒀다. M2 기록의 이월 1건 — 예산 내 복구 1/10의 지배 요인이 Tailscale underlay 재경로(~4–5 s)였고 qsh 자체 resume은 233–1076 ms — 를 이 캠페인이 분해 보고로 갈라야 한다.
+
+#### Step 10 — 마감
+
+### 6.3 실행 환경
+
+72시간 fuzz 누적과 24h soak은 heavy compute다. 로컬 개발 머신이 아니라 전용 호스트에서 돌린다(전역 지침의 머신 라우팅). 캠페인 기록은 M2·M6·M7 선례대로 `docs/campaigns/`에 사전 정의 후 실행한다.
+
+### 6.4 M7에서 이월된 항목
+
+| # | 항목 | 소유 step |
+|---|---|---|
+| i | bounded pull executor + `RESOURCE_EXHAUSTED` (측정된 512 천장) | Step 3·5 |
+| ii | `Ops::exec`(`ops/exec.rs:81`) 호출당 `new_multi_thread()` 런타임 | Step 5 |
+| iii | pull당 fd 선형 증가 | Step 5 |
+| iv | 고아 `.tmp{pid}-{N}` 청소 부재 | Step 5 |
+| v | `qsh trust add dave@box --address …` 오도 제안 | Step 6 |
+| vi | trust store read-modify-write 잠금 부재 | Step 6 |
+| vii | invites.toml CLI/데몬 lock-free 창 | Step 6 |
+| viii | device_name 길이 상한 + Unicode bidi/homoglyph 스푸핑 | Step 6 |
+| ix | forward-route live carrier·`-R` 자동 재발행 (ROADMAP §3 표가 M8 소유로 등재) | Step 3 |
+| x | `ControlLink`/`DataLink` enum → trait 전환 (ADR-0005 P0 부채, M3→M7 연쇄 이월) | P1 재기록 — M8도 트리거하지 않음 |
+
+### 6.5 리스크
+
+- **SC7 리드타임은 이미 만료**다(6.0). wire freeze 일정이 조직 액션에 묶여 있다.
+- **DoD 1·2·3은 전부 벽시계**다. 압축되지 않으므로 순서가 곧 일정이다 — Step 1을 가장 먼저 세운 이유.
+- **graceful re-exec(fd 보존 handoff)** 는 ROADMAP §4 리스크 4가 M8 stretch로 비용 산정만 요구한다. 구현은 범위 밖.
+- **notarization은 M9가 아니라 M8 중 시작**(ROADMAP M9 크기 주석). 리드타임 항목이라 6.0과 같은 성질이다.

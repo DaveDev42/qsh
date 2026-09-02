@@ -1,0 +1,2 @@
+
+{"host":"host-alias","mode":"local","listen_port":8080,"forward_host":"127.0.0.1","forward_port":80}
