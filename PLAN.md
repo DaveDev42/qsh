@@ -455,6 +455,8 @@ pin 라운드(sonnet). 단위 1건 `gate_record_rejection_and_flush_expired_both
 
 main 세션 검토. 두 루프 배선(`accept()` 단일 await의 취소 안전성, `select!` 브랜치 셋, 종료 시 flush→drain→close→wait_idle), `WindowState` 로직(mutex 아래 `.await` 없음), `server_config`, 하네스 `start_with_admission` 두 벌을 직접 읽었다. 독립 변이 스팟체크 2건(X3: `drop(permit)`을 `serve_connection` 뒤로 / N6-Listen: `Listen::run` 종료 flush 삭제) — 둘 다 변이 상태에서 FAIL(`admission.rs:621`·`:764` 단언), `cp` 원복 뒤 PASS, 트리는 `mut4` 백업과 `cmp` 일치. ADR-0009는 `docs/adr/0009-admission-defenses.md`에 배치하고 README 색인에 추가했다(초안은 humanize-korean light 경로로 다듬음 — 볼드 48→16, 코드 식별자·수치 무변경). 최종 게이트 6종 green, nextest 1370 passed / 2 skipped(1366→1370, pin 4건). 커밋 후 CI green이 Step 2 마감이다.
 
+CI 마감(`1b34912`): CI run 33667720455 success, fuzz-smoke run 33667720360 success(2026-09-03). Step 2 Done.
+
 #### Step 3 — 적대적 부하 방어선 ③: 세션·터널 쿼터
 
 - `[serve].max_sessions`, principal별 세션 쿼터.
@@ -518,4 +520,4 @@ M2가 20회를 조기 측정해 SC4/SC5를 실기기로 확인했고 SC3 판정�
 - **DoD 1·2·3은 전부 벽시계**다. 압축되지 않으므로 순서가 곧 일정이다 — Step 1을 가장 먼저 세운 이유.
 - **graceful re-exec(fd 보존 handoff)** 는 ROADMAP §4 리스크 4가 M8 stretch로 비용 산정만 요구한다. 구현은 범위 밖.
 - **notarization은 M9가 아니라 M8 중 시작**(ROADMAP M9 크기 주석). 리드타임 항목이라 6.0과 같은 성질이다.
-- **CI flake (2026-09-02, run 33601809635, docs-only 커밋 `b0da849`)** — `qsh-cli::attach_ops::a_teardown_waits_out_a_detach_that_is_still_flushing`이 `ubuntu-24.04-arm` leg에서만 `left: Applied, right: Unconfirmed`로 실패, 재실행 통과. 테스트는 host를 SIGSTOP한 뒤 detach flush가 ack를 못 받아 `Unconfirmed`이길 기대하는데, 빠른 러너에서는 SIGSTOP 전에 이미 쓴 바이트의 ack가 도착해 `Applied`가 된다 — 제품 결함이 아니라 테스트의 순서 가정(정지 → 쓰기가 아니라 쓰기 → 정지). Step 2 착륙 후 별도 소커밋으로 결정론화(ack가 불가능한 상태를 먼저 만들고 나서 쓰기).
+- **CI flake (2026-09-02, run 33601809635, docs-only 커밋 `b0da849`)** — `qsh-cli::attach_ops::a_teardown_waits_out_a_detach_that_is_still_flushing`이 `ubuntu-24.04-arm` leg에서만 `left: Applied, right: Unconfirmed`로 실패, 재실행 통과. 테스트는 host를 SIGSTOP한 뒤 detach flush가 ack를 못 받아 `Unconfirmed`이길 기대하는데, 빠른 러너에서는 SIGSTOP 전에 이미 쓴 바이트의 ack가 도착해 `Applied`가 된다 — 제품 결함이 아니라 테스트의 순서 가정(정지 → 쓰기가 아니라 쓰기 → 정지). Step 2 착륙 후 별도 소커밋으로 결정론화(ack가 불가능한 상태를 먼저 만들고 나서 쓰기). **해결(2026-09-03)**: 다시 보니 테스트는 이미 정지 → 쓰기 순서였다. 진짜 원인은 SIGSTOP의 비동기성 — `kill`은 신호를 큐에 넣고 바로 돌아오고, 멀티스레드 대상은 한 스레드가 신호를 꺼내 group stop을 실행하기 전까지 나머지 스레드(QUIC 소켓을 돌리는 tokio 워커)가 계속 돈다. 그 틈에 host가 "two\n"을 ack하면 `Applied`. 테스트는 `waitpid(host, WUNTRACED)`로 스레드 그룹 전체가 멈춘 것을 커널이 보고한 뒤에 쓴다(직접 자식이고 그 구간에 다른 reaper 없음 확인). 로컬 20/20.

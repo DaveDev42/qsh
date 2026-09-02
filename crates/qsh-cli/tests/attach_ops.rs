@@ -296,6 +296,20 @@ fn detaching_leaves_the_session_running_and_re_attachable() {
 /// at once (ubuntu-24.04-arm CI, 2026-08-24). Both are correct detaches;
 /// only the ordering separates a teardown that waited from one that cut
 /// a flush short.
+///
+/// `kill(host, SIGSTOP)` only queues the signal; it does not wait for the
+/// host to actually stop. For a multi-threaded target, Linux wakes a
+/// single thread to dequeue the signal, and the rest of the group — here,
+/// the tokio workers still servicing the QUIC socket — keep running in
+/// user space until that thread executes the group stop and kicks them.
+/// On a loaded runner that window can be wide enough for the host to
+/// receive and ack `"two\n"` before it has actually stopped, which is
+/// indistinguishable from a normal flush and reports `Applied` instead of
+/// `Unconfirmed` (ubuntu-24.04-arm CI run 33601809635, 2026-09-02). The
+/// scenario below closes that window by waiting on `waitpid(host,
+/// WUNTRACED)` — which the kernel only satisfies once the whole thread
+/// group has stopped, and which does not reap the child — before writing
+/// `"two\n"`.
 #[test]
 fn a_teardown_waits_out_a_detach_that_is_still_flushing() {
     let fleet = Fleet::start();
@@ -316,8 +330,21 @@ fn a_teardown_waits_out_a_detach_that_is_still_flushing() {
         read_until(&mut stream, "ECHO:one");
 
         // From here the host answers nothing at all, so the detach below
-        // cannot finish on its own.
+        // cannot finish on its own. `SIGSTOP` only queues the signal — the
+        // host's thread group does not necessarily stop before the next
+        // line runs (see the doc comment above), so wait for the kernel to
+        // report the whole group actually stopped before writing "two\n".
+        // `fleet.serve` is a direct child of this test process
+        // (`ServeGuard::spawn`, `crates/qsh-cli/tests/common/mod.rs`) and
+        // nothing else waits on it while this scenario runs, so this
+        // `waitpid` cannot race another reaper for the same pid.
         nix::sys::signal::kill(host, nix::sys::signal::Signal::SIGSTOP).expect("stop the host");
+        match nix::sys::wait::waitpid(host, Some(nix::sys::wait::WaitPidFlag::WUNTRACED))
+            .expect("wait for the host to report itself stopped")
+        {
+            nix::sys::wait::WaitStatus::Stopped(_, nix::sys::signal::Signal::SIGSTOP) => {}
+            other => panic!("expected the host to report SIGSTOP, got {other:?}"),
+        }
         stream
             .write(b"two\n".to_vec())
             .expect("write before the detach");
