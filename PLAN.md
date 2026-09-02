@@ -389,9 +389,11 @@ main 세션 독립 검증: `frame_decoder`(바이트 보존 단언이 `HEADER_LE
 
 의도적 미커버(기록): `SessionEvent`·`ErrorCode`의 JSON `Deserialize` — 워크스페이스 안에 비테스트 파스 지점이 없다(직접 grep 확인). `resume.rs:375-408`의 salvage JSON 파서 — 로컬 파일이고 qsh-proto 밖이라 이번 타깃 집합 밖, 단 fuzz가 결함을 잘 찾는 모양의 코드라 Step 5(soak)에서 재검토.
 
-미검증: Windows cross-check(G6)는 로컬 macOS에서 통과했으나 fuzz는 워크스페이스 밖이라 영향 경로가 없고, CI Windows leg가 최종 확인.
+CI 마감(`d87e76b`): CI run 33601462030 11 job 전부 success(`test (windows-latest)` 포함 — 로컬에서 미검증으로 남긴 G6를 CI가 확인), fuzz-smoke run 33601462001 success, step 로그에서 16 타깃 전부 `Done 4096 runs`, crash/`SUMMARY:` 0건. **Step 1 마감.**
 
 다음: 이 커밋을 push한 뒤 fuzz 호스트(Dave-Windows-WSL, 8 vCPU / 31 GB, cargo-fuzz 0.13.2 설치 완료)에 clone하고 72 h 시계를 돌린다. 16 타깃 × 72 h를 8 코어로 돌리면 2 배치 = 최소 144 h 벽시계.
+
+**72 h 시계 시작 기록.** 커밋 `d87e76b`, 호스트 Dave-Windows-WSL, run-id `m8-fuzz-20260902-1600`, 시작 2026-09-02T16:01:37+09:00, 16 타깃을 8 워커로 2 배치(`-max_total_time=259200 -rss_limit_mb=1536`, grown corpus는 `~/fuzz/grown/<t>`를 첫 인자로 두어 체크인 seed는 읽기 전용). 1차 배치 종료 예정 09-05 16:01, 2차 배치 종료 예정 09-08 16:01 이후. 기동 직후 실측: `decode_control` 7.1M execs / 170k exec/s / cov 1873 / RSS 541 MB, load 6.2, 가용 메모리 16 GB. 로그·exit 코드는 호스트 `~/fuzz/logs/m8-fuzz-20260902-1600/`. DoD 1 판정은 `exits.txt`의 16행 전부 `exit=0`이고 어떤 로그에도 `SUMMARY:`/`deadly signal`/`Test unit written`이 없을 때.
 
 #### Step 2 — 적대적 부하 방어선 ①②: 주소 검증 + accept 상한
 
