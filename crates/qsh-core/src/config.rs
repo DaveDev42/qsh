@@ -541,6 +541,43 @@ pub struct ServeConfig {
     /// [`ServeConfig::DEFAULT_VALIDATED_RATE_PER_SOURCE`] (10). Same
     /// no-off-switch discipline.
     pub validated_rate_per_source: Option<u32>,
+    /// Host-wide cap on concurrently running `exec.run` children
+    /// (`crate::quota::QuotaKind::ExecHost`), checked before the
+    /// per-principal axis (`crate::quota::Quotas::reserve_exec`). Unset or
+    /// `0` ⇒ [`ServeConfig::DEFAULT_MAX_EXEC`] (256). Same no-off-switch
+    /// discipline.
+    pub max_exec: Option<usize>,
+    /// Per-principal cap on concurrently open tunnel (`-L`) streams
+    /// (`crate::quota::QuotaKind::TunnelStreamsPerPrincipal`, M8 Step 3b,
+    /// `docs/adr/0010-resource-quotas.md`). Unset or `0` ⇒
+    /// [`ServeConfig::DEFAULT_MAX_TUNNEL_STREAMS_PER_PRINCIPAL`] (256).
+    /// Same no-off-switch discipline.
+    pub max_tunnel_streams_per_principal: Option<usize>,
+    /// Per-`(principal, destination)` cap on concurrently open tunnel
+    /// streams (`crate::quota::QuotaKind::TunnelStreamsPerForward`). Unset
+    /// or `0` ⇒ [`ServeConfig::DEFAULT_MAX_TUNNEL_STREAMS_PER_FORWARD`]
+    /// (64). Same no-off-switch discipline.
+    pub max_tunnel_streams_per_forward: Option<usize>,
+    /// Per-principal cap on concurrently open remote-forward (`-R`)
+    /// listeners (`crate::quota::QuotaKind::RemoteForwardsPerPrincipal`).
+    /// Unset or `0` ⇒
+    /// [`ServeConfig::DEFAULT_MAX_REMOTE_FORWARDS_PER_PRINCIPAL`] (16).
+    /// Same no-off-switch discipline.
+    pub max_remote_forwards_per_principal: Option<usize>,
+    /// Per-principal cap on concurrently open connections
+    /// (`crate::quota::QuotaKind::ConnectionsPerPrincipal`). Unset or `0`
+    /// ⇒ [`ServeConfig::DEFAULT_MAX_CONNECTIONS_PER_PRINCIPAL`] (32). Same
+    /// no-off-switch discipline.
+    pub max_connections_per_principal: Option<usize>,
+    /// Accept-arm-wide cap on concurrently open connections
+    /// (`crate::quota::QuotaKind::Connections`) — per accept arm (`qsh
+    /// serve`'s `Server::run` and `qsh listen`'s `Listen` each get an
+    /// independent budget; M8 Step 3b ruling R6), not per process. Unset
+    /// or `0` ⇒ [`ServeConfig::DEFAULT_MAX_CONNECTIONS`] (512). Same
+    /// no-off-switch discipline. The fixed pre-identity (pairing)
+    /// connection cap (`crate::quota::MAX_CONCURRENT_PAIRING_CONNECTIONS`,
+    /// 8) has no config key of its own.
+    pub max_connections: Option<usize>,
 }
 
 impl ServeConfig {
@@ -566,6 +603,20 @@ impl ServeConfig {
     pub const DEFAULT_MAX_EXEC_PER_PRINCIPAL: usize = 32;
     /// Default per-source validated-handshake rate: 10/s.
     pub const DEFAULT_VALIDATED_RATE_PER_SOURCE: u32 = 10;
+    /// Default host-wide concurrent-`exec.run` cap: 256 (`PLAN.md` M8 Step
+    /// 3b, `docs/adr/0010-resource-quotas.md`).
+    pub const DEFAULT_MAX_EXEC: usize = 256;
+    /// Default per-principal concurrent tunnel-stream cap: 256.
+    pub const DEFAULT_MAX_TUNNEL_STREAMS_PER_PRINCIPAL: usize = 256;
+    /// Default per-`(principal, destination)` concurrent tunnel-stream cap:
+    /// 64.
+    pub const DEFAULT_MAX_TUNNEL_STREAMS_PER_FORWARD: usize = 64;
+    /// Default per-principal concurrent remote-forward-listener cap: 16.
+    pub const DEFAULT_MAX_REMOTE_FORWARDS_PER_PRINCIPAL: usize = 16;
+    /// Default per-principal concurrent-connection cap: 32.
+    pub const DEFAULT_MAX_CONNECTIONS_PER_PRINCIPAL: usize = 32;
+    /// Default accept-arm-wide concurrent-connection cap: 512.
+    pub const DEFAULT_MAX_CONNECTIONS: usize = 512;
 
     /// Effective replay budget (never zero; a `0` in config is treated as
     /// the default rather than an unusable ring).
@@ -638,6 +689,60 @@ impl ServeConfig {
         match self.validated_rate_per_source {
             Some(n) if n > 0 => n,
             _ => Self::DEFAULT_VALIDATED_RATE_PER_SOURCE,
+        }
+    }
+
+    /// Effective host-wide concurrent-`exec.run` cap (never zero, same
+    /// discipline).
+    pub fn max_exec(&self) -> usize {
+        match self.max_exec {
+            Some(n) if n > 0 => n,
+            _ => Self::DEFAULT_MAX_EXEC,
+        }
+    }
+
+    /// Effective per-principal concurrent tunnel-stream cap (never zero,
+    /// same discipline).
+    pub fn max_tunnel_streams_per_principal(&self) -> usize {
+        match self.max_tunnel_streams_per_principal {
+            Some(n) if n > 0 => n,
+            _ => Self::DEFAULT_MAX_TUNNEL_STREAMS_PER_PRINCIPAL,
+        }
+    }
+
+    /// Effective per-`(principal, destination)` concurrent tunnel-stream
+    /// cap (never zero, same discipline).
+    pub fn max_tunnel_streams_per_forward(&self) -> usize {
+        match self.max_tunnel_streams_per_forward {
+            Some(n) if n > 0 => n,
+            _ => Self::DEFAULT_MAX_TUNNEL_STREAMS_PER_FORWARD,
+        }
+    }
+
+    /// Effective per-principal concurrent remote-forward-listener cap
+    /// (never zero, same discipline).
+    pub fn max_remote_forwards_per_principal(&self) -> usize {
+        match self.max_remote_forwards_per_principal {
+            Some(n) if n > 0 => n,
+            _ => Self::DEFAULT_MAX_REMOTE_FORWARDS_PER_PRINCIPAL,
+        }
+    }
+
+    /// Effective per-principal concurrent-connection cap (never zero, same
+    /// discipline).
+    pub fn max_connections_per_principal(&self) -> usize {
+        match self.max_connections_per_principal {
+            Some(n) if n > 0 => n,
+            _ => Self::DEFAULT_MAX_CONNECTIONS_PER_PRINCIPAL,
+        }
+    }
+
+    /// Effective accept-arm-wide concurrent-connection cap (never zero,
+    /// same discipline).
+    pub fn max_connections(&self) -> usize {
+        match self.max_connections {
+            Some(n) if n > 0 => n,
+            _ => Self::DEFAULT_MAX_CONNECTIONS,
         }
     }
 }

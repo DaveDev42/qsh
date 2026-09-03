@@ -212,7 +212,7 @@ impl TargetRig {
         let conn_id = ctx.conn_id;
         let task = tokio::spawn(async move {
             let _ = server.clone().serve_control(&conn, ctl, ctx, None).await;
-            server.purge_connection(conn_id).await;
+            server.purge_connection(conn_id, ()).await;
         });
         self.reverse_conn = Some(dialed);
         self.reverse_task = Some(task);

@@ -272,25 +272,34 @@ impl AuditRecord {
     /// record_rejection` from the same control-stream request that hit the
     /// quota), so the ACL `allow` line and this `deny` line for one request
     /// share a `request_id` and are not left to guesswork (verdict ruling
-    /// 11①). `peer_addr` alone stays `"-"`: `crate::quota::Quotas` is
-    /// leaf-most and connection-agnostic (architecture.md §1) and does not
-    /// have it to hand. Structural fields only — never payload.
+    /// 11①). `request_id` is `Option<u64>` (M8 Step 3b ruling R9): `None`
+    /// (a data-stream or connection-axis rejection with no control
+    /// request to attribute it to) is written as `"-"`, not the ambiguous
+    /// sentinel `0`. `peer_addr` (M8 Step 3b ruling R4, reversing the 3a note this
+    /// replaced — "`crate::quota::Quotas` has no address to hand") is the
+    /// caller's own live peer address, threaded through `crate::quota::
+    /// Quotas::record_rejection` from the same connection context the
+    /// triggering request came in on. `Quotas` itself stays leaf-most and
+    /// connection-agnostic (architecture.md §1): it never inspects the
+    /// address, only carries it through as an opaque value. Structural
+    /// fields only — never payload.
     pub fn quota_rejected(
         kind: QuotaKind,
         principal: &str,
-        request_id: u64,
+        peer_addr: std::net::SocketAddr,
+        request_id: Option<u64>,
         auth_path: AuthPath,
     ) -> Self {
         Self {
             ts: now_rfc3339(),
-            request_id: request_id.to_string(),
+            request_id: request_id.map_or_else(|| "-".to_string(), |id| id.to_string()),
             principal: principal.to_string(),
             action: kind.action().to_string(),
             resource: kind.category().to_string(),
             decision: Decision::Deny.as_str().to_string(),
             rule: None,
             auth_path: auth_path_str(auth_path).to_string(),
-            peer_addr: "-".to_string(),
+            peer_addr: peer_addr.to_string(),
             count: None,
         }
     }
@@ -397,8 +406,11 @@ pub(crate) fn write_admission_audit(audit: &dyn AuditSink, records: &[AuditRecor
 /// volume — but its own wording, because a quota rejection is neither a
 /// connection rejection nor an admission decision, and an operator
 /// grepping the log must not read it as one. A quota record has a real
-/// `principal` and no `peer_addr` (`crate::quota` is
-/// connection-agnostic), so that is what the line carries.
+/// `principal` and, since M8 Step 3b ruling R4, a real `peer_addr` too —
+/// `crate::quota` stays connection-agnostic itself, but the caller's live
+/// peer address is threaded through it opaquely on every individual
+/// (non-summary) rejection line; only a windowed summary, which spans many
+/// peers, still carries `"-"`.
 pub(crate) fn write_quota_audit(audit: &dyn AuditSink, records: &[AuditRecord]) {
     for record in records {
         if record.count.is_some() {

@@ -54,6 +54,55 @@ pub(crate) async fn loopback_pair() -> (Connection, Connection) {
     (client, server)
 }
 
+/// Server-side [`qsh_transport::TrustEvaluator`] that pins nothing and
+/// always answers `pairing_open() == true` — the M8 Step 3b unit tests'
+/// twin of `crate::pairing::AcceptAnyForPairing` (that one is the
+/// *client's* dial-time evaluator; this is what lets a real loopback
+/// *server* admit an unpinned peer as [`Principal::Pairing`] at all,
+/// mirroring `crate::trust::SharedTrustStore`'s behavior with a live
+/// invite outstanding, without needing a whole invite store for a unit
+/// test).
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct AlwaysPairingOpen;
+
+impl qsh_transport::TrustEvaluator for AlwaysPairingOpen {
+    fn lookup_pin(&self, _fingerprint: &Fingerprint) -> Option<Principal> {
+        None
+    }
+
+    fn ca_roots(&self) -> Vec<CertificateDer<'static>> {
+        Vec::new()
+    }
+
+    fn pairing_open(&self) -> bool {
+        true
+    }
+}
+
+/// [`loopback_pair`]'s twin for a pre-identity connection: the server
+/// observes `client`'s principal as [`Principal::Pairing`]
+/// ([`AlwaysPairingOpen`] above), the same shape `qsh serve` sees for a
+/// real invite-window dial.
+pub(crate) async fn pairing_loopback_pair() -> (Connection, Connection) {
+    let (client_id, _client_fp) = self_signed();
+    let (server_id, server_fp) = self_signed();
+    let client_trust = StaticTrust::empty().with_pin(server_fp, Principal::Device("host".into()));
+
+    let listener = Listener::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        server_id,
+        Arc::new(AlwaysPairingOpen),
+    )
+    .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let dialer = Dialer::new(client_id, Arc::new(client_trust));
+    let (server, client) = tokio::join!(
+        async { listener.accept().await.unwrap().accept().await.unwrap() },
+        async { dialer.dial(addr, "127.0.0.1").await.unwrap().connection },
+    );
+    (client, server)
+}
+
 /// A [`BindHostResolver`] that answers from a script and counts how
 /// many times it was asked. The count is the point: it is what turns
 /// "the address bound is the address validated" into an assertion

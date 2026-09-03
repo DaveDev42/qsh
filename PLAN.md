@@ -499,6 +499,22 @@ nextest는 베이스라인 1370에서 main 판정 라운드 종료 시 1415, 적
 
 CI는 2e5d581에서 한 번 빨갰다. testkit quota 테스트의 `FramedStream` import가 unix 전용 테스트에서만 쓰여 Windows clippy가 미사용 import로 잡았고, 같은 런의 Windows test 잡은 install-action의 bash 시작 실패였다. import를 그 테스트 안의 전체 경로 호출로 바꾼 0e1a4aa에서 CI와 fuzz-smoke가 모두 green이다. 로컬 G6 게이트는 core와 cli만 win-gnu로 check하고 있었으므로 workspace 전체 win-gnu clippy를 추가해 같은 구멍을 로컬에서 먼저 잡는다. Step 3a는 여기서 닫는다.
 
+**(a)-추기 — Step 3b 구현 라운드 판정 (2026-09-04, main 세션).**
+
+구현은 3a의 교훈대로 처음부터 열 스테이지(S1·S2·S2E·S3·S3E·S4·S4E·S5·S6·S7)로 쪼개 순차로 돌렸고 스테이지마다 도구 호출 70회를 넘기지 못하게 하고 PROGRESS-3b.md로 인수인계했다. 착수 전 개방질문 일곱(Q1~Q7)을 main이 먼저 판정했고(R1~R7), 진행 중에 둘이 더 생겼다. S2가 터널 거부의 `request_id`에 0을 넣은 것은 실제 id와 구별되지 않아 `Option<u64>`로 바꾸고 `None`을 `"-"`로 적게 했다(R9). S3가 쓴 Fatal 자기제거 테스트는 tokio가 쥔 listener의 fd를 `libc::close`로 직접 닫아 EBADF를 유도했는데, 이중 close와 Windows clippy 적색이 겹쳐 기각하고 `run_remote_forward_accept_loop`를 future 제네릭으로 바꿔 즉시 끝나는 future와 `pending()` future로 자기제거를 고정했다(R10). S3는 그 테스트가 실제로 걸려 한 번 멈췄고 판정 뒤 재개했다.
+
+판정 중 설계에 남는 것은 넷이다. pairing 초과 거부는 proof를 읽지 않고 프레임도 쓰지 않은 채 `CLOSE_CODE_RESOURCE_EXHAUSTED`(0x1003)로 즉시 닫는다(R2). 상한이 막으려는 작업을 초과 연결에 쓰지 않는다는 원칙이고 protocol.md §15.5의 응답 규율 표는 proof 평가 뒤의 이야기라 손대지 않았다. 연결 permit은 outer `serve_connection`에서 inner 진입 전에 얻고 `purge_connection` 뒤에 놓는다(R3). `max_connections`의 "전역"은 프로세스가 아니라 inbound accept arm 단위다(R6). `qsh serve`의 accept 루프와 `qsh listen` 컨트롤러가 각각 512를 갖고 reverse target이 listener로 거는 outbound 연결은 세지 않는다. 그 수는 operator가 정한 listener 수라 peer가 늘릴 수 없기 때문이다. `quota_rejected` 감사행의 `peer_addr`는 첫 건 행에 실값을 적고 요약 행만 `"-"`로 남긴다(R4).
+
+적대적 라운드는 3a와 같이 opus 둘이 사설 복사본에서 돌렸다. A(보안 순서·자원 수명)가 다섯 건, B(동시성·케이던스·계약)가 열세 실험에서 아홉 건을 냈고 기각은 없다. 실제 코드 결함은 하나뿐인데 둘 다 찾았다(A2=B5). `Listen::decide_registration`이 quota 거부를 ACL 판정보다 먼저 돌려줘서 인가되지 않은 peer도 컨트롤러가 가득 찼는지를 응답 코드로 알 수 있었다. 거부 검사를 `admit()` 뒤로 옮겨 idle이든 full이든 미인가 peer는 `PERMISSION_DENIED`만 본다. 나머지는 핀 공백이다. permit이 되돌아오는 행동 테스트가 세 arm 모두 없었고(A1), `purge_connection` 뒤에 permit을 놓는다는 순서가 소스 텍스트 트립와이어로만 고정돼 있어 `drop(permit.take())`를 앞에 끼워도 살아남았다(B3). B3는 텍스트 테스트를 지우고 permit을 `purge_connection(conn_id, held)`의 값 인자로 넘겨 타입이 순서를 강제하게 했다. 그 밖에 `remote_forwards` 락의 `NonLeafGuard`(A4), 감사행 `peer_addr`·`request_id` 필드 단언(B1·B2), `Listen::run` 틱의 flush 회귀 테스트(B4), 터널 축 거부는 `ConnectResult`라 `retryable` 필드가 없다는 문서 정정과 quota_docs 핀(B6), 알 수 없는 `[serve]` 키가 조용히 무시된다는 문장(B7), testkit 대기 여유값의 `AUDIT_WINDOW_SLACK` 통합(B9)이다. B8의 stress 실측은 결함 없음이다.
+
+fixer는 다섯 단계(F0~F4)로 돌렸다. F0는 판정 전에 생겼다. 첫 전체 게이트에서 reverse_tunnel의 두 테스트가 새 remote-forward 상한(기본 16)에 걸렸는데, 그 테스트들은 parked claim 상한 32까지 한 principal로 forward를 연다. main은 컨트롤러 `Listen`의 quota를 올리라고 지시했지만 F0는 `reserve_remote_forward`의 유일한 production 호출처를 따라가 실제 게이트가 target 쪽 `Server`임을 보이고 하네스 헬퍼가 target의 `[serve]` 설정을 덮어쓰게 했다. 그때 fail-fast가 뒤의 97건을 가렸으므로 게이트 스크립트에 `--no-fail-fast`를 넣었다. F3는 B2의 묶음을 반박했다. main은 remote-forward 축의 `request_id`를 `"-"`로 묶었지만 `authorize_and_bind_remote_forward`가 `Some(request_id)`를 넘기므로 control 요청(세션·exec·remote-forward)은 실제 id, 데이터 스트림과 연결 축만 `"-"`가 맞고 R9 원문도 그렇다. 반박을 수용해 실제 동작대로 핀을 박았다. pairing 축은 in-crate 감사행 테스트가 없어 B1·B2 핀을 못 박았고 Step 4로 넘긴다. F4는 A·B의 변이 다섯을 다시 넣어 전부 죽는 것을 확인했다. 그중 B3 변이는 컴파일 오류(E0382)로 죽는다. 새 테스트는 qsh-core 846→851, testkit 212→213이다.
+
+main은 위험 diff(예약 헬퍼·permit 수명·거부 콜백·락 순서)를 직접 읽고 변이 둘을 찍었다. principal별 비교를 off-by-one으로 바꾼 것은 두 테스트가 잡았다. `decide_registration`의 거부 분기에서 `registry.rollback`을 지운 것은 살아남았다. F2가 개명한 `..._without_registering` 테스트가 `registry().get("adv-fixer")`를 봤는데 `admit()`이 등록하는 키는 offered name이 아니라 핀된 device name(`"laptop"`)이라 단언이 공허했다. 단언을 `snapshot().is_empty()`로 바꾸고 살아 있는 등록 한 건을 `conns.publish`로 올린 뒤 거부된 재등록이 그 행을 같은 generation으로 되돌리는지도 같은 테스트에 넣었다. 처음엔 `conns`를 안 올려 `rollback_target`의 phantom-host 가드가 행을 지웠는데, 그건 3b 결함이 아니라 기존 설계다.
+
+문서는 ADR-0010을 `docs/adr/0010-resource-quotas.md`로 배치하고 CLI.md §6.12·protocol.md 코드 표·architecture.md를 갱신했다. Step 4로 넘기는 것은 넷이다. `deny_unknown_fields` 채택 또는 `qsh doctor`의 unknown-key 경고, pairing testkit 하네스 공용화와 pairing 축 감사 핀, nextest LEAK 원인 규명(B가 한 번 본 `846 passed (1 leaky)` 포함), 그리고 remote-forward 기본 상한 16이 testkit의 parked claim 상한 32보다 작아 테스트가 설정을 덮어써야 한다는 관계다.
+
+nextest는 3a 마감 1430에서 1473 passed / 2 skipped다. 게이트 여섯은 F0 뒤 두 번째 전체 실행에서 전부 rc=0이다.
+
 #### Step 4 — 적대적 부하 하네스 (DoD 5) + audit 수명주기 부하 검증
 
 협조적 soak과 **별도 게이트**다. 감사 개정 ④의 연쇄(스푸핑 flood → 세션 없는 audit 쓰기 → 디스크 만실 → resume 실패)가 차단되는지를 본다. Step 2·3이 선언한 상한이 실제로 강제되는지를 이 하네스가 판정한다.

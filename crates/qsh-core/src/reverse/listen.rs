@@ -313,14 +313,24 @@ async fn run_listen_unix(
         config.serve.handshake_rate_per_source(),
         config.serve.validated_rate_per_source(),
     );
-    let listen = Listen::with_admission(
+    // `[listen]` has no quota keys of its own either — same inheritance
+    // as `admission` just above (M8 Step 3b ruling R6: this controller's
+    // connection cap is its own accept arm, but the *values* it enforces
+    // still come from the operator's `[serve]` section).
+    let quotas = crate::quota::Quotas::new(
+        crate::quota::QuotaLimits::from_serve(&config.serve),
+        clock.clone(),
+    );
+    let listen = Listen::with_admission_and_quotas(
         registry,
         authorizer,
         audit,
         identity.identity.device_id.clone(),
         clock,
         stale_retention,
+        STALE_SWEEP_TICK,
         admission,
+        quotas,
     );
     tokio::spawn(Listen::run_stale_sweeper(Arc::downgrade(&listen)));
     tracing::info!(
@@ -3181,6 +3191,14 @@ pub struct Listen {
     /// as `crate::server::Server`'s own field; consulted by [`Self::run`]
     /// before an `Incoming` reaches [`Self::accept_and_register`].
     admission: crate::admission::Gate,
+    /// M8 Step 3b ruling R6: `[serve].max_connections`/
+    /// `max_connections_per_principal` is enforced **per accept arm**,
+    /// not per process — this controller is its own arm, independent of
+    /// `crate::server::Server`'s, with its own [`crate::quota::Quotas`]
+    /// instance (same type, same reservation call
+    /// [`crate::quota::Quotas::reserve_connection`], same host→principal
+    /// order) even when both run in the same `qsh listen` process.
+    quotas: Arc<crate::quota::Quotas>,
 }
 
 impl std::fmt::Debug for Listen {
@@ -3294,6 +3312,41 @@ impl Listen {
         sweep_tick: Duration,
         admission: crate::admission::Gate,
     ) -> Arc<Self> {
+        let quotas = crate::quota::Quotas::new(crate::quota::QuotaLimits::default(), clock.clone());
+        Self::with_admission_and_quotas(
+            registry,
+            authorizer,
+            audit,
+            device_name,
+            clock,
+            stale_retention,
+            sweep_tick,
+            admission,
+            quotas,
+        )
+    }
+
+    /// [`Self::with_admission_and_sweep_tick`] plus an explicit
+    /// [`crate::quota::Quotas`] — `run_listen_unix` uses this to build
+    /// the tracker from the operator's actual `[serve].max_connections`/
+    /// `max_connections_per_principal` the same way `[listen]` already
+    /// inherits `[serve]`'s admission values (`Self::with_admission`'s own
+    /// doc comment), rather than [`crate::quota::QuotaLimits::default`].
+    /// M8 Step 3b ruling R6: this controller's `Quotas` is entirely its
+    /// own — a separate accept arm from `crate::server::Server`'s, never
+    /// shared, even when both run in the same process.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_admission_and_quotas(
+        registry: Registry,
+        authorizer: Arc<dyn Authorizer>,
+        audit: Arc<dyn AuditSink>,
+        device_name: impl Into<String>,
+        clock: Arc<dyn Clock>,
+        stale_retention: Duration,
+        sweep_tick: Duration,
+        admission: crate::admission::Gate,
+        quotas: Arc<crate::quota::Quotas>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             registry,
             authorizer,
@@ -3306,6 +3359,7 @@ impl Listen {
             stale_retention,
             sweep_tick,
             admission,
+            quotas,
         })
     }
 
@@ -3531,11 +3585,24 @@ impl Listen {
                 _ = audit_flush.tick() => {
                     let records = self.admission.flush_expired(self.admission.now());
                     crate::audit::write_admission_audit(self.audit.as_ref(), &records);
+                    // M8 Step 3b S5: this controller owns its own
+                    // `Quotas` (ruling R6 — the `Listen` accept arm's
+                    // connection cap is independent of `qsh serve`'s), so
+                    // its rejection-audit windows need the same
+                    // bounded-latency flush `Server::run`'s identical tick
+                    // gives `quota_housekeeping` — otherwise a burst of
+                    // refused registrations here would open a first-record
+                    // window that never closes into a summary until the
+                    // next rejection happens to land, which may be never.
+                    let quota_records = self.quotas.flush_expired(self.quotas.now());
+                    crate::audit::write_quota_audit(self.audit.as_ref(), &quota_records);
                 }
             }
         }
         let records = self.admission.flush_expired(self.admission.now());
         crate::audit::write_admission_audit(self.audit.as_ref(), &records);
+        let quota_records = self.quotas.flush_expired(self.quotas.now());
+        crate::audit::write_quota_audit(self.audit.as_ref(), &quota_records);
         listener.close(0, b"shutdown");
         listener.endpoint().wait_idle().await;
     }
@@ -3575,6 +3642,19 @@ impl Listen {
     /// verify-then-audit shape for a rejected TLS handshake. Reached only
     /// through [`Self::admit`], holding the handshake permit
     /// [`Self::admission`] handed out.
+    /// M8 Step 3b (rulings R3/R6): this controller's own connection-count
+    /// quota is reserved here — this is its outer role, exactly like
+    /// `crate::server::Server::serve_connection` is for the `qsh serve`
+    /// accept arm (same host→principal order, same [`crate::quota::
+    /// Quotas::reserve_connection`] call) — before [`Self::register_connection`]
+    /// (and the `Hello` exchange inside it) ever runs, and released only
+    /// after this whole registered session has fully torn down
+    /// (`Self::drive_registered_session`'s own `conns.remove_if`, deep
+    /// inside the `register_connection(...).await` below — this task's
+    /// own `.await` does not return until that has already run). `Listen`
+    /// never sees `Principal::Pairing` (pairing is a `qsh serve`-only
+    /// concept), so there is only ever this one axis to check, unlike
+    /// `Server::serve_connection`'s pairing/regular split.
     async fn accept_and_register_permitted(
         self: Arc<Self>,
         incoming: Incoming,
@@ -3584,7 +3664,34 @@ impl Listen {
         let result = incoming.accept().await;
         drop(permit);
         match result {
-            Ok(conn) => self.register_connection(conn).await,
+            Ok(conn) => {
+                let opener = crate::acl::opener_key(conn.principal(), conn.auth_path());
+                let (quota_permit, refused) = match self.quotas.reserve_connection(&opener) {
+                    Ok(permit) => (Some(permit), None),
+                    Err(kind) => {
+                        let records = self.quotas.record_rejection(
+                            kind,
+                            &opener,
+                            peer,
+                            self.quotas.now(),
+                            None,
+                            conn.auth_path(),
+                        );
+                        crate::audit::write_quota_audit(self.audit.as_ref(), &records);
+                        (None, Some(kind))
+                    }
+                };
+                // B3 (type-pinned, M8 Step 3b arbitration): `quota_permit`
+                // moves into `register_connection` by value rather than
+                // being dropped here — the same "the callee holds it and
+                // releases it last" shape `Server::serve_connection`'s two
+                // arms now use for their own connection permits. A
+                // trailing `drop(quota_permit)` here would compile fine
+                // and release the slot before the registered session is
+                // actually torn down; moving it in makes that ordering a
+                // type error instead of a text convention.
+                self.register_connection(conn, quota_permit, refused).await;
+            }
             Err(err) => {
                 let category = match &err {
                     AcceptError::Unverified(reason) => format!("{reason:?}").to_lowercase(),
@@ -3610,7 +3717,20 @@ impl Listen {
     /// [`Listen::finish_registration`]. Every rejection path already wrote
     /// (and [`crate::handshake::respond`] already drained) its error frame
     /// before returning here — this only has to close.
-    async fn register_connection(self: Arc<Self>, conn: Connection) {
+    ///
+    /// M8 Step 3b arbitration B3: `quota_permit` is owned here, not
+    /// borrowed or dropped by the caller — released only at the very end
+    /// of this function (see the `drop(quota_permit)` there), after the
+    /// whole registered session this permit was reserved for has already
+    /// run to completion. [`Listen::accept_and_register_permitted`]'s own
+    /// doc comment already named the shape this enforces: the slot stays
+    /// held for as long as the connection is live.
+    async fn register_connection(
+        self: Arc<Self>,
+        conn: Connection,
+        quota_permit: Option<crate::quota::ConnectionPermit>,
+        refused: Option<crate::quota::QuotaKind>,
+    ) {
         // `Mutex`, not `RefCell`: this reference is captured by the
         // `make_local_hello` closure `handshake::respond` holds across an
         // `.await` inside a `tokio::spawn`ed task, so it must be `Sync`
@@ -3619,7 +3739,7 @@ impl Listen {
         // runs synchronously, once, before `respond` returns.
         let outcome_cell: Mutex<Option<RegisterOutcome>> = Mutex::new(None);
         let result = crate::handshake::respond(&conn, |peer_hello| {
-            self.decide_registration(&conn, peer_hello, &outcome_cell)
+            self.decide_registration(&conn, peer_hello, &outcome_cell, refused)
         })
         .await;
 
@@ -3649,6 +3769,7 @@ impl Listen {
                     qsh_transport::endpoint::CLOSE_CODE_PROTOCOL,
                     b"registration refused",
                 );
+                drop(quota_permit);
                 return;
             }
         };
@@ -3659,10 +3780,12 @@ impl Listen {
                 qsh_transport::endpoint::CLOSE_CODE_PROTOCOL,
                 b"internal error",
             );
+            drop(quota_permit);
             return;
         };
         self.finish_registration(conn, ctl, peer_hello, outcome)
             .await;
+        drop(quota_permit);
     }
 
     /// The synchronous decision `crate::handshake::respond`'s
@@ -3672,11 +3795,34 @@ impl Listen {
     /// into `outcome_cell` for [`Listen::register_connection`] to pick up
     /// once the whole `Hello` exchange (this reply included) has actually
     /// gone out.
+    ///
+    /// M8 Step 3b arbitration (A2/B5, overturning R3 for this arm): the
+    /// connection-count `refused` check is consulted only *after*
+    /// [`admit`] — this arm's `host.reverse` ACL choke point — has run,
+    /// never before it. Checking it first (R3's original placement, still
+    /// correct for `crate::server::Server::serve_connection_inner`'s
+    /// per-op ACL, which has no handshake-time "would this Hello even be
+    /// authorized" concept) made a peer this registry would deny anyway
+    /// able to fingerprint the controller's saturation: the exact same
+    /// denied `Hello` got `PERMISSION_DENIED` while idle and
+    /// `RESOURCE_EXHAUSTED(retryable)` once the connection cap filled —
+    /// one bit of "is the host full right now" leaking to principals with
+    /// zero authorization (`crate::quota` module doc, `adr-0010-draft.md`
+    /// §6: unauthorized principals must never see a quota-shaped answer).
+    /// `admit`'s own doc guarantees "every early return leaves the
+    /// registry exactly as it was", so an ACL deny here costs nothing to
+    /// unwind; an ACL *allow* that this method then discards for quota
+    /// reasons does insert into the registry (`admit`'s step 4) and must
+    /// be rolled back explicitly below — the same `rollback_target` +
+    /// `Registry::rollback` pair `Listen::register_connection`'s own
+    /// failed-`Hello`-reply path already uses for the identical shape
+    /// (an admitted entry with nothing to drive it).
     fn decide_registration(
         &self,
         conn: &Connection,
         peer_hello: &Hello,
         outcome_cell: &Mutex<Option<RegisterOutcome>>,
+        refused: Option<crate::quota::QuotaKind>,
     ) -> Result<Hello, wire::Error> {
         let Some(reg) = peer_hello.reverse.as_ref() else {
             tracing::warn!(
@@ -3726,6 +3872,23 @@ impl Listen {
             req,
         ) {
             Ok(outcome) => {
+                // A2/B5: the ACL choke point above just allowed this
+                // registration — only now is it safe to also apply the
+                // connection-count refusal decided before this callback
+                // ever ran. `refused` is ignored entirely on the `Err`
+                // arm below: an ACL-denied peer must never learn whether
+                // the controller happens to be at capacity.
+                if let Some(kind) = refused {
+                    let replaced =
+                        rollback_target(&self.conns, &outcome.entry.name, outcome.replaced_entry);
+                    self.registry
+                        .rollback(&outcome.entry.name, outcome.entry.generation, replaced);
+                    return Err(wire::Error::new(
+                        ErrorCode::ResourceExhausted,
+                        kind.wire_message(),
+                        true,
+                    ));
+                }
                 RegistrationEvent {
                     event: if outcome.replaced_generation.is_some() {
                         "replaced"
@@ -4481,6 +4644,436 @@ mod tests {
             Arc::new(SystemClock),
             Duration::from_secs(120),
         )
+    }
+
+    /// [`test_listen`], but with caller-chosen [`crate::quota::
+    /// QuotaLimits`] — the M8 Step 3b S4 twin of `crate::server::tests::
+    /// rig_with_quota_limits` for this controller's own, independent
+    /// accept-arm quota tracker (ruling R6).
+    fn test_listen_with_quotas(quota_limits: crate::quota::QuotaLimits) -> Arc<Listen> {
+        let clock = Arc::new(SystemClock);
+        let registry = Registry::new(clock.clone(), false);
+        let admission = crate::admission::Gate::new(
+            clock.clone(),
+            crate::config::ServeConfig::DEFAULT_MAX_CONCURRENT_HANDSHAKES,
+            crate::config::ServeConfig::DEFAULT_HANDSHAKE_RATE_PER_SOURCE,
+            crate::config::ServeConfig::DEFAULT_VALIDATED_RATE_PER_SOURCE,
+        );
+        let quotas = crate::quota::Quotas::new(quota_limits, clock.clone());
+        Listen::with_admission_and_quotas(
+            registry,
+            Arc::new(AllowAllPinned),
+            Arc::new(crate::audit::NullAuditSink),
+            "hermes",
+            clock,
+            Duration::from_secs(120),
+            STALE_SWEEP_TICK,
+            admission,
+            quotas,
+        )
+    }
+
+    /// M8 Step 3b ruling R6: this controller's `quotas` is its own,
+    /// independent accept-arm tracker — constructed once, from the
+    /// caller's own `QuotaLimits`, not shared with any
+    /// `crate::server::Server` that might run in the same process.
+    #[test]
+    fn listen_is_wired_with_its_own_independent_quota_limits() {
+        let listen = test_listen_with_quotas(crate::quota::QuotaLimits {
+            max_connections: 1,
+            ..crate::quota::QuotaLimits::default()
+        });
+        let _first = listen.quotas.reserve_connection("device:a").unwrap();
+        assert_eq!(
+            listen.quotas.reserve_connection("device:b").unwrap_err(),
+            crate::quota::QuotaKind::Connections
+        );
+    }
+
+    /// M8 Step 3b arbitration A2/B5 (overturns R3 for this arm — see
+    /// [`Listen::decide_registration`]'s own doc comment for why): the
+    /// connection-quota refusal is consulted only *after* [`admit`] — the
+    /// `host.reverse` ACL choke point — has already allowed the
+    /// registration, never before it. An allow that is then discarded for
+    /// quota reasons must roll back the entry `admit` just inserted, so
+    /// this also asserts the registry shows nothing live under the
+    /// offered name once the `RESOURCE_EXHAUSTED` reply has gone out —
+    /// not just that `RegisterOutcome` stayed out of `outcome_cell`
+    /// (`decide_registration_refuses_on_a_quota_kind_before_inspecting_
+    /// hello_reverse`'s original assertion, kept, since the "never
+    /// populate a RegisterOutcome" guarantee this test's predecessor
+    /// establishes still holds under the new order).
+    #[tokio::test]
+    async fn decide_registration_refuses_on_a_quota_kind_after_the_acl_choke_point_without_registering()
+     {
+        let clock = Arc::new(SystemClock);
+        let registry = Registry::new(clock.clone(), true);
+        let admission = crate::admission::Gate::new(
+            clock.clone(),
+            crate::config::ServeConfig::DEFAULT_MAX_CONCURRENT_HANDSHAKES,
+            crate::config::ServeConfig::DEFAULT_HANDSHAKE_RATE_PER_SOURCE,
+            crate::config::ServeConfig::DEFAULT_VALIDATED_RATE_PER_SOURCE,
+        );
+        let quotas = crate::quota::Quotas::new(crate::quota::QuotaLimits::default(), clock.clone());
+        let listen = Listen::with_admission_and_quotas(
+            registry,
+            Arc::new(AllowAllPinned),
+            Arc::new(crate::audit::NullAuditSink),
+            "hermes",
+            clock,
+            Duration::from_secs(120),
+            STALE_SWEEP_TICK,
+            admission,
+            quotas,
+        );
+        let outcome_cell: Mutex<Option<RegisterOutcome>> = Mutex::new(None);
+        // Unlike the predecessor test, `Hello.reverse` must be a genuine,
+        // admissible registration — the quota refusal now only matters
+        // once `admit` has actually said yes.
+        let hello = Hello {
+            versions: Vec::new(),
+            device_name: String::new(),
+            capabilities: Vec::new(),
+            reverse: Some(wire::ReverseRegistration {
+                offered_name: "adv-fixer".to_string(),
+                capabilities: Vec::new(),
+            }),
+        };
+        let (_client, conn) = crate::tunnel::testutil::loopback_pair().await;
+        let err = listen
+            .decide_registration(
+                &conn,
+                &hello,
+                &outcome_cell,
+                Some(crate::quota::QuotaKind::Connections),
+            )
+            .expect_err("a refused connection quota must never register");
+        assert_eq!(err.error_code(), ErrorCode::ResourceExhausted);
+        assert_eq!(err.message, "connection quota exceeded");
+        assert!(err.retryable);
+        assert!(
+            outcome_cell.into_inner().unwrap().is_none(),
+            "a quota refusal must never populate a RegisterOutcome"
+        );
+        // The registry is keyed by the name `admit()` resolves (the pinned
+        // device name, not `offered_name`), so the pin looks at the whole
+        // table rather than guessing the key: main-session spot-check found
+        // a `get("adv-fixer")` assertion here passing with the rollback
+        // deleted, because the leftover row was `("laptop", 0)`.
+        assert!(
+            listen.registry().snapshot().is_empty(),
+            "the ACL-allowed registration admit() inserted must be rolled back, not left \
+             live behind a RESOURCE_EXHAUSTED reply: {:?}",
+            listen.registry().snapshot()
+        );
+
+        // Same pin for the `replaced` half of `Registry::rollback`: a live
+        // registration that a refused re-registration would have replaced
+        // must come back exactly as it was (same generation), not vanish.
+        let live_cell: Mutex<Option<RegisterOutcome>> = Mutex::new(None);
+        listen
+            .decide_registration(&conn, &hello, &live_cell, None)
+            .expect("an unrefused registration on an empty controller must succeed");
+        let before: Vec<(String, u64)> = listen
+            .registry()
+            .snapshot()
+            .iter()
+            .map(|e| (e.name.clone(), e.generation))
+            .collect();
+        assert_eq!(
+            before.len(),
+            1,
+            "exactly one live registration expected: {before:?}"
+        );
+        // `register_connection` is what publishes the live occupant into
+        // `conns` in production; `rollback_target` only trusts the
+        // replaced snapshot while that occupant is still there, so mirror
+        // it here — otherwise the restore path is (correctly) skipped and
+        // this half of the test would be measuring the phantom-host guard
+        // instead of the rollback.
+        listen
+            .conns
+            .publish(before[0].0.clone(), before[0].1, conn.clone());
+        let refused_cell: Mutex<Option<RegisterOutcome>> = Mutex::new(None);
+        let err = listen
+            .decide_registration(
+                &conn,
+                &hello,
+                &refused_cell,
+                Some(crate::quota::QuotaKind::Connections),
+            )
+            .expect_err("a refused re-registration must not replace the live entry");
+        assert_eq!(err.error_code(), ErrorCode::ResourceExhausted);
+        assert!(refused_cell.into_inner().unwrap().is_none());
+        let after: Vec<(String, u64)> = listen
+            .registry()
+            .snapshot()
+            .iter()
+            .map(|e| (e.name.clone(), e.generation))
+            .collect();
+        assert_eq!(
+            after, before,
+            "the entry the refused registration replaced must be restored unchanged"
+        );
+    }
+
+    /// M8 Step 3b arbitration A2/B5 — the oracle regression: a peer
+    /// `DenyEverything` would refuse anyway must get the identical answer
+    /// whether the controller is idle or at its connection cap. Ported
+    /// from adversary A's reproduction
+    /// (`adv_a_a_denied_registration_learns_whether_the_controller_is_full`,
+    /// `adv-A/repo/crates/qsh-core/src/reverse/listen.rs` ~4691),
+    /// unmodified apart from the name: `idle == full == PermissionDenied`
+    /// is the assertion the arbitration ruling picked (option 1, "code
+    /// follows the doc"), not the inverted "these must differ" shape the
+    /// original defect made pass.
+    #[tokio::test]
+    async fn a_denied_registration_cannot_learn_whether_the_controller_is_full() {
+        struct DenyEverything;
+        impl crate::acl::Authorizer for DenyEverything {
+            fn check(
+                &self,
+                _: &qsh_transport::Principal,
+                _: qsh_transport::AuthPath,
+                _: crate::acl::Action,
+                _: crate::acl::ResourceRef<'_>,
+            ) -> crate::acl::Verdict {
+                crate::acl::Verdict {
+                    decision: crate::acl::Decision::Deny,
+                    rule: None,
+                }
+            }
+        }
+        let clock = Arc::new(SystemClock);
+        let listen = Listen::new(
+            Registry::new(clock.clone(), true),
+            Arc::new(DenyEverything),
+            Arc::new(crate::audit::NullAuditSink),
+            "hermes",
+            clock,
+            Duration::from_secs(120),
+        );
+        let (_client, conn) = crate::tunnel::testutil::loopback_pair().await;
+        let hello = Hello {
+            versions: Vec::new(),
+            device_name: String::new(),
+            capabilities: Vec::new(),
+            reverse: Some(wire::ReverseRegistration {
+                offered_name: "adv-a".to_string(),
+                capabilities: Vec::new(),
+            }),
+        };
+        let idle_cell: Mutex<Option<RegisterOutcome>> = Mutex::new(None);
+        let idle = listen
+            .decide_registration(&conn, &hello, &idle_cell, None)
+            .expect_err("a denied registration must be refused");
+        let full_cell: Mutex<Option<RegisterOutcome>> = Mutex::new(None);
+        let full = listen
+            .decide_registration(
+                &conn,
+                &hello,
+                &full_cell,
+                Some(crate::quota::QuotaKind::Connections),
+            )
+            .expect_err("a denied registration must be refused");
+        assert_eq!(idle.error_code(), ErrorCode::PermissionDenied);
+        assert_eq!(
+            full.error_code(),
+            idle.error_code(),
+            "the same ACL-denied registration must not answer differently once the \
+             controller is at capacity (that answer is a saturation oracle): idle={:?} full={:?}",
+            idle.error_code(),
+            full.error_code()
+        );
+    }
+
+    /// M8 Step 3b arbitration A1(3)/A5: a `qsh listen` registration
+    /// driven through the real accept path (`Listen::register_connection`,
+    /// same call [`Listen::accept_and_register_permitted`] makes) must
+    /// hold exactly one per-principal connection slot while it is live
+    /// and give it back once the connection ends — the Listen-arm twin of
+    /// `crate::server::tests::a_served_connection_holds_and_returns_its_
+    /// connection_slot`, closing the gap A5 named ("this controller's own
+    /// permit lifetime is unwatched inside qsh-core, only from a
+    /// testkit e2e").
+    #[tokio::test]
+    async fn a_registered_controller_connection_holds_and_returns_its_connection_slot() {
+        let listen = test_listen_with_quotas(crate::quota::QuotaLimits {
+            max_connections_per_principal: 1,
+            ..crate::quota::QuotaLimits::default()
+        });
+        let (client, conn) = crate::tunnel::testutil::loopback_pair().await;
+        let opener = crate::acl::opener_key(conn.principal(), conn.auth_path());
+        let quota_permit = listen
+            .quotas
+            .reserve_connection(&opener)
+            .expect("the cap is empty at the start of the test");
+        let listen_task = listen.clone();
+        let server_side = tokio::spawn(async move {
+            listen_task
+                .register_connection(conn, Some(quota_permit), None)
+                .await
+        });
+
+        let local_hello = Hello {
+            versions: wire::WIRE_MINOR_VERSIONS.to_vec(),
+            device_name: "fixer".to_string(),
+            capabilities: Vec::new(),
+            reverse: Some(wire::ReverseRegistration {
+                offered_name: "adv-fixer-slot".to_string(),
+                capabilities: Vec::new(),
+            }),
+        };
+        let (ctl, _peer_hello) = crate::handshake::initiate(&client, local_hello)
+            .await
+            .expect("the registration must succeed under an empty quota");
+        assert_eq!(
+            listen.quotas.connections_per_principal_in_use(&opener),
+            1,
+            "a live registered connection must hold exactly one connection slot"
+        );
+
+        drop(ctl);
+        drop(client);
+        server_side
+            .await
+            .expect("register_connection must not panic");
+        assert_eq!(
+            listen.quotas.connections_per_principal_in_use(&opener),
+            0,
+            "the connection slot must be released once the connection is over"
+        );
+    }
+
+    /// M8 Step 3b arbitration B4: `Listen::run`'s periodic tick must flush
+    /// its own `quotas` audit window the same bounded-latency way the
+    /// shutdown tail already does — S5 fixed exactly this gap, and this
+    /// pins it. A quota rejection opens a window on the first call and
+    /// only *suppresses* further rejections inside the same
+    /// [`crate::admission::AUDIT_AGGREGATION_WINDOW`]; nothing closes that
+    /// window into a summary record until either another rejection lands
+    /// after the window has gone stale, or a periodic tick does it first
+    /// — this test forces the second path with `tokio::time::advance`
+    /// under `#[tokio::test(start_paused = true)]`, never a real 10 s
+    /// sleep (`docs/design/testing.md` L2).
+    #[tokio::test(start_paused = true)]
+    async fn listen_run_flushes_its_quota_audit_window_on_the_periodic_tick() {
+        let clock = Arc::new(SystemClock);
+        let registry = Registry::new(clock.clone(), false);
+        let admission = crate::admission::Gate::new(
+            clock.clone(),
+            crate::config::ServeConfig::DEFAULT_MAX_CONCURRENT_HANDSHAKES,
+            crate::config::ServeConfig::DEFAULT_HANDSHAKE_RATE_PER_SOURCE,
+            crate::config::ServeConfig::DEFAULT_VALIDATED_RATE_PER_SOURCE,
+        );
+        let quotas = crate::quota::Quotas::new(crate::quota::QuotaLimits::default(), clock.clone());
+        let audit = Arc::new(crate::audit::MemoryAuditSink::new());
+        let listen = Listen::with_admission_and_quotas(
+            registry,
+            Arc::new(AllowAllPinned),
+            audit.clone(),
+            "hermes",
+            clock,
+            Duration::from_secs(120),
+            STALE_SWEEP_TICK,
+            admission,
+            quotas,
+        );
+
+        let (server_id, _fp) = crate::tunnel::testutil::self_signed();
+        let listener = qsh_transport::Listener::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            server_id,
+            Arc::new(qsh_transport::StaticTrust::empty()),
+        )
+        .expect("bind a loopback listener");
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let listen_task = listen.clone();
+        let _run = tokio::spawn(async move {
+            listen_task
+                .run(listener, async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await;
+        });
+
+        // One immediate rejection (opens the window, its own first-line
+        // record written the same way `accept_and_register_permitted`
+        // does at its real call site) plus two more within the same
+        // window (each only increments `suppressed`, per
+        // `Quotas::record_rejection`'s own doc) — the shape that makes
+        // the tick's flush produce an observable summary record, not just
+        // silently closing an empty window.
+        let now = listen.quotas.now();
+        let peer_addr: std::net::SocketAddr = "127.0.0.1:1".parse().unwrap();
+        let first = listen.quotas.record_rejection(
+            crate::quota::QuotaKind::Connections,
+            "device:flush-probe",
+            peer_addr,
+            now,
+            None,
+            qsh_transport::AuthPath::Pin,
+        );
+        assert_eq!(
+            first.len(),
+            1,
+            "the first rejection of a fresh window audits its own line"
+        );
+        assert_eq!(
+            first[0].peer_addr,
+            peer_addr.to_string(),
+            "R4 — the connection axis's quota deny record must carry the live peer"
+        );
+        assert_eq!(
+            first[0].request_id, "-",
+            "R9 — the connection axis has no control request id"
+        );
+        crate::audit::write_quota_audit(audit.as_ref(), &first);
+        for _ in 0..2 {
+            let suppressed = listen.quotas.record_rejection(
+                crate::quota::QuotaKind::Connections,
+                "device:flush-probe",
+                peer_addr,
+                listen.quotas.now(),
+                None,
+                qsh_transport::AuthPath::Pin,
+            );
+            assert!(
+                suppressed.is_empty(),
+                "a rejection inside the same aggregation window must only be suppressed"
+            );
+        }
+        assert!(
+            audit
+                .records()
+                .iter()
+                .any(|r| r.resource == "quota_connections_host" && r.count.is_none()),
+            "the first rejection's own line must already be in the sink"
+        );
+
+        // Past the aggregation window, and past at least one of `Listen::
+        // run`'s own audit-flush ticks (same period).
+        tokio::time::advance(crate::admission::AUDIT_AGGREGATION_WINDOW + Duration::from_secs(2))
+            .await;
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+            if audit
+                .records()
+                .iter()
+                .any(|r| r.resource == "quota_connections_host" && r.count == Some(2))
+            {
+                break;
+            }
+        }
+        assert!(
+            audit
+                .records()
+                .iter()
+                .any(|r| r.resource == "quota_connections_host" && r.count == Some(2)),
+            "the periodic tick must flush the stale window into a summary record, not only \
+             the shutdown tail — got {:?}",
+            audit.records()
+        );
     }
 
     /// [`test_listen`], but on an injectable [`crate::broker::TestClock`]
