@@ -205,6 +205,7 @@ impl ReverseHarness {
     pub async fn start_with_admission(
         max_concurrent_handshakes: usize,
         handshake_rate_per_source: u32,
+        validated_rate_per_source: u32,
     ) -> Self {
         let controller = make_identity();
         let listener = Listener::bind(
@@ -221,6 +222,7 @@ impl ReverseHarness {
             clock.clone(),
             max_concurrent_handshakes,
             handshake_rate_per_source,
+            validated_rate_per_source,
         );
         let listen = Listen::with_admission(
             registry,
@@ -413,6 +415,38 @@ impl ReverseHarness {
         .await
     }
 
+    /// [`Self::run_target_with_config`], plus a hook exposing the target's
+    /// own [`HostRuntime`] before the first dial — for a caller that needs
+    /// to read something off the target's real runtime that no wire
+    /// response surfaces (e.g. `HostRuntime::audit`'s
+    /// `RotatingAuditSink::path`, to assert on the target's own on-disk
+    /// audit log directly). Mirrors [`Self::run_target_through_chaos`]'s
+    /// `on_runtime` hook, minus the chaos proxy in front.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn run_target_with_config_observing_runtime(
+        &self,
+        target: &TestIdentity,
+        device_id: &str,
+        controller_alias: &str,
+        offered_name: Option<&str>,
+        config: &Config,
+        on_runtime: impl FnOnce(&HostRuntime),
+        shutdown: impl Future<Output = ()>,
+    ) -> Result<(), OpError> {
+        self.run_target_via(
+            target,
+            device_id,
+            controller_alias,
+            offered_name,
+            config,
+            self.addr,
+            on_runtime,
+            || {},
+            shutdown,
+        )
+        .await
+    }
+
     /// [`Self::run_target_with_config`], plus a hook that fires at most
     /// once, the first time an attempt to reach `controller_alias` fails —
     /// the same `on_unreachable` [`run_reverse_observed`] exposes, wired
@@ -512,7 +546,7 @@ impl ReverseHarness {
     ) -> Result<(), OpError> {
         let (_dir, paths) = self.target_paths_at(controller_alias, dial_addr);
         let identity = loaded_identity(target, device_id);
-        run_reverse_observed(
+        let result = run_reverse_observed(
             &paths,
             config,
             identity,
@@ -522,7 +556,21 @@ impl ReverseHarness {
             on_unreachable,
             shutdown,
         )
-        .await
+        .await;
+        // M8 Step 3a fix-3 sweep (B5): the target's own audit sink
+        // (`HostRuntime::audit`'s `RotatingAuditSink`, per this fn's own
+        // `on_runtime` doc) writes through a real background OS thread —
+        // `record()` only `try_send`s into its channel, with no
+        // synchronization point that would otherwise guarantee a write
+        // enqueued right before shutdown (e.g. by a `purge_connection`-
+        // triggered quota-audit flush) actually reaches disk before this
+        // function returns and `_dir` drops, deleting the scratch
+        // directory `on_runtime`'s caller may still want to read from.
+        // A short, deliberate pause here — after the run, before the
+        // drop — is what makes that read reliable instead of racing a
+        // background thread against `tempfile::TempDir`'s own cleanup.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        result
     }
 
     /// Bind and run a localctl UDS admin daemon on top of this harness's
@@ -825,6 +873,7 @@ impl ReversePairHarness {
                 replay_bytes: 64 * 1024,
                 resume_ttl: Duration::from_secs(3600),
                 close_grace: Duration::from_millis(100),
+                quota_limits: qsh_core::quota::QuotaLimits::default(),
             },
             pipes.clone(),
         );

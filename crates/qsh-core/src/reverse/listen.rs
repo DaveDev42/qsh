@@ -311,6 +311,7 @@ async fn run_listen_unix(
         clock.clone(),
         config.serve.max_concurrent_handshakes(),
         config.serve.handshake_rate_per_source(),
+        config.serve.validated_rate_per_source(),
     );
     let listen = Listen::with_admission(
         registry,
@@ -3240,6 +3241,7 @@ impl Listen {
             clock.clone(),
             crate::config::ServeConfig::DEFAULT_MAX_CONCURRENT_HANDSHAKES,
             crate::config::ServeConfig::DEFAULT_HANDSHAKE_RATE_PER_SOURCE,
+            crate::config::ServeConfig::DEFAULT_VALIDATED_RATE_PER_SOURCE,
         );
         Self::with_admission_and_sweep_tick(
             registry,

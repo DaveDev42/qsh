@@ -108,7 +108,7 @@ async fn admission_cap_refuses_and_creates_nothing() {
     // Rate limiting is not this test's subject: a source rate high enough
     // that no attempt is ever mistaken for a flood, so every rejection
     // observed here is unambiguously `AtCapacity`, never `RateLimited`.
-    let h = LoopbackHarness::start_with_admission(1, u32::MAX / 4).await;
+    let h = LoopbackHarness::start_with_admission(1, u32::MAX / 4, u32::MAX / 4).await;
 
     let mut tasks = Vec::with_capacity(CONCURRENT_DIALS);
     for _ in 0..CONCURRENT_DIALS {
@@ -196,7 +196,7 @@ async fn legitimate_client_connects_after_flood_subsides() {
     // `EPOCH`, `PLAN.md` M8 Step 2 verification round F2) — a handful of
     // concurrent *fresh* dial attempts reliably exceeds it. Concurrency
     // cap is generous; it is not this test's subject.
-    let h = LoopbackHarness::start_with_admission(64, 1).await;
+    let h = LoopbackHarness::start_with_admission(64, 1, u32::MAX / 4).await;
 
     // The flood: each is its own fresh QUIC Initial (a fresh
     // `Dialer::dial` call — `qsh_transport::endpoint::Dialer::dial_inner`
@@ -303,7 +303,7 @@ async fn admission_rejection_audit_is_aggregated() {
     // default` degradation is pinned separately, in
     // `qsh-core::config::tests::
     // admission_keys_use_the_documented_names_and_defaults`).
-    let h = LoopbackHarness::start_with_admission(0, u32::MAX / 4).await;
+    let h = LoopbackHarness::start_with_admission(0, u32::MAX / 4, u32::MAX / 4).await;
 
     for _ in 0..REJECTIONS {
         let dialer = dialer_with_timeout(&h, Duration::from_secs(3));
@@ -492,7 +492,7 @@ async fn poll_for_summary(
 #[tokio::test(flavor = "multi_thread")]
 async fn admission_rejection_summary_flushes_without_further_dials() {
     const REJECTIONS: usize = 5;
-    let h = LoopbackHarness::start_with_admission(0, u32::MAX / 4).await;
+    let h = LoopbackHarness::start_with_admission(0, u32::MAX / 4, u32::MAX / 4).await;
 
     for _ in 0..REJECTIONS {
         let dialer = dialer_with_timeout(&h, Duration::from_secs(3));
@@ -532,7 +532,7 @@ async fn admission_rejection_summary_flushes_without_further_dials() {
 #[tokio::test(flavor = "multi_thread")]
 async fn listen_admission_cap_refuses_creates_nothing_and_summary_flushes() {
     const REJECTIONS: usize = 5;
-    let h = ReverseHarness::start_with_admission(0, u32::MAX / 4).await;
+    let h = ReverseHarness::start_with_admission(0, u32::MAX / 4, u32::MAX / 4).await;
     let target = make_identity();
 
     for _ in 0..REJECTIONS {
@@ -600,7 +600,7 @@ async fn listen_admission_cap_refuses_creates_nothing_and_summary_flushes() {
 /// exhausted and be refused instead.
 #[tokio::test(flavor = "multi_thread")]
 async fn admission_permit_is_released_at_handshake_end_not_connection_end() {
-    let h = LoopbackHarness::start_with_admission(1, u32::MAX / 4).await;
+    let h = LoopbackHarness::start_with_admission(1, u32::MAX / 4, u32::MAX / 4).await;
 
     // Connection A: dial, negotiate, open a session — then hold it open
     // for the rest of the test.
@@ -680,7 +680,7 @@ async fn admission_permit_is_released_at_handshake_end_not_connection_end() {
 #[tokio::test(flavor = "multi_thread")]
 async fn admission_on_exit_flush_reports_suppressed_rejections_at_shutdown() {
     const REJECTIONS: usize = 3;
-    let h = LoopbackHarness::start_with_admission(0, u32::MAX / 4).await;
+    let h = LoopbackHarness::start_with_admission(0, u32::MAX / 4, u32::MAX / 4).await;
 
     // See this fn's doc: a wide, non-marginal gap from loop start before
     // the window even opens, so the second periodic tick (~t0+10) is
@@ -739,7 +739,7 @@ async fn admission_on_exit_flush_reports_suppressed_rejections_at_shutdown() {
 #[tokio::test(flavor = "multi_thread")]
 async fn listen_admission_on_exit_flush_reports_suppressed_rejections_at_shutdown() {
     const REJECTIONS: usize = 3;
-    let h = ReverseHarness::start_with_admission(0, u32::MAX / 4).await;
+    let h = ReverseHarness::start_with_admission(0, u32::MAX / 4, u32::MAX / 4).await;
     let target = make_identity();
 
     tokio::time::sleep(WINDOW_OPEN_DELAY_FROM_LOOP_START).await;

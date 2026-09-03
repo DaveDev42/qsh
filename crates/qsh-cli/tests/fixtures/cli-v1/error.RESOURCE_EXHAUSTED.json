@@ -1,0 +1,12 @@
+{
+  "command": "session.open",
+  "error": {
+    "code": "RESOURCE_EXHAUSTED",
+    "details": null,
+    "message": "session quota exceeded",
+    "retryable": true
+  },
+  "ok": false,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

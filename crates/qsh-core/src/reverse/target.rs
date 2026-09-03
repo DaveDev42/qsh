@@ -405,48 +405,81 @@ async fn run_reverse_unix(
             }
         });
 
-        tokio::select! {
-            _ = &mut shutdown => {
-                // SIGTERM graceful drain (`docs/CLI.md` §6.12, ADR-0003) —
-                // this is the single path a shutdown signal can take out
-                // of this loop, whether it lands mid-backoff, mid-redial
-                // (the `select!` above `dial_and_register`) or here,
-                // mid-serve, so `drain` runs exactly once regardless of
-                // which. `serve_control` keeps running as its own task
-                // through this, so it can still deliver `session.closed`
-                // before the connection closes below.
-                runtime.server.drain().await;
-                conn.close(0, b"shutdown");
-                let _ = serve_control.await;
-                watchdog.abort();
-                return Ok(());
-            }
-            () = watch.dead() => {
-                // No clean QUIC close — the path just went silent
-                // (`docs/design/protocol.md` §10). `serve_control` is
-                // parked on a read that will never complete on its own,
-                // but aborting the *outer* task here would not be enough:
-                // `serve_control`'s own module docs single out that
-                // dropping its `blocking: JoinSet` only *requests* an
-                // abort of the tasks inside it, so a data-stream task
-                // already mid-await on `Sessions::take_lease` could still
-                // apply it after `purge_connection` below runs, pinning a
-                // lease to a dead connection forever. Closing the
-                // connection instead makes `ctl.recv.recv()` return an
-                // error, so `serve_control`'s own loop exits normally and
-                // runs its own `blocking.shutdown().await` — the join
-                // actually happens, and `purge_connection` below only
-                // starts once it has.
-                conn.close(CLOSE_CODE_PATH_DEAD, b"path unresponsive");
-                let _ = (&mut serve_control).await;
-            }
-            joined = &mut serve_control => {
-                let detail = match joined {
-                    Ok(Ok(())) => "connection closed".to_string(),
-                    Ok(Err(err)) => err.to_string(),
-                    Err(join_err) => format!("serve_control task failed: {join_err}"),
-                };
-                tracing::info!(controller, %detail, "qsh reverse: connection to the controller ended");
+        // This connection's own periodic quota-audit flush (main-session
+        // arbitration item 5, S2 deviation 2, design §2.4 path ②): the
+        // forward host's accept loop (`server::Server::run`) already ticks
+        // `Server::quota_housekeeping` on this exact cadence, but this
+        // reconnect loop has no accept loop of its own to hang a tick off
+        // — without this, a quota-rejection window on a target that stays
+        // registered for a long time (no reconnect to trigger
+        // `purge_connection`'s own one-shot flush, path ③) only ever
+        // closes lazily, on the *next* rejection, which once a burst stops
+        // may be never. Same interval, same missed-tick policy as
+        // `Server::run`'s own `audit_flush`.
+        let mut quota_flush = tokio::time::interval(crate::admission::AUDIT_AGGREGATION_WINDOW);
+        quota_flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        'serve: loop {
+            tokio::select! {
+                _ = &mut shutdown => {
+                    // SIGTERM graceful drain (`docs/CLI.md` §6.12, ADR-0003) —
+                    // this is the single path a shutdown signal can take out
+                    // of this loop, whether it lands mid-backoff, mid-redial
+                    // (the `select!` above `dial_and_register`) or here,
+                    // mid-serve, so `drain` runs exactly once regardless of
+                    // which. `serve_control` keeps running as its own task
+                    // through this, so it can still deliver `session.closed`
+                    // before the connection closes below.
+                    runtime.server.drain().await;
+                    conn.close(0, b"shutdown");
+                    let _ = serve_control.await;
+                    watchdog.abort();
+                    // Same path-③ reasoning as `Server::run`'s own
+                    // post-loop call (design §2.4): a shutdown that lands
+                    // mid-window must not strand that window's summary —
+                    // this connection is not reconnecting, so nothing
+                    // else will ever flush it. This is the *only* arm of
+                    // this loop that returns without falling through to
+                    // the shared `purge_connection` call below `'serve:`,
+                    // so call it here explicitly; the other two arms
+                    // (`watch.dead()`, `serve_control` join) `break
+                    // 'serve` into it instead, and must keep doing so —
+                    // this call and that one are not both reached on any
+                    // path.
+                    runtime.server.purge_connection(conn_id).await;
+                    return Ok(());
+                }
+                () = watch.dead() => {
+                    // No clean QUIC close — the path just went silent
+                    // (`docs/design/protocol.md` §10). `serve_control` is
+                    // parked on a read that will never complete on its own,
+                    // but aborting the *outer* task here would not be enough:
+                    // `serve_control`'s own module docs single out that
+                    // dropping its `blocking: JoinSet` only *requests* an
+                    // abort of the tasks inside it, so a data-stream task
+                    // already mid-await on `Sessions::take_lease` could still
+                    // apply it after `purge_connection` below runs, pinning a
+                    // lease to a dead connection forever. Closing the
+                    // connection instead makes `ctl.recv.recv()` return an
+                    // error, so `serve_control`'s own loop exits normally and
+                    // runs its own `blocking.shutdown().await` — the join
+                    // actually happens, and `purge_connection` below only
+                    // starts once it has.
+                    conn.close(CLOSE_CODE_PATH_DEAD, b"path unresponsive");
+                    let _ = (&mut serve_control).await;
+                    break 'serve;
+                }
+                joined = &mut serve_control => {
+                    let detail = match joined {
+                        Ok(Ok(())) => "connection closed".to_string(),
+                        Ok(Err(err)) => err.to_string(),
+                        Err(join_err) => format!("serve_control task failed: {join_err}"),
+                    };
+                    tracing::info!(controller, %detail, "qsh reverse: connection to the controller ended");
+                    break 'serve;
+                }
+                _ = quota_flush.tick() => {
+                    runtime.server.quota_housekeeping();
+                }
             }
         }
         watchdog.abort();

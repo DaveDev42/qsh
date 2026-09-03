@@ -1,23 +1,25 @@
 //! Connection admission control (`PLAN.md` M8 Step 2,
-//! `docs/adr/0009-admission-defenses.md`): the L2-L3 layer of the L0-L5
-//! admission ordering, sitting between quinn's own cheap pre-app shed
-//! (`qsh_transport::endpoint`'s `MAX_INCOMING`/`INCOMING_BUFFER_SIZE`, L0)
-//! and the TLS handshake (L4). Shared by both internet-exposed accept
-//! loops — `crate::server::Server::run` and
-//! `crate::reverse::listen::Listen::run`.
+//! `docs/adr/0009-admission-defenses.md`, extended `PLAN.md` M8 Step 3
+//! P2-3): the L2-L3 layer of the L0-L5 admission ordering, sitting
+//! between quinn's own cheap pre-app shed (`qsh_transport::endpoint`'s
+//! `MAX_INCOMING`/`INCOMING_BUFFER_SIZE`, L0) and the TLS handshake (L4).
+//! Shared by both internet-exposed accept loops —
+//! `crate::server::Server::run` and `crate::reverse::listen::Listen::run`.
 //!
 //! [`Gate`] answers one question, [`Gate::decide`]: for this `Incoming`,
 //! at this moment, is the attempt address-validated and, if so, is there
 //! capacity to run its handshake? The answer is a [`Decision`] the accept
 //! loop maps onto `qsh_transport::Incoming::retry`/`refuse`/`ignore`/
 //! `accept` — `decide` itself never touches the network, a QUIC type, or
-//! an audit sink: it only reads/updates in-memory state (a semaphore, a
-//! count-min sketch, two rejection-aggregation windows) and returns what
-//! happened, including any [`crate::audit::AuditRecord`]s the call site
-//! should write. That split is deliberate: every invariant this module
-//! owns (the cap bites, the rate limit bites and recovers, IPv6 keys by
-//! /64, the table cannot grow) is testable without a network, a clock
-//! that runs in real time, or a fake [`crate::audit::AuditSink`].
+//! an audit sink: it only reads/updates in-memory state (a semaphore, two
+//! independent count-min sketches — one per rate-limit axis, unvalidated
+//! and validated — and three rejection-aggregation windows, one per
+//! [`RejectReason`]) and returns what happened, including any
+//! [`crate::audit::AuditRecord`]s the call site should write. That split
+//! is deliberate: every invariant this module owns (the cap bites, both
+//! rate limits bite and recover independently, IPv6 keys by /64, neither
+//! table can grow) is testable without a network, a clock that runs in
+//! real time, or a fake [`crate::audit::AuditSink`].
 
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hash};
@@ -82,7 +84,7 @@ pub(crate) const AUDIT_AGGREGATION_WINDOW: Duration = Duration::from_secs(10);
 
 /// Why one admission attempt was rejected — also the vocabulary
 /// [`crate::audit::AuditRecord::handshake_rejected`]'s `category` uses for
-/// this module's two rejection kinds (`docs/CLI.md` §6.12).
+/// this module's three rejection kinds (`docs/CLI.md` §6.12).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RejectReason {
     /// The per-source sliding-window rate limit was exceeded by an
@@ -91,15 +93,35 @@ pub enum RejectReason {
     /// The address-validated attempt lost the race for a handshake
     /// permit — [`Gate`]'s concurrency cap is exhausted.
     AtCapacity,
+    /// The per-source sliding-window rate limit was exceeded by an
+    /// address-*validated* attempt (holder of a completed Retry round
+    /// trip) — `PLAN.md` M8 Step 3 P2-3, `docs/adr/0009-admission-
+    /// defenses.md`'s 한계 section. Keyed by the same validated peer
+    /// address, but tracked in its own [`Sketch`] so a spoofed
+    /// unvalidated flood can never collide with (and steal budget from)
+    /// a real validated source.
+    ValidatedRateLimited,
 }
 
 impl RejectReason {
+    /// Every variant, in the same order as [`Gate`]'s `windows` array —
+    /// `reason as usize` indexes into it, so this order and the enum's
+    /// declaration order must stay in lockstep. Used by
+    /// [`Gate::flush_expired`] and by `crates/qsh-core/tests/
+    /// admission_docs.rs`'s doc-drift check.
+    pub const ALL: &'static [RejectReason] = &[
+        RejectReason::RateLimited,
+        RejectReason::AtCapacity,
+        RejectReason::ValidatedRateLimited,
+    ];
+
     /// The audit/log category word (`docs/CLI.md` §6.12: `"rate_limited"`
-    /// / `"at_capacity"`).
+    /// / `"at_capacity"` / `"validated_rate_limited"`).
     pub fn category(self) -> &'static str {
         match self {
             RejectReason::RateLimited => "rate_limited",
             RejectReason::AtCapacity => "at_capacity",
+            RejectReason::ValidatedRateLimited => "validated_rate_limited",
         }
     }
 }
@@ -122,8 +144,11 @@ pub enum Decision {
     /// aggregation), otherwise one or two records (a closed prior
     /// window's summary, then this window's own first-occurrence record).
     Ignore(RejectReason, Vec<AuditRecord>),
-    /// Validated, at the concurrency cap: the caller must `refuse()` the
-    /// attempt. Same aggregation contract as [`Decision::Ignore`].
+    /// Validated, but rejected before/instead of a handshake permit: over
+    /// its own per-source rate limit (`RejectReason::ValidatedRateLimited`,
+    /// P2-3 — never touches the semaphore) or at the concurrency cap
+    /// (`RejectReason::AtCapacity`). Either way the caller must `refuse()`
+    /// the attempt. Same aggregation contract as [`Decision::Ignore`].
     Refuse(RejectReason, Vec<AuditRecord>),
     /// Validated, under the cap: admitted. The permit must be held until
     /// the handshake (`Incoming::accept()`) resolves — success or
@@ -315,9 +340,9 @@ impl Sketch {
 /// [`Gate::flush_expired`] is polled after that same bound — whichever
 /// comes first.
 #[derive(Default)]
-struct WindowState {
-    start: Option<Instant>,
-    suppressed: u32,
+pub(crate) struct WindowState {
+    pub(crate) start: Option<Instant>,
+    pub(crate) suppressed: u32,
 }
 
 /// `start` and `suppressed` live behind **one** lock (verification round
@@ -330,8 +355,25 @@ struct WindowState {
 /// suppressed, maybe reset both" one atomic critical section, so that
 /// interleaving cannot happen. No `.await` is ever held across the lock.
 #[derive(Default)]
-struct AuditWindow {
-    state: Mutex<WindowState>,
+pub(crate) struct AuditWindow {
+    pub(crate) state: Mutex<WindowState>,
+}
+
+#[cfg(test)]
+impl AuditWindow {
+    /// Whether this window is still open (`state.start.is_some()`) —
+    /// test-only, so a pin can assert the window a `flush_expired` just
+    /// closed is *actually* closed (`start` reset to `None`) rather than
+    /// merely re-stamped with a fresh `start` that happens to also pass a
+    /// "was it reported" assertion (`crate::quota`'s twin of this module's
+    /// own `flush_expired`/`WindowState` shape shares this helper).
+    pub(crate) fn is_open(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .start
+            .is_some()
+    }
 }
 
 /// The admission decision-maker: a handshake concurrency permit pool plus
@@ -349,20 +391,27 @@ pub struct Gate {
     handshake_permits: Arc<Semaphore>,
     rate_per_source: u32,
     sketch: Sketch,
-    windows: [AuditWindow; 2],
+    /// P2-3 (`PLAN.md` M8 Step 3, design §2.7): a **second**, independent
+    /// fixed-size sketch keyed by the same validated peer address, so a
+    /// spoofed unvalidated flood can never collide with (and steal
+    /// budget from) a real validated source's counters.
+    validated_sketch: Sketch,
+    validated_rate_per_source: u32,
+    windows: [AuditWindow; 3],
 }
 
 impl Gate {
-    /// Build a gate. `max_concurrent_handshakes`/`rate_per_source` are
-    /// already-defaulted, already-nonzero values
-    /// (`crate::config::ServeConfig::max_concurrent_handshakes`/
-    /// `handshake_rate_per_source` — `0` in config means "use the
-    /// default", never "unlimited", and that degradation happens before
-    /// this constructor is ever called).
+    /// Build a gate. `max_concurrent_handshakes`/`rate_per_source`/
+    /// `validated_rate_per_source` are already-defaulted, already-nonzero
+    /// values (`crate::config::ServeConfig::max_concurrent_handshakes`/
+    /// `handshake_rate_per_source`/`validated_rate_per_source` — `0` in
+    /// config means "use the default", never "unlimited", and that
+    /// degradation happens before this constructor is ever called).
     pub fn new(
         clock: Arc<dyn Clock>,
         max_concurrent_handshakes: usize,
         rate_per_source: u32,
+        validated_rate_per_source: u32,
     ) -> Self {
         let origin = clock.now();
         Self {
@@ -371,7 +420,13 @@ impl Gate {
             handshake_permits: Arc::new(Semaphore::new(max_concurrent_handshakes)),
             rate_per_source,
             sketch: Sketch::new(),
-            windows: [AuditWindow::default(), AuditWindow::default()],
+            validated_sketch: Sketch::new(),
+            validated_rate_per_source,
+            windows: [
+                AuditWindow::default(),
+                AuditWindow::default(),
+                AuditWindow::default(),
+            ],
         }
     }
 
@@ -397,34 +452,32 @@ impl Gate {
     /// or not it acts on the `Decision` synchronously.
     ///
     /// **Ordering this method encodes** (`docs/adr/0009-admission-
-    /// defenses.md`'s L2-L3): unvalidated attempts are checked against
-    /// the rate limit *before* anything capacity-related, so a spoofed
-    /// source that will be `Ignore`d never touches the handshake
-    /// semaphore at all; only an already address-validated attempt
-    /// competes for a permit.
+    /// defenses.md`'s L2-L3, extended by design §2.7 for P2-3): an
+    /// unvalidated attempt is checked against its rate limit *before*
+    /// anything capacity-related, so a spoofed source that will be
+    /// `Ignore`d never touches the handshake semaphore at all. A
+    /// validated attempt is checked against its *own* (separately
+    /// sketched, separately configured) rate limit before it ever
+    /// competes for a permit — the same "rate limit ahead of the
+    /// semaphore" ordering ADR-0009 established, just extended to the
+    /// axis that ADR-0009's 한계 section left open. `RejectReason::
+    /// ValidatedRateLimited` never touches `handshake_permits`.
     pub fn decide(&self, peer: SocketAddr, validated: bool, now: Instant) -> Decision {
         if !validated {
-            let key = SourceKey::from_addr(peer.ip());
-            let elapsed = now.saturating_duration_since(self.origin);
-            let epoch_len = EPOCH.as_secs_f64();
-            let epoch_position = elapsed.as_secs_f64() / epoch_len;
-            let epoch_index = epoch_position as u64;
-            let fraction_into_epoch = epoch_position - epoch_index as f64;
-            let estimate = self
-                .sketch
-                .record_and_estimate(&key, epoch_index, fraction_into_epoch);
-            // The per-epoch budget for a *sustained* `rate_per_source`/s
-            // source (verification round F2): over one `EPOCH`-long
-            // window a sustained source accumulates `rate × EPOCH.as_secs()`
-            // events, so that product — not a separate burst multiplier —
-            // is both the sustained ceiling and the instantaneous-burst
-            // allowance within a single epoch.
-            let burst_limit = self.rate_per_source.saturating_mul(EPOCH.as_secs() as u32);
-            if estimate > burst_limit {
+            if self.rate_exceeded(&self.sketch, self.rate_per_source, peer, now) {
                 let records = self.record_rejection(RejectReason::RateLimited, peer, now);
                 return Decision::Ignore(RejectReason::RateLimited, records);
             }
             return Decision::Retry;
+        }
+        if self.rate_exceeded(
+            &self.validated_sketch,
+            self.validated_rate_per_source,
+            peer,
+            now,
+        ) {
+            let records = self.record_rejection(RejectReason::ValidatedRateLimited, peer, now);
+            return Decision::Refuse(RejectReason::ValidatedRateLimited, records);
         }
         match self.handshake_permits.clone().try_acquire_owned() {
             Ok(permit) => Decision::Admit(permit),
@@ -433,6 +486,31 @@ impl Gate {
                 Decision::Refuse(RejectReason::AtCapacity, records)
             }
         }
+    }
+
+    /// Record one event for `peer` in `sketch` and report whether that
+    /// source is now over `rate`'s per-epoch budget — the shared body
+    /// behind both the unvalidated and the validated rate checks in
+    /// [`Gate::decide`]; only which `sketch`/`rate` pair is passed in
+    /// differs between the two axes. See [`Sketch::record_and_estimate`]
+    /// for the epoch/burst math this wraps.
+    fn rate_exceeded(&self, sketch: &Sketch, rate: u32, peer: SocketAddr, now: Instant) -> bool {
+        let key = SourceKey::from_addr(peer.ip());
+        let elapsed = now.saturating_duration_since(self.origin);
+        let epoch_len = EPOCH.as_secs_f64();
+        let epoch_position = elapsed.as_secs_f64() / epoch_len;
+        let epoch_index = epoch_position as u64;
+        let fraction_into_epoch = epoch_position - epoch_index as f64;
+        let estimate = sketch.record_and_estimate(&key, epoch_index, fraction_into_epoch);
+        // The per-epoch budget for a *sustained* `rate`/s source
+        // (verification round F2, extended unchanged to the validated
+        // axis by design §2.7): over one `EPOCH`-long window a sustained
+        // source accumulates `rate × EPOCH.as_secs()` events, so that
+        // product — not a separate burst multiplier — is both the
+        // sustained ceiling and the instantaneous-burst allowance within
+        // a single epoch.
+        let burst_limit = rate.saturating_mul(EPOCH.as_secs() as u32);
+        estimate > burst_limit
     }
 
     /// The §5 aggregation itself. **Lazy flush**: a window's summary is
@@ -495,9 +573,8 @@ impl Gate {
     /// *next* rejection (if any) is still the one that opens/continues it,
     /// exactly as before this method existed.
     pub fn flush_expired(&self, now: Instant) -> Vec<AuditRecord> {
-        const REASONS: [RejectReason; 2] = [RejectReason::RateLimited, RejectReason::AtCapacity];
         let mut records = Vec::new();
-        for (window, reason) in self.windows.iter().zip(REASONS) {
+        for (window, reason) in self.windows.iter().zip(RejectReason::ALL.iter().copied()) {
             let mut guard = window.state.lock().unwrap_or_else(|e| e.into_inner());
             let Some(start) = guard.start else { continue };
             if now.saturating_duration_since(start) < AUDIT_AGGREGATION_WINDOW {
@@ -517,19 +594,28 @@ impl Gate {
         records
     }
 
-    /// Raw storage-pointer identity of the sketch's backing arrays — the
-    /// measurable proxy [`gate_table_is_constant_size_under_forged_cardinality`]
-    /// uses to demonstrate the table cannot grow: a `Vec`'s data pointer
-    /// only ever changes when it reallocates, and nothing in [`Sketch`]
-    /// ever calls `push`/`resize`/`reserve` on `gens` after
-    /// [`SketchRow::new`] allocates it once at construction — every
-    /// operation past that point indexes into the fixed length. If the
-    /// pointers returned here are bit-identical before and after driving
-    /// [`Gate::decide`] with 10⁵ distinct synthetic sources, the table's
-    /// footprint provably did not move, let alone grow.
+    /// Raw storage-pointer identity of the unvalidated-axis sketch's
+    /// backing arrays — the measurable proxy
+    /// [`gate_table_is_constant_size_under_forged_cardinality`] uses to
+    /// demonstrate the table cannot grow: a `Vec`'s data pointer only
+    /// ever changes when it reallocates, and nothing in [`Sketch`] ever
+    /// calls `push`/`resize`/`reserve` on `gens` after [`SketchRow::new`]
+    /// allocates it once at construction — every operation past that
+    /// point indexes into the fixed length. If the pointers returned here
+    /// are bit-identical before and after driving [`Gate::decide`] with
+    /// 10⁵ distinct synthetic sources, the table's footprint provably did
+    /// not move, let alone grow.
     #[cfg(test)]
     fn sketch_storage_pointers(&self) -> Vec<*const AtomicU32> {
         self.sketch.storage_pointers()
+    }
+
+    /// [`Gate::sketch_storage_pointers`]'s twin for the **validated**-axis
+    /// sketch (P2-3, design §2.7 U17) — the second, independent fixed-size
+    /// table [`Gate::decide`]'s validated branch drives.
+    #[cfg(test)]
+    fn validated_sketch_storage_pointers(&self) -> Vec<*const AtomicU32> {
+        self.validated_sketch.storage_pointers()
     }
 }
 
@@ -567,7 +653,7 @@ mod tests {
     #[tokio::test]
     async fn gate_admits_then_refuses_at_cap() {
         let clock = Arc::new(TestClock::new());
-        let gate = Gate::new(clock.clone(), 2, 10);
+        let gate = Gate::new(clock.clone(), 2, 10, 10);
         let peer = addr(v4(203, 0, 113, 1), 1);
 
         let permit1 = match gate.decide(peer, true, gate.now()) {
@@ -599,7 +685,7 @@ mod tests {
     #[tokio::test]
     async fn gate_releases_permit_on_handshake_completion() {
         let clock = Arc::new(TestClock::new());
-        let gate = Gate::new(clock.clone(), 1, 10);
+        let gate = Gate::new(clock.clone(), 1, 10, 10);
         let peer = addr(v4(203, 0, 113, 2), 1);
 
         let permit = match gate.decide(peer, true, gate.now()) {
@@ -627,7 +713,7 @@ mod tests {
     #[tokio::test]
     async fn gate_throttles_per_source_and_recovers_next_window() {
         let clock = Arc::new(TestClock::new());
-        let gate = Gate::new(clock.clone(), 64, 5); // burst = 10
+        let gate = Gate::new(clock.clone(), 64, 5, 10); // burst = 10
         let peer = addr(v4(198, 51, 100, 7), 4242);
 
         let mut retried = 0;
@@ -665,7 +751,7 @@ mod tests {
     #[tokio::test]
     async fn gate_keys_ipv6_by_64_prefix() {
         let clock = Arc::new(TestClock::new());
-        let gate = Gate::new(clock.clone(), 64, 2); // burst = 4
+        let gate = Gate::new(clock.clone(), 64, 2, 10); // burst = 4
 
         let same_prefix_a = addr(IpAddr::V6("2001:db8:1234:5678::1".parse().unwrap()), 1);
         let same_prefix_b = addr(
@@ -704,7 +790,7 @@ mod tests {
     #[tokio::test]
     async fn gate_table_is_constant_size_under_forged_cardinality() {
         let clock = Arc::new(TestClock::new());
-        let gate = Gate::new(clock.clone(), 64, 10);
+        let gate = Gate::new(clock.clone(), 64, 10, 10);
         let before = gate.sketch_storage_pointers();
 
         const FORGED_SOURCES: u32 = 100_000;
@@ -735,7 +821,7 @@ mod tests {
     #[tokio::test]
     async fn gate_false_positive_rate_under_flood() {
         let clock = Arc::new(TestClock::new());
-        let gate = Gate::new(clock.clone(), 64, 10); // burst = 20
+        let gate = Gate::new(clock.clone(), 64, 10, 10); // burst = 20
         let now = gate.now();
 
         const FORGED_SOURCES: u32 = 5_000;
@@ -787,7 +873,7 @@ mod tests {
     #[tokio::test]
     async fn unvalidated_peer_never_touches_the_permit_pool_even_at_cap_zero() {
         let clock = Arc::new(TestClock::new());
-        let gate = Gate::new(clock.clone(), 0, 10);
+        let gate = Gate::new(clock.clone(), 0, 10, 10);
         let peer = addr(v4(198, 51, 100, 20), 1);
 
         let before = gate.available_permits();
@@ -834,7 +920,7 @@ mod tests {
         let clock = Arc::new(TestClock::new());
         // cap=0: every attempt is a deterministic AtCapacity rejection —
         // no rate-limit interaction to account for.
-        let gate = Gate::new(clock.clone(), 0, 10);
+        let gate = Gate::new(clock.clone(), 0, 10, 10);
         let peer = addr(v4(198, 51, 100, 21), 1);
 
         const REJECTIONS: usize = 7;
@@ -894,7 +980,7 @@ mod tests {
     #[tokio::test]
     async fn gate_rate_limit_bounds_sustained_rate_not_just_instantaneous_burst() {
         let clock = Arc::new(TestClock::new());
-        let gate = Gate::new(clock.clone(), 64, 10); // burst_limit = 20
+        let gate = Gate::new(clock.clone(), 64, 10, 10); // burst_limit = 20
         let five_per_sec = addr(v4(198, 51, 100, 22), 1);
         let burst_peer = addr(v4(198, 51, 100, 23), 1);
         let fifteen_per_sec = addr(v4(198, 51, 100, 24), 1);
@@ -975,7 +1061,7 @@ mod tests {
         let clock = Arc::new(TestClock::new());
         // cap=0: every validated attempt is a deterministic AtCapacity
         // rejection.
-        let gate = Gate::new(clock.clone(), 0, 10);
+        let gate = Gate::new(clock.clone(), 0, 10, 10);
         let peer = addr(v4(198, 51, 100, 30), 1);
 
         // Window 1: 3 rejections — 1 first-occurrence row + 2 suppressed.
@@ -1076,5 +1162,325 @@ mod tests {
             }
             other => panic!("expected Refuse(AtCapacity), got {}", decision_kind(&other)),
         }
+    }
+
+    /// `PLAN.md` M8 Step 3 P2-3 (design §4.3, U15) — the validated-axis
+    /// rate limiter sits *ahead* of the handshake semaphore, exactly the
+    /// `AtCapacity` axis's own ordering: an attempt that loses only to
+    /// its own rate budget must never dent `available_permits()`.
+    #[tokio::test]
+    async fn validated_rate_limit_rejects_without_taking_a_permit() {
+        let clock = Arc::new(TestClock::new());
+        let gate = Gate::new(clock.clone(), 64, 10, 5); // validated burst = 10
+        let peer = addr(v4(203, 0, 113, 40), 1);
+
+        let mut held_permits = Vec::new();
+        for i in 1..=10 {
+            match gate.decide(peer, true, gate.now()) {
+                Decision::Admit(p) => held_permits.push(p),
+                other => panic!(
+                    "attempt {i}/10 within the validated burst must be Admit, got {}",
+                    decision_kind(&other)
+                ),
+            }
+        }
+        let permits_before = gate.available_permits();
+
+        match gate.decide(peer, true, gate.now()) {
+            Decision::Refuse(RejectReason::ValidatedRateLimited, records) => {
+                assert_eq!(records.len(), 1);
+                assert_eq!(records[0].resource, "validated_rate_limited");
+                assert_eq!(records[0].peer_addr, peer.to_string());
+                assert!(
+                    records[0].count.is_none(),
+                    "first rejection carries no count"
+                );
+            }
+            other => panic!(
+                "the 11th validated attempt within one epoch must be \
+                 Refuse(ValidatedRateLimited), got {}",
+                decision_kind(&other)
+            ),
+        }
+        assert_eq!(
+            gate.available_permits(),
+            permits_before,
+            "a validated-rate rejection must never touch the handshake permit pool"
+        );
+        drop(held_permits);
+    }
+
+    /// `validated_rate_limit_rejects_without_taking_a_permit` only compares
+    /// `available_permits()` *before* and *after* the call, which cannot
+    /// tell "never acquired" apart from "acquired, then released on the
+    /// way out" — this one watches the pool *during* a validated-rate
+    /// flood: with `validated_rate_per_source = 0` every validated attempt
+    /// is a rate-axis rejection, so the single handshake permit must read
+    /// `1` at every instant a concurrent reader samples it. Capped at a
+    /// fixed iteration count (well under the adversarial source's
+    /// 2,000,000) so it runs in well under a second.
+    #[test]
+    fn validated_rate_rejection_never_dips_the_permit_pool_even_transiently() {
+        const SAMPLES: usize = 200_000;
+
+        let clock = Arc::new(TestClock::new());
+        let gate = Arc::new(Gate::new(clock.clone(), 1, 10, 0));
+        let peer = addr(v4(198, 51, 100, 77), 1);
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let flood_gate = Arc::clone(&gate);
+        let flood_stop = Arc::clone(&stop);
+        let flooder = std::thread::spawn(move || {
+            while !flood_stop.load(Ordering::Relaxed) {
+                let now = flood_gate.now();
+                match flood_gate.decide(peer, true, now) {
+                    Decision::Refuse(RejectReason::ValidatedRateLimited, _) => {}
+                    other => panic!(
+                        "every validated attempt at rate 0 must be \
+                         ValidatedRateLimited, got {}",
+                        decision_kind(&other)
+                    ),
+                }
+            }
+        });
+
+        let mut dips = 0usize;
+        for _ in 0..SAMPLES {
+            if gate.available_permits() != 1 {
+                dips += 1;
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        flooder.join().unwrap();
+        assert_eq!(
+            dips, 0,
+            "a validated-rate rejection must never take a handshake permit, \
+             not even transiently"
+        );
+    }
+
+    /// `PLAN.md` M8 Step 3 P2-3 (design §4.3, U16), both directions: the
+    /// two axes are tracked in genuinely independent `Sketch`es, so a
+    /// flood on one axis from a given address never spends the other
+    /// axis's budget for that same address.
+    #[tokio::test]
+    async fn unvalidated_flood_does_not_consume_a_validated_sources_budget() {
+        let clock = Arc::new(TestClock::new());
+        let gate = Gate::new(clock.clone(), 64, 5, 5); // both bursts = 10
+        let peer = addr(v4(203, 0, 113, 41), 1);
+
+        // Flood the unvalidated axis well past its own burst from this
+        // address — the validated axis must not notice.
+        for _ in 0..15 {
+            let _ = gate.decide(peer, false, gate.now());
+        }
+        match gate.decide(peer, true, gate.now()) {
+            Decision::Admit(_) => {}
+            other => panic!(
+                "a validated attempt from an address that only flooded the unvalidated \
+                 axis must still be Admit, got {}",
+                decision_kind(&other)
+            ),
+        }
+
+        // And the reverse: flood a fresh address's validated axis past
+        // its own burst — the unvalidated axis for that same address
+        // must still see a clean slate.
+        let other_peer = addr(v4(203, 0, 113, 43), 1);
+        for _ in 0..15 {
+            let _ = gate.decide(other_peer, true, gate.now());
+        }
+        match gate.decide(other_peer, false, gate.now()) {
+            Decision::Retry => {}
+            other => panic!(
+                "an unvalidated attempt from an address that only flooded the validated \
+                 axis must still be Retry, got {}",
+                decision_kind(&other)
+            ),
+        }
+    }
+
+    /// `PLAN.md` M8 Step 3 P2-3 (design §4.3, U17) — the validated-axis
+    /// sketch's twin of `gate_table_is_constant_size_under_forged_cardinality`:
+    /// its backing storage must never reallocate regardless of how many
+    /// distinct validated addresses an attacker forges.
+    #[tokio::test]
+    async fn validated_rate_state_is_constant_size_under_forged_cardinality() {
+        let clock = Arc::new(TestClock::new());
+        let gate = Gate::new(clock.clone(), 64, 10, 10);
+        let before = gate.validated_sketch_storage_pointers();
+
+        const FORGED_SOURCES: u32 = 100_000;
+        for i in 0..FORGED_SOURCES {
+            let ip = v4((i >> 24) as u8, (i >> 16) as u8, (i >> 8) as u8, i as u8);
+            let peer = addr(ip, 1);
+            let _ = gate.decide(peer, true, gate.now());
+        }
+
+        let after = gate.validated_sketch_storage_pointers();
+        assert_eq!(
+            before, after,
+            "the validated-axis sketch's backing storage must never reallocate, \
+             regardless of source cardinality"
+        );
+    }
+
+    /// `PLAN.md` M8 Step 3 P2-3 (design §4.3, U18) — pins the documented
+    /// default (`[serve].validated_rate_per_source = 10`, `docs/CLI.md`
+    /// §6.12): a sustained validated source at exactly the burst ceiling
+    /// (20 within one epoch, same `rate × EPOCH.as_secs()` formula as the
+    /// unvalidated axis) always passes, and the 21st trips
+    /// `ValidatedRateLimited`.
+    #[tokio::test]
+    async fn validated_rate_threshold_matches_the_documented_sustained_rate() {
+        let clock = Arc::new(TestClock::new());
+        let gate = Gate::new(
+            clock.clone(),
+            64,
+            10,
+            crate::config::ServeConfig::DEFAULT_VALIDATED_RATE_PER_SOURCE,
+        );
+        let peer = addr(v4(203, 0, 113, 42), 1);
+        let mut held_permits = Vec::new();
+
+        for i in 1..=20 {
+            match gate.decide(peer, true, gate.now()) {
+                Decision::Admit(p) => held_permits.push(p),
+                other => panic!(
+                    "attempt {i}/20 at the documented default validated rate must be \
+                     Admit, got {}",
+                    decision_kind(&other)
+                ),
+            }
+        }
+        match gate.decide(peer, true, gate.now()) {
+            Decision::Refuse(RejectReason::ValidatedRateLimited, _) => {}
+            other => panic!(
+                "the 21st validated attempt at the documented default (10/s, burst 20) \
+                 must be ValidatedRateLimited, got {}",
+                decision_kind(&other)
+            ),
+        }
+        drop(held_permits);
+    }
+
+    /// `PLAN.md` M8 Step 3, verdict ruling 10's U18 twin (F3 of the M8
+    /// Step 3a conformance sweep — `validated_rate_threshold_matches_
+    /// the_documented_sustained_rate` above proves only the validated
+    /// axis, at a single instant; the ADR-0010 draft cited it as the
+    /// two-axis cadence pin, which it is not). One source dials at a
+    /// truly *sustained* 10/s — one dial every `EPOCH / RATE` (100 ms),
+    /// not `RATE * EPOCH.as_secs()` (20) dials bursted at each epoch
+    /// boundary — across several epochs, each dial driving *both* axes
+    /// the way a real client does: `decide(peer, false, …)` (Initial,
+    /// always `Retry` below the unvalidated ceiling) followed by
+    /// `decide(peer, true, …)` (post-Retry-roundtrip, `Admit` below the
+    /// validated ceiling, permit dropped immediately — a completed
+    /// handshake, not a held one).
+    ///
+    /// The even spacing matters, not just the total: [`Sketch::
+    /// record_and_estimate`]'s two-generation estimator weights the
+    /// *previous* epoch's count by `1 - fraction_into_epoch`, so 20
+    /// events bursted at one epoch's very start followed by 20 more
+    /// bursted at the very next epoch's start would double-count (the new
+    /// epoch's first event already sees the full, undecayed previous
+    /// count) — correctly rejecting a burst that only *looks* like two
+    /// separate epochs' worth of budget, but not what "sustained 10/s"
+    /// means. Spreading the same total count evenly is what a genuinely
+    /// paced dialer looks like, and neither axis may ever reject it — a
+    /// coupling regression between the two independently-sketched axes,
+    /// or an off-by-one in the sliding-window math, would show up here
+    /// even though it passes U18 (which never calls `TestClock::advance`
+    /// at all).
+    #[tokio::test]
+    async fn one_source_dialing_at_a_sustained_rate_passes_both_axes_across_epochs() {
+        let clock = Arc::new(TestClock::new());
+        let gate = Gate::new(clock.clone(), 64, 10, 10);
+        let peer = addr(v4(203, 0, 113, 44), 1);
+
+        const RATE_PER_SEC: u32 = 10;
+        const EPOCHS: u32 = 4;
+        let dial_interval = EPOCH / RATE_PER_SEC;
+        let total_dials = RATE_PER_SEC * EPOCHS * (EPOCH.as_secs() as u32);
+
+        for dial in 1..=total_dials {
+            match gate.decide(peer, false, gate.now()) {
+                Decision::Retry => {}
+                other => panic!(
+                    "dial {dial}/{total_dials}: the unvalidated axis of a sustained \
+                     10/s dialer must stay Retry, got {}",
+                    decision_kind(&other)
+                ),
+            }
+            match gate.decide(peer, true, gate.now()) {
+                Decision::Admit(permit) => drop(permit),
+                other => panic!(
+                    "dial {dial}/{total_dials}: the validated axis of a sustained \
+                     10/s dialer must stay Admit, got {}",
+                    decision_kind(&other)
+                ),
+            }
+            clock.advance(dial_interval);
+        }
+    }
+
+    /// `PLAN.md` M8 Step 3 P2-3 — the `ValidatedRateLimited` category's
+    /// audit shares the exact first-row-then-summary aggregation contract
+    /// every other `RejectReason` already has
+    /// (`gate_flush_expired_emits_exactly_one_summary_after_the_window_closes`'s
+    /// twin), pinned independently for the new category and window slot.
+    #[tokio::test]
+    async fn validated_rate_limited_rejections_aggregate_into_first_row_then_summary() {
+        let clock = Arc::new(TestClock::new());
+        // validated_rate_per_source = 0: burst = 0, so every validated
+        // attempt is a deterministic ValidatedRateLimited rejection —
+        // same pattern the existing cap=0 AtCapacity tests use, just on
+        // the rate axis instead of the semaphore.
+        let gate = Gate::new(clock.clone(), 64, 10, 0);
+        let peer = addr(v4(198, 51, 100, 50), 1);
+
+        const REJECTIONS: usize = 5;
+        for i in 0..REJECTIONS {
+            match gate.decide(peer, true, gate.now()) {
+                Decision::Refuse(RejectReason::ValidatedRateLimited, records) => {
+                    if i == 0 {
+                        assert_eq!(records.len(), 1, "the first rejection carries its own row");
+                        assert_eq!(records[0].resource, "validated_rate_limited");
+                        assert_eq!(records[0].peer_addr, peer.to_string());
+                        assert!(records[0].count.is_none());
+                    } else {
+                        assert!(
+                            records.is_empty(),
+                            "further rejections in the same window are suppressed, not \
+                             re-reported: {records:?}"
+                        );
+                    }
+                }
+                other => panic!(
+                    "expected Refuse(ValidatedRateLimited), got {}",
+                    decision_kind(&other)
+                ),
+            }
+        }
+
+        assert!(
+            gate.flush_expired(gate.now()).is_empty(),
+            "flush_expired must not fire before the window has run past \
+             AUDIT_AGGREGATION_WINDOW"
+        );
+
+        clock.advance(AUDIT_AGGREGATION_WINDOW + Duration::from_secs(1));
+        let flushed = gate.flush_expired(gate.now());
+        assert_eq!(
+            flushed.len(),
+            1,
+            "expected exactly one summary record, got {flushed:?}"
+        );
+        assert_eq!(flushed[0].resource, "validated_rate_limited");
+        assert_eq!(flushed[0].count, Some((REJECTIONS - 1) as u32));
+        assert_eq!(
+            flushed[0].peer_addr, "-",
+            "the summary row never carries an observed address"
+        );
     }
 }

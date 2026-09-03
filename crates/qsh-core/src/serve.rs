@@ -193,8 +193,26 @@ pub fn host_runtime(paths: &Paths, config: &Config, device_id: impl Into<String>
         Arc::new(SystemClock),
         config.serve.max_concurrent_handshakes(),
         config.serve.handshake_rate_per_source(),
+        config.serve.validated_rate_per_source(),
     );
-    let server = Server::with_admission(authorizer, audit.clone(), broker, device_id, admission);
+    // `PLAN.md` M8 Step 3: the same operator-configured `[serve]` quota
+    // limits the broker above already resolved via `BrokerConfig::
+    // from_serve` (session-count axes), so the `Server`'s own quota
+    // tracker (`exec.run` concurrency + every axis's audit-aggregation
+    // window, `crate::quota` module doc) sees the identical values instead
+    // of `QuotaLimits::default`.
+    let quotas = crate::quota::Quotas::new(
+        crate::quota::QuotaLimits::from_serve(&config.serve),
+        Arc::new(SystemClock),
+    );
+    let server = Server::with_admission_and_quotas(
+        authorizer,
+        audit.clone(),
+        broker,
+        device_id,
+        admission,
+        quotas,
+    );
     HostRuntime {
         server,
         audit,

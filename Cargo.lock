@@ -2177,6 +2177,7 @@ dependencies = [
  "qsh-core",
  "qsh-proto",
  "qsh-transport",
+ "quinn",
  "rcgen",
  "serde_json",
  "tempfile",

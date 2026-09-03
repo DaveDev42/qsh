@@ -203,6 +203,7 @@ impl Rig {
                 replay_bytes: 64 * 1024,
                 resume_ttl: Duration::from_secs(3600),
                 close_grace: Duration::from_millis(100),
+                quota_limits: qsh_core::quota::QuotaLimits::default(),
             },
             pipes.clone(),
         );

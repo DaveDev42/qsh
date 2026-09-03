@@ -29,7 +29,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use qsh_proto::ErrorCode;
@@ -228,12 +228,33 @@ impl ConnCtx {
 }
 
 /// An authorized exec waiting for its data stream.
-#[derive(Debug, Clone)]
+///
+/// Not [`Clone`] (as of `PLAN.md` M8 Step 3): [`Self::permit`] is an RAII
+/// reservation ([`crate::quota::ExecPermit`]), and nothing in this crate
+/// ever actually clones a [`Ticket`]/[`TicketPurpose`]/`PendingExec`
+/// (confirmed by grep before dropping the derive) — cloning one would
+/// double-count the reservation it represents.
+#[derive(Debug)]
 pub struct PendingExec {
     /// Opaque exec identifier (ULID).
     pub exec_id: String,
     /// What to run once the stream arrives.
     pub spec: ExecSpec,
+    /// The `exec.run` concurrency slot this ticket holds
+    /// (`[serve].max_exec_per_principal`, verdict arbitration item 5).
+    /// Reserved in [`Server::handle_exec_start`] before the ticket is
+    /// issued; released by `Drop` whenever this value's last owner goes
+    /// away — the ticket map's lazy/periodic/`purge_connection` expiry
+    /// sweeps ([`Server::issue_ticket`], [`Server::pending_tickets_for`],
+    /// [`Server::purge_connection`]) all drop it the same way an
+    /// unredeemed ticket is dropped, and a *redeemed* ticket's
+    /// [`TicketPurpose::Exec`] moves it into the data-stream task that
+    /// runs the child, so it releases when that task's `run_exec(..)` call
+    /// returns — child exit or spawn failure alike, since
+    /// [`crate::exec::run_exec`] reports a spawn failure as an `Ok`
+    /// outcome (shell-convention exit code) rather than an early `Err`
+    /// that would skip straight past the drop.
+    pub permit: crate::quota::ExecPermit,
 }
 
 /// An authorized `session.write` whose bytes have not reached the child
@@ -248,7 +269,9 @@ pub struct PendingWrite {
 }
 
 /// What a ticket authorizes once a data stream redeems it.
-#[derive(Debug, Clone)]
+///
+/// Not [`Clone`] — see [`PendingExec`]'s own doc.
+#[derive(Debug)]
 pub enum TicketPurpose {
     /// An `EXEC_DATA` stream for this exec.
     Exec(PendingExec),
@@ -293,7 +316,9 @@ impl TicketPurpose {
 }
 
 /// An issued, unredeemed ticket.
-#[derive(Debug, Clone)]
+///
+/// Not [`Clone`] — see [`PendingExec`]'s own doc.
+#[derive(Debug)]
 pub struct Ticket {
     /// What redeeming it authorizes.
     pub purpose: TicketPurpose,
@@ -400,6 +425,19 @@ pub struct Server {
     /// builds one from the operator's actual config via
     /// [`Server::with_admission`].
     admission: crate::admission::Gate,
+    /// Post-authorization resource quotas (`PLAN.md` M8 Step 3, `docs/adr/
+    /// 0010-resource-quotas.md`) — the `exec.run` concurrency reservation
+    /// ([`Self::handle_exec_start`]) plus the shared audit-aggregation
+    /// windows for every [`crate::quota::QuotaKind`], including the
+    /// session-count axes `crate::broker::Broker` enforces from its own
+    /// registry ([`Self::handle_session_open`] turns a returned
+    /// `BrokerError::QuotaExceeded` into the audited rejection here, since
+    /// the broker itself never touches an [`AuditSink`]). Defaulted by
+    /// [`Server::new`]/[`Server::with_admission`]; production
+    /// (`crate::serve::host_runtime`) instead builds one from the
+    /// operator's actual `[serve]` limits via
+    /// [`Server::with_admission_and_quotas`].
+    quotas: Arc<crate::quota::Quotas>,
 }
 
 /// [`Server`]'s own write access to the trust store (to pin a
@@ -421,6 +459,32 @@ impl std::fmt::Debug for Server {
     }
 }
 
+/// [`Server::lock_tickets`]'s return type — a `self.tickets.lock()`
+/// `MutexGuard`, plus (under `#[cfg(test)]`) a
+/// [`crate::quota::lock_order::NonLeafGuard`] marking this thread as
+/// inside a non-leaf lock scope for as long as the guard lives. Field
+/// order is deliberate: the `MutexGuard` drops first, the `NonLeafGuard`
+/// second — see `lock_tickets`'s own doc.
+struct TicketsGuard<'a> {
+    guard: MutexGuard<'a, HashMap<[u8; TICKET_LEN], Ticket>>,
+    #[cfg(test)]
+    _non_leaf: crate::quota::lock_order::NonLeafGuard,
+}
+
+impl std::ops::Deref for TicketsGuard<'_> {
+    type Target = HashMap<[u8; TICKET_LEN], Ticket>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.guard
+    }
+}
+
+impl std::ops::DerefMut for TicketsGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.guard
+    }
+}
+
 impl Server {
     /// Build a server with the given policy, audit sink and session
     /// backend.
@@ -434,6 +498,7 @@ impl Server {
             Arc::new(crate::broker::SystemClock),
             crate::config::ServeConfig::DEFAULT_MAX_CONCURRENT_HANDSHAKES,
             crate::config::ServeConfig::DEFAULT_HANDSHAKE_RATE_PER_SOURCE,
+            crate::config::ServeConfig::DEFAULT_VALIDATED_RATE_PER_SOURCE,
         );
         Self::with_admission(authorizer, audit, sessions, device_name, admission)
     }
@@ -457,6 +522,29 @@ impl Server {
         device_name: impl Into<String>,
         admission: crate::admission::Gate,
     ) -> Arc<Self> {
+        let quotas = crate::quota::Quotas::new(
+            crate::quota::QuotaLimits::default(),
+            Arc::new(crate::broker::SystemClock),
+        );
+        Self::with_admission_and_quotas(authorizer, audit, sessions, device_name, admission, quotas)
+    }
+
+    /// [`Server::with_admission`] plus explicit [`crate::quota::Quotas`] —
+    /// `crate::serve::host_runtime` uses this to build the quota tracker
+    /// from the operator's actual `[serve].max_sessions`/
+    /// `max_sessions_per_principal`/`max_exec_per_principal` (`PLAN.md` M8
+    /// Step 3) instead of [`crate::quota::QuotaLimits::default`]. A
+    /// separate constructor for the same reason [`Server::with_admission`]
+    /// itself is one and not a parameter on [`Server::new`]: every other
+    /// call site has no need for anything but the default limits.
+    pub fn with_admission_and_quotas(
+        authorizer: Arc<dyn Authorizer>,
+        audit: Arc<dyn AuditSink>,
+        sessions: Arc<dyn SessionBackend>,
+        device_name: impl Into<String>,
+        admission: crate::admission::Gate,
+        quotas: Arc<crate::quota::Quotas>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             authorizer,
             audit,
@@ -467,6 +555,7 @@ impl Server {
             draining: AtomicBool::new(false),
             pairing: OnceLock::new(),
             admission,
+            quotas,
         })
     }
 
@@ -509,18 +598,44 @@ impl Server {
         &self.sessions
     }
 
+    /// The one choke point for every `self.tickets.lock()` acquisition
+    /// (M8 Step 3a fix-3 sweep, B4): `TicketsGuard`'s field order —
+    /// `MutexGuard` first, [`crate::quota::lock_order::NonLeafGuard`]
+    /// second, `#[cfg(test)]` only — is how `docs/adr/0010-resource-
+    /// quotas.md` §9's "collect under the guard, drop outside" rule is
+    /// enforced mechanically in tests: Rust drops a struct's fields in
+    /// declaration order, so the mutex releases first and the depth
+    /// tracked for [`crate::quota::ExecPermit`]'s own `Drop` to check is
+    /// only decremented after that — an `ExecPermit` dropped while any
+    /// copy of this guard is still alive on this thread is exactly the
+    /// ordering violation the rule forbids.
+    fn lock_tickets(&self) -> TicketsGuard<'_> {
+        TicketsGuard {
+            guard: self.tickets.lock().unwrap_or_else(|e| e.into_inner()),
+            #[cfg(test)]
+            _non_leaf: crate::quota::lock_order::NonLeafGuard::new(),
+        }
+    }
+
     /// Number of tickets currently outstanding (tests/diagnostics).
     pub fn pending_tickets(&self) -> usize {
-        self.tickets.lock().unwrap_or_else(|e| e.into_inner()).len()
+        self.lock_tickets().len()
     }
 
     /// Number of unexpired tickets outstanding for `conn_id`. Expired
     /// entries are dropped on the way so a stale backlog never counts.
     fn pending_tickets_for(&self, conn_id: usize) -> usize {
-        let mut tickets = self.tickets.lock().unwrap_or_else(|e| e.into_inner());
+        let mut tickets = self.lock_tickets();
         let now = Instant::now();
-        tickets.retain(|_, p| p.expires_at > now);
-        tickets.values().filter(|p| p.conn_id == conn_id).count()
+        let expired = extract_tickets(&mut tickets, |p| p.expires_at > now);
+        let count = tickets.values().filter(|p| p.conn_id == conn_id).count();
+        drop(tickets);
+        // `expired`'s removed `Ticket`s (and any `ExecPermit`s inside)
+        // drop here, after the tickets lock above has already been
+        // released (main-session arbitration item 2, F7 of the M8 Step 3a
+        // conformance sweep: "collect under the guard, drop outside").
+        drop(expired);
+        count
     }
 
     // ------------------------------------------------------------------
@@ -911,16 +1026,28 @@ impl Server {
             );
         }
 
-        // ---- Resource bound: no more outstanding tickets for this peer. ----
-        if let Err(reply) = self.check_ticket_budget(ctx, request_id) {
-            return *reply;
-        }
-
         // ---- ACL choke point: decide + audit BEFORE any resource. ----
         if let Err(denied) =
             self.authorize(ctx, request_id, crate::acl::Op::ExecRun.action(), "exec")
         {
             return *denied;
+        }
+
+        // ---- Resource bound: no more outstanding tickets for this peer. ----
+        //
+        // After the ACL choke point above (main-session arbitration round,
+        // item 3), *not* ahead of it the way the M8 Step 3a conformance
+        // sweep's F4 had left it: `check_ticket_budget` creates nothing —
+        // there was never a "never create a resource before authorization"
+        // reason to run it first — and putting any capacity check ahead of
+        // ACL makes `RESOURCE_EXHAUSTED` vs. `PERMISSION_DENIED` a
+        // same-connection oracle for whether the *caller's own* prior
+        // requests are what is being counted, which an unauthorized
+        // principal has no business learning either way.
+        // `exec_ticket_budget_follows_the_acl_choke_point_on_the_same_
+        // connection` below pins the order this call site now has.
+        if let Err(reply) = self.check_ticket_budget(ctx, request_id) {
+            return *reply;
         }
 
         // ---- Drain gate (CLI.md §6.12, ADR-0003): after the ACL decision,
@@ -930,6 +1057,30 @@ impl Server {
         if let Err(reply) = self.require_not_draining(request_id) {
             return *reply;
         }
+
+        // ---- exec.run concurrency quota (`[serve].max_exec_per_principal`,
+        // verdict arbitration item 5): after the ACL decision (an
+        // unauthorized principal must see `PERMISSION_DENIED`, never a
+        // quota oracle), before anything is issued. The ticket budget above
+        // only bounds *unredeemed* tickets — a principal that keeps
+        // redeeming and reaping children never accumulates an unbounded
+        // backlog through that alone, so this reserves against *live*
+        // children instead. ----
+        let opener = opener_key(&ctx.principal, ctx.auth_path);
+        let permit = match self.quotas.reserve_exec(&opener) {
+            Ok(permit) => permit,
+            Err(kind) => {
+                let records = self.quotas.record_rejection(
+                    kind,
+                    &opener,
+                    self.quotas.now(),
+                    request_id,
+                    ctx.auth_path,
+                );
+                crate::audit::write_quota_audit(self.audit.as_ref(), &records);
+                return broker_error(request_id, BrokerError::QuotaExceeded(kind));
+            }
+        };
 
         // ---- Allowed: issue a single-use ticket. Nothing spawned yet. ----
         let spec = ExecSpec {
@@ -947,6 +1098,7 @@ impl Server {
             TicketPurpose::Exec(PendingExec {
                 exec_id: exec_id.clone(),
                 spec,
+                permit,
             }),
         );
         tracing::info!(
@@ -1086,9 +1238,6 @@ impl Server {
         let Some((cols, rows)) = window_size(req.cols, req.rows) else {
             return invalid_argument(request_id, "cols/rows must fit in 16 bits");
         };
-        if let Err(reply) = self.check_ticket_budget(ctx, request_id) {
-            return *reply;
-        }
 
         // ---- ACL choke point: decide + audit BEFORE any resource. ----
         if let Err(denied) = self.authorize(
@@ -1107,6 +1256,31 @@ impl Server {
         // earlier, and doing so would make `RESOURCE_EXHAUSTED` vs.
         // `PERMISSION_DENIED` an oracle for host shutdown state. ----
         if let Err(reply) = self.require_not_draining(request_id) {
+            return *reply;
+        }
+
+        // ---- Resource bound: no more outstanding tickets for this peer. ----
+        //
+        // After the ACL choke point above (main-session arbitration round,
+        // item 3) — not ahead of it the way the M8 Step 3a conformance
+        // sweep had instead left this call site (adversary finding A1):
+        // `check_ticket_budget` creates nothing, so there was never a
+        // "never create a resource before authorization" reason to run it
+        // first, and putting any capacity check ahead of ACL makes
+        // `RESOURCE_EXHAUSTED` vs. `PERMISSION_DENIED` a same-connection
+        // oracle for whether the *caller's own* prior requests are what is
+        // being counted, which an unauthorized principal has no business
+        // learning either way. Placed after the drain gate immediately
+        // above, matching `session.attach`'s own ACL → drain → ticket-
+        // budget order (see that handler's "same reasoning as
+        // exec.run/session.open" comment) rather than `exec.run`'s ACL →
+        // ticket-budget → drain order — `session.open` and
+        // `session.attach` share a drain-gate rationale that `exec.run`
+        // does not, so the two session ops stay in lockstep with each
+        // other here.
+        // `session_open_ticket_budget_follows_the_acl_choke_point_on_the_
+        // same_connection` below pins the order this call site now has.
+        if let Err(reply) = self.check_ticket_budget(ctx, request_id) {
             return *reply;
         }
 
@@ -1144,11 +1318,29 @@ impl Server {
         // 3.5 PR②) — `session.write`/`session.resize` bind to it from here
         // on. `opener_key`, not `ctx.principal.to_string()` alone: see its
         // doc comment.
-        let session_id = match self
-            .sessions
-            .open(&spec, &opener_key(&ctx.principal, ctx.auth_path))
-        {
+        let opener = opener_key(&ctx.principal, ctx.auth_path);
+        let session_id = match self.sessions.open(&spec, &opener) {
             Ok(id) => id,
+            // A session-count quota (`[serve].max_sessions`/
+            // `max_sessions_per_principal`, `PLAN.md` M8 Step 3) was
+            // already saturated when `Broker::open` reserved a slot for
+            // this opener — reached strictly after the ACL `allow` above
+            // was decided and audited, so this can never substitute for a
+            // `PERMISSION_DENIED` an unauthorized principal should have
+            // seen instead. The broker itself never touches an
+            // `AuditSink` (`crate::quota` is leaf-most/connection-agnostic
+            // — architecture.md §1), so the rejection is recorded here.
+            Err(BrokerError::QuotaExceeded(kind)) => {
+                let records = self.quotas.record_rejection(
+                    kind,
+                    &opener,
+                    self.quotas.now(),
+                    request_id,
+                    ctx.auth_path,
+                );
+                crate::audit::write_quota_audit(self.audit.as_ref(), &records);
+                return broker_error(request_id, BrokerError::QuotaExceeded(kind));
+            }
             Err(err) => return broker_error(request_id, err),
         };
         let ticket = self.issue_ticket(
@@ -1815,17 +2007,22 @@ impl Server {
             conn_id,
             expires_at: Instant::now() + TICKET_TTL,
         };
-        let mut tickets = self.tickets.lock().unwrap_or_else(|e| e.into_inner());
+        let mut tickets = self.lock_tickets();
         let now = Instant::now();
-        tickets.retain(|_, p| p.expires_at > now);
-        loop {
+        let expired = extract_tickets(&mut tickets, |p| p.expires_at > now);
+        let ticket = loop {
             let mut ticket = [0u8; TICKET_LEN];
             rand::rng().fill_bytes(&mut ticket);
             if let std::collections::hash_map::Entry::Vacant(slot) = tickets.entry(ticket) {
                 slot.insert(pending);
-                return ticket;
+                break ticket;
             }
-        }
+        };
+        drop(tickets);
+        // Same "collect under the guard, drop outside" discipline as
+        // `pending_tickets_for` — see `extract_tickets`'s own doc.
+        drop(expired);
+        ticket
     }
 
     /// Redeem a ticket presented on `conn_id` by a stream of `kind`.
@@ -1834,11 +2031,45 @@ impl Server {
     /// connection, or issued for a different stream kind.
     pub fn redeem_ticket(&self, conn_id: usize, kind: StreamKind, ticket: &[u8]) -> Option<Ticket> {
         let key: [u8; TICKET_LEN] = ticket.try_into().ok()?;
-        let mut tickets = self.tickets.lock().unwrap_or_else(|e| e.into_inner());
+        let mut tickets = self.lock_tickets();
         let matches = tickets.get(&key).is_some_and(|p| {
             p.conn_id == conn_id && p.expires_at > Instant::now() && p.purpose.stream_kind() == kind
         });
         if matches { tickets.remove(&key) } else { None }
+    }
+
+    /// Periodic and last-chance quota housekeeping shared by
+    /// [`Server::run`]'s own periodic tick, its post-loop shutdown call,
+    /// [`Server::purge_connection`] (design §2.4 path ③), and
+    /// `reverse::target`'s per-connection tick — `pub(crate)`, not
+    /// private, so that last caller (a different module) can reach it
+    /// without duplicating this pairing of calls or reaching into
+    /// `Server`'s private `tickets`/`quotas`/`audit` fields itself.
+    ///
+    /// Two things, in order. First, sweep every expired, unredeemed
+    /// ticket across *all* connections — same collect-under-the-guard,
+    /// drop-outside shape as `pending_tickets_for` (main-session
+    /// arbitration item 2, F7 of the M8 Step 3a conformance sweep): this
+    /// bounds how long an expired unredeemed exec ticket can hold its
+    /// `ExecPermit` to `TICKET_TTL` plus one tick, instead of "until the
+    /// next request happens to reach `pending_tickets_for` or
+    /// `issue_ticket`". Second, force-close every quota-rejection audit
+    /// window past its staleness bound and write whatever summary/
+    /// first-line records that produces to the audit sink
+    /// (`crate::quota::Quotas::flush_expired`).
+    pub(crate) fn quota_housekeeping(&self) {
+        let expired_tickets = {
+            let mut tickets = self.lock_tickets();
+            let now = Instant::now();
+            extract_tickets(&mut tickets, |p| p.expires_at > now)
+        };
+        // `expired_tickets`'s removed `Ticket`s (and any `ExecPermit`s
+        // inside) drop here, after the tickets lock above has already
+        // been released.
+        drop(expired_tickets);
+
+        let records = self.quotas.flush_expired(self.quotas.now());
+        crate::audit::write_quota_audit(self.audit.as_ref(), &records);
     }
 
     /// The connection is gone: drop every ticket issued to it, abort every
@@ -1848,19 +2079,26 @@ impl Server {
     /// children) survive — that is the point of the broker
     /// (architecture.md §3 rule c).
     pub async fn purge_connection(&self, conn_id: usize) {
-        self.tickets
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .retain(|_, p| p.conn_id != conn_id);
+        // Collected under the tickets lock, dropped only after it (and
+        // `remote_forwards`'s lock below) are released — main-session
+        // arbitration item 2, F7 of the M8 Step 3a conformance sweep:
+        // "collect under the guard, drop outside". A removed `Ticket` can
+        // carry a `crate::quota::ExecPermit` whose own `Drop` takes the
+        // quota lock; that lock is leaf-most (`docs/adr/0010-resource-
+        // quotas.md` §9) precisely so it is safe to run *underneath*
+        // another lock, but there is no reason to run it *while* this one
+        // is still held.
+        let expired_tickets = {
+            let mut tickets = self.lock_tickets();
+            extract_tickets(&mut tickets, |p| p.conn_id != conn_id)
+        };
         // `conn_id`-scoped, not `owner`-scoped (`Server::remote_forwards`'s
         // own doc): a dead connection tears down every forward *it*
         // opened, regardless of whether the same principal still has a
-        // live connection elsewhere. Block-scoped (not a trailing
-        // `drop(forwards)`) so the `MutexGuard` — never `Send` — provably
-        // cannot straddle the `.await` below: rustc's drop-tracking
-        // sometimes can't see past a `for` loop that a `drop()` call ends a
-        // guard's liveness, and flags the whole future `!Send` regardless.
-        {
+        // live connection elsewhere. Same collect-under-guard shape as
+        // `expired_tickets` above — `entry.task.abort()` runs after
+        // `forwards`'s guard is released, not before.
+        let dying_forwards: Vec<RemoteForwardEntry> = {
             let mut forwards = self
                 .remote_forwards
                 .lock()
@@ -1870,15 +2108,30 @@ impl Server {
                 .filter(|(_, entry)| entry.conn_id == conn_id)
                 .map(|(forward_id, _)| forward_id.clone())
                 .collect();
-            for forward_id in dying {
-                if let Some(entry) = forwards.remove(&forward_id) {
-                    entry.task.abort();
-                }
-            }
+            dying
+                .into_iter()
+                .filter_map(|forward_id| forwards.remove(&forward_id))
+                .collect()
+        };
+        for entry in &dying_forwards {
+            entry.task.abort();
         }
         self.sessions
             .release_connection(ConnectionId(conn_id as u64))
             .await;
+        // Design §2.4 path ③ (main-session arbitration item 5, S2
+        // deviation 2): a dying connection's own quota-rejection windows
+        // must not linger open forever waiting for the next rejection or
+        // the accept loop's periodic tick — this matters most for the
+        // reverse **target** arm, whose per-connection loop has no
+        // accept-loop tick of its own to lean on at all (`reverse::
+        // target`'s own periodic flush, added alongside this call, covers
+        // the case where the connection never dies).
+        self.quota_housekeeping();
+        // `expired_tickets`'/`dying_forwards`' removed values drop here,
+        // after every lock this function took has already been released.
+        drop(expired_tickets);
+        drop(dying_forwards);
     }
 
     // ------------------------------------------------------------------
@@ -1915,6 +2168,14 @@ impl Server {
                 _ = audit_flush.tick() => {
                     let records = self.admission.flush_expired(self.admission.now());
                     crate::audit::write_admission_audit(self.audit.as_ref(), &records);
+                    // Same bounded-latency rationale, for the quota
+                    // rejection windows (`PLAN.md` M8 Step 3, `docs/adr/
+                    // 0010-resource-quotas.md` §2.4): a flood that has
+                    // already stopped still gets its last window's summary
+                    // within one more tick instead of only on the next
+                    // rejection, which — once the flood truly ends — may be
+                    // never.
+                    self.quota_housekeeping();
                 }
             }
         }
@@ -1923,6 +2184,7 @@ impl Server {
         // tick this interval again after this function returns).
         let records = self.admission.flush_expired(self.admission.now());
         crate::audit::write_admission_audit(self.audit.as_ref(), &records);
+        self.quota_housekeeping();
         // SIGTERM graceful drain (CLI.md §6.12, ADR-0003) runs *before* the
         // listener closes: closing it first would sever every control
         // stream — including the ones carrying `session.closed` to an
@@ -3291,6 +3553,37 @@ impl Server {
 /// single-writer UX invariant, not an authorization boundary (the ACL
 /// choke point and the ticket redemption above it already gate access);
 /// only the ticket's *entropy*, not its unlinkability, matters here.
+/// Remove every entry of `tickets` that `keep` rejects, returning the
+/// removed [`Ticket`]s instead of dropping them in place — so a caller
+/// still holding `tickets`'s `MutexGuard` can drop the returned `Vec`
+/// only *after* releasing that guard (main-session arbitration item 2,
+/// F7 of the M8 Step 3a conformance sweep: "collect under the guard,
+/// drop outside"). A `Ticket` can carry a `crate::quota::ExecPermit`
+/// (`PendingExec.permit` is a mandatory, non-`Option` field — `docs/adr/
+/// 0010-resource-quotas.md` §3 — so a ticket can never exist without
+/// one), and that permit's own `Drop` takes the quota lock; the quota
+/// lock is leaf-most by design (ADR-0010 §9), so nesting it *under* the
+/// tickets lock is safe, but there is no reason to run it *while* the
+/// tickets lock is still held. `crate::server::Server::issue_ticket`,
+/// `Server::pending_tickets_for` and `Server::purge_connection` are the
+/// three retain sites this replaces (`std::collections::HashMap::
+/// retain`'s own removed values drop exactly where they stood, inside
+/// the closure — the one shape this function exists to avoid).
+fn extract_tickets(
+    tickets: &mut HashMap<[u8; TICKET_LEN], Ticket>,
+    mut keep: impl FnMut(&Ticket) -> bool,
+) -> Vec<Ticket> {
+    let doomed: Vec<[u8; TICKET_LEN]> = tickets
+        .iter()
+        .filter(|(_, p)| !keep(p))
+        .map(|(k, _)| *k)
+        .collect();
+    doomed
+        .into_iter()
+        .filter_map(|k| tickets.remove(&k))
+        .collect()
+}
+
 fn attach_lease_owner(ticket: &[u8]) -> ConnectionId {
     let mut half = [0u8; 8];
     let n = ticket.len().min(half.len());
@@ -3359,6 +3652,11 @@ fn broker_error(request_id: u64, err: BrokerError) -> ControlMessage {
         BrokerError::Spawn(_) | BrokerError::Io(_) | BrokerError::Gone => {
             (ErrorCode::Internal, false)
         }
+        // A session quota was saturated (`PLAN.md` M8 Step 3, `docs/adr/
+        // 0010-resource-quotas.md`): retryable, unlike `Draining` —
+        // retrying against this same process can succeed once some other
+        // session closes. Structural message only, no payload.
+        BrokerError::QuotaExceeded(_) => (ErrorCode::ResourceExhausted, true),
     };
     ControlMessage::error(
         request_id,
@@ -3908,6 +4206,12 @@ mod tests {
         broker: Arc<Broker>,
         pipes: Arc<PipeFactory>,
         clock: TestClock,
+        /// Same object as `server`'s own (private) `quotas` field — kept
+        /// here too so a test can call `flush_expired`/`exec_in_use`
+        /// without reaching through `server` (still fine either way: this
+        /// module is `crate::server`'s own `tests` submodule, so `Server`'s
+        /// private fields are visible from here regardless).
+        quotas: Arc<crate::quota::Quotas>,
     }
 
     fn rig(authorizer: Arc<dyn Authorizer>) -> Rig {
@@ -3925,6 +4229,27 @@ mod tests {
         pipes: Arc<PipeFactory>,
         close_grace: Duration,
     ) -> Rig {
+        rig_with_quota_limits(
+            authorizer,
+            pipes,
+            close_grace,
+            crate::quota::QuotaLimits::default(),
+        )
+    }
+
+    /// [`rig_with`] plus caller-chosen [`crate::quota::QuotaLimits`], so a
+    /// quota-cap test does not have to open/reserve hundreds of times to
+    /// reach the default limits. The broker and the `Server`'s own
+    /// [`crate::quota::Quotas`] share the same [`TestClock`], so advancing
+    /// `rig.clock` moves both the session-count and the `exec.run`/audit
+    /// window axes together, the same way the real `SystemClock` is one
+    /// clock in production.
+    fn rig_with_quota_limits(
+        authorizer: Arc<dyn Authorizer>,
+        pipes: Arc<PipeFactory>,
+        close_grace: Duration,
+        quota_limits: crate::quota::QuotaLimits,
+    ) -> Rig {
         let clock = TestClock::new();
         let broker = Broker::new(
             Arc::new(clock.clone()),
@@ -3932,17 +4257,33 @@ mod tests {
                 replay_bytes: 64 * 1024,
                 resume_ttl: Duration::from_secs(3600),
                 close_grace,
+                quota_limits,
             },
             pipes.clone(),
         );
         let audit = Arc::new(MemoryAuditSink::new());
-        let server = Server::new(authorizer, audit.clone(), broker.clone(), "host");
+        let quotas = crate::quota::Quotas::new(quota_limits, Arc::new(clock.clone()));
+        let admission = crate::admission::Gate::new(
+            Arc::new(clock.clone()),
+            crate::config::ServeConfig::DEFAULT_MAX_CONCURRENT_HANDSHAKES,
+            crate::config::ServeConfig::DEFAULT_HANDSHAKE_RATE_PER_SOURCE,
+            crate::config::ServeConfig::DEFAULT_VALIDATED_RATE_PER_SOURCE,
+        );
+        let server = Server::with_admission_and_quotas(
+            authorizer,
+            audit.clone(),
+            broker.clone(),
+            "host",
+            admission,
+            quotas.clone(),
+        );
         Rig {
             server,
             audit,
             broker,
             pipes,
             clock,
+            quotas,
         }
     }
 
@@ -4150,9 +4491,29 @@ mod tests {
         assert!(records.iter().all(|r| r.decision == "deny"));
     }
 
+    /// The subject here is the *per-connection ticket budget*, which
+    /// `PLAN.md` M8 Step 3 left untouched. It needs an exec quota well
+    /// clear of that budget to stay observable, because the two now share
+    /// a numeric boundary: `MAX_PENDING_TICKETS_PER_CONN` and the default
+    /// `[serve].max_exec_per_principal` are both 32, and an unredeemed
+    /// exec ticket holds its `ExecPermit` — so under the defaults a single
+    /// principal's 33rd concurrent exec is refused by the (cross-
+    /// connection) exec quota before this (per-connection) budget's own
+    /// "another connection is unaffected" arm can be reached. Raising only
+    /// this rig's quota keeps the budget's contract asserted exactly as it
+    /// was; the quota's own boundary is asserted by
+    /// `exec_cap_rejects_past_the_limit_and_audits_quota_exec_principal`.
     #[tokio::test]
     async fn outstanding_tickets_per_connection_are_bounded() {
-        let rig = allow_rig();
+        let rig = rig_with_quota_limits(
+            Arc::new(AllowAllPinned),
+            Arc::new(PipeFactory::new(64 * 1024)),
+            Duration::from_millis(100),
+            crate::quota::QuotaLimits {
+                max_exec_per_principal: MAX_PENDING_TICKETS_PER_CONN * 4,
+                ..crate::quota::QuotaLimits::default()
+            },
+        );
         let ctx = ctx(Principal::Device("laptop".into()), &["exec"]);
         for i in 0..MAX_PENDING_TICKETS_PER_CONN {
             let reply = rig
@@ -4170,8 +4531,12 @@ mod tests {
             .unwrap();
         assert_eq!(error_code(&reply), Some(ErrorCode::ResourceExhausted));
         assert_eq!(rig.server.pending_tickets(), MAX_PENDING_TICKETS_PER_CONN);
-        // Not an authorization decision: nothing extra in the audit log.
-        assert_eq!(rig.audit.records().len(), MAX_PENDING_TICKETS_PER_CONN);
+        // `check_ticket_budget` now runs *after* the ACL choke point
+        // (main-session arbitration item 3, `handle_exec_start`'s own
+        // comment) — so the refused, over-budget request still reaches
+        // (and is audited by) ACL first, one more `allow` line than the
+        // `MAX_PENDING_TICKETS_PER_CONN` successful opens' own lines.
+        assert_eq!(rig.audit.records().len(), MAX_PENDING_TICKETS_PER_CONN + 1);
         // Another connection is unaffected by this one's backlog.
         let mut other = ctx.clone();
         other.conn_id += 1;
@@ -4201,6 +4566,712 @@ mod tests {
         assert_eq!(rig.server.pending_tickets(), 0);
     }
 
+    // ---- exec.run concurrency quota (`PLAN.md` M8 Step 3, `docs/adr/
+    // 0010-resource-quotas.md`, verdict arbitration item 5) --------------
+
+    #[tokio::test]
+    async fn exec_cap_rejects_past_the_limit_and_audits_quota_exec_principal() {
+        let rig = rig_with_quota_limits(
+            Arc::new(AllowAllPinned),
+            Arc::new(PipeFactory::new(64 * 1024)),
+            Duration::from_millis(100),
+            crate::quota::QuotaLimits {
+                max_exec_per_principal: 1,
+                ..crate::quota::QuotaLimits::default()
+            },
+        );
+        let ctx = ctx(Principal::Device("laptop".into()), &["exec"]);
+        let opener = opener_key(&ctx.principal, ctx.auth_path);
+
+        // First exec.run reserves the sole permit.
+        let ok = rig
+            .server
+            .dispatch(&ctx, &exec_start(1, &["true"]))
+            .await
+            .unwrap();
+        assert_eq!(error_code(&ok), None);
+        assert_eq!(rig.quotas.exec_in_use(&opener), 1);
+
+        // Second, while the first ticket is still unredeemed, is refused by
+        // the per-principal exec cap — not the (much larger) ticket budget.
+        let refused = rig
+            .server
+            .dispatch(&ctx, &exec_start(2, &["true"]))
+            .await
+            .unwrap();
+        assert_eq!(error_code(&refused), Some(ErrorCode::ResourceExhausted));
+        match response_body(&refused) {
+            response::Body::Error(e) => {
+                assert!(e.retryable, "a quota rejection is retryable");
+                // The exec axis gets its own wire message, distinct from
+                // the session axis's ("session quota exceeded") — see
+                // `QuotaKind::wire_message` (docs/CLI.md §6.12).
+                assert_eq!(e.message, "exec quota exceeded");
+            }
+            other => panic!("expected an error response, got {other:?}"),
+        }
+        // Still only the one ticket the first call issued.
+        assert_eq!(rig.server.pending_tickets(), 1);
+
+        let recs = rig.audit.records();
+        assert_eq!(
+            recs.len(),
+            3,
+            "first open's ACL allow, second's ACL allow, second's quota deny"
+        );
+        assert_eq!(recs[0].decision, "allow");
+        assert_eq!(recs[1].decision, "allow");
+        assert_eq!(recs[2].decision, "deny");
+        assert_eq!(recs[2].resource, "quota_exec_principal");
+        assert_eq!(recs[2].principal, opener);
+    }
+
+    /// [`crate::exec::run_exec`] reports even a spawn failure ("argv that
+    /// cannot exec", `ENOENT`) as an `Ok` outcome carrying a
+    /// shell-convention exit code (its own doc) — there is no early `Err`
+    /// return that would skip past dropping the exec's `PendingExec`. So
+    /// the one release point after redemption — [`Server::
+    /// serve_data_stream`]'s match arm drops `pending` (the permit with
+    /// it) once `run_exec(pending.spec, ..)` returns — covers "released on
+    /// child exit" and "released on spawn failure" identically: both are
+    /// this same drop, at the same point in the same function, differing
+    /// only in `spec.argv`. Exercising that literal drop through an actual
+    /// spawned child needs a real QUIC data stream (`FramedSend`/
+    /// `FramedRecv` wrap `quinn::{Send,Recv}Stream` directly, `qsh-
+    /// transport`'s `control.rs`) that this in-process `Rig` has no way to
+    /// create — that level of exercise belongs to `qsh-testkit`'s loopback
+    /// harness, not this file. What *is* unit-testable here, and is the
+    /// actual mechanism both scenarios rely on, is that redeeming an exec
+    /// ticket really does hand the permit to the caller (not leave a
+    /// second claim on it behind in the ticket map) and that dropping the
+    /// redeemed value releases it — exactly what `serve_data_stream` does,
+    /// unconditionally, right after `run_exec` returns.
+    #[tokio::test]
+    async fn exec_permit_moves_with_the_redeemed_ticket_and_releases_when_it_is_dropped() {
+        let rig = rig_with_quota_limits(
+            Arc::new(AllowAllPinned),
+            Arc::new(PipeFactory::new(64 * 1024)),
+            Duration::from_millis(100),
+            crate::quota::QuotaLimits {
+                max_exec_per_principal: 1,
+                ..crate::quota::QuotaLimits::default()
+            },
+        );
+        let ctx = ctx(Principal::Device("laptop".into()), &["exec"]);
+        let opener = opener_key(&ctx.principal, ctx.auth_path);
+
+        let reply = rig
+            .server
+            .dispatch(&ctx, &exec_start(1, &["true"]))
+            .await
+            .unwrap();
+        let ticket = match response_body(&reply) {
+            response::Body::ExecStarted(started) => started.ticket.clone(),
+            other => panic!("expected ExecStarted, got {other:?}"),
+        };
+        assert_eq!(rig.quotas.exec_in_use(&opener), 1);
+
+        // Redeem — the real production method (`Server::serve_data_stream`'s
+        // own call). Redemption moves the permit out of the ticket map; it
+        // does not itself release it.
+        let redeemed = rig
+            .server
+            .redeem_ticket(ctx.conn_id, StreamKind::ExecData, &ticket)
+            .expect("redeem once");
+        assert_eq!(
+            rig.quotas.exec_in_use(&opener),
+            1,
+            "redeeming a ticket must not itself free the slot"
+        );
+
+        // What `serve_data_stream` does next — `run_exec(pending.spec,
+        // ..).await` — needs a real stream and is unreachable here; what it
+        // does *after* that call, on every outcome (child exit or spawn
+        // failure alike), is drop `pending`. That is what this reproduces.
+        drop(redeemed);
+        assert_eq!(
+            rig.quotas.exec_in_use(&opener),
+            0,
+            "the permit is released once the redeemed ticket is dropped"
+        );
+
+        // And the slot really is usable again, not just reported as such.
+        let second = rig
+            .server
+            .dispatch(&ctx, &exec_start(2, &["true"]))
+            .await
+            .unwrap();
+        assert_eq!(error_code(&second), None);
+    }
+
+    /// The path the verdict flags: an unredeemed exec ticket's permit must
+    /// not survive the ticket itself. Production reaches an expired ticket
+    /// after `TICKET_TTL` (30 s) of real wall-clock time — `expires_at`
+    /// uses `std::time::Instant::now()` directly, not the injected
+    /// `TestClock`, so this test forces the same state by hand and
+    /// exercises the sweep itself (`Server::pending_tickets_for`, reached
+    /// through `check_ticket_budget` on the next request), not the wait.
+    #[tokio::test]
+    async fn exec_permit_is_released_when_its_ticket_expires() {
+        let rig = rig_with_quota_limits(
+            Arc::new(AllowAllPinned),
+            Arc::new(PipeFactory::new(64 * 1024)),
+            Duration::from_millis(100),
+            crate::quota::QuotaLimits {
+                max_exec_per_principal: 1,
+                ..crate::quota::QuotaLimits::default()
+            },
+        );
+        let ctx = ctx(Principal::Device("laptop".into()), &["exec"]);
+        let opener = opener_key(&ctx.principal, ctx.auth_path);
+
+        let first = rig
+            .server
+            .dispatch(&ctx, &exec_start(1, &["true"]))
+            .await
+            .unwrap();
+        assert_eq!(error_code(&first), None);
+        assert_eq!(rig.quotas.exec_in_use(&opener), 1);
+
+        // Confirms the slot really is still held while the ticket lives.
+        let refused = rig
+            .server
+            .dispatch(&ctx, &exec_start(2, &["true"]))
+            .await
+            .unwrap();
+        assert_eq!(error_code(&refused), Some(ErrorCode::ResourceExhausted));
+
+        // Force the outstanding ticket to look expired.
+        {
+            let mut tickets = rig.server.tickets.lock().unwrap_or_else(|e| e.into_inner());
+            for ticket in tickets.values_mut() {
+                ticket.expires_at = Instant::now() - Duration::from_secs(1);
+            }
+        }
+
+        // Any call that reaches `pending_tickets_for` (via
+        // `check_ticket_budget`) sweeps expired entries first — dropping
+        // the expired `PendingExec` and, with it, its `ExecPermit`.
+        let after_sweep = rig
+            .server
+            .dispatch(&ctx, &exec_start(3, &["true"]))
+            .await
+            .unwrap();
+        assert_eq!(
+            error_code(&after_sweep),
+            None,
+            "the freed slot admits a new exec"
+        );
+        assert_eq!(
+            rig.quotas.exec_in_use(&opener),
+            1,
+            "exactly one live permit, not two"
+        );
+    }
+
+    /// `Server::quota_housekeeping`'s new first step (A9 of the M8 Step
+    /// 3a fix-3 sweep): sweeping expired tickets is no longer something
+    /// only a *request* reaches through `check_ticket_budget`/
+    /// `pending_tickets_for` — the housekeeping call itself must do it,
+    /// so `Server::run`'s tick, its post-loop shutdown call,
+    /// `purge_connection`, and `reverse::target`'s per-connection tick
+    /// all bound an expired unredeemed exec ticket's `ExecPermit` to
+    /// `TICKET_TTL` plus one tick, with no request required to free it.
+    #[tokio::test]
+    async fn quota_housekeeping_sweeps_expired_tickets_before_flushing_audit() {
+        let rig = rig_with_quota_limits(
+            Arc::new(AllowAllPinned),
+            Arc::new(PipeFactory::new(64 * 1024)),
+            Duration::from_millis(100),
+            crate::quota::QuotaLimits {
+                max_exec_per_principal: 1,
+                ..crate::quota::QuotaLimits::default()
+            },
+        );
+        let ctx = ctx(Principal::Device("laptop".into()), &["exec"]);
+        let opener = opener_key(&ctx.principal, ctx.auth_path);
+
+        let first = rig
+            .server
+            .dispatch(&ctx, &exec_start(1, &["true"]))
+            .await
+            .unwrap();
+        assert_eq!(error_code(&first), None);
+        assert_eq!(rig.quotas.exec_in_use(&opener), 1);
+
+        // Force the outstanding ticket to look expired, same as
+        // `exec_permit_is_released_when_its_ticket_expires` above.
+        {
+            let mut tickets = rig.server.tickets.lock().unwrap_or_else(|e| e.into_inner());
+            for ticket in tickets.values_mut() {
+                ticket.expires_at = Instant::now() - Duration::from_secs(1);
+            }
+        }
+
+        // No request in between — `quota_housekeeping` alone sweeps it.
+        rig.server.quota_housekeeping();
+
+        assert_eq!(
+            rig.quotas.exec_in_use(&opener),
+            0,
+            "quota_housekeeping released the expired ticket's permit on its own"
+        );
+    }
+
+    /// Mechanical form of `docs/adr/0010-resource-quotas.md` §9's
+    /// "collect under the guard, drop outside" rule (B4 of the M8 Step 3a
+    /// fix-3 sweep): exercises all four sites that sweep expired tickets —
+    /// `pending_tickets_for`, `issue_ticket`, `purge_connection`,
+    /// `quota_housekeeping` — each against an expired ticket whose
+    /// `ExecPermit` is about to drop, and asserts
+    /// `crate::quota::lock_order::violations() == 0` once all four have
+    /// run. `VIOLATIONS` is process-global, not per-test
+    /// (`lock_order`'s own doc) — `cargo nextest` runs one test per
+    /// process, so a nonzero count read back here is never cross-test
+    /// noise.
+    #[tokio::test]
+    async fn ticket_sweep_sites_never_drop_an_exec_permit_while_the_tickets_lock_is_held() {
+        let rig = rig_with_quota_limits(
+            Arc::new(AllowAllPinned),
+            Arc::new(PipeFactory::new(64 * 1024)),
+            Duration::from_millis(100),
+            crate::quota::QuotaLimits {
+                // Generous — this test is about lock order, not about
+                // exhausting the exec cap, and each site below leaves one
+                // extra permit outstanding for the next site to sweep.
+                max_exec_per_principal: 8,
+                ..crate::quota::QuotaLimits::default()
+            },
+        );
+        let ctx = ctx(Principal::Device("laptop".into()), &["exec"]);
+        let opener = opener_key(&ctx.principal, ctx.auth_path);
+        let conn_id = ctx.conn_id;
+
+        // Reserve a real `ExecPermit` and wrap it in an already-expired
+        // `Ticket`, the same shape `Server::handle_exec_start` builds
+        // before `issue_ticket` — but built directly so each site below
+        // can be called on its own, not only reachable through
+        // `dispatch`'s own call chain (which would sweep at
+        // `pending_tickets_for` before any later site got a turn).
+        let expired_exec_ticket = |exec_id: &str| -> Ticket {
+            let permit = rig.quotas.reserve_exec(&opener).unwrap();
+            Ticket {
+                purpose: TicketPurpose::Exec(PendingExec {
+                    exec_id: exec_id.to_string(),
+                    spec: crate::exec::ExecSpec {
+                        argv: vec!["true".to_string()],
+                        env: Vec::new(),
+                        timeout: None,
+                    },
+                    permit,
+                }),
+                conn_id,
+                expires_at: Instant::now() - Duration::from_secs(1),
+            }
+        };
+        let insert = |key: u8, ticket: Ticket| {
+            let mut tickets = rig.server.tickets.lock().unwrap_or_else(|e| e.into_inner());
+            tickets.insert([key; TICKET_LEN], ticket);
+        };
+
+        // Site 1: `pending_tickets_for`.
+        insert(1, expired_exec_ticket("a"));
+        let _ = rig.server.pending_tickets_for(conn_id);
+
+        // Site 2: `issue_ticket`'s own sweep (distinct from
+        // `pending_tickets_for`'s — see `check_ticket_budget`'s call
+        // order, which always runs the latter first inside `dispatch`).
+        insert(2, expired_exec_ticket("b"));
+        let fresh_permit = rig.quotas.reserve_exec(&opener).unwrap();
+        let _ = rig.server.issue_ticket(
+            conn_id,
+            TicketPurpose::Exec(PendingExec {
+                exec_id: "c".to_string(),
+                spec: crate::exec::ExecSpec {
+                    argv: vec!["true".to_string()],
+                    env: Vec::new(),
+                    timeout: None,
+                },
+                permit: fresh_permit,
+            }),
+        );
+
+        // Site 3: `purge_connection` — removes every ticket for `conn_id`
+        // regardless of expiry, including the still-live one `issue_ticket`
+        // just inserted above.
+        rig.server.purge_connection(conn_id).await;
+
+        // Site 4: `quota_housekeeping`.
+        insert(4, expired_exec_ticket("e"));
+        rig.server.quota_housekeeping();
+
+        assert_eq!(
+            crate::quota::lock_order::violations(),
+            0,
+            "an ExecPermit dropped while the tickets lock was still held"
+        );
+    }
+
+    #[tokio::test]
+    async fn exec_quota_rejections_aggregate_into_one_first_line_and_one_summary() {
+        let rig = rig_with_quota_limits(
+            Arc::new(AllowAllPinned),
+            Arc::new(PipeFactory::new(64 * 1024)),
+            Duration::from_millis(100),
+            crate::quota::QuotaLimits {
+                max_exec_per_principal: 1,
+                ..crate::quota::QuotaLimits::default()
+            },
+        );
+        let ctx = ctx(Principal::Device("laptop".into()), &["exec"]);
+
+        let first = rig
+            .server
+            .dispatch(&ctx, &exec_start(1, &["true"]))
+            .await
+            .unwrap();
+        assert_eq!(error_code(&first), None);
+        let before = rig.audit.records().len();
+
+        // A burst of 3 rejections, all inside the same aggregation window.
+        for i in 0..3u64 {
+            let reply = rig
+                .server
+                .dispatch(&ctx, &exec_start(100 + i, &["true"]))
+                .await
+                .unwrap();
+            assert_eq!(error_code(&reply), Some(ErrorCode::ResourceExhausted));
+        }
+        // Each of the 3 rejected calls still writes its own ACL *allow*
+        // line (`check_ticket_budget`/ACL run before the quota check, same
+        // as `exec_cap_rejects_past_the_limit_and_audits_quota_exec_
+        // principal`) — what this test pins is that only one of those
+        // three calls also produced a *quota* line, not that the audit log
+        // grew by exactly one record overall.
+        let quota_lines: Vec<_> = rig
+            .audit
+            .records()
+            .into_iter()
+            .skip(before)
+            .filter(|r| r.resource == "quota_exec_principal")
+            .collect();
+        assert_eq!(
+            quota_lines.len(),
+            1,
+            "only the burst's first rejection gets its own quota line"
+        );
+        assert_eq!(quota_lines[0].count, None);
+
+        // The tick `Server::run`'s accept loop drives, exercised directly:
+        // the burst has already stopped, so only the periodic flush (not
+        // the lazy `record_rejection` path) can close this window.
+        rig.clock
+            .advance(crate::admission::AUDIT_AGGREGATION_WINDOW + Duration::from_secs(1));
+        let flushed = rig.quotas.flush_expired(rig.quotas.now());
+        for record in &flushed {
+            rig.audit.record(record).unwrap();
+        }
+        assert_eq!(flushed.len(), 1);
+        assert_eq!(
+            flushed[0].count,
+            Some(2),
+            "the two suppressed rejections after the burst's first line"
+        );
+        assert_eq!(flushed[0].resource, "quota_exec_principal");
+
+        // A second flush at the same instant finds nothing left to close.
+        assert!(rig.quotas.flush_expired(rig.quotas.now()).is_empty());
+    }
+
+    // ---- session-count quota (`Broker::open_with_opener`'s own
+    // `reserve_session`) + ACL-vs-quota ordering (verdict arbitration item
+    // 11) --------------------------------------------------------------
+
+    /// An unauthorized principal must never learn "the host is at
+    /// capacity" as a substitute for "you are not allowed here" — that
+    /// would be an oracle on occupancy to a peer who should learn nothing.
+    #[tokio::test]
+    async fn saturated_quota_still_answers_permission_denied_to_an_unauthorized_principal() {
+        let rig = rig_with_quota_limits(
+            Arc::new(AllowAllPinned),
+            Arc::new(PipeFactory::new(64 * 1024)),
+            Duration::from_millis(100),
+            crate::quota::QuotaLimits {
+                max_sessions: 1,
+                ..crate::quota::QuotaLimits::default()
+            },
+        );
+        let allowed_ctx = ctx(Principal::Device("laptop".into()), &["session"]);
+        let _opened = open_session(&rig, &allowed_ctx).await;
+        assert_eq!(rig.broker.session_count(), 1);
+
+        // A CA-asserted principal is not pinned, so `AllowAllPinned` denies
+        // it outright (same setup as
+        // `unpinned_principal_is_denied_under_interim_policy`) — and the
+        // host's single session slot is already saturated by the open
+        // above.
+        let mut denied_ctx = allowed_ctx.clone();
+        denied_ctx.principal = Principal::User("mallory".into());
+        denied_ctx.auth_path = AuthPath::Ca;
+        denied_ctx.conn_id += 1;
+
+        let reply = rig
+            .server
+            .dispatch(&denied_ctx, &session_open(9))
+            .await
+            .unwrap();
+        assert_eq!(
+            error_code(&reply),
+            Some(ErrorCode::PermissionDenied),
+            "ACL must run before the quota check"
+        );
+        // Nothing was created for the refused attempt.
+        assert_eq!(rig.broker.session_count(), 1);
+        assert_eq!(
+            rig.server.pending_tickets(),
+            1,
+            "only the first, allowed open's ticket"
+        );
+    }
+
+    /// Main-session arbitration round, item 3: `handle_exec_start` now
+    /// runs `check_ticket_budget` *after* the ACL choke point (F4 of the
+    /// M8 Step 3a conformance sweep had instead documented — and pinned —
+    /// the pre-existing order where the ticket-budget check ran first;
+    /// this reverses that call). `check_ticket_budget` creates nothing, so
+    /// there was never a resource-creation reason to run it early, and
+    /// leaving it first made `RESOURCE_EXHAUSTED` vs. `PERMISSION_DENIED`
+    /// tell an unauthorized caller something about its own connection's
+    /// state before ACL ever got a say. This pins the order directly, on
+    /// one connection whose ticket budget is genuinely exhausted: a
+    /// principal ACL denies still sees `PERMISSION_DENIED` (proving ACL
+    /// runs first), and a principal ACL allows still sees
+    /// `RESOURCE_EXHAUSTED` (proving the ticket-budget check still runs,
+    /// second).
+    #[tokio::test]
+    async fn exec_ticket_budget_follows_the_acl_choke_point_on_the_same_connection() {
+        let rig = rig_with_quota_limits(
+            Arc::new(AllowAllPinned),
+            Arc::new(PipeFactory::new(64 * 1024)),
+            Duration::from_millis(100),
+            crate::quota::QuotaLimits {
+                max_exec_per_principal: MAX_PENDING_TICKETS_PER_CONN * 4,
+                ..crate::quota::QuotaLimits::default()
+            },
+        );
+        // A pinned device fills its own connection's ticket budget under
+        // an ACL that allows it — ordinary, authorized traffic.
+        let allowed_ctx = ctx(Principal::Device("laptop".into()), &["exec"]);
+        for i in 0..MAX_PENDING_TICKETS_PER_CONN {
+            let reply = rig
+                .server
+                .dispatch(&allowed_ctx, &exec_start(i as u64, &["true"]))
+                .await
+                .unwrap();
+            assert_eq!(error_code(&reply), None, "ticket {i} must be issued");
+        }
+        assert_eq!(rig.server.pending_tickets(), MAX_PENDING_TICKETS_PER_CONN);
+
+        // The SAME connection (`conn_id` unchanged), but the principal on
+        // this next request is one `AllowAllPinned` denies outright — not
+        // a realistic mid-connection identity change, just the sharpest
+        // way to isolate which check answers first.
+        let mut denied_same_conn = allowed_ctx.clone();
+        denied_same_conn.principal = Principal::User("mallory".into());
+        denied_same_conn.auth_path = AuthPath::Ca;
+
+        let reply = rig
+            .server
+            .dispatch(&denied_same_conn, &exec_start(999, &["true"]))
+            .await
+            .unwrap();
+        assert_eq!(
+            error_code(&reply),
+            Some(ErrorCode::PermissionDenied),
+            "ACL now runs before check_ticket_budget — an unauthorized \
+             principal must never see RESOURCE_EXHAUSTED as a substitute \
+             for PERMISSION_DENIED, even on a connection whose ticket \
+             budget happens to be exhausted"
+        );
+        assert_eq!(
+            rig.server.pending_tickets(),
+            MAX_PENDING_TICKETS_PER_CONN,
+            "the denied attempt must not have issued a ticket"
+        );
+
+        // The SAME connection, still at its ticket budget, but a principal
+        // ACL allows: PERMISSION_DENIED is off the table, so the ticket
+        // budget check underneath must still fire.
+        let reply = rig
+            .server
+            .dispatch(&allowed_ctx, &exec_start(1000, &["true"]))
+            .await
+            .unwrap();
+        assert_eq!(
+            error_code(&reply),
+            Some(ErrorCode::ResourceExhausted),
+            "an ACL-allowed principal must still be bounded by its \
+             connection's own ticket budget"
+        );
+        assert_eq!(rig.server.pending_tickets(), MAX_PENDING_TICKETS_PER_CONN);
+    }
+
+    /// `handle_session_open`'s twin of the pin above: the M8 Step 3a
+    /// conformance sweep's F4 had also left `session.open` checking its
+    /// ticket budget ahead of the ACL choke point (adversary finding A1) —
+    /// this pins the corrected order the same way, on one connection whose
+    /// ticket budget is genuinely exhausted: a principal ACL denies still
+    /// sees `PERMISSION_DENIED` (proving ACL runs first) *and* still gets
+    /// its own ACL-deny audit row (proving the denied attempt reached the
+    /// choke point rather than being short-circuited by the ticket-budget
+    /// check before ACL ever ran), while a principal ACL allows still sees
+    /// `RESOURCE_EXHAUSTED` (proving the ticket-budget check still runs,
+    /// second).
+    #[tokio::test]
+    async fn session_open_ticket_budget_follows_the_acl_choke_point_on_the_same_connection() {
+        let rig = rig_with_quota_limits(
+            Arc::new(AllowAllPinned),
+            Arc::new(PipeFactory::new(64 * 1024)),
+            Duration::from_millis(100),
+            crate::quota::QuotaLimits {
+                max_sessions: MAX_PENDING_TICKETS_PER_CONN * 4,
+                max_sessions_per_principal: MAX_PENDING_TICKETS_PER_CONN * 4,
+                ..crate::quota::QuotaLimits::default()
+            },
+        );
+        // A pinned device fills its own connection's ticket budget under
+        // an ACL that allows it — ordinary, authorized traffic.
+        let allowed_ctx = ctx(Principal::Device("laptop".into()), &["session"]);
+        for i in 0..MAX_PENDING_TICKETS_PER_CONN {
+            let reply = rig
+                .server
+                .dispatch(&allowed_ctx, &session_open(i as u64))
+                .await
+                .unwrap();
+            assert_eq!(error_code(&reply), None, "ticket {i} must be issued");
+        }
+        assert_eq!(rig.server.pending_tickets(), MAX_PENDING_TICKETS_PER_CONN);
+        let records_before_deny = rig.audit.records().len();
+
+        // The SAME connection (`conn_id` unchanged), but the principal on
+        // this next request is one `AllowAllPinned` denies outright — not
+        // a realistic mid-connection identity change, just the sharpest
+        // way to isolate which check answers first.
+        let mut denied_same_conn = allowed_ctx.clone();
+        denied_same_conn.principal = Principal::User("mallory".into());
+        denied_same_conn.auth_path = AuthPath::Ca;
+
+        let reply = rig
+            .server
+            .dispatch(&denied_same_conn, &session_open(999))
+            .await
+            .unwrap();
+        assert_eq!(
+            error_code(&reply),
+            Some(ErrorCode::PermissionDenied),
+            "ACL now runs before check_ticket_budget on session.open too — \
+             an unauthorized principal must never see RESOURCE_EXHAUSTED as \
+             a substitute for PERMISSION_DENIED, even on a connection whose \
+             ticket budget happens to be exhausted"
+        );
+        assert_eq!(
+            rig.server.pending_tickets(),
+            MAX_PENDING_TICKETS_PER_CONN,
+            "the denied attempt must not have issued a ticket"
+        );
+        let recs = rig.audit.records();
+        assert_eq!(
+            recs.len(),
+            records_before_deny + 1,
+            "the ACL choke point still writes an audit row for the denied \
+             attempt — it was reached and it decided, it did not get \
+             short-circuited by a ticket-budget check running first"
+        );
+        assert_eq!(
+            recs.last().unwrap().decision,
+            "deny",
+            "the denied attempt's own audit row records the ACL deny"
+        );
+
+        // The SAME connection, still at its ticket budget, but a principal
+        // ACL allows: PERMISSION_DENIED is off the table, so the ticket
+        // budget check underneath must still fire.
+        let reply = rig
+            .server
+            .dispatch(&allowed_ctx, &session_open(1000))
+            .await
+            .unwrap();
+        assert_eq!(
+            error_code(&reply),
+            Some(ErrorCode::ResourceExhausted),
+            "an ACL-allowed principal must still be bounded by its \
+             connection's own ticket budget"
+        );
+        assert_eq!(rig.server.pending_tickets(), MAX_PENDING_TICKETS_PER_CONN);
+    }
+
+    /// The ACL choke point's own audit line for an *allowed* principal must
+    /// still be written even though that same open then fails on a
+    /// saturated quota — a quota rejection is a distinct, later decision,
+    /// not a reason to suppress the (already true) ACL verdict that
+    /// preceded it.
+    #[tokio::test]
+    async fn quota_rejection_still_leaves_the_acl_allow_audit_line() {
+        let rig = rig_with_quota_limits(
+            Arc::new(AllowAllPinned),
+            Arc::new(PipeFactory::new(64 * 1024)),
+            Duration::from_millis(100),
+            crate::quota::QuotaLimits {
+                max_sessions: 1,
+                ..crate::quota::QuotaLimits::default()
+            },
+        );
+        let ctx = ctx(Principal::Device("laptop".into()), &["session"]);
+        let _opened = open_session(&rig, &ctx).await;
+        assert_eq!(
+            rig.audit.records().len(),
+            1,
+            "first open's own ACL allow line"
+        );
+
+        // Same, allowed principal, second connection — ACL allows again
+        // (unowned resource, still pinned), but the global session cap is
+        // already saturated by the first open.
+        let mut second_conn = ctx.clone();
+        second_conn.conn_id += 1;
+        let reply = rig
+            .server
+            .dispatch(&second_conn, &session_open(2))
+            .await
+            .unwrap();
+        assert_eq!(error_code(&reply), Some(ErrorCode::ResourceExhausted));
+
+        let recs = rig.audit.records();
+        assert_eq!(
+            recs.len(),
+            3,
+            "first open's allow, second open's allow, second's quota deny"
+        );
+        assert_eq!(
+            recs[1].decision, "allow",
+            "the ACL allow line is written even though the open then fails on quota"
+        );
+        assert_eq!(recs[2].decision, "deny");
+        assert_eq!(recs[2].resource, "quota_sessions_host");
+        assert_eq!(recs[2].action, "session.open");
+        assert_eq!(
+            recs[1].request_id, recs[2].request_id,
+            "the ACL allow line and the quota deny line for the SAME request \
+             must share a request_id, or the two cannot be correlated \
+             (verdict ruling 11①)"
+        );
+        assert_ne!(
+            recs[2].request_id, "-",
+            "the quota deny record must carry the real request_id, not the \
+             placeholder used before F2 threaded it through"
+        );
+    }
+
     /// `PLAN.md` M5 Step 3(c) "disk-full fail-closed": an
     /// `AllowAllPinned`-eligible peer's `session.open` is denied — and no
     /// session is created — while the audit sink cannot durably record the
@@ -4217,6 +5288,7 @@ mod tests {
                 replay_bytes: 64 * 1024,
                 resume_ttl: Duration::from_secs(3600),
                 close_grace: Duration::from_millis(100),
+                quota_limits: crate::quota::QuotaLimits::default(),
             },
             pipes.clone(),
         );

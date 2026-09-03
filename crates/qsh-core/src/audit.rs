@@ -29,6 +29,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::acl::{Action, Decision};
 use crate::config::now_rfc3339;
+use crate::quota::QuotaKind;
 
 pub mod writer;
 
@@ -255,6 +256,72 @@ impl AuditRecord {
         }
     }
 
+    /// A resource-quota rejection (`crate::quota`, `PLAN.md` M8 Step 3,
+    /// `docs/adr/0010-resource-quotas.md`) — the peer was already
+    /// authorized (this fires strictly after the ACL choke point, never
+    /// before: an unauthorized principal must see `PERMISSION_DENIED`,
+    /// not a quota oracle), so unlike [`AuditRecord::handshake_rejected`]
+    /// there is a real `principal` to record. `action` is `kind.action()` —
+    /// `"session.open"` or `"exec.run"`, the same word `docs/CLI.md`'s audit
+    /// section names for a quota-reject record, never the bare `"quota"`
+    /// placeholder. `resource` carries `kind.category()` — the same
+    /// `quota_*` vocabulary [`crate::quota::QuotaKind::category`]
+    /// documents — mirroring how [`AuditRecord::handshake_rejected`] stuffs
+    /// its category into `resource`. `request_id` and `auth_path` are the
+    /// caller's own live values (threaded through `crate::quota::Quotas::
+    /// record_rejection` from the same control-stream request that hit the
+    /// quota), so the ACL `allow` line and this `deny` line for one request
+    /// share a `request_id` and are not left to guesswork (verdict ruling
+    /// 11①). `peer_addr` alone stays `"-"`: `crate::quota::Quotas` is
+    /// leaf-most and connection-agnostic (architecture.md §1) and does not
+    /// have it to hand. Structural fields only — never payload.
+    pub fn quota_rejected(
+        kind: QuotaKind,
+        principal: &str,
+        request_id: u64,
+        auth_path: AuthPath,
+    ) -> Self {
+        Self {
+            ts: now_rfc3339(),
+            request_id: request_id.to_string(),
+            principal: principal.to_string(),
+            action: kind.action().to_string(),
+            resource: kind.category().to_string(),
+            decision: Decision::Deny.as_str().to_string(),
+            rule: None,
+            auth_path: auth_path_str(auth_path).to_string(),
+            peer_addr: "-".to_string(),
+            count: None,
+        }
+    }
+
+    /// The windowed-summary half of [`AuditRecord::quota_rejected`]'s
+    /// aggregation (`crate::quota::Quotas`, same `AUDIT_AGGREGATION_
+    /// WINDOW`/first-record-then-summary shape as [`AuditRecord::
+    /// handshake_rejected_summary`]): one record per `(category, 10s
+    /// window)`, standing in for `count` further rejections in that same
+    /// category and window that were suppressed rather than each getting
+    /// their own line. Callers pass `"-"` for `principal` — a window can
+    /// suppress rejections from more than one principal, and the first
+    /// rejection of the window already recorded a real one via
+    /// [`AuditRecord::quota_rejected`] — but the parameter is left open
+    /// rather than hardcoded so a caller with a single dominant principal
+    /// for the window is free to name it.
+    pub fn quota_rejected_summary(kind: QuotaKind, principal: &str, count: u32) -> Self {
+        Self {
+            ts: now_rfc3339(),
+            request_id: "-".to_string(),
+            principal: principal.to_string(),
+            action: kind.action().to_string(),
+            resource: kind.category().to_string(),
+            decision: Decision::Deny.as_str().to_string(),
+            rule: None,
+            auth_path: "-".to_string(),
+            peer_addr: "-".to_string(),
+            count: Some(count),
+        }
+    }
+
     /// A pairing exchange's outcome (ADR-0002, M7 Step 4,
     /// `crate::server::Server::serve_pairing_connection`). Pairing has no
     /// authorization surface at all (`docs/CLI.md` §2.5's
@@ -318,6 +385,37 @@ pub(crate) fn write_admission_audit(audit: &dyn AuditSink, records: &[AuditRecor
         }
         if let Err(audit_err) = audit.record(record) {
             tracing::warn!(%audit_err, "failed to record admission rejection");
+        }
+    }
+}
+
+/// [`write_admission_audit`]'s sibling for resource-quota rejections
+/// ([`AuditRecord::quota_rejected`]/[`AuditRecord::quota_rejected_summary`],
+/// `PLAN.md` M8 Step 3): same sink, same fail-open-on-audit-failure
+/// exception (the request is already being refused, so a failed enqueue
+/// changes only the diagnostic), same suppression-driven `tracing::warn!`
+/// volume — but its own wording, because a quota rejection is neither a
+/// connection rejection nor an admission decision, and an operator
+/// grepping the log must not read it as one. A quota record has a real
+/// `principal` and no `peer_addr` (`crate::quota` is
+/// connection-agnostic), so that is what the line carries.
+pub(crate) fn write_quota_audit(audit: &dyn AuditSink, records: &[AuditRecord]) {
+    for record in records {
+        if record.count.is_some() {
+            tracing::warn!(
+                category = %record.resource,
+                count = record.count,
+                "quota rejections aggregated in this window"
+            );
+        } else {
+            tracing::warn!(
+                principal = %record.principal,
+                category = %record.resource,
+                "request refused by a resource quota"
+            );
+        }
+        if let Err(audit_err) = audit.record(record) {
+            tracing::warn!(%audit_err, "failed to record quota rejection");
         }
     }
 }

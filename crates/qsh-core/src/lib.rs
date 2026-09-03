@@ -38,6 +38,7 @@ pub mod localctl;
 pub mod ops;
 pub mod pairing;
 pub mod pty;
+pub mod quota;
 pub mod resume;
 pub mod reverse;
 pub mod serve;
