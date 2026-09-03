@@ -497,6 +497,8 @@ fixer는 네 단계로 돌렸다. 두 번째 단계가 도구 호출 125회 즈�
 
 nextest는 베이스라인 1370에서 main 판정 라운드 종료 시 1415, 적대적 fixer 뒤 1430 passed / 2 skipped다. 게이트 여섯은 fixer 4단계에서 첫 실행에 전부 rc=0이었다. quota 스위트를 main이 다섯 번 더 돌렸더니 LEAK 표지가 한 번, 이번엔 `exec_run_past_the_quota_answers_resource_exhausted_end_to_end`에서 나왔다. 하네스는 자식 프로세스를 만들지 않으므로 B11이 짚은 클라이언트 엔드포인트 해체가 원인의 전부는 아니다. Step 4의 부하 하네스 항목에 nextest LEAK 원인 규명을 넣는다.
 
+CI는 2e5d581에서 한 번 빨갰다. testkit quota 테스트의 `FramedStream` import가 unix 전용 테스트에서만 쓰여 Windows clippy가 미사용 import로 잡았고, 같은 런의 Windows test 잡은 install-action의 bash 시작 실패였다. import를 그 테스트 안의 전체 경로 호출로 바꾼 0e1a4aa에서 CI와 fuzz-smoke가 모두 green이다. 로컬 G6 게이트는 core와 cli만 win-gnu로 check하고 있었으므로 workspace 전체 win-gnu clippy를 추가해 같은 구멍을 로컬에서 먼저 잡는다. Step 3a는 여기서 닫는다.
+
 #### Step 4 — 적대적 부하 하네스 (DoD 5) + audit 수명주기 부하 검증
 
 협조적 soak과 **별도 게이트**다. 감사 개정 ④의 연쇄(스푸핑 flood → 세션 없는 audit 쓰기 → 디스크 만실 → resume 실패)가 차단되는지를 본다. Step 2·3이 선언한 상한이 실제로 강제되는지를 이 하네스가 판정한다.
