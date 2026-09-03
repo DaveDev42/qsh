@@ -126,6 +126,32 @@ pub const RESET_CODE_FORBIDDEN: u32 = 0x2003;
 /// "someone else is driving".
 pub const RESET_CODE_SESSION_CONFLICT: u32 = 0x2004;
 
+/// Stream reset code: the ticket/ACL/shape checks all passed but a
+/// resource quota was already at its cap (M8 Step 3b,
+/// `crate::quota::Quotas::reserve_tunnel_stream`). Distinct from every
+/// other reset code here because — unlike `FORBIDDEN` — the resource
+/// comes back once something else releases: a client that reads this
+/// code alone (with no `ConnectResult` frame reachable, e.g. before the
+/// framed reply lands) still learns "retry", not "never".
+pub const RESET_CODE_RESOURCE_EXHAUSTED: u32 = 0x200D;
+
+/// Connection close code: the accept-arm's connection-count quota (M8
+/// Step 3b, `[serve].max_connections`/`max_connections_per_principal`, or
+/// the fixed pairing cap) was already at its cap when this connection
+/// reached the front of `Server::serve_connection` — used only for the
+/// pre-identity (`Principal::Pairing`) refusal (ruling R2), which closes
+/// the connection outright rather than writing a `ConnectResult`/`Error`
+/// frame (a pairing connection's own non-distinguishing discipline,
+/// `docs/design/protocol.md` §10-2/§15.5, applies to capacity the same
+/// way it applies to a missing invite). A regular (non-pairing) refusal
+/// instead reaches the peer as a normal `RESOURCE_EXHAUSTED` error frame
+/// through `handshake::respond` (ruling R3) — this code exists for the
+/// one path that never gets that far. Next free value after
+/// `qsh_transport::endpoint::CLOSE_CODE_PROTOCOL` (`0x1002`); lives here,
+/// not in `qsh-transport`, because it is only ever an opaque argument to
+/// `Connection::close` — zero transport-crate change.
+pub const CLOSE_CODE_RESOURCE_EXHAUSTED: u32 = 0x1003;
+
 /// Maximum number of unredeemed tickets one connection may hold. Bounds
 /// the memory a (pinned) peer can pin down by issuing requests it never
 /// follows up on; further ticket-issuing requests get `RESOURCE_EXHAUSTED`
@@ -373,6 +399,17 @@ struct RemoteForwardEntry {
     /// teardown — nothing else to release, the same shape as
     /// [`crate::tunnel::local::LocalForwardHandle`]'s `Drop`.
     task: tokio::task::JoinHandle<()>,
+    /// This listener's `[serve].max_remote_forwards_per_principal`
+    /// reservation (M8 Step 3b, [`crate::quota::Quotas::
+    /// reserve_remote_forward`]) — held for the entry's whole lifetime and
+    /// never read, only kept alive so its `Drop` runs exactly when the
+    /// entry itself is removed. Both removal sites
+    /// ([`Server::handle_rfwd_close`], [`Server::purge_connection`]) take
+    /// this `RemoteForwardEntry` out of [`Server::remote_forwards`] by
+    /// value, so the permit releases automatically with no manual
+    /// decrement at either site — same "let the map remove do the
+    /// releasing" shape a `Ticket`'s `ExecPermit` already relies on.
+    _quota: crate::quota::RemoteForwardPermit,
 }
 
 /// The host: policy + audit + ticket registry + session backend. Shared
@@ -480,6 +517,35 @@ impl std::ops::Deref for TicketsGuard<'_> {
 }
 
 impl std::ops::DerefMut for TicketsGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.guard
+    }
+}
+
+/// [`Server::lock_remote_forwards`]'s return type — same shape as
+/// [`TicketsGuard`], for the same reason (M8 Step 3b ruling A4):
+/// [`Server::remote_forwards`] is the second lock `purge_connection`'s
+/// "collect under the guard, drop outside" discipline applies to (a
+/// removed [`RemoteForwardEntry`] carries a task handle, not a quota
+/// permit, today — but nothing stops a future edit from adding one, and
+/// this tripwire exists precisely so that edit cannot silently violate
+/// ADR-0010 §9). Field order matters here too: the `MutexGuard` drops
+/// first, the `NonLeafGuard` second.
+struct RemoteForwardsGuard<'a> {
+    guard: MutexGuard<'a, HashMap<String, RemoteForwardEntry>>,
+    #[cfg(test)]
+    _non_leaf: crate::quota::lock_order::NonLeafGuard,
+}
+
+impl std::ops::Deref for RemoteForwardsGuard<'_> {
+    type Target = HashMap<String, RemoteForwardEntry>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.guard
+    }
+}
+
+impl std::ops::DerefMut for RemoteForwardsGuard<'_> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.guard
     }
@@ -612,6 +678,21 @@ impl Server {
     fn lock_tickets(&self) -> TicketsGuard<'_> {
         TicketsGuard {
             guard: self.tickets.lock().unwrap_or_else(|e| e.into_inner()),
+            #[cfg(test)]
+            _non_leaf: crate::quota::lock_order::NonLeafGuard::new(),
+        }
+    }
+
+    /// The choke point for `self.remote_forwards.lock()` in
+    /// [`Self::purge_connection`] (M8 Step 3b ruling A4) — same shape and
+    /// same reasoning as [`Self::lock_tickets`] above, extended to this
+    /// crate's second non-leaf lock.
+    fn lock_remote_forwards(&self) -> RemoteForwardsGuard<'_> {
+        RemoteForwardsGuard {
+            guard: self
+                .remote_forwards
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()),
             #[cfg(test)]
             _non_leaf: crate::quota::lock_order::NonLeafGuard::new(),
         }
@@ -1073,8 +1154,9 @@ impl Server {
                 let records = self.quotas.record_rejection(
                     kind,
                     &opener,
+                    ctx.peer_addr,
                     self.quotas.now(),
-                    request_id,
+                    Some(request_id),
                     ctx.auth_path,
                 );
                 crate::audit::write_quota_audit(self.audit.as_ref(), &records);
@@ -1334,8 +1416,9 @@ impl Server {
                 let records = self.quotas.record_rejection(
                     kind,
                     &opener,
+                    ctx.peer_addr,
                     self.quotas.now(),
-                    request_id,
+                    Some(request_id),
                     ctx.auth_path,
                 );
                 crate::audit::write_quota_audit(self.audit.as_ref(), &records);
@@ -2078,7 +2161,23 @@ impl Server {
     /// doc), and release every writer lease it held. Sessions (and their
     /// children) survive — that is the point of the broker
     /// (architecture.md §3 rule c).
-    pub async fn purge_connection(&self, conn_id: usize) {
+    ///
+    /// `held` is the connection-count permit this connection's slot was
+    /// reserved with (`ConnectionPermit`, `PairingConnectionPermit`, or
+    /// `()` from a test with nothing to hold) — M8 Step 3b ruling B3.
+    /// It is released by this function, as its own last statement, once
+    /// every other teardown step above has run to completion. A caller
+    /// that wants the slot released *before* teardown finishes has no
+    /// way to ask for that here: `held` is moved in by value, so passing
+    /// anything other than the real permit — `None` on an `Option<..>`,
+    /// say — is a visible, deliberate choice at the call site, exactly
+    /// the kind of thing a reviewer is expected to catch. This replaces
+    /// the source-text tripwire this function's call sites used to be
+    /// pinned by (`the_connection_permit_is_released_after_purge_
+    /// connection_not_before`, deleted): that test could not tell a
+    /// same-line-text-but-early `drop` apart from the real thing (B3's
+    /// own mutation demonstrated it surviving); ownership can.
+    pub async fn purge_connection<P: Send>(&self, conn_id: usize, held: P) {
         // Collected under the tickets lock, dropped only after it (and
         // `remote_forwards`'s lock below) are released — main-session
         // arbitration item 2, F7 of the M8 Step 3a conformance sweep:
@@ -2099,10 +2198,7 @@ impl Server {
         // `expired_tickets` above — `entry.task.abort()` runs after
         // `forwards`'s guard is released, not before.
         let dying_forwards: Vec<RemoteForwardEntry> = {
-            let mut forwards = self
-                .remote_forwards
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let mut forwards = self.lock_remote_forwards();
             let dying: Vec<String> = forwards
                 .iter()
                 .filter(|(_, entry)| entry.conn_id == conn_id)
@@ -2132,6 +2228,11 @@ impl Server {
         // after every lock this function took has already been released.
         drop(expired_tickets);
         drop(dying_forwards);
+        // `held` (the connection-count permit) is released last, after
+        // every other teardown step above has completed — B3's doc
+        // comment on this function's signature is the actual contract;
+        // this is the enforcement.
+        drop(held);
     }
 
     // ------------------------------------------------------------------
@@ -2300,14 +2401,91 @@ impl Server {
     }
 
     /// Drive one authenticated connection to completion.
+    ///
+    /// M8 Step 3b (rulings R2/R3): the connection-count quota is reserved
+    /// **here**, before [`Self::serve_connection_inner`] ever runs — a
+    /// peer that never sends `Hello` at all is still counted — and
+    /// released only after [`Self::purge_connection`] below (never
+    /// earlier: a dead connection's forwards must never outlive its
+    /// slot). `Principal::Pairing` uses a separate, fixed axis
+    /// ([`crate::quota::Quotas::reserve_pairing_connection`]) and, on
+    /// refusal, never reaches `serve_connection_inner`/`handshake::
+    /// respond` at all — no stream accepted, no proof read, no frame
+    /// written, just an immediate [`CLOSE_CODE_RESOURCE_EXHAUSTED`]
+    /// close (ruling R2: the cap this guards is itself non-distinguishing
+    /// from every other pairing refusal). A regular refusal instead lets
+    /// `serve_connection_inner` run with `refused: Some(kind)`, so the
+    /// peer still gets a normal `RESOURCE_EXHAUSTED` `Hello` reply
+    /// through the ordinary drained-rejection path (ruling R3) — the
+    /// out-param this function threads through is the one new parameter
+    /// that ruling allows.
     pub async fn serve_connection(self: Arc<Self>, conn: Connection) {
         let peer_addr = conn.remote_address();
         let principal = conn.principal().clone();
         let conn_id = conn.stable_id();
         tracing::info!(%principal, peer = %peer_addr, "connection accepted");
 
-        let result = self.clone().serve_connection_inner(&conn).await;
-        self.purge_connection(conn_id).await;
+        if *conn.principal() == Principal::Pairing {
+            match self.quotas.reserve_pairing_connection() {
+                Ok(permit) => {
+                    let result = self.clone().serve_connection_inner(&conn, None).await;
+                    self.purge_connection(conn_id, permit).await;
+                    self.log_and_close_on_error(&conn, &principal, peer_addr, result);
+                }
+                Err(kind) => {
+                    // Ruling R2: audited with the connection's own
+                    // `principal().to_string()`, not `opener_key` — a
+                    // pairing principal has no `auth_path` worth folding
+                    // in (pre-identity), and the ADR's own §6 table names
+                    // this field by the bare principal.
+                    let records = self.quotas.record_rejection(
+                        kind,
+                        &principal.to_string(),
+                        peer_addr,
+                        self.quotas.now(),
+                        None,
+                        conn.auth_path(),
+                    );
+                    crate::audit::write_quota_audit(self.audit.as_ref(), &records);
+                    conn.close(CLOSE_CODE_RESOURCE_EXHAUSTED, b"at capacity");
+                }
+            }
+            return;
+        }
+
+        let opener = opener_key(conn.principal(), conn.auth_path());
+        let (permit, refused) = match self.quotas.reserve_connection(&opener) {
+            Ok(permit) => (Some(permit), None),
+            Err(kind) => {
+                let records = self.quotas.record_rejection(
+                    kind,
+                    &opener,
+                    peer_addr,
+                    self.quotas.now(),
+                    None,
+                    conn.auth_path(),
+                );
+                crate::audit::write_quota_audit(self.audit.as_ref(), &records);
+                (None, Some(kind))
+            }
+        };
+
+        let result = self.clone().serve_connection_inner(&conn, refused).await;
+        self.purge_connection(conn_id, permit).await;
+        self.log_and_close_on_error(&conn, &principal, peer_addr, result);
+    }
+
+    /// Shared tail of [`Self::serve_connection`]'s two branches (pairing
+    /// and regular): the same logging/close-on-protocol-error behavior
+    /// this function's body used to inline once, before the connection
+    /// quota reservation above needed two separate call sites for it.
+    fn log_and_close_on_error(
+        &self,
+        conn: &Connection,
+        principal: &Principal,
+        peer_addr: SocketAddr,
+        result: Result<(), ConnError>,
+    ) {
         match result {
             Ok(()) => tracing::info!(%principal, peer = %peer_addr, "connection closed"),
             // The peer went away (closed, idle timeout, reset). Ordinary
@@ -2322,7 +2500,11 @@ impl Server {
         }
     }
 
-    async fn serve_connection_inner(self: Arc<Self>, conn: &Connection) -> Result<(), ConnError> {
+    async fn serve_connection_inner(
+        self: Arc<Self>,
+        conn: &Connection,
+        refused: Option<crate::quota::QuotaKind>,
+    ) -> Result<(), ConnError> {
         // ADR-0002 / M7 Step 4's structural guarantee (report §B1): a
         // pairing-authenticated connection never reaches `handshake::
         // respond`, `ConnCtx`, `Self::dispatch` or the ACL choke point at
@@ -2337,6 +2519,22 @@ impl Server {
         }
 
         let (ctl, peer_hello) = crate::handshake::respond(conn, |peer_hello| {
+            // M8 Step 3b ruling R3: the connection-count refusal decided
+            // in `Self::serve_connection`, before this callback ever ran,
+            // surfaces first — ahead of the reverse-registration check
+            // below. It is unrelated to anything this peer's `Hello`
+            // says (the cap was already exceeded the instant this
+            // connection was accepted), so nothing about `peer_hello`
+            // could change the answer; checking it first also means a
+            // saturated host never spends a cycle deciding whether this
+            // would-be registration is otherwise well-formed.
+            if let Some(kind) = refused {
+                return Err(wire::Error::new(
+                    ErrorCode::ResourceExhausted,
+                    kind.wire_message(),
+                    true,
+                ));
+            }
             // A forward host does not accept registrations — the
             // symmetric-protocol counterpart of `qsh listen` refusing a
             // peer with no `Hello.reverse` at all (`docs/design/
@@ -2781,10 +2979,14 @@ impl Server {
     /// (1024) is the peer's whole bidi-stream allowance, so concurrent
     /// tunnel splices — and the upstream fds they hold open — are bounded
     /// at 1024 per connection, on a peer that is mTLS-pinned to begin with
-    /// (the M1-M4 interim allow-all-pinned posture). A *tunnel-specific*
+    /// (the M1-M4 interim allow-all-pinned posture). A tunnel-specific
     /// quota tighter than that connection-wide cap (per principal, per
-    /// forward) is M5 policy-engine scope, not something to invent here
-    /// (`docs/design/protocol.md` §7 "동시성 상한").
+    /// forward) **is** M8 Step 3b scope now:
+    /// [`Server::authorize_and_dial_tunnel`]'s [`crate::quota::
+    /// TunnelStreamPermit`] is held for this whole function's lifetime
+    /// (bound below, released only when this function returns — normal
+    /// completion, error, or task-abort unwind alike), so the splice
+    /// itself never has to know the quota exists.
     async fn handle_tcp_connect(
         &self,
         ctx: &ConnCtx,
@@ -2803,7 +3005,7 @@ impl Server {
             .authorize_and_dial_tunnel(ctx, header, &SystemDialer::default())
             .await;
 
-        let upstream = match dialed {
+        let (upstream, _permit) = match dialed {
             Err(rejection) => {
                 // §7 requires the requester learn *why*, so the refusal is
                 // a `ConnectResult` frame and a clean FIN — `reset()` here
@@ -2819,6 +3021,7 @@ impl Server {
                 let stop_code = match rejection.code.parse::<ErrorCode>() {
                     Ok(ErrorCode::PermissionDenied) => RESET_CODE_FORBIDDEN,
                     Ok(ErrorCode::InvalidArgument) => RESET_CODE_BAD_HEADER,
+                    Ok(ErrorCode::ResourceExhausted) => RESET_CODE_RESOURCE_EXHAUSTED,
                     _ => 0,
                 };
                 let _ = stream.send.send(&rejection).await;
@@ -2826,7 +3029,7 @@ impl Server {
                 stream.recv.stop(stop_code);
                 return;
             }
-            Ok(upstream) => {
+            Ok((upstream, permit)) => {
                 if stream
                     .send
                     .send(&wire::ConnectResult {
@@ -2838,11 +3041,14 @@ impl Server {
                     .is_err()
                 {
                     // Peer went away between the dial and the reply; drop
-                    // the freshly-dialed socket rather than splice into
-                    // nothing.
+                    // the freshly-dialed socket (and the quota permit
+                    // with it) rather than splice into nothing.
                     return;
                 }
-                upstream
+                // `permit` is carried out to the outer `let` below — held
+                // until this function returns (see the doc comment above
+                // `handle_tcp_connect`, `crate::quota::TunnelStreamPermit`).
+                (upstream, permit)
             }
         };
 
@@ -2915,7 +3121,8 @@ impl Server {
         ctx: &ConnCtx,
         header: &StreamHeader,
         dialer: &dyn TunnelDialer,
-    ) -> Result<tokio::net::TcpStream, wire::ConnectResult> {
+    ) -> Result<(tokio::net::TcpStream, crate::quota::TunnelStreamPermit), wire::ConnectResult>
+    {
         // (1) Shape. A malformed destination never becomes an ACL decision
         // (there is nothing to decide *about*) and never becomes a socket
         // — same discipline as `docs/design/protocol.md` §9's "check the
@@ -2930,6 +3137,18 @@ impl Server {
             return Err(connect_rejected(
                 ErrorCode::InvalidArgument,
                 "destination host and port are required",
+            ));
+        }
+        // A host this long is never a real DNS name (255-octet wire
+        // limit, RFC 1035 §3.1) or a literal IP — nothing legitimate is
+        // refused here, but an unbounded host string is an unbounded ACL
+        // resource / audit field / quota map key (M8 Step 3b ruling: this
+        // shape check belongs beside the others, before the ACL choke
+        // point, same "nothing to decide about" reasoning).
+        if header.host.len() > 255 {
+            return Err(connect_rejected(
+                ErrorCode::InvalidArgument,
+                "destination host is too long",
             ));
         }
         // Canonical `host:port` — bracketed for an IPv6 literal, which
@@ -2956,9 +3175,37 @@ impl Server {
             ));
         }
 
+        // (2.5) The tunnel-stream concurrency quota (M8 Step 3b,
+        // `[serve].max_tunnel_streams_per_principal`/
+        // `max_tunnel_streams_per_forward`): after the ACL decision (an
+        // unauthorized principal must see `PERMISSION_DENIED`, never a
+        // quota oracle — `crate::quota`'s own module doc), before the
+        // dial (nothing is created before a reservation succeeds). Same
+        // shape as `handle_exec_start`'s `reserve_exec` gate
+        // (`server/mod.rs` exec path).
+        let opener = crate::acl::opener_key(&ctx.principal, ctx.auth_path);
+        let permit = match self.quotas.reserve_tunnel_stream(&opener, &resource) {
+            Ok(permit) => permit,
+            Err(kind) => {
+                let records = self.quotas.record_rejection(
+                    kind,
+                    &opener,
+                    ctx.peer_addr,
+                    self.quotas.now(),
+                    None,
+                    ctx.auth_path,
+                );
+                crate::audit::write_quota_audit(self.audit.as_ref(), &records);
+                return Err(connect_rejected(
+                    ErrorCode::ResourceExhausted,
+                    kind.wire_message(),
+                ));
+            }
+        };
+
         // (3) Only now may a resource come into existence.
         match dialer.dial(&header.host, port).await {
-            Ok(upstream) => Ok(upstream),
+            Ok(upstream) => Ok((upstream, permit)),
             Err(err) => {
                 // The destination, not the payload: safe to log, and the
                 // only thing about this tunnel that ever is.
@@ -3011,7 +3258,8 @@ impl Server {
         req: &wire::RemoteForwardOpen,
         resolver: &dyn BindHostResolver,
         binder: &dyn RemoteForwardBinder,
-    ) -> Result<tokio::net::TcpListener, Box<ControlMessage>> {
+    ) -> Result<(tokio::net::TcpListener, crate::quota::RemoteForwardPermit), Box<ControlMessage>>
+    {
         // (1) Shape. A malformed request never becomes an ACL decision or a
         // socket, same discipline as `authorize_and_dial_tunnel`'s own (1).
         let Ok(bind_port) = u16::try_from(req.bind_port) else {
@@ -3079,8 +3327,38 @@ impl Server {
                 .await
                 .map_err(|err| Box::new(invalid_argument(request_id, err.to_string())))?;
 
+        // (3.5) The remote-forward-listener concurrency quota (M8 Step 3b,
+        // `[serve].max_remote_forwards_per_principal`): after the ACL
+        // decision and the loopback shape check (an unauthorized principal
+        // must see `PERMISSION_DENIED`, and a non-loopback bind must see
+        // `INVALID_ARGUMENT` — neither should ever be shadowed by
+        // `RESOURCE_EXHAUSTED`), strictly **before** `binder.bind` below:
+        // nothing may be created before the reservation succeeds, same
+        // shape as `authorize_and_dial_tunnel`'s own `reserve_tunnel_
+        // stream` gate. A spy `binder` in this module's own unit tests
+        // must observe zero `bind` calls on a refusal here.
+        let opener = crate::acl::opener_key(&ctx.principal, ctx.auth_path);
+        let quota = self
+            .quotas
+            .reserve_remote_forward(&opener)
+            .map_err(|kind| {
+                let records = self.quotas.record_rejection(
+                    kind,
+                    &opener,
+                    ctx.peer_addr,
+                    self.quotas.now(),
+                    Some(request_id),
+                    ctx.auth_path,
+                );
+                crate::audit::write_quota_audit(self.audit.as_ref(), &records);
+                Box::new(ControlMessage::error(
+                    request_id,
+                    wire::Error::new(ErrorCode::ResourceExhausted, kind.wire_message(), true),
+                ))
+            })?;
+
         // (4) Only now may a resource come into existence.
-        binder.bind(addr).await.map_err(|err| {
+        let listener = binder.bind(addr).await.map_err(|err| {
             Box::new(ControlMessage::error(
                 request_id,
                 wire::Error::new(
@@ -3089,7 +3367,8 @@ impl Server {
                     false,
                 ),
             ))
-        })
+        })?;
+        Ok((listener, quota))
     }
 
     /// Full production handling of `RemoteForwardOpen`: the choke point
@@ -3104,17 +3383,17 @@ impl Server {
     /// streams on is actually available (`dispatch`'s own RfwdOpen arm
     /// documents why it cannot do this itself).
     async fn handle_rfwd_open(
-        &self,
+        self: &Arc<Self>,
         ctx: &ConnCtx,
         conn: &Connection,
         request_id: u64,
         req: &wire::RemoteForwardOpen,
     ) -> ControlMessage {
-        let listener = match self
+        let (listener, quota) = match self
             .authorize_and_bind_remote_forward(ctx, request_id, req, &SystemResolver, &SystemBinder)
             .await
         {
-            Ok(listener) => listener,
+            Ok(pair) => pair,
             Err(reply) => return *reply,
         };
         let actual_addr = match listener.local_addr() {
@@ -3155,10 +3434,20 @@ impl Server {
         );
 
         let forward_id = ulid::Ulid::new().to_string();
-        let task = tokio::spawn(crate::tunnel::remote::serve_remote_forward(
-            listener,
-            conn.clone(),
-            forward_id.clone().into_bytes(),
+        // Self-removal on a fatal accept error (M8 Step 3b) — factored
+        // into `run_remote_forward_accept_loop` (this module's own free
+        // fn, below, generic over the serve future) both so this spawn
+        // stays short and so a test can drive the exact same production
+        // self-removal tail with a cheap stand-in future instead of a
+        // real listener (R10).
+        let task = tokio::spawn(run_remote_forward_accept_loop(
+            Arc::downgrade(self),
+            crate::tunnel::remote::serve_remote_forward(
+                listener,
+                conn.clone(),
+                forward_id.clone().into_bytes(),
+            ),
+            forward_id.clone(),
         ));
         // Recorded under this connection's authenticated `(principal,
         // auth_path)`, not `ctx.conn_id` alone — the ACL ownership axis
@@ -3173,6 +3462,7 @@ impl Server {
                     conn_id: ctx.conn_id,
                     owner: opener_key(&ctx.principal, ctx.auth_path),
                     task,
+                    _quota: quota,
                 },
             );
 
@@ -3629,6 +3919,55 @@ fn invalid_argument(request_id: u64, message: impl Into<String>) -> ControlMessa
         request_id,
         wire::Error::new(ErrorCode::InvalidArgument, message, false),
     )
+}
+
+/// Runs `serve` (in production, [`crate::tunnel::remote::
+/// serve_remote_forward`]) to its own completion — reachable only via a
+/// `Fatal` accept disposition (that function's own doc: every other
+/// accept error is `Retry`/`Backoff`'d away inside its loop) — then
+/// removes this forward's own `forward_id` from `server`'s [`Server::
+/// remote_forwards`], releasing its [`crate::quota::RemoteForwardPermit`]
+/// (M8 Step 3b). Without this, a listener that died on its own left its
+/// entry — and permit — registered forever: a leak, and a `forward_id`
+/// `RemoteForwardOpen` could never reuse (`docs/CLI.md` §2.5's `-R` retry
+/// path) even though nothing is actually listening any more.
+///
+/// `server` is [`Weak`], not [`Arc`]: this task must never be the thing
+/// keeping the whole host alive past its own shutdown, the same
+/// reasoning [`crate::quota::ExecPermit`]/[`crate::quota::
+/// TunnelStreamPermit`] hold a `Weak<Quotas>` for. `Self::handle_rfwd_
+/// close`/[`Server::purge_connection`] both already remove the entry
+/// themselves before calling [`tokio::task::JoinHandle::abort`], and an
+/// abort drops this future at whatever `.await` point it was suspended
+/// on — the removal below simply never runs on that path, so an aborted
+/// forward is never double-removed by both this task and its closer.
+///
+/// `serve` is generic (`F: Future<Output = ()>`), not a concrete
+/// `TcpListener` + [`Connection`] pair, so a test can drive this exact
+/// production self-removal tail with a cheap stand-in future (`async {}`
+/// to exercise the return path, [`std::future::pending`] to exercise the
+/// abort path) instead of coaxing a real listener into a fatal OS-level
+/// accept error (M8 Step 3b, R10: an earlier version of this test closed
+/// a live listener's file descriptor out from under tokio's reactor to
+/// force one, which is unsound and Windows-hostile — no test needs to do
+/// that once the loop body itself is generic).
+///
+/// A free fn, not a [`Server`] method, so [`Server::handle_rfwd_open`]'s
+/// spawn can pass it a plain [`Weak`] rather than the whole `self: &Arc<
+/// Self>` receiver holding a strong reference into the spawned task.
+async fn run_remote_forward_accept_loop<F: std::future::Future<Output = ()>>(
+    server: std::sync::Weak<Server>,
+    serve: F,
+    forward_id: String,
+) {
+    serve.await;
+    if let Some(server) = server.upgrade() {
+        server
+            .remote_forwards
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&forward_id);
+    }
 }
 
 /// The `BrokerError` → `ErrorCode` table (PLAN M2 Step 2 handoff): the
@@ -4624,6 +4963,15 @@ mod tests {
         assert_eq!(recs[2].decision, "deny");
         assert_eq!(recs[2].resource, "quota_exec_principal");
         assert_eq!(recs[2].principal, opener);
+        assert_eq!(
+            recs[2].request_id, "2",
+            "R9 — the exec axis has a real control request id to carry"
+        );
+        assert_eq!(
+            recs[2].peer_addr,
+            ctx.peer_addr.to_string(),
+            "R4 — the quota deny record must carry the live peer, not \"-\""
+        );
     }
 
     /// [`crate::exec::run_exec`] reports even a spawn failure ("argv that
@@ -4820,12 +5168,15 @@ mod tests {
 
     /// Mechanical form of `docs/adr/0010-resource-quotas.md` §9's
     /// "collect under the guard, drop outside" rule (B4 of the M8 Step 3a
-    /// fix-3 sweep): exercises all four sites that sweep expired tickets —
-    /// `pending_tickets_for`, `issue_ticket`, `purge_connection`,
-    /// `quota_housekeeping` — each against an expired ticket whose
-    /// `ExecPermit` is about to drop, and asserts
-    /// `crate::quota::lock_order::violations() == 0` once all four have
-    /// run. `VIOLATIONS` is process-global, not per-test
+    /// fix-3 sweep, extended by M8 Step 3b ruling A4 to the
+    /// `remote_forwards` lock as well): exercises all four sites that
+    /// sweep expired tickets — `pending_tickets_for`, `issue_ticket`,
+    /// `purge_connection`, `quota_housekeeping` — each against an expired
+    /// ticket whose `ExecPermit` is about to drop, plus (at the
+    /// `purge_connection` site) a live `RemoteForwardEntry` whose own
+    /// `RemoteForwardPermit` is about to drop from the same call, and
+    /// asserts `crate::quota::lock_order::violations() == 0` once all
+    /// four have run. `VIOLATIONS` is process-global, not per-test
     /// (`lock_order`'s own doc) — `cargo nextest` runs one test per
     /// process, so a nonzero count read back here is never cross-test
     /// noise.
@@ -4898,8 +5249,24 @@ mod tests {
 
         // Site 3: `purge_connection` — removes every ticket for `conn_id`
         // regardless of expiry, including the still-live one `issue_ticket`
-        // just inserted above.
-        rig.server.purge_connection(conn_id).await;
+        // just inserted above; also (A4) removes every `RemoteForwardEntry`
+        // this `conn_id` opened, whose own `RemoteForwardPermit` must drop
+        // only after `remote_forwards`'s lock is released, exactly like
+        // `ExecPermit` above and the tickets lock.
+        {
+            let remote_forward_permit = rig.quotas.reserve_remote_forward(&opener).unwrap();
+            let task = tokio::spawn(std::future::pending::<()>());
+            rig.server.lock_remote_forwards().insert(
+                "adv-a4-forward".to_string(),
+                RemoteForwardEntry {
+                    conn_id,
+                    owner: opener.clone(),
+                    task,
+                    _quota: remote_forward_permit,
+                },
+            );
+        }
+        rig.server.purge_connection(conn_id, ()).await;
 
         // Site 4: `quota_housekeeping`.
         insert(4, expired_exec_ticket("e"));
@@ -4908,7 +5275,8 @@ mod tests {
         assert_eq!(
             crate::quota::lock_order::violations(),
             0,
-            "an ExecPermit dropped while the tickets lock was still held"
+            "a quota permit (ExecPermit or RemoteForwardPermit) dropped while a non-leaf lock \
+             (tickets or remote_forwards) was still held"
         );
     }
 
@@ -5270,6 +5638,15 @@ mod tests {
             "the quota deny record must carry the real request_id, not the \
              placeholder used before F2 threaded it through"
         );
+        assert_eq!(
+            recs[2].request_id, "2",
+            "R9 — the session axis has a real control request id to carry"
+        );
+        assert_eq!(
+            recs[2].peer_addr,
+            ctx.peer_addr.to_string(),
+            "R4 — the quota deny record must carry the live peer, not \"-\""
+        );
     }
 
     /// `PLAN.md` M5 Step 3(c) "disk-full fail-closed": an
@@ -5528,7 +5905,7 @@ mod tests {
             Some("device:laptop")
         );
 
-        rig.server.purge_connection(42).await;
+        rig.server.purge_connection(42, ()).await;
         assert_eq!(rig.server.pending_tickets(), 0);
         assert_eq!(rig.broker.get(&sid).unwrap().info().writer, None);
         assert_eq!(rig.broker.session_count(), 1, "the session survives");
@@ -7609,6 +7986,377 @@ mod tests {
         }
     }
 
+    /// A destination host past the 255-octet DNS-name limit is refused on
+    /// shape, same discipline as the empty-host/zero-port/out-of-range-port
+    /// cases above: nothing to decide about, so no ACL call, no audit
+    /// line, and no dial (M8 Step 3b).
+    #[tokio::test]
+    async fn an_over_long_destination_host_is_refused_as_invalid_argument() {
+        let rig = allow_rig();
+        let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
+        let dialer = CountingDialer::refusing();
+
+        let long_host = "a".repeat(256);
+        let header = tcp_connect_header(&long_host, 5432);
+        let rejection = rig
+            .server
+            .authorize_and_dial_tunnel(&ctx, &header, &dialer)
+            .await
+            .expect_err("a 256-octet host is never a real destination");
+
+        assert_eq!(dialer.calls(), 0);
+        assert_eq!(rejection.code, ErrorCode::InvalidArgument.as_str());
+        assert!(
+            rig.audit.records().is_empty(),
+            "no ACL decision was made, so no audit line"
+        );
+    }
+
+    /// The security core of the tunnel-stream quota (M8 Step 3b, mirrors
+    /// `tcp_connect_denied_dials_nothing_and_reports_permission_denied`'s
+    /// own reasoning for the ACL axis): a principal already at its
+    /// `max_tunnel_streams_per_forward` cap must see **zero** dials and a
+    /// `RESOURCE_EXHAUSTED` `ConnectResult`, with the deny audited under
+    /// the quota category rather than `forward.local`'s allow/deny pair.
+    #[tokio::test]
+    async fn a_tunnel_dial_past_the_quota_never_reaches_the_dialer() {
+        let rig = rig_with_quota_limits(
+            Arc::new(AllowAllPinned),
+            Arc::new(PipeFactory::new(64 * 1024)),
+            Duration::from_millis(100),
+            crate::quota::QuotaLimits {
+                max_tunnel_streams_per_forward: 0,
+                ..crate::quota::QuotaLimits::default()
+            },
+        );
+        let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
+        let dialer = CountingDialer::refusing();
+
+        let header = tcp_connect_header("db.internal", 5432);
+        let rejection = rig
+            .server
+            .authorize_and_dial_tunnel(&ctx, &header, &dialer)
+            .await
+            .expect_err("a principal already at its forward cap must not dial");
+
+        assert_eq!(
+            dialer.calls(),
+            0,
+            "the quota gate sits before the dial, same as the ACL gate"
+        );
+        assert!(!rejection.ok);
+        assert_eq!(rejection.code, ErrorCode::ResourceExhausted.as_str());
+        assert_eq!(rejection.message, "tunnel quota exceeded");
+
+        // The ACL `allow` line for `forward.local` is still audited
+        // (`authorize_stream` ran and passed) — the quota rejection is a
+        // *second*, distinct line under its own category, not a
+        // replacement for the ACL decision.
+        let recs = rig.audit.records();
+        assert_eq!(recs.len(), 2, "{recs:?}");
+        assert_eq!(recs[0].action, "forward.local");
+        assert_eq!(recs[0].decision, "allow");
+        assert_eq!(recs[1].resource, "quota_tunnels_forward");
+        assert_eq!(recs[1].decision, "deny");
+        assert_eq!(
+            recs[1].request_id, "-",
+            "R9 — the tunnel axis has no control request id (a data stream dial)"
+        );
+        assert_eq!(
+            recs[1].peer_addr,
+            ctx.peer_addr.to_string(),
+            "R4 — the quota deny record must carry the live peer, not \"-\""
+        );
+    }
+
+    /// The wire-level shape of a quota refusal on a real QUIC stream: the
+    /// requester's receive half is stopped with
+    /// [`RESET_CODE_RESOURCE_EXHAUSTED`], not the generic `0` a plain
+    /// "destination would not accept" refusal uses — a client reading
+    /// only the QUIC stop code (no `ConnectResult` frame reachable, e.g.
+    /// racing a connection teardown) still learns "retry" rather than
+    /// misreading a capacity refusal as "we are just done reading".
+    #[tokio::test]
+    async fn a_quota_refusal_stops_the_receive_half_with_resource_exhausted() {
+        let rig = rig_with_quota_limits(
+            Arc::new(AllowAllPinned),
+            Arc::new(PipeFactory::new(64 * 1024)),
+            Duration::from_millis(100),
+            crate::quota::QuotaLimits {
+                max_tunnel_streams_per_forward: 0,
+                ..crate::quota::QuotaLimits::default()
+            },
+        );
+        let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
+        let header = tcp_connect_header("db.internal", 5432);
+
+        let (client, host_conn) = crate::tunnel::testutil::loopback_pair().await;
+
+        let (send, recv) = client.open_bi().await.unwrap();
+        let mut framed = FramedStream::data(send, recv);
+        framed.send.send(&header).await.unwrap();
+        let (send, mut recv) = framed.split();
+        // Nothing more is ever written on this half — into_raw is safe to
+        // call immediately, and is the only way to read back the peer's
+        // `STOP_SENDING` error code (`FramedSend::stopped` discards it).
+        let raw_send = send.into_raw();
+
+        let server = rig.server.clone();
+        let host_handle = host_conn.clone();
+        let host_side = tokio::spawn(async move {
+            let (send, recv) = host_handle.accept_bi().await.unwrap();
+            let mut framed = FramedStream::data(send, recv);
+            let header: StreamHeader = framed.recv.recv().await.unwrap().expect("header frame");
+            server.handle_tcp_connect(&ctx, framed, &header).await;
+        });
+
+        let result: wire::ConnectResult = recv.recv().await.unwrap().expect("ConnectResult");
+        assert!(!result.ok);
+        assert_eq!(result.code, ErrorCode::ResourceExhausted.as_str());
+
+        let stop = tokio::time::timeout(Duration::from_secs(5), raw_send.stopped())
+            .await
+            .expect("the host must stop the receive half promptly")
+            .expect("stopped() must observe the STOP_SENDING, not a connection error");
+        assert_eq!(
+            stop.map(|code| code.into_inner()),
+            Some(u64::from(RESET_CODE_RESOURCE_EXHAUSTED)),
+            "a quota refusal must stop with RESET_CODE_RESOURCE_EXHAUSTED, not the generic 0"
+        );
+
+        host_side.await.unwrap();
+        drop(host_conn);
+    }
+
+    // ------------------------------------------------------------------
+    // connection caps, M8 Step 3b S4 — host/principal/pairing
+    // ------------------------------------------------------------------
+
+    /// M8 Step 3b ruling R3: a peer past the host connection cap must
+    /// never receive the ordinary local `Hello` — the refusal is decided
+    /// entirely in `Server::serve_connection`, *before*
+    /// `serve_connection_inner` (and the `local_hello` it builds) ever
+    /// runs, and reaches the peer as a normal `RESOURCE_EXHAUSTED` reply
+    /// to its own `Hello` (not a raw connection close — that shape is
+    /// pairing-only, ruling R2). The occupant below holds a *different*
+    /// principal's slot, proving this is the host axis
+    /// ([`QuotaKind::Connections`]), not the (nowhere-near-exhausted)
+    /// per-principal one.
+    #[tokio::test]
+    async fn a_connection_past_the_host_cap_is_refused_with_resource_exhausted_before_the_local_hello()
+     {
+        let rig = rig_with_quota_limits(
+            Arc::new(AllowAllPinned),
+            Arc::new(PipeFactory::new(64 * 1024)),
+            Duration::from_millis(100),
+            crate::quota::QuotaLimits {
+                max_connections: 1,
+                max_connections_per_principal: 100,
+                ..crate::quota::QuotaLimits::default()
+            },
+        );
+        let occupant = opener_key(&Principal::Device("occupant".into()), AuthPath::Pin);
+        let _occupant_permit = rig.quotas.reserve_connection(&occupant).unwrap();
+        assert_eq!(rig.quotas.connections_per_principal_in_use(&occupant), 1);
+
+        let (client, host_conn) = crate::tunnel::testutil::loopback_pair().await;
+        let server = rig.server.clone();
+        let host_side = tokio::spawn(async move { server.serve_connection(host_conn).await });
+
+        let local_hello = rig.server.local_hello(None);
+        let err = match crate::handshake::initiate(&client, local_hello).await {
+            Ok(_) => panic!("a connection past the host cap must never get a Hello reply"),
+            Err(err) => err,
+        };
+        match err {
+            crate::handshake::HelloError::Remote {
+                code,
+                message,
+                retryable,
+            } => {
+                assert_eq!(code, ErrorCode::ResourceExhausted);
+                assert_eq!(message, "connection quota exceeded");
+                assert!(retryable, "a quota refusal must be retryable");
+            }
+            other => panic!("expected a Remote RESOURCE_EXHAUSTED rejection, got {other:?}"),
+        }
+
+        host_side.await.unwrap();
+        // The refused connection was never counted — only the
+        // manually-seeded occupant still holds a slot.
+        assert_eq!(rig.quotas.connections_per_principal_in_use(&occupant), 1);
+        drop(client);
+    }
+
+    /// M8 Step 3b ruling R2: a pre-identity (`Principal::Pairing`)
+    /// connection past the fixed pairing cap is refused *without ever
+    /// naming the reason* — no control stream accepted, no proof read,
+    /// no error frame written, just an immediate close carrying
+    /// [`CLOSE_CODE_RESOURCE_EXHAUSTED`] — the same non-distinguishing
+    /// discipline `docs/design/protocol.md` §10-2/§15.5 already apply to
+    /// every other pairing refusal (a missing invite looks identical on
+    /// the wire).
+    #[tokio::test]
+    async fn a_pairing_connection_past_its_fixed_cap_is_refused_without_naming_the_reason() {
+        let rig = rig_with_quota_limits(
+            Arc::new(AllowAllPinned),
+            Arc::new(PipeFactory::new(64 * 1024)),
+            Duration::from_millis(100),
+            crate::quota::QuotaLimits::default(),
+        );
+        let mut occupants = Vec::new();
+        for _ in 0..crate::quota::MAX_CONCURRENT_PAIRING_CONNECTIONS {
+            occupants.push(rig.quotas.reserve_pairing_connection().unwrap());
+        }
+
+        let (client, host_conn) = crate::tunnel::testutil::pairing_loopback_pair().await;
+        assert_eq!(*host_conn.principal(), Principal::Pairing);
+        let server = rig.server.clone();
+        let host_side = tokio::spawn(async move { server.serve_connection(host_conn).await });
+
+        // No stream accepted, no proof read, no frame written (R2): the
+        // client's own `open_bi` must never even be answered — the
+        // connection is simply closed out from under it.
+        let close_err = client.closed().await;
+        match close_err {
+            quinn::ConnectionError::ApplicationClosed(close) => {
+                assert_eq!(
+                    u64::from(close.error_code),
+                    u64::from(CLOSE_CODE_RESOURCE_EXHAUSTED)
+                );
+                assert_eq!(&close.reason[..], b"at capacity");
+            }
+            other => panic!("expected ApplicationClosed, got {other:?}"),
+        }
+
+        host_side.await.unwrap();
+        // Every occupant slot is still held — the refusal created and
+        // consumed no ninth permit.
+        assert_eq!(
+            rig.quotas.pairing_connections_in_use(),
+            crate::quota::MAX_CONCURRENT_PAIRING_CONNECTIONS
+        );
+        drop(occupants);
+    }
+
+    /// M8 Step 3b ruling B3 (adversary A1/B3): behavioral twin of the
+    /// former source-text tripwire — a connection served by the real
+    /// accept path must take exactly one slot on its own principal and
+    /// give it back once the connection is over. `purge_connection` now
+    /// takes the permit by value and drops it as its own last statement
+    /// (see that function's doc), so "released only after purge" is a
+    /// compile-time property of `serve_connection`'s two call sites, not
+    /// something a test has to watch for by re-reading source text; this
+    /// test instead pins the *externally observable* half of that
+    /// contract — the slot is really held while the connection is live
+    /// and really given back once it ends.
+    #[tokio::test]
+    async fn a_served_connection_holds_and_returns_its_connection_slot() {
+        let rig = rig_with_quota_limits(
+            Arc::new(AllowAllPinned),
+            Arc::new(PipeFactory::new(64 * 1024)),
+            Duration::from_millis(100),
+            crate::quota::QuotaLimits::default(),
+        );
+        let (client, host_conn) = crate::tunnel::testutil::loopback_pair().await;
+        let opener = opener_key(host_conn.principal(), host_conn.auth_path());
+        let server = rig.server.clone();
+        let host_side = tokio::spawn(async move { server.serve_connection(host_conn).await });
+        let local_hello = rig.server.local_hello(None);
+        let ctl = match crate::handshake::initiate(&client, local_hello).await {
+            Ok(ctl) => ctl,
+            Err(err) => panic!("the handshake must succeed under an empty quota: {err:?}"),
+        };
+        assert_eq!(
+            rig.quotas.connections_per_principal_in_use(&opener),
+            1,
+            "a live served connection must hold exactly one connection slot"
+        );
+        drop(ctl);
+        drop(client);
+        host_side.await.unwrap();
+        assert_eq!(
+            rig.quotas.connections_per_principal_in_use(&opener),
+            0,
+            "the connection slot must be released once the connection is over"
+        );
+    }
+
+    /// Pairing sibling of the above: the fixed pairing axis
+    /// ([`crate::quota::MAX_CONCURRENT_PAIRING_CONNECTIONS`] == 8) behaves
+    /// the same way for a connection that actually clears the cap and gets
+    /// served, not just for one manually seeded and never served. Seven
+    /// occupants are hand-seeded (leaving exactly one slot), then the
+    /// eighth is driven through the real pairing protocol
+    /// (`crate::pairing::accept`/`respond`) so `serve_connection`'s
+    /// pairing arm — real `reserve_pairing_connection`, real
+    /// `serve_connection_inner`, real `purge_connection` — is what holds
+    /// and releases the slot, not the test.
+    #[tokio::test]
+    async fn a_served_pairing_connection_holds_and_returns_its_pairing_slot() {
+        let rig = rig_with_quota_limits(
+            Arc::new(AllowAllPinned),
+            Arc::new(PipeFactory::new(64 * 1024)),
+            Duration::from_millis(100),
+            crate::quota::QuotaLimits::default(),
+        );
+
+        let mut occupants = Vec::new();
+        for _ in 0..crate::quota::MAX_CONCURRENT_PAIRING_CONNECTIONS - 1 {
+            occupants.push(rig.quotas.reserve_pairing_connection().unwrap());
+        }
+        assert_eq!(
+            rig.quotas.pairing_connections_in_use(),
+            crate::quota::MAX_CONCURRENT_PAIRING_CONNECTIONS - 1
+        );
+
+        // Wire up a real, minimal invite + trust store so the eighth
+        // connection clears `serve_pairing_connection`'s "not configured"
+        // guard and runs the actual wire exchange.
+        let dir = tempfile::tempdir().unwrap();
+        let invite_path = dir.path().join("invites.toml");
+        let secret = crate::trust::pairing::generate_secret();
+        {
+            let _lock = crate::trust::pairing::InviteStore::lock(&invite_path).unwrap();
+            let mut store = crate::trust::pairing::InviteStore::load(&invite_path).unwrap();
+            store.add(secret.as_slice(), std::time::SystemTime::now());
+            store.save(&invite_path).unwrap();
+        }
+        let invites = crate::trust::pairing::SharedInviteStore::open(&invite_path).unwrap();
+        let trust = crate::trust::SharedTrustStore::open(dir.path().join("trust.toml")).unwrap();
+        rig.server.set_pairing(trust, invites);
+
+        let (client, host_conn) = crate::tunnel::testutil::pairing_loopback_pair().await;
+        assert_eq!(*host_conn.principal(), Principal::Pairing);
+        let server = rig.server.clone();
+        let host_side = tokio::spawn(async move { server.serve_connection(host_conn).await });
+
+        let accepted = crate::pairing::accept(&client, "adv-a1-b-client", secret.as_slice())
+            .await
+            .expect("the eighth pairing connection must clear the cap and pair successfully");
+        assert_eq!(accepted.peer_device_name, rig.server.device_name);
+        assert_eq!(
+            rig.quotas.pairing_connections_in_use(),
+            crate::quota::MAX_CONCURRENT_PAIRING_CONNECTIONS,
+            "the eighth, just-served pairing connection must hold the last slot"
+        );
+        // A ninth reservation must fail while all eight are held.
+        assert!(matches!(
+            rig.quotas.reserve_pairing_connection(),
+            Err(crate::quota::QuotaKind::PairingConnections)
+        ));
+
+        drop(client);
+        host_side.await.unwrap();
+        assert_eq!(
+            rig.quotas.pairing_connections_in_use(),
+            crate::quota::MAX_CONCURRENT_PAIRING_CONNECTIONS - 1,
+            "the pairing slot must be released once the connection is over"
+        );
+
+        drop(occupants);
+    }
+
     // ------------------------------------------------------------------
     // remote forward (`-R`), M4 Step 4 — choke point + accept loop
     // ------------------------------------------------------------------
@@ -7789,7 +8537,7 @@ mod tests {
             let binder = CountingBinder::real();
             let req = rfwd_open(bind_host, 0, "127.0.0.1", 5432);
 
-            let listener = rig
+            let (listener, _quota) = rig
                 .server
                 .authorize_and_bind_remote_forward(&ctx, 1, &req, &SystemResolver, &binder)
                 .await
@@ -7835,7 +8583,7 @@ mod tests {
         ]);
         let req = rfwd_open("rebinder.example", 0, "127.0.0.1", 5432);
 
-        let listener = rig
+        let (listener, _quota) = rig
             .server
             .authorize_and_bind_remote_forward(&ctx, 1, &req, &resolver, &binder)
             .await
@@ -7913,6 +8661,309 @@ mod tests {
                 "no ACL decision was made, so no audit line: {req:?}"
             );
         }
+    }
+
+    /// The security core of M8 Step 3b's listener quota, the
+    /// remote-forward twin of `a_tunnel_dial_past_the_quota_never_reaches_
+    /// the_dialer`: a principal already at `max_remote_forwards_per_
+    /// principal` must be refused **before** `binder.bind` ever runs — a
+    /// spy binder observes zero calls, not one bind-then-unwind.
+    #[tokio::test]
+    async fn a_remote_forward_past_the_quota_is_refused_before_the_binder_runs() {
+        let rig = rig_with_quota_limits(
+            Arc::new(AllowAllPinned),
+            Arc::new(PipeFactory::new(64 * 1024)),
+            Duration::from_millis(100),
+            crate::quota::QuotaLimits {
+                max_remote_forwards_per_principal: 0,
+                ..crate::quota::QuotaLimits::default()
+            },
+        );
+        let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
+        let binder = CountingBinder::real();
+        let req = rfwd_open("127.0.0.1", 0, "127.0.0.1", 5432);
+
+        let rejection = rig
+            .server
+            .authorize_and_bind_remote_forward(&ctx, 1, &req, &SystemResolver, &binder)
+            .await
+            .expect_err("a principal already at its listener cap must not bind");
+
+        assert_eq!(
+            binder.calls(),
+            0,
+            "the quota gate sits before the bind, same as the ACL and loopback gates"
+        );
+        assert_eq!(error_code(&rejection), Some(ErrorCode::ResourceExhausted));
+
+        // The ACL `allow` line for `forward.remote` is still audited — the
+        // quota rejection is a *second*, distinct line under its own
+        // category, not a replacement for the ACL decision.
+        let recs = rig.audit.records();
+        assert_eq!(recs.len(), 2, "{recs:?}");
+        assert_eq!(recs[0].action, "forward.remote");
+        assert_eq!(recs[0].decision, "allow");
+        assert_eq!(recs[1].resource, "quota_remote_forwards_principal");
+        assert_eq!(recs[1].decision, "deny");
+        // R9 (per `Quotas::record_rejection`'s own doc: "a control request
+        // (session, exec, `RemoteForwardOpen`) has a real one to pass as
+        // `Some`") — remote-forward is a control request, so this axis's
+        // first row carries the real request_id, same as session/exec.
+        // REBUTTAL B2 (see F3 handoff): the arbitration table's summary
+        // grouped remote-forward with the tunnel/connection/pairing "-"
+        // axes, but `authorize_and_bind_remote_forward` passes
+        // `Some(request_id)`, not `None` — implemented against the actual
+        // call site instead.
+        assert_eq!(
+            recs[1].request_id, "1",
+            "R9 — the remote-forward axis has a real control request id (RemoteForwardOpen)"
+        );
+        assert_eq!(
+            recs[1].peer_addr,
+            ctx.peer_addr.to_string(),
+            "R4 — the quota deny record must carry the live peer, not \"-\""
+        );
+    }
+
+    /// Both places a live [`RemoteForwardEntry`] is ever removed —
+    /// [`Server::handle_rfwd_close`] and [`Server::purge_connection`] —
+    /// must release its [`crate::quota::RemoteForwardPermit`], not just
+    /// one of them. Proved indirectly, the same way the tunnel-stream twin
+    /// tests reopening past a cap: with `max_remote_forwards_per_
+    /// principal: 1`, a second open by the same principal only ever
+    /// succeeds again after whichever removal path just ran actually
+    /// dropped the permit.
+    #[tokio::test]
+    async fn the_listener_permit_is_released_by_both_removal_sites() {
+        let rig = rig_with_quota_limits(
+            Arc::new(AllowAllPinned),
+            Arc::new(PipeFactory::new(64 * 1024)),
+            Duration::from_millis(100),
+            crate::quota::QuotaLimits {
+                max_remote_forwards_per_principal: 1,
+                ..crate::quota::QuotaLimits::default()
+            },
+        );
+        let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
+        let req = rfwd_open("127.0.0.1", 0, "127.0.0.1", 9);
+
+        // --- purge_connection path ---
+        let (client1, host1) = crate::tunnel::testutil::loopback_pair().await;
+        let reply1 = rig.server.handle_rfwd_open(&ctx, &host1, 1, &req).await;
+        let response::Body::RfwdOpened(_opened1) = response_body(&reply1) else {
+            panic!("expected RfwdOpened, got {reply1:?}");
+        };
+
+        rig.server.purge_connection(ctx.conn_id, ()).await;
+
+        let (client2, host2) = crate::tunnel::testutil::loopback_pair().await;
+        let ctx2 = ConnCtx {
+            conn_id: 99,
+            ..ctx.clone()
+        };
+        let reply2 = rig.server.handle_rfwd_open(&ctx2, &host2, 2, &req).await;
+        let response::Body::RfwdOpened(opened2) = response_body(&reply2) else {
+            panic!("purge_connection did not release the listener permit: {reply2:?}");
+        };
+        let opened2 = opened2.clone();
+
+        // At the cap again (opened2 is still live) — a third open must be
+        // refused, so the test below actually proves a release rather than
+        // an accident of the cap being loose.
+        let reply3 = rig.server.handle_rfwd_open(&ctx2, &host2, 3, &req).await;
+        assert_eq!(error_code(&reply3), Some(ErrorCode::ResourceExhausted));
+
+        // --- handle_rfwd_close path ---
+        let close = wire::RemoteForwardClose {
+            forward_id: opened2.forward_id.clone(),
+        };
+        let closed = rig.server.handle_rfwd_close(&ctx2, 4, &close);
+        assert_eq!(error_code(&closed), None, "{closed:?}");
+
+        let reply4 = rig.server.handle_rfwd_open(&ctx2, &host2, 5, &req).await;
+        let response::Body::RfwdOpened(_opened4) = response_body(&reply4) else {
+            panic!("handle_rfwd_close did not release the listener permit: {reply4:?}");
+        };
+
+        drop(client1);
+        drop(client2);
+    }
+
+    /// U11a (R10): when its `serve` future returns on its own — in
+    /// production, only a `Fatal` accept disposition ends `serve_remote_
+    /// forward`, `crate::tunnel::remote`'s own doc — the accept loop must
+    /// remove its own `forward_id` from [`Server::remote_forwards`] and
+    /// release the listener permit, freeing the id for `RemoteForwardOpen`
+    /// to reuse. Registers the entry exactly the way `handle_rfwd_open`'s
+    /// own production path does (same `authorize_and_bind_remote_forward`
+    /// choke point), then drives `run_remote_forward_accept_loop` (the
+    /// exact free fn `handle_rfwd_open`'s own spawn calls) with `async {}`
+    /// standing in for `serve_remote_forward` — an immediately-ready
+    /// future exercises the exact same self-removal tail a real `Fatal`
+    /// return does, without needing a real listener broken from outside
+    /// tokio's reactor to produce one (R10 rejects that: unsound double
+    /// `close`, Windows-hostile `AsRawFd`).
+    #[tokio::test]
+    async fn the_accept_loop_removes_its_own_forward_and_releases_the_permit_when_it_returns() {
+        let rig = allow_rig();
+        let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
+        let opener = crate::acl::opener_key(&ctx.principal, ctx.auth_path);
+
+        let req = rfwd_open("127.0.0.1", 0, "127.0.0.1", 9);
+        let (_listener, quota) = rig
+            .server
+            .authorize_and_bind_remote_forward(&ctx, 1, &req, &SystemResolver, &SystemBinder)
+            .await
+            .expect("loopback bind must succeed");
+        assert_eq!(
+            rig.quotas.remote_forwards_per_principal_in_use(&opener),
+            1,
+            "the permit is reserved once the bind succeeds"
+        );
+
+        // Register it the way `handle_rfwd_open` would — a harmless
+        // already-finished task stands in for the real spawn, since this
+        // test drives the accept loop itself rather than through
+        // `tokio::spawn`.
+        let forward_id = "self-removal-test-forward".to_string();
+        let task = tokio::spawn(async {});
+        rig.server
+            .remote_forwards
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                forward_id.clone(),
+                RemoteForwardEntry {
+                    conn_id: ctx.conn_id,
+                    owner: opener.clone(),
+                    task,
+                    _quota: quota,
+                },
+            );
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            run_remote_forward_accept_loop(
+                Arc::downgrade(&rig.server),
+                async {},
+                forward_id.clone(),
+            ),
+        )
+        .await
+        .expect("an immediately-ready serve future must not hang the accept loop");
+
+        assert!(
+            rig.server
+                .remote_forwards
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&forward_id)
+                .is_none(),
+            "the accept loop must remove its own forward_id once its serve future returns"
+        );
+        assert_eq!(
+            rig.quotas.remote_forwards_per_principal_in_use(&opener),
+            0,
+            "the listener permit must release along with the registry entry"
+        );
+    }
+
+    /// U11b (R10): the other half of the self-removal tail's safety —
+    /// when this forward is torn down by its closer (`handle_rfwd_close`/
+    /// `purge_connection`: remove the entry, then `abort()` the task) the
+    /// accept loop's own `.await` on `serve` is dropped mid-flight and its
+    /// removal tail below that `.await` never runs, so the forward is
+    /// removed exactly once — never by both the closer and the aborted
+    /// task. Drives the same production fn with `std::future::pending()`
+    /// standing in for a `serve_remote_forward` that would otherwise run
+    /// forever, then reproduces `handle_rfwd_close`'s own remove-then-abort
+    /// sequence on it directly.
+    #[tokio::test]
+    async fn an_aborted_accept_loop_is_removed_once_by_its_closer_and_never_again() {
+        let rig = allow_rig();
+        let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
+        let opener = crate::acl::opener_key(&ctx.principal, ctx.auth_path);
+
+        let req = rfwd_open("127.0.0.1", 0, "127.0.0.1", 9);
+        let (_listener, quota) = rig
+            .server
+            .authorize_and_bind_remote_forward(&ctx, 1, &req, &SystemResolver, &SystemBinder)
+            .await
+            .expect("loopback bind must succeed");
+        assert_eq!(
+            rig.quotas.remote_forwards_per_principal_in_use(&opener),
+            1,
+            "the permit is reserved once the bind succeeds"
+        );
+
+        let forward_id = "abort-test-forward".to_string();
+        let task = tokio::spawn(run_remote_forward_accept_loop(
+            Arc::downgrade(&rig.server),
+            std::future::pending(),
+            forward_id.clone(),
+        ));
+        rig.server
+            .remote_forwards
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                forward_id.clone(),
+                RemoteForwardEntry {
+                    conn_id: ctx.conn_id,
+                    owner: opener.clone(),
+                    task,
+                    _quota: quota,
+                },
+            );
+
+        // Mirror `handle_rfwd_close`'s closer sequence exactly: remove the
+        // entry from the registry first (this alone drops `_quota` and
+        // releases the permit), then abort the task.
+        let entry = rig
+            .server
+            .remote_forwards
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&forward_id)
+            .expect("the entry must be present before its closer runs");
+        let RemoteForwardEntry { task, _quota, .. } = entry;
+        task.abort();
+        // `handle_rfwd_close`'s own order: `entry.task.abort()` runs while
+        // the entry (and its permit) is still alive, and the entry drops
+        // — releasing the permit — immediately after, at the end of that
+        // match arm. `drop(_quota)` here stands in for that implicit drop.
+        drop(_quota);
+        assert_eq!(
+            rig.quotas.remote_forwards_per_principal_in_use(&opener),
+            0,
+            "the closer's remove-then-drop must release the permit right away, before the \
+             aborted task is even polled again"
+        );
+        let join_result = tokio::time::timeout(std::time::Duration::from_secs(3), task)
+            .await
+            .expect("an aborted task must resolve promptly, not hang");
+        assert!(
+            join_result.is_err_and(|e| e.is_cancelled()),
+            "an aborted accept loop's handle must report cancellation, not a panic"
+        );
+
+        // The loop's own `.await` on `pending()` was dropped mid-flight —
+        // its self-removal tail never ran, so the permit was released
+        // exactly once (by the closer above), never twice.
+        assert_eq!(
+            rig.quotas.remote_forwards_per_principal_in_use(&opener),
+            0,
+            "an aborted accept loop must not release its permit a second time"
+        );
+        assert!(
+            rig.server
+                .remote_forwards
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&forward_id)
+                .is_none(),
+            "the closer's own removal must stand; the aborted loop must not re-insert or re-touch it"
+        );
     }
 
     /// The full production path — the part
@@ -8126,7 +9177,7 @@ mod tests {
             "the forward must be registered before purge"
         );
 
-        rig.server.purge_connection(ctx.conn_id).await;
+        rig.server.purge_connection(ctx.conn_id, ()).await;
 
         assert!(
             !rig.server

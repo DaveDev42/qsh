@@ -575,7 +575,9 @@ message ConnectResult {
   bool ok = 1;
   // Empty when `ok`. CLI.md §3.3 vocabulary: a failed dial is
   // `CONNECTION_FAILED`; an inline ACL rejection (protocol.md §7's ticket
-  // exception for `TCP_CONNECT`) is `PERMISSION_DENIED`.
+  // exception for `TCP_CONNECT`) is `PERMISSION_DENIED`; a per-principal
+  // or per-forward tunnel-stream quota rejection (M8 Step 3b) is
+  // `RESOURCE_EXHAUSTED`.
   string code = 2;
   string message = 3;
 }

@@ -445,7 +445,7 @@ async fn run_reverse_unix(
                     // 'serve` into it instead, and must keep doing so —
                     // this call and that one are not both reached on any
                     // path.
-                    runtime.server.purge_connection(conn_id).await;
+                    runtime.server.purge_connection(conn_id, ()).await;
                     return Ok(());
                 }
                 () = watch.dead() => {
@@ -494,7 +494,7 @@ async fn run_reverse_unix(
         // re-registers, so a stale lease left behind here would actually
         // be observable by the *next* connection instead of being
         // reclaimed by process exit.
-        runtime.server.purge_connection(conn_id).await;
+        runtime.server.purge_connection(conn_id, ()).await;
         ReconnectEvent {
             event: "lost",
             host: controller,

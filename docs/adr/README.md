@@ -13,3 +13,4 @@ QSH의 아키텍처/설계 결정을 기록한다. 각 ADR은 맥락, 결정, �
 | [0007](0007-session-ref-and-resume-token-custody.md) | `session_ref`는 클라이언트 `Ops`가 조립하고 resume token은 클라이언트 상태 파일에만 둔다 | 승인됨 |
 | [0008](0008-private-ca-cert-issuance.md) | private CA는 단일 self-signed root로 device cert를 발급한다 | 승인됨 |
 | [0009](0009-admission-defenses.md) | 미검증 Initial은 항상 Retry로 되돌리고, admission은 handshake 상한과 source별 rate limit으로 자원 생성 전에 결정한다 | 승인됨 |
+| [0010](0010-resource-quotas.md) | 세션·exec·터널·연결 quota는 인가 이후·자원 생성 이전에 결정하고, 살아 있는 자원 자체를 계수한다 | 승인됨 |

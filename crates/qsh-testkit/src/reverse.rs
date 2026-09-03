@@ -248,6 +248,65 @@ impl ReverseHarness {
         }
     }
 
+    /// [`Self::start_with`] plus an explicit
+    /// [`qsh_core::quota::QuotaLimits`] instead of `crate::config::
+    /// ServeConfig`'s defaults (M8 Step 3b ruling R6) — mirrors
+    /// `crate::loopback::LoopbackHarness::start_with_quotas` for the
+    /// `Listen` arm's own connection-cap integration test
+    /// (`crates/qsh-testkit/tests/quota.rs`, I12): this controller keeps
+    /// its own [`crate::quota::Quotas`] instance, entirely independent of
+    /// `crate::server::Server`'s, even when both run in the same process
+    /// (ruling R6 — arm-scoped, not process-scoped).
+    pub async fn start_with_quotas(
+        authorizer: Arc<dyn Authorizer>,
+        allow_advertised_names: bool,
+        trust: StaticTrust,
+        limits: qsh_core::quota::QuotaLimits,
+    ) -> Self {
+        let controller = make_identity();
+        let listener = Listener::bind(
+            "127.0.0.1:0".parse().expect("addr"),
+            controller.local.clone(),
+            Arc::new(trust),
+        )
+        .expect("bind controller");
+        let addr = listener.local_addr().expect("local addr");
+        let audit = Arc::new(MemoryAuditSink::new());
+        let clock: Arc<dyn qsh_core::broker::Clock> = Arc::new(SystemClock);
+        let registry = Registry::new(clock.clone(), allow_advertised_names);
+        let admission = qsh_core::admission::Gate::new(
+            clock.clone(),
+            qsh_core::config::ServeConfig::DEFAULT_MAX_CONCURRENT_HANDSHAKES,
+            qsh_core::config::ServeConfig::DEFAULT_HANDSHAKE_RATE_PER_SOURCE,
+            qsh_core::config::ServeConfig::DEFAULT_VALIDATED_RATE_PER_SOURCE,
+        );
+        let quotas = qsh_core::quota::Quotas::new(limits, clock.clone());
+        let listen = Listen::with_admission_and_quotas(
+            registry,
+            authorizer,
+            audit.clone(),
+            "controller-device",
+            clock,
+            Duration::from_secs(120),
+            qsh_core::reverse::listen::STALE_SWEEP_TICK,
+            admission,
+            quotas,
+        );
+        tokio::spawn(Listen::run_stale_sweeper(Arc::downgrade(&listen)));
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(listen.clone().run(listener, async move {
+            let _ = rx.await;
+        }));
+        Self {
+            listen,
+            addr,
+            audit,
+            controller,
+            task,
+            shutdown: Some(tx),
+        }
+    }
+
     /// A `Dialer` for `target`, trusting only this controller — the same
     /// one-directional pin shape [`crate::loopback::LoopbackHarness`] uses
     /// for its own `dialer` field.
@@ -980,7 +1039,7 @@ impl ReversePairHarness {
             // liveness probing — it is a role-axis-independence proof for
             // ordinary dispatch, not a reconnect-loop test.
             let _ = server.clone().serve_control(&conn, ctl, ctx, None).await;
-            server.purge_connection(conn_id).await;
+            server.purge_connection(conn_id, ()).await;
         });
         self.target_tasks
             .lock()

@@ -276,6 +276,15 @@ impl TunnelHarness {
         Self::start_inner(LoopbackHarness::start_with(authorizer).await).await
     }
 
+    /// Start with the interim allow-all-pinned policy and an explicit
+    /// [`qsh_core::quota::QuotaLimits`] instead of `ServeConfig`'s
+    /// defaults — the tunnel-flavored twin of [`LoopbackHarness::
+    /// start_with_quotas`], for the tunnel-stream quota's own e2e pins
+    /// (`crates/qsh-testkit/tests/quota.rs`, M8 Step 3b).
+    pub async fn start_with_quotas(limits: qsh_core::quota::QuotaLimits) -> Self {
+        Self::start_inner(LoopbackHarness::start_with_quotas(limits).await).await
+    }
+
     /// Start with a custom policy, a caller-provided client identity and a
     /// caller-provided host trust store — the tunnel-flavored twin of
     /// [`LoopbackHarness::start_custom`]. For a test that needs a *second*,

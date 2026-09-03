@@ -59,7 +59,43 @@ pub enum QuotaKind {
     /// (`[serve].max_exec_per_principal`) — enforced by
     /// [`Quotas::reserve_exec`].
     ExecPerPrincipal,
+    /// The host-wide concurrent-`exec.run` cap (`[serve].max_exec`) —
+    /// enforced by [`Quotas::reserve_exec`], checked *before* the
+    /// per-principal axis (host → principal, matching `reserve_exec`'s own
+    /// order and the broker's global-then-per-principal order). Derived as
+    /// `Σ exec_in_use` — no separate counter (this module's own "no
+    /// hand-maintained counter" discipline).
+    ExecHost,
+    /// The per-principal cap on concurrently open tunnel (`-L`) streams
+    /// (`[serve].max_tunnel_streams_per_principal`) — enforced by
+    /// [`Quotas::reserve_tunnel_stream`].
+    TunnelStreamsPerPrincipal,
+    /// The per-`(principal, destination)` cap on concurrently open tunnel
+    /// streams (`[serve].max_tunnel_streams_per_forward`) — enforced by
+    /// [`Quotas::reserve_tunnel_stream`].
+    TunnelStreamsPerForward,
+    /// The per-principal cap on concurrently open remote-forward (`-R`)
+    /// listeners (`[serve].max_remote_forwards_per_principal`) — enforced
+    /// in a later M8 Step 3b stage.
+    RemoteForwardsPerPrincipal,
+    /// The per-principal cap on concurrently open connections
+    /// (`[serve].max_connections_per_principal`) — enforced in a later M8
+    /// Step 3b stage.
+    ConnectionsPerPrincipal,
+    /// The accept-arm-wide cap on concurrently open connections
+    /// (`[serve].max_connections`) — enforced in a later M8 Step 3b stage.
+    Connections,
+    /// The fixed cap on concurrently open pre-identity (pairing) connections
+    /// ([`MAX_CONCURRENT_PAIRING_CONNECTIONS`], not configurable) —
+    /// enforced in a later M8 Step 3b stage.
+    PairingConnections,
 }
+
+/// Fixed cap on concurrently open pairing connections (`Principal::
+/// Pairing`, pre-identity) — no config key: a pairing connection has no
+/// principal to key a per-principal cap by, so this is the only axis for
+/// it, and it is deliberately not operator-tunable (M8 Step 3b ruling R2).
+pub const MAX_CONCURRENT_PAIRING_CONNECTIONS: usize = 8;
 
 impl QuotaKind {
     /// Every variant, in the same order as [`Quotas`]'s internal window
@@ -70,29 +106,58 @@ impl QuotaKind {
         QuotaKind::Sessions,
         QuotaKind::SessionsPerPrincipal,
         QuotaKind::ExecPerPrincipal,
+        QuotaKind::ExecHost,
+        QuotaKind::TunnelStreamsPerPrincipal,
+        QuotaKind::TunnelStreamsPerForward,
+        QuotaKind::RemoteForwardsPerPrincipal,
+        QuotaKind::ConnectionsPerPrincipal,
+        QuotaKind::Connections,
+        QuotaKind::PairingConnections,
     ];
 
     /// The audit/log category word — the exact `quota_*` vocabulary
-    /// `docs/adr/0010-resource-quotas.md` §2.4 settles on.
+    /// `docs/adr/0010-resource-quotas.md` §2.4 settles on (M8 Step 3b
+    /// ruling R5 for the 7 variants 3b adds).
     pub fn category(self) -> &'static str {
         match self {
             QuotaKind::Sessions => "quota_sessions_host",
             QuotaKind::SessionsPerPrincipal => "quota_sessions_principal",
             QuotaKind::ExecPerPrincipal => "quota_exec_principal",
+            QuotaKind::ExecHost => "quota_exec_host",
+            QuotaKind::TunnelStreamsPerPrincipal => "quota_tunnels_principal",
+            QuotaKind::TunnelStreamsPerForward => "quota_tunnels_forward",
+            QuotaKind::RemoteForwardsPerPrincipal => "quota_remote_forwards_principal",
+            QuotaKind::ConnectionsPerPrincipal => "quota_connections_principal",
+            QuotaKind::Connections => "quota_connections_host",
+            QuotaKind::PairingConnections => "quota_connections_pairing",
         }
     }
 
     /// The ACL action word this kind's rejection is *for* — `docs/CLI.md`'s
     /// audit prose states the `action` field on a quota-reject record is
-    /// `"session.open"` (either session axis) or `"exec.run"`
-    /// (`ExecPerPrincipal`), matching `crate::acl::Action::SessionOpen`/
-    /// `ExecRun::as_str()` byte for byte without pulling an `acl` dependency
-    /// into this leaf-most module — see [`crate::audit::AuditRecord::
-    /// quota_rejected`], which is the sole caller.
+    /// `"session.open"` (either session axis), `"exec.run"` (either exec
+    /// axis), `"forward.local"` (either tunnel-stream axis — the exact word
+    /// `Server::authorize_and_dial_tunnel` checks via
+    /// `crate::acl::Op::ForwardLocal.action()`, `server/mod.rs:2949`),
+    /// `"forward.remote"` (the remote-forward-listener axis, matching
+    /// `crate::acl::Action::ForwardRemote::as_str()`), or `"connect"` (any
+    /// connection axis — the same word `AuditRecord::handshake_rejected`
+    /// already uses for a connection-axis rejection, `audit.rs:224`) —
+    /// matching the relevant `crate::acl::Action::as_str()` byte for byte
+    /// without pulling an `acl` dependency into this leaf-most module — see
+    /// [`crate::audit::AuditRecord::quota_rejected`], which is the sole
+    /// caller.
     pub fn action(self) -> &'static str {
         match self {
             QuotaKind::Sessions | QuotaKind::SessionsPerPrincipal => "session.open",
-            QuotaKind::ExecPerPrincipal => "exec.run",
+            QuotaKind::ExecPerPrincipal | QuotaKind::ExecHost => "exec.run",
+            QuotaKind::TunnelStreamsPerPrincipal | QuotaKind::TunnelStreamsPerForward => {
+                "forward.local"
+            }
+            QuotaKind::RemoteForwardsPerPrincipal => "forward.remote",
+            QuotaKind::ConnectionsPerPrincipal
+            | QuotaKind::Connections
+            | QuotaKind::PairingConnections => "connect",
         }
     }
 
@@ -100,18 +165,27 @@ impl QuotaKind {
     /// QuotaExceeded` displays (`docs/CLI.md` §6.12, `docs/adr/
     /// 0010-resource-quotas.md` §5).
     ///
-    /// Uniform *per resource type*, not per variant: both session-axis
-    /// kinds (`Sessions`, the host-wide cap, and `SessionsPerPrincipal`,
-    /// the per-principal cap) share one string, distinct only from the
-    /// exec-axis string. Which axis actually rejected the request is
-    /// carried solely by the audit record's `resource` field
-    /// ([`QuotaKind::category`]) — a client parsing this message alone
-    /// cannot and is not meant to distinguish host-wide from
-    /// per-principal within the same resource type.
+    /// Uniform *per resource type*, not per variant: every axis of one
+    /// resource type shares a string, distinct only across resource types.
+    /// Which axis actually rejected the request is carried solely by the
+    /// audit record's `resource` field ([`QuotaKind::category`]) — a client
+    /// parsing this message alone cannot and is not meant to distinguish
+    /// host-wide from per-principal within the same resource type.
+    /// [`QuotaKind::PairingConnections`] never reaches the wire (a pairing
+    /// rejection closes the connection without a frame — M8 Step 3b ruling
+    /// R2) but this match is total, so it still returns the connection-axis
+    /// string rather than special-casing `"-"`.
     pub fn wire_message(self) -> &'static str {
         match self {
             QuotaKind::Sessions | QuotaKind::SessionsPerPrincipal => "session quota exceeded",
-            QuotaKind::ExecPerPrincipal => "exec quota exceeded",
+            QuotaKind::ExecPerPrincipal | QuotaKind::ExecHost => "exec quota exceeded",
+            QuotaKind::TunnelStreamsPerPrincipal | QuotaKind::TunnelStreamsPerForward => {
+                "tunnel quota exceeded"
+            }
+            QuotaKind::RemoteForwardsPerPrincipal => "remote forward quota exceeded",
+            QuotaKind::ConnectionsPerPrincipal
+            | QuotaKind::Connections
+            | QuotaKind::PairingConnections => "connection quota exceeded",
         }
     }
 }
@@ -128,6 +202,25 @@ pub struct QuotaLimits {
     /// Per-principal cap on concurrently running `exec.run` children
     /// (`[serve].max_exec_per_principal`).
     pub max_exec_per_principal: usize,
+    /// Host-wide cap on concurrently running `exec.run` children
+    /// (`[serve].max_exec`), checked before the per-principal axis
+    /// ([`Quotas::reserve_exec`]).
+    pub max_exec: usize,
+    /// Per-principal cap on concurrently open tunnel (`-L`) streams
+    /// (`[serve].max_tunnel_streams_per_principal`).
+    pub max_tunnel_streams_per_principal: usize,
+    /// Per-`(principal, destination)` cap on concurrently open tunnel
+    /// streams (`[serve].max_tunnel_streams_per_forward`).
+    pub max_tunnel_streams_per_forward: usize,
+    /// Per-principal cap on concurrently open remote-forward (`-R`)
+    /// listeners (`[serve].max_remote_forwards_per_principal`).
+    pub max_remote_forwards_per_principal: usize,
+    /// Per-principal cap on concurrently open connections
+    /// (`[serve].max_connections_per_principal`).
+    pub max_connections_per_principal: usize,
+    /// Accept-arm-wide cap on concurrently open connections
+    /// (`[serve].max_connections`).
+    pub max_connections: usize,
 }
 
 impl Default for QuotaLimits {
@@ -136,6 +229,13 @@ impl Default for QuotaLimits {
             max_sessions: ServeConfig::DEFAULT_MAX_SESSIONS,
             max_sessions_per_principal: ServeConfig::DEFAULT_MAX_SESSIONS_PER_PRINCIPAL,
             max_exec_per_principal: ServeConfig::DEFAULT_MAX_EXEC_PER_PRINCIPAL,
+            max_exec: ServeConfig::DEFAULT_MAX_EXEC,
+            max_tunnel_streams_per_principal: ServeConfig::DEFAULT_MAX_TUNNEL_STREAMS_PER_PRINCIPAL,
+            max_tunnel_streams_per_forward: ServeConfig::DEFAULT_MAX_TUNNEL_STREAMS_PER_FORWARD,
+            max_remote_forwards_per_principal:
+                ServeConfig::DEFAULT_MAX_REMOTE_FORWARDS_PER_PRINCIPAL,
+            max_connections_per_principal: ServeConfig::DEFAULT_MAX_CONNECTIONS_PER_PRINCIPAL,
+            max_connections: ServeConfig::DEFAULT_MAX_CONNECTIONS,
         }
     }
 }
@@ -149,6 +249,12 @@ impl QuotaLimits {
             max_sessions: serve.max_sessions(),
             max_sessions_per_principal: serve.max_sessions_per_principal(),
             max_exec_per_principal: serve.max_exec_per_principal(),
+            max_exec: serve.max_exec(),
+            max_tunnel_streams_per_principal: serve.max_tunnel_streams_per_principal(),
+            max_tunnel_streams_per_forward: serve.max_tunnel_streams_per_forward(),
+            max_remote_forwards_per_principal: serve.max_remote_forwards_per_principal(),
+            max_connections_per_principal: serve.max_connections_per_principal(),
+            max_connections: serve.max_connections(),
         }
     }
 }
@@ -165,6 +271,33 @@ struct QuotaState {
     /// resource" invariant `docs/adr/0010-resource-quotas.md` §2.1
     /// states for the tunnel/connection maps 3b adds).
     exec_in_use: HashMap<String, usize>,
+    /// Live tunnel-stream reservations per principal (M8 Step 3b,
+    /// [`Quotas::reserve_tunnel_stream`]) — same "no entry without a live
+    /// resource" invariant as `exec_in_use`.
+    tunnel_streams_per_principal: HashMap<String, usize>,
+    /// Live tunnel-stream reservations per `(principal, destination)`
+    /// (M8 Step 3b, [`Quotas::reserve_tunnel_stream`]) — `destination` is
+    /// the same canonical `host:port` string
+    /// [`crate::server::Server::authorize_and_dial_tunnel`] uses as its
+    /// ACL resource. Cardinality is bounded by `Σ
+    /// max_tunnel_streams_per_forward` the same way `exec_in_use`'s is.
+    tunnel_streams_per_forward: HashMap<(String, String), usize>,
+    /// Live remote-forward listener reservations per principal (M8 Step
+    /// 3b, [`Quotas::reserve_remote_forward`]) — same "no entry without a
+    /// live resource" invariant as `exec_in_use`.
+    remote_forwards_per_principal: HashMap<String, usize>,
+    /// Live connection reservations per opener key (M8 Step 3b,
+    /// [`Quotas::reserve_connection`]) — same "no entry without a live
+    /// resource" invariant as `exec_in_use`. The host-wide axis
+    /// ([`QuotaKind::Connections`]) is derived as `Σ
+    /// connections_per_principal.values()`, no separate counter, same
+    /// discipline as `exec_in_use`/[`QuotaKind::ExecHost`].
+    connections_per_principal: HashMap<String, usize>,
+    /// Live pre-identity (`Principal::Pairing`) connection reservations
+    /// (M8 Step 3b ruling R2, [`Quotas::reserve_pairing_connection`]) — a
+    /// plain counter, not a map: a pairing connection has no principal to
+    /// key by, so there is only ever this one fixed-cap axis.
+    pairing_connections_in_use: usize,
 }
 
 /// The quota decision-maker for the resource axes this module directly
@@ -234,14 +367,25 @@ impl Quotas {
     /// expires.
     pub fn reserve_exec(&self, principal_key: &str) -> Result<ExecPermit, QuotaKind> {
         let mut state = self.lock();
-        // Read-only check first (F9 of the M8 Step 3a conformance sweep):
-        // `entry(..).or_insert(0)` ahead of the cap test would plant a
+        // Read-only checks first (F9 of the M8 Step 3a conformance sweep):
+        // `entry(..).or_insert(0)` ahead of either cap test would plant a
         // zero-valued map entry for a *refused* principal too, breaking
         // this module's own "no entry without a live resource" invariant
-        // (this struct's doc comment) the moment `max_exec_per_principal`
-        // is `0` — unreachable from parsed config (`0` degrades to the
-        // default there) but reachable from any hand-built `QuotaLimits`,
-        // which is exactly how tests (and 3b) construct one.
+        // (this struct's doc comment) the moment a cap is `0` —
+        // unreachable from parsed config (`0` degrades to the default
+        // there) but reachable from any hand-built `QuotaLimits`, which is
+        // exactly how tests (and 3b) construct one.
+        //
+        // Host axis first, then per-principal (M8 Step 3b, `QuotaLimits::
+        // max_exec`): the host-wide count is derived as `Σ
+        // exec_in_use.values()` — no separate counter, so it can never
+        // drift from the per-principal counts that back it (this module's
+        // own no-hand-maintained-counter discipline, restated for this
+        // axis).
+        let host_in_use: usize = state.exec_in_use.values().sum();
+        if host_in_use >= self.limits.max_exec {
+            return Err(QuotaKind::ExecHost);
+        }
         let current = state.exec_in_use.get(principal_key).copied().unwrap_or(0);
         if current >= self.limits.max_exec_per_principal {
             return Err(QuotaKind::ExecPerPrincipal);
@@ -278,6 +422,240 @@ impl Quotas {
         self.lock().exec_in_use.len()
     }
 
+    /// Reserve one tunnel (`-L`) stream slot for `principal_key` dialing
+    /// `resource` (`host:port`, [`qsh_proto::wire::format_host_port`]'s
+    /// canonical form — the same string
+    /// `crate::server::Server::authorize_and_dial_tunnel` uses as its ACL
+    /// resource), or refuse with [`QuotaKind::TunnelStreamsPerPrincipal`]
+    /// / [`QuotaKind::TunnelStreamsPerForward`] if either axis is already
+    /// at its cap.
+    ///
+    /// Principal axis checked first, forward axis second — broader before
+    /// narrower, same direction as [`Quotas::reserve_exec`]'s
+    /// host-before-principal order: every forward-axis count is a subset
+    /// of its principal's total, so a caller already at the broader cap
+    /// learns *that* reason rather than the narrower one. Read-only
+    /// checks first, same F9 discipline as `reserve_exec` (a `0` cap must
+    /// never plant a zero-valued entry for a refused principal).
+    pub fn reserve_tunnel_stream(
+        &self,
+        principal_key: &str,
+        resource: &str,
+    ) -> Result<TunnelStreamPermit, QuotaKind> {
+        let mut state = self.lock();
+        let principal_count = state
+            .tunnel_streams_per_principal
+            .get(principal_key)
+            .copied()
+            .unwrap_or(0);
+        if principal_count >= self.limits.max_tunnel_streams_per_principal {
+            return Err(QuotaKind::TunnelStreamsPerPrincipal);
+        }
+        let forward_key = (principal_key.to_string(), resource.to_string());
+        let forward_count = state
+            .tunnel_streams_per_forward
+            .get(&forward_key)
+            .copied()
+            .unwrap_or(0);
+        if forward_count >= self.limits.max_tunnel_streams_per_forward {
+            return Err(QuotaKind::TunnelStreamsPerForward);
+        }
+        *state
+            .tunnel_streams_per_principal
+            .entry(principal_key.to_string())
+            .or_insert(0) += 1;
+        *state
+            .tunnel_streams_per_forward
+            .entry(forward_key)
+            .or_insert(0) += 1;
+        drop(state);
+        Ok(TunnelStreamPermit {
+            quotas: self.self_weak.clone(),
+            principal_key: principal_key.to_string(),
+            resource: resource.to_string(),
+        })
+    }
+
+    /// Current live tunnel-stream reservation count for `principal_key`
+    /// across every destination — test/diagnostic use only.
+    #[cfg(test)]
+    fn tunnel_streams_per_principal_in_use(&self, principal_key: &str) -> usize {
+        self.lock()
+            .tunnel_streams_per_principal
+            .get(principal_key)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Current live tunnel-stream reservation count for
+    /// `(principal_key, resource)` — test/diagnostic use only.
+    #[cfg(test)]
+    fn tunnel_streams_per_forward_in_use(&self, principal_key: &str, resource: &str) -> usize {
+        self.lock()
+            .tunnel_streams_per_forward
+            .get(&(principal_key.to_string(), resource.to_string()))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Number of distinct principals with a map entry in
+    /// `tunnel_streams_per_principal` — test-only, same "entry present
+    /// holding `0`" distinction `exec_in_use_principal_count` exists for.
+    #[cfg(test)]
+    fn tunnel_streams_per_principal_entry_count(&self) -> usize {
+        self.lock().tunnel_streams_per_principal.len()
+    }
+
+    /// Number of distinct `(principal, destination)` pairs with a map
+    /// entry in `tunnel_streams_per_forward` — test-only, same purpose as
+    /// [`Quotas::tunnel_streams_per_principal_entry_count`] for the
+    /// narrower axis.
+    #[cfg(test)]
+    fn tunnel_streams_per_forward_entry_count(&self) -> usize {
+        self.lock().tunnel_streams_per_forward.len()
+    }
+
+    /// Reserve one live remote-forward listener for `principal_key`
+    /// (`[serve].max_remote_forwards_per_principal`, M8 Step 3b). `Err(
+    /// QuotaKind::RemoteForwardsPerPrincipal)` if the principal is already
+    /// at its cap — read-only check first, same F9 discipline as
+    /// [`Quotas::reserve_exec`]/[`Quotas::reserve_tunnel_stream`] (a `0`
+    /// cap must never plant a zero-valued entry for a refused principal).
+    pub fn reserve_remote_forward(
+        &self,
+        principal_key: &str,
+    ) -> Result<RemoteForwardPermit, QuotaKind> {
+        let mut state = self.lock();
+        let count = state
+            .remote_forwards_per_principal
+            .get(principal_key)
+            .copied()
+            .unwrap_or(0);
+        if count >= self.limits.max_remote_forwards_per_principal {
+            return Err(QuotaKind::RemoteForwardsPerPrincipal);
+        }
+        *state
+            .remote_forwards_per_principal
+            .entry(principal_key.to_string())
+            .or_insert(0) += 1;
+        drop(state);
+        Ok(RemoteForwardPermit {
+            quotas: self.self_weak.clone(),
+            principal_key: principal_key.to_string(),
+        })
+    }
+
+    /// Current live remote-forward reservation count for `principal_key`
+    /// — test/diagnostic use only. `pub`, not `#[cfg(test)]`, matching
+    /// [`Quotas::exec_in_use`]'s own visibility, since `crate::server`'s
+    /// own test module (a different module in the same crate) needs it
+    /// too.
+    pub fn remote_forwards_per_principal_in_use(&self, principal_key: &str) -> usize {
+        self.lock()
+            .remote_forwards_per_principal
+            .get(principal_key)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Number of distinct principals with a map entry in
+    /// `remote_forwards_per_principal` — test-only, same "entry present
+    /// holding `0`" distinction `exec_in_use_principal_count` exists for.
+    #[cfg(test)]
+    fn remote_forwards_per_principal_entry_count(&self) -> usize {
+        self.lock().remote_forwards_per_principal.len()
+    }
+
+    /// Reserve one live connection slot for `principal_key` (an
+    /// [`crate::acl::opener_key`] string, same as every other per-
+    /// principal axis in this module), or refuse with
+    /// [`QuotaKind::Connections`] (host/accept-arm-wide,
+    /// `[serve].max_connections`) or [`QuotaKind::ConnectionsPerPrincipal`]
+    /// (`[serve].max_connections_per_principal`) if either axis is already
+    /// at its cap.
+    ///
+    /// Host axis first, then per-principal — same order as
+    /// [`Quotas::reserve_exec`] (host → principal, M8 Step 3b ruling R3),
+    /// derived as `Σ connections_per_principal.values()` rather than a
+    /// separate counter, same discipline as `reserve_exec`'s
+    /// `ExecHost`. Read-only checks first, same F9 discipline as every
+    /// other `reserve_*` here (a `0` cap must never plant a zero-valued
+    /// entry for a refused principal).
+    ///
+    /// Called from the *outer* frame of a connection's accept path
+    /// (`crate::server::Server::serve_connection`,
+    /// `crate::reverse::listen::Listen::accept_and_register_permitted`) —
+    /// before the inner `Hello` exchange even runs, so a peer that never
+    /// sends `Hello` at all is still counted (ruling R3).
+    pub fn reserve_connection(&self, principal_key: &str) -> Result<ConnectionPermit, QuotaKind> {
+        let mut state = self.lock();
+        let host_in_use: usize = state.connections_per_principal.values().sum();
+        if host_in_use >= self.limits.max_connections {
+            return Err(QuotaKind::Connections);
+        }
+        let current = state
+            .connections_per_principal
+            .get(principal_key)
+            .copied()
+            .unwrap_or(0);
+        if current >= self.limits.max_connections_per_principal {
+            return Err(QuotaKind::ConnectionsPerPrincipal);
+        }
+        *state
+            .connections_per_principal
+            .entry(principal_key.to_string())
+            .or_insert(0) += 1;
+        drop(state);
+        Ok(ConnectionPermit {
+            quotas: self.self_weak.clone(),
+            principal_key: principal_key.to_string(),
+        })
+    }
+
+    /// Current live connection reservation count for `principal_key` —
+    /// `pub`, not `#[cfg(test)]`, matching [`Quotas::
+    /// remote_forwards_per_principal_in_use`]'s own visibility: both
+    /// `crate::server` and `crate::reverse::listen`'s test modules need
+    /// it.
+    pub fn connections_per_principal_in_use(&self, principal_key: &str) -> usize {
+        self.lock()
+            .connections_per_principal
+            .get(principal_key)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Number of distinct principals with a map entry in
+    /// `connections_per_principal` — test-only, same "entry present
+    /// holding `0`" distinction `exec_in_use_principal_count` exists for.
+    #[cfg(test)]
+    fn connections_per_principal_entry_count(&self) -> usize {
+        self.lock().connections_per_principal.len()
+    }
+
+    /// Reserve one of the fixed [`MAX_CONCURRENT_PAIRING_CONNECTIONS`]
+    /// slots for a pre-identity (`Principal::Pairing`) connection, or
+    /// refuse with [`QuotaKind::PairingConnections`]. Not configurable
+    /// (M8 Step 3b ruling R2) and not keyed by principal — a pairing
+    /// connection has none yet.
+    pub fn reserve_pairing_connection(&self) -> Result<PairingConnectionPermit, QuotaKind> {
+        let mut state = self.lock();
+        if state.pairing_connections_in_use >= MAX_CONCURRENT_PAIRING_CONNECTIONS {
+            return Err(QuotaKind::PairingConnections);
+        }
+        state.pairing_connections_in_use += 1;
+        drop(state);
+        Ok(PairingConnectionPermit {
+            quotas: self.self_weak.clone(),
+        })
+    }
+
+    /// Current live pairing-connection reservation count — test/
+    /// diagnostic use only.
+    pub fn pairing_connections_in_use(&self) -> usize {
+        self.lock().pairing_connections_in_use
+    }
+
     /// Record one rejection of `kind` against `principal`, returning the
     /// [`AuditRecord`]s the caller should hand to its
     /// [`crate::audit::AuditSink`] — first-occurrence-then-summary
@@ -302,13 +680,30 @@ impl Quotas {
     /// `allow` line and this `deny` line for the *same* request share a
     /// `request_id` and can be correlated (verdict ruling 11①). A summary
     /// record spans many requests, so it keeps the pre-existing `"-"`
-    /// convention regardless of what is passed here.
+    /// convention regardless of what is passed here. `request_id` is
+    /// `Option<u64>` (M8 Step 3b ruling R9): a control request (session,
+    /// exec, `RemoteForwardOpen`) has a real one to pass as `Some`; a data
+    /// stream (tunnel dial) or a connection-axis rejection (S4) has none,
+    /// and passes `None` rather than the ambiguous sentinel `0` — the same
+    /// "no id" shape `authorize_stream`'s connection-level callers already
+    /// use. [`AuditRecord::quota_rejected`] writes `None` as the audit
+    /// string `"-"`.
+    ///
+    /// `peer_addr` (M8 Step 3b ruling R4, reversing the 3a "this module has
+    /// no address to hand" note) is likewise the caller's own live value —
+    /// this module stays connection-agnostic (`architecture.md` §1): it
+    /// only carries the address through to [`AuditRecord::quota_rejected`]
+    /// as an opaque value, never inspects or validates it. Every caller
+    /// today (session/exec axes) passes its `ConnCtx::peer_addr`; the
+    /// summary record still hardcodes `"-"` — one aggregation window can
+    /// span many peers.
     pub fn record_rejection(
         &self,
         kind: QuotaKind,
         principal: &str,
+        peer_addr: std::net::SocketAddr,
         now: Instant,
-        request_id: u64,
+        request_id: Option<u64>,
         auth_path: qsh_transport::AuthPath,
     ) -> Vec<AuditRecord> {
         let window = &self.windows[kind as usize];
@@ -337,7 +732,7 @@ impl Quotas {
             ));
         }
         records.push(AuditRecord::quota_rejected(
-            kind, principal, request_id, auth_path,
+            kind, principal, peer_addr, request_id, auth_path,
         ));
         records
     }
@@ -412,6 +807,165 @@ impl Drop for ExecPermit {
                 state.exec_in_use.remove(&self.principal_key);
             }
         }
+    }
+}
+
+/// RAII tunnel-stream concurrency reservation ([`Quotas::
+/// reserve_tunnel_stream`], M8 Step 3b). `Drop` decrements both the
+/// per-principal and per-`(principal, destination)` counts (removing
+/// either map entry entirely once it reaches zero), the same discipline
+/// as [`ExecPermit`]'s own `Drop` for the same reason — this is what
+/// `crate::server::Server::handle_tcp_connect` holds across the whole
+/// spliced connection, so every exit path (clean close, error, task
+/// abort's unwind) must release both axes exactly once.
+#[derive(Debug)]
+pub struct TunnelStreamPermit {
+    quotas: Weak<Quotas>,
+    principal_key: String,
+    resource: String,
+}
+
+impl Drop for TunnelStreamPermit {
+    fn drop(&mut self) {
+        // Same B4 lock-order tripwire as `ExecPermit::drop` — this
+        // permit's `Drop` must never run while a higher-level lock (e.g.
+        // `crate::server::Server`'s tickets map) is still held.
+        #[cfg(test)]
+        if lock_order::DEPTH.with(|d| d.get()) > 0 {
+            lock_order::VIOLATIONS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        let Some(quotas) = self.quotas.upgrade() else {
+            return;
+        };
+        let mut state = quotas.lock();
+        if let Some(count) = state
+            .tunnel_streams_per_principal
+            .get_mut(&self.principal_key)
+        {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                state
+                    .tunnel_streams_per_principal
+                    .remove(&self.principal_key);
+            }
+        }
+        let forward_key = (self.principal_key.clone(), self.resource.clone());
+        if let Some(count) = state.tunnel_streams_per_forward.get_mut(&forward_key) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                state.tunnel_streams_per_forward.remove(&forward_key);
+            }
+        }
+    }
+}
+
+/// RAII remote-forward-listener concurrency reservation ([`Quotas::
+/// reserve_remote_forward`], M8 Step 3b). `Drop` decrements the
+/// principal's in-use count (removing the map entry entirely once it
+/// reaches zero), the same discipline as [`ExecPermit`]'s own `Drop` for
+/// the same reason — `crate::server::Server`'s `RemoteForwardEntry` holds
+/// exactly one of these, so both removal sites
+/// ([`crate::server::Server::handle_rfwd_close`],
+/// [`crate::server::Server::purge_connection`]) release it automatically
+/// by dropping the entry, rather than each having to remember a manual
+/// decrement.
+#[derive(Debug)]
+pub struct RemoteForwardPermit {
+    quotas: Weak<Quotas>,
+    principal_key: String,
+}
+
+impl Drop for RemoteForwardPermit {
+    fn drop(&mut self) {
+        // Same B4 lock-order tripwire as `ExecPermit::drop`/
+        // `TunnelStreamPermit::drop` — this permit's `Drop` must never run
+        // while a higher-level lock (e.g. `crate::server::Server`'s
+        // `remote_forwards` map) is still held.
+        #[cfg(test)]
+        if lock_order::DEPTH.with(|d| d.get()) > 0 {
+            lock_order::VIOLATIONS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        let Some(quotas) = self.quotas.upgrade() else {
+            return;
+        };
+        let mut state = quotas.lock();
+        if let Some(count) = state
+            .remote_forwards_per_principal
+            .get_mut(&self.principal_key)
+        {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                state
+                    .remote_forwards_per_principal
+                    .remove(&self.principal_key);
+            }
+        }
+    }
+}
+
+/// RAII connection-count reservation ([`Quotas::reserve_connection`], M8
+/// Step 3b). `Drop` decrements the principal's in-use count (removing the
+/// map entry entirely once it reaches zero), same discipline as
+/// [`ExecPermit`]'s own `Drop` for the same reason —
+/// `crate::server::Server::serve_connection` and `crate::reverse::listen::
+/// Listen::accept_and_register_permitted` each hold exactly one of these
+/// across their whole connection lifetime, dropping it only after their
+/// own cleanup (`purge_connection`/`conns.remove_if`) has already run
+/// (ruling R3: releasing it any earlier would let a dead connection's
+/// forwards outlive its slot).
+#[derive(Debug)]
+pub struct ConnectionPermit {
+    quotas: Weak<Quotas>,
+    principal_key: String,
+}
+
+impl Drop for ConnectionPermit {
+    fn drop(&mut self) {
+        // Same B4 lock-order tripwire as `ExecPermit::drop` — this
+        // permit's `Drop` must never run while a higher-level lock is
+        // still held.
+        #[cfg(test)]
+        if lock_order::DEPTH.with(|d| d.get()) > 0 {
+            lock_order::VIOLATIONS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        let Some(quotas) = self.quotas.upgrade() else {
+            return;
+        };
+        let mut state = quotas.lock();
+        if let Some(count) = state.connections_per_principal.get_mut(&self.principal_key) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                state.connections_per_principal.remove(&self.principal_key);
+            }
+        }
+    }
+}
+
+/// RAII pairing-connection-count reservation ([`Quotas::
+/// reserve_pairing_connection`], M8 Step 3b ruling R2). `Drop` decrements
+/// the fixed counter — no map, no principal key, same reasoning as
+/// [`ConnectionPermit`]'s own `Drop`.
+#[derive(Debug)]
+pub struct PairingConnectionPermit {
+    quotas: Weak<Quotas>,
+}
+
+impl Drop for PairingConnectionPermit {
+    fn drop(&mut self) {
+        // Same B4 lock-order tripwire as every other permit's `Drop` here.
+        #[cfg(test)]
+        if lock_order::DEPTH.with(|d| d.get()) > 0 {
+            lock_order::VIOLATIONS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        let Some(quotas) = self.quotas.upgrade() else {
+            return;
+        };
+        let mut state = quotas.lock();
+        state.pairing_connections_in_use = state.pairing_connections_in_use.saturating_sub(1);
     }
 }
 
@@ -515,6 +1069,290 @@ mod tests {
         assert!(quotas.reserve_exec("device:a").is_ok());
     }
 
+    fn quotas_with_tunnel(
+        max_tunnel_streams_per_principal: usize,
+        max_tunnel_streams_per_forward: usize,
+    ) -> Arc<Quotas> {
+        Quotas::new(
+            QuotaLimits {
+                max_tunnel_streams_per_principal,
+                max_tunnel_streams_per_forward,
+                ..QuotaLimits::default()
+            },
+            Arc::new(TestClock::new()),
+        )
+    }
+
+    /// [`TunnelStreamPermit::drop`] must decrement both axes it
+    /// incremented and, once either count reaches zero, remove that map
+    /// entry entirely — the same "no entry without a live resource"
+    /// invariant `reserve_exec_refuses_past_the_cap_and_release_frees_
+    /// the_slot` pins for `ExecPermit`. Distinct from that test in
+    /// checking cardinality (`_entry_count`) as well as the count itself:
+    /// `_in_use`'s `unwrap_or(0)` alone cannot tell "no entry" apart from
+    /// "entry present holding `0`".
+    #[test]
+    fn tunnel_permit_release_frees_the_slot_and_drops_the_map_entry() {
+        let quotas = quotas_with_tunnel(64, 2);
+        let p1 = quotas
+            .reserve_tunnel_stream("device:a", "db.internal:5432")
+            .unwrap();
+        let p2 = quotas
+            .reserve_tunnel_stream("device:a", "db.internal:5432")
+            .unwrap();
+        assert_eq!(
+            quotas.tunnel_streams_per_forward_in_use("device:a", "db.internal:5432"),
+            2
+        );
+        assert_eq!(quotas.tunnel_streams_per_principal_in_use("device:a"), 2);
+        assert_eq!(
+            quotas
+                .reserve_tunnel_stream("device:a", "db.internal:5432")
+                .unwrap_err(),
+            QuotaKind::TunnelStreamsPerForward
+        );
+
+        drop(p1);
+        assert_eq!(
+            quotas.tunnel_streams_per_forward_in_use("device:a", "db.internal:5432"),
+            1
+        );
+        assert_eq!(quotas.tunnel_streams_per_principal_entry_count(), 1);
+
+        drop(p2);
+        assert_eq!(
+            quotas.tunnel_streams_per_forward_in_use("device:a", "db.internal:5432"),
+            0
+        );
+        assert_eq!(
+            quotas.tunnel_streams_per_forward_entry_count(),
+            0,
+            "the last release must remove the map entry, not just zero it"
+        );
+        assert_eq!(quotas.tunnel_streams_per_principal_entry_count(), 0);
+    }
+
+    /// The forward axis is keyed by `(principal, destination)`, not by
+    /// either alone: the same principal dialing two destinations gets two
+    /// independent forward budgets, and two principals dialing the same
+    /// destination get two independent budgets too — only the
+    /// per-principal axis (checked first) is shared across destinations
+    /// for one principal.
+    #[test]
+    fn the_tunnel_quota_is_keyed_by_principal_and_destination() {
+        let quotas = quotas_with_tunnel(64, 1);
+        let _a_db = quotas
+            .reserve_tunnel_stream("device:a", "db.internal:5432")
+            .unwrap();
+        // Same principal, different destination: forward axis is
+        // independent, so this must not see "device:a"/"db" 's count.
+        let _a_web = quotas
+            .reserve_tunnel_stream("device:a", "web.internal:443")
+            .unwrap();
+        assert_eq!(quotas.tunnel_streams_per_principal_in_use("device:a"), 2);
+
+        // Different principal, same destination: also independent.
+        let _b_db = quotas
+            .reserve_tunnel_stream("device:b", "db.internal:5432")
+            .unwrap();
+        assert_eq!(
+            quotas.tunnel_streams_per_forward_in_use("device:b", "db.internal:5432"),
+            1
+        );
+
+        // But "device:a" against "db.internal:5432" is still at its own
+        // forward cap of 1.
+        assert_eq!(
+            quotas
+                .reserve_tunnel_stream("device:a", "db.internal:5432")
+                .unwrap_err(),
+            QuotaKind::TunnelStreamsPerForward
+        );
+    }
+
+    fn quotas_with_remote_forward(max_remote_forwards_per_principal: usize) -> Arc<Quotas> {
+        Quotas::new(
+            QuotaLimits {
+                max_remote_forwards_per_principal,
+                ..QuotaLimits::default()
+            },
+            Arc::new(TestClock::new()),
+        )
+    }
+
+    /// [`RemoteForwardPermit::drop`] must decrement the principal's
+    /// in-use count and, once it reaches zero, remove the map entry
+    /// entirely — the M8 Step 3b twin of `reserve_exec_refuses_past_the_
+    /// cap_and_release_frees_the_slot`/`tunnel_permit_release_frees_the_
+    /// slot_and_drops_the_map_entry` for the listener axis.
+    #[test]
+    fn remote_forward_permit_release_frees_the_slot_and_drops_the_map_entry() {
+        let quotas = quotas_with_remote_forward(2);
+        let p1 = quotas.reserve_remote_forward("device:a").unwrap();
+        let p2 = quotas.reserve_remote_forward("device:a").unwrap();
+        assert_eq!(quotas.remote_forwards_per_principal_in_use("device:a"), 2);
+        assert_eq!(
+            quotas.reserve_remote_forward("device:a").unwrap_err(),
+            QuotaKind::RemoteForwardsPerPrincipal
+        );
+
+        drop(p1);
+        assert_eq!(quotas.remote_forwards_per_principal_in_use("device:a"), 1);
+        assert_eq!(quotas.remote_forwards_per_principal_entry_count(), 1);
+        let p3 = quotas.reserve_remote_forward("device:a").unwrap();
+        assert_eq!(quotas.remote_forwards_per_principal_in_use("device:a"), 2);
+
+        drop(p2);
+        drop(p3);
+        assert_eq!(quotas.remote_forwards_per_principal_in_use("device:a"), 0);
+        assert_eq!(
+            quotas.remote_forwards_per_principal_entry_count(),
+            0,
+            "the last release must remove the map entry, not just zero it"
+        );
+    }
+
+    /// Isolated per principal, same as `exec_quota_is_isolated_per_
+    /// principal`/`the_tunnel_quota_is_keyed_by_principal_and_
+    /// destination`'s own principal axis: one principal at its cap never
+    /// blocks another.
+    #[test]
+    fn remote_forward_quota_is_isolated_per_principal() {
+        let quotas = quotas_with_remote_forward(1);
+        let _a = quotas.reserve_remote_forward("device:a").unwrap();
+        let _b = quotas.reserve_remote_forward("device:b").unwrap();
+        assert_eq!(quotas.remote_forwards_per_principal_in_use("device:a"), 1);
+        assert_eq!(quotas.remote_forwards_per_principal_in_use("device:b"), 1);
+        assert_eq!(
+            quotas.reserve_remote_forward("device:a").unwrap_err(),
+            QuotaKind::RemoteForwardsPerPrincipal
+        );
+    }
+
+    fn quotas_with_connections(
+        max_connections: usize,
+        max_connections_per_principal: usize,
+    ) -> Arc<Quotas> {
+        Quotas::new(
+            QuotaLimits {
+                max_connections,
+                max_connections_per_principal,
+                ..QuotaLimits::default()
+            },
+            Arc::new(TestClock::new()),
+        )
+    }
+
+    /// [`ConnectionPermit::drop`] must decrement the principal's in-use
+    /// count and, once it reaches zero, remove the map entry entirely —
+    /// the M8 Step 3b twin of `remote_forward_permit_release_frees_the_
+    /// slot_and_drops_the_map_entry` for the connection axis.
+    #[test]
+    fn connection_permit_release_frees_the_slot_and_drops_the_map_entry() {
+        let quotas = quotas_with_connections(100, 2);
+        let p1 = quotas.reserve_connection("device:a").unwrap();
+        let p2 = quotas.reserve_connection("device:a").unwrap();
+        assert_eq!(quotas.connections_per_principal_in_use("device:a"), 2);
+        assert_eq!(
+            quotas.reserve_connection("device:a").unwrap_err(),
+            QuotaKind::ConnectionsPerPrincipal
+        );
+
+        drop(p1);
+        assert_eq!(quotas.connections_per_principal_in_use("device:a"), 1);
+        assert_eq!(quotas.connections_per_principal_entry_count(), 1);
+        let p3 = quotas.reserve_connection("device:a").unwrap();
+        assert_eq!(quotas.connections_per_principal_in_use("device:a"), 2);
+
+        drop(p2);
+        drop(p3);
+        assert_eq!(quotas.connections_per_principal_in_use("device:a"), 0);
+        assert_eq!(
+            quotas.connections_per_principal_entry_count(),
+            0,
+            "the last release must remove the map entry, not just zero it"
+        );
+    }
+
+    /// Host axis first, then per-principal — same order
+    /// `exec_reservation_refuses_on_the_host_cap_before_the_principal_cap`
+    /// pins for `reserve_exec`, restated here for `reserve_connection`
+    /// (M8 Step 3b ruling R3: "host → principal, matching `reserve_exec`'s
+    /// own order").
+    #[test]
+    fn connection_reservation_refuses_on_the_host_cap_before_the_principal_cap() {
+        let quotas = quotas_with_connections(1, 100);
+        let _first = quotas.reserve_connection("device:a").unwrap();
+
+        // A second, entirely distinct principal — nowhere near its own
+        // per-principal budget — is still refused, and refused for the
+        // host reason, not the (irrelevant, unreached) per-principal one.
+        assert_eq!(
+            quotas.reserve_connection("device:b").unwrap_err(),
+            QuotaKind::Connections
+        );
+        assert_eq!(quotas.connections_per_principal_in_use("device:b"), 0);
+
+        // The principal that filled the host cap is bound by it too.
+        assert_eq!(
+            quotas.reserve_connection("device:a").unwrap_err(),
+            QuotaKind::Connections
+        );
+    }
+
+    /// Isolated per principal, same as every other per-principal axis in
+    /// this module.
+    #[test]
+    fn connection_quota_is_isolated_per_principal() {
+        let quotas = quotas_with_connections(100, 1);
+        let _a = quotas.reserve_connection("device:a").unwrap();
+        let _b = quotas.reserve_connection("device:b").unwrap();
+        assert_eq!(quotas.connections_per_principal_in_use("device:a"), 1);
+        assert_eq!(quotas.connections_per_principal_in_use("device:b"), 1);
+        assert_eq!(
+            quotas.reserve_connection("device:a").unwrap_err(),
+            QuotaKind::ConnectionsPerPrincipal
+        );
+    }
+
+    /// [`PairingConnectionPermit::drop`] must decrement the fixed counter
+    /// — no map, no principal key, same discipline as every other
+    /// permit's `Drop` in this module. Also pins the fixed cap itself
+    /// (`MAX_CONCURRENT_PAIRING_CONNECTIONS = 8`, M8 Step 3b ruling R2):
+    /// not configurable, so this test (unlike every other `reserve_*`
+    /// test here) needs no `QuotaLimits` override to reach it.
+    #[test]
+    fn pairing_connection_permit_release_frees_the_fixed_slot() {
+        let quotas = Quotas::new(QuotaLimits::default(), Arc::new(TestClock::new()));
+        let mut permits = Vec::new();
+        for _ in 0..MAX_CONCURRENT_PAIRING_CONNECTIONS {
+            permits.push(quotas.reserve_pairing_connection().unwrap());
+        }
+        assert_eq!(
+            quotas.pairing_connections_in_use(),
+            MAX_CONCURRENT_PAIRING_CONNECTIONS
+        );
+        assert_eq!(
+            quotas.reserve_pairing_connection().unwrap_err(),
+            QuotaKind::PairingConnections
+        );
+
+        drop(permits.pop().unwrap());
+        assert_eq!(
+            quotas.pairing_connections_in_use(),
+            MAX_CONCURRENT_PAIRING_CONNECTIONS - 1
+        );
+        let _fresh = quotas.reserve_pairing_connection().unwrap();
+        assert_eq!(
+            quotas.pairing_connections_in_use(),
+            MAX_CONCURRENT_PAIRING_CONNECTIONS
+        );
+
+        permits.clear();
+        drop(_fresh);
+        assert_eq!(quotas.pairing_connections_in_use(), 0);
+    }
+
     #[test]
     fn exec_quota_is_isolated_per_principal() {
         let quotas = quotas_with(1);
@@ -572,13 +1410,15 @@ mod tests {
         let quotas = quotas_with(1);
         let clock = TestClock::new();
         let t0 = clock.now();
+        let peer: std::net::SocketAddr = "127.0.0.1:1".parse().unwrap();
 
         // First rejection in a fresh window: an immediate, real record.
         let first_batch = quotas.record_rejection(
             QuotaKind::ExecPerPrincipal,
             "device:a",
+            peer,
             t0,
-            1,
+            Some(1),
             qsh_transport::AuthPath::Ca,
         );
         assert_eq!(
@@ -597,8 +1437,9 @@ mod tests {
                 .record_rejection(
                     QuotaKind::ExecPerPrincipal,
                     "device:a",
+                    peer,
                     t0 + std::time::Duration::from_secs(1),
-                    1,
+                    Some(1),
                     qsh_transport::AuthPath::Ca,
                 )
                 .is_empty()
@@ -608,8 +1449,9 @@ mod tests {
                 .record_rejection(
                     QuotaKind::ExecPerPrincipal,
                     "device:a",
+                    peer,
                     t0 + std::time::Duration::from_secs(2),
-                    1,
+                    Some(1),
                     qsh_transport::AuthPath::Ca,
                 )
                 .is_empty()
@@ -630,6 +1472,171 @@ mod tests {
         assert_eq!(flushed[0].principal, "-");
         assert_eq!(flushed[0].count, Some(2));
         assert_eq!(flushed[0].resource, QuotaKind::ExecPerPrincipal.category());
+    }
+
+    /// M8 Step 3b S5: twin of `quota_audit_reports_first_then_summary`,
+    /// but for a tunnel-stream category and interleaved with rejections
+    /// on an unrelated category (`ExecPerPrincipal`) in the same window —
+    /// `windows` is one slot per `QuotaKind`, so the tunnel category's
+    /// first-line/summary count must reflect only *its own* rejections,
+    /// never the other category's, even though both windows are open and
+    /// aging over the exact same wall-clock span.
+    #[test]
+    fn a_tunnel_quota_rejection_reports_first_then_summary_in_its_own_window() {
+        let quotas = quotas_with_tunnel(1, 64);
+        let clock = TestClock::new();
+        let t0 = clock.now();
+        let peer: std::net::SocketAddr = "127.0.0.1:1".parse().unwrap();
+        let sec = std::time::Duration::from_secs(1);
+
+        // First tunnel rejection in a fresh window: real record.
+        let first = quotas.record_rejection(
+            QuotaKind::TunnelStreamsPerPrincipal,
+            "device:a",
+            peer,
+            t0,
+            None,
+            qsh_transport::AuthPath::Ca,
+        );
+        assert_eq!(first.len(), 1);
+        assert_eq!(
+            first[0].resource,
+            QuotaKind::TunnelStreamsPerPrincipal.category()
+        );
+
+        // An unrelated category's own first rejection, same instant: its
+        // own window opens independently and must not be folded into the
+        // tunnel window's count.
+        let unrelated_first = quotas.record_rejection(
+            QuotaKind::ExecPerPrincipal,
+            "device:a",
+            peer,
+            t0,
+            Some(9),
+            qsh_transport::AuthPath::Ca,
+        );
+        assert_eq!(unrelated_first.len(), 1);
+
+        // Three more tunnel rejections within the window: suppressed.
+        for i in 1..=3u64 {
+            assert!(
+                quotas
+                    .record_rejection(
+                        QuotaKind::TunnelStreamsPerPrincipal,
+                        "device:a",
+                        peer,
+                        t0 + sec * i as u32,
+                        None,
+                        qsh_transport::AuthPath::Ca,
+                    )
+                    .is_empty()
+            );
+        }
+        // One more on the unrelated category too, so both windows close
+        // at the same flush with different suppressed counts.
+        assert!(
+            quotas
+                .record_rejection(
+                    QuotaKind::ExecPerPrincipal,
+                    "device:a",
+                    peer,
+                    t0 + sec,
+                    Some(9),
+                    qsh_transport::AuthPath::Ca,
+                )
+                .is_empty()
+        );
+
+        let flushed = quotas.flush_expired(t0 + AUDIT_AGGREGATION_WINDOW + sec);
+        assert_eq!(flushed.len(), 2, "both windows close at this flush");
+        let tunnel_summary = flushed
+            .iter()
+            .find(|r| r.resource == QuotaKind::TunnelStreamsPerPrincipal.category())
+            .expect("tunnel summary present");
+        assert_eq!(
+            tunnel_summary.count,
+            Some(3),
+            "tunnel window must count exactly its own 3 suppressed \
+             rejections, not the unrelated category's"
+        );
+        let exec_summary = flushed
+            .iter()
+            .find(|r| r.resource == QuotaKind::ExecPerPrincipal.category())
+            .expect("exec summary present");
+        assert_eq!(exec_summary.count, Some(1));
+    }
+
+    /// M8 Step 3b S5: `Quotas::windows` grew from 3 slots to
+    /// `QuotaKind::ALL.len()` (10) across S1-S4. This pins that every one
+    /// of the 7 categories S1 added closes its own window with a real
+    /// summary — not just that `flush_expired_summary_names_the_correct_
+    /// kind_for_every_category` above sees *a* record (which a stray
+    /// hardcoded `windows: [AuditWindow; 3]` would already fail loudly
+    /// on, via an out-of-bounds index panic long before this test could
+    /// even run) but that the suppressed-count arithmetic for each new
+    /// slot is independent and correct.
+    #[test]
+    fn flush_expired_closes_every_new_category_window() {
+        let new_kinds = [
+            QuotaKind::ExecHost,
+            QuotaKind::TunnelStreamsPerPrincipal,
+            QuotaKind::TunnelStreamsPerForward,
+            QuotaKind::RemoteForwardsPerPrincipal,
+            QuotaKind::ConnectionsPerPrincipal,
+            QuotaKind::Connections,
+            QuotaKind::PairingConnections,
+        ];
+        assert_eq!(
+            new_kinds.len() + 3,
+            QuotaKind::ALL.len(),
+            "this test's own table must cover every category S1 added \
+             on top of the pre-existing 3"
+        );
+        for kind in new_kinds {
+            let quotas = quotas_with(1);
+            let clock = TestClock::new();
+            let t0 = clock.now();
+            let peer: std::net::SocketAddr = "127.0.0.1:1".parse().unwrap();
+            let sec = std::time::Duration::from_secs(1);
+
+            let first = quotas.record_rejection(
+                kind,
+                "device:a",
+                peer,
+                t0,
+                None,
+                qsh_transport::AuthPath::Ca,
+            );
+            assert_eq!(first.len(), 1, "kind {kind:?}: first line");
+            for i in 1..=2u64 {
+                assert!(
+                    quotas
+                        .record_rejection(
+                            kind,
+                            "device:a",
+                            peer,
+                            t0 + sec * i as u32,
+                            None,
+                            qsh_transport::AuthPath::Ca,
+                        )
+                        .is_empty(),
+                    "kind {kind:?}: suppressed rejection #{i}"
+                );
+            }
+            let flushed = quotas.flush_expired(t0 + AUDIT_AGGREGATION_WINDOW + sec);
+            assert_eq!(flushed.len(), 1, "kind {kind:?}: summary on flush");
+            assert_eq!(
+                flushed[0].count,
+                Some(2),
+                "kind {kind:?}: must count exactly its own 2 suppressed \
+                 rejections"
+            );
+            assert_eq!(flushed[0].resource, kind.category());
+            assert!(
+                !quotas.windows[kind as usize].is_open(),
+                "kind {kind:?}: flush must actually close its window"
+            );
+        }
     }
 
     /// `record_rejection` indexes `Quotas`'s internal `windows` array by
@@ -658,14 +1665,37 @@ mod tests {
             let quotas = quotas_with(1);
             let clock = TestClock::new();
             let t0 = clock.now();
+            let peer: std::net::SocketAddr = "127.0.0.1:1".parse().unwrap();
             let sec = std::time::Duration::from_secs(1);
 
-            let first =
-                quotas.record_rejection(kind, "device:a", t0, 1, qsh_transport::AuthPath::Ca);
+            let first = quotas.record_rejection(
+                kind,
+                "device:a",
+                peer,
+                t0,
+                Some(1),
+                qsh_transport::AuthPath::Ca,
+            );
             assert_eq!(first.len(), 1, "kind {kind:?}: first line");
+            assert_eq!(
+                first[0].peer_addr,
+                peer.to_string(),
+                "kind {kind:?}: R4 — first line must carry the live peer, not \"-\""
+            );
+            assert_eq!(
+                first[0].request_id, "1",
+                "kind {kind:?}: R9 — a Some(1) request_id must audit as \"1\", not the \"-\" sentinel"
+            );
             assert!(
                 quotas
-                    .record_rejection(kind, "device:a", t0 + sec, 1, qsh_transport::AuthPath::Ca)
+                    .record_rejection(
+                        kind,
+                        "device:a",
+                        peer,
+                        t0 + sec,
+                        Some(1),
+                        qsh_transport::AuthPath::Ca
+                    )
                     .is_empty(),
                 "kind {kind:?}: second rejection suppressed"
             );
@@ -677,6 +1707,14 @@ mod tests {
                 kind.category(),
                 "kind {kind:?}: summary named the wrong category"
             );
+            assert_eq!(
+                flushed[0].peer_addr, "-",
+                "kind {kind:?}: R4 — a summary record spans many peers and stays \"-\""
+            );
+            assert_eq!(
+                flushed[0].request_id, "-",
+                "kind {kind:?}: R9 — a summary record spans many requests and stays \"-\""
+            );
         }
     }
 
@@ -685,12 +1723,14 @@ mod tests {
         let quotas = quotas_with(1);
         let clock = TestClock::new();
         let t0 = clock.now();
+        let peer: std::net::SocketAddr = "127.0.0.1:1".parse().unwrap();
 
         let first = quotas.record_rejection(
             QuotaKind::Sessions,
             "device:a",
+            peer,
             t0,
-            1,
+            Some(1),
             qsh_transport::AuthPath::Ca,
         );
         assert_eq!(first.len(), 1, "first rejection reported");
@@ -725,8 +1765,9 @@ mod tests {
         let reopened = quotas.record_rejection(
             QuotaKind::Sessions,
             "device:b",
+            peer,
             t0 + AUDIT_AGGREGATION_WINDOW + std::time::Duration::from_secs(2),
-            2,
+            Some(2),
             qsh_transport::AuthPath::Ca,
         );
         assert_eq!(
@@ -751,6 +1792,7 @@ mod tests {
         let quotas = quotas_with(1);
         let clock = TestClock::new();
         let t0 = clock.now();
+        let peer: std::net::SocketAddr = "127.0.0.1:1".parse().unwrap();
         let sec = std::time::Duration::from_secs(1);
 
         assert_eq!(
@@ -758,8 +1800,9 @@ mod tests {
                 .record_rejection(
                     QuotaKind::Sessions,
                     "device:a",
+                    peer,
                     t0,
-                    1,
+                    Some(1),
                     qsh_transport::AuthPath::Ca
                 )
                 .len(),
@@ -771,8 +1814,9 @@ mod tests {
                     .record_rejection(
                         QuotaKind::Sessions,
                         "device:a",
+                        peer,
                         t0 + sec * (n as u32),
-                        1,
+                        Some(1),
                         qsh_transport::AuthPath::Ca,
                     )
                     .is_empty()
@@ -790,8 +1834,9 @@ mod tests {
         let later = quotas.record_rejection(
             QuotaKind::Sessions,
             "device:b",
+            peer,
             t0 + AUDIT_AGGREGATION_WINDOW + sec * 2,
-            7,
+            Some(7),
             qsh_transport::AuthPath::Ca,
         );
         assert_eq!(
@@ -815,14 +1860,16 @@ mod tests {
         let quotas = quotas_with(1);
         let clock = TestClock::new();
         let t0 = clock.now();
+        let peer: std::net::SocketAddr = "127.0.0.1:1".parse().unwrap();
 
         // Three rejections in one window: one immediate first line, two
         // suppressed.
         let first = quotas.record_rejection(
             QuotaKind::Sessions,
             "device:a",
+            peer,
             t0,
-            1,
+            Some(1),
             qsh_transport::AuthPath::Ca,
         );
         assert_eq!(first.len(), 1);
@@ -831,8 +1878,9 @@ mod tests {
                 .record_rejection(
                     QuotaKind::Sessions,
                     "device:a",
+                    peer,
                     t0 + std::time::Duration::from_secs(1),
-                    1,
+                    Some(1),
                     qsh_transport::AuthPath::Ca,
                 )
                 .is_empty()
@@ -842,8 +1890,9 @@ mod tests {
                 .record_rejection(
                     QuotaKind::Sessions,
                     "device:a",
+                    peer,
                     t0 + std::time::Duration::from_secs(2),
-                    1,
+                    Some(1),
                     qsh_transport::AuthPath::Ca,
                 )
                 .is_empty()
@@ -856,8 +1905,9 @@ mod tests {
         let stale_reopen = quotas.record_rejection(
             QuotaKind::Sessions,
             "device:b",
+            peer,
             t0 + AUDIT_AGGREGATION_WINDOW + std::time::Duration::from_secs(1),
-            9,
+            Some(9),
             qsh_transport::AuthPath::Pin,
         );
         assert_eq!(
@@ -881,5 +1931,236 @@ mod tests {
                 .flush_expired(t0 + AUDIT_AGGREGATION_WINDOW + std::time::Duration::from_secs(1))
                 .is_empty()
         );
+    }
+
+    /// M8 Step 3b S1: `Quotas::windows` is sized `[AuditWindow;
+    /// QuotaKind::ALL.len()]` and every `record_rejection`/`flush_expired`
+    /// index into it is `kind as usize` — so `ALL`'s length (and, via the
+    /// discriminant-order test above, its declaration order) is exactly
+    /// what keeps the two in lockstep. This test pins the length half of
+    /// that invariant directly, independent of the discriminant-order
+    /// test, so a mutation that drops a variant from `ALL` without
+    /// touching declaration order still gets caught.
+    #[test]
+    fn quota_kind_all_stays_in_lockstep_with_the_window_array() {
+        let quotas = quotas_with(1);
+        // `Quotas::windows` is declared `[AuditWindow; QuotaKind::ALL.len()]`
+        // — its length can never mechanically diverge from `ALL.len()`, so
+        // the invariant this test exists to pin is that *count* against a
+        // literal (10, the full 3b vocabulary), not against `ALL.len()`
+        // itself: comparing a derived quantity to the very expression it
+        // was derived from can never fail no matter how many variants a
+        // mutation drops from `ALL`.
+        assert_eq!(
+            quotas.windows.len(),
+            10,
+            "Quotas::windows must have exactly one slot per QuotaKind::ALL entry \
+             (10 variants after M8 Step 3b S1)"
+        );
+        assert_eq!(
+            QuotaKind::ALL.len(),
+            10,
+            "QuotaKind::ALL must list all 10 variants"
+        );
+        // Every kind must be reachable as a valid index — a variant added
+        // to the enum but left out of ALL would panic here instead of
+        // silently aliasing another kind's window.
+        for &kind in QuotaKind::ALL {
+            let _ = &quotas.windows[kind as usize];
+        }
+    }
+
+    /// M8 Step 3b ruling R5: pins the full, exact vocabulary for every one
+    /// of the 10 `QuotaKind` variants — `category()`, `action()`, and
+    /// `wire_message()` — against the ruling's own table, so a variant
+    /// added to the enum without a matching arm in one of these three
+    /// functions (or a typo in the string a match arm returns) fails here
+    /// instead of only being caught by a doc-contract test much later.
+    #[test]
+    fn every_quota_kind_maps_to_its_documented_category_action_and_wire_message() {
+        let expected: &[(QuotaKind, &str, &str, &str)] = &[
+            (
+                QuotaKind::Sessions,
+                "quota_sessions_host",
+                "session.open",
+                "session quota exceeded",
+            ),
+            (
+                QuotaKind::SessionsPerPrincipal,
+                "quota_sessions_principal",
+                "session.open",
+                "session quota exceeded",
+            ),
+            (
+                QuotaKind::ExecPerPrincipal,
+                "quota_exec_principal",
+                "exec.run",
+                "exec quota exceeded",
+            ),
+            (
+                QuotaKind::ExecHost,
+                "quota_exec_host",
+                "exec.run",
+                "exec quota exceeded",
+            ),
+            (
+                QuotaKind::TunnelStreamsPerPrincipal,
+                "quota_tunnels_principal",
+                "forward.local",
+                "tunnel quota exceeded",
+            ),
+            (
+                QuotaKind::TunnelStreamsPerForward,
+                "quota_tunnels_forward",
+                "forward.local",
+                "tunnel quota exceeded",
+            ),
+            (
+                QuotaKind::RemoteForwardsPerPrincipal,
+                "quota_remote_forwards_principal",
+                "forward.remote",
+                "remote forward quota exceeded",
+            ),
+            (
+                QuotaKind::ConnectionsPerPrincipal,
+                "quota_connections_principal",
+                "connect",
+                "connection quota exceeded",
+            ),
+            (
+                QuotaKind::Connections,
+                "quota_connections_host",
+                "connect",
+                "connection quota exceeded",
+            ),
+            (
+                QuotaKind::PairingConnections,
+                "quota_connections_pairing",
+                "connect",
+                "connection quota exceeded",
+            ),
+        ];
+        assert_eq!(
+            expected.len(),
+            QuotaKind::ALL.len(),
+            "this test's own table must cover every QuotaKind::ALL entry"
+        );
+        for &(kind, category, action, wire_message) in expected {
+            assert_eq!(kind.category(), category, "kind {kind:?}: category");
+            assert_eq!(kind.action(), action, "kind {kind:?}: action");
+            assert_eq!(
+                kind.wire_message(),
+                wire_message,
+                "kind {kind:?}: wire_message"
+            );
+        }
+    }
+
+    /// M8 Step 3b S1: `reserve_exec` checks the host-wide axis
+    /// (`QuotaLimits::max_exec`, derived as `Σ exec_in_use.values()`)
+    /// before the per-principal axis — a host at its host cap must refuse
+    /// with `QuotaKind::ExecHost` even for a principal nowhere near its own
+    /// per-principal cap, and must never touch that principal's map entry
+    /// while refusing.
+    #[test]
+    fn exec_reservation_refuses_on_the_host_cap_before_the_principal_cap() {
+        let quotas = Quotas::new(
+            QuotaLimits {
+                max_exec: 1,
+                max_exec_per_principal: 100,
+                ..QuotaLimits::default()
+            },
+            Arc::new(TestClock::new()),
+        );
+        // One reservation for device:a fills the host cap (1) while
+        // leaving device:a's own per-principal cap (100) nowhere near
+        // exhausted.
+        let _first = quotas.reserve_exec("device:a").unwrap();
+
+        // A second principal, entirely within its own per-principal
+        // budget, must still be refused — and refused for the host reason,
+        // not the (irrelevant, unreached) per-principal one.
+        assert_eq!(
+            quotas.reserve_exec("device:b").unwrap_err(),
+            QuotaKind::ExecHost
+        );
+        // The refused principal must get no map entry at all (F9
+        // discipline, extended to the host axis).
+        assert_eq!(quotas.exec_in_use("device:b"), 0);
+
+        // The same principal already holding the one live reservation is
+        // refused too — the host cap binds everyone once it is full,
+        // including the principal that filled it.
+        assert_eq!(
+            quotas.reserve_exec("device:a").unwrap_err(),
+            QuotaKind::ExecHost
+        );
+    }
+
+    /// M8 Step 3b S1: every new `[serve]` key degrades `0`/unset to its
+    /// documented default, the same discipline every existing quota key
+    /// already follows (`ServeConfig::max_exec_per_principal`, etc.) —
+    /// exercised through `QuotaLimits::from_serve` end to end rather than
+    /// each individual getter in isolation, so a mismatch between
+    /// `QuotaLimits::from_serve`'s field wiring and the getters it calls
+    /// is caught here too.
+    #[test]
+    fn an_unset_or_zero_quota_key_degrades_to_its_documented_default() {
+        let unset = crate::config::ServeConfig::default();
+        let limits = QuotaLimits::from_serve(&unset);
+        assert_eq!(
+            limits.max_exec,
+            crate::config::ServeConfig::DEFAULT_MAX_EXEC
+        );
+        assert_eq!(
+            limits.max_tunnel_streams_per_principal,
+            crate::config::ServeConfig::DEFAULT_MAX_TUNNEL_STREAMS_PER_PRINCIPAL
+        );
+        assert_eq!(
+            limits.max_tunnel_streams_per_forward,
+            crate::config::ServeConfig::DEFAULT_MAX_TUNNEL_STREAMS_PER_FORWARD
+        );
+        assert_eq!(
+            limits.max_remote_forwards_per_principal,
+            crate::config::ServeConfig::DEFAULT_MAX_REMOTE_FORWARDS_PER_PRINCIPAL
+        );
+        assert_eq!(
+            limits.max_connections_per_principal,
+            crate::config::ServeConfig::DEFAULT_MAX_CONNECTIONS_PER_PRINCIPAL
+        );
+        assert_eq!(
+            limits.max_connections,
+            crate::config::ServeConfig::DEFAULT_MAX_CONNECTIONS
+        );
+
+        // Explicit `0` degrades exactly the same way as unset.
+        let zeroed = crate::config::ServeConfig {
+            max_exec: Some(0),
+            max_tunnel_streams_per_principal: Some(0),
+            max_tunnel_streams_per_forward: Some(0),
+            max_remote_forwards_per_principal: Some(0),
+            max_connections_per_principal: Some(0),
+            max_connections: Some(0),
+            ..crate::config::ServeConfig::default()
+        };
+        let zeroed_limits = QuotaLimits::from_serve(&zeroed);
+        assert_eq!(zeroed_limits.max_exec, limits.max_exec);
+        assert_eq!(
+            zeroed_limits.max_tunnel_streams_per_principal,
+            limits.max_tunnel_streams_per_principal
+        );
+        assert_eq!(
+            zeroed_limits.max_tunnel_streams_per_forward,
+            limits.max_tunnel_streams_per_forward
+        );
+        assert_eq!(
+            zeroed_limits.max_remote_forwards_per_principal,
+            limits.max_remote_forwards_per_principal
+        );
+        assert_eq!(
+            zeroed_limits.max_connections_per_principal,
+            limits.max_connections_per_principal
+        );
+        assert_eq!(zeroed_limits.max_connections, limits.max_connections);
     }
 }

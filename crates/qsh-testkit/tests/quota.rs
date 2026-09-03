@@ -18,17 +18,30 @@ use std::time::Duration;
 use qsh_core::acl::AllowAllPinned;
 use qsh_core::client::{ClientError, Session};
 use qsh_core::exec::ExecSpec;
+use qsh_core::handshake::HelloError;
 use qsh_core::quota::QuotaLimits;
+use qsh_core::server::RESET_CODE_RESOURCE_EXHAUSTED;
 use qsh_proto::ErrorCode;
 use qsh_proto::wire;
 use qsh_testkit::loopback::{LoopbackHarness, make_ca, make_identity};
-use qsh_transport::{Dialer, Principal, StaticTrust};
+use qsh_testkit::reverse::ReverseHarness;
+use qsh_testkit::tunnel::TunnelHarness;
+use qsh_transport::{Dialer, FramedRecv, FramedSend, Principal, StaticTrust};
+use tokio::net::TcpListener;
 
 /// Mirrors `qsh_core::quota`'s private `AUDIT_AGGREGATION_WINDOW` (10s) —
 /// not reachable from here, so restated (the same convention
 /// `crates/qsh-testkit/tests/admission.rs` uses for its own copy of the
 /// admission module's identical constant).
 const AUDIT_AGGREGATION_WINDOW: Duration = Duration::from_secs(10);
+
+/// M8 Step 3b arbitration B9: the margin four tests in this file (and
+/// `mod reverse_target_quota`, via `use super::AUDIT_WINDOW_SLACK`) sleep
+/// past `AUDIT_AGGREGATION_WINDOW`'s own staleness point before asserting
+/// the window's summary landed — one shared constant instead of four
+/// independent `Duration::from_millis(1500)` literals, so a CI-wide bump
+/// (a loaded runner eating into the margin) is a one-line change.
+const AUDIT_WINDOW_SLACK: Duration = Duration::from_millis(1500);
 
 /// Same empirical margin `admission.rs`'s on-exit-flush tests use, for the
 /// identical reason: rejecting immediately after harness start puts the
@@ -309,6 +322,69 @@ async fn quota_rejection_audit_is_aggregated() {
     );
 }
 
+/// M8 Step 3b arbitration B1's testkit e2e pin: the `quota_rejected`
+/// audit line's `peer_addr` must be the real address QUIC saw the client
+/// dial from, not the `"-"` sentinel `quota_rejected_summary` uses. Dials
+/// through [`LoopbackHarness::dial`] directly (rather than
+/// [`LoopbackHarness::session`]) so the client's own `quinn::Endpoint` —
+/// and its `local_addr()` — stays reachable after the connection is
+/// negotiated; that local address is exactly what the server sees as the
+/// connection's remote address.
+#[tokio::test(flavor = "multi_thread")]
+async fn quota_rejection_audit_line_carries_the_real_client_peer_addr() {
+    let h = LoopbackHarness::start_with_quotas(QuotaLimits {
+        max_sessions: 1,
+        ..QuotaLimits::default()
+    })
+    .await;
+    let mut s = h.session().await;
+    let _opened = s.session_open(open_req()).await.unwrap();
+
+    let dialed = h.dial().await;
+    // `quinn::Endpoint::local_addr()` reports the socket's *bind* address,
+    // which for a client dialed against a loopback target is the
+    // unspecified `0.0.0.0`/`[::]`, not the concrete `127.0.0.1` the
+    // server's `Connection::remote_address()` observes on the accepted
+    // path — only the port is shared between the two. That port is
+    // still the thing worth pinning: a `"-"`-sentinel regression would
+    // fail this the same way a full-address mismatch would.
+    let expected_peer_port = dialed
+        .endpoint
+        .local_addr()
+        .expect("client local_addr")
+        .port();
+    let mut s2 = Session::negotiate(dialed.connection, "laptop2")
+        .await
+        .expect("negotiate the rejecting connection");
+    let err = s2.session_open(open_req()).await.unwrap_err();
+    let (code, _) = remote(err);
+    assert_eq!(code, ErrorCode::ResourceExhausted);
+
+    let audit = h.audit.clone();
+    h.shutdown().await;
+
+    let records = audit.records();
+    let first = records
+        .iter()
+        .find(|r| r.resource == "quota_sessions_host" && r.count.is_none())
+        .unwrap_or_else(|| panic!("expected a quota_sessions_host line, got {records:?}"));
+    assert_ne!(
+        first.peer_addr, "-",
+        "the quota deny record must carry the client's real peer, not the summary sentinel"
+    );
+    let audited: std::net::SocketAddr = first.peer_addr.parse().unwrap_or_else(|err| {
+        panic!(
+            "peer_addr {:?} did not parse as an address: {err}",
+            first.peer_addr
+        )
+    });
+    assert_eq!(
+        audited.port(),
+        expected_peer_port,
+        "the quota deny record's peer port must match the dialing client's own port"
+    );
+}
+
 /// B5 (M8 Step 3a fix-3 sweep): pins `Server::run`'s post-loop
 /// `quota_housekeeping` call as *the* thing that flushes a window a
 /// shutdown catches — the window is pushed past its own staleness bound
@@ -351,7 +427,7 @@ async fn quota_rejection_summary_is_flushed_by_a_shutdown_inside_the_window() {
     // Past the window's own staleness bound (opened at ~t0+4, stale at
     // ~t0+14), landing at ~t0+15.5 — well before the next periodic tick
     // at ~t0+20 (same margin `quota_rejection_audit_is_aggregated` uses).
-    tokio::time::sleep(AUDIT_AGGREGATION_WINDOW + Duration::from_millis(1500)).await;
+    tokio::time::sleep(AUDIT_AGGREGATION_WINDOW + AUDIT_WINDOW_SLACK).await;
 
     let audit = h.audit.clone();
     h.shutdown().await;
@@ -582,6 +658,540 @@ async fn a_running_child_holds_its_exec_permit_until_it_exits() {
     h.shutdown().await;
 }
 
+/// I4 (design §4.4/`docs/adr/0010-resource-quotas.md`) — the tunnel-stream
+/// quota's security core, end to end: a principal already at its
+/// `max_tunnel_streams_per_forward` cap for one destination gets
+/// `RESOURCE_EXHAUSTED` on the `ConnectResult`, the requester's send half
+/// is stopped with [`RESET_CODE_RESOURCE_EXHAUSTED`] (`0x200D`), the
+/// host's own send half finishes cleanly (a frame, then a FIN — not a
+/// reset), and — the point of the whole test — nothing is dialed for the
+/// refused attempt.
+///
+/// `qsh_core::server`'s own inline tests already pin "zero dials" with an
+/// instrumented [`TunnelDialer`](qsh_core::server) double
+/// (`a_tunnel_dial_past_the_quota_never_reaches_the_dialer`) and the stop
+/// code with a raw QUIC loopback pair
+/// (`a_quota_refusal_stops_the_receive_half_with_resource_exhausted`) —
+/// this is their e2e twin, reached through the *real* production
+/// `SystemDialer` via a live [`TunnelHarness`] instead of a test double,
+/// so "nothing dialed" has to be proved differently: the destination
+/// itself is a `TcpListener` this test accepts from (a spy), and the
+/// forward-axis cap (keyed by `(principal, host:port)`,
+/// `Quotas::reserve_tunnel_stream`'s own doc) is filled by a first,
+/// genuinely successful connect to that same destination — so a second
+/// dial reaching it, if the quota gate let one through, would show up as
+/// a second `accept()`.
+///
+/// The first stream is opened and read to its `ConnectResult` but its
+/// send/recv halves are deliberately never dropped until after the
+/// second attempt is fully checked: dropping them ends the splice and
+/// frees the permit immediately (I5, below), which would let the second
+/// connect through and defeat the "past the quota" premise this test is
+/// built on.
+#[tokio::test(flavor = "multi_thread")]
+async fn tcp_connect_past_the_forward_quota_answers_resource_exhausted_and_dials_nothing() {
+    let h = TunnelHarness::start_with_quotas(QuotaLimits {
+        max_tunnel_streams_per_forward: 1,
+        ..QuotaLimits::default()
+    })
+    .await;
+
+    let spy = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind the spy destination");
+    let spy_port = spy.local_addr().expect("spy addr").port();
+
+    // Fill the one-slot forward cap: a real `TCP_CONNECT` to the spy,
+    // held open (not dropped) for the rest of the test.
+    let (send, recv) = h
+        .connection()
+        .open_bi()
+        .await
+        .expect("open the first tunnel stream");
+    let mut held_send = FramedSend::data(send);
+    held_send.set_priority(wire::PRIORITY_TUNNEL);
+    held_send
+        .send(&wire::StreamHeader {
+            kind: wire::StreamKind::TcpConnect as i32,
+            ticket: Vec::new(),
+            host: "127.0.0.1".to_string(),
+            port: u32::from(spy_port),
+        })
+        .await
+        .expect("send the first TCP_CONNECT header");
+    let mut held_recv = FramedRecv::data(recv);
+    let first: wire::ConnectResult = held_recv
+        .recv()
+        .await
+        .expect("read the first ConnectResult")
+        .expect("§7 requires a ConnectResult either way");
+    assert!(first.ok, "{first:?}");
+
+    // Prove the first dial really reached the spy — otherwise "the
+    // second dial never reaches it" below would be true for the wrong
+    // reason (nothing here ever dials at all).
+    let (first_accept, _) = tokio::time::timeout(Duration::from_secs(5), spy.accept())
+        .await
+        .expect("the first dial must reach the spy")
+        .expect("accept");
+
+    // Second attempt, same destination — same forward key, now at cap.
+    let (send2, recv2) = h
+        .connection()
+        .open_bi()
+        .await
+        .expect("open the second tunnel stream");
+    let mut send2 = FramedSend::data(send2);
+    send2.set_priority(wire::PRIORITY_TUNNEL);
+    send2
+        .send(&wire::StreamHeader {
+            kind: wire::StreamKind::TcpConnect as i32,
+            ticket: Vec::new(),
+            host: "127.0.0.1".to_string(),
+            port: u32::from(spy_port),
+        })
+        .await
+        .expect("send the second TCP_CONNECT header");
+    // `into_raw` before anything else is read on this half — the only way
+    // to read back the peer's `STOP_SENDING` code
+    // (`FramedSend::stopped` discards it).
+    let raw_send2 = send2.into_raw();
+    let mut recv2 = FramedRecv::data(recv2);
+    let second: wire::ConnectResult = recv2
+        .recv()
+        .await
+        .expect("read the second ConnectResult")
+        .expect("§7 requires a ConnectResult either way");
+    assert!(!second.ok, "{second:?}");
+    assert_eq!(second.code, ErrorCode::ResourceExhausted.as_str());
+
+    // Nothing was dialed for the refused attempt: no second connection
+    // ever reaches the spy.
+    let no_second = tokio::time::timeout(Duration::from_millis(300), spy.accept()).await;
+    assert!(
+        no_second.is_err(),
+        "a forward-quota refusal must never reach the dialer"
+    );
+
+    // The host's send half finished cleanly (the `ConnectResult` frame,
+    // then a FIN) — reading past it must end the stream, not error it.
+    let tail = recv2
+        .recv::<wire::ConnectResult>()
+        .await
+        .expect("a clean end-of-stream, not a truncation or reset");
+    assert!(
+        tail.is_none(),
+        "the host's send half must finish, not stay open: {tail:?}"
+    );
+
+    // The requester's own send half (this stream's other direction) is
+    // stopped with the quota-specific code, not the generic `0` a plain
+    // "destination would not accept" refusal uses.
+    let stop = tokio::time::timeout(Duration::from_secs(5), raw_send2.stopped())
+        .await
+        .expect("the host must stop the receive half promptly")
+        .expect("stopped() must observe the STOP_SENDING, not a connection error");
+    assert_eq!(
+        stop.map(|code| code.into_inner()),
+        Some(u64::from(RESET_CODE_RESOURCE_EXHAUSTED)),
+        "a quota refusal must stop with RESET_CODE_RESOURCE_EXHAUSTED, not the generic 0"
+    );
+
+    drop(first_accept);
+    drop(held_send);
+    drop(held_recv);
+    h.shutdown().await;
+}
+
+/// I5 (design §4.4) — the tunnel-stream permit is released when its
+/// splice ends, not held forever: at a forward cap of 1, a first
+/// `TCP_CONNECT` that completes and goes away must free the slot for a
+/// second one to the same destination.
+///
+/// [`TunnelHarness::tcp_connect`] opens its bi-stream, reads the
+/// `ConnectResult` and returns — its local `send`/`recv` handles are
+/// dropped the moment it does, which ends the splice from the requester
+/// side, exactly the trigger this test needs. Release is asynchronous on
+/// the host side (the same "the close is asynchronous" reasoning
+/// `tunnel_loopback.rs`'s `dropping_the_forward_closes_the_local_listener`
+/// polls for), so the second connect is retried on a bounded timer rather
+/// than asserted on the first attempt.
+#[tokio::test(flavor = "multi_thread")]
+async fn tunnel_streams_are_released_when_a_splice_ends() {
+    let h = TunnelHarness::start_with_quotas(QuotaLimits {
+        max_tunnel_streams_per_forward: 1,
+        ..QuotaLimits::default()
+    })
+    .await;
+
+    let first = h.tcp_connect("127.0.0.1", h.echo.port()).await;
+    assert!(first.ok, "{first:?}");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let second = h.tcp_connect("127.0.0.1", h.echo.port()).await;
+        if second.ok {
+            break;
+        }
+        assert_eq!(
+            second.code,
+            ErrorCode::ResourceExhausted.as_str(),
+            "a refusal here must be the still-held quota, nothing else: {second:?}"
+        );
+        if tokio::time::Instant::now() >= deadline {
+            panic!("the forward-stream permit was never released after the first splice ended");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    h.shutdown().await;
+}
+
+/// I6 (design §4.4/`docs/adr/0010-resource-quotas.md`) — the remote-forward
+/// listener quota (`max_remote_forwards_per_principal`), end to end: at a
+/// cap of 1, a first `RemoteForwardOpen` succeeds, a second (same
+/// principal, a fresh session — quota is per-principal, not per-session,
+/// [`TunnelHarness::remote_forward`]'s own doc on why `-R` gets its own
+/// connection) answers `RESOURCE_EXHAUSTED`/`retryable: true` and binds no
+/// listener, and after `RemoteForwardClose` on the first, the reopen
+/// succeeds.
+///
+/// [`TunnelHarness::remote_forward`] panics on a rejection (it is the
+/// "this must work" helper every other remote-forward test uses), so the
+/// refused attempt is driven by hand here: a fresh
+/// [`Session::rfwd_open`] call, matching what that helper does internally
+/// minus the `.expect`.
+///
+/// "No listener bound" is shown the same way `remote_forward_close_
+/// releases_the_hosts_listener` shows a listener *gone*: an explicit
+/// `bind_port` (a real ephemeral port grabbed and released just before,
+/// so it is a loopback address nothing else is using) is named in the
+/// refused request, and a plain `TcpStream::connect` to it fails —
+/// `Server::authorize_and_bind_remote_forward` reserves before it ever
+/// calls the binder (`qsh-core`'s own
+/// `a_remote_forward_past_the_quota_is_refused_before_the_binder_runs`
+/// pins that ordering without a network; this is its e2e twin), so a
+/// quota refusal never reaches `binder.bind` at all.
+#[tokio::test(flavor = "multi_thread")]
+async fn remote_forward_open_past_the_quota_answers_resource_exhausted_and_reopens_after_close() {
+    let h = TunnelHarness::start_with_quotas(QuotaLimits {
+        max_remote_forwards_per_principal: 1,
+        ..QuotaLimits::default()
+    })
+    .await;
+
+    // Fills the one-slot principal cap.
+    let forward = h.remote_forward("127.0.0.1", h.echo.port()).await;
+    assert!(forward.host_addr().ip().is_loopback());
+
+    // A loopback address nothing is listening on yet — freed right after
+    // grabbing it, so the refused request below names a real, otherwise
+    // idle port rather than an arbitrary guess.
+    let probe = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind a throwaway port to learn a free one");
+    let probe_addr = probe.local_addr().expect("probe addr");
+    drop(probe);
+
+    // A background racer, spinning for the whole in-flight request:
+    // repeatedly (re)binds `probe_addr` itself. If `binder.bind` ever ran
+    // for the refused request — even bound-then-immediately-dropped on the
+    // reservation's way back out, which a mere *post-hoc* "is the port
+    // closed now" check on the settled response could never observe, since
+    // the drop happens host-side before the wire error is even sent — this
+    // racer's own bind attempt collides with it (`AddrInUse`) at some point
+    // during the race and records the hit.
+    let probe_hit = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let racer_hit = probe_hit.clone();
+    let racer = tokio::spawn(async move {
+        loop {
+            match TcpListener::bind(probe_addr).await {
+                Ok(listener) => drop(listener),
+                Err(_already_bound) => {
+                    racer_hit.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    });
+
+    // Second `RemoteForwardOpen`, same principal, a fresh session (quota
+    // is per-principal) — driven by hand, not through
+    // `TunnelHarness::remote_forward`, since that helper panics on a
+    // rejection.
+    let mut second_session = h.host.session().await;
+    let err = second_session
+        .rfwd_open(wire::RemoteForwardOpen {
+            bind_host: probe_addr.ip().to_string(),
+            bind_port: u32::from(probe_addr.port()),
+            forward_host: "127.0.0.1".to_string(),
+            forward_port: u32::from(h.echo.port()),
+            claim_token: Vec::new(),
+        })
+        .await
+        .expect_err("the principal's remote-forward cap is already full");
+    let (code, retryable) = remote(err);
+    assert_eq!(code, ErrorCode::ResourceExhausted);
+    assert!(
+        retryable,
+        "RESOURCE_EXHAUSTED must be retryable on the wire"
+    );
+
+    racer.abort();
+    let _ = racer.await;
+    assert!(
+        !probe_hit.load(std::sync::atomic::Ordering::SeqCst),
+        "a quota refusal must never reach the binder — the probed port must never have been bound, not even transiently"
+    );
+
+    // Settled state, restated the simple way: the port is closed now too.
+    let dial = tokio::net::TcpStream::connect(probe_addr).await;
+    assert!(
+        dial.is_err(),
+        "the probed port must stay closed, got {dial:?}"
+    );
+
+    // Free the one slot, then the same second session can open the
+    // forward it was just refused.
+    forward.close().await;
+
+    let reopened = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match second_session
+                .rfwd_open(wire::RemoteForwardOpen {
+                    bind_host: String::new(),
+                    bind_port: 0,
+                    forward_host: "127.0.0.1".to_string(),
+                    forward_port: u32::from(h.echo.port()),
+                    claim_token: Vec::new(),
+                })
+                .await
+            {
+                Ok(opened) => return opened,
+                Err(err) => {
+                    let (code, _) = remote(err);
+                    assert_eq!(
+                        code,
+                        ErrorCode::ResourceExhausted,
+                        "a refusal here must be the still-held quota, nothing else"
+                    );
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }
+        }
+    })
+    .await
+    .expect("the freed slot must admit the reopen after RemoteForwardClose");
+    assert!(wire::valid_forward_id(&reopened.forward_id));
+
+    second_session
+        .rfwd_close(wire::RemoteForwardClose {
+            forward_id: reopened.forward_id,
+        })
+        .await
+        .expect("RemoteForwardClose");
+
+    h.shutdown().await;
+}
+
+// ==========================================================================
+// I8/I12 (design §4.4/`docs/adr/0010-resource-quotas.md`) — M8 Step 3b S4:
+// the connection-level cap(s) (`max_connections`,
+// `max_connections_per_principal`), end to end over real loopback QUIC.
+// ==========================================================================
+
+/// I8 — the host-wide connection cap (ruling R3): past `max_connections`,
+/// a new dial's `Hello` is answered `RESOURCE_EXHAUSTED`/`retryable: true`
+/// instead of the ordinary local `Hello` — the same wire shape every other
+/// quota axis uses — and the connection already established is completely
+/// untouched by the refusal: a `session.open` on it still succeeds.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_established_connection_cap_refuses_the_extra_dial_and_keeps_the_first() {
+    let h = LoopbackHarness::start_with_quotas(QuotaLimits {
+        max_connections: 1,
+        max_connections_per_principal: 100,
+        ..QuotaLimits::default()
+    })
+    .await;
+
+    // First connection: spends the one host-wide slot.
+    let mut first = h.session().await;
+
+    // Second dial, same principal — the host-wide cap is already spent,
+    // so this never gets the ordinary local Hello back.
+    let dialed = h.dial().await;
+    let err = match Session::negotiate(dialed.connection, "laptop").await {
+        Ok(_) => panic!("a second connection past the host cap must be refused"),
+        Err(err) => err,
+    };
+    let (code, retryable) = remote(err);
+    assert_eq!(code, ErrorCode::ResourceExhausted);
+    assert!(
+        retryable,
+        "RESOURCE_EXHAUSTED must be retryable on the wire"
+    );
+
+    // The refusal touched nothing about the connection already up: it can
+    // still open a session.
+    let opened = first.session_open(open_req()).await.unwrap();
+    assert!(!opened.session_id.is_empty());
+
+    h.shutdown().await;
+}
+
+/// Connection-axis twin of I3 (`two_principals_have_independent_session_
+/// budgets` above): `max_connections_per_principal` is keyed by
+/// principal, not shared — `device:laptop`'s own connection budget is
+/// exhausted while `device:phone` still gets its full independent budget
+/// against the same host, and `device:laptop`'s already-open connection
+/// keeps working throughout.
+#[tokio::test(flavor = "multi_thread")]
+async fn two_principals_have_independent_connection_budgets() {
+    let h = LoopbackHarness::start_with_quotas(QuotaLimits {
+        max_connections: 100,
+        max_connections_per_principal: 1,
+        ..QuotaLimits::default()
+    })
+    .await;
+
+    let mut laptop = h.session().await;
+
+    let dialed = h.dial().await;
+    let err = match Session::negotiate(dialed.connection, "laptop").await {
+        Ok(_) => panic!("laptop's own per-principal cap is already spent"),
+        Err(err) => err,
+    };
+    let (code, retryable) = remote(err);
+    assert_eq!(code, ErrorCode::ResourceExhausted);
+    assert!(retryable);
+
+    // `device:phone`'s budget is untouched by laptop's.
+    let dialed_phone = h.second_dial().await;
+    let mut phone = Session::negotiate(dialed_phone.connection, "phone")
+        .await
+        .expect("phone's per-principal budget is independent of laptop's");
+    let opened_phone = phone.session_open(open_req()).await.unwrap();
+    assert!(!opened_phone.session_id.is_empty());
+
+    // ...and laptop's own connection is unaffected too.
+    let opened_laptop = laptop.session_open(open_req()).await.unwrap();
+    assert!(!opened_laptop.session_id.is_empty());
+
+    h.shutdown().await;
+}
+
+/// M8 Step 3b S5: connection-axis twin of `quota_rejection_audit_is_
+/// aggregated` above — a burst of refused *dials* (not requests inside an
+/// already-open connection) still collapses into one first record plus
+/// one window summary in the audit sink, proving the `quota_connections_
+/// host` window `Server::serve_connection`'s outer permit-refusal path
+/// (ruling R3) opens and closes exactly like every control-stream
+/// rejection's window does.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_connection_cap_rejection_burst_is_aggregated_in_the_audit_log() {
+    const REJECTIONS: usize = 3;
+    let h = LoopbackHarness::start_with_quotas(QuotaLimits {
+        max_connections: 1,
+        max_connections_per_principal: 100,
+        ..QuotaLimits::default()
+    })
+    .await;
+
+    // First connection: spends the one host-wide slot, held open for the
+    // rest of the test.
+    let _first = h.session().await;
+
+    // See WINDOW_OPEN_DELAY's own doc: a wide gap from harness start
+    // before the window even opens, so the periodic accept-loop tick is
+    // nowhere near this window's staleness point.
+    tokio::time::sleep(WINDOW_OPEN_DELAY).await;
+
+    for _ in 0..REJECTIONS {
+        let dialed = h.dial().await;
+        let err = match Session::negotiate(dialed.connection, "laptop").await {
+            Ok(_) => panic!("every dial past the host cap must be refused"),
+            Err(err) => err,
+        };
+        let (code, retryable) = remote(err);
+        assert_eq!(code, ErrorCode::ResourceExhausted);
+        assert!(retryable);
+    }
+
+    tokio::time::sleep(AUDIT_AGGREGATION_WINDOW + Duration::from_millis(1500)).await;
+
+    let audit = h.audit.clone();
+    h.shutdown().await;
+
+    let records = audit.records();
+    let first = records
+        .iter()
+        .find(|r| r.resource == "quota_connections_host" && r.count.is_none())
+        .unwrap_or_else(|| panic!("expected a first quota_connections_host line, got {records:?}"));
+    assert_eq!(first.decision, "deny");
+    let summary = records
+        .iter()
+        .find(|r| r.resource == "quota_connections_host" && r.count.is_some())
+        .unwrap_or_else(|| panic!("expected a quota_connections_host summary, got {records:?}"));
+    assert_eq!(
+        summary.count,
+        Some((REJECTIONS - 1) as u32),
+        "the first rejection was reported immediately; the summary covers the rest"
+    );
+}
+
+/// I12 — arm parity (ruling R6): `qsh listen`'s controller (`Listen`) owns
+/// its own `Quotas`, entirely independent of `crate::server::Server`'s,
+/// and enforces the identical `max_connections` cap over its own accept
+/// loop — a second target's registration past the cap is refused
+/// `RESOURCE_EXHAUSTED`/`retryable: true` the same way a forward host's
+/// extra dial is (I8, above), never a bare connection close.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_listen_controller_enforces_the_connection_cap() {
+    let first = make_identity();
+    let second = make_identity();
+    let trust = StaticTrust::empty()
+        .with_pin(first.fingerprint, Principal::Device("first".into()))
+        .with_pin(second.fingerprint, Principal::Device("second".into()));
+    let harness = ReverseHarness::start_with_quotas(
+        Arc::new(AllowAllPinned),
+        false,
+        trust,
+        QuotaLimits {
+            max_connections: 1,
+            max_connections_per_principal: 100,
+            ..QuotaLimits::default()
+        },
+    )
+    .await;
+
+    // First target: spends the controller's one connection slot.
+    let (_dialed1, _ctl1, _hello1) = harness
+        .register(&first, "widget")
+        .await
+        .expect("first registration must fill the controller's one connection slot");
+
+    // Second target, distinct principal — the controller's own cap is
+    // already spent (I12: same axis, same shape, its own arm).
+    let err = match harness.register(&second, "gadget").await {
+        Ok(_) => panic!("the controller's connection cap must refuse the second registration"),
+        Err(err) => err,
+    };
+    match err {
+        HelloError::Remote {
+            code, retryable, ..
+        } => {
+            assert_eq!(code, ErrorCode::ResourceExhausted);
+            assert!(
+                retryable,
+                "RESOURCE_EXHAUSTED must be retryable on the wire"
+            );
+        }
+        other => panic!("expected a Remote RESOURCE_EXHAUSTED rejection, got {other:?}"),
+    }
+
+    harness.shutdown().await;
+}
+
 // ==========================================================================
 // I10 (design §4.5) — the reverse **target** arm enforces the identical
 // session cap the forward host does. `ReverseHarness`'s own "start_*"
@@ -607,9 +1217,11 @@ mod reverse_target_quota {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use super::AUDIT_WINDOW_SLACK;
     use qsh_core::acl::AllowAllPinned;
     use qsh_core::config::{Config, ServeConfig};
     use qsh_core::localctl::frame::LocalConduit;
+    use qsh_core::server::RESET_CODE_RESOURCE_EXHAUSTED;
     use qsh_core::{Paths, Principal};
     use qsh_proto::ErrorCode;
     use qsh_proto::local::{
@@ -618,8 +1230,8 @@ mod reverse_target_quota {
     use qsh_proto::wire::{self, control_message, response};
     use qsh_testkit::loopback::{TestIdentity, make_identity};
     use qsh_testkit::reverse::{ReverseHarness, wait_for};
-    use qsh_transport::StaticTrust;
-    use tokio::net::UnixStream;
+    use qsh_transport::{FramedRecv, FramedSend, StaticTrust};
+    use tokio::net::{TcpListener, UnixStream};
 
     const TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -865,6 +1477,132 @@ mod reverse_target_quota {
         let (result, ()) = tokio::join!(run_fut, test_fut);
         result.expect("run_target_with_config must exit cleanly on shutdown");
         localctl.shutdown().await;
+        harness.shutdown().await;
+    }
+
+    /// I11 (M8 Step 3b S5): the reverse target's tunnel-stream quota is
+    /// the same `[serve]`-config-driven wiring the session/exec tests
+    /// above pin — `max_tunnel_streams_per_forward` must reach
+    /// `host_runtime` through `QuotaLimits::from_serve` too, not just the
+    /// control-stream axes. `TCP_CONNECT` is a bare QUIC bidi stream
+    /// (`docs/design/protocol.md` §7), not a `LOCAL_CONTROL` message, so
+    /// this opens it by hand directly on the target's raw [`Connection`]
+    /// (`Listen::connection_for_wait`, the same connection
+    /// `serve_control` drives control messages over) — proving the real
+    /// `serve.rs` wiring, not `ReversePairHarness`'s hand-built
+    /// `Server::new` with `QuotaLimits::default()` (module docs above).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reverse_target_enforces_the_same_tunnel_stream_quota() {
+        let target = make_identity();
+        let harness =
+            ReverseHarness::start_with(Arc::new(AllowAllPinned), false, pin(&target, "widget"))
+                .await;
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let config = Config {
+            serve: ServeConfig {
+                max_tunnel_streams_per_forward: Some(1),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let run_fut = harness.run_target_with_config(
+            &target,
+            "device-id",
+            "controller",
+            None,
+            &config,
+            async {
+                let _ = shutdown_rx.await;
+            },
+        );
+
+        let test_fut = async {
+            wait_for(TIMEOUT, || harness.listen.registry().get("widget")).await;
+            let (conn, _hub) = harness
+                .listen
+                .connection_for_wait("widget", None, TIMEOUT)
+                .await
+                .expect("target registered a control hub");
+
+            // Nothing is listening on this loopback port — the first
+            // dial's own success/failure is irrelevant, only that it
+            // *reaches the dialer* and holds the forward-axis permit
+            // until this connection's send/recv half are dropped.
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind a throwaway listener");
+            let port = listener.local_addr().unwrap().port();
+
+            let (send1, recv1) = conn.open_bi().await.expect("open the first tunnel stream");
+            let mut held_send = FramedSend::data(send1);
+            held_send.set_priority(wire::PRIORITY_TUNNEL);
+            held_send
+                .send(&wire::StreamHeader {
+                    kind: wire::StreamKind::TcpConnect as i32,
+                    ticket: Vec::new(),
+                    host: "127.0.0.1".to_string(),
+                    port: u32::from(port),
+                })
+                .await
+                .expect("send the first TCP_CONNECT header");
+            let mut held_recv = FramedRecv::data(recv1);
+            let first: wire::ConnectResult = held_recv
+                .recv()
+                .await
+                .expect("read the first ConnectResult")
+                .expect("§7 requires a ConnectResult either way");
+            assert!(
+                first.ok,
+                "the first tunnel stream must be admitted: {first:?}"
+            );
+
+            // Second dial to the exact same (principal, destination) key
+            // while the first stream is still held open: refused by the
+            // real per-forward cap of 1, not a default `QuotaLimits`.
+            let (send2, recv2) = conn.open_bi().await.expect("open the second tunnel stream");
+            let mut send2 = FramedSend::data(send2);
+            send2.set_priority(wire::PRIORITY_TUNNEL);
+            send2
+                .send(&wire::StreamHeader {
+                    kind: wire::StreamKind::TcpConnect as i32,
+                    ticket: Vec::new(),
+                    host: "127.0.0.1".to_string(),
+                    port: u32::from(port),
+                })
+                .await
+                .expect("send the second TCP_CONNECT header");
+            let raw_send2 = send2.into_raw();
+            let mut recv2 = FramedRecv::data(recv2);
+            let second: wire::ConnectResult = recv2
+                .recv()
+                .await
+                .expect("read the second ConnectResult")
+                .expect("§7 requires a ConnectResult either way");
+            assert!(
+                !second.ok,
+                "a second tunnel stream past max_tunnel_streams_per_forward=1 \
+                 must be refused: {second:?}"
+            );
+            assert_eq!(second.code, ErrorCode::ResourceExhausted.as_str());
+            let stop = tokio::time::timeout(TIMEOUT, raw_send2.stopped())
+                .await
+                .expect("the host must stop the receive half promptly")
+                .expect("stopped() must observe the STOP_SENDING, not a connection error");
+            assert_eq!(
+                stop.map(|code| code.into_inner()),
+                Some(u64::from(RESET_CODE_RESOURCE_EXHAUSTED)),
+                "a quota refusal must stop with RESET_CODE_RESOURCE_EXHAUSTED, not the generic 0"
+            );
+
+            drop(listener);
+            drop(held_send);
+            drop(held_recv);
+            let _ = shutdown_tx.send(());
+        };
+
+        let (result, ()) = tokio::join!(run_fut, test_fut);
+        result.expect("run_target_with_config must exit cleanly on shutdown");
         harness.shutdown().await;
     }
 
@@ -1164,7 +1902,7 @@ mod reverse_target_quota {
             // stale at ~t0+14), landing at ~t0+15.5 — well before the
             // next periodic tick at ~t0+20, so shutdown's own purge is
             // the only thing that can produce the summary from here.
-            tokio::time::sleep(AUDIT_AGGREGATION_WINDOW + Duration::from_millis(1500)).await;
+            tokio::time::sleep(AUDIT_AGGREGATION_WINDOW + AUDIT_WINDOW_SLACK).await;
             let _ = shutdown_tx.send(());
 
             // Bounded at 3s, not 20s (this loop's own next periodic tick).
@@ -1295,7 +2033,7 @@ mod reverse_target_quota {
                 // `reverse_attach.rs`'s `register_reverse` spawned task
                 // uses, which is what actually runs the
                 // `quota_housekeeping()` call this test pins.
-                server.purge_connection(conn_id).await;
+                server.purge_connection(conn_id, ()).await;
             }
         });
 
@@ -1348,7 +2086,7 @@ mod reverse_target_quota {
         // Past the window's own staleness bound, well before any tick
         // this test never builds anyway (module docs above) — closing
         // the connection now is the only thing that can flush it.
-        tokio::time::sleep(AUDIT_AGGREGATION_WINDOW + Duration::from_millis(1500)).await;
+        tokio::time::sleep(AUDIT_AGGREGATION_WINDOW + AUDIT_WINDOW_SLACK).await;
         conn.close(0, b"client done");
 
         // Bounded at 3s, not 20s: `MemoryAuditSink` is in-process, so

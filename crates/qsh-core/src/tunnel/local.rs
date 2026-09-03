@@ -964,6 +964,23 @@ mod tests {
         }
     }
 
+    /// The test above only exercises `err.raw_os_error() == None` (every
+    /// `io::Error::from(ErrorKind)` it builds carries no raw errno) —
+    /// leaving `accept_disposition`'s `_ => Fatal` catch-all for a *real*,
+    /// unlisted errno unpinned (M8 Step 3b, R10). `EBADF` is exactly the
+    /// errno the remote-forward accept loop's own fatal path produces (a
+    /// listener whose fd is no longer valid) and belongs to neither
+    /// `ACCEPT_EXHAUSTION_ERRNOS` nor `ACCEPT_PER_CONNECTION_ERRNOS` on any
+    /// platform this crate targets.
+    #[test]
+    fn an_unclassified_accept_errno_is_fatal() {
+        assert_eq!(
+            accept_disposition(&io::Error::from_raw_os_error(libc::EBADF)),
+            AcceptDisposition::Fatal,
+            "EBADF names a dead listener, not a retryable/backoff-able condition"
+        );
+    }
+
     // ---- the requester leg end to end ------------------------------------
 
     /// Stand in for the host side of `docs/design/protocol.md` §7 over a

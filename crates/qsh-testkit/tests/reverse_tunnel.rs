@@ -660,16 +660,61 @@ where
     F: FnOnce(std::path::PathBuf) -> Fut,
     Fut: Future<Output = ()>,
 {
+    with_registered_widget_and_quotas(
+        qsh_core::config::ServeConfig::DEFAULT_MAX_REMOTE_FORWARDS_PER_PRINCIPAL,
+        body,
+    )
+    .await;
+}
+
+/// [`with_registered_widget`] with a caller-chosen
+/// `[serve].max_remote_forwards_per_principal` — for a test that
+/// deliberately opens more than the default (16, M8 Step 3b) worth of
+/// remote forwards from the single `"widget"` principal to exercise
+/// something else entirely (the parked-claim pool), and needs the
+/// per-principal quota out of its way to do so.
+///
+/// The quota that actually gates `RemoteForwardOpen` here lives on the
+/// **target** side, not the controller's `Listen`:
+/// `ReverseHarness::run_target*` builds the target's own
+/// `crate::serve::host_runtime` (`crate::server::Server`) from this
+/// `Config`, and it is that `Server::authorize_and_bind_remote_forward`
+/// call — reached because the target "plays the host role for every op
+/// the controller sends it" (this file's module docs) — that reserves
+/// against `[serve].max_remote_forwards_per_principal`. Raising the
+/// controller-side `Listen`'s own `Quotas` (`ReverseHarness::
+/// start_with_quotas`) does not touch this path at all.
+async fn with_registered_widget_and_quotas<F, Fut>(
+    max_remote_forwards_per_principal: usize,
+    body: F,
+) where
+    F: FnOnce(std::path::PathBuf) -> Fut,
+    Fut: Future<Output = ()>,
+{
     let target = make_identity();
     let harness =
         ReverseHarness::start_with(Arc::new(AllowAllPinned), false, pin(&target, "widget")).await;
     let (_dir, paths) = fresh_paths();
     let localctl = harness.attach_localctl(&paths).await;
 
+    let target_config = qsh_core::config::Config {
+        serve: qsh_core::config::ServeConfig {
+            max_remote_forwards_per_principal: Some(max_remote_forwards_per_principal),
+            ..qsh_core::config::ServeConfig::default()
+        },
+        ..qsh_core::config::Config::default()
+    };
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-    let run_fut = harness.run_target(&target, "device-id", "controller", None, async {
-        let _ = shutdown_rx.await;
-    });
+    let run_fut = harness.run_target_with_config(
+        &target,
+        "device-id",
+        "controller",
+        None,
+        &target_config,
+        async {
+            let _ = shutdown_rx.await;
+        },
+    );
 
     let socket_path = localctl.socket_path.clone();
     let test_fut = async {
@@ -881,7 +926,11 @@ async fn n_live_splices_beyond_the_parked_claim_cap_coexist() {
     const CAP: usize = 32;
     const LIVE_SPLICE_COUNT: usize = CAP + 1;
 
-    with_registered_widget(|socket_path| async move {
+    // `[serve].max_remote_forwards_per_principal` defaults to 16 (M8 Step
+    // 3b); this test opens `LIVE_SPLICE_COUNT` (33) from the single
+    // `"widget"` principal to exercise the parked-claim cap, so it raises
+    // the per-principal quota well above that count.
+    with_registered_widget_and_quotas(64, |socket_path| async move {
         let mut ctl = connect_control(&socket_path, "widget").await;
         // Held for the rest of the test so every splice opened below
         // stays genuinely live (neither the TCP peer nor the claim
@@ -994,7 +1043,12 @@ async fn the_parked_claim_share_bounds_one_conduit_without_starving_another() {
     const HUB_CAP: usize = 32;
     const CONDUITS: usize = HUB_CAP / SHARE;
 
-    with_registered_widget(|socket_path| async move {
+    // `[serve].max_remote_forwards_per_principal` defaults to 16 (M8 Step
+    // 3b); this test opens `HUB_CAP` (32) plus a handful more remote
+    // forwards from the single `"widget"` principal to exercise the
+    // parked-claim share/ceiling, so it raises the per-principal quota
+    // well above that count.
+    with_registered_widget_and_quotas(64, |socket_path| async move {
         // Every parked claim's reader task, kept alive for the whole test
         // so each one's permit stays genuinely held.
         let mut parked = Vec::with_capacity(HUB_CAP);

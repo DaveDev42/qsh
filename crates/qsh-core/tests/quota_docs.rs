@@ -151,7 +151,13 @@ fn cli_md_names_every_quota_reject_action() {
         QuotaKind::ALL.iter().map(|kind| kind.action()).collect();
     assert_eq!(
         actions,
-        std::collections::BTreeSet::from(["session.open", "exec.run"]),
+        std::collections::BTreeSet::from([
+            "session.open",
+            "exec.run",
+            "forward.local",
+            "forward.remote",
+            "connect",
+        ]),
         "QuotaKind::action() vocabulary changed — update the assertion \
          (and docs/CLI.md §6.12's action sentence) deliberately, not by \
          drift: {actions:?}"
@@ -191,6 +197,24 @@ fn cli_md_and_architecture_md_name_every_quota_config_key_and_its_default() {
             "max_exec_per_principal",
             defaults.max_exec_per_principal as u64,
         ),
+        ("max_exec", defaults.max_exec as u64),
+        (
+            "max_tunnel_streams_per_principal",
+            defaults.max_tunnel_streams_per_principal as u64,
+        ),
+        (
+            "max_tunnel_streams_per_forward",
+            defaults.max_tunnel_streams_per_forward as u64,
+        ),
+        (
+            "max_remote_forwards_per_principal",
+            defaults.max_remote_forwards_per_principal as u64,
+        ),
+        (
+            "max_connections_per_principal",
+            defaults.max_connections_per_principal as u64,
+        ),
+        ("max_connections", defaults.max_connections as u64),
     ];
 
     for (key, default) in keys {
@@ -230,5 +254,109 @@ fn cli_md_and_architecture_md_name_every_quota_config_key_and_its_default() {
     assert_eq!(
         defaults.max_exec_per_principal,
         ServeConfig::DEFAULT_MAX_EXEC_PER_PRINCIPAL
+    );
+}
+
+/// D4: `docs/design/protocol.md` used to say the tunnel-stream and
+/// remote-forward-listener axes hit **no** cap at all (M4/M5's
+/// deliberately-left-open gap, `docs/ROADMAP.md` M8 감사 개정 ③) — M8
+/// Step 3b closed both, so the doc must no longer claim otherwise. This
+/// only catches the literal old sentence reappearing (e.g. a careless
+/// revert); it does not re-derive the gap's closure from the quota
+/// module the way D1-D3 do, because protocol.md's prose has no single
+/// constant to read back.
+#[test]
+fn protocol_md_no_longer_declares_the_tunnel_gaps_unbounded() {
+    let protocol_md = read_doc("docs/design/protocol.md");
+
+    assert!(
+        !protocol_md.contains("어떤 상한에도 걸리지 않는다"),
+        "docs/design/protocol.md must not claim the remote-forward-listener \
+         count hits no cap — M8 Step 3b closed that gap with \
+         max_remote_forwards_per_principal"
+    );
+    assert!(
+        protocol_md.contains("max_tunnel_streams_per_principal")
+            && protocol_md.contains("max_tunnel_streams_per_forward"),
+        "docs/design/protocol.md's concurrency-limit section must name the \
+         M8 Step 3b tunnel-stream quota keys, not just the transport-level \
+         MAX_CONCURRENT_BIDI_STREAMS ceiling"
+    );
+    assert!(
+        protocol_md.contains("max_remote_forwards_per_principal"),
+        "docs/design/protocol.md's remote-forward-listener section must \
+         name the M8 Step 3b max_remote_forwards_per_principal quota key"
+    );
+}
+
+/// Every M8 Step 3b `QuotaKind` category is named in `docs/CLI.md` §6.12
+/// (D1 already asserts this for `QuotaKind::ALL` as a whole, iterated —
+/// this pins the *new* 3b-specific set by name so a doc edit that drops
+/// one of them, even while leaving the pre-3b three intact, is caught by
+/// its own literal instead of only by the generic loop), and the two new
+/// wire-facing reset/close codes (`RESET_CODE_RESOURCE_EXHAUSTED` =
+/// `0x200D`, `CLOSE_CODE_RESOURCE_EXHAUSTED` = `0x1003`,
+/// `crates/qsh-core/src/server/mod.rs`) are registered in
+/// `docs/design/protocol.md`'s prose.
+#[test]
+fn cli_md_names_every_3b_quota_category_and_protocol_md_names_the_new_wire_codes() {
+    let cli_md = read_doc("docs/CLI.md");
+    let protocol_md = read_doc("docs/design/protocol.md");
+
+    for category in [
+        "quota_exec_host",
+        "quota_tunnels_principal",
+        "quota_tunnels_forward",
+        "quota_remote_forwards_principal",
+        "quota_connections_principal",
+        "quota_connections_host",
+        "quota_connections_pairing",
+    ] {
+        assert!(
+            cli_md.contains(category),
+            "docs/CLI.md §6.12 must name the M8 Step 3b \"{category}\" category word"
+        );
+    }
+
+    assert!(
+        protocol_md.contains("0x200D"),
+        "docs/design/protocol.md must register RESET_CODE_RESOURCE_EXHAUSTED (0x200D)"
+    );
+    assert!(
+        protocol_md.contains("0x1003"),
+        "docs/design/protocol.md must register CLOSE_CODE_RESOURCE_EXHAUSTED (0x1003)"
+    );
+}
+
+/// M8 Step 3b arbitration B6: the tunnel axis's refusal is a
+/// `wire::ConnectResult{ok,code,message}`, which has no `retryable`
+/// field — only `wire::Error` does. `docs/CLI.md` §6.12's sentence
+/// listing which axes come back as `RESOURCE_EXHAUSTED(retryable: true)`
+/// must not include the tunnel axis (터널) in that list.
+#[test]
+fn cli_md_does_not_claim_the_tunnel_axis_carries_retryable() {
+    let cli_md = read_doc("docs/CLI.md");
+    // Scoped to the §6.12 quota sentence specifically (`docs/CLI.md`
+    // also says "retryable: true" once elsewhere, for `--timeout`'s
+    // unrelated `TIMEOUT` code) via the exact phrase that sentence uses.
+    let marker = "`RESOURCE_EXHAUSTED`(`retryable: true`)";
+    let idx = cli_md
+        .find(marker)
+        .unwrap_or_else(|| panic!("docs/CLI.md §6.12 must still say \"{marker}\" somewhere"));
+    // The sentence is delimited by the nearest '.' on each side (Korean
+    // prose here uses ASCII periods as sentence stops, same convention
+    // the rest of this file's window-based readers rely on).
+    let before = &cli_md[..idx];
+    let sentence_start = before.rfind('.').map(|i| i + 1).unwrap_or(0);
+    let after = &cli_md[idx..];
+    let sentence_end = idx
+        + after
+            .find('.')
+            .unwrap_or_else(|| panic!("no sentence end found after \"{marker}\""));
+    let sentence = &cli_md[sentence_start..=sentence_end];
+    assert!(
+        !sentence.contains("터널"),
+        "the \"retryable: true\" sentence must not claim the tunnel axis — \
+         ConnectResult has no retryable field: {sentence:?}"
     );
 }
