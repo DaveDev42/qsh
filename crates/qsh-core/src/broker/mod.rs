@@ -138,6 +138,103 @@ pub enum BrokerError {
     /// just for the narrow window that check alone cannot close.
     #[error("qsh serve is shutting down: refusing new sessions")]
     Draining,
+    /// A session quota was already saturated when this open was attempted
+    /// (→ `RESOURCE_EXHAUSTED`, `PLAN.md` M8 Step 3, `docs/adr/0010-
+    /// resource-quotas.md`). Reserved and checked *before* `factory.create`
+    /// runs, so nothing was spawned — same "never create a resource before
+    /// authorization/quota succeeds" discipline `Draining` already
+    /// follows. Unlike `Draining` this is retryable: the resource comes
+    /// back once some other session closes.
+    ///
+    /// The wire-visible message is [`crate::quota::QuotaKind::
+    /// wire_message`], **not** `{0:?}` (F10 of the M8 Step 3a conformance
+    /// sweep) — a `Debug`-formatted `QuotaKind` would hand an
+    /// authorized-but-saturated peer a small occupancy oracle (global-host
+    /// vs. own-principal budget) through the one channel where `crate::
+    /// acl::PERMISSION_DENIED_MESSAGE`'s deliberate uniformity discipline
+    /// (architecture.md §6) already established the opposite norm.
+    /// `wire_message` is uniform *per resource type* (both session-axis
+    /// kinds share one string; the exec-axis kind has its own), so the
+    /// host-vs-principal axis stays available to operators only through
+    /// the *audit* record's `resource` field (`crate::audit::
+    /// AuditRecord::quota_rejected`'s `kind.category()`), never on the
+    /// wire.
+    #[error("{}", .0.wire_message())]
+    QuotaExceeded(crate::quota::QuotaKind),
+}
+
+/// In-flight session-open reservations — the gap between [`Broker::
+/// reserve_slot`] (taken *before* `factory.create` runs) and the registry
+/// insert that later consumes it, or [`SessionSlot::drop`] releasing it on
+/// any earlier failure/panic path. A reservation counts exactly like a
+/// live registry entry against [`crate::quota::QuotaLimits`] while it
+/// stands, which is what closes the residual race `Broker::precheck_quota`
+/// used to accept (F5 of the M8 Step 3a conformance sweep, main-session
+/// arbitration item 1): two concurrent openers can no longer both read the
+/// registry as "not yet full", both call `factory.create`, and have only
+/// one of them actually fit — the first one to reserve makes itself
+/// visible to the second's count immediately, not only once its session is
+/// inserted.
+#[derive(Debug, Default)]
+struct InFlightState {
+    total: usize,
+    by_opener: HashMap<String, usize>,
+}
+
+/// An in-flight, not-yet-inserted session-open reservation ([`Broker::
+/// reserve_slot`]). Its in-flight counters are decremented exactly once,
+/// however this is let go: [`SessionSlot::consume`] does it immediately,
+/// right after [`Broker::open_with_opener_reserved`]'s registry insert —
+/// the reservation's job is done the instant a live registry entry stands
+/// in its place, and leaving the counter incremented until some later
+/// `Drop` would double-count that session (in-flight *and* live) for as
+/// long as the returned [`SessionHandle`] happens to stay alive. Every
+/// other exit path (`factory.create` failing, `SessionActor::create`
+/// failing, a concurrent `close_all` draining the host in between, or an
+/// unwinding panic) never calls `consume`, so plain `Drop` does the same
+/// release instead — the same "a slot can never leak" discipline
+/// `crate::quota::ExecPermit`'s own doc comment states for `exec.run`.
+/// `released` guards against double-decrementing when `consume`'s own
+/// drop glue runs `Drop::drop` a second time on the same value.
+struct SessionSlot {
+    broker: Weak<Broker>,
+    opener: String,
+    released: bool,
+}
+
+impl SessionSlot {
+    /// Release the in-flight reservation right now, because a live
+    /// registry entry has just replaced it. Idempotent with `Drop` running
+    /// immediately after (this consumes `self` by value, so `Drop` still
+    /// fires at the end of this call — [`Self::release`] is what both
+    /// share, guarded so the decrement only ever happens once).
+    fn consume(mut self) {
+        self.release();
+    }
+
+    fn release(&mut self) {
+        if self.released {
+            return;
+        }
+        self.released = true;
+        let Some(broker) = self.broker.upgrade() else {
+            return;
+        };
+        let mut in_flight = broker.in_flight.lock().unwrap_or_else(|e| e.into_inner());
+        in_flight.total = in_flight.total.saturating_sub(1);
+        if let Some(count) = in_flight.by_opener.get_mut(&self.opener) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                in_flight.by_opener.remove(&self.opener);
+            }
+        }
+    }
+}
+
+impl Drop for SessionSlot {
+    fn drop(&mut self) {
+        self.release();
+    }
 }
 
 /// Factory/spawn `io::Error` → [`BrokerError`]: `Unsupported` is a policy
@@ -161,6 +258,12 @@ pub struct BrokerConfig {
     /// Per-step grace in the close signal escalation
     /// (`[serve].close_grace_ms`).
     pub close_grace: Duration,
+    /// Session-count quota limits (`[serve].max_sessions`/
+    /// `max_sessions_per_principal`, `PLAN.md` M8 Step 3, `docs/adr/
+    /// 0010-resource-quotas.md`). Enforced from the registry itself plus
+    /// the in-flight reservations not yet inserted into it (`Broker::
+    /// reserve_slot`) — no separate steady-state counter.
+    pub quota_limits: crate::quota::QuotaLimits,
 }
 
 impl Default for BrokerConfig {
@@ -169,6 +272,7 @@ impl Default for BrokerConfig {
             replay_bytes: ServeConfig::DEFAULT_REPLAY_BYTES,
             resume_ttl: Duration::from_secs(ServeConfig::DEFAULT_RESUME_TTL_SECS),
             close_grace: Duration::from_millis(ServeConfig::DEFAULT_CLOSE_GRACE_MS),
+            quota_limits: crate::quota::QuotaLimits::default(),
         }
     }
 }
@@ -181,6 +285,7 @@ impl BrokerConfig {
             replay_bytes: serve.replay_bytes(),
             resume_ttl: serve.resume_ttl(),
             close_grace: serve.close_grace(),
+            quota_limits: crate::quota::QuotaLimits::from_serve(serve),
         }
     }
 }
@@ -341,6 +446,24 @@ pub struct Broker {
     /// session's `session.attach` is indistinguishable from one naming an
     /// id that never existed.
     resume: ResumeRegistry,
+    /// In-flight session-open reservations ([`InFlightState`]) — a
+    /// separate lock from `registry`'s own. The actual discipline: this
+    /// lock is leaf-most with respect to `registry`'s — `reserve_slot`
+    /// takes `registry` first and then `in_flight` while still holding
+    /// it, and `open_with_opener_reserved`'s `slot.consume()` does the
+    /// same (registry held across the insert, `SessionSlot::release`
+    /// then takes `in_flight` underneath it) — so it MAY be taken while
+    /// `registry` is held, but never the reverse, and nothing taken under
+    /// `in_flight` ever takes another lock (same leaf discipline as the
+    /// quota lock, ADR-0010 §9). That fixed order is what rules out a
+    /// deadlock between the two, not the two never nesting.
+    in_flight: Mutex<InFlightState>,
+    /// Back-reference so a [`SessionSlot`] can release its reservation
+    /// from an arbitrary `'static` drop glue (a panicking task's unwind
+    /// included) without borrowing back into whatever owns this `Broker`
+    /// — the same [`Weak`] pattern `crate::quota::Quotas`'s own doc
+    /// comment explains for `ExecPermit`.
+    self_weak: Weak<Broker>,
 }
 
 impl std::fmt::Debug for Broker {
@@ -359,10 +482,18 @@ impl Broker {
         config: BrokerConfig,
         factory: Arc<dyn SourceFactory>,
     ) -> Arc<Self> {
-        Arc::new(Self {
+        // `Arc::new_cyclic`, not a plain `Arc::new` (this module's own
+        // history: pre-M8 Step 3a `Broker::new` never needed a
+        // self-reference) — `self_weak` is what lets `reserve_slot`'s
+        // returned `SessionSlot` release itself from `Drop` without this
+        // constructor threading a second, already-built `Arc<Broker>`
+        // back into the struct it is still building.
+        Arc::new_cyclic(|weak| Self {
             registry: Mutex::new(HashMap::new()),
             draining: AtomicBool::new(false),
             resume: ResumeRegistry::new(Arc::clone(&clock)),
+            in_flight: Mutex::new(InFlightState::default()),
+            self_weak: weak.clone(),
             clock,
             config,
             factory,
@@ -389,6 +520,55 @@ impl Broker {
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<SessionId, SessionHandle>> {
         self.registry.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Reserve one session-open slot for `opener`, checked against
+    /// [`crate::quota::QuotaLimits`] as *(live registry entries) +
+    /// (in-flight reservations not yet inserted)* — the global cap before
+    /// the per-principal one, same ordering `docs/adr/0010-resource-
+    /// quotas.md` §2.1 states. Takes `registry`'s lock, reads it, then
+    /// takes and releases `in_flight`'s lock, in that fixed order, both
+    /// released again before this returns — the reservation itself (not
+    /// lock continuity) is what holds the caller's place for however long
+    /// it then takes to run `factory.create` and insert the real session
+    /// (main-session arbitration item 1, replacing the non-reserving
+    /// `precheck_quota` F5 of the M8 Step 3a conformance sweep flagged).
+    fn reserve_slot(&self, opener: &str) -> Result<SessionSlot, crate::quota::QuotaKind> {
+        let registry = self.lock();
+        let mut in_flight = self.in_flight.lock().unwrap_or_else(|e| e.into_inner());
+        let mut total = in_flight.total;
+        let mut for_opener = in_flight.by_opener.get(opener).copied().unwrap_or(0);
+        for handle in registry.values().filter(|h| h.closed_at().is_none()) {
+            total += 1;
+            if handle.opener() == opener {
+                for_opener += 1;
+            }
+        }
+        if total >= self.config.quota_limits.max_sessions {
+            return Err(crate::quota::QuotaKind::Sessions);
+        }
+        if for_opener >= self.config.quota_limits.max_sessions_per_principal {
+            return Err(crate::quota::QuotaKind::SessionsPerPrincipal);
+        }
+        in_flight.total += 1;
+        *in_flight.by_opener.entry(opener.to_string()).or_insert(0) += 1;
+        drop(in_flight);
+        drop(registry);
+        Ok(SessionSlot {
+            broker: self.self_weak.clone(),
+            opener: opener.to_string(),
+            released: false,
+        })
+    }
+
+    /// Current in-flight (not-yet-inserted) reservation total —
+    /// test/diagnostic use only.
+    #[cfg(test)]
+    fn in_flight_total(&self) -> usize {
+        self.in_flight
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .total
     }
 
     fn now_rfc3339(&self) -> String {
@@ -432,9 +612,19 @@ impl Broker {
     /// The caller is responsible for having authorized this first (Step 3
     /// puts the ACL check ahead of `open` — never create a resource before
     /// authorization succeeds, `CLAUDE.md` security defaults).
+    ///
+    /// Quota-*reserved* (not merely checked) *before* `self.factory.create`
+    /// runs (`Broker::reserve_slot` — `PLAN.md` M8 Step 3, `docs/adr/0010-
+    /// resource-quotas.md`, main-session arbitration item 1): a refused
+    /// open must not fork/open a PTY only to throw it away, and the
+    /// reservation itself (not a second check at insert time) is what
+    /// keeps a concurrent racer from also fitting into the same slot —
+    /// [`SessionSlot::consume`] is the insert's own confirmation that the
+    /// reservation held.
     pub fn open(&self, spec: &SessionSpec) -> Result<SessionHandle, BrokerError> {
+        let slot = self.reserve_slot("").map_err(BrokerError::QuotaExceeded)?;
         let source = self.factory.create(spec).map_err(spawn_error)?;
-        self.open_with(spec, source)
+        self.open_with_opener_reserved(spec, source, String::new(), slot)
     }
 
     /// [`Broker::open`], recording `opener` as the session's owner
@@ -444,13 +634,20 @@ impl Broker {
     /// used). `SessionBackend::open` — `server::handle_session_open`'s only
     /// broker call, i.e. the sole production path — always calls this, not
     /// `open`/`open_with`; every other caller in this crate is a test.
+    ///
+    /// Same reserve-before-`factory.create` discipline as [`Broker::open`]
+    /// (this function's own doc).
     pub fn open_as(
         &self,
         spec: &SessionSpec,
         opener: impl Into<String>,
     ) -> Result<SessionHandle, BrokerError> {
+        let opener = opener.into();
+        let slot = self
+            .reserve_slot(&opener)
+            .map_err(BrokerError::QuotaExceeded)?;
         let source = self.factory.create(spec).map_err(spawn_error)?;
-        self.open_with_opener(spec, source, opener.into())
+        self.open_with_opener_reserved(spec, source, opener, slot)
     }
 
     /// [`Broker::open`] with an explicit source (tests; Step 4 PTY wiring
@@ -463,11 +660,37 @@ impl Broker {
         self.open_with_opener(spec, source, String::new())
     }
 
+    /// [`Broker::open_with`]'s worker: the source already exists (built by
+    /// the caller before this function was ever entered — the one case
+    /// this module cannot reserve ahead of resource creation, unchanged
+    /// from before this stage), so this reserves the session-count slot
+    /// right at entry, before the actor is spawned, and delegates the rest
+    /// to [`Broker::open_with_opener_reserved`].
     fn open_with_opener(
         &self,
         spec: &SessionSpec,
         source: Box<dyn SessionSource>,
         opener: String,
+    ) -> Result<SessionHandle, BrokerError> {
+        let slot = self
+            .reserve_slot(&opener)
+            .map_err(BrokerError::QuotaExceeded)?;
+        self.open_with_opener_reserved(spec, source, opener, slot)
+    }
+
+    /// The shared tail of [`Broker::open`]/[`Broker::open_as`]/[`Broker::
+    /// open_with_opener`]: given a [`SessionSlot`] the caller already
+    /// reserved (main-session arbitration item 1), spawn the session actor
+    /// and insert it, consuming the slot on success. `slot` simply drops —
+    /// releasing the reservation — on every early return here (`Draining`,
+    /// `SessionActor::create` failing), which is what [`SessionSlot`]'s own
+    /// doc comment means by "a slot can never leak".
+    fn open_with_opener_reserved(
+        &self,
+        spec: &SessionSpec,
+        source: Box<dyn SessionSource>,
+        opener: String,
+        slot: SessionSlot,
     ) -> Result<SessionHandle, BrokerError> {
         // Held from the draining check through the registry insert below,
         // spanning `SessionActor::create` (which spawns the real child —
@@ -482,7 +705,15 @@ impl Broker {
         // where the caller believes it opened a session `close_all` never
         // saw. `require_not_draining`'s check in `server/mod.rs` is the
         // cheap fast path for the ordinary case; this is the backstop for
-        // the race that check alone cannot close.
+        // the race that check alone cannot close. The quota decision
+        // itself was already made by `reserve_slot` before `slot` ever
+        // reached here — nothing re-checks it under this lock; the insert
+        // below is the reservation's redemption, not a second gate. The
+        // reservation is the ONLY gate on the session cap: delete it and
+        // `concurrent_opens_racing_inside_factory_create_still_call_it_
+        // once` (broker `mod tests`) must fail, since nothing else here
+        // stops two genuinely concurrent openers from both reaching this
+        // insert.
         let mut registry = self.lock();
         if self.draining.load(Ordering::Acquire) {
             return Err(BrokerError::Draining);
@@ -505,6 +736,11 @@ impl Broker {
         .map_err(spawn_error)?;
         tokio::spawn(actor.run());
         registry.insert(id, handle.clone());
+        // The reservation is now represented by the registry entry just
+        // inserted above — consume it (transfer, not re-check:
+        // `Broker::reserve_slot`'s own doc) rather than let `Drop` release
+        // a count the fresh entry already carries.
+        slot.consume();
         Ok(handle)
     }
 
@@ -1095,6 +1331,7 @@ mod tests {
                 replay_bytes: 64 * 1024,
                 resume_ttl: ttl,
                 close_grace: Duration::from_millis(5000),
+                quota_limits: crate::quota::QuotaLimits::default(),
             },
             Arc::new(PipeFactory::new(64 * 1024)),
         );
@@ -1485,6 +1722,7 @@ mod tests {
                 replay_bytes: 64 * 1024,
                 resume_ttl: Duration::from_secs(10),
                 close_grace: Duration::from_millis(5000),
+                quota_limits: crate::quota::QuotaLimits::default(),
             },
             Arc::new(PipeFactory::new(64 * 1024)),
         );
@@ -1509,5 +1747,466 @@ mod tests {
         drop(broker);
         tokio::time::advance(REAPER_TICK).await;
         within(reaper).await.unwrap();
+    }
+
+    // --- Session quotas (`PLAN.md` M8 Step 3, `docs/adr/0010-resource-
+    // quotas.md`, design §4.1). ---
+
+    use crate::quota::{QuotaKind, QuotaLimits};
+
+    fn broker_with_limits(quota_limits: QuotaLimits) -> (Arc<Broker>, TestClock) {
+        let clock = TestClock::new();
+        let broker = Broker::new(
+            Arc::new(clock.clone()),
+            BrokerConfig {
+                replay_bytes: 64 * 1024,
+                resume_ttl: Duration::from_secs(3600),
+                close_grace: Duration::from_millis(5000),
+                quota_limits,
+            },
+            Arc::new(PipeFactory::new(64 * 1024)),
+        );
+        (broker, clock)
+    }
+
+    /// A [`SourceFactory`] wrapping a [`PipeFactory`], counting how many
+    /// times `create` actually ran.
+    struct CountingFactory {
+        inner: PipeFactory,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl CountingFactory {
+        fn new(buffer: usize) -> Self {
+            Self {
+                inner: PipeFactory::new(buffer),
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl SourceFactory for CountingFactory {
+        fn create(&self, spec: &SessionSpec) -> io::Result<Box<dyn SessionSource>> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.create(spec)
+        }
+    }
+
+    #[tokio::test]
+    async fn open_refuses_past_the_host_session_cap() {
+        let (broker, _clock) = broker_with_limits(QuotaLimits {
+            max_sessions: 3,
+            ..QuotaLimits::default()
+        });
+        for _ in 0..3 {
+            open_pipe(&broker);
+        }
+        assert_eq!(broker.session_count(), 3);
+        assert_eq!(
+            broker
+                .open_as(&SessionSpec::default(), "device:extra")
+                .unwrap_err(),
+            BrokerError::QuotaExceeded(QuotaKind::Sessions)
+        );
+        assert_eq!(broker.session_count(), 3);
+    }
+
+    /// Verdict arbitration item 11's twin to U3/U14: `Broker::open` and
+    /// `Broker::open_with` are test-only entry points, but both are
+    /// `pub`, and both funnel through the same `open_with_opener` — this
+    /// pins that neither one is a quiet quota bypass a future production
+    /// caller could reach for.
+    #[tokio::test]
+    async fn open_and_open_with_are_refused_by_the_same_cap_as_open_as() {
+        let (broker, _clock) = broker_with_limits(QuotaLimits {
+            max_sessions: 1,
+            ..QuotaLimits::default()
+        });
+        broker.open_as(&SessionSpec::default(), "device:a").unwrap();
+        assert_eq!(
+            broker.open(&SessionSpec::default()).unwrap_err(),
+            BrokerError::QuotaExceeded(QuotaKind::Sessions)
+        );
+        let (source, _pipe) = PipeSource::new(64 * 1024);
+        assert_eq!(
+            broker
+                .open_with(&SessionSpec::default(), Box::new(source))
+                .unwrap_err(),
+            BrokerError::QuotaExceeded(QuotaKind::Sessions)
+        );
+        assert_eq!(broker.session_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn per_principal_cap_refuses_one_opener_and_still_admits_another() {
+        let (broker, _clock) = broker_with_limits(QuotaLimits {
+            max_sessions_per_principal: 2,
+            ..QuotaLimits::default()
+        });
+        broker.open_as(&SessionSpec::default(), "device:a").unwrap();
+        broker.open_as(&SessionSpec::default(), "device:a").unwrap();
+        assert_eq!(
+            broker
+                .open_as(&SessionSpec::default(), "device:a")
+                .unwrap_err(),
+            BrokerError::QuotaExceeded(QuotaKind::SessionsPerPrincipal)
+        );
+        // A different opener has its own, untouched budget.
+        assert!(broker.open_as(&SessionSpec::default(), "device:b").is_ok());
+    }
+
+    /// ADR-0010 §2.1: the global session cap is checked before the
+    /// per-principal cap in `reserve_slot`. With both caps saturated by
+    /// the very same opener, the error must still name `Sessions`
+    /// (global), never `SessionsPerPrincipal` — the two are equally true
+    /// here, so this only distinguishes them by which one `reserve_slot`
+    /// actually returns first.
+    #[tokio::test]
+    async fn global_cap_is_checked_before_the_per_principal_cap() {
+        let (broker, _clock) = broker_with_limits(QuotaLimits {
+            max_sessions: 1,
+            max_sessions_per_principal: 1,
+            ..QuotaLimits::default()
+        });
+        broker.open_as(&SessionSpec::default(), "device:a").unwrap();
+        assert_eq!(
+            broker
+                .open_as(&SessionSpec::default(), "device:a")
+                .unwrap_err(),
+            BrokerError::QuotaExceeded(QuotaKind::Sessions)
+        );
+    }
+
+    #[tokio::test]
+    async fn refused_open_never_calls_the_source_factory() {
+        let clock = TestClock::new();
+        let factory = Arc::new(CountingFactory::new(64 * 1024));
+        let broker = Broker::new(
+            Arc::new(clock),
+            BrokerConfig {
+                replay_bytes: 64 * 1024,
+                resume_ttl: Duration::from_secs(3600),
+                close_grace: Duration::from_millis(5000),
+                quota_limits: QuotaLimits {
+                    max_sessions: 1,
+                    ..QuotaLimits::default()
+                },
+            },
+            factory.clone(),
+        );
+        broker.open(&SessionSpec::default()).unwrap();
+        assert_eq!(factory.calls(), 1);
+        assert_eq!(
+            broker.open(&SessionSpec::default()).unwrap_err(),
+            BrokerError::QuotaExceeded(QuotaKind::Sessions)
+        );
+        // The refusal must not have spawned a second source.
+        assert_eq!(factory.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn closed_sessions_do_not_hold_quota() {
+        let (broker, _clock) = broker_with_limits(QuotaLimits {
+            max_sessions: 1,
+            ..QuotaLimits::default()
+        });
+        let (h, _pipe) = open_pipe(&broker);
+        assert_eq!(
+            broker.open(&SessionSpec::default()).unwrap_err(),
+            BrokerError::QuotaExceeded(QuotaKind::Sessions)
+        );
+        within(broker.close(&sid(&h), CloseReason::Closed, None))
+            .await
+            .unwrap();
+        // Closed-but-lingering (within CLOSED_RETENTION) does not hold
+        // the slot — a fresh open succeeds immediately.
+        assert!(broker.open(&SessionSpec::default()).is_ok());
+    }
+
+    #[tokio::test]
+    async fn reaped_sessions_release_quota() {
+        let ttl = Duration::from_secs(10);
+        let clock = TestClock::new();
+        let broker = Broker::new(
+            Arc::new(clock.clone()),
+            BrokerConfig {
+                replay_bytes: 64 * 1024,
+                resume_ttl: ttl,
+                close_grace: Duration::from_millis(5000),
+                quota_limits: QuotaLimits {
+                    max_sessions: 1,
+                    ..QuotaLimits::default()
+                },
+            },
+            Arc::new(PipeFactory::new(64 * 1024)),
+        );
+        open_pipe(&broker);
+        assert_eq!(
+            broker.open(&SessionSpec::default()).unwrap_err(),
+            BrokerError::QuotaExceeded(QuotaKind::Sessions)
+        );
+        clock.advance(ttl + Duration::from_secs(1));
+        let reaped = broker.reap_once().await;
+        assert_eq!(reaped.len(), 1);
+        assert_eq!(broker.session_count(), 0);
+        assert!(broker.open(&SessionSpec::default()).is_ok());
+    }
+
+    #[tokio::test]
+    async fn concurrent_opens_never_exceed_the_cap() {
+        const CAP: usize = 8;
+        const ATTEMPTS: usize = 32;
+        let (broker, _clock) = broker_with_limits(QuotaLimits {
+            max_sessions: CAP,
+            ..QuotaLimits::default()
+        });
+        let barrier = Arc::new(tokio::sync::Barrier::new(ATTEMPTS));
+        let mut tasks = tokio::task::JoinSet::new();
+        for i in 0..ATTEMPTS {
+            let broker = Arc::clone(&broker);
+            let barrier = Arc::clone(&barrier);
+            tasks.spawn(async move {
+                barrier.wait().await;
+                broker
+                    .open_as(&SessionSpec::default(), format!("device:{i}"))
+                    .is_ok()
+            });
+        }
+        let mut successes = 0usize;
+        while let Some(res) = tasks.join_next().await {
+            if res.unwrap() {
+                successes += 1;
+            }
+            assert!(broker.session_count() <= CAP);
+        }
+        assert_eq!(successes, CAP);
+        assert_eq!(broker.session_count(), CAP);
+    }
+
+    /// Main-session arbitration item 1's own test: the in-flight
+    /// `SessionSlot` reservation must close the residual race F5 of the
+    /// M8 Step 3a conformance sweep accepted for the old, non-reserving
+    /// `precheck_quota` — twin of `refused_open_never_calls_the_source_
+    /// factory` (U3), run under `concurrent_opens_never_exceed_the_cap`'s
+    /// (U6) own barrier shape. `2N` concurrent openers racing for `N`
+    /// slots must have `factory.create` called exactly `N` times, never
+    /// `2N`: a refused attempt must never have created (and then
+    /// discarded) a source at all, not merely never have kept one.
+    ///
+    /// This runs on a current-thread runtime, and `Broker::open_as` has no
+    /// `.await` in it, so its "concurrent" openers actually serialize —
+    /// the race the reservation exists to close is genuinely exercised by
+    /// `concurrent_opens_racing_inside_factory_create_still_call_it_once`
+    /// below, not by this test.
+    #[tokio::test]
+    async fn concurrent_opens_call_the_factory_exactly_cap_times() {
+        const CAP: usize = 8;
+        const ATTEMPTS: usize = CAP * 2;
+        let clock = TestClock::new();
+        let factory = Arc::new(CountingFactory::new(64 * 1024));
+        let broker = Broker::new(
+            Arc::new(clock),
+            BrokerConfig {
+                replay_bytes: 64 * 1024,
+                resume_ttl: Duration::from_secs(3600),
+                close_grace: Duration::from_millis(5000),
+                quota_limits: QuotaLimits {
+                    max_sessions: CAP,
+                    ..QuotaLimits::default()
+                },
+            },
+            factory.clone(),
+        );
+        let barrier = Arc::new(tokio::sync::Barrier::new(ATTEMPTS));
+        let mut tasks = tokio::task::JoinSet::new();
+        for i in 0..ATTEMPTS {
+            let broker = Arc::clone(&broker);
+            let barrier = Arc::clone(&barrier);
+            tasks.spawn(async move {
+                barrier.wait().await;
+                broker
+                    .open_as(&SessionSpec::default(), format!("device:{i}"))
+                    .map(|h| sid(&h))
+            });
+        }
+        let mut opened = Vec::new();
+        while let Some(res) = tasks.join_next().await {
+            if let Ok(id) = res.unwrap() {
+                opened.push(id);
+            }
+        }
+        assert_eq!(opened.len(), CAP, "the cap, not more, must actually open");
+        assert_eq!(
+            factory.calls(),
+            CAP,
+            "a refused open must never have called the source factory at \
+             all — the old non-reserving `precheck_quota` this stage \
+             replaces could let a loser's `factory.create` run and then \
+             discard the result; the in-flight reservation must close \
+             that race outright, not just bound it"
+        );
+        assert_eq!(broker.session_count(), CAP);
+        assert_eq!(broker.in_flight_total(), 0);
+
+        for id in opened {
+            within(broker.close(&id, CloseReason::Closed, None))
+                .await
+                .unwrap();
+        }
+        assert_eq!(broker.in_flight_total(), 0);
+        assert!(
+            broker
+                .open_as(&SessionSpec::default(), "device:after")
+                .is_ok()
+        );
+    }
+
+    /// The in-flight `SessionSlot` reservation must be observable by a
+    /// *genuinely concurrent* opener, not just by openers a current-thread
+    /// runtime happens to serialize (see the note on
+    /// `concurrent_opens_call_the_factory_exactly_cap_times` above). This
+    /// one blocks *inside* `factory.create` until both racers are in it,
+    /// on a real multi-thread runtime, so the reserve → insert window the
+    /// reservation exists to close is actually open while both are
+    /// racing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_opens_racing_inside_factory_create_still_call_it_once() {
+        struct SlowFactory {
+            inner: PipeFactory,
+            calls: std::sync::atomic::AtomicUsize,
+            entered: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        }
+        impl SourceFactory for SlowFactory {
+            fn create(&self, spec: &SessionSpec) -> io::Result<Box<dyn SessionSource>> {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                // Widen the reserve->insert window: park here long enough
+                // that a second opener is guaranteed to have run
+                // `reserve_slot` while this one is still inside create().
+                self.entered
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(300));
+                self.inner.create(spec)
+            }
+        }
+        let entered = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let factory = Arc::new(SlowFactory {
+            inner: PipeFactory::new(64 * 1024),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            entered: entered.clone(),
+        });
+        let clock = TestClock::new();
+        let broker = Broker::new(
+            Arc::new(clock),
+            BrokerConfig {
+                replay_bytes: 64 * 1024,
+                resume_ttl: Duration::from_secs(3600),
+                close_grace: Duration::from_millis(5000),
+                quota_limits: QuotaLimits {
+                    max_sessions: 1,
+                    ..QuotaLimits::default()
+                },
+            },
+            factory.clone(),
+        );
+        let b1 = Arc::clone(&broker);
+        let t1 = tokio::task::spawn_blocking(move || {
+            b1.open_as(&SessionSpec::default(), "device:a").is_ok()
+        });
+        // Let t1 get inside `factory.create` before t2 even starts.
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert_eq!(
+            entered.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the first opener must actually be parked inside factory.create"
+        );
+        let b2 = Arc::clone(&broker);
+        let t2 = tokio::task::spawn_blocking(move || {
+            b2.open_as(&SessionSpec::default(), "device:b").is_ok()
+        });
+        let r1 = t1.await.unwrap();
+        let r2 = t2.await.unwrap();
+        assert_eq!(
+            [r1, r2].iter().filter(|ok| **ok).count(),
+            1,
+            "exactly one of the two racers may open under max_sessions = 1"
+        );
+        assert_eq!(
+            factory.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the loser must never have reached factory.create at all — the \
+             in-flight reservation taken before create() is what makes the \
+             winner visible to the loser's count"
+        );
+        assert_eq!(broker.session_count(), 1);
+        assert_eq!(broker.in_flight_total(), 0);
+    }
+
+    #[tokio::test]
+    async fn slot_is_released_when_the_factory_fails() {
+        let clock = TestClock::new();
+        let attempt = std::sync::atomic::AtomicUsize::new(0);
+        let factory = move |spec: &SessionSpec| -> io::Result<Box<dyn SessionSource>> {
+            if attempt.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                Err(io::Error::other("boom"))
+            } else {
+                let (source, _pipe) = PipeSource::new(64 * 1024);
+                let _ = spec;
+                Ok(Box::new(source) as Box<dyn SessionSource>)
+            }
+        };
+        let broker = Broker::new(
+            Arc::new(clock),
+            BrokerConfig {
+                replay_bytes: 64 * 1024,
+                resume_ttl: Duration::from_secs(3600),
+                close_grace: Duration::from_millis(5000),
+                quota_limits: QuotaLimits {
+                    max_sessions: 1,
+                    ..QuotaLimits::default()
+                },
+            },
+            Arc::new(factory),
+        );
+        // First attempt: factory fails. Nothing was reserved/inserted, so
+        // the cap-1 slot is still free for the next attempt.
+        assert!(matches!(
+            broker.open(&SessionSpec::default()),
+            Err(BrokerError::Spawn(_))
+        ));
+        assert_eq!(broker.session_count(), 0);
+        assert!(broker.open(&SessionSpec::default()).is_ok());
+        assert_eq!(broker.session_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn detached_session_still_holds_quota_until_closed() {
+        let (broker, _clock) = broker_with_limits(QuotaLimits {
+            max_sessions_per_principal: 1,
+            ..QuotaLimits::default()
+        });
+        let h = broker.open_as(&SessionSpec::default(), "device:a").unwrap();
+        let id = sid(&h);
+        // "Detach": the caller's handle goes away with no explicit
+        // session.close — nothing broker-side increments on an attach
+        // call here, so this session is exactly the "unattached, still
+        // running" shape the design's occupancy predicate must still
+        // count (verdict arbitration §2.1: detached sessions occupy
+        // their slot; only `closed_at().is_none()` gates the count, never
+        // attach state).
+        drop(h);
+        assert_eq!(
+            broker
+                .open_as(&SessionSpec::default(), "device:a")
+                .unwrap_err(),
+            BrokerError::QuotaExceeded(QuotaKind::SessionsPerPrincipal)
+        );
+        within(broker.close(&id, CloseReason::Closed, None))
+            .await
+            .unwrap();
+        assert!(broker.open_as(&SessionSpec::default(), "device:a").is_ok());
     }
 }

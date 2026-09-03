@@ -68,48 +68,6 @@ const DEFERRED: &[(&str, &str)] = &[
         "no producer anywhere in the tree yet — reserved for caller-side \
          cancellation, which no M2 op offers",
     ),
-    (
-        "RESOURCE_EXHAUSTED",
-        "three producers pre-M4, none cheap to stage behind a CLI-binary \
-         envelope: `exec.run` output past `EXEC_OUTPUT_MAX` (64 MiB, since \
-         M1 — deterministic but a fixture would push 64 MiB through the \
-         harness for one envelope), the broker's full input queue \
-         (`BrokerError::Backpressure`, M2), which needs a child that has \
-         stopped draining its pty, and — new in M3 Step 6 — a \
-         `LOCAL_CONTROL` conduit's per-conduit in-flight cap \
-         (`MAX_INFLIGHT_PER_CONDUIT`, `crates/qsh-core/src/localctl/mux.rs`), \
-         which does have a deterministic testkit-level producer \
-         (`crates/qsh-core/src/localctl/mux.rs`'s own \
-         `cap_exhausted_on_one_conduit_does_not_affect_another` and its \
-         adversarial proptest) but, like the other two, only at the \
-         `qsh-testkit`/`qsh-core` in-process level — no \
-         `CARGO_BIN_EXE_qsh` path drives a conduit past 64 in-flight \
-         requests to capture a `qsh.cli/v1` envelope. M4 Steps 5-7 add a \
-         fourth shape rather than a fourth CLI-reachable producer: \
-         `ControlHub`'s hub-wide tunnel-stream cap \
-         (`MAX_TUNNEL_STREAMS_PER_HUB`) and its parked-claim caps \
-         (`MAX_PARKED_CLAIMS_PER_HUB`, `MAX_PARKED_CLAIMS_PER_CONDUIT`, \
-         `crates/qsh-core/src/reverse/listen.rs`) are exercised at the \
-         `qsh-core` unit level by `tunnel_permit_cap_is_exact_not_advisory`, \
-         `exceeding_the_hub_cap_refuses_the_new_stream_without_wedging_the_hub_for_others`, \
-         `claim_permit_hub_ceiling_is_exact_not_advisory`, and \
-         `a_queued_arrival_nobody_claims_expires_resetting_its_stream_and_freeing_its_permit`, \
-         but at the cap `TCP_CONNECT` answers `ErrorCode::ResourceExhausted` \
-         as a `ConnectResult{ok:false}` on the tunnel data stream — \
-         structurally envelope-less the same way `-L`'s per-connection \
-         `forward.local` deny is (a `ConnectResult{ok:false}` on an \
-         already-open tunnel's data stream — see \
-         `golden_permission_denied_fixture`'s doc for that contrast), \
-         since the command's own `tunnel.open` envelope is already \
-         printed and stays `ok: true` — \
-         and `TCP_ACCEPTED` never reaches `ErrorCode` at all: \
-         `handle_tcp_accepted_stream_at_the_hub_cap_resets_rather_than_queues` \
-         shows the cap answered with a raw QUIC stream reset \
-         (`RESET_CODE_TUNNEL_HUB_EXHAUSTED`, 0x200B), one layer below the \
-         wire's `ErrorCode` enum entirely. Neither shape is a `qsh.cli/v1` \
-         top-level error envelope this fixture list could ever capture, so \
-         M4 does not move this entry — it only adds a reason it stays put",
-    ),
     ("REMOTE_ERROR", "no deterministic producer"),
     ("INTERNAL", "no deterministic producer"),
 ];
@@ -159,6 +117,7 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "error.PERMISSION_DENIED.json",
     "acl.check.allow.json",
     "acl.check.deny.json",
+    "error.RESOURCE_EXHAUSTED.json",
 ];
 
 // ---------------------------------------------------------------------------
@@ -595,6 +554,52 @@ fn golden_permission_denied_fixture() {
         "a denied op must carry no data: {denied}"
     );
     check("error.PERMISSION_DENIED.json", denied);
+}
+
+/// `RESOURCE_EXHAUSTED`'s first CLI-binary envelope producer (`PLAN.md` M8
+/// Step 3, `docs/adr/0010-resource-quotas.md`) — the former `DEFERRED`
+/// entry's own listed producers (`EXEC_OUTPUT_MAX`, broker backpressure, a
+/// `LOCAL_CONTROL` conduit's in-flight cap) were each too expensive or too
+/// deep in `qsh-testkit`/`qsh-core` machinery to stage behind a real
+/// `CARGO_BIN_EXE_qsh` envelope; a saturated `[serve].
+/// max_sessions_per_principal` is neither: one extra `config.toml` line on
+/// an ordinary two-`session open`-calls scenario.
+///
+/// `max_sessions_per_principal = 1` (mirroring
+/// `golden_permission_denied_fixture`'s hand-built host/client pair, not
+/// `Fleet::start`, which has no seam for a caller-written `config.toml`
+/// before `qsh serve` starts): the first `session open` succeeds and is
+/// left running (`ServeGuard` kills the child on drop); the second is
+/// refused before any PTY is spawned for it.
+#[cfg(unix)]
+#[test]
+fn golden_resource_exhausted_fixture() {
+    let host = Sandbox::new();
+    let client = Sandbox::new();
+    let host_fp = host.fingerprint();
+    let client_fp = client.fingerprint();
+    host.trust_add(CLIENT_ALIAS, None, &client_fp);
+    std::fs::write(
+        host.config_dir().join("config.toml"),
+        "[serve]\nmax_sessions_per_principal = 1\n",
+    )
+    .expect("write config.toml");
+    let serve = ServeGuard::start(&host);
+    client.trust_add(HOST_ALIAS, Some(serve.addr()), &host_fp);
+
+    let (code, opened) = client.json(&["session", "open", HOST_ALIAS, "--json", "--", "sh"]);
+    assert_eq!(code, 0, "{opened}");
+
+    let (code, refused) = client.json(&["session", "open", HOST_ALIAS, "--json", "--", "sh"]);
+    assert_eq!(code, 255, "{refused}");
+    assert_eq!(refused["ok"], false, "{refused}");
+    assert_eq!(refused["error"]["code"], "RESOURCE_EXHAUSTED", "{refused}");
+    assert_eq!(refused["error"]["retryable"], true, "{refused}");
+    assert!(
+        refused["data"].is_null(),
+        "a refused op must carry no data: {refused}"
+    );
+    check("error.RESOURCE_EXHAUSTED.json", refused);
 }
 
 /// Everything that needs a live peer on the other end.

@@ -9,6 +9,7 @@ license.workspace = true
 qsh-proto.workspace = true
 qsh-transport.workspace = true
 qsh-core.workspace = true
+quinn.workspace = true
 tokio.workspace = true
 rcgen.workspace = true
 tempfile.workspace = true

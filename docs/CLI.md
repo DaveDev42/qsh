@@ -772,17 +772,41 @@ qsh serve --bind <ip:port>
 - **정책 파일 진단(M5).** 시작 시 `acl.toml`을 1회 읽는다(hot reload 없음). 파일이 없거나 파싱에 실패해도 프로세스는 뜨고 bind하지만, 그 상태에서 도달하는 모든 인가 판정은 항상 `deny`이고 어떤 리소스(세션·터널·등록)도 생성되지 않는다(`docs/design/architecture.md` §6, `PLAN.md` M5 §4.1 #1). 운영자에게는 stderr에 `no usable acl.toml policy`, `every request is denied until this is fixed`, 파일 경로, `CONFIG_ERROR` 코드, 복사해 붙일 수 있는 최소 정책 예시(이 머신에 실제로 pin된 peer 이름을 채운), `acl.toml is never auto-generated — create it by hand`, `verify a fix before restarting: qsh acl check`를 담은 진단을 한 번 출력한다 — 진단의 `code` 필드는 `acl_policy_missing`(파일 부재)과 `acl_policy_invalid`(파싱·검증 실패) 두 code word로 두 원인을 구분한다 — core(`crates/qsh-core/src/acl/load.rs`의 `StartupDiagnostic::render`)가 조립한 완성 문자열을 CLI가 그대로 stderr에 쓰는 평문 블록이다(tracing JSON 라인이 아니다). §6.13이 인용하는 `qsh-core::doctor::CONTROLLER_UNREACHABLE`과 공통점은 딱 하나다 — 문안 정본은 core에 있고 CLI는 인가 로직 0줄로 출력만 한다는 것. `doctor::Diagnostic`에는 `render()`가 없어 CLI가 `message`/`remedy` 두 필드를 직접 조립해 쓴다는 점에서 조립 방식 자체는 다르다. 정책 파일의 원본 소스 라인은 절대 덤프하지 않는다 — 유일한 echo는 문제 rule의 문법 토큰(≤128바이트, 한 줄 이스케이프) 3종(unknown action/auth_path/scope)뿐이다. `acl.toml`을 자동으로 만들지는 않는다(§4.1 #1 (b): interim allow-all-pinned 경계를 파일로 영구화하는 것은 의도치 않은 권한 확대다). 재시작 전 정책을 검증하려면 §6.15의 `qsh acl check`를 쓴다.
 - **Admission 상한(M8).** 주소 검증되지 않은 Initial은 항상 `Retry`로 되돌려 보낸다(스푸핑 1패킷당
   상태 생성 차단) — 정상 클라이언트는 새 연결마다 왕복 1회를 더 지불하며, migration은 영향이 없다.
-  `[serve].max_concurrent_handshakes`(기본 64)는 동시에 진행 중인 handshake 수의 상한이고,
-  `[serve].handshake_rate_per_source`(기본 10/초)는 주소 미검증 Initial의 source당 속도 상한이다
-  (키: IPv4 /32, IPv6 /64) — 2초 window에서 지속 10/초까지는 항상 통과하고, window 하나 안에
-  몰린 순간 burst는 최대 20건까지 받아준 뒤 그 이상을 무시한다. 두 값 모두 `0`은 "무제한"이 아니라
-  "기본값"이며, 방어선을 끄는 설정은 없다. 상한 초과는 자원 생성 전 거부이고, 클라이언트에게는
-  `CONNECTION_FAILED`(retryable)로 보인다 — handshake도, 세션도, task도 만들어지지 않는다.
-- 거부는 audit에 구조적으로만 남는다: `action="connect"`, `resource`는 `"rate_limited"` 또는
-  `"at_capacity"`, `principal`/`auth_path`는 `"-"`. `rate_limited`의 첫 행에 실리는 `peer_addr`는
-  주소 검증 이전에 관측된 값이라 스푸핑 가능하다 — 상관관계 확인용일 뿐 발신자 증명은 아니다.
+  `[serve].max_concurrent_handshakes`(기본 64)는 동시에 진행 중인 handshake 수의 상한이다.
+  `[serve].handshake_rate_per_source`(기본 10/초)는 **주소 미검증 Initial에만** 적용되는 source당
+  속도 상한이고, `[serve].validated_rate_per_source`(기본 10/초, M8 Step 3)는 **검증된**(Retry
+  토큰 왕복을 마친) Initial에 적용되는 별개의 source당 속도 상한이다 — 검증을 통과해도 시도 속도
+  자체는 통과 전과 같은 자릿수로 계속 제한된다(`docs/adr/0009-admission-defenses.md`의 한계
+  절이 Step 3에 넘긴 항목). 두 속도 상한 모두 키는 동일하다(IPv4 /32, IPv6 /64) — 2초 window에서
+  지속 10/초까지는 항상 통과하고, window 하나 안에 몰린 순간 burst는 최대 20건까지 받아준 뒤 그
+  이상을 거부한다. 세 값 모두 `0`은 "무제한"이 아니라 "기본값"이며, 방어선을 끄는 설정은 없다.
+  상한 초과는 자원 생성 전 거부이고, 클라이언트에게는 `CONNECTION_FAILED`(retryable)로 보인다 —
+  handshake도, 세션도, task도 만들어지지 않는다. `retry_token_lifetime`(quinn 기본 15초)은 이
+  방어선의 대상이 아니다 — 시도 *속도*를 제한하는 것은 이 rate limiter이지 토큰 수명이 아니다.
+- 거부는 audit에 구조적으로만 남는다: `action="connect"`, `resource`는 `"rate_limited"`(주소
+  미검증)·`"at_capacity"`(handshake 동시성 상한)·`"validated_rate_limited"`(검증된 Initial,
+  source당) 중 하나, `principal`/`auth_path`는 `"-"`. 각 category 첫 행에 실리는 `peer_addr`는
+  `rate_limited`의 경우 주소 검증 이전에 관측된 값이라 스푸핑 가능하다 — 상관관계 확인용일 뿐
+  발신자 증명은 아니다(`validated_rate_limited`/`at_capacity`는 검증된 주소이므로 이 제약이 없다).
   `Retry` 발급 자체는 audit하지 않으며, 창(10초)당 category별 1행 + 요약 1행으로 집계된다 — flood가
   audit flood가 되지 않는다.
+- **세션·exec quota(M8 Step 3, `docs/adr/0010-resource-quotas.md`).** `[serve].max_sessions`(기본
+  256)는 전체 principal을 합친 live 세션 수의 전역 상한이고, `[serve].max_sessions_per_principal`(기본
+  32)는 opener별 상한이며, `[serve].max_exec_per_principal`(기본 32)는 principal별로 동시에
+  진행 중인(ticket 발급 시점부터 완료까지, redeem 여부와 무관) `exec.run` 상한이다. exec 쿼터는
+  미상환 exec 티켓도 센다(티켓 TTL로 유계). 세 값 모두 `0`은
+  "무제한"이 아니라 "기본값"이며 방어선을 끄는 설정은 없다. **ACL 판정이 quota보다 먼저다** — 인가되지
+  않은 principal은 quota가 이미 포화돼 있어도 여전히 `PERMISSION_DENIED`를 보며, 그 응답만으로는 quota
+  상태를 유추할 수 없다. 상한 초과는 자원(세션·child process) 생성 전 거부이고 클라이언트에게는
+  `RESOURCE_EXHAUSTED`(`retryable: true`)로 보인다. 세션 quota는 살아 있는 세션 자체를 센다 — 세션이
+  `session.close`나 attach 없는 TTL 만료로 broker registry에서 제거될 때까지 slot을 점유하며,
+  attach 중이든 detach된 상태로 백그라운드에서 계속 실행 중이든 점유량은 같다(detach는 quota를
+  풀어주지 않는다). 거부는 audit에 구조적으로만 남는다: `action`은
+  `"session.open"`(세션 quota) 또는 `"exec.run"`(exec quota)이고, `resource`는
+  `"quota_sessions_host"`(전역 세션)·`"quota_sessions_principal"`(principal별 세션)·
+  `"quota_exec_principal"`(principal별 exec) 중 하나이며, admission과 동일하게 창(10초)당
+  category별 1행 + 요약 1행으로 집계된다. 터널 스트림·remote forward listener·연결 자체의 상한은
+  이 Step의 범위 밖이며 M8 Step 3b가 추가한다.
 
 ### 6.13 장기 실행 모드: `qsh listen` / `qsh reverse`
 

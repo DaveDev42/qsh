@@ -121,7 +121,30 @@ pub struct LoopbackHarness {
     pub client: TestIdentity,
     /// The server identity.
     pub server_identity: TestIdentity,
+    /// A second client identity the host also pins, as `device:phone` —
+    /// only set by [`Self::start_with_quotas`], for per-principal quota
+    /// tests (`crates/qsh-testkit/tests/quota.rs`) that need two distinct
+    /// principals against the one host. `None` for every other
+    /// constructor.
+    pub second_client: Option<TestIdentity>,
+    /// A dialer built for [`Self::second_client`] — pins the same host,
+    /// under the same `device:box` principal `dialer` uses. `None` unless
+    /// `second_client` is set.
+    pub second_dialer: Option<Dialer>,
     conns: Arc<Mutex<Vec<Connection>>>,
+    /// Every client-side [`quinn::Endpoint`] a harness dial method
+    /// (`Self::dial`, `Self::second_dial`) has created. `Dialer::dial`
+    /// mints a brand-new endpoint per call (`qsh_transport::endpoint::
+    /// Dialer::dial_inner`) and hands it back inside `Dialed` for the
+    /// caller to keep; nothing about the client `Connection` itself closes
+    /// it. Before this field existed, every dial's endpoint was simply
+    /// dropped at the end of whatever scope built it — harmless for a
+    /// connection torn down promptly, but `two_principals_have_
+    /// independent_session_budgets` (`crates/qsh-testkit/tests/quota.rs`)
+    /// holds its second-principal connection open across the whole test
+    /// body, and nextest flagged the resulting undriven endpoint as a
+    /// LEAK. `Self::shutdown` closes every endpoint stashed here.
+    client_endpoints: Arc<Mutex<Vec<quinn::Endpoint>>>,
     task: tokio::task::JoinHandle<()>,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
 }
@@ -150,18 +173,36 @@ impl LoopbackHarness {
         client: TestIdentity,
         server_trust: StaticTrust,
     ) -> Self {
-        Self::start_inner(authorizer, client, server_trust, None, None).await
+        Self::start_inner(authorizer, client, server_trust, None, None, None).await
+    }
+
+    /// [`Self::start_custom`] plus an explicit
+    /// [`qsh_core::quota::QuotaLimits`] — for a quota test that also needs
+    /// [`Self::start_custom`]'s caller-built `server_trust` (e.g. a
+    /// CA-pinned, ACL-denied second peer alongside the quota-saturating
+    /// pinned one, `crates/qsh-testkit/tests/quota.rs`'s ACL→quota
+    /// order-pin test). [`Self::start_with_quotas`] covers the common
+    /// single-identity case.
+    pub async fn start_custom_with_quotas(
+        authorizer: Arc<dyn Authorizer>,
+        client: TestIdentity,
+        server_trust: StaticTrust,
+        limits: qsh_core::quota::QuotaLimits,
+    ) -> Self {
+        Self::start_inner(authorizer, client, server_trust, None, None, Some(limits)).await
     }
 
     /// [`Self::start`], but with an explicit
-    /// `(max_concurrent_handshakes, handshake_rate_per_source)`
-    /// `crate::admission::Gate` instead of `crate::config::ServeConfig`'s
-    /// defaults (`PLAN.md` M8 Step 2) — the admission integration tests
+    /// `(max_concurrent_handshakes, handshake_rate_per_source,
+    /// validated_rate_per_source)` `crate::admission::Gate` instead of
+    /// `crate::config::ServeConfig`'s defaults (`PLAN.md` M8 Step 2, P2-3
+    /// wiring added Step 3) — the admission integration tests
     /// (`crates/qsh-testkit/tests/admission.rs`) use a small cap so they
     /// don't need hundreds of real connections to reach it.
     pub async fn start_with_admission(
         max_concurrent_handshakes: usize,
         handshake_rate_per_source: u32,
+        validated_rate_per_source: u32,
     ) -> Self {
         let client = make_identity();
         let server_trust =
@@ -171,9 +212,53 @@ impl LoopbackHarness {
             client,
             server_trust,
             None,
-            Some((max_concurrent_handshakes, handshake_rate_per_source)),
+            Some((
+                max_concurrent_handshakes,
+                handshake_rate_per_source,
+                validated_rate_per_source,
+            )),
+            None,
         )
         .await
+    }
+
+    /// [`Self::start`], but with an explicit
+    /// [`qsh_core::quota::QuotaLimits`] instead of
+    /// `crate::config::ServeConfig`'s defaults (`PLAN.md` M8 Step 3) — for
+    /// quota integration tests (`crates/qsh-testkit/tests/quota.rs`). The
+    /// host also pins a second, distinct client identity under
+    /// `device:phone` ([`Self::second_client`]/[`Self::second_dialer`]) so
+    /// a per-principal test can drive two budgets against the one host
+    /// without standing up a second harness — pinning happens once at
+    /// bind time (`qsh_transport::StaticTrust` has no runtime add-a-pin
+    /// path), so this is the only place a second principal can be
+    /// introduced, not something a test can bolt onto [`Self::start`]
+    /// afterward.
+    pub async fn start_with_quotas(limits: qsh_core::quota::QuotaLimits) -> Self {
+        let client = make_identity();
+        let second_client = make_identity();
+        let server_trust = StaticTrust::empty()
+            .with_pin(client.fingerprint, Principal::Device("laptop".into()))
+            .with_pin(second_client.fingerprint, Principal::Device("phone".into()));
+        let mut harness = Self::start_inner(
+            Arc::new(AllowAllPinned),
+            client,
+            server_trust,
+            None,
+            None,
+            Some(limits),
+        )
+        .await;
+        let client_trust = StaticTrust::empty().with_pin(
+            harness.server_identity.fingerprint,
+            Principal::Device("box".into()),
+        );
+        harness.second_dialer = Some(Dialer::new(
+            second_client.local.clone(),
+            Arc::new(client_trust),
+        ));
+        harness.second_client = Some(second_client);
+        harness
     }
 
     /// Start a host the client reaches only through a seeded chaos proxy
@@ -189,7 +274,7 @@ impl LoopbackHarness {
         let client = make_identity();
         let server_trust =
             StaticTrust::empty().with_pin(client.fingerprint, Principal::Device("laptop".into()));
-        Self::start_inner(authorizer, client, server_trust, Some(policy), None).await
+        Self::start_inner(authorizer, client, server_trust, Some(policy), None, None).await
     }
 
     async fn start_inner(
@@ -197,7 +282,8 @@ impl LoopbackHarness {
         client: TestIdentity,
         server_trust: StaticTrust,
         chaos: Option<ChaosPolicy>,
-        admission: Option<(usize, u32)>,
+        admission: Option<(usize, u32, u32)>,
+        quota_limits: Option<qsh_core::quota::QuotaLimits>,
     ) -> Self {
         let server_identity = make_identity();
         let client_trust = StaticTrust::empty()
@@ -217,20 +303,37 @@ impl LoopbackHarness {
                 replay_bytes: 64 * 1024,
                 resume_ttl: std::time::Duration::from_secs(3600),
                 close_grace: std::time::Duration::from_millis(100),
+                quota_limits: quota_limits.unwrap_or_default(),
             },
             pipes.clone(),
         );
         tokio::spawn(Broker::run_reaper(Arc::downgrade(&broker)));
-        let (max_concurrent_handshakes, handshake_rate_per_source) = admission.unwrap_or((
-            qsh_core::config::ServeConfig::DEFAULT_MAX_CONCURRENT_HANDSHAKES,
-            qsh_core::config::ServeConfig::DEFAULT_HANDSHAKE_RATE_PER_SOURCE,
-        ));
+        let (max_concurrent_handshakes, handshake_rate_per_source, validated_rate_per_source) =
+            admission.unwrap_or((
+                qsh_core::config::ServeConfig::DEFAULT_MAX_CONCURRENT_HANDSHAKES,
+                qsh_core::config::ServeConfig::DEFAULT_HANDSHAKE_RATE_PER_SOURCE,
+                qsh_core::config::ServeConfig::DEFAULT_VALIDATED_RATE_PER_SOURCE,
+            ));
         let gate = qsh_core::admission::Gate::new(
             Arc::new(SystemClock),
             max_concurrent_handshakes,
             handshake_rate_per_source,
+            validated_rate_per_source,
         );
-        let server = Server::with_admission(authorizer, audit.clone(), broker.clone(), "box", gate);
+        let server = match quota_limits {
+            Some(limits) => {
+                let quotas = qsh_core::quota::Quotas::new(limits, Arc::new(SystemClock));
+                Server::with_admission_and_quotas(
+                    authorizer,
+                    audit.clone(),
+                    broker.clone(),
+                    "box",
+                    gate,
+                    quotas,
+                )
+            }
+            None => Server::with_admission(authorizer, audit.clone(), broker.clone(), "box", gate),
+        };
         let (tx, rx) = tokio::sync::oneshot::channel();
         let conns: Arc<Mutex<Vec<Connection>>> = Arc::new(Mutex::new(Vec::new()));
         let (addr, chaos, task) = match chaos {
@@ -268,7 +371,10 @@ impl LoopbackHarness {
             dialer: Dialer::new(client.local.clone(), Arc::new(client_trust)),
             client,
             server_identity,
+            second_client: None,
+            second_dialer: None,
             conns,
+            client_endpoints: Arc::new(Mutex::new(Vec::new())),
             task,
             shutdown: Some(tx),
         }
@@ -320,10 +426,45 @@ impl LoopbackHarness {
     /// carries the seed (`docs/design/testing.md` L4: 실패 메시지에 seed를
     /// 출력한다).
     pub async fn dial(&self) -> Dialed {
-        self.dialer
+        self.dial_via(&self.dialer).await
+    }
+
+    /// [`Self::dial`], but through [`Self::second_dialer`] — the second
+    /// pinned principal ([`Self::second_client`], `device:phone`) a
+    /// `start_with_quotas` harness sets up. Panics unless the harness was
+    /// started with [`start_with_quotas`](Self::start_with_quotas).
+    ///
+    /// Goes through the same [`Self::dial_via`] tracking `Self::dial`
+    /// does, so its endpoint is closed by `Self::shutdown` too — calling
+    /// `self.second_dialer.dial(..)` directly instead would bypass that
+    /// tracking and leak the endpoint, exactly the failure this method
+    /// exists to prevent.
+    pub async fn second_dial(&self) -> Dialed {
+        let dialer = self
+            .second_dialer
+            .as_ref()
+            .expect("harness was not started with start_with_quotas");
+        self.dial_via(dialer).await
+    }
+
+    /// Shared by [`Self::dial`]/[`Self::second_dial`]: dial through
+    /// `dialer` and stash a clone of the resulting endpoint in
+    /// [`Self::client_endpoints`] before handing the [`Dialed`] back, so
+    /// `Self::shutdown` can close it even though the caller only ever
+    /// touches `dialed.connection`. `quinn::Endpoint` is a cheap `Clone` —
+    /// an `Arc`-backed handle onto the same underlying endpoint state, not
+    /// a second endpoint — so closing the stashed clone closes the one the
+    /// caller holds too.
+    async fn dial_via(&self, dialer: &Dialer) -> Dialed {
+        let dialed = dialer
             .dial(self.addr, "127.0.0.1")
             .await
-            .unwrap_or_else(|err| panic!("dial {}: {err:?} — {}", self.addr, self.detail()))
+            .unwrap_or_else(|err| panic!("dial {}: {err:?} — {}", self.addr, self.detail()));
+        self.client_endpoints
+            .lock()
+            .expect("client_endpoints lock")
+            .push(dialed.endpoint.clone());
+        dialed
     }
 
     /// Dial and negotiate `Hello`.
@@ -370,6 +511,20 @@ impl LoopbackHarness {
             let _ = tx.send(());
         }
         let _ = (&mut self.task).await;
+
+        // Close every client endpoint `Self::dial`/`Self::second_dial`
+        // created (`Self::client_endpoints`'s doc) — dropping a
+        // `quinn::Endpoint` alone does not promptly close it, and an
+        // endpoint left running past the harness's own shutdown is what
+        // nextest flags as a LEAK. Bounded so a connection `wait_idle`
+        // cannot hang the whole test on a peer that never acks the close.
+        let endpoints =
+            std::mem::take(&mut *self.client_endpoints.lock().expect("client_endpoints lock"));
+        for endpoint in endpoints {
+            endpoint.close(0u32.into(), b"");
+            let _ =
+                tokio::time::timeout(std::time::Duration::from_secs(2), endpoint.wait_idle()).await;
+        }
     }
 }
 

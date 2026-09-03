@@ -485,6 +485,18 @@ CI 마감(`1b34912`): CI run 33667720455 success, fuzz-smoke run 33667720360 suc
 
 구현 규율은 Step 2와 같다 — 변이 원복은 `cp` 백업 + `cmp`, PLAN/ROADMAP/adr 무편집(ADR 초안은 scratchpad), 게이트 6종 green + nextest 수치 대조, fixer는 반박 가능, 마감 후 main 세션이 위험 diff(예약 헬퍼·permit 수명·거부 콜백·락 순서)를 직접 읽고 독립 변이 1건 이상 찍는다.
 
+**(a)-추기 — Step 3a 구현 라운드 판정 (2026-09-03, main 세션).**
+
+구현은 단일 구현자로 시작했다가 네 번 죽었다. 코드가 아니라 컨텍스트가 원인이었다. 누적 도구 출력이 340~500 KB에 이르면 다음 요청이 정확히 180초 뒤에 끊기고 런타임이 에이전트를 다시 띄우는데, 그 반복이 네 번을 넘기자 워크플로우를 멈췄다. 이후 작업을 S1~S5 다섯 단계로 쪼개고 단계마다 읽기 예산을 200~250 KB로 못 박은 뒤 PROGRESS.md로 인수인계하게 했다. 이 형태로는 한 번도 끊기지 않았다. 같은 규율을 이번 판정 뒤의 fixer에도 적용했다.
+
+정합 스윕(F1~F10)은 10건 전부 고쳤다. main 판정 라운드는 아홉 항목을 닫았다. 세션 열기 전에 슬롯을 먼저 예약하는 in-flight `SessionSlot`(항목 1), 티켓 스윕 세 지점의 "가드 아래 수집, 밖에서 drop"(항목 2), exec 경로에서 ACL을 티켓 예산보다 앞세운 것(항목 3), `record_rejection`이 오래된 창의 summary와 새 first 행을 최대 두 건 함께 돌려주는 것(항목 4), `purge_connection`과 reverse target 주기 틱의 flush 배선(항목 5), 그리고 reverse 틱 테스트·ADR §9 재작성·ENOENT e2e·LEAK 20회 루프·문서 갱신(A~E)이다. 판정 5는 한 가지를 고친다. 쿼터 키는 아홉이 아니라 열이다. 호스트 전역 `[serve].max_exec`(기본 256, 범주 `quota_exec_host`)를 열 번째로 두되 구현은 3b로 넘긴다.
+
+적대적 라운드는 opus 둘이 사설 복사본에서 돌렸다. A(보안 순서·자원 수명)가 아홉 건, B(동시성·케이던스·계약)가 열두 건을 냈고 두 쌍(A4=B3, A5=B8)이 겹쳤다. 기각은 없다. 실제 코드 결함은 셋이다. `session.open`이 아직 ACL보다 먼저 티켓 예산을 검사하고 있었고(A1, exec에만 고쳤던 것), reverse target의 SIGTERM arm이 마지막 감사 창을 flush하지 않고 돌아갔으며(B5), exec 거부가 "session quota exceeded"라는 메시지를 달고 나갔다(B7). 나머지는 전부 핀 공백이다. 기존 동시성 테스트가 current-thread 런타임이라 실제로는 직렬로 돌았다는 A3가 대표적인데, main이 독립으로 넣은 변이(in-flight 카운트 무시)도 쿼터 계열 34건을 모두 통과해 같은 공백을 확인했다. 작은 코드 변경 둘은 `as u32` 절단 제거(A8)와 만료 티켓을 하우스키핑 틱에서도 스윕하도록 한 것(A9)이다. 판정 전문은 스크래치패드 MAIN-ARBITRATION.md에 있다.
+
+fixer는 네 단계로 돌렸다. 두 번째 단계가 도구 호출 125회 즈음에 다시 끊겨 런타임이 세 번 재시작했는데, 워크플로우를 멈추고 트리에 남은 것을 main이 직접 목록으로 만들어 인수인계 파일에 적은 뒤 남은 몫만 주고 재개했다. 결과는 판정 21건 전부 반영이고 이탈은 하나다. session.open의 티켓 예산을 exec처럼 드레인 게이트 앞이 아니라 attach처럼 뒤에 두었는데, ACL이 먼저라는 성질은 셋 다 같으므로 그대로 둔다. 새 테스트는 열다섯이고 그중 넷은 변이로 죽는 것을 확인했다. in-flight 예약을 지우면 경쟁 테스트가 2 대 1로 실패하고, 티켓 스윕을 retain으로 바꾸면 트립와이어가 위반 4건을 세며, host_runtime의 from_serve를 default로 바꾸면 config 기반 exec 테스트가 실패하고, CLI.md §6.12 문장을 지우면 문서 테스트가 실패한다. main은 F2의 종료 arm·하우스키핑·트립와이어와 브로커 예약·exec permit·감사 창 코드를 직접 읽었다. 락 순서는 registry→in_flight, tickets→quota로 한 방향이다.
+
+nextest는 베이스라인 1370에서 main 판정 라운드 종료 시 1415, 적대적 fixer 뒤 1430 passed / 2 skipped다. 게이트 여섯은 fixer 4단계에서 첫 실행에 전부 rc=0이었다. quota 스위트를 main이 다섯 번 더 돌렸더니 LEAK 표지가 한 번, 이번엔 `exec_run_past_the_quota_answers_resource_exhausted_end_to_end`에서 나왔다. 하네스는 자식 프로세스를 만들지 않으므로 B11이 짚은 클라이언트 엔드포인트 해체가 원인의 전부는 아니다. Step 4의 부하 하네스 항목에 nextest LEAK 원인 규명을 넣는다.
+
 #### Step 4 — 적대적 부하 하네스 (DoD 5) + audit 수명주기 부하 검증
 
 협조적 soak과 **별도 게이트**다. 감사 개정 ④의 연쇄(스푸핑 flood → 세션 없는 audit 쓰기 → 디스크 만실 → resume 실패)가 차단되는지를 본다. Step 2·3이 선언한 상한이 실제로 강제되는지를 이 하네스가 판정한다.

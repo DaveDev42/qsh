@@ -517,6 +517,30 @@ pub struct ServeConfig {
     /// [`ServeConfig::DEFAULT_HANDSHAKE_RATE_PER_SOURCE`] (10). Same
     /// no-off-switch discipline as `max_concurrent_handshakes`.
     pub handshake_rate_per_source: Option<u32>,
+    /// Global cap on live (not closed) sessions across all principals
+    /// (`crate::quota`, `PLAN.md` M8 Step 3, `docs/adr/0010-resource-
+    /// quotas.md`). Derived from the broker registry, not a separate
+    /// counter (`docs/design/architecture.md` §1). Unset or `0` ⇒
+    /// [`ServeConfig::DEFAULT_MAX_SESSIONS`] (256) — same no-off-switch
+    /// discipline as `max_concurrent_handshakes`.
+    pub max_sessions: Option<usize>,
+    /// Per-principal cap on live sessions, keyed by the session's
+    /// `opener` (`crate::acl::opener_key`). Unset or `0` ⇒
+    /// [`ServeConfig::DEFAULT_MAX_SESSIONS_PER_PRINCIPAL`] (32). Same
+    /// no-off-switch discipline.
+    pub max_sessions_per_principal: Option<usize>,
+    /// Per-principal cap on concurrently *running* (unredeemed-ticket)
+    /// `exec.run` children (`crate::quota::QuotaKind::ExecPerPrincipal`).
+    /// Unset or `0` ⇒ [`ServeConfig::DEFAULT_MAX_EXEC_PER_PRINCIPAL`]
+    /// (32). Same no-off-switch discipline.
+    pub max_exec_per_principal: Option<usize>,
+    /// Per-source rate limit on address-*validated* handshake attempts
+    /// (P2-3, `docs/adr/0010-resource-quotas.md`) — a second axis beside
+    /// `handshake_rate_per_source`'s unvalidated one; same key shape
+    /// (IPv4 /32, IPv6 /64). Unset or `0` ⇒
+    /// [`ServeConfig::DEFAULT_VALIDATED_RATE_PER_SOURCE`] (10). Same
+    /// no-off-switch discipline.
+    pub validated_rate_per_source: Option<u32>,
 }
 
 impl ServeConfig {
@@ -533,6 +557,15 @@ impl ServeConfig {
     /// Default per-source unvalidated-Initial rate: 10/s (`PLAN.md` M8
     /// Step 2).
     pub const DEFAULT_HANDSHAKE_RATE_PER_SOURCE: u32 = 10;
+    /// Default global live-session cap: 256 (`PLAN.md` M8 Step 3,
+    /// `docs/adr/0010-resource-quotas.md`).
+    pub const DEFAULT_MAX_SESSIONS: usize = 256;
+    /// Default per-principal live-session cap: 32.
+    pub const DEFAULT_MAX_SESSIONS_PER_PRINCIPAL: usize = 32;
+    /// Default per-principal concurrent-`exec.run` cap: 32.
+    pub const DEFAULT_MAX_EXEC_PER_PRINCIPAL: usize = 32;
+    /// Default per-source validated-handshake rate: 10/s.
+    pub const DEFAULT_VALIDATED_RATE_PER_SOURCE: u32 = 10;
 
     /// Effective replay budget (never zero; a `0` in config is treated as
     /// the default rather than an unusable ring).
@@ -570,6 +603,41 @@ impl ServeConfig {
         match self.handshake_rate_per_source {
             Some(n) if n > 0 => n,
             _ => Self::DEFAULT_HANDSHAKE_RATE_PER_SOURCE,
+        }
+    }
+
+    /// Effective global live-session cap (never zero, same discipline).
+    pub fn max_sessions(&self) -> usize {
+        match self.max_sessions {
+            Some(n) if n > 0 => n,
+            _ => Self::DEFAULT_MAX_SESSIONS,
+        }
+    }
+
+    /// Effective per-principal live-session cap (never zero, same
+    /// discipline).
+    pub fn max_sessions_per_principal(&self) -> usize {
+        match self.max_sessions_per_principal {
+            Some(n) if n > 0 => n,
+            _ => Self::DEFAULT_MAX_SESSIONS_PER_PRINCIPAL,
+        }
+    }
+
+    /// Effective per-principal concurrent-`exec.run` cap (never zero,
+    /// same discipline).
+    pub fn max_exec_per_principal(&self) -> usize {
+        match self.max_exec_per_principal {
+            Some(n) if n > 0 => n,
+            _ => Self::DEFAULT_MAX_EXEC_PER_PRINCIPAL,
+        }
+    }
+
+    /// Effective per-source validated-handshake rate (never zero, same
+    /// discipline).
+    pub fn validated_rate_per_source(&self) -> u32 {
+        match self.validated_rate_per_source {
+            Some(n) if n > 0 => n,
+            _ => Self::DEFAULT_VALIDATED_RATE_PER_SOURCE,
         }
     }
 }
@@ -1078,6 +1146,46 @@ mod tests {
         let absent = ServeConfig::default();
         assert_eq!(absent.max_concurrent_handshakes(), 64);
         assert_eq!(absent.handshake_rate_per_source(), 10);
+    }
+
+    #[test]
+    fn quota_keys_use_the_documented_names_and_defaults() {
+        // `crate::quota`, PLAN.md M8 Step 3, docs/adr/0010-resource-
+        // quotas.md: `[serve] max_sessions(256) ·
+        // max_sessions_per_principal(32) · max_exec_per_principal(32) ·
+        // validated_rate_per_source(10)`.
+        let serve: ServeConfig = toml::from_str(
+            "max_sessions = 10\n\
+             max_sessions_per_principal = 4\n\
+             max_exec_per_principal = 5\n\
+             validated_rate_per_source = 7\n",
+        )
+        .unwrap();
+        assert_eq!(serve.max_sessions(), 10);
+        assert_eq!(serve.max_sessions_per_principal(), 4);
+        assert_eq!(serve.max_exec_per_principal(), 5);
+        assert_eq!(serve.validated_rate_per_source(), 7);
+
+        // Defaults: 256 / 32 / 32 / 10; `0` degrades to the default
+        // rather than meaning "unlimited" — this defense has no off
+        // switch.
+        let zero: ServeConfig = toml::from_str(
+            "max_sessions = 0\n\
+             max_sessions_per_principal = 0\n\
+             max_exec_per_principal = 0\n\
+             validated_rate_per_source = 0\n",
+        )
+        .unwrap();
+        assert_eq!(zero.max_sessions(), 256);
+        assert_eq!(zero.max_sessions_per_principal(), 32);
+        assert_eq!(zero.max_exec_per_principal(), 32);
+        assert_eq!(zero.validated_rate_per_source(), 10);
+
+        let absent = ServeConfig::default();
+        assert_eq!(absent.max_sessions(), 256);
+        assert_eq!(absent.max_sessions_per_principal(), 32);
+        assert_eq!(absent.max_exec_per_principal(), 32);
+        assert_eq!(absent.validated_rate_per_source(), 10);
     }
 
     #[test]
