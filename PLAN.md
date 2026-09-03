@@ -521,6 +521,16 @@ nextest는 3a 마감 1430에서 1473 passed / 2 skipped다. 게이트 여섯은 
 
 - **Step 2 이월 P3-6** — retry-always × 경로 단절(chaos 하네스 `accept_observed` seam, M2 시나리오): Retry 왕복 중 경로가 끊길 때 재시도·reconnect 케이던스가 rate 임계와 어떻게 겹치는지.
 
+**(a)-추기 — Step 4 설계 판정 (2026-09-04, main 세션).** 조사 3분할(`step4/facts-A/B/C.md`) → opus 설계(`step4/design.md`, 266줄) → opus 적대적 검토(`step4/critique.md`, P1 5·P2 7·P3 5)를 판정한다. 판정 전문은 스크래치패드 `step4/ARBITRATION-4.md`(J1~J17)에 있다.
+
+설계의 뼈대는 채택한다. PR 게이트에는 in-process 축소판(T1)만 두고 실측(RSS/fd/echo p95/audit 부피, T2)은 서브프로세스 `qsh serve`를 잰다. 신규 config 키는 0이다. 검토가 뒤집은 P1 다섯은 전부 수용한다. 시나리오 1의 source 64개 × 1회는 rate 임계(10/s × 2 s epoch = 20)를 못 넘겨 아무 거부도 나오지 않으므로 source 8개 × 40회로 뒤집는다. 시나리오 2의 64 동시 dial은 한 source라 quota보다 admission에 먼저 걸리므로 config로 두 rate 키를 200으로 열어 quota 축만 잰다. T1 시나리오 2는 admission과 quota를 함께 받는 하네스 생성자가 없어 하나 추가한다. P3-6 시나리오는 LoopbackHarness에 제품 재연결 루프가 없어 resume_chaos 형태로 다시 짜고 migration을 끈다. RSS 30 MB 임계는 debug가 아니라 release 바이너리에 건다.
+
+설계와 검토가 같이 틀린 곳이 하나 있다. 둘 다 `-R` listener의 accept가 무상한이어도 QUIC 스트림 상한 1024가 유계를 준다고 봤다. 그 상한은 스트림만 막고 accept된 TCP fd와 태스크는 EMFILE까지 쌓인다. `accept_disposition`은 EMFILE을 Backoff로 분류하므로 listener는 살지만 프로세스 fd가 바닥난다. `-R` 포트는 인증 없이 도달할 수 있는 유일한 자원 생성 경로다. ADR-0010의 원칙대로 accept 직후 `open_bi` 전에 기존 터널 스트림 permit(`max_tunnel_streams_per_forward` 64·principal별 256)을 예약하고 거부면 TCP를 즉시 닫는다. 새 키도 wire 변경도 없다. ADR-0010에는 "forward별"의 `-R` 정의를 추기한다.
+
+나머지 결정은 이렇다. T2는 acceptance job이 아니라 별도 워크플로 `load.yml`(fuzz-smoke와 같은 지위, `ci-ok` 비의존, push main + dispatch)에서 release 빌드로 돈다. testing.md가 절대 수치를 필수 경로에 두지 말라고 적었기 때문이다. echo 임계는 같은 실행 baseline p95의 3배 또는 50 ms 중 큰 값이다. T1의 echo는 PTY가 아니라 pipe라 그렇게 부른다. 감사 개정 ④ 연쇄는 창당 category별 2행 상계와 회전·retention 부피 유계 두 겹으로 고리 1–2 사이에서 끊기고 degraded audit 하 attach 거부는 의도된 fail-closed로 문서에 적는다. `deny_unknown_fields`는 CLI.md 계약 위반이라 기각하고 doctor `config_unknown_key`는 손목록 없이 round-trip 키 차집합으로 Step 4에서 넣는다. pairing 하네스는 testkit으로 승격해 감사 핀 2건을 박는다. nextest LEAK은 실험 3종을 돌리고 `leak-timeout`을 명시한다. reverse Listen 축은 T1 축소판 1건을 더하고 T2는 forward listener만 잰다.
+
+라운드는 셋이다. 4a는 in-process 하네스와 핀(leak-timeout, 하네스 생성자, T1 6건, P3-6 케이던스 2변형, pairing 승격·핀), 4b는 강제 공백 2건(`-R` accept permit, doctor unknown-key)과 문서, 4c는 실측 T2와 load.yml·캠페인 문서다. 각 라운드가 Step 2·3과 같은 리듬을 따로 돈다.
+
 #### Step 5 — 24h/100-session soak + fd/메모리 게이트 (DoD 2)
 
 M7 이월 부채가 여기서 만난다: bounded pull executor 부재(측정된 512 천장), pull당 fd 선형 증가, 고아 `.tmp{pid}-{N}` 미청소. soak이 이것들을 드러내는 자리다.
