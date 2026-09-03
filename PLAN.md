@@ -513,7 +513,7 @@ main은 위험 diff(예약 헬퍼·permit 수명·거부 콜백·락 순서)를 
 
 문서는 ADR-0010을 `docs/adr/0010-resource-quotas.md`로 배치하고 CLI.md §6.12·protocol.md 코드 표·architecture.md를 갱신했다. Step 4로 넘기는 것은 넷이다. `deny_unknown_fields` 채택 또는 `qsh doctor`의 unknown-key 경고, pairing testkit 하네스 공용화와 pairing 축 감사 핀, nextest LEAK 원인 규명(B가 한 번 본 `846 passed (1 leaky)` 포함), 그리고 remote-forward 기본 상한 16이 testkit의 parked claim 상한 32보다 작아 테스트가 설정을 덮어써야 한다는 관계다.
 
-nextest는 3a 마감 1430에서 1473 passed / 2 skipped다. 게이트 여섯은 F0 뒤 두 번째 전체 실행에서 전부 rc=0이다.
+nextest는 3a 마감 1430에서 1473 passed / 2 skipped다. 게이트 여섯은 F0 뒤 두 번째 전체 실행에서 전부 rc=0이다. CI는 74a728f에서 CI·fuzz-smoke 둘 다 첫 실행에 green이다. Step 3b는 여기서 닫는다.
 
 #### Step 4 — 적대적 부하 하네스 (DoD 5) + audit 수명주기 부하 검증
 
