@@ -22,7 +22,7 @@ use qsh_core::quota::QuotaLimits;
 use qsh_proto::ErrorCode;
 use qsh_proto::wire;
 use qsh_testkit::loopback::{LoopbackHarness, make_ca, make_identity};
-use qsh_transport::{Dialer, FramedStream, Principal, StaticTrust};
+use qsh_transport::{Dialer, Principal, StaticTrust};
 
 /// Mirrors `qsh_core::quota`'s private `AUDIT_AGGREGATION_WINDOW` (10s) —
 /// not reachable from here, so restated (the same convention
@@ -519,7 +519,11 @@ async fn a_running_child_holds_its_exec_permit_until_it_exits() {
     // sleep-based race.
     let started = s1.exec_start(&exec_spec(&["cat"])).await.unwrap();
     let (send, recv) = s1.connection().open_bi().await.unwrap();
-    let mut data = FramedStream::data(send, recv);
+    // Fully qualified rather than imported at the top: this is the only
+    // user and it sits inside a `#[cfg(unix)]` test, so a top-level import
+    // is an unused-import error on Windows (`clippy -D warnings`, CI
+    // 33723264758 on 2e5d581).
+    let mut data = qsh_transport::FramedStream::data(send, recv);
     data.send
         .send(&wire::StreamHeader::exec_data(started.ticket))
         .await
