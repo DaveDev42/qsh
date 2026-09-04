@@ -531,6 +531,22 @@ nextest는 3a 마감 1430에서 1473 passed / 2 skipped다. 게이트 여섯은 
 
 라운드는 셋이다. 4a는 in-process 하네스와 핀(leak-timeout, 하네스 생성자, T1 6건, P3-6 케이던스 2변형, pairing 승격·핀), 4b는 강제 공백 2건(`-R` accept permit, doctor unknown-key)과 문서, 4c는 실측 T2와 load.yml·캠페인 문서다. 각 라운드가 Step 2·3과 같은 리듬을 따로 돈다.
 
+**(a)-추기 — Step 4a 구현 라운드 판정 (2026-09-04, main 세션).**
+
+4a는 설계 판정의 첫 라운드로, in-process 하네스(T1)와 유닛 테스트만 다뤘다. 산출은 `LoopbackHarness::start_with_admission_and_quotas`, `PairingHarness`(pairing_loopback.rs의 사설 `PairingHost`를 qsh-testkit/src/pairing.rs로 승격, 보류 pairing 연결 n개 헬퍼 포함), quota.rs의 flood 하 echo 생존 테스트 3건(연결 flood·같은 principal 세션 flood·Listen 축 flood), pairing_quota.rs의 감사 핀 2건(peer_addr 실값, request_id "-"), server/mod.rs의 attach·write 두 축 fail-closed 테스트, admission.rs의 세대 롤오버 테스트, admission_retry_sever.rs의 재dial 케이던스 테스트와 ops/session.rs의 backoff 스케줄 유닛 테스트, .config/nextest.toml의 leak-timeout 명시다. 구현 워크플로우는 다섯 스테이지(S1 LEAK 실험·baseline, S2 하네스와 T1 테스트, S3 케이던스, S4 pairing 승격, S5 검증)로 돌았고 S5의 변이 4건 중 3건이 예측대로 죽었다.
+
+적대 라운드는 opus 둘이 각자 사설 워크트리(HEAD 위에 4a diff 적용)에서 변이 실험을 하며 돌았고 둘 다 amber였다. 핵심은 S3가 넣은 프로세스 전역 재dial 플로어 `MIN_REDIAL_INTERVAL`이다. A는 8개 동시 호출 실험으로 그 플로어가 자기 doc이 약속한 동시 호출 직렬화를 하지 않음을 보였고(7개가 113ms에 함께 풀림), B는 전역 잠금이 다른 호스트로 붙은 세션까지 직렬화하고 그 대기가 `time_to_recovery_ms` 밖에 놓인다고 짚었다. main은 플로어를 철회했다. 그 상수의 존재 이유였던 "40회/4ms"가 `recover()`를 backoff 없이 맨손으로 도는 테스트 자신의 루프에서 나온 값이고 제품 경로 `recover_attach`는 `RecoveryConfig::backoff` 0/200/800ms로 이미 시도를 띄워 2초 창에 최대 4회만 들어가기 때문이다. J6의 조건은 제품 케이던스에 대해 판정했어야 했다.
+
+그 밖에 수용한 지적. `authorize_owned`의 fail-closed 분기는 853개 테스트 어디에서도 검증되지 않았다(변이 생존) → write 축 테스트를 추가해 죽였다. 롤오버 테스트는 저장소 포인터와 permit만 보아 `Sketch::advance_to`를 통째로 끄는 변이가 살아남았다 → 홍수 한복판의 합법 source가 Retry이고 지속 source가 Ignore 됐다가 EPOCH 두 번 뒤 Retry로 복귀하는 단언을 더해 죽였다. pairing 하네스의 50ms 고정 sleep은 testing.md의 sleep 금지에 걸려 `Quotas` 핸들 폴링으로 바꿨다. 연결 flood는 순차 dial이라 마지막 슬롯 경합이 없었고 `JoinSet` 동시 dial로 바꿨다. echo 테스트 두 건의 무기한 await는 2s·5s timeout으로 감쌌다. `#![cfg(unix)]`는 근거가 없어 지웠고 `recover`의 rustdoc이 새 상수에 흡수된 사고는 상수 철회로 함께 해소됐다.
+
+fixer의 반박은 전부 수용했다. qsh-testkit에 전방 경로 `Ops` 하네스가 없어(attach_recovery.rs는 qsh-cli에 있고 `qsh serve` 자식 프로세스를 쓴다) 제품 attempt 루프를 그대로 구동할 수 없으므로 e2e는 제품 진입점 `recover()`를 스케줄 간격으로 돌리고 스케줄 값은 유닛 테스트가 지키는 분할로 갔다. fast-fail e2e 변형은 관측 seam이 없어 두지 않았다. `admission::EPOCH`가 private이라 유닛 테스트 안에 값을 다시 세웠다. `futures`가 qsh-testkit 의존성이 아니라 `JoinSet`을 썼다. S5 반박 둘도 수용한다. J15의 M1 예측 대상은 `gate_state_and_permits_survive_generation_rollovers_under_sustained_forged_flood`가 아니라 기존 `validated_rate_rejection_never_dips_the_permit_pool_even_transiently`가 맞다. J12의 H1·H2 코드 실험은 0/115 재현 상황에서 정보를 주지 않고 `LoopbackHarness`는 자식 프로세스를 만들지 않아 nextest의 leaky 판정 경로가 성립하지 않으므로 "재현 불가, 기제상 성립 어려움"으로 닫는다. 3a의 1회 관측은 미해명으로 남긴다.
+
+변이 실증은 S5 4건(M2·M5·M8 kill, M1은 예측 테스트 생존이나 crate 안 기존 테스트가 잡음), F1 3건(backoff 0, blackhole 제거, attempts 1), F2 2건(`|| recorded.is_err()` 제거, `advance_to` return), F4 독립 재현 3건, main 독립 1건(quota.rs `reserve_connection`의 `>=`를 `>`로 → 동시 flood 테스트가 admitted 1로 잡음)이다. CI 플레이크(run 33801780928, macOS test 잡)는 `abort_local`의 `set_zero_linger`가 보내는 RST가 비동기 connect의 writable 확인보다 먼저 닿아 connect 자체가 ECONNRESET을 돌려준 것으로, tunnel_loopback.rs와 tunnel/local.rs의 테스트가 그 모양도 거부로 허용하게 고쳤다. 재실행은 green이었다.
+
+4b(-R accept permit, doctor `config_unknown_key`, architecture.md·CLI.md, ADR-0010 추기)와 4c(adversarial_load.rs, load.yml, 캠페인 문서, testing.md L9/L10, Dave-Windows-WSL 실측)는 설계 판정 그대로다. B가 남긴 "CI 3 OS의 신규 테스트 개별 시간"은 4a 커밋의 CI에서 읽어 4b 판정에 적는다.
+
+게이트는 fmt, clippy -D warnings(host와 x86_64-pc-windows-gnu), xtask arch, cargo deny, nextest 1483 passed / 2 skipped(`--test-threads=1`, 934초)로 닫았다. win-gnu clippy가 한 번 빨갰는데, quota.rs의 Listen 축 테스트가 unix 전용 `Listen::control_hub`·`ConduitInbound`를 쓰는 탓이라 그 테스트에 `#[cfg(unix)]`를 달고 `wait_for` import를 함수 안으로 옮겼다. 커밋 3213796은 CI(run 33827723206)와 fuzz-smoke 둘 다 첫 실행에 green이다. Step 4a는 여기서 닫는다.
+
 #### Step 5 — 24h/100-session soak + fd/메모리 게이트 (DoD 2)
 
 M7 이월 부채가 여기서 만난다: bounded pull executor 부재(측정된 512 천장), pull당 fd 선형 증가, 고아 `.tmp{pid}-{N}` 미청소. soak이 이것들을 드러내는 자리다.
