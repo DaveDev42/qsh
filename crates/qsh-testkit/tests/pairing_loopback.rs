@@ -11,120 +11,17 @@
 //! bidirectional-proof regression (report §B13): a rogue responder that
 //! does not hold the secret cannot trick the initiator into pinning it.
 
-use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use qsh_core::acl::AllowAllPinned;
-use qsh_core::audit::MemoryAuditSink;
-use qsh_core::broker::{Broker, BrokerConfig, PipeFactory, SystemClock};
-use qsh_core::pairing::{AcceptAnyForPairing, PairingError};
-use qsh_core::server::Server;
-use qsh_core::trust::pairing::{INVITE_TTL, InviteStore, generate_secret};
-use qsh_core::trust::{SharedInviteStore, SharedTrustStore, TrustStore};
+use qsh_core::pairing::PairingError;
+use qsh_core::trust::pairing::INVITE_TTL;
 use qsh_proto::ErrorCode;
 use qsh_proto::pairing::INVITE_SECRET_LEN;
 use qsh_proto::wire::{self, ControlMessage, control_message};
 use qsh_testkit::loopback::make_identity;
-use qsh_transport::{Dialer, FramedStream, Listener, LocalIdentity, StaticTrust, TrustEvaluator};
-
-/// A real, on-disk-backed `qsh serve`-shaped host with pairing wired in —
-/// the same `Server::set_pairing`/`SharedTrustStore::attach_pairing` shape
-/// `crate::serve::run_serve` wires in production.
-struct PairingHost {
-    addr: SocketAddr,
-    trust_path: PathBuf,
-    invites_path: PathBuf,
-    _dir: tempfile::TempDir,
-    task: tokio::task::JoinHandle<()>,
-    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
-}
-
-impl PairingHost {
-    async fn start() -> Self {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let trust_path = dir.path().join("trust.toml");
-        let invites_path = dir.path().join("invites.toml");
-
-        let host_identity = make_identity();
-        let trust = SharedTrustStore::open(&trust_path).expect("open trust");
-        let invites = SharedInviteStore::open(&invites_path).expect("open invites");
-        trust.attach_pairing(Arc::clone(&invites));
-
-        let listener = Listener::bind(
-            "127.0.0.1:0".parse().expect("addr"),
-            host_identity.local.clone(),
-            Arc::clone(&trust) as Arc<dyn TrustEvaluator>,
-        )
-        .expect("bind loopback");
-        let addr = listener.local_addr().expect("local addr");
-
-        let audit = Arc::new(MemoryAuditSink::new());
-        let pipes = Arc::new(PipeFactory::new(64 * 1024));
-        let broker = Broker::new(
-            Arc::new(SystemClock),
-            BrokerConfig {
-                replay_bytes: 64 * 1024,
-                resume_ttl: Duration::from_secs(3600),
-                close_grace: Duration::from_millis(100),
-                quota_limits: qsh_core::quota::QuotaLimits::default(),
-            },
-            pipes,
-        );
-        tokio::spawn(Broker::run_reaper(Arc::downgrade(&broker)));
-        let server = Server::new(Arc::new(AllowAllPinned), audit, broker, "host");
-        server.set_pairing(Arc::clone(&trust), Arc::clone(&invites));
-
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let task = tokio::spawn(server.clone().run(listener, async move {
-            let _ = rx.await;
-        }));
-
-        Self {
-            addr,
-            trust_path,
-            invites_path,
-            _dir: dir,
-            task,
-            shutdown: Some(tx),
-        }
-    }
-
-    /// Mint a fresh invite directly against this host's on-disk store
-    /// (mirrors `Ops::trust_invite` without going through the `Ops` layer,
-    /// so these tests stay focused on the wire exchange and
-    /// `Server::serve_pairing_connection`, not the CLI-facing op).
-    fn invite_at(&self, created_at: SystemTime) -> [u8; INVITE_SECRET_LEN] {
-        let secret = generate_secret();
-        let mut store = InviteStore::load(&self.invites_path).expect("load invites");
-        store.add(secret.as_slice(), created_at);
-        store.save(&self.invites_path).expect("save invites");
-        *secret
-    }
-
-    fn invite(&self) -> [u8; INVITE_SECRET_LEN] {
-        self.invite_at(SystemTime::now())
-    }
-
-    fn trust_snapshot(&self) -> TrustStore {
-        TrustStore::load(&self.trust_path).expect("load trust")
-    }
-
-    async fn shutdown(mut self) {
-        if let Some(tx) = self.shutdown.take() {
-            let _ = tx.send(());
-        }
-        let _ = (&mut self.task).await;
-    }
-}
-
-/// A dialer that accepts any certificate the dialed address presents — the
-/// same evaluator `qsh trust accept` dials with (report §B3): pairing's
-/// real authentication is possession of the secret, not the TLS identity.
-fn pairing_dialer(local: LocalIdentity) -> Dialer {
-    Dialer::new(local, Arc::new(AcceptAnyForPairing))
-}
+use qsh_testkit::pairing::{PairingHarness, pairing_dialer};
+use qsh_transport::{FramedStream, Listener, StaticTrust};
 
 fn remote_error(
     result: &Result<qsh_core::pairing::PairingSuccess, PairingError>,
@@ -137,7 +34,7 @@ fn remote_error(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn pairing_dod_success_pins_both_sides_of_the_wire_exchange() {
-    let host = PairingHost::start().await;
+    let host = PairingHarness::start().await;
     let secret = host.invite();
     let laptop = make_identity();
 
@@ -165,7 +62,7 @@ async fn pairing_dod_success_pins_both_sides_of_the_wire_exchange() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn pairing_dod_ttl_expiry_is_trust_required_not_a_bare_rejection() {
-    let host = PairingHost::start().await;
+    let host = PairingHarness::start().await;
     // Backdated past INVITE_TTL, but still within INVITE_RETENTION — so
     // `pairing_open()` is still true and this reaches the application-layer
     // exchange instead of failing the TLS handshake outright (report §B6).
@@ -189,7 +86,7 @@ async fn pairing_dod_ttl_expiry_is_trust_required_not_a_bare_rejection() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn pairing_dod_reuse_after_success_is_session_conflict() {
-    let host = PairingHost::start().await;
+    let host = PairingHarness::start().await;
     let secret = host.invite();
 
     let first = make_identity();
@@ -222,7 +119,7 @@ async fn pairing_dod_reuse_after_success_is_session_conflict() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn pairing_dod_wrong_secret_is_auth_failed() {
-    let host = PairingHost::start().await;
+    let host = PairingHarness::start().await;
     let _live_but_unused = host.invite();
     let laptop = make_identity();
 
@@ -246,7 +143,7 @@ async fn pairing_dod_wrong_secret_is_auth_failed() {
 /// collide, must still succeed.
 #[tokio::test(flavor = "multi_thread")]
 async fn pairing_collision_fails_loudly_and_leaves_the_invite_unconsumed() {
-    let host = PairingHost::start().await;
+    let host = PairingHarness::start().await;
 
     // Pin "laptop" once, ordinarily, via a first successful pairing.
     let first_secret = host.invite();
@@ -305,7 +202,7 @@ async fn pairing_collision_fails_loudly_and_leaves_the_invite_unconsumed() {
 /// error" — the store itself, per this fix's own instruction).
 #[tokio::test(flavor = "multi_thread")]
 async fn pairing_rejects_a_control_character_initiator_device_name() {
-    let host = PairingHost::start().await;
+    let host = PairingHarness::start().await;
     assert!(
         host.trust_snapshot().peers().is_empty(),
         "sanity: nothing pinned before the attempt"

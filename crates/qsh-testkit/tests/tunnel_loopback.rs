@@ -19,6 +19,7 @@
 //! The only sleeping anywhere is a bounded retry poll, which fails the
 //! test when it runs out rather than passing on a timeout.
 
+use std::io;
 use std::sync::Arc;
 
 use qsh_core::acl::DenyAll;
@@ -151,18 +152,32 @@ async fn a_refused_connection_yields_no_payload_and_does_not_kill_the_forward() 
     let forward = h.local_forward("127.0.0.1", port).await;
     let addr = forward.local_addr();
 
-    let mut sock = TcpStream::connect(addr)
-        .await
-        .expect("connect to the local forward");
-    let mut got = Vec::new();
-    // `Err` is the RST the requester leg sends on a refusal; `Ok` is an
-    // orderly close. Either is fine — payload is not.
-    let _ = sock.read_to_end(&mut got).await;
-    assert!(
-        got.is_empty(),
-        "a refused forward delivered payload: {got:?}"
-    );
-    drop(sock);
+    // The refusal can arrive as an RST before `connect` itself returns —
+    // `abort_local`'s `set_zero_linger` (`qsh-core/src/tunnel/local.rs`)
+    // means the requester leg's own socket teardown sends RST, not FIN,
+    // and a macOS `connect()` that observes `SO_ERROR = ECONNRESET`
+    // before the socket goes writable surfaces that as `Err` here rather
+    // than a connected socket that then reads EOF/reset (CI run
+    // 33801780928). Either shape is "refused, no payload" — none is.
+    match TcpStream::connect(addr).await {
+        Ok(mut sock) => {
+            let mut got = Vec::new();
+            // `Err` is the RST the requester leg sends on a refusal; `Ok`
+            // is an orderly close. Either is fine — payload is not.
+            let _ = sock.read_to_end(&mut got).await;
+            assert!(
+                got.is_empty(),
+                "a refused forward delivered payload: {got:?}"
+            );
+            drop(sock);
+        }
+        Err(e)
+            if matches!(
+                e.kind(),
+                io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted
+            ) => {}
+        Err(e) => panic!("connect to the local forward: {e}"),
+    }
 
     // The destination the forward was already pointing at comes up. Same
     // listener, same forward, same destination — only the refusal is

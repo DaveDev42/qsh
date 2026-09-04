@@ -5721,6 +5721,185 @@ mod tests {
         );
     }
 
+    /// `ARBITRATION-4.md` J7 고리4: fail-closed extended to the attach
+    /// choke point — [`Server::authorize`] is the same choke point
+    /// `session.open` goes through
+    /// (`session_open_fails_closed_when_the_audit_sink_cannot_record_
+    /// an_allow` pins that axis), so a `session.attach` whose credential
+    /// verifies but whose allow cannot be durably recorded is denied with
+    /// the exact same [`crate::acl::PERMISSION_DENIED_MESSAGE`],
+    /// byte-for-byte — a peer must not be able to tell "audit degraded"
+    /// from "policy said no." The still-valid resume token is untouched
+    /// by the denial (`Broker::rotate_resume` only runs once the ACL
+    /// choke point has already passed), so the same token attaches
+    /// successfully once the sink recovers.
+    #[tokio::test]
+    async fn session_attach_fails_closed_when_the_audit_sink_cannot_record_an_allow() {
+        let clock = TestClock::new();
+        let pipes = Arc::new(PipeFactory::new(64 * 1024));
+        let broker = Broker::new(
+            Arc::new(clock.clone()),
+            BrokerConfig {
+                replay_bytes: 64 * 1024,
+                resume_ttl: Duration::from_secs(3600),
+                close_grace: Duration::from_millis(100),
+                quota_limits: crate::quota::QuotaLimits::default(),
+            },
+            pipes.clone(),
+        );
+        let audit = Arc::new(FailingAuditSink::new());
+        let server = Server::new(
+            Arc::new(AllowAllPinned),
+            audit.clone(),
+            broker.clone(),
+            "host",
+        );
+        let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
+
+        // Open the session while the sink is healthy — the axis under
+        // test is `session.attach`, not `session.open`.
+        let reply = server.dispatch(&ctx, &session_open(1)).await.unwrap();
+        let opened = match response_body(&reply) {
+            response::Body::SessionOpened(o) => o.clone(),
+            other => panic!("expected SessionOpened, got {other:?}"),
+        };
+        let _pipe = pipes.take().expect("pipe handle for the new session");
+
+        let attach = |token: Vec<u8>| wire::SessionAttach {
+            session_id: opened.session_id.clone(),
+            resume_token: token,
+            mode: wire::AttachMode::Rw as i32,
+            ..Default::default()
+        };
+
+        audit.fail();
+        let reply = server
+            .dispatch(
+                &ctx,
+                &ControlMessage::new(
+                    2,
+                    control_message::Body::SessionAttach(attach(opened.resume_token.clone())),
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(error_code(&reply), Some(ErrorCode::PermissionDenied));
+        match &reply.body {
+            Some(control_message::Body::Response(wire::Response {
+                body: Some(response::Body::Error(e)),
+            })) => assert_eq!(
+                e.message,
+                crate::acl::PERMISSION_DENIED_MESSAGE,
+                "fail-closed audit-degraded deny must use the uniform message, byte for byte"
+            ),
+            other => panic!("expected an error response, got {other:?}"),
+        }
+
+        // Recovery: the same still-valid resume token now succeeds — a
+        // degraded audit sink must never burn the credential it denied
+        // under.
+        audit.clear();
+        let reply = server
+            .dispatch(
+                &ctx,
+                &ControlMessage::new(
+                    3,
+                    control_message::Body::SessionAttach(attach(opened.resume_token.clone())),
+                ),
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(response_body(&reply), response::Body::SessionAttached(_)),
+            "expected SessionAttached once the audit sink recovers, got {reply:?}"
+        );
+    }
+
+    /// `ARBITRATION-4.md` M8 Step 4 fixer round F2 (A-P2-1): fail-closed
+    /// extended to the ownership-aware choke point — [`Server::
+    /// authorize_owned`] is a *different* fail-closed branch than
+    /// [`Server::authorize`] (`session_open_fails_closed_when_the_audit_
+    /// sink_cannot_record_an_allow` and `session_attach_fails_closed_
+    /// when_the_audit_sink_cannot_record_an_allow` both only exercise the
+    /// latter, via [`Server::authorize`]'s own `!verdict.is_allow() ||
+    /// recorded.is_err()`). `session.write` reaches `authorize_owned`
+    /// through `authorize_session_control` → `require_opener`
+    /// (`Server::prepare_session_write`'s doc), and only the session's own
+    /// opener gets an `is_allow()` verdict under the default `scope =
+    /// "owned"` policy — a foreign principal's write is already denied by
+    /// ownership before `authorize_owned`'s own fail-closed branch is
+    /// ever reached, which is exactly why this test must write as the
+    /// opener, the same way `write_by_another_principal_is_denied_by_
+    /// ownership_not_the_lease` pins the foreign-principal side of the
+    /// same choke point. Same byte-identical `PERMISSION_DENIED_MESSAGE`
+    /// contract, same recovery-without-burning-anything shape.
+    #[tokio::test]
+    async fn session_write_fails_closed_when_the_audit_sink_cannot_record_an_allow() {
+        let clock = TestClock::new();
+        let pipes = Arc::new(PipeFactory::new(64 * 1024));
+        let broker = Broker::new(
+            Arc::new(clock.clone()),
+            BrokerConfig {
+                replay_bytes: 64 * 1024,
+                resume_ttl: Duration::from_secs(3600),
+                close_grace: Duration::from_millis(100),
+                quota_limits: crate::quota::QuotaLimits::default(),
+            },
+            pipes.clone(),
+        );
+        let audit = Arc::new(FailingAuditSink::new());
+        let server = Server::new(
+            Arc::new(AllowAllPinned),
+            audit.clone(),
+            broker.clone(),
+            "host",
+        );
+        let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
+
+        // Open the session while the sink is healthy — the axis under
+        // test is `session.write`, not `session.open`.
+        let reply = server.dispatch(&ctx, &session_open(1)).await.unwrap();
+        let opened = match response_body(&reply) {
+            response::Body::SessionOpened(o) => o.clone(),
+            other => panic!("expected SessionOpened, got {other:?}"),
+        };
+        let _pipe = pipes.take().expect("pipe handle for the new session");
+
+        let write = |request_id: u64| {
+            ControlMessage::new(
+                request_id,
+                control_message::Body::SessionWrite(wire::SessionWrite {
+                    session_id: opened.session_id.clone(),
+                    data: b"x".to_vec(),
+                }),
+            )
+        };
+
+        audit.fail();
+        let reply = server.dispatch(&ctx, &write(2)).await.unwrap();
+        assert_eq!(error_code(&reply), Some(ErrorCode::PermissionDenied));
+        match &reply.body {
+            Some(control_message::Body::Response(wire::Response {
+                body: Some(response::Body::Error(e)),
+            })) => assert_eq!(
+                e.message,
+                crate::acl::PERMISSION_DENIED_MESSAGE,
+                "fail-closed audit-degraded deny must use the uniform message, byte for byte"
+            ),
+            other => panic!("expected an error response, got {other:?}"),
+        }
+
+        // Recovery: the same opener's write now succeeds once the sink
+        // recovers.
+        audit.clear();
+        let reply = server.dispatch(&ctx, &write(3)).await.unwrap();
+        assert_eq!(
+            error_code(&reply),
+            None,
+            "expected session.write to succeed once the audit sink recovers, got {reply:?}"
+        );
+    }
+
     /// An unsolicited SessionEvent (host → client only) is dropped.
     #[tokio::test]
     async fn inbound_session_event_is_ignored() {

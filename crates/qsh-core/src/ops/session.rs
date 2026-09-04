@@ -4348,4 +4348,64 @@ mod tests {
         let err = ops.resolve_user_hint("mac", None).unwrap_err();
         assert_eq!(err.code, ErrorCode::ConfigError);
     }
+
+    /// The re-dial cadence a recovering attach actually produces is a
+    /// property of [`RecoveryConfig::backoff`] alone, so it is checked as
+    /// arithmetic rather than by counting dials against a live host.
+    ///
+    /// The bound it is checked against is the host's admission burst
+    /// limit for one source: `rate_exceeded` in
+    /// `crates/qsh-core/src/admission.rs` rejects when the estimate
+    /// exceeds `handshake_rate_per_source * EPOCH.as_secs()`, which for
+    /// the shipping defaults (10/s, `EPOCH` = 2 s) is 20 attempts per 2 s
+    /// window. Both values are restated here because `EPOCH` is private
+    /// to the `admission` module; the test fails loudly if the schedule
+    /// ever drifts toward that number rather than tracking it silently.
+    ///
+    /// Attempts are modelled at the instant their backoff ends, i.e. an
+    /// attempt of zero duration. Real attempts take time and only spread
+    /// further apart, so the count computed here is an upper bound on the
+    /// density any real recovery loop can reach.
+    #[test]
+    fn the_recovery_backoff_schedule_stays_far_under_the_admission_burst_limit() {
+        const HANDSHAKE_RATE_PER_SOURCE: u32 = 10;
+        const EPOCH: Duration = Duration::from_secs(2);
+        let burst_limit = HANDSHAKE_RATE_PER_SOURCE * EPOCH.as_secs() as u32;
+        assert_eq!(burst_limit, 20, "admission burst limit for one source");
+
+        // Every dial instant a loop of `attempts` attempts would produce,
+        // sleeping `backoff(attempt)` before each one.
+        let attempts = 64u32;
+        let mut at = Vec::with_capacity(attempts as usize);
+        let mut clock = Duration::ZERO;
+        for attempt in 0..attempts {
+            clock += RecoveryConfig::backoff(attempt);
+            at.push(clock);
+        }
+
+        // Densest 2 s window: every window that starts at a dial covers
+        // the maximum, because moving a window's start off a dial can
+        // only drop that dial.
+        let mut worst = 0usize;
+        let mut worst_start = Duration::ZERO;
+        for start in &at {
+            let end = *start + EPOCH;
+            let n = at.iter().filter(|t| **t >= *start && **t < end).count();
+            if n > worst {
+                worst = n;
+                worst_start = *start;
+            }
+        }
+
+        assert_eq!(
+            worst, 4,
+            "the 0/200 ms/800 ms schedule puts at most 4 dials in a 2 s window \
+             (densest window starts at {worst_start:?}, dials at {at:?})"
+        );
+        assert!(
+            (worst as u32) < burst_limit,
+            "recovery cadence {worst} per 2 s must stay under the admission \
+             burst limit {burst_limit}"
+        );
+    }
 }

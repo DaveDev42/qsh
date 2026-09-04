@@ -9,3 +9,14 @@
 # (mobility, chaos, e2e) legitimately take tens of seconds; the point is a
 # bound, not a tight one.
 slow-timeout = { period = "60s", terminate-after = 3 }
+
+# nextest's built-in default (0.9.143) is 200ms — confirmed against upstream
+# `nextest-runner/default-config.toml` (nextest-rs/nextest, main), since
+# `cargo nextest run --help` does not surface it (ARBITRATION-4.md J12,
+# design.md §0-17 left it unconfirmed). We pin it explicitly rather than
+# inherit silently, because an unconfirmed default is a reproducibility gap
+# on its own. This harness spawns no child processes, so nextest's leaky
+# path — a child still holding the test process's stdout/stderr fd after
+# exit — never applies here; the value is pinned for explicitness, not
+# because a leak was observed or ruled out.
+leak-timeout = "200ms"
