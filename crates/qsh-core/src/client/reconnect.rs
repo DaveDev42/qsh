@@ -295,6 +295,10 @@ impl<T> RecoveryOutcome<T> {
 /// it is [`Recovery::Failed`], even if the attach would have succeeded a
 /// moment later: a late recovery is the failure mode this deadline exists
 /// to name.
+///
+/// `recover` itself does not guarantee any interval between attempts; a
+/// caller that retries in a loop brings its own backoff, the way
+/// [`crate::ops::session::RecoveryConfig::backoff`] does.
 pub async fn recover<P, PFut, R, RFut, T, E, G>(
     session_ref: &str,
     binder: Option<&dyn PathBinder>,

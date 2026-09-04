@@ -261,6 +261,39 @@ impl LoopbackHarness {
         harness
     }
 
+    /// [`Self::start_with_admission`] and [`Self::start_with_quotas`]
+    /// combined (`ARBITRATION-4.md` J4, `start_inner` already takes
+    /// both) — for a test that needs quota limits pinned down tight
+    /// while the *admission* axis (handshake concurrency, per-source
+    /// rate limits) is opened wide so it never becomes the bottleneck
+    /// being measured (`crates/qsh-testkit/tests/quota.rs`'s
+    /// connection-/session-flood-vs-existing-session-echo tests). Single
+    /// pinned client identity — no [`Self::second_client`]/
+    /// [`Self::second_dialer`], same as [`Self::start_custom_with_quotas`].
+    pub async fn start_with_admission_and_quotas(
+        max_concurrent_handshakes: usize,
+        handshake_rate_per_source: u32,
+        validated_rate_per_source: u32,
+        limits: qsh_core::quota::QuotaLimits,
+    ) -> Self {
+        let client = make_identity();
+        let server_trust =
+            StaticTrust::empty().with_pin(client.fingerprint, Principal::Device("laptop".into()));
+        Self::start_inner(
+            Arc::new(AllowAllPinned),
+            client,
+            server_trust,
+            None,
+            Some((
+                max_concurrent_handshakes,
+                handshake_rate_per_source,
+                validated_rate_per_source,
+            )),
+            Some(limits),
+        )
+        .await
+    }
+
     /// Start a host the client reaches only through a seeded chaos proxy
     /// (`docs/design/testing.md` L4). [`addr`](Self::addr) becomes the
     /// proxy's front address, so `dial()`/`session()` and everything built on

@@ -1080,6 +1080,197 @@ async fn two_principals_have_independent_connection_budgets() {
     h.shutdown().await;
 }
 
+// ==========================================================================
+// `ARBITRATION-4.md` J4/4a round 3: a real connection/session flood, over
+// an admission gate deliberately opened wide (`LoopbackHarness::
+// start_with_admission_and_quotas`) so the admission axis (`crate::
+// admission::Gate`, J3) never becomes the bottleneck under test here —
+// that axis is `admission.rs`'s own job. Both tests use the pipe-backed
+// PTY round trip (`qsh_core::broker::PipeFactory`, "pipe echo") every
+// other quota test in this file uses; a real PTY's own echo latency is
+// T2's job (`ARBITRATION-4.md` J5), not this in-process harness's.
+// ==========================================================================
+
+/// A real **connection** flood past `max_connections`, admission wide
+/// open, never starves an already-open session's pipe echo (PipeFactory
+/// round trip) — the connection-axis twin of `existing_session_echo_
+/// survives_a_saturated_quota` above, driven against real dials instead
+/// of a single already-full session cap.
+#[tokio::test(flavor = "multi_thread")]
+async fn existing_session_echo_survives_a_connection_flood() {
+    // `Arc`-wrapped (unlike every other harness use in this file) solely
+    // so the concurrent flood below can hand each `tokio::task::JoinSet`
+    // task its own `Arc::clone` — `LoopbackHarness` itself isn't `Clone`,
+    // and its `dial`/`session` methods take `&self`, so a spawned task
+    // (which needs `'static`) can't otherwise borrow it.
+    let h = Arc::new(
+        LoopbackHarness::start_with_admission_and_quotas(
+            128,
+            100_000,
+            100_000,
+            QuotaLimits {
+                max_connections: 2,
+                max_connections_per_principal: 100,
+                ..QuotaLimits::default()
+            },
+        )
+        .await,
+    );
+
+    // First slot: the session under test.
+    let mut s = h.session().await;
+    let opened = s.session_open(open_req()).await.unwrap();
+    let id = opened.session_id.clone();
+    let mut pipe = h.pipes.take().expect("pipe handle for the session");
+
+    // Second slot: a spare connection, held open for the rest of the test
+    // purely to saturate `max_connections = 2` up front, so every flood
+    // dial below is unambiguously refused rather than racing a still-free
+    // slot.
+    let dialed_spare = h.dial().await;
+    let _spare = Session::negotiate(dialed_spare.connection, "laptop")
+        .await
+        .expect("the second connection fits under max_connections=2");
+
+    // Dial the whole flood concurrently — not one at a time — so the race
+    // for `max_connections`'s last slot (there is none left; both slots
+    // are already held) is actually exercised rather than 20 dials that
+    // never contend with one another (`ARBITRATION-4.md` F3, B-P2-5).
+    // `futures::future::join_all` isn't a `qsh-testkit` dependency (only a
+    // transitive one via other crates), so this drives the same
+    // concurrency with `tokio::task::JoinSet` instead — each task gets its
+    // own `Arc::clone` of the harness.
+    const FLOOD: usize = 20;
+    let mut flood_dials = tokio::task::JoinSet::new();
+    for i in 0..FLOOD {
+        let h = Arc::clone(&h);
+        flood_dials.spawn(async move {
+            let dialed = h.dial().await;
+            (i, Session::negotiate(dialed.connection, "laptop").await)
+        });
+    }
+    let mut flood_results = Vec::with_capacity(FLOOD);
+    while let Some(result) = flood_dials.join_next().await {
+        flood_results.push(result.expect("flood dial task panicked"));
+    }
+    let admitted = flood_results.iter().filter(|(_, r)| r.is_ok()).count();
+    assert_eq!(
+        admitted, 0,
+        "an already-saturated max_connections=2 must admit none of the concurrent flood dials"
+    );
+    for (i, result) in flood_results {
+        let err = match result {
+            Ok(_) => unreachable!("checked admitted == 0 above"),
+            Err(err) => err,
+        };
+        let (code, retryable) = remote(err);
+        assert_eq!(code, ErrorCode::ResourceExhausted);
+        assert!(
+            retryable,
+            "flood dial {i}: RESOURCE_EXHAUSTED must be retryable"
+        );
+    }
+
+    // The existing session's pipe echo must keep working through the
+    // flood, not merely before or after it.
+    for i in 0..FLOOD {
+        let payload = format!("cmd-{i}\n").into_bytes();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let n = s.session_write(&id, payload.clone()).await.unwrap();
+            assert_eq!(n, payload.len() as u64);
+            assert_eq!(
+                pipe.read_input(64).await.unwrap(),
+                payload,
+                "pipe echo {i} did not survive the connection flood"
+            );
+        })
+        .await
+        .unwrap_or_else(|_| panic!("pipe echo {i} exceeded its 2s budget"));
+    }
+
+    // All the `Arc::clone`s the flood spawned above are gone (each task
+    // joined before its result was collected), so this is the sole
+    // remaining handle.
+    Arc::try_unwrap(h)
+        .unwrap_or_else(|_| panic!("a flood task's Arc<LoopbackHarness> outlived its JoinSet"))
+        .shutdown()
+        .await;
+}
+
+/// A real **session** flood from the same principal, past `max_sessions_
+/// per_principal`, admission wide open: exactly `max_sessions_per_
+/// principal` of 20 consecutive `session.open` attempts are admitted
+/// (the rest `ResourceExhausted`), and the first session admitted keeps
+/// answering its pipe echo (PipeFactory round trip) 20 times, each within
+/// a 2s budget.
+#[tokio::test(flavor = "multi_thread")]
+async fn existing_session_echo_survives_a_session_flood_from_the_same_principal() {
+    let h = LoopbackHarness::start_with_admission_and_quotas(
+        128,
+        100_000,
+        100_000,
+        QuotaLimits {
+            max_sessions_per_principal: 2,
+            ..QuotaLimits::default()
+        },
+    )
+    .await;
+    let mut s = h.session().await;
+
+    const ATTEMPTS: usize = 20;
+    let mut first_opened: Option<wire::SessionOpened> = None;
+    let mut admitted = 0usize;
+    let mut refused = 0usize;
+    for _ in 0..ATTEMPTS {
+        match s.session_open(open_req()).await {
+            Ok(opened) => {
+                admitted += 1;
+                if first_opened.is_none() {
+                    first_opened = Some(opened);
+                }
+            }
+            Err(err) => {
+                let (code, retryable) = remote(err);
+                assert_eq!(code, ErrorCode::ResourceExhausted);
+                assert!(retryable);
+                refused += 1;
+            }
+        }
+    }
+    assert_eq!(
+        admitted, 2,
+        "max_sessions_per_principal=2 must admit exactly 2 of the 20-attempt flood"
+    );
+    assert_eq!(
+        refused,
+        ATTEMPTS - 2,
+        "18 of the 20 flood attempts must be refused at cap=2"
+    );
+
+    // The first session the flood admitted — `h.pipes` hands out handles
+    // in open order, and a refused attempt creates no pipe, so this is
+    // the first admitted session's own handle.
+    let opened = first_opened.expect("the first flood attempt must have been admitted");
+    let id = opened.session_id.clone();
+    let mut pipe = h
+        .pipes
+        .take()
+        .expect("pipe handle for the first admitted session");
+
+    for i in 0..ATTEMPTS {
+        let payload = format!("cmd-{i}\n").into_bytes();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let n = s.session_write(&id, payload.clone()).await.unwrap();
+            assert_eq!(n, payload.len() as u64);
+            assert_eq!(pipe.read_input(64).await.unwrap(), payload);
+        })
+        .await
+        .unwrap_or_else(|_| panic!("pipe echo {i} exceeded its 2s budget"));
+    }
+
+    h.shutdown().await;
+}
+
 /// M8 Step 3b S5: connection-axis twin of `quota_rejection_audit_is_
 /// aggregated` above — a burst of refused *dials* (not requests inside an
 /// already-open connection) still collapses into one first record plus
@@ -1187,6 +1378,198 @@ async fn the_listen_controller_enforces_the_connection_cap() {
             );
         }
         other => panic!("expected a Remote RESOURCE_EXHAUSTED rejection, got {other:?}"),
+    }
+
+    harness.shutdown().await;
+}
+
+/// `ARBITRATION-4.md` J8, reduced scale ("축소판"): while a flood of
+/// extra registrations is refused past the controller's one-connection
+/// cap (the exact scenario `the_listen_controller_enforces_the_
+/// connection_cap` above pins), the already-registered target keeps
+/// answering a real pipe echo (`qsh_core::broker::PipeFactory` round
+/// trip) — driven through the controller's `ControlHub::send_request`/
+/// `register_conduit` the same way the localctl daemon relays a real
+/// CLI's requests (`qsh_core::localctl::daemon`'s dispatch loop), but
+/// without the daemon/`Ops` layer itself, which this single round trip
+/// does not need. The registered target is a real `Server`/`Broker`/
+/// `PipeFactory`, wired the same way `reverse_session_ops.rs`'s
+/// `TargetRig::register_reverse` wires one.
+// The controller side of this test drives the registered target through
+// `Listen::control_hub` / `ConduitInbound`, the localctl conduit surface that
+// `qsh-core` only builds on unix (`#[cfg(unix)]` in `reverse/listen.rs`), so
+// the test is unix-only the same way `reverse_target_quota` below is.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn existing_registration_pipe_echo_survives_a_connection_flood() {
+    // Imported here rather than at the top of the file: this is the only
+    // non-`cfg(unix)`-module use of `wait_for`, and a top-level import would
+    // be unused (and, under `-D warnings`, an error) on the windows target.
+    use qsh_testkit::reverse::wait_for;
+
+    let target_identity = make_identity();
+    let flooder_identity = make_identity();
+    // `allow_advertised_names = false` below: `Registry::resolve_name`
+    // resolves to the trust-store *alias*, not the `offered_name` argument
+    // `register()` passes — so the registered name is the pin itself
+    // ("widget"), and the `offered_name` argument below is cosmetic.
+    let trust = StaticTrust::empty()
+        .with_pin(
+            target_identity.fingerprint,
+            Principal::Device("widget".into()),
+        )
+        .with_pin(
+            flooder_identity.fingerprint,
+            Principal::Device("flooder".into()),
+        );
+    let harness = ReverseHarness::start_with_quotas(
+        Arc::new(AllowAllPinned),
+        false,
+        trust,
+        QuotaLimits {
+            max_connections: 1,
+            max_connections_per_principal: 100,
+            ..QuotaLimits::default()
+        },
+    )
+    .await;
+
+    // The registered target: a real Server/Broker/PipeFactory.
+    let pipes = Arc::new(qsh_core::broker::PipeFactory::new(64 * 1024));
+    let broker = qsh_core::broker::Broker::new(
+        Arc::new(qsh_core::broker::SystemClock),
+        qsh_core::broker::BrokerConfig {
+            replay_bytes: 64 * 1024,
+            resume_ttl: Duration::from_secs(3600),
+            close_grace: Duration::from_millis(100),
+            quota_limits: QuotaLimits::default(),
+        },
+        pipes.clone(),
+    );
+    tokio::spawn(qsh_core::broker::Broker::run_reaper(Arc::downgrade(
+        &broker,
+    )));
+    let audit = Arc::new(qsh_core::audit::MemoryAuditSink::new());
+    let server =
+        qsh_core::server::Server::new(Arc::new(AllowAllPinned), audit, broker.clone(), "target");
+
+    let (dialed, ctl, peer_hello) = harness
+        .register(&target_identity, "widget")
+        .await
+        .expect("target registers under the controller's one connection slot");
+    let conn = dialed.connection.clone();
+    let ctx = qsh_core::server::ConnCtx {
+        principal: conn.principal().clone(),
+        auth_path: conn.auth_path(),
+        peer_fingerprint: conn
+            .peer_fingerprint()
+            .map(|fp| qsh_core::broker::PeerFingerprint::new(*fp.as_bytes())),
+        peer_addr: conn.remote_address(),
+        conn_id: conn.stable_id(),
+        capabilities: qsh_core::handshake::negotiated_capabilities(&peer_hello),
+        is_reverse_registration: true,
+    };
+    let serve_server = server.clone();
+    let conn_id = ctx.conn_id;
+    let _serve_task = tokio::spawn(async move {
+        let _ = serve_server
+            .clone()
+            .serve_control(&conn, ctl, ctx, None)
+            .await;
+        serve_server.purge_connection(conn_id, ()).await;
+    });
+
+    wait_for(Duration::from_secs(5), || {
+        harness.listen.registry().get("widget")
+    })
+    .await;
+    let hub = harness
+        .listen
+        .control_hub("widget")
+        .expect("control hub for the registered target");
+    let (conduit_id, mut inbox) = hub.register_conduit();
+
+    // One real session.open, driven raw through the hub — the session
+    // the pipe echo below writes to.
+    let open_request_id = 1u64;
+    hub.send_request(
+        conduit_id,
+        open_request_id,
+        wire::control_message::Body::SessionOpen(open_req()),
+    )
+    .expect("send session.open through the hub");
+    let opened = loop {
+        match inbox
+            .recv()
+            .await
+            .expect("hub inbox closed before session.open answered")
+        {
+            qsh_core::reverse::listen::ConduitInbound::Response {
+                peer_request_id,
+                body,
+            } if peer_request_id == open_request_id => match body.body {
+                Some(wire::response::Body::SessionOpened(o)) => break o,
+                other => panic!("expected SessionOpened, got {other:?}"),
+            },
+            _ => continue,
+        }
+    };
+    let id = opened.session_id.clone();
+    let mut pipe = pipes
+        .take()
+        .expect("pipe handle for the registered target's session");
+
+    // Flood extra registrations past the controller's one-connection cap
+    // — every one refused — while the already-registered target's own
+    // pipe echo keeps working through it.
+    const FLOOD: usize = 8;
+    for i in 0..FLOOD {
+        let err = match harness.register(&flooder_identity, "flood").await {
+            Ok(_) => panic!("flood {i}: registration past max_connections=1 must be refused"),
+            Err(err) => err,
+        };
+        match err {
+            HelloError::Remote {
+                code, retryable, ..
+            } => {
+                assert_eq!(code, ErrorCode::ResourceExhausted);
+                assert!(retryable, "flood {i}: RESOURCE_EXHAUSTED must be retryable");
+            }
+            other => panic!("expected a Remote RESOURCE_EXHAUSTED rejection, got {other:?}"),
+        }
+
+        let write_request_id = 2 + i as u64;
+        let payload = format!("cmd-{i}\n").into_bytes();
+        hub.send_request(
+            conduit_id,
+            write_request_id,
+            wire::control_message::Body::SessionWrite(wire::SessionWrite {
+                session_id: id.clone(),
+                data: payload.clone(),
+            }),
+        )
+        .expect("send session.write through the hub");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match inbox.recv().await.expect("hub inbox closed mid-flood") {
+                    qsh_core::reverse::listen::ConduitInbound::Response {
+                        peer_request_id,
+                        body,
+                    } if peer_request_id == write_request_id => match body.body {
+                        Some(wire::response::Body::SessionWritten(_)) => break,
+                        other => panic!("expected SessionWritten, got {other:?}"),
+                    },
+                    _ => continue,
+                }
+            }
+            assert_eq!(
+                pipe.read_input(64).await.unwrap(),
+                payload,
+                "the registered target's pipe echo {i} did not survive the connection flood"
+            );
+        })
+        .await
+        .unwrap_or_else(|_| panic!("hub round trip {i} exceeded its 5s budget"));
     }
 
     harness.shutdown().await;

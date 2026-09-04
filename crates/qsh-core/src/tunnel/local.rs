@@ -1103,14 +1103,31 @@ mod tests {
         let addr = forward.local_addr();
         let runner = tokio::spawn(forward.run(Arc::new(ForwardCarrier::Quic(client_conn))));
 
-        let mut tcp = TcpStream::connect(addr).await.unwrap();
-        let mut got = Vec::new();
-        // Either an RST (`ConnectionReset`) or a bare EOF is a closed
-        // socket; what must never happen is data arriving from a
-        // destination that was never dialed.
-        match tcp.read_to_end(&mut got).await {
-            Ok(_) => assert!(got.is_empty(), "a refused forward must carry no payload"),
-            Err(err) => assert_eq!(err.kind(), io::ErrorKind::ConnectionReset),
+        // The refusal's RST can arrive before `connect` itself returns —
+        // `abort_local`'s `set_zero_linger` above means the requester leg
+        // sends RST, not FIN, and a `connect()` that observes
+        // `SO_ERROR = ECONNRESET` before the socket is writable surfaces
+        // that as `Err` here instead of a connected socket that then
+        // reads a reset (macOS CI run 33801780928). Either shape is
+        // "refused, no payload"; neither should stop the test short of
+        // the "forward keeps serving" assertion below.
+        match TcpStream::connect(addr).await {
+            Ok(mut tcp) => {
+                let mut got = Vec::new();
+                // Either an RST (`ConnectionReset`) or a bare EOF is a
+                // closed socket; what must never happen is data arriving
+                // from a destination that was never dialed.
+                match tcp.read_to_end(&mut got).await {
+                    Ok(_) => assert!(got.is_empty(), "a refused forward must carry no payload"),
+                    Err(err) => assert_eq!(err.kind(), io::ErrorKind::ConnectionReset),
+                }
+            }
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted
+                ) => {}
+            Err(e) => panic!("connect to the local forward: {e}"),
         }
         deny.await.unwrap();
 

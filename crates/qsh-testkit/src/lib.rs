@@ -27,10 +27,12 @@ pub mod chaos;
 pub mod fixtures;
 pub mod loopback;
 pub mod pair;
+pub mod pairing;
 pub mod reverse;
 pub mod tunnel;
 
 pub use chaos::{ChaosPolicy, ChaosProxy, ChaosStats, DelayDist};
 pub use loopback::{LoopbackHarness, TestIdentity, make_identity};
 pub use pair::HostedPair;
+pub use pairing::PairingHarness;
 pub use tunnel::{EchoServer, TunnelHarness};

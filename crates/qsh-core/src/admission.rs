@@ -862,6 +862,109 @@ mod tests {
         );
     }
 
+    /// `M8 Step 4` (`ARBITRATION-4.md` J4): the time axis
+    /// `gate_table_is_constant_size_under_forged_cardinality` doesn't
+    /// cover — a sustained unvalidated (spoofable) flood that keeps
+    /// firing across many [`EPOCH`] generation rollovers must still
+    /// never grow the sketch's backing storage and must never touch the
+    /// handshake permit pool, no matter how many generations have
+    /// rotated through the sliding-window blend
+    /// ([`Gate::rate_exceeded`]'s epoch/fraction math).
+    #[tokio::test]
+    async fn gate_state_and_permits_survive_generation_rollovers_under_sustained_forged_flood() {
+        let clock = Arc::new(TestClock::new());
+        let gate = Gate::new(clock.clone(), 8, 10, 10);
+        let before_pointers = gate.sketch_storage_pointers();
+        let before_permits = gate.available_permits();
+
+        const GENERATIONS: u32 = 50;
+        const SOURCES_PER_GENERATION: u32 = 200;
+        for generation in 0..GENERATIONS {
+            for i in 0..SOURCES_PER_GENERATION {
+                // A fresh forged /32 every attempt, reused across
+                // generations by (generation, i) so the flood is both
+                // wide (cardinality) and sustained (keeps firing across
+                // rollovers) rather than a one-shot burst.
+                let ip = v4(10, (generation % 256) as u8, (i >> 8) as u8, i as u8);
+                let peer = addr(ip, 1);
+                // Unvalidated: outcome doesn't matter here — the
+                // invariant is what it never does (grow storage, touch
+                // the permit pool), which
+                // `unvalidated_peer_never_touches_the_permit_pool_even_at_cap_zero`
+                // already pins per-call; this test pins it across time.
+                let _ = gate.decide(peer, false, gate.now());
+            }
+            clock.advance(EPOCH);
+        }
+
+        let after_pointers = gate.sketch_storage_pointers();
+        assert_eq!(
+            before_pointers, after_pointers,
+            "the sketch's backing storage must never reallocate across EPOCH generation \
+             rollovers, regardless of sustained forged-source cardinality"
+        );
+        assert_eq!(
+            gate.available_permits(),
+            before_permits,
+            "a sustained unvalidated flood must never consume a handshake permit, across any \
+             number of EPOCH generation rollovers"
+        );
+
+        // `ARBITRATION-4.md` M8 Step 4 fixer round F2 (A-P2-2): the two
+        // asserts above are both time-invariant regardless of whether
+        // `Sketch::advance_to` ever actually rolls a generation over —
+        // storage never reallocates and an unvalidated decide never
+        // touches the permit pool either way (P2-2's mutation experiment:
+        // gutting `advance_to` to a no-op `return;` still passes both).
+        // What's missing is a load-bearing check *of the rollover itself*
+        // — that generations are really rotating, not just that nothing
+        // visibly breaks if they don't. Two more, on the still-forged
+        // `gate`/`clock` above:
+        //
+        // (a) a single legitimate source amid the flood is never a false
+        // positive — sketch saturation from 50 generations × 200 forged
+        // sources/generation must not spill onto an honest source's own
+        // estimate.
+        let honest = addr(v4(192, 168, 0, 7), 1);
+        assert!(
+            matches!(gate.decide(honest, false, gate.now()), Decision::Retry),
+            "a legitimate source amid a sustained forged flood spanning many EPOCH rollovers \
+             must not be falsely throttled"
+        );
+
+        // (b) a single *sustained* source, pushed past `burst_limit` (=
+        // `rate_per_source * EPOCH.as_secs()` = 10 * 2 = 20, this gate's
+        // own `rate_exceeded` doc) within one generation, is throttled —
+        // and two EPOCH rollovers later the same source is admitted
+        // again, which only happens if `advance_to` actually resets its
+        // counters rather than merely leaving old ones in place forever.
+        let noisy = addr(v4(203, 0, 113, 9), 1);
+        for i in 1..=20 {
+            match gate.decide(noisy, false, gate.now()) {
+                Decision::Retry => {}
+                other => panic!(
+                    "burst attempt {i}/20 within one epoch must be Retry, got {}",
+                    decision_kind(&other)
+                ),
+            }
+        }
+        assert!(
+            matches!(
+                gate.decide(noisy, false, gate.now()),
+                Decision::Ignore(RejectReason::RateLimited, _)
+            ),
+            "the 21st attempt within one epoch must be throttled once burst_limit=20 is exceeded"
+        );
+        clock.advance(EPOCH);
+        clock.advance(EPOCH);
+        assert!(
+            matches!(gate.decide(noisy, false, gate.now()), Decision::Retry),
+            "two EPOCH rollovers after being throttled, the same source must be admitted again \
+             — proof the rollover actually resets its counters, not just that nothing crashes \
+             if it doesn't"
+        );
+    }
+
     /// `PLAN.md` M8 Step 2 verification round, P1-2: pins the L2-before-L3
     /// ordering `Gate::decide`'s own doc claims — an *unvalidated* peer is
     /// never charged against the handshake-concurrency semaphore, even
