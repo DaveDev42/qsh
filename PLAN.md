@@ -395,6 +395,8 @@ CI 마감(`d87e76b`): CI run 33601462030 11 job 전부 success(`test (windows-la
 
 **72 h 시계 시작 기록.** 커밋 `d87e76b`, 호스트 Dave-Windows-WSL, run-id `m8-fuzz-20260902-1600`, 시작 2026-09-02T16:01:37+09:00, 16 타깃을 8 워커로 2 배치(`-max_total_time=259200 -rss_limit_mb=1536`, grown corpus는 `~/fuzz/grown/<t>`를 첫 인자로 두어 체크인 seed는 읽기 전용). 1차 배치 종료 예정 09-05 16:01, 2차 배치 종료 예정 09-08 16:01 이후. 기동 직후 실측: `decode_control` 7.1M execs / 170k exec/s / cov 1873 / RSS 541 MB, load 6.2, 가용 메모리 16 GB. 로그·exit 코드는 호스트 `~/fuzz/logs/m8-fuzz-20260902-1600/`. DoD 1 판정은 `exits.txt`의 16행 전부 `exit=0`이고 어떤 로그에도 `SUMMARY:`/`deadly signal`/`Test unit written`이 없을 때.
 
+**72 h 시계 경과 기록 (2026-09-07).** 1차 배치(decode_* 8종)는 09-05 새벽 호스트(WSL VM) 재시작으로 끊겼다. `exits.txt`에 exit 행이 없고 launcher도 함께 죽었다. 로그 마지막 수정 시각으로 센 타깃당 실효 시간은 59.1~65.6 h(부족분 6.4~12.9 h), 실행 수는 2.0B(`decode_control`, 큰 입력이라 8.6k exec/s)~44.8B, crash·artifact 0, OOM 없음. grown corpus는 `~/fuzz/grown/<t>`에 1.3~13 MB로 남았다. 2차 배치(fingerprint_principal, frame_decoder, json_request_types, parse_forward_spec, parse_invite_code, sanitize_peer_text, valid_forward_id, valid_host_name)는 커밋 `ab8a82f`, run-id `m8-fuzz-20260907-1450`, 시작 2026-09-07T14:47:53+09:00으로 돌고 있고 종료 예정은 09-10 14:48이다. `run72.sh`가 둘째 인자로 타깃 파일을 받게 고쳐 부분 집합을 돌린다. 2차가 끝나면 1차 부족분을 grown corpus에서 이어 타깃당 약 13 h 더 돌려 DoD 1을 닫는다. 누적 fuzz-hours 정의상 이어 돌린 시간은 유효하다. 09-05 재시작 원인은 미확인이다(Windows 업데이트 추정).
+
 #### Step 2 — 적대적 부하 방어선 ①②: 주소 검증 + accept 상한
 
 감사 개정 ①②. 인터넷에 직접 노출되는 데몬에 현재 방어선이 없다.
@@ -546,6 +548,26 @@ fixer의 반박은 전부 수용했다. qsh-testkit에 전방 경로 `Ops` 하�
 4b(-R accept permit, doctor `config_unknown_key`, architecture.md·CLI.md, ADR-0010 추기)와 4c(adversarial_load.rs, load.yml, 캠페인 문서, testing.md L9/L10, Dave-Windows-WSL 실측)는 설계 판정 그대로다. B가 남긴 "CI 3 OS의 신규 테스트 개별 시간"은 4a 커밋의 CI에서 읽어 4b 판정에 적는다.
 
 게이트는 fmt, clippy -D warnings(host와 x86_64-pc-windows-gnu), xtask arch, cargo deny, nextest 1483 passed / 2 skipped(`--test-threads=1`, 934초)로 닫았다. win-gnu clippy가 한 번 빨갰는데, quota.rs의 Listen 축 테스트가 unix 전용 `Listen::control_hub`·`ConduitInbound`를 쓰는 탓이라 그 테스트에 `#[cfg(unix)]`를 달고 `wait_for` import를 함수 안으로 옮겼다. 커밋 3213796은 CI(run 33827723206)와 fuzz-smoke 둘 다 첫 실행에 green이다. Step 4a는 여기서 닫는다.
+
+**(a)-추기 — Step 4b 구현 라운드 판정 (2026-09-07, main 세션).**
+
+4b는 설계 판정의 둘째 라운드로, 강제 공백 두 건과 문서를 다뤘다. 첫째는 `-R` 리스너의 accept permit이다. `serve_remote_forward`가 accept 직후 `open_bi` 전에 `Quotas::reserve_tunnel_stream(owner, forward_key)`를 부르고 거부면 QUIC 스트림 없이 TCP를 닫으며 `quota_tunnels_forward`/`quota_tunnels_principal` 감사 행(request_id "-", peer_addr는 TCP peer)을 남긴다. owner는 등록 principal의 `opener_key`, forward_key는 `rfwd:` 접두어를 붙인 등록 `forward_id`다. permit은 splice 태스크 안으로 옮겨져 `accept_one`이 돌아올 때 반납된다. 둘째는 `qsh doctor`의 `config_unknown_key`(14번째 진단 코드)다. 손목록 없이 config.toml 원본의 리프 키 경로와 로드된 `Config`를 재직렬화한 리프 키 경로의 차집합으로 구하고 그러려고 `Config`와 다섯 섹션에 `Serialize`를 달았다(출력 경로 없음, 계약 무변경). 문서는 architecture.md 63행의 `-L`/`-R` 대칭 두 문단, CLI.md §6.12 불릿 둘과 doctor 진단 표 행, reverse_tunnel.rs 헬퍼 doc이다. 구현 워크플로우는 네 스테이지(S1 permit, S2 doctor, S3 문서, S4 검증)로 돌았고 S4의 변이 5건이 전부 죽었다.
+
+적대 라운드는 opus 둘이 돌았고 둘 다 amber였다. P1 세 건이 핵심이다. B는 in-crate permit 테스트가 20회 중 4회 깨진다는 것을 보였다. `held.len()`을 즉시 단언하는데 permit 반납이 태스크 종료와 경쟁하기 때문이다. B는 또 "before any QUIC stream opens"라는 테스트 이름을 어떤 단언도 뒷받침하지 않는다고 짚었다. 예약을 `open_stream` 뒤로 옮겨도 그 테스트가 통과한다(E7). A와 B가 함께 doctor가 문서화된 serde alias(`resume_ttl_secs`)를 unknown으로 오탐한다는 것을 잡았다. 재직렬화는 정식 이름만 내므로 차집합에 alias가 남는다. P2로는 e2e가 permit 소유자 principal을 검증하지 않는 것, `-R`의 principal 축 테스트 부재, "RESET 없음/clean EOF" 문구가 바이트를 먼저 보낸 클라이언트에서 성립하지 않는 것(커널 RST), `doc_default_after`가 첫 등장만 보아 architecture.md 신규 문단이 config 지도의 기본값 검증을 가린 것(E8 변이 생존), lockstep 테스트가 한 방향뿐인 것, malformed TOML 분기 테스트 부재가 있었다.
+
+판정은 전부 수용했다. alias 오탐은 A의 권장안대로 차집합 후보마다 그 키 하나만 담은 최소 TOML 문서를 `Config`로 역직렬화해 결과가 `Config::default()`와 다르면 "다른 이름으로 인식되는 키"로 보고 제외한다. 플레이크는 즉시 상계·5 s 폴링·폴링 뒤 상계의 세 단언으로 갈랐고 20회 반복 20/20이다. 순서 성질은 forward 축 cap 0(강제 거부, server/mod.rs 8209행 선례)으로 TCP 20개를 열고 요청자의 `accept_bi`가 500 ms 안에 아무것도 받지 않음을 단언하는 테스트로 고정했다. principal 축은 cap 2 테스트를, e2e에는 owner principal 단언(`Pin:device:laptop`)을 넣었다. 거부 관측은 `Ok(0)`/ConnectionReset/ConnectionAborted 셋으로 넓혔다. forward 키는 `remote_forward_quota_key` 헬퍼로 `rfwd:` 접두어를 구조화했고 `doc_default_after`는 모든 등장이 같은 기본값을 가리켜야 통과한다. lockstep 테스트는 `ServeConfig` 16필드 struct literal(`..Default::default()` 없이)로 양방향이 됐다.
+
+fixer 반박은 이렇게 처리했다. qsh-core 테스트는 qsh-testkit의 `wait_for`를 못 쓴다(역의존 금지)는 것과, 순서 테스트에서 `held` 빈 벡터 단언을 생략하고 프로브 자체를 관측점으로 삼은 것은 수용했다. F1이 `tunnel_streams_per_principal_in_use`를 `#[cfg(test)] pub(crate)`로 올린 것도 수용했고 main은 같은 근거로 쌍둥이 `tunnel_streams_per_forward_in_use`도 `#[cfg(test)] pub(crate)`로 내렸다. J13이 pub의 근거로 든 "testkit e2e가 관측한다"가 실제 e2e에서는 감사 행과 TCP 거부로 대신 관측돼 크레이트 밖 호출부가 0건이기 때문이다. F2는 착수 시점에 항목 전부가 이미 구현돼 있었다고 적었는데, 이는 하네스가 F2 인스턴스를 세 번 재시작한 흔적이다(앞 인스턴스가 쓰고 죽었다). `cargo doc -D warnings`는 F2와 무관한 33개 파일의 기존 intra-doc 링크 경고 125~150건 때문에 크레이트 단위로 걸 수 없어 Step 5로 넘긴다. F4의 "known_leaf_paths grep 1건"은 테스트 함수 이름이라 결함이 아니다.
+
+수용하되 코드는 바꾸지 않은 지적. 거부 감사 창의 키가 category 하나라 무인증 `-R` flood 중 같은 category의 다른 principal 거부는 요약 행으로만 남는다(A-P2-4). ADR-0010 추기에 한 문장으로 적고 창 키에 principal을 넣는 것은 Step 5로 넘긴다. 거부 경로가 `Quotas` 뮤텍스를 accept마다 두 번 잡는 것(A-P2-5)은 4c 시나리오 13 진단에 flood 중 `session.open` p95를 더해 본다. 기본값 64 경로는 4c T2 시나리오 13이 유일한 관측점이고 B가 제안한 단언 7개(512 동시 dial, 성립 64, 거부 448, fd 델타 ≤ 64+8, 종료 뒤 fd 복귀, principal cap 4 변형에서 category 전환)를 그대로 쓴다(B-P2-6). S2가 적은 doctor 테스트 192 s는 다른 빌드와 겹친 산물이라(B 재측정 3.5 s) CI 예산 근거로 쓰지 않는다(B-P3-3).
+
+변이 실증은 S4 5건(M7 예약 삭제, M10 permit 즉시 drop, M11 감사 삭제, M9 차집합 공집합, M12 코드 표 삭제), F1 3건(principal 축 `if false`, E7 순서 변경, owner 상수화), F2 2건(alias 필터 무력화, lockstep 기대집합 키 제거), F3 1건(E8), F4 독립 재현 6건(위 셋에 alias 무력화·E8·`ServeConfig` 필드 추가), main 독립 2건(alias 프로브의 `!=`를 `==`로 → alias·typo 테스트 둘 다 실패, permit 즉시 drop → cap 테스트 실패)이다. 전부 죽었고 전부 cmp로 원복을 확인했다.
+
+B가 남긴 CI 3 OS의 신규 테스트 개별 시간은 4a 커밋 3213796의 run 33827723206에서 읽었다. test 잡 벽시계는 ubuntu 3m31s, ubuntu-arm 3m34s, windows 3m45s, macos 4m40s다. 4a 신규 테스트 중 가장 긴 재dial 케이던스 테스트는 네 OS 모두 3.25~3.31 s, 나머지는 1.3 s 아래다. 4c의 T1 시간 예산은 이 수치를 기준으로 한다.
+
+라운드 중 사고 하나. 첫 F4 인스턴스가 cargo 빌드 넷을 동시에 띄웠고 그 뒤 호스트 load가 190~320으로 올라 ps·top까지 멈췄다(09-04 저녁부터 09-07 새벽). 원인은 동시 빌드 자체보다 170 GB 빌드 디렉터리를 Spotlight(`LegacyImporterHost` 47개)와 `syspolicyd`가 95% 찬 디스크 위에서 계속 훑은 것이다. 재부팅 없이 풀린 뒤 `target`을 `target.noindex`로 옮기고 심링크를 뒀다(`.git/info/exclude`에 등록, 커밋 대상 아님). F4는 cargo를 한 번에 하나씩만 띄우는 규칙으로 다시 돌렸다. ADR-0010의 추기(`## 추기 — Step 4 (2026-09)`)는 A-P3-6의 사실 점검을 반영해 main이 놓았다.
+
+게이트는 fmt, clippy -D warnings(host와 x86_64-pc-windows-gnu), xtask arch, cargo deny, nextest 1496 passed / 2 skipped(`--test-threads=1`, 895초)로 닫았다. 커밋 6d8de8c는 CI(run 34094633762)와 fuzz-smoke(run 34094633780) 둘 다 첫 실행에 green이다. Step 4b는 여기서 닫는다.
 
 #### Step 5 — 24h/100-session soak + fd/메모리 게이트 (DoD 2)
 
