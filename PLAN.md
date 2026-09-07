@@ -595,6 +595,21 @@ Step 5 이월 항목. admission·quota 판정 지점에 카운터성 tracing과 
 
 M7 이월 부채가 여기서 만난다: bounded pull executor 부재(측정된 512 천장), pull당 fd 선형 증가, 고아 `.tmp{pid}-{N}` 미청소. soak이 이것들을 드러내는 자리다.
 
+**(a) 착수 판정 (2026-09-08, main 세션).** 인벤토리(`$SP/step5/INVENTORY-5.md`)가 리더 다섯의 보고를 합치며 찾은 충돌 셋이 설계를 정했다. 100세션은 기본값과 충돌한다. `max_sessions_per_principal` 32(`config.rs:601`)와 `MAX_PENDING_TICKETS_PER_CONN` 32(`server/mod.rs:159`)가 걸린다. soak config에서 principal당 상한을 128로 올리고 세션은 attach까지 해서 ticket을 redeem한다. T2의 상한 공식 `30 MB + 8 MB × N`은 N=100에서 830 MB라 판정력이 없다. 세션당 buffer는 기울기 `(peak − baseline) / N ≤ 8 MiB`로 판정하고 상한 공식은 보조 기록으로 둔다. DoD 2의 fd는 listener 프로세스이고 M7 이월 (iii)은 클라이언트 `dial_peer`(`ops/session.rs:1115`)라 pid가 다르다. 하네스는 두 프로세스를 다 샘플링하고 사이클 세션은 `Ops::connect_target` 실경로로 연다.
+
+하네스는 하이브리드다. 측정 헬퍼를 `qsh-testkit`으로 승격하고(4c의 `raw_quic.rs` 전례), `crates/qsh-cli/tests/soak.rs` 하나가 env로 길이·세션 수·샘플 간격을 받는다. 짧은 모드(120 s / 8세션)는 `[profile.load]`에서 load.yml의 회귀 감시자가 되고 24h 모드는 `scripts/soak/run.sh`가 `[profile.soak]`(slow-timeout 경고만)로 전용 호스트에서 기동해 CSV를 남기며 `scripts/soak/summarize.py`가 판정한다. 판정 기준은 `docs/campaigns/m8-soak.md`에 실행 전 고정한다. GHA job 상한 6시간과 Linux 전용 측정(`common/mod.rs:906-933`) 때문에 24h 런은 Dave-Windows-WSL에서 돌고 fuzz 2차 배치와 1차 부족분 재개가 끝난 뒤 단독 점유로 시작한다. 4c의 dial timeout 오염을 되풀이하지 않기 위해서다.
+
+범위 조정. (i) bounded pull executor는 ADR-0011이 Step 6에서 `crates/qsh-cli/src/mcp/`를 지우면 고칠 자리와 재현 경로가 함께 사라지므로 Step 6 뒤로 미룬다. (ix) forward-route live carrier는 protocol.md·README·`tunnel_chaos.rs:299` 단언을 뒤집는 의미론 재설계라 Step 6(freeze 선행 정리)으로 옮기고 새 ADR을 선행한다. doctor 진단은 신설하지 않는다. 4c 이월 중 (a) 계측만 soak 체인에 들어가고 (b)(c)(d)(e)(g)는 24h 대기 시간에 처리하는 병행 정리 묶음이며 (f) cargo doc 경고 149건은 Step 6이다.
+
+| 하위 | 내용 | 완료 기준 |
+|---|---|---|
+| 5a | `Gate::decide`·`reserve_connection` 카운터 + trace 이벤트, accept 루프 1 s 하트비트(debug), T2 per-dial 타임스탬프 | 분기별 카운터 유닛 테스트, `QSH_LOG=debug`에서 하트비트 |
+| 5b | 헬퍼 승격 + `soak.rs` + `[profile.soak]` + CSV | macOS skip green, WSL 짧은 모드 strict 3/3 |
+| 5c | `scripts/soak/`, `docs/campaigns/m8-soak.md`, testing.md, load.yml | summarize.py가 합성 CSV로 표를 낸다 |
+| 5d | (ii) `exec_run` 런타임 공유, (iv) atomic-rename 헬퍼 통합 + 죽은 pid `.tmp` 스윕 | 회귀 테스트, win-gnu check |
+| 5e | 24h 런 + 캠페인 기록 + DoD 2 판정 | 6.1 DoD 2 체크 |
+| 5f | soak이 드러낸 수정((iii) 등) | 재실행 24h에서 fd 회귀선 기울기 0 |
+
 #### Step 6 — wire freeze 선행 정리
 
 freeze 이후에는 고칠 수 없는 것들을 먼저 처리한다.
@@ -604,6 +619,9 @@ freeze 이후에는 고칠 수 없는 것들을 먼저 처리한다.
 - TUI 펌프 스레드 spawn 실패 panic 제거.
 - pairing device_name 길이 상한(현재 `CONTROL_FRAME_MAX` 256 KiB로만 묶임)과 Unicode bidi-override·homoglyph 스푸핑 — `docs/design/protocol.md` §15.5가 M8 백로그로 기록한 2건.
 - **MCP 어댑터 제거(ADR-0011, 2026-09-07 확정).** `qsh mcp` 서브커맨드, `crates/qsh-cli/src/mcp/`, `mcp_conformance.rs`, rmcp·schemars 핀, xtask arch의 `MCP_DIR` 규칙, `docs/man/qsh-mcp.1`을 지우고 PRD·CLI.md §8·ROADMAP M6·architecture.md·testing.md·README·CLAUDE.md·`docs/campaigns/m6-mcp.md`를 맞춘다. `tools_list.json`은 append-only라 두고 같은 디렉터리 README로 은퇴를 적는다. qsh-core의 `qsh mcp` 언급 주석은 서술만 바꾼다. Step 7 threat model 전에 끝낸다.
+- **forward-route live carrier·`-R` 자동 재발행(M7 이월 ix, Step 5 (a)가 이관).** 현행 의미론은 "연결 손실→resume에서 터널 스트림은 깨끗이 종료"이고 `tunnel_chaos.rs`의 `a_dead_connection_ends_the_tunnel_cleanly_while_the_pty_session_resumes`가 이를 고정한다. 뒤집으려면 새 ADR과 `docs/design/protocol.md`·README Known limitations 개정이 먼저다. freeze 전에 결정한다.
+- bounded pull executor(M7 이월 i) 재질문 — MCP 제거 뒤 `Ops` facade에 로컬 동시성 상한이 여전히 필요한지.
+- `cargo doc --workspace --no-deps` 경고 149건(`rustdoc::private_intra_doc_links`·미해결 링크 위주) 정리 — Step 5 인벤토리가 새로 확인한 항목.
 - **서비스 unit 예시 문서(ROADMAP M9 추가 범위, 2026-09-07).** `docs/deploy/service.md`에 `qsh serve`/`qsh listen`/`qsh reverse`용 launchd LaunchAgent plist와 systemd user unit 예시를 싣는다. 로그 경로, `KeepAlive`/`Restart=always`, `loginctl enable-linger`, LaunchAgent가 로그인 세션 안에서만 뜬다는 제약, WSL의 `systemd=true` 조건을 적는다. README Install 절에서 링크한다. 구현(`qsh service`)은 M9다.
 
 #### Step 7 — wire format freeze + threat model + OSS-Fuzz 제출
@@ -626,7 +644,7 @@ M2가 20회를 조기 측정해 SC4/SC5를 실기기로 확인했고 SC3 판정�
 
 | # | 항목 | 소유 step |
 |---|---|---|
-| i | bounded pull executor + `RESOURCE_EXHAUSTED` (측정된 512 천장) | Step 5 (Step 3은 어휘 정합만 — 판정 13) |
+| i | bounded pull executor + `RESOURCE_EXHAUSTED` (측정된 512 천장) | Step 6 뒤 재질문 (Step 5 (a) 판정: ADR-0011이 MCP 어댑터를 지우면 512 천장의 재현 경로가 사라진다. Step 3은 어휘 정합만 — 판정 13) |
 | ii | `Ops::exec`(`ops/exec.rs:81`) 호출당 `new_multi_thread()` 런타임 | Step 5 |
 | iii | pull당 fd 선형 증가 | Step 5 |
 | iv | 고아 `.tmp{pid}-{N}` 청소 부재 | Step 5 |
@@ -634,7 +652,7 @@ M2가 20회를 조기 측정해 SC4/SC5를 실기기로 확인했고 SC3 판정�
 | vi | trust store read-modify-write 잠금 부재 | Step 6 |
 | vii | invites.toml CLI/데몬 lock-free 창 | Step 6 |
 | viii | device_name 길이 상한 + Unicode bidi/homoglyph 스푸핑 | Step 6 |
-| ix | forward-route live carrier·`-R` 자동 재발행 (ROADMAP §3 표가 M8 소유로 등재) | Step 5 (판정 13) |
+| ix | forward-route live carrier·`-R` 자동 재발행 (ROADMAP §3 표가 M8 소유로 등재) | Step 6 (Step 5 (a)가 이관 — 의미론 재설계라 새 ADR 선행. 판정 13) |
 | x | `ControlLink`/`DataLink` enum → trait 전환 (ADR-0005 P0 부채, M3→M7 연쇄 이월) | P1 재기록 — M8도 트리거하지 않음 |
 
 ### 6.5 리스크
