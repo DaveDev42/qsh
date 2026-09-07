@@ -94,6 +94,7 @@
 - **수용 기준 (DoD):** stdio conformance 하네스(initialize → tools/list == checked-in fixture → open/write/read/close 시나리오). Claude Code 실접속으로 원격 명령 실행. `read_session` 취소 후 세션 상태 `running` 유지. adapter의 의존성 ban(arch-lint)으로 subprocess/CLI 재파싱 원천 봉쇄. `-vv`에도 stdout에 JSON-RPC 외 바이트 0.
 - **크기:** 1.5ew
 - **마감 노트 (2026-08-31):** DoD 5항목 전건 이름 붙은 증거로 통과 — ① conformance 하네스는 `mcp_conformance.rs`(raw JSON-RPC client, PLAN 4.1 #5 결정대로 rmcp client 비사용): initialize→`tools/list`==`fixtures/mcp/tools_list.json`(12종, `REQUIRED_MCP_FIXTURES` 양방향 set-equality 등록) + open/write/read/close·exec·tunnel 실구동 12종 전수, ② Claude Code 실접속은 `docs/campaigns/m6-mcp.md` — 사전 고정 C1–C5를 2회차 연속 충족, 회차 2는 stream-json의 MCP 프레임 원문으로 nonce 왕복 byte-exact 판정, ③ 취소는 `cancelling_a_pending_read_session_leaves_the_session_running_and_writable`(취소 후 `running`·writer lease 생존·수신 프레임 전수 id-핀·종료 후 stdout 정적) — rmcp 3.1.4 `local_ct_pool` 구조 보장으로 어댑터 취소 코드 0줄, ④ arch-lint ban은 xtask `ModuleBan`에 `crates/qsh-cli/src/mcp/` 스코프 3토큰(`std::process`·`Command::new`·`Stdio::piped`) + 단위 테스트 4건, ⑤ stdout 순수성은 `-vv` 실측 테스트 2건 + rmcp debug-log 페이로드 유출 차단(`rmcp=warn` 클램프, PTY b64·argv가 stderr에도 안 나감). 어댑터에 플랫폼 분기 0(stdio-only 설계 그대로), Windows ungated 성공 경로 2건(list_hosts·list_sessions). 발견·수정된 프로덕션 결함 2건: stdin EOF 후 blocking pool join으로 종료 최대 60s 지연(→`shutdown_timeout(500ms)`, 29.7s→5.5s), forward tunnel `close` 응답의 진실성(→qsh-core `TunnelHoldRegistry`, closed:true == listener 해제 보장). M7 이월: long-poll 취소의 자원 비해제 + 동시성 무상한(400 폴 → 4,412 threads/372MB 실측, PLAN.md M6판 Step 4 판정 ⑤), `acl_check` tool 노출 결정, `action_of` enum화, `trust add`의 address 갱신 경로 부재(캠페인 백로그), rmcp minor 업그레이드 시 `local_ct_pool` 재검증. **SC7 외부 보안 리뷰 예약은 여전히 운영자 액션 미완 — 재이월**(M8 wire freeze 리드타임 소진 중). 마감 태그 대조에서 남긴 판정 2건: §8.3 "다양한 MCP client에서 동일하게 동작"은 표준 JSON-RPC 설계 논증 + client 2종(raw 하네스·Claude Code) 실증으로 지지 — 멀티클라이언트 실측은 DoD 문면 밖이라 추가 조치 없음; §10 "기존 argument 재해석 금지"는 기계 게이트 없이 L7 fixture diff 리뷰 규율로 방어(L6과 동형) — 기계화 비채택.
+- **철회 (2026-09-07, [ADR-0011](adr/0011-remove-mcp-adapter.md)):** 내장 MCP 어댑터는 M8 Step 6에서 제거한다. 에이전트 연동 면은 `qsh.cli/v1` JSON CLI 하나로 통일한다. 이 절은 역사 기록으로 남긴다.
 
 ### M7 — Trust UX·profiles·doctor
 
@@ -118,6 +119,7 @@
 - **수용 기준 (DoD):** 클린 macOS arm64/x86_64·Linux arm64/x86_64에서 brew/curl 설치 → 동작. Gatekeeper가 notarized 바이너리를 차단하지 않음. musl static 바이너리가 구형 glibc 배포판에서 실행.
   - **(감사 개정 2026-08-21)** "동작"의 정의는 `version --json`이 아니라 **기능 스모크**다: init → trust → `exec --json` 왕복 + PTY 셸 획득 + detach→attach resume이 배포되는 release 프로파일 바이너리로 통과. 근거: 현재 CI의 전 기능 테스트는 dev 프로파일이고 release 바이너리는 기능 테스트 0건으로 출고된다. release 태그 전 CI에서 `--release` 프로파일 통합 테스트를 최소 1회 돌린다.
 - **크기:** 1.5ew (notarization은 Apple 계정 리드타임 — M8 중 시작)
+- **검토 항목(2026-09-07, ADR-0011):** `-W`(ProxyCommand형 stdio와 원격 TCP의 브리지) 필요 여부. `qsh exec`의 pipe stdin 전달과 `-L`로 부족한 사용례가 있을 때만 추가하고 없으면 기각한다.
 
 ## 3. 유예 가드레일 (P1/P2 경계)
 

@@ -581,6 +581,7 @@ freeze 이후에는 고칠 수 없는 것들을 먼저 처리한다.
 - device 개인키 프로세스 상주 사본에 `Zeroizing`.
 - TUI 펌프 스레드 spawn 실패 panic 제거.
 - pairing device_name 길이 상한(현재 `CONTROL_FRAME_MAX` 256 KiB로만 묶임)과 Unicode bidi-override·homoglyph 스푸핑 — `docs/design/protocol.md` §15.5가 M8 백로그로 기록한 2건.
+- **MCP 어댑터 제거(ADR-0011, 2026-09-07 확정).** `qsh mcp` 서브커맨드, `crates/qsh-cli/src/mcp/`, `mcp_conformance.rs`, rmcp·schemars 핀, xtask arch의 `MCP_DIR` 규칙, `docs/man/qsh-mcp.1`을 지우고 PRD·CLI.md §8·ROADMAP M6·architecture.md·testing.md·README·CLAUDE.md·`docs/campaigns/m6-mcp.md`를 맞춘다. `tools_list.json`은 append-only라 두고 같은 디렉터리 README로 은퇴를 적는다. qsh-core의 `qsh mcp` 언급 주석은 서술만 바꾼다. Step 7 threat model 전에 끝낸다.
 
 #### Step 7 — wire format freeze + threat model + OSS-Fuzz 제출
 
