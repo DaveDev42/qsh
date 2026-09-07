@@ -314,3 +314,21 @@ doc-contract로 고정).
 
 이 문서는 M8 Step 3b 마감 커밋에서 `docs/adr/`에 배치됐고 `docs/adr/README.md` 색인에 등재됐다. §6.4 이월
 i·ix(이 문서의 §10)의 소유 스텝은 `PLAN.md` §6.4 표가 Step 5로 적고 있다.
+
+## 추기 — Step 4 (2026-09)
+
+### `-R` accept를 터널 스트림 permit으로 계수한다
+
+3b는 `max_tunnel_streams_per_forward`를 "`-R` 등록 하나당 동시 스트림 수"로 정의해 놓고 예약은 `-L`(`TCP_CONNECT`) 쪽에서만 했다. `-R` 리스너의 accept 루프(`serve_remote_forward`)는 accept가 성공할 때마다 `open_bi`로 `TCP_ACCEPTED` 스트림을 무조건 열었다. 그 위에 있는 QUIC 스트림 상한 1024는 스트림만 막고 accept된 TCP fd와 대기 태스크는 EMFILE까지 쌓인다. `-R` 리스너 포트는 인증 없이 도달할 수 있는 유일한 자원 생성 경로다. Step 4 설계와 검토는 둘 다 이 상한이 유계를 준다고 봤고 main 판정(J13)이 뒤집었다.
+
+결정. `serve_remote_forward`는 accept 직후, `open_bi` 전에 `Quotas::reserve_tunnel_stream(owner, forward_key)`를 부른다. owner는 그 `-R`을 등록한 principal(`opener_key(principal, auth_path)`)이고 forward_key는 등록의 `forward_id`에 `rfwd:` 접두어를 붙인 문자열이다. 거부되면 QUIC 스트림을 열지 않고 TCP를 그대로 닫는다. QUIC 스트림 자체가 없으므로 RESET_STREAM도 없다. TCP 쪽은 평범한 close이고, 클라이언트가 이미 바이트를 보냈다면 커널이 RST를 보낸다. 감사는 `-L`과 같은 기제로 `quota_tunnels_forward`/`quota_tunnels_principal` 첫 건+요약 행을 남기고 `request_id`는 `"-"`, `peer_addr`는 TCP peer다. permit은 splice 태스크 안으로 옮겨져 `accept_one`이 돌아올 때 두 축을 함께 반납한다. 신규 config 키 0, wire 변경 0. §5의 순서 표에 한 줄이 는다.
+
+```
+-R accept(터널):      serve_remote_forward의 listener.accept → Quotas::reserve_tunnel_stream(owner → forward_id) → open_bi(TCP_ACCEPTED) → splice
+```
+
+"forward별"의 정의. `max_tunnel_streams_per_forward`의 키는 `(principal, 자원 문자열)`이고 자원 문자열은 방향마다 다르다. `-L`은 dial 목적지 `host:port`(ACL 자원과 같은 문자열)이고 `-R`은 `rfwd:` 뒤에 등록 `forward_id`를 붙인 것이다. forward_id는 호스트가 민팅한 ULID라 `host:port`와 겹칠 수 없지만, 접두어가 그 보장을 문자열 우연이 아니라 구조로 만든다. `-R`의 ACL 자원은 `bind_host:bind_port`라서 `-L`에서 성립하던 "quota forward 키 == ACL 자원" 대응은 `-R`에서 성립하지 않는다. 한 principal의 `-L`과 `-R` 스트림은 principal 축(256)에서는 합산되고 forward 축(64)에서는 키가 달라 따로 센다.
+
+의도된 결과 하나. `-R` permit은 리스너 소유자 principal 기준으로 예약되므로 TCP 쪽 상대가 누구든 같은 풀을 쓴다. 외부에서 오는 무인증 TCP flood가 그 등록의 64와 소유자의 256을 채울 수 있다. 상한이 아예 없던 상태를 소유자 단위의 유계로 바꾸는 것이 목적이다. 리스너 하나가 소유자의 principal 축을 점유하는 것은 소유자가 `-R` 등록 수와 배치로 감수하는 비용이다. 거부 감사 창의 키는 category 하나라서, 무인증 flood가 `quota_tunnels_forward`/`quota_tunnels_principal` 창을 채우는 동안 같은 category의 다른 principal 거부는 요약 행(principal `"-"`)으로만 남는다. 창 키에 principal을 넣는 것은 상계를 principal 수만큼 늘리는 설계 변경이라 Step 5로 넘긴다.
+
+고정하는 테스트는 넷이다. in-crate 단위 테스트 `remote_forward_accept_past_the_per_forward_stream_cap_is_closed_before_any_quic_stream_opens`는 cap을 4로 낮춰 5번째 accept가 닫히고, 살아 있는 동안 `tunnel_streams_per_forward_in_use`가 4, 종료 뒤 0임을 즉시 상계·폴링·폴링 뒤 상계의 세 단언으로 본다. `refused_remote_forward_accepts_never_open_a_quic_stream`은 forward 축 cap 0에서 TCP 20개를 열고 요청자의 `accept_bi`가 500 ms 안에 아무 스트림도 받지 않음을, `remote_forward_accept_past_the_per_principal_stream_cap_is_refused_on_that_axis`는 principal 축 cap 2에서 세 번째 accept가 `quota_tunnels_principal`로 거부됨을 본다. testkit e2e `remote_forward_accept_past_the_per_forward_stream_cap_is_closed_end_to_end`(`quota.rs`)는 감사 행과 permit 소유자 principal까지 단언한다. 기본값 64에서 512개 TCP 동시 연결로 64 성립·448 즉시 close·fd 델타 ≤ 64를 재는 것은 4c의 T2 시나리오 13이다.
