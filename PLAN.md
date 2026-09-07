@@ -363,7 +363,7 @@ naive 1.25가 예측 1.00보다 큰 것은 baseline 12스레드가 **공유 런�
 - [ ] **DoD 2 — soak**: 24h/100-session에서 idle listener ≤30MB, 세션당 buffer ≤8MB, fd 무증가.
 - [ ] **DoD 3 — 실기기 mobility**: Wi-Fi↔테더링 ≥60회(macOS+Linux) 자동 유지+resume ≥95%, migrated/resumed 분해 보고. 통과 기준은 사전 정의(idle timeout에 기대지 않는 2초 내 재dial). **사람이 실행한다.**
 - [ ] **DoD 4 — wire freeze 후 독립 리뷰 계약** (SC7 — 6.0 참조).
-- [ ] **DoD 5 (감사 개정) — 적대적 부하 하네스**: 스푸핑 Initial flood·대량 연결·principal당 세션 폭주 각각에서 선언된 상한이 실제로 강제되고, 부하 중·후 idle listener RSS/fd가 soak과 같은 bound를 지키며, 기존 세션의 PTY echo가 살아 있음.
+- [x] **DoD 5 (감사 개정) — 적대적 부하 하네스**: 스푸핑 Initial flood·대량 연결·principal당 세션 폭주 각각에서 선언된 상한이 실제로 강제되고, 부하 중·후 idle listener RSS/fd가 soak과 같은 bound를 지키며, 기존 세션의 PTY echo가 살아 있음. **2026-09-08 마감** — Step 4a·4b·4c, 커밋 2f52958. 판정과 실측은 Step 4의 (a)-추기 세 블록에 있다.
 
 ### 6.2 실행 단계 (PR 단위)
 
@@ -568,6 +568,28 @@ B가 남긴 CI 3 OS의 신규 테스트 개별 시간은 4a 커밋 3213796의 ru
 라운드 중 사고 하나. 첫 F4 인스턴스가 cargo 빌드 넷을 동시에 띄웠고 그 뒤 호스트 load가 190~320으로 올라 ps·top까지 멈췄다(09-04 저녁부터 09-07 새벽). 원인은 동시 빌드 자체보다 170 GB 빌드 디렉터리를 Spotlight(`LegacyImporterHost` 47개)와 `syspolicyd`가 95% 찬 디스크 위에서 계속 훑은 것이다. 재부팅 없이 풀린 뒤 `target`을 `target.noindex`로 옮기고 심링크를 뒀다(`.git/info/exclude`에 등록, 커밋 대상 아님). F4는 cargo를 한 번에 하나씩만 띄우는 규칙으로 다시 돌렸다. ADR-0010의 추기(`## 추기 — Step 4 (2026-09)`)는 A-P3-6의 사실 점검을 반영해 main이 놓았다.
 
 게이트는 fmt, clippy -D warnings(host와 x86_64-pc-windows-gnu), xtask arch, cargo deny, nextest 1496 passed / 2 skipped(`--test-threads=1`, 895초)로 닫았다. 커밋 6d8de8c는 CI(run 34094633762)와 fuzz-smoke(run 34094633780) 둘 다 첫 실행에 green이다. Step 4b는 여기서 닫는다.
+
+**(a)-추기 — Step 4c 구현 라운드 판정 + DoD 5 마감 (2026-09-08, main 세션).**
+
+4c는 설계 판정의 셋째 라운드로, DoD 5의 T2 적대 부하 스위트와 그 실행 자리를 만들었다. 브리프 `$SP/step4/BRIEF-4c.md`의 개방질문 일곱은 ARBITRATION-4.md에 이렇게 닫았다. 게이트는 새 환경변수 `QSH_LOAD_STRICT`/`QSH_LOAD_BIN`이고 `#[ignore]`나 `cargo xtask load`는 쓰지 않는다. 30 MB는 release 빌드 idle listener 기준이며 부하 중 상한은 `30 MB + 8 MB × 살아 있는 세션 수`, 하한 단언(`2 MiB < rss`, `fd >= 3`)을 둔다. 시나리오 3의 세션 수는 8이다. CLI.md §6.12에 audit 부피 상계 문장(`max_bytes × (retain + 1)`)을 더하고 `quota_docs.rs`에 핀을 붙인다. 시나리오 1은 bind에 실패한 source를 빼고 진행하되 성립 source가 2 미만이면 실패한다. DoD 5 판정은 main이 Dave-Windows-WSL 실측으로 닫고 load.yml은 회귀 감시자다. nextest.toml 주석은 주어를 4a의 in-process 하네스로 좁히고 doctor 진단 개수는 CLI.md 두 자리를 14로 고쳐 `doctor_docs.rs`가 `EXPECTED_DOCTOR_CODES.len()`과 대조한다.
+
+구현 워크플로우는 다섯 스테이지(S1 측정 헬퍼와 서브프로세스 하네스, S2 시나리오 1·2·3, S3 시나리오 12·13과 진단 A-P2-4/A-P2-5, S4 load.yml과 문서, S5 게이트와 핸드오프)로 돌았다. 서브프로세스 `qsh serve`는 `Sandbox::command_with_bin`과 `ServeGuard::start_with_bin`으로 release 바이너리를 고른다. 시나리오 1의 raw flood client는 소스 주소를 고르는 검증 없는 rustls endpoint라 `qsh-testkit::raw_quic`에 두고 qsh-cli에는 quinn/rustls dev-dep을 넣지 않았다. macOS에는 `/proc`도 `127.0.0.0/8` 다중화도 없어 strict 실행은 전부 WSL에서 했고 WSL에는 fuzz 워커 여덟 개가 8 vCPU를 상시 점유하고 있어 그 위에서 잰 값이다.
+
+적대 라운드는 opus 둘(A 테스트 강도·변이, B 견고성·CI·계약)이 돌았고 둘 다 amber였다. 수용한 것은 시나리오 3의 부하 중 RSS·fd 단언과 200 ms 간격 `RssPeakSampler`(A1·A2·A12·B2, 부하가 끝난 뒤 잰 값은 peak가 아니다), nextest `[profile.load]`(A7·B1·B3), 시나리오 1의 회복 단계(A9), 시나리오 12를 집계 12a와 회전·retention 12b로 나누는 것(A4·A5·A6·B5), 회전 실패 fail-closed 12c 시도(A17), 시나리오 2의 세는 dial 재시도 제거와 30 s 타임아웃(A16·B4), raw UDP 부단계의 워커 차단 해소(B12), `poll_stable` async화(A13), verdict를 단언 뒤에 계산(B6), `classify`에 BrokenPipe(B9), `RLIMIT_NOFILE` 가드(B10), flood client 이동(B13), 문서 핀 강화(B7·B8)와 주석·문서 정정 여섯이다. 기각은 셋이다. echo p95 임계 `max(baseline × 3, 50 ms)`의 50 ms는 제품 절대 상한이고 상대 팔을 좁히면 CI 잡음에 깨진다(A3, 대신 진단에 `load/baseline` 비율을 남긴다). "accept 이전 거부"는 qsh-core 단위 테스트가 소유하고 e2e는 개수·fd·audit 요약만 고정한다(A10). 기본값에서 `validated_rate_limited`가 도달 불가라는 관측은 테스트가 아니라 제품 문제라 시나리오 1의 `validated_rate_per_source=3`은 두고 admission 기본값 재검토를 Step 5로 올린다(A8).
+
+수정 라운드는 F1a(시나리오 1·2, flood client 이동, profile.load, load.yml), F1b(시나리오 3·13, common 헬퍼, classify, RLIMIT 가드, verdict 블록), F2a·F2b·F2c(시나리오 12, 핀, 문서), F3·F3b(게이트, WSL 20회, 지정 변이 실증, 핸드오프)로 돌았다. 하네스가 긴 스테이지를 두 번 도중에 끊어 F2를 셋으로 쪼갰다. 12b 재구성 중 `negotiate_session`이 Hello 교환만 하고 `session.open`을 보내지 않아 허용 행이 한 줄도 안 쓰인다는 것을 찾아 `session_open`/`session_close` RPC 쌍으로 바꿨고 `audit.log.lock` 사이드카를 회전 파일로 세던 오검출도 잡았다. 12c는 A17의 `chmod 500` 구성으로는 writer가 rename 실패를 비치명으로 다루도록 설계돼 있어 fail-closed 관측 지점에 닿지 않는다는 것을 두 번 실측하고 브리프 §4.6의 예외 조항대로 뺐다. fail-closed 계약 자체는 4a의 단위 테스트 `session_open_fails_closed_when_the_audit_sink_cannot_record_an_allow`가 여전히 고정한다.
+
+반박으로 남은 것은 하나다. 12a에 대한 지정 변이 `AUDIT_AGGREGATION_WINDOW` 10 s→1 s가 F2a와 F2c의 두 독립 재구성에서 모두 NOT KILLED다. F2c는 held 연결 16개 위에서 Initial 제한 아래 5/s로 12 s 이상 dial해 거부를 연속으로 만들었는데도 상계가 죽지 않았다. 최초 burst 뒤 quota 거부 감사 행이 더 안 나오는 현상이 원인 후보이고 근본 원인은 못 잡았다. `window_is_fresh` 상시 true 변이는 죽는다(rows 226 > bound 6). 이 항목은 Step 5에서 동적 계측으로 규명한다.
+
+지정 변이 다섯은 넷이 KILLED다. `Sketch::advance_to` 첫 줄 `return;`은 시나리오 1 회복 단계가, retention 무력화는 12b가, `RssPeakSampler` 상시 0은 시나리오 3 하한이, `reserve_connection`의 host-cap `if false`는 시나리오 2가 잡는다(`left: 32, right: 16`, 1.1 s). 다섯째가 위의 집계 창 변이다. 스테이지별 변이는 S2·S3·F1a·F1b·F2a·F2b·F2c가 각자 표로 남겼고 전부 cmp로 원복을 확인했다.
+
+WSL 실측. RUN 9 같은 깨끗한 회차에서 시나리오 2는 RSS baseline 15.5 MB, 부하 중 peak 24.1 MB, idle 24.1 MB(상한 30 MB)이고 시나리오 3은 peak 16.2 MB(상한 96 MB), idle 16.2 MB다. A-P2-5 진단(512 accept flood 중 `session.open` p95)은 8.3 ms(30 표본)라 `Quotas` 뮤텍스를 accept마다 두 번 잡는 비용은 지금 의미가 없다. 그런데 strict 전 스위트 20회 반복은 200건 중 170 pass, 실패 30건이 전부 `dial: Timeout(30s)` 클래스이고 단언 불일치는 0건이다. 시나리오 2가 19/20회로 지배적이다. 서버 stderr를 tee한 진단 세 번 중 두 번은 서버가 31 s 동안 시작 로그 두 줄 외에 아무것도 남기지 않았고 한 번은 같은 batch의 dial 여덟 중 일곱을 4 ms 안에 거부한 뒤 하나만 30 s 동안 응답이 없었다. 커널 UDP 수신 오류 카운터는 늘지 않았다. `admission.rs`와 `quota.rs`에는 tracing 호출이 한 줄도 없어 handshake 이전 판정(Retry/Ignore/Refuse/Admit)은 로그 레벨과 무관하게 보이지 않는다. 원인은 못 잡았고 가설(fuzz 워커와 dial 동시성이 겹친 스케줄링 지연)만 남긴다.
+
+DoD 5는 여기서 닫는다. 근거는 RSS·fd·echo p95·audit 부피의 단언이 WSL 실측에서 한 번도 깨지지 않았다는 것이고 남은 것은 부하 아래 dial 정지라는 별개의 질문이다. 그 질문은 Step 5로 넘긴다. GHA 첫 load.yml 실행이 경합 없는 환경의 답이다. CI(run 34148240314)와 fuzz-smoke(run 34148240184)는 첫 실행에 green이고, load.yml 첫 실행(run 34148240215, ubuntu-24.04 4 vCPU, `ulimit -n` 65536)은 10 tests run, 10 passed, 43.0 s로 WSL의 깨끗한 회차(43.3 s)와 같다. 그 러너에서 시나리오 2는 baseline 15.0 MB, peak 23.2 MB, idle 23.2 MB, 시나리오 3은 peak 15.6 MB에 echo p95가 baseline 0.33 ms, 부하 중 0.67 ms(임계 50 ms), A-P2-5는 8.7 ms다. WSL의 dial 정지는 경합 없는 러너에서 재현되지 않았다.
+
+Step 5 이월 항목. admission·quota 판정 지점에 카운터성 tracing과 서버 하트비트를 넣고 하네스에 dial별 송수신 시각을 남긴다. 집계 창 변이 미검출의 근본 원인. `session.open` 뒤 `session.close`가 미상환 티켓을 해제하지 않아 한 연결이 `MAX_PENDING_TICKETS_PER_CONN`(32)에서 막히는 관측(12b·12c 모두 부딪혔다)이 의도인지 확인. 12c를 실제로 `degraded`에 닿는 구성(활성 파일 자체의 권한 제거나 재시작)으로 다시 만들 것. admission 기본값 재검토(A8). 거부 감사 창 키에 principal(A-P2-4). `cargo doc -D warnings`의 기존 링크 경고. doctor 테스트 SLOW 원인.
+
+게이트는 fmt, clippy -D warnings(host와 x86_64-pc-windows-gnu), xtask arch, cargo deny, nextest 1500 passed / 2 skipped(`--test-threads=1`, 938초)로 닫았다. 커밋은 2f52958이다. Step 4는 4a·4b·4c로 여기서 닫는다.
 
 #### Step 5 — 24h/100-session soak + fd/메모리 게이트 (DoD 2)
 
