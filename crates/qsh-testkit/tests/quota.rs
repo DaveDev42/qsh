@@ -994,6 +994,149 @@ async fn remote_forward_open_past_the_quota_answers_resource_exhausted_and_reope
     h.shutdown().await;
 }
 
+/// J13 (M8 Step 4b, `docs/adr/0010-resource-quotas.md`'s addendum) — the
+/// `-R` accept-time tunnel-stream permit, end to end over the real
+/// `TCP client -> host accept -> QUIC TCP_ACCEPTED -> RemoteForwardAcceptor
+/// -> dialed echo` path `TunnelHarness::remote_forward` wires up (no
+/// hand-rolled stream, unlike `tcp_connect_past_the_forward_quota_answers_
+/// resource_exhausted_and_dials_nothing`'s `-L` twin above — `-R`'s accept
+/// loop is host-driven, so there is no client-side header to send by
+/// hand). `qsh-core`'s own in-crate unit test
+/// (`tunnel::remote::tests::remote_forward_accept_past_the_per_forward_
+/// stream_cap_is_closed_before_any_quic_stream_opens`) already pins the
+/// exact counter arithmetic (N live, N+1 refused, drain back to 0) with
+/// nothing but a bare loopback QUIC pair; this test's job is the two
+/// things that seam cannot see — the real dialed-and-spliced path staying
+/// live, and the real audit sink.
+///
+/// `CAP` is 4, not the production default 64
+/// (`ServeConfig::DEFAULT_MAX_TUNNEL_STREAMS_PER_FORWARD`) — opening 64
+/// real TCP connections each through a real three-hop splice buys nothing
+/// this test does not already prove at 4, same reasoning the in-crate
+/// twin's own doc gives for using 4 there.
+///
+/// Each of the `CAP` connections is proven genuinely spliced (a
+/// non-closing echo round trip — `EchoServer::start_on` uses
+/// `tokio::io::copy`, which answers per-byte rather than only at EOF, so a
+/// round trip proves the splice without ending it) before the next opens,
+/// so by the time the `CAP + 1`-th probe runs, all `CAP` are still alive
+/// and holding their permits — sequential admission, not a single racing
+/// burst, but the property under test (all `CAP` alive *at once* when the
+/// refusal happens) holds either way.
+#[tokio::test(flavor = "multi_thread")]
+async fn remote_forward_accept_past_the_per_forward_stream_cap_is_closed_end_to_end() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    const CAP: usize = 4;
+
+    let h = TunnelHarness::start_with_quotas(QuotaLimits {
+        max_tunnel_streams_per_forward: CAP,
+        ..QuotaLimits::default()
+    })
+    .await;
+    let forward = h.remote_forward("127.0.0.1", h.echo.port()).await;
+    let addr = forward.host_addr();
+
+    let mut live = Vec::with_capacity(CAP);
+    for i in 0..CAP {
+        let mut sock = tokio::time::timeout(Duration::from_secs(2), TcpStream::connect(addr))
+            .await
+            .unwrap_or_else(|_| panic!("connect {i} of {CAP} must not hang"))
+            .unwrap_or_else(|e| panic!("connect {i} of {CAP} within the cap: {e}"));
+        sock.write_all(b"ping").await.expect("write within the cap");
+        let mut buf = [0u8; 4];
+        tokio::time::timeout(Duration::from_secs(2), sock.read_exact(&mut buf))
+            .await
+            .unwrap_or_else(|_| panic!("connection {i} of {CAP} must echo, proving it spliced"))
+            .expect("read the echoed bytes");
+        assert_eq!(&buf, b"ping");
+        live.push(sock);
+    }
+
+    // The (CAP+1)-th connection must be refused with no payload. No QUIC
+    // stream is ever opened for it, so there is no QUIC RESET_STREAM; the
+    // TCP side is an ordinary close, which this socket — having written
+    // nothing — sees as EOF, while a socket that had already written would
+    // see the kernel's RST. Both are the same refusal (the 4a F3 shape
+    // `tunnel_loopback.rs` uses).
+    let mut over_cap = tokio::time::timeout(Duration::from_secs(2), TcpStream::connect(addr))
+        .await
+        .expect("connect must not hang")
+        .expect("TCP connect itself must succeed — only the tunnel-stream permit is refused");
+    let over_cap_peer = over_cap.local_addr().expect("over_cap local addr");
+    let mut buf = [0u8; 1];
+    match tokio::time::timeout(Duration::from_secs(2), over_cap.read(&mut buf))
+        .await
+        .expect("the refused connection must close promptly, not hang")
+    {
+        Ok(0) => {}
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
+            ) => {}
+        other => panic!(
+            "the (cap+1)-th accept must end with no payload — the forward cap is full: {other:?}"
+        ),
+    }
+
+    // The `quota_tunnels_forward` audit line: same shape `-L`'s own
+    // `authorize_and_dial_tunnel` refusal writes (`tcp_connect_past_the_
+    // forward_quota_answers_resource_exhausted_and_dials_nothing`, above),
+    // but `request_id` is `"-"` here — a data-plane TCP accept, not a
+    // control-stream request, triggered this refusal.
+    let records = h.audit().records();
+    let quota_record = records
+        .iter()
+        .find(|r| r.resource == "quota_tunnels_forward")
+        .expect("a quota_tunnels_forward audit record must be written on refusal");
+    assert_eq!(quota_record.request_id, "-");
+    assert_eq!(quota_record.decision, "deny");
+    assert_eq!(
+        quota_record.peer_addr,
+        over_cap_peer.to_string(),
+        "peer_addr must be the real TCP peer, not a placeholder"
+    );
+    // The permit's owner axis: the accept is counted against the principal
+    // that registered the `-R`, keyed exactly as `-L`'s own permits are
+    // (`acl::opener_key`). Without this, an owner string unrelated to the
+    // client would still pass every other assertion here.
+    assert_eq!(
+        quota_record.principal,
+        qsh_core::acl::opener_key(&h.client_principal(), qsh_transport::AuthPath::Pin),
+        "the permit must be charged to the -R registration's owner principal"
+    );
+
+    // Draining every live splice must free every permit — a fresh
+    // connection is admitted again once they are gone.
+    drop(live);
+    drop(over_cap);
+    let reopened = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Ok(mut sock) = TcpStream::connect(addr).await {
+                // Every step retries, the write included: a permit may not
+                // be released yet when `connect` succeeds, and the host
+                // then closes the socket right after — a refusal, not a
+                // failure of this test.
+                let mut buf = [0u8; 2];
+                if sock.write_all(b"ok").await.is_ok()
+                    && sock.read_exact(&mut buf).await.is_ok()
+                    && &buf == b"ok"
+                {
+                    return;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    reopened.expect("every permit must release once its splice ends, admitting a fresh one");
+
+    forward.close().await;
+    h.shutdown().await;
+}
+
 // ==========================================================================
 // I8/I12 (design §4.4/`docs/adr/0010-resource-quotas.md`) — M8 Step 3b S4:
 // the connection-level cap(s) (`max_connections`,

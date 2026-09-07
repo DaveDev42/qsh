@@ -35,44 +35,72 @@ fn read_doc(relative: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("read {}: {err}", path.display()))
 }
 
-/// The first decimal number appearing after `key`'s own occurrence in
-/// `doc`, within a short window — `docs/CLI.md`/`docs/design/
-/// architecture.md`'s shared "`key`(기본 N)" / "key(기본 N, ...)"
-/// convention (quoted-backtick style differs between the two docs, so
-/// this matches on the bare `기본` marker rather than any particular
-/// surrounding punctuation). Scoped to a window right after the key's own
-/// occurrence, not the whole (very long, many-numbered) config-map line —
-/// so a cap change on a *different* key elsewhere on the same line can
-/// never be mistaken for this one's default. Panics with the offending
-/// text on any mismatch, so a doc that stops naming a key — or drifts far
-/// enough from its default that this heuristic can no longer find it —
-/// fails loudly instead of silently agreeing with anything.
+/// The decimal number appearing after `key`, checked at *every*
+/// occurrence of `key` in `doc`, not just the first — `docs/CLI.md`/
+/// `docs/design/architecture.md`'s shared "`key`(기본 N)" / "key(기본 N,
+/// ...)" convention (quoted-backtick style differs between the two docs,
+/// so this matches on the bare `기본` marker rather than any particular
+/// surrounding punctuation). A prose paragraph introduced earlier in the
+/// doc than the canonical config-map line (as happened when 4b added an
+/// `-L`/`-R` paragraph ahead of architecture.md's config map, see
+/// `docs/design/architecture.md`'s config-map section and PROGRESS-4.md's
+/// Stage 4b-F3 note) used to shadow the config map from this check
+/// entirely, since only the *first* occurrence was ever read — a cap
+/// change on the config-map line then went unnoticed. Checking every
+/// occurrence closes that: each occurrence's window (up to 200 chars
+/// after the key) is searched for "기본 N"; occurrences that don't carry
+/// a "기본 N" nearby (e.g. a mention of the key with no default quoted)
+/// are skipped, but at least one must supply a value, and every value
+/// found must agree. Panics with the offending text on any mismatch, so
+/// a doc that stops naming a key anywhere, or names it with conflicting
+/// defaults, fails loudly instead of silently agreeing with anything.
 fn doc_default_after(doc: &str, key: &str) -> u64 {
-    let key_idx = find_key_as_its_own_identifier(doc, key).unwrap_or_else(|| {
-        panic!("doc never names \"{key}\" as its own identifier (not as a prefix of a longer one)")
-    });
-    // Char-based, not byte-based: `doc` is Korean UTF-8, and a fixed byte
-    // offset from `key_idx` can land inside a multi-byte character.
-    let window: String = doc[key_idx..].chars().take(200).collect();
-    let marker_idx = window
-        .find("기본")
-        .unwrap_or_else(|| panic!("no \"기본 N\" found near \"{key}\": {window:?}"));
-    let after = &window[marker_idx + "기본".len()..];
-    let digits: String = after
-        .chars()
-        .skip_while(|c| !c.is_ascii_digit())
-        .take_while(|c| c.is_ascii_digit())
-        .collect();
-    digits
-        .parse::<u64>()
-        .unwrap_or_else(|_| panic!("no number found after \"기본\" near \"{key}\": {after:?}"))
+    let occurrences = find_key_as_its_own_identifier(doc, key);
+    assert!(
+        !occurrences.is_empty(),
+        "doc never names \"{key}\" as its own identifier (not as a prefix of a longer one)"
+    );
+
+    let mut found: Vec<(usize, u64)> = Vec::new();
+    for key_idx in occurrences {
+        // Char-based, not byte-based: `doc` is Korean UTF-8, and a fixed
+        // byte offset from `key_idx` can land inside a multi-byte
+        // character.
+        let window: String = doc[key_idx..].chars().take(200).collect();
+        let Some(marker_idx) = window.find("기본") else {
+            continue;
+        };
+        let after = &window[marker_idx + "기본".len()..];
+        let digits: String = after
+            .chars()
+            .skip_while(|c| !c.is_ascii_digit())
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        let value = digits
+            .parse::<u64>()
+            .unwrap_or_else(|_| panic!("no number found after \"기본\" near \"{key}\": {after:?}"));
+        found.push((key_idx, value));
+    }
+
+    assert!(
+        !found.is_empty(),
+        "\"{key}\" appears in the doc but no occurrence has a \"기본 N\" default nearby"
+    );
+    let first_value = found[0].1;
+    assert!(
+        found.iter().all(|(_, v)| *v == first_value),
+        "\"{key}\" has conflicting \"기본 N\" defaults across occurrences in the doc: {found:?}"
+    );
+    first_value
 }
 
-/// Finds `key` in `doc`, skipping any hit whose next character is still
-/// part of the same identifier (`_` or alphanumeric) — otherwise
-/// `"max_sessions"` matches inside `"max_sessions_per_principal"` and
-/// `doc_default_after` reads the wrong config key's default.
-fn find_key_as_its_own_identifier(doc: &str, key: &str) -> Option<usize> {
+/// Finds every occurrence of `key` in `doc`, skipping any hit whose next
+/// character is still part of the same identifier (`_` or alphanumeric)
+/// — otherwise `"max_sessions"` matches inside
+/// `"max_sessions_per_principal"` and `doc_default_after` reads the wrong
+/// config key's default.
+fn find_key_as_its_own_identifier(doc: &str, key: &str) -> Vec<usize> {
+    let mut hits = Vec::new();
     let mut search_from = 0;
     while let Some(rel_idx) = doc[search_from..].find(key) {
         let idx = search_from + rel_idx;
@@ -81,11 +109,11 @@ fn find_key_as_its_own_identifier(doc: &str, key: &str) -> Option<usize> {
             None => true,
         };
         if boundary_ok {
-            return Some(idx);
+            hits.push(idx);
         }
         search_from = idx + key.len();
     }
-    None
+    hits
 }
 
 /// D1: every `QuotaKind::ALL` category string is named in both docs.

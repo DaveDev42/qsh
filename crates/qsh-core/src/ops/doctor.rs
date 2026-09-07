@@ -31,8 +31,8 @@ use crate::acl::load_or_deny;
 use crate::config::Config;
 use crate::doctor::probe::{self, UdpProbeOutcome};
 use crate::doctor::{
-    CERT_EXPIRED, CERT_EXPIRING_SOON, CLOCK_SKEW, PEER_UNTRUSTED, QSH_PATH_SHADOWED,
-    TRUST_REMOVE_SCOPE, probe_audit_path_writable,
+    CERT_EXPIRED, CERT_EXPIRING_SOON, CLOCK_SKEW, CONFIG_UNKNOWN_KEY, PEER_UNTRUSTED,
+    QSH_PATH_SHADOWED, TRUST_REMOVE_SCOPE, probe_audit_path_writable,
 };
 use crate::hosts::HostsFile;
 use crate::identity::{CERT_BACKDATE_MINUTES, Identity, KeyStore, PlatformKeyStore};
@@ -91,7 +91,11 @@ impl Ops {
     /// each loader already turns a malformed file into `CONFIG_ERROR`
     /// (`crate::config::Config::load`/`HostsFile::load`/`TrustStore::load`'s
     /// own contracts) and doctor does not re-implement a second, tolerant
-    /// parse of the same file just to keep running past it.
+    /// parse of the same file just to keep running past it. `config_
+    /// unknown_key` (below) is a different kind of check on the same file
+    /// and does not relax this: it only ever runs after `Config::load`
+    /// has already succeeded, and compares two parses of the same
+    /// well-formed TOML rather than tolerating a malformed one.
     pub fn doctor(&self, req: DoctorReq, now: SystemTime) -> Result<DoctorData, OpError> {
         let now_unix = unix_seconds(now);
         let identity = crate::identity::read_identity(&self.paths)?.ok_or_else(|| {
@@ -149,6 +153,7 @@ impl Ops {
     ) -> Result<DoctorData, OpError> {
         let mut findings = Vec::new();
         findings.extend(self.doctor_audit_finding(config));
+        findings.extend(self.doctor_config_unknown_key_findings(config));
         findings.extend(self.doctor_acl_finding());
         findings.extend(self.doctor_cert_findings(identity, now_unix)?);
         findings.extend(self.doctor_clock_skew_finding(identity, now_unix)?);
@@ -248,6 +253,62 @@ impl Ops {
             .with_retryable(false)
         })?;
         Ok(clock_skew_finding(not_before, now_unix))
+    }
+
+    /// `config_unknown_key` (`PLAN.md` M8 Step 4b, J10). Reads `config.toml`
+    /// a second time as a bare [`toml::Value`] (not through [`Config`]'s
+    /// `#[serde(default)]` `Deserialize`, which silently drops anything it
+    /// does not recognize — that silence is exactly what this finding
+    /// exists to surface) and compares its leaf key paths against
+    /// `config`'s own, re-serialized the same way. No hand-maintained key
+    /// list: [`collect_leaf_paths`] derives the "known" set from the
+    /// struct itself via `Serialize`, so a future field addition/removal
+    /// to [`Config`] or any of its sections updates this finding's
+    /// vocabulary for free, with nothing here to keep in sync by hand. A
+    /// candidate that only `serde`'s deserializer recognizes under a
+    /// different name (a `#[serde(alias = ...)]`, which never appears in
+    /// `Serialize`'s output) is filtered out by
+    /// [`accepted_under_another_name`] before being reported — see its
+    /// own doc for the one corner it cannot see.
+    ///
+    /// Only reachable once [`Ops::doctor`] already holds a successfully
+    /// loaded `config` — a missing file means `Config::load` returned
+    /// `Config::default()` with nothing to compare against (no finding,
+    /// same as every other "file absent" case in this module), and a
+    /// malformed file would already have failed `Config::load` itself
+    /// (module doc). This method's own re-read can still race a
+    /// concurrent edit or removal after that load; either failure mode
+    /// (unreadable, or fails to parse as *any* TOML) is treated the same
+    /// as "nothing to compare" rather than escalated to a second
+    /// `CONFIG_ERROR` — this diagnostic is best-effort, not a second
+    /// source of truth for whether the file is valid.
+    fn doctor_config_unknown_key_findings(&self, config: &Config) -> Vec<DoctorFinding> {
+        let path = self.paths.config_file();
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return Vec::new();
+        };
+        let Ok(raw) = text.parse::<toml::Value>() else {
+            return Vec::new();
+        };
+        let Ok(known) = toml::Value::try_from(config) else {
+            return Vec::new();
+        };
+
+        let mut present = std::collections::BTreeSet::new();
+        collect_leaf_paths(&raw, String::new(), &mut present);
+        let mut known_paths = std::collections::BTreeSet::new();
+        collect_leaf_paths(&known, String::new(), &mut known_paths);
+
+        present
+            .difference(&known_paths)
+            .filter(|key_path| !accepted_under_another_name(&raw, key_path))
+            .map(|key_path| DoctorFinding {
+                code: CONFIG_UNKNOWN_KEY.code.to_string(),
+                status: "warn".to_string(),
+                detail: format!("{} (key: {key_path})", CONFIG_UNKNOWN_KEY.message),
+                remedy: Some(CONFIG_UNKNOWN_KEY.remedy.to_string()),
+            })
+            .collect()
     }
 
     /// `peer_untrusted`/`trust_remove_scope` (design brief rows #3/#13) —
@@ -352,6 +413,104 @@ fn unix_seconds(t: SystemTime) -> i64 {
         Ok(elapsed) => i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX),
         Err(before_epoch) => -i64::try_from(before_epoch.duration().as_secs()).unwrap_or(i64::MAX),
     }
+}
+
+/// Walks a [`toml::Value`] tree and inserts every *leaf* key path into
+/// `out`, dotted (`serve.max_sessions_per_principal`). A table array's
+/// index is deliberately dropped from the path (`reverse.foo` not
+/// `reverse[0].foo`) so an array-of-tables entry compares by shape, not by
+/// position — [`Ops::doctor_config_unknown_key_findings`]'s own doc
+/// explains why this matters for `Config`, which currently has no such
+/// array field but should not silently break this comparison the day one
+/// is added. An empty table contributes no leaf of its own (nothing to
+/// diff against — an empty `[serve]` and an absent one look identical
+/// either way) — this also means a wholly unknown *empty* section, e.g.
+/// a config.toml with nothing but `[garbage]` and no keys under it, has
+/// no leaf path to compare and so is not reported by
+/// `config_unknown_key` either; only an unknown key (leaf) is ever
+/// flagged, never an unknown but empty table.
+fn collect_leaf_paths(
+    value: &toml::Value,
+    prefix: String,
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    match value {
+        toml::Value::Table(table) => {
+            for (key, child) in table {
+                let path = if prefix.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{prefix}.{key}")
+                };
+                collect_leaf_paths(child, path, out);
+            }
+        }
+        toml::Value::Array(items) => {
+            for item in items {
+                collect_leaf_paths(item, prefix.clone(), out);
+            }
+        }
+        _ => {
+            if !prefix.is_empty() {
+                out.insert(prefix);
+            }
+        }
+    }
+}
+
+/// Looks up the [`toml::Value`] living at a dotted `key_path` inside
+/// `raw`, descending through tables only. A path that runs through an
+/// array along the way (its index already dropped by
+/// [`collect_leaf_paths`]) cannot be resolved to one unambiguous value
+/// and yields `None` — [`accepted_under_another_name`] treats that as
+/// "cannot probe this candidate", not as "this key is unknown".
+fn lookup<'a>(raw: &'a toml::Value, key_path: &str) -> Option<&'a toml::Value> {
+    let mut current = raw;
+    for segment in key_path.split('.') {
+        current = current.as_table()?.get(segment)?;
+    }
+    Some(current)
+}
+
+/// Wraps a single leaf `value` back up in the nested tables its dotted
+/// `key_path` implies, e.g. `serve.resume_ttl_secs` + `3600` becomes the
+/// document `{ serve = { resume_ttl_secs = 3600 } }` and nothing else.
+fn single_key_document(key_path: &str, value: &toml::Value) -> toml::Value {
+    let mut segments: Vec<&str> = key_path.split('.').collect();
+    let mut doc = value.clone();
+    while let Some(segment) = segments.pop() {
+        let mut table = toml::value::Table::new();
+        table.insert(segment.to_string(), doc);
+        doc = toml::Value::Table(table);
+    }
+    doc
+}
+
+/// Filters a `config_unknown_key` candidate that `serde` actually
+/// recognizes under a different name than the one it was written with —
+/// today, only [`crate::config::ServeConfig::resume_ttl`]'s
+/// `#[serde(alias = "resume_ttl_secs")]`, which `Serialize` never
+/// re-emits, so a file written with the alias always looks "unknown" by
+/// [`collect_leaf_paths`]'s round trip alone. Builds a single-key TOML
+/// document containing nothing but this one candidate at its original
+/// path and deserializes it as a [`Config`]: a genuine typo can never
+/// move `Config` off [`Config::default`] (there is no field for it to
+/// land on), so only a real alias — or the canonical name itself —
+/// makes this `true`. A key path [`lookup`] cannot resolve (it runs
+/// through an array) is left flagged rather than probed. A malformed
+/// single-key document (should not happen — it is built from an
+/// already-parsed [`toml::Value`]) is likewise treated as "not an
+/// alias", i.e. still flagged. The one corner this cannot see: an alias
+/// key written with exactly the default value is indistinguishable from
+/// an unrecognized one and stays flagged — harmless, since this
+/// finding's remedy (delete the key) would not change any applied cap
+/// either way.
+fn accepted_under_another_name(raw: &toml::Value, key_path: &str) -> bool {
+    let Some(leaf) = lookup(raw, key_path) else {
+        return false;
+    };
+    let doc = single_key_document(key_path, leaf);
+    matches!(doc.try_into::<Config>(), Ok(config) if config != Config::default())
 }
 
 /// `cert_expired`/`cert_expiring_soon`, pure over an already-read
@@ -1509,5 +1668,223 @@ mod tests {
         assert_eq!(overall_status(std::slice::from_ref(&info)), "ok");
         assert_eq!(overall_status(&[info.clone(), warn.clone()]), "warn");
         assert_eq!(overall_status(&[info, warn, error]), "error");
+    }
+
+    // -----------------------------------------------------------------
+    // config_unknown_key (`PLAN.md` M8 Step 4b, J10).
+    // -----------------------------------------------------------------
+
+    fn config_unknown_key_findings(ops: &Ops) -> Vec<DoctorFinding> {
+        let data = ops
+            .doctor(DoctorReq { host: None }, SystemTime::now())
+            .unwrap();
+        data.findings
+            .into_iter()
+            .filter(|f| f.code == "config_unknown_key")
+            .collect()
+    }
+
+    #[test]
+    fn doctor_reports_config_unknown_key_for_a_typo_d_key_in_a_known_section() {
+        let (_guard, ops) = healthy_ops();
+        std::fs::write(ops.paths().config_file(), "[serve]\nmx_sessions = 4\n").unwrap();
+
+        let findings = config_unknown_key_findings(&ops);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].status, "warn");
+        assert!(
+            findings[0].detail.contains("serve.mx_sessions"),
+            "{:?}",
+            findings[0]
+        );
+    }
+
+    #[test]
+    fn doctor_reports_config_unknown_key_for_a_typo_d_section_name() {
+        let (_guard, ops) = healthy_ops();
+        std::fs::write(ops.paths().config_file(), "[serv]\nbind = \"[::]:1\"\n").unwrap();
+
+        let findings = config_unknown_key_findings(&ops);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(
+            findings[0].detail.contains("serv.bind"),
+            "{:?}",
+            findings[0]
+        );
+    }
+
+    #[test]
+    fn doctor_reports_config_unknown_key_for_a_typo_d_key_nested_in_a_known_section() {
+        let (_guard, ops) = healthy_ops();
+        std::fs::write(
+            ops.paths().config_file(),
+            "[reverse]\nbackoff_initial_m = 5\n",
+        )
+        .unwrap();
+
+        let findings = config_unknown_key_findings(&ops);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(
+            findings[0].detail.contains("reverse.backoff_initial_m"),
+            "{:?}",
+            findings[0]
+        );
+    }
+
+    #[test]
+    fn doctor_reports_no_config_unknown_key_when_every_key_is_recognized() {
+        let (_guard, ops) = healthy_ops();
+        std::fs::write(
+            ops.paths().config_file(),
+            "[serve]\nmax_sessions_per_principal = 4\n\n[reverse]\ncontroller = \"ctrl\"\n",
+        )
+        .unwrap();
+
+        assert!(config_unknown_key_findings(&ops).is_empty());
+    }
+
+    /// A-P1-1/B-P1-3 (4b adversarial round): `ServeConfig::resume_ttl` is
+    /// documented (`config.rs`) to accept `resume_ttl_secs` as a
+    /// `#[serde(alias)]`. `Serialize` never re-emits that alias — only
+    /// the canonical `resume_ttl` — so a naive present/known leaf-path
+    /// diff flags it as unknown even though it is fully recognized and
+    /// applied. This test fixes both halves at once: no finding, and
+    /// (loaded the real way, not through this probe) the alias actually
+    /// set the TTL.
+    #[test]
+    fn doctor_reports_no_config_unknown_key_for_the_documented_resume_ttl_alias() {
+        let (_guard, ops) = healthy_ops();
+        std::fs::write(
+            ops.paths().config_file(),
+            "[serve]\nresume_ttl_secs = 3600\n",
+        )
+        .unwrap();
+
+        assert!(config_unknown_key_findings(&ops).is_empty());
+        let config = Config::load(ops.paths()).unwrap();
+        assert_eq!(config.serve.resume_ttl(), Duration::from_secs(3600));
+    }
+
+    /// The alias filter must not swallow an unrelated typo sitting next
+    /// to it in the same file — `accepted_under_another_name` is a
+    /// per-candidate probe, not a blanket "this section is fine" switch.
+    #[test]
+    fn doctor_reports_config_unknown_key_for_a_typo_next_to_a_recognized_alias() {
+        let (_guard, ops) = healthy_ops();
+        std::fs::write(
+            ops.paths().config_file(),
+            "[serve]\nresume_ttl_secs = 3600\nmax_sesions_per_principal = 4\n",
+        )
+        .unwrap();
+
+        let findings = config_unknown_key_findings(&ops);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(
+            findings[0]
+                .detail
+                .contains("serve.max_sesions_per_principal"),
+            "{:?}",
+            findings[0]
+        );
+    }
+
+    /// B-P2-4 (4b adversarial round): the module doc on
+    /// [`Ops::doctor_config_unknown_key_findings`] promises that a
+    /// config.toml which fails to parse as *any* TOML (e.g. clobbered by
+    /// a concurrent edit after `Config::load` already succeeded) is
+    /// "nothing to compare", not a second error source. Calls the
+    /// private probe directly with a malformed file, bypassing
+    /// `Ops::doctor`'s own `Config::load` (which would fail first on the
+    /// same input and never reach this method in practice).
+    #[test]
+    fn doctor_config_unknown_key_findings_is_empty_for_malformed_config_toml() {
+        let (_guard, ops) = healthy_ops();
+        std::fs::write(ops.paths().config_file(), "[serve\nthis = = broken\n").unwrap();
+
+        let findings = ops.doctor_config_unknown_key_findings(&Config::default());
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn doctor_reports_no_config_unknown_key_when_config_toml_is_absent() {
+        let (_guard, ops) = healthy_ops();
+        // `healthy_ops` never writes a config.toml — `Config::load`
+        // already yields `Config::default()` for a missing file
+        // (`crate::config::Config::load`'s own doc), so there is nothing
+        // for this probe to compare against.
+        assert!(!ops.paths().config_file().exists());
+
+        assert!(config_unknown_key_findings(&ops).is_empty());
+    }
+
+    /// B-P2-3 (4b adversarial round): a true lockstep in both directions,
+    /// not a one-way `contains` check. `ServeConfig` is built as a
+    /// struct literal with every field set to `Some(..)` and no
+    /// `..Default::default()` spread — if a field is ever added to
+    /// `ServeConfig`, this literal fails to compile until the new field
+    /// is named here too, and the expected set below is updated to
+    /// match. `toml`'s `Serialize` omits an `Option::None` field
+    /// entirely (no TOML `null`), which is why every field must be
+    /// `Some`: a `None` silently vanishes from `serve.*` on the
+    /// serialized side rather than producing a leaf to compare, and
+    /// would let a renamed/removed field escape detection.
+    /// [`toml::Value::try_from`] then round-trips the same way
+    /// [`Ops::doctor_config_unknown_key_findings`] does, and the
+    /// resulting `serve.*` leaf-path set must equal the hard-coded
+    /// expectation exactly — `assert_eq!` on two `BTreeSet`s, not
+    /// `contains`, so a name change (not just a field count change) also
+    /// fails this test.
+    #[test]
+    fn known_leaf_paths_round_trip_covers_every_serve_cap_key() {
+        const ALL_SERVE_KEYS: [&str; 16] = [
+            "bind",
+            "replay_bytes",
+            "resume_ttl",
+            "close_grace_ms",
+            "max_concurrent_handshakes",
+            "handshake_rate_per_source",
+            "max_sessions",
+            "max_sessions_per_principal",
+            "max_exec_per_principal",
+            "validated_rate_per_source",
+            "max_exec",
+            "max_tunnel_streams_per_principal",
+            "max_tunnel_streams_per_forward",
+            "max_remote_forwards_per_principal",
+            "max_connections_per_principal",
+            "max_connections",
+        ];
+        let serve = crate::config::ServeConfig {
+            bind: Some("[::]:4433".to_string()),
+            replay_bytes: Some(1),
+            resume_ttl: Some(2),
+            close_grace_ms: Some(3),
+            max_concurrent_handshakes: Some(4),
+            handshake_rate_per_source: Some(5),
+            max_sessions: Some(6),
+            max_sessions_per_principal: Some(7),
+            max_exec_per_principal: Some(8),
+            validated_rate_per_source: Some(9),
+            max_exec: Some(10),
+            max_tunnel_streams_per_principal: Some(11),
+            max_tunnel_streams_per_forward: Some(12),
+            max_remote_forwards_per_principal: Some(13),
+            max_connections_per_principal: Some(14),
+            max_connections: Some(15),
+        };
+        let config = Config {
+            serve,
+            ..Default::default()
+        };
+        let value = toml::Value::try_from(&config).unwrap();
+        let mut known = std::collections::BTreeSet::new();
+        collect_leaf_paths(&value, String::new(), &mut known);
+
+        let serve_paths: std::collections::BTreeSet<&str> = known
+            .iter()
+            .filter_map(|p| p.strip_prefix("serve."))
+            .collect();
+        let expected: std::collections::BTreeSet<&str> = ALL_SERVE_KEYS.into_iter().collect();
+        assert_eq!(serve_paths, expected);
     }
 }

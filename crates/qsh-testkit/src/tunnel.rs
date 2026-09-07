@@ -367,6 +367,19 @@ impl TunnelHarness {
         &self.host.audit
     }
 
+    /// The principal the host authenticates this harness's client as —
+    /// passthrough of [`LoopbackHarness::client_pin`], read out of the
+    /// host's trust store rather than restated by the caller. For a test
+    /// that has to name the owner of something the host attributed (e.g.
+    /// the `-R` accept permit's `opener_key`). Panics for a harness whose
+    /// client is not pinned at all.
+    pub fn client_principal(&self) -> qsh_transport::Principal {
+        self.host
+            .client_pin
+            .clone()
+            .expect("this harness's client is pinned")
+    }
+
     /// Bind a `-L` listener on an **ephemeral** loopback port forwarding to
     /// `host:port` as the host sees it, and start serving it over this
     /// harness's connection. The returned handle owns the listener: drop it

@@ -3446,6 +3446,8 @@ impl Server {
                 listener,
                 conn.clone(),
                 forward_id.clone().into_bytes(),
+                Arc::clone(&self.quotas),
+                Arc::clone(&self.audit),
             ),
             forward_id.clone(),
         ));

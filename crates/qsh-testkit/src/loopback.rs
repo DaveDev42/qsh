@@ -16,7 +16,7 @@ use qsh_core::server::Server;
 use qsh_proto::wire::{self, Hello};
 use qsh_transport::{
     CertificateDer, Connection, Dialed, Dialer, Fingerprint, FramedStream, Listener, LocalIdentity,
-    Principal, StaticTrust,
+    Principal, StaticTrust, TrustEvaluator,
 };
 
 use crate::chaos::{ChaosPolicy, ChaosProxy};
@@ -119,6 +119,13 @@ pub struct LoopbackHarness {
     pub dialer: Dialer,
     /// The client identity (to build alternative dialers).
     pub client: TestIdentity,
+    /// The principal the host pins [`Self::client`] under, read out of the
+    /// host's own trust store at bind time — the value the host will
+    /// authenticate this client as, not a name the test restates. `None`
+    /// when the harness was built with a trust store that has no pin for
+    /// this identity (a CA-only client). Observation only; nothing in the
+    /// harness decides anything with it.
+    pub client_pin: Option<Principal>,
     /// The server identity.
     pub server_identity: TestIdentity,
     /// A second client identity the host also pins, as `device:phone` —
@@ -319,6 +326,7 @@ impl LoopbackHarness {
         quota_limits: Option<qsh_core::quota::QuotaLimits>,
     ) -> Self {
         let server_identity = make_identity();
+        let client_pin = server_trust.lookup_pin(&client.fingerprint);
         let client_trust = StaticTrust::empty()
             .with_pin(server_identity.fingerprint, Principal::Device("box".into()));
         let listener = Listener::bind(
@@ -403,6 +411,7 @@ impl LoopbackHarness {
             chaos,
             dialer: Dialer::new(client.local.clone(), Arc::new(client_trust)),
             client,
+            client_pin,
             server_identity,
             second_client: None,
             second_dialer: None,

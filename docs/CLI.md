@@ -836,6 +836,16 @@ qsh serve --bind <ip:port>
   `authorize_stream`의 connection-level 거부와 같은 sentinel `"-"`를 싣는다. 어느 축이든
   admission과 동일하게 창(10초)당 category별 1행 + 요약 1행으로 집계된다(`quota.rs`가
   `admission.rs`의 `WindowState`/`AuditWindow` 구조를 그대로 재사용).
+- **`-R` accept도 터널 스트림 축에 계수된다(M8 Step 4b).** `-L`뿐 아니라 `-R` 리스너로 들어오는
+  TCP accept도 `max_tunnel_streams_per_forward`·`max_tunnel_streams_per_principal`에 그대로
+  잡힌다: `serve_remote_forward`가 accept 직후·`open_bi` 전에 두 상한을 예약하고, 초과분은
+  QUIC 스트림을 전혀 열지 않은 채 TCP를 즉시 닫는다. 이때 audit는 `quota_tunnels_forward`/
+  `quota_tunnels_principal`로 남고 `request_id`는 대응하는 control 요청이 없으므로 `"-"`,
+  `peer_addr`는 거부된 그 TCP accept의 peer 주소다.
+- **Audit sink가 degraded인 동안은 fail-closed다(M8 Step 4a).** 치명적 쓰기 실패(디스크 풀 등)로
+  audit sink가 degraded로 latch되면 그 동안의 `session.attach`/`session.resume`과 세션 쓰기는
+  감사 없는 allow를 만들지 않기 위해 `PERMISSION_DENIED`로 거부된다 — 이는 버그가 아니라 의도된
+  fail-closed다. sink가 회복되면 같은 세션의 재부착은 다시 성공한다.
 
 ### 6.13 장기 실행 모드: `qsh listen` / `qsh reverse`
 
@@ -1033,6 +1043,7 @@ qsh doctor [host] --json
 | `acl_policy_missing` | error | `acl.toml`이 없음 — `qsh serve`/`qsh listen`(§6.12·§6.13)의 시작 진단과 같은 검사·같은 code(`ACL_POLICY_MISSING_CODE`)를 재사용한다. default-deny로 모든 요청이 거부되는 상태 |
 | `acl_policy_invalid` | error | `acl.toml`이 있지만 파싱/검증에 실패함 — 같은 시작 진단(`ACL_POLICY_INVALID_CODE`)을 재사용한다. `detail`이 시작 진단과 같은 banner(경로·오류 코드·오류 상세·예시)를 담는다 |
 | `qsh_path_shadowed` | warn | `$PATH`에서 지금 실행 중인 바이너리(`current_exe`)보다 앞서는 다른 `qsh` 실행파일이 있음 — 맨몸 `qsh`를 실행하면 그 다른 바이너리가 대신 뜬다 |
+| `config_unknown_key` | warn | `config.toml`에 `Config`가 모르는 키 경로가 있어 조용히 무시되고 있음(§2.3의 "알 수 없는 키는 오류 없이 무시된다" 계약 그대로 — `deny_unknown_fields`는 쓰지 않는다). 상한 키 이름 오타면 그 상한은 기본값으로 남는다. `detail`이 문제의 키 경로를 밝힌다 |
 | `trust_remove_scope` | info | `trust.toml`에 pin이 하나라도 있으면 상시 노출되는 고지 — `trust remove`의 유효 범위(§6.11)를 다시 알려준다: 제거는 다음 handshake부터만 적용되고, 이미 확립된 연결은 협상된 권한 전체를 연결이 끊길 때까지 유지한다 |
 
 **연결성 진단의 우선순위 규칙.** 한 probe 실패는 항상 code 하나만 낸다: probe 대상이 `[reverse].controller`면 결과와 무관하게 `controller_unreachable`이고, `host` 인자로 준 일반 대상이면 침묵 타임아웃은 `udp_egress_blocked`, OS의 즉시 거부(경로 없음)는 `no_route`다 — 세 code가 한 실패에 동시에 나오는 일은 없다.
