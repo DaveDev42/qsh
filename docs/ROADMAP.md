@@ -120,6 +120,7 @@
   - **(감사 개정 2026-08-21)** "동작"의 정의는 `version --json`이 아니라 **기능 스모크**다: init → trust → `exec --json` 왕복 + PTY 셸 획득 + detach→attach resume이 배포되는 release 프로파일 바이너리로 통과. 근거: 현재 CI의 전 기능 테스트는 dev 프로파일이고 release 바이너리는 기능 테스트 0건으로 출고된다. release 태그 전 CI에서 `--release` 프로파일 통합 테스트를 최소 1회 돌린다.
 - **크기:** 1.5ew (notarization은 Apple 계정 리드타임 — M8 중 시작)
 - **검토 항목(2026-09-07, ADR-0011):** `-W`(ProxyCommand형 stdio와 원격 TCP의 브리지) 필요 여부. `qsh exec`의 pipe stdin 전달과 `-L`로 부족한 사용례가 있을 때만 추가하고 없으면 기각한다.
+- **추가 범위(2026-09-07, 사용자 요청):** `qsh service install|uninstall|status [--json]`. `serve`, `listen`, `reverse <controller>`를 그 머신의 서비스 매니저에 등록한다. macOS는 사용자 LaunchAgent(`~/Library/LaunchAgents/io.qsh.<mode>.plist`, `KeepAlive`), Linux는 systemd user unit(`~/.config/systemd/user/qsh-<mode>.service`, `Restart=always`)이며 매니저가 없거나 Windows면 `UNSUPPORTED`다. unit 본문은 주어진 인자를 그대로 고정하고 qsh 자체의 데몬화(CLI.md §6.12 foreground 전용)는 바꾸지 않는다. 로직은 qsh-core `Ops`에 두고 CLI는 렌더만 한다. `qsh doctor`에 서비스 미등록과 linger 미설정 진단을 더한다. unit 예시 문서 `docs/deploy/service.md`는 M8 Step 6 문서 라운드에서 먼저 낸다.
 
 ## 3. 유예 가드레일 (P1/P2 경계)
 
@@ -136,7 +137,7 @@
 | Relay (§14, 별도 제품) | "작은 relay 하나면" | P0 의무는 세션 identity와 transport 분리뿐(resume이 이미 강제). **`--relay` flag는 stub조차 없음** |
 | Forward-route live carrier·`-R` 자동 재발행 (M8 소유) | 터널이 recovery 후에도 신규 연결을 서비스하길 기대 | 연결 손실→resume에서 터널 스트림은 깨끗이 종료된다는 현행 의미론을 M4가 테스트로 고정(`tunnel_chaos.rs`의 개정 강제 트랩)했고 README Known limitations가 고지한다. 변경은 터널 recovery 의미론 재설계라 **M8 백로그 소유** — M4 마감 노트가 M5 입력으로 이관, M5가 범위 밖 판정 후 여기 등재(PLAN.md M5판 §3 (v)) |
 | Cert rotation UX (P1) | 만료 | P0: 만료 30일 전 doctor 경고만 |
-| Service 설치 (P1) | 상시 실행 요구 | launchd/systemd unit은 **문서로만** 제공 |
+| Service 설치 (P1 → M9 범위로 승격, 2026-09-07) | 상시 실행 요구 | M8까지는 unit 예시 문서(`docs/deploy/service.md`, M8 Step 6)만 제공하고 `qsh service install`은 M9 범위 항목대로 구현한다 |
 | **메타 가드레일** | — | `qsh capabilities --json` == fixture 테스트: 새 capability는 fixture diff로만 추가 가능 (리뷰 가능한 산출물). + ErrorCode 전수 도달성 테스트: 존재하지만 만들 수 없는 코드 금지 |
 
 ## 4. 일정 리스크 5건
