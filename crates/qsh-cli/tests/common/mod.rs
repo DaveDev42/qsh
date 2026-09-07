@@ -18,6 +18,7 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -91,7 +92,15 @@ impl Sandbox {
     /// A `qsh` [`Command`] with the environment scrubbed of anything that
     /// could redirect it at the developer's real configuration.
     pub fn command(&self, args: &[&str]) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_qsh"));
+        self.command_with_bin(Path::new(env!("CARGO_BIN_EXE_qsh")), args)
+    }
+
+    /// Like [`command`](Self::command), but against an explicit binary
+    /// rather than the nextest-built `CARGO_BIN_EXE_qsh` — T2's adversarial
+    /// load harness (`crates/qsh-cli/tests/adversarial_load.rs`) measures a
+    /// release build, never the debug test binary (`BRIEF-4c.md` §3.2/J2).
+    pub fn command_with_bin(&self, bin: &Path, args: &[&str]) -> Command {
+        let mut command = Command::new(bin);
         command
             .args(args)
             .env("QSH_CONFIG_DIR", &self.config)
@@ -186,6 +195,41 @@ impl Sandbox {
                     .unwrap_or_else(|e| panic!("audit line is not JSON: {e}: {line:?}"))
             })
             .collect()
+    }
+
+    /// Every audit record across the *live* log and every rotated
+    /// `audit.log.N` (4c adversarial review A6: [`Sandbox::audit_records`]
+    /// above only reads `audit.log`, which silently undercounts once
+    /// rotation has actually happened — T2 scenario 12b's whole point, and
+    /// a latent risk for 12a too if `[audit].max_bytes` is ever small
+    /// enough to rotate). File order does not matter to any T2 caller
+    /// (every use is a row count or a byte sum, not a timeline), so this
+    /// does not attempt to reconstruct chronological order across files.
+    pub fn audit_records_all(&self) -> Vec<Value> {
+        let mut files: Vec<PathBuf> = std::fs::read_dir(&self.state)
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("audit.log"))
+            })
+            .collect();
+        files.sort();
+        let mut records = Vec::new();
+        for path in &files {
+            let Ok(text) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            for line in text.lines() {
+                records.push(serde_json::from_str(line).unwrap_or_else(|e| {
+                    panic!("audit line is not JSON: {e}: {line:?} ({path:?})")
+                }));
+            }
+        }
+        records
     }
 }
 
@@ -331,11 +375,23 @@ impl ServeGuard {
         Self::spawn(host, extra)
     }
 
+    /// Like [`start_with`](Self::start_with), against an explicit release
+    /// binary rather than `CARGO_BIN_EXE_qsh` (`BRIEF-4c.md` §3.2/J2 — T2
+    /// measures a release `qsh serve`, never the debug test binary).
+    pub fn start_with_bin(host: &Sandbox, bin: &Path, extra: &[&str]) -> Self {
+        plant_allow_all_acl(host);
+        Self::spawn_with_bin(host, bin, extra)
+    }
+
     fn spawn(host: &Sandbox, extra: &[&str]) -> Self {
+        Self::spawn_with_bin(host, Path::new(env!("CARGO_BIN_EXE_qsh")), extra)
+    }
+
+    fn spawn_with_bin(host: &Sandbox, bin: &Path, extra: &[&str]) -> Self {
         let mut args: Vec<&str> = extra.to_vec();
         args.extend_from_slice(&["serve", "--bind", "127.0.0.1:0"]);
         let mut child = host
-            .command(&args)
+            .command_with_bin(bin, &args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -832,5 +888,217 @@ pub fn wait_for_audit(
             panic!("no audit record matching {what} within 10s; log: {records:#?}");
         }
         thread::sleep(Duration::from_millis(20));
+    }
+}
+
+// --- T2 adversarial load measurement helpers (`PLAN.md` M8 Step 4c,
+// `BRIEF-4c.md` §3.3/§3.1). `qsh-cli`'s other integration-test binaries
+// never call these, but this module's blanket `#![allow(dead_code)]` at
+// the top of the file already covers that — no separate
+// `#[allow(dead_code)]` is added here (`ARBITRATION-4.md` 4c 판정 §3.1).
+
+/// Resident set size of `pid` in KiB, read from `/proc/<pid>/status`'s
+/// `VmRSS:` line. Linux only — `None` on every other platform, which a
+/// caller under `QSH_LOAD_STRICT` turns into a hard failure and a caller
+/// without it turns into a skip (same shape as `reverse_e2e.rs`'s
+/// `required_by_strict`).
+#[cfg(target_os = "linux")]
+pub fn rss_kib(pid: u32) -> Option<u64> {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    status.lines().find_map(|line| {
+        let rest = line.strip_prefix("VmRSS:")?;
+        let digits: String = rest.chars().filter(|c| c.is_ascii_digit()).collect();
+        digits.parse().ok()
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn rss_kib(_pid: u32) -> Option<u64> {
+    None
+}
+
+/// Count of open file descriptors `pid` currently holds, via
+/// `/proc/<pid>/fd`'s entries. Linux only, same `None`-elsewhere contract
+/// as [`rss_kib`]. Unlike `qsh-core`'s `pty::tests::open_fd_count` (which
+/// only ever reads `/dev/fd` for *this* process), T2 needs the count for a
+/// `qsh serve` child it does not share an address space with.
+#[cfg(target_os = "linux")]
+pub fn open_fd_count(pid: u32) -> Option<usize> {
+    std::fs::read_dir(format!("/proc/{pid}/fd"))
+        .ok()
+        .map(|entries| entries.count())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn open_fd_count(_pid: u32) -> Option<usize> {
+    None
+}
+
+/// How many consecutive samples [`poll_stable`] waits to agree (to within
+/// [`STABILIZE_REL_TOLERANCE`]) before calling a metric converged.
+const STABILIZE_WINDOW: usize = 3;
+
+/// Relative variation across the last [`STABILIZE_WINDOW`] samples below
+/// which a metric counts as stable.
+const STABILIZE_REL_TOLERANCE: f64 = 0.01;
+
+/// Poll interval for [`poll_stable`] (`BRIEF-4c.md` §3.3 — 200ms steps).
+pub const STABILIZE_INTERVAL: Duration = Duration::from_millis(200);
+
+/// Poll ceiling for [`poll_stable`] (`BRIEF-4c.md` §3.3 — at most 25
+/// reads, i.e. 5s worst case).
+pub const STABILIZE_MAX_ITERS: usize = 25;
+
+/// True once the last [`STABILIZE_WINDOW`] entries of `history` (oldest
+/// first) are all within [`STABILIZE_REL_TOLERANCE`] of the window's max —
+/// the pure predicate half of [`poll_stable`], split out so it has a unit
+/// test that needs no `/proc` and no sleeping (`docs/design/testing.md`'s
+/// sleep-free CI discipline is about wall-clock waits, not about this
+/// judgement being untestable).
+pub fn converged(history: &[u64]) -> bool {
+    if history.len() < STABILIZE_WINDOW {
+        return false;
+    }
+    let window = &history[history.len() - STABILIZE_WINDOW..];
+    let max = *window.iter().max().expect("non-empty window");
+    let min = *window.iter().min().expect("non-empty window");
+    if max == 0 {
+        return min == 0;
+    }
+    ((max - min) as f64) / (max as f64) < STABILIZE_REL_TOLERANCE
+}
+
+/// Poll `sample` on [`STABILIZE_INTERVAL`] up to [`STABILIZE_MAX_ITERS`]
+/// times, stopping early once [`converged`] holds. Returns the last
+/// reading and whether it converged before the ceiling — a caller that
+/// gets `false` back writes "수렴하지 않음" into its diagnostic block
+/// rather than trusting the value as settled (`BRIEF-4c.md` §3.3). A `None`
+/// reading (metric unavailable on this platform) is not counted toward
+/// convergence but does not stop the poll either — the ceiling still
+/// applies, and the caller sees the final `None` and `converged = false`.
+///
+/// `async`, sleeping on `tokio::time::sleep` rather than
+/// `std::thread::sleep` (4c adversarial review A13): every caller runs
+/// inside a `#[tokio::test(flavor = "multi_thread")]` body, and a
+/// synchronous sleep here blocked a whole tokio worker thread for up to 5s
+/// per call while other scenario tasks (the flood, the echo loop) needed
+/// to keep running concurrently on the same runtime. This is still a
+/// wall-clock wait, not a substitute for `tokio::time::pause()` — it is a
+/// *condition* poll (stop as soon as three readings agree) rather than a
+/// *fixed* one, which is the distinction `docs/design/testing.md`'s
+/// sleep-free CI discipline actually draws.
+pub async fn poll_stable<F: FnMut() -> Option<u64>>(mut sample: F) -> (Option<u64>, bool) {
+    let mut history = Vec::with_capacity(STABILIZE_MAX_ITERS);
+    let mut last = None;
+    for i in 0..STABILIZE_MAX_ITERS {
+        last = sample();
+        if let Some(value) = last {
+            history.push(value);
+            if converged(&history) {
+                return (last, true);
+            }
+        }
+        if i + 1 < STABILIZE_MAX_ITERS {
+            tokio::time::sleep(STABILIZE_INTERVAL).await;
+        }
+    }
+    (last, false)
+}
+
+/// Sampling interval for [`RssPeakSampler`] — the same 200ms cadence
+/// [`poll_stable`] uses (`ARBITRATION-4.md` 4c 적대 검토 판정, A1/A2/A12/B2).
+pub const RSS_PEAK_SAMPLE_INTERVAL: Duration = Duration::from_millis(200);
+
+/// Tracks `rss_kib(pid)`'s maximum on a background task while a load
+/// section runs concurrently with it, rather than after the fact.
+///
+/// [`poll_stable`] answers "what did RSS settle to once things quieted
+/// down"; it cannot answer "what was the highest RSS *during* the load",
+/// because by the time a caller invokes it the load section has already
+/// returned (4c adversarial review A12: scenario 2's and 3's post-hoc
+/// `rss_peak` reading was, in practice, a steady-state reading taken after
+/// the flood/session-open loop had already finished awaiting, not a peak
+/// sampled while it ran). This instead starts sampling before the load
+/// section begins and keeps the running maximum until [`Self::stop`] is
+/// awaited once the load section's own `.await` has resolved.
+pub struct RssPeakSampler {
+    stop: Arc<AtomicBool>,
+    handle: tokio::task::JoinHandle<Option<u64>>,
+}
+
+impl RssPeakSampler {
+    /// Start sampling `pid`'s RSS every [`RSS_PEAK_SAMPLE_INTERVAL`] in a
+    /// background task. Call this immediately before the load section
+    /// begins.
+    pub fn start(pid: u32) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_task = Arc::clone(&stop);
+        let handle = tokio::spawn(async move {
+            let mut peak: Option<u64> = None;
+            loop {
+                if let Some(sample) = rss_kib(pid) {
+                    peak = Some(peak.map_or(sample, |p| p.max(sample)));
+                }
+                if stop_task.load(Ordering::Relaxed) {
+                    return peak;
+                }
+                tokio::time::sleep(RSS_PEAK_SAMPLE_INTERVAL).await;
+            }
+        });
+        Self { stop, handle }
+    }
+
+    /// Stop sampling — call this right after the load section's own
+    /// `.await` resolves — and return the observed maximum (`None` only if
+    /// `rss_kib` never returned `Some`, the same off-Linux/unavailable
+    /// contract as [`poll_stable`]).
+    pub async fn stop(self) -> Option<u64> {
+        self.stop.store(true, Ordering::Relaxed);
+        self.handle.await.unwrap_or(None)
+    }
+}
+
+/// Minimum `RLIMIT_NOFILE` soft limit T2 needs (4c adversarial review B10):
+/// scenario 13 alone opens 512 concurrent TCP sockets in the test process,
+/// on top of whatever fds the `qsh serve` child itself holds, so an
+/// ambient `ulimit -n` below this produces failures indistinguishable from
+/// a real fd leak.
+pub const MIN_NOFILE_SOFT_LIMIT: u64 = 1200;
+
+/// The current shell's `RLIMIT_NOFILE` soft limit (`ulimit -n` is a shell
+/// builtin, not a program, so this shells out through `sh -c` rather than
+/// executing it directly — same approach `adversarial_load.rs`'s own
+/// `nofile_limit` diagnostic uses, kept separate here rather than shared
+/// because that one is diagnostic-only and never load-bearing).
+fn nofile_soft_limit() -> Option<u64> {
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg("ulimit -n")
+        .output()
+        .ok()?;
+    std::str::from_utf8(&output.stdout)
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// Fail loudly, with a clear diagnosis, when the ambient `ulimit -n` is
+/// below [`MIN_NOFILE_SOFT_LIMIT`] (4c adversarial review B10). Call this
+/// from every `boot`/`boot_with_flood_client`-style helper — those only
+/// ever run once a scenario's own `QSH_LOAD_STRICT` gate has already let
+/// it through, so this never fires on a plain `skip()`ped run. `None`
+/// (limit undeterminable) does not fail — same fail-open-on-unknown
+/// contract [`rss_kib`]/[`open_fd_count`] already use.
+pub fn ensure_nofile_limit() {
+    if let Some(limit) = nofile_soft_limit()
+        && limit < MIN_NOFILE_SOFT_LIMIT
+    {
+        panic!(
+            "ulimit -n is {limit}, below T2's {MIN_NOFILE_SOFT_LIMIT} minimum — scenario 13 \
+             alone opens 512 concurrent TCP sockets; raise the runner's/shell's open-file limit \
+             (`ulimit -n {MIN_NOFILE_SOFT_LIMIT}` or higher) before re-running rather than \
+             reading a failure here as an RSS/fd regression"
+        );
     }
 }
