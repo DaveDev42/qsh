@@ -28,7 +28,7 @@ pub mod probe;
 /// `doctor.run`'s contract keys off of; this enum is the in-process
 /// convenience on top of it).
 ///
-/// 13 variants, one per `docs/CLI.md` §6.17 finding code — a closed,
+/// 14 variants, one per `docs/CLI.md` §6.17 finding code — a closed,
 /// additive-only set (`PLAN.md` M7 §4.1 #5): [`EXPECTED_DOCTOR_CODES`] and
 /// this enum's own `tests` module keep the two in lockstep, so a variant
 /// added without updating the frozen list (or vice versa) fails CI rather
@@ -48,6 +48,7 @@ pub enum DiagnosticId {
     ClockSkew,
     QshPathShadowed,
     TrustRemoveScope,
+    ConfigUnknownKey,
 }
 
 impl DiagnosticId {
@@ -75,6 +76,7 @@ impl DiagnosticId {
             DiagnosticId::ClockSkew => CLOCK_SKEW.code,
             DiagnosticId::QshPathShadowed => QSH_PATH_SHADOWED.code,
             DiagnosticId::TrustRemoveScope => TRUST_REMOVE_SCOPE.code,
+            DiagnosticId::ConfigUnknownKey => CONFIG_UNKNOWN_KEY.code,
         }
     }
 }
@@ -92,6 +94,7 @@ pub const EXPECTED_DOCTOR_CODES: &[&str] = &[
     "cert_expired",
     "cert_expiring_soon",
     "clock_skew",
+    "config_unknown_key",
     "controller_unreachable",
     "keystore_unavailable",
     "no_route",
@@ -263,6 +266,24 @@ pub const QSH_PATH_SHADOWED: Diagnostic = Diagnostic {
     remedy: "Fix the PATH order, or remove the stale `qsh` binary the finding's detail names.",
 };
 
+/// `docs/CLI.md` §6.17, `PLAN.md` M8 Step 4b (J10): `config.toml` has a key
+/// path [`crate::config::Config`] does not know about. `#[serde(default)]`
+/// with no `deny_unknown_fields` means such a key is silently ignored
+/// rather than rejected (`docs/CLI.md` §2.3's documented contract — never
+/// tightened to `deny_unknown_fields`, which would break a newer config
+/// against an older binary), so a typo'd cap key (e.g.
+/// `mx_sessions_per_principal` instead of `max_sessions_per_principal`)
+/// leaves that cap silently at its default forever with no signal
+/// anywhere else. `warn`, not `error`: the file still parses and the
+/// binary still runs correctly under its defaults — only an operator's
+/// expectation about *which* value is in effect may be wrong.
+pub const CONFIG_UNKNOWN_KEY: Diagnostic = Diagnostic {
+    id: DiagnosticId::ConfigUnknownKey,
+    code: "config_unknown_key",
+    message: "config.toml has a key path that Config does not recognize, so it is being silently ignored rather than applied. If this was meant to override a setting (for example a cap), that setting is still at its default.",
+    remedy: "Check the key path the finding's detail names for a typo against docs/CLI.md's config.toml layout, or remove it if it is leftover from an older build.",
+};
+
 /// `docs/CLI.md` §6.17, `PLAN.md` M7 Step 2's confirmed `trust remove`
 /// semantics (README "Known limitations", `docs/CLI.md` §6.11): an `info`
 /// notice, not a problem — it surfaces whenever `trust.toml` has at least
@@ -325,12 +346,12 @@ mod tests {
     /// variant, exhaustively hand-listed (a variant added here without a
     /// matching addition to [`EXPECTED_DOCTOR_CODES`], or vice versa, is
     /// exactly the drift this test exists to catch), must map to a unique
-    /// code and the frozen set must be exactly those 13 codes — no more, no
+    /// code and the frozen set must be exactly those 14 codes — no more, no
     /// fewer. Mirrors `qsh_proto::schema`'s
     /// `cli_v1_schema_commands_is_sorted_and_deduplicated` precedent.
     #[test]
     fn expected_doctor_codes_matches_every_diagnostic_id_variant_exactly() {
-        const ALL: [DiagnosticId; 13] = [
+        const ALL: [DiagnosticId; 14] = [
             DiagnosticId::ControllerUnreachable,
             DiagnosticId::AuditPathUnwritable,
             DiagnosticId::AclPolicyMissing,
@@ -344,6 +365,7 @@ mod tests {
             DiagnosticId::ClockSkew,
             DiagnosticId::QshPathShadowed,
             DiagnosticId::TrustRemoveScope,
+            DiagnosticId::ConfigUnknownKey,
         ];
         let mut codes: Vec<&str> = ALL.iter().map(|id| id.code()).collect();
         codes.sort_unstable();

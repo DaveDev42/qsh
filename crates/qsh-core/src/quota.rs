@@ -478,8 +478,12 @@ impl Quotas {
 
     /// Current live tunnel-stream reservation count for `principal_key`
     /// across every destination — test/diagnostic use only.
+    ///
+    /// `pub(crate)`, not module-private: `tunnel::remote`'s own
+    /// principal-axis test observes this axis the same way the
+    /// forward-axis tests observe theirs.
     #[cfg(test)]
-    fn tunnel_streams_per_principal_in_use(&self, principal_key: &str) -> usize {
+    pub(crate) fn tunnel_streams_per_principal_in_use(&self, principal_key: &str) -> usize {
         self.lock()
             .tunnel_streams_per_principal
             .get(principal_key)
@@ -488,9 +492,21 @@ impl Quotas {
     }
 
     /// Current live tunnel-stream reservation count for
-    /// `(principal_key, resource)` — test/diagnostic use only.
+    /// `(principal_key, resource)` — test-only observation, the forward-axis
+    /// twin of [`Quotas::tunnel_streams_per_principal_in_use`].
+    ///
+    /// `#[cfg(test)]` rather than `pub` (M8 Step 4b): the `-R` accept-permit
+    /// e2e in `qsh-testkit` observes the permit through the refused TCP
+    /// accept and the audit row, so no caller outside this crate exists.
+    /// Widen to `pub` (as [`Quotas::pairing_connections_in_use`] is) only
+    /// when one appears. No logic beyond the lookup; not part of the permit
+    /// decision itself.
     #[cfg(test)]
-    fn tunnel_streams_per_forward_in_use(&self, principal_key: &str, resource: &str) -> usize {
+    pub(crate) fn tunnel_streams_per_forward_in_use(
+        &self,
+        principal_key: &str,
+        resource: &str,
+    ) -> usize {
         self.lock()
             .tunnel_streams_per_forward
             .get(&(principal_key.to_string(), resource.to_string()))

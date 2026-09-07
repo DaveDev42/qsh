@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use qsh_proto::{ErrorCode, KeyStoreMode};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
@@ -461,7 +461,7 @@ pub(crate) fn rfc3339_of(t: SystemTime) -> String {
 ///
 /// Every field is optional and unknown keys are ignored: a newer build's
 /// config must not break an older binary (`docs/CLI.md` §2.3).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     /// `[serve]` — long-running listener settings.
@@ -481,7 +481,7 @@ pub struct Config {
 }
 
 /// `[serve]` section.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ServeConfig {
     /// Listen address. `qsh serve --bind` wins over this, which wins over
@@ -748,7 +748,7 @@ impl ServeConfig {
 }
 
 /// `[identity]` section.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct IdentityConfig {
     /// Private-key store preference; `qsh init --key-store` wins over it.
@@ -762,7 +762,7 @@ pub struct IdentityConfig {
 /// its rotation and retention, `queue_depth` its backpressure bound.
 /// Deliberately has **no `fail_closed` knob**: `docs/ROADMAP.md` treats
 /// disk-full fail-closed as a fixed policy, not an operator option.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AuditConfig {
     /// Audit log path. Unset ⇒ [`Paths::audit_log`] (`<state_dir>/audit.log`).
@@ -825,7 +825,7 @@ impl AuditConfig {
 /// `PLAN.md` Step 3 PR 3a wired `bind`/`allow_advertised_names`. Step 4 adds
 /// `stale_retention`, read by [`reverse::listen::Listen`]'s stale-eviction
 /// sweeper (`crates/qsh-core/src/reverse/listen.rs`).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ListenConfig {
     /// Listen address. `qsh listen --bind` wins over this, which wins over
@@ -915,7 +915,7 @@ impl ListenConfig {
 /// but is not read by any code path (see its own field doc). `PLAN.md`
 /// Step 4 adds the backoff knobs below, read by the reconnect loop in
 /// `reverse::target::run_reverse`.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ReverseConfig {
     /// Trust-store alias of the controller to dial. **Reserved, not

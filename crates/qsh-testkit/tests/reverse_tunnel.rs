@@ -684,6 +684,20 @@ where
 /// against `[serve].max_remote_forwards_per_principal`. Raising the
 /// controller-side `Listen`'s own `Quotas` (`ReverseHarness::
 /// start_with_quotas`) does not touch this path at all.
+///
+/// This is why callers pass a target `[serve]` override at all: proving
+/// the hub's 32-permit parked-claim pool (`MAX_PARKED_CLAIMS_PER_HUB`,
+/// `reverse/listen.rs`) needs opening more than that pool's own cap worth
+/// of remote forwards from a single principal, and the target's default
+/// `max_remote_forwards_per_principal` (16) would reject the
+/// registrations long before that count is reached. The two callers below
+/// don't open the same count: `n_live_splices_beyond_the_parked_claim_cap_coexist`
+/// opens `LIVE_SPLICE_COUNT` (33, one past the 32-permit cap), while
+/// `the_parked_claim_share_bounds_one_conduit_without_starving_another`
+/// opens `HUB_CAP` (32) worth of parked claims plus a handful more to
+/// probe refusal once the pool and a conduit's `SHARE` are spent — both
+/// comfortably clear of the 16-forward default, which is all this
+/// override needs to guarantee.
 async fn with_registered_widget_and_quotas<F, Fut>(
     max_remote_forwards_per_principal: usize,
     body: F,

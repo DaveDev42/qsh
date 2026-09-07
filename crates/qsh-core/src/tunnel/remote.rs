@@ -397,6 +397,25 @@ async fn accept_one(
     Ok(splice_tcp_quic(tcp, raw_send, raw_recv, residue).await?)
 }
 
+/// The forward-axis quota key for one `-R` listener: `rfwd:` plus the
+/// registration's `forward_id`.
+///
+/// The prefix makes a namespace guarantee structural rather than
+/// incidental. `-L`'s own forward-axis key is a `host:port` string
+/// (`Server::authorize_and_dial_tunnel`, via `wire::format_host_port`),
+/// while `forward_id` is a host-minted ULID (`server/mod.rs`'s
+/// `forward.remote.open` handler — Crockford base32, no colon), so the
+/// two could not collide even unprefixed; `rfwd:` makes that a property
+/// of the key shape instead of a property of ULID's alphabet. The key is
+/// a map key only — it never reaches an audit record or the CLI.
+///
+/// `from_utf8_lossy` is lossless in practice: the only production caller
+/// mints `forward_id` with `String::into_bytes()`. The parameter stays
+/// `&[u8]` because `accept_one` carries the same id as ticket bytes.
+fn remote_forward_quota_key(forward_id: &[u8]) -> String {
+    format!("rfwd:{}", String::from_utf8_lossy(forward_id))
+}
+
 /// Accept forever on `listener`, turning each connection into a
 /// `TCP_ACCEPTED` stream on `conn` and splicing it — the host side of
 /// `PLAN.md` M4 Step 4's `-R`, symmetric to
@@ -419,8 +438,26 @@ pub(crate) async fn serve_remote_forward(
     listener: TcpListener,
     conn: qsh_transport::Connection,
     forward_id: Vec<u8>,
+    quotas: Arc<crate::quota::Quotas>,
+    audit: Arc<dyn crate::audit::AuditSink>,
 ) {
     use crate::tunnel::local::{ACCEPT_BACKOFF, AcceptDisposition, accept_disposition};
+
+    // Tunnel-stream concurrency permit (M8 Step 4b, J13): the same choke
+    // point `Server::authorize_and_dial_tunnel`'s own `-L` leg applies
+    // after its ACL decision and before its dial, applied here after the
+    // TCP accept and before `open_bi` — nothing QUIC-shaped may exist
+    // before a reservation succeeds. `-R`'s listener port is reachable
+    // with no authentication at all (this module's own doc), so this is
+    // the *only* gate between an anonymous TCP client and a spawned task
+    // + an open QUIC stream on `conn`; ADR-0010's "decide after
+    // authorization, before creation; count what's alive" applies with
+    // the earlier `RemoteForwardOpen` authorization standing in for the
+    // per-connection ACL check `-L` makes per dial. `owner`/`forward_key`
+    // are fixed for this listener's whole life — same principal, same
+    // `forward_id` — so both are computed once, outside the accept loop.
+    let owner = crate::acl::opener_key(conn.principal(), conn.auth_path());
+    let forward_key = remote_forward_quota_key(&forward_id);
 
     let mut tasks: JoinSet<()> = JoinSet::new();
     loop {
@@ -445,9 +482,39 @@ pub(crate) async fn serve_remote_forward(
                         AcceptDisposition::Fatal => return,
                     },
                 };
+                let permit = match quotas.reserve_tunnel_stream(&owner, &forward_key) {
+                    Ok(permit) => permit,
+                    Err(kind) => {
+                        // No QUIC stream was ever opened for this TCP
+                        // connection, so there is no QUIC `RESET_STREAM`
+                        // to send. The TCP side is an ordinary close; a
+                        // client that already wrote bytes leaves them
+                        // unread in the receive buffer, so the kernel
+                        // turns that close into an RST (the reason both
+                        // this axis's tests accept `Ok(0)` *and*
+                        // `ConnectionReset`/`ConnectionAborted`).
+                        let records = quotas.record_rejection(
+                            kind,
+                            &owner,
+                            peer,
+                            quotas.now(),
+                            None,
+                            conn.auth_path(),
+                        );
+                        crate::audit::write_quota_audit(audit.as_ref(), &records);
+                        drop(tcp);
+                        continue;
+                    }
+                };
                 let conn = conn.clone();
                 let forward_id = forward_id.clone();
                 tasks.spawn(async move {
+                    // Held across the whole splice — the same "permit
+                    // lives inside the spawned future" shape
+                    // `Server::handle_tcp_connect` uses for `-L`'s own
+                    // `TunnelStreamPermit`; dropped (both axes released)
+                    // only when `accept_one` returns.
+                    let _permit = permit;
                     match accept_one(tcp, &conn, &forward_id).await {
                         Ok(stats) => tracing::debug!(
                             %peer,
@@ -2034,5 +2101,420 @@ mod tests {
 
         echo_task.await.unwrap();
         drop(peer_conn);
+    }
+
+    // ---- serve_remote_forward: the `-R` accept-time tunnel-stream permit
+    // (M8 Step 4b, J13) ---------------------------------------------
+
+    /// The cap this suite uses is 4, not the production default 64
+    /// (`ServeConfig::DEFAULT_MAX_TUNNEL_STREAMS_PER_FORWARD`) — opening
+    /// 64 real loopback TCP connections and driving 64 real QUIC streams
+    /// through one `tokio::test` just to exercise the same comparison
+    /// `reserve_tunnel_stream` already has dedicated unit coverage for
+    /// (`quotas.rs`'s own `reserve_exec_refuses_past_the_cap_and_release_
+    /// frees_the_slot`-shaped tests) buys nothing this test doesn't
+    /// already prove at 4; `max_tunnel_streams_per_principal` is left at
+    /// its production default (256) so this stays a *forward*-axis test,
+    /// not a principal-axis one.
+    const TEST_FORWARD_CAP: usize = 4;
+
+    /// Accepts every incoming QUIC bidi stream on `conn` and holds it —
+    /// `-R`'s requester leg, standing in for `RemoteForwardAcceptor`'s
+    /// full claim-loop machinery (this test needs a peer that keeps every
+    /// `TCP_ACCEPTED` stream open, not one that dispatches it anywhere).
+    /// Streams are pushed into `held` rather than dropped so each
+    /// `accept_one` splice this test admits stays genuinely alive (a
+    /// dropped stream would tear the splice down and free its permit,
+    /// defeating the whole "N are alive at once" premise).
+    async fn hold_every_incoming_stream(
+        conn: qsh_transport::Connection,
+        held: Arc<Mutex<Vec<(quinn::SendStream, quinn::RecvStream)>>>,
+    ) {
+        loop {
+            match conn.accept_bi().await {
+                Ok(pair) => held.lock().unwrap_or_else(|e| e.into_inner()).push(pair),
+                Err(_) => return,
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn remote_forward_accept_past_the_per_forward_stream_cap_is_closed_before_any_quic_stream_opens()
+     {
+        use crate::audit::{AuditSink, MemoryAuditSink};
+        use crate::broker::clock::SystemClock;
+        use crate::quota::{QuotaLimits, Quotas};
+
+        let (requester_conn, host_conn) = loopback_pair().await;
+        let held: Arc<Mutex<Vec<(quinn::SendStream, quinn::RecvStream)>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        let accept_task = tokio::spawn(hold_every_incoming_stream(
+            requester_conn,
+            Arc::clone(&held),
+        ));
+
+        let quotas = Quotas::new(
+            QuotaLimits {
+                max_tunnel_streams_per_forward: TEST_FORWARD_CAP,
+                ..QuotaLimits::default()
+            },
+            Arc::new(SystemClock),
+        );
+        let audit = Arc::new(MemoryAuditSink::new());
+        let owner = crate::acl::opener_key(host_conn.principal(), host_conn.auth_path());
+        let forward_id = b"fwd-cap-unit-test".to_vec();
+        // The production key exactly — same helper `serve_remote_forward`
+        // calls, so a change to the key shape cannot silently desync the
+        // observation from the reservation.
+        let forward_key = remote_forward_quota_key(&forward_id);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let serve_task = tokio::spawn(serve_remote_forward(
+            listener,
+            host_conn,
+            forward_id,
+            Arc::clone(&quotas),
+            Arc::clone(&audit) as Arc<dyn AuditSink>,
+        ));
+
+        // Fill the cap and wait for the permits to actually land — no
+        // fixed sleep (`docs/design/testing.md`'s own poll-not-sleep
+        // discipline, the same reasoning F3's `wait_for` swap-in used).
+        let mut live = Vec::with_capacity(TEST_FORWARD_CAP);
+        for _ in 0..TEST_FORWARD_CAP {
+            live.push(TcpStream::connect(addr).await.unwrap());
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if quotas.tunnel_streams_per_forward_in_use(&owner, &forward_key)
+                    == TEST_FORWARD_CAP
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the cap's worth of splices must all report live within 5s");
+
+        // The (CAP+1)-th TCP connection must be refused: closed with no
+        // payload, and — the whole point of "before `open_bi`" — no QUIC
+        // stream for it ever reaches `requester_conn`'s accept loop, so
+        // `held`'s length never exceeds the cap either.
+        let mut over_cap = tokio::time::timeout(Duration::from_secs(2), TcpStream::connect(addr))
+            .await
+            .expect("connect must not hang")
+            .unwrap();
+        let mut buf = [0u8; 1];
+        // A refusal is a *termination with no payload*. This socket wrote
+        // nothing, so the ordinary observation is EOF; a client that had
+        // already written would leave unread bytes in the host's receive
+        // buffer and see the kernel's RST instead. Both are the same
+        // refusal, so both are accepted — the 4a F3 shape
+        // `tunnel_loopback.rs` and `tunnel/local.rs` already use.
+        match tokio::time::timeout(Duration::from_secs(2), over_cap.read(&mut buf))
+            .await
+            .expect("the refused connection must close promptly, not hang")
+        {
+            Ok(0) => {}
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
+                ) => {}
+            other => panic!(
+                "the (cap+1)-th accept must end with no payload — no QUIC stream, hence no \
+                 splice, was ever opened for it: {other:?}"
+            ),
+        }
+        assert_eq!(
+            quotas.tunnel_streams_per_forward_in_use(&owner, &forward_key),
+            TEST_FORWARD_CAP,
+            "the refused connection must not have taken a permit slot"
+        );
+        // Two directions, two kinds of assertion. The *upper bound* holds
+        // at every instant, so it is read immediately; "all `CAP` have
+        // arrived" is a reachability property (the permit is taken before
+        // `open_bi`, so `in_use == CAP` can be observed while the
+        // requester's `accept_bi` has returned fewer), so it is polled.
+        assert!(
+            held.lock().unwrap_or_else(|e| e.into_inner()).len() <= TEST_FORWARD_CAP,
+            "the requester side must never see more streams than the cap admits"
+        );
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if held.lock().unwrap_or_else(|e| e.into_inner()).len() == TEST_FORWARD_CAP {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("every admitted splice must reach the requester as a QUIC stream within 5s");
+        assert_eq!(
+            held.lock().unwrap_or_else(|e| e.into_inner()).len(),
+            TEST_FORWARD_CAP,
+            "the requester side must never see a QUIC stream for the refused connection"
+        );
+
+        // Audit: exactly the `quota_tunnels_forward` shape `-L`'s own
+        // `authorize_and_dial_tunnel` refusal writes — `request_id` "-"
+        // (no control-stream request to attribute a data-plane accept
+        // to), `peer_addr` the actual TCP peer (the refused socket's own
+        // local address, as observed from the accept side).
+        let records = audit.records();
+        let quota_record = records
+            .iter()
+            .find(|r| r.resource == "quota_tunnels_forward")
+            .expect("a quota_tunnels_forward audit record must be written on refusal");
+        assert_eq!(quota_record.request_id, "-");
+        assert_eq!(
+            quota_record.peer_addr,
+            over_cap.local_addr().unwrap().to_string()
+        );
+        assert_eq!(quota_record.decision, "deny");
+
+        // Draining every held splice must release every permit back to
+        // zero. Dropping the live TCP sockets alone only half-closes each
+        // splice (`splice::tests::pump_half_closes_only_its_own_
+        // direction_at_eof`'s own point — one direction ending does not
+        // end a full-duplex splice on its own), so the QUIC side this
+        // test's `hold_every_incoming_stream` is holding open must be
+        // dropped too before `accept_one` can actually return.
+        drop(live);
+        drop(over_cap);
+        held.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if quotas.tunnel_streams_per_forward_in_use(&owner, &forward_key) == 0 {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("every permit must release once its splice ends");
+
+        serve_task.abort();
+        accept_task.abort();
+    }
+
+    /// The *order* the test above only names: a refused accept opens no
+    /// QUIC stream at all, not one that is opened and then reset.
+    ///
+    /// Isolating the order needs every accept refused, so the forward cap
+    /// is 0 — the same "forced refusal" construction `server/mod.rs`'s own
+    /// `a_tunnel_dial_past_the_quota_never_reaches_the_dialer` uses for
+    /// `-L`. Under the correct implementation (reserve, *then*
+    /// `open_stream`) the requester's `accept_bi` never returns, so the
+    /// 500 ms probe below is deterministic: nothing can ever arrive.
+    /// Under an implementation that opened the stream first and reset it
+    /// on refusal, 20 dials would deliver up to 20 streams and the probe
+    /// would return one.
+    ///
+    /// The probe is also the stream-count observation — a concurrent
+    /// `hold_every_incoming_stream` task cannot be used here, since it and
+    /// the probe would be two consumers racing over one `accept_bi`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn refused_remote_forward_accepts_never_open_a_quic_stream() {
+        use crate::audit::{AuditSink, MemoryAuditSink};
+        use crate::broker::clock::SystemClock;
+        use crate::quota::{QuotaLimits, Quotas};
+
+        const DIALS: usize = 20;
+
+        let (requester_conn, host_conn) = loopback_pair().await;
+
+        let quotas = Quotas::new(
+            QuotaLimits {
+                max_tunnel_streams_per_forward: 0,
+                ..QuotaLimits::default()
+            },
+            Arc::new(SystemClock),
+        );
+        let audit = Arc::new(MemoryAuditSink::new());
+        let forward_id = b"fwd-order-unit-test".to_vec();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let serve_task = tokio::spawn(serve_remote_forward(
+            listener,
+            host_conn,
+            forward_id,
+            Arc::clone(&quotas),
+            Arc::clone(&audit) as Arc<dyn AuditSink>,
+        ));
+
+        for i in 0..DIALS {
+            let mut sock = tokio::time::timeout(Duration::from_secs(2), TcpStream::connect(addr))
+                .await
+                .unwrap_or_else(|_| panic!("connect {i} must not hang"))
+                .unwrap_or_else(|e| panic!("connect {i}: the TCP accept itself must succeed: {e}"));
+            let mut buf = [0u8; 1];
+            match tokio::time::timeout(Duration::from_secs(2), sock.read(&mut buf))
+                .await
+                .unwrap_or_else(|_| panic!("refused connection {i} must close promptly, not hang"))
+            {
+                Ok(0) => {}
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
+                    ) => {}
+                other => panic!("refusal {i} must end with no payload: {other:?}"),
+            }
+        }
+
+        // The order itself: with every accept refused, the requester leg
+        // must never be handed a stream.
+        let probe =
+            tokio::time::timeout(Duration::from_millis(500), requester_conn.accept_bi()).await;
+        assert!(
+            probe.is_err(),
+            "a refused accept must open no QUIC stream at all — the requester's accept_bi \
+             returned {:?} instead of timing out",
+            probe.map(|r| r.is_ok())
+        );
+
+        // Audit: the aggregation window (10 s) is far longer than this
+        // test, so the burst leaves exactly the first rejection's row and
+        // no summary — the flood shape `Quotas::record_rejection` promises.
+        let records = audit.records();
+        let forward_rows: Vec<_> = records
+            .iter()
+            .filter(|r| r.resource == "quota_tunnels_forward")
+            .collect();
+        assert_eq!(
+            forward_rows.len(),
+            1,
+            "{DIALS} refusals inside one aggregation window must leave the first row only, \
+             got {forward_rows:?}"
+        );
+        assert_eq!(forward_rows[0].decision, "deny");
+        assert_eq!(forward_rows[0].request_id, "-");
+        assert_eq!(
+            forward_rows[0].count, None,
+            "the first row of a window is a plain rejection, not a summary"
+        );
+
+        serve_task.abort();
+        drop(requester_conn);
+    }
+
+    /// The principal axis of the same gate (`max_tunnel_streams_per_
+    /// principal`), which the forward-axis tests above leave at its
+    /// production default and so never reach: at a cap of 2 with the
+    /// forward axis wide open, the third accept is refused and the audit
+    /// row carries the *principal* category, not the forward one.
+    ///
+    /// This is the axis ADR-0010's addendum names as the intended
+    /// consequence of gating `-R` at accept time — an unauthenticated TCP
+    /// flood can exhaust the registering principal's own tunnel-stream
+    /// budget — so it needs its own pin.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn remote_forward_accept_past_the_per_principal_stream_cap_is_refused_on_that_axis() {
+        use crate::audit::{AuditSink, MemoryAuditSink};
+        use crate::broker::clock::SystemClock;
+        use crate::quota::{QuotaLimits, Quotas};
+
+        const PRINCIPAL_CAP: usize = 2;
+
+        let (requester_conn, host_conn) = loopback_pair().await;
+        let held: Arc<Mutex<Vec<(quinn::SendStream, quinn::RecvStream)>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        let accept_task = tokio::spawn(hold_every_incoming_stream(
+            requester_conn,
+            Arc::clone(&held),
+        ));
+
+        let quotas = Quotas::new(
+            QuotaLimits {
+                max_tunnel_streams_per_principal: PRINCIPAL_CAP,
+                max_tunnel_streams_per_forward: 64,
+                ..QuotaLimits::default()
+            },
+            Arc::new(SystemClock),
+        );
+        let audit = Arc::new(MemoryAuditSink::new());
+        let owner = crate::acl::opener_key(host_conn.principal(), host_conn.auth_path());
+        let forward_id = b"fwd-principal-unit-test".to_vec();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let serve_task = tokio::spawn(serve_remote_forward(
+            listener,
+            host_conn,
+            forward_id,
+            Arc::clone(&quotas),
+            Arc::clone(&audit) as Arc<dyn AuditSink>,
+        ));
+
+        let mut live = Vec::with_capacity(PRINCIPAL_CAP);
+        for _ in 0..PRINCIPAL_CAP {
+            live.push(TcpStream::connect(addr).await.unwrap());
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if quotas.tunnel_streams_per_principal_in_use(&owner) == PRINCIPAL_CAP {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the principal cap's worth of splices must all report live within 5s");
+
+        let mut over_cap = tokio::time::timeout(Duration::from_secs(2), TcpStream::connect(addr))
+            .await
+            .expect("connect must not hang")
+            .unwrap();
+        let mut buf = [0u8; 1];
+        match tokio::time::timeout(Duration::from_secs(2), over_cap.read(&mut buf))
+            .await
+            .expect("the refused connection must close promptly, not hang")
+        {
+            Ok(0) => {}
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
+                ) => {}
+            other => panic!("the (cap+1)-th accept must end with no payload: {other:?}"),
+        }
+        assert_eq!(
+            quotas.tunnel_streams_per_principal_in_use(&owner),
+            PRINCIPAL_CAP,
+            "the refused connection must not have taken a permit slot"
+        );
+
+        let records = audit.records();
+        let quota_record = records
+            .iter()
+            .find(|r| r.resource == "quota_tunnels_principal")
+            .unwrap_or_else(|| {
+                panic!(
+                    "the refusal must be audited under the principal axis, got {:?}",
+                    records.iter().map(|r| &r.resource).collect::<Vec<_>>()
+                )
+            });
+        assert_eq!(quota_record.decision, "deny");
+        assert_eq!(quota_record.request_id, "-");
+        assert_eq!(
+            quota_record.peer_addr,
+            over_cap.local_addr().unwrap().to_string()
+        );
+        assert!(
+            !records
+                .iter()
+                .any(|r| r.resource == "quota_tunnels_forward"),
+            "the forward axis is wide open here — nothing may be refused on it"
+        );
+
+        drop(live);
+        drop(over_cap);
+        held.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        serve_task.abort();
+        accept_task.abort();
     }
 }
