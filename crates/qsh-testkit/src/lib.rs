@@ -28,6 +28,7 @@ pub mod fixtures;
 pub mod loopback;
 pub mod pair;
 pub mod pairing;
+pub mod raw_quic;
 pub mod reverse;
 pub mod tunnel;
 

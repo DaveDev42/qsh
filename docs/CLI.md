@@ -749,7 +749,7 @@ pin 시점에 이름 충돌이 생기면 — 상대가 자칭하는 이름이 �
 
 `--json` mode에서는 pairing도 interactive prompt를 열지 않는다(§2.1) — 잘못된 code나 인자 오류는 곧바로 오류 envelope로 반환된다.
 
-`doctor.run`의 전체 계약(§6.17, M7 Step 6)은 진단 코드 13종·envelope 모양·exit code 규칙을 담는다 — 이 절 밖에서는 더 설명하지 않는다.
+`doctor.run`의 전체 계약(§6.17, M7 Step 6)은 진단 코드 14종·envelope 모양·exit code 규칙을 담는다 — 이 절 밖에서는 더 설명하지 않는다.
 
 원격 operation(`exec.run`, `session.*`, `tunnel.*`)의 mTLS 실패 오류 경로는 다음과 같다.
 
@@ -846,6 +846,11 @@ qsh serve --bind <ip:port>
   audit sink가 degraded로 latch되면 그 동안의 `session.attach`/`session.resume`과 세션 쓰기는
   감사 없는 allow를 만들지 않기 위해 `PERMISSION_DENIED`로 거부된다 — 이는 버그가 아니라 의도된
   fail-closed다. sink가 회복되면 같은 세션의 재부착은 다시 성공한다.
+- **Audit 로그의 디스크 부피도 유계다(M5, `docs/adr/0010-resource-quotas.md`).** 거부 flood가
+  audit flood가 되지 않는 것은 위의 창(10초)당 category별 1행 + 요약 1행 집계가 행 *수*를 묶기
+  때문이고, 그 위에 회전·retention이 디렉터리 총 *부피* 자체를 묶는다 — `[audit].max_bytes`(기본
+  64 MiB)에 도달한 로그는 회전되고 `[audit].retain`(기본 5)개까지만 보관되므로, audit 디렉터리의
+  총 바이트는 `max_bytes × (retain + 1)`(활성 로그 1개 + 보관된 회전분)을 넘지 않는다.
 
 ### 6.13 장기 실행 모드: `qsh listen` / `qsh reverse`
 
@@ -1027,7 +1032,7 @@ qsh doctor [host] --json
 - `detail`: 무엇이 관측됐는지에 대한 사람이 읽을 수 있는 설명(해석된 경로, 관측된 만료 시각 등). 시크릿·PTY/명령 payload는 절대 담지 않는다(`CLAUDE.md`의 보안 기본값).
 - `remedy`: 실행 가능한 다음 행동 한 줄. 없으면 필드 자체가 생략된다(additive-optional, `CapabilitiesData.host`와 같은 규율).
 
-**13종 진단 코드** (재사용 5종·신설 8종 — `PLAN.md` M7 §4.1 #5가 확정한 잠금 어휘):
+**14종 진단 코드** (재사용 5종·신설 9종 — `PLAN.md` M7 §4.1 #5가 확정한 잠금 어휘, `config_unknown_key`는 M8 Step 4b가 더했다):
 
 | `code` | `status` | 무엇을 점검하는가 |
 |---|---|---|

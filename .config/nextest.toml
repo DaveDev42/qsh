@@ -15,8 +15,43 @@ slow-timeout = { period = "60s", terminate-after = 3 }
 # `cargo nextest run --help` does not surface it (ARBITRATION-4.md J12,
 # design.md §0-17 left it unconfirmed). We pin it explicitly rather than
 # inherit silently, because an unconfirmed default is a reproducibility gap
-# on its own. This harness spawns no child processes, so nextest's leaky
-# path — a child still holding the test process's stdout/stderr fd after
-# exit — never applies here; the value is pinned for explicitness, not
-# because a leak was observed or ruled out.
+# on its own. 4a's in-process `LoopbackHarness` spawns no child processes,
+# so nextest's leaky path — a child still holding the test process's
+# stdout/stderr fd after exit — never applies to that harness; the value
+# is pinned for explicitness there, not because a leak was observed or
+# ruled out. `qsh-cli`'s own integration suite (21+ files, plus 4c's
+# `adversarial_load.rs`) is different: it spawns a real `qsh serve` child
+# per test with piped stdout/stderr, so the leaky path is reachable in
+# principle there — what actually keeps it closed is `ServeGuard`'s
+# `Drop` (`crates/qsh-cli/tests/common/mod.rs`), which kills the child,
+# waits for it, and joins its reader threads before returning, so the fd
+# is reclaimed even on an assertion panic (`ARBITRATION-4.md` 4c 판정 Q6).
 leak-timeout = "200ms"
+
+# `load.yml`'s T2 profile (4c adversarial review A7/B1/B3). Three
+# departures from `[profile.default]`, all load-only:
+# - `test-threads = 1`: `adversarial_load.rs`'s scenarios each assert
+#   absolute RSS/fd/echo-p95 numbers against one shared `qsh serve`
+#   subprocess's real resource usage — running them in parallel on a
+#   2-4 vCPU GHA runner lets one scenario's flood contend for the same
+#   CPU/fd budget another scenario is asserting against, which is exactly
+#   the kind of oracle-independent flakiness a tight absolute bound cannot
+#   tell apart from a real regression.
+# - `success-output = "final"`: nextest's own default is `"never"` — a
+#   green run would otherwise print none of the scenarios'
+#   `eprintln!`-ed diagnostic blocks (baseline/peak/idle RSS, fd, echo
+#   p95), which is exactly the record `docs/campaigns/
+#   m8-adversarial-load.md`'s round table and Step 5's re-tuning both
+#   depend on `load.yml`'s log for.
+# - `slow-timeout`'s `period` is raised to 120s (from the default profile's
+#   60s): scenario 12a alone holds a rejection flood for >=12s (12b's own
+#   flood ~8s) before its graceful-shutdown teardown, and scenario 13's
+#   512-socket accept sweep has its own multi-second drain; 60s reads
+#   several of T2's scenarios as "slow" under ordinary host load, not only
+#   under a real hang.
+# `terminate-after` stays 3, same deadlock-not-hang reasoning as
+# `[profile.default]`.
+[profile.load]
+test-threads = 1
+success-output = "final"
+slow-timeout = { period = "120s", terminate-after = 3 }

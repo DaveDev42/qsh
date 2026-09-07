@@ -1,0 +1,87 @@
+name: load
+
+# T2 — the adversarial-load harness (`PLAN.md` M8 Step 4c,
+# `docs/design/testing.md` L9/L10, `docs/ROADMAP.md` M8 DoD 5,
+# `crates/qsh-cli/tests/adversarial_load.rs`). Measures a **release**
+# `qsh serve` subprocess under fixed adversarial N (source flood, connection
+# flood, session flood, sustained rejection flood — split into row-count
+# aggregation / rotation+retention volume / rotation-failure fail-closed,
+# `-R` accept flood) and asserts the RSS/fd/echo bounds DoD 5 names.
+#
+# Kept as its own workflow, entirely separate from `ci.yml`'s `ci-ok`
+# required-check aggregation (ARBITRATION-4.md J1), for the same reason
+# `fuzz-smoke.yml` is: this measures absolute numbers (RSS in MB, echo p95
+# in ms, fd counts) on a shared hosted runner, and `docs/design/testing.md`'s
+# CI discipline is explicit that absolute-number trends belong in a
+# non-blocking job, not the PR-required path — a shared runner's flake on an
+# absolute threshold trains reviewers to ignore red checks. `ci-ok`'s
+# `needs` list (`ci.yml:179-182`) does not include this job.
+#
+# Unlike `fuzz-smoke.yml`, this job has no `continue-on-error`: a bound
+# violation here is a single yes/no observation (did the listener leak
+# memory or fds under adversarial load), not the "first day, nobody has
+# triaged normal flakiness yet" situation that justified `fuzz-smoke.yml`'s
+# soft landing. Red here is meant to be looked at.
+#
+# No `pull_request` trigger and no nightly schedule — `push` (main) and
+# `workflow_dispatch` only, so this runs after a merge and on demand, never
+# gating a PR. There is no trend-storage backend for this data yet, so a
+# schedule would only add noise (ARBITRATION-4.md J1).
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: load-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  adversarial-load:
+    name: adversarial-load
+    runs-on: ubuntu-24.04
+    # Budget: `BRIEF-4c.md` §2.1's per-scenario budgets summed to ~155s
+    # (worst case, ceiling per scenario) for the original 5-scenario shape.
+    # Stage 4c-F2 split scenario 12 into three (12a/12b/12c), for 11 test
+    # functions total in the file (10 `#[tokio::test]` + one pure-function
+    # `#[test]`), 12c skipping itself when running as root. A measured
+    # strict run (`PROGRESS-4.md` Stage 4c-S5, WSL, `~/fuzz`'s 8 workers
+    # saturating the host) finished the pre-split 9-test shape in 20.8s
+    # wall-clock; the split adds one more short flood (12b, a few seconds
+    # to force rotation at a few-hundred-byte `max_bytes`) and one bounded
+    # retry loop (12c, up to 200 round trips) — this workflow's
+    # `--profile load` runs `[profile.load]`'s `test-threads = 1`
+    # (`.config/nextest.toml`), so a GHA runner with no WSL-style
+    # contention should land well inside the original ~155s ceiling plus
+    # this split's addition. 30 minutes leaves headroom for a release
+    # build plus a genuinely slow run without letting a runaway eat the
+    # runner's 6-hour default.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+      # Runner environment record (BRIEF-4c.md §2.2): source-8 loopback
+      # multiplexing and the 512-TCP scenario both depend on values that
+      # are otherwise unconfirmed for GHA's ubuntu-24.04 runner. Printed
+      # unconditionally, not only on failure, so the campaign doc's
+      # environment section can be filled in from a normal green run too.
+      - name: Record runner limits
+        run: |
+          echo "ulimit -n: $(ulimit -n)"
+          echo "nproc: $(nproc)"
+          echo "net.core.rmem_max: $(cat /proc/sys/net/core/rmem_max)"
+      - run: cargo build --release -p qsh-cli
+      - run: cargo nextest run --profile load -p qsh-cli --test adversarial_load --no-fail-fast
+        env:
+          QSH_LOAD_STRICT: 1
+          QSH_LOAD_BIN: ${{ github.workspace }}/target/release/qsh

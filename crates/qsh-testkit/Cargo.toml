@@ -14,6 +14,16 @@ tokio.workspace = true
 rcgen.workspace = true
 tempfile.workspace = true
 serde_json.workspace = true
+# `raw_quic`: a raw client `quinn::Endpoint` bound to a caller-chosen
+# loopback source address, for `crates/qsh-cli/tests/adversarial_load.rs`
+# scenario 1's spoofed-flood harness (`BRIEF-4c.md` §4.1/J3,
+# `docs/adr` 4c review B13). `qsh_transport::Dialer::dial` always binds
+# `0.0.0.0` with no seam to override it, and admission's `Gate::decide`
+# runs before any qsh TLS identity check, so the flood client needs only a
+# skip-verification `rustls::ClientConfig` — no client cert, no server
+# trust. Same workspace-pinned version `qsh-transport` itself builds
+# against.
+rustls.workspace = true
 
 [dev-dependencies]
 qsh-proto.workspace = true

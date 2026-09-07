@@ -2179,6 +2179,7 @@ dependencies = [
  "qsh-transport",
  "quinn",
  "rcgen",
+ "rustls",
  "serde_json",
  "tempfile",
  "tokio",

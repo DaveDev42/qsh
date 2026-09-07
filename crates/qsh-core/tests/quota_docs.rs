@@ -18,7 +18,7 @@
 
 use std::path::PathBuf;
 
-use qsh_core::config::ServeConfig;
+use qsh_core::config::{AuditConfig, ServeConfig};
 use qsh_core::quota::{QuotaKind, QuotaLimits};
 
 /// The repo root, reached from `CARGO_MANIFEST_DIR` (`crates/qsh-core`)
@@ -386,5 +386,78 @@ fn cli_md_does_not_claim_the_tunnel_axis_carries_retryable() {
         !sentence.contains("터널"),
         "the \"retryable: true\" sentence must not claim the tunnel axis — \
          ConnectResult has no retryable field: {sentence:?}"
+    );
+}
+
+/// M8 Step 4c (`BRIEF-4c.md` §5.3, `ARBITRATION-4.md` "4c 구현 판정" Q4):
+/// §6.12 names the audit-*row-count* bound (D1/D2 above already pin the
+/// window/category prose) but, before this test, nothing pinned the
+/// audit-*directory-byte* bound — `[audit].max_bytes × (retain + 1)` — or
+/// even named `max_bytes`/`retain` at all. Reuses this file's existing
+/// §6.12-scoped `SECTION_HEADING`/`NEXT_HEADING` cut (`cli_md_names_every_
+/// quota_reject_action`) and `doc_default_after` rather than adding a
+/// separate `audit_docs.rs` — the section-slicing helper already lives
+/// here.
+#[test]
+fn cli_md_names_the_audit_volume_bound_and_its_defaults() {
+    let cli_md = read_doc("docs/CLI.md");
+
+    const SECTION_HEADING: &str = "### 6.12 장기 실행 모드: `qsh serve`";
+    const NEXT_HEADING: &str = "### 6.13 장기 실행 모드: `qsh listen` / `qsh reverse`";
+    let start = cli_md
+        .find(SECTION_HEADING)
+        .unwrap_or_else(|| panic!("docs/CLI.md must contain the heading {SECTION_HEADING:?}"));
+    let end = cli_md[start..]
+        .find(NEXT_HEADING)
+        .map(|offset| start + offset)
+        .unwrap_or_else(|| panic!("docs/CLI.md must contain the heading {NEXT_HEADING:?}"));
+    let section = &cli_md[start..end];
+
+    assert!(
+        section.contains("max_bytes"),
+        "docs/CLI.md §6.12 must name the [audit].max_bytes config key"
+    );
+    assert!(
+        section.contains("retain"),
+        "docs/CLI.md §6.12 must name the [audit].retain config key"
+    );
+    assert!(
+        section.contains("max_bytes × (retain + 1)")
+            || section.contains("max_bytes × ([audit].retain + 1)"),
+        "docs/CLI.md §6.12 must state the audit directory byte bound as \
+         max_bytes × (retain + 1)"
+    );
+    // 4c adversarial review B8: the three `contains` checks above only pin
+    // that the formula's *tokens* appear together somewhere in §6.12 — the
+    // sentence's actual claim (that the bound is an upper bound, not a
+    // lower one or an unbounded aside) was unchecked, so flipping "넘지
+    // 않는다" ("does not exceed") to its opposite polarity still passed
+    // (B8's experiment). Anchor on the exact phrase this doc uses for "at
+    // most" so a polarity flip — or a rewrite that drops the claim
+    // entirely — fails here instead.
+    assert!(
+        section.contains("을 넘지 않는다") || section.contains("를 넘지 않는다"),
+        "docs/CLI.md §6.12 must state that the audit directory byte total \
+         does not exceed max_bytes × (retain + 1) — the formula alone, \
+         without this upper-bound claim, does not commit to anything"
+    );
+
+    let defaults = AuditConfig::default();
+    // The doc quotes this one in MiB ("기본 64 MiB"), not raw bytes — the
+    // only size-valued (rather than count-valued) key `doc_default_after`
+    // is used against in this file.
+    assert_eq!(
+        doc_default_after(section, "max_bytes"),
+        defaults.max_bytes() / (1024 * 1024),
+        "docs/CLI.md §6.12's quoted MiB default for [audit].max_bytes must \
+         match AuditConfig::default().max_bytes() ({} bytes)",
+        defaults.max_bytes()
+    );
+    assert_eq!(
+        doc_default_after(section, "retain"),
+        u64::from(defaults.retain()),
+        "docs/CLI.md §6.12's quoted default for [audit].retain must \
+         match AuditConfig::default().retain() ({})",
+        defaults.retain()
     );
 }
