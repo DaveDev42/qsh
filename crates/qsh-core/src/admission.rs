@@ -72,7 +72,7 @@ const EPOCH: Duration = Duration::from_secs(2);
 ///
 /// Flushed two ways (`PLAN.md` M8 Step 2 verification round, P1-3/F1):
 /// lazily, the next time a rejection in the same category arrives after
-/// the window has run past this bound (see [`Gate::record_rejection`]'s
+/// the window has run past this bound (see `Gate::record_rejection`'s
 /// doc), *and* on a bounded schedule — both `crate::server::Server::run`
 /// and `crate::reverse::listen::Listen::run` tick
 /// [`Gate::flush_expired`] every `AUDIT_AGGREGATION_WINDOW` off a
@@ -80,7 +80,15 @@ const EPOCH: Duration = Duration::from_secs(2);
 /// when the loop exits. So a flood's last (possibly partial) window's
 /// summary is never delayed past one more tick after the flood stops —
 /// not "possibly never", as it was when only the lazy path existed.
-pub(crate) const AUDIT_AGGREGATION_WINDOW: Duration = Duration::from_secs(10);
+///
+/// `pub`, not `pub(crate)`: `crates/qsh-cli/tests/adversarial_load.rs`
+/// (scenario 12a) reads this across the crate boundary instead of
+/// carrying its own hardcoded copy of the window length (`PLAN.md` M8
+/// Step 5 (b-0)). Widening visibility here is not a contract change —
+/// nothing outside this crate is meant to *depend* on the value, only
+/// this one integration test computing bounds from the real number
+/// instead of drifting from it.
+pub const AUDIT_AGGREGATION_WINDOW: Duration = Duration::from_secs(10);
 
 /// Why one admission attempt was rejected — also the vocabulary
 /// [`crate::audit::AuditRecord::handshake_rejected`]'s `category` uses for

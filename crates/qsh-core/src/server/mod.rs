@@ -1892,7 +1892,59 @@ impl Server {
         // `final_seq` is the offset at removal time (CLI.md §6.7): whatever
         // the child emitted while dying is included, and it equals the
         // `sequence` on the trailing `session.closed` entry.
-        match self.sessions.close(&id, CloseReason::Closed, signal).await {
+        let result = self.sessions.close(&id, CloseReason::Closed, signal).await;
+        if result.is_ok() {
+            // A closed session's own unredeemed tickets are now ghosts —
+            // no `SESSION_DATA` stream can attach to a session the broker
+            // no longer has, so their `MAX_PENDING_TICKETS_PER_CONN` slots
+            // would otherwise sit dead until `TICKET_TTL` (30 s) or a
+            // connection-wide `purge_connection` reclaimed them. `handle_
+            // session_attach` mints exactly one ticket per call but does
+            // not invalidate a still-pending one from an earlier attach of
+            // the *same* session (confirmed by reading it above — its only
+            // ticket-map access before its own `issue_ticket` is
+            // `check_ticket_budget`, which only sweeps expired tickets and
+            // counts what is left; it invalidates nothing), so more than
+            // one `TicketPurpose::Session` ticket can be outstanding for
+            // one `session_id` at once; that is exactly why this matches
+            // on `session_id` rather than assuming a single ticket.
+            //
+            // Deliberately *not* also scoped to `t.conn_id == ctx.conn_id`
+            // (라운드 1 판정 (c)): `close` is the unowned path (see above) —
+            // any connection may close a session it did not open — so
+            // scoping to the closer's own connection would strand the
+            // opener's ticket forever whenever a different device reaps
+            // the session. A session that no longer exists cannot be
+            // attached to from *any* connection, so every `Session` ticket
+            // naming it is equally dead; all of them go, regardless of
+            // which connection minted them. The one race this still
+            // leaves open — `handle_session_attach` confirming the broker
+            // still has the session, then this `close` running, then that
+            // same attach's `issue_ticket` minting a ticket for a session
+            // that is already gone — is real but narrow (single `.await`
+            // wide) and self-healing: `TICKET_TTL` (30 s) is its upper
+            // bound even if this exact interleaving is hit.
+            let dropped = {
+                let mut tickets = self.lock_tickets();
+                extract_tickets(
+                    &mut tickets,
+                    |t| !matches!(&t.purpose, TicketPurpose::Session { session_id, .. } if *session_id == id),
+                )
+            };
+            // Same "collect under the guard, drop outside" discipline
+            // (ADR-0010 §9) as `issue_ticket`/`pending_tickets_for`'s
+            // expiry sweep and `purge_connection`'s connection-close
+            // sweep — even though the `TicketPurpose::Session` tickets
+            // dropped here never carry a `crate::quota::ExecPermit` (only
+            // `TicketPurpose::Exec` does), so this particular `drop` can
+            // never re-take the quota lock today. Keeping the same shape
+            // as those other three `extract_tickets` call sites anyway
+            // means a future `TicketPurpose` variant that *does* carry a
+            // permit cannot silently violate ADR-0010 §9 just because this
+            // call site looked different.
+            drop(dropped);
+        }
+        match result {
             Ok(final_seq) => ControlMessage::response(
                 request_id,
                 response::Body::SessionClosed(wire::SessionClosed { final_seq }),
@@ -5811,6 +5863,132 @@ mod tests {
         assert_eq!(rig.server.pending_tickets(), MAX_PENDING_TICKETS_PER_CONN);
     }
 
+    /// `session.close` must release its own session's unredeemed ticket
+    /// (main-session arbitration, "병행 정리 묶음 판정" (c)) — the closed
+    /// session's slot in the connection's `MAX_PENDING_TICKETS_PER_CONN`
+    /// budget frees up immediately rather than sitting dead until
+    /// `TICKET_TTL` or the connection itself closes.
+    #[tokio::test]
+    async fn session_close_releases_that_sessions_unredeemed_ticket() {
+        let rig = rig_with_quota_limits(
+            Arc::new(AllowAllPinned),
+            Arc::new(PipeFactory::new(64 * 1024)),
+            Duration::from_millis(100),
+            crate::quota::QuotaLimits {
+                max_sessions: MAX_PENDING_TICKETS_PER_CONN * 4,
+                max_sessions_per_principal: MAX_PENDING_TICKETS_PER_CONN * 4,
+                ..crate::quota::QuotaLimits::default()
+            },
+        );
+        let ctx = ctx(Principal::Device("laptop".into()), &["session"]);
+        let mut session_ids = Vec::with_capacity(MAX_PENDING_TICKETS_PER_CONN);
+        for i in 0..MAX_PENDING_TICKETS_PER_CONN {
+            let reply = rig
+                .server
+                .dispatch(&ctx, &session_open(i as u64))
+                .await
+                .unwrap();
+            match response_body(&reply) {
+                response::Body::SessionOpened(opened) => {
+                    session_ids.push(opened.session_id.clone());
+                }
+                other => panic!("expected SessionOpened, got {other:?}"),
+            }
+        }
+        assert_eq!(rig.server.pending_tickets(), MAX_PENDING_TICKETS_PER_CONN);
+
+        // Close one of the sessions — its own ticket must go with it, and
+        // only its own: the other `MAX_PENDING_TICKETS_PER_CONN - 1`
+        // sessions' tickets are untouched.
+        let closing = session_ids[0].clone();
+        let reply = rig
+            .server
+            .dispatch(
+                &ctx,
+                &ControlMessage::new(
+                    9000,
+                    control_message::Body::SessionClose(wire::SessionClose {
+                        session_id: closing.clone(),
+                        signal: None,
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(response_body(&reply), response::Body::SessionClosed(_)),
+            "expected SessionClosed, got {reply:?}"
+        );
+        assert_eq!(
+            rig.server.pending_tickets(),
+            MAX_PENDING_TICKETS_PER_CONN - 1,
+            "closing one session must free exactly its own ticket"
+        );
+
+        // The freed slot admits a new open without ResourceExhausted — the
+        // budget check sees the drop, not just this test's own count.
+        let reply = rig
+            .server
+            .dispatch(&ctx, &session_open(9001))
+            .await
+            .unwrap();
+        assert_eq!(
+            error_code(&reply),
+            None,
+            "a session.open right after the close must not see \
+             ResourceExhausted — the closed session's own ticket must \
+             already be gone"
+        );
+        assert_eq!(rig.server.pending_tickets(), MAX_PENDING_TICKETS_PER_CONN);
+    }
+
+    /// `session.close` must release its own session's unredeemed ticket
+    /// even when the closing connection is not the one that opened it
+    /// (라운드 1 판정 (c) 항목 4, the two-connection cross-check for
+    /// dropping `t.conn_id == ctx.conn_id` from the purge predicate
+    /// above). `close` is the unowned path (`handle_session_close`'s own
+    /// doc comment): a different device sharing the same ACL scope may
+    /// reap a session it never opened, and the opener's ticket must not
+    /// be stranded when that happens — the session is gone either way, so
+    /// no connection can ever redeem it.
+    #[tokio::test]
+    async fn session_close_from_a_different_connection_still_releases_the_opener_s_ticket() {
+        let rig = allow_rig();
+        let opener = ctx(Principal::Device("laptop".into()), ALL_CAPS);
+        let closer = ConnCtx {
+            conn_id: opener.conn_id + 1,
+            ..ctx(Principal::Device("desktop".into()), ALL_CAPS)
+        };
+        let (id, _t, _pipe) = open_session(&rig, &opener).await;
+        assert_eq!(rig.server.pending_tickets(), 1);
+
+        let reply = rig
+            .server
+            .dispatch(
+                &closer,
+                &ControlMessage::new(
+                    1,
+                    control_message::Body::SessionClose(wire::SessionClose {
+                        session_id: id.clone(),
+                        signal: None,
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(response_body(&reply), response::Body::SessionClosed(_)),
+            "expected SessionClosed, got {reply:?}"
+        );
+        assert_eq!(
+            rig.server.pending_tickets(),
+            0,
+            "the opener's connection did not do the closing, but its \
+             ticket must still be gone: the session it targeted no longer \
+             exists on either connection"
+        );
+    }
+
     /// The ACL choke point's own audit line for an *allowed* principal must
     /// still be written even though that same open then fails on a
     /// saturated quota — a quota rejection is a distinct, later decision,
@@ -6445,9 +6623,14 @@ mod tests {
             assert_eq!(rec.decision, "allow", "{name}");
             assert_eq!(rec.request_id, "7", "{name}");
         }
-        // The extra `open` in the loop created a second session + ticket.
+        // The extra `open` in the loop created a second session + ticket,
+        // but the loop's own `close` (of the *first* session, opened
+        // before the loop) then freed that first ticket along with the
+        // session it belonged to (라운드 1 판정 (c): `session.close` frees
+        // its own session's unredeemed ticket) — so only the second
+        // session's ticket is left outstanding.
         assert_eq!(rig.broker.session_count(), 1, "the loop closed the first");
-        assert_eq!(rig.server.pending_tickets(), 2);
+        assert_eq!(rig.server.pending_tickets(), 1);
     }
 
     #[tokio::test]

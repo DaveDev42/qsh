@@ -434,7 +434,7 @@ qsh session close <session-ref> --json
 qsh session close <session-ref> --signal TERM --json
 ```
 
-`session.close`는 세션의 **process group 전체**(architecture.md §4)를 종료하고 세션을 broker에서 제거한다. 기본 절차는 SIGHUP → 유예 후 SIGTERM → 유예 후 SIGKILL escalation이며, 단계별 유예는 `[serve].close_grace_ms`(기본 5000)다. `--signal <SIG>`는 이 절차의 **첫 신호를 지정한 신호로 바꾼다** — 신호를 process group에 보낸 뒤 동일한 유예·escalation과 세션 정리가 이어진다. `--signal`은 wire `SessionClose`의 optional `signal` field로 전달되며(§2.4), 허용 값은 `HUP|INT|QUIT|TERM|USR1|USR2|KILL`(대소문자 무시, `SIG` 접두 유무 무관)뿐이다. 그 외(숫자, stop 계열 `STOP`/`TSTP`, 미지의 이름)는 `INVALID_ARGUMENT`(exit `2`)다. 이름은 내부적으로 `SIGTERM` 형태의 정규형으로 정규화되며 `session.exit`의 `signal` field도 같은 정규형을 쓴다. `--signal KILL`은 escalation 없이 즉시 `killpg(SIGKILL)` 후 정리다. 세션을 종료하지 않고 신호만 보내는 operation은 M2에 없다(§2.4, P1). 종료가 완료되면 `--follow` 소비자는 `session.closed{reason: "closed"}` event(§6.4)를 받는다. 이미 종료된(`exited`) 세션의 close는 **어떤 신호도 보내지 않고**(재사용된 pgid로 무관한 프로세스에 신호가 갈 수 있다) 정리만 수행하며 오류가 아니다 — 이때도 `reason`은 `"closed"`다.
+`session.close`는 세션의 **process group 전체**(architecture.md §4)를 종료하고 세션을 broker에서 제거한다. 기본 절차는 SIGHUP → 유예 후 SIGTERM → 유예 후 SIGKILL escalation이며, 단계별 유예는 `[serve].close_grace_ms`(기본 5000)다. `--signal <SIG>`는 이 절차의 **첫 신호를 지정한 신호로 바꾼다** — 신호를 process group에 보낸 뒤 동일한 유예·escalation과 세션 정리가 이어진다. `--signal`은 wire `SessionClose`의 optional `signal` field로 전달되며(§2.4), 허용 값은 `HUP|INT|QUIT|TERM|USR1|USR2|KILL`(대소문자 무시, `SIG` 접두 유무 무관)뿐이다. 그 외(숫자, stop 계열 `STOP`/`TSTP`, 미지의 이름)는 `INVALID_ARGUMENT`(exit `2`)다. 이름은 내부적으로 `SIGTERM` 형태의 정규형으로 정규화되며 `session.exit`의 `signal` field도 같은 정규형을 쓴다. `--signal KILL`은 escalation 없이 즉시 `killpg(SIGKILL)` 후 정리다. 세션을 종료하지 않고 신호만 보내는 operation은 M2에 없다(§2.4, P1). 종료가 완료되면 `--follow` 소비자는 `session.closed{reason: "closed"}` event(§6.4)를 받는다. 이미 종료된(`exited`) 세션의 close는 **어떤 신호도 보내지 않고**(재사용된 pgid로 무관한 프로세스에 신호가 갈 수 있다) 정리만 수행하며 오류가 아니다 — 이때도 `reason`은 `"closed"`다. close는 그 세션에 발급된 미상환 데이터 스트림 티켓도 함께 해제한다.
 
 결과 `data`는 `{"session_ref": "...", "final_sequence": <제거 시점의 누적 output byte offset>}`다.
 
@@ -843,9 +843,12 @@ qsh serve --bind <ip:port>
   `quota_tunnels_principal`로 남고 `request_id`는 대응하는 control 요청이 없으므로 `"-"`,
   `peer_addr`는 거부된 그 TCP accept의 peer 주소다.
 - **Audit sink가 degraded인 동안은 fail-closed다(M8 Step 4a).** 치명적 쓰기 실패(디스크 풀 등)로
-  audit sink가 degraded로 latch되면 그 동안의 `session.attach`/`session.resume`과 세션 쓰기는
-  감사 없는 allow를 만들지 않기 위해 `PERMISSION_DENIED`로 거부된다 — 이는 버그가 아니라 의도된
-  fail-closed다. sink가 회복되면 같은 세션의 재부착은 다시 성공한다.
+  audit sink가 degraded로 latch되면 그 동안의 `session.open`/`session.attach`/`session.resume`과
+  세션 쓰기는 감사 없는 allow를 만들지 않기 위해 `PERMISSION_DENIED`로 거부된다(12c e2e로도 확인,
+  `crates/qsh-cli/tests/adversarial_load.rs`의
+  `session_open_fails_closed_when_a_freshly_restarted_writer_cannot_create_the_audit_log`,
+  `PLAN.md` M8 Step 5 (d)) — 이는 버그가 아니라 의도된 fail-closed다. sink가 회복되면 같은 세션의
+  재부착은 다시 성공한다.
 - **Audit 로그의 디스크 부피도 유계다(M5, `docs/adr/0010-resource-quotas.md`).** 거부 flood가
   audit flood가 되지 않는 것은 위의 창(10초)당 category별 1행 + 요약 1행 집계가 행 *수*를 묶기
   때문이고, 그 위에 회전·retention이 디렉터리 총 *부피* 자체를 묶는다 — `[audit].max_bytes`(기본

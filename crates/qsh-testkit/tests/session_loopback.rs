@@ -215,9 +215,11 @@ async fn session_full_path_open_write_read_resize_get_list_close<P: HostedPair>(
         Some(Some(session_read_event::Body::Closed(c))) if c.reason == "closed"
     ));
 
-    // The unredeemed session ticket is still outstanding until the
-    // connection goes away; the audit log has one structural line per op.
-    assert_eq!(h.server().pending_tickets(), 1);
+    // `close` frees its own session's unredeemed ticket immediately
+    // (라운드 1 판정 (c)) rather than leaving it outstanding until the
+    // connection goes away; the audit log still has one structural line
+    // per op regardless.
+    assert_eq!(h.server().pending_tickets(), 0);
     let recs = h.audit().records();
     let actions: Vec<&str> = recs.iter().map(|r| r.action.as_str()).collect();
     assert_eq!(

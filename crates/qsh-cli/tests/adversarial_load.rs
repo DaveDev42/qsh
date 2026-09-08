@@ -205,6 +205,7 @@ mod linux_only {
     use qsh_transport::{Dialer, Endpoint, Fingerprint, Principal, StaticTrust};
     use std::collections::HashSet;
     use std::net::SocketAddr;
+    use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
     use std::str::FromStr;
     use std::sync::Arc;
@@ -534,6 +535,30 @@ mod linux_only {
         std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(0)
+    }
+
+    /// Shelled out the same way as [`nofile_limit`] rather than pulling in
+    /// a `libc`/`nix` uid accessor this crate does not otherwise depend on
+    /// (`nix`'s own feature list here is `["term", "ioctl", "signal"]`, no
+    /// `user` feature). Only used to skip
+    /// `session_open_fails_closed_when_a_freshly_restarted_writer_cannot_
+    /// create_the_audit_log` under uid 0, where `chmod 500` on a directory
+    /// does not stop file creation in it (A17's own judgment,
+    /// `ARBITRATION-4.md` "root면 skip"). `false` on any failure to read
+    /// `id -u` — a non-root default only ever makes the scenario run and
+    /// hit its own bounded-attempts assertion instead of silently skipping.
+    fn running_as_root() -> bool {
+        std::process::Command::new("id")
+            .arg("-u")
+            .output()
+            .ok()
+            .and_then(|out| {
+                std::str::from_utf8(&out.stdout)
+                    .ok()
+                    .map(str::trim)
+                    .and_then(|s| s.parse::<u32>().ok())
+            })
+            .is_some_and(|uid| uid == 0)
     }
 
     /// True while `fleet`'s `qsh serve` child has not exited on its own — the
@@ -1470,7 +1495,10 @@ mod linux_only {
         // dial fails at `quota_connections_host`, not the admission rate
         // limiter — see `rate_limited_reject_flood_for`'s doc comment.
         const FLOOD_DIAL_RATE_PER_SEC: u64 = 5;
-        const AUDIT_WINDOW_SECS: f64 = 10.0;
+        // M8 Step 5 (b-0): read the real window instead of carrying a
+        // local hardcoded copy that can drift from
+        // `admission::AUDIT_AGGREGATION_WINDOW` unnoticed.
+        let audit_window_secs: f64 = qsh_core::admission::AUDIT_AGGREGATION_WINDOW.as_secs_f64();
         // A15: the flood loop's own real elapsed time must not silently
         // run away from `FLOOD_DURATION` — 2s of slop absorbs one
         // in-flight dial's round trip past the deadline check.
@@ -1531,14 +1559,14 @@ mod linux_only {
             .iter()
             .filter_map(|v| v["resource"].as_str())
             .collect();
-        let windows_upper = (flood_elapsed.as_secs_f64() / AUDIT_WINDOW_SECS).ceil() + 1.0;
+        let windows_upper = (flood_elapsed.as_secs_f64() / audit_window_secs).ceil() + 1.0;
         let row_bound = (windows_upper * 2.0 * (categories.len().max(1) as f64)) as usize;
         // A5's lower bound: over a genuinely continuous `T`-second flood of
         // one category, aggregation must have closed at least `floor(T/
         // 10)` windows — each a first-record row — for that category.
         // `rate_limited_reject_flood_for`'s spaced-out dial rate is what
         // makes this hold (F2c) — a saturating flood could not clear it.
-        let windows_lower = (flood_elapsed.as_secs_f64() / AUDIT_WINDOW_SECS).floor();
+        let windows_lower = (flood_elapsed.as_secs_f64() / audit_window_secs).floor();
         let row_floor = windows_lower as usize; // one flooded category
 
         let dir_bytes: u64 = std::fs::read_dir(fleet.host.state_dir())
@@ -1777,7 +1805,205 @@ mod linux_only {
     // itself — is still pinned at the unit level by 4a's in-crate
     // `session_open_fails_closed_when_the_audit_sink_cannot_record_an_
     // allow` (`crates/qsh-core/src/server/mod.rs:5661`), unaffected by
-    // this scenario's removal.
+    // this scenario's removal. M8 Step 5 (d)'s second construction below
+    // (`session_open_fails_closed_when_a_freshly_restarted_writer_cannot_
+    // create_the_audit_log`) is the "fresh writer restart" case this
+    // comment names — it does reach `degraded` at the e2e level.
+
+    /// Scenario 12c, second construction (`PLAN.md` M8 Step 5 (d),
+    /// `ARBITRATION-5.md` "병행 정리 묶음 판정" Q5). The first construction
+    /// (comment block directly above) locked the directory down *after*
+    /// the writer already held an open fd on `audit.log` — POSIX
+    /// permission checks happen at `open()`, not per-write, so it never
+    /// reached `degraded`. This construction locks the directory down
+    /// *before* any writer has ever opened `audit.log` in it, then starts
+    /// a brand-new `qsh serve` (a fresh writer thread) against it: that
+    /// writer's very first `ensure_open()` (`audit/writer.rs`) has to
+    /// *create* the file (`OpenOptions::create(true)`), which needs write
+    /// permission on the directory itself, not just an already-open fd.
+    ///
+    /// A manual reproduction against the debug binary (outside this
+    /// suite, `scratchpad/d12c` — not part of the repo) confirmed the
+    /// shape this test pins before writing it: `qsh serve` still binds
+    /// and answers normally — `chmod 500` on `state_dir` never touches
+    /// `identity`/`ca`/`trust`, which all live under the separate
+    /// `config_dir` (`Paths::ca_dir`/`Paths::audit_log`'s own doc) — but
+    /// the writer thread's first write trips `EACCES` creating
+    /// `audit.log` and latches `degraded`
+    /// (`crates/qsh-core/src/audit/writer.rs`'s own `tracing::error!` on
+    /// that trip). Because that first write races the client's first
+    /// `session.open` (`RotatingAuditSink::record`'s latch check runs
+    /// before the background writer thread ever touches disk), the
+    /// *first* attempt can still win the race and be admitted; every
+    /// attempt after the latch is visibly tripped is deterministically
+    /// `PERMISSION_DENIED`, and stays that way — the directory never
+    /// becomes writable again, so the writer's own background retry
+    /// (`RETRY_TICK`) can never clear it. This is outcome (i) of the
+    /// stage's three-way judgment: the refusal is directly observed, so
+    /// this test joins the strict axis (`QSH_LOAD_STRICT=1`) rather than
+    /// being dropped again.
+    ///
+    /// Root bypasses every POSIX permission check this construction
+    /// depends on (`chmod 500` on a directory does not stop `root` from
+    /// creating files in it), so this test skips under uid 0 — A17's own
+    /// judgment (`ARBITRATION-4.md` "12c 회전 실패 fail-closed를 A17의
+    /// 구성으로 만든다... root면 skip") carried forward to this second
+    /// construction.
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn session_open_fails_closed_when_a_freshly_restarted_writer_cannot_create_the_audit_log()
+    {
+        if !gate_requested() {
+            skip();
+            return;
+        }
+        if running_as_root() {
+            eprintln!(
+                "SKIP: this construction depends on the POSIX permission check root bypasses \
+                 (`chmod 500` on state_dir never stops root from creating `audit.log` in it), \
+                 so it cannot observe the fail-closed latch under uid 0 — `ARBITRATION-4.md` \
+                 \"12c 회전 실패 fail-closed를 A17의 구성으로 만든다... root면 skip\""
+            );
+            return;
+        }
+
+        let bin = load_bin();
+        let host = Sandbox::initialized();
+        let identity = make_identity();
+        host.trust_add("flood", None, &identity.fingerprint.to_string());
+
+        // First boot: a normal, writable state dir, but no session is ever
+        // opened — no choke point (`Server::authorize` and siblings) ever
+        // calls `record()`, so the writer thread never performs its first
+        // write and `audit.log` is never created (`RotatingFile::
+        // ensure_open` is lazy). This is the "no active file yet"
+        // precondition the stage's construction depends on.
+        {
+            let serve = ServeGuard::start_with_bin(&host, &bin, &[]);
+            assert!(
+                !host.state_dir().join("audit.log").exists(),
+                "a boot with no session opened must never create audit.log"
+            );
+            drop(serve); // Drop kills the child; no clean-shutdown drain needed here.
+        }
+
+        std::fs::set_permissions(host.state_dir(), std::fs::Permissions::from_mode(0o500))
+            .expect("chmod 500 the (still audit.log-less) state dir");
+
+        // Second boot: a fresh writer thread against the now-locked-down
+        // directory — the "writer restart" the stage's own name for this
+        // construction refers to. `mut`: `finish()` at the end of this
+        // test needs `&mut self` to drain the reader threads and capture
+        // stderr.
+        let mut serve = ServeGuard::start_with_bin(&host, &bin, &[]);
+        let addr: SocketAddr = serve.addr().parse().expect("serve addr parses");
+        let server_fp = host.fingerprint();
+        let dialer = flood_dialer(&identity, &server_fp);
+
+        let (mut session, _ep) = negotiate_session(&dialer, addr, "d12c")
+            .await
+            .expect("the QUIC connection itself must still be admitted (ACL is allow-all)");
+
+        // Poll a bounded number of `session.open`s for the first
+        // `PERMISSION_DENIED` — the very first can still win the race
+        // against the writer's own first (failing) write attempt, so this
+        // is not a one-shot assertion.
+        const ATTEMPTS: usize = 50;
+        let mut denied_at = None;
+        for attempt in 0..ATTEMPTS {
+            match session.session_open(open_req()).await {
+                Ok(opened) => {
+                    let _ = session.session_close(&opened.session_id, None).await;
+                }
+                Err(err) => {
+                    let (code, retryable) = remote(err);
+                    assert_eq!(
+                        code,
+                        ErrorCode::PermissionDenied,
+                        "a degraded audit sink must fail closed with PERMISSION_DENIED, not any \
+                         other code (attempt {attempt})"
+                    );
+                    assert!(
+                        !retryable,
+                        "PERMISSION_DENIED must not be marked retryable (attempt {attempt})"
+                    );
+                    denied_at = Some(attempt);
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        session.close();
+
+        let denied_at = denied_at.unwrap_or_else(|| {
+            panic!(
+                "expected a PERMISSION_DENIED session.open within {ATTEMPTS} attempts once the \
+                 audit writer could never create audit.log; the fail-closed latch never tripped \
+                 observably"
+            )
+        });
+
+        // Once tripped, the latch must stay tripped — the directory never
+        // becomes writable again, so a further attempt must also be
+        // denied, not flap back to `Ok` on some later retry tick.
+        let (mut session2, _ep2) = negotiate_session(&dialer, addr, "d12c-recheck")
+            .await
+            .expect("a new connection must still be admitted (ACL is allow-all)");
+        let (code, retryable) = remote(
+            session2
+                .session_open(open_req())
+                .await
+                .expect_err("the degraded latch must still be tripped on a fresh connection"),
+        );
+        assert_eq!(code, ErrorCode::PermissionDenied);
+        assert!(!retryable);
+        session2.close();
+
+        eprintln!(
+            "scenario 12c (second construction) \
+         session_open_fails_closed_when_a_freshly_restarted_writer_cannot_create_the_audit_log: \
+         PERMISSION_DENIED first observed at attempt {denied_at}/{ATTEMPTS}"
+        );
+
+        // The writer's own `tracing::error!` (`crates/qsh-core/src/audit/
+        // writer.rs`'s `handle_normal`, target `"qsh::audit"`) really does
+        // reach this stderr at default verbosity: `common/mod.rs`'s
+        // `.env_remove("QSH_LOG")` only strips an override, leaving the
+        // child at `qsh-cli/src/main.rs`'s `init_tracing` default
+        // (`cli.quiet == false`, `cli.verbose == 0`) `=> "warn"`, and
+        // `ERROR` is strictly more severe than `WARN` — `EnvFilter` never
+        // drops a level *above* the threshold it names. So (unlike
+        // `qsh_core::telemetry`/`reverse::listen`'s dedicated targets,
+        // which need `=info` appended to even reach `warn` default) the
+        // degraded diagnostic needs no such carve-out and is asserted here
+        // directly rather than falling back to a third `session.open` as
+        // the latch-persistence-only proxy.
+        let output = serve.finish();
+        assert!(
+            output
+                .stderr
+                .iter()
+                .any(|line| line.contains("audit writer degraded")),
+            "expected the writer's degraded diagnostic on stderr at default verbosity; got: \
+             {:?}",
+            output.stderr
+        );
+        assert!(
+            !output.stderr.iter().any(|line| line.contains("panicked")),
+            "the audit writer's write failure must degrade gracefully, never panic the serve \
+             process; got: {:?}",
+            output.stderr
+        );
+
+        // Restore state_dir's permissions before the sandbox's own
+        // `TempDir` cleanup runs — `TempDir::drop` silently swallows a
+        // removal failure under a still-locked-down directory rather than
+        // panicking, so this is not required for correctness, but a
+        // `chmod 500` directory left behind (however harmlessly reaped) is
+        // not a state this test should hand back to whatever runs next.
+        std::fs::set_permissions(host.state_dir(), std::fs::Permissions::from_mode(0o700))
+            .expect("restore state_dir permissions before teardown");
+    }
 
     /// Scenario 13 (`BRIEF-4c.md` §4.5/J13, B-P2-6): the *default*
     /// `max_tunnel_streams_per_forward=64` path, never exercised by any

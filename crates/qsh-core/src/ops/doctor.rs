@@ -25,7 +25,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use qsh_proto::{DoctorData, DoctorFinding, DoctorReq, ErrorCode};
+use qsh_proto::{DoctorData, DoctorFinding, DoctorReq, ErrorCode, KeyStoreKind};
 
 use crate::acl::load_or_deny;
 use crate::config::Config;
@@ -35,7 +35,9 @@ use crate::doctor::{
     QSH_PATH_SHADOWED, TRUST_REMOVE_SCOPE, probe_audit_path_writable,
 };
 use crate::hosts::HostsFile;
-use crate::identity::{CERT_BACKDATE_MINUTES, Identity, KeyStore, PlatformKeyStore};
+use crate::identity::{
+    CERT_BACKDATE_MINUTES, FileKeyStore, Identity, KEY_FILE, KeyStore, PlatformKeyStore,
+};
 use crate::ops::{OpError, Operation, Ops, resolve_peer_address};
 use crate::trust::TrustStore;
 
@@ -107,21 +109,38 @@ impl Ops {
         })?;
         let config = self.config()?;
 
-        // Real environment: this device's own `PlatformKeyStore` account
-        // and this process's actual `current_exe()`/`$PATH` — the two
-        // inputs `doctor_assemble`'s `keystore_unavailable`/
-        // `qsh_path_shadowed` probes depend on that are not files under
-        // `self.paths` (verify round P2-2/P2-4). Read here, once, and
-        // handed down as data rather than read again inside
+        // Real environment: the key store this device's identity actually
+        // records (`identity.key_store`, `crate::identity::open_store`'s
+        // own match — mirrored here rather than exposed, since `open_store`
+        // is private to the `identity` module) and this process's actual
+        // `current_exe()`/`$PATH` — the inputs `doctor_assemble`'s
+        // `keystore_unavailable`/`qsh_path_shadowed` probes depend on that
+        // are not files under `self.paths` (verify round P2-2/P2-4). Read
+        // here, once, and handed down as data rather than read again inside
         // `doctor_assemble` — the same "read once at the edge, pass data
         // down" shape [`unix_seconds`]'s own `now` injection already uses.
-        let keystore = PlatformKeyStore::new(identity.device_id.clone());
+        //
+        // Always probing `PlatformKeyStore` regardless of `identity.
+        // key_store` used to make `keystore_unavailable` mean "the OS
+        // keychain is unreachable" even for a `file`-mode identity that
+        // never touches it — a probe of a store nothing reads from, and on
+        // this project's own macOS dev hosts, one that can cost tens of
+        // seconds per `doctor.run` (an unsigned binary's first keychain
+        // access prompts for user consent; R1 판정 (g)). Probing the store
+        // actually in use makes the finding mean what its name says: "the
+        // key store this device relies on cannot be opened right now."
+        let keystore: Box<dyn KeyStore> = match identity.key_store {
+            KeyStoreKind::File => {
+                Box::new(FileKeyStore::new(self.paths.identity_dir().join(KEY_FILE)))
+            }
+            KeyStoreKind::Platform => Box::new(PlatformKeyStore::new(identity.device_id.clone())),
+        };
         let current_exe = std::env::current_exe().ok();
         let path_dirs: Vec<PathBuf> = std::env::var_os("PATH")
             .map(|path| std::env::split_paths(&path).collect())
             .unwrap_or_default();
         let env = DoctorEnvironment {
-            keystore: &keystore,
+            keystore: keystore.as_ref(),
             current_exe: current_exe.as_deref(),
             path_dirs: &path_dirs,
         };
@@ -672,12 +691,86 @@ fn probe_address(address: &str, name: &str, is_controller_target: bool) -> Optio
 /// synchronous end to end, so this uses the blocking
 /// [`std::net::ToSocketAddrs`] resolver instead of starting a runtime just
 /// for one DNS lookup.
+///
+/// Bounded by [`DOCTOR_PROBE_TIMEOUT`] via [`resolve_with_timeout`] — a
+/// slow or silent resolver (a real risk for a real, possibly stale-network
+/// `--host`/`[reverse].controller` value) no longer holds `doctor.run`
+/// hostage past the same budget every other probe already respects. A
+/// timeout is surfaced as a plain [`std::io::Error`] and falls through
+/// [`probe_address`]'s existing `Err(_) => `[`UdpProbeOutcome::Unreachable`]
+/// arm — the same path a parse failure or NXDOMAIN already took, so this
+/// adds no new [`DoctorFinding`] code (`EXPECTED_DOCTOR_CODES` stays at
+/// 14). This resolve budget is on top of, not shared with,
+/// [`probe_address`]'s own `DOCTOR_PROBE_TIMEOUT`-bounded
+/// [`probe::probe_udp_egress`] call that follows a successful resolution —
+/// so one unreachable target costs at most `2 × DOCTOR_PROBE_TIMEOUT`, not
+/// `DOCTOR_PROBE_TIMEOUT`.
 fn resolve_probe_socket_addr(address: &str) -> std::io::Result<std::net::SocketAddr> {
+    let address = address.to_string();
+    resolve_with_timeout(DOCTOR_PROBE_TIMEOUT, move || blocking_resolve(&address))
+}
+
+/// The actual blocking `ToSocketAddrs` lookup, factored out of
+/// [`resolve_probe_socket_addr`] so [`resolve_with_timeout`] can be tested
+/// against a synthetic slow closure instead of a real DNS name.
+fn blocking_resolve(address: &str) -> std::io::Result<std::net::SocketAddr> {
     use std::net::ToSocketAddrs;
     address
         .to_socket_addrs()?
         .next()
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no addresses resolved"))
+}
+
+/// Run a blocking `resolve` (in practice, [`blocking_resolve`]'s DNS
+/// lookup) on its own thread and wait up to `timeout` for it to finish.
+///
+/// The thread is detached, not joined: if the resolver never returns —
+/// genuinely hung, not merely slow — that thread stays parked past this
+/// function's return, until the resolver eventually answers (its `send`
+/// then silently fails, since `rx` has already been dropped) or the
+/// process exits. This is a deliberate, bounded leak of at most one thread
+/// per timed-out probe, not an unbounded one: `doctor.run` issues a small,
+/// fixed number of probes per invocation (one per pinned `--host`/
+/// `[reverse].controller` target), never a loop over untrusted input.
+fn resolve_with_timeout<F>(timeout: Duration, resolve: F) -> std::io::Result<std::net::SocketAddr>
+where
+    F: FnOnce() -> std::io::Result<std::net::SocketAddr> + Send + 'static,
+{
+    let (tx, rx) = std::sync::mpsc::channel();
+    let spawned = std::thread::Builder::new()
+        .name("qsh-doctor-resolve".to_string())
+        .spawn(move || {
+            // The receiver may already be gone (timed out and returned) by
+            // the time this resolves — that's the detach: a
+            // dropped-receiver send error is expected, not a bug, and is
+            // deliberately discarded.
+            let _ = tx.send(resolve());
+        });
+    if let Err(err) = spawned {
+        // Thread creation itself failing (`EAGAIN`/`ENOMEM` — OS-level
+        // resource exhaustion) must not panic `doctor.run` the way
+        // `std::thread::spawn` would; it is the same "could not probe"
+        // outcome as a timeout, just diagnosed at spawn time rather than
+        // after waiting on it.
+        return Err(std::io::Error::new(
+            err.kind(),
+            format!("could not spawn resolver thread: {err}"),
+        ));
+    }
+    match rx.recv_timeout(timeout) {
+        Ok(result) => result,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "resolver did not respond within the probe timeout",
+        )),
+        // `tx` was dropped without a `send` — the resolver thread died
+        // (panicked) before it could report a result. Distinct from a
+        // plain timeout: this is not "still working, too slow" but "will
+        // never answer."
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(std::io::Error::other(
+            "resolver thread died before sending a result",
+        )),
+    }
 }
 
 /// Worst severity across every finding — `"error"` beats `"warn"` beats
@@ -1192,21 +1285,27 @@ mod tests {
             .expect("trust_remove_scope finding");
         assert_eq!(finding.status, "info");
         // An `info`-only addition must not change `overall` — compared
-        // against the "before" baseline rather than a hardcoded "ok",
-        // since this test machine's own platform key store reachability
-        // (`keystore_unavailable`, environment-dependent) may already put
-        // the baseline at "warn".
+        // against the "before" baseline rather than a hardcoded "ok"
+        // defensively, in case some other finding on this test machine
+        // already put the baseline at "warn"; `keystore_unavailable`
+        // itself is no longer one of the ways that can happen for
+        // `healthy_ops()`'s file-mode identity (below).
         assert_eq!(after.overall, before.overall);
     }
 
     // -----------------------------------------------------------------
-    // keystore_unavailable — a reachable file-mode identity's own
-    // PlatformKeyStore probe is environment-dependent (it may or may not
-    // find a real platform store on the test machine), so this only
-    // asserts the finding's *shape* through the pure classifier
-    // (`doctor::probe::tests::keystore_finding_fires_on_unavailable`
-    // already covers the classification itself deterministically) plus
-    // that `Ops::doctor` does not panic while probing it.
+    // keystore_unavailable — `Ops::doctor` now probes the key store
+    // `identity.key_store` actually names (R1 판정 (g)), not
+    // unconditionally `PlatformKeyStore`. `healthy_ops()` inits a
+    // file-mode identity, so this probes `FileKeyStore` against the real
+    // `device.key` `init_identity` already wrote — deterministic, and it
+    // always finds the key, so `keystore_unavailable` does not fire in
+    // this suite at all. The test below stays as a defensive shape check
+    // (a broken/unreadable `device.key` on some other machine, or a
+    // platform-mode identity in the field, must still only ever surface
+    // as `"warn"`, never panic) — not a claim that this specific run
+    // exercises the unavailable path; the deterministic trigger for that
+    // path is the `AlwaysUnavailableKeyStore` stub two tests down.
     // -----------------------------------------------------------------
 
     #[test]
@@ -1420,6 +1519,55 @@ mod tests {
     // connectivity: controller_unreachable / no_route / udp_egress_blocked
     // precedence, and an unresolvable req.host being a hard error.
     // -----------------------------------------------------------------
+
+    /// `resolve_with_timeout` against a "slow resolver" seam — a closure
+    /// that sleeps well past a 1ms timeout — rather than a real DNS name,
+    /// per the brief's own steer away from depending on real DNS. Mirrors
+    /// `doctor::probe`'s `probe_times_out_against_a_silent_black_hole`
+    /// shape: an extreme, deterministic timeout injected directly at the
+    /// seam under test.
+    ///
+    /// Two more checks land in this same test (R1 판정 (g), DNS-wiring
+    /// minors): an elapsed-time assertion that the wait itself is actually
+    /// bounded by the 1ms timeout rather than by how long the sleeping
+    /// resolver takes (a regression that swapped `recv_timeout` for a
+    /// plain, unbounded `recv` would still return the right `Err` above,
+    /// eventually — only the clock catches that); and a source-text pin,
+    /// the same shape as `fsutil.rs`'s `resume_and_config_pin_opposite_
+    /// durable_arguments_in_their_source`, that `resolve_probe_socket_
+    /// addr`'s production call site really does pass `DOCTOR_PROBE_
+    /// TIMEOUT` — not some other duration — as the resolve budget. Built
+    /// via `format!` rather than typed as one literal so the needle does
+    /// not just match itself inside this test's own source once
+    /// `include_str!` pulls the whole file in.
+    #[test]
+    fn probe_times_out_against_a_silent_black_hole_resolver() {
+        let started = std::time::Instant::now();
+        let result = resolve_with_timeout(Duration::from_millis(1), || {
+            std::thread::sleep(Duration::from_millis(200));
+            blocking_resolve("127.0.0.1:0")
+        });
+        let elapsed = started.elapsed();
+        let err = result.expect_err("a resolver stuck past the timeout must not succeed");
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+        assert!(
+            elapsed < Duration::from_millis(50),
+            "resolve_with_timeout must return close to its 1ms timeout, not wait \
+             out the 200ms sleeping resolver; took {elapsed:?}"
+        );
+
+        let call_site = format!(
+            "resolve_with_timeout({}, move || blocking_resolve(&address))",
+            "DOCTOR_PROBE_TIMEOUT"
+        );
+        assert_eq!(
+            include_str!("doctor.rs").matches(&call_site).count(),
+            1,
+            "resolve_probe_socket_addr must bound its resolve with \
+             DOCTOR_PROBE_TIMEOUT, the same budget every other probe \
+             already respects"
+        );
+    }
 
     #[test]
     fn doctor_reports_controller_unreachable_for_a_dangling_controller_alias() {
