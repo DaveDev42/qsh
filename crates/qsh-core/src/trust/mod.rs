@@ -132,6 +132,16 @@ impl TrustStore {
     pub(crate) fn lock(path: &Path) -> Result<crate::config::FileLock, OpError> {
         if let Some(parent) = path.parent() {
             ensure_private_dir(parent)?;
+            // `path` (`trust.toml`, in `config_dir`) is written through
+            // `write_private_file` -> `fsutil::write_atomically`, so this
+            // directory does receive `.tmp{pid}-*` orphans on a crash
+            // between temp-write and rename (M7 carryover (iv),
+            // `BRIEF-5.md` §6). `ca::init`/`identity::init` already sweep
+            // `config_dir` once at `qsh init` time, but this call site runs
+            // on every trust lock/save over a long-running `qsh serve`'s
+            // whole lifetime, so sweeping here too bounds how long an
+            // orphan can sit around between `qsh init` runs.
+            crate::fsutil::sweep_stale_temp_files(parent);
         }
         crate::config::FileLock::acquire(&crate::config::lock_path_for(path))
     }
@@ -139,6 +149,13 @@ impl TrustStore {
     /// Write the store to `path` (0600, in a 0700 directory, atomically).
     pub fn save(&self, path: &Path) -> Result<(), OpError> {
         if let Some(parent) = path.parent() {
+            // REVIEW-5-A A8 (부분 채택): no sweep here any more. Every real
+            // call site reaches `save` from within the same
+            // lock→load→mutate→save cycle whose `Self::lock` call just
+            // swept this directory microseconds earlier — a second
+            // `read_dir` walk here bought nothing but a redundant
+            // directory scan on the pairing response path this milestone
+            // is hardening.
             ensure_private_dir(parent)?;
         }
         let file = TrustFile {

@@ -24,7 +24,7 @@
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hash};
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -155,6 +155,33 @@ pub enum Decision {
     /// failure — and dropped **before** the connection is served, so a
     /// handshake slot never outlives the handshake itself.
     Admit(OwnedSemaphorePermit),
+}
+
+/// Lock-free per-branch tally of every [`Decision`] [`Gate::decide`] has
+/// ever returned, since `Gate::new` — a soak-observability counter
+/// (M8 Step 5a), not an enforcement mechanism. `Ignore` is deliberately
+/// **not** promoted past `tracing::trace!` for the individual event (a
+/// spoofed-source flood can hit it thousands of times a second), so this
+/// snapshot is the only cheap way an accept-loop heartbeat or a soak
+/// harness can see how much of that traffic there was without paying for
+/// per-event tracing at a visible level.
+#[derive(Debug, Default)]
+struct DecisionCounters {
+    retry: AtomicU64,
+    ignore: AtomicU64,
+    refuse: AtomicU64,
+    admit: AtomicU64,
+}
+
+/// A point-in-time snapshot of [`DecisionCounters`] — what
+/// [`Gate::counters`] returns. Plain `u64`s (not atomics): once read out,
+/// this is a moment's tally, not a live handle.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct AdmissionCounters {
+    pub retry: u64,
+    pub ignore: u64,
+    pub refuse: u64,
+    pub admit: u64,
 }
 
 /// One row of the count-min sketch: its own independently-seeded hasher
@@ -398,6 +425,8 @@ pub struct Gate {
     validated_sketch: Sketch,
     validated_rate_per_source: u32,
     windows: [AuditWindow; 3],
+    /// Soak observability (M8 Step 5a) — see [`DecisionCounters`].
+    decision_counters: DecisionCounters,
 }
 
 impl Gate {
@@ -427,6 +456,20 @@ impl Gate {
                 AuditWindow::default(),
                 AuditWindow::default(),
             ],
+            decision_counters: DecisionCounters::default(),
+        }
+    }
+
+    /// Snapshot the running tally of every [`Decision`] branch
+    /// [`Gate::decide`] has returned since construction (M8 Step 5a) —
+    /// for the accept-loop heartbeat and soak harnesses, not for
+    /// enforcement decisions.
+    pub fn counters(&self) -> AdmissionCounters {
+        AdmissionCounters {
+            retry: self.decision_counters.retry.load(Ordering::Relaxed),
+            ignore: self.decision_counters.ignore.load(Ordering::Relaxed),
+            refuse: self.decision_counters.refuse.load(Ordering::Relaxed),
+            admit: self.decision_counters.admit.load(Ordering::Relaxed),
         }
     }
 
@@ -466,8 +509,29 @@ impl Gate {
         if !validated {
             if self.rate_exceeded(&self.sketch, self.rate_per_source, peer, now) {
                 let records = self.record_rejection(RejectReason::RateLimited, peer, now);
+                self.decision_counters
+                    .ignore
+                    .fetch_add(1, Ordering::Relaxed);
+                // Deliberately `trace!`, not `debug!`/`info!`: a spoofed
+                // source under flood hits this branch thousands of times
+                // a second (module doc, §5 aggregation) — the aggregated
+                // `AuditRecord`s above are the visible signal, this is
+                // only for someone who turned tracing all the way up.
+                // No payload/key material, address only.
+                tracing::trace!(
+                    target: "qsh_core::admission",
+                    peer = %peer,
+                    reason = ?RejectReason::RateLimited,
+                    "admission decision: ignore"
+                );
                 return Decision::Ignore(RejectReason::RateLimited, records);
             }
+            self.decision_counters.retry.fetch_add(1, Ordering::Relaxed);
+            tracing::trace!(
+                target: "qsh_core::admission",
+                peer = %peer,
+                "admission decision: retry"
+            );
             return Decision::Retry;
         }
         if self.rate_exceeded(
@@ -477,12 +541,38 @@ impl Gate {
             now,
         ) {
             let records = self.record_rejection(RejectReason::ValidatedRateLimited, peer, now);
+            self.decision_counters
+                .refuse
+                .fetch_add(1, Ordering::Relaxed);
+            tracing::trace!(
+                target: "qsh_core::admission",
+                peer = %peer,
+                reason = ?RejectReason::ValidatedRateLimited,
+                "admission decision: refuse"
+            );
             return Decision::Refuse(RejectReason::ValidatedRateLimited, records);
         }
         match self.handshake_permits.clone().try_acquire_owned() {
-            Ok(permit) => Decision::Admit(permit),
+            Ok(permit) => {
+                self.decision_counters.admit.fetch_add(1, Ordering::Relaxed);
+                tracing::trace!(
+                    target: "qsh_core::admission",
+                    peer = %peer,
+                    "admission decision: admit"
+                );
+                Decision::Admit(permit)
+            }
             Err(_) => {
                 let records = self.record_rejection(RejectReason::AtCapacity, peer, now);
+                self.decision_counters
+                    .refuse
+                    .fetch_add(1, Ordering::Relaxed);
+                tracing::trace!(
+                    target: "qsh_core::admission",
+                    peer = %peer,
+                    reason = ?RejectReason::AtCapacity,
+                    "admission decision: refuse"
+                );
                 Decision::Refuse(RejectReason::AtCapacity, records)
             }
         }
@@ -677,6 +767,77 @@ mod tests {
             _ => panic!("expected Refuse(AtCapacity)"),
         }
         drop((permit1, permit2));
+    }
+
+    /// M8 Step 5a: every one of [`Decision`]'s four branches increments
+    /// its own [`AdmissionCounters`] field, and only that field.
+    #[tokio::test]
+    async fn gate_counters_tally_every_decision_branch() {
+        let clock = Arc::new(TestClock::new());
+        // Cap 1 so the second validated attempt is `Refuse(AtCapacity)`
+        // without needing to first exhaust a rate-limit budget.
+        let gate = Gate::new(clock.clone(), 1, 1000, 1000);
+        assert_eq!(gate.counters(), AdmissionCounters::default());
+
+        // Retry: unvalidated, under its rate limit.
+        match gate.decide(addr(v4(203, 0, 113, 1), 1), false, gate.now()) {
+            Decision::Retry => {}
+            other => panic!("expected Retry, got {}", decision_kind(&other)),
+        }
+        assert_eq!(
+            gate.counters(),
+            AdmissionCounters {
+                retry: 1,
+                ..Default::default()
+            }
+        );
+
+        // Admit: validated, under the cap.
+        let permit = match gate.decide(addr(v4(203, 0, 113, 2), 1), true, gate.now()) {
+            Decision::Admit(p) => p,
+            other => panic!("expected Admit, got {}", decision_kind(&other)),
+        };
+        assert_eq!(
+            gate.counters(),
+            AdmissionCounters {
+                retry: 1,
+                admit: 1,
+                ..Default::default()
+            }
+        );
+
+        // Refuse: validated, but the cap (now 1/1) is already held.
+        match gate.decide(addr(v4(203, 0, 113, 3), 1), true, gate.now()) {
+            Decision::Refuse(RejectReason::AtCapacity, _) => {}
+            other => panic!("expected Refuse(AtCapacity), got {}", decision_kind(&other)),
+        }
+        assert_eq!(
+            gate.counters(),
+            AdmissionCounters {
+                retry: 1,
+                admit: 1,
+                refuse: 1,
+                ..Default::default()
+            }
+        );
+        drop(permit);
+
+        // Ignore: same unvalidated source hammered past its rate limit.
+        let flood_peer = addr(v4(203, 0, 113, 9), 1);
+        let mut saw_ignore = false;
+        for _ in 0..10_000 {
+            if let Decision::Ignore(RejectReason::RateLimited, _) =
+                gate.decide(flood_peer, false, gate.now())
+            {
+                saw_ignore = true;
+                break;
+            }
+        }
+        assert!(saw_ignore, "expected the flood to eventually be Ignore'd");
+        let counters = gate.counters();
+        assert_eq!(counters.ignore, 1, "exactly one Ignore so far");
+        assert_eq!(counters.admit, 1);
+        assert_eq!(counters.refuse, 1);
     }
 
     /// `PLAN.md` M8 Step 2 design §8 — dropping the permit returned by

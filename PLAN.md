@@ -610,6 +610,16 @@ M7 이월 부채가 여기서 만난다: bounded pull executor 부재(측정된 
 | 5e | 24h 런 + 캠페인 기록 + DoD 2 판정 | 6.1 DoD 2 체크 |
 | 5f | soak이 드러낸 수정((iii) 등) | 재실행 24h에서 fd 회귀선 기울기 0 |
 
+**(a)-추기 — 5a–5d 구현·검증 라운드 판정 (2026-09-08, main 세션).** 착수 판정의 설계는 그대로 섰다. 하이브리드 하네스(`soak.rs` 하나, 실행기 둘)와 `qsh-testkit::procstat` 승격, `[profile.soak]`의 slow-timeout 경고만 의미론은 S0에서 실측으로 확인했다(1 s period가 4 s sleep 테스트를 죽이지 않고 SLOW 경고만 반복). 24h 런의 실제 상한은 `run.sh`의 outer timeout이 맡는다. 판정식은 `docs/campaigns/m8-soak.md` §3에 실행 전 고정했다. 착수 판정의 두 시계열 판정에 셋을 더했다. listener·self fd는 boot→idle_end 비교가 아니라 steady 4분위 첫/마지막 최댓값 +2로 본다(WSL 실측의 self fd +4가 세션 open/attach의 일회성 warm-up이라 (iii)이 재는 사이클 중 성장과 다르다). echo p95는 ramp 직후 baseline의 3배와 50 ms 중 큰 값이고 baseline은 CSV의 ramp 행에 실어 `summarize.py`도 같은 값을 쓴다. 세션 라운드 5 s 데드라인은 `SESSION_STALLED`로 잡는다. TTL reap 판정 시각은 `resume_ttl + REAPER_TICK`이다.
+
+구현 중 S4가 찾은 사실 하나. atomic-rename은 `config.rs`와 `resume.rs`에 두 벌이었고 ticket 카운터도 둘이었다. `fsutil::write_atomically`로 합치고 카운터를 하나로 두었다. 파일명 `.tmp{pid}-{ticket}`은 crash-safety 테스트가 핀한 계약이라 그대로다. 스윕은 1h+ESRCH 또는 24h 규칙이다. 24h 쪽은 적대 검토 A가 지적한 재부팅 뒤 pid 재사용과 non-unix의 liveness 부재를 한 임계로 덮는다.
+
+검증 라운드. opus 3인 적대 검토(A 변이 9건 중 7 kill, B·C 코드 검토)와 sonnet 수정 F1–F3. 채택 항목은 `$SP/step5/ARBITRATION-5.md`에 표로 남겼다. blocker 둘은 Windows `set_modified`가 읽기 핸들에 `SetFileTime`을 걸어 CI가 붉어지는 것(C1)과 100세션이 `max_connections_per_principal` 기본값 32에 걸리는 것(B1, cap을 `max(64, 2N)`·`max(512, 4N)`으로). 기각은 C11(`.tmp` 접두 강화)과 A8의 디렉터리별 throttle(엔트리 열 개 read_dir 한 번을 막으려 전역 상태를 두지 않는다), A10의 곱셈 백오프(24h 로그에서 5 s 하트비트는 생존 증거)다.
+
+WSL 실측(fuzz 포화 중)과 판정. 짧은 모드 strict에서 dial `ConnectionFailed` 10 s 2회는 4c와 같은 환경 클래스라 하네스가 3회 시도(1 s 백오프)로 흡수하고 제품 타임아웃은 두었다. T2도 5/10으로 같은 클래스. 5b의 완료 기준 "WSL strict 3/3"은 미충족으로 두고 fuzz 종료(2차 09-10 14:48 + 1차 부족분 ~13h/타깃) 뒤 단독 점유에서 다시 잰다. 깨끗한 환경의 답은 load.yml의 soak 스텝이다. 5a·5c·5d는 완료. §6.4의 ii·iv는 5d로 닫는다. (iii)은 24h 런이 `FD_GROWTH_CLIENT`를 내는지로 판정한다.
+
+이월. summarize.py에 echo baseline 플래그 override가 남아 있으나 기본은 ramp 행이다. 4c 이월 (b)(c)(d)(e-1)(e-2)(g)는 24h 대기 중 병행 정리 묶음 그대로다. d01987f의 macOS `tunnel_chaos` flake(fault 주입 전 ECONNRESET)는 1회라 §6.5에 올리지 않았다. 재발하면 올린다.
+
 #### Step 6 — wire freeze 선행 정리
 
 freeze 이후에는 고칠 수 없는 것들을 먼저 처리한다.
@@ -645,9 +655,9 @@ M2가 20회를 조기 측정해 SC4/SC5를 실기기로 확인했고 SC3 판정�
 | # | 항목 | 소유 step |
 |---|---|---|
 | i | bounded pull executor + `RESOURCE_EXHAUSTED` (측정된 512 천장) | Step 6 뒤 재질문 (Step 5 (a) 판정: ADR-0011이 MCP 어댑터를 지우면 512 천장의 재현 경로가 사라진다. Step 3은 어휘 정합만 — 판정 13) |
-| ii | `Ops::exec`(`ops/exec.rs:81`) 호출당 `new_multi_thread()` 런타임 | Step 5 |
-| iii | pull당 fd 선형 증가 | Step 5 |
-| iv | 고아 `.tmp{pid}-{N}` 청소 부재 | Step 5 |
+| ii | `Ops::exec`(`ops/exec.rs:81`) 호출당 `new_multi_thread()` 런타임 | Step 5 (5d 완료 2026-09-08: `exec_run`이 `connect_runtime()`을 공유) |
+| iii | pull당 fd 선형 증가 | Step 5 (5e 24h 런의 `FD_GROWTH_CLIENT` 판정 대기 — steady 4분위 규칙) |
+| iv | 고아 `.tmp{pid}-{N}` 청소 부재 | Step 5 (5d 완료 2026-09-08: `fsutil::write_atomically` 통합 + `sweep_stale_temp_files`, 1h+ESRCH 또는 24h) |
 | v | `qsh trust add dave@box --address …` 오도 제안 | Step 6 |
 | vi | trust store read-modify-write 잠금 부재 | Step 6 |
 | vii | invites.toml CLI/데몬 lock-free 창 | Step 6 |

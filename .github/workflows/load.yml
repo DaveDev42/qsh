@@ -60,10 +60,16 @@ jobs:
     # `--profile load` runs `[profile.load]`'s `test-threads = 1`
     # (`.config/nextest.toml`), so a GHA runner with no WSL-style
     # contention should land well inside the original ~155s ceiling plus
-    # this split's addition. 30 minutes leaves headroom for a release
-    # build plus a genuinely slow run without letting a runaway eat the
-    # runner's 6-hour default.
-    timeout-minutes: 30
+    # this split's addition.
+    #
+    # M8 Step 5 added a second nextest run in this job — the short-mode
+    # soak scenario (`crates/qsh-cli/tests/soak.rs`, default 120s steady
+    # state + 8 sessions + a 90s drain wait for `CLOSED_RETENTION` +
+    # `REAPER_TICK`), a few more minutes on top of adversarial_load's own
+    # budget above. 40 minutes (raised from 30, `BRIEF-5.md` §5) leaves
+    # headroom for a release build plus both genuinely slow runs without
+    # letting a runaway eat the runner's 6-hour default.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v6
       - uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -85,3 +91,36 @@ jobs:
         env:
           QSH_LOAD_STRICT: 1
           QSH_LOAD_BIN: ${{ github.workspace }}/target/release/qsh
+      # M8 Step 5 — the short-mode soak scenario (`crates/qsh-cli/tests/
+      # soak.rs`, `docs/design/testing.md` L4 "구현(M8 Step 5)"). Same
+      # env, same release binary, same `[profile.load]` — this is the
+      # regression-watchdog speed of the one soak.rs scenario; the 24h/
+      # 100-session speed runs under `[profile.soak]` on a dedicated host,
+      # never here (`docs/campaigns/m8-soak.md`). `QSH_SOAK_CSV` gives
+      # `summarize.py` (below) something to judge — without it the test
+      # still asserts its own always-checked axes, but the CSV-only axes
+      # (per-session buffer, RSS trend, quarters notes) never get any CI
+      # coverage at all (REVIEW-5-C C7 / REVIEW-5-B B9 / ARBITRATION-5 F2).
+      - run: cargo nextest run --profile load -p qsh-cli --test soak --no-fail-fast
+        env:
+          QSH_LOAD_STRICT: 1
+          QSH_LOAD_BIN: ${{ github.workspace }}/target/release/qsh
+          QSH_SOAK_CSV: ${{ runner.temp }}/soak.csv
+      # `summarize.py`'s own self-test, so a bug in the judge itself (not
+      # just in the soak scenario it judges) fails this same required-ish
+      # signal instead of only ever being caught by a human running
+      # `--self-test` locally.
+      - run: python3 scripts/soak/summarize.py --self-test
+      # Judge the short-mode CSV the step above just wrote. `--sessions 8`
+      # is `soak.rs`'s own short-mode default (`QSH_SOAK_SESSIONS` unset
+      # above) — the per-session-buffer and RSS-trend axes this adds on
+      # top of the test binary's own asserts are record-only at this
+      # sample count (`evaluate`'s `TREND_MIN_SPAN_SECS` note), same as a
+      # local short run.
+      - run: python3 scripts/soak/summarize.py "${{ runner.temp }}/soak.csv" --sessions 8
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: soak-csv
+          path: ${{ runner.temp }}/soak.csv
+          if-no-files-found: warn

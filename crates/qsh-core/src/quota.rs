@@ -30,6 +30,7 @@
 //! holds the counter that produced it.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Instant;
 
@@ -316,6 +317,58 @@ pub struct Quotas {
     self_weak: Weak<Quotas>,
     state: Mutex<QuotaState>,
     windows: [AuditWindow; QuotaKind::ALL.len()],
+    /// Soak observability (M8 Step 5a) — see [`ConnectionCounters`].
+    connection_counters: ConnectionCounters,
+    /// Per-[`QuotaKind`] rejection tally (REVIEW-5-A A3, ARBITRATION-5 적대
+    /// 검토 A 판정): incremented on every call to [`Quotas::
+    /// record_rejection`], regardless of whether that call's own audit
+    /// line was window-suppressed — suppression is an audit-*emission*
+    /// concern (`AUDIT_AGGREGATION_WINDOW`'s first-then-summary shape),
+    /// never a counting one. This is what closes the gap the accept-loop
+    /// heartbeat's old `quota_refused` field had: that field only ever
+    /// summed the two `reserve_connection`/`reserve_pairing_connection`
+    /// counters (renamed [`ConnectionCounters::connection_refused`]/
+    /// `pairing_refused`, now surfaced as `connection_quota_refused`), so
+    /// a 100-session soak binding on `max_sessions` or
+    /// `max_exec_per_principal` logged zero quota pressure the whole run.
+    rejections: [AtomicU64; QuotaKind::ALL.len()],
+}
+
+/// Lock-free tally of every [`Quotas::reserve_connection`]/
+/// [`Quotas::reserve_pairing_connection`] outcome since construction — the
+/// same soak-observability role as `crate::admission::DecisionCounters`,
+/// not an enforcement mechanism. Individual reservation decisions are
+/// `tracing::trace!`-only (target `qsh_core::quota`); this snapshot is
+/// what an accept-loop heartbeat or a soak harness reads instead.
+#[derive(Debug, Default)]
+struct ConnectionCounters {
+    connection_reserved: AtomicU64,
+    connection_refused: AtomicU64,
+    pairing_reserved: AtomicU64,
+    pairing_refused: AtomicU64,
+}
+
+/// A point-in-time snapshot of [`ConnectionCounters`] plus every
+/// [`QuotaKind`]'s rejection tally — what [`Quotas::counters`] returns.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct QuotaCounters {
+    pub connection_reserved: u64,
+    pub connection_refused: u64,
+    pub pairing_reserved: u64,
+    pub pairing_refused: u64,
+    /// REVIEW-5-A A3: one slot per [`QuotaKind`] (index = `kind as
+    /// usize`), each counting every [`Quotas::record_rejection`] call
+    /// against that axis — every quota a soak can bind on, not just the
+    /// two connection-reservation counters above.
+    pub rejections_by_kind: [u64; QuotaKind::ALL.len()],
+}
+
+impl QuotaCounters {
+    /// Sum of [`Self::rejections_by_kind`] across every axis — the
+    /// accept-loop heartbeat's `quota_rejections` field (REVIEW-5-A A3).
+    pub fn rejections_total(&self) -> u64 {
+        self.rejections_by_kind.iter().sum()
+    }
 }
 
 impl std::fmt::Debug for Quotas {
@@ -337,7 +390,35 @@ impl Quotas {
             self_weak: weak.clone(),
             state: Mutex::new(QuotaState::default()),
             windows: Default::default(),
+            connection_counters: ConnectionCounters::default(),
+            rejections: Default::default(),
         })
+    }
+
+    /// Snapshot the running tally of every [`Quotas::reserve_connection`]/
+    /// [`Quotas::reserve_pairing_connection`] outcome since construction
+    /// (M8 Step 5a) — for the accept-loop heartbeat and soak harnesses,
+    /// not for enforcement decisions.
+    pub fn counters(&self) -> QuotaCounters {
+        QuotaCounters {
+            connection_reserved: self
+                .connection_counters
+                .connection_reserved
+                .load(Ordering::Relaxed),
+            connection_refused: self
+                .connection_counters
+                .connection_refused
+                .load(Ordering::Relaxed),
+            pairing_reserved: self
+                .connection_counters
+                .pairing_reserved
+                .load(Ordering::Relaxed),
+            pairing_refused: self
+                .connection_counters
+                .pairing_refused
+                .load(Ordering::Relaxed),
+            rejections_by_kind: std::array::from_fn(|i| self.rejections[i].load(Ordering::Relaxed)),
+        }
     }
 
     /// The quotas' own clock, for a caller that needs `now` to pass to
@@ -607,6 +688,14 @@ impl Quotas {
         let mut state = self.lock();
         let host_in_use: usize = state.connections_per_principal.values().sum();
         if host_in_use >= self.limits.max_connections {
+            self.connection_counters
+                .connection_refused
+                .fetch_add(1, Ordering::Relaxed);
+            tracing::trace!(
+                target: "qsh_core::quota",
+                kind = ?QuotaKind::Connections,
+                "quota decision: refuse"
+            );
             return Err(QuotaKind::Connections);
         }
         let current = state
@@ -615,6 +704,14 @@ impl Quotas {
             .copied()
             .unwrap_or(0);
         if current >= self.limits.max_connections_per_principal {
+            self.connection_counters
+                .connection_refused
+                .fetch_add(1, Ordering::Relaxed);
+            tracing::trace!(
+                target: "qsh_core::quota",
+                kind = ?QuotaKind::ConnectionsPerPrincipal,
+                "quota decision: refuse"
+            );
             return Err(QuotaKind::ConnectionsPerPrincipal);
         }
         *state
@@ -622,6 +719,10 @@ impl Quotas {
             .entry(principal_key.to_string())
             .or_insert(0) += 1;
         drop(state);
+        self.connection_counters
+            .connection_reserved
+            .fetch_add(1, Ordering::Relaxed);
+        tracing::trace!(target: "qsh_core::quota", "quota decision: reserve connection");
         Ok(ConnectionPermit {
             quotas: self.self_weak.clone(),
             principal_key: principal_key.to_string(),
@@ -641,6 +742,14 @@ impl Quotas {
             .unwrap_or(0)
     }
 
+    /// Total live connection reservations across every principal — the
+    /// same `Σ connections_per_principal.values()` [`Quotas::
+    /// reserve_connection`]'s own host-axis check already computes
+    /// (M8 Step 5a: the accept-loop heartbeat's `live_conns` field).
+    pub fn total_connections_in_use(&self) -> usize {
+        self.lock().connections_per_principal.values().sum()
+    }
+
     /// Number of distinct principals with a map entry in
     /// `connections_per_principal` — test-only, same "entry present
     /// holding `0`" distinction `exec_in_use_principal_count` exists for.
@@ -657,10 +766,22 @@ impl Quotas {
     pub fn reserve_pairing_connection(&self) -> Result<PairingConnectionPermit, QuotaKind> {
         let mut state = self.lock();
         if state.pairing_connections_in_use >= MAX_CONCURRENT_PAIRING_CONNECTIONS {
+            self.connection_counters
+                .pairing_refused
+                .fetch_add(1, Ordering::Relaxed);
+            tracing::trace!(
+                target: "qsh_core::quota",
+                kind = ?QuotaKind::PairingConnections,
+                "quota decision: refuse"
+            );
             return Err(QuotaKind::PairingConnections);
         }
         state.pairing_connections_in_use += 1;
         drop(state);
+        self.connection_counters
+            .pairing_reserved
+            .fetch_add(1, Ordering::Relaxed);
+        tracing::trace!(target: "qsh_core::quota", "quota decision: reserve pairing connection");
         Ok(PairingConnectionPermit {
             quotas: self.self_weak.clone(),
         })
@@ -722,6 +843,11 @@ impl Quotas {
         request_id: Option<u64>,
         auth_path: qsh_transport::AuthPath,
     ) -> Vec<AuditRecord> {
+        // REVIEW-5-A A3: counted on every call, independent of the
+        // window-suppression decision below — suppression governs whether
+        // *this* call also emits its own audit line, not whether it
+        // happened at all.
+        self.rejections[kind as usize].fetch_add(1, Ordering::Relaxed);
         let window = &self.windows[kind as usize];
         let mut guard = window.state.lock().unwrap_or_else(|e| e.into_inner());
         let window_is_fresh = match guard.start {
@@ -1331,6 +1457,98 @@ mod tests {
         );
     }
 
+    /// M8 Step 5a: `reserve_connection`'s success and both its refusal
+    /// branches (host cap, per-principal cap) each land in their own
+    /// [`QuotaCounters`] field.
+    #[test]
+    fn quota_counters_tally_reserve_connection_outcomes() {
+        let quotas = quotas_with_connections(1, 100);
+        assert_eq!(quotas.counters(), QuotaCounters::default());
+
+        let _held = quotas.reserve_connection("device:a").unwrap();
+        assert_eq!(
+            quotas.counters(),
+            QuotaCounters {
+                connection_reserved: 1,
+                ..Default::default()
+            }
+        );
+
+        // Host cap (1) already spent by `_held` — refused for the host
+        // reason regardless of principal.
+        assert_eq!(
+            quotas.reserve_connection("device:b").unwrap_err(),
+            QuotaKind::Connections
+        );
+        assert_eq!(
+            quotas.counters(),
+            QuotaCounters {
+                connection_reserved: 1,
+                connection_refused: 1,
+                ..Default::default()
+            }
+        );
+    }
+
+    /// REVIEW-5-A A9: the test above only ever trips the host-cap branch
+    /// (`max_connections`) — with `max_connections == 1`, the
+    /// per-principal cap (`quotas_with_connections`'s second argument) is
+    /// never reached, so its doc comment's claim ("both its refusal
+    /// branches ... each land in their own field") was untrue of the test
+    /// that made it. This drives the per-principal branch instead
+    /// (`quotas_with_connections(100, 1)`), pinning that
+    /// `connection_refused` really does tally *that* branch too, not only
+    /// the host one.
+    #[test]
+    fn quota_counters_tally_the_per_principal_reserve_connection_refusal_too() {
+        let quotas = quotas_with_connections(100, 1);
+        let _held = quotas.reserve_connection("device:a").unwrap();
+        assert_eq!(
+            quotas.reserve_connection("device:a").unwrap_err(),
+            QuotaKind::ConnectionsPerPrincipal
+        );
+        assert_eq!(
+            quotas.counters(),
+            QuotaCounters {
+                connection_reserved: 1,
+                connection_refused: 1,
+                ..Default::default()
+            }
+        );
+    }
+
+    /// M8 Step 5a twin of the above, for `reserve_pairing_connection`'s
+    /// own (fixed-cap) success/refusal pair — independent counter fields,
+    /// untouched by `reserve_connection` traffic.
+    #[test]
+    fn quota_counters_tally_reserve_pairing_connection_outcomes() {
+        let quotas = Quotas::new(QuotaLimits::default(), Arc::new(TestClock::new()));
+        let mut permits = Vec::new();
+        for _ in 0..MAX_CONCURRENT_PAIRING_CONNECTIONS {
+            permits.push(quotas.reserve_pairing_connection().unwrap());
+        }
+        assert_eq!(
+            quotas.counters(),
+            QuotaCounters {
+                pairing_reserved: MAX_CONCURRENT_PAIRING_CONNECTIONS as u64,
+                ..Default::default()
+            }
+        );
+
+        assert_eq!(
+            quotas.reserve_pairing_connection().unwrap_err(),
+            QuotaKind::PairingConnections
+        );
+        assert_eq!(
+            quotas.counters(),
+            QuotaCounters {
+                pairing_reserved: MAX_CONCURRENT_PAIRING_CONNECTIONS as u64,
+                pairing_refused: 1,
+                ..Default::default()
+            }
+        );
+    }
+
     /// [`PairingConnectionPermit::drop`] must decrement the fixed counter
     /// — no map, no principal key, same discipline as every other
     /// permit's `Drop` in this module. Also pins the fixed cap itself
@@ -1419,6 +1637,97 @@ mod tests {
             QuotaKind::ExecPerPrincipal
         );
         assert_eq!(quotas.exec_in_use_principal_count(), 0);
+    }
+
+    /// REVIEW-5-A A3: `Quotas::record_rejection`'s per-kind tally
+    /// (`QuotaCounters::rejections_by_kind`) increments independently for
+    /// two different axes rejected once each — the heartbeat's
+    /// `quota_rejections` field (`rejections_total`) must reflect every
+    /// axis a soak can bind on, not just the two `reserve_connection`/
+    /// `reserve_pairing_connection` counters the old `quota_refused` field
+    /// summed.
+    #[test]
+    fn rejections_by_kind_tallies_each_kind_independently() {
+        let quotas = quotas_with(1);
+        let clock = TestClock::new();
+        let t0 = clock.now();
+        let peer: std::net::SocketAddr = "127.0.0.1:1".parse().unwrap();
+
+        quotas.record_rejection(
+            QuotaKind::ExecPerPrincipal,
+            "device:a",
+            peer,
+            t0,
+            None,
+            qsh_transport::AuthPath::Ca,
+        );
+        quotas.record_rejection(
+            QuotaKind::Connections,
+            "device:a",
+            peer,
+            t0,
+            None,
+            qsh_transport::AuthPath::Ca,
+        );
+
+        let counters = quotas.counters();
+        assert_eq!(
+            counters.rejections_by_kind[QuotaKind::ExecPerPrincipal as usize],
+            1
+        );
+        assert_eq!(
+            counters.rejections_by_kind[QuotaKind::Connections as usize],
+            1
+        );
+        assert_eq!(counters.rejections_total(), 2);
+    }
+
+    /// REVIEW-5-A A3: a second rejection of the *same* kind inside the
+    /// same aggregation window is audit-suppressed (no new
+    /// `AuditRecord` — `quota_audit_reports_first_then_summary` below
+    /// pins that half), but the raw tally still counts it — counting and
+    /// audit emission are different concerns, and a soak reading
+    /// `quota_rejections` must see the true rejection volume even during
+    /// a suppressed flood.
+    #[test]
+    fn rejections_by_kind_counts_a_window_suppressed_rejection_too() {
+        let quotas = quotas_with(1);
+        let clock = TestClock::new();
+        let t0 = clock.now();
+        let peer: std::net::SocketAddr = "127.0.0.1:1".parse().unwrap();
+
+        let first = quotas.record_rejection(
+            QuotaKind::ExecPerPrincipal,
+            "device:a",
+            peer,
+            t0,
+            None,
+            qsh_transport::AuthPath::Ca,
+        );
+        assert_eq!(
+            first.len(),
+            1,
+            "first rejection in a fresh window gets its own audit line"
+        );
+
+        let second = quotas.record_rejection(
+            QuotaKind::ExecPerPrincipal,
+            "device:a",
+            peer,
+            t0 + std::time::Duration::from_secs(1),
+            None,
+            qsh_transport::AuthPath::Ca,
+        );
+        assert!(
+            second.is_empty(),
+            "same window — this one is audit-suppressed"
+        );
+
+        assert_eq!(
+            quotas.counters().rejections_by_kind[QuotaKind::ExecPerPrincipal as usize],
+            2,
+            "both calls must count even though the second produced no audit line"
+        );
     }
 
     #[test]

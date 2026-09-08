@@ -25,6 +25,7 @@ pub mod client;
 pub mod config;
 pub mod doctor;
 pub mod exec;
+pub(crate) mod fsutil;
 pub mod handshake;
 pub mod hosts;
 pub mod identity;

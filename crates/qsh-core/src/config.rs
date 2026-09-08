@@ -276,78 +276,32 @@ pub fn write_private_file(path: &Path, contents: &[u8]) -> Result<(), OpError> {
     write_private_file_io(path, contents).map_err(|err| config_io_error(path, "write", &err))
 }
 
-/// Ticket source for [`write_private_file_io`]'s temp file name — unique
-/// per *writer*, not just per process (mirrors `resume::write_durably`,
-/// where this pattern originated: `PLAN.md` M7 Step 7-1 brief §4③).
-/// Without it, two writers in the same process (`qsh serve` spawns a
-/// `tokio::spawn` task per inbound connection, and two pairing responses
-/// can land at once) racing the same `path` would share the same pid-only
-/// temp name and truncate/interleave each other's bytes — not a lost
-/// update but a **corrupt file**, which is a strictly worse failure for a
-/// TOML store than either writer's update going missing.
-static WRITE_TICKET: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
 /// The ticket [`write_private_file_io`]'s *next* call will consume. Lets a
 /// crash-safety test predict the exact temp path a write will use without
 /// racing the write itself or resetting shared state — `ca::init`'s and
 /// `identity::promote_to_ca_issued`'s `*_recovers_from_an_interrupted_*_write`
 /// tests block a specific temp path with a directory to force that write to
-/// fail; once the temp name carries a ticket, they must read this to know
-/// which ticket to block instead of assuming the old pid-only name.
+/// fail. Forwards to [`crate::fsutil`]'s shared ticket counter (`PLAN.md`
+/// M7 Step 7-2 carryover (iv)) — this crate's other durable writer
+/// (`resume::write_durably`) draws from the exact same counter now, not a
+/// second one of its own, so this prediction is unaffected by which of
+/// the two call sites the previous write went through.
 ///
 /// The prediction this enables is only sound under a **process-isolated
 /// test runner** (`cargo nextest run`, this repo's required one —
-/// `.github/workflows/ci.yml`), because [`WRITE_TICKET`] is a single
-/// process-global counter: under plain `cargo test`'s in-process,
+/// `.github/workflows/ci.yml`): under plain `cargo test`'s in-process,
 /// thread-parallel execution, any other test scheduled at the same time
-/// that also calls [`write_private_file`]/[`write_private_file_io`] can
-/// consume a ticket between this read and the write it's predicting for,
-/// making the caller's prediction wrong (`PLAN.md` M7 Step 7-1 검증 라운드
-/// A1, reproduced). Callers of this function carry the same caveat in
-/// their own doc comments.
+/// that also writes a private file can consume a ticket between this read
+/// and the write it's predicting for, making the caller's prediction
+/// wrong (`PLAN.md` M7 Step 7-1 검증 라운드 A1, reproduced). Callers of
+/// this function carry the same caveat in their own doc comments.
 #[cfg(test)]
 pub(crate) fn next_write_ticket_for_test() -> u64 {
-    WRITE_TICKET.load(std::sync::atomic::Ordering::Relaxed)
+    crate::fsutil::next_write_ticket_for_test()
 }
 
 pub(crate) fn write_private_file_io(path: &Path, contents: &[u8]) -> io::Result<()> {
-    use std::io::Write as _;
-
-    let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    let file_name = path
-        .file_name()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))?;
-    let ticket = WRITE_TICKET.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let mut tmp = dir.join(file_name);
-    tmp.as_mut_os_string()
-        .push(format!(".tmp{}-{ticket}", std::process::id()));
-
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
-    }
-
-    let result = (|| -> io::Result<()> {
-        let mut file = options.open(&tmp)?;
-        file.write_all(contents)?;
-        file.sync_all()?;
-        drop(file);
-        // `OpenOptions::mode` is ignored for a pre-existing file; re-assert.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
-        }
-        std::fs::rename(&tmp, path)
-    })();
-
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    result
+    crate::fsutil::write_atomically(path, contents, false)
 }
 
 /// Wrap an I/O failure on a config-tree path as a `CONFIG_ERROR`.

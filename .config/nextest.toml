@@ -43,15 +43,48 @@ leak-timeout = "200ms"
 #   p95), which is exactly the record `docs/campaigns/
 #   m8-adversarial-load.md`'s round table and Step 5's re-tuning both
 #   depend on `load.yml`'s log for.
-# - `slow-timeout`'s `period` is raised to 120s (from the default profile's
-#   60s): scenario 12a alone holds a rejection flood for >=12s (12b's own
-#   flood ~8s) before its graceful-shutdown teardown, and scenario 13's
+# - `slow-timeout`'s `period` is raised to 240s (from the default profile's
+#   60s, and from an earlier 120s — REVIEW-5-C C2/ARBITRATION-5 F2):
+#   scenario 12a alone holds a rejection flood for >=12s (12b's own flood
+#   ~8s) before its graceful-shutdown teardown, and scenario 13's
 #   512-socket accept sweep has its own multi-second drain; 60s reads
 #   several of T2's scenarios as "slow" under ordinary host load, not only
-#   under a real hang.
+#   under a real hang. 120s was itself too tight once M8 Step 5 added the
+#   short-mode soak scenario (`crates/qsh-cli/tests/soak.rs`) to this same
+#   profile in `load.yml`: that scenario's fixed sleeps alone (120s steady
+#   + a 90s drain wait) sum to 210s, measured at 216.8s/217.4s wall-clock
+#   on a loaded WSL host — inside 120s x terminate-after(3) = 360s, but
+#   only by a ~1.66x margin once dial retries are added on top. 240s x 3 =
+#   720s gives that same fixed-sleep floor a >=3x margin instead.
 # `terminate-after` stays 3, same deadlock-not-hang reasoning as
 # `[profile.default]`.
 [profile.load]
 test-threads = 1
 success-output = "final"
-slow-timeout = { period = "120s", terminate-after = 3 }
+slow-timeout = { period = "240s", terminate-after = 3 }
+
+# The 24h/100-session soak run (`BRIEF-5.md` §4.5, `PLAN.md` M8 Step 5b).
+# Never used in CI — `scripts/soak/run.sh` invokes it on a dedicated Linux
+# host after the fuzz campaign frees the machine. Two departures from
+# `[profile.load]`:
+# - `slow-timeout`'s `period` is raised to one hour and `terminate-after`
+#   is omitted entirely. Confirmed by an in-repo throwaway experiment
+#   (`PROGRESS-5.md` S0/Q9: a 1s-period profile against a 4s-sleeping test
+#   printed four SLOW warnings and still passed) that nextest's
+#   `terminate-after` is opt-in — omitting it means a slow-timeout period
+#   elapsing produces a warning line, never a kill, so a 24h test is safe
+#   to run under a hard-hour period without a false "deadlock" kill at
+#   1/24th of its intended runtime. `[profile.default]`'s and
+#   `[profile.load]`'s own `terminate-after = 3` exists specifically to
+#   catch a genuine deadlock; the soak scenario's own env-driven duration
+#   (`QSH_SOAK_DURATION_SECS`) is the only bound this profile needs, since
+#   the scenario itself is expected to run for up to 24h on purpose.
+# - `test-threads = 1`, same reasoning as `[profile.load]`: the soak
+#   scenario asserts absolute RSS/fd numbers against one shared `qsh serve`
+#   subprocess, which a concurrently-running unrelated test would contend
+#   with.
+[profile.soak]
+test-threads = 1
+success-output = "final"
+fail-fast = false
+slow-timeout = { period = "3600s" }
