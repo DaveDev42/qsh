@@ -328,6 +328,7 @@ impl ResumeStore {
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."));
         ensure_private_dir(&dir)?;
+        crate::fsutil::sweep_stale_temp_files(&dir);
         let _guard = FileLock::acquire(&self.lock_path)?;
         let mut doc = match self.read() {
             Ok(doc) => doc,
@@ -456,55 +457,14 @@ fn parse_rfc3339(text: &str) -> Option<SystemTime> {
 /// `write_private_file` stops one step short of that, and a lost rotation
 /// is an orphaned session rather than a retry.
 fn write_durably(path: &Path, body: &[u8]) -> std::io::Result<()> {
-    use std::io::Write as _;
-
-    let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    let file_name = path.file_name().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no file name")
-    })?;
-    // Unique per writer, not just per process: the `flock` already
-    // serialises writers on unix, but a temp name two of them could share
-    // would be the one way this corrupts a file rather than losing an
-    // update, and that is a much worse failure.
-    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let ticket = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let mut tmp = dir.join(file_name);
-    tmp.as_mut_os_string()
-        .push(format!(".tmp{}-{ticket}", std::process::id()));
-
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
-    }
-
-    let result = (|| -> std::io::Result<()> {
-        let mut file = options.open(&tmp)?;
-        file.write_all(body)?;
-        file.sync_all()?;
-        drop(file);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
-        }
-        std::fs::rename(&tmp, path)?;
-        #[cfg(unix)]
-        {
-            // Durability of the rename itself.
-            if let Ok(dir) = std::fs::File::open(dir) {
-                let _ = dir.sync_all();
-            }
-        }
-        Ok(())
-    })();
-
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    result
+    // `PLAN.md` M7 Step 7-2 carryover (iv): the atomic-write mechanics
+    // (temp file, ticketed name, fsync, rename) live once in
+    // `crate::fsutil` now — this used to hand-roll a second copy with its
+    // own `SEQ` ticket counter. `durable: true` is the one behavior this
+    // caller still needs that `config::write_private_file` doesn't: an
+    // `fsync` of the containing directory after the rename, so the
+    // rename itself (not just the file's contents) survives a crash.
+    crate::fsutil::write_atomically(path, body, true)
 }
 
 #[cfg(test)]

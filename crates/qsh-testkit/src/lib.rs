@@ -20,6 +20,10 @@
 //!   [`loopback::LoopbackHarness`] host plus a client `-L` listener plus a
 //!   local echo destination, so a forwarded byte's whole path is one
 //!   process (`PLAN.md` M4 Step 3).
+//! - [`procstat`]: `/proc`-based RSS/fd readers and the poll-until-stable
+//!   convergence helper T2's `adversarial_load.rs` and M8 Step 5's
+//!   `soak.rs` both need (`BRIEF-5.md` §4.1, moved from
+//!   `crates/qsh-cli/tests/common/mod.rs`).
 //!
 //! This crate may depend on any workspace crate.
 
@@ -28,6 +32,7 @@ pub mod fixtures;
 pub mod loopback;
 pub mod pair;
 pub mod pairing;
+pub mod procstat;
 pub mod raw_quic;
 pub mod reverse;
 pub mod tunnel;

@@ -412,6 +412,34 @@ struct RemoteForwardEntry {
     _quota: crate::quota::RemoteForwardPermit,
 }
 
+/// One accept-loop heartbeat tick's worth of counter snapshots (M8 Step
+/// 5a) — `PartialEq` so [`Server::log_accept_heartbeat`] can tell "nothing
+/// moved since the last logged tick" without comparing each field by
+/// hand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AcceptHeartbeat {
+    admitted: u64,
+    retry: u64,
+    ignore: u64,
+    refuse: u64,
+    /// REVIEW-5-A A3: renamed from `quota_refused` — this is only ever
+    /// the two connection-*reservation* counters
+    /// (`Quotas::reserve_connection`/`reserve_pairing_connection`), never
+    /// the other eight [`crate::quota::QuotaKind`] axes. `quota_rejections`
+    /// below (`crate::quota::QuotaCounters::rejections_total`) is the
+    /// field that actually covers every axis.
+    connection_quota_refused: u64,
+    live_conns: u64,
+    pending_tickets: u64,
+    /// REVIEW-5-A A3: sum of every [`crate::quota::QuotaKind`] axis's
+    /// [`crate::quota::Quotas::record_rejection`] tally
+    /// (`crate::quota::QuotaCounters::rejections_total`) — the field a
+    /// soak should actually read to see "is the host shedding load
+    /// anywhere?", since `connection_quota_refused` above only covers the
+    /// connection-reservation axes.
+    quota_rejections: u64,
+}
+
 /// The host: policy + audit + ticket registry + session backend. Shared
 /// across connections.
 pub struct Server {
@@ -698,9 +726,34 @@ impl Server {
         }
     }
 
-    /// Number of tickets currently outstanding (tests/diagnostics).
+    /// Number of tickets currently outstanding (tests/diagnostics). Does
+    /// **not** purge expired entries — [`Self::pending_unexpired_tickets`]
+    /// is the purging twin the accept-loop heartbeat uses; this one stays
+    /// as-is because a handful of existing tests depend on its
+    /// non-purging count.
     pub fn pending_tickets(&self) -> usize {
         self.lock_tickets().len()
+    }
+
+    /// Number of *unexpired* tickets currently outstanding (REVIEW-5-A
+    /// A5) — the heartbeat's own read, unlike [`Self::pending_tickets`]:
+    /// expiry there is lazy (only swept when some connection next calls
+    /// [`Self::pending_tickets_for`]), so a quiet-period backlog of
+    /// expired-but-unswept tickets would otherwise make
+    /// [`Self::pending_tickets`] read non-zero on a fully idle listener —
+    /// a genuine leak and an idle backlog would look identical. Same
+    /// "collect under the guard, drop outside" discipline as
+    /// [`Self::pending_tickets_for`]: the expired [`Ticket`]s (and any
+    /// [`crate::quota::ExecPermit`] each carries) are dropped only after
+    /// the tickets lock is released.
+    pub fn pending_unexpired_tickets(&self) -> usize {
+        let mut tickets = self.lock_tickets();
+        let now = Instant::now();
+        let expired = extract_tickets(&mut tickets, |p| p.expires_at > now);
+        let count = tickets.len();
+        drop(tickets);
+        drop(expired);
+        count
     }
 
     /// Number of unexpired tickets outstanding for `conn_id`. Expired
@@ -2239,6 +2292,58 @@ impl Server {
     // connection driver
     // ------------------------------------------------------------------
 
+    /// Emit (or suppress) one accept-loop heartbeat tick. `tracing::
+    /// debug!` only — silent at the default `info` filter, visible under
+    /// `QSH_LOG=debug` — and, per §3.2, logged only every 5th tick while
+    /// every counter is unchanged from the last tick actually logged, so
+    /// an idle 24h listener logs this line once every 5 s instead of once
+    /// a second (REVIEW-5-A A10 — that reduction, not silence: a fully
+    /// idle listener still emits 17,280 lines over 24h, which is the
+    /// point, not a bug). A tick where anything moved always logs
+    /// immediately and resets the idle-tick counter.
+    fn log_accept_heartbeat(
+        &self,
+        last_logged: &mut Option<AcceptHeartbeat>,
+        ticks_since_log: &mut u32,
+    ) {
+        let admission = self.admission.counters();
+        let quota = self.quotas.counters();
+        let snapshot = AcceptHeartbeat {
+            admitted: admission.admit,
+            retry: admission.retry,
+            ignore: admission.ignore,
+            refuse: admission.refuse,
+            connection_quota_refused: quota.connection_refused + quota.pairing_refused,
+            live_conns: self.quotas.total_connections_in_use() as u64,
+            // REVIEW-5-A A5: purged, not `pending_tickets()` — an idle
+            // listener with a backlog of expired-but-unswept tickets must
+            // not read as "tickets outstanding".
+            pending_tickets: self.pending_unexpired_tickets() as u64,
+            quota_rejections: quota.rejections_total(),
+        };
+        let unchanged = last_logged.as_ref() == Some(&snapshot);
+        if unchanged {
+            *ticks_since_log += 1;
+            if *ticks_since_log < 5 {
+                return;
+            }
+        }
+        *ticks_since_log = 0;
+        *last_logged = Some(snapshot);
+        tracing::debug!(
+            target: "qsh_core::server",
+            admitted = snapshot.admitted,
+            retry = snapshot.retry,
+            ignore = snapshot.ignore,
+            refuse = snapshot.refuse,
+            connection_quota_refused = snapshot.connection_quota_refused,
+            live_conns = snapshot.live_conns,
+            pending_tickets = snapshot.pending_tickets,
+            quota_rejections = snapshot.quota_rejections,
+            "accept loop heartbeat"
+        );
+    }
+
     /// Accept loop. Runs until `shutdown` resolves or the listener closes,
     /// then [`drain`](Self::drain)s the host and closes the endpoint.
     pub async fn run(
@@ -2259,6 +2364,19 @@ impl Server {
         // close — a single delayed tick is strictly better here.
         let mut audit_flush = tokio::time::interval(crate::admission::AUDIT_AGGREGATION_WINDOW);
         audit_flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // Accept-loop heartbeat (M8 Step 5a): a 1 s tick in the same
+        // `select!` as the accept arm and the audit-flush tick, so it
+        // shares this loop's own scheduling rather than running on a
+        // separate task that could observe a different `now`. Silent at
+        // the default (info) filter — `tracing::debug!` only, visible
+        // under `QSH_LOG=debug` — and rate-limited to once every 5 ticks
+        // while every counter it reports is unchanged from the last tick
+        // it actually logged, so a 24h idle listener logs this line once
+        // every 5 s instead of once a second (REVIEW-5-A A10).
+        let mut heartbeat = tokio::time::interval(Duration::from_secs(1));
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut last_logged_heartbeat: Option<AcceptHeartbeat> = None;
+        let mut ticks_since_heartbeat_log: u32 = 0;
         loop {
             tokio::select! {
                 _ = &mut shutdown => break,
@@ -2277,6 +2395,9 @@ impl Server {
                     // rejection, which — once the flood truly ends — may be
                     // never.
                     self.quota_housekeeping();
+                }
+                _ = heartbeat.tick() => {
+                    self.log_accept_heartbeat(&mut last_logged_heartbeat, &mut ticks_since_heartbeat_log);
                 }
             }
         }
@@ -5052,6 +5173,116 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(error_code(&second), None);
+    }
+
+    /// M8 Step 5a: [`Server::log_accept_heartbeat`]'s snapshot carries the
+    /// actual admission/quota counters and `pending_tickets`/`live_conns`
+    /// state, and its 5-tick idle suppression only kicks in once the
+    /// snapshot has stopped moving. No `tracing-subscriber` dev-dep exists
+    /// in this crate yet, so this pins the counter-snapshot/logging
+    /// *decision* directly (brief §3.4's documented fallback) rather than
+    /// capturing the emitted line's fields through a subscriber layer.
+    #[tokio::test]
+    async fn accept_heartbeat_snapshot_reflects_counters_and_suppresses_when_idle() {
+        let rig = rig(Arc::new(AllowAllPinned));
+        let opener = "device:laptop".to_string();
+        let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
+
+        let mut last_logged = None;
+        let mut ticks_since_log: u32 = 0;
+
+        // Tick 1: everything at zero. First tick always "logs" (nothing to
+        // suppress against yet) and resets the idle counter.
+        rig.server
+            .log_accept_heartbeat(&mut last_logged, &mut ticks_since_log);
+        assert_eq!(
+            last_logged,
+            Some(AcceptHeartbeat {
+                admitted: 0,
+                retry: 0,
+                ignore: 0,
+                refuse: 0,
+                connection_quota_refused: 0,
+                live_conns: 0,
+                pending_tickets: 0,
+                quota_rejections: 0,
+            })
+        );
+        assert_eq!(ticks_since_log, 0);
+
+        // Reserve a connection slot directly (the real reservation happens
+        // in the accept path, `Server::serve_connection` — out of reach
+        // from a bare `dispatch` call here) and open a session (mints a
+        // ticket), so the next snapshot must show both moving.
+        let _connection_permit = rig.quotas.reserve_connection(&opener).unwrap();
+        let opened = rig.server.dispatch(&ctx, &session_open(1)).await.unwrap();
+        assert_eq!(error_code(&opened), None);
+        assert_eq!(rig.quotas.connections_per_principal_in_use(&opener), 1);
+        assert_eq!(rig.server.pending_tickets(), 1);
+
+        rig.server
+            .log_accept_heartbeat(&mut last_logged, &mut ticks_since_log);
+        let after_open = last_logged.expect("logged");
+        assert_eq!(after_open.live_conns, 1);
+        assert_eq!(after_open.pending_tickets, 1);
+        assert_eq!(ticks_since_log, 0, "a moved snapshot always logs");
+
+        // Nothing changes for the next 4 ticks: suppressed (idle-tick
+        // counter climbs but stays under 5).
+        for expected_idle_ticks in 1..5 {
+            rig.server
+                .log_accept_heartbeat(&mut last_logged, &mut ticks_since_log);
+            assert_eq!(last_logged, Some(after_open));
+            assert_eq!(ticks_since_log, expected_idle_ticks);
+        }
+
+        // The 5th idle tick in a row forces a log even though nothing
+        // moved, and resets the idle counter (§3.2: "5틱에 한 번만 낸다").
+        rig.server
+            .log_accept_heartbeat(&mut last_logged, &mut ticks_since_log);
+        assert_eq!(last_logged, Some(after_open));
+        assert_eq!(ticks_since_log, 0, "the forced 5th tick resets the counter");
+    }
+
+    /// REVIEW-5-A A5: [`Server::pending_tickets`] does not purge expired
+    /// entries (its own doc comment — a handful of existing tests are
+    /// pinned to that non-purging count), so a quiet-period backlog of
+    /// expired-but-unswept tickets would otherwise make the heartbeat's
+    /// old read look identical to a genuine leak.
+    /// [`Server::pending_unexpired_tickets`] is the purging read the
+    /// heartbeat uses instead. Forces a live ticket to look expired the
+    /// same way `exec_permit_is_released_when_its_ticket_expires` does
+    /// below, then checks the purging read reports it gone — and that its
+    /// own sweep actually removed the entry, not merely filtered it, by
+    /// checking the non-purging count afterward too.
+    #[tokio::test]
+    async fn pending_unexpired_tickets_purges_an_expired_ticket() {
+        let rig = rig(Arc::new(AllowAllPinned));
+        let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
+
+        let opened = rig.server.dispatch(&ctx, &session_open(1)).await.unwrap();
+        assert_eq!(error_code(&opened), None);
+        assert_eq!(rig.server.pending_tickets(), 1);
+
+        // Force the outstanding ticket to look expired (same technique as
+        // `exec_permit_is_released_when_its_ticket_expires` below).
+        {
+            let mut tickets = rig.server.tickets.lock().unwrap_or_else(|e| e.into_inner());
+            for ticket in tickets.values_mut() {
+                ticket.expires_at = Instant::now() - Duration::from_secs(1);
+            }
+        }
+
+        assert_eq!(
+            rig.server.pending_unexpired_tickets(),
+            0,
+            "the purging read must not count an expired ticket"
+        );
+        assert_eq!(
+            rig.server.pending_tickets(),
+            0,
+            "the purging read's own sweep must have removed the entry, not just filtered it"
+        );
     }
 
     /// The path the verdict flags: an unredeemed exec ticket's permit must

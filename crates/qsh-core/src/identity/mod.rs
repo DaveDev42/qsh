@@ -115,9 +115,11 @@ struct IdentityFile {
 /// `spawn_blocking`.
 pub fn init(paths: &Paths, mode: KeyStoreMode) -> Result<IdentityInitData, OpError> {
     ensure_private_dir(&paths.config_dir)?;
+    crate::fsutil::sweep_stale_temp_files(&paths.config_dir);
     let config_dir = canonical_config_dir(paths);
     let identity_dir = paths.identity_dir();
     ensure_private_dir(&identity_dir)?;
+    crate::fsutil::sweep_stale_temp_files(&identity_dir);
 
     if let Some(existing) = read_identity(paths)? {
         return Ok(IdentityInitData {

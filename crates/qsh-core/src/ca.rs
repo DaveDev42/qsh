@@ -87,8 +87,10 @@ pub struct CaInit {
 /// `identity::init`'s own idempotency shape).
 pub fn init(paths: &Paths) -> Result<CaInit, OpError> {
     ensure_private_dir(&paths.config_dir)?;
+    crate::fsutil::sweep_stale_temp_files(&paths.config_dir);
     let ca_dir = paths.ca_dir();
     ensure_private_dir(&ca_dir)?;
+    crate::fsutil::sweep_stale_temp_files(&ca_dir);
 
     // Whole idempotency-check-plus-write critical section under lock, not
     // just the writes — see `CA_LOCK_FILE`'s doc.

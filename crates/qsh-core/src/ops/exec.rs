@@ -47,8 +47,9 @@ pub enum ExecStdin {
 impl Ops {
     /// Run a command on a pinned host and collect its output.
     ///
-    /// Blocking: builds a runtime internally so frontends stay synchronous.
-    /// The identity is loaded before entering the runtime (platform key
+    /// Blocking: runs on `Ops`' shared dial runtime
+    /// ([`Ops::connect_runtime`]) so frontends stay synchronous. The
+    /// identity is loaded before entering the runtime (platform key
     /// stores must not be touched from within one).
     pub fn exec_run(&self, req: ExecRunReq, stdin: ExecStdin) -> Result<ExecRunOutput, OpError> {
         if req.argv.is_empty() {
@@ -78,12 +79,14 @@ impl Ops {
             identity.local,
             trust as Arc<dyn qsh_transport::TrustEvaluator>,
         );
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .map_err(|err| OpError::new(ErrorCode::Internal, format!("runtime: {err}")))?;
+        // Shared with every other dial op (`ops/mod.rs::connect_runtime`,
+        // `PLAN.md` M7 Step 7-2 carryover (ii)) instead of a fresh
+        // `Builder::new_multi_thread()` per call — one exec after another
+        // (or an exec alongside a live pull) no longer pays for a second
+        // multi-thread runtime it never needed.
+        let runtime = self.connect_runtime()?;
         let timeout = req.timeout_ms.map(Duration::from_millis);
-        let result = runtime.block_on(exec_async(
+        runtime.block_on(exec_async(
             &dialer,
             &address,
             &server_name,
@@ -91,10 +94,7 @@ impl Ops {
             &spec,
             stdin,
             timeout,
-        ));
-        // Let in-flight QUIC close frames drain (bounded).
-        runtime.shutdown_timeout(Duration::from_millis(200));
-        result
+        ))
     }
 }
 
@@ -368,6 +368,73 @@ pub fn map_client_error(err: ClientError) -> OpError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use qsh_proto::{IdentityInitReq, KeyStoreMode, TrustAddReq};
+
+    fn temp_ops() -> (tempfile::TempDir, Ops) {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = crate::ops::Paths::new(dir.path().join("config"), dir.path().join("state"));
+        (dir, Ops::new(paths))
+    }
+
+    /// M7 Step 7-2 carryover (ii), `PLAN.md`: `exec_run` must dial on
+    /// `Ops`' shared [`crate::ops::Ops::connect_runtime`], not build a
+    /// fresh `Builder::new_multi_thread()` per call — modeled on
+    /// `ops/mod.rs`'s
+    /// `connect_runtime_is_the_same_instance_across_calls_and_clones`,
+    /// but pinned at `exec_run`'s own call site rather than at
+    /// `connect_runtime()` directly, since a regression here would look
+    /// identical from that test's point of view (both build *a* runtime,
+    /// just not the *same* one).
+    ///
+    /// The dial itself is expected to fail — nothing listens on
+    /// `127.0.0.1:1` — the point is only that `exec_run` reaches into
+    /// `Ops::connect_runtime` on its way there, twice, and gets the same
+    /// `Arc` both times.
+    #[test]
+    fn exec_run_shares_the_connect_runtime_across_calls() {
+        let (_dir, ops) = temp_ops();
+        ops.identity_init(IdentityInitReq {
+            key_store: Some(KeyStoreMode::File),
+        })
+        .unwrap();
+        let fingerprint = qsh_transport::Fingerprint::of_spki_der(b"exec-run-shared-runtime-peer");
+        ops.trust_add(TrustAddReq {
+            name: "peer".into(),
+            address: Some("127.0.0.1:1".into()),
+            fingerprint: Some(fingerprint.to_string()),
+        })
+        .unwrap();
+
+        assert!(
+            ops.connect_runtime.get().is_none(),
+            "constructing Ops must not build the dial runtime eagerly"
+        );
+
+        let req = || ExecRunReq {
+            host: "peer".into(),
+            argv: vec!["true".into()],
+            env: vec![],
+            timeout_ms: Some(500),
+        };
+        let _ = ops.exec_run(req(), ExecStdin::Closed);
+        let first = ops
+            .connect_runtime
+            .get()
+            .cloned()
+            .expect("exec_run must build (and reuse) Ops' shared connect_runtime");
+
+        let _ = ops.exec_run(req(), ExecStdin::Closed);
+        let second = ops
+            .connect_runtime
+            .get()
+            .cloned()
+            .expect("the shared runtime must still be installed after a second exec_run");
+
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "exec_run must share one Runtime across calls, not build a second one"
+        );
+    }
 
     #[test]
     fn well_formed_unknown_codes_pass_through_malformed_ones_do_not() {

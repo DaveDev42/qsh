@@ -247,6 +247,15 @@ mod linux_only {
         nofile_limit: Option<u64>,
         nproc: usize,
         bin: &'a Path,
+        /// M8 Step 5a §3.3: scenario 2's per-dial timing/outcome report —
+        /// `None` for every scenario that doesn't drive a counted-dial
+        /// loop. `Some` carries either a one-line p50/p95/max summary
+        /// (verdict "pass") or a full per-dial "dial #k: start +t_ms, end
+        /// +t_ms, outcome" dump (verdict "FAIL") — [`dial_report`]
+        /// decides which, since at construction time (before this
+        /// scenario's own bound checks run) it isn't known yet which the
+        /// final verdict will be.
+        dial_report: Option<String>,
     }
 
     impl std::fmt::Display for Diagnostics<'_> {
@@ -294,8 +303,59 @@ mod linux_only {
                 opt(self.nofile_limit),
                 self.nproc,
                 self.bin.display()
-            )
+            )?;
+            if let Some(report) = &self.dial_report {
+                write!(f, "\n  dials:\n{report}")?;
+            }
+            Ok(())
         }
+    }
+
+    /// One [`Diagnostics::dial_report`] entry: a counted dial's index,
+    /// its start/end offset from the scenario's own dial-loop start, and
+    /// its outcome — M8 Step 5a §3.3.
+    struct DialRecord {
+        index: usize,
+        start: Duration,
+        end: Duration,
+        outcome: String,
+    }
+
+    /// Build [`Diagnostics::dial_report`]'s text: every dial's own line
+    /// when `all_ok` is `false` (a bound violation — the detail a soak/
+    /// load-flood investigation actually needs), otherwise just the
+    /// p50/p95/max of dial round-trip time (§3.3: "성공 시에는 p50/p95/max
+    /// 만"). `records` must be non-empty — every call site drives at
+    /// least one counted dial.
+    fn dial_report(records: &[DialRecord], all_ok: bool) -> String {
+        if !all_ok {
+            return records
+                .iter()
+                .map(|r| {
+                    format!(
+                        "    dial #{}: start +{}ms, end +{}ms, outcome {}",
+                        r.index,
+                        r.start.as_millis(),
+                        r.end.as_millis(),
+                        r.outcome
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+        }
+        let mut durations: Vec<Duration> = records.iter().map(|r| r.end - r.start).collect();
+        durations.sort_unstable();
+        let pct = |p: f64| -> Duration {
+            let idx = ((durations.len() - 1) as f64 * p).round() as usize;
+            durations[idx]
+        };
+        format!(
+            "    {} dials: p50 {}ms, p95 {}ms, max {}ms",
+            durations.len(),
+            pct(0.50).as_millis(),
+            pct(0.95).as_millis(),
+            durations.last().expect("non-empty").as_millis()
+        )
     }
 
     /// Finish one scenario: set `diag`'s verdict from whether `violations`
@@ -542,10 +602,19 @@ mod linux_only {
 
         let mut held: Vec<(Session, Endpoint)> = Vec::new();
         let mut refused = 0usize;
+        // M8 Step 5a §3.3: per-dial start/end/outcome, relative to this
+        // loop's own start — `dial_report` turns this into either a
+        // p50/p95/max summary or (on a bound violation below) a full
+        // per-dial dump.
+        let dial_loop_start = std::time::Instant::now();
+        let mut dial_records: Vec<DialRecord> = Vec::with_capacity(TOTAL);
+        let mut next_dial_index = 0usize;
         for _ in 0..(TOTAL / BATCH) {
             let mut batch = tokio::task::JoinSet::new();
             for _ in 0..BATCH {
                 let dialer = Arc::clone(&dialer);
+                let index = next_dial_index;
+                next_dial_index += 1;
                 // No retry here (4c adversarial review A16/B4): this dial
                 // counts toward `held`/`refused` below, and retrying a
                 // transport-level timeout risks a second attempt claiming a
@@ -556,11 +625,29 @@ mod linux_only {
                 // default) is what absorbs ordinary host contention
                 // instead; a dial that still times out past that is a real
                 // failure, reported below with the diagnostics block.
-                batch.spawn(async move { negotiate_session(&dialer, addr, "flood").await });
+                batch.spawn(async move {
+                    let start = std::time::Instant::now();
+                    let result = negotiate_session(&dialer, addr, "flood").await;
+                    let end = std::time::Instant::now();
+                    (index, start, end, result)
+                });
             }
-            while let Some(result) = batch.join_next().await {
-                match result.expect("flood dial task panicked") {
-                    Ok(pair) => held.push(pair),
+            while let Some(joined) = batch.join_next().await {
+                let (index, start, end, result) = joined.expect("flood dial task panicked");
+                let (start_rel, end_rel) = (
+                    start.duration_since(dial_loop_start),
+                    end.duration_since(dial_loop_start),
+                );
+                match result {
+                    Ok(pair) => {
+                        dial_records.push(DialRecord {
+                            index,
+                            start: start_rel,
+                            end: end_rel,
+                            outcome: "admitted".to_string(),
+                        });
+                        held.push(pair);
+                    }
                     Err(err) => {
                         let (code, retryable) = remote(err);
                         assert_eq!(
@@ -569,6 +656,12 @@ mod linux_only {
                             "a refused dial must be RESOURCE_EXHAUSTED"
                         );
                         assert!(retryable, "RESOURCE_EXHAUSTED must be retryable");
+                        dial_records.push(DialRecord {
+                            index,
+                            start: start_rel,
+                            end: end_rel,
+                            outcome: format!("refused {code:?}"),
+                        });
                         refused += 1;
                     }
                 }
@@ -623,7 +716,7 @@ mod linux_only {
         );
 
         let rss_load_bound = RSS_IDLE_BOUND_KIB; // 0 sessions ever opened in this scenario.
-        let diag = Diagnostics {
+        let mut diag = Diagnostics {
             scenario: "scenario 2 connection_flood_past_the_cap",
             verdict: "pass",
             rss_baseline_kib: rss_baseline,
@@ -641,6 +734,9 @@ mod linux_only {
             nofile_limit: nofile_limit(),
             nproc: nproc(),
             bin: &load_bin(),
+            // Filled in below, once `violations` is known — §3.3's
+            // pass/fail split decides which shape `dial_report` builds.
+            dial_report: None,
         };
 
         // (4c adversarial review A14): `fd_peak_converged` is a plain
@@ -678,6 +774,7 @@ mod linux_only {
                  {fd_after_converged})"
             ));
         }
+        diag.dial_report = Some(dial_report(&dial_records, violations.is_empty()));
         finish_scenario(diag, violations);
     }
 
@@ -893,6 +990,7 @@ mod linux_only {
             nofile_limit: nofile_limit(),
             nproc: nproc(),
             bin: &load_bin(),
+            dial_report: None,
         };
 
         let mut violations = Vec::new();
@@ -1169,6 +1267,7 @@ mod linux_only {
             nofile_limit: nofile_limit(),
             nproc: nproc(),
             bin: &load_bin(),
+            dial_report: None,
         };
         let mut violations = Vec::new();
         if let Some(idle) = rss_idle
@@ -1509,6 +1608,7 @@ mod linux_only {
                 nofile_limit: nofile_limit(),
                 nproc: nproc(),
                 bin: &load_bin(),
+                dial_report: None,
             },
             violations,
         );
@@ -1640,6 +1740,7 @@ mod linux_only {
                 nofile_limit: nofile_limit(),
                 nproc: nproc(),
                 bin: &load_bin(),
+                dial_report: None,
             },
             violations,
         );
@@ -1910,6 +2011,7 @@ mod linux_only {
             nofile_limit: nofile_limit(),
             nproc: nproc(),
             bin: &load_bin(),
+            dial_report: None,
         };
         eprintln!(
             "  A-P2-5 (diagnostic only, no assertion): session.open p95 during the accept \
