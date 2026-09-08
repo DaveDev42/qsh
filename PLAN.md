@@ -620,6 +620,8 @@ WSL 실측(fuzz 포화 중)과 판정. 짧은 모드 strict에서 dial `Connecti
 
 이월. summarize.py에 echo baseline 플래그 override가 남아 있으나 기본은 ramp 행이다. 4c 이월 (b)(c)(d)(e-1)(e-2)(g)는 24h 대기 중 병행 정리 묶음 그대로다. d01987f의 macOS `tunnel_chaos` flake(fault 주입 전 ECONNRESET)는 1회라 §6.5에 올리지 않았다. 재발하면 올린다.
 
+load.yml 첫 실행(run 34203445617)과 F4. b9e67b1의 GHA soak 짧은 모드는 T2 4/4에 RSS(idle_end 20.2 MiB, 세션당 1.1 MiB)·fd·TTL reap을 다 통과하고 echo 축 하나에서 떨어졌다. steady 창 59개 중 2개(첫 steady 창 129.5 ms, cycle 2 직후 114.6 ms)가 50 ms를 넘었고 나머지는 중앙값 1.2 ms다. 세션 교체 순간의 스파이크지 저하가 아니어서 창별 최댓값 규칙을 위반 창 비율 규칙(`ECHO_SPIKE_FRACTION_MAX` 10%, 태그 `ECHO_DEGRADED`)으로 바꿨다. 최댓값·초과 창 수·첫/마지막 4분위 중앙값은 정보로 남겨 24h 뒤 저하 규칙의 입력으로 쓴다. DoD 2에는 echo 항목이 없으니 DoD 판정은 바뀌지 않는다. 스파이크가 세션 spawn과 겹치는 것은 5f 후보로 `docs/campaigns/m8-soak.md` §7에 적었다.
+
 #### Step 6 — wire freeze 선행 정리
 
 freeze 이후에는 고칠 수 없는 것들을 먼저 처리한다.

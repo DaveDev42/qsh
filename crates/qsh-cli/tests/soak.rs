@@ -215,6 +215,27 @@ const FD_GROWTH_ALLOWANCE: i64 = 2;
 /// baseline was already fast (REVIEW-5-C C9 / ARBITRATION-5 F2).
 const ECHO_P95_FLOOR_MS: f64 = 50.0;
 
+/// Fraction of steady-phase echo p95 windows allowed to exceed
+/// [`ECHO_P95_FLOOR_MS`]'s bound before the run is `ECHO_DEGRADED`
+/// (`ARBITRATION-5` "load.yml 첫 GHA soak 실행 판정", GHA run 34203445617,
+/// b9e67b1). The rule this constant replaced was "no steady window's p95
+/// may ever exceed the bound" — that first real GHA run hit exactly 2 of 59
+/// steady windows spiking to 129.5ms and 114.6ms while every other window
+/// stayed at 1-2ms, and both spikes landed on top of a cycle's session
+/// replacement (close + dial/open/attach), not a sustained regression. A
+/// single-window ceiling breaks the first time a session spawn contends for
+/// the runner's 4 shared vCPUs, and a 24h/100-session run (on the order of
+/// 17k steady windows) is certain to hit that at least once, so it was
+/// judging CI noise, not degradation. This fraction rule instead only flags
+/// a run where more than 10% of all steady windows spiked; `SESSION_
+/// STALLED`'s per-round 5s deadline remains the separate guard against a
+/// session that never recovers, so a spike that never resolves is still
+/// caught there, not silently absorbed by this fraction. The max observed
+/// p95, the spike count, and the first/last-quarter median are recorded as
+/// informational items — inputs for a future 24h-run degradation rule, not
+/// asserted here.
+const ECHO_SPIKE_FRACTION_MAX: f64 = 0.10;
+
 /// Minimum steady-phase sample count before a fd-growth quarters check
 /// (`quarter_split`) is trusted as a hard assert rather than downgraded to
 /// an informational note — with fewer samples than this, "first quarter"
@@ -451,6 +472,95 @@ fn judge_fd_quarters(label: &str, tag: &str, samples: &[usize], violations: &mut
             ));
         }
     }
+}
+
+/// Median of `values` (sorts a copy — nearest-rank on odd length, average of
+/// the two middle elements on even length). Only ever called on a
+/// [`quarter_split`] half that is already known non-empty.
+fn median(values: &[f64]) -> f64 {
+    let mut v = values.to_vec();
+    v.sort_by(|a, b| a.partial_cmp(b).expect("finite"));
+    let n = v.len();
+    if n.is_multiple_of(2) {
+        (v[n / 2 - 1] + v[n / 2]) / 2.0
+    } else {
+        v[n / 2]
+    }
+}
+
+/// [`judge_echo_windows`]'s result for one steady-phase echo p95 series.
+/// `spikes`/`windows`/`fraction`/`max_p95_ms` are recorded as informational
+/// items regardless of `violation` (`ECHO_SPIKE_FRACTION_MAX`'s doc comment
+/// — inputs for a future 24h degradation rule).
+struct EchoVerdict {
+    windows: usize,
+    spikes: usize,
+    fraction: f64,
+    max_p95_ms: f64,
+    violation: bool,
+}
+
+/// Pure judge for the echo axis (`ARBITRATION-5` "load.yml 첫 GHA soak 실행
+/// 판정"): `windows` is one p95 per steady-phase sample window, `bound` is
+/// the same-run adaptive bound (`max(3 * ramp baseline, ECHO_P95_FLOOR_MS)`,
+/// computed by the caller). Returns `None` when `windows` is empty — nothing
+/// to judge, never a violation by omission. Otherwise, [`EchoVerdict::
+/// violation`] is true iff the fraction of windows whose own p95 exceeds
+/// `bound` is itself greater than [`ECHO_SPIKE_FRACTION_MAX`].
+fn judge_echo_windows(windows: &[f64], bound: f64) -> Option<EchoVerdict> {
+    if windows.is_empty() {
+        return None;
+    }
+    let spikes = windows.iter().filter(|&&p95| p95 > bound).count();
+    let fraction = spikes as f64 / windows.len() as f64;
+    let max_p95_ms = windows.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    Some(EchoVerdict {
+        windows: windows.len(),
+        spikes,
+        fraction,
+        max_p95_ms,
+        violation: fraction > ECHO_SPIKE_FRACTION_MAX,
+    })
+}
+
+/// GHA run 34203445617's actual shape (`ARBITRATION-5`): 59 steady windows,
+/// 2 spikes (129.5ms, 114.6ms) against everything else near 1-2ms — 2/59 =
+/// 3.4%, under the 10% fraction, so the run passes.
+#[test]
+fn judge_echo_windows_passes_under_the_ten_percent_fraction() {
+    let mut windows = vec![1.2; 57];
+    windows.push(129.495);
+    windows.push(114.632);
+    let verdict = judge_echo_windows(&windows, ECHO_P95_FLOOR_MS).expect("non-empty windows");
+    assert_eq!(verdict.windows, 59);
+    assert_eq!(verdict.spikes, 2);
+    assert!(
+        !verdict.violation,
+        "2/59 = 3.4% must stay under the 10% ECHO_SPIKE_FRACTION_MAX"
+    );
+}
+
+/// Same 2 spikes as the run-shaped case above, but out of only 10 windows:
+/// 2/10 = 20%, over the 10% fraction, so this run is `ECHO_DEGRADED`.
+#[test]
+fn judge_echo_windows_flags_a_higher_spike_fraction() {
+    let mut windows = vec![1.2; 8];
+    windows.push(129.495);
+    windows.push(114.632);
+    let verdict = judge_echo_windows(&windows, ECHO_P95_FLOOR_MS).expect("non-empty windows");
+    assert_eq!(verdict.windows, 10);
+    assert_eq!(verdict.spikes, 2);
+    assert!(
+        verdict.violation,
+        "2/10 = 20% exceeds the 10% ECHO_SPIKE_FRACTION_MAX"
+    );
+}
+
+/// An empty window series has nothing to judge — `None`, not a false pass
+/// or a false violation.
+#[test]
+fn judge_echo_windows_empty_input_is_not_judged() {
+    assert!(judge_echo_windows(&[], ECHO_P95_FLOOR_MS).is_none());
 }
 
 /// `session.open` against `HOST_ALIAS`, PTY-backed (`argv: ["cat"]` — a
@@ -865,7 +975,12 @@ fn soak_session_load() {
     // --- steady: SAMPLE_SECS CSV rows, CYCLE_SECS session replacement ---
     let mut cycles: u64 = 0;
     let mut cycle_cursor: usize = 0;
-    let mut max_echo_p95_ms: Option<f64> = None;
+    // One p95 per steady-phase sample window (`ECHO_SPIKE_FRACTION_MAX`'s
+    // fraction-of-windows judge reads this below — replaces the old running
+    // `max_echo_p95_ms`, which [`judge_echo_windows`]'s own `max_p95_ms`
+    // now derives from the same series instead of a separately-maintained
+    // variable).
+    let mut steady_echo_windows: Vec<f64> = Vec::new();
     // Steady-phase self (test process) and listener fd samples, for the
     // quarters checks (BRIEF-5.md §4.4's (iii) axis and its listener
     // counterpart: growth *during* cycling, not the ramp's one-shot
@@ -939,7 +1054,7 @@ fn soak_session_load() {
                 .flat_map(|w| w.drain_echo_samples())
                 .collect());
             if let Some(p95) = echo_p95 {
-                max_echo_p95_ms = Some(max_echo_p95_ms.map_or(p95, |m: f64| m.max(p95)));
+                steady_echo_windows.push(p95);
             }
             // Self fd sample BEFORE the abandoned-session probe below (B5)
             // — the probe's own `session.get` round trips must not
@@ -1089,14 +1204,52 @@ fn soak_session_load() {
             qsh_core::broker::REAPER_TICK.as_secs()
         ));
     }
-    if let Some(p95) = max_echo_p95_ms
-        && p95 > echo_p95_bound_ms
-    {
-        violations.push(format!(
-            "echo p95 {p95:.3}ms exceeds the {echo_p95_bound_ms:.3}ms bound \
-             (max(3 x ramp-baseline {baseline_echo_p95_ms:?}ms, {ECHO_P95_FLOOR_MS}ms floor)) in \
-             at least one steady window"
-        ));
+    // ECHO_SPIKE_FRACTION_MAX's fraction-of-windows rule (ARBITRATION-5),
+    // not "no window may ever exceed the bound" — see that constant's doc
+    // comment. max/spikes/windows and the first/last-quarter median are
+    // informational (inputs for a future 24h degradation rule); only the
+    // fraction itself is asserted.
+    match judge_echo_windows(&steady_echo_windows, echo_p95_bound_ms) {
+        Some(echo_verdict) => {
+            let quarter_note = if steady_echo_windows.len() >= MIN_QUARTER_SAMPLES {
+                let (first_q, last_q) = quarter_split(&steady_echo_windows);
+                format!(
+                    "first-quarter median {:.3}ms, last-quarter median {:.3}ms",
+                    median(first_q),
+                    median(last_q)
+                )
+            } else {
+                format!(
+                    "first/last-quarter median n/a — only {} window(s), fewer than the \
+                     {MIN_QUARTER_SAMPLES} needed",
+                    steady_echo_windows.len()
+                )
+            };
+            eprintln!(
+                "soak informational: echo p95 steady windows={} spikes={} ({:.1}% of windows > \
+                 {echo_p95_bound_ms:.3}ms bound) max={:.3}ms {quarter_note}",
+                echo_verdict.windows,
+                echo_verdict.spikes,
+                echo_verdict.fraction * 100.0,
+                echo_verdict.max_p95_ms
+            );
+            if echo_verdict.violation {
+                violations.push(format!(
+                    "ECHO_DEGRADED: {}/{} steady window(s) ({:.1}%) exceed the \
+                     {echo_p95_bound_ms:.3}ms bound (max(3 x ramp-baseline \
+                     {baseline_echo_p95_ms:?}ms, {ECHO_P95_FLOOR_MS}ms floor)), over the \
+                     {:.0}% ECHO_SPIKE_FRACTION_MAX allowance (max observed {:.3}ms)",
+                    echo_verdict.spikes,
+                    echo_verdict.windows,
+                    echo_verdict.fraction * 100.0,
+                    ECHO_SPIKE_FRACTION_MAX * 100.0,
+                    echo_verdict.max_p95_ms
+                ));
+            }
+        }
+        None => {
+            eprintln!("soak informational: echo p95 steady windows=0 — nothing to judge");
+        }
     }
     let dead_sessions_total = dead_sessions.load(Ordering::Relaxed);
     if dead_sessions_total > 0 {
