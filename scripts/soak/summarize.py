@@ -43,6 +43,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import statistics
 import sys
 from typing import NamedTuple
 
@@ -59,6 +60,19 @@ PER_SESSION_BUFFER_BOUND_KIB = 8 * 1024
 RSS_TREND_BOUND_KIB_PER_HOUR = 1024
 FD_GROWTH_ALLOWANCE = 2
 ECHO_P95_BOUND_MS = 50.0  # floor of the adaptive bound — see `evaluate`'s `echo_baseline_ms`
+# Fraction of steady-phase echo p95 windows allowed to exceed the bound
+# above before the run is ECHO_DEGRADED (ARBITRATION-5 "load.yml 첫 GHA
+# soak 실행 판정", GHA run 34203445617, b9e67b1). Replaces the old
+# "no steady window's p95 may ever exceed the bound" rule: that first real
+# GHA run hit exactly 2 of 59 steady windows spiking to 129.5ms and 114.6ms
+# while every other window stayed at 1-2ms, and both spikes landed on top of
+# a cycle's session replacement (close + dial/open/attach), not a sustained
+# regression. A single-window ceiling breaks the first time a session spawn
+# contends for a shared 4-vCPU runner, and a 24h/100-session run (on the
+# order of 17k steady windows) is certain to hit that at least once, so it
+# was judging CI noise, not degradation. Mirrors
+# `crates/qsh-cli/tests/soak.rs`'s identical `ECHO_SPIKE_FRACTION_MAX`.
+ECHO_SPIKE_FRACTION_MAX = 0.10
 # `qsh_core::broker::REAPER_TICK`, mirrored (not importable from Rust) —
 # `crates/qsh-cli/tests/soak.rs`'s `ttl_reap_deadline` uses the same value.
 REAPER_TICK_SECS = 30
@@ -366,15 +380,33 @@ def evaluate(
         echo_bound_ms = max(3.0 * echo_baseline_ms, ECHO_P95_BOUND_MS)
         result["echo_p95_baseline_ms"] = echo_baseline_ms
     result["echo_p95_bound_ms"] = echo_bound_ms
+    # Fraction-of-windows judge (ECHO_SPIKE_FRACTION_MAX's comment above):
+    # a window's own p95 exceeding echo_bound_ms is fine in isolation — only
+    # a run where more than ECHO_SPIKE_FRACTION_MAX of all steady windows do
+    # is ECHO_DEGRADED. max/spike-count/quarter-median stay recorded as
+    # informational items either way (inputs for a future 24h-run
+    # degradation rule, not asserted here).
     echo_series = [r.echo_p95_ms for r in steady_rows if r.echo_p95_ms is not None]
     if echo_series:
+        echo_windows = len(echo_series)
+        echo_spike_windows = sum(1 for p95 in echo_series if p95 > echo_bound_ms)
+        echo_spike_fraction = echo_spike_windows / echo_windows
         max_echo = max(echo_series)
+        result["echo_windows"] = echo_windows
+        result["echo_spike_windows"] = echo_spike_windows
+        result["echo_spike_fraction"] = echo_spike_fraction
         result["max_echo_p95_ms"] = max_echo
-        if max_echo > echo_bound_ms:
+        if echo_windows >= MIN_QUARTER_SAMPLES:
+            first_q, last_q = quarter_split(echo_series)
+            result["echo_p95_first_quarter_median_ms"] = statistics.median(first_q)
+            result["echo_p95_last_quarter_median_ms"] = statistics.median(last_q)
+        if echo_spike_fraction > ECHO_SPIKE_FRACTION_MAX:
             violations.append(
-                f"echo p95 {max_echo:.3f}ms exceeds the {echo_bound_ms:.3f}ms bound "
-                f"(max(3 x baseline {echo_baseline_ms}, {ECHO_P95_BOUND_MS}ms floor)) in at "
-                "least one steady window"
+                f"ECHO_DEGRADED: {echo_spike_windows}/{echo_windows} steady window(s) "
+                f"({echo_spike_fraction:.1%}) exceed the {echo_bound_ms:.3f}ms bound "
+                f"(max(3 x baseline {echo_baseline_ms}, {ECHO_P95_BOUND_MS}ms floor)), over "
+                f"the {ECHO_SPIKE_FRACTION_MAX:.0%} ECHO_SPIKE_FRACTION_MAX allowance (max "
+                f"observed {max_echo:.3f}ms)"
             )
 
     # --- TTL reap --- (REVIEW-5-C C4 / REVIEW-5-B B7 / ARBITRATION-5 F2):
@@ -476,14 +508,26 @@ def render(result: dict, snapshots: list[dict]) -> str:
     if "self_fd_quarter_delta" in result:
         lines.append(f"  self fd (quarters)      delta={result['self_fd_quarter_delta']}  "
                      f"allowance<=+{FD_GROWTH_ALLOWANCE}  (violation tagged FD_GROWTH_CLIENT)")
-    if "max_echo_p95_ms" in result:
+    if "echo_windows" in result:
         baseline_note = (
             f" (baseline={result['echo_p95_baseline_ms']}ms via {result['echo_p95_baseline_source']})"
             if "echo_p95_baseline_ms" in result
             else f" (baseline source: {result['echo_p95_baseline_source']})"
         )
+        lines.append(
+            f"  echo p95 spikes         {result['echo_spike_windows']}/{result['echo_windows']} "
+            f"window(s) ({result['echo_spike_fraction']:.1%})  "
+            f"allowance<={ECHO_SPIKE_FRACTION_MAX:.0%}{baseline_note}"
+        )
         lines.append(f"  echo p95 (max)          {result['max_echo_p95_ms']:.3f}ms  "
-                     f"bound<={result.get('echo_p95_bound_ms', ECHO_P95_BOUND_MS):.3f}ms{baseline_note}")
+                     f"bound<={result.get('echo_p95_bound_ms', ECHO_P95_BOUND_MS):.3f}ms")
+        if "echo_p95_first_quarter_median_ms" in result:
+            lines.append(
+                "  echo p95 (quarters)     "
+                f"first-median={result['echo_p95_first_quarter_median_ms']:.3f}ms  "
+                f"last-median={result['echo_p95_last_quarter_median_ms']:.3f}ms  "
+                "(informational)"
+            )
     if "ttl_reap_deadline_secs" in result:
         lines.append(
             f"  TTL reap                abandoned_live at drain="
@@ -631,7 +675,7 @@ def self_test() -> int:
     )
     check(
         "violating: echo p95 flagged",
-        any(v.startswith("echo p95") for v in violating_result["violations"]),
+        any(v.startswith("ECHO_DEGRADED") for v in violating_result["violations"]),
         True,
     )
     check(
@@ -673,7 +717,7 @@ def self_test() -> int:
     echo_adaptive_result = evaluate(violating_rows, sessions=8, echo_baseline_ms=40.0)
     check(
         "echo p95: adaptive bound (3x40=120) absorbs a 90ms max that the fixed 50ms floor would flag",
-        any(v.startswith("echo p95") for v in echo_adaptive_result["violations"]),
+        any(v.startswith("ECHO_DEGRADED") for v in echo_adaptive_result["violations"]),
         False,
     )
     check("echo p95: bound recorded", echo_adaptive_result["echo_p95_bound_ms"], 120.0)
@@ -721,7 +765,7 @@ def self_test() -> int:
     check("ramp-row baseline: bound is max(3x30, 50)=90", ramp_row_result["echo_p95_bound_ms"], 90.0)
     check(
         "ramp-row baseline: 80ms max under the 90ms bound is no violation",
-        any(v.startswith("echo p95") for v in ramp_row_result["violations"]),
+        any(v.startswith("ECHO_DEGRADED") for v in ramp_row_result["violations"]),
         False,
     )
 
@@ -737,7 +781,7 @@ def self_test() -> int:
     check("no ramp row: bound stays the fixed 50ms floor", no_ramp_result["echo_p95_bound_ms"], 50.0)
     check(
         "no ramp row: 80ms max over the 50ms floor is a violation",
-        any(v.startswith("echo p95") for v in no_ramp_result["violations"]),
+        any(v.startswith("ECHO_DEGRADED") for v in no_ramp_result["violations"]),
         True,
     )
 
@@ -764,7 +808,60 @@ def self_test() -> int:
     )
     check(
         "flag overrides ramp row: 80ms max over the 50ms bound is a violation",
-        any(v.startswith("echo p95") for v in flag_overrides_ramp_result["violations"]),
+        any(v.startswith("ECHO_DEGRADED") for v in flag_overrides_ramp_result["violations"]),
+        True,
+    )
+
+    # ECHO_SPIKE_FRACTION_MAX's fraction-of-windows rule, mirroring
+    # `crates/qsh-cli/tests/soak.rs`'s `judge_echo_windows` unit tests
+    # exactly: GHA run 34203445617's actual shape was 59 steady windows with
+    # 2 spikes (129.495ms, 114.632ms) against a ~1.2ms baseline — 2/59 =
+    # 3.4%, under the 10% fraction, so that shape passes; the same 2 spikes
+    # out of only 10 windows is 20%, over the fraction, so that shape is
+    # ECHO_DEGRADED. No ramp row and no --echo-baseline-ms here, so the
+    # bound is the fixed 50ms floor.
+    def _echo_windows_csv(n_steady: int, spike_indices: tuple[int, int]) -> str:
+        spike_values = {spike_indices[0]: 129.495, spike_indices[1]: 114.632}
+        lines = [CSV_HEADER, "0,boot,20000,10,15000,8,0,0,,0"]
+        for i in range(n_steady):
+            t = (i + 1) * 2
+            p95 = spike_values.get(i, 1.2)
+            lines.append(f"{t},steady,20100,10,15050,8,8,{i},{p95},0")
+        t_drain = (n_steady + 1) * 2
+        lines.append(f"{t_drain},drain,20050,10,15000,8,0,{n_steady},,0")
+        return "\n".join(lines) + "\n"
+
+    echo_pass_result = evaluate(
+        read_rows(_echo_windows_csv(59, (10, 40)).splitlines()), sessions=8
+    )
+    check("echo fraction: 59-window shape records windows=59", echo_pass_result["echo_windows"], 59)
+    check(
+        "echo fraction: 59-window shape records spike_windows=2",
+        echo_pass_result["echo_spike_windows"],
+        2,
+    )
+    check(
+        "echo fraction: 2/59 = 3.4% stays under the 10% fraction -> pass",
+        any(v.startswith("ECHO_DEGRADED") for v in echo_pass_result["violations"]),
+        False,
+    )
+
+    echo_violation_result = evaluate(
+        read_rows(_echo_windows_csv(10, (2, 7)).splitlines()), sessions=8
+    )
+    check(
+        "echo fraction: 10-window shape records windows=10",
+        echo_violation_result["echo_windows"],
+        10,
+    )
+    check(
+        "echo fraction: 10-window shape records spike_windows=2",
+        echo_violation_result["echo_spike_windows"],
+        2,
+    )
+    check(
+        "echo fraction: 2/10 = 20% exceeds the 10% fraction -> ECHO_DEGRADED",
+        any(v.startswith("ECHO_DEGRADED") for v in echo_violation_result["violations"]),
         True,
     )
 

@@ -58,7 +58,7 @@ main이 Dave-Windows-WSL 단독 점유에서 돌린 24h 실측(BRIEF-5.md §1.1 
 | listener fd (baseline/idle_end) | `idle_end_fds <= baseline_fds + 2` | soak.rs (assert) + summarize.py |
 | listener fd (steady quarters) | steady 마지막 1/4 구간 fd 최댓값 `<= 첫 1/4 최댓값 + 2`. 위반은 `FD_GROWTH_LISTENER`로 표기 | soak.rs (`judge_fd_quarters`, assert) + summarize.py 양쪽 동일 구현(`quarter_split`). steady 표본이 `MIN_QUARTER_SAMPLES`(8) 미만이면 양쪽 다 위반 대신 기록만 남긴다 |
 | self(테스트 프로세스) fd | steady 마지막 1/4 fd 최댓값 `<= 첫 1/4 최댓값 + 2`(사이클링 도중의 증가만 잰다). 위반은 `FD_GROWTH_CLIENT`로 표기(M7 carryover (iii) 재현) | soak.rs (`judge_fd_quarters`, assert, strict) + summarize.py. listener fd 축과 같은 `MIN_QUARTER_SAMPLES` 다운그레이드 규칙을 공유한다 |
-| echo p95 | 창별 p95 최댓값 `<= max(3 × ramp 직후 baseline p95, 50 ms)` — 고정 50ms가 아니라 이 런 자신의 ramp-직후 baseline에 대한 적응형 상한(공유 러너의 절대치 flake를 피하려는 T2 `adversarial_load.rs` 패턴과 동일). baseline을 못 구하면 50ms 바닥값으로 대체 | soak.rs (assert, 자체 계측한 baseline 사용) + summarize.py (assert; CSV의 `phase == ramp` 행에서 baseline을 자동으로 구하고, `--echo-baseline-ms`를 주면 그 값이 우선한다) |
+| echo p95 | steady 창 중 p95가 bound(`max(3 × ramp 직후 baseline p95, 50 ms)`)를 넘는 창의 비율이 `ECHO_SPIKE_FRACTION_MAX`(10%)를 넘으면 위반이고 태그는 `ECHO_DEGRADED`다. bound는 고정 50ms가 아니라 이 런 자신의 ramp 직후 baseline에 대한 적응형 상한이다(공유 러너의 절대치 flake를 피하려는 T2 `adversarial_load.rs` 패턴과 같다). baseline을 못 구하면 50ms 바닥값으로 대체한다. 최댓값, 초과 창 수, steady 첫/마지막 1/4 구간 중앙값은 위반 여부와 무관하게 정보로만 기록한다(24h 저하 규칙을 세울 입력, ARBITRATION-5 "load.yml 첫 GHA soak 실행 판정") | soak.rs(`judge_echo_windows`, assert) + summarize.py(assert. CSV의 `phase == ramp` 행에서 baseline을 자동으로 구하고 `--echo-baseline-ms`를 주면 그 값이 우선한다) |
 | TTL reap | `resume_ttl_secs + REAPER_TICK`(30s)이 지난 뒤에도 `abandoned_live != 0`이면 위반. 그 전에는 "아직 판정 대상 아님"으로 기록만 한다 — `DRAIN_WAIT`(≈`REAPER_TICK`+`CLOSED_RETENTION`, `qsh_core::broker`의 두 pub const 합)와는 다른, TTL 정책 자체의 만료 시각 기준이다 | soak.rs (`ttl_reap_deadline`, assert) + summarize.py (`--resume-ttl-secs`로 같은 식을 계산; 안 주면 예전처럼 무조건 `abandoned_live == 0` 체크로 폴백) |
 | 세션 정지(SESSION_STALLED) | 한 세션의 write→echo 한 라운드가 `SESSION_ROUND_DEADLINE`(5s)을 넘기면 그 세션을 끊고 카운트한다. 카운트가 1 이상이면 위반 | soak.rs (assert)만. CSV에 세션별 정지 이력이 없어 summarize.py는 판단하지 않는다 |
 
@@ -178,6 +178,14 @@ Q9) 이 조합은 SLOW 경고만 반복해서 찍을 뿐 24h 테스트를 중간
 open/cycle 자체가 실패로 집계된다). `run.log`의 `dead_sessions=N`도
 "비고"에 옮긴다. 이쪽은 정보성이 아니다. 1 이상이면 SESSION_STALLED
 위반이 verdict FAIL의 근거 중 하나라는 뜻이다.
+
+GHA 첫 실행(run 34203445617, b9e67b1)에서는 steady 창 2개(129.5 ms,
+114.6 ms, 59개 중)가 사이클의 세션 교체(close + dial/open/attach)
+직후에 튀었다. 옛 규칙(창별 p95 최댓값 `<= bound`)은 이 스파이크 하나로
+그 회차를 위반 처리했지만, 새 비율 규칙(2/59 = 3.4%, 10% 미만)으로는
+위반이 아니다(ARBITRATION-5). 이 상관 관계는 5f 후보로 "비고"에 남겨
+둔다. listener가 PTY spawn(openpty/fork/exec) 동안 런타임을 막는지는
+24h 데이터가 쌓인 뒤에 본다.
 
 ## 8. 요약
 
