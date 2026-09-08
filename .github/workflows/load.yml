@@ -56,7 +56,10 @@ jobs:
     # saturating the host) finished the pre-split 9-test shape in 20.8s
     # wall-clock; the split adds one more short flood (12b, a few seconds
     # to force rotation at a few-hundred-byte `max_bytes`) and one bounded
-    # retry loop (12c, up to 200 round trips) — this workflow's
+    # retry loop — 12c's second construction (`PLAN.md` M8 Step 5 (d)),
+    # up to 50 `session.open` round trips 50ms apart (2.5s ceiling) polling
+    # for the fail-closed `PERMISSION_DENIED` once a freshly restarted
+    # writer cannot create `audit.log` — this workflow's
     # `--profile load` runs `[profile.load]`'s `test-threads = 1`
     # (`.config/nextest.toml`), so a GHA runner with no WSL-style
     # contention should land well inside the original ~155s ceiling plus

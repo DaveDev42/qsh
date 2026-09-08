@@ -622,6 +622,8 @@ WSL 실측(fuzz 포화 중)과 판정. 짧은 모드 strict에서 dial `Connecti
 
 load.yml 첫 실행(run 34203445617)과 F4. b9e67b1의 GHA soak 짧은 모드는 T2 4/4에 RSS(idle_end 20.2 MiB, 세션당 1.1 MiB)·fd·TTL reap을 다 통과하고 echo 축 하나에서 떨어졌다. steady 창 59개 중 2개(첫 steady 창 129.5 ms, cycle 2 직후 114.6 ms)가 50 ms를 넘었고 나머지는 중앙값 1.2 ms다. 세션 교체 순간의 스파이크지 저하가 아니어서 창별 최댓값 규칙을 위반 창 비율 규칙(`ECHO_SPIKE_FRACTION_MAX` 10%, 태그 `ECHO_DEGRADED`)으로 바꿨다. 최댓값·초과 창 수·첫/마지막 4분위 중앙값은 정보로 남겨 24h 뒤 저하 규칙의 입력으로 쓴다. DoD 2에는 echo 항목이 없으니 DoD 판정은 바뀌지 않는다. 스파이크가 세션 spawn과 겹치는 것은 5f 후보로 `docs/campaigns/m8-soak.md` §7에 적었다.
 
+병행 정리 라운드 1((c)(g)(d)+(b-0), 2026-09-08). BRIEF-PB의 Q1~Q6 판정은 `$SP/step5/ARBITRATION-5.md`에 있다. Q1 admission 기본값은 바꾸지 않는다. 에이전트의 동시 `qsh exec` burst가 같은 source에서 오고 미검증 축이 이미 10/s·burst 20으로 그 source를 묶고 있어 검증 축을 낮춰 얻는 방어가 없다. quinn NEW_TOKEN을 켜 재접속 Initial이 Retry 없이 검증 상태로 들어오게 되면 그때 다시 정한다. Q2 audit 창 principal 분리는 라운드 2에서 상한 두 겹(닫힌 창 삭제, 카테고리당 principal 창 64개와 overflow 창 `"-"`)과 같이 간다. Q3 (b) 변이 실측은 WSL 단독 점유 때다. 구현은 셋이다. (c) `session.close`가 그 세션의 미상환 티켓을 어느 연결의 것이든 푼다. 기존 테스트 3건의 기대를 새 규칙으로 고치고 교차 연결 테스트를 더했다. (g) DNS resolve를 `DOCTOR_PROBE_TIMEOUT` 안에 묶었다(detached 스레드, spawn 실패는 오류). doctor SLOW의 원인은 검토자가 실측으로 뒤집었다. `Ops::doctor`가 identity의 keystore 종류와 무관하게 `PlatformKeyStore`를 만들어 macOS Keychain을 쳤고 서명 없는 테스트 바이너리에서는 그 한 번이 20 s였다. 이제 identity의 `key_store` 종류대로 실제 store를 진단하고 doctor 테스트 43건은 313 s에서 3.2 s가 됐다. (d) 12c는 "active 파일 없는 audit 디렉터리 `chmod 500` 위 writer 재시작" 구성으로 degraded 래치에 닿았다. 래치 변이로 죽는 것을 확인했고 strict 축에 넣었으며 root면 skip이다. (b-0) `AUDIT_AGGREGATION_WINDOW`를 `pub`으로 넓혀 12a의 하드코딩 10.0을 상수로 바꿨다. CLI.md의 close 문단과 §6.12 degraded 문장에 `session.open`을 더했다.
+
 #### Step 6 — wire freeze 선행 정리
 
 freeze 이후에는 고칠 수 없는 것들을 먼저 처리한다.
