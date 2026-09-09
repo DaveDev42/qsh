@@ -394,23 +394,6 @@ pub(crate) struct AuditWindow {
     pub(crate) state: Mutex<WindowState>,
 }
 
-#[cfg(test)]
-impl AuditWindow {
-    /// Whether this window is still open (`state.start.is_some()`) —
-    /// test-only, so a pin can assert the window a `flush_expired` just
-    /// closed is *actually* closed (`start` reset to `None`) rather than
-    /// merely re-stamped with a fresh `start` that happens to also pass a
-    /// "was it reported" assertion (`crate::quota`'s twin of this module's
-    /// own `flush_expired`/`WindowState` shape shares this helper).
-    pub(crate) fn is_open(&self) -> bool {
-        self.state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .start
-            .is_some()
-    }
-}
-
 /// The admission decision-maker: a handshake concurrency permit pool plus
 /// a per-source rate limiter, both driven by an injected
 /// [`crate::broker::Clock`] so every invariant here is testable without
