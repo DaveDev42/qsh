@@ -674,5 +674,5 @@ M2가 20회를 조기 측정해 SC4/SC5를 실기기로 확인했고 SC3 판정�
 - **SC7 리드타임은 이미 만료**다(6.0). wire freeze 일정이 조직 액션에 묶여 있다.
 - **DoD 1·2·3은 전부 벽시계**다. 압축되지 않으므로 순서가 곧 일정이다 — Step 1을 가장 먼저 세운 이유.
 - **graceful re-exec(fd 보존 handoff)** 는 ROADMAP §4 리스크 4가 M8 stretch로 비용 산정만 요구한다. 구현은 범위 밖.
-- **notarization은 M9가 아니라 M8 중 시작**(ROADMAP M9 크기 주석). 리드타임 항목이라 6.0과 같은 성질이다.
+- **notarization은 M10이 아니라 M8 중 시작**(ROADMAP M10 크기 주석). 리드타임 항목이라 6.0과 같은 성질이다.
 - **CI flake (2026-09-02, run 33601809635, docs-only 커밋 `b0da849`)** — `qsh-cli::attach_ops::a_teardown_waits_out_a_detach_that_is_still_flushing`이 `ubuntu-24.04-arm` leg에서만 `left: Applied, right: Unconfirmed`로 실패, 재실행 통과. 테스트는 host를 SIGSTOP한 뒤 detach flush가 ack를 못 받아 `Unconfirmed`이길 기대하는데, 빠른 러너에서는 SIGSTOP 전에 이미 쓴 바이트의 ack가 도착해 `Applied`가 된다 — 제품 결함이 아니라 테스트의 순서 가정(정지 → 쓰기가 아니라 쓰기 → 정지). Step 2 착륙 후 별도 소커밋으로 결정론화(ack가 불가능한 상태를 먼저 만들고 나서 쓰기). **해결(2026-09-03)**: 다시 보니 테스트는 이미 정지 → 쓰기 순서였다. 진짜 원인은 SIGSTOP의 비동기성 — `kill`은 신호를 큐에 넣고 바로 돌아오고, 멀티스레드 대상은 한 스레드가 신호를 꺼내 group stop을 실행하기 전까지 나머지 스레드(QUIC 소켓을 돌리는 tokio 워커)가 계속 돈다. 그 틈에 host가 "two\n"을 ack하면 `Applied`. 테스트는 `waitpid(host, WUNTRACED)`로 스레드 그룹 전체가 멈춘 것을 커널이 보고한 뒤에 쓴다(직접 자식이고 그 구간에 다른 reaper 없음 확인). 로컬 20/20.

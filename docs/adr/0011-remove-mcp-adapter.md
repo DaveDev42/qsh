@@ -17,14 +17,14 @@ M6는 `qsh mcp`를 stdio MCP 서버로 넣었다(ROADMAP M6, CLI.md §8, PRD의 
 2. 에이전트와 자동화의 연동 면은 `qsh.cli/v1` JSON/JSONL CLI 하나다. PRD의 "선택적 MCP server" 역할, CLI.md §8, ROADMAP M6 범위는 이 ADR로 철회한다. M6의 완료 표시는 역사로 두고 마감 노트에 철회를 적는다.
 3. `crates/qsh-cli/tests/fixtures/mcp/tools_list.json`은 append-only 규칙대로 지우지 않는다. 읽는 테스트가 없어지므로 같은 디렉터리에 `README.md`를 두어 은퇴 사실과 이 ADR을 적는다.
 4. 터널 홀더 의미는 CLI.md §6.14 그대로다. 터널은 그것을 연 `qsh tunnel open` 프로세스가 홀더이고 여러 호출에 걸쳐 터널을 들고 있으려면 외부 소비자가 그 프로세스를 살려 둔다. 내장 어댑터가 하던 장기 실행 서버 안의 tunnel hold는 외부로 이전된다. `Ops::tunnel_open`과 `TunnelHold`는 CLI와 testkit이 쓰므로 남긴다. 어댑터만 쓰던 `Ops` API가 있으면 제거 라운드에서 같이 지운다.
-5. `-W`(ProxyCommand형 stdio와 원격 TCP의 브리지)는 만들지 않는다. `qsh exec`와 `-L`로 부족한 사용례가 나올 때 M9에서 검토한다(ROADMAP M9).
+5. `-W`(ProxyCommand형 stdio와 원격 TCP의 브리지)는 만들지 않는다. `qsh exec`와 `-L`로 부족한 사용례가 나올 때 M10에서 검토한다(ROADMAP M10).
 6. 실행 시점은 M8 Step 6(wire freeze 선행 정리)이다. Step 7 threat model이 지울 표면을 적지 않게 한다. Step 4c와 Step 5는 MCP와 무관해 순서를 바꾸지 않는다.
 
 ## 결과
 
 - 잃는 것은 추가 설치 없는 1st-party MCP 서버 하나다. Claude Code 같은 에이전트는 Bash로 `qsh … --json`을 부르거나 별도 MCP remote를 쓴다.
 - `qsh.cli/v1`과 `qsh.event/v1` 봉투는 바뀌지 않는다. MCP는 자기 wire(JSON-RPC)를 썼지 JSON 봉투의 필드가 아니었으므로 additive-only 규칙에 걸리지 않는다. 서브커맨드 제거는 alpha 단계의 CLI 표면 변경이고 이 ADR이 그 근거다.
-- 바뀌는 문서: PRD(61·68·154·237~255·273·289·352행 부근), CLI.md §8과 §6.4·§7의 MCP 언급, ROADMAP M6 마감 노트와 M9 범위, `docs/design/architecture.md`의 어댑터 절, `docs/design/testing.md`의 golden 규율 예시, ADR-0007의 MCP 언급(사실 서술이라 각주로 처리), README, CLAUDE.md의 MCP 규칙 두 줄과 문서 지도, `docs/campaigns/m6-mcp.md`(역사로 유지, 머리에 철회 주석).
+- 바뀌는 문서: PRD(61·68·154·237~255·273·289·352행 부근), CLI.md §8과 §6.4·§7의 MCP 언급, ROADMAP M6 마감 노트와 M10 범위, `docs/design/architecture.md`의 어댑터 절, `docs/design/testing.md`의 golden 규율 예시, ADR-0007의 MCP 언급(사실 서술이라 각주로 처리), README, CLAUDE.md의 MCP 규칙 두 줄과 문서 지도, `docs/campaigns/m6-mcp.md`(역사로 유지, 머리에 철회 주석).
 - qsh-core의 `resume.rs`, `ops/mod.rs`, `ops/tunnel.rs`에 있는 `qsh mcp` 언급 주석은 "장기 실행 외부 프로세스" 서술로 바꾼다. 동작 변경은 없다.
 - 폴링 read마다 새 프로세스와 새 QUIC 연결이 든다. `--wait` 상한이 60 s라 빈도는 낮고 내장 어댑터가 한 연결을 재사용하던 이점은 여기서 잃는다.
 

@@ -11,7 +11,7 @@ QSH는 password 인증을 지원하지 않고 상호 TLS와 pinned certificate(�
 
 기본 pairing UX는 `qsh trust invite`가 발급하는 **고엔트로피 일회용 invite code(10분 TTL)** 로 한다. 양측은 TLS exporter 기반 channel binding으로 HMAC proof를 교환해 중간자 없이 양방향 pin을 한 번에 설정한다.
 
-- **Fingerprint 수동 확인**(`qsh trust add --fingerprint`)은 스크립트/프로비저닝용 1급 fallback으로 유지한다(Ansible, cloud-init 등 사람이 개입하지 않는 경로).
+- **Fingerprint 수동 확인**(`qsh trust add --fingerprint`)과 **인증서 파일 교환**(`qsh identity export` + `qsh trust add --cert-file`)을 스크립트/프로비저닝용 1급 fallback으로 유지한다(Ansible, cloud-init 등 사람이 개입하지 않는 경로, 그리고 `qsh listen`처럼 invite 상환 창구 자체가 없는 상대). 인증서 파일 교환은 fingerprint 수동 확인과 달리 사람의 육안 대조를 요구하지 않는다(ADR-0013).
 - **QR 코드**는 P1로 연기한다.
 - `--json` 모드에서는 대화형 prompt 대신 `TRUST_REQUIRED` 오류 + 관찰된 fingerprint를 `details`에 반환한다(CLI.md §2.1 규칙과 일치).
 
@@ -30,7 +30,7 @@ QSH는 password 인증을 지원하지 않고 상호 TLS와 pinned certificate(�
 
 ## 결과
 
-- `qsh trust invite` / `qsh trust accept <code>` 명령과 TLS exporter 기반 HMAC proof 교환 로직을 `qsh-core::trust` 모듈([architecture.md](../design/architecture.md) §5)에 구현해야 한다.
+- `qsh pair invite` / `qsh pair accept <address> <code>` 명령과 TLS exporter 기반 HMAC proof 교환 로직을 `qsh-core::trust` 모듈([architecture.md](../design/architecture.md) §5)에 구현해야 한다. 구 표기 `qsh trust invite`/`qsh trust accept`는 v1 내내 숨김 alias로 유지한다(ADR-0012).
 - Pairing 로직은 `TrustEvaluator` trait을 통해 `QshPeerVerifier`(ADR와 무관하게 이미 결정된 pin-or-CA 검증기)와 연결된다.
 - `--json` 경로는 대화형 prompt를 절대 열지 않고 `TRUST_REQUIRED` + `details.fingerprint`를 반환해야 한다 — CLI.md §11(frontend에 인증 로직 금지)과 일치.
 - P1 백로그: QR 인코딩(invite code를 QR로 표시/스캔), pairing 만료·재발급 UX 개선.
