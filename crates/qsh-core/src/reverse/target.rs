@@ -16,9 +16,9 @@
 //! **Step 4: the reconnect loop.** Registration is the target's only
 //! reachability path, so a dead connection is never fatal — the process
 //! stays up and keeps trying, forever (`docs/design/protocol.md` §11-4).
-//! One connection's lifetime, inside the loop in [`run_reverse_unix`], is:
+//! One connection's lifetime, inside the loop in `run_reverse_unix`, is:
 //!
-//! 1. Dial + `Hello.reverse` exchange ([`dial_and_register`]). A rejection
+//! 1. Dial + `Hello.reverse` exchange (`dial_and_register`). A rejection
 //!    from the controller (`PERMISSION_DENIED`/`INVALID_ARGUMENT`/
 //!    `UNSUPPORTED` — name-squatting shape check, the `host.reverse` choke
 //!    point, or an unpinned peer) arrives as `HelloError::Remote` from
@@ -38,10 +38,10 @@
 //!    held — **never** the sessions themselves (`docs/design/
 //!    architecture.md` §3: session lifetime is decoupled from connection
 //!    lifetime, and the whole point of this loop is that the *same*
-//!    broker, built once in [`run_reverse_unix`] before the loop starts,
+//!    broker, built once in `run_reverse_unix` before the loop starts,
 //!    outlives every connection it dials).
 //! 4. Backoff (exponential + jitter, ±%, `[reverse]` config,
-//!    `docs/design/protocol.md` §11-4) via [`Backoff`], then back to step 1
+//!    `docs/design/protocol.md` §11-4) via `Backoff`, then back to step 1
 //!    — unless a successful registration already reset it back to
 //!    `backoff_initial_ms`.
 //!
@@ -782,7 +782,7 @@ mod tests {
             },
             local: qsh_transport::LocalIdentity {
                 cert_chain: Vec::new(),
-                key_pkcs8_der: Vec::new(),
+                key_pkcs8_der: zeroize::Zeroizing::new(Vec::new()),
             },
         };
         let paths = Paths::new("unused-config", "unused-state");

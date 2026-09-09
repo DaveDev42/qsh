@@ -38,7 +38,7 @@
 //!    `crate::reverse::listen::ControlHub` bounds exposure to that
 //!    instead of cancelling it (its own module docs) — and a `Response`
 //!    that later arrives for one of these now-gone ids is simply dropped
-//!    by the caller ([`Self::map_inbound`] returning `None`), no
+//!    by the caller ([`ControlMux::map_inbound`] returning `None`), no
 //!    exception: session lifetime is decoupled from connection lifetime
 //!    (`docs/PRD.md`'s core premise), so the session the target may have
 //!    already created for it stays alive exactly as it would on the
@@ -304,7 +304,7 @@ impl ControlMux {
     /// Allocate a fresh, globally-unique `daemon_request_id` for a request
     /// that is not attributed to any conduit at all — the daemon acting on
     /// its own authority rather than relaying on a specific conduit's
-    /// behalf. [`ControlHub::admin_close_forward`](crate::reverse::listen::ControlHub::admin_close_forward)
+    /// behalf. `ControlHub::admin_close_forward`
     /// (`PLAN.md` M4 Step 5 PR 5b) is the one caller: an admin-authorized
     /// `tunnel.close` sends `RemoteForwardClose` without waiting for or
     /// correlating the reply, so unlike [`Self::map_outbound`] this never

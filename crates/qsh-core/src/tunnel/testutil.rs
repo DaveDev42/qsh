@@ -25,7 +25,7 @@ pub(crate) fn self_signed() -> (LocalIdentity, Fingerprint) {
     (
         LocalIdentity {
             cert_chain: vec![der],
-            key_pkcs8_der: key.serialize_der(),
+            key_pkcs8_der: zeroize::Zeroizing::new(key.serialize_der()),
         },
         fingerprint,
     )

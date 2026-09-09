@@ -10,7 +10,7 @@
 //!
 //! `qsh-cli` otherwise stays a thin frontend binary in every sense
 //! `docs/CLI.md` §11 and `docs/design/architecture.md` §1 already commit
-//! to: `mcp`, `render`, and `tui` stay private to `main.rs`, nothing here
+//! to: `render` and `tui` stay private to `main.rs`, nothing here
 //! is a supported external API, and no product crate may depend on this
 //! one. Worth being exact about what enforces that, now that a library
 //! target makes the edge expressible at all: `xtask/src/arch.rs`'s matrix

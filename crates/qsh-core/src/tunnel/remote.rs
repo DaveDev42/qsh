@@ -121,7 +121,7 @@ impl BindHostResolver for SystemResolver {
 /// The exact `docs/CLI.md` §6.9 / `README.md` wording for a non-loopback
 /// `-R` bind's `INVALID_ARGUMENT` refusal (`PLAN.md` M4 Step 8's L6
 /// doc-consistency gate, the same discipline M3 Step 9 applied to
-/// `qsh_core::doctor::CONTROLLER_UNREACHABLE`). [`NotLoopback`]'s
+/// `qsh_core::doctor::CONTROLLER_UNREACHABLE`). `NotLoopback`'s
 /// `Display` is defined in terms of this constant rather than its own
 /// literal so the two cannot drift apart — `crates/qsh-core/tests/
 /// tunnel_docs.rs` pins docs to this single source, not to a second copy
@@ -687,7 +687,7 @@ impl RemoteForwardAcceptor {
     /// no task at all — there is nothing to dispatch until
     /// [`Self::register`] names the first `forward_id`, at which point a
     /// dedicated claim loop starts for exactly that id
-    /// ([`AcceptDispatch::Local`]'s own doc on why one loop per id, not
+    /// (`AcceptDispatch::Local`'s own doc on why one loop per id, not
     /// one shared loop).
     #[cfg(unix)]
     pub async fn spawn_reverse(socket_path: std::path::PathBuf, host: String) -> Self {
@@ -711,8 +711,8 @@ impl RemoteForwardAcceptor {
     }
 
     /// This instance's own claim token, reverse route only — the exact
-    /// bytes [`Self::spawn_reverse`] minted, unchanged. `None` on the
-    /// forward route ([`AcceptDispatch::Quic`] has no claim token; a
+    /// bytes `Self::spawn_reverse` minted, unchanged. `None` on the
+    /// forward route (`AcceptDispatch::Quic` has no claim token; a
     /// live QUIC connection makes the token's whole purpose moot, since
     /// nothing else can claim from it). A caller that opens a `-R over
     /// reverse` forward must call this **before** it sends
@@ -773,9 +773,9 @@ impl RemoteForwardAcceptor {
     /// `forward_id`'s claim loop — the same one-drop teardown
     /// [`Self::drop`] gives every remaining claim loop, just scoped to
     /// this one id — which stops *new* claims immediately but, same as
-    /// the forward route's own [`dispatch_remote_forwards`], never
+    /// the forward route's own `dispatch_remote_forwards`, never
     /// disturbs a splice already in flight for this id: it drains to its
-    /// own natural end ([`DrainSplicesOnDrop`]'s own doc on how the
+    /// own natural end (`DrainSplicesOnDrop`'s own doc on how the
     /// abort above achieves that rather than tearing those splices down
     /// with it).
     pub fn unregister(&self, forward_id: &str) {

@@ -202,7 +202,7 @@ pub const DENY_SEAMS: &[DenySeam] = &[
 /// dial destination" without re-deriving it from the handler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResourceKind {
-    /// A session id, or the [`super::SESSION_RESOURCE`]-shaped sentinel
+    /// A session id, or the [`crate::server::SESSION_RESOURCE`]-shaped sentinel
     /// `"session"` for the two ops with no single session to name
     /// (`session.open`, `session.list`).
     Session,
@@ -255,7 +255,7 @@ macro_rules! declare_ops {
         impl Op {
             /// Every [`Op`] variant, in [`OP_REGISTRY`]'s declaration
             /// order — for exhaustive enumeration. This is not a second
-            /// hand-maintained list: the [`declare_ops!`] invocation
+            /// hand-maintained list: the `declare_ops!` invocation
             /// below derives the variant list, [`Op::as_str`],
             /// [`Op::spec`], and [`OP_REGISTRY`] from one set of rows, so
             /// there is no separate membership list a variant can be
@@ -299,7 +299,7 @@ macro_rules! declare_ops {
 
         /// Every privileged operation this build authorizes (`PLAN.md`
         /// M5 Step 8, PRD §15 SC6) — the const projection of the same
-        /// [`declare_ops!`] invocation that derives [`Op`] and
+        /// `declare_ops!` invocation that derives [`Op`] and
         /// [`Op::ALL`], in that invocation's order. See [`OpSpec`]'s own
         /// doc for the naming rule and the relationship to
         /// [`DENY_SEAMS`], and [`ALWAYS_DENIED_NO_OP`] for the three PRD

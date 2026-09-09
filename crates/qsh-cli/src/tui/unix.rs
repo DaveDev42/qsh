@@ -2,7 +2,7 @@
 //!
 //! Everything here is terminal plumbing around a single
 //! [`Ops::session_attach`] stream — see the module docs in
-//! [`super`](super) for the thread layout and why it is three threads.
+//! [`super`] for the thread layout and why it is three threads.
 
 use std::io::{self, Read as _, Write as _};
 use std::sync::Arc;
@@ -111,7 +111,18 @@ pub fn run(ops: &Ops, what: Attach, escape: Option<u8>) -> Result<i32, OpError> 
     // Signals *before* raw mode: between `tcsetattr` and an installed
     // handler a SIGTERM would kill the client with the terminal still raw,
     // which is the one outcome the restore machinery exists to prevent.
-    spawn_signal_pump(stream.handle());
+    //
+    // Nothing to restore yet — the terminal is still cooked — so a spawn
+    // failure here is just `orphan`'s usual "session is still running"
+    // report (BRIEF-6 §1.4: `spawn` used to `.expect()`, which would panic
+    // *after* the session was created but leave the operator with no idea
+    // it was still running).
+    spawn_signal_pump(stream.handle(), &RealThreadSpawn).map_err(|err| {
+        orphan(OpError::new(
+            ErrorCode::Internal,
+            format!("cannot start the signal-handling thread: {err}"),
+        ))
+    })?;
 
     let raw = RawMode::enter().map_err(|err| {
         orphan(OpError::new(
@@ -127,7 +138,32 @@ pub fn run(ops: &Ops, what: Attach, escape: Option<u8>) -> Result<i32, OpError> 
     // stdin every byte is forwarded verbatim (`docs/CLI.md` §7).
     let is_raw = raw.is_raw();
     let escape = escape.filter(|_| is_raw);
-    spawn_input_pump(stream.handle(), escape, Arc::clone(&detached), is_raw);
+    // Past this point the terminal *is* raw, so a spawn failure has to walk
+    // the same restore path every other exit does: drop the guard (`term::
+    // restore`, via `RawMode`'s `Drop`) before reporting anything, the same
+    // ordering `drop(raw)` uses lower down for the ordinary exit path
+    // (BRIEF-6 §1.4 — this used to `.expect()` here, which panics with the
+    // terminal already switched and no guard on the unwinding stack to put
+    // it back). The `Err` branch below and this ordering — `drop(raw)`
+    // *before* `orphan`'s stderr note, not after — are read-verified but
+    // not test-pinned: reaching the branch needs a real spawn failure
+    // (`spawn_input_pump`'s own unit tests use a stub `PumpHandle` and
+    // never call this closure at all), and a mutation deleting this
+    // `drop(raw)` was confirmed to slip past the full `qsh-cli` suite
+    // (verify-lens 2, BRIEF-6 §1.4 mutation d2).
+    if let Err(err) = spawn_input_pump(
+        stream.handle(),
+        escape,
+        Arc::clone(&detached),
+        is_raw,
+        &RealThreadSpawn,
+    ) {
+        drop(raw);
+        return Err(orphan(OpError::new(
+            ErrorCode::Internal,
+            format!("cannot start the input pump thread: {err}"),
+        )));
+    }
 
     let outcome = pump_events(&mut stream, &detached, is_raw);
 
@@ -288,15 +324,23 @@ fn note(raw: bool, message: &str) {
 /// Detached on purpose: it parks in `read(2)` on the terminal, which
 /// nothing but the process exiting can interrupt. It owns no terminal
 /// state, so leaving it parked is safe.
-fn spawn_input_pump(
-    handle: AttachHandle,
+///
+/// Returns the spawn failure instead of panicking (BRIEF-6 §1.4): by the
+/// time the caller can reach here the terminal is already raw, and a
+/// `.expect()` here used to leave the operator's terminal stuck raw with a
+/// panic backtrace stair-stepped across it — exactly the failure `term::
+/// restore_and_die` exists to prevent for signals, just reached from a
+/// different door.
+fn spawn_input_pump<H: PumpHandle>(
+    handle: H,
     escape: Option<u8>,
     detached: Arc<AtomicBool>,
     raw: bool,
-) {
-    std::thread::Builder::new()
-        .name("qsh-tui-input".into())
-        .spawn(move || {
+    spawner: &dyn ThreadSpawn,
+) -> io::Result<()> {
+    spawner.spawn(
+        "qsh-tui-input",
+        Box::new(move || {
             let mut machine = Escape::new(escape);
             let mut stdin = io::stdin().lock();
             let mut buf = vec![0u8; INPUT_CHUNK];
@@ -342,8 +386,8 @@ fn spawn_input_pump(
                     break;
                 }
             }
-        })
-        .expect("spawn the stdin pump");
+        }),
+    )
 }
 
 /// `SIGWINCH` → `session.resize`, `SIGINT` → the `^C` byte,
@@ -364,11 +408,17 @@ fn spawn_input_pump(
 /// session-bound arms use the non-blocking sends and drop what will not
 /// fit: a lost resize is re-sent by the next `SIGWINCH`, and a lost `^C`
 /// is cheap next to an unkillable process.
-fn spawn_signal_pump(handle: AttachHandle) {
+///
+/// Returns the spawn failure instead of panicking (BRIEF-6 §1.4): this
+/// runs before the terminal goes raw, so the caller has nothing to restore
+/// yet, but a `.expect()` panic here still used to strand the session the
+/// caller already opened with no `orphan` report telling the operator it
+/// was still running.
+fn spawn_signal_pump<H: PumpHandle>(handle: H, spawner: &dyn ThreadSpawn) -> io::Result<()> {
     let (ready, installed) = std::sync::mpsc::sync_channel(1);
-    std::thread::Builder::new()
-        .name("qsh-tui-signals".into())
-        .spawn(move || {
+    spawner.spawn(
+        "qsh-tui-signals",
+        Box::new(move || {
             let runtime = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -417,11 +467,69 @@ fn spawn_signal_pump(handle: AttachHandle) {
                     None => return,
                 }
             }
-        })
-        .expect("spawn the signal pump");
+        }),
+    )?;
     // Bounded: a client with no signal thread is worse off, but hanging
     // here would be worse still.
     let _ = installed.recv_timeout(SIGNALS_READY);
+    Ok(())
+}
+
+/// The subset of [`AttachHandle`] the two pumps actually call — abstracted
+/// so the spawn-failure tests (BRIEF-6 §1.4, verify-lens 2 finding P2) can
+/// pass a handle double instead of a live `AttachHandle`, whose fields are
+/// private to `qsh-core::ops::session` with no test constructor exposed to
+/// `qsh-cli` (building a real one means driving `Ops::session_attach`
+/// against a running host or `qsh-testkit`'s harness).
+///
+/// `write`/`try_write`/`try_resize`/`detach` are exactly the four
+/// `AttachHandle` methods `spawn_input_pump` and `spawn_signal_pump` use;
+/// grep confirms no other `AttachHandle` method appears in this file.
+trait PumpHandle: Send + 'static {
+    fn write(&self, data: Vec<u8>) -> Result<(), OpError>;
+    fn try_write(&self, data: Vec<u8>) -> Result<bool, OpError>;
+    fn try_resize(&self, cols: u16, rows: u16) -> Result<bool, OpError>;
+    fn detach(&self) -> DetachFlush;
+}
+
+impl PumpHandle for AttachHandle {
+    fn write(&self, data: Vec<u8>) -> Result<(), OpError> {
+        AttachHandle::write(self, data)
+    }
+
+    fn try_write(&self, data: Vec<u8>) -> Result<bool, OpError> {
+        AttachHandle::try_write(self, data)
+    }
+
+    fn try_resize(&self, cols: u16, rows: u16) -> Result<bool, OpError> {
+        AttachHandle::try_resize(self, cols, rows)
+    }
+
+    fn detach(&self) -> DetachFlush {
+        AttachHandle::detach(self)
+    }
+}
+
+/// Starts a named background thread — abstracted so the two pumps' spawn
+/// failure path (BRIEF-6 §1.4) can be exercised deterministically, the same
+/// DI seam `qsh-core`'s `DoctorEnvironment` uses to force `Ops::doctor`'s
+/// probes through a stub rather than a real failing OS resource.
+trait ThreadSpawn {
+    fn spawn(&self, name: &str, body: Box<dyn FnOnce() + Send>) -> io::Result<()>;
+}
+
+/// The real spawner: `std::thread::Builder`, detached — the join handle is
+/// dropped, matching both pumps' "parks in a blocking syscall for the
+/// process's life, never joined" contract (`super`'s module doc).
+struct RealThreadSpawn;
+
+impl ThreadSpawn for RealThreadSpawn {
+    fn spawn(&self, name: &str, body: Box<dyn FnOnce() + Send>) -> io::Result<()> {
+        std::thread::Builder::new()
+            .name(name.into())
+            .spawn(body)
+            .map(|_join| ())
+    }
 }
 
 /// What the signal pump saw.
@@ -503,5 +611,125 @@ impl Signals {
 fn test_panic_hook() {
     if std::env::var_os("QSH_TUI_TEST_PANIC").is_some() {
         panic!("QSH_TUI_TEST_PANIC");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A spawner that always fails, standing in for a process that has hit
+    /// its thread limit — deterministic in a way the real OS failure never
+    /// is (BRIEF-6 §1.4).
+    struct FailingThreadSpawn;
+
+    impl ThreadSpawn for FailingThreadSpawn {
+        fn spawn(&self, _name: &str, _body: Box<dyn FnOnce() + Send>) -> io::Result<()> {
+            Err(io::Error::other("no threads left (test double)"))
+        }
+    }
+
+    /// [`RealThreadSpawn`]'s `Ok` path: it actually starts a thread, whose
+    /// body runs on it rather than inline.
+    #[test]
+    fn real_thread_spawn_starts_a_thread() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        RealThreadSpawn
+            .spawn(
+                "qsh-tui-test",
+                Box::new(move || {
+                    let _ = tx.send(());
+                }),
+            )
+            .expect("spawn");
+        rx.recv_timeout(std::time::Duration::from_secs(1))
+            .expect("the spawned thread ran its body");
+    }
+
+    /// [`PumpHandle`] double: reports success on every call. Stands in for
+    /// a live `qsh_core::AttachHandle` (BRIEF-6 §1.4 verify-lens 2, finding
+    /// P2) — its fields are private to `qsh-core::ops::session` with no
+    /// test constructor exposed to `qsh-cli`, so building a real one means
+    /// driving `Ops::session_attach` against a running host or
+    /// `qsh-testkit`'s harness, integration-test weight for a spawn-only
+    /// question. `spawn_input_pump`/`spawn_signal_pump` only ever call
+    /// `spawner.spawn(...)` before touching the handle at all, so a handle
+    /// that is never actually exercised still lets a real
+    /// `spawn_input_pump(...)`/`spawn_signal_pump(...)` call run and return.
+    #[derive(Clone)]
+    struct StubHandle;
+
+    impl PumpHandle for StubHandle {
+        fn write(&self, _data: Vec<u8>) -> Result<(), OpError> {
+            Ok(())
+        }
+
+        fn try_write(&self, _data: Vec<u8>) -> Result<bool, OpError> {
+            Ok(true)
+        }
+
+        fn try_resize(&self, _cols: u16, _rows: u16) -> Result<bool, OpError> {
+            Ok(true)
+        }
+
+        fn detach(&self) -> DetachFlush {
+            DetachFlush::Applied
+        }
+    }
+
+    /// Pins the one moving part `spawn_input_pump`/`spawn_signal_pump`
+    /// changed for BRIEF-6 §1.4: a spawn failure now reaches the caller as
+    /// a plain `io::Result::Err` through [`ThreadSpawn::spawn`], not a
+    /// `.expect()` panic.
+    ///
+    /// This is the seam (`ThreadSpawn`) both pumps call through
+    /// unconditionally; `run()`'s two call sites then just
+    /// `.map_err`/`if let Err` that same `io::Error` into an `OpError`,
+    /// which is ordinary, already-covered control flow.
+    #[test]
+    fn failing_spawner_reports_err_not_panic() {
+        let err = FailingThreadSpawn
+            .spawn("qsh-tui-test", Box::new(|| {}))
+            .expect_err("a failing spawner must report Err, not panic");
+        assert_eq!(err.to_string(), "no threads left (test double)");
+    }
+
+    /// The actual `spawn_input_pump`/`spawn_signal_pump` `Err` path
+    /// (verify-lens 2 finding P2 / mutation d1: restoring
+    /// `.expect("spawn the stdin pump")` must make this test fail).
+    /// `StubHandle` is never touched — both functions only reach the
+    /// handle from inside the spawned closure, which `FailingThreadSpawn`
+    /// never runs.
+    #[test]
+    fn spawn_failure_is_returned_not_panicked() {
+        spawn_input_pump(
+            StubHandle,
+            None,
+            Arc::new(AtomicBool::new(false)),
+            false,
+            &FailingThreadSpawn,
+        )
+        .expect_err("spawn_input_pump must surface a failing spawner as Err");
+
+        spawn_signal_pump(StubHandle, &FailingThreadSpawn)
+            .expect_err("spawn_signal_pump must surface a failing spawner as Err");
+    }
+
+    /// The `Ok` path, through the real spawner — checked with the signal
+    /// pump only. The input pump's body blocks in stdin `read(2)` for the
+    /// life of the process once spawned (by design: it is detached and
+    /// never joined, see the pump's own doc comment), so spawning it for
+    /// real here would leave a thread parked on this test binary's stdin
+    /// for the rest of the run; that is harmless in a production client
+    /// that exits with the process, but in `cargo nextest`'s per-test
+    /// process it is one more live thread than the next test in this
+    /// process needs. `real_thread_spawn_starts_a_thread` above already
+    /// pins `RealThreadSpawn`'s `Ok` path in isolation, so the signal pump
+    /// is enough to confirm `spawn_signal_pump` itself returns `Ok` end to
+    /// end (handlers installed, `ready` signalled, no `Err` mapped).
+    #[test]
+    fn spawn_success_returns_ok() {
+        spawn_signal_pump(StubHandle, &RealThreadSpawn)
+            .expect("spawn_signal_pump must return Ok when the spawner succeeds");
     }
 }

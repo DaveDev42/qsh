@@ -58,14 +58,14 @@ PTY 세션은 QUIC connection보다 오래 살아야 한다. 연결이 교체되
 
 ### 단일 바이너리
 
-`qsh` 하나가 client, listener, agent, 인증서 관리와 선택적 MCP server 역할을 수행한다.
+`qsh` 하나가 client, listener, agent와 인증서 관리 역할을 수행한다(내장 MCP server는 M8 Step 6에서 철회, ADR-0011).
 
 ## 5. 주요 사용자
 
 - 여러 Mac과 Linux 장비를 사용하는 개발자
 - Claude Code, Codex 등 장시간 실행되는 CLI 에이전트 운영자
 - 원격 서버에 지속적으로 접속하는 인프라 운영자
-- MCP를 통해 원격 셸과 명령을 제어하는 orchestrator
+- JSON/JSONL CLI로 원격 셸과 명령을 제어하는 orchestrator
 
 ## 6. 핵심 사용자 경험
 
@@ -151,7 +151,7 @@ qsh -D 1080 dave@server   # P1 — SOCKS5, 플래그는 예약만 되어 있음
 | Tunnel | local 및 remote TCP forwarding |
 | Identity | pinned certificate와 private CA |
 | ACL | principal·resource·action 기반 local policy |
-| Automation | 안정된 JSON/JSONL CLI와 `qsh mcp` stdio adapter |
+| Automation | 안정된 JSON/JSONL CLI (`qsh.cli/v1`; 내장 MCP adapter는 철회, ADR-0011) |
 | Operations | host profile, local audit, `qsh doctor` |
 | Platform | macOS와 Linux, arm64와 x86_64 |
 
@@ -234,25 +234,7 @@ qsh session read <session-ref> --after 42 --jsonl
 
 JSON schema는 version을 포함하고, stdout에는 결과만 출력한다. 진단 로그는 stderr로 분리한다. PTY bytes는 sequence와 함께 lossless encoding으로 전달한다.
 
-MCP가 필요한 환경에서는 같은 바이너리를 stdio server로 실행한다.
-
-```bash
-qsh mcp
-```
-
-최소 tool set:
-
-- `list_hosts`, `get_host`, `list_sessions`, `get_session`
-- `open_session`, `close_session`
-- `read_session`, `write_session`, `resize_session`
-- `exec`
-- `open_tunnel`, `close_tunnel`
-
-MCP는 long-poll `read_session`/`write_session` 모델을 사용하므로 별도의 attach tool은 없다(CLI.md §8.3).
-
-`qsh mcp`는 별도 기능 계층이 아니다. CLI와 같은 typed operation, identity, ACL과 session broker를 MCP tool로 노출하는 얇은 adapter다. 내부에서 `qsh` subprocess를 반복 실행하거나 별도 business logic을 구현하지 않는다.
-
-JSON/JSONL과 MCP의 상세 계약은 `docs/CLI.md`에서 정의한다.
+내장 MCP stdio adapter(`qsh mcp`)는 M8 Step 6에서 철회했다(ADR-0011) — 에이전트 연동은 위 JSON/JSONL CLI 하나로 통일하며, 상세 계약은 `docs/CLI.md`에서 정의한다. 원격 stdio MCP 서버가 필요하면 `qsh exec host -- <server>`로 그 프로세스를 실행한다.
 
 ## 11. 명령 체계
 
@@ -270,7 +252,6 @@ qsh trust ...                   신뢰 관리
 qsh cert ...                    인증서 관리
 qsh acl ...                     ACL 관리와 검사
 qsh <command> --json            machine-readable result
-qsh mcp                         MCP server
 qsh schema --json               지원 schema와 capability 조회
 qsh doctor                      연결·인증·정책 진단
 ```
@@ -286,7 +267,7 @@ QSH가 책임지는 것:
 - PTY 및 session lifecycle
 - reconnect와 replay
 - exec와 tunnel multiplexing
-- Human CLI, JSON/JSONL과 얇은 MCP adapter
+- Human CLI와 JSON/JSONL
 
 QSH 밖에서 해결하는 것:
 
@@ -349,7 +330,7 @@ Relay는 payload와 endpoint private key를 볼 수 없어야 한다. 이를 위
 - QUIC과 TLS 1.3 상호 인증을 기본으로 한다.
 - PTY session lifetime을 transport lifetime과 분리한다.
 - JSON CLI를 canonical programmatic interface로 삼는다.
-- `qsh mcp`는 동일 operation을 노출하는 얇은 내장 adapter다.
+- 내장 MCP adapter(`qsh mcp`)는 M8 Step 6에서 철회했다(ADR-0011) — 에이전트 연동은 JSON CLI 하나로 통일한다.
 - Relay는 향후 별도 self-hosted/managed 제품으로 개발한다.
 - Transport protocol은 HTTP/3가 아닌 custom QUIC application protocol(`qsh/1` ALPN)로 확정한다. QSH에는 HTTP semantics가 필요 없고, custom frame layer는 P1 TCP fallback과도 동일하게 동작한다.
 - Pairing 기본 UX는 일회용 invite code(TLS-exporter 기반 channel binding, 10분 TTL)로 하며, fingerprint 방식은 Ansible/cloud-init 등 스크립트 provisioning용 fallback으로 유지한다. QR pairing은 P1이다.

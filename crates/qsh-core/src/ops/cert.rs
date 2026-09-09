@@ -66,7 +66,7 @@ impl Ops {
     /// Idempotent in two independent ways: re-issuing a leaf already
     /// signed by *this* local CA is a no-op (`issued: false`) rather than
     /// a silent rotation, and re-registering the same root under
-    /// [`LOCAL_CA_NAME`] follows `TrustStore::add_ca`'s own no-op/update
+    /// `LOCAL_CA_NAME` follows `TrustStore::add_ca`'s own no-op/update
     /// rule.
     ///
     /// Requires `qsh init` (an identity to promote) and `qsh cert init`

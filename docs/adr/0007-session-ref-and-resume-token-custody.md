@@ -18,7 +18,7 @@ M2(세션 broker + resume) 계획 중 두 가지 정의 공백이 드러났다(P
 ## 근거
 
 - alias는 클라이언트 로컬 지식이다(같은 호스트를 두 클라이언트가 다른 이름으로 pin할 수 있다). 조립 지점은 그 지식이 있는 곳, 즉 클라이언트 `Ops`여야 하며, `Ops`는 세 frontend가 공유하는 유일한 계층이므로(architecture.md §2) 조립 로직이 렌더러/adapter로 새지 않는다.
-- 토큰을 JSON에 실으면 (a) `--json` 출력이 스크립트 로그·CI 아티팩트·MCP 대화 기록에 그대로 남아 credential 유출 표면이 생기고, (b) 계약이 additive-only이므로 한 번 실으면 되돌릴 수 없으며, (c) 호출자가 토큰을 다시 넣어 줘야 하는 API가 되어 MCP long-poll 모델(CLI.md §8.3 — `session_ref` + cursor만)과 어긋난다. `session_ref`만으로 충분한 API가 더 작고 안전하다.
+- 토큰을 JSON에 실으면 (a) `--json` 출력이 스크립트 로그·CI 아티팩트·에이전트 도구의 대화 기록에 그대로 남아 credential 유출 표면이 생기고, (b) 계약이 additive-only이므로 한 번 실으면 되돌릴 수 없으며, (c) 호출자가 토큰을 다시 넣어 줘야 하는 API가 되어 long-poll cursor 모델(CLI.md §6.4 — `session_ref` + cursor만. 당시 MCP adapter의 `read_session`도 같은 모델이었고 그 adapter는 ADR-0011로 철회됐다)과 어긋난다. `session_ref`만으로 충분한 API가 더 작고 안전하다.
 - 토큰 단독으로는 무용하고(peer SPKI 결합, protocol.md §10) 상태 파일은 이미 protocol.md §10이 정한 보관처다 — 이 ADR은 "거기에만" 둔다는 점을 계약으로 못 박을 뿐이다.
 - 토큰이 없을 때 원격에 빈 attach를 보내지 않는 것은 non-distinguishing 오류 정책(protocol.md §10)과 무관하게 로컬에서 판정 가능하며, 불필요한 실패 요청·audit 잡음을 만들지 않는다.
 
@@ -37,6 +37,6 @@ M2(세션 broker + resume) 계획 중 두 가지 정의 공백이 드러났다(P
 - wire `SessionInfo`에는 `session_ref`도 `host`도 없다(둘 다 클라이언트 alias 지식). JSON `types::Session`은 `Ops`가 두 field를 채워 만든다.
 - 상태 파일 `resume.json`: 0600, key = `session_ref`, value = {token, host_alias, session_id, **peer_spki_sha256**, **expires_at**(wire `SessionOpened`/`SessionAttached`의 `expires_at`), updated_at}.
   - **제시 조건:** `Ops`는 연결된 peer의 SPKI fingerprint가 항목의 `peer_spki_sha256`과 일치할 때만 토큰을 보낸다. 불일치(alias가 다른 장비로 re-pin된 경우 등)는 토큰을 보내지 않고 로컬 `SESSION_NOT_FOUND`(`details.reason: "peer_mismatch"`)로 fail closed하고 항목을 폐기한다.
-  - **원자성·durability·동시성:** 쓰기는 같은 디렉터리에 `resume.json.tmp`를 0600으로 **생성한 뒤** 기록·fsync·`rename(2)`하는 원자적 교체이고, 프로세스 간(CLI + `qsh mcp` + `--follow` 등 동시 실행) read-modify-write는 파일 락(`flock`)으로 직렬화한다. rotation은 `SessionAttached`의 `new_resume_token`을 **durable하게 기록한 뒤에야** data 스트림을 진행한다 — 기록 실패는 attach 실패로 처리한다(단일 세대 토큰이므로 유실은 곧 영구 orphan, fail closed).
+  - **원자성·durability·동시성:** 쓰기는 같은 디렉터리에 `resume.json.tmp`를 0600으로 **생성한 뒤** 기록·fsync·`rename(2)`하는 원자적 교체이고, 프로세스 간(CLI + `qsh mcp`(당시, ADR-0011로 철회) + `--follow` 등 동시 실행) read-modify-write는 파일 락(`flock`)으로 직렬화한다. rotation은 `SessionAttached`의 `new_resume_token`을 **durable하게 기록한 뒤에야** data 스트림을 진행한다 — 기록 실패는 attach 실패로 처리한다(단일 세대 토큰이므로 유실은 곧 영구 orphan, fail closed).
   - **정리:** 항목은 (i) `session.closed` 수신, (ii) attach가 `AUTH_FAILED`/`SESSION_NOT_FOUND`로 실패, (iii) `expires_at` 경과 중 하나면 즉시 삭제하고, 로드 시 만료 항목을 먼저 정리한다(호스트는 stale 토큰에 non-distinguishing `AUTH_FAILED`로 답하므로 (ii)·(iii)이 지배적 경로다).
   - **위생:** 토큰은 `Zeroizing<[u8; 32]>`, 토큰을 담는 타입은 `Debug`에서 `<redacted>`(architecture.md §5).

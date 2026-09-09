@@ -36,9 +36,10 @@ three timed rounds its DoD requires). What works end to end today:
 - A default-deny ACL (`acl.toml`) and a fail-closed audit log gate every
   operation a remote peer requests. See [Security
   posture](#security-posture).
-- `qsh mcp`, an MCP server over stdio that exposes the same 12 operations
-  the CLI uses to MCP clients such as Claude Code. See [MCP
-  server](#mcp-server).
+- A stable `--json`/`--jsonl` CLI contract (`qsh.cli/v1`) for agents and
+  scripts. The built-in `qsh mcp` stdio server was retired in M8 Step 6
+  (see [ADR-0011](docs/adr/0011-remove-mcp-adapter.md)); run a remote
+  stdio MCP server through `qsh exec host -- <server>` instead.
 - Three ways to pin a peer: trust-on-first-connect, `qsh trust
   invite`/`qsh trust accept` pairing with a one-time code, or a private CA
   (`qsh cert init`/`qsh cert issue`) so a fleet trusts one CA root instead
@@ -116,6 +117,8 @@ it belongs to an unrelated project — which is why the crate is `qsh-cli`
 even though the binary it installs is `qsh`.
 
 `scripts/README.md` covers the installer in more detail.
+
+Running qsh as a service: see [docs/deploy/service.md](docs/deploy/service.md).
 
 Man pages for every subcommand are generated from the same `clap`
 definitions `--help` uses and live under [`docs/man/`](docs/man/)
@@ -374,48 +377,18 @@ controller has no trust-store alias for that peer and its
 `[listen].allow_advertised_names` is set; otherwise the controller names the
 peer from its own trust store.
 
-### MCP server
+### MCP server (retired, ADR-0011)
 
-`qsh mcp` runs an MCP server over stdio. It calls the same typed
-operation layer the CLI does and never shells out to `qsh` itself or
-reparses CLI output. Twelve tools, grouped by what they touch:
-
-- Hosts: `list_hosts`, `get_host`
-- Sessions: `list_sessions`, `get_session`, `open_session`, `read_session`,
-  `write_session`, `resize_session`, `close_session`
-- Exec: `exec`
-- Tunnels: `open_tunnel`, `close_tunnel`
-
-A minimal client config:
-
-```json
-{
-  "mcpServers": {
-    "qsh": {
-      "command": "qsh",
-      "args": ["mcp"]
-    }
-  }
-}
-```
-
-`QSH_CONFIG_DIR` and `QSH_STATE_DIR` can go in an `env` block, optional,
-to select a profile other than the default; otherwise the server runs as
-whatever identity and trust store `qsh init` already set up for the local
-user.
-
-A tool failure comes back as the same error JSON as the CLI's `--json`
-mode (`code`, `message`, `retryable`, `details`), carried in the tool
-result's content with `isError` set, not as a protocol-level error.
-`read_session` is a long-poll: pass `wait_ms` and feed the response's
-`next_after`/`next_ctl_after` back into the next call, the same cursor
-protocol `qsh session read --wait` uses. Canceling a tool call cancels
-only that in-flight request; the session and its PTY keep running.
-ACL enforcement happens host-side, exactly as it does for the CLI — MCP
-grants no extra access and never opens an interactive trust prompt.
-
-`docs/CLI.md` §8 is the binding contract for tool behavior, cancellation
-and error shape.
+The built-in `qsh mcp` stdio server — a twelve-tool adapter over the same
+typed operation layer the CLI uses — was removed in M8 Step 6. Agent
+integration now goes through the `qsh.cli/v1` JSON/JSONL CLI alone:
+`session read --wait`/`--follow` carries the same `next_after`/
+`next_ctl_after` long-poll cursor the old `read_session` tool used. If you
+still need a remote stdio MCP server, run it as the remote command itself
+— `qsh exec host -- <server>` — and let qsh be the transport underneath
+it. See [ADR-0011](docs/adr/0011-remove-mcp-adapter.md) for the reasoning
+and the fixture that stays checked in for historical reference
+(`crates/qsh-cli/tests/fixtures/mcp/`).
 
 ## Security posture
 
@@ -473,7 +446,7 @@ be able to do.
 ## Documents
 
 - [Product Requirements](docs/PRD.md)
-- [CLI, JSON and MCP Contract](docs/CLI.md)
+- [CLI and JSON Contract](docs/CLI.md)
 - [Roadmap: milestones, scope and acceptance criteria](docs/ROADMAP.md)
 - [Wire Protocol Design](docs/design/protocol.md)
 - [Architecture Design](docs/design/architecture.md)
@@ -498,7 +471,8 @@ qsh-cli (bin `qsh`)  →  qsh-core  →  qsh-transport  →  qsh-proto
 - `qsh-core`: all business logic. Typed operation layer, session broker,
   PTY, ACL, identity and trust, config.
 - `qsh-cli`: thin frontend. Argument parsing, human/JSON/JSONL rendering,
-  the interactive TUI, and eventually the MCP adapter.
+  and the interactive TUI. The built-in MCP adapter it once carried was
+  retired in M8 Step 6 (ADR-0011).
 - `qsh-testkit`: shared test harness with a loopback transport, a chaos
   proxy, and fixtures.
 
@@ -519,7 +493,7 @@ already taken on crates.io. The workspace stays `publish = false` until M10.
 | M3 | Reverse connections (`listen`/`reverse`/`attach`) | Done |
 | M4 | Port forwarding (`-L`/`-R`) | Done |
 | M5 | ACL and audit | Done |
-| M6 | MCP adapter | Done |
+| M6 | MCP adapter | Done (retired, ADR-0011) |
 | M7 | Trust UX, host profiles, `doctor` | In progress |
 | M8 | Hardening (fuzz, soak, real-device mobility campaign) | Planned |
 | M9 | Human-facing surface (naming, pairing, service install) | Planned |

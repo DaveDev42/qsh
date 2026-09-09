@@ -117,11 +117,11 @@ impl MacKey {
 /// Compute both directions' proofs directly from a raw invite secret — the
 /// initiator's own path (`crate::pairing`'s `AcceptAnyForPairing` dial): it
 /// holds the secret in plaintext (from `qsh trust accept`'s `<code>`
-/// argument), never a stored [`MacKey`]. Returns `(client_proof,
+/// argument), never a stored `MacKey`. Returns `(client_proof,
 /// server_proof)`: the initiator sends `client_proof` in its own
 /// `PairingProof.proof` and must verify the responder's
 /// `PairingAccepted.proof` against `server_proof` — constant-time, and
-/// **before** pinning anything (see [`PairingAccepted`]'s own doc in
+/// **before** pinning anything (see `PairingAccepted`'s own doc in
 /// `v1.proto` for why this check is not optional).
 pub fn proofs_from_secret(secret: &[u8], exported_keying_material: &[u8]) -> ([u8; 32], [u8; 32]) {
     let mac_key = MacKey::of(secret);
@@ -259,7 +259,7 @@ impl InviteStore {
     /// *processes* read-modify-write this same file: a `qsh trust invite`
     /// CLI process (`Ops::trust_invite`'s load→prune→add→save) and a
     /// running `qsh serve`'s own [`SharedInviteStore::redeem`]. Both now
-    /// hold [`InviteStore::lock`] across their whole cycle (see that
+    /// hold `InviteStore::lock` across their whole cycle (see that
     /// method's doc), which is the actual fix — a lost update can no
     /// longer happen because a second writer's `load` cannot even start
     /// until the first writer's `save` has returned. The merge below

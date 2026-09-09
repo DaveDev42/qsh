@@ -200,7 +200,7 @@ pub fn load(paths: &Paths) -> Result<Option<LoadedIdentity>, OpError> {
 
     let local = LocalIdentity {
         cert_chain: vec![CertificateDer::from(identity.cert_der.clone())],
-        key_pkcs8_der: key.to_vec(),
+        key_pkcs8_der: key,
     };
     Ok(Some(LoadedIdentity { identity, local }))
 }

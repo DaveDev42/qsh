@@ -70,7 +70,7 @@ impl FamilyPrefix {
 /// One `allow` entry inside a [`Rule`] — either exactly one action, or
 /// every action in one dotted family (a trailing `.*` in `acl.toml`).
 /// Never a mid-string glob: `docs/design/architecture.md` §6 permits only
-/// these two shapes, and [`crate::acl::load`] rejects anything else at
+/// these two shapes, and `crate::acl::load` rejects anything else at
 /// load time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActionPattern {
@@ -78,7 +78,7 @@ pub enum ActionPattern {
     Exact(Action),
     /// Matches every action whose dotted name starts with this family
     /// prefix, dot included (e.g. `"session."` for the `acl.toml` entry
-    /// `"session.*"`). See [`FamilyPrefix`] for how that invariant is
+    /// `"session.*"`). See `FamilyPrefix` for how that invariant is
     /// enforced rather than merely documented.
     Prefix(FamilyPrefix),
 }
@@ -98,7 +98,7 @@ impl ActionPattern {
 /// [`Scope::Owned`] — the safe default that reproduces M3's
 /// opener-principal binding.
 ///
-/// **Evaluated by [`Policy::decide`]'s ④ since `PLAN.md` M5 Step 5**: a
+/// **Evaluated by `Policy::decide`'s ④ since `PLAN.md` M5 Step 5**: a
 /// matched rule with `scope = "owned"` allows only when the resource's
 /// owner ([`ResourceRef::owner`]) equals the requester's own
 /// [`super::opener_key`] — `owner: None` (a resource kind with no owner
@@ -136,7 +136,7 @@ pub struct Rule {
     pub scope: Scope,
 }
 
-/// The outcome of [`Policy::decide`]: an allow/deny [`Decision`] plus,
+/// The outcome of `Policy::decide`: an allow/deny [`Decision`] plus,
 /// when a rule matched, that rule's array index in [`Policy::rules`] —
 /// the same value [`crate::audit::AuditRecord::rule`] and `acl check`'s
 /// `rule` field carry (`PLAN.md` M5 §4.1 #8: `Authorizer::check` returns

@@ -2,11 +2,11 @@
 .el .ds Aq '
 .TH qsh-reverse 1  "reverse 0.1.0" 
 .SH NAME
-qsh\-reverse \- Dial `<controller>` and register this device as a reverse target, once — no reconnect loop yet (`docs/CLI.md` §6.13). On success this process serves the connection as a host, the same broker/writer\-lease discipline as `qsh serve`
+qsh\-reverse \- Dial `<controller>` and register this device as a reverse target, and keep it registered, redialing with backoff when the link drops (`docs/CLI.md` §6.13). On success this process serves the connection as a host, the same broker/writer\-lease discipline as `qsh serve`
 .SH SYNOPSIS
 \fBqsh reverse\fR [\fB\-\-json\fR] [\fB\-\-offered\-name\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fICONTROLLER\fR> 
 .SH DESCRIPTION
-Dial `<controller>` and register this device as a reverse target, once — no reconnect loop yet (`docs/CLI.md` §6.13). On success this process serves the connection as a host, the same broker/writer\-lease discipline as `qsh serve`
+Dial `<controller>` and register this device as a reverse target, and keep it registered, redialing with backoff when the link drops (`docs/CLI.md` §6.13). On success this process serves the connection as a host, the same broker/writer\-lease discipline as `qsh serve`
 .SH OPTIONS
 .TP
 \fB\-\-json\fR

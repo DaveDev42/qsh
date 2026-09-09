@@ -260,7 +260,7 @@ impl TrustStore {
 
     /// Register a private CA root, idempotently (`qsh cert issue`,
     /// `docs/adr/0008-private-ca-cert-issuance.md` §6 결과: "trust.toml
-    /// [[ca]] 등재는 additive·append-only이며 중복 방지·갱신 semantics는
+    /// \[\[ca\]\] 등재는 additive·append-only이며 중복 방지·갱신 semantics는
     /// trust add(Step 2) 선례를 따른다") — the same created/updated shape
     /// as [`TrustStore::add_peer`], keyed on `name` instead of
     /// fingerprint since a CA root has no principal of its own.

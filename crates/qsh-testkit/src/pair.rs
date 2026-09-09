@@ -13,7 +13,7 @@
 //! same `Ops`/session code. This trait is the seam that lets one scenario
 //! function's body run unmodified against either topology: every primitive
 //! a scenario needs — a fresh client-role [`Session`], a raw client-role
-//! control stream for tests that pipeline [`wire::ControlMessage`]s
+//! control stream for tests that pipeline [`qsh_proto::wire::ControlMessage`]s
 //! directly, and read access to the *host* side's broker/pipes/audit/
 //! server — is named here without saying which side dialed.
 //!

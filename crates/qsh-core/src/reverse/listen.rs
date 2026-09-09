@@ -24,7 +24,7 @@
 //! (`crate::handshake::REJECTION_DRAIN_TIMEOUT`) before the caller closes
 //! the connection — nothing here re-implements that ordering.
 //!
-//! [`run_listen_unix`] also binds this process's `localctl` UDS admin
+//! `run_listen_unix` also binds this process's `localctl` UDS admin
 //! socket (`crate::localctl::daemon`, `PLAN.md` M3 Step 5 (a)) alongside
 //! the QUIC listener and runs its accept loop for as long as
 //! [`Listen::run`]'s does, unlinking the socket immediately after — on a
@@ -573,7 +573,7 @@ fn rollback_target<T>(
 
 /// How many undelivered [`ConduitInbound`] messages one conduit's inbox
 /// holds before it is treated as dead. Generous relative to
-/// [`crate::localctl::mux::MAX_INFLIGHT_PER_CONDUIT`] (64 in-flight
+/// `crate::localctl::mux::MAX_INFLIGHT_PER_CONDUIT` (64 in-flight
 /// requests, each worth at most one `Response`) so a merely-bursty reader
 /// is never mistaken for a stuck one, while still bounding this hub's
 /// memory against a conduit that stops reading altogether
@@ -869,12 +869,12 @@ pub enum ConduitInbound {
 #[cfg(unix)]
 #[derive(Debug)]
 pub enum HubSendError {
-    /// `conduit` already has [`crate::localctl::mux::MAX_INFLIGHT_PER_CONDUIT`]
+    /// `conduit` already has `crate::localctl::mux::MAX_INFLIGHT_PER_CONDUIT`
     /// requests outstanding — the caller answers this one `RESOURCE_EXHAUSTED`
     /// locally, on the same conduit only (`ControlMux::map_outbound`'s own
     /// contract: nothing was allocated or sent).
     Exhausted,
-    /// This host's driver ([`Listen::drive_registered_session`]) has
+    /// This host's driver (`Listen::drive_registered_session`) has
     /// already exited — there is nobody left to send onto the QUIC
     /// connection. The caller treats this exactly like a mid-flight host
     /// death: the conduit is about to receive (or may already have
@@ -1344,7 +1344,7 @@ impl HubState {
 }
 
 /// The `LOCAL_CONTROL` relay for one registered host's live reverse
-/// connection — what [`Listen::drive_registered_session`] (the sole
+/// connection — what `Listen::drive_registered_session` (the sole
 /// owner/driver of that connection's [`Session`]) and
 /// `crate::localctl::daemon`'s conduit-serve loop (one per attached CLI
 /// process, `N` per host) share: `N` conduits in, one physical QUIC
@@ -1356,16 +1356,16 @@ impl HubState {
 /// 1): a conduit task registers itself, then only ever calls
 /// [`Self::send_request`]/[`Self::unregister_conduit`] — synchronous,
 /// non-blocking calls under this hub's own `state` mutex, never the
-/// [`Registry`] lock and never [`Listen::conns`]'s. The drive loop is the
-/// *only* task that ever reads [`Self::take_outbound_receiver`]'s channel
+/// [`Registry`] lock and never `Listen::conns`'s. The drive loop is the
+/// *only* task that ever reads `Self::take_outbound_receiver`'s channel
 /// or writes to the QUIC control stream (`Session::send_control_message`),
 /// so two conduits' requests can never interleave on the wire regardless
 /// of how many conduits send concurrently — every send this hub relays is
 /// queued (an unbounded channel: this hub never blocks a conduit's own
 /// request-handling loop waiting for the drive loop to catch up) and the
 /// drive loop drains and sends them one at a time, in the order conduits
-/// handed them over. This is a *different* lock than [`Listen::hubs`]/
-/// [`Listen::conns`] (`ConnTable`'s own `Mutex`) and than
+/// handed them over. This is a *different* lock than `Listen::hubs`/
+/// `Listen::conns` (`ConnTable`'s own `Mutex`) and than
 /// [`super::registry::Registry`]'s — none of the three is ever held while
 /// awaiting another, so there is no lock-order hazard against the
 /// registry, the Step 4 probe driver, or the stale sweeper (all of which
@@ -1539,12 +1539,12 @@ impl ControlHub {
     /// `ControlMux::unregister_conduit`'s own contract), drops its inbox
     /// sender, and — `PLAN.md` M4 Step 5 (a)'s misdelivery-prevention
     /// requirement — removes **every** `forward_id` this conduit owns
-    /// from [`HubState::forwards`] and resets every `TCP_ACCEPTED`
-    /// stream still queued for one of them in [`HubState::tunnel_queue`]
+    /// from `HubState::forwards` and resets every `TCP_ACCEPTED`
+    /// stream still queued for one of them in `HubState::tunnel_queue`
     /// (`RESET_CODE_TUNNEL_UNKNOWN_FORWARD`: from this instant those ids
     /// are exactly as unregistered as one that never existed, so a
     /// straggling `TCP_ACCEPTED` for one that arrives moments later is
-    /// rejected by [`Self::deliver_tcp_accepted`] the ordinary way — no
+    /// rejected by `Self::deliver_tcp_accepted` the ordinary way — no
     /// separate bookkeeping needed there). No leaked registry entry, no
     /// leaked QUIC stream, and no entry ever outlives the conduit that
     /// owns it. Idempotent — safe to call from both the conduit's own EOF
@@ -2041,7 +2041,7 @@ impl ControlHub {
     /// Every conduit of this host ends together
     /// (`docs/design/protocol.md` §11-3's "역방향 QUIC 연결 자체가 죽으면 그
     /// host의 모든 conduit이 명확한 typed error로 함께 끝난다") — called once,
-    /// when [`Listen::drive_registered_session`]'s select loop exits for
+    /// when `Listen::drive_registered_session`'s select loop exits for
     /// any reason (probe-declared death, a read error, or this generation
     /// being replaced by a newer one). Every live conduit gets one
     /// best-effort [`ConduitInbound::HostDead`] and is then unregistered;
@@ -3218,7 +3218,7 @@ impl Listen {
     /// [`Self::run_stale_sweeper`] at the production [`STALE_SWEEP_TICK`]; a
     /// test that actually wants to observe a sweep fire without paying that
     /// real wall-clock cost uses [`Self::new_with_sweep_tick`] instead
-    /// ([`sweep_tick`](Self::sweep_tick)'s own doc comment). Its admission
+    /// (`sweep_tick`'s own doc comment). Its admission
     /// gate (`PLAN.md` M8 Step 2) defaults to
     /// `crate::config::ServeConfig`'s own defaults on `clock` — production
     /// (`run_listen_unix`) instead builds one from the operator's actual
@@ -3245,7 +3245,7 @@ impl Listen {
     }
 
     /// [`Self::new`] with a caller-chosen sweep tick — the injection point
-    /// [`sweep_tick`](Self::sweep_tick)'s doc comment promises.
+    /// `sweep_tick`'s doc comment promises.
     pub fn new_with_sweep_tick(
         registry: Registry,
         authorizer: Arc<dyn Authorizer>,
@@ -3409,7 +3409,7 @@ impl Listen {
     /// Looking each up independently (a `control_hub` call plus a
     /// separate `conns` lookup) could momentarily pair a hub from one
     /// generation with a connection from a different one during the
-    /// narrow window [`Self::hubs`]'s own doc comment describes; this
+    /// narrow window `Self::hubs`'s own doc comment describes; this
     /// method instead fixes the hub's generation first and requires the
     /// connection to still be published under exactly that generation,
     /// `None` otherwise — the same "stale and unknown are
@@ -3440,9 +3440,9 @@ impl Listen {
     /// would silently resume the caller onto a dead connection instead of
     /// the live one it is waiting for (this method's whole job).
     ///
-    /// Polls [`Self::hubs`] on [`Self::clock`] (so `TestClock` drives this
+    /// Polls `Self::hubs` on `Self::clock` (so `TestClock` drives this
     /// deterministically in tests, `docs/design/testing.md` L2) at
-    /// [`HUB_WAIT_POLL`] — a plain [`ConnTable`] has no per-name wakeup to
+    /// `HUB_WAIT_POLL` — a plain `ConnTable` has no per-name wakeup to
     /// block on instead (this method's own module has no `Notify` keyed by
     /// registration name), and `PLAN.md` M3 Step 8 (b) sanctions a bounded
     /// poll as an acceptable substitute for exactly this reason. Gives up
@@ -3514,7 +3514,7 @@ impl Listen {
     /// Sweep stale, retention-expired registry entries until this
     /// controller is dropped (`this` holds only a [`std::sync::Weak`], the
     /// same shape [`crate::broker::Broker::run_reaper`] uses). Spawn this
-    /// on a task alongside [`Listen::run`]. Uses [`Listen::clock`], so
+    /// on a task alongside [`Listen::run`]. Uses `Listen::clock`, so
     /// `tokio::time::pause()`/`TestClock` drive it deterministically — see
     /// [`Registry::sweep_expired`] for the pure logic this only paces.
     pub async fn run_stale_sweeper(this: std::sync::Weak<Self>) {
@@ -5508,7 +5508,7 @@ mod tests {
             },
             local: qsh_transport::LocalIdentity {
                 cert_chain: Vec::new(),
-                key_pkcs8_der: Vec::new(),
+                key_pkcs8_der: zeroize::Zeroizing::new(Vec::new()),
             },
         };
         let paths = Paths::new("unused-config", "unused-state");

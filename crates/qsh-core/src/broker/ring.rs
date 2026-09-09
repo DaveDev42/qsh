@@ -42,7 +42,8 @@
 //! ring). Stateful consumers (the SESSION_DATA pump, `--follow` loops) feed
 //! back the [`ReadOut::next`] cursor and see every control exactly once.
 //! Stateless offset-only callers ([`Cursor::from_offset`] — a single
-//! `session read --after N`, MCP long-poll) get *at-least-once* delivery of
+//! `session read --after N`, a long-running external process's (e.g. an
+//! agent tool) long-poll) get *at-least-once* delivery of
 //! controls positioned exactly at `N`; output bytes are never duplicated in
 //! either case.
 

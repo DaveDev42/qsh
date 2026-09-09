@@ -11,7 +11,7 @@
 //!
 //! **Lock discipline (verdict arbitration item 8, mirroring `crate::
 //! admission::Gate`'s `WindowState`).** [`Quotas`]'s mutex (and each
-//! [`crate::admission::AuditWindow`]'s) is always the **leaf-most** lock
+//! `crate::admission::AuditWindow`'s) is always the **leaf-most** lock
 //! taken: nothing else is ever locked while it is held, it is never held
 //! across an `.await`, and it is never held while a session or child
 //! handle is dropped (a `Drop` impl that runs arbitrary destructor code
@@ -105,7 +105,7 @@ pub const MAX_CONCURRENT_PAIRING_CONNECTIONS: usize = 8;
 /// into its own summary line. Above it, the offending principal's window
 /// lands in that category's single `CategoryWindows::overflow` slot
 /// instead of growing the map further — the row-count trade-off this
-/// bounds is documented on [`CategoryWindows`] itself.
+/// bounds is documented on `CategoryWindows` itself.
 ///
 /// `pub` for the same reason [`crate::admission::AUDIT_AGGREGATION_
 /// WINDOW`] is: `docs/CLI.md`/`docs/design/architecture.md`'s doc-drift
@@ -437,7 +437,7 @@ struct ConnectionCounters {
     pairing_refused: AtomicU64,
 }
 
-/// A point-in-time snapshot of [`ConnectionCounters`] plus every
+/// A point-in-time snapshot of `ConnectionCounters` plus every
 /// [`QuotaKind`]'s rejection tally — what [`Quotas::counters`] returns.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct QuotaCounters {
@@ -926,7 +926,7 @@ impl Quotas {
     ///
     /// **Window key (R2 설계 검토 (a-2)/(a-3)):** the window this call
     /// opens or bumps is keyed on `(kind, principal)`, not `kind` alone —
-    /// [`CategoryWindows::per_principal`] holds one [`WindowState`] per
+    /// `CategoryWindows::per_principal` holds one `WindowState` per
     /// principal currently within its own aggregation window, so one
     /// principal's flood can never suppress a *different* principal's
     /// first rejection into a summary line. Once a category already has
@@ -945,7 +945,7 @@ impl Quotas {
     /// still-open window in the same category, so the critical section
     /// stays O(1) regardless of how many other principals are currently
     /// being tracked (the deliberate trade documented on
-    /// [`CategoryWindows`]/[`Quotas::flush_expired`]: a window that has
+    /// `CategoryWindows`/[`Quotas::flush_expired`]: a window that has
     /// gone stale but has not yet been swept can occupy a map slot for up
     /// to one more housekeeping tick before a *new* principal beyond the
     /// cap is pushed to overflow — an audit-attribution quality question,
@@ -1033,7 +1033,7 @@ impl Quotas {
     /// [`Quotas::record_rejection`]).
     ///
     /// A closed principal window's entry is *deleted* from
-    /// [`CategoryWindows::per_principal`], not reset in place — this is
+    /// `CategoryWindows::per_principal`, not reset in place — this is
     /// what keeps the map's cardinality bounded by
     /// [`MAX_AUDIT_WINDOW_PRINCIPALS`] rather than growing by one for
     /// every distinct principal ever rejected over the process's
@@ -1267,7 +1267,7 @@ impl Drop for TunnelStreamPermit {
 /// reaches zero), the same discipline as [`ExecPermit`]'s own `Drop` for
 /// the same reason — `crate::server::Server`'s `RemoteForwardEntry` holds
 /// exactly one of these, so both removal sites
-/// ([`crate::server::Server::handle_rfwd_close`],
+/// (`crate::server::Server::handle_rfwd_close`,
 /// [`crate::server::Server::purge_connection`]) release it automatically
 /// by dropping the entry, rather than each having to remember a manual
 /// decrement.

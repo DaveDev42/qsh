@@ -2,19 +2,19 @@
 //! §7 "스트림 배치", §12 "우선순위와 backpressure"; `docs/design/architecture.md`
 //! §8's quinn selection rationale).
 //!
-//! [`open_stream`] itself stays deliberately bare — no listener, no dial,
+//! `open_stream` itself stays deliberately bare — no listener, no dial,
 //! no splice, no ACL check (those are its submodules' and
-//! `crate::server`'s, added by M4 Step 3: [`dial`] the destination dialer
+//! `crate::server`'s, added by M4 Step 3: `dial` the destination dialer
 //! seam the host's inline `forward.local` gate calls *after* it authorizes,
-//! [`splice`] the raw byte pipe a tunnel becomes past its handshake, and
-//! [`local`] the requester's `-L` listener). What this seam *does* fix,
+//! `splice` the raw byte pipe a tunnel becomes past its handshake, and
+//! `local` the requester's `-L` listener). What this seam *does* fix,
 //! ahead of any tunnel business logic landing, is that opening a tunnel
 //! data stream is symmetric across:
 //!
 //! - **carrier** — a forward QUIC connection dialed straight to the peer,
 //!   or a reverse `LOCAL_STREAM` conduit to this machine's resident `qsh
-//!   listen` daemon ([`crate::client::link::DataLink`], the same
-//!   forward/reverse axis [`crate::client::link::ControlLink`] already
+//!   listen` daemon (`crate::client::link::DataLink`, the same
+//!   forward/reverse axis `crate::client::link::ControlLink` already
 //!   uses for the control channel);
 //! - **role** — the requester opens `TCP_CONNECT`, the peer that accepted
 //!   the inbound TCP connection opens `TCP_ACCEPTED` (protocol.md §7's

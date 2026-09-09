@@ -308,9 +308,9 @@ naive 1.25가 예측 1.00보다 큰 것은 baseline 12스레드가 **공유 런�
 
 - **cert rotation/revocation UX, background service 설치, QR** — ROADMAP M7 명시 out.
 - **`ControlLink`/`DataLink` enum → trait 전환(ADR-0005 P0 부채)** — M3→M6 연쇄 이월. M7도 트리거하지 않는다(trust/doctor는 transport 추상에 접촉하지 않는다). P1 입력으로 재기록.
-- **HTTP/SSE transport, streaming MCP** — M6판 그대로 P1.
+- **HTTP/SSE transport, streaming MCP** — M6판 그대로 P1. (M8 Step 6: ADR-0011이 MCP 어댑터를 지웠으므로 소멸.)
 - **revocation의 실시간 전파**(trust remove 즉시 종료를 Step 2가 기각할 경우) — 결정 결과에 따라 P1 재기록.
-- **rmcp minor 업그레이드** — 착수하지 않음. 단 업그레이드가 필요해지는 순간 `local_ct_pool` 취소 구조 재검증이 선행 조건(M6 판정 ① 감시 항목 승계).
+- **rmcp minor 업그레이드** — 착수하지 않음. 단 업그레이드가 필요해지는 순간 `local_ct_pool` 취소 구조 재검증이 선행 조건(M6 판정 ① 감시 항목 승계). (M8 Step 6: rmcp 의존 자체가 사라져 소멸, ADR-0011.)
 
 ## 4. 리스크와 감시 항목
 
@@ -638,6 +638,16 @@ freeze 이후에는 고칠 수 없는 것들을 먼저 처리한다.
 - `cargo doc --workspace --no-deps` 경고 149건(`rustdoc::private_intra_doc_links`·미해결 링크 위주) 정리 — Step 5 인벤토리가 새로 확인한 항목.
 - **서비스 unit 예시 문서(ROADMAP M9 추가 범위, 2026-09-07).** `docs/deploy/service.md`에 `qsh serve`/`qsh listen`/`qsh reverse`용 launchd LaunchAgent plist와 systemd user unit 예시를 싣는다. 로그 경로, `KeepAlive`/`Restart=always`, `loginctl enable-linger`, LaunchAgent가 로그인 세션 안에서만 뜬다는 제약, WSL의 `systemd=true` 조건을 적는다. README Install 절에서 링크한다. 구현(`qsh service`)은 M9다.
 
+**(a) 착수·완료 판정 (2026-09-10, main 세션).** 브리프(`$SP/step6/BRIEF-6.md`)가 위 항목 12개를 스테이지 아홉(S1~S9)으로 나눴다. 문서 스테이지는 병렬, Rust 스테이지는 한 트리에서 순차로 돌렸고 cargo 파일 락이 직렬화를 맡았다. 설계 판정은 넷이다. forward-route는 ADR-0018로 확정했다. v1 터널 수명은 connection에 결합하고 live carrier는 구현하지 않으며 `-R` 자동 재발행은 P1이다. freeze 문면은 additive 확장(`reclaim` 류 필드)을 막지 않는다고 적는다. ROADMAP §3 행과 아래 §6.4 ix가 이것으로 닫힌다. bounded pull executor(§6.4 i)는 ADR-0011로 종결한다. MCP 어댑터가 사라지면서 512 천장의 재현 경로가 사라졌고 `session_read` 호출처는 CLI `run_session_read`와 서버 핸들러 둘뿐이라 `Ops` facade에 로컬 동시성 상한을 둘 자리가 없다. trust store·invites 잠금(§6.4 vi·vii)은 M7 Step 7-1이 이미 닫았다. `TrustStore::lock`이 `ops/mod.rs:548`·`:575`·`:699`, `InviteStore::lock`이 `ops/mod.rs:607`·`trust/pairing.rs:587`에서 read-modify-write 전체를 덮는다. 렌즈 1이 재확인했다. device_name 규칙은 `wire::validate_device_name` 한 표로 두고 `valid_host_name`(offered_name, ASCII)과는 64바이트 상한만 공유한다. homoglyph는 탐지하지 않고 §15.4의 fingerprint 병기를 방어선으로 적었다.
+
+받아들인 잔여 셋. `qsh mcp`는 이제 clap 오류가 아니라 대화형 호스트 `mcp`로 파싱돼 `HOST_NOT_FOUND`(exit 255)다. 서브커맨드를 예약해 두지 않는다. `Zeroizing`은 `LocalIdentity.key_pkcs8_der`까지이고 rustls로 넘어가는 사본은 rustls-pki-types 1.15.1에 `impl Drop`이 없어 그대로다(주석에 기록, 업스트림 이슈는 열지 않았다). ALPN 불일치는 클라이언트가 다른 ALPN을 내는 case18 하나다. 서버 accept가 `HandshakeErr`이고 `lookup_pin` 호출이 0회이며 클라이언트가 정확히 `no_application_protocol`(0x100+120)을 받는다는 세 단언으로 "application 상태 생성 전 실패"가 고정된다. 서버 측 케이스는 같은 불변식의 거울이라 넣지 않았다.
+
+검증은 opus 렌즈 셋(삭제 완전성·계약 안정성 / 하드닝 정확성 / 문서 정합)과 픽서 둘, 재검증 하나다. 변이 실험은 렌즈 1이 1건(지운 `MCP_DIR` ban을 되살리면 arch-lint FAIL), 렌즈 3이 2건(`qsh-mcp.1`을 되살리면 man 집합 게이트 FAIL, gnu 타깃 doc은 에러 8건), 렌즈 2가 8건이다. 8건 중 a1·a2(case18)·b1·b2(bidi 표·64바이트)·c1(Debug에 키 필드)·e1(`user@` 스트립 제거)은 기대대로 FAIL했고 d1·d2(TUI 펌프 spawn panic 복원, `drop(raw)` 순서)는 PASS로 새어 나갔다. 렌즈 2가 든 이유는 테스트가 테스트 더블 자신만 단언했기 때문이다. 픽서 B가 `PumpHandle` 시임(write/try_write/try_resize/detach 4개)으로 두 펌프를 제네릭화해 실제 spawn 경로가 테스트를 타게 했고 재검증이 d1을 다시 적용해 FAIL을 확인했다. d2는 `run()` 전체를 태워야 잡히는 e2e 무게라 단위테스트로 못 잡는다. 해당 분기 위에 그 사실을 주석으로 남겼다. 렌즈 2가 찾은 `"dave@"`/`"@"`의 빈 별칭은 `hint_alias`가 `None`을 돌려주고 `empty_host_name_error()`(`INVALID_ARGUMENT`)로 떨어진다. 같은 힌트를 쓰는 `qsh exec` 경로(`resolve_peer_address`)도 같은 헬퍼로 묶었다. 렌즈 3의 P1은 새 doc 스텝이 windows-latest에서 무조건 깨진다는 것이었다. `if:`로 ubuntu에 좁히면 Windows 전용 doc 경고는 영영 안 잡히므로 cfg(unix) 항목을 가리키던 링크 12건을 평문 코드로 풀고 4개 러너 전부 유지했다. 로컬 `--target x86_64-pc-windows-gnu` doc이 rc 0이다. `qsh reverse`의 clap 설명은 Step 6 범위 밖 선재 결함이지만 `service.md`가 노출해 지금 고쳤다. M9 개명(ADR-0012) 때 다시 바뀐다.
+
+지운 것의 크기. `mcp/mod.rs` 915줄, `mcp_conformance.rs` 1880줄, Cargo.lock 194줄, man 페이지 1장. `fixtures/mcp/tools_list.json`은 append-only 규칙대로 남고 같은 디렉터리 README가 은퇴를 적는다. cargo doc 경고는 158건(브리프 시점 재측정)에서 0으로, 문장은 건드리지 않고 링크 표기만 고쳤다. 게이트는 fmt, clippy `-D warnings`, xtask arch, cargo deny, win-gnu check+doc, host doc `-D warnings`, nextest 1527 passed(2 skipped)다.
+
+이월. Step 7 freeze 문면에 ADR-0018 결정 3(additive `reclaim` 경로)을 반영한다. 24h soak·Round 3은 WSL fuzz 2차 배치 종료 후다. 재검증이 남긴 P3 하나. `hint_alias`가 벗긴 별칭을 trim하지 않아 `"dave@ nowhere"`의 remedy에 공백 낀 별칭이 실린다. `@` 없는 `" nowhere"`도 같은 모양이라 선재 성질이고, 별칭이 `valid_host_name`을 못 넘으면 remedy 대신 `INVALID_ARGUMENT`로 보내는 규칙 하나로 두 경로를 정리할 자리다(Step 7 전 소정리). MCP 이름은 코드에서 `xtask/src/arch.rs`의 CRLF 테스트 doc 주석 한 곳에 역사 서술로 남는다.
+
 #### Step 7 — wire format freeze + threat model + OSS-Fuzz 제출
 
 6.0의 SC7 판단이 선행 조건이다. freeze 문면은 `docs/design/protocol.md`에 박고, threat model은 새 문서로 낸다.
@@ -658,15 +668,15 @@ M2가 20회를 조기 측정해 SC4/SC5를 실기기로 확인했고 SC3 판정�
 
 | # | 항목 | 소유 step |
 |---|---|---|
-| i | bounded pull executor + `RESOURCE_EXHAUSTED` (측정된 512 천장) | Step 6 뒤 재질문 (Step 5 (a) 판정: ADR-0011이 MCP 어댑터를 지우면 512 천장의 재현 경로가 사라진다. Step 3은 어휘 정합만 — 판정 13) |
+| i | bounded pull executor + `RESOURCE_EXHAUSTED` (측정된 512 천장) | 종결 (Step 6 (a) 2026-09-10: ADR-0011로 MCP 어댑터가 사라져 512 천장의 재현 경로가 없다. `session_read` 호출처는 CLI `run_session_read`와 서버 핸들러뿐 — 판정 13) |
 | ii | `Ops::exec`(`ops/exec.rs:81`) 호출당 `new_multi_thread()` 런타임 | Step 5 (5d 완료 2026-09-08: `exec_run`이 `connect_runtime()`을 공유) |
 | iii | pull당 fd 선형 증가 | Step 5 (5e 24h 런의 `FD_GROWTH_CLIENT` 판정 대기 — steady 4분위 규칙) |
 | iv | 고아 `.tmp{pid}-{N}` 청소 부재 | Step 5 (5d 완료 2026-09-08: `fsutil::write_atomically` 통합 + `sweep_stale_temp_files`, 1h+ESRCH 또는 24h) |
-| v | `qsh trust add dave@box --address …` 오도 제안 | Step 6 |
-| vi | trust store read-modify-write 잠금 부재 | Step 6 |
-| vii | invites.toml CLI/데몬 lock-free 창 | Step 6 |
-| viii | device_name 길이 상한 + Unicode bidi/homoglyph 스푸핑 | Step 6 |
-| ix | forward-route live carrier·`-R` 자동 재발행 (ROADMAP §3 표가 M8 소유로 등재) | Step 6 (Step 5 (a)가 이관 — 의미론 재설계라 새 ADR 선행. 판정 13) |
+| v | `qsh trust add dave@box --address …` 오도 제안 | Step 6 (완료 2026-09-10: `ops/host.rs` `hint_alias`가 `user@`를 벗기고 빈 별칭은 `INVALID_ARGUMENT`, `qsh host get`·`qsh exec` 두 경로 공유. 테스트 `host_not_found_message_never_leaks_a_user_at_prefix` 외 4건) |
+| vi | trust store read-modify-write 잠금 부재 | 종결 (M7 Step 7-1이 이미 닫음, Step 6 렌즈 1 재확인 2026-09-10: `TrustStore::lock` `ops/mod.rs:548`·`:575`·`:699`) |
+| vii | invites.toml CLI/데몬 lock-free 창 | 종결 (M7 Step 7-1이 이미 닫음, Step 6 렌즈 1 재확인 2026-09-10: `InviteStore::lock` `ops/mod.rs:607`·`trust/pairing.rs:587`) |
+| viii | device_name 길이 상한 + Unicode bidi/homoglyph 스푸핑 | Step 6 (완료 2026-09-10: `wire::validate_device_name` — 1..=64바이트, 제어·bidi·zero-width 거부, `PairingError::InvalidDeviceName`; homoglyph는 탐지 대신 fingerprint 병기, protocol.md §15.5 표) |
+| ix | forward-route live carrier·`-R` 자동 재발행 (ROADMAP §3 표가 M8 소유로 등재) | 종결 (ADR-0018, 2026-09-10: v1 터널 수명은 connection에 결합, live carrier 미구현, `-R` 자동 재발행 P1 — 판정 13) |
 | x | `ControlLink`/`DataLink` enum → trait 전환 (ADR-0005 P0 부채, M3→M7 연쇄 이월) | P1 재기록 — M8도 트리거하지 않음 |
 
 ### 6.5 리스크

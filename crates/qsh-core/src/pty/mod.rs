@@ -1,11 +1,11 @@
 //! POSIX PTY backend for the session broker (`docs/design/architecture.md`
 //! §4, PLAN Step 4).
 //!
-//! [`PtySource`] is the production [`SessionSource`]: it opens a pty pair
+//! `PtySource` is the production [`crate::broker::SessionSource`]: it opens a pty pair
 //! with `portable-pty` 0.9, spawns the child as a **session leader with the
 //! slave as its controlling tty** (`setsid` + `TIOCSCTTY`, so it is also the
 //! process-group leader and job control works), wraps the master fd in a
-//! [`tokio::io::unix::AsyncFd`] for async read/write, applies `TIOCSWINSZ`
+//! `tokio::io::unix::AsyncFd` for async read/write, applies `TIOCSWINSZ`
 //! on resize, delivers signals with **`killpg` to the whole process group**
 //! (never just the leader), and reaps the child with `waitpid` on
 //! `SIGCHLD` (no zombies, no blocking thread per session).

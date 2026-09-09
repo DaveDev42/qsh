@@ -3,7 +3,7 @@
 //! L4).
 //!
 //! This is the half of the recovery story that has no QUIC answer. quinn
-//! surfaces a connection that was *closed* ([`Connection::closed`]) and a
+//! surfaces a connection that was *closed* (`Connection::closed`) and a
 //! connection that has been silent for its whole idle timeout — 45 s
 //! (`protocol.md` §2). Neither describes the case the product exists for: a
 //! laptop that changed networks, whose packets now go nowhere while the
@@ -415,7 +415,7 @@ impl Drop for StallGuard {
 
 /// What [`watch_path`] needs from the connection carrying probes: an
 /// unambiguous "this is gone" signal, and the RTT that scales the death
-/// deadline ([`PathWatchConfig::dead_after`]). Nothing about *sending* a
+/// deadline (`PathWatchConfig::dead_after`). Nothing about *sending* a
 /// probe lives here — deliberately: on both roles, writing to the control
 /// stream is owned by a single task for cancel-safety reasons (see
 /// `ops/session.rs`'s `pump_attach_control` doc comment on why
@@ -443,7 +443,7 @@ pub trait ProbeSource: Send + Sync + 'static {
     /// probing is useful past this point.
     fn closed(&self) -> impl std::future::Future<Output = ()> + Send;
 
-    /// Current smoothed RTT, used to scale [`PathWatchConfig::dead_after`].
+    /// Current smoothed RTT, used to scale `PathWatchConfig::dead_after`.
     fn rtt(&self) -> Duration;
 }
 

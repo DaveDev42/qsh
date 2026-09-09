@@ -7,9 +7,9 @@
 //! (`docs/CLI.md` §7.1, §11). What is left here is terminal work:
 //!
 //! - put the local terminal in raw mode and restore it on *every* exit
-//!   path — normal, error, panic, signal ([`term`]);
+//!   path — normal, error, panic, signal (`term`, `#[cfg(unix)]` only);
 //! - forward stdin bytes **verbatim**, recognising nothing except the
-//!   line-start escape sequences ([`Escape`]);
+//!   line-start escape sequences (`Escape`);
 //! - turn `SIGWINCH` into `session.resize`, and an externally delivered
 //!   `SIGINT` into the `^C` byte the remote PTY expects (`docs/CLI.md` §9);
 //! - map the remote exit status onto this process's exit code (§4).
@@ -31,14 +31,14 @@
 //!
 //! ## Threads
 //!
-//! Three, because [`SessionAttachStream::next_event`] blocks the thread
+//! Three, because [`qsh_core::ops::session::SessionAttachStream::next_event`] blocks the thread
 //! that owns the stream and no `Ops` entry point may be called from inside
 //! a tokio runtime:
 //!
 //! | thread | role |
 //! |---|---|
 //! | main | drains events, writes session output to stdout, owns the raw-mode guard |
-//! | input | blocking `read(2)` on stdin → [`Escape`] → `AttachHandle::write` |
+//! | input | blocking `read(2)` on stdin → `Escape` → `AttachHandle::write` |
 //! | signals | `SIGWINCH` → `resize`, `SIGINT` → `^C`, `SIGTERM`/`SIGHUP` → restore and die |
 //!
 //! The two helpers are detached, never joined: both park in a blocking
@@ -111,9 +111,9 @@ impl Attach {
 /// silently ignored here).
 ///
 /// Interactive-only on purpose, and documented as such: `qsh session open`
-/// and the MCP adapter send exactly the `--env` their caller asked for, so
-/// a machine caller's session is never shaped by whatever locale the
-/// process that started it happened to have.
+/// sends exactly the `--env` its caller asked for, so a machine caller's
+/// session is never shaped by whatever locale the process that started it
+/// happened to have.
 #[cfg(unix)]
 const LOCALE_VARS: &[&str] = &["LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "LC_COLLATE"];
 

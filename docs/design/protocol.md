@@ -156,7 +156,7 @@ message ControlMessage {
                                             // -> SessionReadResult{events[], next_after, next_ctl_after} —
                                             //   broker pull() 1회; events[]의 원소는
                                             //   SessionReadEvent{Output|Gap|Exit|WriterChanged|Closed}
-                                            //   (CLI.md §6.4 `session read --wait`/`--follow` 루프/MCP long-poll);
+                                            //   (CLI.md §6.4 `session read --wait`/`--follow` 루프);
                                             //   ACL session.attach, resume token 불요(CLI.md §6.3)
     SessionWrite        session_write = 28; // session_id, data(≤ 16 KiB, 초과 시 INVALID_ARGUMENT)
                                             // -> SessionWritten{bytes_written} ; ACL session.control
@@ -327,7 +327,7 @@ message ExecFrame {
 
 **M4 Step 7 최종값(포화-터널-vs-PTY-echo 게이트가 측정·확정):** `TUNNEL_STREAM_RECEIVE_WINDOW = 2 MiB`(§12 상단 2–4 MB 대역 안, quinn 기본 STREAM_RWND ≈1.25 MB보다 큼) — Step 2의 잠정치 4 MiB에서 하향. 대역 하단 아래인 128 KiB는 기각됐다: 128 KiB / 50ms ≈ 2.6 MB/s로 연결 위 *모든* 스트림(PTY/exec/replay 포함)이 공유하는 처리량 상한이 돼 버리고, loopback 기준 DoD 3 게이트는 raw-quinn 기준선과 tunnel 다리가 같은 연결-전체 window를 공유하므로 이 리그레션을 볼 수 없다 — 그래서 이 상수엔 코드 내 floor assertion이 별도로 있다(`crates/qsh-transport/src/endpoint.rs`의 유닛 테스트, quinn 자체 기본값 1,250,000 이상을 강제). `SEND_DEPTH_CAP_BYTES = 128 KiB`(`qsh_core::tunnel::splice`) — 우선순위 band만으로는 부족했다: cap 없이 측정한 DoD 4 p95는 30.579ms(<10ms 요구 대비 큰 폭 미달)였고, cap 도입 후 128 KiB에서 5회 반복 측정 p95 7.1–7.9ms(모두 <10ms)·DoD 3 ratio 0.899–0.945(모두 ≥0.80 floor, 0.85 안정 기준도 충족)로 두 DoD를 동시에 만족했다. UDP 소켓 버퍼(SO_RCVBUF/SO_SNDBUF)는 이 window와 별개로 다룬다 — OS 기본값을 절대 낮추지 않는 하향 ladder(8/4/2/1 MiB)로, OS가 실제로 승인한 값보다 클 때만 적용한다(`bind_tuned_udp_socket`, `crates/qsh-transport/src/endpoint.rs`).
 - **Replay ring = 만능 decoupler:** PTY reader task는 항상 ring에만 쓰고 네트워크에 블록되지 않는다. 각 attach/read 소비자는 ring 위의 cursor다. 느린 소비자는 cursor가 밀릴 뿐이고, ring 밖으로 밀리면 `Gap`을 받고 전진한다. 세션당 메모리는 ring 8MB + 소비자별 소량으로 유계이며(CLI.md §11 backpressure 규칙), 멈춘 reader가 child process의 stdout을 막을 수 없다.
-- `session read --wait`/MCP long-poll/`--follow`는 모두 같은 cursor-pull primitive의 다른 표면이다([architecture.md](architecture.md) 참조).
+- `session read --wait`/`--follow`는 같은 cursor-pull primitive의 다른 표면이다([architecture.md](architecture.md) 참조). 옛 MCP adapter의 long-poll도 같은 primitive를 탔고, 그 adapter는 ADR-0011로 철회됐다.
 
 ## 13. Fuzzing·검증 계획
 
@@ -388,12 +388,23 @@ initiator(`qsh trust accept`)가 control 스트림에 `PairingProof` 하나를 �
 | 맞는 invite는 있으나 TTL(10분) 초과 | `TRUST_REQUIRED` |
 | 맞는 invite가 이미 redeem됨 | `SESSION_CONFLICT` |
 | 증명은 맞으나 pin 시점 이름 충돌(§15.7) | `SESSION_CONFLICT` |
-| `PairingProof.device_name`(responder 측) 또는 `PairingAccepted.device_name`(initiator 측)에 제어 문자(`char::is_control()`, tab 포함)가 있음 | `INVALID_ARGUMENT` — pin·persist·tracing 어느 것도 그 값을 보기 전에 거부, 값 자체는 로그에 남기지 않는다 |
+| `PairingProof.device_name`(responder 측) 또는 `PairingAccepted.device_name`(initiator 측)이 아래 `validate_device_name` 표를 벗어남 | `INVALID_ARGUMENT` — pin·persist·tracing 어느 것도 그 값을 보기 전에 거부, 값 자체는 로그에 남기지 않는다 |
 | responder의 `PairingAccepted.proof`가 검증 실패 | (initiator 로컬 실패 — 어떤 pin도 하지 않고 거부) |
+
+`device_name`이 위 행에서 거부되는 조건은 `qsh-proto`의 `wire::validate_device_name`(`qsh-core`의 `pairing::reject_control_chars`가 양방향에서 호출) 하나의 표로 고정돼 있다:
+
+| 조건 | 비고 |
+|---|---|
+| 길이가 0바이트, 또는 UTF-8로 64바이트 초과 | 바이트 길이 기준(문자 수 아님) — 멀티바이트 이름은 문자 수가 더 일찍 상한에 닿는다 |
+| 제어 문자(`char::is_control()`, tab 포함) | 기존 규칙 |
+| bidi override/isolate 제어(U+202A–U+202E, U+2066–U+2069, U+200E–U+200F) | `char::is_control()`이 아니라서 위 행에 안 걸린다 — 이름이 자기 자신이나 옆에 찍힌 fingerprint의 표시 순서를 뒤집을 수 있는 이른바 RLO 위장 |
+| zero-width 문자(U+200B–U+200D, U+2060, U+FEFF) | 터미널에 보이지 않으므로 겉보기엔 같은 이름 두 개가 서로 다른 pin으로 갈릴 수 있다 |
 
 invite의 TTL(10분, redeem 가능 창)과 §15.1의 retention(20분, TLS 게이트가 열려 있는 창)은 서로 다른 창이다 — TTL이 지나도 retention 안에서는 `pairing_open()`이 계속 `true`이므로, 뒤늦게 dial한 initiator는 "이 host는 애초에 페어링을 지원하지 않는다"처럼 보이는 TLS 단의 뭉뚱그려진 거부 대신 `TRUST_REQUIRED`라는 명확한 신호를 control 스트림 위에서 받는다.
 
-`device_name`의 제어 문자 거부(위 표)는 인증이 아니라 표시 안전성 문제다 — `device_name`은 애초에 인증 입력이 아니고(§15 서두, v1.proto 주석), 오직 pin의 label로만 쓰인다. 그런데 CLI human 렌더러(`qsh trust add`/`list`/`accept`)는 `{name} ({fingerprint})`를 한 줄에 찍는다 — 그 fingerprint가 바로 §15.4가 안내하는, operator가 out-of-band로 사후 대조해야 할 값이다. `name`에 터미널 이스케이프 시퀀스나 bare `\r`이 섞이면 같은 줄의 fingerprint를 가리거나 덮어써서 그 대조를 무력화할 수 있으므로, `crate::pairing::accept`/`respond` 양쪽 다 이 값을 pin·persist·tracing 어디에도 넘기기 전에 거부한다(`qsh-core/src/pairing.rs`의 `reject_control_chars`). 길이 상한(현재는 `CONTROL_FRAME_MAX`, 256 KiB에 묶여 있을 뿐)과 유니코드 bidi-override/homoglyph 위장(U+202E 등, `char::is_control()`이 아니라서 이 검사에 걸리지 않는다)은 이 Step의 범위 밖으로 남긴다(M8 backlog).
+`device_name`의 표 기반 거부는 인증이 아니라 표시 안전성 문제다 — `device_name`은 애초에 인증 입력이 아니고(§15 서두, v1.proto 주석), 오직 pin의 label로만 쓰인다. 그런데 CLI human 렌더러(`qsh trust add`/`list`/`accept`)는 `{name} ({fingerprint})`를 한 줄에 찍는다 — 그 fingerprint가 바로 §15.4가 안내하는, operator가 out-of-band로 사후 대조해야 할 값이다. `name`에 터미널 이스케이프 시퀀스나 bare `\r`, 또는 bidi override가 섞이면 같은 줄의 fingerprint를 가리거나 덮어쓰거나 순서를 뒤집어서 그 대조를 무력화할 수 있으므로, `crate::pairing::accept`/`respond` 양쪽 다 이 값을 pin·persist·tracing 어디에도 넘기기 전에 거부한다(`qsh-core/src/pairing.rs`의 `reject_control_chars`, `qsh-proto`의 `wire::validate_device_name`). 길이 상한은 이제 `CONTROL_FRAME_MAX`(256 KiB)가 아니라 위 표의 `1..=64`바이트로 좁혀져 있다.
+
+homoglyph(confusable) 위장 — 서로 다른 코드 포인트가 같은 글리프로 렌더되는 문제 — 는 `validate_device_name`이 탐지하지 않는다. 표 기반 confusable 판정은 커스텀 crate 없이는 정확히 구현하기 어렵고, 이 자리에서 실제로 방어선 노릇을 하는 것은 판정 자체가 아니라 §15.4의 fingerprint 병기다: 이름이 아무리 비슷하게 보여도 pin은 독립적으로 검증된 fingerprint에 걸리므로, homoglyph는 operator의 눈을 헷갈리게 할 수는 있어도 신원 검사 자체를 대신하지 못한다.
 
 ### 15.6 동시 양방향 pin과 충돌
 

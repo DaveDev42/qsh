@@ -7,8 +7,8 @@
 //!
 //! **This is not a second evaluator.** [`Ops::acl_check`] loads this
 //! machine's own `acl.toml` with the exact same [`crate::acl::PolicySource::load`]
-//! production uses, and calls the exact same [`crate::acl::Policy::decide`]
-//! [`crate::server::Server::authorize`] (via `impl Authorizer for Policy`)
+//! production uses, and calls the exact same `crate::acl::Policy::decide`
+//! `crate::server::Server::authorize` (via `impl Authorizer for Policy`)
 //! calls — `Policy::decide` is `pub(crate)`, so there is no way to build a
 //! second, explaining-only judgment from outside this crate (`policy.rs`'s
 //! own doc on that method spells out the two-call-site invariant this

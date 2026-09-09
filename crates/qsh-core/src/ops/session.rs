@@ -6,8 +6,9 @@
 //! assembles and parses.
 //!
 //! The stream operations live here too: [`Ops::session_reader`] is the
-//! single cursor-pull primitive (`--wait`, `--follow`, and M6's MCP
-//! long-poll all go through it) and [`Ops::session_attach`] is the one
+//! single cursor-pull primitive (`--wait`, `--follow`, and a long-running
+//! external process's, e.g. an agent tool, long-poll all go through it)
+//! and [`Ops::session_attach`] is the one
 //! stream op, a live `SESSION_DATA` stream as a typed event stream.
 
 use std::sync::Arc;
@@ -138,7 +139,7 @@ pub struct RecoveryConfig {
     /// (`LocalHello.wait_ms`, clamped again on the daemon side to
     /// `qsh_proto::local::LOCAL_WAIT_MAX` regardless of what is sent
     /// here — this is this *client's* budget, not a second copy of that
-    /// clamp). Unread on the forward route: [`DialReconnect`] never
+    /// clamp). Unread on the forward route: `DialReconnect` never
     /// looks at it. Deliberately **not** [`REDIAL_DEADLINE`] — that 2 s
     /// budget covers the resume *after* a registration is observed
     /// (`docs/design/protocol.md` §11-4's "재등록 시점부터 resume 완료까지
@@ -377,7 +378,8 @@ impl Ops {
     }
 
     /// Fill in `SessionOpen.user` (`docs/CLI.md` §7): an explicit hint from
-    /// the caller — `user@host`/an MCP `user` argument — always wins;
+    /// the caller — `user@host`/a long-running external process's (e.g. an
+    /// agent tool) `user` argument — always wins;
     /// otherwise `hosts.toml`'s `user` entry for `host` fills in as a
     /// default, if it set a non-empty one (`PLAN.md` M7 Step 3, ssh_config
     /// `User`-directive-like: a per-name default a caller can still
@@ -393,8 +395,9 @@ impl Ops {
     /// user" defaults to before that check ever runs.
     ///
     /// Applied uniformly at this single choke point — every
-    /// `session.open` caller (interactive attach, `session open`, and the
-    /// MCP adapter) gets the same default-fill, rather than only the
+    /// `session.open` caller (interactive attach, `session open`, and a
+    /// long-running external process, e.g. an agent tool) gets the same
+    /// default-fill, rather than only the
     /// interactive command growing it, so the three frontends can't drift
     /// into different behavior for the same host name.
     fn resolve_user_hint(
@@ -552,7 +555,8 @@ impl Ops {
     /// plus a cursor that advances with every [`SessionReader::pull`].
     ///
     /// `session read --wait` is exactly one `pull`, `--follow` is a loop of
-    /// them, and M6's MCP long-poll will be a third caller — all of them
+    /// them, and a long-running external process's (e.g. an agent tool)
+    /// long-poll is a third caller — all of them
     /// the same code path, so a fix or a cap applies to every consumer at
     /// once. `req`'s cursor and `wait_ms`/`limit_bytes` seed the reader;
     /// each pull then feeds `next_after`/`next_ctl_after` back, which is
@@ -593,7 +597,7 @@ impl Ops {
     /// processed **inside** this call, before the attach driver is
     /// spawned — not left to a later method on the returned
     /// [`SessionAttachStream`] the way [`SessionAttachStream::
-    /// open_local_forwards`] is. The reason is [`Connected::run`]: each
+    /// open_local_forwards`] is. The reason is `Connected::run`: each
     /// `-R` spec costs a real `RemoteForwardOpen` control round trip, and
     /// that needs the connection's [`Session`], but a few lines below
     /// this point `Connected::take_session` moves that `Session` into the
@@ -602,7 +606,7 @@ impl Ops {
     /// ("connection already closed"), because there is no session left to
     /// run a request on. `-L` never hits this because
     /// [`SessionAttachStream::open_local_forwards`] only needs the raw
-    /// [`Connected::connection`], which the driver never takes. Pass an
+    /// `Connected::connection`, which the driver never takes. Pass an
     /// empty slice for a plain attach or `-L`-only one; the resulting
     /// [`qsh_proto::Tunnel`] DTOs come back through
     /// [`SessionAttachStream::take_remote_forward_tunnels`].
@@ -970,7 +974,7 @@ impl Ops {
     /// scope-creep tripwire pins.
     ///
     /// With `req.host`: dials and negotiates exactly like every other
-    /// value op ([`Self::call`]) and reports the intersection that
+    /// value op (`Self::call`) and reports the intersection that
     /// specific connection's own `Hello` exchange settled on
     /// ([`Session::capabilities`], computed by
     /// `crate::handshake::negotiated_capabilities`). There is **no
@@ -1204,8 +1208,9 @@ async fn dial_reverse_wait(
 }
 
 /// A live cursor on one session's replay ring — the single pull primitive
-/// behind `session read --wait`, `session read --follow` and (M6) the MCP
-/// long-poll. See [`Ops::session_reader`].
+/// behind `session read --wait`, `session read --follow` and a long-running
+/// external process's (e.g. an agent tool) long-poll. See
+/// [`Ops::session_reader`].
 pub struct SessionReader {
     conn: Connected,
     /// Where this session's resume credential lives, so a `session.closed`
@@ -1557,7 +1562,7 @@ impl SessionAttachStream {
     /// DTOs, for the frontend to render — one per spec, in the order
     /// passed to [`Ops::session_attach`], which is where the actual
     /// `RemoteForwardOpen` round trips already happened (this method's own
-    /// struct field doc, [`SessionAttachStream::remote_acceptor`], says
+    /// struct field doc, `SessionAttachStream::remote_acceptor`, says
     /// why they cannot happen here instead). Takes the vec, so a second
     /// call sees nothing left — there is exactly one batch to hand over,
     /// same as `-L`'s single [`Self::open_local_forwards`] call.
@@ -1589,7 +1594,7 @@ impl SessionAttachStream {
     /// whether a later attach can resume. This one is not re-read, because
     /// the TTL the host grants is a constant of its configuration; if that
     /// ever stops being true, the driver has to publish the new window back
-    /// here and into [`RenewalSchedule::ttl`] together.
+    /// here and into `RenewalSchedule::ttl` together.
     pub fn expires_at(&self) -> &str {
         &self.expires_at
     }
@@ -3450,8 +3455,8 @@ enum ConnectedLink {
         /// reader — `crate::ops::tunnel`'s route-aware `tunnel_open`
         /// (`PLAN.md` M4 Step 5 PR 5b), which needs both to open the
         /// per-connection `LOCAL_STREAM` conduits
-        /// [`crate::tunnel::LocalForwardHandle::start_reverse`] and
-        /// [`crate::tunnel::remote::RemoteForwardAcceptor::spawn_reverse`]
+        /// `crate::tunnel::LocalForwardHandle::start_reverse` and
+        /// `crate::tunnel::remote::RemoteForwardAcceptor::spawn_reverse`
         /// take.
         socket: std::path::PathBuf,
         host: String,

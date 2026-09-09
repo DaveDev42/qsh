@@ -298,7 +298,7 @@ impl<T> RecoveryOutcome<T> {
 ///
 /// `recover` itself does not guarantee any interval between attempts; a
 /// caller that retries in a loop brings its own backoff, the way
-/// [`crate::ops::session::RecoveryConfig::backoff`] does.
+/// `crate::ops::session::RecoveryConfig::backoff` does.
 pub async fn recover<P, PFut, R, RFut, T, E, G>(
     session_ref: &str,
     binder: Option<&dyn PathBinder>,

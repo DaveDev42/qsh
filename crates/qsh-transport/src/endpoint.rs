@@ -17,6 +17,7 @@ use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use socket2::{Domain, Protocol, Socket, Type};
 use thiserror::Error;
+use zeroize::Zeroizing;
 
 use crate::identity::{Fingerprint, Principal};
 use crate::tls::{AuthPath, Observation, PeerRole, QshPeerVerifier, RejectReason, TrustEvaluator};
@@ -131,8 +132,18 @@ pub const CLOSE_CODE_PROTOCOL: u32 = 0x1002;
 pub struct LocalIdentity {
     /// Leaf first. Self-signed device certs are a chain of one.
     pub cert_chain: Vec<CertificateDer<'static>>,
-    /// PKCS#8 DER private key.
-    pub key_pkcs8_der: Vec<u8>,
+    /// PKCS#8 DER private key. `Zeroizing` covers the resident copy this
+    /// struct owns; `key()` below draws one further copy out of it via
+    /// `.to_vec()` (not `.clone()` — the result is a plain `Vec<u8>`,
+    /// already outside `Zeroizing` from the moment it exists) and hands
+    /// that `Vec` to `PrivatePkcs8KeyDer::from`, which takes ownership of
+    /// it rather than copying it again. That one non-`Zeroizing` copy is
+    /// *not* zeroized on drop once it belongs to rustls/quinn —
+    /// `rustls-pki-types` 1.15.1 implements `zeroize::Zeroize` on
+    /// `PrivatePkcs8KeyDer` for callers who opt in, but has no `Drop` impl
+    /// that calls it, so the copy handed to rustls/quinn is out of this
+    /// type's control (BRIEF-6 §1.3).
+    pub key_pkcs8_der: Zeroizing<Vec<u8>>,
 }
 
 impl std::fmt::Debug for LocalIdentity {
@@ -146,7 +157,7 @@ impl std::fmt::Debug for LocalIdentity {
 
 impl LocalIdentity {
     fn key(&self) -> PrivateKeyDer<'static> {
-        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(self.key_pkcs8_der.clone()))
+        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(self.key_pkcs8_der.to_vec()))
     }
 }
 
@@ -436,7 +447,7 @@ fn tune_socket_buffer(
     }
 }
 
-/// Bind a UDP socket at `addr` with [`tune_socket_buffer`] applied
+/// Bind a UDP socket at `addr` with `tune_socket_buffer` applied
 /// independently to each direction, in place of
 /// `quinn::Endpoint::client`/`::server`'s own internal bind (which offers
 /// no way to ask for a bigger buffer). `dual_stack_v6` mirrors
@@ -956,7 +967,7 @@ impl Incoming {
     /// quinn's own contract, `!remote_address_validated()` guarantees this
     /// is `true` (the converse does not hold) — so the gate's ordinary
     /// path never needs to check it before calling
-    /// [`retry`](Self::retry); it exists for [`retry`]'s own `Err` case
+    /// [`retry`](Self::retry); it exists for [`retry`](Self::retry)'s own `Err` case
     /// and for tests pinning that contract.
     pub fn may_retry(&self) -> bool {
         self.incoming.may_retry()
@@ -1215,8 +1226,33 @@ mod tests {
         let cert = params.self_signed(&key).unwrap();
         LocalIdentity {
             cert_chain: vec![CertificateDer::from(cert.der().to_vec())],
-            key_pkcs8_der: key.serialize_der(),
+            key_pkcs8_der: Zeroizing::new(key.serialize_der()),
         }
+    }
+
+    /// `LocalIdentity`'s `impl Debug` must never print the private key,
+    /// `Zeroizing<Vec<u8>>` included (BRIEF-6 §1.3) — `Zeroizing` derives
+    /// `Debug` from its inner `Vec<u8>`, so the hand-written `impl Debug`
+    /// above (which never touches `key_pkcs8_der` at all) is the only
+    /// thing standing between this type and a Debug-logged key. Pin it
+    /// with the actual key bytes present in the struct.
+    #[test]
+    fn debug_never_prints_the_private_key() {
+        let identity = test_identity();
+        let key_bytes = identity.key_pkcs8_der.clone();
+        let rendered = format!("{identity:?}");
+        assert!(
+            !rendered.contains(&format!("{key_bytes:?}")),
+            "Debug output must not contain the raw key bytes: {rendered}"
+        );
+        assert!(
+            !rendered.to_lowercase().contains("key_pkcs8_der"),
+            "Debug output must not name the key field at all: {rendered}"
+        );
+        assert!(
+            rendered.contains("cert_chain_len"),
+            "Debug output should still be useful: {rendered}"
+        );
     }
 
     /// A trust store that pins nothing and trusts no CA — same role as
@@ -1233,7 +1269,7 @@ mod tests {
             (
                 LocalIdentity {
                     cert_chain: vec![der],
-                    key_pkcs8_der: key.serialize_der(),
+                    key_pkcs8_der: Zeroizing::new(key.serialize_der()),
                 },
                 fp,
             )

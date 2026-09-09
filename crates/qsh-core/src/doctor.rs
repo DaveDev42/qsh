@@ -241,7 +241,7 @@ pub const KEYSTORE_UNAVAILABLE: Diagnostic = Diagnostic {
 
 /// `docs/CLI.md` §6.17: the local clock reads earlier than this device's
 /// own certificate's backdated `not_before` — `crate::identity`'s 5-minute
-/// backdate margin ([`crate::identity::CERT_BACKDATE_MINUTES`]) exists
+/// backdate margin (`crate::identity::CERT_BACKDATE_MINUTES`) exists
 /// exactly to absorb small skew, so `crate::ops::doctor` only calls this a
 /// hard `error` once the observed skew exceeds that margin; smaller skew
 /// still `warn`s; only [`SystemTime`]/`now` injection can reach this in a

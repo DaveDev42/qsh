@@ -70,7 +70,7 @@ impl Paths {
     /// `$XDG_RUNTIME_DIR` and the `state_dir/run` fallback. For tests (and
     /// any other embedding) that need a deterministic, sandboxed location
     /// for localctl sockets regardless of what the host process's
-    /// environment happens to export — see [`Paths::runtime_dir_override`]'s
+    /// environment happens to export — see `Paths::runtime_dir_override`'s
     /// doc for why this is necessary rather than merely convenient.
     pub fn with_runtime_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.runtime_dir_override = Some(dir.into());
@@ -794,7 +794,7 @@ impl AuditConfig {
 /// (`docs/CLI.md` §6.13, `docs/design/protocol.md` §11-2/§11-4).
 ///
 /// `PLAN.md` Step 3 PR 3a wired `bind`/`allow_advertised_names`. Step 4 adds
-/// `stale_retention`, read by [`reverse::listen::Listen`]'s stale-eviction
+/// `stale_retention`, read by [`crate::reverse::listen::Listen`]'s stale-eviction
 /// sweeper (`crates/qsh-core/src/reverse/listen.rs`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -965,7 +965,7 @@ impl ReverseConfig {
     /// clamping it: a `0` initial delay would busy-loop redials, a `max`
     /// below `initial` is a contradiction, a jitter `≥ 100%` can swing a
     /// delay down to (or past) zero, defeating backoff's entire purpose,
-    /// and a `max` past [`Self::MAX_BACKOFF_MS`] risks the same zero-delay
+    /// and a `max` past `Self::MAX_BACKOFF_MS` risks the same zero-delay
     /// failure through integer overflow in `target::jitter` instead.
     pub fn backoff(&self) -> Result<BackoffLimits, OpError> {
         let initial_ms = self

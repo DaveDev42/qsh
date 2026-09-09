@@ -619,7 +619,7 @@ impl Broker {
     /// open must not fork/open a PTY only to throw it away, and the
     /// reservation itself (not a second check at insert time) is what
     /// keeps a concurrent racer from also fitting into the same slot —
-    /// [`SessionSlot::consume`] is the insert's own confirmation that the
+    /// `SessionSlot::consume` is the insert's own confirmation that the
     /// reservation held.
     pub fn open(&self, spec: &SessionSpec) -> Result<SessionHandle, BrokerError> {
         let slot = self.reserve_slot("").map_err(BrokerError::QuotaExceeded)?;

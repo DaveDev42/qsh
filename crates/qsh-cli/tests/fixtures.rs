@@ -193,8 +193,8 @@ fn golden_local_fixtures() {
     // this one is **not** append-only in the strict "never touches again"
     // sense — its whole purpose is to fail loudly the moment
     // `wire::LOCAL_CAPABILITIES` changes, the same "diff review required"
-    // discipline `docs/design/testing.md` L7 already documents for MCP's
-    // `tools_list.json`. A deliberate capability change updates this file
+    // discipline `docs/design/testing.md` documents for value-carrying
+    // golden fixtures. A deliberate capability change updates this file
     // with `QSH_UPDATE_FIXTURES=1` and the diff gets reviewed like any
     // other contract change; it does not get a second, parallel file the
     // way an ordinary CLI fixture would.

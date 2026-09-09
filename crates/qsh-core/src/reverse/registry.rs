@@ -266,9 +266,9 @@ impl Registry {
     /// oversized or separator-containing alias would make that ambiguous.
     /// So an alias is held to the exact same shape rule as `offered_name`
     /// here, and a violation fails closed with the identical generic
-    /// [`host_reverse_denied`] the no-alias case below returns (never
+    /// `host_reverse_denied` the no-alias case below returns (never
     /// revealing the alias content or that a pin exists — see
-    /// [`host_reverse_denied`]'s docs). Tightening `Ops::trust_add` itself
+    /// `host_reverse_denied`'s docs). Tightening `Ops::trust_add` itself
     /// to enforce this at pin time would be a user-visible CLI behavior
     /// change, out of this PR's zero-behavior-change scope — `trust_add` is
     /// the other end of this invariant and remains permissive for now.

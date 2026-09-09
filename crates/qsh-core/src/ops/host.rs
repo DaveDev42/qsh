@@ -1,6 +1,6 @@
 //! `host.list`/`host.get` — the local, authorization-free host query
 //! (`docs/CLI.md` §2.5: "인가 불요 — local operation으로 원격 peer의 ACL
-//! 평가 대상이 아님"; §5 `Host`; §6.1) — plus [`resolve_host_route`], the
+//! 평가 대상이 아님"; §5 `Host`; §6.1) — plus [`Ops::resolve_host_route`], the
 //! one function that also backs `host.get`'s single entry, the human
 //! renderer's "route that would be used", and (Step 6) `Ops::connect`'s
 //! path choice (`PLAN.md` M3 Step 5, PR 5b).
@@ -10,10 +10,10 @@
 //! 등록 양쪽에 존재하면... 두 항목으로 나타난다"):
 //!
 //! - **forward** — `trust.toml` pins that carry an address
-//!   ([`forward_hosts`]). Never probed: `state` is always `"unknown"`.
+//!   (`forward_hosts`). Never probed: `state` is always `"unknown"`.
 //! - **reverse** — the union of `LocalHostList` across every localctl
 //!   daemon discovered on this machine
-//!   ([`crate::localctl::client::admin_host_list_all`], unix only). A
+//!   (`crate::localctl::client::admin_host_list_all`, unix only). A
 //!   daemon this machine cannot reach is dropped from the result, never
 //!   turned into an error — one sleeping laptop must not hide every other
 //!   host (`docs/CLI.md` §6.2). `state` is whatever the daemon reported
@@ -21,7 +21,7 @@
 //!   TLS-verified, never a wire display name.
 //!
 //! `host.list` never dials — both sources are purely local reads.
-//! [`resolve_host_route`] is the one place a name turns into "which peer,
+//! [`Ops::resolve_host_route`] is the one place a name turns into "which peer,
 //! reached how": live reverse registration beats a forward pin (a proven
 //! reachable path beats an address that is only ever an estimate), and two
 //! daemons holding the same name live is a routing failure
@@ -76,7 +76,7 @@ pub(crate) struct ReverseHostEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostRoute {
     /// Dial directly — the address `hosts.toml`/the trust store pin
-    /// resolves to (`PLAN.md` M7 Step 3, [`resolve_forward`]).
+    /// resolves to (`PLAN.md` M7 Step 3, `resolve_forward`).
     Forward {
         /// `host:port` to dial — `hosts.toml`'s address when it has this
         /// name, the trust store pin's address otherwise.
@@ -87,7 +87,7 @@ pub enum HostRoute {
         /// (this module's own doc).
         fingerprint: String,
         /// Which directory's *address* actually won — `"hosts"`/`"trust"`/
-        /// `"both"` (`"both"` only when they agree — [`resolve_forward`]'s
+        /// `"both"` (`"both"` only when they agree — `resolve_forward`'s
         /// own doc, `PLAN.md` Step 3 (a)-추기 ②) — or `None` when
         /// `hosts.toml` has no entries at all (preserves the pre-M7-Step-3
         /// `Host` shape exactly, `docs/CLI.md` §5).
@@ -363,6 +363,38 @@ fn is_live(entry: &ReverseHostEntry) -> bool {
     entry.local.state == "reachable"
 }
 
+/// `ErrorCode::InvalidArgument` for an empty/whitespace-only (or, after
+/// [`hint_alias`] strips a `user@` prefix, empty-after-stripping) host
+/// name. One error value, two call sites in [`resolve_route`] (BRIEF-6 §1
+/// item 1 — same code, same wording, not just the same code) so neither
+/// can drift from the other.
+pub(crate) fn empty_host_name_error() -> OpError {
+    OpError::new(ErrorCode::InvalidArgument, "host name must not be empty")
+}
+
+/// Strip a `user@` hint off a host alias, the way `parse_target` does for
+/// the bare `qsh [user@]host` form (`docs/CLI.md` §7) — for positionals
+/// that bypass that parser (`qsh host get <name>`, `qsh exec <name> --
+/// ...`, `docs/CLI.md` §6.1/§6.9) and so can still carry one when they
+/// reach routing or `Ops::resolve_peer_address`'s remedy-message assembly.
+/// Splits on the *last* `@` and returns `None` when the remainder is empty
+/// or whitespace-only (`"dave@"`, `"@"`, `"dave@ "`) — such input has no
+/// alias left to name in a `qsh trust add <alias> --address ...` remedy,
+/// so the caller must fall to [`empty_host_name_error`] rather than
+/// interpolate an empty alias into an otherwise-unparseable suggested
+/// command (BRIEF-6 §1 items 1-2 / lens-2 findings). Shared by
+/// [`resolve_route`] here and `Ops::resolve_peer_address`
+/// (`crate::ops::resolve_peer_address`) so the two `HOST_NOT_FOUND`
+/// remedies never diverge on this rule.
+pub(crate) fn hint_alias(name: &str) -> Option<&str> {
+    let stripped = name.rsplit_once('@').map_or(name, |(_, host)| host);
+    if stripped.trim().is_empty() {
+        None
+    } else {
+        Some(stripped)
+    }
+}
+
 /// The pure decision [`Ops::resolve_host_route`] delegates to — see that
 /// method's doc for the rule. Split out from any I/O (daemon queries,
 /// trust-file load) so the routing table (`PLAN.md` M3 Step 5 (c)) is
@@ -382,10 +414,7 @@ fn resolve_route(
         // (adversarial review finding). `ErrorCode::InvalidArgument` is
         // already the vocabulary this function uses for the two-daemon
         // case, so this reuses it rather than inventing a new code.
-        return Err(OpError::new(
-            ErrorCode::InvalidArgument,
-            "host name must not be empty",
-        ));
+        return Err(empty_host_name_error());
     }
 
     let live: Vec<&ReverseHostEntry> = reverse
@@ -439,12 +468,35 @@ fn resolve_route(
         });
     }
 
+    // A host alias never carries a `user@` hint (`docs/CLI.md` §7: the
+    // bare `qsh [user@]host` form strips it at the CLI before the alias
+    // ever reaches routing), so any input that still has one here came
+    // through a positional that does not do that stripping (`qsh host get
+    // <name>`, `docs/CLI.md` §6.1) and is not itself a valid alias — it
+    // will never match a trust-store or reverse-registration name. Left
+    // as-is, interpolating it verbatim below would echo the `user@` back
+    // into both the diagnostic and the `qsh trust add` remedy, and the
+    // latter is not even parseable: alias names are `[A-Za-z0-9._-]`
+    // (`qsh_proto::wire::valid_host_name`), which rejects `@`. Strip the
+    // same "last `@`" hint `parse_target` uses (BRIEF-6 §1.6 / M7 carry-
+    // over v) via [`hint_alias`] so the message and remedy always name a
+    // bare alias. `"dave@"`/`"@"` strip down to an empty alias, which is
+    // the same argument defect the guard above rejects — fall into the
+    // identical `InvalidArgument` rather than let an empty alias reach the
+    // `qsh trust add  --address ...` remedy below (un-runnable: two spaces,
+    // no name; BRIEF-6 §1 item 1 / lens-2 finding).
+    let display_name = match hint_alias(name) {
+        Some(alias) => alias,
+        None => return Err(empty_host_name_error()),
+    };
+
     Err(OpError::new(
         ErrorCode::HostNotFound,
         format!(
-            "host {name:?} has no live reverse registration on this machine and no address \
-             pinned for it; register it (`qsh reverse <controller>` run on that host) or pin \
-             one here with `qsh trust add {name} --address <host:port> --fingerprint sha256:...`"
+            "host {display_name:?} has no live reverse registration on this machine and no \
+             address pinned for it; register it (`qsh reverse <controller>` run on that host) \
+             or pin one here with `qsh trust add {display_name} --address <host:port> \
+             --fingerprint sha256:...`"
         ),
     ))
 }
@@ -486,7 +538,7 @@ impl Ops {
     /// reverse 등록이 우선").
     ///
     /// **Sync, and not callable from inside a running Tokio runtime.** This
-    /// method (via [`Self::reverse_host_entries`]) builds its own
+    /// method (via `Self::reverse_host_entries`) builds its own
     /// current-thread runtime and `block_on`s it; calling it from code that
     /// is itself already executing inside a Tokio runtime panics ("Cannot
     /// start a runtime from within a runtime"). PR 5b's own callers are all
@@ -509,7 +561,7 @@ impl Ops {
     }
 
     /// The async twin of [`Self::resolve_host_route`] — same decision
-    /// (delegates to the same pure [`resolve_route`]), but never builds or
+    /// (delegates to the same pure `resolve_route`), but never builds or
     /// blocks on its own runtime, so it is safe to call from *inside* one
     /// that already exists (`PLAN.md` M3 Step 6's async seam).
     ///
@@ -518,14 +570,14 @@ impl Ops {
     /// `Ops::resolve_route` *before* `connect_target`/`connect_reverse`
     /// build their own dial runtime, so the throwaway probe runtime this
     /// resolves with and the dial's own multi-thread runtime are
-    /// sequential, never nested — no caller on the current CLI/MCP-less
-    /// call graph reaches `connect` from inside an already-running
-    /// runtime (`main` is a plain sync `fn`). This method exists as the
-    /// seam for the caller that eventually will run inside one — a future
-    /// async host (an MCP adapter, or any other async entry point) that
-    /// needs the same routing decision without the sync method's "cannot
-    /// start a runtime from within a runtime" hazard — so that caller
-    /// never has to reach for `crates/qsh-testkit/tests/host_list_reverse.rs`'s
+    /// sequential, never nested — no caller on the current CLI call graph
+    /// reaches `connect` from inside an already-running runtime (`main` is
+    /// a plain sync `fn`). This method exists as the seam for the caller
+    /// that eventually will run inside one — a future long-running
+    /// external-process host, or any other async entry point — that needs
+    /// the same routing decision without the sync method's "cannot start a
+    /// runtime from within a runtime" hazard — so that caller never has to
+    /// reach for `crates/qsh-testkit/tests/host_list_reverse.rs`'s
     /// `spawn_blocking` workaround the way today's sync-only callers do.
     pub async fn resolve_host_route_async(&self, name: &str) -> Result<HostRoute, OpError> {
         let reverse = self.reverse_host_entries_async().await;
@@ -1056,6 +1108,60 @@ mod tests {
         let store = TrustStore::default();
         let err = resolve_route(&[], &store, &no_hosts(), "nowhere").unwrap_err();
         assert_eq!(err.code, ErrorCode::HostNotFound);
+    }
+
+    #[test]
+    fn host_not_found_message_never_leaks_a_user_at_prefix() {
+        // `qsh host get <name>` (`docs/CLI.md` §6.1) takes a raw
+        // positional — unlike the bare `qsh [user@]host` form, it does not
+        // run `parse_target`'s `user@` split first, so a `user@host` typo
+        // can reach `resolve_route` unstripped (BRIEF-6 §1.6 / M7 carry-
+        // over v). The message must not echo the `@` back, and the
+        // suggested `qsh trust add <name> --address ...` remedy must name
+        // something `qsh trust add` itself would actually accept —
+        // `qsh_proto::wire::valid_host_name`'s `[A-Za-z0-9._-]`, `1..=64`
+        // rule, which rejects `@` outright.
+        let store = TrustStore::default();
+        let err = resolve_route(&[], &store, &no_hosts(), "dave@nowhere").unwrap_err();
+        assert_eq!(err.code, ErrorCode::HostNotFound);
+        assert!(
+            !err.message.contains('@'),
+            "message leaked the user@ hint: {:?}",
+            err.message
+        );
+        assert!(
+            err.message.contains("qsh trust add nowhere --address"),
+            "remedy did not name the bare alias: {:?}",
+            err.message
+        );
+        assert!(
+            qsh_proto::wire::valid_host_name("nowhere"),
+            "the suggested alias itself must satisfy `qsh trust add`'s own name rule",
+        );
+    }
+
+    #[test]
+    fn an_at_prefix_with_no_alias_left_is_invalid_argument_not_host_not_found() {
+        // `"dave@"`/`"@"`/`"dave@ "` strip down to an empty (or
+        // whitespace-only) alias — falling through to `HOST_NOT_FOUND`
+        // would produce `qsh trust add  --address ...` (two spaces, no
+        // name: un-runnable). This must land on the exact same
+        // `InvalidArgument`/message the empty-name guard above uses, not a
+        // new one (BRIEF-6 §1 item 1 / lens-2 finding).
+        let store = TrustStore::default();
+        for name in ["dave@", "@", "dave@ "] {
+            let err = resolve_route(&[], &store, &no_hosts(), name).unwrap_err();
+            assert_eq!(err.code, ErrorCode::InvalidArgument, "name {name:?}");
+            assert_eq!(
+                err.message, "host name must not be empty",
+                "name {name:?} did not share the empty-name guard's message"
+            );
+            assert!(
+                !err.message.contains("HOST_NOT_FOUND") && !err.message.contains("trust add"),
+                "name {name:?} leaked into a HOST_NOT_FOUND-shaped remedy: {:?}",
+                err.message
+            );
+        }
     }
 
     #[test]

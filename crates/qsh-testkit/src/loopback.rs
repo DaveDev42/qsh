@@ -2,7 +2,7 @@
 //! a running [`Server`] and a [`Dialer`] ready to connect to it.
 //!
 //! [`LoopbackHarness::start_chaotic`] is the L4 variant: identical host, but
-//! the dialer is pointed at a [`ChaosProxy`](crate::chaos::ChaosProxy) that
+//! the dialer is pointed at a [`ChaosProxy`] that
 //! relays to it under a seeded fault policy (`docs/design/testing.md` L4).
 
 use std::net::SocketAddr;
@@ -43,7 +43,7 @@ pub fn make_identity() -> TestIdentity {
     TestIdentity {
         local: LocalIdentity {
             cert_chain: vec![der.clone()],
-            key_pkcs8_der: key.serialize_der(),
+            key_pkcs8_der: zeroize::Zeroizing::new(key.serialize_der()),
         },
         fingerprint,
         cert_der: der.to_vec(),
@@ -87,7 +87,7 @@ impl TestCa {
         TestIdentity {
             local: LocalIdentity {
                 cert_chain: vec![der.clone()],
-                key_pkcs8_der: key.serialize_der(),
+                key_pkcs8_der: zeroize::Zeroizing::new(key.serialize_der()),
             },
             fingerprint,
             cert_der: der.to_vec(),
@@ -441,7 +441,7 @@ impl LoopbackHarness {
         }
     }
 
-    /// [`context`](Self::context) plus a freshly read [`ChaosStats`]
+    /// [`context`](Self::context) plus a freshly read [`crate::chaos::ChaosStats`]
     /// (`qsh_testkit::chaos::ChaosStats`). Call it at the assertion site.
     pub fn detail(&self) -> String {
         match &self.chaos {
@@ -476,7 +476,7 @@ impl LoopbackHarness {
     /// `start_with_quotas` harness sets up. Panics unless the harness was
     /// started with [`start_with_quotas`](Self::start_with_quotas).
     ///
-    /// Goes through the same [`Self::dial_via`] tracking `Self::dial`
+    /// Goes through the same `Self::dial_via` tracking `Self::dial`
     /// does, so its endpoint is closed by `Self::shutdown` too — calling
     /// `self.second_dialer.dial(..)` directly instead would bypass that
     /// tracking and leak the endpoint, exactly the failure this method
