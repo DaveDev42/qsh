@@ -1,20 +1,16 @@
-//! Fuzzes `serde_json::from_value`/`from_slice` into every `qsh_proto`
-//! request type the MCP adapter deserializes an external client's tool-call
-//! `arguments` into (`crates/qsh-cli/src/mcp/mod.rs`, `run_tool`'s
-//! `serde_json::from_value(Value::Object(arguments))`, one call site shared
-//! by every tool). CLAUDE.md names the JSON contract types (`qsh-proto`) as
-//! fuzz surface; this is the untrusted-JSON-in edge of that surface — MCP
-//! `arguments` come straight from whatever client is talking to `qsh mcp`
-//! over stdio, no ACL gate in front of the deserialize itself.
+//! Fuzzes `serde_json::from_slice` into `qsh_proto::types::*Req` — the
+//! request types an agent hands in as the `--json` argument payload on
+//! `qsh`'s JSON CLI surface (ADR-0011: agent integration is JSON CLI and
+//! exec stdio, not a built-in MCP adapter). CLAUDE.md names the JSON
+//! contract types (`qsh-proto`) as fuzz surface; this is the
+//! untrusted-JSON-in edge of that surface.
 //!
-//! Covers exactly the request types `run_tool` is invoked with in
-//! `mcp/mod.rs` as of this writing (verified against the call sites, not
-//! the tool list): `HostListReq`, `HostGetReq`, `SessionListReq`,
-//! `SessionGetReq`, `SessionOpenReq`, `SessionReadReq`, `SessionWriteReq`,
-//! `SessionResizeReq`, `SessionCloseReq`, `ExecRunReq`, `TunnelOpenReq`,
-//! `TunnelCloseReq`. (`SessionAttachReq` exists in `qsh-proto::types` but
-//! `mcp/mod.rs` does not currently route any tool through it — nothing to
-//! select here until it does.)
+//! Covers 12 of the request types in `qsh_proto::types`: `HostListReq`,
+//! `HostGetReq`, `SessionListReq`, `SessionGetReq`, `SessionOpenReq`,
+//! `SessionReadReq`, `SessionWriteReq`, `SessionResizeReq`,
+//! `SessionCloseReq`, `ExecRunReq`, `TunnelOpenReq`, `TunnelCloseReq`.
+//! (`SessionAttachReq` also exists in `qsh-proto::types` but is not
+//! selected here — nothing in this list routes through it.)
 //!
 //! First byte of the input selects the type (mod the list length, same
 //! selector-byte shape `fingerprint_principal` uses for its own two-way

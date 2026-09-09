@@ -911,14 +911,15 @@ pub(crate) fn resolve_peer_address(
     // lens-2 finding).
     let entry = host::resolve_forward(trust.find(host), hosts.find(host), hosts_has_any)
         .ok_or_else(|| match host::hint_alias(host) {
-            Some(alias) => OpError::new(
+            host::HintAlias::Valid(alias) => OpError::new(
                 ErrorCode::HostNotFound,
                 format!(
                     "host {alias:?} is not in the trust store; pin it with `qsh trust add \
                      {alias} --address <host:port> --fingerprint sha256:...`"
                 ),
             ),
-            None => host::empty_host_name_error(),
+            host::HintAlias::Empty => host::empty_host_name_error(),
+            host::HintAlias::Invalid(alias) => host::invalid_host_alias_error(alias),
         })?;
     let server_name = server_name_for(&entry.address);
     Ok((entry.address, server_name))
@@ -1852,6 +1853,33 @@ mod tests {
             assert_eq!(err.code, ErrorCode::InvalidArgument, "name {name:?}");
             assert_eq!(err.message, "host name must not be empty", "name {name:?}");
         }
+    }
+
+    #[test]
+    fn resolve_peer_address_trims_a_stray_space_left_by_an_at_split() {
+        // BRIEF-7 §2.5 item 1 (Q10) — same trim `resolve_route` gets,
+        // reused here via the shared `host::hint_alias`.
+        let trust = TrustStore::default();
+        let hosts = HostsFile::default();
+        let err = resolve_peer_address(&trust, &hosts, "dave@ nowhere").unwrap_err();
+        assert_eq!(err.code, ErrorCode::HostNotFound);
+        assert!(
+            err.message.contains("qsh trust add nowhere --address"),
+            "remedy did not name the trimmed bare alias: {:?}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn resolve_peer_address_on_an_internal_space_is_invalid_argument_not_host_not_found() {
+        let trust = TrustStore::default();
+        let hosts = HostsFile::default();
+        let err = resolve_peer_address(&trust, &hosts, "dave@no where").unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidArgument);
+        assert_eq!(
+            err.message,
+            "host name \"no where\" is not a valid host alias"
+        );
     }
 
     #[test]

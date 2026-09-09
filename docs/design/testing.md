@@ -93,14 +93,31 @@ M6가 채웠던 이 계층(내장 `qsh mcp` stdio adapter를 raw JSON-RPC로 구
 
 ## L8 — Fuzzing (`cargo-fuzz`, 본격 가동은 M8)
 
-| 타깃 | 내용 | 비고 |
+M8 Step 1(커밋 `d87e76b`, 2026-09-02)에 cargo-fuzz 타깃 **16종**이 `fuzz/fuzz_targets/`에 착륙했다. 아래 표는 `fuzz/Cargo.toml`의 `[[bin]]` 이름 그대로다 — 이 절이 원래 계획했던 이름(`frame_decode`/`control_message`/`roundtrip`/`json_envelope`/`broker_ops`)은 착륙 시점에 다시 갈라졌다(`docs/design/protocol.md` §13).
+
+| 타깃 | 내용 | 상태 |
 |---|---|---|
-| `frame_decode` | raw bytes → frame splitter | 최우선 |
-| `control_message` | frame → 시맨틱 파싱 | |
-| `roundtrip` | structure-aware `Arbitrary` → encode → decode → eq | 시간당 버그 최저가 |
-| 문자열 파서류 | `session_ref`, `parse_forward_spec`(`-L`/`-R` grammar, `qsh-proto::wire`, M4) 파싱 | sans-IO 순수 함수라 이 계층에 바로 얹힌다 — port 범위(`1..=65535`)·IPv6 대괄호·`bind` 유무 조합을 구조 인지(arbitrary) 변형으로 커버 |
-| `json_envelope` | JSON CLI 요청 필드 (agent/script가 주는 입력) | |
-| `broker_ops` | **stateful**: byte열 → op 시퀀스(append/read/attach/detach/tick) vs 모델 oracle | **M2에서 주입 가능한 clock을 설계해야 가능** |
+| `frame_decoder` | 길이 프리픽스 framing에 적대적 부분 청크를 흘리고 `push`/`next_frame`/`take_remaining`을 임의 순서로 인터리브 | 착륙 (구 `frame_decode`) |
+| `decode_control` | `decode_msg::<ControlMessage>` — 루트 oneof | 착륙 (구 `control_message`) |
+| `decode_hello` | `decode_msg::<Hello>` — handshake 최초 파싱 | 착륙 |
+| `decode_stream_header` | `decode_msg::<StreamHeader>` + `StreamKind::try_from`(unknown i32 포함) | 착륙 |
+| `decode_session_frame` | `decode_msg::<SessionFrame>` + `validate()` 체인 | 착륙 |
+| `decode_exec_frame` | `decode_msg::<ExecFrame>` — EXEC_DATA 경로 | 착륙 |
+| `decode_connect_result` | `decode_msg::<ConnectResult>` — ticket/ACL 게이트가 없는 유일한 decode 경로 | 착륙 |
+| `decode_local_hello` | `decode_local::<LocalHello>` — localctl 첫 메시지 (`qsh.local.v1`) | 착륙 |
+| `decode_local_admin_request` | `decode_local::<LocalAdminRequest>` — localctl 두 번째 프레임 | 착륙 |
+| `valid_host_name` | `Hello.reverse.offered_name` 모양 검사 | 착륙 |
+| `valid_forward_id` | `forward_id`/`ticket` 모양 검사 | 착륙 |
+| `parse_invite_code` | Crockford Base32 invite code 디코드 | 착륙 |
+| `parse_forward_spec` | `-L`/`-R` grammar (`[bind:]listen_port:host:host_port`) | 착륙 (구 "문자열 파서류") |
+| `sanitize_peer_text` | 화면에 뿌릴 peer 문자열의 제어문자 제거 | 착륙 |
+| `fingerprint_principal` | `Fingerprint`/`Principal`의 `from_str` | 착륙 |
+| `json_request_types` | `serde_json::from_slice` → `qsh_proto::types::*Req` | 착륙 (구 `json_envelope`) |
+| `broker_ops` | **stateful**: byte열 → op 시퀀스(append/read/attach/detach/tick) vs 모델 oracle | **미구현 — M8 Step 7b로 이월.** 선행 조건인 주입 가능 `Clock`은 이미 있다(`crates/qsh-core/src/broker/clock.rs`). `docs/ROADMAP.md:110`이 M8 범위로 나열하지만 `PLAN.md` Step 1–10에 소유 Step이 없었다 |
+
+구 `roundtrip` 행(structure-aware `Arbitrary` → encode → decode → eq)도 별도 타깃으로는 착륙하지 않았다. 그 자리를 대신 메운 것이 proptest 다섯 종이고(§L2 및 `protocol.md` §13-5), 두 방식이 재는 것이 달라 등가 교체는 아니다 — 위 표의 decode 타깃들은 임의 바이트를, proptest는 타입 수준 모델을 흔든다.
+
+캠페인 기록(배치별 run-id·누적 fuzz-hours·DoD 1 판정)은 [`docs/campaigns/m8-fuzz.md`](../campaigns/m8-fuzz.md)가 canonical이다.
 
 ACL glob 평가기는 fuzz보다 property test가 적합하다(위 L2 "정책 평가기 property" 행이 M5 Step 2의 실현 지점) — action 어휘가 PRD §9의 닫힌 11종(`Action::ALL`)이고 wildcard가 trailing `.*`만 허용되도록 M5 Step 1이 못박았으므로(`docs/design/architecture.md` §6), `session.control.escalate` 같은 가상의 깊은 이름 문제는 애초에 발생하지 않는다 — 로더가 `Action::ALL`의 어느 것에도 매칭되지 않는 패턴을 로드 시점 `CONFIG_ERROR`로 거부한다. property로 직접 표현할 질문은: `session.*`가 `session.control`에 매칭되는가? `forward.*`를 가진 정책에서도 `forward.socks`는 여전히 deny인가(항상-deny 게이트가 wildcard 매칭보다 먼저 적용)? `user:dave`가 `user:dave2`에 매칭되지 않는가?
 
@@ -123,6 +140,7 @@ ACL glob 평가기는 fuzz보다 property test가 적합하다(위 L2 "정책 �
 - `Swatinem/rust-cache`, concurrency group으로 구식 run 취소.
 - GHA macOS runner는 UDP 소켓 버퍼 기본값이 작다 — `SO_RCVBUF`를 명시 설정하거나 throughput 수치 저하를 예상할 것.
 - clippy는 **모든 타깃에서** 실행 — Linux 전용 clippy는 `cfg(target_os = "macos")` 블록 전체를 놓친다. 이 프로젝트처럼 플랫폼 분기가 많으면 실질적 구멍이다. Windows도 포함: 지원 플랫폼은 아니지만 `cfg(unix)`/`cfg(not(unix))` 분기가 계속 컴파일되는지는 CI만이 보증한다.
+- 어느 테스트가 어느 위협을 갚고 있는지의 인덱스는 [threat-model.md](threat-model.md) §4가 canonical이다. 이 문서는 계층별로 무엇을 갚아야 하는지를 적고, 그쪽은 위협별로 무엇이 그것을 갚고 있는지를 적는다. 통제를 지키는 테스트의 이름이 바뀌면 그 표도 같은 커밋에서 바뀐다.
 - `cargo-nextest` **필수**, `cargo test`는 게이트가 아니다: 테스트별 프로세스 격리(전역 상태를 바꾸는 PTY/termios 테스트에 필수), 실 timeout, flake 재시도, JUnit 출력이 이유의 절반이고, 나머지 절반은 이 repo의 실측이다 — `cargo test`는 전역 상태를 공유하는 동일 바이너리 실행 때문에 M7 기준 baseline부터 이미 빨간불(`acl::load`·`localctl::daemon` 계열이 프로세스 안에서 서로 간섭)이고, CI(`.github/workflows/ci.yml`)도 nextest만 돈다. 커밋 전 게이트는 `TMPDIR=<격리 디렉터리> cargo nextest run --workspace`이며, `cargo test`로 빨간불이 뜨는 것은 회귀 신호가 아니다 — nextest로 같은 스위트를 돌려 실제로 깨졌는지 확인한다.
 
 **현재 상태 (M1 이후):** `.github/workflows/ci.yml`이 push(main)/PR마다 fmt / clippy / test(nextest + doc-test + `RUSTDOCFLAGS=-D warnings` doc, M8 Step 6부터) / arch-lint / cargo-deny를 4개 runner(ubuntu-24.04, ubuntu-24.04-arm, macos-14, windows-latest)에서 돌리고(macos-15-intel은 2026-08-27에 커버리지가 macos-14와 겹쳐 매트릭스에서 빠졌다 — `ci.yml`의 매트릭스 상단 주석 참고), 단일 required check `ci-ok`로 합친다. Windows에서는 POSIX 시그널·process-group·`$$` 의존 테스트가 `cfg(unix)`로 빠지고 나머지(`sh -c` 기반 DoD 테스트 포함 — runner의 Git for Windows `sh`에 의존)는 그대로 돈다. fuzz-smoke·nightly-fuzz·soak·perf job은 M8에서 추가한다 — fuzz-smoke와 T2 적대적 부하(`.github/workflows/load.yml`)는 이미 섰고, 같은 워크플로가 이제 짧은 soak 시나리오(`cargo nextest run --profile load -p qsh-cli --test soak`)도 T2 스텝 뒤에 돈다. 24h/100세션 soak은 CI job이 아니라 `docs/campaigns/m8-soak.md`의 사람 캠페인이다(위 L4 "구현(M8 Step 5)" 참고) — nightly-fuzz·perf는 아직이다. `crates/qsh-testkit`은 M2에서 chaos proxy(`chaos.rs`, L4)·loopback 하네스(`loopback.rs`, L3)를 구현했고 M2 attach recovery 스위트(`crates/qsh-cli/tests/attach_recovery.rs`)가 그 위에 서 있다 — 더 이상 빈 골격이 아니다. M3는 여기에 역방향 하네스(`reverse.rs` — controller listener + target dialer, `ReverseHarness`)를 더했고, 그 위에 역방향 resume 게이트 두 개(`reverse_resume_chaos.rs` PR 상시 + `reverse_blackout.rs` 60초 수용, L4)와 controller 도달성 진단 항목 및 문서-상수 일치 게이트(`crates/qsh-core/src/doctor.rs` + `crates/qsh-core/tests/doctor_docs.rs`, L6)가 서 있다. M5는 L2에 정책 평가기 property test(`crates/qsh-core/src/acl/policy.rs`, default-deny·wildcard·principal 정확 일치, DoD 3)와 audit 수명주기 테스트(회전·retention·쓰기 실패 fail-closed, `crates/qsh-core/src/audit/writer.rs`, DoD 5)를 심었다. L6에는 문서-상수 일치 게이트가 두 벌 섰다. `crates/qsh-core/tests/acl_docs.rs`는 `Action::ALL`·`PERMISSION_DENIED_MESSAGE`·시작 진단 문면이 PRD·CLI.md·README와 어긋나지 않는지 보고, Step 8이 마감한 `crates/qsh-core/tests/acl_registry.rs`는 `OP_REGISTRY`와 CLI.md §2.5 매핑 표를 양방향으로 대조하면서 `Server::dispatch`의 `control_message::Body` variant를 전수 분류하고 registry 10개 항목의 DoD 2 audit 완전성을 구동한다. 항상-deny 3종(`forward.socks`·`file.read`·`file.write`)은 구동 가능한 wire op이 아직 없어 이 열거에서 빠지며, 나머지 14개 인가 seam의 거부 문면 균일성은 `crates/qsh-testkit/tests/acl_uniformity.rs`가 맡는다. `OP_REGISTRY`가 `Server::dispatch`만으로는 구동할 수 없는 `forward.local`·`forward.remote`·`host.reverse` 세 seam의 DoD 2 구동은 `crates/qsh-testkit/tests/acl_registry_audit.rs`가 이어받는다. M6는 L7을 처음 채웠다: `qsh mcp`(`crates/qsh-cli/src/mcp/mod.rs`, rmcp `=3.1.4` stdio 서버)에 대해 `crates/qsh-cli/tests/mcp_conformance.rs`가 fixture 고정·stdout 순수성(DoD 5)·오류 표면·취소 의미론(DoD 3)·터널 truthful-close·Windows-ungated 성공 경로·fixture 세트 등가성을 실 바이너리 spawn으로 구동하고, `xtask`의 `ModuleBan`이 `crates/qsh-cli/src/mcp/` 스코프에서 `std::process`/`Command::new`/`Stdio::piped` 세 토큰을 금지해 DoD 4(subprocess·CLI 재파싱 ban)를 기계로 강제했다. DoD 2(Claude Code 실접속)는 이 계층의 자동 게이트가 아니라 `docs/campaigns/m6-mcp.md`의 수동 캠페인 기록이었다 — M2 mobility 캠페인과 같은 지위. 이 어댑터와 L7 하네스 전체는 M8 Step 6에서 철회했다(ADR-0011, 위 "L7 — MCP conformance (철회, ADR-0011)" 참고).

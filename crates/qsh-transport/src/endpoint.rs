@@ -1220,6 +1220,60 @@ mod tests {
         );
     }
 
+    /// BRIEF-7 §2.5 item 2 (g5 — 0-RTT threat-model gap): `client_tls_config`/
+    /// `server_tls_config`'s own comments assert "No 0-RTT, no session
+    /// resumption" / "No early data, no tickets", but nothing in this
+    /// workspace read those five rustls config values back before this test
+    /// — `docs/design/threat-model.md`'s 0-RTT row can only cite a pin, not
+    /// a comment, as its control. Reads every field directly off the built
+    /// `rustls::ClientConfig`/`rustls::ServerConfig` — the same values
+    /// [`client_tls_config`]/[`server_tls_config`] set — rather than
+    /// re-deriving them, so a future edit that silently drops one of the
+    /// five lines (re-enabling 0-RTT/resumption/tickets) fails this test
+    /// instead of only breaking a comment's promise. `resumption`'s two
+    /// fields are `pub(super)` in rustls (no public accessor beyond
+    /// `Debug`), so that one assertion goes through the derived `Debug`
+    /// string the way `server_config_sets_admission_bounds` above already
+    /// does for `TransportConfig`; `session_storage` is a `dyn
+    /// StoresServerSessions` trait object with the same limitation. Every
+    /// other field (`enable_early_data`, `max_early_data_size`,
+    /// `send_tls13_tickets`) is public and asserted directly.
+    #[test]
+    fn tls_configs_disable_0_rtt_and_session_resumption() {
+        let identity = test_identity();
+        let verifier = Arc::new(QshPeerVerifier::new(Arc::new(StaticTrust::empty())));
+
+        let client = client_tls_config(&identity, verifier.clone()).expect("client tls config");
+        assert!(
+            !client.enable_early_data,
+            "client config must not enable 0-RTT early data"
+        );
+        let resumption_debug = format!("{:?}", client.resumption);
+        assert!(
+            resumption_debug.contains("NoClientSessionStorage"),
+            "client resumption store must be the no-op store, got {resumption_debug:?}"
+        );
+        assert!(
+            resumption_debug.contains("Disabled"),
+            "client TLS 1.2 resumption must be disabled, got {resumption_debug:?}"
+        );
+
+        let server = server_tls_config(&identity, verifier).expect("server tls config");
+        assert_eq!(
+            server.max_early_data_size, 0,
+            "server must not accept 0-RTT early data"
+        );
+        assert_eq!(
+            server.send_tls13_tickets, 0,
+            "server must not issue TLS 1.3 session tickets"
+        );
+        let storage_debug = format!("{:?}", server.session_storage);
+        assert!(
+            storage_debug.contains("NoServerSessionStorage"),
+            "server session storage must be the no-op store, got {storage_debug:?}"
+        );
+    }
+
     fn test_identity() -> LocalIdentity {
         let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
         let params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();

@@ -68,7 +68,7 @@ Run from `fuzz/`:
 | `parse_invite_code` | `crates/qsh-proto/src/pairing.rs` | `parse_invite_code` — Crockford Base32 invite-code decode (case-fold, hyphen-agnostic, `i`/`l`/`o` remap, `u` rejected), reached from `qsh trust accept`. Transitively exercises the private per-`char` `decode_symbol` over the full Unicode domain. |
 | `parse_forward_spec` | `wire.rs` | `parse_forward_spec` — the `-L`/`-R` forward-spec grammar (`[bind:]listen_port:host:host_port`, IPv6 bracket tokenizing). Local-CLI-origin text, included because it's part of qsh-proto's sans-IO parser surface. |
 | `fingerprint_principal` | `crates/qsh-transport/src/identity.rs` | `Fingerprint::from_str` and `Principal::from_str`, selected by a leading byte. Fingerprint text is reached from `trust.toml` on disk and `qsh trust add`; Principal text from `qsh acl check --principal` (and composes `Fingerprint::from_str` for its `fp:` branch). |
-| `json_request_types` | `crates/qsh-proto/src/types.rs` | `serde_json::from_slice` into each `qsh_proto::types` request type the MCP adapter deserializes an external client's tool-call `arguments` into (`crates/qsh-cli/src/mcp/mod.rs`, `run_tool`), selected by a leading byte. |
+| `json_request_types` | `crates/qsh-proto/src/types.rs` | `serde_json::from_slice` into 12 of the `qsh_proto::types` request types an agent hands in as `--json` payload on qsh's JSON CLI surface (ADR-0011), selected by a leading byte. |
 
 Each target's doc comment (top of its `fuzz_targets/*.rs` file) has the
 fuller "why this is the right target boundary" rationale.
@@ -96,6 +96,14 @@ cargo fuzz tmin <target> artifacts/<target>/<crash-file>
 `artifacts/` is gitignored (crash reproducers are a local debugging
 artifact, not something to commit as part of standing up the harness) —
 copy one out of the tree if you need to hand it to someone else.
+
+## Campaign record and OSS-Fuzz
+
+`docs/campaigns/m8-fuzz.md` is the standing record of the 72-hour
+accumulation runs below — target definitions, batch start/end timestamps,
+commit SHAs, and DoD 1 status. `fuzz/oss-fuzz/README.md` covers packaging
+these same targets for continuous OSS-Fuzz fuzzing (submission is a
+separate, human-driven step from the local runs this file describes).
 
 ## The 72-hour accumulation (M8 DoD)
 
@@ -199,10 +207,11 @@ tests and fixtures — not random bytes — per target:
   threat model as `sanitize_peer_text`, since this target chains straight
   into it.
 - `json_request_types`: one selector-byte-prefixed valid JSON object per
-  `qsh_proto::types` request type covered, pulled from the MCP
-  conformance test's own tool-call `arguments` (`crates/qsh-cli/tests/
-  mcp_conformance.rs`), plus one malformed-JSON seed and one
-  wrong-JSON-shape (array where an object is expected) seed.
+  `qsh_proto::types` request type covered, hand-written from
+  `qsh_proto::types`'s own field shapes (the MCP conformance fixtures they
+  were originally lifted from went with the adapter, ADR-0011), plus one
+  malformed-JSON seed and one wrong-JSON-shape (array where an object is
+  expected) seed.
 
 The generator that produced the protobuf-encoded seeds above (a throwaway `prost`-based binary, not
 checked in — it isn't part of the repo, just the tool that wrote the files
