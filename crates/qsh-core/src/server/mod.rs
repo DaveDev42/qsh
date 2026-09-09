@@ -268,10 +268,10 @@ pub struct PendingExec {
     pub spec: ExecSpec,
     /// The `exec.run` concurrency slot this ticket holds
     /// (`[serve].max_exec_per_principal`, verdict arbitration item 5).
-    /// Reserved in [`Server::handle_exec_start`] before the ticket is
+    /// Reserved in `Server::handle_exec_start` before the ticket is
     /// issued; released by `Drop` whenever this value's last owner goes
     /// away — the ticket map's lazy/periodic/`purge_connection` expiry
-    /// sweeps ([`Server::issue_ticket`], [`Server::pending_tickets_for`],
+    /// sweeps (`Server::issue_ticket`, `Server::pending_tickets_for`,
     /// [`Server::purge_connection`]) all drop it the same way an
     /// unredeemed ticket is dropped, and a *redeemed* ticket's
     /// [`TicketPurpose::Exec`] moves it into the data-stream task that
@@ -655,7 +655,7 @@ impl Server {
 
     /// Wire this host's trust store and invite store together so `qsh
     /// serve`'s connection driver can answer a `Principal::Pairing`
-    /// connection ([`Self::serve_pairing_connection`]): verify the
+    /// connection (`Self::serve_pairing_connection`): verify the
     /// initiator's proof against `invites`, and — only once that succeeds —
     /// pin the peer into `trust`. No-op past the first call —
     /// `crate::serve`'s startup path calls this exactly once, immediately
@@ -738,12 +738,12 @@ impl Server {
     /// Number of *unexpired* tickets currently outstanding (REVIEW-5-A
     /// A5) — the heartbeat's own read, unlike [`Self::pending_tickets`]:
     /// expiry there is lazy (only swept when some connection next calls
-    /// [`Self::pending_tickets_for`]), so a quiet-period backlog of
+    /// `Self::pending_tickets_for`), so a quiet-period backlog of
     /// expired-but-unswept tickets would otherwise make
     /// [`Self::pending_tickets`] read non-zero on a fully idle listener —
     /// a genuine leak and an idle backlog would look identical. Same
     /// "collect under the guard, drop outside" discipline as
-    /// [`Self::pending_tickets_for`]: the expired [`Ticket`]s (and any
+    /// `Self::pending_tickets_for`: the expired [`Ticket`]s (and any
     /// [`crate::quota::ExecPermit`] each carries) are dropped only after
     /// the tickets lock is released.
     pub fn pending_unexpired_tickets(&self) -> usize {
@@ -1593,7 +1593,8 @@ impl Server {
     }
 
     /// `session.read`: ACL `session.attach` on the session id, then one
-    /// cursor pull (the same primitive `--follow` and MCP long-poll use).
+    /// cursor pull (the same primitive `--follow` and a long-running
+    /// external process's, e.g. an agent tool, long-poll use).
     async fn handle_session_read(
         &self,
         ctx: &ConnCtx,
@@ -2262,7 +2263,7 @@ impl Server {
 
     /// The connection is gone: drop every ticket issued to it, abort every
     /// remote-forward listener it opened (`PLAN.md` M4 Step 4's
-    /// connection-bound lifetime — see [`Server::remote_forwards`]'s own
+    /// connection-bound lifetime — see `Server::remote_forwards`'s own
     /// doc), and release every writer lease it held. Sessions (and their
     /// children) survive — that is the point of the broker
     /// (architecture.md §3 rule c).
@@ -2516,8 +2517,8 @@ impl Server {
     /// `on_accept` observes that connection after verification and before it
     /// is served.
     ///
-    /// [`run`](Self::run) reaches this only through [`Self::admit`], which
-    /// already consulted [`Self::admission`] and is holding the resulting
+    /// [`run`](Self::run) reaches this only through `Self::admit`, which
+    /// already consulted `Self::admission` and is holding the resulting
     /// handshake permit. It is still a public seam with no permit
     /// (`accept_and_serve`, below) so an alternative accept loop —
     /// `qsh-testkit`'s L4 chaos harness runs one, to watch the host-side
@@ -2576,7 +2577,7 @@ impl Server {
     /// Drive one authenticated connection to completion.
     ///
     /// M8 Step 3b (rulings R2/R3): the connection-count quota is reserved
-    /// **here**, before [`Self::serve_connection_inner`] ever runs — a
+    /// **here**, before `Self::serve_connection_inner` ever runs — a
     /// peer that never sends `Hello` at all is still counted — and
     /// released only after [`Self::purge_connection`] below (never
     /// earlier: a dead connection's forwards must never outlive its
@@ -4375,7 +4376,7 @@ pub enum ConnError {
     /// `crate::pairing::respond` already wrote and drained the
     /// corresponding wire `Error` frame before returning this, so (like
     /// [`ConnError::Rejected`]) it exists purely for
-    /// [`Server::serve_pairing_connection`]'s own logging/close path.
+    /// `Server::serve_pairing_connection`'s own logging/close path.
     #[error(transparent)]
     Pairing(#[from] crate::pairing::PairingError),
 }
@@ -4454,7 +4455,7 @@ fn map_hello_error(err: crate::handshake::HelloError) -> ConnError {
 /// (`docs/design/protocol.md` §10). `ControlPinger` is only the adapter
 /// that lets the host role feed that policy: it turns a `Verdict::Probe`
 /// into an actual `Ping` on the wire (via [`Self::send_probe`]) and turns
-/// the matching `Pong` back into [`PathWatch::inbound`] (via
+/// the matching `Pong` back into [`crate::client::pathwatch::PathWatch::inbound`] (via
 /// [`Self::observe`]).
 ///
 /// ## Why this doesn't fight `serve_control`
@@ -4573,7 +4574,7 @@ impl ControlPinger {
 
     /// Feed one inbound control message. `true` means this was this
     /// pinger's own `Pong` — the caller must not also route it to
-    /// `dispatch` — and [`PathWatch::inbound`] has already been reported.
+    /// `dispatch` — and [`crate::client::pathwatch::PathWatch::inbound`] has already been reported.
     /// `false` covers everything else, including a `Pong` whose
     /// `request_id` was never one of ours (dropped, unchanged from today's
     /// `dispatch` behavior — see the module doc's "Inbound" note) and a
@@ -4635,7 +4636,7 @@ impl ControlPinger {
     /// landing between our own `Ping` and its answering `Pong` makes that
     /// `Pong` arrive uncorrelated here too — it is still just this
     /// watchdog talking to itself, not session use. Everything else is
-    /// full [`PathWatch::traffic`].
+    /// full [`crate::client::pathwatch::PathWatch::traffic`].
     pub fn record(&self, msg: &ControlMessage) -> bool {
         if self.observe(msg) {
             return true;

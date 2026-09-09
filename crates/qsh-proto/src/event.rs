@@ -2,7 +2,8 @@
 //! output/gap/exit/writer_changed/closed).
 //!
 //! The shape matches the documented JSON exactly so `qsh session read`,
-//! `--follow --jsonl` and the MCP `read_session` long-poll share one type.
+//! `--follow --jsonl` and a long-running external process's (e.g. an agent
+//! tool) `read_session` long-poll share one type.
 //!
 //! **Forward compatibility** (`docs/CLI.md` §6.4, §10): new event `type`s
 //! may be added within `qsh.event/v1`, so consumers must skip unknown types

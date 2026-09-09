@@ -2,7 +2,6 @@
 //! this crate only parses arguments, calls `qsh_core::Ops`, and renders the
 //! result (`docs/CLI.md` §11).
 
-mod mcp;
 mod render;
 mod tui;
 
@@ -64,11 +63,6 @@ const LISTEN_MODE: &str = "listen";
 /// The name `qsh reverse` reports in diagnostics. Not an operation — it has
 /// no envelope (`docs/CLI.md` §6.13).
 const REVERSE_MODE: &str = "reverse";
-
-/// The name `qsh mcp` reports in diagnostics. Not an operation — it has no
-/// envelope; stdout carries only JSON-RPC frames for as long as the
-/// process runs (`docs/CLI.md` §8.1, §2.2).
-const MCP_MODE: &str = "mcp";
 
 /// Usage error exit code (`docs/CLI.md` §4), matching clap's own.
 const EXIT_USAGE: i32 = 2;
@@ -154,31 +148,6 @@ fn init_tracing(cli: &Cli) {
         .or_else(|_| std::env::var("RUST_LOG"))
         .ok()
         .filter(|spec| EnvFilter::try_new(spec).is_ok());
-    // `rmcp`'s own `debug!(?request, …)`/`debug!(?result, …)` spans
-    // (`rmcp-3.1.4/src/service.rs`'s `serve_inner`) `Debug`-format the
-    // *entire* JSON-RPC message — a `tools/call` request's `arguments`
-    // (PTY input b64, `exec` argv) or a response's `structuredContent`
-    // (PTY output b64) — at plain `debug` level, so `-vv` (`default ==
-    // "trace"`) would otherwise put PTY/command content on stderr as
-    // `Debug`, violating this crate's "PTY/command 내용 로그 금지" rule
-    // just as much as putting it on stdout would (`docs/CLI.md` §8.1's
-    // *stream* promise says nothing about *content*; `PLAN.md` M6 Step
-    // 2+3 검증 라운드 판정 ①/F1). `rmcp`'s crate-prefixed target (every
-    // span/event above resolves to `rmcp::…`) is clamped to `warn` here,
-    // unconditionally — appended to *both* the flag-derived `default` and
-    // any explicit `QSH_LOG`/`RUST_LOG`, the same "always append a
-    // target-scoped directive so it wins over the coarse level, however
-    // that level was chosen" shape `recovery_default` below uses (for the
-    // opposite reason: making sure a target is *always shown*, not always
-    // hidden) — so neither `-vv` nor a blanket `RUST_LOG=debug` can
-    // surface it. A caller who explicitly names `rmcp=` at a lower level
-    // in their own spec still wins (`EnvFilter`'s per-target directives
-    // are resolved by specificity, not by append order), which is the
-    // deliberate opt-in escape hatch, not a hole in this clamp.
-    const RMCP_TARGET_CLAMP: &str = "rmcp=warn";
-    let default = format!("{default},{RMCP_TARGET_CLAMP}");
-    let default = default.as_str();
-    let spec = spec.map(|spec| format!("{spec},{RMCP_TARGET_CLAMP}"));
     let spec = spec.as_deref();
     // With no explicit spec, the recovery target sits at `info` whatever
     // `-v` says, because §6.4 fixes the record as visible at *default*
@@ -476,7 +445,6 @@ fn run(cli: &Cli) -> i32 {
             controller,
             offered_name,
         } => run_reverse(&ops, controller, offered_name.as_deref()),
-        Command::Mcp => run_mcp(&ops),
     }
 }
 
@@ -915,7 +883,6 @@ fn long_running_setup_mode(command: &Option<Command>) -> Option<&'static str> {
         Some(Command::Serve { .. }) => Some(SERVE_MODE),
         Some(Command::Listen { .. }) => Some(LISTEN_MODE),
         Some(Command::Reverse { .. }) => Some(REVERSE_MODE),
-        Some(Command::Mcp) => Some(MCP_MODE),
         _ => None,
     }
 }
@@ -1052,89 +1019,6 @@ fn run_reverse(ops: &Ops, controller: &str, offered_name: Option<&str>) -> i32 {
             0
         }
         Err(err) => report_long_running_setup_error(REVERSE_MODE, &err),
-    }
-}
-
-/// `qsh mcp` — serve MCP tools over stdio (`docs/CLI.md` §8, `PLAN.md` M6
-/// Step 2/3). Not an operation: no envelope, nothing on stdout but JSON-RPC
-/// frames, same shape as [`run_serve`]/[`run_listen`]/[`run_reverse`].
-///
-/// No identity/config load *here* — unlike `serve`/`listen`/`reverse`, `qsh
-/// mcp` is not a host runtime (it never accepts a peer connection or
-/// enforces `acl.toml`; `docs/design/architecture.md` §6's ACL choke point
-/// stays on the host-dispatch side). `ops` (Step 3's [`mcp::QshMcpServer`]
-/// field) is the **same** `Ops` every other command in [`run`] already
-/// dialed with (`Ops::from_env()`, this function's caller) — the MCP
-/// adapter's tool calls reach out through it exactly the way the CLI
-/// frontend's own commands do (`docs/CLI.md` §11), so there is no
-/// `qsh_core::acl::StartupDiagnostic` for this process to print — nothing
-/// here is silently skipping one.
-///
-/// Diagnostics: [`stderr_note!`] only, and [`init_tracing`]'s subscriber is
-/// already stderr-only regardless of `-v`/`-vv`/`-q` (`LossyStderr`), which
-/// is what keeps stdout pure JSON-RPC even at `-vv` (`docs/CLI.md` §8.1,
-/// DoD 5) — nothing MCP-specific was needed to get that.
-fn run_mcp(ops: &Ops) -> i32 {
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(runtime) => runtime,
-        Err(err) => {
-            return report_long_running_setup_error(
-                MCP_MODE,
-                &OpError::new(ErrorCode::Internal, format!("runtime: {err}")),
-            );
-        }
-    };
-    stderr_note!("qsh mcp: serving tools over stdio");
-    let result = runtime.block_on(mcp::serve_stdio(ops.clone()));
-    // `runtime.shutdown_timeout` — not a plain `drop(runtime)` — on the way
-    // out (`PLAN.md` M6 Step 4 item ①/③(iii), proved by a real binary: a
-    // `qsh mcp` process with a still-in-flight `read_session` long-poll
-    // (`run_tool`'s `spawn_blocking`, `crate::mcp`'s own doc on why every
-    // `Ops` call needs one) hung well past `mcp::serve_stdio`'s own return
-    // when stdin closed with the default `Drop for Runtime`). The reason:
-    // `Ops::session_read`'s blocking network wait has no cancellation hook
-    // of its own (`Connected::run`'s `runtime.block_on` on its own private,
-    // per-connection runtime — a genuinely new interrupt plumbing into
-    // `qsh-core`'s pull primitive is out of this adapter's scope, `PLAN.md`
-    // M6 Step 4 (a)'s "새 스트리밍 경로를 만들지 않는다"), so once
-    // `spawn_blocking` has started that thread, nothing this crate does can
-    // make it return early — it keeps running until the host's own
-    // `SESSION_READ_MAX_WAIT` clamp (60s) or the requested `wait_ms`,
-    // whichever is sooner. Plain `Runtime::drop` (`tokio-1.53.1`
-    // `src/runtime/blocking/pool.rs`'s `BlockingPool::drop` →
-    // `shutdown(None)`) blocks the *caller* — this function, and therefore
-    // `main`'s `std::process::exit` — for that same span, so a client that
-    // cancels a long-poll and then simply disconnects (`docs/CLI.md` §9's
-    // "MCP cancellation은 local wait 또는 request를 취소하고 session
-    // lifecycle을 변경하지 않는다" — it says nothing about *this* process's
-    // own exit latency) would leave `qsh mcp` visibly hung for up to a
-    // minute. `shutdown_timeout` gives outstanding work `MCP_SHUTDOWN_DRAIN`
-    // to finish — on top of `rmcp`'s own up-to-5s internal drain
-    // (`rmcp-3.1.4/src/service.rs`'s `serve_inner`, already run inside
-    // `mcp::serve_stdio`'s `service.waiting()` before this line), so a tool
-    // call that is genuinely about to finish still gets to send its
-    // response — and then returns regardless, abandoning (not aborting) any
-    // thread still running; the abandoned thread's own result was already
-    // unobservable to any peer (a cancelled request's response is dropped
-    // by `rmcp` itself — `crate::mcp::QshMcpServer::call_tool`'s doc
-    // comment, `read_session` paragraph, has the `local_ct_pool` source
-    // citation; an uncancelled one simply never gets read once this process
-    // has exited), and the OS reclaims the thread the instant
-    // `std::process::exit` tears the process down.
-    const MCP_SHUTDOWN_DRAIN: std::time::Duration = std::time::Duration::from_millis(500);
-    runtime.shutdown_timeout(MCP_SHUTDOWN_DRAIN);
-    match result {
-        Ok(()) => {
-            stderr_note!("qsh mcp: shutting down");
-            0
-        }
-        Err(err) => report_long_running_setup_error(
-            MCP_MODE,
-            &OpError::new(ErrorCode::Internal, format!("mcp: {err}")),
-        ),
     }
 }
 
@@ -1309,7 +1193,6 @@ fn command_name(cli: &Cli) -> &'static str {
         Command::Serve { .. } => SERVE_MODE,
         Command::Listen { .. } => LISTEN_MODE,
         Command::Reverse { .. } => REVERSE_MODE,
-        Command::Mcp => MCP_MODE,
     }
 }
 
@@ -1499,7 +1382,6 @@ mod tests {
             })),
             Some(REVERSE_MODE)
         );
-        assert_eq!(long_running_setup_mode(&Some(Command::Mcp)), Some(MCP_MODE));
         // Every ordinary operation keeps using `report_error`'s envelope
         // path.
         assert_eq!(long_running_setup_mode(&Some(Command::Version)), None);

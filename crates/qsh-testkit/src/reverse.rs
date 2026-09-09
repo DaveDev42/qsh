@@ -254,7 +254,7 @@ impl ReverseHarness {
     /// `crate::loopback::LoopbackHarness::start_with_quotas` for the
     /// `Listen` arm's own connection-cap integration test
     /// (`crates/qsh-testkit/tests/quota.rs`, I12): this controller keeps
-    /// its own [`crate::quota::Quotas`] instance, entirely independent of
+    /// its own [`qsh_core::quota::Quotas`] instance, entirely independent of
     /// `crate::server::Server`'s, even when both run in the same process
     /// (ruling R6 — arm-scoped, not process-scoped).
     pub async fn start_with_quotas(
@@ -633,10 +633,10 @@ impl ReverseHarness {
     }
 
     /// Bind and run a localctl UDS admin daemon on top of this harness's
-    /// own [`Listen`] — the same [`LocalctlListener::bind`] +
-    /// [`LocalctlDaemon::run`] wiring `reverse/listen.rs`'s
+    /// own [`Listen`] — the same [`qsh_core::localctl::daemon::LocalctlListener::bind`] +
+    /// [`qsh_core::localctl::daemon::LocalctlDaemon::run`] wiring `reverse/listen.rs`'s
     /// `run_listen_unix` does, except [`ReverseHarness`] is built by hand
-    /// rather than through [`crate::reverse::listen::run_listen`] (module
+    /// rather than through [`qsh_core::reverse::listen::run_listen`] (module
     /// docs), so nothing attaches a localctl socket unless a caller asks
     /// for one here. `PLAN.md` M3 Step 5 (c)'s owed L3 proof — `qsh
     /// hosts`/`host.get` merging forward + live reverse into one array,
@@ -758,7 +758,7 @@ pub fn forward_hello() -> Hello {
 }
 
 /// Build a [`LoadedIdentity`] straight from a [`TestIdentity`], bypassing
-/// `identity::init`/a key store entirely — [`run_reverse`] only needs the
+/// `identity::init`/a key store entirely — [`qsh_core::reverse::target::run_reverse`] only needs the
 /// shape, and every field it is built from ([`Identity::device_id`]/
 /// `fingerprint`/`cert_der`, [`LoadedIdentity::local`]) is already sitting
 /// in `test` from [`crate::loopback::make_identity`].

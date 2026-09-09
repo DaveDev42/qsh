@@ -15,7 +15,7 @@
 //!   queue only; when it is full, further writes fail fast with
 //!   [`WriteError::Backpressure`] (→ `RESOURCE_EXHAUSTED`) instead of
 //!   parking anything.
-//! - the **actor loop**: serves the mpsc inbox ([`Command`]: `Write` /
+//! - the **actor loop**: serves the mpsc inbox (`Command`: `Write` /
 //!   `Resize` / `Signal` / `TakeLease` / `ReleaseConnection` / `Close`),
 //!   observes child exit, appends the `session.exit` control entry once the
 //!   output is drained (output-before-exit ordering,
@@ -393,8 +393,9 @@ impl SessionHandle {
     /// control entries due, in stream order. If nothing is ready and
     /// `wait` is non-zero, sleep on `clock` until there is something or the
     /// deadline passes (the cursor-pull primitive — architecture.md §3;
-    /// the same call backs `session read --wait`, `--follow` and MCP
-    /// long-poll). Never needs the lease. Works on a closed session too,
+    /// the same call backs `session read --wait`, `--follow` and a
+    /// long-running external process's (e.g. an agent tool) long-poll).
+    /// Never needs the lease. Works on a closed session too,
     /// so a follower can drain the trailing `session.closed`.
     ///
     /// `wait` is caller-supplied; an absurdly large value is clamped
@@ -475,7 +476,7 @@ impl SessionHandle {
     /// attach can name its axis to the credential rotation before the
     /// rotation has decided. A redemption that loses that race then burns
     /// nothing but a counter value: no map slot is taken, so a lost race
-    /// cannot evict a live peer's axis from the [`MAX_INPUT_AXES`] window.
+    /// cannot evict a live peer's axis from the `MAX_INPUT_AXES` window.
     ///
     /// A **fresh** id every time, never the predecessor's, is what keeps
     /// the previous attach — which may still be connected and typing after

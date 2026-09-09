@@ -21,9 +21,9 @@
 //! latched degraded (its last write failed and none has succeeded since).
 //! A record that *was* successfully enqueued before the latch trips — its
 //! op was already **allowed**, so the record must eventually land — is
-//! never dropped on the trip itself: [`run_writer`] moves it into an
+//! never dropped on the trip itself: `run_writer` moves it into an
 //! in-memory `pending` queue and retries flushing it, in order, on a fixed
-//! cadence ([`RETRY_TICK`]) until the write actually lands, at which point
+//! cadence (`RETRY_TICK`) until the write actually lands, at which point
 //! the latch clears automatically and a caller needs to take no action
 //! (`PLAN.md` M5 Step 3, F1). `record()` itself is unchanged by any of
 //! this: the latch check still runs *before* the enqueue, so an op that is

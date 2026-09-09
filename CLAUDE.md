@@ -15,8 +15,8 @@ QSH is a QUIC-based direct-connect remote shell (single Rust binary `qsh`) that 
 
 - `PLAN.md` — execution plan for the current milestone (living doc, replaced per milestone)
 - `docs/PRD.md` — product requirements (binding)
-- `docs/CLI.md` — CLI / JSON / MCP contract (binding)
-- `docs/ROADMAP.md` — milestones M0–M9 with scope and acceptance criteria
+- `docs/CLI.md` — CLI / JSON contract (binding)
+- `docs/ROADMAP.md` — milestones M0–M10 with scope and acceptance criteria
 - `docs/design/protocol.md` — wire protocol design (frames, streams, resume, reverse)
 - `docs/design/architecture.md` — crate/module design and key mechanisms
 - `docs/design/testing.md` — per-layer test strategy and CI discipline
@@ -47,15 +47,15 @@ same tree to find out.
 - `crates/qsh-proto` — contract layer: wire framing, JSON contract types, `ErrorCode`. sans-IO, no async. This is the fuzz surface.
 - `crates/qsh-transport` — quinn/rustls glue only. No session or ACL knowledge.
 - `crates/qsh-core` — ALL business logic: typed `Ops` facade, session broker, ACL choke point, identity/trust.
-- `crates/qsh-cli` (package `qsh-cli`, binary `qsh`) — thin frontends only: clap, human/JSON/JSONL renderers, interactive TUI, MCP adapter.
+- `crates/qsh-cli` (package `qsh-cli`, binary `qsh`) — thin frontends only: clap, human/JSON/JSONL renderers, interactive TUI.
 - `crates/qsh-testkit` — test harness.
 - `xtask` — arch-lint.
 
 ## Hard architecture rules (docs/design/architecture.md §1, enforced by xtask arch)
 
 - Allowed dependency matrix (exactly what `xtask arch` enforces): `qsh-proto` → nothing; `qsh-transport` → `qsh-proto`; `qsh-core` → `qsh-proto`, `qsh-transport`; `qsh-cli` → `qsh-core` and `qsh-proto` (contract types only — never `qsh-transport`); `qsh-testkit` → anything. Never backwards.
-- Renderers and the MCP adapter contain **zero** auth/ACL/session logic. They call only the typed `Ops` layer.
-- The MCP adapter never shells out to `qsh` and never re-parses CLI output. It calls `Ops` directly, same as the CLI frontend.
+- Renderers contain **zero** auth/ACL/session logic. They call only the typed `Ops` layer.
+- The built-in MCP adapter was retired in M8 Step 6 (ADR-0011); the agent-facing surface is the `qsh.cli/v1` JSON/JSONL CLI alone.
 
 If a change requires putting logic in `qsh-cli` to make something work, that's a signal the logic belongs in `qsh-core`'s `Ops` facade instead — move it, don't work around arch-lint.
 

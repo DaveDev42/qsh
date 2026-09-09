@@ -1,5 +1,7 @@
 # M6 MCP 실접속 캠페인 — Claude Code → `qsh mcp` → 원격 명령 실행
 
+> **철회 주석(M8 Step 6, ADR-0011):** 이 캠페인이 검증하던 내장 MCP adapter(`qsh mcp`)는 M8 Step 6에서 제거했다. 아래 기록은 M6 DoD 2 합격 당시의 실측 결과로 역사적 사실만 남기며, 더 이상 재현 대상이 아니다 — 현재 에이전트 연동 경로는 `docs/CLI.md`의 `qsh.cli/v1` JSON/JSONL CLI다.
+
 ## 1. 목적과 지위
 
 ROADMAP M6 DoD 2("Claude Code 실접속으로 원격 명령 실행")의 실측 기록이다. M2 mobility 캠페인과 달리 이 캠페인은 참고 자료가 아니라 **DoD 그 자체 — 합격/불합격 게이트다**. conformance 하네스(raw JSON-RPC)가 계약 준수를 이미 전수 검증했으므로, 여기서 보는 것은 하나다: SDK 기반 실제 MCP client(Claude Code)가 `qsh mcp`에 붙어 실제 qsh host에서 명령을 실행하고 결과를 받아오는가.

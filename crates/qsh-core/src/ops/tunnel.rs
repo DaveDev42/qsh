@@ -10,7 +10,7 @@
 //! interactive twin. M4 Step 5 PR 5b lands `tunnel.list`/`tunnel.close`
 //! ([`Ops::tunnel_list`]/[`Ops::tunnel_close`]) and route-awareness for
 //! `tunnel.open` (forward *and* reverse connections, via
-//! [`Ops::tunnel_open_reverse`]).
+//! `Ops::tunnel_open_reverse`).
 //!
 //! **Holder model** (`PLAN.md` M4 §4.1 #1, `docs/CLI.md` §6.14).
 //! `tunnel.open` is a *value* operation that returns one envelope
@@ -63,10 +63,10 @@ type TunnelCloseSignal = tokio::sync::oneshot::Sender<std::sync::mpsc::Sender<()
 /// [`Ops`]'s shared, [`Ops::clone`]-visible table of every tunnel this
 /// process is holding via [`Ops::tunnel_open_and_hold`], keyed by
 /// `tunnel_id`. `Arc`-backed so every clone of one `Ops` sees the same
-/// registrations — `crate::mcp::QshMcpServer`'s `call_tool` (`qsh-cli`)
-/// clones a fresh `Ops` per tool call, and an `open_tunnel` call's
-/// registration must still be visible to a *later* `close_tunnel` call's
-/// own clone.
+/// registrations — a long-running external process's (e.g. an agent tool)
+/// per-call adapter clones a fresh `Ops` per call, and an `open_tunnel`
+/// call's registration must still be visible to a *later* `close_tunnel`
+/// call's own clone.
 pub(crate) type TunnelHoldRegistry = Arc<Mutex<HashMap<String, TunnelCloseSignal>>>;
 
 /// A fresh, empty [`TunnelHoldRegistry`] — [`Ops::new`]'s own construction
@@ -365,8 +365,9 @@ impl TunnelHold {
     /// §6.9's "forward route에서는 tunnel이 그것을 연 CLI 프로세스에 수명이
     /// 결합된다") — exactly right for `qsh tunnel open`, one process per
     /// tunnel, but wrong for a long-running host that opens many tunnels
-    /// across many tool calls in one process (`qsh mcp`): killing that
-    /// process to close one tunnel would close all of them. This method is
+    /// across many calls in one process (a long-running external process,
+    /// e.g. an agent tool): killing that process to close one tunnel would
+    /// close all of them. This method is
     /// [`Ops::tunnel_open_and_hold`]'s only caller — it is what lets a
     /// *later*, same-process `close_tunnel` reach back into an *earlier*
     /// `open_tunnel`'s still-live hold.
@@ -511,11 +512,11 @@ impl Ops {
     /// Reverse route (`PLAN.md` M4 Step 5 PR 5b): relay through this
     /// machine's resident `qsh listen` daemon over the `LOCAL_STREAM`
     /// conduit instead of a QUIC connection this process does not hold.
-    /// `"local"` mode: [`LocalForwardHandle::start_reverse`] — each
+    /// `"local"` mode: `LocalForwardHandle::start_reverse` — each
     /// forwarded TCP connection opens its own `TCP_CONNECT`-carrying
     /// `LOCAL_STREAM` conduit, same as the forward route's per-connection
     /// stream, just relayed. `"remote"` mode:
-    /// [`RemoteForwardAcceptor::spawn_reverse`] mints this holder's own
+    /// `RemoteForwardAcceptor::spawn_reverse` mints this holder's own
     /// claim token *before* `RemoteForwardOpen` is sent — the daemon seats
     /// whatever `claim_token` that request carries as the only credential
     /// that may ever claim the resulting `forward_id`'s `TCP_ACCEPTED`
@@ -621,8 +622,8 @@ impl Ops {
         ))
     }
 
-    /// `tunnel.open` for a long-running, multi-call host process (`qsh mcp`,
-    /// `PLAN.md` M6 Step 2+3 검증 라운드 판정 ②/F2) rather than a one-shot
+    /// `tunnel.open` for a long-running, multi-call host process (e.g. an
+    /// agent tool, `PLAN.md` M6 Step 2+3 검증 라운드 판정 ②/F2) rather than a one-shot
     /// CLI invocation.
     ///
     /// [`Self::tunnel_open`] hands back a [`TunnelHold`] and leaves holding
@@ -644,9 +645,9 @@ impl Ops {
     /// long as this process runs, the same promise §6.14 makes for any
     /// holder — and registers a close signal for it, keyed by `tunnel_id`,
     /// in `self`'s own (shared, `Ops::clone()`-visible)
-    /// [`tunnel_holds`](Ops::tunnel_holds) table. [`Self::tunnel_close`]
+    /// `tunnel_holds` table. [`Self::tunnel_close`]
     /// checks that table before ever touching the cross-process daemon
-    /// fan-out ([`Self::admin_close_tunnel`]) — so a `close_tunnel` call in
+    /// fan-out (`Self::admin_close_tunnel`) — so a `close_tunnel` call in
     /// this *same* process, for a tunnel this *same* process opened this
     /// way, is truthful (`closed: true` really tears the forward down)
     /// regardless of route, not only for a daemon-held reverse `-R`. A
@@ -721,8 +722,8 @@ impl Ops {
     /// 5 PR 5b): every tunnel visible to this caller.
     ///
     /// Only ever the daemon-held reverse source — the direct structural
-    /// twin of [`crate::ops::host::Ops::host_list`]'s reverse source
-    /// ([`crate::localctl::client::admin_tunnel_list_all`], the twin of
+    /// twin of [`crate::ops::Ops::host_list`]'s reverse source
+    /// (`crate::localctl::client::admin_tunnel_list_all`, the twin of
     /// `admin_host_list_all`). A forward-route `-L`/`-R` opened by a
     /// standalone `qsh tunnel open` has **no** entry here: that tunnel's
     /// only holder is the CLI process that opened it (`docs/CLI.md` §6.14's
@@ -735,7 +736,7 @@ impl Ops {
     /// ones *it* holds, and only `-R over reverse` ever registers a
     /// `forward_id` with a daemon at all
     /// ([`qsh_proto::local::LocalTunnel::mode`]'s own doc:
-    /// [`crate::reverse::listen::ForwardMeta::mode`] is always
+    /// `ForwardMeta::mode` is always
     /// `"remote"`).
     ///
     /// Never dials anything and never fails closed on an unreachable or

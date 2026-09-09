@@ -1,10 +1,11 @@
-//! JSON contract types shared by the CLI, the ops layer and (eventually) the
-//! MCP adapter. These mirror `docs/CLI.md` field-for-field; when the two
-//! disagree, `docs/CLI.md` is the source of truth and this file is wrong.
+//! JSON contract types shared by the CLI, the ops layer and any long-running
+//! external process (e.g. an agent tool) integrating over `qsh.cli/v1`.
+//! These mirror `docs/CLI.md` field-for-field; when the two disagree,
+//! `docs/CLI.md` is the source of truth and this file is wrong.
 //!
 //! Every `*Req`/`*Data` type derives `JsonSchema` (schemars) so the same
-//! Rust definition drives the CLI envelope, golden-fixture validation and
-//! (from M6) MCP tool schemas — one source (`docs/design/architecture.md` §2).
+//! Rust definition drives the CLI envelope and golden-fixture validation —
+//! one source (`docs/design/architecture.md` §2).
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -308,8 +309,9 @@ pub struct SessionAttachReq {
     pub no_steal: bool,
 }
 
-/// Request for `session.read` (`docs/CLI.md` §6.4; same field names as the
-/// MCP `read_session` tool, §8.3).
+/// Request for `session.read` (`docs/CLI.md` §6.4; the same cursor-pull
+/// shape a long-running external process's, e.g. an agent tool, long-poll
+/// caller would send).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionReadReq {
     /// Opaque session handle.
@@ -694,7 +696,7 @@ pub struct CertIssueReq {}
 
 /// The `trust.toml [[ca]]` registration half of `cert.issue`'s result —
 /// the same created/updated shape as [`TrustAddData`] (ADR-0008 §6 결과:
-/// "trust.toml [[ca]] 등재는... trust add(Step 2) 선례를 따른다"). Never
+/// "trust.toml \[\[ca\]\] 등재는... trust add(Step 2) 선례를 따른다"). Never
 /// carries the raw PEM: only the CA's own fingerprint, so this payload
 /// stays golden-fixture-stable across regenerations (a fresh CA's PEM
 /// bytes differ every run; its trust-entry shape does not).
@@ -1359,8 +1361,10 @@ mod tests {
     }
 
     #[test]
-    fn session_read_req_matches_mcp_read_session_shape() {
-        // CLI.md §8.3: {session_ref, after_sequence, wait_ms, limit_bytes}.
+    fn session_read_req_matches_long_poll_cursor_shape() {
+        // The cursor-pull request shape a long-poll caller sends over
+        // qsh.cli/v1's session.read: {session_ref, after_sequence, wait_ms,
+        // limit_bytes}.
         let json = serde_json::json!({
             "session_ref": "personal-mac/01K0SESSION",
             "after_sequence": 42,

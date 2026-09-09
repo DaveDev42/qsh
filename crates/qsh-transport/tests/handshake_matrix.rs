@@ -27,6 +27,7 @@
 //! | 15 | mixed: client by pin, server by CA                        | OK |
 //! | 16 | client presents no certificate at all                     | handshake fails, no `Connection` |
 //! | 17 | server `pairing_open()==true`, client cert pinned nowhere | OK, `Principal::Pairing`/`AuthPath::Pairing` |
+//! | 18 | client dials with a mismatched ALPN (`qsh/0`), cert otherwise valid/pinned | client `DialError::RemoteRejected` (TLS `no_application_protocol`), server `HandshakeErr` before any principal/`Connection` |
 //!
 //! Case 17 is the M7 Step 4 (ADR-0002) addition: the pairing fallback only
 //! ever applies *after* both the pin and CA paths have already failed
@@ -54,18 +55,19 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use rcgen::string::Ia5String;
 use rcgen::{BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair, PKCS_ED25519, SanType};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::pki_types::{ServerName, UnixTime};
+use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, SignatureScheme};
 use time::{Duration as TimeDuration, OffsetDateTime};
 
 use qsh_transport::{
     AcceptError, AuthPath, CertificateDer, DialError, Dialed, Dialer, Fingerprint, Listener,
-    LocalIdentity, Principal, RejectReason, StaticTrust,
+    LocalIdentity, Principal, RejectReason, StaticTrust, TrustEvaluator,
 };
 
 fn loopback() -> SocketAddr {
@@ -93,7 +95,7 @@ fn self_signed_window(not_before: OffsetDateTime, not_after: OffsetDateTime) -> 
     Cert {
         identity: LocalIdentity {
             cert_chain: vec![der],
-            key_pkcs8_der: key.serialize_der(),
+            key_pkcs8_der: zeroize::Zeroizing::new(key.serialize_der()),
         },
         fingerprint,
     }
@@ -148,7 +150,7 @@ fn ca_signed(ca: &Ca, san_uri: Option<&str>) -> Cert {
     Cert {
         identity: LocalIdentity {
             cert_chain: vec![der],
-            key_pkcs8_der: key.serialize_der(),
+            key_pkcs8_der: zeroize::Zeroizing::new(key.serialize_der()),
         },
         fingerprint,
     }
@@ -848,4 +850,213 @@ async fn case17b_pairing_closed_still_rejects_unpinned_peer() {
     expect_remote_rejected(dial_result).await;
     let server_outcome = join_server(server_handle).await;
     assert!(server_outcome.is_rejected());
+}
+
+/// Wraps a [`StaticTrust`] and counts calls to [`TrustEvaluator::
+/// lookup_pin`] — the single pin-lookup point on the accept path
+/// (`crates/qsh-transport/src/tls.rs:217`, `QshPeerVerifier::
+/// verify_core`). Used by case18 to observe "the server never attempted
+/// to compute a principal" directly, rather than inferring it from the
+/// accept outcome alone (`ServerAccept::HandshakeErr` proves no
+/// `Connection` was produced, but not that `lookup_pin` itself was never
+/// called — BRIEF-6 §1 item 4 / lens-2 finding). `ca_roots`/
+/// `pairing_open` pass straight through so wrapping never changes
+/// accept behavior, only observes it.
+struct CountingTrust {
+    inner: StaticTrust,
+    lookups: AtomicUsize,
+}
+
+impl CountingTrust {
+    fn new(inner: StaticTrust) -> Self {
+        Self {
+            inner,
+            lookups: AtomicUsize::new(0),
+        }
+    }
+
+    fn lookup_count(&self) -> usize {
+        self.lookups.load(Ordering::SeqCst)
+    }
+}
+
+impl TrustEvaluator for CountingTrust {
+    fn lookup_pin(&self, fingerprint: &Fingerprint) -> Option<Principal> {
+        self.lookups.fetch_add(1, Ordering::SeqCst);
+        self.inner.lookup_pin(fingerprint)
+    }
+
+    fn ca_roots(&self) -> Vec<CertificateDer<'static>> {
+        self.inner.ca_roots()
+    }
+
+    fn pairing_open(&self) -> bool {
+        self.inner.pairing_open()
+    }
+}
+
+/// The TLS alert QUIC encodes ALPN mismatch as: `no_application_protocol`
+/// is alert 120 (RFC 7301 §3.2), and RFC 9001 §4.8 encodes a TLS alert as
+/// transport error code `0x100 + alert`. Narrower than
+/// [`qsh_transport::endpoint::is_crypto_failure`]'s whole `0x100..=0x1ff`
+/// crypto-class band, which also accepts unrelated alerts (e.g. a
+/// certificate failure) — case18's own doc names `no_application_protocol`
+/// specifically, so the assertion should too (BRIEF-6 §1 item 4 / lens-2
+/// finding: confirmed by probe against a live mismatch, see PROGRESS-6).
+const ALPN_MISMATCH_ERROR_CODE: u64 = 0x100 + 120;
+
+/// True when `err` is exactly the QUIC `ConnectionClosed` carrying
+/// [`ALPN_MISMATCH_ERROR_CODE`] — i.e. a TLS `no_application_protocol`
+/// alert, and nothing broader.
+fn is_alpn_mismatch(err: &quinn::ConnectionError) -> bool {
+    match err {
+        quinn::ConnectionError::ConnectionClosed(cc) => {
+            let raw: u64 = cc.error_code.into();
+            raw == ALPN_MISMATCH_ERROR_CODE
+        }
+        _ => false,
+    }
+}
+
+// ---------------------------------------------------------------------
+// 18. ALPN mismatch (BRIEF-6 §1.2) -- client's cert and both trust stores
+//     are otherwise exactly case01's happy path; only the ALPN the client
+//     advertises differs (`qsh/0` instead of the wire's `qsh/1`,
+//     `qsh_proto::wire::ALPN`). Invariant under test: an ALPN mismatch
+//     must fail *during the TLS handshake itself*, before either side ever
+//     reaches application state -- the server must never compute a
+//     principal or hand back a `Connection`, and the client's failure must
+//     be the crypto-class alert (`no_application_protocol`, RFC 7301 §3.2),
+//     not some later protocol-level rejection. Built with a bare
+//     rustls/quinn client (not `Dialer`, which always sets the production
+//     ALPN with no injection point -- deliberately: `Dialer` is not the
+//     place to make ALPN pluggable for a test) the same way case16 builds
+//     its bare client for "no certificate"; here the client cert is valid
+//     and pinned so the only broken variable is ALPN.
+// ---------------------------------------------------------------------
+#[tokio::test(flavor = "multi_thread")]
+async fn case18_alpn_mismatch_remote_rejected_before_application_state() {
+    let server = self_signed_valid();
+    let client = self_signed_valid();
+    let server_trust =
+        StaticTrust::empty().with_pin(client.fingerprint, Principal::Device("client".into()));
+    let server_trust = Arc::new(CountingTrust::new(server_trust));
+    let listener = Listener::bind(loopback(), server.identity, server_trust.clone()).unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server_task = tokio::spawn(async move {
+        let Some(incoming) = listener.accept().await else {
+            return ServerAccept::NoConnection;
+        };
+        match incoming.accept().await {
+            Ok(conn) => ServerAccept::Ok(conn.principal().clone(), conn.auth_path()),
+            Err(AcceptError::Unverified(reason)) => ServerAccept::Unverified(reason),
+            Err(_) => ServerAccept::HandshakeErr,
+        }
+    });
+
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+        client.identity.key_pkcs8_der.to_vec(),
+    ));
+    let mut tls = rustls::ClientConfig::builder_with_provider(provider)
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .unwrap()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(AcceptAllServerCerts))
+        .with_client_auth_cert(client.identity.cert_chain.clone(), key)
+        .unwrap();
+    // The one deliberately wrong value in this test: every other knob
+    // mirrors `client_tls_config` (`crates/qsh-transport/src/endpoint.rs`).
+    tls.alpn_protocols = vec![b"qsh/0".to_vec()];
+    let quic = quinn::crypto::rustls::QuicClientConfig::try_from(tls).unwrap();
+    let client_config = quinn::ClientConfig::new(Arc::new(quic));
+    let mut endpoint = quinn::Endpoint::client(loopback()).unwrap();
+    endpoint.set_default_client_config(client_config);
+
+    let connecting = endpoint.connect(addr, "127.0.0.1").unwrap();
+    let dial_err = match connecting.await {
+        Err(err) => err,
+        Ok(conn) => conn.closed().await,
+    };
+    assert!(
+        is_alpn_mismatch(&dial_err),
+        "ALPN mismatch must surface as exactly the TLS `no_application_protocol` \
+         alert (error_code {ALPN_MISMATCH_ERROR_CODE:#x}), got {dial_err:?}"
+    );
+
+    let server_outcome = tokio::time::timeout(Duration::from_secs(10), server_task)
+        .await
+        .expect("server task did not finish (possible hang)")
+        .expect("server task panicked");
+    assert!(
+        matches!(server_outcome, ServerAccept::HandshakeErr),
+        "server must fail the handshake on ALPN mismatch before deriving a \
+         principal or producing a Connection (never Ok, never Unverified): \
+         {server_outcome:?}"
+    );
+    assert_eq!(
+        server_trust.lookup_count(),
+        0,
+        "the server must never attempt a principal lookup on an ALPN mismatch \
+         -- the handshake must fail before the peer certificate is even \
+         evaluated"
+    );
+}
+
+/// Control for case18's `lookup_pin` observation: the same [`CountingTrust`]
+/// wrapper, on case01's own happy-path setup (matching ALPN, valid pinned
+/// certs both ways). If the wrapper actually counted nothing regardless of
+/// what happened on the wire, case18's `lookup_count() == 0` assertion
+/// would be vacuous. This shows the opposite for a case that must reach
+/// verification: at least one `lookup_pin` call (BRIEF-6 §1 item 4 / lens-2
+/// finding).
+#[tokio::test(flavor = "multi_thread")]
+async fn case18_control_lookup_pin_wrapper_counts_a_successful_handshake() {
+    let server = self_signed_valid();
+    let client = self_signed_valid();
+    let server_trust =
+        StaticTrust::empty().with_pin(client.fingerprint, Principal::Device("client".into()));
+    let client_trust =
+        StaticTrust::empty().with_pin(server.fingerprint, Principal::Device("server".into()));
+    let server_trust = Arc::new(CountingTrust::new(server_trust));
+
+    let listener = Listener::bind(loopback(), server.identity, server_trust.clone()).unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server_task = tokio::spawn(async move {
+        let Some(incoming) = listener.accept().await else {
+            return ServerAccept::NoConnection;
+        };
+        match incoming.accept().await {
+            Ok(conn) => {
+                let outcome = ServerAccept::Ok(conn.principal().clone(), conn.auth_path());
+                let _ = conn.closed().await;
+                outcome
+            }
+            Err(AcceptError::Unverified(reason)) => ServerAccept::Unverified(reason),
+            Err(_) => ServerAccept::HandshakeErr,
+        }
+    });
+
+    let dialer = Dialer::new(client.identity, Arc::new(client_trust));
+    let dialed = dialer
+        .dial(addr, "127.0.0.1")
+        .await
+        .expect("a matching-ALPN, mutually-pinned dial must succeed");
+    dialed.connection.close(0, b"done");
+
+    let server_outcome = tokio::time::timeout(Duration::from_secs(10), server_task)
+        .await
+        .expect("server task did not finish (possible hang)")
+        .expect("server task panicked");
+    assert!(
+        matches!(server_outcome, ServerAccept::Ok(..)),
+        "control setup must reach a successful accept: {server_outcome:?}"
+    );
+    assert!(
+        server_trust.lookup_count() >= 1,
+        "the wrapper must observe at least one lookup_pin call on a handshake \
+         that actually reaches verification -- otherwise case18's \
+         lookup_count() == 0 assertion would not be distinguishing anything"
+    );
 }

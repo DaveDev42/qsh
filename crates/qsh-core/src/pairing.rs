@@ -96,19 +96,23 @@ pub enum PairingError {
     ResponderProofMismatch,
     /// The peer-reported `device_name` — `PairingProof.device_name` on the
     /// responder side, `PairingAccepted.device_name` on the initiator side
-    /// — contained a control character (`char::is_control()`, tab
-    /// included: a device name is a label, not formatted text). Rejected
-    /// at ingest, before any pin, persist, or tracing emission
-    /// (`docs/CLI.md` §6.11, `docs/design/protocol.md` §15.5) — a name
-    /// like this reaching `human.rs`'s `print_trust_*` renderers could
-    /// otherwise overwrite or hide the fingerprint printed right next to
-    /// it, which is exactly the value pairing tells the operator to
-    /// compare out of band. Never carries the rejected value itself, even
-    /// here — only which field was rejected, never what it contained.
-    #[error("{field} contains a control character; device names must not")]
+    /// — failed [`wire::validate_device_name`] (control character, bidi
+    /// control, zero-width character, or a length outside `1..=64` bytes;
+    /// see that function's own doc for the full table and why homoglyphs
+    /// are deliberately not on it). Rejected at ingest, before any pin,
+    /// persist, or tracing emission (`docs/CLI.md` §6.11, `docs/design/
+    /// protocol.md` §15.5) — a name like this reaching `human.rs`'s
+    /// `print_trust_*` renderers could otherwise overwrite or hide the
+    /// fingerprint printed right next to it, which is exactly the value
+    /// pairing tells the operator to compare out of band. Never carries
+    /// the rejected value itself, even here — only which field was
+    /// rejected and why, never what it contained.
+    #[error("{field} is not a valid device name: {reason}")]
     InvalidDeviceName {
         /// Which wire field failed validation.
         field: &'static str,
+        /// Why [`wire::validate_device_name`] rejected it.
+        reason: wire::DeviceNameError,
     },
     /// The responder answered with a wire `Error` frame.
     #[error("{code}: {message}")]
@@ -183,16 +187,15 @@ impl PairingError {
     }
 }
 
-/// Reject a peer-reported device name containing a control character
-/// (`char::is_control()`, tab included) — applied to both wire directions
-/// before any pin, persist, or tracing emission ever sees the value (see
+/// Reject a peer-reported device name that fails [`wire::validate_device_name`]
+/// (control character, bidi control, zero-width character, or a length
+/// outside `1..=64` bytes) — applied to both wire directions before any
+/// pin, persist, or tracing emission ever sees the value (see
 /// [`PairingError::InvalidDeviceName`]'s own doc for why). Never echoes
 /// `name` in the error it returns, even on rejection.
 fn reject_control_chars(name: &str, field: &'static str) -> Result<(), PairingError> {
-    if name.chars().any(char::is_control) {
-        return Err(PairingError::InvalidDeviceName { field });
-    }
-    Ok(())
+    wire::validate_device_name(name)
+        .map_err(|reason| PairingError::InvalidDeviceName { field, reason })
 }
 
 /// A verified pairing exchange's result: the *other* side's self-reported
@@ -493,7 +496,8 @@ mod tests {
                 matches!(
                     err,
                     PairingError::InvalidDeviceName {
-                        field: "PairingProof.device_name"
+                        field: "PairingProof.device_name",
+                        reason: wire::DeviceNameError::Control,
                     }
                 ),
                 "unexpected error for {bad:?}: {err:?}"
@@ -515,7 +519,94 @@ mod tests {
     fn invalid_device_name_maps_to_invalid_argument_on_the_wire() {
         let err = PairingError::InvalidDeviceName {
             field: "PairingProof.device_name",
+            reason: wire::DeviceNameError::Control,
         };
         assert_eq!(err.as_wire_error().error_code(), ErrorCode::InvalidArgument);
+    }
+
+    /// The boundary this guard now enforces (`docs/design/protocol.md`
+    /// §15.5's length row): exactly 64 bytes passes, 65 bytes fails —
+    /// checked once in ASCII (byte count == char count) and once in a
+    /// multi-byte script (Korean, 3 bytes/char) so the boundary is proven
+    /// on the UTF-8 *byte* length, not the char count.
+    #[test]
+    fn reject_control_chars_enforces_the_64_byte_boundary() {
+        let ascii_64 = "a".repeat(64);
+        let ascii_65 = "a".repeat(65);
+        assert!(reject_control_chars(&ascii_64, "PairingProof.device_name").is_ok());
+        assert!(matches!(
+            reject_control_chars(&ascii_65, "PairingProof.device_name"),
+            Err(PairingError::InvalidDeviceName {
+                reason: wire::DeviceNameError::Length,
+                ..
+            })
+        ));
+
+        // "가" is 3 bytes in UTF-8: 21 chars = 63 bytes (fits), 22 chars =
+        // 66 bytes (a multi-byte overshoot past 64, not just an off-by-one).
+        let hangul_63_bytes = "가".repeat(21);
+        let hangul_66_bytes = "가".repeat(22);
+        assert_eq!(hangul_63_bytes.len(), 63);
+        assert_eq!(hangul_66_bytes.len(), 66);
+        assert!(reject_control_chars(&hangul_63_bytes, "PairingProof.device_name").is_ok());
+        assert!(matches!(
+            reject_control_chars(&hangul_66_bytes, "PairingProof.device_name"),
+            Err(PairingError::InvalidDeviceName {
+                reason: wire::DeviceNameError::Length,
+                ..
+            })
+        ));
+    }
+
+    /// An empty name is rejected the same way an oversized one is (the
+    /// length row covers both ends of `1..=64`).
+    #[test]
+    fn reject_control_chars_rejects_an_empty_name() {
+        assert!(matches!(
+            reject_control_chars("", "PairingProof.device_name"),
+            Err(PairingError::InvalidDeviceName {
+                reason: wire::DeviceNameError::Length,
+                ..
+            })
+        ));
+    }
+
+    /// Bidi-override and zero-width characters are neither of them
+    /// `char::is_control()` (the RLO trick this closes: a name that
+    /// visually rewrites its own or a neighboring fingerprint line without
+    /// tripping the older control-character guard — `docs/design/
+    /// protocol.md` §15.5).
+    #[test]
+    fn reject_control_chars_rejects_bidi_and_zero_width() {
+        assert!(matches!(
+            reject_control_chars("evil\u{202e}name", "PairingProof.device_name"),
+            Err(PairingError::InvalidDeviceName {
+                reason: wire::DeviceNameError::Bidi,
+                ..
+            })
+        ));
+        assert!(matches!(
+            reject_control_chars("evil\u{200b}name", "PairingProof.device_name"),
+            Err(PairingError::InvalidDeviceName {
+                reason: wire::DeviceNameError::ZeroWidth,
+                ..
+            })
+        ));
+        assert!(matches!(
+            reject_control_chars("evil\u{feff}name", "PairingProof.device_name"),
+            Err(PairingError::InvalidDeviceName {
+                reason: wire::DeviceNameError::ZeroWidth,
+                ..
+            })
+        ));
+    }
+
+    /// A name built from ordinary multi-byte characters — Korean text, an
+    /// emoji — is not itself a rejection reason; only the specific
+    /// code-point classes in `wire::validate_device_name`'s table are.
+    #[test]
+    fn reject_control_chars_allows_hangul_and_emoji_names() {
+        assert!(reject_control_chars("데이브의 맥북", "PairingProof.device_name").is_ok());
+        assert!(reject_control_chars("laptop 💻", "PairingProof.device_name").is_ok());
     }
 }

@@ -400,7 +400,7 @@ pub(crate) async fn splice_tcp_quic(
 /// [`SpliceGuard`]'s counterpart for [`splice_tcp_uds`]: only the local TCP
 /// half needs drop-driven reset teardown here. The remote half is the
 /// reverse `LOCAL_STREAM` conduit to this same machine's resident daemon
-/// (raw [`crate::localctl::client::RawUdsRead`]/`RawUdsWrite`), which has
+/// (raw `crate::localctl::client::RawUdsRead`/`RawUdsWrite`), which has
 /// no equivalent abrupt-close signal available through tokio — exactly the
 /// asymmetry `crate::localctl::daemon::TunnelQuicGuard`'s own doc already
 /// establishes for the daemon's own UDS↔QUIC relay hop ("losing the
@@ -456,7 +456,7 @@ impl Drop for LocalTcpGuard {
 /// identically on either carrier.
 ///
 /// `residue` is the handshake leftover
-/// [`crate::localctl::client::DataRecvHalf::into_raw`] hands back — see
+/// `crate::localctl::client::DataRecvHalf::into_raw` hands back — see
 /// [`splice_tcp_quic`]'s own doc on why it must lead the stream.
 ///
 /// Teardown is asymmetric by design — see [`LocalTcpGuard`]'s own doc: the

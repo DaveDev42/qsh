@@ -95,6 +95,16 @@ jobs:
       # on Linux is enough (header comment).
       - if: matrix.os == 'ubuntu-24.04'
         run: cargo test --workspace --doc
+      # Runs on all four runners, unlike the doc-test step above: an
+      # intra-doc link on a `#[cfg(...)]`-gated item must not resolve only
+      # on the platform that happens to compile that item in, so "zero
+      # warnings" needs every target this matrix builds for, not just one.
+      # Reproduce a Windows-only break from macOS or Linux with:
+      #   RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps --target x86_64-pc-windows-gnu
+      - name: Doc (no warnings)
+        run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
 
   # The interactive acceptance set (`PLAN.md` M2 DoD 2) as a *standing*
   # gate. The suite skips an acceptance item whose binary is missing, which

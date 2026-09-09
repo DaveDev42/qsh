@@ -48,7 +48,7 @@ pub trait TrustEvaluator: Send + Sync + 'static {
     /// implementor (`StaticTrust`, and any test/probe evaluator) needs no
     /// change; only `qsh-core`'s `SharedTrustStore` overrides this, backed
     /// by whether it currently has a live invite record. Checked by
-    /// [`QshPeerVerifier::verify_core`] only *after* both the pin and the
+    /// `QshPeerVerifier::verify_core` only *after* both the pin and the
     /// CA-chain paths have already failed — an evaluator that pins or
     /// CA-signs a peer is never routed through this fallback.
     fn pairing_open(&self) -> bool {

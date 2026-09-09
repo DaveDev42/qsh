@@ -1,4 +1,4 @@
-# QSH CLI, JSON and MCP Contract
+# QSH CLI and JSON Contract
 
 **상태:** Draft v0.10 (M3 Step 8 — 역방향 위 resume: §6.4 recovery 진단의 `registration_wait_ms`가 실제로 채워짐(정방향 `0`, 역방향은 재등록 대기 시간) — `recovery` 값 집합은 무변경, 필드는 M2 세 필드 뒤에 additive로 붙는다; v0.9 = M3 Step 7 — 대화형 attach(`qsh [user@]host`/`qsh attach`)가 역방향 등록 host를 향해서도 §6.13의 `LOCAL_CONTROL`/`LOCAL_STREAM` 경로를 타도록 landing — §6.13 갱신(더 이상 forward 전용이 아님, 그리고 역방향 leg에는 reconnect/recovery가 없다는 점 명시); v0.8 = M3 Step 1 — `Host`의 `state`/`device_id` 값 어휘 확정과 역방향 등록 ACL 매핑(§2.5·§5)·`host.list`/`host.get` 데이터 소스(§6.1)·recovery 진단의 `registration_wait_ms`(§6.4)·신규 §6.13 `qsh listen`/`qsh reverse` 계약 추가; v0.7 = M2 Step 7 — `session.attach`는 resume credential을 **반드시** 요구하며 그 실패는 항상 non-distinguishing `AUTH_FAILED`임을 §6.3·§6.4에 명문화; v0.6 = `session read --follow` 출력 형태와 `--wait` 하한 명문화, v0.5 = M2 계약 확정, v0.4 = M1 구현과 동기화)  
 **대상:** QSH MVP  
@@ -6,18 +6,16 @@
 
 ## 1. 목적
 
-QSH는 하나의 명령 체계를 사람, shell script와 MCP client가 함께 사용하도록 설계한다.
+QSH는 하나의 명령 체계를 사람과 shell script가 함께 사용하도록 설계한다.
 
 - 기본 출력은 사람이 읽기 쉽다.
 - `--json`과 `--jsonl`은 안정된 machine-readable contract다.
-- `qsh mcp`는 동일한 내부 operation을 MCP tool로 노출한다.
-- CLI와 MCP 사이에 별도 business logic이나 권한 모델을 만들지 않는다.
+- 내장 MCP adapter(`qsh mcp`)는 M8 Step 6에서 철회됐다(ADR-0011) — 에이전트 연동 면은 이 `qsh.cli/v1` JSON/JSONL 계약 하나로 통일한다. 원격 stdio MCP 서버를 띄워야 하면 `qsh exec host -- <server>`로 그 프로세스를 실행한다(§8).
 
 ```text
 Typed QSH operations
 ├── Human renderer
-├── JSON / JSONL renderer
-└── MCP stdio adapter
+└── JSON / JSONL renderer
 ```
 
 ## 2. 공통 규칙
@@ -61,7 +59,7 @@ qsh hosts --json
 
 ### 2.4 Operation 이름
 
-CLI의 `command`, JSON envelope, audit record와 MCP tool mapping은 하나의 dotted operation 이름을 공유한다. 각 operation이 요구하는 ACL action은 §2.5의 매핑 표에서 정의한다.
+CLI의 `command`, JSON envelope와 audit record는 하나의 dotted operation 이름을 공유한다. 각 operation이 요구하는 ACL action은 §2.5의 매핑 표에서 정의한다.
 
 ```text
 host.list
@@ -93,7 +91,7 @@ capabilities.get
 version.get
 ```
 
-`session.attach`는 value operation이 아니라 stream operation이다 (§7.1 참고). CLI subcommand 표기(`qsh hosts`, `qsh session open` 등)와 이 dotted 이름은 서로 다른 계층이며, envelope의 `command` field·audit record·MCP mapping은 항상 이 dotted 이름을 사용한다.
+`session.attach`는 value operation이 아니라 stream operation이다 (§7.1 참고). CLI subcommand 표기(`qsh hosts`, `qsh session open` 등)와 이 dotted 이름은 서로 다른 계층이며, envelope의 `command` field와 audit record는 항상 이 dotted 이름을 사용한다.
 
 `acl.check`(§6.15, M5)는 원격 peer가 요청하는 operation이 아니라 **이 머신 자신의** `acl.toml`을 로컬에서 조회하는 op이다 — §2.5의 "인가 불요" 행이 다른 local-only operation들과 함께 명시한다.
 
@@ -400,7 +398,7 @@ Closed event (wire `SessionEvent::Closed`). 세션이 broker에서 제거되어 
 
 두 event는 `qsh.event/v1`에 additive로 추가된 타입이다(§10). **소비자는 알 수 없는 event `type`을 오류 없이 무시(skip)해야 한다** — 알 수 없는 field를 무시하는 §2.3 규칙의 event 수준 대응이며, 새 event 타입은 major bump 없이 추가될 수 있다. `qsh.event/v1`은 아직 출시된 producer가 없으므로 이 규칙은 v1 최초 구현부터 적용된다(`qsh-proto`의 event 타입은 unknown-type fallback을 가져야 한다, architecture.md §2).
 
-**전달 경로와 순서.** `session.exit`/`session.writer_changed`/`session.closed`는 broker가 ReplayRing에 **zero-length 제어 엔트리**로 append하며, `pull()`(architecture.md §3)의 반환 event 열에서 `session.output`과 **전순서(total order)** 로 섞여 나온다 — 단발 `session read --wait`/MCP `read_session` 결과 배열에도 그대로 포함될 수 있다. 이 event들의 `sequence`는 append 시점의 누적 output offset이며 offset을 증가시키지 않는다. attach 중인 connection은 같은 event를 control 스트림의 wire `SessionEvent`로도 받는다.
+**전달 경로와 순서.** `session.exit`/`session.writer_changed`/`session.closed`는 broker가 ReplayRing에 **zero-length 제어 엔트리**로 append하며, `pull()`(architecture.md §3)의 반환 event 열에서 `session.output`과 **전순서(total order)** 로 섞여 나온다 — 단발 `session read --wait` 결과 배열에도 그대로 포함될 수 있다. 이 event들의 `sequence`는 append 시점의 누적 output offset이며 offset을 증가시키지 않는다. attach 중인 connection은 같은 event를 control 스트림의 wire `SessionEvent`로도 받는다.
 
 **`--follow`의 종료.** `--follow`는 `session.exit`를 수신하면 즉시 정상 종료한다(exit `0`) — TTL 정리(`session.closed{reason:"exit"}`)를 기다리지 않는다. 실행 중이던 세션이 `session.close`/reaper로 제거되면 `session.closed`가 마지막 event이고 그 직후 종료한다.
 
@@ -743,7 +741,7 @@ invite는 한 번만 redeem된다 — 성공하는 순간 소비되고, **다른
 
 pin 시점에 이름 충돌이 생기면 — 상대가 자칭하는 이름이 이미 다른 fingerprint로 pin되어 있으면 — `trust.add`가 같은 상황에서 취하는 조용한 no-op과 달리 pairing은 `SESSION_CONFLICT`로 크게 실패한다. 이 실패는 invite를 소비하지 않는다: 충돌은 pin을 시도한 쪽의 로컬 상태 문제일 뿐이므로, 같은 code를 다른 상대가 곧바로 다시 시도할 수 있다.
 
-상대가 자칭하는 `device_name`(양쪽 다 — initiator의 `PairingProof.device_name`, responder의 `PairingAccepted.device_name`)에 제어 문자(tab 포함, `char::is_control()`)가 하나라도 있으면 그 자리에서 `INVALID_ARGUMENT`로 거부한다 — 어느 쪽도 pin되지 않고, 거부된 값 자체는 로그에 남기지 않는다. `device_name`은 인증 입력이 아닌 자칭 label일 뿐이지만, human 렌더러가 `{name} ({fingerprint})`를 한 줄에 찍으므로 이스케이프 시퀀스가 그 fingerprint(바로 위 문단이 사후 대조를 권하는 값)를 가리거나 지울 수 있다는 것이 이 거부의 이유다(`docs/design/protocol.md` §15.5).
+상대가 자칭하는 `device_name`(양쪽 다 — initiator의 `PairingProof.device_name`, responder의 `PairingAccepted.device_name`)이 `docs/design/protocol.md` §15.5의 `validate_device_name` 표를 벗어나면 — 제어 문자(tab 포함, `char::is_control()`), bidi 제어(U+202A–U+202E, U+2066–U+2069, U+200E–U+200F), zero-width 문자(U+200B–U+200D, U+2060, U+FEFF), 또는 UTF-8 길이가 0바이트이거나 64바이트를 넘음 — 그 자리에서 `INVALID_ARGUMENT`로 거부한다 — 어느 쪽도 pin되지 않고, 거부된 값 자체는 로그에 남기지 않는다. `device_name`은 인증 입력이 아닌 자칭 label일 뿐이지만, human 렌더러가 `{name} ({fingerprint})`를 한 줄에 찍으므로 이스케이프 시퀀스나 bidi override가 그 fingerprint(바로 위 문단이 사후 대조를 권하는 값)를 가리거나 지우거나 표시 순서를 뒤집을 수 있다는 것이 이 거부의 이유다. homoglyph는 탐지하지 않는다 — fingerprint 병기가 방어선이다(`docs/design/protocol.md` §15.5).
 
 `qsh serve`로 이미 떠 있는 데몬은 재시작 없이 새로 발급된 invite를 인식한다 — `trust.remove`(바로 위 문단)가 따르는 것과 같은 content-based reload 원칙이 invite store에도 그대로 적용된다. 이 재로드는 `qsh trust invite`(CLI 프로세스)와 `qsh serve`(daemon)가 같은 `invites.toml`을 서로 다른 프로세스에서 잠금 없이 읽고 쓰는 형태라, 두 프로세스의 쓰기가 정확히 겹치는 좁은 창에서는 한쪽의 갱신이 다른 쪽에 곧바로 반영되지 않을 수 있다(예: 거의 동시에 발급된 두 invite 중 하나가 다음 redeem 조회에서 아직 보이지 않는 경우) — 이후 재시도나 다음 저장 시점에는 다시 수렴하므로 invite가 영구히 사라지지는 않지만, 완전한 파일 잠금은 아직 없다(Step 7 debt로 이월).
 
@@ -767,7 +765,7 @@ qsh serve --bind <ip:port>
 - **Foreground 전용(M1).** 데몬화는 QSH 자체가 하지 않고 OS 서비스 매니저(systemd/launchd)에 위임한다.
 - `--bind`의 우선순위: CLI flag > `config.toml`의 `[serve].bind` > 기본값 `[::]:4433`.
 - 시작 시 실제로 bind된 주소를 stderr에 출력한다. stdout은 §2.2 규칙에 따라 JSON 계약 전용이므로 여기서는 쓰지 않는다.
-- listener 재시작 시 세션 소실에 대해서는 README의 [Known limitations](../README.md#known-limitations-mvp-by-design)를 참고한다.
+- listener 재시작 시 세션 소실에 대해서는 README의 [Known limitations](../README.md#known-limitations)를 참고한다.
 - **SIGTERM drain(M2, ADR-0003):** 신규 attach·open을 거부한 뒤 모든 세션에 §6.7의 close 절차(SIGHUP→TERM→KILL, `close_grace_ms`)를 적용하고 붙어 있는 소비자에게 `session.closed{reason: "closed"}`(§6.4)를 보낸 다음 종료한다. 세션은 프로세스와 함께 끝나며 고아 셸을 남기지 않는다.
 - **정책 파일 진단(M5).** 시작 시 `acl.toml`을 1회 읽는다(hot reload 없음). 파일이 없거나 파싱에 실패해도 프로세스는 뜨고 bind하지만 그 상태에서 도달하는 모든 인가 판정은 항상 `deny`이고 어떤 리소스(세션·터널·등록)도 생성되지 않는다(`docs/design/architecture.md` §6, `PLAN.md` M5 §4.1 #1). 운영자에게는 stderr에 `no usable acl.toml policy`, `every request is denied until this is fixed`, 파일 경로, `CONFIG_ERROR` 코드, 복사해 붙일 수 있는 최소 정책 예시(이 머신에 실제로 pin된 peer 이름을 채운), `acl.toml is never auto-generated — create it by hand`, `verify a fix before restarting: qsh acl check`를 담은 진단을 한 번 출력한다. 진단의 `code` 필드는 `acl_policy_missing`(파일 부재)과 `acl_policy_invalid`(파싱·검증 실패) 두 code word로 두 원인을 구분한다. 이 진단은 core(`crates/qsh-core/src/acl/load.rs`의 `StartupDiagnostic::render`)가 조립한 완성 문자열을 CLI가 그대로 stderr에 쓰는 평문 블록이다(tracing JSON 라인이 아니다). §6.13이 인용하는 `qsh-core::doctor::CONTROLLER_UNREACHABLE`과 공통점은 딱 하나다. 문안 정본은 core에 있고 CLI는 인가 로직 0줄로 출력만 한다. `doctor::Diagnostic`에는 `render()`가 없어 CLI가 `message`/`remedy` 두 필드를 직접 조립해 쓴다는 점에서 조립 방식 자체는 다르다. 정책 파일의 원본 소스 라인은 절대 덤프하지 않는다. 유일한 echo는 문제 rule의 문법 토큰(≤128바이트, 한 줄 이스케이프) 3종(unknown action/auth_path/scope)뿐이다. `acl.toml`을 자동으로 만들지는 않는다(§4.1 #1 (b): interim allow-all-pinned 경계를 파일로 영구화하는 것은 의도치 않은 권한 확대다). 재시작 전 정책을 검증하려면 §6.15의 `qsh acl check`를 쓴다.
 - **Admission 상한(M8).** 주소 검증되지 않은 Initial은 항상 `Retry`로 되돌려 보낸다(스푸핑 1패킷당
@@ -1088,11 +1086,11 @@ Interactive mode는 terminal raw mode, window resize와 signal forwarding을 처
 
 **Machine output mode가 없다.** 이 두 form의 stdout은 원격 터미널의 byte 그 자체이므로(§2.2) envelope가 들어갈 자리가 없다 — `qsh serve`(§6.12)와 같은 이유로 예외다. `--json`/`--jsonl`을 붙이면 **세션을 만들기 전에** `INVALID_ARGUMENT` error envelope 한 줄과 exit `255`(§4)로 거부한다. 기계 소비자는 같은 일을 `qsh session open --json` + `qsh session read --follow --jsonl` + `qsh session write`로 조합한다(§7.1).
 
-**전달되는 환경변수.** 대화형 form은 로컬 터미널을 재현하는 데 필요한 것만 보낸다: `TERM`은 `SessionOpen.term`으로, locale(`LANG`, `LANGUAGE`, `LC_ALL`, `LC_CTYPE`, `LC_COLLATE`) 중 클라이언트 프로세스에 설정된 것은 `SessionOpen.env` overlay로 전달한다(architecture.md §4). 이는 **대화형 form 한정** 동작이다 — `qsh session open`·`qsh exec`·MCP는 호출자가 명시한 `--env`만 보내며, 클라이언트 프로세스의 환경을 암묵적으로 상속시키지 않는다. `HOME`/`USER`/`LOGNAME`/`SHELL`/`PATH`는 어느 경로에서도 호스트가 고정한다.
+**전달되는 환경변수.** 대화형 form은 로컬 터미널을 재현하는 데 필요한 것만 보낸다: `TERM`은 `SessionOpen.term`으로, locale(`LANG`, `LANGUAGE`, `LC_ALL`, `LC_CTYPE`, `LC_COLLATE`) 중 클라이언트 프로세스에 설정된 것은 `SessionOpen.env` overlay로 전달한다(architecture.md §4). 이는 **대화형 form 한정** 동작이다 — `qsh session open`·`qsh exec`는 호출자가 명시한 `--env`만 보내며, 클라이언트 프로세스의 환경을 암묵적으로 상속시키지 않는다. `HOME`/`USER`/`LOGNAME`/`SHELL`/`PATH`는 어느 경로에서도 호스트가 고정한다.
 
 **`user@`의 의미.** 원격 셸은 항상 **`qsh serve`를 실행한 OS 계정**으로 실행된다 — MVP에는 user switching이 없고, ACL principal은 항상 인증서에서 나온다(§2.5, protocol.md §3). `user@`는 SSH 근육 기억을 위해 받아들이며 생략해도 된다(`qsh personal-mac`). 지정하면 `SessionOpen`에 선택 hint로 전달되고, 호스트는 그 값이 serve 계정의 login name과 다르면 세션을 만들지 않고 `UNSUPPORTED`(message: user switching is not supported)로 거부한다 — fail closed. 즉 `user@`는 "이 계정이어야 한다"는 단언이지 계정 선택이 아니다(PRD §6). 검사 순서는 **ACL `session.open` → `user` hint → spawn**이다: 인가되지 않은 peer는 hint 값과 무관하게 항상 `PERMISSION_DENIED`를 받고(계정명 비노출, audit는 ACL 판정만 기록), `UNSUPPORTED`는 인가된 peer에게만 반환된다. 비교는 serve 계정의 login name과 정확 일치(case-sensitive)다. `user@`는 `qsh [user@]host` 형태(`-L`/`-R` 플래그를 동반한 경우 포함 — 모두 `SessionOpen`을 보낸다)에서만 받으며, `qsh exec`/`qsh session open`/`qsh tunnel open`은 bare host만 받는다.
 
-**`hosts.toml`의 `user` 기본값 (M7 Step 3).** `user@`를 명시하지 않았고 그 host 이름에 `hosts.toml`이 `user`를 설정해 뒀다면 그 값이 hint로 채워진다 — ssh_config의 `User` directive와 같은 위치의 편의 기능이다. 명시적으로 준 `user@`가 있으면 그것이 항상 이긴다(`hosts.toml`의 값은 덮어쓰지 않는다). 이 기본값 채움은 `qsh [user@]host`뿐 아니라 `qsh session open`·MCP를 포함해 `SessionOpen`을 보내는 모든 경로에 동일하게 적용된다 — 위 문단의 검사(ACL → user hint → spawn, 불일치 시 `UNSUPPORTED`)는 hint의 출처가 명시값이든 `hosts.toml` 기본값이든 완전히 동일하게 작동한다.
+**`hosts.toml`의 `user` 기본값 (M7 Step 3).** `user@`를 명시하지 않았고 그 host 이름에 `hosts.toml`이 `user`를 설정해 뒀다면 그 값이 hint로 채워진다 — ssh_config의 `User` directive와 같은 위치의 편의 기능이다. 명시적으로 준 `user@`가 있으면 그것이 항상 이긴다(`hosts.toml`의 값은 덮어쓰지 않는다). 이 기본값 채움은 `qsh [user@]host`뿐 아니라 `qsh session open`을 포함해 `SessionOpen`을 보내는 모든 경로에 동일하게 적용된다 — 위 문단의 검사(ACL → user hint → spawn, 불일치 시 `UNSUPPORTED`)는 hint의 출처가 명시값이든 `hosts.toml` 기본값이든 완전히 동일하게 작동한다.
 
 **`-L`/`-R`은 이 대화형 form의 companion flag이지 별도 명령이 아니다.** `qsh [user@]host -L …`/`-R …`는 여전히 대화형 셸을 여는 `qsh [user@]host` 그 자체이며 — 위 문단대로 `SessionOpen`을 보내고 §4의 exit code 규칙을 그대로 따르는 실제 interactive 세션이 열린다 — 거기에 하나 이상의 터널(§6.9)이 **곁들여** 열릴 뿐이다. `-L`/`-R`이 세션 없이 터널만 여는 경로는 없다: 터널만 필요하고 셸은 필요 없으면 machine-mode `qsh tunnel open --json`(§6.9)을 쓴다 — 이쪽은 `SessionOpen`을 전혀 보내지 않고 `tunnel.open` 하나만 나간다. 두 경로 모두 홀더는 그 명령을 실행한 foreground CLI 프로세스다(§6.14).
 
@@ -1105,7 +1103,7 @@ Interactive mode는 terminal raw mode, window resize와 signal forwarding을 처
 | `~~` | 리터럴 `~` 하나를 전송 |
 | `~?` | escape 도움말을 **stderr**에 출력 |
 
-이 표가 전부이며 다른 시퀀스(`~^Z`, `~#`, `~&` 등)는 없다. 행 시작의 escape 문자 1 byte는 다음 byte가 올 때까지 로컬에 보류되고 전달되지 않는다; 표에 없는 두 번째 byte가 오면 escape 문자와 그 byte를 **둘 다 그대로** 원격에 전달하고 상태를 초기화한다(ssh와 동일 — 입력이 조용히 사라지지 않는다). escape 처리는 **local stdin이 TTY일 때만** 활성이다 — pipe/file stdin에서는 `--escape-char`와 무관하게 꺼지고 모든 byte가 그대로 전달된다(`qsh session write`·MCP 경로에는 애초에 escape 처리가 없다).
+이 표가 전부이며 다른 시퀀스(`~^Z`, `~#`, `~&` 등)는 없다. 행 시작의 escape 문자 1 byte는 다음 byte가 올 때까지 로컬에 보류되고 전달되지 않는다; 표에 없는 두 번째 byte가 오면 escape 문자와 그 byte를 **둘 다 그대로** 원격에 전달하고 상태를 초기화한다(ssh와 동일 — 입력이 조용히 사라지지 않는다). escape 처리는 **local stdin이 TTY일 때만** 활성이다 — pipe/file stdin에서는 `--escape-char`와 무관하게 꺼지고 모든 byte가 그대로 전달된다(`qsh session write` 경로에는 애초에 escape 처리가 없다).
 
 escape 문자는 `--escape-char <c>`로 바꿀 수 있고 `--escape-char none`은 escape 처리를 끈다(그때 detach 수단은 client 프로세스 종료뿐이며 세션은 여전히 유지된다). 기본값은 `~`. `--escape-char`는 `qsh [user@]host`와 `qsh attach`에만 붙는 flag이며 값은 **단일 출력 가능한(printable, 공백·제어문자 제외) ASCII 문자** 또는 `none`이다(그 외는 `INVALID_ARGUMENT`, exit `2`) — 행 시작에서 눈에 보이지 않는 byte가 입력을 삼키는 일이 없도록 하는 제한이다; 설정 파일 기본값은 M2에 없다. escape 시퀀스는 client 로컬에서 소비되고 원격으로 전달되지 않는다.
 
@@ -1120,67 +1118,9 @@ QSH operation은 두 종류로 나뉜다.
 
 `tunnel.open`(§6.9)은 이 분류에서 value operation이다 — envelope은 터널이 열렸다는 사실과 메타데이터(`Tunnel`)만 한 번 반환하고 즉시 끝난다. 터널을 오가는 실제 TCP payload는 JSON envelope 층에 전혀 노출되지 않는 wire-level data 스트림(`TCP_CONNECT`/`TCP_ACCEPTED`, protocol.md §7·§9)이며, `session.attach`와 달리 이 문서의 stream operation 개념에 속하지 않는다 — 이 streaming byte channel은 `qsh-core`가 로컬 TCP 연결과 host 사이에서 직접 splice하고, CLI operation 계층은 그 존재를 모른다.
 
-## 8. MCP server
+## 8. MCP server (철회, ADR-0011)
 
-### 8.1 실행
-
-```bash
-qsh mcp
-```
-
-MVP에서는 stdio transport만 지원한다. MCP stdout에는 protocol frame만 출력하고 모든 진단 로그는 stderr로 보낸다.
-
-### 8.2 Tool mapping
-
-| MCP tool | Typed operation |
-|---|---|
-| `list_hosts` | `host.list` |
-| `get_host` | `host.get` |
-| `list_sessions` | `session.list` |
-| `get_session` | `session.get` |
-| `open_session` | `session.open` |
-| `read_session` | `session.read` |
-| `write_session` | `session.write` |
-| `resize_session` | `session.resize` |
-| `close_session` | `session.close` |
-| `exec` | `exec.run` |
-| `open_tunnel` | `tunnel.open` |
-| `close_tunnel` | `tunnel.close` |
-
-Tool input과 output field는 JSON CLI의 data type과 동일하다. MCP adapter가 command string을 만들거나 CLI output을 다시 parse해서는 안 된다. 두 adapter 모두 같은 Rust operation layer를 직접 호출한다.
-
-**어떤 op이 tool이 되는가.** 원격 host의 상태를 바꾸거나 조회하는 op만 tool로 낸다. 두 부류가 빠진다.
-
-첫째, 이 기계의 로컬 상태를 읽거나 쓰는 op — `identity.init`, `trust.*`, `cert.*`, `doctor.run`, `acl.check`. `host.list`와 `host.get`이 §2.5에서 `acl.check`와 같은 "인가 불요" 행에 있으면서도 앞의 둘만 tool인 이유가 이것이다: 앞의 둘은 도달 가능한 원격 host를 답하고, 뒤는 이 기계의 파일 내용을 답한다.
-
-이 부류의 경계는 §2.5의 행이 아니라 "답이 어느 기계의 사실인가"다. `tunnel.close`(=`close_tunnel`)와 `tunnel.list`는 §2.5에서 한 행에 있지만 앞의 것만 tool이다 — `tunnel.close`는 host 쪽 소유권 검사를 거쳐 원격의 forward를 닫지만, `tunnel.list`는 이 기계의 상주 `qsh listen` daemon이 쥔 hold를 답한다(§6.9). `session.attach`는 아예 다른 이유로 빠진다: value operation이 아니라 stream operation이라(§7.1) value tool 표면에 애초에 후보가 아니다.
-
-둘째, wire contract 자체를 기술하는 introspection op — `schema.get`, `capabilities.get`, `version.get`. `capabilities.get`은 host를 주면 실제로 그 peer와 negotiation한 결과를 답하므로(§6.10) 첫째 기준으로는 걸러지지 않지만, 그 답은 host의 상태가 아니라 두 build 사이의 protocol 합의다 — 에이전트는 그 합의를 이미 tool schema 형태로 받아 들고 있고, 자기가 부를 수 있는 tool 목록보다 더 많은 것을 negotiation 결과에서 알아낼 수 없다. 이 셋은 사람이 버전 불일치를 진단할 때 쓰는 CLI 표면으로 남는다.
-
-`acl.check`를 tool로 내지 않기로 한 결정(M7)의 근거는 정보 노출이 아니라 **정확성**이다. `acl.check`는 호출자 로컬의 `acl.toml`을 평가한다(§6.15). 에이전트가 알고 싶은 것은 "저 host가 나를 허용하는가"인데, 클라이언트 쪽에 `acl.toml`이 없는 정상 배치에서 이 op의 답은 `policy.loaded: false`와 무조건 `deny`다. 에이전트는 이것을 "그 작업은 불가능하다"로 읽는다. 게다가 tool 표면에는 에이전트가 자기 principal을 알아낼 방법이 없다 — `get_host`의 `device_id`는 상대 peer의 신원이다. 로컬 정책을 확인하려면 사람이 `qsh acl check`를 직접 실행한다.
-
-### 8.3 지속 출력
-
-MVP의 `read_session`은 streaming MCP extension에 의존하지 않는다.
-
-```json
-{
-  "session_ref": "personal-mac/01K0SESSION",
-  "after_sequence": 42,
-  "wait_ms": 30000,
-  "limit_bytes": 65536
-}
-```
-
-Agent는 응답의 `next_after`/`next_ctl_after`를 다음 호출의 `after_sequence`/`ctl_after`로 그대로 되먹인다(§6.4의 두-값 cursor; `ctl_after`는 additive optional field라 처음 호출에서는 생략한다). 이 long-poll model은 다양한 MCP client에서 동일하게 동작한다.
-
-### 8.4 보안
-
-- MCP server는 실행한 local user의 QSH identity와 config를 사용한다.
-- 각 tool call에 일반 CLI와 동일한 ACL을 적용한다.
-- MCP를 통해 interactive trust prompt를 열지 않는다.
-- `write_session`, `exec`, `open_tunnel`은 read operation과 별도 권한으로 검사한다.
-- Tool cancellation은 해당 operation을 취소하지만 remote PTY를 자동 종료하지 않는다.
+내장 MCP stdio adapter(`qsh mcp`, 이 절의 옛 §8.1-§8.4가 기술하던 tool mapping·지속 출력·보안 경계)는 M8 Step 6에서 제거됐다(ADR-0011) — 근거와 대안은 그 ADR을 참고한다. 에이전트 연동 면은 이 문서의 `qsh.cli/v1` JSON/JSONL CLI 하나로 좁혀졌다: §6.4의 long-poll cursor(`--after`/`--ctl-after`, 계약 타입으로는 `SessionReadReq.after_sequence`/`ctl_after`)가 예전 MCP adapter의 `read_session`과 같은 값을 그대로 낸다. 원격 stdio MCP 서버를 계속 띄워야 하면 `qsh exec host -- <server>`로 그 프로세스 자체를 실행한다 — qsh는 다시 순수 transport로 돌아가고 MCP framing은 그 프로세스의 stdio 안에 남는다.
 
 ## 9. Timeout과 cancellation
 
@@ -1188,22 +1128,20 @@ Agent는 응답의 `next_after`/`next_ctl_after`를 다음 호출의 `after_sequ
 - `session read --wait`은 long-poll 대기 시간이며 전체 command timeout과 구분한다.
 - SIGINT는 현재 local operation을 취소한다.
 - Interactive attach의 SIGINT는 기본적으로 remote PTY로 전달하며, detach는 행 시작의 `~d`(또는 `~.`) escape 시퀀스로 한다(§7, `--escape-char`로 변경·비활성화). detach는 세션을 종료하지 않는다.
-- MCP cancellation은 local wait 또는 request를 취소하고 session lifecycle을 변경하지 않는다.
-- MCP 취소의 실제 동작은 해당 요청의 응답 전달 중단이다: MCP server는 취소된 요청에 응답을 보내지 않을 뿐, session·PTY·writer lease는 그대로 유지된다. server 내부에 남은 대기는 host의 wait clamp까지 자연 소멸하며, 그 결과는 어느 client에서도 관측되지 않는다.
+- `session read --wait`를 취소해도(로컬 프로세스 종료·SIGINT) session·PTY·writer lease는 그대로 유지된다: 취소는 이 요청의 응답 전달을 끊을 뿐이다. host 내부에 남은 대기는 wait clamp까지 자연 소멸하며, 그 결과는 어느 client에서도 관측되지 않는다.
 
 ## 10. Compatibility policy
 
 - `qsh.cli/v1`과 `qsh.event/v1`에는 optional field를 추가할 수 있다. `qsh.event/v1`에는 새 event `type`도 추가할 수 있으며, 소비자는 알 수 없는 `type`을 무시해야 한다(§6.4).
 - `reason`·`state`·`error.code`처럼 값 집합이 열린 문자열 field에는 새 값을 추가할 수 있다. 소비자는 알 수 없는 값을 오류 없이 처리해야 한다(`ErrorCode` 미지 코드 pass-through와 같은 원칙, §3.3).
 - Field 삭제, type 변경과 의미 변경은 `/v2`가 필요하다.
-- MCP tool에는 optional argument를 추가할 수 있지만 기존 argument를 재해석하지 않는다.
-- Deprecated field와 tool은 최소 두 minor release 동안 유지한다.
+- Deprecated field는 최소 두 minor release 동안 유지한다.
 - `qsh schema --json`으로 지원 version과 deprecation을 조회할 수 있어야 한다.
 
 ## 11. 구현 제약
 
-- Human, JSON과 MCP adapter는 같은 Rust typed operation을 호출한다.
-- Renderer 또는 adapter 내부에 인증·ACL·session logic을 구현하지 않는다.
+- Human renderer와 JSON renderer는 같은 Rust typed operation을 호출한다.
+- Renderer 내부에 인증·ACL·session logic을 구현하지 않는다.
 - JSON mode를 test fixture로 사용해 schema compatibility를 검증한다.
 - JSONL event는 한 줄에 하나의 완전한 JSON object이며 중간에 plain text를 삽입하지 않는다.
 - Streaming backpressure가 remote PTY를 무제한으로 memory에 적재하게 해서는 안 된다.

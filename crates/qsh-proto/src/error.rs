@@ -1,7 +1,8 @@
 //! Wire/CLI shared error vocabulary.
 //!
 //! [`ErrorCode`] is the single vocabulary shared by the wire protocol, the
-//! `qsh.cli/v1` JSON envelope and the MCP adapter (see `docs/CLI.md` §3.3).
+//! `qsh.cli/v1` JSON envelope and any long-running external process (e.g.
+//! an agent tool) integrating over it (see `docs/CLI.md` §3.3).
 //! It is intentionally *not* `#[non_exhaustive]` in the Rust sense of that
 //! attribute (matching on it exhaustively is fine and desired for the known
 //! codes), but the wire format itself is open: a newer peer may send a code

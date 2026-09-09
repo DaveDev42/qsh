@@ -261,7 +261,7 @@ impl Decision {
 /// `session.control` in `crates/qsh-testkit/tests/session_loopback.rs`).
 ///
 /// `localctl`'s `NotOwner` refusal ("this forward is owned by another
-/// client on this host", [`crate::localctl::daemon`]) is deliberately
+/// client on this host", `crate::localctl::daemon`) is deliberately
 /// **not** this constant: it is a same-uid local trust boundary between
 /// two local clients of one host's daemon, not a remote peer's
 /// authorization outcome (`docs/design/protocol.md` §11-3, "localctl은
@@ -270,13 +270,13 @@ impl Decision {
 pub const PERMISSION_DENIED_MESSAGE: &str =
     "peer is not allowed to perform this operation on this host";
 
-/// A resource identifier passed to [`Policy::decide`], plus (`PLAN.md` M5
+/// A resource identifier passed to `Policy::decide`, plus (`PLAN.md` M5
 /// Step 5) that resource's owner, when it has one. `owner` is the
 /// [`opener_key`] of whichever principal/auth_path pair created the
 /// resource — a session's broker-recorded opener, or a remote forward's
 /// registering principal — and is `None` for every resource kind that has
 /// no owner concept at all (`exec.run`, `host.reverse`, `forward.local`:
-/// [`Scope`](policy::Scope)'s own doc). `scope = "owned"` compares this
+/// [`Scope`]'s own doc). `scope = "owned"` compares this
 /// field against the requester's own `opener_key`; a resource with
 /// `owner: None` is never affected by `scope` either way, which is what
 /// lets a not-yet-existing resource (e.g. `session.control` racing a
@@ -335,7 +335,7 @@ pub trait Authorizer: Send + Sync + 'static {
 /// Lived as a private `server::opener_key` since M3 (Step 3.5 PR②); moved
 /// here when M5 Step 5 promoted the ownership comparison itself from a
 /// `Server`-private post-check into the policy vocabulary
-/// ([`Policy::decide`], [`AllowAllPinned::check`]). `pub`, not
+/// (`Policy::decide`, [`AllowAllPinned::check`]). `pub`, not
 /// `pub(crate)`: `crates/qsh-testkit`'s test doubles that reproduce this
 /// same comparison for a hypothetical wider-admitting [`Authorizer`] (e.g.
 /// `session_loopback.rs`'s `AllowAllAnyAuthPath`) need it too, and
@@ -360,7 +360,7 @@ pub fn opener_key(principal: &Principal, auth_path: AuthPath) -> String {
 /// `Policy` in) — a pinned principal is allowed every *unowned* action
 /// unconditionally, but an owned one only when it is also the resource's
 /// own owner. `resource.owner: None` is never filtered, same as
-/// [`Policy::decide`]'s ④.
+/// `Policy::decide`'s ④.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct AllowAllPinned;
 

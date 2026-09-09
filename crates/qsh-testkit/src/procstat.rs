@@ -66,8 +66,8 @@ pub const STABILIZE_INTERVAL: Duration = Duration::from_millis(200);
 /// reads, i.e. 5s worst case).
 pub const STABILIZE_MAX_ITERS: usize = 25;
 
-/// True once the last [`STABILIZE_WINDOW`] entries of `history` (oldest
-/// first) are all within [`STABILIZE_REL_TOLERANCE`] of the window's max —
+/// True once the last `STABILIZE_WINDOW` entries of `history` (oldest
+/// first) are all within `STABILIZE_REL_TOLERANCE` of the window's max —
 /// the pure predicate half of [`poll_stable`], split out so it has a unit
 /// test that needs no `/proc` and no sleeping (`docs/design/testing.md`'s
 /// sleep-free CI discipline is about wall-clock waits, not about this

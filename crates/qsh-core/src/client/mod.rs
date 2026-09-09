@@ -130,13 +130,13 @@ pub fn map_hello_error(err: crate::handshake::HelloError) -> ClientError {
 
 /// A negotiated connection: control stream open, `Hello` exchanged.
 ///
-/// `conn` is `None` exactly when [`Self::link`] is
-/// [`ControlLink::Local`](link::ControlLink::Local) (the reverse route,
+/// `conn` is `None` exactly when `Self::link` is
+/// `ControlLink::Local` (the reverse route,
 /// `PLAN.md` M3 Step 6): a CLI process relaying through its resident
 /// daemon is not itself a QUIC endpoint on the underlying connection, so
 /// there is no [`Connection`] to hold. [`Self::exec`] stays forward-only
 /// (`exec.run` has no reverse leg to open) and fails closed with
-/// [`ClientError::Unsupported`] there — see [`Self::require_connection`].
+/// [`ClientError::Unsupported`] there — see `Self::require_connection`.
 /// [`Self::open_attach_stream`] does not: on this leg it opens a fresh
 /// `LOCAL_STREAM` conduit to the same daemon socket and host `local`
 /// recorded (`PLAN.md` M3 Step 7).
@@ -764,7 +764,7 @@ impl Session {
     /// The data half: redeem `attached`'s ticket on a fresh
     /// `SESSION_DATA` link (`PLAN.md` M3 Step 7: a QUIC stream on the
     /// forward route, a `LOCAL_STREAM` conduit on the reverse route —
-    /// [`Self::open_data_link`]).
+    /// `Self::open_data_link`).
     pub async fn open_attach_stream(
         &mut self,
         attached: wire::SessionAttached,
@@ -932,7 +932,7 @@ impl Session {
     //
     /// Send an already-built `ControlMessage` verbatim, bypassing this
     /// `Session`'s own internal id counter entirely (that counter is
-    /// otherwise only advanced by [`Self::request`]/[`Self::send_ping`],
+    /// otherwise only advanced by `Self::request`/[`Self::send_ping`],
     /// whose replies this caller is not using — see this section's docs).
     pub async fn send_control_message(&mut self, msg: &ControlMessage) -> Result<(), ClientError> {
         self.link.send(msg).await

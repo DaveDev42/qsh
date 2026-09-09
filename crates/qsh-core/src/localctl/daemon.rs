@@ -23,9 +23,9 @@
 //!
 //!   | kind | served by | shape |
 //!   |---|---|---|
-//!   | `LOCAL_ADMIN` | [`LocalctlDaemon::serve_admin`] | one `LocalAdminRequest` (`HostList` / `TunnelList` / `TunnelClose`, M4 Step 5 PR 5b) → one `LocalResponse`, from [`Listen::registry`]'s current snapshot or [`Listen::hubs_snapshot`]'s live forwards, stale entries included, never dialing anything. No `LocalHelloAck` — its fields describe a specific registered host and `LOCAL_ADMIN` names none. |
-//!   | `LOCAL_CONTROL` (`M3 Step 6`) | [`LocalctlDaemon::serve_control`] | `LocalHelloAck`, then a long-lived `qsh.wire.v1` `ControlMessage` relay for `hello.host`'s live [`ControlHub`](crate::reverse::listen::ControlHub) — one conduit per attached CLI process, for as long as it runs. |
-//!   | `LOCAL_STREAM` (`M3 Step 7`) | [`LocalctlDaemon::serve_stream`] | `LocalHelloAck`, then exactly one wire `StreamHeader{SESSION_DATA, ticket}` frame, then a raw byte-level splice onto a fresh QUIC bidi stream on `hello.host`'s live connection — the daemon never parses anything past that header (module docs' own "grants no new authority": it neither redeems nor inspects the ticket, the target does). |
+//!   | `LOCAL_ADMIN` | `LocalctlDaemon::serve_admin` | one `LocalAdminRequest` (`HostList` / `TunnelList` / `TunnelClose`, M4 Step 5 PR 5b) → one `LocalResponse`, from [`Listen::registry`]'s current snapshot or [`Listen::hubs_snapshot`]'s live forwards, stale entries included, never dialing anything. No `LocalHelloAck` — its fields describe a specific registered host and `LOCAL_ADMIN` names none. |
+//!   | `LOCAL_CONTROL` (`M3 Step 6`) | `LocalctlDaemon::serve_control` | `LocalHelloAck`, then a long-lived `qsh.wire.v1` `ControlMessage` relay for `hello.host`'s live [`ControlHub`](crate::reverse::listen::ControlHub) — one conduit per attached CLI process, for as long as it runs. |
+//!   | `LOCAL_STREAM` (`M3 Step 7`) | `LocalctlDaemon::serve_stream` | `LocalHelloAck`, then exactly one wire `StreamHeader{SESSION_DATA, ticket}` frame, then a raw byte-level splice onto a fresh QUIC bidi stream on `hello.host`'s live connection — the daemon never parses anything past that header (module docs' own "grants no new authority": it neither redeems nor inspects the ticket, the target does). |
 //!
 //!   An unspecified/unrecognized `LocalHello.kind` answers
 //!   `INVALID_ARGUMENT`. None of the three paths ever calls
@@ -294,12 +294,12 @@ impl LocalctlDaemon {
     }
 
     /// Accept loop: run until `shutdown` resolves, spawning one task per
-    /// accepted connection, up to [`MAX_CONCURRENT_LOCALCTL_HANDSHAKES`]
-    /// concurrently *while unclassified* — [`Self::serve_authorized_conduit`]
+    /// accepted connection, up to `MAX_CONCURRENT_LOCALCTL_HANDSHAKES`
+    /// concurrently *while unclassified* — `Self::serve_authorized_conduit`
     /// releases this permit the moment it knows `LocalHello.kind` and
     /// switches to that kind's own pool, so this bound never limits how
     /// many classified conduits run at once. A single failed `accept` is
-    /// logged (after a brief backoff — see [`ACCEPT_ERROR_BACKOFF`]'s doc)
+    /// logged (after a brief backoff — see `ACCEPT_ERROR_BACKOFF`'s doc)
     /// and does not end the loop — one bad connection attempt must not
     /// take the whole daemon down.
     pub async fn run(

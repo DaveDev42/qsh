@@ -66,7 +66,7 @@ pub struct AdmitRequest<'a> {
 ///    no resolved name to use as `resource`. Every `PERMISSION_DENIED` this
 ///    function returns — this step's two failure modes and the choke-point
 ///    deny below — carries the identical opaque
-///    [`super::registry::host_reverse_denied`] message, so a peer cannot
+///    `super::registry::host_reverse_denied` message, so a peer cannot
 ///    distinguish them from one another.
 /// 3. **The `host.reverse` choke point** — [`Authorizer::check`] on the
 ///    now-resolved name as `resource`, audited unconditionally (allow *or*

@@ -21,3 +21,4 @@ QSH의 아키텍처/설계 결정을 기록한다. 각 ADR은 맥락, 결정, �
 | [0015](0015-listener-pairing.md) | listener 를 상대로 한 초대 코드 pairing | 예약됨 |
 | [0016](0016-csr-issuance.md) | CA 서명 요청(CSR) 흐름 | 예약됨 |
 | [0017](0017-acl-toml-not-written.md) | `acl.toml`은 어떤 명령도 쓰지 않고 부담은 doctor 진단과 페어링 직후 고지로 옮긴다 | 승인됨 |
+| [0018](0018-tunnel-lifetime-bound-to-connection.md) | 터널 수명은 v1 내내 QUIC connection에 결합하고, forward-route live carrier와 `-R` 자동 재발행은 P1로 둔다 | 승인됨 |

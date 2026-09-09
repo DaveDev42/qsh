@@ -105,7 +105,7 @@ pub enum RejectReason {
     /// address-*validated* attempt (holder of a completed Retry round
     /// trip) — `PLAN.md` M8 Step 3 P2-3, `docs/adr/0009-admission-
     /// defenses.md`'s 한계 section. Keyed by the same validated peer
-    /// address, but tracked in its own [`Sketch`] so a spoofed
+    /// address, but tracked in its own `Sketch` so a spoofed
     /// unvalidated flood can never collide with (and steal budget from)
     /// a real validated source.
     ValidatedRateLimited,
@@ -181,7 +181,7 @@ struct DecisionCounters {
     admit: AtomicU64,
 }
 
-/// A point-in-time snapshot of [`DecisionCounters`] — what
+/// A point-in-time snapshot of `DecisionCounters` — what
 /// [`Gate::counters`] returns. Plain `u64`s (not atomics): once read out,
 /// this is a moment's tally, not a live handle.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -648,7 +648,7 @@ impl Gate {
     /// `tokio::time::interval(AUDIT_AGGREGATION_WINDOW)` in its `select!`
     /// (plus once more on shutdown) so a category's last window closes on
     /// a bounded schedule even when the flood that filled it has already
-    /// stopped and nothing will ever call [`Gate::record_rejection`]
+    /// stopped and nothing will ever call `Gate::record_rejection`
     /// again to flush it lazily. A window with no `start` (never opened)
     /// or one still inside the aggregation window is left untouched — the
     /// *next* rejection (if any) is still the one that opens/continues it,

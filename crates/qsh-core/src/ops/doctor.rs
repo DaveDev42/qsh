@@ -18,7 +18,7 @@
 //! unreachable in real time under normal operation — a device leaf is
 //! valid for 10 years — and are only testable by supplying a synthetic
 //! `now`. Not a new architectural pattern: [`crate::trust::pairing`]'s
-//! `InviteStore::add`/`prune` and [`crate::config::rfc3339_of`] already
+//! `InviteStore::add`/`prune` and `crate::config::rfc3339_of` already
 //! take `SystemTime` as a parameter rather than calling
 //! `SystemTime::now()` internally.
 

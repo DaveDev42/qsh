@@ -24,6 +24,7 @@ serde_json.workspace = true
 # trust. Same workspace-pinned version `qsh-transport` itself builds
 # against.
 rustls.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 qsh-proto.workspace = true

@@ -48,7 +48,7 @@ impl Ops {
     /// Run a command on a pinned host and collect its output.
     ///
     /// Blocking: runs on `Ops`' shared dial runtime
-    /// ([`Ops::connect_runtime`]) so frontends stay synchronous. The
+    /// (`Ops::connect_runtime`) so frontends stay synchronous. The
     /// identity is loaded before entering the runtime (platform key
     /// stores must not be touched from within one).
     pub fn exec_run(&self, req: ExecRunReq, stdin: ExecStdin) -> Result<ExecRunOutput, OpError> {

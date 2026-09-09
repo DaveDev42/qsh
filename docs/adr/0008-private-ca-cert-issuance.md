@@ -47,7 +47,7 @@ QSH는 password 인증을 지원하지 않고 상호 TLS로만 인증한다(PRD 
 ## 결과
 
 - 발급/서명 로직은 `qsh-core`(신규 `ca` 모듈 또는 `identity/` 확장)에 두고, `qsh-cli`는 clap + 렌더러만 담당한다. rcgen은 `qsh-core`가 이미 의존한다. `qsh cert`가 value op을 내면 `CLI_V1_SCHEMA_COMMANDS` 등록과 fixture 추가가 완전성 게이트(`schema_commands_registry`) 때문에 필수다.
-- `qsh cert`를 MCP tool로 노출할지는 별도 결정이다 — trust/identity 관리는 현재 MCP 표면이 0이므로(CLI.md §8.4 "MCP를 통해 interactive trust prompt를 열지 않는다"), Step 5는 신규 MCP tool을 추가하지 않는다. 노출이 필요하면 §8.2 표를 갱신하는 별도 결정으로 다룬다.
+- (ADR-0011로 MCP 표면 자체가 철회됐다. 아래는 당시 기록이다.) `qsh cert`를 MCP tool로 노출할지는 별도 결정이다 — trust/identity 관리는 현재 MCP 표면이 0이므로(CLI.md §8.4 "MCP를 통해 interactive trust prompt를 열지 않는다"), Step 5는 신규 MCP tool을 추가하지 않는다. 노출이 필요하면 §8.2 표를 갱신하는 별도 결정으로 다룬다.
 - `trust.toml [[ca]]` 등재는 additive·append-only이며 중복 방지·갱신 semantics는 trust add(Step 2) 선례를 따른다. CA 관련 값-보유 golden fixture는 diff 리뷰 규율(testing.md) 대상이다.
 - **CA rotation·CRL/OCSP·revocation 전파는 이 ADR의 범위 밖(P1)이다.** cert 무효화의 유일한 레버는 validity window 만료이며(verifier가 이미 fail-closed로 강제), 신규 CA·leaf도 이 동작을 그대로 상속한다. rotation UX는 미래 ADR로 다룬다.
 - CA 발급은 신뢰 근원을 넓히는 표면이므로 PRD의 SC7 외부 보안 리뷰 대상에 포함한다.

@@ -1,5 +1,6 @@
 //! The typed operation layer: the single API surface the CLI, `--json`
-//! renderer and (from M6) the MCP adapter all call through. See
+//! renderer and any long-running external process (e.g. an agent tool)
+//! all call through. See
 //! `docs/CLI.md` §11 — frontends must not reimplement business logic, they
 //! only translate an [`Ops`] call into their own presentation.
 
@@ -240,8 +241,9 @@ impl Operation for TrustRemoveOp {
 }
 
 /// Façade over every typed operation. This is the *only* entry point
-/// frontends (`qsh-cli`'s human/JSON renderers, and later the MCP adapter)
-/// are allowed to call into `qsh-core` through.
+/// frontends (`qsh-cli`'s human/JSON renderers, and any long-running
+/// external process, e.g. an agent tool) are allowed to call into
+/// `qsh-core` through.
 ///
 /// One `Ops` is bound to one pair of config/state directories, so a test —
 /// or a `QSH_CONFIG_DIR` override — redirects the whole tree at once.
@@ -278,10 +280,11 @@ pub struct Ops {
     /// `Runtime`) is what makes the last such `Arc` safe to drop from
     /// literally anywhere — see its own doc.
     ///
-    /// Never reused for the `qsh mcp` server's own long-lived runtime
-    /// ([`crate`]'s caller wires that up separately in `qsh-cli`): sharing
-    /// one runtime's blocking-thread pool between "the server accepting MCP
-    /// requests" and "every in-flight pull's blocking work" was measured to
+    /// Never reused for a long-running external process's (e.g. an agent
+    /// tool) own long-lived runtime ([`crate`]'s caller wires that up
+    /// separately in `qsh-cli`): sharing one runtime's blocking-thread pool
+    /// between "the process accepting long-poll requests" and "every
+    /// in-flight pull's blocking work" was measured to
     /// deadlock around ~256 concurrent pulls, because each pull both
     /// occupies a blocking-pool thread (the caller's `spawn_blocking`) and
     /// then asks the *same* pool for another one (`tokio::net::lookup_host`)
@@ -897,16 +900,25 @@ pub(crate) fn resolve_peer_address(
     // via `qsh exec nowhere`) — kept byte-identical to the pre-M7-Step-3
     // wording even though the remedy it names (`qsh trust add`) is now
     // only one of two ways to fix this (the other being a `hosts.toml`
-    // entry); fixtures are append-only, this is not an editable one.
+    // entry); fixtures are append-only, this is not an editable one. The
+    // fixture's own input (`"nowhere"`) has no `@`, so [`host::hint_alias`]
+    // is a no-op for it and the fixture stays byte-identical; the strip
+    // only changes behavior for `qsh exec <user>@<host> -- ...`
+    // (`ExecArgs.host`, `docs/CLI.md` §6.9, a raw positional that — like
+    // `qsh host get` — bypasses `parse_target`'s own `user@` split), which
+    // used to echo the `user@` hint into this same un-runnable `qsh trust
+    // add` shape `Ops::resolve_host_route` had (BRIEF-6 §1 item 2 /
+    // lens-2 finding).
     let entry = host::resolve_forward(trust.find(host), hosts.find(host), hosts_has_any)
-        .ok_or_else(|| {
-            OpError::new(
+        .ok_or_else(|| match host::hint_alias(host) {
+            Some(alias) => OpError::new(
                 ErrorCode::HostNotFound,
                 format!(
-                    "host {host:?} is not in the trust store; pin it with `qsh trust add {host} \
-                     --address <host:port> --fingerprint sha256:...`"
+                    "host {alias:?} is not in the trust store; pin it with `qsh trust add \
+                     {alias} --address <host:port> --fingerprint sha256:...`"
                 ),
-            )
+            ),
+            None => host::empty_host_name_error(),
         })?;
     let server_name = server_name_for(&entry.address);
     Ok((entry.address, server_name))
@@ -1799,5 +1811,63 @@ mod tests {
         assert_eq!(err.code, ErrorCode::InvalidArgument);
         a.join().unwrap();
         b.join().unwrap();
+    }
+
+    #[test]
+    fn resolve_peer_address_strips_a_user_at_hint_from_the_host_not_found_remedy() {
+        // `qsh exec <user>@<host> -- ...` (`ExecArgs.host`, a raw
+        // positional that bypasses `parse_target`'s own `user@` split,
+        // `docs/CLI.md` §6.9) used to echo the hint straight into this
+        // function's `qsh trust add` remedy — the exact shape
+        // `Ops::resolve_host_route` had before BRIEF-6 §1 item 1 fixed it.
+        // Pin both halves: no `@` survives in the message, and the
+        // suggested alias itself is one `qsh trust add` would accept
+        // (BRIEF-6 §1 item 2 / lens-2 finding).
+        let trust = TrustStore::default();
+        let hosts = HostsFile::default();
+        let err = resolve_peer_address(&trust, &hosts, "dave@nowhere").unwrap_err();
+        assert_eq!(err.code, ErrorCode::HostNotFound);
+        assert!(
+            !err.message.contains('@'),
+            "message leaked the user@ hint: {:?}",
+            err.message
+        );
+        assert!(
+            err.message.contains("qsh trust add nowhere --address"),
+            "remedy did not name the bare alias: {:?}",
+            err.message
+        );
+        assert!(
+            qsh_proto::wire::valid_host_name("nowhere"),
+            "the suggested alias itself must satisfy `qsh trust add`'s own name rule",
+        );
+    }
+
+    #[test]
+    fn resolve_peer_address_on_an_at_prefix_with_no_alias_left_is_invalid_argument() {
+        let trust = TrustStore::default();
+        let hosts = HostsFile::default();
+        for name in ["dave@", "@", "dave@ "] {
+            let err = resolve_peer_address(&trust, &hosts, name).unwrap_err();
+            assert_eq!(err.code, ErrorCode::InvalidArgument, "name {name:?}");
+            assert_eq!(err.message, "host name must not be empty", "name {name:?}");
+        }
+    }
+
+    #[test]
+    fn resolve_peer_address_leaves_an_at_free_host_byte_identical() {
+        // The golden fixture
+        // (`crates/qsh-cli/tests/fixtures/cli-v1/error.HOST_NOT_FOUND.json`,
+        // via `qsh exec nowhere`) has no `@` in its input, so
+        // `host::hint_alias` must be a no-op for it.
+        let trust = TrustStore::default();
+        let hosts = HostsFile::default();
+        let err = resolve_peer_address(&trust, &hosts, "nowhere").unwrap_err();
+        assert_eq!(err.code, ErrorCode::HostNotFound);
+        assert_eq!(
+            err.message,
+            "host \"nowhere\" is not in the trust store; pin it with `qsh trust add nowhere \
+             --address <host:port> --fingerprint sha256:...`"
+        );
     }
 }

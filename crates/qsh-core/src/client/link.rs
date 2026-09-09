@@ -6,7 +6,7 @@
 //! registration (`crate::localctl::client`, `crate::reverse::listen`'s
 //! `ControlHub` on the daemon side).
 //!
-//! [`ControlLink`] is deliberately an **enum**, never a generic type
+//! `ControlLink` is deliberately an **enum**, never a generic type
 //! parameter or an ADR-0005 `Transport`/`StreamMux` trait object — a
 //! `Session` is either dialed or relayed, never a third thing, and every
 //! caller (`crate::client::Session`) already knows the wire messages it
@@ -14,7 +14,7 @@
 //! carrier is underneath, so there is nothing a trait's extra indirection
 //! would buy here.
 //!
-//! Dependency direction: this file depends on [`crate::localctl::client`],
+//! Dependency direction: this file depends on `crate::localctl::client`,
 //! never the reverse — `localctl::client` stays transport-free (it must
 //! never name `qsh_transport`/`quinn`/`rustls`, `xtask arch`'s
 //! `LOCALCTL_CLIENT_FILE` ban) and has no reason to know this enum exists.
@@ -116,7 +116,7 @@ impl ControlLink {
     }
 }
 
-/// [`OpError`] (what [`crate::localctl::client`]'s conduit calls return) →
+/// [`OpError`] (what `crate::localctl::client`'s conduit calls return) →
 /// [`ClientError`] (what every other `Session` method returns), preserving
 /// the code/message/retryable triple verbatim — the same "nothing to
 /// translate" shape as `crate::localctl::client::remote_error`'s
@@ -576,7 +576,7 @@ mod tests {
         daemon.await.unwrap();
     }
 
-    /// [`crate::localctl::client::open_stream`]'s handshake errors map
+    /// `crate::localctl::client::open_stream`'s handshake errors map
     /// through [`DataSend`]/[`DataRecv`]'s callers exactly like
     /// `open_control`'s do — a `LocalError` the daemon sends back is not
     /// this layer's problem to interpret, only to relay

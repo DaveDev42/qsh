@@ -15,7 +15,8 @@
 //!   directory is `fsync`ed too — a crash leaves either the old file or the
 //!   new one, never half of either.
 //! - **Cross-process serialisation.** A `qsh session read --follow`, a
-//!   `qsh mcp` and an interactive attach can all rotate a token at once, so
+//!   long-running external process (e.g. an agent tool) and an interactive
+//!   attach can all rotate a token at once, so
 //!   every read-modify-write holds an exclusive advisory lock on a sidecar
 //!   lock file for its whole duration ([`std::fs::File::lock`] — `flock(2)`
 //!   on unix, `LockFileEx` on Windows).
@@ -680,8 +681,9 @@ mod tests {
     }
 
     /// The lock is what makes a read-modify-write safe when a `qsh attach`,
-    /// a `qsh session read --follow` and an MCP server all rotate tokens at
-    /// once. `std::fs::File::lock` is real on every supported platform, so
+    /// a `qsh session read --follow` and a long-running external process
+    /// (e.g. an agent tool) all rotate tokens at once. `std::fs::File::lock`
+    /// is real on every supported platform, so
     /// this asserts the guarantee everywhere rather than only where
     /// `flock(2)` is spelled that way.
     #[test]

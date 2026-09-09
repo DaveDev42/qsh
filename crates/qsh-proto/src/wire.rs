@@ -238,7 +238,7 @@ impl ControlMessage {
         )
     }
 
-    /// A [`Response`] carrying an [`Error`], correlated to `request_id`.
+    /// A [`Response`] carrying an [`struct@Error`], correlated to `request_id`.
     pub fn error(request_id: u64, err: Error) -> Self {
         Self::response(request_id, response::Body::Error(err))
     }
@@ -339,6 +339,75 @@ pub fn sanitize_peer_text(text: &str) -> String {
             }
         })
         .collect()
+}
+
+/// Why [`validate_device_name`] rejected a name — never carries the
+/// rejected value itself (`docs/design/protocol.md` §15.5's own "the value
+/// never appears in a log line" rule extends to this type's own `Display`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum DeviceNameError {
+    /// Empty, or more than 64 bytes when UTF-8 encoded.
+    #[error("must be 1..=64 bytes")]
+    Length,
+    /// A control character (`char::is_control()`, tab included — a device
+    /// name is a label, not formatted text).
+    #[error("must not contain a control character")]
+    Control,
+    /// A bidi-override or bidi-isolate control (U+202A–U+202E,
+    /// U+2066–U+2069, U+200E–U+200F) — none of these are `char::is_control()`,
+    /// so [`Self::Control`] never catches them, yet a name built from one
+    /// can visually reorder its own or its neighbor's rendering (the
+    /// classic "evil.txt" RLO trick) wherever a renderer prints it next to
+    /// a fingerprint or a path.
+    #[error("must not contain a bidi control character")]
+    Bidi,
+    /// A zero-width character (U+200B–U+200D, U+2060, U+FEFF) — invisible
+    /// in a terminal, so two names that render identically can compare
+    /// unequal, letting one silently shadow the other under a pin.
+    #[error("must not contain a zero-width character")]
+    ZeroWidth,
+}
+
+/// Shape a peer-reported device name must have before pairing ever pins,
+/// persists, or traces it: `1..=64` bytes, no control character
+/// (`char::is_control()`, tab included), no bidi-override/isolate control,
+/// no zero-width character (`docs/design/protocol.md` §15.5).
+///
+/// Shared by both pairing directions (`qsh-core`'s `pairing::
+/// reject_control_chars`, called for `PairingProof.device_name` on the
+/// responder and `PairingAccepted.device_name` on the initiator) so the two
+/// call sites can never drift onto different rejection tables. Lives in
+/// `qsh-proto`, not `qsh-core`, for the same reason [`valid_host_name`]
+/// does: `qsh-core` may depend on `qsh-proto` but not the reverse
+/// (`docs/design/architecture.md` §1), and this shape check has to run
+/// before the value reaches anything `qsh-core` owns.
+///
+/// Deliberately does **not** check for homoglyph/confusable characters —
+/// a table-driven confusable check needs a curated Unicode confusables
+/// table this crate does not carry (no new crate for it, per this
+/// function's own design brief), and §15.4's fingerprint pinning is
+/// already the defense that matters here: two names that merely *look*
+/// alike still pin under different, independently-verified fingerprints,
+/// so a homoglyph name can confuse an operator's eye but never substitute
+/// for the identity check itself.
+pub fn validate_device_name(name: &str) -> Result<(), DeviceNameError> {
+    if name.is_empty() || name.len() > 64 {
+        return Err(DeviceNameError::Length);
+    }
+    for c in name.chars() {
+        if c.is_control() {
+            return Err(DeviceNameError::Control);
+        }
+        if matches!(c,
+            '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200E}'..='\u{200F}'
+        ) {
+            return Err(DeviceNameError::Bidi);
+        }
+        if matches!(c, '\u{200B}'..='\u{200D}' | '\u{2060}' | '\u{FEFF}') {
+            return Err(DeviceNameError::ZeroWidth);
+        }
+    }
+    Ok(())
 }
 
 /// Render a forward destination as the canonical `host:port` string:
@@ -524,7 +593,7 @@ fn parse_forward_port(raw: &str) -> Option<u16> {
 /// `direction` is always [`ForwardDirection::Local`] — set it explicitly
 /// after parsing when the caller is handling `-R` (see that field's doc).
 ///
-/// Returns [`Error`] with [`ErrorCode::InvalidArgument`] for anything that
+/// Returns [`struct@Error`] with [`ErrorCode::InvalidArgument`] for anything that
 /// does not fit the grammar: not exactly 3 or 4 colon-separated parts, a
 /// port outside `1..=65535`, an empty or malformed host/bind, unmatched
 /// `[`/`]`, or a bracketed listen/host port.
@@ -1798,6 +1867,62 @@ mod tests {
         // A ULID — the shape the host actually mints
         // (`qsh_core::server::Server::handle_rfwd_open`).
         assert!(valid_forward_id("01ARZ3NDEKTSV4RRFFQ69G5FAV"));
+    }
+
+    // ---- validate_device_name ----------------------------------------------
+
+    #[test]
+    fn validate_device_name_boundary_table() {
+        // Empty: too short.
+        assert_eq!(validate_device_name(""), Err(DeviceNameError::Length));
+        // Exactly 64 bytes: allowed; 65 bytes: refused — checked in ASCII
+        // (byte count == char count) and in a 3-bytes-per-char script, so
+        // the boundary is proven on UTF-8 *byte* length, not char count.
+        assert_eq!(validate_device_name(&"a".repeat(64)), Ok(()));
+        assert_eq!(
+            validate_device_name(&"a".repeat(65)),
+            Err(DeviceNameError::Length)
+        );
+        let hangul_63_bytes = "가".repeat(21);
+        let hangul_66_bytes = "가".repeat(22);
+        assert_eq!(hangul_63_bytes.len(), 63);
+        assert_eq!(hangul_66_bytes.len(), 66);
+        assert_eq!(validate_device_name(&hangul_63_bytes), Ok(()));
+        assert_eq!(
+            validate_device_name(&hangul_66_bytes),
+            Err(DeviceNameError::Length)
+        );
+        // Existing control-character rule (`char::is_control()`, tab
+        // included).
+        assert_eq!(
+            validate_device_name("evil\u{1b}[Kname"),
+            Err(DeviceNameError::Control)
+        );
+        assert_eq!(
+            validate_device_name("evil\tname"),
+            Err(DeviceNameError::Control)
+        );
+        // Bidi override/isolate controls — not `char::is_control()`, so
+        // they need their own arm.
+        assert_eq!(
+            validate_device_name("evil\u{202e}name"),
+            Err(DeviceNameError::Bidi)
+        );
+        // Zero-width characters — invisible in a terminal.
+        assert_eq!(
+            validate_device_name("evil\u{200b}name"),
+            Err(DeviceNameError::ZeroWidth)
+        );
+        assert_eq!(
+            validate_device_name("evil\u{feff}name"),
+            Err(DeviceNameError::ZeroWidth)
+        );
+        // Ordinary multi-byte names — Korean, emoji — pass; only the
+        // specific code-point classes above are rejected, not
+        // "non-ASCII" wholesale (unlike `valid_host_name`).
+        assert_eq!(validate_device_name("데이브의 맥북"), Ok(()));
+        assert_eq!(validate_device_name("laptop 💻"), Ok(()));
+        assert_eq!(validate_device_name("Dave's MacBook Pro"), Ok(()));
     }
 
     // ---- sanitize_peer_text ------------------------------------------------

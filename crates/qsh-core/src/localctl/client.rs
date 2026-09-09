@@ -1017,7 +1017,7 @@ pub struct DaemonHostList {
 /// listen` running" state — never an error a caller has to special-case.
 ///
 /// Every candidate is probed **concurrently**, each under
-/// [`ADMIN_LIST_CANDIDATE_TIMEOUT`], so the total wall-clock cost of a
+/// `ADMIN_LIST_CANDIDATE_TIMEOUT`, so the total wall-clock cost of a
 /// listing is bounded by that one deadline regardless of how many sockets
 /// exist — a serial loop would let a wedged daemon early in pid-ascending
 /// order add its own timeout on top of every candidate behind it
@@ -1027,7 +1027,7 @@ pub struct DaemonHostList {
 /// pid-ascending order candidates were discovered in, independent of which
 /// connect happened to finish first.
 ///
-/// Reuses [`connect_candidate`]'s stale-socket-unlink discipline (the same
+/// Reuses `connect_candidate`'s stale-socket-unlink discipline (the same
 /// one [`discover`] applies), so a crashed daemon's leftover socket gets
 /// cleaned up here too, not only on the routing path.
 pub async fn admin_host_list_all(runtime_dir: &Path) -> Vec<DaemonHostList> {
@@ -1123,7 +1123,7 @@ async fn admin_host_list_one(pid: u32, socket: PathBuf) -> Option<DaemonHostList
 pub struct DaemonTunnelList {
     /// The daemon's pid — from its own `<pid>.sock` filename.
     pub pid: u32,
-    /// The daemon's localctl socket path — kept for [`Ops::tunnel_close`]
+    /// The daemon's localctl socket path — kept for [`crate::ops::Ops::tunnel_close`]
     /// (`crate::ops::tunnel`), which (unlike `host.list`) may need to
     /// speak to this exact daemon again to close what it just listed.
     pub socket: PathBuf,

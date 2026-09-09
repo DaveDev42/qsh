@@ -386,11 +386,11 @@ impl LocalForwardHandle {
     /// forward's listener relays through `socket_path` (this machine's
     /// resident `qsh listen` daemon's UDS socket) to `host`'s live reverse
     /// registration, instead of dialing a QUIC connection directly. See
-    /// [`ForwardCarrier::Local`]'s own doc for the wire shape this opens
+    /// `ForwardCarrier::Local`'s own doc for the wire shape this opens
     /// per connection.
     ///
     /// `pub`, not `pub(crate)` — the same Stage D widening
-    /// [`crate::tunnel::RemoteForwardAcceptor::spawn_reverse`] already
+    /// `crate::tunnel::RemoteForwardAcceptor::spawn_reverse` already
     /// got: `crates/qsh-testkit/tests/reverse_tunnel.rs` (L3, Step 5 (a))
     /// drives the real `-L over reverse` requester leg end to end rather
     /// than re-implementing it, which needs this callable from outside

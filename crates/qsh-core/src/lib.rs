@@ -1,7 +1,8 @@
 //! `qsh-core`: all business logic, exposed as a typed operation layer.
 //!
 //! [`ops::Ops`] is the single API every frontend (`qsh-cli`'s human/JSON
-//! renderers today; the MCP adapter from M6) calls through — see
+//! renderers, and any long-running external process — e.g. an agent tool —
+//! integrating over `qsh.cli/v1`) calls through — see
 //! `docs/CLI.md` §11. Renderers and adapters contain zero auth, ACL or
 //! session logic; if something has to be reimplemented in a frontend to
 //! work, it belongs here instead.
