@@ -451,6 +451,7 @@ be able to do.
 - [Wire Protocol Design](docs/design/protocol.md)
 - [Architecture Design](docs/design/architecture.md)
 - [Test Strategy](docs/design/testing.md)
+- [Threat Model](docs/design/threat-model.md)
 - [Architecture Decision Records](docs/adr/)
 
 `docs/PRD.md` and `docs/CLI.md` are binding: they define behavior, the wire
@@ -630,3 +631,7 @@ cargo run -p xtask -- arch
 
 All five have to be green before a commit. `docs/design/testing.md`
 explains which tests each layer owes.
+
+## License
+
+MIT OR Apache-2.0 — see `LICENSE-MIT` and `LICENSE-APACHE`.

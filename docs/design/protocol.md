@@ -99,7 +99,7 @@ connection당 **control 스트림 1개** + 리소스별 스트림. 비-control �
 - replay 요청(`last_output_seq = N`)은 "누적 offset N 이후 byte"를 의미하며, 서버는 chunk를 자유롭게 분할·병합해 **정확히 N에서 끊어** 재전송할 수 있다. UTF-8 경계·`--limit-bytes` 절단 문제가 원천적으로 없다.
 - input 방향도 동일한 누적 byte offset(`input_seq`)을 쓴다. input 재전송/중복 제거는 wire 내부 동작이며 CLI 계약에는 노출되지 않는다.
 
-## 9. `.proto` 스케치 (v1)
+## 9. `.proto` 계약 (v1)
 
 M1에서 `crates/qsh-proto/proto/qsh/wire/v1.proto`로 구체화한다. `Response.Error.code`는 CLI.md §3.3의 오류 코드 문자열을 **그대로** 사용한다(wire→JSON 번역표 없음, 어휘 단일화).
 
@@ -331,15 +331,17 @@ message ExecFrame {
 
 ## 13. Fuzzing·검증 계획
 
-신뢰 불가 입력 표면 전체를 sans-IO `qsh-proto`에 격리한다(순수 `&[u8] → Result<Frame>` + sans-IO 상태 기계). cargo-fuzz(libFuzzer) 타깃:
+신뢰 불가 입력 표면 전체를 sans-IO `qsh-proto`에 격리한다(순수 `&[u8] → Result<Frame>` + sans-IO 상태 기계). Step 1(커밋 `d87e76b`, 2026-09-02)에 cargo-fuzz(libFuzzer) 타깃 16종이 `fuzz/fuzz_targets/`에 착륙했다 — 이 절이 원래 계획했던 4개 타깃 이름(`fuzz_frame_split`/`fuzz_control_decode`/`fuzz_stream_header`/`fuzz_session_machine`)은 실제 착륙 시점에 다시 갈라졌다:
 
-1. **`fuzz_frame_split`** — frame splitter에 적대적 부분 청크(1-byte 피드, 쪼개진 length prefix, 상한 근접 길이). 불변식: panic 없음, 상한 초과 할당 없음, 청킹 방식과 무관하게 결과 동일.
-2. **`fuzz_control_decode`** — raw bytes → `ControlMessage::decode` + `arbitrary` 기반 structure-aware 변형. 불변식: decode는 panic하지 않고, 의미 검증은 결정적.
-3. **`fuzz_stream_header`** — 모든 `StreamKind`(unknown 포함)·불량/만료 ticket의 첫 frame 처리. 불변식: `Hello` 완료 전에는 control 외 어떤 것도 존재 불가, ACL 미통과 경로에서 리소스(PTY/exec/socket) 생성 0건(계측 mock broker로 단언).
-4. **`fuzz_session_machine`** — `arbitrary` 생성 control message 시퀀스 + 연결 단절 이벤트를 sans-IO broker에 주입. 불변식: default deny 유지, writer lease 단일성, sequence 단조성, gap 범위 정확성, resume token 단회성.
-5. **proptest 모델 테스트** — 전 message encode/decode round-trip; ring buffer를 naive Vec 오라클과 대조(임의 append/attach/evict 후 replay·gap 정확성); reconnect 경쟁 하의 input dedup 모델.
+1. **frame layer 1종** — `frame_decoder`(구 `fuzz_frame_split`에 대응). `FrameDecoder`에 적대적 부분 청크(1-byte 피드, 쪼개진 length prefix, 상한 근접 길이)를 흘리고 `push`/`next_frame`/`take_remaining`을 임의 순서로 인터리브한다. 불변식: panic 없음, 상한 초과 할당 없음, 청킹 방식과 무관하게 결과 동일.
+2. **wire·local 메시지 decode 8종**(구 `fuzz_control_decode`/`fuzz_stream_header`가 갈라진 것) — `decode_control`(`ControlMessage`, 루트 oneof), `decode_hello`(`Hello`), `decode_stream_header`(`StreamHeader`, 모든 `StreamKind` 포함 unknown 값도), `decode_session_frame`(`SessionFrame`, decode 뒤 `validate()`까지 체인), `decode_exec_frame`(`ExecFrame`), `decode_connect_result`(`ConnectResult`, `TCP_CONNECT`에서 유일하게 ticket/ACL 게이트가 없는 decode 경로), `decode_local_hello`/`decode_local_admin_request`(`qsh.local.v1`, localctl UDS 첫 두 메시지). 불변식은 원래 계획과 같다 — decode는 panic하지 않고, `Hello`/ACL 완료 전에는 control 외 어떤 리소스(PTY/exec/socket)도 생성되지 않는다.
+3. **로컬 입력 파서·검증기 6종** — `valid_host_name`, `valid_forward_id`, `parse_invite_code`, `parse_forward_spec`, `sanitize_peer_text`, `fingerprint_principal`. 신뢰 불가 peer bytes가 아니라 CLI 인자·trust store·화면 표시 문자열처럼 로컬 기원 입력이지만, `qsh-proto`의 sans-IO 파서 표면에 같이 있어 같은 취급을 받는다(각 타깃 파일 머리 주석에 근거).
+4. **JSON 계약 표면 1종** — `json_request_types`. `serde_json::from_slice`로 `qsh_proto::types::*Req`(에이전트가 `--json`으로 주는 요청 타입)를 흔든다.
+5. **proptest 모델 테스트** — ACL `decide`를 naive coverage 오라클과 대조(`crates/qsh-core/src/acl/policy.rs`), ring buffer를 naive Vec 오라클과 대조(임의 append/attach/evict 후 replay·gap 정확성, `crates/qsh-core/src/broker/ring.rs`), reverse registry의 `generation` 단조성(`crates/qsh-core/src/reverse/registry.rs`), reverse target의 backoff 단조성(`crates/qsh-core/src/reverse/target.rs`), localctl mux의 request-id 교차 부재(`crates/qsh-core/src/localctl/mux.rs`).
 
-corpus는 `fuzz/corpus/`에 체크인하고 **모든 플랫폼에서 유닛 테스트로 상시 재생**한다(발견된 크래시의 회귀 고정). CI에서 PR마다 fuzz 빌드 게이트 + nightly smoke fuzz, 공개 beta 전 타깃당 누적 72시간 + OSS-Fuzz 제출. 상세는 [testing.md](testing.md).
+**착륙하지 않은 것 — stateful broker fuzzer.** 원래 4번 항목이 겨누던 것(`arbitrary` 생성 control message *시퀀스* + 연결 단절 이벤트를 sans-IO broker에 주입해 default deny 유지·writer lease 단일성·sequence 단조성·gap 범위 정확성·resume token 단회성을 흔드는 stateful 타깃)은 이번 16종 어디에도 없다 — 위 8종은 각 메시지 하나의 decode만 흔들고 시퀀스 상태를 주입하지 않는다. `docs/ROADMAP.md`는 이것을 M8 범위로 나열하지만 `PLAN.md`는 Step 1–10 어디에도 소유 Step을 두지 않았다 — **M8 Step 7b**(같은 마일스톤, 마감 전 별도 라운드)로 이월한다.
+
+corpus는 `fuzz/corpus/`에 체크인하고 **모든 플랫폼에서 유닛 테스트로 상시 재생**한다(발견된 크래시의 회귀 고정). CI에서 PR마다 fuzz 빌드 게이트 + nightly smoke fuzz, 공개 beta 전 타깃당 누적 72시간 + OSS-Fuzz 제출. 캠페인 기록은 [`docs/campaigns/m8-fuzz.md`](../campaigns/m8-fuzz.md), 상세는 [testing.md](testing.md).
 
 ## 14. P1 TCP fallback을 위한 제약 (지금 지켜야 할 것)
 
@@ -432,4 +434,99 @@ TLS 게이트(`pairing_open()`, §15.1)는 redeem 여부를 보지 않고 오직
 
 ### 15.9 Fuzzing
 
-`PairingProof`/`PairingAccepted`는 `ControlMessage.body` oneof의 새 variant일 뿐이므로, §13의 `fuzz_control_decode` 타깃(`ControlMessage::decode` 전체를 `arbitrary` structure-aware 변형으로 흔드는 타깃)이 그대로 이 두 메시지도 포함한다 — 별도 타깃이 필요 없다. 이 저장소에는 아직 `fuzz/` 하네스 자체가 실제로 구현되어 있지 않다(§13은 계획 문서다) — 이 Step이 그 계획에 추가하는 표면은 없다는 뜻으로 남긴다.
+`PairingProof`/`PairingAccepted`는 `ControlMessage.body` oneof의 새 variant일 뿐이므로, §13의 `decode_control` 타깃(`ControlMessage::decode` 전체를 `arbitrary` structure-aware 변형으로 흔드는 타깃)이 그대로 이 두 메시지도 포함한다 — 별도 타깃이 필요 없다. `fuzz/` 하네스 자체는 이 Step(M7 Step 4) 이후인 M8 Step 1(커밋 `d87e76b`, 2026-09-02)에 착륙했다 — 이 절이 쓰인 시점에는 아직 존재하지 않았다는 뜻으로 읽는다. 착륙한 뒤에도 이 절이 그 16종에 추가하는 표면은 없다: `decode_control`이 이미 이 두 메시지를 덮는다.
+
+## 16. Wire format freeze (v1)
+
+**상태: 초안 — 발효 전.** 발효 조건: `PLAN.md` §6.0의 SC7 운영자 판정 — 외부 보안 리뷰를 지금 예약할지((가)), 예약 없이 freeze만 먼저 진행할지((나)) — 이 기록되는 순간이다(`PLAN.md:357-358`). 판정이 나면 이 절 머리의 상태를 "발효"로 바꾸고 아래 두 칸을 채운다. 이 절의 나머지 내용은 (가)/(나) 어느 쪽이 나든 그대로다 — 둘의 차이는 문면 밖의 후속 조치(리뷰 일정, (나)라면 `PRD.md` SC7 문장의 개정)에만 있다(§16.10).
+
+- 발효 일자: (미정)
+- 발효 커밋: (미정)
+
+### 16.1 동결 대상 — `.proto` 계약 (§9)
+
+§9가 정의하는 `qsh.wire.v1`의 message·field 번호 배정 전체가 얼어붙는다. 값은 HEAD `95d8e8a` 기준 실측이다.
+
+| 항목 | 정의 위치 | 값 |
+|---|---|---|
+| `ControlMessage` oneof 태그(18 branch) | `crates/qsh-proto/proto/qsh/wire/v1.proto:41-82` | `hello=10`, `response=11`, `session_open=20`…`session_write=28`(`25`는 결번), `exec_start=30`, `rfwd_open=40`, `rfwd_close=41`, `ping=50`, `pong=51`, `session_event=60`, `pairing_proof=70`, `pairing_accepted=71` |
+| `Response` oneof 태그(10 branch + `error`) | 같은 파일:135-147 | `session_opened=1`…`session_closed=10`, `error=15` |
+| top-level `message` 선언 49종의 필드 번호 전체 | 같은 파일(675줄) | `grep -c '^message '` = 49 |
+| `reserved 25` | 같은 파일:40(주석 `:38-39`) | 구 `SessionSignal`, 번호만 예약(P1). prost는 unknown field를 버리므로 25는 body 없는 `ControlMessage`로 디코드되고, 호스트는 `UNSUPPORTED`로 답한다(§9) |
+| `AttachMode.ATTACH_MODE_RO = 2` | 같은 파일:357-363(`RO=2`는 `:362`) | `UNSPECIFIED=0`/`RW=1`/`RO=2`. 오늘 hosts는 RO 요청에 `INVALID_ARGUMENT`로 답한다 — `reserved 25`와 같은 성격의 예약 번호다 |
+| `ErrorCode` 어휘 16종 + `Unknown(raw)` passthrough | `crates/qsh-proto/src/error.rs:78-95`(`KNOWN`), `:116`·`:188`(양방향 passthrough) | `InvalidArgument`…`Internal` 16종. 미지 문자열은 `Unknown(raw)`로 무손실 왕복 |
+| ALPN | `crates/qsh-proto/src/wire.rs:34`; 1차 결정 `docs/adr/0001-custom-quic-protocol.md:14` | `qsh/1` |
+| Frame 헤더 레이아웃 | `crates/qsh-proto/src/frame.rs:1-19`; 1차 결정 `docs/adr/0001-custom-quic-protocol.md:16,22` | `u32` BE length prefix + prost body. ADR-0001:22가 이 모양을 고른 결정적 이유는 P1 TCP fallback(ADR-0005)을 wire 변경 없이 얹기 위해서다 — 이 layer를 얼리는 것은 그 경로도 함께 지키는 일이다 |
+| `CONTROL_FRAME_MAX` / `DATA_FRAME_MAX` | `crates/qsh-proto/src/frame.rs:13,16` | 256 KiB / 64 KiB |
+| `EXEC_CHUNK_MAX` / `SESSION_CHUNK_MAX` / `SESSION_READ_MAX_BYTES` | `crates/qsh-proto/src/wire.rs:78,85,93` | 16 KiB / 16 KiB / 192 KiB |
+| `StreamKind` enum | `crates/qsh-proto/proto/qsh/wire/v1.proto:544-550` | `STREAM_KIND_UNSPECIFIED=0`/`SESSION_DATA=1`/`EXEC_DATA=2`/`TCP_CONNECT=3`/`TCP_ACCEPTED=4`. 0값의 취급은 §16.8 |
+| sequence 시맨틱 | §8; `crates/qsh-core/src/broker/ring.rs:4-9` | 세션 수명 누적 output byte offset(`u64`). 오프셋 배정은 `ReplayStore::push` 한 곳뿐 |
+
+### 16.2 동결 대상 — `.proto` 밖의 상호운용 계약
+
+`.proto`에 실리지 않지만 peer 간 상호운용을 좌우하는 값들도 함께 얼어붙는다.
+
+| 항목 | 정의 위치 | 값 |
+|---|---|---|
+| 0-RTT 전면 금지 | §2; client `crates/qsh-transport/src/endpoint.rs:511-512`, server `:527-529` | client `enable_early_data = false` + `Resumption::disabled()`; server `max_early_data_size = 0` + `send_tls13_tickets = 0` + `NoServerSessionStorage`. §2가 남긴 조건("의심스러우면 `NoServerSessionStorage`로 끈다")은 코드가 이미 무조건 끄는 쪽으로 해소돼 있다 — 이 freeze가 그 사실을 확정 서술로 올린다 |
+| TLS 검증 코어 `QshPeerVerifier` | §3 | pin(SPKI SHA-256) → private CA 체인 → 거부. leaf 유효기간 항상 검사. web PKI root 미적재. TLS 1.3 전용 양방향 |
+| pairing exporter label / 도메인 분리 접미사 | §15.3–15.4; `crates/qsh-core/src/pairing.rs:43` | `b"qsh pairing v1"`, context 빈 값; `exporter‖0x01`(initiator→responder) / `exporter‖0x02`(responder→initiator) |
+| `session_id` / `forward_id` 모양 | `session_id`: `crates/qsh-core/src/server/mod.rs:4074`(`valid_session_id`, 상한 `:181` `SESSION_ID_MAX_LEN = 64`; §9 "세션 id는 모양부터 검사한다" `:275`). `forward_id`: `crates/qsh-proto/src/wire.rs:304-305`(§7 `:88`) | 둘 다 `1..=64` bytes `[A-Za-z0-9_-]` |
+| `device_name` / `offered_name` 검증 | §15.5; `crates/qsh-proto/src/wire.rs:393`(`validate_device_name`), `:286`(`valid_host_name`) | `device_name`은 `1..=64` bytes, 제어문자·bidi override/isolate·zero-width 거부(homoglyph는 의도적 미검사, §15.5). `offered_name`은 빈 문자열이거나 `1..=64` bytes `[A-Za-z0-9._-]`(빈 값은 controller가 이름을 정하는 정상 경로, §9 `ReverseRegistration.offered_name` :222-224, 모양 규칙은 §11-2 :311) |
+| priority band | §12; `crates/qsh-proto/src/wire.rs:64,68,71,74` | control=200 / session_data=100 / exec_data=50 / tunnel=0. 송신 큐 힌트라 peer가 관측하는 값은 아니지만 이 문서가 명문화한 값이다 |
+
+### 16.3 동결 밖
+
+아래는 freeze가 명시적으로 선을 그은 것들이다 — wire freeze의 additive-only 규율(§16.4)이 적용되지 않는다.
+
+- **`qsh.local.v1`**(localctl UDS). `crates/qsh-proto/proto/qsh/local/v1.proto:9-15`가 이유를 직접 적고 있다 — M8이 freeze하는 것은 네트워크를 건너 두 peer 사이를 오가는 원격 계약 `qsh.wire.v1`뿐이고, 이 파일의 메시지는 전부 한 머신 안, same-uid만 열 수 있는 소켓 위에서만 오간다. 별도 버전 축(`LOCAL_HELLO_VERSION = 2`, `crates/qsh-proto/src/local.rs:64`)을 쓴다.
+- **`qsh.event/v1` JSON 봉투**(`crates/qsh-proto/src/event.rs:27` `EVENT_SCHEMA`, `:31-37` `KNOWN_EVENT_TYPES` 5종). wire의 `SessionEvent`(태그 60)와는 다른 표면이고, `docs/CLI.md` §10이 이미 자기 additive-only 규율을 갖는다 — 대조는 §16.6.
+- **`ForwardSpec`/`ForwardDirection`**(`crates/qsh-proto/src/wire.rs:464`(`ForwardSpec`)·`:446`(`ForwardDirection`)). `-L`/`-R` CLI 인자를 로컬에서 파싱한 결과 타입이지 wire에 실리는 값이 아니다 — `.proto` 전체에 이 이름의 message도 field도 없다. `parse_forward_spec`이 §13의 fuzz 타깃인 것은 신뢰 불가 **로컬** 입력 파서이기 때문이지, wire 표면이기 때문이 아니다.
+- **QUIC RESET/CLOSE 코드값**(`0x1001`~`0x200D`). CLOSE 대역(`0x100x`)의 정의 위치는 `crates/qsh-transport/src/endpoint.rs:125,128`·`crates/qsh-core/src/server/mod.rs:153`·`crates/qsh-core/src/reverse/listen.rs:112,132`·`crates/qsh-core/src/reverse/target.rs:205`이고, RESET 대역(`0x200x`)의 근거는 §7이다. 이 값들이 동결 밖인 이유와 그것이 뜻하지 않는 것은 §16.5 끝에서 다룬다.
+- **우선순위 band 값**. 로컬 송신 큐 힌트일 뿐 peer가 관측하는 wire 필드가 아니다(값 자체는 §16.2에 명문화돼 있다).
+
+### 16.4 허용되는 변경 — additive-only
+
+- 새 `message`, 또는 기존 oneof에 새 필드 번호 추가. 기존 번호의 재사용·재번호는 §16.5의 금지 사항이다.
+- **예약된 번호를 그 예약 대상으로 채우는 것.** 오늘 예약된 번호는 둘이다 — `reserved 25`(구 SessionSignal, P1)와 `AttachMode.ATTACH_MODE_RO = 2`(오늘은 `INVALID_ARGUMENT`). 둘 다 나란히 적어 둔다 — 나중에 "이 번호는 예약이었나 폐기였나"라는 분기가 생기지 않도록.
+- 새 capability 문자열과 그 capability에 딸린 새 optional message.
+- 새 `ErrorCode` 문자열. 구버전 peer는 `Unknown(raw)`로 무손실 왕복한다(`crates/qsh-proto/src/error.rs:116,188`; JSON 쪽 대응 규율은 `docs/CLI.md:1136`).
+- **ADR-0018 결정 3.** `RemoteForwardOpen`의 `forward_id` 재수락(`-R` 자동 재발행)은 v1에 넣지 않는다. 필요해지면 P1 이후 `reclaim: bool` 같은 additive 필드로 넣을 수 있고, 이 freeze는 그 경로를 막지 않는다(`docs/adr/0018-tunnel-lifetime-bound-to-connection.md:16`).
+
+### 16.5 금지되는 변경 — major bump 사유
+
+- 기존 필드 번호의 재사용·재번호·타입 변경·삭제.
+- frame 헤더 레이아웃 변경(§5).
+- `CONTROL_FRAME_MAX`/`DATA_FRAME_MAX` 축소.
+- TLS 검증 경로(pin → CA → 거부)의 의미 변경, 0-RTT 허용.
+
+이 중 하나라도 필요해지면 ALPN을 `qsh/2`로 올린다 — `qsh/1`은 그대로 두고 새 major로 파괴적 개정을 실어 보낸다(§4).
+
+QUIC RESET/CLOSE 코드값(`0x1001`~`0x200D`, CLOSE 대역 `crates/qsh-transport/src/endpoint.rs:125,128`·`crates/qsh-core/src/server/mod.rs:153`·`crates/qsh-core/src/reverse/listen.rs:112,132`·`crates/qsh-core/src/reverse/target.rs:205`, RESET 대역 §7)은 이 목록에 없다 — 애초에 §16.1/§16.2의 동결 대상이 아니기 때문이다(§16.3). 다만 "동결 밖"이 "아무 때나 바뀐다"는 뜻은 아니다. §7이 말하는 것은 "peer가 이 값에 의존해 분기하면 안 된다"이지 값의 안정성 자체를 포기한다는 뜻이 아니다 — 이 값들은 wire 계약이 아니므로 peer는 값에 의존해서는 안 되지만, 진단·audit 상관관계를 위해 major 버전 안에서는 재배치하지 않는다. 지금 `0x1003`은 서버 accept 경로의 용량 거부(`crates/qsh-core/src/server/mod.rs:153` `RESOURCE_EXHAUSTED`)와 reverse 등록 교체(`crates/qsh-core/src/reverse/listen.rs:112` `REPLACED`)가 각자 정의해 같은 값에 이름이 둘이다. 발신 지점이 다르고 close reason 문자열도 다르므로 지금 부딪히지는 않지만, 값을 갈라 둘지는 §16 발효 판정과 함께 정한다.
+
+### 16.6 wire major와 JSON major는 독립 트랙
+
+wire major(ALPN `qsh/N`)와 JSON major(`qsh.cli/vN`, `qsh.event/vN`)는 서로 다른 표면이다 — 전자는 mTLS로 인증된 두 qsh 인스턴스 사이, 후자는 CLI/에이전트와 로컬 `qsh` 바이너리 사이다. **wire major bump는 `qsh.cli/vN`·`qsh.event/vN`을 자동으로 무효화하지 않는다. 반대도 같다.**
+
+대조할 JSON 쪽 원문은 `docs/CLI.md` §10 "Compatibility policy"다: optional field·새 event `type` 추가 허용(`:1135`), `reason`/`state`/`error.code` 같은 열린 문자열 field에 새 값 추가 허용(`:1136`), 삭제·type 변경·의미 변경은 `/v2`(`:1137`), deprecated field는 최소 두 minor release 유지(`:1138`), `qsh schema --json`으로 지원 version·deprecation 조회(`:1139`). CLAUDE.md의 계약 안정성 규칙("`qsh.cli/v1`과 `qsh.event/v1`은 additive-only")이 이 JSON 표면에 적용한 것과, §16.4의 wire additive-only가 이 절에서 적용한 것은 같은 원칙을 서로 다른 표면에 적용한 것뿐이다 — 두 표면은 서로를 강제하지 않는다. `tests/` 밑 JSON 픽스처의 append-only 규칙도 이 wire freeze로 새로 생기는 것이 아니라 원래부터 별도 규율이다.
+
+wire 쪽에는 `:1138`(두 minor release 유지)과 `:1139`(`qsh schema --json` 조회)에 대응하는 메커니즘이 없다 — 이 비대칭을 메우지는 않는다. §16.7이 이유를 적는다.
+
+### 16.7 minor version의 의미
+
+`WIRE_MINOR_VERSIONS`(`crates/qsh-proto/src/wire.rs:38`)는 v1 내내 `&[0]` 하나만 유지한다. minor 축은 `Hello.versions`의 협상 필드로 예약돼 있을 뿐 지금은 쓰지 않는다 — additive 확장은 이미 capability 문자열(§4)이 맡고 있어서, 지금 minor를 올릴 이유가 없다. 새 minor의 의미를 나중에 정의하는 것 자체는 §16.4의 additive 변경으로 허용된다. 이것은 `docs/CLI.md:1138`의 minor(릴리스 축, deprecation 창을 정의하는 축)와는 다른 축이다 — wire minor를 JSON minor와 같은 의미로 맞추는 선택지도 있었지만, wire에는 애초에 CLI의 deprecation 개념(additive-only + `reserved`로 이미 대체돼 있다)이 없어 맞출 이유가 없었다.
+
+### 16.8 `StreamKind`의 0값
+
+`STREAM_KIND_UNSPECIFIED = 0`은 유효한 kind가 아니다. proto3에서는 미설정 필드가 자동으로 0을 갖는데, 이것을 `SESSION_DATA` 등과 같은 취급으로 두면 "kind를 아예 지정하지 않은 스트림"과 "0을 kind로 명시한 스트림"이 구별되지 않는다. `decode_stream_header` 퍼즈 타깃(§13)이 이 값과 그 밖의 unknown 값까지 흔드는 것이 이 규정의 실행 계약이다.
+
+### 16.9 §13과의 교차 참조 — freeze 표면이 곧 fuzz 표면이다
+
+`qsh.wire.v1`이 신뢰 불가 입력 표면 전체라는 것은 이 freeze가 새로 정하는 것이 아니라 ADR-0001의 원래 결정이다(`docs/adr/0001-custom-quic-protocol.md:36` "신뢰 불가 입력을 다루는 파싱 코드는 `qsh-proto`에 격리되어 cargo-fuzz 타깃으로 커버 가능해야 한다"). 이 절이 얼리는 표면과 §13이 흔드는 표면은 같다 — §16.4에 따라 새 wire op을 additive로 추가할 때마다, 그 op의 decode 경로가 §13의 대응 타깃(대개 `decode_control`)에 이미 걸리는지 확인하는 것이 이 규율을 실제로 지키는 방법이다. 누적 fuzz-hours와 배치 실행 기록은 [`docs/campaigns/m8-fuzz.md`](../campaigns/m8-fuzz.md)가 canonical이다.
+
+### 16.10 발효 절차
+
+1. SC7 판정(`PLAN.md` §6.0, (가)/(나))이 기록된다.
+2. 이 절 머리의 상태를 "발효"로 바꾸고 발효 일자·커밋을 채운다.
+3. `README.md`의 Known limitations 또는 Security posture 절에 한 줄을 더한다 — wire format `qsh/1`이 그 일자·커밋부터 동결됐다는 것과, 변경 규율이 이 절이라는 것.
+4. 판정이 (나)(예약 없이 freeze만 진행)라면 `docs/PRD.md`의 SC7 문장(`:311`)도 함께 개정한다 — 이 개정은 이 절이 아니라 그 판정을 낸 세션의 몫이다.

@@ -354,15 +354,15 @@ naive 1.25가 예측 1.00보다 큰 것은 baseline 12스레드가 **공유 런�
 
 - **외부 보안 리뷰 예약은 M5→M6→M7 3연속 미완**이다. 저장소 안에서 완결할 수 없는 조직 액션이라 에이전트가 대신할 수 없다.
 - 조건은 ROADMAP §4 리스크 5: 리뷰 시작 ~6주 전에 wire format을 freeze한다. **지금 예약해도 freeze는 이미 리뷰 일정을 밀어내는 쪽**이다 — 리드타임이 남아 있지 않다.
-- 결과적으로 남는 선택지는 둘뿐이다. (가) 지금 예약하고 wire freeze(6.7)를 예약일 기준 6주 전으로 앞당긴다. (나) 예약 없이 freeze만 진행하고 리뷰를 M9로 미룬다 — 이 경우 SC7은 릴리스 게이트에서 빠지므로 PRD 개정이 따라야 한다.
-- **판단은 운영자 몫**이고 코드 작업으로 대체되지 않는다. 이 항목이 미해결인 채로 6.7(wire freeze)을 넘기지 않는다.
+- 결과적으로 남는 선택지는 둘뿐이다. (가) 지금 예약하고 wire freeze(§6.2 Step 7)를 예약일 기준 6주 전으로 앞당긴다. (나) 예약 없이 freeze만 진행하고 리뷰를 M9로 미룬다 — 이 경우 SC7은 릴리스 게이트에서 빠지므로 PRD 개정이 따라야 한다.
+- **판단은 운영자 몫**이고 코드 작업으로 대체되지 않는다. 이 항목이 미해결인 채로 §6.2 Step 7(wire freeze)을 넘기지 않는다.
 
 ### 6.1 DoD 체크리스트 (ROADMAP M8)
 
-- [ ] **DoD 1 — fuzz**: parser 타깃당 누적 ≥72 fuzz-hours 무crash.
+- [ ] **DoD 1 — fuzz**: parser 타깃당 누적 ≥72 fuzz-hours 무crash. 기록은 `docs/campaigns/m8-fuzz.md`(타깃 16개 전부가 대상) — 배치 2 결과 확인 대기.
 - [ ] **DoD 2 — soak**: 24h/100-session에서 idle listener ≤30MB, 세션당 buffer ≤8MB, fd 무증가.
 - [ ] **DoD 3 — 실기기 mobility**: Wi-Fi↔테더링 ≥60회(macOS+Linux) 자동 유지+resume ≥95%, migrated/resumed 분해 보고. 통과 기준은 사전 정의(idle timeout에 기대지 않는 2초 내 재dial). **사람이 실행한다.**
-- [ ] **DoD 4 — wire freeze 후 독립 리뷰 계약** (SC7 — 6.0 참조).
+- [ ] **DoD 4 — wire freeze 후 독립 리뷰 계약** (SC7 — 6.0 참조). 문면 초안은 완료(Step 7, 2026-09-10, `protocol.md` §16 "초안 — 발효 전") — 발효와 리뷰 계약은 §6.0 판정 대기.
 - [x] **DoD 5 (감사 개정) — 적대적 부하 하네스**: 스푸핑 Initial flood·대량 연결·principal당 세션 폭주 각각에서 선언된 상한이 실제로 강제되고, 부하 중·후 idle listener RSS/fd가 soak과 같은 bound를 지키며, 기존 세션의 PTY echo가 살아 있음. **2026-09-08 마감** — Step 4a·4b·4c, 커밋 2f52958. 판정과 실측은 Step 4의 (a)-추기 세 블록에 있다.
 
 ### 6.2 실행 단계 (PR 단위)
@@ -651,6 +651,24 @@ freeze 이후에는 고칠 수 없는 것들을 먼저 처리한다.
 #### Step 7 — wire format freeze + threat model + OSS-Fuzz 제출
 
 6.0의 SC7 판단이 선행 조건이다. freeze 문면은 `docs/design/protocol.md`에 박고, threat model은 새 문서로 낸다.
+
+**(a) 착수 판정 (2026-09-10, main 세션).** 인벤토리(`$SP/step7/INVENTORY-7.md`, 리더 다섯과 합성·비평 각 하나)가 산출물 여섯을 확정했다. freeze 문면(protocol.md §16 신설, §9는 "`.proto` 계약 (v1)"로 개명), threat model(`docs/design/threat-model.md`), OSS-Fuzz 제출물 초안(`fuzz/oss-fuzz/`), fuzz 캠페인 기록의 승격(`docs/campaigns/m8-fuzz.md` — Step 1 기록은 아래에 그대로 남긴다), LICENSE 실물 파일(`Cargo.toml`의 `MIT OR Apache-2.0` 선언만 있고 루트에 파일이 없었다), Step 6 이월 소정리(`hint_alias`). SC7은 §6.0대로 운영자 판정이 아직 없다. 문면은 (가)(나) 어느 쪽이든 같으므로(차이는 PRD·DoD 4 문구뿐) §16을 "상태: 초안 — 발효 전"으로 완성해 두고 발효(일자·커밋 기입)는 판정 뒤 소커밋으로 한다. §6.0의 "넘기지 않는다"는 발효를 뜻한다고 읽는다.
+
+판정 여덟. wire major(ALPN `qsh/N`)와 `qsh.cli/vN`·`qsh.event/vN`은 독립 트랙이다. QUIC RESET/CLOSE 코드값은 wire 계약이 아니되 진단 상관관계를 위해 major 안에서 재배치하지 않는다. `WIRE_MINOR_VERSIONS`는 v1 내내 `[0]`이고 minor 축은 예약만 한다. additive 협상은 capability 문자열 몫이다. 예약 번호(`reserved 25`, `ATTACH_MODE_RO = 2`)를 그 예약 대상으로 채우는 것은 additive다. `StreamKind` 0은 유효 kind가 아니다. stateful broker fuzzer(ROADMAP M8 범위, protocol.md §13 4번과 testing.md L8 `broker_ops`)는 Step 7에 넣지 않고 Step 7b로 바로 뒤에 붙인다. 주입 가능 `Clock`은 이미 있다. perf 게이트(Step 8)는 Step 7 뒤다. OSS-Fuzz의 `primary_contact`, google/oss-fuzz PR 제출은 사용자 액션이고 저장소는 이미 public이다.
+
+threat model은 인벤토리의 위협 표(A 스푸핑부터 G 가용성까지 41행: 위협·통제·근거·핀 테스트·잔여 위험)와 갭 세 표를 본문으로 삼는다. 통제는 있는데 되돌려도 깨지는 테스트가 없던 0-RTT 금지 다섯 상수는 config 필드를 직접 단언하는 유닛으로 닫는다. per-conduit inflight 캡, `trust remove` 뒤 기존 연결 유지, `session.control close`의 owner scope 예외는 기존 테스트를 특정하거나 최소 테스트를 더한다. doctor 진단 2종은 M9 소유라 잔여 위험으로만 적는다. 테스트는 있는데 문서가 없던 다섯(audit torn-write 복구, audit 파일 락, localctl 쓰레기 피어 생존, localctl의 resume token 부재, ring tail-chunk coalescing)은 threat model 서술로 흡수한다.
+
+**(a)-추기 — Step 7 완료 판정 (2026-09-10, main 세션).** 구현은 Workflow 9 에이전트(S1 freeze 문면·S3 캠페인 문서·S4 OSS-Fuzz·S5 코드를 sonnet 넷이 병렬로, 그 뒤 S2 threat model을 opus가, 게이트, V1/V2/V3 opus 렌즈), 수정 라운드는 Workflow 7 에이전트(F-A/F-B/F-C sonnet → 게이트 → R1/R2/R3 opus). 산출물 여섯이 전부 착지했다. protocol.md §16(초안 — 발효 전, §16.1–16.10)과 §9 개명·§13 재작성, `docs/design/threat-model.md`(자산·주체·진입점, 위협 표 51행 — 인벤토리 rev.2의 50행에 localctl euid 게이트 B9를 더했다 — 갭 g1–g5, 역갭 r1–r5, 잔여 h1–h15, 운영 가정, 비목표, 유지 규율; README·architecture.md §6·testing.md·CLAUDE.md 문서 맵에서 링크), `docs/campaigns/m8-fuzz.md`(DoD 1의 "parser 타깃" = 16개 전부로 고정, 배치 1/2 기록 이관), `fuzz/oss-fuzz/` 4파일 + `scripts/fuzz/oss-fuzz-local.sh`(로컬 실행 16 바이너리 + seed corpus zip 16), `LICENSE-MIT`·`LICENSE-APACHE`(anyhow 1.0.104 본문, README License 절), 코드 소정리 둘(`hint_alias` trim + `valid_host_name` 3-way `HintAlias`, 0-RTT/resumption 다섯 값을 실제 rustls config에서 읽는 유닛 — threat model g5를 닫는다). 신규 테스트 6, 픽스처 불변. `crates/**` 밖에서 바뀐 코드 파일은 `fuzz/fuzz_targets/json_request_types.rs`의 모듈 주석(MCP 어댑터 제거 뒤 문면)뿐이다.
+
+렌즈가 잡은 것과 처분. V1(freeze 문면) P2 3·P3 4 — §16.2 `session_id` 행이 `valid_host_name`을 가리켰고(실제 검증기는 `server/mod.rs:4074`), "세션 id는 모양부터 검사한다"는 §7이 아니라 §9이며, `offered_name`의 빈 문자열 예외(controller가 이름을 정하는 정상 경로, `registry.rs:486`)가 빠져 얼리는 수용 집합이 실제보다 좁았다. V2(threat model·코드) P2 2·P3 1 — threat-model.md의 architecture.md·README 인용 15곳이 S2 자신의 편집(+2·+1줄)에 밀려 있었고, localctl의 accept 시 euid 검사(`daemon.rs:1460,1805`, 핀 테스트 셋)가 통제·테스트 다 있는데 표에 없었다. V3(OSS-Fuzz·라이선스) P1 1·P2 3·P3 4 — `build.sh`의 errexit이 shebang에만 있어 `bash build.sh`로 부르는 로컬 하네스가 false green을 냈고(S4 1회차 로그가 실증: 빌드가 죽고 `cp` 16회 실패인데 rc 0), 타깃 목록 하드코딩이 `cargo fuzz list` 규율과 어긋났으며, `-O` 단독은 debug assertion과 overflow check를 끄고, Dockerfile이 aws-lc-sys의 cmake 의존을 준비하지 않았다. 전건 채택해 고쳤고, V2-3(hint_alias의 trim이 조회 키가 아니라 remedy 문면에만 걸린다)만 이름 정규화 정책이라 M9로 이월했다. 위협 표는 BRIEF의 "41행"이 아니라 인벤토리 rev.2의 50행이 맞았다(A9·B8·C10·D7·E8과 대조군이 그 증분).
+
+변이 증거 여덟. `hint_alias`의 trim+검증 가드를 되돌리면 신규 5건이 전부 FAIL하고 기존 3건은 PASS(과결합 없음). 0-RTT 다섯 값(`enable_early_data`, `resumption`, `max_early_data_size`, `send_tls13_tickets`, `session_storage`)을 각각 독립으로 뒤집으면 매번 해당 단언에서 FAIL — 이 유닛은 단언값이 아니라 실제 config를 읽는다. per-conduit 캡을 +1 완화하면 g1이 인용한 `cap_exhausted_on_one_conduit_does_not_affect_another`가 FAIL. 수정 라운드 재검에서 `peer_is_authorized`를 항상 true로 바꾸면 B9가 인용한 `:1935`가 FAIL하고 `:2255`는 그대로 PASS다 — 그 테스트는 거부 판정을 `Ok(false)`로 주입해 "프레임을 읽지 않고 닫는다"만 고정하므로, B9 행에 이 구분을 적었다. 원복은 전부 백업 사본과 `cmp` 동일을 main이 재확인했다.
+
+재검 R1/R2/R3(opus)은 셋 다 fix-then-pass, 남긴 것은 P3 여덟(둘은 같은 스크래치패드 문면)이다. 리포에 닿은 넷은 main이 직접 고쳤다 — §16.3/§16.5의 CLOSE 대역 정의 위치가 `0x1004`(`reverse/listen.rs:132`·`reverse/target.rs:205`)를 빠뜨려 네 경로로 채웠고, `0x1003`이 `RESOURCE_EXHAUSTED`(`server/mod.rs:153`)와 `REPLACED`(`reverse/listen.rs:112`) 두 이름에 겹친 사실을 §16.5 끝에 적었으며, `device_name` 인용을 doc comment 줄에서 `validate_device_name`(`wire.rs:393`)으로 옮겼고, B9 핀 테스트 칸에 `:2255`의 범위를 적었다. OSS-Fuzz 쪽은 README의 build.sh 설명이 V3-2/V3-3 이후 낡아 있던 것과 `mapfile`이 bash 4 빌트인이라 macOS `/bin/bash` 3.2에서 죽는 것 — `while read` 루프로 바꿨다. 전부 문서·스크립트라 게이트 재실행 없이 `linkcheck.py`·`r2-cite.py`(threat-model.md 인용 198건 problems 0)·`bash -n`·shellcheck만 다시 돌렸다.
+
+게이트: fmt·clippy·arch·deny·win-gnu check·doc(host+win-gnu, `-D warnings`)·nextest `--test-threads=1` **1533 passed / 2 skipped**(기준선 1527 + 신규 6). macOS syspolicyd가 새로 빌드된 테스트 바이너리를 45분간 붙들어 `--list`가 멈춘 것처럼 보였지만 기다리면 지나간다.
+
+이월과 사용자 액션. §16 발효는 §6.0 SC7 판정이 기록되는 소커밋에서 한다 — 상태 줄·일자·커밋, README Security posture 한 줄, DoD 4 문구, (나)면 `docs/PRD.md:311`. OSS-Fuzz는 `primary_contact` 실주소 기입, google/oss-fuzz PR, `infra/helper.py build_image qsh && build_fuzzers qsh` 검증(첫 실패 후보는 aws-lc-sys)이 사람 몫이다. WSL 배치 2(`m8-fuzz-20260907-1450`, 종료 예정 2026-09-10 14:48 KST) 결과를 확인해 m8-fuzz.md §4와 DoD 1을 닫고, 배치 1 부족분(타깃당 6.4~12.9h)을 재실행한다. Step 7b stateful broker fuzzer(`broker_ops`, `Clock` 주입 있음)는 이 뒤에 바로 붙이고 Step 8 perf 게이트는 그 뒤다. M9 이월 둘 — hint_alias 조회 키 trim(hosts.toml/trust.toml 이름 정규화와 함께), doctor `acl_principal_unmatched`/`acl_ca_auth_path_missing`(threat model g4). CLOSE `0x1003`의 이중 이름은 §16 발효 소커밋에서 값을 갈라 둘지 정한다 — 발효 전이라 §16.5의 "major 안 재배치 금지"에 걸리지 않는다. 코드 doc의 `BRIEF-7 §2.5` 인용은 Step 6이 남긴 `BRIEF-6` 관례를 따른 것이라 저장소 밖 문서 참조라는 점만 P3로 적어 둔다.
 
 #### Step 8 — perf 게이트
 
