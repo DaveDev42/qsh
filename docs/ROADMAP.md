@@ -1,12 +1,12 @@
 # QSH 로드맵
 
 **상태:** 확정 (구현과 어긋나는 내용을 발견하면 이 문서를 먼저 갱신한다)
-**작성일:** 2026-08-17 · **개정:** 2026-08-21 — 프로덕션 준비도 감사(HEAD `1d5d1b0`) 반영: M3/M5/M7/M8/M9 범위·수용 기준 증보, "마일스톤 마감 공통 절차" 신설. 새 마일스톤은 만들지 않았다 — 감사가 찾은 갭 전부를 기존 마일스톤에 명시 귀속시킨 것이 이 개정의 전부다.
+**작성일:** 2026-08-17 · **개정:** 2026-08-21 — 프로덕션 준비도 감사(HEAD `1d5d1b0`) 반영: M3/M5/M7/M8/M9 범위·수용 기준 증보, "마일스톤 마감 공통 절차" 신설. 새 마일스톤은 만들지 않았다 — 감사가 찾은 갭 전부를 기존 마일스톤에 명시 귀속시킨 것이 이 개정의 전부다. · **개정 2:** 2026-09-09 — 사람용 CLI 설계(design.html, 2026-09-08) 확정 결정 반영: 신규 `M9 — 사람용 표면`(4.3ew)을 M8과 구 M9 사이에 신설하고, 구 `M9 — 릴리스`는 `M10 — 릴리스`로 번호만 옮긴다. notarization 리드타임이 CLI 설계 일정을 막지 않게 하려는 결정(ADR-0012~0017, DECISIONS.md Q1).
 **현재 위치:** M7 (Trust UX·profiles·doctor) 실행 중 — Step 1–8 전건 착륙, 마감은 사람이 해야 하는 두 항목에 걸려 있다. DoD 2(doctor 진단)·DoD 3(capabilities fixture)·DoD 4(`trust remove` 의미론)는 코드와 테스트로 충족됐고, **DoD 1(스톱워치 3회)은 미실행**이다 — `docs/campaigns/m7-stopwatch.md`가 기준을 사전 고정하고 예행 1회를 마쳤으며 `scripts/stopwatch/`가 회차 환경을 준비하지만, 측정 자체가 사람 시간을 재는 것이라(같은 문서 §9: 스크립트가 대신 채우면 실측이 아니라 과소측정) 자동화로 대체할 수 없다. **SC7 외부 보안 리뷰 예약도 M5→M6→M7 3연속 미완**이며 M8 wire freeze 리드타임이 사실상 만료됐다.
 
 이 문서는 P0 MVP까지의 canonical 마일스톤 기록이다. 각 마일스톤의 "수용 기준"이 곧 그 마일스톤의 **완료 정의(Definition of Done)** 다 — 수용 기준을 통과하는 테스트/시연 없이는 마일스톤을 닫지 않는다. SC 번호는 PRD §15 성공 기준의 순번이다 (SC1: 신규 두 장비 5분 내 연결, SC2: 한 명령 접속, SC3: 네트워크 전환 ≥95% 유지/resume, SC4: resume 가능한 단절에서 output 무손실, SC5: client crash가 remote PTY를 죽이지 않음, SC6: 모든 privileged op의 ACL 추적성, SC7: 공개 beta 전 독립 보안 리뷰).
 
-총 크기: 약 23–24 engineer-weeks (1인 기준).
+총 크기: 약 28–29 engineer-weeks (1인 기준) — 기존 24.5ew에 신규 M9(사람용 표면, 4.3ew)를 더한 28.8ew 반영.
 
 ## 1. 시퀀싱 원칙
 
@@ -113,14 +113,32 @@
   - **(감사 개정)** **적대적 부하 하네스** — 협조적 soak과 별도 게이트: 스푸핑 Initial flood·대량 연결·principal당 세션 폭주 각각에서 선언된 상한이 실제로 강제되고(`RESOURCE_EXHAUSTED`/거부), 부하 중·후 idle listener RSS/fd가 soak과 같은 bound를 지키며, 기존 세션의 PTY echo가 살아 있음.
 - **크기:** 3ew
 
-### M9 — 릴리스
+### M9 — 사람용 표면
+
+- **범위:** 신규 두 장비가 README만 보고 5분 안에 붙는 경로(SC1)의 마찰 축소. (a) **이름 결정권 이동** — `pair invite --as N` / `pair accept --as N`(신설. `TrustInviteData.assigned_name`과 `TrustInviteReq`/`TrustAcceptReq`의 `as_name`이 additive로 붙고, accept 결과는 기존 `TrustAcceptData.peer.name`이 그대로 담는다)로 pin하는 쪽이 상대 이름을 정한다. wire 자칭 값은 오늘의 `device_id` 그대로 두어 기존 fixture는 불변이다(근거: ADR-0012). (b) **역방향 개명** — `qsh reverse <controller>` → `qsh serve --to <listener|host:port> [--name N]`(신설), `qsh listen`은 유지. `--to`는 인바운드 bind를 하지 않는 순수 outbound 모드이고 `--bind`와 함께 주면 `INVALID_ARGUMENT`다. 구 표기(`trust invite`/`trust accept`/`qsh reverse`)는 v1 내내 숨김 alias로 남기고 `[serve].to`와 구 `[reverse].controller` config 키를 이중으로 읽는다(근거: ADR-0012). (c) **파일 교환 프로비저닝** — `identity export`(신설, leaf cert PEM 단독 출력) + `trust add --cert-file <pem>`(신설, leaf 단일 PEM만 허용, 체인/번들은 `INVALID_ARGUMENT`)를 코드 페어링과 동급 1급 경로로 승격한다(근거: ADR-0013, ADR-0002 개정). (d) **주소 기본값** — 포트 생략 시 4433을 파서와 조회 양쪽에서 채운다(파일은 불변, 근거: ADR-0014). (e) `trust add-ca`(신설)로 `[[ca]]` 수기 편집을 없앤다. (f) `trust rename`(신설) — 재시작 불요, 다음 handshake부터 적용, audit 기록. (g) `qsh service install|uninstall|status [--json]`(신설). `[serve].to`(또는 구 `[reverse].controller`)면 `serve --to` 모드, `[listen]`만 있으면 `listen` 모드, 아니면 `serve` 모드로 추론하고, Windows에서는 이 세 모드 중 어느 쪽이든 unit을 쓰기 전에 `UNSUPPORTED`를 낸다. macOS는 사용자 LaunchAgent(`~/Library/LaunchAgents/io.qsh.<mode>.plist`, `KeepAlive`), Linux는 systemd user unit(`~/.config/systemd/user/qsh-<mode>.service`, `Restart=always`), 그 외/매니저 없음은 `UNSUPPORTED`; unit 인자는 고정, qsh 자체 데몬화(CLI.md §6.12 foreground 전용)는 바꾸지 않는다 — ROADMAP 2026-09-07 추가 범위를 이 마일스톤이 계승한다. unit 예시 문서 `docs/deploy/service.md`는 M8 Step 6 문서 라운드에서 먼저 낸다. (h) `doctor` 진단 7종 추가 — 서비스 미등록, systemd linger 미설정, macOS LaunchAgent가 로그인 세션 안에서만 사는 한계, `bindv6only`, `acl_principal_unmatched`, `acl_ca_auth_path_missing`, `[serve].to`와 구 `[reverse].controller`의 값 충돌(`EXPECTED_DOCTOR_CODES`·CLI.md §6.17 표를 같은 커밋에서 갱신). (i) 실패 문면 8종의 관측·영향·다음 명령 규율(원격 오류·콘솔 진단 분리를 예외 축으로 명시). (j) `pair accept`의 `code`를 선택 인자로 바꾼다. TTY면 에코 없는 프롬프트, 파이프면 `--code-stdin`, `--json`/`--jsonl`에서는 프롬프트 없이 `INVALID_ARGUMENT`(근거: ADR-0013 결정 8). 로직은 qsh-core `Ops`에 두고 CLI는 렌더만 한다(기존 아키텍처 규칙 재확인, 신규 예외 없음).
+- **명시적 out:** TOFU(client가 미지 peer를 자동 pin) — `trust.toml` 양방향 구조상 outbound pin이 상대의 inbound 인증까지 통과시키는 문제가 있어 pin 방향 축을 ADR로 예약한다(ADR-0017). listener 대상 초대 상환("listener pairing")은 예약(ADR-0015). CSR 기반 다대 CA 서명도 예약(ADR-0016)이며, 현행 `qsh cert issue`(M7)는 로컬 device 승격만 유지한다. README 전면 재작성은 SC1 baseline 재측정 뒤로 미룬다(DoD 참고).
+- **수용 기준 (DoD):**
+  - SC1 스톱워치 재측정 — 새 표면으로 독립 3회, 5분 이내, `docs/campaigns/m7-stopwatch.md` 선례 형식을 계승한 캠페인 문서로 baseline(M7 DoD 1 측정치, Q4에 따라 현행 표면으로 먼저 잰다) 대비 단축 기록.
+  - doctor 신규 7종이 각각 안정된 code로 진단되는 것을 실행 가능한 메시지와 함께 테스트로 고정하고, `EXPECTED_DOCTOR_CODES`와 CLI.md §6.17 표를 같은 커밋에서 갱신.
+  - 문구 표본 8종(§6 문구 규칙 — forward loopback 처방, `-D` 현행 유지 문구, 재상환 실패의 host 전용 진단, 초대 출력의 후보 주소 열거, 포트 충돌 `--bind` 처방, 페어링 직후 pin 이름·매칭 규칙 부재 고지, `auth_path` 누락 host 진단, `assuming port 4433` 한 줄)이 축자 테스트로 고정.
+  - 숨김 alias(구 서브커맨드·config 키)와 config 이중 읽기가 왕복 테스트로 검증 — 구 표기 호출이 신 표기와 동일 op에 도달하고 신구 config 키가 동시에 있을 때의 우선순위가 고정된다.
+  - 신규 op마다 새 JSON fixture 파일을 추가하고 `REQUIRED_FIXTURES`(`crates/qsh-cli/tests/fixtures.rs`)에 등록한다. 기존 fixture는 한 바이트도 고치지 않는다. `cli_v1` 스키마도 신규 op마다 schemars 타입, `cli_v1_data_schema` arm, `CLI_V1_SCHEMA_COMMANDS` 등록, 렌더러(human/JSON) 둘, CLI.md 문서 행, man 항목이 모두 존재함을 등록 완전성 테스트로 확인(M5 `acl_registry` 선례 형식).
+  - 마일스톤 마감 공통 절차(§2) 1·2 — 구속 문서 태그 대조, README 동기화(단 전면 재작성은 위 명시적 out).
+- **크기:** 4.3ew (S1 포트 정규화 0.3 / S2 code 선택화·프롬프트 0.2 / S3 문구 8종·acl_docs·acl_uniformity 0.5 / S4 doctor 7종·동결 set 0.5 / S5 `serve --to`·v1 내내 유지하는 alias·config 이중 읽기·PRD 0.5 / S6 `identity export`·`--cert-file`·`add-ca` 0.7 / S7 `pair … --as`·`trust rename` 0.5 / S8 `qsh service` 0.4 / S9 계약 문서(CLI.md·PRD.md·man) 반영 0.4 — README 전면 재작성 제외 / S10 ADR 0.3: 0012·0013·0014·0017은 확정 반영, 0015·0016 신규 작성).
+- **결정 기록 (2026-09-09, 사용자 확정):**
+  - Q1 마일스톤 배치 — 쪼개서 M9 앞에 신설, 릴리스는 M10으로 민다. notarization의 Apple 계정 리드타임이 CLI 설계 일정을 인질로 잡지 않도록.
+  - Q2 역방향 이름 — `qsh reverse <c>` → `qsh serve --to <listener|host:port>`, `qsh listen` 유지. 구 표기는 v1 내내 숨김 alias, config는 `[serve].to`와 구 키 이중 읽기.
+  - Q3 이름 결정권 — `pair invite --as` / `pair accept --as` 채택. pin 쪽이 이름을 정하고 wire 자칭 값은 `device_id` 그대로.
+  - Q4 SC1 시점 — 현행 표면으로 먼저 baseline 3회 측정 후, 새 표면으로 재측정해 DoD에서 비교한다.
+  - Q5 둘째 터미널 마찰 — `qsh service install` 안내 + 데몬 부재 진단으로 해결. `serve --pair`는 기각(10분 초대를 상시 데몬 stderr에 노출하고 잠금 없는 `invites.toml`에 writer를 하나 더 만들기 때문).
+
+### M10 — 릴리스
 
 - **범위:** 설치 스크립트/cargo-dist 검토, Homebrew tap, macOS codesign + notarization, musl static Linux 빌드, SLSA provenance, 클린 VM smoke, beta 문서. crates.io publish gate 해제(`qsh-cli`).
 - **수용 기준 (DoD):** 클린 macOS arm64/x86_64·Linux arm64/x86_64에서 brew/curl 설치 → 동작. Gatekeeper가 notarized 바이너리를 차단하지 않음. musl static 바이너리가 구형 glibc 배포판에서 실행.
   - **(감사 개정 2026-08-21)** "동작"의 정의는 `version --json`이 아니라 **기능 스모크**다: init → trust → `exec --json` 왕복 + PTY 셸 획득 + detach→attach resume이 배포되는 release 프로파일 바이너리로 통과. 근거: 현재 CI의 전 기능 테스트는 dev 프로파일이고 release 바이너리는 기능 테스트 0건으로 출고된다. release 태그 전 CI에서 `--release` 프로파일 통합 테스트를 최소 1회 돌린다.
 - **크기:** 1.5ew (notarization은 Apple 계정 리드타임 — M8 중 시작)
 - **검토 항목(2026-09-07, ADR-0011):** `-W`(ProxyCommand형 stdio와 원격 TCP의 브리지) 필요 여부. `qsh exec`의 pipe stdin 전달과 `-L`로 부족한 사용례가 있을 때만 추가하고 없으면 기각한다.
-- **추가 범위(2026-09-07, 사용자 요청):** `qsh service install|uninstall|status [--json]`. `serve`, `listen`, `reverse <controller>`를 그 머신의 서비스 매니저에 등록한다. macOS는 사용자 LaunchAgent(`~/Library/LaunchAgents/io.qsh.<mode>.plist`, `KeepAlive`), Linux는 systemd user unit(`~/.config/systemd/user/qsh-<mode>.service`, `Restart=always`)이며 매니저가 없거나 Windows면 `UNSUPPORTED`다. unit 본문은 주어진 인자를 그대로 고정하고 qsh 자체의 데몬화(CLI.md §6.12 foreground 전용)는 바꾸지 않는다. 로직은 qsh-core `Ops`에 두고 CLI는 렌더만 한다. `qsh doctor`에 서비스 미등록과 linger 미설정 진단을 더한다. unit 예시 문서 `docs/deploy/service.md`는 M8 Step 6 문서 라운드에서 먼저 낸다.
 
 ## 3. 유예 가드레일 (P1/P2 경계)
 
@@ -137,7 +155,7 @@
 | Relay (§14, 별도 제품) | "작은 relay 하나면" | P0 의무는 세션 identity와 transport 분리뿐(resume이 이미 강제). **`--relay` flag는 stub조차 없음** |
 | Forward-route live carrier·`-R` 자동 재발행 (M8 소유) | 터널이 recovery 후에도 신규 연결을 서비스하길 기대 | 연결 손실→resume에서 터널 스트림은 깨끗이 종료된다는 현행 의미론을 M4가 테스트로 고정(`tunnel_chaos.rs`의 개정 강제 트랩)했고 README Known limitations가 고지한다. 변경은 터널 recovery 의미론 재설계라 **M8 백로그 소유** — M4 마감 노트가 M5 입력으로 이관, M5가 범위 밖 판정 후 여기 등재(PLAN.md M5판 §3 (v)) |
 | Cert rotation UX (P1) | 만료 | P0: 만료 30일 전 doctor 경고만 |
-| Service 설치 (P1 → M9 범위로 승격, 2026-09-07) | 상시 실행 요구 | M8까지는 unit 예시 문서(`docs/deploy/service.md`, M8 Step 6)만 제공하고 `qsh service install`은 M9 범위 항목대로 구현한다 |
+| Service 설치 (P1 → M9 범위로 승격, 2026-09-07; 2026-09-09 마일스톤 분리 후에도 신설 M9 소속) | 상시 실행 요구 | M8까지는 unit 예시 문서(`docs/deploy/service.md`, M8 Step 6)만 제공하고 `qsh service install`은 신설 M9(사람용 표면) 범위 항목대로 구현한다 |
 | **메타 가드레일** | — | `qsh capabilities --json` == fixture 테스트: 새 capability는 fixture diff로만 추가 가능 (리뷰 가능한 산출물). + ErrorCode 전수 도달성 테스트: 존재하지만 만들 수 없는 코드 금지 |
 
 ## 4. 일정 리스크 5건
@@ -146,4 +164,4 @@
 2. **PTY/터미널 정확성은 추정을 거부하는 long tail.** 대응: M2b를 명명된 수용 세트(bash/zsh+vim+tmux+claude)로 timebox, "terminal quirks" 백로그를 마일스톤 밖에 유지, expect 하네스를 초기에 구축해 수정마다 회귀 테스트가 싸게 남게.
 3. **Identity·keystore·pairing이 SC1(간판 숫자)의 critical path.** headless Linux에 Secret Service 부재 → file fallback + doctor 보고 필수, macOS 미서명 바이너리의 Keychain 재프롬프트가 dev loop을 괴롭힘. 대응: keystore fallback을 M1의 명명된 task로, 스톱워치 테스트를 M7 한 번이 아니라 조기·반복 실행.
 4. **In-listener 세션과 listener 재시작/업그레이드의 충돌은 구조적.** 대응: ADR-0003의 `SessionBackend` seam을 처음부터 순수하게 유지(CI로 transport import 금지 확인), graceful re-exec(fd 보존 handoff)을 M8 stretch로 비용 산정.
-5. **SC7 보안 리뷰와 notarization은 리드타임 함정.** 대응: 리뷰는 M5 시점에 예약하고 wire format을 리뷰 ~6주 전에 freeze, notarization은 M9가 아니라 M8 중 시작.
+5. **SC7 보안 리뷰와 notarization은 리드타임 함정.** 대응: 리뷰는 M5 시점에 예약하고 wire format을 리뷰 ~6주 전에 freeze, notarization은 M10이 아니라 M8 중 시작.

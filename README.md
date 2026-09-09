@@ -70,7 +70,7 @@ The script picks the archive for your platform, verifies it against the
 release's `SHA256SUMS` before unpacking, and installs to `~/.local/bin`. It
 never calls `sudo`; if the target directory is not writable it says so and
 stops. That checksum is an integrity check against a bad download, not a
-signature: the binaries are neither signed nor notarized until M9.
+signature: the binaries are neither signed nor notarized until M10.
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -109,7 +109,7 @@ cargo install --locked --git https://github.com/DaveDev42/qsh qsh-cli
 ```
 
 There is no `cargo install qsh-cli` from crates.io yet: the workspace is
-`publish = false` until M9, so `--git` (or `--path` against a local clone)
+`publish = false` until M10, so `--git` (or `--path` against a local clone)
 is the only `cargo install` route today. The package name `qsh-cli` is
 unclaimed and reserved for that release; the shorter name `qsh` is not —
 it belongs to an unrelated project — which is why the crate is `qsh-cli`
@@ -121,7 +121,7 @@ Man pages for every subcommand are generated from the same `clap`
 definitions `--help` uses and live under [`docs/man/`](docs/man/)
 (`cargo xtask man` regenerates them; `docs/design/testing.md` covers the
 test that keeps them from drifting). Nothing installs them onto a system
-`MANPATH` yet — that lands with M9's packaging — so point `man` at a page
+`MANPATH` yet — that lands with M10's packaging — so point `man` at a page
 directly instead: `man ./docs/man/qsh.1`, or `man ./docs/man/qsh-trust-add.1`
 for a subcommand.
 
@@ -507,7 +507,7 @@ qsh-cli (bin `qsh`)  →  qsh-core  →  qsh-transport  →  qsh-proto
 `cargo run -p xtask -- arch`, and a violation fails CI.
 
 The binary is `qsh`; the Cargo package is `qsh-cli`, because `qsh` was
-already taken on crates.io. The workspace stays `publish = false` until M9.
+already taken on crates.io. The workspace stays `publish = false` until M10.
 
 ## Roadmap
 
@@ -522,7 +522,8 @@ already taken on crates.io. The workspace stays `publish = false` until M9.
 | M6 | MCP adapter | Done |
 | M7 | Trust UX, host profiles, `doctor` | In progress |
 | M8 | Hardening (fuzz, soak, real-device mobility campaign) | Planned |
-| M9 | Release (installers, Homebrew, notarization) | Planned |
+| M9 | Human-facing surface (naming, pairing, service install) | Planned |
+| M10 | Release (installers, Homebrew, notarization) | Planned |
 
 Per-milestone scope, in/out boundaries and acceptance criteria live in
 [docs/ROADMAP.md](docs/ROADMAP.md).
