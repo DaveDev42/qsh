@@ -1560,6 +1560,14 @@ mod linux_only {
             .filter_map(|v| v["resource"].as_str())
             .collect();
         let windows_upper = (flood_elapsed.as_secs_f64() / audit_window_secs).ceil() + 1.0;
+        // M8 Step 5 R2: the real per-category-per-window row bound is now
+        // `2 × (min(principal 수, 64) + 1)`, not a flat 2 — but this
+        // flood's dialer uses a single identity (see `boot_with_flood_
+        // client` below), so every rejection here shares one principal,
+        // one principal-window per category, and the overflow window
+        // never opens. `2` stays correct and is in fact the *tighter* of
+        // the two bounds for this single-identity flood; a multi-principal
+        // flood variant would need the fuller formula instead.
         let row_bound = (windows_upper * 2.0 * (categories.len().max(1) as f64)) as usize;
         // A5's lower bound: over a genuinely continuous `T`-second flood of
         // one category, aggregation must have closed at least `floor(T/
@@ -2194,6 +2202,10 @@ mod linux_only {
             .iter()
             .filter(|v| v["resource"] == "quota_tunnels_forward")
             .count();
+        // M8 Step 5 R2: this dialer is also a single identity
+        // (`boot_with_flood_client("")`), so every rejection shares one
+        // principal window and `(1..=2)` — the single-principal case of
+        // `2 × (min(principal 수, 64) + 1)` — stays the correct bound.
         assert!(
             (1..=2).contains(&forward_rows),
             "quota_tunnels_forward must land as first-row + summary only, not one row per \
@@ -2387,18 +2399,18 @@ mod linux_only {
         );
     }
 
-    /// A-P2-4 diagnostic (`BRIEF-4c.md` §4.5, code change deferred to Step
-    /// 5): two independently owned `-R` forwards' accept-cap rejections
-    /// share the *same* `quota_tunnels_forward` audit window — it is keyed
-    /// on category alone (`crates/qsh-core/src/quota.rs:724`-adjacent), so
-    /// once principal A's own forward rejection has already opened this
-    /// run's window, principal B's own forward's first rejection inside
-    /// the same window lands only as a summary bump, never a fresh
-    /// first-row of its own. Observation only, no hard assertion — the
-    /// brief calls this a diagnostic, not a bound.
+    /// A-P2-4, promoted from diagnostic to a hard assertion by M8 Step 5's
+    /// R2 window-key change (`BRIEF-4c.md` §4.5 originally deferred this;
+    /// `crates/qsh-core/src/quota.rs`'s `record_rejection` now keys its
+    /// audit window on `(category, principal)`, not category alone): two
+    /// independently owned `-R` forwards' accept-cap rejections each open
+    /// their *own* `quota_tunnels_forward` audit window, so principal B's
+    /// own forward's first rejection inside the same wall-clock window as
+    /// principal A's still lands as a fresh first row of its own, never a
+    /// summary bump folded into A's window.
     #[cfg(target_os = "linux")]
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_second_principals_forward_rejection_shares_the_first_principals_audit_window() {
+    async fn a_second_principals_forward_rejection_opens_its_own_audit_window() {
         if !gate_requested() {
             skip();
             return;
@@ -2479,9 +2491,13 @@ mod linux_only {
         let _reject_a = TcpStream::connect(addr_a)
             .await
             .expect("the TCP connect itself must succeed — only the permit is refused");
-        let records_after_a = wait_for_audit(&fleet.host, "quota_tunnels_forward", |v| {
-            v["resource"] == "quota_tunnels_forward"
-        });
+        // `opener_key` (`crates/qsh-core/src/acl/mod.rs`) formats a pinned
+        // principal as `"Pin:device:<name>"` — the exact strings
+        // `host.trust_add` registered above as aliases "flood-a"/"flood-b".
+        let records_after_a =
+            wait_for_audit(&fleet.host, "quota_tunnels_forward from principal a", |v| {
+                v["resource"] == "quota_tunnels_forward" && v["principal"] == "Pin:device:flood-a"
+            });
         let rows_after_a = records_after_a
             .iter()
             .filter(|v| v["resource"] == "quota_tunnels_forward")
@@ -2493,19 +2509,45 @@ mod linux_only {
         let _reject_b = TcpStream::connect(addr_b)
             .await
             .expect("the TCP connect itself must succeed — only the permit is refused");
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        let records_after_b = fleet.host.audit_records();
+        let records_after_b =
+            wait_for_audit(&fleet.host, "quota_tunnels_forward from principal b", |v| {
+                v["resource"] == "quota_tunnels_forward" && v["principal"] == "Pin:device:flood-b"
+            });
         let rows_after_b = records_after_b
             .iter()
             .filter(|v| v["resource"] == "quota_tunnels_forward")
             .count();
 
-        eprintln!(
-            "A-P2-4 (diagnostic only, no assertion): quota_tunnels_forward rows after \
-         principal A's first rejection: {rows_after_a}; after principal B's own first \
-         rejection in the same window: {rows_after_b} (a fresh first-row of B's own would read \
-         {}, a shared-window summary bump reads {rows_after_a})",
-            rows_after_a + 1
+        assert_eq!(
+            rows_after_a, 1,
+            "principal A's own first rejection must be the only \
+             quota_tunnels_forward row so far: {records_after_a:#?}"
+        );
+        assert_eq!(
+            rows_after_b,
+            rows_after_a + 1,
+            "principal B's own first rejection must add its own fresh row, \
+             not fold into A's window as a summary bump: {records_after_b:#?}"
+        );
+        let row_a = records_after_b
+            .iter()
+            .find(|v| {
+                v["resource"] == "quota_tunnels_forward" && v["principal"] == "Pin:device:flood-a"
+            })
+            .expect("principal A's own row must still be present");
+        let row_b = records_after_b
+            .iter()
+            .find(|v| {
+                v["resource"] == "quota_tunnels_forward" && v["principal"] == "Pin:device:flood-b"
+            })
+            .expect("principal B's own row must be present");
+        assert!(
+            row_a["count"].is_null(),
+            "A's row must be its own first line, not a summary: {row_a:#?}"
+        );
+        assert!(
+            row_b["count"].is_null(),
+            "B's row must be its own first line, not a summary: {row_b:#?}"
         );
 
         session_a.close();

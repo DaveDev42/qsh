@@ -34,7 +34,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Instant;
 
-use crate::admission::{AUDIT_AGGREGATION_WINDOW, AuditWindow};
+use crate::admission::{AUDIT_AGGREGATION_WINDOW, WindowState};
 use crate::audit::AuditRecord;
 use crate::broker::Clock;
 use crate::config::ServeConfig;
@@ -97,6 +97,23 @@ pub enum QuotaKind {
 /// principal to key a per-principal cap by, so this is the only axis for
 /// it, and it is deliberately not operator-tunable (M8 Step 3b ruling R2).
 pub const MAX_CONCURRENT_PAIRING_CONNECTIONS: usize = 8;
+
+/// Cap on how many distinct principals' audit windows one [`QuotaKind`]
+/// category keeps open at once (R2 설계 검토 (a-4)/(a-6)). Below this, a
+/// rejection's audit window is keyed on `(category, principal)`, so one
+/// principal's flood can never absorb another principal's first rejection
+/// into its own summary line. Above it, the offending principal's window
+/// lands in that category's single `CategoryWindows::overflow` slot
+/// instead of growing the map further — the row-count trade-off this
+/// bounds is documented on [`CategoryWindows`] itself.
+///
+/// `pub` for the same reason [`crate::admission::AUDIT_AGGREGATION_
+/// WINDOW`] is: `docs/CLI.md`/`docs/design/architecture.md`'s doc-drift
+/// pin (`crates/qsh-core/tests/quota_docs.rs`'s `cli_md_and_architecture_
+/// md_name_the_audit_window_principal_cap_and_row_bound`) reads this
+/// constant instead of a hardcoded copy of `64`, not an invitation for
+/// another crate to depend on the value.
+pub const MAX_AUDIT_WINDOW_PRINCIPALS: usize = 64;
 
 impl QuotaKind {
     /// Every variant, in the same order as [`Quotas`]'s internal window
@@ -301,6 +318,78 @@ struct QuotaState {
     pairing_connections_in_use: usize,
 }
 
+/// One [`QuotaKind`] category's audit-window bookkeeping (R2 설계 검토
+/// (a-1)/(a-5)): a per-principal map plus one fixed overflow slot, rather
+/// than a single map keyed by an enum that folds "this principal" and
+/// "overflow" into the same variant space.
+///
+/// Two reasons this is a struct with a dedicated `overflow` field, not
+/// `HashMap<WindowKey, WindowState>` with a `WindowKey::Overflow` variant:
+///
+/// - **Allocation.** `per_principal.get_mut(principal)` looks up by `&str`
+///   with no allocation. A `WindowKey::Principal(String)` probe key would
+///   need a fresh `String` on every lookup unless `Borrow<str>` were
+///   hand-implemented — one heap allocation per rejection, on the exact
+///   flood path this module exists to bound. Once a category is at its
+///   cap ([`MAX_AUDIT_WINDOW_PRINCIPALS`], the attacker's own steady
+///   state), every further rejection from a new principal name is a
+///   lookup only — zero allocations.
+/// - **Type-level separation.** "overflow is never a principal" is a
+///   struct shape, not a string convention a caller could get wrong —
+///   `per_principal.len()` is exactly the live principal-window count, so
+///   the cap check is a single comparison rather than a scan for a
+///   sentinel key.
+///
+/// **Memory bound.** `per_principal` holds at most
+/// [`MAX_AUDIT_WINDOW_PRINCIPALS`] entries per category (a closed window
+/// is deleted, not merely reset — see [`Quotas::flush_expired`]), so the
+/// whole `Quotas` never holds more than `QuotaKind::ALL.len() ×
+/// (MAX_AUDIT_WINDOW_PRINCIPALS + 1)` windows at once — 10 × 65 = 650
+/// today. Each entry is a `String` key (principal name, length `L`) plus
+/// a small `WindowState`; with hashbrown's ~2× load-factor overhead the
+/// skeleton (`L = 0`) is bounded by roughly `2 × 650 × 64` bytes ≈ 83
+/// KiB, plus `2 × 650 × L` for the strings themselves. **`L` is not
+/// bounded by this module** (R2 review A/B, F4/B6) — on the CA path
+/// `qsh_transport::identity::valid_segment` accepts any non-empty SAN
+/// segment containing no `/`, so `L` is bounded only by the peer
+/// certificate the attacker presents, not by anything this module
+/// controls: a realistic `L ≤ 1 KiB` gives ~1.4 MB total, a pathological
+/// 64 KiB SAN gives ~83 MB. Bounding principal-name length itself is a
+/// separate question, out of scope here. This is not a *new* attack
+/// surface of that shape, though — the same principal string already
+/// lives in at least one longer-lived structure (a live connection's own
+/// `connections_per_principal` entry) for as long as the connection it
+/// names is open, and this module's own [`QuotaLimits::
+/// max_connections_per_principal`] and [`QuotaLimits::max_connections`]
+/// already bound how many such live entries exist at once — an audit
+/// window can, however, outlive the connection it was opened for by up
+/// to one housekeeping tick ([`Quotas::flush_expired`]'s own sweep
+/// cadence), so this map's cardinality is not strictly a subset of that
+/// one's at every instant.
+#[derive(Default)]
+struct CategoryWindows {
+    /// One audit window per principal that has been rejected in this
+    /// category and is still within [`AUDIT_AGGREGATION_WINDOW`] of its
+    /// first rejection. Capped at [`MAX_AUDIT_WINDOW_PRINCIPALS`] entries;
+    /// a closed window's entry is deleted outright, not reset in place
+    /// (see [`Quotas::flush_expired`]).
+    per_principal: HashMap<String, WindowState>,
+    /// The single shared window for every principal that arrives after
+    /// `per_principal` is already at [`MAX_AUDIT_WINDOW_PRINCIPALS`] —
+    /// its *summary* line is audited under the sentinel principal `"-"`
+    /// rather than under whichever principal happened to fill it, since
+    /// more than one principal can share it over its lifetime (its own
+    /// *first* line, one per rejection until the window itself goes
+    /// stale, still carries the real name — only the summary spans
+    /// principals). The bare string `"-"` is also routed here directly by
+    /// [`Quotas::record_rejection`] regardless of map size (R2 review B,
+    /// B1) — it is a reserved sentinel, never a legitimate `per_principal`
+    /// key, so a pre-identity axis auditing under it (matching
+    /// `docs/CLI.md` §6.12's admission convention) cannot open a window
+    /// indistinguishable from an actual overflow summary.
+    overflow: WindowState,
+}
+
 /// The quota decision-maker for the resource axes this module directly
 /// enforces (today: `exec.run` concurrency), plus the shared audit
 /// aggregation windows for every [`QuotaKind`] regardless of which module
@@ -316,7 +405,7 @@ pub struct Quotas {
     clock: Arc<dyn Clock>,
     self_weak: Weak<Quotas>,
     state: Mutex<QuotaState>,
-    windows: [AuditWindow; QuotaKind::ALL.len()],
+    windows: [Mutex<CategoryWindows>; QuotaKind::ALL.len()],
     /// Soak observability (M8 Step 5a) — see [`ConnectionCounters`].
     connection_counters: ConnectionCounters,
     /// Per-[`QuotaKind`] rejection tally (REVIEW-5-A A3, ARBITRATION-5 적대
@@ -834,6 +923,33 @@ impl Quotas {
     /// today (session/exec axes) passes its `ConnCtx::peer_addr`; the
     /// summary record still hardcodes `"-"` — one aggregation window can
     /// span many peers.
+    ///
+    /// **Window key (R2 설계 검토 (a-2)/(a-3)):** the window this call
+    /// opens or bumps is keyed on `(kind, principal)`, not `kind` alone —
+    /// [`CategoryWindows::per_principal`] holds one [`WindowState`] per
+    /// principal currently within its own aggregation window, so one
+    /// principal's flood can never suppress a *different* principal's
+    /// first rejection into a summary line. Once a category already has
+    /// [`MAX_AUDIT_WINDOW_PRINCIPALS`] live principal windows, a rejection
+    /// from any further new principal falls into that category's single
+    /// `overflow` window instead of growing the map — its own first line
+    /// still carries the rejected principal's real name (only the later
+    /// *summary* line for that shared window is audited under `"-"`, see
+    /// [`Quotas::flush_expired`]). `"-"` is itself a reserved sentinel
+    /// (R2 review B, B1) and is routed straight to `overflow` regardless
+    /// of the map's current size, so no caller — today or in the future —
+    /// can accidentally open a normal `per_principal` window whose
+    /// summary would then be indistinguishable from an actual overflow
+    /// summary. This call only ever touches its own
+    /// key's window; it never inspects or closes another principal's
+    /// still-open window in the same category, so the critical section
+    /// stays O(1) regardless of how many other principals are currently
+    /// being tracked (the deliberate trade documented on
+    /// [`CategoryWindows`]/[`Quotas::flush_expired`]: a window that has
+    /// gone stale but has not yet been swept can occupy a map slot for up
+    /// to one more housekeeping tick before a *new* principal beyond the
+    /// cap is pushed to overflow — an audit-attribution quality question,
+    /// never a cap-enforcement one).
     pub fn record_rejection(
         &self,
         kind: QuotaKind,
@@ -848,9 +964,37 @@ impl Quotas {
         // *this* call also emits its own audit line, not whether it
         // happened at all.
         self.rejections[kind as usize].fetch_add(1, Ordering::Relaxed);
-        let window = &self.windows[kind as usize];
-        let mut guard = window.state.lock().unwrap_or_else(|e| e.into_inner());
-        let window_is_fresh = match guard.start {
+        let mut cat = self.windows[kind as usize]
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // `is_overflow` records which window this rejection landed in so
+        // the summary line built after the lock is dropped below can pick
+        // the right principal string ("-" for overflow, the window's own
+        // owner otherwise) without holding the lock while formatting it.
+        //
+        // R2 review B (B1): `"-"` is reserved for the overflow summary and
+        // must never become a `per_principal` key in its own right — a
+        // caller that (today or in the future) audits a pre-identity axis
+        // under the same sentinel admission already uses for it
+        // (`docs/CLI.md` §6.12's admission-reject `principal: "-"`) would
+        // otherwise open a normal, indistinguishable window under that
+        // string, and its summary line would then be byte-for-byte
+        // identical to an actual overflow summary. Routing it to
+        // `overflow` up front makes that invariant a type fact instead of
+        // a convention every future caller has to already know.
+        let (state, is_overflow) = if principal == "-" {
+            (&mut cat.overflow, true)
+        } else if let Some(state) = cat.per_principal.get_mut(principal) {
+            (state, false)
+        } else if cat.per_principal.len() >= MAX_AUDIT_WINDOW_PRINCIPALS {
+            (&mut cat.overflow, true)
+        } else {
+            (
+                cat.per_principal.entry(principal.to_string()).or_default(),
+                false,
+            )
+        };
+        let window_is_fresh = match state.start {
             None => true,
             Some(start) => now.saturating_duration_since(start) >= AUDIT_AGGREGATION_WINDOW,
         };
@@ -858,18 +1002,18 @@ impl Quotas {
             // Same critical section as the freshness check above — no gap
             // a concurrent `flush_expired` could land its close inside
             // (mirrors `Gate::record_rejection`'s own identical note).
-            guard.suppressed = guard.suppressed.saturating_add(1);
+            state.suppressed = state.suppressed.saturating_add(1);
             return Vec::new();
         }
-        let prior_suppressed = guard.suppressed;
-        guard.suppressed = 0;
-        guard.start = Some(now);
-        drop(guard);
+        let prior_suppressed = state.suppressed;
+        state.suppressed = 0;
+        state.start = Some(now);
+        drop(cat);
         let mut records = Vec::with_capacity(2);
         if prior_suppressed > 0 {
             records.push(AuditRecord::quota_rejected_summary(
                 kind,
-                "-",
+                if is_overflow { "-" } else { principal },
                 prior_suppressed,
             ));
         }
@@ -887,25 +1031,140 @@ impl Quotas {
     /// stopped still gets its last window's summary within one more
     /// tick, even with nothing left to trigger the lazy path in
     /// [`Quotas::record_rejection`]).
+    ///
+    /// A closed principal window's entry is *deleted* from
+    /// [`CategoryWindows::per_principal`], not reset in place — this is
+    /// what keeps the map's cardinality bounded by
+    /// [`MAX_AUDIT_WINDOW_PRINCIPALS`] rather than growing by one for
+    /// every distinct principal ever rejected over the process's
+    /// lifetime. The only thing dropped under the category lock is a
+    /// `String` (the deleted key) — not a session or child-process
+    /// handle — so this stays within the module's own "collect under the
+    /// guard, drop outside" lock discipline (top-of-file doc). The
+    /// `overflow` slot is a fixed field, never deleted, only closed
+    /// (`start = None`) the same way a principal window used to be.
+    ///
+    /// One consequence worth naming: with up to
+    /// [`MAX_AUDIT_WINDOW_PRINCIPALS`] principal windows live per
+    /// category, a single tick's return can carry up to
+    /// `QuotaKind::ALL.len() × (MAX_AUDIT_WINDOW_PRINCIPALS + 1)` summary
+    /// records (650 today) instead of the old at-most-10. `crate::audit::
+    /// write_quota_audit`'s sink write can return `AuditError::QueueFull`
+    /// under that burst; that path does not latch the sink `degraded` (only
+    /// a hard write failure does, `crate::audit::writer::RotatingAuditSink
+    /// ::record`), and the caller already treats a failed quota-audit
+    /// enqueue as fail-open (the request itself is already being refused,
+    /// so a lost *summary* line only degrades the diagnostic, not any
+    /// enforcement decision).
+    ///
+    /// **R2 review A (F1): this burst is not free of effect on other
+    /// traffic, and the previous wording here overstated that it was.**
+    /// `write_quota_audit` shares one `AuditSink` — and one bounded queue —
+    /// with `Server::authorize`/`authorize_stream`'s own enqueues, and
+    /// *those* choke points are where the actual `docs/CLI.md` §6.12
+    /// fail-closed rule lives: an allow verdict whose own audit enqueue
+    /// fails is denied (`server/mod.rs`'s `verdict.is_allow() &&
+    /// recorded.is_ok()` / `!verdict.is_allow() || recorded.is_err()`
+    /// shape). A 650-record burst landing in the same queue at the same
+    /// instant as a legitimate request's own enqueue can push that
+    /// request's enqueue into `QueueFull` too, and the fail-closed rule
+    /// then denies a request that was never itself over any quota — an
+    /// availability cost, not a fail-closed *violation* (no allow ever
+    /// reaches a peer without a durable record; the queue-full request is
+    /// simply refused instead). The default `[audit].queue_depth` (1024)
+    /// leaves headroom over the 650-record ceiling; the test
+    /// `flush_expired_worst_case_burst_fits_under_the_default_audit_queue_
+    /// depth` below pins that relationship so a future `QuotaKind::ALL`
+    /// growth (or a cap increase) that closes the gap fails loudly instead
+    /// of silently. An operator who lowers `[audit].queue_depth` below the
+    /// per-tick ceiling trades that headroom away themselves.
+    ///
+    /// **R2 review B (B5):** the same row-count increase (2 → up to 130
+    /// per category per window, before this change) also shortens how
+    /// long a deny record actually survives on disk under a
+    /// principal-rotating flood. `[audit].max_bytes × (retain + 1)` still
+    /// bounds the audit directory's total *volume* (`docs/CLI.md` §6.12),
+    /// but a flood that fills the same volume with more rows pushes older
+    /// deny records past `[audit].retain`'s rotation boundary sooner —
+    /// this is ordinary rotation working as designed, not a new bound
+    /// violation, but it means "audit flood does not grow the log" is no
+    /// longer the same claim as "audit flood does not shorten retention".
     pub fn flush_expired(&self, now: Instant) -> Vec<AuditRecord> {
         let mut records = Vec::new();
         for (window, kind) in self.windows.iter().zip(QuotaKind::ALL.iter().copied()) {
-            let mut guard = window.state.lock().unwrap_or_else(|e| e.into_inner());
-            let Some(start) = guard.start else {
-                continue;
-            };
-            if now.saturating_duration_since(start) < AUDIT_AGGREGATION_WINDOW {
-                continue;
+            let mut closed: Vec<(String, u32)> = Vec::new();
+            let mut overflow_suppressed = None;
+            {
+                let mut cat = window.lock().unwrap_or_else(|e| e.into_inner());
+                cat.per_principal.retain(|principal, state| {
+                    let Some(start) = state.start else {
+                        return false;
+                    };
+                    if now.saturating_duration_since(start) < AUDIT_AGGREGATION_WINDOW {
+                        return true;
+                    }
+                    closed.push((principal.clone(), state.suppressed));
+                    false
+                });
+                if let Some(start) = cat.overflow.start
+                    && now.saturating_duration_since(start) >= AUDIT_AGGREGATION_WINDOW
+                {
+                    overflow_suppressed = Some(cat.overflow.suppressed);
+                    cat.overflow.start = None;
+                    cat.overflow.suppressed = 0;
+                }
             }
-            let suppressed = guard.suppressed;
-            guard.start = None;
-            guard.suppressed = 0;
-            drop(guard);
-            if suppressed > 0 {
+            for (principal, suppressed) in closed {
+                if suppressed > 0 {
+                    records.push(AuditRecord::quota_rejected_summary(
+                        kind, &principal, suppressed,
+                    ));
+                }
+            }
+            if let Some(suppressed) = overflow_suppressed
+                && suppressed > 0
+            {
                 records.push(AuditRecord::quota_rejected_summary(kind, "-", suppressed));
             }
         }
         records
+    }
+
+    /// Test-only accessors replacing the direct `windows[..].is_open()`
+    /// field access the pre-Step-5 single-window-per-category shape used
+    /// — `CategoryWindows`'s two fields are private so the invariants in
+    /// its own doc comment (map cardinality, overflow separation) cannot
+    /// be violated from outside this module even in tests.
+    #[cfg(test)]
+    fn audit_window_is_open(&self, kind: QuotaKind, principal: &str) -> bool {
+        // A deleted entry (`flush_expired`) reads as closed — deletion
+        // *is* closure in this design, not merely "closure implies
+        // deletion eventually".
+        self.windows[kind as usize]
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .per_principal
+            .get(principal)
+            .is_some_and(|state| state.start.is_some())
+    }
+
+    #[cfg(test)]
+    fn audit_window_principal_count(&self, kind: QuotaKind) -> usize {
+        self.windows[kind as usize]
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .per_principal
+            .len()
+    }
+
+    #[cfg(test)]
+    fn audit_overflow_window_is_open(&self, kind: QuotaKind) -> bool {
+        self.windows[kind as usize]
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .overflow
+            .start
+            .is_some()
     }
 }
 
@@ -1794,7 +2053,10 @@ mod tests {
         let flushed =
             quotas.flush_expired(t0 + AUDIT_AGGREGATION_WINDOW + std::time::Duration::from_secs(1));
         assert_eq!(flushed.len(), 1);
-        assert_eq!(flushed[0].principal, "-");
+        // R2: the window is keyed on (category, principal), so its
+        // summary carries that principal's own name, not the old shared
+        // "-" — every rejection above was against "device:a".
+        assert_eq!(flushed[0].principal, "device:a");
         assert_eq!(flushed[0].count, Some(2));
         assert_eq!(flushed[0].resource, QuotaKind::ExecPerPrincipal.category());
     }
@@ -1958,7 +2220,7 @@ mod tests {
             );
             assert_eq!(flushed[0].resource, kind.category());
             assert!(
-                !quotas.windows[kind as usize].is_open(),
+                !quotas.audit_window_is_open(kind, "device:a"),
                 "kind {kind:?}: flush must actually close its window"
             );
         }
@@ -2072,12 +2334,17 @@ mod tests {
         // "nothing was reported": an empty `flushed` is also what a bug
         // that re-stamped `guard.start = Some(start)` instead of clearing
         // it to `None` would produce, since that bug leaves nothing new
-        // to summarize either. `AuditWindow::is_open` reads `start`
-        // itself, so it fails the way that bug should.
+        // to summarize either. `audit_window_is_open` reads exactly the
+        // (deleted-or-not) entry, so it fails the way that bug should.
         assert!(
-            !quotas.windows[QuotaKind::Sessions as usize].is_open(),
-            "flush_expired must actually close the window (guard.start = \
-             None), not just decline to report anything"
+            !quotas.audit_window_is_open(QuotaKind::Sessions, "device:a"),
+            "flush_expired must actually close the window (entry deleted), \
+             not just decline to report anything"
+        );
+        assert_eq!(
+            quotas.audit_window_principal_count(QuotaKind::Sessions),
+            0,
+            "the closed entry must be removed from the map, not merely reset"
         );
         assert!(
             quotas
@@ -2087,9 +2354,17 @@ mod tests {
 
         // A rejection after the close starts a brand new window and is
         // reported immediately, proving the old one did not linger open.
+        // Reusing "device:a" (not a different principal) matters here: in
+        // the R2 (category, principal)-keyed design a *different*
+        // principal always gets its own fresh first line regardless of
+        // whether "device:a"'s window is still open — so only reusing the
+        // same principal actually exercises "the old window did not
+        // linger open" rather than "a different principal has its own
+        // window", which `a_second_principals_first_rejection_opens_its_
+        // own_window` covers separately.
         let reopened = quotas.record_rejection(
             QuotaKind::Sessions,
-            "device:b",
+            "device:a",
             peer,
             t0 + AUDIT_AGGREGATION_WINDOW + std::time::Duration::from_secs(2),
             Some(2),
@@ -2100,7 +2375,7 @@ mod tests {
             1,
             "closed window reopens on the next rejection"
         );
-        assert_eq!(reopened[0].principal, "device:b");
+        assert_eq!(reopened[0].principal, "device:a");
         assert_eq!(reopened[0].count, None);
     }
 
@@ -2179,7 +2454,9 @@ mod tests {
     /// summary and the triggering rejection's own first line, mirroring
     /// `crate::admission::Gate::record_rejection` exactly — not the single
     /// `Option` the M8 Step 3a S1 stage had shipped, which could only ever
-    /// return one of the two.
+    /// return one of the two. If a different principal came instead, the
+    /// return would be 1 row, not 2 — `a_second_principals_first_
+    /// rejection_opens_its_own_window` covers that branch.
     #[test]
     fn quota_rejection_reopens_a_stale_window_with_both_its_summary_and_a_fresh_first_line() {
         let quotas = quotas_with(1);
@@ -2227,9 +2504,18 @@ mod tests {
         // `flush_expired` tick), then one more rejection: this call alone
         // must close the stale window (summary, 2 suppressed) *and* report
         // its own fresh first line — never one at the other's expense.
+        //
+        // R2: this must reuse "device:a" (not a different principal like
+        // the old "device:b"). With windows keyed on (category,
+        // principal), a *different* principal always opens its own fresh
+        // window regardless of "device:a"'s state and this call would
+        // return only 1 record, not 2 — the len()==2 assertion below only
+        // means what it says when both records are attributed to the same
+        // principal's own window: the closing summary of its stale window
+        // plus its own reopening first line.
         let stale_reopen = quotas.record_rejection(
             QuotaKind::Sessions,
-            "device:b",
+            "device:a",
             peer,
             t0 + AUDIT_AGGREGATION_WINDOW + std::time::Duration::from_secs(1),
             Some(9),
@@ -2241,10 +2527,10 @@ mod tests {
             "the closing summary and the reopening rejection's own line, \
              both — got {stale_reopen:?}"
         );
-        assert_eq!(stale_reopen[0].principal, "-");
+        assert_eq!(stale_reopen[0].principal, "device:a");
         assert_eq!(stale_reopen[0].count, Some(2));
         assert_eq!(stale_reopen[0].resource, QuotaKind::Sessions.category());
-        assert_eq!(stale_reopen[1].principal, "device:b");
+        assert_eq!(stale_reopen[1].principal, "device:a");
         assert_eq!(stale_reopen[1].count, None);
         assert_eq!(stale_reopen[1].request_id, "9");
         assert_eq!(stale_reopen[1].auth_path, "pin");
@@ -2487,5 +2773,534 @@ mod tests {
             limits.max_connections_per_principal
         );
         assert_eq!(zeroed_limits.max_connections, limits.max_connections);
+    }
+
+    /// R2 설계 검토 (b-5) #1: with windows keyed on `(category,
+    /// principal)`, principal A opening (and then re-suppressing into) its
+    /// own window must never absorb principal B's *first* rejection in the
+    /// same category and the same wall-clock window — B still gets its own
+    /// fresh first line.
+    ///
+    /// Mutation this catches: reverting the window key to `kind` alone
+    /// (the pre-Step-5 shape) makes B's rejection land in A's already-open
+    /// window and return an empty `Vec` (suppressed) instead of a 1-row
+    /// first line. This test pins that most narrowly, but it is not the
+    /// only one that mutation breaks (R2 review B, B4) — every other
+    /// multi-principal test added alongside it in this module
+    /// (`two_principals_audit_windows_expire_independently`,
+    /// `flush_expired_removes_every_closed_window_entry`,
+    /// `the_sixty_fifth_principal_falls_into_the_category_overflow_
+    /// window`) also rely on distinct principals getting distinct windows,
+    /// and would each independently fail (or, for the ones asserting on
+    /// `CategoryWindows::per_principal`'s own shape via
+    /// `audit_window_principal_count`/`audit_window_is_open`, fail to
+    /// build) under a mutation that collapses the window key back to
+    /// `kind` alone.
+    #[test]
+    fn a_second_principals_first_rejection_opens_its_own_window() {
+        let quotas = quotas_with(1);
+        let clock = TestClock::new();
+        let t0 = clock.now();
+        let peer: std::net::SocketAddr = "127.0.0.1:1".parse().unwrap();
+
+        let a_first = quotas.record_rejection(
+            QuotaKind::Sessions,
+            "device:a",
+            peer,
+            t0,
+            Some(1),
+            qsh_transport::AuthPath::Ca,
+        );
+        assert_eq!(a_first.len(), 1);
+        assert_eq!(a_first[0].principal, "device:a");
+
+        // A's second rejection in the same window is suppressed into A's
+        // own window, as always.
+        assert!(
+            quotas
+                .record_rejection(
+                    QuotaKind::Sessions,
+                    "device:a",
+                    peer,
+                    t0 + std::time::Duration::from_secs(1),
+                    Some(1),
+                    qsh_transport::AuthPath::Ca,
+                )
+                .is_empty()
+        );
+
+        // B's first rejection, same category, same window instant: must
+        // be its own fresh first line, not folded into A's open window.
+        let b_first = quotas.record_rejection(
+            QuotaKind::Sessions,
+            "device:b",
+            peer,
+            t0 + std::time::Duration::from_secs(1),
+            Some(2),
+            qsh_transport::AuthPath::Ca,
+        );
+        assert_eq!(
+            b_first.len(),
+            1,
+            "principal B's own first rejection must not be absorbed into \
+             principal A's window: {b_first:?}"
+        );
+        assert_eq!(b_first[0].principal, "device:b");
+        assert!(b_first[0].count.is_none());
+    }
+
+    /// R2 설계 검토 (b-5) #2: two principals' audit windows in the same
+    /// category expire independently — closing one does not close, or
+    /// otherwise disturb, the other's suppressed count or start time.
+    ///
+    /// R2 review B (B3): the mutation this test is meant to catch is
+    /// `flush_expired` closing every window in a category the instant any
+    /// one of them goes stale (equivalent to sharing one `WindowState`
+    /// across principals, the pre-Step-5 shape). The assertion that
+    /// actually catches it is the `audit_window_is_open(Sessions,
+    /// "device:b")` check right after the first flush — B's window must
+    /// still read as open there. The *previous* version of this doc
+    /// claimed the second flush's "reports nothing" assertion was what
+    /// caught it, but that assertion passes either way: under the
+    /// mutation B's window was already closed (and its zero suppressions
+    /// already reported, i.e. not reported) by the *first* flush, so the
+    /// second flush finding nothing left to report is not evidence of
+    /// anything. B now suppresses one rejection of its own precisely so
+    /// the second flush has something to report — under the mutation, B's
+    /// closing summary and its `count` would have already been consumed
+    /// (or never opened) by the first flush and this second flush would
+    /// come back empty instead of `len() == 1`, giving that assertion real
+    /// bite as a second, independent witness to the same mutation.
+    #[test]
+    fn two_principals_audit_windows_expire_independently() {
+        let quotas = quotas_with(1);
+        let clock = TestClock::new();
+        let t0 = clock.now();
+        let peer: std::net::SocketAddr = "127.0.0.1:1".parse().unwrap();
+
+        // A opens its window at t0 and suppresses one more rejection.
+        assert_eq!(
+            quotas
+                .record_rejection(
+                    QuotaKind::Sessions,
+                    "device:a",
+                    peer,
+                    t0,
+                    Some(1),
+                    qsh_transport::AuthPath::Ca,
+                )
+                .len(),
+            1
+        );
+        assert!(
+            quotas
+                .record_rejection(
+                    QuotaKind::Sessions,
+                    "device:a",
+                    peer,
+                    t0 + std::time::Duration::from_secs(1),
+                    Some(1),
+                    qsh_transport::AuthPath::Ca,
+                )
+                .is_empty()
+        );
+
+        // B opens its own window 6s later (still well within A's window)
+        // and suppresses one further rejection of its own — giving the
+        // second flush below something concrete to report.
+        let t_b = t0 + std::time::Duration::from_secs(6);
+        assert_eq!(
+            quotas
+                .record_rejection(
+                    QuotaKind::Sessions,
+                    "device:b",
+                    peer,
+                    t_b,
+                    Some(2),
+                    qsh_transport::AuthPath::Ca,
+                )
+                .len(),
+            1
+        );
+        assert!(
+            quotas
+                .record_rejection(
+                    QuotaKind::Sessions,
+                    "device:b",
+                    peer,
+                    t_b + std::time::Duration::from_secs(1),
+                    Some(2),
+                    qsh_transport::AuthPath::Ca,
+                )
+                .is_empty()
+        );
+
+        // Flushing once A's window (but not yet B's) has aged out reports
+        // only A's summary.
+        let flushed_a =
+            quotas.flush_expired(t0 + AUDIT_AGGREGATION_WINDOW + std::time::Duration::from_secs(1));
+        assert_eq!(
+            flushed_a.len(),
+            1,
+            "only A's window should have closed: {flushed_a:?}"
+        );
+        assert_eq!(flushed_a[0].principal, "device:a");
+        assert_eq!(flushed_a[0].count, Some(1));
+        assert!(
+            quotas.audit_window_is_open(QuotaKind::Sessions, "device:b"),
+            "B's still-fresh window must not have been touched by A's flush"
+        );
+
+        // Flushing again once B's window has also aged out reports only
+        // B's summary, with B's own suppressed count — untouched by A's
+        // earlier, separate flush.
+        let flushed_b = quotas
+            .flush_expired(t_b + AUDIT_AGGREGATION_WINDOW + std::time::Duration::from_secs(1));
+        assert_eq!(
+            flushed_b.len(),
+            1,
+            "B's window must still carry its own suppressed rejection at \
+             this point, untouched by A's earlier flush: {flushed_b:?}"
+        );
+        assert_eq!(flushed_b[0].principal, "device:b");
+        assert_eq!(flushed_b[0].count, Some(1));
+        assert!(!quotas.audit_window_is_open(QuotaKind::Sessions, "device:b"));
+    }
+
+    /// R2 설계 검토 (b-5) #3: `flush_expired` must actually *remove* every
+    /// closed principal-window entry from the category's map, not merely
+    /// re-stamp `start = None` in place — otherwise the map grows by one
+    /// entry for every distinct principal ever rejected over the
+    /// process's lifetime instead of staying bounded by
+    /// [`MAX_AUDIT_WINDOW_PRINCIPALS`].
+    ///
+    /// Mutation this catches: changing `flush_expired`'s `retain` closure
+    /// to reset the entry in place (`state.start = None; state.suppressed
+    /// = 0; true`) instead of returning `false` to drop it. Most tests in
+    /// this module only inspect the `Vec<AuditRecord>` a flush returns,
+    /// which is identical either way (both shapes report zero summaries
+    /// when nothing was suppressed) — checking the map's own cardinality
+    /// after the flush is what distinguishes them, which is exactly what
+    /// `audit_window_principal_count` does here. (R2 review A confirmed by
+    /// mutation: this is not the *only* test that catches it —
+    /// `quota_flush_expired_closes_a_window_with_no_further_rejections`
+    /// makes the same cardinality check on its own single principal — but
+    /// this test is the one that pins it across *many* distinct
+    /// principals in one category, closer to the actual flood shape the
+    /// cap exists for.)
+    #[test]
+    fn flush_expired_removes_every_closed_window_entry() {
+        let quotas = quotas_with(1);
+        let clock = TestClock::new();
+        let t0 = clock.now();
+        let peer: std::net::SocketAddr = "127.0.0.1:1".parse().unwrap();
+
+        for n in 0..8u32 {
+            let principal = format!("device:{n}");
+            assert_eq!(
+                quotas
+                    .record_rejection(
+                        QuotaKind::Sessions,
+                        &principal,
+                        peer,
+                        t0,
+                        Some(1),
+                        qsh_transport::AuthPath::Ca,
+                    )
+                    .len(),
+                1,
+                "principal {principal}: own first line"
+            );
+        }
+        assert_eq!(
+            quotas.audit_window_principal_count(QuotaKind::Sessions),
+            8,
+            "all 8 distinct principals must have their own live window"
+        );
+
+        let flushed =
+            quotas.flush_expired(t0 + AUDIT_AGGREGATION_WINDOW + std::time::Duration::from_secs(1));
+        assert!(
+            flushed.is_empty(),
+            "none of the 8 principals suppressed a second rejection, so \
+             there is nothing to summarize: {flushed:?}"
+        );
+        assert_eq!(
+            quotas.audit_window_principal_count(QuotaKind::Sessions),
+            0,
+            "every closed entry must be deleted from the map, not merely \
+             reset in place"
+        );
+    }
+
+    /// R2 설계 검토 (b-5) #4: the 65th distinct principal rejected within
+    /// one category's window falls into that category's single overflow
+    /// window instead of growing the per-principal map past
+    /// [`MAX_AUDIT_WINDOW_PRINCIPALS`] — and, since the overflow window
+    /// starts out fresh, that 65th principal's own first rejection still
+    /// carries its real name; only the *summary* line for the (possibly
+    /// multi-principal) shared overflow window is audited under `"-"`.
+    ///
+    /// Mutation this catches: dropping the `per_principal.len() >=
+    /// MAX_AUDIT_WINDOW_PRINCIPALS` guard makes the 66th principal also
+    /// get its own fresh window (map size 66, not 64, and no overflow
+    /// window ever opens) — the count/`is_open` assertions below fail.
+    /// Attributing the overflow window's *first* line to `"-"` instead of
+    /// the rejected principal's own name (rather than only the summary)
+    /// is a separate mutation this test also catches via the `first_65th`
+    /// assertion.
+    #[test]
+    fn the_sixty_fifth_principal_falls_into_the_category_overflow_window() {
+        let quotas = quotas_with(1);
+        let clock = TestClock::new();
+        let t0 = clock.now();
+        let peer: std::net::SocketAddr = "127.0.0.1:1".parse().unwrap();
+
+        for n in 0..MAX_AUDIT_WINDOW_PRINCIPALS {
+            let principal = format!("device:{n}");
+            assert_eq!(
+                quotas
+                    .record_rejection(
+                        QuotaKind::Sessions,
+                        &principal,
+                        peer,
+                        t0,
+                        Some(1),
+                        qsh_transport::AuthPath::Ca,
+                    )
+                    .len(),
+                1,
+                "principal {principal}: own first line"
+            );
+        }
+        assert_eq!(
+            quotas.audit_window_principal_count(QuotaKind::Sessions),
+            MAX_AUDIT_WINDOW_PRINCIPALS
+        );
+        assert!(!quotas.audit_overflow_window_is_open(QuotaKind::Sessions));
+
+        // The 65th distinct principal: falls into overflow, but its own
+        // first line still names it (the overflow window is itself fresh).
+        let first_65th = quotas.record_rejection(
+            QuotaKind::Sessions,
+            "device:overflow-1",
+            peer,
+            t0,
+            Some(1),
+            qsh_transport::AuthPath::Ca,
+        );
+        assert_eq!(first_65th.len(), 1);
+        assert_eq!(first_65th[0].principal, "device:overflow-1");
+        assert_eq!(
+            quotas.audit_window_principal_count(QuotaKind::Sessions),
+            MAX_AUDIT_WINDOW_PRINCIPALS,
+            "the map itself must not grow past the cap"
+        );
+        assert!(quotas.audit_overflow_window_is_open(QuotaKind::Sessions));
+
+        // The 66th distinct principal: the overflow window is now open
+        // and fresh, so this one is suppressed into it.
+        assert!(
+            quotas
+                .record_rejection(
+                    QuotaKind::Sessions,
+                    "device:overflow-2",
+                    peer,
+                    t0,
+                    Some(1),
+                    qsh_transport::AuthPath::Ca,
+                )
+                .is_empty(),
+            "a second overflow principal in the same window is suppressed, \
+             not given its own line"
+        );
+
+        let flushed =
+            quotas.flush_expired(t0 + AUDIT_AGGREGATION_WINDOW + std::time::Duration::from_secs(1));
+        let overflow_summary: Vec<_> = flushed.iter().filter(|r| r.principal == "-").collect();
+        assert_eq!(
+            overflow_summary.len(),
+            1,
+            "exactly one overflow summary line, attributed to \"-\": {flushed:?}"
+        );
+        assert_eq!(overflow_summary[0].count, Some(1));
+        assert!(!quotas.audit_overflow_window_is_open(QuotaKind::Sessions));
+    }
+
+    /// R2 review A, F2: none of the existing tests drive
+    /// `record_rejection`'s own `if is_overflow { "-" } else { principal
+    /// }` branch (quota.rs, the summary line built inside
+    /// `record_rejection` itself, not `flush_expired`'s separate summary
+    /// path) with `is_overflow == true` — `the_sixty_fifth_principal_...`
+    /// only ever closes the overflow window via `flush_expired`, and
+    /// mutating this call's `"-"` to `principal` unconditionally
+    /// (confirmed by mutation: A's M5) left every existing test green.
+    /// This test fills the category to the overflow cap, suppresses one
+    /// rejection inside the (already fresh) overflow window, then lets it
+    /// go stale and reopens it — driving the same "stale window closes
+    /// with a summary, plus a fresh first line" shape
+    /// `quota_rejection_reopens_a_stale_window_with_both_its_summary_and_
+    /// a_fresh_first_line` already covers for a normal window, but for the
+    /// overflow window specifically.
+    #[test]
+    fn overflow_window_reopening_emits_a_dash_summary_line_from_record_rejection() {
+        let quotas = quotas_with(1);
+        let clock = TestClock::new();
+        let t0 = clock.now();
+        let peer: std::net::SocketAddr = "127.0.0.1:1".parse().unwrap();
+
+        for n in 0..MAX_AUDIT_WINDOW_PRINCIPALS {
+            let principal = format!("device:{n}");
+            assert_eq!(
+                quotas
+                    .record_rejection(
+                        QuotaKind::Sessions,
+                        &principal,
+                        peer,
+                        t0,
+                        Some(1),
+                        qsh_transport::AuthPath::Ca,
+                    )
+                    .len(),
+                1
+            );
+        }
+
+        // The overflow window's own first line: fresh, names the real
+        // principal, not "-".
+        let overflow_first = quotas.record_rejection(
+            QuotaKind::Sessions,
+            "device:overflow-a",
+            peer,
+            t0,
+            Some(1),
+            qsh_transport::AuthPath::Ca,
+        );
+        assert_eq!(overflow_first.len(), 1);
+        assert_eq!(overflow_first[0].principal, "device:overflow-a");
+
+        // A second, different principal lands in the same still-fresh
+        // overflow window and is suppressed.
+        assert!(
+            quotas
+                .record_rejection(
+                    QuotaKind::Sessions,
+                    "device:overflow-b",
+                    peer,
+                    t0 + std::time::Duration::from_secs(1),
+                    Some(1),
+                    qsh_transport::AuthPath::Ca,
+                )
+                .is_empty()
+        );
+
+        // Let the overflow window go stale, then reopen it with a third
+        // principal's rejection: `record_rejection` itself (not
+        // `flush_expired`) must emit the closing summary under "-", plus
+        // its own fresh first line under the real name — both from this
+        // one call.
+        let stale_reopen = quotas.record_rejection(
+            QuotaKind::Sessions,
+            "device:overflow-c",
+            peer,
+            t0 + AUDIT_AGGREGATION_WINDOW + std::time::Duration::from_secs(1),
+            Some(1),
+            qsh_transport::AuthPath::Ca,
+        );
+        assert_eq!(
+            stale_reopen.len(),
+            2,
+            "the overflow window's closing summary and the reopening \
+             rejection's own line, both — got {stale_reopen:?}"
+        );
+        assert_eq!(
+            stale_reopen[0].principal, "-",
+            "the overflow window's *summary* line must be attributed to \
+             the reserved sentinel, not whichever principal happened to \
+             reopen it: {stale_reopen:?}"
+        );
+        assert_eq!(stale_reopen[0].count, Some(1));
+        assert_eq!(stale_reopen[1].principal, "device:overflow-c");
+        assert!(stale_reopen[1].count.is_none());
+    }
+
+    /// R2 review B, B1: `"-"` is a reserved sentinel for the overflow
+    /// summary, never a legitimate `per_principal` key — a caller that
+    /// audits a pre-identity axis under `"-"` (matching the admission
+    /// convention `docs/CLI.md` §6.12 already uses for `rate_limited`/
+    /// `at_capacity`) must land in the shared overflow window, not open an
+    /// ordinary window under that literal string. Confirmed by mutation
+    /// (B's M4 against `server/mod.rs`'s pairing-rejection call site):
+    /// before the `principal == "-"` guard in `record_rejection`, passing
+    /// `"-"` through opened a normal `per_principal["-"]` entry
+    /// indistinguishable from an actual overflow summary, and zero tests
+    /// caught it.
+    #[test]
+    fn a_rejection_audited_under_the_reserved_dash_principal_lands_in_overflow() {
+        let quotas = quotas_with(1);
+        let clock = TestClock::new();
+        let t0 = clock.now();
+        let peer: std::net::SocketAddr = "127.0.0.1:1".parse().unwrap();
+
+        let first = quotas.record_rejection(
+            QuotaKind::Sessions,
+            "-",
+            peer,
+            t0,
+            None,
+            qsh_transport::AuthPath::Ca,
+        );
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].principal, "-");
+        assert_eq!(
+            quotas.audit_window_principal_count(QuotaKind::Sessions),
+            0,
+            "\"-\" must never become a per_principal map entry"
+        );
+        assert!(quotas.audit_overflow_window_is_open(QuotaKind::Sessions));
+
+        assert!(
+            quotas
+                .record_rejection(
+                    QuotaKind::Sessions,
+                    "-",
+                    peer,
+                    t0 + std::time::Duration::from_secs(1),
+                    None,
+                    qsh_transport::AuthPath::Ca,
+                )
+                .is_empty(),
+            "a second \"-\" rejection in the same window is suppressed into \
+             the overflow window, same as any other overflow rejection"
+        );
+
+        let flushed =
+            quotas.flush_expired(t0 + AUDIT_AGGREGATION_WINDOW + std::time::Duration::from_secs(1));
+        assert_eq!(flushed.len(), 1);
+        assert_eq!(flushed[0].principal, "-");
+        assert_eq!(flushed[0].count, Some(1));
+    }
+
+    /// R2 review A, F1: `flush_expired`'s doc names 650 (`QuotaKind::
+    /// ALL.len() × (MAX_AUDIT_WINDOW_PRINCIPALS + 1)`) as the worst-case
+    /// per-tick record burst and claims it stays under
+    /// `AuditConfig::DEFAULT_QUEUE_DEPTH`'s headroom. Pin the arithmetic
+    /// itself so a future `QuotaKind::ALL` growth, a
+    /// `MAX_AUDIT_WINDOW_PRINCIPALS` increase, or a `DEFAULT_QUEUE_DEPTH`
+    /// decrease that closes this gap fails here instead of only showing
+    /// up as an occasional `QueueFull` under load.
+    #[test]
+    fn flush_expired_worst_case_burst_fits_under_the_default_audit_queue_depth() {
+        let worst_case_burst = QuotaKind::ALL.len() * (MAX_AUDIT_WINDOW_PRINCIPALS + 1);
+        assert_eq!(worst_case_burst, 650, "documented worst-case burst drifted");
+        assert!(
+            (worst_case_burst as u32) < crate::config::AuditConfig::DEFAULT_QUEUE_DEPTH,
+            "flush_expired's worst-case per-tick burst ({worst_case_burst}) \
+             must stay under the default [audit].queue_depth \
+             ({}) — otherwise a routine quota-audit flush can itself \
+             saturate the queue at defaults, with no operator \
+             misconfiguration involved",
+            crate::config::AuditConfig::DEFAULT_QUEUE_DEPTH
+        );
     }
 }

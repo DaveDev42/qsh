@@ -19,7 +19,7 @@
 use std::path::PathBuf;
 
 use qsh_core::config::{AuditConfig, ServeConfig};
-use qsh_core::quota::{QuotaKind, QuotaLimits};
+use qsh_core::quota::{MAX_AUDIT_WINDOW_PRINCIPALS, QuotaKind, QuotaLimits};
 
 /// The repo root, reached from `CARGO_MANIFEST_DIR` (`crates/qsh-core`)
 /// the same way every other doc-reading integration test in this
@@ -459,5 +459,79 @@ fn cli_md_names_the_audit_volume_bound_and_its_defaults() {
         "docs/CLI.md §6.12's quoted default for [audit].retain must \
          match AuditConfig::default().retain() ({})",
         defaults.retain()
+    );
+}
+
+/// R2 review B, B2: `qsh_core::quota::MAX_AUDIT_WINDOW_PRINCIPALS`'s own
+/// doc comment justifies being `pub` by claiming this file pins it against
+/// `docs/CLI.md`/`docs/design/architecture.md` — before this test, that
+/// claim was false (grep found zero occurrences of the constant's name in
+/// this crate's `tests/`), and neither doc's `64`-per-category cap nor its
+/// `2 × (min(principal 수, 64) + 1)` row-count formula was checked against
+/// anything. Reuses the same §6.12 section slice as
+/// `cli_md_names_the_audit_volume_bound_and_its_defaults` above — a
+/// whole-file `contains("64")` would also match
+/// `max_tunnel_streams_per_forward`'s unrelated default of 64.
+#[test]
+fn cli_md_and_architecture_md_name_the_audit_window_principal_cap_and_row_bound() {
+    let cli_md = read_doc("docs/CLI.md");
+    let architecture_md = read_doc("docs/design/architecture.md");
+
+    const SECTION_HEADING: &str = "### 6.12 장기 실행 모드: `qsh serve`";
+    const NEXT_HEADING: &str = "### 6.13 장기 실행 모드: `qsh listen` / `qsh reverse`";
+    let start = cli_md
+        .find(SECTION_HEADING)
+        .unwrap_or_else(|| panic!("docs/CLI.md must contain the heading {SECTION_HEADING:?}"));
+    let end = cli_md[start..]
+        .find(NEXT_HEADING)
+        .map(|offset| start + offset)
+        .unwrap_or_else(|| panic!("docs/CLI.md must contain the heading {NEXT_HEADING:?}"));
+    let cli_section = &cli_md[start..end];
+
+    let cap_str = format!("{MAX_AUDIT_WINDOW_PRINCIPALS}개");
+    assert!(
+        cli_section.contains(&cap_str),
+        "docs/CLI.md §6.12 must state the per-category audit-window \
+         principal cap as {cap_str} (MAX_AUDIT_WINDOW_PRINCIPALS)"
+    );
+    let row_bound = format!("2 × (min(principal 수, {MAX_AUDIT_WINDOW_PRINCIPALS}) + 1)");
+    assert!(
+        cli_section.contains(&row_bound),
+        "docs/CLI.md §6.12 must state the per-category, per-window row \
+         bound as {row_bound:?}"
+    );
+    // §6.12 states this exact formula three times today (the
+    // `(category, principal)`-key aggregation paragraph, and twice in the
+    // audit-volume bullet that builds on it) — a plain `contains` above
+    // is satisfied as long as *any one* of them still carries the correct
+    // formula, so a mutation that rewrites just one occurrence (verified
+    // experimentally: R2 review B's M3, which changed only the first, to
+    // a different shape entirely) passes unnoticed as long as the others
+    // still agree. Pin the count itself, not just presence, so a change
+    // to any one occurrence's cap — or to its shape altogether — trips
+    // this even though the substring still appears elsewhere. If a future
+    // edit legitimately drops one of the three mentions, update this
+    // count deliberately rather than loosening it back to a bare
+    // `contains`.
+    let correct_occurrences = cli_section.matches(row_bound.as_str()).count();
+    assert_eq!(
+        correct_occurrences, 3,
+        "docs/CLI.md §6.12 must state the exact row-bound formula \
+         {row_bound:?} exactly 3 times (found {correct_occurrences}) — a \
+         count lower than the last known-good value means some occurrence \
+         drifted even though the formula still appears elsewhere in the \
+         section"
+    );
+
+    assert!(
+        architecture_md.contains(&cap_str),
+        "docs/design/architecture.md's audit paragraph must state the \
+         per-category audit-window principal cap as {cap_str} \
+         (MAX_AUDIT_WINDOW_PRINCIPALS)"
+    );
+    assert!(
+        architecture_md.contains(&row_bound),
+        "docs/design/architecture.md's audit paragraph must state the \
+         per-category, per-window row bound as {row_bound:?}"
     );
 }

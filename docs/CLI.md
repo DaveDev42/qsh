@@ -779,7 +779,12 @@ qsh serve --bind <ip:port>
   자체는 통과 전과 같은 자릿수로 계속 제한된다(`docs/adr/0009-admission-defenses.md`의 한계
   절이 Step 3에 넘긴 항목). 두 속도 상한 모두 키는 동일하다(IPv4 /32, IPv6 /64). 2초 window에서
   지속 10/초까지는 항상 통과하고 window 하나 안에 몰린 순간 burst는 최대 20건까지 받아준 뒤 그
-  이상을 거부한다. 세 값 모두 `0`은 "무제한"이 아니라 "기본값"이며 방어선을 끄는 설정은 없다.
+  이상을 거부한다. 두 축의 기본값이 같다는 것은 검증 축이 미검증 축을 통과한 것보다 많은 시도를
+  볼 수 없다는 뜻이고, 그래서 기본 설정에서 `validated_rate_limited` 거부는 거의 나오지 않는다.
+  검증 축은 운영자가 `validated_rate_per_source`를 미검증 축보다 낮게 줄 때만 따로 작동한다.
+  quinn의 NEW_TOKEN(validation token)을 채택해 재접속 Initial이 Retry 없이 검증된 상태로 들어오게
+  되면 검증 축이 그 경로의 유일한 문지기가 되므로, 그때 기본값을 다시 정한다. 세 값 모두 `0`은
+  "무제한"이 아니라 "기본값"이며 방어선을 끄는 설정은 없다.
   상한 초과는 자원 생성 전 거부이고 클라이언트에게는 `CONNECTION_FAILED`(retryable)로 보인다 —
   handshake도, 세션도, task도 만들어지지 않는다. `retry_token_lifetime`(quinn 기본 15초)은 이
   방어선의 대상이 아니다 — 시도 *속도*를 제한하는 것은 이 rate limiter이지 토큰 수명이 아니다.
@@ -834,8 +839,13 @@ qsh serve --bind <ip:port>
   합치므로 `"-"`로 남는다). `request_id`는 control 요청(세션·exec·`RemoteForwardOpen`)에 대한
   거부는 그 요청의 실제 id를, 대응하는 control 요청이 없는 데이터 스트림(터널)·연결 축 거부는
   `authorize_stream`의 connection-level 거부와 같은 sentinel `"-"`를 싣는다. 어느 축이든
-  admission과 동일하게 창(10초)당 category별 1행 + 요약 1행으로 집계된다(`quota.rs`가
-  `admission.rs`의 `WindowState`/`AuditWindow` 구조를 그대로 재사용).
+  admission과 같은 10초 창으로 집계하지만 창 키는 category 하나가 아니라 `(category, principal)`이다
+  (`quota.rs`가 `admission.rs`의 `WindowState`를 재사용하되 category마다 principal별 창 맵을 둔다).
+  그래서 한 principal이 열어 둔 창이 다른 principal의 첫 거부를 흡수하지 않고, 요약 행의
+  `principal`은 그 창을 채운 principal 본인이다. 창 맵은 두 겹으로 묶는다. 닫힌 창은 요약 행을 낸
+  뒤 맵에서 지우고, category당 principal 창은 64개까지만 둔다. 그 위로 넘치는 principal의 거부는
+  category마다 하나뿐인 overflow 창으로 모이며 그 요약 행의 `principal`만 `"-"`다. 창 하나가 내는
+  행이 첫 행 1 + 요약 1이므로 category당 행 상계는 창 주기마다 `2 × (min(principal 수, 64) + 1)`행이다.
 - **`-R` accept도 터널 스트림 축에 계수된다(M8 Step 4b).** `-L`뿐 아니라 `-R` 리스너로 들어오는
   TCP accept도 `max_tunnel_streams_per_forward`·`max_tunnel_streams_per_principal`에 그대로
   잡힌다: `serve_remote_forward`가 accept 직후·`open_bi` 전에 두 상한을 예약하고, 초과분은
@@ -850,10 +860,15 @@ qsh serve --bind <ip:port>
   `PLAN.md` M8 Step 5 (d)) — 이는 버그가 아니라 의도된 fail-closed다. sink가 회복되면 같은 세션의
   재부착은 다시 성공한다.
 - **Audit 로그의 디스크 부피도 유계다(M5, `docs/adr/0010-resource-quotas.md`).** 거부 flood가
-  audit flood가 되지 않는 것은 위의 창(10초)당 category별 1행 + 요약 1행 집계가 행 *수*를 묶기
-  때문이고, 그 위에 회전·retention이 디렉터리 총 *부피* 자체를 묶는다 — `[audit].max_bytes`(기본
+  audit flood가 되지 않는 것은 위의 10초 창 집계가 category당 `2 × (min(principal 수, 64) + 1)`행으로
+  행 *수*를 묶기 때문이고, 그 위에 회전·retention이 디렉터리 총 *부피* 자체를 묶는다 — `[audit].max_bytes`(기본
   64 MiB)에 도달한 로그는 회전되고 `[audit].retain`(기본 5)개까지만 보관되므로, audit 디렉터리의
-  총 바이트는 `max_bytes × (retain + 1)`(활성 로그 1개 + 보관된 회전분)을 넘지 않는다.
+  총 바이트는 `max_bytes × (retain + 1)`(활성 로그 1개 + 보관된 회전분)을 넘지 않는다. 다만 이
+  행 상계는 M8 Step 5에서 category당 2행(`(category, principal)` 키 이전)에서 최대
+  `2 × (min(principal 수, 64) + 1)`행으로 늘었다 — 총 부피는 여전히 위 산식대로 유계이지만, principal을
+  계속 바꿔 가며 거부당하는 flood는 같은 부피 상한 안에 더 많은 행을 채워 오래된 거부 레코드를
+  예전보다 빨리 retention 밖으로 밀어낸다. 즉 이 조건에서 짧아지는 것은 감사 이력이 실제로 남는
+  *기간*이지 디렉터리 총 바이트가 아니다.
 
 ### 6.13 장기 실행 모드: `qsh listen` / `qsh reverse`
 

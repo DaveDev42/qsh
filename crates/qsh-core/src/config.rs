@@ -555,7 +555,24 @@ impl ServeConfig {
     pub const DEFAULT_MAX_SESSIONS_PER_PRINCIPAL: usize = 32;
     /// Default per-principal concurrent-`exec.run` cap: 32.
     pub const DEFAULT_MAX_EXEC_PER_PRINCIPAL: usize = 32;
-    /// Default per-source validated-handshake rate: 10/s.
+    /// Default per-source validated-handshake rate: 10/s — deliberately the
+    /// same number as [`ServeConfig::DEFAULT_HANDSHAKE_RATE_PER_SOURCE`], not
+    /// an oversight. `admission::Gate::decide` runs the unvalidated axis
+    /// first, so the validated axis only ever sees attempts that axis already
+    /// passed; at equal rates (and therefore equal per-epoch burst, `rate ×
+    /// EPOCH`) it can never see more than the first axis let through, and a
+    /// `validated_rate_limited` rejection is close to unreachable at the
+    /// defaults — only an epoch-boundary skew between the two sketches
+    /// produces one. That is the intended shape, not a hole to close by
+    /// lowering this value: ADR-0011 makes several concurrent `qsh exec` runs
+    /// from one host a supported pattern and their handshakes share a source
+    /// key, so a smaller validated budget would refuse legitimate concurrency
+    /// the unvalidated axis has already bounded. An operator who wants this
+    /// axis to bite lowers it alone (`crates/qsh-cli/tests/adversarial_load.
+    /// rs` scenario 1 does exactly that, with 3). Revisit if quinn's
+    /// NEW_TOKEN validation tokens are adopted: a returning client's Initial
+    /// would then arrive already validated, skipping Retry, and this axis
+    /// becomes the only gate on that path.
     pub const DEFAULT_VALIDATED_RATE_PER_SOURCE: u32 = 10;
     /// Default host-wide concurrent-`exec.run` cap: 256 (`PLAN.md` M8 Step
     /// 3b, `docs/adr/0010-resource-quotas.md`).

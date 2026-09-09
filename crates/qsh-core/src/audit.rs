@@ -307,15 +307,18 @@ impl AuditRecord {
     /// The windowed-summary half of [`AuditRecord::quota_rejected`]'s
     /// aggregation (`crate::quota::Quotas`, same `AUDIT_AGGREGATION_
     /// WINDOW`/first-record-then-summary shape as [`AuditRecord::
-    /// handshake_rejected_summary`]): one record per `(category, 10s
-    /// window)`, standing in for `count` further rejections in that same
-    /// category and window that were suppressed rather than each getting
-    /// their own line. Callers pass `"-"` for `principal` — a window can
-    /// suppress rejections from more than one principal, and the first
-    /// rejection of the window already recorded a real one via
-    /// [`AuditRecord::quota_rejected`] — but the parameter is left open
-    /// rather than hardcoded so a caller with a single dominant principal
-    /// for the window is free to name it.
+    /// handshake_rejected_summary`]): one record per `(category,
+    /// principal, 10s window)`, standing in for `count` further
+    /// rejections in that same window that were suppressed rather than
+    /// each getting their own line. Since M8 Step 5's R2 window-key
+    /// change, a window belongs to exactly one principal — the caller
+    /// passes that principal's own name, the same one the window's first
+    /// (non-summary) rejection already carried. The lone exception is a
+    /// category's shared overflow window (`crate::quota::CategoryWindows`
+    /// — the slot every principal past `crate::quota::
+    /// MAX_AUDIT_WINDOW_PRINCIPALS` falls into): more than one principal
+    /// can pass through that one window over its lifetime, so its summary
+    /// is the only caller that still passes `"-"`.
     pub fn quota_rejected_summary(kind: QuotaKind, principal: &str, count: u32) -> Self {
         Self {
             ts: now_rfc3339(),

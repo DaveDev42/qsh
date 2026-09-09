@@ -171,3 +171,35 @@ fn validated_rate_per_source_is_documented_in_cli_md_and_architecture_md() {
          drifted from ServeConfig::DEFAULT_VALIDATED_RATE_PER_SOURCE"
     );
 }
+
+/// R2 review B, B7: the two assertions above only pin that the *value*
+/// 10 matches `ServeConfig::DEFAULT_VALIDATED_RATE_PER_SOURCE` — they say
+/// nothing about *why* it equals
+/// `ServeConfig::DEFAULT_HANDSHAKE_RATE_PER_SOURCE`. `docs/CLI.md` §6.12
+/// carries that rationale (the two axes' equal defaults are a deliberate
+/// consequence of `Gate::decide` running the unvalidated axis first, not
+/// an oversight; an operator who wants the validated axis to bite lowers
+/// it below the unvalidated one; and quinn's NEW_TOKEN validation tokens
+/// are the condition under which the default should be revisited) in the
+/// same words `ServeConfig::DEFAULT_VALIDATED_RATE_PER_SOURCE`'s own doc
+/// comment (`crates/qsh-core/src/config.rs`) uses — before this test,
+/// nothing kept the two in sync, so `docs/CLI.md` could lose the
+/// rationale paragraph entirely and every other test in this file would
+/// still pass.
+#[test]
+fn cli_md_keeps_the_validated_rate_per_source_rationale() {
+    let cli_md = read_doc("docs/CLI.md");
+
+    assert!(
+        cli_md.contains("NEW_TOKEN"),
+        "docs/CLI.md §6.12 must keep the validated_rate_per_source \
+         rationale's NEW_TOKEN revisit condition (see \
+         ServeConfig::DEFAULT_VALIDATED_RATE_PER_SOURCE's doc comment)"
+    );
+    assert!(
+        cli_md.contains("검증 축은 운영자가"),
+        "docs/CLI.md §6.12 must keep the sentence stating the validated \
+         axis only bites when an operator lowers validated_rate_per_source \
+         below the unvalidated axis"
+    );
+}
