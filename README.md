@@ -466,7 +466,8 @@ qsh-cli (bin `qsh`)  →  qsh-core  →  qsh-transport  →  qsh-proto
 ```
 
 - `qsh-proto`: sans-IO wire contract, framing, types, events, error codes.
-  This is the fuzz surface.
+  This is the fuzz surface (`fuzz/` also drives the `qsh-core` broker
+  state machine through `broker_ops`).
 - `qsh-transport`: QUIC glue over quinn and rustls. Owns the connection,
   knows nothing about sessions or ACL.
 - `qsh-core`: all business logic. Typed operation layer, session broker,

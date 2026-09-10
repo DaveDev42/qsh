@@ -10,3 +10,11 @@
 # `.cmd`, or `.ps1` — and every tracked file is already LF in the index, so
 # this needs no `--renormalize` pass.
 * text=auto eol=lf
+
+# broker_ops_corpus.rs (crates/qsh-core/tests/broker_ops_corpus.rs) is the
+# first checked-in-file consumer that compares bytes exactly, not lines —
+# it replays fuzz/corpus/broker_ops/ seeds through a fixed op byte-format.
+# A future seed with no NUL byte and a stray CRLF pair would fall under
+# `text=auto`'s heuristic and get normalized at commit time, decoding as a
+# different op sequence on Windows checkouts. Pin corpus bytes untouched.
+fuzz/corpus/** -text

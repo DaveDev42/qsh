@@ -20,6 +20,7 @@ arbitrary = { version = "1", features = ["derive"] }
 
 qsh-proto = { path = "../crates/qsh-proto" }
 qsh-transport = { path = "../crates/qsh-transport" }
+qsh-core = { path = "../crates/qsh-core" }
 serde_json = "1"
 
 [profile.release]
@@ -133,6 +134,13 @@ bench = false
 [[bin]]
 name = "json_request_types"
 path = "fuzz_targets/json_request_types.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "broker_ops"
+path = "fuzz_targets/broker_ops.rs"
 test = false
 doc = false
 bench = false

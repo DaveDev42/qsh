@@ -70,7 +70,7 @@ ReplayRing은 자산이면서 그 자체가 통제다. PTY 평문 output이 프�
 | cert 파일 교환 | 로컬 파일 | ADR-0013 |
 | `Server::dispatch` | 인증된 peer | `server/mod.rs:782` — 디코딩된 모든 요청의 단일 통과점 |
 
-`.proto` 디코더와 로컬 입력 파서가 이 진입점들의 첫 코드다. 그 표면 전체가 freeze 대상이자 fuzz 대상이며(`protocol.md` §16.9, ADR-0001:36), 16개 타깃의 상태는 [m8-fuzz.md](../campaigns/m8-fuzz.md)가 기록한다.
+`.proto` 디코더와 로컬 입력 파서가 이 진입점들의 첫 코드다. 그 표면 전체가 freeze 대상이자 fuzz 대상이며(`protocol.md` §16.9, ADR-0001:36), 파서 타깃 16개와 stateful 타깃 `broker_ops`의 상태는 [m8-fuzz.md](../campaigns/m8-fuzz.md)가 기록한다.
 
 ## 4. 위협 표
 

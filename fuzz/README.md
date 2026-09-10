@@ -1,12 +1,16 @@
-# qsh-proto fuzz targets
+# qsh-proto and broker fuzz targets
 
 `crates/qsh-proto` is the project's designated fuzz surface (`CLAUDE.md`,
 `crates/qsh-proto/src/lib.rs`) — it is the sans-IO contract layer every
 attacker-controlled byte stream and CLI-adjacent string runs through before
-anything else touches it. This crate holds the `cargo-fuzz` harnesses over
-that surface, plus two string parsers in `qsh-transport` (`Fingerprint`/
-`Principal`) that are reached from the same untrusted-input paths (trust
-store files, ACL principal text).
+anything else touches it. This crate holds sixteen `cargo-fuzz` parser
+harnesses over that surface, plus two string parsers in `qsh-transport`
+(`Fingerprint`/`Principal`) that are reached from the same untrusted-input
+paths (trust store files, ACL principal text). A seventeenth, stateful
+target — `broker_ops` — drives `qsh-core`'s session broker state machine
+(append/read/lease/resume/attach/tick/reap) against a model oracle instead
+of decoding a single message; see "The `broker_ops` state machine target"
+below.
 
 ## Why this lives outside the workspace
 
@@ -18,10 +22,13 @@ the root `Cargo.toml`'s `members`, so:
 
 - the six stable-toolchain gates (`cargo fmt`, `cargo clippy`, `cargo run -p
   xtask -- arch`, `cargo deny check`, the Windows cross-checks, `cargo
-  nextest run --workspace`) never see this crate, and are unaffected by it;
+  nextest run --workspace`) never see this crate, and are unaffected by it —
+  though `cargo nextest run --workspace` does read `fuzz/corpus/broker_ops/`
+  as data (`broker_ops_corpus.rs` replays it), so the nightly toolchain
+  stays optional while that corpus directory does not;
 - `xtask arch` iterates workspace members only, so this crate (and its
-  `qsh-proto`/`qsh-transport` path dependencies, added the ordinary way) is
-  invisible to the dependency-direction lint;
+  `qsh-proto`/`qsh-transport`/`qsh-core` path dependencies, added the
+  ordinary way) is invisible to the dependency-direction lint;
 - you need a nightly toolchain installed to build or run anything under
   `fuzz/`, but not to build, lint, or test the rest of the repo.
 
@@ -47,6 +54,14 @@ export PATH=~/.rustup/toolchains/nightly-<host-triple>/bin:$PATH
 Everything below assumes `cargo` on `PATH` resolves to the nightly
 toolchain's `cargo` (verify with `cargo --version`).
 
+## Cargo.lock scope
+
+`fuzz/Cargo.lock` is its own lock, separate from the workspace root's. This
+lock is outside `cargo deny check`'s range — `deny.toml`/`ci.yml` run that
+gate at the workspace root and never point at `fuzz/`, so advisories and
+license terms in this lock go unscanned by CI. Run it by hand when this
+lock changes: `cargo deny --manifest-path fuzz/Cargo.toml check advisories`.
+
 ## Target list
 
 Run from `fuzz/`:
@@ -69,6 +84,7 @@ Run from `fuzz/`:
 | `parse_forward_spec` | `wire.rs` | `parse_forward_spec` — the `-L`/`-R` forward-spec grammar (`[bind:]listen_port:host:host_port`, IPv6 bracket tokenizing). Local-CLI-origin text, included because it's part of qsh-proto's sans-IO parser surface. |
 | `fingerprint_principal` | `crates/qsh-transport/src/identity.rs` | `Fingerprint::from_str` and `Principal::from_str`, selected by a leading byte. Fingerprint text is reached from `trust.toml` on disk and `qsh trust add`; Principal text from `qsh acl check --principal` (and composes `Fingerprint::from_str` for its `fp:` branch). |
 | `json_request_types` | `crates/qsh-proto/src/types.rs` | `serde_json::from_slice` into 12 of the `qsh_proto::types` request types an agent hands in as `--json` payload on qsh's JSON CLI surface (ADR-0011), selected by a leading byte. |
+| `broker_ops` | `crates/qsh-core/src/broker/` | **Stateful**, not a single-message decode: a fixed byte-format op sequence (append/read/lease/resume/attach/detach/tick/reap, 19 opcodes) driven against `qsh-core`'s public broker API and checked against a `ModelSession` oracle every op — sequence/gap/byte-identity, writer lease `Acquired`/`Conflict`/steal semantics, resume issue/verify/rotate, and TTL/reap. See "The `broker_ops` state machine target" below. |
 
 Each target's doc comment (top of its `fuzz_targets/*.rs` file) has the
 fuller "why this is the right target boundary" rationale.
@@ -117,7 +133,7 @@ independently — they don't share a clock:
 ```sh
 cd fuzz
 mkdir -p /var/fuzz/grown
-for t in $(cargo fuzz list); do
+for t in $(cargo fuzz list | grep -v broker_ops); do
   # scratch/grown dir FIRST, checked-in seed dir second — see "Corpus"
   # below for why the order matters.
   cargo fuzz run "$t" /var/fuzz/grown/"$t" corpus/"$t" -- -max_total_time=259200 &
@@ -126,9 +142,16 @@ wait
 ```
 
 Driving the target list from `cargo fuzz list` instead of a hard-coded
-name list means a newly added target picks up its 72-hour run
+name list means a newly added *parser* target picks up its 72-hour run
 automatically — nothing to remember to update here when the target count
-changes.
+changes. The `grep -v broker_ops` above is deliberate: `broker_ops` is the
+one stateful target and it is outside the DoD 1 "parser target" count
+(`docs/campaigns/m8-fuzz.md` §2 fixes the denominator at 16; §8 tracks
+`broker_ops` separately). Give it a budget on its own terms if you run one
+— it's covered by the same `fuzz-smoke.yml` build-and-crash-check as every
+other target, and a dedicated long run is optional, recorded in
+`docs/campaigns/m8-fuzz.md` §8 rather than counted toward this section's
+72-hour DoD.
 
 Running the full target list in parallel needs one core per target to
 actually get independent 72-hour clocks in 72 wall-clock hours; on fewer
@@ -212,12 +235,59 @@ tests and fixtures — not random bytes — per target:
   were originally lifted from went with the adapter, ADR-0011), plus one
   malformed-JSON seed and one wrong-JSON-shape (array where an object is
   expected) seed.
+- `broker_ops`: fifteen named op sequences covering the three-phase writer
+  lease dance (acquire → steal → no-steal `Conflict`), lease release via
+  `DropConnection` followed by exit-TTL expiry, a split-physical lease
+  drop-then-reacquire, a small-budget ring overflow followed by a
+  `ReadFollow` gap, a control-only overflow producing a same-offset gap, a
+  resume issue/verify/rotate/replay-reject cycle, TTL expiry followed by
+  `Reap` purge, a rotate followed by a tick past TTL where verify is denied
+  without a `Reap` in between, an `Attach` surviving ticks and expiring
+  only after `Detach`, a `ReadBeyond` on a tiny budget, a doomed session
+  whose credential still outlives it by the issue TTL, a rotate that
+  refreshes expiry before the session is doomed, a spent generation that
+  stays dead across further rotations, a `ReadAt` that surfaces only
+  pushed controls, and a session marked `closing` that survives two
+  `Reap` passes well past its TTL. Generated (not hand-typed) by
+  `crates/qsh-core/tests/broker_ops_corpus.rs`'s `#[ignore]` test
+  `regenerate_seeds` (`BROKER_OPS_WRITE_SEEDS=1 cargo nextest run -p
+  qsh-core -E 'test(regenerate_seeds)' --run-ignored ignored-only`); the
+  fixed op byte-format is documented in the doc comment at the top of
+  `crates/qsh-core/tests/support/broker_ops_harness.rs`.
 
 The generator that produced the protobuf-encoded seeds above (a throwaway `prost`-based binary, not
 checked in — it isn't part of the repo, just the tool that wrote the files
 under `corpus/`) built each message with the crate's own public
 constructors/struct literals and `encode_to_vec()`, so the seed bytes are
 guaranteed-valid encodings, not hand-typed hex.
+
+## The `broker_ops` state machine target
+
+Unlike the sixteen parser targets, `broker_ops` doesn't decode one message
+— it replays a byte-encoded sequence of ops (append, read, take/drop a
+writer lease, issue/verify/rotate a resume token, attach/detach, advance a
+clock, reap) against `qsh-core`'s public broker API and checks the result
+against a `ModelSession` oracle after every op. `Reap` runs the registry
+half of a reaper pass: the deadline map is built from the surviving slots
+(the shape a real pass has once a doomed session has already left the
+registry — production itself maps every session, `broker/mod.rs:837-838`),
+`sync_expiry` runs, then a `purge_expired` call production never makes
+judges credential expiry on the spot, `registry.len()` is checked against
+the model's prediction, and only then are the doomed slots closed and
+forgotten. A tokref of kind 1 (`Spent`) is a no-op when nothing has
+been spent yet, and otherwise always presents the real superseded bytes
+rather than a sentinel. The harness lives at
+`crates/qsh-core/tests/support/broker_ops_harness.rs` and is compiled into
+two places: this fuzz target (`fuzz/fuzz_targets/broker_ops.rs`, via
+`#[path]`) and a plain nextest binary
+(`crates/qsh-core/tests/broker_ops_corpus.rs`, same `#[path]`) that replays
+every checked-in seed under `corpus/broker_ops/` twice each (to catch
+non-determinism) on every `cargo nextest run -p qsh-core` — that's the
+"regression replay" this crate's parser targets don't yet have (see
+"The 72-hour accumulation" above). ACL default-deny is out of scope here —
+that's `acl/policy.rs`'s proptest; `broker_ops` instead fuzzes the
+fail-closed shape of missing/expired/mismatched state
+(`Err(ResumeDenied)`, `Conflict`, `CursorBeyondEnd`).
 
 ## CI
 

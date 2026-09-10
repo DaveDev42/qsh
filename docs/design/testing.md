@@ -29,7 +29,7 @@ Keystore는 trait 뒤에: 유닛 테스트는 in-memory 구현, 플랫폼별로 
 - Buffer 초과는 올바른 `available_from`을 가진 `session.gap`을 산출 — silent truncation 금지 (PRD §8).
 - Writer lease: 획득 / 재attach 시 steal·`SESSION_CONFLICT` 규칙 / connection 사망 시 해제 / TTL 만료.
 - **TTL·시간 관련 테스트는 전부 `tokio::time::pause()`.** **테스트 스위트 전체에서 `sleep()` 전면 금지** — 이벤트 통지 + `timeout`으로 대체한다. 네트워크 프로젝트의 flaky 스위트는 팀이 빨간불을 무시하게 훈련시킨다.
-- Fuzz를 위해 broker에 **주입 가능한 clock**을 M2 설계 시점부터 넣는다 (L8의 stateful fuzzer 전제).
+- Fuzz를 위해 broker에 **주입 가능한 clock**을 M2 설계 시점부터 넣는다 (L8의 stateful fuzzer 전제). M8 Step 7b가 그 전제를 실제로 쓴다 — `broker_ops` 하네스와 reaper가 같은 `TestClock`/`Clock` trait 위에서 돌고, `TickSmall`/`TickLarge`/`Reap` op이 `TtlWindow::deadline`/`reap_reason`을 실시간 대기 없이 흔든다.
 - **정책 평가기 property(M5, `PLAN.md` Step 2 — DoD 3):** default-deny(임의 정책에서 어떤 rule도 커버하지 않는 action은 반드시 Deny), wildcard(trailing `.*`만 매칭 — 중간 glob이나 항상-deny 3종을 삼키지 않음), principal 정확 일치(`user:dave`는 `user:dave2`에 매칭되지 않음)를 순수 함수 위의 property test로 검증한다. 정책이 `acl.toml` 로더가 만든 순수 평가기(네트워크·I/O 없음)인 동안에만 이 계층에서 값싸게 돈다.
 - **Audit 수명주기(M5, `PLAN.md` Step 3 — DoD 5):** 회전 트리거(`max_bytes` 초과 시 실제로 회전)·retention 준수(`retain` 개수만 남음)·쓰기 실패 fail-closed(주입형 실패 sink로 디스크 만실을 시뮬레이션 — 실디스크를 채우지 않는다, CI 규율 참고)를 순수 로직으로 검증한다. tempdir + 주입 가능한 clock/sink로 결정적이며 `sleep()` 없음.
 
@@ -93,7 +93,7 @@ M6가 채웠던 이 계층(내장 `qsh mcp` stdio adapter를 raw JSON-RPC로 구
 
 ## L8 — Fuzzing (`cargo-fuzz`, 본격 가동은 M8)
 
-M8 Step 1(커밋 `d87e76b`, 2026-09-02)에 cargo-fuzz 타깃 **16종**이 `fuzz/fuzz_targets/`에 착륙했다. 아래 표는 `fuzz/Cargo.toml`의 `[[bin]]` 이름 그대로다 — 이 절이 원래 계획했던 이름(`frame_decode`/`control_message`/`roundtrip`/`json_envelope`/`broker_ops`)은 착륙 시점에 다시 갈라졌다(`docs/design/protocol.md` §13).
+M8 Step 1(커밋 `d87e76b`, 2026-09-02)에 cargo-fuzz 파서 타깃 **16종**이 `fuzz/fuzz_targets/`에 착륙했고, M8 Step 7b가 stateful 타깃 `broker_ops`를 더해 **17종**이 됐다. 아래 표는 `fuzz/Cargo.toml`의 `[[bin]]` 이름 그대로다 — 이 절이 원래 계획했던 이름(`frame_decode`/`control_message`/`roundtrip`/`json_envelope`/`broker_ops`)은 착륙 시점에 다시 갈라졌다(`docs/design/protocol.md` §13).
 
 | 타깃 | 내용 | 상태 |
 |---|---|---|
@@ -113,7 +113,7 @@ M8 Step 1(커밋 `d87e76b`, 2026-09-02)에 cargo-fuzz 타깃 **16종**이 `fuzz/
 | `sanitize_peer_text` | 화면에 뿌릴 peer 문자열의 제어문자 제거 | 착륙 |
 | `fingerprint_principal` | `Fingerprint`/`Principal`의 `from_str` | 착륙 |
 | `json_request_types` | `serde_json::from_slice` → `qsh_proto::types::*Req` | 착륙 (구 `json_envelope`) |
-| `broker_ops` | **stateful**: byte열 → op 시퀀스(append/read/attach/detach/tick) vs 모델 oracle | **미구현 — M8 Step 7b로 이월.** 선행 조건인 주입 가능 `Clock`은 이미 있다(`crates/qsh-core/src/broker/clock.rs`). `docs/ROADMAP.md:110`이 M8 범위로 나열하지만 `PLAN.md` Step 1–10에 소유 Step이 없었다 |
+| `broker_ops` | **stateful**: byte열 → 19종 op 어휘(NewSession/Append/AppendControl/ReadAt/ReadBeyond/ReadFollow/TakeLease/DropConnection/Attach/Detach/SetExited/SetClosing/IssueResume/VerifyResume/RotateResume/ForgetResume/TickSmall/TickLarge/Reap) 시퀀스를 `ModelSession` oracle(naive Vec + 독립 재구현한 `predict_reap_reason`/`predict_verify`)과 대조 — sequence·control id·gap·byte-identity·메모리 예산·writer lease·resume 토큰·TTL/reap 전부. default deny 축은 `acl/policy.rs`의 proptest(§13-5)가 담당하고, `broker_ops`는 그 대신 상태 부재·불일치 → `Err(ResumeDenied)`·`Conflict`·`CursorBeyondEnd`의 fail-closed 성질을 잰다. **착륙 (M8 Step 7b)** — 하네스는 `crates/qsh-core/tests/support/broker_ops_harness.rs`, fuzz 타깃은 `fuzz/fuzz_targets/broker_ops.rs`(같은 파일을 `#[path]`로 include), 회귀 재생은 `crates/qsh-core/tests/broker_ops_corpus.rs`(`fuzz/corpus/broker_ops/` seed 15개를 일반 nextest로 상시 재생, 디렉터리 0개면 FAIL) |
 
 구 `roundtrip` 행(structure-aware `Arbitrary` → encode → decode → eq)도 별도 타깃으로는 착륙하지 않았다. 그 자리를 대신 메운 것이 proptest 다섯 종이고(§L2 및 `protocol.md` §13-5), 두 방식이 재는 것이 달라 등가 교체는 아니다 — 위 표의 decode 타깃들은 임의 바이트를, proptest는 타입 수준 모델을 흔든다.
 
@@ -121,7 +121,7 @@ M8 Step 1(커밋 `d87e76b`, 2026-09-02)에 cargo-fuzz 타깃 **16종**이 `fuzz/
 
 ACL glob 평가기는 fuzz보다 property test가 적합하다(위 L2 "정책 평가기 property" 행이 M5 Step 2의 실현 지점) — action 어휘가 PRD §9의 닫힌 11종(`Action::ALL`)이고 wildcard가 trailing `.*`만 허용되도록 M5 Step 1이 못박았으므로(`docs/design/architecture.md` §6), `session.control.escalate` 같은 가상의 깊은 이름 문제는 애초에 발생하지 않는다 — 로더가 `Action::ALL`의 어느 것에도 매칭되지 않는 패턴을 로드 시점 `CONFIG_ERROR`로 거부한다. property로 직접 표현할 질문은: `session.*`가 `session.control`에 매칭되는가? `forward.*`를 가진 정책에서도 `forward.socks`는 여전히 deny인가(항상-deny 게이트가 wildcard 매칭보다 먼저 적용)? `user:dave`가 `user:dave2`에 매칭되지 않는가?
 
-**Corpus는 checked-in하고 일반 유닛 테스트로 전 플랫폼에서 상시 replay** — fuzzing이 돌지 않는 동안에도 발견된 crash가 고정된 상태로 유지된다. 공개 beta 전 타깃당 누적 72시간 + OSS-Fuzz 제출 (무료이며 SC7 리뷰의 신뢰 신호).
+**Corpus는 checked-in하고, 그중 `broker_ops`는 일반 유닛 테스트로 전 플랫폼에서 상시 replay된다**(`crates/qsh-core/tests/broker_ops_corpus.rs`) — 파서 16종의 상시 replay는 아직 선언이고 현재는 `fuzz-smoke.yml`의 짧은 결정적 스모크가 그 자리다. fuzzing이 돌지 않는 동안에도 발견된 crash는 seed로 고정된다. 공개 beta 전 타깃당 누적 72시간 + OSS-Fuzz 제출 (무료이며 SC7 리뷰의 신뢰 신호).
 
 ## L9/L10 — Soak·Perf
 
