@@ -170,14 +170,42 @@ valid_host_name 47.
 줄이 있는데 cargo 전역 registry 캐시 auto-clean이 `rusb-0.9.4`
 예제 파일 삭제에 실패한 경고이고 fuzz 빌드·타깃과는 무관하다.
 
-결과는 확인 대기.
+**종료 2026-09-11T04:05:23+09:00.** `exits.txt` 8행 전부 `exit=0
+secs=46802`, 마지막 줄 `DONE 2026-09-11T04:05:23+09:00`. 엄격 grep(`Test
+unit written`/`deadly signal`/`SUMMARY: libFuzzer`/`out-of-memory`)은 8
+로그 전부 0건이고 크래시 artifact 파일도 0개다. 로그 끝의
+`-print_final_stats` 행은 타깃마다 `Done N runs in 46801 second`다.
+
+| 타깃 | runs | exec/s 평균 | cov | corp | peak RSS |
+|---|---|---|---|---|---|
+| decode_connect_result | 13,924,928,478 | 297,534 | 298 | 354 | 589 MB |
+| decode_control | 1,362,942,041 | 29,122 | 1920 | 2492 | 523 MB |
+| decode_exec_frame | 6,606,114,363 | 141,153 | 394 | 482 | 685 MB |
+| decode_hello | 4,630,116,874 | 98,932 | 317 | 353 | 540 MB |
+| decode_local_admin_request | 7,425,479,275 | 158,660 | 301 | 381 | 607 MB |
+| decode_local_hello | 8,733,058,745 | 186,599 | 235 | 294 | 512 MB |
+| decode_session_frame | 2,098,024,745 | 44,828 | 435 | 557 | 795 MB |
+| decode_stream_header | 11,511,596,007 | 245,969 | 261 | 283 | 559 MB |
+
+범위: 1.4B(`decode_control`)~13.9B(`decode_connect_result`) runs,
+exec/s 29.1k~297.5k, peak RSS 512~795 MB — `-rss_limit_mb=1536` 아래다.
+`decode_control`의 cov 1920은 배치 1 기동 직후 실측 1873에서 늘어난
+값이다.
+
+누적: 배치 1 실효 시간 59.1~65.6h + 13.0h = 72.1~78.6h/타깃. 부족분이
+가장 컸던 타깃(12.89h)도 72.11h로 72h를 넘는다. DoD 1의 "누적" 문면상
+회차를 나눠 이어 돌린 시간은 합산한다(PLAN.md Step 1 경과 기록 09-07).
+
+**배치 1 보충 판정: decode_* 8 타깃 누적 ≥72h 충족, crash 0.**
+
+**DoD 1 판정(2026-09-11): 16 타깃 전부 누적 ≥72 fuzz-hours, crash 0.**
 
 ## 6. 남은 것
 
-- 보충 회차(`m8-fuzz-20260910-1505`) 종료 확인 — `exits.txt` 8행
-  `exit=0`, 로그 엄격 grep 0건, 누적 = 배치 1 실효 시간 + 13h ≥ 72h.
-- 위가 닫히면 DoD 1 체크(`docs/ROADMAP.md`) — 16 타깃 전부 72h 누적,
-  crash 0건.
+- 보충 회차(`m8-fuzz-20260910-1505`) 종료 확인 — 09-11 완료. `exits.txt`
+  8행 `exit=0`, 로그 엄격 grep 0건, 누적 72.1~78.6h(§5).
+- DoD 1 체크 — 09-11 완료(PLAN.md §6.1). ROADMAP M8 마감 노트는 마감
+  커밋에서 이 문서 §5를 인용한다.
 - stateful broker fuzzer(`fuzz_session_machine`/`broker_ops`)는 이 16
   타깃 집합 밖이다 — Step 7b가 착지해 §8에 기록하며, DoD 1의 "parser
   타깃당" 카운트(분모 16) 밖이라 이 캠페인의 완료 조건과 무관하다.
