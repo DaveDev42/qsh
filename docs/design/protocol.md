@@ -331,7 +331,7 @@ message ExecFrame {
 
 ## 13. Fuzzing·검증 계획
 
-신뢰 불가 입력 표면 전체를 sans-IO `qsh-proto`에 격리한다(순수 `&[u8] → Result<Frame>` + sans-IO 상태 기계). Step 1(커밋 `d87e76b`, 2026-09-02)에 cargo-fuzz(libFuzzer) 타깃 16종이 `fuzz/fuzz_targets/`에 착륙했다 — 이 절이 원래 계획했던 4개 타깃 이름(`fuzz_frame_split`/`fuzz_control_decode`/`fuzz_stream_header`/`fuzz_session_machine`)은 실제 착륙 시점에 다시 갈라졌다:
+신뢰 불가 입력 표면 전체를 sans-IO `qsh-proto`에 격리한다(순수 `&[u8] → Result<Frame>` + sans-IO 상태 기계). Step 1(커밋 `d87e76b`, 2026-09-02)에 cargo-fuzz(libFuzzer) 파서 타깃 16종이 `fuzz/fuzz_targets/`에 착륙했다 — 이 절이 원래 계획했던 4개 타깃 이름(`fuzz_frame_split`/`fuzz_control_decode`/`fuzz_stream_header`/`fuzz_session_machine`)은 실제 착륙 시점에 다시 갈라졌다:
 
 1. **frame layer 1종** — `frame_decoder`(구 `fuzz_frame_split`에 대응). `FrameDecoder`에 적대적 부분 청크(1-byte 피드, 쪼개진 length prefix, 상한 근접 길이)를 흘리고 `push`/`next_frame`/`take_remaining`을 임의 순서로 인터리브한다. 불변식: panic 없음, 상한 초과 할당 없음, 청킹 방식과 무관하게 결과 동일.
 2. **wire·local 메시지 decode 8종**(구 `fuzz_control_decode`/`fuzz_stream_header`가 갈라진 것) — `decode_control`(`ControlMessage`, 루트 oneof), `decode_hello`(`Hello`), `decode_stream_header`(`StreamHeader`, 모든 `StreamKind` 포함 unknown 값도), `decode_session_frame`(`SessionFrame`, decode 뒤 `validate()`까지 체인), `decode_exec_frame`(`ExecFrame`), `decode_connect_result`(`ConnectResult`, `TCP_CONNECT`에서 유일하게 ticket/ACL 게이트가 없는 decode 경로), `decode_local_hello`/`decode_local_admin_request`(`qsh.local.v1`, localctl UDS 첫 두 메시지). 불변식은 원래 계획과 같다 — decode는 panic하지 않고, `Hello`/ACL 완료 전에는 control 외 어떤 리소스(PTY/exec/socket)도 생성되지 않는다.
@@ -339,9 +339,9 @@ message ExecFrame {
 4. **JSON 계약 표면 1종** — `json_request_types`. `serde_json::from_slice`로 `qsh_proto::types::*Req`(에이전트가 `--json`으로 주는 요청 타입)를 흔든다.
 5. **proptest 모델 테스트** — ACL `decide`를 naive coverage 오라클과 대조(`crates/qsh-core/src/acl/policy.rs`), ring buffer를 naive Vec 오라클과 대조(임의 append/attach/evict 후 replay·gap 정확성, `crates/qsh-core/src/broker/ring.rs`), reverse registry의 `generation` 단조성(`crates/qsh-core/src/reverse/registry.rs`), reverse target의 backoff 단조성(`crates/qsh-core/src/reverse/target.rs`), localctl mux의 request-id 교차 부재(`crates/qsh-core/src/localctl/mux.rs`).
 
-**착륙하지 않은 것 — stateful broker fuzzer.** 원래 4번 항목이 겨누던 것(`arbitrary` 생성 control message *시퀀스* + 연결 단절 이벤트를 sans-IO broker에 주입해 default deny 유지·writer lease 단일성·sequence 단조성·gap 범위 정확성·resume token 단회성을 흔드는 stateful 타깃)은 이번 16종 어디에도 없다 — 위 8종은 각 메시지 하나의 decode만 흔들고 시퀀스 상태를 주입하지 않는다. `docs/ROADMAP.md`는 이것을 M8 범위로 나열하지만 `PLAN.md`는 Step 1–10 어디에도 소유 Step을 두지 않았다 — **M8 Step 7b**(같은 마일스톤, 마감 전 별도 라운드)로 이월한다.
+**6. stateful broker fuzzer — `broker_ops`(M8 Step 7b).** 원래 4번 항목이 겨누던 것(`arbitrary` 생성 control message *시퀀스* + 연결 단절 이벤트를 sans-IO broker에 주입해 default deny 유지·writer lease 단일성·sequence 단조성·gap 범위 정확성·resume token 단회성을 흔드는 stateful 타깃)은 위 16종 어디에도 없었다 — 그 8종 decode 타깃은 각 메시지 하나의 decode만 흔들고 시퀀스 상태를 주입하지 않는다. `docs/ROADMAP.md`는 이것을 M8 범위로 나열했지만 `PLAN.md`는 Step 1–10 어디에도 소유 Step을 두지 않았고, **M8 Step 7b**(같은 마일스톤, 마감 전 별도 라운드)가 이를 채웠다. 하네스는 `crates/qsh-core/tests/support/broker_ops_harness.rs`(19종 op 어휘 — 세션 append/read/control, writer lease, resume issue/verify/rotate, attach/detach, tick, reap)이고, 같은 파일을 fuzz 타깃(`fuzz/fuzz_targets/broker_ops.rs`)과 nextest 회귀 재생(`crates/qsh-core/tests/broker_ops_corpus.rs`, `fuzz/corpus/broker_ops/` seed 15개)이 `#[path]`로 나눠 include한다. oracle은 naive `ModelSession`(전체 히스토리 `Vec<u8>` + lease/resume/TTL 상태를 독립 재구현) 대조다. **default deny 축은 `acl/policy.rs`의 proptest(§13-5)가 담당하고, `broker_ops`는 그 대신 상태 부재·불일치 → `Err(ResumeDenied)`·`Conflict`·`CursorBeyondEnd`의 fail-closed 성질을 잰다** — 불변식 목록을 조용히 갈아끼우지 않는다.
 
-corpus는 `fuzz/corpus/`에 체크인하고 **모든 플랫폼에서 유닛 테스트로 상시 재생**한다(발견된 크래시의 회귀 고정). CI에서 PR마다 fuzz 빌드 게이트 + nightly smoke fuzz, 공개 beta 전 타깃당 누적 72시간 + OSS-Fuzz 제출. 캠페인 기록은 [`docs/campaigns/m8-fuzz.md`](../campaigns/m8-fuzz.md), 상세는 [testing.md](testing.md).
+corpus는 `fuzz/corpus/`에 체크인한다. **17종 중 `broker_ops`는 이미 모든 플랫폼에서 유닛 테스트로 상시 재생된다**(위 `broker_ops_corpus.rs`, 발견된 크래시의 회귀 고정) — 나머지 파서 타깃 16종에 대해 "유닛 테스트 상시 재생"은 아직 이 문서의 선언일 뿐 별도 회귀 하네스로 구현되지 않았다(현재는 `fuzz-smoke.yml`의 짧은 결정적 `-runs=<N>` 스모크가 그 자리를 대신한다 — `fuzz/README.md` "CI"). CI에서 PR마다 fuzz 빌드 게이트 + nightly smoke fuzz, 공개 beta 전 타깃당 누적 72시간(파서 16종, DoD 1) + OSS-Fuzz 제출. 캠페인 기록은 [`docs/campaigns/m8-fuzz.md`](../campaigns/m8-fuzz.md), 상세는 [testing.md](testing.md).
 
 ## 14. P1 TCP fallback을 위한 제약 (지금 지켜야 할 것)
 
@@ -434,7 +434,7 @@ TLS 게이트(`pairing_open()`, §15.1)는 redeem 여부를 보지 않고 오직
 
 ### 15.9 Fuzzing
 
-`PairingProof`/`PairingAccepted`는 `ControlMessage.body` oneof의 새 variant일 뿐이므로, §13의 `decode_control` 타깃(`ControlMessage::decode` 전체를 `arbitrary` structure-aware 변형으로 흔드는 타깃)이 그대로 이 두 메시지도 포함한다 — 별도 타깃이 필요 없다. `fuzz/` 하네스 자체는 이 Step(M7 Step 4) 이후인 M8 Step 1(커밋 `d87e76b`, 2026-09-02)에 착륙했다 — 이 절이 쓰인 시점에는 아직 존재하지 않았다는 뜻으로 읽는다. 착륙한 뒤에도 이 절이 그 16종에 추가하는 표면은 없다: `decode_control`이 이미 이 두 메시지를 덮는다.
+`PairingProof`/`PairingAccepted`는 `ControlMessage.body` oneof의 새 variant일 뿐이므로, §13의 `decode_control` 타깃(`ControlMessage::decode` 전체를 `arbitrary` structure-aware 변형으로 흔드는 타깃)이 그대로 이 두 메시지도 포함한다 — 별도 타깃이 필요 없다. `fuzz/` 하네스 자체는 이 Step(M7 Step 4) 이후인 M8 Step 1(커밋 `d87e76b`, 2026-09-02)에 착륙했다 — 이 절이 쓰인 시점에는 아직 존재하지 않았다는 뜻으로 읽는다. 착륙한 뒤에도 이 절이 그 파서 타깃 16종(이후 M8 Step 7b의 `broker_ops`를 더해 17종)에 추가하는 표면은 없다: `decode_control`이 이미 이 두 메시지를 덮는다.
 
 ## 16. Wire format freeze (v1)
 
@@ -522,7 +522,7 @@ wire 쪽에는 `:1138`(두 minor release 유지)과 `:1139`(`qsh schema --json` 
 
 ### 16.9 §13과의 교차 참조 — freeze 표면이 곧 fuzz 표면이다
 
-`qsh.wire.v1`이 신뢰 불가 입력 표면 전체라는 것은 이 freeze가 새로 정하는 것이 아니라 ADR-0001의 원래 결정이다(`docs/adr/0001-custom-quic-protocol.md:36` "신뢰 불가 입력을 다루는 파싱 코드는 `qsh-proto`에 격리되어 cargo-fuzz 타깃으로 커버 가능해야 한다"). 이 절이 얼리는 표면과 §13이 흔드는 표면은 같다 — §16.4에 따라 새 wire op을 additive로 추가할 때마다, 그 op의 decode 경로가 §13의 대응 타깃(대개 `decode_control`)에 이미 걸리는지 확인하는 것이 이 규율을 실제로 지키는 방법이다. 누적 fuzz-hours와 배치 실행 기록은 [`docs/campaigns/m8-fuzz.md`](../campaigns/m8-fuzz.md)가 canonical이다.
+`qsh.wire.v1`이 신뢰 불가 입력 표면 전체라는 것은 이 freeze가 새로 정하는 것이 아니라 ADR-0001의 원래 결정이다(`docs/adr/0001-custom-quic-protocol.md:36` "신뢰 불가 입력을 다루는 파싱 코드는 `qsh-proto`에 격리되어 cargo-fuzz 타깃으로 커버 가능해야 한다"). 이 절이 얼리는 표면과 §13이 흔드는 표면은 같다 — §16.4에 따라 새 wire op을 additive로 추가할 때마다, 그 op의 decode 경로가 §13의 대응 타깃(대개 `decode_control`)에 이미 걸리는지 확인하는 것이 이 규율을 실제로 지키는 방법이다. 누적 fuzz-hours와 배치 실행 기록은 [`docs/campaigns/m8-fuzz.md`](../campaigns/m8-fuzz.md)가 canonical이다. (이 등식은 §13-1~4의 파서 타깃 16종에 한정된다. §13-6의 `broker_ops`는 반대 방향으로, 동결 대상이 아닌 broker 내부 상태 기계(§16.3)를 흔든다 — freeze 표면을 넓히지 않는다.)
 
 ### 16.10 발효 절차
 

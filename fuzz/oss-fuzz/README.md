@@ -1,8 +1,9 @@
 # OSS-Fuzz integration (draft)
 
 This directory holds the three files an OSS-Fuzz project submission needs
-(`project.yaml`, `Dockerfile`, `build.sh`) so that `qsh`'s 16 existing
-`cargo-fuzz` targets under `fuzz/` (see `fuzz/README.md` and
+(`project.yaml`, `Dockerfile`, `build.sh`) so that `qsh`'s 17 existing
+`cargo-fuzz` targets under `fuzz/` (the 16 parser targets plus the
+stateful `broker_ops`, see `fuzz/README.md` and
 `docs/campaigns/m8-fuzz.md`) get picked up by OSS-Fuzz's own build and
 scheduling infrastructure — continuous fuzzing on Google's fleet, on top
 of this repo's own local runs and CI smoke job.
@@ -38,7 +39,12 @@ onto OSS-Fuzz requires:
   needed" against what that run shows. First `build_fuzzers` failure's
   top suspect: `aws-lc-sys` needing `cmake`, which the Dockerfile now
   installs — confirm it's still there in whatever base-builder-rust
-  version is current at submission time.
+  version is current at submission time. Second suspect, introduced by
+  `broker_ops`'s `qsh-core` dependency: Linux is unix, so `portable-pty`
+  (and `keyring`'s secret-service backend) really are built into
+  `base-builder-rust`'s image — both are pure Rust and should need no
+  extra system package; confirm that in the first `build_fuzzers` run
+  rather than assuming the `cfg` gates them out.
 - **u3**: once the PR merges and OSS-Fuzz starts building `qsh`, monitor
   the project's OSS-Fuzz dashboard and the `primary_contact` inbox for
   build failures and new crash reports — that monitoring is an ongoing
@@ -50,7 +56,7 @@ onto OSS-Fuzz requires:
 |---|---|
 | `project.yaml` | OSS-Fuzz project metadata: language, contact, sanitizer/engine/architecture matrix. |
 | `Dockerfile` | Build image: clones `main_repo` fresh and layers `build.sh` on top of `base-builder-rust`. |
-| `build.sh` | Builds every target `cargo fuzz list` reports (16 today) with `cargo fuzz build -O --debug-assertions` and stages each binary plus its seed corpus zip into `$OUT`. |
+| `build.sh` | Builds every target `cargo fuzz list` reports (17 today) with `cargo fuzz build -O --debug-assertions` and stages each binary plus its seed corpus zip into `$OUT`. |
 
 `scripts/fuzz/oss-fuzz-local.sh` (repo root) is the local stand-in used to
 exercise `build.sh` without an OSS-Fuzz checkout or the Docker image.

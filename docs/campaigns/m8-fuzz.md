@@ -16,8 +16,9 @@ M2/adversarial-load/soak과 같은 지위 — 이 문서는 **합격/불합격 �
 ## 2. DoD 1의 "parser 타깃" 정의 (고정)
 
 `docs/ROADMAP.md` DoD 1: "parser 타깃당 누적 ≥72 fuzz-hours 무crash." 이
-문구의 "parser 타깃"을 여기서 고정한다 — `fuzz/Cargo.toml`이 등록한 16개
-`[[bin]]` 전부다:
+문구의 "parser 타깃"을 여기서 고정한다 — M8 Step 1이 등록한 파서
+`[[bin]]` 16개 전부다(이후 Step 7b가 더한 stateful `broker_ops`는 §8,
+DoD 1 밖):
 
 - 바이트 디코더 8: `decode_control`·`decode_hello`·`decode_exec_frame`·
   `decode_session_frame`·`decode_stream_header`·`decode_connect_result`·
@@ -40,7 +41,7 @@ M2/adversarial-load/soak과 같은 지위 — 이 문서는 **합격/불합격 �
 
 ## 3. 타깃 표
 
-`fuzz/Cargo.toml`의 `[[bin]]` 16개, 각 타깃 파일 첫 doc 주석에서 covers
+`fuzz/Cargo.toml`의 파서 `[[bin]]` 16개, 각 타깃 파일 첫 doc 주석에서 covers
 열을 옮겼다.
 
 | 타깃 | 분류 | 대상 코드 | covers | DoD 1 포함 |
@@ -136,14 +137,29 @@ artifact 0건, OOM 없음. grown corpus는 `~/fuzz/grown/<t>`에 1.3~13 MB로
 
 ## 7. OSS-Fuzz 제출과의 관계
 
-이 문서가 기록하는 로컬 72h 실행과 별개로, 같은 16 타깃을 continuous
-fuzzing 서비스로 넘기는 준비물이 `fuzz/oss-fuzz/`에 있다(`project.yaml`·
+이 문서가 기록하는 로컬 72h 실행과 별개로, 같은 타깃 전량(현재 17종 —
+파서 16 + `broker_ops`)을 continuous fuzzing 서비스로 넘기는 준비물이
+`fuzz/oss-fuzz/`에 있다(`project.yaml`·
 `Dockerfile`·`build.sh`, 로컬 검증은 `scripts/fuzz/oss-fuzz-local.sh`).
 제출(google/oss-fuzz로 PR)은 사람이 하는 별도 액션이고 절차는
 `fuzz/oss-fuzz/README.md`에 있다 — 이 문서의 배치 기록과 그쪽 제출 상태는
 독립적으로 갱신된다.
 
-## 8. 재사용
+## 8. Stateful 타깃 `broker_ops` (DoD 1 밖)
+
+`broker_ops`(M8 Step 7b, `fuzz/fuzz_targets/broker_ops.rs`)는 §2가 고정한
+16 타깃 집합에 들지 않는다 — DoD 1의 "parser 타깃당" 분모는 이 문서
+전체에서 16으로 그대로 둔다(§6의 이월 기록도 불변). `broker_ops`는
+`.github/workflows/fuzz-smoke.yml`의 build-and-crash-check 스모크에는
+`cargo fuzz list`가 동적으로 잡아내 자동으로 들어가지만, 이 문서가 기록하는
+72h 누적 회차는 별도다 — 돌리게 되면 아래 표에 배치 3으로 기록한다(지금은
+헤더만, 아직 실행 회차 없음):
+
+| run-id | 시작 | 종료 | grown corpus | crash | 판정 |
+|---|---|---|---|---|---|
+| — | — | — | — | — | 미실행 |
+
+## 9. 재사용
 
 `m2-mobility.md`/`m8-adversarial-load.md`/`m8-soak.md`처럼 다음 배치가
 생기면 §5에 새 배치 절을 더하고 §6을 다시 계산한다. 타깃 집합이 바뀌면

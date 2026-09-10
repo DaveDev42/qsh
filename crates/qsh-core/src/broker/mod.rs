@@ -48,7 +48,7 @@ pub use ring::{
 pub use session::{
     AttachGuard, AttachToken, FIRST_INPUT_STREAM, InputStreamId, PipeHandle, PipeSource,
     SessionActor, SessionConfig, SessionHandle, SessionInfo, SessionSource, SessionSpec,
-    SessionState, SourceControl, SourceExit, SpawnedSource, WriteError,
+    SessionState, SourceControl, SourceExit, SpawnedSource, TtlWindow, WriteError,
 };
 pub use signal::Signal;
 

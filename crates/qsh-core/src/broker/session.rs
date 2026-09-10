@@ -192,6 +192,48 @@ struct Meta {
     closed_at: Option<Instant>,
 }
 
+/// The four facts the TTL rules read, detached from the actor so the same
+/// rule serves the reaper ([`SessionHandle::ttl_reap_reason`],
+/// [`SessionHandle::resume_deadline`]) and the `broker_ops` fuzz harness
+/// (`crates/qsh-core/tests/support/broker_ops_harness.rs`), which has no
+/// actor to ask and drives these four fields directly against a model.
+#[derive(Debug, Clone, Copy)]
+pub struct TtlWindow {
+    /// Number of live attachments. TTL only runs while this is zero.
+    pub attached: usize,
+    /// `true` from the moment a close was accepted.
+    pub closing: bool,
+    /// Lifecycle state (decides `Exit` vs `TtlExpired`).
+    pub state: SessionState,
+    /// Monotonic instant the TTL is measured from when `attached == 0`.
+    pub ttl_base: Instant,
+}
+
+impl TtlWindow {
+    /// See [`SessionHandle::ttl_reap_reason`].
+    pub fn reap_reason(&self, now: Instant, ttl: Duration) -> Option<CloseReason> {
+        if self.attached > 0 || self.closing {
+            return None;
+        }
+        if now.saturating_duration_since(self.ttl_base) < ttl {
+            return None;
+        }
+        Some(match self.state {
+            SessionState::Exited => CloseReason::Exit,
+            SessionState::Running => CloseReason::TtlExpired,
+        })
+    }
+
+    /// See [`SessionHandle::resume_deadline`].
+    pub fn deadline(&self, now: Instant, ttl: Duration) -> Instant {
+        if self.attached > 0 {
+            now + ttl
+        } else {
+            self.ttl_base + ttl
+        }
+    }
+}
+
 /// State shared between the actor and every [`SessionHandle`] clone.
 pub struct SessionShared {
     id: String,
@@ -680,17 +722,7 @@ impl SessionHandle {
     /// and `[serve].resume_ttl`. Returns `None` while attached or once a
     /// close has been accepted.
     pub fn ttl_reap_reason(&self, now: Instant, ttl: Duration) -> Option<CloseReason> {
-        let meta = self.shared.meta();
-        if meta.attached > 0 || meta.closing {
-            return None;
-        }
-        if now.saturating_duration_since(meta.ttl_base) < ttl {
-            return None;
-        }
-        Some(match meta.state {
-            SessionState::Exited => CloseReason::Exit,
-            SessionState::Running => CloseReason::TtlExpired,
-        })
+        self.ttl_window().reap_reason(now, ttl)
     }
 
     /// When this session stops being resumable, on the broker's clock.
@@ -704,11 +736,18 @@ impl SessionHandle {
     ///
     /// [`ttl_reap_reason`]: Self::ttl_reap_reason
     pub fn resume_deadline(&self, now: Instant, ttl: Duration) -> Instant {
+        self.ttl_window().deadline(now, ttl)
+    }
+
+    /// The four facts [`TtlWindow`]'s rules read, snapshotted from this
+    /// session's `Meta` under one lock acquisition.
+    fn ttl_window(&self) -> TtlWindow {
         let meta = self.shared.meta();
-        if meta.attached > 0 {
-            now + ttl
-        } else {
-            meta.ttl_base + ttl
+        TtlWindow {
+            attached: meta.attached,
+            closing: meta.closing,
+            state: meta.state,
+            ttl_base: meta.ttl_base,
         }
     }
 
@@ -2319,5 +2358,74 @@ mod tests {
                 .unwrap();
             assert!(collect_output(&out).len() <= budget);
         }
+    }
+
+    // `TtlWindow` is a pure function of four fields, detached from the actor
+    // precisely so it can be tested (and fuzzed, `broker_ops_harness.rs`)
+    // without spawning one — these three cover the same three branches
+    // `ttl_reap_reason`'s doc describes, directly on the type.
+
+    #[test]
+    fn ttl_window_never_reaps_while_attached() {
+        let epoch = Instant::now();
+        let ttl = Duration::from_secs(10);
+        let window = TtlWindow {
+            attached: 1,
+            closing: false,
+            state: SessionState::Exited,
+            ttl_base: epoch,
+        };
+        // Miles past the TTL on the clock, but still attached: no reason,
+        // and the deadline is pinned to `now + ttl` (architecture.md §3 —
+        // the TTL does not run at all while attached).
+        let now = epoch + ttl * 100;
+        assert_eq!(window.reap_reason(now, ttl), None);
+        assert_eq!(window.deadline(now, ttl), now + ttl);
+    }
+
+    #[test]
+    fn ttl_window_reason_depends_on_state_once_the_ttl_elapses() {
+        let epoch = Instant::now();
+        let ttl = Duration::from_secs(10);
+        for state in [SessionState::Running, SessionState::Exited] {
+            let window = TtlWindow {
+                attached: 0,
+                closing: false,
+                state,
+                ttl_base: epoch,
+            };
+            // Not yet due: unattached alone is not enough.
+            assert_eq!(
+                window.reap_reason(epoch + ttl - Duration::from_millis(1), ttl),
+                None
+            );
+            // Exactly due, split by state (session.rs's own `ttl_reap_reason`
+            // doc: `Exit` for an already-exited child, `TtlExpired` for one
+            // still running).
+            let expected = match state {
+                SessionState::Exited => CloseReason::Exit,
+                SessionState::Running => CloseReason::TtlExpired,
+            };
+            assert_eq!(window.reap_reason(epoch + ttl, ttl), Some(expected));
+        }
+    }
+
+    #[test]
+    fn ttl_window_closing_suppresses_reap_and_deadline_anchors_to_ttl_base() {
+        let epoch = Instant::now();
+        let ttl = Duration::from_secs(10);
+        let window = TtlWindow {
+            attached: 0,
+            closing: true,
+            state: SessionState::Running,
+            ttl_base: epoch,
+        };
+        let now = epoch + ttl * 100;
+        // `closing` suppresses reaping even long past the TTL...
+        assert_eq!(window.reap_reason(now, ttl), None);
+        // ...but unlike the attached case, the deadline is unaffected by
+        // `closing` — it is anchored to `ttl_base`, same as any other
+        // unattached session.
+        assert_eq!(window.deadline(now, ttl), epoch + ttl);
     }
 }
