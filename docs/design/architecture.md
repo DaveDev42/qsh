@@ -128,7 +128,7 @@ $XDG_RUNTIME_DIR/qsh/     # (없으면 state 하위 run/, 0700) per-process UDS:
 ## 9. 아키텍처 리스크 5건
 
 1. **Resume/replay 정합성** — byte offset 경계·gap 계산·lease 경합 버그는 제품의 핵심 약속을 깬다. 대응: ReplayRing property test(oracle 대조), 단절 지점 전수 시뮬레이션, sans-IO 상태 기계 fuzz ([testing.md](testing.md)).
-2. **In-listener 세션 vs listener 재시작** — seam(`SessionBackend`+UDS)이 오염되면 supervisor 전환이 재작성이 된다. 대응: broker의 transport 타입 import 금지를 유지(arch-lint 확장 후보), 제한은 README에 명시.
+2. **In-listener 세션 vs listener 재시작** — seam(`SessionBackend`+UDS)이 오염되면 supervisor 전환이 재작성이 된다. 대응: broker의 transport 타입 import 금지를 유지(arch-lint 확장 후보), 제한은 README에 명시. M8 비용 산정(2026-09-10): [reexec-estimate.md](reexec-estimate.md) — 후보 H0(고지)~H5(supervisor 분리)를 ew로 매겼고 M8 구현은 0, H4 execve 제자리 handoff·H5 supervisor 분리는 P1 결정 입력.
 3. **Headless Linux 키 저장** — platform store 부재 시 file fallback이 조용히 일어나면 보안 태세 공백. 대응: init/doctor의 명시 보고를 계약으로 유지.
 4. **(해소, ADR-0011)** 내장 MCP adapter의 rmcp API 변동 리스크는 M8 Step 6에서 그 adapter를 철회하며 함께 사라졌다.
 5. **느린 소비자 backpressure vs PTY 생존성** — cursor-pull + 유계 구독자 버퍼 + gap 재동기화가 설계 답이지만 QUIC flow control과의 상호작용은 soak test로 실증해야 한다 (testing.md의 frozen-consumer soak).

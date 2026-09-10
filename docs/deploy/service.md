@@ -175,6 +175,13 @@ after a crash, but neither retries a bad argument or a missing
 (`docs/CLI.md` §6.12/§6.13), so a unit that keeps bouncing is usually a
 config problem, not a supervisor problem. Check the log path first.
 
+Every restart, whether the supervisor bounced a crashed process or you
+asked for one, also ends every detached session on that listener. A
+session lives only as long as the `serve` or `listen`/`reverse` process
+that opened it, so a service-manager restart is not a resume point (README,
+Known limitations). Detach before restarting only if you are fine losing
+the shell.
+
 The unit's `ExecStart`/`ProgramArguments` line is the whole invocation.
 qsh itself never re-execs, backgrounds, or reparents; it stays in the
 foreground for as long as the process lives, and the service manager owns
