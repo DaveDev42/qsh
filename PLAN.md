@@ -686,6 +686,26 @@ main의 오판 하나를 Fix-A가 잡았다. G-5 근거로 적은 "reap은 살�
 
 #### Step 8 — perf 게이트
 
+**(a) 범위 판정 (2026-09-10, main 세션).** M8은 새 perf 수치를 세우지 않는다. `docs/ROADMAP.md:110`의 "perf 게이트"는 M4가 확정한 두 게이트(`docs/PRD.md:284` PTY p95 < RTT+10ms, `:285` throughput ≥ raw-quinn 80%)를 M8 HEAD에서 다시 세우고 그 자리를 문서로 확정하는 일이다. 근거 셋. M8 DoD(`docs/ROADMAP.md:112-113`)에 perf 항목이 없어 §6.1 체크리스트에도 번호가 없다. 두 수치는 M4 마감 노트(`docs/ROADMAP.md:80`, acceptance run 32986938847)가 이미 닫았고 지금도 `ci.yml` `acceptance` job이 `QSH_ACCEPTANCE_STRICT=1`로 PR마다 단언한다(`ci-ok` 필수). `docs/design/testing.md`가 남긴 "perf job은 아직"이라는 상태 서술이 요구하는 nightly 형태는 `.github/workflows/load.yml` 머리말이 같은 저장소 안에서 이미 기각했다 — trend 저장소가 없는 schedule은 소음만 더한다. 인벤토리는 `$SP/step8/`(R1 요구 수치·R2 기존 게이트·R3 M4 이력·R4 soak 상태 + opus CRITIQUE-8)이고, 후보 A(기록만)/B(재확인 + 대조)/C(PRD §13 전부) 중 B를 택했다. C는 `docs/PRD.md:289`의 30분 단절 축 하나 때문에 벽시계가 하나 더 붙어 마감이 종속된다.
+
+M8이 실제로 재야 할 것은 Step 2·3이 데이터 경로에 넣은 방어선(주소 검증·accept 상한·세션/터널 쿼터)의 perf 비용이다. M4 정본은 그 이전 트리의 수치다. 여기에 둘을 덧붙인다. acceptance job은 dev 프로필로 돈다(`ci.yml` acceptance 스텝에 `--release`가 없고 루트 `Cargo.toml`에 프로필 오버라이드가 없다) — T2·soak이 릴리스 바이너리를 요구하는 것과 달라 릴리스 수치를 한 번 나란히 남긴다. `docs/ROADMAP.md:78`의 M4 DoD 문면은 아직 "1GB 포화 터널"인데 실제 게이트는 15초 시간유계 + `MIN_SAMPLES=200`(`crates/qsh-testkit/tests/tunnel_echo_under_load.rs`)이라 구속 문서를 구현에 맞춘다. 방어선은 config에 off 스위치가 없으므로("0/unset ⇒ default, never unlimited", `config.rs`·`admission.rs`·`quota.rs`) 대조는 설정이 아니라 트리 비교(Step 2 착륙 직전 커밋 worktree)로 하고, 그보다 먼저 두 게이트의 하네스가 그 방어선을 실제로 지나는지 코드로 판정한다.
+
+**(b) 산출물.** 새 테스트·새 워크플로 0. ① 문서·주석 정정 — `docs/PRD.md:305`/`:306` 스테일 인용(실제 `:286`/`:287`) 10줄과 `ci.yml:179-182` 스테일 인용(`ci-ok` needs 실제 줄) 2줄, `docs/design/testing.md`의 perf job 상태 문장, `docs/ROADMAP.md:78` 마감 노트 추기와 `:110` 범위 문구. ② 실측 기록 — dev/release/방어선 세 축의 throughput 비율과 echo p95를 (d)에 남긴다. ③ M8 HEAD acceptance run 하나를 이 Step의 정본으로 지정한다.
+
+**(c) 이월.** nightly perf job은 M10으로 넘긴다. 조건은 trend 저장소이고, 그것이 없는 채로 schedule을 붙이면 `load.yml`이 적은 소음 문제를 되풀이한다. `docs/PRD.md:289`(30분 단절 후 TTL 내 복구)와 `:290`(느린 파일·터널 stream이 PTY를 block하지 않음)의 직접 증거는 이 Step 범위 밖이며 M10 릴리스 게이트 입력으로 남긴다 — `:290`은 file transfer 표면이 v1에 없어(`docs/ROADMAP.md` M4 명시적 out) 대역 스트림 대체 하네스가 필요하고, `:289`는 M3의 60초 blackout 게이트(`reverse_blackout.rs`)의 30배 길이라 acceptance job에 못 들어간다.
+
+**(d) 완료 판정.** 정본 acceptance run에서 throughput 비율 ≥ 0.80과 echo p95 < 측정 RTT + 10ms가 둘 다 서고 run id가 이 절에 적혀 있다. 릴리스 대조와 방어선 대조 수치가 이 절에 남아 있고 어느 쪽도 게이트를 넘지 않는다. 문서 정정이 같은 커밋에 들어가 있다. Step 8은 DoD 번호를 갖지 않으므로 §6.1에 줄을 더하지 않는다 — 판정은 이 (d)가 전부다.
+
+**(a)-추기 — 실측과 판정 (2026-09-10, main 세션).** 구현 Workflow는 S1 sonnet(스테일 인용 12줄 + `testing.md` perf job 문장) → S2 sonnet/high(실측) → 게이트 → opus 검증 넷이다. S2는 Dave-MBP16(M1 Max, rustc 1.97.1, 커밋 dc01e04 트리)에서 세 구성을 각 3회 돌렸다(`$SP/step8/MEASURE-8.md`, 원 로그 `logs/`). 먼저 경로 판정. 두 하네스는 `LoopbackHarness::start_inner`(`crates/qsh-testkit/src/loopback.rs`)로 모이고, 그 안에서 프로덕션 `DEFAULT_*` 상수의 admission Gate와 `QuotaLimits::default()`를 쥔 `Server::run`(실제 accept 루프, `crates/qsh-core/src/server/mod.rs`)이 뜬다 — 방어선을 지난다. 그래서 대조는 Step 2 착륙 직전 커밋 `b0da849`(`admission.rs` 부재)를 worktree로 꺼내 release로 돌렸다.
+
+| 구성 | throughput 비율 (3회) | raw / tunnel MiB/s | echo p95 여유 ms (3회) |
+|---|---|---|---|
+| dev (acceptance 구성) | 0.934 / 0.826 / 0.850 | 54~55 / 45~51 | 6.81 / 5.02 / 5.60 |
+| release, HEAD | 0.998 / 0.950 / 0.947 | 108~111 / 102~108 | 2.18 / 2.14 / 2.21 |
+| release, `b0da849` (방어선 이전) | 0.993 / 0.964 / 0.953 | 94~107 / 90~106 | 2.23 / 2.98 / 2.42 |
+
+판정. 아홉 회차 전부 비율 ≥ 0.80, p95 여유 < 10ms. release는 dev보다 처리량이 두 배, p95 여유는 절반 이하로 더 넉넉하다 — dev 게이트가 보수적인 쪽이므로 릴리스 승격은 하지 않는다(Q2, `ci-ok` 필수 경로 비용). 방어선 전후는 회차 간 변동 폭 안에서 겹친다. 방어선이 얹은 것은 연결당 admission `decide` 한 번과 세션당 quota reserve 한 번이고 스플라이스 핫패스 밖이며, 이 하네스가 여는 연결·세션 수는 상한 근처에도 못 간다. dev 2회차 0.826이 아홉 회차 중 기준에 가장 가깝다 — 공유 러너에서 0.80 아래로 떨어지는 flake가 나올 수 있는 값이라 §6.5 감시 항목에 둔다. 유보 둘. 하네스는 RTT 자체를 찍지 않고 `elapsed − rtt` 여유만 남기므로 표의 p95는 여유값이다(DoD 4 판정식과 같은 수치). 연결 수립은 프로덕션 accept 루프를 지나지만 세션 백엔드는 `PipeFactory`, 포워드는 `LocalForwardHandle`이라 여기 echo는 실 PTY가 아닌 pipe echo다 — `testing.md`가 T1/T2를 가르는 것과 같은 유보이고, 실 PTY 축은 T2 시나리오 3과 soak echo 창 규칙이 release `qsh serve`에서 잰다. 정본 acceptance run은 이 커밋이 착륙한 뒤의 run id를 아래에 추기한다.
+
 #### Step 9 — 실기기 mobility 캠페인 ≥60회 (DoD 3, 사람 몫)
 
 M2가 20회를 조기 측정해 SC4/SC5를 실기기로 확인했고 SC3 판정을 N≥60으로 미뤄뒀다. M2 기록의 이월 1건 — 예산 내 복구 1/10의 지배 요인이 Tailscale underlay 재경로(~4–5 s)였고 qsh 자체 resume은 233–1076 ms — 를 이 캠페인이 분해 보고로 갈라야 한다.
@@ -714,6 +734,7 @@ M2가 20회를 조기 측정해 SC4/SC5를 실기기로 확인했고 SC3 판정�
 ### 6.5 리스크
 
 - **SC7 리드타임은 이미 만료**다(6.0). wire freeze 일정이 조직 액션에 묶여 있다.
+- **perf 게이트 flake 여지 (2026-09-10, Step 8).** 로컬 dev 프로필 실측에서 throughput 비율이 0.826까지 내려간 회차가 있었다(기준 0.80). 공유 러너 acceptance job이 0.80 아래로 떨어지면 제품 회귀보다 러너 변동을 먼저 의심하고 재실행 한 번으로 가른다. release 프로필은 0.947 이상이라 여유가 있다.
 - **DoD 1·2·3은 전부 벽시계**다. 압축되지 않으므로 순서가 곧 일정이다 — Step 1을 가장 먼저 세운 이유.
 - **graceful re-exec(fd 보존 handoff)** 는 ROADMAP §4 리스크 4가 M8 stretch로 비용 산정만 요구한다. 구현은 범위 밖.
 - **notarization은 M10이 아니라 M8 중 시작**(ROADMAP M10 크기 주석). 리드타임 항목이라 6.0과 같은 성질이다.

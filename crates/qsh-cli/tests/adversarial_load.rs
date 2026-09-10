@@ -10,7 +10,7 @@
 //!   (`tui_expect.rs`, `reverse_blackout.rs`,
 //!   `qsh-testkit/tests/tunnel_echo_under_load.rs`): those flip on the
 //!   acceptance job, which sits in `ci-ok`'s `needs` list
-//!   (`.github/workflows/ci.yml:179-182`) and therefore runs on every PR;
+//!   (`.github/workflows/ci.yml:192`) and therefore runs on every PR;
 //!   reusing them would drag T2's absolute-number scenarios into the PR
 //!   gate, which J1 rejected in favor of a separate `load.yml` (push +
 //!   `workflow_dispatch` only).
@@ -33,8 +33,8 @@ mod common;
 use common::{Sandbox, ServeGuard, converged, open_fd_count, poll_stable, rss_kib};
 use std::path::PathBuf;
 
-// The idle-listener bound (`docs/PRD.md:305`, 30 MB) and the per-session
-// load-time allowance (`docs/PRD.md:306`/J2, +8 MB per alive session) that
+// The idle-listener bound (`docs/PRD.md:286`, 30 MB) and the per-session
+// load-time allowance (`docs/PRD.md:287`/J2, +8 MB per alive session) that
 // every scenario's RSS assertion uses land with the scenarios themselves
 // in S2/S3 — this stage only has a floor to check, not a ceiling.
 
@@ -387,11 +387,11 @@ mod linux_only {
     // Stage 4c-S2 (`BRIEF-4c.md` §4.1-§4.3, §6 S2): scenarios 1, 2, 3.
     // ---------------------------------------------------------------------
 
-    /// `docs/PRD.md:305` idle-listener bound — also J2's post-flood idle
+    /// `docs/PRD.md:286` idle-listener bound — also J2's post-flood idle
     /// ceiling every S2/S3 scenario's RSS assertion converges back to.
     const RSS_IDLE_BOUND_KIB: u64 = 30 * 1024;
 
-    /// `docs/PRD.md:306`/J2's per-alive-session load-time allowance.
+    /// `docs/PRD.md:287`/J2's per-alive-session load-time allowance.
     const RSS_PER_SESSION_LOAD_KIB: u64 = 8 * 1024;
 
     fn open_req() -> wire::SessionOpen {

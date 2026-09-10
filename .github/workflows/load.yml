@@ -15,7 +15,7 @@ name: load
 # CI discipline is explicit that absolute-number trends belong in a
 # non-blocking job, not the PR-required path — a shared runner's flake on an
 # absolute threshold trains reviewers to ignore red checks. `ci-ok`'s
-# `needs` list (`ci.yml:179-182`) does not include this job.
+# `needs` list (`ci.yml:192`) does not include this job.
 #
 # Unlike `fuzz-smoke.yml`, this job has no `continue-on-error`: a bound
 # violation here is a single yes/no observation (did the listener leak

@@ -62,9 +62,9 @@ main이 Dave-Windows-WSL 단독 점유에서 돌린 24h 실측(BRIEF-5.md §1.1 
 | TTL reap | `resume_ttl_secs + REAPER_TICK`(30s)이 지난 뒤에도 `abandoned_live != 0`이면 위반. 그 전에는 "아직 판정 대상 아님"으로 기록만 한다 — `DRAIN_WAIT`(≈`REAPER_TICK`+`CLOSED_RETENTION`, `qsh_core::broker`의 두 pub const 합)와는 다른, TTL 정책 자체의 만료 시각 기준이다 | soak.rs (`ttl_reap_deadline`, assert) + summarize.py (`--resume-ttl-secs`로 같은 식을 계산; 안 주면 예전처럼 무조건 `abandoned_live == 0` 체크로 폴백) |
 | 세션 정지(SESSION_STALLED) | 한 세션의 write→echo 한 라운드가 `SESSION_ROUND_DEADLINE`(5s)을 넘기면 그 세션을 끊고 카운트한다. 카운트가 1 이상이면 위반 | soak.rs (assert)만. CSV에 세션별 정지 이력이 없어 summarize.py는 판단하지 않는다 |
 
-`docs/PRD.md:305`("Idle listener 메모리 30 MB 이하 **목표**")와
+`docs/PRD.md:286`("Idle listener 메모리 30 MB 이하 **목표**")와
 `docs/ROADMAP.md:112`("Idle listener RSS ≤ 30 MB", DoD 2 본문)가 이 30 MiB의
-상류다. 세션당 8 MiB는 `docs/PRD.md:306`의 세션당 replay buffer 설정값에서
+상류다. 세션당 8 MiB는 `docs/PRD.md:287`의 세션당 replay buffer 설정값에서
 빌린 것이지 실측된 RSS 증분이 아니다 — `m8-adversarial-load.md` §3와 같은
 출처, 같은 유보.
 
