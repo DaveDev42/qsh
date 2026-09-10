@@ -794,7 +794,7 @@ qsh serve --bind <ip:port>
   `Retry` 발급 자체는 audit하지 않으며 창(10초)당 category별 1행 + 요약 1행으로 집계된다 — flood가
   audit flood가 되지 않는다.
 - **세션·exec·터널·연결 quota(M8 Step 3/3b, `docs/adr/0010-resource-quotas.md`).** `[serve]`의
-  10개 키 모두 `0`은 "무제한"이 아니라 "기본값"이며 방어선을 끄는 설정은 없다. 알 수 없는
+  9개 키 모두 `0`은 "무제한"이 아니라 "기본값"이며 방어선을 끄는 설정은 없다. 알 수 없는
   `[serve]` 키는 오류 없이 무시된다. 상한 키 하나를 잘못 쓰면 그 상한은 오류 없이 기본값으로
   남는다. `max_sessions`(기본
   256)는 전체 principal을 합친 live 세션 수의 전역 상한, `max_sessions_per_principal`(기본 32)는
@@ -851,7 +851,7 @@ qsh serve --bind <ip:port>
   `quota_tunnels_principal`로 남고 `request_id`는 대응하는 control 요청이 없으므로 `"-"`,
   `peer_addr`는 거부된 그 TCP accept의 peer 주소다.
 - **Audit sink가 degraded인 동안은 fail-closed다(M8 Step 4a).** 치명적 쓰기 실패(디스크 풀 등)로
-  audit sink가 degraded로 latch되면 그 동안의 `session.open`/`session.attach`/`session.resume`과
+  audit sink가 degraded로 latch되면 그 동안의 `session.open`/`session.attach`(resume token 재부착 포함)과
   세션 쓰기는 감사 없는 allow를 만들지 않기 위해 `PERMISSION_DENIED`로 거부된다(12c e2e로도 확인,
   `crates/qsh-cli/tests/adversarial_load.rs`의
   `session_open_fails_closed_when_a_freshly_restarted_writer_cannot_create_the_audit_log`,

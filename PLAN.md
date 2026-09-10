@@ -712,6 +712,12 @@ M2가 20회를 조기 측정해 SC4/SC5를 실기기로 확인했고 SC3 판정�
 
 #### Step 10 — 마감
 
+**(a) 선행 감사 (2026-09-10, main 세션).** 마감 공통 절차(`docs/ROADMAP.md` §2) 두 검사를 DoD 1~4가 열린 채로 먼저 돌렸다. 인벤토리 5(CLI.md·PRD.md·ADR·README·M8 증거) → opus 대조 → 반박 검증 2(지적 26건 전부 반영) → fixer 순이고 결과는 `$SP/step10/TAG-AUDIT.md`·`I4-readme.md`다. 절차 1(구속 문서 태그 대조): 대조 문장 62건 — 검증 43, 후속 마일스톤 명시 유예 11, 열린 DoD 종속 7, 대조 대상 아님 2(ADR-0015·0016은 예약됨이라 결정 절이 비어 있다), 충돌 1. 충돌 1은 `docs/CLI.md` §6.12 audit fail-closed 문장 — op 어휘에 없는 `session.resume`을 열거했다(정본 `crates/qsh-core/src/acl/registry.rs`; resume은 token을 실은 `session.attach`). 문면을 고쳤다. 열린 DoD 종속 7건은 PRD:222(DoD 1)·:286·:287(DoD 2)·:307(DoD 3)·:311(DoD 4), ADR-0009:68(DoD 3)·:99 후반절의 24h soak 판정(DoD 2)이며 해당 DoD가 닫히는 순간 검증으로 옮긴다. 절차 2(README 동기화): 대조 20항목 중 불일치 5 — 상태 문단과 Roadmap 표의 M8 누락, quota Known limitations가 이미 착륙한 방어선을 "없다"고 서술, audit fail-closed 열거가 `session.attach`·세션 쓰기를 빼 실제 거부 범위보다 좁음, Development 절이 게이트가 아닌 `cargo test`를 대안으로 제시 — 전부 고쳤다. 부수 정정 셋: `docs/CLI.md` §6.12 quota 키 수 10→9(`crates/qsh-core/tests/quota_docs.rs` 핀과 일치), `docs/ROADMAP.md` M9 명시적 out의 pin 방향 축 예약처(ADR-0017이 아니라 번호 미배정 별도 ADR — ADR-0017 결정 5), ROADMAP M10 수용 기준에 PRD:289/:290 이관 행(PLAN.md가 M9판으로 교체돼도 귀속이 남도록). `docs/campaigns/m8-adversarial-load.md` §5 환경 표도 채웠다(RUN 9 당시 미기록 값은 재조회 표시).
+
+**(b) 마감 커밋에 남긴 것.** DoD 1·2·3·4 체크박스와 위 7건의 검증 이동. `docs/CLI.md:3` 상태 헤더(v0.10 = M3 Step 8에서 멈춰 M5~M8 개정 이력이 없다 — 한 줄 개정). ROADMAP M8 마감 노트(초안 `TAG-AUDIT.md` §7: 절차 1·2 수치, ADR-0009:99의 RSS/fd 축은 DoD 5로 닫히고 24h 판정은 DoD 2 소관이라는 분리, ADR-0014는 `제안됨` 상태 그대로 M9 S10 귀속). ROADMAP M8 ✅와 PLAN.md 전면 교체(M9 계획). notarization 착수는 Apple 계정이 필요한 사람 몫이라 M10 리드타임 항목으로 표기만 한다.
+
+**(c) 완료 판정.** §6.1 DoD 1~5 전부 `[x]`, 절차 1 충돌 0, 절차 2 불일치 0, ROADMAP M8 마감 노트가 run id·캠페인 문서를 인용, 마감 커밋 CI green.
+
 ### 6.3 실행 환경
 
 72시간 fuzz 누적과 24h soak은 heavy compute다. 로컬 개발 머신이 아니라 전용 호스트에서 돌린다(전역 지침의 머신 라우팅). 캠페인 기록은 M2·M6·M7 선례대로 `docs/campaigns/`에 사전 정의 후 실행한다.
