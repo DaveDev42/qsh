@@ -8927,20 +8927,51 @@ mod tests {
         let server = rig.server.clone();
         let host_side = tokio::spawn(async move { server.serve_connection(host_conn).await });
 
+        // The eighth slot is observable only *while* `serve_pairing_connection`
+        // is still in flight: the server releases it the moment its own reply's
+        // `stopped()` drain resolves in `pairing::respond`, independently of
+        // whether the client's `accept()` (below) has finished reading that
+        // reply on its own task/thread. A single read taken after `accept()`
+        // returns races the server's teardown and reads seven under parallel
+        // load (the flake this replaces). Watch the count concurrently with the
+        // handshake instead, so the check lands inside the window where the slot
+        // is genuinely held (bounded by the invite-store file I/O plus a QUIC
+        // round trip), and fold the ninth-reservation-must-fail check into that
+        // same instant rather than a second, separately racy read.
+        let quotas_for_peak = rig.quotas.clone();
+        let peak_watcher = tokio::spawn(async move {
+            loop {
+                if quotas_for_peak.pairing_connections_in_use()
+                    == crate::quota::MAX_CONCURRENT_PAIRING_CONNECTIONS
+                {
+                    break quotas_for_peak.reserve_pairing_connection();
+                }
+                tokio::task::yield_now().await;
+            }
+        });
+
         let accepted = crate::pairing::accept(&client, "adv-a1-b-client", secret.as_slice())
             .await
             .expect("the eighth pairing connection must clear the cap and pair successfully");
         assert_eq!(accepted.peer_device_name, rig.server.device_name);
-        assert_eq!(
-            rig.quotas.pairing_connections_in_use(),
-            crate::quota::MAX_CONCURRENT_PAIRING_CONNECTIONS,
-            "the eighth, just-served pairing connection must hold the last slot"
+
+        // `accept()` returning only means the client saw the reply, not that the
+        // watcher has caught the peak yet. Bound the wait so a real regression
+        // (the slot never reaching eight at all) fails fast instead of hanging.
+        let ninth_reservation = tokio::time::timeout(Duration::from_secs(5), peak_watcher)
+            .await
+            .expect(
+                "the eighth, served pairing connection must hold the last slot \
+                 at some point during its handshake",
+            )
+            .unwrap();
+        assert!(
+            matches!(
+                ninth_reservation,
+                Err(crate::quota::QuotaKind::PairingConnections)
+            ),
+            "a ninth reservation must fail while all eight are held"
         );
-        // A ninth reservation must fail while all eight are held.
-        assert!(matches!(
-            rig.quotas.reserve_pairing_connection(),
-            Err(crate::quota::QuotaKind::PairingConnections)
-        ));
 
         drop(client);
         host_side.await.unwrap();
