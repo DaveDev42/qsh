@@ -40,6 +40,16 @@ main이 Dave-Windows-WSL 단독 점유에서 돌린 24h 실측(BRIEF-5.md §1.1 
 6. **저장소 상태.** `run.sh`가 `env.txt`에 `git rev-parse HEAD`와 working
    tree clean/dirty 여부를 자동 기록한다 — dirty면 회차 기록에 그 사실이
    그대로 남는다(가리지 않는다).
+7. **리스너 rate limit 상향은 하네스가 자동으로 한다.** `soak.rs`가 쓰는
+   listener `config.toml`은 `handshake_rate_per_source`/
+   `validated_rate_per_source`를 `(2×N).max(64)`로 올린다(N=100이면
+   200/s). 하네스가 N세션 전부를 같은 소스 IP(127.0.0.1)에서 dial하다
+   보니, 제품 기본값(10/s, burst 20/2s)을 그대로 두면 ramp 구간의 burst가
+   per-source 핸드셰이크 rate limiter에 걸려 예산 초과분 Initial이
+   조용히 `Ignore`되고 클라이언트에는 "no response within 10s"만 보인다.
+   제품 기본값 자체는 손대지 않는다 — 단일 소스가 제한당하는 건
+   프로덕션에서 의도된 동작이고(PLAN.md Step 5 Q1), 이 상향은 신뢰된
+   테스트 드라이버인 하네스 자신의 리스너 설정에만 적용된다.
 
 ## 3. 사전 정의된 합격/불합격 기준 (실행 전에 고정)
 
@@ -177,7 +187,11 @@ Q9) 이 조합은 SLOW 경고만 반복해서 찍을 뿐 24h 테스트를 중간
 그 자체는 위반이 아니다(3회 시도를 다 쓰고 실패한 경우만 그 세션의
 open/cycle 자체가 실패로 집계된다). `run.log`의 `dead_sessions=N`도
 "비고"에 옮긴다. 이쪽은 정보성이 아니다. 1 이상이면 SESSION_STALLED
-위반이 verdict FAIL의 근거 중 하나라는 뜻이다.
+위반이 verdict FAIL의 근거 중 하나라는 뜻이다. `run.log`의
+`dial_exhausted=N`도 같이 옮긴다 — 1 이상이면 사이클 교체 dial이 재시도
+3회를 다 쓰고 스킵됐다는 뜻으로(DIAL_EXHAUSTED, verdict FAIL 근거), 다만
+런 자체는 죽지 않고 drain까지 이어져 CSV가 끝까지 닫혔다는 뜻이기도
+하다.
 
 GHA 첫 실행(run 34203445617, b9e67b1)에서는 steady 창 2개(129.5 ms,
 114.6 ms, 59개 중)가 사이클의 세션 교체(close + dial/open/attach)
