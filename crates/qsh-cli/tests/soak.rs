@@ -303,23 +303,50 @@ fn listener_connection_caps(sessions: usize) -> (usize, usize) {
     (max_connections_per_principal, max_connections)
 }
 
+/// `handshake_rate_per_source`/`validated_rate_per_source`
+/// (`crates/qsh-core/src/config.rs`'s `ServeConfig`) for an `N`-session
+/// soak run dialed from a single source IP (127.0.0.1). The harness ramps
+/// `N` connections and cycle-replaces them all from one address, so at the
+/// product default (10/s, `burst_limit = rate × EPOCH.as_secs()` = 20 per
+/// 2s epoch) the ramp burst — an exp3 loopback `tcpdump` measured ~25 new
+/// dials inside one 2s window for N=100 — trips the per-source unvalidated
+/// rate limiter, whose over-budget Initials are silently `Decision::Ignore`d
+/// (no packet sent). The client then sees `ConnectionFailed` "no response
+/// within 10s" and, after [`DIAL_RETRY_ATTEMPTS`] exhausted retries, the
+/// scenario dies (the 2026-09-11 24h-abort triage). The product default is
+/// deliberately NOT changed (`PLAN.md` Step 5 Q1 arbitration: a single
+/// high-rate source is *meant* to be limited in production) — this raises
+/// the cap only in the harness's own listener config, where the single
+/// dialing source is a trusted test driver, not a flood. `(2*N).max(64)`
+/// mirrors [`listener_connection_caps`] and clears the observed ramp burst
+/// with headroom; both axes get the same value so the validated axis never
+/// becomes the tighter gate.
+fn listener_source_rates(sessions: usize) -> (u32, u32) {
+    let rate = (2 * sessions).max(64) as u32;
+    (rate, rate)
+}
+
 /// Render the `[serve]` section of the soak listener's `config.toml`
-/// (pulled out of [`boot`] so [`soak_listener_config_raises_connection_
-/// caps_for_100_sessions`] can assert its content without booting a real
+/// (pulled out of [`boot`] so [`soak_listener_config_raises_caps_and_
+/// rates_for_100_sessions`] can assert its content without booting a real
 /// listener).
 fn render_serve_config_toml(params: &Params) -> String {
     let (max_connections_per_principal, max_connections) =
         listener_connection_caps(params.sessions);
+    let (handshake_rate_per_source, validated_rate_per_source) =
+        listener_source_rates(params.sessions);
     format!(
         "[serve]\nmax_sessions_per_principal = 128\nresume_ttl_secs = {}\n\
          max_connections_per_principal = {max_connections_per_principal}\n\
-         max_connections = {max_connections}\n",
+         max_connections = {max_connections}\n\
+         handshake_rate_per_source = {handshake_rate_per_source}\n\
+         validated_rate_per_source = {validated_rate_per_source}\n",
         params.resume_ttl_secs
     )
 }
 
 #[test]
-fn soak_listener_config_raises_connection_caps_for_100_sessions() {
+fn soak_listener_config_raises_caps_and_rates_for_100_sessions() {
     let params = Params {
         duration: Duration::from_secs(120),
         sessions: 100,
@@ -339,6 +366,15 @@ fn soak_listener_config_raises_connection_caps_for_100_sessions() {
         config.contains("max_connections = 512"),
         "config must keep max_connections at the product default 512 (4*N=400 < 512) for N=100: \
          {config}"
+    );
+    assert!(
+        config.contains("handshake_rate_per_source = 200"),
+        "config must raise handshake_rate_per_source to (2*N).max(64) (200) for N=100 so the \
+         single-source ramp burst does not trip the product per-source rate limiter: {config}"
+    );
+    assert!(
+        config.contains("validated_rate_per_source = 200"),
+        "config must raise validated_rate_per_source to (2*N).max(64) (200) for N=100: {config}"
     );
 }
 
@@ -885,6 +921,12 @@ fn soak_session_load() {
     // (main's F1 call) — informational in the verdict, never a violation
     // by itself.
     let dial_retries = AtomicU64::new(0);
+    // Cycle-replacement dials that exhausted all DIAL_RETRY_ATTEMPTS
+    // attempts — recorded as a DIAL_EXHAUSTED violation (verdict FAIL)
+    // rather than panicking, so one exhausted replacement does not unwind
+    // the scenario before drain and leave the CSV with no judgeable
+    // verdict (the 2026-09-11 24h abort).
+    let dial_exhausted = AtomicU64::new(0);
     // Sessions that hit SESSION_ROUND_DEADLINE mid-round (B12) — every one
     // is a SESSION_STALLED violation, tallied across every worker's
     // lifetime (ramp opens and cycle replacements alike).
@@ -1023,14 +1065,31 @@ fn soak_session_load() {
             }
             let mut replaced = Vec::with_capacity(victims.len());
             for &idx in &victims {
-                let old = std::mem::replace(
-                    &mut workers[idx],
-                    spawn_session_retrying(&ops, StopMode::Cycle, &dial_retries, &dead_sessions)
-                        .unwrap_or_else(|e| {
-                            panic!("cycle: replacement session for slot {idx}: {e:?}")
-                        }),
-                );
-                replaced.push(old);
+                match spawn_session_retrying(&ops, StopMode::Cycle, &dial_retries, &dead_sessions) {
+                    Ok(new_worker) => {
+                        let old = std::mem::replace(&mut workers[idx], new_worker);
+                        replaced.push(old);
+                    }
+                    Err(e) => {
+                        // The victim at `idx` was already `signal_stop`'d
+                        // above; on an exhausted replacement dial we leave
+                        // that stopped worker in place (it winds down and is
+                        // joined at drain like any other) rather than
+                        // panicking — a single exhausted replacement must not
+                        // unwind the whole scenario before the drain phase,
+                        // or the CSV loses its drain rows and the run yields
+                        // no judgeable verdict at all (the 2026-09-11 24h
+                        // abort). It is still a verdict FAIL via
+                        // DIAL_EXHAUSTED below, just a survivable one.
+                        dial_exhausted.fetch_add(1, Ordering::Relaxed);
+                        eprintln!(
+                            "soak: cycle replacement for slot {idx} exhausted all \
+                             {DIAL_RETRY_ATTEMPTS} attempts; leaving the slot's stopped session \
+                             in place and continuing to drain (DIAL_EXHAUSTED, a verdict FAIL): \
+                             {e:?}"
+                        );
+                    }
+                }
             }
             for old in replaced {
                 old.join();
@@ -1258,6 +1317,14 @@ fn soak_session_load() {
              {SESSION_ROUND_DEADLINE:?} per-round echo deadline"
         ));
     }
+    let dial_exhausted_total = dial_exhausted.load(Ordering::Relaxed);
+    if dial_exhausted_total > 0 {
+        violations.push(format!(
+            "DIAL_EXHAUSTED: {dial_exhausted_total} cycle replacement dial(s) exhausted all \
+             {DIAL_RETRY_ATTEMPTS} attempts and were skipped (the run continued to drain so this \
+             CSV still closes — a survivable FAIL, not a scenario-ending panic)"
+        ));
+    }
     // §4.4's per-session-buffer and RSS-trend axes are record-only in short
     // mode (too few samples for a regression line) — `scripts/soak/
     // summarize.py` (Step 5c) is what asserts them from the CSV in 24h
@@ -1291,7 +1358,8 @@ fn soak_session_load() {
          echo_baseline_p95={baseline_echo_p95_ms:?}ms echo_p95_bound={echo_p95_bound_ms:.3}ms \
          dial_retries={dial_retries_total} (informational — a dial retry is never a violation by \
          itself, only exhausting all {DIAL_RETRY_ATTEMPTS} attempts is) \
-         dead_sessions={dead_sessions_total} cycle_deadline_skips={cycle_deadline_skips} \
+         dead_sessions={dead_sessions_total} dial_exhausted={dial_exhausted_total} \
+         cycle_deadline_skips={cycle_deadline_skips} \
          sample_deadline_skips={sample_deadline_skips} (informational — an overrun clamp, not a \
          violation)"
     );
