@@ -96,14 +96,15 @@ QSH_LOAD_STRICT=1 QSH_LOAD_BIN=$(pwd)/target/release/qsh \
 
 | 항목 | 값 |
 |---|---|
-| 날짜 (UTC) | |
-| 조작자 | |
-| 호스트 / OS / 커널 | |
-| `ulimit -n` | |
-| `nproc` | |
-| `net.core.rmem_max` | |
-| qsh 커밋 SHA | |
-| 바이너리 경로 | |
+| 날짜 (UTC) | 2026-09-08 (DoD 5 마감 회차 RUN 9, PLAN.md M8 Step 4 기록) |
+| 조작자 | main 세션 자동 실행 |
+| 호스트 / OS / 커널 | Dave-Windows-WSL (WSL2, Ryzen 9 7950X `.wslconfig` cap 8 vCPU) / Ubuntu 24.04.4 LTS / 6.18.33.2-microsoft-standard-WSL2 (2026-09-10 재조회) |
+| `ulimit -n` | 1024 (2026-09-10 재조회 — RUN 9 당시 값은 미기록) |
+| `nproc` | 8 (2026-09-10 재조회) |
+| `net.core.rmem_max` | 4194304 (2026-09-10 재조회) |
+| qsh 커밋 SHA | `2f52958` |
+| 바이너리 경로 | WSL 작업 사본 `~/Projects/github.com/qsh/target/release/qsh` (`QSH_LOAD_STRICT=1 QSH_LOAD_BIN=$(pwd)/target/release/qsh cargo nextest run -p qsh-cli --test adversarial_load --profile load`, §4) |
+| CI 대조 실행 | `.github/workflows/load.yml` run 34148240215 (ubuntu-24.04 4 vCPU, `ulimit -n` 65536, 10-of-10) |
 
 ## 6. 회차 기록
 

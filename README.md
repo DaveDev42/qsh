@@ -18,9 +18,12 @@ One binary (`qsh`) is both ends: it serves, and it connects.
 Pre-alpha. **Not for production use.**
 
 M0 through M6 are done. M7 (trust UX, host profiles, `doctor`) has landed
-the features below; closing the milestone out still needs the stopwatch
-campaign in `docs/campaigns/m7-stopwatch.md` (a dry run so far, not the
-three timed rounds its DoD requires). What works end to end today:
+its features; closing it out still needs the stopwatch campaign in
+`docs/campaigns/m7-stopwatch.md` (a dry run so far, not the three timed
+rounds its DoD requires). M8 (hardening) is underway: the admission and
+quota defenses, the adversarial load gate, the wire-format freeze draft and
+the threat model have landed, while the fuzz, soak and real-device mobility
+campaigns are still running or pending. What works end to end today:
 
 - `qsh exec host -- cmd`, in human mode or as a single `qsh.cli/v1` JSON
   envelope with the remote exit code, stdout and stderr.
@@ -497,7 +500,7 @@ already taken on crates.io. The workspace stays `publish = false` until M10.
 | M5 | ACL and audit | Done |
 | M6 | MCP adapter | Done (retired, ADR-0011) |
 | M7 | Trust UX, host profiles, `doctor` | In progress |
-| M8 | Hardening (fuzz, soak, real-device mobility campaign) | Planned |
+| M8 | Hardening (fuzz, soak, real-device mobility campaign) | In progress |
 | M9 | Human-facing surface (naming, pairing, service install) | Planned |
 | M10 | Release (installers, Homebrew, notarization) | Planned |
 
@@ -541,8 +544,9 @@ Some of these are MVP scope decisions, some are unfinished work.
   `qsh serve`/`qsh listen`/`qsh reverse` starts, and qsh never creates or
   edits the file for you. See [Security posture](#security-posture).
 - The audit log is fail-closed: `qsh serve`/`qsh reverse` deny an
-  otherwise-allowed `session.open`, `exec.run`, or `host.reverse`
-  registration rather than let it through with no durable audit record —
+  otherwise-allowed `session.open`, `session.attach`, session write,
+  `exec.run`, or `host.reverse` registration rather than let it through
+  with no durable audit record —
   a full disk, a permissions problem on the audit directory, or a writer
   backlogged past its bounded queue all deny in the same way a policy
   refusal does. There is no override; recording an authorization decision
@@ -555,12 +559,14 @@ Some of these are MVP scope decisions, some are unfinished work.
   fields are structural by design: argv, PTY bytes, and key material never
   appear in it. `audit.log_argv` is named in the design docs as a
   sanctioned future exception; M5 does not implement it.
-- There is no per-principal or per-forward quota. A pinned peer with
-  `session.*`/`forward.*` can open as many sessions or remote forwards as
-  it likes, and nothing here caps concurrent sessions, connections, or
-  forwards per principal. M8's adversarial load gate adds that
-  enforcement (`[serve].max_sessions` and a per-principal session cap);
-  the ACL engine itself never will.
+- Quotas are fixed defaults for now. Concurrent sessions, `exec.run`
+  runs and connections are capped per listener and per principal, tunnel
+  streams per principal and per forward, remote forwards per principal,
+  and the admission gate caps concurrent handshakes and the per-source
+  rate (`[serve].max_sessions` and friends, `docs/CLI.md` §6.12). A key
+  set to `0` or left unset means the default, not unlimited, and there is
+  no switch that turns a cap off. The ACL engine itself never enforces
+  quotas.
 - `qsh trust remove` only affects future handshakes. A peer you removed
   keeps the connection's entire negotiated authority — not just the
   sessions it already had open, but the ability to open brand-new ones,
@@ -623,7 +629,7 @@ limitations](#known-limitations).
 ## Development
 
 ```bash
-cargo nextest run --workspace     # or: cargo test --workspace
+cargo nextest run --workspace     # the gate (plain cargo test is not)
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 cargo deny check
