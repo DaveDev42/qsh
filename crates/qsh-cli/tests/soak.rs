@@ -198,10 +198,10 @@ impl Params {
 }
 
 /// The idle-listener bound every phase's `listener_rss_kib` sample is
-/// judged against (`docs/PRD.md:305`, `BRIEF-5.md` §4.4).
+/// judged against (`docs/PRD.md:286`, `BRIEF-5.md` §4.4).
 const IDLE_RSS_BOUND_KIB: u64 = 30 * 1024;
 
-/// Per-session buffer allowance (`docs/PRD.md:306`, `BRIEF-5.md` §4.4).
+/// Per-session buffer allowance (`docs/PRD.md:287`, `BRIEF-5.md` §4.4).
 const PER_SESSION_BUFFER_KIB: u64 = 8 * 1024;
 
 /// fd growth allowance across a phase (`BRIEF-5.md` §4.4): "does not grow

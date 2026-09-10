@@ -77,7 +77,7 @@
 - **명시적 out:** SOCKS `-D`(P1), file copy, UDP forwarding.
 - **수용 기준 (DoD):** `-L 8080:localhost:3000` 후 `curl localhost:8080` 도달. `-R` non-loopback bind 요청이 **거부**되는 명시적 테스트. Throughput ≥ 동일 프로세스에서 측정한 raw-quinn 기준의 80%. **1GB 포화 터널과 병행한 PTY echo p95 < RTT + 10ms** (§13). `-D 1080` → `UNSUPPORTED` + "P1" 메시지.
 - **크기:** 2ew
-- **마감 노트 (2026-08-27):** DoD 5항목 전건 테스트 증거로 통과(PLAN.md M4판 §1 체크리스트 — perf 게이트 정본은 CI `acceptance` run 32986938847). 마감 절차 1·2(태그 대조·README 동기화) 완료 — 구속 문서 충돌 0건. Step 8이 확정한 resume 의미론: migration(path rebind)은 터널을 투명 생존시키고, 연결 손실→resume에서 터널 스트림은 깨끗이 종료된다(세션만 §10 resume). **forward-route live carrier**(-L forward가 recovery 후에도 신규 연결을 서비스) 는 구현하지 않기로 확정하고 M5 입력으로 명시 이관 — 근거는 PLAN.md M4판 Step 8 (a)-추기(git 이력).
+- **마감 노트 (2026-08-27):** DoD 5항목 전건 테스트 증거로 통과(PLAN.md M4판 §1 체크리스트 — perf 게이트 정본은 CI `acceptance` run 32986938847). 마감 절차 1·2(태그 대조·README 동기화) 완료 — 구속 문서 충돌 0건. Step 8이 확정한 resume 의미론: migration(path rebind)은 터널을 투명 생존시키고, 연결 손실→resume에서 터널 스트림은 깨끗이 종료된다(세션만 §10 resume). **forward-route live carrier**(-L forward가 recovery 후에도 신규 연결을 서비스) 는 구현하지 않기로 확정하고 M5 입력으로 명시 이관 — 근거는 PLAN.md M4판 Step 8 (a)-추기(git 이력). M8 Step 8 추기(2026-09-10): DoD의 "1GB 포화 터널" 문면은 M4 Step 7 구현에서 15초 시간유계 + 최소 200표본(`crates/qsh-testkit/tests/tunnel_echo_under_load.rs`의 `MEASUREMENT_DURATION`·`MIN_SAMPLES`)으로 대체됐다 — 포화 상태를 유지한 채 재는 것이 목적이고 1GB는 그 수단이었으므로 게이트의 뜻은 같다. 문면은 이 추기로 갈음하고 DoD 줄은 고치지 않는다.
 
 ### M5 — ACL 정책 + audit ✅ 완료 (2026-08-28)
 
@@ -107,7 +107,7 @@
 
 ### M8 — Hardening
 
-- **범위:** cargo-fuzz 타깃 + corpus + OSS-Fuzz 제출, stateful broker fuzzer, 24h soak, fd/메모리 누수 게이트, **실기기 mobility 캠페인**, perf 게이트, threat model 문서, **wire format freeze**, 외부 보안 리뷰 착수.
+- **범위:** cargo-fuzz 타깃 + corpus + OSS-Fuzz 제출, stateful broker fuzzer, 24h soak, fd/메모리 누수 게이트, **실기기 mobility 캠페인**, perf 게이트(M4 게이트의 M8 HEAD 재확인 + 릴리스·방어선 대조 기록 — PLAN.md M8 Step 8; nightly perf job은 M10), threat model 문서, **wire format freeze**, 외부 보안 리뷰 착수.
 - **감사 개정 (2026-08-21) 추가 범위 — 적대적 부하 게이트:** 인터넷에 직접 노출되는 데몬에 현재 방어선이 하나도 없다(주소 검증 없음·연결 수 무제한·세션 수 무제한·`receive_window: VarInt::MAX`). ① `Incoming::retry()` 주소 검증(스푸핑 Initial 1패킷당 상태 생성 차단), ② accept 동시성 상한과 source rate limit, ③ `[serve].max_sessions`와 principal별 세션 쿼터, 그리고 **터널 전용 할당량**(principal별·forward별 동시 `TCP_CONNECT` 스트림 수, remote-forward listener 개수 상한 — `docs/design/protocol.md` §7이 명시하는, M4·M5 어느 쪽도 만들지 않는 무상한 갭을 이 항목이 인수한다) — 초과는 `RESOURCE_EXHAUSTED`(CLI.md §3.3 기정의 어휘), ④ M5가 구현한 audit 수명주기의 부하 하 검증(스푸핑 flood → 세션 없는 audit 쓰기 → 디스크 만실 → resume 실패 연쇄의 차단). 그 외: handshake matrix에 **ALPN 불일치** 케이스 추가(§4의 "application 상태 생성 전 실패" 불변식을 의존성 상속이 아니라 테스트로 고정 — wire freeze 전에), device 개인키 프로세스 상주 사본의 `Zeroizing` 적용, TUI 펌프 스레드 spawn 실패 panic 제거(보안 리뷰 준비 항목).
 - **수용 기준 (DoD):** parser 타깃당 누적 ≥72 fuzz-hours 무crash. 24h/100-session soak: idle listener ≤30MB, 세션당 buffer ≤8MB, fd 무증가. **실기기 Wi-Fi↔테더링 ≥60회(macOS+Linux)에서 자동 유지+resume ≥95%, migrated/resumed 분해 보고** (SC3 — 통과 기준은 사전 정의: idle timeout에 기대지 않는 2초 내 재dial). 프로토콜 스펙 freeze 후 독립 리뷰 계약 (SC7 — 리뷰는 리드타임이 있으므로 M5 시점에 예약).
   - **(감사 개정)** **적대적 부하 하네스** — 협조적 soak과 별도 게이트: 스푸핑 Initial flood·대량 연결·principal당 세션 폭주 각각에서 선언된 상한이 실제로 강제되고(`RESOURCE_EXHAUSTED`/거부), 부하 중·후 idle listener RSS/fd가 soak과 같은 bound를 지키며, 기존 세션의 PTY echo가 살아 있음.

@@ -43,7 +43,7 @@ main이 Dave-Windows-WSL에서 돌린 실측(`ARBITRATION-4.md` "4c 구현 판�
 
 ## 3. 사전 정의된 합격/불합격 기준 (실행 전에 고정)
 
-`docs/PRD.md:305`("Idle listener 메모리: 30MB 이하 **목표**")와
+`docs/PRD.md:286`("Idle listener 메모리: 30MB 이하 **목표**")와
 `docs/ROADMAP.md:112`("Idle listener RSS ≤ 30MB")가 이 수치의 상류다. PRD가
 "목표"라고 적은 것을 그대로 받아, 실패했을 때 코드가 아니라 임계 자체를
 의심할 여지를 열어 둔다.
