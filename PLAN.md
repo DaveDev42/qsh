@@ -359,7 +359,7 @@ naive 1.25가 예측 1.00보다 큰 것은 baseline 12스레드가 **공유 런�
 
 ### 6.1 DoD 체크리스트 (ROADMAP M8)
 
-- [ ] **DoD 1 — fuzz**: parser 타깃당 누적 ≥72 fuzz-hours 무crash. 기록은 `docs/campaigns/m8-fuzz.md`(타깃 16개 전부가 대상; Step 7b의 stateful `broker_ops`는 분모 밖, 같은 문서 §8) — 배치 2 결과 확인 대기.
+- [ ] **DoD 1 — fuzz**: parser 타깃당 누적 ≥72 fuzz-hours 무crash. 기록은 `docs/campaigns/m8-fuzz.md`(타깃 16개 전부가 대상; Step 7b의 stateful `broker_ops`는 분모 밖, 같은 문서 §8) — 배치 2(나머지 8종) 72 h 완료·crash 0(09-10), 배치 1 부족분 보충 회차(`m8-fuzz-20260910-1505`, 13 h) 종료 확인 대기.
 - [ ] **DoD 2 — soak**: 24h/100-session에서 idle listener ≤30MB, 세션당 buffer ≤8MB, fd 무증가.
 - [ ] **DoD 3 — 실기기 mobility**: Wi-Fi↔테더링 ≥60회(macOS+Linux) 자동 유지+resume ≥95%, migrated/resumed 분해 보고. 통과 기준은 사전 정의(idle timeout에 기대지 않는 2초 내 재dial). **사람이 실행한다.**
 - [ ] **DoD 4 — wire freeze 후 독립 리뷰 계약** (SC7 — 6.0 참조). 문면 초안은 완료(Step 7, 2026-09-10, `protocol.md` §16 "초안 — 발효 전") — 발효와 리뷰 계약은 §6.0 판정 대기.
@@ -396,6 +396,8 @@ CI 마감(`d87e76b`): CI run 33601462030 11 job 전부 success(`test (windows-la
 **72 h 시계 시작 기록.** 커밋 `d87e76b`, 호스트 Dave-Windows-WSL, run-id `m8-fuzz-20260902-1600`, 시작 2026-09-02T16:01:37+09:00, 16 타깃을 8 워커로 2 배치(`-max_total_time=259200 -rss_limit_mb=1536`, grown corpus는 `~/fuzz/grown/<t>`를 첫 인자로 두어 체크인 seed는 읽기 전용). 1차 배치 종료 예정 09-05 16:01, 2차 배치 종료 예정 09-08 16:01 이후. 기동 직후 실측: `decode_control` 7.1M execs / 170k exec/s / cov 1873 / RSS 541 MB, load 6.2, 가용 메모리 16 GB. 로그·exit 코드는 호스트 `~/fuzz/logs/m8-fuzz-20260902-1600/`. DoD 1 판정은 `exits.txt`의 16행 전부 `exit=0`이고 어떤 로그에도 `SUMMARY:`/`deadly signal`/`Test unit written`이 없을 때.
 
 **72 h 시계 경과 기록 (2026-09-07).** 1차 배치(decode_* 8종)는 09-05 새벽 호스트(WSL VM) 재시작으로 끊겼다. `exits.txt`에 exit 행이 없고 launcher도 함께 죽었다. 로그 마지막 수정 시각으로 센 타깃당 실효 시간은 59.1~65.6 h(부족분 6.4~12.9 h), 실행 수는 2.0B(`decode_control`, 큰 입력이라 8.6k exec/s)~44.8B, crash·artifact 0, OOM 없음. grown corpus는 `~/fuzz/grown/<t>`에 1.3~13 MB로 남았다. 2차 배치(fingerprint_principal, frame_decoder, json_request_types, parse_forward_spec, parse_invite_code, sanitize_peer_text, valid_forward_id, valid_host_name)는 커밋 `ab8a82f`, run-id `m8-fuzz-20260907-1450`, 시작 2026-09-07T14:47:53+09:00으로 돌고 있고 종료 예정은 09-10 14:48이다. `run72.sh`가 둘째 인자로 타깃 파일을 받게 고쳐 부분 집합을 돌린다. 2차가 끝나면 1차 부족분을 grown corpus에서 이어 타깃당 약 13 h 더 돌려 DoD 1을 닫는다. 누적 fuzz-hours 정의상 이어 돌린 시간은 유효하다. 09-05 재시작 원인은 미확인이다(Windows 업데이트 추정).
+
+**72 h 시계 경과 기록 (2026-09-10).** 2차 배치(`m8-fuzz-20260907-1450`)가 09-10 14:47:55에 끝났다. `exits.txt` 8행 전부 `exit=0`(각 259,202 s), 어느 로그에도 `Test unit written`·`deadly signal`·`SUMMARY:`가 없고 artifact 파일도 없다. 실행 수는 31.6B(`frame_decoder`)~139.1B(`valid_forward_id`), exec/s 121.9k~536.7k, peak RSS 517~782 MB(`-rss_limit_mb=1536` 아래). 1차 부족분은 같은 날 15:05:21에 `m8-fuzz-20260910-1505`로 이어 돌리기 시작했다. 대상은 decode_* 8종, 커밋 `ab8a82f`(2차와 같은 빌드), `-max_total_time=46800`(13 h, 최대 부족분 12.89 h를 덮는 균일값), grown corpus는 첫 인자로 그대로 재사용. 런처는 `run72.sh`에서 `git pull`을 뺀 `run-cont.sh`. 종료 예정 09-11 04:05이고, 그때 `exits.txt` 8행 `exit=0`과 로그 엄격 grep 0건이면 DoD 1이 닫힌다. 타깃별 수치는 `docs/campaigns/m8-fuzz.md` §5.
 
 #### Step 2 — 적대적 부하 방어선 ①②: 주소 검증 + accept 상한
 

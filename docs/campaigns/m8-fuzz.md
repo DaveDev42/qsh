@@ -116,24 +116,71 @@ artifact 0건, OOM 없음. grown corpus는 `~/fuzz/grown/<t>`에 1.3~13 MB로
 커밋 `ab8a82f`, run-id `m8-fuzz-20260907-1450`, 대상 `fingerprint_principal`·
 `frame_decoder`·`json_request_types`·`parse_forward_spec`·
 `parse_invite_code`·`sanitize_peer_text`·`valid_forward_id`·
-`valid_host_name`, 시작 2026-09-07T14:47:53+09:00, 종료 예정
-2026-09-10T14:48+09:00. `run72.sh`가 둘째 인자로 타깃 파일을 받게 고쳐 부분
-집합을 돌린다.
+`valid_host_name`, 시작 2026-09-07T14:47:53+09:00, 종료
+2026-09-10T14:47:55+09:00. `run72.sh`가 둘째 인자로 타깃 파일을 받게 고쳐
+부분집합을 돌린다.
 
-**결과: 확인 대기.** 이 문서를 쓰는 시점(2026-09-10)에 종료 예정 시각이
-아직 지나지 않았다 — `exits.txt`·로그 확인은 배치 종료 후의 남은 일(§6).
+`exits.txt` 8행 전부 `exit=0 secs=259202`, 마지막 줄
+`DONE 2026-09-10T14:47:55+09:00`. 엄격 grep(`Test unit written`/
+`deadly signal`/`SUMMARY: libFuzzer`/`out-of-memory`)은 8 로그 전부
+0건이고 크래시 artifact 파일도 0개다. `json_request_types` 로그에
+`timeout` 문자열이 잡히는 건 libFuzzer timeout이 아니라 요청 타입의
+사전 필드 이름 `timeout_ms` 때문이다.
+
+| 타깃 | runs | exec/s 평균 | cov | peak RSS |
+|---|---|---|---|---|
+| fingerprint_principal | 66,924,261,203 | 258,194 | 408 | 530 MB |
+| frame_decoder | 31,592,470,495 | 121,884 | 159 | 517 MB |
+| json_request_types | 32,600,404,805 | 125,772 | 3151 | 782 MB |
+| parse_forward_spec | 32,172,011,895 | 124,119 | 294 | 653 MB |
+| parse_invite_code | 87,849,677,445 | 338,924 | 85 | 526 MB |
+| sanitize_peer_text | 42,459,844,850 | 163,810 | 112 | 548 MB |
+| valid_forward_id | 139,115,028,629 | 536,707 | 38 | 583 MB |
+| valid_host_name | 132,605,606,771 | 511,593 | 39 | 578 MB |
+
+범위: 31.6B(`frame_decoder`)~139.1B(`valid_forward_id`) runs, exec/s
+121.9k~536.7k, peak RSS 517~782 MB — `-rss_limit_mb=1536` 아래다.
+grown corpus 파일 수(`~/fuzz/grown/<t>`): fingerprint_principal 228,
+frame_decoder 144, json_request_types 4885, parse_forward_spec 256,
+parse_invite_code 141, sanitize_peer_text 125, valid_forward_id 35,
+valid_host_name 47.
+
+**배치 2 판정: 8 타깃 72h 누적 충족, crash 0.**
+
+### 배치 1 보충 — decode_* 8종 이어 돌리기
+
+커밋 `ab8a82f`(배치 2와 같은 빌드, `cargo fuzz build` 0.98초로
+재컴파일 없음), run-id `m8-fuzz-20260910-1505`. 런처는
+`~/fuzz/run-cont.sh`로, `run72.sh`와 같은 규율(grown corpus를 첫
+인자로, 체크인 seed는 읽기 전용 둘째 인자, `-rss_limit_mb=1536
+-print_final_stats=1`, 타깃별 로그와 exit 행)을 따르되 두 가지가
+다르다 — `git pull`이 없고, `-max_total_time`을 셋째 인자로 받는다.
+`nohup setsid`로 분리 기동했다.
+
+대상은 decode_* 8종(`decode_control`·`decode_hello`·
+`decode_exec_frame`·`decode_session_frame`·`decode_stream_header`·
+`decode_connect_result`·`decode_local_hello`·
+`decode_local_admin_request`), `-max_total_time=46800`(13h). 위
+배치 1 기록의 부족분(로그 mtime 기준 6.4~12.9h/타깃, 정확히는
+6.35~12.89h)을 한 값으로 덮는 균일 13h다. 시작
+2026-09-10T15:05:21+09:00, 종료 예정 2026-09-11T04:05+09:00.
+
+기동 50초 실측: 8 프로세스 각 CPU 95%, RSS 441~493 MB, exec/s
+73k(`decode_control`)~262k. `build.txt`에 `Permission denied` 두
+줄이 있는데 cargo 전역 registry 캐시 auto-clean이 `rusb-0.9.4`
+예제 파일 삭제에 실패한 경고이고 fuzz 빌드·타깃과는 무관하다.
+
+결과는 확인 대기.
 
 ## 6. 남은 것
 
-- 배치 2 종료 확인 — `exits.txt` 8행 `exit=0`, 로그에 `SUMMARY:`/
-  `deadly signal`/`Test unit written` 부재.
-- 배치 1 부족분(6.4~12.9h/타깃) 이어 돌리기 — grown corpus를 그대로 첫
-  인자로 재사용, 이어 돌린 시간은 누적 fuzz-hours 정의상 유효하다.
-- 위 둘이 닫히면 DoD 1 체크(`docs/ROADMAP.md`) — 16 타깃 전부 72h 누적,
+- 보충 회차(`m8-fuzz-20260910-1505`) 종료 확인 — `exits.txt` 8행
+  `exit=0`, 로그 엄격 grep 0건, 누적 = 배치 1 실효 시간 + 13h ≥ 72h.
+- 위가 닫히면 DoD 1 체크(`docs/ROADMAP.md`) — 16 타깃 전부 72h 누적,
   crash 0건.
 - stateful broker fuzzer(`fuzz_session_machine`/`broker_ops`)는 이 16
-  타깃 집합 밖이고 Step 7b로 이월됐다(ARBITRATION-7 Q7) — DoD 1의 "parser
-  타깃당" 카운트에 들지 않으므로 이 캠페인의 완료 조건과 무관하다.
+  타깃 집합 밖이다 — Step 7b가 착지해 §8에 기록하며, DoD 1의 "parser
+  타깃당" 카운트(분모 16) 밖이라 이 캠페인의 완료 조건과 무관하다.
 
 ## 7. OSS-Fuzz 제출과의 관계
 
@@ -149,7 +196,7 @@ artifact 0건, OOM 없음. grown corpus는 `~/fuzz/grown/<t>`에 1.3~13 MB로
 
 `broker_ops`(M8 Step 7b, `fuzz/fuzz_targets/broker_ops.rs`)는 §2가 고정한
 16 타깃 집합에 들지 않는다 — DoD 1의 "parser 타깃당" 분모는 이 문서
-전체에서 16으로 그대로 둔다(§6의 이월 기록도 불변). `broker_ops`는
+전체에서 16으로 그대로 둔다(§6 항목도 같은 뜻). `broker_ops`는
 `.github/workflows/fuzz-smoke.yml`의 build-and-crash-check 스모크에는
 `cargo fuzz list`가 동적으로 잡아내 자동으로 들어가지만, 이 문서가 기록하는
 72h 누적 회차는 별도다 — 돌리게 되면 아래 표에 배치 3으로 기록한다(지금은
