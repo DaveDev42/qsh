@@ -5,6 +5,35 @@
 mod render;
 mod tui;
 
+// jemalloc global allocator (Linux only) — see crates/qsh-cli/Cargo.toml for
+// why. On Linux the serve/listener returns freed pages to the OS at idle via
+// jemalloc's background purge threads instead of pinning glibc's arena
+// high-water. macOS and Windows use the system allocator.
+//
+// `malloc_conf` pins the fixed floor so it fits the PRD 30 MiB idle bound
+// (docs/PRD.md:286). `narenas:1` caps arena count at one: jemalloc otherwise
+// scales it to the *detected* CPU count, which on a CI/container host is the
+// host's, not the cgroup's — dozens of arenas whose metadata alone overran the
+// bound. One arena also holds the fixed floor as low as jemalloc goes, which
+// the connection_flood path needs: it bounds *peak* RSS (live memory during a
+// 16-connection flood, which no decay setting can reclaim) at the same 30 MiB,
+// so the floor plus the flood's working set must fit. `dirty_decay_ms:0` +
+// `muzzy_decay_ms:0` purge freed pages immediately (MADV_DONTNEED) rather than
+// on a timer, and `background_thread:true` runs that purge off the hot path.
+// The `_rjem_malloc_conf` symbol name is the tikv-jemalloc-sys prefix applied
+// to jemalloc's `malloc_conf`; jemalloc reads it as a `char *`, so the `&[u8]`
+// slice's data pointer (its first word) is what it sees — hence a NUL
+// terminator and a reference, not an array.
+#[cfg(target_os = "linux")]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+#[cfg(target_os = "linux")]
+#[allow(non_upper_case_globals)]
+#[unsafe(export_name = "_rjem_malloc_conf")]
+pub static malloc_conf: &[u8] =
+    b"narenas:1,dirty_decay_ms:0,muzzy_decay_ms:0,background_thread:true\0";
+
 // `cli` lives in this crate's library target now (`src/lib.rs`), not as a
 // `mod cli;` binary-only submodule — that's what lets `xtask` read the
 // real `clap::Command` tree for man-page generation (`xtask/src/man.rs`)
