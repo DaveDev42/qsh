@@ -27,6 +27,18 @@ tokio.workspace = true
 [target.'cfg(unix)'.dependencies]
 nix = { workspace = true, features = ["term", "ioctl", "signal"] }
 
+# jemalloc as the global allocator for the `qsh` serve/listener on Linux, so
+# freed pages return to the OS at idle via background purge threads. glibc pins
+# the arena high-water instead — a 24h/100-session soak surfaced ~183 MiB
+# retained idle RSS. Linux-only on purpose: the retention is glibc-specific
+# (macOS's own allocator releases idle pages readily), and jemalloc's
+# background_thread is unsupported on macOS — enabling it there prints a
+# "<jemalloc>: option background_thread currently supports pthread only" line
+# to stderr, which breaks the single-stderr-line CLI contract (docs/CLI.md).
+# macOS and Windows (client, P1) use the system allocator.
+[target.'cfg(target_os = "linux")'.dependencies]
+tikv-jemallocator = { version = "0.7", features = ["background_threads"] }
+
 [dev-dependencies]
 tempfile.workspace = true
 jsonschema.workspace = true
