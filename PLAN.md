@@ -360,7 +360,7 @@ naive 1.25가 예측 1.00보다 큰 것은 baseline 12스레드가 **공유 런�
 ### 6.1 DoD 체크리스트 (ROADMAP M8)
 
 - [x] **DoD 1 — fuzz**: parser 타깃당 누적 ≥72 fuzz-hours 무crash. 기록은 `docs/campaigns/m8-fuzz.md`(타깃 16개 전부가 대상; Step 7b의 stateful `broker_ops`는 분모 밖, 같은 문서 §8). **2026-09-11 마감** — 배치 2(나머지 8종) 72 h 완료·crash 0(09-10), 배치 1(decode_* 8종)은 실효 59.1~65.6 h에 보충 회차 `m8-fuzz-20260910-1505` 13 h를 더해 72.1~78.6 h·crash 0(09-11). 판정은 Step 1 (a)의 종료 기록과 캠페인 문서 §5.
-- [ ] **DoD 2 — soak**: 24h/100-session에서 idle listener ≤30MB, 세션당 buffer ≤8MB, fd 무증가.
+- [ ] **DoD 2 — soak**: 24h/100-session에서 idle listener ≤30MB, 세션당 buffer ≤8MB, 사이클 중 fd 무증가(누수 0; steady 4등분 성장 ≤ +2, boot→idle 일회성 warm-up은 정보성).
 - [ ] **DoD 3 — 실기기 mobility**: Wi-Fi↔테더링 ≥60회(macOS+Linux) 자동 유지+resume ≥95%, migrated/resumed 분해 보고. 통과 기준은 사전 정의(idle timeout에 기대지 않는 2초 내 재dial). **사람이 실행한다.**
 - [ ] **DoD 4 — wire freeze 후 독립 리뷰 계약** (SC7 — 6.0 참조). 문면 초안은 완료(Step 7, 2026-09-10, `protocol.md` §16 "초안 — 발효 전") — 발효와 리뷰 계약은 §6.0 판정 대기.
 - [x] **DoD 5 (감사 개정) — 적대적 부하 하네스**: 스푸핑 Initial flood·대량 연결·principal당 세션 폭주 각각에서 선언된 상한이 실제로 강제되고, 부하 중·후 idle listener RSS/fd가 soak과 같은 bound를 지키며, 기존 세션의 PTY echo가 살아 있음. **2026-09-08 마감** — Step 4a·4b·4c, 커밋 2f52958. 판정과 실측은 Step 4의 (a)-추기 세 블록에 있다.

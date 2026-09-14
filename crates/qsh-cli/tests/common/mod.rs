@@ -910,5 +910,6 @@ pub fn wait_for_audit(
 #[allow(unused_imports)]
 pub use qsh_testkit::procstat::{
     MIN_NOFILE_SOFT_LIMIT, RSS_PEAK_SAMPLE_INTERVAL, RssPeakSampler, STABILIZE_INTERVAL,
-    STABILIZE_MAX_ITERS, converged, ensure_nofile_limit, open_fd_count, poll_stable, rss_kib,
+    STABILIZE_MAX_ITERS, converged, ensure_nofile_limit, open_fd_count, open_fd_targets,
+    poll_stable, rss_kib,
 };
