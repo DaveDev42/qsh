@@ -5,14 +5,6 @@
 mod render;
 mod tui;
 
-// jemalloc global allocator (Linux only) — see crates/qsh-cli/Cargo.toml for
-// why. On Linux the serve/listener returns freed pages to the OS at idle via
-// jemalloc's background purge threads instead of pinning glibc's arena
-// high-water. macOS and Windows use the system allocator.
-#[cfg(target_os = "linux")]
-#[global_allocator]
-static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
-
 // `cli` lives in this crate's library target now (`src/lib.rs`), not as a
 // `mod cli;` binary-only submodule — that's what lets `xtask` read the
 // real `clap::Command` tree for man-page generation (`xtask/src/man.rs`)
