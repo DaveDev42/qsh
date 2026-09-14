@@ -51,6 +51,42 @@ pub fn open_fd_count(_pid: u32) -> Option<usize> {
     None
 }
 
+/// The open file descriptors `pid` holds, as `(fd number, readlink target)`
+/// pairs from `/proc/<pid>/fd`, sorted by fd. This is [`open_fd_count`]'s
+/// inventory sibling: the count answers "how many", this answers "which", so
+/// the soak's informational fd-delta line can show that a boot->idle_end jump
+/// is exactly the benign one-time lazy-init set (audit-log fd, DNS resolver
+/// socket, keystore fd, tokio io-driver eventfd/epoll) and not a leak — a
+/// deterministic in-harness record in the CI `load.yml` log, so nobody has to
+/// `lsof` the child by hand to classify the delta. Linux only, same
+/// `None`-elsewhere contract as [`open_fd_count`]. fd targets are structural
+/// (path/socket-inode links), never key material or PTY/command payload, so
+/// this stays inside the audit-logging rule. An entry whose link cannot be
+/// read (it closed between the readdir and the readlink) keeps its slot with
+/// an `<unreadable>` target rather than being dropped, so the pairs still
+/// account for every fd the count saw.
+#[cfg(target_os = "linux")]
+pub fn open_fd_targets(pid: u32) -> Option<Vec<(u32, String)>> {
+    let mut targets: Vec<(u32, String)> = std::fs::read_dir(format!("/proc/{pid}/fd"))
+        .ok()?
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let fd = entry.file_name().to_str()?.parse::<u32>().ok()?;
+            let target = std::fs::read_link(entry.path())
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| "<unreadable>".to_string());
+            Some((fd, target))
+        })
+        .collect();
+    targets.sort_by_key(|(fd, _)| *fd);
+    Some(targets)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn open_fd_targets(_pid: u32) -> Option<Vec<(u32, String)>> {
+    None
+}
+
 /// How many consecutive samples [`poll_stable`] waits to agree (to within
 /// [`STABILIZE_REL_TOLERANCE`]) before calling a metric converged.
 const STABILIZE_WINDOW: usize = 3;
