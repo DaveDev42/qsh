@@ -691,6 +691,8 @@ qsh trust remove <name> --json
 ```bash
 qsh trust invite --json
 qsh trust accept <address> <code> --json
+qsh trust accept <address> --code-stdin --json
+qsh trust accept <address>
 ```
 
 `trust.invite`는 이 장치에서 10분 TTL짜리 1회용 invite code를 발급한다(ADR-0002, M7 Step 4). 160-bit CSPRNG secret을 Crockford Base32로 인코딩해 `xxxx-xxxx-xxxx-xxxx-xxxx-xxxx-xxxx-xxxx` 형태(소문자, 4자씩 8그룹)로 보여준다. code 자체에는 주소가 들어 있지 않다 — 이 장치에 닿을 `host:port`는 별도로, out-of-band 경로로 전달해야 한다.
@@ -712,6 +714,8 @@ qsh trust accept <address> <code> --json
 human mode는 `accept_command`를 화면에 그대로 찍는다. operator는 `<address>` 자리만 실제 주소로 바꿔 상대에게 전달하면 된다 — 그게 이 필드의 유일한 용도다.
 
 `trust.accept <address> <code>`는 `address`로 dial해 `code`가 가리키는 invite를 redeem한다. 인증의 근거는 TLS identity가 아니라 secret 소유 증명이다: 양쪽은 TLS exporter(RFC 5705 `export_keying_material`)로 채널에 묶인 값을 뽑고, 그 위에 도메인을 분리한 두 개의 BLAKE3 keyed-hash 증명(initiator→responder, responder→initiator)을 constant-time으로 주고받는다. 상대 쪽 증명이 검증되기 전에는 어느 쪽도 pin하지 않는다 — 메시지가 도착했다는 사실만으로 pin하는 경로는 없다.
+
+`code`를 주는 경로는 셋이다. 명령줄 위치 인자, `--code-stdin`(표준입력을 끝까지 읽는다), 그리고 셋 다 없을 때 human mode에서 열리는 프롬프트다. 프롬프트는 표준입력이 터미널일 때만 열리고 에코를 끄며 문면은 stderr로 나간다 — stdout에는 결과 envelope 외에 아무것도 나가지 않는다(§2.2). `--code-stdin`도 표준입력이 터미널이면 같은 방식으로 에코를 끈다 — 프롬프트를 기다리지 않고 바로 타이핑해도 코드가 화면에 남지 않는다. 세 경로 모두 읽은 값은 앞뒤 공백을 제거한 뒤 쓴다 — 위치 인자도 포함이라 `qsh trust accept <address> ' abcd-... '`처럼 앞뒤에 공백이 붙어도 그대로 통한다. code 문법 자체는 Crockford 심볼과 `-`만 허용하므로 `printf '%s\n' "$code" | qsh trust accept <address> --code-stdin`처럼 후행 개행이 붙은 입력은 제거하지 않으면 첫 시도부터 거부된다. 내부 공백은 제거하지 않는다 — 코드 중간의 공백은 여전히 오류다. 위치 인자와 `--code-stdin`을 함께 주는 것은 인자 사용 오류(exit 2, envelope 없음, §4)다. 코드가 셸 히스토리에 남는 것 자체는 재사용 위험이 아니다 — invite는 1회용이고 발급 10분 뒤 상환이 끝난다.
 
 이 증명이 보장하는 것은 "상대가 invite secret을 안다"까지다 — 그 이상의 신원 주장은 아니다. secret은 전화나 채팅처럼 사람이 개입하는 경로로 전달되는 경우가 많으므로, 더 높은 확신이 필요하면 pairing이 끝난 뒤 `trust list`가 보여주는 fingerprint를 out-of-band로 상대와 사후 대조하는 것도 방법이다 — pairing 자체가 요구하는 단계는 아니고, 원하는 operator가 추가로 얹는 defense-in-depth다(`docs/design/protocol.md` §15.4).
 
@@ -745,7 +749,7 @@ pin 시점에 이름 충돌이 생기면 — 상대가 자칭하는 이름이 �
 
 `qsh serve`로 이미 떠 있는 데몬은 재시작 없이 새로 발급된 invite를 인식한다 — `trust.remove`(바로 위 문단)가 따르는 것과 같은 content-based reload 원칙이 invite store에도 그대로 적용된다. 이 재로드는 `qsh trust invite`(CLI 프로세스)와 `qsh serve`(daemon)가 같은 `invites.toml`을 서로 다른 프로세스에서 잠금 없이 읽고 쓰는 형태라, 두 프로세스의 쓰기가 정확히 겹치는 좁은 창에서는 한쪽의 갱신이 다른 쪽에 곧바로 반영되지 않을 수 있다(예: 거의 동시에 발급된 두 invite 중 하나가 다음 redeem 조회에서 아직 보이지 않는 경우) — 이후 재시도나 다음 저장 시점에는 다시 수렴하므로 invite가 영구히 사라지지는 않지만, 완전한 파일 잠금은 아직 없다(Step 7 debt로 이월).
 
-`--json` mode에서는 pairing도 interactive prompt를 열지 않는다(§2.1) — 잘못된 code나 인자 오류는 곧바로 오류 envelope로 반환된다.
+`--json`/`--jsonl` mode에서는 pairing도 interactive prompt를 열지 않는다(§2.1) — 잘못된 code나 인자 오류는 곧바로 오류 envelope로 반환된다. 그래서 machine mode에서 위치 인자도 `--code-stdin`도 없이 부르면 프롬프트 대신 `INVALID_ARGUMENT`다. `--code-stdin`을 줬더라도 표준입력이 터미널이면 machine mode에서는 마찬가지로 `INVALID_ARGUMENT`다 — 터미널 위에서 사람의 입력을 기다리는 것 자체가 §2.1이 금지하는 대기이기 때문이다; 표준입력이 파이프나 파일이면 이 제약과 무관하게 그대로 읽는다. 표준입력이 터미널이 아닌 human mode 호출(스크립트, cron)도 같은 이유로 `INVALID_ARGUMENT`다 — 열 수 있는 프롬프트가 없다. Windows 빌드에는 에코를 끄는 경로가 없어 터미널 프롬프트 대신 `UNSUPPORTED`를 내며 `--code-stdin`을 안내한다(client Windows는 P1, `docs/design/architecture.md` §8) — `--code-stdin` 자체는 이 플랫폼에서도 동작하지만, 터미널 입력이면 에코는 꺼지지 않는다.
 
 `doctor.run`의 전체 계약(§6.17, M7 Step 6)은 진단 코드 14종·envelope 모양·exit code 규칙을 담는다 — 이 절 밖에서는 더 설명하지 않는다.
 

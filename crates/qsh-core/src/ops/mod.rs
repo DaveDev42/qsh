@@ -226,6 +226,150 @@ impl Operation for TrustAcceptOp {
     const COMMAND: &'static str = "trust.accept";
 }
 
+/// The invite-code prompt's wording, in `qsh-core` because the decision to
+/// prompt is `qsh-core`'s (`docs/ROADMAP.md:118` (j)) and the frontend only
+/// writes what it is handed.
+pub const INVITE_CODE_PROMPT: &str = "Invite code: ";
+
+/// Upper bound on the bytes read for `--code-stdin`. The display form is 39
+/// bytes (`docs/CLI.md` §6.11); the slack is for whitespace and CRLF. The
+/// frontend reads one byte past it and lets
+/// [`qsh_proto::pairing::parse_invite_code`] reject the oversize input by
+/// symbol count — `qsh-core` only defines the number, the same way it
+/// defines [`INVITE_CODE_PROMPT`] without being the one that writes it;
+/// the frontend's own stdin-bounding precedent is `run_session_write`'s use
+/// of [`SESSION_WRITE_MAX`] the same way.
+pub const INVITE_CODE_STDIN_MAX: usize = 1024;
+
+/// Where `trust accept` is to get its invite code from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InviteCodeSource {
+    /// Use this value, already on the command line.
+    UseCode(String),
+    /// Read this process's stdin to end of input (`--code-stdin`).
+    /// `suppress_echo` is set only when stdin is a terminal *and* the
+    /// platform can suppress its echo — the same guard
+    /// [`Prompt`](InviteCodeSource::Prompt) needs, reused here because
+    /// `--code-stdin` on a terminal is just as interactive as the prompt
+    /// and must not echo the code into the scrollback either.
+    ReadStdin { suppress_echo: bool },
+    /// Write `text` to **stderr**, then read one line from the terminal
+    /// with echo suppressed.
+    Prompt { text: String },
+}
+
+const NO_CODE_IN_MACHINE_MODE: &str = "no invite code: --json/--jsonl mode never prompts, so pass the code as \
+     an argument or read it from stdin with --code-stdin";
+
+const NO_CODE_WITHOUT_A_TERMINAL: &str = "no invite code: stdin is not a terminal, so pass the code as an \
+     argument or read it from stdin with --code-stdin";
+
+const BOTH_CODE_SOURCES: &str = "invite code given both as an argument and with --code-stdin; pass \
+     exactly one";
+
+/// `--code-stdin` was given explicitly, but stdin is a terminal and this is
+/// machine mode: reading it would block a `--json`/`--jsonl` caller on a
+/// human, which §2.1 forbids exactly as much as opening the prompt would
+/// (ADR-0013 decision 8). Distinct wording from [`NO_CODE_IN_MACHINE_MODE`]
+/// on purpose — that one fires when there is no way at all to get a code,
+/// this one when the code-stdin path itself is what would block.
+const CODE_STDIN_BLOCKS_MACHINE_MODE: &str = "invite code: --code-stdin on a terminal is interactive; \
+     --json/--jsonl mode never blocks on a terminal, so redirect stdin from a pipe or file, or pass the \
+     code as an argument";
+
+/// This build cannot suppress a terminal's echo, so the interactive prompt
+/// is refused rather than opened with the code landing in the scrollback —
+/// the CLI's Windows-client precedent for the same reason (`tui::run`,
+/// `docs/design/architecture.md` §8, client Windows is P1).
+const NO_TERMINAL_ECHO_SUPPRESSION: &str = "reading an invite code from the terminal needs a POSIX \
+     terminal; pass the code as an argument or read it from stdin with --code-stdin";
+
+fn no_invite_code(message: &'static str) -> OpError {
+    OpError::new(ErrorCode::InvalidArgument, message).with_retryable(false)
+}
+
+fn terminal_echo_unsupported(message: &'static str) -> OpError {
+    OpError::new(ErrorCode::Unsupported, message).with_retryable(false)
+}
+
+/// Decide where `trust accept`'s invite code comes from, or refuse
+/// (`docs/ROADMAP.md:118` (j), ADR-0013 decision 8,
+/// `docs/adr/0013-cert-file-exchange.md:29`).
+///
+/// A free function, not an [`Ops`] method: it is pure (no [`Paths`], no
+/// filesystem, no network), so a `&self` method would wrongly suggest it
+/// touches the store — the same reasoning [`dynamic_forward_unsupported`]
+/// and [`parse_local_forwards`] already follow for this crate's other
+/// CLI-preflight judgments.
+///
+/// `echo_can_be_suppressed` is the frontend's `cfg!(unix)` at the call
+/// site: whether a no-echo prompt is even possible carries the same
+/// prompt-vs-refuse judgment as everything else here, so it belongs in
+/// this resolver rather than as a second, untested branch in `qsh-cli`
+/// (`main.rs`'s `read_invite_code_from_terminal` used to answer this on
+/// its own, invisibly to this function's unit tests).
+pub fn resolve_invite_code_source(
+    code: Option<String>,
+    code_stdin: bool,
+    machine_mode: bool,
+    stdin_is_tty: bool,
+    echo_can_be_suppressed: bool,
+) -> Result<InviteCodeSource, OpError> {
+    match (code, code_stdin) {
+        // Unreachable through the CLI: clap's `conflicts_with` refuses this
+        // pair as a usage error first (`cli.rs`'s `TrustCmd::Accept`).
+        // Answered anyway so the resolver is total on its own inputs and
+        // the arm is exercised by its own unit test rather than left as
+        // dead code.
+        (Some(_), true) => Err(no_invite_code(BOTH_CODE_SOURCES)),
+        // An explicit code wins in every mode: neither `machine_mode` nor
+        // `stdin_is_tty` is consulted, because nothing has to be read.
+        (Some(code), false) => Ok(InviteCodeSource::UseCode(code)),
+        (None, true) => {
+            // A terminal delivers EOF on Ctrl-D, so `--code-stdin` is
+            // honored there too in human mode — but in machine mode a
+            // terminal has no EOF coming, so this would block a
+            // `--json`/`--jsonl` caller on a human exactly as a prompt
+            // would.
+            if stdin_is_tty && machine_mode {
+                return Err(no_invite_code(CODE_STDIN_BLOCKS_MACHINE_MODE));
+            }
+            Ok(InviteCodeSource::ReadStdin {
+                suppress_echo: stdin_is_tty && echo_can_be_suppressed,
+            })
+        }
+        (None, false) => {
+            if machine_mode {
+                return Err(no_invite_code(NO_CODE_IN_MACHINE_MODE));
+            }
+            if !stdin_is_tty {
+                return Err(no_invite_code(NO_CODE_WITHOUT_A_TERMINAL));
+            }
+            if !echo_can_be_suppressed {
+                return Err(terminal_echo_unsupported(NO_TERMINAL_ECHO_SUPPRESSION));
+            }
+            Ok(InviteCodeSource::Prompt {
+                text: INVITE_CODE_PROMPT.to_string(),
+            })
+        }
+    }
+}
+
+/// The invite code as it goes on the wire: leading and trailing whitespace
+/// removed.
+///
+/// Internal whitespace is left alone — `abcd efgh…` still fails
+/// [`qsh_proto::pairing::parse_invite_code`]'s `InvalidCharacter` check, on
+/// purpose: silently accepting embedded whitespace would blur the §6.11
+/// grammar contract that only `-` is ignored. Every source in
+/// [`InviteCodeSource`] funnels through this one function at exactly one
+/// call site (`run_trust_accept`'s `invite_code` helper), so there is a
+/// single named place the trim happens, mirroring how
+/// [`dynamic_forward_unsupported`] centralizes its own single-site policy.
+pub fn normalize_invite_code(raw: &str) -> &str {
+    raw.trim()
+}
+
 /// The `trust.list` operation.
 pub struct TrustListOp;
 
@@ -1897,5 +2041,219 @@ mod tests {
             "host \"nowhere\" is not in the trust store; pin it with `qsh trust add nowhere \
              --address <host:port> --fingerprint sha256:...`"
         );
+    }
+
+    /// `PLAN.md` M9 Step 2 (c)'s 4 combinations, plus every other real
+    /// branch the resolver answers (`PLAN.md` "### Step 2" (a)④, ADR-0013
+    /// decision 8 at `docs/adr/0013-cert-file-exchange.md:29`). Each error
+    /// row pins the exact code *and* message, not merely
+    /// `ErrorCode::InvalidArgument` — two different refusals sharing a
+    /// substring (both mention `--code-stdin`) would otherwise pass under
+    /// a looser check even after one arm's wording silently became the
+    /// other's.
+    #[test]
+    fn resolve_invite_code_source_decision_table() {
+        let code = || Some("abcd-efgh".to_string());
+        #[allow(clippy::type_complexity)]
+        let cases: &[(
+            &str,
+            Option<String>,
+            bool,
+            bool,
+            bool,
+            bool,
+            Result<InviteCodeSource, (ErrorCode, &'static str)>,
+        )] = &[
+            // (label, code, code_stdin, machine_mode, stdin_is_tty, echo_can_be_suppressed, expected)
+            (
+                "explicit code",
+                code(),
+                false,
+                true,
+                false,
+                true,
+                Ok(InviteCodeSource::UseCode("abcd-efgh".into())),
+            ),
+            (
+                "--code-stdin, piped",
+                None,
+                true,
+                true,
+                false,
+                true,
+                Ok(InviteCodeSource::ReadStdin {
+                    suppress_echo: false,
+                }),
+            ),
+            (
+                "--code-stdin, terminal, human",
+                None,
+                true,
+                false,
+                true,
+                true,
+                Ok(InviteCodeSource::ReadStdin {
+                    suppress_echo: true,
+                }),
+            ),
+            (
+                "--code-stdin, terminal, human, platform cannot suppress echo",
+                None,
+                true,
+                false,
+                true,
+                false,
+                Ok(InviteCodeSource::ReadStdin {
+                    suppress_echo: false,
+                }),
+            ),
+            (
+                "--code-stdin, terminal, machine mode",
+                None,
+                true,
+                true,
+                true,
+                true,
+                Err((ErrorCode::InvalidArgument, CODE_STDIN_BLOCKS_MACHINE_MODE)),
+            ),
+            (
+                "human tty",
+                None,
+                false,
+                false,
+                true,
+                true,
+                Ok(InviteCodeSource::Prompt {
+                    text: INVITE_CODE_PROMPT.to_string(),
+                }),
+            ),
+            (
+                "human tty, platform cannot suppress echo",
+                None,
+                false,
+                false,
+                true,
+                false,
+                Err((ErrorCode::Unsupported, NO_TERMINAL_ECHO_SUPPRESSION)),
+            ),
+            (
+                "machine, none",
+                None,
+                false,
+                true,
+                false,
+                true,
+                Err((ErrorCode::InvalidArgument, NO_CODE_IN_MACHINE_MODE)),
+            ),
+            (
+                "machine, none, terminal",
+                None,
+                false,
+                true,
+                true,
+                true,
+                Err((ErrorCode::InvalidArgument, NO_CODE_IN_MACHINE_MODE)),
+            ),
+            (
+                "both sources",
+                code(),
+                true,
+                false,
+                false,
+                true,
+                Err((ErrorCode::InvalidArgument, BOTH_CODE_SOURCES)),
+            ),
+            (
+                "human, no terminal",
+                None,
+                false,
+                false,
+                false,
+                true,
+                Err((ErrorCode::InvalidArgument, NO_CODE_WITHOUT_A_TERMINAL)),
+            ),
+        ];
+        for (label, code, code_stdin, machine, tty, echo_ok, expected) in cases {
+            let got =
+                resolve_invite_code_source(code.clone(), *code_stdin, *machine, *tty, *echo_ok);
+            match expected {
+                Ok(want) => assert_eq!(got.as_ref().ok(), Some(want), "{label}"),
+                Err((want_code, want_message)) => {
+                    let err = got.expect_err(label);
+                    assert_eq!(err.code, *want_code, "{label}");
+                    assert!(!err.retryable, "{label}");
+                    assert_eq!(err.message, *want_message, "{label}");
+                }
+            }
+        }
+    }
+
+    /// An explicit code wins regardless of mode or tty-ness.
+    #[test]
+    fn resolve_invite_code_source_ignores_the_mode_when_a_code_is_given() {
+        for machine_mode in [false, true] {
+            for stdin_is_tty in [false, true] {
+                let got = resolve_invite_code_source(
+                    Some("abcd-efgh".to_string()),
+                    false,
+                    machine_mode,
+                    stdin_is_tty,
+                    true,
+                );
+                assert_eq!(
+                    got,
+                    Ok(InviteCodeSource::UseCode("abcd-efgh".to_string())),
+                    "machine_mode={machine_mode} stdin_is_tty={stdin_is_tty}"
+                );
+            }
+        }
+    }
+
+    /// `exit_code_matrix.rs`'s human leg runs with a non-terminal stdin
+    /// too (`Sandbox::qsh`'s `Stdio::null()`) — that state must not
+    /// silently open a prompt that then reads an empty code from
+    /// `/dev/null`.
+    #[test]
+    fn resolve_invite_code_source_rejects_a_missing_code_without_a_terminal() {
+        let err = resolve_invite_code_source(None, false, false, false, true).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidArgument);
+        assert_eq!(err.message, NO_CODE_WITHOUT_A_TERMINAL);
+    }
+
+    /// Clap's `conflicts_with` blocks this through the CLI, but the
+    /// resolver still answers it — this test is that arm's only caller.
+    #[test]
+    fn resolve_invite_code_source_rejects_a_code_from_both_sources() {
+        let err =
+            resolve_invite_code_source(Some("abcd-efgh".to_string()), true, false, false, true)
+                .unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidArgument);
+        assert_eq!(err.message, BOTH_CODE_SOURCES);
+    }
+
+    /// The two "no code" rejections read distinctly, so the real cause
+    /// (machine mode vs. no terminal) survives into the error message.
+    #[test]
+    fn the_two_missing_code_rejections_have_distinct_messages() {
+        let machine = resolve_invite_code_source(None, false, true, false, true).unwrap_err();
+        let no_tty = resolve_invite_code_source(None, false, false, false, true).unwrap_err();
+        assert_ne!(machine.message, no_tty.message);
+        assert!(
+            machine.message.contains("--json/--jsonl"),
+            "{}",
+            machine.message
+        );
+        assert!(no_tty.message.contains("terminal"), "{}", no_tty.message);
+    }
+
+    /// Trim rule: surrounding whitespace (including CRLF) removed, internal
+    /// whitespace left alone (`PLAN.md` M9 Step 2 (c)'s two trim inputs).
+    #[test]
+    fn normalize_invite_code_trims_surrounding_whitespace_only() {
+        let code = "abcd-efgh-jkmn-pqrs-tvwx-yz23-4567-89ab";
+        assert_eq!(normalize_invite_code(&format!("{code}\n")), code);
+        assert_eq!(normalize_invite_code(&format!("  {code}  ")), code);
+        assert_eq!(normalize_invite_code(&format!("{code}\r\n")), code);
+        assert_eq!(normalize_invite_code(" ab cd "), "ab cd"); // internal space kept
     }
 }

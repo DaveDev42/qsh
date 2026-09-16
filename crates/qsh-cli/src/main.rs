@@ -46,10 +46,11 @@ use std::time::SystemTime;
 use clap::{CommandFactory as _, Parser};
 use qsh_core::{
     AclCheckOp, CapabilitiesOp, CertInitOp, CertIssueOp, DoctorOp, ExecRunOp, ExecStdin, HostGetOp,
-    HostListOp, IdentityInitOp, OpError, Operation, Ops, SchemaOp, SessionAttachOp, SessionCloseOp,
-    SessionGetOp, SessionListOp, SessionOpenOp, SessionReadOp, SessionResizeOp, SessionWriteOp,
-    TrustAcceptOp, TrustAddOp, TrustInviteOp, TrustListOp, TrustRemoveOp, TunnelCloseOp,
-    TunnelListOp, TunnelOpenOp, VersionOp, dynamic_forward_unsupported,
+    HostListOp, IdentityInitOp, InviteCodeSource, OpError, Operation, Ops, SchemaOp,
+    SessionAttachOp, SessionCloseOp, SessionGetOp, SessionListOp, SessionOpenOp, SessionReadOp,
+    SessionResizeOp, SessionWriteOp, TrustAcceptOp, TrustAddOp, TrustInviteOp, TrustListOp,
+    TrustRemoveOp, TunnelCloseOp, TunnelListOp, TunnelOpenOp, VersionOp,
+    dynamic_forward_unsupported, normalize_invite_code, resolve_invite_code_source,
 };
 use qsh_proto::{
     AclCheckReq, CapabilitiesReq, CertInitReq, CertIssueReq, DoctorReq, ErrorCode, ExecRunReq,
@@ -388,15 +389,11 @@ fn run(cli: &Cli) -> i32 {
             ops.trust_invite(TrustInviteReq {}),
             human::print_trust_invite,
         ),
-        Command::Trust(TrustCmd::Accept { address, code }) => finish(
-            cli,
-            TrustAcceptOp::COMMAND,
-            ops.trust_accept(TrustAcceptReq {
-                address: address.clone(),
-                code: code.clone(),
-            }),
-            human::print_trust_accept,
-        ),
+        Command::Trust(TrustCmd::Accept {
+            address,
+            code,
+            code_stdin,
+        }) => run_trust_accept(cli, &ops, address, code.clone(), *code_stdin),
         Command::Cert(CertCmd::Init) => finish(
             cli,
             CertInitOp::COMMAND,
@@ -1155,6 +1152,191 @@ fn prompt_for_pin(name: &str, err: &OpError) -> Prompt {
         "y" | "yes" => Prompt::Accepted(fingerprint.to_string()),
         _ => Prompt::Declined,
     }
+}
+
+/// `qsh trust accept` — the code may come from argv, from stdin, or from a
+/// no-echo terminal prompt.
+///
+/// Which of the three, and whether to refuse instead, is `qsh-core`'s call
+/// ([`resolve_invite_code_source`], `docs/ROADMAP.md` M9 (j)); this
+/// function performs only the I/O that answer names. In `--json`/`--jsonl`
+/// mode the resolver never returns [`InviteCodeSource::Prompt`], and never
+/// returns [`InviteCodeSource::ReadStdin`] with a terminal behind it
+/// either, so machine mode never opens a prompt and never blocks on a
+/// terminal — nothing but the envelope reaches stdout (`docs/CLI.md`
+/// §2.1, §2.2).
+fn run_trust_accept(
+    cli: &Cli,
+    ops: &Ops,
+    address: &str,
+    code: Option<String>,
+    code_stdin: bool,
+) -> i32 {
+    let result = invite_code(code, code_stdin, cli.wants_json()).and_then(|code| {
+        ops.trust_accept(TrustAcceptReq {
+            address: address.to_string(),
+            code,
+        })
+    });
+    finish(
+        cli,
+        TrustAcceptOp::COMMAND,
+        result,
+        human::print_trust_accept,
+    )
+}
+
+/// Obtain the invite code from wherever `qsh-core` says it lives, then
+/// normalize it in exactly one place.
+///
+/// `echo_can_be_suppressed` is `cfg!(unix)`: whether a no-echo prompt is
+/// even possible is itself part of the resolver's decision now (`ops::
+/// resolve_invite_code_source`'s own doc), not a second judgment made
+/// here.
+fn invite_code(
+    code: Option<String>,
+    code_stdin: bool,
+    machine_mode: bool,
+) -> Result<String, OpError> {
+    let source = resolve_invite_code_source(
+        code,
+        code_stdin,
+        machine_mode,
+        io::stdin().is_terminal(),
+        cfg!(unix),
+    )?;
+    let raw = match source {
+        InviteCodeSource::UseCode(code) => code,
+        InviteCodeSource::ReadStdin { suppress_echo } => {
+            read_invite_code_from_stdin(suppress_echo)?
+        }
+        InviteCodeSource::Prompt { text } => read_invite_code_from_terminal(&text)?,
+    };
+    // The one trim site (`normalize_invite_code`'s own doc): every source
+    // funnels through here, so no path can be half-normalized.
+    Ok(normalize_invite_code(&raw).to_string())
+}
+
+/// `--code-stdin`: read to end of input, bounded. `suppress_echo` is only
+/// ever `true` when stdin is a terminal (the resolver's call), in which
+/// case this suppresses echo the same way [`read_invite_code_from_terminal`]
+/// does — reusing the unix-only `EchoSuppressed` guard (not an intra-doc
+/// link: the item does not exist on other targets, and rustdoc under
+/// `-D warnings` rejects a dangling one) rather than duplicating the
+/// termios plumbing — so a typed code does not land in the operator's scrollback
+/// just because they used `--code-stdin` instead of waiting for the
+/// prompt.
+fn read_invite_code_from_stdin(suppress_echo: bool) -> Result<String, OpError> {
+    #[cfg(unix)]
+    let _quiet = if suppress_echo {
+        Some(EchoSuppressed::new()?)
+    } else {
+        None
+    };
+    // Only reachable with `suppress_echo: true` when `cfg!(unix)` is also
+    // true (`ops::resolve_invite_code_source`'s `echo_can_be_suppressed`
+    // gate), so there is nothing to suppress here on any other platform.
+    #[cfg(not(unix))]
+    let _ = suppress_echo;
+
+    let mut raw = String::new();
+    let cap = qsh_core::ops::INVITE_CODE_STDIN_MAX as u64 + 1;
+    io::stdin()
+        .lock()
+        .take(cap)
+        .read_to_string(&mut raw)
+        .map_err(invite_code_read_failure)?;
+    Ok(raw)
+}
+
+fn invite_code_read_failure(err: io::Error) -> OpError {
+    // Same code and shape `session write --stdin` uses for the identical
+    // failure (`run_session_write`, this file).
+    OpError::new(
+        ErrorCode::InvalidArgument,
+        format!("cannot read the invite code: {err}"),
+    )
+    .with_retryable(false)
+}
+
+/// RAII guard: clears `ECHO` on stdin's termios and restores the saved
+/// settings on every exit path, including a panic-unwind. Shared by the
+/// terminal prompt and by `--code-stdin` on a terminal
+/// (`read_invite_code_from_stdin`) — either way, the invite code must not
+/// land in the operator's scrollback.
+///
+/// Not `tui::term::RawMode`: `cfmakeraw` also clears `ICANON`, so
+/// `read_line` would never see the Enter that ends the line, and that
+/// guard publishes into a process-global slot and installs the TUI's own
+/// panic hook (`tui/term.rs`). This clears exactly `ECHO` and nothing
+/// else.
+#[cfg(unix)]
+struct EchoSuppressed(nix::sys::termios::Termios);
+
+#[cfg(unix)]
+impl EchoSuppressed {
+    fn new() -> Result<Self, OpError> {
+        use nix::sys::termios::{self, LocalFlags, SetArg};
+        use std::os::fd::AsFd;
+
+        let stdin = io::stdin();
+        let saved = termios::tcgetattr(stdin.as_fd())
+            .map_err(|err| invite_code_read_failure(io::Error::from(err)))?;
+        let mut quiet = saved.clone();
+        quiet.local_flags.remove(LocalFlags::ECHO);
+        // TCSAFLUSH, not `tui/term.rs`'s TCSADRAIN: anything typed ahead
+        // before echo was off is discarded rather than echoed back.
+        termios::tcsetattr(stdin.as_fd(), SetArg::TCSAFLUSH, &quiet)
+            .map_err(|err| invite_code_read_failure(io::Error::from(err)))?;
+        Ok(Self(saved))
+    }
+}
+
+#[cfg(unix)]
+impl Drop for EchoSuppressed {
+    fn drop(&mut self) {
+        use nix::sys::termios::{self, SetArg};
+        use std::os::fd::AsFd;
+        let _ = termios::tcsetattr(io::stdin().as_fd(), SetArg::TCSAFLUSH, &self.0);
+    }
+}
+
+/// Prompt on stderr and read one line from the terminal with echo off.
+#[cfg(unix)]
+fn read_invite_code_from_terminal(prompt: &str) -> Result<String, OpError> {
+    let _quiet = EchoSuppressed::new()?;
+
+    let stdin = io::stdin();
+    let mut stderr = io::stderr().lock();
+    write!(stderr, "{prompt}")
+        .and_then(|()| stderr.flush())
+        .map_err(invite_code_read_failure)?;
+    drop(stderr);
+
+    let mut line = String::new();
+    let read = stdin.read_line(&mut line);
+    // The terminal did not echo the Enter that ended the line.
+    stderr_note!("");
+    read.map_err(invite_code_read_failure)?;
+    Ok(line)
+}
+
+/// Unreachable in practice: `invite_code` passes `cfg!(unix)` as
+/// `echo_can_be_suppressed`, so on this platform
+/// `ops::resolve_invite_code_source` already refuses
+/// (`NO_TERMINAL_ECHO_SUPPRESSION`, `ErrorCode::Unsupported`) before ever
+/// constructing `InviteCodeSource::Prompt` — that is the actual contract
+/// `docs/CLI.md` §6.11 documents for the Windows client (P1,
+/// `docs/design/architecture.md` §8), and it is now unit-tested there
+/// (`ops::tests::resolve_invite_code_source_decision_table`). This exists
+/// only so the `Prompt` match arm in `invite_code` type-checks on every
+/// platform.
+#[cfg(not(unix))]
+fn read_invite_code_from_terminal(_prompt: &str) -> Result<String, OpError> {
+    unreachable!(
+        "resolve_invite_code_source refuses before returning Prompt when \
+         echo_can_be_suppressed is false"
+    )
 }
 
 /// Render one op result in whichever output mode was requested and return

@@ -57,12 +57,13 @@ pub use hosts::{HostEntry, HostsFile};
 pub use identity::{Identity, KeyStore, KeyStoreError, LoadedIdentity};
 pub use ops::{
     AclCheckOp, AttachHandle, CapabilitiesOp, CertInitOp, CertIssueOp, DetachFlush, DoctorOp,
-    ExecRunOp, ExecRunOutput, ExecStdin, HostGetOp, HostListOp, HostRoute, IdentityInitOp, OpError,
-    Operation, Ops, RecoveryConfig, SchemaOp, SessionAttachOp, SessionAttachStream, SessionCloseOp,
-    SessionGetOp, SessionListOp, SessionOpenOp, SessionReadOp, SessionReadOutput, SessionReader,
-    SessionResizeOp, SessionWriteOp, TrustAcceptOp, TrustAddOp, TrustInviteOp, TrustListOp,
-    TrustRemoveOp, TunnelCloseOp, TunnelHold, TunnelListOp, TunnelOpenOp, VersionOp,
-    dynamic_forward_unsupported, parse_local_forwards, parse_remote_forwards,
+    ExecRunOp, ExecRunOutput, ExecStdin, HostGetOp, HostListOp, HostRoute, INVITE_CODE_PROMPT,
+    INVITE_CODE_STDIN_MAX, IdentityInitOp, InviteCodeSource, OpError, Operation, Ops,
+    RecoveryConfig, SchemaOp, SessionAttachOp, SessionAttachStream, SessionCloseOp, SessionGetOp,
+    SessionListOp, SessionOpenOp, SessionReadOp, SessionReadOutput, SessionReader, SessionResizeOp,
+    SessionWriteOp, TrustAcceptOp, TrustAddOp, TrustInviteOp, TrustListOp, TrustRemoveOp,
+    TunnelCloseOp, TunnelHold, TunnelListOp, TunnelOpenOp, VersionOp, dynamic_forward_unsupported,
+    normalize_invite_code, parse_local_forwards, parse_remote_forwards, resolve_invite_code_source,
 };
 pub use trust::{SharedTrustStore, TrustStore};
 

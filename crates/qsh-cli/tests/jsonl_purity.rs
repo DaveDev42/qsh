@@ -97,6 +97,33 @@ fn a_noisy_exec_keeps_stdout_pure_json_at_every_verbosity() {
     }
 }
 
+/// `PLAN.md` M9 Step 2: refusing `trust accept` for lack of a code must
+/// not leak the terminal-prompt wording onto stdout at any verbosity —
+/// the resolver never opens the prompt in machine mode, so there is
+/// nothing to leak, but this pins that as a regression test rather than
+/// leaving it to the resolver's own unit test alone.
+#[test]
+fn trust_accept_with_no_code_keeps_stdout_pure_json_at_every_verbosity() {
+    let client = Sandbox::initialized();
+    for (label, mode, verbosity) in [
+        ("--jsonl -vv", "--jsonl", "-vv"),
+        ("--json -vvv", "--json", "-vvv"),
+    ] {
+        let output = client.qsh(&["trust", "accept", "127.0.0.1:1", verbosity, mode]);
+        assert_eq!(exit_code(&output), 255, "{label}");
+        let lines = parse_stdout_lines(&output.stdout, label);
+        assert_eq!(lines.len(), 1, "{label}");
+        assert_eq!(lines[0]["ok"], false, "{label}");
+        assert_eq!(lines[0]["command"], "trust.accept", "{label}");
+        assert_eq!(lines[0]["error"]["code"], "INVALID_ARGUMENT", "{label}");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            !stdout.contains(qsh_core::ops::INVITE_CODE_PROMPT),
+            "{label}: {stdout:?}"
+        );
+    }
+}
+
 /// Assert that `stdout` is one or more lines, each a complete
 /// `qsh.event/v1` object, and return them. Deliberately a separate parser
 /// from [`parse_stdout_lines`]: a follower streams bare events, so the
