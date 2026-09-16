@@ -22,7 +22,7 @@
 //!   process (`PLAN.md` M4 Step 3).
 //! - [`procstat`]: `/proc`-based RSS/fd readers and the poll-until-stable
 //!   convergence helper T2's `adversarial_load.rs` and M8 Step 5's
-//!   `soak.rs` both need (`BRIEF-5.md` §4.1, moved from
+//!   `soak.rs` both need (docs/campaigns/m8-soak.md §4, moved from
 //!   `crates/qsh-cli/tests/common/mod.rs`).
 //!
 //! This crate may depend on any workspace crate.

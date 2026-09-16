@@ -859,9 +859,8 @@ async fn case17b_pairing_closed_still_rejects_unpinned_peer() {
 /// to compute a principal" directly, rather than inferring it from the
 /// accept outcome alone (`ServerAccept::HandshakeErr` proves no
 /// `Connection` was produced, but not that `lookup_pin` itself was never
-/// called — BRIEF-6 §1 item 4 / lens-2 finding). `ca_roots`/
-/// `pairing_open` pass straight through so wrapping never changes
-/// accept behavior, only observes it.
+/// called). `ca_roots`/`pairing_open` pass straight through so wrapping
+/// never changes accept behavior, only observes it.
 struct CountingTrust {
     inner: StaticTrust,
     lookups: AtomicUsize,
@@ -901,8 +900,8 @@ impl TrustEvaluator for CountingTrust {
 /// [`qsh_transport::endpoint::is_crypto_failure`]'s whole `0x100..=0x1ff`
 /// crypto-class band, which also accepts unrelated alerts (e.g. a
 /// certificate failure) — case18's own doc names `no_application_protocol`
-/// specifically, so the assertion should too (BRIEF-6 §1 item 4 / lens-2
-/// finding: confirmed by probe against a live mismatch, see PROGRESS-6).
+/// specifically, so the assertion should too (confirmed by probe against
+/// a live mismatch).
 const ALPN_MISMATCH_ERROR_CODE: u64 = 0x100 + 120;
 
 /// True when `err` is exactly the QUIC `ConnectionClosed` carrying
@@ -919,7 +918,7 @@ fn is_alpn_mismatch(err: &quinn::ConnectionError) -> bool {
 }
 
 // ---------------------------------------------------------------------
-// 18. ALPN mismatch (BRIEF-6 §1.2) -- client's cert and both trust stores
+// 18. ALPN mismatch -- client's cert and both trust stores
 //     are otherwise exactly case01's happy path; only the ALPN the client
 //     advertises differs (`qsh/0` instead of the wire's `qsh/1`,
 //     `qsh_proto::wire::ALPN`). Invariant under test: an ALPN mismatch
@@ -1009,8 +1008,7 @@ async fn case18_alpn_mismatch_remote_rejected_before_application_state() {
 /// certs both ways). If the wrapper actually counted nothing regardless of
 /// what happened on the wire, case18's `lookup_count() == 0` assertion
 /// would be vacuous. This shows the opposite for a case that must reach
-/// verification: at least one `lookup_pin` call (BRIEF-6 §1 item 4 / lens-2
-/// finding).
+/// verification: at least one `lookup_pin` call.
 #[tokio::test(flavor = "multi_thread")]
 async fn case18_control_lookup_pin_wrapper_counts_a_successful_handshake() {
     let server = self_signed_valid();

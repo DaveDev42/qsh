@@ -269,11 +269,10 @@ impl LoopbackHarness {
     }
 
     /// [`Self::start_with_admission`] and [`Self::start_with_quotas`]
-    /// combined (`ARBITRATION-4.md` J4, `start_inner` already takes
-    /// both) — for a test that needs quota limits pinned down tight
-    /// while the *admission* axis (handshake concurrency, per-source
-    /// rate limits) is opened wide so it never becomes the bottleneck
-    /// being measured (`crates/qsh-testkit/tests/quota.rs`'s
+    /// combined (`start_inner` already takes both) — for a test that needs
+    /// quota limits pinned down tight while the *admission* axis (handshake
+    /// concurrency, per-source rate limits) is opened wide so it never becomes
+    /// the bottleneck being measured (`crates/qsh-testkit/tests/quota.rs`'s
     /// connection-/session-flood-vs-existing-session-echo tests). Single
     /// pinned client identity — no [`Self::second_client`]/
     /// [`Self::second_dialer`], same as [`Self::start_custom_with_quotas`].

@@ -2,8 +2,8 @@
 //! `docs/design/testing.md` L9/L10, `docs/ROADMAP.md` M8 DoD 5).
 //!
 //! Unlike the rest of `qsh-cli`'s integration suite, this file measures a
-//! **release** `qsh serve` subprocess (`BRIEF-4c.md` §3.2/J2) and only runs
-//! its scenarios under an explicit env gate:
+//! **release** `qsh serve` subprocess (docs/campaigns/m8-adversarial-load.md
+//! §2) and only runs its scenarios under an explicit env gate:
 //!
 //! - `QSH_LOAD_STRICT=1` turns the gate on. This is deliberately a new name
 //!   rather than the existing `QSH_ACCEPTANCE_STRICT`/`QSH_ACCEPTANCE_SLOW`
@@ -38,7 +38,7 @@ use std::path::PathBuf;
 // every scenario's RSS assertion uses land with the scenarios themselves
 // in S2/S3 — this stage only has a floor to check, not a ceiling.
 
-/// Lower bound every RSS reading must clear (J2/J15 mutation M6) — a
+/// Lower bound every RSS reading must clear (mutation M6 of the 4c review) — a
 /// measurement helper that always returns near-zero must not be mistaken
 /// for "the listener is impossibly lean".
 const RSS_FLOOR_KIB: u64 = 2 * 1024;
@@ -74,7 +74,8 @@ fn skip() {
 }
 
 /// A `qsh serve` release subprocess plus the sandbox it runs in, the unit
-/// every T2 scenario is built from (`BRIEF-4c.md` §3.2, mirroring
+/// every T2 scenario is built from (docs/campaigns/m8-adversarial-load.md §2,
+/// mirroring
 /// `fixtures.rs:575-604`'s `golden_resource_exhausted_fixture` hand-built
 /// host).
 struct LoadFleet {
@@ -93,7 +94,7 @@ impl LoadFleet {
 /// caller only reaches this after [`gate_requested`] is already true, so a
 /// missing `QSH_LOAD_BIN` at this point is a strict-mode configuration
 /// error, not something to paper over quietly (mutation (b) in
-/// `PROGRESS-4.md`'s Stage 4c-S1 exercises exactly this).
+/// Stage 4c-S1 exercises exactly this).
 fn load_bin() -> PathBuf {
     std::env::var_os("QSH_LOAD_BIN")
         .map(PathBuf::from)
@@ -101,7 +102,8 @@ fn load_bin() -> PathBuf {
             panic!(
                 "QSH_LOAD_STRICT=1 but QSH_LOAD_BIN is not set — T2 measures a release `qsh` \
                  binary and refuses to silently substitute the nextest-built debug binary \
-                 (BRIEF-4c.md §3.5/J2); set QSH_LOAD_BIN=$(pwd)/target/release/qsh after \
+                 (docs/campaigns/m8-adversarial-load.md §2); set \
+                 QSH_LOAD_BIN=$(pwd)/target/release/qsh after \
                  `cargo build --release -p qsh-cli`."
             )
         })
@@ -174,8 +176,8 @@ async fn fleet_boot_reports_rss_and_fd_above_the_floor() {
 }
 
 /// Pure-function unit test for `common::converged` — no `/proc`, no
-/// sleeping, runs on every platform including macOS (J15/`ARBITRATION-4.md`
-/// 4c 판정: helper unit tests are pure-function level).
+/// sleeping, runs on every platform including macOS (helper unit
+/// tests are pure-function level).
 #[test]
 fn converged_requires_three_consistent_samples_by_the_one_percent_bound() {
     assert!(!converged(&[]));
@@ -226,7 +228,7 @@ mod linux_only {
     }
 
     /// One `scenario N name: observed vs bound (verdict)` diagnostic block
-    /// (`BRIEF-4c.md` §3.6). Every T2 scenario `eprintln!`s this on both
+    /// (docs/campaigns/m8-adversarial-load.md §6). Every T2 scenario `eprintln!`s this on both
     /// success and failure, so a green run's log is exactly what
     /// `docs/campaigns/m8-adversarial-load.md`'s round-record table copies
     /// from. Constructed by scenarios 1, 2 and 3 (Stage 4c-S2).
@@ -384,7 +386,7 @@ mod linux_only {
     }
 
     // ---------------------------------------------------------------------
-    // Stage 4c-S2 (`BRIEF-4c.md` §4.1-§4.3, §6 S2): scenarios 1, 2, 3.
+    // Stage 4c-S2 (docs/campaigns/m8-adversarial-load.md §3, §6): scenarios 1, 2, 3.
     // ---------------------------------------------------------------------
 
     /// `docs/PRD.md:286` idle-listener bound — also J2's post-flood idle
@@ -417,12 +419,12 @@ mod linux_only {
     }
 
     /// [`boot`] plus one pinned "flood" client identity — every S2/S3 scenario
-    /// dials as this single principal (`BRIEF-4c.md` §4.2/§4.3 only override
+    /// dials as this single principal (scenarios 2 and 3 only override
     /// host-wide/per-principal caps, neither of which needs more than one
     /// identity to exercise). The pin has to land in `trust.toml` *before*
-    /// [`ServeGuard::start_with_bin`] runs `plant_allow_all_acl` (`BRIEF-4c.md`
-    /// §3.2's `boot()` has no such seam, hence this sibling rather than a
-    /// `boot()` parameter every S1-era caller would have to thread through).
+    /// [`ServeGuard::start_with_bin`] runs `plant_allow_all_acl` (`boot()`
+    /// has no such seam, hence this sibling rather than a `boot()` parameter
+    /// every S1-era caller would have to thread through).
     fn boot_with_flood_client(config_toml: &str) -> (LoadFleet, TestIdentity) {
         common::ensure_nofile_limit();
         let bin = load_bin();
@@ -517,7 +519,8 @@ mod linux_only {
     /// `ulimit -n`'s soft limit, shelled out (`sh -c ulimit -n`: it is a shell
     /// builtin, not a program, so there is nothing to exec directly) — for
     /// [`Diagnostics::nofile_limit`] only; never load-bearing for a scenario's
-    /// own pass/fail (`BRIEF-4c.md` §2.2 asks only that it be *recorded*).
+    /// own pass/fail (docs/campaigns/m8-adversarial-load.md §2 asks only
+    /// that it be *recorded*).
     fn nofile_limit() -> Option<u64> {
         let output = std::process::Command::new("sh")
             .arg("-c")
@@ -543,8 +546,8 @@ mod linux_only {
     /// `user` feature). Only used to skip
     /// `session_open_fails_closed_when_a_freshly_restarted_writer_cannot_
     /// create_the_audit_log` under uid 0, where `chmod 500` on a directory
-    /// does not stop file creation in it (A17's own judgment,
-    /// `ARBITRATION-4.md` "root면 skip"). `false` on any failure to read
+    /// does not stop file creation in it (A17's own judgment: skip under
+    /// root). `false` on any failure to read
     /// `id -u` — a non-root default only ever makes the scenario run and
     /// hit its own bounded-attempts assertion instead of silently skipping.
     fn running_as_root() -> bool {
@@ -562,8 +565,7 @@ mod linux_only {
     }
 
     /// True while `fleet`'s `qsh serve` child has not exited on its own — the
-    /// "server survives the flood" half of every scenario's common assertions
-    /// (`BRIEF-4c.md` §4 "서버가 살아 있고 stderr에 panic이 없다").
+    /// "server survives the flood" half of every scenario's common assertions.
     fn server_alive(fleet: &mut LoadFleet) -> bool {
         fleet
             .serve
@@ -571,8 +573,8 @@ mod linux_only {
             .is_none()
     }
 
-    /// Scenario 2 (`BRIEF-4c.md` §4.2/J4): 64 dials past `max_connections=16`,
-    /// 8 at a time, must admit exactly 16 and refuse the rest with
+    /// Scenario 2 (docs/campaigns/m8-adversarial-load.md §3): 64 dials past
+    /// `max_connections=16`, 8 at a time, must admit exactly 16 and refuse the rest with
     /// `RESOURCE_EXHAUSTED`/`retryable`, leaving the subprocess listener's
     /// RSS/fd bounded both mid-flood and after every connection closes.
     /// `handshake_rate_per_source`/`validated_rate_per_source` are raised to
@@ -803,7 +805,7 @@ mod linux_only {
         finish_scenario(diag, violations);
     }
 
-    /// Scenario 3 (`BRIEF-4c.md` §4.3/J5): a single principal saturates
+    /// Scenario 3 (docs/campaigns/m8-adversarial-load.md §3): a single principal saturates
     /// `max_sessions_per_principal=8`, then floods `session.open` from a
     /// second connection for ~10s while an existing session's **real PTY**
     /// echo (not `PipeFactory`'s pipe echo — the property DoD 5 actually
@@ -1069,7 +1071,8 @@ mod linux_only {
         finish_scenario(diag, violations);
     }
 
-    /// Scenario 1 (`BRIEF-4c.md` §4.1/J3): an 8-source spoofed Initial flood
+    /// Scenario 1 (docs/campaigns/m8-adversarial-load.md §3): an
+    /// 8-source spoofed Initial flood
     /// (40 dials/source, well past the default `burst_limit=20`) must produce
     /// both `rate_limited` (unvalidated) and `validated_rate_limited`
     /// (post-Retry) audit rows, survive a raw-UDP garbage sub-phase, and still
@@ -1091,8 +1094,8 @@ mod linux_only {
         const ATTEMPTS_PER_SOURCE: usize = 40;
         const GARBAGE_PACKETS_PER_SOURCE: usize = 10_000;
         // `handshake_rate_per_source` stays at its default (10, burst 20 —
-        // `BRIEF-4c.md`'s "burst 20을 넘기는 것이 목적" for the unvalidated
-        // axis). `validated_rate_per_source` is lowered here (WSL 실측,
+        // the point is to drive the unvalidated axis past that burst).
+        // `validated_rate_per_source` is lowered here (WSL 실측,
         // Stage 4c-S2): the unvalidated gate itself caps how many of each
         // source's attempts ever complete Retry and reach the validated
         // sketch at roughly its own burst (~20, same EPOCH/burst formula,
@@ -1241,7 +1244,7 @@ mod linux_only {
             .iter()
             .filter(|v| v["resource"] == "validated_rate_limited")
             .count();
-        // Window-summary upper bound (`BRIEF-4c.md` §4.4's formula, applied
+        // Window-summary upper bound (docs/campaigns/m8-adversarial-load.md §3's formula, applied
         // per single category here: `(ceil(T/10) + 1) * 2` — first row plus
         // one summary row per 10s aggregation window
         // (`admission.rs::AUDIT_AGGREGATION_WINDOW`), +1 window for the
@@ -1319,8 +1322,8 @@ mod linux_only {
     }
 
     // ---------------------------------------------------------------------
-    // Stage 4c-F2 (`ARBITRATION-4.md` "4c 적대 검토 판정" A4/A5/A6/A15/A17/
-    // B5): scenario 12 split into three narrower ones. The original single
+    // Stage 4c-F2 (adversarial review findings A4/A5/A6/A15/A17/B5):
+    // scenario 12 split into three narrower ones. The original single
     // `a_sustained_rejection_flood_keeps_the_audit_log_bounded` is gone —
     // A4/A5/A6/B5 all independently found its two "bounds" non-
     // discriminating (A4: `max_bytes` never came close to triggering a
@@ -1343,7 +1346,7 @@ mod linux_only {
     /// listener with `concurrency` inflight dials. Returns the actual
     /// elapsed wall-clock time.
     ///
-    /// Stage 4c-F2c (ARBITRATION-4.md "4c 적대 검토 판정", F2a's own
+    /// Stage 4c-F2c (from the adversarial review, F2a's own
     /// 반박 1): 12a's earlier rolling-concurrency flood (8 concurrent
     /// dials, replace-on-completion) drove `quota_connections_host`
     /// rejections at ~19/s, saturating `Server::run`'s accept loop with an
@@ -1467,7 +1470,7 @@ mod linux_only {
         }
     }
 
-    /// Scenario 12a (`BRIEF-4c.md` §4.4/J7, split by 4c adversarial review
+    /// Scenario 12a (docs/campaigns/m8-adversarial-load.md §3, split by 4c adversarial review
     /// A4/A5/A6): a sustained connection-cap rejection flood held for
     /// `FLOOD_DURATION` must leave the reject-category audit row count
     /// bounded *both* ways — an upper bound from the window-aggregation
@@ -1650,7 +1653,7 @@ mod linux_only {
         );
     }
 
-    /// Scenario 12b (`BRIEF-4c.md` §4.4/J7, split by A4/B5, reworked
+    /// Scenario 12b (docs/campaigns/m8-adversarial-load.md §3, split by A4/B5, reworked
     /// Stage 4c-F2c per F2a's 반박 2): `[audit].max_bytes` narrowed to a
     /// few hundred bytes so rotation *actually happens repeatedly* (A4's
     /// fix), driven by an `open_close_cycle` of ordinary allowed
@@ -1782,9 +1785,10 @@ mod linux_only {
         );
     }
 
-    // Scenario 12c (`BRIEF-4c.md` §4.6/A17) was attempted and dropped
-    // in this stage (4c-F2) per the escape clause A17/§4.6 itself names
-    // ("결정적으로 안 되면 근거 적고 뺀다"). The construction A17 proposed
+    // Scenario 12c (A17) was attempted and dropped in this stage (4c-F2)
+    // per docs/campaigns/m8-adversarial-load.md §3's escape clause: when a
+    // construction cannot be made to work, record why and drop it.
+    // The construction A17 proposed
     // — `chmod 500` the state directory to force `rotate_files`'s
     // `fs::rename` to EACCES — never reaches the fail-closed
     // `PERMISSION_DENIED` latch this scenario was meant to observe,
@@ -1818,9 +1822,8 @@ mod linux_only {
     // create_the_audit_log`) is the "fresh writer restart" case this
     // comment names — it does reach `degraded` at the e2e level.
 
-    /// Scenario 12c, second construction (`PLAN.md` M8 Step 5 (d),
-    /// `ARBITRATION-5.md` "병행 정리 묶음 판정" Q5). The first construction
-    /// (comment block directly above) locked the directory down *after*
+    /// Scenario 12c, second construction (`PLAN.md` M8 Step 5 (d)). The first
+    /// construction (comment block directly above) locked the directory down *after*
     /// the writer already held an open fd on `audit.log` — POSIX
     /// permission checks happen at `open()`, not per-write, so it never
     /// reached `degraded`. This construction locks the directory down
@@ -1854,8 +1857,7 @@ mod linux_only {
     /// Root bypasses every POSIX permission check this construction
     /// depends on (`chmod 500` on a directory does not stop `root` from
     /// creating files in it), so this test skips under uid 0 — A17's own
-    /// judgment (`ARBITRATION-4.md` "12c 회전 실패 fail-closed를 A17의
-    /// 구성으로 만든다... root면 skip") carried forward to this second
+    /// judgment to skip under root, carried forward to this second
     /// construction.
     #[cfg(target_os = "linux")]
     #[tokio::test(flavor = "multi_thread")]
@@ -1869,8 +1871,8 @@ mod linux_only {
             eprintln!(
                 "SKIP: this construction depends on the POSIX permission check root bypasses \
                  (`chmod 500` on state_dir never stops root from creating `audit.log` in it), \
-                 so it cannot observe the fail-closed latch under uid 0 — `ARBITRATION-4.md` \
-                 \"12c 회전 실패 fail-closed를 A17의 구성으로 만든다... root면 skip\""
+                 so it cannot observe the fail-closed latch under uid 0 (why 12c left the \
+                 campaign proper: docs/campaigns/m8-adversarial-load.md §3)."
             );
             return;
         }
@@ -2013,7 +2015,7 @@ mod linux_only {
             .expect("restore state_dir permissions before teardown");
     }
 
-    /// Scenario 13 (`BRIEF-4c.md` §4.5/J13, B-P2-6): the *default*
+    /// Scenario 13 (docs/campaigns/m8-adversarial-load.md §3, B-P2-6): the *default*
     /// `max_tunnel_streams_per_forward=64` path, never exercised by any
     /// other test in the tree (`quota.rs`'s own twin lowers the cap to
     /// reach it quickly instead) — 512 concurrent TCP dials against one
@@ -2289,7 +2291,7 @@ mod linux_only {
         finish_scenario(diag, violations);
     }
 
-    /// Scenario 13, assertion 7 (`BRIEF-4c.md` §4.5 item 7): with
+    /// Scenario 13, assertion 7 (docs/campaigns/m8-adversarial-load.md §3): with
     /// `max_tunnel_streams_per_principal` lowered below the forward's own
     /// default cap, the rejection category must shift from
     /// `quota_tunnels_forward` to `quota_tunnels_principal` — same accept
@@ -2400,7 +2402,7 @@ mod linux_only {
     }
 
     /// A-P2-4, promoted from diagnostic to a hard assertion by M8 Step 5's
-    /// R2 window-key change (`BRIEF-4c.md` §4.5 originally deferred this;
+    /// R2 window-key change (docs/campaigns/m8-adversarial-load.md §3 originally deferred this;
     /// `crates/qsh-core/src/quota.rs`'s `record_rejection` now keys its
     /// audit window on `(category, principal)`, not category alone): two
     /// independently owned `-R` forwards' accept-cap rejections each open

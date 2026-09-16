@@ -89,8 +89,8 @@ pub(crate) fn write_atomically(path: &Path, contents: &[u8], durable: bool) -> i
         #[cfg(unix)]
         if durable {
             // Durability of the rename itself: fsync the directory entry,
-            // not just the file's own contents. Never propagated (REVIEW-5-A
-            // A1) — a filesystem that refuses directory fsync (some network
+            // not just the file's own contents. Never propagated — a
+            // filesystem that refuses directory fsync (some network
             // filesystems) must not break the write that already landed;
             // the only thing lost is "retry instead of an orphaned session"
             // (`resume.rs`'s own doc on `durable`), not the write itself.
@@ -166,8 +166,7 @@ fn parse_temp_suffix(file_name: &str) -> Option<u32> {
 /// target just because another process's stale one shares the directory.
 const STALE_AGE: Duration = Duration::from_secs(60 * 60);
 
-/// The second, unconditional threshold (REVIEW-5-A A6/A7, ARBITRATION-5
-/// 적대 검토 A 판정: 채택). A crash is normally followed by a restart, and
+/// The second, unconditional threshold. A crash is normally followed by a restart, and
 /// often a reboot — after a reboot the crashed writer's pid is drawn from
 /// a fresh pid space and can be alive again as a completely unrelated
 /// process, at which point [`process_is_dead`]'s `ESRCH` check never
@@ -252,11 +251,10 @@ pub(crate) fn sweep_stale_temp_files(dir: &Path) -> usize {
 /// for the next sweep. This proof is not forever-reachable: after a
 /// reboot the dead writer's pid can be reused by an unrelated live
 /// process, and `ESRCH` never fires again for that file — [`STALE_AGE_ANY_WRITER`]
-/// is what eventually reclaims an orphan this check can no longer clear
-/// (REVIEW-5-A A6).
+/// is what eventually reclaims an orphan this check can no longer clear.
 ///
 /// Non-unix has no equivalent liveness check available here, so this
-/// always reports "not proven dead" (REVIEW-5-A A7) — on that platform
+/// always reports "not proven dead" — on that platform
 /// only [`STALE_AGE_ANY_WRITER`] ever sweeps a temp file;
 /// [`sweep_stale_temp_files`]'s `STALE_AGE`-plus-liveness branch is
 /// unreachable there.
@@ -276,8 +274,8 @@ fn process_is_dead(pid: u32) -> bool {
 
 #[cfg(not(unix))]
 fn process_is_dead(_pid: u32) -> bool {
-    // No proof of death is available on this platform at all (REVIEW-5-A
-    // A7) — the old `true` here made every temp file older than
+    // No proof of death is available on this platform at all — the old
+    // `true` here made every temp file older than
     // `STALE_AGE` (1h) sweepable regardless of whether its writer was
     // still running, which is exactly backwards: "no evidence either way"
     // must not be treated as "proven dead". `STALE_AGE_ANY_WRITER` (24h,
@@ -303,7 +301,7 @@ mod tests {
         // a bit `GENERIC_READ` does not carry. `std`'s own path-based
         // `fs::set_times` reopens with `FILE_WRITE_ATTRIBUTES` for exactly
         // this reason; do the same here or Windows CI fails every test that
-        // calls this helper with `ERROR_ACCESS_DENIED` (REVIEW-5-C C1).
+        // calls this helper with `ERROR_ACCESS_DENIED`.
         std::fs::File::options()
             .write(true)
             .open(path)
@@ -347,7 +345,7 @@ mod tests {
         );
     }
 
-    /// REVIEW-5-A A6/A7: past [`STALE_AGE_ANY_WRITER`] the sweep no longer
+    /// Past [`STALE_AGE_ANY_WRITER`] the sweep no longer
     /// asks `process_is_dead` at all — even a live (this test's own) pid's
     /// temp file is deleted once it is old enough, on every platform (not
     /// `#[cfg(unix)]`: non-unix's `process_is_dead` always answers "not
@@ -435,7 +433,7 @@ mod tests {
         assert_eq!(parse_temp_suffix("resume.json.corrupt"), None);
     }
 
-    /// REVIEW-5-A A1: `durable` is the only behavioral difference between
+    /// `durable` is the only behavioral difference between
     /// the two writers this module merged (`config::write_private_file_io`
     /// and `resume`'s durable session-file writer), and fsync itself is not
     /// observable in-process (no crash-injection harness here). A
@@ -465,7 +463,7 @@ mod tests {
         );
     }
 
-    /// REVIEW-5-A A1: the `durable` branch (mutation m5) had zero coverage
+    /// The `durable` branch (mutation m5) had zero coverage
     /// — nothing exercised it at all. This does not (cannot, without crash
     /// injection) prove the fsyncs happen; it proves the branch runs and
     /// still produces a correct file, so the source pin above is the thing
@@ -479,7 +477,7 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"x");
     }
 
-    /// REVIEW-5-A A2 (mutation m9, survived): `OpenOptions::mode(0o600)` is
+    /// Mutation m9 survived: `OpenOptions::mode(0o600)` is
     /// ignored when the temp file already exists, so the `set_permissions`
     /// re-assertion is the only thing that closes that hole — reachable on
     /// a pid-reuse restart, where `WRITE_TICKET` restarts at 0 and

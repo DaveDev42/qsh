@@ -97,7 +97,8 @@ impl Sandbox {
     /// Like [`command`](Self::command), but against an explicit binary
     /// rather than the nextest-built `CARGO_BIN_EXE_qsh` — T2's adversarial
     /// load harness (`crates/qsh-cli/tests/adversarial_load.rs`) measures a
-    /// release build, never the debug test binary (`BRIEF-4c.md` §3.2/J2).
+    /// release build, never the debug test binary
+    /// (docs/campaigns/m8-adversarial-load.md §2/J2).
     pub fn command_with_bin(&self, bin: &Path, args: &[&str]) -> Command {
         let mut command = Command::new(bin);
         command
@@ -375,8 +376,8 @@ impl ServeGuard {
     }
 
     /// Like [`start_with`](Self::start_with), against an explicit release
-    /// binary rather than `CARGO_BIN_EXE_qsh` (`BRIEF-4c.md` §3.2/J2 — T2
-    /// measures a release `qsh serve`, never the debug test binary).
+    /// binary rather than `CARGO_BIN_EXE_qsh` (docs/campaigns/m8-adversarial-load.md
+    /// §2/J2 — T2 measures a release `qsh serve`, never the debug test binary).
     pub fn start_with_bin(host: &Sandbox, bin: &Path, extra: &[&str]) -> Self {
         plant_allow_all_acl(host);
         Self::spawn_with_bin(host, bin, extra)
@@ -890,13 +891,12 @@ pub fn wait_for_audit(
     }
 }
 
-// --- T2 adversarial load measurement helpers (`PLAN.md` M8 Step 4c,
-// `BRIEF-4c.md` §3.3/§3.1). `qsh-cli`'s other integration-test binaries
-// never call these, but this module's blanket `#![allow(dead_code)]` at
-// the top of the file already covers that — no separate
-// `#[allow(dead_code)]` is added here (`ARBITRATION-4.md` 4c 판정 §3.1).
+// --- T2 adversarial load measurement helpers (`PLAN.md` M8 Step 4c).
+// `qsh-cli`'s other integration-test binaries never call these, but this
+// module's blanket `#![allow(dead_code)]` at the top of the file already
+// covers that — no separate `#[allow(dead_code)]` is added here (4c 판정 참고).
 
-// M8 Step 5 (`BRIEF-5.md` §4.1): the RSS/fd readers, the poll-until-stable
+// M8 Step 5 (docs/campaigns/m8-soak.md §2): the RSS/fd readers, the poll-until-stable
 // convergence helper, `RssPeakSampler`, and `ensure_nofile_limit` moved to
 // `qsh-testkit::procstat` so `soak.rs` can share them without duplicating
 // `/proc` parsing — same precedent as `raw_quic.rs`'s move in 4c. Re-export

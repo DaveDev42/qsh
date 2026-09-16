@@ -2,7 +2,7 @@
 //! integration tests (T2 `adversarial_load.rs`, M8 Step 5's `soak.rs`).
 //!
 //! Moved here from `crates/qsh-cli/tests/common/mod.rs`
-//! (`BRIEF-5.md` §4.1, precedent: `raw_quic.rs`'s move in 4c): both test
+//! (docs/campaigns/m8-soak.md §4, precedent: `raw_quic.rs`'s move in 4c): both test
 //! files need the same `/proc`-based RSS/fd readers and the same
 //! poll-until-stable convergence helper, and `qsh-cli` already carries
 //! `qsh-testkit` as a dev-dependency, so a second copy in `soak.rs` would
@@ -95,11 +95,11 @@ const STABILIZE_WINDOW: usize = 3;
 /// which a metric counts as stable.
 const STABILIZE_REL_TOLERANCE: f64 = 0.01;
 
-/// Poll interval for [`poll_stable`] (`BRIEF-4c.md` §3.3 — 200ms steps).
+/// Poll interval for [`poll_stable`] (docs/campaigns/m8-adversarial-load.md §3 — 200ms steps).
 pub const STABILIZE_INTERVAL: Duration = Duration::from_millis(200);
 
-/// Poll ceiling for [`poll_stable`] (`BRIEF-4c.md` §3.3 — at most 25
-/// reads, i.e. 5s worst case).
+/// Poll ceiling for [`poll_stable`] (docs/campaigns/m8-adversarial-load.md §3 —
+/// at most 25 reads, i.e. 5s worst case).
 pub const STABILIZE_MAX_ITERS: usize = 25;
 
 /// True once the last `STABILIZE_WINDOW` entries of `history` (oldest
@@ -125,7 +125,7 @@ pub fn converged(history: &[u64]) -> bool {
 /// times, stopping early once [`converged`] holds. Returns the last
 /// reading and whether it converged before the ceiling — a caller that
 /// gets `false` back writes "수렴하지 않음" into its diagnostic block
-/// rather than trusting the value as settled (`BRIEF-4c.md` §3.3). A `None`
+/// rather than trusting the value as settled (docs/campaigns/m8-adversarial-load.md §3). A `None`
 /// reading (metric unavailable on this platform) is not counted toward
 /// convergence but does not stop the poll either — the ceiling still
 /// applies, and the caller sees the final `None` and `converged = false`.
@@ -159,7 +159,7 @@ pub async fn poll_stable<F: FnMut() -> Option<u64>>(mut sample: F) -> (Option<u6
 }
 
 /// Sampling interval for [`RssPeakSampler`] — the same 200ms cadence
-/// [`poll_stable`] uses (`ARBITRATION-4.md` 4c 적대 검토 판정, A1/A2/A12/B2).
+/// [`poll_stable`] uses (docs/campaigns/m8-adversarial-load.md §3).
 pub const RSS_PEAK_SAMPLE_INTERVAL: Duration = Duration::from_millis(200);
 
 /// Tracks `rss_kib(pid)`'s maximum on a background task while a load

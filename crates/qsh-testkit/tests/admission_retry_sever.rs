@@ -1,4 +1,4 @@
-//! P3-6 재dial 케이던스 (`ARBITRATION-4.md` J6, F1). A client recovering
+//! P3-6 재dial 케이던스. A client recovering
 //! from a dead path re-dials the same host from the same source address,
 //! and must never re-dial fast enough for that host's `admission::Gate` to
 //! see a burst. The gate's threshold at the shipping default is

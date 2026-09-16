@@ -1,5 +1,5 @@
-//! M8 Step 5b — the 24h/100-session soak harness (`BRIEF-5.md` §4,
-//! `docs/ROADMAP.md` M8 DoD 2).
+//! M8 Step 5b — the 24h/100-session soak harness (`docs/campaigns/m8-soak.md`
+//! §1, `docs/ROADMAP.md` M8 DoD 2).
 //!
 //! One scenario, one env gate, two speeds:
 //!
@@ -15,8 +15,8 @@
 //! Unlike T2, this scenario drives its client side through the real
 //! [`Ops`] facade — `session_open`/`session_attach` — rather than a raw
 //! wire client: `Ops::session_attach`'s `connect_target` call is exactly
-//! the per-pull dial path M7 carryover (iii) is about (`BRIEF-5.md` §1.1,
-//! `crates/qsh-core/src/ops/session.rs:1057`), so every cycle's replacement
+//! the per-pull dial path M7 carryover (iii) is about
+//! (`crates/qsh-core/src/ops/session.rs:1057`), so every cycle's replacement
 //! session is a real fresh dial, not a simulation of one.
 //!
 //! `rss_kib`/`open_fd_count` are Linux-only (`qsh_testkit::procstat`), so
@@ -25,7 +25,7 @@
 //! `adversarial_load.rs`, expressed as a runtime check here instead of a
 //! `#[cfg(target_os = "linux")]` module split, because a caller who sets
 //! `QSH_LOAD_STRICT=1` on a non-Linux host needs a loud, explicit failure
-//! (`BRIEF-5.md` §2), not a silent compile-time absence.
+//! (`docs/campaigns/m8-soak.md` §2), not a silent compile-time absence.
 
 mod common;
 
@@ -44,7 +44,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// CSV header, pinned (`BRIEF-5.md` §4.3): `scripts/soak/summarize.py` and
+/// CSV header, pinned (`docs/campaigns/m8-soak.md` §6): `scripts/soak/summarize.py` and
 /// `docs/campaigns/m8-soak.md`'s record template both depend on this exact
 /// column order and spelling never drifting out from under them.
 pub const SOAK_CSV_HEADER: &str = "t_secs,phase,listener_rss_kib,listener_fds,self_rss_kib,self_fds,live_sessions,cycles,echo_p95_ms,abandoned_live";
@@ -65,8 +65,8 @@ fn soak_csv_header_is_pinned() {
 /// `scripts/soak/summarize.py`'s `CSV_HEADER` must be the exact same
 /// string as [`SOAK_CSV_HEADER`] — the two used to be "pinned" only by a
 /// comment on each side pointing at the other, which a drifted edit on
-/// either file would not catch (REVIEW-5-B B10 / ARBITRATION-5 F2). This
-/// reads the actual script source at compile time and greps for the
+/// either file would not catch. This reads the actual script source at
+/// compile time and greps for the
 /// literal, so a hand-edit to either constant that breaks the match fails
 /// this test instead of silently drifting until a CSV round-trip fails at
 /// campaign time.
@@ -90,8 +90,8 @@ fn env_flag(name: &str) -> bool {
 }
 
 /// Whether the soak scenario should run at all — same `QSH_LOAD_STRICT`
-/// gate T2 uses (`BRIEF-5.md` §4.2: soak is a scenario in the same load
-/// harness family, not a separate gate name).
+/// gate T2 uses (`docs/campaigns/m8-soak.md` §1: soak is a scenario in the
+/// same load harness family, not a separate gate name).
 fn gate_requested() -> bool {
     env_flag("QSH_LOAD_STRICT")
 }
@@ -124,10 +124,9 @@ fn load_bin() -> PathBuf {
 
 /// Read `name` as a `u64`, or `default` when it is unset — but an env var
 /// that *is* set and fails to parse panics with a clear message instead of
-/// silently falling back to `default` (`BRIEF-5.md` §4.2's env knobs are
-/// meant to be typo-caught immediately, not to quietly run the short-mode
-/// default while the caller believes they set a 24h vector — REVIEW-5-B
-/// B13 / ARBITRATION-5 F2).
+/// silently falling back to `default` — the env knobs are meant to be
+/// typo-caught immediately, not to quietly run the short-mode default while
+/// the caller believes they set a 24h vector.
 fn env_u64(name: &str, default: u64) -> u64 {
     match std::env::var(name) {
         Ok(raw) => raw
@@ -152,8 +151,8 @@ fn env_f64(name: &str, default: f64) -> f64 {
     }
 }
 
-/// The scenario's env-tunable knobs (`BRIEF-5.md` §4.2's table). Defaults
-/// are the short mode; the 24h/100-session mode is
+/// The scenario's env-tunable knobs (`docs/campaigns/m8-soak.md` §4).
+/// Defaults are the short mode; the 24h/100-session mode is
 /// `86400/100/5/60/0.1/5/600/<csv>`.
 struct Params {
     duration: Duration,
@@ -188,8 +187,7 @@ impl Params {
         params
     }
 
-    /// `ceil(sessions * cycle_fraction)`, at least 1 (`BRIEF-5.md` §4.3
-    /// step 3).
+    /// `ceil(sessions * cycle_fraction)`, at least 1.
     fn cycle_batch(&self) -> usize {
         ((self.sessions as f64) * self.cycle_fraction)
             .ceil()
@@ -198,27 +196,29 @@ impl Params {
 }
 
 /// The idle-listener bound every phase's `listener_rss_kib` sample is
-/// judged against (`docs/PRD.md:286`, `BRIEF-5.md` §4.4).
+/// judged against (`docs/PRD.md:286`, `docs/campaigns/m8-soak.md` §3).
 const IDLE_RSS_BOUND_KIB: u64 = 30 * 1024;
 
-/// Per-session buffer allowance (`docs/PRD.md:287`, `BRIEF-5.md` §4.4).
+/// Per-session buffer allowance (`docs/PRD.md:287`, `docs/campaigns/
+/// m8-soak.md` §3).
 const PER_SESSION_BUFFER_KIB: u64 = 8 * 1024;
 
-/// fd growth allowance across a phase (`BRIEF-5.md` §4.4): "does not grow
-/// by more than 2" for both the listener and this test process.
+/// fd growth allowance across a phase (`docs/campaigns/m8-soak.md` §3):
+/// "does not grow by more than 2" for both the listener and this test
+/// process.
 const FD_GROWTH_ALLOWANCE: i64 = 2;
 
 /// Floor of the echo p95 bound — same formula T2's scenario 3 uses
 /// (`docs/design/testing.md:126`): `max(3 * ramp-phase baseline p95, this
 /// floor)`. A fixed absolute number is what a shared, contended CI runner
 /// cannot promise; this floor only kicks in when the same run's own
-/// baseline was already fast (REVIEW-5-C C9 / ARBITRATION-5 F2).
+/// baseline was already fast.
 const ECHO_P95_FLOOR_MS: f64 = 50.0;
 
 /// Fraction of steady-phase echo p95 windows allowed to exceed
 /// [`ECHO_P95_FLOOR_MS`]'s bound before the run is `ECHO_DEGRADED`
-/// (`ARBITRATION-5` "load.yml 첫 GHA soak 실행 판정", GHA run 34203445617,
-/// b9e67b1). The rule this constant replaced was "no steady window's p95
+/// (`docs/campaigns/m8-soak.md` §7, GHA soak run, commit b9e67b1). The rule
+/// this constant replaced was "no steady window's p95
 /// may ever exceed the bound" — that first real GHA run hit exactly 2 of 59
 /// steady windows spiking to 129.5ms and 114.6ms while every other window
 /// stayed at 1-2ms, and both spikes landed on top of a cycle's session
@@ -241,7 +241,7 @@ const ECHO_SPIKE_FRACTION_MAX: f64 = 0.10;
 /// an informational note — with fewer samples than this, "first quarter"
 /// and "last quarter" are one or two points each and the comparison is
 /// mostly noise. Mirrors `scripts/soak/summarize.py`'s identical constant
-/// (REVIEW-5-C/B B8 / ARBITRATION-5 F2).
+/// (`docs/campaigns/m8-soak.md` §3).
 const MIN_QUARTER_SAMPLES: usize = 8;
 
 /// `qsh_core::broker::REAPER_TICK` + `qsh_core::broker::CLOSED_RETENTION` —
@@ -254,9 +254,9 @@ const MIN_QUARTER_SAMPLES: usize = 8;
 /// to reap before the idle-end sample — unrelated to `resume_ttl_secs`,
 /// which is independently env-tunable; see [`ttl_reap_deadline`] for the
 /// abandoned-session check, which must never compare against this instead
-/// (REVIEW-5-C C4 / REVIEW-5-B B7 / ARBITRATION-5 F2 — an earlier version
-/// of this file did exactly that, and it made any run with
-/// `resume_ttl_secs` set above ~60s fail spuriously).
+/// (`docs/campaigns/m8-soak.md` §3 — an earlier version of this file did
+/// exactly that, and it made any run with `resume_ttl_secs` set above
+/// ~60s fail spuriously).
 const DRAIN_WAIT: Duration = Duration::from_secs(
     qsh_core::broker::REAPER_TICK.as_secs() + qsh_core::broker::CLOSED_RETENTION.as_secs(),
 );
@@ -292,8 +292,8 @@ struct SoakFleet {
 /// needs a principal-level cap north of 100, not the product default of 32
 /// (`ServeConfig::DEFAULT_MAX_CONNECTIONS_PER_PRINCIPAL`) — at that
 /// default the 33rd ramp session's `session_attach` is rejected with
-/// `RESOURCE_EXHAUSTED`, which is not retryable, and ramp panics
-/// (REVIEW-5-B B1 / ARBITRATION-5 F2). `max(64, 2*N)` and `max(512, 4*N)`
+/// `RESOURCE_EXHAUSTED`, which is not retryable, and ramp panics.
+/// `max(64, 2*N)` and `max(512, 4*N)`
 /// give headroom for the cycle-replacement window, where a victim's old
 /// connection can still be tearing down while its replacement's new one is
 /// already established.
@@ -413,7 +413,7 @@ fn block_on<F: std::future::Future>(fut: F) -> F::Output {
         .block_on(fut)
 }
 
-/// One `t_secs` sample row (`BRIEF-5.md` §4.3's CSV schema).
+/// One `t_secs` sample row (`docs/campaigns/m8-soak.md` §6's CSV schema).
 struct Sample {
     t_secs: u64,
     phase: &'static str,
@@ -461,7 +461,8 @@ fn p95(mut samples: Vec<f64>) -> Option<f64> {
 }
 
 /// First-quarter and last-quarter slices of a time-ordered series
-/// (`BRIEF-5.md` §4.4's fd-growth-during-cycling axes compare these).
+/// (`docs/campaigns/m8-soak.md` §3's fd-growth-during-cycling axes compare
+/// these).
 /// Mirrors `scripts/soak/summarize.py`'s `quarter_split` exactly so the
 /// test binary's own verdict and the offline judge agree bit-for-bit. A
 /// series of 1-3 samples puts everything in both quarters rather than
@@ -471,7 +472,7 @@ fn p95(mut samples: Vec<f64>) -> Option<f64> {
 /// result is trusted as a hard assert or only recorded as an informational
 /// note when the series is short is entirely the caller's call (see
 /// [`judge_fd_quarters`]'s [`MIN_QUARTER_SAMPLES`] gate, mirrored in
-/// `summarize.py`'s `evaluate` — REVIEW-5-B/C B8 / ARBITRATION-5 F2).
+/// `summarize.py`'s `evaluate`).
 fn quarter_split<T: Copy>(values: &[T]) -> (&[T], &[T]) {
     if values.is_empty() {
         return (&[], &[]);
@@ -484,7 +485,7 @@ fn quarter_split<T: Copy>(values: &[T]) -> (&[T], &[T]) {
 /// than [`MIN_QUARTER_SAMPLES`] samples, the split is too coarse to trust
 /// (one or two points per quarter), so this only prints an informational
 /// note instead of asserting (`summarize.py`'s `evaluate` applies the same
-/// downgrade — REVIEW-5-B/C B8 / ARBITRATION-5 F2). Otherwise, a last-
+/// downgrade). Otherwise, a last-
 /// quarter max more than [`FD_GROWTH_ALLOWANCE`] above the first-quarter
 /// max is pushed onto `violations`, tagged `tag`.
 fn judge_fd_quarters(label: &str, tag: &str, samples: &[usize], violations: &mut Vec<String>) {
@@ -536,8 +537,8 @@ struct EchoVerdict {
     violation: bool,
 }
 
-/// Pure judge for the echo axis (`ARBITRATION-5` "load.yml 첫 GHA soak 실행
-/// 판정"): `windows` is one p95 per steady-phase sample window, `bound` is
+/// Pure judge for the echo axis (`docs/campaigns/m8-soak.md` §7): `windows`
+/// is one p95 per steady-phase sample window, `bound` is
 /// the same-run adaptive bound (`max(3 * ramp baseline, ECHO_P95_FLOOR_MS)`,
 /// computed by the caller). Returns `None` when `windows` is empty — nothing
 /// to judge, never a violation by omission. Otherwise, [`EchoVerdict::
@@ -559,7 +560,7 @@ fn judge_echo_windows(windows: &[f64], bound: f64) -> Option<EchoVerdict> {
     })
 }
 
-/// GHA run 34203445617's actual shape (`ARBITRATION-5`): 59 steady windows,
+/// The GHA soak run's actual shape (`docs/campaigns/m8-soak.md` §7): 59 steady windows,
 /// 2 spikes (129.5ms, 114.6ms) against everything else near 1-2ms — 2/59 =
 /// 3.4%, under the 10% fraction, so the run passes.
 #[test]
@@ -649,8 +650,8 @@ fn decode(data_b64: &str) -> Vec<u8> {
 }
 
 /// What a cycled session's worker does once its stop signal fires; an
-/// abandoned session never gets [`StopMode::Cycle`] (`BRIEF-5.md` §4.3
-/// step 3: "ABANDON 세션은 ramp 직후 detach하고 다시 붙지 않는다").
+/// abandoned session never gets [`StopMode::Cycle`] — an abandoned session
+/// detaches right after ramp and never reattaches.
 ///
 /// `Copy` so [`spawn_session_retrying`] can reuse the same mode across
 /// retry attempts without the caller needing to clone it at each call site.
@@ -676,14 +677,14 @@ struct SessionWorker {
     handle: std::thread::JoinHandle<()>,
 }
 
-/// 500ms write cadence, 1 KiB marker (`BRIEF-5.md` §4.3 step 2: "500 ms마다
-/// 1 KiB 줄을 쓰고 echo를 기다린다").
+/// 500ms write cadence, 1 KiB marker: every 500ms the worker writes a 1 KiB
+/// line and waits for its echo.
 const WRITE_INTERVAL: Duration = Duration::from_millis(500);
 const MARKER_LEN: usize = 1024;
 
-/// Per-round echo deadline (REVIEW-5-B B12 / ARBITRATION-5 F2): a session
-/// that goes this long without completing one write/echo round is dropped
-/// and every dropped session is a `SESSION_STALLED` violation in the
+/// Per-round echo deadline: a session that goes this long without
+/// completing one write/echo round is dropped and every dropped session is
+/// a `SESSION_STALLED` violation in the
 /// verdict — a real product-level stall, distinct from
 /// [`spawn_session_retrying`]'s dial-retry budget, which only covers the
 /// *opening* dial, never a round already in flight on an established
@@ -812,11 +813,12 @@ fn is_retryable_dial_error(err: &qsh_core::OpError) -> bool {
 /// [`spawn_session`], but ramp opens and cycle replacement opens retry a
 /// retryable dial failure up to [`DIAL_RETRY_ATTEMPTS`] times,
 /// [`DIAL_RETRY_BACKOFF`] apart, instead of failing the whole scenario on
-/// the first miss (`PROGRESS-5.md` S5 saw exactly this failure mode on a
-/// fuzz-saturated WSL host, load 9.x/8 vCPU, otherwise well within qsh's
-/// own 10s dial budget). Every retry increments `dial_retries` so the
-/// caller can report the total as an informational verdict line — a retry
-/// is never a violation by itself, only exhausting every attempt is.
+/// the first miss (this failure mode showed up on a fuzz-saturated WSL host,
+/// load 9.x/8 vCPU, otherwise well within qsh's own 10s dial budget;
+/// `docs/campaigns/m8-soak.md` §3 records the retry rule). Every retry
+/// increments `dial_retries` so the caller can report the total as an
+/// informational verdict line — a retry is never a violation by itself, only
+/// exhausting every attempt is.
 fn spawn_session_retrying(
     ops: &Arc<Ops>,
     mode: StopMode,
@@ -863,7 +865,7 @@ impl SessionWorker {
     }
 }
 
-/// The 24h/100-session soak scenario (`BRIEF-5.md` §4). Short mode
+/// The 24h/100-session soak scenario (`docs/campaigns/m8-soak.md` §1). Short mode
 /// (defaults) is what `[profile.load]` runs in CI; 24h/100-session mode is
 /// the same test under `[profile.soak]`, driven by `scripts/soak/run.sh`.
 #[test]
@@ -875,7 +877,8 @@ fn soak_session_load() {
     if !cfg!(target_os = "linux") {
         panic!(
             "QSH_LOAD_STRICT=1 but this host is not Linux — the soak scenario's rss_kib/\
-             open_fd_count measurement is Linux-only (BRIEF-5.md §2); rerun on a Linux host \
+             open_fd_count measurement is Linux-only (docs/campaigns/m8-soak.md §2); rerun on a \
+             Linux host \
              (this repo's soak campaign runs on Dave-Windows-WSL) or unset QSH_LOAD_STRICT to \
              skip here instead of measuring nothing."
         );
@@ -932,7 +935,7 @@ fn soak_session_load() {
     // lifetime (ramp opens and cycle replacements alike).
     let dead_sessions = Arc::new(AtomicU64::new(0));
 
-    // --- boot: baseline idle RSS/fd (BRIEF-5.md §4.3 step 1) ---
+    // --- boot: baseline idle RSS/fd (`docs/campaigns/m8-soak.md` §3) ---
     let (baseline_listener_rss, _) = block_on(poll_stable(|| rss_kib(listener_pid)));
     let (baseline_listener_fds, _) = block_on(poll_stable(|| {
         open_fd_count(listener_pid).map(|n| n as u64)
@@ -980,8 +983,7 @@ fn soak_session_load() {
     // window before steady begins, so the echo p95 bound (below) has a
     // same-run reference point instead of a fixed absolute number a shared
     // runner cannot promise — same reasoning as `adversarial_load.rs`'s T2
-    // baseline (`docs/design/testing.md:126`, REVIEW-5-C C9 /
-    // ARBITRATION-5 F2).
+    // baseline (`docs/design/testing.md:126`).
     let baseline_window = params.sample.max(Duration::from_secs(2));
     std::thread::sleep(baseline_window);
     let baseline_echo_p95_ms = p95(workers
@@ -991,7 +993,7 @@ fn soak_session_load() {
         .collect());
     let echo_p95_bound_ms =
         baseline_echo_p95_ms.map_or(ECHO_P95_FLOOR_MS, |b| (3.0 * b).max(ECHO_P95_FLOOR_MS));
-    // Record this same baseline in the CSV itself (PROGRESS-5.md §F2: the
+    // Record this same baseline in the CSV itself — the
     // verdict above judges steady echo p95 against a baseline this test
     // measured in-process, but that number never used to reach the CSV, so
     // `scripts/soak/summarize.py` judging the same run offline had no way
@@ -1024,7 +1026,7 @@ fn soak_session_load() {
     // variable).
     let mut steady_echo_windows: Vec<f64> = Vec::new();
     // Steady-phase self (test process) and listener fd samples, for the
-    // quarters checks (BRIEF-5.md §4.4's (iii) axis and its listener
+    // quarters checks (`docs/campaigns/m8-soak.md` §3's (iii) axis and its listener
     // counterpart: growth *during* cycling, not the ramp's one-shot
     // session-open/attach fd cost).
     let mut steady_self_fds: Vec<usize> = Vec::new();
@@ -1040,7 +1042,7 @@ fn soak_session_load() {
     // measurements taken just above it.
     const ABANDONED_PROBE_INTERVAL: Duration = Duration::from_secs(10);
     // Anchored at the steady phase's own start (after ramp + the baseline
-    // window above), not the scenario's t=0 (B4 / ARBITRATION-5 F2) —
+    // window above), not the scenario's t=0 —
     // otherwise ramp's own N-sequential-dial latency eats into the first
     // cycle/sample period before steady-state load has even begun.
     let steady_start = Instant::now();
@@ -1202,7 +1204,7 @@ fn soak_session_load() {
         abandoned_live,
     });
 
-    // --- verdict (BRIEF-5.md §4.4) ---
+    // --- verdict (`docs/campaigns/m8-soak.md` §3) ---
     let mut violations: Vec<String> = Vec::new();
     if let (Some(baseline), Some(idle_end)) = (baseline_listener_rss, idle_end_listener_rss) {
         if baseline > IDLE_RSS_BOUND_KIB {
@@ -1253,11 +1255,12 @@ fn soak_session_load() {
         );
     }
     // Self (test process) fd growth is judged on the steady-phase quarters,
-    // not the boot-baseline-vs-drain-idle_end span: the (iii) axis BRIEF-5.md
-    // §4.4 names is growth *during* cycling, and the full-lifecycle
-    // comparison also bundles in ramp's one-shot session-open/attach fd cost
-    // (runtime warm-up), which is not what (iii) is about (main's F1 call,
-    // PROGRESS-5.md S5 "self fd 판정식 불일치"). The boot->idle_end delta is
+    // not the boot-baseline-vs-drain-idle_end span: the (iii) axis
+    // `docs/campaigns/m8-soak.md` §3 names is growth *during* cycling, and
+    // the full-lifecycle comparison also bundles in ramp's one-shot
+    // session-open/attach fd cost (runtime warm-up), which is not what
+    // (iii) is about — an earlier version of this file compared the two
+    // and mismatched the judgment formula. The boot->idle_end delta is
     // still worth recording, just never as a violation.
     if let (Some(baseline_fds), Some(idle_end_fds)) = (baseline_self_fds, idle_end_self_fds) {
         let delta = idle_end_fds as i64 - baseline_fds as i64;
@@ -1289,9 +1292,10 @@ fn soak_session_load() {
             qsh_core::broker::REAPER_TICK.as_secs()
         ));
     }
-    // ECHO_SPIKE_FRACTION_MAX's fraction-of-windows rule (ARBITRATION-5),
-    // not "no window may ever exceed the bound" — see that constant's doc
-    // comment. max/spikes/windows and the first/last-quarter median are
+    // ECHO_SPIKE_FRACTION_MAX's fraction-of-windows rule
+    // (`docs/campaigns/m8-soak.md` §3), not "no window may ever exceed the
+    // bound" — see that constant's doc comment. max/spikes/windows and
+    // the first/last-quarter median are
     // informational (inputs for a future 24h degradation rule); only the
     // fraction itself is asserted.
     match judge_echo_windows(&steady_echo_windows, echo_p95_bound_ms) {
@@ -1366,8 +1370,7 @@ fn soak_session_load() {
     // Record-only (never a violation): peak listener RSS reached during
     // steady state and its per-session delta over baseline, same
     // per-session-buffer shape `summarize.py`'s 24h-mode assert uses, just
-    // not asserted here (too few samples in short mode) — REVIEW-5-B/C
-    // C7/B9 / ARBITRATION-5 F2.
+    // not asserted here (too few samples in short mode).
     let per_session_rss_delta_kib = match (peak_listener_rss_kib, baseline_listener_rss) {
         (Some(peak), Some(baseline)) if sessions > 0 => {
             Some((peak as i64 - baseline as i64) as f64 / sessions as f64)

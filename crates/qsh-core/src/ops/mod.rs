@@ -1051,7 +1051,7 @@ pub(crate) fn resolve_peer_address(
     // (`ExecArgs.host`, `docs/CLI.md` §6.9, a raw positional that — like
     // `qsh host get` — bypasses `parse_target`'s own `user@` split), which
     // used to echo the `user@` hint into this same un-runnable `qsh trust
-    // add` shape `Ops::resolve_host_route` had (BRIEF-6 §1 item 2 /
+    // add` shape `Ops::resolve_host_route` had (`PLAN.md` §3 Step 6,
     // lens-2 finding).
     let entry = host::resolve_forward(trust.find(host), hosts.find(host), hosts_has_any)
         .ok_or_else(|| match host::hint_alias(host) {
@@ -1964,10 +1964,10 @@ mod tests {
         // positional that bypasses `parse_target`'s own `user@` split,
         // `docs/CLI.md` §6.9) used to echo the hint straight into this
         // function's `qsh trust add` remedy — the exact shape
-        // `Ops::resolve_host_route` had before BRIEF-6 §1 item 1 fixed it.
-        // Pin both halves: no `@` survives in the message, and the
+        // `Ops::resolve_host_route` had before `PLAN.md` §3 Step 6 fixed
+        // it. Pin both halves: no `@` survives in the message, and the
         // suggested alias itself is one `qsh trust add` would accept
-        // (BRIEF-6 §1 item 2 / lens-2 finding).
+        // (lens-2 finding).
         let trust = TrustStore::default();
         let hosts = HostsFile::default();
         let err = resolve_peer_address(&trust, &hosts, "dave@nowhere").unwrap_err();
@@ -2001,7 +2001,7 @@ mod tests {
 
     #[test]
     fn resolve_peer_address_trims_a_stray_space_left_by_an_at_split() {
-        // BRIEF-7 §2.5 item 1 (Q10) — same trim `resolve_route` gets,
+        // `PLAN.md` §3 Step 7, Q10 — same trim `resolve_route` gets,
         // reused here via the shared `host::hint_alias`.
         let trust = TrustStore::default();
         let hosts = HostsFile::default();

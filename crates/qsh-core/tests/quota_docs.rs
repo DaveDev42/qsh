@@ -43,9 +43,8 @@ fn read_doc(relative: &str) -> String {
 /// surrounding punctuation). A prose paragraph introduced earlier in the
 /// doc than the canonical config-map line (as happened when 4b added an
 /// `-L`/`-R` paragraph ahead of architecture.md's config map, see
-/// `docs/design/architecture.md`'s config-map section and PROGRESS-4.md's
-/// Stage 4b-F3 note) used to shadow the config map from this check
-/// entirely, since only the *first* occurrence was ever read — a cap
+/// `docs/design/architecture.md`'s config-map section) used to shadow the
+/// config map from this check entirely, since only the *first* occurrence was ever read — a cap
 /// change on the config-map line then went unnoticed. Checking every
 /// occurrence closes that: each occurrence's window (up to 200 chars
 /// after the key) is searched for "기본 N"; occurrences that don't carry
@@ -389,8 +388,8 @@ fn cli_md_does_not_claim_the_tunnel_axis_carries_retryable() {
     );
 }
 
-/// M8 Step 4c (`BRIEF-4c.md` §5.3, `ARBITRATION-4.md` "4c 구현 판정" Q4):
-/// §6.12 names the audit-*row-count* bound (D1/D2 above already pin the
+/// M8 Step 4c (docs/campaigns/m8-adversarial-load.md §3): §6.12 names the
+/// audit-*row-count* bound (D1/D2 above already pin the
 /// window/category prose) but, before this test, nothing pinned the
 /// audit-*directory-byte* bound — `[audit].max_bytes × (retain + 1)` — or
 /// even named `max_bytes`/`retain` at all. Reuses this file's existing

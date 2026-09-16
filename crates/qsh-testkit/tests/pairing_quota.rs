@@ -1,7 +1,6 @@
-//! Pairing-connection quota audit pins (`PLAN.md` M8 Step 4,
-//! ARBITRATION-4.md J11, ruling R2): the ninth pre-identity
-//! (`Principal::Pairing`) connection against a host already holding
-//! [`MAX_CONCURRENT_PAIRING_CONNECTIONS`] slots is refused with an
+//! Pairing-connection quota audit pins (`PLAN.md` M8 Step 4): the ninth
+//! pre-identity (`Principal::Pairing`) connection against a host already
+//! holding [`MAX_CONCURRENT_PAIRING_CONNECTIONS`] slots is refused with an
 //! immediate [`CLOSE_CODE_RESOURCE_EXHAUSTED`] close — no stream accepted,
 //! no frame written — and the `quota_connections_pairing` audit line that
 //! rejection leaves behind carries the *real* observed peer address (not a
