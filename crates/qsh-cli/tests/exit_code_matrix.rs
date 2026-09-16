@@ -245,6 +245,38 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
             outcome: Outcome::Fails("INVALID_ARGUMENT"),
         },
         Case {
+            // No positional code and no `--code-stdin`. `check()` also
+            // runs this in human mode, whose stdin is `Stdio::null()`
+            // (non-a-terminal) too, so both modes must fall to the same
+            // `INVALID_ARGUMENT` for "exit code does not depend on output
+            // mode" (`docs/CLI.md` §4) to hold (`PLAN.md` "### Step 2" (a)④,
+            // ADR-0013 decision 8 at `docs/adr/0013-cert-file-exchange.md:29`).
+            name: "trust accept: no code and no --code-stdin",
+            sandbox: &fleet.client,
+            args: &["trust", "accept", "127.0.0.1:1"],
+            outcome: Outcome::Fails("INVALID_ARGUMENT"),
+        },
+        Case {
+            // `docs/CLI.md` §6.11: the positional code and `--code-stdin`
+            // together is a clap usage error (exit 2, no envelope), not an
+            // `Ops`-level `INVALID_ARGUMENT` — `cli.rs`'s
+            // `conflicts_with = "code"` is what makes
+            // `resolve_invite_code_source`'s own `(Some(_), true)` arm
+            // unreachable through the CLI; removing the attribute would
+            // make this row fall through to that arm's `INVALID_ARGUMENT`
+            // (exit 255) instead, which this pins against.
+            name: "trust accept: code and --code-stdin together",
+            sandbox: &fleet.client,
+            args: &[
+                "trust",
+                "accept",
+                "127.0.0.1:1",
+                "abcd-efgh-jkmn-pqrs-tvwx-yz23-4567-89ab",
+                "--code-stdin",
+            ],
+            outcome: Outcome::Usage,
+        },
+        Case {
             // `PLAN.md` M5 Step 7 (c): a name outside `Action::ALL`'s
             // vocabulary is `INVALID_ARGUMENT` in both output modes — the
             // deliberate deviation from the Step 7 draft's literal "exit

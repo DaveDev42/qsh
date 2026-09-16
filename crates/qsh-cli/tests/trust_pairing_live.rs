@@ -253,3 +253,137 @@ fn trust_add_with_an_explicit_fingerprint_is_unaffected_by_pairing() {
     assert_eq!(peers.len(), 1, "{listed}");
     assert_eq!(peers[0]["fingerprint"], host_fp, "{listed}");
 }
+
+/// `PLAN.md` M9 Step 2, ADR-0013 decision 8: a code piped on stdin
+/// redeems a real invite, same as the positional-argument path.
+#[test]
+fn trust_accept_reads_the_code_from_stdin_in_json_mode() {
+    let host = Sandbox::initialized();
+    let client = Sandbox::initialized();
+    let serve = ServeGuard::start(&host);
+    let (code, _cmd) = invite(&host);
+
+    let args = ["trust", "accept", serve.addr(), "--code-stdin", "--json"];
+    let output = client.qsh_with_stdin(&args, code.as_bytes());
+    let envelope = common::sole_envelope(&output.stdout, &args);
+    assert_eq!(common::exit_code(&output), 0, "{envelope}");
+    assert_eq!(envelope["data"]["created"], true, "{envelope}");
+    assert_eq!(
+        envelope["data"]["peer"]["address"],
+        serve.addr(),
+        "{envelope}"
+    );
+}
+
+/// Trim regression 1 (`PLAN.md` M9 Step 2 (c)): a trailing newline, as a
+/// real `printf '%s\n' "$code" | qsh trust accept … --code-stdin` pipeline
+/// would produce, must not be rejected.
+#[test]
+fn trust_accept_from_stdin_tolerates_a_trailing_newline() {
+    let host = Sandbox::initialized();
+    let client = Sandbox::initialized();
+    let serve = ServeGuard::start(&host);
+    let (code, _cmd) = invite(&host);
+
+    let args = ["trust", "accept", serve.addr(), "--code-stdin", "--json"];
+    let output = client.qsh_with_stdin(&args, format!("{code}\n").as_bytes());
+    let envelope = common::sole_envelope(&output.stdout, &args);
+    assert_eq!(common::exit_code(&output), 0, "{envelope}");
+    assert_eq!(envelope["data"]["created"], true, "{envelope}");
+}
+
+/// Trim regression 2 (`PLAN.md` M9 Step 2 (c)): surrounding spaces must
+/// not be rejected either.
+#[test]
+fn trust_accept_from_stdin_tolerates_surrounding_whitespace() {
+    let host = Sandbox::initialized();
+    let client = Sandbox::initialized();
+    let serve = ServeGuard::start(&host);
+    let (code, _cmd) = invite(&host);
+
+    let args = ["trust", "accept", serve.addr(), "--code-stdin", "--json"];
+    let output = client.qsh_with_stdin(&args, format!("  {code}  ").as_bytes());
+    let envelope = common::sole_envelope(&output.stdout, &args);
+    assert_eq!(common::exit_code(&output), 0, "{envelope}");
+    assert_eq!(envelope["data"]["created"], true, "{envelope}");
+}
+
+/// A `trust accept` call with neither a positional code nor
+/// `--code-stdin` in machine mode is rejected without ever opening a
+/// prompt. No host needed: the resolver refuses before any dial.
+#[test]
+fn trust_accept_with_no_code_in_json_mode_is_invalid_argument() {
+    let client = Sandbox::initialized();
+    let args = ["trust", "accept", "127.0.0.1:1", "--json"];
+    let output = client.qsh(&args);
+
+    let envelope = common::sole_envelope(&output.stdout, &args);
+    assert_eq!(common::exit_code(&output), 255, "{envelope}");
+    assert_eq!(envelope["ok"], false, "{envelope}");
+    assert_eq!(envelope["error"]["code"], "INVALID_ARGUMENT", "{envelope}");
+    // This is the resolver's own wording for *this* refusal — the
+    // machine-mode arm wins before the tty check, so even though stdin is
+    // not a terminal here either, the sibling "no terminal" wording must
+    // not appear (both mention `--code-stdin`, so a substring match alone
+    // would not tell the two apart — see
+    // `ops::tests::resolve_invite_code_source_decision_table`). It is also
+    // not `parse_invite_code`'s `WrongLength`, which is what a prompt
+    // opening and reading an empty value would have produced instead.
+    assert_eq!(
+        envelope["error"]["message"].as_str().expect("message"),
+        "no invite code: --json/--jsonl mode never prompts, so pass the code as an argument or \
+         read it from stdin with --code-stdin",
+        "{envelope}"
+    );
+    // machine mode never opens a prompt: its wording never reaches stderr.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains(qsh_core::ops::INVITE_CODE_PROMPT),
+        "no prompt in machine mode: {stderr:?}"
+    );
+}
+
+/// `PLAN.md` M9 Step 2 (d): `INVITE_CODE_STDIN_MAX` really bounds the
+/// read — a valid code preceded by more than the cap's worth of padding
+/// is truncated away entirely (nothing but padding survives into the
+/// buffer), not merely trimmed. Raising the constant, or reading stdin
+/// unbounded, would turn this into a real accept instead of a rejection.
+#[test]
+fn trust_accept_from_stdin_is_bounded_by_invite_code_stdin_max() {
+    let client = Sandbox::initialized();
+    let padding = " ".repeat(qsh_core::ops::INVITE_CODE_STDIN_MAX + 10);
+    let code = "abcd-efgh-jkmn-pqrs-tvwx-yz23-4567-89ab";
+    let input = format!("{padding}{code}");
+
+    let args = ["trust", "accept", "127.0.0.1:1", "--code-stdin", "--json"];
+    let output = client.qsh_with_stdin(&args, input.as_bytes());
+    let envelope = common::sole_envelope(&output.stdout, &args);
+    assert_eq!(common::exit_code(&output), 255, "{envelope}");
+    assert_eq!(envelope["error"]["code"], "INVALID_ARGUMENT", "{envelope}");
+    assert!(
+        envelope["error"]["message"]
+            .as_str()
+            .expect("message")
+            .contains("0 symbols"),
+        "the cap must have discarded the whole code, not merely trimmed whitespace: {envelope}"
+    );
+}
+
+/// `--code-stdin` input that is not valid UTF-8 fails with a distinct,
+/// readable message rather than silently truncating or panicking.
+#[test]
+fn trust_accept_from_stdin_rejects_non_utf8_input() {
+    let client = Sandbox::initialized();
+    let args = ["trust", "accept", "127.0.0.1:1", "--code-stdin", "--json"];
+    let output = client.qsh_with_stdin(&args, &[0xFF, 0xFE, 0xFD]);
+    let envelope = common::sole_envelope(&output.stdout, &args);
+    assert_eq!(common::exit_code(&output), 255, "{envelope}");
+    assert_eq!(envelope["error"]["code"], "INVALID_ARGUMENT", "{envelope}");
+    assert!(
+        envelope["error"]["message"]
+            .as_str()
+            .expect("message")
+            .contains("valid UTF-8"),
+        "{envelope}"
+    );
+}

@@ -479,7 +479,26 @@ pub enum TrustCmd {
         /// `host:port` of the device that printed `code` via `trust invite`.
         address: String,
         /// The invite code, as printed (case-insensitive, hyphens ignored).
-        code: String,
+        ///
+        /// Optional. With no code here and no `--code-stdin`, a terminal is
+        /// prompted for it with echo off, and `--json`/`--jsonl` returns
+        /// INVALID_ARGUMENT instead of prompting.
+        ///
+        /// A fingerprint is a public value, so `trust add --fingerprint` left
+        /// in shell history is not a risk. A code left in history has no
+        /// reuse value either: an invite is single-use and stops being
+        /// redeemable 10 minutes after `trust invite` mints it.
+        code: Option<String>,
+        /// Read the invite code from standard input, to end of input,
+        /// ignoring leading and trailing whitespace. Use this instead of the
+        /// positional code to keep it out of shell history.
+        ///
+        /// If standard input is a terminal, echo is suppressed the same way
+        /// it is for the prompt, and `--json`/`--jsonl` still refuses
+        /// rather than waiting on it: pipe or redirect the code in for
+        /// machine mode.
+        #[arg(long, conflicts_with = "code")]
+        code_stdin: bool,
     },
 }
 

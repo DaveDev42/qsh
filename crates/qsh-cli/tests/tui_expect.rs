@@ -29,11 +29,11 @@
 
 mod common;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use common::{Fleet, HOST_ALIAS, Sandbox};
+use common::{Fleet, HOST_ALIAS, Sandbox, ServeGuard};
 use expectrl::process::unix::{Signal, WaitStatus};
 use expectrl::session::OsSession;
 use expectrl::{Eof, Expect as _, Regex, Session};
@@ -66,6 +66,28 @@ impl Client {
     /// a `TERM` a full-screen program will accept.
     fn spawn(sandbox: &Sandbox, args: &[&str]) -> Self {
         Self::spawn_with(sandbox.command(args))
+    }
+
+    /// Spawn `qsh <args>` under a pty whose `ECHO` flag is *on* by the
+    /// time `qsh` starts.
+    ///
+    /// `ptyprocess` clears `ECHO` on the slave inside the child right
+    /// before `exec` (ptyprocess 0.5.0 `src/lib.rs:120`,
+    /// `set_echo(STDIN_FILENO, false)`), so a plain [`Self::spawn`] hands
+    /// `qsh` a terminal that already does not echo. For a test that wants
+    /// to watch echo go off and come back that is useless: the guard
+    /// would save "off", faithfully restore "off", and nothing it does
+    /// would be observable. Running `stty echo` in the same process image
+    /// right before `exec` puts the flag back, so the first `tcgetattr`
+    /// `qsh` performs sees echo on.
+    fn spawn_with_echo_on(sandbox: &Sandbox, args: &[&str]) -> Self {
+        let mut shell_args = vec![
+            "-c",
+            "stty echo && exec \"$0\" \"$@\"",
+            env!("CARGO_BIN_EXE_qsh"),
+        ];
+        shell_args.extend_from_slice(args);
+        Self::spawn_with(sandbox.command_with_bin(Path::new("sh"), &shell_args))
     }
 
     /// Spawn a prepared command under a pty.
@@ -146,6 +168,23 @@ impl Client {
             .expect("pty master handle");
         let flags = termios::tcgetattr(master.as_fd()).expect("tcgetattr on the pty");
         flags.local_flags.contains(LocalFlags::ICANON)
+    }
+
+    /// Whether the local terminal has `ECHO` on right now — off while
+    /// `qsh trust accept`'s invite-code prompt (or `--code-stdin` on a
+    /// terminal) holds it, back on once that read returns. Companion to
+    /// [`Self::is_cooked`], which checks a different flag (`ICANON`) for a
+    /// different purpose: reading the invite code never leaves canonical
+    /// mode (`main.rs`'s `EchoSuppressed` clears exactly `ECHO`), so
+    /// `is_cooked` alone cannot see it.
+    fn echo_enabled(&self) -> bool {
+        let master = self
+            .session
+            .get_process()
+            .get_raw_handle()
+            .expect("pty master handle");
+        let flags = termios::tcgetattr(master.as_fd()).expect("tcgetattr on the pty");
+        flags.local_flags.contains(LocalFlags::ECHO)
     }
 
     /// Send a signal to the client process.
@@ -811,4 +850,59 @@ fn a_piped_stdin_forwards_everything_verbatim() {
         5,
         "`~d` on a pipe is input, not a detach: {stdout:?}"
     );
+}
+
+/// `PLAN.md` M9 Step 2, ADR-0013 decision 8
+/// (`docs/adr/0013-cert-file-exchange.md:29`): `qsh trust accept`'s
+/// invite-code prompt genuinely suppresses echo on a real terminal, and
+/// machine mode refuses instead of opening it even when stdin *is* a
+/// terminal. Neither half is reachable from `trust_pairing_live.rs`'s
+/// e2e tests: every one of them runs with `Stdio::null()` stdin
+/// (`common::Sandbox::qsh`), which is never a terminal, so without a code
+/// they land on `NO_CODE_IN_MACHINE_MODE` under `--json` and on
+/// `NO_CODE_WITHOUT_A_TERMINAL` otherwise, never on the termios code path
+/// or on the machine-mode-with-a-tty refusal.
+///
+/// The human half spawns through [`Client::spawn_with_echo_on`]: the pty
+/// harness turns echo off before `exec`, so under a plain spawn the guard
+/// saves "off" and restores "off" — the "off while prompting" read passes
+/// without the guard doing anything and the "on afterwards" read fails,
+/// which says nothing about the guard. Starting from echo on makes both
+/// reads mean what they claim.
+#[test]
+fn trust_accept_prompt_suppresses_echo_and_never_opens_in_machine_mode() {
+    let host = Sandbox::initialized();
+    let client = Sandbox::initialized();
+    let serve = ServeGuard::start(&host);
+    let (status, envelope) = host.json(&["trust", "invite", "--json"]);
+    assert_eq!(status, 0, "{envelope}");
+    let invite_code = envelope["data"]["code"]
+        .as_str()
+        .expect("data.code")
+        .to_string();
+
+    // Human mode, a real terminal, no code on the command line: the
+    // prompt opens on stderr with echo off, and typing the code accepts
+    // it.
+    let mut human = Client::spawn_with_echo_on(&client, &["trust", "accept", serve.addr()]);
+    human.expect(qsh_core::ops::INVITE_CODE_PROMPT);
+    assert!(
+        !human.echo_enabled(),
+        "echo must be off while the invite-code prompt is up"
+    );
+    human.type_(&format!("{invite_code}\r"));
+    human.expect_exit(0);
+    assert!(
+        human.echo_enabled(),
+        "echo must be restored once the prompt's read returns"
+    );
+
+    // Machine mode, the same kind of real terminal, no code: the
+    // resolver must refuse immediately rather than open the prompt and
+    // block on it. If the machine-mode guard were gone, this would hang
+    // reading the terminal until `EXPECT_TIMEOUT` instead of reaching
+    // either assertion below.
+    let mut machine = Client::spawn(&client, &["trust", "accept", "127.0.0.1:1", "--json"]);
+    machine.expect(r#""code":"INVALID_ARGUMENT""#);
+    machine.expect_exit(255);
 }
