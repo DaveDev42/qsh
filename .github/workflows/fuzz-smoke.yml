@@ -20,14 +20,11 @@ name: fuzz-smoke
 #   stable-toolchain gates (`CLAUDE.md`) must never depend on or be slowed
 #   by — a separate job in a separate file can't accidentally end up on
 #   the same dependency chain as `fmt`/`clippy`/`test`/`arch`/`deny`.
-# - It is deliberately non-blocking for now (`continue-on-error: true` on
-#   the run step, not the whole job — a build failure still shows red on
-#   the step, just doesn't fail the job or gate a merge): this is the
-#   harness's first day, the parser surface here is large, and turning a
-#   brand-new nightly-only job into a hard merge gate before anyone has
-#   triaged what "normal" flakiness (if any) looks like on a hosted
-#   runner would just train reviewers to ignore a red check. Flip
-#   `continue-on-error` off once this has run green for a while.
+# - A failing target fails the job. The run step carried
+#   `continue-on-error: true` for the harness's first two weeks; every run
+#   from 2026-09-02 to 2026-09-14 came back green, so the guard came off.
+#   The job is still outside `ci-ok`'s `needs`, so a red check here does
+#   not block a merge by itself.
 
 on:
   push:
@@ -67,15 +64,12 @@ jobs:
       # to catch "doesn't build" and "panics on its own seeds" without
       # making this job's runtime a function of runner load.
       #
-      # continue-on-error stays on the run step, same non-blocking
-      # posture and same reason as before (see header comment) -- it just
-      # now guards a loop instead of one matrix leg, so a single target's
-      # failure doesn't stop the rest from being smoke-tested, and every
-      # failing target is named in the summary below.
+      # The loop keeps going after a failing target so one bad target does
+      # not hide the others; the step exits non-zero at the end and names
+      # every target that failed.
       - name: Smoke-run every fuzz target
         id: smoke
         working-directory: fuzz
-        continue-on-error: true
         run: |
           set -u
           failed=()
