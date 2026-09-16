@@ -20,7 +20,7 @@
 //!    with that row's `action` and the expected `decision`. Ten of the
 //!    thirteen rows need nothing more than a bare `Server::dispatch` call
 //!    (`DISPATCH_DRIVABLE_OPS`) — this file drives those, extending
-//!    `crates/qsh-core/src/server/mod.rs`'s own
+//!    `crates/qsh-core/src/server/tests.rs`'s own
 //!    `every_session_op_passes_the_choke_point_with_the_mapped_action`
 //!    precedent to an external integration test. The remaining three
 //!    (`forward.local`, `forward.remote`, `host.reverse`) each need a real
@@ -53,7 +53,7 @@ use qsh_core::acl::{Action, AllowAllPinned, DenyAll, OP_REGISTRY};
 
 #[path = "support/docs.rs"]
 mod docs;
-use docs::read_doc;
+use docs::{read_doc, repo_root};
 
 /// Same trick `crates/qsh-core/tests/acl_docs.rs` uses: slice `doc` from
 /// `heading` (matched verbatim) up to, but not including, the next line
@@ -1106,12 +1106,32 @@ mod single_source {
 mod source_scan {
     use super::*;
 
-    /// `crates/qsh-core/src/server/mod.rs`, which is production code only:
-    /// its tests live in the sibling `server/tests.rs`, so a `#[cfg(test)]`
-    /// call site or `Action::` literal can never count toward either pin
-    /// below.
+    /// Every production `.rs` file under `crates/qsh-core/src/server/`,
+    /// concatenated: `mod.rs` plus the `impl Server` split-outs beside it
+    /// (`dispatch.rs`, `sessions.rs`, `tunnels.rs`, …). A file added to
+    /// that directory later is scanned without anyone editing this list.
+    /// The one file left out is `tests.rs`, the sibling test module, so a
+    /// `#[cfg(test)]` call site or `Action::` literal can never count
+    /// toward either pin below.
     fn server_mod_production_source() -> String {
-        read_doc("crates/qsh-core/src/server/mod.rs")
+        let dir = repo_root().join("crates/qsh-core/src/server");
+        let mut paths: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap_or_else(|err| panic!("read_dir {}: {err}", dir.display()))
+            .map(|entry| entry.expect("read_dir entry").path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
+            .filter(|path| path.file_name().is_some_and(|name| name != "tests.rs"))
+            .collect();
+        paths.sort();
+        assert!(
+            paths.iter().any(|path| path.ends_with("mod.rs")),
+            "server/mod.rs missing from {}: {paths:?}",
+            dir.display()
+        );
+        paths
+            .iter()
+            .map(|path| read_doc(&path.strip_prefix(repo_root()).unwrap().to_string_lossy()))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// Every line of `source`, blanking any line that is itself a comment
@@ -1189,7 +1209,7 @@ mod source_scan {
         assert_eq!(
             literal_lines.len(),
             1,
-            "server/mod.rs's production code must have exactly one Action:: variant \
+            "the production code under server/ must have exactly one Action:: variant \
              literal — every other handler must route through crate::acl::Op::X.action() \
              instead of naming an Action variant directly: {literal_lines:?}"
         );
