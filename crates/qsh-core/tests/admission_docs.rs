@@ -17,24 +17,12 @@
 //! M8 Step 3 P2-3) is caught by this test the moment it lands in `ALL`,
 //! before anyone remembers to hand-write a new assertion for it.
 
-use std::path::PathBuf;
-
 use qsh_core::admission::RejectReason;
 use qsh_core::config::ServeConfig;
 
-/// The repo root, reached from `CARGO_MANIFEST_DIR`
-/// (`crates/qsh-core`) the same way every other doc-reading integration
-/// test in this workspace does.
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-}
-
-fn read_doc(relative: &str) -> String {
-    let path = repo_root().join(relative);
-    std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("read {}: {err}", path.display()))
-}
+#[path = "support/docs.rs"]
+mod docs;
+use docs::read_doc;
 
 /// The first decimal number appearing after `key`'s own occurrence in
 /// `doc`, within a short window — mirrors `crates/qsh-core/tests/
