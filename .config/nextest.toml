@@ -1,7 +1,6 @@
 # `cargo nextest run` configuration. Local defaults otherwise — this only
 # adds a bound so a genuine deadlock terminates instead of hanging CI up to
-# the job-level timeout (`docs/ROADMAP.md` 2026-08-21 audit A13, PLAN.md
-# Step 3.5 PR ①).
+# the job-level timeout (`docs/ROADMAP.md` 2026-08-21 audit A13).
 [profile.default]
 # A test that runs past 60s is flagged as slow (a warning, not a failure);
 # one still running after 3 such periods (180s) is a deadlock, not a slow
@@ -10,12 +9,11 @@
 # bound, not a tight one.
 slow-timeout = { period = "60s", terminate-after = 3 }
 
-# nextest's built-in default (0.9.143) is 200ms — confirmed against upstream
-# `nextest-runner/default-config.toml` (nextest-rs/nextest, main), since
-# `cargo nextest run --help` does not surface it (ARBITRATION-4.md J12,
-# design.md §0-17 left it unconfirmed). We pin it explicitly rather than
-# inherit silently, because an unconfirmed default is a reproducibility gap
-# on its own. 4a's in-process `LoopbackHarness` spawns no child processes,
+# nextest's built-in default (0.9.143) is 200ms, confirmed against upstream
+# `nextest-runner/default-config.toml` because `cargo nextest run --help`
+# does not surface it. We pin it explicitly rather than inherit silently,
+# because an unconfirmed default is a reproducibility gap on its own.
+# 4a's in-process `LoopbackHarness` spawns no child processes,
 # so nextest's leaky path — a child still holding the test process's
 # stdout/stderr fd after exit — never applies to that harness; the value
 # is pinned for explicitness there, not because a leak was observed or
@@ -25,10 +23,10 @@ slow-timeout = { period = "60s", terminate-after = 3 }
 # principle there — what actually keeps it closed is `ServeGuard`'s
 # `Drop` (`crates/qsh-cli/tests/common/mod.rs`), which kills the child,
 # waits for it, and joins its reader threads before returning, so the fd
-# is reclaimed even on an assertion panic (`ARBITRATION-4.md` 4c 판정 Q6).
+# is reclaimed even on an assertion panic.
 leak-timeout = "200ms"
 
-# `load.yml`'s T2 profile (4c adversarial review A7/B1/B3). Three
+# `load.yml`'s T2 profile. Three
 # departures from `[profile.default]`, all load-only:
 # - `test-threads = 1`: `adversarial_load.rs`'s scenarios each assert
 #   absolute RSS/fd/echo-p95 numbers against one shared `qsh serve`
@@ -44,7 +42,7 @@ leak-timeout = "200ms"
 #   m8-adversarial-load.md`'s round table and Step 5's re-tuning both
 #   depend on `load.yml`'s log for.
 # - `slow-timeout`'s `period` is raised to 240s (from the default profile's
-#   60s, and from an earlier 120s — REVIEW-5-C C2/ARBITRATION-5 F2):
+#   60s, and from an earlier 120s):
 #   scenario 12a alone holds a rejection flood for >=12s (12b's own flood
 #   ~8s) before its graceful-shutdown teardown, and scenario 13's
 #   512-socket accept sweep has its own multi-second drain; 60s reads
@@ -63,13 +61,13 @@ test-threads = 1
 success-output = "final"
 slow-timeout = { period = "240s", terminate-after = 3 }
 
-# The 24h/100-session soak run (`BRIEF-5.md` §4.5, `PLAN.md` M8 Step 5b).
+# The 24h/100-session soak run (`docs/campaigns/m8-soak.md` §4).
 # Never used in CI — `scripts/soak/run.sh` invokes it on a dedicated Linux
 # host after the fuzz campaign frees the machine. Two departures from
 # `[profile.load]`:
 # - `slow-timeout`'s `period` is raised to one hour and `terminate-after`
 #   is omitted entirely. Confirmed by an in-repo throwaway experiment
-#   (`PROGRESS-5.md` S0/Q9: a 1s-period profile against a 4s-sleeping test
+#   (measured in-repo: a 1s-period profile against a 4s-sleeping test
 #   printed four SLOW warnings and still passed) that nextest's
 #   `terminate-after` is opt-in — omitting it means a slow-timeout period
 #   elapsing produces a warning line, never a kill, so a 24h test is safe

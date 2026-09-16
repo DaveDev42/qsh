@@ -9,8 +9,9 @@ name: load
 # `-R` accept flood) and asserts the RSS/fd/echo bounds DoD 5 names.
 #
 # Kept as its own workflow, entirely separate from `ci.yml`'s `ci-ok`
-# required-check aggregation (ARBITRATION-4.md J1), for the same reason
-# `fuzz-smoke.yml` is: this measures absolute numbers (RSS in MB, echo p95
+# required-check aggregation (`docs/campaigns/m8-adversarial-load.md` §1),
+# for the same reason `fuzz-smoke.yml` is: this measures absolute numbers
+# (RSS in MB, echo p95
 # in ms, fd counts) on a shared hosted runner, and `docs/design/testing.md`'s
 # CI discipline is explicit that absolute-number trends belong in a
 # non-blocking job, not the PR-required path — a shared runner's flake on an
@@ -26,7 +27,7 @@ name: load
 # No `pull_request` trigger and no nightly schedule — `push` (main) and
 # `workflow_dispatch` only, so this runs after a merge and on demand, never
 # gating a PR. There is no trend-storage backend for this data yet, so a
-# schedule would only add noise (ARBITRATION-4.md J1).
+# schedule would only add noise.
 
 on:
   push:
@@ -47,16 +48,16 @@ jobs:
   adversarial-load:
     name: adversarial-load
     runs-on: ubuntu-24.04
-    # Budget: `BRIEF-4c.md` §2.1's per-scenario budgets summed to ~155s
+    # Budget: the per-scenario budgets summed to ~155s
     # (worst case, ceiling per scenario) for the original 5-scenario shape.
-    # Stage 4c-F2 split scenario 12 into three (12a/12b/12c), for 11 test
+    # A later fix split scenario 12 into three (12a/12b/12c), for 11 test
     # functions total in the file (10 `#[tokio::test]` + one pure-function
-    # `#[test]`), 12c skipping itself when running as root. A measured
-    # strict run (`PROGRESS-4.md` Stage 4c-S5, WSL, `~/fuzz`'s 8 workers
-    # saturating the host) finished the pre-split 9-test shape in 20.8s
+    # `#[test]`), 12c skipping itself when running as root. A strict run
+    # measured on WSL (with `~/fuzz`'s 8 workers saturating the host)
+    # finished the pre-split 9-test shape in 20.8s
     # wall-clock; the split adds one more short flood (12b, a few seconds
     # to force rotation at a few-hundred-byte `max_bytes`) and one bounded
-    # retry loop — 12c's second construction (`PLAN.md` M8 Step 5 (d)),
+    # retry loop — 12c's second construction (`PLAN.md` §3 Step 5),
     # up to 50 `session.open` round trips 50ms apart (2.5s ceiling) polling
     # for the fail-closed `PERMISSION_DENIED` once a freshly restarted
     # writer cannot create `audit.log` — this workflow's
@@ -69,9 +70,9 @@ jobs:
     # soak scenario (`crates/qsh-cli/tests/soak.rs`, default 120s steady
     # state + 8 sessions + a 90s drain wait for `CLOSED_RETENTION` +
     # `REAPER_TICK`), a few more minutes on top of adversarial_load's own
-    # budget above. 40 minutes (raised from 30, `BRIEF-5.md` §5) leaves
-    # headroom for a release build plus both genuinely slow runs without
-    # letting a runaway eat the runner's 6-hour default.
+    # budget above. 40 minutes (raised from 30 when the soak step was
+    # added) leaves headroom for a release build plus both genuinely slow
+    # runs without letting a runaway eat the runner's 6-hour default.
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v6
@@ -79,9 +80,10 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: nextest
-      # Runner environment record (BRIEF-4c.md §2.2): source-8 loopback
-      # multiplexing and the 512-TCP scenario both depend on values that
-      # are otherwise unconfirmed for GHA's ubuntu-24.04 runner. Printed
+      # Runner environment record (`docs/campaigns/m8-adversarial-load.md`
+      # §5): source-8 loopback multiplexing and the 512-TCP scenario both
+      # depend on values that are otherwise unconfirmed for GHA's
+      # ubuntu-24.04 runner. Printed
       # unconditionally, not only on failure, so the campaign doc's
       # environment section can be filled in from a normal green run too.
       - name: Record runner limits
@@ -103,7 +105,7 @@ jobs:
       # `summarize.py` (below) something to judge — without it the test
       # still asserts its own always-checked axes, but the CSV-only axes
       # (per-session buffer, RSS trend, quarters notes) never get any CI
-      # coverage at all (REVIEW-5-C C7 / REVIEW-5-B B9 / ARBITRATION-5 F2).
+      # coverage at all (`docs/campaigns/m8-soak.md` §3).
       - run: cargo nextest run --profile load -p qsh-cli --test soak --no-fail-fast
         env:
           QSH_LOAD_STRICT: 1
