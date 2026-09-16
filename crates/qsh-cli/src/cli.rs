@@ -385,7 +385,7 @@ pub struct TunnelOpenArgs {
 
     /// SOCKS5 dynamic forwarding `[bind:]port`, repeatable — a third,
     /// independent mode: it does not fold into `--local`/`--remote`'s
-    /// mutual exclusion (`PLAN.md` M4 Step 6). Parses, but always answers
+    /// mutual exclusion. Parses, but always answers
     /// `UNSUPPORTED` before opening a connection to `host` or doing
     /// anything `--local`/`--remote` would have — implementation is P1
     /// (`docs/CLI.md` §6.9).
@@ -440,10 +440,10 @@ fn parse_env_var(value: &str) -> Result<EnvVar, String> {
     }
 }
 
-/// `qsh cert …` subcommands (`docs/adr/0008-private-ca-cert-issuance.md`,
-/// `PLAN.md` M7 Step 5). Both are local-only and idempotent — neither
-/// dials, and neither takes a `device_id`: `cert issue` always promotes
-/// this device's own identity (ADR §5).
+/// `qsh cert …` subcommands (`docs/adr/0008-private-ca-cert-issuance.md`).
+/// Both are local-only and idempotent — neither dials, and neither takes a
+/// `device_id`: `cert issue` always promotes this device's own identity
+/// (ADR §5).
 #[derive(Debug, Subcommand)]
 pub enum CertCmd {
     /// Create the local private CA root (self-signed, `is_ca`). Idempotent:
@@ -507,8 +507,8 @@ pub enum TrustCmd {
 pub enum AclCmd {
     /// Evaluate this machine's own `acl.toml` against a hypothetical
     /// request, using the exact same evaluator `qsh serve`/`qsh listen`/
-    /// `qsh reverse` enforce with (`PLAN.md` M5 DoD 1) — a reliable
-    /// prediction of what enforcement would decide, without a restart.
+    /// `qsh reverse` enforce with — a reliable prediction of what
+    /// enforcement would decide, without a restart.
     /// Local only: never reaches a remote peer (`docs/CLI.md` §6.15).
     Check(AclCheckArgs),
 }
@@ -538,7 +538,7 @@ pub struct AclCheckArgs {
     pub auth_path: Option<String>,
 
     /// Principal that owns `--resource`, so `scope = "owned"` rows can be
-    /// evaluated too (`PLAN.md` M5 §4.2). Omit to evaluate `--resource` as
+    /// evaluated too (`docs/CLI.md` §6.15). Omit to evaluate `--resource` as
     /// unowned.
     #[arg(long, value_name = "PRINCIPAL")]
     pub owner: Option<String>,
@@ -804,8 +804,8 @@ mod tests {
 
     /// `-R` is `-L`'s twin: repeatable, scoped to the interactive form,
     /// unparsed by clap for the same reason (`docs/CLI.md` §6.9), and free
-    /// to coexist with `-L` on the same invocation — `PLAN.md` M4 Step 4
-    /// calls them "companion flags" of the interactive form, not mutually
+    /// to coexist with `-L` on the same invocation — `docs/CLI.md` §6.9
+    /// treats them as companion flags of the interactive form, not mutually
     /// exclusive.
     #[test]
     fn remote_forward_is_repeatable_scoped_to_the_interactive_form_and_coexists_with_local() {
