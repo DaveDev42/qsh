@@ -24,7 +24,7 @@ Emit newline\-delimited JSON on stdout (reserved for streaming commands; non\-st
 Remote forward `[bind:]rport:host:hport` — same grammar as the interactive `\-R` (`docs/CLI.md` §6.9). Exactly one of `\-\-local`/`\-\-remote`/`\-\-dynamic` is required
 .TP
 \fB\-D\fR, \fB\-\-dynamic\fR \fI<SPEC>\fR
-SOCKS5 dynamic forwarding `[bind:]port`, repeatable — a third, independent mode: it does not fold into `\-\-local`/`\-\-remote`\*(Aqs mutual exclusion (`PLAN.md` M4 Step 6). Parses, but always answers `UNSUPPORTED` before opening a connection to `host` or doing anything `\-\-local`/`\-\-remote` would have — implementation is P1 (`docs/CLI.md` §6.9)
+SOCKS5 dynamic forwarding `[bind:]port`, repeatable — a third, independent mode: it does not fold into `\-\-local`/`\-\-remote`\*(Aqs mutual exclusion. Parses, but always answers `UNSUPPORTED` before opening a connection to `host` or doing anything `\-\-local`/`\-\-remote` would have — implementation is P1 (`docs/CLI.md` §6.9)
 .TP
 \fB\-v\fR, \fB\-\-verbose\fR
 Increase diagnostic verbosity on stderr (`\-v` info, `\-vv` debug, `\-vvv` trace). Never affects stdout (`docs/CLI.md` §2.2)
