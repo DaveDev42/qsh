@@ -1,5 +1,5 @@
-//! ARBITRATION-5 (적대 검토 A 판정, F3) — REVIEW-5-A A4's own premise was
-//! wrong: it assumed `Quotas::reserve_connection` has exactly one
+//! An M8 soak adversarial-review finding (docs/campaigns/m8-soak.md §3) had a
+//! wrong premise: it assumed `Quotas::reserve_connection` has exactly one
 //! production call site, when there are really two, one per accept path
 //! that reserves a connection slot before authorizing anything else —
 //! `Server::serve_connection` (`qsh serve`'s own accept loop,
@@ -76,7 +76,7 @@ fn reserve_connection_call_sites(relative: &str) -> Vec<String> {
         .collect()
 }
 
-/// REVIEW-5-A A4: `Server::serve_connection` must be the sole
+/// `Server::serve_connection` must be the sole
 /// `reserve_connection` call site in `server/mod.rs` — a second one
 /// (an accept path that reserves a slot outside this choke point) or a
 /// zero count (the reservation moved or was dropped) both change what the
@@ -93,7 +93,7 @@ fn reserve_connection_has_exactly_one_production_call_site_in_server_mod() {
     );
 }
 
-/// REVIEW-5-A A4's other half: `Listen::accept_and_register_permitted`
+/// The other half of the same check: `Listen::accept_and_register_permitted`
 /// must be the sole `reserve_connection` call site in
 /// `reverse/listen.rs` — the reverse-target controller's own accept path,
 /// independent of `qsh serve`'s.

@@ -408,8 +408,7 @@ pub struct Quotas {
     windows: [Mutex<CategoryWindows>; QuotaKind::ALL.len()],
     /// Soak observability (M8 Step 5a) — see [`ConnectionCounters`].
     connection_counters: ConnectionCounters,
-    /// Per-[`QuotaKind`] rejection tally (REVIEW-5-A A3, ARBITRATION-5 적대
-    /// 검토 A 판정): incremented on every call to [`Quotas::
+    /// Per-[`QuotaKind`] rejection tally, incremented on every call to [`Quotas::
     /// record_rejection`], regardless of whether that call's own audit
     /// line was window-suppressed — suppression is an audit-*emission*
     /// concern (`AUDIT_AGGREGATION_WINDOW`'s first-then-summary shape),
@@ -445,7 +444,7 @@ pub struct QuotaCounters {
     pub connection_refused: u64,
     pub pairing_reserved: u64,
     pub pairing_refused: u64,
-    /// REVIEW-5-A A3: one slot per [`QuotaKind`] (index = `kind as
+    /// One slot per [`QuotaKind`] (index = `kind as
     /// usize`), each counting every [`Quotas::record_rejection`] call
     /// against that axis — every quota a soak can bind on, not just the
     /// two connection-reservation counters above.
@@ -454,7 +453,7 @@ pub struct QuotaCounters {
 
 impl QuotaCounters {
     /// Sum of [`Self::rejections_by_kind`] across every axis — the
-    /// accept-loop heartbeat's `quota_rejections` field (REVIEW-5-A A3).
+    /// accept-loop heartbeat's `quota_rejections` field.
     pub fn rejections_total(&self) -> u64 {
         self.rejections_by_kind.iter().sum()
     }
@@ -959,7 +958,7 @@ impl Quotas {
         request_id: Option<u64>,
         auth_path: qsh_transport::AuthPath,
     ) -> Vec<AuditRecord> {
-        // REVIEW-5-A A3: counted on every call, independent of the
+        // Counted on every call, independent of the
         // window-suppression decision below — suppression governs whether
         // *this* call also emits its own audit line, not whether it
         // happened at all.
@@ -1749,7 +1748,7 @@ mod tests {
         );
     }
 
-    /// REVIEW-5-A A9: the test above only ever trips the host-cap branch
+    /// The test above only ever trips the host-cap branch
     /// (`max_connections`) — with `max_connections == 1`, the
     /// per-principal cap (`quotas_with_connections`'s second argument) is
     /// never reached, so its doc comment's claim ("both its refusal
@@ -1898,7 +1897,7 @@ mod tests {
         assert_eq!(quotas.exec_in_use_principal_count(), 0);
     }
 
-    /// REVIEW-5-A A3: `Quotas::record_rejection`'s per-kind tally
+    /// `Quotas::record_rejection`'s per-kind tally
     /// (`QuotaCounters::rejections_by_kind`) increments independently for
     /// two different axes rejected once each — the heartbeat's
     /// `quota_rejections` field (`rejections_total`) must reflect every
@@ -1941,7 +1940,7 @@ mod tests {
         assert_eq!(counters.rejections_total(), 2);
     }
 
-    /// REVIEW-5-A A3: a second rejection of the *same* kind inside the
+    /// A second rejection of the *same* kind inside the
     /// same aggregation window is audit-suppressed (no new
     /// `AuditRecord` — `quota_audit_reports_first_then_summary` below
     /// pins that half), but the raw tally still counts it — counting and

@@ -305,7 +305,7 @@ fn detaching_leaves_the_session_running_and_re_attachable() {
 /// On a loaded runner that window can be wide enough for the host to
 /// receive and ack `"two\n"` before it has actually stopped, which is
 /// indistinguishable from a normal flush and reports `Applied` instead of
-/// `Unconfirmed` (ubuntu-24.04-arm CI run 33601809635, 2026-09-02). The
+/// `Unconfirmed` (ubuntu-24.04-arm CI run, 2026-09-02). The
 /// scenario below closes that window by waiting on `waitpid(host,
 /// WUNTRACED)` — which the kernel only satisfies once the whole thread
 /// group has stopped, and which does not reap the child — before writing

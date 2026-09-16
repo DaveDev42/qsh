@@ -1108,7 +1108,7 @@ mod tests {
         // sends RST, not FIN, and a `connect()` that observes
         // `SO_ERROR = ECONNRESET` before the socket is writable surfaces
         // that as `Err` here instead of a connected socket that then
-        // reads a reset (macOS CI run 33801780928). Either shape is
+        // reads a reset (observed on macOS CI). Either shape is
         // "refused, no payload"; neither should stop the test short of
         // the "forward keeps serving" assertion below.
         match TcpStream::connect(addr).await {

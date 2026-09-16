@@ -142,7 +142,7 @@ pub struct LocalIdentity {
     /// `rustls-pki-types` 1.15.1 implements `zeroize::Zeroize` on
     /// `PrivatePkcs8KeyDer` for callers who opt in, but has no `Drop` impl
     /// that calls it, so the copy handed to rustls/quinn is out of this
-    /// type's control (BRIEF-6 §1.3).
+    /// type's control.
     pub key_pkcs8_der: Zeroizing<Vec<u8>>,
 }
 
@@ -1220,13 +1220,13 @@ mod tests {
         );
     }
 
-    /// BRIEF-7 §2.5 item 2 (g5 — 0-RTT threat-model gap): `client_tls_config`/
-    /// `server_tls_config`'s own comments assert "No 0-RTT, no session
-    /// resumption" / "No early data, no tickets", but nothing in this
-    /// workspace read those five rustls config values back before this test
-    /// — `docs/design/threat-model.md`'s 0-RTT row can only cite a pin, not
-    /// a comment, as its control. Reads every field directly off the built
-    /// `rustls::ClientConfig`/`rustls::ServerConfig` — the same values
+    /// Closes `docs/design/threat-model.md`'s 0-RTT gap (g5):
+    /// `client_tls_config`/`server_tls_config`'s own comments assert "No
+    /// 0-RTT, no session resumption" / "No early data, no tickets", but
+    /// nothing in this workspace read those five rustls config values back
+    /// before this test — the threat model's 0-RTT row can only cite a
+    /// pin, not a comment, as its control. Reads every field directly off
+    /// the built `rustls::ClientConfig`/`rustls::ServerConfig` — the same values
     /// [`client_tls_config`]/[`server_tls_config`] set — rather than
     /// re-deriving them, so a future edit that silently drops one of the
     /// five lines (re-enabling 0-RTT/resumption/tickets) fails this test
@@ -1285,7 +1285,7 @@ mod tests {
     }
 
     /// `LocalIdentity`'s `impl Debug` must never print the private key,
-    /// `Zeroizing<Vec<u8>>` included (BRIEF-6 §1.3) — `Zeroizing` derives
+    /// `Zeroizing<Vec<u8>>` included — `Zeroizing` derives
     /// `Debug` from its inner `Vec<u8>`, so the hand-written `impl Debug`
     /// above (which never touches `key_pkcs8_der` at all) is the only
     /// thing standing between this type and a Debug-logged key. Pin it

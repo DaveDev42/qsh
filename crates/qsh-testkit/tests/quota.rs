@@ -1224,14 +1224,14 @@ async fn two_principals_have_independent_connection_budgets() {
 }
 
 // ==========================================================================
-// `ARBITRATION-4.md` J4/4a round 3: a real connection/session flood, over
+// A real connection/session flood, over
 // an admission gate deliberately opened wide (`LoopbackHarness::
 // start_with_admission_and_quotas`) so the admission axis (`crate::
-// admission::Gate`, J3) never becomes the bottleneck under test here —
+// admission::Gate`) never becomes the bottleneck under test here —
 // that axis is `admission.rs`'s own job. Both tests use the pipe-backed
 // PTY round trip (`qsh_core::broker::PipeFactory`, "pipe echo") every
 // other quota test in this file uses; a real PTY's own echo latency is
-// T2's job (`ARBITRATION-4.md` J5), not this in-process harness's.
+// T2's job, not this in-process harness's.
 // ==========================================================================
 
 /// A real **connection** flood past `max_connections`, admission wide
@@ -1278,7 +1278,7 @@ async fn existing_session_echo_survives_a_connection_flood() {
     // Dial the whole flood concurrently — not one at a time — so the race
     // for `max_connections`'s last slot (there is none left; both slots
     // are already held) is actually exercised rather than 20 dials that
-    // never contend with one another (`ARBITRATION-4.md` F3, B-P2-5).
+    // never contend with one another.
     // `futures::future::join_all` isn't a `qsh-testkit` dependency (only a
     // transitive one via other crates), so this drives the same
     // concurrency with `tokio::task::JoinSet` instead — each task gets its
@@ -1526,7 +1526,7 @@ async fn the_listen_controller_enforces_the_connection_cap() {
     harness.shutdown().await;
 }
 
-/// `ARBITRATION-4.md` J8, reduced scale ("축소판"): while a flood of
+/// Reduced scale ("축소판"): while a flood of
 /// extra registrations is refused past the controller's one-connection
 /// cap (the exact scenario `the_listen_controller_enforces_the_
 /// connection_cap` above pins), the already-registered target keeps
