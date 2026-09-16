@@ -1014,13 +1014,11 @@ mod tests {
         );
     }
 
-    /// `M8 Step 4` (`ARBITRATION-4.md` J4): the time axis
-    /// `gate_table_is_constant_size_under_forged_cardinality` doesn't
-    /// cover — a sustained unvalidated (spoofable) flood that keeps
-    /// firing across many [`EPOCH`] generation rollovers must still
-    /// never grow the sketch's backing storage and must never touch the
-    /// handshake permit pool, no matter how many generations have
-    /// rotated through the sliding-window blend
+    /// `M8 Step 4`: the time axis `gate_table_is_constant_size_under_forged_cardinality`
+    /// doesn't cover — a sustained unvalidated (spoofable) flood that keeps firing across
+    /// many [`EPOCH`] generation rollovers must still never grow the sketch's backing
+    /// storage and must never touch the handshake permit pool, no matter how many
+    /// generations have rotated through the sliding-window blend
     /// ([`Gate::rate_exceeded`]'s epoch/fraction math).
     #[tokio::test]
     async fn gate_state_and_permits_survive_generation_rollovers_under_sustained_forged_flood() {
@@ -1062,12 +1060,11 @@ mod tests {
              number of EPOCH generation rollovers"
         );
 
-        // `ARBITRATION-4.md` M8 Step 4 fixer round F2 (A-P2-2): the two
-        // asserts above are both time-invariant regardless of whether
-        // `Sketch::advance_to` ever actually rolls a generation over —
-        // storage never reallocates and an unvalidated decide never
-        // touches the permit pool either way (P2-2's mutation experiment:
-        // gutting `advance_to` to a no-op `return;` still passes both).
+        // M8 Step 4 adversarial review, P2-2: the two asserts above are both time-invariant
+        // regardless of whether `Sketch::advance_to` ever actually rolls a generation
+        // over — storage never reallocates and an unvalidated decide never touches the
+        // permit pool either way (P2-2's mutation experiment: gutting `advance_to` to a
+        // no-op `return;` still passes both).
         // What's missing is a load-bearing check *of the rollover itself*
         // — that generations are really rotating, not just that nothing
         // visibly breaks if they don't. Two more, on the still-forged

@@ -366,15 +366,15 @@ fn is_live(entry: &ReverseHostEntry) -> bool {
 /// `ErrorCode::InvalidArgument` for an empty/whitespace-only (or, after
 /// [`hint_alias`] strips a `user@` prefix, empty-after-stripping) host
 /// name. One error value, every empty-alias call site in [`resolve_route`]
-/// and `Ops::resolve_peer_address` (BRIEF-6 §1 item 1 — same code, same
+/// and `Ops::resolve_peer_address` (`PLAN.md` §3 Step 6 — same code, same
 /// wording, not just the same code) so neither can drift from the other.
 pub(crate) fn empty_host_name_error() -> OpError {
     OpError::new(ErrorCode::InvalidArgument, "host name must not be empty")
 }
 
 /// `ErrorCode::InvalidArgument` for a [`hint_alias`] result that is
-/// non-empty but still fails `qsh_proto::wire::valid_host_name` (BRIEF-7 §2.5
-/// item 1 — Q10) — a name like `"dave@no where"` strips down to `"no
+/// non-empty but still fails `qsh_proto::wire::valid_host_name` (`PLAN.md`
+/// §3 Step 7, Q10) — a name like `"dave@no where"` strips down to `"no
 /// where"`, which is neither empty (so [`empty_host_name_error`] would be
 /// the wrong wording) nor an alias `qsh trust add` could ever accept (so
 /// falling through to the `HOST_NOT_FOUND` remedy would suggest an
@@ -392,7 +392,7 @@ pub(crate) fn invalid_host_alias_error(alias: &str) -> OpError {
 }
 
 /// The three outcomes of [`hint_alias`] stripping and validating a `user@`
-/// hint off a host alias (BRIEF-7 §2.5 item 1 — Q10): nothing usable is
+/// hint off a host alias (`PLAN.md` §3 Step 7, Q10): nothing usable is
 /// left ([`HintAlias::Empty`]), something is left but it is not a legal
 /// alias ([`HintAlias::Invalid`]), or it is ([`HintAlias::Valid`]). Kept as
 /// three explicit outcomes rather than folding `Invalid` back into `Empty`
@@ -419,8 +419,8 @@ pub(crate) enum HintAlias<'a> {
 /// ...`, `docs/CLI.md` §6.1/§6.9) and so can still carry one when they
 /// reach routing or `Ops::resolve_peer_address`'s remedy-message assembly.
 ///
-/// Splits on the *last* `@`, then **trims** the remainder (BRIEF-7 §2.5
-/// item 1 — Q10: a stray space survives an `@`-split unnoticed otherwise,
+/// Splits on the *last* `@`, then **trims** the remainder (`PLAN.md` §3
+/// Step 7, Q10: a stray space survives an `@`-split unnoticed otherwise,
 /// e.g. `"dave@ nowhere"` -> `" nowhere"`, and a bare name with no `@` at
 /// all can carry the same leading/trailing whitespace, e.g. `" nowhere"`)
 /// and validates it against `qsh_proto::wire::valid_host_name` — the exact
@@ -432,9 +432,9 @@ pub(crate) enum HintAlias<'a> {
 /// remedy at all. [`HintAlias::Invalid`] when it is non-empty but still not
 /// a legal alias (`"dave@no where"` -> `"no where"`, an internal space) —
 /// interpolating it verbatim would produce an un-runnable remedy just the
-/// same, but for a different reason than "empty" (BRIEF-6 §1 items 1-2 /
-/// lens-2 findings; BRIEF-7 §2.5 item 1 extends the same discipline to
-/// this third case). Shared by [`resolve_route`] here and
+/// same, but for a different reason than "empty" (`PLAN.md` §3 Step 6
+/// lens-2 findings; Step 7 extends the same discipline to this third
+/// case). Shared by [`resolve_route`] here and
 /// `Ops::resolve_peer_address` (`crate::ops::resolve_peer_address`) so the
 /// two `HOST_NOT_FOUND`/`INVALID_ARGUMENT` choices never diverge on this
 /// rule.
@@ -533,13 +533,13 @@ fn resolve_route(
     // into both the diagnostic and the `qsh trust add` remedy, and the
     // latter is not even parseable: alias names are `[A-Za-z0-9._-]`
     // (`qsh_proto::wire::valid_host_name`), which rejects `@`. Strip the
-    // same "last `@`" hint `parse_target` uses (BRIEF-6 §1.6 / M7 carry-
-    // over v) via [`hint_alias`] so the message and remedy always name a
-    // bare alias. `"dave@"`/`"@"` strip down to an empty alias, which is
-    // the same argument defect the guard above rejects — fall into the
-    // identical `InvalidArgument` rather than let an empty alias reach the
-    // `qsh trust add  --address ...` remedy below (un-runnable: two spaces,
-    // no name; BRIEF-6 §1 item 1 / lens-2 finding).
+    // same "last `@`" hint `parse_target` uses (`PLAN.md` §3 Step 6, M7
+    // carry-over v) via [`hint_alias`] so the message and remedy always
+    // name a bare alias. `"dave@"`/`"@"` strip down to an empty alias,
+    // which is the same argument defect the guard above rejects — fall
+    // into the identical `InvalidArgument` rather than let an empty alias
+    // reach the `qsh trust add  --address ...` remedy below (un-runnable:
+    // two spaces, no name; lens-2 finding).
     let display_name = match hint_alias(name) {
         HintAlias::Valid(alias) => alias,
         HintAlias::Empty => return Err(empty_host_name_error()),
@@ -1171,8 +1171,8 @@ mod tests {
         // `qsh host get <name>` (`docs/CLI.md` §6.1) takes a raw
         // positional — unlike the bare `qsh [user@]host` form, it does not
         // run `parse_target`'s `user@` split first, so a `user@host` typo
-        // can reach `resolve_route` unstripped (BRIEF-6 §1.6 / M7 carry-
-        // over v). The message must not echo the `@` back, and the
+        // can reach `resolve_route` unstripped (`PLAN.md` §3 Step 6, M7
+        // carry-over v). The message must not echo the `@` back, and the
         // suggested `qsh trust add <name> --address ...` remedy must name
         // something `qsh trust add` itself would actually accept —
         // `qsh_proto::wire::valid_host_name`'s `[A-Za-z0-9._-]`, `1..=64`
@@ -1203,7 +1203,7 @@ mod tests {
         // would produce `qsh trust add  --address ...` (two spaces, no
         // name: un-runnable). This must land on the exact same
         // `InvalidArgument`/message the empty-name guard above uses, not a
-        // new one (BRIEF-6 §1 item 1 / lens-2 finding).
+        // new one (`PLAN.md` §3 Step 6, lens-2 finding).
         let store = TrustStore::default();
         for name in ["dave@", "@", "dave@ "] {
             let err = resolve_route(&[], &store, &no_hosts(), name).unwrap_err();
@@ -1222,7 +1222,7 @@ mod tests {
 
     #[test]
     fn routing_trims_a_stray_space_left_by_an_at_split_and_still_finds_host_not_found() {
-        // BRIEF-7 §2.5 item 1 (Q10): `"dave@ nowhere"` splits on the last
+        // `PLAN.md` §3 Step 7, Q10: `"dave@ nowhere"` splits on the last
         // `@` to `" nowhere"` — the leading space must be trimmed before
         // the `HOST_NOT_FOUND` remedy names the alias, so the suggested
         // `qsh trust add` command is runnable and the message matches the
@@ -1255,7 +1255,7 @@ mod tests {
 
     #[test]
     fn routing_an_internal_space_left_after_stripping_is_invalid_argument_not_host_not_found() {
-        // BRIEF-7 §2.5 item 1 (Q10): `"dave@no where"` strips to `"no
+        // `PLAN.md` §3 Step 7, Q10: `"dave@no where"` strips to `"no
         // where"` — non-empty, but not a legal `valid_host_name` alias (an
         // internal space). Falling through to `HOST_NOT_FOUND` would
         // suggest an un-runnable `qsh trust add "no where" --address ...`;

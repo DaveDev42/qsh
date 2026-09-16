@@ -134,8 +134,8 @@ fn cli_md_names_every_frozen_doctor_code() {
     );
 }
 
-/// M8 Step 4c (`BRIEF-4c.md` §5.4/§7 Q7, `ARBITRATION-4.md` "4c 구현 판정"
-/// Q7): the test above pins that every frozen *code* is named somewhere in
+/// M8 Step 4c (docs/campaigns/m8-adversarial-load.md §3): the test above
+/// pins that every frozen *code* is named somewhere in
 /// `docs/CLI.md`, but nothing pinned the loose *count prose* — "진단 코드
 /// N종" at `docs/CLI.md:752` and "N종 진단 코드" at `:1030` — against
 /// `EXPECTED_DOCTOR_CODES.len()`. That drift actually happened once

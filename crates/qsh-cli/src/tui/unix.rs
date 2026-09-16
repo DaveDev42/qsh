@@ -114,9 +114,9 @@ pub fn run(ops: &Ops, what: Attach, escape: Option<u8>) -> Result<i32, OpError> 
     //
     // Nothing to restore yet — the terminal is still cooked — so a spawn
     // failure here is just `orphan`'s usual "session is still running"
-    // report (BRIEF-6 §1.4: `spawn` used to `.expect()`, which would panic
-    // *after* the session was created but leave the operator with no idea
-    // it was still running).
+    // report (`spawn` used to `.expect()`, which would panic *after* the
+    // session was created but leave the operator with no idea it was still
+    // running).
     spawn_signal_pump(stream.handle(), &RealThreadSpawn).map_err(|err| {
         orphan(OpError::new(
             ErrorCode::Internal,
@@ -141,16 +141,16 @@ pub fn run(ops: &Ops, what: Attach, escape: Option<u8>) -> Result<i32, OpError> 
     // Past this point the terminal *is* raw, so a spawn failure has to walk
     // the same restore path every other exit does: drop the guard (`term::
     // restore`, via `RawMode`'s `Drop`) before reporting anything, the same
-    // ordering `drop(raw)` uses lower down for the ordinary exit path
-    // (BRIEF-6 §1.4 — this used to `.expect()` here, which panics with the
-    // terminal already switched and no guard on the unwinding stack to put
-    // it back). The `Err` branch below and this ordering — `drop(raw)`
-    // *before* `orphan`'s stderr note, not after — are read-verified but
-    // not test-pinned: reaching the branch needs a real spawn failure
+    // ordering `drop(raw)` uses lower down for the ordinary exit path (this
+    // used to `.expect()` here, which panics with the terminal already
+    // switched and no guard on the unwinding stack to put it back). The
+    // `Err` branch below and this ordering — `drop(raw)` *before*
+    // `orphan`'s stderr note, not after — are read-verified but not
+    // test-pinned: reaching the branch needs a real spawn failure
     // (`spawn_input_pump`'s own unit tests use a stub `PumpHandle` and
     // never call this closure at all), and a mutation deleting this
     // `drop(raw)` was confirmed to slip past the full `qsh-cli` suite
-    // (verify-lens 2, BRIEF-6 §1.4 mutation d2).
+    // (verify-lens 2, mutation d2).
     if let Err(err) = spawn_input_pump(
         stream.handle(),
         escape,
@@ -325,12 +325,11 @@ fn note(raw: bool, message: &str) {
 /// nothing but the process exiting can interrupt. It owns no terminal
 /// state, so leaving it parked is safe.
 ///
-/// Returns the spawn failure instead of panicking (BRIEF-6 §1.4): by the
-/// time the caller can reach here the terminal is already raw, and a
-/// `.expect()` here used to leave the operator's terminal stuck raw with a
-/// panic backtrace stair-stepped across it — exactly the failure `term::
-/// restore_and_die` exists to prevent for signals, just reached from a
-/// different door.
+/// Returns the spawn failure instead of panicking: by the time the caller
+/// can reach here the terminal is already raw, and a `.expect()` here used
+/// to leave the operator's terminal stuck raw with a panic backtrace
+/// stair-stepped across it — exactly the failure `term::restore_and_die`
+/// exists to prevent for signals, just reached from a different door.
 fn spawn_input_pump<H: PumpHandle>(
     handle: H,
     escape: Option<u8>,
@@ -409,11 +408,11 @@ fn spawn_input_pump<H: PumpHandle>(
 /// fit: a lost resize is re-sent by the next `SIGWINCH`, and a lost `^C`
 /// is cheap next to an unkillable process.
 ///
-/// Returns the spawn failure instead of panicking (BRIEF-6 §1.4): this
-/// runs before the terminal goes raw, so the caller has nothing to restore
-/// yet, but a `.expect()` panic here still used to strand the session the
-/// caller already opened with no `orphan` report telling the operator it
-/// was still running.
+/// Returns the spawn failure instead of panicking: this runs before the
+/// terminal goes raw, so the caller has nothing to restore yet, but a
+/// `.expect()` panic here still used to strand the session the caller
+/// already opened with no `orphan` report telling the operator it was
+/// still running.
 fn spawn_signal_pump<H: PumpHandle>(handle: H, spawner: &dyn ThreadSpawn) -> io::Result<()> {
     let (ready, installed) = std::sync::mpsc::sync_channel(1);
     spawner.spawn(
@@ -476,8 +475,8 @@ fn spawn_signal_pump<H: PumpHandle>(handle: H, spawner: &dyn ThreadSpawn) -> io:
 }
 
 /// The subset of [`AttachHandle`] the two pumps actually call — abstracted
-/// so the spawn-failure tests (BRIEF-6 §1.4, verify-lens 2 finding P2) can
-/// pass a handle double instead of a live `AttachHandle`, whose fields are
+/// so the spawn-failure tests (verify-lens 2 finding P2) can pass a handle
+/// double instead of a live `AttachHandle`, whose fields are
 /// private to `qsh-core::ops::session` with no test constructor exposed to
 /// `qsh-cli` (building a real one means driving `Ops::session_attach`
 /// against a running host or `qsh-testkit`'s harness).
@@ -511,9 +510,9 @@ impl PumpHandle for AttachHandle {
 }
 
 /// Starts a named background thread — abstracted so the two pumps' spawn
-/// failure path (BRIEF-6 §1.4) can be exercised deterministically, the same
-/// DI seam `qsh-core`'s `DoctorEnvironment` uses to force `Ops::doctor`'s
-/// probes through a stub rather than a real failing OS resource.
+/// failure path can be exercised deterministically, the same DI seam
+/// `qsh-core`'s `DoctorEnvironment` uses to force `Ops::doctor`'s probes
+/// through a stub rather than a real failing OS resource.
 trait ThreadSpawn {
     fn spawn(&self, name: &str, body: Box<dyn FnOnce() + Send>) -> io::Result<()>;
 }
@@ -620,7 +619,7 @@ mod tests {
 
     /// A spawner that always fails, standing in for a process that has hit
     /// its thread limit — deterministic in a way the real OS failure never
-    /// is (BRIEF-6 §1.4).
+    /// is.
     struct FailingThreadSpawn;
 
     impl ThreadSpawn for FailingThreadSpawn {
@@ -647,8 +646,8 @@ mod tests {
     }
 
     /// [`PumpHandle`] double: reports success on every call. Stands in for
-    /// a live `qsh_core::AttachHandle` (BRIEF-6 §1.4 verify-lens 2, finding
-    /// P2) — its fields are private to `qsh-core::ops::session` with no
+    /// a live `qsh_core::AttachHandle` (verify-lens 2, finding P2) — its
+    /// fields are private to `qsh-core::ops::session` with no
     /// test constructor exposed to `qsh-cli`, so building a real one means
     /// driving `Ops::session_attach` against a running host or
     /// `qsh-testkit`'s harness, integration-test weight for a spawn-only
@@ -678,8 +677,8 @@ mod tests {
     }
 
     /// Pins the one moving part `spawn_input_pump`/`spawn_signal_pump`
-    /// changed for BRIEF-6 §1.4: a spawn failure now reaches the caller as
-    /// a plain `io::Result::Err` through [`ThreadSpawn::spawn`], not a
+    /// changed: a spawn failure now reaches the caller as a plain
+    /// `io::Result::Err` through [`ThreadSpawn::spawn`], not a
     /// `.expect()` panic.
     ///
     /// This is the seam (`ThreadSpawn`) both pumps call through

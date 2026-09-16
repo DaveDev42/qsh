@@ -400,10 +400,10 @@ mod tests {
 
     /// Smoke check: a CRLF-line-ended source file (the Windows-checkout
     /// shape `acl_registry.rs`'s `source_scan` module calls out) must still
-    /// get its violation caught (BRIEF-6 §5, restoring the coverage the M8
-    /// Step 6 MCP-ban removal dropped along with `MCP_DIR` — the deleted
-    /// test's own doc said as much: this is a demonstration, not a
-    /// discriminator, and cannot be turned into one. Swapping
+    /// get its violation caught (restoring the coverage the M8 Step 6 MCP-ban
+    /// removal dropped along with `MCP_DIR`) — the deleted test's own doc
+    /// said as much: this is a demonstration, not a discriminator, and
+    /// cannot be turned into one. Swapping
     /// `text.lines()` for `text.split('\n')` in `check_module_bans` still
     /// passes this (and every other) xtask test, because the scan matches
     /// `ban.forbidden` as a substring anywhere within a line, and a

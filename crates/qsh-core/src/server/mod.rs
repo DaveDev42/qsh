@@ -422,7 +422,7 @@ struct AcceptHeartbeat {
     retry: u64,
     ignore: u64,
     refuse: u64,
-    /// REVIEW-5-A A3: renamed from `quota_refused` — this is only ever
+    /// Renamed from `quota_refused` — this is only ever
     /// the two connection-*reservation* counters
     /// (`Quotas::reserve_connection`/`reserve_pairing_connection`), never
     /// the other eight [`crate::quota::QuotaKind`] axes. `quota_rejections`
@@ -431,7 +431,7 @@ struct AcceptHeartbeat {
     connection_quota_refused: u64,
     live_conns: u64,
     pending_tickets: u64,
-    /// REVIEW-5-A A3: sum of every [`crate::quota::QuotaKind`] axis's
+    /// Sum of every [`crate::quota::QuotaKind`] axis's
     /// [`crate::quota::Quotas::record_rejection`] tally
     /// (`crate::quota::QuotaCounters::rejections_total`) — the field a
     /// soak should actually read to see "is the host shedding load
@@ -735,8 +735,8 @@ impl Server {
         self.lock_tickets().len()
     }
 
-    /// Number of *unexpired* tickets currently outstanding (REVIEW-5-A
-    /// A5) — the heartbeat's own read, unlike [`Self::pending_tickets`]:
+    /// Number of *unexpired* tickets currently outstanding — the
+    /// heartbeat's own read, unlike [`Self::pending_tickets`]:
     /// expiry there is lazy (only swept when some connection next calls
     /// `Self::pending_tickets_for`), so a quiet-period backlog of
     /// expired-but-unswept tickets would otherwise make
@@ -2350,9 +2350,9 @@ impl Server {
     /// `QSH_LOG=debug` — and, per §3.2, logged only every 5th tick while
     /// every counter is unchanged from the last tick actually logged, so
     /// an idle 24h listener logs this line once every 5 s instead of once
-    /// a second (REVIEW-5-A A10 — that reduction, not silence: a fully
-    /// idle listener still emits 17,280 lines over 24h, which is the
-    /// point, not a bug). A tick where anything moved always logs
+    /// a second — that reduction, not silence: a fully idle listener
+    /// still emits 17,280 lines over 24h, which is the point, not a bug.
+    /// A tick where anything moved always logs
     /// immediately and resets the idle-tick counter.
     fn log_accept_heartbeat(
         &self,
@@ -2368,7 +2368,7 @@ impl Server {
             refuse: admission.refuse,
             connection_quota_refused: quota.connection_refused + quota.pairing_refused,
             live_conns: self.quotas.total_connections_in_use() as u64,
-            // REVIEW-5-A A5: purged, not `pending_tickets()` — an idle
+            // Purged, not `pending_tickets()` — an idle
             // listener with a backlog of expired-but-unswept tickets must
             // not read as "tickets outstanding".
             pending_tickets: self.pending_unexpired_tickets() as u64,
@@ -2425,7 +2425,7 @@ impl Server {
         // under `QSH_LOG=debug` — and rate-limited to once every 5 ticks
         // while every counter it reports is unchanged from the last tick
         // it actually logged, so a 24h idle listener logs this line once
-        // every 5 s instead of once a second (REVIEW-5-A A10).
+        // every 5 s instead of once a second.
         let mut heartbeat = tokio::time::interval(Duration::from_secs(1));
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut last_logged_heartbeat: Option<AcceptHeartbeat> = None;
@@ -5297,7 +5297,7 @@ mod tests {
         assert_eq!(ticks_since_log, 0, "the forced 5th tick resets the counter");
     }
 
-    /// REVIEW-5-A A5: [`Server::pending_tickets`] does not purge expired
+    /// [`Server::pending_tickets`] does not purge expired
     /// entries (its own doc comment — a handful of existing tests are
     /// pinned to that non-purging count), so a quiet-period backlog of
     /// expired-but-unswept tickets would otherwise make the heartbeat's
@@ -6133,9 +6133,8 @@ mod tests {
         );
     }
 
-    /// `ARBITRATION-4.md` J7 고리4: fail-closed extended to the attach
-    /// choke point — [`Server::authorize`] is the same choke point
-    /// `session.open` goes through
+    /// Fail-closed extended to the attach choke point — [`Server::authorize`]
+    /// is the same choke point `session.open` goes through
     /// (`session_open_fails_closed_when_the_audit_sink_cannot_record_
     /// an_allow` pins that axis), so a `session.attach` whose credential
     /// verifies but whose allow cannot be durably recorded is denied with
@@ -6227,8 +6226,7 @@ mod tests {
         );
     }
 
-    /// `ARBITRATION-4.md` M8 Step 4 fixer round F2 (A-P2-1): fail-closed
-    /// extended to the ownership-aware choke point — [`Server::
+    /// Fail-closed extended to the ownership-aware choke point — [`Server::
     /// authorize_owned`] is a *different* fail-closed branch than
     /// [`Server::authorize`] (`session_open_fails_closed_when_the_audit_
     /// sink_cannot_record_an_allow` and `session_attach_fails_closed_

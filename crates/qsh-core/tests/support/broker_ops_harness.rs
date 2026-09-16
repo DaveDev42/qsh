@@ -159,7 +159,7 @@
 //!   re-anchoring arm, seed 11 the `None` arm where a credential outlives
 //!   the session that owned it by a single millisecond.
 //!
-//! Deliberately out of scope (`docs/adr/` and `ARBITRATION-7b.md` Q7): the
+//! Deliberately out of scope (docs/design/threat-model.md): the
 //! default-deny ACL axis — that is `acl/policy.rs`'s proptest's job, this
 //! file only measures the broker's own fail-closed shape (`ResumeDenied`,
 //! `Conflict`, `CursorBeyondEnd`).
