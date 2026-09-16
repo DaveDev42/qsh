@@ -21,23 +21,12 @@
 //! data and every doc file this test reads is plain text, so this runs on
 //! the Windows CI leg too (`PLAN.md` M3 Step 9 (d)'s precedent).
 
-use std::path::PathBuf;
-
 use qsh_core::ops::tunnel::DYNAMIC_FORWARD_UNSUPPORTED_MESSAGE;
 use qsh_core::tunnel::REMOTE_FORWARD_LOOPBACK_ONLY_MESSAGE;
 
-/// The repo root, reached from `CARGO_MANIFEST_DIR` (`crates/qsh-core`)
-/// the same way `doctor_docs.rs`'s own helper does.
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-}
-
-fn read_doc(relative: &str) -> String {
-    let path = repo_root().join(relative);
-    std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("read {}: {err}", path.display()))
-}
+#[path = "support/docs.rs"]
+mod docs;
+use docs::read_doc;
 
 #[test]
 fn readme_quotes_the_dynamic_forward_unsupported_message_verbatim() {

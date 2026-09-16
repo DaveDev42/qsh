@@ -36,11 +36,9 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-}
+#[path = "support/docs.rs"]
+mod docs;
+use docs::repo_root;
 
 /// `crates/qsh-core/src/ops/`.
 fn ops_dir() -> PathBuf {

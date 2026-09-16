@@ -48,20 +48,12 @@
 //! survive all three at once to go unnoticed.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
 
 use qsh_core::acl::{Action, AllowAllPinned, DenyAll, OP_REGISTRY};
 
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-}
-
-fn read_doc(relative: &str) -> String {
-    let path = repo_root().join(relative);
-    std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("read {}: {err}", path.display()))
-}
+#[path = "support/docs.rs"]
+mod docs;
+use docs::read_doc;
 
 /// Same trick `crates/qsh-core/tests/acl_docs.rs` uses: slice `doc` from
 /// `heading` (matched verbatim) up to, but not including, the next line

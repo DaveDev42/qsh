@@ -15,24 +15,12 @@
 //! in is plain text, so this runs on the Windows CI leg too
 //! (`PLAN.md` M3 Step 9 (d)).
 
-use std::path::PathBuf;
-
 use qsh_core::CONTROLLER_UNREACHABLE;
 use qsh_core::doctor::{CERT_EXPIRING_SOON, TRUST_REMOVE_SCOPE};
 
-/// The repo root, reached from `CARGO_MANIFEST_DIR`
-/// (`crates/qsh-core`) the same way every other doc-reading integration
-/// test in this workspace does.
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-}
-
-fn read_doc(relative: &str) -> String {
-    let path = repo_root().join(relative);
-    std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("read {}: {err}", path.display()))
-}
+#[path = "support/docs.rs"]
+mod docs;
+use docs::read_doc;
 
 #[test]
 fn readme_quotes_the_controller_unreachable_diagnostic_verbatim() {
