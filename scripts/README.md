@@ -36,7 +36,32 @@ Archive naming (`qsh-<tag>-<target>.tar.gz`, `.zip` on Windows) and the
 naming is a contract between the two files; changing one means changing the
 other.
 
+## fuzz/
+
+`oss-fuzz-local.sh` builds every fuzz target the way OSS-Fuzz's own helper
+would and produces the seed-corpus zips, so a submission can be checked
+without cloning the OSS-Fuzz repo. Target inventory and campaign procedure
+are in [fuzz/README.md](../fuzz/README.md).
+
 ## mobility/
 
 Manual Wi-Fi to tethering mobility campaign scripts. See
 [docs/campaigns/m2-mobility.md](../docs/campaigns/m2-mobility.md).
+
+## soak/
+
+`run.sh` drives the 24h/100-session soak scenario
+(`crates/qsh-cli/tests/soak.rs`) under nextest's `[profile.soak]` on a
+dedicated Linux host. `summarize.py` (stdlib only) reads the CSV that
+`run.sh` writes and judges it against the thresholds fixed in
+[docs/campaigns/m8-soak.md](../docs/campaigns/m8-soak.md) §3, exiting
+non-zero on a violation. Neither script runs in CI; `load.yml` runs the
+same scenario in its short mode instead.
+
+## stopwatch/
+
+A container pair that builds a never-configured machine for each round of
+the SC1 stopwatch campaign and checks the campaign's preconditions before
+the timer starts. It measures nothing — the thing being timed is human
+time. See [docs/campaigns/m7-stopwatch.md](../docs/campaigns/m7-stopwatch.md)
+and stopwatch/README.md (Korean, like the campaign doc it serves).
