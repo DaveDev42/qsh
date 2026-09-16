@@ -23,23 +23,13 @@
 mod docs;
 use docs::read_doc;
 
-/// `relative`'s production code only: a prefix slice on the file's sole
-/// `"\n#[cfg(test)]\nmod tests {"` marker (this crate's clippy/fmt
-/// discipline keeps exactly one such block per file) — not a parser,
-/// deliberately, same as `tests/acl_registry.rs::source_scan::
-/// server_mod_production_source`, whose own doc explains why a
-/// byte-offset slice on a literal marker is the cheapest way to guarantee
-/// a `#[cfg(test)]` call site never counts. CRLF-normalized for the same
-/// reason that function documents: the Windows CI runner checks sources
-/// out with `\r\n`, which would keep the `\n`-joined marker from ever
-/// matching.
+/// `relative`'s source, which is production code only: both scanned files
+/// keep their tests in sibling files (`server/tests.rs`, `reverse/listen/
+/// *_tests.rs` and `listen/tests.rs`), so a `#[cfg(test)]` call site never
+/// counts. Same shape as `tests/acl_registry.rs::source_scan::
+/// server_mod_production_source`.
 fn production_source(relative: &str) -> String {
-    let full = read_doc(relative).replace("\r\n", "\n");
-    let marker = "\n#[cfg(test)]\nmod tests {";
-    let end = full
-        .find(marker)
-        .unwrap_or_else(|| panic!("{relative} must still have a #[cfg(test)] mod tests block"));
-    full[..end].to_string()
+    read_doc(relative)
 }
 
 /// Every line of `source`, blanking any line that is itself a comment
