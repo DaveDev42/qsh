@@ -18,12 +18,14 @@ One binary (`qsh`) is both ends: it serves, and it connects.
 Pre-alpha. **Not for production use.**
 
 M0 through M6 are done. M7 (trust UX, host profiles, `doctor`) has landed
-its features; closing it out still needs the stopwatch campaign in
-`docs/campaigns/m7-stopwatch.md` (a dry run so far, not the three timed
-rounds its DoD requires). M8 (hardening) is underway: the admission and
-quota defenses, the adversarial load gate, the wire-format freeze draft and
-the threat model have landed, while the fuzz, soak and real-device mobility
-campaigns are still running or pending. What works end to end today:
+its features; what is left is the stopwatch campaign in
+`docs/campaigns/m7-stopwatch.md`, which a person has to run. M8 (hardening)
+is underway. The admission and quota defenses, the adversarial-load gate
+(`docs/campaigns/m8-adversarial-load.md`), the fuzz campaign
+(`docs/campaigns/m8-fuzz.md`: 72 fuzz-hours per parser target, no crashes),
+the wire-format freeze draft and the threat model have all landed. The
+24-hour soak and the real-device mobility campaign are still open. What
+works end to end today:
 
 - `qsh exec host -- cmd`, in human mode or as a single `qsh.cli/v1` JSON
   envelope with the remote exit code, stdout and stderr.
@@ -255,38 +257,12 @@ a different already-pinned peer (mTLS still blocks an unpinned address).
 
 ## Quick start
 
-Both machines need the same binary. Start with identity and trust, which is
-the part with no SSH equivalent: each device generates a keypair on `init`,
-and each side pins the other's certificate fingerprint before anything
-connects.
+Everything below assumes the two machines from [First run](#first-run):
+`box` is the host running `qsh serve`, `laptop` is the client, and each has
+pinned the other. One addition to the host's `acl.toml`: the commands here
+need `exec.run` alongside `session.*`.
 
-```bash
-# On the host, the machine that will run the shell:
-qsh init --json                          # creates the device identity; note "fingerprint"
-```
-
-The host denies every request it has no rule for, so write the policy before
-starting `serve`, which reads it once at startup and never reloads it:
-
-```toml
-# <config_dir>/acl.toml, next to trust.toml: written by hand, qsh never
-# generates this file. "laptop" is the name the client gets pinned under
-# two steps down; the rule can name it before that pin exists:
-[[acl]]
-principal = "device:laptop"
-allow = ["session.*", "exec.run"]
-```
-
-```bash
-qsh serve --bind 0.0.0.0:4433            # foreground; bound address goes to stderr
-
-# On the client:
-qsh init --json                          # note this device's "fingerprint" too
-qsh trust add box --address host.example.com:4433 --fingerprint sha256:<HOST_FP>
-
-# Back on the host, let the client in. No address needed, just the fingerprint:
-qsh trust add laptop --fingerprint sha256:<CLIENT_FP>
-```
+### Running one command
 
 Now run something:
 
@@ -297,11 +273,6 @@ qsh exec box --json -- sh -c 'echo out; echo err >&2; exit 7'
 #  "data":{"stdout_b64":"b3V0Cg==","stderr_b64":"ZXJyCg==","remote_exit_code":7,"signal":null,"duration_ms":7}}
 echo $?                                  # 7, the remote exit code (255 clamps to 254; qsh's own failures are 255)
 ```
-
-Drop `--fingerprint` and `qsh trust add box --address …` connects, shows the
-fingerprint it observed, and asks you to confirm, the way SSH does on first
-contact. In `--json` mode it returns `TRUST_REQUIRED` with
-`details.observed_fingerprint` instead of prompting.
 
 `qsh hosts` lists everything this machine can reach, pinned forward hosts
 and live reverse registrations together, without dialing any of them.
@@ -396,16 +367,14 @@ peer from its own trust store.
 
 ### MCP server (retired, ADR-0011)
 
-The built-in `qsh mcp` stdio server — a twelve-tool adapter over the same
-typed operation layer the CLI uses — was removed in M8 Step 6. Agent
-integration now goes through the `qsh.cli/v1` JSON/JSONL CLI alone:
-`session read --wait`/`--follow` carries the same `next_after`/
-`next_ctl_after` long-poll cursor the old `read_session` tool used. If you
-still need a remote stdio MCP server, run it as the remote command itself
-— `qsh exec host -- <server>` — and let qsh be the transport underneath
-it. See [ADR-0011](docs/adr/0011-remove-mcp-adapter.md) for the reasoning
-and the fixture that stays checked in for historical reference
-(`crates/qsh-cli/tests/fixtures/mcp/`).
+The built-in `qsh mcp` stdio server, a twelve-tool adapter over the same
+typed operation layer the CLI uses, was removed in M8 Step 6. Agents go
+through the `qsh.cli/v1` JSON/JSONL CLI instead: `session read
+--wait`/`--follow` carries the same `next_after`/`next_ctl_after` long-poll
+cursor the old `read_session` tool did. To reach a remote stdio MCP server,
+run it as the remote command itself (`qsh exec host -- <server>`) and let
+qsh be the transport; see [ADR-0011](docs/adr/0011-remove-mcp-adapter.md),
+whose fixture stays checked in at `crates/qsh-cli/tests/fixtures/mcp/`.
 
 ## Security posture
 
@@ -513,8 +482,8 @@ already taken on crates.io. The workspace stays `publish = false` until M10.
 | M4 | Port forwarding (`-L`/`-R`) | Done |
 | M5 | ACL and audit | Done |
 | M6 | MCP adapter | Done (retired, ADR-0011) |
-| M7 | Trust UX, host profiles, `doctor` | In progress |
-| M8 | Hardening (fuzz, soak, real-device mobility campaign) | In progress |
+| M7 | Trust UX, host profiles, `doctor` | Features done; stopwatch campaign open |
+| M8 | Hardening (fuzz, soak, real-device mobility campaign) | In progress (fuzz and load gates closed) |
 | M9 | Human-facing surface (naming, pairing, service install) | Planned |
 | M10 | Release (installers, Homebrew, notarization) | Planned |
 
@@ -647,14 +616,16 @@ limitations](#known-limitations).
 ## Development
 
 ```bash
-cargo nextest run --workspace     # the gate (plain cargo test is not)
-cargo fmt --all
+cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
+cargo nextest run --workspace   # the gate (plain cargo test is not)
+cargo test --workspace --doc
+RUSTDOCFLAGS=-D warnings cargo doc --workspace --no-deps
+cargo xtask arch
 cargo deny check
-cargo run -p xtask -- arch
 ```
 
-All five have to be green before a commit. `docs/design/testing.md`
+All seven have to be green before a commit. `docs/design/testing.md`
 explains which tests each layer owes.
 
 ## License
