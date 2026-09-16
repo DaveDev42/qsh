@@ -28,7 +28,6 @@
 //! runs on the Windows CI leg too (`PLAN.md` M3 Step 9 (d)'s precedent).
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
 
 use qsh_core::acl::{
     ACL_POLICY_INVALID_CODE, ACL_POLICY_MISSING_CODE, ACL_STARTUP_CHECK_HINT,
@@ -36,19 +35,9 @@ use qsh_core::acl::{
     PERMISSION_DENIED_MESSAGE,
 };
 
-/// The repo root, reached from `CARGO_MANIFEST_DIR` (`crates/qsh-core`) the
-/// same way every other doc-reading integration test in this workspace
-/// does.
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-}
-
-fn read_doc(relative: &str) -> String {
-    let path = repo_root().join(relative);
-    std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("read {}: {err}", path.display()))
-}
+#[path = "support/docs.rs"]
+mod docs;
+use docs::read_doc;
 
 /// Every `` `word.word` `` inline-code token inside PRD §9 ("## 9. 보안과
 /// ACL" up to the next `## ` heading) — dotted, lowercase, `[a-z_]+\.[a-z_]+`

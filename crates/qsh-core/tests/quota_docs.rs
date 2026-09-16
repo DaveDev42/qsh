@@ -16,24 +16,12 @@
 //! in `ALL`, before anyone remembers to hand-write a new assertion for
 //! it.
 
-use std::path::PathBuf;
-
 use qsh_core::config::{AuditConfig, ServeConfig};
 use qsh_core::quota::{MAX_AUDIT_WINDOW_PRINCIPALS, QuotaKind, QuotaLimits};
 
-/// The repo root, reached from `CARGO_MANIFEST_DIR` (`crates/qsh-core`)
-/// the same way every other doc-reading integration test in this
-/// workspace does.
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-}
-
-fn read_doc(relative: &str) -> String {
-    let path = repo_root().join(relative);
-    std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("read {}: {err}", path.display()))
-}
+#[path = "support/docs.rs"]
+mod docs;
+use docs::read_doc;
 
 /// The decimal number appearing after `key`, checked at *every*
 /// occurrence of `key` in `doc`, not just the first — `docs/CLI.md`/

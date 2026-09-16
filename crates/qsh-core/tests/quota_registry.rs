@@ -19,18 +19,9 @@
 //! which accept path actually reserves the slot the heartbeat and the
 //! quota believe every live connection holds.
 
-use std::path::PathBuf;
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-}
-
-fn read_doc(relative: &str) -> String {
-    let path = repo_root().join(relative);
-    std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("read {}: {err}", path.display()))
-}
+#[path = "support/docs.rs"]
+mod docs;
+use docs::read_doc;
 
 /// `relative`'s production code only: a prefix slice on the file's sole
 /// `"\n#[cfg(test)]\nmod tests {"` marker (this crate's clippy/fmt
