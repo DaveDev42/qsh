@@ -13,8 +13,8 @@ load.yml 고정 N 이상을 손으로 재는 것과 같은 골격을 이 문서�
 
 M2/adversarial-load와 마찬가지로 이 문서는 **합격/불합격 게이트가 아니다**
 — 회차 실패가 M8을 막지 않는다. `docs/ROADMAP.md`의 DoD 2 자체 판정은
-main이 Dave-Windows-WSL 단독 점유에서 돌린 24h 실측(BRIEF-5.md §1.1 5e,
-이 워크플로 밖)이 닫는다. 이 문서는 그 실측의 절차·사전 판정·기록 자리다.
+main이 Dave-Windows-WSL 단독 점유에서 돌린 24h 실측(이 워크플로 밖)이
+닫는다. 이 문서는 그 실측의 절차·사전 판정·기록 자리다.
 
 ## 2. 전제 조건
 
@@ -36,7 +36,7 @@ main이 Dave-Windows-WSL 단독 점유에서 돌린 24h 실측(BRIEF-5.md §1.1 
 5. **fuzz 워커 종료 후.** 실행 호스트가 Dave-Windows-WSL이면 `cargo fuzz`/
    `*-fuzz` 프로세스 8개가 이미 그 호스트의 CPU를 점유하고 있을 수 있다
    — kill/renice는 절대 하지 않는다(하드 룰). soak 24h 런은 그 fuzz 라운드가
-   자연 종료된 뒤에 시작한다(BRIEF-5.md §2 Q5).
+   자연 종료된 뒤에 시작한다.
 6. **저장소 상태.** `run.sh`가 `env.txt`에 `git rev-parse HEAD`와 working
    tree clean/dirty 여부를 자동 기록한다 — dirty면 회차 기록에 그 사실이
    그대로 남는다(가리지 않는다).
@@ -53,7 +53,7 @@ main이 Dave-Windows-WSL 단독 점유에서 돌린 24h 실측(BRIEF-5.md §1.1 
 
 ## 3. 사전 정의된 합격/불합격 기준 (실행 전에 고정)
 
-이 표는 `crates/qsh-cli/tests/soak.rs`(BRIEF-5.md §4.4)와
+이 표는 `crates/qsh-cli/tests/soak.rs`와
 `scripts/soak/summarize.py`가 **동일하게** 계산한다 — 캠페인은 같은 판정을
 24h/100세션 규모로 반복하는 것이지 새 기준을 세우는 것이 아니다. 테스트
 바이너리 자신은 짧은 런 안에서 판단 가능한 축만 강한 assert로 검사하고,
@@ -68,7 +68,7 @@ main이 Dave-Windows-WSL 단독 점유에서 돌린 24h 실측(BRIEF-5.md §1.1 
 | listener fd (baseline/idle_end) | boot→idle_end 델타는 정보성 기록만 — 첫 세션 open의 일회성 lazy warm-up(감사·resolver·keystore·io-driver)이라 위반 아님. soak.rs는 `open_fd_targets`로 idle_end fd 인벤토리도 같이 찍어 델타가 그 lazy 세트임을 로그로 보인다. 누수는 아래 steady quarters가 잡는다 | soak.rs (eprintln) + summarize.py (note) |
 | listener fd (steady quarters) | steady 마지막 1/4 구간 fd 최댓값 `<= 첫 1/4 최댓값 + 2`. 위반은 `FD_GROWTH_LISTENER`로 표기 | soak.rs (`judge_fd_quarters`, assert) + summarize.py 양쪽 동일 구현(`quarter_split`). steady 표본이 `MIN_QUARTER_SAMPLES`(8) 미만이면 양쪽 다 위반 대신 기록만 남긴다 |
 | self(테스트 프로세스) fd | steady 마지막 1/4 fd 최댓값 `<= 첫 1/4 최댓값 + 2`(사이클링 도중의 증가만 잰다). 위반은 `FD_GROWTH_CLIENT`로 표기(M7 carryover (iii) 재현) | soak.rs (`judge_fd_quarters`, assert, strict) + summarize.py. listener fd 축과 같은 `MIN_QUARTER_SAMPLES` 다운그레이드 규칙을 공유한다 |
-| echo p95 | steady 창 중 p95가 bound(`max(3 × ramp 직후 baseline p95, 50 ms)`)를 넘는 창의 비율이 `ECHO_SPIKE_FRACTION_MAX`(10%)를 넘으면 위반이고 태그는 `ECHO_DEGRADED`다. bound는 고정 50ms가 아니라 이 런 자신의 ramp 직후 baseline에 대한 적응형 상한이다(공유 러너의 절대치 flake를 피하려는 T2 `adversarial_load.rs` 패턴과 같다). baseline을 못 구하면 50ms 바닥값으로 대체한다. 최댓값, 초과 창 수, steady 첫/마지막 1/4 구간 중앙값은 위반 여부와 무관하게 정보로만 기록한다(24h 저하 규칙을 세울 입력, ARBITRATION-5 "load.yml 첫 GHA soak 실행 판정") | soak.rs(`judge_echo_windows`, assert) + summarize.py(assert. CSV의 `phase == ramp` 행에서 baseline을 자동으로 구하고 `--echo-baseline-ms`를 주면 그 값이 우선한다) |
+| echo p95 | steady 창 중 p95가 bound(`max(3 × ramp 직후 baseline p95, 50 ms)`)를 넘는 창의 비율이 `ECHO_SPIKE_FRACTION_MAX`(10%)를 넘으면 위반이고 태그는 `ECHO_DEGRADED`다. bound는 고정 50ms가 아니라 이 런 자신의 ramp 직후 baseline에 대한 적응형 상한이다(공유 러너의 절대치 flake를 피하려는 T2 `adversarial_load.rs` 패턴과 같다). baseline을 못 구하면 50ms 바닥값으로 대체한다. 최댓값, 초과 창 수, steady 첫/마지막 1/4 구간 중앙값은 위반 여부와 무관하게 정보로만 기록한다(24h 저하 규칙을 세울 입력. 비율 규칙 자체는 첫 GHA soak 실행을 판정하면서 정했다) | soak.rs(`judge_echo_windows`, assert) + summarize.py(assert. CSV의 `phase == ramp` 행에서 baseline을 자동으로 구하고 `--echo-baseline-ms`를 주면 그 값이 우선한다) |
 | TTL reap | `resume_ttl_secs + REAPER_TICK`(30s)이 지난 뒤에도 `abandoned_live != 0`이면 위반. 그 전에는 "아직 판정 대상 아님"으로 기록만 한다 — `DRAIN_WAIT`(≈`REAPER_TICK`+`CLOSED_RETENTION`, `qsh_core::broker`의 두 pub const 합)와는 다른, TTL 정책 자체의 만료 시각 기준이다 | soak.rs (`ttl_reap_deadline`, assert) + summarize.py (`--resume-ttl-secs`로 같은 식을 계산; 안 주면 예전처럼 무조건 `abandoned_live == 0` 체크로 폴백) |
 | 세션 정지(SESSION_STALLED) | 한 세션의 write→echo 한 라운드가 `SESSION_ROUND_DEADLINE`(5s)을 넘기면 그 세션을 끊고 카운트한다. 카운트가 1 이상이면 위반 | soak.rs (assert)만. CSV에 세션별 정지 이력이 없어 summarize.py는 판단하지 않는다 |
 
@@ -111,7 +111,7 @@ summarize.py는 이 축을 보지 않는다).
 # macOS 관행 — 흔히 185 GB급 빌드 캐시)로의 심볼릭 링크다. --exclude target은
 # 그 링크 자체만 걸러내고 target.noindex라는 실제 디렉터리는 그대로 걸어
 # 들어가 rsync가 사실상 끝나지 않으니, --exclude target.noindex를 반드시
-# 같이 준다(PROGRESS-5.md S5에서 17분+ 걸려도 안 끝나는 것으로 실측됨).
+# 같이 준다(실측: 17분이 넘어도 끝나지 않았다).
 rsync -a --delete --exclude target --exclude target.noindex --exclude .git \
   ./ dave-windows-wsl.tail91e9e.ts.net:~/Projects/github.com/qsh-4c/
 
@@ -129,7 +129,7 @@ scripts/soak/run.sh --duration 86400 --sessions 100 --out /tmp/soak-$(date -u +%
 1. `env.txt`에 `uname -a`, `nproc`, `uptime`, `ulimit -n`, `git rev-parse
    HEAD`, working tree clean/dirty, 바이너리 경로와 sha256을 적는다.
 2. `QSH_SOAK_DURATION_SECS=86400 QSH_SOAK_SESSIONS=100`(그 외
-   `QSH_SOAK_*`는 BRIEF-5.md §4.2 기본값 — 필요하면 호출 전에 개별
+   `QSH_SOAK_*`는 `scripts/soak/run.sh`가 채우는 기본값 — 필요하면 호출 전에 개별
    env로 덮어쓴다)과 `QSH_LOAD_STRICT=1`로 `cargo nextest run --profile
    soak -p qsh-cli --test soak`을 돌리고 `run.log`에 tee한다. 이 전체
    실행을 `timeout $((QSH_SOAK_DURATION_SECS + 1800))`으로 감싼다.
@@ -140,8 +140,7 @@ scripts/soak/run.sh --duration 86400 --sessions 100 --out /tmp/soak-$(date -u +%
    `run.sh`도 exit 1로 끝난다.
 
 `[profile.soak]`(`.config/nextest.toml`)은 `slow-timeout = { period =
-"3600s" }`이고 `terminate-after`가 없다 — 실측 확인 결과(PROGRESS-5.md S0
-Q9) 이 조합은 SLOW 경고만 반복해서 찍을 뿐 24h 테스트를 중간에 kill하지
+"3600s" }`이고 `terminate-after`가 없다 — 실측 확인 결과 이 조합은 SLOW 경고만 반복해서 찍을 뿐 24h 테스트를 중간에 kill하지
 않는다. 이 프로파일 자체는 강제 종료를 안 하므로, 진짜 멈춘 런을 잡는
 바깥 상한은 `run.sh`가 두는 `timeout $((QSH_SOAK_DURATION_SECS +
 1800))`이다. 의도한 duration에 boot·ramp·drain과 summarize.py 실행
@@ -153,7 +152,7 @@ Q9) 이 조합은 SLOW 경고만 반복해서 찍을 뿐 24h 테스트를 중간
 | 항목 | 값 |
 |---|---|
 | 날짜 (UTC) | |
-| 조작자 | main (Dave-Windows-WSL 단독 점유 실측, BRIEF-5.md §1.1 5e) |
+| 조작자 | main (Dave-Windows-WSL 단독 점유 실측) |
 | 호스트 / OS / 커널 | |
 | `ulimit -n` | |
 | `nproc` | |
@@ -197,7 +196,7 @@ GHA 첫 실행(run 34203445617, b9e67b1)에서는 steady 창 2개(129.5 ms,
 114.6 ms, 59개 중)가 사이클의 세션 교체(close + dial/open/attach)
 직후에 튀었다. 옛 규칙(창별 p95 최댓값 `<= bound`)은 이 스파이크 하나로
 그 회차를 위반 처리했지만, 새 비율 규칙(2/59 = 3.4%, 10% 미만)으로는
-위반이 아니다(ARBITRATION-5). 이 상관 관계는 5f 후보로 "비고"에 남겨
+위반이 아니다. 이 상관 관계는 5f 후보로 "비고"에 남겨
 둔다. listener가 PTY spawn(openpty/fork/exec) 동안 런타임을 막는지는
 24h 데이터가 쌓인 뒤에 본다.
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Drive the 24h/100-session soak run (BRIEF-5.md §5, `crates/qsh-cli/tests/
-# soak.rs`, `docs/campaigns/m8-soak.md`) under `[profile.soak]` and capture
+# Drive the 24h/100-session soak run (`docs/campaigns/m8-soak.md` §4,
+# `crates/qsh-cli/tests/soak.rs`) under `[profile.soak]` and capture
 # everything a campaign round needs to fill in the record template.
 #
 # This script does not judge anything itself — it runs the nextest binary
@@ -16,8 +16,8 @@
 # Env passthrough: QSH_SOAK_* variables already set in the caller's
 # environment are respected as-is (`:=` below only fills in a var that is
 # not already set) — every knob defaults to the full 24h/100-session vector
-# (BRIEF-5.md §4.2), not the test binary's own short-mode defaults, so
-# `QSH_SOAK_CYCLE_SECS=600 scripts/soak/run.sh` for a custom cycle length
+# (`docs/campaigns/m8-soak.md` §4), not the test binary's own short-mode
+# defaults, so `QSH_SOAK_CYCLE_SECS=600 scripts/soak/run.sh` for a custom cycle length
 # keeps working, and a plain `scripts/soak/run.sh` with no overrides runs
 # the real 24h campaign shape rather than a debug-length short run.
 # `QSH_LOAD_BIN` must already point at a release `qsh` binary; this script
@@ -83,8 +83,8 @@ if [ -z "$OUT" ]; then
 fi
 mkdir -p "$OUT"
 
-# Full 24h/100-session vector (BRIEF-5.md §4.2) as the default for every
-# QSH_SOAK_* knob — a caller-set value always wins (`:=` is a no-op when
+# Full 24h/100-session vector (`docs/campaigns/m8-soak.md` §4) as the
+# default for every QSH_SOAK_* knob — a caller-set value always wins (`:=` is a no-op when
 # the var is already non-empty in the environment).
 : "${QSH_SOAK_DURATION_SECS:=$DURATION}"
 : "${QSH_SOAK_SESSIONS:=$SESSIONS}"
@@ -145,9 +145,9 @@ echo "== soak run starting: $QSH_SOAK_SESSIONS session(s), ${QSH_SOAK_DURATION_S
 # rarely lands exactly in the repo root).
 cd "$ROOT"
 
-# Outer wall-clock bound (B12's "outer bound", REVIEW-5-C C2 / ARBITRATION-5
-# F2): `[profile.soak]`'s own `slow-timeout` never kills the test (period=
-# 3600s, no terminate-after — S0/Q9's confirmed "warn, never kill"
+# Outer wall-clock bound (the outer bound, `docs/campaigns/m8-soak.md` §4):
+# `[profile.soak]`'s own `slow-timeout` never kills the test (period=
+# 3600s, no terminate-after — the confirmed "warn, never kill"
 # semantics), so a genuinely hung 24h run would otherwise wait forever for
 # a human to notice. This `timeout` is the actual outer bound: the test's
 # own intended duration plus 30 extra minutes for boot/ramp/drain and

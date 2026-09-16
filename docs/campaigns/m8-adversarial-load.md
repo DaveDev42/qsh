@@ -16,7 +16,7 @@ load.yml이 고정한 N 이상에서 RSS·fd·echo p95 bound가 얼마나 여유
 
 M2 mobility 캠페인과 마찬가지로 이 문서는 **합격/불합격 게이트가 아니다** —
 실패 회차가 M8을 막지 않는다. DoD 5(`docs/ROADMAP.md:113`) 자체의 판정은
-main이 Dave-Windows-WSL에서 돌린 실측(`ARBITRATION-4.md` "4c 구현 판정" Q5)이
+main이 Dave-Windows-WSL에서 돌린 실측이
 닫으며, load.yml은 그 뒤로도 계속 도는 회귀 감시자다.
 
 ## 2. 전제 조건
@@ -89,8 +89,8 @@ QSH_LOAD_STRICT=1 QSH_LOAD_BIN=$(pwd)/target/release/qsh \
 캠페인 실행 전용이며 커밋하지 않는다. 각 회차마다 §6 표의 한 행을 채운다.
 
 플레이크가 나오면 원인(코드 회귀인지 호스트 경합인지)을 20회 반복으로
-가른다 — `S3`가 WSL fuzz 워커 포화와 순수 dial 타임아웃을 이 방법으로
-구분한 선례를 그대로 따른다(`PROGRESS-4.md` Stage 4c-S3).
+가른다 — 구현 중에 WSL fuzz 워커 포화와 순수 dial 타임아웃을 이 방법으로
+구분한 선례를 그대로 따른다.
 
 ## 5. 환경 기록 (캠페인 시작 시 채운다)
 

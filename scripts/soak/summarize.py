@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""summarize.py — judge a qsh soak-run CSV against BRIEF-5.md §4.4.
+"""summarize.py — judge a qsh soak-run CSV against the thresholds in docs/campaigns/m8-soak.md §3.
 
 `crates/qsh-cli/tests/soak.rs` writes one CSV row per sample
 (`t_secs,phase,listener_rss_kib,listener_fds,self_rss_kib,self_fds,
@@ -13,7 +13,7 @@ recorded as an informational line only, never a violation (that span also
 bundles in ramp's one-shot session-open/attach fd cost). Dial retries on a
 retryable `OpError` during ramp/cycle opens are likewise recorded, not a
 violation, in the test binary's own stderr — this script does not see them
-since they never reach the CSV. This script re-derives the *same* §4.4 table
+since they never reach the CSV. This script re-derives the *same* §3 table
 from the CSV, plus the two axes the test binary only ever records because a
 120s short run has too few samples to fit them — the per-session buffer
 bound and the RSS-trend regression slope — which is why `scripts/soak/
@@ -26,7 +26,7 @@ soak.rs writes that same-run baseline into the CSV itself, as the
 "boot", "steady", nor "drain", so it is invisible to every phase-filtered
 check below). `evaluate()` derives `echo_baseline_ms` from that row when the
 caller does not pass `--echo-baseline-ms` explicitly; the flag, when given,
-still wins outright (PROGRESS-5.md §F2 — before this row existed, soak.rs
+still wins outright (before this row existed, soak.rs
 judged steady echo p95 against its own in-process baseline while this
 script, never handed that number, silently fell back to the fixed floor:
 two judges, two different bounds for the same run).
@@ -50,7 +50,7 @@ from typing import NamedTuple
 # Kept as one contiguous literal (not split across concatenated strings)
 # so `crates/qsh-cli/tests/soak.rs`'s `summarize_py_pins_the_same_csv_header`
 # test can `include_str!` this file and grep for the exact `SOAK_CSV_HEADER`
-# text byte-for-byte (REVIEW-5-B B10 / ARBITRATION-5 F2) — a value built
+# text byte-for-byte — a value built
 # from adjacent string literals never appears as one contiguous run in the
 # file's own source text, only in the interpreter's evaluated result.
 CSV_HEADER = "t_secs,phase,listener_rss_kib,listener_fds,self_rss_kib,self_fds,live_sessions,cycles,echo_p95_ms,abandoned_live"
@@ -61,8 +61,8 @@ RSS_TREND_BOUND_KIB_PER_HOUR = 1024
 FD_GROWTH_ALLOWANCE = 2
 ECHO_P95_BOUND_MS = 50.0  # floor of the adaptive bound — see `evaluate`'s `echo_baseline_ms`
 # Fraction of steady-phase echo p95 windows allowed to exceed the bound
-# above before the run is ECHO_DEGRADED (ARBITRATION-5 "load.yml 첫 GHA
-# soak 실행 판정", GHA run 34203445617, b9e67b1). Replaces the old
+# above before the run is ECHO_DEGRADED (docs/campaigns/m8-soak.md §3,
+# rule fixed after the first GHA soak run, b9e67b1). Replaces the old
 # "no steady window's p95 may ever exceed the bound" rule: that first real
 # GHA run hit exactly 2 of 59 steady windows spiking to 129.5ms and 114.6ms
 # while every other window stayed at 1-2ms, and both spikes landed on top of
@@ -80,7 +80,7 @@ TREND_MIN_SPAN_SECS = 3600  # below this, too few samples for a fitted slope to 
 # Minimum steady-phase sample count before a fd-growth quarters check is
 # trusted as a hard assert rather than downgraded to a recorded note —
 # mirrors `crates/qsh-cli/tests/soak.rs`'s identical `MIN_QUARTER_SAMPLES`
-# (REVIEW-5-B/C B8 / ARBITRATION-5 F2).
+# (`docs/campaigns/m8-soak.md` §3).
 MIN_QUARTER_SAMPLES = 8
 
 SNAPSHOT_HOURS = (0, 1, 6, 12, 24)
@@ -123,9 +123,9 @@ def read_rows(stream) -> list[Row]:
             f"(crates/qsh-cli/tests/soak.rs SOAK_CSV_HEADER)"
         )
     # Buffered (not streamed row-by-row) so a malformed row can be told
-    # apart from "the last line in the file" (REVIEW-5-B B11 /
-    # ARBITRATION-5 F2): a `qsh serve` subprocess or the harness itself
-    # getting killed mid-write leaves a single truncated trailing row,
+    # apart from "the last line in the file": a `qsh serve` subprocess or
+    # the harness itself getting killed mid-write leaves a single
+    # truncated trailing row,
     # which is a normal, recoverable end-of-run artifact worth a warning
     # and a drop; the same wrong-column-count shape *anywhere else* in the
     # file is real corruption worth failing loudly on, naming the row.
@@ -193,8 +193,8 @@ def quarter_split(values: list[int]) -> tuple[list[int], list[int]]:
     assert or only recorded as a note when the series is short (fewer than
     MIN_QUARTER_SAMPLES total) is entirely the caller's call in `evaluate`
     — this function never downgrades or refuses to split (mirrors
-    `crates/qsh-cli/tests/soak.rs`'s identical `quarter_split` — REVIEW-5-B/C
-    B8 / ARBITRATION-5 F2)."""
+    `crates/qsh-cli/tests/soak.rs`'s identical `quarter_split` —
+    `docs/campaigns/m8-soak.md` §3)."""
     n = len(values)
     if n == 0:
         return [], []
@@ -330,8 +330,7 @@ def evaluate(
     # only (growth *during* cycling) — the boot-baseline-vs-drain-idle_end
     # span is recorded as an informational note instead, never a violation,
     # since it also bundles in ramp's one-shot session-open/attach fd cost
-    # (runtime warm-up), which is not what (iii) is about (main's F1 call,
-    # PROGRESS-5.md S5 "self fd 판정식 불일치"). ---
+    # (runtime warm-up), which is not what (iii) is about. ---
     if baseline.self_fds is not None and idle_end.self_fds is not None:
         delta = idle_end.self_fds - baseline.self_fds
         result["self_fd_baseline_idle_end_delta"] = delta
@@ -360,7 +359,7 @@ def evaluate(
                     "per-pull dial fd cost, reproduced"
                 )
 
-    # --- echo p95 --- adaptive bound (REVIEW-5-C C9 / ARBITRATION-5 F2): a
+    # --- echo p95 --- adaptive bound (`docs/campaigns/m8-soak.md` §3): a
     # fixed absolute number is what a shared, contended runner cannot
     # promise, so the bound becomes max(3 x baseline, the ECHO_P95_BOUND_MS
     # floor) — the same formula `adversarial_load.rs`'s T2 scenario uses
@@ -369,9 +368,9 @@ def evaluate(
     # given (`"flag"`); otherwise it is derived from the CSV's own
     # `phase == "ramp"` row(s) — the same same-run baseline soak.rs measured
     # right after ramp and writes back into the CSV for exactly this
-    # (`"ramp-row"`, PROGRESS-5.md §F2 — before that row existed, this
-    # script had no way to see that number and silently judged every run
-    # against the fixed floor instead). No ramp row and no flag leaves the
+    # (`"ramp-row"`; before that row existed, this script had no way to
+    # see that number and silently judged every run against the fixed
+    # floor instead). No ramp row and no flag leaves the
     # baseline unset (`"none"`) and the bound at the fixed floor, same as
     # before this row existed.
     echo_p95_baseline_source = "flag"
@@ -419,7 +418,7 @@ def evaluate(
                 f"observed {max_echo:.3f}ms)"
             )
 
-    # --- TTL reap --- (REVIEW-5-C C4 / REVIEW-5-B B7 / ARBITRATION-5 F2):
+    # --- TTL reap --- (`docs/campaigns/m8-soak.md` §3):
     # judged against `resume_ttl_secs + REAPER_TICK`, not an unconditional
     # "must be 0 at drain" — `resume_ttl_secs` is independently env-tunable
     # (up to 600s in 24h mode), and a run whose total elapsed time hasn't
@@ -459,8 +458,8 @@ def evaluate(
 
 def snapshot_rows(rows: list[Row]) -> list[dict]:
     """Nearest-sample row at each of the 0h/1h/6h/12h/24h marks
-    (BRIEF-5.md §5), formatted for a direct paste into `docs/campaigns/
-    m8-soak.md`'s record template. Nearest-sample, not interpolated —
+    (`docs/campaigns/m8-soak.md` §4), formatted for a direct paste into that
+    document's §6. Nearest-sample, not interpolated —
     a soak run's sample interval (2s default, `QSH_SOAK_SAMPLE_SECS`) is
     far finer than these marks, so the nearest actual row is always close
     enough, and it is always a row that really happened."""
@@ -492,7 +491,7 @@ def render(result: dict, snapshots: list[dict]) -> str:
     lines: list[str] = []
     lines.append(f"rows read: {result['rows']}")
     lines.append("")
-    lines.append("BRIEF-5.md §4.4 table")
+    lines.append("m8-soak.md §3 judgment table")
     lines.append(f"  idle listener RSS       baseline={result.get('baseline_rss_kib')} KiB  "
                  f"idle_end={result.get('idle_end_rss_kib')} KiB  bound<={IDLE_RSS_BOUND_KIB} KiB")
     if "per_session_buffer_kib" in result:
@@ -583,7 +582,7 @@ def render(result: dict, snapshots: list[dict]) -> str:
 ## Both fixtures below carry 9 steady rows, not 4 — one more than
 ## MIN_QUARTER_SAMPLES(8) needs, so the self-test below exercises the real
 ## fd-growth quarters assert instead of always taking the "too few samples,
-## downgrade to a note" branch (REVIEW-5-B/C B8 / ARBITRATION-5 F2). The
+## downgrade to a note" branch. The
 ## time grid (0/900/1800/2700/3600/5400/7200/9000/10800) keeps exact hour
 ## marks at 0 and 3600 so `snapshot_rows`' 0h/1h nearest-sample self-test
 ## checks below still resolve to an exact match, not an interpolated
@@ -758,7 +757,7 @@ def self_test() -> int:
         "flag",
     )
 
-    # PROGRESS-5.md §F2: the CSV's own "phase == ramp" row is where
+    # The CSV's own "phase == ramp" row is where
     # `evaluate()` derives the echo p95 baseline when the caller passes no
     # `--echo-baseline-ms` — these three fixtures share the same steady-phase
     # echo p95 (max 80ms) and differ only in whether a ramp row is present
@@ -952,7 +951,7 @@ def self_test() -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Judge a qsh soak-run CSV against BRIEF-5.md §4.4.",
+        description="Judge a qsh soak-run CSV against the thresholds in docs/campaigns/m8-soak.md §3.",
     )
     parser.add_argument("csv", nargs="?", help="samples.csv path ('-' or omitted for stdin)")
     parser.add_argument(
