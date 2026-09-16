@@ -615,7 +615,7 @@ impl LocalctlDaemon {
     /// `TunnelList` arm of [`Self::serve_admin`] (`PLAN.md` M4 Step 5 PR
     /// 5b, `qsh tunnels`): every forward this controller currently holds,
     /// across every registered reverse host — structural fields only
-    /// ([`crate::reverse::listen::ForwardSummary`]'s own doc), never a
+    /// ([`crate::reverse::listen::hub::ForwardSummary`]'s own doc), never a
     /// payload byte. `host` is filled in from the name each
     /// [`Listen::hubs_snapshot`] entry is keyed under, the same "this
     /// table's own key is the alias" pattern [`to_local_host`] relies on

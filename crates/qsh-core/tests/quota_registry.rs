@@ -21,7 +21,7 @@
 
 #[path = "support/docs.rs"]
 mod docs;
-use docs::read_doc;
+use docs::{read_doc, repo_root};
 
 /// `relative`'s source, which is production code only: both scanned files
 /// keep their tests in sibling files (`server/tests.rs`, `reverse/listen/
@@ -30,6 +30,37 @@ use docs::read_doc;
 /// server_mod_production_source`.
 fn production_source(relative: &str) -> String {
     read_doc(relative)
+}
+
+/// `reverse/listen.rs` plus every production `.rs` file in the
+/// `reverse/listen/` directory beside it (`conn_table.rs`, `hub.rs`,
+/// `registration.rs`, and whatever is added later), concatenated. The
+/// test files are the ones named `tests.rs` or ending in `_tests.rs`.
+fn reverse_listen_production_source() -> String {
+    let dir = repo_root().join("crates/qsh-core/src/reverse/listen");
+    let mut paths: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap_or_else(|err| panic!("read_dir {}: {err}", dir.display()))
+        .map(|entry| entry.expect("read_dir entry").path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
+        .filter(|path| {
+            let name = path.file_name().unwrap().to_string_lossy();
+            name != "tests.rs" && !name.ends_with("_tests.rs")
+        })
+        .collect();
+    paths.sort();
+    assert!(
+        !paths.is_empty(),
+        "no production files under {}",
+        dir.display()
+    );
+    let mut source = production_source("crates/qsh-core/src/reverse/listen.rs");
+    for path in paths {
+        source.push('\n');
+        source.push_str(&production_source(
+            &path.strip_prefix(repo_root()).unwrap().to_string_lossy(),
+        ));
+    }
+    source
 }
 
 /// Every line of `source`, blanking any line that is itself a comment
@@ -50,7 +81,12 @@ fn non_comment_lines(source: &str) -> Vec<&str> {
 /// `receiver.method(`; a definition never is) as well as anything in a
 /// `#[cfg(test)]` module or a comment.
 fn reserve_connection_call_sites(relative: &str) -> Vec<String> {
-    non_comment_lines(&production_source(relative))
+    reserve_connection_call_sites_in(&production_source(relative))
+}
+
+/// [`reserve_connection_call_sites`] over an already-read source string.
+fn reserve_connection_call_sites_in(source: &str) -> Vec<String> {
+    non_comment_lines(source)
         .into_iter()
         .filter(|line| line.contains(".reserve_connection("))
         .map(|line| line.trim().to_string())
@@ -75,17 +111,17 @@ fn reserve_connection_has_exactly_one_production_call_site_in_server_mod() {
 }
 
 /// The other half of the same check: `Listen::accept_and_register_permitted`
-/// must be the sole `reserve_connection` call site in
-/// `reverse/listen.rs` — the reverse-target controller's own accept path,
+/// must be the sole `reserve_connection` call site under `reverse/listen.rs`
+/// and `reverse/listen/` — the reverse-target controller's own accept path,
 /// independent of `qsh serve`'s.
 #[test]
 fn reserve_connection_has_exactly_one_production_call_site_in_reverse_listen() {
-    let sites = reserve_connection_call_sites("crates/qsh-core/src/reverse/listen.rs");
+    let sites = reserve_connection_call_sites_in(&reverse_listen_production_source());
     assert_eq!(
         sites.len(),
         1,
         "Listen::accept_and_register_permitted must be the sole reserve_connection call \
-         site in reverse/listen.rs, not {}: {sites:?}",
+         site under reverse/listen.rs and reverse/listen/, not {}: {sites:?}",
         sites.len()
     );
 }

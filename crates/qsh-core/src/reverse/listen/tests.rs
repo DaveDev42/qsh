@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use super::hub::*;
 use super::*;
 
 #[test]

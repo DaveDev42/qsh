@@ -1126,7 +1126,7 @@ fn spawn_claim_attempt(
 /// only the claim *loop*'s task, never the detached attempt it was
 /// polling — that attempt keeps running regardless, per
 /// [`spawn_claim_attempt`]'s own doc, and can still be granted a real
-/// [`crate::reverse::listen::TunnelArrival`] by the daemon after nothing
+/// [`crate::reverse::listen::hub::TunnelArrival`] by the daemon after nothing
 /// is left to hand it to [`handle_reverse_claim`]. Left alone, the
 /// runtime just drops that `(send, recv, kill)` return value the instant
 /// the orphaned task finishes — no reset, no log, the arrival simply
