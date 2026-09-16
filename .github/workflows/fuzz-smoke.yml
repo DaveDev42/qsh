@@ -52,7 +52,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       # Deliberately does NOT honor the root rust-toolchain.toml (stable
-      # 1.97.1, CLAUDE.md's "toolchain constraint") -- cargo-fuzz needs
+      # 1.98.1, CLAUDE.md's "toolchain constraint") -- cargo-fuzz needs
       # nightly's -Z sanitizer flags, which is the whole reason fuzz/ is
       # kept out of the workspace in the first place (fuzz/README.md).
       - uses: actions-rust-lang/setup-rust-toolchain@v1

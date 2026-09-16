@@ -14,7 +14,7 @@ below.
 
 ## Why this lives outside the workspace
 
-`rust-toolchain.toml` pins the whole `qsh` workspace to **stable 1.97.1**.
+`rust-toolchain.toml` pins the whole `qsh` workspace to **stable 1.98.1**.
 `cargo-fuzz` requires **nightly** (it builds with `-Z sanitizer=address`
 and friends, which are `-Z` unstable-only flags). `fuzz/Cargo.toml` has its
 own empty `[workspace]` table and `fuzz/` is deliberately **not** listed in

@@ -2,7 +2,7 @@
 name = "qsh-proto-fuzz"
 version = "0.0.0"
 publish = false
-edition = "2021"
+edition = "2024"
 
 # Standalone cargo-fuzz crate, deliberately OUTSIDE the workspace root's
 # `[workspace]` (see fuzz/README.md). cargo-fuzz requires nightly; the rest

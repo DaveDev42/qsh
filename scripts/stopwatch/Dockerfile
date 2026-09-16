@@ -7,7 +7,7 @@
 
 # Pinned to rust-toolchain.toml's channel so the image does not spend a
 # round's setup time letting rustup download a second toolchain.
-FROM rust:1.97.1-bookworm AS build
+FROM rust:1.98.1-bookworm AS build
 WORKDIR /src
 COPY . .
 RUN cargo build --release -p qsh-cli
