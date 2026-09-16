@@ -1,3 +1,4 @@
+use super::hub::*;
 use super::*;
 
 fn hub() -> Arc<ControlHub> {
