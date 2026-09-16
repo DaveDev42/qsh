@@ -1106,24 +1106,12 @@ mod single_source {
 mod source_scan {
     use super::*;
 
-    /// `crates/qsh-core/src/server/mod.rs`, production code only: a
-    /// prefix slice on the file's sole `"\n#[cfg(test)]\nmod tests {"`
-    /// marker (this crate's clippy/fmt discipline keeps exactly one such
-    /// block per file), not a parser. Deliberately simple over clever: a
-    /// `#[cfg(test)]` call site or `Action::` literal inside the test
-    /// module must never count toward either pin below, and a byte-offset
-    /// slice on a literal, verbatim string is the cheapest way to
-    /// guarantee that.
+    /// `crates/qsh-core/src/server/mod.rs`, which is production code only:
+    /// its tests live in the sibling `server/tests.rs`, so a `#[cfg(test)]`
+    /// call site or `Action::` literal can never count toward either pin
+    /// below.
     fn server_mod_production_source() -> String {
-        // CRLF-normalized: the Windows CI runner checks sources out with
-        // `\r\n` endings, which would keep the `\n`-joined marker below
-        // from ever matching (and panic this scan on every Windows run).
-        let full = read_doc("crates/qsh-core/src/server/mod.rs").replace("\r\n", "\n");
-        let marker = "\n#[cfg(test)]\nmod tests {";
-        let end = full.find(marker).unwrap_or_else(|| {
-            panic!("server/mod.rs must still have a #[cfg(test)] mod tests block")
-        });
-        full[..end].to_string()
+        read_doc("crates/qsh-core/src/server/mod.rs")
     }
 
     /// Every line of `source`, blanking any line that is itself a comment
