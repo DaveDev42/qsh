@@ -128,3 +128,37 @@ jobs:
               --generate-notes \
               "${prerelease_flag[@]}"
           fi
+
+  homebrew-tap:
+    name: homebrew-tap
+    needs: release
+    runs-on: ubuntu-24.04
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: read
+    steps:
+      # HOMEBREW_TAP_TOKEN is a fine-grained PAT scoped to the tap repo; it
+      # doesn't exist until a human runs `gh secret set`, so this job stays
+      # green-but-skipped until then instead of failing every tag push.
+      #
+      # The token being set is not by itself enough to bump: the action also
+      # requires Formula/qsh.rb to already exist in the tap repo (it does a
+      # GET on the file and fails if that 404s). Until that first push lands,
+      # continue-on-error keeps a tap-side failure from redding out a release
+      # whose binaries and GitHub Release already published successfully.
+      - name: Check for tap token
+        id: check
+        env:
+          HAS_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN != '' }}
+        run: echo "has-token=$HAS_TOKEN" >> "$GITHUB_OUTPUT"
+
+      - name: Bump homebrew-tap formula
+        if: steps.check.outputs.has-token == 'true'
+        continue-on-error: true
+        uses: DaveDev42/homebrew-tap-release@v1
+        with:
+          formula-name: qsh
+          version: ${{ github.ref_name }}
+          # Same asset naming as the build job's Package archive (unix) step.
+          download-url: https://github.com/DaveDev42/qsh/releases/download/${{ github.ref_name }}/qsh-${{ github.ref_name }}-aarch64-apple-darwin.tar.gz
+          tap-token: ${{ secrets.HOMEBREW_TAP_TOKEN }}

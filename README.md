@@ -82,6 +82,8 @@ signature: the binaries are neither signed nor notarized until M10.
 | `QSH_INSTALL_DIR` | `$HOME/.local/bin` | Where the `qsh` binary lands (created if missing) |
 | `QSH_REPO` | `DaveDev42/qsh` | `owner/repo` to install from, for forks and testing |
 
+### Manual download
+
 To download by hand, take the asset matching your platform, check it against
 `SHA256SUMS`, and put `qsh` somewhere on your `PATH`:
 
@@ -96,6 +98,18 @@ To download by hand, take the asset matching your platform, check it against
 The installer has no Windows path. Take the `.zip` from the releases page.
 Note the Windows caveat under [Known limitations](#known-limitations): the
 tree compiles and the portable tests run there, but nothing is promised.
+
+### Homebrew (macOS)
+
+```bash
+brew install DaveDev42/tap/qsh
+```
+
+Apple silicon only for now — the formula tracks the `aarch64-apple-darwin`
+release tarball. The Homebrew version is the release tag without its
+leading `v`; there is no separate versioning scheme.
+
+### From source
 
 Building from source needs a Rust toolchain. `rust-toolchain.toml` pins
 1.97.1, which is what CI and the release builds use. Either build in a
@@ -503,6 +517,10 @@ already taken on crates.io. The workspace stays `publish = false` until M10.
 | M8 | Hardening (fuzz, soak, real-device mobility campaign) | In progress |
 | M9 | Human-facing surface (naming, pairing, service install) | Planned |
 | M10 | Release (installers, Homebrew, notarization) | Planned |
+
+The Homebrew tap (`DaveDev42/tap`) and the release workflow's auto-bump job
+already exist as a skeleton ahead of M10; the rest of M10's scope is still
+Planned — see [docs/ROADMAP.md](docs/ROADMAP.md) for the full list.
 
 Per-milestone scope, in/out boundaries and acceptance criteria live in
 [docs/ROADMAP.md](docs/ROADMAP.md).
