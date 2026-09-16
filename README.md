@@ -112,7 +112,7 @@ leading `v`; there is no separate versioning scheme.
 ### From source
 
 Building from source needs a Rust toolchain. `rust-toolchain.toml` pins
-1.97.1, which is what CI and the release builds use. Either build in a
+1.98.1, which is what CI and the release builds use. Either build in a
 clone and place the binary yourself:
 
 ```bash
