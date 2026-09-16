@@ -2,3 +2,5 @@
 .DS_Store
 __pycache__/
 /mobility-*
+.claude/worktrees/
+/target.noindex/
