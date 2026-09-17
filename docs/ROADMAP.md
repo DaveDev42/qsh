@@ -135,7 +135,7 @@
 ### M10 — 릴리스
 
 - **범위:** 설치 스크립트/cargo-dist 검토, Homebrew tap, macOS codesign + notarization, musl static Linux 빌드, SLSA provenance, 클린 VM smoke, beta 문서. crates.io publish gate 해제(`qsh-cli`).
-  - **(스켈레톤 조기 반영 2026-09-16)** Homebrew tap(`DaveDev42/homebrew-tap`, `Formula/qsh.rb`)과 release.yml의 tap 자동 bump job(`homebrew-tap`)은 태그(`v0.1.0-alpha.3`) 전에 미리 배선해뒀다. formula sha256은 아직 자리표시자이고 시크릿(`HOMEBREW_TAP_TOKEN`)도 아직 없어 job은 skip 상태다 — M10 DoD(codesign, notarization, musl static, SLSA provenance 등)는 여전히 미완이다.
+  - **(스켈레톤 조기 반영 2026-09-16)** Homebrew tap(`DaveDev42/homebrew-tap`, `Formula/qsh.rb`)과 release.yml의 tap 자동 bump job(`homebrew-tap`)은 태그(`v0.1.0-alpha.3`) 전에 미리 배선해뒀다. formula sha256은 아직 자리표시자다. tap 쪽 쓰기는 2026-09-18부터 fine-grained PAT 대신 tap 저장소에 등록한 write deploy key(시크릿 `HOMEBREW_TAP_DEPLOY_KEY`)로 하며, 첫 릴리스는 `Formula/qsh.rb`가 tap에 아직 없어 사람이 formula를 밀어 넣어야 job이 그 다음 태그부터 자동으로 돈다 — M10 DoD(codesign, notarization, musl static, SLSA provenance 등)는 여전히 미완이다.
 - **수용 기준 (DoD):** 클린 macOS arm64/x86_64·Linux arm64/x86_64에서 brew/curl 설치 → 동작. Gatekeeper가 notarized 바이너리를 차단하지 않음. musl static 바이너리가 구형 glibc 배포판에서 실행.
   - **(감사 개정 2026-08-21)** "동작"의 정의는 `version --json`이 아니라 **기능 스모크**다: init → trust → `exec --json` 왕복 + PTY 셸 획득 + detach→attach resume이 배포되는 release 프로파일 바이너리로 통과. 근거: 현재 CI의 전 기능 테스트는 dev 프로파일이고 release 바이너리는 기능 테스트 0건으로 출고된다. release 태그 전 CI에서 `--release` 프로파일 통합 테스트를 최소 1회 돌린다.
   - **(M8 이관 2026-09-10)** `docs/PRD.md:289`(30분 단절 후 TTL 내 복구)·`:290`(느린 파일·터널 stream이 PTY를 block하지 않음)의 직접 증거는 릴리스 게이트에서 판정한다 — `:290`은 파일 전송 표면이 v1에 없어 대역 스트림 대체 하네스가 필요하고, `:289`는 M3 60초 blackout 게이트의 30배 길이라 acceptance job에 못 들어간다(PLAN.md M8 Step 8 (c)).
