@@ -13,7 +13,7 @@
 
 > 스톱워치 테스트 — 한 번도 설정한 적 없는 두 장비가 README만 보고 `qsh user@host`까지 5분 이내, 독립 3회 측정·기록 (SC1, SC2)
 
-`PLAN.md` Step 8 (a)는 실행 조건을 더 좁힌다: "한 번도 설정한 적 없는 두 장비(신선한 sandbox 프로필 2식 또는 실장비 2대), README만 보고 `qsh user@host`까지, 독립 3회, 5분 기준." (d)는 완료 판정을 "캠페인 3회 기록 완료(전건 5분 이내)"로 못박는다.
+`docs/history/m7-plan.md` Step 8 (a)는 실행 조건을 더 좁힌다: "한 번도 설정한 적 없는 두 장비(신선한 sandbox 프로필 2식 또는 실장비 2대), README만 보고 `qsh user@host`까지, 독립 3회, 5분 기준." (d)는 완료 판정을 "캠페인 3회 기록 완료(전건 5분 이내)"로 못박는다.
 
 이 캠페인은 M2 mobility 캠페인과 다르다. M2는 참고 자료였고 실패 회차가 마일스톤을 막지 않았다. 이 캠페인은 M6 MCP 캠페인과 같은 자리에 있다 — **DoD 1 그 자체이며 합격/불합격 게이트다.** 3회 전부가 5분 이내여야 M7을 닫을 수 있다.
 
@@ -148,11 +148,11 @@
 | qsh 커밋 SHA | |
 | 바인드 주소 | |
 
-회차 1, 2, 3의 §6 기록표와 요약을 여기 또는 이 절 아래에 이어 붙인다. 3회 전부 PASS면 캠페인 PASS로 결론짓고 §1의 DoD 1을 충족시킨 근거로 `docs/ROADMAP.md`와 `PLAN.md`에 인용한다.
+회차 1, 2, 3의 §6 기록표와 요약을 여기 또는 이 절 아래에 이어 붙인다. 3회 전부 PASS면 캠페인 PASS로 결론짓고 §1의 DoD 1을 충족시킨 근거로 `docs/ROADMAP.md` M7 절에 인용한다.
 
 ## 9. 예행(dry run) 요약 — 2026-09-01, 이 캠페인이 아니다
 
-공식 3회 측정에 앞서 이 문서의 프로토콜 자체가 말이 되는지 확인하려고 예행 1회를 돌렸다(`ROADMAP.md` §4 리스크 3의 "조기·반복" 대응, `PLAN.md` Step 8 (a)). 예행은 §5의 pass/fail 판정 대상이 아니다 — 회차로 세지 않는다.
+공식 3회 측정에 앞서 이 문서의 프로토콜 자체가 말이 되는지 확인하려고 예행 1회를 돌렸다(`ROADMAP.md` §4 리스크 3의 "조기·반복" 대응, `docs/history/m7-plan.md` Step 8 (a)). 예행은 §5의 pass/fail 판정 대상이 아니다 — 회차로 세지 않는다.
 
 **기계가 쓰는 시간은 총 0.65~0.72초, 5분 예산의 0.25% 미만이다.** README "First run" 절의 문자 그대로의 스크립트(6개 명령 + acl.toml 1개)는 기계적으로는 전혀 병목이 아니다. 300초 예산은 사실상 전부 사람 시간 — 문서 읽기, acl.toml 손으로 쓰기, fingerprint 옮겨 적고 대조하기, 터미널 오가기 — 이고, 딱 하나의 막힌 지점이 예산 전체를 날릴 수 있다.
 
@@ -178,4 +178,4 @@
 
 ## 관련 문서
 
-`docs/PRD.md` §15(SC1/SC2 원문), `docs/ROADMAP.md` M7(DoD 1), `PLAN.md` Step 8, `docs/campaigns/m2-mobility.md`와 `docs/campaigns/m6-mcp.md`(형식 선례), `docs/CLI.md` §6.17(`qsh doctor` 진단 코드).
+`docs/PRD.md` §15(SC1/SC2 원문), `docs/ROADMAP.md` M7(DoD 1), `docs/history/m7-plan.md` Step 8, `docs/campaigns/m2-mobility.md`와 `docs/campaigns/m6-mcp.md`(형식 선례), `docs/CLI.md` §6.17(`qsh doctor` 진단 코드).

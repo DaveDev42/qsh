@@ -96,7 +96,7 @@ QSH_LOAD_STRICT=1 QSH_LOAD_BIN=$(pwd)/target/release/qsh \
 
 | 항목 | 값 |
 |---|---|
-| 날짜 (UTC) | 2026-09-08 (DoD 5 마감 회차 RUN 9, PLAN.md M8 Step 4 기록) |
+| 날짜 (UTC) | 2026-09-08 (DoD 5 마감 회차 RUN 9, `docs/history/m8-plan.md` §3 Step 4 기록) |
 | 조작자 | main 세션 자동 실행 |
 | 호스트 / OS / 커널 | Dave-Windows-WSL (WSL2, Ryzen 9 7950X `.wslconfig` cap 8 vCPU) / Ubuntu 24.04.4 LTS / 6.18.33.2-microsoft-standard-WSL2 (2026-09-10 재조회) |
 | `ulimit -n` | 1024 (2026-09-10 재조회 — RUN 9 당시 값은 미기록) |
