@@ -14,10 +14,10 @@ proxy(`docs/design/testing.md` L4)는 PR 회귀 게이트이고, 실제 인터�
 보이는 *모습*을 재현할 뿐, 라디오 down/up·DHCP·NAT 재바인딩의 실제 지연은 재현하지
 않는다.
 
-이 캠페인은 **합격/불합격 게이트가 아니다**(`PLAN.md` Step 9 (a)). 실패 회차는 M2를
-막지 않고 M8 백로그 항목으로 남는다. 본 캠페인(N ≥ 60, ≥ 95%)은 **M8**이며 이
-문서를 그대로 재사용한다 — §6의 표를 60행 이상으로 늘리고 §7 요약을 다시 계산하면
-된다(파일은 `docs/campaigns/m8-mobility.md`로 복사, 이 문서는 M2 기록으로 보존).
+이 캠페인은 **합격/불합격 게이트가 아니다**. 실패 회차는 M2를 막지 않고 M8
+백로그 항목으로 남는다. 본 캠페인(N ≥ 60, ≥ 95%)은 **M8**이며 이 문서를 그대로
+이어 쓴다 — 새 파일을 만들지 않고 §6의 표를 60행 이상으로 늘리고 §7 요약을 다시
+계산한다. M2 회차 기록은 그대로 두고 그 아래에 M8 회차를 덧붙인다.
 
 ## 2. 전제 조건 (정확히 이대로)
 
@@ -35,8 +35,8 @@ proxy(`docs/design/testing.md` L4)는 PR 회귀 게이트이고, 실제 인터�
    laptop$ qsh trust list --json
    ```
 3. **격리 프로필 + `key_store = "file"`.** 캠페인은 재dial·재attach를 20회 이상
-   반복하므로 macOS 미서명 바이너리의 Keychain 재프롬프트가 측정을 오염시킨다
-   (`PLAN.md` §4 감시 항목). 전용 프로필을 쓰고 platform keystore를 쓰지 않는다.
+   반복하므로 macOS 미서명 바이너리의 Keychain 재프롬프트가 측정을 오염시킨다.
+   전용 프로필을 쓰고 platform keystore를 쓰지 않는다.
    ```
    laptop$ export QSH_CONFIG_DIR="$HOME/.qsh-campaign/config"
    laptop$ export QSH_STATE_DIR="$HOME/.qsh-campaign/state"

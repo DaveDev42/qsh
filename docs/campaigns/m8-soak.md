@@ -48,7 +48,7 @@ main이 Dave-Windows-WSL 단독 점유에서 돌린 24h 실측(BRIEF-5.md §1.1 
    per-source 핸드셰이크 rate limiter에 걸려 예산 초과분 Initial이
    조용히 `Ignore`되고 클라이언트에는 "no response within 10s"만 보인다.
    제품 기본값 자체는 손대지 않는다 — 단일 소스가 제한당하는 건
-   프로덕션에서 의도된 동작이고(PLAN.md Step 5 Q1), 이 상향은 신뢰된
+   프로덕션에서 의도된 동작이고(`docs/history/m8-plan.md` §3 Step 5), 이 상향은 신뢰된
    테스트 드라이버인 하네스 자신의 리스너 설정에만 적용된다.
 
 ## 3. 사전 정의된 합격/불합격 기준 (실행 전에 고정)
