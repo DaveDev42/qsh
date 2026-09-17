@@ -78,6 +78,15 @@ if [ ! -x "$QSH_LOAD_BIN" ]; then
     exit 2
 fi
 
+# 방화벽이 loopback UDP ephemeral 범위 일부를 막고 있으면 24h를 태우기 전에
+# 여기서 잡는다(scripts/soak/preflight_udp.py). run #5의 DIAL_EXHAUSTED가
+# 호스트 nftables 규칙 때문이었던 것과 같은 사고를 다시 겪지 않기 위해서다
+# (docs/campaigns/m8-soak.md §2 8·9번, §8 "run #5 결과").
+if ! python3 "$HERE/preflight_udp.py"; then
+    echo "run.sh: loopback UDP preflight failed — see message above; this is a host firewall/config issue, not a qsh defect. Narrow the rule, add a loopback exception, or run this round inside a network namespace (docs/campaigns/m8-soak.md §2, items 8 and 9)" >&2
+    exit 2
+fi
+
 if [ -z "$OUT" ]; then
     OUT="$ROOT/soak-out-$(date -u +%Y%m%dT%H%M%SZ)"
 fi
