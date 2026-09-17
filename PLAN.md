@@ -291,7 +291,7 @@ Q4(`docs/ROADMAP.md:132`)가 현행 표면 선측정을 못박았고 DoD 1이 �
 
 ## 7. 태그 정책
 
-- 실측(2026-09-16): 저장소의 태그는 `v0.1.0-alpha.1`·`v0.1.0-alpha.2` 둘뿐이다 — `v0.1.0-alpha.3`은 아직 찍혀 있지 않다. `docs/ROADMAP.md:138`은 이 태그를 전제로 Homebrew tap 스켈레톤(`DaveDev42/homebrew-tap`, release.yml의 `homebrew-tap` job)을 미리 배선해 뒀다고 적고, formula sha256과 `HOMEBREW_TAP_TOKEN`이 없어 job은 skip 상태라고 밝힌다.
+- 실측(2026-09-16): 저장소의 태그는 `v0.1.0-alpha.1`·`v0.1.0-alpha.2` 둘뿐이다 — `v0.1.0-alpha.3`은 아직 찍혀 있지 않다. `docs/ROADMAP.md:138`은 이 태그를 전제로 Homebrew tap 스켈레톤(`DaveDev42/homebrew-tap`, release.yml의 `homebrew-tap` job)을 미리 배선해 뒀다고 적고, formula sha256이 자리표시자라고 밝힌다. (2026-09-18 갱신: tap 쓰기 자격은 fine-grained PAT 가 아니라 tap 저장소의 write deploy key — 시크릿 `HOMEBREW_TAP_DEPLOY_KEY` — 로 바꿨고 시크릿은 등록돼 있다. 첫 릴리스의 formula 는 여전히 사람이 tap 에 밀어 넣는다.)
 - 정책: `v0.1.0-alpha.3`은 HEAD가 아니라 soak-equivalent tree인 `525a2a5`(`build(deps): rustls 0.23.45 로 lockfile 갱신 — RUSTSEC-2026-0285 로 빨개진 cargo deny 게이트 복구`)에 찍는다. 근거는 M8 DoD 2의 판정 조건이다 — `docs/campaigns/m8-soak.md:27`이 "24h 내내 같은 바이너리(같은 sha256)로 재야" 한다고 회차 요건을 고정했고 `:41`이 트리 clean/dirty를 회차 기록에 남기라고 요구한다. 릴리스 태그가 HEAD를 가리키면 soak 판정 트리와 릴리스 트리가 갈라져 DoD 2의 근거가 무효가 된다.
 - soak 회차가 실패하면 태그 대상은 통과 회차가 실제로 돈 트리로 재지정한다 — 그 트리의 커밋과 바이너리 sha256을 `docs/campaigns/m8-soak.md` §7 회차 표에서 인용한다. 현재 문면은 run #5 통과를 전제하지 않는다.
 - M9 커밋은 `525a2a5` 이후 main에 얹히고 다음 태그에 실린다. M9 기간에 `525a2a5`를 가리키는 태그를 옮기지 않는다. M9 PLAN.md 작성 커밋 자체도 이 규칙 아래 있다. Step 0의 baseline 측정도 이 트리에서 한다.

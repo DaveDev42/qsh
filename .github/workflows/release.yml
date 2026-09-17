@@ -137,28 +137,72 @@ jobs:
     permissions:
       contents: read
     steps:
-      # HOMEBREW_TAP_TOKEN is a fine-grained PAT scoped to the tap repo; it
-      # doesn't exist until a human runs `gh secret set`, so this job stays
-      # green-but-skipped until then instead of failing every tag push.
+      # HOMEBREW_TAP_DEPLOY_KEY is the private half of a write-enabled deploy
+      # key registered on DaveDev42/homebrew-tap (title "qsh release.yml tap
+      # bump"). A deploy key is scoped to that one repository and never
+      # expires, and unlike a fine-grained PAT it can be created through the
+      # API, so no browser session is needed to rotate it. If the secret is
+      # missing the job stays green-but-skipped instead of failing every tag
+      # push.
       #
-      # The token being set is not by itself enough to bump: the action also
-      # requires Formula/qsh.rb to already exist in the tap repo (it does a
-      # GET on the file and fails if that 404s). Until that first push lands,
+      # The key alone is not enough to bump: Formula/qsh.rb must already exist
+      # in the tap (the first release pushes it by hand). Until then,
       # continue-on-error keeps a tap-side failure from redding out a release
       # whose binaries and GitHub Release already published successfully.
-      - name: Check for tap token
+      - name: Check for tap deploy key
         id: check
         env:
-          HAS_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN != '' }}
-        run: echo "has-token=$HAS_TOKEN" >> "$GITHUB_OUTPUT"
+          HAS_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY != '' }}
+        run: echo "has-key=$HAS_KEY" >> "$GITHUB_OUTPUT"
 
-      - name: Bump homebrew-tap formula
-        if: steps.check.outputs.has-token == 'true'
+      - name: Check out the tap
+        id: tap
+        if: steps.check.outputs.has-key == 'true'
         continue-on-error: true
-        uses: DaveDev42/homebrew-tap-release@v1
+        uses: actions/checkout@v6
         with:
-          formula-name: qsh
-          version: ${{ github.ref_name }}
+          repository: DaveDev42/homebrew-tap
+          ref: main
+          ssh-key: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+          path: tap
+
+      # Same three-line rewrite (version / url / sha256) that
+      # DaveDev42/homebrew-tap-release@v1 performs over the Contents API,
+      # done over git so the deploy key can push it.
+      - name: Bump homebrew-tap formula
+        if: steps.check.outputs.has-key == 'true' && steps.tap.outcome == 'success'
+        continue-on-error: true
+        working-directory: tap
+        env:
+          TAG: ${{ github.ref_name }}
           # Same asset naming as the build job's Package archive (unix) step.
-          download-url: https://github.com/DaveDev42/qsh/releases/download/${{ github.ref_name }}/qsh-${{ github.ref_name }}-aarch64-apple-darwin.tar.gz
-          tap-token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          DOWNLOAD_URL: https://github.com/DaveDev42/qsh/releases/download/${{ github.ref_name }}/qsh-${{ github.ref_name }}-aarch64-apple-darwin.tar.gz
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          formula=Formula/qsh.rb
+          if [ ! -f "$formula" ]; then
+            echo "$formula is not in the tap yet; the first release pushes it by hand."
+            exit 1
+          fi
+          tarball="$(mktemp)"
+          curl -fsSL --retry 3 "$DOWNLOAD_URL" -o "$tarball"
+          sha256="$(sha256sum "$tarball" | awk '{print $1}')"
+          rm -f "$tarball"
+          echo "sha256=${sha256}"
+          awk -v ver="$version" -v url="$DOWNLOAD_URL" -v sha="$sha256" '
+            /^[[:space:]]*version[[:space:]]+"/ { sub(/"[^"]*"/, "\"" ver "\"") }
+            /^[[:space:]]*url[[:space:]]+"/     { sub(/"[^"]*"/, "\"" url "\"") }
+            /^[[:space:]]*sha256[[:space:]]+"/  { sub(/"[^"]*"/, "\"" sha "\"") }
+            { print }' "$formula" > "$formula.new"
+          mv "$formula.new" "$formula"
+          if git diff --quiet -- "$formula"; then
+            echo "Formula already at ${version}; nothing to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$formula"
+          git commit -m "qsh ${version}"
+          git push origin HEAD:main
+          echo "Pushed qsh ${version} to DaveDev42/homebrew-tap."
