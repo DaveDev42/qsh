@@ -41,6 +41,125 @@ use crate::ops::OpError;
 pub mod pairing;
 pub use pairing::SharedInviteStore;
 
+/// The one line an operator gets when a peer address named no port and
+/// 4433 was assumed (ADR-0014 결정 5). stderr only, on the write paths
+/// only (`qsh trust add`, `qsh trust accept`, and `qsh serve --to` from
+/// M9 Step 5), and only when [`NormalizedAddress::port_filled`] is true.
+/// Never a field of a `qsh.cli/v1` envelope and never on a read path:
+/// `trust.list`/`host.list`/`host.get` stay silent (those ops each return
+/// several entries, so a line per entry would be noise, and pointing out a
+/// hand-written file's notation on every op does not fit "the file is the
+/// operator's to manage").
+///
+/// The wording lives here, not in the frontend, because operator-facing
+/// text has one canonical copy in `qsh-core` and the CLI only writes what
+/// it is handed (`docs/design/architecture.md` §1; precedent:
+/// [`crate::ops::INVITE_CODE_PROMPT`]).
+pub const ADDRESS_PORT_ASSUMED_NOTICE: &str = "assuming port 4433";
+
+/// The notice must name the one default port and nothing else — a second
+/// literal here would be a second source of truth (ADR-0014 결정 1).
+const _: () = assert!(
+    crate::serve::trailing_port(ADDRESS_PORT_ASSUMED_NOTICE) == crate::serve::DEFAULT_PORT,
+    "ADDRESS_PORT_ASSUMED_NOTICE must name serve::DEFAULT_PORT"
+);
+
+/// Outcome of [`normalize_peer_address`]: the address every downstream
+/// consumer must use, plus whether this call is what put the port there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NormalizedAddress {
+    /// The normalized address. Never a rewrite of any file on disk
+    /// (ADR-0014 결정 4): callers derive responses from it, they do not
+    /// save it back to `trust.toml`/`hosts.toml`.
+    pub address: String,
+    /// `true` only when the default port was actually appended. The one
+    /// input that makes the `assuming port 4433` notice
+    /// ([`ADDRESS_PORT_ASSUMED_NOTICE`]) correct to print.
+    pub port_filled: bool,
+}
+
+/// The single place a peer address gets its port filled in (ADR-0014 결정 2,
+/// "파서 한 곳"). Pure: no I/O, no clock, no errors.
+///
+/// A peer address is what an operator hand-writes or hand-relays: `qsh
+/// trust add --address`, `qsh trust accept <address>`, and the `address`
+/// fields of `trust.toml`/`hosts.toml`. When it names no port, the one port
+/// qsh uses (`crate::serve::DEFAULT_PORT`, 4433) is appended. When it
+/// already names one, or is empty, the input comes back byte-identical.
+///
+/// Not for bind specs. `qsh serve --bind`/`qsh listen --bind` still refuse a
+/// port-less spec (ADR-0014 결정 8): a bind decides where this machine
+/// listens, and that is not a value to guess at.
+///
+/// Port *range* is not this function's business either (`PLAN.md` M9 §4.1
+/// #12): `"host:0"` and `"host:99999"` come back untouched and fail later,
+/// at dial time, exactly as they do today. The `1..=65535` rule belongs to
+/// the `-L`/`-R` spec grammar alone (`docs/CLI.md:482`,
+/// `qsh_proto::wire::parse_forward_spec`).
+pub fn normalize_peer_address(address: &str) -> NormalizedAddress {
+    let as_given = || NormalizedAddress {
+        address: address.to_string(),
+        port_filled: false,
+    };
+    let filled = |address: String| NormalizedAddress {
+        address,
+        port_filled: true,
+    };
+
+    // 1. An address-less pin stays address-less. `trust.toml`/`hosts.toml`
+    //    use an empty `address` to mean "inbound-only peer, never a dial
+    //    candidate" (`docs/CLI.md` §6.1·§6.11); turning it into `:4433`
+    //    would invent a reachable-looking dial target out of nothing.
+    //    (This filter runs strictly before rule 5 appends anything — the
+    //    read path's own empty-string filter in `host::resolve_forward`
+    //    duplicates it defensively, but this is the one that must hold for
+    //    `trust_list`, which has no such filter of its own.)
+    if address.is_empty() {
+        return as_given();
+    }
+    // 2. A bracket-less IPv6 literal is a *host*, never host+port: its last
+    //    group would otherwise read as a port (`::1` -> host `:`, port `1`).
+    //    Bracketing is the contract layer's own rule, so call it rather than
+    //    re-deriving it here.
+    if address.parse::<std::net::Ipv6Addr>().is_ok() {
+        return filled(qsh_proto::wire::format_host_port(
+            address,
+            crate::serve::DEFAULT_PORT,
+        ));
+    }
+    // 3. Already carries a port — the same test `ops::server_name_for` uses
+    //    to find the port it strips for SNI (`split_port`, shared so there
+    //    is one rule and not two).
+    if split_port(address).is_some() {
+        return as_given();
+    }
+    // 4. Has a colon that is not a port and is not a closing bracket: the
+    //    input is malformed (`"host:"`, `"host:ssh"`, `"[::1]:x"`).
+    //    Appending would only add a second colon, producing a string the
+    //    operator never typed and no resolver can read; hand the bytes back
+    //    and let the dial report them verbatim, exactly as today.
+    if address.contains(':') && !address.ends_with(']') {
+        return as_given();
+    }
+    // 5. A name, an IPv4 literal, or a bracketed IPv6 with no port.
+    filled(format!("{address}:{}", crate::serve::DEFAULT_PORT))
+}
+
+/// Where the port starts in a peer address, when it has one: the run after
+/// the rightmost `:`, if that run is non-empty and all ASCII digits.
+///
+/// One rule, two consumers: [`normalize_peer_address`]'s "does it already
+/// have a port" test and the SNI host `ops::server_name_for` extracts
+/// (ADR-0014 결정 2, "이미 코드에 있는 규칙을 재사용한다").
+pub(crate) fn split_port(address: &str) -> Option<(&str, &str)> {
+    match address.rsplit_once(':') {
+        Some((host, port)) if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) => {
+            Some((host, port))
+        }
+        _ => None,
+    }
+}
+
 /// A private CA root the verifier accepts chains against.
 ///
 /// Written by `qsh cert issue` (`docs/adr/0008-private-ca-cert-issuance.md`,
@@ -551,6 +670,153 @@ mod tests {
 
     fn fp(seed: &[u8]) -> Fingerprint {
         Fingerprint::of_spki_der(seed)
+    }
+
+    /// PLAN.md M9 §2.1: every decision-table row, `(input, expected address,
+    /// expected port_filled)`. Row numbers in comments match the design doc.
+    #[test]
+    fn normalize_peer_address_decision_table() {
+        let rows: &[(&str, &str, bool)] = &[
+            // 1
+            ("", "", false),
+            // 2
+            ("mac", "mac:4433", true),
+            // 3
+            ("mac.example.com", "mac.example.com:4433", true),
+            // 4
+            ("mac:4433", "mac:4433", false),
+            // 5
+            ("mac:22", "mac:22", false),
+            // 6
+            ("192.0.2.10", "192.0.2.10:4433", true),
+            // 7
+            ("192.0.2.10:4433", "192.0.2.10:4433", false),
+            // 8
+            ("[::1]:4433", "[::1]:4433", false),
+            // 9
+            ("[::1]", "[::1]:4433", true),
+            // 10
+            ("[fe80::1%eth0]", "[fe80::1%eth0]:4433", true),
+            // 14
+            ("mac:", "mac:", false),
+            // 15
+            ("mac:ssh", "mac:ssh", false),
+            // 16
+            ("[::1]:x", "[::1]:x", false),
+            // 17
+            ("mac:0", "mac:0", false),
+            // 18
+            ("mac:99999", "mac:99999", false),
+            // 19
+            (" mac ", " mac :4433", true),
+        ];
+        for (input, expected_address, expected_port_filled) in rows {
+            let got = normalize_peer_address(input);
+            assert_eq!(&got.address, expected_address, "input {input:?}");
+            assert_eq!(
+                got.port_filled, *expected_port_filled,
+                "input {input:?} port_filled"
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_peer_address_is_identity_on_an_empty_address() {
+        let got = normalize_peer_address("");
+        assert_eq!(got.address, "");
+        assert!(!got.port_filled);
+    }
+
+    #[test]
+    fn normalize_peer_address_brackets_a_bare_ipv6_literal_instead_of_reading_its_last_group_as_a_port()
+     {
+        // Row 11
+        let got = normalize_peer_address("::1");
+        assert_eq!(got.address, "[::1]:4433");
+        assert!(got.port_filled);
+
+        // Row 12
+        let got = normalize_peer_address("2001:db8::1");
+        assert_eq!(got.address, "[2001:db8::1]:4433");
+        assert!(got.port_filled);
+
+        // Row 13 — the last colon-group is not read as a port because the
+        // whole string parses as an IPv6 literal first.
+        let got = normalize_peer_address("2001:db8::1:4433");
+        assert_eq!(got.address, "[2001:db8::1:4433]:4433");
+        assert!(got.port_filled);
+    }
+
+    #[test]
+    fn normalize_peer_address_does_not_enforce_a_port_range() {
+        // Rows 17-18, §4.1 #12: out-of-range ports are left untouched, no
+        // new error code.
+        let got = normalize_peer_address("mac:0");
+        assert_eq!(got.address, "mac:0");
+        assert!(!got.port_filled);
+
+        let got = normalize_peer_address("mac:99999");
+        assert_eq!(got.address, "mac:99999");
+        assert!(!got.port_filled);
+    }
+
+    #[test]
+    fn normalize_peer_address_is_idempotent_on_its_own_output() {
+        let inputs = [
+            "",
+            "mac",
+            "mac.example.com",
+            "mac:4433",
+            "mac:22",
+            "192.0.2.10",
+            "192.0.2.10:4433",
+            "[::1]:4433",
+            "[::1]",
+            "[fe80::1%eth0]",
+            "::1",
+            "2001:db8::1",
+            "2001:db8::1:4433",
+            "mac:",
+            "mac:ssh",
+            "[::1]:x",
+            "mac:0",
+            "mac:99999",
+            " mac ",
+        ];
+        for input in inputs {
+            let once = normalize_peer_address(input);
+            let twice = normalize_peer_address(&once.address);
+            assert_eq!(
+                twice.address, once.address,
+                "not a fixed point for input {input:?}"
+            );
+            assert!(
+                !twice.port_filled,
+                "second application still reports port_filled for input {input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_peer_address_leaves_a_malformed_trailing_colon_alone() {
+        for input in ["mac:", "mac:ssh", "[::1]:x"] {
+            let got = normalize_peer_address(input);
+            assert_eq!(got.address, input);
+            assert!(!got.port_filled);
+            assert!(
+                !got.address.contains("::4433"),
+                "must not double up a colon: {:?}",
+                got.address
+            );
+        }
+    }
+
+    #[test]
+    fn the_port_notice_names_the_default_port() {
+        assert_eq!(
+            ADDRESS_PORT_ASSUMED_NOTICE,
+            format!("assuming port {}", crate::serve::DEFAULT_PORT)
+        );
     }
 
     #[test]

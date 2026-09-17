@@ -77,6 +77,7 @@ Broker
 - **개인키 저장 3-mode** (`identity.key_store = auto | platform | file`): `platform`은 keyring 3.x(macOS Keychain / Linux Secret Service). headless Linux는 Secret Service가 없으므로 `auto`가 `identity/device.key`(0600, 디렉터리 0700 — sshd host key와 같은 태세)로 fallback하고, `qsh init`과 `qsh doctor`가 **어느 저장소가 실제 사용 중인지 명시 보고**한다. 키 바이트는 메모리에서 `zeroize::Zeroizing`으로 감싸고 절대 로그에 남기지 않는다. resume token(ADR-0007)도 같은 위생을 적용한다: `Zeroizing<[u8; 32]>`로 다루고, 토큰을 담는 타입(`SessionOpened`/`SessionAttached` 래퍼, `resume.json` 항목)은 `Debug`를 수동 구현해 `<redacted>`로 렌더하며, control message 전문을 `?msg`로 로깅하는 것은 어떤 verbosity에서도 금지한다.
 - **Trust store** (`trust.toml`): pinned peer(이름+fingerprint)와 private CA 두 종류. 검증 로직(`QshPeerVerifier`: pin 일치 → 허용, CA 체인 → 허용, 그 외 거부, web PKI 절대 미적재)은 `qsh-transport`에 살되 신뢰 평가는 `qsh-core::trust`가 `TrustEvaluator` trait로 주입한다. 검증 결과는 connection에 부착되는 `Principal`(`fp:…` / `user:…` / `device:…`) 하나로 환원되며 — principal은 **항상 인증서에서만** 나오고 Hello 등 wire 필드에서 나오지 않는다.
 - **Pairing:** 기본 UX는 일회용 invite code(10분 TTL) + TLS exporter 기반 channel binding으로 양방향 pin을 한 번에 설정, fingerprint 방식은 스크립트/프로비저닝용 일급 fallback — 프로토콜 상세와 근거는 [ADR-0002](../adr/0002-pairing-invite-code.md).
+- **Peer 주소 기본 포트:** peer 주소가 포트를 생략하면 4433을 채우는 정규화 함수와 그때 나가는 `assuming port 4433` 문면의 정본은 `qsh-core`의 `trust` 모듈(`normalize_peer_address`, `ADDRESS_PORT_ASSUMED_NOTICE`)이고, frontend는 이 판정을 다시 하지 않는다([ADR-0014](../adr/0014-address-default-port.md)).
 
 ## 6. ACL 엔진과 audit
 

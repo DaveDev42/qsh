@@ -40,12 +40,19 @@ impl Ops {
             ));
         }
 
+        // ADR-0014 결정 3: op 진입점에서 한 번. 아래 세 사용처(probe dial,
+        // TRUST_REQUIRED details.address, add_peer) 전부 이 값을 쓴다.
+        let address = req
+            .address
+            .as_deref()
+            .map(|address| crate::trust::normalize_peer_address(address).address);
+
         let fingerprint = match req.fingerprint.as_deref() {
             Some(text) => text
                 .parse::<Fingerprint>()
                 .map_err(|err| OpError::new(ErrorCode::InvalidArgument, err.to_string()))?,
             None => {
-                let Some(address) = req.address.as_deref() else {
+                let Some(address) = address.as_deref() else {
                     return Err(OpError::new(
                         ErrorCode::InvalidArgument,
                         "--address is required to observe a fingerprint",
@@ -75,8 +82,7 @@ impl Ops {
         // Step 7-1).
         let _lock = TrustStore::lock(&path)?;
         let mut store = TrustStore::load(&path)?;
-        let (peer, created, updated) =
-            store.add_peer(name, req.address, fingerprint, now_rfc3339());
+        let (peer, created, updated) = store.add_peer(name, address, fingerprint, now_rfc3339());
         if created || updated {
             store.save(&path)?;
         }
@@ -91,7 +97,17 @@ impl Ops {
     pub fn trust_list(&self) -> Result<TrustListData, OpError> {
         let store = TrustStore::load(&self.paths.trust_file())?;
         Ok(TrustListData {
-            peers: store.peers().to_vec(),
+            // ADR-0014 결정 4: 응답을 파생시키는 자리다. `TrustStore::save`
+            // 경로가 아니므로 `trust.toml`의 바이트는 그대로다. 빈 `address`
+            // (주소 없는 client-only pin)는 정규화가 항등이므로 빈 채로 남는다.
+            peers: store
+                .peers()
+                .iter()
+                .map(|peer| TrustPeer {
+                    address: crate::trust::normalize_peer_address(&peer.address).address,
+                    ..peer.clone()
+                })
+                .collect(),
         })
     }
 
@@ -170,6 +186,9 @@ impl Ops {
             OpError::new(ErrorCode::InvalidArgument, err.to_string()).with_retryable(false)
         })?;
 
+        // ADR-0014 결정 3: dial·pin·오류 문면이 모두 같은 한 값을 쓴다.
+        let address = crate::trust::normalize_peer_address(&req.address).address;
+
         let Some(loaded) = self.load_identity()? else {
             return Err(OpError::new(
                 ErrorCode::ConfigError,
@@ -194,8 +213,8 @@ impl Ops {
             })?;
 
         let dialer = Dialer::new(loaded.local, Arc::new(crate::pairing::AcceptAnyForPairing));
-        let server_name = server_name_for(&req.address);
-        let dial_address = req.address.clone();
+        let server_name = server_name_for(&address);
+        let dial_address = address.clone();
 
         let outcome = runtime.block_on(async move {
             let socket = resolve_one(&dial_address).await?;
@@ -235,7 +254,7 @@ impl Ops {
         // (5-minute pairing to first connection).
         let (peer, created, updated) = store.add_peer(
             success.peer_device_name.clone(),
-            Some(req.address.clone()),
+            Some(address.clone()),
             observed_fp,
             now_rfc3339(),
         );
@@ -245,7 +264,7 @@ impl Ops {
                 format!(
                     "paired with {}, but {:?} is already pinned locally under a different \
                      identity; rename or remove the conflicting entry and retry",
-                    req.address, success.peer_device_name
+                    address, success.peer_device_name
                 ),
             )
             .with_retryable(false));

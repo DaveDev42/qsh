@@ -51,6 +51,7 @@ use qsh_core::{
     SessionResizeOp, SessionWriteOp, TrustAcceptOp, TrustAddOp, TrustInviteOp, TrustListOp,
     TrustRemoveOp, TunnelCloseOp, TunnelListOp, TunnelOpenOp, VersionOp,
     dynamic_forward_unsupported, normalize_invite_code, resolve_invite_code_source,
+    trust::{ADDRESS_PORT_ASSUMED_NOTICE, normalize_peer_address},
 };
 use qsh_proto::{
     AclCheckReq, CapabilitiesReq, CertInitReq, CertIssueReq, DoctorReq, ErrorCode, ExecRunReq,
@@ -1079,6 +1080,15 @@ async fn shutdown_signal() {
 /// confirmation prompt; in `--json`/`--jsonl` mode the error is returned
 /// verbatim, because machine mode never prompts (`docs/CLI.md` §2.1).
 fn run_trust_add(cli: &Cli, ops: &Ops, args: &TrustAddArgs) -> i32 {
+    // ADR-0014 결정 5. 문면도, "채웠나"의 판정도 qsh-core 것이고 이 함수는
+    // stderr I/O만 한다 — `resolve_invite_code_source`(Step 2)가 세운
+    // "core가 판정하고 CLI는 지시된 I/O만" 규율 그대로다.
+    if let Some(address) = args.address.as_deref()
+        && normalize_peer_address(address).port_filled
+    {
+        stderr_note!("{ADDRESS_PORT_ASSUMED_NOTICE}");
+    }
+
     let request = |fingerprint: Option<String>| TrustAddReq {
         name: args.name.clone(),
         address: args.address.clone(),
@@ -1172,6 +1182,10 @@ fn run_trust_accept(
     code: Option<String>,
     code_stdin: bool,
 ) -> i32 {
+    if normalize_peer_address(address).port_filled {
+        stderr_note!("{ADDRESS_PORT_ASSUMED_NOTICE}");
+    }
+
     let result = invite_code(code, code_stdin, cli.wants_json()).and_then(|code| {
         ops.trust_accept(TrustAcceptReq {
             address: address.to_string(),

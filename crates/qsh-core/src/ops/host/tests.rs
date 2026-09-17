@@ -327,6 +327,101 @@ fn hosts_toml_and_trust_toml_agreeing_on_the_same_address_report_source_both() {
     );
 }
 
+/// ADR-0014 결정 4: a port-less trust pin and a `hosts.toml` address
+/// carrying the default port name the same address once normalized —
+/// `source` must be `"both"`, not `"hosts"` (a false redirect signal).
+#[test]
+fn a_port_less_trust_pin_and_a_hosts_toml_address_with_the_port_report_source_both() {
+    let store = forward_store("mac", "mac.example", FP_A);
+    let hosts = hosts_with(&[("mac", "mac.example:4433", None)]);
+
+    let listed = forward_hosts(&store, &hosts);
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].address, "mac.example:4433");
+    assert_eq!(
+        listed[0].source.as_deref(),
+        Some("both"),
+        "same address, port-spelling only difference -> \"both\""
+    );
+
+    let route = resolve_route(&[], &store, &hosts, "mac").unwrap();
+    assert_eq!(
+        route,
+        HostRoute::Forward {
+            address: "mac.example:4433".to_string(),
+            fingerprint: FP_A.to_string(),
+            source: Some("both".to_string()),
+            user: None,
+        }
+    );
+}
+
+#[test]
+fn a_port_less_hosts_toml_address_resolves_with_the_default_port() {
+    let hosts = hosts_with(&[("mac", "mac", None)]);
+    let store = TrustStore::default();
+
+    let listed = forward_hosts(&store, &hosts);
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].address, "mac:4433");
+    assert_eq!(listed[0].source.as_deref(), Some("hosts"));
+}
+
+/// ADR-0014 결정 4: a *live* reverse registration's address is an
+/// observed value from an active daemon, never a hand-written file —
+/// it must never be run through the peer-address normalizer.
+#[test]
+fn a_live_reverse_registration_address_is_never_normalized() {
+    let mut entry = reverse_entry(100, "mac", "reachable", FP_B);
+    entry.local.address = "203.0.113.5".to_string();
+    let hosts = no_hosts();
+
+    let reverse = vec![entry.clone()];
+    let route = resolve_route(&reverse, &TrustStore::default(), &hosts, "mac").unwrap();
+    assert_eq!(
+        route,
+        HostRoute::Reverse {
+            pid: 100,
+            socket: entry.socket.clone(),
+            address: "203.0.113.5".to_string(),
+            fingerprint: FP_B.to_string(),
+            generation: 1,
+            user: None,
+        }
+    );
+
+    let merged = merge_hosts(Vec::new(), &reverse, &hosts);
+    assert_eq!(merged[0].address, "203.0.113.5");
+}
+
+/// `PLAN.md` M9 §6 행 i: surrounding whitespace in a lookup key is
+/// trimmed and still finds the pin; a `user@` hint is a different kind
+/// of prefix and must keep failing closed.
+#[test]
+fn a_lookup_key_with_surrounding_whitespace_finds_the_pin_but_a_user_at_prefix_still_does_not() {
+    let store = forward_store("mac", "mac.example.com:4433", FP_A);
+    let hosts = no_hosts();
+
+    let route = resolve_route(&[], &store, &hosts, " mac ").unwrap();
+    assert_eq!(
+        route,
+        HostRoute::Forward {
+            address: "mac.example.com:4433".to_string(),
+            fingerprint: FP_A.to_string(),
+            source: None,
+            user: None,
+        }
+    );
+
+    let err = resolve_route(&[], &store, &hosts, "dave@mac").unwrap_err();
+    assert_eq!(err.code, ErrorCode::HostNotFound);
+    assert!(
+        err.message.contains("qsh trust add mac --address"),
+        "remedy did not name the bare alias: {:?}",
+        err.message
+    );
+}
+
 #[test]
 fn hosts_toml_user_hint_is_carried_through_forward_hosts_and_resolve_route() {
     let store = forward_store("mac", "mac.example.com:4433", FP_A);

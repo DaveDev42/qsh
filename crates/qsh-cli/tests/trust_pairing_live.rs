@@ -387,3 +387,37 @@ fn trust_accept_from_stdin_rejects_non_utf8_input() {
         "{envelope}"
     );
 }
+
+/// ADR-0014 결정 5: the port-assumed notice fires from the very top of
+/// `run_trust_accept`, before the invite code is even resolved — so a
+/// call with no code at all (machine mode refuses to prompt) still notes
+/// the assumed port exactly once, with no network and no server needed.
+#[test]
+fn trust_accept_with_a_port_less_address_notes_the_assumed_port_once_and_keeps_stdout_pure() {
+    let client = Sandbox::initialized();
+    let args = ["trust", "accept", "127.0.0.1", "--json"];
+    let output = client.qsh(&args);
+    let envelope = common::sole_envelope(&output.stdout, &args);
+    assert_eq!(common::exit_code(&output), 255, "{envelope}");
+    assert_eq!(envelope["error"]["code"], "INVALID_ARGUMENT", "{envelope}");
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(
+        stderr.matches("assuming port 4433").count(),
+        1,
+        "stderr must note the assumed port exactly once: {stderr:?}"
+    );
+}
+
+/// The symmetric case: an address that already names a port notes nothing.
+#[test]
+fn trust_accept_with_a_port_notes_nothing() {
+    let client = Sandbox::initialized();
+    let args = ["trust", "accept", "127.0.0.1:4433", "--json"];
+    let output = client.qsh(&args);
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        !stderr.contains("assuming port"),
+        "an address with an explicit port must not be noted: {stderr:?}"
+    );
+}

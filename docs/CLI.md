@@ -256,6 +256,8 @@ qsh host get personal-mac --json
 
 **forward host 해석 우선순위 (`hosts.toml` vs `trust.toml`, M7 Step 3):** 같은 이름이 `hosts.toml`과 `trust.toml` 양쪽에 있으면 **`hosts.toml`의 `address`가 이긴다**. `trust.toml`에만 있으면 그 주소를, `hosts.toml`에만 있으면 그 주소를 쓴다. **fingerprint(신원)는 항상 `trust.toml`에서만 온다** — `hosts.toml`은 이름과 주소, `user` hint만 담는 순수 주소록이며 신원 판단에 절대 관여하지 않는다: `hosts.toml`이 어떤 이름에 주소를 대더라도 실제 dial 시 TLS 계층에서 그 주소가 제시한 fingerprint가 trust store 어딘가에 핀되어 있지 않으면 인증은 그대로 실패한다(pin 조회는 이름이 아니라 fingerprint 기준이다). `hosts.toml` 파일이 없거나 비어 있으면 이 절차는 M7 이전과 동일하게 `trust.toml`의 pin이 유일한 출처다. `hosts.toml`은 **read-only 디렉터리**다 — 이를 쓰는 CLI 명령은 없으며 수동으로 직접 편집한다. `hosts.toml`에 쓰기 권한이 있다는 것은 곧 어떤 이름을 이미 핀된 다른 peer로 돌릴 수 있는 권한이다(mTLS는 여전히 핀되지 않은 주소를 막는다) — 그런 redirect는 `host.list`/`host.get`의 `source: "hosts"`로 드러난다(§5).
 
+두 파일이 같은 주소를 포트 표기만 다르게 적었으면(`hosts.toml`이 `mac:4433`, `trust.toml`이 `mac`) 비교는 기본 포트를 채운 뒤에 하므로 `source`는 `both`다.
+
 `hosts.toml`의 주소는 op 시작 시점에 한 번 resolve된다 — session이 열려 있는 동안 파일을 고쳐도 그 session에는 반영되지 않는다. `attach`가 끊긴 연결을 자동으로 재접속할 때도 최초 attach 시점에 resolve된 주소를 계속 쓴다(재resolve 없음). 이는 매 handshake마다 내용을 다시 읽는 `trust.toml`과 대비된다(§6.11 `trust remove` 문단).
 
 **`hosts.toml` 파일 계약.** `<config_dir>/hosts.toml`(`trust.toml`과 같은 디렉터리, architecture.md §7)에 다음 형식으로 둔다.
@@ -268,6 +270,8 @@ user = "dave"
 ```
 
 `name`·`address`는 필수, `user`는 선택이다. 파일이 없으면 빈 디렉터리로 취급한다(오류 아님) — M7 Step 3 도입 이전과 동일하게 `trust.toml`의 pin만으로 동작한다. 파싱 실패(TOML 문법 오류, 필수 필드 누락)는 `CONFIG_ERROR`(`retryable: false`)로, `trust.toml`이 손상됐을 때와 동일한 실패 형태다. 같은 `name`이 여러 번 나오면 첫 항목이 이긴다(`trust.toml`과 같은 규칙). `address`를 빈 문자열로 명시하면 파싱은 되지만 그 이름에 대해 `hosts.toml`은 "주소 없음"으로 취급되어 `trust.toml`의 주소로 폴백한다(`trust.toml`의 client-only pin과 동일한 관례).
+
+`address`에 포트가 없으면 읽는 시점에 4433으로 해석한다. 파일은 다시 쓰지 않으므로 `hosts.toml`의 바이트는 그대로고 `host.list`/`host.get`이 돌려주는 값만 `host:port` 꼴이다. 빈 문자열에는 포트를 채우지 않는다 — 위의 "주소 없음" 관례가 그대로 이긴다.
 
 ### 6.2 Session 조회
 
@@ -582,12 +586,14 @@ qsh init --key-store file --json
 `identity.init`의 실패 경로는 전용 오류 코드를 두지 않고 일반 `ErrorCode` 어휘(§3.3)를 따른다 — 예: keystore 쓰기 실패는 `INTERNAL`(`retryable: false`)로 보고한다.
 
 ```bash
-qsh trust add <name> --address <host:port> --fingerprint sha256:... --json
+qsh trust add <name> --address <host[:port]> --fingerprint sha256:... --json
 qsh trust list --json
 qsh trust remove <name> --json
 ```
 
 `trust.add`는 fingerprint를 명시하면 연결 없이 peer를 pin한다(provisioning 친화). 이때 `--address`는 선택이며 생략하면 `address`는 빈 문자열로 기록된다 — 단, `qsh exec <name>`의 host→주소 해석(§6.1, §6.8)은 address가 있는 pin만 이 store 쪽 후보로 삼으므로 명령을 보낼 host는 address와 함께 pin하거나 `hosts.toml`에 주소를 적어 둔다(inbound 전용 peer, 즉 "이 장비에 접속해 올 client"는 fingerprint만으로 충분하다). fingerprint 없이 연결해서 확인하는 방식은 human mode에서만 prompt를 열며 `--json` mode에서는 §2.1 규칙에 따라 prompt 대신 `TRUST_REQUIRED` 오류에 `details.observed_fingerprint`와 `details.address`를 담아 반환한다 — 호출자는 그 값을 검증한 뒤 `--fingerprint`로 재호출한다.
+
+`--address`에 포트를 적지 않으면 4433을 채워 저장한다 — `qsh serve`/`qsh listen`의 bind 기본값과 같은 포트 하나다(ADR-0014). 포트를 채운 경우에만 `assuming port 4433` 한 줄이 stderr로 나가며 envelope에는 이 사실이 들어가지 않는다. `--address`를 아예 생략한 경우는 지금처럼 빈 문자열이고 포트를 채우지 않는다.
 
 세 명령 모두 통일된 pinned peer 객체를 사용한다:
 
@@ -713,7 +719,7 @@ qsh trust accept <address>
 
 human mode는 `accept_command`를 화면에 그대로 찍는다. operator는 `<address>` 자리만 실제 주소로 바꿔 상대에게 전달하면 된다 — 그게 이 필드의 유일한 용도다.
 
-`trust.accept <address> <code>`는 `address`로 dial해 `code`가 가리키는 invite를 redeem한다. 인증의 근거는 TLS identity가 아니라 secret 소유 증명이다: 양쪽은 TLS exporter(RFC 5705 `export_keying_material`)로 채널에 묶인 값을 뽑고, 그 위에 도메인을 분리한 두 개의 BLAKE3 keyed-hash 증명(initiator→responder, responder→initiator)을 constant-time으로 주고받는다. 상대 쪽 증명이 검증되기 전에는 어느 쪽도 pin하지 않는다 — 메시지가 도착했다는 사실만으로 pin하는 경로는 없다.
+`trust.accept <address> <code>`는 `address`로 dial해 `code`가 가리키는 invite를 redeem한다. `address`도 포트를 생략하면 4433으로 읽고, 채운 경우 같은 `assuming port 4433` 한 줄이 stderr로 나간다. pin에 저장되는 주소는 그 정규화된 값, 즉 방금 dial에 성공한 그 문자열이다. 인증의 근거는 TLS identity가 아니라 secret 소유 증명이다: 양쪽은 TLS exporter(RFC 5705 `export_keying_material`)로 채널에 묶인 값을 뽑고, 그 위에 도메인을 분리한 두 개의 BLAKE3 keyed-hash 증명(initiator→responder, responder→initiator)을 constant-time으로 주고받는다. 상대 쪽 증명이 검증되기 전에는 어느 쪽도 pin하지 않는다 — 메시지가 도착했다는 사실만으로 pin하는 경로는 없다.
 
 `code`를 주는 경로는 셋이다. 명령줄 위치 인자, `--code-stdin`(표준입력을 끝까지 읽는다), 그리고 셋 다 없을 때 human mode에서 열리는 프롬프트다. 프롬프트는 표준입력이 터미널일 때만 열리고 에코를 끄며 문면은 stderr로 나간다 — stdout에는 결과 envelope 외에 아무것도 나가지 않는다(§2.2). `--code-stdin`도 표준입력이 터미널이면 같은 방식으로 에코를 끈다 — 프롬프트를 기다리지 않고 바로 타이핑해도 코드가 화면에 남지 않는다. 세 경로 모두 읽은 값은 앞뒤 공백을 제거한 뒤 쓴다 — 위치 인자도 포함이라 `qsh trust accept <address> ' abcd-... '`처럼 앞뒤에 공백이 붙어도 그대로 통한다. code 문법 자체는 Crockford 심볼과 `-`만 허용하므로 `printf '%s\n' "$code" | qsh trust accept <address> --code-stdin`처럼 후행 개행이 붙은 입력은 제거하지 않으면 첫 시도부터 거부된다. 내부 공백은 제거하지 않는다 — 코드 중간의 공백은 여전히 오류다. 위치 인자와 `--code-stdin`을 함께 주는 것은 인자 사용 오류(exit 2, envelope 없음, §4)다. 코드가 셸 히스토리에 남는 것 자체는 재사용 위험이 아니다 — invite는 1회용이고 발급 10분 뒤 상환이 끝난다.
 

@@ -274,6 +274,124 @@ fn trust_add_without_address_or_fingerprint_is_an_invalid_argument() {
     );
 }
 
+/// ADR-0014 결정 5: `trust add --address` with no `:port` pins the default
+/// port and notes it exactly once on stderr, never on stdout.
+#[test]
+fn trust_add_with_a_port_less_address_notes_the_assumed_port_once_and_pins_it() {
+    let sandbox = Sandbox::new();
+    sandbox.init();
+
+    let output = sandbox.qsh(&[
+        "trust",
+        "add",
+        "peer-a",
+        "--address",
+        "127.0.0.1",
+        "--fingerprint",
+        FINGERPRINT,
+        "--json",
+    ]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "stdout must be exactly one JSON line: {stdout:?}"
+    );
+    let value: Value = serde_json::from_str(lines[0]).expect("stdout is JSON");
+    assert_eq!(value["data"]["peer"]["address"], "127.0.0.1:4433");
+    assert_eq!(
+        stderr.matches("assuming port 4433").count(),
+        1,
+        "stderr must note the assumed port exactly once: {stderr:?}"
+    );
+    assert!(
+        !stdout.contains("assuming"),
+        "the notice must never reach stdout: {stdout:?}"
+    );
+}
+
+/// The other half: an address that already names a port notes nothing.
+#[test]
+fn trust_add_with_a_port_in_the_address_notes_nothing() {
+    let sandbox = Sandbox::new();
+    sandbox.init();
+
+    let output = sandbox.qsh(&[
+        "trust",
+        "add",
+        "peer-a",
+        "--address",
+        "127.0.0.1:4433",
+        "--fingerprint",
+        FINGERPRINT,
+        "--json",
+    ]);
+    assert_eq!(output.status.code(), Some(0));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        !stderr.contains("assuming port"),
+        "an address with an explicit port must not be noted: {stderr:?}"
+    );
+}
+
+/// ADR-0014 결정 5: read paths never note the assumed port, even though
+/// they do normalize the address they return (mutation (iii)'s first
+/// catcher).
+#[test]
+fn trust_list_never_notes_an_assumed_port() {
+    let sandbox = Sandbox::new();
+    sandbox.init();
+    std::fs::write(
+        sandbox.config.join("trust.toml"),
+        format!(
+            "[[peer]]\nname = \"peer-a\"\nfingerprint = \"{FINGERPRINT}\"\naddress = \"127.0.0.1\"\nadded_at = \"2026-08-17T00:00:00Z\"\n"
+        ),
+    )
+    .expect("write trust.toml");
+
+    let output = sandbox.qsh(&["trust", "list", "--json"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let value: Value = serde_json::from_str(stdout.trim()).expect("stdout is JSON");
+    assert_eq!(
+        value["data"]["peers"][0]["address"], "127.0.0.1:4433",
+        "the read path must still normalize"
+    );
+    assert!(
+        !stderr.contains("assuming port"),
+        "trust.list must never note an assumed port: {stderr:?}"
+    );
+}
+
+/// Same guarantee, the other read choke point.
+#[test]
+fn host_list_never_notes_an_assumed_port() {
+    let sandbox = Sandbox::new();
+    sandbox.init();
+    std::fs::write(
+        sandbox.config.join("trust.toml"),
+        format!(
+            "[[peer]]\nname = \"peer-a\"\nfingerprint = \"{FINGERPRINT}\"\naddress = \"127.0.0.1\"\nadded_at = \"2026-08-17T00:00:00Z\"\n"
+        ),
+    )
+    .expect("write trust.toml");
+
+    let output = sandbox.qsh(&["hosts", "--json"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let value: Value = serde_json::from_str(stdout.trim()).expect("stdout is JSON");
+    assert_eq!(value["data"]["hosts"][0]["address"], "127.0.0.1:4433");
+    assert!(
+        !stderr.contains("assuming port"),
+        "hosts must never note an assumed port: {stderr:?}"
+    );
+}
+
 #[test]
 fn probing_needs_an_identity_and_then_reports_a_connection_failure() {
     let sandbox = Sandbox::new();

@@ -901,19 +901,29 @@ fn doctor_probes_a_pinned_extra_host_and_classifies_a_black_hole_as_udp_egress_b
 /// `no_route` — verify round P2-1, mutation `MC`
 /// (`probe_address`'s `Err(_) => UdpProbeOutcome::Unreachable` branch
 /// weakened to `TimedOut`). Rebuts design brief §C/§E-2's premise that
-/// a real, OS-dependent socket is required to reach `no_route`: a
-/// pinned address with no port fails
+/// a real, OS-dependent socket is required to reach `no_route`: an
+/// address whose port cannot be parsed fails
 /// `resolve_probe_socket_addr`/`ToSocketAddrs::to_socket_addrs`'s
 /// parse deterministically — no socket, no DNS, no OS dependency at
 /// all.
+///
+/// The address used to be bare (`203.0.113.9`, no colon), which parsed
+/// just as deterministically until M9 Step 1 (ADR-0014) made
+/// `trust_add` fill the default port; a bare address now pins as
+/// `203.0.113.9:4433`, resolves, and reaches the real UDP probe, which
+/// is exactly the OS dependency this test exists to avoid. A non-numeric
+/// port keeps the property, because `normalize_peer_address` passes a
+/// colon it cannot read as a port through untouched — so this now also
+/// pins that rule from the doctor side.
 #[test]
-fn doctor_reports_no_route_for_a_pinned_address_with_no_port() {
+fn doctor_reports_no_route_for_a_pinned_address_with_an_unparseable_port() {
     let (_guard, ops) = healthy_ops();
     ops.trust_add(TrustAddReq {
         name: "bad".into(),
-        // No port: `ToSocketAddrs` for `&str` requires `host:port` and
-        // fails to parse this at all, deterministically.
-        address: Some("203.0.113.9".into()),
+        // `ToSocketAddrs` for `&str` splits at the last colon and parses
+        // the remainder as a `u16`; `ssh` fails that parse before any
+        // resolver runs, deterministically.
+        address: Some("203.0.113.9:ssh".into()),
         fingerprint: Some(qsh_transport::Fingerprint::of_spki_der(b"bad").to_string()),
     })
     .unwrap();
