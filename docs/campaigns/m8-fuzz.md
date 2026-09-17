@@ -194,7 +194,7 @@ exec/s 29.1k~297.5k, peak RSS 512~795 MB — `-rss_limit_mb=1536` 아래다.
 
 누적: 배치 1 실효 시간 59.1~65.6h + 13.0h = 72.1~78.6h/타깃. 부족분이
 가장 컸던 타깃(12.89h)도 72.11h로 72h를 넘는다. DoD 1의 "누적" 문면상
-회차를 나눠 이어 돌린 시간은 합산한다(PLAN.md Step 1 경과 기록 09-07).
+회차를 나눠 이어 돌린 시간은 합산한다(`docs/history/m8-plan.md` §3 Step 1 경과 기록 09-07).
 
 **배치 1 보충 판정: decode_* 8 타깃 누적 ≥72h 충족, crash 0.**
 
@@ -204,7 +204,7 @@ exec/s 29.1k~297.5k, peak RSS 512~795 MB — `-rss_limit_mb=1536` 아래다.
 
 - 보충 회차(`m8-fuzz-20260910-1505`) 종료 확인 — 09-11 완료. `exits.txt`
   8행 `exit=0`, 로그 엄격 grep 0건, 누적 72.1~78.6h(§5).
-- DoD 1 체크 — 09-11 완료(PLAN.md §6.1). ROADMAP M8 마감 노트는 마감
+- DoD 1 체크 — 09-11 완료(`docs/history/m8-plan.md` §2). ROADMAP M8 마감 노트는 마감
   커밋에서 이 문서 §5를 인용한다.
 - stateful broker fuzzer(`fuzz_session_machine`/`broker_ops`)는 이 16
   타깃 집합 밖이다 — Step 7b가 착지해 §8에 기록하며, DoD 1의 "parser
