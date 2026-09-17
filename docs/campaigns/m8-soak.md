@@ -50,6 +50,31 @@ main이 Dave-Windows-WSL 단독 점유에서 돌린 24h 실측(이 워크플로 
    제품 기본값 자체는 손대지 않는다 — 단일 소스가 제한당하는 건
    프로덕션에서 의도된 동작이고(`docs/history/m8-plan.md` §3 Step 5), 이 상향은 신뢰된
    테스트 드라이버인 하네스 자신의 리스너 설정에만 적용된다.
+8. **loopback UDP가 ephemeral 범위 안에서 막혀 있지 않은지 확인한다.**
+   `run.sh`가 시작 직후 `scripts/soak/preflight_udp.py`로
+   `/proc/sys/net/ipv4/ip_local_port_range` 전 구간을 고르게 샘플링해
+   127.0.0.1 UDP 왕복을 실제로 찔러 본다. 막힌 창을 찾으면 즉시 실패하고
+   회차를 열지 않는다 — run #5가 겪은 DIAL_EXHAUSTED(§8 "run #5 결과")가
+   호스트 nftables 규칙 때문이었던 것과 같은 사고를 24시간 뒤가 아니라
+   시작 전 몇 초 안에 잡기 위해서다. `/proc`가 없는 호스트에서는 확인을
+   건너뛰고 진행한다.
+9. **막힌 창이 있는 호스트에서는 네트워크 네임스페이스 안에서 돌린다.**
+   nftables 테이블은 netns마다 별개라 새로 만든 네임스페이스에는 그 규칙이
+   없고, 만드는 데 권한도 필요 없다. 호스트의 방화벽 규칙은 손대지 않는다 —
+   그 규칙은 호스트 소유자의 결정이고 다른 용도로 의도된 예약일 수 있다.
+
+   ```sh
+   unshare -rn sh -c 'ip link set lo up; exec scripts/soak/run.sh …'
+   ```
+
+   `-r`이 user namespace를 함께 만들어 `ip link`를 쓸 수 있게 한다. `net`만
+   분리하므로 PID는 호스트에서 그대로 보이고 §6 감시 항목의 `pgrep`·RSS·fd
+   수집이 다 살아 있다. 네임스페이스는 프로세스와 함께 사라져 호스트에
+   남는 것이 없다. 위 8번 preflight가 이 조건을 기계로 지킨다 — 호스트
+   netns에서 그냥 부르면 exit 2로 회차를 열지 않고, 네임스페이스 안에서
+   부르면 통과한다. netns는 RSS·버퍼·fd 어느 판정 축에도 영향이 없고
+   qsh와 무관한 호스트 artifact 하나를 제거할 뿐이므로, 이 회차 조건을
+   여기에 전제로 적고 §5 기록에 남긴다.
 
 ## 3. 사전 정의된 합격/불합격 기준 (실행 전에 고정)
 
@@ -151,32 +176,32 @@ scripts/soak/run.sh --duration 86400 --sessions 100 --out /tmp/soak-$(date -u +%
 
 | 항목 | 값 |
 |---|---|
-| 날짜 (UTC) | |
+| 날짜 (UTC) | 2026-09-16T10:05:00Z |
 | 조작자 | main (Dave-Windows-WSL 단독 점유 실측) |
-| 호스트 / OS / 커널 | |
-| `ulimit -n` | |
-| `nproc` | |
-| qsh 커밋 SHA | |
-| working tree 상태 (clean/dirty) | |
-| 바이너리 경로 / sha256 | |
-| fuzz 라운드 종료 시각 (이 런 시작 전) | |
-| `QSH_SOAK_*` 오버라이드 (기본값과 다르면) | |
+| 호스트 / OS / 커널 | Linux Dave-Windows-WSL 6.18.33.2-microsoft-standard-WSL2 #1 SMP PREEMPT_DYNAMIC Thu Jun 18 21:54:43 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux |
+| `ulimit -n` | 65536 |
+| `nproc` | 8 |
+| qsh 커밋 SHA | dd66e0fb3ba316f130f93ee7ff847a6635b74140 |
+| working tree 상태 (clean/dirty) | clean |
+| 바이너리 경로 / sha256 | /home/dave/Projects/github.com/qsh/target/release/qsh / 85f7074630c8681d527381550ec9dd68707a0c884c16219d3d10ec0019cbe65d |
+| fuzz 라운드 종료 시각 (이 런 시작 전) | 기록 없음 — `env.txt`에 해당 필드가 없다. `uptime`이 "up 13 min"으로 찍혀 있어, 이 런은 fuzz 라운드 종료 뒤가 아니라 호스트 재부팅 직후(§2.5 전제와 다른 경로)에 시작됐다. |
+| `QSH_SOAK_*` 오버라이드 (기본값과 다르면) | DURATION_SECS=86400, SESSIONS=100(§4 절차의 표준 24h/100-session 호출값), SAMPLE_SECS=5, CYCLE_SECS=60, CYCLE_FRACTION=0.1, ABANDON=5, RESUME_TTL_SECS=600. `env.txt` 실측값 그대로다 — 어느 값이 기본값이고 어느 값이 오버라이드인지 가르는 대조표가 저장소에 없어 전부 나열했다. |
 
 ## 6. 스냅숏 기록 (0h/1h/6h/12h/24h — `summary.txt`에서 그대로 옮긴다)
 
 | hour | t_secs | phase | listener_rss_kib | listener_fds | self_rss_kib | self_fds | live_sessions | cycles | echo_p95_ms | abandoned_live |
 |---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| 0 | | | | | | | | | | |
-| 1 | | | | | | | | | | |
-| 6 | | | | | | | | | | |
-| 12 | | | | | | | | | | |
-| 24 | | | | | | | | | | |
+| 0 | 1 | boot | 14236 | 11 | 12488 | 14 | 0 | 0 | None | 0 |
+| 1 | 3603 | steady | 124304 | 116 | 561760 | 110 | 95 | 59 | 1.347 | 0 |
+| 6 | 21601 | steady | 129228 | 114 | 562804 | 110 | 95 | 359 | 1.165 | 0 |
+| 12 | 43203 | steady | 134132 | 120 | 565576 | 111 | 95 | 719 | 1.318 | 0 |
+| 24 | 86388 | steady | 128176 | 112 | 567880 | 109 | 95 | 1438 | 1.146 | 0 |
 
 ## 7. §3 표 회차 기록
 
 | 회차 | idle RSS baseline/idle_end (KiB) | 세션당 buffer (KiB) | RSS 추세 (MiB/h) | listener fd baseline/idle_end | self fd 1/4 구간 델타 | echo p95 최댓값 (ms) | TTL reap (abandoned_live) | 판정 | 비고 |
 |---:|---|---|---|---|---|---|---|---|---|
-| | | | | | | | | | |
+| 5 | 14236 / 30244 | 1266.3 (peak=140868) | -0.0480 | 11 / 19 | -1 | 15.847 | 0 | FAIL | 트리 dd66e0f, 바이너리 sha256 85f7074630c8681d527381550ec9dd68707a0c884c16219d3d10ec0019cbe65d. 실행 시간 86636.283s(설정 86400s+drain, ≈24h04m). soak.rs 자체 verdict FAIL — DIAL_EXHAUSTED: 8건(사이클 교체 dial이 재시도 3회 모두 소진, slot 81×2·43·54·94·50·15·93). dial_retries=1138(정보성), dead_sessions=0(SESSION_STALLED 없음), listener fd quarters 델타=-1·self fd quarters 델타=-1(둘 다 allowance +2 이내, 위반 아님). summarize.py는 §3 세 축(idle RSS·세션당 buffer·RSS 추세) 기준 pass. run.sh 결합 verdict는 FAIL(test exit=100, summarize exit=0) — DIAL_EXHAUSTED>0은 `soak.rs`가 별도로 거는 축이고 §3 사전 기준 9행에는 없으며 DoD 2 세 축과도 별개다. 그 축의 원인은 이 호스트의 nftables 규칙 `inet dave_mosh`(`udp dport 60000-61000 drop`, loopback 예외 없음)로 규명됐다 — 제품 결함이 아니다. 근거와 재현은 §8 "run #5 결과" 참고. |
 
 `FAIL`이면 `summarize.py`가 찍는 위반 문구를 "비고"에 그대로 옮긴다 —
 특히 self fd 위반이 `FD_GROWTH_CLIENT` 태그를 달고 있으면 M7 carryover
@@ -214,6 +239,134 @@ GHA 첫 실행(run 34203445617, b9e67b1)에서는 steady 창 2개(129.5 ms,
   만들었는지(§6 스냅숏 행에서 `resume_ttl_secs`와 대조).
 - 24h 내내 나온 새 실패 모드(있다면) — 특히 `run.log`의 SLOW 경고 빈도가
   비정상적으로 늘었는지(호스트 경합 신호).
+
+### run #5 결과 (2026-09-16 10:05 UTC 시작, dd66e0f)
+
+§3의 판정 축 중 idle listener RSS(14236/30244 KiB, bound 30720 KiB), 세션당
+buffer(1266.3 KiB, bound 8192 KiB), RSS 추세(-0.0480 MiB/h, bound <1.0),
+listener/self fd quarters 델타(둘 다 -1, allowance +2), echo p95 스파이크
+(0/14198 창, 0.0%, allowance 10%)와 최댓값(15.847ms, bound 50ms), TTL
+reap(아래 참고)은 전부 pass다. summarize.py는 이 CSV 기반 축만 보고
+verdict를 pass로 찍는다.
+
+soak.rs 자신의 assert 목록에는 CSV에 없는 축이 하나 더 있다. 사이클
+교체 dial 8건이 재시도 3회를 전부 소진했고(DIAL_EXHAUSTED — slot 81이
+두 번, 43·54·94·50·15·93이 한 번씩), 이 축이 soak.rs 자체 verdict를
+FAIL로 만든다. dial_retries=1138은 정보성 집계이고 dead_sessions=0이라
+SESSION_STALLED는 걸리지 않았다. run.sh는 nextest exit code와
+summarize.py exit code를 OR로 묶으므로(test exit=100, summarize
+exit=0), 이 회차의 결합 verdict는 FAIL이다.
+
+idle_end RSS 30244 KiB는 bound 30720 KiB(30 MiB)까지 476 KiB(1.5%)만
+남아 근접한 편이다. Step 5 이후 재조정 대상 후보로 남긴다(짧은 모드 CI
+회귀 감시자 임계 자체는 이 기록만으로 바꾸지 않는다). self fd quarters
+델타는 -1이라, M7 carryover (iii)는 이번 24h 규모에서 재현되지 않았다.
+
+TTL reap 판정선은 resume_ttl_secs(600s)+REAPER_TICK(30s)=630s다.
+`samples.csv` 기준으로 5개 abandon 세션은 늦어도 ramp 첫 표본(t=50s)에
+이미 abandoned_live=5로 잡혔고, steady 구간 내내 5를 유지하다 t=648s
+표본까지도 5, t=661s 표본에서 0으로 떨어져 그 뒤 끝까지(드레인 포함)
+0을 유지한다. 판정선 630s 부근에서 반영된 것으로, 위반은 없다.
+
+이전 두 회차(#3, #4)는 각각 t≈14,800s(4.1h), t≈16,085s(4.47h)에
+Windows Update 트리거 재부팅으로 죽어 verdict 자체가 없었다. run #5는
+이 재시도 계열에서 처음 24h 전체(86636.283s)를 완주한 회차이자,
+DIAL_EXHAUSTED가 assert 위반으로 처음 관측된 회차다. `env.txt`는 호스트가
+재부팅 13분 뒤(load average 0.96/1.36/0.95, 8 vCPU)에 시작됐다고
+기록하는데, fuzz 워커로 포화된 상태가 아니다 — pre-jemalloc 시기의
+이전 24h 완주 라운드(DECISION-24h-soak.md, DIAL_EXHAUSTED×6)가 "fuzz
+경합, 환경 문제"로 트리아지된 조건과 다른데도 그보다 많은 ×8이 나온
+셈이다.
+
+실패 메시지의 출처는 한 곳뿐이다. 1146개 실패 줄 전부가
+`DialError::Timeout` 문면(`qsh-core/src/ops/exec.rs:252-255`,
+`qsh-transport/src/endpoint.rs:32`의 10s `DEFAULT_DIAL_TIMEOUT`)이고,
+`Refused`는 run.log에 0건이다. admission 계층에서 `Refuse`를 내는 축
+(`validated_rate_per_source`, `max_concurrent_handshakes`)은 즉시
+`CONNECTION_CLOSE`를 보내 client에 구별되는 메시지를 남기므로, 이 축들이
+원인이었다면 로그 문면이 달랐어야 한다. 침묵하는 코드 경로는
+`handshake_rate_per_source`의 `Decision::Ignore`
+(`qsh-core/src/admission.rs:499-519`) 하나인데, 이 회차 설정값은 200/s이고
+실제 교체 dial은 ≈0.17/s다.
+
+관측 공백을 같이 기록해 둔다. `ServeGuard::start_with_bin`
+(`crates/qsh-cli/tests/common/mod.rs:119`)이 서버 서브프로세스에서
+`QSH_LOG`를 `env_remove`하므로, admission 결정별 카운터는 이 회차에
+아예 수집되지 않았다. 위 문단의 admission 관련 판단은 설정 headroom
+계산에서 나온 것이고 관측된 카운터가 근거가 아니다. 다음 회차는 listener의
+admission 결정 로그를 남기도록 해서 이 축을 추론이 아니라 계측으로
+가릴 수 있게 한다.
+
+태그 대상 트리 감사: `git diff dd66e0f..525a2a5`는
+`.github/workflows/release.yml`·`Cargo.lock`·`README.md`·`docs/ROADMAP.md`
+4개 파일만 건드리고, transport·admission·config·quota·server·broker·serve와
+`crates/qsh-cli/tests/soak.rs`에는 변경이 0줄이다. 이 회차가 관측한 동작은
+현재 트리에 그대로 남아 있다.
+
+DIAL_EXHAUSTED의 근본 원인은 이 호스트의 방화벽 규칙이다. 제품 결함이
+아니고 하네스 결함도 아니다.
+
+WSL 호스트에 사용자가 만들어 둔 nftables 테이블 `inet dave_mosh`가 있고,
+그 input 체인의 마지막 규칙이 `udp dport 60000-61000 drop`이다. 앞선 두
+규칙이 Tailscale 주소(`100.64.0.0/10`, `fd7a:115c:a1e0::/48`)에서 온 것만
+accept 하므로 loopback 트래픽에는 예외가 없다. 이 호스트의 ephemeral 범위는
+`32768-60999`(`/proc/sys/net/ipv4/ip_local_port_range`)이고, 그중 약 1000개
+(≈3.5%)가 막힌 창에 들어간다. `dial_inner`
+(`crates/qsh-transport/src/endpoint.rs`)가 dial 마다 새 ephemeral 소켓을
+bind 하므로 매 dial이 이 3.5%를 두 번 굴린다 — client 쪽 포트가 걸리면 그
+dial의 응답이 사라지고, 리스너가 `--bind 127.0.0.1:0`으로 받은 포트가
+걸리면 그 리스너로 가는 모든 dial이 수명 내내 죽는다. 두 배라 관측 실패율이
+5.75~7.4%로 나온다.
+
+확증은 셋이고 서로 독립이다. 첫째, `lo` 패킷 캡처에서 실패 flow 899개 중
+"리스너가 한 번도 응답하지 않은" 것이 0개다 — 리스너는 매번 응답했고
+응답이 소켓에 닿기 전 input hook에서 사라졌다. 그래서 client 쪽 문면
+("no response ... within 10s")은 소켓 관점에서 정확했다. 둘째, 포트 구간별
+실패율이 92.9% 대 0%로 갈린다. 셋째, 리스너가 우연히 60693에 bind 된 회차에
+릴리스 바이너리로 `qsh exec`를 5번 부르면 5번 다 같은 envelope으로
+실패한다(soak 하네스 없이, 동시성 1, `CONNECTION_FAILED` /
+"no response from 127.0.0.1:60693 within 10s"). 결정적 재현이다.
+
+뒤이어 둘이 더 붙었다. 넷째, 캡처를 바이트 단위로 디코드하니 사라지는
+패킷의 종류가 특정된다. 리스너는 실패 dial의 모든 client Initial에 새
+stateless Retry를 답한다(ADR-0009 설계 그대로, 캐시된 상태 없음). client는
+그 Retry를 한 번도 못 받아 토큰 없는 원본 Initial을 PTO 사다리(0s, ~1s,
+~3s, ~7s, ~10s)로만 재전송하고, 성공 flow가 1ms 안에 하는 "토큰 붙이고
+`dcid`를 Retry의 `scid`로 교체"를 끝까지 하지 않는다. 실패 flow 어디에도
+`Handshake`·`0-RTT`·`VersionNegotiation` 패킷이 없다. 즉 단방향으로,
+client의 ephemeral 포트를 목적지로 하는 Retry만 전량 소실된다. 실패 서명
+`duration=10.001s c2l=8 l2c=5`의 패킷 수가 그 사다리의 산술이다. 다섯째,
+같은 호스트에서 `unshare -rn` + `ip link set lo up`으로 만든 네트워크
+네임스페이스 안은 nft 룰셋이 비어 있고 127.0.0.1 UDP 왕복이
+45000·60500·60999·61001 네 포트 전부 통과한다. 호스트 netns에서는
+60500·60999만 막힌다. 규칙 창과 정확히 일치하는 대조다.
+
+이 판정은 회차 자료로만 내릴 수 있는 것이 아니었다. run #5 이후 같은
+호스트에서 돌린 재현 실험 넷(E1 35/480=7.29%, E2b 9/136=6.62%,
+E6 18/313=5.75%, E7 5/5=100%)이 근거이고, 회차 원래 값 7.405%를 E1·E2b가
+양쪽에서 감싼다. 커널 UDP 오류 카운터(`NoPorts`·`InErrors`·`RcvbufErrors`·
+`SndbufErrors`·`InCsumErrors`·`MemErrors`)는 네 실험 모두 델타 정확히 0이라
+버퍼·백로그 드롭도 아니다.
+
+같은 규칙이 이 호스트의 일반 테스트도 깬다. `cargo nextest run --workspace`
+한 번이 단일 리스너 통합 테스트 넷(`acl_enforcement`·`attach_recovery`·
+`exit_code_matrix`·`jsonl_purity`)을 같은 문면으로 떨어뜨렸다. GitHub 호스팅
+CI가 같은 트리에서 전 플랫폼 attempt 1 녹색인 이유도 이것이다 — 그 러너에는
+이 규칙이 없다.
+
+그래서 이 축은 제품 추적 항목이 아니다. 이전 회차의 "환경(fuzz 경합)" 판정과
+결론은 같지만 근거가 다르다 — 경합이 아니라 방화벽이고, 부하와 무관하게
+dial 단위로 독립이며, 재부팅 직후 idle 호스트에서도 같은 비율로 난다.
+
+다음 회차의 전제 조건이 둘 늘어난다. 하나는 확인이다 — 회차 시작 전에
+loopback UDP가 ephemeral 범위 전체에서 필터링되지 않는지 본다(§2 8번,
+`scripts/soak/preflight_udp.py`). 다른 하나는 우회다 — 막힌 창이 남아 있는
+호스트에서는 네트워크 네임스페이스 안에서 회차를 돌린다(§2 9번). 규칙
+자체를 어떻게 할지는 이 호스트 소유자의 결정이다. 범위를 좁히거나 옮기거나
+loopback 예외를 두는 것 중 하나이고, `qsh` 프로세스가 자기 소켓 수준에서
+피할 수 있는 것은 아니다(bind 는 OS가 주는 `:0` 포트다). netns 는 그
+프로세스 수준의 우회가 아니라 규칙이 존재하지 않는 별개의 네트워크 스택을
+쓰는 것이고, 권한 없이 만들 수 있으며 호스트 설정을 바꾸지 않는다.
 
 ## 9. 재사용
 
