@@ -174,10 +174,12 @@ pub fn resolve_bind(flag: Option<&str>, config: &Config) -> Result<SocketAddr, O
 ///
 /// `identity` must already be loaded synchronously before entering the
 /// runtime, exactly like [`crate::serve::run_serve`]. `on_bound` receives
-/// the actual bound address once the listener is up. `on_policy_diagnostic`
-/// fires at most once, after `on_bound` and before the accept loop starts
-/// admitting registrations, and only when `acl.toml` did not produce a
-/// usable policy — with the already-rendered
+/// the actual bound address and fires immediately before the accept loop
+/// starts, not as soon as the listener is up, for the reason given on
+/// [`crate::serve::run_serve`]. `on_policy_diagnostic` fires at most once,
+/// before `on_bound` and therefore before the accept loop starts admitting
+/// registrations, and only when `acl.toml` did not produce a usable
+/// policy — with the already-rendered
 /// [`crate::acl::StartupDiagnostic::render`] text (`PLAN.md` M5 Step 6);
 /// `qsh-cli` prints it verbatim and holds no ACL logic of its own.
 pub async fn run_listen(
@@ -285,8 +287,6 @@ async fn run_listen_unix(
             format!("cannot read bound address: {err}"),
         )
     })?;
-    on_bound(actual);
-
     // F7 (`PLAN.md` M5 Step 3 arbitration): the controller shares the same
     // config-driven `RotatingAuditSink` construction `serve.rs`'s
     // `host_runtime` uses — `[audit]`'s `path`/`max_bytes`/`retain`/
@@ -373,6 +373,17 @@ async fn run_listen_unix(
     let localctl_task = tokio::spawn(localctl_daemon.run(localctl_bound, async move {
         let _ = localctl_shutdown_rx.await;
     }));
+
+    // Announced here, not right after `local_addr()` above, for the reason
+    // spelled out at the matching call in `crate::serve::run_serve` — the
+    // stderr line is what external scripts synchronize on, so it must not
+    // be readable before the accept loop is armed. The window this closes
+    // is wider here than in `run_serve`: everything between the bind and
+    // this point includes two blocking file reads (the audit sink's
+    // rotation setup and `acl::load_or_deny`, which opens `acl.toml` and
+    // `trust.toml`), so on a slow or loaded disk the old placement left a
+    // real, disk-latency-bounded gap rather than a scheduling-only one.
+    on_bound(actual);
 
     listen.run(listener, shutdown).await;
 

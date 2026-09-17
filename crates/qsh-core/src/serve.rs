@@ -1,6 +1,8 @@
 //! `qsh serve` — the long-running host mode (`docs/CLI.md` §6.12). Not an
 //! operation: no envelope, foreground only, prints the bound address to
-//! stderr via the `on_bound` callback and runs until `shutdown` resolves.
+//! stderr via the `on_bound` callback — fired immediately before the
+//! accept loop starts, so the line cannot be read while the loop is not
+//! yet armed — and runs until `shutdown` resolves.
 
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
@@ -77,7 +79,11 @@ pub fn resolve_bind(flag: Option<&str>, config: &Config) -> Result<SocketAddr, O
 ///
 /// `identity` must already be loaded (synchronously, before entering the
 /// runtime — see `identity::load`). `on_bound` receives the actual bound
-/// address once the listener is up.
+/// address, and fires immediately before the accept loop starts rather
+/// than as soon as the listener is up — callers announce readiness with
+/// it, so it must not be observable while the loop is not yet armed. Any
+/// startup diagnostic this function emits through another channel
+/// therefore lands *before* the `on_bound` announcement.
 pub async fn run_serve(
     paths: &Paths,
     config: &Config,
@@ -121,8 +127,6 @@ pub async fn run_serve(
             format!("cannot read bound address: {err}"),
         )
     })?;
-    on_bound(actual);
-
     let runtime = host_runtime(paths, config, identity.identity.device_id.clone());
     // Same `trust`/`invites` pair the listener's own evaluator was built
     // from (report §B9/§B14) — `Server::serve_pairing_connection` pins
@@ -135,6 +139,16 @@ pub async fn run_serve(
         %actual,
         "qsh serve listening"
     );
+    // Announced here, not right after `local_addr()` above, so that the
+    // line an external script synchronizes on (`docs/CLI.md` §6.12 makes
+    // the stderr line the operator-facing "the address is up" contract)
+    // cannot be read before the accept loop is armed. There is no `.await`
+    // between this call and `Server::run`'s first `select!` poll, so under
+    // tokio's cooperative scheduling nothing can observe the announcement
+    // while this task is still short of the loop. Announcing earlier left
+    // the config-dependent work below — `host_runtime`'s audit-sink spawn
+    // and its `acl::load_or_deny` read — inside the window instead.
+    on_bound(actual);
     // `Server::run` takes `self: Arc<Self>` by value — this call already
     // consumes and (once the accept loop exits) drops `runtime.server`
     // internally, so nothing of this function's own is keeping `Server`
