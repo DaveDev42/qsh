@@ -52,8 +52,8 @@ mod registry;
 // `FamilyPrefix` to put one in, `pub` enum or not.
 pub use load::{
     ACL_POLICY_INVALID_CODE, ACL_POLICY_MISSING_CODE, ACL_STARTUP_CHECK_HINT,
-    ACL_STARTUP_DENIED_CLAUSE, ACL_STARTUP_HEADLINE, ACL_STARTUP_NO_AUTOGEN, PolicyLoad,
-    PolicySource, StartupDiagnostic, load_or_deny,
+    ACL_STARTUP_DENIED_CLAUSE, ACL_STARTUP_HEADLINE, ACL_STARTUP_NO_AUTOGEN, PinnedPrincipalIndex,
+    PolicyLoad, PolicySource, StartupDiagnostic, load_or_deny, load_or_deny_with_index,
 };
 pub use policy::{ActionPattern, Policy, Rule, Scope, Verdict};
 pub use registry::{

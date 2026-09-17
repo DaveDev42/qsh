@@ -112,9 +112,16 @@ pub struct InteractiveArgs {
     pub remote_forward: Vec<String>,
 
     /// SOCKS5 dynamic forwarding `[bind:]port`, repeatable. Parses, but
-    /// P0 always refuses it with `UNSUPPORTED` before this session (or
-    /// anything else on the command line) is opened — implementation is
-    /// P1 (`docs/CLI.md` §6.9, `docs/ROADMAP.md` M4 "명시적 out").
+    /// P0 refuses it with `UNSUPPORTED`, "SOCKS dynamic forwarding (-D)
+    /// is a P1 feature", before this session (or anything else on the
+    /// command line) is opened — unless `--json`/`--jsonl` is also given,
+    /// in which case §7's machine-mode gate answers `INVALID_ARGUMENT`
+    /// first, since the interactive form has no JSON output mode of its
+    /// own for `-D`'s own refusal to appear in (`docs/CLI.md` §6.9,
+    /// `docs/ROADMAP.md` M4 "명시적 out"). The flag parses but no SOCKS
+    /// proxy is ever opened and no bytes are forwarded, whatever value
+    /// you pass. Use `-L` for a known port pair, or an existing overlay
+    /// for anything wider.
     ///
     /// Not shape-checked here for the same reason as
     /// [`Self::local_forward`]/[`Self::remote_forward`]: the refusal is
@@ -386,9 +393,13 @@ pub struct TunnelOpenArgs {
     /// SOCKS5 dynamic forwarding `[bind:]port`, repeatable — a third,
     /// independent mode: it does not fold into `--local`/`--remote`'s
     /// mutual exclusion. Parses, but always answers
-    /// `UNSUPPORTED` before opening a connection to `host` or doing
-    /// anything `--local`/`--remote` would have — implementation is P1
-    /// (`docs/CLI.md` §6.9).
+    /// `UNSUPPORTED`, "SOCKS dynamic forwarding (-D) is a P1 feature",
+    /// before opening a connection to `host` or doing anything
+    /// `--local`/`--remote` would have — implementation is P1
+    /// (`docs/CLI.md` §6.9). The flag parses but no SOCKS proxy is ever
+    /// opened and no bytes are forwarded, whatever value you pass. Use
+    /// `-L` for a known port pair, or an existing overlay for anything
+    /// wider.
     #[arg(short = 'D', long, value_name = "SPEC", action = ArgAction::Append)]
     pub dynamic: Vec<String>,
 }

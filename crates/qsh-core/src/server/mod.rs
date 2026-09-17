@@ -446,6 +446,11 @@ struct AcceptHeartbeat {
     quota_rejections: u64,
 }
 
+/// [`Server`]'s operator-notice sink type ([`Server::set_notice_sink`]) —
+/// named so the field it backs stays under clippy's `type_complexity`
+/// threshold.
+type NoticeSink = Arc<dyn Fn(&str) + Send + Sync>;
+
 /// The host: policy + audit + ticket registry + session backend. Shared
 /// across connections.
 pub struct Server {
@@ -488,6 +493,25 @@ pub struct Server {
     /// `true` without an attached invite store on the trust-evaluator side
     /// too.
     pairing: OnceLock<PairingState>,
+    /// The pin-path principal set the running policy enforces, set once by
+    /// [`Server::set_pinned_principals`] — `crate::serve::host_runtime`
+    /// calls it right after construction, from the same
+    /// `crate::acl::load_or_deny_with_index` call that built `authorizer`
+    /// (ADR-0017 결정 3's pairing-pin notice). Unset (any
+    /// caller that never wires it, e.g. a bare [`Server::new`] in a test)
+    /// reads as [`crate::acl::PinnedPrincipalIndex::empty`] — correct,
+    /// not merely a fallback, since no policy means no row names anything.
+    pinned_principals: OnceLock<crate::acl::PinnedPrincipalIndex>,
+    /// Where this host's own operator-facing notices go — set once by
+    /// [`Server::set_notice_sink`]. `qsh-core` never writes to stderr
+    /// itself (`docs/design/architecture.md` §1); this is the injected-
+    /// closure seam `crate::serve::run_serve`'s `on_notice` parameter
+    /// wires to `qsh-cli`'s `stderr_note!`, the same pattern `main.rs`'s
+    /// `StartupDiagnostic::render` printing already follows. Unset (every
+    /// caller but production `qsh serve`) means a notice is simply
+    /// dropped — best-effort, like every other operator diagnostic this
+    /// crate emits.
+    notice_sink: OnceLock<NoticeSink>,
     /// L2-L3 of the L0-L5 admission ordering (`PLAN.md` M8 Step 2,
     /// `docs/adr/0009-admission-defenses.md`) — consulted by [`Self::run`]
     /// before an `Incoming` ever reaches [`Self::accept_and_serve`].
@@ -654,6 +678,8 @@ impl Server {
             remote_forwards: Mutex::new(HashMap::new()),
             draining: AtomicBool::new(false),
             pairing: OnceLock::new(),
+            pinned_principals: OnceLock::new(),
+            notice_sink: OnceLock::new(),
             admission,
             quotas,
         })
@@ -674,6 +700,35 @@ impl Server {
         invites: Arc<crate::trust::SharedInviteStore>,
     ) {
         let _ = self.pairing.set(PairingState { trust, invites });
+    }
+
+    /// Wire the pin-path principal index this process's `acl.toml` load
+    /// produced (`crate::acl::load_or_deny_with_index`) so the pairing-pin
+    /// notice can tell "no `[[acl]]` row names it yet" apart from "a row
+    /// already does" (ADR-0017 결정 3). No-op past the first
+    /// call, same discipline as [`Self::set_pairing`].
+    pub fn set_pinned_principals(&self, index: crate::acl::PinnedPrincipalIndex) {
+        let _ = self.pinned_principals.set(index);
+    }
+
+    /// Wire this host's operator-notice sink (`crate::serve::run_serve`'s
+    /// `on_notice` parameter) — the pairing-pin notice (ADR-0017 결정 3)
+    /// and the invite-replay notice (결정 4's exempted axes plus this
+    /// third line) both deliver through it rather than writing to stderr
+    /// directly, keeping that I/O in `qsh-cli` (`docs/design/
+    /// architecture.md` §1). No-op past the first call, same discipline as
+    /// [`Self::set_pairing`]. Never called at all outside production `qsh
+    /// serve`, in which case a notice is silently dropped.
+    pub fn set_notice_sink(&self, sink: impl Fn(&str) + Send + Sync + 'static) {
+        let _ = self.notice_sink.set(Arc::new(sink));
+    }
+
+    /// Best-effort delivery to whatever [`Self::set_notice_sink`] wired, or
+    /// nothing when it was never called.
+    fn notify(&self, notice: &str) {
+        if let Some(sink) = self.notice_sink.get() {
+            sink(notice);
+        }
     }
 
     /// The `Hello` this host sends. `reverse` is `Some` only when this
@@ -1465,6 +1520,21 @@ impl Server {
                     Decision::Allow,
                     &success.peer_device_name,
                 ));
+                // ADR-0017 결정 3: tell the operator running
+                // `qsh serve` who just got pinned and whether `acl.toml`
+                // already names them — `self.pinned_principals` is the
+                // `Policy` this process is actually enforcing, never a
+                // fresh re-read (`crate::acl::PinnedPrincipalIndex`'s own
+                // doc on why a fresh read would misreport a row added
+                // after startup as already applied).
+                let acl_row_present = self
+                    .pinned_principals
+                    .get()
+                    .is_some_and(|index| index.names_device(&success.peer_device_name));
+                self.notify(&crate::pairing::pairing_pin_notice(
+                    &success.peer_device_name,
+                    acl_row_present,
+                ));
                 conn.close(0, b"paired");
                 Ok(())
             }
@@ -1477,6 +1547,13 @@ impl Server {
                         category,
                     ));
                     tracing::warn!(%err, "pairing exchange failed");
+                    // A third, host-local line on top of the
+                    // wire `SESSION_CONFLICT` reply and the `tracing::warn!`
+                    // just above — both of those stay exactly as they are
+                    // (ADR-0017 결정 4 exempts them); this is additive.
+                    if matches!(err, crate::pairing::PairingError::AlreadyConsumed) {
+                        self.notify(crate::pairing::PAIRING_INVITE_REPLAY_NOTICE);
+                    }
                 }
                 Err(ConnError::Pairing(err))
             }

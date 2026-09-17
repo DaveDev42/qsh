@@ -12,7 +12,8 @@
 //! daemon must pick the new invite up with no signal, no restart, nothing
 //! but the next connection.
 
-use common::{Sandbox, ServeGuard};
+use common::{Sandbox, ServeGuard, poll_until};
+use std::time::Duration;
 
 mod common;
 
@@ -90,12 +91,20 @@ fn trust_accept_pairs_both_sides_via_a_live_invite() {
 
 /// **DoD quadrant: single-use.** A second redemption of the same code, after
 /// a first success, is rejected — the invite is consumed, not reusable.
+///
+/// ADR-0017 결정 4: the replay also owes a host-
+/// local diagnostic on top of the wire reply. Both halves are asserted —
+/// the host's own stderr must carry `PAIRING_INVITE_REPLAY_NOTICE`
+/// exactly once, **and** the second redeemer's `SESSION_CONFLICT`
+/// envelope (`error.code`/`error.message`) must stay byte-unchanged,
+/// which is the proof that decision 4's exempted wire/tracing axes were
+/// not touched by adding the third, host-local line.
 #[test]
 fn a_consumed_invite_cannot_be_redeemed_twice() {
     let host = Sandbox::initialized();
     let first_client = Sandbox::initialized();
     let second_client = Sandbox::initialized();
-    let serve = ServeGuard::start(&host);
+    let mut serve = ServeGuard::start(&host);
 
     let (code, _cmd) = invite(&host);
 
@@ -105,6 +114,160 @@ fn a_consumed_invite_cannot_be_redeemed_twice() {
     let (exit2, rejected) = second_client.json(&["trust", "accept", serve.addr(), &code, "--json"]);
     assert_ne!(exit2, 0, "a second redemption must fail: {rejected}");
     assert_eq!(rejected["error"]["code"], "SESSION_CONFLICT", "{rejected}");
+    assert_eq!(
+        rejected["error"]["message"], "invite already used",
+        "the wire message `PairingError::as_wire_error` sends must stay byte-unchanged: {rejected}"
+    );
+
+    // The rejected client already has its `SESSION_CONFLICT` reply (and
+    // has exited) by the time the host's own follow-on `self.notify(...)`
+    // (`server/mod.rs`'s `serve_pairing_connection`) runs — that write is
+    // asynchronous to the wire exchange, so poll for it rather than racing
+    // `finish()`'s immediate kill against it (`ServeGuard::stderr_snapshot`'s
+    // own doc).
+    poll_until(
+        "the invite-replay notice on host stderr",
+        Duration::from_secs(5),
+        || {
+            serve
+                .stderr_snapshot()
+                .iter()
+                .any(|line| line.contains(qsh_core::pairing::PAIRING_INVITE_REPLAY_NOTICE))
+                .then_some(())
+        },
+    );
+
+    let output = serve.finish();
+    let notice_count = output
+        .stderr
+        .iter()
+        .filter(|line| line.contains(qsh_core::pairing::PAIRING_INVITE_REPLAY_NOTICE))
+        .count();
+    assert_eq!(
+        notice_count, 1,
+        "host stderr must note the invite replay exactly once: {:?}",
+        output.stderr
+    );
+}
+
+/// ADR-0017 결정 3: pairing with no `acl.toml` on
+/// disk at all. `ServeGuard::start_without_policy` skips
+/// `plant_allow_all_acl`, so the host enforces `DenyAll` — pairing itself
+/// is not ACL-gated (`Server::serve_pairing_connection`'s `try_pin`
+/// closure runs before any `Authorizer::check`), so the accept still
+/// succeeds, and the host's own stderr must carry `PAIRING_ACL_ROW_ABSENT`
+/// exactly once: pinned, but every action is still denied.
+#[test]
+fn pairing_with_no_acl_toml_notes_the_row_absent_on_the_host() {
+    let host = Sandbox::initialized();
+    let client = Sandbox::initialized();
+    let mut serve = ServeGuard::start_without_policy(&host, &[]);
+
+    let (code, _cmd) = invite(&host);
+    let (exit, accepted) = client.json(&["trust", "accept", serve.addr(), &code, "--json"]);
+    assert_eq!(exit, 0, "{accepted}");
+
+    // See the `poll_until` note in `a_consumed_invite_cannot_be_redeemed_twice`
+    // — the pin notice is a host-side follow-on write, asynchronous to the
+    // client's own already-completed exchange.
+    poll_until(
+        "the absent-acl-row pin notice on host stderr",
+        Duration::from_secs(5),
+        || {
+            serve
+                .stderr_snapshot()
+                .iter()
+                .any(|line| line.contains(qsh_core::pairing::PAIRING_ACL_ROW_ABSENT))
+                .then_some(())
+        },
+    );
+
+    let output = serve.finish();
+    let notice_count = output
+        .stderr
+        .iter()
+        .filter(|line| line.contains(qsh_core::pairing::PAIRING_ACL_ROW_ABSENT))
+        .count();
+    assert_eq!(
+        notice_count, 1,
+        "host stderr must note the absent acl row exactly once: {:?}",
+        output.stderr
+    );
+}
+
+/// The mirror of `pairing_with_no_acl_toml_notes_the_row_absent_on_the_host`
+/// above: an `[[acl]]` row already names the initiator's device id, so the
+/// host's stderr must carry `PAIRING_ACL_ROW_PRESENT` instead.
+///
+/// **Startup order is the test contract, not an accident.**
+/// `PinnedPrincipalIndex` (`acl/load.rs`) is computed exactly once, at
+/// `qsh serve` startup, from the `Policy` this process is actually
+/// enforcing — a fresh re-read at pairing time would misreport a row
+/// added *after* startup as already applied (the same startup-vs-runtime
+/// hazard ADR-0017 결정 2 already guards against). So the `acl.toml` row
+/// below must exist on disk **before** `ServeGuard::start` spawns the
+/// host; starting the host first and writing the row afterward would
+/// still make the assertion below pass, but for the wrong reason (it
+/// would only prove a fresh read, not the startup-computed index this
+/// step actually commits to). Do not reorder this.
+#[test]
+fn pairing_with_an_existing_acl_row_notes_the_row_present_on_the_host() {
+    let host = Sandbox::initialized();
+    let client = Sandbox::initialized();
+    let client_device_id = client.init()["data"]["device_id"]
+        .as_str()
+        .expect("device_id")
+        .to_string();
+
+    // Written BEFORE `ServeGuard::start` below — see the doc comment
+    // above.
+    let acl_path = host.config_dir().join("acl.toml");
+    std::fs::write(
+        &acl_path,
+        format!("[[acl]]\nprincipal = \"device:{client_device_id}\"\nallow = [\"exec.run\"]\n"),
+    )
+    .expect("write acl.toml");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&acl_path, std::fs::Permissions::from_mode(0o600));
+    }
+
+    // `ServeGuard::start`'s `plant_allow_all_acl` is a no-op here — the
+    // file above already exists — so the policy actually loaded and
+    // enforced is exactly the one-row file just written.
+    let mut serve = ServeGuard::start(&host);
+
+    let (code, _cmd) = invite(&host);
+    let (exit, accepted) = client.json(&["trust", "accept", serve.addr(), &code, "--json"]);
+    assert_eq!(exit, 0, "{accepted}");
+
+    // See the `poll_until` note in `a_consumed_invite_cannot_be_redeemed_twice`
+    // — the pin notice is a host-side follow-on write, asynchronous to the
+    // client's own already-completed exchange.
+    poll_until(
+        "the present-acl-row pin notice on host stderr",
+        Duration::from_secs(5),
+        || {
+            serve
+                .stderr_snapshot()
+                .iter()
+                .any(|line| line.contains(qsh_core::pairing::PAIRING_ACL_ROW_PRESENT))
+                .then_some(())
+        },
+    );
+
+    let output = serve.finish();
+    let notice_count = output
+        .stderr
+        .iter()
+        .filter(|line| line.contains(qsh_core::pairing::PAIRING_ACL_ROW_PRESENT))
+        .count();
+    assert_eq!(
+        notice_count, 1,
+        "host stderr must note the present acl row exactly once: {:?}",
+        output.stderr
+    );
 }
 
 /// **DoD quadrant: unknown code.** A syntactically valid but never-issued
@@ -406,6 +569,20 @@ fn trust_accept_with_a_port_less_address_notes_the_assumed_port_once_and_keeps_s
         stderr.matches("assuming port 4433").count(),
         1,
         "stderr must note the assumed port exactly once: {stderr:?}"
+    );
+
+    // The `stderr_note!` call in `run_trust_accept`
+    // fires unconditionally, before `--json`/human mode is decided
+    // (`main.rs`'s `run_trust_accept`), so the human-mode half must see
+    // it too. Deleting that call site must turn this whole test red.
+    let human_client = Sandbox::initialized();
+    let human_output = human_client.qsh(&["trust", "accept", "127.0.0.1"]);
+    assert_eq!(common::exit_code(&human_output), 255, "{human_output:?}");
+    let human_stderr = String::from_utf8(human_output.stderr).unwrap();
+    assert_eq!(
+        human_stderr.matches("assuming port 4433").count(),
+        1,
+        "human mode stderr must note the assumed port exactly once: {human_stderr:?}"
     );
 }
 

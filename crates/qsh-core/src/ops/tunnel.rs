@@ -107,6 +107,18 @@ impl Operation for TunnelCloseOp {
 pub const DYNAMIC_FORWARD_UNSUPPORTED_MESSAGE: &str =
     "SOCKS dynamic forwarding (-D) is a P1 feature";
 
+/// The impact and next-command parts of `-D`'s three-part refusal —
+/// [`DYNAMIC_FORWARD_UNSUPPORTED_MESSAGE`] above is the
+/// observation, and only the observation: `crates/qsh-cli/tests/fixtures/
+/// cli-v1/error.UNSUPPORTED.json` pins that message inside a whole-
+/// envelope `assert_eq!`, and JSON fixtures under `tests/` are
+/// append-only, so the envelope `message` cannot grow without editing a
+/// fixture that must never change. This constant carries the rest instead,
+/// on channels no fixture pins: `qsh-cli`'s clap doc comments for `-D`
+/// (the bare `qsh [user@]host -D` form and `qsh tunnel open -D`), plus
+/// `README.md`/`docs/CLI.md` §6.9.
+pub const DYNAMIC_FORWARD_UNSUPPORTED_GUIDANCE: &str = "The flag parses but no SOCKS proxy is ever opened and no bytes are forwarded, whatever value you pass. Use `-L` for a known port pair, or an existing overlay for anything wider.";
+
 /// `-D`/SOCKS dynamic forwarding's P0 stub (`docs/CLI.md` §6.9,
 /// `docs/ROADMAP.md` M4 "명시적 out", `PLAN.md` M4 Step 6, DoD 5).
 ///

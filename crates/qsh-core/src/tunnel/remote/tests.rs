@@ -295,6 +295,19 @@ async fn a_real_non_loopback_interface_address_is_not_loopback() {
     );
 }
 
+/// `NotLoopback`'s wire text is the three-part
+/// notice, not some other literal — pins `Display` to
+/// [`REMOTE_FORWARD_LOOPBACK_ONLY_MESSAGE`] the same way the doc-fixture
+/// tests pin `docs/CLI.md`/`README.md` to it.
+#[test]
+fn not_loopback_displays_the_three_part_notice() {
+    assert_eq!(
+        NotLoopback.to_string(),
+        REMOTE_FORWARD_LOOPBACK_ONLY_MESSAGE,
+        "NotLoopback::Display must stay defined in terms of the shared constant"
+    );
+}
+
 // ---- claim_remote_forward_reverse cancel-safety (finding C) -------
 
 /// **The primitive [`claim_remote_forward_reverse`]'s `select!` relies

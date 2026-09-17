@@ -283,6 +283,94 @@ pub async fn accept(
     }
 }
 
+/// The self-asserted-name clause of the pairing-succeeded notice (ADR-0017
+/// 결정 3, `:30-32`). Before `--as` lands, a responder pins the
+/// initiator under whatever `device_name` it claimed for itself, and this
+/// notice exists so the operator running `qsh serve` sees that fact rather
+/// than discovering it later from `trust.toml`.
+///
+/// **This constant (and its two siblings below) stops being true once
+/// `--as` lets the operator pin under a name of their own choosing** —
+/// whoever lands `--as` revises it, moving the verbatim doc/README tests
+/// added alongside it to that commit too.
+pub const PAIRING_PINNED_SELF_ASSERTED: &str =
+    "pinned a new peer under the name it asked for itself:";
+
+/// [`pairing_pin_notice`]'s impact+next-command clause when no `[[acl]]`
+/// row names the newly-pinned principal yet: it can authenticate, but
+/// every action is still denied (default-deny, `docs/design/
+/// architecture.md`'s security-defaults). The restart clause comes
+/// *before* the `qsh acl check` command on purpose: `Ops::acl_check`
+/// re-reads `acl.toml` on every call (`ops/acl.rs`), so a row added after
+/// this `qsh serve` process started would otherwise look already-applied
+/// to `acl check` while the running process still denies everything.
+pub const PAIRING_ACL_ROW_ABSENT: &str = "No `[[acl]]` row names it, so it can authenticate but every action is still denied. Add a row for it to acl.toml and restart this `qsh serve` before it takes effect, then re-check with:";
+
+/// [`pairing_pin_notice`]'s impact+next-command clause when an `[[acl]]`
+/// row already names the newly-pinned principal — the peer inherits that
+/// row's grants exactly as written, including any the operator did not
+/// mean for this specific device (ADR-0017 결정 3, the condition that
+/// decision accepts). No restart clause here: this branch is computed from
+/// [`crate::acl::PinnedPrincipalIndex`], which is the very `Policy` this
+/// running process is enforcing, not a fresh re-read of `acl.toml` — so
+/// "inherits that row's grants exactly as written" is already true at the
+/// moment this notice prints.
+pub const PAIRING_ACL_ROW_PRESENT: &str = "An `[[acl]]` row already names it, so it inherits that row's grants exactly as written, including any you did not mean for this device. Confirm them with:";
+
+/// The full pairing-succeeded stderr notice (`Server::serve_pairing_connection`'s
+/// pin callback delivers this through the same `on_notice` sink
+/// `crate::serve::run_serve` wires — `qsh-core` never writes to stderr
+/// itself, ADR-0017 결정 3 / `docs/design/architecture.md` §1). `name` is
+/// the peer's self-reported device name, already pinned by the time this
+/// is called; `acl_row_present` comes from
+/// [`crate::acl::PinnedPrincipalIndex::names_device`] against the `Policy`
+/// this process loaded at startup, never a fresh read of `acl.toml`.
+pub fn pairing_pin_notice(name: &str, acl_row_present: bool) -> String {
+    let tail = if acl_row_present {
+        PAIRING_ACL_ROW_PRESENT
+    } else {
+        PAIRING_ACL_ROW_ABSENT
+    };
+    // `name` is the peer's self-asserted `device_name` — `wire::
+    // validate_device_name` rejects control/bidi/zero-width characters
+    // and anything over 64 bytes, but not spaces, quotes or shell
+    // metacharacters (`"Dave's MacBook Pro"` is a valid name, asserted as
+    // such by `reject_control_chars_allows_an_ordinary_device_name`
+    // below). The principal is shell-quoted so the printed "next command"
+    // stays the command it claims to be.
+    let principal = shell_single_quoted(&format!("device:{name}"));
+    format!(
+        "{PAIRING_PINNED_SELF_ASSERTED} \"{name}\". {tail} qsh acl check --principal {principal} --action session.open"
+    )
+}
+
+/// POSIX single-quote a string so it survives a shell as one word.
+///
+/// Wrapping in single quotes alone is not enough: a `'` inside `text` would
+/// close the quote early, so each one becomes `'\''` — close, escaped
+/// quote, reopen. This matters because `validate_device_name` admits an
+/// apostrophe, and [`pairing_pin_notice`] advertises its output as a
+/// command the operator can paste. A `text` with no apostrophe comes back
+/// simply wrapped, which is what the notice's pinned wording expects.
+fn shell_single_quoted(text: &str) -> String {
+    format!("'{}'", text.replace('\'', r"'\''"))
+}
+
+/// The host-local stderr notice for a replayed invite
+/// (`PairingError::AlreadyConsumed`) — ADR-0017 결정 4 exempts the wire
+/// reply (`PairingError::as_wire_error`'s `SESSION_CONFLICT` mapping)
+/// and the console `tracing::warn!` in
+/// `Server::serve_pairing_connection` from carrying a remedy (folding a
+/// host-state clause into either would turn a pairing failure into an
+/// oracle for that state); this notice is the **third**, additional line,
+/// on the same host-local channel [`pairing_pin_notice`] already uses, so
+/// it is unambiguously additive on its own, not a change to either
+/// exempted axis.
+///
+/// **Whoever lands the `qsh trust invite` → `qsh pair invite` rename must
+/// also revise the next-command clause here.**
+pub const PAIRING_INVITE_REPLAY_NOTICE: &str = "an invite code was presented again after it had already been redeemed. Nothing was pinned and the peer got SESSION_CONFLICT; an invite is single-use by design, so this is not a fault on this host. Mint a fresh one with `qsh trust invite` if that peer still needs to pair.";
+
 /// The responder's side (`qsh serve`, once `pairing_open()` admitted this
 /// connection). Accept the peer-opened control stream, read one
 /// [`wire::PairingProof`], redeem it against `store`, and reply. On
@@ -479,6 +567,36 @@ mod tests {
     fn reject_control_chars_allows_an_ordinary_device_name() {
         assert!(reject_control_chars("laptop", "PairingProof.device_name").is_ok());
         assert!(reject_control_chars("Dave's MacBook Pro", "PairingProof.device_name").is_ok());
+    }
+
+    /// The notice advertises its tail as a command to paste, and the name
+    /// in it is the peer's self-asserted `device_name`, so the principal
+    /// has to survive a shell as one word. An apostrophe is the case bare
+    /// single-quoting gets wrong — it closes the quote early — and
+    /// `reject_control_chars_allows_an_ordinary_device_name` above pins
+    /// `"Dave's MacBook Pro"` as a name a peer may legitimately assert.
+    #[test]
+    fn the_pin_notice_shell_quotes_a_device_name_containing_an_apostrophe() {
+        let notice = pairing_pin_notice("Dave's MacBook Pro", false);
+        assert!(
+            notice.contains(r"--principal 'device:Dave'\''s MacBook Pro' --action session.open"),
+            "an apostrophe must be POSIX-escaped, not left to close the quote: {notice}"
+        );
+    }
+
+    /// The complement: a name with no apostrophe is wrapped and nothing
+    /// else, which is the form `failure_text_discipline.rs`'s three-part
+    /// table pins as T3's next-command slice. Escaping must not reach a
+    /// name that does not need it.
+    #[test]
+    fn the_pin_notice_wraps_an_apostrophe_free_name_without_escaping_it() {
+        let notice = pairing_pin_notice("probe-device", false);
+        assert!(
+            notice
+                .ends_with("qsh acl check --principal 'device:probe-device' --action session.open"),
+            "{notice}"
+        );
+        assert!(!notice.contains(r"\'"), "no escape belongs here: {notice}");
     }
 
     /// The actual threat this guard closes (report background: `human.rs`'s
