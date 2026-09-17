@@ -255,6 +255,140 @@ fn trust_add_updates_the_address_of_an_identity_it_already_knows() {
     assert_eq!(listed.peers, vec![moved.peer], "no duplicate entry");
 }
 
+/// ADR-0014: `trust add --address` with no `:port` pins the default
+/// port (4433) — the file on disk carries the normalized value, not
+/// the bare name the operator typed.
+#[test]
+fn trust_add_with_a_port_less_address_pins_the_default_port() {
+    let (_guard, ops) = temp_ops();
+    let fingerprint = qsh_transport::Fingerprint::of_spki_der(b"peer").to_string();
+
+    let added = ops
+        .trust_add(TrustAddReq {
+            name: "mac".into(),
+            address: Some("mac.example".into()),
+            fingerprint: Some(fingerprint.clone()),
+        })
+        .unwrap();
+    assert_eq!(added.peer.address, "mac.example:4433");
+
+    let listed = ops.trust_list().unwrap();
+    assert_eq!(listed.peers[0].address, "mac.example:4433");
+
+    let raw = std::fs::read_to_string(ops.paths().trust_file()).unwrap();
+    assert!(
+        raw.contains("mac.example:4433"),
+        "trust.toml must carry the normalized address: {raw:?}"
+    );
+    assert!(
+        !raw.contains("address = \"mac.example\"\n"),
+        "trust.toml must not carry the port-less address: {raw:?}"
+    );
+}
+
+/// `trust.list` normalizes a hand-written port-less pin on read, and
+/// leaves an address-less (client-only) pin's empty address alone
+/// (§6.11: an address-less pin is never a dial candidate).
+#[test]
+fn trust_list_normalizes_a_port_less_pin_and_leaves_an_address_less_pin_empty() {
+    let (dir, ops) = temp_ops();
+    let config_dir = dir.path().join("config");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("trust.toml"),
+        r#"
+[[peer]]
+name = "mac"
+fingerprint = "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+address = "mac.example"
+added_at = "2026-08-17T00:00:00Z"
+
+[[peer]]
+name = "phone"
+fingerprint = "sha256:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB="
+address = ""
+added_at = "2026-08-17T00:00:00Z"
+"#,
+    )
+    .unwrap();
+
+    let listed = ops.trust_list().unwrap();
+    assert_eq!(listed.peers[0].address, "mac.example:4433");
+    assert_eq!(listed.peers[1].address, "");
+}
+
+/// ADR-0014 결정 4·6: normalization never rewrites `trust.toml` — the
+/// on-disk bytes are identical before and after a read-path op.
+#[test]
+fn a_hand_written_port_less_trust_toml_is_read_with_the_default_port_and_never_rewritten() {
+    let (dir, ops) = temp_ops();
+    let config_dir = dir.path().join("config");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let trust_path = config_dir.join("trust.toml");
+    std::fs::write(
+        &trust_path,
+        r#"
+[[peer]]
+name = "mac"
+fingerprint = "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+address = "mac.example"
+added_at = "2026-08-17T00:00:00Z"
+"#,
+    )
+    .unwrap();
+
+    let before_bytes = std::fs::read(&trust_path).unwrap();
+    let before_hash = blake3::hash(&before_bytes);
+
+    let listed = ops.trust_list().unwrap();
+    assert_eq!(listed.peers[0].address, "mac.example:4433");
+
+    let store = TrustStore::load(&trust_path).unwrap();
+    let hosts = HostsFile::default();
+    let (address, _server_name) = resolve_peer_address(&store, &hosts, "mac").unwrap();
+    assert_eq!(address, "mac.example:4433");
+
+    let after_bytes = std::fs::read(&trust_path).unwrap();
+    let after_hash = blake3::hash(&after_bytes);
+    assert_eq!(
+        before_hash, after_hash,
+        "trust.toml bytes must be unchanged"
+    );
+    assert_eq!(
+        before_bytes, after_bytes,
+        "trust.toml bytes must be unchanged"
+    );
+}
+
+/// ADR-0014 결정 3, `design.md` §6 C12: `trust_accept`'s dial path
+/// (`resolve_one(&dial_address)`, just above) uses the *normalized*
+/// address, not the port-less string the operator typed — so a
+/// resolution failure reports the address with the port already
+/// filled in, never the bare input. `mac.example.invalid` is RFC
+/// 2606's reserved, permanently-unresolvable TLD, so this fails before
+/// any dial opens a socket: no network, no server, no dial timeout to
+/// wait out (the risk `design.md` flagged for this case).
+#[test]
+fn trust_accept_uses_the_normalized_address_for_the_dial_and_its_failure_message() {
+    let (_dir, ops) = temp_ops();
+    ops.identity_init(file_mode()).unwrap();
+
+    let err = ops
+        .trust_accept(TrustAcceptReq {
+            address: "mac.example.invalid".into(),
+            code: "0000-0000-0000-0000-0000-0000-0000-0000".into(),
+        })
+        .expect_err("an unresolvable host must fail before any dial opens");
+
+    assert_eq!(err.code, ErrorCode::ConnectionFailed);
+    assert!(
+        err.message.contains("mac.example.invalid:4433"),
+        "the failure must name the normalized (ported) address, not the \
+         port-less input the operator typed: {:?}",
+        err.message
+    );
+}
+
 /// Regression for `PLAN.md` M7 Step 7-1 검증 라운드 A2: `crate::trust`'s
 /// own concurrency regressions (`concurrent_full_rmw_cycles_do_not_lose_each_others_peers`
 /// et al.) call `TrustStore::lock`/`load`/`save` directly from test
@@ -545,6 +679,7 @@ fn server_name_strips_the_port_and_brackets() {
     assert_eq!(server_name_for("[::1]:4433"), "::1");
     assert_eq!(server_name_for("example.com"), "example.com");
     assert_eq!(server_name_for(":4433"), "qsh");
+    assert_eq!(server_name_for("[::1]"), "::1");
 }
 
 // ---- `Ops::resolve_route` — `PeerRoute` selection (`PLAN.md` M3

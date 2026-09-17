@@ -20,6 +20,38 @@ use crate::trust::{SharedInviteStore, SharedTrustStore};
 /// Default listen address when neither `--bind` nor `[serve].bind` is set.
 pub const DEFAULT_BIND: &str = "[::]:4433";
 
+/// The one port qsh uses when a peer address does not name one
+/// (ADR-0014 결정 1). Not a second default: it is parsed out of
+/// [`DEFAULT_BIND`] at compile time, so the bind default and the peer
+/// default can never drift apart. Peer addresses only — a *bind* spec with
+/// no port is still refused (ADR-0014 결정 8, [`resolve_bind`]).
+pub const DEFAULT_PORT: u16 = trailing_port(DEFAULT_BIND);
+
+/// The decimal port at the end of `text`, parsed in a `const` context:
+/// scans backwards over ASCII digits and stops at the first byte that is
+/// not one. Panics at compile time when `text` ends in no digits, or in a
+/// number too large for a `u16`.
+pub(crate) const fn trailing_port(text: &str) -> u16 {
+    let bytes = text.as_bytes();
+    let mut i = bytes.len();
+    let mut port: u32 = 0;
+    let mut scale: u32 = 1;
+    let mut digits = 0usize;
+    while i > 0 {
+        i -= 1;
+        let byte = bytes[i];
+        if !byte.is_ascii_digit() {
+            break;
+        }
+        port += (byte - b'0') as u32 * scale;
+        scale *= 10;
+        digits += 1;
+    }
+    assert!(digits > 0, "DEFAULT_BIND must end in a decimal port");
+    assert!(port <= u16::MAX as u32, "the port must fit in a u16");
+    port as u16
+}
+
 /// Resolve the bind address: CLI flag > `config.toml` `[serve].bind` >
 /// [`DEFAULT_BIND`]. Accepts `ip:port` or `host:port` (first resolution).
 pub fn resolve_bind(flag: Option<&str>, config: &Config) -> Result<SocketAddr, OpError> {
@@ -223,6 +255,14 @@ pub fn host_runtime(paths: &Paths, config: &Config, device_id: impl Into<String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_port_is_the_port_inside_default_bind() {
+        assert_eq!(
+            DEFAULT_PORT,
+            DEFAULT_BIND.parse::<SocketAddr>().unwrap().port()
+        );
+    }
 
     #[test]
     fn bind_precedence_flag_then_config_then_default() {

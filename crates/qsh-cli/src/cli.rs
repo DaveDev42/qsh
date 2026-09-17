@@ -477,6 +477,7 @@ pub enum TrustCmd {
     /// (ADR-0002, `docs/CLI.md` §6.11).
     Accept {
         /// `host:port` of the device that printed `code` via `trust invite`.
+        /// With no `:port`, port 4433 is assumed.
         address: String,
         /// The invite code, as printed (case-insensitive, hyphens ignored).
         ///
@@ -573,7 +574,8 @@ pub struct TrustAddArgs {
 
     /// `host:port` used to dial this peer. Required when `--fingerprint`
     /// is absent, since the fingerprint has to be observed from somewhere.
-    #[arg(long, value_name = "HOST:PORT")]
+    /// With no `:port`, port 4433 is assumed and the pin is stored with it.
+    #[arg(long, value_name = "HOST[:PORT]")]
     pub address: Option<String>,
 
     /// `sha256:BASE64` fingerprint. When given, the peer is pinned without

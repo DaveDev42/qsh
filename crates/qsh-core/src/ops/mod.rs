@@ -11,7 +11,7 @@ use std::time::Duration;
 use qsh_proto::{
     BuildInfo, ErrorCode, IdentityInitData, IdentityInitReq, KeyStoreMode, SchemaData,
     TrustAcceptData, TrustAcceptReq, TrustAddData, TrustAddReq, TrustInviteData, TrustInviteReq,
-    TrustListData, TrustRemoveData, VersionData,
+    TrustListData, TrustPeer, TrustRemoveData, VersionData,
 };
 use qsh_transport::{DialError, Dialer, Fingerprint, StaticTrust};
 
@@ -706,8 +706,11 @@ pub(crate) fn resolve_peer_address(
     // used to echo the `user@` hint into this same un-runnable `qsh trust
     // add` shape `Ops::resolve_host_route` had (`PLAN.md` §3 Step 6,
     // lens-2 finding).
-    let entry = host::resolve_forward(trust.find(host), hosts.find(host), hosts_has_any)
-        .ok_or_else(|| match host::hint_alias(host) {
+    // `PLAN.md` M9 §6 행 i: the lookup key is trimmed independently of
+    // `hint_alias`'s remedy-message stripping below.
+    let key = host::lookup_name(host);
+    let entry = host::resolve_forward(trust.find(key), hosts.find(key), hosts_has_any).ok_or_else(
+        || match host::hint_alias(host) {
             host::HintAlias::Valid(alias) => OpError::new(
                 ErrorCode::HostNotFound,
                 format!(
@@ -717,7 +720,8 @@ pub(crate) fn resolve_peer_address(
             ),
             host::HintAlias::Empty => host::empty_host_name_error(),
             host::HintAlias::Invalid(alias) => host::invalid_host_alias_error(alias),
-        })?;
+        },
+    )?;
     let server_name = server_name_for(&entry.address);
     Ok((entry.address, server_name))
 }
@@ -727,10 +731,7 @@ pub(crate) fn resolve_peer_address(
 /// will accept; the host part of the address is the most useful one for
 /// packet captures.
 fn server_name_for(address: &str) -> String {
-    let host = match address.rsplit_once(':') {
-        Some((host, port)) if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) => host,
-        _ => address,
-    };
+    let host = crate::trust::split_port(address).map_or(address, |(host, _)| host);
     let host = host.trim_start_matches('[').trim_end_matches(']');
     if host.is_empty() {
         "qsh".to_string()

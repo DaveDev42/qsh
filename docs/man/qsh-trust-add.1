@@ -9,8 +9,8 @@ qsh\-trust\-add \- Pin a peer by name
 Pin a peer by name
 .SH OPTIONS
 .TP
-\fB\-\-address\fR \fI<HOST:PORT>\fR
-`host:port` used to dial this peer. Required when `\-\-fingerprint` is absent, since the fingerprint has to be observed from somewhere
+\fB\-\-address\fR \fI<HOST[:PORT]>\fR
+`host:port` used to dial this peer. Required when `\-\-fingerprint` is absent, since the fingerprint has to be observed from somewhere. With no `:port`, port 4433 is assumed and the pin is stored with it
 .TP
 \fB\-\-json\fR
 Emit a single `qsh.cli/v1` JSON envelope on stdout instead of human\-readable text

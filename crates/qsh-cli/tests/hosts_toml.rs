@@ -155,6 +155,39 @@ fn a_hosts_toml_default_user_mismatch_is_refused_the_same_as_an_explicit_one() {
     );
 }
 
+/// ADR-0014 결정 4: a port-less `trust.toml` pin and a `hosts.toml` entry
+/// that spells the same address *with* the default port must report
+/// `source: "both"` through the real `qsh.cli/v1` envelope, not just in
+/// `resolve_forward`'s own pure-function tests (`ops/host.rs`'s D13).
+#[test]
+fn a_port_less_trust_pin_and_a_hosts_toml_port_report_source_both_through_the_envelope() {
+    let sandbox = Sandbox::initialized();
+    std::fs::write(
+        sandbox.config_dir().join("trust.toml"),
+        "[[peer]]\n\
+         name = \"mac\"\n\
+         fingerprint = \"sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"\n\
+         address = \"127.0.0.1\"\n\
+         added_at = \"2026-08-17T00:00:00Z\"\n",
+    )
+    .expect("write trust.toml");
+    std::fs::write(
+        sandbox.config_dir().join("hosts.toml"),
+        "[[host]]\nname = \"mac\"\naddress = \"127.0.0.1:4433\"\n",
+    )
+    .expect("write hosts.toml");
+
+    let (code, envelope) = sandbox.json(&["hosts", "--json"]);
+    assert_eq!(code, 0, "{envelope}");
+    let hosts = envelope["data"]["hosts"].as_array().expect("hosts array");
+    let mac = hosts
+        .iter()
+        .find(|h| h["name"] == "mac")
+        .expect("mac entry");
+    assert_eq!(mac["address"], "127.0.0.1:4433");
+    assert_eq!(mac["source"], "both");
+}
+
 /// How many sessions the host is holding.
 fn session_count(client: &Sandbox) -> usize {
     let (code, listed) = client.json(&["sessions", HOST_ALIAS, "--json"]);

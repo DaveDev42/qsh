@@ -228,28 +228,42 @@ pub(super) struct ForwardEntry {
 /// - **`user`:** `hosts.toml`'s hint for this name, if it set one —
 ///   independent of which address won, since the hint is a property of
 ///   the name, not of the winning route.
+///
+/// The two addresses are compared after the default port is filled in —
+/// the same address spelled with and without a port is still `"both"`
+/// (ADR-0014 결정 4).
 pub(super) fn resolve_forward(
     trust_peer: Option<&TrustPeer>,
     hosts_entry: Option<&HostEntry>,
     hosts_has_any: bool,
 ) -> Option<ForwardEntry> {
+    // ADR-0014 결정 4: 파생값만 정규화한다. `HostEntry`/`TrustPeer`가 메모리에
+    // 들고 있는 문자열도, 디스크의 바이트도 손대지 않는다.
     let hosts_address = hosts_entry
         .map(|entry| entry.address.as_str())
-        .filter(|address| !address.is_empty());
+        .filter(|address| !address.is_empty())
+        .map(|address| crate::trust::normalize_peer_address(address).address);
     let trust_address = trust_peer
         .map(|peer| peer.address.as_str())
-        .filter(|address| !address.is_empty());
+        .filter(|address| !address.is_empty())
+        .map(|address| crate::trust::normalize_peer_address(address).address);
 
-    let address = match (hosts_address, trust_address) {
-        (Some(address), _) => address.to_string(),
-        (None, Some(address)) => address.to_string(),
+    let address = match (&hosts_address, &trust_address) {
+        (Some(address), _) => address.clone(),
+        (None, Some(address)) => address.clone(),
         (None, None) => return None,
     };
 
     // Address-winner based, not name-presence based (this function's own
     // doc, above) — the `(None, None)` arm is unreachable because the
     // `address` match above already returned `None` for that case.
-    let source = match (hosts_address, trust_address) {
+    //
+    // 정규화 **후** 비교다(ADR-0014 결정 4 `:37`): `hosts.toml`이 `mac:4433`,
+    // `trust.toml`이 `mac`처럼 표기만 다르고 같은 주소를 가리키는 경우를
+    // `"hosts"`(=redirect)로 보고하면 운영자에게 거짓 신호를 준다. 두 주소의
+    // 비교는 기본 포트를 채운 뒤에 한다 — 포트 표기만 다른 같은 주소는
+    // `"both"`다(ADR-0014 결정 4).
+    let source = match (&hosts_address, &trust_address) {
         (Some(hosts), Some(trust)) if hosts == trust => "both",
         (Some(_), _) => "hosts",
         (None, Some(_)) => "trust",
@@ -438,6 +452,22 @@ pub(crate) enum HintAlias<'a> {
 /// `Ops::resolve_peer_address` (`crate::ops::resolve_peer_address`) so the
 /// two `HOST_NOT_FOUND`/`INVALID_ARGUMENT` choices never diverge on this
 /// rule.
+/// The key a host name is looked up under: the name with surrounding
+/// whitespace removed, and nothing else.
+///
+/// **Not [`hint_alias`].** That one also strips a `user@` prefix, which is
+/// right for a remedy message and wrong for a lookup key: `qsh exec
+/// dave@mac -- …` must keep failing closed with `HOST_NOT_FOUND` rather
+/// than silently resolving to `mac` and running as the *default* account
+/// while the operator asked for `dave` (`docs/CLI.md` §6.9·§7 — the bare
+/// `qsh [user@]host` form is the only shape that carries a user hint, and
+/// it is split at the CLI before routing ever sees it). Whitespace is the
+/// one difference that carries no meaning, so it is the one this trims
+/// (`PLAN.md` M9 §6 행 i).
+pub(crate) fn lookup_name(name: &str) -> &str {
+    name.trim()
+}
+
 pub(crate) fn hint_alias(name: &str) -> HintAlias<'_> {
     let stripped = name.rsplit_once('@').map_or(name, |(_, host)| host);
     let trimmed = stripped.trim();
@@ -471,10 +501,16 @@ fn resolve_route(
         // case, so this reuses it rather than inventing a new code.
         return Err(empty_host_name_error());
     }
+    // `PLAN.md` M9 §6 행 i: the lookup key is trimmed, independently of
+    // `hint_alias`'s remedy-message stripping below — live reverse and
+    // forward must share the same key, or a stray space resolves one way
+    // and not the other and silently flips §6.1's "live reverse first"
+    // rule.
+    let key = lookup_name(name);
 
     let live: Vec<&ReverseHostEntry> = reverse
         .iter()
-        .filter(|entry| entry.local.name == name && is_live(entry))
+        .filter(|entry| entry.local.name == key && is_live(entry))
         .collect();
 
     match live.as_slice() {
@@ -514,7 +550,7 @@ fn resolve_route(
     // rules (the same discipline the pre-M7-Step-3 code already followed
     // for `TrustStore::resolve_host`).
     let hosts_has_any = !hosts.entries().is_empty();
-    if let Some(entry) = resolve_forward(store.find(name), hosts.find(name), hosts_has_any) {
+    if let Some(entry) = resolve_forward(store.find(key), hosts.find(key), hosts_has_any) {
         return Ok(HostRoute::Forward {
             address: entry.address,
             fingerprint: entry.fingerprint,
