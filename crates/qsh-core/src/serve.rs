@@ -8,9 +8,9 @@ use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 
 use qsh_proto::ErrorCode;
-use qsh_transport::{Listener, TrustEvaluator};
+use qsh_transport::{Listener, SetupError, TrustEvaluator};
 
-use crate::acl::{StartupDiagnostic, load_or_deny};
+use crate::acl::{StartupDiagnostic, load_or_deny_with_index};
 use crate::audit::RotatingAuditSink;
 use crate::broker::{Broker, BrokerConfig, SystemClock};
 use crate::config::{Config, Paths};
@@ -54,6 +54,113 @@ pub(crate) const fn trailing_port(text: &str) -> u16 {
     port as u16
 }
 
+/// Whether every independent run of decimal digits in `text` equals `port`,
+/// and at least one such run exists — checked in a `const` context so a
+/// wording constant that names a port can be pinned to
+/// [`DEFAULT_PORT`] without a second literal becoming a second source of
+/// truth (ADR-0014 결정 1).
+///
+/// Unlike [`trailing_port`], this does not fix the port's position — a
+/// three-part failure notice (ADR-0014 결정 5's "one line")
+/// puts the port in the middle of a sentence, so what the assertion must
+/// hold is "this wording names `serve::DEFAULT_PORT`, and only that
+/// number", not "the port is the last byte". Seeing "and only that
+/// number" through is what keeps this a single source of truth the same
+/// way [`trailing_port`]'s own doc requires — it is a whole-string scan,
+/// not an existence check, on purpose.
+pub(crate) const fn names_only_port(text: &str, port: u16) -> bool {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    let mut found = false;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_digit() && (i == 0 || !bytes[i - 1].is_ascii_digit()) {
+            // A run of two or more digits starting with `0` is a
+            // different spelling of the same number (`04433` vs `4433`)
+            // — reject it rather than let it numerically match `port`.
+            if bytes[i] == b'0' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit() {
+                return false;
+            }
+            let mut value: u32 = 0;
+            let mut j = i;
+            while j < bytes.len() && bytes[j].is_ascii_digit() {
+                value = value * 10 + (bytes[j] - b'0') as u32;
+                // Bail out the moment the run can no longer equal `port`
+                // instead of continuing to multiply: a digit run longer
+                // than five bytes overflows `u32` on the next
+                // multiplication, which is a hard `E0080` const-eval
+                // error, not the `false` this function must return for
+                // "this wording names a number other than `port`".
+                if value > u16::MAX as u32 {
+                    return false;
+                }
+                j += 1;
+            }
+            if value != port as u32 {
+                return false;
+            }
+            found = true;
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    found
+}
+
+/// Stderr remedy appended to a bind-failure report (ADR-0014 결정 9,
+/// `:57`) — `qsh serve` ([`run_serve`]) and `qsh listen`
+/// (`crate::reverse::listen`) both default to [`DEFAULT_PORT`], so one
+/// machine running both needs an explicit `--bind` for at least one of
+/// them. Observation (`cannot listen on {bind}: {err}`) is composed by
+/// [`bind_unavailable`]'s caller; this constant is only the impact and
+/// next-command parts, shared by both call sites so a fix to one can never
+/// leave the other holding a remedy-less copy of the same format string.
+pub const BIND_UNAVAILABLE_REMEDY: &str = "Nothing is being served. `qsh serve` and `qsh listen` both default to port 4433, so one machine running both needs an explicit bind for at least one of them. Re-run with `--bind <ip:port>` on a free port.";
+
+/// This remedy also names the one default port by number, so it gets the
+/// same single-source-of-truth assertion [`ADDRESS_PORT_ASSUMED_NOTICE`]
+/// does.
+const _: () = assert!(
+    names_only_port(BIND_UNAVAILABLE_REMEDY, DEFAULT_PORT),
+    "BIND_UNAVAILABLE_REMEDY must name DEFAULT_PORT and no other number"
+);
+
+/// The single place a bind failure becomes a `CONFIG_ERROR`, for both
+/// `qsh serve` ([`run_serve`], below) and `qsh listen`
+/// (`crate::reverse::listen::run_listen_unix`) — `ADR-0014` 결정 9 warns
+/// that two independent copies of this format string is exactly how one
+/// gets a remedy and the other does not. The observation clause
+/// (`cannot listen on {bind}: {err}`) stays byte-identical to the
+/// pre-M9 wording: `qsh-cli/tests/exit_code_matrix.rs` asserts
+/// `starts_with("qsh: cannot listen on")` on the rendered line.
+pub fn bind_unavailable(bind: &SocketAddr, err: &dyn std::fmt::Display) -> OpError {
+    OpError::new(
+        ErrorCode::ConfigError,
+        format!("cannot listen on {bind}: {err}. {BIND_UNAVAILABLE_REMEDY}"),
+    )
+}
+
+/// [`Listener::bind`]'s actual failure type is [`SetupError`], which is
+/// not only a port conflict: `SetupError::Tls`/`SetupError::Quic` fire
+/// before a socket is ever touched (a rejected identity cert, a rustls
+/// config quinn refuses), and re-running with a different `--bind` cannot
+/// fix either. [`BIND_UNAVAILABLE_REMEDY`]'s shared-default-port sentence
+/// is only true of `SetupError::Bind` (an OS-level bind failure — port in
+/// use, no such interface, a privileged port without the privilege); the
+/// other variants get the bare observation instead, with no remedy that
+/// would misdirect the operator toward a `--bind` that was never the
+/// problem.
+pub fn bind_setup_error(bind: &SocketAddr, err: SetupError) -> OpError {
+    if matches!(err, SetupError::Bind { .. }) {
+        bind_unavailable(bind, &err)
+    } else {
+        OpError::new(
+            ErrorCode::ConfigError,
+            format!("cannot listen on {bind}: {err}"),
+        )
+    }
+}
+
 /// Resolve the bind address: CLI flag > `config.toml` `[serve].bind` >
 /// [`DEFAULT_BIND`]. Accepts `ip:port` or `host:port` (first resolution).
 pub fn resolve_bind(flag: Option<&str>, config: &Config) -> Result<SocketAddr, OpError> {
@@ -84,6 +191,15 @@ pub fn resolve_bind(flag: Option<&str>, config: &Config) -> Result<SocketAddr, O
 /// it, so it must not be observable while the loop is not yet armed. Any
 /// startup diagnostic this function emits through another channel
 /// therefore lands *before* the `on_bound` announcement.
+///
+/// `on_notice` is wired onto the returned [`HostRuntime`]'s
+/// `server` before the accept loop ever starts, so every pairing-pin
+/// notice (ADR-0017 결정 3) and invite-replay notice (결정 4's exempted
+/// axes plus a third, host-local line) a connection can produce reaches it.
+/// `qsh-core` never performs this I/O itself (`docs/design/
+/// architecture.md` §1) — `qsh-cli`'s `run_serve` wrapper passes a closure
+/// that prints `qsh serve: {notice}` to stderr.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_serve(
     paths: &Paths,
     config: &Config,
@@ -91,6 +207,7 @@ pub async fn run_serve(
     bind_flag: Option<&str>,
     on_bound: impl FnOnce(SocketAddr),
     on_runtime: impl FnOnce(&HostRuntime),
+    on_notice: impl Fn(&str) + Send + Sync + 'static,
     shutdown: impl std::future::Future<Output = ()>,
 ) -> Result<(), OpError> {
     let bind = resolve_bind(bind_flag, config)?;
@@ -109,18 +226,15 @@ pub async fn run_serve(
     // A bind that cannot be satisfied (port in use, privileged port, no
     // such interface) is a configuration problem on this host, not an
     // internal fault: report it as such so `--bind`/`[serve].bind` is the
-    // obvious thing to look at.
+    // obvious thing to look at. `bind_setup_error` only attaches that
+    // remedy to an actual `SetupError::Bind` — a rejected TLS/QUIC config
+    // gets the bare observation instead.
     let listener = Listener::bind(
         bind,
         identity.local,
         Arc::clone(&trust) as Arc<dyn TrustEvaluator>,
     )
-    .map_err(|err| {
-        OpError::new(
-            ErrorCode::ConfigError,
-            format!("cannot listen on {bind}: {err}"),
-        )
-    })?;
+    .map_err(|err| bind_setup_error(&bind, err))?;
     let actual = listener.local_addr().map_err(|err| {
         OpError::new(
             ErrorCode::Internal,
@@ -128,6 +242,9 @@ pub async fn run_serve(
         )
     })?;
     let runtime = host_runtime(paths, config, identity.identity.device_id.clone());
+    // Wired before `on_runtime`/`on_bound` so it is live for every
+    // connection the accept loop below could ever admit.
+    runtime.server.set_notice_sink(on_notice);
     // Same `trust`/`invites` pair the listener's own evaluator was built
     // from (report §B9/§B14) — `Server::serve_pairing_connection` pins
     // through `trust`'s path and redeems through `invites`.
@@ -199,7 +316,7 @@ pub struct HostRuntime {
 
 /// Build a [`HostRuntime`]: session broker (with its TTL reaper spawned),
 /// the `acl.toml`-backed policy this process resolved at startup
-/// ([`load_or_deny`] — falls back to `DenyAll` plus a
+/// ([`load_or_deny_with_index`] — falls back to `DenyAll` plus a
 /// [`HostRuntime::policy_diagnostic`] on anything short of a clean load,
 /// `PLAN.md` M5 Step 6; replaces the M1–M4 `AllowAllPinned` interim
 /// posture), the rotating, bounded-queue audit sink at `[audit]`'s
@@ -229,7 +346,15 @@ pub fn host_runtime(paths: &Paths, config: &Config, device_id: impl Into<String>
         crate::pty::factory(),
     );
     tokio::spawn(Broker::run_reaper(Arc::downgrade(&broker)));
-    let (authorizer, policy_diagnostic) = load_or_deny(paths);
+    // `_with_index` over plain `load_or_deny`: the pairing-pin
+    // notice (ADR-0017 결정 3) needs to ask "does a pin-path row already
+    // name this principal", which only the concrete `Policy` this call
+    // just loaded can answer (`crate::acl::PinnedPrincipalIndex`'s own
+    // doc) — by the time `authorizer` below is an `Arc<dyn Authorizer>`
+    // that type is erased. `crate::reverse::listen::run_listen_unix` keeps
+    // calling plain `load_or_deny`: a reverse target never reaches
+    // `Server::serve_pairing_connection` at all.
+    let (authorizer, policy_diagnostic, pinned_principals) = load_or_deny_with_index(paths);
     // `PLAN.md` M8 Step 2: the same operator-configured admission bounds
     // for every host role this constructs (`qsh serve` and a reverse
     // target's own accept loop, `crate::reverse::target::run_reverse_unix`
@@ -259,6 +384,7 @@ pub fn host_runtime(paths: &Paths, config: &Config, device_id: impl Into<String>
         admission,
         quotas,
     );
+    server.set_pinned_principals(pinned_principals);
     HostRuntime {
         server,
         audit,
@@ -312,5 +438,92 @@ mod tests {
         assert_eq!(runtime.server.local_hello(None).device_name, "hermes");
         assert_eq!(runtime.audit.path(), paths.audit_log());
         assert_eq!(runtime.server.pending_tickets(), 0);
+    }
+
+    // `names_only_port`: unit coverage the two const-asserts
+    // above it never exercise on their own (a const-assert only proves
+    // the two production wordings pass; it says nothing about the
+    // function's behavior on inputs those wordings never contain).
+    #[test]
+    fn names_only_port_true_when_the_only_digit_run_is_the_port() {
+        assert!(names_only_port("assuming port 4433: ...", 4433));
+    }
+
+    #[test]
+    fn names_only_port_false_when_a_second_number_appears() {
+        assert!(!names_only_port(
+            "assuming port 4433 after 80 retries",
+            4433
+        ));
+    }
+
+    #[test]
+    fn names_only_port_false_for_a_longer_run_sharing_a_prefix() {
+        // `44330` contains `4433` as a prefix but is a different number.
+        assert!(!names_only_port("bound to 44330", 4433));
+    }
+
+    #[test]
+    fn names_only_port_false_with_no_digits_at_all() {
+        assert!(!names_only_port("no port named here", 4433));
+    }
+
+    #[test]
+    fn names_only_port_false_for_a_leading_zero_spelling() {
+        // `04433` numerically equals 4433 but is not the same spelling —
+        // a wording must name the port, not a zero-padded look-alike.
+        assert!(!names_only_port("assuming port 04433", 4433));
+    }
+
+    #[test]
+    fn names_only_port_false_for_a_digit_run_long_enough_to_overflow_u32() {
+        // Regression: this used to keep multiplying past `u16::MAX` and
+        // panic with a `u32` overflow in a const context instead of
+        // returning `false`.
+        assert!(!names_only_port("after 99999999999999 bytes", 4433));
+    }
+
+    #[test]
+    fn names_only_port_true_for_the_two_production_wordings() {
+        assert!(names_only_port(
+            crate::trust::ADDRESS_PORT_ASSUMED_NOTICE,
+            DEFAULT_PORT
+        ));
+        assert!(names_only_port(BIND_UNAVAILABLE_REMEDY, DEFAULT_PORT));
+    }
+
+    // `bind_setup_error`: only a genuine `SetupError::Bind`
+    // gets the shared-default-port remedy; a TLS/QUIC config failure
+    // (which a different `--bind` can never fix) gets the bare
+    // observation instead.
+    #[test]
+    fn bind_setup_error_attaches_the_remedy_only_to_an_actual_bind_failure() {
+        let bind: SocketAddr = "127.0.0.1:4433".parse().unwrap();
+        let bind_err = SetupError::Bind {
+            addr: bind,
+            source: std::io::Error::new(std::io::ErrorKind::AddrInUse, "address in use"),
+        };
+        let op = bind_setup_error(&bind, bind_err);
+        assert!(op.message.starts_with("cannot listen on 127.0.0.1:4433:"));
+        assert!(
+            op.message.contains(BIND_UNAVAILABLE_REMEDY),
+            "an OS-level bind failure must carry the shared-default-port remedy: {}",
+            op.message
+        );
+    }
+
+    #[test]
+    fn bind_setup_error_does_not_attach_the_remedy_to_a_tls_config_failure() {
+        let bind: SocketAddr = "127.0.0.1:4433".parse().unwrap();
+        let tls_err = SetupError::Tls(rustls::Error::General("bad certificate".into()));
+        let op = bind_setup_error(&bind, tls_err);
+        assert!(op.message.starts_with("cannot listen on 127.0.0.1:4433:"));
+        assert!(
+            !op.message.contains(BIND_UNAVAILABLE_REMEDY),
+            "a TLS config failure must not suggest re-binding on a free port, which cannot \
+             fix it: {}",
+            op.message
+        );
+        assert_eq!(op.code, ErrorCode::ConfigError);
     }
 }

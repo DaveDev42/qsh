@@ -759,6 +759,52 @@ fn qsh_listen_bind_conflict_is_one_stderr_line_exit_255_and_zero_stdout() {
         "stderr: {stderr:?}"
     );
     assert!(lines[0].contains("(CONFIG_ERROR)"), "stderr: {stderr:?}");
+    // `reverse/listen.rs`'s bind-failure `map_err`
+    // now calls the shared `qsh_core::serve::bind_unavailable`, so the
+    // remedy is on this line too — the five assertions above are
+    // untouched (`bind_unavailable`'s observation clause is byte-
+    // identical to the pre-M9 format string).
+    assert!(
+        lines[0].contains(qsh_core::serve::BIND_UNAVAILABLE_REMEDY),
+        "stderr must carry the bind-conflict remedy: {stderr:?}"
+    );
+
+    drop(holder);
+}
+
+/// `qsh serve`'s bind failure carries the remedy on one stderr line with
+/// exit 255, the twin of the `qsh listen` bind-conflict test above — same
+/// shared `qsh_core::serve::bind_unavailable`, reached through `serve.rs`'s
+/// own `Listener::bind` call site rather than `reverse/listen.rs`'s.
+#[test]
+fn qsh_serve_bind_conflict_is_one_stderr_line_exit_255_and_zero_stdout() {
+    let sandbox = Sandbox::initialized();
+    let holder = ServeGuard::start(&sandbox);
+
+    let output = sandbox.qsh(&["serve", "--bind", holder.addr()]);
+
+    assert_eq!(exit_code(&output), EXIT_RUNTIME_FAILURE, "{output:?}");
+    assert!(
+        output.stdout.is_empty(),
+        "a bind conflict must never write to stdout: {:?}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "expected exactly one stderr line: {stderr:?}"
+    );
+    assert!(
+        lines[0].starts_with("qsh: cannot listen on"),
+        "stderr: {stderr:?}"
+    );
+    assert!(lines[0].contains("(CONFIG_ERROR)"), "stderr: {stderr:?}");
+    assert!(
+        lines[0].contains(qsh_core::serve::BIND_UNAVAILABLE_REMEDY),
+        "stderr must carry the bind-conflict remedy: {stderr:?}"
+    );
 
     drop(holder);
 }

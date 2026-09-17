@@ -446,6 +446,23 @@ impl ServeGuard {
         &self.addr
     }
 
+    /// Everything the child has written to stderr so far, without
+    /// stopping it — for polling a notice into existence
+    /// (`poll_until`/`wait_for_audit`'s own bounded-poll discipline) before
+    /// [`finish`](Self::finish) kills the process out from under a
+    /// still-in-flight `eprintln!`. The pairing-pin/invite-replay
+    /// notices are written by the host process asynchronously *after* the
+    /// wire reply the client is waiting on, so a caller that has just seen
+    /// the client-side command exit 0 has no guarantee the host has
+    /// already run its own follow-on notify — it must poll this, not call
+    /// `finish()` straight away.
+    pub fn stderr_snapshot(&self) -> Vec<String> {
+        self.stderr
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
     /// The child's process id, for a test that has to stop the host
     /// answering (`SIGSTOP`) rather than take it away.
     pub fn pid(&self) -> u32 {

@@ -55,13 +55,34 @@ pub use pairing::SharedInviteStore;
 /// text has one canonical copy in `qsh-core` and the CLI only writes what
 /// it is handed (`docs/design/architecture.md` §1; precedent:
 /// [`crate::ops::INVITE_CODE_PROMPT`]).
-pub const ADDRESS_PORT_ASSUMED_NOTICE: &str = "assuming port 4433";
+///
+/// Three parts (ADR-0014 결정 5, "관측·영향·다음 명령"): what happened
+/// (`assuming port 4433: the peer address names no port`), what it means
+/// (`so this command uses port 4433 everywhere that address goes`), and
+/// what to do about it (`Re-run with an explicit \`host:port\` to use a
+/// different port.`). The leading seven words are byte-identical to the
+/// pre-M9 wording on purpose: `qsh-cli/tests/init_trust.rs` and
+/// `qsh-cli/tests/trust_pairing_live.rs` each assert
+/// `stderr.matches("assuming port 4433").count() == 1`, and this notice
+/// fires from three call sites (`qsh trust add`, `qsh trust accept`, and
+/// `qsh serve --to`) that share one wording rather than one
+/// per site (ADR-0014 결정 5 requires a single line). "pins" was
+/// deliberately left out of the impact clause — at the `serve --to` site
+/// this notice also fires from, the normalized address only looks an
+/// already-pinned peer up, it pins nothing (ADR-0014 결정 7) — so
+/// `everywhere that address goes` is the one clause true at all three
+/// sites.
+pub const ADDRESS_PORT_ASSUMED_NOTICE: &str = "assuming port 4433: the peer address names no port, so this command uses port 4433 everywhere that address goes. Re-run with an explicit `host:port` to use a different port.";
 
 /// The notice must name the one default port and nothing else — a second
 /// literal here would be a second source of truth (ADR-0014 결정 1).
+/// [`crate::serve::names_only_port`], not [`crate::serve::trailing_port`]:
+/// this notice puts the port in the middle of a sentence, not at the end,
+/// so there is no trailing digit run for `trailing_port` to scan back
+/// over.
 const _: () = assert!(
-    crate::serve::trailing_port(ADDRESS_PORT_ASSUMED_NOTICE) == crate::serve::DEFAULT_PORT,
-    "ADDRESS_PORT_ASSUMED_NOTICE must name serve::DEFAULT_PORT"
+    crate::serve::names_only_port(ADDRESS_PORT_ASSUMED_NOTICE, crate::serve::DEFAULT_PORT),
+    "ADDRESS_PORT_ASSUMED_NOTICE must name serve::DEFAULT_PORT and no other number"
 );
 
 /// Outcome of [`normalize_peer_address`]: the address every downstream
@@ -813,9 +834,31 @@ mod tests {
 
     #[test]
     fn the_port_notice_names_the_default_port() {
+        // Leading clause byte-identical to the pre-M9 wording — the
+        // substring `init_trust.rs`/`trust_pairing_live.rs` count on.
+        // `names_only_port`'s const-assert above already proves the notice
+        // names `DEFAULT_PORT` and nothing else, so this unit only has to
+        // pin the leading clause plus the three-part shape:
+        // observation, impact, next-command.
+        assert!(
+            ADDRESS_PORT_ASSUMED_NOTICE
+                .starts_with(&format!("assuming port {}", crate::serve::DEFAULT_PORT)),
+            "leading clause must stay byte-identical: {ADDRESS_PORT_ASSUMED_NOTICE:?}"
+        );
+        // Two sentence-ending periods: observation+impact share one
+        // sentence ("...goes."), next-command is the second ("...port.").
         assert_eq!(
-            ADDRESS_PORT_ASSUMED_NOTICE,
-            format!("assuming port {}", crate::serve::DEFAULT_PORT)
+            ADDRESS_PORT_ASSUMED_NOTICE.matches('.').count(),
+            2,
+            "observation+impact, then next-command, are two sentences: {ADDRESS_PORT_ASSUMED_NOTICE:?}"
+        );
+        assert!(
+            ADDRESS_PORT_ASSUMED_NOTICE.contains("everywhere that address goes"),
+            "must carry the impact clause: {ADDRESS_PORT_ASSUMED_NOTICE:?}"
+        );
+        assert!(
+            ADDRESS_PORT_ASSUMED_NOTICE.contains("Re-run"),
+            "must carry a next command: {ADDRESS_PORT_ASSUMED_NOTICE:?}"
         );
     }
 

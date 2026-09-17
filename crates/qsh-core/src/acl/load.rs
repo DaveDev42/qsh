@@ -341,8 +341,78 @@ impl StartupDiagnostic {
 /// already-reported failure elsewhere and must not blank out this
 /// diagnostic's own message.
 pub fn load_or_deny(paths: &Paths) -> (Arc<dyn Authorizer>, Option<StartupDiagnostic>) {
+    let (authorizer, diagnostic, _index) = load_or_deny_with_index(paths);
+    (authorizer, diagnostic)
+}
+
+/// The pin-path principal set this process is **enforcing**, named by an
+/// `[[acl]]` row whose `auth_path` is `"pin"` (including the omitted-
+/// default case) — `docs/adr/0017-acl-toml-not-written.md` 결정 2 (`:21`)'s
+/// matching rule, reused verbatim.
+///
+/// This is the one thing [`crate::acl::Authorizer::check`] cannot answer:
+/// that trait has a single method, `check(principal, auth_path, action,
+/// resource) -> Verdict`, which asks "may this principal do this one
+/// thing", never "does any row name this principal at all". Probing with a
+/// representative action would misclassify a principal that a row names
+/// for a *different* action as "absent". Re-reading `acl.toml` at pairing
+/// time would misreport a row added after this process started as
+/// "already applied" (`PolicySource::load` is process-start-once,
+/// `docs/design/architecture.md`'s security defaults) — the same startup-
+/// vs-runtime hazard 결정 2 (`:28`) already requires a restart clause for.
+/// This index sidesteps both: it is extracted from the very [`Policy`]
+/// [`load_or_deny_with_index`] just loaded, before that `Policy` is erased
+/// into an `Arc<dyn Authorizer>`, and it lives for the process's lifetime.
+#[derive(Debug, Clone, Default)]
+pub struct PinnedPrincipalIndex(std::collections::BTreeSet<String>);
+
+impl PinnedPrincipalIndex {
+    fn from_policy(policy: &Policy) -> Self {
+        Self(
+            policy
+                .rules
+                .iter()
+                .filter(|rule| rule.auth_path == AuthPath::Pin)
+                .map(|rule| rule.principal.clone())
+                .collect(),
+        )
+    }
+
+    /// The empty index — correct (not merely a placeholder) whenever the
+    /// enforced policy is [`DenyAll`]: nothing is enforcing any row, pinned
+    /// or otherwise.
+    pub fn empty() -> Self {
+        Self(std::collections::BTreeSet::new())
+    }
+
+    /// Whether `device:<name>` is named by a pin-path row in the enforced
+    /// policy.
+    pub fn names_device(&self, name: &str) -> bool {
+        self.0.contains(&format!("device:{name}"))
+    }
+}
+
+/// [`load_or_deny`] plus the [`PinnedPrincipalIndex`] extracted from the
+/// same [`Policy`] before it is erased into an `Arc<dyn Authorizer>`
+/// (`Arc::new(policy)` below). `crate::serve::host_runtime` is the one
+/// caller that needs the index (to compose ADR-0017 결정 3's pairing-pin
+/// notice); every other caller (`crate::reverse::listen::run_listen_unix`,
+/// `crate::ops::doctor`) keeps calling [`load_or_deny`] itself, unchanged,
+/// since a reverse target never reaches
+/// `crate::server::Server::serve_pairing_connection` at all and doctor's
+/// own diagnostic has no pairing notice to compose.
+pub fn load_or_deny_with_index(
+    paths: &Paths,
+) -> (
+    Arc<dyn Authorizer>,
+    Option<StartupDiagnostic>,
+    PinnedPrincipalIndex,
+) {
     match PolicySource::load(paths) {
-        PolicyLoad::Loaded(policy) => (Arc::new(policy), None),
+        PolicyLoad::Loaded(policy) => {
+            let index = PinnedPrincipalIndex::from_policy(&policy);
+            (Arc::new(policy), None, index)
+        }
         PolicyLoad::Missing => (
             Arc::new(DenyAll),
             Some(StartupDiagnostic {
@@ -351,6 +421,7 @@ pub fn load_or_deny(paths: &Paths) -> (Arc<dyn Authorizer>, Option<StartupDiagno
                 detail: None,
                 example: minimal_policy_example(paths),
             }),
+            PinnedPrincipalIndex::empty(),
         ),
         PolicyLoad::Invalid(err) => (
             Arc::new(DenyAll),
@@ -360,6 +431,7 @@ pub fn load_or_deny(paths: &Paths) -> (Arc<dyn Authorizer>, Option<StartupDiagno
                 detail: Some(err.message),
                 example: minimal_policy_example(paths),
             }),
+            PinnedPrincipalIndex::empty(),
         ),
     }
 }

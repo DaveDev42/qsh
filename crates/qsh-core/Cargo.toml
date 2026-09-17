@@ -61,6 +61,12 @@ portable-pty.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 proptest.workspace = true
+# `serve::bind_setup_error`'s unit tests construct a real
+# `qsh_transport::SetupError::Tls(rustls::Error)` to prove the bind-conflict
+# remedy is not attached to a TLS config failure — test-only, already the
+# same pinned version `qsh-transport` uses (workspace-resolved, no second
+# copy).
+rustls.workspace = true
 # `tokio::time::pause()`/`advance()` and `#[tokio::test(start_paused)]` need
 # the test-util feature; only pulled in for tests (`docs/design/testing.md`
 # L2: no `sleep()`, deterministic time).

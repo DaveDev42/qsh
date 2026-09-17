@@ -59,7 +59,11 @@ works end to end today:
 
 `-D` (SOCKS5 dynamic forwarding) parses on both the interactive and
 `tunnel open` forms but always answers `UNSUPPORTED` with the message
-"SOCKS dynamic forwarding (-D) is a P1 feature".
+"SOCKS dynamic forwarding (-D) is a P1 feature". That envelope `message`
+is frozen; `qsh --help` and `qsh tunnel open --help` carry the rest of the
+refusal, exactly:
+
+> The flag parses but no SOCKS proxy is ever opened and no bytes are forwarded, whatever value you pass. Use `-L` for a known port pair, or an existing overlay for anything wider.
 
 ## Install
 
@@ -319,8 +323,10 @@ qsh box -R 9000:localhost:9000           # host's :9000 reaches this machine's :
 
 Both are repeatable, both share the grammar `[bind:]listen_port:host:host_port`,
 and both bind loopback by default. A non-loopback bind on `-R` is refused by
-the host with `INVALID_ARGUMENT` ("remote forward binds loopback only"), no
-matter what the ACL says.
+the host with `INVALID_ARGUMENT`, no matter what the ACL says. The refusal's
+message is exactly:
+
+> remote forward binds loopback only: this bind could not be confirmed as a loopback address, so nothing was opened on the host. Re-run `-R` with a loopback bind (omit the bind, or use `127.0.0.1` / `[::1]`).
 
 For a tunnel with no shell attached, use the machine-mode form. It emits one
 `tunnel.open` envelope and then blocks until you interrupt it:
@@ -527,6 +533,13 @@ Some of these are MVP scope decisions, some are unfinished work.
   case from a drop-and-resume: switching networks without losing the
   connection outright (Wi-Fi to tethering, a changed IP) carries an open
   tunnel through transparently, the same as it does a session.
+- `qsh serve` and `qsh listen` share one default port. Both bind `[::]:4433`
+  unless told otherwise, so a machine taking both roles needs an explicit
+  `--bind` (or `[serve].bind`/`[listen].bind`) for at least one of them. The
+  second one to start fails immediately with `CONFIG_ERROR` and exit `255`
+  rather than half-working, with this remedy on stderr, exactly:
+
+  > Nothing is being served. `qsh serve` and `qsh listen` both default to port 4433, so one machine running both needs an explicit bind for at least one of them. Re-run with `--bind <ip:port>` on a free port.
 - `acl.toml` has no hot reload: an edit only takes effect the next time
   `qsh serve`/`qsh listen`/`qsh reverse` starts, and qsh never creates or
   edits the file for you. See [Security posture](#security-posture).

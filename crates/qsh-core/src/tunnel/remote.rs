@@ -126,7 +126,23 @@ impl BindHostResolver for SystemResolver {
 /// literal so the two cannot drift apart — `crates/qsh-core/tests/
 /// tunnel_docs.rs` pins docs to this single source, not to a second copy
 /// of the string.
-pub const REMOTE_FORWARD_LOOPBACK_ONLY_MESSAGE: &str = "remote forward binds loopback only";
+///
+/// Three parts: the observation is deliberately **not** "is
+/// not a loopback address" — `resolve_loopback_bind_addr_bounded`
+/// returns this same `NotLoopback` from five distinct branches (a
+/// non-loopback IP literal, a name that resolves to a non-loopback
+/// answer, an empty answer set, a resolver failure, and a resolve
+/// timeout), and this module's own anti-oracle rationale for folding them
+/// together (this const's neighboring doc on `NotLoopback`, and the
+/// resolve-failure/timeout arms below) means the host does not actually
+/// know, in the last three cases, that the bind is not loopback — only
+/// that it could not confirm it is. "could not be confirmed" is true in
+/// all five; "is not" would have been a false assertion in three of them.
+/// The leading clause stays byte-identical to the pre-M9 wording on
+/// purpose: `docs/CLI.md` and `README.md` already quote it inside prose
+/// ("정확히 ... 다"), so extending the quoted span is all either doc needs
+/// to do to stay verbatim-consistent.
+pub const REMOTE_FORWARD_LOOPBACK_ONLY_MESSAGE: &str = "remote forward binds loopback only: this bind could not be confirmed as a loopback address, so nothing was opened on the host. Re-run `-R` with a loopback bind (omit the bind, or use `127.0.0.1` / `[::1]`).";
 
 /// A `bind_host` this host will not bind for anyone: it is not loopback,
 /// or it named nothing at all.

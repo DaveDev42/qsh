@@ -37,7 +37,7 @@ Remote forward `[bind:]rport:host:hport`, repeatable: ask the peer to bind `rpor
 Same reasoning as [`Self::local_forward`] for not being a clap `value_parser`: `qsh_core::parse_remote_forwards` decides the `docs/CLI.md` §3.3 code, not clap\*(Aqs usage\-error path.
 .TP
 \fB\-D\fR \fI<SPEC>\fR
-SOCKS5 dynamic forwarding `[bind:]port`, repeatable. Parses, but P0 always refuses it with `UNSUPPORTED` before this session (or anything else on the command line) is opened — implementation is P1 (`docs/CLI.md` §6.9, `docs/ROADMAP.md` M4 "명시적 out").
+SOCKS5 dynamic forwarding `[bind:]port`, repeatable. Parses, but P0 refuses it with `UNSUPPORTED`, "SOCKS dynamic forwarding (\-D) is a P1 feature", before this session (or anything else on the command line) is opened — unless `\-\-json`/`\-\-jsonl` is also given, in which case §7\*(Aqs machine\-mode gate answers `INVALID_ARGUMENT` first, since the interactive form has no JSON output mode of its own for `\-D`\*(Aqs own refusal to appear in (`docs/CLI.md` §6.9, `docs/ROADMAP.md` M4 "명시적 out"). The flag parses but no SOCKS proxy is ever opened and no bytes are forwarded, whatever value you pass. Use `\-L` for a known port pair, or an existing overlay for anything wider.
 
 Not shape\-checked here for the same reason as [`Self::local_forward`]/[`Self::remote_forward`]: the refusal is unconditional, so there is nothing a `value_parser` could reject that this flag\*(Aqs own handling would not refuse anyway.
 .TP

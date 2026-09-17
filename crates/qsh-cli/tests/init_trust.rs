@@ -311,6 +311,30 @@ fn trust_add_with_a_port_less_address_notes_the_assumed_port_once_and_pins_it() 
         !stdout.contains("assuming"),
         "the notice must never reach stdout: {stdout:?}"
     );
+
+    // The `stderr_note!` call in `run_trust_add`
+    // fires unconditionally, before the `--json`/human branch is ever
+    // looked at (`main.rs`'s `run_trust_add`), so a second, human-mode
+    // invocation must see the exact same notice. Deleting that call site
+    // must turn *this whole test* red, not just its `--json` half.
+    let human_sandbox = Sandbox::new();
+    human_sandbox.init();
+    let human_output = human_sandbox.qsh(&[
+        "trust",
+        "add",
+        "peer-a",
+        "--address",
+        "127.0.0.1",
+        "--fingerprint",
+        FINGERPRINT,
+    ]);
+    assert_eq!(human_output.status.code(), Some(0));
+    let human_stderr = String::from_utf8(human_output.stderr).unwrap();
+    assert_eq!(
+        human_stderr.matches("assuming port 4433").count(),
+        1,
+        "human mode stderr must note the assumed port exactly once: {human_stderr:?}"
+    );
 }
 
 /// The other half: an address that already names a port notes nothing.

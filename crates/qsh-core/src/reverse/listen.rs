@@ -275,10 +275,7 @@ async fn run_listen_unix(
     })?;
     let listener = Listener::bind(bind, identity.local, trust).map_err(|err| {
         let _ = std::fs::remove_file(&localctl_socket_path);
-        OpError::new(
-            ErrorCode::ConfigError,
-            format!("cannot listen on {bind}: {err}"),
-        )
+        crate::serve::bind_setup_error(&bind, err)
     })?;
     let actual = listener.local_addr().map_err(|err| {
         let _ = std::fs::remove_file(&localctl_socket_path);

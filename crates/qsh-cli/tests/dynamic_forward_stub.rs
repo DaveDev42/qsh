@@ -27,7 +27,31 @@ mod common;
 
 use std::net::TcpListener;
 
-use common::{Fleet, HOST_ALIAS};
+use common::{Fleet, HOST_ALIAS, Sandbox};
+
+/// Slice clap's rendered `--help` text down to one flag's own entry: from
+/// `header` (matched verbatim, e.g. `"  -D <SPEC>"`) up to, but not
+/// including, the next line that starts a new flag entry (`"\n  -"` — every
+/// rendered flag header, short or long-only, starts two spaces in with a
+/// dash; a description's continuation lines are indented ten spaces).
+/// Mirrors `qsh-core`'s doc-side `heading_section_slice` (`acl_docs.rs`):
+/// without this, `help.contains(guidance)` alone would still pass if the
+/// guidance text moved to a completely different flag's doc comment, since
+/// the *whole* `--help` output is one haystack. Verified by mutation:
+/// grafting `-D`'s guidance paragraph onto a different field leaves this
+/// slice not containing it, and the whole-output-only assertion would have
+/// stayed green.
+fn flag_help_slice<'a>(help: &'a str, header: &str) -> &'a str {
+    let start = help
+        .find(header)
+        .unwrap_or_else(|| panic!("--help must contain the flag header {header:?}: {help}"));
+    let rest = &help[start..];
+    let end = rest[header.len()..]
+        .find("\n  -")
+        .map(|i| i + header.len())
+        .unwrap_or(rest.len());
+    &rest[..end]
+}
 
 /// A port nothing is listening on, released back to the kernel so a
 /// successful re-bind after the refusal is proof nothing claimed it in
@@ -216,5 +240,58 @@ fn dynamic_forward_on_the_interactive_form_creates_no_session_even_combined_with
     assert_eq!(
         json_envelope["error"]["code"], "INVALID_ARGUMENT",
         "§7 must win over §6.9's -D refusal when --json is present: {json_envelope}"
+    );
+}
+
+/// Pins that `qsh --help`'s bare `-D` entry quotes
+/// `qsh_core::ops::tunnel::DYNAMIC_FORWARD_UNSUPPORTED_GUIDANCE`
+/// verbatim: `-D` lives on `InteractiveArgs`,
+/// `#[command(flatten)]`ed straight into `Cli` (`cli.rs`), so it is a bare
+/// `qsh [user@]host -D …` flag — its doc comment (clap's `long_help`)
+/// shows up in `qsh --help`, never in `qsh host --help`
+/// (`Command::Host(HostCmd)` has no `-D` field at all). No host needed:
+/// `--help` never dials anything.
+#[test]
+fn qsh_help_carries_the_dynamic_forward_guidance() {
+    let sandbox = Sandbox::new();
+    let output = sandbox.qsh(&["--help"]);
+    let help = String::from_utf8_lossy(&output.stdout);
+    // clap-derive drops the single trailing `.` off the very end of a
+    // field's rendered long help when that field's doc comment is the
+    // struct's last paragraph (verified empirically: `-D`'s own doc
+    // comment ends the `InteractiveArgs` struct with a *second* trailing
+    // paragraph after this one, so this field keeps its period — but
+    // `TunnelOpenArgs::dynamic` below does not, since it is that struct's
+    // last field). Compared with the period trimmed off both sides so
+    // the assertion does not depend on which struct position `-D` sits
+    // in; the wording itself is still the imported constant, byte for
+    // byte, not a copy.
+    let guidance =
+        qsh_core::ops::tunnel::DYNAMIC_FORWARD_UNSUPPORTED_GUIDANCE.trim_end_matches('.');
+    let section = flag_help_slice(&help, "  -D <SPEC>");
+    assert!(
+        section.contains(guidance),
+        "qsh --help's own -D entry (not merely somewhere in --help) must quote the guidance \
+         verbatim: {section}"
+    );
+}
+
+/// The `qsh tunnel open --help` twin of the test above —
+/// `TunnelOpenArgs::dynamic`'s own doc comment quotes the same constant.
+#[test]
+fn qsh_tunnel_open_help_carries_the_dynamic_forward_guidance() {
+    let sandbox = Sandbox::new();
+    let output = sandbox.qsh(&["tunnel", "open", "--help"]);
+    let help = String::from_utf8_lossy(&output.stdout);
+    // See the sibling `qsh_help_carries_the_dynamic_forward_guidance`'s
+    // comment: `TunnelOpenArgs::dynamic` is that struct's last field, so
+    // clap-derive strips the trailing `.` off the rendered help text.
+    let guidance =
+        qsh_core::ops::tunnel::DYNAMIC_FORWARD_UNSUPPORTED_GUIDANCE.trim_end_matches('.');
+    let section = flag_help_slice(&help, "  -D, --dynamic <SPEC>");
+    assert!(
+        section.contains(guidance),
+        "qsh tunnel open --help's own -D entry (not merely somewhere in --help) must quote \
+         the guidance verbatim: {section}"
     );
 }

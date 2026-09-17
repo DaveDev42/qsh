@@ -886,6 +886,13 @@ fn run_serve(ops: &Ops, bind: Option<&str>) -> i32 {
                     stderr_note!("qsh serve: {}", diag.render());
                 }
             },
+            // The pairing-pin notice (ADR-0017 결정 3) and the
+            // invite-replay notice (결정 4's exempted axes plus a
+            // third, host-local line) both reach the operator through this
+            // sink — `qsh-core` holds no stderr I/O of its own
+            // (`docs/design/architecture.md` §1), same precedent as the
+            // `policy_diagnostic` closure just above.
+            |notice| stderr_note!("qsh serve: {notice}"),
             shutdown_signal(),
         ))
     })();

@@ -945,3 +945,70 @@ fn minimal_policy_example_fills_in_actual_pinned_peer_names() {
     let example = minimal_policy_example(&paths_with(dir.path()));
     assert!(example.contains("device:laptop"), "{example:?}");
 }
+
+// `PinnedPrincipalIndex` (ADR-0017 결정 2 `:21`'s matching
+// rule reused verbatim): the pairing-pin notice's "does an `[[acl]]` row
+// already name this principal" answer. Previously untested — a mutation
+// that deleted the `auth_path == AuthPath::Pin` filter left the whole
+// `acl::` suite green.
+#[test]
+fn pinned_principal_index_counts_only_pin_auth_path_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    write_acl(
+        dir.path(),
+        "[[acl]]\nprincipal = \"device:a\"\nauth_path = \"pin\"\nallow = [\"session.open\"]\n\n\
+         [[acl]]\nprincipal = \"device:b\"\nauth_path = \"ca\"\nallow = [\"session.open\"]\n",
+    );
+    let load = PolicySource::load(&paths_with(dir.path()));
+    let policy = load.as_loaded().expect("valid acl.toml must load");
+    let index = PinnedPrincipalIndex::from_policy(policy);
+    assert!(
+        index.names_device("a"),
+        "a pin-path row for device:a must be counted"
+    );
+    assert!(
+        !index.names_device("b"),
+        "a ca-path row for device:b must not be counted as a pin-path row"
+    );
+}
+
+#[test]
+fn pinned_principal_index_counts_the_omitted_default_auth_path() {
+    let dir = tempfile::tempdir().unwrap();
+    // `auth_path` omitted entirely — defaults to `pin`
+    // (`auth_path_defaults_to_pin_when_omitted`, above).
+    write_acl(
+        dir.path(),
+        "[[acl]]\nprincipal = \"device:a\"\nallow = [\"session.open\"]\n",
+    );
+    let load = PolicySource::load(&paths_with(dir.path()));
+    let policy = load.as_loaded().expect("valid acl.toml must load");
+    let index = PinnedPrincipalIndex::from_policy(policy);
+    assert!(
+        index.names_device("a"),
+        "an omitted auth_path defaults to pin and must be counted"
+    );
+}
+
+#[test]
+fn pinned_principal_index_empty_names_no_device() {
+    assert!(!PinnedPrincipalIndex::empty().names_device("anything"));
+}
+
+#[test]
+fn load_or_deny_with_index_returns_the_empty_index_on_a_missing_or_invalid_policy() {
+    // `DenyAll` is what is actually enforced in both cases, so no row —
+    // pin-path or otherwise — is enforcing anything.
+    let dir = tempfile::tempdir().unwrap();
+    let (_authorizer, diagnostic, index) = load_or_deny_with_index(&paths_with(dir.path()));
+    assert!(diagnostic.is_some(), "a missing acl.toml must diagnose");
+    assert!(!index.names_device("anything"));
+
+    write_acl(dir.path(), "this is not [ valid toml");
+    let (_authorizer, diagnostic, index) = load_or_deny_with_index(&paths_with(dir.path()));
+    assert!(
+        diagnostic.is_some(),
+        "an unparseable acl.toml must diagnose"
+    );
+    assert!(!index.names_device("anything"));
+}
