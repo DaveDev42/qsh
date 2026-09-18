@@ -2,11 +2,12 @@
 //! failure wordings (`docs/ROADMAP.md:123`'s eight-topic list; ADR-0017
 //! 결정 4's exemption axes; ADR-0014 결정 5/9's port/bind wordings).
 //!
-//! Scope: **T1-T6 only, six entries, not seven.** T7 (the `qsh trust
-//! invite` candidate-address enumeration, `INVITE_ADDRESS_*`) is
-//! deliberately not in this table yet — none of its constants exist in
-//! `qsh-core`, so there is nothing here to test against. Add its rows
-//! here in the same shape when they land.
+//! Scope: **T1-T7, seven topics.** T7 is the `qsh trust invite`
+//! candidate-address enumeration: its zero-candidate wording
+//! (`qsh_core::trust::invite_address::INVITE_ADDRESS_NONE`) is the
+//! three-part one, while the populated-case heading
+//! (`INVITE_ADDRESS_HEADING`) is a heading rather than a failure and
+//! carries no remedy — it is covered by the §6.11 verbatim test alone.
 //!
 //! Two frames, both copied from `acl_docs.rs`/`schema_commands_registry.rs`
 //! rather than invented fresh:
@@ -46,6 +47,7 @@ use qsh_core::pairing::{
 };
 use qsh_core::serve::{BIND_UNAVAILABLE_REMEDY, bind_unavailable};
 use qsh_core::trust::ADDRESS_PORT_ASSUMED_NOTICE;
+use qsh_core::trust::invite_address::{INVITE_ADDRESS_HEADING, INVITE_ADDRESS_NONE};
 use qsh_core::tunnel::REMOTE_FORWARD_LOOPBACK_ONLY_MESSAGE;
 
 #[path = "support/docs.rs"]
@@ -70,7 +72,8 @@ fn heading_section_slice<'a>(doc: &'a str, heading: &str) -> &'a str {
 
 // ---------------------------------------------------------------------
 // 6.1 Verbatim doc-quoting tests, rows 1-6 (rows 7-10 live in
-// tunnel_docs.rs, rows for T7 do not exist in this commit).
+// tunnel_docs.rs); T7's own verbatim test is F23, below the three-part
+// table.
 // ---------------------------------------------------------------------
 
 #[test]
@@ -151,6 +154,22 @@ fn cli_md_section_6_11_quotes_the_pairing_invite_replay_notice_verbatim() {
         section.contains(PAIRING_INVITE_REPLAY_NOTICE),
         "docs/CLI.md §6.11 itself must quote PAIRING_INVITE_REPLAY_NOTICE verbatim"
     );
+}
+
+/// T7's own verbatim check: `docs/CLI.md` §6.11 itself must quote both
+/// `INVITE_ADDRESS_*` constants, not merely somewhere in the file
+/// (§6.1's F5 rationale — the same reason every other row here is
+/// section-scoped).
+#[test]
+fn cli_md_section_6_11_quotes_the_invite_address_wordings_verbatim() {
+    let cli_md = read_doc("docs/CLI.md");
+    let section = heading_section_slice(&cli_md, "### 6.11 Identity와 trust");
+    for wording in [INVITE_ADDRESS_HEADING, INVITE_ADDRESS_NONE] {
+        assert!(
+            section.contains(wording),
+            "docs/CLI.md §6.11 itself must quote {wording:?} verbatim"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -315,6 +334,22 @@ fn three_part_rows() -> Vec<ThreePartRow> {
             ),
         },
         ThreePartRow {
+            label: "T7",
+            observation: ThreePartSlot::new(
+                INVITE_ADDRESS_NONE,
+                "the kernel named no source address, or only ones this line can't offer \
+                 (loopback, unspecified, or an unprintable link-local)",
+            ),
+            impact: ThreePartSlot::new(
+                INVITE_ADDRESS_NONE,
+                "Invite still valid; fill `<address>` by hand.",
+            ),
+            next_command: ThreePartSlot::new(
+                INVITE_ADDRESS_NONE,
+                "Check routing with `ip route`/`route -n`",
+            ),
+        },
+        ThreePartRow {
             label: "T6",
             // T6 is the one row that splits across two constants by
             // design (§2 T6, `CHANNEL_CONSTRAINED` below): the envelope
@@ -339,14 +374,13 @@ fn three_part_rows() -> Vec<ThreePartRow> {
 
 #[test]
 fn each_failure_wording_has_observation_impact_and_next_command() {
-    // Seven rows for six topics: T3 gets two (absent/present `[[acl]]`
-    // row branches), T7 is out of scope for this commit —
-    // gated on a pending decision (see this file's module doc).
+    // Eight rows for seven topics: T3 gets two (absent/present `[[acl]]`
+    // row branches).
     let rows = three_part_rows();
     assert_eq!(
         rows.len(),
-        7,
-        "this table covers T1-T6 (T3 split into its absent/present rows), not T7"
+        8,
+        "this table covers T1-T7 (T3 split into its absent/present rows)"
     );
     for row in &rows {
         row.observation.assert_holds(row.label, "observation");

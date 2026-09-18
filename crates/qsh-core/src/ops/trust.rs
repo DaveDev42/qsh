@@ -1,6 +1,9 @@
 //! `trust.*` operations and the shared trust store: add, list, remove, invite, accept.
 
+use std::net::IpAddr;
+
 use super::*;
+use crate::trust::invite_address::{self, InviteAddressAdvice};
 
 impl Ops {
     /// The shared, reload-on-change trust store to inject into the
@@ -160,6 +163,54 @@ impl Ops {
             code,
             expires_at,
         })
+    }
+
+    /// The human-mode address block that goes under `trust.invite`'s
+    /// `accept_command` (`docs/CLI.md` §6.11): candidate `host:port`
+    /// strings for the `<address>` placeholder, or the single line that
+    /// says why there are none.
+    ///
+    /// Deliberately **not** part of [`Self::trust_invite`]'s result.
+    /// `TrustInviteData` is a `qsh.cli/v1` contract type and this is a
+    /// routing observation about the machine the CLI happens to be running
+    /// on — merging the two would put a host-local, unverifiable fact
+    /// inside a frozen envelope, and would make every machine-mode caller
+    /// pay for an observation it never asked for. Keeping them separate is
+    /// also what lets the frontend call this from inside `finish`'s
+    /// human-only closure, so machine mode makes no route query at all.
+    ///
+    /// The port comes from this host's `[serve].bind`, or
+    /// [`crate::serve::DEFAULT_PORT`] when `config.toml` names none or
+    /// cannot be read at all — an unreadable config is a bigger problem
+    /// than this line and must not turn an invite into an error, so it
+    /// degrades to the default the wording already names.
+    pub fn invite_address_advice(&self) -> InviteAddressAdvice {
+        self.invite_address_advice_with(invite_address::route::observe_source_addresses)
+    }
+
+    /// [`Self::invite_address_advice`] over a caller-supplied observation.
+    ///
+    /// The injected-observation seam: the effect arrives as an argument
+    /// and nothing is stored, the same shape
+    /// `crate::doctor::probe::detect_path_shadow` and
+    /// `crate::doctor::probe::keystore_finding` use, and for the reason
+    /// their own docs give — so the rule under test is tested against a
+    /// fixed input instead of against whatever the machine running the
+    /// tests happens to have. (`crate::serve::run_serve`'s
+    /// `on_bound`/`on_notice` parameters are the same shape on the
+    /// effect-out side.) `FnOnce` is the minimum bound: the observation
+    /// happens exactly once.
+    pub fn invite_address_advice_with(
+        &self,
+        observe: impl FnOnce() -> Vec<IpAddr>,
+    ) -> InviteAddressAdvice {
+        let config = self.config().ok();
+        let port = invite_address::port_from_bind_spec(
+            config
+                .as_ref()
+                .and_then(|config| config.serve.bind.as_deref()),
+        );
+        invite_address::assemble(&observe(), port)
     }
 
     /// `trust.accept <address> <code>` — complete a pairing exchange with

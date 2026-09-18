@@ -479,9 +479,12 @@ pub enum TrustCmd {
         name: String,
     },
     /// Mint a one-time invite code for another device to pair with this one
-    /// (ADR-0002, `docs/CLI.md` §6.11). No address to reach *this* device is
-    /// known here — the operator supplies one out of band when relaying the
-    /// printed `qsh trust accept` command line.
+    /// (ADR-0002, `docs/CLI.md` §6.11). Human mode also lists the source
+    /// addresses this host's own routing table picks, as candidates for the
+    /// `<address>` placeholder in the printed `qsh trust accept` line — a
+    /// routing observation, never a reachability check, and the operator
+    /// still relays the chosen one out of band. `--json`/`--jsonl` makes no
+    /// such observation and the envelope carries no address.
     Invite,
     /// Dial `address`, redeem `code` against its invite, and — on a
     /// successful mutual proof — pin the peer exactly as `trust add` would

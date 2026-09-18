@@ -196,6 +196,39 @@ const CLI_SRC_DIR: &str = "crates/qsh-cli/src";
 const CLI_SRC_REASON: &str = "qsh-cli talks to a daemon only through qsh-core's localctl client, never by opening a UDS \
      socket itself (PLAN.md M3 Step 5(a)); crates/qsh-cli/tests is out of scope for this rule";
 
+/// `trust/invite_address/route.rs` (and any future sibling under the same
+/// directory) asks the kernel which source address a route off this host
+/// would use and must never transmit: zero bytes on the wire is the
+/// premise the whole candidate block rests on (`docs/design/
+/// threat-model.md` §3's `qsh trust invite` row), and it is also what
+/// makes the call bounded — `connect(2)` on a datagram socket resolves a
+/// route synchronously, while a transmit or receive call would introduce
+/// the one wait an interactive command must not have. Directory-scoped,
+/// not file-scoped: a file-scoped ban on `route.rs` alone would not cover
+/// a later sibling added to this module (adversarial review).
+const INVITE_ADDRESS_DIR: &str = "crates/qsh-core/src/trust/invite_address";
+const INVITE_ROUTE_REASON: &str = "crates/qsh-core/src/trust/invite_address/ performs a connect-only route lookup and \
+     must never transmit or wait: zero bytes on the wire is what keeps `qsh trust invite` from becoming an \
+     active probe, and what keeps an interactive command from blocking (docs/design/threat-model.md §3)";
+
+/// `trust::invite_address::InviteAddressAdvice` must stay structurally
+/// incapable of reaching the `qsh.cli/v1` envelope: no serde derive, no
+/// hand-written impl, no schema. `qsh-cli`'s `finish` is bound on
+/// `Serialize`, so with no such impl anywhere in this module the type
+/// cannot be serialized into an envelope even by accident. Two scopes,
+/// not one: `Scope::Dir(INVITE_ADDRESS_DIR)` covers `route.rs` and any
+/// future sibling, but not the parent `invite_address.rs` file itself
+/// (a directory scope never reaches its own parent), so a
+/// `Scope::File(INVITE_ADDRESS_FILE)` entry stays alongside it — trait
+/// coherence lets an `impl Serialize` for a `qsh-core` type live in any
+/// file of the crate, not only the one that declares the type
+/// (adversarial review).
+const INVITE_ADDRESS_FILE: &str = "crates/qsh-core/src/trust/invite_address.rs";
+const INVITE_ADDRESS_REASON: &str = "trust/invite_address holds a human-channel-only type; this module must not itself \
+     name serde or a schema derive for it — trait coherence still lets an impl live in another qsh-core file, so this \
+     ban is one input to keeping the type out of a qsh.cli/v1 envelope, not a crate-wide guarantee by itself \
+     (docs/CLI.md §10 compatibility policy)";
+
 fn module_bans() -> Vec<ModuleBan> {
     let mut bans: Vec<ModuleBan> = BROKER_TOKEN_SET
         .into_iter()
@@ -229,6 +262,27 @@ fn module_bans() -> Vec<ModuleBan> {
             scope: Scope::Dir(CLI_SRC_DIR),
             forbidden,
             reason: CLI_SRC_REASON,
+        });
+    }
+
+    for forbidden in [".send", ".recv"] {
+        bans.push(ModuleBan {
+            scope: Scope::Dir(INVITE_ADDRESS_DIR),
+            forbidden,
+            reason: INVITE_ROUTE_REASON,
+        });
+    }
+
+    for forbidden in ["Serialize", "serde", "JsonSchema"] {
+        bans.push(ModuleBan {
+            scope: Scope::File(INVITE_ADDRESS_FILE),
+            forbidden,
+            reason: INVITE_ADDRESS_REASON,
+        });
+        bans.push(ModuleBan {
+            scope: Scope::Dir(INVITE_ADDRESS_DIR),
+            forbidden,
+            reason: INVITE_ADDRESS_REASON,
         });
     }
 
@@ -299,9 +353,10 @@ fn check_module_bans(workspace_root: &Path, violations: &mut Vec<String>) -> Res
 /// sufficient for this lint: this assumption — no string literal embeds `//`
 /// before a banned token, and no block comments (`/* … */`) are used — has
 /// been re-verified for every scope this lint currently scans (`BROKER_DIR`,
-/// the `localctl` files, `REGISTRY_FILE`, and `CLI_SRC_DIR`). **Adding a new
-/// scanned scope requires re-checking this assumption against that scope's
-/// actual source** before trusting this naive strip on it.
+/// the `localctl` files, `REGISTRY_FILE`, `CLI_SRC_DIR`, `INVITE_ADDRESS_DIR`
+/// and `INVITE_ADDRESS_FILE`). **Adding a new scanned scope requires
+/// re-checking this assumption against that scope's actual source** before
+/// trusting this naive strip on it.
 fn strip_line_comment(line: &str) -> &str {
     match line.find("//") {
         Some(idx) => &line[..idx],
@@ -488,13 +543,15 @@ mod tests {
     /// Every configured module-ban target that doesn't exist is flagged
     /// once — not once per token bound to it (the ban targets must exist
     /// once their consumers land: `BROKER_DIR`, the two `localctl` files,
-    /// `REGISTRY_FILE`, and `CLI_SRC_DIR`).
+    /// `REGISTRY_FILE`, `CLI_SRC_DIR`, `INVITE_ADDRESS_FILE`, and the
+    /// `INVITE_ADDRESS_DIR` directory that two separate bans share — a
+    /// shared target is still one entry in `reported_missing`, not two).
     #[test]
     fn module_ban_flags_each_missing_target_exactly_once() {
         let root = tempfile::tempdir().unwrap();
         let mut violations = Vec::new();
         check_module_bans(root.path(), &mut violations).unwrap();
-        assert_eq!(violations.len(), 5, "{violations:?}");
+        assert_eq!(violations.len(), 7, "{violations:?}");
         assert!(
             violations.iter().all(|v| v.contains("does not exist")),
             "{violations:?}"
@@ -551,6 +608,67 @@ mod tests {
         assert!(
             daemon_hits.is_empty(),
             "daemon.rs is the transport bridge and must stay exempt: {violations:?}"
+        );
+    }
+
+    /// `trust/invite_address/` bans `.send`/`.recv` and the serde tokens by
+    /// *directory* (`INVITE_ADDRESS_DIR`), not only on `route.rs` by name: a
+    /// file-scoped-only ban would let a later sibling added next to `route.rs`
+    /// escape it, exactly the trap CLAUDE.md's arch-lint note warns about.
+    /// The parent `invite_address.rs`
+    /// *file*, one level up, is deliberately outside the directory scope —
+    /// covered instead by the separate `Scope::File(INVITE_ADDRESS_FILE)`
+    /// entry the serde tokens also carry.
+    #[test]
+    fn module_ban_flags_send_and_json_schema_in_a_new_sibling_under_invite_address() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("crates/qsh-core/src/trust/invite_address");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("route.rs"),
+            "fn f(s: &std::net::UdpSocket) { let _ = s.send(&[]); }\n",
+        )
+        .unwrap();
+        // Not `route.rs` — a brand-new sibling, to prove the ban reaches a
+        // file that did not exist when the rule was written.
+        fs::write(
+            dir.join("extra.rs"),
+            "#[derive(schemars::JsonSchema)]\nstruct Sibling;\n",
+        )
+        .unwrap();
+        // The parent file, one level up: outside `INVITE_ADDRESS_DIR`'s
+        // scope, so it must stay clean even though it shares the "serde
+        // tokens" rule via its own separate `Scope::File` entry.
+        fs::write(
+            root.path()
+                .join("crates/qsh-core/src/trust/invite_address.rs"),
+            "pub(crate) mod route;\n",
+        )
+        .unwrap();
+
+        let mut violations = Vec::new();
+        check_module_bans(root.path(), &mut violations).unwrap();
+
+        let route_hits: Vec<_> = violations
+            .iter()
+            .filter(|v| v.contains("invite_address/route.rs"))
+            .collect();
+        let extra_hits: Vec<_> = violations
+            .iter()
+            .filter(|v| v.contains("extra.rs"))
+            .collect();
+        let parent_hits: Vec<_> = violations
+            .iter()
+            .filter(|v| v.contains("invite_address.rs:"))
+            .collect();
+
+        assert_eq!(route_hits.len(), 1, "{violations:?}");
+        assert!(route_hits[0].contains(".send"));
+        assert_eq!(extra_hits.len(), 1, "{violations:?}");
+        assert!(extra_hits[0].contains("JsonSchema"));
+        assert!(
+            parent_hits.is_empty(),
+            "invite_address.rs's own clean content must not be flagged: {violations:?}"
         );
     }
 

@@ -38,6 +38,7 @@ use crate::config::{config_io_error, ensure_private_dir, write_private_file};
 use crate::identity::pem;
 use crate::ops::OpError;
 
+pub mod invite_address;
 pub mod pairing;
 pub use pairing::SharedInviteStore;
 
@@ -169,9 +170,11 @@ pub fn normalize_peer_address(address: &str) -> NormalizedAddress {
 /// Where the port starts in a peer address, when it has one: the run after
 /// the rightmost `:`, if that run is non-empty and all ASCII digits.
 ///
-/// One rule, two consumers: [`normalize_peer_address`]'s "does it already
-/// have a port" test and the SNI host `ops::server_name_for` extracts
-/// (ADR-0014 결정 2, "이미 코드에 있는 규칙을 재사용한다").
+/// One rule, three consumers: [`normalize_peer_address`]'s "does it
+/// already have a port" test, the SNI host `ops::server_name_for` extracts
+/// (ADR-0014 결정 2, "이미 코드에 있는 규칙을 재사용한다"), and
+/// [`invite_address::port_from_bind_spec`]'s read of the `[serve].bind`
+/// port.
 pub(crate) fn split_port(address: &str) -> Option<(&str, &str)> {
     match address.rsplit_once(':') {
         Some((host, port)) if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) => {
