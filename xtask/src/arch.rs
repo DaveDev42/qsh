@@ -337,7 +337,7 @@ fn check_module_bans(workspace_root: &Path, violations: &mut Vec<String>) -> Res
                     let rel = file.strip_prefix(workspace_root).unwrap_or(&file);
                     violations.push(format!(
                         "{}:{} names `{}` — {}",
-                        rel.display(),
+                        repo_relative_display(rel),
                         lineno + 1,
                         ban.forbidden,
                         ban.reason
@@ -347,6 +347,23 @@ fn check_module_bans(workspace_root: &Path, violations: &mut Vec<String>) -> Res
         }
     }
     Ok(())
+}
+
+/// A repo-relative path spelled with `/` on every platform.
+///
+/// `Path::display` uses the host separator, so a directory-scoped ban on
+/// Windows renders `trust/invite_address\route.rs` — a mixed spelling,
+/// because the scope constant's own slashes survive `Path::join` while
+/// [`collect_rs_files`] appends each entry with the native one. A violation
+/// string is a repo-relative path a person pastes into an editor or a grep,
+/// so it must read the same everywhere. Built from `components()` rather
+/// than a `\` → `/` replacement: a backslash is a legal filename byte on
+/// Unix, and replacing it there would rewrite a real file name.
+fn repo_relative_display(path: &Path) -> String {
+    path.components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// Everything before a `//` line comment (doc comments included). Naive but
@@ -669,6 +686,30 @@ mod tests {
         assert!(
             parent_hits.is_empty(),
             "invite_address.rs's own clean content must not be flagged: {violations:?}"
+        );
+    }
+
+    /// The directory-qualified filter the test above uses only means what it
+    /// says if a violation spells its path the same way on every platform.
+    /// It does not by default: a Windows CI run flagged
+    /// `trust/invite_address\route.rs`, and every other ban test matches a
+    /// bare file name, so that test is the first one the mixed spelling
+    /// could reach. [`repo_relative_display`] is what makes it uniform.
+    #[test]
+    fn a_violation_path_is_spelled_with_forward_slashes_on_every_platform() {
+        let native: PathBuf = [
+            "crates",
+            "qsh-core",
+            "src",
+            "trust",
+            "invite_address",
+            "route.rs",
+        ]
+        .iter()
+        .collect();
+        assert_eq!(
+            repo_relative_display(&native),
+            "crates/qsh-core/src/trust/invite_address/route.rs"
         );
     }
 
