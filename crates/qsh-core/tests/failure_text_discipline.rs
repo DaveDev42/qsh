@@ -4,9 +4,9 @@
 //!
 //! Scope: **T1-T6 only, six entries, not seven.** T7 (the `qsh trust
 //! invite` candidate-address enumeration, `INVITE_ADDRESS_*`) is
-//! deliberately not in this table yet — it is gated on a pending
-//! decision (design §7 열린 질문 8/11/12); none of its constants exist in
-//! `qsh-core` yet, so there is nothing here to test against.
+//! deliberately not in this table yet — none of its constants exist in
+//! `qsh-core`, so there is nothing here to test against. Add its rows
+//! here in the same shape when they land.
 //!
 //! Two frames, both copied from `acl_docs.rs`/`schema_commands_registry.rs`
 //! rather than invented fresh:
@@ -104,7 +104,7 @@ fn readme_known_limitations_quotes_the_bind_unavailable_remedy_verbatim() {
     assert!(
         section.contains(BIND_UNAVAILABLE_REMEDY),
         "README.md's Known limitations section itself must quote BIND_UNAVAILABLE_REMEDY \
-         verbatim (ADR-0014 결정 9, design §5)"
+         verbatim (ADR-0014 결정 9)"
     );
 }
 
@@ -272,8 +272,8 @@ fn three_part_rows() -> Vec<ThreePartRow> {
                 "it inherits that row's grants exactly as written",
             ),
             // Same assembled-command shape as the T3 (absent) row above,
-            // but with `acl_row_present: true` — design §2 T3 lists both
-            // branches' impact clauses as T3's impact slot, and this row
+            // but with `acl_row_present: true`. T3's impact slot covers
+            // both branches' impact clauses, and this row
             // is what stops `PAIRING_ACL_ROW_PRESENT`'s impact clause
             // from being droppable while the gate stays green (a
             // mutation that replaced it with a bare "A row exists:" was
@@ -340,7 +340,7 @@ fn three_part_rows() -> Vec<ThreePartRow> {
 #[test]
 fn each_failure_wording_has_observation_impact_and_next_command() {
     // Seven rows for six topics: T3 gets two (absent/present `[[acl]]`
-    // row branches, design §2 T3), T7 is out of scope for this commit —
+    // row branches), T7 is out of scope for this commit —
     // gated on a pending decision (see this file's module doc).
     let rows = three_part_rows();
     assert_eq!(
@@ -371,7 +371,7 @@ fn t1_observation_slice_guards_the_assuming_port_substring() {
 }
 
 // ---------------------------------------------------------------------
-// 6.3 Exception-list tests, over the tables design §4 writes out verbatim.
+// 6.3 Exception-list tests, over the two tables written out just below.
 // ---------------------------------------------------------------------
 
 /// Axes deliberately excluded from the observation/impact/next-command
@@ -426,7 +426,7 @@ const CHANNEL_CONSTRAINED: &[(&str, &str)] = &[(
      2자리, README, `docs/CLI.md` §6.9)로 낸다",
 )];
 
-/// Test one (design §6.3 (1)): every exclusion has a non-empty reason, the
+/// Test one of the two: every exclusion has a non-empty reason, the
 /// two lists never overlap, and ADR-0017 결정 4's two exempt axes are
 /// present by name — modeled on `schema_commands_registry.rs`'s
 /// bidirectional gate (`every_implemented_operation_has_a_schema_or_a_
@@ -470,7 +470,7 @@ fn excluded_and_channel_constrained_entries_are_documented_and_disjoint() {
     }
 }
 
-/// Test two, the reverse direction (design §6.3 (2)): `PERMISSION_DENIED_
+/// Test two, the reverse direction: `PERMISSION_DENIED_
 /// MESSAGE` and `PairingError::AlreadyConsumed`'s wire text must NOT show
 /// up as a slot's source wording in the §6.2 three-part table — that is
 /// what stops someone later three-parting them and breaking
