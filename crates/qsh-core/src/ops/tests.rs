@@ -286,6 +286,60 @@ fn trust_add_with_a_port_less_address_pins_the_default_port() {
     );
 }
 
+/// `Ops::invite_address_advice_with` lists every surviving candidate from
+/// a synthetic observation — the injected-observation seam
+/// (`crate::doctor::probe::detect_path_shadow`'s doc gives the same
+/// reason) instead of depending on this test machine's real routes.
+#[test]
+fn invite_address_advice_with_a_synthetic_observation_lists_every_surviving_candidate() {
+    let (_guard, ops) = temp_ops();
+    let advice = ops.invite_address_advice_with(|| {
+        vec![
+            "192.0.2.10".parse().unwrap(),
+            std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+        ]
+    });
+    assert_eq!(
+        advice.lines(),
+        &[
+            crate::trust::invite_address::INVITE_ADDRESS_HEADING.to_string(),
+            "  192.0.2.10:4433".to_string(),
+        ]
+    );
+}
+
+/// An empty observation (no default route in either family) falls back to
+/// the three-part zero-candidate wording rather than an empty block.
+#[test]
+fn invite_address_advice_with_an_empty_observation_yields_the_none_wording() {
+    let (_guard, ops) = temp_ops();
+    let advice = ops.invite_address_advice_with(Vec::new);
+    assert_eq!(
+        advice.lines(),
+        &[crate::trust::invite_address::INVITE_ADDRESS_NONE.to_string()]
+    );
+}
+
+/// The port attached to a candidate line comes from `[serve].bind` in
+/// `config.toml`, not the hardcoded default, when the sandbox's config
+/// names one.
+#[test]
+fn invite_address_advice_reads_the_configured_serve_port() {
+    let (dir, ops) = temp_ops();
+    let config_dir = dir.path().join("config");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(ops.paths().config_file(), "[serve]\nbind = \"[::]:5555\"\n").unwrap();
+
+    let advice = ops.invite_address_advice_with(|| vec!["192.0.2.10".parse().unwrap()]);
+    assert_eq!(
+        advice.lines(),
+        &[
+            crate::trust::invite_address::INVITE_ADDRESS_HEADING.to_string(),
+            "  192.0.2.10:5555".to_string(),
+        ]
+    );
+}
+
 /// `trust.list` normalizes a hand-written port-less pin on read, and
 /// leaves an address-less (client-only) pin's empty address alone
 /// (§6.11: an address-less pin is never a dial candidate).

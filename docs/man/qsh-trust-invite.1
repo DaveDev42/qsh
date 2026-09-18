@@ -2,11 +2,11 @@
 .el .ds Aq '
 .TH qsh-trust-invite 1  "invite 0.1.0" 
 .SH NAME
-qsh\-trust\-invite \- Mint a one\-time invite code for another device to pair with this one (ADR\-0002, `docs/CLI.md` §6.11). No address to reach *this* device is known here — the operator supplies one out of band when relaying the printed `qsh trust accept` command line
+qsh\-trust\-invite \- Mint a one\-time invite code for another device to pair with this one (ADR\-0002, `docs/CLI.md` §6.11). Human mode also lists the source addresses this host\*(Aqs own routing table picks, as candidates for the `<address>` placeholder in the printed `qsh trust accept` line — a routing observation, never a reachability check, and the operator still relays the chosen one out of band. `\-\-json`/`\-\-jsonl` makes no such observation and the envelope carries no address
 .SH SYNOPSIS
 \fBqsh trust invite\fR [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] 
 .SH DESCRIPTION
-Mint a one\-time invite code for another device to pair with this one (ADR\-0002, `docs/CLI.md` §6.11). No address to reach *this* device is known here — the operator supplies one out of band when relaying the printed `qsh trust accept` command line
+Mint a one\-time invite code for another device to pair with this one (ADR\-0002, `docs/CLI.md` §6.11). Human mode also lists the source addresses this host\*(Aqs own routing table picks, as candidates for the `<address>` placeholder in the printed `qsh trust accept` line — a routing observation, never a reachability check, and the operator still relays the chosen one out of band. `\-\-json`/`\-\-jsonl` makes no such observation and the envelope carries no address
 .SH OPTIONS
 .TP
 \fB\-\-json\fR

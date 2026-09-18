@@ -124,6 +124,40 @@ fn trust_accept_with_no_code_keeps_stdout_pure_json_at_every_verbosity() {
     }
 }
 
+/// `qsh trust invite`'s candidate-address block is a human-mode-only
+/// channel (`docs/CLI.md` §6.11): `--json`/`--jsonl` must make no route
+/// query at all, so neither wording constant can appear on stdout, and the
+/// envelope's `data` object still carries exactly its three contract keys.
+#[test]
+fn trust_invite_keeps_stdout_pure_json_and_free_of_the_address_block_at_every_verbosity() {
+    use qsh_core::trust::invite_address::{INVITE_ADDRESS_HEADING, INVITE_ADDRESS_NONE};
+
+    let client = Sandbox::initialized();
+    for (label, mode, verbosity) in [
+        ("--jsonl -vv", "--jsonl", "-vv"),
+        ("--json -vvv", "--json", "-vvv"),
+    ] {
+        let output = client.qsh(&["trust", "invite", verbosity, mode]);
+        assert_eq!(exit_code(&output), 0, "{label}");
+        let lines = parse_stdout_lines(&output.stdout, label);
+        assert_eq!(lines.len(), 1, "{label}");
+        assert_eq!(lines[0]["ok"], true, "{label}");
+        assert_eq!(lines[0]["command"], "trust.invite", "{label}");
+        let keys: Vec<&str> = lines[0]["data"]
+            .as_object()
+            .expect("data object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        // Alphabetical: see `qsh_proto::types::trust`'s own key-set test.
+        assert_eq!(keys, ["accept_command", "code", "expires_at"], "{label}");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for wording in [INVITE_ADDRESS_HEADING, INVITE_ADDRESS_NONE] {
+            assert!(!stdout.contains(wording), "{label}: {stdout:?}");
+        }
+    }
+}
+
 /// Assert that `stdout` is one or more lines, each a complete
 /// `qsh.event/v1` object, and return them. Deliberately a separate parser
 /// from [`parse_stdout_lines`]: a follower streams bare events, so the

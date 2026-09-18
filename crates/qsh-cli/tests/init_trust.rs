@@ -239,6 +239,49 @@ fn trust_list_human_mode_renders_a_table() {
     assert!(stdout.contains("peer-a"), "{stdout:?}");
 }
 
+/// `docs/CLI.md` §6.11: human mode always prints exactly one of the two
+/// `INVITE_ADDRESS_*` wordings under `accept_command` — a populated
+/// heading plus candidates, or the zero-candidate wording — never both,
+/// never neither. Which one depends on this test machine's real routing,
+/// so the assertion is exclusive-or over the two, not a guess at which
+/// branch fires.
+#[test]
+fn trust_invite_human_mode_prints_exactly_one_of_the_two_address_wordings() {
+    use qsh_core::trust::invite_address::{INVITE_ADDRESS_HEADING, INVITE_ADDRESS_NONE};
+
+    let sandbox = Sandbox::new();
+    sandbox.init();
+
+    let output = sandbox.qsh(&["trust", "invite"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8(output.stdout).expect("utf-8");
+    let heading = stdout.contains(INVITE_ADDRESS_HEADING);
+    let none = stdout.contains(INVITE_ADDRESS_NONE);
+    assert!(
+        heading ^ none,
+        "human mode must print exactly one of the two address wordings: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("qsh trust accept <address> "),
+        "the `<address>` placeholder survives the candidate block: {stdout:?}"
+    );
+    // Nothing pins that a printed candidate is *this host's* address
+    // rather than the route query's own destination — `source_address_for`
+    // reading `peer_addr()` (the RFC 5737/3849 destination) instead of
+    // `local_addr()` (this host's kernel-picked source) compiles clean and
+    // keeps every other gate green (adversarial review). It is not this
+    // host's real address on any machine, so its absence is a
+    // machine-independent, unconditional check.
+    for destination in ["192.0.2.1", "2001:db8::1"] {
+        assert!(
+            !stdout.contains(destination),
+            "a candidate must never be this route query's own RFC 5737/3849 \
+             destination address, which would mean `source_address_for` read the \
+             wrong end of the socket: {stdout:?}"
+        );
+    }
+}
+
 #[test]
 fn a_malformed_fingerprint_is_an_invalid_argument() {
     let sandbox = Sandbox::new();

@@ -6,6 +6,7 @@
 
 use std::io::{self, Write};
 
+use qsh_core::trust::invite_address::InviteAddressAdvice;
 use qsh_core::{ExecRunOutput, OpError, SessionReadOutput};
 use qsh_proto::{
     AclCheckData, CapabilitiesData, CertInitData, CertIssueData, DoctorData, Host, HostListData,
@@ -254,13 +255,24 @@ pub fn print_trust_remove(data: &TrustRemoveData) -> io::Result<()> {
 /// The load-bearing line is `accept_command`: the operator copies it
 /// verbatim to the other party (after filling in the placeholder address),
 /// so it is printed on its own line, not folded into a sentence.
-pub fn print_trust_invite(data: &TrustInviteData) -> io::Result<()> {
+///
+/// `advice` is the candidate-address block `Ops` already decided in full —
+/// heading plus candidates, or the single "none" line. This function picks
+/// nothing and formats nothing about it: it writes the lines it was
+/// handed, in order. Any branch here would be a decision living in a
+/// renderer (`docs/design/architecture.md` §1).
+pub fn print_trust_invite(data: &TrustInviteData, advice: &InviteAddressAdvice) -> io::Result<()> {
     let mut stdout = io::stdout().lock();
     writeln!(stdout, "invite code: {}", data.code)?;
     writeln!(stdout, "expires:     {}", data.expires_at)?;
     writeln!(stdout)?;
     writeln!(stdout, "Give this command to the other device's operator:")?;
-    writeln!(stdout, "  {}", data.accept_command)
+    writeln!(stdout, "  {}", data.accept_command)?;
+    writeln!(stdout)?;
+    for line in advice.lines() {
+        writeln!(stdout, "{line}")?;
+    }
+    Ok(())
 }
 
 /// Print the outcome of `qsh trust accept` (ADR-0002, `docs/CLI.md` §6.11).

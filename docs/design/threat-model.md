@@ -65,6 +65,7 @@ ReplayRing은 자산이면서 그 자체가 통제다. PTY 평문 output이 프�
 | `qsh listen` / `qsh reverse` accept | 미인증 UDP | **pairing evaluator를 attach하지 않는다** — 역방향 conduit은 사전 pin/CA로만 신뢰를 세운다(`protocol.md:433`) |
 | localctl UDS | same-uid 로컬 | `<pid>.sock`, 디렉터리 0700, 소켓 파일 0600(`crates/qsh-core/src/localctl/daemon.rs:144`) |
 | CLI 전체 | 로컬 사용자 | 모든 명령이 `Ops`를 통과한다 |
+| `qsh trust invite`의 경로 질의 | 로컬 커널 (나가는 바이트 0) | 소스 주소를 묻기 위해 문서용 예약 주소(RFC 5737 `192.0.2.1`, RFC 3849 `2001:db8::1`)로 UDP `connect`만 하고 전송은 하지 않는다 — 와이어에 패킷이 없으므로 원격 관찰자에게는 표면이 아니고, 대기가 없으므로 대화형 명령을 막지도 않는다. 결과는 human stdout 전용이고 machine mode는 질의 자체를 하지 않는다. `xtask arch`의 디렉터리 스코프 금지(`crates/qsh-core/src/trust/invite_address/`)가 이 전제를 기계로 강제하고, machine mode 불변식은 별도로 `route::observation_count`(관측 카운터)가 `qsh-cli`의 실제 dispatch arm 테스트로 고정한다 |
 | `config.toml` / `trust.toml` / `acl.toml` / `hosts.toml` | 로컬 파일 | 파싱 실패는 fail-closed(`architecture.md:87`) |
 | invite code 입력 | 사람이 옮긴 문자열 | 20바이트 CSPRNG → Crockford Base32, `crates/qsh-proto/src/pairing.rs` |
 | cert 파일 교환 | 로컬 파일 | ADR-0013 |

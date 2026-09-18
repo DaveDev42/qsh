@@ -701,7 +701,7 @@ qsh trust accept <address> --code-stdin --json
 qsh trust accept <address>
 ```
 
-`trust.invite`는 이 장치에서 10분 TTL짜리 1회용 invite code를 발급한다(ADR-0002, M7 Step 4). 160-bit CSPRNG secret을 Crockford Base32로 인코딩해 `xxxx-xxxx-xxxx-xxxx-xxxx-xxxx-xxxx-xxxx` 형태(소문자, 4자씩 8그룹)로 보여준다. code 자체에는 주소가 들어 있지 않다 — 이 장치에 닿을 `host:port`는 별도로, out-of-band 경로로 전달해야 한다.
+`trust.invite`는 이 장치에서 10분 TTL짜리 1회용 invite code를 발급한다(ADR-0002, M7 Step 4). 160-bit CSPRNG secret을 Crockford Base32로 인코딩해 `xxxx-xxxx-xxxx-xxxx-xxxx-xxxx-xxxx-xxxx` 형태(소문자, 4자씩 8그룹)로 보여준다. code 자체에는 주소가 들어 있지 않다 — 이 장치에 닿을 `host:port`는 여전히 별도로, out-of-band 경로로 전달해야 한다. human mode는 그 자리에 무엇을 넣을지 고르라고 후보 목록을 덧붙이지만(아래), envelope에는 어떤 주소도 싣지 않는다 — `data`는 `code`·`expires_at`·`accept_command` 셋 그대로다.
 
 ```json
 {
@@ -718,6 +718,10 @@ qsh trust accept <address>
 ```
 
 human mode는 `accept_command`를 화면에 그대로 찍는다. operator는 `<address>` 자리만 실제 주소로 바꿔 상대에게 전달하면 된다 — 그게 이 필드의 유일한 용도다.
+
+human mode는 `accept_command` 아래에 이 host가 스스로 관측한 후보 주소를 덧붙인다 — `<address>` 자리에 넣을 값을 고르는 재료다. 관측은 커널에 길을 묻는 것 하나뿐이다: 문서용 예약 주소(RFC 5737 `192.0.2.1`, RFC 3849 `2001:db8::1`)를 목적지로 UDP 소켓을 `connect`하고 커널이 고른 소스 주소를 읽는다 — IP 패밀리(v4/v6)당 최대 하나이지, 이 host가 가진 다른 인터페이스 주소(두 번째 NIC, Tailscale/WireGuard 같은 overlay 포함)까지 나열하는 것은 아니다. 전송은 하지 않으므로 와이어로 나가는 바이트는 0이고, 그래서 기다릴 것도 없다. 붙는 포트는 이 host의 `[serve].bind`가 명시한 값이고, 이 명령이 그 값을 읽을 수 없으면(미설정이거나, `config.toml` 읽기·파싱이 실패했거나, bind spec의 포트 부분이 `u16`으로 파싱되지 않는 경우 — 이 세 갈래 모두) 4433이다. `config.toml` 파싱 실패는 이 경로에서 별도 오류나 경고 없이 조용히 4433으로 접힌다. 실행 중인 `qsh serve --bind`가 그 포트를 덮어썼는지, 그리고 `[serve].bind`가 loopback처럼 이 host 자신을 이미 좁혀 놨는지는 이 명령이 알 수 있는 사실이 아니다 — 가령 `[serve].bind`가 `127.0.0.1:4433`이면 여기 찍힐 수 있는 LAN 주소를 실제 서버는 받지 않는다. loopback·unspecified 주소와, zone index 없이는 붙여 넣을 수 없는 IPv6 link-local(`fe80::/10`)은 후보에서 뺀다. 찍히는 IPv6 후보가 이 host가 RFC 8981 privacy extension으로 하루 안팎마다 스스로 회전시키는 임시 주소일 수 있다는 것도 이 관측은 모른다 — `trust accept`는 그 순간 쓰인 주소를 영구적으로 pin하므로, 이 줄을 나중에 복사해 쓰면 이미 낡은 주소일 수 있다. 머리글 문면은 정확히 "Default-route source address per IP family, not every interface -- port is `[serve].bind`'s, or 4433 when it gives none this command can read, never a running `qsh serve --bind`. Not a reachability check: a NAT or firewall can still block any of these for the peer:"다. 커널이 어느 축에서도 소스 주소를 답하지 않거나, 답한 것이 전부 위 규칙에 걸리면 목록 대신 정확히 "No candidate: the kernel named no source address, or only ones this line can't offer (loopback, unspecified, or an unprintable link-local) -- not "this device has no address". Invite still valid; fill `<address>` by hand. Check routing with `ip route`/`route -n`."가 나간다. 인터페이스 열거(`getifaddrs` 계열) 폴백은 없다.
+
+`--json`/`--jsonl`에서는 이 질의를 아예 하지 않는다 — 후보는 human stdout 전용 채널이고, machine mode의 stdout에는 envelope 한 줄 외에 아무것도 나가지 않는다(§2.2). 이 목록은 도달성 주장이 아니다: NAT나 방화벽 뒤에서 상대가 실제로 닿을 수 있는지는 이 host가 볼 수 없는 사실이고, 그래서 머리글이 그것을 명시적으로 부정한다.
 
 `trust.accept <address> <code>`는 `address`로 dial해 `code`가 가리키는 invite를 redeem한다. `address`도 포트를 생략하면 4433으로 읽고, 채운 경우 같은 `assuming port 4433` 한 줄이 stderr로 나간다. pin에 저장되는 주소는 그 정규화된 값, 즉 방금 dial에 성공한 그 문자열이다. 인증의 근거는 TLS identity가 아니라 secret 소유 증명이다: 양쪽은 TLS exporter(RFC 5705 `export_keying_material`)로 채널에 묶인 값을 뽑고, 그 위에 도메인을 분리한 두 개의 BLAKE3 keyed-hash 증명(initiator→responder, responder→initiator)을 constant-time으로 주고받는다. 상대 쪽 증명이 검증되기 전에는 어느 쪽도 pin하지 않는다 — 메시지가 도착했다는 사실만으로 pin하는 경로는 없다.
 

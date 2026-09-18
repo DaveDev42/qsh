@@ -593,6 +593,14 @@ Some of these are MVP scope decisions, some are unfinished work.
   own state is not the problem. Recovery is `qsh trust remove` on the
   host, then a new `trust invite`/`trust accept` round
   (`docs/design/protocol.md` §15.6, `docs/CLI.md` §6.11).
+- `qsh trust invite` does not know this device's reachable address. Human
+  mode suggests candidates by asking the kernel which source address a
+  packet leaving this host would carry, but that is a routing observation,
+  not a reachability check — behind NAT or a firewall none of them may work
+  — and a host with no default route, or one whose only answer is an
+  address that means nothing off this machine, gets no candidates at all,
+  since there is no interface-enumeration fallback. The operator still
+  picks the address and relays it out of band (`docs/CLI.md` §6.11).
 - `exec.run` output is capped at 64 MiB. The whole of stdout plus stderr
   comes back in one envelope, and anything beyond the cap is
   `RESOURCE_EXHAUSTED`. Streaming output is a session feature: use

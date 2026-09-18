@@ -101,3 +101,33 @@ pub struct TrustInviteData {
     /// substitutes a real `host:port` before sending it to the other party.
     pub accept_command: String,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The envelope's `data` object for `trust.invite` has exactly these
+    /// three keys, in alphabetical order — not declaration order. This
+    /// crate's `serde_json` is built without the `preserve_order` feature
+    /// (no `indexmap` in `Cargo.lock`), so `serde_json::Map` is a
+    /// `BTreeMap` and `to_value`/`from_slice::<Value>` both return keys
+    /// alphabetically. The checked-in fixture
+    /// `crates/qsh-cli/tests/fixtures/cli-v1/trust.invite.json` already
+    /// reads `accept_command` → `code` → `expires_at` for the same reason.
+    #[test]
+    fn trust_invite_data_serializes_exactly_three_keys() {
+        let value = serde_json::to_value(TrustInviteData {
+            code: "c".into(),
+            expires_at: "e".into(),
+            accept_command: "a".into(),
+        })
+        .expect("TrustInviteData serializes");
+        let keys: Vec<&str> = value
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(keys, ["accept_command", "code", "expires_at"]);
+    }
+}

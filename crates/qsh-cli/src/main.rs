@@ -316,7 +316,17 @@ fn run(cli: &Cli) -> i32 {
             };
         }
     };
+    dispatch(cli, ops)
+}
 
+/// The command dispatch table, split out of [`run`] so a test can drive it
+/// against an [`Ops`] built from a temporary, test-controlled
+/// `qsh_core::Paths` instead of the real [`Ops::from_env`] — same match arms, same code, the
+/// only thing that differs is where `ops` came from. This is what lets
+/// `trust_invite_json_mode_makes_no_route_query_while_human_mode_does`
+/// (below) exercise the real `Command::Trust(TrustCmd::Invite)` arm rather
+/// than a hand-built stand-in for it.
+fn dispatch(cli: &Cli, ops: Ops) -> i32 {
     let Some(command) = &cli.command else {
         // No subcommand: the bare interactive form, `qsh [user@]host`.
         let Some(target) = &cli.interactive.target else {
@@ -388,7 +398,21 @@ fn run(cli: &Cli) -> i32 {
             cli,
             TrustInviteOp::COMMAND,
             ops.trust_invite(TrustInviteReq {}),
-            human::print_trust_invite,
+            // `ops.invite_address_advice()` must stay inline, as the
+            // second argument `print_trust_invite` is called with, rather
+            // than hoisted into a `let` above this closure: `finish` never
+            // calls this closure in machine mode, so keeping the call
+            // inside it is what keeps `--json`/`--jsonl` from making the
+            // route query at all (`docs/CLI.md` §2.2). Neither
+            // `finish_never_calls_the_human_closure_in_machine_mode` below
+            // nor the jsonl-purity regression can see a hoist here — both
+            // stay green either way, since a discarded observation prints
+            // nothing in either shape (adversarial review). The guard that
+            // does see it is
+            // `trust_invite_json_mode_makes_no_route_query_while_human_mode_does`
+            // below, which drives this arm and reads the route query's own
+            // call counter.
+            |data| human::print_trust_invite(data, &ops.invite_address_advice()),
         ),
         Command::Trust(TrustCmd::Accept {
             address,
@@ -1628,5 +1652,104 @@ mod tests {
         assert_eq!(remote_exit_code_to_process_exit(255), 254);
         assert_eq!(remote_exit_code_to_process_exit(-1), 254);
         assert_eq!(remote_exit_code_to_process_exit(300), 254);
+    }
+
+    /// `finish`'s laziness is the structural half of D3
+    /// (`docs/CLI.md` §2.2): in machine mode it must never call the human
+    /// closure at all, which is what keeps `qsh trust invite --json` from
+    /// making a route query it will not print. This does not go through
+    /// `qsh trust invite`'s own dispatch arm (that needs a live `Ops` and
+    /// real config paths) — it exercises `finish` directly with a fixed
+    /// `Ok` result and a closure that records whether it ran, which is
+    /// exactly the seam `run`'s dispatch arm calls through.
+    #[test]
+    fn finish_never_calls_the_human_closure_in_machine_mode() {
+        let cli = Cli::parse_from(["qsh", "--json", "trust", "invite"]);
+        assert!(cli.wants_json());
+
+        let called = std::cell::Cell::new(false);
+        let data = qsh_proto::TrustInviteData {
+            code: "abcd-efgh-jkmn-pqrs-tvwx-yz23-4567-89ab".to_string(),
+            expires_at: "2026-08-31T00:10:00Z".to_string(),
+            accept_command: "qsh trust accept <address> abcd-efgh-jkmn-pqrs-tvwx-yz23-4567-89ab"
+                .to_string(),
+        };
+        let exit = finish(&cli, TrustInviteOp::COMMAND, Ok(data), |_data| {
+            called.set(true);
+            Ok(())
+        });
+        assert_eq!(exit, 0);
+        assert!(
+            !called.get(),
+            "the human closure must not run when --json is set"
+        );
+    }
+
+    /// The mechanical guard the test above cannot provide.
+    /// `finish_never_calls_the_human_closure_in_machine_mode` exercises
+    /// `finish` with a hand-built closure, not `qsh trust invite`'s real
+    /// one, so it never runs the real dispatch arm end to end and would
+    /// not fail if `ops.invite_address_advice()` were called
+    /// unconditionally instead of only inside the human closure. That
+    /// mutation still compiles, still keeps `dead_code` quiet (the call
+    /// site still exists), and still prints nothing extra in machine
+    /// mode, since a discarded return value writes no stdout line either
+    /// way. `jsonl_purity.rs`'s
+    /// `trust_invite_keeps_stdout_pure_json_and_free_of_the_address_block_at_every_verbosity`
+    /// is blind to it for the same reason: it reads stdout, and the hoist
+    /// changes no byte of stdout.
+    ///
+    /// This drives [`dispatch`] itself — the exact function `run` calls
+    /// in production — against a real `Ops` over a temporary,
+    /// test-owned config/state directory pair standing in for
+    /// `Ops::from_env()`'s environment lookup, and checks the one effect
+    /// that *does* tell the two shapes apart:
+    /// `qsh_core::trust::invite_address::route_query_count()`, an
+    /// `AtomicUsize` `qsh-core`'s `observe_source_addresses` increments
+    /// on every call. An **integration** test spawning the built `qsh`
+    /// binary as a subprocess (the `Sandbox`/`sandbox.qsh(..)` pattern
+    /// `crates/qsh-cli/tests/*.rs` uses) cannot observe this counter at
+    /// all — it lives in the child process's own address space, gone the
+    /// moment that process exits, and unreadable from the parent test
+    /// process even while it runs. Only a test compiled into the same
+    /// binary as the code under test, calling `dispatch` in-process
+    /// exactly as `run` does, can read it — which is why this test lives
+    /// here, in `qsh-cli`'s own `#[cfg(test)]` module, rather than under
+    /// `crates/qsh-cli/tests/`.
+    #[test]
+    fn trust_invite_json_mode_makes_no_route_query_while_human_mode_does() {
+        use qsh_core::Paths;
+        use qsh_core::trust::invite_address::route_query_count;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let paths = Paths::new(tmp.path().join("config"), tmp.path().join("state"));
+        std::fs::create_dir_all(&paths.config_dir).expect("create config dir");
+        std::fs::create_dir_all(&paths.state_dir).expect("create state dir");
+
+        let before = route_query_count();
+
+        let json_cli = Cli::parse_from(["qsh", "--json", "trust", "invite"]);
+        let exit = dispatch(&json_cli, Ops::new(paths.clone()));
+        assert_eq!(
+            exit, 0,
+            "trust invite --json must succeed on a fresh config dir"
+        );
+        assert_eq!(
+            route_query_count(),
+            before,
+            "machine mode must make no route query at all"
+        );
+
+        let human_cli = Cli::parse_from(["qsh", "trust", "invite"]);
+        let exit = dispatch(&human_cli, Ops::new(paths));
+        assert_eq!(
+            exit, 0,
+            "trust invite (human mode) must succeed on a fresh config dir"
+        );
+        assert_eq!(
+            route_query_count(),
+            before + 1,
+            "human mode must make exactly one route query"
+        );
     }
 }
