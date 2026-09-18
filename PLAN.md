@@ -121,6 +121,22 @@ Q4(`docs/ROADMAP.md:132`)가 현행 표면 선측정을 못박았고 DoD 1이 �
 
 **보고만 하고 고치지 않은 것 하나.** `docs/CLI.md:47`이 `--quiet`를 "성공 시 진단 출력 억제"로 적었지만 트리의 `stderr_note!` 자리 어느 것도 `--quiet`를 보지 않는다 — `listening on`, `identity … fingerprint`, `shutting down`이 다 그렇고 `--quiet`가 거는 것은 tracing 계층뿐이다. 새 고지는 기존 자리 전부와 같은 자세이므로 이 스텝이 만든 문제가 아니고, 어느 쪽으로 맞추든 이 스텝이 건드리지 않는 명령들의 출력을 한꺼번에 바꾸는 결정이다. 별도 스텝이나 §8 항목으로 다룬다.
 
+**(a)-추기 — Step 3b 착지 (2026-09-18, main 세션).** 커밋 `51455dc`가 3a가 미뤄 둔 "초대 출력의 후보 주소 열거" 하나를 담는다. §4.1 #13의 답은 `doctor/probe.rs` 재사용이 아니다 — 그쪽 탐지기는 자기 모듈 doc이 `doctor.run`으로 범위를 못박고 있어서 `trust.invite`가 부르면 진단 모듈이 페어링 경로의 의존이 된다. 대신 같은 모양의 형제를 `trust/invite_address`에 세웠다. 순수한 부모(문면·`InviteAddressAdvice`·`assemble`·`port_from_bind_spec`)와 OS에 닿는 자식(`route`)으로 가른 것이 `doctor::probe`가 쓰는 탐지/분류 분리와 같은 구조다.
+
+**새 OS 표면은 ADR이 아니라 threat-model 항목으로 기록했다.** ADR-0019가 `제안됨`에 머문 상태에서 3a가 `docs/man/qsh.1` 수정을 뺐던 것과 같은 게이트를 여기에도 걸면 스텝이 결정을 기다리며 멈춘다. 이 표면이 새로 여는 것은 진입점 하나뿐이고 — `qsh trust invite`가 커널 라우팅 테이블에 질의한다 — 그것은 `docs/design/threat-model.md` §3 진입점 표가 담는 종류의 사실이다. 프로토콜도 와이어 포맷도 JSON 계약도 바뀌지 않으므로 새 결정으로 기록할 것이 없다. 후보 0건 구멍을 `getifaddrs` 폴백으로 메우는 쪽은 별도 스텝으로 미뤘다 — 후보의 출처를 라우트 질의에서 인터페이스 열거로 바꾸는 일이고 열거가 내는 주소 집합의 필터 규칙을 새로 정해야 한다.
+
+**와이어로 나가는 바이트는 0이다.** `UdpSocket::bind`로 unspecified에 묶고 `connect`로 목적지를 지정한 뒤 `local_addr`만 읽는다. `send`도 `recv`도 부르지 않는다 — connect된 UDP 소켓은 패킷을 내지 않고도 커널이 고른 소스 주소를 답한다. 목적지는 문서화 대역의 `SocketAddr` 상수 둘이고(`192.0.2.1:9`, `[2001:db8::1]:9`) `&str`이 아니다. 문자열이면 파싱이 아니라 resolver를 타므로 DNS 질의가 나갈 수 있다. `xtask arch`가 `invite_address` 파일과 그 디렉터리 양쪽에서 `.send`/`.recv`를 금지해 이 성질을 기계로 건다.
+
+**기계 가드 둘을 세웠다.** 문면과 테스트만으로는 두 변이가 잡히지 않는 것을 실증했기 때문이다. 하나, `ops.invite_address_advice()`를 human 클로저 밖으로 끌어올리면 게이트 일곱이 전부 green인 채 machine 모드가 매 호출마다 라우트 질의를 한다 — 버려지는 관측값은 stdout에 한 바이트도 쓰지 않으므로 jsonl 순수성 회귀도 `finish`의 게으름 테스트도 눈이 없다. `route`에 `AtomicUsize` 호출 카운터를 두고, `run`에서 갈라낸 `dispatch`를 `--json`과 human 두 번 태워 카운터를 읽는다. 이 테스트가 통합 테스트일 수 없는 이유는 카운터가 자식 프로세스 주소 공간에 살기 때문이다. 둘, `local_addr()`를 `peer_addr()`로 바꾸면 operator에게 `192.0.2.1:4433`을 건네면서도 일곱 게이트가 green이다. 관측된 IP가 질의 자신의 목적지와 같지 않다는 단언을 `qsh-core` 쪽에, stdout이 두 문서화 주소를 담지 않는다는 단언을 `init_trust.rs` 쪽에 각각 걸었다. 라우트가 없는 기계에서 공허하게 참이 되므로 조건부 단언이 아니다.
+
+**문면 넷을 고쳤다.** 착지 전 리뷰가 상수 둘의 절 여섯 가운데 넷이 거짓인 경우를 실기계에서 재현했다. ① 후보 0건 문면의 "a missing route"는 두 경로 중 하나에서만 참이다 — 커널이 소스 주소를 답하지 않은 경우와, 답했으나 zone index 때문에 `host:port`에 쓸 수 없는 IPv6 link-local이 걸러진 경우가 있고 뒤쪽은 라우트가 있었다. ② 다음 명령으로 `qsh doctor`를 지목한 것은 무동작이다 — `doctor_connectivity_findings`는 named target 안에서만 probe하고 첫 `trust invite`를 돌리는 호스트에는 그 pin이 없다. 저장소가 `no_route` remedy에서 이미 쓰는 `ip route`/`route -n` 표기로 바꿨다. ③ 머리글이 주소 *집합*을 주장했지만 질의가 내는 것은 IP family당 최대 하나, 기본 경로의 소스 주소뿐이다 — 두 번째 NIC도 VPN/overlay도 빠진다. 리뷰가 tailnet 주소가 조용히 누락되는 것을 재현했다. ④ 포트 출처 주장이 "미설정이면 4433"만 말했지만 fallback 조건은 셋이다 — 미설정, config 읽기·파싱 실패, bind spec의 포트가 `u16` 파싱 실패. TOML을 깨는 줄이 든 config로 재현했고 그 상태에서 `qsh serve`는 `CONFIG_ERROR`로 뜨지도 않는다.
+
+**상수 길이 상한을 271자로 잡았다.** 설계 1차 판이 제안한 418자·703자는 저장소의 다른 문면 상수와 자릿수가 다르다 — 기존 상수는 45자에서 271자 사이에 있고 최댓값이 `PAIRING_INVITE_REPLAY_NOTICE`다. 넷을 고치면서 늘어난 분량은 배경 설명을 rustdoc과 `docs/CLI.md` §6.11로 옮겨 상쇄했다(265자·263자).
+
+**고치지 않고 공개한 것 둘.** 하나, `[serve].bind`의 host 절반을 버리므로 loopback에 바인드된 서버도 LAN 후보를 광고한다. 고치려면 후보의 출처가 라우트 질의에서 설정된 bind host로 바뀌는지를 결정해야 하고 그건 이 스텝 범위 밖이다. 기본값이 unspecified라 이 경우는 operator가 명시적으로 loopback에 묶은 때뿐이고, 머리글이 도달성을 이미 부정하므로 찍히는 값이 거짓말은 아니고 쓸모없을 뿐이다. 둘, 찍히는 IPv6 후보가 RFC 8981 privacy extension 임시 주소면 하루 안에 돌아가는데 `trust accept`는 그것을 durable하게 pin한다. 둘 다 `docs/CLI.md` §6.11에 한 문장씩 적었다.
+
+**착지 중 지운 것 하나.** 끌어올리기 변이를 소스 텍스트 매칭으로 잡으려던 테스트가 동어반복이었다 — `include_str!("main.rs")`가 찾는 바늘이 그 단언 자신의 리터럴에 있어서 dispatch arm이 무엇이든 통과한다. 카운터 가드가 같은 변이를 실제로 잡으므로 지웠고, 그 테스트를 가리키던 주석 둘은 카운터 가드 이름으로 고쳤다.
+
 ### Step 4 — doctor 진단 6종 + 동결 set 확장 (S4, 0.5ew)
 
 근거 ADR: `acl_principal_unmatched`·`acl_ca_auth_path_missing` 2종은 ADR-0017 결정 2가 code 이름과 매칭 규칙까지 정한다(`0017-acl-toml-not-written.md:20-26`). 나머지 4종(서비스 미등록, systemd linger 미설정, macOS LaunchAgent 로그인 세션 한계, `bindv6only`)은 어느 ADR에도 결정문이 없다 — ADR-0017 결과 절이 "이 ADR이 정하지 않는다. 같은 설계의 doctor 스텝과 `qsh service` 스텝 소관이다"라고 명시적으로 넘겼다(`:46`). 즉 이 스텝이 그 결정 지점이다.
