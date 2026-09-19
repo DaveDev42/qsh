@@ -1947,6 +1947,7 @@ async fn open_fake_target_tcp_accepted(
             ticket: ticket.to_vec(),
             host: String::new(),
             port: 0,
+            deny_host_local: false,
         })
         .await
         .unwrap();

@@ -397,6 +397,7 @@ async fn open_fake_tcp_accepted(
             ticket: forward_id.to_vec(),
             host: String::new(),
             port: 0,
+            deny_host_local: false,
         })
         .await
         .unwrap();

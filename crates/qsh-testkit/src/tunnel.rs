@@ -462,6 +462,7 @@ impl TunnelHarness {
             ticket: Vec::new(),
             host: host.to_string(),
             port: u32::from(port),
+            deny_host_local: false,
         })
         .await
         .expect("send the TCP_CONNECT header");

@@ -2243,6 +2243,7 @@ mod tests {
             ticket: Vec::new(),
             host: String::new(),
             port: 0,
+            deny_host_local: false,
         }));
     }
 

@@ -49,14 +49,26 @@ pub const CAP_SESSION: &str = "session";
 /// §10).
 pub const CAP_RESUME_V1: &str = "resume.v1";
 
+/// Capability string advertised by peers whose `TCP_CONNECT` dialer honors
+/// [`StreamHeader::deny_host_local`] (ADR-0019 decision 3): when that field
+/// is set, every resolved destination address is checked against the
+/// host-local categories before `connect`, and the stream is refused
+/// (`ErrorCode::PermissionDenied`) if none survive. A peer that has not
+/// advertised this string silently ignores the field (proto3 default
+/// `false`), so a sender must confirm the capability before ever setting it
+/// — there is no fallback that filters without it.
+pub const CAP_DIAL_FILTER_V1: &str = "dial-filter.v1";
+
 /// Capabilities this build advertises in [`Hello`]. Advertised and
 /// implemented stay in lockstep — a capability string is a promise about
 /// behaviour, and a peer that advertises resume and then cannot replay is
 /// worse than one that never claimed it. [`CAP_RESUME_V1`] joined the list
 /// with the resume implementation (PLAN M2 Step 7): the host redeems a
 /// resume credential, replays from the requested offset (or opens with a
-/// `Gap`), and deduplicates retransmitted input.
-pub const LOCAL_CAPABILITIES: &[&str] = &[CAP_EXEC, CAP_SESSION, CAP_RESUME_V1];
+/// `Gap`), and deduplicates retransmitted input. [`CAP_DIAL_FILTER_V1`]
+/// joined with the host-local dial filter (ADR-0019 decision 3): the
+/// advertisement and the filter land in the same commit.
+pub const LOCAL_CAPABILITIES: &[&str] = &[CAP_EXEC, CAP_SESSION, CAP_RESUME_V1, CAP_DIAL_FILTER_V1];
 
 /// quinn send priority of the control stream — the top of the
 /// `docs/design/protocol.md` §12 band, so a saturated bulk stream can never
@@ -662,6 +674,7 @@ impl StreamHeader {
             ticket,
             host: String::new(),
             port: 0,
+            deny_host_local: false,
         }
     }
 
@@ -673,6 +686,7 @@ impl StreamHeader {
             ticket,
             host: String::new(),
             port: 0,
+            deny_host_local: false,
         }
     }
 
@@ -1214,14 +1228,20 @@ mod tests {
     }
 
     fn arb_stream_header() -> impl Strategy<Value = StreamHeader> {
-        (0i32..=4, arb_bytes(16), ".{0,32}", any::<u32>()).prop_map(|(kind, ticket, host, port)| {
-            StreamHeader {
+        (
+            0i32..=4,
+            arb_bytes(16),
+            ".{0,32}",
+            any::<u32>(),
+            any::<bool>(),
+        )
+            .prop_map(|(kind, ticket, host, port, deny_host_local)| StreamHeader {
                 kind,
                 ticket,
                 host,
                 port,
-            }
-        })
+                deny_host_local,
+            })
     }
 
     fn arb_session_frame() -> impl Strategy<Value = SessionFrame> {
@@ -1660,6 +1680,49 @@ mod tests {
         // assertion is the lockstep — flipping it back means the
         // implementation went away.
         assert!(LOCAL_CAPABILITIES.contains(&CAP_RESUME_V1));
+        // The host-local dial filter is implemented (ADR-0019 decision 3):
+        // `authorize_and_dial_tunnel` honors `StreamHeader.deny_host_local`.
+        assert!(LOCAL_CAPABILITIES.contains(&CAP_DIAL_FILTER_V1));
+    }
+
+    /// A `StreamHeader` encoded by a peer that predates field 5 (no bytes
+    /// on the wire for it) must decode with `deny_host_local == false` —
+    /// proto3's own default, and the "unfiltered = today's behavior"
+    /// meaning ADR-0019 decision 3 relies on (`docs/design/protocol.md`
+    /// §16.4's additive rule for a new field number on an existing
+    /// message).
+    #[test]
+    fn stream_header_without_field_5_decodes_as_false() {
+        // Hand-encoded, not `StreamHeader { deny_host_local: false, .. }.
+        // encode_to_vec()`: encoding the new struct and trusting prost to
+        // omit a default-valued field is a round-trip of prost's own
+        // encoder, not a decode of bytes a pre-ADR-0019 peer actually
+        // sends. Building the bytes by hand and asserting no field-5 tag
+        // appears in them is the only form this test cannot pass
+        // vacuously if a future encoder starts writing field 5 explicitly
+        // even for `false`.
+        let host = b"example.com";
+        let mut old_peer_bytes = vec![
+            0x08,
+            0x03, // field 1 (kind), varint: TCP_CONNECT = 3
+            0x1A,
+            host.len() as u8, // field 3 (host), length-delimited
+        ];
+        old_peer_bytes.extend_from_slice(host);
+        old_peer_bytes.extend_from_slice(&[0x20, 0xBB, 0x03]); // field 4 (port) = 443
+
+        const FIELD_5_TAG: u8 = 0x28; // (5 << 3) | 0 (varint wire type)
+        assert!(
+            !old_peer_bytes.contains(&FIELD_5_TAG),
+            "these hand-encoded bytes must carry no field-5 tag at all: {old_peer_bytes:02x?}"
+        );
+
+        let decoded = StreamHeader::decode(old_peer_bytes.as_slice())
+            .expect("a header with no field 5 bytes must still decode");
+        assert_eq!(decoded.kind, StreamKind::TcpConnect as i32);
+        assert_eq!(decoded.host, "example.com");
+        assert_eq!(decoded.port, 443);
+        assert!(!decoded.deny_host_local);
     }
 
     #[test]

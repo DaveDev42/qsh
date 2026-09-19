@@ -557,6 +557,9 @@ message StreamHeader {
   // TCP_CONNECT only.
   string host = 3;
   uint32 port = 4;
+  // TCP_CONNECT only; honored only by peers advertising dial-filter.v1;
+  // default false = unfiltered (today's behavior).
+  bool deny_host_local = 5;
 }
 
 // ---------------------------------------------------------------------------

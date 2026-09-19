@@ -109,6 +109,7 @@ mod tests {
             ticket: Vec::new(),
             host: "localhost".to_string(),
             port: 3000,
+            deny_host_local: false,
         };
         let link = DataLink::Quic(&client);
         let (mut send, _recv, _kill) = open_stream(&link, &header).await.unwrap();
@@ -215,6 +216,7 @@ mod tests {
             ticket: b"forward-id".to_vec(),
             host: String::new(),
             port: 0,
+            deny_host_local: false,
         };
         let link = DataLink::Local {
             socket: &sock,

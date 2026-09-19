@@ -716,6 +716,7 @@ async fn tcp_connect_past_the_forward_quota_answers_resource_exhausted_and_dials
             ticket: Vec::new(),
             host: "127.0.0.1".to_string(),
             port: u32::from(spy_port),
+            deny_host_local: false,
         })
         .await
         .expect("send the first TCP_CONNECT header");
@@ -749,6 +750,7 @@ async fn tcp_connect_past_the_forward_quota_answers_resource_exhausted_and_dials
             ticket: Vec::new(),
             host: "127.0.0.1".to_string(),
             port: u32::from(spy_port),
+            deny_host_local: false,
         })
         .await
         .expect("send the second TCP_CONNECT header");
@@ -2069,6 +2071,7 @@ mod reverse_target_quota {
                     ticket: Vec::new(),
                     host: "127.0.0.1".to_string(),
                     port: u32::from(port),
+                    deny_host_local: false,
                 })
                 .await
                 .expect("send the first TCP_CONNECT header");
@@ -2095,6 +2098,7 @@ mod reverse_target_quota {
                     ticket: Vec::new(),
                     host: "127.0.0.1".to_string(),
                     port: u32::from(port),
+                    deny_host_local: false,
                 })
                 .await
                 .expect("send the second TCP_CONNECT header");

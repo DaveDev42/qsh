@@ -395,6 +395,7 @@ async fn accept_one(
         ticket: forward_id.to_vec(),
         host: String::new(),
         port: 0,
+        deny_host_local: false,
     };
     let link = DataLink::Quic(conn);
     let (send, recv, kill) = match crate::tunnel::open_stream(&link, &header).await {
@@ -982,7 +983,13 @@ async fn handle_accepted_stream(
     // `crate::tunnel::dial::TUNNEL_DIAL_TIMEOUT` — same bound and same
     // dialer the host side's `authorize_and_dial_tunnel` uses for `-L`.
     let dialer = SystemDialer::default();
-    let tcp = match dialer.dial(&host, port).await {
+    // `-R`'s destination is the operator's own registered `host:port`, not
+    // a `TCP_CONNECT` stream field — ADR-0019's filter is scoped to
+    // `TCP_CONNECT` only, so this dial stays unfiltered.
+    let tcp = match dialer
+        .dial(&host, port, &crate::tunnel::dial::DialPolicy::default())
+        .await
+    {
         Ok(tcp) => tcp,
         Err(err) => {
             tracing::warn!(
@@ -1310,6 +1317,7 @@ async fn claim_remote_forward_reverse(
         ticket: claim_ticket(&forward_id, &claim_token),
         host: String::new(),
         port: 0,
+        deny_host_local: false,
     };
     let mut tasks = DrainSplicesOnDrop(JoinSet::new());
     let mut attempt_started = Instant::now();
@@ -1407,9 +1415,14 @@ async fn handle_reverse_claim(
         return;
     };
 
-    // Same dialer, same timeout, as `handle_accepted_stream`'s own dial.
+    // Same dialer, same timeout, as `handle_accepted_stream`'s own dial —
+    // and, like that one, unfiltered: this is `-R`'s own registered
+    // destination, not a `TCP_CONNECT` stream field.
     let dialer = SystemDialer::default();
-    let tcp = match dialer.dial(&host, port).await {
+    let tcp = match dialer
+        .dial(&host, port, &crate::tunnel::dial::DialPolicy::default())
+        .await
+    {
         Ok(tcp) => tcp,
         Err(err) => {
             kill.kill();

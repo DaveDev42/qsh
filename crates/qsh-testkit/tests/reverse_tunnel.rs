@@ -649,6 +649,7 @@ fn tcp_accepted_header(forward_id: &[u8], claim_token: &[u8]) -> wire::StreamHea
         ticket,
         host: String::new(),
         port: 0,
+        deny_host_local: false,
     }
 }
 

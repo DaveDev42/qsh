@@ -3548,12 +3548,20 @@ async fn unanswered_probes_are_judged_dead_on_a_paused_clock() {
 // ---------------------------------------------------------------
 
 fn tcp_connect_header(host: &str, port: u32) -> StreamHeader {
+    tcp_connect_header_with_policy(host, port, false)
+}
+
+/// Same as [`tcp_connect_header`] but with the caller choosing
+/// `deny_host_local` explicitly — for the ADR-0019 host-local dial filter
+/// tests, which need a header that asks for filtering.
+fn tcp_connect_header_with_policy(host: &str, port: u32, deny_host_local: bool) -> StreamHeader {
     StreamHeader {
         kind: StreamKind::TcpConnect as i32,
         // §7's ticket exception: a `TCP_CONNECT` stream carries none.
         ticket: Vec::new(),
         host: host.to_string(),
         port,
+        deny_host_local,
     }
 }
 
@@ -3562,9 +3570,16 @@ fn tcp_connect_header(host: &str, port: u32) -> StreamHeader {
 /// With `target: Some(addr)` it makes a real loopback connection (so
 /// the allow path is proved end-to-end, not stubbed); with `None`
 /// every dial fails, standing in for a refused destination.
+///
+/// Also records the [`crate::tunnel::dial::DialPolicy`] each call was
+/// handed: this dialer never honors `deny_host_local` itself (it is not
+/// [`crate::tunnel::dial::SystemDialer`]), so the only way a test using it
+/// can pin "`authorize_and_dial_tunnel` threads `header.deny_host_local`
+/// through" is to read back what it was actually given.
 struct CountingDialer {
     calls: std::sync::atomic::AtomicUsize,
     target: Option<SocketAddr>,
+    policies: std::sync::Mutex<Vec<crate::tunnel::dial::DialPolicy>>,
 }
 
 impl CountingDialer {
@@ -3572,6 +3587,7 @@ impl CountingDialer {
         Self {
             calls: std::sync::atomic::AtomicUsize::new(0),
             target: None,
+            policies: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -3579,19 +3595,38 @@ impl CountingDialer {
         Self {
             calls: std::sync::atomic::AtomicUsize::new(0),
             target: Some(target),
+            policies: std::sync::Mutex::new(Vec::new()),
         }
     }
 
     fn calls(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
     }
+
+    /// The [`crate::tunnel::dial::DialPolicy`] the most recent `dial` call
+    /// was handed. Panics if `dial` was never called — every test that
+    /// calls this also asserts `calls() >= 1`.
+    fn last_policy(&self) -> crate::tunnel::dial::DialPolicy {
+        *self
+            .policies
+            .lock()
+            .unwrap()
+            .last()
+            .expect("dial was never called")
+    }
 }
 
 impl TunnelDialer for CountingDialer {
-    fn dial<'a>(&'a self, _host: &'a str, _port: u16) -> crate::tunnel::dial::DialFuture<'a> {
+    fn dial<'a>(
+        &'a self,
+        _host: &'a str,
+        _port: u16,
+        policy: &'a crate::tunnel::dial::DialPolicy,
+    ) -> crate::tunnel::dial::DialFuture<'a> {
         // Count first: an implementation that dialed before checking
         // the ACL would be recorded here even if the dial then failed.
         self.calls.fetch_add(1, Ordering::SeqCst);
+        self.policies.lock().unwrap().push(*policy);
         let target = self.target;
         Box::pin(async move {
             match target {
@@ -3902,6 +3937,181 @@ async fn an_over_long_destination_host_is_refused_as_invalid_argument() {
         rig.audit.records().is_empty(),
         "no ACL decision was made, so no audit line"
     );
+}
+
+// ---------------------------------------------------------------
+// ADR-0019 decision 5 — byte-category shape check — and decision 3 —
+// the host-local dial filter.
+// ---------------------------------------------------------------
+
+/// A destination host carrying an ASCII control byte is refused on shape,
+/// before the ACL is consulted at all: same "nothing to decide about"
+/// discipline as the length check right next to it (ADR-0019 decision 5).
+/// No audit line, no dial — a malicious client that skips its own
+/// encoder's checks must still be caught here, since the host cannot rely
+/// on the peer having validated anything.
+#[tokio::test]
+async fn tcp_connect_host_with_control_bytes_is_invalid_argument_before_acl() {
+    let rig = allow_rig();
+    let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
+    for bad_host in ["evil\r\nHost", "tab\there", "de\x7fl", "spa ce"] {
+        let dialer = CountingDialer::refusing();
+        let header = tcp_connect_header(bad_host, 80);
+        let rejection = rig
+            .server
+            .authorize_and_dial_tunnel(&ctx, &header, &dialer)
+            .await
+            .expect_err("a control-byte host is never a real destination");
+
+        assert_eq!(dialer.calls(), 0, "{bad_host:?}");
+        assert_eq!(rejection.code, ErrorCode::InvalidArgument.as_str());
+        assert!(
+            rig.audit.records().is_empty(),
+            "no ACL decision was made, so no audit line: {bad_host:?}"
+        );
+    }
+}
+
+/// Same shape rule, non-ASCII byte instead of a control byte (ADR-0019
+/// decision 5's "or any non-ASCII byte").
+#[tokio::test]
+async fn tcp_connect_host_with_non_ascii_is_invalid_argument_before_acl() {
+    let rig = allow_rig();
+    let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
+    let dialer = CountingDialer::refusing();
+
+    let header = tcp_connect_header("café.example", 80);
+    let rejection = rig
+        .server
+        .authorize_and_dial_tunnel(&ctx, &header, &dialer)
+        .await
+        .expect_err("a non-ASCII host is never a real destination");
+
+    assert_eq!(dialer.calls(), 0);
+    assert_eq!(rejection.code, ErrorCode::InvalidArgument.as_str());
+    assert!(
+        rig.audit.records().is_empty(),
+        "no ACL decision was made, so no audit line"
+    );
+}
+
+/// The security core of ADR-0019 decision 3: a `TCP_CONNECT` that asks for
+/// the host-local dial filter (`deny_host_local: true`) and resolves only
+/// to a host-local address is refused with `PERMISSION_DENIED`, on top of
+/// (not instead of) the `forward.local` ACL `allow` — the filter is a dial
+/// policy, not an ACL rule — with exactly one additional connection-level
+/// deny audit line, `rule: None`. Uses the real `SystemDialer` (not
+/// `CountingDialer`) with an injected resolver, since the filter itself
+/// lives in `SystemDialer`, not in the ACL gate above it.
+#[tokio::test]
+async fn filtered_dial_is_permission_denied_with_one_deny_audit_line() {
+    /// A [`crate::tunnel::dial::Resolver`] that always answers with a
+    /// fixed, host-local address — this test's way of forcing the real
+    /// [`crate::tunnel::dial::SystemDialer`] filter to see a resolution it
+    /// must refuse, with no DNS involved.
+    struct AlwaysLoopback;
+    impl crate::tunnel::dial::Resolver for AlwaysLoopback {
+        fn resolve<'a>(
+            &'a self,
+            _host: &'a str,
+            _port: u16,
+        ) -> crate::tunnel::dial::ResolveFuture<'a> {
+            Box::pin(async move { Ok(vec!["127.0.0.1:80".parse().unwrap()]) })
+        }
+    }
+
+    let rig = allow_rig();
+    let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
+    let dialer = crate::tunnel::dial::SystemDialer::with_resolver(AlwaysLoopback);
+
+    let header = tcp_connect_header_with_policy("attacker-controlled.example", 80, true);
+    let rejection = rig
+        .server
+        .authorize_and_dial_tunnel(&ctx, &header, &dialer)
+        .await
+        .expect_err("a fully host-local resolution must be refused");
+
+    assert!(!rejection.ok);
+    assert_eq!(rejection.code, ErrorCode::PermissionDenied.as_str());
+
+    // Two lines, not one: the ACL `allow` for `forward.local` (the filter
+    // is a dial policy, not an ACL rule — `authorize_and_dial_tunnel`'s own
+    // doc — so it never replaces that decision) and, on top of it, exactly
+    // one filter-deny line in the same connection-level shape.
+    let recs = rig.audit.records();
+    assert_eq!(recs.len(), 2, "{recs:?}");
+    assert_eq!(recs[0].action, "forward.local");
+    assert_eq!(recs[0].decision, "allow");
+    assert_eq!(recs[1].action, "forward.local");
+    assert_eq!(recs[1].decision, "deny");
+    assert_eq!(recs[1].rule, None);
+    assert_eq!(recs[1].resource, "attacker-controlled.example:80");
+}
+
+/// The regression this whole shape/filter addition must not cause: a
+/// plain `-L`-shaped `TCP_CONNECT` (`deny_host_local: false`, today's
+/// default) to `localhost` still dials — the filter never applies unless
+/// the field asks for it. Also pins that `false` is what actually reaches
+/// the dialer, not just that a dial happened: `CountingDialer` never
+/// filters on its own, so a server that hard-coded `DialPolicy {
+/// deny_host_local: true }` at the call site would still dial here and
+/// only `last_policy()` catches it.
+#[tokio::test]
+async fn dynamic_hint_does_not_change_plain_tcp_connect_to_localhost() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let rig = allow_rig();
+    let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
+    let dialer = CountingDialer::to(addr);
+
+    let header = tcp_connect_header_with_policy("127.0.0.1", u32::from(addr.port()), false);
+    let upstream = rig
+        .server
+        .authorize_and_dial_tunnel(&ctx, &header, &dialer)
+        .await
+        .expect("an unfiltered TCP_CONNECT to localhost dials exactly as before ADR-0019");
+
+    assert_eq!(dialer.calls(), 1);
+    assert!(
+        !dialer.last_policy().deny_host_local,
+        "header.deny_host_local: false must reach the dialer as false"
+    );
+    let (accepted, _peer) = listener.accept().await.unwrap();
+    drop(accepted);
+    drop(upstream);
+}
+
+/// The other direction of the same threading: `deny_host_local: true` on
+/// the header must reach the dialer as `true`. `CountingDialer` does not
+/// filter, so this dials regardless — the assertion that matters is
+/// `last_policy()`, which is what would catch a server that hard-coded
+/// either constant at the `DialPolicy` construction site in
+/// `authorize_and_dial_tunnel`.
+#[tokio::test]
+async fn tcp_connect_threads_header_deny_host_local_true_to_the_dialer() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let rig = allow_rig();
+    let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
+    let dialer = CountingDialer::to(addr);
+
+    let header = tcp_connect_header_with_policy("127.0.0.1", u32::from(addr.port()), true);
+    let upstream = rig
+        .server
+        .authorize_and_dial_tunnel(&ctx, &header, &dialer)
+        .await
+        .expect("CountingDialer does not itself filter anything");
+
+    assert_eq!(dialer.calls(), 1);
+    assert!(
+        dialer.last_policy().deny_host_local,
+        "header.deny_host_local: true must reach the dialer as true"
+    );
+    let (accepted, _peer) = listener.accept().await.unwrap();
+    drop(accepted);
+    drop(upstream);
 }
 
 /// The security core of the tunnel-stream quota (M8 Step 3b, mirrors

@@ -508,6 +508,10 @@ async fn forward_connection(
         ticket: Vec::new(),
         host: host.to_string(),
         port: u32::from(port),
+        // `-L`'s destination is operator-chosen, not attacker-steered
+        // content behind a proxy (ADR-0019's threat model) — unfiltered,
+        // today's behavior, same as every host predating this field.
+        deny_host_local: false,
     };
     let link = carrier.link();
     let (send, mut recv, kill) = match crate::tunnel::open_stream(&link, &header).await {
