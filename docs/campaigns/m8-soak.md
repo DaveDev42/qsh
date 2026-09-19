@@ -95,7 +95,8 @@ main이 Dave-Windows-WSL 단독 점유에서 돌린 24h 실측(이 워크플로 
 | self(테스트 프로세스) fd | steady 마지막 1/4 fd 최댓값 `<= 첫 1/4 최댓값 + 2`(사이클링 도중의 증가만 잰다). 위반은 `FD_GROWTH_CLIENT`로 표기(M7 carryover (iii) 재현) | soak.rs (`judge_fd_quarters`, assert, strict) + summarize.py. listener fd 축과 같은 `MIN_QUARTER_SAMPLES` 다운그레이드 규칙을 공유한다 |
 | echo p95 | steady 창 중 p95가 bound(`max(3 × ramp 직후 baseline p95, 50 ms)`)를 넘는 창의 비율이 `ECHO_SPIKE_FRACTION_MAX`(10%)를 넘으면 위반이고 태그는 `ECHO_DEGRADED`다. bound는 고정 50ms가 아니라 이 런 자신의 ramp 직후 baseline에 대한 적응형 상한이다(공유 러너의 절대치 flake를 피하려는 T2 `adversarial_load.rs` 패턴과 같다). baseline을 못 구하면 50ms 바닥값으로 대체한다. 최댓값, 초과 창 수, steady 첫/마지막 1/4 구간 중앙값은 위반 여부와 무관하게 정보로만 기록한다(24h 저하 규칙을 세울 입력. 비율 규칙 자체는 첫 GHA soak 실행을 판정하면서 정했다) | soak.rs(`judge_echo_windows`, assert) + summarize.py(assert. CSV의 `phase == ramp` 행에서 baseline을 자동으로 구하고 `--echo-baseline-ms`를 주면 그 값이 우선한다) |
 | TTL reap | `resume_ttl_secs + REAPER_TICK`(30s)이 지난 뒤에도 `abandoned_live != 0`이면 위반. 그 전에는 "아직 판정 대상 아님"으로 기록만 한다 — `DRAIN_WAIT`(≈`REAPER_TICK`+`CLOSED_RETENTION`, `qsh_core::broker`의 두 pub const 합)와는 다른, TTL 정책 자체의 만료 시각 기준이다 | soak.rs (`ttl_reap_deadline`, assert) + summarize.py (`--resume-ttl-secs`로 같은 식을 계산; 안 주면 예전처럼 무조건 `abandoned_live == 0` 체크로 폴백) |
-| 세션 정지(SESSION_STALLED) | 한 세션의 write→echo 한 라운드가 `SESSION_ROUND_DEADLINE`(5s)을 넘기면 그 세션을 끊고 카운트한다. 카운트가 1 이상이면 위반 | soak.rs (assert)만. CSV에 세션별 정지 이력이 없어 summarize.py는 판단하지 않는다 |
+| 세션 정지(SESSION_STALLED) | 한 세션의 write→echo 한 라운드가 `SESSION_ROUND_DEADLINE`(5s)을 넘기면 그 세션을 끊고 카운트한다. 카운트가 1 이상이면 위반 | soak.rs (assert) + summarize.py (19열 CSV의 `dead_sessions` 열, §4.1). 10열 CSV에는 이 열이 없어 summarize.py가 판단하지 않는다 |
+| dial 소진(DIAL_EXHAUSTED) | 사이클 교체 dial이 3회 시도를 다 쓰고도 실패한 횟수가 1 이상이면 위반. 회차는 멈추지 않고 drain까지 가서 CSV를 닫는다 | soak.rs (assert) + summarize.py (19열 CSV의 `dial_exhausted` 열, §4.1). 10열 CSV에서는 판단하지 않는다 |
 
 `docs/PRD.md:286`("Idle listener 메모리 30 MB 이하 **목표**")와
 `docs/ROADMAP.md:112`("Idle listener RSS ≤ 30 MB", DoD 2 본문)가 이 30 MiB의
@@ -121,8 +122,8 @@ self fd 축은 boot baseline과 drain idle_end를 직접 비교하지 않는다 
 세션 정지(SESSION_STALLED) 축은 한 세션의 write→echo 왕복 한 라운드가
 `SESSION_ROUND_DEADLINE`(5s)을 넘기면 그 세션은 거기서 끊기고
 `dead_sessions` 카운터가 올라간다. 이 카운터가 1 이상이면 verdict는
-무조건 FAIL이다(soak.rs만 판단한다. CSV에는 세션별 정지 이력이 없어
-summarize.py는 이 축을 보지 않는다).
+무조건 FAIL이다. 회차 #6부터는 이 누적 카운터가 CSV에 실려
+summarize.py도 같은 판정을 낸다(§4.1).
 
 ## 4. 실행 절차
 
@@ -171,6 +172,53 @@ scripts/soak/run.sh --duration 86400 --sessions 100 --out /tmp/soak-$(date -u +%
 1800))`이다. 의도한 duration에 boot·ramp·drain과 summarize.py 실행
 여유분 30분(1800s)을 더한 값이고, 이 시간을 넘기면 `cargo nextest run`
 전체가 강제 종료된다.
+
+### 4.1 회차 #6 계측
+
+회차 #5는 DIAL_EXHAUSTED로 실패했는데 `summary.txt`에는 그 축이 없었다.
+`summarize.py`는 CSV에 있는 축만 판정하는데 그 카운터가 CSV에 없었기
+때문이다. 서버 쪽 admission 판단도 로그에 한 줄도 남지 않아 설정값으로
+추정할 수밖에 없었다. 회차 #6부터 하네스가 남기는 것이 다섯 가지
+늘었다. §3의 판정 기준은 바뀌지 않는다.
+
+1. 서버 accept 루프 heartbeat. `soak.rs`가 서버 자식을
+   `QSH_LOG=warn,qsh_core::server=debug`와 `NO_COLOR=1`로 띄우고 표본마다
+   마지막 heartbeat 줄에서 `admitted`·`retry`·`ignore`·`refuse`·
+   `connection_quota_refused`·`live_conns`를 읽어 CSV에 싣는다.
+   `NO_COLOR`가 없으면 fmt 계층이 필드 이름을 ANSI 코드로 감싸서 여섯
+   열이 전부 빈다. 실제 서버 자식으로 이를 확인하는 테스트가
+   `a_logging_serve_child_emits_a_heartbeat_the_sampler_can_parse`다.
+   boot·ramp 행과 첫 heartbeat 이전 행은 빈 칸이다. 빈 칸은 0이 아니라
+   자료가 없다는 뜻이다.
+2. 하네스 카운터 세 열. `dial_exhausted`·`dial_retries`·`dead_sessions`가
+   모든 행에 누적값으로 실린다. `summarize.py`는 `dial_exhausted`와
+   `dead_sessions`를 `soak.rs`와 같은 규칙으로 판정한다. 0이 아니면 각각
+   DIAL_EXHAUSTED·SESSION_STALLED 위반이다. `run.sh`는 원래 두 판정이
+   모두 통과해야 회차를 통과로 치므로 회차 판정은 달라지지 않는다.
+   `summary.txt`의 verdict가 테스트 바이너리와 어긋나지 않게 될
+   뿐이다. `dial_retries`는 정보로만 찍는다.
+3. `audit.log` 사본. 샌드박스는 테스트 프로세스가 끝날 때 지워지고
+   `run.sh`는 그 뒤에야 제어를 돌려받는다. 그래서 `soak.rs`가 steady
+   표본마다, 그리고 drain 행에서 한 번 더 `state/audit.log`를 CSV 옆
+   (`$OUT/audit.log`)으로 복사한다. 회차가 중간에 죽어도 마지막 표본
+   시점까지의 기록은 남는다. audit 레코드는 구조 정보만 담는다.
+4. 실패 줄의 시각과 슬롯. dial 재시도 줄과 DIAL_EXHAUSTED 줄에
+   `t=<초>s`와 슬롯 번호가 붙는다. CSV에서 같은 `t_secs` 행을 손 계산
+   없이 찾을 수 있다.
+5. probe 실패 수. abandoned 세션 probe가 `SESSION_NOT_FOUND`가 아닌
+   오류를 받으면 `t`와 함께 한 줄을 남기고 `probe_failures`를 올린다.
+   `SESSION_NOT_FOUND`는 reaper가 가져간 세션의 정상 응답이라 세지
+   않는다. 이 수는 최종 요약 줄에 정보로만 찍히고 위반이 아니다.
+
+CSV는 10열에서 19열이 됐다(`SOAK_CSV_HEADER`). `summarize.py`는 두
+헤더를 모두 읽는다. 회차 #5의 10열 `samples.csv`를 다시 요약하면 판정은
+그대로이고 새 두 축에는 판정하지 않았다는 메모가 붙는다. 스냅숏
+출력에는 19열 CSV일 때만 새 아홉 열의 표가 하나 더 붙는다.
+
+heartbeat는 카운터가 움직이면 매초, 아니면 5초에 한 줄이 나와 24시간이면
+수만 줄이 된다. 테스트 프로세스가 서버 stderr를 메모리에 쌓아 두므로
+`self_rss_kib`가 회차 동안 수 MB 오른다. `self_rss_kib`는 판정 축이
+아니다.
 
 ## 5. 환경 기록 (실행 시작 시 채운다 — 대부분 `env.txt`가 자동으로 채운다)
 
