@@ -1,8 +1,8 @@
 # OSS-Fuzz integration (draft)
 
 This directory holds the three files an OSS-Fuzz project submission needs
-(`project.yaml`, `Dockerfile`, `build.sh`) so that `qsh`'s 17 existing
-`cargo-fuzz` targets under `fuzz/` (the 16 parser targets plus the
+(`project.yaml`, `Dockerfile`, `build.sh`) so that `qsh`'s 18 existing
+`cargo-fuzz` targets under `fuzz/` (the 17 parser targets plus the
 stateful `broker_ops`, see `fuzz/README.md` and
 `docs/campaigns/m8-fuzz.md`) get picked up by OSS-Fuzz's own build and
 scheduling infrastructure — continuous fuzzing on Google's fleet, on top
@@ -56,7 +56,7 @@ onto OSS-Fuzz requires:
 |---|---|
 | `project.yaml` | OSS-Fuzz project metadata: language, contact, sanitizer/engine/architecture matrix. |
 | `Dockerfile` | Build image: clones `main_repo` fresh and layers `build.sh` on top of `base-builder-rust`. |
-| `build.sh` | Builds every target `cargo fuzz list` reports (17 today) with `cargo fuzz build -O --debug-assertions` and stages each binary plus its seed corpus zip into `$OUT`. |
+| `build.sh` | Builds every target `cargo fuzz list` reports (18 today) with `cargo fuzz build -O --debug-assertions` and stages each binary plus its seed corpus zip into `$OUT`. |
 
 `scripts/fuzz/oss-fuzz-local.sh` (repo root) is the local stand-in used to
 exercise `build.sh` without an OSS-Fuzz checkout or the Docker image.

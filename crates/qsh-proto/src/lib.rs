@@ -18,6 +18,11 @@
 //!   `docs/design/protocol.md` §11-3).
 //! - [`pairing`]: the invite-code display encoding (Crockford Base32) for
 //!   one-time pairing (ADR-0002, `docs/design/protocol.md` §15).
+//! - [`socks5`]: the SOCKS5 sans-IO codec `-D` (dynamic port forwarding)
+//!   drives against its loopback listener (ADR-0019). A local-input
+//!   parser like [`wire::parse_forward_spec`], not a `qsh` peer-to-peer
+//!   wire contract — `docs/design/protocol.md` §16.3 lists it outside the
+//!   wire freeze.
 //!
 //! Because this crate parses untrusted input from the network, it is the
 //! designated fuzzing surface for the project (`docs/design/protocol.md`
@@ -29,6 +34,7 @@ pub mod frame;
 pub mod local;
 pub mod pairing;
 pub mod schema;
+pub mod socks5;
 pub mod types;
 pub mod wire;
 

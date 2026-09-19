@@ -341,7 +341,9 @@ message ExecFrame {
 
 **6. stateful broker fuzzer — `broker_ops`(M8 Step 7b).** 원래 4번 항목이 겨누던 것(`arbitrary` 생성 control message *시퀀스* + 연결 단절 이벤트를 sans-IO broker에 주입해 default deny 유지·writer lease 단일성·sequence 단조성·gap 범위 정확성·resume token 단회성을 흔드는 stateful 타깃)은 위 16종 어디에도 없었다 — 그 8종 decode 타깃은 각 메시지 하나의 decode만 흔들고 시퀀스 상태를 주입하지 않는다. `docs/ROADMAP.md`는 이것을 M8 범위로 나열했지만 `PLAN.md`는 Step 1–10 어디에도 소유 Step을 두지 않았고, **M8 Step 7b**(같은 마일스톤, 마감 전 별도 라운드)가 이를 채웠다. 하네스는 `crates/qsh-core/tests/support/broker_ops_harness.rs`(19종 op 어휘 — 세션 append/read/control, writer lease, resume issue/verify/rotate, attach/detach, tick, reap)이고, 같은 파일을 fuzz 타깃(`fuzz/fuzz_targets/broker_ops.rs`)과 nextest 회귀 재생(`crates/qsh-core/tests/broker_ops_corpus.rs`, `fuzz/corpus/broker_ops/` seed 15개)이 `#[path]`로 나눠 include한다. oracle은 naive `ModelSession`(전체 히스토리 `Vec<u8>` + lease/resume/TTL 상태를 독립 재구현) 대조다. **default deny 축은 `acl/policy.rs`의 proptest(§13-5)가 담당하고, `broker_ops`는 그 대신 상태 부재·불일치 → `Err(ResumeDenied)`·`Conflict`·`CursorBeyondEnd`의 fail-closed 성질을 잰다** — 불변식 목록을 조용히 갈아끼우지 않는다.
 
-corpus는 `fuzz/corpus/`에 체크인한다. **17종 중 `broker_ops`는 이미 모든 플랫폼에서 유닛 테스트로 상시 재생된다**(위 `broker_ops_corpus.rs`, 발견된 크래시의 회귀 고정) — 나머지 파서 타깃 16종에 대해 "유닛 테스트 상시 재생"은 아직 이 문서의 선언일 뿐 별도 회귀 하네스로 구현되지 않았다(현재는 `fuzz-smoke.yml`의 짧은 결정적 `-runs=<N>` 스모크가 그 자리를 대신한다 — `fuzz/README.md` "CI"). CI에서 PR마다 fuzz 빌드 게이트 + nightly smoke fuzz, 공개 beta 전 타깃당 누적 72시간(파서 16종, DoD 1) + OSS-Fuzz 제출. 캠페인 기록은 [`docs/campaigns/m8-fuzz.md`](../campaigns/m8-fuzz.md), 상세는 [testing.md](testing.md).
+**7. `parse_socks5`(ADR-0019).** `crates/qsh-proto/src/socks5.rs`의 sans-IO SOCKS5 codec(greeting·request 파서, method-select·reply 인코더)을 흔든다 — 항목 3의 로컬 입력 파서들과 같은 이유(신뢰 불가 **로컬** 입력)로 이 표면에 있지만, 커밋 `d87e76b`가 착륙시킨 위 16종에도 DoD 1의 분모(파서 16종, `docs/campaigns/m8-fuzz.md` §2)에도 들지 않는 이후 추가다. 불변식: panic 없음, `consumed <= input.len()`, 유효 메시지의 엄격한 접두는 항상 `Incomplete`다.
+
+corpus는 `fuzz/corpus/`에 체크인한다. **18종 중 `broker_ops`는 이미 모든 플랫폼에서 유닛 테스트로 상시 재생된다**(위 `broker_ops_corpus.rs`, 발견된 크래시의 회귀 고정) — 나머지 파서 타깃 17종에 대해 "유닛 테스트 상시 재생"은 아직 이 문서의 선언일 뿐 별도 회귀 하네스로 구현되지 않았다(현재는 `fuzz-smoke.yml`의 짧은 결정적 `-runs=<N>` 스모크가 그 자리를 대신한다 — `fuzz/README.md` "CI"). CI에서 PR마다 fuzz 빌드 게이트 + nightly smoke fuzz, 공개 beta 전 타깃당 누적 72시간(파서 16종, DoD 1) + OSS-Fuzz 제출. 캠페인 기록은 [`docs/campaigns/m8-fuzz.md`](../campaigns/m8-fuzz.md), 상세는 [testing.md](testing.md).
 
 ## 14. P1 TCP fallback을 위한 제약 (지금 지켜야 할 것)
 
@@ -484,6 +486,7 @@ TLS 게이트(`pairing_open()`, §15.1)는 redeem 여부를 보지 않고 오직
 - **`ForwardSpec`/`ForwardDirection`**(`crates/qsh-proto/src/wire.rs:464`(`ForwardSpec`)·`:446`(`ForwardDirection`)). `-L`/`-R` CLI 인자를 로컬에서 파싱한 결과 타입이지 wire에 실리는 값이 아니다 — `.proto` 전체에 이 이름의 message도 field도 없다. `parse_forward_spec`이 §13의 fuzz 타깃인 것은 신뢰 불가 **로컬** 입력 파서이기 때문이지, wire 표면이기 때문이 아니다.
 - **QUIC RESET/CLOSE 코드값**(`0x1001`~`0x200D`). CLOSE 대역(`0x100x`)의 정의 위치는 `crates/qsh-transport/src/endpoint.rs:125,128`·`crates/qsh-core/src/server/mod.rs:153`·`crates/qsh-core/src/reverse/listen.rs:112,132`·`crates/qsh-core/src/reverse/target.rs:205`이고, RESET 대역(`0x200x`)의 근거는 §7이다. 이 값들이 동결 밖인 이유와 그것이 뜻하지 않는 것은 §16.5 끝에서 다룬다.
 - **우선순위 band 값**. 로컬 송신 큐 힌트일 뿐 peer가 관측하는 wire 필드가 아니다(값 자체는 §16.2에 명문화돼 있다).
+- **SOCKS5 로컬 codec**(`crates/qsh-proto/src/socks5.rs`, ADR-0019). `-D`가 로컬 loopback listener에서 받는 클라이언트 프로토콜이지 두 `qsh` peer 사이의 wire 계약이 아니다 — `.proto`에 이 이름의 message가 없다. `parse_socks5`가 §13의 fuzz 타깃인 것도 `parse_forward_spec`과 같은 이유(신뢰 불가 로컬 입력)이지 wire 표면이기 때문이 아니다.
 
 ### 16.4 허용되는 변경 — additive-only
 
