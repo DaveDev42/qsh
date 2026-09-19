@@ -24,7 +24,7 @@ M9는 CLI/JSON 축만 건드린다. M8이 얼린 wire 계약(`docs/design/protoc
 
 - [ ] DoD 1 — SC1 스톱워치 재측정: 새 표면으로 독립 3회, 5분 이내, `docs/campaigns/m7-stopwatch.md` 선례 형식을 계승한 캠페인 문서로 baseline(M7 DoD 1 측정치, Q4에 따라 현행 표면으로 먼저 잰다) 대비 단축 기록. 근거: Step 9 ⑧(캠페인 문서 사전 정의) + Step 11 이전 사람 측정. §0.2 M7 DoD 1에 종속. 소유: 사람(측정 3회 + Step 0의 baseline 3회). 에이전트 몫은 캠페인 문서 사전 정의뿐이다.
 - [ ] DoD 2 — doctor 신규 7종: 각각 안정된 code로 진단되는 것을 실행 가능한 메시지와 함께 테스트로 고정하고, `EXPECTED_DOCTOR_CODES`와 CLI.md §6.17 표를 같은 커밋에서 갱신. 근거: Step 4(6종) + Step 5(`[serve].to`↔구 `[reverse].controller` 충돌 1종 — 그 config 키가 서는 커밋).
-- [ ] DoD 3 — 문구 표본 8종 축자 테스트: forward loopback 처방, `-D` 거절 문구(역방향·capability 부재 — 2026-09-19에 옛 "현행 유지 문구"를 Step 12가 대체한다), 재상환 실패의 host 전용 진단, 초대 출력의 후보 주소 열거, 포트 충돌 `--bind` 처방, 페어링 직후 pin 이름·매칭 규칙 부재 고지, `auth_path` 누락 host 진단, `assuming port 4433` 한 줄. 근거: Step 3(7종) + Step 4(`acl_ca_auth_path_missing` 1종 — 문면 상수가 `DiagnosticId` variant를 요구하므로 Step 3 커밋에 담기면 동결 set 게이트가 붉어진다, `crates/qsh-core/src/doctor.rs:116-122`). 페어링 고지 1종은 Step 3이 세우고 Step 7이 같은 상수를 개정하며 축자 테스트도 같은 커밋에서 갱신한다(ADR-0017 결정 3, `0017-acl-toml-not-written.md:32`).
+- [ ] DoD 3 — 문구 표본 8종 축자 테스트: forward loopback 처방, `-D` 거절 문구(capability 부재 — 2026-09-19에 옛 "현행 유지 문구"를 Step 12가 대체하고, 2026-09-20에 ADR-0020이 역방향 거절을 걷었다), 재상환 실패의 host 전용 진단, 초대 출력의 후보 주소 열거, 포트 충돌 `--bind` 처방, 페어링 직후 pin 이름·매칭 규칙 부재 고지, `auth_path` 누락 host 진단, `assuming port 4433` 한 줄. 근거: Step 3(7종) + Step 4(`acl_ca_auth_path_missing` 1종 — 문면 상수가 `DiagnosticId` variant를 요구하므로 Step 3 커밋에 담기면 동결 set 게이트가 붉어진다, `crates/qsh-core/src/doctor.rs:116-122`). 페어링 고지 1종은 Step 3이 세우고 Step 7이 같은 상수를 개정하며 축자 테스트도 같은 커밋에서 갱신한다(ADR-0017 결정 3, `0017-acl-toml-not-written.md:32`).
 - [ ] DoD 4 — 숨김 alias·config 이중 읽기 왕복 테스트: 구 표기 호출이 신 표기와 동일 op에 도달하고 신구 config 키가 동시에 있을 때의 우선순위가 고정된다. 근거: Step 5(`qsh reverse`·`[reverse].controller`), Step 7(`trust invite`/`trust accept`).
 - [ ] DoD 5 — 신규 op 등록 완전성: 신규 op마다 새 JSON fixture + `REQUIRED_FIXTURES`(`crates/qsh-cli/tests/fixtures.rs:77-121`, 실측 43개) 등록, 기존 fixture 한 바이트도 안 고침, schemars 타입·`cli_v1_data_schema` arm·`CLI_V1_SCHEMA_COMMANDS` 등록·렌더러 2종·CLI.md 문서 행·man 항목이 모두 존재함을 등록 완전성 테스트로 확인(M5 `acl_registry` 선례 형식). 근거: Step 6(테스트 신설) → Step 7·8이 소비.
 - [ ] DoD 6 — 마감 공통 절차 1·2: 구속 문서 태그 대조, README 동기화(서사·구조 전면 재작성은 명시적 out). 근거: Step 11.
@@ -276,10 +276,11 @@ M9가 wire를 건드리지 않는다는 머리말의 원칙에 예외가 하나 
 3. §16.4 개정 한 항목만 담은 문서 커밋.
 4. host dial 필터. `StreamHeader.deny_host_local`, `dial-filter.v1` 광고, 해석 결과의 host-local 주소 거르기, `TCP_CONNECT` host의 바이트 범주 검사, `capabilities.json` 재생성. client는 아직 필드를 보내지 않는다.
 5. client 쪽 SOCKS 드라이버(`qsh-core/src/tunnel/dynamic.rs`). `forward_connection`을 `open_tunnel`과 `splice_opened`로 나누고 listener별 상한(handshake 10초, handshake 슬롯 64, 연결 128, CONNECT 초당 50·burst 100)을 둔다. 속도 초과는 남은 handshake 기한 안에서 기다린다.
-6. `Ops::tunnel_dynamic`과 CLI 전환. 거절 상수와 `dynamic_forward_unsupported()`를 지우고 새 op `tunnel.dynamic`, 새 fixture 셋, `RETIRED_PRODUCERS`, `DYNAMIC_FORWARD_ACL_NOTE`, CLI.md §2.5·§3.3·§6.9, README, man 재생성을 한 커밋에 담는다. 역방향 route의 `-D`는 이 커밋에서 `UNSUPPORTED`다.
-7. 사실이 바뀐 서술을 고친다. `forward.socks` doc과 `ALWAYS_DENIED_NO_OP` 사유 문면, `docs/design/threat-model.md` §2·§4·§7, `docs/design/architecture.md`, `docs/design/testing.md`, `docs/campaigns/m8-adversarial-load.md`의 두 행이 대상이다.
-8. acceptance. 실제 `curl --socks5-hostname`을 qsh SOCKS listener로 통과시키는 `socks_curl` 테스트를 CI acceptance 잡에 넣는다. 양성 경로, host-local 필터, ACL 거부, 종료 뒤 포트 재bind를 확인한다.
-9. 역방향 `-D`. controller는 자기 daemon과 UDS로만 말하므로 target의 capability를 모른다. daemon이 target의 협상된 capability를 controller에게 알려 주는 경로를 만들고 그 확인이 되면 역방향 거절을 걷는다. 확인하지 못하면 거절을 유지한다(ADR-0019 결정 3·10).
+6. 역방향 `-D`의 결정 기록. ADR-0020이 ADR-0019 결정 10·13과 Q2를 개정한다. 역방향 controller는 이미 `ControlHandshake.capabilities`로 target의 협상된 capability를 받고, daemon은 `LOCAL_STREAM` 헤더를 바이트 그대로 넘기므로 새 경로를 만들 필요가 없다. 색인과 이 절도 같이 고친다.
+7. `Ops::tunnel_dynamic`과 CLI 전환. 거절 상수와 `dynamic_forward_unsupported()`를 지우고 새 op `tunnel.dynamic`, 새 fixture 셋, `RETIRED_PRODUCERS`, `DYNAMIC_FORWARD_ACL_NOTE`, CLI.md §2.5·§3.3·§6.9, README, man 재생성을 한 커밋에 담는다. 역방향 route의 `-D`는 이 커밋에서 아직 `UNSUPPORTED`다. 다음 커밋이 이 거절을 걷으므로 fixture로 고정하지 않고, `UNSUPPORTED`는 `DEFERRED`로 돌아간다(ADR-0020 결정 4).
+8. 역방향 `-D`와 대화형 역방향 `-L`. controller가 `ControlHandshake.capabilities`에서 `dial-filter.v1`을 확인하고 `LOCAL_STREAM`의 `TCP_CONNECT` 헤더에 필드 5를 실어 보낸다. 대화형 세션의 forward도 역방향에서는 `tunnel open`과 같은 opener로 연다. `ReverseHarness` e2e로 왕복, target loopback 이름의 `REP 0x02`, capability 부재 거절, 대화형 `-L` 왕복을 고정한다(ADR-0020 결정 1~3).
+9. 사실이 바뀐 서술을 고친다. `forward.socks` doc과 `ALWAYS_DENIED_NO_OP` 사유 문면, `docs/design/threat-model.md` §2·§4·§7, `docs/design/architecture.md`, `docs/design/testing.md`, `docs/campaigns/m8-adversarial-load.md`의 두 행이 대상이다. threat-model의 `-D` 행에는 역방향 경로도 넣는다.
+10. acceptance. 실제 `curl --socks5-hostname`을 qsh SOCKS listener로 통과시키는 `socks_curl` 테스트를 CI acceptance 잡에 넣는다. 양성 경로, host-local 필터, ACL 거부, 종료 뒤 포트 재bind를 확인한다.
 
 **(b) 완료 기준.**
 
@@ -288,9 +289,9 @@ M9가 wire를 건드리지 않는다는 머리말의 원칙에 예외가 하나 
 - 옛 계약을 고정하던 테스트(`dynamic_forward_stub.rs`, `tunnel_docs.rs`의 네 테스트, `failure_text_discipline.rs`의 T6, `fixtures.rs`의 `-D` 블록)는 새 계약의 테스트로 바뀐다. 자원을 만들지 않는다는 속성은 실패 경로마다 계속 검사한다.
 - ACL 테스트의 단언은 바뀌지 않는다. 이름이 바뀌는 테스트는 `is_always_denied_is_exactly_the_p1_deferred_trio` 하나다.
 - `socks_curl`이 CI acceptance 잡에서 건너뛰지 않고 초록이다.
-- 역방향 `-D`는 (a) 9가 착지했으면 켜져 있고 아니면 이 절에 그 이유가 적혀 있다.
+- 역방향 `-D`가 켜져 있고, 대화형 세션의 역방향 `-L`도 더는 `UNSUPPORTED`가 아니다.
 
-**(c) 이 스텝이 바꾸는 M9 DoD.** DoD 3의 문구 표본 "`-D` 현행 유지 문구"는 "`-D` 거절 문구(역방향·capability 부재)"로 바뀐다. 표본 수는 8종 그대로다. DoD 5의 등록 완전성 테스트는 새 op `tunnel.dynamic`에도 걸린다.
+**(c) 이 스텝이 바꾸는 M9 DoD.** DoD 3의 문구 표본 "`-D` 현행 유지 문구"는 "`-D` 거절 문구(capability 부재)"로 바뀐다. 2026-09-19 판은 역방향 거절도 넣었으나 ADR-0020이 그 거절을 걷었다. 표본 수는 8종 그대로다. DoD 5의 등록 완전성 테스트는 새 op `tunnel.dynamic`에도 걸린다.
 
 ## 3. 명시적 non-goals (P1 유예 / 타 마일스톤)
 
