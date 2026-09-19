@@ -670,6 +670,59 @@ async fn resize_is_applied_to_the_pty() {
 }
 
 // --------------------------------------------------------------------------
+// cwd fallback (`cwd_unusable`) — the `is_dir()` → EACCES spawn-failure bug
+// --------------------------------------------------------------------------
+
+/// A normal directory is usable; a missing path and a regular file are
+/// not, and each reports its own reason rather than whatever `errno`
+/// happened to hold.
+#[test]
+fn cwd_unusable_is_none_for_a_plain_dir_and_names_the_reason_otherwise() {
+    use std::io::ErrorKind;
+
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(
+        super::posix::cwd_unusable(dir.path().to_str().unwrap()),
+        None
+    );
+    let missing = dir.path().join("does-not-exist");
+    assert_eq!(
+        super::posix::cwd_unusable(missing.to_str().unwrap()),
+        Some(ErrorKind::NotFound)
+    );
+    let file = dir.path().join("plain-file");
+    std::fs::write(&file, b"").unwrap();
+    assert_eq!(
+        super::posix::cwd_unusable(file.to_str().unwrap()),
+        Some(ErrorKind::NotADirectory)
+    );
+}
+
+/// A directory that exists but is unsearchable (mode 000) must not be
+/// reported usable — `Path::is_dir()` alone says `true` here, which is
+/// exactly the bug: `chdir` into it fails with `EACCES` and used to take
+/// the whole spawn down. Root bypasses the permission bit, so the negative
+/// assertion is skipped when running as root (CI containers commonly do);
+/// permissions are restored before the tempdir guard removes it either way.
+#[test]
+fn cwd_unusable_is_permission_denied_for_an_unsearchable_dir() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o000)).unwrap();
+    // SAFETY: geteuid takes no arguments and has no preconditions.
+    let is_root = unsafe { libc::geteuid() == 0 };
+    if !is_root {
+        assert_eq!(
+            super::posix::cwd_unusable(dir.path().to_str().unwrap()),
+            Some(std::io::ErrorKind::PermissionDenied)
+        );
+    }
+    // Restore before the `TempDir` guard's drop tries to remove it.
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+// --------------------------------------------------------------------------
 // helpers
 // --------------------------------------------------------------------------
 

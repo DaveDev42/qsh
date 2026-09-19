@@ -6,7 +6,7 @@
 use std::ffi::{CStr, OsString};
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -140,10 +140,24 @@ impl SessionSource for PtySource {
         for (k, v) in build_env(spec, &account, &shell) {
             cmd.env(k, v);
         }
-        cmd.cwd(if Path::new(&account.home).is_dir() {
-            account.home.as_str()
-        } else {
+        cmd.cwd(if let Some(error_kind) = cwd_unusable(&account.home) {
+            // sshd parity: a home directory can exist and still be
+            // unsearchable by our uid (mode 000/700 owned by someone
+            // else, or an unmapped owner inside a user namespace) — a
+            // bare `is_dir()` test misses that, `chdir` then fails with
+            // EACCES, and the whole spawn dies instead of just the cwd.
+            // The child runs with the server process's own uid, no
+            // privilege drop (architecture.md §4), so `cwd_unusable`'s
+            // check in the parent is accurate for it too: warn and fall
+            // back to "/" like sshd does rather than failing the spawn.
+            tracing::warn!(
+                home = %account.home,
+                ?error_kind,
+                "session starts in \"/\": home directory is not accessible"
+            );
             "/"
+        } else {
+            account.home.as_str()
         });
         // `set_controlling_tty(true)` is the default: setsid + TIOCSCTTY in
         // the child, which also makes it the process-group leader.
@@ -274,6 +288,34 @@ fn is_executable(path: &str) -> bool {
     };
     // SAFETY: `c` is a valid NUL-terminated string for the call's duration.
     unsafe { libc::access(c.as_ptr(), libc::X_OK) == 0 }
+}
+
+/// `None` only if `home` is a directory this process's uid can search into
+/// (`libc::access(X_OK)`), not merely one that `is_dir()` accepts;
+/// otherwise the reason it cannot be the child's cwd. A directory can exist
+/// and still be unsearchable — mode 000/700 owned by someone else, or an
+/// unmapped owner inside a user namespace — in which case `is_dir()` says
+/// `true` but `chdir` into it fails with `EACCES`. Same idea as
+/// `is_executable` above; see `spawn`'s cwd fallback (sshd parity) for why
+/// this matters. The reason is captured here, right after the failing
+/// call, so the caller never reads a stale `errno`.
+///
+/// `pub(crate)` only so `pty::tests` can exercise it directly.
+pub(crate) fn cwd_unusable(home: &str) -> Option<io::ErrorKind> {
+    match std::fs::metadata(home) {
+        Ok(meta) if meta.is_dir() => {}
+        Ok(_) => return Some(io::ErrorKind::NotADirectory),
+        Err(err) => return Some(err.kind()),
+    }
+    let Ok(c) = std::ffi::CString::new(home) else {
+        return Some(io::ErrorKind::InvalidInput);
+    };
+    // SAFETY: `c` is a valid NUL-terminated string for the call's duration.
+    if unsafe { libc::access(c.as_ptr(), libc::X_OK) } == 0 {
+        None
+    } else {
+        Some(io::Error::last_os_error().kind())
+    }
 }
 
 /// The `qsh serve` account, looked up once (`getpwuid_r` may go through
