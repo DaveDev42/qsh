@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """summarize.py — judge a qsh soak-run CSV against the thresholds in docs/campaigns/m8-soak.md §3.
 
-`crates/qsh-cli/tests/soak.rs` writes one CSV row per sample
-(`t_secs,phase,listener_rss_kib,listener_fds,self_rss_kib,self_fds,
-live_sessions,cycles,echo_p95_ms,abandoned_live` — pinned by
-`soak_csv_header_is_pinned`, checked against that exact string below) and
+`crates/qsh-cli/tests/soak.rs` writes one CSV row per sample (the
+`SOAK_CSV_HEADER` columns, pinned by `soak_csv_header_is_pinned` and
+checked against `CSV_HEADER` below; the pre-#6 ten-column header is still
+read, see `LEGACY_CSV_HEADER`) and
 already asserts the axes of §4.4 it can judge from inside a single short
 run: idle RSS/fd bounds, echo p95, TTL reap, and (as `FD_GROWTH_CLIENT`) the
 client-side fd-growth check — judged on the steady-phase quarters (growth
@@ -12,8 +12,10 @@ client-side fd-growth check — judged on the steady-phase quarters (growth
 recorded as an informational line only, never a violation (that span also
 bundles in ramp's one-shot session-open/attach fd cost). Dial retries on a
 retryable `OpError` during ramp/cycle opens are likewise recorded, not a
-violation, in the test binary's own stderr — this script does not see them
-since they never reach the CSV. This script re-derives the *same* §3 table
+violation. A #6-shaped CSV carries them, along with the two counters the
+test binary does judge (DIAL_EXHAUSTED, SESSION_STALLED), which this script
+then judges the same way (docs/campaigns/m8-soak.md §4.1). This script
+re-derives the *same* §3 table
 from the CSV, plus the two axes the test binary only ever records because a
 120s short run has too few samples to fit them — the per-session buffer
 bound and the RSS-trend regression slope — which is why `scripts/soak/
@@ -53,7 +55,24 @@ from typing import NamedTuple
 # text byte-for-byte — a value built
 # from adjacent string literals never appears as one contiguous run in the
 # file's own source text, only in the interpreter's evaluated result.
-CSV_HEADER = "t_secs,phase,listener_rss_kib,listener_fds,self_rss_kib,self_fds,live_sessions,cycles,echo_p95_ms,abandoned_live"
+CSV_HEADER = "t_secs,phase,listener_rss_kib,listener_fds,self_rss_kib,self_fds,live_sessions,cycles,echo_p95_ms,abandoned_live,admitted,retry,ignore,refuse,quota_refused,live_conns,dial_exhausted,dial_retries,dead_sessions"
+
+# The ten-column header every round before #6 wrote. Round #5's `samples.csv`
+# is a recorded campaign artifact (docs/campaigns/m8-soak.md §7) and stays
+# readable here: its rows simply carry no value for the nine columns §4.1
+# added, which `read_rows` fills with None. Kept as its own literal rather
+# than derived by slicing `CSV_HEADER`, so that neither header can drift into
+# the other by an edit to one of them.
+LEGACY_CSV_HEADER = "t_secs,phase,listener_rss_kib,listener_fds,self_rss_kib,self_fds,live_sessions,cycles,echo_p95_ms,abandoned_live"
+
+# Column count keyed by header, for the per-row width check in `read_rows`.
+ACCEPTED_HEADERS = {
+    CSV_HEADER: len(CSV_HEADER.split(",")),
+    LEGACY_CSV_HEADER: len(LEGACY_CSV_HEADER.split(",")),
+}
+
+# The nine §4.1 columns, in CSV order, for the snapshot table's second half.
+SNAPSHOT_EXTRA_COLUMNS = CSV_HEADER.split(",")[10:]
 
 IDLE_RSS_BOUND_KIB = 30 * 1024
 PER_SESSION_BUFFER_BOUND_KIB = 8 * 1024
@@ -97,6 +116,27 @@ class Row(NamedTuple):
     cycles: int
     echo_p95_ms: float | None
     abandoned_live: int
+    # The nine columns §4.1 added. All are `| None` rather than defaulted to
+    # zero, and for two different reasons that must not be conflated.
+    #
+    # The six accept-loop counters are None on a `boot`/`ramp` row, which
+    # never reads them, and on any sample taken before the server child's
+    # first heartbeat line. "No data" and "the counter is zero"
+    # are different claims about admission, and round #5 is precisely the
+    # round where reading one as the other produced a wrong conclusion.
+    #
+    # The three harness counters are cumulative and always written, so they
+    # are None only on a legacy ten-column row, where the column does not
+    # exist at all.
+    admitted: int | None = None
+    retry: int | None = None
+    ignore: int | None = None
+    refuse: int | None = None
+    quota_refused: int | None = None
+    live_conns: int | None = None
+    dial_exhausted: int | None = None
+    dial_retries: int | None = None
+    dead_sessions: int | None = None
 
 
 def _opt_int(value: str) -> int | None:
@@ -116,10 +156,12 @@ def read_rows(stream) -> list[Row]:
     except StopIteration:
         return []
     got = ",".join(header)
-    if got != CSV_HEADER:
+    width = ACCEPTED_HEADERS.get(got)
+    if width is None:
         raise ValueError(
             f"CSV header does not match the soak.rs-pinned column order — "
             f"got {got!r}, want {CSV_HEADER!r} "
+            f"(or the pre-#6 {LEGACY_CSV_HEADER!r}) "
             f"(crates/qsh-cli/tests/soak.rs SOAK_CSV_HEADER)"
         )
     # Buffered (not streamed row-by-row) so a malformed row can be told
@@ -133,20 +175,26 @@ def read_rows(stream) -> list[Row]:
     rows: list[Row] = []
     last_index = len(raw_rows) - 1
     for i, fields in enumerate(raw_rows):
-        if len(fields) != 10:
+        if len(fields) != width:
             # Row 1 is the header, so the first data row is row 2.
             row_number = i + 2
             if i == last_index:
                 print(
                     f"summarize.py: dropping truncated trailing row {row_number} "
-                    f"({len(fields)} column(s), want 10) — treated as an incomplete "
+                    f"({len(fields)} column(s), want {width}) — treated as an incomplete "
                     f"in-progress write, not corruption: {fields!r}",
                     file=sys.stderr,
                 )
                 continue
             raise ValueError(
-                f"row {row_number} has {len(fields)} column(s), want 10: {fields!r}"
+                f"row {row_number} has {len(fields)} column(s), want {width}: {fields!r}"
             )
+        extra = fields[10:] if width > 10 else []
+
+        def col(offset: int) -> int | None:
+            """One of the nine §4.1 columns, or None on a legacy row."""
+            return _opt_int(extra[offset]) if offset < len(extra) else None
+
         rows.append(
             Row(
                 t_secs=int(fields[0]),
@@ -159,6 +207,15 @@ def read_rows(stream) -> list[Row]:
                 cycles=int(fields[7]),
                 echo_p95_ms=_opt_float(fields[8]),
                 abandoned_live=int(fields[9]),
+                admitted=col(0),
+                retry=col(1),
+                ignore=col(2),
+                refuse=col(3),
+                quota_refused=col(4),
+                live_conns=col(5),
+                dial_exhausted=col(6),
+                dial_retries=col(7),
+                dead_sessions=col(8),
             )
         )
     return rows
@@ -453,6 +510,83 @@ def evaluate(
                 "not yet judged"
             )
 
+    # Dial exhaustion (docs/campaigns/m8-soak.md §4.1). soak.rs asserts this
+    # axis itself, but this script judged only what the CSV carried, so in
+    # round #5 the axis that actually failed the round never appeared in
+    # summary.txt at all and the report read clean. The column exists so the
+    # two verdicts can no longer disagree silently.
+    #
+    # The counter is cumulative, so the round's total is its largest value;
+    # taking the max rather than the last row means a sample that somehow
+    # read lower cannot hide an exhaustion. A legacy CSV carries it nowhere
+    # and is left unjudged rather than passed by default.
+    dial_rows = [r for r in rows if r.dial_exhausted is not None]
+    if not dial_rows:
+        notes.append(
+            "dial exhaustion: no `dial_exhausted` column in this CSV (pre-#6 "
+            "ten-column header) — axis not judged"
+        )
+    else:
+        total = max(r.dial_exhausted for r in dial_rows)
+        result["dial_exhausted"] = total
+        if total != 0:
+            first = next(r for r in dial_rows if r.dial_exhausted)
+            violations.append(
+                f"DIAL_EXHAUSTED: {total} dial(s) exhausted their retry budget over "
+                f"the round, first at t={first.t_secs}s ({first.phase}) — every dial "
+                "must succeed within its retries"
+            )
+
+    # SESSION_STALLED, judged exactly as soak.rs judges it: any session that
+    # outran its per-round echo deadline fails the round. Same cumulative
+    # counter, same max-not-last reading, same "unjudged on a legacy CSV".
+    stall_rows = [r for r in rows if r.dead_sessions is not None]
+    if not stall_rows:
+        notes.append(
+            "session stalls: no `dead_sessions` column in this CSV (pre-#6 "
+            "ten-column header) — axis not judged here (soak.rs judged it)"
+        )
+    else:
+        stalled = max(r.dead_sessions for r in stall_rows)
+        result["dead_sessions"] = stalled
+        if stalled != 0:
+            first = next(r for r in stall_rows if r.dead_sessions)
+            violations.append(
+                f"SESSION_STALLED: {stalled} session(s) outran the per-round echo "
+                f"deadline, first at t={first.t_secs}s ({first.phase})"
+            )
+
+    # Informational counters: reported, never judged. `dial_retries` counts
+    # retry attempts (a retry is not a failure until the budget runs out,
+    # which DIAL_EXHAUSTED above already judges), and the six accept-loop
+    # counters are the server child's own view of admission. Both are
+    # context for reading a failure, not axes with a bound.
+    retries = [r.dial_retries for r in rows if r.dial_retries is not None]
+    if retries:
+        result["dial_retries"] = max(retries)
+    heartbeat_rows = [r for r in rows if r.admitted is not None]
+    if heartbeat_rows:
+        last_hb = heartbeat_rows[-1]
+        result["accept_loop"] = {
+            "samples_with_heartbeat": len(heartbeat_rows),
+            "admitted": last_hb.admitted,
+            "retry": last_hb.retry,
+            "ignore": last_hb.ignore,
+            "refuse": last_hb.refuse,
+            "quota_refused": last_hb.quota_refused,
+            "live_conns": last_hb.live_conns,
+        }
+    elif any(r.dial_exhausted is not None for r in rows):
+        # A #6-shaped CSV whose heartbeat columns never filled in: the server
+        # child's log never reached the sampler. Worth saying out loud — this
+        # is the exact blind spot §4.1 exists to close, so silence here means
+        # the instrumentation did not take.
+        notes.append(
+            "accept loop: no sample carried a heartbeat — the server child's "
+            "QSH_LOG stream never reached the sampler (docs/campaigns/"
+            "m8-soak.md §4.1)"
+        )
+
     return result
 
 
@@ -482,6 +616,15 @@ def snapshot_rows(rows: list[Row]) -> list[dict]:
                 "cycles": nearest.cycles,
                 "echo_p95_ms": nearest.echo_p95_ms,
                 "abandoned_live": nearest.abandoned_live,
+                "admitted": nearest.admitted,
+                "retry": nearest.retry,
+                "ignore": nearest.ignore,
+                "refuse": nearest.refuse,
+                "quota_refused": nearest.quota_refused,
+                "live_conns": nearest.live_conns,
+                "dial_exhausted": nearest.dial_exhausted,
+                "dial_retries": nearest.dial_retries,
+                "dead_sessions": nearest.dead_sessions,
             }
         )
     return out
@@ -546,6 +689,26 @@ def render(result: dict, snapshots: list[dict]) -> str:
     else:
         lines.append(f"  TTL reap                abandoned_live at drain={result.get('idle_end_abandoned_live')}  "
                      "want=0")
+    if "dial_exhausted" in result:
+        lines.append(
+            f"  dial exhaustion         {result['dial_exhausted']}  want=0"
+        )
+    if "dead_sessions" in result:
+        lines.append(
+            f"  session stalls          {result['dead_sessions']}  want=0"
+        )
+    if "dial_retries" in result:
+        lines.append(
+            f"  dial retries            {result['dial_retries']}  (informational)"
+        )
+    if "accept_loop" in result:
+        a = result["accept_loop"]
+        lines.append(
+            f"  accept loop             admitted={a['admitted']}  retry={a['retry']}  "
+            f"ignore={a['ignore']}  refuse={a['refuse']}  "
+            f"quota_refused={a['quota_refused']}  live_conns={a['live_conns']}  "
+            f"({a['samples_with_heartbeat']} sample(s) with a heartbeat, informational)"
+        )
 
     if result["notes"]:
         lines.append("")
@@ -576,6 +739,18 @@ def render(result: dict, snapshots: list[dict]) -> str:
                 f"{s['live_sessions']!s:>13}  {s['cycles']!s:>6}  "
                 f"{s['echo_p95_ms']!s:>11}  {s['abandoned_live']!s:>14}"
             )
+        # The §4.1 columns go in a table of their own, printed only when
+        # the CSV carries them, so a legacy CSV renders exactly as before.
+        # An empty heartbeat field prints as "-", never as 0.
+        if any(s[k] is not None for s in snapshots for k in SNAPSHOT_EXTRA_COLUMNS):
+            lines.append("")
+            lines.append("  hour  " + "  ".join(SNAPSHOT_EXTRA_COLUMNS))
+            for s in snapshots:
+                cells = [
+                    f"{'-' if s[k] is None else s[k]!s:>{len(k)}}"
+                    for k in SNAPSHOT_EXTRA_COLUMNS
+                ]
+                lines.append(f"  {s['hours']:>4}  " + "  ".join(cells))
     return "\n".join(lines)
 
 
@@ -588,7 +763,7 @@ def render(result: dict, snapshots: list[dict]) -> str:
 ## checks below still resolve to an exact match, not an interpolated
 ## nearest-neighbor guess.
 PASSING_CSV = (
-    CSV_HEADER + "\n"
+    LEGACY_CSV_HEADER + "\n"
     "0,boot,20000,10,15000,8,0,0,,0\n"
     "0,steady,20500,10,15200,8,8,0,12.5,0\n"
     "900,steady,20550,10,15200,8,8,1,13.0,0\n"
@@ -603,7 +778,7 @@ PASSING_CSV = (
 )
 
 VIOLATING_CSV = (
-    CSV_HEADER + "\n"
+    LEGACY_CSV_HEADER + "\n"
     "0,boot,20000,10,15000,8,0,0,,0\n"
     "0,steady,22000,10,15200,10,8,0,12.5,0\n"
     "900,steady,32500,10,15205,11,8,1,25.0,0\n"
@@ -764,7 +939,7 @@ def self_test() -> int:
     # and whether the flag is passed, so the only thing that should move
     # between them is the bound and the recorded baseline source.
     RAMP_BASELINE_CSV = (
-        CSV_HEADER + "\n"
+        LEGACY_CSV_HEADER + "\n"
         "0,boot,20000,10,15000,8,0,0,,0\n"
         "2,ramp,20000,10,15000,8,8,0,30.0,1\n"
         "2,steady,20100,10,15050,8,8,0,80.0,0\n"
@@ -772,7 +947,7 @@ def self_test() -> int:
         "6,drain,20050,10,15000,8,0,1,,0\n"
     )
     NO_RAMP_CSV = (
-        CSV_HEADER + "\n"
+        LEGACY_CSV_HEADER + "\n"
         "0,boot,20000,10,15000,8,0,0,,0\n"
         "2,steady,20100,10,15050,8,8,0,80.0,0\n"
         "4,steady,20100,10,15050,8,8,1,20.0,0\n"
@@ -852,7 +1027,7 @@ def self_test() -> int:
     # bound is the fixed 50ms floor.
     def _echo_windows_csv(n_steady: int, spike_indices: tuple[int, int]) -> str:
         spike_values = {spike_indices[0]: 129.495, spike_indices[1]: 114.632}
-        lines = [CSV_HEADER, "0,boot,20000,10,15000,8,0,0,,0"]
+        lines = [LEGACY_CSV_HEADER, "0,boot,20000,10,15000,8,0,0,,0"]
         for i in range(n_steady):
             t = (i + 1) * 2
             p95 = spike_values.get(i, 1.2)
@@ -898,7 +1073,7 @@ def self_test() -> int:
     # A regression fitted over a span shorter than an hour is recorded, never
     # asserted — too few samples for the 24h-mode judgment to mean anything.
     short_csv = (
-        CSV_HEADER + "\n"
+        LEGACY_CSV_HEADER + "\n"
         "0,boot,20000,10,15000,8,0,0,,0\n"
         "0,steady,20200,10,15000,8,8,0,10.0,0\n"
         "60,steady,25000,10,15000,8,8,1,10.0,0\n"
@@ -939,6 +1114,129 @@ def self_test() -> int:
     text = render(passing_result, snaps)
     check("render mentions verdict", "verdict: pass" in text, True)
     check("render never leaks a token-shaped word", "token" in text.lower(), False)
+
+    # The §4.1 nineteen-column shape. The fixtures above deliberately keep the
+    # pre-#6 header so the legacy path stays covered; these rows cover the new
+    # one. Both boot rows leave the six accept-loop columns empty, which is
+    # what the sampler writes before the server child's first heartbeat —
+    # that must read as "no data", never as an admission count of zero.
+    wide_clean = (
+        CSV_HEADER + "\n"
+        "0,boot,20000,10,15000,8,0,0,,0,,,,,,,0,0,0\n"
+        "0,steady,20500,10,15200,8,8,0,12.5,0,8,0,0,0,0,8,0,0,0\n"
+        "900,steady,20550,10,15200,8,8,1,13.0,0,16,1,0,0,0,8,0,1,0\n"
+        "1800,drain,20200,10,15100,8,0,2,,0,16,1,0,0,0,0,0,1,0\n"
+    )
+    wide_rows = read_rows(wide_clean.splitlines())
+    check("wide: row count", len(wide_rows), 4)
+    check("wide: boot heartbeat is absent, not zero", wide_rows[0].admitted, None)
+    check("wide: steady heartbeat parses", wide_rows[1].admitted, 8)
+    check("wide: harness counter present on boot", wide_rows[0].dial_exhausted, 0)
+    wide_result = evaluate(wide_rows, sessions=8)
+    check("wide: dial exhaustion judged", wide_result.get("dial_exhausted"), 0)
+    check(
+        "wide: dial exhaustion adds no violation at zero",
+        any("exhausted" in v for v in wide_result["violations"]),
+        False,
+    )
+    check("wide: retries reported", wide_result.get("dial_retries"), 1)
+    check(
+        "wide: accept loop reported from the last heartbeat row",
+        wide_result.get("accept_loop", {}).get("admitted"),
+        16,
+    )
+    check(
+        "wide: accept loop counts only rows that carried a heartbeat",
+        wide_result.get("accept_loop", {}).get("samples_with_heartbeat"),
+        3,
+    )
+    wide_text = render(wide_result, snapshot_rows(wide_rows))
+    check("wide: render shows the axis", "dial exhaustion" in wide_text, True)
+    check("wide: render shows the accept loop", "accept loop  " in wide_text, True)
+
+    # The same shape with a nonzero exhaustion count must flip the verdict.
+    # Round #5 failed on exactly this axis while summary.txt read clean,
+    # because the column did not exist to be judged.
+    # The counter is cumulative, so every row from t=900 on carries it.
+    wide_exhausted = wide_clean.replace(
+        "900,steady,20550,10,15200,8,8,1,13.0,0,16,1,0,0,0,8,0,1,0",
+        "900,steady,20550,10,15200,8,8,1,13.0,0,16,1,0,0,0,8,3,1,0",
+    ).replace(
+        "1800,drain,20200,10,15100,8,0,2,,0,16,1,0,0,0,0,0,1,0",
+        "1800,drain,20200,10,15100,8,0,2,,0,16,1,0,0,0,0,3,1,0",
+    )
+    exhausted_result = evaluate(read_rows(wide_exhausted.splitlines()), sessions=8)
+    check("wide: nonzero exhaustion is judged", exhausted_result.get("dial_exhausted"), 3)
+    check(
+        "wide: nonzero exhaustion is a violation",
+        any("exhausted" in v for v in exhausted_result["violations"]),
+        True,
+    )
+    check(
+        "wide: the violation names the first sample that saw one",
+        any("t=900s" in v for v in exhausted_result["violations"]),
+        True,
+    )
+
+    # A later sample reading lower must not launder the count back to zero.
+    regressed = wide_clean.replace(
+        "900,steady,20550,10,15200,8,8,1,13.0,0,16,1,0,0,0,8,0,1,0",
+        "900,steady,20550,10,15200,8,8,1,13.0,0,16,1,0,0,0,8,3,1,0",
+    )
+    check(
+        "wide: a later lower sample cannot hide an exhaustion",
+        evaluate(read_rows(regressed.splitlines()), sessions=8).get("dial_exhausted"),
+        3,
+    )
+
+    # SESSION_STALLED reads the same way: judged, tagged, first sample named.
+    stalled_csv = wide_clean.replace(
+        "1800,drain,20200,10,15100,8,0,2,,0,16,1,0,0,0,0,0,1,0",
+        "1800,drain,20200,10,15100,8,0,2,,0,16,1,0,0,0,0,0,1,2",
+    )
+    stalled_result = evaluate(read_rows(stalled_csv.splitlines()), sessions=8)
+    check("wide: session stalls judged", stalled_result.get("dead_sessions"), 2)
+    check(
+        "wide: session stalls are a tagged violation at their first sample",
+        any(v.startswith("SESSION_STALLED:") and "t=1800s" in v for v in stalled_result["violations"]),
+        True,
+    )
+    check("wide: zero stalls add no violation", wide_result.get("dead_sessions"), 0)
+    check(
+        "wide: the extra snapshot table renders empty heartbeat fields as '-'",
+        any(line.split()[:2] == ["0", "-"] for line in wide_text.splitlines()),
+        True,
+    )
+
+    # A legacy CSV leaves the axis unjudged rather than passing it by default.
+    check(
+        "legacy: dial exhaustion is not judged",
+        "dial_exhausted" in passing_result,
+        False,
+    )
+    check(
+        "legacy: and says so in the notes",
+        any("not judged" in n for n in passing_result["notes"]),
+        True,
+    )
+
+    # A #6-shaped CSV whose heartbeat never arrived is called out: silence
+    # there means the §4.1 instrumentation did not take.
+    mute = read_rows(
+        (
+            CSV_HEADER + "\n"
+            "0,boot,20000,10,15000,8,0,0,,0,,,,,,,0,0,0\n"
+            "0,steady,20500,10,15200,8,8,0,12.5,0,,,,,,,0,0,0\n"
+            "900,drain,20200,10,15100,8,0,1,,0,,,,,,,0,0,0\n"
+        ).splitlines()
+    )
+    mute_result = evaluate(mute, sessions=8)
+    check("mute: no accept_loop block", "accept_loop" in mute_result, False)
+    check(
+        "mute: the silence is noted",
+        any("never reached the sampler" in n for n in mute_result["notes"]),
+        True,
+    )
 
     if failures:
         for failure in failures:

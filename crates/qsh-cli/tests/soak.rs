@@ -47,7 +47,18 @@ use std::time::{Duration, Instant};
 /// CSV header, pinned (`docs/campaigns/m8-soak.md` §6): `scripts/soak/summarize.py` and
 /// `docs/campaigns/m8-soak.md`'s record template both depend on this exact
 /// column order and spelling never drifting out from under them.
-pub const SOAK_CSV_HEADER: &str = "t_secs,phase,listener_rss_kib,listener_fds,self_rss_kib,self_fds,live_sessions,cycles,echo_p95_ms,abandoned_live";
+///
+/// The last nine columns are round-#6 additions (`docs/campaigns/
+/// m8-soak.md` §4.1): `admitted`/`retry`/`ignore`/`refuse`/
+/// `quota_refused`/`live_conns` are the server child's own accept-loop
+/// heartbeat counters (`Server::log_accept_heartbeat`,
+/// `crates/qsh-core/src/server/mod.rs`), parsed from its `QSH_LOG`-enabled
+/// stderr and sampled only at `steady`/`drain` rows (blank on `boot`/
+/// `ramp`); `dial_exhausted`/`dial_retries`/`dead_sessions` mirror this
+/// test's own atomics on every row. `scripts/soak/summarize.py` must keep
+/// accepting the pre-#6 ten-column header/rows too — round #5's recorded
+/// `samples.csv` predates this schema and stays a valid artifact.
+pub const SOAK_CSV_HEADER: &str = "t_secs,phase,listener_rss_kib,listener_fds,self_rss_kib,self_fds,live_sessions,cycles,echo_p95_ms,abandoned_live,admitted,retry,ignore,refuse,quota_refused,live_conns,dial_exhausted,dial_retries,dead_sessions";
 
 /// Pure pin test — no env gate, runs on every platform including macOS
 /// (same "helper unit tests are pure-function level" discipline
@@ -58,7 +69,8 @@ fn soak_csv_header_is_pinned() {
     assert_eq!(
         SOAK_CSV_HEADER,
         "t_secs,phase,listener_rss_kib,listener_fds,self_rss_kib,self_fds,live_sessions,cycles,\
-         echo_p95_ms,abandoned_live"
+         echo_p95_ms,abandoned_live,admitted,retry,ignore,refuse,quota_refused,live_conns,\
+         dial_exhausted,dial_retries,dead_sessions"
     );
 }
 
@@ -275,11 +287,12 @@ fn ttl_reap_deadline(params: &Params) -> Duration {
 /// (`common::Fleet`'s shape, but against the release binary — mirrors
 /// `adversarial_load.rs::LoadFleet`/`boot`).
 struct SoakFleet {
-    /// Kept alive only for its `Drop` (the sandbox's `TempDir`, which the
-    /// running `serve` child's config/state directories live under) — no
-    /// field read after `boot()` returns, same as `adversarial_load.rs`'s
-    /// `LoadFleet` fields.
-    #[allow(dead_code)]
+    /// Also read after `boot()` returns (`docs/campaigns/m8-soak.md`
+    /// §4.1): `host.state_dir()` locates the `audit.log` this round copies
+    /// into the artifact directory on every steady sample and once more at
+    /// the drain row (`snapshot_audit_log`). Kept alive for its `Drop` too —
+    /// the sandbox's `TempDir`, which the running `serve` child's
+    /// config/state directories live under.
     host: Sandbox,
     client: Sandbox,
     serve: ServeGuard,
@@ -388,7 +401,7 @@ fn boot(params: &Params) -> SoakFleet {
     host.trust_add(CLIENT_ALIAS, None, &client_fingerprint);
     let config_toml = render_serve_config_toml(params);
     std::fs::write(host.config_dir().join("config.toml"), config_toml).expect("write config.toml");
-    let serve = ServeGuard::start_with_bin(&host, &bin, &[]);
+    let serve = ServeGuard::start_with_bin_logging(&host, &bin, &[], SERVE_LOG_FILTER);
     client.trust_add(HOST_ALIAS, Some(serve.addr()), &host_fingerprint);
     SoakFleet {
         host,
@@ -425,6 +438,17 @@ struct Sample {
     cycles: u64,
     echo_p95_ms: Option<f64>,
     abandoned_live: usize,
+    /// The server child's latest accept-loop heartbeat as of this row
+    /// (`docs/campaigns/m8-soak.md` §4.1). `None` on `boot`/`ramp` rows,
+    /// which never read it, and on any row taken before the child logged
+    /// its first one; both render as empty CSV fields, never as zeros.
+    heartbeat: Option<HeartbeatSample>,
+    /// This test's own atomics as of this row (`docs/campaigns/m8-soak.md`
+    /// §4.1). Cumulative and present on every row, since they do not
+    /// depend on the server child's log stream.
+    dial_exhausted: u64,
+    dial_retries: u64,
+    dead_sessions: u64,
 }
 
 impl Sample {
@@ -432,8 +456,9 @@ impl Sample {
         fn opt(v: Option<impl std::fmt::Display>) -> String {
             v.map(|v| v.to_string()).unwrap_or_default()
         }
+        let hb = self.heartbeat.as_ref();
         format!(
-            "{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             self.t_secs,
             self.phase,
             opt(self.listener_rss_kib),
@@ -444,8 +469,169 @@ impl Sample {
             self.cycles,
             opt(self.echo_p95_ms.map(|v| format!("{v:.3}"))),
             self.abandoned_live,
+            opt(hb.and_then(|h| h.admitted)),
+            opt(hb.and_then(|h| h.retry)),
+            opt(hb.and_then(|h| h.ignore)),
+            opt(hb.and_then(|h| h.refuse)),
+            opt(hb.and_then(|h| h.quota_refused)),
+            opt(hb.and_then(|h| h.live_conns)),
+            self.dial_exhausted,
+            self.dial_retries,
+            self.dead_sessions,
         )
     }
+}
+
+/// The soak listener's `QSH_LOG` filter (`docs/campaigns/m8-soak.md` §4.1).
+/// Target-scoped rather than `-vv`, so the 24h formatting cost stays off
+/// the dial path this round measures: under this harness's allow-all ACL
+/// and no tunnels, `Server::log_accept_heartbeat` is the only `debug!`
+/// event in `qsh_core::server` with anything to fire on, and the
+/// per-decision admission events stay at `trace!`. `warn` stays ahead of
+/// it so the degraded-path warnings still print.
+const SERVE_LOG_FILTER: &str = "warn,qsh_core::server=debug";
+
+/// The message `Server::log_accept_heartbeat` logs its counters under.
+const HEARTBEAT_MESSAGE: &str = "accept loop heartbeat";
+
+/// One accept-loop heartbeat, parsed from the server child's
+/// `tracing::debug!` line (`Server::log_accept_heartbeat`,
+/// `crates/qsh-core/src/server/mod.rs`). A field is `None` when its key is
+/// missing or does not parse. A format drift therefore records nothing
+/// for that column rather than panicking a 24h round;
+/// `a_logging_serve_child_emits_a_heartbeat_the_sampler_can_parse` is what
+/// catches the drift.
+struct HeartbeatSample {
+    admitted: Option<u64>,
+    retry: Option<u64>,
+    ignore: Option<u64>,
+    refuse: Option<u64>,
+    quota_refused: Option<u64>,
+    live_conns: Option<u64>,
+}
+
+/// Parse the `key=value` fields of one heartbeat line as the default
+/// `tracing_subscriber::fmt` layer renders them with ANSI off
+/// (`crates/qsh-cli/src/main.rs::init_tracing`,
+/// `ServeGuard::start_with_bin_logging`). The leading space in the needle
+/// keeps `refuse` from matching inside `connection_quota_refused`.
+fn parse_heartbeat(line: &str) -> HeartbeatSample {
+    fn field(line: &str, key: &str) -> Option<u64> {
+        let needle = format!(" {key}=");
+        let start = line.find(&needle)? + needle.len();
+        let rest = &line[start..];
+        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        rest[..end].parse().ok()
+    }
+    HeartbeatSample {
+        admitted: field(line, "admitted"),
+        retry: field(line, "retry"),
+        ignore: field(line, "ignore"),
+        refuse: field(line, "refuse"),
+        quota_refused: field(line, "connection_quota_refused"),
+        live_conns: field(line, "live_conns"),
+    }
+}
+
+/// The child's latest heartbeat, or `None` before its first one. Reads the
+/// capture the reader thread has already collected, so it never blocks on
+/// the child.
+fn last_heartbeat(serve: &ServeGuard) -> Option<HeartbeatSample> {
+    serve
+        .last_stderr_line_containing(HEARTBEAT_MESSAGE)
+        .map(|line| parse_heartbeat(&line))
+}
+
+/// A real `qsh serve` child under [`SERVE_LOG_FILTER`] must produce a
+/// heartbeat line every one of the six columns can be read from. The
+/// parser alone cannot show this: with ANSI on, the fmt layer wraps each
+/// field name in escape codes, every lookup misses, and a 24h round would
+/// have recorded six empty columns without failing anything. Runs on every
+/// platform against the debug binary; the listener logs its first
+/// heartbeat on the accept loop's first tick.
+#[test]
+fn a_logging_serve_child_emits_a_heartbeat_the_sampler_can_parse() {
+    let host = Sandbox::initialized();
+    let serve = ServeGuard::start_with_bin_logging(
+        &host,
+        std::path::Path::new(env!("CARGO_BIN_EXE_qsh")),
+        &[],
+        SERVE_LOG_FILTER,
+    );
+    let line = common::poll_until(
+        "first accept-loop heartbeat",
+        Duration::from_secs(20),
+        || serve.last_stderr_line_containing(HEARTBEAT_MESSAGE),
+    );
+    let hb = parse_heartbeat(&line);
+    assert_eq!(hb.admitted, Some(0), "admitted: {line:?}");
+    assert_eq!(hb.retry, Some(0), "retry: {line:?}");
+    assert_eq!(hb.ignore, Some(0), "ignore: {line:?}");
+    assert_eq!(hb.refuse, Some(0), "refuse: {line:?}");
+    assert_eq!(
+        hb.quota_refused,
+        Some(0),
+        "connection_quota_refused: {line:?}"
+    );
+    assert_eq!(hb.live_conns, Some(0), "live_conns: {line:?}");
+}
+
+/// Best-effort copy of the host sandbox's `state/audit.log` into the
+/// round's artifact directory (`docs/campaigns/m8-soak.md` §4.1). The
+/// sandbox is a `TempDir` that this process deletes on exit, before
+/// `run.sh` gets control back, so only this process can keep the file.
+/// Called on every steady sample and once more at the drain row, so a
+/// round killed mid-run (host reboot, `run.sh`'s outer `timeout`) still
+/// leaves the trail as of its last sample. `csv_path`'s parent is the
+/// artifact directory (`run.sh` sets `QSH_SOAK_CSV` to
+/// `$OUT/samples.csv`); a short-mode run with no CSV has none, and this
+/// does nothing. A copy error is dropped: early in a run the file may not
+/// exist yet. Audit records are structural and hold no payload (CLAUDE.md
+/// "Security defaults"), so the copy carries nothing confidential.
+fn snapshot_audit_log(host: &Sandbox, csv_path: Option<&PathBuf>) {
+    let Some(out_dir) = csv_path.and_then(|p| p.parent()) else {
+        return;
+    };
+    let _ = std::fs::copy(
+        host.state_dir().join("audit.log"),
+        out_dir.join("audit.log"),
+    );
+}
+
+/// Probe every abandoned session with `session.get` and return how many
+/// are still live. `SESSION_NOT_FOUND` is the expected answer once the
+/// reaper has taken a session, so it counts as "not live" and nothing
+/// else. Any other error is a probe that failed to get an answer
+/// (`docs/campaigns/m8-soak.md` §4.1): it also counts as "not live",
+/// exactly as the `.is_ok()` filter this replaced did, but it bumps
+/// `probe_failures` and logs a line with `t` so the failure can be matched
+/// against the dial lines. It never becomes a violation; a harness round
+/// trip failing is not the product keeping a session past its TTL.
+fn probe_abandoned_live(
+    ops: &Ops,
+    refs: &[String],
+    probe_failures: &AtomicU64,
+    start: Instant,
+) -> usize {
+    refs.iter()
+        .filter(|r| {
+            match ops.session_get(SessionGetReq {
+                session_ref: (*r).clone(),
+            }) {
+                Ok(_) => true,
+                Err(e) if e.code == ErrorCode::SessionNotFound => false,
+                Err(e) => {
+                    probe_failures.fetch_add(1, Ordering::Relaxed);
+                    eprintln!(
+                        "soak: t={}s probe of abandoned session {r} failed (informational, not a \
+                         violation): {e:?}",
+                        start.elapsed().as_secs()
+                    );
+                    false
+                }
+            }
+        })
+        .count()
 }
 
 /// Nearest-rank p95 over `samples` (copied from `adversarial_load.rs`'s
@@ -819,11 +1005,20 @@ fn is_retryable_dial_error(err: &qsh_core::OpError) -> bool {
 /// increments `dial_retries` so the caller can report the total as an
 /// informational verdict line — a retry is never a violation by itself, only
 /// exhausting every attempt is.
+///
+/// `start`/`slot` (`docs/campaigns/m8-soak.md` §4.1) only feed the retry
+/// `eprintln!` below: a `t=<secs>s slot=<n>` prefix, so a retry line lines
+/// up with the CSV row of the same `t_secs` and with the DIAL_EXHAUSTED
+/// line of the same slot without arithmetic by hand. `slot` is the
+/// caller's own index (ramp position or cycle-pool slot); this function
+/// has no session identity before `spawn_session` returns one.
 fn spawn_session_retrying(
     ops: &Arc<Ops>,
     mode: StopMode,
     dial_retries: &AtomicU64,
     dead_sessions: &Arc<AtomicU64>,
+    start: Instant,
+    slot: usize,
 ) -> Result<SessionWorker, qsh_core::OpError> {
     let mut attempt = 1;
     loop {
@@ -832,8 +1027,9 @@ fn spawn_session_retrying(
             Err(err) if attempt < DIAL_RETRY_ATTEMPTS && is_retryable_dial_error(&err) => {
                 dial_retries.fetch_add(1, Ordering::Relaxed);
                 eprintln!(
-                    "soak: dial attempt {attempt}/{DIAL_RETRY_ATTEMPTS} failed with a retryable \
-                     error, retrying in {:?}: {err:?}",
+                    "soak: t={}s slot={slot} dial attempt {attempt}/{DIAL_RETRY_ATTEMPTS} failed \
+                     with a retryable error, retrying in {:?}: {err:?}",
+                    start.elapsed().as_secs(),
                     DIAL_RETRY_BACKOFF
                 );
                 std::thread::sleep(DIAL_RETRY_BACKOFF);
@@ -934,6 +1130,12 @@ fn soak_session_load() {
     // is a SESSION_STALLED violation, tallied across every worker's
     // lifetime (ramp opens and cycle replacements alike).
     let dead_sessions = Arc::new(AtomicU64::new(0));
+    // Abandoned-session probes that got an error other than
+    // SESSION_NOT_FOUND (`docs/campaigns/m8-soak.md` §4.1). Informational
+    // only, never a violation: a probe round trip failing is a harness
+    // measurement miss, not a product regression (that axis is
+    // `abandoned_live` itself).
+    let probe_failures = AtomicU64::new(0);
 
     // --- boot: baseline idle RSS/fd (`docs/campaigns/m8-soak.md` §3) ---
     let (baseline_listener_rss, _) = block_on(poll_stable(|| rss_kib(listener_pid)));
@@ -953,6 +1155,10 @@ fn soak_session_load() {
         cycles: 0,
         echo_p95_ms: None,
         abandoned_live: 0,
+        heartbeat: None,
+        dial_exhausted: dial_exhausted.load(Ordering::Relaxed),
+        dial_retries: dial_retries.load(Ordering::Relaxed),
+        dead_sessions: dead_sessions.load(Ordering::Relaxed),
     });
 
     // --- ramp: open N sessions, `abandon` of which are never cycled ---
@@ -963,7 +1169,7 @@ fn soak_session_load() {
         } else {
             StopMode::Cycle
         };
-        let worker = spawn_session_retrying(&ops, mode, &dial_retries, &dead_sessions)
+        let worker = spawn_session_retrying(&ops, mode, &dial_retries, &dead_sessions, start, i)
             .unwrap_or_else(|e| panic!("ramp: session {i} of {}: {e:?}", params.sessions));
         workers.push(worker);
     }
@@ -1014,6 +1220,10 @@ fn soak_session_load() {
         cycles: 0,
         echo_p95_ms: baseline_echo_p95_ms,
         abandoned_live: params.abandon,
+        heartbeat: None,
+        dial_exhausted: dial_exhausted.load(Ordering::Relaxed),
+        dial_retries: dial_retries.load(Ordering::Relaxed),
+        dead_sessions: dead_sessions.load(Ordering::Relaxed),
     });
 
     // --- steady: SAMPLE_SECS CSV rows, CYCLE_SECS session replacement ---
@@ -1067,7 +1277,14 @@ fn soak_session_load() {
             }
             let mut replaced = Vec::with_capacity(victims.len());
             for &idx in &victims {
-                match spawn_session_retrying(&ops, StopMode::Cycle, &dial_retries, &dead_sessions) {
+                match spawn_session_retrying(
+                    &ops,
+                    StopMode::Cycle,
+                    &dial_retries,
+                    &dead_sessions,
+                    start,
+                    idx,
+                ) {
                     Ok(new_worker) => {
                         let old = std::mem::replace(&mut workers[idx], new_worker);
                         replaced.push(old);
@@ -1085,10 +1302,11 @@ fn soak_session_load() {
                         // DIAL_EXHAUSTED below, just a survivable one.
                         dial_exhausted.fetch_add(1, Ordering::Relaxed);
                         eprintln!(
-                            "soak: cycle replacement for slot {idx} exhausted all \
+                            "soak: t={}s cycle replacement for slot {idx} exhausted all \
                              {DIAL_RETRY_ATTEMPTS} attempts; leaving the slot's stopped session \
                              in place and continuing to drain (DIAL_EXHAUSTED, a verdict FAIL): \
-                             {e:?}"
+                             {e:?}",
+                            t(start)
                         );
                     }
                 }
@@ -1137,17 +1355,14 @@ fn soak_session_load() {
             let should_probe = last_abandoned_probe
                 .is_none_or(|t| probe_now.duration_since(t) >= ABANDONED_PROBE_INTERVAL);
             if should_probe {
-                abandoned_live_cached = abandoned_refs
-                    .iter()
-                    .filter(|r| {
-                        ops.session_get(SessionGetReq {
-                            session_ref: (*r).clone(),
-                        })
-                        .is_ok()
-                    })
-                    .count();
+                abandoned_live_cached =
+                    probe_abandoned_live(&ops, &abandoned_refs, &probe_failures, start);
                 last_abandoned_probe = Some(probe_now);
             }
+            // After every fd sample above, so neither the capture lookup
+            // nor the copy's own file handles land in the fd axes.
+            let heartbeat = last_heartbeat(&fleet.serve);
+            snapshot_audit_log(&fleet.host, params.csv_path.as_ref());
             write_row(&Sample {
                 t_secs: t(start),
                 phase: "steady",
@@ -1159,6 +1374,10 @@ fn soak_session_load() {
                 cycles,
                 echo_p95_ms: echo_p95,
                 abandoned_live: abandoned_live_cached,
+                heartbeat,
+                dial_exhausted: dial_exhausted.load(Ordering::Relaxed),
+                dial_retries: dial_retries.load(Ordering::Relaxed),
+                dead_sessions: dead_sessions.load(Ordering::Relaxed),
             });
             let naive_next_sample = next_sample + params.sample;
             let after_sample = Instant::now();
@@ -1182,15 +1401,9 @@ fn soak_session_load() {
     }));
     let (idle_end_self_fds, _) =
         block_on(poll_stable(|| open_fd_count(self_pid).map(|n| n as u64)));
-    let abandoned_live = abandoned_refs
-        .iter()
-        .filter(|r| {
-            ops.session_get(SessionGetReq {
-                session_ref: (*r).clone(),
-            })
-            .is_ok()
-        })
-        .count();
+    let abandoned_live = probe_abandoned_live(&ops, &abandoned_refs, &probe_failures, start);
+    let drain_heartbeat = last_heartbeat(&fleet.serve);
+    snapshot_audit_log(&fleet.host, params.csv_path.as_ref());
     write_row(&Sample {
         t_secs: t(start),
         phase: "drain",
@@ -1202,6 +1415,10 @@ fn soak_session_load() {
         cycles,
         echo_p95_ms: None,
         abandoned_live,
+        heartbeat: drain_heartbeat,
+        dial_exhausted: dial_exhausted.load(Ordering::Relaxed),
+        dial_retries: dial_retries.load(Ordering::Relaxed),
+        dead_sessions: dead_sessions.load(Ordering::Relaxed),
     });
 
     // --- verdict (`docs/campaigns/m8-soak.md` §3) ---
@@ -1366,6 +1583,7 @@ fn soak_session_load() {
         "FAIL"
     };
     let dial_retries_total = dial_retries.load(Ordering::Relaxed);
+    let probe_failures_total = probe_failures.load(Ordering::Relaxed);
     let sessions = params.sessions;
     // Record-only (never a violation): peak listener RSS reached during
     // steady state and its per-session delta over baseline, same
@@ -1388,7 +1606,7 @@ fn soak_session_load() {
          dial_retries={dial_retries_total} (informational — a dial retry is never a violation by \
          itself, only exhausting all {DIAL_RETRY_ATTEMPTS} attempts is) \
          dead_sessions={dead_sessions_total} dial_exhausted={dial_exhausted_total} \
-         cycle_deadline_skips={cycle_deadline_skips} \
+         probe_failures={probe_failures_total} (informational) cycle_deadline_skips={cycle_deadline_skips} \
          sample_deadline_skips={sample_deadline_skips} (informational — an overrun clamp, not a \
          violation)"
     );

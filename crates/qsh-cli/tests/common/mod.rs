@@ -380,18 +380,41 @@ impl ServeGuard {
     /// §2/J2 — T2 measures a release `qsh serve`, never the debug test binary).
     pub fn start_with_bin(host: &Sandbox, bin: &Path, extra: &[&str]) -> Self {
         plant_allow_all_acl(host);
-        Self::spawn_with_bin(host, bin, extra)
+        Self::spawn_with_bin(host, bin, extra, None)
+    }
+
+    /// Like [`start_with_bin`](Self::start_with_bin), but also sets
+    /// `QSH_LOG` in the child's environment to `log` (`docs/campaigns/
+    /// m8-soak.md` §4.1 — a soak round needs the server child's own
+    /// accept-loop heartbeat, and `command_with_bin`'s `env_remove`
+    /// otherwise strips any inherited `QSH_LOG`/`RUST_LOG` before the child
+    /// ever sees it). `Command` applies env mutations in call order, so a
+    /// `.env("QSH_LOG", log)` issued after `command_with_bin`'s
+    /// `env_remove` of the same key always wins — the removal stays in
+    /// place for every other caller, and only a caller that opts in here
+    /// gets a chatty server child.
+    ///
+    /// `NO_COLOR=1` goes with it. `tracing_subscriber`'s fmt layer turns
+    /// ANSI on by default and does not check whether stderr is a terminal,
+    /// so a piped child would otherwise wrap every field name in escape
+    /// codes and a caller searching for `key=value` would find nothing.
+    pub fn start_with_bin_logging(host: &Sandbox, bin: &Path, extra: &[&str], log: &str) -> Self {
+        plant_allow_all_acl(host);
+        Self::spawn_with_bin(host, bin, extra, Some(log))
     }
 
     fn spawn(host: &Sandbox, extra: &[&str]) -> Self {
-        Self::spawn_with_bin(host, Path::new(env!("CARGO_BIN_EXE_qsh")), extra)
+        Self::spawn_with_bin(host, Path::new(env!("CARGO_BIN_EXE_qsh")), extra, None)
     }
 
-    fn spawn_with_bin(host: &Sandbox, bin: &Path, extra: &[&str]) -> Self {
+    fn spawn_with_bin(host: &Sandbox, bin: &Path, extra: &[&str], log: Option<&str>) -> Self {
         let mut args: Vec<&str> = extra.to_vec();
         args.extend_from_slice(&["serve", "--bind", "127.0.0.1:0"]);
-        let mut child = host
-            .command_with_bin(bin, &args)
+        let mut command = host.command_with_bin(bin, &args);
+        if let Some(log) = log {
+            command.env("QSH_LOG", log).env("NO_COLOR", "1");
+        }
+        let mut child = command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -461,6 +484,20 @@ impl ServeGuard {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    /// The most recent stderr line containing `needle`, if any. Same
+    /// capture as [`stderr_snapshot`](Self::stderr_snapshot), but it clones
+    /// one line instead of all of them — for a caller polling a long-lived
+    /// child on a timer, whose capture only grows.
+    pub fn last_stderr_line_containing(&self, needle: &str) -> Option<String> {
+        self.stderr
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .rev()
+            .find(|line| line.contains(needle))
+            .cloned()
     }
 
     /// The child's process id, for a test that has to stop the host
