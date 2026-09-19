@@ -42,6 +42,7 @@ client/server 양쪽 verifier가 **하나의 검증 코어**를 공유한다 (`q
 
 - ALPN `qsh/1`. 파괴적 wire 개정만 `qsh/2`. ALPN 불일치는 application 상태가 생기기 전에 handshake에서 실패한다.
 - major 내 확장은 `Hello.versions`(minor 교집합) + `Hello.capabilities`(문자열 집합 교집합)로 협상한다. 새 기능 = 새 capability 문자열 + 새 optional message. protobuf라 구 peer는 unknown field를 무시하고, 광고하지 않은 capability의 스트림은 받지 않는다. `qsh capabilities` 명령은 협상된 교집합을 그대로 반환한다(CLI.md §6.10).
+- 이 build가 광고하는 capability: `exec`, `session`, `resume.v1`, `dial-filter.v1`(ADR-0019 결정 3 — host dialer가 `StreamHeader.deny_host_local`을 준수한다는 뜻, §7 참조).
 
 ## 5. Frame layer
 
@@ -76,6 +77,10 @@ connection당 **control 스트림 1개** + 리소스별 스트림. 비-control �
 **Ticket:** `SESSION_DATA`/`EXEC_DATA`용 ticket은 128-bit 난수, **해당 control 요청이 ACL을 통과한 뒤에만 발급**, 단회용, 30s 만료. 스트림이 인가받지 않은 리소스에 붙는 것을 구조적으로 차단한다("인증·인가 전 리소스 생성 금지", PRD §9). 유일한 예외는 `TCP_CONNECT`(local forward) — per-connection RPC 왕복을 피하려 스트림 오픈 시점에 `forward.local` ACL을 inline 검사하고, 거부 시 아무것도 dial하지 않는다(거부 teardown은 아래).
 
 **`ConnectResult`(§9의 data-stream message, `qsh.wire.v1`):** `{ bool ok = 1; string code = 2; string message = 3; }`. frame layer는 위와 같은 §5 재사용(`u32`-BE length prefix + prost, `DATA_FRAME_MAX` 상한)이며, `ok = true` 이후로는 frame 없이 raw bytes로 전환된다(§5의 터널 스트림 예외). `ok = false`일 때 `code`는 CLI.md §3.3 어휘에서 온다 — dial 실패는 `CONNECTION_FAILED`, 위 inline ACL 거부는 `PERMISSION_DENIED`.
+
+**`TCP_CONNECT`의 host 모양 검사(ADR-0019 결정 5):** ACL choke point 이전, 길이 검사(255바이트)와 같은 자리에서 `header.host`를 바이트 단위로 본다. ASCII 제어문자, 공백, DEL, 비ASCII 바이트가 하나라도 있으면 `INVALID_ARGUMENT`로 거절한다 — 판정할 것이 없는 요청이므로 ACL도 audit도 dial도 없다. `-L`이 보낸 `TCP_CONNECT`에도 똑같이 적용된다.
+
+**host-local dial 필터(ADR-0019 결정 3):** `StreamHeader.deny_host_local`(§9 필드 5)이 참이면, host dialer는 이름 해석 결과 주소마다 `connect` 직전에 다음 범주를 검사하고 해당하면 연결하지 않는다 — loopback(`127.0.0.0/8`, `::1`), "이 망"(`0.0.0.0/8`; unspecified `0.0.0.0`/`::` 포함), link-local(`169.254.0.0/16`, `fe80::/10`), multicast, IPv4 broadcast(`255.255.255.255`), 그리고 위 주소들의 IPv4-mapped·IPv4-compatible IPv6 표기. 해석은 한 번만 하고 그 결과로만 연결을 시도하므로 검사와 연결 사이에 재해석 경합이 없다. 해석된 주소가 전부 이 범주에 들면 dial을 시도하지 않고 `ConnectResult{ok:false, code:PERMISSION_DENIED}`를 돌려주며, `AuditRecord::connection_level` 모양으로 `action=forward.local, decision=deny, rule=null`인 audit 한 줄을 쓴다(§7 "인가 순서" 위 `forward.local` ACL 판정과는 별개의, 추가되는 한 줄이다 — 이 필터는 ACL 규칙이 아니라 dial 정책이다). 해석된 IP 자체는 audit에도 로그에도 남기지 않는다. 이 필드를 준수하는 것은 `dial-filter.v1` capability(§4)를 광고한 host뿐이다 — 광고하지 않은 구버전 host는 필드를 무시하고 오늘과 같이 무필터로 동작한다.
 
 **거부 teardown(`TCP_CONNECT`):** 거부는 `ConnectResult{ok:false, code}`를 **먼저 쓰고**, 송신 half를 `finish()`로 닫고, 수신 half를 사유에 맞는 코드로 `stop()`한다 — `PERMISSION_DENIED`면 `FORBIDDEN`(0x2003), `INVALID_ARGUMENT`면 `BAD_HEADER`(0x2001), `RESOURCE_EXHAUSTED`면 `RESET_CODE_RESOURCE_EXHAUSTED`(0x200D, M8 Step 3b — principal별·forward별 터널 스트림 quota 초과), 목적지가 그냥 받아주지 않은 경우는 누구의 프로토콜 오류도 아니므로 0이다. **송신 half를 reset하지 않는 것이 요점이다**: QUIC `RESET_STREAM`은 아직 전달되지 않은 스트림 데이터를 버리므로, 방금 쓴 `ConnectResult`를 reset이 그대로 파괴할 수 있다 — 이 절이 요구하는 "요청자가 거부 사유를 `code`로 읽는다"가 전달 경쟁에 걸린다. 그렇다고 거부가 느슨해지지는 않는다. dial은 0건이고, splice는 시작되지 않으며, 수신 half가 stop된 스트림에는 요청자가 더 쓸 수 없다 — 거부는 그대로 종단이다. 구현은 `crates/qsh-core/src/server/mod.rs`의 `handle_tcp_connect`.
 
@@ -238,6 +243,8 @@ message StreamHeader {
   StreamKind kind = 1;                 // SESSION_DATA | EXEC_DATA | TCP_CONNECT | TCP_ACCEPTED
   bytes ticket = 2;                    // SESSION_DATA / EXEC_DATA / TCP_ACCEPTED(forward_id)
   string host = 3; uint32 port = 4;    // TCP_CONNECT 전용
+  bool deny_host_local = 5;            // TCP_CONNECT 전용, dial-filter.v1을 광고하는 peer만 준수
+                                        //   (ADR-0019 결정 3). 기본값 false = 오늘 동작(무필터).
 }
 
 // Session data 스트림 frame. sequence/input_seq는 누적 byte offset(§8).

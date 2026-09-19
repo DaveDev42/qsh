@@ -162,8 +162,14 @@ impl Server {
     ///
     /// A local forward's destination is chosen by the requester and is
     /// **not** restricted here (unlike `-R`'s loopback-only bind, Step 4):
-    /// `host:port` is the ACL resource, so restricting destinations is the
-    /// policy engine's job (M5), not this code's.
+    /// `host:port` is the ACL resource. The policy engine does not inspect
+    /// destinations today — a rule matches on principal/auth_path/scope
+    /// only (`crate::acl::policy` module doc) — so a `forward.local` grant
+    /// is a grant to every destination this host can reach. A destination
+    /// grammar (matching a rule against `host:port` itself) is a separate
+    /// ADR (ADR-0019 decision 15, Q1); this function's own destination
+    /// check is [`is_host_local`](crate::tunnel::dial::is_host_local)'s
+    /// dial-time filter below, which is a dial policy, not an ACL rule.
     ///
     /// `Err` is the [`wire::ConnectResult`] to hand the requester verbatim.
     pub(crate) async fn authorize_and_dial_tunnel(
@@ -199,6 +205,27 @@ impl Server {
             return Err(connect_rejected(
                 ErrorCode::InvalidArgument,
                 "destination host is too long",
+            ));
+        }
+        // ADR-0019 decision 5: an ASCII control byte, space, DEL, or any
+        // non-ASCII byte never appears in a real DNS name or IP literal
+        // (`parse_forward_spec` never produces one from a well-formed
+        // `-L`/`-D` spec), so this is "nothing to decide about" exactly
+        // like the length check above — before the ACL choke point, no
+        // audit line, no dial. A malicious client bypasses its own
+        // encoder's checks trivially, so the host needs this defense
+        // whether or not the peer is honest, and it applies to every
+        // `TCP_CONNECT`, `-L`'s included.
+        if header
+            .host
+            .bytes()
+            // `is_ascii_control` already covers DEL (0x7F) alongside the
+            // C0 control range; `!is_ascii` catches every byte >= 0x80.
+            .any(|b| b.is_ascii_control() || b == b' ' || !b.is_ascii())
+        {
+            return Err(connect_rejected(
+                ErrorCode::InvalidArgument,
+                "destination host contains a disallowed byte",
             ));
         }
         // Canonical `host:port` — bracketed for an IPv6 literal, which
@@ -253,9 +280,55 @@ impl Server {
             }
         };
 
-        // (3) Only now may a resource come into existence.
-        match dialer.dial(&header.host, port).await {
+        // (3) Only now may a resource come into existence. `header.
+        // deny_host_local` is `StreamHeader` field 5 verbatim (ADR-0019
+        // decision 3) — a peer that never sent it decodes it as `false`
+        // (proto3 default), so an old client's `-L` and this build's own
+        // `-L` (`crate::tunnel::local`, which always sends `false`) dial
+        // exactly as before this field existed.
+        let policy = crate::tunnel::dial::DialPolicy {
+            deny_host_local: header.deny_host_local,
+        };
+        match dialer.dial(&header.host, port, &policy).await {
             Ok(upstream) => Ok((upstream, permit)),
+            Err(crate::tunnel::dial::DialError::Filtered) => {
+                // The host-local dial filter is a dial policy, not an ACL
+                // rule (`authorize_and_dial_tunnel`'s own doc), but a
+                // filtered destination is still refused the same way an
+                // ACL deny is: one connection-level audit line, `rule:
+                // None` because no `[[acl]]` row was ever consulted for
+                // this decision (`AuditRecord::now`'s doc on `rule`),
+                // `PERMISSION_DENIED` to the requester (ADR-0019 decision
+                // 3). Resolved addresses never reach the audit line —
+                // `DialError::Filtered`'s `Display` names the category
+                // only.
+                let recorded = self.audit.record(&AuditRecord::connection_level(
+                    &ctx.principal,
+                    ctx.auth_path,
+                    crate::acl::Op::ForwardLocal.action(),
+                    &resource,
+                    Decision::Deny,
+                    None,
+                    ctx.peer_addr,
+                ));
+                if recorded.is_err() {
+                    // Fail-closed (`CLAUDE.md` "the audit writer is
+                    // fail-closed too: no durable record, no operation"):
+                    // already a denial either way, so there is nothing
+                    // further to withhold — this just documents that an
+                    // unrecorded filter-deny is not treated as silently
+                    // unaudited.
+                    tracing::warn!(
+                        principal = %ctx.principal,
+                        %resource,
+                        "tunnel: host-local dial filter deny audit record failed to write"
+                    );
+                }
+                Err(connect_rejected(
+                    ErrorCode::PermissionDenied,
+                    crate::tunnel::dial::FILTERED_MESSAGE,
+                ))
+            }
             Err(err) => {
                 // The destination, not the payload: safe to log, and the
                 // only thing about this tunnel that ever is.

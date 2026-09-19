@@ -4,7 +4,8 @@
     "capabilities": [
       "exec",
       "session",
-      "resume.v1"
+      "resume.v1",
+      "dial-filter.v1"
     ]
   },
   "ok": true,
