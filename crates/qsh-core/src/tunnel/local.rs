@@ -44,12 +44,16 @@ use qsh_proto::wire::{
     ConnectResult, ForwardSpec, StreamHeader, StreamKind, format_host_port, sanitize_peer_text,
 };
 use qsh_proto::{ErrorCode, Tunnel};
+use quinn::{RecvStream, SendStream};
 use thiserror::Error;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinSet;
 
 use crate::client::ClientError;
 use crate::client::link::DataLink;
+use crate::tunnel::dial::DialPolicy;
+#[cfg(unix)]
+use crate::tunnel::splice::splice_tcp_uds;
 use crate::tunnel::splice::{SpliceError, SpliceStats, splice_tcp_quic};
 
 /// An owned carrier a [`LocalForward`] can keep opening tunnel streams on,
@@ -222,7 +226,7 @@ impl LocalForward {
     /// peer, per connection, before the peer creates anything
     /// (`docs/PRD.md` §9, `docs/design/protocol.md` §7).
     pub(crate) async fn bind(spec: &ForwardSpec) -> Result<Self, LocalForwardError> {
-        let addr = loopback_bind_addr(spec.bind.as_deref(), spec.listen_port)?;
+        let addr = loopback_bind_addr(spec.bind.as_deref(), spec.listen_port, "-L")?;
         let listener = TcpListener::bind(addr)
             .await
             .map_err(|source| LocalForwardError::Listen { addr, source })?;
@@ -488,19 +492,58 @@ impl Drop for LocalForwardHandle {
     }
 }
 
-/// One accepted TCP connection's whole life: open the tunnel stream, read
-/// the peer's verdict, then either splice or clean up.
+/// A tunnel stream past its `ConnectResult{ok:true}` handshake: a raw byte
+/// pipe on whichever carrier [`open_tunnel`] actually opened it on, plus any
+/// payload the peer already pipelined behind the handshake frame (the
+/// `residue` [`splice_opened`] must write first — same requirement
+/// `splice_tcp_quic`'s own doc states).
 ///
-/// The handshake is exactly `docs/design/protocol.md` §7's: a
+/// Split out of the old single-shot `forward_connection` (ADR-0019 decision
+/// 9) so a `-D` SOCKS driver can hold the local TCP connection open across
+/// its own handshake (reading the SOCKS request, writing the `REP`) between
+/// [`open_tunnel`] returning and [`splice_opened`] being called — `-L` still
+/// calls the two back to back with nothing in between, so its behavior is
+/// unchanged.
+pub(crate) enum OpenedTunnel {
+    /// Opened on [`ForwardCarrier::Quic`].
+    Quic {
+        send: SendStream,
+        recv: RecvStream,
+        residue: Vec<u8>,
+    },
+    /// Opened on [`ForwardCarrier::Local`].
+    #[cfg(unix)]
+    Local {
+        send: crate::localctl::client::RawUdsWrite,
+        recv: crate::localctl::client::RawUdsRead,
+        residue: Vec<u8>,
+    },
+}
+
+/// Open one tunnel stream on `carrier` for `host:port` and wait for the
+/// peer's verdict — everything up to, but not including, the raw byte
+/// splice.
+///
+/// The handshake is exactly `docs/design/protocol.md` §7's:
 /// `StreamHeader{TCP_CONNECT}` (written by [`crate::tunnel::open_stream`],
-/// which also applies `PRIORITY_TUNNEL`), one `ConnectResult` back, and
-/// from there raw bytes with no framing at all.
-async fn forward_connection(
-    tcp: TcpStream,
+/// which also applies `PRIORITY_TUNNEL`) out, one `ConnectResult` back. On
+/// `ConnectResult{ok:true}` this converts the framed stream to the raw halves
+/// [`splice_opened`] needs; on anything else it reports [`ForwardConnError`]
+/// and leaves the caller's `tcp` connection untouched — callers that need
+/// `-L`'s always-RST cleanup do that themselves (`abort_local`), and callers
+/// that owe the local peer a SOCKS `REP` first (`-D`) get the chance to send
+/// one before closing anything.
+///
+/// `policy.deny_host_local` becomes `StreamHeader.deny_host_local` verbatim
+/// (ADR-0019 decision 3) — `-L` always passes
+/// [`DialPolicy::default`]-equivalent `false` (operator-chosen destination,
+/// not attacker-steered content behind a proxy), `-D` always passes `true`.
+pub(crate) async fn open_tunnel(
     carrier: &ForwardCarrier,
     host: &str,
     port: u16,
-) -> Result<SpliceStats, ForwardConnError> {
+    policy: DialPolicy,
+) -> Result<OpenedTunnel, ForwardConnError> {
     let header = StreamHeader {
         kind: StreamKind::TcpConnect as i32,
         // §7: `TCP_CONNECT` is the sole stream kind that carries no
@@ -508,72 +551,115 @@ async fn forward_connection(
         ticket: Vec::new(),
         host: host.to_string(),
         port: u32::from(port),
-        // `-L`'s destination is operator-chosen, not attacker-steered
-        // content behind a proxy (ADR-0019's threat model) — unfiltered,
-        // today's behavior, same as every host predating this field.
-        deny_host_local: false,
+        deny_host_local: policy.deny_host_local,
     };
     let link = carrier.link();
-    let (send, mut recv, kill) = match crate::tunnel::open_stream(&link, &header).await {
-        Ok(opened) => opened,
-        Err(err) => return Err(abort_local(tcp, err.into())),
-    };
+    let (send, mut recv, kill) = crate::tunnel::open_stream(&link, &header).await?;
 
     let result: ConnectResult = match recv.recv().await {
         Ok(Some(result)) => result,
         Ok(None) => {
             kill.kill();
-            return Err(abort_local(tcp, ForwardConnError::NoConnectResult));
+            return Err(ForwardConnError::NoConnectResult);
         }
         Err(err) => {
             kill.kill();
-            return Err(abort_local(tcp, err.into()));
+            return Err(err.into());
         }
     };
     if !result.ok {
         kill.kill();
-        return Err(abort_local(
-            tcp,
-            ForwardConnError::Refused {
-                // Sanitized at construction — the peer authored these and
-                // they end up in this side's diagnostics, possibly on a
-                // raw-mode terminal (`ForwardConnError::Refused`'s doc).
-                code: sanitize_peer_text(&result.code),
-                message: sanitize_peer_text(&result.message),
-            },
-        ));
+        return Err(ForwardConnError::Refused {
+            // Sanitized at construction — the peer authored these and
+            // they end up in this side's diagnostics, possibly on a
+            // raw-mode terminal (`ForwardConnError::Refused`'s doc).
+            code: sanitize_peer_text(&result.code),
+            message: sanitize_peer_text(&result.message),
+        });
     }
 
     // Past `ConnectResult{ok:true}` the stream is a raw byte pipe (§5, §7):
-    // hand both halves to the splice for whichever carrier this connection
-    // actually opened its stream on — `carrier`'s own variant decides
-    // which raw conversion must succeed, so the two always agree; the
-    // `CarrierNotRaw` arm exists only as a defensive fallback
-    // (`ForwardConnError::CarrierNotRaw`'s own doc), never a reachable
-    // outcome. Either way any payload the peer already pipelined behind
-    // the `ConnectResult` frame (`into_raw_quic`/`into_raw_local`'s
-    // residue) is what the splice must write first.
+    // convert both halves to whichever raw carrier this connection actually
+    // opened its stream on — `carrier`'s own variant decides which raw
+    // conversion must succeed, so the two always agree; the `CarrierNotRaw`
+    // arm exists only as a defensive fallback (`ForwardConnError::
+    // CarrierNotRaw`'s own doc), never a reachable outcome.
     match carrier {
         ForwardCarrier::Quic(_) => {
-            let (Ok(raw_send), Ok((raw_recv, residue))) =
-                (send.into_raw_quic(), recv.into_raw_quic())
+            let (Ok(send), Ok((recv, residue))) = (send.into_raw_quic(), recv.into_raw_quic())
             else {
                 kill.kill();
-                return Err(abort_local(tcp, ForwardConnError::CarrierNotRaw));
+                return Err(ForwardConnError::CarrierNotRaw);
             };
-            Ok(splice_tcp_quic(tcp, raw_send, raw_recv, residue).await?)
+            Ok(OpenedTunnel::Quic {
+                send,
+                recv,
+                residue,
+            })
         }
         #[cfg(unix)]
         ForwardCarrier::Local { .. } => {
-            let (Ok(raw_send), Ok((raw_recv, residue))) =
-                (send.into_raw_local(), recv.into_raw_local())
+            let (Ok(send), Ok((recv, residue))) = (send.into_raw_local(), recv.into_raw_local())
             else {
                 kill.kill();
-                return Err(abort_local(tcp, ForwardConnError::CarrierNotRaw));
+                return Err(ForwardConnError::CarrierNotRaw);
             };
-            Ok(crate::tunnel::splice::splice_tcp_uds(tcp, raw_send, raw_recv, residue).await?)
+            Ok(OpenedTunnel::Local {
+                send,
+                recv,
+                residue,
+            })
         }
     }
+}
+
+/// Splice `tcp` against `opened`'s raw carrier until both directions end —
+/// [`open_tunnel`]'s other half. Any payload the peer pipelined behind the
+/// `ConnectResult` (`opened`'s `residue`) is written to `tcp` first (module
+/// docs).
+pub(crate) async fn splice_opened(
+    tcp: TcpStream,
+    opened: OpenedTunnel,
+) -> Result<SpliceStats, ForwardConnError> {
+    match opened {
+        OpenedTunnel::Quic {
+            send,
+            recv,
+            residue,
+        } => Ok(splice_tcp_quic(tcp, send, recv, residue).await?),
+        #[cfg(unix)]
+        OpenedTunnel::Local {
+            send,
+            recv,
+            residue,
+        } => Ok(splice_tcp_uds(tcp, send, recv, residue).await?),
+    }
+}
+
+/// One accepted TCP connection's whole life for `-L`: open the tunnel
+/// stream, read the peer's verdict, then either splice or clean up.
+///
+/// The two-step split ([`open_tunnel`] then [`splice_opened`]) exists for
+/// `-D` (ADR-0019 decision 9); `-L` has no handshake of its own to interleave
+/// between them, so this just calls both in sequence with its existing
+/// [`abort_local`] discipline — behavior identical to before the split.
+async fn forward_connection(
+    tcp: TcpStream,
+    carrier: &ForwardCarrier,
+    host: &str,
+    port: u16,
+) -> Result<SpliceStats, ForwardConnError> {
+    // `-L`'s destination is operator-chosen, not attacker-steered content
+    // behind a proxy (ADR-0019's threat model) — unfiltered, today's
+    // behavior, same as every host predating this field.
+    let policy = DialPolicy {
+        deny_host_local: false,
+    };
+    let opened = match open_tunnel(carrier, host, port, policy).await {
+        Ok(opened) => opened,
+        Err(err) => return Err(abort_local(tcp, err)),
+    };
+    splice_opened(tcp, opened).await
 }
 
 /// End an accepted local connection the way a *failed* tunnel must end it,
@@ -602,12 +688,12 @@ fn abort_local(tcp: TcpStream, err: ForwardConnError) -> ForwardConnError {
 /// rather than after one is already running. It is the *same* function
 /// [`LocalForward::bind`] uses, not a copy of its rule.
 pub(crate) fn check_bind(spec: &ForwardSpec) -> Result<(), LocalForwardError> {
-    loopback_bind_addr(spec.bind.as_deref(), spec.listen_port).map(|_| ())
+    loopback_bind_addr(spec.bind.as_deref(), spec.listen_port, "-L").map(|_| ())
 }
 
-/// Resolve a `-L` spec's `[bind:]` to the loopback socket address to bind,
-/// refusing anything that is not loopback (this module's own doc, `PLAN.md`
-/// M4 §4.1 #3).
+/// Resolve a `[bind:]` to the loopback socket address to bind, refusing
+/// anything that is not loopback (this module's own doc, `PLAN.md` M4 §4.1
+/// #3; ADR-0019 decision 9 reuses this verbatim for `-D`).
 ///
 /// Loopback-ness is decided by *address classification*
 /// ([`IpAddr::is_loopback`]), never by string comparison, so neither
@@ -616,7 +702,23 @@ pub(crate) fn check_bind(spec: &ForwardSpec) -> Result<(), LocalForwardError> {
 /// one name accepted, and it is mapped to `127.0.0.1` here rather than
 /// resolved — a resolver that returned something else for it (a doctored
 /// `/etc/hosts`) would otherwise decide where this port listens.
-fn loopback_bind_addr(bind: Option<&str>, port: u16) -> Result<SocketAddr, LocalForwardError> {
+///
+/// `flag` names the actual caller (`"-L"` or `"-D"`) in the refusal text —
+/// ADR-0019 decision 9: "오류 문면은 '-L listeners'가 아니라 실제 flag
+/// 이름을 댄다", so a `-D` caller's listener is never described as a `-L`
+/// listener. The noun phrase leading the message stays `-L`'s original,
+/// byte-identical text (`"local forward bind ..."`, predating `-D`); only
+/// the trailing `"{flag} listeners are loopback-only"` — and, for `-D`, the
+/// noun itself — actually varies by caller.
+pub(crate) fn loopback_bind_addr(
+    bind: Option<&str>,
+    port: u16,
+    flag: &str,
+) -> Result<SocketAddr, LocalForwardError> {
+    let noun = match flag {
+        "-D" => "dynamic forward",
+        _ => "local forward",
+    };
     let Some(bind) = bind else {
         return Ok(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port));
     };
@@ -626,12 +728,12 @@ fn loopback_bind_addr(bind: Option<&str>, port: u16) -> Result<SocketAddr, Local
     match bind.parse::<IpAddr>() {
         Ok(ip) if ip.is_loopback() => Ok(SocketAddr::new(ip, port)),
         Ok(_) => Err(LocalForwardError::Bind(format!(
-            "local forward bind {bind:?} is not a loopback address; \
-             -L listeners are loopback-only"
+            "{noun} bind {bind:?} is not a loopback address; \
+             {flag} listeners are loopback-only"
         ))),
         Err(_) => Err(LocalForwardError::Bind(format!(
-            "local forward bind {bind:?} is not an IP address or \"localhost\"; \
-             -L listeners are loopback-only"
+            "{noun} bind {bind:?} is not an IP address or \"localhost\"; \
+             {flag} listeners are loopback-only"
         ))),
     }
 }
@@ -742,409 +844,4 @@ pub(crate) fn accept_disposition(err: &io::Error) -> AcceptDisposition {
 }
 
 #[cfg(test)]
-mod tests {
-    use qsh_proto::wire::{ForwardDirection, parse_forward_spec};
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    use super::*;
-    use crate::tunnel::testutil::loopback_pair;
-
-    /// Build a `-L` spec directly rather than through
-    /// [`parse_forward_spec`], because the parser's grammar rejects listen
-    /// port 0 (`1..=65535`, settled in M4 Step 1) while
-    /// `docs/design/testing.md`'s CI rule requires tests to bind port 0.
-    /// [`LocalForward`] takes a [`ForwardSpec`], not a spec string, so a
-    /// test can express what the CLI grammar cannot.
-    fn local_spec(bind: Option<&str>, listen_port: u16, host: &str, host_port: u16) -> ForwardSpec {
-        ForwardSpec {
-            direction: ForwardDirection::Local,
-            bind: bind.map(str::to_string),
-            listen_port,
-            host: host.to_string(),
-            host_port,
-        }
-    }
-
-    /// The port-0 loopback spec every splice test below binds.
-    fn ephemeral_spec() -> ForwardSpec {
-        local_spec(None, 0, "db.internal", 5432)
-    }
-
-    /// The parser and this module agree on where a real `-L` string binds:
-    /// a parsed spec's `bind` flows into [`loopback_bind_addr`] unchanged.
-    #[test]
-    fn a_parsed_spec_binds_the_address_it_names() {
-        let spec = parse_forward_spec("127.0.0.1:8080:db.internal:5432").unwrap();
-        assert_eq!(spec.direction, ForwardDirection::Local);
-        let addr = loopback_bind_addr(spec.bind.as_deref(), spec.listen_port).unwrap();
-        assert_eq!(addr, "127.0.0.1:8080".parse::<SocketAddr>().unwrap());
-    }
-
-    // ---- bind policy (§4.1 #3) ------------------------------------------
-
-    #[test]
-    fn bind_defaults_to_ipv4_loopback_when_the_spec_has_no_bind() {
-        let addr = loopback_bind_addr(None, 8080).unwrap();
-        assert_eq!(addr, "127.0.0.1:8080".parse::<SocketAddr>().unwrap());
-        assert!(addr.ip().is_loopback());
-    }
-
-    #[test]
-    fn bind_accepts_every_loopback_spelling() {
-        for (bind, expected) in [
-            ("localhost", "127.0.0.1:1:"),
-            ("LocalHost", "127.0.0.1:1:"),
-            ("127.0.0.1", "127.0.0.1:1:"),
-            // Not `127.0.0.1`: loopback is the whole 127/8 block, which a
-            // string comparison against "127.0.0.1" would get wrong.
-            ("127.0.0.7", "127.0.0.7:1:"),
-            ("::1", "[::1]:1:"),
-        ] {
-            let addr = loopback_bind_addr(Some(bind), 1).unwrap();
-            assert!(addr.ip().is_loopback(), "{bind} must classify as loopback");
-            assert_eq!(
-                format!("{addr}:"),
-                expected,
-                "{bind} must bind the address it names"
-            );
-        }
-    }
-
-    /// The security property of §4.1 #3: a `-L` listener is never exposed
-    /// off this machine, and the refusal happens *before* any listener
-    /// exists (`bind` returns `Err` without touching the network).
-    #[tokio::test]
-    async fn non_loopback_bind_is_refused_and_binds_nothing() {
-        for bind in [
-            "0.0.0.0",
-            "::",
-            "192.168.1.10",
-            "8.8.8.8",
-            // A name, not an address — never resolved, since a resolver
-            // answer would otherwise pick the interface.
-            "example.com",
-            "*",
-        ] {
-            let err =
-                loopback_bind_addr(Some(bind), 0).expect_err("non-loopback bind must be refused");
-            assert_eq!(err.code(), ErrorCode::InvalidArgument, "{bind}");
-
-            let refused = LocalForward::bind(&local_spec(Some(bind), 0, "example.test", 80))
-                .await
-                .expect_err("bind must refuse before listening");
-            assert_eq!(refused.code(), ErrorCode::InvalidArgument, "{bind}");
-        }
-    }
-
-    #[tokio::test]
-    async fn bind_reports_the_real_port_for_a_port_zero_spec() {
-        let forward = LocalForward::bind(&ephemeral_spec()).await.unwrap();
-        assert!(forward.local_addr().ip().is_loopback());
-        assert_ne!(forward.local_addr().port(), 0, "port 0 must resolve");
-        assert_eq!(forward.destination(), ("db.internal", 5432));
-    }
-
-    // ---- the `Tunnel` DTO (`docs/CLI.md` §6.9) ---------------------------
-
-    /// `actual_port` reports the port actually bound, **including** when
-    /// the spec named it — which is what §6.9's own `Tunnel` example
-    /// shows. Reporting it only for a `0` request would leave every
-    /// fixed-port reader re-splitting `bind` (a socket address, so the
-    /// harder split of the two) to learn the same number.
-    #[tokio::test]
-    async fn the_tunnel_dto_reports_the_bound_port_for_a_fixed_port_spec() {
-        // A port the kernel just handed out and released: fixed from the
-        // spec's point of view, never a literal (`docs/design/testing.md`'s
-        // CI rule).
-        let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = probe.local_addr().unwrap().port();
-        drop(probe);
-
-        let (client_conn, host_conn) = loopback_pair().await;
-        let handle =
-            LocalForwardHandle::start(&local_spec(None, port, "db.internal", 5432), client_conn)
-                .await
-                .unwrap();
-
-        assert_eq!(
-            handle.local_addr().port(),
-            port,
-            "the spec's fixed port was granted as asked"
-        );
-        let dto = handle.tunnel("box");
-        assert_eq!(
-            dto.actual_port,
-            Some(u32::from(port)),
-            "a fixed-port forward still reports the port it bound"
-        );
-        assert_eq!(dto.bind, format!("127.0.0.1:{port}"));
-        assert_eq!(dto.forward_to, "db.internal:5432");
-        assert_eq!(dto.mode, "local");
-        assert_eq!(dto.host, "box");
-
-        drop(handle);
-        drop(host_conn);
-    }
-
-    /// `forward_to` is the canonical `host:port`, so an IPv6 destination
-    /// is bracketed — `parse_forward_spec` strips the brackets off
-    /// `[::1]`, and plain concatenation would emit the unsplittable
-    /// `::1:5432` (the same form the peer's `forward.local` ACL resource
-    /// takes).
-    #[tokio::test]
-    async fn the_tunnel_dto_brackets_an_ipv6_destination() {
-        let (client_conn, host_conn) = loopback_pair().await;
-        let handle = LocalForwardHandle::start(&local_spec(None, 0, "::1", 5432), client_conn)
-            .await
-            .unwrap();
-
-        assert_eq!(handle.tunnel("box").forward_to, "[::1]:5432");
-
-        drop(handle);
-        drop(host_conn);
-    }
-
-    // ---- accept-error classification (Step 3: one bad accept must not
-    //      end the forward) --------------------------------------------
-
-    /// The `-L` contract's liveness half: only a dead *listener* ends a
-    /// forward. A connection that died on the way in is retried at once;
-    /// running out of descriptors or buffers is retried behind
-    /// [`ACCEPT_BACKOFF`] so a persistent `EMFILE` cannot spin the loop;
-    /// and everything else — the listener itself being unusable — is the
-    /// one thing that stops accepting.
-    #[test]
-    fn accept_errors_are_classified_so_one_bad_accept_never_ends_the_forward() {
-        use io::ErrorKind;
-
-        for kind in [ErrorKind::ConnectionAborted, ErrorKind::Interrupted] {
-            assert_eq!(
-                accept_disposition(&io::Error::from(kind)),
-                AcceptDisposition::Retry,
-                "{kind:?} is about one pending connection, not the listener"
-            );
-        }
-
-        assert!(
-            !ACCEPT_EXHAUSTION_ERRNOS.is_empty(),
-            "this platform must name its exhaustion errnos, or the loop \
-             treats a recoverable EMFILE as a dead listener"
-        );
-        for code in ACCEPT_EXHAUSTION_ERRNOS {
-            assert_eq!(
-                accept_disposition(&io::Error::from_raw_os_error(*code)),
-                AcceptDisposition::Backoff,
-                "errno {code} exhausts a resource; the listener survives it"
-            );
-        }
-        assert_eq!(
-            accept_disposition(&io::Error::from(ErrorKind::OutOfMemory)),
-            AcceptDisposition::Backoff
-        );
-
-        // Linux passes a pending connection's own network error back out
-        // of `accept()`; `accept(2)` says to treat those like `EAGAIN`.
-        // Left unclassified they land in the `Fatal` catch-all below, so
-        // one unreachable client would end the whole forward.
-        for code in ACCEPT_PER_CONNECTION_ERRNOS {
-            assert_eq!(
-                accept_disposition(&io::Error::from_raw_os_error(*code)),
-                AcceptDisposition::Backoff,
-                "errno {code} describes the pending connection, not the listener"
-            );
-        }
-
-        for kind in [
-            ErrorKind::InvalidInput,
-            ErrorKind::PermissionDenied,
-            ErrorKind::NotConnected,
-            ErrorKind::Other,
-        ] {
-            assert_eq!(
-                accept_disposition(&io::Error::from(kind)),
-                AcceptDisposition::Fatal,
-                "{kind:?} says the listener is unusable"
-            );
-        }
-    }
-
-    /// The test above only exercises `err.raw_os_error() == None` (every
-    /// `io::Error::from(ErrorKind)` it builds carries no raw errno) —
-    /// leaving `accept_disposition`'s `_ => Fatal` catch-all for a *real*,
-    /// unlisted errno unpinned (M8 Step 3b, R10). `EBADF` is exactly the
-    /// errno the remote-forward accept loop's own fatal path produces (a
-    /// listener whose fd is no longer valid) and belongs to neither
-    /// `ACCEPT_EXHAUSTION_ERRNOS` nor `ACCEPT_PER_CONNECTION_ERRNOS` on any
-    /// platform this crate targets.
-    #[test]
-    fn an_unclassified_accept_errno_is_fatal() {
-        assert_eq!(
-            accept_disposition(&io::Error::from_raw_os_error(libc::EBADF)),
-            AcceptDisposition::Fatal,
-            "EBADF names a dead listener, not a retryable/backoff-able condition"
-        );
-    }
-
-    // ---- the requester leg end to end ------------------------------------
-
-    /// Stand in for the host side of `docs/design/protocol.md` §7 over a
-    /// real QUIC connection: accept one tunnel stream, assert the header
-    /// is a ticket-less `TCP_CONNECT` for the expected destination, answer
-    /// `ConnectResult`, and — when allowed — echo raw bytes back with
-    /// `pipelined` prepended *in the same write as the `ConnectResult`*,
-    /// which is what forces the client's framed reader to buffer payload
-    /// past the handshake frame.
-    ///
-    /// Takes a **clone** of the connection: `qsh_transport::Connection` is
-    /// a handle whose last drop closes the whole QUIC connection with
-    /// application code 0, which would tear down stream data still in
-    /// flight the moment this helper returned.
-    async fn fake_host(
-        conn: qsh_transport::Connection,
-        allow: bool,
-        pipelined: &'static [u8],
-    ) -> StreamHeader {
-        let (send, recv) = conn.accept_bi().await.unwrap();
-        let mut framed = qsh_transport::FramedStream::data(send, recv);
-        let header: StreamHeader = framed.recv.recv().await.unwrap().expect("header");
-        assert_eq!(header.stream_kind(), Some(StreamKind::TcpConnect));
-        assert!(
-            header.ticket.is_empty(),
-            "§7: TCP_CONNECT carries no ticket"
-        );
-
-        if !allow {
-            framed
-                .send
-                .send(&ConnectResult {
-                    ok: false,
-                    code: ErrorCode::PermissionDenied.as_str().to_string(),
-                    message: "denied".into(),
-                })
-                .await
-                .unwrap();
-            let _ = framed.send.finish();
-            return header;
-        }
-
-        framed
-            .send
-            .send(&ConnectResult {
-                ok: true,
-                code: String::new(),
-                message: String::new(),
-            })
-            .await
-            .unwrap();
-        let (send, recv) = framed.split();
-        let mut raw_send = send.into_raw();
-        let (mut raw_recv, residue) = recv.into_raw();
-        assert!(
-            residue.is_empty(),
-            "client sends nothing before the verdict"
-        );
-        if !pipelined.is_empty() {
-            raw_send.write_all(pipelined).await.unwrap();
-        }
-        // Echo until the client half-closes, then half-close back.
-        let mut buf = [0u8; 256];
-        loop {
-            // `quinn::RecvStream` has its own inherent `read` returning
-            // `Option<usize>` (`None` == FIN), which shadows
-            // `AsyncReadExt::read` here.
-            match raw_recv.read(&mut buf).await.unwrap() {
-                None => break,
-                Some(n) => raw_send.write_all(&buf[..n]).await.unwrap(),
-            }
-        }
-        raw_send.finish().unwrap();
-        header
-    }
-
-    /// The whole requester leg: a connection to the bound loopback port
-    /// becomes a `TCP_CONNECT` for the spec's destination, and after
-    /// `ConnectResult{ok:true}` the socket is a transparent byte pipe —
-    /// including the bytes the peer pipelined behind the handshake frame,
-    /// which arrive **first and exactly once** (the residue transition
-    /// `FramedRecv::into_raw` exists for; without it this test loses
-    /// `"ahead-"`).
-    #[tokio::test]
-    async fn allowed_connection_splices_raw_bytes_and_delivers_handshake_residue_first() {
-        let (client_conn, host_conn) = loopback_pair().await;
-        let host = tokio::spawn(fake_host(host_conn.clone(), true, b"ahead-"));
-
-        let forward = LocalForward::bind(&ephemeral_spec()).await.unwrap();
-        let addr = forward.local_addr();
-        let runner = tokio::spawn(forward.run(Arc::new(ForwardCarrier::Quic(client_conn))));
-
-        let mut tcp = TcpStream::connect(addr).await.unwrap();
-        tcp.write_all(b"ping").await.unwrap();
-        tcp.shutdown().await.unwrap();
-        let mut got = Vec::new();
-        tcp.read_to_end(&mut got).await.unwrap();
-        assert_eq!(
-            got, b"ahead-ping",
-            "residue must lead the stream, then the echoed payload"
-        );
-
-        let header = host.await.unwrap();
-        assert_eq!(header.host, "db.internal");
-        assert_eq!(header.port, 5432);
-        runner.abort();
-        drop(host_conn);
-    }
-
-    /// A refused connection (the peer's inline `forward.local` denial) must
-    /// not leak the accepted socket and must not take the forward down:
-    /// the local client sees the connection fail, and the *next*
-    /// connection is still served.
-    #[tokio::test]
-    async fn refused_connection_closes_the_local_socket_and_the_forward_keeps_serving() {
-        let (client_conn, host_conn) = loopback_pair().await;
-        let deny = tokio::spawn(fake_host(host_conn.clone(), false, b""));
-
-        let forward = LocalForward::bind(&ephemeral_spec()).await.unwrap();
-        let addr = forward.local_addr();
-        let runner = tokio::spawn(forward.run(Arc::new(ForwardCarrier::Quic(client_conn))));
-
-        // The refusal's RST can arrive before `connect` itself returns —
-        // `abort_local`'s `set_zero_linger` above means the requester leg
-        // sends RST, not FIN, and a `connect()` that observes
-        // `SO_ERROR = ECONNRESET` before the socket is writable surfaces
-        // that as `Err` here instead of a connected socket that then
-        // reads a reset (observed on macOS CI). Either shape is
-        // "refused, no payload"; neither should stop the test short of
-        // the "forward keeps serving" assertion below.
-        match TcpStream::connect(addr).await {
-            Ok(mut tcp) => {
-                let mut got = Vec::new();
-                // Either an RST (`ConnectionReset`) or a bare EOF is a
-                // closed socket; what must never happen is data arriving
-                // from a destination that was never dialed.
-                match tcp.read_to_end(&mut got).await {
-                    Ok(_) => assert!(got.is_empty(), "a refused forward must carry no payload"),
-                    Err(err) => assert_eq!(err.kind(), io::ErrorKind::ConnectionReset),
-                }
-            }
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted
-                ) => {}
-            Err(e) => panic!("connect to the local forward: {e}"),
-        }
-        deny.await.unwrap();
-
-        // Same forward, second connection — now allowed, and it works.
-        let allow = tokio::spawn(fake_host(host_conn.clone(), true, b""));
-        let mut tcp = TcpStream::connect(addr).await.unwrap();
-        tcp.write_all(b"second").await.unwrap();
-        tcp.shutdown().await.unwrap();
-        let mut got = Vec::new();
-        tcp.read_to_end(&mut got).await.unwrap();
-        assert_eq!(got, b"second", "one refusal must not end the forward");
-        allow.await.unwrap();
-        runner.abort();
-        drop(host_conn);
-    }
-}
+mod tests;
