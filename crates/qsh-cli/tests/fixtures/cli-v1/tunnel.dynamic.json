@@ -1,0 +1,15 @@
+{
+  "command": "tunnel.dynamic",
+  "data": {
+    "actual_port": 0,
+    "bind": "127.0.0.1:<port>",
+    "dial_policy": "deny_host_local",
+    "host": "box",
+    "mode": "dynamic",
+    "protocol": "socks5",
+    "tunnel_id": "<tunnel_id>"
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

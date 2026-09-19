@@ -82,6 +82,13 @@ pub enum Attach {
         /// them.
         #[cfg_attr(not(unix), allow(dead_code))]
         remote_forwards: Vec<String>,
+        /// `-D` SOCKS dynamic forward specs, unparsed
+        /// (`qsh_core::parse_dynamic_forwards` turns them into specs;
+        /// ADR-0019 decision 1). Same scope as `forwards`/
+        /// `remote_forwards` — only this form carries them, and only the
+        /// `#[cfg(unix)]` driver reads them.
+        #[cfg_attr(not(unix), allow(dead_code))]
+        dynamic_forwards: Vec<String>,
     },
     /// `qsh attach <session-ref>` — attach to a session already running.
     Existing {

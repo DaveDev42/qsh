@@ -117,7 +117,7 @@ mod section_2_5 {
         let rows = rows(&cli_md);
         assert_eq!(
             rows.len(),
-            9,
+            10,
             "docs/CLI.md §2.5's table row count drifted from this test's row-by-row \
              expectations — update them alongside whatever row was added, removed or \
              reordered: {rows:?}"
@@ -166,39 +166,61 @@ mod section_2_5 {
         assert_eq!(backtick_tokens(right6), ["forward.remote"]);
         expected.insert(("forward.remote".to_string(), "forward.remote".to_string()));
 
-        // Row 7: `tunnel.close`, `tunnel.list` — no single-action pair of
+        // Row 7 (ADR-0019): `tunnel.dynamic` (`-D`, SOCKS5) -> `forward.local`.
+        // Not a *new* OP_REGISTRY row — `-D` authorizes every CONNECT
+        // through the exact same `forward.local` seam row 5 already
+        // contributed (ADR-0019 decision 6: same action, same resource
+        // string, same choke point as `-L`). This row is verified for
+        // cross-reference correctness only; it must not add a second,
+        // distinct pair to `expected`.
+        let (left7, right7) = &rows[7];
+        assert!(
+            left7.contains("tunnel.dynamic"),
+            "row 7 must be the tunnel.dynamic (-D) annotation: {left7:?}"
+        );
+        let row7_tokens = backtick_tokens(right7);
+        assert!(
+            row7_tokens.first() == Some(&"forward.local")
+                && right7.contains("forward.socks")
+                && right7.contains("ADR-0019"),
+            "row 7 must map -D to forward.local and cross-reference forward.socks/ADR-0019: \
+             {right7:?}"
+        );
+        expected.insert(("forward.local".to_string(), "forward.local".to_string()));
+
+        // Row 8: `tunnel.close`, `tunnel.list` — no single-action pair of
         // its own (the cell is prose, not one backtick action): `-L`'s
         // tunnel.close has no host-side ACL check at all, and `-R`'s is
         // the forward.remote.close consequence this row's own prose
         // cross-references (§6.9). Assert the cross-reference still lives
         // rather than silently trusting it, then add that row by hand.
-        let (left7, right7) = &rows[7];
+        let (left8, right8) = &rows[8];
         assert!(
-            left7.contains("tunnel.close") && left7.contains("tunnel.list"),
-            "row 7 must be the tunnel.close/tunnel.list row: {left7:?}"
+            left8.contains("tunnel.close") && left8.contains("tunnel.list"),
+            "row 8 must be the tunnel.close/tunnel.list row: {left8:?}"
         );
         assert!(
-            right7.contains("forward.remote")
-                && right7.contains("M5 Step 5")
-                && right7.contains("6.9"),
-            "row 7 must still cross-reference the forward.remote.close host-side check \
-             (M5 Step 5, §6.9): {right7:?}"
+            right8.contains("forward.remote")
+                && right8.contains("M5 Step 5")
+                && right8.contains("6.9"),
+            "row 8 must still cross-reference the forward.remote.close host-side check \
+             (M5 Step 5, §6.9): {right8:?}"
         );
         expected.insert((
             "forward.remote.close".to_string(),
             "forward.remote".to_string(),
         ));
 
-        // Row 8: host.list, host.get, identity.init, trust.*, doctor.run,
+        // Row 9: host.list, host.get, identity.init, trust.*, doctor.run,
         // acl.check, schema.get, capabilities.get, version.get — 인가
         // 불요. Contributes no OP_REGISTRY pair; verified as an exclusion
         // list below instead.
-        let (left8, right8) = &rows[8];
+        let (left9, right9) = &rows[9];
         assert!(
-            right8.contains("인가 불요"),
-            "row 8 must be the no-authorization-needed row: {right8:?}"
+            right9.contains("인가 불요"),
+            "row 9 must be the no-authorization-needed row: {right9:?}"
         );
-        let no_authz_ops = backtick_tokens(left8);
+        let no_authz_ops = backtick_tokens(left9);
         assert!(no_authz_ops.contains(&"host.list"));
 
         // `host.reverse` is not a table row at all (§2.5's own prose: a

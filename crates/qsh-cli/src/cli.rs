@@ -111,22 +111,34 @@ pub struct InteractiveArgs {
     )]
     pub remote_forward: Vec<String>,
 
-    /// SOCKS5 dynamic forwarding `[bind:]port`, repeatable. Parses, but
-    /// P0 refuses it with `UNSUPPORTED`, "SOCKS dynamic forwarding (-D)
-    /// is a P1 feature", before this session (or anything else on the
-    /// command line) is opened — unless `--json`/`--jsonl` is also given,
-    /// in which case §7's machine-mode gate answers `INVALID_ARGUMENT`
-    /// first, since the interactive form has no JSON output mode of its
-    /// own for `-D`'s own refusal to appear in (`docs/CLI.md` §6.9,
-    /// `docs/ROADMAP.md` M4 "명시적 out"). The flag parses but no SOCKS
-    /// proxy is ever opened and no bytes are forwarded, whatever value
-    /// you pass. Use `-L` for a known port pair, or an existing overlay
-    /// for anything wider.
+    /// SOCKS5 dynamic forwarding `[bind:]port`, repeatable: open a SOCKS5
+    /// proxy on this machine and, for every CONNECT a SOCKS client sends
+    /// it, forward to whatever destination that CONNECT names, as seen
+    /// from the peer (ADR-0019). `bind` defaults to (and is restricted
+    /// to) loopback, same as `-L`/`-R`.
+    ///
+    /// Every listener this flag opens lives exactly as long as this
+    /// interactive session and dies with the process, same lifecycle as
+    /// `-L` (`docs/CLI.md` §6.14) — there is no daemon and nothing to
+    /// close.
+    ///
+    /// There is no ACL check at open time: each CONNECT is authorized on
+    /// the peer as `forward.local`, the same action `-L` uses.
+    /// `DYNAMIC_FORWARD_ACL_NOTE` — "`-D` runs SOCKS5 on this machine and
+    /// authorizes every CONNECT on the peer as `forward.local`;
+    /// `forward.socks` is never consulted." Refused with `UNSUPPORTED`
+    /// before anything binds when the target resolves to a reverse route,
+    /// or when the peer does not advertise `dial-filter.v1`
+    /// (`docs/CLI.md` §6.9).
+    ///
+    /// With `--json`/`--jsonl` also given, §7's machine-mode gate answers
+    /// `INVALID_ARGUMENT` before this flag is looked at at all — the
+    /// interactive form has no JSON output mode of its own.
     ///
     /// Not shape-checked here for the same reason as
-    /// [`Self::local_forward`]/[`Self::remote_forward`]: the refusal is
-    /// unconditional, so there is nothing a `value_parser` could reject
-    /// that this flag's own handling would not refuse anyway.
+    /// [`Self::local_forward`]/[`Self::remote_forward`]:
+    /// `qsh_core::parse_dynamic_forwards` is the single place that decides
+    /// which `docs/CLI.md` §3.3 code a malformed spec earns.
     #[arg(
         short = 'D',
         value_name = "SPEC",
@@ -390,17 +402,34 @@ pub struct TunnelOpenArgs {
     )]
     pub remote: Option<String>,
 
-    /// SOCKS5 dynamic forwarding `[bind:]port`, repeatable — a third,
-    /// independent mode: it does not fold into `--local`/`--remote`'s
-    /// mutual exclusion. Parses, but always answers
-    /// `UNSUPPORTED`, "SOCKS dynamic forwarding (-D) is a P1 feature",
-    /// before opening a connection to `host` or doing anything
-    /// `--local`/`--remote` would have — implementation is P1
-    /// (`docs/CLI.md` §6.9). The flag parses but no SOCKS proxy is ever
-    /// opened and no bytes are forwarded, whatever value you pass. Use
-    /// `-L` for a known port pair, or an existing overlay for anything
-    /// wider.
-    #[arg(short = 'D', long, value_name = "SPEC", action = ArgAction::Append)]
+    /// SOCKS5 dynamic forwarding `[bind:]port`: open a SOCKS5 proxy on
+    /// this machine and, for every CONNECT a SOCKS client sends it,
+    /// forward to whatever destination that CONNECT names, as seen from
+    /// the peer (ADR-0019). Exactly one of `--local`/`--remote`/`--dynamic`
+    /// is required, and `--dynamic` conflicts with the other two — a
+    /// single `tunnel open` call opens exactly one listener.
+    ///
+    /// Still `Vec<String>`/`ArgAction::Append` so the value can be given
+    /// more than once on the command line, but only ever one listener is
+    /// meant to result: giving `--dynamic` twice is refused with
+    /// `INVALID_ARGUMENT` ("one listener per `tunnel open`"), not silently
+    /// collapsed to the first or last value.
+    ///
+    /// There is no ACL check at open time: each CONNECT is authorized on
+    /// the peer as `forward.local`, the same action `--local` uses.
+    /// `DYNAMIC_FORWARD_ACL_NOTE` — "`-D` runs SOCKS5 on this machine and
+    /// authorizes every CONNECT on the peer as `forward.local`;
+    /// `forward.socks` is never consulted." Refused with `UNSUPPORTED`
+    /// before anything binds when `host` resolves to a reverse route, or
+    /// when the peer does not advertise `dial-filter.v1`
+    /// (`docs/CLI.md` §6.9).
+    #[arg(
+        short = 'D',
+        long,
+        value_name = "SPEC",
+        action = ArgAction::Append,
+        conflicts_with_all = ["local", "remote"]
+    )]
     pub dynamic: Vec<String>,
 }
 
@@ -855,9 +884,15 @@ mod tests {
     }
 
     /// `qsh tunnel open` takes a bare host and exactly one of
-    /// `--local`/`-L` or `--remote`/`-R` (`docs/CLI.md` §6.9) — neither,
-    /// or both, is a clap usage error (exit 2), because a tunnel with no
-    /// forward — or two contradictory ones — is nothing.
+    /// `--local`/`-L`, `--remote`/`-R`, or `--dynamic`/`-D`
+    /// (`docs/CLI.md` §6.9) — none, or more than one, is a clap usage
+    /// error (exit 2), because a tunnel with no forward — or two
+    /// contradictory ones — is nothing. `--dynamic` given twice is a
+    /// separate `INVALID_ARGUMENT` refusal built in `main.rs`'s
+    /// `run_tunnel_open_dynamic` (not clap, and not `Ops`: `Ops::tunnel_dynamic`
+    /// never sees `args.dynamic`'s length), not a clap usage error — clap's
+    /// own conflict machinery only rejects *different* flags colliding, so
+    /// this test does not cover that case.
     #[test]
     fn tunnel_open_takes_a_bare_host_and_exactly_one_of_local_or_remote() {
         let cli = Cli::try_parse_from([
@@ -907,6 +942,39 @@ mod tests {
         assert!(
             Cli::try_parse_from(["qsh", "tunnel", "open", "box", "-L", "1:h:2", "-R", "3:h:4",])
                 .is_err()
+        );
+
+        // `-D` is a third, mutually exclusive mode.
+        let cli = Cli::try_parse_from(["qsh", "tunnel", "open", "box", "-D", "1080"]).unwrap();
+        match cli.command.unwrap() {
+            Command::Tunnel(TunnelCmd::Open(args)) => {
+                assert_eq!(args.local, None);
+                assert_eq!(args.remote, None);
+                assert_eq!(args.dynamic, vec!["1080".to_string()]);
+            }
+            other => panic!("expected tunnel open, got {other:?}"),
+        }
+        // `--dynamic` conflicts with `--local` and `--remote` alike, in
+        // either flag order.
+        assert!(
+            Cli::try_parse_from(["qsh", "tunnel", "open", "box", "-D", "1080", "-L", "1:h:2",])
+                .is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["qsh", "tunnel", "open", "box", "-L", "1:h:2", "-D", "1080",])
+                .is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["qsh", "tunnel", "open", "box", "-D", "1080", "-R", "3:h:4",])
+                .is_err()
+        );
+        // `--dynamic` given twice parses fine at the clap layer
+        // (`main.rs`'s `run_tunnel_open_dynamic` refuses it downstream,
+        // before `Ops::tunnel_dynamic` is ever called) — this is not a
+        // usage error.
+        assert!(
+            Cli::try_parse_from(["qsh", "tunnel", "open", "box", "-D", "1080", "-D", "1081",])
+                .is_ok()
         );
     }
 

@@ -35,7 +35,7 @@ use std::sync::Arc;
 use qsh_core::acl::{AllowAllPinned, Authorizer};
 use qsh_core::audit::MemoryAuditSink;
 use qsh_core::client::Session;
-use qsh_core::tunnel::{LocalForwardHandle, RemoteForwardAcceptor};
+use qsh_core::tunnel::{DynamicForwardHandle, LocalForwardHandle, RemoteForwardAcceptor};
 use qsh_proto::wire::{
     self, ConnectResult, ForwardDirection, ForwardSpec, PRIORITY_TUNNEL, StreamHeader, StreamKind,
 };
@@ -391,6 +391,22 @@ impl TunnelHarness {
         LocalForwardHandle::start(&ephemeral_local_spec(host, port), self.connection())
             .await
             .expect("bind local forward")
+    }
+
+    /// Bind a `-D` (SOCKS5 dynamic forward) listener on an **ephemeral**
+    /// loopback port, serving it over this harness's connection (ADR-0019
+    /// decision 11) — the `-D` twin of [`Self::local_forward`]: same
+    /// production entry point ([`DynamicForwardHandle::start`]) the CLI's
+    /// `-D`/`--dynamic` both call, nothing about the requester leg
+    /// re-implemented here. Every destination a client speaks to this
+    /// listener rides `StreamHeader.deny_host_local = true` (`-L`'s own
+    /// `local_forward` always sends `false`), so a test using this against
+    /// a loopback destination is exercising the host's filter on purpose,
+    /// not by accident.
+    pub async fn dynamic_forward(&self) -> DynamicForwardHandle {
+        DynamicForwardHandle::start(None, 0, self.connection())
+            .await
+            .expect("bind dynamic forward")
     }
 
     /// Open a `-R` remote forward the production way (`PLAN.md` M4 Step 4):

@@ -461,16 +461,27 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
             outcome: Outcome::Fails("PERMISSION_DENIED"),
         },
         Case {
-            // `-D` refuses before `Ops::tunnel_open` is even called
-            // (`main.rs`'s `run_tunnel_open`), so no peer round trip
-            // happens here at all — included in this table anyway
-            // because it is exactly the kind of envelope-producing
+            // `-D` is implemented (ADR-0019); this row used to pin the P0
+            // stub's unconditional `UNSUPPORTED`. What still refuses
+            // before `Ops::tunnel_open`/`Ops::tunnel_dynamic` is even
+            // called (`main.rs`'s `run_tunnel_open_dynamic`) is giving
+            // `--dynamic` more than once — no peer round trip happens
+            // here either, for the same reason: included in this table
+            // anyway because it is exactly the kind of envelope-producing
             // failure this matrix exists to pin (`docs/CLI.md` §6.9,
             // `PLAN.md` M4 Step 6, DoD 5).
-            name: "tunnel open: -D is UNSUPPORTED",
+            name: "tunnel open: --dynamic given twice is INVALID_ARGUMENT",
             sandbox: &fleet.client,
-            args: &["tunnel", "open", HOST_ALIAS, "--dynamic", "1080"],
-            outcome: Outcome::Fails("UNSUPPORTED"),
+            args: &[
+                "tunnel",
+                "open",
+                HOST_ALIAS,
+                "--dynamic",
+                "1080",
+                "--dynamic",
+                "1081",
+            ],
+            outcome: Outcome::Fails("INVALID_ARGUMENT"),
         },
         Case {
             // `tunnel.close` is idempotent by contract (`docs/CLI.md`
@@ -675,45 +686,52 @@ fn attach_on_an_unregistered_host_is_host_not_found_and_stdout_stays_empty() {
 // ---------------------------------------------------------------------
 // Interactive `-D` — deliberately **not** a `Case` row above, for the
 // same reason as the attach test just above: the two output modes
-// disagree *on purpose*. `docs/CLI.md` §7 (~line 662) states that
+// disagree *on purpose*, and human mode itself has the same unix/Windows
+// split `attach_on_an_unregistered_host_is_host_not_found_and_stdout_
+// stays_empty` documents. `docs/CLI.md` §7 (~line 662) states that
 // `--json`/`--jsonl` on either interactive form is refused with
 // `INVALID_ARGUMENT` **before a session is even opened**, because the
-// interactive form has no machine mode at all; §6.9 separately states
-// that `-D` itself is always `UNSUPPORTED`. `run_interactive` (`main.rs`)
-// checks `wants_json` first and the `-D` refusal second, so with
-// `--json`/`--jsonl` present the §7 gate answers `INVALID_ARGUMENT` and
-// `-D`'s own `UNSUPPORTED` never gets a turn — human mode is the only
-// place `-D`'s `UNSUPPORTED` is observable. `check`'s machinery asserts
-// the *same* `error.code` in both modes, which this command structurally
-// cannot satisfy, so it gets its own two-part assertion instead of a
-// matrix row.
+// interactive form has no machine mode at all. `run_interactive`
+// (`main.rs`) checks `wants_json` first, so with `--json`/`--jsonl`
+// present the §7 gate answers `INVALID_ARGUMENT` before `-D`'s own specs
+// are even parsed. `check`'s machinery asserts the *same* `error.code` in
+// both modes, which this command structurally cannot satisfy, so it gets
+// its own two-part assertion instead of a matrix row.
 // ---------------------------------------------------------------------
 
 #[test]
-fn interactive_dash_d_is_unsupported_in_human_mode_but_json_mode_wins_on_precedence() {
+fn interactive_dash_d_is_host_not_found_but_json_mode_wins_on_precedence() {
     let sandbox = Sandbox::initialized();
 
-    // Human mode: nothing outranks `-D` here, so its own `UNSUPPORTED`
-    // (`docs/CLI.md` §6.9) is what stderr names.
+    // Human mode: on unix nothing outranks host resolution here, so a
+    // valid `-D` spec against an alias this sandbox never registered
+    // reaches `Ops::session_open` and reports `HOST_NOT_FOUND`, exactly
+    // like a bare interactive attach with no `-D` at all. On Windows the
+    // interactive PTY path is `cfg(unix)`, so `run_interactive` answers
+    // `UNSUPPORTED` ("needs a POSIX terminal") before ever reaching host
+    // resolution — the identical platform split
+    // `attach_on_an_unregistered_host_is_host_not_found_and_stdout_stays_empty`
+    // pins.
     let human = sandbox.qsh(&[HOST_ALIAS, "-D", "1080"]);
     assert_eq!(exit_code(&human), EXIT_RUNTIME_FAILURE, "{human:?}");
     assert!(
         human.stdout.is_empty(),
-        "interactive -D refusal must never write to stdout: {:?}",
+        "interactive -D's routing failure must never write to stdout: {:?}",
         String::from_utf8_lossy(&human.stdout)
     );
     let stderr = String::from_utf8_lossy(&human.stderr);
+    let expected_code = if cfg!(unix) {
+        "(HOST_NOT_FOUND)"
+    } else {
+        "(UNSUPPORTED)"
+    };
     assert!(
-        stderr.contains("(UNSUPPORTED)"),
-        "stderr must name UNSUPPORTED: {stderr:?}"
-    );
-    assert!(
-        stderr.contains("P1"),
-        "stderr must carry the -D P1 message: {stderr:?}"
+        stderr.contains(expected_code),
+        "stderr must name {expected_code}: {stderr:?}"
     );
 
-    // Machine mode: §7's json-mode gate answers first, so the envelope
-    // names `INVALID_ARGUMENT`, not `-D`'s own `UNSUPPORTED`.
+    // Machine mode: §7's json-mode gate answers first, before host
+    // resolution or any `-D` parsing, on both platforms alike.
     let args = [HOST_ALIAS, "-D", "1080", "--json"];
     let json = sandbox.qsh(&args);
     assert_eq!(exit_code(&json), EXIT_RUNTIME_FAILURE, "{json:?}");
@@ -721,7 +739,7 @@ fn interactive_dash_d_is_unsupported_in_human_mode_but_json_mode_wins_on_precede
     assert_eq!(envelope["ok"], false, "{envelope}");
     assert_eq!(
         envelope["error"]["code"], "INVALID_ARGUMENT",
-        "§7 must win over §6.9's -D refusal when --json is present: {envelope}"
+        "§7 must win over host resolution when --json is present: {envelope}"
     );
 }
 

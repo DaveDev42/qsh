@@ -38,9 +38,7 @@ use std::io;
 use std::net::SocketAddr;
 
 use qsh_core::acl::PERMISSION_DENIED_MESSAGE;
-use qsh_core::ops::tunnel::{
-    DYNAMIC_FORWARD_UNSUPPORTED_GUIDANCE, DYNAMIC_FORWARD_UNSUPPORTED_MESSAGE,
-};
+use qsh_core::ops::tunnel::DYNAMIC_FORWARD_REVERSE_UNSUPPORTED_MESSAGE;
 use qsh_core::pairing::{
     PAIRING_ACL_ROW_ABSENT, PAIRING_ACL_ROW_PRESENT, PAIRING_INVITE_REPLAY_NOTICE,
     PAIRING_PINNED_SELF_ASSERTED, PairingError, pairing_pin_notice,
@@ -351,22 +349,27 @@ fn three_part_rows() -> Vec<ThreePartRow> {
         },
         ThreePartRow {
             label: "T6",
-            // T6 is the one row that splits across two constants by
-            // design (§2 T6, `CHANNEL_CONSTRAINED` below): the envelope
-            // `message` is frozen (fixture append-only), so only the
-            // observation comes from it — impact and next-command live in
-            // the human-only guidance constant instead.
+            // T6 is `-D`'s reverse-route refusal (ADR-0019 decisions 3,
+            // 10): unlike the P0 stub this replaced, the new wording packs
+            // all three parts into the one envelope `message` from the
+            // start — no `CHANNEL_CONSTRAINED` exception is needed any
+            // more (§2 T6's old entry there is gone). The sibling
+            // `DYNAMIC_FORWARD_CAPABILITY_UNSUPPORTED_MESSAGE` refusal
+            // (missing `dial-filter.v1`) follows the identical
+            // observation/impact/next-command shape but is not its own row
+            // here — this table pins one example of each of the seven
+            // topics, not every wording `qsh-core` produces.
             observation: ThreePartSlot::new(
-                DYNAMIC_FORWARD_UNSUPPORTED_MESSAGE,
-                "SOCKS dynamic forwarding (-D) is a P1 feature",
+                DYNAMIC_FORWARD_REVERSE_UNSUPPORTED_MESSAGE,
+                "SOCKS dynamic forwarding (-D) is not available over a reverse route",
             ),
             impact: ThreePartSlot::new(
-                DYNAMIC_FORWARD_UNSUPPORTED_GUIDANCE,
-                "The flag parses but no SOCKS proxy is ever opened and no bytes are forwarded",
+                DYNAMIC_FORWARD_REVERSE_UNSUPPORTED_MESSAGE,
+                "nothing was bound",
             ),
             next_command: ThreePartSlot::new(
-                DYNAMIC_FORWARD_UNSUPPORTED_GUIDANCE,
-                "Use `-L` for a known port pair, or an existing overlay for anything wider.",
+                DYNAMIC_FORWARD_REVERSE_UNSUPPORTED_MESSAGE,
+                "Use `-L` for a fixed destination through this route.",
             ),
         },
     ]
@@ -446,19 +449,15 @@ const EXCLUDED: &[(&str, &str)] = &[
 /// A different shape of exclusion: not "no remedy belongs here" (ADR
 /// territory, `EXCLUDED` above) but "the remedy exists, a repo rule just
 /// keeps it out of this particular channel".
-const CHANNEL_CONSTRAINED: &[(&str, &str)] = &[(
-    "qsh_core::ops::tunnel::DYNAMIC_FORWARD_UNSUPPORTED_MESSAGE",
-    "`crates/qsh-cli/tests/fixtures/cli-v1/error.UNSUPPORTED.json` 이 이 \
-     문면을 전체 envelope `assert_eq!` 로 박고 있다(`fixtures.rs:113` 등록, \
-     `fn check` `:140`, `-D` 대조 `:317`). `message` 에 마스킹 arm 은 있지만 \
-     (`qsh-testkit/src/fixtures.rs:165-169`, `mask_loopback_ports`) \
-     이 문면에는 loopback 주소가 없어 no-op 이므로 문면을 늘리면 기존 \
-     fixture 를 편집해야 하고 그것은 CLAUDE.md 의 fixture append-only 규칙 \
-     위반이다. `details` 우회도 현재 `null` 이라 같은 바이트 변경이다. \
-     그래서 관측은 envelope 에 남기고 영향·다음 명령은 fixture 가 없는 \
-     사람 채널(`DYNAMIC_FORWARD_UNSUPPORTED_GUIDANCE` → clap long_help \
-     2자리, README, `docs/CLI.md` §6.9)로 낸다",
-)];
+///
+/// Empty since ADR-0019: `-D`'s P0 stub refusal used to be the one entry
+/// here (its unconditional-refusal message constant was frozen by the
+/// append-only `error.UNSUPPORTED.json` fixture, so its impact/next-command
+/// had to live on a channel no fixture pinned). `-D`'s real refusals
+/// (T6, above) pack all three parts into the envelope `message` itself
+/// from the start, so there is nothing left to constrain — this stays
+/// declared, empty, as the seam the next such wording would register in.
+const CHANNEL_CONSTRAINED: &[(&str, &str)] = &[];
 
 /// Test one of the two: every exclusion has a non-empty reason, the
 /// two lists never overlap, and ADR-0017 결정 4's two exempt axes are

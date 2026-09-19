@@ -74,6 +74,7 @@ session.close
 session.attach
 exec.run
 tunnel.open
+tunnel.dynamic
 tunnel.close
 tunnel.list
 identity.init
@@ -112,10 +113,11 @@ ACL action은 인가(authorization) 어휘로, operation 이름과는 별개 차
 | `exec.run` | `exec.run` |
 | `tunnel.open` (local forward) | `forward.local` |
 | `tunnel.open` (remote forward) | `forward.remote` |
-| `tunnel.close`, `tunnel.list` | 해당 tunnel의 소유 peer이면 허용 (`forward.*` 부여로 충분) — remote forward(`-R`)의 `tunnel.close`는 이 로컬-머신 축(§6.13·§6.14, `docs/design/protocol.md` §11-3)과 별개로, host 쪽 `forward.remote` principal 소유권 검사를 하나 더 거친다(M5 Step 5, §6.9 아래 문단). `-L`의 `tunnel.close`에는 이 host 쪽 검사가 없다 — 로컬 listener를 닫는 것뿐인 순수 local operation이다 |
+| `tunnel.dynamic` (`-D`, SOCKS5) | `forward.local` — 새 grant가 아니라 `-L`과 같은 action의 재사용이다. `forward.socks`는 이 인가에 관여하지 않는다(ADR-0019 decision 14, §6.9의 `DYNAMIC_FORWARD_ACL_NOTE` 참고) |
+| `tunnel.close`, `tunnel.list` | 해당 tunnel의 소유 peer이면 허용 (`forward.*` 부여로 충분) — remote forward(`-R`)의 `tunnel.close`는 이 로컬-머신 축(§6.13·§6.14, `docs/design/protocol.md` §11-3)과 별개로, host 쪽 `forward.remote` principal 소유권 검사를 하나 더 거친다(M5 Step 5, §6.9 아래 문단). `-L`/`-D`의 `tunnel.close`에는 이 host 쪽 검사가 없다 — 로컬 listener를 닫는 것뿐인 순수 local operation이다 |
 | `host.list`, `host.get`, `identity.init`, `trust.*`, `cert.init`, `cert.issue`, `doctor.run`, `acl.check`, `schema.get`, `capabilities.get`, `version.get` | 인가 불요 — local operation으로 원격 peer의 ACL 평가 대상이 아님 |
 
-향후 예약: streaming file copy → `file.read`/`file.write`, SOCKS(`-D`) → `forward.socks`.
+`forward.socks`는 action 어휘에 예약되어 있지만 어떤 operation도 이 action으로 인가하지 않는다 — `-D`가 실제로 구현된 뒤에도 마찬가지다(위 행, ADR-0019 decision 14). 향후 예약: streaming file copy → `file.read`/`file.write`.
 
 역방향 host 등록은 operation이 아니라 **연결 수립 시점의 검사**다 — 위 표는 operation→ACL action 매핑이고 `qsh listen`/`qsh reverse`는 §2.4가 명시하듯 operation이 아닌 장기 실행 모드이므로 표에 행을 만들지 않는다. `qsh reverse`(target)가 `qsh listen`(controller)에 dial해 보내는 `Hello.reverse`(protocol.md §9·§11)를 controller가 인증서로 인증한 뒤, 그 principal에 ACL action `host.reverse`를 검사한다 — 통과해야만 registry에 등록된다(default deny, PRD §9).
 
@@ -177,7 +179,7 @@ RESOURCE_EXHAUSTED
 INTERNAL
 ```
 
-오류 코드는 추가될 수 있다. 알 수 없는 code는 일반 QSH 오류로 처리한다. `RESUME_GAP`은 M2에서 **event 전용 상황**이다 — replay 범위 이탈은 항상 `session.gap` event(§6.4)로 전달되며 오류 envelope로는 반환되지 않는다(도달성 테스트에서는 이 사유로 DEFERRED 유지; 오류로 반환하는 strict read 옵션은 P1에서 검토). `UNSUPPORTED`는 요청한 기능이 아직 구현되지 않았거나 peer와 협상되지 않은 경우(예: P1 기능인 `-D`/SOCKS)에 사용한다. `RESOURCE_EXHAUSTED`는 backpressure나 서버측 한도 초과를 나타낸다.
+오류 코드는 추가될 수 있다. 알 수 없는 code는 일반 QSH 오류로 처리한다. `RESUME_GAP`은 M2에서 **event 전용 상황**이다 — replay 범위 이탈은 항상 `session.gap` event(§6.4)로 전달되며 오류 envelope로는 반환되지 않는다(도달성 테스트에서는 이 사유로 DEFERRED 유지; 오류로 반환하는 strict read 옵션은 P1에서 검토). `UNSUPPORTED`는 요청한 기능이 아직 구현되지 않았거나 peer와 협상되지 않은 경우(예: 역방향 route 위의 `-D`, 또는 `dial-filter.v1`을 advertise하지 않는 peer 위의 `-D` — §6.9)에 사용한다. `RESOURCE_EXHAUSTED`는 backpressure나 서버측 한도 초과를 나타낸다.
 
 ## 4. Process exit code
 
@@ -508,7 +510,48 @@ qsh tunnel close <tunnel-id> --json
 
 **Holder 수명은 route에 따라 갈린다.** forward route에서는 tunnel(`-L`/`-R` 모두)이 그것을 연 CLI 프로세스에 수명이 결합된다(§6.14). **reverse route의 `-R`만은 다르다** — target의 listener는 그 CLI가 아니라 상주 `qsh listen` 데몬이 쥔 reverse connection에 결합돼, CLI가 죽어도 살아남고 reverse connection이 죽어야 함께 죽는다(§6.13·§6.14 예외 문단, `docs/design/protocol.md` §11-3).
 
-`-D`(SOCKS5 dynamic forwarding, `forward.socks`)는 CLI 인자로 parsing되지만 P0에서는 항상 `UNSUPPORTED`(`message`는 정확히 "SOCKS dynamic forwarding (-D) is a P1 feature" — `qsh_core::ops::tunnel::DYNAMIC_FORWARD_UNSUPPORTED_MESSAGE`, `docs/design/testing.md` L6 게이트 대상)로 거부된다 — envelope data에는 절대 도달하지 않는다. 구현은 P1이다. 스펠링은 두 곳에 있고 둘 다 반복 가능하다 — 대화형 form의 `-D <[bind:]port>`와 `tunnel open`의 `-D`/`--dynamic <[bind:]port>`. 값은 P0에서 전혀 parsing되지 않는다 — 어떤 값을 주든 동일한 `UNSUPPORTED` 거부 한 건으로 수렴한다. 대화형 form에는 우선순위가 하나 더 얹힌다: `--json`/`--jsonl`이 함께 오면 `-D`와 무관하게 §7의 `INVALID_ARGUMENT`가 우선한다 — 대화형 form에는 애초에 machine mode가 없기 때문이다. `error.UNSUPPORTED.json` fixture가 이 `message`를 전체 envelope `assert_eq!`로 고정하고 있어 영향·다음 명령은 그 envelope에 얹지 않고 별도 상수로 낸다 — 정확히 "The flag parses but no SOCKS proxy is ever opened and no bytes are forwarded, whatever value you pass. Use `-L` for a known port pair, or an existing overlay for anything wider."다(`qsh_core::ops::tunnel::DYNAMIC_FORWARD_UNSUPPORTED_GUIDANCE`). 이 문구는 `qsh --help`/`qsh tunnel open --help`의 `-D` 설명과 README가 함께 소비한다.
+**`-D`(SOCKS5 dynamic forwarding)는 구현되어 있다([ADR-0019](adr/0019-socks-dynamic-forward.md)).** grammar는 `-L`/`-R`과 다르다 — 목적지가 없는 `[bind:]listen_port` 하나뿐이다(목적지는 SOCKS5 CONNECT가 매 연결마다 실어 온다). `bind`를 생략하면 loopback이고, non-loopback `bind`는 listener가 생기기 전에 `INVALID_ARGUMENT`로 거절된다(`-L`의 `loopback_bind_addr`를 그대로 재사용). 두 spelling 모두 존재한다. 대화형 `qsh [user@]host -D [bind:]port`는 `-L`처럼 반복 가능해서 세션 하나에 SOCKS listener를 여러 개 열 수 있다. `qsh tunnel open host -D/--dynamic [bind:]port`는 호출 하나에 listener 하나이고 `--local`/`--remote`와 함께 쓸 수 없다 — 셋 중 하나만 고르는 상호 배타 그룹이다. `--dynamic`을 이 호출 하나에 두 번 이상 주면 peer에 연결하기 전에 `INVALID_ARGUMENT`("one listener per `tunnel open`")로 거절된다. 대화형 form에는 우선순위가 하나 더 얹힌다: `--json`/`--jsonl`이 함께 오면 `-D`의 spec parsing이나 열기보다 §7의 `INVALID_ARGUMENT`가 먼저 나온다 — 대화형 form에는 애초에 machine mode가 없기 때문이다.
+
+**처리 순서**는 spec 모양·loopback 검사 → route 해석(역방향이면 여기서 거절) → peer 연결 → capability 검사 → listener bind다. 대화형 form도 이 순서를 지킨다. route 해석은 `session.open`보다 먼저 끝나므로 역방향 target을 향한 대화형 `-D`도 세션을 열기 전에 거절된다. 다만 대화형 form의 "peer 연결"은 `tunnel.dynamic`처럼 `-D` 전용 연결 하나가 아니라 그 세션의 attach 연결이다 — capability 검사는 그 attach 연결이 이미 선 뒤, `session.open`까지 끝난 뒤에 이루어진다. **open 시점에 ACL 검사는 없다** — `tunnel.dynamic`/대화형 `-D`가 성공했다는 것은 SOCKS listener가 떴다는 뜻일 뿐 인가를 뜻하지 않는다. 인가는 SOCKS CONNECT를 받을 때마다 host에서 이루어진다: `-D`는 **새 grant가 아니라 `-L`과 같은 `forward.local`의 재사용**이고, 어휘에 있는 `forward.socks`는 이 인가에 전혀 관여하지 않는다(§2.5).
+
+> `-D` runs SOCKS5 on this machine and authorizes every CONNECT on the peer as `forward.local`; `forward.socks` is never consulted.
+
+(`qsh_core::ops::tunnel::DYNAMIC_FORWARD_ACL_NOTE` — `docs/design/testing.md` L6 게이트 대상. README가 함께 축자 인용한다.) 즉 `forward.local`을 부여받은 principal은 이미 host가 닿는 모든 목적지로 나갈 수 있었고(§2.5 매핑, ADR-0019 근거), `-D`는 그 egress를 브라우저·프록시 클라이언트가 쓰기 쉬운 형태로 옮겼을 뿐이다.
+
+역방향 route로 해석된 host를 대상으로 하면 연결하기 전에 `UNSUPPORTED`로 거절한다 — target의 협상된 capability를 controller가 아직 확인할 방법이 없기 때문이다(범위 결정이지 보안 경계가 아니다, ADR-0019 decision 10). peer가 capability `dial-filter.v1`을 advertise하지 않으면, 정방향이라도 listener를 bind하기 전에 같은 이유로 `UNSUPPORTED`다 — fallback 없이 거절한다. 두 거절 모두 아무 listener도 뜨지 않은 채 끝난다.
+
+**JSON 계약.** `tunnel.dynamic`은 `tunnel.open`과 별개 op이다(§2.4) — 요청은 `TunnelDynamicReq { host, bind: Option<String>, listen_port: u32 }`, 성공 데이터는 아래 `DynamicTunnel` 하나다:
+
+```json
+{
+  "tunnel_id": "01K0SOCKS",
+  "mode": "dynamic",
+  "bind": "127.0.0.1:1080",
+  "actual_port": 1080,
+  "protocol": "socks5",
+  "dial_policy": "deny_host_local",
+  "host": "personal-mac"
+}
+```
+
+`mode`/`protocol`/`dial_policy`는 모두 열린 문자열이다. `forward_to`는 없다 — `Tunnel`과 달리 `DynamicTunnel`은 고정된 목적지를 갖지 않는다. `actual_port`는 `Tunnel.actual_port`와 타입·의미가 같다. machine 모드 stdout에는 이 봉투 한 줄만 나가고 그 뒤로는 hold한다 — 연결별 결과(각 CONNECT의 REP, 거부 사유)는 stderr로만 나간다(`docs/CLI.md` §2.2). `-D` listener는 `-L`처럼 그것을 연 프로세스가 유일한 홀더이므로 `tunnel.list`에 나타나지 않고(§6.14), 닫는 것은 그 프로세스를 끝내는 것뿐이다.
+
+**SOCKS5 CONNECT 처리 결과 → REP 매핑**(codec은 `qsh_proto::socks5`, sans-IO):
+
+| 원인 | REP |
+|---|---|
+| `ConnectResult{ok:true}` | `0x00` |
+| `PERMISSION_DENIED`(host ACL 거부, host-local 주소 필터 거부) | `0x02` |
+| `HOST_NOT_FOUND`(원격 이름 해석 실패) | `0x04` |
+| `CONNECTION_FAILED`(거절, 모든 주소 실패, dial 타임아웃) | `0x05` |
+| `RESOURCE_EXHAUSTED`, `INVALID_ARGUMENT`, 그 밖의 code | `0x01` |
+| 로컬: 스트림 열기 실패, client 쪽 상한 초과 | `0x01` |
+| 로컬: CMD가 CONNECT가 아님 | `0x07` |
+| 로컬: ATYP 미지원, 도메인 모양 위반 | `0x08` |
+
+`BND` 필드는 항상 `ATYP=0x01, 0.0.0.0:0` 고정이다 — `ConnectResult`에는 실제 연결 주소를 담는 필드가 없다. 실패 REP는 `shutdown(Write)` 후 close로 보낸다(RST는 쓰지 않는다 — 아직 보내지 않은 REP가 사라질 수 있어서). SOCKS5가 아닌 첫 바이트(HTTP의 `G`/`P`, TLS의 `0x16` 등)를 받으면 한 바이트도 쓰지 않고 스트림도 열지 않은 채 닫는다.
+
+host는 목적지 이름을 원격으로(자신이) 해석한다 — 즉 SOCKS5의 remote-DNS 의미론이다. 애플리케이션이 `socks5://`(로컬 DNS)를 쓰면 client 쪽에서 이름이 새므로, 이름을 감추려면 `socks5h://`(원격 DNS, 예: `curl --socks5-hostname 127.0.0.1:1080 http://internal-service/`)를 쓴다.
 
 ### 6.10 Schema와 capability
 

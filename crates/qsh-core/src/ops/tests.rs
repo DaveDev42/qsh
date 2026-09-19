@@ -798,6 +798,27 @@ fn resolve_route_forward_resolves_a_peer_target_with_the_pinned_address() {
     }
 }
 
+/// ADR-0019 decision 9's loopback-only `-D` bind check runs **before**
+/// route resolution or any connect attempt — `"nowhere"` names no host
+/// this `Ops` (no identity, no trust entry, no daemon) could ever resolve,
+/// so getting `INVALID_ARGUMENT` back rather than `HOST_NOT_FOUND` (or a
+/// connect failure) proves zero connect attempts were made.
+#[test]
+fn tunnel_dynamic_non_loopback_bind_is_invalid_argument_before_connect() {
+    let dir = tempfile::tempdir().unwrap();
+    let ops = resolve_route_ops(dir.path());
+
+    let err = match ops.tunnel_dynamic(qsh_proto::TunnelDynamicReq {
+        host: "nowhere".into(),
+        bind: Some("0.0.0.0".into()),
+        listen_port: 1080,
+    }) {
+        Err(err) => err,
+        Ok(_) => panic!("a non-loopback -D bind must never succeed"),
+    };
+    assert_eq!(err.code, ErrorCode::InvalidArgument);
+}
+
 #[cfg(unix)]
 fn sample_local_host(name: &str) -> qsh_proto::local::LocalHost {
     qsh_proto::local::LocalHost {
@@ -866,6 +887,37 @@ fn resolve_route_reverse_returns_the_local_route_to_the_live_daemon() {
         }
         PeerRoute::Forward(_) => panic!("expected a reverse route"),
     }
+    daemon.join().unwrap();
+}
+
+/// ADR-0019 decisions 3, 10: `-D` over a reverse route is refused with
+/// `UNSUPPORTED` before anything connects. The fake daemon here only ever
+/// answers `LocalHostList` — if `tunnel_dynamic` reached past route
+/// resolution and tried to actually dial through it, the daemon would
+/// either hang (never joining) or this call would fail with some other
+/// error, not this exact message.
+#[test]
+#[cfg(unix)]
+fn tunnel_dynamic_on_reverse_route_is_unsupported_before_connect() {
+    let dir = tempfile::tempdir().unwrap();
+    let ops = resolve_route_ops(dir.path());
+    let runtime_dir = ops.paths().runtime_dir();
+    let daemon =
+        spawn_fake_admin_daemon_thread(&runtime_dir, 100, vec![sample_local_host("phone")]);
+
+    let err = match ops.tunnel_dynamic(qsh_proto::TunnelDynamicReq {
+        host: "phone".into(),
+        bind: None,
+        listen_port: 1080,
+    }) {
+        Err(err) => err,
+        Ok(_) => panic!("-D over a reverse route must never succeed"),
+    };
+    assert_eq!(err.code, ErrorCode::Unsupported);
+    assert_eq!(
+        err.message,
+        crate::ops::tunnel::DYNAMIC_FORWARD_REVERSE_UNSUPPORTED_MESSAGE
+    );
     daemon.join().unwrap();
 }
 

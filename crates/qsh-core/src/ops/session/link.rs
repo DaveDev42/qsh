@@ -121,6 +121,29 @@ impl Link {
 }
 
 impl Connected {
+    /// Build a forward-route `Connected` directly from an already-dialed
+    /// endpoint/connection/session, with no wire handshake of its own —
+    /// the test seam [`crate::ops::tunnel`]'s capability-gate tests need,
+    /// since `Session::from_control` performs no I/O (just stores fields),
+    /// so a fabricated [`Session`] (e.g. one built from a hand-written
+    /// [`qsh_proto::wire::Hello`] whose `capabilities` omits
+    /// `dial-filter.v1`) is enough to exercise
+    /// `Ops::tunnel_dynamic_with_connected`'s capability check without a
+    /// real peer answering a `Hello`.
+    #[cfg(test)]
+    pub(crate) fn for_test_forward(
+        runtime: Arc<crate::ops::SharedRuntime>,
+        endpoint: qsh_transport::Endpoint,
+        connection: qsh_transport::Connection,
+        session: Session,
+    ) -> Self {
+        Self {
+            runtime: Some(runtime),
+            link: ConnectedLink::Forward(Link::new(endpoint, connection)),
+            session: Some(session),
+        }
+    }
+
     /// Run one request closure on the live session.
     ///
     /// `pub(crate)`, not private: `crate::ops::tunnel`'s `-R` requester leg
@@ -195,6 +218,21 @@ impl Connected {
             ConnectedLink::Forward(link) => Some(link.connection()),
             ConnectedLink::Reverse { .. } => None,
         }
+    }
+
+    /// The capabilities negotiated with the peer at handshake time
+    /// (`crate::handshake::negotiated_capabilities`) — e.g.
+    /// [`qsh_proto::wire::CAP_DIAL_FILTER_V1`], which
+    /// [`crate::ops::tunnel::Ops::tunnel_dynamic`] requires before binding
+    /// anything (ADR-0019 decision 3). Empty if the session was already
+    /// taken out from under this `Connected` (there is no live negotiation
+    /// left to read), which a caller here only ever sees on a
+    /// structurally-already-closed connection.
+    pub(crate) fn capabilities(&self) -> &[String] {
+        self.session
+            .as_ref()
+            .map(|s| s.capabilities.as_slice())
+            .unwrap_or(&[])
     }
 
     /// The reverse-route carrier [`crate::ops::tunnel`]'s route-aware

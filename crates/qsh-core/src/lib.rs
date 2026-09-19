@@ -62,8 +62,9 @@ pub use ops::{
     RecoveryConfig, SchemaOp, SessionAttachOp, SessionAttachStream, SessionCloseOp, SessionGetOp,
     SessionListOp, SessionOpenOp, SessionReadOp, SessionReadOutput, SessionReader, SessionResizeOp,
     SessionWriteOp, TrustAcceptOp, TrustAddOp, TrustInviteOp, TrustListOp, TrustRemoveOp,
-    TunnelCloseOp, TunnelHold, TunnelListOp, TunnelOpenOp, VersionOp, dynamic_forward_unsupported,
-    normalize_invite_code, parse_local_forwards, parse_remote_forwards, resolve_invite_code_source,
+    TunnelCloseOp, TunnelDynamicOp, TunnelHold, TunnelListOp, TunnelOpenOp, VersionOp,
+    normalize_invite_code, parse_dynamic_forwards, parse_local_forwards, parse_remote_forwards,
+    resolve_invite_code_source,
 };
 pub use trust::{SharedTrustStore, TrustStore};
 

@@ -37,9 +37,15 @@ Remote forward `[bind:]rport:host:hport`, repeatable: ask the peer to bind `rpor
 Same reasoning as [`Self::local_forward`] for not being a clap `value_parser`: `qsh_core::parse_remote_forwards` decides the `docs/CLI.md` §3.3 code, not clap\*(Aqs usage\-error path.
 .TP
 \fB\-D\fR \fI<SPEC>\fR
-SOCKS5 dynamic forwarding `[bind:]port`, repeatable. Parses, but P0 refuses it with `UNSUPPORTED`, "SOCKS dynamic forwarding (\-D) is a P1 feature", before this session (or anything else on the command line) is opened — unless `\-\-json`/`\-\-jsonl` is also given, in which case §7\*(Aqs machine\-mode gate answers `INVALID_ARGUMENT` first, since the interactive form has no JSON output mode of its own for `\-D`\*(Aqs own refusal to appear in (`docs/CLI.md` §6.9, `docs/ROADMAP.md` M4 "명시적 out"). The flag parses but no SOCKS proxy is ever opened and no bytes are forwarded, whatever value you pass. Use `\-L` for a known port pair, or an existing overlay for anything wider.
+SOCKS5 dynamic forwarding `[bind:]port`, repeatable: open a SOCKS5 proxy on this machine and, for every CONNECT a SOCKS client sends it, forward to whatever destination that CONNECT names, as seen from the peer (ADR\-0019). `bind` defaults to (and is restricted to) loopback, same as `\-L`/`\-R`.
 
-Not shape\-checked here for the same reason as [`Self::local_forward`]/[`Self::remote_forward`]: the refusal is unconditional, so there is nothing a `value_parser` could reject that this flag\*(Aqs own handling would not refuse anyway.
+Every listener this flag opens lives exactly as long as this interactive session and dies with the process, same lifecycle as `\-L` (`docs/CLI.md` §6.14) — there is no daemon and nothing to close.
+
+There is no ACL check at open time: each CONNECT is authorized on the peer as `forward.local`, the same action `\-L` uses. `DYNAMIC_FORWARD_ACL_NOTE` — "`\-D` runs SOCKS5 on this machine and authorizes every CONNECT on the peer as `forward.local`; `forward.socks` is never consulted." Refused with `UNSUPPORTED` before anything binds when the target resolves to a reverse route, or when the peer does not advertise `dial\-filter.v1` (`docs/CLI.md` §6.9).
+
+With `\-\-json`/`\-\-jsonl` also given, §7\*(Aqs machine\-mode gate answers `INVALID_ARGUMENT` before this flag is looked at at all — the interactive form has no JSON output mode of its own.
+
+Not shape\-checked here for the same reason as [`Self::local_forward`]/[`Self::remote_forward`]: `qsh_core::parse_dynamic_forwards` is the single place that decides which `docs/CLI.md` §3.3 code a malformed spec earns.
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help (see a summary with \*(Aq\-h\*(Aq)

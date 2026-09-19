@@ -39,7 +39,9 @@ pairing, `qsh service install`) is underway. What works end to end today:
   controller. The target reconnects with backoff when the link dies.
 - `-L` and `-R` port forwards, over forward connections and over reverse
   ones, plus the standalone `qsh tunnel open`/`qsh tunnels`/
-  `qsh tunnel close` machine-mode commands.
+  `qsh tunnel close` machine-mode commands. `-D` (SOCKS5 dynamic
+  forwarding) is a third mode on both the interactive and `tunnel open`
+  forms — see below.
 - A default-deny ACL (`acl.toml`) and a fail-closed audit log gate every
   operation a remote peer requests. See [Security
   posture](#security-posture).
@@ -59,13 +61,23 @@ pairing, `qsh service install`) is underway. What works end to end today:
   way, and `qsh capabilities` reports its supported capabilities, or, given
   a pinned host, what was actually negotiated with that peer.
 
-`-D` (SOCKS5 dynamic forwarding) parses on both the interactive and
-`tunnel open` forms but always answers `UNSUPPORTED` with the message
-"SOCKS dynamic forwarding (-D) is a P1 feature". That envelope `message`
-is frozen; `qsh --help` and `qsh tunnel open --help` carry the rest of the
-refusal, exactly:
+`-D` (SOCKS5 dynamic forwarding, [ADR-0019](docs/adr/0019-socks-dynamic-forward.md))
+opens a loopback-only SOCKS5 listener instead of a fixed destination:
+`qsh dave@host -D 1080` (repeatable, alongside the session) or
+`qsh tunnel open host --dynamic 1080` (one listener per call, mutually
+exclusive with `--local`/`--remote`). It is not a new grant:
 
-> The flag parses but no SOCKS proxy is ever opened and no bytes are forwarded, whatever value you pass. Use `-L` for a known port pair, or an existing overlay for anything wider.
+> `-D` runs SOCKS5 on this machine and authorizes every CONNECT on the peer as `forward.local`; `forward.socks` is never consulted.
+
+so a peer already trusted with `forward.local` needs no extra
+configuration to use it — see [Security posture](#security-posture) for
+what that implies. It refuses before binding anything when the target
+host resolves to a reverse route, or when the peer does not advertise the
+`dial-filter.v1` capability that lets the host filter out loopback/
+link-local/metadata addresses from a proxied CONNECT. Point applications
+at `socks5h://127.0.0.1:1080` (remote DNS), not `socks5://`, so a hostname
+does not leak to local resolution: `curl --socks5-hostname 127.0.0.1:1080
+http://internal-service/`.
 
 ## Install
 
@@ -408,10 +420,14 @@ like `exec.run`, or a trailing-wildcard family like `session.*`. A peer
 that authenticates through a trusted CA (`[[ca]]` in `trust.toml`) gets
 exactly what a rule with an explicit `auth_path = "ca"` grants it; a rule
 that omits `auth_path` (the pin default) never matches a CA-authenticated
-peer, even when the principal string is identical. `forward.socks`,
-`file.read`, and `file.write` are defined in the action vocabulary but
-always denied regardless of any rule — those operations are P1,
-unimplemented. Every refusal a remote peer sees is the same opaque
+peer, even when the principal string is identical. `file.read` and
+`file.write` are defined in the action vocabulary but always denied
+regardless of any rule — those operations are P1, unimplemented.
+`forward.socks` is defined too and always denied as well, but for a
+different reason: no operation is ever authorized through it, by design
+([ADR-0019](docs/adr/0019-socks-dynamic-forward.md)) — `-D` (SOCKS5
+dynamic forwarding, see above) reuses `forward.local` instead. Every
+refusal a remote peer sees is the same opaque
 `PERMISSION_DENIED` message, whether it came from a missing rule, a
 policy file that failed to load, or an audit-write failure.
 
@@ -522,8 +538,10 @@ Some of these are MVP scope decisions, some are unfinished work.
 - A tunnel does not resume the way a session does. `-L` and `-R` work over
   both forward and reverse connections, `qsh tunnels`/`qsh tunnel close`
   manage what a resident daemon holds, and `-D` (SOCKS5 dynamic forwarding)
-  parses but always answers `UNSUPPORTED` — implementation is P1, and there
-  is no SOCKS proxy or UDP forwarding either. Remote forwards bind loopback
+  works over a forward connection only — a reverse-routed target is refused
+  before anything binds (ADR-0019 decision 10), and there is still no UDP
+  forwarding (`UDP ASSOCIATE` gets `REP 0x07`, the same "unsupported
+  command" reply BIND gets). Remote forwards bind loopback
   only; a non-loopback `bind` is refused, ACL notwithstanding. What a
   tunnel does not have is a session's replay ring: a connection that drops
   and later resumes ends any in-flight tunnel TCP connection cleanly rather
@@ -617,8 +635,10 @@ Some of these are MVP scope decisions, some are unfinished work.
 - Windows is P1 for the client and P2 for the host. PTY code is gated
   `#[cfg(unix)]`, and so is reverse mode: `qsh listen` and `qsh reverse`
   return `UNSUPPORTED` there rather than running. A tunnel over a reverse
-  connection needs that same daemon and inherits the restriction; `-D` is
-  `UNSUPPORTED` on every platform regardless. CI builds, lints and runs
+  connection needs that same daemon and inherits the restriction.
+  `qsh tunnel open --dynamic` is cross-platform like `--local`/`--remote`;
+  the interactive `-D` spelling is not, since the interactive PTY driver
+  it rides is itself `#[cfg(unix)]`. CI builds, lints and runs
   the portable test subset on `windows-latest` so the tree keeps compiling,
   but POSIX-only behavior such as signal exits and process-group kill is
   never exercised there.

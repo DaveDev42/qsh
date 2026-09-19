@@ -814,6 +814,10 @@ impl Ops {
             (Some(acceptor), tunnels)
         };
 
+        // Captured before `take_session()` below empties it out — see
+        // `SessionAttachStream::capabilities`'s own doc for why
+        // `open_dynamic_forwards` cannot read `conn.capabilities()` itself.
+        let capabilities = conn.capabilities().to_vec();
         let session = conn
             .take_session()
             .ok_or_else(|| OpError::new(ErrorCode::Internal, "attach lost its control stream"))?;
@@ -865,8 +869,10 @@ impl Ops {
                 driver,
             },
             forwards: Vec::new(),
+            dynamic_forwards: Vec::new(),
             remote_acceptor,
             remote_tunnels,
+            capabilities,
             conn,
             store: ResumeStore::new(&self.paths),
             events: events_rx,
@@ -1086,7 +1092,12 @@ impl Ops {
     /// An attach resolves its peer once and keeps the result, because the
     /// resolution loads the device key — which must not happen inside a
     /// runtime — and a recovery re-dials from inside one.
-    fn connect_target(&self, target: &PeerTarget) -> Result<Connected, OpError> {
+    ///
+    /// `pub(crate)`, not private: `crate::ops::tunnel::Ops::tunnel_dynamic`
+    /// (a sibling module) calls this directly once it already knows the
+    /// route is [`PeerRoute::Forward`] (ADR-0019 decisions 3, 10), rather
+    /// than going back through [`Self::connect`]'s own route branch.
+    pub(crate) fn connect_target(&self, target: &PeerTarget) -> Result<Connected, OpError> {
         let runtime = self.connect_runtime()?;
         let (endpoint, connection, session) = runtime.block_on(dial_peer(target))?;
         Ok(Connected {
