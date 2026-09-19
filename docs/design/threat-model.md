@@ -51,7 +51,7 @@ ReplayRing은 자산이면서 그 자체가 통제다. PTY 평문 output이 프�
 | 페어링 중인 미지 peer(`Principal::Pairing`) | 없음 — `Hello`에도 dispatch에도 ACL에도 닿지 못한다 | `pairing_open()`이 참인 창(살아 있는 invite ≤ 20분) 안에서만 TLS를 통과하고(`protocol.md:360`), 그 뒤로는 §15.2의 우회 경로만 탄다(`protocol.md:364`) |
 | 그 외 미지 peer | 없음 | 검증 코어의 3번 경로: 무조건 거부(`protocol.md:35`) |
 | 같은 uid의 로컬 호출자(localctl) | 데몬이 들고 있는 것을 조회·조작 | same-uid peer credential. **인가 계층이 아니다** — 그 프로세스는 이미 device 개인키를 읽을 수 있는 uid다 |
-| 같은 호스트의 다른 사용자 | 없음 | 파일 권한(0600/0700) + accept 시 euid 검사 |
+| 같은 호스트의 다른 사용자 | localctl UDS와 로컬 상태 파일에는 없음. `-L`/`-D`가 여는 loopback TCP listener에는 있다 — 그 principal의 `forward.local` 권한 전체(`-D`는 host가 닿는 모든 목적지) | localctl UDS·상태 파일: 파일 권한(0600/0700) + accept 시 euid 검사. loopback TCP listener: 없음 — TCP 포트는 파일 권한도 euid 검사도 거치지 않고 같은 머신의 어떤 uid에서도 그냥 connect된다(ADR-0019 결정, §7 h16) |
 | 네트워크 관찰자·능동 공격자 | 없음 | QUIC/TLS 1.3 양방향 인증(`protocol.md:39`), 0-RTT 전면 금지(`protocol.md:26`) |
 | 에이전트(`--json` 호출자) | 그 CLI를 실행한 사용자와 같다 | 별도 경계가 아니다 — `Ops` 파사드를 통과할 뿐이고, JSON 모드는 권한이 아니라 출력 형식이다 |
 
@@ -222,8 +222,17 @@ M8 Step 7 착수 시점에 다섯 개를 열어 두고 조사했다. 넷은 닫�
 | h13 | rustls 내부로 넘어간 키 사본이 `Zeroizing` 밖에 있다. `LocalIdentity.key_pkcs8_der`까지가 규율의 경계이고, rustls-pki-types 1.15.1에 `impl Drop`이 없다 | M8 Step 6이 명시적으로 수용한 잔여(코드 주석에 기록, 업스트림 이슈는 열지 않았다) |
 | h14 | 이미 redeem된 invite도 20분 retention 창 안에서는 TLS 게이트가 계속 열려 있다. 실제 거부는 그다음 단인 redeem 판정에서 난다 | `protocol.md:429`. 이 관찰이 뚫는 것은 없다 — redeem 판정 자체가 매번 지켜진다 |
 | h15 | 세션 replay는 기본 8 MiB까지다. 그보다 오래 끊겼다가 돌아오면 그 구간은 gap event로 통보될 뿐 복구 수단이 없다. disk spool이 없으므로 늘리는 유일한 방법은 `[serve].replay_bytes`이고, 그건 리스너 메모리를 직접 늘린다 | ADR-0004:14,18,20,27,34; 기본값 `crates/qsh-core/src/config.rs:539`. h11과는 다른 항목이다 — 이쪽은 세션 output 이력의 **크기 상한** 문제다 |
+| h16 | `-D`가 인가하는 것은 `forward.local` 하나뿐이고, 이미 그 principal이 갖고 있던 grant다. `-D`는 그 egress를 SOCKS 클라이언트가 쓰기 쉬운 형태로 옮길 뿐, 새 권한을 만들지 않는다 — 다만 host가 닿는 모든 목적지로 무제한 egress라는 위험 자체는 `-D` 이전부터 있었다 | ADR-0019:149(R1); Q1 목적지 ACL 문법이 나오면 완화 후보 |
+| h17 | `-L`/`-D`가 여는 loopback TCP listener는 같은 머신의 다른 uid도 그냥 connect할 수 있다 — localctl UDS와 달리 파일 권한도 accept 시 euid 검사도 거치지 않는다. `-D`는 목적지가 고정되지 않아 피해 범위가 `-L`보다 넓다(그 principal이 닿는 모든 곳). 정방향·역방향 두 route 모두 같다 — 역방향은 daemon을 거쳐 relay될 뿐 이 listener 자체의 신뢰 경계를 바꾸지 않는다. 처방은 다중 사용자 머신에서 `-D`를 쓰지 않는 것 | ADR-0019:150(R2); ADR-0020:42("새 신뢰 경계는 없다"); listener별 자격증명(RFC 1929)은 P2 후보. §2의 "같은 호스트의 다른 사용자" 행이 이 예외를 반영한다 |
+| h18 | 응용이 `socks5h://`가 아니라 `socks5://`를 쓰면 이름 해석이 client 쪽 로컬 DNS로 새어 나간다 | ADR-0019:151(R3). client 설정 문제이므로 통제가 아니라 문서 안내(README, `docs/CLI.md` §6.9)로 대응한다 |
+| h19 | SOCKS5 REP 분류가 거칠다 — `0x03`/`0x06`은 나오지 않고, `0x04`(`HOST_NOT_FOUND`)와 `0x05`(`CONNECTION_FAILED`)의 구분이 원격 포트 스캔의 단서가 된다 | ADR-0019:152(R4). `-L`의 `ConnectResult`와 같은 수준의 잔여 위험이다 |
+| h20 | `dial-filter.v1`의 host-local 필터는 loopback/link-local/메타데이터 주소만 거른다 — host 자신의 비-loopback 인터페이스 주소와 RFC 1918 사설망 대역, IPv6 metadata 주소(예: `fd00:ec2::254`)는 거르지 않는다. 사내망 접근이 실제 용례이기 때문이다 | ADR-0019:153(R5) |
+| h21 | `acl.toml`의 `allow = ["forward.socks"]`는 `-D`에 아무 효과가 없다 — `-D`는 항상 `forward.local`로만 판정된다(`DYNAMIC_FORWARD_ACL_NOTE`). 운영자가 이 행으로 `-D`를 허용했다고 착각할 수 있다 | ADR-0019:154(R6). `qsh doctor` 진단은 후속 후보 |
+| h22 | `-D`가 splice하는 연결에는 idle timeout이 없다 — 클라이언트도 목적지도 조용한 연결이 끊기지 않고 자원을 계속 쥔다 | ADR-0019:155(R7). `-L`과 같은 수준의 잔여 위험이다 |
 
 h4와 h5는 함께 읽어야 한다. revocation 메커니즘이 없고 `trust remove`도 소급되지 않으므로, 손상된 peer를 즉시 끊는 수단이 v1에는 없다. 실무적 대응은 그 연결이 끊길 때까지 기다리거나 `qsh serve`를 재시작하는 것이고, 후자는 h12에 따라 모든 세션을 끝낸다.
+
+h16–h22는 ADR-0019의 R1–R7이다(그 ADR 자신이 "잔여 위험은 §7에 행으로 올린다"고 요구한다). h17만 ADR-0020으로 개정됐다 — 역방향 route에도 같은 loopback listener 노출이 적용되지만, ADR-0020 자신이 "새 신뢰 경계는 없다"고 명시하므로 위험의 성격은 그대로다.
 
 ## 8. 운영 가정
 

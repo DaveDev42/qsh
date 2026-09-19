@@ -229,6 +229,12 @@ impl SessionAttachStream {
     /// the terminal — a bind failure is an ordinary typed error, and the
     /// caller should report it rather than half-start a session.
     ///
+    /// Route-aware (ADR-0020 decision 3): a forward route opens each
+    /// forward's own QUIC stream directly; a reverse route relays through
+    /// this machine's resident `qsh listen` daemon, exactly the way
+    /// [`Ops::tunnel_open`](crate::ops::Ops::tunnel_open)'s reverse leg
+    /// does for the standalone `-L` form.
+    ///
     /// Returns the [`qsh_proto::Tunnel`] DTO of each forward, in `specs`
     /// order, for
     /// the frontend to render.
@@ -240,44 +246,103 @@ impl SessionAttachStream {
             return Ok(Vec::new());
         }
         let host = parse_session_ref(&self.session_ref)?.host;
-        // A `-L` needs a raw QUIC stream of its own; the reverse route has
-        // no connection here to open one on (`Connected::connection`).
-        // Fail closed rather than pretend (`PLAN.md` M4 Step 5).
-        let Some(connection) = self.conn.connection() else {
-            return Err(OpError::new(
-                ErrorCode::Unsupported,
-                "local forwards over a reverse connection are not implemented yet",
-            ));
-        };
-        let started = {
-            let runtime = self.conn.runtime();
-            let mut started = Vec::with_capacity(specs.len());
-            for spec in specs {
-                // On `Err` the loop returns, dropping every handle in
-                // `started` — each drop closes its listener.
-                let handle = runtime
-                    .block_on(crate::tunnel::LocalForwardHandle::start(
-                        spec,
-                        connection.clone(),
-                    ))
-                    .map_err(crate::ops::tunnel::map_local_forward_error)?;
-                started.push(handle);
-            }
-            started
+        let started = match self.conn.connection() {
+            Some(connection) => self.start_local_forwards_forward(specs, connection)?,
+            None => self.start_local_forwards_reverse(specs)?,
         };
         let tunnels = started.iter().map(|f| f.tunnel(&host)).collect();
         self.forwards.extend(started);
         Ok(tunnels)
     }
 
+    /// [`Self::open_local_forwards`]'s forward-route half.
+    fn start_local_forwards_forward(
+        &self,
+        specs: &[qsh_proto::wire::ForwardSpec],
+        connection: qsh_transport::Connection,
+    ) -> Result<Vec<crate::tunnel::LocalForwardHandle>, OpError> {
+        let runtime = self.conn.runtime();
+        let mut started = Vec::with_capacity(specs.len());
+        for spec in specs {
+            // On `Err` the loop returns, dropping every handle in
+            // `started` — each drop closes its listener.
+            let handle = runtime
+                .block_on(crate::tunnel::LocalForwardHandle::start(
+                    spec,
+                    connection.clone(),
+                ))
+                .map_err(crate::ops::tunnel::map_local_forward_error)?;
+            started.push(handle);
+        }
+        Ok(started)
+    }
+
+    /// [`Self::open_local_forwards`]'s reverse-route half (ADR-0020
+    /// decision 3): each forward's listener relays through this machine's
+    /// resident `qsh listen` daemon instead of dialing a QUIC connection
+    /// this process does not hold on the reverse route.
+    #[cfg(unix)]
+    fn start_local_forwards_reverse(
+        &self,
+        specs: &[qsh_proto::wire::ForwardSpec],
+    ) -> Result<Vec<crate::tunnel::LocalForwardHandle>, OpError> {
+        let Some((socket, route_host)) = self.conn.reverse_route() else {
+            return Err(OpError::new(
+                ErrorCode::Internal,
+                "reverse connection is missing its localctl route",
+            ));
+        };
+        let socket = socket.to_path_buf();
+        let route_host = route_host.to_string();
+        let runtime = self.conn.runtime();
+        let mut started = Vec::with_capacity(specs.len());
+        for spec in specs {
+            let handle = runtime
+                .block_on(crate::tunnel::LocalForwardHandle::start_reverse(
+                    spec,
+                    socket.clone(),
+                    route_host.clone(),
+                ))
+                .map_err(crate::ops::tunnel::map_local_forward_error)?;
+            started.push(handle);
+        }
+        Ok(started)
+    }
+
+    /// Windows twin: localctl (UDS) has no meaning there, and
+    /// `Ops::resolve_route` never produces a reverse route there either, so
+    /// this is unreachable in practice rather than dead code — see
+    /// `crate::ops::tunnel::Ops::tunnel_open_reverse`'s own Windows twin
+    /// for the identical reasoning.
+    #[cfg(not(unix))]
+    fn start_local_forwards_reverse(
+        &self,
+        _specs: &[qsh_proto::wire::ForwardSpec],
+    ) -> Result<Vec<crate::tunnel::LocalForwardHandle>, OpError> {
+        Err(OpError::new(
+            ErrorCode::Unsupported,
+            "reverse routing (localctl) is not available on this platform",
+        ))
+    }
+
     /// Bind and start this attach's `-D` dynamic (SOCKS5) forwards
-    /// (ADR-0019 decision 11) — the interactive twin of
-    /// [`Ops::tunnel_dynamic`](crate::ops::Ops::tunnel_dynamic), shaped
-    /// like [`Self::open_local_forwards`]: rides this attach's own
-    /// connection, refuses a reverse route (ADR-0019 decisions 3, 10) and
-    /// the peer's missing `dial-filter.v1` capability (ADR-0019 decision
-    /// 3, no fallback) before binding anything, and is all-or-nothing —
-    /// a spec that fails drops every listener this call already bound.
+    /// (ADR-0019 decision 11, ADR-0020 decisions 1–3) — the interactive
+    /// twin of [`Ops::tunnel_dynamic`](crate::ops::Ops::tunnel_dynamic),
+    /// shaped like [`Self::open_local_forwards`]: route-aware (forward or
+    /// reverse), refuses the connected route's missing `dial-filter.v1`
+    /// capability (ADR-0019 decision 3, no fallback; ADR-0020 decision 2's
+    /// dual-cause reverse wording) before binding anything, and is
+    /// all-or-nothing — a spec that fails drops every listener this call
+    /// already bound.
+    ///
+    /// This is a backstop, not the primary ordering gate for the
+    /// interactive `qsh [user@]host -D spec` spelling: `tui::run` already
+    /// runs the same capability check *before* `session.open`
+    /// (`Ops::session_open_for_dynamic`, ADR-0020 decisions 2–3), so a
+    /// capability-missing route is refused before a session — let alone a
+    /// listener — ever exists. This check stays so `open_dynamic_forwards`
+    /// is still safe to call from anywhere without relying on a caller to
+    /// have checked first.
     ///
     /// Returns the [`qsh_proto::DynamicTunnel`] DTO of each forward, in
     /// `specs` order, for the frontend to render.
@@ -289,46 +354,92 @@ impl SessionAttachStream {
             return Ok(Vec::new());
         }
         let host = parse_session_ref(&self.session_ref)?.host;
-        // Same reverse-route refusal `open_local_forwards` applies, before
-        // any resource exists (ADR-0019 decisions 3, 10 — `-D` is
-        // forward-route only at this landing). This is a backstop, not
-        // the primary gate: `tui::run` (the only caller that can reach a
-        // reverse route interactively) already calls
-        // `Ops::check_dynamic_route` *before* `session.open`, so a
-        // reverse-routed host is refused before a session — let alone a
-        // listener — ever exists. This check stays so `open_dynamic_forwards`
-        // is still safe to call from anywhere without relying on a caller
-        // to have checked first.
-        let Some(connection) = self.conn.connection() else {
-            return Err(crate::ops::tunnel::dynamic_forward_reverse_unsupported_interactive());
-        };
-        // ADR-0019 decision 3: no fallback if the peer never advertised
-        // the capability this dial policy depends on — refused here,
-        // before any listener binds, exactly like `Ops::tunnel_dynamic`'s
-        // own gate. Shares the actual predicate with that gate through
-        // `require_dial_filter_capability`, not a second independently
-        // re-derived `if`.
-        crate::ops::tunnel::require_dial_filter_capability(&self.capabilities)?;
-        let started = {
-            let runtime = self.conn.runtime();
-            let mut started = Vec::with_capacity(specs.len());
-            for spec in specs {
-                // On `Err` the loop returns, dropping every handle in
-                // `started` — each drop closes its listener.
-                let handle = runtime
-                    .block_on(crate::tunnel::DynamicForwardHandle::start(
-                        spec.bind.as_deref(),
-                        spec.listen_port,
-                        connection.clone(),
-                    ))
-                    .map_err(crate::ops::tunnel::map_local_forward_error)?;
-                started.push(handle);
-            }
-            started
+        let is_reverse = self.conn.connection().is_none();
+        // ADR-0019 decision 3, ADR-0020 decision 2: no fallback if the
+        // connected route never advertised the capability this dial
+        // policy depends on — refused here, before any listener binds,
+        // exactly like `Ops::tunnel_dynamic`'s own gate. Shares the actual
+        // predicate with that gate through `require_dial_filter_capability`,
+        // not a second independently re-derived `if`.
+        crate::ops::tunnel::require_dial_filter_capability(&self.capabilities, is_reverse)?;
+        let started = match self.conn.connection() {
+            Some(connection) => self.start_dynamic_forwards_forward(specs, connection)?,
+            None => self.start_dynamic_forwards_reverse(specs)?,
         };
         let tunnels = started.iter().map(|f| f.dynamic_tunnel(&host)).collect();
         self.dynamic_forwards.extend(started);
         Ok(tunnels)
+    }
+
+    /// [`Self::open_dynamic_forwards`]'s forward-route half.
+    fn start_dynamic_forwards_forward(
+        &self,
+        specs: &[qsh_proto::wire::DynamicSpec],
+        connection: qsh_transport::Connection,
+    ) -> Result<Vec<crate::tunnel::DynamicForwardHandle>, OpError> {
+        let runtime = self.conn.runtime();
+        let mut started = Vec::with_capacity(specs.len());
+        for spec in specs {
+            // On `Err` the loop returns, dropping every handle in
+            // `started` — each drop closes its listener.
+            let handle = runtime
+                .block_on(crate::tunnel::DynamicForwardHandle::start(
+                    spec.bind.as_deref(),
+                    spec.listen_port,
+                    connection.clone(),
+                ))
+                .map_err(crate::ops::tunnel::map_local_forward_error)?;
+            started.push(handle);
+        }
+        Ok(started)
+    }
+
+    /// [`Self::open_dynamic_forwards`]'s reverse-route half (ADR-0020
+    /// decision 1): each `-D` listener relays every `CONNECT` through this
+    /// machine's resident `qsh listen` daemon instead of dialing a QUIC
+    /// connection this process does not hold on the reverse route. The
+    /// capability gate has already run in [`Self::open_dynamic_forwards`]
+    /// by the time this is reached.
+    #[cfg(unix)]
+    fn start_dynamic_forwards_reverse(
+        &self,
+        specs: &[qsh_proto::wire::DynamicSpec],
+    ) -> Result<Vec<crate::tunnel::DynamicForwardHandle>, OpError> {
+        let Some((socket, route_host)) = self.conn.reverse_route() else {
+            return Err(OpError::new(
+                ErrorCode::Internal,
+                "reverse connection is missing its localctl route",
+            ));
+        };
+        let socket = socket.to_path_buf();
+        let route_host = route_host.to_string();
+        let runtime = self.conn.runtime();
+        let mut started = Vec::with_capacity(specs.len());
+        for spec in specs {
+            let handle = runtime
+                .block_on(crate::tunnel::DynamicForwardHandle::start_reverse(
+                    spec.bind.as_deref(),
+                    spec.listen_port,
+                    socket.clone(),
+                    route_host.clone(),
+                ))
+                .map_err(crate::ops::tunnel::map_local_forward_error)?;
+            started.push(handle);
+        }
+        Ok(started)
+    }
+
+    /// Windows twin — see [`Self::start_local_forwards_reverse`]'s own doc
+    /// on why this is unreachable in practice rather than dead code.
+    #[cfg(not(unix))]
+    fn start_dynamic_forwards_reverse(
+        &self,
+        _specs: &[qsh_proto::wire::DynamicSpec],
+    ) -> Result<Vec<crate::tunnel::DynamicForwardHandle>, OpError> {
+        Err(OpError::new(
+            ErrorCode::Unsupported,
+            "reverse routing (localctl) is not available on this platform",
+        ))
     }
 
     /// This attach's `-R` remote forward [`Tunnel`](qsh_proto::Tunnel)

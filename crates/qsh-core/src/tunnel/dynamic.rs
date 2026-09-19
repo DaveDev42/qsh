@@ -471,6 +471,43 @@ impl DynamicForwardHandle {
         })
     }
 
+    /// [`Self::start`]'s reverse-route sibling, `-D` over a reverse route
+    /// (ADR-0020 decision 1): each `CONNECT` accepted on this listener
+    /// relays through `socket_path` (this machine's resident `qsh listen`
+    /// daemon's UDS socket) to `host`'s live reverse registration, instead
+    /// of dialing a QUIC connection directly. See `ForwardCarrier::Local`'s
+    /// own doc for the wire shape this opens per connection —
+    /// `DynamicForward::run` itself is already carrier-agnostic and
+    /// unchanged by this.
+    ///
+    /// `pub`, not `pub(crate)` — the same widening
+    /// [`LocalForwardHandle::start_reverse`] already got, for the same
+    /// reason: `crates/qsh-testkit` drives the real `-D over reverse`
+    /// requester leg end to end rather than re-implementing it, which needs
+    /// this callable from outside `qsh-core`. `Ops`'s route-aware entry
+    /// point is still the only *production* caller.
+    ///
+    /// [`LocalForwardHandle::start_reverse`]: crate::tunnel::local::LocalForwardHandle::start_reverse
+    #[cfg(unix)]
+    pub async fn start_reverse(
+        bind: Option<&str>,
+        listen_port: u16,
+        socket_path: std::path::PathBuf,
+        host: String,
+    ) -> Result<Self, LocalForwardError> {
+        let forward = DynamicForward::bind(bind, listen_port).await?;
+        let bind_addr = forward.local_addr();
+        let carrier = Arc::new(ForwardCarrier::Local {
+            socket: socket_path,
+            host,
+        });
+        Ok(Self {
+            tunnel_id: ulid::Ulid::new().to_string(),
+            bind: bind_addr,
+            task: tokio::spawn(forward.run(carrier)),
+        })
+    }
+
     /// The address actually bound — with a `0` listen port, the one the
     /// kernel picked.
     pub fn local_addr(&self) -> SocketAddr {

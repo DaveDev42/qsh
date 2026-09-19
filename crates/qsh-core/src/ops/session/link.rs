@@ -144,6 +144,36 @@ impl Connected {
         }
     }
 
+    /// Build a reverse-route `Connected` directly from an already-built
+    /// `LOCAL_CONTROL` [`Session`], with no live `qsh listen` daemon or
+    /// registration behind it — the reverse-route sibling of
+    /// [`Self::for_test_forward`], for the same
+    /// `crate::ops::tunnel`/`crate::ops::session` capability-gate tests
+    /// (ADR-0020 decisions 2–3): a `session` built with
+    /// [`Session::from_local_control`](crate::client::Session::from_local_control)
+    /// from a hand-written capability list (e.g. one omitting
+    /// `dial-filter.v1`) is enough to exercise the gate without a real
+    /// `qsh listen` daemon or a live reverse registration. `socket`/`host`
+    /// only need to be *some* path/name — this seam's tests never dial
+    /// them, only read `Connected::reverse_route()` back.
+    #[cfg(all(test, unix))]
+    pub(crate) fn for_test_reverse(
+        runtime: Arc<crate::ops::SharedRuntime>,
+        session: Session,
+        socket: std::path::PathBuf,
+        host: String,
+    ) -> Self {
+        Self {
+            runtime: Some(runtime),
+            link: ConnectedLink::Reverse {
+                peer_fingerprint: None,
+                socket,
+                host,
+            },
+            session: Some(session),
+        }
+    }
+
     /// Run one request closure on the live session.
     ///
     /// `pub(crate)`, not private: `crate::ops::tunnel`'s `-R` requester leg

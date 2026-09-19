@@ -87,12 +87,10 @@ pub(crate) enum ForwardCarrier {
     /// counterpart to [`ForwardCarrier::Quic`]'s `splice_tcp_quic`.
     ///
     /// Constructing and splicing over this variant is complete as of this
-    /// stage (`PLAN.md` M4 Step 5 (a)) — only its *call site* is not: the
-    /// interactive `-L`/standalone `tunnel_open` entry points still always
-    /// pick [`ForwardCarrier::Quic`], deciding the route is `ops`'s job
-    /// (`PLAN.md` M4 Step 5 PR 5b), not this module's.
+    /// stage (`PLAN.md` M4 Step 5 (a)); wired up by every route-aware
+    /// `Ops` entry point (`-L`/`-D`, standalone and interactive) since
+    /// ADR-0020.
     #[cfg(unix)]
-    #[allow(dead_code)] // wired up by PR 5b's route-aware `Ops` entry points
     Local {
         /// The daemon's UDS socket path.
         socket: std::path::PathBuf,
