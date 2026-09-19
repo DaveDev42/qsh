@@ -2,18 +2,18 @@
 
 QSH is a QUIC-based direct-connect remote shell (single Rust binary `qsh`) that decouples PTY session lifetime from QUIC connection lifetime, so the same shell survives IP changes, sleep, and network switches without a relay server.
 
-`docs/PRD.md` and `docs/CLI.md` are the binding contract for behavior, wire format, and JSON envelope shape. `docs/adr/` holds decided architecture decisions (ADRs). **Read the relevant PRD/CLI.md section and any related ADR before proposing a change to protocol, wire format, or JSON contract** — do not re-litigate a decision that already has an ADR; propose a new ADR instead if you believe it's wrong.
+`docs/PRD.md` and `docs/CLI.md` are the binding contract for behavior, wire format, and JSON envelope shape. `docs/adr/` holds architecture decision records (ADRs). **Read the relevant PRD/CLI.md section and any related ADR before proposing a change to protocol, wire format, or JSON contract** — do not re-litigate a decision that already has an accepted ADR; propose a new ADR instead if you believe it's wrong.
 
 ## Session onboarding
 
-1. Open `docs/ROADMAP.md` and find the current milestone (first one not marked Done). Its acceptance criteria are the definition of done — build to them, not past them.
+1. Open `docs/ROADMAP.md` and read the `현재 위치` line at the top. It names the current milestone, which can be ahead of earlier milestones still waiting on campaigns a person runs. The current milestone's acceptance criteria are the definition of done — build to them, not past them.
 2. Open `PLAN.md` — the execution plan for the current milestone (ordered PR-sized steps with per-step tests and completion criteria). It is a living doc: when a milestone is done, it is fully replaced by the next milestone's plan.
 3. Before implementing, read the matching sections of `docs/design/protocol.md` (wire protocol), `docs/design/architecture.md` (crates, modules, key mechanisms), `docs/design/testing.md` (which tests the milestone owes), and the `docs/CLI.md` contract for any command you touch.
 4. Features deferred to P1/P2 stay deferred: reserved flags (e.g. `-D`) parse and return `UNSUPPORTED`; do not implement them early.
 
 ## Document map
 
-- `PLAN.md` — execution plan for the current milestone (M8, hardening). Replaced wholesale when a milestone closes; the superseded plan moves to `docs/history/`.
+- `PLAN.md` — execution plan for the current milestone; the file's title names the milestone. Replaced wholesale when a milestone closes; the superseded plan moves to `docs/history/`.
 - `docs/PRD.md` — product requirements (binding)
 - `docs/CLI.md` — CLI / JSON contract (binding)
 - `docs/ROADMAP.md` — milestones M0–M10 with scope and acceptance criteria
@@ -27,7 +27,7 @@ QSH is a QUIC-based direct-connect remote shell (single Rust binary `qsh`) that 
 - `docs/campaigns/` — manual campaigns a person runs and records: `m2-mobility`, `m6-mcp`, `m7-stopwatch`, `m8-fuzz`, `m8-soak`, `m8-adversarial-load`
 - `scripts/README.md` — installer and campaign harnesses under `scripts/`
 - `fuzz/README.md` — the seventeen cargo-fuzz targets, why `fuzz/` sits outside the workspace, how to run a campaign
-- `docs/adr/` — architecture decision records, 0001–0018 (settled decisions)
+- `docs/adr/` — architecture decision records, indexed with their status in `docs/adr/README.md`. Only an accepted (`승인됨`) ADR is settled; proposed (`제안됨`) and reserved (`예약됨`) ones are not.
 
 ## Commands
 

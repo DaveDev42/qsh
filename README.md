@@ -20,12 +20,14 @@ Pre-alpha. **Not for production use.**
 M0 through M6 are done. M7 (trust UX, host profiles, `doctor`) has landed
 its features; what is left is the stopwatch campaign in
 `docs/campaigns/m7-stopwatch.md`, which a person has to run. M8 (hardening)
-is underway. The admission and quota defenses, the adversarial-load gate
-(`docs/campaigns/m8-adversarial-load.md`), the fuzz campaign
+has landed its code: the admission and quota defenses, the adversarial-load
+gate (`docs/campaigns/m8-adversarial-load.md`), the fuzz campaign
 (`docs/campaigns/m8-fuzz.md`: 72 fuzz-hours per parser target, no crashes),
-the wire-format freeze draft and the threat model have all landed. The
-24-hour soak and the real-device mobility campaign are still open. What
-works end to end today:
+the wire-format freeze draft and the threat model. Three M8 items are still
+open: the 24-hour soak, the real-device mobility campaign, and the
+independent security review. The freeze draft takes effect once the
+operator decides on that review. M9 (the human-facing surface: naming,
+pairing, `qsh service install`) is underway. What works end to end today:
 
 - `qsh exec host -- cmd`, in human mode or as a single `qsh.cli/v1` JSON
   envelope with the remote exit code, stdout and stderr.
@@ -489,8 +491,8 @@ already taken on crates.io. The workspace stays `publish = false` until M10.
 | M5 | ACL and audit | Done |
 | M6 | MCP adapter | Done (retired, ADR-0011) |
 | M7 | Trust UX, host profiles, `doctor` | Features done; stopwatch campaign open |
-| M8 | Hardening (fuzz, soak, real-device mobility campaign) | In progress (fuzz and load gates closed) |
-| M9 | Human-facing surface (naming, pairing, service install) | Planned |
+| M8 | Hardening (fuzz, soak, real-device mobility campaign) | Code done; soak, mobility campaign, wire freeze and security review open |
+| M9 | Human-facing surface (naming, pairing, service install) | In progress |
 | M10 | Release (installers, Homebrew, notarization) | Planned |
 
 The Homebrew tap (`DaveDev42/tap`) and the release workflow's auto-bump job
