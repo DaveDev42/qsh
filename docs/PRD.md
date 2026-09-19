@@ -133,7 +133,7 @@ qsh exec personal-mac -- uname -a
 ```bash
 qsh -L 8080:localhost:3000 dave@personal-mac
 qsh -R 9000:localhost:9000 dave@server
-qsh -D 1080 dave@server   # P1 — SOCKS5, 플래그는 예약만 되어 있음
+qsh -D 1080 dave@server   # SOCKS5 dynamic forwarding (ADR-0019)
 ```
 
 ## 7. 기능 요구사항
@@ -158,7 +158,7 @@ qsh -D 1080 dave@server   # P1 — SOCKS5, 플래그는 예약만 되어 있음
 ### P1 — 실사용 확장
 
 - UDP가 차단된 환경을 위한 TCP/TLS fallback
-- SOCKS5 dynamic forwarding
+- SOCKS5 dynamic forwarding — 2026-09-19 사용자 결정으로 v1(M9)에 넣는다(ADR-0019)
 - streaming file copy
 - 인증서 rotation과 revocation UX
 - Windows client
@@ -256,7 +256,7 @@ qsh schema --json               지원 schema와 capability 조회
 qsh doctor                      연결·인증·정책 진단
 ```
 
-SSH 사용자에게 익숙한 `-L`, `-R`, `-D`, `-t`, `-T`, `-v`는 의미가 충돌하지 않는 범위에서 유지한다. `-D`(SOCKS5 dynamic forwarding)는 P0에서 flag parsing만 되며 실제 구현은 P1이다.
+SSH 사용자에게 익숙한 `-L`, `-R`, `-D`, `-t`, `-T`, `-v`는 의미가 충돌하지 않는 범위에서 유지한다. `-D`(SOCKS5 dynamic forwarding)는 client 쪽 loopback listener가 SOCKS5 CONNECT마다 host에 `TCP_CONNECT` 스트림을 하나씩 열고, host는 그 스트림을 `forward.local`로 인가한다(ADR-0019).
 
 ## 12. 시스템 경계
 

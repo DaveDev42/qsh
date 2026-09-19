@@ -2,7 +2,7 @@
 
 M8의 코드 스텝이 끝나고 남은 DoD 넷을 §0.2로 이월한 채, 이 문서는 M9 실행 계획으로 전면 교체됐다(M8 자체의 마감 판정은 그 넷이 닫힐 때 `docs/ROADMAP.md`에 적는다). 구속 근거: `docs/ROADMAP.md` M9 절(범위 (a)~(j) — `:118`, 명시적 out — `:119`, DoD — `:120-126`, 크기 내역 S1~S10 — `:127`, 결정 기록 Q1~Q5 — `:128-133`), 마일스톤 마감 공통 절차(`docs/ROADMAP.md:25-30`), `docs/PRD.md` §6·§11·§15(SC1), `docs/CLI.md` §2.3·§2.4·§2.5·§3.2·§6.11·§6.12·§6.13·§6.17·§10, `docs/adr/0012-human-surface-naming.md`·`0013-cert-file-exchange.md`·`0014-address-default-port.md`·`0017-acl-toml-not-written.md`(0015·0016은 예약됨), `docs/design/architecture.md` §1·§7, `docs/design/testing.md` L6. 이 계획과 ROADMAP.md의 편집은 main 세션 전용이다.
 
-M9는 CLI/JSON 축만 건드린다. M8이 얼린 wire 계약(`docs/design/protocol.md` §16)에 M9는 프레임을 더하지 않는다 — 이름 결정권도 `TrustInviteReq`/`TrustAcceptReq`라는 CLI 요청 타입에 붙고 wire의 자칭 값은 오늘의 `device_id` 그대로다(ADR-0012 결정 6, `0012-human-surface-naming.md:30`).
+M9는 CLI/JSON 축만 건드린다. M8이 얼린 wire 계약(`docs/design/protocol.md` §16)에 M9는 프레임을 더하지 않는다 — 이름 결정권도 `TrustInviteReq`/`TrustAcceptReq`라는 CLI 요청 타입에 붙고 wire의 자칭 값은 오늘의 `device_id` 그대로다(ADR-0012 결정 6, `0012-human-surface-naming.md:30`). 예외가 하나 있다. 2026-09-19에 범위로 들어온 SOCKS `-D`(Step 12)가 capability `dial-filter.v1`로 보호되는 `StreamHeader` 필드 하나를 더한다. 프레임은 늘지 않는다(ADR-0019 결정 3·4).
 
 ## 0. 착수 조건
 
@@ -24,10 +24,11 @@ M9는 CLI/JSON 축만 건드린다. M8이 얼린 wire 계약(`docs/design/protoc
 
 - [ ] DoD 1 — SC1 스톱워치 재측정: 새 표면으로 독립 3회, 5분 이내, `docs/campaigns/m7-stopwatch.md` 선례 형식을 계승한 캠페인 문서로 baseline(M7 DoD 1 측정치, Q4에 따라 현행 표면으로 먼저 잰다) 대비 단축 기록. 근거: Step 9 ⑧(캠페인 문서 사전 정의) + Step 11 이전 사람 측정. §0.2 M7 DoD 1에 종속. 소유: 사람(측정 3회 + Step 0의 baseline 3회). 에이전트 몫은 캠페인 문서 사전 정의뿐이다.
 - [ ] DoD 2 — doctor 신규 7종: 각각 안정된 code로 진단되는 것을 실행 가능한 메시지와 함께 테스트로 고정하고, `EXPECTED_DOCTOR_CODES`와 CLI.md §6.17 표를 같은 커밋에서 갱신. 근거: Step 4(6종) + Step 5(`[serve].to`↔구 `[reverse].controller` 충돌 1종 — 그 config 키가 서는 커밋).
-- [ ] DoD 3 — 문구 표본 8종 축자 테스트: forward loopback 처방, `-D` 현행 유지 문구, 재상환 실패의 host 전용 진단, 초대 출력의 후보 주소 열거, 포트 충돌 `--bind` 처방, 페어링 직후 pin 이름·매칭 규칙 부재 고지, `auth_path` 누락 host 진단, `assuming port 4433` 한 줄. 근거: Step 3(7종) + Step 4(`acl_ca_auth_path_missing` 1종 — 문면 상수가 `DiagnosticId` variant를 요구하므로 Step 3 커밋에 담기면 동결 set 게이트가 붉어진다, `crates/qsh-core/src/doctor.rs:116-122`). 페어링 고지 1종은 Step 3이 세우고 Step 7이 같은 상수를 개정하며 축자 테스트도 같은 커밋에서 갱신한다(ADR-0017 결정 3, `0017-acl-toml-not-written.md:32`).
+- [ ] DoD 3 — 문구 표본 8종 축자 테스트: forward loopback 처방, `-D` 거절 문구(역방향·capability 부재 — 2026-09-19에 옛 "현행 유지 문구"를 Step 12가 대체한다), 재상환 실패의 host 전용 진단, 초대 출력의 후보 주소 열거, 포트 충돌 `--bind` 처방, 페어링 직후 pin 이름·매칭 규칙 부재 고지, `auth_path` 누락 host 진단, `assuming port 4433` 한 줄. 근거: Step 3(7종) + Step 4(`acl_ca_auth_path_missing` 1종 — 문면 상수가 `DiagnosticId` variant를 요구하므로 Step 3 커밋에 담기면 동결 set 게이트가 붉어진다, `crates/qsh-core/src/doctor.rs:116-122`). 페어링 고지 1종은 Step 3이 세우고 Step 7이 같은 상수를 개정하며 축자 테스트도 같은 커밋에서 갱신한다(ADR-0017 결정 3, `0017-acl-toml-not-written.md:32`).
 - [ ] DoD 4 — 숨김 alias·config 이중 읽기 왕복 테스트: 구 표기 호출이 신 표기와 동일 op에 도달하고 신구 config 키가 동시에 있을 때의 우선순위가 고정된다. 근거: Step 5(`qsh reverse`·`[reverse].controller`), Step 7(`trust invite`/`trust accept`).
 - [ ] DoD 5 — 신규 op 등록 완전성: 신규 op마다 새 JSON fixture + `REQUIRED_FIXTURES`(`crates/qsh-cli/tests/fixtures.rs:77-121`, 실측 43개) 등록, 기존 fixture 한 바이트도 안 고침, schemars 타입·`cli_v1_data_schema` arm·`CLI_V1_SCHEMA_COMMANDS` 등록·렌더러 2종·CLI.md 문서 행·man 항목이 모두 존재함을 등록 완전성 테스트로 확인(M5 `acl_registry` 선례 형식). 근거: Step 6(테스트 신설) → Step 7·8이 소비.
 - [ ] DoD 6 — 마감 공통 절차 1·2: 구속 문서 태그 대조, README 동기화(서사·구조 전면 재작성은 명시적 out). 근거: Step 11.
+- [ ] DoD 7 — SOCKS `-D`(2026-09-19 추가): 실제 `curl --socks5-hostname`이 qsh SOCKS listener를 통과하는 acceptance 테스트가 CI에서 건너뛰지 않고 초록이고, host-local 필터 거부와 ACL 거부가 각각 테스트로 고정되며, 옛 거절 계약의 fixture는 한 바이트도 바뀌지 않는다. 근거: Step 12.
 
 ## 2. 실행 단계 (PR 단위)
 
@@ -260,7 +261,36 @@ Q4(`docs/ROADMAP.md:132`)가 현행 표면 선측정을 못박았고 DoD 1이 �
 
 **(b) 마감 커밋에 남길 것.** §1 DoD 체크박스, `docs/CLI.md:3` 상태 헤더, `docs/ROADMAP.md:5` "현재 위치", ROADMAP M9 절 갱신 + 마감 노트(절차 1·2 수치, 캠페인 문서와 run id 인용), ROADMAP M9 ✅, §7 태그 정책 한 줄의 ROADMAP 이관, PLAN.md를 M10 계획으로 전면 교체(§3의 P1 재기록 항목과 §6 이월 표의 미종결 행 이관 포함).
 
-**(c) 완료 판정.** §1 DoD 1~6 전부 `[x]`, 절차 1 충돌 0, 절차 2 불일치 0, ROADMAP M9 마감 노트가 `docs/campaigns/m9-stopwatch.md`와 CI run id를 인용, 마감 커밋 CI green. §0.2의 M7·M8 잔여 넷은 마감 조건이 아니다 — 그중 M7 DoD 1만 §1 DoD 1의 선행 조건이다.
+**(c) 완료 판정.** §1 DoD 1~7 전부 `[x]`, 절차 1 충돌 0, 절차 2 불일치 0, ROADMAP M9 마감 노트가 `docs/campaigns/m9-stopwatch.md`와 CI run id를 인용, 마감 커밋 CI green. §0.2의 M7·M8 잔여 넷은 마감 조건이 아니다 — 그중 M7 DoD 1만 §1 DoD 1의 선행 조건이다.
+
+### Step 12 — SOCKS `-D` 구현 (ADR-0019, 1.6~2.0ew)
+
+사용자가 2026-09-19에 `-D`를 구현하기로 결정했다. 설계는 ADR-0019가 기록하고 이 스텝은 그 결정을 커밋 순서로 옮긴다. Step 11 마감은 이 스텝이 닫힌 뒤에 한다. 커밋마다 일곱 게이트와 CI acceptance 잡이 초록이어야 한다.
+
+M9가 wire를 건드리지 않는다는 머리말의 원칙에 예외가 하나 생긴다. `StreamHeader`의 필드 5(`deny_host_local`)와 capability `dial-filter.v1`이다. 프레임은 늘지 않고 `docs/design/protocol.md` §16.4에 capability로 보호되는 새 필드 번호를 허용하는 항목을 먼저 넣은 뒤 코드가 들어간다(ADR-0019 결정 4).
+
+**(a) 순서.** 커밋 하나가 아래 항목 하나다.
+
+1. 결정 기록. ADR-0019를 승인된 설계로 교체하고 색인, `docs/ROADMAP.md`, `docs/PRD.md`, 이 절을 고친다.
+2. `qsh-proto`의 SOCKS5 codec(`socks5.rs`)과 fuzz 타깃 `parse_socks5`(열여덟 번째). codec은 아직 아무 데서도 부르지 않는다. `docs/design/protocol.md` §13·§16.3을 같은 커밋에서 고친다.
+3. §16.4 개정 한 항목만 담은 문서 커밋.
+4. host dial 필터. `StreamHeader.deny_host_local`, `dial-filter.v1` 광고, 해석 결과의 host-local 주소 거르기, `TCP_CONNECT` host의 바이트 범주 검사, `capabilities.json` 재생성. client는 아직 필드를 보내지 않는다.
+5. client 쪽 SOCKS 드라이버(`qsh-core/src/tunnel/dynamic.rs`). `forward_connection`을 `open_tunnel`과 `splice_opened`로 나누고 listener별 상한(handshake 10초, handshake 슬롯 64, 연결 128, CONNECT 초당 50·burst 100)을 둔다. 속도 초과는 남은 handshake 기한 안에서 기다린다.
+6. `Ops::tunnel_dynamic`과 CLI 전환. 거절 상수와 `dynamic_forward_unsupported()`를 지우고 새 op `tunnel.dynamic`, 새 fixture 셋, `RETIRED_PRODUCERS`, `DYNAMIC_FORWARD_ACL_NOTE`, CLI.md §2.5·§3.3·§6.9, README, man 재생성을 한 커밋에 담는다. 역방향 route의 `-D`는 이 커밋에서 `UNSUPPORTED`다.
+7. 사실이 바뀐 서술을 고친다. `forward.socks` doc과 `ALWAYS_DENIED_NO_OP` 사유 문면, `docs/design/threat-model.md` §2·§4·§7, `docs/design/architecture.md`, `docs/design/testing.md`, `docs/campaigns/m8-adversarial-load.md`의 두 행이 대상이다.
+8. acceptance. 실제 `curl --socks5-hostname`을 qsh SOCKS listener로 통과시키는 `socks_curl` 테스트를 CI acceptance 잡에 넣는다. 양성 경로, host-local 필터, ACL 거부, 종료 뒤 포트 재bind를 확인한다.
+9. 역방향 `-D`. controller는 자기 daemon과 UDS로만 말하므로 target의 capability를 모른다. daemon이 target의 협상된 capability를 controller에게 알려 주는 경로를 만들고 그 확인이 되면 역방향 거절을 걷는다. 확인하지 못하면 거절을 유지한다(ADR-0019 결정 3·10).
+
+**(b) 완료 기준.**
+
+- `DYNAMIC_FORWARD_UNSUPPORTED`가 저장소에 남지 않는다. retired 사유 문자열과 ADR 본문만 예외다.
+- `crates/qsh-cli/tests/fixtures/cli-v1/`의 기존 파일은 한 바이트도 바뀌지 않는다. 재생성은 `capabilities.json` 하나이고 그 diff는 capability 한 줄이다.
+- 옛 계약을 고정하던 테스트(`dynamic_forward_stub.rs`, `tunnel_docs.rs`의 네 테스트, `failure_text_discipline.rs`의 T6, `fixtures.rs`의 `-D` 블록)는 새 계약의 테스트로 바뀐다. 자원을 만들지 않는다는 속성은 실패 경로마다 계속 검사한다.
+- ACL 테스트의 단언은 바뀌지 않는다. 이름이 바뀌는 테스트는 `is_always_denied_is_exactly_the_p1_deferred_trio` 하나다.
+- `socks_curl`이 CI acceptance 잡에서 건너뛰지 않고 초록이다.
+- 역방향 `-D`는 (a) 9가 착지했으면 켜져 있고 아니면 이 절에 그 이유가 적혀 있다.
+
+**(c) 이 스텝이 바꾸는 M9 DoD.** DoD 3의 문구 표본 "`-D` 현행 유지 문구"는 "`-D` 거절 문구(역방향·capability 부재)"로 바뀐다. 표본 수는 8종 그대로다. DoD 5의 등록 완전성 테스트는 새 op `tunnel.dynamic`에도 걸린다.
 
 ## 3. 명시적 non-goals (P1 유예 / 타 마일스톤)
 
@@ -272,7 +302,7 @@ Q4(`docs/ROADMAP.md:132`)가 현행 표면 선측정을 못박았고 DoD 1이 �
 - qsh 자체 데몬화 — foreground 전용 불변(`docs/ROADMAP.md:118` (g), `docs/CLI.md:765`).
 - wire 변경 — M8 freeze(`docs/design/protocol.md` §16) 이후 M9는 CLI/JSON 축만 건드린다. 이름 결정권도 wire 자칭 값을 바꾸지 않는다(ADR-0012 결정 6).
 - doctor `--fail-on` — `docs/CLI.md:1072`가 향후 additive 후보로 남긴 플래그. M9 미구현.
-- `-D`/SOCKS, file copy, Windows host — `docs/ROADMAP.md:152-154` 가드레일 표 그대로. `-D`는 파싱되고 `UNSUPPORTED`를 낸다(Step 3이 그 문면만 규율한다).
+- file copy, Windows host — `docs/ROADMAP.md` §3 가드레일 표 그대로. `-D`/SOCKS는 2026-09-19 사용자 결정으로 이 목록에서 빠져 Step 12가 구현한다(ADR-0019).
 - `ControlLink`/`DataLink` enum → trait 전환(ADR-0005 P0 부채) — M3부터 연쇄 이월. M9도 트리거하지 않는다. P1 재기록.
 - cert rotation/revocation UX — P1(`docs/ROADMAP.md:159`), doctor 만료 경고만.
 
@@ -310,7 +340,7 @@ Q4(`docs/ROADMAP.md:132`)가 현행 표면 선측정을 못박았고 DoD 1이 �
 
 ## 5. 완료 절차
 
-1. §1 DoD 1~6 전건을 실제 테스트·캠페인 기록으로 확인(체크박스는 근거 green일 때만).
+1. §1 DoD 1~7 전건을 실제 테스트·캠페인 기록으로 확인(체크박스는 근거 green일 때만).
 2. 구속 문서 태그 대조 — `docs/CLI.md` §2.3·§2.4·§2.5·§3.2·§6.11·§6.12·§6.13·§6.17·§10, `docs/PRD.md` §6·§11·§15, `docs/adr/0012`~`0017`의 M9 관련 전 문장 전수(Step 11 (a) 절차 1).
 3. README 동기화 — 기능 목록·Known limitations·인터임 고지 + ADR 지정 델타 넷, Roadmap 표 M9 → Done. 서사·구조 전면 재작성 제외.
 4. `docs/design/testing.md`에 M9 테스트 층 반영(Step 9 ⑤에서 이미 낸 문단의 최종 확인).
