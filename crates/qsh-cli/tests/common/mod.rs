@@ -10,10 +10,17 @@
 //!
 //! Nothing here sleeps for correctness: the only wait is a bounded
 //! `recv_timeout` on the `qsh serve: listening on …` line.
+//!
+//! [`Sandbox::qsh`]/[`Sandbox::qsh_with_stdin`] and [`ServeGuard`] teardown
+//! register with the [`watchdog`] module for as long as they are in
+//! flight, so a hang that would otherwise show up only as a bare nextest
+//! slow-timeout instead names itself in stderr.
 
 // This module is compiled into several test binaries; each one uses a
 // different subset of it.
 #![allow(dead_code)]
+
+mod watchdog;
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -122,12 +129,35 @@ impl Sandbox {
         command
     }
 
+    /// A short, unique-per-sandbox tag for watchdog labels: the random
+    /// tempdir name underneath [`config_dir`](Self::config_dir)/
+    /// [`state_dir`](Self::state_dir). It separates different sandboxes
+    /// that run the identical argv (for example, two sandboxes both
+    /// running `exec <alias> -- true`), which would otherwise share a
+    /// label and be indistinguishable in a stuck-operation report.
+    fn watchdog_tag(&self) -> String {
+        self.config
+            .parent()
+            .and_then(Path::file_name)
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "?".to_string())
+    }
+
     /// Run `qsh` to completion with no stdin.
     pub fn qsh(&self, args: &[&str]) -> Output {
-        self.command(args)
+        let label = format!("qsh {} [{}]", args.join(" "), self.watchdog_tag());
+        let child = self
+            .command(args)
             .stdin(Stdio::null())
-            .output()
-            .expect("failed to run qsh")
+            // `output()` pipes both streams by default; `spawn()` inherits
+            // them, so both are set explicitly to keep this a pure
+            // spawn/wait split of the same `output()` semantics.
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("failed to run qsh");
+        let _watchdog = watchdog::InFlightGuard::new(label, Some(child.id()));
+        child.wait_with_output().expect("failed to run qsh")
     }
 
     /// Run `qsh` to completion, feeding `input` on stdin (a pipe, so the
@@ -140,6 +170,8 @@ impl Sandbox {
             .stderr(Stdio::piped())
             .spawn()
             .expect("failed to spawn qsh");
+        let label = format!("qsh {} [{}]", args.join(" "), self.watchdog_tag());
+        let _watchdog = watchdog::InFlightGuard::new(label, Some(child.id()));
         child
             .stdin
             .take()
@@ -455,6 +487,8 @@ impl ServeGuard {
             panic!("qsh serve never reported a bound address ({err}); stderr:\n{lines}")
         });
 
+        watchdog::register_serve(child.id(), addr.clone(), Arc::downgrade(&stderr));
+
         Self {
             child,
             addr,
@@ -539,6 +573,7 @@ impl ServeGuard {
     /// reader threads without touching the process itself, unlike
     /// [`finish`](Self::finish).
     pub fn captured(&mut self) -> ServeOutput {
+        let _watchdog = watchdog::InFlightGuard::new(self.teardown_label(), Some(self.child.id()));
         for reader in self.readers.drain(..) {
             let _ = reader.join();
         }
@@ -558,6 +593,7 @@ impl ServeGuard {
 
     /// Stop the child and return everything it wrote. Idempotent.
     pub fn finish(&mut self) -> ServeOutput {
+        let _watchdog = watchdog::InFlightGuard::new(self.teardown_label(), Some(self.child.id()));
         let _ = self.child.kill();
         let _ = self.child.wait();
         for reader in self.readers.drain(..) {
@@ -576,10 +612,23 @@ impl ServeGuard {
                 .clone(),
         }
     }
+
+    /// The label [`captured`](Self::captured)/[`finish`](Self::finish)/
+    /// [`Drop`] register while they wait for the child and join its reader
+    /// threads. The join has no bound: a grandchild that still holds the
+    /// serve's stdout or stderr keeps it from returning.
+    fn teardown_label(&self) -> String {
+        format!(
+            "ServeGuard teardown pid={} addr={}: wait + join stdout/stderr readers",
+            self.child.id(),
+            self.addr
+        )
+    }
 }
 
 impl Drop for ServeGuard {
     fn drop(&mut self) {
+        let _watchdog = watchdog::InFlightGuard::new(self.teardown_label(), Some(self.child.id()));
         let _ = self.child.kill();
         let _ = self.child.wait();
         for reader in self.readers.drain(..) {
