@@ -125,6 +125,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "parse_socks5"
+path = "fuzz_targets/parse_socks5.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fingerprint_principal"
 path = "fuzz_targets/fingerprint_principal.rs"
 test = false

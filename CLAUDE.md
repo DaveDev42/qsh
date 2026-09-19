@@ -26,7 +26,7 @@ QSH is a QUIC-based direct-connect remote shell (single Rust binary `qsh`) that 
 - `docs/man/` — generated man pages; regenerate with `cargo xtask man`, never hand-edit a `.1` file
 - `docs/campaigns/` — manual campaigns a person runs and records: `m2-mobility`, `m6-mcp`, `m7-stopwatch`, `m8-fuzz`, `m8-soak`, `m8-adversarial-load`
 - `scripts/README.md` — installer and campaign harnesses under `scripts/`
-- `fuzz/README.md` — the seventeen cargo-fuzz targets, why `fuzz/` sits outside the workspace, how to run a campaign
+- `fuzz/README.md` — the eighteen cargo-fuzz targets, why `fuzz/` sits outside the workspace, how to run a campaign
 - `docs/adr/` — architecture decision records, indexed with their status in `docs/adr/README.md`. Only an accepted (`승인됨`) ADR is settled; proposed (`제안됨`) and reserved (`예약됨`) ones are not.
 
 ## Commands

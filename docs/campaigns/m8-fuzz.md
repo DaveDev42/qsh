@@ -212,8 +212,9 @@ exec/s 29.1k~297.5k, peak RSS 512~795 MB — `-rss_limit_mb=1536` 아래다.
 
 ## 7. OSS-Fuzz 제출과의 관계
 
-이 문서가 기록하는 로컬 72h 실행과 별개로, 같은 타깃 전량(현재 17종 —
-파서 16 + `broker_ops`)을 continuous fuzzing 서비스로 넘기는 준비물이
+이 문서가 기록하는 로컬 72h 실행과 별개로, 같은 타깃 전량(현재 18종 —
+파서 16 + `broker_ops` + `parse_socks5`, 뒤 둘은 §2의 DoD 1 분모 밖이다)을
+continuous fuzzing 서비스로 넘기는 준비물이
 `fuzz/oss-fuzz/`에 있다(`project.yaml`·
 `Dockerfile`·`build.sh`, 로컬 검증은 `scripts/fuzz/oss-fuzz-local.sh`).
 제출(google/oss-fuzz로 PR)은 사람이 하는 별도 액션이고 절차는
