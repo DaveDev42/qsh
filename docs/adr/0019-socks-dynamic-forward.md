@@ -72,7 +72,7 @@ SOCKS는 실제로 wire가 아니라 목적지를 고르는 주체를 바꾼다.
    - CONNECT 속도는 token bucket으로 초당 50, burst 100이다. 토큰이 없으면 그 연결은 남은 handshake 기한 안에서 토큰을 기다린다. 기한 안에 토큰이 생기지 않을 때만 스트림 없이 REP `0x01`을 받는다. 브라우저는 페이지 하나에 연결 수십 개를 한꺼번에 열기 때문에, 즉시 거절하면 정상 브라우징이 깨진다. host의 fail-closed audit 큐를 한 principal이 채우는 일을 client 쪽에서 먼저 줄이려는 장치다.
    - 기존 `accept_disposition`의 EMFILE 백오프는 그대로 쓴다.
 
-10. 첫 착지에서 `-D`는 정방향 route에서만 켠다. 대상 host가 역방향 route로 해석되면 연결하기 전에 `UNSUPPORTED`로 거절한다. 이것은 범위 결정이지 보안 경계가 아니다. controller는 같은 목적지로 `-L`을 열 수 있다. 역방향을 막는 실제 걸림돌은 capability 확인이다. 역방향 controller는 자기 머신의 `qsh listen` daemon과 UDS로만 말하고 target의 `Hello`는 daemon이 받는다. 그래서 controller가 target의 `dial-filter.v1`을 확인할 길이 아직 없다. 결정 3은 capability를 확인하지 못하면 거절하라고 하므로, daemon이 target의 협상된 capability를 controller에게 알려 주는 경로가 생기면 역방향 `-D`를 같은 작업의 마지막 단계로 켠다. 목적지 ACL 문법(Q1)은 역방향 `-D`의 선행 조건이 아니다. 정방향과 같은 이유로, `forward.local`을 준 target 운영자는 이미 모든 목적지를 허락한 것이다.
+10. 첫 착지에서 `-D`는 정방향 route에서만 켠다. 대상 host가 역방향 route로 해석되면 연결하기 전에 `UNSUPPORTED`로 거절한다. 이것은 범위 결정이지 보안 경계가 아니다. controller는 같은 목적지로 `-L`을 열 수 있다. 역방향을 막는 실제 걸림돌은 capability 확인이다. 역방향 controller는 자기 머신의 `qsh listen` daemon과 UDS로만 말하고 target의 `Hello`는 daemon이 받는다. 그래서 controller가 target의 `dial-filter.v1`을 확인할 길이 아직 없다. 결정 3은 capability를 확인하지 못하면 거절하라고 하므로, daemon이 target의 협상된 capability를 controller에게 알려 주는 경로가 생기면 역방향 `-D`를 같은 작업의 마지막 단계로 켠다. 목적지 ACL 문법(Q1)은 역방향 `-D`의 선행 조건이 아니다. 정방향과 같은 이유로, `forward.local`을 준 target 운영자는 이미 모든 목적지를 허락한 것이다. ADR-0020이 이 결정을 개정했다. 전제와 달리 controller는 이미 target의 협상된 capability를 받고 있었으므로 역방향 `-D`도 켠다.
 
 11. JSON 계약은 새 op 하나로 더한다.
     - command 문자열은 `tunnel.dynamic`이다. `qsh tunnel open ... --dynamic`의 모든 봉투(성공과 오류)가 이 command를 쓴다. `CLI_V1_SCHEMA_COMMANDS`와 `cli_v1_data_schema`에 등록한다.
@@ -85,13 +85,13 @@ SOCKS는 실제로 wire가 아니라 목적지를 고르는 주체를 바꾼다.
 
 12. 로그 규율은 이렇다. host audit은 지금처럼 목적지를 구조적 메타데이터로 남긴다. client는 연결별 목적지를 debug 수준에서만 남긴다. warn 이상에는 개수와 오류 범주만 싣는다. `-L` accept 루프의 `warn!(host, port, …)` 호출을 SOCKS 루프에 옮겨 쓰지 않는다. handshake 이후 바이트는 보지 않는다. SNI나 Host 헤더를 엿보는 일도 하지 않는다.
 
-13. fixture 처리는 이렇다. `error.UNSUPPORTED.json`은 바이트 그대로 둔다. `-D`가 더는 그 봉투를 만들지 않으므로 `crates/qsh-cli/tests/fixtures.rs`에서 생성 코드를 지우고 그 파일 이름을 새 상수 `RETIRED_PRODUCERS`에 사유와 함께 올린다. `ErrorCode` 도달성 테스트는 retired 파일을 커버리지에서 뺀다. 따라서 `UNSUPPORTED`에는 살아 있는 생성자가 새로 있어야 하고 역방향 route `-D` 거절(결정 10)이 새 fixture `error.UNSUPPORTED.dynamic_reverse.json`을 만든다. 새 fixture로 `tunnel.dynamic.json`과 `error.INVALID_ARGUMENT.dynamic_bind.json`도 추가하고 `REQUIRED_FIXTURES`에 등록한다. `capabilities.json`은 `dial-filter.v1` 때문에 `QSH_UPDATE_FIXTURES=1`로 다시 만들고 계약 변경과 같은 무게로 리뷰한다(`docs/design/testing.md` L6).
+13. fixture 처리는 이렇다. `error.UNSUPPORTED.json`은 바이트 그대로 둔다. `-D`가 더는 그 봉투를 만들지 않으므로 `crates/qsh-cli/tests/fixtures.rs`에서 생성 코드를 지우고 그 파일 이름을 새 상수 `RETIRED_PRODUCERS`에 사유와 함께 올린다. `ErrorCode` 도달성 테스트는 retired 파일을 커버리지에서 뺀다. 따라서 `UNSUPPORTED`에는 살아 있는 생성자가 새로 있어야 하고 역방향 route `-D` 거절(결정 10)이 새 fixture `error.UNSUPPORTED.dynamic_reverse.json`을 만든다. 이 fixture는 ADR-0020 결정 4가 철회했다. 새 fixture로 `tunnel.dynamic.json`과 `error.INVALID_ARGUMENT.dynamic_bind.json`도 추가하고 `REQUIRED_FIXTURES`에 등록한다. `capabilities.json`은 `dial-filter.v1` 때문에 `QSH_UPDATE_FIXTURES=1`로 다시 만들고 계약 변경과 같은 무게로 리뷰한다(`docs/design/testing.md` L6).
 
 14. 거절 상수 둘(`DYNAMIC_FORWARD_UNSUPPORTED_MESSAGE`, `DYNAMIC_FORWARD_UNSUPPORTED_GUIDANCE`)과 `dynamic_forward_unsupported()`는 지운다. 대신 상수 `DYNAMIC_FORWARD_ACL_NOTE`를 둔다. 문면은 "`-D` runs SOCKS5 on this machine and authorizes every CONNECT on the peer as `forward.local`; `forward.socks` is never consulted."이다. README와 `docs/CLI.md` §6.9가 이를 축자 인용하고 `crates/qsh-core/tests/tunnel_docs.rs`가 대조한다. 거절 문면에 걸려 있던 문서-상수 대조 장치를 보안상 중요한 이 사실로 옮긴다.
 
 15. 초안의 미결 질문 아홉 개는 이렇게 처분한다. 이유는 근거 절에 있다.
     - Q1 목적지 ACL 문법: 이 ADR의 선행 조건이 아니다. 문법은 `forward.local`을 대상으로 하는 별도 ADR로 만든다. 그 문법은 `allow` 토큰 안에 인코딩해서 구버전 바이너리가 파일을 `CONFIG_ERROR`(전부 거부)로 읽게 한다. 이름 패턴은 요청 문자열에, CIDR은 해석된 주소에 맞춘다. 결정 2 덕분에 그 문법은 `-L`과 `-D`를 함께 덮는다.
-    - Q2 역방향 egress: 첫 착지에서는 끄고 daemon이 target capability를 전달하게 되면 켠다(결정 10). target 쪽 "SOCKS 끄기" 스위치는 만들지 않는다. host가 SOCKS와 `-L`을 구별할 수 없으니 그런 스위치는 강제될 수 없다. 강제할 수 있는 통제는 Q1의 문법이다.
+    - Q2 역방향 egress: 첫 착지에서는 끄고 daemon이 target capability를 전달하게 되면 켠다(결정 10). ADR-0020 결정 5가 켜는 것으로 닫았다. target 쪽 "SOCKS 끄기" 스위치는 만들지 않는다. host가 SOCKS와 `-L`을 구별할 수 없으니 그런 스위치는 강제될 수 없다. 강제할 수 있는 통제는 Q1의 문법이다.
     - Q3 stream kind: `TCP_CONNECT`를 재사용한다(결정 2). 필요한 wire 추가는 capability로 보호되는 필드 하나(결정 3)다.
     - Q4 JSON 표현: 새 op `tunnel.dynamic`과 새 타입으로 한다(결정 11). 기존 필드를 `Option`으로 바꾸거나 다르게 해석하게 하지 않는다.
     - Q5 bind와 command 집합: loopback 전용, no-auth, CONNECT만 받는다(결정 7, 9).

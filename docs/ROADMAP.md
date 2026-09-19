@@ -121,7 +121,7 @@
   - SC1 스톱워치 재측정 — 새 표면으로 독립 3회, 5분 이내, `docs/campaigns/m7-stopwatch.md` 선례 형식을 계승한 캠페인 문서로 baseline(M7 DoD 1 측정치, Q4에 따라 현행 표면으로 먼저 잰다) 대비 단축 기록.
   - doctor 신규 7종이 각각 안정된 code로 진단되는 것을 실행 가능한 메시지와 함께 테스트로 고정하고, `EXPECTED_DOCTOR_CODES`와 CLI.md §6.17 표를 같은 커밋에서 갱신.
   - SOCKS `-D` — 실제 `curl --socks5-hostname`이 qsh SOCKS listener를 통과하는 acceptance 테스트가 CI에서 건너뛰지 않고 초록이다. host-local 필터 거부와 ACL 거부가 각각 테스트로 고정되고, 옛 거절 계약을 고정하던 fixture는 한 바이트도 바뀌지 않는다(2026-09-19 추가).
-  - 문구 표본 8종(§6 문구 규칙 — forward loopback 처방, `-D` 거절 문구(역방향·capability 부재, 2026-09-19 개정 — 옛 "현행 유지 문구"), 재상환 실패의 host 전용 진단, 초대 출력의 후보 주소 열거, 포트 충돌 `--bind` 처방, 페어링 직후 pin 이름·매칭 규칙 부재 고지, `auth_path` 누락 host 진단, `assuming port 4433` 한 줄)이 축자 테스트로 고정.
+  - 문구 표본 8종(§6 문구 규칙 — forward loopback 처방, `-D` 거절 문구(capability 부재, 2026-09-19 개정 — 옛 "현행 유지 문구". 역방향 거절은 2026-09-20 ADR-0020이 걷었다), 재상환 실패의 host 전용 진단, 초대 출력의 후보 주소 열거, 포트 충돌 `--bind` 처방, 페어링 직후 pin 이름·매칭 규칙 부재 고지, `auth_path` 누락 host 진단, `assuming port 4433` 한 줄)이 축자 테스트로 고정.
   - 숨김 alias(구 서브커맨드·config 키)와 config 이중 읽기가 왕복 테스트로 검증 — 구 표기 호출이 신 표기와 동일 op에 도달하고 신구 config 키가 동시에 있을 때의 우선순위가 고정된다.
   - 신규 op마다 새 JSON fixture 파일을 추가하고 `REQUIRED_FIXTURES`(`crates/qsh-cli/tests/fixtures.rs`)에 등록한다. 기존 fixture는 한 바이트도 고치지 않는다. `cli_v1` 스키마도 신규 op마다 schemars 타입, `cli_v1_data_schema` arm, `CLI_V1_SCHEMA_COMMANDS` 등록, 렌더러(human/JSON) 둘, CLI.md 문서 행, man 항목이 모두 존재함을 등록 완전성 테스트로 확인(M5 `acl_registry` 선례 형식).
   - 마일스톤 마감 공통 절차(§2) 1·2 — 구속 문서 태그 대조, README 동기화(단 전면 재작성은 위 명시적 out).
