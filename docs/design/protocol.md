@@ -495,6 +495,7 @@ TLS 게이트(`pairing_open()`, §15.1)는 redeem 여부를 보지 않고 오직
 - 새 capability 문자열과 그 capability에 딸린 새 optional message.
 - 새 `ErrorCode` 문자열. 구버전 peer는 `Unknown(raw)`로 무손실 왕복한다(`crates/qsh-proto/src/error.rs:116,188`; JSON 쪽 대응 규율은 `docs/CLI.md:1136`).
 - **ADR-0018 결정 3.** `RemoteForwardOpen`의 `forward_id` 재수락(`-R` 자동 재발행)은 v1에 넣지 않는다. 필요해지면 P1 이후 `reclaim: bool` 같은 additive 필드로 넣을 수 있고, 이 freeze는 그 경로를 막지 않는다(`docs/adr/0018-tunnel-lifetime-bound-to-connection.md:16`).
+- **ADR-0019 결정 4.** 기존 message에 새 필드 번호를 더하는 것 — 단, 기본값의 의미가 오늘 동작과 같고, 송신자가 그 필드를 이해하는 peer임을 capability로 먼저 확인한 경우에 한한다. `StreamHeader.deny_host_local = 5`(§9, `dial-filter.v1` capability로 보호, 기본값 `false` = 무필터)가 이 경로로 들어온 첫 사례다. ADR-0018 결정 3의 `reclaim` 항목과 같은 성격 — 새 번호이지 새 `oneof` branch나 재번호가 아니다.
 
 ### 16.5 금지되는 변경 — major bump 사유
 
