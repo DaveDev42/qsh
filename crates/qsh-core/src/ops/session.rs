@@ -372,6 +372,40 @@ impl Ops {
     /// §6.3). Value op: no attach, no PTY on this side; the returned
     /// `session_ref` is the handle for every later call.
     pub fn session_open(&self, req: SessionOpenReq) -> Result<SessionOpenData, OpError> {
+        self.session_open_gated(req, false)
+    }
+
+    /// [`Self::session_open`]'s twin for the interactive `qsh [user@]host
+    /// -D spec` form (ADR-0020 decisions 2–3): the same `session.open`, but
+    /// gated on the connected route's `dial-filter.v1` capability *before*
+    /// `SessionOpen` is sent, on both routes. Exists so `-D`'s connect-
+    /// side entry point (`crate::tui`'s interactive driver, outside this
+    /// crate) never opens a session on the target and then discovers the
+    /// capability is missing — the ordering
+    /// [`crate::ops::session::SessionAttachStream::open_dynamic_forwards`]
+    /// cannot give it, since that call only runs *after* the attach that
+    /// created the session already exists. `-L`-only and plain interactive
+    /// sessions are unaffected: they call [`Self::session_open`] instead,
+    /// which requires nothing extra.
+    pub fn session_open_for_dynamic(
+        &self,
+        req: SessionOpenReq,
+    ) -> Result<SessionOpenData, OpError> {
+        self.session_open_gated(req, true)
+    }
+
+    /// The shared body of [`Self::session_open`]/
+    /// [`Self::session_open_for_dynamic`]: connect, optionally require
+    /// `dial-filter.v1` on whichever route connected, and only then send
+    /// `SessionOpen` — the capability gate strictly precedes the one
+    /// resource this op creates (`docs/PRD.md` §9), exactly the same
+    /// "connect, gate, only then act" order `crate::ops::tunnel::Ops::
+    /// tunnel_dynamic_with_connected` uses for the standalone `-D` form.
+    fn session_open_gated(
+        &self,
+        req: SessionOpenReq,
+        require_dial_filter: bool,
+    ) -> Result<SessionOpenData, OpError> {
         let host = req.host.clone();
         let user = self.resolve_user_hint(&host, req.user)?;
         let msg = wire::SessionOpen {
@@ -385,15 +419,42 @@ impl Ops {
         // Not `call`: the resume credential is bound to the peer that
         // issued it (protocol.md §10-2), so the fingerprint of *this*
         // connection has to be read before the connection is torn down.
-        let mut conn = self.connect(&host)?;
+        let conn = self.connect(&host)?;
+        self.session_open_gated_with_connected(conn, msg, &host, require_dial_filter)
+    }
+
+    /// The post-connect half of [`Self::session_open_gated`], split out as
+    /// a test seam mirroring [`crate::ops::tunnel::Ops::
+    /// tunnel_dynamic_with_connected`]'s own doc: a test can hand this a
+    /// [`Connected`] built directly ([`Connected::for_test_forward`]/
+    /// [`Connected::for_test_reverse`]) carrying a fabricated negotiated
+    /// capability set, to exercise the capability gate — and confirm no
+    /// `SessionOpen` is ever sent when it fails closed — without a real
+    /// peer `Hello`/`LocalHelloAck` answering a dial.
+    fn session_open_gated_with_connected(
+        &self,
+        mut conn: Connected,
+        msg: wire::SessionOpen,
+        host: &str,
+        require_dial_filter: bool,
+    ) -> Result<SessionOpenData, OpError> {
+        if require_dial_filter {
+            let is_reverse = conn.connection().is_none();
+            if let Err(err) =
+                crate::ops::tunnel::require_dial_filter_capability(conn.capabilities(), is_reverse)
+            {
+                conn.close();
+                return Err(err);
+            }
+        }
         let peer = conn.peer_fingerprint();
         let opened = conn.run(move |s| Box::pin(s.session_open(msg)));
         conn.close();
         let opened = opened?;
-        let session_ref = make_session_ref(&host, &opened.session_id);
+        let session_ref = make_session_ref(host, &opened.session_id);
         self.remember_resume(
             &session_ref,
-            &host,
+            host,
             &opened.session_id,
             &opened.resume_token,
             peer.as_deref(),
@@ -1092,12 +1153,7 @@ impl Ops {
     /// An attach resolves its peer once and keeps the result, because the
     /// resolution loads the device key — which must not happen inside a
     /// runtime — and a recovery re-dials from inside one.
-    ///
-    /// `pub(crate)`, not private: `crate::ops::tunnel::Ops::tunnel_dynamic`
-    /// (a sibling module) calls this directly once it already knows the
-    /// route is [`PeerRoute::Forward`] (ADR-0019 decisions 3, 10), rather
-    /// than going back through [`Self::connect`]'s own route branch.
-    pub(crate) fn connect_target(&self, target: &PeerTarget) -> Result<Connected, OpError> {
+    fn connect_target(&self, target: &PeerTarget) -> Result<Connected, OpError> {
         let runtime = self.connect_runtime()?;
         let (endpoint, connection, session) = runtime.block_on(dial_peer(target))?;
         Ok(Connected {

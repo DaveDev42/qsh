@@ -890,36 +890,19 @@ fn resolve_route_reverse_returns_the_local_route_to_the_live_daemon() {
     daemon.join().unwrap();
 }
 
-/// ADR-0019 decisions 3, 10: `-D` over a reverse route is refused with
-/// `UNSUPPORTED` before anything connects. The fake daemon here only ever
-/// answers `LocalHostList` — if `tunnel_dynamic` reached past route
-/// resolution and tried to actually dial through it, the daemon would
-/// either hang (never joining) or this call would fail with some other
-/// error, not this exact message.
-#[test]
-#[cfg(unix)]
-fn tunnel_dynamic_on_reverse_route_is_unsupported_before_connect() {
-    let dir = tempfile::tempdir().unwrap();
-    let ops = resolve_route_ops(dir.path());
-    let runtime_dir = ops.paths().runtime_dir();
-    let daemon =
-        spawn_fake_admin_daemon_thread(&runtime_dir, 100, vec![sample_local_host("phone")]);
-
-    let err = match ops.tunnel_dynamic(qsh_proto::TunnelDynamicReq {
-        host: "phone".into(),
-        bind: None,
-        listen_port: 1080,
-    }) {
-        Err(err) => err,
-        Ok(_) => panic!("-D over a reverse route must never succeed"),
-    };
-    assert_eq!(err.code, ErrorCode::Unsupported);
-    assert_eq!(
-        err.message,
-        crate::ops::tunnel::DYNAMIC_FORWARD_REVERSE_UNSUPPORTED_MESSAGE
-    );
-    daemon.join().unwrap();
-}
+// `tunnel_dynamic_on_reverse_route_is_unsupported_before_connect` used to
+// live here, pinning ADR-0019 decision 10's forward-only restriction on
+// `-D`: a reverse route was refused with `UNSUPPORTED` strictly before
+// `Ops::tunnel_dynamic` ever tried to connect. ADR-0020 decision 1 lifted
+// that restriction — `-D` over reverse now connects and is gated on
+// `dial-filter.v1` instead (`crate::ops::tunnel`'s
+// `tunnel_dynamic_over_reverse_without_dial_filter_capability_is_unsupported_and_binds_nothing`
+// pins the new refusal at the point that actually needs a fabricated
+// `Connected`, `Connected::for_test_reverse`). This file's fake admin
+// daemon answers only `LocalHostList` (`spawn_fake_admin_daemon_thread`'s
+// own doc) and cannot play the `LOCAL_CONTROL` handshake side of a real
+// connect, so there is no cheap way to keep a same-shaped test here — the
+// full round trip is `crates/qsh-testkit`'s `ReverseHarness` job instead.
 
 #[test]
 #[cfg(unix)]

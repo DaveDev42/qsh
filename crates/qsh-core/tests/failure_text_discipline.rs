@@ -38,7 +38,7 @@ use std::io;
 use std::net::SocketAddr;
 
 use qsh_core::acl::PERMISSION_DENIED_MESSAGE;
-use qsh_core::ops::tunnel::DYNAMIC_FORWARD_REVERSE_UNSUPPORTED_MESSAGE;
+use qsh_core::ops::tunnel::DYNAMIC_FORWARD_REVERSE_CAPABILITY_UNSUPPORTED_MESSAGE;
 use qsh_core::pairing::{
     PAIRING_ACL_ROW_ABSENT, PAIRING_ACL_ROW_PRESENT, PAIRING_INVITE_REPLAY_NOTICE,
     PAIRING_PINNED_SELF_ASSERTED, PairingError, pairing_pin_notice,
@@ -349,27 +349,32 @@ fn three_part_rows() -> Vec<ThreePartRow> {
         },
         ThreePartRow {
             label: "T6",
-            // T6 is `-D`'s reverse-route refusal (ADR-0019 decisions 3,
-            // 10): unlike the P0 stub this replaced, the new wording packs
-            // all three parts into the one envelope `message` from the
-            // start — no `CHANNEL_CONSTRAINED` exception is needed any
-            // more (§2 T6's old entry there is gone). The sibling
-            // `DYNAMIC_FORWARD_CAPABILITY_UNSUPPORTED_MESSAGE` refusal
-            // (missing `dial-filter.v1`) follows the identical
+            // T6 is `-D`'s reverse-route capability refusal (ADR-0019
+            // decision 3, ADR-0020 decision 2): ADR-0020 lifted the
+            // forward-only restriction this row used to pin, so the
+            // reverse-route-specific wording is now the *capability* gate
+            // instead — the same one every route hits, just naming the two
+            // reverse-specific causes a missing `dial-filter.v1` there can
+            // have. The new wording packs all three parts into the one
+            // envelope `message`, same as before. The sibling
+            // `DYNAMIC_FORWARD_CAPABILITY_UNSUPPORTED_MESSAGE` refusal (the
+            // forward-route twin) follows the identical
             // observation/impact/next-command shape but is not its own row
             // here — this table pins one example of each of the seven
             // topics, not every wording `qsh-core` produces.
             observation: ThreePartSlot::new(
-                DYNAMIC_FORWARD_REVERSE_UNSUPPORTED_MESSAGE,
-                "SOCKS dynamic forwarding (-D) is not available over a reverse route",
+                DYNAMIC_FORWARD_REVERSE_CAPABILITY_UNSUPPORTED_MESSAGE,
+                "and this reverse route does not have it: either the target's qsh predates \
+                 dial-filter.v1, or this machine's `qsh listen` daemon started before this \
+                 machine's own qsh was last upgraded",
             ),
             impact: ThreePartSlot::new(
-                DYNAMIC_FORWARD_REVERSE_UNSUPPORTED_MESSAGE,
+                DYNAMIC_FORWARD_REVERSE_CAPABILITY_UNSUPPORTED_MESSAGE,
                 "nothing was bound",
             ),
             next_command: ThreePartSlot::new(
-                DYNAMIC_FORWARD_REVERSE_UNSUPPORTED_MESSAGE,
-                "Use `-L` for a fixed destination through this route.",
+                DYNAMIC_FORWARD_REVERSE_CAPABILITY_UNSUPPORTED_MESSAGE,
+                "Upgrade qsh on the target, then restart `qsh listen` on this machine and retry.",
             ),
         },
     ]

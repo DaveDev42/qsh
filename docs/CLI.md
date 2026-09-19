@@ -179,7 +179,7 @@ RESOURCE_EXHAUSTED
 INTERNAL
 ```
 
-오류 코드는 추가될 수 있다. 알 수 없는 code는 일반 QSH 오류로 처리한다. `RESUME_GAP`은 M2에서 **event 전용 상황**이다 — replay 범위 이탈은 항상 `session.gap` event(§6.4)로 전달되며 오류 envelope로는 반환되지 않는다(도달성 테스트에서는 이 사유로 DEFERRED 유지; 오류로 반환하는 strict read 옵션은 P1에서 검토). `UNSUPPORTED`는 요청한 기능이 아직 구현되지 않았거나 peer와 협상되지 않은 경우(예: 역방향 route 위의 `-D`, 또는 `dial-filter.v1`을 advertise하지 않는 peer 위의 `-D` — §6.9)에 사용한다. `RESOURCE_EXHAUSTED`는 backpressure나 서버측 한도 초과를 나타낸다.
+오류 코드는 추가될 수 있다. 알 수 없는 code는 일반 QSH 오류로 처리한다. `RESUME_GAP`은 M2에서 **event 전용 상황**이다 — replay 범위 이탈은 항상 `session.gap` event(§6.4)로 전달되며 오류 envelope로는 반환되지 않는다(도달성 테스트에서는 이 사유로 DEFERRED 유지; 오류로 반환하는 strict read 옵션은 P1에서 검토). `UNSUPPORTED`는 요청한 기능이 아직 구현되지 않았거나 peer와 협상되지 않은 경우(예: `dial-filter.v1`을 advertise하지 않는 route 위의 `-D` — §6.9)에 사용한다. `RESOURCE_EXHAUSTED`는 backpressure나 서버측 한도 초과를 나타낸다.
 
 ## 4. Process exit code
 
@@ -512,13 +512,17 @@ qsh tunnel close <tunnel-id> --json
 
 **`-D`(SOCKS5 dynamic forwarding)는 구현되어 있다([ADR-0019](adr/0019-socks-dynamic-forward.md)).** grammar는 `-L`/`-R`과 다르다 — 목적지가 없는 `[bind:]listen_port` 하나뿐이다(목적지는 SOCKS5 CONNECT가 매 연결마다 실어 온다). `bind`를 생략하면 loopback이고, non-loopback `bind`는 listener가 생기기 전에 `INVALID_ARGUMENT`로 거절된다(`-L`의 `loopback_bind_addr`를 그대로 재사용). 두 spelling 모두 존재한다. 대화형 `qsh [user@]host -D [bind:]port`는 `-L`처럼 반복 가능해서 세션 하나에 SOCKS listener를 여러 개 열 수 있다. `qsh tunnel open host -D/--dynamic [bind:]port`는 호출 하나에 listener 하나이고 `--local`/`--remote`와 함께 쓸 수 없다 — 셋 중 하나만 고르는 상호 배타 그룹이다. `--dynamic`을 이 호출 하나에 두 번 이상 주면 peer에 연결하기 전에 `INVALID_ARGUMENT`("one listener per `tunnel open`")로 거절된다. 대화형 form에는 우선순위가 하나 더 얹힌다: `--json`/`--jsonl`이 함께 오면 `-D`의 spec parsing이나 열기보다 §7의 `INVALID_ARGUMENT`가 먼저 나온다 — 대화형 form에는 애초에 machine mode가 없기 때문이다.
 
-**처리 순서**는 spec 모양·loopback 검사 → route 해석(역방향이면 여기서 거절) → peer 연결 → capability 검사 → listener bind다. 대화형 form도 이 순서를 지킨다. route 해석은 `session.open`보다 먼저 끝나므로 역방향 target을 향한 대화형 `-D`도 세션을 열기 전에 거절된다. 다만 대화형 form의 "peer 연결"은 `tunnel.dynamic`처럼 `-D` 전용 연결 하나가 아니라 그 세션의 attach 연결이다 — capability 검사는 그 attach 연결이 이미 선 뒤, `session.open`까지 끝난 뒤에 이루어진다. **open 시점에 ACL 검사는 없다** — `tunnel.dynamic`/대화형 `-D`가 성공했다는 것은 SOCKS listener가 떴다는 뜻일 뿐 인가를 뜻하지 않는다. 인가는 SOCKS CONNECT를 받을 때마다 host에서 이루어진다: `-D`는 **새 grant가 아니라 `-L`과 같은 `forward.local`의 재사용**이고, 어휘에 있는 `forward.socks`는 이 인가에 전혀 관여하지 않는다(§2.5).
+**처리 순서**는 spec 모양·loopback 검사 → route 해석(forward/reverse 모두 여기서는 거절하지 않는다) → peer 연결(forward는 QUIC로 직접, reverse는 이 머신의 상주 `qsh listen` 데몬을 경유 — [ADR-0020](adr/0020-socks-reverse-route.md) decisions 1–3) → capability 검사 → listener bind다. `tunnel.dynamic`(standalone form)은 이 순서 그대로다.
+
+대화형 form(`qsh [user@]host -D spec`)은 순서가 다르다: capability 검사가 `session.open`보다 **먼저** 끝난다(ADR-0020 decisions 2–3) — 연결(`Ops::session_open_for_dynamic`) → capability 검사 → 통과해야만 `session.open`을 보낸다. 실패하면 세션은 target 위에 전혀 생기지 않는다. 이는 route를 가리지 않는다: forward든 reverse든 attach가 서기 전에 같은 순서로 거절된다. 통과한 뒤에는 별도의 attach 연결(`session.attach`)이 새로 서고, 그 위에서 여는 `-D` listener도 같은 capability 검사를 한 번 더 거친다(backstop, `SessionAttachStream::open_dynamic_forwards`) — 실제 거절은 항상 attach 이전에 먼저 일어나므로 이 두 번째 검사가 실전에서 거절을 만드는 경우는 없다.
+
+**open 시점에 ACL 검사는 없다** — `tunnel.dynamic`/대화형 `-D`가 성공했다는 것은 SOCKS listener가 떴다는 뜻일 뿐 인가를 뜻하지 않는다. 인가는 SOCKS CONNECT를 받을 때마다 host에서 이루어진다: `-D`는 **새 grant가 아니라 `-L`과 같은 `forward.local`의 재사용**이고, 어휘에 있는 `forward.socks`는 이 인가에 전혀 관여하지 않는다(§2.5).
 
 > `-D` runs SOCKS5 on this machine and authorizes every CONNECT on the peer as `forward.local`; `forward.socks` is never consulted.
 
 (`qsh_core::ops::tunnel::DYNAMIC_FORWARD_ACL_NOTE` — `docs/design/testing.md` L6 게이트 대상. README가 함께 축자 인용한다.) 즉 `forward.local`을 부여받은 principal은 이미 host가 닿는 모든 목적지로 나갈 수 있었고(§2.5 매핑, ADR-0019 근거), `-D`는 그 egress를 브라우저·프록시 클라이언트가 쓰기 쉬운 형태로 옮겼을 뿐이다.
 
-역방향 route로 해석된 host를 대상으로 하면 연결하기 전에 `UNSUPPORTED`로 거절한다 — target의 협상된 capability를 controller가 아직 확인할 방법이 없기 때문이다(범위 결정이지 보안 경계가 아니다, ADR-0019 decision 10). peer가 capability `dial-filter.v1`을 advertise하지 않으면, 정방향이라도 listener를 bind하기 전에 같은 이유로 `UNSUPPORTED`다 — fallback 없이 거절한다. 두 거절 모두 아무 listener도 뜨지 않은 채 끝난다.
+역방향 route로 해석된 host도 이제 지원한다(ADR-0020 decisions 1–3, ADR-0019 decision 10을 대체) — SOCKS listener가 받는 각 CONNECT는 이 머신의 상주 `qsh listen` 데몬을 거쳐 target의 살아있는 역방향 등록으로 `LOCAL_STREAM`을 열어 relay되며, `StreamHeader.deny_host_local = true`는 forward route와 동일하게 매 요청마다 그대로 실려 daemon을 넘어간다 — target 쪽의 host-local 주소 필터는 route와 무관하게 항상 켜져 있다. peer(forward는 그 peer 자신, reverse는 이 머신의 daemon이 target과 협상해 둔 capability 집합)가 capability `dial-filter.v1`을 advertise하지 않으면, listener를 bind하기 전에 `UNSUPPORTED`로 거절한다 — fallback 없음. 역방향 거절의 메시지는 원인을 하나로 특정할 수 없어 둘 다 지목한다: target의 qsh가 `dial-filter.v1`보다 오래됐거나, 이 머신의 `qsh listen` 데몬이 이 머신 자신의 업그레이드보다 먼저 떠서 협상 당시의 예전 capability 집합을 그대로 relay하고 있는 경우다 — 후자라면 `qsh listen`을 재시작하는 것으로 해결된다. 두 route 모두, 거절되면 아무 listener도 뜨지 않은 채 끝난다.
 
 **JSON 계약.** `tunnel.dynamic`은 `tunnel.open`과 별개 op이다(§2.4) — 요청은 `TunnelDynamicReq { host, bind: Option<String>, listen_port: u32 }`, 성공 데이터는 아래 `DynamicTunnel` 하나다:
 

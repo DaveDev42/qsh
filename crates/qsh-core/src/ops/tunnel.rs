@@ -48,7 +48,7 @@ use qsh_proto::{
 };
 
 use crate::ops::session::Connected;
-use crate::ops::{OpError, Operation, Ops, PeerRoute};
+use crate::ops::{OpError, Operation, Ops};
 use crate::tunnel::remote::RemoteForwardAcceptor;
 use crate::tunnel::{DynamicForwardHandle, LocalForwardError, LocalForwardHandle};
 
@@ -114,61 +114,11 @@ impl Operation for TunnelDynamicOp {
 /// `-D` was implemented.
 pub const DYNAMIC_FORWARD_ACL_NOTE: &str = "`-D` runs SOCKS5 on this machine and authorizes every CONNECT on the peer as `forward.local`; `forward.socks` is never consulted.";
 
-/// [`Ops::tunnel_dynamic`]'s reverse-route refusal (ADR-0019 decisions 3,
-/// 10: "`-D`는 이번 착지에서 forward route 전용이다"). Three parts in one
-/// envelope message — observation, impact, next command — the same
-/// discipline `docs/CLI.md` §3.3 asks every refusal message to follow.
-pub const DYNAMIC_FORWARD_REVERSE_UNSUPPORTED_MESSAGE: &str = "SOCKS dynamic forwarding (-D) is not available over a reverse route; nothing was bound. \
-     Use `-L` for a fixed destination through this route.";
-
-/// `-D` refused before connecting, because [`Ops::resolve_route`] named a
-/// reverse route (ADR-0019 decisions 3, 10). No connection, listener, or
-/// stream exists on this path — the refusal happens strictly before
-/// [`Ops::connect_target`] would ever be called.
-///
-/// `pub(crate)`: [`crate::ops::session::SessionAttachStream::open_dynamic_forwards`]
-/// (a sibling module) reuses this exact wording for the interactive `-D`
-/// form's own reverse-route refusal, rather than a second copy that could
-/// drift.
-pub(crate) fn dynamic_forward_reverse_unsupported() -> OpError {
-    OpError::new(
-        ErrorCode::Unsupported,
-        DYNAMIC_FORWARD_REVERSE_UNSUPPORTED_MESSAGE,
-    )
-}
-
-/// The interactive `-D` form's own reverse-route refusal message
-/// (ADR-0019 decisions 3, 10) — named separately from
-/// [`DYNAMIC_FORWARD_REVERSE_UNSUPPORTED_MESSAGE`] rather than sharing it,
-/// because that constant's next-command advice ("Use `-L`") is wrong here:
-/// interactive `-L` over a reverse route is *itself* refused as
-/// `UNSUPPORTED` (`Self::open_local_forwards`'s "local forwards over a
-/// reverse connection are not implemented yet"), so following that advice
-/// from `qsh host -D port`'s own refusal would just open, and then
-/// strand, a second session. Only `qsh tunnel open <host> --local
-/// [bind:]port:host:hostport` (`Ops::tunnel_open`'s reverse leg,
-/// `Self::tunnel_open_reverse`) actually works over a reverse route,
-/// so this message names that command instead. The shared constant is
-/// left untouched rather than folded into this one.
-const DYNAMIC_FORWARD_REVERSE_UNSUPPORTED_MESSAGE_INTERACTIVE: &str = "SOCKS dynamic forwarding (-D) is not available over a reverse route; nothing was bound. \
-     Use `qsh tunnel open <host> --local [bind:]port:host:hostport` for a fixed destination \
-     through this route.";
-
-/// [`crate::ops::session::SessionAttachStream::open_dynamic_forwards`]'s
-/// own reverse-route refusal — see
-/// [`DYNAMIC_FORWARD_REVERSE_UNSUPPORTED_MESSAGE_INTERACTIVE`]'s doc for
-/// why it is not [`dynamic_forward_reverse_unsupported`].
-pub(crate) fn dynamic_forward_reverse_unsupported_interactive() -> OpError {
-    OpError::new(
-        ErrorCode::Unsupported,
-        DYNAMIC_FORWARD_REVERSE_UNSUPPORTED_MESSAGE_INTERACTIVE,
-    )
-}
-
-/// [`Ops::tunnel_dynamic`]'s missing-capability refusal (ADR-0019 decision
-/// 3: "peer가 `dial-filter.v1`을 advertise하지 않으면 fallback 없이
-/// UNSUPPORTED로 거부한다"). Names the fix (upgrade the peer), not just the
-/// symptom, matching this module's other refusal messages.
+/// [`Ops::tunnel_dynamic`]'s missing-capability refusal on the forward
+/// route (ADR-0019 decision 3: "peer가 `dial-filter.v1`을 advertise하지
+/// 않으면 fallback 없이 UNSUPPORTED로 거부한다"). Names the fix (upgrade the
+/// peer), not just the symptom, matching this module's other refusal
+/// messages.
 pub const DYNAMIC_FORWARD_CAPABILITY_UNSUPPORTED_MESSAGE: &str = "SOCKS dynamic forwarding (-D) needs the peer's dial-filter.v1 capability to enforce \
      host-local address filtering safely, and this peer does not advertise it; nothing was \
      bound. Upgrade qsh on the peer.";
@@ -181,8 +131,8 @@ pub const DYNAMIC_FORWARD_CAPABILITY_UNSUPPORTED_MESSAGE: &str = "SOCKS dynamic 
 /// caller of `tunnel_dynamic`/`tunnel_dynamic_with_connected`.
 ///
 /// `pub(crate)`: [`crate::ops::session::SessionAttachStream::open_dynamic_forwards`]
-/// reuses this exact wording too — see
-/// [`dynamic_forward_reverse_unsupported`]'s own doc on why.
+/// reuses this exact wording too, and so does [`Ops::session_open_gated`]
+/// for the interactive `-D` ordering (ADR-0020 decisions 2–3).
 pub(crate) fn dynamic_forward_capability_unsupported() -> OpError {
     OpError::new(
         ErrorCode::Unsupported,
@@ -190,19 +140,54 @@ pub(crate) fn dynamic_forward_capability_unsupported() -> OpError {
     )
 }
 
-/// The gate itself (ADR-0019 decision 3, "no fallback"), factored out so
-/// [`Ops::tunnel_dynamic_with_connected`] and
-/// [`crate::ops::session::SessionAttachStream::open_dynamic_forwards`]
-/// share one predicate, not just the error constructor above — a
-/// duplicated `if !caps.iter().any(...)` at each call site meant a test
-/// deleting one copy would not have caught the other rotting (found in
-/// review; each call site used to re-derive this check independently).
-pub(crate) fn require_dial_filter_capability(capabilities: &[String]) -> Result<(), OpError> {
+/// [`Ops::tunnel_dynamic`]'s missing-capability refusal on the reverse
+/// route (ADR-0020 decision 2). Unlike the forward-route message, a
+/// missing `dial-filter.v1` here has two distinct possible causes this
+/// side cannot tell apart — the target's `qsh` may predate the
+/// capability, or this machine's own resident `qsh listen` daemon may
+/// have started before *this* machine's `qsh` was upgraded and so is
+/// still relaying the older, pre-upgrade capability set it negotiated at
+/// registration time — so the refusal names both, plus the next command
+/// that clears either one.
+pub const DYNAMIC_FORWARD_REVERSE_CAPABILITY_UNSUPPORTED_MESSAGE: &str = "SOCKS dynamic forwarding (-D) needs dial-filter.v1 to enforce host-local address \
+     filtering safely, and this reverse route does not have it: either the target's qsh \
+     predates dial-filter.v1, or this machine's `qsh listen` daemon started before this \
+     machine's own qsh was last upgraded and is still relaying its old capability set; nothing \
+     was bound. Upgrade qsh on the target, then restart `qsh listen` on this machine and retry.";
+
+/// [`DYNAMIC_FORWARD_REVERSE_CAPABILITY_UNSUPPORTED_MESSAGE`]'s
+/// constructor — see [`dynamic_forward_capability_unsupported`]'s own doc
+/// for the sharing rationale, which applies identically here.
+pub(crate) fn dynamic_forward_reverse_capability_unsupported() -> OpError {
+    OpError::new(
+        ErrorCode::Unsupported,
+        DYNAMIC_FORWARD_REVERSE_CAPABILITY_UNSUPPORTED_MESSAGE,
+    )
+}
+
+/// The gate itself (ADR-0019 decision 3, "no fallback"; ADR-0020 decision
+/// 2's dual-cause reverse wording), factored out so
+/// [`Ops::tunnel_dynamic_with_connected`],
+/// [`crate::ops::session::SessionAttachStream::open_dynamic_forwards`] and
+/// [`Ops::session_open_gated`] share one predicate, not just the error
+/// constructors above — a duplicated `if !caps.iter().any(...)` at each
+/// call site meant a test deleting one copy would not have caught the
+/// other rotting (found in review; each call site used to re-derive this
+/// check independently). `is_reverse` picks which of the two refusal
+/// messages a missing capability gets — the connected route already knows
+/// which one it is (`Connected::connection().is_none()`), so every call
+/// site can pass that straight through rather than re-deriving it.
+pub(crate) fn require_dial_filter_capability(
+    capabilities: &[String],
+    is_reverse: bool,
+) -> Result<(), OpError> {
     if capabilities
         .iter()
         .any(|cap| cap == wire::CAP_DIAL_FILTER_V1)
     {
         Ok(())
+    } else if is_reverse {
+        Err(dynamic_forward_reverse_capability_unsupported())
     } else {
         Err(dynamic_forward_capability_unsupported())
     }
@@ -213,22 +198,35 @@ mod require_dial_filter_capability_tests {
     use super::*;
 
     #[test]
-    fn present_capability_is_ok() {
+    fn present_capability_is_ok_on_either_route() {
         let caps = vec![wire::CAP_DIAL_FILTER_V1.to_string(), "other.v1".to_string()];
-        assert!(require_dial_filter_capability(&caps).is_ok());
+        assert!(require_dial_filter_capability(&caps, false).is_ok());
+        assert!(require_dial_filter_capability(&caps, true).is_ok());
     }
 
     #[test]
-    fn missing_capability_is_unsupported() {
+    fn missing_capability_on_forward_route_is_the_forward_message() {
         let caps = vec!["other.v1".to_string()];
-        let err = require_dial_filter_capability(&caps).expect_err("must refuse");
+        let err = require_dial_filter_capability(&caps, false).expect_err("must refuse");
         assert_eq!(err.code, ErrorCode::Unsupported);
         assert_eq!(err.message, DYNAMIC_FORWARD_CAPABILITY_UNSUPPORTED_MESSAGE);
     }
 
     #[test]
+    fn missing_capability_on_reverse_route_names_both_causes() {
+        let err = require_dial_filter_capability(&[], true).expect_err("must refuse");
+        assert_eq!(err.code, ErrorCode::Unsupported);
+        assert_eq!(
+            err.message,
+            DYNAMIC_FORWARD_REVERSE_CAPABILITY_UNSUPPORTED_MESSAGE
+        );
+        assert!(err.message.contains("target's qsh predates"));
+        assert!(err.message.contains("qsh listen` daemon started before"));
+    }
+
+    #[test]
     fn empty_capability_list_is_unsupported() {
-        let err = require_dial_filter_capability(&[]).expect_err("must refuse");
+        let err = require_dial_filter_capability(&[], false).expect_err("must refuse");
         assert_eq!(err.code, ErrorCode::Unsupported);
     }
 }
@@ -879,31 +877,7 @@ impl Ops {
         });
     }
 
-    /// Refuse `-D` against `host` up front, when `host` resolves to a
-    /// reverse route (ADR-0019 decisions 3, 10) — **zero connects**,
-    /// because route resolution only reads local state (`hosts.toml`,
-    /// `trust.toml`, and a probe of this machine's own `qsh listen` daemon
-    /// for a live reverse registration; none of that dials the peer).
-    ///
-    /// Exists so the interactive `qsh [user@]host -D spec` spelling
-    /// (`crate::tui`-side driver, outside this crate) can run the same
-    /// reverse-route check [`Self::tunnel_dynamic`] runs, *before*
-    /// `session.open` rather than after: the only other place that
-    /// checks is
-    /// [`crate::ops::session::SessionAttachStream::open_dynamic_forwards`],
-    /// which cannot run before the attach that creates the session it
-    /// belongs to, so without this a refused `-D` would still leave a
-    /// live remote shell behind it. [`Self::tunnel_dynamic`] does not
-    /// call this — it already resolves the route itself, inline, as step
-    /// 2 of its own order.
-    pub fn check_dynamic_route(&self, host: &str) -> Result<(), OpError> {
-        match self.resolve_route(host)? {
-            PeerRoute::Reverse(_) => Err(dynamic_forward_reverse_unsupported_interactive()),
-            PeerRoute::Forward(_) => Ok(()),
-        }
-    }
-
-    /// `tunnel.dynamic` (`-D`, ADR-0019 decision 11).
+    /// `tunnel.dynamic` (`-D`, ADR-0019 decision 11, ADR-0020 decisions 1–3).
     ///
     /// Order, each step failing closed before the next resource exists
     /// (`docs/PRD.md` §9's "never create a resource before authorization
@@ -914,53 +888,61 @@ impl Ops {
     ///    policy, applied inline here since this is one spec, not a list) —
     ///    a non-loopback `bind` is `INVALID_ARGUMENT` before anything
     ///    connects, with zero connect attempts made;
-    /// 2. route resolution — a reverse route is refused
-    ///    (`dynamic_forward_reverse_unsupported`, ADR-0019 decisions 3,
-    ///    10) before anything connects;
-    /// 3. connect (forward route only, by construction of step 2);
-    /// 4. require the peer's `dial-filter.v1` capability
-    ///    (`Self::tunnel_dynamic_with_connected`, ADR-0019 decision 3) —
-    ///    the connection is closed and the call refused, with nothing
-    ///    bound, if absent, no fallback;
-    /// 5. only then bind the SOCKS5 listener.
+    /// 2. connect — forward *or* reverse (ADR-0020 decision 1 lifts the
+    ///    forward-only restriction ADR-0019 decision 10 originally set;
+    ///    `Self::connect` resolves the route the same way every other
+    ///    value op does);
+    /// 3. require `dial-filter.v1` on whichever route connected
+    ///    (`Self::tunnel_dynamic_with_connected`, ADR-0019 decision 3,
+    ///    ADR-0020 decision 2's dual-cause reverse wording) — the
+    ///    connection is closed and the call refused, with nothing bound,
+    ///    if absent, no fallback;
+    /// 4. only then bind the SOCKS5 listener, opening each `CONNECT`
+    ///    through the connected route's own carrier
+    ///    (`ForwardCarrier::Quic`/`Local`).
     pub fn tunnel_dynamic(&self, req: TunnelDynamicReq) -> Result<TunnelHold, OpError> {
         let listen_port = port(req.listen_port, "listen_port")?;
         crate::tunnel::local::loopback_bind_addr(req.bind.as_deref(), listen_port, "-D")
             .map_err(map_local_forward_error)?;
-        match self.resolve_route(&req.host)? {
-            PeerRoute::Reverse(_) => Err(dynamic_forward_reverse_unsupported()),
-            PeerRoute::Forward(target) => {
-                let conn = self.connect_target(&target)?;
-                Self::tunnel_dynamic_with_connected(
-                    conn,
-                    req.bind.as_deref(),
-                    listen_port,
-                    &req.host,
-                )
-            }
-        }
+        let conn = self.connect(&req.host)?;
+        Self::tunnel_dynamic_with_connected(conn, req.bind.as_deref(), listen_port, &req.host)
     }
 
     /// The post-connect half of [`Self::tunnel_dynamic`], split out as a
     /// test seam: a test can hand this a [`Connected`] built directly
-    /// ([`Connected::for_test_forward`]) carrying a fabricated negotiated
-    /// capability set, to exercise the capability gate without a real peer
-    /// `Hello` exchange answering a dial.
+    /// ([`Connected::for_test_forward`]/[`Connected::for_test_reverse`])
+    /// carrying a fabricated negotiated capability set, to exercise the
+    /// capability gate without a real peer `Hello`/`LocalHelloAck`
+    /// answering a dial.
     fn tunnel_dynamic_with_connected(
         conn: Connected,
         bind: Option<&str>,
         listen_port: u16,
         host: &str,
     ) -> Result<TunnelHold, OpError> {
-        if let Err(err) = require_dial_filter_capability(conn.capabilities()) {
+        let is_reverse = conn.connection().is_none();
+        if let Err(err) = require_dial_filter_capability(conn.capabilities(), is_reverse) {
             conn.close();
             return Err(err);
         }
-        let connection = conn.connection().expect(
-            "tunnel_dynamic_with_connected is only ever reached over the forward route \
-             (Ops::tunnel_dynamic's own match on PeerRoute), where Connected::connection \
-             is always Some",
-        );
+        match conn.connection() {
+            Some(connection) => {
+                Self::tunnel_dynamic_forward(conn, connection, bind, listen_port, host)
+            }
+            None => Self::tunnel_dynamic_reverse(conn, bind, listen_port, host),
+        }
+    }
+
+    /// Forward route: dial the peer's QUIC connection directly — exactly
+    /// [`Self::tunnel_dynamic_with_connected`]'s original (pre-ADR-0020)
+    /// body once the capability gate has already passed.
+    fn tunnel_dynamic_forward(
+        conn: Connected,
+        connection: qsh_transport::Connection,
+        bind: Option<&str>,
+        listen_port: u16,
+        host: &str,
+    ) -> Result<TunnelHold, OpError> {
         let forward = match conn.runtime().block_on(DynamicForwardHandle::start(
             bind,
             listen_port,
@@ -978,6 +960,70 @@ impl Ops {
             forward: ForwardResource::Dynamic(forward),
             tunnel: TunnelDto::Dynamic(tunnel),
         })
+    }
+
+    /// Reverse route (ADR-0020 decision 1): relay through this machine's
+    /// resident `qsh listen` daemon over the `LOCAL_STREAM` conduit
+    /// instead of a QUIC connection this process does not hold — same
+    /// shape as [`Self::tunnel_open_reverse`]'s `"local"` mode, just with
+    /// [`DynamicForwardHandle::start_reverse`] in place of
+    /// `LocalForwardHandle::start_reverse`.
+    ///
+    /// Windows has no localctl (UDS) and `Ops::resolve_route` never
+    /// produces a reverse route there, so `conn.connection()` returning
+    /// `None` — this function's only caller — is unreachable in practice
+    /// on that platform; the `#[cfg(not(unix))]` twin below exists only so
+    /// the match in [`Self::tunnel_dynamic_with_connected`] compiles there.
+    #[cfg(unix)]
+    fn tunnel_dynamic_reverse(
+        conn: Connected,
+        bind: Option<&str>,
+        listen_port: u16,
+        host: &str,
+    ) -> Result<TunnelHold, OpError> {
+        let Some((socket, route_host)) = conn.reverse_route() else {
+            conn.close();
+            return Err(OpError::new(
+                ErrorCode::Internal,
+                "reverse connection is missing its localctl route",
+            ));
+        };
+        let socket = socket.to_path_buf();
+        let route_host = route_host.to_string();
+        let forward = match conn.runtime().block_on(DynamicForwardHandle::start_reverse(
+            bind,
+            listen_port,
+            socket,
+            route_host,
+        )) {
+            Ok(forward) => forward,
+            Err(err) => {
+                conn.close();
+                return Err(map_local_forward_error(err));
+            }
+        };
+        let tunnel = forward.dynamic_tunnel(host);
+        Ok(TunnelHold {
+            conn,
+            forward: ForwardResource::Dynamic(forward),
+            tunnel: TunnelDto::Dynamic(tunnel),
+        })
+    }
+
+    /// Windows twin — see [`Self::tunnel_dynamic_reverse`]'s own doc on why
+    /// this is unreachable in practice rather than dead code.
+    #[cfg(not(unix))]
+    fn tunnel_dynamic_reverse(
+        conn: Connected,
+        _bind: Option<&str>,
+        _listen_port: u16,
+        _host: &str,
+    ) -> Result<TunnelHold, OpError> {
+        conn.close();
+        Err(OpError::new(
+            ErrorCode::Unsupported,
+            "reverse routing (localctl) is not available on this platform",
+        ))
     }
 
     /// [`Self::tunnel_open_and_hold`]'s `tunnel.dynamic` twin (ADR-0019
@@ -1475,6 +1521,89 @@ mod tests {
         };
         assert_eq!(err.code, ErrorCode::Unsupported);
         assert_eq!(err.message, DYNAMIC_FORWARD_CAPABILITY_UNSUPPORTED_MESSAGE);
+    }
+
+    /// ADR-0020 decision 2's reverse-route twin of the test just above:
+    /// a reverse route whose `LOCAL_CONTROL` registration never negotiated
+    /// `dial-filter.v1` gets `UNSUPPORTED` naming both possible causes, and
+    /// **nothing is bound** — same "no handle to ask for a bound port, so
+    /// the only way to observe it is that this call never got that far"
+    /// pin as the forward-route test.
+    ///
+    /// Builds a real (but registration-free) reverse-route [`Connected`]
+    /// via [`Connected::for_test_reverse`]: a fake localctl daemon,
+    /// speaking exactly the `qsh.local.v1` `LOCAL_CONTROL` handshake
+    /// [`crate::localctl::client::open_control_over`] drives, answers with
+    /// a `LocalHelloAck` whose `capabilities` omits
+    /// [`wire::CAP_DIAL_FILTER_V1`] — the same "target predates the
+    /// capability, or this machine's own `qsh listen` daemon has not been
+    /// restarted since its own upgrade" state ADR-0020 decision 2 names.
+    #[cfg(unix)]
+    #[test]
+    fn tunnel_dynamic_over_reverse_without_dial_filter_capability_is_unsupported_and_binds_nothing()
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = crate::config::Paths::new(dir.path().join("config"), dir.path().join("state"));
+        let ops = Ops::new(paths);
+        let runtime = ops.connect_runtime().unwrap();
+
+        let handshake = runtime.block_on(async {
+            let (client_end, daemon_end) = tokio::net::UnixStream::pair().expect("socketpair");
+            tokio::spawn(async move {
+                let mut daemon = crate::localctl::frame::LocalConduit::new(daemon_end);
+                let _hello: qsh_proto::local::LocalHello = daemon
+                    .recv()
+                    .await
+                    .expect("recv LocalHello")
+                    .expect("conduit open");
+                let ack = qsh_proto::local::LocalResponse {
+                    body: Some(qsh_proto::local::local_response::Body::HelloAck(
+                        qsh_proto::local::LocalHelloAck {
+                            host: "target".to_string(),
+                            peer_fingerprint: "sha256:deadbeef".to_string(),
+                            generation: 1,
+                            // `dial-filter.v1` deliberately missing — an
+                            // old target, or a daemon still relaying its
+                            // pre-upgrade registration.
+                            capabilities: vec![qsh_proto::wire::CAP_EXEC.to_string()],
+                        },
+                    )),
+                };
+                daemon.send(&ack).await.expect("send LocalHelloAck");
+                // Keep the daemon end alive for the test's whole duration —
+                // dropping it here would race the client's own read of the
+                // ack above with an early EOF.
+                std::future::pending::<()>().await
+            });
+            crate::localctl::client::open_control_over(client_end, "target", 0, None)
+                .await
+                .expect("fake LOCAL_CONTROL handshake")
+        });
+
+        let session = crate::client::Session::from_local_control(
+            handshake.conduit,
+            handshake.capabilities,
+            handshake.host,
+            dir.path().join("fake.sock"),
+            handshake.peer_fingerprint,
+            handshake.generation,
+        );
+        let conn = Connected::for_test_reverse(
+            runtime,
+            session,
+            dir.path().join("fake.sock"),
+            "target".to_string(),
+        );
+
+        let err = match Ops::tunnel_dynamic_with_connected(conn, None, 0, "target") {
+            Err(err) => err,
+            Ok(_) => panic!("-D over reverse must never bind without dial-filter.v1"),
+        };
+        assert_eq!(err.code, ErrorCode::Unsupported);
+        assert_eq!(
+            err.message,
+            DYNAMIC_FORWARD_REVERSE_CAPABILITY_UNSUPPORTED_MESSAGE
+        );
     }
 
     /// ADR-0019 decision 11 promises that a same-process `tunnel.close`

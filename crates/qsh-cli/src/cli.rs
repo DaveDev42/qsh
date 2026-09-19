@@ -126,10 +126,16 @@ pub struct InteractiveArgs {
     /// the peer as `forward.local`, the same action `-L` uses.
     /// `DYNAMIC_FORWARD_ACL_NOTE` — "`-D` runs SOCKS5 on this machine and
     /// authorizes every CONNECT on the peer as `forward.local`;
-    /// `forward.socks` is never consulted." Refused with `UNSUPPORTED`
-    /// before anything binds when the target resolves to a reverse route,
-    /// or when the peer does not advertise `dial-filter.v1`
-    /// (`docs/CLI.md` §6.9).
+    /// `forward.socks` is never consulted." Works over both forward and
+    /// reverse routes (ADR-0020 decisions 1–3) — a reverse route relays
+    /// each CONNECT through this machine's resident `qsh listen` daemon,
+    /// with the same host-local address filter a forward route enforces.
+    /// The one refusal left is `UNSUPPORTED` before anything binds when
+    /// the connected route never negotiated `dial-filter.v1`; on a
+    /// reverse route the message names both possible causes (the
+    /// target's qsh may predate the capability, or this machine's own
+    /// `qsh listen` daemon may have started before this machine's own
+    /// upgrade) (`docs/CLI.md` §6.9).
     ///
     /// With `--json`/`--jsonl` also given, §7's machine-mode gate answers
     /// `INVALID_ARGUMENT` before this flag is looked at at all — the
@@ -419,10 +425,16 @@ pub struct TunnelOpenArgs {
     /// the peer as `forward.local`, the same action `--local` uses.
     /// `DYNAMIC_FORWARD_ACL_NOTE` — "`-D` runs SOCKS5 on this machine and
     /// authorizes every CONNECT on the peer as `forward.local`;
-    /// `forward.socks` is never consulted." Refused with `UNSUPPORTED`
-    /// before anything binds when `host` resolves to a reverse route, or
-    /// when the peer does not advertise `dial-filter.v1`
-    /// (`docs/CLI.md` §6.9).
+    /// `forward.socks` is never consulted." Works over both forward and
+    /// reverse routes (ADR-0020 decisions 1–3) — a reverse route relays
+    /// each CONNECT through this machine's resident `qsh listen` daemon,
+    /// with the same host-local address filter a forward route enforces.
+    /// The one refusal left is `UNSUPPORTED` before anything binds when
+    /// the connected route never negotiated `dial-filter.v1`; on a
+    /// reverse route the message names both possible causes (the
+    /// target's qsh may predate the capability, or this machine's own
+    /// `qsh listen` daemon may have started before this machine's own
+    /// upgrade) (`docs/CLI.md` §6.9).
     #[arg(
         short = 'D',
         long,

@@ -40,18 +40,16 @@ pub fn run(ops: &Ops, what: Attach, escape: Option<u8>) -> Result<i32, OpError> 
     // `-L`/`-D` specs are parsed and policy-checked *first*, before a
     // session exists: a malformed or non-loopback spec must not cost the
     // operator a running remote shell to find out about (`docs/CLI.md`
-    // §6.9, ADR-0019 decision 9). `-D` additionally refuses a
-    // reverse-routed host here, with `Ops::check_dynamic_route`
-    // (ADR-0019 decisions 3, 10), before `session_open`/`session_attach`
-    // below, so a reverse target does not pay for a real remote shell
-    // just to have `-D` refused afterward. The peer's `dial-filter.v1`
-    // capability still cannot be checked this early: it is only known
-    // once a connection exists, which for `-D` means once the attach
-    // below has one — `open_dynamic_forwards` remains the only place
-    // that gate runs, and a capability-refused reverse-adjacent session
-    // on the *forward* route is the residual case `orphan` below still
-    // exists for. The listeners themselves come up after the attach,
-    // because they ride its connection.
+    // §6.9, ADR-0019 decision 9). `-D`'s `dial-filter.v1` capability check
+    // cannot run this early — it needs a connected route, forward or
+    // reverse — so instead it is the very first thing
+    // `Ops::session_open_for_dynamic` does, strictly before `SessionOpen`
+    // is sent, on either route (ADR-0020 decisions 2–3): a capability-missing
+    // target — reverse or forward — never gets a session opened for a `-D`
+    // attach. `open_dynamic_forwards` below re-runs the same gate as a
+    // backstop (that method's own doc), but by the time it runs for this
+    // call site the gate has already passed. The listeners themselves come
+    // up after the attach, because they ride its connection.
     let (session_ref, opened, forward_specs, remote_forward_specs, dynamic_specs) = match what {
         Attach::Open {
             host,
@@ -63,11 +61,9 @@ pub fn run(ops: &Ops, what: Attach, escape: Option<u8>) -> Result<i32, OpError> 
             let specs = qsh_core::parse_local_forwards(&forwards)?;
             let remote_specs = qsh_core::parse_remote_forwards(&remote_forwards)?;
             let dynamic_specs = qsh_core::parse_dynamic_forwards(&dynamic_forwards)?;
-            if !dynamic_specs.is_empty() {
-                ops.check_dynamic_route(&host)?;
-            }
+            let requires_dynamic = !dynamic_specs.is_empty();
             (
-                open_session(ops, open_request(host, user, size))?,
+                open_session(ops, open_request(host, user, size), requires_dynamic)?,
                 true,
                 specs,
                 remote_specs,
@@ -202,9 +198,19 @@ pub fn run(ops: &Ops, what: Attach, escape: Option<u8>) -> Result<i32, OpError> 
     finish(outcome)
 }
 
-/// `session.open` for the bare `qsh [user@]host` form.
-fn open_session(ops: &Ops, req: SessionOpenReq) -> Result<String, OpError> {
-    Ok(ops.session_open(req)?.session_ref)
+/// `session.open` for the interactive `qsh [user@]host` form.
+/// `requires_dynamic` is true when this session is opening for a `-D`
+/// attach: it routes to [`Ops::session_open_for_dynamic`] instead of
+/// [`Ops::session_open`] so the `dial-filter.v1` capability gate runs
+/// before `SessionOpen` is ever sent (ADR-0020 decisions 2–3, this module's
+/// own doc on `run`).
+fn open_session(ops: &Ops, req: SessionOpenReq, requires_dynamic: bool) -> Result<String, OpError> {
+    let opened = if requires_dynamic {
+        ops.session_open_for_dynamic(req)?
+    } else {
+        ops.session_open(req)?
+    };
+    Ok(opened.session_ref)
 }
 
 /// How the interactive session ended.

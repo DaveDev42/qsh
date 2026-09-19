@@ -671,3 +671,234 @@ fn the_recovery_backoff_schedule_stays_far_under_the_admission_burst_limit() {
          burst limit {burst_limit}"
     );
 }
+
+// ---- `Ops::session_open_for_dynamic`'s capability gate (ADR-0020
+// decisions 2–3): interactive `-D`'s ordering guarantee is that the gate
+// runs *before* `SessionOpen` is ever sent, on both routes — mirrors
+// `crate::ops::tunnel`'s own `tunnel_dynamic_*_without_dial_filter_
+// capability_is_unsupported_and_binds_nothing` pair one level up the call
+// chain. Unlike that pair (which never sends anything until a SOCKS client
+// actually connects), `session_open_gated_with_connected` sends
+// `SessionOpen` itself the moment the gate lets it through, so "no session
+// was opened" cannot be inferred from the returned error alone: a
+// mutation that moves the gate to *after* `conn.run(session_open(..))` can
+// still surface the identical `Unsupported`/capability-message pair if
+// nothing on the other end distinguishes "gate rejected first" from
+// "request was sent and something else failed" — the two tests below give
+// each fake peer/daemon a companion task that answers any `SessionOpen`
+// that does reach it with a distinct, deliberately wrong error, so a
+// skipped gate fails the exact-message assertion instead of coincidentally
+// matching it (or hanging until nextest's own test-level timeout). ----
+
+fn fake_session_open_msg() -> wire::SessionOpen {
+    wire::SessionOpen {
+        argv: Vec::new(),
+        env: std::collections::HashMap::new(),
+        term: String::new(),
+        cols: 0,
+        rows: 0,
+        user: None,
+    }
+}
+
+#[test]
+fn session_open_for_dynamic_without_dial_filter_capability_on_forward_route_opens_no_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = crate::config::Paths::new(dir.path().join("config"), dir.path().join("state"));
+    let ops = Ops::new(paths);
+    let runtime = ops.connect_runtime().unwrap();
+
+    let (endpoint, client, server) =
+        runtime.block_on(crate::tunnel::testutil::loopback_pair_with_client_endpoint());
+    // Reports whether the peer's companion task below ever saw a frame on
+    // this stream after setup — the actual property under test, checked
+    // independently of `err`'s value below (see this module's own doc on
+    // why the error alone cannot pin it).
+    let (session_open_reached_tx, session_open_reached_rx) = std::sync::mpsc::channel::<bool>();
+    let ctl = runtime.block_on(async {
+        let (send, recv) = client.open_bi().await.unwrap();
+        // Server-side companion of this same stream: if the capability
+        // gate below is ever skipped, `session_open` reaches this task
+        // instead of hanging forever, and the reply below is deliberately
+        // *not* the capability-gate message, so a caller whose returned
+        // `Result` does depend on the reply also fails on a normal value
+        // diff instead of a 180s nextest timeout.
+        tokio::spawn(async move {
+            let Ok((peer_send, peer_recv)) = server.accept_bi().await else {
+                let _ = session_open_reached_tx.send(false);
+                return;
+            };
+            let mut peer_ctl = qsh_transport::FramedStream::control(peer_send, peer_recv);
+            let request = peer_ctl.recv.recv::<wire::ControlMessage>().await;
+            let reached = matches!(request, Ok(Some(_)));
+            if let Ok(Some(msg)) = request {
+                let _ = peer_ctl
+                    .send
+                    .send(&wire::ControlMessage::error(
+                        msg.request_id,
+                        wire::Error::from_code(
+                            ErrorCode::Internal,
+                            "test peer: SessionOpen must never reach the wire while \
+                             dial-filter.v1 is missing",
+                        ),
+                    ))
+                    .await;
+            }
+            let _ = session_open_reached_tx.send(reached);
+        });
+        qsh_transport::FramedStream::control(send, recv)
+    });
+    let hello = wire::Hello {
+        versions: vec![1],
+        device_name: "peer".to_string(),
+        // Every other capability present, `dial-filter.v1` deliberately
+        // missing — an old peer that predates ADR-0019.
+        capabilities: vec![
+            qsh_proto::wire::CAP_EXEC.to_string(),
+            qsh_proto::wire::CAP_SESSION.to_string(),
+        ],
+        reverse: None,
+    };
+    let session = Session::from_control(client.clone(), ctl, hello);
+    let conn = Connected::for_test_forward(runtime, endpoint, client, session);
+
+    let err = ops
+        .session_open_gated_with_connected(conn, fake_session_open_msg(), "box", true)
+        .expect_err("session_open_for_dynamic must never open a session without dial-filter.v1");
+    assert_eq!(err.code, ErrorCode::Unsupported);
+    assert_eq!(
+        err.message,
+        crate::ops::tunnel::DYNAMIC_FORWARD_CAPABILITY_UNSUPPORTED_MESSAGE
+    );
+    assert!(
+        !recv_session_open_reached(&session_open_reached_rx),
+        "SessionOpen must never reach the wire while the capability gate \
+         could still reject the call"
+    );
+}
+
+/// Wait for the fake peer/daemon's observation task to report whether it
+/// ever saw a frame after its handshake ack. `conn.close()` inside
+/// `session_open_gated_with_connected` always drops the connection/
+/// conduit before that function returns to its caller, which is what
+/// makes the companion task's read resolve — cleanly, to `Ok(None)`,
+/// when nothing else was ever sent — so a report is always expected
+/// within a couple of seconds on a correctly ordered gate. A report that
+/// never arrives is itself worth failing loudly on rather than hanging
+/// past nextest's own per-test timeout.
+fn recv_session_open_reached(rx: &std::sync::mpsc::Receiver<bool>) -> bool {
+    rx.recv_timeout(Duration::from_secs(5))
+        .expect("the fake peer/daemon's observation task did not report in time")
+}
+
+/// [`session_open_for_dynamic_without_dial_filter_capability_on_forward_route_opens_no_session`]'s
+/// reverse-route twin (ADR-0020 decisions 2–3): a reverse route whose
+/// `LOCAL_CONTROL` registration never negotiated `dial-filter.v1` also
+/// opens no session — same fake-localctl-daemon seam
+/// `crate::ops::tunnel`'s reverse capability test uses, plus the same
+/// wrong-answer companion this module's own doc above explains.
+#[cfg(unix)]
+#[test]
+fn session_open_for_dynamic_without_dial_filter_capability_on_reverse_route_opens_no_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = crate::config::Paths::new(dir.path().join("config"), dir.path().join("state"));
+    let ops = Ops::new(paths);
+    let runtime = ops.connect_runtime().unwrap();
+
+    // Reports whether the fake daemon below ever saw a frame on this
+    // conduit after its ack — the actual property under test, checked
+    // independently of `err`'s value below (see this module's own doc,
+    // above the forward-route twin, on why the error alone cannot pin
+    // it).
+    let (session_open_reached_tx, session_open_reached_rx) = std::sync::mpsc::channel::<bool>();
+    let handshake = runtime.block_on(async {
+        let (client_end, daemon_end) = tokio::net::UnixStream::pair().expect("socketpair");
+        tokio::spawn(async move {
+            let mut daemon = crate::localctl::frame::LocalConduit::new(daemon_end);
+            let _hello: qsh_proto::local::LocalHello = daemon
+                .recv()
+                .await
+                .expect("recv LocalHello")
+                .expect("conduit open");
+            let ack = qsh_proto::local::LocalResponse {
+                body: Some(qsh_proto::local::local_response::Body::HelloAck(
+                    qsh_proto::local::LocalHelloAck {
+                        host: "target".to_string(),
+                        peer_fingerprint: "sha256:deadbeef".to_string(),
+                        generation: 1,
+                        // `dial-filter.v1` deliberately missing — an old
+                        // target, or a daemon still relaying its
+                        // pre-upgrade registration. `CAP_SESSION` is
+                        // present (unlike a bare "old target" would need)
+                        // so that only the missing dial-filter capability
+                        // stands between this ack and a real
+                        // `session.open` attempt — the forward-route
+                        // twin's own "every other capability present"
+                        // isolation.
+                        capabilities: vec![
+                            qsh_proto::wire::CAP_EXEC.to_string(),
+                            qsh_proto::wire::CAP_SESSION.to_string(),
+                        ],
+                    },
+                )),
+            };
+            daemon.send(&ack).await.expect("send LocalHelloAck");
+            // If the capability gate is skipped and `session.open`
+            // genuinely reaches this conduit, answer with a
+            // deliberately wrong error so a caller whose returned
+            // `Result` does depend on the reply also fails on a normal
+            // value diff instead of hanging until nextest's own
+            // test-level timeout. `Ok(None)` — a clean EOF from
+            // `conn.close()` — is the expected outcome when the gate
+            // runs first, as it should: nothing else is ever sent on this
+            // conduit, and the loop just ends.
+            let request = daemon.recv::<qsh_proto::wire::ControlMessage>().await;
+            let reached = matches!(request, Ok(Some(_)));
+            if let Ok(Some(msg)) = request {
+                let _ = daemon
+                    .send(&qsh_proto::wire::ControlMessage::error(
+                        msg.request_id,
+                        qsh_proto::wire::Error::from_code(
+                            ErrorCode::Internal,
+                            "test daemon: SessionOpen must never reach the wire while \
+                             dial-filter.v1 is missing",
+                        ),
+                    ))
+                    .await;
+            }
+            let _ = session_open_reached_tx.send(reached);
+        });
+        crate::localctl::client::open_control_over(client_end, "target", 0, None)
+            .await
+            .expect("fake LOCAL_CONTROL handshake")
+    });
+
+    let session = Session::from_local_control(
+        handshake.conduit,
+        handshake.capabilities,
+        handshake.host,
+        dir.path().join("fake.sock"),
+        handshake.peer_fingerprint,
+        handshake.generation,
+    );
+    let conn = Connected::for_test_reverse(
+        runtime,
+        session,
+        dir.path().join("fake.sock"),
+        "target".to_string(),
+    );
+
+    let err = ops
+        .session_open_gated_with_connected(conn, fake_session_open_msg(), "target", true)
+        .expect_err("session_open_for_dynamic must never open a session without dial-filter.v1");
+    assert_eq!(err.code, ErrorCode::Unsupported);
+    assert_eq!(
+        err.message,
+        crate::ops::tunnel::DYNAMIC_FORWARD_REVERSE_CAPABILITY_UNSUPPORTED_MESSAGE
+    );
+    assert!(
+        !recv_session_open_reached(&session_open_reached_rx),
+        "SessionOpen must never reach the wire while the capability gate \
+         could still reject the call"
+    );
+}

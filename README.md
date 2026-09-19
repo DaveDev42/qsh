@@ -71,10 +71,14 @@ exclusive with `--local`/`--remote`). It is not a new grant:
 
 so a peer already trusted with `forward.local` needs no extra
 configuration to use it — see [Security posture](#security-posture) for
-what that implies. It refuses before binding anything when the target
-host resolves to a reverse route, or when the peer does not advertise the
-`dial-filter.v1` capability that lets the host filter out loopback/
-link-local/metadata addresses from a proxied CONNECT. Point applications
+what that implies. It works over both forward and reverse routes
+([ADR-0020](docs/adr/0020-socks-reverse-route.md) decisions 1–3): a
+reverse route relays each CONNECT through this machine's resident
+`qsh listen` daemon, with the same host-local address filter a forward
+route enforces. It refuses before binding anything only when the
+connected route does not advertise the `dial-filter.v1` capability that
+lets the host filter out loopback/link-local/metadata addresses from a
+proxied CONNECT. Point applications
 at `socks5h://127.0.0.1:1080` (remote DNS), not `socks5://`, so a hostname
 does not leak to local resolution: `curl --socks5-hostname 127.0.0.1:1080
 http://internal-service/`.
@@ -535,13 +539,17 @@ Some of these are MVP scope decisions, some are unfinished work.
   or a stuck child, a shell can still outlive the process. A separate
   session supervisor is planned after MVP
   ([ADR-0003](docs/adr/0003-sessions-in-listener.md)).
-- A tunnel does not resume the way a session does. `-L` and `-R` work over
-  both forward and reverse connections, `qsh tunnels`/`qsh tunnel close`
-  manage what a resident daemon holds, and `-D` (SOCKS5 dynamic forwarding)
-  works over a forward connection only — a reverse-routed target is refused
-  before anything binds (ADR-0019 decision 10), and there is still no UDP
-  forwarding (`UDP ASSOCIATE` gets `REP 0x07`, the same "unsupported
-  command" reply BIND gets). Remote forwards bind loopback
+- A tunnel does not resume the way a session does. `-L`, `-R` and `-D`
+  (SOCKS5 dynamic forwarding) all work over both forward and reverse
+  connections (ADR-0020 decisions 1–3, superseding ADR-0019 decision 10's
+  forward-only restriction): a `-D` listener over a reverse route relays
+  every `CONNECT` through this machine's resident `qsh listen` daemon to
+  the target's live registration, with the same host-local address filter
+  a forward-route `-D` enforces. Either route is refused before anything
+  binds if the connected peer never negotiated `dial-filter.v1`
+  (`qsh tunnels`/`qsh tunnel close` manage what a resident daemon holds).
+  There is still no UDP forwarding (`UDP ASSOCIATE` gets `REP 0x07`, the
+  same "unsupported command" reply BIND gets). Remote forwards bind loopback
   only; a non-loopback `bind` is refused, ACL notwithstanding. What a
   tunnel does not have is a session's replay ring: a connection that drops
   and later resumes ends any in-flight tunnel TCP connection cleanly rather

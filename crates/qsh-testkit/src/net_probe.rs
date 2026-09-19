@@ -53,19 +53,29 @@ pub fn find_non_loopback_v4() -> Option<Ipv4Addr> {
 }
 
 /// [`find_non_loopback_v4`], plus a bounded live probe that a connection
-/// really does loop back to this address: bind a listener on it, then try
-/// to connect to that same listener from this same process within two
-/// seconds. `None` either way is the same "no usable address" signal
+/// really does loop back to this address: bind a listener on it, then
+/// connect to that same listener from this same process and wait for the
+/// listener's own `accept` to hand the connection back, all within two
+/// seconds. Both halves matter: on a network that answers the handshake
+/// somewhere in the middle, `connect` returns while the listener never
+/// accepts anything, so a connect-only probe would call such an address
+/// usable and leave the caller's real round trip to run out its bound.
+/// `None` either way is the same "no usable address" signal
 /// [`find_non_loopback_v4`] already gives a caller for a missing route.
 pub async fn usable_non_loopback_v4() -> Option<Ipv4Addr> {
     let ip = find_non_loopback_v4()?;
     let listener = TcpListener::bind((ip, 0)).await.ok()?;
     let addr = listener.local_addr().ok()?;
-    let accept = tokio::spawn(async move { listener.accept().await });
-    let probe = tokio::time::timeout(Duration::from_secs(2), TcpStream::connect(addr)).await;
+    let mut accept = tokio::spawn(async move { listener.accept().await });
+    let probe = tokio::time::timeout(Duration::from_secs(2), async {
+        let client = TcpStream::connect(addr).await.ok()?;
+        let (server, _) = (&mut accept).await.ok()?.ok()?;
+        Some((client, server))
+    })
+    .await;
     accept.abort();
     match probe {
-        Ok(Ok(_stream)) => Some(ip),
+        Ok(Some(_both_ends)) => Some(ip),
         _ => None,
     }
 }
