@@ -37,28 +37,46 @@ pub fn run(ops: &Ops, what: Attach, escape: Option<u8>) -> Result<i32, OpError> 
     // `Ops`, before a single byte of terminal state is touched: a refused
     // attach must leave the operator's terminal exactly as it found it.
     //
-    // `-L` specs are parsed and policy-checked *first*, before a session
-    // exists: a malformed or non-loopback spec must not cost the operator
-    // a running remote shell to find out about (`docs/CLI.md` §6.9,
-    // `PLAN.md` M4 §4.1 #3). The listeners themselves come up after the
-    // attach, because they ride its connection.
-    let (session_ref, opened, forward_specs, remote_forward_specs) = match what {
+    // `-L`/`-D` specs are parsed and policy-checked *first*, before a
+    // session exists: a malformed or non-loopback spec must not cost the
+    // operator a running remote shell to find out about (`docs/CLI.md`
+    // §6.9, ADR-0019 decision 9). `-D` additionally refuses a
+    // reverse-routed host here, with `Ops::check_dynamic_route`
+    // (ADR-0019 decisions 3, 10), before `session_open`/`session_attach`
+    // below, so a reverse target does not pay for a real remote shell
+    // just to have `-D` refused afterward. The peer's `dial-filter.v1`
+    // capability still cannot be checked this early: it is only known
+    // once a connection exists, which for `-D` means once the attach
+    // below has one — `open_dynamic_forwards` remains the only place
+    // that gate runs, and a capability-refused reverse-adjacent session
+    // on the *forward* route is the residual case `orphan` below still
+    // exists for. The listeners themselves come up after the attach,
+    // because they ride its connection.
+    let (session_ref, opened, forward_specs, remote_forward_specs, dynamic_specs) = match what {
         Attach::Open {
             host,
             user,
             forwards,
             remote_forwards,
+            dynamic_forwards,
         } => {
             let specs = qsh_core::parse_local_forwards(&forwards)?;
             let remote_specs = qsh_core::parse_remote_forwards(&remote_forwards)?;
+            let dynamic_specs = qsh_core::parse_dynamic_forwards(&dynamic_forwards)?;
+            if !dynamic_specs.is_empty() {
+                ops.check_dynamic_route(&host)?;
+            }
             (
                 open_session(ops, open_request(host, user, size))?,
                 true,
                 specs,
                 remote_specs,
+                dynamic_specs,
             )
         }
-        Attach::Existing { session_ref } => (session_ref, false, Vec::new(), Vec::new()),
+        Attach::Existing { session_ref } => {
+            (session_ref, false, Vec::new(), Vec::new(), Vec::new())
+        }
     };
     // From here on a failure on the freshly opened path would strand a
     // real remote shell, so every early return names it: sessions outlive
@@ -99,6 +117,16 @@ pub fn run(ops: &Ops, what: Attach, escape: Option<u8>) -> Result<i32, OpError> 
     // DTOs to render.
     for tunnel in stream.take_remote_forward_tunnels() {
         let _ = human::print_forward_started(&tunnel);
+    }
+    // `-D` dynamic (SOCKS5) forwards: same all-or-nothing bind-after-attach
+    // shape as `-L` above (ADR-0019 decision 11), rendered through the
+    // `DynamicTunnel`-shaped twin of `print_forward_started` since there is
+    // no `forward_to` to print.
+    for tunnel in stream
+        .open_dynamic_forwards(&dynamic_specs)
+        .map_err(orphan)?
+    {
+        let _ = human::print_dynamic_forward_started(&tunnel);
     }
 
     // Adopt this terminal's size before the shell draws anything. On the

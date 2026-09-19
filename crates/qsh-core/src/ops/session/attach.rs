@@ -62,6 +62,11 @@ pub struct SessionAttachStream {
     /// ordering is also the whole `-L` teardown story — the listeners die
     /// with the attach, no daemon and no close RPC (`PLAN.md` M4 §4.1 #1).
     pub(super) forwards: Vec<crate::tunnel::LocalForwardHandle>,
+    /// The `-D` dynamic (SOCKS5) forwards opened on this attach, if any
+    /// ([`Self::open_dynamic_forwards`], ADR-0019 decision 11). Declared
+    /// **before** `conn` for the same reason `forwards` is: each handle's
+    /// drop aborts its accept loop on `conn`'s runtime.
+    pub(super) dynamic_forwards: Vec<crate::tunnel::DynamicForwardHandle>,
     /// The `-R` remote forwards opened on this attach, if any — one shared
     /// [`crate::tunnel::remote::RemoteForwardAcceptor`] for every `-R` spec
     /// on this attach (`PLAN.md` M4 Step 4): a single `TCP_ACCEPTED`
@@ -87,6 +92,18 @@ pub struct SessionAttachStream {
     /// returns directly, split out here only because `-R`'s RPCs cannot
     /// run this late (this struct's own doc on `remote_acceptor`).
     pub(super) remote_tunnels: Vec<qsh_proto::Tunnel>,
+    /// The capabilities negotiated at handshake time, captured **before**
+    /// [`Ops::session_attach`] calls `conn.take_session()` to hand the
+    /// session to the background driver. [`Connected::capabilities`]
+    /// itself reads `&[]` once its `session` has been taken (that method's
+    /// own doc), which is unconditionally true of `conn` by the time this
+    /// struct exists — so [`Self::open_dynamic_forwards`]'s `dial-filter.v1`
+    /// gate reads this field, never `self.conn.capabilities()`, or it would
+    /// refuse every attach's `-D`, negotiated or not (the bug this field
+    /// fixes: found by `dynamic_forward.rs`'s
+    /// `interactive_dash_d_opens_listener_beside_session` failing against a
+    /// live peer that plainly does advertise `dial-filter.v1`).
+    pub(super) capabilities: Vec<String>,
     pub(super) conn: Connected,
     /// See [`SessionReader::store`].
     pub(super) store: ResumeStore,
@@ -250,6 +267,67 @@ impl SessionAttachStream {
         };
         let tunnels = started.iter().map(|f| f.tunnel(&host)).collect();
         self.forwards.extend(started);
+        Ok(tunnels)
+    }
+
+    /// Bind and start this attach's `-D` dynamic (SOCKS5) forwards
+    /// (ADR-0019 decision 11) — the interactive twin of
+    /// [`Ops::tunnel_dynamic`](crate::ops::Ops::tunnel_dynamic), shaped
+    /// like [`Self::open_local_forwards`]: rides this attach's own
+    /// connection, refuses a reverse route (ADR-0019 decisions 3, 10) and
+    /// the peer's missing `dial-filter.v1` capability (ADR-0019 decision
+    /// 3, no fallback) before binding anything, and is all-or-nothing —
+    /// a spec that fails drops every listener this call already bound.
+    ///
+    /// Returns the [`qsh_proto::DynamicTunnel`] DTO of each forward, in
+    /// `specs` order, for the frontend to render.
+    pub fn open_dynamic_forwards(
+        &mut self,
+        specs: &[qsh_proto::wire::DynamicSpec],
+    ) -> Result<Vec<qsh_proto::DynamicTunnel>, OpError> {
+        if specs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let host = parse_session_ref(&self.session_ref)?.host;
+        // Same reverse-route refusal `open_local_forwards` applies, before
+        // any resource exists (ADR-0019 decisions 3, 10 — `-D` is
+        // forward-route only at this landing). This is a backstop, not
+        // the primary gate: `tui::run` (the only caller that can reach a
+        // reverse route interactively) already calls
+        // `Ops::check_dynamic_route` *before* `session.open`, so a
+        // reverse-routed host is refused before a session — let alone a
+        // listener — ever exists. This check stays so `open_dynamic_forwards`
+        // is still safe to call from anywhere without relying on a caller
+        // to have checked first.
+        let Some(connection) = self.conn.connection() else {
+            return Err(crate::ops::tunnel::dynamic_forward_reverse_unsupported_interactive());
+        };
+        // ADR-0019 decision 3: no fallback if the peer never advertised
+        // the capability this dial policy depends on — refused here,
+        // before any listener binds, exactly like `Ops::tunnel_dynamic`'s
+        // own gate. Shares the actual predicate with that gate through
+        // `require_dial_filter_capability`, not a second independently
+        // re-derived `if`.
+        crate::ops::tunnel::require_dial_filter_capability(&self.capabilities)?;
+        let started = {
+            let runtime = self.conn.runtime();
+            let mut started = Vec::with_capacity(specs.len());
+            for spec in specs {
+                // On `Err` the loop returns, dropping every handle in
+                // `started` — each drop closes its listener.
+                let handle = runtime
+                    .block_on(crate::tunnel::DynamicForwardHandle::start(
+                        spec.bind.as_deref(),
+                        spec.listen_port,
+                        connection.clone(),
+                    ))
+                    .map_err(crate::ops::tunnel::map_local_forward_error)?;
+                started.push(handle);
+            }
+            started
+        };
+        let tunnels = started.iter().map(|f| f.dynamic_tunnel(&host)).collect();
+        self.dynamic_forwards.extend(started);
         Ok(tunnels)
     }
 

@@ -9,11 +9,11 @@ use std::io::{self, Write};
 use qsh_core::trust::invite_address::InviteAddressAdvice;
 use qsh_core::{ExecRunOutput, OpError, SessionReadOutput};
 use qsh_proto::{
-    AclCheckData, CapabilitiesData, CertInitData, CertIssueData, DoctorData, Host, HostListData,
-    IdentityInitData, SchemaData, Session, SessionCloseData, SessionEvent, SessionListData,
-    SessionOpenData, SessionResizeData, SessionWriteData, TrustAcceptData, TrustAddData,
-    TrustInviteData, TrustListData, TrustPeer, TrustRemoveData, Tunnel, TunnelCloseData,
-    TunnelListData, VersionData,
+    AclCheckData, CapabilitiesData, CertInitData, CertIssueData, DoctorData, DynamicTunnel, Host,
+    HostListData, IdentityInitData, SchemaData, Session, SessionCloseData, SessionEvent,
+    SessionListData, SessionOpenData, SessionResizeData, SessionWriteData, TrustAcceptData,
+    TrustAddData, TrustInviteData, TrustListData, TrustPeer, TrustRemoveData, Tunnel,
+    TunnelCloseData, TunnelListData, VersionData,
 };
 
 use crate::stderr_note;
@@ -640,6 +640,24 @@ pub fn print_tunnel_open(tunnel: &Tunnel) -> io::Result<()> {
     )
 }
 
+/// Print one opened `-D` listener (`qsh tunnel open --dynamic`,
+/// `docs/CLI.md` §6.9). Mirrors [`print_tunnel_open`]'s shape, but there is
+/// no `forward_to` to print — [`DynamicTunnel`] has none, by design
+/// (ADR-0019 decision 11: SOCKS chooses a destination per CONNECT, not at
+/// open time) — so `protocol`/`dial_policy` take that slot instead.
+pub fn print_dynamic_tunnel_open(tunnel: &DynamicTunnel) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    writeln!(
+        stdout,
+        "{} ({}, {}) on {} ({})",
+        sanitize(&tunnel.bind),
+        sanitize(&tunnel.protocol),
+        sanitize(&tunnel.dial_policy),
+        sanitize(&tunnel.host),
+        sanitize(&tunnel.tunnel_id)
+    )
+}
+
 /// Print the tunnel table (`qsh tunnels`, `docs/CLI.md` §6.9). Only ever
 /// daemon-held reverse-route tunnels — `Ops::tunnel_list`'s own doc on why
 /// a forward-route `qsh tunnel open` is never listed here.
@@ -712,6 +730,21 @@ pub fn print_forward_started(tunnel: &Tunnel) -> io::Result<()> {
         "qsh: forwarding {} -> {} on {}",
         sanitize(&tunnel.bind),
         sanitize(&tunnel.forward_to),
+        sanitize(&tunnel.host)
+    )
+}
+
+/// [`print_forward_started`]'s `-D` twin, on **stderr**
+/// (`qsh [user@]host -D …`). Same reasoning on stdout vs stderr, and the
+/// same platform gating — dead, not absent, on Windows.
+#[cfg_attr(not(unix), allow(dead_code))]
+pub fn print_dynamic_forward_started(tunnel: &DynamicTunnel) -> io::Result<()> {
+    let mut stderr = io::stderr().lock();
+    writeln!(
+        stderr,
+        "qsh: dynamic forward ({}) listening on {} via {}",
+        sanitize(&tunnel.protocol),
+        sanitize(&tunnel.bind),
         sanitize(&tunnel.host)
     )
 }

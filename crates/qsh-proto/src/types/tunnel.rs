@@ -102,3 +102,63 @@ pub struct TunnelCloseData {
     /// (idempotent, same pattern as `TrustRemoveData::removed`).
     pub closed: bool,
 }
+
+// ---------------------------------------------------------------------------
+// tunnel.dynamic (`-D`, `docs/CLI.md` §6.9, ADR-0019 decision 11)
+// ---------------------------------------------------------------------------
+
+/// Request for `tunnel.dynamic` (`-D`, ADR-0019 decision 11). A dedicated
+/// request/data pair rather than a widened `TunnelOpenReq`/[`Tunnel`]: the
+/// existing pair's `forward_host`/`forward_port` mean "the dial target",
+/// which `-D` has none of at open time (the SOCKS client picks one per
+/// `CONNECT`) — turning them `Option` or reinterpreting an empty value as
+/// "no target" would be a type or meaning change either way, and
+/// `docs/CLI.md` §10's additive-only rule allows neither on an existing
+/// type (ADR-0019's own rationale section).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TunnelDynamicReq {
+    /// Host alias to open the SOCKS5 listener's tunnel streams against.
+    pub host: String,
+    /// The `[bind:]` prefix, when present; `None` = loopback default —
+    /// same convention as [`TunnelOpenReq::bind`]. A non-loopback value is
+    /// refused (`INVALID_ARGUMENT`) before anything connects, never
+    /// honored (ADR-0019 decision 9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bind: Option<String>,
+    /// The port to bind the SOCKS5 listener on.
+    pub listen_port: u32,
+}
+
+/// Data payload of a successful `tunnel.dynamic`: the opened `-D` listener
+/// (ADR-0019 decision 11). Deliberately not a [`Tunnel`] — there is no
+/// `forward_to`, because the destination is chosen per `CONNECT` by
+/// whatever speaks SOCKS5 through this listener, not fixed at open time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DynamicTunnel {
+    /// Opaque handle for `tunnel.close` — same id space as [`Tunnel::tunnel_id`],
+    /// just never listed by `tunnel.list` (`-D` is a foreground holder like
+    /// `tunnel.open`'s `"local"` mode, ADR-0019 decision 11).
+    pub tunnel_id: String,
+    /// Always `"dynamic"` — an open string, same discipline as
+    /// [`Tunnel::mode`].
+    pub mode: String,
+    /// The `[bind:]listen_port` half, as bound — same shape and meaning as
+    /// [`Tunnel::bind`].
+    pub bind: String,
+    /// The port actually bound — same type and meaning as
+    /// [`Tunnel::actual_port`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actual_port: Option<u32>,
+    /// The local protocol this listener speaks. Always `"socks5"` today;
+    /// an open string in case a future SOCKS variant needs a second value
+    /// (ADR-0019 decision 11).
+    pub protocol: String,
+    /// The dial policy every `CONNECT` on this listener rides
+    /// (`StreamHeader.deny_host_local`, ADR-0019 decision 3). Always
+    /// `"deny_host_local"` today; an open string for the same reason as
+    /// `protocol`.
+    pub dial_policy: String,
+    /// Host alias this tunnel is on (`Ops`-filled; never present on the
+    /// wire — ADR-0007, same rule as [`Tunnel::host`]).
+    pub host: String,
+}

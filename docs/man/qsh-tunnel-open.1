@@ -24,7 +24,11 @@ Emit newline\-delimited JSON on stdout (reserved for streaming commands; non\-st
 Remote forward `[bind:]rport:host:hport` — same grammar as the interactive `\-R` (`docs/CLI.md` §6.9). Exactly one of `\-\-local`/`\-\-remote`/`\-\-dynamic` is required
 .TP
 \fB\-D\fR, \fB\-\-dynamic\fR \fI<SPEC>\fR
-SOCKS5 dynamic forwarding `[bind:]port`, repeatable — a third, independent mode: it does not fold into `\-\-local`/`\-\-remote`\*(Aqs mutual exclusion. Parses, but always answers `UNSUPPORTED`, "SOCKS dynamic forwarding (\-D) is a P1 feature", before opening a connection to `host` or doing anything `\-\-local`/`\-\-remote` would have — implementation is P1 (`docs/CLI.md` §6.9). The flag parses but no SOCKS proxy is ever opened and no bytes are forwarded, whatever value you pass. Use `\-L` for a known port pair, or an existing overlay for anything wider
+SOCKS5 dynamic forwarding `[bind:]port`: open a SOCKS5 proxy on this machine and, for every CONNECT a SOCKS client sends it, forward to whatever destination that CONNECT names, as seen from the peer (ADR\-0019). Exactly one of `\-\-local`/`\-\-remote`/`\-\-dynamic` is required, and `\-\-dynamic` conflicts with the other two — a single `tunnel open` call opens exactly one listener.
+
+Still `Vec<String>`/`ArgAction::Append` so the value can be given more than once on the command line, but only ever one listener is meant to result: giving `\-\-dynamic` twice is refused with `INVALID_ARGUMENT` ("one listener per `tunnel open`"), not silently collapsed to the first or last value.
+
+There is no ACL check at open time: each CONNECT is authorized on the peer as `forward.local`, the same action `\-\-local` uses. `DYNAMIC_FORWARD_ACL_NOTE` — "`\-D` runs SOCKS5 on this machine and authorizes every CONNECT on the peer as `forward.local`; `forward.socks` is never consulted." Refused with `UNSUPPORTED` before anything binds when `host` resolves to a reverse route, or when the peer does not advertise `dial\-filter.v1` (`docs/CLI.md` §6.9).
 .TP
 \fB\-v\fR, \fB\-\-verbose\fR
 Increase diagnostic verbosity on stderr (`\-v` info, `\-vv` debug, `\-vvv` trace). Never affects stdout (`docs/CLI.md` §2.2)

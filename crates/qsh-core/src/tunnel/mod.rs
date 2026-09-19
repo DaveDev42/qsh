@@ -35,6 +35,7 @@ use qsh_proto::wire::{PRIORITY_TUNNEL, StreamHeader};
 use crate::client::ClientError;
 use crate::client::link::{DataKillSwitch, DataLink, DataRecv, DataSend};
 
+pub use dynamic::DynamicForwardHandle;
 pub use local::{LocalForwardError, LocalForwardHandle};
 pub use remote::{REMOTE_FORWARD_LOOPBACK_ONLY_MESSAGE, RemoteForwardAcceptor};
 

@@ -49,15 +49,15 @@ use qsh_core::{
     HostListOp, IdentityInitOp, InviteCodeSource, OpError, Operation, Ops, SchemaOp,
     SessionAttachOp, SessionCloseOp, SessionGetOp, SessionListOp, SessionOpenOp, SessionReadOp,
     SessionResizeOp, SessionWriteOp, TrustAcceptOp, TrustAddOp, TrustInviteOp, TrustListOp,
-    TrustRemoveOp, TunnelCloseOp, TunnelListOp, TunnelOpenOp, VersionOp,
-    dynamic_forward_unsupported, normalize_invite_code, resolve_invite_code_source,
+    TrustRemoveOp, TunnelCloseOp, TunnelDynamicOp, TunnelListOp, TunnelOpenOp, VersionOp,
+    normalize_invite_code, parse_dynamic_forwards, resolve_invite_code_source,
     trust::{ADDRESS_PORT_ASSUMED_NOTICE, normalize_peer_address},
 };
 use qsh_proto::{
     AclCheckReq, CapabilitiesReq, CertInitReq, CertIssueReq, DoctorReq, ErrorCode, ExecRunReq,
     HostGetReq, IdentityInitReq, SessionCloseReq, SessionGetReq, SessionListReq, SessionOpenReq,
     SessionReadReq, SessionResizeReq, SessionWriteReq, TrustAcceptReq, TrustAddReq, TrustInviteReq,
-    TunnelCloseReq, TunnelListReq, TunnelOpenReq,
+    TunnelCloseReq, TunnelDynamicReq, TunnelListReq, TunnelOpenReq,
 };
 use serde::Serialize;
 use tracing_subscriber::EnvFilter;
@@ -353,6 +353,7 @@ fn dispatch(cli: &Cli, ops: Ops) -> i32 {
                 user: target.user.clone(),
                 forwards: cli.interactive.local_forward.clone(),
                 remote_forwards: cli.interactive.remote_forward.clone(),
+                dynamic_forwards: cli.interactive.dynamic_forward.clone(),
             },
             cli.interactive.escape_char,
         );
@@ -512,23 +513,14 @@ fn run_interactive(cli: &Cli, ops: &Ops, what: tui::Attach, escape: Option<Escap
     if cli.wants_json() {
         return report_error(cli, command, &tui::json_mode_unsupported());
     }
-    // `-D` is refused before anything else on this command line — before
-    // `SessionOpen`, before `-L`/`-R` are even looked at (`docs/CLI.md`
-    // §6.9, `PLAN.md` M4 Step 6, DoD 5): fail-closed ordering means a
-    // `-D` alongside a session/`-L`/`-R` request must not let any of the
-    // rest through first, so this has to happen before `tui::run` ever
-    // touches a session or a target — the zero-resource property holds
-    // just as it did when this check lived in `run`. It sits *after* the
-    // `wants_json` gate above, though: `docs/CLI.md` §7 wins over §6.9's
-    // `-D` refusal when `--json`/`--jsonl` is present, because the
-    // interactive form has no machine mode at all — that has to be the
-    // first thing reported no matter what else is wrong with the command
-    // line. Only the bare `qsh [user@]host` form ever populates
-    // `dynamic_forward` (`qsh attach` has no `-D`), so this is a no-op on
-    // the `Attach::Existing` path.
-    if !cli.interactive.dynamic_forward.is_empty() {
-        return report_error(cli, command, &dynamic_forward_unsupported());
-    }
+    // `docs/CLI.md` §7 wins over `-D`'s own refusals (reverse route,
+    // missing `dial-filter.v1`) when `--json`/`--jsonl` is present,
+    // because the interactive form has no machine mode at all — that has
+    // to be the first thing reported no matter what else is wrong with
+    // the command line. Past this gate, `-D` specs flow into `tui::run`
+    // exactly like `-L`/`-R`: parsed before the session opens, opened
+    // (via `SessionAttachStream::open_dynamic_forwards`) right after
+    // attach (`docs/CLI.md` §6.9, ADR-0019 decision 1).
     let EscapeChar(escape) = escape.unwrap_or(DEFAULT_ESCAPE_CHAR);
     match tui::run(ops, what, escape) {
         Ok(code) => code,
@@ -776,17 +768,23 @@ fn remote_exit_code_to_process_exit(remote: i32) -> i32 {
 ///   §2.2), and a success line followed by a failure line would break
 ///   every parser of it.
 fn run_tunnel_open(cli: &Cli, ops: &Ops, args: &TunnelOpenArgs) -> i32 {
-    // `-D` is checked before anything else here, same fail-closed
-    // ordering as the interactive form's own check above: whichever of
-    // `--local`/`--remote` also happens to be given, `-D` wins and
-    // nothing gets as far as `Ops::tunnel_open` (`docs/CLI.md` §6.9,
-    // `PLAN.md` M4 Step 6, DoD 5). That is "whichever", not "both": `-L`
-    // and `-R` together never reach this function at all — clap's
-    // `conflicts_with` on both flags (`cli.rs`'s `TunnelOpenArgs`)
-    // rejects that combination as a usage error (exit `2`) during
-    // argument parsing, before `-D` or anything else here runs.
+    // `--dynamic` is checked before anything else here: clap's
+    // `conflicts_with_all` on it (`cli.rs`'s `TunnelOpenArgs`) already
+    // rules out combining it with `--local`/`--remote` as a usage error
+    // (exit `2`) during argument parsing, so by the time this function
+    // runs, `--dynamic` present implies `--local`/`--remote` are both
+    // absent. `Vec<String>`/`ArgAction::Append` still lets `--dynamic` be
+    // given more than once on the command line — clap has no way to
+    // reject that at parse time without losing the ability to give it
+    // once — so this is the one place "one listener per `tunnel open`"
+    // (ADR-0019 decision 1) is enforced — right here in `qsh-cli`
+    // (`run_tunnel_open_dynamic` below), as an `INVALID_ARGUMENT` raised
+    // before `Ops::tunnel_dynamic` is ever called, not an `Ops`-layer
+    // check: `Ops::tunnel_dynamic` takes one already-parsed spec and
+    // never sees how many times `--dynamic` appeared on the command
+    // line.
     if !args.dynamic.is_empty() {
-        return report_error(cli, TunnelOpenOp::COMMAND, &dynamic_forward_unsupported());
+        return run_tunnel_open_dynamic(cli, ops, args);
     }
     // Exactly one of `--local`/`--remote` is expected here: clap's
     // `conflicts_with`/`required_unless_present_any` on both flags
@@ -852,6 +850,70 @@ fn run_tunnel_open(cli: &Cli, ops: &Ops, args: &TunnelOpenArgs) -> i32 {
         }
     } else {
         emit(human::print_tunnel_open(hold.tunnel()))
+    };
+    if rendered != 0 {
+        // Could not even report the tunnel; do not go on to hold one
+        // nobody was told about. Dropping `hold` closes it.
+        return rendered;
+    }
+    if let Err(err) = io::stdout().flush() {
+        stderr_note!("qsh: failed to write output: {err}");
+        return EXIT_IO_FAILURE;
+    }
+    stderr_note!("qsh tunnel open: holding; press Ctrl-C to close");
+    let err = hold.hold();
+    if let Err(io_err) = human::print_error(&err) {
+        stderr_note!("qsh tunnel open: failed to write output: {io_err}");
+    }
+    EXIT_RUNTIME_FAILURE
+}
+
+/// [`run_tunnel_open`]'s `--dynamic` branch (`tunnel.dynamic`, ADR-0019
+/// decision 11). Same two-phase "print the envelope, flush, then hold"
+/// shape as the `"local"`/`"remote"` path above, but through
+/// `Ops::tunnel_dynamic` and rendered as a [`qsh_proto::DynamicTunnel`]
+/// (no `forward_to`) instead of a [`qsh_proto::Tunnel`].
+fn run_tunnel_open_dynamic(cli: &Cli, ops: &Ops, args: &TunnelOpenArgs) -> i32 {
+    if args.dynamic.len() > 1 {
+        return report_error(
+            cli,
+            TunnelDynamicOp::COMMAND,
+            &OpError::new(
+                ErrorCode::InvalidArgument,
+                "one listener per `tunnel open`: --dynamic was given more than once",
+            ),
+        );
+    }
+    let specs = match parse_dynamic_forwards(&args.dynamic) {
+        Ok(specs) => specs,
+        Err(err) => return report_error(cli, TunnelDynamicOp::COMMAND, &err),
+    };
+    let Some(spec) = specs.first() else {
+        return report_error(
+            cli,
+            TunnelDynamicOp::COMMAND,
+            &OpError::new(ErrorCode::InvalidArgument, "no forward spec"),
+        );
+    };
+    let request = TunnelDynamicReq {
+        host: args.host.clone(),
+        bind: spec.bind.clone(),
+        listen_port: u32::from(spec.listen_port),
+    };
+    let hold = match ops.tunnel_dynamic(request) {
+        Ok(hold) => hold,
+        Err(err) => return report_error(cli, TunnelDynamicOp::COMMAND, &err),
+    };
+    let rendered = if cli.wants_json() {
+        match serde_json::to_value(hold.dynamic_tunnel()) {
+            Ok(value) => emit(Envelope::success(TunnelDynamicOp::COMMAND, value).print()),
+            Err(err) => {
+                stderr_note!("qsh: failed to encode result: {err}");
+                EXIT_IO_FAILURE
+            }
+        }
+    } else {
+        emit(human::print_dynamic_tunnel_open(hold.dynamic_tunnel()))
     };
     if rendered != 0 {
         // Could not even report the tunnel; do not go on to hold one
@@ -1443,6 +1505,9 @@ fn command_name(cli: &Cli) -> &'static str {
         Command::Session(SessionCmd::Resize { .. }) => SessionResizeOp::COMMAND,
         Command::Session(SessionCmd::Close { .. }) => SessionCloseOp::COMMAND,
         Command::Sessions { .. } => SessionListOp::COMMAND,
+        Command::Tunnel(TunnelCmd::Open(args)) if !args.dynamic.is_empty() => {
+            TunnelDynamicOp::COMMAND
+        }
         Command::Tunnel(TunnelCmd::Open(_)) => TunnelOpenOp::COMMAND,
         Command::Tunnel(TunnelCmd::Close { .. }) => TunnelCloseOp::COMMAND,
         Command::Tunnels => TunnelListOp::COMMAND,

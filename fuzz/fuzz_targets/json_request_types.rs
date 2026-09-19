@@ -5,12 +5,13 @@
 //! contract types (`qsh-proto`) as fuzz surface; this is the
 //! untrusted-JSON-in edge of that surface.
 //!
-//! Covers 12 of the request types in `qsh_proto::types`: `HostListReq`,
+//! Covers 13 of the request types in `qsh_proto::types`: `HostListReq`,
 //! `HostGetReq`, `SessionListReq`, `SessionGetReq`, `SessionOpenReq`,
 //! `SessionReadReq`, `SessionWriteReq`, `SessionResizeReq`,
-//! `SessionCloseReq`, `ExecRunReq`, `TunnelOpenReq`, `TunnelCloseReq`.
-//! (`SessionAttachReq` also exists in `qsh-proto::types` but is not
-//! selected here — nothing in this list routes through it.)
+//! `SessionCloseReq`, `ExecRunReq`, `TunnelOpenReq`, `TunnelCloseReq`,
+//! `TunnelDynamicReq`. (`SessionAttachReq` also exists in
+//! `qsh-proto::types` but is not selected here — nothing in this list
+//! routes through it.)
 //!
 //! First byte of the input selects the type (mod the list length, same
 //! selector-byte shape `fingerprint_principal` uses for its own two-way
@@ -23,10 +24,10 @@ use libfuzzer_sys::fuzz_target;
 use qsh_proto::types::{
     ExecRunReq, HostGetReq, HostListReq, SessionCloseReq, SessionGetReq, SessionListReq,
     SessionOpenReq, SessionReadReq, SessionResizeReq, SessionWriteReq, TunnelCloseReq,
-    TunnelOpenReq,
+    TunnelDynamicReq, TunnelOpenReq,
 };
 
-const VARIANT_COUNT: u8 = 12;
+const VARIANT_COUNT: u8 = 13;
 
 fuzz_target!(|data: &[u8]| {
     let Some((&selector, rest)) = data.split_first() else {
@@ -68,6 +69,9 @@ fuzz_target!(|data: &[u8]| {
         }
         11 => {
             let _ = serde_json::from_slice::<TunnelCloseReq>(rest);
+        }
+        12 => {
+            let _ = serde_json::from_slice::<TunnelDynamicReq>(rest);
         }
         _ => unreachable!("selector % VARIANT_COUNT is < VARIANT_COUNT"),
     }

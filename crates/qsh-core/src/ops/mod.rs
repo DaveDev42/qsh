@@ -44,7 +44,7 @@ pub use session::{
     make_session_ref, parse_session_ref,
 };
 pub use tunnel::{
-    TunnelCloseOp, TunnelHold, TunnelListOp, TunnelOpenOp, dynamic_forward_unsupported,
+    TunnelCloseOp, TunnelDynamicOp, TunnelHold, TunnelListOp, TunnelOpenOp, parse_dynamic_forwards,
     parse_local_forwards, parse_remote_forwards,
 };
 
@@ -302,8 +302,8 @@ fn terminal_echo_unsupported(message: &'static str) -> OpError {
 ///
 /// A free function, not an [`Ops`] method: it is pure (no [`Paths`], no
 /// filesystem, no network), so a `&self` method would wrongly suggest it
-/// touches the store — the same reasoning [`dynamic_forward_unsupported`]
-/// and [`parse_local_forwards`] already follow for this crate's other
+/// touches the store — the same reasoning [`parse_local_forwards`] and
+/// [`parse_dynamic_forwards`] already follow for this crate's other
 /// CLI-preflight judgments.
 ///
 /// `echo_can_be_suppressed` is the frontend's `cfg!(unix)` at the call
@@ -369,7 +369,7 @@ pub fn resolve_invite_code_source(
 /// [`InviteCodeSource`] funnels through this one function at exactly one
 /// call site (`run_trust_accept`'s `invite_code` helper), so there is a
 /// single named place the trim happens, mirroring how
-/// [`dynamic_forward_unsupported`] centralizes its own single-site policy.
+/// [`parse_dynamic_forwards`] centralizes its own single-site policy.
 pub fn normalize_invite_code(raw: &str) -> &str {
     raw.trim()
 }

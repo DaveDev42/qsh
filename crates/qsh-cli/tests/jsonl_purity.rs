@@ -565,3 +565,144 @@ fn a_tunnel_in_progress_keeps_stdout_pure_json_while_qsh_tunnel_diagnostics_land
         );
     }
 }
+
+/// `-D`'s twin of the test just above (ADR-0019 decision 11):
+/// `tunnel.dynamic` is a value-once-then-hold op exactly like `tunnel.open`
+/// is, so the same "never a second stdout line" property has to hold once
+/// a real SOCKS5 CONNECT drives traffic through the listener and produces
+/// its own `qsh::tunnel` diagnostics. Unlike the `-L` test just above,
+/// the CONNECT here targets a loopback destination on purpose and is
+/// expected to come back `REP 0x02` — the host-local dial filter
+/// (`dial-filter.v1`, ADR-0019 decision 3) denies it, since `-D`'s whole
+/// point is that this filter is always on, and a real non-loopback
+/// destination is not something a portable test can rely on being
+/// reachable. `qsh::tunnel::dynamic: CONNECT`'s own debug log fires once
+/// the request is parsed, before the dial is attempted, so it is on
+/// stderr regardless of that outcome. Forward-route only, same `unix`
+/// gate as `a_tunnel_in_progress_…` above and for the same reason (this
+/// file's own imports).
+#[cfg(unix)]
+#[test]
+fn a_dynamic_tunnel_in_progress_keeps_stdout_pure_json_while_qsh_tunnel_diagnostics_land_on_stderr()
+{
+    let fleet = Fleet::start();
+
+    for (label, mode, verbosity) in [
+        ("--jsonl -vv", "--jsonl", "-vv"),
+        ("--json -vvv", "--json", "-vvv"),
+    ] {
+        let listen_port = TcpListener::bind("127.0.0.1:0")
+            .expect("pick a free listen port")
+            .local_addr()
+            .expect("port")
+            .port();
+
+        let mut child = fleet
+            .client
+            .command(&[
+                "tunnel",
+                "open",
+                HOST_ALIAS,
+                "--dynamic",
+                &listen_port.to_string(),
+                verbosity,
+                mode,
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap_or_else(|e| panic!("{label}: spawn qsh tunnel open --dynamic: {e}"));
+
+        let stdout = child.stdout.take().expect("stdout pipe");
+        let stderr = child.stderr.take().expect("stderr pipe");
+
+        let stdout_lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let stdout_reader = Arc::clone(&stdout_lines);
+        let stdout_thread = thread::spawn(move || {
+            let reader = BufReader::new(stdout);
+            for line in reader.lines() {
+                let Ok(line) = line else { break };
+                stdout_reader.lock().unwrap().push(line);
+            }
+        });
+
+        let stderr_text: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+        let stderr_reader = Arc::clone(&stderr_text);
+        let stderr_thread = thread::spawn(move || {
+            let reader = BufReader::new(stderr);
+            for line in reader.lines() {
+                let Ok(line) = line else { break };
+                let mut text = stderr_reader.lock().unwrap();
+                text.push_str(&line);
+                text.push('\n');
+            }
+        });
+
+        poll_until(
+            &format!("{label}: the tunnel.dynamic envelope line"),
+            Duration::from_secs(10),
+            || (!stdout_lines.lock().unwrap().is_empty()).then_some(()),
+        );
+
+        // Speak SOCKS5 through the listener and drive one CONNECT — see
+        // this test's own doc for why the destination is loopback and the
+        // expected `REP` is the host-local filter's denial, not success.
+        let mut conn = TcpStream::connect(("127.0.0.1", listen_port))
+            .unwrap_or_else(|e| panic!("{label}: connect to the SOCKS listener: {e}"));
+        conn.set_read_timeout(Some(Duration::from_secs(30)))
+            .expect("set read timeout");
+        conn.write_all(&[0x05, 0x01, 0x00])
+            .expect("write socks5 greeting");
+        let mut greeting_reply = [0u8; 2];
+        conn.read_exact(&mut greeting_reply)
+            .expect("read socks5 method-select reply");
+        assert_eq!(greeting_reply, [0x05, 0x00], "{label}: expected no-auth");
+        let mut connect_req = vec![0x05, 0x01, 0x00, 0x01, 127, 0, 0, 1];
+        connect_req.extend_from_slice(&1u16.to_be_bytes());
+        conn.write_all(&connect_req).expect("write socks5 connect");
+        let mut connect_reply = [0u8; 10];
+        conn.read_exact(&mut connect_reply)
+            .expect("read socks5 connect reply");
+        assert_eq!(
+            connect_reply[1], 0x02,
+            "{label}: expected the host-local dial filter to deny a loopback destination"
+        );
+        drop(conn);
+
+        poll_until(
+            &format!("{label}: qsh::tunnel diagnostics on stderr"),
+            Duration::from_secs(10),
+            || {
+                stderr_text
+                    .lock()
+                    .unwrap()
+                    .contains("qsh::tunnel")
+                    .then_some(())
+            },
+        );
+
+        let _ = child.kill();
+        let _ = child.wait();
+        stdout_thread.join().expect("stdout reader thread");
+        stderr_thread.join().expect("stderr reader thread");
+
+        let lines = stdout_lines.lock().unwrap();
+        assert_eq!(
+            lines.len(),
+            1,
+            "{label}: exactly one tunnel.dynamic envelope, no more, while holding: {lines:?}"
+        );
+        let envelope: Value = serde_json::from_str(&lines[0])
+            .unwrap_or_else(|e| panic!("{label}: stdout line is not JSON: {e}: {:?}", lines[0]));
+        assert_eq!(envelope["schema"], "qsh.cli/v1", "{label}");
+        assert_eq!(envelope["command"], "tunnel.dynamic", "{label}");
+        assert_eq!(envelope["ok"], true, "{label}: {envelope}");
+
+        let stderr = stderr_text.lock().unwrap();
+        assert!(
+            stderr.contains("qsh::tunnel"),
+            "{label}: expected qsh::tunnel diagnostics on stderr, got {stderr:?}"
+        );
+    }
+}

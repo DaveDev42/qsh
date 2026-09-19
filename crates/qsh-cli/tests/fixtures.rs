@@ -70,7 +70,29 @@ const DEFERRED: &[(&str, &str)] = &[
     ),
     ("REMOTE_ERROR", "no deterministic producer"),
     ("INTERNAL", "no deterministic producer"),
+    (
+        "UNSUPPORTED",
+        "no same-build deterministic producer left (ADR-0020 decision 4: \
+         `-D` now works on both routes when both peers negotiate \
+         `dial-filter.v1`). The refusal only reappears against an \
+         other-build peer (no common wire minor, or a qsh listen daemon \
+         started before this upgrade with no `dial-filter.v1` capability) \
+         or on a Windows-only path, neither of which this harness can \
+         force deterministically",
+    ),
 ];
+
+/// Fixture files whose producing test code is gone, but which stay on
+/// disk byte-for-byte because fixtures are append-only (`docs/CLI.md`
+/// §10) — a file, not a code path, is the unit of that rule.
+/// [`every_error_code_is_covered_by_a_fixture_or_explicitly_deferred`]
+/// excludes these from `covered`, so the `ErrorCode` reachability
+/// discipline still asks for a *live* producer, never a retired one.
+const RETIRED_PRODUCERS: &[(&str, &str)] = &[(
+    "error.UNSUPPORTED.json",
+    "-D stub refusal; -D implemented per ADR-0019. File kept byte-for-byte \
+     (append-only).",
+)];
 
 /// Every fixture this milestone owes, so a silently-missing file fails
 /// loudly instead of shrinking the covered surface.
@@ -112,6 +134,8 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "error.SESSION_CONFLICT.json",
     "error.UNSUPPORTED.json",
     "tunnel.open.json",
+    "tunnel.dynamic.json",
+    "error.INVALID_ARGUMENT.dynamic_bind.json",
     "tunnel.list.json",
     "tunnel.close.json",
     "error.PERMISSION_DENIED.json",
@@ -293,28 +317,28 @@ fn golden_local_fixtures() {
     assert_eq!(code, 255, "{config_error}");
     check("error.CONFIG_ERROR.json", config_error);
 
-    // `-D`'s stub refusal (`docs/CLI.md` §6.9, `PLAN.md` M4 Step 6, DoD 5)
-    // is `UNSUPPORTED`'s first CLI-binary envelope producer (`fixtures.rs`
-    // module doc, `DEFERRED`'s former `UNSUPPORTED` entry). It needs no
-    // identity or peer at all — `main.rs`'s `run_tunnel_open` refuses `-D`
-    // before ever calling `Ops::tunnel_open`, so a brand-new, uninitialized
-    // sandbox proves the same thing `a_non_loopback_bind_is_refused_before…`
-    // proves for `-L` in `tunnel_e2e.rs`: nothing downstream ran.
+    // `-D`'s non-loopback `bind` refusal (ADR-0019 decision 9, `docs/CLI.md`
+    // §6.9): `Ops::tunnel_dynamic` checks the bind shape
+    // (`crate::tunnel::local::loopback_bind_addr`) before it ever resolves
+    // the host, so — like the `-D` stub's own former producer this
+    // replaces — a brand-new, uninitialized sandbox proves the same thing
+    // `a_non_loopback_bind_is_refused_before…` proves for `-L` in
+    // `tunnel_e2e.rs`: nothing downstream (identity, peer, ACL) ever ran.
     let no_identity = Sandbox::new();
-    let (code, dynamic_forward) = no_identity.json(&[
+    let (code, dynamic_bind) = no_identity.json(&[
         "tunnel",
         "open",
         "irrelevant-host",
         "--dynamic",
-        "1080",
+        "192.0.2.1:1080",
         "--json",
     ]);
-    assert_eq!(code, 255, "{dynamic_forward}");
+    assert_eq!(code, 255, "{dynamic_bind}");
     assert_eq!(
-        dynamic_forward["error"]["code"], "UNSUPPORTED",
-        "{dynamic_forward}"
+        dynamic_bind["error"]["code"], "INVALID_ARGUMENT",
+        "{dynamic_bind}"
     );
-    check("error.UNSUPPORTED.json", dynamic_forward);
+    check("error.INVALID_ARGUMENT.dynamic_bind.json", dynamic_bind);
 
     // `acl check` (`docs/CLI.md` §6.15, `PLAN.md` M5 Step 7) is local and
     // needs no identity (`Ops::from_env` only resolves paths), so a fresh,
@@ -698,6 +722,47 @@ fn golden_tunnel_fixtures() {
     let _ = child.kill();
     let _ = child.wait();
 
+    // `tunnel.dynamic` (`-D`, ADR-0019 decision 11) is a separate op from
+    // `tunnel.open` with its own data shape (`DynamicTunnel`, no
+    // `forward_to`) — same one-envelope-then-hold shape as `--local`
+    // above, against the same live, trusted `fleet`.
+    let dynamic_port = free_port();
+    let mut dynamic_command = fleet.client.command(&[
+        "tunnel",
+        "open",
+        HOST_ALIAS,
+        "--dynamic",
+        &dynamic_port.to_string(),
+        "--json",
+    ]);
+    let mut dynamic_child = dynamic_command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn qsh tunnel open --dynamic");
+    let mut dynamic_stdout =
+        std::io::BufReader::new(dynamic_child.stdout.take().expect("tunnel open stdout"));
+    let mut dynamic_line = String::new();
+    dynamic_stdout
+        .read_line(&mut dynamic_line)
+        .expect("read the envelope line");
+    assert!(
+        !dynamic_line.trim().is_empty(),
+        "qsh tunnel open --dynamic printed nothing"
+    );
+    let dynamic_opened: Value = serde_json::from_str(dynamic_line.trim())
+        .unwrap_or_else(|e| panic!("not JSON: {e}: {dynamic_line:?}"));
+    assert_eq!(dynamic_opened["ok"], true, "{dynamic_opened}");
+    assert_eq!(
+        dynamic_opened["data"]["mode"], "dynamic",
+        "{dynamic_opened}"
+    );
+    check("tunnel.dynamic.json", dynamic_opened);
+
+    let _ = dynamic_child.kill();
+    let _ = dynamic_child.wait();
+
     let (code, listed) = fleet.client.json(&["tunnels", "--json"]);
     assert_eq!(code, 0, "{listed}");
     assert_eq!(listed["data"]["tunnels"].as_array().map(Vec::len), Some(0));
@@ -1066,8 +1131,10 @@ fn every_error_code_is_covered_by_a_fixture_or_explicitly_deferred() {
         .iter()
         .map(|code| code.as_str().to_string())
         .collect();
+    let retired: BTreeSet<&str> = RETIRED_PRODUCERS.iter().map(|(name, _)| *name).collect();
     let covered: BTreeSet<String> = fixtures::all_cli_v1()
         .into_iter()
+        .filter(|(name, _)| !retired.contains(name.as_str()))
         .filter_map(|(_, fixture)| {
             fixture
                 .get("error")

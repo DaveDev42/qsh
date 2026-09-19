@@ -54,6 +54,33 @@ pub(crate) async fn loopback_pair() -> (Connection, Connection) {
     (client, server)
 }
 
+/// [`loopback_pair`], but also returning the client [`qsh_transport::Endpoint`]
+/// instead of discarding it — needed by any test that builds a
+/// [`crate::ops::session::Connected`] directly (`for_test_forward`), since
+/// `Connected::close` calls `endpoint.wait_idle()` on its forward-route
+/// endpoint.
+pub(crate) async fn loopback_pair_with_client_endpoint()
+-> (qsh_transport::Endpoint, Connection, Connection) {
+    let (client_id, client_fp) = self_signed();
+    let (server_id, server_fp) = self_signed();
+    let server_trust = StaticTrust::empty().with_pin(client_fp, Principal::Device("laptop".into()));
+    let client_trust = StaticTrust::empty().with_pin(server_fp, Principal::Device("box".into()));
+
+    let listener = Listener::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        server_id,
+        Arc::new(server_trust),
+    )
+    .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let dialer = Dialer::new(client_id, Arc::new(client_trust));
+    let (server, dialed) = tokio::join!(
+        async { listener.accept().await.unwrap().accept().await.unwrap() },
+        async { dialer.dial(addr, "127.0.0.1").await.unwrap() },
+    );
+    (dialed.endpoint, dialed.connection, server)
+}
+
 /// Server-side [`qsh_transport::TrustEvaluator`] that pins nothing and
 /// always answers `pairing_open() == true` — the M8 Step 3b unit tests'
 /// twin of `crate::pairing::AcceptAnyForPairing` (that one is the

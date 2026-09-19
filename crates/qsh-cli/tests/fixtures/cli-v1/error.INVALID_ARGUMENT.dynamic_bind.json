@@ -1,0 +1,12 @@
+{
+  "command": "tunnel.dynamic",
+  "error": {
+    "code": "INVALID_ARGUMENT",
+    "details": null,
+    "message": "-D 192.0.2.1:1080: dynamic forward bind \"192.0.2.1\" is not a loopback address; -D listeners are loopback-only",
+    "retryable": false
+  },
+  "ok": false,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

@@ -686,6 +686,93 @@ fn tunnel_mode_is_an_open_string() {
     }
 }
 
+// ---- tunnel.dynamic (`-D`, ADR-0019 decision 11) ---------------------
+
+#[test]
+fn tunnel_dynamic_req_matches_documented_shape() {
+    let req = TunnelDynamicReq {
+        host: "personal-mac".into(),
+        bind: Some("127.0.0.1".into()),
+        listen_port: 1080,
+    };
+    assert_eq!(
+        serde_json::to_value(&req).unwrap(),
+        serde_json::json!({
+            "host": "personal-mac",
+            "bind": "127.0.0.1",
+            "listen_port": 1080
+        })
+    );
+    let back: TunnelDynamicReq =
+        serde_json::from_value(serde_json::to_value(&req).unwrap()).unwrap();
+    assert_eq!(back, req);
+
+    // `bind` omits when absent, same convention as `TunnelOpenReq::bind`.
+    let req = TunnelDynamicReq { bind: None, ..req };
+    assert!(serde_json::to_value(&req).unwrap().get("bind").is_none());
+}
+
+#[test]
+fn dynamic_tunnel_round_trips() {
+    let t = DynamicTunnel {
+        tunnel_id: "tun_01K0EXAMPLE".into(),
+        mode: "dynamic".into(),
+        bind: "127.0.0.1:1080".into(),
+        actual_port: Some(1080),
+        protocol: "socks5".into(),
+        dial_policy: "deny_host_local".into(),
+        host: "personal-mac".into(),
+    };
+    assert_eq!(
+        serde_json::to_value(&t).unwrap(),
+        serde_json::json!({
+            "tunnel_id": "tun_01K0EXAMPLE",
+            "mode": "dynamic",
+            "bind": "127.0.0.1:1080",
+            "actual_port": 1080,
+            "protocol": "socks5",
+            "dial_policy": "deny_host_local",
+            "host": "personal-mac"
+        })
+    );
+    // `actual_port` is omitted, not null, when unset — same convention as
+    // `Tunnel::actual_port`.
+    let t = DynamicTunnel {
+        actual_port: None,
+        ..t
+    };
+    let json = serde_json::to_value(&t).unwrap();
+    assert!(json.get("actual_port").is_none());
+    let back: DynamicTunnel = serde_json::from_value(json).unwrap();
+    assert_eq!(back, t);
+}
+
+/// `DynamicTunnel` has no `forward_to` field at all — unlike `Tunnel`,
+/// there is no fixed dial target to report (ADR-0019 decision 11's own
+/// rationale: the destination is chosen per `CONNECT`, not at open time).
+#[test]
+fn dynamic_tunnel_has_no_forward_to_field() {
+    let json = serde_json::json!({
+        "tunnel_id": "tun_x",
+        "mode": "dynamic",
+        "bind": "127.0.0.1:1080",
+        "protocol": "socks5",
+        "dial_policy": "deny_host_local",
+        "host": "h",
+        "forward_to": "should-be-ignored:1"
+    });
+    // An unknown extra field must not be *required* — schemars/serde
+    // default to ignoring unrecognized fields — but the type itself
+    // carries no such field to populate.
+    let t: DynamicTunnel = serde_json::from_value(json).unwrap();
+    assert_eq!(t.bind, "127.0.0.1:1080");
+    let serialized = serde_json::to_value(&t).unwrap();
+    assert!(
+        serialized.get("forward_to").is_none(),
+        "DynamicTunnel must never serialize a forward_to field: {serialized}"
+    );
+}
+
 // ---- acl.check (M5) --------------------------------------------------
 
 #[test]

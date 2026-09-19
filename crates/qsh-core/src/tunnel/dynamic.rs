@@ -53,14 +53,6 @@
 //! speaking SOCKS5 (or never speaks it at all) is dropped, not parked
 //! forever holding a handshake slot.
 
-// This module's production entry point (`DynamicForward::bind`/`run`) is not
-// yet called from anywhere but its own tests — wiring `-D` up to a route-aware
-// `Ops` entry point (refusing it over a reverse route, ADR-0019 decisions 3
-// and 10) is the next stage's job, the same staged-landing shape
-// `tunnel::local::ForwardCarrier::Local`'s own `#[allow(dead_code)]` already
-// used for `-L`'s reverse carrier ahead of its own call site landing.
-#![allow(dead_code)]
-
 use std::io;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -434,6 +426,97 @@ impl DynamicForward {
                 }
             }
         }
+    }
+}
+
+/// A bound, running `-D` listener plus the task serving it, owned by the
+/// caller (`Ops`/`SessionAttachStream`) for the tunnel's whole lifetime.
+///
+/// Mirrors [`crate::tunnel::local::LocalForwardHandle`]: `start` binds and
+/// spawns in one step, `Drop` aborts the accept task (which owns the
+/// listener and every in-flight connection task via its own `JoinSet`, so
+/// aborting it is a complete teardown — [`LocalForwardHandle`]'s own doc).
+///
+/// [`LocalForwardHandle`]: crate::tunnel::local::LocalForwardHandle
+#[derive(Debug)]
+pub struct DynamicForwardHandle {
+    tunnel_id: String,
+    bind: SocketAddr,
+    task: tokio::task::JoinHandle<io::Error>,
+}
+
+impl DynamicForwardHandle {
+    /// Bind `[bind:]listen_port`'s loopback listener and start serving it
+    /// over `connection` (ADR-0019 decision 11).
+    ///
+    /// Must be called from inside a tokio runtime — same requirement as
+    /// [`LocalForwardHandle::start`]. The listener exists only after this
+    /// returns `Ok`: a refused bind (non-loopback, port in use) creates
+    /// nothing, and no tunnel stream is opened until a SOCKS client
+    /// completes a `CONNECT` (this module's own doc).
+    ///
+    /// [`LocalForwardHandle::start`]: crate::tunnel::local::LocalForwardHandle::start
+    pub async fn start(
+        bind: Option<&str>,
+        listen_port: u16,
+        connection: qsh_transport::Connection,
+    ) -> Result<Self, LocalForwardError> {
+        let forward = DynamicForward::bind(bind, listen_port).await?;
+        let bind_addr = forward.local_addr();
+        let carrier = Arc::new(ForwardCarrier::Quic(connection));
+        Ok(Self {
+            tunnel_id: ulid::Ulid::new().to_string(),
+            bind: bind_addr,
+            task: tokio::spawn(forward.run(carrier)),
+        })
+    }
+
+    /// The address actually bound — with a `0` listen port, the one the
+    /// kernel picked.
+    pub fn local_addr(&self) -> SocketAddr {
+        self.bind
+    }
+
+    /// This forward as the `qsh.cli/v1` [`qsh_proto::DynamicTunnel`] DTO
+    /// (ADR-0019 decision 11). `host` is the peer alias, which only the
+    /// `Ops` layer knows — same `Ops`-filled-alias rule
+    /// [`LocalForwardHandle::tunnel`] follows (ADR-0007).
+    ///
+    /// [`LocalForwardHandle::tunnel`]: crate::tunnel::local::LocalForwardHandle::tunnel
+    pub fn dynamic_tunnel(&self, host: &str) -> qsh_proto::DynamicTunnel {
+        qsh_proto::DynamicTunnel {
+            tunnel_id: self.tunnel_id.clone(),
+            mode: "dynamic".to_string(),
+            bind: self.bind.to_string(),
+            actual_port: Some(u32::from(self.bind.port())),
+            protocol: "socks5".to_string(),
+            dial_policy: "deny_host_local".to_string(),
+            host: host.to_string(),
+        }
+    }
+
+    /// Wait for the forward's listener to fail fatally.
+    ///
+    /// Only a *listener* error resolves this — one broken `CONNECT`ed
+    /// connection never does — so in practice a holder parks here until the
+    /// process ends or the handle is dropped (same discipline as
+    /// [`LocalForwardHandle::wait`]).
+    ///
+    /// [`LocalForwardHandle::wait`]: crate::tunnel::local::LocalForwardHandle::wait
+    pub async fn wait(&mut self) -> io::Error {
+        match (&mut self.task).await {
+            Ok(err) => err,
+            Err(err) => io::Error::other(format!("dynamic forward task ended: {err}")),
+        }
+    }
+}
+
+impl Drop for DynamicForwardHandle {
+    fn drop(&mut self) {
+        // The listener and every in-flight connection task live inside the
+        // aborted future (`DynamicForward::run`'s own `JoinSet`), so this is
+        // the whole teardown — same reasoning as `LocalForwardHandle::drop`.
+        self.task.abort();
     }
 }
 

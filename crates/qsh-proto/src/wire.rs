@@ -666,6 +666,70 @@ pub fn parse_forward_spec(spec: &str) -> Result<ForwardSpec, Error> {
     })
 }
 
+/// A parsed `-D` dynamic-forward spec (ADR-0019 decision 11) — the result
+/// of [`parse_dynamic_spec`]. Shape-only, same discipline as
+/// [`ForwardSpec`]: whether a non-loopback `bind` is allowed is host-side
+/// policy decided later (ADR-0019 decision 9), not here.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DynamicSpec {
+    /// The `[bind:]` prefix, when present. `None` means the caller-side
+    /// loopback default applies — same convention as [`ForwardSpec::bind`].
+    pub bind: Option<String>,
+    /// The `listen_port` component: `1..=65535`.
+    pub listen_port: u16,
+}
+
+/// Parse a `-D` dynamic-forward spec: `[bind:]listen_port` (ADR-0019
+/// decision 11), e.g. `"1080"` or `"127.0.0.1:1080"`. Reuses the same
+/// internal tokenizer [`parse_forward_spec`] uses — a 1-or-2-token variant
+/// of that function's 3-or-4-token grammar, since a dynamic forward has no
+/// fixed dial target to encode.
+///
+/// Returns [`struct@Error`] with [`ErrorCode::InvalidArgument`] for anything
+/// that does not fit the grammar: not exactly 1 or 2 colon-separated parts,
+/// a port outside `1..=65535`, a malformed bind, unmatched `[`/`]`, or a
+/// bracketed listen port.
+pub fn parse_dynamic_spec(spec: &str) -> Result<DynamicSpec, Error> {
+    fn invalid(detail: impl std::fmt::Display) -> Error {
+        Error::from_code(ErrorCode::InvalidArgument, detail.to_string())
+    }
+
+    let tokens = tokenize_forward_spec(spec)
+        .ok_or_else(|| invalid(format!("malformed dynamic forward spec {spec:?}")))?;
+
+    let (bind_tok, port_tok) = match tokens.as_slice() {
+        [port] => (None, *port),
+        [bind, port] => (Some(*bind), *port),
+        other => {
+            return Err(invalid(format!(
+                "expected 1 or 2 colon-separated parts in {spec:?}, found {}",
+                other.len()
+            )));
+        }
+    };
+
+    if let Some(tok) = bind_tok
+        && !valid_forward_host_token(tok)
+    {
+        return Err(invalid(format!(
+            "invalid bind host {:?} in {spec:?}",
+            tok.inner()
+        )));
+    }
+    let ForwardSpecToken::Plain(port_raw) = port_tok else {
+        return Err(invalid(format!(
+            "listen port must not be bracketed in {spec:?}"
+        )));
+    };
+    let listen_port = parse_forward_port(port_raw)
+        .ok_or_else(|| invalid(format!("invalid listen port {port_raw:?} in {spec:?}")))?;
+
+    Ok(DynamicSpec {
+        bind: bind_tok.map(|t| t.inner().to_string()),
+        listen_port,
+    })
+}
+
 impl StreamHeader {
     /// Header for an exec data stream carrying `ticket`.
     pub fn exec_data(ticket: Vec<u8>) -> Self {
@@ -2177,6 +2241,46 @@ mod tests {
             ..spec
         };
         assert_eq!(spec.direction, ForwardDirection::Remote);
+    }
+
+    // ---- parse_dynamic_spec (ADR-0019 decision 11) -------------------------
+
+    #[test]
+    fn parse_dynamic_spec_table() {
+        // (spec, expected bind, expected port) for the accepted cases.
+        let ok_cases: &[(&str, Option<&str>, u16)] = &[
+            ("1080", None, 1080),
+            ("127.0.0.1:1080", Some("127.0.0.1"), 1080),
+            ("[::1]:1080", Some("::1"), 1080),
+            ("localhost:1080", Some("localhost"), 1080),
+            ("1", None, 1),
+            ("65535", None, 65535),
+        ];
+        for (spec, bind, port) in ok_cases {
+            let parsed = parse_dynamic_spec(spec)
+                .unwrap_or_else(|e| panic!("spec {spec:?} should parse, got {e:?}"));
+            assert_eq!(parsed.bind.as_deref(), *bind, "spec {spec:?}");
+            assert_eq!(parsed.listen_port, *port, "spec {spec:?}");
+        }
+
+        let err_cases = [
+            "",
+            "0",
+            "65536",
+            "garbage",
+            "127.0.0.1:8080:1080",
+            "[1080]",
+            "8080:",
+            ":8080",
+            "[::1:1080",
+        ];
+        for spec in err_cases {
+            assert_eq!(
+                parse_dynamic_spec(spec).unwrap_err().error_code(),
+                ErrorCode::InvalidArgument,
+                "spec {spec:?} should be rejected"
+            );
+        }
     }
 
     #[test]
