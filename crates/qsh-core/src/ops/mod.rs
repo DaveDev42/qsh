@@ -440,7 +440,8 @@ pub struct Ops {
     connect_runtime: Arc<OnceLock<Arc<SharedRuntime>>>,
 }
 
-/// A [`tokio::runtime::Runtime`] whose `Drop` never blocks.
+/// A [`tokio::runtime::Runtime`] whose `Drop` never blocks where blocking
+/// is forbidden, and otherwise waits — bounded — for its threads to go.
 ///
 /// The plain `Runtime::drop` waits for every worker thread to park before
 /// returning, and that wait **panics** — "Cannot drop a runtime in a
@@ -454,14 +455,51 @@ pub struct Ops {
 /// step's own nextest run: `qsh-testkit::reverse_attach
 /// detaching_leaves_the_session_running_and_a_reattach_replays_the_retained_ring`
 /// failed with precisely that panic before this wrapper existed). Wrapping
-/// every shared handle in this type instead and routing its `Drop` through
-/// [`tokio::runtime::Runtime::shutdown_background`] — documented by tokio
-/// itself as the non-blocking teardown, safe to call from inside another
-/// runtime — fixes it generally, for every current and future caller,
-/// rather than special-casing the one call site the test happened to
-/// exercise.
+/// every shared handle in this type instead is what makes the last `Arc`
+/// safe to drop from anywhere, for every current and future caller, rather
+/// than special-casing the one call site the test happened to exercise.
+///
+/// Which teardown that `Drop` picks depends on where it runs.
+///
+/// Inside any runtime context — an async task, a `block_on` closure, or
+/// one of this runtime's own blocking-pool threads, all three reported by
+/// [`tokio::runtime::Handle::try_current`] — it must not block, so it
+/// takes [`tokio::runtime::Runtime::shutdown_background`], documented by
+/// tokio itself as the non-blocking teardown. The threads then wind down
+/// on their own.
+///
+/// Everywhere else it waits up to [`SHUTDOWN_GRACE`] for them, because
+/// "the threads are still winding down" is not free on Windows. `qsh`'s
+/// `main` ends in `std::process::exit`, whose `ExitProcess` terminates
+/// every surviving thread at whatever instruction it had reached. A
+/// worker thread releasing its `tracing` registry slot at exit holds a
+/// process-wide mutex (`sharded_slab`'s thread-id free list) for a few
+/// instructions; killed in there, it never releases it. `ExitProcess`
+/// then runs the *main* thread's own thread-local destructors, which
+/// release the same kind of slot, take the same mutex — and block on an
+/// owner that no longer exists. The process is left with its exit status
+/// already set and one thread parked in `ntdll` forever; not even
+/// `taskkill /F` can reap it, and it never releases the stdout/stderr
+/// pipes it inherited, so whoever spawned `qsh` and reads to EOF hangs
+/// with it. That is what made `exit_code_matrix` and `exec_e2e` time out
+/// intermittently on Windows CI; measured on a loaded 16-core Windows
+/// box, 11 hangs in 40 runs before this wait, 0 in 40 after.
+///
+/// Waiting is the fix; the bound is what keeps a wedged blocking task
+/// (tokio does not abort those) from turning process exit into its own
+/// hang. Timing out only restores the previous behavior.
 #[derive(Debug)]
 pub(crate) struct SharedRuntime(Option<tokio::runtime::Runtime>);
+
+/// How long [`SharedRuntime`]'s `Drop` waits for the runtime's threads
+/// when it is allowed to wait at all.
+///
+/// Parking a worker takes microseconds; this is sized for the one thing
+/// that can genuinely take longer — an in-flight `spawn_blocking` such as
+/// [`tokio::net::lookup_host`]'s DNS call, which shutdown waits on rather
+/// than aborting. Two seconds covers the realistic case without turning a
+/// pathological one into an unbounded exit.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 
 impl std::ops::Deref for SharedRuntime {
     type Target = tokio::runtime::Runtime;
@@ -473,8 +511,13 @@ impl std::ops::Deref for SharedRuntime {
 
 impl Drop for SharedRuntime {
     fn drop(&mut self) {
-        if let Some(runtime) = self.0.take() {
+        let Some(runtime) = self.0.take() else {
+            return;
+        };
+        if tokio::runtime::Handle::try_current().is_ok() {
             runtime.shutdown_background();
+        } else {
+            runtime.shutdown_timeout(SHUTDOWN_GRACE);
         }
     }
 }
