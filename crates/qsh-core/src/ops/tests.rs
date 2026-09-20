@@ -138,6 +138,44 @@ fn dropping_ops_with_a_live_shared_runtime_from_inside_another_runtime_does_not_
     });
 }
 
+/// The other half of that same `Drop`: outside any runtime context it
+/// must *not* return while the runtime's threads are still running.
+/// `qsh`'s `main` calls `std::process::exit` immediately after the last
+/// `Ops` goes away, and on Windows a worker thread killed mid-teardown
+/// deadlocks the exiting process for good — the failure
+/// [`SharedRuntime`]'s own doc describes, seen as intermittent
+/// `exit_code_matrix`/`exec_e2e` timeouts on Windows CI. The deadlock
+/// itself is Windows-only and inherently racy, so what is pinned here is
+/// the property that removes it, which holds on every platform: a
+/// blocking task still running when the drop starts has finished by the
+/// time it returns.
+#[test]
+fn dropping_ops_outside_a_runtime_context_waits_for_its_threads() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let (_guard, ops) = temp_ops();
+    let runtime = ops
+        .connect_runtime()
+        .expect("build the shared runtime so there is something to drop");
+    let finished = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&finished);
+    runtime.spawn_blocking(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        flag.store(true, Ordering::SeqCst);
+    });
+
+    // Two `Arc`s point at the runtime: this local handle and the one
+    // `ops` keeps in its `connect_runtime` cell. Dropping the second is
+    // what runs the teardown, here on a plain test thread.
+    drop(runtime);
+    drop(ops);
+
+    assert!(
+        finished.load(Ordering::SeqCst),
+        "drop returned while a runtime thread was still running"
+    );
+}
+
 #[test]
 fn op_error_from_code_defaults_retryable() {
     let err = OpError::from(ErrorCode::Timeout);
