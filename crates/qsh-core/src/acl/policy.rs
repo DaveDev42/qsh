@@ -1,9 +1,10 @@
-//! The pure policy evaluator (`docs/design/architecture.md` §6,
-//! `PLAN.md` M5 Step 2). Nothing in this module touches the filesystem or
-//! the network — [`crate::acl::load`] is the only thing that turns
-//! `acl.toml` into a [`Policy`], and nothing in production constructs a
-//! [`Policy`] yet (`PLAN.md` M5 Step 6 wires it in; until then production
-//! stays on [`super::AllowAllPinned`]).
+//! The pure policy evaluator (`docs/design/architecture.md` §6). Nothing
+//! in this module touches the filesystem or the network —
+//! [`crate::acl::load`] is the only thing that turns `acl.toml` into a
+//! [`Policy`], and [`crate::acl::load_or_deny_with_index`] is what
+//! `crate::serve` calls at startup to hand the result to the server (a
+//! missing or unparseable file becomes a policy that denies everything,
+//! plus a startup diagnostic).
 //!
 //! **Evaluation order is canonical and lives here, not in prose**
 //! (`docs/design/architecture.md` §6):
@@ -15,10 +16,10 @@
 //! 2. Principal exact match (`Rule::principal` against the connection's
 //!    `Principal::to_string()`) **and** `auth_path` match. A rule that
 //!    omits `auth_path` defaults to [`AuthPath::Pin`] and so never matches
-//!    an [`AuthPath::Ca`] request (`PLAN.md` M5 §4.1 #2).
+//!    an [`AuthPath::Ca`] request.
 //! 3. Action pattern match — exact or trailing-`.*` family wildcard
 //!    (`ActionPattern::matches`).
-//! 4. `scope` judgment (`PLAN.md` M5 Step 5): `Scope::Any` always passes.
+//! 4. `scope` judgment: `Scope::Any` always passes.
 //!    `Scope::Owned` (the default) passes only when `resource.owner` is
 //!    `None` (no owner concept — never filtered either way) or equals the
 //!    requester's own [`super::opener_key`] — see [`Policy::decide`]'s

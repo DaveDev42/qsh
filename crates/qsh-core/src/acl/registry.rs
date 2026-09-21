@@ -29,9 +29,13 @@
 //! never message equality. See [`SeamKind::StreamReset`]'s own doc.
 //!
 //! `forward.socks` / `file.read` / `file.write` are excluded too: they are
-//! always-denied (`Action::is_always_denied`) but P1-unimplemented — no
-//! wire op exists yet for a peer to hit the gate through. This exclusion
-//! is anchored by this module's own `#[cfg(test)]`
+//! always-denied (`Action::is_always_denied`), but for two different
+//! reasons. `file.read`/`file.write` are P1-unimplemented — no wire op
+//! exists yet for a peer to hit the gate through. `forward.socks` is
+//! undrivable by design, permanently — `-D` authorizes every `CONNECT` as
+//! `forward.local` instead (ADR-0019 결정 6), and a client-attached label
+//! can't carry authorization, so no wire op will ever construct this
+//! action. This exclusion is anchored by this module's own `#[cfg(test)]`
 //! `deny_seams_cover_every_action_except_the_always_denied_trio`: it fails
 //! the moment a new `Action` — always-denied or not — has no row and no
 //! documented exclusion here.
@@ -391,8 +395,9 @@ pub struct OpSpec {
 pub const ALWAYS_DENIED_NO_OP: &[(Action, &str)] = &[
     (
         Action::ForwardSocks,
-        "forward.socks (-D SOCKS proxying) is P1-deferred; no wire op exists yet for a peer \
-         to construct this action (docs/ROADMAP.md §3 deferred-feature guardrail table)",
+        "-D runs SOCKS5 on the client and authorizes every CONNECT on the peer as \
+         forward.local (ADR-0019 decision 6); a client-attached label can't carry \
+         authorization, so no wire op will ever be built to construct this action",
     ),
     (
         Action::FileRead,
@@ -462,14 +467,18 @@ mod tests {
     /// anchor: the set of [`Action`]s covered by [`DENY_SEAMS`] rows must
     /// equal `Action::ALL` minus the always-denied trio
     /// (`ForwardSocks`/`FileRead`/`FileWrite`, `Action::is_always_denied`).
-    /// That trio has no row here — not by oversight, but because no wire
-    /// op exists today that can construct one of those three actions for
-    /// a real peer to hit a gate through (they are P1-deferred,
-    /// `docs/ROADMAP.md` §3's guardrail table); `PLAN.md` M5 Step 6
-    /// re-checks that gap once real wire paths might exist. A newly added
-    /// `Action` — always-denied or not — fails this test until it either
-    /// gets a seam row or is added to the exclusion filter below with a
-    /// reason.
+    /// That trio has no row here, for two different reasons. `FileRead`/
+    /// `FileWrite` are P1-deferred — no wire op exists today that can
+    /// construct either for a real peer to hit a gate through
+    /// (`docs/ROADMAP.md` §3's guardrail table); the deferred-feature
+    /// guardrail table there is re-checked once real wire paths might
+    /// exist. `ForwardSocks`
+    /// is undrivable by design, permanently — `-D` authorizes every
+    /// `CONNECT` as `forward.local` instead (ADR-0019 결정 6), and no wire
+    /// op will ever construct `forward.socks` for a peer to hit. A newly
+    /// added `Action` — always-denied or not — fails this test until it
+    /// either gets a seam row or is added to the exclusion filter below
+    /// with a reason.
     #[test]
     fn deny_seams_cover_every_action_except_the_always_denied_trio() {
         let covered: std::collections::HashSet<Action> =
@@ -483,11 +492,12 @@ mod tests {
             covered, expected,
             "DENY_SEAMS must cover every Action::ALL member except the \
              always-denied trio (ForwardSocks/FileRead/FileWrite via \
-             Action::is_always_denied) — no wire op can construct those \
-             three actions today, so there is no seam to enumerate for \
-             them yet (PLAN.md M5 Step 6 re-checks this once one might \
-             exist); every other action needs a row here or this test \
-             fails"
+             Action::is_always_denied) — FileRead/FileWrite have no \
+             constructing wire op yet (docs/ROADMAP.md §3's guardrail \
+             table is re-checked once one might exist) and ForwardSocks \
+             is undrivable by design (ADR-0019 결정 6: -D authorizes via \
+             forward.local, not this action); every other action needs a \
+             row here or this test fails"
         );
     }
 

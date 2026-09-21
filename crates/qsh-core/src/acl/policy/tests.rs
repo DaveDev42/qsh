@@ -33,7 +33,8 @@ fn family_prefix(action: Action) -> FamilyPrefix {
 fn always_deny_trio_denies_under_the_most_generous_policy_with_no_rule_index() {
     // `docs/design/architecture.md` §6 / `PLAN.md` M5 Step 2 (a): even
     // the most permissive policy an operator could write cannot grant
-    // the P1-deferred trio.
+    // the always-denied trio (two P1-deferred, one undrivable by design —
+    // ADR-0019 결정 6).
     let policy = Policy {
         rules: vec![rule(
             "user:dave",
@@ -510,8 +511,9 @@ proptest! {
             None => ResourceRef::unowned("r"),
         };
         let verdict = policy.decide(&principal, auth_path, action, resource);
-        // F4 (M5 Step 2 adversarial review): the literal P1-deferred
-        // trio, spelled out again here rather than calling
+        // F4 (M5 Step 2 adversarial review): the literal always-denied
+        // trio (two P1-deferred, one undrivable by design, ADR-0019 결정
+        // 6), spelled out again here rather than calling
         // `Action::is_always_denied()` — the very function `decide`
         // itself calls to implement this gate. Branching the oracle on
         // the code under test meant a mutation to `is_always_denied`

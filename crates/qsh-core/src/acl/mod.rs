@@ -101,21 +101,24 @@ pub enum Action {
     /// constraint (`PLAN.md` M4 Step 4) — see `crate::tunnel::remote`.
     ForwardRemote,
     /// Dial a destination through a SOCKS5 proxy on this host's behalf
-    /// (`forward.socks`, `-D`). PRD §9 defines the vocabulary now, but the
-    /// feature itself is P1 and unimplemented (`docs/ROADMAP.md` §3
-    /// deferred-feature guardrail table) — this action is **always denied**
-    /// regardless of any `acl.toml` rule, see [`Action::is_always_denied`].
-    /// The CLI already refuses `-D` at the flag layer with `UNSUPPORTED`
-    /// (M4 Step 6); this action gate is what answers a peer that speaks the
-    /// wire directly, bypassing the CLI.
+    /// (`forward.socks`, `-D`). `-D` is implemented (ADR-0019, ADR-0020,
+    /// both routes) — but every `CONNECT` it opens is authorized on the
+    /// peer as [`Action::ForwardLocal`] against the requested `host:port`,
+    /// the same gate `-L` uses (ADR-0019 결정 6). A client-attached label
+    /// cannot carry authorization, so no wire op will ever be built to
+    /// drive `forward.socks` — it is **always denied** regardless of any
+    /// `acl.toml` rule, see [`Action::is_always_denied`], permanently by
+    /// design rather than pending one.
     ForwardSocks,
     /// Read a file over a (not-yet-defined) file-transfer operation
     /// (`file.read`). PRD §9 vocabulary, P1-deferred, **always denied** —
-    /// same guardrail as [`Action::ForwardSocks`].
+    /// same always-deny gate as [`Action::ForwardSocks`], for a different
+    /// reason (see [`Action::is_always_denied`]).
     FileRead,
     /// Write a file over a (not-yet-defined) file-transfer operation
     /// (`file.write`). PRD §9 vocabulary, P1-deferred, **always denied** —
-    /// same guardrail as [`Action::ForwardSocks`].
+    /// same always-deny gate as [`Action::ForwardSocks`], for a different
+    /// reason (see [`Action::is_always_denied`]).
     FileWrite,
 }
 
@@ -156,9 +159,14 @@ impl Action {
     }
 
     /// Whether this action is denied unconditionally, independent of any
-    /// `acl.toml` rule — the closed set of PRD §9 actions that are defined
-    /// but not implemented in P0 (`docs/ROADMAP.md` §3 deferred-feature
-    /// guardrail table: `forward.socks`, `file.read`, `file.write`).
+    /// `acl.toml` rule — the closed set of PRD §9 actions this build always
+    /// refuses, for two different reasons. `forward.socks` is always denied
+    /// by design (ADR-0019 결정 6): `-D` is implemented, but every `CONNECT`
+    /// it opens is authorized on the peer as `forward.local`, and a
+    /// client-attached label cannot carry authorization, so no wire op will
+    /// ever drive `forward.socks` itself. `file.read` and `file.write` are
+    /// P1-deferred instead — defined in PRD §9 but not implemented in P0
+    /// (`docs/ROADMAP.md` §3 deferred-feature guardrail table).
     ///
     /// The M5 policy evaluator (`PLAN.md` Step 2) must apply this gate
     /// **before** wildcard rule matching, not fold it into matching itself:
@@ -617,10 +625,14 @@ mod tests {
     }
 
     #[test]
-    fn is_always_denied_is_exactly_the_p1_deferred_trio() {
+    fn is_always_denied_is_exactly_the_undrivable_trio() {
         // docs/ROADMAP.md §3 deferred-feature guardrail table: exactly
         // `forward.socks`/`file.read`/`file.write` are "defined but always
         // denied" — every other action is a normal, policy-evaluated one.
+        // The three share the outcome but not the reason: `file.read`/
+        // `file.write` are P1-deferred (no wire op exists yet), while
+        // `forward.socks` is undrivable by design — `-D` authorizes every
+        // `CONNECT` as `forward.local` instead (ADR-0019 결정 6).
         let always_denied: std::collections::HashSet<Action> = Action::ALL
             .iter()
             .copied()
