@@ -43,12 +43,13 @@
 
 mod common;
 
-use std::io::{BufRead as _, Read as _, Write as _};
+use std::io::{Read as _, Write as _};
 use std::net::{TcpListener, TcpStream};
-use std::process::{Child, Command, Stdio};
+#[cfg(unix)]
+use std::process::Stdio;
 use std::time::Duration;
 
-use common::{Fleet, HOST_ALIAS, Sandbox, exit_code};
+use common::{DynamicTunnelGuard, Fleet, HOST_ALIAS, Sandbox, exit_code};
 use serde_json::Value;
 
 #[cfg(unix)]
@@ -176,91 +177,12 @@ macro_rules! live_round_trip_or_return {
     };
 }
 
-/// Everything a failed child wrote to stderr, for a panic message (copied
-/// from `tunnel_e2e.rs`'s own helper of the same name and shape).
-fn drain_stderr(child: &mut Child) -> String {
-    let mut text = String::new();
-    if let Some(mut err) = child.stderr.take() {
-        let _ = err.read_to_string(&mut text);
-    }
-    text
-}
-
-// ---------------------------------------------------------------------
-// A held `qsh tunnel open --dynamic` child
-// ---------------------------------------------------------------------
-
-/// A running `qsh tunnel open <host> --dynamic <spec> --json` child, killed
-/// on drop — the `--dynamic` twin of `tunnel_e2e.rs`'s `TunnelGuard`. The
-/// process *is* the tunnel's holder (ADR-0019 decision 1), so there is no
-/// close RPC: killing it is the whole teardown.
-struct DynamicTunnelGuard {
-    child: Child,
-    stdout: std::io::BufReader<std::process::ChildStdout>,
-}
-
-impl DynamicTunnelGuard {
-    /// Start the child and return it together with the single envelope it
-    /// prints before it starts holding.
-    fn start(client: &Sandbox, spec: &str) -> (Self, Value) {
-        Self::start_against(client, HOST_ALIAS, spec)
-    }
-
-    /// [`Self::start`], against a caller-named host rather than the fixed
-    /// [`HOST_ALIAS`] — the reverse-route tests need this, since their
-    /// target's trust-store name is [`TARGET_NAME`], not [`HOST_ALIAS`].
-    fn start_against(client: &Sandbox, host: &str, spec: &str) -> (Self, Value) {
-        let mut command: Command =
-            client.command(&["tunnel", "open", host, "--dynamic", spec, "--json"]);
-        let mut child = command
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("spawn qsh tunnel open --dynamic");
-        let mut stdout =
-            std::io::BufReader::new(child.stdout.take().expect("tunnel open stdout pipe"));
-        let mut line = String::new();
-        // The child flushes stdout before it blocks, so this returns as
-        // soon as the tunnel is up — no sleep, and a failure to start
-        // shows as an EOF (empty line) rather than a hang.
-        stdout.read_line(&mut line).expect("read the envelope line");
-        assert!(
-            !line.trim().is_empty(),
-            "qsh tunnel open --dynamic printed no envelope; stderr:\n{}",
-            drain_stderr(&mut child)
-        );
-        let envelope: Value = serde_json::from_str(line.trim())
-            .unwrap_or_else(|e| panic!("stdout is not JSON: {e}: {line:?}"));
-        assert_eq!(envelope["schema"], "qsh.cli/v1");
-        (Self { child, stdout }, envelope)
-    }
-
-    /// Whether the child is still holding the tunnel.
-    fn is_running(&mut self) -> bool {
-        matches!(self.child.try_wait(), Ok(None))
-    }
-
-    /// Kill the child and return everything else it wrote to stdout —
-    /// which must be nothing (`docs/CLI.md` §2.2).
-    fn finish(mut self) -> String {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        let mut rest = String::new();
-        let _ = self.stdout.read_to_string(&mut rest);
-        rest
-    }
-}
-
-impl Drop for DynamicTunnelGuard {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
 // ---------------------------------------------------------------------
 // `qsh tunnel open --dynamic`
+//
+// The held-child harness itself (`DynamicTunnelGuard`) moved to
+// `tests/common/mod.rs` once `socks_curl.rs` (the ADR-0019 / docs/CLI.md
+// §6.9 curl acceptance test) needed the identical shape.
 // ---------------------------------------------------------------------
 
 /// The success path end to end: one `qsh.cli/v1` envelope naming

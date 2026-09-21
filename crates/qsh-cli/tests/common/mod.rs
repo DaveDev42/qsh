@@ -8,8 +8,13 @@
 //! `127.0.0.1:0` and [`Fleet`] wires a host and a client together the way
 //! `docs/ROADMAP.md` M1 describes: two identities, each pinning the other.
 //!
-//! Nothing here sleeps for correctness: the only wait is a bounded
-//! `recv_timeout` on the `qsh serve: listening on …` line.
+//! Nothing here sleeps for correctness: every wait carries a hard
+//! deadline — the `recv_timeout` on a child's start line (`qsh serve:
+//! listening on …`, and the `--dynamic` envelope via
+//! [`DYNAMIC_TUNNEL_START_TIMEOUT`]) and the deadline-bounded polls in
+//! `wait_timeout` / `shut_down` / [`DynamicTunnelGuard::terminate_and_wait`]
+//! / `poll_until` / `wait_for_audit`. No helper here sleeps a fixed amount
+//! standing in for one.
 //!
 //! [`Sandbox::qsh`]/[`Sandbox::qsh_with_stdin`] and [`ServeGuard`] teardown
 //! register with the [`watchdog`] module for as long as they are in
@@ -935,6 +940,177 @@ impl ReverseGuard {
 
 #[cfg(unix)]
 impl Drop for ReverseGuard {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Everything a failed child wrote to stderr, for a panic message — shared
+/// by [`DynamicTunnelGuard::start`] and any caller that needs the same
+/// diagnostic (`dynamic_forward.rs`, `socks_curl.rs`).
+pub fn drain_stderr(child: &mut Child) -> String {
+    let mut text = String::new();
+    if let Some(mut err) = child.stderr.take() {
+        let _ = err.read_to_string(&mut text);
+    }
+    text
+}
+
+/// A running `qsh tunnel open <host> --dynamic <spec> --json` child, killed
+/// on drop — the `--dynamic` twin of `tunnel_e2e.rs`'s own `TunnelGuard`.
+/// The process *is* the tunnel's holder (ADR-0019 decision 1), so there is
+/// no close RPC: killing it is the whole teardown.
+///
+/// Moved here from `dynamic_forward.rs` once `socks_curl.rs` (the ADR-0019 /
+/// `docs/CLI.md` §6.9 curl acceptance test) needed the identical shape,
+/// rather than copy-pasting it a second time.
+pub struct DynamicTunnelGuard {
+    child: Child,
+    /// Reads the envelope line, then keeps reading stdout to EOF and
+    /// returns whatever came after it — [`Self::finish`]'s "everything
+    /// else". Owning the reader on a background thread (rather than a
+    /// `BufReader` field read from directly, as this used to be) is what
+    /// lets [`Self::start_against`] bound its wait for the envelope line
+    /// with [`DYNAMIC_TUNNEL_START_TIMEOUT`] instead of blocking forever
+    /// on a child that starts and never flushes — the same reason
+    /// [`ServeGuard`]/[`ListenGuard`] read their own start signal off a
+    /// channel rather than a direct blocking read. `Option` (rather than a
+    /// bare `JoinHandle`) only exists so [`Self::finish`] can `take` it out
+    /// of a type that implements [`Drop`], which forbids a partial move.
+    reader: Option<JoinHandle<String>>,
+}
+
+/// How long we wait for `qsh tunnel open --dynamic` to print its one
+/// envelope line before declaring the test broken — same budget as
+/// [`SERVE_START_TIMEOUT`]/`LISTEN_START_TIMEOUT` for the identical reason.
+const DYNAMIC_TUNNEL_START_TIMEOUT: Duration = Duration::from_secs(10);
+
+impl DynamicTunnelGuard {
+    /// Start the child and return it together with the single envelope it
+    /// prints before it starts holding.
+    pub fn start(client: &Sandbox, spec: &str) -> (Self, Value) {
+        Self::start_against(client, HOST_ALIAS, spec)
+    }
+
+    /// [`Self::start`], against a caller-named host rather than the fixed
+    /// [`HOST_ALIAS`] — the reverse-route tests need this, since their
+    /// target's trust-store name is not [`HOST_ALIAS`].
+    pub fn start_against(client: &Sandbox, host: &str, spec: &str) -> (Self, Value) {
+        let mut command: Command =
+            client.command(&["tunnel", "open", host, "--dynamic", spec, "--json"]);
+        let mut child = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn qsh tunnel open --dynamic");
+        let mut stdout = BufReader::new(child.stdout.take().expect("tunnel open stdout pipe"));
+
+        let (tx, rx) = mpsc::channel::<String>();
+        let reader = thread::spawn(move || {
+            // The child flushes stdout before it blocks, so this returns as
+            // soon as the tunnel is up — no sleep. A failure to start shows
+            // as an EOF (empty line) rather than a hang, since the caller
+            // below still bounds the wait for this send.
+            let mut line = String::new();
+            let _ = stdout.read_line(&mut line);
+            let _ = tx.send(line);
+            let mut rest = String::new();
+            let _ = stdout.read_to_string(&mut rest);
+            rest
+        });
+
+        // The guard (with its child-killing `Drop`) is built now, before any
+        // of the assertions below can panic — otherwise a panicking envelope
+        // check would drop a bare `Child` and orphan a live `qsh tunnel
+        // open --dynamic` still holding the port instead of killing it.
+        let mut guard = Self {
+            child,
+            reader: Some(reader),
+        };
+
+        let line = rx.recv_timeout(DYNAMIC_TUNNEL_START_TIMEOUT).unwrap_or_else(|err| {
+            panic!(
+                "qsh tunnel open --dynamic printed no envelope within {DYNAMIC_TUNNEL_START_TIMEOUT:?} ({err}); stderr:\n{}",
+                drain_stderr(&mut guard.child)
+            )
+        });
+        assert!(
+            !line.trim().is_empty(),
+            "qsh tunnel open --dynamic printed no envelope; stderr:\n{}",
+            drain_stderr(&mut guard.child)
+        );
+        let envelope: Value = serde_json::from_str(line.trim())
+            .unwrap_or_else(|e| panic!("stdout is not JSON: {e}: {line:?}"));
+        assert_eq!(envelope["schema"], "qsh.cli/v1");
+        // Check `ok` before any caller reads `data.bind`/`data.actual_port`
+        // (adversarial review finding: without this, an `EADDRINUSE` from
+        // `free_port()`'s TOCTOU window comes back as an opaque
+        // `.expect("bind string")` panic instead of naming the real
+        // failure) — the whole envelope goes in the message since this is
+        // the one place that would otherwise swallow it.
+        assert_eq!(
+            envelope["ok"], true,
+            "qsh tunnel open --dynamic did not succeed: {envelope}"
+        );
+        (guard, envelope)
+    }
+
+    /// Whether the child is still holding the tunnel.
+    pub fn is_running(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
+
+    /// Send `SIGTERM` and wait up to `timeout` for the child to exit on its
+    /// own — unlike [`finish`](Self::finish), this does not force-kill.
+    /// Returns whether it exited before the deadline. Unix only, same
+    /// reasoning as [`ServeGuard::signal`]/[`ReverseGuard::shut_down`].
+    ///
+    /// `qsh tunnel open --dynamic` installs no signal handler on this path
+    /// (`run_tunnel_open_dynamic` in `crates/qsh-cli/src/main.rs` ends in
+    /// `Ops::tunnel_dynamic`'s `TunnelHold::hold()`, whose `wait_for_end`
+    /// selects only on the forward's own listener failing or the
+    /// connection dying — no signal arm; contrast `run_serve`/`run_listen`/
+    /// `run_reverse`, which do wire in `shutdown_signal`), so this `SIGTERM` kills by the
+    /// default disposition — process death, not a graceful listener
+    /// release. `socks_curl.rs`'s port-re-bind check only needs the
+    /// process gone, which is enough for the kernel to free the listen
+    /// socket; it does not exercise a graceful-shutdown code path, because
+    /// there is none on this path yet.
+    #[cfg(unix)]
+    pub fn terminate_and_wait(mut self, timeout: Duration) -> bool {
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(self.child.id() as i32),
+            nix::sys::signal::Signal::SIGTERM,
+        );
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if matches!(self.child.try_wait(), Ok(Some(_))) {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Kill the child and return everything else it wrote to stdout —
+    /// which must be nothing (`docs/CLI.md` §2.2). Killing the child first
+    /// closes its stdout, so the reader thread unblocks its trailing
+    /// `read_to_string` immediately and the `join` below returns promptly.
+    pub fn finish(mut self) -> String {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        self.reader
+            .take()
+            .and_then(|reader| reader.join().ok())
+            .unwrap_or_default()
+    }
+}
+
+impl Drop for DynamicTunnelGuard {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
