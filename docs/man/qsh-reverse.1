@@ -1,6 +1,6 @@
 .ie \n(.g .ds Aq \(aq
 .el .ds Aq '
-.TH qsh-reverse 1  "reverse 0.1.0" 
+.TH qsh-reverse 1  "reverse 0.2.0" 
 .SH NAME
 qsh\-reverse \- Dial `<controller>` and register this device as a reverse target, and keep it registered, redialing with backoff when the link drops (`docs/CLI.md` §6.13). On success this process serves the connection as a host, the same broker/writer\-lease discipline as `qsh serve`
 .SH SYNOPSIS
@@ -33,4 +33,4 @@ Print version
 <\fICONTROLLER\fR>
 Trust\-store alias of the controller to dial (`qsh trust list`)
 .SH VERSION
-v0.1.0
+v0.2.0
