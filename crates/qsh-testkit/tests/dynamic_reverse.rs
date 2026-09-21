@@ -74,7 +74,7 @@ use std::time::Duration;
 use qsh_core::acl::AllowAllPinned;
 use qsh_core::ops::Ops;
 use qsh_core::tunnel::DynamicForwardHandle;
-use qsh_core::{Paths, Principal};
+use qsh_core::{HostRoute, Paths, Principal};
 use qsh_proto::{SessionAttachReq, SessionOpenReq};
 use qsh_testkit::loopback::make_identity;
 use qsh_testkit::net_probe::{self, LanEcho};
@@ -101,9 +101,29 @@ fn pin(fingerprint: &str, name: &str) -> StaticTrust {
     StaticTrust::empty().with_pin(fp, Principal::Device(name.to_string()))
 }
 
+/// Fresh, throwaway [`Paths`], with `runtime_dir()` pinned under the same
+/// tempdir via [`Paths::with_runtime_dir`]. Without the pin, `runtime_dir()`
+/// falls back to `$XDG_RUNTIME_DIR/qsh` whenever that variable is set
+/// (`Paths::runtime_dir`'s own doc) — true on every Linux CI runner, where
+/// it names one directory shared by every concurrently running `nextest`
+/// process. [`ReverseHarness::attach_localctl`] binds its socket there, and
+/// `Ops::resolve_host_route`'s reverse-source discovery
+/// (`crates/qsh-core/src/ops/host.rs`) scans it by listing `<pid>.sock`
+/// files, so an unpinned `Paths` lets this test's discovery see every other
+/// concurrently running test process's same-named registration — the exact
+/// cause of the `InvalidArgument`/"registered live by more than one qsh
+/// listen daemon" flake this file, `local_control_reverse.rs` and
+/// `local_stream_reverse.rs` (also unpinned) can otherwise produce for
+/// each other under nextest's one-process-per-test model. Pinning gives
+/// this test's own daemon and its own discovery the same private directory,
+/// independent of the ambient environment — the same isolation
+/// `host_list_reverse.rs`, `reverse_attach.rs`, `reverse_session_ops.rs` and
+/// two of `reverse_tunnel.rs`'s own tests already apply for the identical
+/// reason.
 fn fresh_paths() -> (tempfile::TempDir, Paths) {
     let dir = tempfile::tempdir().expect("tempdir");
-    let paths = Paths::new(dir.path().join("config"), dir.path().join("state"));
+    let paths = Paths::new(dir.path().join("config"), dir.path().join("state"))
+        .with_runtime_dir(dir.path().join("run"));
     (dir, paths)
 }
 
@@ -383,6 +403,31 @@ async fn interactive_dash_l_over_reverse_round_trips_at_the_ops_level() {
     let test_fut = async {
         wait_for(TIMEOUT, || harness.listen.registry().get("widget")).await;
 
+        // Pin the property `fresh_paths`'s isolation exists to guarantee:
+        // discovery resolves "widget" to exactly this test's own daemon.
+        // `Ops::resolve_host_route`'s two-daemon-duplicate check
+        // (`crates/qsh-core/src/ops/host.rs`) would return `InvalidArgument`
+        // instead of `HostRoute::Reverse` if it ever saw more than one live
+        // registration under this name — so a successful match here, on
+        // this test's own `localctl.socket_path`, is a direct assertion of
+        // "exactly one daemon", not an inference from `session_open` merely
+        // succeeding.
+        let route = tokio::task::spawn_blocking({
+            let ops = ops.clone();
+            move || ops.resolve_host_route("widget")
+        })
+        .await
+        .expect("join resolve_host_route")
+        .expect("resolve_host_route must resolve \"widget\" to exactly one live daemon");
+        match route {
+            HostRoute::Reverse { socket, .. } => assert_eq!(
+                socket, localctl.socket_path,
+                "discovery must resolve \"widget\" to this test's own localctl daemon, not a \
+                 concurrent process's"
+            ),
+            other => panic!("expected a live reverse route for \"widget\", got {other:?}"),
+        }
+
         let opened = tokio::task::spawn_blocking({
             let ops = ops.clone();
             move || {
@@ -453,4 +498,216 @@ async fn interactive_dash_l_over_reverse_round_trips_at_the_ops_level() {
     localctl.shutdown().await;
     harness.shutdown().await;
     drop(dir);
+}
+
+// ---------------------------------------------------------------------
+// A direct regression check for the isolation `fresh_paths` now provides —
+// forces the exact two-daemon collision the CI flake this file hit under
+// nextest's one-process-per-test model, instead of relying on that flake's
+// absence as indirect evidence.
+// ---------------------------------------------------------------------
+
+/// Binds a live "widget" localctl daemon at a caller-chosen `pid`, backed
+/// by `harness`'s own registry — the same two primitives
+/// [`ReverseHarness::attach_localctl`] itself composes
+/// ([`qsh_core::localctl::daemon::LocalctlListener::bind`] +
+/// [`qsh_core::localctl::daemon::LocalctlDaemon::run`]), called directly so
+/// a fabricated `pid` can be forced rather than always taking
+/// `std::process::id()`. That is what lets this one test process bind two
+/// independently live daemons under the *same* directory: `pid` is only
+/// ever used as a `<pid>.sock` filename and a `details.pids` label
+/// (`crates/qsh-core/src/ops/host.rs`'s `resolve_route`), never checked
+/// against a real OS process, so two fabricated, distinct values collide
+/// exactly the way two real nextest test processes' genuine pids do.
+struct FabricatedDaemon {
+    socket_path: std::path::PathBuf,
+    shutdown: tokio::sync::oneshot::Sender<()>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl FabricatedDaemon {
+    /// Signal shutdown and wait for the accept loop to drain — the same
+    /// two steps [`LocalctlHandle::shutdown`] performs for a real one.
+    async fn shutdown(self) {
+        let _ = self.shutdown.send(());
+        let _ = self.task.await;
+    }
+}
+
+async fn attach_fabricated_localctl(
+    harness: &ReverseHarness,
+    paths: &Paths,
+    pid: u32,
+) -> FabricatedDaemon {
+    use qsh_core::localctl::daemon::{LocalctlDaemon, LocalctlListener};
+    let bound = LocalctlListener::bind(paths, pid).expect("bind fabricated localctl socket");
+    let socket_path = bound.socket_path.clone();
+    let daemon = LocalctlDaemon::new(harness.listen.clone());
+    let (shutdown, rx) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(daemon.run(bound, async move {
+        let _ = rx.await;
+    }));
+    FabricatedDaemon {
+        socket_path,
+        shutdown,
+        task,
+    }
+}
+
+/// Two independent, live "widget" registrations whose localctl sockets are
+/// deliberately forced into one shared directory — the shape
+/// `$XDG_RUNTIME_DIR/qsh` takes when several concurrently running
+/// `nextest` processes all fall back to the same ambient directory
+/// (`Paths::runtime_dir`'s own doc), which is what actually produced the
+/// `InvalidArgument`/"registered live by more than one qsh listen daemon"
+/// failure this suite hit in CI. Discovery over that shared directory must
+/// fail closed with `resolve_route`'s two-daemon-duplicate check
+/// (`crates/qsh-core/src/ops/host.rs`), naming both fabricated pids. A
+/// third, independent daemon registered under `fresh_paths`'s own isolated
+/// directory carries the identical name and must resolve cleanly
+/// regardless — proof that `fresh_paths`'s `with_runtime_dir` pin, not
+/// luck, is what keeps `interactive_dash_l_over_reverse_round_trips_at_the_
+/// ops_level` (above) green under concurrent nextest processes.
+#[tokio::test(flavor = "multi_thread")]
+async fn discovery_fails_closed_on_a_shared_runtime_dir_but_resolves_cleanly_once_isolated() {
+    let shared_dir = tempfile::tempdir().expect("shared decoy runtime dir");
+
+    let decoy_a_target = make_identity();
+    let decoy_a_harness = ReverseHarness::start_with(
+        Arc::new(AllowAllPinned),
+        false,
+        pin(&decoy_a_target.fingerprint.to_string(), "widget"),
+    )
+    .await;
+    let decoy_a_scratch = tempfile::tempdir().expect("tempdir");
+    let decoy_a_paths = Paths::new(
+        decoy_a_scratch.path().join("config"),
+        decoy_a_scratch.path().join("state"),
+    )
+    .with_runtime_dir(shared_dir.path().to_path_buf());
+
+    let decoy_b_target = make_identity();
+    let decoy_b_harness = ReverseHarness::start_with(
+        Arc::new(AllowAllPinned),
+        false,
+        pin(&decoy_b_target.fingerprint.to_string(), "widget"),
+    )
+    .await;
+    let decoy_b_scratch = tempfile::tempdir().expect("tempdir");
+    let decoy_b_paths = Paths::new(
+        decoy_b_scratch.path().join("config"),
+        decoy_b_scratch.path().join("state"),
+    )
+    .with_runtime_dir(shared_dir.path().to_path_buf());
+
+    let (own_dir, own_paths) = fresh_paths();
+    let own_target = make_identity();
+    let own_harness = ReverseHarness::start_with(
+        Arc::new(AllowAllPinned),
+        false,
+        pin(&own_target.fingerprint.to_string(), "widget"),
+    )
+    .await;
+
+    let (decoy_a_shutdown_tx, decoy_a_shutdown_rx) = tokio::sync::oneshot::channel();
+    let (decoy_b_shutdown_tx, decoy_b_shutdown_rx) = tokio::sync::oneshot::channel();
+    let (own_shutdown_tx, own_shutdown_rx) = tokio::sync::oneshot::channel();
+
+    let decoy_a_run =
+        decoy_a_harness.run_target(&decoy_a_target, "device-id", "controller", None, async {
+            let _ = decoy_a_shutdown_rx.await;
+        });
+    let decoy_b_run =
+        decoy_b_harness.run_target(&decoy_b_target, "device-id", "controller", None, async {
+            let _ = decoy_b_shutdown_rx.await;
+        });
+    let own_run = own_harness.run_target(&own_target, "device-id", "controller", None, async {
+        let _ = own_shutdown_rx.await;
+    });
+
+    let test_fut = async {
+        wait_for(TIMEOUT, || decoy_a_harness.listen.registry().get("widget")).await;
+        wait_for(TIMEOUT, || decoy_b_harness.listen.registry().get("widget")).await;
+        wait_for(TIMEOUT, || own_harness.listen.registry().get("widget")).await;
+
+        // Two fabricated pids, deliberately distinct, both bound under
+        // `shared_dir` — the two-daemon collision itself.
+        let decoy_a_daemon =
+            attach_fabricated_localctl(&decoy_a_harness, &decoy_a_paths, 900_001).await;
+        let decoy_b_daemon =
+            attach_fabricated_localctl(&decoy_b_harness, &decoy_b_paths, 900_002).await;
+
+        let probe_scratch = tempfile::tempdir().expect("tempdir");
+        let probe_paths = Paths::new(
+            probe_scratch.path().join("config"),
+            probe_scratch.path().join("state"),
+        )
+        .with_runtime_dir(shared_dir.path().to_path_buf());
+        let probe_ops = Ops::new(probe_paths);
+        let err = tokio::task::spawn_blocking(move || probe_ops.resolve_host_route("widget"))
+            .await
+            .expect("join resolve_host_route")
+            .expect_err(
+                "two live \"widget\" daemons sharing one runtime dir must fail closed, not \
+                 guess",
+            );
+        assert_eq!(
+            err.code,
+            qsh_proto::ErrorCode::InvalidArgument,
+            "expected the two-daemon-duplicate InvalidArgument, got {err:?}"
+        );
+        let pids: Vec<u64> = err
+            .details
+            .get("pids")
+            .and_then(serde_json::Value::as_array)
+            .expect("details.pids must be an array")
+            .iter()
+            .map(|v| v.as_u64().expect("each pid is a number"))
+            .collect();
+        assert_eq!(
+            pids,
+            vec![900_001, 900_002],
+            "details.pids must name exactly the two colliding fabricated daemons, sorted: {err:?}"
+        );
+
+        // The isolated "own" directory sees only its own daemon and
+        // resolves cleanly despite the collision above still being live —
+        // the property this file's own interactive `-L` test depends on.
+        let own_ops = Ops::new(own_paths.clone());
+        let own_localctl = attach_fabricated_localctl(&own_harness, &own_paths, 900_003).await;
+        let route = tokio::task::spawn_blocking(move || own_ops.resolve_host_route("widget"))
+            .await
+            .expect("join resolve_host_route")
+            .expect(
+                "an isolated runtime dir must resolve \"widget\" cleanly despite two unrelated \
+                 decoys elsewhere sharing the same name",
+            );
+        match route {
+            HostRoute::Reverse { socket, .. } => {
+                assert_eq!(
+                    socket, own_localctl.socket_path,
+                    "must resolve to this test's own daemon, not a decoy's"
+                );
+            }
+            other => panic!("expected a live reverse route for \"widget\", got {other:?}"),
+        }
+
+        decoy_a_daemon.shutdown().await;
+        decoy_b_daemon.shutdown().await;
+        own_localctl.shutdown().await;
+
+        let _ = decoy_a_shutdown_tx.send(());
+        let _ = decoy_b_shutdown_tx.send(());
+        let _ = own_shutdown_tx.send(());
+    };
+
+    let (decoy_a_result, decoy_b_result, own_result, ()) =
+        tokio::join!(decoy_a_run, decoy_b_run, own_run, test_fut);
+    decoy_a_result.expect("decoy A run_target must exit cleanly on shutdown");
+    decoy_b_result.expect("decoy B run_target must exit cleanly on shutdown");
+    own_result.expect("own run_target must exit cleanly on shutdown");
+    decoy_a_harness.shutdown().await;
+    decoy_b_harness.shutdown().await;
+    own_harness.shutdown().await;
+    drop(own_dir);
 }

@@ -591,6 +591,14 @@ fn interactive_dash_d_opens_listener_beside_session() {
 /// uses for `-L` alone. `parse_dynamic_forwards` runs (and fails) before
 /// `session.open` regardless of flag order (`tui::unix::run`'s own doc),
 /// so the `-L` spec here never gets a chance to open anything either.
+///
+/// `#[cfg(unix)]`: this contract only exists on unix. On Windows,
+/// `tui::run`'s `#[cfg(not(unix))]` branch (`crates/qsh-cli/src/tui/mod.rs`)
+/// refuses the interactive form with `UNSUPPORTED` before spec validation
+/// ever runs, so the `INVALID_ARGUMENT` this test expects never happens
+/// there — same platform split every other interactive-entry test in this
+/// file already draws.
+#[cfg(unix)]
 #[test]
 fn interactive_dash_d_non_loopback_bind_creates_no_session_even_combined_with_local_forward() {
     let fleet = Fleet::start();
