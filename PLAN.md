@@ -16,7 +16,7 @@ M9는 CLI/JSON 축만 건드린다. M8이 얼린 wire 계약(`docs/design/protoc
 넷 중 어느 것도 M9의 코드 스텝을 막지 않는다. 다만 M9 DoD 1은 M7 DoD 1에 직접 종속이고(비교 대상이 그 측정치다), M8 DoD 4는 §6.0(M8판)이 운영자에게 넘긴 판단을 그대로 승계한다.
 
 - [ ] M7 DoD 1 — 스톱워치 baseline 3회: 한 번도 설정한 적 없는 두 장비가 README만 보고 `qsh user@host`까지 5분 이내, 독립 3회. 미실행이고 사람이 해야 한다. 기준은 `docs/campaigns/m7-stopwatch.md`에 사전 고정됐고 회차 환경은 `scripts/stopwatch/round.sh`가 준비하지만 재는 대상이 사람 시간이다(같은 문서 §9). `docs/ROADMAP.md:132`가 Q4로 순서를 못박았다 — 현행 표면으로 먼저 재지 않으면 M9 DoD 1의 "단축 기록"이 성립하지 않는다. 실행 자리는 Step 0. 소유: 사람.
-- [ ] M8 DoD 2 — 24h/100-session soak: idle listener ≤30MB, 세션당 buffer ≤8MB, 사이클 중 fd 무증가. 저장소 안의 상태는 `docs/campaigns/m8-soak.md:179`의 §7 회차 표에 run #5 행이 FAIL로 채워져 있다는 것이다 — `ROADMAP.md:112`가 명명한 이 세 축은 실측 통과했고, 회차 verdict FAIL의 근거는 그 셋이 아니라 `soak.rs`가 별도로 걸는 DIAL_EXHAUSTED 8건이다(`m8-soak.md` §8 "run #5 결과"에 새 실패 모드로 기록). `PLAN.md:296`의 태그 정책대로 `v0.1.0-alpha.3` 태그 대상은 아직 이 트리로 확정되지 않았다. 착수 시점에 `m8-soak.md` §7·§8을 다시 읽어 최신 상태를 확인한다. 소유: soak 회차.
+- [x] M8 DoD 2 — 24h/100-session soak: idle listener ≤30MB, 세션당 buffer ≤8MB, 사이클 중 fd 무증가. **2026-09-21 마감.** run #6(트리 8c4f319, 2026-09-19 17:21 UTC 시작, 86564.262s 완주)이 `run.sh: PASS`로 끝났다 — idle listener 27308 KiB, 세션당 1215.0 KiB, listener fd 11→12(quarters 델타 -5), dial_exhausted 0, dead_sessions 0. 기록은 `docs/campaigns/m8-soak.md` §5~§8 "run #6 결과". run #5의 verdict FAIL은 `ROADMAP.md:112`의 세 축이 아니라 `soak.rs`가 별도로 거는 DIAL_EXHAUSTED 8건 때문이었고 원인은 호스트 nftables 규칙이었다(§8 "run #5 결과"). run #6은 그래서 §2 9번대로 네트워크 네임스페이스 안에서 돌렸다. §7 태그 정책의 재지정 규칙대로 `v0.1.0-alpha.3` 대상은 run #6이 실제로 돈 트리 `8c4f319`다(§7 재지정 항목). 태그 문면과 생성은 사람이 한다. 소유: soak 회차.
 - [ ] M8 DoD 3 — 실기기 mobility ≥60회: Wi-Fi↔테더링 자동 유지+resume ≥95%, migrated/resumed 분해 보고. 통과 기준은 `docs/campaigns/m2-mobility.md`에 사전 정의. 사람이 실행한다. 소유: 사람.
 - [ ] M8 DoD 4 — wire freeze 후 독립 리뷰 계약(SC7): 문면은 `docs/design/protocol.md` §16에 "초안 — 발효 전"으로 서 있고 발효와 리뷰 계약은 M8 §6.0 판정 대기다. 선택지는 둘뿐이었다 — (가) 지금 예약하고 freeze를 예약일 6주 전으로 앞당긴다, (나) 예약 없이 freeze만 진행하고 리뷰를 미루며 PRD를 개정한다(`docs/ROADMAP.md:169` 리스크 5). 저장소 밖 조직 액션이라 에이전트가 대신할 수 없다. 소유: 운영자(M8 §6.0 승계). M9는 이 판정을 기다리지 않지만, §16 발효 소커밋에 딸린 잔여 셋(CLOSE `0x1003` 이중 이름 처분, README Security posture 한 줄, DoD 4 문구)은 M9 기간에도 M8 소관으로 남는다.
 
@@ -282,6 +282,8 @@ M9가 wire를 건드리지 않는다는 머리말의 원칙에 예외가 하나 
 9. 사실이 바뀐 서술을 고친다. `forward.socks` doc과 `ALWAYS_DENIED_NO_OP` 사유 문면, `docs/design/threat-model.md` §2·§4·§7, `docs/design/architecture.md`, `docs/design/testing.md`, `docs/campaigns/m8-adversarial-load.md`의 두 행이 대상이다. threat-model의 `-D` 행에는 역방향 경로도 넣는다.
 10. acceptance. 실제 `curl --socks5-hostname`을 qsh SOCKS listener로 통과시키는 `socks_curl` 테스트를 CI acceptance 잡에 넣는다. 양성 경로, host-local 필터, ACL 거부, 종료 뒤 포트 재bind를 확인한다.
 
+**(a)-추기 — 항목 7·8 착지 (2026-09-21, main 세션).** 항목 7은 dbd7d59, 항목 8은 8dd604d로 main에 올랐다. 8dd604d의 CI(run 35476274774)는 테스트 둘에서 빨갰다. Linux에서는 `$XDG_RUNTIME_DIR`이 잡혀 있어 nextest 프로세스들이 runtime dir 하나를 공유했고, 실제 discovery로 이름을 푸는 역방향 테스트가 다른 테스트의 daemon까지 보고 거절당했다. Windows에서는 대화형 attach가 spec 검사 전에 `UNSUPPORTED`로 끝나 단언이 어긋났다. 제품 코드는 그대로 두고 c4ab4c8이 테스트만 고쳤다(runtime dir 격리와 격리 여부를 고정하는 새 테스트, `cfg(unix)`). c4ab4c8의 CI 35555489133·fuzz-smoke 35555489153·load 35555489142 전부 초록. 항목 9·10이 남았다.
+
 **(b) 완료 기준.**
 
 - `DYNAMIC_FORWARD_UNSUPPORTED`가 저장소에 남지 않는다. retired 사유 문자열과 ADR 본문만 예외다.
@@ -316,7 +318,7 @@ M9가 wire를 건드리지 않는다는 머리말의 원칙에 예외가 하나 
 - Windows leg. M7 Step 3·Step 5가 둘 다 `cfg(not(unix))` 블록 때문에 CI에서 붉어졌다. 각 스텝 게이트에 `cargo check --target x86_64-pc-windows-gnu`를 넣는다.
 - 기존 fixture 불변이 `--as`·`assigned_name`의 `skip_serializing_if` 처리에 달려 있다. 빠뜨리면 `trust.invite.json`이 흔들리고 DoD 5가 즉시 깨진다. 주소 축은 위험이 아니다 — ADR-0014 결과(`:65`)가 열거한 8개 fixture는 `address`를 이미 `"<address>"`로 마스킹한다.
 - 신규 fixture의 결정성. `cert_pem`(매 실행 새 키 재료의 파생물)과 `service.*`의 unit 경로(테스트별 `HOME` tempdir)가 `normalize` 마스크에 걸리지 않으면 golden이 회차마다 달라진다. Step 6이 `normalize`에 `cert_pem`을 더하고 Step 8이 필드를 `path`로 명명한다.
-- M8 DoD 2 soak과 트리 분기. M9 커밋이 main에 얹히는 동안 soak은 `525a2a5` 트리에서 돈다 — §7 태그 정책이 그 분리를 명문화한다.
+- M8 DoD 2 soak과 트리 분기. 통과 회차(run #6)는 `8c4f319`에서 돌았고 그 뒤 main에 얹힌 M9 커밋은 server·tunnel 경로를 바꾼다 — §7 태그 정책의 재지정 항목이 그 분리를 기록한다. 닫힌 DoD라 감시 항목에서는 빠지지만, 태그가 `8c4f319`를 가리키는지는 Step 11 절차 1이 확인한다.
 - perf 게이트 flake 여지 — M8 Step 8 실측에서 dev 프로필 throughput 비율이 0.826까지 내려간 회차가 있었다(기준 0.80). M9는 데이터 경로를 건드리지 않으므로 0.80 아래가 나오면 러너 변동을 먼저 의심한다.
 
 ### 4.1 구현 중 확정할 값 (해당 step (a)에 근거와 함께 추기)
@@ -366,8 +368,9 @@ M9가 wire를 건드리지 않는다는 머리말의 원칙에 예외가 하나 
 
 - 실측(2026-09-16): 저장소의 태그는 `v0.1.0-alpha.1`·`v0.1.0-alpha.2` 둘뿐이다 — `v0.1.0-alpha.3`은 아직 찍혀 있지 않다. `docs/ROADMAP.md:138`은 이 태그를 전제로 Homebrew tap 스켈레톤(`DaveDev42/homebrew-tap`, release.yml의 `homebrew-tap` job)을 미리 배선해 뒀다고 적고, formula sha256이 자리표시자라고 밝힌다. (2026-09-18 갱신: tap 쓰기 자격은 fine-grained PAT 가 아니라 tap 저장소의 write deploy key — 시크릿 `HOMEBREW_TAP_DEPLOY_KEY` — 로 바꿨고 시크릿은 등록돼 있다. 첫 릴리스의 formula 는 여전히 사람이 tap 에 밀어 넣는다.)
 - 정책: `v0.1.0-alpha.3`은 HEAD가 아니라 soak-equivalent tree인 `525a2a5`(`build(deps): rustls 0.23.45 로 lockfile 갱신 — RUSTSEC-2026-0285 로 빨개진 cargo deny 게이트 복구`)에 찍는다. 근거는 M8 DoD 2의 판정 조건이다 — `docs/campaigns/m8-soak.md:27`이 "24h 내내 같은 바이너리(같은 sha256)로 재야" 한다고 회차 요건을 고정했고 `:41`이 트리 clean/dirty를 회차 기록에 남기라고 요구한다. 릴리스 태그가 HEAD를 가리키면 soak 판정 트리와 릴리스 트리가 갈라져 DoD 2의 근거가 무효가 된다.
-- soak 회차가 실패하면 태그 대상은 통과 회차가 실제로 돈 트리로 재지정한다 — 그 트리의 커밋과 바이너리 sha256을 `docs/campaigns/m8-soak.md` §7 회차 표에서 인용한다. 현재 문면은 run #5 통과를 전제하지 않는다.
-- M9 커밋은 `525a2a5` 이후 main에 얹히고 다음 태그에 실린다. M9 기간에 `525a2a5`를 가리키는 태그를 옮기지 않는다. M9 PLAN.md 작성 커밋 자체도 이 규칙 아래 있다. Step 0의 baseline 측정도 이 트리에서 한다.
+- soak 회차가 실패하면 태그 대상은 통과 회차가 실제로 돈 트리로 재지정한다 — 그 트리의 커밋과 바이너리 sha256을 `docs/campaigns/m8-soak.md` §7 회차 표에서 인용한다.
+- **재지정(2026-09-21).** run #5(dd66e0f, `525a2a5`와 동등 트리)는 FAIL이었고 run #6이 `8c4f319`(`test(m8): soak 회차 #6 계측을 넣는다`, 바이너리 sha256 `ee250603ff43d1097af5875caa7b31d2edc0d0f301f96cfd218526b745afc2ef`)에서 PASS했다(`m8-soak.md` §7 회차 표 6행). 위 규칙대로 `v0.1.0-alpha.3` 대상은 `8c4f319`다. 이 트리에는 `525a2a5` 뒤 36 커밋이 들어 있고 그중 M9 코드는 Step 1(d5eef05)·2(d71cb38)·3a(858acb5)·3b(51455dc)와 모듈 분할 리팩터다. `8c4f319` 뒤의 M9 커밋(Step 12의 `-D` 계열, f331cd0의 PTY 홈 폴백 등)은 server·tunnel 경로를 바꾸므로 다음 태그에 실린다. 태그 문면과 생성은 사람이 한다.
+- M9 기간에 `8c4f319`를 가리키는 태그를 옮기지 않는다. M9 PLAN.md 작성 커밋 자체도 이 규칙 아래 있다. Step 0의 baseline 측정은 태그 대상과 별개로 M9 이전 표면인 `525a2a5`에서 한다 — 그 측정의 목적이 "현행 표면" 기록이라서다(§0.2 M7 DoD 1).
 - 이 정책을 명문화한 file:line은 저장소에 없다(교체 전 `PLAN.md`에도 `docs/ROADMAP.md`에도 해당 문장이 없다 — 실측). 이 절이 그 명문화이고, §5.6이 Step 11 마감 커밋에서 ROADMAP으로 한 줄 이관한다.
 - TAG-AUDIT 형식은 유지하고 대상만 M9로 다시 가리킨다 — Step 11의 (a) 선행 감사 / (b) 마감 커밋에 남길 것 / (c) 완료 판정 3필드, 절차 1은 "대조 문장 N건 — 검증 M, 후속 마일스톤 명시 유예 P, 열린 DoD 종속 Q, 대조 대상 아님 R, 충돌 S", 절차 2는 "대조 항목 N개 중 불일치 M", 산출물은 `$SP/step11/TAG-AUDIT.md`.
 

@@ -64,7 +64,7 @@ main이 Dave-Windows-WSL 단독 점유에서 돌린 24h 실측(이 워크플로 
    그 규칙은 호스트 소유자의 결정이고 다른 용도로 의도된 예약일 수 있다.
 
    ```sh
-   unshare -rn sh -c 'ip link set lo up; exec scripts/soak/run.sh …'
+   unshare -rn sh -c 'ip link set lo up; exec unshare -U --map-user=1000 --map-group=1000 scripts/soak/run.sh …'
    ```
 
    `-r`이 user namespace를 함께 만들어 `ip link`를 쓸 수 있게 한다. `net`만
@@ -75,6 +75,22 @@ main이 Dave-Windows-WSL 단독 점유에서 돌린 24h 실측(이 워크플로 
    부르면 통과한다. netns는 RSS·버퍼·fd 어느 판정 축에도 영향이 없고
    qsh와 무관한 호스트 artifact 하나를 제거할 뿐이므로, 이 회차 조건을
    여기에 전제로 적고 §5 기록에 남긴다.
+
+   안쪽 `unshare -U --map-user=… --map-group=…`은 빼면 안 된다. 바깥 `-r`은
+   호출자를 네임스페이스 안 uid 0으로 매핑하므로, 그대로 `run.sh`를 부르면
+   세션 PTY 자식이 `getpwuid(0)`의 홈 `/root`(0700, 실제 root 소유)에
+   들어가지 못해 spawn이 EACCES로 죽는다(run #6 1차 시도, 1.7초). 안쪽
+   매핑이 원래 uid/gid를 되찾아 준다 — 값은 `id -u`/`id -g`에 맞춘다.
+   f331cd0 이후의 바이너리는 홈에 못 들어가도 `/`에서 세션을 열어 죽지는
+   않지만, 회차는 실제 사용자 홈에서 여는 쪽이 프로덕션 모양에 가까우므로
+   중첩 매핑을 그대로 쓴다.
+10. **회차 동안 호스트를 재부팅하지 않는다.** 사람 쪽 항목이다. Windows
+    Update가 건 재부팅으로 run #3·#4·#6 2차가, 시작 메뉴의 수동 재시작으로
+    run #6 3차가 죽었다. 넷 다 verdict 없이 시간을 잃었다. WSL 호스트라면
+    Windows 쪽 재부팅이 곧 회차 손실이다. Windows Update 일시 중지는 호스트
+    소유자의 결정이고 회차를 여는 쪽이 대신 바꾸지 않는다. 출력 디렉터리는
+    `/tmp`가 아니라 재부팅에도 남는 곳(`$HOME` 아래)에 둔다 — run #6 2차는
+    `/tmp` 출력이 재부팅으로 지워져 부분 자료도 남지 않았다.
 
 ## 3. 사전 정의된 합격/불합격 기준 (실행 전에 고정)
 
@@ -222,20 +238,24 @@ heartbeat는 카운터가 움직이면 매초, 아니면 5초에 한 줄이 나�
 
 ## 5. 환경 기록 (실행 시작 시 채운다 — 대부분 `env.txt`가 자동으로 채운다)
 
-| 항목 | 값 |
-|---|---|
-| 날짜 (UTC) | 2026-09-16T10:05:00Z |
-| 조작자 | main (Dave-Windows-WSL 단독 점유 실측) |
-| 호스트 / OS / 커널 | Linux Dave-Windows-WSL 6.18.33.2-microsoft-standard-WSL2 #1 SMP PREEMPT_DYNAMIC Thu Jun 18 21:54:43 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux |
-| `ulimit -n` | 65536 |
-| `nproc` | 8 |
-| qsh 커밋 SHA | dd66e0fb3ba316f130f93ee7ff847a6635b74140 |
-| working tree 상태 (clean/dirty) | clean |
-| 바이너리 경로 / sha256 | /home/dave/Projects/github.com/qsh/target/release/qsh / 85f7074630c8681d527381550ec9dd68707a0c884c16219d3d10ec0019cbe65d |
-| fuzz 라운드 종료 시각 (이 런 시작 전) | 기록 없음 — `env.txt`에 해당 필드가 없다. `uptime`이 "up 13 min"으로 찍혀 있어, 이 런은 fuzz 라운드 종료 뒤가 아니라 호스트 재부팅 직후(§2.5 전제와 다른 경로)에 시작됐다. |
-| `QSH_SOAK_*` 오버라이드 (기본값과 다르면) | DURATION_SECS=86400, SESSIONS=100(§4 절차의 표준 24h/100-session 호출값), SAMPLE_SECS=5, CYCLE_SECS=60, CYCLE_FRACTION=0.1, ABANDON=5, RESUME_TTL_SECS=600. `env.txt` 실측값 그대로다 — 어느 값이 기본값이고 어느 값이 오버라이드인지 가르는 대조표가 저장소에 없어 전부 나열했다. |
+| 항목 | run #5 | run #6 |
+|---|---|---|
+| 날짜 (UTC) | 2026-09-16T10:05:00Z | 2026-09-19T17:21:09Z |
+| 조작자 | main (Dave-Windows-WSL 단독 점유 실측) | main (Dave-Windows-WSL 단독 점유 실측) |
+| 실행 방식 | 호스트 netns에서 직접 | §2 9번대로 `unshare -rn` 네트워크 네임스페이스 안. 그 안에 `unshare -U --map-user=1000 --map-group=1000`을 한 겹 더 두고 `run.sh`를 불렀다. 바깥 `-r`만 쓰면 uid가 0으로 매핑돼 세션 PTY가 `getpwuid(0)`의 홈 `/root`(0700)에 들어가지 못하고 spawn이 EACCES로 죽는다(1차 시도, 1.7s). |
+| 호스트 / OS / 커널 | Linux Dave-Windows-WSL 6.18.33.2-microsoft-standard-WSL2 #1 SMP PREEMPT_DYNAMIC Thu Jun 18 21:54:43 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux | 같음 |
+| `ulimit -n` | 65536 | 65536 |
+| `nproc` | 8 | 8 |
+| qsh 커밋 SHA | dd66e0fb3ba316f130f93ee7ff847a6635b74140 | 8c4f3191d3292789e2471d61f75d2ab0ec459d60 |
+| working tree 상태 (clean/dirty) | clean | clean |
+| 바이너리 경로 / sha256 | /home/dave/Projects/github.com/qsh/target/release/qsh / 85f7074630c8681d527381550ec9dd68707a0c884c16219d3d10ec0019cbe65d | /home/dave/qsh-soak6/target/release/qsh / ee250603ff43d1097af5875caa7b31d2edc0d0f301f96cfd218526b745afc2ef |
+| preflight_udp (§2 8번) | 없었다(회차 뒤에 생겼다) | 통과 — 네임스페이스 안 ephemeral 범위 32768-60999의 96개 표본 전부 loopback UDP 왕복 성공 |
+| fuzz 라운드 종료 시각 (이 런 시작 전) | 기록 없음 — `env.txt`에 해당 필드가 없다. `uptime`이 "up 13 min"으로 찍혀 있어, 이 런은 fuzz 라운드 종료 뒤가 아니라 호스트 재부팅 직후(§2.5 전제와 다른 경로)에 시작됐다. | fuzz 워커 없음. `uptime` "up 12 min" — 3차 시도를 끊은 수동 재시작 12분 뒤에 시작했다(§8 "run #6 결과"). |
+| `QSH_SOAK_*` 오버라이드 (기본값과 다르면) | DURATION_SECS=86400, SESSIONS=100(§4 절차의 표준 24h/100-session 호출값), SAMPLE_SECS=5, CYCLE_SECS=60, CYCLE_FRACTION=0.1, ABANDON=5, RESUME_TTL_SECS=600. `env.txt` 실측값 그대로다 — 어느 값이 기본값이고 어느 값이 오버라이드인지 가르는 대조표가 저장소에 없어 전부 나열했다. | run #5와 같다(`run.sh --duration 86400 --sessions 100`). |
 
 ## 6. 스냅숏 기록 (0h/1h/6h/12h/24h — `summary.txt`에서 그대로 옮긴다)
+
+### run #5
 
 | hour | t_secs | phase | listener_rss_kib | listener_fds | self_rss_kib | self_fds | live_sessions | cycles | echo_p95_ms | abandoned_live |
 |---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -245,11 +265,33 @@ heartbeat는 카운터가 움직이면 매초, 아니면 5초에 한 줄이 나�
 | 12 | 43203 | steady | 134132 | 120 | 565576 | 111 | 95 | 719 | 1.318 | 0 |
 | 24 | 86388 | steady | 128176 | 112 | 567880 | 109 | 95 | 1438 | 1.146 | 0 |
 
+### run #6
+
+| hour | t_secs | phase | listener_rss_kib | listener_fds | self_rss_kib | self_fds | live_sessions | cycles | echo_p95_ms | abandoned_live |
+|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 0 | 1 | boot | 14520 | 11 | 12992 | 14 | 0 | 0 | None | 0 |
+| 1 | 3601 | steady | 126340 | 107 | 563028 | 109 | 95 | 59 | 1.135 | 0 |
+| 6 | 21599 | steady | 126056 | 107 | 576256 | 109 | 95 | 359 | 1.199 | 0 |
+| 12 | 43200 | steady | 126084 | 107 | 585744 | 109 | 95 | 719 | 1.113 | 0 |
+| 24 | 86399 | steady | 125924 | 107 | 601292 | 109 | 95 | 1439 | 1.059 | 0 |
+
+§4.1의 새 아홉 열(19열 CSV부터). boot 행의 heartbeat 여섯 열은 첫
+heartbeat 이전이라 빈 칸이다(0이 아니라 자료 없음).
+
+| hour | admitted | retry | ignore | refuse | connection_quota_refused | live_conns | dial_exhausted | dial_retries | dead_sessions |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 0 | | | | | | | 0 | 0 | 0 |
+| 1 | 3430 | 3430 | 0 | 0 | 0 | 95 | 0 | 0 | 0 |
+| 6 | 18919 | 18922 | 0 | 0 | 0 | 95 | 0 | 1 | 0 |
+| 12 | 37448 | 37451 | 0 | 0 | 0 | 95 | 0 | 1 | 0 |
+| 24 | 75884 | 75887 | 0 | 0 | 0 | 95 | 0 | 1 | 0 |
+
 ## 7. §3 표 회차 기록
 
 | 회차 | idle RSS baseline/idle_end (KiB) | 세션당 buffer (KiB) | RSS 추세 (MiB/h) | listener fd baseline/idle_end | self fd 1/4 구간 델타 | echo p95 최댓값 (ms) | TTL reap (abandoned_live) | 판정 | 비고 |
 |---:|---|---|---|---|---|---|---|---|---|
 | 5 | 14236 / 30244 | 1266.3 (peak=140868) | -0.0480 | 11 / 19 | -1 | 15.847 | 0 | FAIL | 트리 dd66e0f, 바이너리 sha256 85f7074630c8681d527381550ec9dd68707a0c884c16219d3d10ec0019cbe65d. 실행 시간 86636.283s(설정 86400s+drain, ≈24h04m). soak.rs 자체 verdict FAIL — DIAL_EXHAUSTED: 8건(사이클 교체 dial이 재시도 3회 모두 소진, slot 81×2·43·54·94·50·15·93). dial_retries=1138(정보성), dead_sessions=0(SESSION_STALLED 없음), listener fd quarters 델타=-1·self fd quarters 델타=-1(둘 다 allowance +2 이내, 위반 아님). summarize.py는 §3 세 축(idle RSS·세션당 buffer·RSS 추세) 기준 pass. run.sh 결합 verdict는 FAIL(test exit=100, summarize exit=0) — DIAL_EXHAUSTED>0은 `soak.rs`가 별도로 거는 축이고 §3 사전 기준 9행에는 없으며 DoD 2 세 축과도 별개다. 그 축의 원인은 이 호스트의 nftables 규칙 `inet dave_mosh`(`udp dport 60000-61000 drop`, loopback 예외 없음)로 규명됐다 — 제품 결함이 아니다. 근거와 재현은 §8 "run #5 결과" 참고. |
+| 6 | 14520 / 27308 | 1215.0 (peak=136024) | +0.1647 | 11 / 12 | -1 | 28.438 | 0 | PASS | 트리 8c4f319, 바이너리 sha256 ee250603ff43d1097af5875caa7b31d2edc0d0f301f96cfd218526b745afc2ef. 실행 시간 86564.262s(설정 86400s+drain, ≈24h03m). §2 9번대로 네트워크 네임스페이스 안에서 돌렸다(§5 "실행 방식"). run.sh 결합 verdict PASS(test exit=0, summarize exit=0), nextest `PASS [86564.262s] soak_session_load`. dial_exhausted=0, dead_sessions=0, dial_retries=1(정보성). listener fd quarters 델타=-5, self fd quarters 델타=-1. echo p95 스파이크 0/17276 창(0.0%). accept 루프 heartbeat 최종값 admitted=75984 retry=75987 ignore=0 refuse=0 connection_quota_refused=0 (§4.1 1번, 이 회차부터 계측). TTL reap: abandoned_live 5 → 0이 t=626s 표본과 t=631s 표본 사이(판정선 630s). 표본 17279행, SLOW 표시 25회(시간당 1회, 정상). 상세는 §8 "run #6 결과". |
 
 `FAIL`이면 `summarize.py`가 찍는 위반 문구를 "비고"에 그대로 옮긴다 —
 특히 self fd 위반이 `FD_GROWTH_CLIENT` 태그를 달고 있으면 M7 carryover
@@ -415,6 +457,74 @@ loopback 예외를 두는 것 중 하나이고, `qsh` 프로세스가 자기 소
 피할 수 있는 것은 아니다(bind 는 OS가 주는 `:0` 포트다). netns 는 그
 프로세스 수준의 우회가 아니라 규칙이 존재하지 않는 별개의 네트워크 스택을
 쓰는 것이고, 권한 없이 만들 수 있으며 호스트 설정을 바꾸지 않는다.
+
+### run #6 결과 (2026-09-19 17:21 UTC 시작, 8c4f319)
+
+§3의 판정 축 전부 pass다. idle listener RSS 14520/27308 KiB(bound 30720
+KiB), 세션당 buffer 1215.0 KiB(peak 136024 KiB, bound 8192 KiB), RSS 추세
++0.1647 MiB/h(86393s 구간, bound <1.0), listener fd 11/12(allowance +2)와
+quarters 델타 -5, self fd quarters 델타 -1, echo p95 스파이크 0/17276
+창(0.0%, allowance 10%)과 최댓값 28.438 ms(bound 50 ms), TTL reap(아래)이다.
+§4.1이 더한 두 축도 pass다. dial_exhausted=0, dead_sessions=0.
+dial_retries=1(정보성). run.sh 결합 verdict는 PASS(test exit=0, summarize
+exit=0)다. 이 재시도 계열에서 §3 아홉 축과 soak.rs 자체 assert가 모두
+통과한 첫 회차다.
+
+idle_end RSS 27308 KiB는 bound까지 3412 KiB(11.1%) 남는다. run #5의 476
+KiB(1.5%)보다 넓다. 두 회차 값이 이만큼 다른 이유는 이 기록만으로 가릴 수
+없고 run #5가 남긴 "Step 5 이후 재조정 후보" 메모는 그대로 둔다. RSS 추세는
+run #5(-0.0480)와 달리 양수인데, steady 스냅숏 넷(1h/6h/12h/24h)은
+126340→126056→126084→125924 KiB로 평평하다. 기울기는 ramp 구간이 회귀에
+들어가 양수가 됐고 크기는 bound의 1/6이다. self_rss_kib가 563028→601292
+KiB로 오른 것은 §4.1 마지막 문단이 예고한 대로 테스트 프로세스가 서버
+stderr(heartbeat 수만 줄)를 메모리에 쌓기 때문이다. 판정 축은 아니다.
+
+TTL reap 판정선은 run #5와 같이 600s+30s=630s다. abandoned_live는 t=626s
+표본까지 5였고 t=631s 표본에서 0이 됐다. run #5(648s→661s 사이)보다
+판정선에 가깝다. 위반 없음.
+
+echo p95는 전 창이 50 ms 아래다. 최댓값 28.438 ms는 run #5의 15.847 ms보다
+크지만 스파이크 규칙(창의 10% 초과)과는 거리가 멀고 분기별 중앙값은
+1.119→1.072 ms로 baseline 1.015 ms 근처에 머문다. nextest SLOW 표시는
+25회로 시간당 한 번 찍히는 정상 빈도이고 호스트 경합 신호는 없다.
+
+run #5가 남긴 관측 공백은 닫혔다. 이번 회차부터 서버 accept 루프 heartbeat가
+CSV에 실린다(§4.1 1번). 24시간 최종값은 admitted=75984, retry=75987,
+ignore=0, refuse=0, connection_quota_refused=0이다. admission 계층이 24시간
+동안 어떤 dial도 버리거나 거절하지 않았다는 것을 이번에는 추론이 아니라
+카운터로 확인했다. retry가 admitted보다 3 많은데, Retry를 답한 뒤 토큰
+Initial이 돌아오지 않은 dial이 셋 있었다는 뜻이다(ADR-0009 stateless
+retry). 판정 축이 아니다. dial_retries는 run #5의 1138에서 1로,
+DIAL_EXHAUSTED는 8에서 0으로 내려왔다. run #5 §8이 원인으로 지목한 nftables
+규칙이 없는 네트워크 스택에서 돌리자 그 축이 사라졌다. 그 진단과 맞는
+결과다.
+
+실행 환경은 §5 "실행 방식" 행에 적었다. §2 9번대로 `unshare -rn` 네트워크
+네임스페이스 안에서 돌렸고 그 안에서 `unshare -U --map-user=1000
+--map-group=1000`을 한 겹 더 두고 `run.sh`를 불렀다. 1차 시도(14:39:56Z)는
+1.7초 만에 죽었다. `unshare -r`이 호출자를 네임스페이스 안 uid 0으로
+매핑하고 세션 PTY 자식이 `getpwuid(0)`의 홈 `/root`(0700, 실제 root 소유)로
+chdir하다 EACCES를 받아 spawn이 실패했기 때문이다. 회차는 중첩 userns로 uid
+1000을 되찾아 돌렸고 제품 쪽은 f331cd0(홈에 들어갈 수 없으면 sshd처럼
+경고만 남기고 `/`에서 연다)으로 따로 고쳤다. f331cd0은 트리 8c4f319 뒤에
+main에 올랐으므로 이 회차의 바이너리는 그 수정을 담고 있지 않다.
+
+24시간을 채우기까지 시도가 넷이었다. 2차(14:41Z)는 15:29:30Z에 Windows
+Update 재부팅(NVIDIA 드라이버 32.0.16.1088, System 이벤트 1074 "Service pack
+(Planned)")으로 죽었고 `/tmp`에 쓰던 출력이 재부팅으로 지워졌다.
+3차(16:33:22Z)는 17:07:55Z에 시작 메뉴에서 누른 수동 재시작(이벤트 1074,
+출처 StartMenuExperienceHost, "Other (Unplanned)")으로 죽었다. 4차는 그
+재시작 12분 뒤에 출력을 `/home/dave` 아래로 두고 시작해 완주했다. 회차 동안
+Windows Store 자동 다운로드 정책 키(`HKLM\SOFTWARE\Policies\Microsoft\WindowsStore`
+`AutoDownload`)를 걸어 두었다가 회차가 끝난 뒤 지웠다. Windows Update 자체는
+멈추지 않았다. 회차 중 호스트 재부팅으로 잃은 시도는 run #3·#4와 이번 2차·3차로
+넷이 됐다. §2 사전 조건에 "회차 동안 호스트를 재부팅하지 않는다"를 사람 쪽
+항목으로 넣었다.
+
+태그 대상 트리. `PLAN.md` §7의 재지정 규칙대로 `v0.1.0-alpha.3` 대상은 이
+회차가 돈 8c4f319다. 그 뒤 main에 얹힌 13 커밋(M9 `-D` 계열, f331cd0의 PTY
+홈 폴백, 테스트 타임아웃 보고)은 server·tunnel 경로를 바꾸므로 이 회차의
+관측은 8c4f319까지만 보증한다.
 
 ## 9. 재사용
 
