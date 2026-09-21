@@ -128,10 +128,24 @@ jobs:
       - name: Install the acceptance set this runner can provide
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y tmux vim zsh
+          sudo apt-get install --no-install-recommends -y tmux vim zsh curl
       - run: cargo nextest run -p qsh-cli --test tui_expect
         env:
           QSH_ACCEPTANCE_STRICT: bash,zsh,vim,tmux
+      # ADR-0019 / docs/CLI.md §6.9: a real `curl --socks5-hostname`
+      # driven through the real `-D` SOCKS5 listener — the positive path
+      # (pinned by an IPv4 literal), the host-local filter, an ACL deny, and
+      # a port re-bind after the holder exits. The by-hostname twin of the
+      # positive path only runs when this runner's own hostname happens to
+      # resolve to its LAN address (best-effort; it prints a skip line
+      # otherwise, same as a missing binary would). `curl` ships on
+      # ubuntu-24.04 already; it is still named in the apt-get line above so
+      # the promise is explicit, and `QSH_ACCEPTANCE_STRICT` below turns a
+      # missing install into a failure instead of a skip, same discipline as
+      # `tui_expect` above.
+      - run: cargo nextest run -p qsh-cli --test socks_curl
+        env:
+          QSH_ACCEPTANCE_STRICT: curl
       # The literal 60-second reverse-route blackout (`PLAN.md` M3 Step 8
       # (b)/(d), `docs/ROADMAP.md` M3 DoD 2). `QSH_ACCEPTANCE_SLOW` is what
       # keeps this out of the PR-gated unit suite (`docs/design/testing.md`'s

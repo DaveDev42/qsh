@@ -148,7 +148,7 @@ ACL glob 평가기는 fuzz보다 property test가 적합하다(위 L2 "정책 �
 
 | 변수 | 켜는 것 | 어디서 |
 |---|---|---|
-| `QSH_ACCEPTANCE_STRICT` | `tui_expect`의 대화형 셸 5종이 없을 때 skip이 아니라 실패, `tunnel_throughput`·`tunnel_echo_under_load`의 게이트 단언 | `ci.yml`의 `acceptance` job |
+| `QSH_ACCEPTANCE_STRICT` | `tui_expect`의 대화형 셸 5종이 없을 때 skip이 아니라 실패, `tunnel_throughput`·`tunnel_echo_under_load`의 게이트 단언, `socks_curl`의 curl 없을 때 skip이 아니라 실패 | `ci.yml`의 `acceptance` job |
 | `QSH_ACCEPTANCE_SLOW` | `reverse_blackout`의 실제 60초 차단 회차 | `ci.yml`의 `acceptance` job |
 | `QSH_LOAD_STRICT`·`QSH_LOAD_BIN` | `adversarial_load`·`soak`의 절대 RSS/fd/echo 단언과 측정 대상 release 바이너리 | `load.yml` |
 | `QSH_SOAK_*`(`DURATION_SECS`·`SESSIONS`·`SAMPLE_SECS`·`CYCLE_SECS`·`CYCLE_FRACTION`·`ABANDON`·`RESUME_TTL_SECS`·`CSV`) | soak 시나리오의 길이·세션 수·CSV 경로 | `scripts/soak/run.sh` |

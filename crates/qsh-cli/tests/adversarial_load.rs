@@ -9,9 +9,9 @@
 //!   rather than the existing `QSH_ACCEPTANCE_STRICT`/`QSH_ACCEPTANCE_SLOW`
 //!   (`tui_expect.rs`, `reverse_blackout.rs`,
 //!   `qsh-testkit/tests/tunnel_echo_under_load.rs`): those flip on the
-//!   acceptance job, which sits in `ci-ok`'s `needs` list
-//!   (`.github/workflows/ci.yml:192`) and therefore runs on every PR;
-//!   reusing them would drag T2's absolute-number scenarios into the PR
+//!   `acceptance` job, which sits in `ci-ok`'s `needs` list
+//!   (`.github/workflows/ci.yml`'s `ci-ok` job) and therefore runs on every
+//!   PR; reusing them would drag T2's absolute-number scenarios into the PR
 //!   gate, which J1 rejected in favor of a separate `load.yml` (push +
 //!   `workflow_dispatch` only).
 //! - With the gate on, `QSH_LOAD_BIN` must name the release binary to
@@ -21,7 +21,9 @@
 //!   DoD 5's 30 MB bound is about.
 //! - `#[ignore]` is not used anywhere in this file: nextest's ignore
 //!   filter does not say *why* a test did not run, and the env-gate +
-//!   `skip()` pattern above already has three precedents in this repo.
+//!   `skip()` pattern above already has four precedents in this repo
+//!   (`tui_expect.rs`, `reverse_blackout.rs`,
+//!   `qsh-testkit/tests/tunnel_echo_under_load.rs`, `socks_curl.rs`).
 //!
 //! Every scenario is `#[cfg(target_os = "linux")]` per J9/§2.2: the
 //! `/proc` readers in `common::rss_kib`/`common::open_fd_count` and
