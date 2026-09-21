@@ -15,19 +15,22 @@ One binary (`qsh`) is both ends: it serves, and it connects.
 
 ## Status
 
-Pre-alpha. **Not for production use.**
+Version 0.2.0. **Not for production use**: the M10 release gates
+(codesign, notarization, a static musl build, SLSA provenance, and a
+release-profile functional smoke test) are still open.
 
 M0 through M6 are done. M7 (trust UX, host profiles, `doctor`) has landed
 its features; what is left is the stopwatch campaign in
 `docs/campaigns/m7-stopwatch.md`, which a person has to run. M8 (hardening)
-has landed its code: the admission and quota defenses, the adversarial-load
-gate (`docs/campaigns/m8-adversarial-load.md`), the fuzz campaign
+has landed its code and closed its 24-hour soak (`docs/campaigns/m8-soak.md`
+run #6, PASS): the admission and quota defenses, the adversarial-load gate
+(`docs/campaigns/m8-adversarial-load.md`), the fuzz campaign
 (`docs/campaigns/m8-fuzz.md`: 72 fuzz-hours per parser target, no crashes),
-the wire-format freeze draft and the threat model. Three M8 items are still
-open: the 24-hour soak, the real-device mobility campaign, and the
-independent security review. The freeze draft takes effect once the
-operator decides on that review. M9 (the human-facing surface: naming,
-pairing, `qsh service install`) is underway. What works end to end today:
+the wire-format freeze draft and the threat model. Two M8 items are still
+open: the real-device mobility campaign and the independent security
+review. The freeze draft takes effect once the operator decides on that
+review. M9 (the human-facing surface: naming, pairing, `qsh service
+install`) is underway. What works end to end today:
 
 - `qsh exec host -- cmd`, in human mode or as a single `qsh.cli/v1` JSON
   envelope with the remote exit code, stdout and stderr.
@@ -85,10 +88,13 @@ http://internal-service/`.
 
 ## Install
 
-Prebuilt binaries for macOS (arm64, x86_64) and Linux (x86_64,
-aarch64) are attached to each [GitHub
-release](https://github.com/DaveDev42/qsh/releases). One line installs the
-latest:
+Prebuilt binaries for macOS (arm64, x86_64), Linux (x86_64,
+aarch64) and Windows (x86_64) are attached to each [GitHub
+release](https://github.com/DaveDev42/qsh/releases). The one-line installer
+below covers macOS and Linux; on Windows take the `.zip` (see [Manual
+download](#manual-download)).
+
+One line installs the latest:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/DaveDev42/qsh/main/scripts/install.sh | sh
@@ -542,7 +548,7 @@ already taken on crates.io. The workspace stays `publish = false` until M10.
 | M5 | ACL and audit | Done |
 | M6 | MCP adapter | Done (retired, ADR-0011) |
 | M7 | Trust UX, host profiles, `doctor` | Features done; stopwatch campaign open |
-| M8 | Hardening (fuzz, soak, real-device mobility campaign) | Code done; soak, mobility campaign, wire freeze and security review open |
+| M8 | Hardening (fuzz, soak, real-device mobility campaign) | Code done; mobility campaign, wire freeze and security review open |
 | M9 | Human-facing surface (naming, pairing, service install) | In progress |
 | M10 | Release (installers, Homebrew, notarization) | Planned |
 
@@ -687,6 +693,19 @@ Some of these are MVP scope decisions, some are unfinished work.
   > Reverse attach needs a directly reachable UDP path from the target to the controller. QSH provides no relay, NAT traversal, or discovery — that is out of scope for P0.
   >
   > Put the controller on a publicly routable address, a forwarded port, or an existing overlay such as WireGuard or Tailscale. If the controller itself is behind NAT, M3 has no answer for that.
+- macOS asks "Do you want the application “qsh” to accept incoming network
+  connections?" the first time a given build dials out, though `-L` and
+  `-D` listeners are both loopback-only, so neither triggers it. The
+  cause is qsh's QUIC client socket,
+  which binds the wildcard address (`0.0.0.0:0`/`[::]:0`,
+  `crates/qsh-transport/src/endpoint.rs`) on every dial because connection
+  migration across IP changes needs it; a release build is only ad-hoc
+  linker-signed, so macOS has no stable identity to remember an answer
+  against and asks again after every rebuild or reinstall. Developer ID
+  signing and notarization (M10) fix this; until then, sign the binary
+  yourself (`codesign -fs "<cert>" $(which qsh)`) or register it with
+  `/usr/libexec/ApplicationFirewall/socketfilterfw --add $(which qsh)
+  --unblockapp $(which qsh)` (the tool is not on `PATH`).
 
 ## Product boundary
 
