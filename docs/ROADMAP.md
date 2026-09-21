@@ -2,7 +2,7 @@
 
 **상태:** 확정 (구현과 어긋나는 내용을 발견하면 이 문서를 먼저 갱신한다)
 **작성일:** 2026-08-17 · **개정:** 2026-08-21 — 프로덕션 준비도 감사(HEAD `1d5d1b0`) 반영: M3/M5/M7/M8/M9 범위·수용 기준 증보, "마일스톤 마감 공통 절차" 신설. 새 마일스톤은 만들지 않았다 — 감사가 찾은 갭 전부를 기존 마일스톤에 명시 귀속시킨 것이 이 개정의 전부다. · **개정 2:** 2026-09-09 — 사람용 CLI 설계(design.html, 2026-09-08) 확정 결정 반영: 신규 `M9 — 사람용 표면`(4.3ew)을 M8과 구 M9 사이에 신설하고, 구 `M9 — 릴리스`는 `M10 — 릴리스`로 번호만 옮긴다. notarization 리드타임이 CLI 설계 일정을 막지 않게 하려는 결정(ADR-0012~0017, DECISIONS.md Q1). · **개정 3:** 2026-09-19 — 사용자 결정으로 SOCKS `-D`를 P1에서 M9 범위로 당긴다(ADR-0019).
-**현재 위치:** M9(사람용 표면) 실행 중 — 계획은 `PLAN.md`. M8은 코드 스텝을 마쳤고 DoD 1(파서 타깃당 누적 ≥72 fuzz-hours, crash 0 — 2026-09-11 마감, `docs/campaigns/m8-fuzz.md`)과 DoD 5(적대적 부하 하네스 — 2026-09-08 마감, `docs/campaigns/m8-adversarial-load.md`)는 닫혔다. 열린 채 M9로 넘어간 것은 넷이다(`PLAN.md` §0.2): M8 DoD 2(24h/100-session soak), DoD 3(실기기 mobility ≥60회), DoD 4(wire freeze 발효 + 독립 리뷰 계약), 그리고 M7 DoD 1 스톱워치 3회 측정(`docs/campaigns/m7-stopwatch.md`, 예행 1회만 끝났다). SC7 외부 보안 리뷰 예약은 M5→M6→M7→M8 네 번째 이월이고 wire freeze 리드타임은 이미 만료됐다. M7판 계획은 `docs/history/m7-plan.md`, M8판은 `docs/history/m8-plan.md`에 있다.
+**현재 위치:** M9(사람용 표면) 실행 중 — 계획은 `PLAN.md`. M8은 코드 스텝을 마쳤고 DoD 1(파서 타깃당 누적 ≥72 fuzz-hours, crash 0 — 2026-09-11 마감, `docs/campaigns/m8-fuzz.md`), DoD 2(24h/100-session soak — 2026-09-21 마감, `docs/campaigns/m8-soak.md` run #6 PASS), DoD 5(적대적 부하 하네스 — 2026-09-08 마감, `docs/campaigns/m8-adversarial-load.md`)는 닫혔다. 열린 채 M9로 넘어간 넷(`PLAN.md` §0.2) 중 남은 것은 셋이다: M8 DoD 3(실기기 mobility ≥60회), DoD 4(wire freeze 발효 + 독립 리뷰 계약), 그리고 M7 DoD 1 스톱워치 3회 측정(`docs/campaigns/m7-stopwatch.md`, 예행 1회만 끝났다). SC7 외부 보안 리뷰 예약은 M5→M6→M7→M8 네 번째 이월이고 wire freeze 리드타임은 이미 만료됐다. M7판 계획은 `docs/history/m7-plan.md`, M8판은 `docs/history/m8-plan.md`에 있다.
 
 이 문서는 P0 MVP까지의 canonical 마일스톤 기록이다. 각 마일스톤의 "수용 기준"이 곧 그 마일스톤의 **완료 정의(Definition of Done)** 다 — 수용 기준을 통과하는 테스트/시연 없이는 마일스톤을 닫지 않는다. SC 번호는 PRD §15 성공 기준의 순번이다 (SC1: 신규 두 장비 5분 내 연결, SC2: 한 명령 접속, SC3: 네트워크 전환 ≥95% 유지/resume, SC4: resume 가능한 단절에서 output 무손실, SC5: client crash가 remote PTY를 죽이지 않음, SC6: 모든 privileged op의 ACL 추적성, SC7: 공개 beta 전 독립 보안 리뷰).
 
@@ -105,7 +105,7 @@
   - **(감사 개정)** `trust remove` 후 기존 연결·신규 handshake 각각의 동작이 테스트로 고정되고 문서·doctor 고지와 일치.
 - **크기:** 2.5ew
 
-### M8 — Hardening 🔄 진행 중 (DoD 1·5 완료 · DoD 2·3·4 진행)
+### M8 — Hardening 🔄 진행 중 (DoD 1·2·5 완료 · DoD 3·4 진행)
 
 - **범위:** cargo-fuzz 타깃 + corpus + OSS-Fuzz 제출, stateful broker fuzzer, 24h soak, fd/메모리 누수 게이트, **실기기 mobility 캠페인**, perf 게이트(M4 게이트의 M8 HEAD 재확인 + 릴리스·방어선 대조 기록 — PLAN.md M8 Step 8; nightly perf job은 M10), threat model 문서, **wire format freeze**, 외부 보안 리뷰 착수.
 - **감사 개정 (2026-08-21) 추가 범위 — 적대적 부하 게이트:** 인터넷에 직접 노출되는 데몬에 현재 방어선이 하나도 없다(주소 검증 없음·연결 수 무제한·세션 수 무제한·`receive_window: VarInt::MAX`). ① `Incoming::retry()` 주소 검증(스푸핑 Initial 1패킷당 상태 생성 차단), ② accept 동시성 상한과 source rate limit, ③ `[serve].max_sessions`와 principal별 세션 쿼터, 그리고 **터널 전용 할당량**(principal별·forward별 동시 `TCP_CONNECT` 스트림 수, remote-forward listener 개수 상한 — `docs/design/protocol.md` §7이 명시하는, M4·M5 어느 쪽도 만들지 않는 무상한 갭을 이 항목이 인수한다) — 초과는 `RESOURCE_EXHAUSTED`(CLI.md §3.3 기정의 어휘), ④ M5가 구현한 audit 수명주기의 부하 하 검증(스푸핑 flood → 세션 없는 audit 쓰기 → 디스크 만실 → resume 실패 연쇄의 차단). 그 외: handshake matrix에 **ALPN 불일치** 케이스 추가(§4의 "application 상태 생성 전 실패" 불변식을 의존성 상속이 아니라 테스트로 고정 — wire freeze 전에), device 개인키 프로세스 상주 사본의 `Zeroizing` 적용, TUI 펌프 스레드 spawn 실패 panic 제거(보안 리뷰 준비 항목).
