@@ -27,17 +27,20 @@
 //!
 //! **One row is not end-to-end, flagged rather than silently substituted**:
 //! `forward.socks`/`file.read`/`file.write` (`Action::is_always_denied`)
-//! have no CLI-reachable producer anywhere in the tree — they are P1,
-//! unimplemented (`fixtures.rs`'s own `DEFERRED` list documents the same
-//! kind of gap for other actions/codes). There is no live network op to
-//! run for them and so no audit record a real request would leave;
+//! have no CLI-reachable producer anywhere in the tree, for two different
+//! reasons. `file.read`/`file.write` are P1, unimplemented (`fixtures.rs`'s
+//! own `DEFERRED` list documents the same kind of gap for other
+//! actions/codes). `forward.socks` is not pending an implementation at
+//! all — ADR-0019 결정 6 means no op will *ever* drive it, since a
+//! client-attached label cannot carry authorization. There is no live
+//! network op to run for any of the three and so no audit record a real
+//! request would leave;
 //! [`row_always_denied_action_overrides_an_explicit_allow_rule`] proves
 //! (ii)/(iii) instead by calling the exact same `Authorizer::check`
 //! `Server::authorize` calls, loaded from the same `acl.toml` a running
-//! host would read, directly rather than through a network round trip that
-//! does not exist yet. Every other row here is fully end-to-end: a real
-//! `qsh serve` subprocess, a real client subprocess, and a real audit log
-//! on disk.
+//! host would read, directly rather than through a network round trip.
+//! Every other row here is fully end-to-end: a real `qsh serve`
+//! subprocess, a real client subprocess, and a real audit log on disk.
 
 mod common;
 
@@ -264,11 +267,12 @@ fn row_wildcard_match() {
 ///
 /// **Deviation, flagged (module doc)**: `forward.socks` has no
 /// CLI-reachable producer, so there is no live op to run and no audit
-/// record it would leave. (ii)/(iii) are proven here by loading the same
-/// `acl.toml` the same way `Ops::acl_check` does and calling the exact
-/// same `Authorizer::check` `Server::authorize` calls — the same
-/// evaluator, invoked directly rather than through a network round trip
-/// this action's implementation does not have yet.
+/// record it would leave — by design, permanently (ADR-0019 결정 6), not
+/// pending one. (ii)/(iii) are proven here by loading the same `acl.toml`
+/// the same way `Ops::acl_check` does and calling the exact same
+/// `Authorizer::check` `Server::authorize` calls — the same evaluator,
+/// invoked directly rather than through a network round trip this action
+/// will never have.
 #[test]
 fn row_always_denied_action_overrides_an_explicit_allow_rule() {
     let host = Sandbox::new();

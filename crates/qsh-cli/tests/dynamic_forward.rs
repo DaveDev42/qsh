@@ -6,11 +6,13 @@
 //! `dynamic_forward_unsupported()` are gone).
 //!
 //! The "creates nothing" property does not disappear — it moves onto every
-//! *failure* path `-D` still has (a non-loopback bind, a reverse route, a
-//! peer without `dial-filter.v1`, a malformed handshake): each such test
-//! here re-binds the port (or checks the host's audit log) afterward as its
-//! own proof, the same technique the old stub file used for its one
-//! all-the-time refusal.
+//! *failure* path `-D` still has in this file (a non-loopback bind, a
+//! rejected flag combination, a malformed handshake): each such test here
+//! re-binds the port (or checks
+//! the host's audit log) afterward as its own proof, the same technique the
+//! old stub file used for its one all-the-time refusal. The remaining
+//! failure path, a peer without `dial-filter.v1`, is deliberately not here
+//! either — see below.
 //!
 //! Two tests from the step plan are deliberately not here:
 //! `dash_d_refuses_before_bind_when_peer_lacks_capability` (standalone) and
