@@ -365,6 +365,37 @@ interrupting the process that opened it. See [Known
 limitations](#known-limitations) for what happens to a tunnel across a
 dropped connection; it is not the same as what happens to a session.
 
+### SOCKS proxy (`-D`)
+
+`-D` opens a SOCKS5 proxy on this machine. For every `CONNECT` a SOCKS
+client sends to it, the host dials whatever destination that `CONNECT`
+names:
+
+```bash
+qsh box -D 1080                             # SOCKS5 on 127.0.0.1:1080, alongside the shell
+qsh tunnel open box --dynamic 1080 --json   # the same listener with no shell attached
+curl --socks5-hostname 127.0.0.1:1080 http://internal-service/
+```
+
+Two things have to be true before the first `CONNECT` succeeds:
+
+- The host's `acl.toml` grants the client `forward.local` (or the
+  `forward.*` family). `-D` reuses the `-L` grant; the First run example
+  above only grants `session.*`, so add the action there. `-R` needs
+  `forward.remote` the same way.
+- Both ends run a build that negotiates `dial-filter.v1`, which is what
+  lets the host refuse loopback, link-local and metadata destinations. An
+  older peer is refused before anything binds. Over a reverse route the
+  resident `qsh listen` daemon relays the capability set it negotiated
+  with the target when that target registered; a daemon still running
+  from before this machine's own upgrade keeps relaying the old set, so
+  restart it.
+
+Point applications at `socks5h://127.0.0.1:1080` so the host resolves the
+name; with plain `socks5://` it is resolved here and leaks to the local
+resolver. Destinations on the host's loopback or link-local ranges get
+`REP 0x02` no matter what the ACL says; `-L` is the tool for those.
+
 ### Reverse connections
 
 When the host cannot accept inbound packets, invert the dial. The
