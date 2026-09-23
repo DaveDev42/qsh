@@ -62,7 +62,7 @@ use qsh_proto::local::{
 };
 use qsh_proto::wire::{self, control_message, response};
 use qsh_testkit::loopback::{TestIdentity, make_identity};
-use qsh_testkit::reverse::ReverseHarness;
+use qsh_testkit::reverse::{ReverseHarness, wait_for};
 use qsh_testkit::tunnel::{EchoServer, RemoteForwardBinding, TunnelHarness, ephemeral_local_spec};
 use qsh_transport::StaticTrust;
 use tokio::net::UnixStream;
@@ -1710,6 +1710,7 @@ async fn tunnel_list_and_close_manage_a_daemon_held_remote_forward() {
                     listen_port: u32::from(free_port()),
                     forward_host: "127.0.0.1".to_string(),
                     forward_port: u32::from(echo_port),
+                    wait_ms: None,
                 })
                 .expect("tunnel_open --remote over reverse");
             let _ = tunnel_tx.send(hold.tunnel().clone());
@@ -1858,6 +1859,7 @@ async fn tunnel_open_remote_over_reverse_survives_a_thread_with_no_ambient_tokio
                     listen_port: u32::from(free_port()),
                     forward_host: "127.0.0.1".to_string(),
                     forward_port: u32::from(echo_port),
+                    wait_ms: None,
                 })
                 .expect("tunnel_open --remote over reverse, off any Tokio runtime");
             let _ = tunnel_tx.send(hold.tunnel().clone());
@@ -1891,6 +1893,553 @@ async fn tunnel_open_remote_over_reverse_survives_a_thread_with_no_ambient_tokio
 
     let (result, ()) = tokio::join!(run_fut, test_fut);
     result.expect("run_target must exit cleanly on shutdown");
+    localctl.shutdown().await;
+    harness.shutdown().await;
+}
+
+// ------------------------------------------------------------------
+// issue #4 item 5a — `-L` over reverse survives a registration drop, and
+// `qsh tunnel open --wait <ms>` (`docs/CLI.md` §6.9/§6.14).
+// ------------------------------------------------------------------
+
+/// Waits for `harness`'s `"widget"` entry to reach `want` — the
+/// stale-then-live-again round trip both tests below need twice each, so
+/// this is the one place their shared polling shape lives.
+async fn wait_for_widget_state(
+    harness: &ReverseHarness,
+    want: qsh_core::reverse::registry::EntryState,
+) {
+    wait_for(TIMEOUT, || {
+        let entry = harness.listen.registry().get("widget")?;
+        (entry.state == want).then_some(())
+    })
+    .await;
+}
+
+/// issue #4 item 5a (`docs/CLI.md` §6.14): the `LocalForward` *primitive's*
+/// listener-survival half, driven end to end through a real controller +
+/// target + a raw [`LocalForwardHandle::start_reverse`] leg — [`l_over_
+/// reverse_reaches_the_target_echo`]'s own harness, extended past the
+/// first round trip rather than copied into a second one.
+///
+/// **Scope note (review finding, issue #4 item 5a):** this drives
+/// `LocalForwardHandle` directly, never `Ops::tunnel_open`/`TunnelHold::
+/// hold`, so it proves only that the `LocalForward` object itself is not
+/// wired to any connection or registration concept — it says nothing
+/// about what the real `qsh tunnel open -L` process does when its
+/// controlling connection dies. That whole-process question has the
+/// opposite answer and is pinned separately by
+/// [`tunnel_open_local_over_reverse_ends_when_the_registration_drops`]
+/// below: `TunnelHold::hold` races this same listener against the
+/// `LOCAL_CONTROL` conduit's own death, so the CLI process — and this
+/// listener along with it — ends the moment the registration goes stale,
+/// exactly like every other tunnel this section's opening paragraph
+/// describes. `docs/CLI.md` §6.14 states both halves explicitly so a
+/// reader does not generalize from this narrower one.
+///
+/// Sequence: register `"widget"`, bind a raw `LocalForward` over it,
+/// round-trip once to prove the forward genuinely works; end the
+/// target's connection (the registration goes `Stale`, never removed —
+/// `crate::reverse::registry::Registry::mark_stale`'s own doc); a *fresh*
+/// TCP connection accepted on the same listener during the outage is
+/// reset, not silently dropped or hung, and the listener itself stays
+/// bound the whole time (`LocalForward::run`'s own doc: "one connection
+/// can never take the forward down"); once a second registration under
+/// the same fingerprint makes `"widget"` live again, a fresh connection
+/// on the *same, never-reopened* listener round-trips successfully again
+/// — no new `tunnel.open`, exactly the per-connection `LOCAL_STREAM`
+/// design `crates/qsh-core/src/tunnel/local.rs` already had before this
+/// PR (this test is new; the behavior it proves is not).
+#[tokio::test(flavor = "multi_thread")]
+async fn local_forward_primitive_over_reverse_survives_a_registration_drop_and_self_heals_per_connection()
+ {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let target = make_identity();
+    let harness =
+        ReverseHarness::start_with(Arc::new(AllowAllPinned), false, pin(&target, "widget")).await;
+    let (_dir, paths) = fresh_paths();
+    let localctl = harness.attach_localctl(&paths).await;
+    let echo = EchoServer::start().await.expect("bind echo server");
+
+    // First registration: bind `-L` over it and prove it genuinely works
+    // before the outage.
+    let (shutdown1_tx, shutdown1_rx) = tokio::sync::oneshot::channel();
+    let run1 = harness.run_target(&target, "device-id", "controller", None, async {
+        let _ = shutdown1_rx.await;
+    });
+    let open_and_prove = async {
+        harness.wait_control_hub("widget").await;
+
+        let handle = LocalForwardHandle::start_reverse(
+            &ephemeral_local_spec("127.0.0.1", echo.port()),
+            localctl.socket_path.clone(),
+            "widget".to_string(),
+        )
+        .await
+        .expect("bind -L over reverse");
+
+        let payload = b"before the outage".to_vec();
+        let got = TunnelHarness::round_trip(handle.local_addr(), payload.clone())
+            .await
+            .expect("round trip before the outage");
+        assert_eq!(got, payload);
+
+        let _ = shutdown1_tx.send(());
+        handle
+    };
+    let (result1, handle) = tokio::join!(run1, open_and_prove);
+    result1.expect("first run_target must exit cleanly on shutdown");
+
+    // `mark_stale` fires once the controller's own connection-driving loop
+    // for this registration ends — a graceful end still stales the entry
+    // rather than removing it outright (`docs/design/protocol.md` §11-4).
+    wait_for_widget_state(&harness, qsh_core::reverse::registry::EntryState::Stale).await;
+
+    // The listener is still bound — TCP connect succeeds — but the
+    // accepted connection is reset (not gracefully closed, not echoed,
+    // not hung) because the daemon has nothing live to relay it to:
+    // `abort_local` (`crates/qsh-core/src/tunnel/local.rs`) sets
+    // `SO_LINGER(0)` before dropping the socket, which forces an RST
+    // rather than a FIN. Checked by OS error *kind*, not merely
+    // presence/absence of an error — a plain graceful half-close (FIN,
+    // empty `read_to_end`) is a different, weaker outcome that a
+    // regression to a plain `drop(tcp)` (no zero-linger) would still
+    // produce, and this must fail on that regression rather than accept
+    // it (review finding: the previous form of this assertion treated an
+    // empty graceful read as equivalent to a reset).
+    let mut broken =
+        tokio::time::timeout(TIMEOUT, tokio::net::TcpStream::connect(handle.local_addr()))
+            .await
+            .expect("connect must not hang")
+            .expect("the listener must stay bound through the outage");
+    let write_result = broken.write_all(b"during the outage").await;
+    let mut buf = Vec::new();
+    let read_result = tokio::time::timeout(TIMEOUT, broken.read_to_end(&mut buf)).await;
+    let is_reset_kind = |kind: std::io::ErrorKind| {
+        matches!(
+            kind,
+            std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::BrokenPipe
+                | std::io::ErrorKind::ConnectionAborted
+        )
+    };
+    let write_was_reset = write_result
+        .as_ref()
+        .err()
+        .is_some_and(|err| is_reset_kind(err.kind()));
+    let read_was_reset = matches!(&read_result, Ok(Err(err)) if is_reset_kind(err.kind()));
+    assert!(
+        write_was_reset || read_was_reset,
+        "a connection accepted during the outage must be reset (RST) by the OS, not merely \
+         closed gracefully or hung: write={write_result:?} read={read_result:?} buf={buf:?}"
+    );
+
+    // Second registration, same fingerprint, same name: `Registry::admit`
+    // re-admits a `Stale` entry under the same fingerprint and flips it
+    // back to `Live` (`Registry::admit`'s own doc on the conflict rule).
+    let (shutdown2_tx, shutdown2_rx) = tokio::sync::oneshot::channel();
+    let run2 = harness.run_target(&target, "device-id", "controller", None, async {
+        let _ = shutdown2_rx.await;
+    });
+    let prove_self_heal = async {
+        wait_for_widget_state(&harness, qsh_core::reverse::registry::EntryState::Live).await;
+
+        // Same listener, no new `tunnel.open` anywhere in this scenario.
+        let payload = b"after re-registration, no reopen needed".to_vec();
+        let got = TunnelHarness::round_trip(handle.local_addr(), payload.clone())
+            .await
+            .expect("round trip after re-registration");
+        assert_eq!(got, payload);
+
+        let _ = shutdown2_tx.send(());
+    };
+    let (result2, ()) = tokio::join!(run2, prove_self_heal);
+    result2.expect("second run_target must exit cleanly on shutdown");
+
+    drop(handle);
+    localctl.shutdown().await;
+    harness.shutdown().await;
+}
+
+/// issue #4 item 5a (`docs/CLI.md` §6.14 review finding): the whole-
+/// process complement of the primitive-level test above — driven through
+/// the real `Ops::tunnel_open` + `TunnelHold::hold` path a real `qsh
+/// tunnel open -L` process takes, not `LocalForwardHandle` directly.
+/// `-L` over a reverse route does NOT survive a registration drop at this
+/// level: `TunnelHold::hold` (`crates/qsh-core/src/ops/tunnel.rs`) races
+/// the listener against `Connected::wait_dead` on the `LOCAL_CONTROL`
+/// conduit, so the moment the registration goes stale and the daemon
+/// ends that conduit, `hold()` returns `CONNECTION_FAILED` — exactly the
+/// same "the process holding a tunnel dies when its connection dies"
+/// rule every other route/mode already follows (§6.14's opening
+/// paragraph), no exception carved out for `-L`.
+#[tokio::test(flavor = "multi_thread")]
+async fn tunnel_open_local_over_reverse_ends_when_the_registration_drops() {
+    let target = make_identity();
+    let harness =
+        ReverseHarness::start_with(Arc::new(AllowAllPinned), false, pin(&target, "widget")).await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let paths = qsh_core::Paths::new(dir.path().join("config"), dir.path().join("state"))
+        .with_runtime_dir(dir.path().join("run"));
+    qsh_core::TrustStore::default()
+        .save(&paths.trust_file())
+        .expect("save empty trust.toml");
+    let ops = qsh_core::Ops::new(paths);
+    let localctl = harness.attach_localctl(ops.paths()).await;
+    let echo = EchoServer::start().await.expect("bind echo server");
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let run_fut = harness.run_target(&target, "device-id", "controller", None, async {
+        let _ = shutdown_rx.await;
+    });
+
+    let test_fut = async {
+        harness.wait_control_hub("widget").await;
+
+        let ops_hold = ops.clone();
+        let echo_port = echo.port();
+        let (tunnel_tx, tunnel_rx) = tokio::sync::oneshot::channel();
+        let hold_task = tokio::task::spawn_blocking(move || {
+            let hold = ops_hold
+                .tunnel_open(qsh_proto::TunnelOpenReq {
+                    host: "widget".to_string(),
+                    mode: "local".to_string(),
+                    bind: None,
+                    listen_port: u32::from(free_port()),
+                    forward_host: "127.0.0.1".to_string(),
+                    forward_port: u32::from(echo_port),
+                    wait_ms: None,
+                })
+                .expect("tunnel_open --local over reverse");
+            let _ = tunnel_tx.send(hold.tunnel().clone());
+            // Unlike the other `-L`/`-R` scenarios in this file, this one
+            // *does* call `hold()` — that is the exact behavior under
+            // test: what it returns once the registration drops.
+            hold.hold()
+        });
+        let opened = tunnel_rx.await.expect("tunnel_open reported its Tunnel");
+        assert_eq!(opened.mode, "local");
+        assert_eq!(opened.host, "widget");
+
+        // Prove the tunnel genuinely works before ending the
+        // registration — otherwise a failure below could just as well be
+        // an open that never really succeeded.
+        let bind_addr: SocketAddr = opened.bind.parse().expect("bind is a real socket address");
+        let payload = b"before the registration drops".to_vec();
+        let got = TunnelHarness::round_trip(bind_addr, payload.clone())
+            .await
+            .expect("round trip before the registration drops");
+        assert_eq!(got, payload);
+
+        // End the target's connection: the daemon ends this
+        // registration's `LOCAL_CONTROL` conduit, which is `hold()`'s
+        // only signal on the reverse route.
+        let _ = shutdown_tx.send(());
+
+        let err = tokio::time::timeout(TIMEOUT, hold_task)
+            .await
+            .expect("hold() must not hang past TIMEOUT")
+            .expect("hold task join");
+        assert_eq!(
+            err.code,
+            qsh_proto::ErrorCode::ConnectionFailed,
+            "the whole tunnel-holding process must end when the registration drops: {err:?}"
+        );
+    };
+
+    let (result, ()) = tokio::join!(run_fut, test_fut);
+    result.expect("run_target must exit cleanly on shutdown");
+    localctl.shutdown().await;
+    harness.shutdown().await;
+}
+
+/// issue #4 item 5a: `--wait`'s expiry half — while `"widget"` stays
+/// stale for good (nothing ever re-registers it), `Ops::tunnel_open`
+/// retries until its budget runs out and then returns the *same*
+/// retryable stale error the last attempt produced (`ops::tunnel::
+/// retry_while_stale`'s own doc and unit tests pin the decision in
+/// isolation; this pins it wired to a real registry/localctl stack).
+#[tokio::test(flavor = "multi_thread")]
+async fn tunnel_open_wait_returns_the_same_stale_error_once_the_budget_expires() {
+    let target = make_identity();
+    let harness =
+        ReverseHarness::start_with(Arc::new(AllowAllPinned), false, pin(&target, "widget")).await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let paths = qsh_core::Paths::new(dir.path().join("config"), dir.path().join("state"))
+        .with_runtime_dir(dir.path().join("run"));
+    qsh_core::TrustStore::default()
+        .save(&paths.trust_file())
+        .expect("save empty trust.toml");
+    let ops = qsh_core::Ops::new(paths);
+    let localctl = harness.attach_localctl(ops.paths()).await;
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let run_fut = harness.run_target(&target, "device-id", "controller", None, async {
+        let _ = shutdown_rx.await;
+    });
+    let register_then_end = async {
+        harness.wait_control_hub("widget").await;
+        let _ = shutdown_tx.send(());
+    };
+    let (result, ()) = tokio::join!(run_fut, register_then_end);
+    result.expect("run_target must exit cleanly on shutdown");
+    wait_for_widget_state(&harness, qsh_core::reverse::registry::EntryState::Stale).await;
+
+    let ops_call = ops.clone();
+    let started = std::time::Instant::now();
+    let outcome = tokio::task::spawn_blocking(move || {
+        ops_call.tunnel_open(qsh_proto::TunnelOpenReq {
+            host: "widget".to_string(),
+            mode: "local".to_string(),
+            bind: None,
+            listen_port: u32::from(free_port()),
+            forward_host: "127.0.0.1".to_string(),
+            forward_port: 1,
+            wait_ms: Some(300),
+        })
+    })
+    .await
+    .expect("spawn_blocking join");
+    let elapsed = started.elapsed();
+
+    let err = match outcome {
+        Ok(_) => panic!("must still be stale — no re-registration ever happened"),
+        Err(err) => err,
+    };
+    assert_eq!(err.code, qsh_proto::ErrorCode::HostNotFound);
+    assert!(err.retryable, "{err:?}");
+    assert_eq!(
+        err.details
+            .get("reason")
+            .and_then(serde_json::Value::as_str),
+        Some(qsh_core::ops::host::STALE_REGISTRATION_REASON),
+        "{err:?}"
+    );
+    assert!(
+        elapsed >= Duration::from_millis(300),
+        "must not return before the wait budget was spent: {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "must not hang well past the wait budget: {elapsed:?}"
+    );
+
+    localctl.shutdown().await;
+    harness.shutdown().await;
+}
+
+/// issue #4 item 5a: `--wait`'s success half — the registration comes
+/// back mid-wait (a second target registration under the same
+/// fingerprint, started only after a deliberate delay) and
+/// `Ops::tunnel_open` returns the tunnel it would have returned all
+/// along, with no different code path from an ordinary open once the
+/// registration is live.
+#[tokio::test(flavor = "multi_thread")]
+async fn tunnel_open_wait_succeeds_once_the_registration_comes_back_mid_wait() {
+    let target = make_identity();
+    let harness =
+        ReverseHarness::start_with(Arc::new(AllowAllPinned), false, pin(&target, "widget")).await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let paths = qsh_core::Paths::new(dir.path().join("config"), dir.path().join("state"))
+        .with_runtime_dir(dir.path().join("run"));
+    qsh_core::TrustStore::default()
+        .save(&paths.trust_file())
+        .expect("save empty trust.toml");
+    let ops = qsh_core::Ops::new(paths);
+    let localctl = harness.attach_localctl(ops.paths()).await;
+    let echo = EchoServer::start().await.expect("bind echo server");
+
+    // First registration, then end it — the entry goes `Stale`.
+    let (shutdown1_tx, shutdown1_rx) = tokio::sync::oneshot::channel();
+    let run1 = harness.run_target(&target, "device-id", "controller", None, async {
+        let _ = shutdown1_rx.await;
+    });
+    let register_then_end = async {
+        harness.wait_control_hub("widget").await;
+        let _ = shutdown1_tx.send(());
+    };
+    let (result1, ()) = tokio::join!(run1, register_then_end);
+    result1.expect("first run_target must exit cleanly on shutdown");
+    wait_for_widget_state(&harness, qsh_core::reverse::registry::EntryState::Stale).await;
+
+    // `tunnel_open --wait` starts now, while still stale, on its own
+    // blocking-pool thread — `Ops::tunnel_open` is sync and spins its own
+    // runtime internally, exactly like this file's other `Ops` calls
+    // (`tunnel_list`/`tunnel_close`'s own doc comments).
+    let ops_call = ops.clone();
+    let echo_port = echo.port();
+    let (tunnel_tx, tunnel_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let started = std::time::Instant::now();
+    let open_task = tokio::task::spawn_blocking(move || {
+        let hold = ops_call
+            .tunnel_open(qsh_proto::TunnelOpenReq {
+                host: "widget".to_string(),
+                mode: "local".to_string(),
+                bind: None,
+                listen_port: u32::from(free_port()),
+                forward_host: "127.0.0.1".to_string(),
+                forward_port: u32::from(echo_port),
+                wait_ms: Some(10_000),
+            })
+            .expect("tunnel_open --wait must succeed once the registration is live again");
+        let _ = tunnel_tx.send(hold.tunnel().clone());
+        let _ = release_rx.recv();
+        hold.close();
+    });
+
+    // A deliberate delay before re-registering — long enough to prove the
+    // open call actually retried at least once (the retry loop's own poll
+    // interval is 250 ms, `ops::tunnel::WAIT_POLL_INTERVAL`), not that it
+    // happened to land on its very first attempt.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    let (shutdown2_tx, shutdown2_rx) = tokio::sync::oneshot::channel();
+    let run2 = harness.run_target(&target, "device-id", "controller", None, async {
+        let _ = shutdown2_rx.await;
+    });
+    let prove_success = async {
+        let opened = tokio::time::timeout(TIMEOUT, tunnel_rx)
+            .await
+            .expect("tunnel_open --wait must not hang past TIMEOUT")
+            .expect("tunnel_open reported its Tunnel");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(500),
+            "must have actually waited through at least one retry, not raced a lucky first \
+             attempt: {elapsed:?}"
+        );
+        assert_eq!(opened.mode, "local");
+        assert_eq!(opened.host, "widget");
+
+        let bind_addr: SocketAddr = opened.bind.parse().expect("bind is a real socket address");
+        let payload = b"tunnel open --wait succeeded after re-registration".to_vec();
+        let got = TunnelHarness::round_trip(bind_addr, payload.clone())
+            .await
+            .expect("round trip through the tunnel opened by --wait");
+        assert_eq!(got, payload);
+
+        release_tx
+            .send(())
+            .expect("tell the holder task to stop holding");
+        open_task.await.expect("open task join");
+
+        let _ = shutdown2_tx.send(());
+    };
+    let (result2, ()) = tokio::join!(run2, prove_success);
+    result2.expect("second run_target must exit cleanly on shutdown");
+
+    localctl.shutdown().await;
+    harness.shutdown().await;
+}
+
+/// issue #4 item 5a review finding: `--wait` must not outlive the window
+/// `[listen].stale_retention` keeps a stale registration retryable in —
+/// past that window `Registry::sweep_expired` removes the entry outright
+/// and resolution falls through to a non-retryable "not configured"
+/// `HOST_NOT_FOUND`, which `is_stale_registration` no longer recognizes.
+/// `Ops::cap_wait_budget_to_stale_retention` (`crates/qsh-core/src/ops/
+/// tunnel.rs`) exists to keep the retry loop from ever running past that
+/// point.
+///
+/// This machine's own `config.toml` (`[listen].stale_retention = 1`, 1 s
+/// — the coarsest granularity that section's TOML shape allows) is set
+/// deliberately *shorter* than the harness's real, enforced retention (3
+/// s, via [`ReverseHarness::start_with_stale_retention_and_sweep_tick`])
+/// so the two clocks can never race: the cap always fires with roughly 2
+/// s of slack before the registry could possibly sweep the entry,
+/// regardless of scheduling jitter between "this test observed `Stale`"
+/// and "`Ops::tunnel_open`'s own retry clock starts". A requested
+/// `wait_ms` of 5 s — above both the 1 s config cap and the 3 s real
+/// retention — proves the *cap*, not a lucky short request, is what ends
+/// the retry early: mutating away the
+/// `cap_wait_budget_to_stale_retention` call would let this run the full
+/// 5 s requested, sail past the 3 s real sweep, and return the
+/// non-retryable "not configured" error this test's assertions would
+/// then fail on.
+#[tokio::test(flavor = "multi_thread")]
+async fn tunnel_open_wait_is_capped_by_stale_retention_and_never_outlives_the_sweep() {
+    let target = make_identity();
+    let harness = ReverseHarness::start_with_stale_retention_and_sweep_tick(
+        Arc::new(AllowAllPinned),
+        false,
+        pin(&target, "widget"),
+        Duration::from_secs(3),
+        Duration::from_millis(100),
+    )
+    .await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let paths = qsh_core::Paths::new(dir.path().join("config"), dir.path().join("state"))
+        .with_runtime_dir(dir.path().join("run"));
+    qsh_core::TrustStore::default()
+        .save(&paths.trust_file())
+        .expect("save empty trust.toml");
+    std::fs::write(
+        paths.config_file(),
+        "[reverse]\nbackoff_initial_ms = 1\nbackoff_max_ms = 1\n\n\
+         [listen]\nstale_retention = 1\n",
+    )
+    .expect("write config.toml with a short stale_retention");
+    let ops = qsh_core::Ops::new(paths);
+    let localctl = harness.attach_localctl(ops.paths()).await;
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let run_fut = harness.run_target(&target, "device-id", "controller", None, async {
+        let _ = shutdown_rx.await;
+    });
+    let register_then_end = async {
+        harness.wait_control_hub("widget").await;
+        let _ = shutdown_tx.send(());
+    };
+    let (result, ()) = tokio::join!(run_fut, register_then_end);
+    result.expect("run_target must exit cleanly on shutdown");
+    wait_for_widget_state(&harness, qsh_core::reverse::registry::EntryState::Stale).await;
+
+    let ops_call = ops.clone();
+    let started = std::time::Instant::now();
+    let outcome = tokio::task::spawn_blocking(move || {
+        ops_call.tunnel_open(qsh_proto::TunnelOpenReq {
+            host: "widget".to_string(),
+            mode: "local".to_string(),
+            bind: None,
+            listen_port: u32::from(free_port()),
+            forward_host: "127.0.0.1".to_string(),
+            forward_port: 1,
+            wait_ms: Some(5_000),
+        })
+    })
+    .await
+    .expect("spawn_blocking join");
+    let elapsed = started.elapsed();
+
+    let err = match outcome {
+        Ok(_) => panic!("must still be stale — nothing ever re-registered \"widget\""),
+        Err(err) => err,
+    };
+    assert_eq!(err.code, qsh_proto::ErrorCode::HostNotFound, "{err:?}");
+    assert!(
+        err.retryable,
+        "the config.toml stale_retention (1s) cap must return before the real 3s sweep, \
+         so this must still be the retryable stale branch: {err:?}"
+    );
+    assert_eq!(
+        err.details
+            .get("reason")
+            .and_then(serde_json::Value::as_str),
+        Some(qsh_core::ops::host::STALE_REGISTRATION_REASON),
+        "{err:?}"
+    );
+    assert!(
+        elapsed >= Duration::from_millis(900),
+        "must not return before the capped (~1s) budget was spent: {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "the 1s config cap, not the 5s request or the 3s real retention, must govern how long \
+         this waited: {elapsed:?}"
+    );
+
     localctl.shutdown().await;
     harness.shutdown().await;
 }

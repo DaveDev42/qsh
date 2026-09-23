@@ -624,6 +624,7 @@ fn tunnel_open_req_matches_documented_shape() {
         listen_port: 8080,
         forward_host: "localhost".into(),
         forward_port: 3000,
+        wait_ms: None,
     };
     let json = serde_json::to_value(&req).unwrap();
     assert_eq!(json["mode"], "remote");
@@ -634,6 +635,51 @@ fn tunnel_open_req_matches_documented_shape() {
     // `bind` omits when absent (`-L`/`-R` without an explicit bind).
     let req = TunnelOpenReq { bind: None, ..req };
     assert!(serde_json::to_value(&req).unwrap().get("bind").is_none());
+}
+
+/// `wait_ms` (issue #4 item 5a, `docs/CLI.md` §6.9's `--wait`) is
+/// additive-optional: absent by default (a request built before this
+/// field existed still deserializes, and `bind`'s own precedent just
+/// above is the pattern this repeats), omitted from the wire when `None`,
+/// and a plain number when `Some` — never present-but-null.
+#[test]
+fn tunnel_open_req_wait_ms_is_additive_optional() {
+    let base = TunnelOpenReq {
+        host: "personal-mac".into(),
+        mode: "local".into(),
+        bind: None,
+        listen_port: 8080,
+        forward_host: "localhost".into(),
+        forward_port: 3000,
+        wait_ms: None,
+    };
+    let json = serde_json::to_value(&base).unwrap();
+    assert!(
+        json.get("wait_ms").is_none(),
+        "wait_ms must be omitted, not null, when absent: {json}"
+    );
+
+    // A pre-existing request with no `wait_ms` key at all still parses —
+    // the additive-only contract (`docs/CLI.md` §10).
+    let mut without_field = json.clone();
+    assert!(
+        without_field
+            .as_object_mut()
+            .unwrap()
+            .remove("wait_ms")
+            .is_none()
+    );
+    let back: TunnelOpenReq = serde_json::from_value(without_field).unwrap();
+    assert_eq!(back, base);
+
+    let waited = TunnelOpenReq {
+        wait_ms: Some(5_000),
+        ..base.clone()
+    };
+    let json = serde_json::to_value(&waited).unwrap();
+    assert_eq!(json["wait_ms"], 5_000);
+    let back: TunnelOpenReq = serde_json::from_value(json).unwrap();
+    assert_eq!(back, waited);
 }
 
 #[test]

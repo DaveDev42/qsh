@@ -4,7 +4,7 @@
 .SH NAME
 qsh\-tunnel\-open \- Open a tunnel to a pinned host and hold it open
 .SH SYNOPSIS
-\fBqsh tunnel open\fR [\fB\-\-json\fR] [\fB\-L\fR|\fB\-\-local\fR] [\fB\-\-jsonl\fR] [\fB\-R\fR|\fB\-\-remote\fR] [\fB\-D\fR|\fB\-\-dynamic\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fIHOST\fR> 
+\fBqsh tunnel open\fR [\fB\-\-json\fR] [\fB\-L\fR|\fB\-\-local\fR] [\fB\-\-jsonl\fR] [\fB\-R\fR|\fB\-\-remote\fR] [\fB\-D\fR|\fB\-\-dynamic\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-wait\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fIHOST\fR> 
 .SH DESCRIPTION
 Open a tunnel to a pinned host and hold it open.
 .PP
@@ -35,6 +35,9 @@ Increase diagnostic verbosity on stderr (`\-v` info, `\-vv` debug, `\-vvv` trace
 .TP
 \fB\-q\fR, \fB\-\-quiet\fR
 Suppress diagnostic output on stderr
+.TP
+\fB\-\-wait\fR \fI<MS>\fR [default: 0]
+Milliseconds to keep retrying the initial route resolution while it answers the reverse\-registration\-stale branch. `0` (the default) is one attempt, unchanged from before this flag existed. Applies to `\-\-local`/`\-\-remote` only — combining it with `\-\-dynamic` is a clap usage error. Bound `0..=600000`; above it is `INVALID_ARGUMENT`. Full semantics: `docs/CLI.md` §6.9
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help (see a summary with \*(Aq\-h\*(Aq)
