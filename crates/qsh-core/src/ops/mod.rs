@@ -689,23 +689,158 @@ impl Ops {
     }
 }
 
-/// Resolve `host:port` to its first socket address. `pub(crate)` — Step 3's
-/// `qsh reverse` (`crate::reverse::target::run_reverse`) reuses this exact
-/// resolution instead of a second copy of it, for the same reason
-/// [`resolve_peer_address`] just below is split out.
-pub(crate) async fn resolve_one(address: &str) -> Result<SocketAddr, OpError> {
-    let mut addrs = tokio::net::lookup_host(address).await.map_err(|err| {
-        OpError::new(
-            ErrorCode::ConnectionFailed,
-            format!("failed to resolve {address}: {err}"),
-        )
-    })?;
-    addrs.next().ok_or_else(|| {
-        OpError::new(
+/// Resolve `host:port` to every socket address the resolver returns, in
+/// resolver order. `pub(crate)` — the same three sites [`resolve_one`]
+/// used to serve directly (`crate::reverse::target::dial_and_register`,
+/// `crate::ops::exec::exec_async`, `crate::ops::session::reader::dial_peer`)
+/// now go through this instead, so a dual-stack host with an unreachable
+/// address ahead of a reachable one in DNS order is not permanently
+/// unreachable (issue #4 item 2) — a caller that tries only
+/// `resolve_one`'s first address never sees the rest.
+pub(crate) async fn resolve_all(address: &str) -> Result<Vec<SocketAddr>, OpError> {
+    let addrs: Vec<SocketAddr> = tokio::net::lookup_host(address)
+        .await
+        .map_err(|err| {
+            OpError::new(
+                ErrorCode::ConnectionFailed,
+                format!("failed to resolve {address}: {err}"),
+            )
+        })?
+        .collect();
+    if addrs.is_empty() {
+        return Err(OpError::new(
             ErrorCode::ConnectionFailed,
             format!("{address} resolved to no addresses"),
-        )
-    })
+        ));
+    }
+    Ok(addrs)
+}
+
+/// Resolve `host:port` to its first socket address — a thin wrapper over
+/// [`resolve_all`] for the two callers that genuinely want exactly one
+/// address rather than a dial across the whole set: [`Ops::probe_fingerprint`]
+/// and [`Ops::trust_accept`] (a probe or a pairing exchange targets one
+/// endpoint by design, not "whichever resolved address answers first").
+pub(crate) async fn resolve_one(address: &str) -> Result<SocketAddr, OpError> {
+    resolve_all(address).await.map(|addrs| addrs[0])
+}
+
+/// Future returned by [`AddressResolver::resolve_all`].
+pub(crate) type ResolveFuture<'a> = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<Vec<SocketAddr>, OpError>> + Send + 'a>,
+>;
+
+/// Issue #4 item 2's stub-resolver seam for the production call sites
+/// that need to inject a non-DNS resolver answer in a test
+/// (`crate::ops::exec::exec_async_resolving`,
+/// `crate::reverse::target::dial_and_register_resolving`) —
+/// `crate::tunnel::dial`'s `Resolver` trait is the pattern this copies. A
+/// plain `FnOnce(&str) -> impl Future` closure cannot fill this role: its
+/// opaque return type is tied to one specific input lifetime, so it
+/// cannot satisfy "works for whatever lifetime the caller's `&str`
+/// happens to have" (the exact HRTB problem `Resolver`'s own
+/// `fn resolve<'a>(&'a self, ..) -> ResolveFuture<'a>` shape exists to
+/// route around) — a trait method with an explicit lifetime parameter
+/// can express that; a bare closure type cannot.
+pub(crate) trait AddressResolver: Send + Sync {
+    /// Resolve `host:port` the same way [`resolve_all`] does.
+    fn resolve_all<'a>(&'a self, address: &'a str) -> ResolveFuture<'a>;
+}
+
+/// The real resolver: [`resolve_all`] itself. Production always uses
+/// this; only a test builds anything else.
+pub(crate) struct SystemResolver;
+
+impl AddressResolver for SystemResolver {
+    fn resolve_all<'a>(&'a self, address: &'a str) -> ResolveFuture<'a> {
+        Box::pin(resolve_all(address))
+    }
+}
+
+/// How many resolved addresses [`dial_first_reachable`] will try before
+/// giving up (issue #4 item 2). A resolver answer longer than this is
+/// truncated, not rejected — the first four addresses in resolver order
+/// are what gets tried.
+pub(crate) const MAX_DIAL_ADDRESSES: usize = 4;
+
+/// Dial each of `addrs`, in order, capped at [`MAX_DIAL_ADDRESSES`],
+/// returning the first successful result `dial` produces. If every
+/// attempted address fails, returns one [`DialError`] together with how
+/// many addresses were attempted, so the caller can classify that failure
+/// exactly as it would a single-address failure
+/// (`crate::ops::exec::map_dial_error`,
+/// `crate::reverse::target::classify_dial_error`) and, only when more
+/// than one address was tried, say so in the message.
+///
+/// Which error is reported is *not* simply "the last one": a non-retryable
+/// auth-class rejection ([`DialError::LocalRejected`] — we rejected the
+/// peer's cert — or [`DialError::RemoteRejected`] — the peer rejected
+/// ours) from an earlier address is never overwritten by an ordinary
+/// transport-class failure (timeout, refused, …) from a later one, once
+/// seen. Plain last-error-wins would let a later address's mundane
+/// unreachability mask an earlier address's pin mismatch — flipping
+/// `retryable` from `false` to `true` and hiding exactly the ambiguous-
+/// auth case CLAUDE.md's "Security defaults" ("fail closed on any
+/// ambiguous auth/ACL state") means to catch. Within the same class
+/// (auth or transport), the last one tried still wins, matching a
+/// single-address dial's own behavior.
+///
+/// Generic over `dial` (rather than taking a [`qsh_transport::Dialer`] directly) for the
+/// same reason `crate::tunnel::dial`'s `Resolver`/`Connector` traits
+/// exist: a test can inject a fake per-address outcome (a canned
+/// `Err(DialError::Refused)`, a real dial only for the address that
+/// should succeed) and assert on order/cap/last-error without a real
+/// unreachable network address to wait out — every production caller
+/// passes `|addr| dialer.dial(addr, server_name)`.
+///
+/// Sequential, not happy-eyeballs (`docs/design/protocol.md` §16.3 puts
+/// the local axis outside the wire freeze; nothing here is a wire
+/// change) — each attempt already carries its own
+/// [`qsh_transport::endpoint::DEFAULT_DIAL_TIMEOUT`] bound inside
+/// [`qsh_transport::Dialer::dial`], and a caller with an overall deadline of its own
+/// (`crate::ops::exec::exec_async`'s `until`) wraps this whole call in
+/// it, the same way it used to wrap the single dial.
+///
+/// `addrs` must be non-empty — every caller gets it from
+/// [`resolve_all`], which never returns an empty `Vec`.
+pub(crate) async fn dial_first_reachable<T, F, Fut>(
+    addrs: &[SocketAddr],
+    mut dial: F,
+) -> Result<T, (DialError, usize)>
+where
+    F: FnMut(SocketAddr) -> Fut,
+    Fut: std::future::Future<Output = Result<T, DialError>>,
+{
+    debug_assert!(!addrs.is_empty(), "resolve_all never returns no addresses");
+    let capped = addrs.iter().take(MAX_DIAL_ADDRESSES);
+    let mut chosen: Option<DialError> = None;
+    let mut attempted = 0usize;
+    for &addr in capped {
+        attempted += 1;
+        match dial(addr).await {
+            Ok(value) => return Ok(value),
+            Err(err) => {
+                let is_auth_class = matches!(
+                    err,
+                    DialError::LocalRejected { .. } | DialError::RemoteRejected
+                );
+                let chosen_is_auth_class = matches!(
+                    chosen,
+                    Some(DialError::LocalRejected { .. } | DialError::RemoteRejected)
+                );
+                // Fail closed on ambiguous auth (see the doc comment
+                // above): once an auth-class rejection has been seen, a
+                // later transport-class failure never overwrites it.
+                if is_auth_class || !chosen_is_auth_class {
+                    chosen = Some(err);
+                }
+            }
+        }
+    }
+    Err((
+        chosen.expect("addrs is non-empty, so the loop above ran at least once"),
+        attempted,
+    ))
 }
 
 /// The `(address, server_name)` half of [`Ops::resolve_peer`] that touches

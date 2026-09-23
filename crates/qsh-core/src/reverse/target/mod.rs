@@ -605,8 +605,12 @@ async fn run_reverse_unix(
 /// failing to load and `resolve_peer_address` finding no known address
 /// for `controller` both classify `local` rather than `resolve`: neither
 /// one ever reaches a DNS resolver — that classification is reserved for
-/// [`crate::ops::resolve_one`]'s own failure just below, the literal
-/// resolver call.
+/// [`crate::ops::resolve_all`]'s own failure just below, the literal
+/// resolver call. Issue #4 item 2: `resolve_all` returns every address
+/// the resolver gave, not only the first, and
+/// [`crate::ops::dial_first_reachable`] tries each in turn (capped at
+/// [`crate::ops::MAX_DIAL_ADDRESSES`]) — `cause` and the mapped
+/// [`OpError`] both describe only the *last* address's failure.
 ///
 /// Only ever driven in production from [`run_reverse_unix`]
 /// (`#[cfg(unix)]`), but gated `#[cfg(any(unix, test))]` rather than
@@ -625,18 +629,58 @@ async fn dial_and_register(
     controller: &str,
     local_hello: &wire::Hello,
 ) -> Result<(Dialed, FramedStream, wire::Hello), (OpError, ReconnectCause)> {
+    dial_and_register_resolving(
+        dialer,
+        trust,
+        paths,
+        controller,
+        local_hello,
+        &crate::ops::SystemResolver,
+    )
+    .await
+}
+
+/// [`dial_and_register`], with the resolve step seamed out behind
+/// `resolver` — issue #4 item 2's stub-resolver seam
+/// ([`crate::ops::AddressResolver`], modeled on
+/// `crates/qsh-core/src/tunnel/dial.rs`'s `Resolver`). Production always
+/// calls [`dial_and_register`], which passes
+/// [`crate::ops::SystemResolver`]; a test can pass a synthetic resolver
+/// instead and prove this function itself — not a hand-rolled copy of
+/// [`crate::ops::dial_first_reachable`] — tries every resolved address,
+/// not only the first
+/// (`dial_and_register_tries_every_resolved_address_not_only_the_first`).
+#[cfg(any(unix, test))]
+async fn dial_and_register_resolving(
+    dialer: &Dialer,
+    trust: &SharedTrustStore,
+    paths: &Paths,
+    controller: &str,
+    local_hello: &wire::Hello,
+    resolver: &dyn crate::ops::AddressResolver,
+) -> Result<(Dialed, FramedStream, wire::Hello), (OpError, ReconnectCause)> {
     let hosts = crate::hosts::HostsFile::load(&paths.hosts_file())
         .map_err(|err| (err, ReconnectCause::Local))?;
     let (address, server_name) =
         crate::ops::resolve_peer_address(&trust.snapshot(), &hosts, controller)
             .map_err(|err| (err, ReconnectCause::Local))?;
-    let addr = crate::ops::resolve_one(&address)
+    let addrs = resolver
+        .resolve_all(&address)
         .await
         .map_err(|err| (err, ReconnectCause::Resolve))?;
-    let dialed = dialer.dial(addr, &server_name).await.map_err(|err| {
-        let cause = classify_dial_error(&err);
-        (crate::ops::exec::map_dial_error(err, &address), cause)
-    })?;
+    let dialed = crate::ops::dial_first_reachable(&addrs, |addr| dialer.dial(addr, &server_name))
+        .await
+        .map_err(|(err, attempted)| {
+            // Issue #4 item 2: `cause` classifies the LAST address's
+            // failure — the same one `map_dial_error` below turns into
+            // the human message, so the two never disagree about which
+            // attempt is "the" failure.
+            let cause = classify_dial_error(&err);
+            (
+                crate::ops::exec::map_dial_error(err, &address, attempted),
+                cause,
+            )
+        })?;
     let (ctl, peer_hello) = crate::handshake::initiate(&dialed.connection, local_hello.clone())
         .await
         .map_err(|err| {

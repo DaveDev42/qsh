@@ -134,6 +134,40 @@ async fn exec_async(
     stdin: ExecStdin,
     timeout: Option<Duration>,
 ) -> Result<ExecRunOutput, OpError> {
+    exec_async_resolving(
+        dialer,
+        address,
+        server_name,
+        device_name,
+        spec,
+        stdin,
+        timeout,
+        &crate::ops::SystemResolver,
+    )
+    .await
+}
+
+/// [`exec_async`], with the resolve step seamed out behind `resolver` —
+/// issue #4 item 2's stub-resolver seam
+/// ([`crate::ops::AddressResolver`], modeled on
+/// `crates/qsh-core/src/tunnel/dial.rs`'s `Resolver`). Production always
+/// calls [`exec_async`], which passes [`crate::ops::SystemResolver`]; a
+/// test can pass a synthetic resolver instead and prove this function
+/// itself — not a hand-rolled copy of
+/// [`crate::ops::dial_first_reachable`] — tries every resolved address,
+/// not only the first
+/// (`exec_async_tries_every_resolved_address_not_only_the_first`).
+#[allow(clippy::too_many_arguments)]
+async fn exec_async_resolving(
+    dialer: &Dialer,
+    address: &str,
+    server_name: &str,
+    device_name: &str,
+    spec: &ExecSpec,
+    stdin: ExecStdin,
+    timeout: Option<Duration>,
+    resolver: &dyn crate::ops::AddressResolver,
+) -> Result<ExecRunOutput, OpError> {
     // One budget for everything the user is waiting on: resolve, dial,
     // negotiate, run. The connection teardown afterwards is *not* under it —
     // a command that finished in time must not be reported as TIMEOUT
@@ -141,21 +175,16 @@ async fn exec_async(
     let deadline = timeout.map(|t| tokio::time::Instant::now() + t);
     let timed_out = || timeout_error(timeout.unwrap_or_default());
 
-    let addr = until(deadline, tokio::net::lookup_host(address))
+    let addrs = until(deadline, resolver.resolve_all(address))
         .await
-        .ok_or_else(timed_out)?
-        .ok()
-        .and_then(|mut it| it.next())
-        .ok_or_else(|| {
-            OpError::new(
-                ErrorCode::ConnectionFailed,
-                format!("cannot resolve {address:?}"),
-            )
-        })?;
-    let dialed = until(deadline, dialer.dial(addr, server_name))
-        .await
-        .ok_or_else(timed_out)?
-        .map_err(|err| map_dial_error(err, address))?;
+        .ok_or_else(timed_out)??;
+    let dialed = until(
+        deadline,
+        crate::ops::dial_first_reachable(&addrs, |addr| dialer.dial(addr, server_name)),
+    )
+    .await
+    .ok_or_else(timed_out)?
+    .map_err(|(err, attempted)| map_dial_error(err, address, attempted))?;
     let endpoint = dialed.endpoint.clone();
     let connection = dialed.connection.clone();
 
@@ -217,8 +246,36 @@ fn auth_failed(category: &str) -> OpError {
     .with_details(serde_json::json!({ "category": category }))
 }
 
-/// Map a dial failure to the CLI vocabulary (`docs/CLI.md` §6.11 error paths).
-pub(crate) fn map_dial_error(err: DialError, address: &str) -> OpError {
+/// Map a dial failure to the CLI vocabulary (`docs/CLI.md` §6.11 error
+/// paths). `attempted` is how many resolved addresses
+/// [`crate::ops::dial_first_reachable`] tried before `err` (its last
+/// failure) gave up; when more than one address was tried *and* `err` is
+/// a reachability-class failure (`Refused`/`Timeout`/`Connect`, or
+/// `Failed` that is not itself a crypto failure), the count is appended
+/// to the message so an operator sees this was not a single-address
+/// failure. A `Setup` failure or an auth-class rejection
+/// (`LocalRejected`/`RemoteRejected`, or a crypto-class `Failed`) never
+/// gets the suffix: those are local/identity problems that have nothing
+/// to do with how many *addresses* were tried, so naming an attempt
+/// count next to them would misleadingly imply a reachability issue —
+/// the single-address case (`attempted == 1`, every existing caller
+/// before issue #4 item 2) stays byte-identical to the pinned
+/// `crates/qsh-cli/tests/fixtures/cli-v1/error.CONNECTION_FAILED.json`
+/// either way.
+pub(crate) fn map_dial_error(err: DialError, address: &str, attempted: usize) -> OpError {
+    let reachability_class = match &err {
+        DialError::Refused | DialError::Timeout(_) | DialError::Connect(_) => true,
+        DialError::Failed(inner) => !is_crypto_failure(inner),
+        DialError::LocalRejected { .. } | DialError::RemoteRejected | DialError::Setup(_) => false,
+    };
+    let mut op_err = map_dial_error_inner(err, address);
+    if attempted > 1 && reachability_class {
+        op_err.message = format!("{} (tried {attempted} addresses)", op_err.message);
+    }
+    op_err
+}
+
+fn map_dial_error_inner(err: DialError, address: &str) -> OpError {
     match err {
         // `address` no longer implies a trust store pin for this host
         // (`PLAN.md` M7 Step 3 (a)-추기 ③): it can come from `hosts.toml`
@@ -433,6 +490,83 @@ mod tests {
         assert!(
             Arc::ptr_eq(&first, &second),
             "exec_run must share one Runtime across calls, not build a second one"
+        );
+    }
+
+    /// Issue #4 item 2, end to end: `exec_async` itself — not
+    /// `dial_first_reachable` driven directly (`ops::tests` already
+    /// covers that in isolation) — must try every resolved address, not
+    /// only the first. Drives `exec_async_resolving` (`exec_async`'s own
+    /// production body, with only the resolve step swapped for a
+    /// synthetic one, its `Resolver`-pattern seam) with two real,
+    /// unreachable loopback UDP ports — bind-then-drop, the same
+    /// technique `crates/qsh-cli/tests/reverse_unreachable_diagnostic.rs`
+    /// uses — so this is a real `Dialer::dial` attempt against each, not
+    /// a canned `DialError`. `with_timeout` keeps each attempt to well
+    /// under a second instead of the production 10s default. A mutation
+    /// that truncates the resolver's answer before the
+    /// `dial_first_reachable` call inside `exec_async_resolving` reds
+    /// this test: `attempted` would read 1 and the "(tried 2 addresses)"
+    /// suffix `map_dial_error` appends would be absent from the message.
+    #[tokio::test]
+    async fn exec_async_tries_every_resolved_address_not_only_the_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = crate::ops::Paths::new(dir.path().join("config"), dir.path().join("state"));
+        let trust = crate::trust::SharedTrustStore::open(paths.trust_file()).unwrap();
+
+        // A real generated identity (not an empty `LocalIdentity`): the
+        // dial below must actually reach `Dialer::dial`'s socket
+        // bind/connect, not fail earlier at TLS config construction —
+        // that would report `DialError::Setup`, which
+        // `map_dial_error`'s own doc comment excludes from the "(tried N
+        // addresses)" suffix this test asserts on.
+        crate::identity::init(&paths, qsh_proto::KeyStoreMode::File).unwrap();
+        let local = crate::identity::load(&paths).unwrap().unwrap().local;
+        let dialer = Dialer::new(local, trust as Arc<dyn qsh_transport::TrustEvaluator>)
+            .with_timeout(Duration::from_millis(300));
+
+        // Two real, unreachable loopback UDP ports: bind each to claim a
+        // real, otherwise unused port, then drop the socket immediately
+        // so nothing ever answers there.
+        let unreachable_addr = || {
+            let socket =
+                std::net::UdpSocket::bind("127.0.0.1:0").expect("bind a throwaway UDP port");
+            socket.local_addr().expect("local addr")
+        };
+        let addrs = vec![unreachable_addr(), unreachable_addr()];
+
+        struct StubResolver(Vec<std::net::SocketAddr>);
+        impl crate::ops::AddressResolver for StubResolver {
+            fn resolve_all<'a>(&'a self, _address: &'a str) -> crate::ops::ResolveFuture<'a> {
+                let addrs = self.0.clone();
+                Box::pin(async move { Ok(addrs) })
+            }
+        }
+
+        let spec = ExecSpec {
+            argv: vec!["true".into()],
+            env: vec![],
+            timeout: None,
+        };
+
+        let err = exec_async_resolving(
+            &dialer,
+            "does-not-matter:4433",
+            "widget",
+            "device",
+            &spec,
+            ExecStdin::Closed,
+            None,
+            &StubResolver(addrs),
+        )
+        .await
+        .expect_err("two unreachable loopback ports must never dial successfully");
+
+        assert!(
+            err.message.contains("tried 2 addresses"),
+            "message must name both attempts, not just the first (i.e. exec_async_resolving \
+             must not have been reverted to trying only `addrs[0]`): {}",
+            err.message
         );
     }
 

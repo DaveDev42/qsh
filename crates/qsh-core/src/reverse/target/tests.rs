@@ -73,7 +73,7 @@ async fn reverse_hello_carries_only_offered_name_capabilities_empty() {
 }
 
 /// `dial_and_register`'s own doc comment reserves `resolve` for
-/// [`crate::ops::resolve_one`]'s own literal DNS-resolver failure,
+/// [`crate::ops::resolve_all`]'s own literal DNS-resolver failure,
 /// never for `hosts.toml`/`resolve_peer_address` failing to find an
 /// address at all — this is the real end-to-end proof of that one
 /// specific branch, driving `dial_and_register` itself (not just
@@ -558,6 +558,142 @@ fn classify_dial_error_maps_the_documented_vocabulary() {
             }
         )),
         ReconnectCause::Local
+    );
+}
+
+/// Issue #4 item 2: when `dial_and_register`'s dial phase tries several
+/// resolved addresses and every one fails, `cause`
+/// (`classify_dial_error`) and the mapped [`OpError`]
+/// (`crate::ops::exec::map_dial_error`) must describe the *same* — the
+/// last-tried — address's failure, not two different attempts. Drives
+/// `crate::ops::dial_first_reachable` with a synthetic per-address
+/// outcome the same way `dial_and_register`'s own closure consumes it
+/// (`(err, attempted)` → `classify_dial_error(&err)` then
+/// `map_dial_error(err, .., attempted)`), rather than the full
+/// `dial_and_register` end to end, which would need a real multi-A-record
+/// hostname no hermetic test controls.
+#[tokio::test]
+async fn dial_and_register_classifies_and_maps_the_last_addresss_dial_error_consistently() {
+    use qsh_transport::DialError;
+
+    let addrs: Vec<std::net::SocketAddr> = vec![
+        "127.0.0.1:1".parse().unwrap(),
+        "127.0.0.1:2".parse().unwrap(),
+        "127.0.0.1:3".parse().unwrap(),
+    ];
+    let last = addrs[2];
+    let (err, attempted) = crate::ops::dial_first_reachable(&addrs, |a| async move {
+        // Only the last address rejects on TLS; the earlier ones are a
+        // plain refusal — if `cause`/the mapped message ever drifted to
+        // an earlier attempt's error, this test would see `refused`/
+        // `Refused` instead.
+        if a == last {
+            Err::<(), _>(DialError::RemoteRejected)
+        } else {
+            Err::<(), _>(DialError::Refused)
+        }
+    })
+    .await
+    .expect_err("every address fails");
+
+    assert_eq!(attempted, 3);
+    let cause = classify_dial_error(&err);
+    let mapped = crate::ops::exec::map_dial_error(err, "widget:4433", attempted);
+
+    assert_eq!(
+        cause,
+        ReconnectCause::TlsRejected,
+        "cause must classify the LAST address's error (RemoteRejected), not an earlier one"
+    );
+    assert_eq!(mapped.code, qsh_proto::ErrorCode::AuthFailed);
+    assert!(
+        !mapped.retryable,
+        "AUTH_FAILED for a rejected peer cert is not retryable"
+    );
+}
+
+/// Issue #4 item 2, end to end: `dial_and_register` itself — not
+/// `dial_first_reachable` driven directly, which the two tests above
+/// already cover — must try every resolved address, not only the
+/// first. Drives `dial_and_register_resolving` (`dial_and_register`'s own
+/// production body, with only the resolve step swapped for a synthetic
+/// one, its `Resolver`-pattern seam) with two real, unreachable loopback
+/// UDP ports — bind-then-drop, the same technique
+/// `crates/qsh-cli/tests/reverse_unreachable_diagnostic.rs` uses — so
+/// this is a real `Dialer::dial` attempt against each, not a canned
+/// `DialError`. `with_timeout` keeps each attempt to well under a second
+/// instead of the production 10 s default. A mutation that truncates the
+/// resolver's answer before the `dial_first_reachable` call inside
+/// `dial_and_register_resolving` reds this test: `attempted` would read 1
+/// and the "(tried 2 addresses)" suffix `map_dial_error` appends would be
+/// absent from the message.
+#[tokio::test]
+async fn dial_and_register_tries_every_resolved_address_not_only_the_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = Paths::new(dir.path().join("config"), dir.path().join("state"));
+    let mut trust = crate::trust::TrustStore::default();
+    trust.add_peer(
+        "widget",
+        Some("does-not-matter:4433".to_string()),
+        qsh_transport::Fingerprint::of_spki_der(&[]),
+        "2026-01-01T00:00:00Z".to_string(),
+    );
+    trust.save(&paths.trust_file()).expect("save trust.toml");
+    let trust = SharedTrustStore::open(paths.trust_file()).expect("open trust.toml");
+
+    let runtime = crate::serve::host_runtime(&paths, &Config::default(), "hermes");
+    let local_hello = runtime.server.local_hello(Some(wire::ReverseRegistration {
+        offered_name: "hermes".into(),
+        capabilities: Vec::new(),
+    }));
+
+    // A real generated identity (not an empty `LocalIdentity`): the dial
+    // below must actually reach `Dialer::dial`'s socket bind/connect, not
+    // fail earlier at TLS config construction — that would report
+    // `DialError::Setup`, which `map_dial_error`'s own doc comment
+    // excludes from the "(tried N addresses)" suffix this test asserts
+    // on.
+    crate::identity::init(&paths, qsh_proto::KeyStoreMode::File).unwrap();
+    let local = crate::identity::load(&paths).unwrap().unwrap().local;
+    let dialer = Dialer::new(local, trust.clone() as Arc<dyn TrustEvaluator>)
+        .with_timeout(std::time::Duration::from_millis(300));
+
+    // Two real, unreachable loopback UDP ports: bind each to claim a
+    // real, otherwise unused port, then drop the socket immediately so
+    // nothing ever answers there.
+    let unreachable_addr = || {
+        let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind a throwaway UDP port");
+        socket.local_addr().expect("local addr")
+    };
+    let addrs = vec![unreachable_addr(), unreachable_addr()];
+
+    struct StubResolver(Vec<std::net::SocketAddr>);
+    impl crate::ops::AddressResolver for StubResolver {
+        fn resolve_all<'a>(&'a self, _address: &'a str) -> crate::ops::ResolveFuture<'a> {
+            let addrs = self.0.clone();
+            Box::pin(async move { Ok(addrs) })
+        }
+    }
+
+    let (err, _cause) = match dial_and_register_resolving(
+        &dialer,
+        &trust,
+        &paths,
+        "widget",
+        &local_hello,
+        &StubResolver(addrs),
+    )
+    .await
+    {
+        Ok(_) => panic!("two unreachable loopback ports must never dial successfully"),
+        Err(pair) => pair,
+    };
+
+    assert!(
+        err.message.contains("tried 2 addresses"),
+        "message must name both attempts, not just the first (i.e. the function must not have \
+         been reverted to trying only `addrs[0]`): {}",
+        err.message
     );
 }
 
