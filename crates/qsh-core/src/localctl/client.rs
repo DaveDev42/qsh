@@ -1397,6 +1397,7 @@ mod tests {
             capabilities: vec!["pty".to_string()],
             generation: 1,
             registered_at: "2026-08-22T00:00:00Z".to_string(),
+            lost_at: None,
         }
     }
 

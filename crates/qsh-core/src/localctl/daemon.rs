@@ -1828,6 +1828,23 @@ fn to_local_host(entry: ReverseEntry) -> LocalHost {
         capabilities: entry.capabilities,
         generation: entry.generation,
         registered_at: entry.registered_at,
+        lost_at: entry.lost_at,
+    }
+}
+
+#[cfg(test)]
+fn sample_reverse_entry(state: EntryState, lost_at: Option<String>) -> ReverseEntry {
+    ReverseEntry {
+        name: "phone".to_string(),
+        fingerprint: "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string(),
+        principal: "device:phone".to_string(),
+        address: "203.0.113.5:51820".parse().unwrap(),
+        capabilities: vec!["pty".to_string()],
+        registered_at: "2026-08-22T00:00:00Z".to_string(),
+        generation: 1,
+        state,
+        stale_since: None,
+        lost_at,
     }
 }
 
@@ -2553,5 +2570,27 @@ mod tests {
         drop(_held);
         let _ = shutdown_tx.send(());
         task.await.unwrap();
+    }
+
+    // Issue #4 items 4/3a: `to_local_host` must pass `ReverseEntry.lost_at`
+    // straight through to `LocalHost.lost_at`, `Some` exactly when the
+    // registry set it (only ever true for a `Stale` entry —
+    // `Registry::mark_stale`'s own doc) and `None` for a `Live` one, never
+    // invented or dropped on the way across this hop.
+    #[test]
+    fn to_local_host_passes_lost_at_through_for_a_stale_entry() {
+        let entry =
+            sample_reverse_entry(EntryState::Stale, Some("2026-08-22T00:00:07Z".to_string()));
+        let local = to_local_host(entry);
+        assert_eq!(local.state, "stale");
+        assert_eq!(local.lost_at.as_deref(), Some("2026-08-22T00:00:07Z"));
+    }
+
+    #[test]
+    fn to_local_host_omits_lost_at_for_a_live_entry() {
+        let entry = sample_reverse_entry(EntryState::Live, None);
+        let local = to_local_host(entry);
+        assert_eq!(local.state, "reachable");
+        assert_eq!(local.lost_at, None);
     }
 }

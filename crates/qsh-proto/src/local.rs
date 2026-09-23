@@ -194,9 +194,19 @@ mod tests {
             proptest::collection::vec("[a-z.0-9]{1,16}", 0..4),
             any::<u64>(),
             arb_rfc3339(),
+            proptest::option::of(arb_rfc3339()),
         )
             .prop_map(
-                |(name, address, state, fingerprint, capabilities, generation, registered_at)| {
+                |(
+                    name,
+                    address,
+                    state,
+                    fingerprint,
+                    capabilities,
+                    generation,
+                    registered_at,
+                    lost_at,
+                )| {
                     LocalHost {
                         name,
                         address,
@@ -205,6 +215,7 @@ mod tests {
                         capabilities,
                         generation,
                         registered_at,
+                        lost_at,
                     }
                 },
             )

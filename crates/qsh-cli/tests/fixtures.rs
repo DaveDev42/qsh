@@ -34,6 +34,8 @@ use std::path::PathBuf;
 use std::process::Stdio;
 
 use common::{CLIENT_ALIAS, Fleet, HOST_ALIAS, Sandbox, ServeGuard};
+#[cfg(unix)]
+use common::{ListenGuard, ReverseGuard, hosts_array, poll_until};
 use qsh_proto::ErrorCode;
 use qsh_testkit::fixtures;
 use serde_json::Value;
@@ -114,6 +116,8 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "host.get.json",
     "host.list.with_hosts_toml.json",
     "host.get.with_hosts_toml.json",
+    "host.list.reverse_stale.json",
+    "error.HOST_NOT_FOUND.reverse_stale.json",
     "exec.run.json",
     "exec.run.signal.json",
     "error.INVALID_ARGUMENT.json",
@@ -624,6 +628,83 @@ fn golden_resource_exhausted_fixture() {
         "a refused op must carry no data: {refused}"
     );
     check("error.RESOURCE_EXHAUSTED.json", refused);
+}
+
+/// issue #4 items 4/3a: a real `qsh listen`/`qsh reverse` pair, the target
+/// registered under a client-only pin (no `--address`, so nothing else
+/// can ever answer this name once the registration goes stale — same
+/// "pinned without an address" shape `hosts_reverse.rs`'s own
+/// `stale_only_registration_with_no_forward_pin_is_retryable_host_not_found`
+/// drives, reused here to source this milestone's two new golden fixtures
+/// rather than duplicating a third copy of the same scenario). Produces:
+/// `host.list.reverse_stale.json` (the stale entry, `lost_at` present) and
+/// `error.HOST_NOT_FOUND.reverse_stale.json` (`host get` on that same
+/// name, retryable, `details.reason: "reverse_registration_stale"`).
+///
+/// A distinctly-named `host.get.reverse_stale.json` "success" fixture is
+/// deliberately not produced: `host.get` on a stale-only name (no forward
+/// fallback) can only ever fail with this retryable envelope — there is
+/// no `HostRoute` success variant for "stale" (`resolve_route`'s live
+/// filter excludes a stale entry from ever becoming `HostRoute::Reverse`)
+/// — so no separate `host.get.reverse_stale.json` success fixture is
+/// possible or needed; `error.HOST_NOT_FOUND.reverse_stale.json` is the
+/// `host.get` coverage for this branch (issue #4 item 3a, `docs/CLI.md`
+/// §6.1).
+#[cfg(unix)]
+#[test]
+fn golden_reverse_stale_fixtures() {
+    const NAME: &str = "stale-only-host";
+
+    let listen_sandbox = Sandbox::initialized();
+    let target_sandbox = Sandbox::initialized();
+    let listen_fp = listen_sandbox.fingerprint();
+    let target_fp = target_sandbox.fingerprint();
+
+    listen_sandbox.trust_add(NAME, None, &target_fp);
+
+    // `ListenGuard::start` plants the `acl.toml` `qsh listen` itself now
+    // requires (`common::ListenGuard::start_with`'s own doc).
+    let listen = ListenGuard::start(&listen_sandbox);
+    target_sandbox.trust_add("hub", Some(listen.addr()), &listen_fp);
+    let reverse = ReverseGuard::start(&target_sandbox, "hub");
+
+    poll_until(
+        "the reverse registration to appear",
+        std::time::Duration::from_secs(10),
+        || {
+            hosts_array(&listen_sandbox)
+                .into_iter()
+                .find(|h| h["name"] == NAME && h["connection_mode"] == "reverse")
+        },
+    );
+
+    reverse.shut_down();
+
+    poll_until(
+        "the reverse registration to go stale",
+        std::time::Duration::from_secs(10),
+        || {
+            hosts_array(&listen_sandbox)
+                .into_iter()
+                .find(|h| h["name"] == NAME && h["state"] == "stale")
+        },
+    );
+
+    let (code, hosts) = listen_sandbox.json(&["hosts", "--json"]);
+    assert_eq!(code, 0, "{hosts}");
+    check("host.list.reverse_stale.json", hosts);
+
+    let (code, not_found) = listen_sandbox.json(&["host", "get", NAME, "--json"]);
+    assert_eq!(code, 255, "{not_found}");
+    assert_eq!(not_found["error"]["code"], "HOST_NOT_FOUND", "{not_found}");
+    assert_eq!(not_found["error"]["retryable"], true, "{not_found}");
+    assert_eq!(
+        not_found["error"]["details"]["reason"], "reverse_registration_stale",
+        "{not_found}"
+    );
+    check("error.HOST_NOT_FOUND.reverse_stale.json", not_found);
+
+    drop(listen);
 }
 
 /// Everything that needs a live peer on the other end.

@@ -96,6 +96,19 @@ pub struct ReverseEntry {
     /// string — the same reasoning `broker::resume`'s TTL deadlines use
     /// (immune to wall-clock adjustment).
     pub stale_since: Option<Instant>,
+    /// RFC 3339 wall-clock stamp of the same transition [`stale_since`]
+    /// (this field's monotonic sibling) records — `None` for a
+    /// [`EntryState::Live`] entry, `Some` the instant [`Registry::mark_stale`]
+    /// runs (`self.clock.wall_now()`, the same [`Clock`] `registered_at`
+    /// already reads). This is the wall-clock stamp `qsh.local.v1`'s
+    /// `LocalHost.lost_at` and `qsh.cli/v1`'s `Host.lost_at` both surface
+    /// (issue #4 item 4, `Registry::mark_stale`) — `stale_since`
+    /// stays [`Instant`]-only because nothing outside this process may ever
+    /// read it, but a stamp crossing that boundary must be wall-clock, the
+    /// same reasoning `registered_at` already follows.
+    ///
+    /// [`stale_since`]: ReverseEntry::stale_since
+    pub lost_at: Option<String>,
 }
 
 /// The outcome of a successful [`Registry::admit`] call.
@@ -372,6 +385,7 @@ impl Registry {
             generation,
             state: EntryState::Live,
             stale_since: None,
+            lost_at: None,
         };
         state.last_generation.insert(name.clone(), generation);
         state.entries.insert(name, new_entry.clone());
@@ -445,6 +459,7 @@ impl Registry {
         }
         entry.state = EntryState::Stale;
         entry.stale_since = Some(self.clock.now());
+        entry.lost_at = Some(crate::config::rfc3339_of(self.clock.wall_now()));
         Some(entry.clone())
     }
 
@@ -551,6 +566,7 @@ mod tests {
             generation,
             state: EntryState::Live,
             stale_since: None,
+            lost_at: None,
         }
     }
 
@@ -705,6 +721,10 @@ mod tests {
             .expect("same fingerprint revives it");
         assert_eq!(second.entry.state, EntryState::Live);
         assert!(second.entry.stale_since.is_none());
+        assert!(
+            second.entry.lost_at.is_none(),
+            "a revived live entry must clear lost_at, not keep the stale one"
+        );
         assert_eq!(second.entry.generation, 1);
         assert_eq!(second.replaced_generation, Some(0));
     }
@@ -911,6 +931,31 @@ mod tests {
 
         let still = r.get("shared").expect("entry remains, just stale");
         assert_eq!(still.state, EntryState::Stale);
+    }
+
+    /// `lost_at` (issue #4 item 4) is `stale_since`'s wall-clock sibling —
+    /// stamped from the same injected [`Clock`], at the same transition,
+    /// in the same RFC 3339 shape [`registered_at_uses_the_injected_clock`]
+    /// already pins for `registered_at`.
+    #[test]
+    fn mark_stale_records_lost_at_from_the_injected_clock() {
+        let (r, clock) = clocked_registry(false);
+        let outcome = r
+            .admit(
+                "personal-mac".to_string(),
+                entry("sha256:a", "device:personal-mac"),
+            )
+            .expect("registers");
+        assert!(
+            outcome.entry.lost_at.is_none(),
+            "a fresh live entry has no lost_at"
+        );
+        clock.advance(Duration::from_secs(7));
+
+        let staled = r
+            .mark_stale("personal-mac", outcome.entry.generation)
+            .expect("live entry at this generation transitions");
+        assert_eq!(staled.lost_at.as_deref(), Some("2026-01-01T00:00:07Z"));
     }
 
     #[test]

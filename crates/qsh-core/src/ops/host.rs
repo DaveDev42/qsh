@@ -30,6 +30,7 @@
 
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::time::SystemTime;
 
 use qsh_proto::local::LocalHost;
 use qsh_proto::{ErrorCode, Host, HostGetReq, HostListData, TrustPeer};
@@ -148,6 +149,10 @@ impl HostRoute {
                 device_id: fingerprint,
                 source,
                 user,
+                // A forward host is never probed (`state` is always
+                // `"unknown"` above) and so is never `"stale"` — no
+                // connection loss to time-stamp.
+                lost_at: None,
             },
             HostRoute::Reverse {
                 address,
@@ -166,6 +171,10 @@ impl HostRoute {
                 // that — see `HostRoute::Reverse::user`'s own doc.
                 source: None,
                 user,
+                // `HostRoute::Reverse` only ever names a *live* route
+                // (`resolve_route`'s `is_live` filter builds it) — never
+                // `"stale"`, so never a `lost_at`.
+                lost_at: None,
             },
         }
     }
@@ -318,6 +327,8 @@ fn forward_hosts(store: &TrustStore, hosts: &HostsFile) -> Vec<Host> {
                 device_id: entry.fingerprint,
                 source: entry.source,
                 user: entry.user,
+                // Forward hosts are never probed, never `"stale"`.
+                lost_at: None,
             })
         })
         .collect()
@@ -353,6 +364,12 @@ fn reverse_host(entry: &ReverseHostEntry, hosts: &HostsFile) -> Host {
         // identical Reverse-arm comment.
         source: None,
         user: hosts_toml_user(hosts, &entry.local.name),
+        // `docs/CLI.md` §5 `Host.lost_at`: passed straight through from
+        // the daemon's own `LocalHost.lost_at` (`localctl::daemon::
+        // to_local_host`'s identical passthrough) — `host.list` is a pure
+        // read of whatever the daemon reported, never its own state
+        // machine, so this field is `Some` exactly when the daemon's is.
+        lost_at: entry.local.lost_at.clone(),
     }
 }
 
@@ -480,16 +497,92 @@ pub(crate) fn hint_alias(name: &str) -> HintAlias<'_> {
     }
 }
 
+/// `details.reason` for the retryable `HOST_NOT_FOUND` branch below —
+/// issue #4 item 3a. A name with a NON-live registry entry (the daemon
+/// still lists it, so `sweep_expired`, `crates/qsh-core/src/reverse/
+/// registry.rs`, has not yet dropped it past `[listen].stale_retention`)
+/// is not the same defect as a name nobody ever registered: the target is
+/// expected back, so this branch (unlike every other `HOST_NOT_FOUND`
+/// path here) sets `retryable: true` (`docs/CLI.md` §3.2's new
+/// per-response-value sentence — automation reads this field, never
+/// derives retryability from `code` alone).
+pub const STALE_REGISTRATION_REASON: &str = "reverse_registration_stale";
+
+/// Parse a `LocalHost.lost_at`/`ReverseEntry.lost_at`-shaped RFC 3339
+/// string (`crate::config::rfc3339_of`'s own format) back into a
+/// [`SystemTime`]. `None` on anything that does not parse — a defensive
+/// fallback, not an expected path: the value only ever reaches here
+/// already stamped by [`crate::config::rfc3339_of`] on the registry side
+/// (`crate::reverse::registry::Registry::mark_stale`), so a parse failure
+/// would mean a future format change on that side outran this one, not
+/// attacker-controlled input (this hop never crosses the wire — it is a
+/// same-process registry read, `docs/design/protocol.md` §16.3).
+fn parse_rfc3339(value: &str) -> Option<SystemTime> {
+    time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339)
+        .ok()
+        .map(SystemTime::from)
+}
+
+/// The retryable `HOST_NOT_FOUND` for a name whose registry entry exists
+/// but is currently stale (issue #4 items 4/3a, `resolve_route`'s
+/// non-live-entry branch below). `lost_ago_ms` derives from the entry's
+/// own `lost_at` when it parses (`0` when it is missing or malformed —
+/// defensive, never a hard failure over a display-only figure);
+/// `retry_after_ms` is the caller-supplied backoff-maximum hint
+/// ([`Ops::stale_retry_after_ms`]), passed in rather than read here so
+/// this function — like [`resolve_route`] itself — stays pure and
+/// directly unit-testable (`docs/design/testing.md` L2).
+///
+/// `lost_ago_ms` has a whole-second floor, not millisecond precision:
+/// `lost_at` is stamped by [`crate::config::rfc3339_of`], which truncates
+/// to whole seconds, so this can over-report by up to ~999 ms against a
+/// full-precision `now`. Display-only figure, so this is not corrected
+/// here — flagged so a future caller does not treat it as exact.
+fn stale_host_not_found(
+    display_name: &str,
+    lost_at: Option<&str>,
+    now: SystemTime,
+    retry_after_ms: u64,
+) -> OpError {
+    let lost_ago_ms = lost_at
+        .and_then(parse_rfc3339)
+        .and_then(|lost_at| now.duration_since(lost_at).ok())
+        .map(|elapsed| elapsed.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0);
+    OpError::new(
+        ErrorCode::HostNotFound,
+        format!(
+            "host {display_name:?} has a reverse registration on this machine but it is \
+             currently disconnected; it is expected to re-register — retry in a moment or once \
+             `qsh reverse` reconnects on that host"
+        ),
+    )
+    .with_retryable(true)
+    .with_details(serde_json::json!({
+        "reason": STALE_REGISTRATION_REASON,
+        "lost_ago_ms": lost_ago_ms,
+        "retry_after_ms": retry_after_ms,
+    }))
+}
+
 /// The pure decision [`Ops::resolve_host_route`] delegates to — see that
 /// method's doc for the rule. Split out from any I/O (daemon queries,
 /// trust-file load) so the routing table (`PLAN.md` M3 Step 5 (c)) is
 /// testable against hand-built sources, exactly like [`merge_hosts`]
 /// above.
+///
+/// `now`/`retry_after_ms` are injected by the caller
+/// ([`Ops::resolve_host_route`]/[`Ops::resolve_host_route_async`]) rather
+/// than read here, keeping this function itself I/O-free and directly
+/// testable against a fixed clock (`docs/design/testing.md` L2) — the
+/// same discipline the rest of this module's pure helpers follow.
 fn resolve_route(
     reverse: &[ReverseHostEntry],
     store: &TrustStore,
     hosts: &HostsFile,
     name: &str,
+    now: SystemTime,
+    retry_after_ms: u64,
 ) -> Result<HostRoute, OpError> {
     if name.trim().is_empty() {
         // An empty/whitespace-only name is an argument defect, not a
@@ -582,6 +675,47 @@ fn resolve_route(
         HintAlias::Invalid(alias) => return Err(invalid_host_alias_error(alias)),
     };
 
+    // issue #4 items 4/3a: a name with a registry entry that exists but is
+    // not live (`is_live` above already excluded it from the live match)
+    // is a different defect than "nobody ever registered this name" — the
+    // daemon still lists it, which by `sweep_expired`'s own rule
+    // (`crates/qsh-core/src/reverse/registry.rs`) means it is still inside
+    // `[listen].stale_retention` and the target is expected back. Checked
+    // after the forward-pin lookup above so a forward pin still wins when
+    // one exists (§6.1's "라우팅 우선순위" only ever orders live-reverse vs.
+    // forward; a stale entry is not live and so never outranks a forward
+    // pin, exactly like the "no reverse at all" case it is meant to read
+    // as closely as possible while still being distinguishable).
+    //
+    // Matches `state == "stale"` explicitly rather than `!is_live(entry)`:
+    // `state` is a documented open string (`docs/CLI.md` §5, §10:
+    // `∈ {"reachable", "stale", "unknown"}` today, room for more later),
+    // and both `docs/CLI.md` §5's `lost_at` paragraph and §6.1's retryable
+    // row tie this branch — and the `lost_at` it emits — specifically to
+    // `"stale"`, not to "anything that isn't reachable". A future third
+    // state would otherwise be silently reported as
+    // `reverse_registration_stale` with a `lost_ago_ms` derived from a
+    // `lost_at` that was never stamped for it.
+    //
+    // Two daemons each holding a stale entry under the same `key` is
+    // resolved deterministically (smallest `pid`) rather than by iteration
+    // order (`Self::reverse_host_entries`' discovery order is not itself
+    // pinned) — unlike the live branch above, this does not fail closed
+    // with `InvalidArgument`, because guessing wrong here only picks which
+    // daemon's `lost_ago_ms` is reported, not which one gets dialed.
+    let stale_matches: Vec<&ReverseHostEntry> = reverse
+        .iter()
+        .filter(|entry| entry.local.name == key && entry.local.state == "stale")
+        .collect();
+    if let Some(entry) = stale_matches.into_iter().min_by_key(|entry| entry.pid) {
+        return Err(stale_host_not_found(
+            display_name,
+            entry.local.lost_at.as_deref(),
+            now,
+            retry_after_ms,
+        ));
+    }
+
     Err(OpError::new(
         ErrorCode::HostNotFound,
         format!(
@@ -649,7 +783,14 @@ impl Ops {
         let reverse = self.reverse_host_entries();
         let store = TrustStore::load(&self.paths.trust_file())?;
         let hosts = HostsFile::load(&self.paths.hosts_file())?;
-        resolve_route(&reverse, &store, &hosts, name)
+        resolve_route(
+            &reverse,
+            &store,
+            &hosts,
+            name,
+            SystemTime::now(),
+            self.stale_retry_after_ms(),
+        )
     }
 
     /// The async twin of [`Self::resolve_host_route`] — same decision
@@ -675,7 +816,36 @@ impl Ops {
         let reverse = self.reverse_host_entries_async().await;
         let store = TrustStore::load(&self.paths.trust_file())?;
         let hosts = HostsFile::load(&self.paths.hosts_file())?;
-        resolve_route(&reverse, &store, &hosts, name)
+        resolve_route(
+            &reverse,
+            &store,
+            &hosts,
+            name,
+            SystemTime::now(),
+            self.stale_retry_after_ms(),
+        )
+    }
+
+    /// Best-effort `retry_after_ms` hint for [`stale_host_not_found`]: this
+    /// controller's own effective `[reverse].backoff_max_ms`
+    /// (`crates/qsh-core/src/config.rs`'s `ReverseConfig::backoff`), or the
+    /// compiled-in default (`ReverseConfig::DEFAULT_BACKOFF_MAX_MS`, 30s)
+    /// on any config-load/validation error.
+    ///
+    /// Deliberately infallible and best-effort rather than propagating
+    /// `Config::load`/`backoff()`'s `Result` into routing: `resolve_route`
+    /// answers `HOST_NOT_FOUND` for names this machine does not control at
+    /// all, so making a malformed *local* `config.toml` fail a query about
+    /// an unrelated remote name would turn a display-only hint into a hard
+    /// routing outage. A bad config already fails closed everywhere it
+    /// actually matters (`Ops::config`'s other callers); this hint alone
+    /// is not one of those places.
+    fn stale_retry_after_ms(&self) -> u64 {
+        self.config()
+            .ok()
+            .and_then(|config| config.reverse.backoff().ok())
+            .map(|limits| limits.max.as_millis().min(u128::from(u64::MAX)) as u64)
+            .unwrap_or(crate::config::ReverseConfig::DEFAULT_BACKOFF_MAX_MS)
     }
 
     /// The reverse source: the union of `LocalHostList` across every

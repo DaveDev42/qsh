@@ -276,6 +276,10 @@ fn forward_and_reverse_merge_into_two_entries_route_live_and_hosts_never_dials()
     let live_reverse = find(&merged, "reverse").expect("live reverse entry");
     assert_eq!(live_reverse["state"], "reachable");
     assert!(
+        live_reverse.get("lost_at").is_none(),
+        "a live reverse entry must never carry lost_at: {live_reverse}"
+    );
+    assert!(
         live_reverse["address"]
             .as_str()
             .is_some_and(|a| a.starts_with("127.0.0.1:")),
@@ -324,6 +328,10 @@ fn forward_and_reverse_merge_into_two_entries_route_live_and_hosts_never_dials()
     assert_eq!(got["command"], "host.get");
     assert_eq!(got["data"]["connection_mode"], "reverse");
     assert_eq!(got["data"]["state"], "reachable");
+    assert!(
+        got["data"].get("lost_at").is_none(),
+        "host.get on a live reverse route must never carry lost_at: {got}"
+    );
 
     // Gracefully end the reverse target — `SIGTERM`, real `CONNECTION_CLOSE`
     // frame, not a `SIGKILL` this test would then have to wait
@@ -347,12 +355,111 @@ fn forward_and_reverse_merge_into_two_entries_route_live_and_hosts_never_dials()
         "the stale entry must stay listed, not disappear"
     );
 
+    // issue #4 item 4: `host.list` must surface `lost_at` for the stale
+    // reverse entry (an RFC 3339 UTC timestamp, never `null`/absent) and
+    // must keep omitting it for the still-`"unknown"` forward entry — a
+    // forward host is never probed, so it never has a connection to lose
+    // (`docs/CLI.md` §5).
+    let stale_reverse = find(&after_disconnect, "reverse").expect("stale reverse entry");
+    let lost_at = stale_reverse["lost_at"]
+        .as_str()
+        .expect("stale reverse entry must carry lost_at as a string");
+    // A cheap RFC 3339 UTC shape check (`YYYY-MM-DDTHH:MM:SSZ`) rather
+    // than pulling in a date-parsing crate just for this assertion —
+    // `crate::config::rfc3339_of`'s own unit tests already pin the exact
+    // format this value comes from.
+    assert!(
+        lost_at.len() == 20 && lost_at.ends_with('Z') && lost_at.as_bytes()[10] == b'T',
+        "lost_at must look like RFC 3339 UTC: {lost_at:?}"
+    );
+    let stale_forward = find(&after_disconnect, "forward").expect("forward entry");
+    assert!(
+        stale_forward.get("lost_at").is_none(),
+        "a forward host must never carry lost_at: {stale_forward}"
+    );
+
     // With the reverse registration no longer live, routing falls back to
     // the forward pin.
     let (code, got) = listen_sandbox.json(&["host", "get", DUP_NAME, "--json"]);
     assert_eq!(code, 0, "{got}");
     assert_eq!(got["data"]["connection_mode"], "forward");
     assert_eq!(got["data"]["state"], "unknown");
+
+    drop(listen);
+}
+
+/// issue #4 items 4/3a end-to-end: a name with **no** forward pin at all
+/// (`trust add` with no `--address` — a client-only pin, `docs/CLI.md`
+/// §6.1) whose reverse registration exists but has gone stale must answer
+/// `host get` with a *retryable* `HOST_NOT_FOUND`
+/// (`details.reason: "reverse_registration_stale"`), not the ordinary
+/// non-retryable one `host_get_on_an_unknown_name_is_host_not_found`
+/// pins for a name nobody ever registered — proving the branch end to
+/// end, across the real registry/localctl/CLI stack, rather than only
+/// against `resolve_route`'s hand-built sources
+/// (`crates/qsh-core/src/ops/host/tests.rs`).
+#[test]
+fn stale_only_registration_with_no_forward_pin_is_retryable_host_not_found() {
+    const NAME: &str = "stale-only-host";
+
+    let listen_sandbox = Sandbox::initialized();
+    let target_sandbox = Sandbox::initialized();
+    let listen_fp = listen_sandbox.fingerprint();
+    let target_fp = target_sandbox.fingerprint();
+
+    // A client-only pin: gives the reverse registration an alias to
+    // resolve under, but `forward_hosts` skips it (no address) — so once
+    // stale, nothing but the stale-registry-entry branch can answer this
+    // name at all (`resolve_route`'s forward-pin check finds nothing to
+    // fall back to).
+    listen_sandbox.trust_add(NAME, None, &target_fp);
+
+    let listen = ListenGuard::start(&listen_sandbox);
+    target_sandbox.trust_add("hub", Some(listen.addr()), &listen_fp);
+    let reverse = ReverseGuard::start(&target_sandbox, "hub");
+
+    // `find` (this file's shared helper, just above) is hardcoded to
+    // `DUP_NAME` — inlined here rather than reused, filtering on `NAME`
+    // instead.
+    let find_by_name = |hosts: &[Value], mode: &str| -> Option<Value> {
+        hosts
+            .iter()
+            .find(|h| h["name"] == NAME && h["connection_mode"] == mode)
+            .cloned()
+    };
+
+    poll_until("the reverse registration to appear", || {
+        let hosts = hosts_array(&listen_sandbox);
+        find_by_name(&hosts, "reverse")
+    });
+
+    // Still live: the ordinary non-retryable path never applies here
+    // either — routing succeeds.
+    let (code, live) = listen_sandbox.json(&["host", "get", NAME, "--json"]);
+    assert_eq!(code, 0, "{live}");
+    assert_eq!(live["data"]["connection_mode"], "reverse");
+
+    reverse.shut_down();
+
+    poll_until("the reverse registration to go stale", || {
+        let hosts = hosts_array(&listen_sandbox);
+        find_by_name(&hosts, "reverse").filter(|entry| entry["state"] == "stale")
+    });
+
+    let (code, got) = listen_sandbox.json(&["host", "get", NAME, "--json"]);
+    assert_eq!(code, 255, "{got}");
+    assert_eq!(got["ok"], false);
+    assert_eq!(got["error"]["code"], "HOST_NOT_FOUND");
+    assert_eq!(
+        got["error"]["retryable"], true,
+        "a name whose registry entry is stale but not yet swept must be retryable: {got}"
+    );
+    assert_eq!(
+        got["error"]["details"]["reason"], "reverse_registration_stale",
+        "{got}"
+    );
+    assert!(got["error"]["details"]["lost_ago_ms"].is_u64(), "{got}");
+    assert!(got["error"]["details"]["retry_after_ms"].is_u64(), "{got}");
 
     drop(listen);
 }

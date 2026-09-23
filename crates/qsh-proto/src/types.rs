@@ -171,6 +171,16 @@ pub struct Host {
     /// `user`) for this name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
+    /// Additive, issue #4 item 4 — RFC 3339 UTC instant the registry
+    /// observed this reverse registration's connection die (the same
+    /// wall-clock stamp `qsh.local.v1`'s `LocalHost.lost_at` carries from
+    /// `Registry::mark_stale`). Present only for a `"reverse"` host whose
+    /// `state` is `"stale"`; absent (key omitted, never `null`) for every
+    /// other state and for every `"forward"` host — a forward host is
+    /// never probed at all (`state` doc above), so it has no connection
+    /// loss to time-stamp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lost_at: Option<String>,
 }
 
 /// Request for `host.list` (`qsh hosts`, `docs/CLI.md` §6.1). No filters in
