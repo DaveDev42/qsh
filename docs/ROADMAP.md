@@ -132,6 +132,7 @@
   - Q3 이름 결정권 — `pair invite --as` / `pair accept --as` 채택. pin 쪽이 이름을 정하고 wire 자칭 값은 `device_id` 그대로.
   - Q4 SC1 시점 — 현행 표면으로 먼저 baseline 3회 측정 후, 새 표면으로 재측정해 DoD에서 비교한다.
   - Q5 둘째 터미널 마찰 — `qsh service install` 안내 + 데몬 부재 진단으로 해결. `serve --pair`는 기각(10분 초대를 상시 데몬 stderr에 노출하고 잠금 없는 `invites.toml`에 writer를 하나 더 만들기 때문).
+- **이슈 처리 기록 (2026-09-24):** GitHub 이슈 #3·#4는 M9 범위 (a)~(k) 어디에도 없어 M9 크기 내역 밖의 결함 수정으로 처리했다(커밋 ea8fcb6·46cfda8·fab8563·dd086e1·56d16b1·c9113cc, `PLAN.md`의 2026-09-24 항목). 이미 출고된 표면의 결함 다섯 건을 main에 올렸고, 남은 항목은 제안 ADR 넷(0021·0022·0025·0026)으로 적었다. 마일스톤 상태와 DoD는 바뀌지 않는다.
 
 ### M10 — 릴리스
 
