@@ -119,7 +119,7 @@
 - **명시적 out:** TOFU(client가 미지 peer를 자동 pin) — `trust.toml` 양방향 구조상 outbound pin이 상대의 inbound 인증까지 통과시키는 문제가 있어 pin 방향 축을 별도 ADR로 예약한다(번호 미배정 — ADR-0017 결정 5가 그 자리를 미룬다). listener 대상 초대 상환("listener pairing")은 예약(ADR-0015). CSR 기반 다대 CA 서명도 예약(ADR-0016)이며, 현행 `qsh cert issue`(M7)는 로컬 device 승격만 유지한다. README 전면 재작성은 SC1 baseline 재측정 뒤로 미룬다(DoD 참고).
 - **수용 기준 (DoD):**
   - SC1 스톱워치 재측정 — 새 표면으로 독립 3회, 5분 이내, `docs/campaigns/m7-stopwatch.md` 선례 형식을 계승한 캠페인 문서로 baseline(M7 DoD 1 측정치, Q4에 따라 현행 표면으로 먼저 잰다) 대비 단축 기록.
-  - doctor 신규 7종이 각각 안정된 code로 진단되는 것을 실행 가능한 메시지와 함께 테스트로 고정하고, `EXPECTED_DOCTOR_CODES`와 CLI.md §6.17 표를 같은 커밋에서 갱신.
+  - doctor 신규 8종(범위 (h)의 7종에 2026-09-24 이슈 처리 기록의 `host_pinned_without_address`를 더한 수)이 각각 안정된 code로 진단되는 것을 실행 가능한 메시지와 함께 테스트로 고정하고, `EXPECTED_DOCTOR_CODES`와 CLI.md §6.17 표를 같은 커밋에서 갱신.
   - SOCKS `-D` — 실제 `curl --socks5-hostname`이 qsh SOCKS listener를 통과하는 acceptance 테스트가 CI에서 건너뛰지 않고 초록이다. host-local 필터 거부와 ACL 거부가 각각 테스트로 고정되고, 옛 거절 계약을 고정하던 fixture는 한 바이트도 바뀌지 않는다(2026-09-19 추가).
   - 문구 표본 8종(§6 문구 규칙 — forward loopback 처방, `-D` 거절 문구(capability 부재, 2026-09-19 개정 — 옛 "현행 유지 문구". 역방향 거절은 2026-09-20 ADR-0020이 걷었다), 재상환 실패의 host 전용 진단, 초대 출력의 후보 주소 열거, 포트 충돌 `--bind` 처방, 페어링 직후 pin 이름·매칭 규칙 부재 고지, `auth_path` 누락 host 진단, `assuming port 4433` 한 줄)이 축자 테스트로 고정.
   - 숨김 alias(구 서브커맨드·config 키)와 config 이중 읽기가 왕복 테스트로 검증 — 구 표기 호출이 신 표기와 동일 op에 도달하고 신구 config 키가 동시에 있을 때의 우선순위가 고정된다.
