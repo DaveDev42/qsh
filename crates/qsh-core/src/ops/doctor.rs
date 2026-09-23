@@ -22,17 +22,19 @@
 //! take `SystemTime` as a parameter rather than calling
 //! `SystemTime::now()` internally.
 
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use qsh_proto::{DoctorData, DoctorFinding, DoctorReq, ErrorCode, KeyStoreKind};
 
-use crate::acl::load_or_deny;
+use crate::acl::{Role, ca_policy_example_row, load_or_deny_with_index, policy_example_rows};
 use crate::config::Config;
 use crate::doctor::probe::{self, UdpProbeOutcome};
 use crate::doctor::{
-    CERT_EXPIRED, CERT_EXPIRING_SOON, CLOCK_SKEW, CONFIG_UNKNOWN_KEY, PEER_UNTRUSTED,
-    QSH_PATH_SHADOWED, TRUST_REMOVE_SCOPE, probe_audit_path_writable,
+    ACL_CA_AUTH_PATH_MISSING, ACL_PRINCIPAL_UNMATCHED, CERT_EXPIRED, CERT_EXPIRING_SOON,
+    CLOCK_SKEW, CONFIG_UNKNOWN_KEY, PEER_UNTRUSTED, QSH_PATH_SHADOWED, TRUST_REMOVE_SCOPE,
+    probe_audit_path_writable,
 };
 use crate::hosts::HostsFile;
 use crate::identity::{
@@ -61,18 +63,54 @@ const DOCTOR_PROBE_TIMEOUT: Duration = super::PROBE_DIAL_TIMEOUT;
 /// 30일 전 doctor 경고", design brief row #5).
 const CERT_EXPIRING_SOON_WINDOW_SECS: i64 = 30 * 24 * 60 * 60;
 
-/// The two real-process inputs [`Ops::doctor_assemble`]'s
-/// `keystore_unavailable`/`qsh_path_shadowed` probes depend on that are
-/// not files under `self.paths` — bundled into one borrow so
-/// [`Ops::doctor_assemble`] stays under clippy's argument-count lint
-/// (verify round P2-2/P2-4). [`Ops::doctor`] always builds this from the
-/// real environment; a test builds it from a stub `KeyStore` and/or an
-/// injected temp `$PATH` to force either probe deterministically through
-/// the real assembly path.
+/// The real-process inputs [`Ops::doctor_assemble`]'s
+/// `keystore_unavailable`/`qsh_path_shadowed`/`service_not_registered`/
+/// `systemd_linger_disabled`/`launchagent_session_scoped`/
+/// `bindv6only_blocks_ipv4` probes depend on that are not files under
+/// `self.paths` — bundled into one borrow so [`Ops::doctor_assemble`]
+/// stays under clippy's argument-count lint (verify round P2-2/P2-4).
+/// [`Ops::doctor`] always builds this from the real environment; a test
+/// builds it from a stub `KeyStore`, an injected temp `$PATH`/`$HOME`/
+/// linger root, or a synthetic bind-probe function to force any of these
+/// probes deterministically through the real assembly path — the same
+/// injected-environment seam this struct exists for.
+///
+/// `home_dir`/`linger_dir`/`username`/`bindv6only_probe` are **always**
+/// constructed and read on every target, never behind a `#[cfg(...)]` —
+/// see [`Ops::doctor_service_registration_findings`]'s own doc for why:
+/// gating individual fields on a struct built at one shared call site
+/// would force every construction site (production plus every test) to
+/// mirror the same `#[cfg(...)]` attributes, and an ungated field that is
+/// only *read* inside a platform-gated body would still trip `-D
+/// warnings`' dead-code lint on the one target where it goes unread
+/// (`x86_64-pc-windows-gnu`, this crate's own cross-compiled CI leg).
+/// `if cfg!(target_os = "...")` at the point of *use* avoids both.
 struct DoctorEnvironment<'a> {
     keystore: &'a dyn KeyStore,
     current_exe: Option<&'a Path>,
     path_dirs: &'a [PathBuf],
+    /// `$HOME` — `None` when [`crate::config::home_dir`] could not resolve
+    /// one, the same "could not even build the path" case
+    /// [`probe::service_unit_registered`]'s own `None` already covers.
+    home_dir: Option<&'a Path>,
+    /// `/var/lib/systemd/linger` in production; a test points this at a
+    /// tempdir instead ([`probe::probe_systemd_linger`]'s own doc).
+    linger_dir: &'a Path,
+    /// `$USER` — `None` when the real environment could not resolve one
+    /// (no finding either way; matches [`probe::LingerProbe::Unknown`]'s
+    /// own "cannot tell" reading rather than guessing an account name).
+    username: Option<&'a str>,
+    /// [`probe::probe_bindv6only`] in production — a real-socket probe,
+    /// injected the same way `keystore`/`path_dirs` are so a test can
+    /// force `bindv6only_blocks_ipv4`'s wiring through [`Ops::doctor_assemble`]
+    /// deterministically (mutation-checked: deleting the wiring line
+    /// goes red) without depending on this OS's actual `IPV6_V6ONLY`
+    /// default — the classifier itself ([`probe::bindv6only_finding`]) is
+    /// already unit-tested with a synthetic bool; this is the one
+    /// layer up, closing the same wiring gap
+    /// [`keystore_finding_of`]/[`path_shadow_finding`] already close for
+    /// their own probes.
+    bindv6only_probe: fn(SocketAddr) -> std::io::Result<bool>,
 }
 
 impl Ops {
@@ -139,10 +177,20 @@ impl Ops {
         let path_dirs: Vec<PathBuf> = std::env::var_os("PATH")
             .map(|path| std::env::split_paths(&path).collect())
             .unwrap_or_default();
+        let home_dir = crate::config::home_dir();
+        // Production linger root — real systemd state, `/var/lib/systemd/
+        // linger` (`probe::probe_systemd_linger`'s own doc); a test swaps
+        // this for a tempdir via `DoctorEnvironment` directly.
+        let linger_dir = Path::new("/var/lib/systemd/linger");
+        let username = std::env::var("USER").ok();
         let env = DoctorEnvironment {
             keystore: keystore.as_ref(),
             current_exe: current_exe.as_deref(),
             path_dirs: &path_dirs,
+            home_dir: home_dir.as_deref(),
+            linger_dir,
+            username: username.as_deref(),
+            bindv6only_probe: probe::probe_bindv6only,
         };
 
         self.doctor_assemble(req, now_unix, &identity, &config, &env)
@@ -170,10 +218,11 @@ impl Ops {
         config: &Config,
         env: &DoctorEnvironment<'_>,
     ) -> Result<DoctorData, OpError> {
+        let mode = infer_run_mode(config);
         let mut findings = Vec::new();
         findings.extend(self.doctor_audit_finding(config));
         findings.extend(self.doctor_config_unknown_key_findings(config));
-        findings.extend(self.doctor_acl_finding());
+        findings.extend(self.doctor_acl_findings(mode)?);
         findings.extend(self.doctor_cert_findings(identity, now_unix)?);
         findings.extend(self.doctor_clock_skew_finding(identity, now_unix)?);
         findings.extend(keystore_finding_of(env.keystore));
@@ -182,7 +231,10 @@ impl Ops {
                 .and_then(|exe| path_shadow_finding(exe, env.path_dirs)),
         );
         findings.extend(self.doctor_trust_findings()?);
+        findings.extend(self.doctor_pinned_no_address_findings()?);
         findings.extend(self.doctor_connectivity_findings(config, req.host.as_deref())?);
+        findings.extend(self.doctor_service_registration_findings(mode, env));
+        findings.extend(self.doctor_bindv6only_finding(config, mode, env));
 
         Ok(DoctorData {
             overall: overall_status(&findings),
@@ -208,24 +260,95 @@ impl Ops {
     }
 
     /// `acl_policy_missing`/`acl_policy_invalid` (design brief rows
-    /// #10/#11) — reuses [`load_or_deny`] and its
-    /// [`crate::acl::StartupDiagnostic`] verbatim, the exact same
-    /// detection `qsh serve`/`qsh listen`'s own startup banner runs; this
-    /// discards the throwaway [`crate::acl::Authorizer`] it also
-    /// constructs (loading `acl.toml` has no side effects worth avoiding).
-    fn doctor_acl_finding(&self) -> Option<DoctorFinding> {
-        let (_authorizer, diagnostic) = load_or_deny(&self.paths);
-        let diagnostic = diagnostic?;
-        Some(DoctorFinding {
-            code: diagnostic.code.to_string(),
-            status: "error".to_string(),
-            detail: diagnostic.render(),
-            remedy: Some(format!(
-                "{}. {}",
-                crate::acl::ACL_STARTUP_NO_AUTOGEN,
-                crate::acl::ACL_STARTUP_CHECK_HINT
-            )),
-        })
+    /// #10/#11), plus ROADMAP M9 (h)'s `acl_principal_unmatched`/
+    /// `acl_ca_auth_path_missing` (ADR-0017 결정 2) — one
+    /// `acl.toml` read for all four codes via [`load_or_deny_with_index`]
+    /// (the exact same detection `qsh serve`/`qsh listen`'s own startup
+    /// banner runs, plus the [`crate::acl::PinnedPrincipalIndex`] extracted
+    /// from the same load), discarding the throwaway
+    /// [`crate::acl::Authorizer`] it also constructs (loading `acl.toml`
+    /// has no side effects worth avoiding). `role` (ADR-0017 결정 2)
+    /// is [`Role::Listen`] for an inferred `listen` mode, [`Role::Serve`]
+    /// otherwise — the same precedence [`infer_run_mode`] already
+    /// establishes for `service_not_registered`.
+    ///
+    /// The two new checks only run once `acl.toml` actually loaded
+    /// ([`crate::acl::PolicyLoad::Loaded`], i.e. `diagnostic.is_none()`):
+    /// `acl_policy_missing`/`acl_policy_invalid` already cover "nothing
+    /// enforced", and a [`crate::acl::PinnedPrincipalIndex::empty`] on
+    /// either of those outcomes has no data worth checking — no false
+    /// `acl_principal_unmatched`/`acl_ca_auth_path_missing` noise on top
+    /// of a report that already says the file itself is the problem.
+    ///
+    /// `remedy` on both new findings is `docs/CLI.md` §6.17's "실행 가능한
+    /// 다음 행동 한 줄" verbatim — the copy-pasteable `[[acl]]` example row
+    /// lives in `detail` instead ([`crate::acl::policy_example_rows`] for
+    /// `acl_principal_unmatched`, naming only the one unmatched peer, not
+    /// every pinned peer; [`crate::acl::ca_policy_example_row`] for
+    /// `acl_ca_auth_path_missing`, which is file-wide and has no peer to
+    /// name).
+    fn doctor_acl_findings(&self, mode: &str) -> Result<Vec<DoctorFinding>, OpError> {
+        let role = if mode == "listen" {
+            Role::Listen
+        } else {
+            Role::Serve
+        };
+        let (_authorizer, diagnostic, index) = load_or_deny_with_index(&self.paths, role);
+        let mut out = Vec::new();
+        if let Some(diagnostic) = diagnostic {
+            out.push(DoctorFinding {
+                code: diagnostic.code.to_string(),
+                status: "error".to_string(),
+                detail: diagnostic.render(),
+                remedy: Some(format!(
+                    "{}. {}",
+                    crate::acl::ACL_STARTUP_NO_AUTOGEN,
+                    crate::acl::ACL_STARTUP_CHECK_HINT
+                )),
+            });
+            return Ok(out);
+        }
+
+        let trust = TrustStore::load(&self.paths.trust_file())?;
+        // `docs/CLI.md` §6.17: `remedy` is one actionable line; the
+        // copy-pasteable `[[acl]]` example row goes in `detail` instead
+        // (the same split `acl_policy_missing`/`acl_policy_invalid`'s
+        // `StartupDiagnostic::render` already uses). `acl_principal_
+        // unmatched`'s row names only the one unmatched peer
+        // ([`policy_example_rows`] with a single-element slice), not every
+        // pinned peer — `acl_ca_auth_path_missing`'s row
+        // ([`ca_policy_example_row`]) is file-wide, so it has no peer to
+        // name at all.
+        let diag = &ACL_PRINCIPAL_UNMATCHED;
+        for peer in trust.peers() {
+            let matched =
+                index.names_device(&peer.name) || index.names_fingerprint(&peer.fingerprint);
+            if !matched {
+                let example = policy_example_rows(&[peer.name.as_str()], role);
+                out.push(DoctorFinding {
+                    code: diag.code.to_string(),
+                    status: "error".to_string(),
+                    detail: format!(
+                        "{} (peer: {})\nminimal example:\n{example}",
+                        diag.message, peer.name
+                    ),
+                    remedy: Some(diag.remedy.to_string()),
+                });
+            }
+        }
+
+        if !trust.cas().is_empty() && !index.has_ca_auth_path() {
+            let diag = &ACL_CA_AUTH_PATH_MISSING;
+            let example = ca_policy_example_row(role);
+            out.push(DoctorFinding {
+                code: diag.code.to_string(),
+                status: "warn".to_string(),
+                detail: format!("{}\nminimal example:\n{example}", diag.message),
+                remedy: Some(diag.remedy.to_string()),
+            });
+        }
+
+        Ok(out)
     }
 
     /// `cert_expired`/`cert_expiring_soon` (design brief rows #4/#5) —
@@ -419,6 +542,123 @@ impl Ops {
         }
 
         Ok(out)
+    }
+
+    /// `service_not_registered`/`systemd_linger_disabled`/
+    /// `launchagent_session_scoped` (ROADMAP M9 (h)) — one
+    /// platform-unit-file existence read
+    /// ([`probe::service_unit_registered`]) off `env.home_dir` decides
+    /// which of the three fires: no unit ⇒ `service_not_registered`
+    /// alone; a registered unit ⇒ `systemd_linger_disabled` (Linux, via
+    /// `env.linger_dir`/`env.username`) or `launchagent_session_scoped`
+    /// (macOS) instead, never both together and never alongside
+    /// `service_not_registered` — mirrors
+    /// [`crate::doctor::SYSTEMD_LINGER_DISABLED`]'s own "only reachable
+    /// once a unit IS registered" doc.
+    ///
+    /// `if cfg!(target_os = "...")` rather than `#[cfg(...)]`-gating any
+    /// of this body: [`probe::launchagent_session_scoped_finding`],
+    /// [`probe::probe_systemd_linger`] and [`probe::linger_finding`] are
+    /// themselves portable (no `#[cfg(target_os = ...)]` of their own),
+    /// precisely so this method can call them
+    /// unconditionally on every target and let the runtime, compile-time-
+    /// foldable `target_os` check alone decide which branch's result is
+    /// kept — the same struct-field dead-code hazard
+    /// [`DoctorEnvironment`]'s own doc explains this sidesteps.
+    fn doctor_service_registration_findings(
+        &self,
+        mode: &str,
+        env: &DoctorEnvironment<'_>,
+    ) -> Vec<DoctorFinding> {
+        let mut out = Vec::new();
+        match probe::service_unit_registered(env.home_dir, mode) {
+            Some(true) => {
+                if cfg!(target_os = "macos") {
+                    out.push(probe::launchagent_session_scoped_finding(mode));
+                }
+                if cfg!(target_os = "linux")
+                    && let Some(username) = env.username
+                {
+                    let probe = probe::probe_systemd_linger(env.linger_dir, username);
+                    out.extend(probe::linger_finding(probe, mode));
+                }
+            }
+            Some(false) => out.push(probe::service_not_registered_finding(mode)),
+            None => {}
+        }
+        out
+    }
+
+    /// `bindv6only_blocks_ipv4` (ROADMAP M9 (h)) —
+    /// resolves the effective bind address for `mode` the same way
+    /// `qsh serve`/`qsh listen` themselves do
+    /// ([`crate::serve::resolve_bind`]/[`crate::reverse::listen::resolve_bind`],
+    /// both `--bind` flag > config > [`crate::serve::DEFAULT_BIND`] —
+    /// `doctor.run` passes no flag, so this reads exactly what a plain
+    /// `qsh <mode>` invocation would bind to), skips the real probe
+    /// entirely unless that address is the IPv6 wildcard
+    /// ([`probe::is_ipv6_wildcard`] — every other address has no
+    /// IPv4-blocking consequence, `crate::doctor::BINDV6ONLY_BLOCKS_IPV4`'s
+    /// own doc), then defers to `env.bindv6only_probe` (production:
+    /// [`probe::probe_bindv6only`]) plus [`probe::bindv6only_finding`]'s
+    /// pure classification. A `reverse` target has no listener config of
+    /// its own — treated the same as `serve` here (`resolve_bind` falls
+    /// back to `[serve].bind` either way), since a reverse target can
+    /// still have `[serve]` configured and `DEFAULT_BIND` is a harmless
+    /// fallback regardless.
+    ///
+    /// `Err`/unresolvable bind spec (a config that would already fail
+    /// `qsh <mode>`'s own startup) and a bind failure on the throwaway
+    /// probe socket both fold into "no finding" — this diagnostic is
+    /// best-effort on top of an address doctor did not itself validate,
+    /// the same stance [`probe_named_target`] already takes for a
+    /// dangling `[reverse].controller` alias.
+    fn doctor_bindv6only_finding(
+        &self,
+        config: &Config,
+        mode: &str,
+        env: &DoctorEnvironment<'_>,
+    ) -> Option<DoctorFinding> {
+        // `qsh reverse` dials out; it binds no listener at all (the only
+        // two `Listener::bind` call sites in the workspace are `serve`'s
+        // and `listen`'s), so there is no bind address to probe here —
+        // falling through to `serve`'s default would report a listener
+        // problem for a host that runs no listener.
+        if mode == "reverse" {
+            return None;
+        }
+        let bind = if mode == "listen" {
+            crate::reverse::listen::resolve_bind(None, config)
+        } else {
+            crate::serve::resolve_bind(None, config)
+        }
+        .ok()?;
+        if !probe::is_ipv6_wildcard(bind) {
+            return None;
+        }
+        let only_v6 = (env.bindv6only_probe)(bind).ok()?;
+        probe::bindv6only_finding(&bind.to_string(), only_v6)
+    }
+}
+
+/// `service_not_registered`/`bindv6only_blocks_ipv4`'s shared mode
+/// inference: `[listen]` present (any field set,
+/// via `!= ListenConfig::default()` — the same "any field set" test
+/// `docs/CLI.md` gives no dedicated accessor for) wins outright; else the
+/// legacy `[reverse].controller` key (reserved, `crate::config::ReverseConfig::controller`'s
+/// own doc — kept here only so a `config.toml` written for an older
+/// build still infers `reverse` instead of silently falling through to
+/// `serve`); else `serve`, the default role for a bare `config.toml`.
+/// `config_serve_to_conflict` (a later ROADMAP M9 (h) step) is the only
+/// thing this deliberately leaves out: no diagnostic here for a config
+/// that sets more than one of these at once, only a precedence rule.
+fn infer_run_mode(config: &Config) -> &'static str {
+    if config.listen != crate::config::ListenConfig::default() {
+        "listen"
+    } else if config.reverse.controller.is_some() {
+        "reverse"
+    } else {
+        "serve"
     }
 }
 

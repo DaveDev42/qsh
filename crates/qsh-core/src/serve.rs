@@ -10,7 +10,7 @@ use std::sync::Arc;
 use qsh_proto::ErrorCode;
 use qsh_transport::{Listener, SetupError, TrustEvaluator};
 
-use crate::acl::{StartupDiagnostic, load_or_deny_with_index};
+use crate::acl::{Role, StartupDiagnostic, load_or_deny_with_index};
 use crate::audit::RotatingAuditSink;
 use crate::broker::{Broker, BrokerConfig, SystemClock};
 use crate::config::{Config, Paths};
@@ -354,7 +354,8 @@ pub fn host_runtime(paths: &Paths, config: &Config, device_id: impl Into<String>
     // that type is erased. `crate::reverse::listen::run_listen_unix` keeps
     // calling plain `load_or_deny`: a reverse target never reaches
     // `Server::serve_pairing_connection` at all.
-    let (authorizer, policy_diagnostic, pinned_principals) = load_or_deny_with_index(paths);
+    let (authorizer, policy_diagnostic, pinned_principals) =
+        load_or_deny_with_index(paths, Role::Serve);
     // `PLAN.md` M8 Step 2: the same operator-configured admission bounds
     // for every host role this constructs (`qsh serve` and a reverse
     // target's own accept loop, `crate::reverse::target::run_reverse_unix`

@@ -5,7 +5,13 @@ use crate::config::Paths;
 
 fn temp_ops() -> (tempfile::TempDir, Ops) {
     let dir = tempfile::tempdir().unwrap();
-    let paths = Paths::new(dir.path().join("config"), dir.path().join("state"));
+    // Pin `runtime_dir` into the sandbox (`Paths::with_runtime_dir`'s own
+    // doc) so `reverse_host_entries()` — `host_pinned_without_address`'s
+    // dependency, via `self.paths().runtime_dir()` — never reads this
+    // developer's or CI runner's real `$XDG_RUNTIME_DIR`/localctl socket,
+    // regardless of what real `qsh listen` state happens to exist there.
+    let paths = Paths::new(dir.path().join("config"), dir.path().join("state"))
+        .with_runtime_dir(dir.path().join("run"));
     (dir, Ops::new(paths))
 }
 
@@ -14,6 +20,46 @@ fn init_identity(ops: &Ops) {
         key_store: Some(KeyStoreMode::File),
     })
     .unwrap();
+}
+
+/// A `linger_dir` no test's home directory ever coincides with — used by
+/// every [`DoctorEnvironment`] literal that is not itself exercising
+/// `systemd_linger_disabled` (`probe::probe_systemd_linger` only reads it
+/// once a unit is registered, `env.home_dir` is `Some`, which most tests
+/// below never set either).
+fn no_linger_dir() -> &'static Path {
+    Path::new("/nonexistent-m9-step4-doctor-test-linger-root")
+}
+
+/// A `bindv6only_probe` stub for every [`DoctorEnvironment`] literal that
+/// is not itself exercising `bindv6only_blocks_ipv4` — `Ok(false)` never
+/// fires [`probe::bindv6only_finding`] — the mutation check has its own
+/// dedicated `Ok(true)` stub, [`always_v6_only`].
+fn never_v6_only(_addr: SocketAddr) -> std::io::Result<bool> {
+    Ok(false)
+}
+
+/// The wiring test's forcing stub — always reports `IPV6_V6ONLY`,
+/// deterministically, on every OS/CI leg, regardless of this machine's
+/// real dual-stack default.
+fn always_v6_only(_addr: SocketAddr) -> std::io::Result<bool> {
+    Ok(true)
+}
+
+/// A [`DoctorEnvironment`] with every probe stubbed to "not present"/
+/// "cannot tell" — every ROADMAP M9 (h) test below overrides only the one or
+/// two fields its own probe actually reads, via struct-update syntax,
+/// rather than repeating all seven fields at every call site.
+fn minimal_env(keystore: &dyn KeyStore) -> DoctorEnvironment<'_> {
+    DoctorEnvironment {
+        keystore,
+        current_exe: None,
+        path_dirs: &[],
+        home_dir: None,
+        linger_dir: no_linger_dir(),
+        username: None,
+        bindv6only_probe: never_v6_only,
+    }
 }
 
 // -----------------------------------------------------------------
@@ -465,6 +511,16 @@ fn doctor_has_no_peer_untrusted_when_hosts_toml_is_empty() {
 #[test]
 fn doctor_reports_trust_remove_scope_only_once_a_peer_is_pinned() {
     let (_guard, ops) = healthy_ops();
+    // A pin-path row for the peer this test pins below, so the only
+    // `overall` delta the pin adds is `trust_remove_scope`'s own `info`
+    // notice — otherwise `acl_principal_unmatched` would
+    // (correctly) also fire for an ACL-unmatched "mac" pin and confound
+    // this test's isolation.
+    std::fs::write(
+        ops.paths().acl_file(),
+        "[[acl]]\nprincipal = \"device:mac\"\nallow = [\"exec.run\"]\n",
+    )
+    .unwrap();
     let before = ops
         .doctor(DoctorReq { host: None }, SystemTime::now())
         .unwrap();
@@ -583,6 +639,10 @@ fn doctor_wires_the_keystore_finding_into_the_full_report_deterministically() {
         keystore: &AlwaysUnavailableKeyStore,
         current_exe: None,
         path_dirs: &[],
+        home_dir: None,
+        linger_dir: no_linger_dir(),
+        username: None,
+        bindv6only_probe: never_v6_only,
     };
 
     let data = ops
@@ -703,6 +763,10 @@ fn doctor_wires_the_path_shadow_finding_into_the_full_report_deterministically()
         keystore: &never_unavailable,
         current_exe: Some(&real_exe),
         path_dirs: &path_dirs,
+        home_dir: None,
+        linger_dir: no_linger_dir(),
+        username: None,
+        bindv6only_probe: never_v6_only,
     };
 
     let data = ops
@@ -1250,4 +1314,757 @@ fn known_leaf_paths_round_trip_covers_every_serve_cap_key() {
         .collect();
     let expected: std::collections::BTreeSet<&str> = ALL_SERVE_KEYS.into_iter().collect();
     assert_eq!(serve_paths, expected);
+}
+
+// ===================================================================
+// ROADMAP M9 (h): seven new diagnostics.
+// ===================================================================
+
+// -----------------------------------------------------------------
+// infer_run_mode — the shared mode inference `service_not_registered`/
+// `bindv6only_blocks_ipv4` both key off.
+// -----------------------------------------------------------------
+
+#[test]
+fn infer_run_mode_prefers_listen_then_reverse_then_defaults_to_serve() {
+    let mut config = Config::default();
+    assert_eq!(infer_run_mode(&config), "serve");
+
+    config.reverse.controller = Some("ctrl".to_string());
+    assert_eq!(infer_run_mode(&config), "reverse");
+
+    // `[listen]` present (any field set) wins outright, even over an
+    // already-set `[reverse].controller` (`infer_run_mode`'s own precedence).
+    config.listen.allow_advertised_names = true;
+    assert_eq!(infer_run_mode(&config), "listen");
+}
+
+/// A CA to add to `trust.toml` for the `acl_ca_auth_path_missing` tests
+/// below — content is never parsed as a real certificate by anything
+/// this test touches, only counted (`TrustStore::cas().is_empty()`).
+fn add_stub_ca(ops: &Ops, name: &str) {
+    let mut store = TrustStore::load(&ops.paths().trust_file()).unwrap_or_default();
+    store.add_ca(
+        name,
+        "-----BEGIN CERTIFICATE-----\nstub\n-----END CERTIFICATE-----\n".to_string(),
+    );
+    crate::config::ensure_private_dir(&ops.paths().config_dir).unwrap();
+    store.save(&ops.paths().trust_file()).unwrap();
+}
+
+// -----------------------------------------------------------------
+// service_not_registered / systemd_linger_disabled /
+// launchagent_session_scoped — the injected-environment seam
+// (`env.home_dir`/`env.linger_dir`/`env.username`).
+// -----------------------------------------------------------------
+
+#[test]
+fn doctor_service_registration_findings_reports_not_registered_when_home_has_no_unit_file() {
+    let keystore = crate::identity::MemoryKeyStore::new();
+    let (_guard, ops) = healthy_ops();
+    let home = tempfile::tempdir().unwrap();
+    let env = DoctorEnvironment {
+        home_dir: Some(home.path()),
+        ..minimal_env(&keystore)
+    };
+
+    let findings = ops.doctor_service_registration_findings("listen", &env);
+    if cfg!(any(target_os = "macos", target_os = "linux")) {
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        let finding = &findings[0];
+        assert_eq!(finding.code, "service_not_registered");
+        assert_eq!(finding.status, "info");
+        assert!(finding.detail.contains("listen"), "{finding:?}");
+    } else {
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+}
+
+/// `None` `home_dir` (the real environment's own "could not even build
+/// the path" case) is silent everywhere — portable, no platform cfg
+/// needed: [`probe::service_unit_registered`] returns `None` on macOS/
+/// Linux too once `home` is `None`.
+#[test]
+fn doctor_service_registration_findings_is_silent_with_no_home_dir() {
+    let keystore = crate::identity::MemoryKeyStore::new();
+    let (_guard, ops) = healthy_ops();
+    let env = minimal_env(&keystore);
+    assert!(
+        ops.doctor_service_registration_findings("serve", &env)
+            .is_empty()
+    );
+}
+
+/// Off macOS/Linux, `service_unit_registered` is unconditionally `None`
+/// (`infer_run_mode` never runs off macOS/Linux) — an injected `home_dir` that *would* trigger
+/// `service_not_registered` on macOS/Linux must still report nothing
+/// here.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[test]
+fn doctor_service_registration_findings_is_always_silent_off_macos_and_linux() {
+    let keystore = crate::identity::MemoryKeyStore::new();
+    let (_guard, ops) = healthy_ops();
+    let home = tempfile::tempdir().unwrap();
+    let env = DoctorEnvironment {
+        home_dir: Some(home.path()),
+        ..minimal_env(&keystore)
+    };
+    assert!(
+        ops.doctor_service_registration_findings("serve", &env)
+            .is_empty()
+    );
+}
+
+/// Once the unit file is registered, `service_not_registered` must not
+/// also fire — `systemd_linger_disabled`/`launchagent_session_scoped`
+/// take over instead (`crate::doctor::SYSTEMD_LINGER_DISABLED`'s own
+/// "only reachable once a unit IS registered" doc).
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn doctor_service_registration_findings_is_silent_on_service_not_registered_once_the_unit_exists() {
+    let keystore = crate::identity::MemoryKeyStore::new();
+    let (_guard, ops) = healthy_ops();
+    let home = tempfile::tempdir().unwrap();
+    #[cfg(target_os = "macos")]
+    let unit_path = probe::macos_launchagent_path(home.path(), "serve");
+    #[cfg(target_os = "linux")]
+    let unit_path = probe::linux_systemd_user_unit_path(home.path(), "serve");
+    std::fs::create_dir_all(unit_path.parent().unwrap()).unwrap();
+    std::fs::write(&unit_path, b"stub").unwrap();
+
+    let env = DoctorEnvironment {
+        home_dir: Some(home.path()),
+        username: Some("m9-step4-test-account"),
+        ..minimal_env(&keystore)
+    };
+    let findings = ops.doctor_service_registration_findings("serve", &env);
+    assert!(
+        findings.iter().all(|f| f.code != "service_not_registered"),
+        "a registered unit must not also report service_not_registered: {findings:?}"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn doctor_service_registration_findings_reports_launchagent_session_scoped_once_registered() {
+    let keystore = crate::identity::MemoryKeyStore::new();
+    let (_guard, ops) = healthy_ops();
+    let home = tempfile::tempdir().unwrap();
+    let unit_path = probe::macos_launchagent_path(home.path(), "serve");
+    std::fs::create_dir_all(unit_path.parent().unwrap()).unwrap();
+    std::fs::write(&unit_path, b"stub").unwrap();
+
+    let env = DoctorEnvironment {
+        home_dir: Some(home.path()),
+        ..minimal_env(&keystore)
+    };
+    let findings = ops.doctor_service_registration_findings("serve", &env);
+    let finding = findings
+        .iter()
+        .find(|f| f.code == "launchagent_session_scoped")
+        .expect("launchagent_session_scoped finding");
+    assert_eq!(finding.status, "warn");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn doctor_service_registration_findings_reports_systemd_linger_disabled_once_registered() {
+    let keystore = crate::identity::MemoryKeyStore::new();
+    let (_guard, ops) = healthy_ops();
+    let home = tempfile::tempdir().unwrap();
+    let unit_path = probe::linux_systemd_user_unit_path(home.path(), "serve");
+    std::fs::create_dir_all(unit_path.parent().unwrap()).unwrap();
+    std::fs::write(&unit_path, b"stub").unwrap();
+    let linger_dir = tempfile::tempdir().unwrap();
+    // No marker file for this account: `try_exists` on the missing leaf
+    // is deterministically `Ok(false)` (`probe::LingerProbe`'s own
+    // doc), never an error, so this observes `Disabled`, not `Unknown`.
+
+    let env = DoctorEnvironment {
+        home_dir: Some(home.path()),
+        linger_dir: linger_dir.path(),
+        username: Some("m9-step4-test-account"),
+        ..minimal_env(&keystore)
+    };
+    let findings = ops.doctor_service_registration_findings("serve", &env);
+    let finding = findings
+        .iter()
+        .find(|f| f.code == "systemd_linger_disabled")
+        .expect("systemd_linger_disabled finding");
+    assert_eq!(finding.status, "warn");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn doctor_service_registration_findings_is_silent_once_linger_is_enabled() {
+    let keystore = crate::identity::MemoryKeyStore::new();
+    let (_guard, ops) = healthy_ops();
+    let home = tempfile::tempdir().unwrap();
+    let unit_path = probe::linux_systemd_user_unit_path(home.path(), "serve");
+    std::fs::create_dir_all(unit_path.parent().unwrap()).unwrap();
+    std::fs::write(&unit_path, b"stub").unwrap();
+    let linger_dir = tempfile::tempdir().unwrap();
+    std::fs::write(linger_dir.path().join("m9-step4-test-account"), b"").unwrap();
+
+    let env = DoctorEnvironment {
+        home_dir: Some(home.path()),
+        linger_dir: linger_dir.path(),
+        username: Some("m9-step4-test-account"),
+        ..minimal_env(&keystore)
+    };
+    let findings = ops.doctor_service_registration_findings("serve", &env);
+    assert!(
+        findings.iter().all(|f| f.code != "systemd_linger_disabled"),
+        "{findings:?}"
+    );
+}
+
+/// Wiring (mutation check: deleting the wiring line reds this test): goes through
+/// [`Ops::doctor_assemble`] itself with an injected environment, the
+/// real code path `Ops::doctor` calls — the same discipline
+/// `doctor_wires_the_keystore_finding_into_the_full_report_deterministically`
+/// already establishes. Deleting `doctor_assemble`'s
+/// `findings.extend(self.doctor_service_registration_findings(mode, env))`
+/// line reds this test on macOS/Linux (the two platforms this repo's
+/// CI actually runs `cargo nextest run --workspace` on).
+#[test]
+fn doctor_wires_the_service_not_registered_finding_into_the_full_report_deterministically() {
+    let (_guard, ops) = healthy_ops();
+    let identity = ops.load_identity().unwrap().unwrap().identity;
+    let config = ops.config().unwrap();
+    let keystore = crate::identity::MemoryKeyStore::new();
+    let home = tempfile::tempdir().unwrap();
+    let env = DoctorEnvironment {
+        home_dir: Some(home.path()),
+        ..minimal_env(&keystore)
+    };
+
+    let data = ops
+        .doctor_assemble(
+            DoctorReq { host: None },
+            unix_seconds(SystemTime::now()),
+            &identity,
+            &config,
+            &env,
+        )
+        .unwrap();
+    if cfg!(any(target_os = "macos", target_os = "linux")) {
+        assert!(
+            data.findings
+                .iter()
+                .any(|f| f.code == "service_not_registered"),
+            "{:?}",
+            data.findings
+        );
+    }
+}
+
+// -----------------------------------------------------------------
+// bindv6only_blocks_ipv4 — classifier already covered by
+// `probe::tests`; this is the wiring layer, deterministic via
+// `env.bindv6only_probe`.
+// -----------------------------------------------------------------
+
+#[test]
+fn doctor_bindv6only_finding_fires_for_the_default_wildcard_bind_when_the_probe_reports_v6_only() {
+    let keystore = crate::identity::MemoryKeyStore::new();
+    let (_guard, ops) = healthy_ops();
+    let config = Config::default();
+    let env = DoctorEnvironment {
+        bindv6only_probe: always_v6_only,
+        ..minimal_env(&keystore)
+    };
+
+    let finding = ops
+        .doctor_bindv6only_finding(&config, "serve", &env)
+        .expect("bindv6only_blocks_ipv4 finding");
+    assert_eq!(finding.code, "bindv6only_blocks_ipv4");
+    assert_eq!(finding.status, "warn");
+}
+
+#[test]
+fn doctor_bindv6only_finding_is_none_when_the_probe_reports_dual_stack() {
+    let keystore = crate::identity::MemoryKeyStore::new();
+    let (_guard, ops) = healthy_ops();
+    let config = Config::default();
+    let env = minimal_env(&keystore);
+    assert!(
+        ops.doctor_bindv6only_finding(&config, "serve", &env)
+            .is_none()
+    );
+}
+
+/// A non-wildcard bind is never probed at all, even with a stub that
+/// would otherwise fire — [`probe::is_ipv6_wildcard`]'s own gate.
+#[test]
+fn doctor_bindv6only_finding_is_none_for_a_non_wildcard_bind() {
+    let keystore = crate::identity::MemoryKeyStore::new();
+    let (_guard, ops) = healthy_ops();
+    let mut config = Config::default();
+    config.serve.bind = Some("127.0.0.1:4433".to_string());
+    let env = DoctorEnvironment {
+        bindv6only_probe: always_v6_only,
+        ..minimal_env(&keystore)
+    };
+    assert!(
+        ops.doctor_bindv6only_finding(&config, "serve", &env)
+            .is_none()
+    );
+}
+
+/// `listen` mode reads `[listen].bind`, not `[serve].bind`.
+#[test]
+fn doctor_bindv6only_finding_reads_the_listen_bind_for_listen_mode() {
+    let keystore = crate::identity::MemoryKeyStore::new();
+    let (_guard, ops) = healthy_ops();
+    let mut config = Config::default();
+    config.serve.bind = Some("127.0.0.1:4433".to_string());
+    config.listen.bind = Some("[::]:4433".to_string());
+    let env = DoctorEnvironment {
+        bindv6only_probe: always_v6_only,
+        ..minimal_env(&keystore)
+    };
+    let finding = ops
+        .doctor_bindv6only_finding(&config, "listen", &env)
+        .expect("bindv6only_blocks_ipv4 finding");
+    assert_eq!(finding.code, "bindv6only_blocks_ipv4");
+}
+
+/// `qsh reverse` dials out and binds no listener at all — falling
+/// through to `serve`'s bind resolution here would report a listener
+/// problem for a host that never opens one.
+#[test]
+fn doctor_bindv6only_finding_is_none_for_reverse_mode_even_with_a_wildcard_serve_bind() {
+    let keystore = crate::identity::MemoryKeyStore::new();
+    let (_guard, ops) = healthy_ops();
+    let mut config = Config::default();
+    config.serve.bind = Some("[::]:4433".to_string());
+    let env = DoctorEnvironment {
+        bindv6only_probe: always_v6_only,
+        ..minimal_env(&keystore)
+    };
+    assert!(
+        ops.doctor_bindv6only_finding(&config, "reverse", &env)
+            .is_none()
+    );
+}
+
+/// Wiring (mutation check) — deleting `doctor_assemble`'s
+/// `findings.extend(self.doctor_bindv6only_finding(config, mode, env))`
+/// line reds this test unconditionally (unlike the service-registration
+/// wiring test above, this one needs no platform gate: the stub makes
+/// it deterministic on every OS `cargo nextest run --workspace` runs
+/// on).
+#[test]
+fn doctor_wires_the_bindv6only_finding_into_the_full_report_deterministically() {
+    let (_guard, ops) = healthy_ops();
+    let identity = ops.load_identity().unwrap().unwrap().identity;
+    let config = ops.config().unwrap();
+    let keystore = crate::identity::MemoryKeyStore::new();
+    let env = DoctorEnvironment {
+        bindv6only_probe: always_v6_only,
+        ..minimal_env(&keystore)
+    };
+
+    let data = ops
+        .doctor_assemble(
+            DoctorReq { host: None },
+            unix_seconds(SystemTime::now()),
+            &identity,
+            &config,
+            &env,
+        )
+        .unwrap();
+    assert!(
+        data.findings
+            .iter()
+            .any(|f| f.code == "bindv6only_blocks_ipv4"),
+        "{:?}",
+        data.findings
+    );
+}
+
+// -----------------------------------------------------------------
+// acl_principal_unmatched / acl_ca_auth_path_missing (ADR-0017 결정 2).
+// -----------------------------------------------------------------
+
+#[test]
+fn doctor_acl_findings_reports_acl_principal_unmatched_for_an_unmatched_pin() {
+    let (_guard, ops) = temp_ops();
+    init_identity(&ops);
+    crate::config::ensure_private_dir(&ops.paths().config_dir).unwrap();
+    std::fs::write(ops.paths().acl_file(), minimal_acl_toml()).unwrap();
+    ops.trust_add(TrustAddReq {
+        name: "mac".into(),
+        address: None,
+        fingerprint: Some(qsh_transport::Fingerprint::of_spki_der(b"mac").to_string()),
+    })
+    .unwrap();
+
+    let findings = ops.doctor_acl_findings("serve").unwrap();
+    let finding = findings
+        .iter()
+        .find(|f| f.code == "acl_principal_unmatched")
+        .expect("acl_principal_unmatched finding");
+    assert_eq!(finding.status, "error");
+    assert!(finding.detail.contains("mac"), "{finding:?}");
+}
+
+/// `detail` (not `remedy` — `docs/CLI.md` §6.17's "실행 가능한 다음 행동 한
+/// 줄" keeps `remedy` to one line) carries a real copy-pasteable `[[acl]]`
+/// row naming this machine's actual unmatched peer, role-aware:
+/// `exec.run` for `serve`, `host.reverse` for `listen`, never both — and,
+/// with a second, already-matched peer pinned alongside it, names only
+/// the unmatched one, not every pinned peer.
+#[test]
+fn doctor_acl_findings_acl_principal_unmatched_detail_carries_a_role_aware_example_row() {
+    let (_guard, ops) = temp_ops();
+    init_identity(&ops);
+    crate::config::ensure_private_dir(&ops.paths().config_dir).unwrap();
+    std::fs::write(
+        ops.paths().acl_file(),
+        "[[acl]]\nprincipal = \"device:other\"\nallow = [\"exec.run\"]\n",
+    )
+    .unwrap();
+    ops.trust_add(TrustAddReq {
+        name: "mac".into(),
+        address: None,
+        fingerprint: Some(qsh_transport::Fingerprint::of_spki_der(b"mac").to_string()),
+    })
+    .unwrap();
+    ops.trust_add(TrustAddReq {
+        name: "other".into(),
+        address: None,
+        fingerprint: Some(qsh_transport::Fingerprint::of_spki_der(b"other").to_string()),
+    })
+    .unwrap();
+
+    let serve_finding = ops
+        .doctor_acl_findings("serve")
+        .unwrap()
+        .into_iter()
+        .find(|f| f.code == "acl_principal_unmatched")
+        .expect("acl_principal_unmatched finding");
+    assert!(
+        serve_finding.remedy.as_deref() == Some(ACL_PRINCIPAL_UNMATCHED.remedy),
+        "{:?}",
+        serve_finding.remedy
+    );
+    let serve_detail = serve_finding.detail;
+    assert!(serve_detail.contains("[[acl]]"), "{serve_detail}");
+    assert!(serve_detail.contains("device:mac"), "{serve_detail}");
+    assert!(serve_detail.contains("exec.run"), "{serve_detail}");
+    assert!(!serve_detail.contains("host.reverse"), "{serve_detail}");
+    assert!(
+        !serve_detail.contains("device:other"),
+        "the example row must name only the unmatched peer: {serve_detail}"
+    );
+
+    let listen_detail = ops
+        .doctor_acl_findings("listen")
+        .unwrap()
+        .into_iter()
+        .find(|f| f.code == "acl_principal_unmatched")
+        .expect("acl_principal_unmatched finding")
+        .detail;
+    assert!(listen_detail.contains("host.reverse"), "{listen_detail}");
+    assert!(!listen_detail.contains("exec.run"), "{listen_detail}");
+}
+
+#[test]
+fn doctor_acl_findings_is_silent_when_a_pin_path_row_names_the_device() {
+    let (_guard, ops) = temp_ops();
+    init_identity(&ops);
+    crate::config::ensure_private_dir(&ops.paths().config_dir).unwrap();
+    std::fs::write(
+        ops.paths().acl_file(),
+        "[[acl]]\nprincipal = \"device:mac\"\nallow = [\"exec.run\"]\n",
+    )
+    .unwrap();
+    ops.trust_add(TrustAddReq {
+        name: "mac".into(),
+        address: None,
+        fingerprint: Some(qsh_transport::Fingerprint::of_spki_der(b"mac").to_string()),
+    })
+    .unwrap();
+
+    let findings = ops.doctor_acl_findings("serve").unwrap();
+    assert!(
+        findings.iter().all(|f| f.code != "acl_principal_unmatched"),
+        "{findings:?}"
+    );
+}
+
+/// The other candidate [`crate::acl::PinnedPrincipalIndex::names_fingerprint`]
+/// checks — a row naming `fp:sha256:<...>` also counts as matched, not
+/// only `device:<name>`.
+#[test]
+fn doctor_acl_findings_is_silent_when_a_pin_path_row_names_the_fingerprint() {
+    let (_guard, ops) = temp_ops();
+    init_identity(&ops);
+    let fingerprint = qsh_transport::Fingerprint::of_spki_der(b"mac").to_string();
+    crate::config::ensure_private_dir(&ops.paths().config_dir).unwrap();
+    std::fs::write(
+        ops.paths().acl_file(),
+        format!("[[acl]]\nprincipal = \"fp:{fingerprint}\"\nallow = [\"exec.run\"]\n"),
+    )
+    .unwrap();
+    ops.trust_add(TrustAddReq {
+        name: "mac".into(),
+        address: None,
+        fingerprint: Some(fingerprint.clone()),
+    })
+    .unwrap();
+
+    let findings = ops.doctor_acl_findings("serve").unwrap();
+    assert!(
+        findings.iter().all(|f| f.code != "acl_principal_unmatched"),
+        "{findings:?}"
+    );
+}
+
+#[test]
+fn doctor_acl_findings_reports_acl_ca_auth_path_missing_when_no_row_sets_ca() {
+    let (_guard, ops) = temp_ops();
+    init_identity(&ops);
+    crate::config::ensure_private_dir(&ops.paths().config_dir).unwrap();
+    std::fs::write(ops.paths().acl_file(), minimal_acl_toml()).unwrap();
+    add_stub_ca(&ops, "corp-ca");
+
+    let findings = ops.doctor_acl_findings("serve").unwrap();
+    let finding = findings
+        .iter()
+        .find(|f| f.code == "acl_ca_auth_path_missing")
+        .expect("acl_ca_auth_path_missing finding");
+    assert_eq!(finding.status, "warn");
+    assert!(finding.detail.contains("[[acl]]"), "{finding:?}");
+    assert!(finding.detail.contains("auth_path = \"ca\""), "{finding:?}");
+    assert!(
+        finding.remedy.as_deref() == Some(ACL_CA_AUTH_PATH_MISSING.remedy),
+        "{:?}",
+        finding.remedy
+    );
+}
+
+#[test]
+fn doctor_acl_findings_is_silent_when_a_row_sets_auth_path_ca() {
+    let (_guard, ops) = temp_ops();
+    init_identity(&ops);
+    crate::config::ensure_private_dir(&ops.paths().config_dir).unwrap();
+    std::fs::write(
+        ops.paths().acl_file(),
+        "[[acl]]\nprincipal = \"device:x\"\nauth_path = \"ca\"\nallow = [\"exec.run\"]\n",
+    )
+    .unwrap();
+    add_stub_ca(&ops, "corp-ca");
+
+    let findings = ops.doctor_acl_findings("serve").unwrap();
+    assert!(
+        findings
+            .iter()
+            .all(|f| f.code != "acl_ca_auth_path_missing"),
+        "{findings:?}"
+    );
+}
+
+#[test]
+fn doctor_acl_findings_is_silent_about_ca_auth_path_with_no_ca_entries_at_all() {
+    let (_guard, ops) = temp_ops();
+    init_identity(&ops);
+    crate::config::ensure_private_dir(&ops.paths().config_dir).unwrap();
+    std::fs::write(ops.paths().acl_file(), minimal_acl_toml()).unwrap();
+
+    let findings = ops.doctor_acl_findings("serve").unwrap();
+    assert!(
+        findings
+            .iter()
+            .all(|f| f.code != "acl_ca_auth_path_missing"),
+        "{findings:?}"
+    );
+}
+
+/// Both new checks only run once `acl.toml` actually loaded — a missing
+/// policy already reports `acl_policy_missing` and must not also pile
+/// on `acl_principal_unmatched`/`acl_ca_auth_path_missing` noise for
+/// data an unloaded `PinnedPrincipalIndex::empty()` cannot actually
+/// speak to.
+#[test]
+fn doctor_acl_findings_skips_the_new_checks_when_the_policy_failed_to_load() {
+    let (_guard, ops) = temp_ops();
+    init_identity(&ops);
+    add_stub_ca(&ops, "corp-ca");
+    ops.trust_add(TrustAddReq {
+        name: "mac".into(),
+        address: None,
+        fingerprint: Some(qsh_transport::Fingerprint::of_spki_der(b"mac").to_string()),
+    })
+    .unwrap();
+    // No acl.toml at all: `PolicyLoad::Missing`.
+
+    let findings = ops.doctor_acl_findings("serve").unwrap();
+    assert!(findings.iter().any(|f| f.code == "acl_policy_missing"));
+    assert!(
+        findings.iter().all(|f| f.code != "acl_principal_unmatched"),
+        "{findings:?}"
+    );
+    assert!(
+        findings
+            .iter()
+            .all(|f| f.code != "acl_ca_auth_path_missing"),
+        "{findings:?}"
+    );
+}
+
+/// ADR-0017 결정 2: a `listen` role's minimal-policy example names
+/// `host.reverse`, not `serve`'s five session/exec actions — checked
+/// through the public surface (the embedded `StartupDiagnostic::render`
+/// text in `acl_policy_missing`'s own `detail`) rather than reaching
+/// into `acl::load`'s private `minimal_policy_example`.
+#[test]
+fn doctor_acl_findings_minimal_policy_example_is_role_aware() {
+    let (_guard, ops) = temp_ops();
+    init_identity(&ops);
+    // No acl.toml: both calls hit `PolicyLoad::Missing`, embedding a
+    // fresh example each time.
+
+    let serve_finding = ops
+        .doctor_acl_findings("serve")
+        .unwrap()
+        .into_iter()
+        .find(|f| f.code == "acl_policy_missing")
+        .expect("acl_policy_missing finding");
+    assert!(
+        serve_finding.detail.contains("exec.run"),
+        "{serve_finding:?}"
+    );
+    assert!(
+        !serve_finding.detail.contains("host.reverse"),
+        "{serve_finding:?}"
+    );
+
+    let listen_finding = ops
+        .doctor_acl_findings("listen")
+        .unwrap()
+        .into_iter()
+        .find(|f| f.code == "acl_policy_missing")
+        .expect("acl_policy_missing finding");
+    assert!(
+        listen_finding.detail.contains("host.reverse"),
+        "{listen_finding:?}"
+    );
+    assert!(
+        !listen_finding.detail.contains("exec.run"),
+        "{listen_finding:?}"
+    );
+}
+
+/// ADR-0017 결정 2's restart clause ("verbatim in spirit").
+#[test]
+fn acl_principal_unmatched_and_ca_auth_path_missing_remedies_mention_restart() {
+    assert!(
+        crate::doctor::ACL_PRINCIPAL_UNMATCHED
+            .remedy
+            .contains("restart")
+    );
+    assert!(
+        crate::doctor::ACL_CA_AUTH_PATH_MISSING
+            .remedy
+            .contains("restart")
+    );
+}
+
+/// Wiring (mutation check): deleting `doctor_assemble`'s
+/// `findings.extend(self.doctor_acl_findings(mode)?)` line reds this
+/// test. Goes through `doctor_assemble` with an injected environment
+/// (the same discipline
+/// `doctor_wires_the_service_not_registered_finding_into_the_full_report_deterministically`
+/// already establishes) rather than the real `Ops::doctor`, even though
+/// neither new ACL check itself reads `DoctorEnvironment`: the full
+/// pipeline still runs every other probe (`bindv6only_probe`'s real UDP
+/// bind included), so this keeps the test hermetic rather than merely
+/// "happens not to care about the result".
+#[test]
+fn doctor_wires_the_acl_principal_and_ca_findings_into_the_full_report() {
+    let (_guard, ops) = temp_ops();
+    init_identity(&ops);
+    crate::config::ensure_private_dir(&ops.paths().config_dir).unwrap();
+    std::fs::write(ops.paths().acl_file(), minimal_acl_toml()).unwrap();
+    add_stub_ca(&ops, "corp-ca");
+    ops.trust_add(TrustAddReq {
+        name: "mac".into(),
+        address: None,
+        fingerprint: Some(qsh_transport::Fingerprint::of_spki_der(b"mac").to_string()),
+    })
+    .unwrap();
+
+    let identity = ops.load_identity().unwrap().unwrap().identity;
+    let config = ops.config().unwrap();
+    let keystore = crate::identity::MemoryKeyStore::new();
+    let data = ops
+        .doctor_assemble(
+            DoctorReq { host: None },
+            unix_seconds(SystemTime::now()),
+            &identity,
+            &config,
+            &minimal_env(&keystore),
+        )
+        .unwrap();
+    assert!(
+        data.findings
+            .iter()
+            .any(|f| f.code == "acl_principal_unmatched"),
+        "{:?}",
+        data.findings
+    );
+    assert!(
+        data.findings
+            .iter()
+            .any(|f| f.code == "acl_ca_auth_path_missing"),
+        "{:?}",
+        data.findings
+    );
+}
+
+// -----------------------------------------------------------------
+// host_pinned_without_address — pure-function coverage lives in
+// `crate::ops::host::tests` (`host_pinned_without_address_*`); this is
+// only the doctor-side wiring.
+// -----------------------------------------------------------------
+
+/// Wiring (mutation check): deleting `doctor_assemble`'s
+/// `findings.extend(self.doctor_pinned_no_address_findings()?)` line
+/// reds this test.
+#[test]
+fn doctor_wires_the_host_pinned_without_address_finding_into_the_full_report() {
+    let (_guard, ops) = healthy_ops();
+    ops.trust_add(TrustAddReq {
+        name: "mac".into(),
+        address: None,
+        fingerprint: Some(qsh_transport::Fingerprint::of_spki_der(b"mac").to_string()),
+    })
+    .unwrap();
+
+    let identity = ops.load_identity().unwrap().unwrap().identity;
+    let config = ops.config().unwrap();
+    let keystore = crate::identity::MemoryKeyStore::new();
+    let data = ops
+        .doctor_assemble(
+            DoctorReq { host: None },
+            unix_seconds(SystemTime::now()),
+            &identity,
+            &config,
+            &minimal_env(&keystore),
+        )
+        .unwrap();
+    let finding = data
+        .findings
+        .iter()
+        .find(|f| f.code == "host_pinned_without_address")
+        .expect("host_pinned_without_address finding");
+    assert_eq!(finding.status, "warn");
+    assert!(finding.detail.contains("mac"), "{finding:?}");
+    assert!(
+        finding.remedy.as_deref().unwrap().contains("trust add mac"),
+        "{finding:?}"
+    );
 }

@@ -33,7 +33,7 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 use qsh_proto::local::LocalHost;
-use qsh_proto::{ErrorCode, Host, HostGetReq, HostListData, TrustPeer};
+use qsh_proto::{DoctorFinding, ErrorCode, Host, HostGetReq, HostListData, TrustPeer};
 
 use crate::hosts::{HostEntry, HostsFile};
 use crate::ops::{OpError, Operation, Ops};
@@ -289,19 +289,15 @@ pub(super) fn resolve_forward(
     })
 }
 
-/// Pure mapping: every name either `hosts.toml` or a routable `trust.toml`
-/// pin knows about becomes one forward `Host` entry (`docs/CLI.md` §5,
-/// extended `PLAN.md` M7 Step 3 by [`resolve_forward`]). Split out from
-/// any I/O so the merge table (`PLAN.md` M3 Step 5 (c)) is testable
-/// against hand-built [`TrustStore`]/[`HostsFile`] values, never real
-/// files.
-///
-/// Name order: trust pins first (in store order, the pre-M7-Step-3
-/// order), then any `hosts.toml`-only names not already covered, in file
-/// order — keeps the existing goldens' entry order unperturbed when
-/// `hosts.toml` is absent or only restates trust names.
-fn forward_hosts(store: &TrustStore, hosts: &HostsFile) -> Vec<Host> {
-    let hosts_has_any = !hosts.entries().is_empty();
+/// Every name either `hosts.toml` or `trust.toml` knows about, deduplicated
+/// — trust pins first (in store order, the pre-M7-Step-3 order), then any
+/// `hosts.toml`-only names not already covered, in file order. Split out
+/// of [`forward_hosts`] (ROADMAP M9 (h)) so
+/// [`host_pinned_without_address`]'s own candidate set can reuse the
+/// identical enumeration instead of a second, hand-copied loop that could
+/// silently drift from it — the same "single source of truth" discipline
+/// [`resolve_route`] already applies to [`resolve_forward`] itself.
+fn host_candidate_names<'a>(store: &'a TrustStore, hosts: &'a HostsFile) -> Vec<&'a str> {
     let mut seen: HashSet<&str> = HashSet::new();
     let mut names: Vec<&str> = Vec::new();
     for peer in store.peers() {
@@ -314,8 +310,22 @@ fn forward_hosts(store: &TrustStore, hosts: &HostsFile) -> Vec<Host> {
             names.push(entry.name.as_str());
         }
     }
-
     names
+}
+
+/// Pure mapping: every name either `hosts.toml` or a routable `trust.toml`
+/// pin knows about becomes one forward `Host` entry (`docs/CLI.md` §5,
+/// extended `PLAN.md` M7 Step 3 by [`resolve_forward`]). Split out from
+/// any I/O so the merge table (`PLAN.md` M3 Step 5 (c)) is testable
+/// against hand-built [`TrustStore`]/[`HostsFile`] values, never real
+/// files.
+///
+/// Name order: [`host_candidate_names`]'s own order — keeps the existing
+/// goldens' entry order unperturbed when `hosts.toml` is absent or only
+/// restates trust names.
+fn forward_hosts(store: &TrustStore, hosts: &HostsFile) -> Vec<Host> {
+    let hosts_has_any = !hosts.entries().is_empty();
+    host_candidate_names(store, hosts)
         .into_iter()
         .filter_map(|name| {
             let entry = resolve_forward(store.find(name), hosts.find(name), hosts_has_any)?;
@@ -331,6 +341,45 @@ fn forward_hosts(store: &TrustStore, hosts: &HostsFile) -> Vec<Host> {
                 lost_at: None,
             })
         })
+        .collect()
+}
+
+/// ROADMAP M9 (h)'s `host_pinned_without_address`: every
+/// [`host_candidate_names`] name [`resolve_forward`] cannot
+/// route at all — no non-empty address from either `hosts.toml` or the
+/// trust-store pin — **and** that has no reverse registration for it at
+/// all, live or stale (`reverse`, not filtered through `is_live` the way
+/// `resolve_route`'s live-reverse-first rule is: a stale entry still
+/// proves this device has heard from that name before, which is exactly
+/// the "normal transient state, not a bug" shape
+/// [`crate::doctor::HOST_PINNED_WITHOUT_ADDRESS`]'s own doc distinguishes
+/// from a name that has never been reachable by
+/// any means).
+///
+/// Re-derives the same candidate-name enumeration
+/// [`forward_hosts`]/[`host_candidate_names`] use and calls
+/// [`resolve_forward`] directly, rather than filtering `Ops::host_list()`'s
+/// merged `Vec<Host>` for an empty `address`: [`forward_hosts`]/[`resolve_forward`]
+/// never produce a `Host` entry with an empty address at all —
+/// [`resolve_forward`] returns `None` (contributing zero entries)
+/// precisely when neither source has a non-empty address, so an
+/// addressless pinned name never appears in `host_list()`'s output to
+/// filter in the first place. Calling [`resolve_forward`] directly
+/// reuses the existing merge rule rather than hand-rolling a second one,
+/// and takes `reverse` as a
+/// parameter (mirroring [`resolve_route`]'s own injected-`&[ReverseHostEntry]`
+/// seam) so this stays testable without a live localctl daemon.
+pub(super) fn host_pinned_without_address(
+    reverse: &[ReverseHostEntry],
+    store: &TrustStore,
+    hosts: &HostsFile,
+) -> Vec<String> {
+    let hosts_has_any = !hosts.entries().is_empty();
+    host_candidate_names(store, hosts)
+        .into_iter()
+        .filter(|name| resolve_forward(store.find(name), hosts.find(name), hosts_has_any).is_none())
+        .filter(|name| !reverse.iter().any(|entry| entry.local.name == *name))
+        .map(str::to_string)
         .collect()
 }
 
@@ -849,6 +898,26 @@ impl Ops {
         Ok(HostListData {
             hosts: merge_hosts(forward, &reverse, &hosts),
         })
+    }
+
+    /// `host_pinned_without_address` (`crate::ops::doctor`'s ROADMAP
+    /// M9 (h) wiring) — [`host_pinned_without_address`] fed this
+    /// process's real `trust.toml`/`hosts.toml`/reverse-daemon state, the
+    /// same three sources [`Ops::host_list`] itself reads.
+    pub(crate) fn doctor_pinned_no_address_findings(&self) -> Result<Vec<DoctorFinding>, OpError> {
+        let store = TrustStore::load(&self.paths.trust_file())?;
+        let hosts = HostsFile::load(&self.paths.hosts_file())?;
+        let reverse = self.reverse_host_entries();
+        let diag = &crate::doctor::HOST_PINNED_WITHOUT_ADDRESS;
+        Ok(host_pinned_without_address(&reverse, &store, &hosts)
+            .into_iter()
+            .map(|name| DoctorFinding {
+                code: diag.code.to_string(),
+                status: "warn".to_string(),
+                detail: format!("{} (host: {name})", diag.message),
+                remedy: Some(diag.remedy.replace("{name}", &name)),
+            })
+            .collect())
     }
 
     /// `host.get` (`qsh host get <name>`, `docs/CLI.md` §6.1). Authorization-

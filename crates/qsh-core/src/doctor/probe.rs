@@ -253,236 +253,196 @@ pub fn keystore_finding(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+// ---------------------------------------------------------------------------
+// bindv6only (ROADMAP M9 (h)) — real probe + pure classification
+// ---------------------------------------------------------------------------
 
-    // -----------------------------------------------------------------
-    // Raw UDP probe — real sockets, `udp_egress_blocked`'s trigger (a
-    // cooperative local black-hole: bound, but never read from/responded
-    // to) plus the happy path. `no_route`'s real-socket trigger is OS/CI
-    // dependent (E-2, brief) so it stays `#[ignore]`; `classify_connectivity`
-    // below covers its logic deterministically instead.
-    // -----------------------------------------------------------------
+/// Whether `addr` is the IPv6 wildcard (`[::]:port`) — the one shape
+/// [`probe_bindv6only`] is even worth running against; `dual_stack_v6=false`
+/// binds fine at any other address, wildcard or not, with no IPv4-blocking
+/// consequence (`crate::doctor::BINDV6ONLY_BLOCKS_IPV4`'s own doc).
+pub fn is_ipv6_wildcard(addr: SocketAddr) -> bool {
+    matches!(addr, SocketAddr::V6(v6) if v6.ip().is_unspecified())
+}
 
-    #[test]
-    fn probe_reports_responded_when_the_target_replies() {
-        let responder = UdpSocket::bind(("127.0.0.1", 0)).unwrap();
-        let addr = responder.local_addr().unwrap();
-        let handle = std::thread::spawn(move || {
-            let mut buf = [0u8; 64];
-            if let Ok((n, from)) = responder.recv_from(&mut buf) {
-                let _ = responder.send_to(&buf[..n], from);
-            }
-        });
-        let outcome = probe_udp_egress(addr, Duration::from_secs(2));
-        assert_eq!(outcome, UdpProbeOutcome::Responded);
-        handle.join().unwrap();
+/// Bind a throwaway UDP socket at `addr`'s IP but an **ephemeral port**
+/// (`SocketAddr::new(addr.ip(), 0)`, same wildcard IP as the configured
+/// listen address) via `qsh_transport::bind_tuned_udp_socket(_, false)` —
+/// `dual_stack_v6=false`, `crates/qsh-transport/src/endpoint.rs` — and
+/// read back whether the OS defaulted it to `IPV6_V6ONLY`. `IPV6_V6ONLY`'s
+/// default is a per-socket/system default (Linux `net.ipv6.bindv6only`,
+/// BSD/macOS `net.inet6.ip6.v6only`, Windows fixed to 1), never
+/// port-specific, so an ephemeral-port bind answers exactly the same
+/// question a bind of the configured port would — without colliding with,
+/// or racing, a real listener already bound there (`qsh serve`/`qsh
+/// listen` running on this machine binds the configured port for the
+/// whole time doctor is probing it, which would otherwise turn every
+/// `Err` here into a false "could not tell"). A real socket, real OS
+/// default — this is the one probe in this module that is not a
+/// synthetic classifier input, because "what does this OS default a fresh
+/// dual-stack bind to" has no portable answer any other way.
+///
+/// `Err` (bind failure — no permission, unsupported family) means "could
+/// not tell", not "blocked"; [`crate::ops::Ops::doctor`]'s own caller
+/// treats that the same as "no finding" rather than guessing.
+pub fn probe_bindv6only(addr: SocketAddr) -> io::Result<bool> {
+    let ephemeral = SocketAddr::new(addr.ip(), 0);
+    let std_socket = qsh_transport::bind_tuned_udp_socket(ephemeral, false)?;
+    let socket: socket2::Socket = std_socket.into();
+    socket.only_v6()
+}
+
+/// Turn an already-observed [`probe_bindv6only`] result into at most one
+/// [`DoctorFinding`] — pure over `only_v6`, so the classification itself
+/// (fire iff the OS actually defaulted to v6-only) is unit-testable with a
+/// synthetic bool, no real socket, the same "detect vs. classify" split
+/// [`classify_connectivity`] already establishes in this module.
+pub fn bindv6only_finding(bind_display: &str, only_v6: bool) -> Option<DoctorFinding> {
+    if !only_v6 {
+        return None;
     }
+    let diag = &super::BINDV6ONLY_BLOCKS_IPV4;
+    Some(DoctorFinding {
+        code: diag.code.to_string(),
+        status: "warn".to_string(),
+        detail: format!("{} (bind: {bind_display})", diag.message),
+        remedy: Some(diag.remedy.to_string()),
+    })
+}
 
-    /// `udp_egress_blocked`'s actual trigger: a socket that binds (so the
-    /// address is live) but never calls `recv`, standing in for a firewall
-    /// that drops the packet silently — both look identical to a probe
-    /// that only waits for *any* response.
-    #[test]
-    fn probe_times_out_against_a_silent_black_hole() {
-        let black_hole = UdpSocket::bind(("127.0.0.1", 0)).unwrap();
-        let addr = black_hole.local_addr().unwrap();
-        let outcome = probe_udp_egress(addr, Duration::from_millis(300));
-        assert_eq!(outcome, UdpProbeOutcome::TimedOut);
-        drop(black_hole);
+// ---------------------------------------------------------------------------
+// Service registration (ROADMAP M9 (h)): unit-file existence,
+// platform-gated. Every function below takes its root directory
+// (`$HOME`, the systemd linger marker directory) as a parameter rather
+// than reading the environment itself — the same "detection reads real
+// state, classification/path-building stays a pure function of its
+// inputs" split this module's other probes use, and the seam
+// `crate::ops::doctor::DoctorEnvironment` injects a fake root through for
+// hermetic tests: real unit registration and real linger state cannot be
+// simulated any other way.
+// ---------------------------------------------------------------------------
+
+/// `~/Library/LaunchAgents/io.qsh.<mode>.plist` — the path `qsh service
+/// install` (ROADMAP M9 (g)) will write and [`service_unit_registered`] reads,
+/// on macOS.
+#[cfg(target_os = "macos")]
+pub fn macos_launchagent_path(home: &Path, mode: &str) -> PathBuf {
+    home.join("Library")
+        .join("LaunchAgents")
+        .join(format!("io.qsh.{mode}.plist"))
+}
+
+/// `~/.config/systemd/user/qsh-<mode>.service` — the Linux twin of
+/// [`macos_launchagent_path`].
+#[cfg(target_os = "linux")]
+pub fn linux_systemd_user_unit_path(home: &Path, mode: &str) -> PathBuf {
+    home.join(".config")
+        .join("systemd")
+        .join("user")
+        .join(format!("qsh-{mode}.service"))
+}
+
+/// Whether this platform's service unit for `mode` is registered —
+/// `Some(true)`/`Some(false)` on macOS/Linux (existence of the path
+/// `macos_launchagent_path`/`linux_systemd_user_unit_path` names),
+/// `None` everywhere else (Windows included) — `docs/CLI.md` §6.17: `qsh
+/// service install` is `UNSUPPORTED`/P1 off macOS/Linux, so there is
+/// nothing to report there. `home` is `None` when
+/// the caller could not resolve one (`crate::config::home_dir()`
+/// returning `None` in the real environment) — also `None`, since no
+/// unit path could even be built.
+pub fn service_unit_registered(home: Option<&Path>, mode: &str) -> Option<bool> {
+    #[cfg(target_os = "macos")]
+    {
+        let home = home?;
+        Some(macos_launchagent_path(home, mode).exists())
     }
-
-    /// OS/CI dependent (ICMP port-unreachable handling varies by sandbox),
-    /// so `#[ignore]` per the brief's own E-2 guidance — `classify_connectivity`'s
-    /// unit tests below cover the `no_route` *logic* deterministically;
-    /// this is only a best-effort confirmation that a real refused port
-    /// actually reaches that classification on a real socket.
-    #[test]
-    #[ignore = "ICMP port-unreachable delivery to a connected UDP socket is OS/sandbox dependent"]
-    fn probe_reports_unreachable_when_nothing_listens_on_the_port() {
-        let claim = UdpSocket::bind(("127.0.0.1", 0)).unwrap();
-        let addr = claim.local_addr().unwrap();
-        drop(claim);
-        let outcome = probe_udp_egress(addr, Duration::from_millis(500));
-        assert_eq!(outcome, UdpProbeOutcome::Unreachable);
+    #[cfg(target_os = "linux")]
+    {
+        let home = home?;
+        Some(linux_systemd_user_unit_path(home, mode).exists())
     }
-
-    // -----------------------------------------------------------------
-    // classify_io_error — pure, synthetic `io::Error`s, no socket
-    // (verify round P3-3: nothing drove this function before, so mutation
-    // `MH`, `ConnectionRefused` remapped to `TimedOut`, went undetected —
-    // in production that turns an actively refused port into
-    // `udp_egress_blocked` ("a firewall is silently blocking UDP")
-    // instead of `no_route`, a wrong remedy handed to an operator).
-    // -----------------------------------------------------------------
-
-    #[test]
-    fn classify_io_error_maps_active_refusal_kinds_to_unreachable() {
-        for kind in [
-            io::ErrorKind::ConnectionRefused,
-            io::ErrorKind::NetworkUnreachable,
-            io::ErrorKind::HostUnreachable,
-        ] {
-            let outcome = classify_io_error(&io::Error::from(kind));
-            assert_eq!(outcome, UdpProbeOutcome::Unreachable, "{kind:?}");
-        }
-    }
-
-    #[test]
-    fn classify_io_error_maps_any_other_kind_to_other() {
-        let outcome = classify_io_error(&io::Error::from(io::ErrorKind::PermissionDenied));
-        assert_eq!(
-            outcome,
-            UdpProbeOutcome::Other(io::ErrorKind::PermissionDenied)
-        );
-    }
-
-    // -----------------------------------------------------------------
-    // classify_connectivity — pure, synthetic inputs, no socket.
-    // -----------------------------------------------------------------
-
-    #[test]
-    fn classify_connectivity_responded_has_no_finding() {
-        assert!(classify_connectivity(UdpProbeOutcome::Responded, false, "h", "a:1").is_none());
-        assert!(classify_connectivity(UdpProbeOutcome::Responded, true, "h", "a:1").is_none());
-    }
-
-    #[test]
-    fn classify_connectivity_controller_target_always_wins() {
-        for outcome in [
-            UdpProbeOutcome::TimedOut,
-            UdpProbeOutcome::Unreachable,
-            UdpProbeOutcome::Other(io::ErrorKind::Other),
-        ] {
-            let finding = classify_connectivity(outcome, true, "ctrl", "203.0.113.1:4433")
-                .unwrap_or_else(|| panic!("expected a finding for {outcome:?}"));
-            assert_eq!(finding.code, "controller_unreachable");
-        }
-    }
-
-    #[test]
-    fn classify_connectivity_non_controller_timeout_is_udp_egress_blocked() {
-        let finding =
-            classify_connectivity(UdpProbeOutcome::TimedOut, false, "h", "203.0.113.1:4433")
-                .unwrap();
-        assert_eq!(finding.code, "udp_egress_blocked");
-        assert_eq!(finding.status, "error");
-        assert!(finding.remedy.is_some());
-    }
-
-    #[test]
-    fn classify_connectivity_non_controller_unreachable_is_no_route() {
-        for outcome in [
-            UdpProbeOutcome::Unreachable,
-            UdpProbeOutcome::Other(io::ErrorKind::Other),
-        ] {
-            let finding = classify_connectivity(outcome, false, "h", "203.0.113.1:4433").unwrap();
-            assert_eq!(finding.code, "no_route");
-        }
-    }
-
-    /// Precedence, asserted directly (E-6, brief): never two codes for one
-    /// failed probe.
-    #[test]
-    fn classify_connectivity_never_emits_more_than_one_code_for_one_failure() {
-        const CODES: [&str; 3] = ["controller_unreachable", "udp_egress_blocked", "no_route"];
-        for is_controller in [true, false] {
-            for outcome in [UdpProbeOutcome::TimedOut, UdpProbeOutcome::Unreachable] {
-                let finding = classify_connectivity(outcome, is_controller, "h", "a:1").unwrap();
-                assert_eq!(
-                    CODES.iter().filter(|&&c| c == finding.code).count(),
-                    1,
-                    "{outcome:?}/{is_controller} produced {}",
-                    finding.code
-                );
-            }
-        }
-    }
-
-    // -----------------------------------------------------------------
-    // PATH shadow scan
-    // -----------------------------------------------------------------
-
-    #[cfg(unix)]
-    fn write_fake_exe(dir: &Path) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-        let path = dir.join("qsh");
-        std::fs::write(&path, b"#!/bin/sh\nexit 0\n").unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        path
-    }
-
-    #[cfg(windows)]
-    fn write_fake_exe(dir: &Path) -> PathBuf {
-        let path = dir.join("qsh.exe");
-        std::fs::write(&path, b"MZ").unwrap();
-        path
-    }
-
-    #[test]
-    fn detect_path_shadow_finds_an_earlier_qsh_before_the_running_one() {
-        let dir = tempfile::tempdir().unwrap();
-        let shadow_dir = dir.path().join("shadow");
-        let real_dir = dir.path().join("real");
-        std::fs::create_dir(&shadow_dir).unwrap();
-        std::fs::create_dir(&real_dir).unwrap();
-        let shadow_exe = write_fake_exe(&shadow_dir);
-        let real_exe = write_fake_exe(&real_dir);
-
-        let found = detect_path_shadow(&real_exe, &[shadow_dir, real_dir]);
-        assert_eq!(found.as_deref(), Some(shadow_exe.as_path()));
-    }
-
-    #[test]
-    fn detect_path_shadow_is_none_when_the_running_binary_resolves_first() {
-        let dir = tempfile::tempdir().unwrap();
-        let real_dir = dir.path().join("real");
-        let other_dir = dir.path().join("other");
-        std::fs::create_dir(&real_dir).unwrap();
-        std::fs::create_dir(&other_dir).unwrap();
-        let real_exe = write_fake_exe(&real_dir);
-        let _other_exe = write_fake_exe(&other_dir);
-
-        assert!(detect_path_shadow(&real_exe, &[real_dir, other_dir]).is_none());
-    }
-
-    #[test]
-    fn detect_path_shadow_is_none_with_no_qsh_on_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let real_dir = dir.path().join("real");
-        let empty_dir = dir.path().join("empty");
-        std::fs::create_dir(&real_dir).unwrap();
-        std::fs::create_dir(&empty_dir).unwrap();
-        let real_exe = write_fake_exe(&real_dir);
-
-        assert!(detect_path_shadow(&real_exe, &[empty_dir]).is_none());
-        assert!(detect_path_shadow(&real_exe, &[]).is_none());
-    }
-
-    // -----------------------------------------------------------------
-    // keystore_finding — pure, synthetic KeyStoreError.
-    // -----------------------------------------------------------------
-
-    #[test]
-    fn keystore_finding_fires_on_unavailable() {
-        let finding = keystore_finding(Err(crate::identity::KeyStoreError::Unavailable(
-            "no secret service".to_string(),
-        )))
-        .unwrap();
-        assert_eq!(finding.code, "keystore_unavailable");
-        assert_eq!(finding.status, "warn");
-        assert!(finding.detail.contains("no secret service"));
-    }
-
-    #[test]
-    fn keystore_finding_is_none_when_reachable_or_a_different_failure() {
-        assert!(keystore_finding(Ok(None)).is_none());
-        assert!(
-            keystore_finding(Err(crate::identity::KeyStoreError::Other(
-                "malformed".to_string()
-            )))
-            .is_none()
-        );
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = (home, mode);
+        None
     }
 }
+
+/// `service_not_registered`'s finding, pure over an already-observed
+/// [`service_unit_registered`] result — `None` when a unit is registered
+/// (or this platform never reports at all, which [`service_unit_registered`]'s
+/// `None` already signals to its own caller directly).
+pub fn service_not_registered_finding(mode: &str) -> DoctorFinding {
+    let diag = &super::SERVICE_NOT_REGISTERED;
+    DoctorFinding {
+        code: diag.code.to_string(),
+        status: "info".to_string(),
+        detail: format!("{} (inferred mode: {mode})", diag.message),
+        remedy: Some(diag.remedy.to_string()),
+    }
+}
+
+/// `launchagent_session_scoped`'s finding — unconditional once the
+/// LaunchAgent is registered (`crate::doctor::LAUNCHAGENT_SESSION_SCOPED`'s
+/// own doc: a structural fact, not a misconfiguration).
+pub fn launchagent_session_scoped_finding(mode: &str) -> DoctorFinding {
+    let diag = &super::LAUNCHAGENT_SESSION_SCOPED;
+    DoctorFinding {
+        code: diag.code.to_string(),
+        status: "warn".to_string(),
+        detail: format!("{} (mode: {mode})", diag.message),
+        remedy: Some(diag.remedy.to_string()),
+    }
+}
+
+/// The outcome of probing `/var/lib/systemd/linger/$USER` for
+/// [`super::SYSTEMD_LINGER_DISABLED`]. Three states, not two — `Unknown` for an
+/// unreadable probe (a sandboxed CI account) is
+/// deliberately not folded into `Disabled`: a probe this process cannot
+/// even perform is not evidence that linger is off, only that this
+/// process cannot tell, and reporting a finding on that non-evidence
+/// would be a false positive `crate::doctor::SYSTEMD_LINGER_DISABLED`'s
+/// own doc explicitly declines to risk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LingerProbe {
+    /// The marker file exists — linger is enabled for this account.
+    Enabled,
+    /// The marker file's absence was confirmed (not merely unreadable).
+    Disabled,
+    /// Could not tell (e.g. `linger_dir` itself is unreadable in a
+    /// sandbox) — no finding either way.
+    Unknown,
+}
+
+/// Probe `<linger_dir>/<username>` for existence — systemd's own linger
+/// marker, no subprocess (`crate::doctor::SYSTEMD_LINGER_DISABLED`'s own
+/// doc: "matches the repo's no-`Command::new` bias"). `linger_dir` is a
+/// parameter (production: `/var/lib/systemd/linger`) rather than a
+/// literal here so a test can point it at a tempdir instead.
+pub fn probe_systemd_linger(linger_dir: &Path, username: &str) -> LingerProbe {
+    match linger_dir.join(username).try_exists() {
+        Ok(true) => LingerProbe::Enabled,
+        Ok(false) => LingerProbe::Disabled,
+        Err(_) => LingerProbe::Unknown,
+    }
+}
+
+/// `systemd_linger_disabled`'s finding, pure over an already-observed
+/// [`LingerProbe`] — `None` for `Enabled`/`Unknown`, matching
+/// [`LingerProbe::Unknown`]'s own "no finding either way" doc.
+pub fn linger_finding(probe: LingerProbe, mode: &str) -> Option<DoctorFinding> {
+    if probe != LingerProbe::Disabled {
+        return None;
+    }
+    let diag = &super::SYSTEMD_LINGER_DISABLED;
+    Some(DoctorFinding {
+        code: diag.code.to_string(),
+        status: "warn".to_string(),
+        detail: format!("{} (mode: {mode})", diag.message),
+        remedy: Some(diag.remedy.to_string()),
+    })
+}
+
+#[cfg(test)]
+mod tests;

@@ -1294,6 +1294,77 @@ fn stale_route_loses_to_a_forward_pin_when_one_exists() {
     );
 }
 
+// ---- `host_pinned_without_address` (ROADMAP M9 (h)) ----
+
+/// A trust-store pin with **no** address — [`forward_store`]'s twin, minus
+/// the `--address` a real `qsh trust add --fingerprint`-only pin also
+/// omits (`crate::doctor::HOST_PINNED_WITHOUT_ADDRESS`'s own remedy: this
+/// is a normal pure-reverse-target pinning shape, not a malformed one).
+fn pinless_store(name: &str, fingerprint: &str) -> TrustStore {
+    let mut store = TrustStore::default();
+    store.add_peer(
+        name,
+        None,
+        fingerprint.parse().expect("fingerprint"),
+        "2026-01-01T00:00:00Z".to_string(),
+    );
+    store
+}
+
+#[test]
+fn host_pinned_without_address_fires_for_an_addressless_pin_with_no_reverse_entry_at_all() {
+    let store = pinless_store("mac", FP_A);
+    let names = host_pinned_without_address(&[], &store, &no_hosts());
+    assert_eq!(names, vec!["mac".to_string()]);
+}
+
+/// "live **or stale**" — a live registration suppresses the finding
+/// (`crate::doctor::HOST_PINNED_WITHOUT_ADDRESS`'s own doc).
+#[test]
+fn host_pinned_without_address_is_suppressed_by_a_live_reverse_entry() {
+    let store = pinless_store("mac", FP_A);
+    let reverse = [reverse_entry(1, "mac", "reachable", FP_A)];
+    assert!(host_pinned_without_address(&reverse, &store, &no_hosts()).is_empty());
+}
+
+/// The other half of that rule — a merely *stale* registration (not evicted
+/// yet) still proves this device has heard from the name before, so it
+/// suppresses the finding exactly like a live one: this is the one place
+/// [`host_pinned_without_address`] deliberately does **not** reuse
+/// [`is_live`]'s live-only filter.
+#[test]
+fn host_pinned_without_address_is_suppressed_by_a_stale_reverse_entry_too() {
+    let store = pinless_store("mac", FP_A);
+    let reverse = [reverse_entry(1, "mac", "stale", FP_A)];
+    assert!(host_pinned_without_address(&reverse, &store, &no_hosts()).is_empty());
+}
+
+#[test]
+fn host_pinned_without_address_is_silent_when_the_trust_pin_has_an_address() {
+    let store = forward_store("mac", "mac.example:4433", FP_A);
+    assert!(host_pinned_without_address(&[], &store, &no_hosts()).is_empty());
+}
+
+#[test]
+fn host_pinned_without_address_is_silent_when_hosts_toml_supplies_the_address() {
+    let store = pinless_store("mac", FP_A);
+    let hosts = hosts_with(&[("mac", "mac.example:4433", None)]);
+    assert!(host_pinned_without_address(&[], &store, &hosts).is_empty());
+}
+
+/// A reverse entry for an unrelated name must not suppress this one —
+/// the suppression is keyed by name, not by "some reverse entry exists
+/// somewhere".
+#[test]
+fn host_pinned_without_address_ignores_a_reverse_entry_for_a_different_name() {
+    let store = pinless_store("mac", FP_A);
+    let reverse = [reverse_entry(1, "phone", "reachable", FP_B)];
+    assert_eq!(
+        host_pinned_without_address(&reverse, &store, &no_hosts()),
+        vec!["mac".to_string()]
+    );
+}
+
 // ---- `resolve_host_route_async` (`PLAN.md` M3 Step 6's async seam) ----
 //
 // `#[cfg(unix)]`: localctl (UDS, `tokio::net::UnixListener`) is

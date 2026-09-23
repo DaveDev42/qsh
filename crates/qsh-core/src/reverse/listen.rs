@@ -313,7 +313,7 @@ async fn run_listen_unix(
     // `Listener::bind`): `load_or_deny` opens `paths.trust_file()` itself
     // to fill the diagnostic's example policy with this machine's actual
     // pins.
-    let (authorizer, policy_diagnostic) = crate::acl::load_or_deny(paths);
+    let (authorizer, policy_diagnostic) = crate::acl::load_or_deny(paths, crate::acl::Role::Listen);
     if let Some(diag) = &policy_diagnostic {
         on_policy_diagnostic(&diag.render());
     }
