@@ -33,3 +33,7 @@ qsh-proto.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 base64.workspace = true
+# `tests/reverse_lost_cause_and_since_registered_ms.rs`: parses a real
+# `ReconnectEvent`/`RegistrationEvent` `at` field as RFC3339 (issue #4 item
+# 6) — the workspace-pinned version, same as `qsh-core`'s own `now_rfc3339`.
+time.workspace = true

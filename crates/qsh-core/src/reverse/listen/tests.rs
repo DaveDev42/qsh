@@ -38,6 +38,9 @@ fn registration_event_json_line_has_the_documented_field_set() {
         host: "personal-mac",
         fingerprint: "sha256:abc",
         generation: Some(0),
+        cause: None,
+        at: "2026-01-01T00:00:00Z".to_string(),
+        since_registered_ms: None,
     })
     .unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&with_generation).unwrap();
@@ -45,17 +48,29 @@ fn registration_event_json_line_has_the_documented_field_set() {
     assert_eq!(parsed["host"], "personal-mac");
     assert_eq!(parsed["fingerprint"], "sha256:abc");
     assert_eq!(parsed["generation"], 0);
+    assert_eq!(parsed["at"], "2026-01-01T00:00:00Z");
+    // `registered` never carries a `cause`/`since_registered_ms` (issue #4
+    // item 6, `docs/CLI.md` §6.13 bullet at :952) — absent, not null.
+    assert!(parsed.get("cause").is_none());
+    assert!(parsed.get("since_registered_ms").is_none());
 
     let without_generation = serde_json::to_string(&RegistrationEvent {
         event: "denied",
         host: "-",
         fingerprint: "sha256:abc",
         generation: None,
+        cause: Some("registration_denied"),
+        at: "2026-01-01T00:00:00Z".to_string(),
+        since_registered_ms: None,
     })
     .unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&without_generation).unwrap();
     assert_eq!(parsed["event"], "denied");
     assert!(parsed.get("generation").is_none());
+    // `denied` always carries the fixed `registration_denied` cause
+    // (issue #4 item 6).
+    assert_eq!(parsed["cause"], "registration_denied");
+    assert!(parsed.get("since_registered_ms").is_none());
 }
 
 #[test]
@@ -67,11 +82,39 @@ fn registration_event_json_line_covers_the_expired_event() {
         host: "personal-mac",
         fingerprint: "sha256:abc",
         generation: Some(3),
+        cause: None,
+        at: "2026-01-01T00:00:00Z".to_string(),
+        since_registered_ms: None,
     })
     .unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&line).unwrap();
     assert_eq!(parsed["event"], "expired");
     assert_eq!(parsed["generation"], 3);
+    assert!(parsed.get("cause").is_none());
+}
+
+/// `"lost"` is the one `RegistrationEvent` shape that actually carries
+/// `since_registered_ms` (issue #4 item 6) — this pins the JSON key
+/// present/absent behavior the real emit site (`Listen::
+/// drive_registered_session`) relies on, independent of driving a real
+/// connection death (that end-to-end proof is
+/// `reverse_lost_cause_and_since_registered_ms.rs`).
+#[test]
+fn registration_event_json_line_covers_the_lost_event_with_since_registered_ms() {
+    let line = serde_json::to_string(&RegistrationEvent {
+        event: "lost",
+        host: "personal-mac",
+        fingerprint: "sha256:abc",
+        generation: Some(3),
+        cause: Some("peer_closed"),
+        at: "2026-01-01T00:00:00Z".to_string(),
+        since_registered_ms: Some(1_234),
+    })
+    .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(parsed["event"], "lost");
+    assert_eq!(parsed["cause"], "peer_closed");
+    assert_eq!(parsed["since_registered_ms"], 1_234);
 }
 
 fn test_listen() -> Arc<Listen> {

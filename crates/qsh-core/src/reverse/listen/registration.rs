@@ -264,6 +264,12 @@ impl Listen {
                     host: &outcome.entry.name,
                     fingerprint: &outcome.entry.fingerprint,
                     generation: Some(outcome.entry.generation),
+                    // Neither `replaced` nor `registered` is an ended
+                    // registration — no `cause`/`since_registered_ms`
+                    // (issue #4 item 6).
+                    cause: None,
+                    at: crate::config::now_rfc3339(),
+                    since_registered_ms: None,
                 }
                 .emit();
                 *outcome_cell.lock().unwrap_or_else(|e| e.into_inner()) = Some(outcome);
@@ -275,6 +281,12 @@ impl Listen {
                     host: diag_host(&reg.offered_name),
                     fingerprint: &fingerprint.to_string(),
                     generation: None,
+                    // Fixed: every `denied` is the `host.reverse`
+                    // ACL/registry choke point refusing the registration
+                    // (issue #4 item 6).
+                    cause: Some(crate::reverse::ReconnectCause::RegistrationDenied.as_str()),
+                    at: crate::config::now_rfc3339(),
+                    since_registered_ms: None,
                 }
                 .emit();
                 Err(wire::Error::new(err.code, err.message, err.retryable))
@@ -377,6 +389,14 @@ impl Listen {
         fingerprint: String,
         generation: u64,
     ) {
+        // Issue #4 item 6: how long this registration lived, reported on
+        // the eventual `"lost"` line's `since_registered_ms`.
+        let registered_at = std::time::Instant::now();
+        // Why the loop below eventually breaks (issue #4 item 6,
+        // `docs/CLI.md` §6.13 bullet at :952). Deferred init, no `mut`:
+        // every arm that can `break` assigns this exactly once, first —
+        // the only way to reach the read after the loop.
+        let loss_cause;
         let watch = PathWatch::new(PathWatchConfig::default());
         let probes = Arc::new(tokio::sync::Notify::new());
         let watchdog = tokio::spawn(watch_path(
@@ -417,11 +437,27 @@ impl Listen {
                     // `LOCAL_STREAM` splice pump still reading on this
                     // connection blocks until quinn's 45 s idle timeout,
                     // not this watchdog's own detection budget.
+                    // Issue #4 item 6: `watch.dead()` also resolves for a
+                    // connection that was *already* closed (`target.rs`'s
+                    // symmetric `watch.dead()` arm carries the full
+                    // reasoning) — read `close_reason()` before this
+                    // side's own close call so an already-peer-closed
+                    // connection classifies as that, not `path_dead`.
+                    let pre_close_reason = session.connection().close_reason();
                     session.connection().close(CLOSE_CODE_PATH_DEAD, b"path unresponsive");
+                    loss_cause = match pre_close_reason {
+                        Some(err) => crate::reverse::classify_connection_error(&err),
+                        None => crate::reverse::ReconnectCause::PathDead,
+                    };
                     break;
                 }
                 () = probes.notified() => {
-                    if session.send_ping().await.is_err() {
+                    if let Err(err) = session.send_ping().await {
+                        // A write failure surfaces the same `ClientError`
+                        // shapes a read failure would (issue #4 item 6) —
+                        // classify it the same way rather than assuming
+                        // `local`.
+                        loss_cause = classify_client_error(&err);
                         break;
                     }
                 }
@@ -444,14 +480,25 @@ impl Listen {
                         continue;
                     };
                     let msg = wire::ControlMessage::new(daemon_request_id, body);
-                    if session.send_control_message(&msg).await.is_err() {
+                    if let Err(err) = session.send_control_message(&msg).await {
+                        // Same reasoning as `send_ping` above.
+                        loss_cause = classify_client_error(&err);
                         break;
                     }
                 }
                 message = session.next_control_message() => {
                     let msg = match message {
                         Ok(Some(msg)) => msg,
-                        Ok(None) | Err(_) => break,
+                        // A clean end of stream — the peer closed its
+                        // send side (issue #4 item 6).
+                        Ok(None) => {
+                            loss_cause = crate::reverse::ReconnectCause::PeerClosed;
+                            break;
+                        }
+                        Err(err) => {
+                            loss_cause = classify_client_error(&err);
+                            break;
+                        }
                     };
                     let request_id = msg.request_id;
                     match msg.body {
@@ -476,7 +523,8 @@ impl Listen {
                         // liveness only.
                         Some(wire::control_message::Body::Ping(_)) => {
                             watch.inbound();
-                            if session.send_pong(request_id).await.is_err() {
+                            if let Err(err) = session.send_pong(request_id).await {
+                                loss_cause = classify_client_error(&err);
                                 break;
                             }
                         }
@@ -507,7 +555,8 @@ impl Listen {
                         // documents.
                         _ => {
                             watch.traffic();
-                            if session.reject_unsupported(request_id).await.is_err() {
+                            if let Err(err) = session.reject_unsupported(request_id).await {
+                                loss_cause = classify_client_error(&err);
                                 break;
                             }
                         }
@@ -530,6 +579,11 @@ impl Listen {
                 host: &name,
                 fingerprint: &fingerprint,
                 generation: Some(generation),
+                cause: Some(loss_cause.as_str()),
+                at: crate::config::now_rfc3339(),
+                since_registered_ms: Some(
+                    u64::try_from(registered_at.elapsed().as_millis()).unwrap_or(u64::MAX),
+                ),
             }
             .emit();
         }
@@ -825,5 +879,79 @@ impl Listen {
         // `Ok(())`: queued in `hub`'s `tunnel_queue`, owning its permit,
         // for `ControlHub::claim_tcp_accepted` to hand to a `LOCAL_STREAM`
         // conduit — nothing further to do on this task.
+    }
+}
+
+/// Classify a [`ClientError`] from [`Listen::drive_registered_session`]'s
+/// own `session.next_control_message()` read into [`crate::reverse::ReconnectCause`]'s
+/// `peer_closed`/`path_dead`/`local` slice (issue #4 item 6) — the same
+/// judgment [`crate::reverse::classify_connection_error`] already applies to a raw
+/// `ConnectionError`, reached through whichever of `ClientError`'s two
+/// variants actually carries one on this client role's control stream.
+/// Everything else (`Remote`, a peer-sent wire `Error` reply;
+/// `Unsupported`/`Protocol`, a malformed peer; a stream framing error with
+/// no underlying `ConnectionError`; `HelloTimeout`/`OutputTooLarge`,
+/// unreachable here — none of it is `Connection`/a `ConnectionLost`
+/// stream error) falls to `local`: none of it is a peer-initiated clean
+/// close or a PathWatch-class idle judgment, so by elimination it is
+/// "something about this side's own read that isn't one of the other
+/// two", the same catch-all `crate::reverse::classify_connection_error`'s own doc
+/// already claims.
+fn classify_client_error(err: &ClientError) -> crate::reverse::ReconnectCause {
+    match err {
+        ClientError::Connection(e) => crate::reverse::classify_connection_error(e),
+        ClientError::Stream(qsh_transport::StreamError::Read(
+            qsh_transport::ReadError::ConnectionLost(e),
+        ))
+        | ClientError::Stream(qsh_transport::StreamError::Write(
+            qsh_transport::WriteError::ConnectionLost(e),
+        )) => crate::reverse::classify_connection_error(e),
+        _ => crate::reverse::ReconnectCause::Local,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Mutation coverage for `classify_client_error`'s own three-way split
+    /// (issue #4 item 6): a real `ClientError` of each documented shape
+    /// classifies as the one `classify_client_error`'s doc comment claims.
+    #[test]
+    fn classify_client_error_maps_the_documented_vocabulary() {
+        // `Connection(ApplicationClosed)` with an ordinary close code (not
+        // `CLOSE_CODE_PATH_DEAD`) — a real, clean peer close.
+        let closed = ClientError::Connection(qsh_transport::ConnectionError::ApplicationClosed(
+            quinn::ApplicationClose {
+                error_code: quinn::VarInt::from_u32(0),
+                reason: bytes::Bytes::new(),
+            },
+        ));
+        assert_eq!(
+            classify_client_error(&closed),
+            crate::reverse::ReconnectCause::PeerClosed
+        );
+
+        // `Connection(TimedOut)` — quinn's own idle-timeout judgment on an
+        // otherwise-silent path, the same condition `PathWatch` exists to
+        // detect sooner.
+        let timed_out = ClientError::Connection(qsh_transport::ConnectionError::TimedOut);
+        assert_eq!(
+            classify_client_error(&timed_out),
+            crate::reverse::ReconnectCause::PathDead
+        );
+
+        // Everything else — a peer-sent wire `Error` reply, here — is
+        // `local`: none of it is a peer-initiated clean close or a
+        // PathWatch-class idle judgment.
+        let remote = ClientError::Remote {
+            code: qsh_proto::ErrorCode::PermissionDenied,
+            message: "denied".to_string(),
+            retryable: false,
+        };
+        assert_eq!(
+            classify_client_error(&remote),
+            crate::reverse::ReconnectCause::Local
+        );
     }
 }

@@ -56,14 +56,19 @@
 // module's tests) — the Windows `run_reverse` refuses before touching any
 // of it, so ungated these would trip `unused_imports` under the Windows
 // leg's `clippy -D warnings` (same gating as `tui/mod.rs`).
-#[cfg(unix)]
+// `#[cfg(any(unix, test))]`, not plain `#[cfg(unix)]`: `dial_and_register`
+// itself and its own unit test both need `Arc`/`Dialed`/`Dialer`/
+// `FramedStream`/`TrustEvaluator`/`SharedTrustStore` on every CI target
+// (the windows-latest test leg included), not just a unix build — see
+// `dial_and_register`'s own doc comment.
+#[cfg(any(unix, test))]
 use std::sync::Arc;
 #[cfg(any(unix, test))]
 use std::time::Duration;
 
 #[cfg(any(unix, test))]
 use qsh_proto::wire;
-#[cfg(unix)]
+#[cfg(any(unix, test))]
 use qsh_transport::{Dialed, Dialer, FramedStream, TrustEvaluator};
 // Only consumed by `run_reverse_unix`'s `StdRng::from_os_rng()` (below) —
 // production's replacement for `rand::rng()`'s `!Send` `ThreadRng`
@@ -85,9 +90,11 @@ use crate::config::BackoffLimits;
 use crate::config::{Config, Paths};
 use crate::identity::LoadedIdentity;
 use crate::ops::OpError;
+#[cfg(any(unix, test))]
+use crate::reverse::ReconnectCause;
 #[cfg(unix)]
 use crate::server::ConnCtx;
-#[cfg(unix)]
+#[cfg(any(unix, test))]
 use crate::trust::SharedTrustStore;
 
 /// Resolve the offered name: `--offered-name` > `[reverse].offered_name` >
@@ -288,26 +295,28 @@ async fn run_reverse_unix(
 
         let (dialed, ctl, peer_hello) = match attempt {
             Ok(v) => v,
-            Err(err) => {
-                tracing::warn!(controller, %err, "qsh reverse: registration attempt failed");
+            Err((err, cause)) => {
+                tracing::warn!(controller, %err, cause = cause.as_str(), "qsh reverse: registration attempt failed");
                 // Gated to the FIRST failed connection attempt of a fresh
-                // process, before any registration has ever succeeded:
-                // `dial_and_register` collapses DNS failures,
-                // refused/blackholed UDP, and TLS rejections into the same
-                // `OpError` today, so there is no protocol-level signal
-                // this loop could switch on to fire only for the
-                // reachability-class case the diagnostic describes without
-                // a wire change (`PLAN.md` M3 Step 9 documents this choice
-                // explicitly). The first attempt of a fresh `qsh reverse`
-                // process is the one moment a controller that is simply
-                // unreachable and a controller having a bad day look
-                // identical from here, and it is also the moment an
-                // operator most needs the reachability reminder — so this
-                // is where it fires, once, and (the `Ok` arm's `None`
-                // assignment below) never once the controller has proven
-                // itself reachable by accepting a registration — a later
-                // redial failure after that is a benign reconnect blip
-                // (mobility, sleep/wake), not a reachability problem.
+                // process, before any registration has ever succeeded.
+                // `dial_and_register` does now classify DNS failures,
+                // refused/blackholed UDP and TLS rejections into distinct
+                // `cause`s (issue #4 item 6, `cause` above) — but
+                // `on_unreachable` stays coarse on purpose: its job is the
+                // *blanket* "you may not be able to reach this controller
+                // at all" hint (`PLAN.md` M3 Step 9), which every one of
+                // those causes equally warrants on a fresh process's first
+                // attempt, not a per-cause routing decision. The first
+                // attempt of a fresh `qsh reverse` process is the one
+                // moment a controller that is simply unreachable and a
+                // controller having a bad day look identical from here,
+                // and it is also the moment an operator most needs the
+                // reachability reminder — so this is where it fires, once,
+                // and (the `Ok` arm's `None` assignment below) never once
+                // the controller has proven itself reachable by accepting
+                // a registration — a later redial failure after that is a
+                // benign reconnect blip (mobility, sleep/wake), not a
+                // reachability problem.
                 if let Some(hook) = on_unreachable.take() {
                     hook();
                 }
@@ -315,8 +324,13 @@ async fn run_reverse_unix(
                 ReconnectEvent {
                     event: "retry",
                     host: controller,
-                    fingerprint: "-",
+                    fingerprint: None,
                     delay_ms: Some(delay.as_millis() as u64),
+                    cause: Some(cause.as_str()),
+                    at: crate::config::now_rfc3339(),
+                    // A fresh dial/register failure never had a
+                    // registration to time (issue #4 item 6).
+                    since_registered_ms: None,
                 }
                 .emit();
                 if !wait_backoff(delay, &mut shutdown).await {
@@ -339,6 +353,13 @@ async fn run_reverse_unix(
         // this same target once (adversarial review finding, M3 Step 9).
         on_unreachable = None;
         backoff.reset();
+        // Issue #4 item 6: starts the clock this registration's eventual
+        // `lost`/`retry` pair reports as `since_registered_ms` — a plain
+        // local, not `Option`: the only read (below, after `'serve` ends)
+        // is always reached through this exact assignment first, never
+        // through an earlier loop iteration or the dial-failure `Err` arm
+        // above (which never reads it).
+        let registered_at = std::time::Instant::now();
 
         // Must outlive the connection (`Dialer::dial`'s own docs).
         let _endpoint = dialed.endpoint;
@@ -351,8 +372,12 @@ async fn run_reverse_unix(
         ReconnectEvent {
             event: "registered",
             host: controller,
-            fingerprint: &peer_fp,
+            fingerprint: Some(&peer_fp),
             delay_ms: None,
+            // Not an ended registration (issue #4 item 6).
+            cause: None,
+            at: crate::config::now_rfc3339(),
+            since_registered_ms: None,
         }
         .emit();
         tracing::info!(
@@ -418,6 +443,12 @@ async fn run_reverse_unix(
         // `Server::run`'s own `audit_flush`.
         let mut quota_flush = tokio::time::interval(crate::admission::AUDIT_AGGREGATION_WINDOW);
         quota_flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // Why this connection ended, for the `lost`/`retry` pair below
+        // (issue #4 item 6, `docs/CLI.md` §6.13 bullet at :952). Deferred
+        // init, no `mut`: the two arms below that `break 'serve` each
+        // assign this exactly once, first — the only way to reach the
+        // read after the loop.
+        let loss_cause;
         'serve: loop {
             tokio::select! {
                 _ = &mut shutdown => {
@@ -464,17 +495,37 @@ async fn run_reverse_unix(
                     // runs its own `blocking.shutdown().await` — the join
                     // actually happens, and `purge_connection` below only
                     // starts once it has.
+                    // Issue #4 item 6: `watch.dead()` resolves both for a
+                    // genuinely silent path (this arm's own comment above)
+                    // and for a connection that was *already* closed —
+                    // `ProbeSource::closed`'s own doc: "the specific
+                    // ConnectionError is diagnostic-only here", i.e. ANY
+                    // close wakes it, not only silence — racing ahead of
+                    // `serve_control` noticing the same close on its own
+                    // read. Reading `close_reason()` *before* our own
+                    // `conn.close()` call just below tells the two apart:
+                    // `Some` means a real close already happened (classify
+                    // it exactly like `classify_target_connection_loss`
+                    // would have), `None` means the connection was still
+                    // nominally open and this really was watchdog-declared
+                    // silence.
+                    let pre_close_reason = conn.close_reason();
                     conn.close(CLOSE_CODE_PATH_DEAD, b"path unresponsive");
                     let _ = (&mut serve_control).await;
+                    loss_cause = match pre_close_reason {
+                        Some(err) => super::classify_connection_error(&err),
+                        None => ReconnectCause::PathDead,
+                    };
                     break 'serve;
                 }
                 joined = &mut serve_control => {
-                    let detail = match joined {
+                    let detail = match &joined {
                         Ok(Ok(())) => "connection closed".to_string(),
                         Ok(Err(err)) => err.to_string(),
                         Err(join_err) => format!("serve_control task failed: {join_err}"),
                     };
                     tracing::info!(controller, %detail, "qsh reverse: connection to the controller ended");
+                    loss_cause = classify_target_connection_loss(&joined);
                     break 'serve;
                 }
                 _ = quota_flush.tick() => {
@@ -495,11 +546,22 @@ async fn run_reverse_unix(
         // be observable by the *next* connection instead of being
         // reclaimed by process exit.
         runtime.server.purge_connection(conn_id, ()).await;
+        // Issue #4 item 6: both lines below describe the same ended
+        // registration, so they share `cause`/`since_registered_ms`; a
+        // later `retry` from a fresh dial failure (the `Err` arm above,
+        // outside this `registered_at`'s scope) reports it absent by
+        // construction — that arm never sees this variable at all.
+        let since_registered_ms =
+            Some(u64::try_from(registered_at.elapsed().as_millis()).unwrap_or(u64::MAX));
+        let lost_at = crate::config::now_rfc3339();
         ReconnectEvent {
             event: "lost",
             host: controller,
-            fingerprint: &peer_fp,
+            fingerprint: Some(&peer_fp),
             delay_ms: None,
+            cause: Some(loss_cause.as_str()),
+            at: lost_at,
+            since_registered_ms,
         }
         .emit();
 
@@ -507,8 +569,11 @@ async fn run_reverse_unix(
         ReconnectEvent {
             event: "retry",
             host: controller,
-            fingerprint: "-",
+            fingerprint: None,
             delay_ms: Some(delay.as_millis() as u64),
+            cause: Some(loss_cause.as_str()),
+            at: crate::config::now_rfc3339(),
+            since_registered_ms,
         }
         .emit();
         if !wait_backoff(delay, &mut shutdown).await {
@@ -531,26 +596,150 @@ async fn run_reverse_unix(
 /// pin as fallback) — so an operator can repoint a controller's address by
 /// editing `hosts.toml` without restarting this process, the same way it
 /// already tolerates DNS/IP changes.
-#[cfg(unix)]
+///
+/// Issue #4 item 6: the `Err` side also carries a [`ReconnectCause`],
+/// classified at the point of failure — before `map_dial_error`/
+/// `map_client_error` collapse it into one opaque [`OpError`] — because
+/// the coarser classification is what the CLI's `error.code` needs, not
+/// what a reconnect-loop operator staring at stderr does. `hosts.toml`
+/// failing to load and `resolve_peer_address` finding no known address
+/// for `controller` both classify `local` rather than `resolve`: neither
+/// one ever reaches a DNS resolver — that classification is reserved for
+/// [`crate::ops::resolve_one`]'s own failure just below, the literal
+/// resolver call.
+///
+/// Only ever driven in production from [`run_reverse_unix`]
+/// (`#[cfg(unix)]`), but gated `#[cfg(any(unix, test))]` rather than
+/// plain `#[cfg(unix)]` so its own unit test
+/// (`dial_and_register_maps_an_unresolvable_controller_to_resolve_cause`)
+/// builds and runs on every CI target, including the windows-latest
+/// clippy/test leg — that test is the only place
+/// [`ReconnectCause::Resolve`] is ever constructed, so without this a
+/// non-unix build has no way to exercise it and the variant is dead code
+/// there.
+#[cfg(any(unix, test))]
 async fn dial_and_register(
     dialer: &Dialer,
     trust: &SharedTrustStore,
     paths: &Paths,
     controller: &str,
     local_hello: &wire::Hello,
-) -> Result<(Dialed, FramedStream, wire::Hello), OpError> {
-    let hosts = crate::hosts::HostsFile::load(&paths.hosts_file())?;
+) -> Result<(Dialed, FramedStream, wire::Hello), (OpError, ReconnectCause)> {
+    let hosts = crate::hosts::HostsFile::load(&paths.hosts_file())
+        .map_err(|err| (err, ReconnectCause::Local))?;
     let (address, server_name) =
-        crate::ops::resolve_peer_address(&trust.snapshot(), &hosts, controller)?;
-    let addr = crate::ops::resolve_one(&address).await?;
-    let dialed = dialer
-        .dial(addr, &server_name)
+        crate::ops::resolve_peer_address(&trust.snapshot(), &hosts, controller)
+            .map_err(|err| (err, ReconnectCause::Local))?;
+    let addr = crate::ops::resolve_one(&address)
         .await
-        .map_err(|err| crate::ops::exec::map_dial_error(err, &address))?;
+        .map_err(|err| (err, ReconnectCause::Resolve))?;
+    let dialed = dialer.dial(addr, &server_name).await.map_err(|err| {
+        let cause = classify_dial_error(&err);
+        (crate::ops::exec::map_dial_error(err, &address), cause)
+    })?;
     let (ctl, peer_hello) = crate::handshake::initiate(&dialed.connection, local_hello.clone())
         .await
-        .map_err(|err| crate::ops::exec::map_client_error(crate::client::map_hello_error(err)))?;
+        .map_err(|err| {
+            let cause = classify_hello_error(&err);
+            (
+                crate::ops::exec::map_client_error(crate::client::map_hello_error(err)),
+                cause,
+            )
+        })?;
     Ok((dialed, ctl, peer_hello))
+}
+
+/// Classify a [`qsh_transport::DialError`] into [`ReconnectCause`]'s
+/// `resolve`-adjacent slice (issue #4 item 6).
+/// `DialError::Failed` mirrors `map_dial_error`'s own
+/// `is_crypto_failure` check exactly — the same quinn
+/// `ConnectionError` that makes that function answer `AUTH_FAILED`
+/// instead of `CONNECTION_FAILED` is what makes this answer
+/// `tls_rejected` instead of `refused`, so the two classifications never
+/// disagree about the same failure.
+#[cfg(any(unix, test))]
+fn classify_dial_error(err: &qsh_transport::DialError) -> ReconnectCause {
+    use qsh_transport::DialError;
+    match err {
+        DialError::Timeout(_) => ReconnectCause::DialTimeout,
+        DialError::LocalRejected { .. } | DialError::RemoteRejected => ReconnectCause::TlsRejected,
+        DialError::Refused | DialError::Connect(_) => ReconnectCause::Refused,
+        DialError::Failed(inner) => {
+            if qsh_transport::endpoint::is_crypto_failure(inner) {
+                ReconnectCause::TlsRejected
+            } else {
+                ReconnectCause::Refused
+            }
+        }
+        // Endpoint construction failed before any packet went out —
+        // originates on this side.
+        DialError::Setup(_) => ReconnectCause::Local,
+    }
+}
+
+/// Classify a [`crate::handshake::HelloError`] reached from `dial_and_register`'s
+/// initiator role into [`ReconnectCause`] (issue #4 item 6). `Remote` is
+/// the controller's own `host.reverse` choke point
+/// answering with a wire `Error` (name-squatting shape check, ACL denial,
+/// or an unpinned peer past the version check — `dial_and_register`'s own
+/// module docs) — always `registration_denied`. `Connection`/a
+/// `ConnectionLost` stream error reuse [`crate::reverse::classify_connection_error`]'s
+/// judgment. Every other variant (`Timeout`, `ClosedBeforeHello`,
+/// `ExpectedHello`, `VersionMismatch`, a stream error with no underlying
+/// `ConnectionError`; `Rejected`/`AlreadyPaired` are responder-only and
+/// unreachable from this initiator call, per that enum's own doc) is a
+/// protocol-shaped anomaly this fixed eight-value vocabulary has no
+/// sharper bucket for, so it falls to `local`.
+#[cfg(any(unix, test))]
+fn classify_hello_error(err: &crate::handshake::HelloError) -> ReconnectCause {
+    use crate::handshake::HelloError;
+    match err {
+        HelloError::Remote { .. } => ReconnectCause::RegistrationDenied,
+        HelloError::Connection(e) => super::classify_connection_error(e),
+        HelloError::Stream(qsh_transport::StreamError::Read(
+            qsh_transport::ReadError::ConnectionLost(e),
+        ))
+        | HelloError::Stream(qsh_transport::StreamError::Write(
+            qsh_transport::WriteError::ConnectionLost(e),
+        )) => super::classify_connection_error(e),
+        _ => ReconnectCause::Local,
+    }
+}
+
+/// Classify why the `'serve` loop in [`run_reverse_unix`] exited via its
+/// `serve_control` join arm (issue #4 item 6) — reached whenever
+/// `serve_control` itself notices the connection ended first; the
+/// `watch.dead()` arm races the same connection dying and classifies its
+/// own arm directly from `conn.close_reason()` instead of calling this
+/// (that arm's own comment: `watch.dead()` resolves for an
+/// already-peer-closed connection just as readily as a genuinely silent
+/// one, so it cannot assume `path_dead` either). `Ok(Ok(()))` is
+/// `serve_control`'s own loop ending on a clean
+/// end-of-stream — the controller closed its send side — `peer_closed`.
+/// `Ok(Err(err))` extracts the underlying `ConnectionError` from
+/// [`crate::server::ConnError`] where one exists (`Connection`, or a
+/// `ConnectionLost` stream error) and reuses
+/// [`crate::reverse::classify_connection_error`]'s judgment; every other
+/// `ConnError` variant (a Hello-exchange error, unreachable here — the
+/// exchange already finished before `serve_control` ever ran) falls to
+/// `local`. `Err(_)` is `serve_control`'s task itself panicking/being
+/// aborted — `local`, a bug on this side, never a peer/path judgment.
+#[cfg(any(unix, test))]
+fn classify_target_connection_loss(
+    joined: &Result<Result<(), crate::server::ConnError>, tokio::task::JoinError>,
+) -> ReconnectCause {
+    use crate::server::ConnError;
+    match joined {
+        Ok(Ok(())) => ReconnectCause::PeerClosed,
+        Ok(Err(ConnError::Connection(e))) => super::classify_connection_error(e),
+        Ok(Err(ConnError::Stream(qsh_transport::StreamError::Read(
+            qsh_transport::ReadError::ConnectionLost(e),
+        )))) => super::classify_connection_error(e),
+        Ok(Err(ConnError::Stream(qsh_transport::StreamError::Write(
+            qsh_transport::WriteError::ConnectionLost(e),
+        )))) => super::classify_connection_error(e),
+        Ok(Err(_)) | Err(_) => ReconnectCause::Local,
+    }
 }
 
 /// Sleep out one backoff delay, unless `shutdown` resolves first. Its own
@@ -648,15 +837,36 @@ fn jitter(delay: Duration, jitter_pct: u8, rng: &mut impl rand::RngCore) -> Dura
 /// handshake for that attempt has even started (e.g. a DNS failure during
 /// backoff), so there is no fingerprint to report yet, and this target
 /// never learns the `generation` number the controller's registry assigns
-/// it (`Hello`'s reply never carries it back).
+/// it (`Hello`'s reply never carries it back). `fingerprint` is itself
+/// `Option` (issue #4 item 6): every `retry` — pre-handshake or the one
+/// right after a `lost` — fires before this attempt's own TLS handshake,
+/// so it is always absent there, never the `"-"` placeholder earlier
+/// revisions used.
 #[cfg(any(unix, test))]
 #[derive(serde::Serialize)]
 struct ReconnectEvent<'a> {
     event: &'static str,
     host: &'a str,
-    fingerprint: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fingerprint: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     delay_ms: Option<u64>,
+    /// Fixed vocabulary ([`crate::reverse::ReconnectCause`]), present only
+    /// on `"lost"` and the `"retry"` that follows it, and on a `"retry"`
+    /// from a failed dial/register attempt — absent, never null, on
+    /// `"registered"` (`docs/CLI.md` §6.13 bullet at :952, issue #4 item
+    /// 6).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cause: Option<&'static str>,
+    /// RFC 3339 UTC, every line (`crate::config::now_rfc3339`).
+    at: String,
+    /// Milliseconds since the registration that just ended was
+    /// established — only on the `"lost"`/`"retry"` pair that follows a
+    /// connection dying; absent (never null) everywhere else, including a
+    /// `"retry"` from a fresh dial failure that never had a registration
+    /// to time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    since_registered_ms: Option<u64>,
 }
 
 #[cfg(any(unix, test))]
@@ -673,6 +883,9 @@ impl ReconnectEvent<'_> {
             host = self.host,
             fingerprint = self.fingerprint,
             delay_ms = self.delay_ms,
+            cause = self.cause,
+            at = %self.at,
+            since_registered_ms = self.since_registered_ms,
             "{}",
             line
         );
@@ -680,365 +893,4 @@ impl ReconnectEvent<'_> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    use crate::config::ReverseConfig;
-    use proptest::prelude::*;
-    use rand::SeedableRng;
-    use rand::rngs::StdRng;
-
-    #[test]
-    fn offered_name_precedence_flag_then_config_then_device_id() {
-        let mut config = Config::default();
-        assert_eq!(
-            resolve_offered_name(None, &config, "device_abc"),
-            "device_abc"
-        );
-        config.reverse.offered_name = Some("configured".into());
-        assert_eq!(
-            resolve_offered_name(None, &config, "device_abc"),
-            "configured"
-        );
-        assert_eq!(
-            resolve_offered_name(Some("flagged"), &config, "device_abc"),
-            "flagged"
-        );
-    }
-
-    // Regression for the adversarial review finding: `rand::rng()`
-    // (`ThreadRng`, `!Send`) held across every `.await` in the reconnect
-    // loop made `run_reverse_observed`'s (and therefore `run_reverse`'s)
-    // returned future `!Send`, so `tokio::spawn(run_reverse(..))` failed to
-    // compile while the symmetric `tokio::spawn(run_listen(..))` was fine.
-    // Nothing here actually runs `never_called` — the whole point is the
-    // compile-time check `assert_send` performs on the future value it's
-    // handed; a future `!Send` fails to *build*, not to pass an assertion.
-    #[cfg(unix)]
-    #[test]
-    fn run_reverse_future_is_send() {
-        fn assert_send<T: Send>(_: T) {}
-        fn never_called(
-            paths: &Paths,
-            config: &Config,
-            identity: LoadedIdentity,
-            controller: &str,
-        ) {
-            let fut = run_reverse_observed(
-                paths,
-                config,
-                identity,
-                controller,
-                None,
-                |_runtime| {},
-                || {},
-                std::future::pending::<()>(),
-            );
-            assert_send(fut);
-        }
-        let _ = never_called;
-    }
-
-    // `host_runtime` spawns the broker's TTL reaper (`tokio::spawn`), so
-    // this needs a runtime in context — same reason
-    // `serve::tests::host_runtime_wires_device_id_and_a_shared_audit_sink`
-    // is a `#[tokio::test]` rather than a plain `#[test]`.
-    #[tokio::test]
-    async fn reverse_hello_carries_only_offered_name_capabilities_empty() {
-        let dir = tempfile::tempdir().unwrap();
-        let paths = Paths::new(dir.path(), dir.path());
-        let runtime = crate::serve::host_runtime(&paths, &Config::default(), "hermes");
-        let hello = runtime.server.local_hello(Some(wire::ReverseRegistration {
-            offered_name: "phone".into(),
-            capabilities: Vec::new(),
-        }));
-        let reg = hello.reverse.expect("Hello.reverse is Some");
-        assert_eq!(reg.offered_name, "phone");
-        assert!(
-            reg.capabilities.is_empty(),
-            "empty means \"same as Hello.capabilities\" (v1.proto)"
-        );
-    }
-
-    /// `docs/CLI.md` §6.13's Windows gate, mechanically: `run_reverse`
-    /// refuses on every non-unix target before it ever touches its
-    /// arguments (module docs on [`super::listen::windows_unsupported`]),
-    /// so the identity/paths/config below are throwaway. This is the
-    /// positive Windows-leg assertion `PLAN.md` Step 3 (d) owes ("Windows
-    /// leg의 nextest green … 나머지가 컴파일·통과") — a real `#[tokio::test]`
-    /// that runs and passes on the Windows CI leg, not just an absence of
-    /// a compile error there.
-    #[cfg(not(unix))]
-    #[tokio::test]
-    async fn run_reverse_is_unsupported_on_non_unix() {
-        let identity = LoadedIdentity {
-            identity: crate::identity::Identity {
-                device_id: "device".into(),
-                fingerprint: qsh_transport::Fingerprint::of_spki_der(&[]),
-                key_store: qsh_proto::KeyStoreKind::File,
-                created_at: "2026-01-01T00:00:00Z".into(),
-                cert_der: Vec::new(),
-                issued_by_ca: None,
-            },
-            local: qsh_transport::LocalIdentity {
-                cert_chain: Vec::new(),
-                key_pkcs8_der: zeroize::Zeroizing::new(Vec::new()),
-            },
-        };
-        let paths = Paths::new("unused-config", "unused-state");
-        let err = run_reverse(
-            &paths,
-            &Config::default(),
-            identity,
-            "controller",
-            None,
-            std::future::pending::<()>(),
-        )
-        .await
-        .expect_err("non-unix must refuse to run");
-        assert_eq!(err.code, qsh_proto::ErrorCode::Unsupported);
-    }
-
-    // ------------------------------------------------------------------
-    // Backoff (`docs/design/testing.md` L2 — deterministic, seeded RNG,
-    // no wall clock)
-    // ------------------------------------------------------------------
-
-    fn limits(initial_ms: u64, max_ms: u64, jitter_pct: u8) -> BackoffLimits {
-        BackoffLimits {
-            initial: Duration::from_millis(initial_ms),
-            max: Duration::from_millis(max_ms),
-            jitter_pct,
-        }
-    }
-
-    proptest! {
-        #![proptest_config(ProptestConfig::with_cases(256))]
-
-        /// The un-jittered sequence never shrinks and never exceeds the
-        /// cap — checked with `jitter_pct: 0` so the observed delay *is*
-        /// the raw sequence, isolating this property from jitter's own
-        /// (separately tested below).
-        #[test]
-        fn backoff_sequence_is_monotone_nondecreasing_until_the_cap(
-            initial_ms in 1u64..=5_000,
-            max_ms in 1u64..=120_000,
-            seed in any::<u64>(),
-        ) {
-            prop_assume!(max_ms >= initial_ms);
-            let limits = limits(initial_ms, max_ms, 0);
-            let mut backoff = Backoff::new(limits, StdRng::seed_from_u64(seed));
-
-            let first = backoff.next_delay();
-            prop_assert_eq!(first, limits.initial);
-
-            let mut prev = first;
-            for _ in 0..24 {
-                let next = backoff.next_delay();
-                prop_assert!(next >= prev, "backoff must never shrink before a reset");
-                prop_assert!(next <= limits.max, "backoff must never exceed the cap");
-                prev = next;
-            }
-            // log2(120_000 / 1) < 17: 24 further doublings always
-            // saturate at the cap for every (initial, max) in range.
-            prop_assert_eq!(prev, limits.max, "cap must actually be reached, not just respected");
-        }
-
-        /// Every jittered delay falls within `±jitter_pct%` of the raw
-        /// (pre-jitter) delay the same doubling-then-cap sequence would
-        /// have produced.
-        #[test]
-        fn jitter_stays_within_the_declared_band(
-            initial_ms in 1u64..=5_000,
-            max_ms in 1u64..=120_000,
-            jitter_pct in 0u8..100,
-            seed in any::<u64>(),
-        ) {
-            prop_assume!(max_ms >= initial_ms);
-            let limits = limits(initial_ms, max_ms, jitter_pct);
-            let mut backoff = Backoff::new(limits, StdRng::seed_from_u64(seed));
-
-            let mut raw = limits.initial;
-            for i in 0..16 {
-                if i > 0 {
-                    raw = raw.saturating_mul(2).min(limits.max);
-                }
-                let observed = backoff.next_delay();
-                let raw_ms = raw.as_millis() as i64;
-                let band = raw_ms * i64::from(jitter_pct) / 100;
-                let lo = (raw_ms - band).max(0);
-                let hi = raw_ms + band;
-                let observed_ms = observed.as_millis() as i64;
-                prop_assert!(
-                    observed_ms >= lo && observed_ms <= hi,
-                    "delay {observed_ms}ms out of band [{lo},{hi}] for raw {raw_ms}ms at {jitter_pct}%",
-                );
-            }
-        }
-
-        /// `jitter_stays_within_the_declared_band` above is containment-only:
-        /// an implementation that applied zero jitter (or jitter only ever
-        /// rounding down) would satisfy it trivially. Pin that jitter is
-        /// actually applied and actually two-sided: at a fixed nonzero
-        /// `jitter_pct`, repeated draws from distinct seeds must produce at
-        /// least two distinct delays, with at least one strictly below the
-        /// raw (pre-jitter) delay and at least one strictly above it.
-        #[test]
-        fn jitter_actually_varies_and_straddles_the_raw_delay(
-            initial_ms in 200u64..=5_000,
-            seed_base in any::<u64>(),
-        ) {
-            let jitter_pct = 20u8;
-            let limits = limits(initial_ms, initial_ms, jitter_pct);
-            let raw_ms = initial_ms as i64;
-
-            let mut distinct = std::collections::HashSet::new();
-            let mut saw_below = false;
-            let mut saw_above = false;
-            for offset in 0u64..64 {
-                let mut backoff = Backoff::new(limits, StdRng::seed_from_u64(seed_base.wrapping_add(offset)));
-                let observed_ms = backoff.next_delay().as_millis() as i64;
-                distinct.insert(observed_ms);
-                saw_below |= observed_ms < raw_ms;
-                saw_above |= observed_ms > raw_ms;
-            }
-            prop_assert!(
-                distinct.len() >= 2,
-                "jitter_pct {jitter_pct}% must produce more than one distinct delay across seeds, got {distinct:?}",
-            );
-            prop_assert!(saw_below, "jitter must round down at least once across seeds, got {distinct:?}");
-            prop_assert!(saw_above, "jitter must round up at least once across seeds, got {distinct:?}");
-        }
-
-        /// A reset collapses the sequence back to `initial`, regardless of
-        /// how far it had already climbed.
-        #[test]
-        fn reset_returns_the_sequence_to_initial(
-            initial_ms in 1u64..=5_000,
-            max_ms in 1u64..=120_000,
-            seed in any::<u64>(),
-        ) {
-            prop_assume!(max_ms >= initial_ms);
-            let limits = limits(initial_ms, max_ms, 0);
-            let mut backoff = Backoff::new(limits, StdRng::seed_from_u64(seed));
-
-            prop_assert_eq!(backoff.next_delay(), limits.initial);
-            let _ = backoff.next_delay();
-            let _ = backoff.next_delay();
-            backoff.reset();
-            prop_assert_eq!(backoff.next_delay(), limits.initial);
-        }
-    }
-
-    #[test]
-    fn a_jitter_of_exactly_zero_percent_is_deterministic() {
-        // jitter_pct: 0 never calls into the rng at all — proven by
-        // seeding with a value that would otherwise perturb the delay.
-        let mut backoff = Backoff::new(limits(500, 2_000, 0), StdRng::seed_from_u64(1));
-        assert_eq!(backoff.next_delay(), Duration::from_millis(500));
-        assert_eq!(backoff.next_delay(), Duration::from_millis(1_000));
-        assert_eq!(backoff.next_delay(), Duration::from_millis(2_000));
-        assert_eq!(backoff.next_delay(), Duration::from_millis(2_000));
-    }
-
-    // ------------------------------------------------------------------
-    // wait_backoff (`docs/design/testing.md` L2 — `tokio::time::pause()`,
-    // no `sleep()`-based test synchronization)
-    // ------------------------------------------------------------------
-
-    /// `docs/design/protocol.md` §11-4 / `PLAN.md` Step 4 (d): "controller
-    /// 부재 상태에서 재접속 루프가 CPU를 태우지 않음(상한 도달 후 30 s
-    /// 간격)". Reaching the cap and then waiting is driven by a real
-    /// `tokio::time::sleep`, not a busy poll — proven by advancing a
-    /// *paused* clock and asserting the elapsed virtual time is exactly
-    /// the capped delay, never more (no extra spinning) and never less
-    /// (no shortcut).
-    #[tokio::test(start_paused = true)]
-    async fn after_reaching_the_cap_the_loop_waits_the_full_default_thirty_seconds() {
-        // `jitter_pct: 0` isolates this from jitter's own (separately
-        // tested) band — this test is about the *wait mechanism*, not
-        // about how big the delay is.
-        let cap = ReverseConfig::default().backoff().unwrap().max;
-        assert_eq!(cap, Duration::from_millis(30_000), "the documented default");
-        let mut backoff = Backoff::new(limits(500, 30_000, 0), StdRng::seed_from_u64(7));
-        let mut delay = Duration::ZERO;
-        for _ in 0..12 {
-            delay = backoff.next_delay();
-        }
-        assert_eq!(delay, cap, "must have saturated at the cap by now");
-
-        let shutdown = std::future::pending::<()>();
-        tokio::pin!(shutdown);
-        let start = tokio::time::Instant::now();
-        let completed = wait_backoff(delay, &mut shutdown).await;
-        assert!(completed, "the delay must elapse, not be short-circuited");
-        assert_eq!(
-            tokio::time::Instant::now() - start,
-            Duration::from_millis(30_000),
-            "must wait exactly the capped delay — no busy loop, no shortcut",
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn shutdown_interrupts_a_backoff_wait_immediately() {
-        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-        tx.send(()).unwrap();
-        let shutdown = async move {
-            let _ = rx.await;
-        };
-        tokio::pin!(shutdown);
-
-        let start = tokio::time::Instant::now();
-        let completed = wait_backoff(Duration::from_secs(30), &mut shutdown).await;
-        assert!(!completed, "shutdown must win the race, not the sleep");
-        assert_eq!(
-            tokio::time::Instant::now() - start,
-            Duration::ZERO,
-            "must not wait any part of the delay once shutdown has already fired",
-        );
-    }
-
-    // ------------------------------------------------------------------
-    // ReconnectEvent (`docs/CLI.md` §6.13 — one-line JSON, additive only)
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn reconnect_event_json_line_has_the_documented_field_set() {
-        let retry = ReconnectEvent {
-            event: "retry",
-            host: "personal-mac",
-            fingerprint: "-",
-            delay_ms: Some(542),
-        };
-        let parsed: serde_json::Value =
-            serde_json::from_str(&serde_json::to_string(&retry).unwrap()).unwrap();
-        assert_eq!(parsed["event"], "retry");
-        assert_eq!(parsed["host"], "personal-mac");
-        assert_eq!(parsed["fingerprint"], "-");
-        assert_eq!(parsed["delay_ms"], 542);
-
-        let registered = ReconnectEvent {
-            event: "registered",
-            host: "personal-mac",
-            fingerprint: "sha256:abc",
-            delay_ms: None,
-        };
-        let parsed: serde_json::Value =
-            serde_json::from_str(&serde_json::to_string(&registered).unwrap()).unwrap();
-        assert_eq!(parsed["event"], "registered");
-        assert_eq!(parsed["fingerprint"], "sha256:abc");
-        assert!(
-            parsed.get("delay_ms").is_none(),
-            "delay_ms must be omitted, not null, when absent — additive-only field"
-        );
-
-        // `emit()`'s only production callers live inside `run_reverse_unix`,
-        // which is `#[cfg(unix)]`. Under `cfg(test) && not(unix)` (the
-        // windows-latest leg of `cargo clippy --workspace --all-targets`)
-        // that leaves the method itself unreferenced unless a test calls it
-        // too — call it here so it is exercised (and its output shape
-        // covered) on every platform this module compiles under.
-        retry.emit();
-        registered.emit();
-    }
-}
+mod tests;

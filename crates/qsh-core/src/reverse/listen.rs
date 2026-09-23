@@ -68,8 +68,8 @@ use crate::broker::Clock;
 use crate::broker::SessionId;
 #[cfg(any(unix, test))]
 use crate::broker::SystemClock;
-use crate::client::Session;
 use crate::client::pathwatch::{PathWatch, PathWatchConfig, watch_path};
+use crate::client::{ClientError, Session};
 use crate::config::{Config, Paths};
 use crate::identity::LoadedIdentity;
 #[cfg(unix)]
@@ -809,6 +809,9 @@ impl Listen {
                     host: &entry.name,
                     fingerprint: &entry.fingerprint,
                     generation: Some(entry.generation),
+                    cause: None,
+                    at: crate::config::now_rfc3339(),
+                    since_registered_ms: None,
                 }
                 .emit();
             }
@@ -977,12 +980,15 @@ pub const TARGET: &str = "qsh::reverse";
 /// One `registered`/`denied`/`replaced`/`lost`/`expired` line
 /// (`docs/design/protocol.md` §11-2/§11-4's vocabulary — `retry` is
 /// `reverse/target.rs`'s own `ReconnectEvent`, the target's side of the
-/// same tracing target, never emitted here). Fields are exactly
-/// `event`/`host`/`fingerprint`/`generation`: no payload, no token,
-/// matching the audit record's own structural-only discipline
-/// (`docs/design/architecture.md` §6). Built with `serde_json`, never
-/// hand-formatted (`docs/CLI.md` §6.13) — the same shape
-/// `reverse/target.rs`'s `ReconnectEvent` already uses.
+/// same tracing target, never emitted here). Fields are
+/// `event`/`host`/`fingerprint`/`generation`/`cause`/`at`/
+/// `since_registered_ms`: no payload, no token, matching the audit
+/// record's own structural-only discipline (`docs/design/architecture.md`
+/// §6). Built with `serde_json`, never hand-formatted (`docs/CLI.md`
+/// §6.13) — the same shape `reverse/target.rs`'s `ReconnectEvent` already
+/// uses. This whole line is an open diagnostic vocabulary, not
+/// `qsh.cli/v1` — additive fields here are free (`docs/CLI.md` §6.13
+/// bullet at :952, issue #4 item 6).
 #[derive(serde::Serialize)]
 struct RegistrationEvent<'a> {
     event: &'static str,
@@ -992,6 +998,19 @@ struct RegistrationEvent<'a> {
     /// resolved far enough to reach [`Registry::admit`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     generation: Option<u64>,
+    /// Fixed vocabulary ([`super::ReconnectCause`]), present only on
+    /// `"denied"` (always `registration_denied`) and `"lost"`
+    /// (`peer_closed`/`path_dead`/`local`, `super::classify_connection_error`'s
+    /// judgment) — absent, never null, on every other event.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cause: Option<&'static str>,
+    /// RFC 3339 UTC, every line (`crate::config::now_rfc3339`).
+    at: String,
+    /// Milliseconds since the registration that just ended was
+    /// established — only on `"lost"`; absent (never null) on every other
+    /// event, including one that never had an ended registration to time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    since_registered_ms: Option<u64>,
 }
 
 impl RegistrationEvent<'_> {
@@ -1006,6 +1025,9 @@ impl RegistrationEvent<'_> {
             host = self.host,
             fingerprint = self.fingerprint,
             generation = self.generation,
+            cause = self.cause,
+            at = %self.at,
+            since_registered_ms = self.since_registered_ms,
             "{}",
             line
         );

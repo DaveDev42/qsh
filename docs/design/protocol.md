@@ -491,7 +491,7 @@ TLS 게이트(`pairing_open()`, §15.1)는 redeem 여부를 보지 않고 오직
 - **`qsh.local.v1`**(localctl UDS). `crates/qsh-proto/proto/qsh/local/v1.proto:9-15`가 이유를 직접 적고 있다 — M8이 freeze하는 것은 네트워크를 건너 두 peer 사이를 오가는 원격 계약 `qsh.wire.v1`뿐이고, 이 파일의 메시지는 전부 한 머신 안, same-uid만 열 수 있는 소켓 위에서만 오간다. 별도 버전 축(`LOCAL_HELLO_VERSION = 2`, `crates/qsh-proto/src/local.rs:64`)을 쓴다.
 - **`qsh.event/v1` JSON 봉투**(`crates/qsh-proto/src/event.rs:27` `EVENT_SCHEMA`, `:31-37` `KNOWN_EVENT_TYPES` 5종). wire의 `SessionEvent`(태그 60)와는 다른 표면이고, `docs/CLI.md` §10이 이미 자기 additive-only 규율을 갖는다 — 대조는 §16.6.
 - **`ForwardSpec`/`ForwardDirection`**(`crates/qsh-proto/src/wire.rs:464`(`ForwardSpec`)·`:446`(`ForwardDirection`)). `-L`/`-R` CLI 인자를 로컬에서 파싱한 결과 타입이지 wire에 실리는 값이 아니다 — `.proto` 전체에 이 이름의 message도 field도 없다. `parse_forward_spec`이 §13의 fuzz 타깃인 것은 신뢰 불가 **로컬** 입력 파서이기 때문이지, wire 표면이기 때문이 아니다.
-- **QUIC RESET/CLOSE 코드값**(`0x1001`~`0x200D`). CLOSE 대역(`0x100x`)의 정의 위치는 `crates/qsh-transport/src/endpoint.rs:125,128`·`crates/qsh-core/src/server/mod.rs:153`·`crates/qsh-core/src/reverse/listen.rs:112,132`·`crates/qsh-core/src/reverse/target.rs:205`이고, RESET 대역(`0x200x`)의 근거는 §7이다. 이 값들이 동결 밖인 이유와 그것이 뜻하지 않는 것은 §16.5 끝에서 다룬다.
+- **QUIC RESET/CLOSE 코드값**(`0x1001`~`0x200D`). CLOSE 대역(`0x100x`)의 정의 위치는 `crates/qsh-transport/src/endpoint.rs:125,128`·`crates/qsh-core/src/server/mod.rs:153`·`crates/qsh-core/src/reverse/listen.rs:112,132`·`crates/qsh-core/src/reverse/target.rs:212`이고, RESET 대역(`0x200x`)의 근거는 §7이다. 이 값들이 동결 밖인 이유와 그것이 뜻하지 않는 것은 §16.5 끝에서 다룬다.
 - **우선순위 band 값**. 로컬 송신 큐 힌트일 뿐 peer가 관측하는 wire 필드가 아니다(값 자체는 §16.2에 명문화돼 있다).
 - **SOCKS5 로컬 codec**(`crates/qsh-proto/src/socks5.rs`, ADR-0019). `-D`가 로컬 loopback listener에서 받는 클라이언트 프로토콜이지 두 `qsh` peer 사이의 wire 계약이 아니다 — `.proto`에 이 이름의 message가 없다. `parse_socks5`가 §13의 fuzz 타깃인 것도 `parse_forward_spec`과 같은 이유(신뢰 불가 로컬 입력)이지 wire 표면이기 때문이 아니다.
 
@@ -513,7 +513,7 @@ TLS 게이트(`pairing_open()`, §15.1)는 redeem 여부를 보지 않고 오직
 
 이 중 하나라도 필요해지면 ALPN을 `qsh/2`로 올린다 — `qsh/1`은 그대로 두고 새 major로 파괴적 개정을 실어 보낸다(§4).
 
-QUIC RESET/CLOSE 코드값(`0x1001`~`0x200D`, CLOSE 대역 `crates/qsh-transport/src/endpoint.rs:125,128`·`crates/qsh-core/src/server/mod.rs:153`·`crates/qsh-core/src/reverse/listen.rs:112,132`·`crates/qsh-core/src/reverse/target.rs:205`, RESET 대역 §7)은 이 목록에 없다 — 애초에 §16.1/§16.2의 동결 대상이 아니기 때문이다(§16.3). 다만 "동결 밖"이 "아무 때나 바뀐다"는 뜻은 아니다. §7이 말하는 것은 "peer가 이 값에 의존해 분기하면 안 된다"이지 값의 안정성 자체를 포기한다는 뜻이 아니다 — 이 값들은 wire 계약이 아니므로 peer는 값에 의존해서는 안 되지만, 진단·audit 상관관계를 위해 major 버전 안에서는 재배치하지 않는다. 지금 `0x1003`은 서버 accept 경로의 용량 거부(`crates/qsh-core/src/server/mod.rs:153` `RESOURCE_EXHAUSTED`)와 reverse 등록 교체(`crates/qsh-core/src/reverse/listen.rs:112` `REPLACED`)가 각자 정의해 같은 값에 이름이 둘이다. 발신 지점이 다르고 close reason 문자열도 다르므로 지금 부딪히지는 않지만, 값을 갈라 둘지는 §16 발효 판정과 함께 정한다.
+QUIC RESET/CLOSE 코드값(`0x1001`~`0x200D`, CLOSE 대역 `crates/qsh-transport/src/endpoint.rs:125,128`·`crates/qsh-core/src/server/mod.rs:153`·`crates/qsh-core/src/reverse/listen.rs:112,132`·`crates/qsh-core/src/reverse/target.rs:212`, RESET 대역 §7)은 이 목록에 없다 — 애초에 §16.1/§16.2의 동결 대상이 아니기 때문이다(§16.3). 다만 "동결 밖"이 "아무 때나 바뀐다"는 뜻은 아니다. §7이 말하는 것은 "peer가 이 값에 의존해 분기하면 안 된다"이지 값의 안정성 자체를 포기한다는 뜻이 아니다 — 이 값들은 wire 계약이 아니므로 peer는 값에 의존해서는 안 되지만, 진단·audit 상관관계를 위해 major 버전 안에서는 재배치하지 않는다. 지금 `0x1003`은 서버 accept 경로의 용량 거부(`crates/qsh-core/src/server/mod.rs:153` `RESOURCE_EXHAUSTED`)와 reverse 등록 교체(`crates/qsh-core/src/reverse/listen.rs:112` `REPLACED`)가 각자 정의해 같은 값에 이름이 둘이다. 발신 지점이 다르고 close reason 문자열도 다르므로 지금 부딪히지는 않지만, 값을 갈라 둘지는 §16 발효 판정과 함께 정한다.
 
 ### 16.6 wire major와 JSON major는 독립 트랙
 

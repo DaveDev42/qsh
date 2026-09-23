@@ -149,7 +149,7 @@ D7은 테스트로 지킬 수 있는 성질이 아니라 코드가 없어서 성
 | E3 | ring 오프셋 산술 오류 | gap 정확 보고 | testing.md L2 | `ring.rs:977` `read_matches_naive_vec_oracle`(proptest) | — |
 | E4 | reverse 등록 generation 재사용 | 롤백된 generation의 재발행 금지 | — | `crates/qsh-core/src/reverse/registry.rs:1102` `generation_is_never_repeated_across_any_replace_stale_remove_sequence`(proptest) | — |
 | E5 | localctl request-id 교차 응답 | mux 오라클 대조 | — | `crates/qsh-core/src/localctl/mux.rs:575` `interleaved_reused_peer_ids_never_cross`(proptest) | — |
-| E6 | 재접속 backoff 폭주 | 단조 증가 + cap | — | `crates/qsh-core/src/reverse/target.rs:823` `backoff_sequence_is_monotone_nondecreasing_until_the_cap`(proptest) | — |
+| E6 | 재접속 backoff 폭주 | 단조 증가 + cap | — | `crates/qsh-core/src/reverse/target/tests.rs:193` `backoff_sequence_is_monotone_nondecreasing_until_the_cap`(proptest) | — |
 | E7 | 터널 재경로 중 바이트 손실 | QUIC path migration을 투명하게 통과 | ADR-0018:14 | `crates/qsh-testkit/tests/tunnel_chaos.rs:149,299,781` | connection 자체가 끊기면 터널은 재생되지 않는다 — v1의 명시적 비대칭 → §7 h11 |
 | E8 | overflow로 인한 output 손실을 조용히 숨김 | overflow는 절대 숨기지 않는다. `available_from` 이전을 가리키는 커서는 먼저 `Gap`을 받고 그다음 데이터를 받는다 | ADR-0004:10,18,33 — "`session.gap` event가 buffer overflow의 유일하고 명시적인 신호여야 하며, 이를 숨기는 어떤 fallback도 있어서는 안 된다"; `protocol.md:289` | `ring.rs:877` `forced_control_loss_is_signalled_by_a_gap_never_hidden`, `:639` | 손실 자체는 §7 h15. 이 행이 지키는 것은 "숨기지 않는다"는 성질이다 |
 
