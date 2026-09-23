@@ -333,7 +333,7 @@ pub fn macos_launchagent_path(home: &Path, mode: &str) -> PathBuf {
 }
 
 /// `~/.config/systemd/user/qsh-<mode>.service` — the Linux twin of
-/// [`macos_launchagent_path`].
+/// `macos_launchagent_path` (each is compiled only on its own OS, so this is not an intra-doc link).
 #[cfg(target_os = "linux")]
 pub fn linux_systemd_user_unit_path(home: &Path, mode: &str) -> PathBuf {
     home.join(".config")
