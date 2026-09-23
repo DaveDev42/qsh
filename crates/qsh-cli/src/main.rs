@@ -751,6 +751,62 @@ fn remote_exit_code_to_process_exit(remote: i32) -> i32 {
     }
 }
 
+/// `run_tunnel_open`'s `"local"`/`"remote"` request-building step,
+/// factored out so it is unit-testable without a daemon or peer (issue #4
+/// item 5a review finding: nothing previously drove `--wait` through this
+/// function, so a mutation dropping `wait_ms` entirely left the whole
+/// suite green). Exactly one of `--local`/`--remote` is expected on
+/// `args` — clap's `conflicts_with`/`required_unless_present_any`
+/// (`cli.rs`'s `TunnelOpenArgs`) already rule out both `None` and both
+/// `Some` as usage errors before argument parsing even finishes, and
+/// `--dynamic` present is ruled out by [`run_tunnel_open`]'s own dispatch
+/// above this function's one call site — but the `_` arm below is a
+/// fail-closed backstop rather than a trusted invariant, exactly like the
+/// inline match this replaced.
+fn build_tunnel_open_request(args: &TunnelOpenArgs) -> Result<TunnelOpenReq, OpError> {
+    let (mode, spec_str) = match (&args.local, &args.remote) {
+        (Some(spec), None) => ("local", spec),
+        (None, Some(spec)) => ("remote", spec),
+        _ => {
+            return Err(OpError::new(
+                ErrorCode::InvalidArgument,
+                "exactly one of --local/--remote is required",
+            ));
+        }
+    };
+    // Parsing (and, for `"local"`, the loopback-bind rule) lives in
+    // `qsh-core`: this frontend only shuttles the already-parsed halves
+    // into the request the contract defines (`docs/CLI.md` §6.9).
+    let parsed = if mode == "local" {
+        qsh_core::parse_local_forwards(std::slice::from_ref(spec_str))
+    } else {
+        qsh_core::parse_remote_forwards(std::slice::from_ref(spec_str))
+    };
+    let specs = parsed?;
+    let Some(spec) = specs.first() else {
+        return Err(OpError::new(ErrorCode::InvalidArgument, "no forward spec"));
+    };
+    Ok(TunnelOpenReq {
+        host: args.host.clone(),
+        mode: mode.to_string(),
+        bind: spec.bind.clone(),
+        listen_port: u32::from(spec.listen_port),
+        forward_host: spec.host.clone(),
+        forward_port: u32::from(spec.host_port),
+        // `0` (the default, and clap's own `default_value_t`) maps to
+        // `None` rather than `Some(0)` so an absent/default `--wait`
+        // keeps the request byte-identical to before this flag existed
+        // (`docs/CLI.md` §6.9's `--wait` paragraph, issue #4 item 5a).
+        // The `0..=600_000` bound is enforced in `qsh-core`
+        // (`Ops::tunnel_open`), not here.
+        wait_ms: if args.wait == 0 {
+            None
+        } else {
+            Some(args.wait)
+        },
+    })
+}
+
 /// `qsh tunnel open <host> --local <spec>` — open one tunnel and hold it
 /// (`docs/CLI.md` §6.9, §6.14).
 ///
@@ -795,46 +851,9 @@ fn run_tunnel_open(cli: &Cli, ops: &Ops, args: &TunnelOpenArgs) -> i32 {
     // invariant: if that guarantee ever slips — a future flag change, a
     // clap upgrade that loosens a constraint — this refuses the command
     // with `INVALID_ARGUMENT` instead of panicking or guessing a mode.
-    let (mode, spec_str) = match (&args.local, &args.remote) {
-        (Some(spec), None) => ("local", spec),
-        (None, Some(spec)) => ("remote", spec),
-        _ => {
-            return report_error(
-                cli,
-                TunnelOpenOp::COMMAND,
-                &OpError::new(
-                    ErrorCode::InvalidArgument,
-                    "exactly one of --local/--remote is required",
-                ),
-            );
-        }
-    };
-    // Parsing (and, for `"local"`, the loopback-bind rule) lives in
-    // `qsh-core`: this frontend only shuttles the already-parsed halves
-    // into the request the contract defines (`docs/CLI.md` §6.9).
-    let parsed = if mode == "local" {
-        qsh_core::parse_local_forwards(std::slice::from_ref(spec_str))
-    } else {
-        qsh_core::parse_remote_forwards(std::slice::from_ref(spec_str))
-    };
-    let specs = match parsed {
-        Ok(specs) => specs,
+    let request = match build_tunnel_open_request(args) {
+        Ok(request) => request,
         Err(err) => return report_error(cli, TunnelOpenOp::COMMAND, &err),
-    };
-    let Some(spec) = specs.first() else {
-        return report_error(
-            cli,
-            TunnelOpenOp::COMMAND,
-            &OpError::new(ErrorCode::InvalidArgument, "no forward spec"),
-        );
-    };
-    let request = TunnelOpenReq {
-        host: args.host.clone(),
-        mode: mode.to_string(),
-        bind: spec.bind.clone(),
-        listen_port: u32::from(spec.listen_port),
-        forward_host: spec.host.clone(),
-        forward_port: u32::from(spec.host_port),
     };
     let hold = match ops.tunnel_open(request) {
         Ok(hold) => hold,
@@ -1815,6 +1834,45 @@ mod tests {
             route_query_count(),
             before + 1,
             "human mode must make exactly one route query"
+        );
+    }
+
+    /// [`TunnelOpenArgs`] with `--local` and every other field at its
+    /// clap default, for the `--wait` wiring tests below — mirrors what
+    /// `Cli::parse_from` would produce for `qsh tunnel open host -L
+    /// 8080:localhost:3000` before any `--wait` is applied.
+    fn local_tunnel_open_args() -> TunnelOpenArgs {
+        TunnelOpenArgs {
+            host: "box".to_string(),
+            local: Some("8080:localhost:3000".to_string()),
+            remote: None,
+            dynamic: Vec::new(),
+            wait: 0,
+        }
+    }
+
+    /// issue #4 item 5a review finding: nothing previously drove `--wait`
+    /// through [`build_tunnel_open_request`], so a mutation that dropped
+    /// `wait_ms` from the built request entirely (or hardcoded `None`)
+    /// passed the whole suite (`crates/qsh-cli/tests/` never constructs a
+    /// `TunnelOpenReq`, and `cli.rs`'s own `tunnel_open_wait_defaults_to_
+    /// zero_and_parses_when_given` only asserts the clap field, never
+    /// builds a request). Pins both directions: a given `--wait` reaches
+    /// `wait_ms` as `Some`, and the clap default `0` maps to `None` —
+    /// the byte-identical-to-before-this-flag guarantee (`docs/CLI.md`
+    /// §6.9).
+    #[test]
+    fn build_tunnel_open_request_wires_wait_into_wait_ms() {
+        let mut args = local_tunnel_open_args();
+        args.wait = 30_000;
+        let request = build_tunnel_open_request(&args).expect("valid -L spec");
+        assert_eq!(request.wait_ms, Some(30_000));
+
+        let bare = local_tunnel_open_args();
+        let request = build_tunnel_open_request(&bare).expect("valid -L spec");
+        assert_eq!(
+            request.wait_ms, None,
+            "the clap default (0) must map to None, not Some(0)"
         );
     }
 }

@@ -443,6 +443,20 @@ pub struct TunnelOpenArgs {
         conflicts_with_all = ["local", "remote"]
     )]
     pub dynamic: Vec<String>,
+
+    /// Milliseconds to keep retrying the initial route resolution while
+    /// it answers the reverse-registration-stale branch. `0` (the
+    /// default) is one attempt, unchanged from before this flag existed.
+    /// Applies to `--local`/`--remote` only — combining it with
+    /// `--dynamic` is a clap usage error. Bound `0..=600000`; above it is
+    /// `INVALID_ARGUMENT`. Full semantics: `docs/CLI.md` §6.9.
+    #[arg(
+        long,
+        value_name = "MS",
+        default_value_t = 0,
+        conflicts_with = "dynamic"
+    )]
+    pub wait: u32,
 }
 
 /// Arguments of `qsh exec`.
@@ -987,6 +1001,55 @@ mod tests {
         assert!(
             Cli::try_parse_from(["qsh", "tunnel", "open", "box", "-D", "1080", "-D", "1081",])
                 .is_ok()
+        );
+    }
+
+    /// `--wait` (`docs/CLI.md` §6.9, issue #4 item 5a): defaults to `0`
+    /// when absent, parses as a plain millisecond count when given, and
+    /// conflicts with `--dynamic` (it builds a separate request this flag
+    /// never reaches) but not with `--local`/`--remote`. The bound
+    /// (`0..=600_000`) is enforced in `qsh-core` (`Ops::tunnel_open`'s
+    /// `wait_budget_ms`), not by clap here, so an out-of-range value
+    /// still parses at this layer and only fails once the request
+    /// reaches `Ops`.
+    #[test]
+    fn tunnel_open_wait_defaults_to_zero_and_parses_when_given() {
+        let cli = Cli::try_parse_from(["qsh", "tunnel", "open", "box", "-L", "1:h:2"]).unwrap();
+        match cli.command.unwrap() {
+            Command::Tunnel(TunnelCmd::Open(args)) => assert_eq!(args.wait, 0),
+            other => panic!("expected tunnel open, got {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from([
+            "qsh", "tunnel", "open", "box", "-L", "1:h:2", "--wait", "30000",
+        ])
+        .unwrap();
+        match cli.command.unwrap() {
+            Command::Tunnel(TunnelCmd::Open(args)) => assert_eq!(args.wait, 30_000),
+            other => panic!("expected tunnel open, got {other:?}"),
+        }
+
+        // Parses fine at this layer even out of `Ops`'s bound — clap does
+        // not enforce `0..=600_000` here (this file's own doc on `wait`).
+        assert!(
+            Cli::try_parse_from([
+                "qsh", "tunnel", "open", "box", "-L", "1:h:2", "--wait", "700000",
+            ])
+            .is_ok()
+        );
+    }
+
+    /// `--wait` together with `--dynamic` (`-D`) is a clap usage error,
+    /// not a silent no-op — `-D` builds `TunnelDynamicReq`, which has no
+    /// `wait_ms` field, so before this `conflicts_with` existed the value
+    /// simply vanished (issue #4 item 5a review finding).
+    #[test]
+    fn tunnel_open_wait_conflicts_with_dynamic() {
+        assert!(
+            Cli::try_parse_from([
+                "qsh", "tunnel", "open", "box", "-D", "1080", "--wait", "30000",
+            ])
+            .is_err()
         );
     }
 

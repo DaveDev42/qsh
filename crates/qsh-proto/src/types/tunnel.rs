@@ -65,6 +65,18 @@ pub struct TunnelOpenReq {
     pub forward_host: String,
     /// The `host_port` component of the forward spec.
     pub forward_port: u32,
+    /// How long, in milliseconds, to keep retrying route resolution when
+    /// the initial attempt answers the retryable stale-registration
+    /// branch (`docs/CLI.md` §6.9's `--wait`, issue #4 item 5a; the
+    /// `HOST_NOT_FOUND`/`retryable: true`/`details.reason:
+    /// "reverse_registration_stale"` shape `qsh-core`'s
+    /// `ops::host::STALE_REGISTRATION_REASON` names) — any other error
+    /// returns on the first attempt, unchanged. Additive-optional: absent
+    /// or `0` means exactly one attempt, byte-identical to every request
+    /// built before this field existed. Bound `0..=600_000`, enforced in
+    /// `qsh-core`'s `Ops::tunnel_open`, not here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_ms: Option<u32>,
 }
 
 /// Data payload of a successful `tunnel.open`: the opened tunnel, exactly

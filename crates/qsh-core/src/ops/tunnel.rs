@@ -38,6 +38,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use qsh_proto::wire::{
     self, ForwardDirection, ForwardSpec, parse_dynamic_spec, parse_forward_spec,
@@ -47,6 +48,7 @@ use qsh_proto::{
     TunnelListData, TunnelListReq, TunnelOpenReq,
 };
 
+use crate::ops::host;
 use crate::ops::session::Connected;
 use crate::ops::{OpError, Operation, Ops};
 use crate::tunnel::remote::RemoteForwardAcceptor;
@@ -629,13 +631,75 @@ impl Ops {
     ///
     /// The returned [`TunnelHold`] is the tunnel: the caller renders
     /// [`TunnelHold::tunnel`] once and then [`TunnelHold::hold`]s it.
+    ///
+    /// `req.wait_ms` (`docs/CLI.md` §6.9's `--wait`, issue #4 item 5a)
+    /// wraps the connect in a retry over the connect step (private
+    /// `connect_with_wait`): absent or `0` takes exactly one attempt,
+    /// identical to every call before this field existed.
     pub fn tunnel_open(&self, req: TunnelOpenReq) -> Result<TunnelHold, OpError> {
         let spec = spec_from_request(&req)?;
-        let conn = self.connect(&req.host)?;
+        let wait_budget_ms = wait_budget_ms(req.wait_ms)?;
+        let wait_budget_ms = self.cap_wait_budget_to_stale_retention(wait_budget_ms);
+        let conn = self.connect_with_wait(&req.host, wait_budget_ms)?;
         match conn.connection() {
             Some(connection) => Self::tunnel_open_forward(conn, connection, &spec, &req.host),
             None => Self::tunnel_open_reverse(conn, &spec, &req.host),
         }
+    }
+
+    /// [`Self::connect`], retried while — and only while — it keeps
+    /// failing with the PR-C stale-registration branch (issue #4 items
+    /// 3a/5a): `HOST_NOT_FOUND`, `retryable: true`,
+    /// `details.reason == host::STALE_REGISTRATION_REASON`
+    /// ([`is_stale_registration`]). Any other error, including a
+    /// `HOST_NOT_FOUND` for a name with no registration at all, returns
+    /// on the very first attempt — this never widens what `--wait`
+    /// retries beyond the one documented branch. `wait_budget_ms == 0`
+    /// (absent `--wait`, or `--wait 0`) also takes exactly one attempt,
+    /// so this is a no-op wrapper in every call site that existed before
+    /// the flag did.
+    ///
+    /// The retry decision itself is [`retry_while_stale`], factored out
+    /// generic over the attempt's return type so it is unit-testable
+    /// against a fake attempt closure without a real daemon or peer
+    /// (`docs/design/testing.md` L2) — the real-daemon case (registration
+    /// actually coming back mid-wait) is
+    /// `crates/qsh-testkit/tests/reverse_tunnel.rs`'s job.
+    fn connect_with_wait(&self, host: &str, wait_budget_ms: u64) -> Result<Connected, OpError> {
+        retry_while_stale(wait_budget_ms, WAIT_POLL_INTERVAL, || self.connect(host))
+    }
+
+    /// Cap a wait budget at this machine's own effective
+    /// `[listen].stale_retention` (`docs/design/protocol.md` §11-4, issue
+    /// #4 item 5a) — [`WAIT_MS_MAX`]'s own `0..=600_000` bound is a wire-
+    /// level sanity check, not a promise that the whole range stays
+    /// retryable: once `stale_retention` elapses,
+    /// `Registry::sweep_expired` (`crates/qsh-core/src/reverse/registry.rs`)
+    /// removes the registry entry outright, and the next resolution falls
+    /// through to a non-retryable "not configured" `HOST_NOT_FOUND`
+    /// (`ops::host::unconfigured_host_not_found`) that
+    /// [`is_stale_registration`] no longer recognizes. Left uncapped, a
+    /// `--wait` past that window would silently stop being retryable
+    /// partway through — contradicting `docs/CLI.md` §6.9's "예산이 다
+    /// 떨어지면 마지막 시도가 낸 것과 같은 retryable `HOST_NOT_FOUND`를
+    /// 그대로 돌려준다" promise. Capping here keeps `retry_while_stale`
+    /// from ever running past the point where a stale error could still
+    /// occur, so its own expiry branch always returns one.
+    ///
+    /// Same best-effort/infallible-on-config-error shape as
+    /// [`host::Ops::stale_retry_after_ms`](super::host)'s own doc: a
+    /// malformed local `config.toml` must not turn this bound into a hard
+    /// routing failure, so any load/validation error falls back to the
+    /// compiled-in default ([`crate::config::ListenConfig::
+    /// DEFAULT_STALE_RETENTION_SECS`], 120 s) instead of propagating.
+    fn cap_wait_budget_to_stale_retention(&self, wait_budget_ms: u64) -> u64 {
+        let retention_ms = self
+            .config()
+            .ok()
+            .and_then(|config| config.stale_retention().ok())
+            .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+            .unwrap_or(crate::config::ListenConfig::DEFAULT_STALE_RETENTION_SECS * 1_000);
+        wait_budget_ms.min(retention_ms)
     }
 
     /// Forward route: dial the peer's QUIC connection directly — exactly
@@ -1327,6 +1391,91 @@ fn port(value: u32, field: &str) -> Result<u16, OpError> {
     }
 }
 
+/// Upper bound on `TunnelOpenReq.wait_ms` (`docs/CLI.md` §6.9's `--wait`,
+/// issue #4 item 5a) — ten minutes, an effectively-unbounded-hang refusal
+/// at the wire/parse layer, checked by [`wait_budget_ms`] before a
+/// connection is ever attempted. It is not, by itself, a promise that the
+/// whole `0..=600_000` range stays retryable: the value that actually
+/// governs how long a stale registration stays retryable is
+/// `[listen].stale_retention` (`crate::config::ListenConfig`, default
+/// 120 s — well under this constant), because
+/// [`Ops::cap_wait_budget_to_stale_retention`] additionally caps the
+/// budget at that value before retrying.
+const WAIT_MS_MAX: u32 = 600_000;
+
+/// Poll interval for [`retry_while_stale`]'s client-side retry loop —
+/// short enough that a registration coming back mid-wait is picked up
+/// promptly, long enough not to hammer the local daemon list
+/// (`Ops::reverse_host_entries`, one `admin_host_list_all` round trip per
+/// attempt) while waiting.
+const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(250);
+
+/// Validate and narrow `TunnelOpenReq.wait_ms` to the millisecond budget
+/// [`retry_while_stale`] takes — same "a request that skipped the CLI
+/// parser is still caught here" discipline as [`port`] just above.
+/// Absent maps to `0` (one attempt, unchanged from before `--wait`
+/// existed).
+fn wait_budget_ms(wait_ms: Option<u32>) -> Result<u64, OpError> {
+    match wait_ms {
+        None => Ok(0),
+        Some(ms) if ms <= WAIT_MS_MAX => Ok(u64::from(ms)),
+        Some(ms) => Err(OpError::new(
+            ErrorCode::InvalidArgument,
+            format!("tunnel wait_ms {ms} is outside 0..={WAIT_MS_MAX}"),
+        )),
+    }
+}
+
+/// Whether `err` is exactly the PR-C stale-registration branch
+/// (`crate::ops::host::stale_host_not_found`'s own doc; issue #4 items
+/// 3a/5a) — `--wait` retries this branch alone, never a `HOST_NOT_FOUND`
+/// for a name with no registration at all (that one is `retryable:
+/// false`) and never any other error code.
+fn is_stale_registration(err: &OpError) -> bool {
+    err.code == ErrorCode::HostNotFound
+        && err.retryable
+        && err
+            .details
+            .get("reason")
+            .and_then(serde_json::Value::as_str)
+            == Some(host::STALE_REGISTRATION_REASON)
+}
+
+/// The retry driver [`Ops::connect_with_wait`] wires to a real
+/// [`Ops::connect`] — kept generic and free of `Connected`/`resolve_route`
+/// so it is unit-testable against a fake `attempt` closure
+/// (this module's `tests::retry_while_stale_tests`).
+///
+/// Attempts `attempt` once unconditionally; on
+/// [`is_stale_registration`] error and remaining budget, sleeps up to
+/// `poll_interval` (capped by what is left) and attempts again. Any other
+/// error, or an exhausted budget, returns that attempt's own `Err`
+/// unchanged — in particular, on expiry this is the *same* retryable
+/// stale error the last attempt produced, not a generic timeout (issue
+/// #4 item 5a's own "returns the SAME retryable error" requirement).
+/// `wait_budget_ms == 0` never retries at all, regardless of what
+/// `attempt` returns.
+fn retry_while_stale<T>(
+    wait_budget_ms: u64,
+    poll_interval: Duration,
+    mut attempt: impl FnMut() -> Result<T, OpError>,
+) -> Result<T, OpError> {
+    let deadline = Instant::now() + Duration::from_millis(wait_budget_ms);
+    loop {
+        match attempt() {
+            Ok(value) => return Ok(value),
+            Err(err) if wait_budget_ms > 0 && is_stale_registration(&err) => {
+                let now = Instant::now();
+                if now >= deadline {
+                    return Err(err);
+                }
+                std::thread::sleep(poll_interval.min(deadline - now));
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::TcpListener;
@@ -1341,7 +1490,169 @@ mod tests {
             listen_port,
             forward_host: "db.internal".to_string(),
             forward_port: 5432,
+            wait_ms: None,
         }
+    }
+
+    /// `--wait`'s bound (`docs/CLI.md` §6.9, issue #4 item 5a): `0..=600_000`
+    /// is accepted (mapped straight through as a millisecond budget),
+    /// anything above is `INVALID_ARGUMENT` before a connection is ever
+    /// attempted — same shape as [`port`]'s own `1..=65535` check just
+    /// above it in this file.
+    #[test]
+    fn wait_ms_is_bounded_0_to_600_000() {
+        assert_eq!(wait_budget_ms(None).unwrap(), 0);
+        assert_eq!(wait_budget_ms(Some(0)).unwrap(), 0);
+        assert_eq!(
+            wait_budget_ms(Some(WAIT_MS_MAX)).unwrap(),
+            u64::from(WAIT_MS_MAX)
+        );
+        let err = wait_budget_ms(Some(WAIT_MS_MAX + 1)).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidArgument);
+        assert!(err.message.contains("wait_ms"), "{}", err.message);
+        assert_eq!(
+            wait_budget_ms(Some(u32::MAX)).unwrap_err().code,
+            ErrorCode::InvalidArgument
+        );
+    }
+
+    /// [`wait_budget_ms`]'s bound wired all the way through
+    /// [`Ops::tunnel_open`], not just the private helper the test above
+    /// pins in isolation (issue #4 item 5a review finding: nothing
+    /// previously called `tunnel_open` with an out-of-range `wait_ms`, so
+    /// a mutation that let it silently become `0` passed the whole
+    /// suite). `wait_budget_ms(req.wait_ms)?` runs before
+    /// `connect_with_wait` ever dials anything, so this needs no daemon
+    /// or peer — a valid `listen_port` (`req`'s own default shape) keeps
+    /// `spec_from_request`'s own port check from firing first and masking
+    /// which check actually rejected the request.
+    #[test]
+    fn tunnel_open_rejects_an_out_of_range_wait_ms_before_ever_connecting() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = crate::config::Paths::new(dir.path().join("config"), dir.path().join("state"));
+        let ops = Ops::new(paths);
+        let over_budget = TunnelOpenReq {
+            wait_ms: Some(WAIT_MS_MAX + 1),
+            ..req("local", None, 8080)
+        };
+        let err = match ops.tunnel_open(over_budget) {
+            Ok(_) => panic!("wait_ms above WAIT_MS_MAX must be rejected"),
+            Err(err) => err,
+        };
+        assert_eq!(err.code, ErrorCode::InvalidArgument);
+        assert!(err.message.contains("wait_ms"), "{}", err.message);
+    }
+
+    /// A retryable `HOST_NOT_FOUND` shaped exactly like
+    /// `crate::ops::host::stale_host_not_found`'s output (that function is
+    /// private to `ops::host`, so this rebuilds the same shape from its
+    /// public `STALE_REGISTRATION_REASON` rather than reaching into it) —
+    /// the one branch [`retry_while_stale`] is allowed to retry.
+    fn stale_err() -> OpError {
+        OpError::new(ErrorCode::HostNotFound, "reverse registration is stale")
+            .with_retryable(true)
+            .with_details(serde_json::json!({
+                "reason": host::STALE_REGISTRATION_REASON,
+                "lost_ago_ms": 1234,
+                "retry_after_ms": 30_000,
+            }))
+    }
+
+    /// A `HOST_NOT_FOUND` for a name with **no** registration at all
+    /// (`crate::ops::host::unconfigured_host_not_found`'s shape) —
+    /// same code as [`stale_err`], `retryable: false`, no `reason` in
+    /// `details`. [`is_stale_registration`]/[`retry_while_stale`] must
+    /// tell the two apart on more than `code` alone.
+    fn unretryable_not_found_err() -> OpError {
+        OpError::new(ErrorCode::HostNotFound, "no such host").with_retryable(false)
+    }
+
+    #[test]
+    fn is_stale_registration_matches_only_the_pr_c_shape() {
+        assert!(is_stale_registration(&stale_err()));
+        assert!(!is_stale_registration(&unretryable_not_found_err()));
+        // Same code, retryable, but a different `details.reason` — must
+        // not be mistaken for the stale branch.
+        let other_reason = OpError::new(ErrorCode::HostNotFound, "x")
+            .with_retryable(true)
+            .with_details(serde_json::json!({ "reason": "something_else" }));
+        assert!(!is_stale_registration(&other_reason));
+        assert!(!is_stale_registration(&OpError::new(
+            ErrorCode::ConnectionFailed,
+            "x"
+        )));
+    }
+
+    /// Mutation check (issue #4 item 5a's own "Tests" ask): comment the
+    /// retry loop out of [`retry_while_stale`] — i.e. make it return on
+    /// the very first `Err` regardless of budget — and this test reds,
+    /// because it would then see `stale_err()` instead of the eventual
+    /// `Ok`.
+    #[test]
+    fn retry_while_stale_retries_the_stale_branch_until_it_succeeds() {
+        let mut calls = 0u32;
+        let result = retry_while_stale(5_000, Duration::from_millis(5), || {
+            calls += 1;
+            if calls < 3 {
+                Err(stale_err())
+            } else {
+                Ok("connected")
+            }
+        });
+        assert_eq!(result, Ok("connected"));
+        assert_eq!(
+            calls, 3,
+            "must have retried exactly twice before succeeding"
+        );
+    }
+
+    /// Mutation check (issue #4 item 5a's own "Tests" ask): replace the
+    /// expiry return with a generic/synthesized error instead of the
+    /// last attempt's own `Err`, and this test reds — the returned error
+    /// must equal `stale_err()` field-for-field (code, `retryable`, and
+    /// `details` all included, via `OpError`'s derived `PartialEq`), not
+    /// merely share its `ErrorCode`.
+    #[test]
+    fn retry_while_stale_returns_the_last_attempts_own_stale_error_on_expiry() {
+        let mut calls = 0u32;
+        let result: Result<(), OpError> = retry_while_stale(30, Duration::from_millis(10), || {
+            calls += 1;
+            Err(stale_err())
+        });
+        assert_eq!(result, Err(stale_err()));
+        assert!(
+            calls >= 2,
+            "a 30ms budget over a 10ms poll must retry at least once: {calls}"
+        );
+    }
+
+    /// A non-stale error — even one that shares `HOST_NOT_FOUND` — returns
+    /// on the very first attempt regardless of budget: `--wait` never
+    /// widens retrying beyond the one documented branch.
+    #[test]
+    fn retry_while_stale_never_retries_a_non_stale_error() {
+        let mut calls = 0u32;
+        let result: Result<(), OpError> =
+            retry_while_stale(5_000, Duration::from_millis(5), || {
+                calls += 1;
+                Err(unretryable_not_found_err())
+            });
+        assert_eq!(result, Err(unretryable_not_found_err()));
+        assert_eq!(calls, 1);
+    }
+
+    /// `wait_budget_ms == 0` (absent `--wait`, or `--wait 0`) is a single
+    /// attempt even when that attempt is the stale branch — the
+    /// byte-identical-to-before-this-flag guarantee (`docs/CLI.md` §6.9).
+    #[test]
+    fn retry_while_stale_with_a_zero_budget_never_retries_even_the_stale_branch() {
+        let mut calls = 0u32;
+        let result: Result<(), OpError> = retry_while_stale(0, Duration::from_millis(5), || {
+            calls += 1;
+            Err(stale_err())
+        });
+        assert_eq!(result, Err(stale_err()));
+        assert_eq!(calls, 1);
     }
 
     /// A `-R` request is refused as unimplemented, not as malformed, and
