@@ -1,0 +1,12 @@
+{
+  "command": "host.get",
+  "error": {
+    "code": "HOST_NOT_FOUND",
+    "details": null,
+    "message": "host \"nowhere-at-all\" is not configured on this machine: no trust-store pin, no hosts.toml entry, and no reverse registration naming it; nothing will be dialed. Pin it with `qsh trust add nowhere-at-all --address <host:port> --fingerprint sha256:...`, or register it by running `qsh reverse <controller>` on that host",
+    "retryable": false
+  },
+  "ok": false,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

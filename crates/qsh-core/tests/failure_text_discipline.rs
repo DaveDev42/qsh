@@ -2,7 +2,11 @@
 //! failure wordings (`docs/ROADMAP.md:123`'s eight-topic list; ADR-0017
 //! 결정 4's exemption axes; ADR-0014 결정 5/9's port/bind wordings).
 //!
-//! Scope: **T1-T7, seven topics.** T7 is the `qsh trust invite`
+//! Scope: **T1-T7, seven topics**, plus a separate `HOST_NOT_FOUND(i)`/
+//! `HOST_NOT_FOUND(iii)` table (issue #3 item b2, PR-D) below the T1-T7
+//! section — kept out of `three_part_rows` so that table's own exact
+//! row-count assertion stays a statement about T1-T7 specifically. T7 is
+//! the `qsh trust invite`
 //! candidate-address enumeration: its zero-candidate wording
 //! (`qsh_core::trust::invite_address::INVITE_ADDRESS_NONE`) is the
 //! three-part one, while the populated-case heading
@@ -38,6 +42,7 @@ use std::io;
 use std::net::SocketAddr;
 
 use qsh_core::acl::PERMISSION_DENIED_MESSAGE;
+use qsh_core::ops::host::{pinned_without_address_host_not_found, unconfigured_host_not_found};
 use qsh_core::ops::tunnel::DYNAMIC_FORWARD_REVERSE_CAPABILITY_UNSUPPORTED_MESSAGE;
 use qsh_core::pairing::{
     PAIRING_ACL_ROW_ABSENT, PAIRING_ACL_ROW_PRESENT, PAIRING_INVITE_REPLAY_NOTICE,
@@ -518,7 +523,10 @@ fn exempted_uniform_messages_never_become_a_three_part_slot() {
     let denied = PERMISSION_DENIED_MESSAGE;
     let replay_wire = PairingError::AlreadyConsumed.to_string();
 
-    for row in three_part_rows() {
+    // Chains in `host_not_found_rows()` (issue #3 item b2, PR-D) so a
+    // table added after `three_part_rows()` still inherits the ADR-0017
+    // 결정 4 uniformity guard rather than sitting outside it silently.
+    for row in three_part_rows().into_iter().chain(host_not_found_rows()) {
         for (part, slot) in [
             ("observation", &row.observation),
             ("impact", &row.impact),
@@ -539,5 +547,99 @@ fn exempted_uniform_messages_never_become_a_three_part_slot() {
                 row.label
             );
         }
+    }
+}
+
+// ---------------------------------------------------------------------
+// issue #3 item b2 (PR-D): `resolve_route`'s (`crates/qsh-core/src/ops/
+// host.rs`) `HOST_NOT_FOUND` fallback split into three branches. A
+// dedicated table, kept separate from `three_part_rows`' T1-T7 (whose own
+// `each_failure_wording_has_observation_impact_and_next_command` asserts
+// an exact row count for that fixed set) rather than folded into it.
+//
+// Branch (ii) — a stale-but-listed registry entry — is PR-C's
+// `stale_host_not_found`, unchanged by this split and not a `pub`
+// function (`error.HOST_NOT_FOUND.reverse_stale.json` pins its wording;
+// `crates/qsh-core/src/ops/host/tests.rs`'s `unconfigured_vs_stale_
+// message`/`stale_vs_pinned_message` prove it stays distinct from the two
+// branches below). Only (i)/(iii) are `pub` and verbatim-tested here.
+// ---------------------------------------------------------------------
+
+fn host_not_found_rows() -> Vec<ThreePartRow> {
+    let unconfigured = unconfigured_host_not_found("nowhere").message;
+    let pinned = pinned_without_address_host_not_found("phone").message;
+
+    vec![
+        ThreePartRow {
+            label: "HOST_NOT_FOUND(i)",
+            observation: ThreePartSlot::new(
+                unconfigured.clone(),
+                "is not configured on this machine: no trust-store pin, no hosts.toml entry, \
+                 and no reverse registration naming it",
+            ),
+            impact: ThreePartSlot::new(unconfigured.clone(), "nothing will be dialed"),
+            next_command: ThreePartSlot::new(
+                unconfigured,
+                "Pin it with `qsh trust add nowhere --address <host:port> --fingerprint \
+                 sha256:...`, or register it by running `qsh reverse <controller>` on that host",
+            ),
+        },
+        ThreePartRow {
+            label: "HOST_NOT_FOUND(iii)",
+            observation: ThreePartSlot::new(
+                pinned.clone(),
+                "is configured on this machine but has no address for it and no reverse \
+                 registration is currently held",
+            ),
+            impact: ThreePartSlot::new(pinned.clone(), "nothing will be dialed"),
+            next_command: ThreePartSlot::new(
+                pinned,
+                "Add one with `qsh trust add phone --address <host:port> --fingerprint \
+                 sha256:...`, or run `qsh reverse <controller>` on that host to register it here",
+            ),
+        },
+    ]
+}
+
+#[test]
+fn host_not_found_split_has_observation_impact_and_next_command() {
+    let rows = host_not_found_rows();
+    assert_eq!(
+        rows.len(),
+        2,
+        "branches (i) and (iii); (ii) is PR-C's own row, tested elsewhere"
+    );
+    for row in &rows {
+        row.observation.assert_holds(row.label, "observation");
+        row.impact.assert_holds(row.label, "impact");
+        row.next_command.assert_holds(row.label, "next-command");
+    }
+}
+
+/// Mutation check: collapsing branch (i) into (iii) (or the reverse)
+/// would red this. The third leg of the pairwise check — (i)/(ii) and
+/// (ii)/(iii) — cannot be written here since `stale_host_not_found` is
+/// not `pub`; `crates/qsh-core/src/ops/host/tests.rs`'s
+/// `unconfigured_vs_stale_message` and `stale_vs_pinned_message` are
+/// those two legs, run from inside the crate where that function is
+/// visible.
+#[test]
+fn host_not_found_branches_i_and_iii_do_not_collapse() {
+    assert_ne!(
+        unconfigured_host_not_found("phone").message,
+        pinned_without_address_host_not_found("phone").message
+    );
+}
+
+/// Neither branch's remedy leaks an `@` — both interpolate only the
+/// already-`hint_alias`-validated bare alias, never a raw `user@host`
+/// query.
+#[test]
+fn host_not_found_i_and_iii_never_leak_an_at_sign() {
+    for message in [
+        unconfigured_host_not_found("dave").message,
+        pinned_without_address_host_not_found("dave").message,
+    ] {
+        assert!(!message.contains('@'), "leaked an @: {message:?}");
     }
 }

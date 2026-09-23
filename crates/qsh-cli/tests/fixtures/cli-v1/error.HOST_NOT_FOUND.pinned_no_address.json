@@ -1,0 +1,12 @@
+{
+  "command": "host.get",
+  "error": {
+    "code": "HOST_NOT_FOUND",
+    "details": null,
+    "message": "host \"phone\" is configured on this machine but has no address for it and no reverse registration is currently held; nothing will be dialed. Add one with `qsh trust add phone --address <host:port> --fingerprint sha256:...`, or run `qsh reverse <controller>` on that host to register it here",
+    "retryable": false
+  },
+  "ok": false,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

@@ -118,6 +118,8 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "host.get.with_hosts_toml.json",
     "host.list.reverse_stale.json",
     "error.HOST_NOT_FOUND.reverse_stale.json",
+    "error.HOST_NOT_FOUND.unconfigured.json",
+    "error.HOST_NOT_FOUND.pinned_no_address.json",
     "exec.run.json",
     "exec.run.signal.json",
     "error.INVALID_ARGUMENT.json",
@@ -705,6 +707,41 @@ fn golden_reverse_stale_fixtures() {
     check("error.HOST_NOT_FOUND.reverse_stale.json", not_found);
 
     drop(listen);
+}
+
+/// issue #3 item b2 (PR-D): the two remaining `HOST_NOT_FOUND` branches
+/// `golden_reverse_stale_fixtures` above does not cover — no `qsh
+/// listen`/`qsh reverse` pair needed for either, since both are decided
+/// from local trust/hosts state alone. `error.HOST_NOT_FOUND.json`
+/// (`REQUIRED_FIXTURES`, driven by `qsh exec nowhere`) pins a different
+/// call site's text (`Ops::resolve_peer_address`) and is untouched by
+/// this test.
+#[test]
+fn golden_host_not_found_split_fixtures() {
+    // Branch (i): unknown to trust.toml, hosts.toml and the registry.
+    let unconfigured_sandbox = Sandbox::initialized();
+    let (code, unconfigured) =
+        unconfigured_sandbox.json(&["host", "get", "nowhere-at-all", "--json"]);
+    assert_eq!(code, 255, "{unconfigured}");
+    assert_eq!(
+        unconfigured["error"]["code"], "HOST_NOT_FOUND",
+        "{unconfigured}"
+    );
+    assert_eq!(unconfigured["error"]["retryable"], false, "{unconfigured}");
+    check("error.HOST_NOT_FOUND.unconfigured.json", unconfigured);
+
+    // Branch (iii): a client-only pin (`trust add` with no `--address`)
+    // and no reverse registration at all, ever — distinct from
+    // `golden_reverse_stale_fixtures`'s same client-only pin shape once a
+    // registration has gone stale.
+    let pinned_sandbox = Sandbox::initialized();
+    let fingerprint = pinned_sandbox.fingerprint();
+    pinned_sandbox.trust_add("phone", None, &fingerprint);
+    let (code, pinned) = pinned_sandbox.json(&["host", "get", "phone", "--json"]);
+    assert_eq!(code, 255, "{pinned}");
+    assert_eq!(pinned["error"]["code"], "HOST_NOT_FOUND", "{pinned}");
+    assert_eq!(pinned["error"]["retryable"], false, "{pinned}");
+    check("error.HOST_NOT_FOUND.pinned_no_address.json", pinned);
 }
 
 /// Everything that needs a live peer on the other end.
