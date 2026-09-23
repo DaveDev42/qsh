@@ -565,6 +565,86 @@ fn stale_host_not_found(
     }))
 }
 
+/// `HOST_NOT_FOUND` for a name `resolve_route` cannot place anywhere at
+/// all — branch (i) of issue #3 item b2's three-way split. Until this
+/// split the same OR-ed message covered this case and branch (iii)
+/// ([`pinned_without_address_host_not_found`]) at once (commit 858acb5's
+/// observation/impact/next-command discipline names the defect: one
+/// wording, two causes, and a third reading — DDNS failure — it can never
+/// actually be, since `resolve_route` never resolves DNS). Message text
+/// is not contract (`docs/CLI.md` §3.2); `error.HOST_NOT_FOUND.json`
+/// pins a different call site's text (`qsh exec` routing,
+/// `Ops::resolve_peer_address`), left untouched by this split.
+///
+/// `qsh pair accept` is not offered as an alternative next command: no
+/// such verb exists in this tree (`crates/qsh-cli/src/cli.rs`'s
+/// `TrustCmd` has `add`/`accept` under `trust`, not `pair`).
+pub fn unconfigured_host_not_found(display_name: &str) -> OpError {
+    OpError::new(
+        ErrorCode::HostNotFound,
+        format!(
+            "host {display_name:?} is not configured on this machine: no trust-store pin, no \
+             hosts.toml entry, and no reverse registration naming it; nothing will be dialed. \
+             Pin it with `qsh trust add {display_name} --address <host:port> --fingerprint \
+             sha256:...`, or register it by running `qsh reverse <controller>` on that host"
+        ),
+    )
+}
+
+/// `HOST_NOT_FOUND` for a name `resolve_route` already knows about — a
+/// trust-store pin, or a `hosts.toml` entry with an explicit empty
+/// address (`crate::hosts::HostEntry::address`'s doc: parses, but is "no
+/// route from hosts.toml" the same way an empty trust-pin address is) —
+/// but that has neither a routable address nor a live-or-stale reverse
+/// registration. Branch (iii) of issue #3 item b2's three-way split; see
+/// [`unconfigured_host_not_found`]'s doc for the wording it used to
+/// share this message with.
+///
+/// The observation says "configured", not "pinned": a `hosts.toml`
+/// empty-address entry can reach this branch with no trust-store pin at
+/// all, and `docs/CLI.md` §6.1's `hosts.toml` paragraph is explicit that
+/// `hosts.toml` is a pure address book that never participates in
+/// identity — "pinned" is trust-store vocabulary and would misreport
+/// that source.
+pub fn pinned_without_address_host_not_found(display_name: &str) -> OpError {
+    OpError::new(
+        ErrorCode::HostNotFound,
+        format!(
+            "host {display_name:?} is configured on this machine but has no address for it \
+             and no reverse registration is currently held; nothing will be dialed. Add one \
+             with `qsh trust add {display_name} --address <host:port> --fingerprint \
+             sha256:...`, or run `qsh reverse <controller>` on that host to register it here"
+        ),
+    )
+}
+
+/// `HOST_NOT_FOUND` for a positional that still carries a `user@` hint
+/// (`docs/CLI.md` §6.1's `qsh host get <name>`/`qsh exec <name> -- ...`
+/// forms do not strip it the way the bare `qsh [user@]host` form does,
+/// §7) naming an alias that *is* configured on this machine under its
+/// bare form. Neither [`unconfigured_host_not_found`] nor
+/// [`pinned_without_address_host_not_found`] fits: both assert something
+/// specific about the alias's configuration state, and a `user@`-hinted
+/// query never actually looked that state up (`key` still has the `@` in
+/// it and can never match a stored alias, which cannot contain one —
+/// `qsh_proto::wire::valid_host_name`). This is not a fourth named
+/// branch of issue #3 item b2's three-way split — routing still falls
+/// through to `HOST_NOT_FOUND`, non-retryable, exactly like before —
+/// only the wording, decided on `display_name` instead of `key` so it
+/// cannot assert a falsehood about the name it names.
+fn user_prefix_not_accepted_host_not_found(display_name: &str) -> OpError {
+    OpError::new(
+        ErrorCode::HostNotFound,
+        format!(
+            "host {display_name:?} is configured on this machine, but this command does not \
+             accept a leading account-name hint (the kind separated by an at sign) in front of \
+             the alias; pass the bare alias by itself, or run `qsh trust add {display_name} \
+             --address <host:port> --fingerprint sha256:...` to update its pin directly, or \
+             `qsh reverse <controller>` on that host to register it"
+        ),
+    )
+}
+
 /// The pure decision [`Ops::resolve_host_route`] delegates to — see that
 /// method's doc for the rule. Split out from any I/O (daemon queries,
 /// trust-file load) so the routing table (`PLAN.md` M3 Step 5 (c)) is
@@ -675,6 +755,28 @@ fn resolve_route(
         HintAlias::Invalid(alias) => return Err(invalid_host_alias_error(alias)),
     };
 
+    // issue #3 item b2 fix-up: every lookup above (live, forward) and
+    // every lookup below (stale, "known") is keyed on `key` — trimmed
+    // only, still carrying a `user@` hint when one was given — while the
+    // enumerated branches below name `display_name`, the hint-stripped
+    // alias. When the two differ, `key` can never match anything those
+    // lookups check (`qsh_proto::wire::valid_host_name` rejects `@`, so
+    // no stored alias ever equals a key that still has one), but
+    // `display_name` itself might still be fully configured. Left as-is,
+    // the enumerated branches below would then assert specific — and
+    // false — things about `display_name` ("no trust-store pin" for a
+    // name that has one; "no address" for a name that has one), and
+    // branch (iii)'s remedy would invite silently overwriting a working
+    // pin. Decide this shape on `display_name` before reaching either
+    // enumerated branch; routing itself does not change; here too, a
+    // `user@`-prefixed positional was never going to route to anything
+    // (`docs/CLI.md` §7).
+    if display_name != key
+        && (store.find(display_name).is_some() || hosts.find(display_name).is_some())
+    {
+        return Err(user_prefix_not_accepted_host_not_found(display_name));
+    }
+
     // issue #4 items 4/3a: a name with a registry entry that exists but is
     // not live (`is_live` above already excluded it from the live match)
     // is a different defect than "nobody ever registered this name" — the
@@ -716,15 +818,24 @@ fn resolve_route(
         ));
     }
 
-    Err(OpError::new(
-        ErrorCode::HostNotFound,
-        format!(
-            "host {display_name:?} has no live reverse registration on this machine and no \
-             address pinned for it; register it (`qsh reverse <controller>` run on that host) \
-             or pin one here with `qsh trust add {display_name} --address <host:port> \
-             --fingerprint sha256:...`"
-        ),
-    ))
+    // issue #3 item b2 (PR-D): the two remaining causes get their own
+    // wording instead of sharing one OR-ed message
+    // (`unconfigured_host_not_found`'s doc has the history). "Known" here
+    // means either source names the alias at all, even with no routable
+    // address from it — a trust-store pin or a `hosts.toml` entry with an
+    // explicit empty address (branch (iii)'s "configured on this
+    // machine" wording covers both without claiming either specifically),
+    // the one `hosts.toml` shape `resolve_forward` above does not already
+    // turn into a route
+    // (`crate::hosts::HostEntry::address`'s doc). Both mean an operator
+    // already told qsh about this name, which "not configured on this
+    // machine" would misreport.
+    let known = store.find(key).is_some() || hosts.find(key).is_some();
+    Err(if known {
+        pinned_without_address_host_not_found(display_name)
+    } else {
+        unconfigured_host_not_found(display_name)
+    })
 }
 
 impl Ops {

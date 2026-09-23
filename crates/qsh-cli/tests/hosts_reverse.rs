@@ -473,4 +473,51 @@ fn host_get_on_an_unknown_name_is_host_not_found() {
     assert_eq!(got["ok"], false);
     assert_eq!(got["error"]["code"], "HOST_NOT_FOUND");
     assert_eq!(got["error"]["retryable"], false);
+    assert!(
+        got["error"]["message"]
+            .as_str()
+            .expect("message is a string")
+            .contains("is not configured on this machine"),
+        "issue #3 item b2 branch (i) wording: {got}"
+    );
+}
+
+/// issue #3 item b2 branch (iii) end to end: a client-only pin (`trust
+/// add` with no `--address`) and no reverse registration at all, ever —
+/// distinct from `stale_only_registration_with_no_forward_pin_is_
+/// retryable_host_not_found` above, which pins the *same* client-only
+/// pin shape once a registration has existed and gone stale. Here no
+/// `qsh listen`/`qsh reverse` pair runs at all, so this must land on the
+/// non-retryable "pinned but no address" wording, never the retryable
+/// stale one.
+#[test]
+fn host_get_on_a_pin_with_no_address_and_no_registration_is_non_retryable_host_not_found() {
+    let sandbox = Sandbox::initialized();
+    let fingerprint = sandbox.fingerprint();
+    sandbox.trust_add("phone", None, &fingerprint);
+
+    let (code, got) = sandbox.json(&["host", "get", "phone", "--json"]);
+    assert_eq!(code, 255, "{got}");
+    assert_eq!(got["command"], "host.get");
+    assert_eq!(got["ok"], false);
+    assert_eq!(got["error"]["code"], "HOST_NOT_FOUND");
+    assert_eq!(
+        got["error"]["retryable"], false,
+        "a pin with no live/stale registration at all is not the retryable branch: {got}"
+    );
+    assert!(
+        got["error"]["details"].is_null(),
+        "the non-retryable branches carry no details: {got}"
+    );
+    let message = got["error"]["message"]
+        .as_str()
+        .expect("message is a string");
+    assert!(
+        message.contains("is configured on this machine but has no address"),
+        "issue #3 item b2 branch (iii) wording: {got}"
+    );
+    assert!(
+        !message.contains("is not configured on this machine"),
+        "must not get branch (i)'s wording: {got}"
+    );
 }

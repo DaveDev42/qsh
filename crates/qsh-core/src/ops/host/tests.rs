@@ -972,6 +972,205 @@ fn stale_route_never_matches_a_user_at_prefixed_query_key() {
     );
 }
 
+// ---------------------------------------------------------------------
+// issue #3 item b2 (PR-D): the single OR-ed `HOST_NOT_FOUND` fallback
+// splits into three branches. Branch (ii) is PR-C's retryable stale
+// branch above (`three_way_table_never_registered_vs_stale_vs_swept`'s
+// row (b)); these tests cover (i)/(iii) and the mutation check across
+// all three.
+// ---------------------------------------------------------------------
+
+/// Branch (i): a name unknown to trust.toml, hosts.toml, and the
+/// registry alike. `routing_unregistered_and_unpinned_is_host_not_found`
+/// (above) already pins the code; this test pins the wording and its
+/// remedy shape (observation "not configured on this machine", next
+/// command `qsh trust add`/`qsh reverse`).
+#[test]
+fn unconfigured_name_gets_the_not_configured_wording() {
+    let store = TrustStore::default();
+    let err = resolve(&[], &store, &no_hosts(), "nowhere").unwrap_err();
+    assert_eq!(err.code, ErrorCode::HostNotFound);
+    assert!(!err.retryable);
+    assert_eq!(err, unconfigured_host_not_found("nowhere"));
+    assert!(err.message.contains("is not configured on this machine"));
+    assert!(err.message.contains("qsh trust add nowhere --address"));
+    assert!(err.message.contains("qsh reverse <controller>"));
+}
+
+/// Branch (iii): a trust-store pin with no address
+/// (`store.add_peer(name, None, ...)`, `docs/CLI.md` §6.1's client-only
+/// pin) and no reverse registration at all. Must land on the distinct
+/// "configured but no address" wording, not branch (i)'s.
+#[test]
+fn pinned_without_address_and_no_registration_gets_the_pinned_wording() {
+    let mut store = TrustStore::default();
+    store.add_peer(
+        "phone",
+        None,
+        FP_A.parse().expect("fingerprint"),
+        "2026-01-01T00:00:00Z".to_string(),
+    );
+    let err = resolve(&[], &store, &no_hosts(), "phone").unwrap_err();
+    assert_eq!(err.code, ErrorCode::HostNotFound);
+    assert!(!err.retryable);
+    assert_eq!(err, pinned_without_address_host_not_found("phone"));
+    assert!(
+        err.message
+            .contains("is configured on this machine but has no address")
+    );
+    assert!(err.message.contains("qsh trust add phone --address"));
+    assert!(err.message.contains("qsh reverse <controller>"));
+    assert_ne!(
+        err.message,
+        unconfigured_host_not_found("phone").message,
+        "a pinned-without-address name must not get branch (i)'s wording"
+    );
+}
+
+/// The same "configured but no address" branch, reached from
+/// `hosts.toml` instead of `trust.toml`: an explicit `address = ""`
+/// entry parses (`crate::hosts::HostEntry::address`'s doc) but is not
+/// routable, and no trust pin exists at all for the name. This is the
+/// one `hosts.toml` shape [`resolve_forward`] does not already turn into
+/// a route, so it must not be reported as "not configured" either — the
+/// operator did configure it, just with nothing usable. The wording says
+/// "configured", not "pinned": `docs/CLI.md` §6.1 is explicit that
+/// `hosts.toml` never participates in identity, so this source must not
+/// be described with trust-store vocabulary.
+#[test]
+fn hosts_toml_entry_with_an_empty_address_and_no_trust_pin_gets_the_pinned_wording_too() {
+    let store = TrustStore::default();
+    let hosts = hosts_with(&[("phone", "", None)]);
+    let err = resolve(&[], &store, &hosts, "phone").unwrap_err();
+    assert_eq!(err.code, ErrorCode::HostNotFound);
+    assert_eq!(err, pinned_without_address_host_not_found("phone"));
+}
+
+/// issue #3 item b2 fix-up: a `user@`-prefixed query against a name that
+/// IS pinned (with a routable address, even) must not land on either
+/// enumerated branch — both would assert something false about the
+/// pinned alias. Regression test for the routing key (`key`, still
+/// carrying the `user@` hint) and the message subject (`display_name`,
+/// hint-stripped) disagreeing on what "known" means.
+#[test]
+fn a_user_at_prefixed_query_against_a_fully_routable_pin_does_not_claim_it_is_unpinned() {
+    let store = forward_store("mac", "mac.example.com:4433", FP_A);
+    let err = resolve(&[], &store, &no_hosts(), "dave@mac").unwrap_err();
+    assert_eq!(err.code, ErrorCode::HostNotFound);
+    assert!(!err.retryable);
+    assert!(
+        !err.message.contains("is not configured on this machine"),
+        "mac has a forward pin; branch (i)'s wording is false here: {:?}",
+        err.message
+    );
+    assert!(
+        !err.message.contains("no trust-store pin"),
+        "mac has a trust-store pin: {:?}",
+        err.message
+    );
+    assert!(
+        !err.message
+            .contains("is configured on this machine but has no address"),
+        "mac has an address; branch (iii)'s wording is false here: {:?}",
+        err.message
+    );
+    assert!(
+        !err.message.contains('@'),
+        "message leaked the user@ hint: {:?}",
+        err.message
+    );
+    assert!(err.message.contains("qsh trust add mac --address"));
+}
+
+/// The same fix-up, for an addressless pin — the finding's own repro
+/// shape (`qsh trust add phone --fingerprint ...` with no `--address`,
+/// then `qsh host get 'dave@phone'`). The message must not claim "no
+/// trust-store pin" for a name that has one.
+#[test]
+fn a_user_at_prefixed_query_against_an_addressless_pin_does_not_claim_no_pin() {
+    let mut store = TrustStore::default();
+    store.add_peer(
+        "phone",
+        None,
+        FP_A.parse().expect("fingerprint"),
+        "2026-01-01T00:00:00Z".to_string(),
+    );
+    let err = resolve(&[], &store, &no_hosts(), "dave@phone").unwrap_err();
+    assert_eq!(err.code, ErrorCode::HostNotFound);
+    assert!(!err.retryable);
+    assert!(
+        !err.message.contains("no trust-store pin"),
+        "phone has a trust-store pin: {:?}",
+        err.message
+    );
+    assert!(!err.message.contains('@'));
+}
+
+/// Mutation check (`docs/design/testing.md`'s discipline): collapsing
+/// any two of the three `HOST_NOT_FOUND` branches into one wording would
+/// red exactly one of the three `*_message` assertions below, at the
+/// wording-constant level.
+///
+/// Mapping — the test that goes red if a branch is collapsed into
+/// another:
+/// - (i)=(ii): `unconfigured_vs_stale_message` below guards the two
+///   wording constants directly; it cannot see a *routing-level*
+///   collapse (e.g. the stale arm in `resolve_route` returning
+///   `unconfigured_host_not_found` instead of `stale_host_not_found`),
+///   since it calls both constructors rather than going through
+///   `resolve`. `three_way_table_never_registered_vs_stale_vs_swept`'s
+///   `code`/`retryable`/`details.reason` assertions and the byte-pinned
+///   `error.HOST_NOT_FOUND.reverse_stale.json` golden are what guard that
+///   arm at the routing level.
+/// - (i)=(iii): `unconfigured_vs_pinned_message` below (and
+///   `pinned_without_address_and_no_registration_gets_the_pinned_wording`'s
+///   `assert_ne!` above) — this pair is reachable through `resolve(...)`
+///   directly, so both the constructor-level and routing-level checks
+///   exist for it.
+/// - (ii)=(iii): `stale_vs_pinned_message` below guards the wording
+///   constants only, for the same reason as (i)=(ii);
+///   `stale_route_never_matches_a_user_at_prefixed_query_key` and the
+///   `error.HOST_NOT_FOUND.reverse_stale.json`/`pinned_no_address.json`
+///   goldens are the routing-level guard for that arm.
+#[test]
+fn unconfigured_vs_stale_message() {
+    let unconfigured = unconfigured_host_not_found("phone").message;
+    let stale = stale_host_not_found("phone", None, TEST_NOW, TEST_RETRY_AFTER_MS).message;
+    assert_ne!(unconfigured, stale);
+}
+
+#[test]
+fn unconfigured_vs_pinned_message() {
+    let unconfigured = unconfigured_host_not_found("phone").message;
+    let pinned = pinned_without_address_host_not_found("phone").message;
+    assert_ne!(unconfigured, pinned);
+}
+
+#[test]
+fn stale_vs_pinned_message() {
+    let stale = stale_host_not_found("phone", None, TEST_NOW, TEST_RETRY_AFTER_MS).message;
+    let pinned = pinned_without_address_host_not_found("phone").message;
+    assert_ne!(stale, pinned);
+}
+
+/// No branch's remedy leaks an unescaped `@` or interpolates anything
+/// but the already-validated (`hint_alias`) bare alias — the same
+/// discipline `host_not_found_message_never_leaks_a_user_at_prefix`
+/// pins for branch (i)/(iii)'s shared pre-split ancestor, restated here
+/// against all three constructors directly so a future fourth branch is
+/// caught by the same loop.
+#[test]
+fn no_host_not_found_branch_leaks_an_at_sign() {
+    let messages = [
+        unconfigured_host_not_found("we-re-a-name").message,
+        pinned_without_address_host_not_found("we-re-a-name").message,
+        stale_host_not_found("we-re-a-name", None, TEST_NOW, TEST_RETRY_AFTER_MS).message,
+    ];
+    for message in messages {
+        assert!(!message.contains('@'), "leaked an @: {message:?}");
+    }
+}
+
 /// Builds a [`ReverseHostEntry`] straight from a live registry's
 /// [`crate::reverse::registry::ReverseEntry`], mapping `state`/`lost_at`
 /// the exact same way `crate::localctl::daemon::to_local_host` does (that
