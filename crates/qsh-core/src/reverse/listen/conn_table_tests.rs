@@ -114,6 +114,7 @@ fn sample_entry(generation: u64) -> registry::ReverseEntry {
         generation,
         state: registry::EntryState::Live,
         stale_since: None,
+        lost_at: None,
     }
 }
 

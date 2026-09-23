@@ -152,6 +152,46 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
         (listen_a, listen_b, reverse_a, reverse_b)
     };
 
+    // issue #4 items 4/3a: a name whose reverse registration exists but
+    // has gone stale (no forward pin to fall back to) — the *other*
+    // `HOST_NOT_FOUND` producer this table's "exec: unpinned host name"
+    // row does not reach at all (that row's name was never registered
+    // anywhere). Same rig shape as the `dup` case just above, one target
+    // instead of two, shut down instead of duplicated.
+    #[cfg(unix)]
+    let stale_controller = Sandbox::initialized();
+    #[cfg(unix)]
+    let stale_target = Sandbox::initialized();
+    #[cfg(unix)]
+    let _stale_listen = {
+        let target_fp = stale_target.fingerprint();
+        let controller_fp = stale_controller.fingerprint();
+        stale_controller.trust_add("stale-only", None, &target_fp);
+        let listen = ListenGuard::start(&stale_controller);
+        stale_target.trust_add("hub", Some(listen.addr()), &controller_fp);
+        let reverse = ReverseGuard::start(&stale_target, "hub");
+        poll_until(
+            "the stale-only reverse registration to appear",
+            std::time::Duration::from_secs(10),
+            || {
+                hosts_array(&stale_controller)
+                    .into_iter()
+                    .find(|h| h["name"] == "stale-only" && h["connection_mode"] == "reverse")
+            },
+        );
+        reverse.shut_down();
+        poll_until(
+            "the stale-only reverse registration to go stale",
+            std::time::Duration::from_secs(10),
+            || {
+                hosts_array(&stale_controller)
+                    .into_iter()
+                    .find(|h| h["name"] == "stale-only" && h["state"] == "stale")
+            },
+        );
+        listen
+    };
+
     // `mut` is only needed for the `#[cfg(unix)] cases.push(..)` below —
     // unused (and clippy-denied) on the Windows leg, where that push is
     // compiled out entirely.
@@ -507,6 +547,19 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
         sandbox: &dup_controller,
         args: &["host", "get", "dup"],
         outcome: Outcome::Fails("INVALID_ARGUMENT"),
+    });
+
+    // issue #4 items 4/3a: exit stays 255 for the retryable stale-registration
+    // `HOST_NOT_FOUND` variant, exactly like the ordinary non-retryable
+    // "exec: unpinned host name" row above — `retryable` changes what the
+    // caller *should do next*, never the exit code itself
+    // (`docs/CLI.md` §3.2/§4).
+    #[cfg(unix)]
+    cases.push(Case {
+        name: "host get: stale reverse registration, no forward pin to fall back to",
+        sandbox: &stale_controller,
+        args: &["host", "get", "stale-only"],
+        outcome: Outcome::Fails("HOST_NOT_FOUND"),
     });
 
     for case in &cases {

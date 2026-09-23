@@ -432,6 +432,7 @@ fn host_matches_documented_shape() {
         device_id: "sha256:BASE64FINGERPRINT".into(),
         source: None,
         user: None,
+        lost_at: None,
     };
     assert_eq!(
         serde_json::to_value(&h).unwrap(),
@@ -444,6 +445,44 @@ fn host_matches_documented_shape() {
         })
     );
     assert!(h.device_id.starts_with("sha256:"));
+}
+
+/// Issue #4 item 4: `lost_at` is additive-optional exactly like
+/// `source`/`user` above — `None` omits the key, `Some` serializes it, and
+/// a pre-PR-C payload with neither key still deserializes cleanly.
+#[test]
+fn host_lost_at_is_additive_optional() {
+    let h = Host {
+        name: "old-laptop".into(),
+        address: "203.0.113.5:51820".into(),
+        connection_mode: "reverse".into(),
+        state: "stale".into(),
+        device_id: "sha256:BASE64FINGERPRINT".into(),
+        source: None,
+        user: None,
+        lost_at: Some("2026-08-17T00:00:07Z".into()),
+    };
+    assert_eq!(
+        serde_json::to_value(&h).unwrap(),
+        serde_json::json!({
+            "name": "old-laptop",
+            "address": "203.0.113.5:51820",
+            "connection_mode": "reverse",
+            "state": "stale",
+            "device_id": "sha256:BASE64FINGERPRINT",
+            "lost_at": "2026-08-17T00:00:07Z"
+        })
+    );
+
+    let old_shape = serde_json::json!({
+        "name": "personal-mac",
+        "address": "personal-mac.example.com:4433",
+        "connection_mode": "forward",
+        "state": "unknown",
+        "device_id": "sha256:BASE64FINGERPRINT"
+    });
+    let parsed: Host = serde_json::from_value(old_shape).unwrap();
+    assert_eq!(parsed.lost_at, None);
 }
 
 /// `PLAN.md` M7 Step 3: `source`/`user` are additive-optional —
@@ -460,6 +499,7 @@ fn host_source_and_user_are_additive_optional() {
         device_id: "sha256:BASE64FINGERPRINT".into(),
         source: Some("both".into()),
         user: Some("dave".into()),
+        lost_at: None,
     };
     assert_eq!(
         serde_json::to_value(&h).unwrap(),
@@ -508,6 +548,7 @@ fn host_list_data_wraps_hosts_array() {
         device_id: "sha256:AAAA".into(),
         source: None,
         user: None,
+        lost_at: None,
     };
     let reverse = Host {
         name: "laptop".into(),
@@ -517,6 +558,7 @@ fn host_list_data_wraps_hosts_array() {
         device_id: "sha256:BBBB".into(),
         source: None,
         user: None,
+        lost_at: None,
     };
     let data = HostListData {
         hosts: vec![forward.clone(), reverse.clone()],

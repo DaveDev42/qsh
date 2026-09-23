@@ -1,0 +1,18 @@
+{
+  "command": "host.list",
+  "data": {
+    "hosts": [
+      {
+        "address": "<address>",
+        "connection_mode": "reverse",
+        "device_id": "<device_id>",
+        "lost_at": "<timestamp>",
+        "name": "stale-only-host",
+        "state": "stale"
+      }
+    ]
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

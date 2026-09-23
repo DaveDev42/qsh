@@ -72,7 +72,7 @@ pub fn normalize(mut value: serde_json::Value) -> serde_json::Value {
                 for (k, child) in map.iter_mut() {
                     match k.as_str() {
                         "request_id" => *child = serde_json::Value::String("<request_id>".into()),
-                        "added_at" | "created_at" | "ts" | "expires_at" => {
+                        "added_at" | "created_at" | "ts" | "expires_at" | "lost_at" => {
                             *child = serde_json::Value::String("<timestamp>".into())
                         }
                         // ADR-0002/M7 Step 4: a fresh 160-bit secret every
@@ -89,7 +89,13 @@ pub fn normalize(mut value: serde_json::Value) -> serde_json::Value {
                         "accept_command" => {
                             *child = serde_json::Value::String("<accept_command>".into())
                         }
-                        "duration_ms" => *child = serde_json::Value::from(0),
+                        // issue #4 items 4/3a: `lost_ago_ms` (the stale
+                        // `HOST_NOT_FOUND` branch's `details`) is derived
+                        // from real elapsed wall-clock time between
+                        // `lost_at` and the routing call — masked to its
+                        // shape the same way `duration_ms` is, not its
+                        // value.
+                        "duration_ms" | "lost_ago_ms" => *child = serde_json::Value::from(0),
                         "config_dir" => *child = serde_json::Value::String("<config_dir>".into()),
                         // `AclPolicyRef.path` is this sandbox's own tempdir
                         // `acl.toml` absolute path — volatile per run, same

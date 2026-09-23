@@ -155,6 +155,9 @@ ACL action은 인가(authorization) 어휘로, operation 이름과는 별개 차
 ```
 
 `message`는 사람을 위한 설명이다. 자동화는 `code`와 구조화된 `details`만 사용해야 한다.
+`retryable`은 응답마다 값이 붙는 필드다 — 같은 `code`라도 `ErrorCode::default_retryable()`이
+주는 기본값과 다를 수 있으므로(§6.1의 `reverse_registration_stale` 분기가 그 예다), 자동화는
+`code`로부터 재시도 가능 여부를 스스로 유추하지 말고 이 필드를 읽어야 한다.
 
 > 위 예시의 `message` 문안은 M5 Step 4가 확정한 균일 거부 문면이다(`crates/qsh-core/src/acl/mod.rs`의 `PERMISSION_DENIED_MESSAGE`) — 원격 peer 대면 `PERMISSION_DENIED`는 어느 인가 지점(정책 거부, 소유권 거부, 감사 기록 실패에 의한 fail-closed 거부)에서 왔든 거부된 action/capability/resource/principal을 노출하지 않고 이 문장 그대로 나간다(`docs/ROADMAP.md` M5 감사 개정 ③, `PLAN.md` M5 Step 4 §4.2). `message`는 계약이 아니므로(위 문단) 이 문안 자체는 `qsh.cli/v1` 호환성 대상이 아니지만, 상수와의 일치는 CI가 지킨다(`crates/qsh-core/tests/acl_docs.rs`).
 
@@ -223,6 +226,8 @@ Output mode에 따라 exit code 의미가 달라져서는 안 된다. 대화형 
 
 **threat 참고.** `hosts.toml`에 쓰기 권한이 있다는 것은 어떤 이름을 이미 핀된 다른 peer로 돌릴 수 있는 권한이다(mTLS는 여전히 핀되지 않은 주소를 막는다) — 이런 redirect는 `source: "hosts"`로 드러난다(주소가 trust.toml의 pin과 다르거나, trust.toml에 pin이 아예 없는 경우).
 
+`lost_at`은 issue #4가 추가한 **additive-optional** field다(§10) — reverse host가 `state: "stale"`일 때만 나타나며(키 자체가 생략된다, `null`이 아니라), 상주 데몬이 이 등록의 연결이 끊겼다고 관측한 순간을 RFC 3339 UTC로 담는다. `"reachable"` reverse host와 모든 forward host(도달성을 probe하지 않으므로 애초에 끊길 연결이 없다, 위 `state` 문단)는 항상 생략된다. 같은 순간을 `qsh.local.v1`의 `LocalHost.lost_at`이 컨트롤러 프로세스 내부에서 그대로 넘겨준다(`docs/design/protocol.md` §16.3, `crate::reverse::registry::Registry::mark_stale`).
+
 ### Session
 
 ```json
@@ -254,7 +259,12 @@ qsh host get personal-mac --json
 
 `host.list`의 `data`는 `{"hosts": [Host, …]}`(§5 Host 배열)이고 `host.get`의 `data`는 Host 객체 하나다.
 
-`hosts`는 두 데이터 소스를 합쳐 반환한다: forward host(`hosts.toml`과 `trust.toml`을 아래 우선순위로 합친 결과)와, 상주 `qsh listen` 데몬이 현재 쥐고 있는 live 역방향 등록(§6.13). **`host.list`는 dial하지 않는다** — forward host의 도달성은 확인하지 않으므로(§5, `state`는 항상 `"unknown"`) 이 목록은 순수 로컬 조회다. 같은 이름이 forward host와 reverse 등록 양쪽에 존재하면 `hosts` 배열에 `connection_mode`로 구분되는 **두 항목**으로 나타난다 — 목록에서는 병합하지 않는다. 다만 그 이름으로 실제 연결을 맺을 때(attach, `qsh <name>`)의 **라우팅 우선순위는 live reverse 등록이 우선**이다 — 증명된 도달 가능 경로를 forward host의 추정 주소보다 앞세운다.
+`hosts`는 두 데이터 소스를 합쳐 반환한다: forward host(`hosts.toml`과 `trust.toml`을 아래 우선순위로 합친 결과)와, 상주 `qsh listen` 데몬이 현재 쥐고 있는 live 역방향 등록(§6.13). **`host.list`는 dial하지 않는다** — forward host의 도달성은 확인하지 않으므로(§5, `state`는 항상 `"unknown"`) 이 목록은 순수 로컬 조회다. 같은 이름이 forward host와 reverse 등록 양쪽에 존재하면 `hosts` 배열에 `connection_mode`로 구분되는 **두 항목**으로 나타난다 — 목록에서는 병합하지 않는다. 다만 그 이름으로 실제 연결을 맺을 때(attach, `qsh <name>`)의 **라우팅 우선순위는 live reverse 등록이 우선**이다 — 증명된 도달 가능 경로를 forward host의 추정 주소보다 앞세운다. `state: "stale"`인 reverse host는 `lost_at`을 함께 보고한다(§5) — `state`가 그 밖의 값이면 이 field는 생략된다.
+
+라우팅(`host.get`, attach)이 이름을 찾지 못하면 `HOST_NOT_FOUND`이지만, 그 원인에 따라 `retryable`이 달라진다(§3.2의 "응답마다 값이 붙는다" 규칙의 실례):
+
+- 이름이 아예 미등록이거나(라이브 reverse 등록도, forward pin도 없음), 등록됐던 이름이 `[listen].stale_retention` 보존 창을 넘겨 이미 sweep된 경우: `retryable: false`. `details`는 비어 있다.
+- 이름의 reverse 등록이 살아있지 않지만(연결이 끊겨 `state: "stale"`) 아직 그 daemon의 목록에 남아 있는 경우(`sweep_expired`가 아직 지우지 않았다는 뜻) — target이 재등록할 것으로 예상되는 일시적 상태이므로 `retryable: true`, `details`: `reason: "reverse_registration_stale"`, `lost_ago_ms`(`lost_at` 이후 경과 밀리초 — `lost_at` 자체가 초 단위로 기록되므로 최대 999ms까지 실제보다 크게 보고될 수 있다), `retry_after_ms`(컨트롤러의 `[reverse].backoff_max_ms` 유효값을 재시도 간격 힌트로 내려준 것 — 기본 30000). forward pin이 이 이름에 있으면 이 분기보다 먼저 그 pin으로 라우팅된다 — stale 등록은 live 등록과 마찬가지로 forward pin을 앞지르지 않는다.
 
 **forward host 해석 우선순위 (`hosts.toml` vs `trust.toml`, M7 Step 3):** 같은 이름이 `hosts.toml`과 `trust.toml` 양쪽에 있으면 **`hosts.toml`의 `address`가 이긴다**. `trust.toml`에만 있으면 그 주소를, `hosts.toml`에만 있으면 그 주소를 쓴다. **fingerprint(신원)는 항상 `trust.toml`에서만 온다** — `hosts.toml`은 이름과 주소, `user` hint만 담는 순수 주소록이며 신원 판단에 절대 관여하지 않는다: `hosts.toml`이 어떤 이름에 주소를 대더라도 실제 dial 시 TLS 계층에서 그 주소가 제시한 fingerprint가 trust store 어딘가에 핀되어 있지 않으면 인증은 그대로 실패한다(pin 조회는 이름이 아니라 fingerprint 기준이다). `hosts.toml` 파일이 없거나 비어 있으면 이 절차는 M7 이전과 동일하게 `trust.toml`의 pin이 유일한 출처다. `hosts.toml`은 **read-only 디렉터리**다 — 이를 쓰는 CLI 명령은 없으며 수동으로 직접 편집한다. `hosts.toml`에 쓰기 권한이 있다는 것은 곧 어떤 이름을 이미 핀된 다른 peer로 돌릴 수 있는 권한이다(mTLS는 여전히 핀되지 않은 주소를 막는다) — 그런 redirect는 `host.list`/`host.get`의 `source: "hosts"`로 드러난다(§5).
 
@@ -882,9 +892,10 @@ qsh serve --bind <ip:port>
   연결) 생성 전 거부다. 세션·exec·remote-forward listener·(pairing 아닌) 연결 축 거부는
   클라이언트에게 `RESOURCE_EXHAUSTED`(`retryable: true`)로 보인다. 터널 축(`TCP_CONNECT`)은
   control 응답이 아니라 스트림 자체의 `ConnectResult{ok:false, code:"RESOURCE_EXHAUSTED",
-  message}`와 스트림 stop code `0x200D`로 답한다. 이 프레임에는 `retryable` 필드가 없다.
-  재시도 가능 여부는 클라이언트가 `code`로부터 `ErrorCode::default_retryable()`을 스스로
-  판단한다. pairing 연결 축 거부만
+  message}`와 스트림 stop code `0x200D`로 답한다. 이 프레임에는 `retryable` 필드가 없다 —
+  `qsh.cli/v1` 실패 봉투 전반의 규칙이 아니라 이 프레임 하나만의 fallback이다(§3.2). 재시도
+  가능 여부는 클라이언트가 `code`로부터 `ErrorCode::default_retryable()`을 스스로 판단한다.
+  pairing 연결 축 거부만
   다르다 — 신원이 아직 없어 오류 프레임을 실을 control 스트림 자체가 없으므로 proof를 읽지도
   않고 연결을 즉시 닫는다(non-distinguishing: invite 존재 여부를 구별해 주지 않는다). 세션
   quota는 살아 있는 세션 자체를 센다. 세션이 `session.close`나 attach 없는 TTL 만료로 broker

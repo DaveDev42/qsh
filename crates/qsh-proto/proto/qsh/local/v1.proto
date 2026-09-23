@@ -243,6 +243,16 @@ message LocalHost {
   uint64 generation = 6;
   // RFC 3339 UTC.
   string registered_at = 7;
+  // RFC 3339 UTC — when this entry transitioned to `"stale"`
+  // (`Registry::mark_stale`'s wall-clock stamp, issue #4 item 4). Present
+  // only when `state == "stale"`; unset for `"reachable"`.
+  // Additive field on an existing message (`docs/design/protocol.md`
+  // §16.3 — `qsh.local.v1` is outside the wire freeze). `LOCAL_HELLO_VERSION`
+  // does not bump for it: `localctl::daemon`'s hello handling rejects any
+  // version mismatch outright (an exact-match gate, not a negotiated
+  // capability), and an absent field 8 simply decodes to `None` on either
+  // leg, so no negotiation changes.
+  optional string lost_at = 8;
 }
 
 // LOCAL_ADMIN request: list the tunnels this resident daemon currently
