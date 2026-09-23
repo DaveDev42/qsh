@@ -14,20 +14,11 @@ pub(super) async fn dial_peer(
         target.trust.clone() as Arc<dyn qsh_transport::TrustEvaluator>,
     );
     let address = target.address.clone();
-    let addr = tokio::net::lookup_host(&address)
-        .await
-        .ok()
-        .and_then(|mut it| it.next())
-        .ok_or_else(|| {
-            OpError::new(
-                ErrorCode::ConnectionFailed,
-                format!("cannot resolve {address:?}"),
-            )
-        })?;
-    let dialed = dialer
-        .dial(addr, &target.server_name)
-        .await
-        .map_err(|err| map_dial_error(err, &address))?;
+    let addrs = crate::ops::resolve_all(&address).await?;
+    let dialed =
+        crate::ops::dial_first_reachable(&addrs, |addr| dialer.dial(addr, &target.server_name))
+            .await
+            .map_err(|(err, attempted)| map_dial_error(err, &address, attempted))?;
     let endpoint = dialed.endpoint.clone();
     let connection = dialed.connection.clone();
     match Session::negotiate(dialed.connection, &device_name).await {

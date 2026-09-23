@@ -35,7 +35,7 @@ pub mod target;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReconnectCause {
     /// DNS/resolver error, or the resolver returned no addresses at all
-    /// (`ops::resolve_one`). Constructed only from `target::dial_and_register`
+    /// (`ops::resolve_all`). Constructed only from `target::dial_and_register`
     /// (`#[cfg(any(unix, test))]` — the dial path is unix-only in
     /// production, so this variant is otherwise dead on a non-unix,
     /// non-test build; see the sibling `#[cfg_attr]`s below).

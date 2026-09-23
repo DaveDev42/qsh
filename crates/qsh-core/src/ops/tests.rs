@@ -1283,3 +1283,189 @@ fn normalize_invite_code_trims_surrounding_whitespace_only() {
     assert_eq!(normalize_invite_code(&format!("{code}\r\n")), code);
     assert_eq!(normalize_invite_code(" ab cd "), "ab cd"); // internal space kept
 }
+
+// --- issue #4 item 2: `dial_first_reachable` / `resolve_all` --------------
+//
+// These drive `dial_first_reachable` with a synthetic per-address `dial`
+// closure instead of a real `Dialer` — no network, no DNS, deterministic —
+// exactly the seam its own doc comment describes. `DialError` has no
+// `PartialEq` (`qsh_transport::endpoint`), so assertions match on the
+// variant with `matches!`/`Display` rather than `assert_eq!`.
+
+fn addr(port: u16) -> SocketAddr {
+    SocketAddr::from(([127, 0, 0, 1], port))
+}
+
+/// The single-address case `error.CONNECTION_FAILED.json` pins: an IP
+/// literal (`127.0.0.1:<port>`, as `golden_connection_failed_fixture`
+/// dials) resolves to exactly one address, no real DNS query involved —
+/// `resolve_all`/`dial_first_reachable` replacing the old first-address-
+/// only path must not turn this into more than one attempt.
+#[tokio::test]
+async fn resolve_all_returns_exactly_one_address_for_an_ip_literal() {
+    let addrs = resolve_all("127.0.0.1:4433").await.unwrap();
+    assert_eq!(addrs, vec![addr(4433)]);
+}
+
+/// `[unreachable, good]` → succeeds on the second address, and the
+/// closure was called with the addresses in exactly resolver order (not
+/// the reverse, not just the winner) — dial succeeds on the second
+/// address, with resolver order preserved (issue #4 item 2).
+#[tokio::test]
+async fn dial_first_reachable_tries_addresses_in_order_and_stops_at_the_first_success() {
+    let addrs = vec![addr(1), addr(2)];
+    let seen = std::sync::Mutex::new(Vec::new());
+    let result = dial_first_reachable(&addrs, |a| {
+        seen.lock().unwrap().push(a);
+        async move {
+            if a == addr(1) {
+                Err(DialError::Refused)
+            } else {
+                Ok(a)
+            }
+        }
+    })
+    .await;
+    assert_eq!(
+        result.ok(),
+        Some(addr(2)),
+        "must resolve to the reachable address"
+    );
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![addr(1), addr(2)],
+        "must try addr(1) before addr(2), not skip straight to the winner"
+    );
+}
+
+/// Five resolved addresses, all failing: only the first
+/// [`MAX_DIAL_ADDRESSES`] are ever tried — the fifth is never dialed.
+#[tokio::test]
+async fn dial_first_reachable_caps_at_max_dial_addresses() {
+    let addrs: Vec<SocketAddr> = (1..=5).map(addr).collect();
+    let seen = std::sync::Mutex::new(Vec::new());
+    let result = dial_first_reachable(&addrs, |a| {
+        seen.lock().unwrap().push(a);
+        async move { Err::<SocketAddr, _>(DialError::Refused) }
+    })
+    .await;
+    let (_err, attempted) = result.expect_err("every address fails");
+    assert_eq!(attempted, MAX_DIAL_ADDRESSES);
+    assert_eq!(
+        *seen.lock().unwrap(),
+        addrs[..MAX_DIAL_ADDRESSES].to_vec(),
+        "must try only the first four addresses, not the last four or all five"
+    );
+}
+
+/// When every address fails, the error returned is the *last* address's
+/// failure, not the first — `dial_and_register`'s PR-A `cause`
+/// classification and `map_dial_error`'s message both key off this same
+/// value, so they must agree with each other about which attempt "the"
+/// failure is.
+#[tokio::test]
+async fn dial_first_reachable_returns_the_last_addresss_error() {
+    let addrs = vec![addr(1), addr(2), addr(3)];
+    let result = dial_first_reachable(&addrs, |a| async move {
+        if a == addr(3) {
+            Err::<(), _>(DialError::RemoteRejected)
+        } else {
+            Err::<(), _>(DialError::Refused)
+        }
+    })
+    .await;
+    let (err, attempted) = result.expect_err("every address fails");
+    assert_eq!(attempted, 3);
+    assert!(
+        matches!(err, DialError::RemoteRejected),
+        "expected the third (last) address's error, got {err:?}"
+    );
+}
+
+/// Mixed-severity precedence (fail closed on ambiguous auth,
+/// CLAUDE.md "Security defaults"): an earlier address's non-retryable
+/// auth-class rejection (`LocalRejected` — we rejected the peer's cert)
+/// must not be silently downgraded to a later address's ordinary,
+/// retryable transport failure (`Timeout`). Plain last-error-wins would
+/// report `Timeout` here and flip `retryable` from `false` to `true`,
+/// hiding the pin mismatch entirely.
+#[tokio::test]
+async fn dial_first_reachable_prefers_an_earlier_auth_rejection_over_a_later_transport_failure() {
+    let addrs = vec![addr(1), addr(2)];
+    let result = dial_first_reachable(&addrs, |a| async move {
+        if a == addr(1) {
+            Err::<(), _>(DialError::LocalRejected {
+                reason: qsh_transport::RejectReason::Untrusted,
+                observed: None,
+            })
+        } else {
+            Err::<(), _>(DialError::Timeout(std::time::Duration::from_secs(10)))
+        }
+    })
+    .await;
+    let (err, attempted) = result.expect_err("every address fails");
+    assert_eq!(
+        attempted, 2,
+        "both addresses must still have been attempted"
+    );
+    assert!(
+        matches!(err, DialError::LocalRejected { .. }),
+        "the earlier auth-class rejection must win over the later timeout, got {err:?}"
+    );
+}
+
+/// Same precedence rule, reversed order: a later auth-class rejection
+/// still wins over an earlier transport failure (this direction already
+/// matched plain last-error-wins, but pins it so the precedence logic
+/// cannot regress into "always keep the first error").
+#[tokio::test]
+async fn dial_first_reachable_prefers_a_later_auth_rejection_over_an_earlier_transport_failure() {
+    let addrs = vec![addr(1), addr(2)];
+    let result = dial_first_reachable(&addrs, |a| async move {
+        if a == addr(1) {
+            Err::<(), _>(DialError::Refused)
+        } else {
+            Err::<(), _>(DialError::RemoteRejected)
+        }
+    })
+    .await;
+    let (err, attempted) = result.expect_err("every address fails");
+    assert_eq!(attempted, 2);
+    assert!(
+        matches!(err, DialError::RemoteRejected),
+        "the later auth-class rejection must still win, got {err:?}"
+    );
+}
+
+/// The full mapping a multi-address dial failure goes through
+/// (`crate::ops::exec::map_dial_error`, driven with a real
+/// `dial_first_reachable` failure rather than a hand-built `DialError`):
+/// still `CONNECTION_FAILED`/`retryable: true` (`qsh.cli/v1` unchanged,
+/// PR-B's own contract note), and the message names the attempt count
+/// only once more than one address was tried — the single-address case
+/// (`attempted == 1`) must read exactly as it did before this feature,
+/// which is what keeps `error.CONNECTION_FAILED.json` byte-identical.
+#[tokio::test]
+async fn all_addresses_failing_maps_to_connection_failed_naming_the_attempt_count() {
+    let addrs = vec![addr(1), addr(2), addr(3)];
+    let (err, attempted) =
+        dial_first_reachable(&addrs, |_a| async { Err::<(), _>(DialError::Refused) })
+            .await
+            .expect_err("every address fails");
+    let multi = crate::ops::exec::map_dial_error(err, "widget:4433", attempted);
+    assert_eq!(multi.code, ErrorCode::ConnectionFailed);
+    assert!(multi.retryable);
+    assert!(
+        multi.message.contains('3'),
+        "message must name the attempt count: {}",
+        multi.message
+    );
+
+    let single = crate::ops::exec::map_dial_error(DialError::Refused, "widget:4433", 1);
+    assert!(
+        !single.message.contains("tried"),
+        "a single-address failure must not mention an attempt count: {}",
+        single.message
+    );
+    assert_ne!(multi.message, single.message);
+}

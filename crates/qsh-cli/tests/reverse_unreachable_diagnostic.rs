@@ -39,13 +39,19 @@ const MESSAGE: &str = "Reverse attach needs a directly reachable UDP path from t
 const REMEDY: &str = "Put the controller on a publicly routable address, a forwarded port, or an existing overlay such as WireGuard or Tailscale. If the controller itself is behind NAT, M3 has no answer for that.";
 
 /// Bound on the whole test — generous: on a sandbox without a fast
-/// ICMP-port-unreachable path back from a closed loopback UDP port, a
-/// single dial attempt against it runs out the clock on
+/// ICMP-port-unreachable path back from a closed loopback UDP port, one
+/// dial attempt against it runs out the clock on
 /// `qsh_transport::endpoint::DEFAULT_DIAL_TIMEOUT` (10s) before the target
-/// even reaches its first backoff wait, so this bound must comfortably
-/// cover at least one full attempt plus [`SETTLE_WINDOW`], not assume a
-/// fast local refusal.
-const TIMEOUT: Duration = Duration::from_secs(25);
+/// even reaches its first backoff wait. The controller below pins
+/// `localhost:<port>` rather than a bare IPv4 literal specifically so
+/// `resolve_all` (issue #4 item 2) resolves it to *two* unreachable
+/// addresses (`127.0.0.1` and `::1`) wherever the sandbox's resolver has
+/// IPv6 loopback enabled, so the one-shot `controller_unreachable` notice
+/// is proven across a real multi-address attempt, not just a
+/// single-address one — this bound must comfortably cover two full
+/// attempts plus [`SETTLE_WINDOW`], not assume a fast local refusal or a
+/// single address.
+const TIMEOUT: Duration = Duration::from_secs(45);
 
 /// Once the diagnostic has appeared at least once, keep watching stderr
 /// for this long before declaring "exactly once" — the "at most once"
@@ -66,16 +72,30 @@ fn qsh_reverse_prints_the_controller_unreachable_diagnostic_exactly_once() {
     // unused loopback port, then drop the socket immediately so nothing
     // ever answers there. Whether the OS delivers a fast ICMP
     // port-unreachable back to the dialer or not, this is real
-    // unreachability, not a fault injected mid-connection — worst case a
-    // single attempt costs the full `qsh_transport::endpoint::
-    // DEFAULT_DIAL_TIMEOUT` (10s), which `TIMEOUT` above budgets for.
-    let addr = {
+    // unreachability, not a fault injected mid-connection — worst case one
+    // attempt costs the full `qsh_transport::endpoint::
+    // DEFAULT_DIAL_TIMEOUT` (10s), which `TIMEOUT` above budgets for
+    // across up to two attempts.
+    let port = {
         let socket = UdpSocket::bind("127.0.0.1:0").expect("bind a throwaway UDP port");
-        socket.local_addr().expect("local addr")
+        socket.local_addr().expect("local addr").port()
     };
 
     let fingerprint = sandbox.fingerprint();
-    sandbox.trust_add(CONTROLLER_ALIAS, Some(&addr.to_string()), &fingerprint);
+    // `localhost:<port>`, not the IPv4 literal directly: `resolve_all`
+    // resolves this to both `127.0.0.1:<port>` and `[::1]:<port>`
+    // wherever the sandbox's resolver has IPv6 loopback enabled, which is
+    // exactly the dual-stack, more-than-one-resolved-address case issue
+    // #4 item 2 exists for — nothing listens on either, so both dials
+    // fail and the one-shot notice is proven across the real
+    // `dial_first_reachable` fan-out. A sandbox with IPv6 loopback
+    // disabled still resolves to one address and still proves the
+    // single-address case unchanged.
+    sandbox.trust_add(
+        CONTROLLER_ALIAS,
+        Some(&format!("localhost:{port}")),
+        &fingerprint,
+    );
 
     // A near-zero backoff — it barely matters against a ~10s-per-attempt
     // dial timeout either way, but there is no reason to make it worse.
