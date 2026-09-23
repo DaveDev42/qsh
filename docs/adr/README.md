@@ -24,3 +24,7 @@ QSH의 아키텍처/설계 결정을 기록한다. 각 ADR은 맥락, 결정, �
 | [0018](0018-tunnel-lifetime-bound-to-connection.md) | 터널 수명은 v1 내내 QUIC connection에 결합하고, forward-route live carrier와 `-R` 자동 재발행은 P1로 둔다 | 승인됨 |
 | [0019](0019-socks-dynamic-forward.md) | SOCKS `-D`를 구현한다. client가 SOCKS5를 번역해 CONNECT마다 `TCP_CONNECT`를 열고 host는 그 dial에서 host-local 주소를 거른다 | 승인됨 |
 | [0020](0020-socks-reverse-route.md) | 역방향 route에서도 `-D`를 켠다(ADR-0019 결정 10 개정) | 승인됨 |
+| [0021](0021-transport-liveness-knobs.md) | keep-alive만 `[transport]` 설정으로 열고 idle timeout 45초는 고정 상수로 남긴다. `PathWatchConfig`의 세 값은 `[recovery]`로 내린다 | 제안됨 |
+| [0022](0022-reverse-health-surface.md) | 역방향 등록 health는 `Host.lost_at`과 `qsh::reverse` 진단 줄까지로 두고 push 계약 표면은 유예한다 | 제안됨 |
+| [0025](0025-acl-show-read-only.md) | writer 없이 ACL 가시성만 올린다. 읽기 전용 `qsh acl show`를 신설하고 `acl grant`/`acl revoke`는 기각한다 | 제안됨 |
+| [0026](0026-ssh-key-import-scope.md) | SSH 키 가져오기(`--import-ssh-key`)는 v1에 넣지 않고 P1 백로그에 둔다 | 제안됨 |
