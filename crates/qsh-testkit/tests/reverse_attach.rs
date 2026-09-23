@@ -97,7 +97,7 @@ use qsh_proto::{
     SessionGetReq, SessionOpenReq,
 };
 use qsh_testkit::loopback::{TestIdentity, make_identity};
-use qsh_testkit::reverse::{ReverseHarness, wait_for};
+use qsh_testkit::reverse::ReverseHarness;
 use qsh_transport::{Dialed, Listener, StaticTrust};
 use tokio::net::UnixStream;
 
@@ -315,7 +315,7 @@ async fn setup(authorizer: Arc<dyn Authorizer>) -> Fixture {
         ReverseHarness::start_with(authorizer, false, pin(&reverse_identity, "revhost")).await;
     rig.register_reverse(&harness, &reverse_identity, "laptop-offered-name")
         .await;
-    wait_for(TIMEOUT, || harness.listen.registry().get("revhost")).await;
+    harness.wait_control_hub("revhost").await;
     let localctl = harness.attach_localctl(ops.paths()).await;
 
     Fixture {

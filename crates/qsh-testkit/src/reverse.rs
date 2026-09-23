@@ -45,6 +45,8 @@ use qsh_core::config::{Config, Paths};
 use qsh_core::handshake::{self, HelloError};
 use qsh_core::identity::{Identity, LoadedIdentity};
 use qsh_core::ops::OpError;
+#[cfg(unix)]
+pub use qsh_core::reverse::listen::ControlHub;
 pub use qsh_core::reverse::listen::Listen;
 use qsh_core::reverse::registry::Registry;
 pub use qsh_core::reverse::registry::{EntryState, ReverseEntry};
@@ -62,6 +64,16 @@ use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
 use crate::chaos::ChaosProxy;
 use crate::loopback::{TestIdentity, make_identity};
 use crate::pair::HostedPair;
+
+/// Bound on [`ReverseHarness::wait_control_hub`]'s wait for the
+/// [`ControlHub`] publish that follows a registry insert (see that
+/// method's own doc for the ordering this closes). Same order of
+/// magnitude as this file's own `CONNECT_TIMEOUT` and every caller's own
+/// `TIMEOUT` — generous slack for a bug, not a budget this should ever
+/// need in full: the gap it is bridging is a handful of in-process
+/// `.await` points, not a network round trip.
+#[cfg(unix)]
+const CONTROL_HUB_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A `qsh listen` controller bound on `127.0.0.1:0` — see module docs for
 /// why this is built by hand rather than by calling
@@ -663,6 +675,35 @@ impl ReverseHarness {
             task,
             shutdown: Some(tx),
         }
+    }
+
+    /// Wait until `name`'s registration is fully live from the localctl
+    /// daemon's own point of view — its [`ControlHub`] published into
+    /// `Listen::hubs` (read back through [`Listen::control_hub`]) — rather
+    /// than merely present in [`Listen::registry`].
+    ///
+    /// Registration publishes in two separate steps, strictly in this
+    /// order (`crates/qsh-core/src/reverse/listen/registration.rs`):
+    /// `Listen::register_connection` calls `decide_registration`, whose
+    /// `admit` inserts the **registry** entry *before* the `Hello` reply is
+    /// even sent; only after that reply has gone out does
+    /// `Listen::finish_registration` publish the connection into `conns`
+    /// and then the [`ControlHub`] into `Listen::hubs`. A caller that polls
+    /// [`Listen::registry`] alone and then immediately opens a localctl
+    /// conduit with `wait_ms = 0` — every first `LOCAL_CONTROL`/
+    /// `LOCAL_STREAM` open, raw or through `Ops` (`Listen::control_hub_wait`'s
+    /// own doc: `None`/`wait_ms = 0` takes the "accept any live hub
+    /// immediately" branch, with no deadline slack to ride out the gap) —
+    /// can land inside that window: [`Listen::control_hub`] still returns
+    /// `None`, and the daemon answers `HOST_NOT_FOUND` even though the
+    /// registry already has the name. That is exactly what CI run
+    /// 35912049994 hit in `ping_on_a_conduit_is_answered_locally_with_pong`
+    /// (`crates/qsh-testkit/tests/local_control_reverse.rs`) — a test-side
+    /// ordering bug, not a product bug: `registry()` is simply not the
+    /// table the daemon itself looks up.
+    #[cfg(unix)]
+    pub async fn wait_control_hub(&self, name: &str) -> Arc<ControlHub> {
+        wait_for(CONTROL_HUB_WAIT_TIMEOUT, || self.listen.control_hub(name)).await
     }
 
     /// Stop the controller and wait for it to drain.

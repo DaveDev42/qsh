@@ -129,7 +129,7 @@ async fn two_conduits_with_the_same_peer_request_id_each_get_their_own_reply() {
     });
 
     let test_fut = async {
-        wait_for(TIMEOUT, || harness.listen.registry().get("widget")).await;
+        harness.wait_control_hub("widget").await;
 
         let mut a = connect_control(&localctl.socket_path, "widget").await;
         let mut b = connect_control(&localctl.socket_path, "widget").await;
@@ -226,7 +226,7 @@ async fn ping_on_a_conduit_is_answered_locally_with_pong() {
     });
 
     let test_fut = async {
-        wait_for(TIMEOUT, || harness.listen.registry().get("widget")).await;
+        harness.wait_control_hub("widget").await;
         let mut conduit = connect_control(&localctl.socket_path, "widget").await;
 
         send(&mut conduit, 42, control_message::Body::Ping(wire::Ping {})).await;
@@ -406,7 +406,7 @@ async fn severing_the_quic_connection_ends_every_conduit_of_that_host() {
     });
 
     let test_fut = async {
-        wait_for(TIMEOUT, || harness.listen.registry().get("widget")).await;
+        harness.wait_control_hub("widget").await;
 
         let mut a = connect_control(&localctl.socket_path, "widget").await;
         let mut b = connect_control(&localctl.socket_path, "widget").await;
