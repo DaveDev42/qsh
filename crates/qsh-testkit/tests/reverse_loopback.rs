@@ -170,7 +170,8 @@ fn reverse_events_for(fp: &str) -> Vec<serde_json::Value> {
 /// — the disambiguator [`reverse_events_for`] can't be for a target-side
 /// `retry` record: those fire before any dial for that attempt has even
 /// started (`target.rs`'s `ReconnectEvent` doc comment), so there is no
-/// `fingerprint` yet to filter on and the record carries `"-"` instead.
+/// `fingerprint` yet to filter on and the key is omitted entirely, not
+/// carried as a placeholder (issue #4 item 6).
 #[cfg(unix)]
 fn reverse_events_by_host_and_kind(host: &str, event: &str) -> Vec<serde_json::Value> {
     reverse_lines()
