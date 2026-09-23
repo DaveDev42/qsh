@@ -125,6 +125,31 @@ fn events_by_host_and_kind(host: &str, event: &str) -> Vec<serde_json::Value> {
         .collect()
 }
 
+/// Wait until the target's own `"registered"` line for `host` has been
+/// captured — the target emits it only after `dial_and_register` returned,
+/// i.e. after the controller's `Hello` reply actually reached it.
+///
+/// The controller's registry is not that signal: `Listen::register_connection`
+/// (`reverse/listen/registration.rs`) admits into the registry *first* and
+/// writes the `Hello` reply *second*, so a test that polls
+/// `Listen::registry` and injects its fault the moment the entry appears
+/// can land the fault inside that window. A sever there drops the reply on
+/// the floor, the target is still parked inside `dial_and_register` with no
+/// `PathWatch` running yet, and the `"lost"` line this file asserts on is
+/// never emitted for that attempt — the failure surfaces as `retry` with a
+/// dial-class cause instead. Observed once on CI (two arm runners, run
+/// 35909383603) as a 10 s `wait_for` timeout on the `"lost"` line; never
+/// reproduced on a fast host, where the reply lands microseconds after the
+/// registry insert. Faults in this file are injected only after this
+/// returns.
+async fn wait_target_registered(host: &str) {
+    wait_for(TIMEOUT, || {
+        let v = events_by_host_and_kind(host, "registered");
+        (!v.is_empty()).then_some(())
+    })
+    .await;
+}
+
 fn assert_at_is_rfc3339(v: &serde_json::Value) {
     let at = v["at"]
         .as_str()
@@ -249,6 +274,11 @@ async fn run_target_lost_and_retry_lines_report_peer_closed_with_since_registere
             (e.generation == 0).then_some(())
         })
         .await;
+        // Same window as the silent-path test: a replacement that lands
+        // before the first target has read its `Hello` reply closes a
+        // connection that is not yet "registered" from the target's side,
+        // so no `"lost"` line would follow — see `wait_target_registered`.
+        wait_target_registered("controller-cause-peer").await;
         let (dialed2, _ctl2, _hello2) = harness
             .register(&target, "")
             .await
@@ -348,6 +378,8 @@ async fn run_target_lost_and_retry_lines_report_a_silent_path_as_path_dead() {
     );
     let scenario = async {
         wait_for(TIMEOUT, || harness.listen.registry().get("widget")).await;
+        // Not the registry alone — see `wait_target_registered`.
+        wait_target_registered("controller-cause-silent").await;
         chaos.sever().await;
 
         let lost = wait_for(TIMEOUT, || {
