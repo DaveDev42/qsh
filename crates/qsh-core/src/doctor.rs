@@ -28,11 +28,15 @@ pub mod probe;
 /// `doctor.run`'s contract keys off of; this enum is the in-process
 /// convenience on top of it).
 ///
-/// 14 variants, one per `docs/CLI.md` §6.17 finding code — a closed,
+/// 21 variants, one per `docs/CLI.md` §6.17 finding code — a closed,
 /// additive-only set (`PLAN.md` M7 §4.1 #5): [`EXPECTED_DOCTOR_CODES`] and
 /// this enum's own `tests` module keep the two in lockstep, so a variant
 /// added without updating the frozen list (or vice versa) fails CI rather
-/// than shipping quietly.
+/// than shipping quietly. `ROADMAP.md` M9 (h)'s batch of seven —
+/// `ServiceNotRegistered`/`SystemdLingerDisabled`/
+/// `LaunchagentSessionScoped`/`Bindv6onlyBlocksIpv4`/
+/// `AclPrincipalUnmatched`/`AclCaAuthPathMissing`/
+/// `HostPinnedWithoutAddress` — landed 14 → 21.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiagnosticId {
     ControllerUnreachable,
@@ -49,6 +53,13 @@ pub enum DiagnosticId {
     QshPathShadowed,
     TrustRemoveScope,
     ConfigUnknownKey,
+    ServiceNotRegistered,
+    SystemdLingerDisabled,
+    LaunchagentSessionScoped,
+    Bindv6onlyBlocksIpv4,
+    AclPrincipalUnmatched,
+    AclCaAuthPathMissing,
+    HostPinnedWithoutAddress,
 }
 
 impl DiagnosticId {
@@ -77,6 +88,13 @@ impl DiagnosticId {
             DiagnosticId::QshPathShadowed => QSH_PATH_SHADOWED.code,
             DiagnosticId::TrustRemoveScope => TRUST_REMOVE_SCOPE.code,
             DiagnosticId::ConfigUnknownKey => CONFIG_UNKNOWN_KEY.code,
+            DiagnosticId::ServiceNotRegistered => SERVICE_NOT_REGISTERED.code,
+            DiagnosticId::SystemdLingerDisabled => SYSTEMD_LINGER_DISABLED.code,
+            DiagnosticId::LaunchagentSessionScoped => LAUNCHAGENT_SESSION_SCOPED.code,
+            DiagnosticId::Bindv6onlyBlocksIpv4 => BINDV6ONLY_BLOCKS_IPV4.code,
+            DiagnosticId::AclPrincipalUnmatched => ACL_PRINCIPAL_UNMATCHED.code,
+            DiagnosticId::AclCaAuthPathMissing => ACL_CA_AUTH_PATH_MISSING.code,
+            DiagnosticId::HostPinnedWithoutAddress => HOST_PINNED_WITHOUT_ADDRESS.code,
         }
     }
 }
@@ -88,18 +106,25 @@ impl DiagnosticId {
 /// variant; nothing already shipped is ever removed or renamed (a new
 /// meaning needs a new code, not a repurposed one).
 pub const EXPECTED_DOCTOR_CODES: &[&str] = &[
+    "acl_ca_auth_path_missing",
     "acl_policy_invalid",
     "acl_policy_missing",
+    "acl_principal_unmatched",
     "audit_path_unwritable",
+    "bindv6only_blocks_ipv4",
     "cert_expired",
     "cert_expiring_soon",
     "clock_skew",
     "config_unknown_key",
     "controller_unreachable",
+    "host_pinned_without_address",
     "keystore_unavailable",
+    "launchagent_session_scoped",
     "no_route",
     "peer_untrusted",
     "qsh_path_shadowed",
+    "service_not_registered",
+    "systemd_linger_disabled",
     "trust_remove_scope",
     "udp_egress_blocked",
 ];
@@ -297,6 +322,144 @@ pub const TRUST_REMOVE_SCOPE: Diagnostic = Diagnostic {
     remedy: "Force-closing an already-established connection on removal is not implemented (P1). If that matters right now, restart the process holding the connection.",
 };
 
+/// `docs/ROADMAP.md` M9 (h), `docs/CLI.md` §6.17: no platform service unit
+/// is registered for this machine's inferred run mode (`serve`/`listen`/
+/// `reverse`, precedence `[listen]` present > old `[reverse].controller`
+/// set > `serve`) — `crate::ops::doctor`'s own
+/// mode inference, not a new config field. `info`, not `warn`/`error`:
+/// running in the foreground is a completely normal way to use `qsh`
+/// (an interactive session, a one-off), not a misconfiguration — this
+/// only tells an operator who *meant* to run unattended that they
+/// haven't registered a unit yet.
+///
+/// Platform-gated in [`probe::service_unit_registered`]: macOS reads
+/// `~/Library/LaunchAgents/io.qsh.<mode>.plist`, Linux reads
+/// `~/.config/systemd/user/qsh-<mode>.service`; every other target
+/// (Windows included) never fires this — `qsh service install` is
+/// `UNSUPPORTED`/P1 there, so flagging its absence would be noise for a
+/// thing the platform cannot do.
+///
+/// `qsh service install` does not exist yet (ROADMAP M9 (g)) — `remedy` points
+/// at the manual unit in `docs/deploy/service.md` instead of a command
+/// that would not run, and says the installer is coming so this finding
+/// is not a dead end.
+pub const SERVICE_NOT_REGISTERED: Diagnostic = Diagnostic {
+    id: DiagnosticId::ServiceNotRegistered,
+    code: "service_not_registered",
+    message: "No platform service unit is registered for this machine's inferred run mode. Until one is, this mode only runs in the foreground; it does not survive logout, reboot, or a crash.",
+    remedy: "`qsh service install` does not exist yet — for now, follow docs/deploy/service.md's manual unit example to run this mode unattended.",
+};
+
+/// `docs/ROADMAP.md` M9 (h), `docs/CLI.md` §6.17: Linux only, and only
+/// reachable once [`SERVICE_NOT_REGISTERED`] did *not* fire for this
+/// mode — there is no point warning about linger for a service that
+/// is not installed yet. Detected via
+/// [`probe::probe_systemd_linger`]'s file-existence read of
+/// `/var/lib/systemd/linger/$USER` (systemd's own marker, no
+/// `Command::new`); an unreadable probe (e.g. a sandboxed CI account)
+/// is "unknown", not "disabled", and reports no finding either way —
+/// the same caution [`probe::keystore_finding`]/`detect_path_shadow`
+/// already apply to an ambiguous probe result.
+pub const SYSTEMD_LINGER_DISABLED: Diagnostic = Diagnostic {
+    id: DiagnosticId::SystemdLingerDisabled,
+    code: "systemd_linger_disabled",
+    message: "systemd user linger is not enabled for this account. The registered service's user unit stops the moment your last login session ends.",
+    remedy: "Run `loginctl enable-linger $USER` (docs/deploy/service.md) so the unit keeps running once your last login session ends.",
+};
+
+/// `docs/ROADMAP.md` M9 (h), `docs/CLI.md` §6.17: macOS only, fires
+/// whenever the inferred mode's LaunchAgent is registered
+/// ([`probe::service_unit_registered`]) — unconditional once true, the
+/// same "structural fact, not a misconfiguration" shape
+/// [`TRUST_REMOVE_SCOPE`] already has: a user LaunchAgent has no
+/// headless equivalent (`docs/deploy/service.md:94-98`), so an operator
+/// who registered one should always see this spelled out, not only once
+/// something goes wrong.
+pub const LAUNCHAGENT_SESSION_SCOPED: Diagnostic = Diagnostic {
+    id: DiagnosticId::LaunchagentSessionScoped,
+    code: "launchagent_session_scoped",
+    message: "qsh's service is registered as a user LaunchAgent, which only runs inside an active login session and stops at logout — unlike a systemd user unit with linger enabled, no headless equivalent exists for a normal user account.",
+    remedy: "Keep a session logged in, or accept the limitation. A LaunchDaemon (root, out of scope) is the only headless option on macOS.",
+};
+
+/// `docs/ROADMAP.md` M9 (h) (ROADMAP/PLAN's own shorthand is the bare
+/// term "bindv6only"; this repo's naming convention spells out the fuller code),
+/// `docs/CLI.md` §6.17: the effective `serve`/`listen` bind address is
+/// the IPv6 wildcard, and a live probe
+/// ([`probe::probe_bindv6only`]) shows this OS defaults a fresh
+/// dual-stack bind there to `IPV6_V6ONLY`. A real gap, not a
+/// hypothetical: `Listener::bind` calls
+/// [`qsh_transport::bind_tuned_udp_socket`] with `dual_stack_v6=false`,
+/// so the server side never explicitly clears `IPV6_V6ONLY` the way the
+/// client dialer does — on a v6-only-by-default OS (the canonical case
+/// is Windows, though this is a genuine per-OS/per-sysctl variable, not
+/// only a Windows one), a `[::]:4433` listener silently rejects IPv4
+/// peers with no signal anywhere in this build.
+pub const BINDV6ONLY_BLOCKS_IPV4: Diagnostic = Diagnostic {
+    id: DiagnosticId::Bindv6onlyBlocksIpv4,
+    code: "bindv6only_blocks_ipv4",
+    message: "The configured listen address is the IPv6 wildcard, and this OS defaults new dual-stack sockets there to IPv6-only; qsh never asks for dual-stack explicitly on the listener side. An IPv4-only peer cannot reach this listener; the dial just times out on the caller's side with no signal here.",
+    remedy: "Bind an explicit IPv4 address for IPv4 reachability (--bind 0.0.0.0:4433), or run separate listeners, or confirm this OS's IPv6 dual-stack default matches intent.",
+};
+
+/// `docs/adr/0017-acl-toml-not-written.md` 결정 2 (`:20-26`): the code
+/// string itself is fixed by that ADR (`:21`'s matching rule, reused
+/// verbatim by [`crate::acl::PinnedPrincipalIndex`]) — a `trust.toml`
+/// pin that no pin-path `acl.toml` row (`device:<name>` or
+/// `fp:sha256:<fingerprint>`, explicit or defaulted `auth_path = "pin"`)
+/// matches. `error`, not `warn`: the same shape
+/// [`PEER_UNTRUSTED`] already reasons through — a named, real peer that
+/// is *certain* to be denied every request, not a latent gap.
+pub const ACL_PRINCIPAL_UNMATCHED: Diagnostic = Diagnostic {
+    id: DiagnosticId::AclPrincipalUnmatched,
+    code: "acl_principal_unmatched",
+    message: "trust.toml pins a peer that no acl.toml row with auth_path \"pin\" matches — neither its device:<name> principal nor its fp:sha256:<fingerprint> principal. Every request from this peer is denied (default-deny) until a matching row exists.",
+    remedy: "Add a matching [[acl]] row (ADR-0017), then restart serve/listen — acl.toml is only read once at process start.",
+};
+
+/// `docs/adr/0017-acl-toml-not-written.md` 결정 2 (`:20-26`): the code
+/// string is fixed by that ADR — `trust.toml` has at least one `[[ca]]`
+/// entry, but no `acl.toml` row anywhere sets `auth_path = "ca"`. File-
+/// wide by design ("peer 단위가 아니라 파일 전체 수준의 거친 검사", the ADR's
+/// own words): a CA-authenticated principal is still `device:<id>`-
+/// shaped and cannot be pre-enumerated (`docs/CLI.md` §6.16), so this
+/// check names the gap, never a specific peer. `warn`, not `error`:
+/// unlike [`ACL_PRINCIPAL_UNMATCHED`]'s named,
+/// certain-to-fail peer, this is "a CA is provisioned but nothing is
+/// proven to rely on it yet" — closer to [`CONFIG_UNKNOWN_KEY`]'s
+/// latent-gap shape than to [`PEER_UNTRUSTED`]'s certain failure.
+pub const ACL_CA_AUTH_PATH_MISSING: Diagnostic = Diagnostic {
+    id: DiagnosticId::AclCaAuthPathMissing,
+    code: "acl_ca_auth_path_missing",
+    message: "trust.toml has a CA root, but no acl.toml row sets auth_path = \"ca\". Any peer authenticating via that CA is denied (default-deny) until one does.",
+    remedy: "Add an [[acl]] row with auth_path = \"ca\" (ADR-0017), then restart serve/listen — acl.toml is only read once at process start.",
+};
+
+/// `docs/ROADMAP.md` M9 (h) (added to the batch in commit `fab8563`), `docs/CLI.md` §6.17: a
+/// name `Ops::host_list`'s forward ∪ reverse merge already knows about
+/// (a trust-store pin or a `hosts.toml` entry) has no routable address
+/// from either book and no reverse registration — live or stale — for
+/// it. The same defect `crate::ops::host::pinned_without_address_host_not_found`
+/// only ever catches reactively, at dial time; this surfaces it
+/// proactively, the same relationship [`PEER_UNTRUSTED`] already has to
+/// `TRUST_REQUIRED`. `warn`, not `error`: a pure
+/// reverse target that has not phoned home yet (pinned via `qsh trust
+/// add --fingerprint`, no `--address`) is a normal transient state, not
+/// a bug — flagging it `error` would false-alarm on an intended
+/// workflow. Suppressed whenever any reverse entry for the name exists
+/// at all, live or stale.
+///
+/// `remedy`'s `{name}` is a template placeholder, not literal output —
+/// the caller (`Ops::doctor_pinned_no_address_findings`) already knows
+/// the concrete host name and substitutes it in, the same way `detail`
+/// interpolates it.
+pub const HOST_PINNED_WITHOUT_ADDRESS: Diagnostic = Diagnostic {
+    id: DiagnosticId::HostPinnedWithoutAddress,
+    code: "host_pinned_without_address",
+    message: "This host is configured (a trust-store pin or a hosts.toml entry) but has no address from either source and no reverse registration is currently held.",
+    remedy: "Add an address with `qsh trust add {name} --address <host:port> --fingerprint sha256:...`, or register it by running `qsh reverse <controller>` on that host.",
+};
+
 /// `PLAN.md` M5 Step 3 (F9): attempts to open `path` for append, creating
 /// the parent directory and the file itself if either is missing —
 /// exactly what [`crate::audit::RotatingAuditSink`]'s writer thread does
@@ -342,16 +505,66 @@ mod tests {
         assert_eq!(AUDIT_PATH_UNWRITABLE.code, "audit_path_unwritable");
     }
 
+    /// ROADMAP M9 (h) batch: each new const's `id`/`code` pairing, mirroring
+    /// the two pre-existing checks above — a mutation swapping one
+    /// const's `code` string or `DiagnosticId` would otherwise only be
+    /// caught indirectly, by the frozen-set test below going red with a
+    /// less specific message.
+    #[test]
+    fn m9_h_batch_diagnostic_consts_have_the_stable_snake_case_codes() {
+        assert_eq!(
+            SERVICE_NOT_REGISTERED.id,
+            DiagnosticId::ServiceNotRegistered
+        );
+        assert_eq!(SERVICE_NOT_REGISTERED.code, "service_not_registered");
+        assert_eq!(
+            SYSTEMD_LINGER_DISABLED.id,
+            DiagnosticId::SystemdLingerDisabled
+        );
+        assert_eq!(SYSTEMD_LINGER_DISABLED.code, "systemd_linger_disabled");
+        assert_eq!(
+            LAUNCHAGENT_SESSION_SCOPED.id,
+            DiagnosticId::LaunchagentSessionScoped
+        );
+        assert_eq!(
+            LAUNCHAGENT_SESSION_SCOPED.code,
+            "launchagent_session_scoped"
+        );
+        assert_eq!(
+            BINDV6ONLY_BLOCKS_IPV4.id,
+            DiagnosticId::Bindv6onlyBlocksIpv4
+        );
+        assert_eq!(BINDV6ONLY_BLOCKS_IPV4.code, "bindv6only_blocks_ipv4");
+        assert_eq!(
+            ACL_PRINCIPAL_UNMATCHED.id,
+            DiagnosticId::AclPrincipalUnmatched
+        );
+        assert_eq!(ACL_PRINCIPAL_UNMATCHED.code, "acl_principal_unmatched");
+        assert_eq!(
+            ACL_CA_AUTH_PATH_MISSING.id,
+            DiagnosticId::AclCaAuthPathMissing
+        );
+        assert_eq!(ACL_CA_AUTH_PATH_MISSING.code, "acl_ca_auth_path_missing");
+        assert_eq!(
+            HOST_PINNED_WITHOUT_ADDRESS.id,
+            DiagnosticId::HostPinnedWithoutAddress
+        );
+        assert_eq!(
+            HOST_PINNED_WITHOUT_ADDRESS.code,
+            "host_pinned_without_address"
+        );
+    }
+
     /// `PLAN.md` M7 §4.1 #5's "code 안정성 fixture": every [`DiagnosticId`]
     /// variant, exhaustively hand-listed (a variant added here without a
     /// matching addition to [`EXPECTED_DOCTOR_CODES`], or vice versa, is
     /// exactly the drift this test exists to catch), must map to a unique
-    /// code and the frozen set must be exactly those 14 codes — no more, no
+    /// code and the frozen set must be exactly those 21 codes — no more, no
     /// fewer. Mirrors `qsh_proto::schema`'s
     /// `cli_v1_schema_commands_is_sorted_and_deduplicated` precedent.
     #[test]
     fn expected_doctor_codes_matches_every_diagnostic_id_variant_exactly() {
-        const ALL: [DiagnosticId; 14] = [
+        const ALL: [DiagnosticId; 21] = [
             DiagnosticId::ControllerUnreachable,
             DiagnosticId::AuditPathUnwritable,
             DiagnosticId::AclPolicyMissing,
@@ -366,6 +579,13 @@ mod tests {
             DiagnosticId::QshPathShadowed,
             DiagnosticId::TrustRemoveScope,
             DiagnosticId::ConfigUnknownKey,
+            DiagnosticId::ServiceNotRegistered,
+            DiagnosticId::SystemdLingerDisabled,
+            DiagnosticId::LaunchagentSessionScoped,
+            DiagnosticId::Bindv6onlyBlocksIpv4,
+            DiagnosticId::AclPrincipalUnmatched,
+            DiagnosticId::AclCaAuthPathMissing,
+            DiagnosticId::HostPinnedWithoutAddress,
         ];
         let mut codes: Vec<&str> = ALL.iter().map(|id| id.code()).collect();
         codes.sort_unstable();

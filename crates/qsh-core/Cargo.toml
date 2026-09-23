@@ -40,6 +40,14 @@ rand.workspace = true
 blake3.workspace = true
 subtle.workspace = true
 libc.workspace = true
+# `doctor.run`'s `bindv6only_blocks_ipv4` probe (`crate::doctor::probe`)
+# binds a throwaway socket at the same wildcard IP `Listener::bind` would,
+# but on an ephemeral port so it never collides with a real listener
+# (`qsh_transport::bind_tuned_udp_socket`) and reads `only_v6()` off it —
+# already the pinned version `qsh-transport` resolves to (workspace-
+# resolved via `quinn`/`quinn-udp`, no second copy in the dependency tree,
+# same note the workspace `Cargo.toml` entry makes).
+socket2.workspace = true
 
 # The OS credential store is only wired up on the platforms QSH supports as
 # hosts today (`docs/design/architecture.md` §5, §8: keyring 3.x pinned).

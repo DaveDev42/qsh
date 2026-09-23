@@ -234,7 +234,14 @@ impl Paths {
 }
 
 /// The user's home directory, as `$HOME` or the platform equivalent.
-fn home_dir() -> Option<PathBuf> {
+///
+/// `pub(crate)`: `crate::ops::doctor`'s `service_not_registered`/
+/// `launchagent_session_scoped` detectors (`docs/CLI.md` §6.17) need this
+/// same resolution to build `~/Library/LaunchAgents/…`/`~/.config/systemd/
+/// user/…` service-unit paths — one source of truth for "what `$HOME`
+/// means on this process" rather than a second, possibly-drifted
+/// `std::env::home_dir()` call in `ops/doctor.rs`.
+pub(crate) fn home_dir() -> Option<PathBuf> {
     std::env::home_dir()
 }
 

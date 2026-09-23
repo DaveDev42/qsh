@@ -822,7 +822,7 @@ pin 시점에 이름 충돌이 생기면 — 상대가 자칭하는 이름이 �
 
 `--json`/`--jsonl` mode에서는 pairing도 interactive prompt를 열지 않는다(§2.1) — 잘못된 code나 인자 오류는 곧바로 오류 envelope로 반환된다. 그래서 machine mode에서 위치 인자도 `--code-stdin`도 없이 부르면 프롬프트 대신 `INVALID_ARGUMENT`다. `--code-stdin`을 줬더라도 표준입력이 터미널이면 machine mode에서는 마찬가지로 `INVALID_ARGUMENT`다 — 터미널 위에서 사람의 입력을 기다리는 것 자체가 §2.1이 금지하는 대기이기 때문이다; 표준입력이 파이프나 파일이면 이 제약과 무관하게 그대로 읽는다. 표준입력이 터미널이 아닌 human mode 호출(스크립트, cron)도 같은 이유로 `INVALID_ARGUMENT`다 — 열 수 있는 프롬프트가 없다. Windows 빌드에는 에코를 끄는 경로가 없어 터미널 프롬프트 대신 `UNSUPPORTED`를 내며 `--code-stdin`을 안내한다(client Windows는 P1, `docs/design/architecture.md` §8) — `--code-stdin` 자체는 이 플랫폼에서도 동작하지만, 터미널 입력이면 에코는 꺼지지 않는다.
 
-`doctor.run`의 전체 계약(§6.17, M7 Step 6)은 진단 코드 14종·envelope 모양·exit code 규칙을 담는다 — 이 절 밖에서는 더 설명하지 않는다.
+`doctor.run`의 전체 계약(§6.17, M7 Step 6)은 진단 코드 21종·envelope 모양·exit code 규칙을 담는다 — 이 절 밖에서는 더 설명하지 않는다.
 
 원격 operation(`exec.run`, `session.*`, `tunnel.*`)의 mTLS 실패 오류 경로는 다음과 같다.
 
@@ -1124,7 +1124,7 @@ qsh doctor [host] --json
 - `detail`: 무엇이 관측됐는지에 대한 사람이 읽을 수 있는 설명(해석된 경로, 관측된 만료 시각 등). 시크릿·PTY/명령 payload는 절대 담지 않는다(`CLAUDE.md`의 보안 기본값).
 - `remedy`: 실행 가능한 다음 행동 한 줄. 없으면 필드 자체가 생략된다(additive-optional, `CapabilitiesData.host`와 같은 규율).
 
-**14종 진단 코드** (재사용 5종·신설 9종 — `PLAN.md` M7 §4.1 #5가 확정한 잠금 어휘, `config_unknown_key`는 M8 Step 4b가 더했다):
+**21종 진단 코드** (재사용 5종·신설 16종 — `PLAN.md` M7 §4.1 #5가 확정한 잠금 어휘, `config_unknown_key`는 M8 Step 4b가, 나머지 7종은 M9 (h)가 더했다):
 
 | `code` | `status` | 무엇을 점검하는가 |
 |---|---|---|
@@ -1142,6 +1142,13 @@ qsh doctor [host] --json
 | `qsh_path_shadowed` | warn | `$PATH`에서 지금 실행 중인 바이너리(`current_exe`)보다 앞서는 다른 `qsh` 실행파일이 있음 — 맨몸 `qsh`를 실행하면 그 다른 바이너리가 대신 뜬다 |
 | `config_unknown_key` | warn | `config.toml`에 `Config`가 모르는 키 경로가 있어 조용히 무시되고 있음(§2.3의 "알 수 없는 키는 오류 없이 무시된다" 계약 그대로 — `deny_unknown_fields`는 쓰지 않는다). 상한 키 이름 오타면 그 상한은 기본값으로 남는다. `detail`이 문제의 키 경로를 밝힌다 |
 | `trust_remove_scope` | info | `trust.toml`에 pin이 하나라도 있으면 상시 노출되는 고지 — `trust remove`의 유효 범위(§6.11)를 다시 알려준다: 제거는 다음 handshake부터만 적용되고, 이미 확립된 연결은 협상된 권한 전체를 연결이 끊길 때까지 유지한다 |
+| `service_not_registered` | info | 이 머신에서 추론한 run mode(`listen`/`reverse`/`serve`)에 대응하는 플랫폼 서비스 유닛이 등록돼 있지 않음 — macOS는 `~/Library/LaunchAgents/io.qsh.<mode>.plist`, Linux는 `~/.config/systemd/user/qsh-<mode>.service`를 확인한다(Windows 등 다른 플랫폼에서는 뜨지 않는다). `qsh service install`은 아직 없으므로 `docs/deploy/service.md`의 수동 유닛 예시를 따르라고 안내한다 |
+| `systemd_linger_disabled` | warn | Linux에서만, 그리고 해당 mode의 유닛이 이미 등록된 경우에만 도달한다 — `/var/lib/systemd/linger/$USER` 파일 존재 여부만 읽는다(subprocess 없음). 못 읽으면 "unknown"으로 취급해 finding을 내지 않는다 |
+| `launchagent_session_scoped` | warn | macOS에서만, 해당 mode의 LaunchAgent가 등록돼 있으면 무조건 뜨는 구조적 고지 — 사용자 LaunchAgent는 로그인 세션 안에서만 돌고 로그아웃하면 멈춘다. headless 대안은 root LaunchDaemon(out of scope)뿐이다 |
+| `bindv6only_blocks_ipv4` | warn | 유효 bind 주소가 IPv6 wildcard이고 이 OS가 새 dual-stack 소켓을 기본으로 `IPV6_V6ONLY`로 여는 경우 — `Listener::bind`는 `dual_stack_v6=false`로 열어 서버 쪽이 명시적으로 풀지 않으므로, 그런 OS 기본값에서는 `[::]:4433` listener가 IPv4 peer를 조용히 거부한다 |
+| `acl_principal_unmatched` | error | `trust.toml`이 pin한 peer 중 `auth_path = "pin"`인 `acl.toml` 행 어디에도 매칭되지 않는 것이 있음 — `device:<name>`·`fp:sha256:<fingerprint>` 두 후보 다 확인한다. `PEER_UNTRUSTED`와 같은 이유로 error다: 이름이 특정된 실제 peer가 모든 요청에서 확실히 거부될 상태이기 때문이다(`docs/adr/0017-acl-toml-not-written.md` 결정 2) |
+| `acl_ca_auth_path_missing` | warn | `trust.toml`에 `[[ca]]`가 하나 이상 있는데 `acl.toml` 어디에도 `auth_path = "ca"` 행이 없음 — peer 단위가 아니라 파일 전체 수준의 거친 검사다(CA 인증 principal은 `device:<id>` 모양이라 미리 열거할 수 없다). `acl_principal_unmatched`와 달리 warn이다: CA는 준비됐지만 아직 아무것도 그것에 의존한다고 증명되지 않은 잠재적 공백이기 때문이다(`docs/adr/0017-acl-toml-not-written.md` 결정 2) |
+| `host_pinned_without_address` | warn | `host_list`가 아는 이름(trust pin 또는 `hosts.toml` 항목)에 두 출처 어디서도 주소가 없고 현재 유지 중인 reverse 등록(live·stale 불문)도 없음 — `--address` 없이 `--fingerprint`만으로 pin해 아직 phone-home하지 않은 순정 reverse 대상은 정상적인 일시 상태이므로 error가 아니라 warn이다. 그 이름의 reverse 등록이 하나라도 있으면(live든 stale이든) 뜨지 않는다 |
 
 **연결성 진단의 우선순위 규칙.** 한 probe 실패는 항상 code 하나만 낸다: probe 대상이 `[reverse].controller`면 결과와 무관하게 `controller_unreachable`이고, `host` 인자로 준 일반 대상이면 침묵 타임아웃은 `udp_egress_blocked`, OS의 즉시 거부(경로 없음)는 `no_route`다 — 세 code가 한 실패에 동시에 나오는 일은 없다.
 

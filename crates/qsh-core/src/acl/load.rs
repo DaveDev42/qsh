@@ -340,9 +340,27 @@ impl StartupDiagnostic {
 /// `unwrap_or_default()`, since a broken `trust.toml` is a different,
 /// already-reported failure elsewhere and must not blank out this
 /// diagnostic's own message.
-pub fn load_or_deny(paths: &Paths) -> (Arc<dyn Authorizer>, Option<StartupDiagnostic>) {
-    let (authorizer, diagnostic, _index) = load_or_deny_with_index(paths);
+pub fn load_or_deny(paths: &Paths, role: Role) -> (Arc<dyn Authorizer>, Option<StartupDiagnostic>) {
+    let (authorizer, diagnostic, _index) = load_or_deny_with_index(paths, role);
     (authorizer, diagnostic)
+}
+
+/// Which production role is loading `acl.toml` — the only thing this
+/// affects is `minimal_policy_example`'s example row (ADR-0017 결정 2): a
+/// `serve` host and a `listen` controller enforce
+/// different actions, so the copy-pasteable starter row should name the
+/// one the caller can actually use, not always `exec.run`/`session.*`
+/// even for a controller that will never see those actions at all
+/// (`docs/CLI.md` §6.16's `host.reverse` is `listen`'s own admission
+/// action).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    /// `qsh serve` / `crate::serve::host_runtime` — the 5 session/exec
+    /// actions.
+    Serve,
+    /// `qsh listen` / `crate::reverse::listen::run_listen_unix` — reverse
+    /// registration (`host.reverse`) only.
+    Listen,
 }
 
 /// The pin-path principal set this process is **enforcing**, named by an
@@ -364,45 +382,79 @@ pub fn load_or_deny(paths: &Paths) -> (Arc<dyn Authorizer>, Option<StartupDiagno
 /// [`load_or_deny_with_index`] just loaded, before that `Policy` is erased
 /// into an `Arc<dyn Authorizer>`, and it lives for the process's lifetime.
 #[derive(Debug, Clone, Default)]
-pub struct PinnedPrincipalIndex(std::collections::BTreeSet<String>);
+pub struct PinnedPrincipalIndex {
+    /// Pin-path principal strings (`device:<name>` | `fp:sha256:<base64>`)
+    /// named by an `auth_path = "pin"` row (explicit or defaulted).
+    pin_principals: std::collections::BTreeSet<String>,
+    /// Whether *any* row in the policy — pin-path or not — sets
+    /// `auth_path = "ca"`. `acl_ca_auth_path_missing`
+    /// (`docs/adr/0017-acl-toml-not-written.md` 결정 2) is a file-wide
+    /// check, not a per-principal one, so this is a bare bool rather than
+    /// a second name set.
+    has_ca_auth_path: bool,
+}
 
 impl PinnedPrincipalIndex {
     fn from_policy(policy: &Policy) -> Self {
-        Self(
-            policy
+        Self {
+            pin_principals: policy
                 .rules
                 .iter()
                 .filter(|rule| rule.auth_path == AuthPath::Pin)
                 .map(|rule| rule.principal.clone())
                 .collect(),
-        )
+            has_ca_auth_path: policy
+                .rules
+                .iter()
+                .any(|rule| rule.auth_path == AuthPath::Ca),
+        }
     }
 
     /// The empty index — correct (not merely a placeholder) whenever the
     /// enforced policy is [`DenyAll`]: nothing is enforcing any row, pinned
     /// or otherwise.
     pub fn empty() -> Self {
-        Self(std::collections::BTreeSet::new())
+        Self::default()
     }
 
     /// Whether `device:<name>` is named by a pin-path row in the enforced
     /// policy.
     pub fn names_device(&self, name: &str) -> bool {
-        self.0.contains(&format!("device:{name}"))
+        self.pin_principals.contains(&format!("device:{name}"))
+    }
+
+    /// Whether `fp:<fingerprint>` is named by a pin-path row in the
+    /// enforced policy — the other candidate besides [`Self::names_device`]
+    /// that `acl_principal_unmatched` checks.
+    /// `fingerprint` is [`qsh_proto::TrustPeer::fingerprint`] verbatim,
+    /// which already carries the `sha256:` prefix, so the `fp:` prefix
+    /// alone completes it to `Principal::Fingerprint`'s `to_string()`
+    /// format (`docs/adr/0017-acl-toml-not-written.md` 결정 2's matching
+    /// rule).
+    pub fn names_fingerprint(&self, fingerprint: &str) -> bool {
+        self.pin_principals.contains(&format!("fp:{fingerprint}"))
+    }
+
+    /// Whether any row in the enforced policy sets `auth_path = "ca"` —
+    /// `acl_ca_auth_path_missing` (ADR-0017 결정 2).
+    pub fn has_ca_auth_path(&self) -> bool {
+        self.has_ca_auth_path
     }
 }
 
 /// [`load_or_deny`] plus the [`PinnedPrincipalIndex`] extracted from the
 /// same [`Policy`] before it is erased into an `Arc<dyn Authorizer>`
-/// (`Arc::new(policy)` below). `crate::serve::host_runtime` is the one
-/// caller that needs the index (to compose ADR-0017 결정 3's pairing-pin
-/// notice); every other caller (`crate::reverse::listen::run_listen_unix`,
-/// `crate::ops::doctor`) keeps calling [`load_or_deny`] itself, unchanged,
-/// since a reverse target never reaches
-/// `crate::server::Server::serve_pairing_connection` at all and doctor's
-/// own diagnostic has no pairing notice to compose.
+/// (`Arc::new(policy)` below). `crate::serve::host_runtime` needs the
+/// index to compose ADR-0017 결정 3's pairing-pin notice;
+/// `crate::ops::doctor` needs it (ROADMAP M9 (h)) for `acl_principal_unmatched`/
+/// `acl_ca_auth_path_missing`. `crate::reverse::listen::run_listen_unix`
+/// keeps calling [`load_or_deny`] itself, unchanged — a reverse target
+/// never reaches `crate::server::Server::serve_pairing_connection` at all,
+/// so it has no pairing notice to compose and no doctor diagnostic of its
+/// own to feed.
 pub fn load_or_deny_with_index(
     paths: &Paths,
+    role: Role,
 ) -> (
     Arc<dyn Authorizer>,
     Option<StartupDiagnostic>,
@@ -419,7 +471,7 @@ pub fn load_or_deny_with_index(
                 code: ACL_POLICY_MISSING_CODE,
                 path: paths.acl_file(),
                 detail: None,
-                example: minimal_policy_example(paths),
+                example: minimal_policy_example(paths, role),
             }),
             PinnedPrincipalIndex::empty(),
         ),
@@ -429,11 +481,63 @@ pub fn load_or_deny_with_index(
                 code: ACL_POLICY_INVALID_CODE,
                 path: paths.acl_file(),
                 detail: Some(err.message),
-                example: minimal_policy_example(paths),
+                example: minimal_policy_example(paths, role),
             }),
             PinnedPrincipalIndex::empty(),
         ),
     }
+}
+
+/// `[[acl]]` `allow` list for `role` (ADR-0017 결정 2): a `listen`
+/// controller only ever evaluates `host.reverse` (`docs/CLI.md` §6.16),
+/// so its starter row would be actively wrong advice with `serve`'s five
+/// session/exec actions. Shared by [`policy_example_rows`] and
+/// [`ca_policy_example_row`] so the two example generators never drift
+/// on which actions a role's example advertises.
+const SERVE_ALLOW: &str =
+    "[\"exec.run\", \"session.open\", \"session.list\", \"session.attach\", \"session.control\"]";
+const LISTEN_ALLOW: &str = "[\"host.reverse\"]";
+
+fn example_allow_list(role: Role) -> &'static str {
+    match role {
+        Role::Serve => SERVE_ALLOW,
+        Role::Listen => LISTEN_ALLOW,
+    }
+}
+
+/// One pin-path `[[acl]]` row of copy-pasteable minimal-policy text per
+/// name in `names` (`device:<name>`, `allow` = `role`'s
+/// [`example_allow_list`]), or the single generic `device:<name>`
+/// placeholder row when `names` is empty. Single-sourced by
+/// [`minimal_policy_example`] (the trust store's actual pinned peer
+/// names, `PLAN.md` M5 §4.2) and by `crate::ops::doctor`'s
+/// `acl_principal_unmatched` finding (`docs/CLI.md` §6.17), which passes
+/// the one unmatched peer's name alone rather than every pinned peer —
+/// so `detail` shows a row for the peer the finding is actually about,
+/// not the whole trust store.
+pub(crate) fn policy_example_rows(names: &[&str], role: Role) -> String {
+    let example_allow = example_allow_list(role);
+    if names.is_empty() {
+        return format!("[[acl]]\nprincipal = \"device:<name>\"\nallow = {example_allow}\n");
+    }
+    let mut out = String::new();
+    for name in names {
+        out.push_str(&format!(
+            "[[acl]]\nprincipal = \"device:{name}\"\nallow = {example_allow}\n"
+        ));
+    }
+    out
+}
+
+/// The `auth_path = "ca"` counterpart to [`policy_example_rows`] —
+/// `crate::ops::doctor`'s `acl_ca_auth_path_missing` finding's `detail`
+/// example (`docs/adr/0017-acl-toml-not-written.md` 결정 2). A CA-
+/// authenticated principal is still `device:<id>`-shaped but cannot be
+/// pre-enumerated (`docs/CLI.md` §6.16), so this names a placeholder id
+/// rather than any specific pinned peer.
+pub(crate) fn ca_policy_example_row(role: Role) -> String {
+    let example_allow = example_allow_list(role);
+    format!("[[acl]]\nprincipal = \"device:<id>\"\nauth_path = \"ca\"\nallow = {example_allow}\n")
 }
 
 /// Build the copy-pasteable minimal-policy example embedded in
@@ -441,25 +545,18 @@ pub fn load_or_deny_with_index(
 /// `paths.trust_file()` (`PLAN.md` M5 §4.2: fill the machine's actual
 /// pinned peer names in), or a single generic placeholder row when the
 /// trust store has no pins yet (a fresh install before the first `qsh
-/// trust add`).
-fn minimal_policy_example(paths: &Paths) -> String {
-    const EXAMPLE_ALLOW: &str = "[\"exec.run\", \"session.open\", \"session.list\", \"session.attach\", \"session.control\"]";
+/// trust add`). `role` (ADR-0017 결정 2) picks the `allow` list — see
+/// [`policy_example_rows`], which does the actual row-building and is
+/// also reused directly by `crate::ops::doctor` for a single named peer.
+pub(crate) fn minimal_policy_example(paths: &Paths, role: Role) -> String {
     let names: Vec<String> = TrustStore::load(&paths.trust_file())
         .unwrap_or_default()
         .peers()
         .iter()
         .map(|peer| peer.name.clone())
         .collect();
-    if names.is_empty() {
-        return format!("[[acl]]\nprincipal = \"device:<name>\"\nallow = {EXAMPLE_ALLOW}\n");
-    }
-    let mut out = String::new();
-    for name in names {
-        out.push_str(&format!(
-            "[[acl]]\nprincipal = \"device:{name}\"\nallow = {EXAMPLE_ALLOW}\n"
-        ));
-    }
-    out
+    let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    policy_example_rows(&name_refs, role)
 }
 
 fn read_error(path: &Path, err: &io::Error) -> OpError {

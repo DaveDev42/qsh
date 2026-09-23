@@ -53,8 +53,14 @@ mod registry;
 pub use load::{
     ACL_POLICY_INVALID_CODE, ACL_POLICY_MISSING_CODE, ACL_STARTUP_CHECK_HINT,
     ACL_STARTUP_DENIED_CLAUSE, ACL_STARTUP_HEADLINE, ACL_STARTUP_NO_AUTOGEN, PinnedPrincipalIndex,
-    PolicyLoad, PolicySource, StartupDiagnostic, load_or_deny, load_or_deny_with_index,
+    PolicyLoad, PolicySource, Role, StartupDiagnostic, load_or_deny, load_or_deny_with_index,
 };
+// Crate-internal only (not part of `qsh-core`'s public surface):
+// `crate::ops::doctor`'s `acl_principal_unmatched`/`acl_ca_auth_path_missing`
+// findings build their own `detail` example rows from these, the same
+// generators `minimal_policy_example` (used only inside `acl::load` now)
+// itself calls for `acl_policy_missing`/`acl_policy_invalid`.
+pub(crate) use load::{ca_policy_example_row, policy_example_rows};
 pub use policy::{ActionPattern, Policy, Rule, Scope, Verdict};
 pub use registry::{
     ALWAYS_DENIED_NO_OP, DENY_SEAMS, DenySeam, OP_REGISTRY, Op, OpSpec, ResourceKind, SeamKind,

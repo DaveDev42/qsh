@@ -653,7 +653,7 @@ fn owner_only_acl_toml_does_not_warn() {
 #[test]
 fn load_or_deny_on_missing_file_denies_and_names_the_missing_code() {
     let dir = tempfile::tempdir().unwrap();
-    let (authorizer, diag) = load_or_deny(&paths_with(dir.path()));
+    let (authorizer, diag) = load_or_deny(&paths_with(dir.path()), Role::Serve);
     let verdict = authorizer.check(
         &Principal::Device("laptop".into()),
         AuthPath::Pin,
@@ -779,7 +779,7 @@ fn load_or_deny_on_invalid_file_denies_and_carries_a_content_free_detail() {
     for case in cases {
         let dir = tempfile::tempdir().unwrap();
         write_acl(dir.path(), &case.text);
-        let (authorizer, diag) = load_or_deny(&paths_with(dir.path()));
+        let (authorizer, diag) = load_or_deny(&paths_with(dir.path()), Role::Serve);
         let verdict = authorizer.check(
             &Principal::Device("laptop".into()),
             AuthPath::Pin,
@@ -849,7 +849,7 @@ fn load_or_deny_on_loaded_policy_has_no_diagnostic_and_evaluates_rules() {
         dir.path(),
         "[[acl]]\nprincipal = \"device:laptop\"\nallow = [\"exec.run\"]\n",
     );
-    let (authorizer, diag) = load_or_deny(&paths_with(dir.path()));
+    let (authorizer, diag) = load_or_deny(&paths_with(dir.path()), Role::Serve);
     assert!(diag.is_none());
     let verdict = authorizer.check(
         &Principal::Device("laptop".into()),
@@ -889,7 +889,7 @@ fn load_or_deny_ca_path_round_trip_default_denies_explicit_ca_allows() {
         "[[acl]]\nprincipal = \"user:dave\"\nallow = [\"exec.run\"]\n\n\
          [[acl]]\nprincipal = \"user:carol\"\nauth_path = \"ca\"\nallow = [\"exec.run\"]\n",
     );
-    let (authorizer, diag) = load_or_deny(&paths_with(dir.path()));
+    let (authorizer, diag) = load_or_deny(&paths_with(dir.path()), Role::Serve);
     assert!(diag.is_none());
 
     // `dave`'s rule has no `auth_path` — defaults to `pin` (F6(b)'s own
@@ -942,8 +942,54 @@ fn minimal_policy_example_fills_in_actual_pinned_peer_names() {
         "2026-01-01T00:00:00Z".to_string(),
     );
     trust.save(&dir.path().join("trust.toml")).unwrap();
-    let example = minimal_policy_example(&paths_with(dir.path()));
+    let example = minimal_policy_example(&paths_with(dir.path()), Role::Serve);
     assert!(example.contains("device:laptop"), "{example:?}");
+}
+
+#[test]
+fn policy_example_rows_is_the_generic_placeholder_row_when_names_is_empty() {
+    let example = policy_example_rows(&[], Role::Serve);
+    assert_eq!(
+        example,
+        "[[acl]]\nprincipal = \"device:<name>\"\nallow = [\"exec.run\", \"session.open\", \"session.list\", \"session.attach\", \"session.control\"]\n"
+    );
+}
+
+#[test]
+fn policy_example_rows_emits_one_row_per_name_and_is_role_aware() {
+    let example = policy_example_rows(&["laptop", "phone"], Role::Serve);
+    assert!(example.contains("device:laptop"), "{example:?}");
+    assert!(example.contains("device:phone"), "{example:?}");
+    assert_eq!(
+        example.matches("[[acl]]").count(),
+        2,
+        "one row per name: {example:?}"
+    );
+    assert!(example.contains("exec.run"), "{example:?}");
+    assert!(!example.contains("host.reverse"), "{example:?}");
+
+    let listen_example = policy_example_rows(&["laptop"], Role::Listen);
+    assert!(
+        listen_example.contains("host.reverse"),
+        "{listen_example:?}"
+    );
+    assert!(!listen_example.contains("exec.run"), "{listen_example:?}");
+}
+
+#[test]
+fn ca_policy_example_row_names_no_specific_peer_and_sets_auth_path_ca() {
+    let example = ca_policy_example_row(Role::Serve);
+    assert!(example.contains("[[acl]]"), "{example:?}");
+    assert!(example.contains("device:<id>"), "{example:?}");
+    assert!(example.contains("auth_path = \"ca\""), "{example:?}");
+    assert!(example.contains("exec.run"), "{example:?}");
+
+    let listen_example = ca_policy_example_row(Role::Listen);
+    assert!(
+        listen_example.contains("host.reverse"),
+        "{listen_example:?}"
+    );
+    assert!(!listen_example.contains("exec.run"), "{listen_example:?}");
 }
 
 // `PinnedPrincipalIndex` (ADR-0017 결정 2 `:21`'s matching
@@ -1000,12 +1046,14 @@ fn load_or_deny_with_index_returns_the_empty_index_on_a_missing_or_invalid_polic
     // `DenyAll` is what is actually enforced in both cases, so no row —
     // pin-path or otherwise — is enforcing anything.
     let dir = tempfile::tempdir().unwrap();
-    let (_authorizer, diagnostic, index) = load_or_deny_with_index(&paths_with(dir.path()));
+    let (_authorizer, diagnostic, index) =
+        load_or_deny_with_index(&paths_with(dir.path()), Role::Serve);
     assert!(diagnostic.is_some(), "a missing acl.toml must diagnose");
     assert!(!index.names_device("anything"));
 
     write_acl(dir.path(), "this is not [ valid toml");
-    let (_authorizer, diagnostic, index) = load_or_deny_with_index(&paths_with(dir.path()));
+    let (_authorizer, diagnostic, index) =
+        load_or_deny_with_index(&paths_with(dir.path()), Role::Serve);
     assert!(
         diagnostic.is_some(),
         "an unparseable acl.toml must diagnose"
