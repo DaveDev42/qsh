@@ -65,7 +65,7 @@ use qsh_proto::local::{
 };
 use qsh_proto::wire::{self, control_message, response, session_frame};
 use qsh_testkit::loopback::{TestIdentity, make_identity};
-use qsh_testkit::reverse::{ReverseHarness, wait_for};
+use qsh_testkit::reverse::ReverseHarness;
 use qsh_transport::StaticTrust;
 use tokio::net::UnixStream;
 
@@ -267,7 +267,7 @@ async fn local_stream_splices_session_data_to_a_real_pty_and_relays_exit_cleanly
     });
 
     let test_fut = async {
-        wait_for(TIMEOUT, || harness.listen.registry().get("widget")).await;
+        harness.wait_control_hub("widget").await;
 
         let mut ctl = connect_control(&localctl.socket_path, "widget").await;
         let opened = open_session(&mut ctl, 1).await;
@@ -384,7 +384,7 @@ async fn a_forged_ticket_on_local_stream_is_rejected_promptly_never_a_hang() {
     });
 
     let test_fut = async {
-        wait_for(TIMEOUT, || harness.listen.registry().get("widget")).await;
+        harness.wait_control_hub("widget").await;
 
         let mut data = connect_stream(&localctl.socket_path, "widget").await;
         // Never minted by anything on the target — `redeem_ticket` cannot
@@ -449,7 +449,7 @@ async fn a_non_session_data_header_on_local_stream_is_invalid_argument_nothing_o
     });
 
     let test_fut = async {
-        wait_for(TIMEOUT, || harness.listen.registry().get("widget")).await;
+        harness.wait_control_hub("widget").await;
 
         let mut data = connect_stream(&localctl.socket_path, "widget").await;
         // `EXEC_DATA`, not `SESSION_DATA` — the one shape `LOCAL_STREAM`

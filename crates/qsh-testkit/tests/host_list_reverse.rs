@@ -139,7 +139,7 @@ async fn hosts_merge_forward_and_live_reverse_then_stale_after_severance() {
         .expect("registration should succeed");
     assert!(peer_hello.reverse.is_none());
     let keepalive = spawn_ping_keepalive(ctl);
-    wait_for(TIMEOUT, || harness.listen.registry().get("dup-host")).await;
+    harness.wait_control_hub("dup-host").await;
 
     let merged = host_list(&ops).await.expect("host.list after registration");
     assert_eq!(

@@ -1547,11 +1547,6 @@ async fn the_listen_controller_enforces_the_connection_cap() {
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn existing_registration_pipe_echo_survives_a_connection_flood() {
-    // Imported here rather than at the top of the file: this is the only
-    // non-`cfg(unix)`-module use of `wait_for`, and a top-level import would
-    // be unused (and, under `-D warnings`, an error) on the windows target.
-    use qsh_testkit::reverse::wait_for;
-
     let target_identity = make_identity();
     let flooder_identity = make_identity();
     // `allow_advertised_names = false` below: `Registry::resolve_name`
@@ -1624,14 +1619,7 @@ async fn existing_registration_pipe_echo_survives_a_connection_flood() {
         serve_server.purge_connection(conn_id, ()).await;
     });
 
-    wait_for(Duration::from_secs(5), || {
-        harness.listen.registry().get("widget")
-    })
-    .await;
-    let hub = harness
-        .listen
-        .control_hub("widget")
-        .expect("control hub for the registered target");
+    let hub = harness.wait_control_hub("widget").await;
     let (conduit_id, mut inbox) = hub.register_conduit();
 
     // One real session.open, driven raw through the hub — the session
@@ -1864,7 +1852,7 @@ mod reverse_target_quota {
         );
 
         let test_fut = async {
-            wait_for(TIMEOUT, || harness.listen.registry().get("widget")).await;
+            harness.wait_control_hub("widget").await;
 
             let mut ctl = connect_control(&localctl.socket_path, "widget").await;
             send(
@@ -1951,7 +1939,7 @@ mod reverse_target_quota {
         );
 
         let test_fut = async {
-            wait_for(TIMEOUT, || harness.listen.registry().get("widget")).await;
+            harness.wait_control_hub("widget").await;
 
             let mut ctl = connect_control(&localctl.socket_path, "widget").await;
             send(
@@ -2208,7 +2196,7 @@ mod reverse_target_quota {
             let audit_path = audit_path_rx
                 .await
                 .expect("run_target hands back the audit path");
-            wait_for(TIMEOUT, || harness.listen.registry().get("widget")).await;
+            harness.wait_control_hub("widget").await;
 
             let mut ctl = connect_control(&localctl.socket_path, "widget").await;
             send(
@@ -2384,7 +2372,7 @@ mod reverse_target_quota {
             let audit_path = audit_path_rx
                 .await
                 .expect("run_target hands back the audit path");
-            wait_for(TIMEOUT, || harness.listen.registry().get("widget")).await;
+            harness.wait_control_hub("widget").await;
 
             let mut ctl = connect_control(&localctl.socket_path, "widget").await;
             send(
@@ -2569,7 +2557,7 @@ mod reverse_target_quota {
 
         let (_dir, paths) = fresh_paths();
         let localctl = harness.attach_localctl(&paths).await;
-        wait_for(TIMEOUT, || harness.listen.registry().get("widget")).await;
+        harness.wait_control_hub("widget").await;
 
         let mut client = connect_control(&localctl.socket_path, "widget").await;
         send(

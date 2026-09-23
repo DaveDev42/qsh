@@ -62,7 +62,7 @@ use qsh_proto::local::{
 };
 use qsh_proto::wire::{self, control_message, response};
 use qsh_testkit::loopback::{TestIdentity, make_identity};
-use qsh_testkit::reverse::{ReverseHarness, wait_for};
+use qsh_testkit::reverse::ReverseHarness;
 use qsh_testkit::tunnel::{EchoServer, RemoteForwardBinding, TunnelHarness, ephemeral_local_spec};
 use qsh_transport::StaticTrust;
 use tokio::net::UnixStream;
@@ -228,7 +228,7 @@ async fn l_over_reverse_reaches_the_target_echo() {
     });
 
     let test_fut = async {
-        wait_for(TIMEOUT, || harness.listen.registry().get("widget")).await;
+        harness.wait_control_hub("widget").await;
 
         scenario_local_forward_round_trips_through_a_target_echo(
             ReverseRoute {
@@ -479,7 +479,7 @@ async fn r_over_reverse_reaches_the_controller_echo() {
     });
 
     let test_fut = async {
-        wait_for(TIMEOUT, || harness.listen.registry().get("widget")).await;
+        harness.wait_control_hub("widget").await;
 
         scenario_remote_forward_round_trips_through_a_controller_echo(
             ReverseRemoteRoute {
@@ -530,7 +530,7 @@ async fn a_target_opened_tcp_accepted_reaches_only_its_own_conduit() {
     });
 
     let test_fut = async {
-        wait_for(TIMEOUT, || harness.listen.registry().get("widget")).await;
+        harness.wait_control_hub("widget").await;
 
         let route_a = ReverseRemoteRoute {
             socket_path: &localctl.socket_path,
@@ -733,7 +733,7 @@ async fn with_registered_widget_and_quotas<F, Fut>(
 
     let socket_path = localctl.socket_path.clone();
     let test_fut = async {
-        wait_for(TIMEOUT, || harness.listen.registry().get("widget")).await;
+        harness.wait_control_hub("widget").await;
         body(socket_path).await;
         let _ = shutdown_tx.send(());
     };
@@ -1361,7 +1361,7 @@ async fn a_claim_granted_after_its_loop_is_torn_down_still_completes_the_splice(
     });
 
     let test_fut = async {
-        wait_for(TIMEOUT, || harness.listen.registry().get("widget")).await;
+        harness.wait_control_hub("widget").await;
 
         let acceptor = RemoteForwardAcceptor::spawn_reverse(
             localctl.socket_path.clone(),
@@ -1691,7 +1691,7 @@ async fn tunnel_list_and_close_manage_a_daemon_held_remote_forward() {
     });
 
     let test_fut = async {
-        wait_for(TIMEOUT, || harness.listen.registry().get("widget")).await;
+        harness.wait_control_hub("widget").await;
 
         // Hold the tunnel open on a blocking-pool thread — `Ops::tunnel_open`
         // is sync and spins its own runtime internally, exactly like
@@ -1840,7 +1840,7 @@ async fn tunnel_open_remote_over_reverse_survives_a_thread_with_no_ambient_tokio
     });
 
     let test_fut = async {
-        wait_for(TIMEOUT, || harness.listen.registry().get("widget")).await;
+        harness.wait_control_hub("widget").await;
 
         let ops_hold = ops.clone();
         let echo_port = echo.port();

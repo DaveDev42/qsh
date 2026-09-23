@@ -442,6 +442,13 @@ async fn a_severed_reverse_path_resumes_the_same_session_under_a_live_cli_attach
     let scenario = async {
         let first = wait_for(TIMEOUT, || harness.listen.registry().get(HOST_ALIAS)).await;
         let baseline_generation = first.generation;
+        // `first.generation` above is the registry's own return value (this
+        // scenario's `baseline_generation`), so the registry poll itself
+        // stays — but the `scenario_handle` below opens a real localctl
+        // conduit against `HOST_ALIAS` immediately, so it also needs the
+        // hub itself live (`ReverseHarness::wait_control_hub`'s own doc:
+        // registry-present does not yet imply hub-published).
+        harness.wait_control_hub(HOST_ALIAS).await;
 
         let (_ops_dir, ops, _cli_fp) = fresh_ops().await;
         let localctl = harness.attach_localctl(ops.paths()).await;

@@ -52,12 +52,8 @@ use qsh_proto::{
     SessionListReq, SessionOpenReq, SessionReadReq, SessionResizeReq, SessionWriteReq, TrustAddReq,
 };
 use qsh_testkit::loopback::{TestIdentity, make_identity};
-use qsh_testkit::reverse::{ReverseHarness, wait_for};
+use qsh_testkit::reverse::ReverseHarness;
 use qsh_transport::{Dialed, Listener, StaticTrust};
-
-/// Bound on every "this must already have happened" wait — same order of
-/// magnitude as every other reverse testkit file's own `TIMEOUT`.
-const TIMEOUT: Duration = Duration::from_secs(5);
 
 fn pin(identity: &TestIdentity, name: &str) -> StaticTrust {
     StaticTrust::empty().with_pin(identity.fingerprint, Principal::Device(name.to_string()))
@@ -383,7 +379,7 @@ async fn session_lifecycle_succeeds_over_both_forward_and_reverse_routes() {
     .await;
     rig.register_reverse(&harness, &reverse_identity, "laptop-offered-name")
         .await;
-    wait_for(TIMEOUT, || harness.listen.registry().get("revhost")).await;
+    harness.wait_control_hub("revhost").await;
     let localctl = harness.attach_localctl(ops.paths()).await;
 
     let fwd_id = full_lifecycle_open_get_list_read_write_resize_close(&ops, "fwdhost").await;
@@ -424,7 +420,7 @@ async fn unauthorized_principal_session_open_over_reverse_is_permission_denied()
     .await;
     rig.register_reverse(&harness, &reverse_identity, "laptop")
         .await;
-    wait_for(TIMEOUT, || harness.listen.registry().get("denied-host")).await;
+    harness.wait_control_hub("denied-host").await;
     let localctl = harness.attach_localctl(ops.paths()).await;
 
     assert_eq!(
@@ -485,7 +481,7 @@ async fn resume_store_on_the_reverse_leg_is_seeded_from_the_acks_peer_fingerprin
     .await;
     rig.register_reverse(&harness, &reverse_identity, "laptop")
         .await;
-    wait_for(TIMEOUT, || harness.listen.registry().get("revhost")).await;
+    harness.wait_control_hub("revhost").await;
     let localctl = harness.attach_localctl(ops.paths()).await;
 
     let opened = blocking(&ops, |ops| ops.session_open(open_req("revhost")))
@@ -587,7 +583,7 @@ async fn killing_the_daemon_mid_session_gives_the_cli_a_clear_error_while_the_ta
     .await;
     rig.register_reverse(&harness, &reverse_identity, "laptop")
         .await;
-    wait_for(TIMEOUT, || harness.listen.registry().get("revhost")).await;
+    harness.wait_control_hub("revhost").await;
     let localctl = harness.attach_localctl(ops.paths()).await;
 
     let opened = blocking(&ops, |ops| ops.session_open(open_req("revhost")))

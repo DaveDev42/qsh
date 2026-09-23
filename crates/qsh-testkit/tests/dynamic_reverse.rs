@@ -78,17 +78,11 @@ use qsh_core::{HostRoute, Paths, Principal};
 use qsh_proto::{SessionAttachReq, SessionOpenReq};
 use qsh_testkit::loopback::make_identity;
 use qsh_testkit::net_probe::{self, LanEcho};
-use qsh_testkit::reverse::{ReverseHarness, wait_for};
+use qsh_testkit::reverse::ReverseHarness;
 use qsh_testkit::tunnel::ephemeral_local_spec;
 use qsh_transport::StaticTrust;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpStream;
-
-/// Bound on every "this must have already happened" wait in this file —
-/// same generosity `reverse_tunnel.rs`'s own `TIMEOUT` uses for the
-/// identical reason (a real reverse registration plus one or two relay
-/// hops, not a pure in-memory pipe).
-const TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Bound on a real, non-loopback round trip once
 /// [`net_probe::require_non_loopback_v4`]'s own probe has already
@@ -198,7 +192,7 @@ async fn dash_d_over_reverse_reaches_a_non_loopback_echo() {
     });
 
     let test_fut = async {
-        wait_for(TIMEOUT, || harness.listen.registry().get("widget")).await;
+        harness.wait_control_hub("widget").await;
 
         let forward = DynamicForwardHandle::start_reverse(
             None,
@@ -289,7 +283,7 @@ async fn dash_d_over_reverse_filters_loopback_and_the_target_sees_no_accept() {
     });
 
     let test_fut = async {
-        wait_for(TIMEOUT, || harness.listen.registry().get("widget")).await;
+        harness.wait_control_hub("widget").await;
 
         let forward = DynamicForwardHandle::start_reverse(
             None,
@@ -401,7 +395,7 @@ async fn interactive_dash_l_over_reverse_round_trips_at_the_ops_level() {
     });
 
     let test_fut = async {
-        wait_for(TIMEOUT, || harness.listen.registry().get("widget")).await;
+        harness.wait_control_hub("widget").await;
 
         // Pin the property `fresh_paths`'s isolation exists to guarantee:
         // discovery resolves "widget" to exactly this test's own daemon.
@@ -626,9 +620,9 @@ async fn discovery_fails_closed_on_a_shared_runtime_dir_but_resolves_cleanly_onc
     });
 
     let test_fut = async {
-        wait_for(TIMEOUT, || decoy_a_harness.listen.registry().get("widget")).await;
-        wait_for(TIMEOUT, || decoy_b_harness.listen.registry().get("widget")).await;
-        wait_for(TIMEOUT, || own_harness.listen.registry().get("widget")).await;
+        decoy_a_harness.wait_control_hub("widget").await;
+        decoy_b_harness.wait_control_hub("widget").await;
+        own_harness.wait_control_hub("widget").await;
 
         // Two fabricated pids, deliberately distinct, both bound under
         // `shared_dir` — the two-daemon collision itself.

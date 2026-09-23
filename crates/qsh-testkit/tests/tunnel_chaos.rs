@@ -602,7 +602,7 @@ mod reverse_conduit_death {
     use qsh_proto::wire::{self, control_message, response};
     use qsh_testkit::chaos::{ChaosPolicy, ChaosProxy};
     use qsh_testkit::loopback::{TestIdentity, make_identity};
-    use qsh_testkit::reverse::{ReverseHarness, wait_for};
+    use qsh_testkit::reverse::ReverseHarness;
     use qsh_testkit::tunnel::{EchoServer, ephemeral_local_spec};
     use qsh_transport::StaticTrust;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -813,7 +813,7 @@ mod reverse_conduit_death {
         );
 
         let scenario = async {
-            wait_for(TIMEOUT, || harness.listen.registry().get("widget")).await;
+            harness.wait_control_hub("widget").await;
 
             // `-L over reverse`.
             let l_handle = LocalForwardHandle::start_reverse(
