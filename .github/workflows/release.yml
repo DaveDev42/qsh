@@ -45,6 +45,62 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
+
+      # ── macOS codesign + notarization (docs/ROADMAP.md M10 범위, DoD 2) ──
+      # Gated exactly the way the `homebrew-tap` job below gates on its
+      # deploy key: a presence check writes a `has-*` output and every
+      # later step reads it, so a repository with no Apple credentials
+      # stays green and ships what it ships today. `release.yml` has no
+      # `pull_request` trigger, so a fork PR never reaches this branch.
+      #
+      # Placed before the toolchain setup on the same reasoning the nextest
+      # install below states: a misconfiguration should fail in seconds,
+      # not after a ten-minute release compile.
+      #
+      # All six or none. A partial set is a misconfiguration, and the two
+      # refs deserve different answers: on a tag the artifacts ship and
+      # DoD 2 is being judged, so it is an error; on a branch dispatch the
+      # artifacts are thrown away and the operator is mid-way through
+      # adding secrets, so it is a warning and a skip.
+      - name: Check for Apple signing secrets
+        id: apple
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          HAS_KEY_ID: ${{ secrets.APPLE_API_KEY_ID != '' }}
+          HAS_ISSUER: ${{ secrets.APPLE_API_ISSUER_ID != '' }}
+          HAS_P8: ${{ secrets.APPLE_API_PRIVATE_KEY != '' }}
+          HAS_P12: ${{ secrets.APPLE_CERT_P12 != '' }}
+          HAS_P12_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD != '' }}
+          HAS_TEAM_ID: ${{ secrets.APPLE_TEAM_ID != '' }}
+          IS_TAG: ${{ startsWith(github.ref, 'refs/tags/') }}
+        run: |
+          set -euo pipefail
+          present=0
+          for flag in "$HAS_KEY_ID" "$HAS_ISSUER" "$HAS_P8" \
+                      "$HAS_P12" "$HAS_P12_PASSWORD" "$HAS_TEAM_ID"; do
+            if [ "$flag" = "true" ]; then present=$((present + 1)); fi
+          done
+          if [ "$present" -eq 6 ]; then
+            echo "has-apple=true" >> "$GITHUB_OUTPUT"
+            echo "All six Apple signing secrets are set; signing and notarizing."
+            exit 0
+          fi
+          echo "has-apple=false" >> "$GITHUB_OUTPUT"
+          if [ "$present" -eq 0 ]; then
+            if [ "$IS_TAG" = "true" ]; then
+              echo "::warning title=Unsigned release::No Apple signing secrets are configured; this tag ships an ad-hoc signed macOS binary that Gatekeeper rejects on a quarantined download."
+            else
+              echo "No Apple signing secrets are configured; skipping codesign and notarization."
+            fi
+            exit 0
+          fi
+          msg="Apple signing is partially configured: ${present} of 6 secrets are set."
+          if [ "$IS_TAG" = "true" ]; then
+            echo "::error title=Partial Apple signing config::${msg} Set all six or none."
+            exit 1
+          fi
+          echo "::warning title=Partial Apple signing config::${msg} Skipping codesign and notarization."
       # Honors rust-toolchain.toml (pinned channel).
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -66,6 +122,158 @@ jobs:
         if: matrix.musl
         run: sudo apt-get update && sudo apt-get install -y musl-tools
       - run: cargo build --release -p qsh-cli --target ${{ matrix.target }}
+
+      # Secrets reach the shell through `env:` only, never interpolated
+      # into `run:`; nothing echoes them and no step runs with `-x`.
+      #
+      # A new keychain defaults to `lock-on-sleep timeout=300s` (measured
+      # with `security show-keychain-info`), which would relock it before
+      # `codesign` runs; `set-keychain-settings` with no flags is
+      # `no-timeout`, which is why the keychain is created here, after the
+      # build, rather than at the top of the job.
+      - name: Import the Developer ID certificate
+        id: identity
+        if: runner.os == 'macOS' && steps.apple.outputs.has-apple == 'true'
+        shell: bash
+        env:
+          APPLE_CERT_P12: ${{ secrets.APPLE_CERT_P12 }}
+          APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          keychain="${RUNNER_TEMP}/qsh-signing.keychain-db"
+          p12="${RUNNER_TEMP}/qsh-signing.p12"
+          password="$(head -c 32 /dev/urandom | base64 | tr -d '\n')"
+          # Armed before the p12 is ever written, so a failure anywhere
+          # below (bad password, corrupt cert) still deletes it -- `rm -f`
+          # after `security import` would not run on that path.
+          trap 'rm -f "$p12"' EXIT
+
+          security create-keychain -p "$password" "$keychain"
+          # Written as soon as the keychain exists, not at the end of the
+          # step: `Delete the signing keychain` is gated on this output,
+          # so a later failure in this step must not leave it unset.
+          echo "keychain=${keychain}" >> "$GITHUB_OUTPUT"
+          security set-keychain-settings "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+
+          umask 077
+          printf '%s' "$APPLE_CERT_P12" | base64 --decode > "$p12"
+          # `-P` is the only way to hand `security import` a passphrase;
+          # there is no stdin form, so it is visible in `ps` for the life
+          # of the call on a single-tenant ephemeral runner.
+          security import "$p12" -k "$keychain" -f pkcs12 \
+            -P "$APPLE_CERT_PASSWORD" -T /usr/bin/codesign
+
+          # Without a partition list, codesign's first use of the imported
+          # private key raises a UI prompt nobody can answer. `-A` (allow
+          # any application) is the insecure shortcut and is not used.
+          security set-key-partition-list \
+            -S apple-tool:,apple: -s -k "$password" "$keychain" >/dev/null
+
+          # `list-keychains -s` REPLACES the search list, so the current
+          # list is read back and the temp keychain appended to it. The
+          # array is not an unquoted `$(...)`: shellcheck rejects that
+          # (SC2046) and actionlint runs shellcheck over every `run:`.
+          prior=()
+          while IFS= read -r kc; do
+            if [ -n "$kc" ]; then prior+=("$kc"); fi
+          done <<EOF
+          $(security list-keychains -d user | sed 's/^[[:space:]]*"//; s/"$//')
+          EOF
+          if [ "${#prior[@]}" -gt 0 ]; then
+            security list-keychains -d user -s "${prior[@]}" "$keychain"
+          else
+            security list-keychains -d user -s "$keychain"
+          fi
+
+          # The identity is read out of the keychain that was just
+          # imported rather than assembled from a secret. `codesign
+          # --sign` accepts the certificate's SHA-1 hash (`man codesign`:
+          # "interpreted as the SHA-1 hash of the certificate part of the
+          # desired identity"), which cannot collide the way a common-name
+          # substring can -- and the common name carries an organization
+          # name that is not one of the six secrets.
+          #
+          # `security find-identity` exits 0 on "0 valid identities found"
+          # (measured), so the count is what is checked, not the status.
+          security find-identity -v -p codesigning "$keychain" \
+            > "${RUNNER_TEMP}/identities.txt"
+          sed -n 's/^[[:space:]]*[0-9][0-9]*)[[:space:]]*\([0-9A-F]\{40\}\)[[:space:]]*"Developer ID Application:.*"$/\1/p' \
+            "${RUNNER_TEMP}/identities.txt" > "${RUNNER_TEMP}/hashes.txt"
+          found="$(wc -l < "${RUNNER_TEMP}/hashes.txt" | tr -d ' ')"
+          if [ "$found" -ne 1 ]; then
+            echo "::error title=Signing identity::expected exactly one Developer ID Application identity in the imported keychain, found ${found}"
+            exit 1
+          fi
+          hash="$(cat "${RUNNER_TEMP}/hashes.txt")"
+
+          # APPLE_TEAM_ID earns its keep as a cross-check: a Developer ID
+          # common name ends with the team id in parentheses.
+          cn="$(sed -n 's/^[[:space:]]*[0-9][0-9]*)[[:space:]]*[0-9A-F]\{40\}[[:space:]]*"\(Developer ID Application:.*\)"$/\1/p' \
+            "${RUNNER_TEMP}/identities.txt")"
+          case "$cn" in
+            *"(${APPLE_TEAM_ID})") ;;
+            *)
+              echo "::error title=Signing identity::the imported identity's common name does not end with the configured APPLE_TEAM_ID"
+              exit 1
+              ;;
+          esac
+          rm -f "${RUNNER_TEMP}/identities.txt" "${RUNNER_TEMP}/hashes.txt"
+
+          # A certificate hash is public -- it is derived from the cert
+          # that ships inside every signed binary -- so logging it is safe
+          # and makes a wrong-certificate run diagnosable.
+          echo "Signing with certificate ${hash}"
+          echo "hash=${hash}" >> "$GITHUB_OUTPUT"
+
+      # `--options runtime` is a notarization prerequisite; `--timestamp`
+      # is what keeps the signature valid past the certificate's expiry.
+      # No entitlements: `otool -L` on a release build lists only
+      # Security.framework, CoreFoundation, libiconv and libSystem, all
+      # Apple-signed, so hardened runtime's library validation is already
+      # satisfied, and qsh needs no JIT, no DYLD overrides, no unsigned
+      # executable memory and no debugger attachment.
+      #
+      # This signs in place, before `Binary starts` and `Release smoke
+      # (functional)` below, so the smoke certifies the bytes that ship
+      # and `Package archive (unix)` needs no change and no repackage.
+      - name: Sign the binary
+        if: runner.os == 'macOS' && steps.apple.outputs.has-apple == 'true'
+        shell: bash
+        env:
+          IDENTITY: ${{ steps.identity.outputs.hash }}
+          KEYCHAIN: ${{ steps.identity.outputs.keychain }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          codesign --force --options runtime --timestamp \
+            --keychain "$KEYCHAIN" --sign "$IDENTITY" \
+            "target/${TARGET}/release/qsh"
+
+      # `codesign --verify` on its own proves nothing here: it exits 0 on
+      # the ad-hoc linker-signed binary this leg produces today
+      # (measured). The `-R` requirement is the assertion; the two display
+      # runs are what put DoD 2's evidence in the job log. `codesign -d`
+      # writes to stderr and nothing to stdout (measured), hence `2>&1`.
+      - name: Verify the signature
+        if: runner.os == 'macOS' && steps.apple.outputs.has-apple == 'true'
+        shell: bash
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          bin="target/${TARGET}/release/qsh"
+          codesign --verify --strict --verbose=2 "$bin"
+          codesign -dv --verbose=4 "$bin" 2>&1
+          codesign --verify --strict \
+            -R="anchor apple generic and certificate leaf[subject.OU] = \"${APPLE_TEAM_ID}\"" \
+            "$bin"
+          if ! codesign -dv --verbose=4 "$bin" 2>&1 | grep -q 'flags=.*runtime'; then
+            echo "::error title=Hardened runtime::the signature does not carry the runtime flag"
+            exit 1
+          fi
 
       # crt-static is the target default; the readelf step is the guard.
       # Pins the static-link precondition for the third M10 acceptance
@@ -126,8 +334,77 @@ jobs:
           QSH_SMOKE_BIN: ${{ github.workspace }}/target/${{ matrix.target }}/release/qsh${{ matrix.ext }}
           RUST_BACKTRACE: short
 
+      # `--wait` is not the gate on its own: `notarytool submit`'s exit
+      # code has historically been 0 even for an `Invalid` submission, so
+      # the JSON `status` field is what is asserted -- which is also
+      # exactly the evidence `docs/ROADMAP.md` M10's DoD 2 asks for.
+      # `--output-format json` also suppresses the progress spinner, which
+      # otherwise fills the log with carriage returns.
+      #
+      # No stapler: `xcrun stapler` attaches a ticket to a .app, .dmg or
+      # .pkg, and this release ships a bare executable in a tar.gz
+      # (`docs/ROADMAP.md` M10 결정 기록 Q2). Notarization therefore does
+      # not touch the binary, so the bytes verified above are the bytes
+      # `Package archive (unix)` tars below.
+      - name: Notarize
+        if: runner.os == 'macOS' && steps.apple.outputs.has-apple == 'true'
+        shell: bash
+        env:
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          p8="${RUNNER_TEMP}/asc.p8"
+          archive="${RUNNER_TEMP}/qsh-notarize.zip"
+          trap 'rm -f "$p8" "$archive"' EXIT
+
+          umask 077
+          printf '%s' "$APPLE_API_PRIVATE_KEY" > "$p8"
+
+          # `-j` junks paths so the archive holds a single `qsh` member.
+          # `ditto -c -k` also works but adds an AppleDouble `._qsh`
+          # sidecar for the binary's com.apple.provenance xattr (measured).
+          rm -f "$archive"
+          zip -j -q "$archive" "target/${TARGET}/release/qsh"
+
+          submission="$(xcrun notarytool submit "$archive" \
+            --key "$p8" \
+            --key-id "$APPLE_API_KEY_ID" \
+            --issuer "$APPLE_API_ISSUER_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait --timeout 30m \
+            --output-format json)"
+          echo "$submission"
+
+          id="$(printf '%s' "$submission" | jq -r '.id')"
+          status="$(printf '%s' "$submission" | jq -r '.status')"
+          echo "notarytool status=${status} id=${id}"
+
+          if [ "$status" != "Accepted" ]; then
+            echo "::error title=Notarization failed::notarytool reported ${status}; the notary log follows."
+            if [ "$id" != "null" ] && [ -n "$id" ]; then
+              xcrun notarytool log "$id" \
+                --key "$p8" \
+                --key-id "$APPLE_API_KEY_ID" \
+                --issuer "$APPLE_API_ISSUER_ID" \
+                --team-id "$APPLE_TEAM_ID" || true
+            else
+              echo "no submission id in the response; raw submission JSON is above"
+            fi
+            exit 1
+          fi
+
       # Archive naming (qsh-<tag>-<target>.tar.gz / .zip) is a contract with
       # scripts/install.sh — keep the two in sync if you change this.
+      #
+      # Must run after `Sign the binary` / `Verify the signature` /
+      # `Notarize` above: nothing in this job re-extracts the archive to
+      # confirm the tar holds the signed, notarized bytes, so if this step
+      # ever moves earlier the chain above would keep passing while
+      # certifying a binary the archive no longer contains.
       - name: Package archive (unix)
         if: runner.os != 'Windows'
         shell: bash
@@ -152,6 +429,25 @@ jobs:
           # Default is a warning, which would ship a release quietly missing
           # a platform. A packaging step that produced nothing is a failure.
           if-no-files-found: error
+
+      # `security delete-keychain` also drops the entry from the user
+      # search list (measured), so no restore is needed -- and a restore
+      # written as `list-keychains -s login.keychain-db` would itself drop
+      # any other keychain that happened to be on the list.
+      - name: Delete the signing keychain
+        if: always() && runner.os == 'macOS' && steps.identity.outputs.keychain != ''
+        shell: bash
+        env:
+          KEYCHAIN: ${{ steps.identity.outputs.keychain }}
+        run: |
+          # No `-e` here, but the runner's `bash --noprofile --norc -eo
+          # pipefail` invocation already has it on for this whole script --
+          # `set -uo pipefail` cannot clear it. This step runs under
+          # `always()` as the last-chance cleanup, so every command in it
+          # must carry `|| true` or a single failure here fails the job.
+          set -uo pipefail
+          rm -f "${RUNNER_TEMP}/qsh-signing.p12" "${RUNNER_TEMP}/asc.p8"
+          security delete-keychain "$KEYCHAIN" || true
 
   release:
     name: release
