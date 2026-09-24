@@ -2,8 +2,13 @@
 name = "qsh-transport"
 version.workspace = true
 edition.workspace = true
-publish.workspace = true
+publish = true
 license.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "QUIC transport layer (quinn + rustls) for qsh, a QUIC-based direct-connect remote shell."
+keywords = ["quic", "remote-shell", "quinn", "rustls", "transport"]
+categories = ["network-programming", "asynchronous"]
 
 [dependencies]
 qsh-proto.workspace = true

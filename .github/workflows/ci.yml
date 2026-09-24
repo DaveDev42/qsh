@@ -199,11 +199,44 @@ jobs:
           tool: cargo-deny
       - run: cargo deny check
 
+  # crates.io publish gate (ADR-0006, docs/PRD.md §16). The four published
+  # crates are packaged and their tarballs compiled, but nothing is uploaded:
+  # `--dry-run` stops before the request, so this needs no registry token.
+  #
+  # One invocation, not four. A per-crate `cargo publish --dry-run -p
+  # qsh-transport` fails with "no matching package named `qsh-proto` found /
+  # location searched: crates.io index" until qsh-proto is actually on the
+  # registry — the generated manifest drops the `path` and keeps only the
+  # version. `--workspace` packages all four together, resolves the
+  # intra-workspace deps against that set, and verifies them in dependency
+  # order. It also skips `qsh-testkit` and `xtask` on its own, because both
+  # are `publish = false`.
+  publish-dry-run:
+    name: publish dry-run
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      # The dry-run itself does NOT pin which crates may publish: opening
+      # `qsh-testkit` would just add it to the batch and still pass, because
+      # the batch resolves its `qsh-core` dep against its own temporary
+      # registry. This step is what pins the set. `cargo metadata` reports
+      # `publish: []` for `publish = false` and `null` for open.
+      - name: The publish set is exactly the four contract crates
+        run: |
+          set -euo pipefail
+          actual=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.publish != []) | .name' | sort | tr '\n' ' ')
+          expected='qsh-cli qsh-core qsh-proto qsh-transport '
+          test "$actual" = "$expected" \
+            || { echo "publish set drifted: [$actual]"; exit 1; }
+      - run: cargo publish --dry-run --workspace
+
   # Single required check for branch protection: green iff every job above is.
   ci-ok:
     name: ci-ok
     if: always()
-    needs: [fmt, clippy, test, acceptance, arch, deny]
+    needs: [fmt, clippy, test, acceptance, arch, deny, publish-dry-run]
     runs-on: ubuntu-24.04
     steps:
       - name: Verify all jobs succeeded

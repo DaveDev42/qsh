@@ -2,8 +2,13 @@
 name = "qsh-cli"
 version.workspace = true
 edition.workspace = true
-publish.workspace = true
+publish = true
 license.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "A QUIC-based direct-connect remote shell whose sessions survive IP changes, sleep and network switches. Installs the qsh binary."
+keywords = ["quic", "remote-shell", "ssh", "terminal", "pty"]
+categories = ["command-line-utilities", "network-programming"]
 
 [[bin]]
 name = "qsh"

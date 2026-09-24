@@ -2,8 +2,13 @@
 name = "qsh-core"
 version.workspace = true
 edition.workspace = true
-publish.workspace = true
+publish = true
 license.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "Session broker, ACL enforcement, identity and trust for qsh, a QUIC-based direct-connect remote shell."
+keywords = ["quic", "remote-shell", "pty", "session", "ssh"]
+categories = ["network-programming", "authentication"]
 
 [dependencies]
 qsh-proto.workspace = true

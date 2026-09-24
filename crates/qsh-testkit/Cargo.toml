@@ -2,7 +2,9 @@
 name = "qsh-testkit"
 version.workspace = true
 edition.workspace = true
-publish.workspace = true
+# Test harness (build tooling), so publishing has no meaning. Same value as
+# the workspace default, spelled out explicitly instead of inherited.
+publish = false
 license.workspace = true
 
 [dependencies]

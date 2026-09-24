@@ -23,9 +23,13 @@ confidence-threshold = 0.8
 
 [bans]
 multiple-versions = "warn"
-# Intra-workspace path dependencies (qsh-core, qsh-proto, ...) have no
-# version requirement by design (private, unpublished workspace) and would
-# otherwise be flagged as wildcards.
+# The four published crates (qsh-proto, qsh-transport, qsh-core, qsh-cli)
+# gained a version on their path dependencies when M10 opened publishing
+# (crates.io requires it). Two versionless path dependencies remain, both
+# intentional: qsh-cli's dev-dependency on qsh-testkit, and xtask's on
+# qsh-cli. Both are publish = false, so adding a version would require a
+# crate that is never published. This key only matters when [bans] wildcards
+# is deny, which it is not right now.
 allow-wildcard-paths = true
 deny = [
     { name = "openssl" },
