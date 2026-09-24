@@ -63,5 +63,6 @@ same scenario in its short mode instead.
 A container pair that builds a never-configured machine for each round of
 the SC1 stopwatch campaign and checks the campaign's preconditions before
 the timer starts. It measures nothing — the thing being timed is human
-time. See [docs/campaigns/m7-stopwatch.md](../docs/campaigns/m7-stopwatch.md)
-and stopwatch/README.md (Korean, like the campaign doc it serves).
+time. See [docs/campaigns/m7-stopwatch.md](../docs/campaigns/m7-stopwatch.md),
+[docs/campaigns/m9-stopwatch.md](../docs/campaigns/m9-stopwatch.md), and
+stopwatch/README.md (Korean, like the campaign docs it serves).
