@@ -448,6 +448,18 @@ pub struct ServeConfig {
     /// Listen address. `qsh serve --bind` wins over this, which wins over
     /// the `[::]:4433` default (`docs/CLI.md` §6.12).
     pub bind: Option<String>,
+    /// Outbound target for `qsh serve --to` (ROADMAP M9 (b), ADR-0012 결정 4/5):
+    /// a trust-store alias or a bare address, resolved the same way `--to`
+    /// itself is (`crate::ops::Ops::resolve_serve_target`). `qsh serve
+    /// --to` on the command line wins over this and this is not even read
+    /// when it is given (`crate::serve::resolve_serve_mode`); this in turn
+    /// wins over the legacy `[reverse].controller` key when both are set
+    /// and equal. Set and disagreeing with `[reverse].controller` is a
+    /// `CONFIG_ERROR` for `qsh serve`/`qsh service install`
+    /// (`crate::serve::config_outbound_target`) and a
+    /// `config_serve_to_conflict` finding for `qsh doctor`, which stays
+    /// exit `0` regardless (`crate::doctor::DiagnosticId::ConfigServeToConflict`).
+    pub to: Option<String>,
     /// Per-session replay ring byte budget. Unset ⇒
     /// [`ServeConfig::DEFAULT_REPLAY_BYTES`] (8 MiB, `docs/PRD.md` §13,
     /// ADR-0004).
@@ -896,19 +908,21 @@ impl ListenConfig {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ReverseConfig {
-    /// Trust-store alias of the controller to dial. **Reserved, not
-    /// currently read by any code path.** `docs/CLI.md` §6.13's synopsis
-    /// (`qsh reverse <controller> [--offered-name <name>]`, no brackets
-    /// around `<controller>`) makes the CLI positional mandatory —
+    /// Trust-store alias or address of the reverse controller — the legacy
+    /// key, read as a fallback by `qsh serve`/`qsh doctor`/`qsh service
+    /// install` when `[serve].to` is unset (ROADMAP M9 (b), ADR-0012 결정 4/5).
+    /// `qsh reverse <controller>`'s CLI positional is still mandatory
+    /// (`docs/CLI.md` §6.13's synopsis) and never reads this key —
     /// `crates/qsh-cli/src/cli.rs`'s `Command::Reverse.controller` is a
-    /// plain `String`, never absent — so there is no code path that would
-    /// ever fall back to this key the way `offered_name` genuinely falls
-    /// back to its own (`resolve_offered_name`, `reverse/target.rs`).
-    /// Kept so a `config.toml` carrying `[reverse].controller`
-    /// (`docs/design/architecture.md` §7's documented layout) parses
-    /// instead of hard-failing, and reserved in case a future milestone
-    /// relaxes the positional to optional — no ROADMAP/PLAN step currently
-    /// commits to that (`PLAN.md` M3 Step 3 review finding).
+    /// plain `String`, so only `qsh serve`'s config-only path
+    /// (`crate::serve::resolve_serve_mode` step 5,
+    /// `crate::serve::config_outbound_target`) ever falls back to it, the
+    /// same way `offered_name` falls back to its own key
+    /// (`resolve_offered_name`, `reverse/target/mod.rs`). Set and
+    /// disagreeing with `[serve].to` is a `CONFIG_ERROR` for `qsh serve`/
+    /// `qsh service install` and a `config_serve_to_conflict` doctor
+    /// finding otherwise (`crate::serve::config_serve_to_conflict`);
+    /// `[serve].to` silently wins when the two agree.
     pub controller: Option<String>,
     /// Name this target offers itself as. `--offered-name` wins over this.
     /// Only takes effect when the controller has no trust-store alias for

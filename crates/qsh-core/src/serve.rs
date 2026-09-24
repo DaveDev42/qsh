@@ -182,7 +182,153 @@ pub fn resolve_bind(flag: Option<&str>, config: &Config) -> Result<SocketAddr, O
         })
 }
 
+/// What `qsh serve` resolves to once every CLI flag and config key has been
+/// weighed (`docs/CLI.md` §6.12/§6.13, ADR-0012 결정 2/4/5, ADR-0014 결정
+/// 7): listen inbound, or dial out and register as a reverse target — the
+/// same role the hidden `qsh reverse <controller>` alias plays. [`Outbound`]
+/// carries the *literal* the operator or config named, not yet resolved
+/// through the trust store/`hosts.toml` — [`crate::ops::Ops::resolve_serve_target`]
+/// is the next step for a caller that needs the actual controller key,
+/// mirroring [`crate::reverse::target`]'s own "keep the literal, resolve it
+/// per dial attempt" discipline so both spellings share one resolution
+/// path.
+///
+/// [`Outbound`]: ServeMode::Outbound
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServeMode {
+    /// Listen inbound at this resolved address (already CLI flag >
+    /// `[serve].bind` > [`DEFAULT_BIND`], via [`resolve_bind`]).
+    Inbound(SocketAddr),
+    /// Dial `target` and register as a reverse target, offering `name` if
+    /// given.
+    Outbound {
+        target: String,
+        offered_name: Option<String>,
+    },
+}
+
+/// Both `[serve].to` and the legacy `[reverse].controller` set, and
+/// disagreeing — the one condition [`resolve_serve_mode`]'s config branch
+/// (step 5) must fail closed on rather than silently pick a winner for
+/// (ADR-0012 결정 5). Returns `(serve_to, reverse_controller)` so a caller
+/// can name both values in its own message. `None` whenever at most one
+/// key is set, or both are set and equal — `ServeConfig::to` wins in
+/// that last case, silently, because there is nothing to disagree about.
+///
+/// The single source of truth both [`config_outbound_target`] (which turns
+/// `Some` into a `CONFIG_ERROR` for `qsh serve`/`qsh service install`) and
+/// `Ops::doctor`'s `config_serve_to_conflict` finding (which turns the same
+/// `Some` into a `warn`-free `error` finding instead, never a hard failure
+/// — `doctor.run` always exits `0`) read, so the two surfaces can never
+/// drift on what counts as a conflict.
+pub fn config_serve_to_conflict(config: &Config) -> Option<(&str, &str)> {
+    match (
+        config.serve.to.as_deref(),
+        config.reverse.controller.as_deref(),
+    ) {
+        (Some(serve_to), Some(controller)) if serve_to != controller => {
+            Some((serve_to, controller))
+        }
+        _ => None,
+    }
+}
+
+/// The last branch of [`resolve_serve_mode`]: neither `--to` nor `--bind` was given
+/// on the command line, so the outbound target (if any) comes from
+/// `config.toml` alone. `[serve].to` wins over the legacy
+/// `[reverse].controller` key when both are set and equal;
+/// [`config_serve_to_conflict`] is consulted first so a disagreement is a
+/// `CONFIG_ERROR` here rather than a silently resolved precedence pick
+/// (ADR-0012 결정 5). `Ok(None)` means no outbound target configured at
+/// all — the caller falls back to [`resolve_bind`].
+pub fn config_outbound_target(config: &Config) -> Result<Option<String>, OpError> {
+    if let Some((serve_to, controller)) = config_serve_to_conflict(config) {
+        return Err(OpError::new(
+            ErrorCode::ConfigError,
+            format!(
+                "[serve].to ({serve_to:?}) and [reverse].controller ({controller:?}) are both \
+                 set and disagree. Delete one of the two keys, keep [serve].to, then restart \
+                 `qsh serve` — config.toml is only read once at start."
+            ),
+        ));
+    }
+    Ok(config
+        .serve
+        .to
+        .clone()
+        .or_else(|| config.reverse.controller.clone()))
+}
+
+/// Resolve what `qsh serve` does this run: listen inbound, or dial out as a
+/// reverse target (`docs/CLI.md` §6.12/§6.13, ADR-0012 결정 2/4/5, ADR-0014
+/// 결정 7). All decision logic lives here, in `qsh-core` — `qsh-cli` only
+/// parses `--to`/`--name`/`--bind` and dispatches on the result
+/// (`CLAUDE.md`'s crate boundary).
+///
+/// Strict order, each step short-circuiting the rest:
+/// 1. `to` and `bind` both given → [`ErrorCode::InvalidArgument`] (never a
+///    clap `conflicts_with` — this must exit `255`, not clap's `2`, the
+///    same precedent `cli.rs`'s `-L` doc sets for a spec clap itself could
+///    reject but deliberately does not).
+/// 2. `name` given without `to` → `InvalidArgument` — a name is only
+///    meaningful outbound; failing closed here is cheaper than silently
+///    ignoring an operator's flag.
+/// 3. `to` given → [`ServeMode::Outbound`] with that literal. The config
+///    keys are not read *at all* on this path — the short-circuit happens
+///    before either lookup, so "no conflict verdict when `--to` wins" is
+///    unreachable by construction, not a suppressed check.
+/// 4. `bind` given (no `to`) → [`ServeMode::Inbound`] via [`resolve_bind`].
+///    The config's outbound keys are not read either: a CLI flag is tier
+///    one, and the operator typed an inbound address.
+/// 5. Neither given → [`config_outbound_target`] decides: `Some` is
+///    outbound, `None` falls back to [`resolve_bind`] with no CLI flag.
+pub fn resolve_serve_mode(
+    to: Option<&str>,
+    name: Option<&str>,
+    bind: Option<&str>,
+    config: &Config,
+) -> Result<ServeMode, OpError> {
+    if to.is_some() && bind.is_some() {
+        return Err(OpError::new(
+            ErrorCode::InvalidArgument,
+            "--to and --bind are mutually exclusive: --to dials out as a reverse target, \
+             --bind listens inbound. Pick one.",
+        ));
+    }
+    if to.is_none() && name.is_some() {
+        return Err(OpError::new(
+            ErrorCode::InvalidArgument,
+            "--name only takes effect together with --to; it names nothing when this process \
+             listens inbound.",
+        ));
+    }
+    if let Some(target) = to {
+        return Ok(ServeMode::Outbound {
+            target: target.to_string(),
+            offered_name: name.map(str::to_owned),
+        });
+    }
+    if bind.is_some() {
+        return Ok(ServeMode::Inbound(resolve_bind(bind, config)?));
+    }
+    match config_outbound_target(config)? {
+        Some(target) => Ok(ServeMode::Outbound {
+            target,
+            offered_name: None,
+        }),
+        None => Ok(ServeMode::Inbound(resolve_bind(None, config)?)),
+    }
+}
+
 /// Run the host until `shutdown` resolves.
+///
+/// `bind` is the already-resolved address — the caller runs
+/// [`resolve_serve_mode`]/[`resolve_bind`] itself and passes
+/// `ServeMode::Inbound`'s payload straight through, so this function
+/// never re-reads `config.toml` or re-resolves the bind flag (the mode
+/// decision and the accept-loop startup used to resolve
+/// the bind address independently, which could disagree on a
+/// multi-address `--bind` name and always cost a second config read).
 ///
 /// `identity` must already be loaded (synchronously, before entering the
 /// runtime — see `identity::load`). `on_bound` receives the actual bound
@@ -204,13 +350,12 @@ pub async fn run_serve(
     paths: &Paths,
     config: &Config,
     identity: LoadedIdentity,
-    bind_flag: Option<&str>,
+    bind: SocketAddr,
     on_bound: impl FnOnce(SocketAddr),
     on_runtime: impl FnOnce(&HostRuntime),
     on_notice: impl Fn(&str) + Send + Sync + 'static,
     shutdown: impl std::future::Future<Output = ()>,
 ) -> Result<(), OpError> {
-    let bind = resolve_bind(bind_flag, config)?;
     let trust = SharedTrustStore::open(paths.trust_file())?;
     // ADR-0002 / M7 Step 4 (report §B12: forward-host, `qsh serve`, only —
     // deliberately wired here in `run_serve`, not in the `host_runtime`
@@ -394,137 +539,4 @@ pub fn host_runtime(paths: &Paths, config: &Config, device_id: impl Into<String>
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn default_port_is_the_port_inside_default_bind() {
-        assert_eq!(
-            DEFAULT_PORT,
-            DEFAULT_BIND.parse::<SocketAddr>().unwrap().port()
-        );
-    }
-
-    #[test]
-    fn bind_precedence_flag_then_config_then_default() {
-        let mut config = Config::default();
-        assert_eq!(
-            resolve_bind(None, &config).unwrap(),
-            DEFAULT_BIND.parse::<SocketAddr>().unwrap()
-        );
-        config.serve.bind = Some("127.0.0.1:5000".into());
-        assert_eq!(
-            resolve_bind(None, &config).unwrap(),
-            "127.0.0.1:5000".parse::<SocketAddr>().unwrap()
-        );
-        assert_eq!(
-            resolve_bind(Some("127.0.0.1:6000"), &config).unwrap(),
-            "127.0.0.1:6000".parse::<SocketAddr>().unwrap()
-        );
-        assert_eq!(
-            resolve_bind(Some("localhost:7000"), &config)
-                .unwrap()
-                .port(),
-            7000
-        );
-        let err = resolve_bind(Some("not an address"), &config).unwrap_err();
-        assert_eq!(err.code, ErrorCode::InvalidArgument);
-    }
-
-    #[tokio::test]
-    async fn host_runtime_wires_device_id_and_a_shared_audit_sink() {
-        let dir = tempfile::tempdir().unwrap();
-        let paths = Paths::new(dir.path(), dir.path());
-        let runtime = host_runtime(&paths, &Config::default(), "hermes");
-        assert_eq!(runtime.server.local_hello(None).device_name, "hermes");
-        assert_eq!(runtime.audit.path(), paths.audit_log());
-        assert_eq!(runtime.server.pending_tickets(), 0);
-    }
-
-    // `names_only_port`: unit coverage the two const-asserts
-    // above it never exercise on their own (a const-assert only proves
-    // the two production wordings pass; it says nothing about the
-    // function's behavior on inputs those wordings never contain).
-    #[test]
-    fn names_only_port_true_when_the_only_digit_run_is_the_port() {
-        assert!(names_only_port("assuming port 4433: ...", 4433));
-    }
-
-    #[test]
-    fn names_only_port_false_when_a_second_number_appears() {
-        assert!(!names_only_port(
-            "assuming port 4433 after 80 retries",
-            4433
-        ));
-    }
-
-    #[test]
-    fn names_only_port_false_for_a_longer_run_sharing_a_prefix() {
-        // `44330` contains `4433` as a prefix but is a different number.
-        assert!(!names_only_port("bound to 44330", 4433));
-    }
-
-    #[test]
-    fn names_only_port_false_with_no_digits_at_all() {
-        assert!(!names_only_port("no port named here", 4433));
-    }
-
-    #[test]
-    fn names_only_port_false_for_a_leading_zero_spelling() {
-        // `04433` numerically equals 4433 but is not the same spelling —
-        // a wording must name the port, not a zero-padded look-alike.
-        assert!(!names_only_port("assuming port 04433", 4433));
-    }
-
-    #[test]
-    fn names_only_port_false_for_a_digit_run_long_enough_to_overflow_u32() {
-        // Regression: this used to keep multiplying past `u16::MAX` and
-        // panic with a `u32` overflow in a const context instead of
-        // returning `false`.
-        assert!(!names_only_port("after 99999999999999 bytes", 4433));
-    }
-
-    #[test]
-    fn names_only_port_true_for_the_two_production_wordings() {
-        assert!(names_only_port(
-            crate::trust::ADDRESS_PORT_ASSUMED_NOTICE,
-            DEFAULT_PORT
-        ));
-        assert!(names_only_port(BIND_UNAVAILABLE_REMEDY, DEFAULT_PORT));
-    }
-
-    // `bind_setup_error`: only a genuine `SetupError::Bind`
-    // gets the shared-default-port remedy; a TLS/QUIC config failure
-    // (which a different `--bind` can never fix) gets the bare
-    // observation instead.
-    #[test]
-    fn bind_setup_error_attaches_the_remedy_only_to_an_actual_bind_failure() {
-        let bind: SocketAddr = "127.0.0.1:4433".parse().unwrap();
-        let bind_err = SetupError::Bind {
-            addr: bind,
-            source: std::io::Error::new(std::io::ErrorKind::AddrInUse, "address in use"),
-        };
-        let op = bind_setup_error(&bind, bind_err);
-        assert!(op.message.starts_with("cannot listen on 127.0.0.1:4433:"));
-        assert!(
-            op.message.contains(BIND_UNAVAILABLE_REMEDY),
-            "an OS-level bind failure must carry the shared-default-port remedy: {}",
-            op.message
-        );
-    }
-
-    #[test]
-    fn bind_setup_error_does_not_attach_the_remedy_to_a_tls_config_failure() {
-        let bind: SocketAddr = "127.0.0.1:4433".parse().unwrap();
-        let tls_err = SetupError::Tls(rustls::Error::General("bad certificate".into()));
-        let op = bind_setup_error(&bind, tls_err);
-        assert!(op.message.starts_with("cannot listen on 127.0.0.1:4433:"));
-        assert!(
-            !op.message.contains(BIND_UNAVAILABLE_REMEDY),
-            "a TLS config failure must not suggest re-binding on a free port, which cannot \
-             fix it: {}",
-            op.message
-        );
-        assert_eq!(op.code, ErrorCode::ConfigError);
-    }
-}
+mod tests;

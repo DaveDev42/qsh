@@ -139,7 +139,11 @@ fn a_reverse_registration_event_is_one_pure_json_line_at_default_verbosity() {
 #[test]
 fn ops_from_env_failure_routes_serve_listen_and_reverse_off_the_envelope_path() {
     assert_eq!(
-        long_running_setup_mode(&Some(Command::Serve { bind: None })),
+        long_running_setup_mode(&Some(Command::Serve {
+            bind: None,
+            to: None,
+            name: None,
+        })),
         Some(SERVE_MODE)
     );
     assert_eq!(
@@ -157,6 +161,53 @@ fn ops_from_env_failure_routes_serve_listen_and_reverse_off_the_envelope_path() 
     // path.
     assert_eq!(long_running_setup_mode(&Some(Command::Version)), None);
     assert_eq!(long_running_setup_mode(&None), None);
+}
+
+/// ROADMAP M9 (b) (`docs/CLI.md` §6.13): the hidden `qsh reverse <controller>` alias
+/// keeps routing through [`long_running_setup_mode`] exactly as before —
+/// adding `Command::Serve`'s `to`/`name` fields must not have disturbed
+/// the `Command::Reverse` arm, which this pins on its own regardless of
+/// what `Command::Serve` looks like.
+#[test]
+fn long_running_setup_mode_still_routes_the_hidden_reverse_form() {
+    assert_eq!(
+        long_running_setup_mode(&Some(Command::Reverse {
+            controller: "widget".to_string(),
+            offered_name: Some("laptop".to_string()),
+        })),
+        Some(REVERSE_MODE)
+    );
+}
+
+/// ROADMAP M9 (b) (`docs/CLI.md` §6.12): `qsh serve --to` is a long-running setup
+/// mode exactly like plain `qsh serve` — the routing decision in
+/// [`long_running_setup_mode`] only matches on the `Command::Serve`
+/// variant, never on which of its fields are set, so a stdout-envelope
+/// leak on an early `Ops::from_env()` failure cannot come back for the
+/// `--to` spelling specifically.
+#[test]
+fn long_running_setup_mode_routes_serve_to_as_a_long_running_mode() {
+    assert_eq!(
+        long_running_setup_mode(&Some(Command::Serve {
+            bind: None,
+            to: Some("widget".to_string()),
+            name: Some("laptop".to_string()),
+        })),
+        Some(SERVE_MODE)
+    );
+}
+
+/// ROADMAP M9 (b) (`docs/CLI.md` §6.12/§6.13): [`command_name`] reports a mode token, not
+/// an op name, for both the `qsh serve --to` spelling and the hidden
+/// `qsh reverse` alias — neither is an operation, so neither has a
+/// `qsh.cli/v1` command string of its own (`docs/CLI.md` §2.2).
+#[test]
+fn command_name_reports_a_mode_token_for_both_spellings() {
+    let cli = Cli::try_parse_from(["qsh", "serve", "--to", "widget"]).unwrap();
+    assert_eq!(command_name(&cli), SERVE_MODE);
+
+    let cli = Cli::try_parse_from(["qsh", "reverse", "widget"]).unwrap();
+    assert_eq!(command_name(&cli), REVERSE_MODE);
 }
 
 #[test]

@@ -95,7 +95,7 @@ fn cli_md_section_6_13_quotes_the_bind_unavailable_remedy_verbatim() {
     let cli_md = read_doc("docs/CLI.md");
     let section = heading_section_slice(
         &cli_md,
-        "### 6.13 장기 실행 모드: `qsh listen` / `qsh reverse`",
+        "### 6.13 장기 실행 모드: `qsh listen` / `qsh serve --to`",
     );
     assert!(
         section.contains(BIND_UNAVAILABLE_REMEDY),
@@ -135,7 +135,7 @@ fn cli_md_section_6_13_quotes_the_pairing_pin_notice_constants_verbatim() {
     let cli_md = read_doc("docs/CLI.md");
     let section = heading_section_slice(
         &cli_md,
-        "### 6.13 장기 실행 모드: `qsh listen` / `qsh reverse`",
+        "### 6.13 장기 실행 모드: `qsh listen` / `qsh serve --to`",
     );
     for fragment in [
         PAIRING_PINNED_SELF_ASSERTED,

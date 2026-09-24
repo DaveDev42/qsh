@@ -315,13 +315,114 @@ fn serve_bind_is_optional() {
     let cli = Cli::try_parse_from(["qsh", "serve"]).unwrap();
     assert!(matches!(
         cli.command.unwrap(),
-        Command::Serve { bind: None }
+        Command::Serve {
+            bind: None,
+            to: None,
+            name: None,
+        }
     ));
     let cli = Cli::try_parse_from(["qsh", "serve", "--bind", "127.0.0.1:0"]).unwrap();
     match cli.command.unwrap() {
-        Command::Serve { bind } => assert_eq!(bind.as_deref(), Some("127.0.0.1:0")),
+        Command::Serve { bind, to, name } => {
+            assert_eq!(bind.as_deref(), Some("127.0.0.1:0"));
+            assert_eq!(to, None);
+            assert_eq!(name, None);
+        }
         other => panic!("expected serve, got {other:?}"),
     }
+}
+
+/// ROADMAP M9 (b) (ADR-0012 결정 2/4): `qsh serve --to <controller>` and `qsh
+/// reverse <controller>` must parse to the same controller literal and
+/// the same offered name — the CLI layer's only obligation is that both
+/// spellings hand `run_serve`/`run_reverse` identical inputs (`main.rs`'s
+/// `run_reverse` is where they actually converge, not here — this test
+/// only pins the parse side).
+#[test]
+fn serve_to_and_reverse_converge_on_the_same_controller_and_offered_name() {
+    let via_serve =
+        Cli::try_parse_from(["qsh", "serve", "--to", "box", "--name", "laptop"]).unwrap();
+    let (serve_to_target, serve_to_name) = match via_serve.command.unwrap() {
+        Command::Serve { to, name, bind } => {
+            assert_eq!(bind, None);
+            (to.unwrap(), name)
+        }
+        other => panic!("expected serve, got {other:?}"),
+    };
+
+    let via_reverse =
+        Cli::try_parse_from(["qsh", "reverse", "box", "--offered-name", "laptop"]).unwrap();
+    let (reverse_controller, reverse_offered_name) = match via_reverse.command.unwrap() {
+        Command::Reverse {
+            controller,
+            offered_name,
+        } => (controller, offered_name),
+        other => panic!("expected reverse, got {other:?}"),
+    };
+
+    assert_eq!(serve_to_target, reverse_controller);
+    assert_eq!(serve_to_name, reverse_offered_name);
+}
+
+/// ROADMAP M9 (b): `--to` and `--bind` both parse together at
+/// the clap layer — clap has no `conflicts_with` between them on purpose
+/// (`cli.rs`'s own doc on `Serve::bind`) so the exit code for combining
+/// them is `qsh-core`'s `INVALID_ARGUMENT` (255), not clap's usage error
+/// (2). This test pins that clap itself does not reject the combination.
+#[test]
+fn serve_to_and_bind_together_still_parse_at_the_clap_layer() {
+    let cli =
+        Cli::try_parse_from(["qsh", "serve", "--to", "box", "--bind", "127.0.0.1:0"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Serve { to, bind, name } => {
+            assert_eq!(to.as_deref(), Some("box"));
+            assert_eq!(bind.as_deref(), Some("127.0.0.1:0"));
+            assert_eq!(name, None);
+        }
+        other => panic!("expected serve, got {other:?}"),
+    }
+}
+
+/// ROADMAP M9 (b): `qsh reverse` is hidden from `qsh --help`'s
+/// `Commands:` block (`#[command(hide = true)]`, ADR-0012 결정 2/4) but
+/// still parses and still has its own `--help` in full — `hide` only
+/// removes it from the parent listing.
+#[test]
+fn reverse_is_hidden_from_help_but_still_parses() {
+    // `reverse` legitimately appears in prose elsewhere in the top-level
+    // help (`serve`'s and `listen`'s own one-line descriptions both
+    // mention it) — what must not exist is a `Commands:` entry naming it:
+    // exactly a two-space indent (clap's subcommand-list indent, never
+    // used for wrapped description text) followed immediately by the bare
+    // word `reverse`.
+    let top_level_help = Cli::command().render_help().to_string();
+    assert!(
+        !top_level_help.lines().any(|line| {
+            line.strip_prefix("  ")
+                .is_some_and(|rest| !rest.starts_with(' ') && rest.starts_with("reverse"))
+        }),
+        "qsh --help must not list the hidden `reverse` alias as a Commands: entry: {top_level_help:?}"
+    );
+
+    let cli = Cli::try_parse_from(["qsh", "reverse", "box"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Reverse {
+            controller,
+            offered_name,
+        } => {
+            assert_eq!(controller, "box");
+            assert_eq!(offered_name, None);
+        }
+        other => panic!("expected reverse, got {other:?}"),
+    }
+
+    let reverse_help = Cli::command()
+        .find_subcommand("reverse")
+        .expect("hidden subcommand must still be reachable by name")
+        .clone()
+        .render_help()
+        .to_string();
+    assert!(reverse_help.contains("controller"));
 }
 
 #[test]

@@ -341,6 +341,31 @@ impl TrustStore {
         self.find(name).filter(|p| !p.address.is_empty())
     }
 
+    /// Every pinned peer whose own dial address normalizes
+    /// ([`normalize_peer_address`]) to `normalized_address` (already
+    /// normalized by the caller) — the address half of `qsh serve --to`'s
+    /// two-step resolution (ADR-0014 결정 7, ROADMAP M9 (b)): name lookup
+    /// (`crate::ops::resolve_peer_address`) runs first, and only on a
+    /// miss does a caller fall back to this scan. An address-less pin
+    /// (`""`, inbound-only, `docs/CLI.md` §6.1/§6.11) never matches — the
+    /// same "empty means never a dial target" rule
+    /// [`normalize_peer_address`]'s own doc states.
+    ///
+    /// Returns every match rather than picking one: more than one match is
+    /// the caller's ambiguity to reject (`INVALID_ARGUMENT`, no first-wins
+    /// — ADR-0014 결정 7 is explicit that address ambiguity must not be
+    /// silently resolved the way `--to`'s name lookup is single-valued by
+    /// construction).
+    pub fn find_by_address<'a>(
+        &'a self,
+        normalized_address: &'a str,
+    ) -> impl Iterator<Item = &'a TrustPeer> + 'a {
+        self.peers.iter().filter(move |p| {
+            !p.address.is_empty()
+                && normalize_peer_address(&p.address).address == normalized_address
+        })
+    }
+
     /// Pin `name`, idempotently — with one deliberate exception (`PLAN.md`
     /// M7 Step 2 decision B): re-adding an already-pinned name under the
     /// *same* fingerprint but a *different* `address` overwrites the

@@ -866,6 +866,145 @@ fn doctor_reports_controller_unreachable_for_a_dangling_controller_alias() {
     );
 }
 
+/// ROADMAP M9 (h) (`docs/CLI.md` §6.17): `doctor_connectivity_findings` reads
+/// `[serve].to` before falling back to the legacy `[reverse].controller`
+/// — the same precedence `infer_run_mode` uses (`doctor.rs`'s own doc on
+/// `doctor_connectivity_findings`). With both set (and disagreeing, so
+/// `config_serve_to_conflict` also fires — irrelevant to this test, which
+/// only pins which alias gets probed), the probed alias must be
+/// `[serve].to`'s.
+#[test]
+fn doctor_connectivity_probes_serve_to_before_the_legacy_reverse_controller() {
+    let (_guard, ops) = healthy_ops();
+    crate::config::ensure_private_dir(&ops.paths().config_dir).unwrap();
+    std::fs::write(
+        ops.paths().config_file(),
+        "[serve]\nto = \"serve-to-ctrl\"\n[reverse]\ncontroller = \"legacy-ctrl\"\n",
+    )
+    .unwrap();
+
+    let data = ops
+        .doctor(DoctorReq { host: None }, SystemTime::now())
+        .unwrap();
+    let finding = data
+        .findings
+        .iter()
+        .find(|f| f.code == "controller_unreachable")
+        .expect("controller_unreachable finding");
+    assert!(
+        finding.detail.contains("serve-to-ctrl"),
+        "must probe [serve].to's alias: {finding:?}"
+    );
+    assert!(
+        !finding.detail.contains("legacy-ctrl"),
+        "must not probe the legacy alias once [serve].to is set: {finding:?}"
+    );
+}
+
+/// ROADMAP M9 (h) (`docs/CLI.md` §6.17): with `[serve].to` unset, the legacy
+/// `[reverse].controller` still drives connectivity probing exactly as
+/// before this rename (ROADMAP M9 (b)) — this is the fallback half of the precedence pinned
+/// above.
+#[test]
+fn doctor_connectivity_falls_back_to_the_legacy_reverse_controller_when_serve_to_is_unset() {
+    let (_guard, ops) = healthy_ops();
+    crate::config::ensure_private_dir(&ops.paths().config_dir).unwrap();
+    std::fs::write(
+        ops.paths().config_file(),
+        "[reverse]\ncontroller = \"legacy-ctrl\"\n",
+    )
+    .unwrap();
+
+    let data = ops
+        .doctor(DoctorReq { host: None }, SystemTime::now())
+        .unwrap();
+    let finding = data
+        .findings
+        .iter()
+        .find(|f| f.code == "controller_unreachable")
+        .expect("controller_unreachable finding");
+    assert!(
+        finding.detail.contains("legacy-ctrl"),
+        "must fall back to probing the legacy alias: {finding:?}"
+    );
+}
+
+// -----------------------------------------------------------------
+// config_serve_to_conflict (ROADMAP M9 (h), ADR-0012 결정 5).
+// -----------------------------------------------------------------
+
+fn config_serve_to_conflict_findings(ops: &Ops) -> Vec<DoctorFinding> {
+    let data = ops
+        .doctor(DoctorReq { host: None }, SystemTime::now())
+        .unwrap();
+    data.findings
+        .into_iter()
+        .filter(|f| f.code == "config_serve_to_conflict")
+        .collect()
+}
+
+#[test]
+fn doctor_reports_config_serve_to_conflict_when_the_two_keys_disagree() {
+    let (_guard, ops) = healthy_ops();
+    std::fs::write(
+        ops.paths().config_file(),
+        "[serve]\nto = \"from-serve\"\n[reverse]\ncontroller = \"from-reverse\"\n",
+    )
+    .unwrap();
+
+    let findings = config_serve_to_conflict_findings(&ops);
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert_eq!(findings[0].status, "error");
+    assert!(findings[0].detail.contains("from-serve"));
+    assert!(findings[0].detail.contains("from-reverse"));
+}
+
+#[test]
+fn doctor_does_not_report_config_serve_to_conflict_when_the_two_keys_agree() {
+    let (_guard, ops) = healthy_ops();
+    std::fs::write(
+        ops.paths().config_file(),
+        "[serve]\nto = \"same\"\n[reverse]\ncontroller = \"same\"\n",
+    )
+    .unwrap();
+
+    assert!(config_serve_to_conflict_findings(&ops).is_empty());
+}
+
+#[test]
+fn doctor_does_not_report_config_serve_to_conflict_when_only_one_key_is_set() {
+    let (_guard, ops) = healthy_ops();
+    std::fs::write(ops.paths().config_file(), "[serve]\nto = \"from-serve\"\n").unwrap();
+    assert!(config_serve_to_conflict_findings(&ops).is_empty());
+
+    let (_guard, ops) = healthy_ops();
+    std::fs::write(
+        ops.paths().config_file(),
+        "[reverse]\ncontroller = \"from-reverse\"\n",
+    )
+    .unwrap();
+    assert!(config_serve_to_conflict_findings(&ops).is_empty());
+}
+
+/// `doctor.run` always exits `0` (module doc) — a `config_serve_to_conflict`
+/// finding is `status: "error"` (raising `overall` to `"error"`) but must
+/// never turn into an `Err` from `Ops::doctor` itself, which is the
+/// qsh-core-level half of that CLI-level guarantee.
+#[test]
+fn doctor_still_exits_zero_with_a_serve_to_conflict() {
+    let (_guard, ops) = healthy_ops();
+    std::fs::write(
+        ops.paths().config_file(),
+        "[serve]\nto = \"from-serve\"\n[reverse]\ncontroller = \"from-reverse\"\n",
+    )
+    .unwrap();
+
+    let data = ops
+        .doctor(DoctorReq { host: None }, SystemTime::now())
+        .expect("doctor.run must still succeed with a serve_to conflict present");
+    assert_eq!(data.overall, "error");
+}
+
 /// P3-4 (verify round): `req.host` naming the same peer as
 /// `[reverse].controller` used to be probed twice — once via the
 /// controller branch (`controller_unreachable`) and once via the
@@ -1264,8 +1403,9 @@ fn doctor_reports_no_config_unknown_key_when_config_toml_is_absent() {
 /// fails this test.
 #[test]
 fn known_leaf_paths_round_trip_covers_every_serve_cap_key() {
-    const ALL_SERVE_KEYS: [&str; 16] = [
+    const ALL_SERVE_KEYS: [&str; 17] = [
         "bind",
+        "to",
         "replay_bytes",
         "resume_ttl",
         "close_grace_ms",
@@ -1284,6 +1424,7 @@ fn known_leaf_paths_round_trip_covers_every_serve_cap_key() {
     ];
     let serve = crate::config::ServeConfig {
         bind: Some("[::]:4433".to_string()),
+        to: Some("personal-mac".to_string()),
         replay_bytes: Some(1),
         resume_ttl: Some(2),
         close_grace_ms: Some(3),
@@ -1337,6 +1478,41 @@ fn infer_run_mode_prefers_listen_then_reverse_then_defaults_to_serve() {
     // already-set `[reverse].controller` (`infer_run_mode`'s own precedence).
     config.listen.allow_advertised_names = true;
     assert_eq!(infer_run_mode(&config), "listen");
+}
+
+/// ROADMAP M9 (h): `[serve].to` sits between `[listen]` and the legacy
+/// `[reverse].controller` in `infer_run_mode`'s precedence — both outbound
+/// keys map to the same `"reverse"` token today (`infer_run_mode` is an
+/// OR over the two, `ops/doctor.rs:690`), so this asserted `"reverse"`
+/// holds whichever key `infer_run_mode` actually consults, disagreeing or
+/// not; only the trailing `[listen]`-wins assertion below is load-bearing
+/// against a mutation of this function. The distinct token that would
+/// make the two keys' precedence itself observable is the `qsh service`
+/// step's job (ROADMAP M9); this test's name records the eventual contract this
+/// function documents, not a precedence this run of it can fail on yet.
+#[test]
+fn infer_run_mode_prefers_serve_to_over_the_legacy_controller() {
+    let mut config = Config::default();
+    config.reverse.controller = Some("legacy-ctrl".to_string());
+    config.serve.to = Some("new-ctrl".to_string());
+    assert_eq!(infer_run_mode(&config), "reverse");
+
+    // `[listen]` still wins outright over both outbound keys.
+    config.listen.allow_advertised_names = true;
+    assert_eq!(infer_run_mode(&config), "listen");
+}
+
+/// Either outbound key alone is enough to infer `"reverse"` — the new
+/// `[serve].to` key is additive, not a replacement for the legacy one.
+#[test]
+fn infer_run_mode_treats_either_outbound_key_as_reverse() {
+    let mut only_serve_to = Config::default();
+    only_serve_to.serve.to = Some("ctrl".to_string());
+    assert_eq!(infer_run_mode(&only_serve_to), "reverse");
+
+    let mut only_legacy = Config::default();
+    only_legacy.reverse.controller = Some("ctrl".to_string());
+    assert_eq!(infer_run_mode(&only_legacy), "reverse");
 }
 
 /// A CA to add to `trust.toml` for the `acl_ca_auth_path_missing` tests

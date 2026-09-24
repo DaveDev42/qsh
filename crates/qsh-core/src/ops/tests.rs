@@ -836,6 +836,127 @@ fn resolve_route_forward_resolves_a_peer_target_with_the_pinned_address() {
     }
 }
 
+// `Ops::resolve_serve_target` (ROADMAP M9 (b), ADR-0014 결정 7): the two-step
+// name-then-address resolution `qsh serve --to`/`[serve].to`/the legacy
+// `[reverse].controller` all share.
+
+#[test]
+fn resolve_serve_target_a_name_match_returns_the_literal_unchanged_and_fills_no_port() {
+    let dir = tempfile::tempdir().unwrap();
+    let ops = resolve_route_ops(dir.path());
+    ops.identity_init(file_mode()).unwrap();
+    let fingerprint = qsh_transport::Fingerprint::of_spki_der(b"peer").to_string();
+    ops.trust_add(TrustAddReq {
+        name: "mac".into(),
+        address: Some("mac.example.com:4433".into()),
+        fingerprint: Some(fingerprint),
+    })
+    .unwrap();
+
+    let target = ops.resolve_serve_target("mac").unwrap();
+    assert_eq!(target.controller, "mac");
+    assert!(!target.port_filled);
+}
+
+#[test]
+fn resolve_serve_target_falls_back_to_a_single_address_match_on_a_name_miss() {
+    let dir = tempfile::tempdir().unwrap();
+    let ops = resolve_route_ops(dir.path());
+    ops.identity_init(file_mode()).unwrap();
+    let fingerprint = qsh_transport::Fingerprint::of_spki_der(b"peer").to_string();
+    ops.trust_add(TrustAddReq {
+        name: "mac".into(),
+        address: Some("203.0.113.5:4433".into()),
+        fingerprint: Some(fingerprint),
+    })
+    .unwrap();
+
+    // The literal names no port and is not itself a pinned name — a
+    // name-lookup miss falls through to the address lookup, which fills
+    // the default port before comparing (`normalize_peer_address`).
+    let target = ops.resolve_serve_target("203.0.113.5").unwrap();
+    assert_eq!(target.controller, "mac");
+    assert!(target.port_filled);
+}
+
+#[test]
+fn resolve_serve_target_a_peer_literally_named_like_an_address_resolves_to_itself() {
+    // ADR-0014 결정 7's own example: name always beats address, not
+    // merely "checked first" — a peer pinned under a name that happens
+    // to look like an address must resolve to *itself*, never to
+    // whichever peer's actual address matches that string.
+    let dir = tempfile::tempdir().unwrap();
+    let ops = resolve_route_ops(dir.path());
+    ops.identity_init(file_mode()).unwrap();
+    let self_fp = qsh_transport::Fingerprint::of_spki_der(b"self").to_string();
+    ops.trust_add(TrustAddReq {
+        name: "192.0.2.10:4433".into(),
+        address: Some("elsewhere.example.com:4433".into()),
+        fingerprint: Some(self_fp),
+    })
+    .unwrap();
+    let other_fp = qsh_transport::Fingerprint::of_spki_der(b"other").to_string();
+    ops.trust_add(TrustAddReq {
+        name: "other".into(),
+        address: Some("192.0.2.10:4433".into()),
+        fingerprint: Some(other_fp),
+    })
+    .unwrap();
+
+    let target = ops.resolve_serve_target("192.0.2.10:4433").unwrap();
+    assert_eq!(target.controller, "192.0.2.10:4433");
+    assert!(!target.port_filled);
+}
+
+#[test]
+fn resolve_serve_target_two_or_more_address_matches_is_invalid_argument_no_first_wins() {
+    let dir = tempfile::tempdir().unwrap();
+    let ops = resolve_route_ops(dir.path());
+    ops.identity_init(file_mode()).unwrap();
+    let fp_a = qsh_transport::Fingerprint::of_spki_der(b"a").to_string();
+    ops.trust_add(TrustAddReq {
+        name: "alpha".into(),
+        address: Some("203.0.113.9:4433".into()),
+        fingerprint: Some(fp_a),
+    })
+    .unwrap();
+    let fp_b = qsh_transport::Fingerprint::of_spki_der(b"b").to_string();
+    ops.trust_add(TrustAddReq {
+        name: "beta".into(),
+        address: Some("203.0.113.9".into()),
+        fingerprint: Some(fp_b),
+    })
+    .unwrap();
+
+    let err = ops.resolve_serve_target("203.0.113.9:4433").unwrap_err();
+    assert_eq!(err.code, ErrorCode::InvalidArgument);
+}
+
+#[test]
+fn resolve_serve_target_matching_neither_name_nor_address_is_host_not_found() {
+    let dir = tempfile::tempdir().unwrap();
+    let ops = resolve_route_ops(dir.path());
+    ops.identity_init(file_mode()).unwrap();
+
+    let err = ops.resolve_serve_target("nowhere").unwrap_err();
+    assert_eq!(err.code, ErrorCode::HostNotFound);
+}
+
+#[test]
+fn resolve_serve_target_an_unpinned_host_port_literal_is_host_not_found() {
+    // The `HOST:PORT` shape `--to`'s own `value_name` advertises fails
+    // `qsh_proto::wire::valid_host_name` at step 1 (no `:` in its
+    // alphabet) and comes back as `INVALID_ARGUMENT`, not
+    // `HOST_NOT_FOUND` — step 2 must not re-raise that verbatim on a
+    // zero-match miss.
+    let dir = tempfile::tempdir().unwrap();
+    let ops = resolve_route_ops(dir.path());
+    ops.identity_init(file_mode()).unwrap();
+
+    let err = ops.resolve_serve_target("198.51.100.7:4433").unwrap_err();
+    assert_eq!(err.code, ErrorCode::HostNotFound);
+}
+
 /// ADR-0019 decision 9's loopback-only `-D` bind check runs **before**
 /// route resolution or any connect attempt — `"nowhere"` names no host
 /// this `Ops` (no identity, no trust entry, no daemon) could ever resolve,

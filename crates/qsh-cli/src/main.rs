@@ -41,12 +41,13 @@ pub static malloc_conf: &[u8] =
 use qsh_cli::cli;
 
 use std::io::{self, IsTerminal, Read, Write};
+use std::net::SocketAddr;
 use std::time::SystemTime;
 
 use clap::{CommandFactory as _, Parser};
 use qsh_core::{
-    AclCheckOp, CapabilitiesOp, CertInitOp, CertIssueOp, DoctorOp, ExecRunOp, ExecStdin, HostGetOp,
-    HostListOp, IdentityInitOp, InviteCodeSource, OpError, Operation, Ops, SchemaOp,
+    AclCheckOp, CapabilitiesOp, CertInitOp, CertIssueOp, Config, DoctorOp, ExecRunOp, ExecStdin,
+    HostGetOp, HostListOp, IdentityInitOp, InviteCodeSource, OpError, Operation, Ops, SchemaOp,
     SessionAttachOp, SessionCloseOp, SessionGetOp, SessionListOp, SessionOpenOp, SessionReadOp,
     SessionResizeOp, SessionWriteOp, TrustAcceptOp, TrustAddOp, TrustInviteOp, TrustListOp,
     TrustRemoveOp, TunnelCloseOp, TunnelDynamicOp, TunnelListOp, TunnelOpenOp, VersionOp,
@@ -491,12 +492,14 @@ fn dispatch(cli: &Cli, ops: Ops) -> i32 {
             ops.tunnel_list(TunnelListReq {}),
             human::print_tunnels,
         ),
-        Command::Serve { bind } => run_serve(&ops, bind.as_deref()),
+        Command::Serve { bind, to, name } => {
+            run_serve(&ops, bind.as_deref(), to.as_deref(), name.as_deref())
+        }
         Command::Listen { bind } => run_listen(&ops, bind.as_deref()),
         Command::Reverse {
             controller,
             offered_name,
-        } => run_reverse(&ops, controller, offered_name.as_deref()),
+        } => run_reverse(&ops, REVERSE_MODE, controller, offered_name.as_deref()),
     }
 }
 
@@ -951,12 +954,68 @@ fn run_tunnel_open_dynamic(cli: &Cli, ops: &Ops, args: &TunnelOpenArgs) -> i32 {
     EXIT_RUNTIME_FAILURE
 }
 
-/// `qsh serve` — long-running host mode. Not an operation: no envelope,
-/// nothing on stdout at all; the bound address goes to stderr and the
-/// process runs until SIGINT/SIGTERM (`docs/CLI.md` §6.12).
-fn run_serve(ops: &Ops, bind: Option<&str>) -> i32 {
+/// `qsh serve` — long-running host mode, inbound or outbound
+/// (`docs/CLI.md` §6.12/§6.13, ADR-0012 결정 2/4/5). All of the
+/// inbound-vs-outbound decision logic lives in
+/// [`qsh_core::serve::resolve_serve_mode`]; this function only parses the
+/// already-parsed flags apart, dispatches on the result, and does the
+/// stderr I/O the outbound branch needs before converging on
+/// [`run_reverse`] (`CLAUDE.md`'s crate boundary — `qsh-cli` never holds
+/// decision logic of its own).
+///
+/// The hidden `qsh reverse <controller>` alias never reaches this
+/// function at all — its own `Command::Reverse` dispatch arm calls
+/// [`run_reverse`] directly — but both spellings converge on that one
+/// call, which is the roundtrip test's convergence point
+/// (`crates/qsh-cli/src/cli/tests.rs`'s
+/// `serve_to_and_reverse_converge_on_the_same_controller_and_offered_name`).
+fn run_serve(ops: &Ops, bind: Option<&str>, to: Option<&str>, name: Option<&str>) -> i32 {
+    let config = match ops.config() {
+        Ok(config) => config,
+        Err(err) => return report_long_running_setup_error(SERVE_MODE, &err),
+    };
+    let mode = match qsh_core::serve::resolve_serve_mode(to, name, bind, &config) {
+        Ok(mode) => mode,
+        Err(err) => return report_long_running_setup_error(SERVE_MODE, &err),
+    };
+    match mode {
+        qsh_core::serve::ServeMode::Inbound(addr) => run_serve_inbound(ops, &config, addr),
+        qsh_core::serve::ServeMode::Outbound {
+            target,
+            offered_name,
+        } => {
+            let resolved = match ops.resolve_serve_target(&target) {
+                Ok(resolved) => resolved,
+                Err(err) => return report_long_running_setup_error(SERVE_MODE, &err),
+            };
+            // ADR-0014 결정 5, same wording and same trigger condition as
+            // `run_trust_add` — qsh-core decides whether the port was
+            // filled in, this function only prints the fixed notice.
+            if resolved.port_filled {
+                stderr_note!("{ADDRESS_PORT_ASSUMED_NOTICE}");
+            }
+            run_reverse(
+                ops,
+                SERVE_MODE,
+                &resolved.controller,
+                offered_name.as_deref(),
+            )
+        }
+    }
+}
+
+/// The inbound branch of `qsh serve`: listen and accept connections from
+/// pinned peers. Not an operation: no envelope, nothing on stdout at all;
+/// the bound address goes to stderr and the process runs until
+/// SIGINT/SIGTERM (`docs/CLI.md` §6.12).
+///
+/// `bind` is the address [`run_serve`]'s call to `resolve_serve_mode`
+/// already resolved — this function does not re-read `config.toml` or
+/// re-resolve it, so a bad `[serve].bind` name is reported once, by the
+/// mode decision, not by the accept loop's own `resolve_bind` call
+/// disagreeing with it on a multi-address name.
+fn run_serve_inbound(ops: &Ops, config: &Config, bind: SocketAddr) -> i32 {
     let result = (|| -> Result<(), OpError> {
-        let config = ops.config()?;
         // Identity is loaded synchronously, before any runtime exists: the
         // credential store may block (and prompt) — keep that off the
         // runtime's workers.
@@ -974,7 +1033,7 @@ fn run_serve(ops: &Ops, bind: Option<&str>) -> i32 {
         let fingerprint = identity.identity.fingerprint.to_string();
         runtime.block_on(qsh_core::serve::run_serve(
             ops.paths(),
-            &config,
+            config,
             identity,
             bind,
             |addr| {
@@ -1103,13 +1162,21 @@ fn run_listen(ops: &Ops, bind: Option<&str>) -> i32 {
     }
 }
 
-/// `qsh reverse <controller>` — the reverse-mode target (`docs/CLI.md`
-/// §6.13). Not an operation: no envelope, nothing on stdout at all.
-/// Registers and reconnects forever with backoff whenever the connection to
-/// the controller dies (`docs/design/protocol.md` §11-4, `PLAN.md` M3 Step
-/// 4) — registration is this target's only reachability path, so it is
-/// never abandoned; a clean SIGINT/SIGTERM is the only way this returns.
-fn run_reverse(ops: &Ops, controller: &str, offered_name: Option<&str>) -> i32 {
+/// `qsh reverse <controller>` / `qsh serve --to` — the reverse-mode target
+/// (`docs/CLI.md` §6.13). Not an operation: no envelope, nothing on stdout
+/// at all. Registers and reconnects forever with backoff whenever the
+/// connection to the controller dies (`docs/design/protocol.md` §11-4,
+/// `PLAN.md` M3 Step 4) — registration is this target's only reachability
+/// path, so it is never abandoned; a clean SIGINT/SIGTERM is the only way
+/// this returns.
+///
+/// `mode` is the stderr prefix and the mode name
+/// [`report_long_running_setup_error`] reports under: `SERVE_MODE` when
+/// reached from `qsh serve --to` (via [`run_serve`]), `REVERSE_MODE` when
+/// reached from the hidden `qsh reverse <controller>` alias directly — the
+/// only difference between the two spellings once they get here (M9 Step
+/// 5).
+fn run_reverse(ops: &Ops, mode: &'static str, controller: &str, offered_name: Option<&str>) -> i32 {
     let result = (|| -> Result<(), OpError> {
         let config = ops.config()?;
         let identity = ops.load_identity()?.ok_or_else(|| {
@@ -1135,7 +1202,7 @@ fn run_reverse(ops: &Ops, controller: &str, offered_name: Option<&str>) -> i32 {
             // dial, `run_reverse_observed`'s own docs).
             |runtime| {
                 if let Some(diag) = &runtime.policy_diagnostic {
-                    stderr_note!("qsh reverse: {}", diag.render());
+                    stderr_note!("qsh {mode}: {}", diag.render());
                 }
             },
             // `qsh_core::doctor::CONTROLLER_UNREACHABLE` fires at most
@@ -1146,18 +1213,18 @@ fn run_reverse(ops: &Ops, controller: &str, offered_name: Option<&str>) -> i32 {
             // `PLAN.md` M3 Step 9).
             || {
                 let diag = qsh_core::doctor::CONTROLLER_UNREACHABLE;
-                stderr_note!("qsh reverse: {}", diag.message);
-                stderr_note!("qsh reverse: {}", diag.remedy);
+                stderr_note!("qsh {mode}: {}", diag.message);
+                stderr_note!("qsh {mode}: {}", diag.remedy);
             },
             shutdown_signal(),
         ))
     })();
     match result {
         Ok(()) => {
-            stderr_note!("qsh reverse: shutting down");
+            stderr_note!("qsh {mode}: shutting down");
             0
         }
-        Err(err) => report_long_running_setup_error(REVERSE_MODE, &err),
+        Err(err) => report_long_running_setup_error(mode, &err),
     }
 }
 

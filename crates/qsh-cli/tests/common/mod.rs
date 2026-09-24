@@ -882,6 +882,19 @@ impl ReverseGuard {
         Self::spawn(sandbox, args)
     }
 
+    /// `qsh serve --to <controller>` — the ROADMAP M9 (b) spelling of the same
+    /// reverse-target role [`start`](Self::start) reaches through the
+    /// hidden `qsh reverse <controller>` alias. Both converge on the same
+    /// `run_reverse` call (`main.rs`'s own doc, pinned by `cli::tests`'s
+    /// `serve_to_and_reverse_converge_on_the_same_controller_and_offered_name`),
+    /// so a caller that wants to prove the two spellings behave identically
+    /// (not merely parse identically — `cli::tests`'s own convergence
+    /// test already covers parsing) swaps one `ReverseGuard::start` call
+    /// for this one and keeps the rest of the test unchanged.
+    pub fn start_serve_to(sandbox: &Sandbox, controller: &str) -> Self {
+        Self::start_with(sandbox, &["serve", "--to", controller])
+    }
+
     /// Like [`start_with`](Self::start_with), but never plants an
     /// `acl.toml` — see [`ServeGuard::start_without_policy`] for why a
     /// test reaches for this instead.

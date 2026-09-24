@@ -33,8 +33,8 @@ use crate::config::Config;
 use crate::doctor::probe::{self, UdpProbeOutcome};
 use crate::doctor::{
     ACL_CA_AUTH_PATH_MISSING, ACL_PRINCIPAL_UNMATCHED, CERT_EXPIRED, CERT_EXPIRING_SOON,
-    CLOCK_SKEW, CONFIG_UNKNOWN_KEY, PEER_UNTRUSTED, QSH_PATH_SHADOWED, TRUST_REMOVE_SCOPE,
-    probe_audit_path_writable,
+    CLOCK_SKEW, CONFIG_SERVE_TO_CONFLICT, CONFIG_UNKNOWN_KEY, PEER_UNTRUSTED, QSH_PATH_SHADOWED,
+    TRUST_REMOVE_SCOPE, probe_audit_path_writable,
 };
 use crate::hosts::HostsFile;
 use crate::identity::{
@@ -222,6 +222,7 @@ impl Ops {
         let mut findings = Vec::new();
         findings.extend(self.doctor_audit_finding(config));
         findings.extend(self.doctor_config_unknown_key_findings(config));
+        findings.extend(self.doctor_config_serve_to_conflict_finding(config));
         findings.extend(self.doctor_acl_findings(mode)?);
         findings.extend(self.doctor_cert_findings(identity, now_unix)?);
         findings.extend(self.doctor_clock_skew_finding(identity, now_unix)?);
@@ -453,6 +454,27 @@ impl Ops {
             .collect()
     }
 
+    /// `config_serve_to_conflict` (ROADMAP M9 (h), ADR-0012 결정 5) — the same
+    /// `[serve].to`-vs-`[reverse].controller` disagreement
+    /// [`crate::serve::config_outbound_target`] turns into a hard
+    /// `CONFIG_ERROR` for `qsh serve`/`qsh service install` becomes a
+    /// finding here instead, never a doctor failure (`doctor.run` always
+    /// exits `0`, module doc). `crate::serve::config_serve_to_conflict` is
+    /// the single source of truth both surfaces read, so the two can never
+    /// disagree about what counts as a conflict.
+    fn doctor_config_serve_to_conflict_finding(&self, config: &Config) -> Option<DoctorFinding> {
+        let (serve_to, controller) = crate::serve::config_serve_to_conflict(config)?;
+        Some(DoctorFinding {
+            code: CONFIG_SERVE_TO_CONFLICT.code.to_string(),
+            status: "error".to_string(),
+            detail: format!(
+                "{} ([serve].to: {serve_to:?}, [reverse].controller: {controller:?})",
+                CONFIG_SERVE_TO_CONFLICT.message
+            ),
+            remedy: Some(CONFIG_SERVE_TO_CONFLICT.remedy.to_string()),
+        })
+    }
+
     /// `peer_untrusted`/`trust_remove_scope` (design brief rows #3/#13) —
     /// a static cross-reference between `hosts.toml` and `trust.toml`
     /// (`peer_untrusted`: `docs/CLI.md`'s `Host` contract guarantees
@@ -492,11 +514,13 @@ impl Ops {
     }
 
     /// `udp_egress_blocked`/`no_route`/`controller_unreachable` (design
-    /// brief rows #1/#2/#8) — one probe for `[reverse].controller` (when
-    /// configured; this is the first code path to actually read that
-    /// field — [`crate::config::ReverseConfig::controller`]'s own doc),
-    /// one for `req.host` (when given). Precedence between the three codes
-    /// is [`probe::classify_connectivity`]'s alone (design brief risk #6):
+    /// brief rows #1/#2/#8) — one probe for the outbound controller target
+    /// (when configured — `[serve].to` first, the legacy
+    /// `[reverse].controller` as a fallback when `[serve].to` is unset,
+    /// same precedence [`infer_run_mode`] uses; ROADMAP M9 (h) —
+    /// `crate::config::ReverseConfig::controller`'s own doc), one for
+    /// `req.host` (when given). Precedence between the three codes is
+    /// [`probe::classify_connectivity`]'s alone (design brief risk #6):
     /// this method never constructs a `DoctorFinding` itself, only feeds
     /// it a `(outcome, is_controller_target)` pair.
     fn doctor_connectivity_findings(
@@ -508,7 +532,11 @@ impl Ops {
         let hosts = HostsFile::load(&self.paths.hosts_file())?;
         let mut out = Vec::new();
 
-        let controller = config.reverse.controller.as_deref();
+        let controller = config
+            .serve
+            .to
+            .as_deref()
+            .or(config.reverse.controller.as_deref());
         if let Some(controller) = controller {
             out.extend(probe_named_target(&trust, &hosts, controller, true));
         }
@@ -644,18 +672,23 @@ impl Ops {
 /// `service_not_registered`/`bindv6only_blocks_ipv4`'s shared mode
 /// inference: `[listen]` present (any field set,
 /// via `!= ListenConfig::default()` — the same "any field set" test
-/// `docs/CLI.md` gives no dedicated accessor for) wins outright; else the
-/// legacy `[reverse].controller` key (reserved, `crate::config::ReverseConfig::controller`'s
-/// own doc — kept here only so a `config.toml` written for an older
-/// build still infers `reverse` instead of silently falling through to
-/// `serve`); else `serve`, the default role for a bare `config.toml`.
-/// `config_serve_to_conflict` (a later ROADMAP M9 (h) step) is the only
-/// thing this deliberately leaves out: no diagnostic here for a config
-/// that sets more than one of these at once, only a precedence rule.
+/// `docs/CLI.md` gives no dedicated accessor for) wins outright; else
+/// `[serve].to` (ROADMAP M9 (b), `qsh serve --to`'s own config key — `config.rs`'s
+/// own doc); else the legacy `[reverse].controller` key
+/// (`crate::config::ReverseConfig::controller`'s own doc — kept here so a
+/// `config.toml` written for an older build still infers `reverse`
+/// instead of silently falling through to `serve`); else `serve`, the
+/// default role for a bare `config.toml`. Both outbound keys map to the
+/// same `"reverse"` token — there is no separate token for `qsh serve
+/// --to` yet (a later milestone's job, `PLAN.md`). `config_serve_to_conflict`
+/// (`crate::doctor::CONFIG_SERVE_TO_CONFLICT`) is the only thing this
+/// deliberately leaves out: no diagnostic here for a config that sets more
+/// than one of these at once and disagrees, only a precedence rule —
+/// conflicting values still infer `"reverse"`.
 fn infer_run_mode(config: &Config) -> &'static str {
     if config.listen != crate::config::ListenConfig::default() {
         "listen"
-    } else if config.reverse.controller.is_some() {
+    } else if config.serve.to.is_some() || config.reverse.controller.is_some() {
         "reverse"
     } else {
         "serve"

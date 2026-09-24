@@ -2,11 +2,11 @@
 .el .ds Aq '
 .TH qsh-listen 1  "listen 0.2.0" 
 .SH NAME
-qsh\-listen \- Run the reverse\-mode controller: accept dial\-in registrations from `qsh reverse` and serve them as hosts (`docs/CLI.md` §6.13). Foreground only; the bound address and registration events go to stderr
+qsh\-listen \- Run the reverse\-mode controller: accept dial\-in registrations from `qsh serve \-\-to` (the hidden `qsh reverse` alias dials the same way) and serve them as hosts (`docs/CLI.md` §6.13). Foreground only; the bound address and registration events go to stderr
 .SH SYNOPSIS
 \fBqsh listen\fR [\fB\-\-bind\fR] [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] 
 .SH DESCRIPTION
-Run the reverse\-mode controller: accept dial\-in registrations from `qsh reverse` and serve them as hosts (`docs/CLI.md` §6.13). Foreground only; the bound address and registration events go to stderr
+Run the reverse\-mode controller: accept dial\-in registrations from `qsh serve \-\-to` (the hidden `qsh reverse` alias dials the same way) and serve them as hosts (`docs/CLI.md` §6.13). Foreground only; the bound address and registration events go to stderr
 .SH OPTIONS
 .TP
 \fB\-\-bind\fR \fI<IP:PORT>\fR

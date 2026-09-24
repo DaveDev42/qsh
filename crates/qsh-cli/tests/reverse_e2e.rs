@@ -303,11 +303,16 @@ fn owned_command_line(pid: u32) -> Option<String> {
 /// exactly what a regression that opened a `qsh_transport` server-bind
 /// endpoint on the target would produce). Plus a runtime argv check: the
 /// process's actual command line, read back via `ps`, must contain
-/// neither `listen` nor `serve` nor `--bind`.
+/// neither `listen` nor `--bind`, and a bare `serve` (inbound, no `--to`)
+/// is likewise disqualifying — but `serve --to` (ROADMAP M9 (b)'s outbound
+/// spelling, the same reverse-target role the hidden `qsh reverse` alias
+/// plays) is exactly what this test expects to see here and must not trip
+/// the check.
 fn assert_owns_no_listening_socket(pid: u32) {
     if let Some(cmd) = owned_command_line(pid) {
+        let looks_like_inbound_serve = cmd.contains("serve") && !cmd.contains("--to");
         assert!(
-            !cmd.contains("listen") && !cmd.contains("serve") && !cmd.contains("--bind"),
+            !cmd.contains("listen") && !looks_like_inbound_serve && !cmd.contains("--bind"),
             "the reverse target's own argv looks like it asked to bind a listener: {cmd:?}"
         );
     }
@@ -366,10 +371,19 @@ fn a_real_target_behind_nat_registers_and_a_local_client_attaches_detaches_and_r
 
     // The target pins the controller (needs a real address to dial) and
     // registers, once, real backoff loop and all if the first attempt
-    // races the controller's own startup — `ReverseGuard::start` never
-    // blocks on this succeeding, `poll_until` below does.
+    // races the controller's own startup — `ReverseGuard::start_serve_to`
+    // never blocks on this succeeding, `poll_until` below does.
+    //
+    // `qsh serve --to` (ROADMAP M9 (b)), not the hidden `qsh reverse` alias:
+    // this is the documented spelling from this rename on (ROADMAP M9 (b)) (`docs/CLI.md`
+    // §6.13), and the two converge on the same `run_reverse` call
+    // (`main.rs`'s own doc, pinned by `crates/qsh-cli/src/cli/tests.rs`'s
+    // `serve_to_and_reverse_converge_on_the_same_controller_and_offered_name`)
+    // — `hosts_reverse.rs`/`reverse_blackout.rs`/
+    // `reverse_unreachable_diagnostic.rs` stay on the old spelling on
+    // purpose, as living evidence the hidden alias still works.
     target.trust_add(CONTROLLER_ALIAS, Some(listen.addr()), &controller_fp);
-    let reverse = ReverseGuard::start(&target, CONTROLLER_ALIAS);
+    let reverse = ReverseGuard::start_serve_to(&target, CONTROLLER_ALIAS);
 
     let merged = poll_until(
         "the reverse registration to appear reachable",

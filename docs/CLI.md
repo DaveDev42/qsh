@@ -96,7 +96,7 @@ version.get
 
 `acl.check`(§6.15, M5)는 원격 peer가 요청하는 operation이 아니라 **이 머신 자신의** `acl.toml`을 로컬에서 조회하는 op이다 — §2.5의 "인가 불요" 행이 다른 local-only operation들과 함께 명시한다.
 
-`qsh serve`, `qsh listen`, `qsh reverse`는 operation이 아니라 장기 실행 모드(long-running mode)다. 단일 요청/응답 계약이 없으며 이 목록에 포함되지 않는다.
+`qsh serve`, `qsh listen`, `qsh serve --to`(구 표기 `qsh reverse`, §6.13)는 operation이 아니라 장기 실행 모드(long-running mode)다. 단일 요청/응답 계약이 없으며 이 목록에 포함되지 않는다.
 
 실행 중인 세션에 **신호만** 보내는 별도 operation(`session.signal`)은 M2 범위가 아니다(P1 후보 — 이 목록에 없다). M2에서 신호를 보내는 유일한 CLI 표면은 `qsh session close --signal <SIG>`(§6.7)이며, 신호는 wire `SessionClose`의 optional `signal` field로 전달된다(ACL은 §2.5의 `session.close` 행 그대로 `session.control`). wire 번호 25(`SessionSignal`)는 **예약만** 하고 M2에서는 메시지를 정의·전송하지 않는다 — 호스트가 25번을 수신하면 리소스 생성 없이 `UNSUPPORTED`로 답한다(protocol.md §9).
 
@@ -119,7 +119,7 @@ ACL action은 인가(authorization) 어휘로, operation 이름과는 별개 차
 
 `forward.socks`는 action 어휘에 예약되어 있지만 어떤 operation도 이 action으로 인가하지 않는다 — `-D`가 실제로 구현된 뒤에도 마찬가지다(위 행, ADR-0019 decision 14). 향후 예약: streaming file copy → `file.read`/`file.write`.
 
-역방향 host 등록은 operation이 아니라 **연결 수립 시점의 검사**다 — 위 표는 operation→ACL action 매핑이고 `qsh listen`/`qsh reverse`는 §2.4가 명시하듯 operation이 아닌 장기 실행 모드이므로 표에 행을 만들지 않는다. `qsh reverse`(target)가 `qsh listen`(controller)에 dial해 보내는 `Hello.reverse`(protocol.md §9·§11)를 controller가 인증서로 인증한 뒤, 그 principal에 ACL action `host.reverse`를 검사한다 — 통과해야만 registry에 등록된다(default deny, PRD §9).
+역방향 host 등록은 operation이 아니라 **연결 수립 시점의 검사**다 — 위 표는 operation→ACL action 매핑이고 `qsh listen`/`qsh serve --to`(구 표기 `qsh reverse`, §6.13)는 §2.4가 명시하듯 operation이 아닌 장기 실행 모드이므로 표에 행을 만들지 않는다. `qsh serve --to`(target)가 `qsh listen`(controller)에 dial해 보내는 `Hello.reverse`(protocol.md §9·§11)를 controller가 인증서로 인증한 뒤, 그 principal에 ACL action `host.reverse`를 검사한다 — 통과해야만 registry에 등록된다(default deny, PRD §9).
 
 ## 3. JSON envelope
 
@@ -459,7 +459,7 @@ qsh exec personal-mac --json -- uname -a
 qsh exec personal-mac --json --timeout 5000 --env FOO=bar -- sh -c 'echo "$FOO"'
 ```
 
-`host` 인자는 host 이름이다. host→주소 해석은 §6.1의 우선순위(`hosts.toml` 우선, 없으면 `trust.toml`의 pinned peer로 폴백)를 따른다 — `exec`뿐 아니라 attach·`session open`·`qsh reverse <controller>`의 controller dial까지 모두 이 동일한 해석을 공유한다.
+`host` 인자는 host 이름이다. host→주소 해석은 §6.1의 우선순위(`hosts.toml` 우선, 없으면 `trust.toml`의 pinned peer로 폴백)를 따른다 — `exec`뿐 아니라 attach·`session open`·`qsh serve --to <listener>`(구 표기 `qsh reverse <controller>`)의 controller dial까지 모두 이 이름 조회를 1단계로 공유한다. 다만 `--to`는 이 이름 조회가 실패했을 때 주소로 한 번 더 시도하는 2단계 해석(§6.13, ADR-0014 결정 7)을 추가로 갖는다는 점에서 `exec`/attach/`session open`과 다르다 — 그 셋은 이름 조회 실패가 곧 최종 실패다.
 
 - 실행할 명령은 항상 `--` 뒤에 온다(`--` 이후는 qsh가 해석하지 않는다). `--` 뒤에 명령이 없으면 usage 오류(exit `2`)다.
 - `--timeout <milliseconds>`(§9): 기한 내 종료하지 않으면 remote 프로세스(process group)를 kill하고 `TIMEOUT`(`retryable: true`, `details.timeout_ms`)을 반환한다. 기한은 해석·연결·협상·실행 전체에 하나의 예산으로 적용되고, 종료 후 연결 정리 시간은 포함하지 않는다(제때 끝난 명령이 정리가 느리다고 `TIMEOUT`이 되지 않는다). 호스트도 같은 기한을 스스로 강제하며(`ExecExit.timed_out`), 어느 쪽이 먼저 걸리든 결과는 `TIMEOUT`이다.
@@ -596,7 +596,7 @@ qsh version --json
 }
 ```
 
-`capabilities`를 host 없이 호출하면 이 build가 `Hello`에 advertise하는 로컬 capability 집합을 가공 없이 그대로 반환한다 — 이 형태만 checked-in fixture로 고정되어 값이 바뀌면 fixture diff로 드러난다(scope-creep tripwire, `docs/ROADMAP.md` M7 DoD 3). host를 주면 그 host와 negotiation된 `Hello`의 교집합을 반환한다 — forward(pinned) host는 그 주소로 직접 dial해 호출마다 새로 negotiation하고, reverse 등록 host는 이 머신의 `qsh listen`/`qsh reverse` daemon이 이미 들고 있는 연결(등록 시점에 그 daemon과 합의된 capability 집합)을 relay로 읽어 보고할 뿐 이 프로세스가 peer를 직접 dial하지 않는다(`docs/design/architecture.md` §2). 이를 위한 별도 wire request는 없다: 어떤 value operation이든 연결을 여는 순간 이미 수행하는 handshake의 결과를 읽어 보고할 뿐이며, 그래서 `capabilities.get`은 §2.5의 "인가 불요" 행에 다른 local operation들과 함께 있다.
+`capabilities`를 host 없이 호출하면 이 build가 `Hello`에 advertise하는 로컬 capability 집합을 가공 없이 그대로 반환한다 — 이 형태만 checked-in fixture로 고정되어 값이 바뀌면 fixture diff로 드러난다(scope-creep tripwire, `docs/ROADMAP.md` M7 DoD 3). host를 주면 그 host와 negotiation된 `Hello`의 교집합을 반환한다 — forward(pinned) host는 그 주소로 직접 dial해 호출마다 새로 negotiation하고, reverse 등록 host는 이 머신의 `qsh listen`/`qsh serve --to`(구 표기 `qsh reverse`) daemon이 이미 들고 있는 연결(등록 시점에 그 daemon과 합의된 capability 집합)을 relay로 읽어 보고할 뿐 이 프로세스가 peer를 직접 dial하지 않는다(`docs/design/architecture.md` §2). 이를 위한 별도 wire request는 없다: 어떤 value operation이든 연결을 여는 순간 이미 수행하는 handshake의 결과를 읽어 보고할 뿐이며, 그래서 `capabilities.get`은 §2.5의 "인가 불요" 행에 다른 local operation들과 함께 있다.
 
 ```json
 {
@@ -822,7 +822,7 @@ pin 시점에 이름 충돌이 생기면 — 상대가 자칭하는 이름이 �
 
 `--json`/`--jsonl` mode에서는 pairing도 interactive prompt를 열지 않는다(§2.1) — 잘못된 code나 인자 오류는 곧바로 오류 envelope로 반환된다. 그래서 machine mode에서 위치 인자도 `--code-stdin`도 없이 부르면 프롬프트 대신 `INVALID_ARGUMENT`다. `--code-stdin`을 줬더라도 표준입력이 터미널이면 machine mode에서는 마찬가지로 `INVALID_ARGUMENT`다 — 터미널 위에서 사람의 입력을 기다리는 것 자체가 §2.1이 금지하는 대기이기 때문이다; 표준입력이 파이프나 파일이면 이 제약과 무관하게 그대로 읽는다. 표준입력이 터미널이 아닌 human mode 호출(스크립트, cron)도 같은 이유로 `INVALID_ARGUMENT`다 — 열 수 있는 프롬프트가 없다. Windows 빌드에는 에코를 끄는 경로가 없어 터미널 프롬프트 대신 `UNSUPPORTED`를 내며 `--code-stdin`을 안내한다(client Windows는 P1, `docs/design/architecture.md` §8) — `--code-stdin` 자체는 이 플랫폼에서도 동작하지만, 터미널 입력이면 에코는 꺼지지 않는다.
 
-`doctor.run`의 전체 계약(§6.17, M7 Step 6)은 진단 코드 21종·envelope 모양·exit code 규칙을 담는다 — 이 절 밖에서는 더 설명하지 않는다.
+`doctor.run`의 전체 계약(§6.17, M7 Step 6)은 진단 코드 22종·envelope 모양·exit code 규칙을 담는다 — 이 절 밖에서는 더 설명하지 않는다.
 
 원격 operation(`exec.run`, `session.*`, `tunnel.*`)의 mTLS 실패 오류 경로는 다음과 같다.
 
@@ -831,14 +831,16 @@ pin 시점에 이름 충돌이 생기면 — 상대가 자칭하는 이름이 �
 
 ### 6.12 장기 실행 모드: `qsh serve`
 
-`qsh serve`는 §2.4가 명시하듯 operation이 아니라 장기 실행 모드(long-running mode)이며 단일 요청/응답 JSON 계약이 없다.
+`qsh serve`는 §2.4가 명시하듯 operation이 아니라 장기 실행 모드(long-running mode)이며 단일 요청/응답 JSON 계약이 없다. `qsh serve`는 인바운드일 때 host, `--to`를 주면 target — controller는 listener이자 client 역할을, target은 host 머신 역할을 한다(ADR-0012 결정 1, 역할 표는 §6.13).
 
 ```bash
 qsh serve --bind <ip:port>
+qsh serve --to <listener|host:port> [--name <name>]
 ```
 
 - **Foreground 전용(M1).** 데몬화는 QSH 자체가 하지 않고 OS 서비스 매니저(systemd/launchd)에 위임한다.
 - `--bind`의 우선순위: CLI flag > `config.toml`의 `[serve].bind` > 기본값 `[::]:4433`.
+- **`--to`(ROADMAP M9 (b), §6.13).** 주면 인바운드 대신 그 controller에 dial해 reverse target으로 등록한다 — `--bind`와 함께 줄 수 없다(`INVALID_ARGUMENT`, exit `255`, clap 사용 오류가 아니다). 우선순위: CLI 플래그(`--to` 또는 `--bind`, 둘 중 하나만 줄 수 있다) 먼저 — 어느 쪽이든 CLI에서 주어지면 그것으로 확정되고 아래 두 config 키는 아예 읽지 않는다. 그다음 `config.toml`의 `[serve].to` > 구 `[reverse].controller`(두 config 키가 다른 값으로 모두 설정되면 `CONFIG_ERROR`로 fail closed, §6.17 `config_serve_to_conflict`) > (아무것도 없으면) 인바운드 기본값 `[::]:4433`. 특히 `--bind`만 주고 `--to`는 생략한 경우도 config의 두 outbound 키를 읽지 않는다 — 오퍼레이터가 인바운드 주소를 직접 타이핑했으므로 `[serve].to`/`[reverse].controller`가 무엇이든 이 실행은 인바운드로 뜨고, 그 경로에서는 `config_serve_to_conflict`로 인한 `CONFIG_ERROR`가 나타날 수 없다. Windows에서는 숨김 `qsh reverse` alias와 같은 `UNSUPPORTED` 거부를 그대로 물려받는다 — 둘 다 같은 `run_reverse` 경로를 공유하기 때문이다(§6.13). 인바운드 `qsh serve` 자신은 이 거부를 갖지 않으며, `--to` 리터럴 자체의 대상 해석(`HOST_NOT_FOUND`/`INVALID_ARGUMENT`)이 이보다 먼저 실패할 수도 있다.
 - 시작 시 실제로 bind된 주소를 stderr에 출력한다. stdout은 §2.2 규칙에 따라 JSON 계약 전용이므로 여기서는 쓰지 않는다.
 - listener 재시작 시 세션 소실에 대해서는 README의 [Known limitations](../README.md#known-limitations)를 참고한다. 서비스 매니저의 `Restart=always`/`KeepAlive` 재시작도 같다(`docs/deploy/service.md`).
 - **SIGTERM drain(M2, ADR-0003):** 신규 attach·open을 거부한 뒤 모든 세션에 §6.7의 close 절차(SIGHUP→TERM→KILL, `close_grace_ms`)를 적용하고 붙어 있는 소비자에게 `session.closed{reason: "closed"}`(§6.4)를 보낸 다음 종료한다. 세션은 프로세스와 함께 끝나며 고아 셸을 남기지 않는다.
@@ -944,16 +946,27 @@ qsh serve --bind <ip:port>
   예전보다 빨리 retention 밖으로 밀어낸다. 즉 이 조건에서 짧아지는 것은 감사 이력이 실제로 남는
   *기간*이지 디렉터리 총 바이트가 아니다.
 
-### 6.13 장기 실행 모드: `qsh listen` / `qsh reverse`
+### 6.13 장기 실행 모드: `qsh listen` / `qsh serve --to`
 
-`qsh listen`(controller)과 `qsh reverse <controller>`(target)는 §2.4가 명시하는 장기 실행 모드다 — 단일 요청/응답 JSON 계약이 없고 operation 목록(§2.4)에 포함되지 않는다.
+`qsh listen`(controller)과 `qsh serve --to <listener>`(target)는 §2.4가 명시하는 장기 실행 모드다 — 단일 요청/응답 JSON 계약이 없고 operation 목록(§2.4)에 포함되지 않는다. target 쪽 이름은 `qsh reverse <controller>`에서 개명됐다(ROADMAP M9 (b), ADR-0012 결정 2/4) — controller/target이라는 두 역할 이름 자체는 바뀌지 않는다: controller는 listener이자 client 역할을, target은 host 머신 역할을 한다.
+
+**역할 표(ADR-0012 결정 1).** 두 축 — 셸을 내주느냐/얻느냐, 인바운드를 받느냐/밖으로 dial하느냐 — 이 명령 넷을 정한다:
+
+| | 인바운드를 받는다 | 밖으로 dial한다 |
+|---|---|---|
+| 셸을 내준다(host) | `qsh serve` | `qsh serve --to` |
+| 셸을 얻는다(client) | `qsh listen` | `qsh <name>`, `qsh exec` |
+
+listener는 중계기가 아니라 사람이 앉아 있는 client 머신이고, 그래서 공인 도달 가능해야 한다. 각 장비의 `acl.toml`은 그 장비로 들어오는 요청만 통제한다.
 
 ```bash
 qsh listen [--bind <ip:port>]
-qsh reverse <controller> [--offered-name <name>]
+qsh serve --to <listener|host:port> [--name <name>]
 ```
 
-- **Controller reachability 요구.** `qsh listen`은 target이 dial할 수 있는 주소에서 실행돼야 한다 — 역방향은 NAT 뒤 target을 도달 가능하게 만들 뿐, controller 자신은 여전히 direct-reachable해야 한다(relay·NAT traversal은 M3의 명시적 out-of-scope, ROADMAP.md M3). 이 요구의 정본 문안은 `qsh-core::doctor::CONTROLLER_UNREACHABLE`(`crates/qsh-core/src/doctor.rs`, `PLAN.md` M3 Step 9)이며, `qsh reverse`의 연결 실패 경로가 그 invocation 생애주기 동안 stderr에 **정확히 한 번**(백오프 재시도마다 반복하지 않는다) 렌더한다:
+**구 표기 alias.** `qsh reverse <controller> [--offered-name <name>]`는 숨김 서브커맨드로 남아 있으며 경고 없이 v1 내내 그대로 동작한다(ADR-0012 결정 4) — `qsh --help`의 `Commands:` 목록에서만 빠질 뿐, `qsh reverse --help`와 `qsh reverse <controller>` 자체는 이전과 동일하게 파싱되고 실행된다. `qsh serve --to`의 `--name`이 `qsh reverse`의 `--offered-name`에 대응한다. `--to`는 `--bind`와 함께 줄 수 없다 — 함께 주면 clap 파싱 오류(exit `2`)가 아니라 `INVALID_ARGUMENT`(exit `255`, envelope 없음, §2.2)다. `--name`을 `--to` 없이 주는 것도 같은 방식으로 거부한다 — `INVALID_ARGUMENT`(exit `255`): 이름은 outbound에서만 의미가 있으므로 조용히 무시하는 대신 fail closed한다.
+
+- **Controller reachability 요구.** `qsh listen`은 target이 dial할 수 있는 주소에서 실행돼야 한다 — 역방향은 NAT 뒤 target을 도달 가능하게 만들 뿐, controller 자신은 여전히 direct-reachable해야 한다(relay·NAT traversal은 M3의 명시적 out-of-scope, ROADMAP.md M3). 이 요구의 정본 문안은 `qsh-core::doctor::CONTROLLER_UNREACHABLE`(`crates/qsh-core/src/doctor.rs`, `PLAN.md` M3 Step 9)이며, `qsh serve --to`(구 `qsh reverse`)의 연결 실패 경로가 그 invocation 생애주기 동안 stderr에 **정확히 한 번**(백오프 재시도마다 반복하지 않는다) 렌더한다:
 
   > Reverse attach needs a directly reachable UDP path from the target to the controller. QSH provides no relay, NAT traversal, or discovery — that is out of scope for P0.
   >
@@ -961,10 +974,10 @@ qsh reverse <controller> [--offered-name <name>]
 
   같은 상수를 `qsh listen` 시작 배너, `README.md`의 "Known limitations", 그리고 이 절이 함께 소비한다 — 문안 정본이 여러 벌 생기지 않는다. `qsh doctor`(§6.17)도 `code: "controller_unreachable"`을 그대로 소비한다.
 - `--bind`의 우선순위: CLI flag > `[listen].bind` > 기본값 `[::]:4433` — `qsh serve`(§6.12)와 **기본값이 같다**. 한 머신에서 두 역할을 겸하려면 명시적 `--bind`가 필요하고, 충돌은 조용한 오작동이 아니라 즉시·명시적 실패(stderr 진단 + exit `255`)다. 실패 문면의 관측절(`cannot listen on {bind}: {err}`) 뒤에 처방이 붙는다 — 정확히 "Nothing is being served. `qsh serve` and `qsh listen` both default to port 4433, so one machine running both needs an explicit bind for at least one of them. Re-run with `--bind <ip:port>` on a free port."다(`qsh_core::serve::BIND_UNAVAILABLE_REMEDY`, ADR-0014 결정 9). `qsh serve`(§6.12)의 같은 실패도 이 상수를 공유하므로 문안 정본은 여기 하나다.
-- **정책 파일 진단(M5).** `qsh serve`(§6.12)와 동일한 규율이다 — `qsh listen`/`qsh reverse` 둘 다 시작 시 `acl.toml`을 1회 읽고, 없거나 파싱 불가면 리소스를 생성하지 않으며 그 상태에서 도달하는 모든 인가 판정은 항상 `deny`다(`docs/design/architecture.md` §6, `PLAN.md` M5 §4.1 #1). 운영자에게는 stderr에 파일 경로, `CONFIG_ERROR` 코드, 최소 정책 예시를 담은 진단을 한 번 출력하고(§6.12와 같은 평문 블록 — `StartupDiagnostic::render`, tracing JSON 라인이 아니다), 자동 생성은 하지 않는다. `qsh listen`은 controller로서 `host.reverse` 등록 요청을, `qsh reverse`는 target으로서 그 연결 위에서 relay되는 세션 op을 각각 자기 자신의 `acl.toml`로 평가한다. `qsh serve`의 페어링 성공 시 pin 고지(§6.11)가 "행이 있나"를 묻는 근거도 여기 §6.13이 서술하는 것과 같은 시점 위험을 진다 — 정책은 프로세스 기동 시 1회만 읽히므로, 그 뒤에 `acl.toml`을 편집해도 재시작 전까지는 반영되지 않는다. 그 고지는 행이 없으면 정확히 "pinned a new peer under the name it asked for itself: \"<name>\". No `[[acl]]` row names it, so it can authenticate but every action is still denied. Add a row for it to acl.toml and restart this `qsh serve` before it takes effect, then re-check with: qsh acl check --principal 'device:<name>' --action session.open"다(`qsh_core::pairing::PAIRING_PINNED_SELF_ASSERTED` + `PAIRING_ACL_ROW_ABSENT`), 행이 이미 있으면 뒷부분이 "An `[[acl]]` row already names it, so it inherits that row's grants exactly as written, including any you did not mean for this device. Confirm them with: qsh acl check --principal 'device:<name>' --action session.open"로 바뀐다(`PAIRING_ACL_ROW_PRESENT`) — 문안 정본은 §6.11 하나이고 이 절은 그 상수를 재인용할 뿐이다. `qsh listen`/`qsh reverse`는 pairing 교환 자체를 갖지 않으므로(트래픽은 항상 `qsh serve`가 받는다) 이 고지가 여기서 발화하지는 않는다.
+- **정책 파일 진단(M5).** `qsh serve`(§6.12)와 동일한 규율이다 — `qsh listen`/`qsh serve --to`(구 `qsh reverse`) 둘 다 시작 시 `acl.toml`을 1회 읽고, 없거나 파싱 불가면 리소스를 생성하지 않으며 그 상태에서 도달하는 모든 인가 판정은 항상 `deny`다(`docs/design/architecture.md` §6, `PLAN.md` M5 §4.1 #1). 운영자에게는 stderr에 파일 경로, `CONFIG_ERROR` 코드, 최소 정책 예시를 담은 진단을 한 번 출력하고(§6.12와 같은 평문 블록 — `StartupDiagnostic::render`, tracing JSON 라인이 아니다), 자동 생성은 하지 않는다. `qsh listen`은 controller로서 `host.reverse` 등록 요청을, `qsh serve --to`는 target으로서 그 연결 위에서 relay되는 세션 op을 각각 자기 자신의 `acl.toml`로 평가한다. `qsh serve`의 페어링 성공 시 pin 고지(§6.11)가 "행이 있나"를 묻는 근거도 여기 §6.13이 서술하는 것과 같은 시점 위험을 진다 — 정책은 프로세스 기동 시 1회만 읽히므로, 그 뒤에 `acl.toml`을 편집해도 재시작 전까지는 반영되지 않는다. 그 고지는 행이 없으면 정확히 "pinned a new peer under the name it asked for itself: \"<name>\". No `[[acl]]` row names it, so it can authenticate but every action is still denied. Add a row for it to acl.toml and restart this `qsh serve` before it takes effect, then re-check with: qsh acl check --principal 'device:<name>' --action session.open"다(`qsh_core::pairing::PAIRING_PINNED_SELF_ASSERTED` + `PAIRING_ACL_ROW_ABSENT`), 행이 이미 있으면 뒷부분이 "An `[[acl]]` row already names it, so it inherits that row's grants exactly as written, including any you did not mean for this device. Confirm them with: qsh acl check --principal 'device:<name>' --action session.open"로 바뀐다(`PAIRING_ACL_ROW_PRESENT`) — 문안 정본은 §6.11 하나이고 이 절은 그 상수를 재인용할 뿐이다. `qsh listen`/`qsh serve --to`는 pairing 교환 자체를 갖지 않으므로(트래픽은 항상 인바운드 `qsh serve`가 받는다) 이 고지가 여기서 발화하지는 않는다.
 - 시작 시 실제로 bind된 주소와 등록 이벤트(`registered|denied|replaced|lost|expired|retry`)를 stderr에 구조화 진단(tracing target `qsh::reverse`, 한 줄 JSON, payload·토큰 field 없음)으로 출력한다 — stdout에는 §2.2 규칙에 따라 한 바이트도 쓰지 않는다. 이 진단은 `qsh.cli/v1`/`qsh.event/v1` 계약에 속하지 않는 열린 어휘다(issue #4 item 6). `denied`/`lost`/`retry`는 실패·유실 사유를 `cause` 필드(고정 8값 — `resolve`/`dial_timeout`/`refused`/`tls_rejected`/`registration_denied`/`peer_closed`/`path_dead`/`local`, 실패 지점에서 분류되며 주소·토큰·peer가 보낸 오류 본문은 절대 담지 않는다)로 함께 내고, `registered`/`replaced`/`expired`는 이 필드를 생략한다. controller 주소가 여러 개로 resolve되는 경우(issue #4 item 2) 한 번의 접속 시도는 최대 4개까지 순서대로 dial을 시도하며, 그중 전부가 실패했을 때의 `cause`와 그 실패까지 걸린 `since_registered_ms`는 마지막으로 시도한 주소 하나의 실패만을 서술한다 — 그 이전에 실패한 주소들은 이 진단 줄에 남지 않는다. 모든 레코드는 RFC3339 `at` 필드를 갖는다 — 초 단위 정밀도이고(`crate::config::now_rfc3339`), wall-clock 기록일 뿐 정렬 키가 아니다(같은 `lost`/`retry` 쌍처럼 짧은 간격으로 이어지는 레코드는 `at`이 같은 초로 겹칠 수 있으며, 순서가 필요하면 stderr에 실제로 쓰인 `qsh::reverse` 줄 순서를 봐야 한다). `retry`는 언제나 `fingerprint`를 생략하고(그 시점에는 아직 TLS 핸드셰이크가 없어 알 수 없다), `lost`와 그 직후의 `retry`는 그 등록이 살아 있던 기간을 `since_registered_ms`(ms)로 함께 내는 반면 등록이 성립한 적 없는 `retry`(가령 `dial_and_register` 자체가 실패한 경우)는 이 필드도 생략한다 — 어느 쪽이든 `null`이 아니라 키 자체가 없다.
-- `qsh reverse <controller>`의 `<controller>`는 trust store alias다(§6.8의 host→주소 해석과 동일 — M7 이전에는 trust.toml pinned peer가 단일 출처). 등록에 성공하면 그 연결 위에서 host 역할로 동작하며, 서비스하는 세션은 `qsh serve`와 같은 broker·writer lease 규율을 그대로 따른다. **관찰 가능한 차이는 writer lease를 쥐는 connection이 상주 `qsh listen` 데몬이 유지하는 역방향 connection에 결합된다는 점이다** — 그 connection이 죽으면(재접속 루프가 새 connection을 세우기 전) lease는 forward 세션과 동일하게 자동 해제된다(architecture.md §3).
-- `qsh listen`/`qsh reverse` 둘 다 Windows에서는 리소스를 생성하지 않고 `UNSUPPORTED` + exit `255`다 — localctl(UDS)과 host 역할(PTY)이 `cfg(unix)`이기 때문이다. Windows의 `qsh hosts`는 forward host만 반환하며(데몬 개념 없음) 오류가 아니다.
+- `qsh serve --to <listener>`의 `<listener>`는 이름을 먼저, 주소를 다음으로 시도하는 2단계로 해석된다(ADR-0014 결정 7): 먼저 §6.8과 동일한 host→주소 해석(`hosts.toml` 우선, 없으면 `trust.toml`의 pinned peer)으로 trust store alias를 찾고, 그 이름이 없을 때만 리터럴을 정규화해(포트 없으면 4433 보충, §6.11) `trust.toml`의 pin 중 정규화된 주소가 일치하는 것을 찾는다 — 정확히 하나가 일치하면 그 peer의 이름이 controller key가 되고, 둘 이상이면 `INVALID_ARGUMENT`(first-wins 없음), 하나도 없으면 이름 조회 쪽의 오류(보통 `HOST_NOT_FOUND`)로 실패한다. 이름이 주소보다 항상 우선한다 — 주소처럼 생긴 이름으로 pin된 peer(`"192.0.2.10:4433"`)는 그 주소에 실제로 있는 다른 peer가 아니라 자기 자신으로 해석된다. 주소 해석으로 포트가 채워졌을 때만(§6.11과 동일한 `ADDRESS_PORT_ASSUMED_NOTICE`) stderr에 한 번 알린다. 등록에 성공하면 그 연결 위에서 host 역할로 동작하며, 서비스하는 세션은 `qsh serve`(인바운드)와 같은 broker·writer lease 규율을 그대로 따른다. **관찰 가능한 차이는 writer lease를 쥐는 connection이 상주 `qsh listen` 데몬이 유지하는 역방향 connection에 결합된다는 점이다** — 그 connection이 죽으면(재접속 루프가 새 connection을 세우기 전) lease는 forward 세션과 동일하게 자동 해제된다(architecture.md §3).
+- `qsh listen`/`qsh serve --to`(그리고 숨김 alias `qsh reverse`) 둘 다 Windows에서는 리소스를 생성하지 않고 `UNSUPPORTED` + exit `255`다 — localctl(UDS)과 host 역할(PTY)이 `cfg(unix)`이기 때문이다. `qsh serve --to`는 숨김 `qsh reverse` alias와 같은 경로(`run_reverse`)를 공유하므로 이 거부도 공유한다 — 인바운드 `qsh serve`는 이 거부를 갖지 않는다. `--to` 리터럴 자체의 대상 해석(`HOST_NOT_FOUND`/`INVALID_ARGUMENT`, §6.8과 같은 이름-그다음-주소 2단계)이 `run_reverse`에 닿기 전에 먼저 실패할 수도 있다. Windows의 `qsh hosts`는 forward host만 반환하며(데몬 개념 없음) 오류가 아니다.
 - 연결이 죽은 등록은 `state:"stale"`로 표시됐다가 `[listen].stale_retention`(기본 120s, `docs/design/protocol.md` §11-4)이 지나면 목록에서 제거된다.
 - **Controller 측 writer lease 결합 (M3 Step 6).** live 역방향 등록으로 뜨는 host를 향한 controller 쪽의 `qsh session ...`(value op 6종: open/get/list/read/write/resize/close)는 그 명령을 실행한 CLI 프로세스 자신의 QUIC connection이 아니라, 상주 `qsh listen` 데몬이 target과 유지하는 그 **하나의** reverse connection을 `LOCAL_CONTROL` conduit(`docs/design/protocol.md` §11-3)으로 relay해서 나간다. **대화형 attach(`qsh <name>`/`qsh attach <name>/<id>`)도 M3 Step 7부터 이 경로를 탄다.** `Ops::session_attach`는 route-aware해졌다(`Ops::connect`로 host route를 먼저 resolve하고, 그 결과가 live 역방향 등록이면 forward의 `connect_target`이 아니라 이 §의 `LOCAL_CONTROL` conduit으로 향한다); ticket을 실제로 redeem하는 data 스트림도 이제 `LOCAL_STREAM` conduit(위 conduit 모델 문단, `docs/design/protocol.md` §11-3)로 역방향에서 열린다 — 데몬은 그 conduit 위에서 `LocalHello`/`LocalHelloAck` 교환 뒤 wire `StreamHeader{SESSION_DATA, ticket}`를 받아 host의 QUIC connection 위에 새 bidi stream을 열고 그 뒤로는 순수 byte splice로만 동작한다(SessionFrame을 파싱하지도, payload를 로그하지도 않는다). 아래 lease 결합 규칙은 지금 이 value op·stream op 양쪽 모두에 참이다: 위 항목의 "writer lease를 쥐는 connection이 데몬의 reverse connection에 결합된다"는 target 쪽 서술의 controller 쪽 대응이다 — target이 실제로 보는 유일한 connection은 데몬의 것이므로, **writer lease는 데몬의 connection에 묶이지, lease를 요청한 CLI 프로세스 자체에는 묶이지 않는다.** 그 CLI 프로세스가 죽어도(터미널 종료, `Ctrl-C`, 비정상 종료) 데몬의 reverse connection이 살아 있는 한 lease는 자동 해제되지 않는다 — forward 세션(§5, architecture.md §3)의 "소유 connection이 죽으면 lease가 자동 해제"라는 기대가 reverse 경로에서는 CLI 프로세스 단위가 아니라 데몬 connection 단위로 적용된다는 뜻이다. **동시 attach 격리.** 이 lease를 실제로 쥐는지 판정하는 identity는 물리 connection(`ctx.connection_id()`)이 아니라 그 attach가 redeem한 단발성 ticket에서 유도된다(`WriterLease::take_owned`) — 그렇지 않으면 한 데몬을 거치는 모든 local CLI가 같은 물리 connection을 공유하는 탓에 서로 다른 두 attach가 같은 identity로 오인되어 조용히 lease를 공동 소유하고 (`no_steal`이 걸려 있어도) 서로의 keystroke를 같은 PTY에 섞어 넣는다. 반면 `no_steal`이 충돌 여부를 판단하는 기준은 여전히 **principal뿐**이다(architecture.md §3(b)). reverse 경로에서 한 데몬을 relay로 쓰는 모든 local CLI 프로세스는 — 어느 프로세스가 열었든 — 항상 그 데몬의 reverse connection과 같은 controller principal로 인증되므로, "타 principal이 lease를 쥐고 있다"는 `no_steal` 충돌의 전제 자체가 reverse 경로 안에서는 성립하지 않는다(`session.write`가 opener 결합 때문에 이미 이 규칙을 재현할 수 없는 것과 같은 이유, 바로 위 architecture.md §3(b) 인용). 즉 죽은 CLI가 남긴 lease는 자동 해제되지 않지만, 다음 attach는 대화형이든 `no_steal`을 쓰는 자동화든 관계없이 항상 그 lease를 이어받는다 — `SESSION_CONFLICT`는 이 reverse 시나리오에서는 발생하지 않는다.
 - **역방향 attach에는 아직 recovery/reconnect가 없다 (M3 Step 7).** Forward 경로의 attach는 connection이 끊겨도 (`docs/CLI.md` 이 절 밖의) 자동 재접속·resume 시도를 갖지만, `LOCAL_STREAM`/`LOCAL_CONTROL` conduit 위의 역방향 attach는 그 driver가 아직 없다 — 데몬의 reverse connection이나 conduit 자체가 죽으면 attach는 그 즉시 명확한 typed error로 끝난다(panic도, 무한 대기도 아니다). 세션 자체는 forward와 동일하게 살아남는다(broker가 쥐고 있고, connection 수명과 분리돼 있다 — architecture.md §3); 사용자가 다시 `qsh attach <name>/<id>`를 실행하면 데몬의 reverse connection이 살아 있는 한 정상적으로 재attach된다. 이 driver는 M3 Step 8에서 forward와 같은 `Reconnect` 추상 위에 통합될 예정이다.
@@ -982,7 +995,7 @@ qsh reverse <controller> [--offered-name <name>]
 qsh acl check --principal <principal> --action <action> [--resource <resource>] [--auth-path pin|ca] [--owner <principal>] [--owner-auth-path pin|ca] --json
 ```
 
-`acl.check`는 §2.4·§2.5가 명시하듯 **로컬 operation**이다 — 원격 peer가 요청할 수 없고, 이 머신 자신의 `acl.toml`을 이 머신에서 조회한다. 원격으로 정책 조회를 허용하면 그 자체가 capability 열거 oracle이 되기 때문이다(`docs/ROADMAP.md` M5 감사 개정 ③). `qsh serve`/`qsh listen`/`qsh reverse`가 실제로 강제하는 것과 **같은 평가기**를 호출하므로(`PLAN.md` M5 DoD 1), 이 명령의 결과는 실제 enforcement 결과의 신뢰할 수 있는 예측이다 — 재시작 전 정책을 검증하는 용도(§6.12·§6.13의 정책 파일 진단 문단)로 쓴다. 이 예측에는 한계가 둘 있다. `policy.loaded: false`는 파일이 아예 없는 경우와 파싱에 실패한 경우를 구별하지 않으며, 파싱 실패의 상세(어떤 rule의 어떤 토큰이 문제였는지)는 `acl check`가 아니라 §6.12·§6.13의 시작 진단이 정본이다 — `acl check` 자신은 그 상세를 출력하지 않는다. 그리고 enforcement에는 이 평가기 위에 fail-closed 층이 하나 더 있어서, audit 기록 자체가 실패하면 `allow` 판정이 `deny`로 뒤집히고 세션 소유자 조회가 실패해도 `deny`로 처리된다(`crates/qsh-core/src/server/mod.rs`) — 그래서 `acl check`의 `allow` 예측은 실제 운영 상태에 따라 `deny`로 뒤집힐 수 있지만, `deny` 예측이 `allow`로 뒤집히는 일은 없다.
+`acl.check`는 §2.4·§2.5가 명시하듯 **로컬 operation**이다 — 원격 peer가 요청할 수 없고, 이 머신 자신의 `acl.toml`을 이 머신에서 조회한다. 원격으로 정책 조회를 허용하면 그 자체가 capability 열거 oracle이 되기 때문이다(`docs/ROADMAP.md` M5 감사 개정 ③). `qsh serve`/`qsh listen`/`qsh serve --to`(구 표기 `qsh reverse`)가 실제로 강제하는 것과 **같은 평가기**를 호출하므로(`PLAN.md` M5 DoD 1), 이 명령의 결과는 실제 enforcement 결과의 신뢰할 수 있는 예측이다 — 재시작 전 정책을 검증하는 용도(§6.12·§6.13의 정책 파일 진단 문단)로 쓴다. 이 예측에는 한계가 둘 있다. `policy.loaded: false`는 파일이 아예 없는 경우와 파싱에 실패한 경우를 구별하지 않으며, 파싱 실패의 상세(어떤 rule의 어떤 토큰이 문제였는지)는 `acl check`가 아니라 §6.12·§6.13의 시작 진단이 정본이다 — `acl check` 자신은 그 상세를 출력하지 않는다. 그리고 enforcement에는 이 평가기 위에 fail-closed 층이 하나 더 있어서, audit 기록 자체가 실패하면 `allow` 판정이 `deny`로 뒤집히고 세션 소유자 조회가 실패해도 `deny`로 처리된다(`crates/qsh-core/src/server/mod.rs`) — 그래서 `acl check`의 `allow` 예측은 실제 운영 상태에 따라 `deny`로 뒤집힐 수 있지만, `deny` 예측이 `allow`로 뒤집히는 일은 없다.
 
 인자:
 
@@ -1083,7 +1096,7 @@ pin(`AuthPath::Pin`)과 CA(`AuthPath::Ca`) 양쪽 모두 principal은 똑같이 
 qsh doctor [host] --json
 ```
 
-`doctor.run`은 §2.4·§2.5가 이미 예약해 둔 대로 **로컬 operation**이다 — 원격 peer가 요청할 수 없고, 이 머신 자신의 identity·ACL 정책·audit 로그·trust store·시계·(best-effort) 네트워크 도달성을 조회해 하나의 report로 묶는다. 인자 없는 `qsh doctor`는 `[reverse].controller`가 설정돼 있으면 그 연결성만 점검하고, `qsh doctor <host>`는 그 pinned host를 추가로 점검한다 — `qsh capabilities [host]`(§6.10)와 같은 UX 형태다.
+`doctor.run`은 §2.4·§2.5가 이미 예약해 둔 대로 **로컬 operation**이다 — 원격 peer가 요청할 수 없고, 이 머신 자신의 identity·ACL 정책·audit 로그·trust store·시계·(best-effort) 네트워크 도달성을 조회해 하나의 report로 묶는다. 인자 없는 `qsh doctor`는 outbound controller(`[serve].to`, 없으면 구 `[reverse].controller`)가 설정돼 있으면 그 연결성만 점검하고, `qsh doctor <host>`는 그 pinned host를 추가로 점검한다 — `qsh capabilities [host]`(§6.10)와 같은 UX 형태다.
 
 **exit code는 항상 `0`이다 — finding은 data이지 실패가 아니다.** `qsh acl check`(§6.15, L845)의 선례를 그대로 확장한다: `deny`나 "정책 없음"조차 `acl check` 자체를 실패로 만들지 않듯, `doctor.run`도 아무리 심각한 finding이 나와도 조회 자체는 성공이다(`ok: true`). 건강도는 `data.overall`이 담는다. `doctor.run`이 `Err`(exit `255`)로 실패하는 경우는 doctor 자신이 조회를 시작할 조건조차 없을 때뿐이다 — 대표적으로 `qsh init`을 아직 실행하지 않아 device identity가 없는 경우, 또는 `config.toml`/`hosts.toml`/`trust.toml`이 파싱조차 되지 않는 경우(각 로더가 이미 `CONFIG_ERROR`로 잡는다 — doctor가 별도 code로 다시 잡지 않는다). output mode에 따라 이 규칙이 달라지지 않는다(§4).
 
@@ -1124,11 +1137,11 @@ qsh doctor [host] --json
 - `detail`: 무엇이 관측됐는지에 대한 사람이 읽을 수 있는 설명(해석된 경로, 관측된 만료 시각 등). 시크릿·PTY/명령 payload는 절대 담지 않는다(`CLAUDE.md`의 보안 기본값).
 - `remedy`: 실행 가능한 다음 행동 한 줄. 없으면 필드 자체가 생략된다(additive-optional, `CapabilitiesData.host`와 같은 규율).
 
-**21종 진단 코드** (재사용 5종·신설 16종 — `PLAN.md` M7 §4.1 #5가 확정한 잠금 어휘, `config_unknown_key`는 M8 Step 4b가, 나머지 7종은 M9 (h)가 더했다):
+**22종 진단 코드** (재사용 5종·신설 17종 — `PLAN.md` M7 §4.1 #5가 확정한 잠금 어휘, `config_unknown_key`는 M8 Step 4b가, 나머지 M9 (h)가 8종을 더했다):
 
 | `code` | `status` | 무엇을 점검하는가 |
 |---|---|---|
-| `controller_unreachable` | error | `[reverse].controller`가 설정돼 있으면 그 dial이 실패 — reverse는 relay·NAT traversal이 없다(M3 out-of-scope, §6.13). 문면은 `qsh_core::doctor::CONTROLLER_UNREACHABLE`을 그대로 재사용한다(§6.13과 동일 정본) |
+| `controller_unreachable` | error | outbound controller(`[serve].to`, 없으면 구 `[reverse].controller`)가 설정돼 있으면 그 dial이 실패 — reverse는 relay·NAT traversal이 없다(M3 out-of-scope, §6.13). 문면은 `qsh_core::doctor::CONTROLLER_UNREACHABLE`을 그대로 재사용한다(§6.13과 동일 정본) |
 | `udp_egress_blocked` | error | `host` 인자로 준 일반 대상으로의 raw UDP probe가 응답 없이 침묵 타임아웃 — 방화벽이 UDP를 막고 있을 가능성. QSH는 TCP fallback이 없다(P1, ADR-0005) |
 | `no_route` | error | 일반 대상으로의 probe가 OS 레벨에서 즉시 거부됨(경로 자체가 없음) — 침묵 타임아웃(`udp_egress_blocked`)과 구분된다 |
 | `peer_untrusted` | error | `hosts.toml`이 이름을 알지만 `trust.toml`에 그 이름의 pin이 없음 — 그 이름으로 연결하면 `TRUST_REQUIRED`로 실패할 운명이다(정적 교차대조, 위양성 없음) |
@@ -1142,15 +1155,16 @@ qsh doctor [host] --json
 | `qsh_path_shadowed` | warn | `$PATH`에서 지금 실행 중인 바이너리(`current_exe`)보다 앞서는 다른 `qsh` 실행파일이 있음 — 맨몸 `qsh`를 실행하면 그 다른 바이너리가 대신 뜬다 |
 | `config_unknown_key` | warn | `config.toml`에 `Config`가 모르는 키 경로가 있어 조용히 무시되고 있음(§2.3의 "알 수 없는 키는 오류 없이 무시된다" 계약 그대로 — `deny_unknown_fields`는 쓰지 않는다). 상한 키 이름 오타면 그 상한은 기본값으로 남는다. `detail`이 문제의 키 경로를 밝힌다 |
 | `trust_remove_scope` | info | `trust.toml`에 pin이 하나라도 있으면 상시 노출되는 고지 — `trust remove`의 유효 범위(§6.11)를 다시 알려준다: 제거는 다음 handshake부터만 적용되고, 이미 확립된 연결은 협상된 권한 전체를 연결이 끊길 때까지 유지한다 |
-| `service_not_registered` | info | 이 머신에서 추론한 run mode(`listen`/`reverse`/`serve`)에 대응하는 플랫폼 서비스 유닛이 등록돼 있지 않음 — macOS는 `~/Library/LaunchAgents/io.qsh.<mode>.plist`, Linux는 `~/.config/systemd/user/qsh-<mode>.service`를 확인한다(Windows 등 다른 플랫폼에서는 뜨지 않는다). `qsh service install`은 아직 없으므로 `docs/deploy/service.md`의 수동 유닛 예시를 따르라고 안내한다 |
+| `service_not_registered` | info | 이 머신에서 추론한 run mode(`listen`/`reverse`/`serve`, 우선순위 `[listen]` > `[serve].to` > 구 `[reverse].controller` > `serve`)에 대응하는 플랫폼 서비스 유닛이 등록돼 있지 않음 — macOS는 `~/Library/LaunchAgents/io.qsh.<mode>.plist`, Linux는 `~/.config/systemd/user/qsh-<mode>.service`를 확인한다(Windows 등 다른 플랫폼에서는 뜨지 않는다). `qsh service install`은 아직 없으므로 `docs/deploy/service.md`의 수동 유닛 예시를 따르라고 안내한다 |
 | `systemd_linger_disabled` | warn | Linux에서만, 그리고 해당 mode의 유닛이 이미 등록된 경우에만 도달한다 — `/var/lib/systemd/linger/$USER` 파일 존재 여부만 읽는다(subprocess 없음). 못 읽으면 "unknown"으로 취급해 finding을 내지 않는다 |
 | `launchagent_session_scoped` | warn | macOS에서만, 해당 mode의 LaunchAgent가 등록돼 있으면 무조건 뜨는 구조적 고지 — 사용자 LaunchAgent는 로그인 세션 안에서만 돌고 로그아웃하면 멈춘다. headless 대안은 root LaunchDaemon(out of scope)뿐이다 |
 | `bindv6only_blocks_ipv4` | warn | 유효 bind 주소가 IPv6 wildcard이고 이 OS가 새 dual-stack 소켓을 기본으로 `IPV6_V6ONLY`로 여는 경우 — `Listener::bind`는 `dual_stack_v6=false`로 열어 서버 쪽이 명시적으로 풀지 않으므로, 그런 OS 기본값에서는 `[::]:4433` listener가 IPv4 peer를 조용히 거부한다 |
 | `acl_principal_unmatched` | error | `trust.toml`이 pin한 peer 중 `auth_path = "pin"`인 `acl.toml` 행 어디에도 매칭되지 않는 것이 있음 — `device:<name>`·`fp:sha256:<fingerprint>` 두 후보 다 확인한다. `PEER_UNTRUSTED`와 같은 이유로 error다: 이름이 특정된 실제 peer가 모든 요청에서 확실히 거부될 상태이기 때문이다(`docs/adr/0017-acl-toml-not-written.md` 결정 2) |
 | `acl_ca_auth_path_missing` | warn | `trust.toml`에 `[[ca]]`가 하나 이상 있는데 `acl.toml` 어디에도 `auth_path = "ca"` 행이 없음 — peer 단위가 아니라 파일 전체 수준의 거친 검사다(CA 인증 principal은 `device:<id>` 모양이라 미리 열거할 수 없다). `acl_principal_unmatched`와 달리 warn이다: CA는 준비됐지만 아직 아무것도 그것에 의존한다고 증명되지 않은 잠재적 공백이기 때문이다(`docs/adr/0017-acl-toml-not-written.md` 결정 2) |
 | `host_pinned_without_address` | warn | `host_list`가 아는 이름(trust pin 또는 `hosts.toml` 항목)에 두 출처 어디서도 주소가 없고 현재 유지 중인 reverse 등록(live·stale 불문)도 없음 — `--address` 없이 `--fingerprint`만으로 pin해 아직 phone-home하지 않은 순정 reverse 대상은 정상적인 일시 상태이므로 error가 아니라 warn이다. 그 이름의 reverse 등록이 하나라도 있으면(live든 stale이든) 뜨지 않는다 |
+| `config_serve_to_conflict` | error | `[serve].to`와 구 `[reverse].controller`가 둘 다 설정돼 있고 값이 다름 — 그 상태에서 `qsh serve`/`qsh service install`은 `CONFIG_ERROR`로 fail closed한다(ADR-0012 결정 5). doctor는 exit `0`을 유지한 채 finding으로만 알린다. 두 값이 같으면 통과이므로 뜨지 않는다 |
 
-**연결성 진단의 우선순위 규칙.** 한 probe 실패는 항상 code 하나만 낸다: probe 대상이 `[reverse].controller`면 결과와 무관하게 `controller_unreachable`이고, `host` 인자로 준 일반 대상이면 침묵 타임아웃은 `udp_egress_blocked`, OS의 즉시 거부(경로 없음)는 `no_route`다 — 세 code가 한 실패에 동시에 나오는 일은 없다.
+**연결성 진단의 우선순위 규칙.** 한 probe 실패는 항상 code 하나만 낸다: probe 대상이 outbound controller(`[serve].to`, 없으면 구 `[reverse].controller`)면 결과와 무관하게 `controller_unreachable`이고, `host` 인자로 준 일반 대상이면 침묵 타임아웃은 `udp_egress_blocked`, OS의 즉시 거부(경로 없음)는 `no_route`다 — 세 code가 한 실패에 동시에 나오는 일은 없다.
 
 **`--fail-on` 플래그는 아직 없다.** severity 임계값 이상일 때 CI 게이트용 nonzero exit을 내는 옵션은 향후 additive 확장 후보이며, 지금은 구현하지 않는다 — 위 exit code 문단대로 지금은 findings의 존재와 무관하게 항상 `0`이다.
 
@@ -1220,6 +1234,7 @@ QSH operation은 두 종류로 나뉜다.
 - Field 삭제, type 변경과 의미 변경은 `/v2`가 필요하다.
 - Deprecated field는 최소 두 minor release 동안 유지한다.
 - `qsh schema --json`으로 지원 version과 deprecation을 조회할 수 있어야 한다.
+- 숨김 서브커맨드 표기의 수명은 §6.13/§6.11이 정한다.
 
 ## 11. 구현 제약
 
