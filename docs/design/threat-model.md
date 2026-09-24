@@ -23,7 +23,7 @@
 - 사용자가 세션 안에서 실행하는 프로그램. qsh는 셸을 내주는 도구이고, 인가된 peer가 그 셸로 무엇을 하는지는 ACL의 관심사가 아니다(PRD §9의 action 어휘가 정하는 것은 "어떤 종류의 요청을 받는가"까지다).
 - 공급망(의존성 취약점·yanked crate)은 `cargo deny check`가 별도 게이트로 본다 — 이 문서는 그 게이트의 존재만 기록하고 위협 표에 행을 두지 않는다.
 - 릴리스 아티팩트 서명·notarization은 M10 소관이다(`docs/ROADMAP.md:135`).
-- M9가 신설할 사람용 표면 명령(`pair`, `service`, `trust rename` 등, `ROADMAP.md:118`)은 아직 코드가 없으므로 위협 표의 대상이 아니다. 그중 이 문서가 지금 인지해야 하는 것은 §5 g4 하나다.
+- M9가 신설한 사람용 표면 명령(`pair`, `service`, `trust rename` 등, `ROADMAP.md:118`)은 `db122f5`·`699af37`·`93e8b76`·`bd34c92`로 이미 착지했다. 이 표는 아직 그 표면을 다루지 않으며, 그 커버리지는 이 문서의 다음 개정으로 미룬다. §5 g4는 닫혔다.
 
 ## 1. 자산
 
@@ -177,14 +177,14 @@ F2의 정확도가 이 범주에서 가장 중요하다. "audit에 payload를 �
 
 ## 5. 갭 — 통제는 있고 핀 테스트가 없거나 불확실했던 것
 
-M8 Step 7 착수 시점에 다섯 개를 열어 두고 조사했다. 넷은 닫혔고 하나는 M9 소유로 남는다.
+M8 Step 7 착수 시점에 다섯 개를 열어 두고 조사했다. 넷은 그때 닫혔고, 남은 g4는 M9 구현(`963809e`)으로 닫혔다 — 다섯 모두 닫힘이다.
 
 | # | 통제 | 판정 | 근거 |
 |---|---|---|---|
 | g1 | `MAX_INFLIGHT_PER_CONDUIT`(64) 초과 시 거부 | **닫힘 — 기존 테스트가 이미 정확히 이 시나리오를 친다.** 새 테스트는 만들지 않았다 | `crates/qsh-core/src/localctl/mux.rs:433` `cap_exhausted_on_one_conduit_does_not_affect_another`가 한 conduit의 in-flight를 `MAX_INFLIGHT_PER_CONDUIT`까지 채운 뒤 `map_outbound`가 `Err(Exhausted)`를 반환함을 확인한다. hub-wide 캡(`listen.rs:2730`)과는 다른 축이다 |
 | g2 | `trust remove` 후 기존 연결의 동작(`README.md` "Known limitations") | **닫힘 — 기존 테스트 있음** | `crates/qsh-cli/tests/trust_lifecycle_live.rs:118` `an_established_connection_survives_the_hosts_trust_remove`가 실제 QUIC 연결로 `trust remove` 뒤에도 같은 PTY 세션의 write/read가 계속됨을 확인한다. 이 테스트가 고정하는 것은 통제가 아니라 §7 h5의 한계 자체다 |
 | g3 | `session.control`의 `close`가 scope 예외라는 것(`architecture.md:86`) | **닫힘 — 기존 테스트가 양성 방향으로 고정한다** | `crates/qsh-testkit/tests/session_loopback.rs:891` `session_close_is_exempt_from_scope_owned_while_write_and_resize_are_not`가 `scope = "owned"` 규칙 아래에서 `close`는 비-owner에게 허용되고 `write`/`resize`는 거부됨을 같은 테스트에서 대조한다 |
-| g4 | doctor `acl_principal_unmatched` / `acl_ca_auth_path_missing` | **열림 — M9 소유.** M8 시점의 잔여 위험으로 남긴다 | ADR-0017 결정 2(`:21-22`)가 이 둘을 요구하고, `docs/ROADMAP.md:118` M9 범위 (h) "doctor 진단 7종 추가"가 소유한다. 저장소에 아직 구현이 없다. 실무적 영향: `trust.toml`에 pin은 됐지만 `acl.toml`에 대응 행이 없는 peer가 조용히 전면 거부 상태로 남고, 운영자는 `serve` 시작 시 stderr 고지에만 의존한다(ADR-0017:36이 이 채널이 상시 데몬에서는 보이지 않는다고 적는다) |
+| g4 | doctor `acl_principal_unmatched` / `acl_ca_auth_path_missing` | **닫힘 — M9가 두 code를 구현·테스트·문서화했다** | 두 code 모두 `963809e`에서 착지했다. `acl_principal_unmatched`는 error, `acl_ca_auth_path_missing`은 warn이다(ADR-0017 결정 2). `crates/qsh-core/src/ops/doctor/tests.rs`의 `doctor_acl_findings_reports_acl_principal_unmatched_for_an_unmatched_pin`과 `doctor_acl_findings_reports_acl_ca_auth_path_missing_when_no_row_sets_ca`가 각각 판정을 고정한다. `docs/CLI.md` §6.17 표에 두 code 모두 등재돼 있다 |
 | g5 | 0-RTT 금지 다섯 상수의 회귀 탐지 | **닫힘 — M8 Step 7이 유닛을 추가했다** | `crates/qsh-transport/src/endpoint.rs:1242` `tls_configs_disable_0_rtt_and_session_resumption`. 이전에는 `loopback.rs:395-403`이 "0-RTT를 구조적으로 도달 불가하게 만들어 단언할 API 표면이 남지 않았다"고 기록한 상태였고, 다섯 상수 중 하나를 되돌려도 깨지는 테스트가 없었다. 새 유닛은 config 객체를 직접 읽어 그 상태를 끝낸다 |
 
 ## 6. 문서가 서술하지 않던 통제
