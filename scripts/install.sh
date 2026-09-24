@@ -199,7 +199,8 @@ to the directory the binary should go in"
     [ "$want" = "$got" ] ||
         die "checksum mismatch for ${asset}: expected ${want}, got ${got} — refusing to install"
 
-    # Extract the one member the archive is supposed to hold, by name, so a
+    # Extract the `qsh` member by name -- the archive also carries the man
+    # pages under `man/`, which this installer does not install -- so a
     # surprise path in the tarball cannot write outside the scratch dir.
     log "unpacking"
     tar xzf "${workdir}/${asset}" -C "$workdir" qsh ||

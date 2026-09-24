@@ -25,7 +25,11 @@ nothing installed: no entry, a duplicate entry, a mismatch, a tarball whose
 `qsh` member is missing or is a symlink. The binary lands via a temp file in
 the destination directory followed by a rename, so an interrupted run never
 leaves a half-written `qsh` on your `PATH`, and `sudo` is never invoked. An
-unwritable `QSH_INSTALL_DIR` is an error, not a prompt to escalate.
+unwritable `QSH_INSTALL_DIR` is an error, not a prompt to escalate. Starting
+with the first tag cut after the man pages joined the release archive, the
+archive also carries them under `man/`; the installer extracts only `qsh`
+and leaves them behind, and Homebrew is the install path that puts them on
+a `MANPATH`.
 
 What the checksum proves is bounded. `SHA256SUMS` comes from the same
 release as the archive, so it catches a truncated or corrupted download, not

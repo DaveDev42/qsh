@@ -7,8 +7,9 @@
 //! Unlike the rest of this suite it can run against an **arbitrary** `qsh`
 //! binary, because what M10 ships is a release build and nothing in CI had
 //! ever exercised a release binary's functional path — only
-//! `version --json` (`.github/workflows/release.yml`'s smoke step) and T2's
-//! absolute RSS/fd numbers (`adversarial_load.rs`, `soak.rs`).
+//! `version --json` (`.github/workflows/release.yml`'s `Binary starts`
+//! step) and T2's absolute RSS/fd numbers (`adversarial_load.rs`,
+//! `soak.rs`).
 //!
 //! - `QSH_SMOKE_BIN` names the binary to drive. Unset, this falls back to
 //!   the nextest-built `CARGO_BIN_EXE_qsh` on purpose, so the scenario runs

@@ -181,7 +181,9 @@ brew install DaveDev42/tap/qsh
 
 Apple silicon only for now — the formula tracks the `aarch64-apple-darwin`
 release tarball. The Homebrew version is the release tag without its
-leading `v`; there is no separate versioning scheme.
+leading `v`; there is no separate versioning scheme. Starting with the
+first tag cut after the man pages joined the release archive, this is the
+one install path that puts them on your `MANPATH`.
 
 ### From source
 
@@ -216,10 +218,15 @@ and manages the unit for you — see
 Man pages for every subcommand are generated from the same `clap`
 definitions `--help` uses and live under [`docs/man/`](docs/man/)
 (`cargo xtask man` regenerates them; `docs/design/testing.md` covers the
-test that keeps them from drifting). Nothing installs them onto a system
-`MANPATH` yet — that lands with M10's packaging — so point `man` at a page
-directly instead: `man ./docs/man/qsh.1`, or `man ./docs/man/qsh-trust-add.1`
-for a subcommand.
+test that keeps them from drifting). Homebrew installs them; the curl
+installer does not. Starting with the first tag cut after the man pages
+joined the release archive, a Homebrew install puts `man qsh` and
+`man qsh-trust-add` on your `MANPATH` with no further setup. From the
+installer or a manual download of a `.tar.gz` asset, the pages ride along
+in the `man/` directory inside the archive (the Windows `.zip` does not
+carry them) but nothing puts them on a `MANPATH`, so point `man` at a page
+directly: `man ./docs/man/qsh.1`, or `man ./man/qsh-trust-add.1` from an
+unpacked archive.
 
 ## First run
 
