@@ -281,6 +281,27 @@ const OP_FACES: &[OpFace] = &[
         man_file: "qsh-schema.1",
     },
     OpFace {
+        op: "service.install",
+        marker: "ServiceInstallOp",
+        renderer: "print_service_install",
+        cli_spelling: "qsh service install",
+        man_file: "qsh-service-install.1",
+    },
+    OpFace {
+        op: "service.status",
+        marker: "ServiceStatusOp",
+        renderer: "print_service_status",
+        cli_spelling: "qsh service status",
+        man_file: "qsh-service-status.1",
+    },
+    OpFace {
+        op: "service.uninstall",
+        marker: "ServiceUninstallOp",
+        renderer: "print_service_uninstall",
+        cli_spelling: "qsh service uninstall",
+        man_file: "qsh-service-uninstall.1",
+    },
+    OpFace {
         op: "session.close",
         marker: "SessionCloseOp",
         renderer: "print_session_close",

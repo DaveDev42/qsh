@@ -168,7 +168,7 @@ even though the binary it installs is `qsh`.
 
 `scripts/README.md` covers the installer in more detail.
 
-Running qsh as a service: see [docs/deploy/service.md](docs/deploy/service.md).
+Running qsh as a service: `qsh service install|uninstall|status` generates and manages the unit for you — see [docs/deploy/service.md](docs/deploy/service.md).
 
 Man pages for every subcommand are generated from the same `clap`
 definitions `--help` uses and live under [`docs/man/`](docs/man/)

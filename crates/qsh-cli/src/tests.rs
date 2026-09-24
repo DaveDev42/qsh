@@ -231,6 +231,22 @@ fn pair_and_trust_invite_accept_spellings_converge_on_the_same_op_name() {
     assert_eq!(command_name(&cli), TrustRenameOp::COMMAND);
 }
 
+/// ROADMAP M9 (g) (`docs/CLI.md` §6.18): all three `qsh service` subcommands
+/// reach their own dotted op name through [`command_name`] — unlike
+/// `serve`/`listen`/`reverse` (above), `qsh service` *is* an operation
+/// triple, so none of its three arms should fall back to a mode token.
+#[test]
+fn command_name_reports_the_dotted_op_name_for_all_three_service_subcommands() {
+    let cli = Cli::try_parse_from(["qsh", "service", "install"]).unwrap();
+    assert_eq!(command_name(&cli), ServiceInstallOp::COMMAND);
+
+    let cli = Cli::try_parse_from(["qsh", "service", "uninstall"]).unwrap();
+    assert_eq!(command_name(&cli), ServiceUninstallOp::COMMAND);
+
+    let cli = Cli::try_parse_from(["qsh", "service", "status"]).unwrap();
+    assert_eq!(command_name(&cli), ServiceStatusOp::COMMAND);
+}
+
 #[test]
 fn remote_exit_code_passes_through_except_255() {
     assert_eq!(remote_exit_code_to_process_exit(0), 0);

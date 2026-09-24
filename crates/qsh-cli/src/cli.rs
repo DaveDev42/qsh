@@ -368,6 +368,13 @@ pub enum Command {
         bind: Option<String>,
     },
 
+    /// Manage this machine's platform service unit for its inferred run
+    /// mode (`docs/CLI.md` §6.18): `install`/`uninstall`/`status` against
+    /// launchd (macOS) or systemd (Linux) user units. `UNSUPPORTED` on
+    /// every other platform.
+    #[command(subcommand)]
+    Service(ServiceCmd),
+
     /// Manage tunnels (`docs/CLI.md` §6.9).
     #[command(subcommand)]
     Tunnel(TunnelCmd),
@@ -404,6 +411,24 @@ pub enum Command {
         #[arg(long, value_name = "NAME")]
         offered_name: Option<String>,
     },
+}
+
+/// `qsh service …` subcommands (`docs/CLI.md` §6.18). None takes an
+/// argument beyond the global `--json`/`--jsonl`/`-v` flags flattened onto
+/// [`Cli`] — the run mode is always inferred from `config.toml`, never
+/// selected on the command line.
+#[derive(Debug, Subcommand)]
+pub enum ServiceCmd {
+    /// Write (or rewrite) the unit for this machine's inferred run mode
+    /// and create its parent directories.
+    Install,
+
+    /// Remove the unit for this machine's inferred run mode, if any.
+    Uninstall,
+
+    /// Report whether the unit for this machine's inferred run mode
+    /// exists. Presence only, never activation.
+    Status,
 }
 
 /// `qsh tunnel …` subcommands (`docs/CLI.md` §6.9).

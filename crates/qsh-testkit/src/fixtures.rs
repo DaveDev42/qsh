@@ -103,6 +103,16 @@ pub fn normalize(mut value: serde_json::Value) -> serde_json::Value {
                         // Unambiguous: no other JSON field in the contract
                         // is literally named `"path"`.
                         "path" => *child = serde_json::Value::String("<path>".into()),
+                        // `service.install`/`service.status`/
+                        // `service.uninstall`'s `manager` is a fact about
+                        // the host OS (`"launchd"` on macOS, `"systemd"` on
+                        // Linux), not about the operation — masked the same
+                        // "shape, not value" way `config_dir` is, so the
+                        // fixture is identical byte for byte on both CI
+                        // legs (ROADMAP M9 (g), `docs/CLI.md` §6.18).
+                        // Measured zero pre-existing fixtures carry this
+                        // key before adding the arm.
+                        "manager" => *child = serde_json::Value::String("<manager>".into()),
                         "device_id" => *child = serde_json::Value::String("<device_id>".into()),
                         // `trust.accept`'s `data.peer.name` is the *other*
                         // side's own device id (`Ops::trust_accept` pins the
@@ -257,6 +267,19 @@ mod tests {
             normalized["error"]["message"],
             "peer 127.0.0.1:<port> is not trusted"
         );
+    }
+
+    #[test]
+    fn normalize_masks_the_manager_field_to_its_shape() {
+        let value = serde_json::json!({
+            "command": "service.install",
+            "ok": true,
+            "data": {"manager": "launchd", "mode": "serve", "created": true},
+        });
+        let normalized = normalize(value);
+        assert_eq!(normalized["data"]["manager"], "<manager>");
+        assert_eq!(normalized["data"]["mode"], "serve");
+        assert_eq!(normalized["data"]["created"], true);
     }
 
     /// `PLAN.md` M7 Step 1 (a)-추기 ②: the `build` key must vanish under

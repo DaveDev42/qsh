@@ -10,10 +10,11 @@ use schemars::{Schema, schema_for};
 use crate::types::{
     AclCheckData, CapabilitiesData, CertInitData, CertIssueData, CliEnvelope, DoctorData,
     DynamicTunnel, ExecRunData, Host, HostListData, IdentityExportData, IdentityInitData,
-    SchemaData, Session, SessionCloseData, SessionListData, SessionOpenData, SessionReadData,
-    SessionResizeData, SessionWriteData, TrustAcceptData, TrustAddCaData, TrustAddData,
-    TrustInviteData, TrustListData, TrustRemoveData, TrustRenameData, TunnelCloseData,
-    TunnelListData, TunnelOpenData, VersionData,
+    SchemaData, ServiceInstallData, ServiceStatusData, ServiceUninstallData, Session,
+    SessionCloseData, SessionListData, SessionOpenData, SessionReadData, SessionResizeData,
+    SessionWriteData, TrustAcceptData, TrustAddCaData, TrustAddData, TrustInviteData,
+    TrustListData, TrustRemoveData, TrustRenameData, TunnelCloseData, TunnelListData,
+    TunnelOpenData, VersionData,
 };
 
 /// Every `docs/CLI.md` §2.4 dotted command name [`cli_v1_data_schema`] has
@@ -33,6 +34,9 @@ pub const CLI_V1_SCHEMA_COMMANDS: &[&str] = &[
     "identity.export",
     "identity.init",
     "schema.get",
+    "service.install",
+    "service.status",
+    "service.uninstall",
     "session.close",
     "session.get",
     "session.list",
@@ -77,6 +81,9 @@ pub fn cli_v1_data_schema(command: &str) -> Option<Schema> {
         "identity.export" => schema_for!(IdentityExportData),
         "identity.init" => schema_for!(IdentityInitData),
         "schema.get" => schema_for!(SchemaData),
+        "service.install" => schema_for!(ServiceInstallData),
+        "service.status" => schema_for!(ServiceStatusData),
+        "service.uninstall" => schema_for!(ServiceUninstallData),
         "session.close" => schema_for!(SessionCloseData),
         "session.get" => schema_for!(Session),
         "session.list" => schema_for!(SessionListData),

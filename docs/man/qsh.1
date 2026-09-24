@@ -111,6 +111,9 @@ Run the host: accept connections from pinned peers, or (with `\-\-to`) dial out 
 qsh\-listen(1)
 Run the reverse\-mode controller: accept dial\-in registrations from `qsh serve \-\-to` (the hidden `qsh reverse` alias dials the same way) and serve them as hosts (`docs/CLI.md` §6.13). Foreground only; the bound address and registration events go to stderr
 .TP
+qsh\-service(1)
+Manage this machine\*(Aqs platform service unit for its inferred run mode (`docs/CLI.md` §6.18): `install`/`uninstall`/`status` against launchd (macOS) or systemd (Linux) user units. `UNSUPPORTED` on every other platform
+.TP
 qsh\-tunnel(1)
 Manage tunnels (`docs/CLI.md` §6.9)
 .TP
