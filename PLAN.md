@@ -166,6 +166,14 @@ jemalloc은 `cfg(all(target_os = "linux", target_env = "gnu"))`로 좁혔다. Ca
 
 **(c) 완료 판정:** dry-run 네 건이 CI에서 green이고 `deny.toml` 주석이 갱신돼 있으며 CI에 그 스텝이 있다. publish 실행 여부는 DoD가 아니므로 미실행이면 마감 노트에 미실행으로 적는다.
 
+**(a)-추기 — Step 11 착지 (2026-09-25, main 세션).** 커밋 `faf10bd` 하나다. 브랜치는 `97fd50d`에서 땄고 main 위로 rebase해 ff-merge했다. 계약 크레이트 넷(`qsh-proto`·`qsh-transport`·`qsh-core`·`qsh-cli`)을 `publish = true`로 열고 각각에 `description`·`repository`·`readme`(워크스페이스 상속)·`keywords`·`categories`를 붙였다. `[workspace.package]`의 `publish = false` 기본값은 그대로 두고 `qsh-testkit`과 `xtask`는 명시적 `publish = false`다. 공개 대상 셋의 path 의존에는 `version`을 붙였고 testkit·xtask 쪽 path 의존은 발행되지 않는 크레이트를 가리키므로 그대로 두고 `deny.toml`의 `allow-wildcard-paths` 주석을 그 사실로 고쳤다. §4.1 #11 확정.
+
+CI는 (a)가 적은 "크레이트별 네 스텝"이 아니라 `publish-dry-run` 잡 하나에 `cargo publish --dry-run --workspace` 한 번이다. 단독 `cargo publish --dry-run -p qsh-transport`는 의존 `qsh-proto`를 레지스트리에서 찾는데 첫 publish 전에는 거기 없어 실패한다는 것을 브리프가 실측했다. `--workspace`는 배치 안에서 임시 레지스트리로 해소하므로 첫 publish 전에도 초록이 된다. 대신 그 dry-run은 testkit이 publish로 열려도 배치에 하나 더 얹고 통과하므로, `cargo metadata --no-deps`와 jq로 publish 집합이 정확히 넷인지 고정하는 스텝을 앞에 뒀다. 잡은 `ci-ok`의 `needs`에 올랐고 `docs/design/testing.md` CI 규율 절에 한 문단으로 적었다. main의 CI run 36023113620에서 `publish dry-run` 잡은 3분 33초에 초록, `ci-ok` 초록.
+
+리뷰는 opus 두 렌즈로 했다. 둘 다 같은 것을 major로 잡았다. `qsh-cli`의 `description`이 clap의 bare `about`을 타고 `CARGO_PKG_DESCRIPTION`으로 흘러 `qsh --help` 첫 줄과 `docs/man/qsh.1`의 NAME 줄이 바뀌고 man page 바이트 게이트 `checked_in_man_pages_match_the_generator`가 붉었다. `cli.rs`의 `about`을 원문 "QSH: a QUIC-based direct-connect remote shell"로 고정해 man page를 커밋 바이트 그대로 되돌렸고 description에서 백틱을 뺐다. 커밋 에이전트가 이 고정을 범위 밖이라며 되돌린 채 커밋해 게이트가 다시 붉었고 main 세션이 다시 적용해 amend했다. 렌즈 A의 minor였던 LICENSE 본문 미포함은 브리프가 SPDX `license` 식으로 충분하다고 정한 대로 두었다. tarball에는 라이선스 본문이 없다.
+
+남긴 것 셋. 첫째, 공개 크레이트의 tarball에 test 타깃이 실리는데 그 테스트는 발행되지 않는 `qsh-testkit`을 dev-dependency로 요구해 tarball만으로는 컴파일되지 않는다. dry-run은 lib·bin 빌드만 검증한다. `exclude`는 넣지 않았고 마감 감사에서 다시 본다. 둘째, `readme` 상속으로 네 크레이트의 crates.io 첫 화면이 저장소 README가 되는데 그 README는 아직 crates.io에서 설치할 수 없다고 적고 있다. 실제 publish 뒤에만 고친다. 셋째, `cargo publish`는 실행하지 않았다. Step 10 PASS 뒤에 사람이 토큰으로 실행한다.
+
 ### Step 12 — 릴리스 문서 (0.20ew)
 
 선행: Step 5·6·7(문면이 가리킬 사실이 먼저 서야 한다). §8 #5.
@@ -235,7 +243,7 @@ jemalloc은 `cfg(all(target_os = "linux", target_env = "gnu"))`로 좁혔다. Ca
 | 8 | 30분 회차의 자리 | `load.yml`에 `workflow_dispatch` 전용 job 추가 또는 `long.yml` 신설 | Step 9 |
 | 9 | 저속·역압 축의 보강 여부 | 기존 하네스가 값싸게 받으면 더하고, 아니면 잔여 위험으로 적는다 | Step 9 |
 | 10 | 캠페인 회차 수와 구형 glibc 이미지 | 네 플랫폼 각 1회 + musl 1회가 하한. 이미지 후보는 CentOS 7 또는 Debian 10 계열 | Step 10 |
-| 11 | publish 대상 크레이트 집합 | proto·transport·core·cli 넷. testkit·xtask는 `publish = false` 유지 | Step 11 |
+| 11 | publish 대상 크레이트 집합 | proto·transport·core·cli 넷. testkit·xtask는 `publish = false` 유지 **확정(2026-09-25):** 초안대로 넷(`faf10bd`). CI 게이트는 크레이트별 dry-run이 아니라 `--workspace` dry-run 한 번에 publish 집합 고정 스텝을 더한 `publish-dry-run` 잡이다. 단독 dry-run은 첫 publish 전에 레지스트리에 없는 의존 때문에 초록이 될 수 없어서다. 공개 tarball의 test 타깃은 미발행 `qsh-testkit`을 요구해 tarball만으로 컴파일되지 않으며 `exclude`는 넣지 않았다. 마감 감사에서 다시 본다. | Step 11 |
 | 12 | 릴리스 노트의 자리 | GitHub Release 본문인지 `docs/` 아래 파일인지 | Step 12 |
 | 13 | 스모크의 양방향 pin 경로 | `identity export` + `trust add --cert-file`이 1순위(릴리스 바이너리 하나로 파일만 주고받으면 된다), `trust add --fingerprint`는 fingerprint를 어디서 관측할지가 한 단계 더 붙어 차선. **확정(2026-09-24):** `trust add --fingerprint`다. `Fleet::start_with_bin`이 기존 `Fleet::start_with`의 pin 순서를 그대로 물려받아 fingerprint는 `init --json` 출력에서 이미 손에 있고, `identity export` + `--cert-file` 경로는 `init_trust.rs`가 따로 덮는다(`152dd78`) | Step 2 |
 
