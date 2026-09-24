@@ -673,6 +673,37 @@ fn trust_add_cert_file_rejects_a_bundle_carrying_a_private_key_and_echoes_no_inp
     assert!(value["error"]["details"].is_null(), "{value}");
 }
 
+/// C11, CLI-stdin axis: `trust add --cert-file -` reads standard input
+/// capped at `qsh_core::ops::CERT_PEM_MAX + 1` bytes
+/// (`run_trust_add`/`read_cert_arg`, `crates/qsh-cli/src/main.rs`) — the
+/// same `.take()` discipline `--code-stdin` uses for
+/// `INVITE_CODE_STDIN_MAX`
+/// (`trust_accept_from_stdin_is_bounded_by_invite_code_stdin_max`,
+/// `trust_pairing_live.rs`). Before this test nothing exercised that cap
+/// at this layer — only `qsh-core`'s own `check_cert_pem_size` on the
+/// resulting string was pinned, never the CLI's own `.take()` on the
+/// stdin reader.
+#[test]
+fn trust_add_cert_file_stdin_is_bounded_by_cert_pem_max() {
+    let sandbox = Sandbox::new();
+    sandbox.init();
+    let oversized = "x".repeat(qsh_core::ops::CERT_PEM_MAX + 1);
+
+    let (code, value) = sandbox.json_with_stdin(
+        &["trust", "add", "peer-a", "--cert-file", "-", "--json"],
+        oversized.as_bytes(),
+    );
+    assert_eq!(code, 255, "{value}");
+    assert_eq!(value["error"]["code"], "INVALID_ARGUMENT");
+    assert!(
+        value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains(&qsh_core::ops::CERT_PEM_MAX.to_string()),
+        "message must name the limit: {value}"
+    );
+}
+
 #[test]
 fn trust_add_cert_file_is_a_silent_no_op_when_the_name_holds_a_different_fingerprint() {
     let exporter = Sandbox::new();

@@ -1375,21 +1375,30 @@ fn run_trust_add_ca(cli: &Cli, ops: &Ops, args: &TrustAddCaArgs) -> i32 {
 }
 
 /// Read a `--cert-file` argument: `-` reads standard input to end of
-/// input (never assuming a POSIX `/dev/stdin` path, so this works
-/// unchanged on Windows); any other value is a real path, delegated to
-/// [`read_cert_file_arg`] so the missing/unreadable-path error text lives
-/// in `qsh-core` (`docs/CLI.md` §6.11). Neither branch echoes any byte it
-/// reads back in an error message.
+/// input, capped at `qsh_core::ops::CERT_PEM_MAX + 1` bytes the same way
+/// [`read_cert_file_arg`] caps its own file read, so an oversized paste
+/// on stdin is never buffered in full either (never assuming a POSIX
+/// `/dev/stdin` path, so this works unchanged on Windows); any other
+/// value is a real path, delegated to [`read_cert_file_arg`] so the
+/// missing/unreadable-path error text lives in `qsh-core` (`docs/CLI.md`
+/// §6.11). Neither branch echoes any byte it reads back in an error
+/// message; the size limit itself is enforced once both branches' text
+/// reaches `qsh-core`'s `trust_add`/`trust_add_ca`.
 fn read_cert_arg(path: &str) -> Result<String, OpError> {
     if path == "-" {
         let mut text = String::new();
-        io::stdin().read_to_string(&mut text).map_err(|err| {
-            OpError::new(
-                ErrorCode::InvalidArgument,
-                format!("failed to read standard input: {err}"),
-            )
-            .with_retryable(false)
-        })?;
+        let cap = qsh_core::ops::CERT_PEM_MAX as u64 + 1;
+        io::stdin()
+            .lock()
+            .take(cap)
+            .read_to_string(&mut text)
+            .map_err(|err| {
+                OpError::new(
+                    ErrorCode::InvalidArgument,
+                    format!("failed to read standard input: {err}"),
+                )
+                .with_retryable(false)
+            })?;
         Ok(text)
     } else {
         read_cert_file_arg(path)
