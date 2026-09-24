@@ -459,6 +459,7 @@ mod tests {
             name: "peer".into(),
             address: Some("127.0.0.1:1".into()),
             fingerprint: Some(fingerprint.to_string()),
+            cert_pem: None,
         })
         .unwrap();
 

@@ -121,6 +121,12 @@ pub fn normalize(mut value: serde_json::Value) -> serde_json::Value {
                         "fingerprint" | "observed_fingerprint" => {
                             *child = serde_json::Value::String("<fingerprint>".into())
                         }
+                        // `identity.export`'s and `trust.add_ca`'s
+                        // `cert_pem` is a real PEM whose base64 body is a
+                        // fresh key/serial every sandbox run (ADR-0013) —
+                        // masked to its shape, not its value, the same
+                        // way `fingerprint` is.
+                        "cert_pem" => *child = serde_json::Value::String("<cert_pem>".into()),
                         "address" => *child = serde_json::Value::String("<address>".into()),
                         // Host-issued session ids are ULIDs; a `session_ref`
                         // keeps its (stable) host alias and masks the id.

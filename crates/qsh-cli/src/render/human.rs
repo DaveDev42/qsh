@@ -10,10 +10,10 @@ use qsh_core::trust::invite_address::InviteAddressAdvice;
 use qsh_core::{ExecRunOutput, OpError, SessionReadOutput};
 use qsh_proto::{
     AclCheckData, CapabilitiesData, CertInitData, CertIssueData, DoctorData, DynamicTunnel, Host,
-    HostListData, IdentityInitData, SchemaData, Session, SessionCloseData, SessionEvent,
-    SessionListData, SessionOpenData, SessionResizeData, SessionWriteData, TrustAcceptData,
-    TrustAddData, TrustInviteData, TrustListData, TrustPeer, TrustRemoveData, Tunnel,
-    TunnelCloseData, TunnelListData, VersionData,
+    HostListData, IdentityExportData, IdentityInitData, SchemaData, Session, SessionCloseData,
+    SessionEvent, SessionListData, SessionOpenData, SessionResizeData, SessionWriteData,
+    TrustAcceptData, TrustAddCaData, TrustAddData, TrustInviteData, TrustListData, TrustPeer,
+    TrustRemoveData, Tunnel, TunnelCloseData, TunnelListData, VersionData,
 };
 
 use crate::stderr_note;
@@ -135,6 +135,25 @@ pub fn print_init(data: &IdentityInitData) -> io::Result<()> {
     )
 }
 
+/// Print the outcome of `qsh identity export` (`docs/CLI.md` §6.11,
+/// ADR-0013). Without `--out` the certificate's PEM text is the *only*
+/// thing this prints, verbatim and with no added note, so
+/// `qsh identity export | ssh box 'qsh trust add laptop --cert-file -'`
+/// pipes cleanly. With `--out` it prints one line naming the path
+/// instead, and the PEM itself never reaches stdout — the two fields are
+/// mutually exclusive by construction (`Ops::identity_export`'s own doc).
+pub fn print_identity_export(data: &IdentityExportData) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    match &data.cert_pem {
+        Some(cert_pem) => write!(stdout, "{cert_pem}"),
+        None => writeln!(
+            stdout,
+            "wrote {}",
+            sanitize(data.path.as_deref().unwrap_or(""))
+        ),
+    }
+}
+
 /// Print the CA root `qsh cert init` created (or found) — no key material,
 /// just the fingerprint and where it lives on disk
 /// (`docs/adr/0008-private-ca-cert-issuance.md` §4).
@@ -197,6 +216,21 @@ pub fn print_trust_add(data: &TrustAddData) -> io::Result<()> {
         "already pinned"
     };
     writeln!(stdout, "{}", format_trust_pin_line(verb, &data.peer))
+}
+
+/// Print the outcome of `qsh trust add-ca` (`docs/CLI.md` §6.11,
+/// ADR-0013) — append-only, so the only verbs are "registered" and
+/// "already registered": a name collision under a *different* certificate
+/// is `INVALID_ARGUMENT` (never reaches this renderer), not a silent
+/// overwrite, so there is no "updated" verb here the way `trust add` has.
+pub fn print_trust_add_ca(data: &TrustAddCaData) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    let verb = if data.created {
+        "registered"
+    } else {
+        "already registered"
+    };
+    writeln!(stdout, "{verb} CA root {}", sanitize(&data.name))
 }
 
 /// Print the pinned-peer table.

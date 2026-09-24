@@ -4,7 +4,7 @@
 .SH NAME
 qsh\-trust\-add \- Pin a peer by name
 .SH SYNOPSIS
-\fBqsh trust add\fR [\fB\-\-address\fR] [\fB\-\-json\fR] [\fB\-\-fingerprint\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fINAME\fR> 
+\fBqsh trust add\fR [\fB\-\-address\fR] [\fB\-\-json\fR] [\fB\-\-fingerprint\fR] [\fB\-\-jsonl\fR] [\fB\-\-cert\-file\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fINAME\fR> 
 .SH DESCRIPTION
 Pin a peer by name
 .SH OPTIONS
@@ -16,10 +16,13 @@ Pin a peer by name
 Emit a single `qsh.cli/v1` JSON envelope on stdout instead of human\-readable text
 .TP
 \fB\-\-fingerprint\fR \fI<FINGERPRINT>\fR
-`sha256:BASE64` fingerprint. When given, the peer is pinned without connecting
+`sha256:BASE64` fingerprint. When given, the peer is pinned without connecting. Mutually exclusive with `\-\-cert\-file`
 .TP
 \fB\-\-jsonl\fR
 Emit newline\-delimited JSON on stdout (reserved for streaming commands; non\-streaming commands emit a single line, same as `\-\-json`)
+.TP
+\fB\-\-cert\-file\fR \fI<PEM|\->\fR
+Path to a PEM file holding exactly one `CERTIFICATE` block (as `qsh identity export` prints), or `\-` to read it from standard input. The peer\*(Aqs fingerprint is derived from it and the peer is pinned without connecting. Mutually exclusive with `\-\-fingerprint` (`docs/CLI.md` §6.11, ADR\-0013)
 .TP
 \fB\-v\fR, \fB\-\-verbose\fR
 Increase diagnostic verbosity on stderr (`\-v` info, `\-vv` debug, `\-vvv` trace). Never affects stdout (`docs/CLI.md` §2.2)

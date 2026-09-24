@@ -58,12 +58,13 @@ pub use identity::{Identity, KeyStore, KeyStoreError, LoadedIdentity};
 pub use ops::{
     AclCheckOp, AttachHandle, CapabilitiesOp, CertInitOp, CertIssueOp, DetachFlush, DoctorOp,
     ExecRunOp, ExecRunOutput, ExecStdin, HostGetOp, HostListOp, HostRoute, INVITE_CODE_PROMPT,
-    INVITE_CODE_STDIN_MAX, IdentityInitOp, InviteCodeSource, OpError, Operation, Ops,
-    RecoveryConfig, SchemaOp, SessionAttachOp, SessionAttachStream, SessionCloseOp, SessionGetOp,
-    SessionListOp, SessionOpenOp, SessionReadOp, SessionReadOutput, SessionReader, SessionResizeOp,
-    SessionWriteOp, TrustAcceptOp, TrustAddOp, TrustInviteOp, TrustListOp, TrustRemoveOp,
-    TunnelCloseOp, TunnelDynamicOp, TunnelHold, TunnelListOp, TunnelOpenOp, VersionOp,
-    normalize_invite_code, parse_dynamic_forwards, parse_local_forwards, parse_remote_forwards,
+    INVITE_CODE_STDIN_MAX, IdentityExportOp, IdentityInitOp, InviteCodeSource, OpError, Operation,
+    Ops, RecoveryConfig, SchemaOp, SessionAttachOp, SessionAttachStream, SessionCloseOp,
+    SessionGetOp, SessionListOp, SessionOpenOp, SessionReadOp, SessionReadOutput, SessionReader,
+    SessionResizeOp, SessionWriteOp, TrustAcceptOp, TrustAddCaOp, TrustAddOp, TrustInviteOp,
+    TrustListOp, TrustRemoveOp, TunnelCloseOp, TunnelDynamicOp, TunnelHold, TunnelListOp,
+    TunnelOpenOp, VersionOp, cert_file_fingerprint_conflict, normalize_invite_code,
+    parse_dynamic_forwards, parse_local_forwards, parse_remote_forwards, read_cert_file_arg,
     resolve_invite_code_source,
 };
 pub use trust::{SharedTrustStore, TrustStore};

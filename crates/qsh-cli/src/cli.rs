@@ -253,6 +253,10 @@ pub enum Command {
         key_store: Option<KeyStoreMode>,
     },
 
+    /// Manage this device's own identity (`docs/CLI.md` §6.11).
+    #[command(subcommand)]
+    Identity(IdentityCmd),
+
     /// Manage the trust store (pinned peers).
     #[command(subcommand)]
     Trust(TrustCmd),
@@ -563,11 +567,34 @@ pub enum CertCmd {
     Issue,
 }
 
+/// `qsh identity …` subcommands.
+#[derive(Debug, Subcommand)]
+pub enum IdentityCmd {
+    /// Print this device's certificate as PEM, never its private key
+    /// (`docs/CLI.md` §6.11, ADR-0013). Without `--out`, the PEM is the
+    /// only thing this command writes to stdout, so it pipes directly
+    /// into `qsh trust add --cert-file -` on another host.
+    Export(IdentityExportArgs),
+}
+
+/// Arguments of `qsh identity export`.
+#[derive(Debug, Args)]
+pub struct IdentityExportArgs {
+    /// Write the certificate to this path instead of stdout. Refuses to
+    /// overwrite an existing file.
+    #[arg(long, value_name = "PATH")]
+    pub out: Option<String>,
+}
+
 /// `qsh trust …` subcommands.
 #[derive(Debug, Subcommand)]
 pub enum TrustCmd {
     /// Pin a peer by name.
     Add(TrustAddArgs),
+    /// Register a foreign CA root supplied as a certificate file
+    /// (`docs/CLI.md` §6.11, ADR-0013). Append-only: an existing name
+    /// under a different certificate is refused rather than overwritten.
+    AddCa(TrustAddCaArgs),
     /// List pinned peers.
     List,
     /// Remove a pinned peer. Idempotent.
@@ -690,9 +717,29 @@ pub struct TrustAddArgs {
     pub address: Option<String>,
 
     /// `sha256:BASE64` fingerprint. When given, the peer is pinned without
-    /// connecting.
+    /// connecting. Mutually exclusive with `--cert-file`.
     #[arg(long, value_name = "FINGERPRINT")]
     pub fingerprint: Option<String>,
+
+    /// Path to a PEM file holding exactly one `CERTIFICATE` block (as
+    /// `qsh identity export` prints), or `-` to read it from standard
+    /// input. The peer's fingerprint is derived from it and the peer is
+    /// pinned without connecting. Mutually exclusive with `--fingerprint`
+    /// (`docs/CLI.md` §6.11, ADR-0013).
+    #[arg(long, value_name = "PEM|-")]
+    pub cert_file: Option<String>,
+}
+
+/// Arguments of `qsh trust add-ca`.
+#[derive(Debug, Args)]
+pub struct TrustAddCaArgs {
+    /// Local name for the CA root.
+    pub name: String,
+
+    /// Path to a PEM file holding exactly one `CERTIFICATE` block, or `-`
+    /// to read it from standard input.
+    #[arg(long, value_name = "PEM|-")]
+    pub cert_file: String,
 }
 
 /// clap value parser for `--key-store`.

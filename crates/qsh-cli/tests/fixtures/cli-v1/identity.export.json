@@ -1,0 +1,11 @@
+{
+  "command": "identity.export",
+  "data": {
+    "cert_pem": "<cert_pem>",
+    "fingerprint": "<fingerprint>",
+    "name": "<device_id>"
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

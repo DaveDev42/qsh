@@ -206,6 +206,40 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
         listen
     };
 
+    // ADR-0013: a chain of two certificates on disk, for the
+    // `trust add --cert-file` `INVALID_ARGUMENT` row below. Built from two
+    // real `identity export`s rather than a hand-written fixture, so this
+    // exercises the exact same `single_certificate` validator the pure-core
+    // negative table (`ops/tests.rs`) and the CLI-face table
+    // (`init_trust.rs`) both pin.
+    let cert_chain_owner_a = Sandbox::new();
+    cert_chain_owner_a.init();
+    let cert_chain_owner_b = Sandbox::new();
+    cert_chain_owner_b.init();
+    let cert_chain_dir = tempfile::tempdir().expect("tempdir");
+    let cert_chain_path = cert_chain_dir.path().join("chain.pem");
+    let (code, pem_a) = cert_chain_owner_a.json(&["identity", "export", "--json"]);
+    assert_eq!(code, 0, "{pem_a}");
+    let (code, pem_b) = cert_chain_owner_b.json(&["identity", "export", "--json"]);
+    assert_eq!(code, 0, "{pem_b}");
+    std::fs::write(
+        &cert_chain_path,
+        format!(
+            "{}{}",
+            pem_a["data"]["cert_pem"].as_str().expect("cert_pem a"),
+            pem_b["data"]["cert_pem"].as_str().expect("cert_pem b")
+        ),
+    )
+    .expect("write chain.pem");
+    let cert_chain_path_str = cert_chain_path.to_str().unwrap().to_string();
+    let trust_add_cert_file_chain_args = [
+        "trust",
+        "add",
+        "chain-peer",
+        "--cert-file",
+        cert_chain_path_str.as_str(),
+    ];
+
     // `mut` is only needed for the `#[cfg(unix)] cases.push(..)` below —
     // unused (and clippy-denied) on the Windows leg, where that push is
     // compiled out entirely.
@@ -293,9 +327,31 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
             outcome: Outcome::Fails("CONFIG_ERROR"),
         },
         Case {
+            // ADR-0013: `identity export` before `qsh init` is
+            // the same `CONFIG_ERROR` every other identity-reading op gives
+            // (`identity_export_is_a_config_error_before_qsh_init` in
+            // `ops/tests.rs` and `init_trust.rs` pin this at the pure-core
+            // and CLI layers; this row is only the exit-code/output-mode
+            // face of the same guarantee).
+            name: "identity export: no device identity",
+            sandbox: &uninitialized,
+            args: &["identity", "export"],
+            outcome: Outcome::Fails("CONFIG_ERROR"),
+        },
+        Case {
             name: "trust add: malformed fingerprint",
             sandbox: &fleet.client,
             args: &["trust", "add", "bad", "--fingerprint", "not-a-fingerprint"],
+            outcome: Outcome::Fails("INVALID_ARGUMENT"),
+        },
+        Case {
+            // ADR-0013 결정 4: a chain of two certificates is a structural
+            // PEM rejection, `INVALID_ARGUMENT` in both output modes —
+            // never a clap usage error, since clap has no opinion on the
+            // *contents* of the file `--cert-file` names.
+            name: "trust add: --cert-file names a chain of two certificates",
+            sandbox: &fleet.client,
+            args: &trust_add_cert_file_chain_args,
             outcome: Outcome::Fails("INVALID_ARGUMENT"),
         },
         Case {

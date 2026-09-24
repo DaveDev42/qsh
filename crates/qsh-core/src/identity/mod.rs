@@ -40,6 +40,12 @@ pub const KEY_FILE: &str = "device.key";
 /// How long a freshly issued device certificate is valid
 /// (`docs/design/architecture.md` §5: "장기(10y) self-signed").
 const CERT_VALIDITY_DAYS: i64 = 3650;
+/// The exact wording every `qsh-core` op that requires a local identity
+/// and finds none uses (`docs/CLI.md` §6.11) — one copy so
+/// `promote_to_ca_issued` and `Ops::identity_export` never
+/// retype it and drift apart.
+pub(crate) const NO_LOCAL_IDENTITY: &str = "no local identity; run `qsh init` first";
+
 /// Backdate `not_before` to absorb small clock skew between peers.
 ///
 /// `pub(crate)`: `doctor.run`'s `clock_skew` diagnostic (`docs/CLI.md`
@@ -270,11 +276,7 @@ pub fn promote_to_ca_issued(
 ) -> Result<Identity, OpError> {
     let identity_dir = paths.identity_dir();
     let existing = read_identity(paths)?.ok_or_else(|| {
-        OpError::new(
-            ErrorCode::ConfigError,
-            "no local identity; run `qsh init` first",
-        )
-        .with_retryable(false)
+        OpError::new(ErrorCode::ConfigError, NO_LOCAL_IDENTITY).with_retryable(false)
     })?;
 
     let fingerprint = Fingerprint::of_cert_der(cert_der).map_err(|err| {

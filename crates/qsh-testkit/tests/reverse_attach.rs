@@ -304,6 +304,7 @@ async fn setup(authorizer: Arc<dyn Authorizer>) -> Fixture {
                 name: "fwdhost".into(),
                 address: Some(addr),
                 fingerprint: Some(fp),
+                cert_pem: None,
             })
         }
     })

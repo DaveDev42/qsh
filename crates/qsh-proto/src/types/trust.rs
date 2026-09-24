@@ -33,6 +33,12 @@ pub struct TrustAddReq {
     /// `sha256:BASE64`. When present the peer is pinned without connecting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fingerprint: Option<String>,
+    /// PEM text carrying exactly one `CERTIFICATE` block (`--cert-file`,
+    /// ADR-0013). Mutually exclusive with `fingerprint`: the fingerprint
+    /// is derived from this certificate instead of being given or
+    /// observed. Additive (`docs/CLI.md` §10).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cert_pem: Option<String>,
 }
 
 /// Data payload of `trust.add`.
@@ -71,8 +77,42 @@ pub struct TrustListData {
 pub struct TrustRemoveData {
     /// The name that was asked to be removed.
     pub name: String,
-    /// `true` if a pin was removed; `false` if none existed (idempotent).
+    /// `true` if a pin or a CA root was removed; `false` if none existed
+    /// (idempotent).
     pub removed: bool,
+}
+
+// ---------------------------------------------------------------------------
+// trust.add_ca (`docs/CLI.md` §6.11, ADR-0013)
+// ---------------------------------------------------------------------------
+
+/// Request for `trust.add_ca`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TrustAddCaReq {
+    /// Operator-chosen label for the CA root.
+    pub name: String,
+    /// PEM text carrying exactly one `CERTIFICATE` block.
+    pub cert_pem: String,
+}
+
+/// Data payload of `trust.add_ca`. Append-only (ADR-0013 결정 5): unlike
+/// `cert issue`'s local re-init of `TrustStore::add_ca`, an existing name
+/// under a *different* `cert_pem` is refused rather than overwritten, so
+/// `updated` is always `Some(false)` here — never `Some(true)`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TrustAddCaData {
+    /// The (new, or pre-existing identical) CA root's name.
+    pub name: String,
+    /// The PEM text as registered — echoed so the fixture `cert_pem` mask
+    /// is load-bearing on this op too.
+    pub cert_pem: String,
+    /// `true` if a new CA root was written; `false` if `name` was already
+    /// registered under this exact PEM (idempotent).
+    pub created: bool,
+    /// Always `Some(false)` from `trust add-ca` (see struct doc). Additive,
+    /// same `skip_serializing_if` as `TrustAddData::updated`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated: Option<bool>,
 }
 
 /// Request for `trust.invite` (ADR-0002, M7 Step 4). No fields today — kept

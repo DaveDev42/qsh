@@ -1,0 +1,33 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH qsh-identity-export 1  "export 0.2.0" 
+.SH NAME
+qsh\-identity\-export \- Print this device\*(Aqs certificate as PEM, never its private key (`docs/CLI.md` §6.11, ADR\-0013). Without `\-\-out`, the PEM is the only thing this command writes to stdout, so it pipes directly into `qsh trust add \-\-cert\-file \-` on another host
+.SH SYNOPSIS
+\fBqsh identity export\fR [\fB\-\-json\fR] [\fB\-\-out\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] 
+.SH DESCRIPTION
+Print this device\*(Aqs certificate as PEM, never its private key (`docs/CLI.md` §6.11, ADR\-0013). Without `\-\-out`, the PEM is the only thing this command writes to stdout, so it pipes directly into `qsh trust add \-\-cert\-file \-` on another host
+.SH OPTIONS
+.TP
+\fB\-\-json\fR
+Emit a single `qsh.cli/v1` JSON envelope on stdout instead of human\-readable text
+.TP
+\fB\-\-out\fR \fI<PATH>\fR
+Write the certificate to this path instead of stdout. Refuses to overwrite an existing file
+.TP
+\fB\-\-jsonl\fR
+Emit newline\-delimited JSON on stdout (reserved for streaming commands; non\-streaming commands emit a single line, same as `\-\-json`)
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Increase diagnostic verbosity on stderr (`\-v` info, `\-vv` debug, `\-vvv` trace). Never affects stdout (`docs/CLI.md` §2.2)
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Suppress diagnostic output on stderr
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.TP
+\fB\-V\fR, \fB\-\-version\fR
+Print version
+.SH VERSION
+v0.2.0

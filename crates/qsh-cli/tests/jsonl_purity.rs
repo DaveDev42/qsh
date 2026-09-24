@@ -706,3 +706,108 @@ fn a_dynamic_tunnel_in_progress_keeps_stdout_pure_json_while_qsh_tunnel_diagnost
         );
     }
 }
+
+// --- `qsh identity export` (ADR-0013) ---
+//
+// Without `--out`, machine mode's whole point is to hand the caller the PEM
+// (the golden fixture `identity.export.json` pins exactly this shape), so
+// `-----BEGIN` necessarily appears *inside* the envelope's `cert_pem`
+// string. What purity actually promises here — and what these tests
+// check — is that the PEM never escapes that one field onto a second raw
+// stdout line: the whole line still parses as one `qsh.cli/v1` JSON object,
+// and `cert_pem` is well-formed PEM text, never a partial or doubled block.
+// The literal "never `-----BEGIN` on stdout" guarantee is real for the
+// `--out` variant, where the cert goes to the file and never touches
+// stdout at all — checked below in both machine and human mode.
+
+/// `--json`/`--jsonl`, no `--out`: exactly one JSON line, and the PEM is
+/// confined to `data.cert_pem` as one well-formed certificate block.
+#[test]
+fn identity_export_json_and_jsonl_confine_the_pem_to_one_field_on_one_line() {
+    for mode in ["--json", "--jsonl"] {
+        let sandbox = Sandbox::initialized();
+        let output = sandbox.qsh(&["identity", "export", mode]);
+        assert_eq!(exit_code(&output), 0, "{mode}");
+        let lines = parse_stdout_lines(&output.stdout, mode);
+        assert_eq!(
+            lines.len(),
+            1,
+            "{mode}: identity.export is a value operation — one envelope, one line"
+        );
+        assert_eq!(lines[0]["command"], "identity.export", "{mode}");
+        let cert_pem = lines[0]["data"]["cert_pem"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{mode}: data.cert_pem must be a string: {}", lines[0]));
+        assert_eq!(
+            cert_pem.matches("-----BEGIN CERTIFICATE-----").count(),
+            1,
+            "{mode}: exactly one certificate block: {cert_pem:?}"
+        );
+        assert_eq!(
+            cert_pem.matches("-----END CERTIFICATE-----").count(),
+            1,
+            "{mode}: exactly one certificate block: {cert_pem:?}"
+        );
+        assert!(
+            !cert_pem.contains("PRIVATE KEY"),
+            "{mode}: never a private key: {cert_pem:?}"
+        );
+    }
+}
+
+/// `--out PATH`: neither JSON mode nor human mode ever puts PEM text on
+/// stdout — the cert goes to the file, full stop.
+#[test]
+fn identity_export_with_out_never_puts_pem_text_on_stdout_in_either_mode() {
+    for json_mode in [false, true] {
+        let sandbox = Sandbox::initialized();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out_path = dir.path().join("device.pem");
+        let mut args = vec!["identity", "export", "--out"];
+        let out_str = out_path.to_str().unwrap().to_string();
+        args.push(&out_str);
+        if json_mode {
+            args.push("--json");
+        }
+        let output = sandbox.qsh(&args);
+        assert_eq!(exit_code(&output), 0, "json_mode={json_mode}");
+        let stdout = String::from_utf8(output.stdout).expect("stdout must be utf-8");
+        assert!(
+            !stdout.contains("-----BEGIN"),
+            "json_mode={json_mode}: --out must never leak PEM text to stdout: {stdout:?}"
+        );
+        let file_contents = std::fs::read_to_string(&out_path).expect("read --out file");
+        assert_eq!(
+            file_contents.matches("-----BEGIN CERTIFICATE-----").count(),
+            1,
+            "json_mode={json_mode}: the file itself must hold exactly one certificate block"
+        );
+        if json_mode {
+            let lines = parse_stdout_lines(stdout.as_bytes(), "identity export --out --json");
+            assert_eq!(lines.len(), 1);
+            assert_eq!(lines[0]["data"]["cert_pem"], Value::Null);
+            assert_eq!(lines[0]["data"]["path"].as_str().unwrap(), out_str);
+        }
+    }
+}
+
+/// Human mode, no `--out`: exactly one `CERTIFICATE` block on stdout and no
+/// `PRIVATE KEY` substring anywhere.
+#[test]
+fn identity_export_human_mode_without_out_prints_exactly_one_certificate_block() {
+    let sandbox = Sandbox::initialized();
+    let output = sandbox.qsh(&["identity", "export"]);
+    assert_eq!(exit_code(&output), 0);
+    let stdout = String::from_utf8(output.stdout).expect("stdout must be utf-8");
+    assert_eq!(
+        stdout.matches("-----BEGIN CERTIFICATE-----").count(),
+        1,
+        "{stdout:?}"
+    );
+    assert_eq!(
+        stdout.matches("-----END CERTIFICATE-----").count(),
+        1,
+        "{stdout:?}"
+    );
+    assert!(!stdout.contains("PRIVATE KEY"), "{stdout:?}");
+}

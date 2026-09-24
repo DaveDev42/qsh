@@ -227,6 +227,7 @@ fn trust_add_list_remove_round_trip() {
             name: "mac".into(),
             address: Some("mac.example:4433".into()),
             fingerprint: Some(fingerprint.clone()),
+            cert_pem: None,
         })
         .unwrap();
     assert!(added.created);
@@ -239,6 +240,7 @@ fn trust_add_list_remove_round_trip() {
             name: "mac".into(),
             address: Some("mac.example:4433".into()),
             fingerprint: Some(fingerprint.clone()),
+            cert_pem: None,
         })
         .unwrap();
     assert!(!again.created);
@@ -269,6 +271,7 @@ fn trust_add_updates_the_address_of_an_identity_it_already_knows() {
             name: "mac".into(),
             address: Some("old.example:4433".into()),
             fingerprint: Some(fingerprint.clone()),
+            cert_pem: None,
         })
         .unwrap();
     assert!(added.created);
@@ -278,6 +281,7 @@ fn trust_add_updates_the_address_of_an_identity_it_already_knows() {
             name: "mac".into(),
             address: Some("new.example:5555".into()),
             fingerprint: Some(fingerprint.clone()),
+            cert_pem: None,
         })
         .unwrap();
     assert!(!moved.created, "identity already pinned — never re-created");
@@ -306,6 +310,7 @@ fn trust_add_with_a_port_less_address_pins_the_default_port() {
             name: "mac".into(),
             address: Some("mac.example".into()),
             fingerprint: Some(fingerprint.clone()),
+            cert_pem: None,
         })
         .unwrap();
     assert_eq!(added.peer.address, "mac.example:4433");
@@ -507,6 +512,7 @@ fn concurrent_trust_add_through_ops_does_not_lose_a_peer() {
                 name: format!("peer-{i}"),
                 address: None,
                 fingerprint: Some(fingerprint),
+                cert_pem: None,
             })
             .unwrap();
         }));
@@ -641,6 +647,7 @@ fn concurrent_trust_remove_through_ops_does_not_lose_a_removal() {
             name: format!("peer-{i}"),
             address: None,
             fingerprint: Some(fingerprint),
+            cert_pem: None,
         })
         .unwrap();
     }
@@ -683,6 +690,7 @@ fn trust_add_rejects_a_different_fingerprint_for_an_already_pinned_name() {
             name: "mac".into(),
             address: Some("mac.example:4433".into()),
             fingerprint: Some(first_fp.clone()),
+            cert_pem: None,
         })
         .unwrap();
     assert!(added.created);
@@ -692,6 +700,7 @@ fn trust_add_rejects_a_different_fingerprint_for_an_already_pinned_name() {
             name: "mac".into(),
             address: Some("attacker.example:1".into()),
             fingerprint: Some(second_fp),
+            cert_pem: None,
         })
         .unwrap();
     assert!(!rejected.created);
@@ -714,6 +723,7 @@ fn trust_add_rejects_bad_input() {
             name: "mac".into(),
             address: None,
             fingerprint: Some("not-a-fingerprint".into()),
+            cert_pem: None,
         })
         .unwrap_err();
     assert_eq!(err.code, ErrorCode::InvalidArgument);
@@ -723,6 +733,7 @@ fn trust_add_rejects_bad_input() {
             name: "  ".into(),
             address: None,
             fingerprint: Some(qsh_transport::Fingerprint::of_spki_der(b"x").to_string()),
+            cert_pem: None,
         })
         .unwrap_err();
     assert_eq!(err.code, ErrorCode::InvalidArgument);
@@ -732,6 +743,7 @@ fn trust_add_rejects_bad_input() {
             name: "mac".into(),
             address: None,
             fingerprint: None,
+            cert_pem: None,
         })
         .unwrap_err();
     assert_eq!(err.code, ErrorCode::InvalidArgument);
@@ -754,6 +766,7 @@ fn open_trust_serves_pins_as_device_principals() {
         name: "mac".into(),
         address: None,
         fingerprint: Some(fingerprint.to_string()),
+        cert_pem: None,
     })
     .unwrap();
 
@@ -824,6 +837,7 @@ fn resolve_route_forward_resolves_a_peer_target_with_the_pinned_address() {
         name: "mac".into(),
         address: Some("mac.example.com:4433".into()),
         fingerprint: Some(fingerprint),
+        cert_pem: None,
     })
     .unwrap();
 
@@ -850,6 +864,7 @@ fn resolve_serve_target_a_name_match_returns_the_literal_unchanged_and_fills_no_
         name: "mac".into(),
         address: Some("mac.example.com:4433".into()),
         fingerprint: Some(fingerprint),
+        cert_pem: None,
     })
     .unwrap();
 
@@ -868,6 +883,7 @@ fn resolve_serve_target_falls_back_to_a_single_address_match_on_a_name_miss() {
         name: "mac".into(),
         address: Some("203.0.113.5:4433".into()),
         fingerprint: Some(fingerprint),
+        cert_pem: None,
     })
     .unwrap();
 
@@ -893,6 +909,7 @@ fn resolve_serve_target_a_peer_literally_named_like_an_address_resolves_to_itsel
         name: "192.0.2.10:4433".into(),
         address: Some("elsewhere.example.com:4433".into()),
         fingerprint: Some(self_fp),
+        cert_pem: None,
     })
     .unwrap();
     let other_fp = qsh_transport::Fingerprint::of_spki_der(b"other").to_string();
@@ -900,6 +917,7 @@ fn resolve_serve_target_a_peer_literally_named_like_an_address_resolves_to_itsel
         name: "other".into(),
         address: Some("192.0.2.10:4433".into()),
         fingerprint: Some(other_fp),
+        cert_pem: None,
     })
     .unwrap();
 
@@ -918,6 +936,7 @@ fn resolve_serve_target_two_or_more_address_matches_is_invalid_argument_no_first
         name: "alpha".into(),
         address: Some("203.0.113.9:4433".into()),
         fingerprint: Some(fp_a),
+        cert_pem: None,
     })
     .unwrap();
     let fp_b = qsh_transport::Fingerprint::of_spki_der(b"b").to_string();
@@ -925,6 +944,7 @@ fn resolve_serve_target_two_or_more_address_matches_is_invalid_argument_no_first
         name: "beta".into(),
         address: Some("203.0.113.9".into()),
         fingerprint: Some(fp_b),
+        cert_pem: None,
     })
     .unwrap();
 
@@ -1075,6 +1095,7 @@ fn resolve_route_reverse_prefers_the_live_daemon_over_a_forward_pin() {
         name: "phone".into(),
         address: Some("stale.example.com:4433".into()),
         fingerprint: Some(fingerprint),
+        cert_pem: None,
     })
     .unwrap();
     let runtime_dir = ops.paths().runtime_dir();
@@ -1589,4 +1610,276 @@ async fn all_addresses_failing_maps_to_connection_failed_naming_the_attempt_coun
         single.message
     );
     assert_ne!(multi.message, single.message);
+}
+
+// ---------------------------------------------------------------------
+// `trust add --cert-file` / `trust add-ca` (ADR-0013).
+// ---------------------------------------------------------------------
+
+/// A real, valid single-`CERTIFICATE`-block PEM — its own fresh device
+/// identity, exported the same way `identity.export` returns it, so
+/// these tests exercise the real validator against real DER rather than
+/// a hand-rolled stand-in.
+fn a_valid_cert_pem() -> String {
+    let (_guard, ops) = temp_ops();
+    ops.identity_init(file_mode()).unwrap();
+    ops.identity_export(IdentityExportReq { out: None })
+        .unwrap()
+        .cert_pem
+        .expect("cert_pem present without --out")
+}
+
+#[test]
+fn trust_add_rejects_cert_file_together_with_fingerprint() {
+    let (_guard, ops) = temp_ops();
+    let err = ops
+        .trust_add(TrustAddReq {
+            name: "mac".into(),
+            address: None,
+            fingerprint: Some(qsh_transport::Fingerprint::of_spki_der(b"x").to_string()),
+            cert_pem: Some(a_valid_cert_pem()),
+        })
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::InvalidArgument);
+    assert_eq!(err.details, serde_json::Value::Null);
+}
+
+#[test]
+fn trust_add_cert_file_rejects_a_chain_of_two_certificates() {
+    let (_guard, ops) = temp_ops();
+    let chain = format!("{}{}", a_valid_cert_pem(), a_valid_cert_pem());
+    let err = ops
+        .trust_add(TrustAddReq {
+            name: "mac".into(),
+            address: None,
+            fingerprint: None,
+            cert_pem: Some(chain),
+        })
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::InvalidArgument);
+    assert_eq!(err.details, serde_json::Value::Null);
+    assert_eq!(
+        err.message,
+        "cert file must contain exactly one CERTIFICATE block"
+    );
+}
+
+#[test]
+fn trust_add_cert_file_rejects_a_bundle_carrying_a_private_key_and_echoes_no_input() {
+    let (_guard, ops) = temp_ops();
+    let key_der = b"this is not a real key, only a foreign-block probe";
+    let bundle = format!(
+        "{}{}",
+        a_valid_cert_pem(),
+        crate::identity::pem::encode(crate::identity::pem::PRIVATE_KEY, key_der)
+    );
+    let err = ops
+        .trust_add(TrustAddReq {
+            name: "mac".into(),
+            address: None,
+            fingerprint: None,
+            cert_pem: Some(bundle),
+        })
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::InvalidArgument);
+    assert_eq!(err.details, serde_json::Value::Null);
+    assert_eq!(err.message, "cert file carries a non-certificate PEM block");
+    // No byte of the rejected input — including the base64 body — ever
+    // reaches the message (ADR-0013 결정 4).
+    assert!(!err.message.contains("BEGIN"));
+}
+
+/// `trust add --cert-file`'s no-op is the *existing* `add_peer` rule
+/// (`TrustStore::add_peer`'s own doc): a name already pinned under a
+/// *different* fingerprint is a silent no-op on the whole entry, not an
+/// error — re-binding an identity is `trust remove` then `trust add`.
+#[test]
+fn trust_add_cert_file_is_a_silent_no_op_when_the_name_holds_a_different_fingerprint() {
+    let (_guard, ops) = temp_ops();
+    let original_fp = qsh_transport::Fingerprint::of_spki_der(b"original").to_string();
+    ops.trust_add(TrustAddReq {
+        name: "mac".into(),
+        address: None,
+        fingerprint: Some(original_fp.clone()),
+        cert_pem: None,
+    })
+    .unwrap();
+
+    let added = ops
+        .trust_add(TrustAddReq {
+            name: "mac".into(),
+            address: None,
+            fingerprint: None,
+            cert_pem: Some(a_valid_cert_pem()),
+        })
+        .unwrap();
+    assert!(!added.created);
+    assert_eq!(added.updated, Some(false));
+    assert_eq!(
+        added.peer.fingerprint, original_fp,
+        "unchanged, not re-bound"
+    );
+}
+
+#[test]
+fn trust_add_ca_is_idempotent_for_an_identical_pem() {
+    let (_guard, ops) = temp_ops();
+    let cert_pem = a_valid_cert_pem();
+    let first = ops
+        .trust_add_ca(TrustAddCaReq {
+            name: "partner-ca".into(),
+            cert_pem: cert_pem.clone(),
+        })
+        .unwrap();
+    assert!(first.created);
+    assert_eq!(first.updated, Some(false));
+
+    let second = ops
+        .trust_add_ca(TrustAddCaReq {
+            name: "partner-ca".into(),
+            cert_pem,
+        })
+        .unwrap();
+    assert!(!second.created);
+    assert_eq!(second.updated, Some(false));
+}
+
+#[test]
+fn trust_add_ca_rejects_a_second_pem_under_an_existing_name() {
+    let (_guard, ops) = temp_ops();
+    ops.trust_add_ca(TrustAddCaReq {
+        name: "partner-ca".into(),
+        cert_pem: a_valid_cert_pem(),
+    })
+    .unwrap();
+
+    let err = ops
+        .trust_add_ca(TrustAddCaReq {
+            name: "partner-ca".into(),
+            cert_pem: a_valid_cert_pem(),
+        })
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::InvalidArgument);
+    assert_eq!(err.details, serde_json::Value::Null);
+    assert!(err.message.contains("partner-ca"));
+    assert!(err.message.contains("trust remove"));
+}
+
+/// The recovery path `add_ca_append_only`'s own error message promises
+/// (ADR-0013 결정 5): a name collision is `INVALID_ARGUMENT`, but
+/// `trust.remove` unpins the CA root by name so a second, different PEM
+/// can then be registered under the same name.
+#[test]
+fn trust_remove_unpins_a_ca_root_so_add_ca_can_replace_it() {
+    let (_guard, ops) = temp_ops();
+    let pem1 = a_valid_cert_pem();
+    let pem2 = a_valid_cert_pem();
+    assert_ne!(pem1, pem2, "two fresh identities must not share a cert");
+
+    ops.trust_add_ca(TrustAddCaReq {
+        name: "x".into(),
+        cert_pem: pem1,
+    })
+    .unwrap();
+
+    let err = ops
+        .trust_add_ca(TrustAddCaReq {
+            name: "x".into(),
+            cert_pem: pem2.clone(),
+        })
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::InvalidArgument);
+
+    let removed = ops.trust_remove("x").unwrap();
+    assert!(removed.removed);
+
+    let added = ops
+        .trust_add_ca(TrustAddCaReq {
+            name: "x".into(),
+            cert_pem: pem2.clone(),
+        })
+        .unwrap();
+    assert!(added.created);
+
+    let store = TrustStore::load(&ops.paths().trust_file()).unwrap();
+    assert_eq!(store.cas().len(), 1);
+    assert_eq!(store.cas()[0].name, "x");
+    assert_eq!(store.cas()[0].cert_pem, pem2);
+}
+
+// ---------------------------------------------------------------------
+// `identity.export` (ADR-0013).
+// ---------------------------------------------------------------------
+
+#[test]
+fn identity_export_is_a_config_error_before_qsh_init() {
+    let (_guard, ops) = temp_ops();
+    let err = ops
+        .identity_export(IdentityExportReq { out: None })
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::ConfigError);
+    assert_eq!(err.message, crate::identity::NO_LOCAL_IDENTITY);
+}
+
+#[test]
+fn identity_export_refuses_to_clobber_an_existing_out_file() {
+    let (_guard, ops) = temp_ops();
+    ops.identity_init(file_mode()).unwrap();
+    let out_dir = tempfile::tempdir().unwrap();
+    let out = out_dir.path().join("device.pem");
+    std::fs::write(&out, b"pre-existing content").unwrap();
+
+    let err = ops
+        .identity_export(IdentityExportReq {
+            out: Some(out.to_string_lossy().into_owned()),
+        })
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::InvalidArgument);
+    assert!(err.message.contains("already exists"), "{}", err.message);
+    assert_eq!(
+        std::fs::read(&out).unwrap(),
+        b"pre-existing content",
+        "a refused export must never touch the existing file's bytes"
+    );
+}
+
+/// Source-scan pin (`ops/identity.rs`'s own doc comment references this
+/// test by name): `Ops::identity_export`'s body — not the whole file,
+/// which also holds `identity_init`'s legitimate `KeyStoreMode` use —
+/// must never reach `identity::load`, `KeyStore`, `KEY_FILE` or
+/// `open_store`. Export reads only through `read_identity` plus a raw
+/// re-read of `device.pem`'s own text; the private key must never be a
+/// reachable value on this path (ADR-0013).
+#[test]
+fn identity_export_never_opens_the_key_store() {
+    let source = include_str!("identity.rs");
+    let start = source
+        .find("pub fn identity_export(")
+        .expect("ops/identity.rs must define identity_export");
+    let body = &source[start..];
+    let open = body.find('{').expect("identity_export must have a body");
+    let mut depth = 0i32;
+    let mut end = None;
+    for (i, ch) in body[open..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = Some(open + i + 1);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let function_body = &body[..end.expect("identity_export's braces must balance")];
+
+    for banned in ["identity::load(", "KeyStore", "KEY_FILE", "open_store"] {
+        assert!(
+            !function_body.contains(banned),
+            "Ops::identity_export's body must never reference {banned:?} — it must read \
+             only through crate::identity::read_identity"
+        );
+    }
 }

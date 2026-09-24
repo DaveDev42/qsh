@@ -364,6 +364,7 @@ async fn session_lifecycle_succeeds_over_both_forward_and_reverse_routes() {
                 name: "fwdhost".into(),
                 address: Some(addr),
                 fingerprint: Some(fp),
+                cert_pem: None,
             })
         }
     })
@@ -568,6 +569,7 @@ async fn killing_the_daemon_mid_session_gives_the_cli_a_clear_error_while_the_ta
                 name: "fwdhost".into(),
                 address: Some(addr),
                 fingerprint: Some(fp),
+                cert_pem: None,
             })
         }
     })

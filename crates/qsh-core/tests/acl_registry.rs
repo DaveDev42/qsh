@@ -265,7 +265,37 @@ mod section_2_5 {
         let mut excluded: Vec<String> = no_authz_ops.iter().map(|s| s.to_string()).collect();
         if let Some(pos) = excluded.iter().position(|o| o == "trust.*") {
             excluded.remove(pos);
-            excluded.extend(["trust.add", "trust.list", "trust.remove"].map(String::from));
+            // This expansion was two ops short of the real `trust.*`
+            // surface (`trust.invite`/`trust.accept` were never added) —
+            // fixed here alongside adding `trust.add_ca`, or coverage
+            // would shrink again with no red test.
+            let trust_ops = [
+                "trust.add",
+                "trust.add_ca",
+                "trust.list",
+                "trust.remove",
+                "trust.invite",
+                "trust.accept",
+            ];
+            // Tie this hand-written expansion to the real registered
+            // surface (`qsh_proto::schema::CLI_V1_SCHEMA_COMMANDS`), not
+            // just to itself: dropping a real `trust.*` op from the list
+            // above (or failing to add a new one) must go red here rather
+            // than silently shrinking coverage with no failing test — the
+            // same gap `trust.invite`/`trust.accept` were caught in above.
+            let real_trust_ops: HashSet<&str> = qsh_proto::schema::CLI_V1_SCHEMA_COMMANDS
+                .iter()
+                .copied()
+                .filter(|op| op.starts_with("trust."))
+                .collect();
+            let listed_trust_ops: HashSet<&str> = trust_ops.iter().copied().collect();
+            assert_eq!(
+                listed_trust_ops, real_trust_ops,
+                "the `trust.*` expansion here must name exactly the real `trust.*` ops in \
+                 CLI_V1_SCHEMA_COMMANDS — an op was added, removed, or misspelled on one \
+                 side without the other"
+            );
+            excluded.extend(trust_ops.map(String::from));
         }
         // The CLI-level tunnel.open/tunnel.close/tunnel.list op names
         // themselves must also have no row of their own — their ACL is

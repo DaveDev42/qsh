@@ -735,3 +735,29 @@ fn concurrent_saves_to_the_same_path_never_corrupt_the_file() {
         );
     }
 }
+
+/// [`TrustStore::remove`] drops a `[[ca]]` root by name (ADR-0013 결정 5
+/// — the only way to unblock `add_ca_append_only`'s name-collision
+/// refusal), leaving an unrelated CA root and every peer pin alone, and
+/// stays idempotent on a second call.
+#[test]
+fn remove_drops_a_ca_root_by_name_and_leaves_other_entries_alone() {
+    let mut store = TrustStore::default();
+    store.add_peer("a", None, fp(b"a"), "2026-08-17T00:00:00Z".into());
+    store.add_ca("x", pem::encode(pem::CERTIFICATE, b"root x"));
+    store.add_ca("y", pem::encode(pem::CERTIFICATE, b"root y"));
+
+    assert!(store.remove("x"));
+    assert_eq!(
+        store
+            .cas()
+            .iter()
+            .map(|ca| ca.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["y"]
+    );
+    assert_eq!(store.peers().len(), 1);
+    assert!(store.find("a").is_some());
+
+    assert!(!store.remove("x"));
+}

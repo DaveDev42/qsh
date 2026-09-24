@@ -9,9 +9,10 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use qsh_proto::{
-    BuildInfo, ErrorCode, IdentityInitData, IdentityInitReq, KeyStoreMode, SchemaData,
-    TrustAcceptData, TrustAcceptReq, TrustAddData, TrustAddReq, TrustInviteData, TrustInviteReq,
-    TrustListData, TrustPeer, TrustRemoveData, VersionData,
+    BuildInfo, ErrorCode, IdentityExportData, IdentityExportReq, IdentityInitData, IdentityInitReq,
+    KeyStoreMode, SchemaData, TrustAcceptData, TrustAcceptReq, TrustAddCaData, TrustAddCaReq,
+    TrustAddData, TrustAddReq, TrustInviteData, TrustInviteReq, TrustListData, TrustPeer,
+    TrustRemoveData, VersionData,
 };
 use qsh_transport::{DialError, Dialer, Fingerprint, StaticTrust};
 
@@ -43,6 +44,7 @@ pub use session::{
     SessionReadOutput, SessionReader, SessionRef, SessionResizeOp, SessionWriteOp,
     make_session_ref, parse_session_ref,
 };
+pub use trust::{cert_file_fingerprint_conflict, read_cert_file_arg};
 pub use tunnel::{
     TunnelCloseOp, TunnelDynamicOp, TunnelHold, TunnelListOp, TunnelOpenOp, parse_dynamic_forwards,
     parse_local_forwards, parse_remote_forwards,
@@ -228,11 +230,25 @@ impl Operation for IdentityInitOp {
     const COMMAND: &'static str = "identity.init";
 }
 
+/// The `identity.export` operation (`qsh identity export`, ADR-0013).
+pub struct IdentityExportOp;
+
+impl Operation for IdentityExportOp {
+    const COMMAND: &'static str = "identity.export";
+}
+
 /// The `trust.add` operation.
 pub struct TrustAddOp;
 
 impl Operation for TrustAddOp {
     const COMMAND: &'static str = "trust.add";
+}
+
+/// The `trust.add_ca` operation (`qsh trust add-ca`, ADR-0013).
+pub struct TrustAddCaOp;
+
+impl Operation for TrustAddCaOp {
+    const COMMAND: &'static str = "trust.add_ca";
 }
 
 /// The `trust.invite` operation (ADR-0002, `PLAN.md` M7 Step 4).

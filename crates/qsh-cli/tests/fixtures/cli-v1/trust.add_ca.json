@@ -1,0 +1,12 @@
+{
+  "command": "trust.add_ca",
+  "data": {
+    "cert_pem": "<cert_pem>",
+    "created": true,
+    "name": "foreign-ca",
+    "updated": false
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}
