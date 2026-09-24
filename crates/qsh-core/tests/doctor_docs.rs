@@ -16,7 +16,7 @@
 //! (`PLAN.md` M3 Step 9 (d)).
 
 use qsh_core::CONTROLLER_UNREACHABLE;
-use qsh_core::doctor::{CERT_EXPIRING_SOON, TRUST_REMOVE_SCOPE};
+use qsh_core::doctor::{ACL_CA_AUTH_PATH_MISSING, CERT_EXPIRING_SOON, TRUST_REMOVE_SCOPE};
 
 #[path = "support/docs.rs"]
 mod docs;
@@ -101,9 +101,22 @@ fn cli_md_quotes_the_cert_expiring_soon_diagnostic_verbatim() {
     );
 }
 
+#[test]
+fn cli_md_quotes_the_acl_ca_auth_path_missing_diagnostic_verbatim() {
+    let cli_md = read_doc("docs/CLI.md");
+    assert!(
+        cli_md.contains(ACL_CA_AUTH_PATH_MISSING.message),
+        "docs/CLI.md §6.17 must quote ACL_CA_AUTH_PATH_MISSING.message verbatim"
+    );
+    assert!(
+        cli_md.contains(ACL_CA_AUTH_PATH_MISSING.remedy),
+        "docs/CLI.md §6.17 must quote ACL_CA_AUTH_PATH_MISSING.remedy verbatim"
+    );
+}
+
 /// The stable half of a diagnostic is its `code`, not its prose: `code` is
 /// what operators grep for and what a future `--fail-on` would select on,
-/// and `EXPECTED_DOCTOR_CODES` freezes the set. So while only the two
+/// and `EXPECTED_DOCTOR_CODES` freezes the set. So while only the three
 /// diagnostics above are pinned word-for-word, every code in the frozen
 /// set must at least be *named* in `docs/CLI.md` — adding a fourteenth
 /// code without documenting it, or renaming one out from under §6.17,
