@@ -141,6 +141,7 @@
 - **수용 기준 (DoD):** 클린 macOS arm64/x86_64·Linux arm64/x86_64에서 brew/curl 설치 → 동작. Gatekeeper가 notarized 바이너리를 차단하지 않음. musl static 바이너리가 구형 glibc 배포판에서 실행.
   - **(감사 개정 2026-08-21)** "동작"의 정의는 `version --json`이 아니라 **기능 스모크**다: init → trust → `exec --json` 왕복 + PTY 셸 획득 + detach→attach resume이 배포되는 release 프로파일 바이너리로 통과. 근거: 현재 CI의 전 기능 테스트는 dev 프로파일이고 release 바이너리는 기능 테스트 0건으로 출고된다. release 태그 전 CI에서 `--release` 프로파일 통합 테스트를 최소 1회 돌린다.
   - **(M8 이관 2026-09-10)** `docs/PRD.md:289`(30분 단절 후 TTL 내 복구)·`:290`(느린 파일·터널 stream이 PTY를 block하지 않음)의 직접 증거는 릴리스 게이트에서 판정한다 — `:290`은 파일 전송 표면이 v1에 없어 대역 스트림 대체 하네스가 필요하고, `:289`는 M3 60초 blackout 게이트의 30배 길이라 acceptance job에 못 들어간다(PLAN.md M8 Step 8 (c)).
+  - **(M9 이관 2026-09-24)** `docs/design/threat-model.md` §3 진입점·§4 위협 표가 M9 사람용 표면 명령(`pair invite|accept --as`, `identity export`, `trust add --cert-file`, `trust add-ca`, `trust rename`, `service install|uninstall|status`)을 다룬다. 그 문서 §0이 "다음 개정으로 미룬다"고 스스로 적어 둔 유예를 M9 마감 감사(마감 공통 절차 1)가 마일스톤 귀속으로 바꾼 것이다. `-D`는 잔여 위험 h16~h22로 이미 다뤄져 대상이 아니다.
 - **크기:** 1.5ew (notarization은 Apple 계정 리드타임 — M8 중 시작)
 - **검토 항목(2026-09-07, ADR-0011):** `-W`(ProxyCommand형 stdio와 원격 TCP의 브리지) 필요 여부. `qsh exec`의 pipe stdin 전달과 `-L`로 부족한 사용례가 있을 때만 추가하고 없으면 기각한다.
 
