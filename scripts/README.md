@@ -29,7 +29,7 @@ unwritable `QSH_INSTALL_DIR` is an error, not a prompt to escalate.
 What the checksum proves is bounded. `SHA256SUMS` comes from the same
 release as the archive, so it catches a truncated or corrupted download, not
 a compromised release. It is an integrity check, not a signature. Signing
-and notarization are M9.
+and notarization are M10.
 
 Archive naming (`qsh-<tag>-<target>.tar.gz`, `.zip` on Windows) and the
 `SHA256SUMS` file are produced by `.github/workflows/release.yml`. That
