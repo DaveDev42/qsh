@@ -48,11 +48,12 @@ use clap::{CommandFactory as _, Parser};
 use qsh_core::{
     AclCheckOp, CapabilitiesOp, CertInitOp, CertIssueOp, Config, DoctorOp, ExecRunOp, ExecStdin,
     HostGetOp, HostListOp, IdentityExportOp, IdentityInitOp, InviteCodeSource, OpError, Operation,
-    Ops, SchemaOp, SessionAttachOp, SessionCloseOp, SessionGetOp, SessionListOp, SessionOpenOp,
-    SessionReadOp, SessionResizeOp, SessionWriteOp, TrustAcceptOp, TrustAddCaOp, TrustAddOp,
-    TrustInviteOp, TrustListOp, TrustRemoveOp, TrustRenameOp, TunnelCloseOp, TunnelDynamicOp,
-    TunnelListOp, TunnelOpenOp, VersionOp, cert_file_fingerprint_conflict, normalize_invite_code,
-    parse_dynamic_forwards, read_cert_file_arg, resolve_invite_code_source,
+    Ops, SchemaOp, ServiceInstallOp, ServiceStatusOp, ServiceUninstallOp, SessionAttachOp,
+    SessionCloseOp, SessionGetOp, SessionListOp, SessionOpenOp, SessionReadOp, SessionResizeOp,
+    SessionWriteOp, TrustAcceptOp, TrustAddCaOp, TrustAddOp, TrustInviteOp, TrustListOp,
+    TrustRemoveOp, TrustRenameOp, TunnelCloseOp, TunnelDynamicOp, TunnelListOp, TunnelOpenOp,
+    VersionOp, cert_file_fingerprint_conflict, normalize_invite_code, parse_dynamic_forwards,
+    read_cert_file_arg, resolve_invite_code_source,
     trust::{ADDRESS_PORT_ASSUMED_NOTICE, normalize_peer_address, suggested_peer_label},
 };
 use qsh_proto::{
@@ -67,7 +68,7 @@ use tracing_subscriber::EnvFilter;
 
 use cli::{
     AclCmd, AttachArgs, CertCmd, Cli, Command, DEFAULT_ESCAPE_CHAR, EscapeChar, ExecArgs, HostCmd,
-    IdentityCmd, PairCmd, SessionCmd, SessionReadArgs, SessionWriteArgs, TrustAddArgs,
+    IdentityCmd, PairCmd, ServiceCmd, SessionCmd, SessionReadArgs, SessionWriteArgs, TrustAddArgs,
     TrustAddCaArgs, TrustCmd, TunnelCmd, TunnelOpenArgs,
 };
 use render::{human, json, json::Envelope};
@@ -516,6 +517,24 @@ fn dispatch(cli: &Cli, ops: Ops) -> i32 {
             run_serve(&ops, bind.as_deref(), to.as_deref(), name.as_deref())
         }
         Command::Listen { bind } => run_listen(&ops, bind.as_deref()),
+        Command::Service(ServiceCmd::Install) => finish(
+            cli,
+            ServiceInstallOp::COMMAND,
+            ops.service_install(),
+            human::print_service_install,
+        ),
+        Command::Service(ServiceCmd::Uninstall) => finish(
+            cli,
+            ServiceUninstallOp::COMMAND,
+            ops.service_uninstall(),
+            human::print_service_uninstall,
+        ),
+        Command::Service(ServiceCmd::Status) => finish(
+            cli,
+            ServiceStatusOp::COMMAND,
+            ops.service_status(),
+            human::print_service_status,
+        ),
         Command::Reverse {
             controller,
             offered_name,
@@ -1739,6 +1758,9 @@ fn command_name(cli: &Cli) -> &'static str {
         Command::Tunnels => TunnelListOp::COMMAND,
         Command::Serve { .. } => SERVE_MODE,
         Command::Listen { .. } => LISTEN_MODE,
+        Command::Service(ServiceCmd::Install) => ServiceInstallOp::COMMAND,
+        Command::Service(ServiceCmd::Uninstall) => ServiceUninstallOp::COMMAND,
+        Command::Service(ServiceCmd::Status) => ServiceStatusOp::COMMAND,
         Command::Reverse { .. } => REVERSE_MODE,
     }
 }

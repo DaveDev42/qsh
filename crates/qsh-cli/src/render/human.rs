@@ -10,10 +10,11 @@ use qsh_core::trust::invite_address::InviteAddressAdvice;
 use qsh_core::{ExecRunOutput, OpError, SessionReadOutput};
 use qsh_proto::{
     AclCheckData, CapabilitiesData, CertInitData, CertIssueData, DoctorData, DynamicTunnel, Host,
-    HostListData, IdentityExportData, IdentityInitData, SchemaData, Session, SessionCloseData,
-    SessionEvent, SessionListData, SessionOpenData, SessionResizeData, SessionWriteData,
-    TrustAcceptData, TrustAddCaData, TrustAddData, TrustInviteData, TrustListData, TrustPeer,
-    TrustRemoveData, TrustRenameData, Tunnel, TunnelCloseData, TunnelListData, VersionData,
+    HostListData, IdentityExportData, IdentityInitData, SchemaData, ServiceInstallData,
+    ServiceStatusData, ServiceUninstallData, Session, SessionCloseData, SessionEvent,
+    SessionListData, SessionOpenData, SessionResizeData, SessionWriteData, TrustAcceptData,
+    TrustAddCaData, TrustAddData, TrustInviteData, TrustListData, TrustPeer, TrustRemoveData,
+    TrustRenameData, Tunnel, TunnelCloseData, TunnelListData, VersionData,
 };
 
 use crate::stderr_note;
@@ -835,6 +836,67 @@ pub fn print_error(err: &OpError) -> io::Result<()> {
         "qsh: {} ({})",
         sanitize(&err.message),
         sanitize(err.code.as_str())
+    )
+}
+
+/// Print the outcome of `qsh service install` (`docs/CLI.md` §6.18). Zero
+/// logic — `manager`/`mode`/`path` plus `created` in words, and a fixed
+/// second line pointing at the activation recipe (`install` alone never
+/// starts anything).
+pub fn print_service_install(data: &ServiceInstallData) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    writeln!(
+        stdout,
+        "{} {} unit for {} mode at {}",
+        sanitize(&data.manager),
+        if data.created { "wrote" } else { "rewrote" },
+        sanitize(&data.mode),
+        sanitize(&data.path)
+    )?;
+    writeln!(
+        stdout,
+        "Activate it as docs/deploy/service.md describes (launchctl bootstrap on macOS, \
+         systemctl --user enable --now on Linux)."
+    )
+}
+
+/// Print the outcome of `qsh service uninstall` (`docs/CLI.md` §6.18).
+pub fn print_service_uninstall(data: &ServiceUninstallData) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    if data.removed {
+        writeln!(
+            stdout,
+            "{} removed the {} mode unit at {}",
+            sanitize(&data.manager),
+            sanitize(&data.mode),
+            sanitize(&data.path)
+        )
+    } else {
+        writeln!(
+            stdout,
+            "{} has nothing to remove for {} mode at {}",
+            sanitize(&data.manager),
+            sanitize(&data.mode),
+            sanitize(&data.path)
+        )
+    }
+}
+
+/// Print the outcome of `qsh service status` (`docs/CLI.md` §6.18).
+/// Presence only, never activation.
+pub fn print_service_status(data: &ServiceStatusData) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    writeln!(
+        stdout,
+        "{} unit for {} mode at {} is {}",
+        sanitize(&data.manager),
+        sanitize(&data.mode),
+        sanitize(&data.path),
+        if data.installed {
+            "installed"
+        } else {
+            "not installed"
+        }
     )
 }
 

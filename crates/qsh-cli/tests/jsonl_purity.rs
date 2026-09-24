@@ -811,3 +811,33 @@ fn identity_export_human_mode_without_out_prints_exactly_one_certificate_block()
     );
     assert!(!stdout.contains("PRIVATE KEY"), "{stdout:?}");
 }
+
+/// `qsh service install` (`docs/CLI.md` §6.18, ROADMAP M9 (g)): at high
+/// verbosity stdout must still be exactly one `qsh.cli/v1` line, with any
+/// human-readable activation hint the renderer might print going to
+/// stderr only — `render/human.rs`'s `print_service_install` output never
+/// reaches stdout in `--json`/`--jsonl` mode, mirroring
+/// `trust_accept_with_no_code_keeps_stdout_pure_json_at_every_verbosity`.
+/// Runs only where `service.*` is implemented; on every other platform the
+/// single `UNSUPPORTED` envelope already satisfies "exactly one JSON line"
+/// trivially, and [`fixtures::service_ops_are_unsupported_off_macos_and_linux`]
+/// (`crates/qsh-cli/tests/fixtures.rs`) is the dedicated companion for that
+/// leg.
+#[test]
+fn service_install_keeps_stdout_pure_json_at_every_verbosity() {
+    if !cfg!(any(target_os = "macos", target_os = "linux")) {
+        return;
+    }
+    let sandbox = Sandbox::new();
+    for (label, mode, verbosity) in [
+        ("--jsonl -vv", "--jsonl", "-vv"),
+        ("--json -vvv", "--json", "-vvv"),
+    ] {
+        let output = sandbox.qsh(&["service", "install", verbosity, mode]);
+        assert_eq!(exit_code(&output), 0, "{label}");
+        let lines = parse_stdout_lines(&output.stdout, label);
+        assert_eq!(lines.len(), 1, "{label}");
+        assert_eq!(lines[0]["ok"], true, "{label}");
+        assert_eq!(lines[0]["command"], "service.install", "{label}");
+    }
+}

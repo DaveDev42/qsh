@@ -1,0 +1,12 @@
+{
+  "command": "service.install",
+  "data": {
+    "created": true,
+    "manager": "<manager>",
+    "mode": "serve",
+    "path": "<path>"
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

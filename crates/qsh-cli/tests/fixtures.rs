@@ -153,6 +153,9 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "acl.check.allow.json",
     "acl.check.deny.json",
     "error.RESOURCE_EXHAUSTED.json",
+    "service.install.json",
+    "service.status.json",
+    "service.uninstall.json",
 ];
 
 // ---------------------------------------------------------------------------
@@ -631,6 +634,113 @@ fn golden_cert_file_exchange_fixtures() {
     assert_eq!(code, 0, "{ca_added}");
     assert_eq!(ca_added["data"]["created"], true, "{ca_added}");
     check("trust.add_ca.json", ca_added);
+}
+
+/// `qsh service install|status|uninstall` (`docs/CLI.md` §6.18, ROADMAP M9 (g)).
+/// Its own fresh sandbox with no `config.toml` (so `infer_run_mode` falls
+/// through to `"serve"`, identical on both CI legs — no identity needed,
+/// neither op reads it) — never `golden_local_fixtures`', to keep this
+/// scenario's writes to `sandbox.home_dir()` isolated from every other
+/// fixture. Runs only on macOS/Linux, where the op is implemented; see
+/// [`service_ops_are_unsupported_off_macos_and_linux`] for the companion
+/// half that keeps every other CI leg from silently skipping this file's
+/// only exercise of `service.*`.
+#[test]
+fn golden_service_fixtures() {
+    if !cfg!(any(target_os = "macos", target_os = "linux")) {
+        return;
+    }
+    let sandbox = Sandbox::new();
+
+    // 1. `status` before `install` — `installed: false`. Not a fixture:
+    // the "before install" face is the less interesting one.
+    let (code, status_before) = sandbox.json(&["service", "status", "--json"]);
+    assert_eq!(code, 0, "{status_before}");
+    assert_eq!(status_before["data"]["installed"], false, "{status_before}");
+
+    // 2. `install` — the mechanical version of PLAN's completion criterion
+    // "테스트가 tempdir 밖 파일을 만들지 않음을 단언": this assert runs
+    // *before* `normalize` masks `data.path`, and it is the one check that
+    // would catch a regression removing `HOME` from the sandbox harness
+    // (guards `Sandbox::command_with_bin`'s `.env("HOME", …)` injection).
+    let (code, installed) = sandbox.json(&["service", "install", "--json"]);
+    assert_eq!(code, 0, "{installed}");
+    let path = installed["data"]["path"].as_str().expect("data.path");
+    assert!(
+        path.starts_with(sandbox.home_dir().to_str().expect("home_dir utf8")),
+        "service install must only ever write under the sandbox's HOME, got {path}"
+    );
+    assert_eq!(installed["data"]["created"], true, "{installed}");
+    check("service.install.json", installed);
+
+    // 3. `status` after `install` — `installed: true`.
+    let (code, status_after) = sandbox.json(&["service", "status", "--json"]);
+    assert_eq!(code, 0, "{status_after}");
+    assert_eq!(status_after["data"]["installed"], true, "{status_after}");
+    check("service.status.json", status_after);
+
+    // 4. `install` again — idempotent, `created: false`. Not a fixture.
+    let (code, reinstalled) = sandbox.json(&["service", "install", "--json"]);
+    assert_eq!(code, 0, "{reinstalled}");
+    assert_eq!(reinstalled["data"]["created"], false, "{reinstalled}");
+
+    // 5. `uninstall` — `removed: true`.
+    let (code, uninstalled) = sandbox.json(&["service", "uninstall", "--json"]);
+    assert_eq!(code, 0, "{uninstalled}");
+    assert_eq!(uninstalled["data"]["removed"], true, "{uninstalled}");
+    check("service.uninstall.json", uninstalled);
+
+    // 6. `uninstall` again — absent unit, `removed: false`. Not a fixture.
+    let (code, reuninstalled) = sandbox.json(&["service", "uninstall", "--json"]);
+    assert_eq!(code, 0, "{reuninstalled}");
+    assert_eq!(reuninstalled["data"]["removed"], false, "{reuninstalled}");
+}
+
+/// The M7 Step 6 trap: an early `return` off the platforms where
+/// `service.*` is implemented is, by itself, exactly the "conditional
+/// assert that passes in the real environment and is vacuous in CI" bug
+/// `PLAN.md` warns against. This is the always-compiled companion —
+/// [`golden_service_fixtures`] does the real work on macOS/Linux, this one
+/// does the real work everywhere else, so exactly one of the two is
+/// non-trivial on any given CI leg and neither leg silently no-ops both.
+#[test]
+fn service_ops_are_unsupported_off_macos_and_linux() {
+    if cfg!(any(target_os = "macos", target_os = "linux")) {
+        return;
+    }
+    let sandbox = Sandbox::new();
+
+    for args in [
+        ["service", "install", "--json"],
+        ["service", "uninstall", "--json"],
+        ["service", "status", "--json"],
+    ] {
+        let (code, value) = sandbox.json(&args);
+        assert_eq!(code, 255, "{value}");
+        assert_eq!(value["ok"], false, "{value}");
+        assert_eq!(value["error"]["code"], "UNSUPPORTED", "{value}");
+    }
+
+    // No unit directory of either manager's shape was ever created under
+    // this sandbox's HOME — the strongest available proof that resolving
+    // the manager genuinely happens before any path is built or touched.
+    assert!(
+        !sandbox
+            .home_dir()
+            .join("Library")
+            .join("LaunchAgents")
+            .exists(),
+        "no macOS unit directory should exist on a platform where service.* is UNSUPPORTED"
+    );
+    assert!(
+        !sandbox
+            .home_dir()
+            .join(".config")
+            .join("systemd")
+            .join("user")
+            .exists(),
+        "no Linux unit directory should exist on a platform where service.* is UNSUPPORTED"
+    );
 }
 
 /// The dial-timeout path. Split out because it is the one scenario that

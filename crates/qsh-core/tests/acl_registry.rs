@@ -211,10 +211,11 @@ mod section_2_5 {
             "forward.remote".to_string(),
         ));
 
-        // Row 9: host.list, host.get, identity.init, trust.*, doctor.run,
-        // acl.check, schema.get, capabilities.get, version.get — 인가
-        // 불요. Contributes no OP_REGISTRY pair; verified as an exclusion
-        // list below instead.
+        // Row 9: host.list, host.get, identity.init, identity.export,
+        // trust.*, cert.init, cert.issue, doctor.run, acl.check,
+        // schema.get, capabilities.get, version.get, service.install,
+        // service.uninstall, service.status — 인가 불요. Contributes no
+        // OP_REGISTRY pair; verified as an exclusion list below instead.
         let (left9, right9) = &rows[9];
         assert!(
             right9.contains("인가 불요"),

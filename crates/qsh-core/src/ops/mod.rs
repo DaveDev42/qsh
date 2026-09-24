@@ -27,6 +27,7 @@ pub mod cert;
 pub mod doctor;
 pub mod exec;
 pub mod host;
+pub mod service;
 pub mod session;
 pub mod tunnel;
 
@@ -429,6 +430,27 @@ pub struct TrustRenameOp;
 
 impl Operation for TrustRenameOp {
     const COMMAND: &'static str = "trust.rename";
+}
+
+/// The `service.install` operation (`docs/CLI.md` §6.18).
+pub struct ServiceInstallOp;
+
+impl Operation for ServiceInstallOp {
+    const COMMAND: &'static str = "service.install";
+}
+
+/// The `service.uninstall` operation (`docs/CLI.md` §6.18).
+pub struct ServiceUninstallOp;
+
+impl Operation for ServiceUninstallOp {
+    const COMMAND: &'static str = "service.uninstall";
+}
+
+/// The `service.status` operation (`docs/CLI.md` §6.18).
+pub struct ServiceStatusOp;
+
+impl Operation for ServiceStatusOp {
+    const COMMAND: &'static str = "service.status";
 }
 
 /// Façade over every typed operation. This is the *only* entry point

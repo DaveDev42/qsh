@@ -323,9 +323,8 @@ pub fn bindv6only_finding(bind_display: &str, only_v6: bool) -> Option<DoctorFin
 // ---------------------------------------------------------------------------
 
 /// `~/Library/LaunchAgents/io.qsh.<mode>.plist` — the path `qsh service
-/// install` (ROADMAP M9 (g)) will write and [`service_unit_registered`] reads,
-/// on macOS.
-#[cfg(target_os = "macos")]
+/// install` (`docs/CLI.md` §6.18) writes and [`service_unit_registered`]
+/// reads, on macOS.
 pub fn macos_launchagent_path(home: &Path, mode: &str) -> PathBuf {
     home.join("Library")
         .join("LaunchAgents")
@@ -333,8 +332,7 @@ pub fn macos_launchagent_path(home: &Path, mode: &str) -> PathBuf {
 }
 
 /// `~/.config/systemd/user/qsh-<mode>.service` — the Linux twin of
-/// `macos_launchagent_path` (each is compiled only on its own OS, so this is not an intra-doc link).
-#[cfg(target_os = "linux")]
+/// [`macos_launchagent_path`].
 pub fn linux_systemd_user_unit_path(home: &Path, mode: &str) -> PathBuf {
     home.join(".config")
         .join("systemd")

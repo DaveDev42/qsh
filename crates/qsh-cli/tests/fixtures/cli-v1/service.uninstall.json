@@ -1,0 +1,12 @@
+{
+  "command": "service.uninstall",
+  "data": {
+    "manager": "<manager>",
+    "mode": "serve",
+    "path": "<path>",
+    "removed": true
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

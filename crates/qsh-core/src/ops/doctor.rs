@@ -685,7 +685,7 @@ impl Ops {
 /// deliberately leaves out: no diagnostic here for a config that sets more
 /// than one of these at once and disagrees, only a precedence rule —
 /// conflicting values still infer `"reverse"`.
-fn infer_run_mode(config: &Config) -> &'static str {
+pub(crate) fn infer_run_mode(config: &Config) -> &'static str {
     if config.listen != crate::config::ListenConfig::default() {
         "listen"
     } else if config.serve.to.is_some() || config.reverse.controller.is_some() {

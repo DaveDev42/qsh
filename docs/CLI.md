@@ -89,6 +89,9 @@ trust.accept
 cert.init
 cert.issue
 doctor.run
+service.install
+service.uninstall
+service.status
 acl.check
 schema.get
 capabilities.get
@@ -120,11 +123,11 @@ ACL action은 인가(authorization) 어휘로, operation 이름과는 별개 차
 | `tunnel.open` (remote forward) | `forward.remote` |
 | `tunnel.dynamic` (`-D`, SOCKS5) | `forward.local` — 새 grant가 아니라 `-L`과 같은 action의 재사용이다. `forward.socks`는 이 인가에 관여하지 않는다(ADR-0019 decision 14, §6.9의 `DYNAMIC_FORWARD_ACL_NOTE` 참고) |
 | `tunnel.close`, `tunnel.list` | 해당 tunnel의 소유 peer이면 허용 (`forward.*` 부여로 충분) — remote forward(`-R`)의 `tunnel.close`는 이 로컬-머신 축(§6.13·§6.14, `docs/design/protocol.md` §11-3)과 별개로, host 쪽 `forward.remote` principal 소유권 검사를 하나 더 거친다(M5 Step 5, §6.9 아래 문단). `-L`/`-D`의 `tunnel.close`에는 이 host 쪽 검사가 없다 — 로컬 listener를 닫는 것뿐인 순수 local operation이다 |
-| `host.list`, `host.get`, `identity.init`, `identity.export`, `trust.*`, `cert.init`, `cert.issue`, `doctor.run`, `acl.check`, `schema.get`, `capabilities.get`, `version.get` | 인가 불요 — local operation으로 원격 peer의 ACL 평가 대상이 아님 |
+| `host.list`, `host.get`, `identity.init`, `identity.export`, `trust.*`, `cert.init`, `cert.issue`, `doctor.run`, `acl.check`, `schema.get`, `capabilities.get`, `version.get`, `service.install`, `service.uninstall`, `service.status` | 인가 불요 — local operation으로 원격 peer의 ACL 평가 대상이 아님 |
 
 `forward.socks`는 action 어휘에 예약되어 있지만 어떤 operation도 이 action으로 인가하지 않는다 — `-D`가 실제로 구현된 뒤에도 마찬가지다(위 행, ADR-0019 decision 14). 향후 예약: streaming file copy → `file.read`/`file.write`.
 
-위 표의 "인가 불요"는 원격 peer의 ACL 평가 대상이 아니라는 뜻이지, 이 머신 상태에 부작용이 없다는 뜻이 아니다 — `trust.rename`이 그 예다: 원격 peer를 인가하는 행위가 아니므로 이 표에 없지만, 실행되고 나면 `acl.toml`의 `[[acl]]` 행이 어떤 principal을 매치하는지 자체가 바뀐다(§6.11).
+위 표의 "인가 불요"는 원격 peer의 ACL 평가 대상이 아니라는 뜻이지, 이 머신 상태에 부작용이 없다는 뜻이 아니다 — `trust.rename`이 그 예다: 원격 peer를 인가하는 행위가 아니므로 이 표에 없지만, 실행되고 나면 `acl.toml`의 `[[acl]]` 행이 어떤 principal을 매치하는지 자체가 바뀐다(§6.11). `service.install`도 마찬가지다: 원격 peer를 인가하지 않지만 실행되면 이 머신의 launchd/systemd 유닛 파일이 쓰이거나 다시 쓰인다(§6.18).
 
 역방향 host 등록은 operation이 아니라 **연결 수립 시점의 검사**다 — 위 표는 operation→ACL action 매핑이고 `qsh listen`/`qsh serve --to`(구 표기 `qsh reverse`, §6.13)는 §2.4가 명시하듯 operation이 아닌 장기 실행 모드이므로 표에 행을 만들지 않는다. `qsh serve --to`(target)가 `qsh listen`(controller)에 dial해 보내는 `Hello.reverse`(protocol.md §9·§11)를 controller가 인증서로 인증한 뒤, 그 principal에 ACL action `host.reverse`를 검사한다 — 통과해야만 registry에 등록된다(default deny, PRD §9).
 
@@ -927,7 +930,7 @@ qsh serve --bind <ip:port>
 qsh serve --to <listener|host:port> [--name <name>]
 ```
 
-- **Foreground 전용(M1).** 데몬화는 QSH 자체가 하지 않고 OS 서비스 매니저(systemd/launchd)에 위임한다.
+- **Foreground 전용(M1).** 데몬화는 QSH 자체가 하지 않고 OS 서비스 매니저(systemd/launchd)에 위임한다(§6.18의 `qsh service install`이 그 위임 대상 유닛을 만든다).
 - `--bind`의 우선순위: CLI flag > `config.toml`의 `[serve].bind` > 기본값 `[::]:4433`.
 - **`--to`(ROADMAP M9 (b), §6.13).** 주면 인바운드 대신 그 controller에 dial해 reverse target으로 등록한다 — `--bind`와 함께 줄 수 없다(`INVALID_ARGUMENT`, exit `255`, clap 사용 오류가 아니다). 우선순위: CLI 플래그(`--to` 또는 `--bind`, 둘 중 하나만 줄 수 있다) 먼저 — 어느 쪽이든 CLI에서 주어지면 그것으로 확정되고 아래 두 config 키는 아예 읽지 않는다. 그다음 `config.toml`의 `[serve].to` > 구 `[reverse].controller`(두 config 키가 다른 값으로 모두 설정되면 `CONFIG_ERROR`로 fail closed, §6.17 `config_serve_to_conflict`) > (아무것도 없으면) 인바운드 기본값 `[::]:4433`. 특히 `--bind`만 주고 `--to`는 생략한 경우도 config의 두 outbound 키를 읽지 않는다 — 오퍼레이터가 인바운드 주소를 직접 타이핑했으므로 `[serve].to`/`[reverse].controller`가 무엇이든 이 실행은 인바운드로 뜨고, 그 경로에서는 `config_serve_to_conflict`로 인한 `CONFIG_ERROR`가 나타날 수 없다. Windows에서는 숨김 `qsh reverse` alias와 같은 `UNSUPPORTED` 거부를 그대로 물려받는다 — 둘 다 같은 `run_reverse` 경로를 공유하기 때문이다(§6.13). 인바운드 `qsh serve` 자신은 이 거부를 갖지 않으며, `--to` 리터럴 자체의 대상 해석(`HOST_NOT_FOUND`/`INVALID_ARGUMENT`)이 이보다 먼저 실패할 수도 있다.
 - 시작 시 실제로 bind된 주소를 stderr에 출력한다. stdout은 §2.2 규칙에 따라 JSON 계약 전용이므로 여기서는 쓰지 않는다.
@@ -1249,7 +1252,7 @@ qsh doctor [host] --json
 | `qsh_path_shadowed` | warn | `$PATH`에서 지금 실행 중인 바이너리(`current_exe`)보다 앞서는 다른 `qsh` 실행파일이 있음 — 맨몸 `qsh`를 실행하면 그 다른 바이너리가 대신 뜬다 |
 | `config_unknown_key` | warn | `config.toml`에 `Config`가 모르는 키 경로가 있어 조용히 무시되고 있음(§2.3의 "알 수 없는 키는 오류 없이 무시된다" 계약 그대로 — `deny_unknown_fields`는 쓰지 않는다). 상한 키 이름 오타면 그 상한은 기본값으로 남는다. `detail`이 문제의 키 경로를 밝힌다 |
 | `trust_remove_scope` | info | `trust.toml`에 pin이 하나라도 있으면 상시 노출되는 고지 — `trust remove`의 유효 범위(§6.11)를 다시 알려준다: 제거는 다음 handshake부터만 적용되고, 이미 확립된 연결은 협상된 권한 전체를 연결이 끊길 때까지 유지한다 |
-| `service_not_registered` | info | 이 머신에서 추론한 run mode(`listen`/`reverse`/`serve`, 우선순위 `[listen]` > `[serve].to` > 구 `[reverse].controller` > `serve`)에 대응하는 플랫폼 서비스 유닛이 등록돼 있지 않음 — macOS는 `~/Library/LaunchAgents/io.qsh.<mode>.plist`, Linux는 `~/.config/systemd/user/qsh-<mode>.service`를 확인한다(Windows 등 다른 플랫폼에서는 뜨지 않는다). `qsh service install`은 아직 없으므로 `docs/deploy/service.md`의 수동 유닛 예시를 따르라고 안내한다 |
+| `service_not_registered` | info | 이 머신에서 추론한 run mode(`listen`/`reverse`/`serve`, 우선순위 `[listen]` > `[serve].to` > 구 `[reverse].controller` > `serve`)에 대응하는 플랫폼 서비스 유닛이 등록돼 있지 않음 — macOS는 `~/Library/LaunchAgents/io.qsh.<mode>.plist`, Linux는 `~/.config/systemd/user/qsh-<mode>.service`를 확인한다(Windows 등 다른 플랫폼에서는 뜨지 않는다). `qsh service install`(§6.18)로 유닛을 생성하고 등록하라고 안내한다 |
 | `systemd_linger_disabled` | warn | Linux에서만, 그리고 해당 mode의 유닛이 이미 등록된 경우에만 도달한다 — `/var/lib/systemd/linger/$USER` 파일 존재 여부만 읽는다(subprocess 없음). 못 읽으면 "unknown"으로 취급해 finding을 내지 않는다 |
 | `launchagent_session_scoped` | warn | macOS에서만, 해당 mode의 LaunchAgent가 등록돼 있으면 무조건 뜨는 구조적 고지 — 사용자 LaunchAgent는 로그인 세션 안에서만 돌고 로그아웃하면 멈춘다. headless 대안은 root LaunchDaemon(out of scope)뿐이다 |
 | `bindv6only_blocks_ipv4` | warn | 유효 bind 주소가 IPv6 wildcard이고 이 OS가 새 dual-stack 소켓을 기본으로 `IPV6_V6ONLY`로 여는 경우 — `Listener::bind`는 `dual_stack_v6=false`로 열어 서버 쪽이 명시적으로 풀지 않으므로, 그런 OS 기본값에서는 `[::]:4433` listener가 IPv4 peer를 조용히 거부한다 |
@@ -1261,6 +1264,106 @@ qsh doctor [host] --json
 **연결성 진단의 우선순위 규칙.** 한 probe 실패는 항상 code 하나만 낸다: probe 대상이 outbound controller(`[serve].to`, 없으면 구 `[reverse].controller`)면 결과와 무관하게 `controller_unreachable`이고, `host` 인자로 준 일반 대상이면 침묵 타임아웃은 `udp_egress_blocked`, OS의 즉시 거부(경로 없음)는 `no_route`다 — 세 code가 한 실패에 동시에 나오는 일은 없다.
 
 **`--fail-on` 플래그는 아직 없다.** severity 임계값 이상일 때 CI 게이트용 nonzero exit을 내는 옵션은 향후 additive 확장 후보이며, 지금은 구현하지 않는다 — 위 exit code 문단대로 지금은 findings의 존재와 무관하게 항상 `0`이다.
+
+### 6.18 `qsh service` — 플랫폼 서비스 유닛 관리 (ROADMAP M9 (g))
+
+```bash
+qsh service install [--json]
+qsh service uninstall [--json]
+qsh service status [--json]
+```
+
+세 subcommand 모두 인자를 받지 않는다. dotted 이름은 `service.install`·
+`service.uninstall`·`service.status`이며(§2.4), 셋 다 §2.5의 "인가 불요" 행이
+명시하듯 local operation이라 원격 peer가 요청할 수 없다 — `service.install`은
+그럼에도 이 머신 상태를 바꾸므로 §2.5 post-table 문단이 `trust.rename`과 나란히
+드는 두 번째 예시다.
+
+**대상 run mode.** 세 op 모두 관리하는 대상은 이 머신에서 추론한 run mode 하나뿐이다
+— `doctor.run`의 `service_not_registered`(§6.17)와 같은 추론 규칙, 같은
+우선순위(`[listen]` 존재 > `[serve].to` 설정 > 구 `[reverse].controller` 설정 >
+어느 쪽도 없으면 `serve`)를 그대로 재사용한다. `[serve].to`와 구
+`[reverse].controller`가 둘 다 설정돼 있고 값이 다르면 §6.17의
+`config_serve_to_conflict`와 동일하게 `CONFIG_ERROR`로 fail closed하고 아무것도
+쓰지 않는다(ADR-0012 결정 5) — 두 값이 같으면 정상 진행한다. 이 순서는 세 op
+모두에 똑같이 적용되므로, 읽기만 하는 `status`도 예외가 아니다: 같은 충돌
+상태에서는 `install`/`uninstall`과 똑같이 `CONFIG_ERROR`를 반환한다.
+
+**유닛 경로와 `<mode>` 토큰.** macOS는
+`~/Library/LaunchAgents/io.qsh.<mode>.plist`, Linux(systemd user unit)는
+`~/.config/systemd/user/qsh-<mode>.service`다. `<mode>`는 추론한 `serve`/
+`listen`/`reverse` 그대로다. `reverse` 유닛은 파일 이름과 label만 `reverse`를
+쓰고, 실제로 실행하는 인자는 숨김 alias `qsh reverse`가 아니라 `qsh serve --to
+<controller>`다(§6.13) — 유닛 자신의 argv는 항상 고정이며 `--bind`·`--name`·
+config·verbosity 플래그가 끼어들 여지가 없고, qsh는 이 경로에서도 자기 자신을
+데몬화하지 않는다(§6.12의 "Foreground 전용" 원칙 그대로 — 서비스 매니저가
+프로세스를 띄우고 재시작을 맡는다).
+
+**`status`는 존재 여부만 본다.** 유닛 파일이 그 경로에 있는지만 확인하고,
+`launchctl print`/`systemctl --user status`가 보여주는 활성화·실행 상태는
+보지 않는다 — 그 활성화 단계는 `docs/deploy/service.md`의 `launchctl bootstrap
+gui/$UID …`(macOS)·`systemctl --user enable --now …`(Linux) 레시피를 손으로
+실행해야 한다. `status`와 `uninstall`도 `install`과 똑같이 "오늘" 추론한 run
+mode만 본다 — mode가 바뀌면(예: `config.toml`을 고쳐 `[listen]`을 추가) 세 op
+모두 새 mode의 경로로 옮겨간다.
+
+**`UNSUPPORTED` — macOS/Linux 외 모든 대상.** 다른 어떤 것도 읽거나 쓰기 전에
+가장 먼저 판정되며, 문면은 다음을 그대로 쓴다:
+
+> `qsh service` manages user service units for launchd (macOS) and systemd (Linux) only; unit installation on this platform is P1 and not implemented. Nothing was written. `docs/deploy/service.md` has a hand-written unit for each supported manager.
+
+**`acl.toml`을 쓰지 않는다.** `service install`은 유닛 파일만 쓰고 인가 정책에는
+관여하지 않는다(ADR-0017 결정 1, `docs/adr/0017-acl-toml-not-written.md:18`) —
+새로 등록한 유닛이 실제로 뜬 뒤 원격 peer를 받으려면 `acl.toml`은 여전히 따로
+손으로 갖춰야 한다.
+
+**바이너리 경로를 다시 잡는다.** 재실행할 때마다 `install`은 그 시점의
+`current_exe()`를 다시 읽어 유닛에 고정한다 — 바이너리를 옮긴(`brew upgrade`로
+Cellar 경로가 바뀌는 등) 뒤 `qsh service install`을 다시 실행하면 유닛의 경로가
+새 위치로 갱신된다. 절대 경로는 그대로 쓰고(symlink를 `canonicalize`하지 않는다),
+상대 경로일 때만 절대 경로로 정규화한다. 이 "symlink 보존" 성질은 macOS의
+`current_exe()` 구현에 한정된다 — Linux는 `readlink("/proc/self/exe")`로 커널이
+이미 완전히 풀어준 경로를 돌려주므로, 심볼릭 링크로 설치된 Linux 바이너리는
+애초에 그 대상 경로가 유닛에 고정된다. 두 플랫폼 모두 바이너리를 옮기거나
+가리키는 대상을 바꾼 뒤 `qsh service install`을 다시 실행하는 것이 갱신 경로다.
+
+**단위 디렉터리 권한.** `install`은 유닛 파일의 부모 디렉터리(macOS
+`~/Library/LaunchAgents`, Linux `~/.config/systemd/user`)와, macOS에서는
+`~/Library/Logs/qsh`도 없을 때만 만든다 — 이미 있는 디렉터리의 모드는 절대
+건드리지 않는다(`~/Library/LaunchAgents`는 다른 애플리케이션의 LaunchAgent도
+함께 담는, qsh가 소유하지 않는 디렉터리이기 때문이다). 유닛 파일 자체는 항상
+0600으로 쓴다.
+
+세 op의 `data`는 각각 `ServiceInstallData`/`ServiceUninstallData`/
+`ServiceStatusData`(`crates/qsh-proto/src/types/service.rs`)다:
+
+```json
+{
+  "schema": "qsh.cli/v1",
+  "request_id": "01K0EXAMPLE",
+  "command": "service.install",
+  "ok": true,
+  "data": {
+    "manager": "launchd",
+    "mode": "serve",
+    "path": "/Users/YOU/Library/LaunchAgents/io.qsh.serve.plist",
+    "created": true
+  }
+}
+```
+
+`manager`는 `"launchd"`/`"systemd"`(cfg만으로 결정, 프로브 없음). `mode`는 위에서
+추론한 `<mode>` 토큰. `path`는 그 유닛의 절대 경로. `created`(install)는 이번
+호출 **전에** 그 경로가 없었는지만 보고하며, `install`은 매번 다시 렌더링해
+덮어쓴다 — 이미 있어도 `created: false`로 성공하는 것은 손으로 고친 유닛을
+복구하는 경로다. `removed`(uninstall)는 `trust.remove`와 같은 관례로, 유닛이
+이미 없으면 오류가 아니라 `removed: false`로 성공한다. `installed`(status)는
+`path.exists()` 그대로다.
+
+§6.12의 "Foreground 전용" 원칙과 이 절의 관계: `qsh service install`이 만드는
+것은 그 foreground 프로세스를 대신 실행해 주는 서비스 유닛이지, qsh 자신의
+데몬화가 아니다 — qsh 바이너리 자체는 이 경로에서도 재실행·백그라운드 전환을
+전혀 하지 않는다.
 
 ## 7. Human interactive mode
 

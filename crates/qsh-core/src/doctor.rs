@@ -368,15 +368,15 @@ pub const TRUST_REMOVE_SCOPE: Diagnostic = Diagnostic {
 /// `UNSUPPORTED`/P1 there, so flagging its absence would be noise for a
 /// thing the platform cannot do.
 ///
-/// `qsh service install` does not exist yet (ROADMAP M9 (g)) — `remedy` points
-/// at the manual unit in `docs/deploy/service.md` instead of a command
-/// that would not run, and says the installer is coming so this finding
-/// is not a dead end.
+/// `qsh service install` (`docs/CLI.md` §6.18) writes and registers the
+/// unit for this machine's inferred run mode; `remedy` points at it and at
+/// the activation step, since creating the unit alone does not start
+/// anything.
 pub const SERVICE_NOT_REGISTERED: Diagnostic = Diagnostic {
     id: DiagnosticId::ServiceNotRegistered,
     code: "service_not_registered",
     message: "No platform service unit is registered for this machine's inferred run mode. Until one is, this mode only runs in the foreground; it does not survive logout, reboot, or a crash.",
-    remedy: "`qsh service install` does not exist yet — for now, follow docs/deploy/service.md's manual unit example to run this mode unattended.",
+    remedy: "Run `qsh service install` to write this mode's unit, then activate it with `launchctl bootstrap gui/$UID …` (macOS) or `systemctl --user enable --now …` (Linux) — docs/deploy/service.md has both.",
 };
 
 /// `docs/ROADMAP.md` M9 (h), `docs/CLI.md` §6.17: Linux only, and only
