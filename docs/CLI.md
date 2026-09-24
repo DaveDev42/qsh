@@ -1,6 +1,6 @@
 # QSH CLI and JSON Contract
 
-**상태:** Draft v0.11 (M9 사람용 표면 — `qsh serve --to`(구 표기 `qsh reverse`, ADR-0012)·`qsh pair invite|accept --as`(구 `qsh trust invite/accept`)·`qsh identity export`/`trust add --cert-file`/`trust add-ca`(ADR-0013)·`trust rename`·`qsh service install|uninstall|status`(§6.18)·peer 주소의 포트 기본값 4433(ADR-0014)·`-D`(`tunnel.dynamic`, ADR-0019/0020)·doctor 22종(M9가 8종 추가 — 범위 (h)의 7종 + `host_pinned_without_address`)이 §2.4·§2.5·§6.1·§6.9·§6.11·§6.13·§6.17·§6.18에 반영됨. 기존 fixture 중 값-보유 golden `capabilities.json` 한 줄만 `dial-filter.v1` 추가로 재생성됐고(94ad639), wire는 `StreamHeader` 필드 5(`deny_host_local`) 하나가 capability 뒤에 additive로 붙었다 — 그 외 fixture·wire 무변경, 신규 op 7종 전부 additive; v0.10 = M3 Step 8 — 역방향 위 resume: §6.4 recovery 진단의 `registration_wait_ms`가 실제로 채워짐(정방향 `0`, 역방향은 재등록 대기 시간) — `recovery` 값 집합은 무변경, 필드는 M2 세 필드 뒤에 additive로 붙는다; v0.9 = M3 Step 7 — 대화형 attach(`qsh [user@]host`/`qsh attach`)가 역방향 등록 host를 향해서도 §6.13의 `LOCAL_CONTROL`/`LOCAL_STREAM` 경로를 타도록 landing — §6.13 갱신(더 이상 forward 전용이 아님, 그리고 역방향 leg에는 reconnect/recovery가 없다는 점 명시); v0.8 = M3 Step 1 — `Host`의 `state`/`device_id` 값 어휘 확정과 역방향 등록 ACL 매핑(§2.5·§5)·`host.list`/`host.get` 데이터 소스(§6.1)·recovery 진단의 `registration_wait_ms`(§6.4)·신규 §6.13 `qsh listen`/`qsh reverse` 계약 추가; v0.7 = M2 Step 7 — `session.attach`는 resume credential을 **반드시** 요구하며 그 실패는 항상 non-distinguishing `AUTH_FAILED`임을 §6.3·§6.4에 명문화; v0.6 = `session read --follow` 출력 형태와 `--wait` 하한 명문화, v0.5 = M2 계약 확정, v0.4 = M1 구현과 동기화)  
+**상태:** Draft v0.11 (M9 사람용 표면 — `qsh serve --to`(구 표기 `qsh reverse`, ADR-0012)·`qsh pair invite|accept --as`(구 `qsh trust invite/accept`)·`qsh identity export`/`trust add --cert-file`/`trust add-ca`(ADR-0013)·`trust rename`·`qsh service install|uninstall|status`(§6.18)·peer 주소의 포트 기본값 4433(ADR-0014)·`-D`(`tunnel.dynamic`, ADR-0019/0020)·doctor 22종(M9가 8종 추가 — 범위 (h)의 7종 + `host_pinned_without_address`)이 §2.4·§2.5·§6.1·§6.9·§6.11·§6.12·§6.13·§6.17·§6.18·§10에 반영됨. 기존 fixture 중 값-보유 golden `capabilities.json` 한 줄만 `dial-filter.v1` 추가로 재생성됐고(94ad639), wire는 `StreamHeader` 필드 5(`deny_host_local`) 하나가 capability 뒤에 additive로 붙었다 — 그 외 fixture·wire 무변경, 신규 op 7종 전부 additive; v0.10 = M3 Step 8 — 역방향 위 resume: §6.4 recovery 진단의 `registration_wait_ms`가 실제로 채워짐(정방향 `0`, 역방향은 재등록 대기 시간) — `recovery` 값 집합은 무변경, 필드는 M2 세 필드 뒤에 additive로 붙는다; v0.9 = M3 Step 7 — 대화형 attach(`qsh [user@]host`/`qsh attach`)가 역방향 등록 host를 향해서도 §6.13의 `LOCAL_CONTROL`/`LOCAL_STREAM` 경로를 타도록 landing — §6.13 갱신(더 이상 forward 전용이 아님, 그리고 역방향 leg에는 reconnect/recovery가 없다는 점 명시); v0.8 = M3 Step 1 — `Host`의 `state`/`device_id` 값 어휘 확정과 역방향 등록 ACL 매핑(§2.5·§5)·`host.list`/`host.get` 데이터 소스(§6.1)·recovery 진단의 `registration_wait_ms`(§6.4)·신규 §6.13 `qsh listen`/`qsh reverse` 계약 추가; v0.7 = M2 Step 7 — `session.attach`는 resume credential을 **반드시** 요구하며 그 실패는 항상 non-distinguishing `AUTH_FAILED`임을 §6.3·§6.4에 명문화; v0.6 = `session read --follow` 출력 형태와 `--wait` 하한 명문화, v0.5 = M2 계약 확정, v0.4 = M1 구현과 동기화)  
 **대상:** QSH MVP  
 **Canonical interface:** `qsh` CLI
 
@@ -1234,7 +1234,7 @@ qsh doctor [host] --json
 - `detail`: 무엇이 관측됐는지에 대한 사람이 읽을 수 있는 설명(해석된 경로, 관측된 만료 시각 등). 시크릿·PTY/명령 payload는 절대 담지 않는다(`CLAUDE.md`의 보안 기본값).
 - `remedy`: 실행 가능한 다음 행동 한 줄. 없으면 필드 자체가 생략된다(additive-optional, `CapabilitiesData.host`와 같은 규율).
 
-**22종 진단 코드** (재사용 5종·신설 17종 — `PLAN.md` M7 §4.1 #5가 확정한 잠금 어휘, `config_unknown_key`는 M8 Step 4b가, 나머지 8종은 M9가 더했다 — 범위 (h)의 7종 + `host_pinned_without_address`):
+**22종 진단 코드** (재사용 5종·신설 17종 — `EXPECTED_DOCTOR_CODES`(`crates/qsh-core/src/doctor.rs`)가 확정한 잠금 어휘, `config_unknown_key`는 `6d8de8c`가, 나머지 8종은 M9가 더했다(`963809e`+`699af37`) — 범위 (h)의 7종 + `host_pinned_without_address`):
 
 | `code` | `status` | 무엇을 점검하는가 |
 |---|---|---|
@@ -1260,6 +1260,12 @@ qsh doctor [host] --json
 | `acl_ca_auth_path_missing` | warn | `trust.toml`에 `[[ca]]`가 하나 이상 있는데 `acl.toml` 어디에도 `auth_path = "ca"` 행이 없음 — peer 단위가 아니라 파일 전체 수준의 거친 검사다(CA 인증 principal은 `device:<id>` 모양이라 미리 열거할 수 없다). `acl_principal_unmatched`와 달리 warn이다: CA는 준비됐지만 아직 아무것도 그것에 의존한다고 증명되지 않은 잠재적 공백이기 때문이다(`docs/adr/0017-acl-toml-not-written.md` 결정 2) |
 | `host_pinned_without_address` | warn | `host_list`가 아는 이름(trust pin 또는 `hosts.toml` 항목)에 두 출처 어디서도 주소가 없고 현재 유지 중인 reverse 등록(live·stale 불문)도 없음 — `--address` 없이 `--fingerprint`만으로 pin해 아직 phone-home하지 않은 순정 reverse 대상은 정상적인 일시 상태이므로 error가 아니라 warn이다. 그 이름의 reverse 등록이 하나라도 있으면(live든 stale이든) 뜨지 않는다 |
 | `config_serve_to_conflict` | error | `[serve].to`와 구 `[reverse].controller`가 둘 다 설정돼 있고 값이 다름 — 그 상태에서 `qsh serve`/`qsh service install`은 `CONFIG_ERROR`로 fail closed한다(ADR-0012 결정 5). doctor는 exit `0`을 유지한 채 finding으로만 알린다. 두 값이 같으면 통과이므로 뜨지 않는다 |
+
+**`acl_ca_auth_path_missing` 문안.** 이 진단의 정본 문안은 `qsh_core::doctor::ACL_CA_AUTH_PATH_MISSING`(`crates/qsh-core/src/doctor.rs`, ADR-0017 결정 2)이고, 그 `message`/`remedy` 두 필드는 각각 다음과 같다 — 실제 렌더되는 `detail`은 이 `message` 뒤에 `minimal example:` 블록을 덧붙인 값이다(`crates/qsh-core/src/ops/doctor.rs`의 `doctor_acl_findings`):
+
+  > trust.toml has a CA root, but no acl.toml row sets auth_path = "ca". Any peer authenticating via that CA is denied (default-deny) until one does.
+  >
+  > Add an [[acl]] row with auth_path = "ca" (ADR-0017), then restart serve/listen — acl.toml is only read once at process start.
 
 **연결성 진단의 우선순위 규칙.** 한 probe 실패는 항상 code 하나만 낸다: probe 대상이 outbound controller(`[serve].to`, 없으면 구 `[reverse].controller`)면 결과와 무관하게 `controller_unreachable`이고, `host` 인자로 준 일반 대상이면 침묵 타임아웃은 `udp_egress_blocked`, OS의 즉시 거부(경로 없음)는 `no_route`다 — 세 code가 한 실패에 동시에 나오는 일은 없다.
 
@@ -1313,7 +1319,7 @@ mode만 본다 — mode가 바뀌면(예: `config.toml`을 고쳐 `[listen]`을 
 > `qsh service` manages user service units for launchd (macOS) and systemd (Linux) only; unit installation on this platform is P1 and not implemented. Nothing was written. `docs/deploy/service.md` has a hand-written unit for each supported manager.
 
 **`acl.toml`을 쓰지 않는다.** `service install`은 유닛 파일만 쓰고 인가 정책에는
-관여하지 않는다(ADR-0017 결정 1, `docs/adr/0017-acl-toml-not-written.md:18`) —
+관여하지 않는다(ADR-0017 결정 1, `docs/adr/0017-acl-toml-not-written.md`) —
 새로 등록한 유닛이 실제로 뜬 뒤 원격 peer를 받으려면 `acl.toml`은 여전히 따로
 손으로 갖춰야 한다.
 
