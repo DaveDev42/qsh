@@ -162,7 +162,7 @@ qsh -D 1080 dave@server   # SOCKS5 dynamic forwarding (ADR-0019)
 - streaming file copy
 - 인증서 rotation과 revocation UX
 - Windows client
-- background service 설치와 자동 시작
+- background service 설치 — ROADMAP M9 (g)로 당겨 `qsh service install|uninstall|status`(macOS user LaunchAgent / Linux systemd user unit, `docs/CLI.md` §6.18)를 v1에 넣는다. 자동 시작은 유닛의 `KeepAlive`/`Restart=always`까지이고, 로그인 세션 밖 상시 기동(systemd linger, macOS LaunchDaemon)은 v1 범위 밖이다. `qsh doctor`가 `systemd_linger_disabled`·`launchagent_session_scoped`로 그 한계를 알린다
 - 세션 및 audit 관리 개선
 
 ### P2 — 선택 기능
@@ -249,13 +249,14 @@ qsh sessions [host]             세션 조회
 qsh attach <session-ref>        세션 attach
 qsh tunnel ...                  터널 관리
 qsh identity export             이 장치 인증서를 PEM으로 출력
-qsh trust ...                   신뢰 관리
+qsh trust ...                   신뢰 관리(add --cert-file·add-ca·rename 포함)
 qsh pair invite|accept          pairing으로 새 신뢰 항목 생성(구 qsh trust invite/accept, 숨김 alias로 남음)
 qsh cert ...                    인증서 관리
 qsh acl ...                     ACL 관리와 검사
 qsh <command> --json            machine-readable result
 qsh schema --json               지원 schema와 capability 조회
 qsh doctor                      연결·인증·정책 진단
+qsh service install|uninstall|status  플랫폼 서비스 유닛 관리(launchd·systemd user)
 ```
 
 SSH 사용자에게 익숙한 `-L`, `-R`, `-D`, `-t`, `-T`, `-v`는 의미가 충돌하지 않는 범위에서 유지한다. `-D`(SOCKS5 dynamic forwarding)는 client 쪽 loopback listener가 SOCKS5 CONNECT마다 host에 `TCP_CONNECT` 스트림을 하나씩 열고, host는 그 스트림을 `forward.local`로 인가한다(ADR-0019).
@@ -335,7 +336,7 @@ Relay는 payload와 endpoint private key를 볼 수 없어야 한다. 이를 위
 - 내장 MCP adapter(`qsh mcp`)는 M8 Step 6에서 철회했다(ADR-0011) — 에이전트 연동은 JSON CLI 하나로 통일한다.
 - Relay는 향후 별도 self-hosted/managed 제품으로 개발한다.
 - Transport protocol은 HTTP/3가 아닌 custom QUIC application protocol(`qsh/1` ALPN)로 확정한다. QSH에는 HTTP semantics가 필요 없고, custom frame layer는 P1 TCP fallback과도 동일하게 동작한다.
-- Pairing 기본 UX는 일회용 invite code(TLS-exporter 기반 channel binding, 10분 TTL)로 하며, fingerprint 방식은 Ansible/cloud-init 등 스크립트 provisioning용 fallback으로 유지한다. QR pairing은 P1이다.
+- Pairing 기본 UX는 일회용 invite code(TLS-exporter 기반 channel binding, 10분 TTL)로 하며, fingerprint 방식은 Ansible/cloud-init 등 스크립트 provisioning용 fallback으로 유지한다. QR pairing은 P1이다. `qsh pair accept`의 `code`는 M9에서 선택 인자가 됐다(ROADMAP M9 (j), ADR-0013 결정 8): TTY면 에코 없는 프롬프트로 받고, 파이프 입력은 `--code-stdin`으로 주며, `--json`/`--jsonl`에서는 프롬프트 없이 `INVALID_ARGUMENT`다. 계약은 `docs/CLI.md` §6.11.
 - Detached PTY 세션은 MVP에서 `qsh serve` 프로세스 내부(in-listener)에 둔다. 단 `SessionBackend` trait와 per-process UDS 제어 소켓 seam을 미리 마련해 P1에서 별도 supervisor로 drop-in 교체 가능하게 한다.
 - Replay buffer는 memory-only ring(세션당 기본 8MB)으로 하며 `ReplayStore` trait 뒤에 격리한다. Encrypted disk spool은 P1 이후 opt-in으로 검토한다.
 - TCP fallback은 P1으로 유지한다. 단 모든 프로토콜 코드를 transport-agnostic framing(`Transport`/`StreamMux` trait) 위에 작성하고, `qsh doctor`의 UDP reachability probe는 P0에 포함한다.

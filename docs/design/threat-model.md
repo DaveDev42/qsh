@@ -61,11 +61,11 @@ ReplayRing은 자산이면서 그 자체가 통제다. PTY 평문 output이 프�
 
 | 진입점 | 신뢰 수준 | 비고 |
 |---|---|---|
-| `qsh serve` accept loop | 미인증 UDP | 노출 포트는 하나뿐이다 — 기본 `[::]:4433`(`crates/qsh-core/src/serve.rs:21`, `docs/adr/0014-address-default-port.md:8`). ADR-0014는 아직 `상태: 제안됨`(`:4`)이고 peer 주소 쪽 정규화는 M9 소관이라, 여기 적는 사실은 "포트 하나, 기본 4433"까지다 |
-| `qsh listen` / `qsh reverse` accept | 미인증 UDP | **pairing evaluator를 attach하지 않는다** — 역방향 conduit은 사전 pin/CA로만 신뢰를 세운다(`protocol.md:433`) |
+| `qsh serve` accept loop | 미인증 UDP | 노출 포트는 하나뿐이다 — 기본 `[::]:4433`(`crates/qsh-core/src/serve.rs:21`, `docs/adr/0014-address-default-port.md:8`). ADR-0014는 `상태: 승인됨`(`:4`)이고, peer 주소의 포트 생략은 파서·조회 양쪽에서 4433으로 채운다 — 파일은 쓰지 않는다(`docs/CLI.md` §6.11) |
+| `qsh listen` / `qsh serve --to`(구 표기 `qsh reverse`) accept | 미인증 UDP | **pairing evaluator를 attach하지 않는다** — 역방향 conduit은 사전 pin/CA로만 신뢰를 세운다(`protocol.md` §15.8) |
 | localctl UDS | same-uid 로컬 | `<pid>.sock`, 디렉터리 0700, 소켓 파일 0600(`crates/qsh-core/src/localctl/daemon.rs:144`) |
 | CLI 전체 | 로컬 사용자 | 모든 명령이 `Ops`를 통과한다 |
-| `qsh trust invite`의 경로 질의 | 로컬 커널 (나가는 바이트 0) | 소스 주소를 묻기 위해 문서용 예약 주소(RFC 5737 `192.0.2.1`, RFC 3849 `2001:db8::1`)로 UDP `connect`만 하고 전송은 하지 않는다 — 와이어에 패킷이 없으므로 원격 관찰자에게는 표면이 아니고, 대기가 없으므로 대화형 명령을 막지도 않는다. 결과는 human stdout 전용이고 machine mode는 질의 자체를 하지 않는다. `xtask arch`의 디렉터리 스코프 금지(`crates/qsh-core/src/trust/invite_address/`)가 이 전제를 기계로 강제하고, machine mode 불변식은 별도로 `route::observation_count`(관측 카운터)가 `qsh-cli`의 실제 dispatch arm 테스트로 고정한다 |
+| `qsh pair invite`(구 표기 `qsh trust invite`)의 경로 질의 | 로컬 커널 (나가는 바이트 0) | 소스 주소를 묻기 위해 문서용 예약 주소(RFC 5737 `192.0.2.1`, RFC 3849 `2001:db8::1`)로 UDP `connect`만 하고 전송은 하지 않는다 — 와이어에 패킷이 없으므로 원격 관찰자에게는 표면이 아니고, 대기가 없으므로 대화형 명령을 막지도 않는다. 결과는 human stdout 전용이고 machine mode는 질의 자체를 하지 않는다. `xtask arch`의 디렉터리 스코프 금지(`crates/qsh-core/src/trust/invite_address/`)가 이 전제를 기계로 강제하고, machine mode 불변식은 별도로 `route::observation_count`(관측 카운터)가 `qsh-cli`의 실제 dispatch arm 테스트로 고정한다 |
 | `config.toml` / `trust.toml` / `acl.toml` / `hosts.toml` | 로컬 파일 | 파싱 실패는 fail-closed(`architecture.md:87`) |
 | invite code 입력 | 사람이 옮긴 문자열 | 20바이트 CSPRNG → Crockford Base32, `crates/qsh-proto/src/pairing.rs` |
 | cert 파일 교환 | 로컬 파일 | ADR-0013 |
@@ -211,10 +211,10 @@ M8 Step 7 착수 시점에 다섯 개를 열어 두고 조사했다. 넷은 닫�
 | h2 | listener를 상대로 한 pairing이 미정 | ADR-0015:16 "미정" |
 | h3 | CSR 기반 발급이 없어, 여러 장비를 한 CA로 서명하려면 CA 개인키를 그 장비 모두에 복제해야 한다 | ADR-0016:10,16; ADR-0013:31 |
 | h4 | CA rotation·revocation 설계가 없다. 단일 root, intermediate 없음 | ADR-0008:34,41 |
-| h5 | `qsh trust remove`가 기존 연결에 소급되지 않는다. 제거된 peer는 그 연결이 끊길 때까지 협상된 권한 전체를 유지한다 | `README.md:563-572`. 강제 종료는 P1 |
-| h6 | `qsh trust accept`의 양쪽 pin이 원자적이지 않다. 호스트 쪽 pin과 invite 소비가 먼저 일어나고 클라이언트 로컬 pin이 나중이라, 그 사이 로컬 이름 충돌이 나면 invite는 이미 소비된 채 남는다 | `README.md:573-581`; `protocol.md` §15.6 |
-| h7 | 이미 pin된 상대의 재페어링이 불가능하다. 새 invite로도 풀리지 않고 복구 경로는 호스트의 `trust remove` 뿐이다 | `README.md:582-588`; `protocol.md:417` |
-| h8 | 역방향 conduit에 pairing evaluator가 붙어 있지 않다. 사전 pin/CA로만 신뢰를 세우고, 그것이 손상됐을 때의 복구 절차 문서가 없다 | `protocol.md:433`; ADR-0015 미정 |
+| h5 | `qsh trust remove`가 기존 연결에 소급되지 않는다. 제거된 peer는 그 연결이 끊길 때까지 협상된 권한 전체를 유지한다 | README "Known limitations". 강제 종료는 P1 |
+| h6 | `qsh pair accept`(구 표기 `qsh trust accept`)의 양쪽 pin이 원자적이지 않다. 호스트 쪽 pin과 invite 소비가 먼저 일어나고 클라이언트 로컬 pin이 나중이라, 그 사이 로컬 이름 충돌이 나면 invite는 이미 소비된 채 남는다 | README "Known limitations"; `protocol.md` §15.6 |
+| h7 | 이미 pin된 상대의 재페어링이 불가능하다. 새 invite로도 풀리지 않고 복구 경로는 호스트의 `trust remove` 뿐이다 | README "Known limitations"; `protocol.md` §15.6 |
+| h8 | 역방향 conduit에 pairing evaluator가 붙어 있지 않다. 사전 pin/CA로만 신뢰를 세우고, 그것이 손상됐을 때의 복구 절차 문서가 없다 | `protocol.md` §15.8; ADR-0015 미정 |
 | h9 | homoglyph 미탐지. 서로 다른 코드 포인트가 같은 글리프로 렌더되는 이름을 `validate_device_name`이 잡지 않는다 | `protocol.md:409`; `crates/qsh-proto/src/wire.rs:385-392`. 실제 방어선은 fingerprint 병기 대조 |
 | h10 | `acl.toml` hot reload 없음. 편집은 다음 `serve`/`listen`/`reverse` 시작부터 적용된다 | `README.md:539-541`; ADR-0017 |
 | h11 | 터널에는 replay ring이 없다. connection 손실 시 in-flight TCP 연결은 재생되지 않고 깨끗이 끊긴다 | ADR-0018:14; `README.md:523-538` |

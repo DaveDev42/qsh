@@ -108,6 +108,8 @@ macOS/Linux 동일 (ssh 스타일 예측 가능성; `~/Library/…` 미사용):
 $XDG_RUNTIME_DIR/qsh/     # (없으면 state 하위 run/, 0700) per-process UDS: <pid>.sock (localctl, M3 도입 — 첫 소비자 2종은 `qsh hosts`와 역방향 attach, protocol.md §11-3)
 ```
 
+qsh가 스스로 위치를 정해 이 트리 밖에 쓰는 파일은 `qsh service install`의 유닛 파일과, macOS에서는 그 유닛이 가리키는 `~/Library/Logs/qsh/`(없을 때만 `install`이 만들고, LaunchAgent의 `StandardOutPath`/`StandardErrorPath`가 그리로 쓴다)뿐이다(`~/Library/LaunchAgents/io.qsh.<mode>.plist`, `~/.config/systemd/user/qsh-<mode>.service`; `docs/CLI.md` §6.18, `docs/deploy/service.md`). `qsh identity export --out <path>`는 별도다 — 그 경로는 운영자가 직접 고른다.
+
 **런타임 소켓 discovery.** 한 머신에 `qsh listen` 데몬이 여러 개 떠 있을 수 있으므로(프로세스마다 `<pid>.sock`), CLI는 `$XDG_RUNTIME_DIR/qsh/*.sock`을 pid 오름차순으로 순서대로 시도한다: connect가 거부되는 stale 소켓은 unlink하고 다음으로 넘어가며, 요청한 host를 모르는 데몬은 `HOST_NOT_FOUND`로 답해 다음 소켓으로 넘어가게 한다. 전부 실패하면 `HOST_NOT_FOUND`다(구현은 M3 Step 5).
 
 ## 8. Crate 선정 (버전은 lock 시점 재확인)
