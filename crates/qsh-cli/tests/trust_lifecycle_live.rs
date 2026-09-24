@@ -337,3 +337,132 @@ fn trust_add_rebinds_a_known_identity_to_the_hosts_new_address() {
     )
     .expect("exec.run must succeed at the rebound address");
 }
+
+/// **`trust rename` live counterpart of `trust_remove_on_a_running_daemon_
+/// rejects_the_next_handshake_without_a_restart`.** `docs/CLI.md` §6.11:
+/// a rename takes effect at the next handshake with no restart required —
+/// `SharedTrustStore` re-reads `trust.toml` on content change exactly as
+/// it does for a removal, so the renamed peer's next connection is
+/// authenticated under its **new** principal name immediately. `acl.toml`
+/// has no hot reload (ADR-0012 결정 7), so its row still names the old
+/// alias: the handshake itself must succeed (never `AuthFailed` — the
+/// fingerprint is still pinned, only relabelled), and the op must be
+/// denied by ACL instead. A `PermissionDenied` here — not `AuthFailed`,
+/// not a silent success — is the proof that the rename's new name is
+/// already the one being matched, with no restart.
+#[test]
+fn trust_rename_takes_effect_on_the_next_handshake_without_a_restart() {
+    let client = Sandbox::new();
+    let (host, _serve, _host_fp) = start(&client);
+    let ops = client_ops(&client);
+
+    // Sanity: a fresh handshake, authorized under the pre-rename alias,
+    // succeeds before the rename.
+    ops.exec_run(
+        ExecRunReq {
+            host: HOST_ALIAS.to_string(),
+            argv: vec!["true".to_string()],
+            env: vec![],
+            timeout_ms: Some(10_000),
+        },
+        ExecStdin::Closed,
+    )
+    .expect("exec.run must succeed before trust rename");
+
+    let (code, renamed) = host.json(&["trust", "rename", CLIENT_ALIAS, "renamed-laptop", "--json"]);
+    assert_eq!(code, 0, "{renamed}");
+
+    // Same running `qsh serve` process (never restarted): the next fresh
+    // dial's handshake must still succeed (the fingerprint is still
+    // pinned, just under a new name) — only the *authorization* changes,
+    // because `acl.toml` still names the pre-rename alias.
+    let err = ops
+        .exec_run(
+            ExecRunReq {
+                host: HOST_ALIAS.to_string(),
+                argv: vec!["true".to_string()],
+                env: vec![],
+                timeout_ms: Some(10_000),
+            },
+            ExecStdin::Closed,
+        )
+        .expect_err("a renamed peer's next handshake must succeed but its op must be denied");
+    assert_eq!(
+        err.code,
+        ErrorCode::PermissionDenied,
+        "AuthFailed here would mean the rename broke the pin instead of \
+         just relabelling it; success here would mean the rename never \
+         took effect at all: {err:?}"
+    );
+}
+
+/// **The `acl.toml`-gap half (ADR-0012 결정 7), distinct from the test
+/// above.** Even if the operator immediately hand-edits `acl.toml` to add
+/// a row for the *new* name, the already-running `qsh serve` does not
+/// pick it up — `acl.toml` has no hot reload at all, unlike `trust.toml`.
+/// Proves the gap is about `acl.toml`'s own load-once design, not merely
+/// a timing race that a `poll_until` would eventually clear.
+#[test]
+fn renamed_principal_has_no_acl_row_until_restart() {
+    let client = Sandbox::new();
+    let (host, _serve, _host_fp) = start(&client);
+    let ops = client_ops(&client);
+
+    let (code, renamed) = host.json(&["trust", "rename", CLIENT_ALIAS, "renamed-laptop", "--json"]);
+    assert_eq!(code, 0, "{renamed}");
+
+    // The operator "fixes" acl.toml right away, naming the new alias.
+    let acl_path = host.config_dir().join("acl.toml");
+    let existing = std::fs::read_to_string(&acl_path).unwrap_or_default();
+    std::fs::write(
+        &acl_path,
+        format!(
+            "{existing}\n[[acl]]\nprincipal = \"device:renamed-laptop\"\nallow = [\"exec.run\"]\n"
+        ),
+    )
+    .expect("rewrite acl.toml with a row for the new name");
+
+    // Still the same running daemon, never restarted: the edit is inert.
+    let err = ops
+        .exec_run(
+            ExecRunReq {
+                host: HOST_ALIAS.to_string(),
+                argv: vec!["true".to_string()],
+                env: vec![],
+                timeout_ms: Some(10_000),
+            },
+            ExecStdin::Closed,
+        )
+        .expect_err("acl.toml has no hot reload — a post-start edit must not take effect");
+    assert_eq!(err.code, ErrorCode::PermissionDenied, "{err:?}");
+}
+
+/// **The `trust remove` survival test's `trust rename` counterpart.** An
+/// already-established connection keeps the authority it negotiated at
+/// open time straight through a rename of its own principal — the same
+/// live PTY session keeps writing and reading with no re-handshake.
+#[test]
+fn an_established_connection_keeps_its_authority_across_a_rename() {
+    let client = Sandbox::new();
+    let (host, _serve, _host_fp) = start(&client);
+    let ops = client_ops(&client);
+
+    let session_ref = open_shell(&ops);
+    let mut stream = attach(&ops, &session_ref);
+    stream
+        .write(b"printf 'BEFORE%s\\n' 1\n".to_vec())
+        .expect("write before rename");
+    read_until(&mut stream, "BEFORE1");
+
+    let (code, renamed) = host.json(&["trust", "rename", CLIENT_ALIAS, "renamed-laptop", "--json"]);
+    assert_eq!(code, 0, "{renamed}");
+
+    // The already-established connection must not notice: same stream,
+    // same negotiated principal, no re-handshake.
+    stream
+        .write(b"printf 'AFTER%s\\n' 1\n".to_vec())
+        .expect("write after rename");
+    read_until(&mut stream, "AFTER1");
+
+    stream.close();
+}

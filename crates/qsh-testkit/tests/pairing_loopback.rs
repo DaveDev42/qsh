@@ -45,7 +45,7 @@ async fn pairing_dod_success_pins_both_sides_of_the_wire_exchange() {
     let success = qsh_core::pairing::accept(&dialed.connection, "laptop", &secret)
         .await
         .expect("pairing exchange succeeds");
-    assert_eq!(success.peer_device_name, "host");
+    assert_eq!(success.pinned_name, "host");
 
     // Server-side effect: `Server::serve_pairing_connection` pinned the
     // initiator using this connection's own observed fingerprint.
@@ -184,7 +184,7 @@ async fn pairing_collision_fails_loudly_and_leaves_the_invite_unconsumed() {
     let retried = qsh_core::pairing::accept(&dialed2.connection, "laptop-2", &second_secret)
         .await
         .expect("the same invite is still redeemable after a collision");
-    assert_eq!(retried.peer_device_name, "host");
+    assert_eq!(retried.pinned_name, "host");
     assert_eq!(
         host.trust_snapshot().find("laptop-2").unwrap().fingerprint,
         impostor.fingerprint.to_string()
@@ -234,7 +234,7 @@ async fn pairing_rejects_a_control_character_initiator_device_name() {
     let retried = qsh_core::pairing::accept(&dialed2.connection, "laptop", &secret)
         .await
         .expect("the same invite is still redeemable after a rejected device name");
-    assert_eq!(retried.peer_device_name, "host");
+    assert_eq!(retried.pinned_name, "host");
     assert_eq!(
         host.trust_snapshot().find("laptop").unwrap().fingerprint,
         retry_identity.fingerprint.to_string()
@@ -300,4 +300,48 @@ async fn accept_rejects_a_rogue_responder_that_does_not_know_the_secret() {
     );
 
     rogue.await.expect("rogue responder task");
+}
+
+/// The frame-level counterpart of `docs/design/protocol.md` §15.6's
+/// "pin되는 이름 자체는 이 wire 교환과 별개의 축이다" claim, on the
+/// invite side: an invite minted with an `assigned_name` (`qsh pair invite
+/// --as`) never puts that name on the wire at all — the initiator's own
+/// `qsh_core::pairing::accept` call still builds its `PairingProof` from
+/// its real, self-asserted device name ("laptop"), exactly as
+/// `invite_with_assigned_name_at`'s doc promises. What actually moves the
+/// pin off that wire value is purely local to the responder: it resolves
+/// the invite record and pins the peer under `assigned_name`
+/// ("workbench") instead of the `PairingProof.device_name` it just
+/// received. A mutation that fed `assigned_name` into `PairingProof`
+/// construction, or that dropped the responder's substitution, both go
+/// red here — the former because "laptop" would appear pinned nowhere,
+/// the latter because "workbench" would.
+#[tokio::test(flavor = "multi_thread")]
+async fn invite_assigned_name_never_reaches_the_wire_proof() {
+    let host = PairingHarness::start().await;
+    let secret = host.invite_with_assigned_name_at(SystemTime::now(), Some("workbench".into()));
+    let laptop = make_identity();
+
+    let dialed = pairing_dialer(laptop.local.clone())
+        .dial(host.addr, "127.0.0.1")
+        .await
+        .expect("dial");
+    qsh_core::pairing::accept(&dialed.connection, "laptop", &secret)
+        .await
+        .expect("pairing exchange succeeds");
+
+    let snapshot = host.trust_snapshot();
+    assert_eq!(
+        snapshot.find("workbench").map(|p| p.fingerprint.clone()),
+        Some(laptop.fingerprint.to_string()),
+        "the host must pin under the invite's assigned_name"
+    );
+    assert!(
+        snapshot.find("laptop").is_none(),
+        "the wire-carried self-asserted device name must never itself \
+         become a pin when the invite carries an assigned_name"
+    );
+
+    dialed.connection.close(0, b"done");
+    host.shutdown().await;
 }

@@ -333,8 +333,8 @@ const OP_FACES: &[OpFace] = &[
         op: "trust.accept",
         marker: "TrustAcceptOp",
         renderer: "print_trust_accept",
-        cli_spelling: "qsh trust accept",
-        man_file: "qsh-trust-accept.1",
+        cli_spelling: "qsh pair accept",
+        man_file: "qsh-pair-accept.1",
     },
     OpFace {
         op: "trust.add",
@@ -354,8 +354,8 @@ const OP_FACES: &[OpFace] = &[
         op: "trust.invite",
         marker: "TrustInviteOp",
         renderer: "print_trust_invite",
-        cli_spelling: "qsh trust invite",
-        man_file: "qsh-trust-invite.1",
+        cli_spelling: "qsh pair invite",
+        man_file: "qsh-pair-invite.1",
     },
     OpFace {
         op: "trust.list",
@@ -370,6 +370,13 @@ const OP_FACES: &[OpFace] = &[
         renderer: "print_trust_remove",
         cli_spelling: "qsh trust remove",
         man_file: "qsh-trust-remove.1",
+    },
+    OpFace {
+        op: "trust.rename",
+        marker: "TrustRenameOp",
+        renderer: "print_trust_rename",
+        cli_spelling: "qsh trust rename",
+        man_file: "qsh-trust-rename.1",
     },
     OpFace {
         op: "tunnel.close",

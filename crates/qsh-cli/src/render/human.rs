@@ -13,7 +13,7 @@ use qsh_proto::{
     HostListData, IdentityExportData, IdentityInitData, SchemaData, Session, SessionCloseData,
     SessionEvent, SessionListData, SessionOpenData, SessionResizeData, SessionWriteData,
     TrustAcceptData, TrustAddCaData, TrustAddData, TrustInviteData, TrustListData, TrustPeer,
-    TrustRemoveData, Tunnel, TunnelCloseData, TunnelListData, VersionData,
+    TrustRemoveData, TrustRenameData, Tunnel, TunnelCloseData, TunnelListData, VersionData,
 };
 
 use crate::stderr_note;
@@ -285,7 +285,51 @@ pub fn print_trust_remove(data: &TrustRemoveData) -> io::Result<()> {
     }
 }
 
-/// Print the outcome of `qsh trust invite` (ADR-0002, `docs/CLI.md` §6.11).
+/// Print the outcome of `qsh trust rename <old> <new>` (`docs/CLI.md`
+/// §6.11). Takes effect at the next handshake with no restart; `acl.toml`
+/// rows keep matching the old name until the daemon restarts and reloads
+/// them (`acl.toml` has no hot reload) — worth one reminder line here since
+/// nothing else in this command's own output says so.
+pub fn print_trust_rename(data: &TrustRenameData) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    writeln!(
+        stdout,
+        "renamed {} to {}",
+        sanitize(&data.old_name),
+        sanitize(&data.peer.name)
+    )?;
+    writeln!(
+        stdout,
+        "any acl.toml rows for either name need a restart to take effect"
+    )
+}
+
+/// `qsh pair accept`/`qsh trust accept` with no `--as`: on **stderr**,
+/// name the self-asserted trust-store label that just got pinned and, when
+/// the caller supplies one, the label `qsh_core::trust::suggested_peer_label`
+/// derived from the dialed address (ADR-0012 결정 6, `docs/CLI.md` §6.11).
+/// `suggested_label` is computed by the caller, in `qsh-cli`'s own dispatch
+/// layer — this function only formats it, keeping with this module's
+/// "never calls back into qsh-core logic" rule. Never touches stdout, so
+/// `--json`/`--jsonl` sees no difference from it at all — `finish` only
+/// ever reaches a human closure that calls this from human mode.
+pub fn print_trust_accept_suggested_name(
+    pinned_name: &str,
+    suggested_label: Option<&str>,
+) -> io::Result<()> {
+    let mut stderr = io::stderr().lock();
+    let pinned_name = sanitize(pinned_name);
+    match suggested_label {
+        Some(label) => writeln!(
+            stderr,
+            "qsh: pinned as {pinned_name:?} (self-asserted); consider `qsh trust rename {pinned_name:?} {}`",
+            sanitize(label)
+        ),
+        None => writeln!(stderr, "qsh: pinned as {pinned_name:?} (self-asserted)"),
+    }
+}
+
+/// Print the outcome of `qsh pair invite` (ADR-0002, `docs/CLI.md` §6.11).
 /// The load-bearing line is `accept_command`: the operator copies it
 /// verbatim to the other party (after filling in the placeholder address),
 /// so it is printed on its own line, not folded into a sentence.
@@ -309,7 +353,7 @@ pub fn print_trust_invite(data: &TrustInviteData, advice: &InviteAddressAdvice) 
     Ok(())
 }
 
-/// Print the outcome of `qsh trust accept` (ADR-0002, `docs/CLI.md` §6.11).
+/// Print the outcome of `qsh pair accept` (ADR-0002, `docs/CLI.md` §6.11).
 /// Same verb logic as [`print_trust_add`] — a successful pairing exchange
 /// ends in exactly the same local pin `trust add` would have written.
 pub fn print_trust_accept(data: &TrustAcceptData) -> io::Result<()> {

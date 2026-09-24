@@ -474,6 +474,7 @@ fn trust_accept_uses_the_normalized_address_for_the_dial_and_its_failure_message
         .trust_accept(TrustAcceptReq {
             address: "mac.example.invalid".into(),
             code: "0000-0000-0000-0000-0000-0000-0000-0000".into(),
+            as_name: None,
         })
         .expect_err("an unresolvable host must fail before any dial opens");
 
@@ -615,6 +616,7 @@ fn trust_accept_rejects_a_control_character_responder_device_name_and_leaves_tru
         .trust_accept(TrustAcceptReq {
             address: addr.to_string(),
             code,
+            as_name: None,
         })
         .expect_err("a control-character responder device name must be rejected");
     assert_eq!(err.code, ErrorCode::InvalidArgument);
@@ -748,6 +750,369 @@ fn trust_add_rejects_bad_input() {
         .unwrap_err();
     assert_eq!(err.code, ErrorCode::InvalidArgument);
     assert!(err.message.contains("--address"), "{err}");
+}
+
+fn seed_two_peers_and_a_ca(ops: &Ops) {
+    ops.trust_add(TrustAddReq {
+        name: "old-name".into(),
+        address: Some("old.example:4433".into()),
+        fingerprint: Some(qsh_transport::Fingerprint::of_spki_der(b"old").to_string()),
+        cert_pem: None,
+    })
+    .unwrap();
+    ops.trust_add(TrustAddReq {
+        name: "taken".into(),
+        address: None,
+        fingerprint: Some(qsh_transport::Fingerprint::of_spki_der(b"taken").to_string()),
+        cert_pem: None,
+    })
+    .unwrap();
+}
+
+/// `docs/CLI.md` §6.11: a rename moves only the name — `fingerprint`,
+/// `address` and `added_at` are untouched, and `TrustRenameData.peer` is
+/// the entry under its *new* name so the caller can see this directly.
+///
+/// `ops.trust_add` stamps `added_at` with `now_rfc3339()` at second
+/// granularity, so seeding and renaming inside the same test would leave
+/// `added_at` unchanged even if `trust_rename` re-stamped it — the two
+/// values would just happen to land in the same second. `old-name`'s
+/// `added_at` is rewritten on disk to a fixed past value before the
+/// rename runs, the same fixed-date discipline
+/// `trust::tests::rename_preserves_added_at_fingerprint_and_address`
+/// seeds directly through `TrustStore::add_peer`, so a rename that
+/// re-stamps `added_at` cannot pass by coincidence.
+#[test]
+fn trust_rename_preserves_added_at_and_fingerprint() {
+    let (_guard, ops) = temp_ops();
+    seed_two_peers_and_a_ca(&ops);
+
+    let trust_path = ops.paths().trust_file();
+    let raw = std::fs::read_to_string(&trust_path).unwrap();
+    let marker = "added_at = \"";
+    let start = raw.find(marker).expect("added_at present") + marker.len();
+    let end = start + raw[start..].find('"').expect("closing quote");
+    let raw = format!("{}2026-08-17T00:00:00Z{}", &raw[..start], &raw[end..]);
+    std::fs::write(&trust_path, raw).unwrap();
+
+    let before = ops
+        .trust_list()
+        .unwrap()
+        .peers
+        .into_iter()
+        .find(|p| p.name == "old-name")
+        .unwrap();
+    assert_eq!(
+        before.added_at, "2026-08-17T00:00:00Z",
+        "the on-disk rewrite above must have taken"
+    );
+
+    let renamed = ops
+        .trust_rename(TrustRenameReq {
+            old: "old-name".into(),
+            new: "new-name".into(),
+        })
+        .unwrap();
+    assert_eq!(renamed.old_name, "old-name");
+    assert_eq!(renamed.peer.name, "new-name");
+    assert_eq!(renamed.peer.fingerprint, before.fingerprint);
+    assert_eq!(renamed.peer.address, before.address);
+    assert_eq!(renamed.peer.added_at, before.added_at);
+
+    let listed = ops.trust_list().unwrap();
+    assert!(listed.peers.iter().any(|p| p.name == "new-name"));
+    assert!(!listed.peers.iter().any(|p| p.name == "old-name"));
+}
+
+/// `new == old` is rejected before anything else runs (`docs/CLI.md`
+/// §6.11) — a no-op rename would otherwise silently write an audit record
+/// for nothing.
+#[test]
+fn trust_rename_to_the_same_name_is_invalid_argument() {
+    let (_guard, ops) = temp_ops();
+    seed_two_peers_and_a_ca(&ops);
+
+    let err = ops
+        .trust_rename(TrustRenameReq {
+            old: "old-name".into(),
+            new: "old-name".into(),
+        })
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::InvalidArgument);
+}
+
+/// `new` already naming a pinned peer is a non-retryable `SESSION_CONFLICT`
+/// (`docs/CLI.md` §6.11) — never silently overwritten, unlike
+/// `TrustStore::add_peer`'s own documented silent no-op on a fingerprint
+/// mismatch.
+#[test]
+fn trust_rename_onto_an_existing_name_is_a_non_retryable_session_conflict() {
+    let (_guard, ops) = temp_ops();
+    seed_two_peers_and_a_ca(&ops);
+
+    let err = ops
+        .trust_rename(TrustRenameReq {
+            old: "old-name".into(),
+            new: "taken".into(),
+        })
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::SessionConflict);
+    assert!(!err.retryable);
+
+    // Neither entry moved.
+    let listed = ops.trust_list().unwrap();
+    assert!(listed.peers.iter().any(|p| p.name == "old-name"));
+    assert!(listed.peers.iter().any(|p| p.name == "taken"));
+}
+
+/// `new` colliding with a `[[ca]]` label is refused the same way a peer
+/// collision is — peers and CA roots share one name space here exactly as
+/// `trust remove` already treats them.
+#[test]
+fn trust_rename_onto_an_existing_ca_label_is_refused() {
+    let (_guard, ops) = temp_ops();
+    seed_two_peers_and_a_ca(&ops);
+    ops.trust_add_ca(TrustAddCaReq {
+        name: "root".into(),
+        cert_pem: a_valid_cert_pem(),
+    })
+    .unwrap();
+
+    let err = ops
+        .trust_rename(TrustRenameReq {
+            old: "old-name".into(),
+            new: "root".into(),
+        })
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::SessionConflict);
+}
+
+/// `old` naming no pinned peer at all is `HOST_NOT_FOUND` — including when
+/// it names only a `[[ca]]` entry (rename operates on peers only).
+#[test]
+fn trust_rename_of_an_absent_name_reports_host_not_found() {
+    let (_guard, ops) = temp_ops();
+    seed_two_peers_and_a_ca(&ops);
+
+    let err = ops
+        .trust_rename(TrustRenameReq {
+            old: "nope".into(),
+            new: "whatever".into(),
+        })
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::HostNotFound);
+}
+
+/// A bad `new` label is `INVALID_ARGUMENT` before the store is even
+/// touched (the shared validator, `crate::trust::validate_peer_label`).
+#[test]
+fn trust_rename_rejects_a_bad_new_label() {
+    let (_guard, ops) = temp_ops();
+    seed_two_peers_and_a_ca(&ops);
+
+    for bad in ["", "bad\tname", "bad\u{200b}name", "a/b", &"x".repeat(65)] {
+        let err = ops
+            .trust_rename(TrustRenameReq {
+                old: "old-name".into(),
+                new: bad.into(),
+            })
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidArgument, "label {bad:?}");
+    }
+
+    // Untouched by every rejected attempt.
+    assert!(
+        ops.trust_list()
+            .unwrap()
+            .peers
+            .iter()
+            .any(|p| p.name == "old-name")
+    );
+}
+
+/// `trust.rename` writes exactly one local audit record — `principal` the
+/// pre-rename name, `resource` the post-rename name, `auth_path: "local"`
+/// (`docs/CLI.md` §6.11, ADR-0012 decision 7).
+#[test]
+fn trust_rename_writes_exactly_one_audit_record() {
+    let (_guard, ops) = temp_ops();
+    seed_two_peers_and_a_ca(&ops);
+    let sink = Arc::new(crate::audit::MemoryAuditSink::new());
+    let ops = ops.with_audit_sink(sink.clone());
+
+    ops.trust_rename(TrustRenameReq {
+        old: "old-name".into(),
+        new: "new-name".into(),
+    })
+    .unwrap();
+
+    let records = sink.records();
+    assert_eq!(records.len(), 1, "exactly one record: {records:?}");
+    let record = &records[0];
+    assert_eq!(record.action, "trust.rename");
+    assert_eq!(record.principal, "device:old-name");
+    assert_eq!(record.resource, "device:new-name");
+    assert_eq!(record.auth_path, "local");
+    assert_eq!(record.request_id, "-");
+    assert_eq!(record.peer_addr, "-");
+}
+
+/// Fail-closed (CLAUDE.md's "no durable record, no operation" rule):
+/// when the audit sink cannot append, `trust rename` refuses and
+/// `trust.toml` is left completely unchanged, exactly as that rule
+/// applies to the wire path.
+#[test]
+fn trust_rename_is_refused_when_the_audit_sink_fails() {
+    let (_guard, ops) = temp_ops();
+    seed_two_peers_and_a_ca(&ops);
+    let sink = Arc::new(crate::audit::FailingAuditSink::new());
+    sink.fail();
+    let ops = ops.with_audit_sink(sink.clone());
+
+    let raw_before = std::fs::read_to_string(ops.paths().trust_file()).unwrap();
+
+    let err = ops
+        .trust_rename(TrustRenameReq {
+            old: "old-name".into(),
+            new: "new-name".into(),
+        })
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::Internal);
+    assert!(err.retryable);
+    assert!(sink.records().is_empty());
+
+    let raw_after = std::fs::read_to_string(ops.paths().trust_file()).unwrap();
+    assert_eq!(
+        raw_after, raw_before,
+        "trust.toml must be byte-identical after a failed audit append"
+    );
+    assert!(
+        ops.trust_list()
+            .unwrap()
+            .peers
+            .iter()
+            .any(|p| p.name == "old-name")
+    );
+}
+
+/// With no `with_audit_sink` builder call at all — the real `qsh` binary's
+/// own shape — `trust_rename` builds a `FileAuditSink` at the daemon's own
+/// default path (`Paths::audit_log`) and the record really lands on disk,
+/// readable back. Runs on all three CI legs (no `#[cfg]`) so the
+/// Windows-gnu leg exercises the real file sink too.
+#[test]
+fn trust_rename_appends_to_the_default_audit_log_path_when_no_sink_is_injected() {
+    let (_guard, ops) = temp_ops();
+    seed_two_peers_and_a_ca(&ops);
+
+    ops.trust_rename(TrustRenameReq {
+        old: "old-name".into(),
+        new: "new-name".into(),
+    })
+    .unwrap();
+
+    let audit_path = ops.paths().audit_log();
+    let contents = std::fs::read_to_string(&audit_path)
+        .unwrap_or_else(|err| panic!("expected an audit log at {audit_path:?}: {err}"));
+    let lines: Vec<&str> = contents.lines().filter(|l| !l.trim().is_empty()).collect();
+    assert_eq!(lines.len(), 1, "exactly one record: {lines:?}");
+    let record: serde_json::Value = serde_json::from_str(lines[0]).expect("audit line is JSON");
+    assert_eq!(record["action"], "trust.rename");
+    assert_eq!(record["principal"], "device:old-name");
+    assert_eq!(record["resource"], "device:new-name");
+    assert_eq!(record["auth_path"], "local");
+}
+
+/// The whole load → rename → save cycle runs under `TrustStore::lock`
+/// (`trust/mod.rs`'s cross-process file lock) exactly like `trust_remove`
+/// — proven the same way `concurrent_trust_remove_through_ops_does_not_
+/// lose_a_removal` proves it for removal: many concurrent renames onto
+/// disjoint names must not lose each other's writes.
+#[test]
+fn trust_rename_goes_through_trust_store_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = Paths::new(dir.path().join("config"), dir.path().join("state"));
+
+    let seed = Ops::new(paths.clone());
+    for i in 0..8u8 {
+        let fingerprint = qsh_transport::Fingerprint::of_spki_der(&[i; 4]).to_string();
+        seed.trust_add(TrustAddReq {
+            name: format!("old-{i}"),
+            address: None,
+            fingerprint: Some(fingerprint),
+            cert_pem: None,
+        })
+        .unwrap();
+    }
+
+    let mut threads = Vec::new();
+    for i in 0..8u8 {
+        let ops = Ops::new(paths.clone());
+        threads.push(std::thread::spawn(move || {
+            ops.trust_rename(TrustRenameReq {
+                old: format!("old-{i}"),
+                new: format!("new-{i}"),
+            })
+            .unwrap();
+        }));
+    }
+    for t in threads {
+        t.join().expect("renamer");
+    }
+
+    let listed = Ops::new(paths).trust_list().unwrap();
+    assert_eq!(
+        listed.peers.len(),
+        8,
+        "a concurrent Ops::trust_rename lost a peer (left: {:?}) — the lock \
+         wired into the real call site isn't doing its job",
+        listed.peers.iter().map(|p| &p.name).collect::<Vec<_>>()
+    );
+    for i in 0..8u8 {
+        assert!(listed.peers.iter().any(|p| p.name == format!("new-{i}")));
+    }
+}
+
+/// The shared label validator (`docs/CLI.md` §6.11, ADR-0012 결정 6) gates
+/// `--as` on `pair invite` before the invite is ever minted — a bad label
+/// costs no invite slot and touches no file.
+#[test]
+fn trust_invite_rejects_a_bad_as_name() {
+    let (_guard, ops) = temp_ops();
+    for bad in ["", "bad\tname", "bad\u{200b}name", "a/b", &"x".repeat(65)] {
+        let err = ops
+            .trust_invite(TrustInviteReq {
+                as_name: Some(bad.to_string()),
+            })
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidArgument, "label {bad:?}");
+    }
+    // A valid label mints normally and echoes it back.
+    let ok = ops
+        .trust_invite(TrustInviteReq {
+            as_name: Some("workbench".into()),
+        })
+        .unwrap();
+    assert_eq!(ok.assigned_name.as_deref(), Some("workbench"));
+}
+
+/// The accept-side counterpart: `--as` fails fast, before any dial opens
+/// (`docs/CLI.md` §6.11) — a bogus, unroutable address proves no network
+/// attempt was made.
+#[test]
+fn trust_accept_rejects_a_bad_as_name_before_dialing() {
+    let (_guard, ops) = temp_ops();
+    ops.identity_init(file_mode()).unwrap();
+    for bad in ["", "bad\tname", "bad\u{200b}name", "a/b", &"x".repeat(65)] {
+        let err = ops
+            .trust_accept(TrustAcceptReq {
+                address: "127.0.0.1:1".into(),
+                code: "0000-0000-0000-0000-0000-0000-0000-0000".into(),
+                as_name: Some(bad.to_string()),
+            })
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidArgument, "label {bad:?}");
+    }
 }
 
 #[test]

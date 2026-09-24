@@ -250,6 +250,7 @@ qsh attach <session-ref>        세션 attach
 qsh tunnel ...                  터널 관리
 qsh identity export             이 장치 인증서를 PEM으로 출력
 qsh trust ...                   신뢰 관리
+qsh pair invite|accept          pairing으로 새 신뢰 항목 생성(구 qsh trust invite/accept, 숨김 alias로 남음)
 qsh cert ...                    인증서 관리
 qsh acl ...                     ACL 관리와 검사
 qsh <command> --json            machine-readable result

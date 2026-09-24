@@ -4421,7 +4421,7 @@ async fn a_served_pairing_connection_holds_and_returns_its_pairing_slot() {
     {
         let _lock = crate::trust::pairing::InviteStore::lock(&invite_path).unwrap();
         let mut store = crate::trust::pairing::InviteStore::load(&invite_path).unwrap();
-        store.add(secret.as_slice(), std::time::SystemTime::now());
+        store.add(secret.as_slice(), std::time::SystemTime::now(), None);
         store.save(&invite_path).unwrap();
     }
     let invites = crate::trust::pairing::SharedInviteStore::open(&invite_path).unwrap();
@@ -4459,7 +4459,7 @@ async fn a_served_pairing_connection_holds_and_returns_its_pairing_slot() {
     let accepted = crate::pairing::accept(&client, "adv-a1-b-client", secret.as_slice())
         .await
         .expect("the eighth pairing connection must clear the cap and pair successfully");
-    assert_eq!(accepted.peer_device_name, rig.server.device_name);
+    assert_eq!(accepted.pinned_name, rig.server.device_name);
 
     // `accept()` returning only means the client saw the reply, not that the
     // watcher has caught the peak yet. Bound the wait so a real regression

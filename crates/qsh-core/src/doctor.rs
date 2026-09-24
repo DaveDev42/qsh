@@ -210,7 +210,7 @@ pub const PEER_UNTRUSTED: Diagnostic = Diagnostic {
     id: DiagnosticId::PeerUntrusted,
     code: "peer_untrusted",
     message: "hosts.toml names this host, but trust.toml has no pin for it — connecting to it is going to fail with TRUST_REQUIRED.",
-    remedy: "Pin it with `qsh trust add <name> --fingerprint <fingerprint>`, or pair with `qsh trust invite` / `qsh trust accept`.",
+    remedy: "Pin it with `qsh trust add <name> --fingerprint <fingerprint>`, or pair with `qsh pair invite` / `qsh pair accept`.",
 };
 
 /// `docs/CLI.md` §6.17: a certificate this device relies on — its own

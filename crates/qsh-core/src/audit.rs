@@ -117,8 +117,11 @@ pub struct AuditRecord {
     /// allow-all-pinned policy.
     pub rule: Option<u32>,
     /// How the peer authenticated: `"pin"` or `"ca"` (`docs/design/
-    /// architecture.md` §6), or `"-"` when no principal was established at
-    /// all ([`AuditRecord::handshake_rejected`]). Structural, like every
+    /// architecture.md` §6), `"pairing"` for a pairing exchange's own
+    /// record ([`AuditRecord::pairing`]), `"local"` for a local operator
+    /// op with no peer at all ([`AuditRecord::local_op`]'s own doc), or
+    /// `"-"` when no principal was established at all
+    /// ([`AuditRecord::handshake_rejected`]). Structural, like every
     /// other field — a `Principal` alone cannot tell a pin from a CA leaf
     /// asserting the same name, so this is what lets an investigation tell
     /// them apart after the fact.
@@ -355,6 +358,39 @@ impl AuditRecord {
             rule: None,
             auth_path: auth_path_str(AuthPath::Pairing).to_string(),
             peer_addr: peer_addr.to_string(),
+            count: None,
+        }
+    }
+
+    /// A local operator op with no ACL surface, no session and no peer —
+    /// `trust.rename` is the first (`docs/CLI.md` §6.11, ADR-0012 결정 7).
+    /// Same shape as [`AuditRecord::pairing`]'s raw-`action`-string
+    /// precedent, the only other place this struct sidesteps the typed
+    /// [`Action`] vocabulary: `action` is not an authorization word, it is
+    /// the CLI op name, and `acl::Action` must never gain a variant for a
+    /// 인가-불요 op (`docs/CLI.md` §2.5). `request_id` is `"-"` (no wire
+    /// request), `decision` is always [`Decision::Allow`] (this fires only
+    /// on the successful path — a refusal never reaches the sink at all),
+    /// `rule` is `None` (no policy rule matched anything), `auth_path` is
+    /// `"local"` (a fourth value alongside `"pin"`/`"ca"`/`"-"` — this
+    /// principal never authenticated over the wire at all), and
+    /// `peer_addr` is `"-"` (a local op has no peer, the sentinel
+    /// `AuditRecord::handshake_rejected` already uses for "no address
+    /// applies"). `principal` is the identity the op acted *on* (for
+    /// `trust.rename`, the pre-rename name) and `resource` is what it
+    /// became (the post-rename name) — both structural, never a free-text
+    /// payload.
+    pub fn local_op(action: &'static str, principal: String, resource: String) -> Self {
+        Self {
+            ts: now_rfc3339(),
+            request_id: "-".to_string(),
+            principal,
+            action: action.to_string(),
+            resource,
+            decision: Decision::Allow.as_str().to_string(),
+            rule: None,
+            auth_path: "local".to_string(),
+            peer_addr: "-".to_string(),
             count: None,
         }
     }
@@ -648,129 +684,4 @@ fn create_private_dir(dir: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use qsh_transport::Principal;
-
-    fn sample() -> AuditRecord {
-        AuditRecord::now(
-            7,
-            &Principal::Device("laptop".into()),
-            AuthPath::Pin,
-            Action::ExecRun,
-            "exec",
-            Decision::Allow,
-            None,
-            "127.0.0.1:4433".parse().unwrap(),
-        )
-    }
-
-    #[test]
-    fn record_has_only_structural_fields() {
-        // Type-level guarantee, checked by enumerating the JSON keys: no
-        // argv / payload / key field can appear.
-        let value = serde_json::to_value(sample()).unwrap();
-        let mut keys: Vec<_> = value.as_object().unwrap().keys().cloned().collect();
-        keys.sort();
-        assert_eq!(
-            keys,
-            [
-                "action",
-                "auth_path",
-                "decision",
-                "peer_addr",
-                "principal",
-                "request_id",
-                "resource",
-                "rule",
-                "ts"
-            ]
-        );
-        assert_eq!(value["principal"], "device:laptop");
-        assert_eq!(value["action"], "exec.run");
-        assert_eq!(value["decision"], "allow");
-        assert_eq!(value["request_id"], "7");
-        assert_eq!(value["auth_path"], "pin");
-        assert!(value["rule"].is_null());
-    }
-
-    #[test]
-    fn file_sink_appends_jsonl_with_private_perms() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("state").join("audit.log");
-        let sink = FileAuditSink::new(&path);
-        sink.record(&sample()).unwrap();
-        sink.record(&sample()).unwrap();
-        let text = fs::read_to_string(&path).unwrap();
-        let lines: Vec<_> = text.lines().collect();
-        assert_eq!(lines.len(), 2);
-        for line in lines {
-            let back: AuditRecord = serde_json::from_str(line).unwrap();
-            assert_eq!(back.decision, "allow");
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-            assert_eq!(mode, 0o600);
-            let dmode = fs::metadata(path.parent().unwrap())
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777;
-            assert_eq!(dmode, 0o700);
-        }
-    }
-
-    /// `FileAuditSink` is fail-closed too, not just `RotatingAuditSink`
-    /// (`PLAN.md` M5 Step 3): a write it cannot perform is `Err`, never a
-    /// swallowed `tracing::error!` with the call site none the wiser. Kept
-    /// as the simplest-possible sink for callers that want one (tests)
-    /// even though `reverse::listen`'s controller itself moved onto
-    /// `RotatingAuditSink` (F7). A directory at the log path makes
-    /// `OpenOptions::open` fail deterministically (EISDIR), no real
-    /// disk-full condition required.
-    #[test]
-    fn file_sink_returns_err_when_the_path_cannot_be_written() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("audit.log");
-        fs::create_dir(&path).unwrap();
-        let sink = FileAuditSink::new(&path);
-        assert_eq!(sink.record(&sample()), Err(AuditError::Degraded));
-    }
-
-    #[test]
-    fn now_rfc3339_has_second_precision_and_z_suffix() {
-        let ts = now_rfc3339();
-        assert!(ts.ends_with('Z'), "{ts}");
-        assert_eq!(ts.len(), "2026-08-17T00:00:00Z".len(), "{ts}");
-    }
-
-    // ---- F2: wait_for_sole_owner ---------------------------------------
-
-    #[tokio::test]
-    async fn wait_for_sole_owner_returns_immediately_when_already_sole_owner() {
-        let arc = Arc::new(NullAuditSink);
-        // No other clone exists: the loop's own condition is false on the
-        // very first check, so this returns without ever sleeping.
-        wait_for_sole_owner(&arc, Duration::from_secs(10)).await;
-    }
-
-    #[tokio::test]
-    async fn wait_for_sole_owner_gives_up_after_grace_when_a_clone_is_still_held() {
-        let arc = Arc::new(NullAuditSink);
-        let _still_held = arc.clone();
-        let grace = Duration::from_millis(30);
-        let start = std::time::Instant::now();
-        wait_for_sole_owner(&arc, grace).await;
-        assert!(
-            start.elapsed() >= grace,
-            "must wait out the full grace period while a clone is held"
-        );
-        assert_eq!(
-            Arc::strong_count(&arc),
-            2,
-            "gives up rather than blocking forever"
-        );
-    }
-}
+mod tests;

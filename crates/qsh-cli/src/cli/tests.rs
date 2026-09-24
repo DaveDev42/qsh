@@ -710,3 +710,156 @@ fn trust_add_requires_a_name_only() {
     }
     assert!(Cli::try_parse_from(["qsh", "trust", "add"]).is_err());
 }
+
+/// ROADMAP M9 DoD 4 (ADR-0012 결정 3/4): `qsh pair invite` and the hidden
+/// `qsh trust invite` parse to the same argument shape — the CLI layer's
+/// only obligation is that both spellings hand `run_trust_invite`
+/// identical inputs (`main.rs` is where they actually converge).
+#[test]
+fn pair_invite_and_trust_invite_converge_on_the_same_parse() {
+    let via_pair = Cli::try_parse_from(["qsh", "pair", "invite", "--as", "workbench"]).unwrap();
+    let pair_as_name = match via_pair.command.unwrap() {
+        Command::Pair(PairCmd::Invite { as_name }) => as_name,
+        other => panic!("expected pair invite, got {other:?}"),
+    };
+
+    let via_trust = Cli::try_parse_from(["qsh", "trust", "invite", "--as", "workbench"]).unwrap();
+    let trust_as_name = match via_trust.command.unwrap() {
+        Command::Trust(TrustCmd::Invite { as_name }) => as_name,
+        other => panic!("expected trust invite, got {other:?}"),
+    };
+
+    assert_eq!(pair_as_name, trust_as_name);
+    assert_eq!(pair_as_name.as_deref(), Some("workbench"));
+
+    // `--as` stays optional on both spellings.
+    assert!(matches!(
+        Cli::try_parse_from(["qsh", "pair", "invite"])
+            .unwrap()
+            .command,
+        Some(Command::Pair(PairCmd::Invite { as_name: None }))
+    ));
+    assert!(matches!(
+        Cli::try_parse_from(["qsh", "trust", "invite"])
+            .unwrap()
+            .command,
+        Some(Command::Trust(TrustCmd::Invite { as_name: None }))
+    ));
+}
+
+/// The `pair accept`/`trust accept` counterpart, over all four argument
+/// forms `pair accept` and the hidden `trust accept` must parse
+/// identically (ADR-0013 decision 8): positional code, `--code-stdin`,
+/// neither, and `--as`.
+#[test]
+fn pair_accept_and_trust_accept_converge_on_the_same_parse() {
+    fn accept_fields(cmd: Command) -> (String, Option<String>, bool, Option<String>) {
+        match cmd {
+            Command::Pair(PairCmd::Accept {
+                address,
+                code,
+                code_stdin,
+                as_name,
+            })
+            | Command::Trust(TrustCmd::Accept {
+                address,
+                code,
+                code_stdin,
+                as_name,
+            }) => (address, code, code_stdin, as_name),
+            other => panic!("expected an accept command, got {other:?}"),
+        }
+    }
+
+    let forms: &[&[&str]] = &[
+        &["box", "the-code"],
+        &["box", "--code-stdin"],
+        &["box"],
+        &["box", "the-code", "--as", "chosen-name"],
+    ];
+    for args in forms {
+        let mut pair_argv = vec!["qsh", "pair", "accept"];
+        pair_argv.extend_from_slice(args);
+        let mut trust_argv = vec!["qsh", "trust", "accept"];
+        trust_argv.extend_from_slice(args);
+
+        let pair = accept_fields(Cli::try_parse_from(pair_argv).unwrap().command.unwrap());
+        let trust = accept_fields(Cli::try_parse_from(trust_argv).unwrap().command.unwrap());
+        assert_eq!(pair, trust, "argument form {args:?} diverged");
+    }
+}
+
+/// ADR-0012 결정 4: the pre-rename spellings are hidden subcommands, not
+/// clap aliases — gone from `qsh trust --help`'s listing but still parse
+/// and still render their own `--help` in full, the same shape as
+/// `reverse_is_hidden_from_help_but_still_parses`.
+#[test]
+fn trust_invite_and_trust_accept_are_hidden_from_help_but_still_parse() {
+    let trust_help = Cli::command()
+        .find_subcommand("trust")
+        .expect("trust subcommand exists")
+        .clone()
+        .render_help()
+        .to_string();
+    for hidden in ["invite", "accept"] {
+        assert!(
+            !trust_help.lines().any(|line| {
+                line.strip_prefix("  ")
+                    .is_some_and(|rest| !rest.starts_with(' ') && rest.starts_with(hidden))
+            }),
+            "qsh trust --help must not list the hidden `{hidden}` subcommand: {trust_help:?}"
+        );
+    }
+
+    assert!(matches!(
+        Cli::try_parse_from(["qsh", "trust", "invite"])
+            .unwrap()
+            .command,
+        Some(Command::Trust(TrustCmd::Invite { as_name: None }))
+    ));
+    assert!(matches!(
+        Cli::try_parse_from(["qsh", "trust", "accept", "box"])
+            .unwrap()
+            .command,
+        Some(Command::Trust(TrustCmd::Accept { .. }))
+    ));
+
+    for hidden in ["invite", "accept"] {
+        let help = Cli::command()
+            .find_subcommand("trust")
+            .unwrap()
+            .clone()
+            .find_subcommand(hidden)
+            .expect("hidden subcommand must still be reachable by name")
+            .clone()
+            .render_help()
+            .to_string();
+        assert!(!help.is_empty());
+    }
+
+    // `qsh pair --help` never lists the hidden pre-rename spellings either
+    // (they simply do not exist under `pair` — `PairCmd` has no hidden
+    // variants of its own).
+    let pair_help = Cli::command()
+        .find_subcommand("pair")
+        .expect("pair subcommand exists")
+        .clone()
+        .render_help()
+        .to_string();
+    assert!(pair_help.contains("invite"));
+    assert!(pair_help.contains("accept"));
+}
+
+#[test]
+fn trust_rename_takes_two_required_positionals() {
+    let cli = Cli::try_parse_from(["qsh", "trust", "rename", "old", "new"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Trust(TrustCmd::Rename { old, new }) => {
+            assert_eq!(old, "old");
+            assert_eq!(new, "new");
+        }
+        other => panic!("expected trust rename, got {other:?}"),
+    }
+    assert!(Cli::try_parse_from(["qsh", "trust", "rename", "old"]).is_err());
+    assert!(Cli::try_parse_from(["qsh", "trust", "rename"]).is_err());
+}

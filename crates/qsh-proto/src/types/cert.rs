@@ -85,6 +85,13 @@ pub struct TrustAcceptReq {
     /// The invite code as displayed by `trust.invite` (case-insensitive,
     /// hyphens ignored).
     pub code: String,
+    /// Pin the redeemed peer under this name instead of its self-asserted
+    /// one (`qsh pair accept --as`, ADR-0012 결정 6). Additive
+    /// (`docs/CLI.md` §10): absent on any envelope produced before this
+    /// field existed, and its absence means the peer's self-asserted name
+    /// is pinned, as it always was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub as_name: Option<String>,
 }
 
 /// Data payload of `trust.accept`. Same shape as [`TrustAddData`] — a

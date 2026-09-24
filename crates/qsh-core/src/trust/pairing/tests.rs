@@ -1,4 +1,3 @@
-
 use super::*;
 
 fn secret(seed: u8) -> [u8; qsh_proto::pairing::INVITE_SECRET_LEN] {
@@ -24,7 +23,7 @@ fn add_load_save_round_trip() {
     let now = SystemTime::now();
 
     let mut store = InviteStore::default();
-    let (created_at, expires_at) = store.add(&secret(1), now);
+    let (created_at, expires_at) = store.add(&secret(1), now, None);
     assert!(!created_at.is_empty());
     assert!(!expires_at.is_empty());
     store.save(&path).unwrap();
@@ -44,14 +43,14 @@ fn redeem_accepts_a_correct_proof_exactly_once() {
     let e = ekm(9);
 
     let mut store = InviteStore::default();
-    store.add(&s, now);
+    store.add(&s, now, None);
     store.save(&path).unwrap();
 
     let shared = SharedInviteStore::open(&path).unwrap();
     assert!(shared.pairing_open(now));
 
     let (client_proof, expected_server_proof) = proofs_from_secret(&s, &e);
-    match shared.redeem(&e, &client_proof, now, || true).unwrap() {
+    match shared.redeem(&e, &client_proof, now, |_| true).unwrap() {
         RedeemOutcome::Accepted { server_proof } => {
             assert_eq!(
                 server_proof, expected_server_proof,
@@ -68,7 +67,7 @@ fn redeem_accepts_a_correct_proof_exactly_once() {
     }
     // Second attempt with the same proof: already consumed.
     assert_eq!(
-        shared.redeem(&e, &client_proof, now, || true).unwrap(),
+        shared.redeem(&e, &client_proof, now, |_| true).unwrap(),
         RedeemOutcome::AlreadyConsumed
     );
 }
@@ -82,7 +81,7 @@ fn redeem_leaves_the_invite_untouched_when_on_matched_declines() {
     let e = ekm(12);
 
     let mut store = InviteStore::default();
-    store.add(&s, now);
+    store.add(&s, now, None);
     store.save(&path).unwrap();
 
     let shared = SharedInviteStore::open(&path).unwrap();
@@ -94,12 +93,73 @@ fn redeem_leaves_the_invite_untouched_when_on_matched_declines() {
     // rename/remove the conflicting pin and retry within the same TTL
     // (this step's brief invariant #5).
     assert_eq!(
-        shared.redeem(&e, &proof, now, || false).unwrap(),
+        shared.redeem(&e, &proof, now, |_| false).unwrap(),
         RedeemOutcome::Rejected
     );
-    match shared.redeem(&e, &proof, now, || true).unwrap() {
+    match shared.redeem(&e, &proof, now, |_| true).unwrap() {
         RedeemOutcome::Accepted { .. } => {}
         other => panic!("expected the still-live invite to redeem on retry, got {other:?}"),
+    }
+}
+
+/// A stored `assigned_name` that no longer passes
+/// [`super::super::validate_peer_label`] (a hand-edited or otherwise
+/// corrupted `invites.toml`) refuses the whole redemption before
+/// `on_matched` ever runs — never a silent fallback to the self-asserted
+/// `device_name` (`docs/CLI.md` §6.11, ADR-0012 decision 6). The record
+/// must be left byte-identical, so the invite is still redeemable once
+/// the name is fixed.
+#[test]
+fn a_corrupt_assigned_name_refuses_redemption_instead_of_falling_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("invites.toml");
+    let now = SystemTime::now();
+    let s = secret(21);
+    let e = ekm(22);
+
+    let mut store = InviteStore::default();
+    // `/` fails `validate_peer_label`; `add` stores it verbatim (no
+    // validation on write, `InviteStore::add`'s own doc).
+    store.add(&s, now, Some("bad/name".to_string()));
+    store.save(&path).unwrap();
+    let raw_before = std::fs::read_to_string(&path).unwrap();
+
+    let shared = SharedInviteStore::open(&path).unwrap();
+    let proof = client_proof_for(&s, &e);
+
+    let on_matched_called = std::cell::Cell::new(false);
+    let outcome = shared
+        .redeem(&e, &proof, now, |_| {
+            on_matched_called.set(true);
+            true
+        })
+        .unwrap();
+    assert_eq!(outcome, RedeemOutcome::InvalidAssignedName);
+    assert!(
+        !on_matched_called.get(),
+        "a corrupt assigned_name must be refused before on_matched runs — \
+         it must never see the self-asserted name as a fallback"
+    );
+
+    let raw_after = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(
+        raw_after, raw_before,
+        "a refused redemption must leave invites.toml byte-identical, \
+         so the invite is still live once the name is fixed"
+    );
+
+    // Fixing the name on disk lets the same secret redeem normally —
+    // proof that InvalidAssignedName is not a general-purpose reject.
+    let mut fixed = InviteStore::load(&path).unwrap();
+    fixed.records[0].assigned_name = Some("good-name".to_string());
+    fixed.save(&path).unwrap();
+    let shared = SharedInviteStore::open(&path).unwrap();
+    match shared.redeem(&e, &proof, now, |name| {
+        assert_eq!(name, Some("good-name"));
+        true
+    }) {
+        Ok(RedeemOutcome::Accepted { .. }) => {}
+        other => panic!("expected Accepted once the name is valid, got {other:?}"),
     }
 }
 
@@ -110,20 +170,20 @@ fn redeem_rejects_a_wrong_proof_as_no_match() {
     let now = SystemTime::now();
 
     let mut store = InviteStore::default();
-    store.add(&secret(1), now);
+    store.add(&secret(1), now, None);
     store.save(&path).unwrap();
 
     let shared = SharedInviteStore::open(&path).unwrap();
     let garbage = [0xAAu8; 32];
     assert_eq!(
-        shared.redeem(&ekm(1), &garbage, now, || true).unwrap(),
+        shared.redeem(&ekm(1), &garbage, now, |_| true).unwrap(),
         RedeemOutcome::NoMatch
     );
     // A failed attempt never consumes or otherwise disturbs the record
     // (this step's brief, invariant #3 / report §B8: no burn-on-failure).
     let proof = client_proof_for(&secret(1), &ekm(1));
     assert!(matches!(
-        shared.redeem(&ekm(1), &proof, now, || true).unwrap(),
+        shared.redeem(&ekm(1), &proof, now, |_| true).unwrap(),
         RedeemOutcome::Accepted { .. }
     ));
 }
@@ -137,14 +197,14 @@ fn redeem_after_ttl_reports_expired_not_no_match() {
     let e = ekm(4);
 
     let mut store = InviteStore::default();
-    store.add(&s, created);
+    store.add(&s, created, None);
     store.save(&path).unwrap();
 
     let shared = SharedInviteStore::open(&path).unwrap();
     let after_ttl = created + INVITE_TTL + Duration::from_secs(1);
     let proof = client_proof_for(&s, &e);
     assert_eq!(
-        shared.redeem(&e, &proof, after_ttl, || true).unwrap(),
+        shared.redeem(&e, &proof, after_ttl, |_| true).unwrap(),
         RedeemOutcome::Expired
     );
     // Still within retention: pairing_open() stays true so this exact
@@ -159,7 +219,7 @@ fn pairing_open_is_false_once_every_record_ages_out_of_retention() {
     let created = SystemTime::now() - Duration::from_secs(60);
 
     let mut store = InviteStore::default();
-    store.add(&secret(5), created);
+    store.add(&secret(5), created, None);
     store.save(&path).unwrap();
 
     let shared = SharedInviteStore::open(&path).unwrap();
@@ -172,8 +232,12 @@ fn pairing_open_is_false_once_every_record_ages_out_of_retention() {
 fn prune_drops_records_past_retention_and_keeps_live_ones() {
     let now = SystemTime::now();
     let mut store = InviteStore::default();
-    store.add(&secret(1), now - INVITE_RETENTION - Duration::from_secs(1));
-    store.add(&secret(2), now);
+    store.add(
+        &secret(1),
+        now - INVITE_RETENTION - Duration::from_secs(1),
+        None,
+    );
+    store.add(&secret(2), now, None);
     assert_eq!(store.records.len(), 2);
     store.prune(now);
     assert_eq!(store.records.len(), 1);
@@ -189,7 +253,7 @@ fn shared_store_reloads_a_freshly_added_invite_without_reopening() {
     assert!(!shared.pairing_open(now), "no invite yet");
 
     let mut store = InviteStore::default();
-    store.add(&secret(1), now);
+    store.add(&secret(1), now, None);
     store.save(&path).unwrap();
 
     assert!(
@@ -226,7 +290,7 @@ fn save_never_reverts_a_consumption_recorded_on_disk_by_another_writer() {
     // Writer A (`trust invite`-shaped): load a store with one live
     // invite.
     let mut writer_a = InviteStore::default();
-    writer_a.add(&secret(1), SystemTime::now());
+    writer_a.add(&secret(1), SystemTime::now(), None);
     writer_a.save(&path).unwrap();
     let mut stale_copy = InviteStore::load(&path).unwrap();
 
@@ -240,7 +304,7 @@ fn save_never_reverts_a_consumption_recorded_on_disk_by_another_writer() {
 
     // Writer A now saves its stale copy (e.g. after mint-ing a second,
     // unrelated invite) — must not blow away writer B's consumption.
-    stale_copy.add(&secret(2), SystemTime::now());
+    stale_copy.add(&secret(2), SystemTime::now(), None);
     stale_copy.save(&path).unwrap();
 
     let final_state = InviteStore::load(&path).unwrap();
@@ -268,7 +332,7 @@ fn save_does_not_drop_an_invite_minted_by_another_writer_after_load() {
     let path = dir.path().join("invites.toml");
 
     let mut writer_a = InviteStore::default();
-    writer_a.add(&secret(1), SystemTime::now());
+    writer_a.add(&secret(1), SystemTime::now(), None);
     writer_a.save(&path).unwrap();
 
     // `redeem`-shaped writer loads the current (one-record) state.
@@ -277,7 +341,7 @@ fn save_does_not_drop_an_invite_minted_by_another_writer_after_load() {
     // A concurrent `trust invite` process mints a second invite and
     // saves, independently, before the redeemer writes back.
     let mut inviter = InviteStore::load(&path).unwrap();
-    inviter.add(&secret(2), SystemTime::now());
+    inviter.add(&secret(2), SystemTime::now(), None);
     inviter.save(&path).unwrap();
 
     // The redeemer now consumes its (only known) record and saves its
@@ -311,7 +375,11 @@ fn save_still_drops_a_pruned_record_even_though_it_is_still_on_disk() {
     let now = SystemTime::now();
 
     let mut store = InviteStore::default();
-    store.add(&secret(1), now - INVITE_RETENTION - Duration::from_secs(1));
+    store.add(
+        &secret(1),
+        now - INVITE_RETENTION - Duration::from_secs(1),
+        None,
+    );
     store.save(&path).unwrap();
     assert_eq!(InviteStore::load(&path).unwrap().records.len(), 1);
 
@@ -319,7 +387,7 @@ fn save_still_drops_a_pruned_record_even_though_it_is_still_on_disk() {
     let mut store = InviteStore::load(&path).unwrap();
     store.prune(now);
     assert_eq!(store.records.len(), 0, "pruned in memory");
-    store.add(&secret(2), now);
+    store.add(&secret(2), now, None);
     store.save(&path).unwrap();
 
     let final_state = InviteStore::load(&path).unwrap();
@@ -343,7 +411,7 @@ fn on_disk_record_never_contains_the_raw_secret() {
     let s = secret(0x42);
 
     let mut store = InviteStore::default();
-    store.add(&s, SystemTime::now());
+    store.add(&s, SystemTime::now(), None);
     store.save(&path).unwrap();
 
     let text = std::fs::read_to_string(&path).unwrap();
@@ -375,7 +443,7 @@ fn concurrent_full_rmw_cycles_do_not_lose_each_others_invites() {
         threads.push(std::thread::spawn(move || {
             let _lock = InviteStore::lock(&path).unwrap();
             let mut store = InviteStore::load(&path).unwrap();
-            store.add(&secret(i), now);
+            store.add(&secret(i), now, None);
             store.save(&path).unwrap();
         }));
     }

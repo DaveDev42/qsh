@@ -1461,64 +1461,59 @@ impl Server {
         };
 
         let trust = &state.trust;
-        let result =
-            crate::pairing::respond(conn, &state.invites, &self.device_name, |initiator_name| {
-                let path = trust.path();
-                // Whole load→mutate→save under lock, not just the write —
-                // same discipline as `Ops::trust_add`/`trust_remove`
-                // (`TrustStore::lock`'s own doc, `PLAN.md` M7 Step 7-1
-                // S1). This closure runs synchronously inside
-                // `SharedInviteStore::redeem`, which already holds its
-                // cache `RwLock` — that lock is acquired first, this one
-                // second, matching `TrustStore::lock`'s required order.
-                // Blocking here (a `flock` wait, then a small TOML
-                // rewrite) briefly parks the current tokio worker thread;
-                // see `PLAN.md` M7 Step 7-1's report for why that is
-                // accepted rather than moved to `spawn_blocking`.
-                let _lock = match crate::trust::TrustStore::lock(path) {
-                    Ok(lock) => lock,
-                    Err(err) => {
-                        tracing::error!(%err, "failed to lock the trust store during pairing");
-                        return false;
-                    }
-                };
-                let mut store = match crate::trust::TrustStore::load(path) {
-                    Ok(store) => store,
-                    Err(err) => {
-                        tracing::error!(%err, "failed to load the trust store during pairing");
-                        return false;
-                    }
-                };
-                let (peer, created, updated) = store.add_peer(
-                    initiator_name,
-                    None,
-                    observed_fp,
-                    crate::config::now_rfc3339(),
+        let result = crate::pairing::respond(conn, &state.invites, &self.device_name, |pin_name| {
+            let path = trust.path();
+            // Whole load→mutate→save under lock, not just the write —
+            // same discipline as `Ops::trust_add`/`trust_remove`
+            // (`TrustStore::lock`'s own doc, `PLAN.md` M7 Step 7-1
+            // S1). This closure runs synchronously inside
+            // `SharedInviteStore::redeem`, which already holds its
+            // cache `RwLock` — that lock is acquired first, this one
+            // second, matching `TrustStore::lock`'s required order.
+            // Blocking here (a `flock` wait, then a small TOML
+            // rewrite) briefly parks the current tokio worker thread;
+            // see `PLAN.md` M7 Step 7-1's report for why that is
+            // accepted rather than moved to `spawn_blocking`.
+            let _lock = match crate::trust::TrustStore::lock(path) {
+                Ok(lock) => lock,
+                Err(err) => {
+                    tracing::error!(%err, "failed to lock the trust store during pairing");
+                    return false;
+                }
+            };
+            let mut store = match crate::trust::TrustStore::load(path) {
+                Ok(store) => store,
+                Err(err) => {
+                    tracing::error!(%err, "failed to load the trust store during pairing");
+                    return false;
+                }
+            };
+            let (peer, created, updated) =
+                store.add_peer(pin_name, None, observed_fp, crate::config::now_rfc3339());
+            if !created && !updated && peer.fingerprint != observed_fp.to_string() {
+                tracing::warn!(
+                    name = %pin_name,
+                    "pairing declined: name already pinned under a different identity"
                 );
-                if !created && !updated && peer.fingerprint != observed_fp.to_string() {
-                    tracing::warn!(
-                        name = %initiator_name,
-                        "pairing declined: name already pinned under a different identity"
-                    );
-                    return false;
-                }
-                if (created || updated)
-                    && let Err(err) = store.save(path)
-                {
-                    tracing::error!(%err, "failed to persist the trust store during pairing");
-                    return false;
-                }
-                true
-            })
-            .await;
+                return false;
+            }
+            if (created || updated)
+                && let Err(err) = store.save(path)
+            {
+                tracing::error!(%err, "failed to persist the trust store during pairing");
+                return false;
+            }
+            true
+        })
+        .await;
 
         match result {
             Ok(success) => {
-                tracing::info!(peer = %success.peer_device_name, "pairing succeeded");
+                tracing::info!(peer = %success.pinned_name, "pairing succeeded");
                 let _ = self.audit.record(&AuditRecord::pairing(
                     peer_addr,
                     Decision::Allow,
-                    &success.peer_device_name,
+                    &success.pinned_name,
                 ));
                 // ADR-0017 결정 3: tell the operator running
                 // `qsh serve` who just got pinned and whether `acl.toml`
@@ -1530,10 +1525,11 @@ impl Server {
                 let acl_row_present = self
                     .pinned_principals
                     .get()
-                    .is_some_and(|index| index.names_device(&success.peer_device_name));
+                    .is_some_and(|index| index.names_device(&success.pinned_name));
                 self.notify(&crate::pairing::pairing_pin_notice(
-                    &success.peer_device_name,
+                    &success.pinned_name,
                     acl_row_present,
+                    success.pinned_by_invite,
                 ));
                 conn.close(0, b"paired");
                 Ok(())
@@ -2073,6 +2069,7 @@ fn pairing_audit_category(err: &crate::pairing::PairingError) -> &'static str {
         PairingError::Expired => "expired",
         PairingError::AlreadyConsumed => "already-consumed",
         PairingError::PinCollision => "pin-collision",
+        PairingError::InvalidAssignedName => "invalid-assigned-name",
         PairingError::InvalidDeviceName { .. } => "invalid-device-name",
         PairingError::ResponderProofMismatch => "responder-proof-mismatch",
         PairingError::Remote { .. } => "remote-error",

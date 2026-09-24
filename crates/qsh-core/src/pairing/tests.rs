@@ -1,4 +1,3 @@
-
 use super::*;
 
 /// **Report F-1 regression.** Zero test in this crate directly pinned
@@ -59,7 +58,7 @@ fn reject_control_chars_allows_an_ordinary_device_name() {
 /// `"Dave's MacBook Pro"` as a name a peer may legitimately assert.
 #[test]
 fn the_pin_notice_shell_quotes_a_device_name_containing_an_apostrophe() {
-    let notice = pairing_pin_notice("Dave's MacBook Pro", false);
+    let notice = pairing_pin_notice("Dave's MacBook Pro", false, false);
     assert!(
         notice.contains(r"--principal 'device:Dave'\''s MacBook Pro' --action session.open"),
         "an apostrophe must be POSIX-escaped, not left to close the quote: {notice}"
@@ -72,7 +71,7 @@ fn the_pin_notice_shell_quotes_a_device_name_containing_an_apostrophe() {
 /// name that does not need it.
 #[test]
 fn the_pin_notice_wraps_an_apostrophe_free_name_without_escaping_it() {
-    let notice = pairing_pin_notice("probe-device", false);
+    let notice = pairing_pin_notice("probe-device", false, false);
     assert!(
         notice.ends_with("qsh acl check --principal 'device:probe-device' --action session.open"),
         "{notice}"
@@ -121,6 +120,23 @@ fn invalid_device_name_maps_to_invalid_argument_on_the_wire() {
         reason: wire::DeviceNameError::Control,
     };
     assert_eq!(err.as_wire_error().error_code(), ErrorCode::InvalidArgument);
+}
+
+/// [`PairingError::InvalidAssignedName`]'s own doc claims the initiator
+/// cannot use the wire reply to distinguish it from an ordinary
+/// [`PairingError::PinCollision`]. Pin that mechanically: not just the
+/// `ErrorCode` (both `SESSION_CONFLICT`) but the `message` bytes too, so
+/// the two variants' distinct `Display` text (used only for the
+/// host-local `tracing::warn!` and audit category) never leaks onto the
+/// wire.
+#[test]
+fn invalid_assigned_name_and_pin_collision_produce_the_same_wire_error() {
+    let a = PairingError::InvalidAssignedName.as_wire_error();
+    let b = PairingError::PinCollision.as_wire_error();
+    assert_eq!(
+        a, b,
+        "the wire error must be byte-identical, not just same-coded"
+    );
 }
 
 /// The boundary this guard now enforces (`docs/design/protocol.md`

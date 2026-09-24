@@ -391,7 +391,7 @@ M8 wire freeze 전 마지막 프로토콜 확장이라 스키마를 의도적으
 
 ### 15.5 상태 기계와 오류 매핑
 
-initiator(`qsh trust accept`)가 control 스트림에 `PairingProof` 하나를 보낸다. responder(`qsh serve`)는 `PairingAccepted`(성공) 또는 기존 `Error` frame(실패) 중 하나만 답하고, 어느 쪽이든 그 직후 연결을 닫는다 — 이 교환은 §9의 일반 `Response` oneof를 타지 않는 pairing 전용의, 의도적으로 더 작은 메시지 모양이다.
+initiator(`qsh pair accept`, 구 `qsh trust accept`)가 control 스트림에 `PairingProof` 하나를 보낸다. responder(`qsh serve`)는 `PairingAccepted`(성공) 또는 기존 `Error` frame(실패) 중 하나만 답하고, 어느 쪽이든 그 직후 연결을 닫는다 — 이 교환은 §9의 일반 `Response` oneof를 타지 않는 pairing 전용의, 의도적으로 더 작은 메시지 모양이다.
 
 | 조건 | 오류 코드(CLI.md §3.3) |
 |---|---|
@@ -413,13 +413,15 @@ initiator(`qsh trust accept`)가 control 스트림에 `PairingProof` 하나를 �
 
 invite의 TTL(10분, redeem 가능 창)과 §15.1의 retention(20분, TLS 게이트가 열려 있는 창)은 서로 다른 창이다 — TTL이 지나도 retention 안에서는 `pairing_open()`이 계속 `true`이므로, 뒤늦게 dial한 initiator는 "이 host는 애초에 페어링을 지원하지 않는다"처럼 보이는 TLS 단의 뭉뚱그려진 거부 대신 `TRUST_REQUIRED`라는 명확한 신호를 control 스트림 위에서 받는다.
 
-`device_name`의 표 기반 거부는 인증이 아니라 표시 안전성 문제다 — `device_name`은 애초에 인증 입력이 아니고(§15 서두, v1.proto 주석), 오직 pin의 label로만 쓰인다. 그런데 CLI human 렌더러(`qsh trust add`/`list`/`accept`)는 `{name} ({fingerprint})`를 한 줄에 찍는다 — 그 fingerprint가 바로 §15.4가 안내하는, operator가 out-of-band로 사후 대조해야 할 값이다. `name`에 터미널 이스케이프 시퀀스나 bare `\r`, 또는 bidi override가 섞이면 같은 줄의 fingerprint를 가리거나 덮어쓰거나 순서를 뒤집어서 그 대조를 무력화할 수 있으므로, `crate::pairing::accept`/`respond` 양쪽 다 이 값을 pin·persist·tracing 어디에도 넘기기 전에 거부한다(`qsh-core/src/pairing.rs`의 `reject_control_chars`, `qsh-proto`의 `wire::validate_device_name`). 길이 상한은 이제 `CONTROL_FRAME_MAX`(256 KiB)가 아니라 위 표의 `1..=64`바이트로 좁혀져 있다.
+`device_name`의 표 기반 거부는 인증이 아니라 표시 안전성 문제다 — `device_name`은 애초에 인증 입력이 아니고(§15 서두, v1.proto 주석), 오직 pin의 label로만 쓰인다. 그런데 CLI human 렌더러(`qsh trust add`/`qsh trust list`/`qsh pair accept`)는 `{name} ({fingerprint})`를 한 줄에 찍는다 — 그 fingerprint가 바로 §15.4가 안내하는, operator가 out-of-band로 사후 대조해야 할 값이다. `name`에 터미널 이스케이프 시퀀스나 bare `\r`, 또는 bidi override가 섞이면 같은 줄의 fingerprint를 가리거나 덮어쓰거나 순서를 뒤집어서 그 대조를 무력화할 수 있으므로, `crate::pairing::accept`/`respond` 양쪽 다 이 값을 pin·persist·tracing 어디에도 넘기기 전에 거부한다(`qsh-core/src/pairing.rs`의 `reject_control_chars`, `qsh-proto`의 `wire::validate_device_name`). 길이 상한은 이제 `CONTROL_FRAME_MAX`(256 KiB)가 아니라 위 표의 `1..=64`바이트로 좁혀져 있다.
 
 homoglyph(confusable) 위장 — 서로 다른 코드 포인트가 같은 글리프로 렌더되는 문제 — 는 `validate_device_name`이 탐지하지 않는다. 표 기반 confusable 판정은 커스텀 crate 없이는 정확히 구현하기 어렵고, 이 자리에서 실제로 방어선 노릇을 하는 것은 판정 자체가 아니라 §15.4의 fingerprint 병기다: 이름이 아무리 비슷하게 보여도 pin은 독립적으로 검증된 fingerprint에 걸리므로, homoglyph는 operator의 눈을 헷갈리게 할 수는 있어도 신원 검사 자체를 대신하지 못한다.
 
 ### 15.6 동시 양방향 pin과 충돌
 
 성공하면 두 장치가 **같은 교환** 안에서 서로를 pin한다 — 별도의 `trust add` 왕복이 없다. 두 pin 모두 기존 `TrustStore::add_peer` 경로(Step 2)를 그대로 탄다. responder 쪽 pin은 `SharedInviteStore::redeem`의 `on_matched` 훅으로 시점이 고정된다: 증명이 검증된 **직후**, invite가 소비 처리되기 **전에** 호출되어, 그 훅이 `false`(이름 충돌)를 답하면 `redeem` 자체가 `Rejected`를 반환하고 레코드는 바이트 단위로 그대로 남는다 — 충돌 실패가 invite를 태우지 않는다. initiator 쪽 pin은 이 wire 교환이 끝난 **뒤**, 완전히 로컬에서 별도로 실행된다(`Ops::trust_accept`) — 그래서 이 두 pin 사이에는 원자성이 없다: responder 쪽 pin과 invite 소비가 이미 성공한 뒤에 initiator 자신의 로컬 저장소에서 이름 충돌이 나는 경우, invite는 이미 소비된 채로 그 자리에 남고 initiator는 로컬 충돌을 별도로 해결하고 새 invite를 다시 받아야 한다(구현 보고서 §F가 이 창을 알려진 제약으로 남긴다).
+
+pin되는 이름 자체는 이 wire 교환과 별개의 축이다: `PairingProof.device_name`/`PairingAccepted.device_name`은 언제나 각자의 `device_id`를 그대로 실어 나르고, `qsh pair invite --as`/`qsh pair accept --as`가 고르는 이름은 CLI/JSON 축(초대 측은 `invites.toml`의 `assigned_name`, 수락 측은 순전히 로컬 `Ops::trust_accept` 호출)에서만 존재한다 — 어느 쪽 `--as` 값도 이 절의 `PairingProof`/`PairingAccepted` 메시지에 실리지 않는다.
 
 어느 쪽에서 나는 이름 충돌이든, 판정 자체는 항상 크게 실패한다(`SESSION_CONFLICT`) — 상대가 자칭하는 이름이 이미 다른 fingerprint로 로컬에 pin돼 있으면, `trust add`가 같은 상황에서 취하는 조용한 no-op과 달리 페어링은 절대 조용히 넘어가지 않는다(이 Step의 invariant #5; `trust add` 자신의 no-op은 의도적으로 손대지 않는다).
 
@@ -429,7 +431,7 @@ homoglyph(confusable) 위장 — 서로 다른 코드 포인트가 같은 글리
 
 ### 15.7 재시작 없는 invite 인식
 
-`qsh serve`는 시작 시점에 `invites.toml`을 한 번 열어 `SharedInviteStore`를 `SharedTrustStore`에 붙인다(`trust.attach_pairing(...)`, `Listener::bind`보다 먼저 — TLS 검증이 참조하는 evaluator와 동일 인스턴스여야 하므로). 이후의 redeem·`pairing_open()` 조회는 매번 파일을 다시 열어 **내용**을 비교한다 — `trust.toml`의 재로드가 따르는 것과 같은 원칙(CLI.md §6.11 `trust.remove` 문단, mtime이 아니라 바이트 비교가 유일한 판정자)이 invite store에도 그대로 적용된다. 별도 프로세스로 실행된 `qsh trust invite`가 파일에 새 invite를 쓰면, 이미 떠 있는 `qsh serve`는 재시작·시그널 없이 바로 다음 연결부터 그 invite를 인식한다.
+`qsh serve`는 시작 시점에 `invites.toml`을 한 번 열어 `SharedInviteStore`를 `SharedTrustStore`에 붙인다(`trust.attach_pairing(...)`, `Listener::bind`보다 먼저 — TLS 검증이 참조하는 evaluator와 동일 인스턴스여야 하므로). 이후의 redeem·`pairing_open()` 조회는 매번 파일을 다시 열어 **내용**을 비교한다 — `trust.toml`의 재로드가 따르는 것과 같은 원칙(CLI.md §6.11 `trust.remove` 문단, mtime이 아니라 바이트 비교가 유일한 판정자)이 invite store에도 그대로 적용된다. 별도 프로세스로 실행된 `qsh pair invite`(구 `qsh trust invite`)가 파일에 새 invite를 쓰면, 이미 떠 있는 `qsh serve`는 재시작·시그널 없이 바로 다음 연결부터 그 invite를 인식한다.
 
 raw secret은 디스크에 절대 남지 않는다 — `invites.toml`에는 `mac_key`(secret의 BLAKE3 해시)와 생성 시각만 기록되고, 파일 자체는 0600이다.
 

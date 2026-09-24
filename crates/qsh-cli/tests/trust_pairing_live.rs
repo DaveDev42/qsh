@@ -35,7 +35,7 @@ fn invite(host: &Sandbox) -> (String, String) {
         "accept_command must embed the real code verbatim: {accept_command:?} / {invite_code:?}"
     );
     assert!(
-        accept_command.starts_with("qsh trust accept <address> "),
+        accept_command.starts_with("qsh pair accept <address> "),
         "accept_command must be the copy-pasteable command line: {accept_command:?}"
     );
     (invite_code, accept_command)
@@ -596,5 +596,350 @@ fn trust_accept_with_a_port_notes_nothing() {
     assert!(
         !stderr.contains("assuming port"),
         "an address with an explicit port must not be noted: {stderr:?}"
+    );
+}
+
+/// Mint an invite with `--as <assigned_name>` and return `(code, assigned_name)`.
+fn invite_as(host: &Sandbox, assigned_name: &str) -> String {
+    let (code, envelope) = host.json(&["trust", "invite", "--as", assigned_name, "--json"]);
+    assert_eq!(code, 0, "{envelope}");
+    assert_eq!(
+        envelope["data"]["assigned_name"], assigned_name,
+        "{envelope}"
+    );
+    envelope["data"]["code"]
+        .as_str()
+        .expect("data.code")
+        .to_string()
+}
+
+/// ADR-0012 결정 6: the host pins the redeeming peer under the name the
+/// invite assigned with `--as`, never the peer's self-asserted device id.
+#[test]
+fn pair_invite_as_pins_the_invite_chosen_name_on_the_host() {
+    let host = Sandbox::initialized();
+    let client = Sandbox::initialized();
+    let serve = ServeGuard::start(&host);
+
+    let code = invite_as(&host, "workbench");
+    let (exit, accepted) = client.json(&["pair", "accept", serve.addr(), &code, "--json"]);
+    assert_eq!(exit, 0, "{accepted}");
+
+    let (list_exit, host_listed) = host.json(&["trust", "list", "--json"]);
+    assert_eq!(list_exit, 0, "{host_listed}");
+    let host_peers = host_listed["data"]["peers"].as_array().expect("peers");
+    assert_eq!(host_peers.len(), 1, "{host_listed}");
+    assert_eq!(
+        host_peers[0]["name"], "workbench",
+        "the host must pin under the invite-assigned name, not the \
+         client's self-asserted device id: {host_listed}"
+    );
+}
+
+/// The accept-side counterpart, and the wire-invariance canary in one
+/// (mutation #5/#6's target): `pair accept --as` only ever renames the
+/// entry in the *accepting* client's own store — the host, which never
+/// sees `--as` at all (it is not on the wire), still pins the client
+/// under its real, self-asserted device id.
+#[test]
+fn pair_accept_as_pins_the_client_chosen_name_locally() {
+    let host = Sandbox::initialized();
+    let client = Sandbox::initialized();
+    let client_device_id = client.init()["data"]["device_id"]
+        .as_str()
+        .expect("device_id")
+        .to_string();
+    let serve = ServeGuard::start(&host);
+
+    let (code, _cmd) = invite(&host);
+    let (exit, accepted) = client.json(&[
+        "pair",
+        "accept",
+        serve.addr(),
+        &code,
+        "--as",
+        "chosen-name",
+        "--json",
+    ]);
+    assert_eq!(exit, 0, "{accepted}");
+
+    let (client_list_exit, client_listed) = client.json(&["trust", "list", "--json"]);
+    assert_eq!(client_list_exit, 0, "{client_listed}");
+    let client_peers = client_listed["data"]["peers"].as_array().expect("peers");
+    assert_eq!(client_peers.len(), 1, "{client_listed}");
+    assert_eq!(client_peers[0]["name"], "chosen-name", "{client_listed}");
+
+    let (host_list_exit, host_listed) = host.json(&["trust", "list", "--json"]);
+    assert_eq!(host_list_exit, 0, "{host_listed}");
+    let host_peers = host_listed["data"]["peers"].as_array().expect("peers");
+    assert_eq!(host_peers.len(), 1, "{host_listed}");
+    assert_eq!(
+        host_peers[0]["name"], client_device_id,
+        "the host must never see the accept side's --as value at all — \
+         it pins the client's real device id, exactly as it would with no \
+         --as given: {host_listed}"
+    );
+}
+
+/// Both `--as` values in the same exchange, deliberately swapped from what
+/// either side's real identity is — each store must hold only its own
+/// axis's chosen name, proving the two are independent and neither
+/// crosses over the wire (`docs/design/protocol.md` §15.6).
+#[test]
+fn invite_side_and_accept_side_as_names_are_independent() {
+    let host = Sandbox::initialized();
+    let client = Sandbox::initialized();
+    let serve = ServeGuard::start(&host);
+
+    let code = invite_as(&host, "host-picks-this");
+    let (exit, accepted) = client.json(&[
+        "pair",
+        "accept",
+        serve.addr(),
+        &code,
+        "--as",
+        "client-picks-this",
+        "--json",
+    ]);
+    assert_eq!(exit, 0, "{accepted}");
+
+    let (_e, host_listed) = host.json(&["trust", "list", "--json"]);
+    let host_peers = host_listed["data"]["peers"].as_array().expect("peers");
+    assert_eq!(host_peers[0]["name"], "host-picks-this", "{host_listed}");
+
+    let (_e, client_listed) = client.json(&["trust", "list", "--json"]);
+    let client_peers = client_listed["data"]["peers"].as_array().expect("peers");
+    assert_eq!(
+        client_peers[0]["name"], "client-picks-this",
+        "{client_listed}"
+    );
+}
+
+/// ADR-0012 결정 6's backward-compatible fallback: an invite minted with no
+/// `--as` still pins the redeeming peer under its self-asserted device id,
+/// exactly as `trust invite`/`trust accept` always did.
+#[test]
+fn pair_invite_without_as_still_pins_the_self_asserted_name() {
+    let host = Sandbox::initialized();
+    let client = Sandbox::initialized();
+    let client_device_id = client.init()["data"]["device_id"]
+        .as_str()
+        .expect("device_id")
+        .to_string();
+    let serve = ServeGuard::start(&host);
+
+    let (_code, envelope) = host.json(&["pair", "invite", "--json"]);
+    assert!(
+        envelope["data"]["assigned_name"].is_null(),
+        "no --as: assigned_name must be absent, not null-but-present: {envelope}"
+    );
+    let code = envelope["data"]["code"].as_str().expect("code").to_string();
+
+    let (exit, accepted) = client.json(&["pair", "accept", serve.addr(), &code, "--json"]);
+    assert_eq!(exit, 0, "{accepted}");
+
+    let (_e, host_listed) = host.json(&["trust", "list", "--json"]);
+    let host_peers = host_listed["data"]["peers"].as_array().expect("peers");
+    assert_eq!(host_peers[0]["name"], client_device_id, "{host_listed}");
+}
+
+/// The accept-side half of the wire-invariance claim (`docs/design/
+/// protocol.md` §15.6): if `Ops::trust_accept` ever put `--as` on the
+/// wire as `PairingProof.device_name` instead of the real device id, the
+/// host would pin the client under the `--as` value even with no
+/// invite-side `assigned_name` at all. This asserts the same property
+/// `pair_accept_as_pins_the_client_chosen_name_locally` above does,
+/// through the CLI/JSON layer rather than a raw wire frame, with a
+/// deliberately identity-shaped `--as` value that would be trivially
+/// distinguishable from a real device id if it leaked onto the wire. The
+/// invite-side half — that an invite's `assigned_name` never reaches
+/// `PairingProof` either — is pinned directly at the frame level by
+/// `qsh-testkit`'s `invite_assigned_name_never_reaches_the_wire_proof`.
+#[test]
+fn pairing_frames_still_carry_the_device_id_not_the_assigned_name() {
+    let host = Sandbox::initialized();
+    let client = Sandbox::initialized();
+    let client_device_id = client.init()["data"]["device_id"]
+        .as_str()
+        .expect("device_id")
+        .to_string();
+    let serve = ServeGuard::start(&host);
+
+    let (code, _cmd) = invite(&host);
+    let (exit, accepted) = client.json(&[
+        "pair",
+        "accept",
+        serve.addr(),
+        &code,
+        "--as",
+        "definitely-not-a-device-id",
+        "--json",
+    ]);
+    assert_eq!(exit, 0, "{accepted}");
+
+    let (_e, host_listed) = host.json(&["trust", "list", "--json"]);
+    let host_peers = host_listed["data"]["peers"].as_array().expect("peers");
+    assert_eq!(
+        host_peers[0]["name"], client_device_id,
+        "PairingProof.device_name must carry this client's real device id, \
+         never the accept side's --as value: {host_listed}"
+    );
+    assert_ne!(host_peers[0]["name"], "definitely-not-a-device-id");
+}
+
+/// `--as` collision on the accept side is judged against the effective
+/// (chosen) name, not the self-asserted device id — a name already pinned
+/// on the client from something unrelated blocks the pairing even though
+/// the client's own device id is fine.
+#[test]
+fn pair_accept_as_collides_on_the_chosen_name_not_the_self_asserted_one() {
+    let host = Sandbox::initialized();
+    let client = Sandbox::initialized();
+    let serve = ServeGuard::start(&host);
+
+    client.trust_add(
+        "already-taken",
+        None,
+        "sha256:QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI=",
+    );
+
+    let (code, _cmd) = invite(&host);
+    let (exit, rejected) = client.json(&[
+        "pair",
+        "accept",
+        serve.addr(),
+        &code,
+        "--as",
+        "already-taken",
+        "--json",
+    ]);
+    assert_ne!(
+        exit, 0,
+        "a chosen-name collision must not be a silent no-op: {rejected}"
+    );
+    assert_eq!(rejected["error"]["code"], "SESSION_CONFLICT", "{rejected}");
+    assert!(
+        rejected["error"]["message"]
+            .as_str()
+            .expect("message")
+            .contains("already-taken"),
+        "the message must name the effective (chosen) name, not the \
+         self-asserted device id: {rejected}"
+    );
+
+    // Unlike a host-side collision, this check runs only after the wire
+    // exchange with the host has already succeeded (`Ops::trust_accept`
+    // pins locally under lock, strictly after `crate::pairing::accept`
+    // returns `Ok`) — the host has no visibility into the accept side's
+    // local naming at all, so it already pinned the client under its real
+    // device id, and the invite is already spent. There is no host-side
+    // rollback to prove here; `pair_invite_assigned_name_collision_
+    // declines_without_burning_the_invite` covers the one collision shape
+    // (host-side, pre-consumption) that does leave the invite untouched.
+    let (_e, host_listed) = host.json(&["trust", "list", "--json"]);
+    let host_peers = host_listed["data"]["peers"].as_array().expect("peers");
+    assert_eq!(host_peers.len(), 1, "{host_listed}");
+}
+
+/// The invite-side counterpart: the invite's `--as` name collides with
+/// something already pinned on the *host*. Declines through the same
+/// non-distinguishing path a self-asserted collision does, and — because
+/// this is a rejection inside `on_matched`, before the invite is marked
+/// consumed — the code must still be redeemable afterward, and
+/// `invites.toml` must be byte-identical (`docs/design/protocol.md` §15.6).
+#[test]
+fn pair_invite_assigned_name_collision_declines_without_burning_the_invite() {
+    let host = Sandbox::initialized();
+    let client = Sandbox::initialized();
+    let serve = ServeGuard::start(&host);
+
+    host.trust_add(
+        "collision-name",
+        None,
+        "sha256:Q0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0M=",
+    );
+    let code = invite_as(&host, "collision-name");
+    let invites_path = host.config_dir().join("invites.toml");
+    let raw_before = std::fs::read_to_string(&invites_path).unwrap();
+
+    let (exit, rejected) = client.json(&["pair", "accept", serve.addr(), &code, "--json"]);
+    assert_ne!(exit, 0, "{rejected}");
+    assert_eq!(rejected["error"]["code"], "SESSION_CONFLICT", "{rejected}");
+
+    let raw_after = std::fs::read_to_string(&invites_path).unwrap();
+    assert_eq!(
+        raw_after, raw_before,
+        "a declined assigned-name collision must leave invites.toml \
+         byte-identical — the invite is not consumed"
+    );
+
+    // Fix the collision on the host, then the very same code still works.
+    host.json(&["trust", "remove", "collision-name", "--json"]);
+    let other_client = Sandbox::initialized();
+    let (exit2, accepted) = other_client.json(&["pair", "accept", serve.addr(), &code, "--json"]);
+    assert_eq!(exit2, 0, "{accepted}");
+}
+
+/// Human mode with `--as` omitted prints the pinned self-asserted name on
+/// **stderr only** — never stdout, so a script piping stdout sees nothing
+/// extra (`docs/CLI.md` §6.11, ADR-0012 decision 6) — and the whole line
+/// is suppressed once `--as` picks the name explicitly. Both cases dial
+/// `serve.addr()` (an IP literal), the one address this harness can dial
+/// with zero risk of an environment-dependent resolver outcome deciding
+/// whether the connection even succeeds, so this also doubles as the
+/// "no suggested label for an IP-literal address" case.
+///
+/// The complementary claim — that a *hostname* address does produce a
+/// suggested label — is pinned separately and without a live dial at all:
+/// `crate::trust::tests::suggested_peer_label_takes_the_first_dns_label_
+/// and_skips_ip_literals` (`qsh-core`) proves `suggested_peer_label`
+/// itself returns `Some` for a hostname and `None` for an IP literal: a
+/// live test that actually dialed a hostname here would depend on which
+/// of `127.0.0.1`/`::1` this machine's resolver hands back first for
+/// `localhost`, which is not this harness's to control and differs across
+/// the three CI legs.
+#[test]
+fn pair_accept_suggested_name_notice_is_stderr_only_and_conditional() {
+    let host = Sandbox::initialized();
+    let serve = ServeGuard::start(&host);
+
+    // `--as` omitted: the self-asserted pin line prints on stderr, never
+    // stdout, and (IP literal, so no hostname to derive a label from)
+    // carries no suggested-rename clause.
+    let client = Sandbox::initialized();
+    let (code, _cmd) = invite(&host);
+    let output = client.qsh(&["pair", "accept", serve.addr(), &code]);
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("pinned as"),
+        "expected the self-asserted pin line on stderr: {stderr:?}"
+    );
+    assert!(
+        !stdout.contains("pinned as"),
+        "the pin notice must never reach stdout: {stdout:?}"
+    );
+    assert!(
+        !stderr.contains("consider `qsh trust rename"),
+        "an IP-literal address must not produce a suggested label: {stderr:?}"
+    );
+
+    // `--as` given: no notice at all, not even the self-asserted line.
+    let client_as = Sandbox::initialized();
+    let (code2, _cmd2) = invite(&host);
+    let output2 = client_as.qsh(&[
+        "pair",
+        "accept",
+        serve.addr(),
+        &code2,
+        "--as",
+        "chosen-name",
+    ]);
+    assert!(output2.status.success(), "{output2:?}");
+    let stderr2 = String::from_utf8_lossy(&output2.stderr);
+    assert!(
+        !stderr2.contains("pinned as"),
+        "no suggested-name notice belongs here when --as was given: {stderr2:?}"
     );
 }

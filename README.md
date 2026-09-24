@@ -53,8 +53,8 @@ install`) is underway. What works end to end today:
   scripts. The built-in `qsh mcp` stdio server was retired in M8 Step 6
   (see [ADR-0011](docs/adr/0011-remove-mcp-adapter.md)); run a remote
   stdio MCP server through `qsh exec host -- <server>` instead.
-- Four ways to pin a peer: trust-on-first-connect, `qsh trust
-  invite`/`qsh trust accept` pairing with a one-time code, a private CA
+- Four ways to pin a peer: trust-on-first-connect, `qsh pair
+  invite`/`qsh pair accept` pairing with a one-time code, a private CA
   (`qsh cert init`/`qsh cert issue`) so a fleet trusts one CA root instead
   of pinning every device by hand, or exchanging certificate files
   directly (`qsh identity export`, `qsh trust add --cert-file`, `qsh
@@ -242,12 +242,12 @@ the same exchange.
 
 ```bash
 # Host:
-qsh trust invite --json
+qsh pair invite --json
 # {"data":{"code":"abcd-efgh-jkmn-pqrs-tvwx-yz23-4567-89ab", "expires_at":"…",
-#          "accept_command":"qsh trust accept <address> abcd-efgh-jkmn-pqrs-tvwx-yz23-4567-89ab"}}
+#          "accept_command":"qsh pair accept <address> abcd-efgh-jkmn-pqrs-tvwx-yz23-4567-89ab"}}
 
 # Client, filling in the host's real address:
-qsh trust accept host.example.com:4433 abcd-efgh-jkmn-pqrs-tvwx-yz23-4567-89ab
+qsh pair accept host.example.com:4433 abcd-efgh-jkmn-pqrs-tvwx-yz23-4567-89ab
 ```
 
 The code carries no address, just a secret — read it over the phone, paste
@@ -474,7 +474,7 @@ Every connection is QUIC with TLS 1.3 mutual authentication. Both ends
 present a certificate and both ends check the other's fingerprint against
 the trust store. Anything that fails to authenticate is rejected during the
 handshake, before a session, tunnel, or listener exists. The one narrow,
-time-boxed exception is `qsh trust invite`/`qsh trust accept`: while a
+time-boxed exception is `qsh pair invite`/`qsh pair accept`: while a
 freshly minted invite is live, an otherwise-unpinned certificate is admitted
 into a dedicated pairing exchange that can do nothing but verify possession
 of the invite's secret and, on success, pin — it never reaches a session,
@@ -673,7 +673,13 @@ Some of these are MVP scope decisions, some are unfinished work.
   the very next connection attempt from the removed peer is rejected
   immediately (`docs/CLI.md` §6.11). Force-closing a peer's
   already-established connection on removal is P1.
-- `qsh trust accept` pins both sides in one exchange, but the two pins are
+- `qsh trust rename` takes effect on the *next handshake* immediately, no
+  restart needed, the same way `qsh trust remove` does — but `acl.toml`
+  rows do not: they still match the pre-rename name until `qsh serve` is
+  restarted, since `acl.toml` has no hot reload at all (ADR-0012 결정 7).
+  A renamed peer's next connection authenticates fine but can be denied
+  every operation until the ACL rows catch up.
+- `qsh pair accept` pins both sides in one exchange, but the two pins are
   not atomic. The host's pin (and the invite's consumption) happens first,
   as part of the wire exchange; the client's own local pin happens after,
   entirely on its own. If the client hits a name collision in its own
@@ -682,14 +688,14 @@ Some of these are MVP scope decisions, some are unfinished work.
   the whole exchange rolling back. A collision on the host's side, during
   the exchange itself, does roll back cleanly: the invite is left
   redeemable (`docs/design/protocol.md` §15.6).
-- Retrying `qsh trust accept` against a peer the host already pinned
+- Retrying `qsh pair accept` against a peer the host already pinned
   fails as a non-retryable `SESSION_CONFLICT`, and **a fresh invite does
   not fix it** — the host's pin makes the ordinary mTLS path win before
   the connection ever reaches invite/pairing logic again, so the invite's
   own state is not the problem. Recovery is `qsh trust remove` on the
-  host, then a new `trust invite`/`trust accept` round
+  host, then a new `pair invite`/`pair accept` round
   (`docs/design/protocol.md` §15.6, `docs/CLI.md` §6.11).
-- `qsh trust invite` does not know this device's reachable address. Human
+- `qsh pair invite` does not know this device's reachable address. Human
   mode suggests candidates by asking the kernel which source address a
   packet leaving this host would carry, but that is a routing observation,
   not a reachability check — behind NAT or a firewall none of them may work
@@ -698,7 +704,7 @@ Some of these are MVP scope decisions, some are unfinished work.
   since there is no interface-enumeration fallback. The operator still
   picks the address and relays it out of band (`docs/CLI.md` §6.11).
 - A listener is not a code-pairing peer: only an inbound `qsh serve`
-  redeems invite codes, so `qsh trust invite`/`qsh trust accept` cannot
+  redeems invite codes, so `qsh pair invite`/`qsh pair accept` cannot
   pin a `qsh listen` or `qsh serve --to` peer. Pin that peer by
   certificate file instead (`qsh identity export`, `qsh trust add
   --cert-file`, `docs/CLI.md` §6.11, §6.13).

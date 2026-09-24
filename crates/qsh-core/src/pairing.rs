@@ -88,6 +88,17 @@ pub enum PairingError {
     /// conflicting pin can retry within the same TTL.
     #[error("a peer is already pinned under this name with a different identity")]
     PinCollision,
+    /// The matching invite's stored `assigned_name` failed
+    /// [`crate::trust::validate_peer_label`] — a corrupted or hand-edited
+    /// `invites.toml` (`qsh pair invite --as` only ever writes an
+    /// already-validated name). Maps to the **same** wire error as
+    /// [`Self::PinCollision`] (`SESSION_CONFLICT`) so the initiator cannot
+    /// use the reply to distinguish this from an ordinary name collision;
+    /// the invite is left unconsumed, exactly as [`Self::PinCollision`]
+    /// leaves it. Never falls back to the peer's self-asserted name
+    /// (ADR-0012 결정 6).
+    #[error("the invite's assigned name failed validation")]
+    InvalidAssignedName,
     /// The responder answered `PairingAccepted`, but its proof did not
     /// verify against this initiator's own independently-derived
     /// expectation. **Never pin on this outcome** — see [`wire::PairingAccepted`]'s
@@ -166,6 +177,12 @@ impl PairingError {
             RedeemOutcome::Rejected => {
                 unreachable!("Rejected is handled by the caller (PinCollision), not built here")
             }
+            RedeemOutcome::InvalidAssignedName => {
+                unreachable!(
+                    "InvalidAssignedName is handled by the caller (InvalidAssignedName), \
+                     not built here"
+                )
+            }
             RedeemOutcome::Expired => PairingError::Expired,
             RedeemOutcome::AlreadyConsumed => PairingError::AlreadyConsumed,
             RedeemOutcome::NoMatch => PairingError::NoMatch,
@@ -173,17 +190,28 @@ impl PairingError {
     }
 
     /// The wire `Error` a responder sends for this failure (report §B7).
+    ///
+    /// [`Self::InvalidAssignedName`] deliberately sends the *same* message
+    /// as [`Self::PinCollision`], not its own `Display` text — see that
+    /// variant's doc. The distinct `Display` stays for the host-local
+    /// `tracing::warn!` in `server/mod.rs` and the distinct audit failure
+    /// category; only the wire bytes are unified. Pinned byte-identical by
+    /// `invalid_assigned_name_and_pin_collision_produce_the_same_wire_error`.
     fn as_wire_error(&self) -> wire::Error {
         let code = match self {
             PairingError::NoMatch => ErrorCode::AuthFailed,
             PairingError::Expired => ErrorCode::TrustRequired,
-            PairingError::AlreadyConsumed | PairingError::PinCollision => {
-                ErrorCode::SessionConflict
-            }
+            PairingError::AlreadyConsumed
+            | PairingError::PinCollision
+            | PairingError::InvalidAssignedName => ErrorCode::SessionConflict,
             PairingError::InvalidDeviceName { .. } => ErrorCode::InvalidArgument,
             _ => ErrorCode::Internal,
         };
-        wire::Error::new(code, self.to_string(), false)
+        let message = match self {
+            PairingError::InvalidAssignedName => PairingError::PinCollision.to_string(),
+            other => other.to_string(),
+        };
+        wire::Error::new(code, message, false)
     }
 }
 
@@ -198,15 +226,25 @@ fn reject_control_chars(name: &str, field: &'static str) -> Result<(), PairingEr
         .map_err(|reason| PairingError::InvalidDeviceName { field, reason })
 }
 
-/// A verified pairing exchange's result: the *other* side's self-reported
-/// name and this connection's own view of its certificate fingerprint —
+/// A verified pairing exchange's result: the name to pin the peer under —
 /// everything [`crate::trust::TrustStore::add_peer`] needs to pin it
 /// (`report §B9/§B10` — neither side ever carries a fingerprint over the
 /// wire, `Connection::peer_fingerprint` already has it for free).
 #[derive(Debug, Clone)]
 pub struct PairingSuccess {
-    /// The name to pin the peer under (its own self-reported device name).
-    pub peer_device_name: String,
+    /// The name to pin the peer under: on [`respond`]'s side, the
+    /// invite's `assigned_name` when the invite carried one, else the
+    /// peer's own self-reported device name (ADR-0012 결정 6); on
+    /// [`accept`]'s side, always the responder's self-reported device
+    /// name — `Ops::trust_accept` resolves its own `--as` override
+    /// locally, this field never reflects it.
+    pub pinned_name: String,
+    /// `true` iff `pinned_name` came from an invite's `assigned_name`
+    /// rather than the peer's self-assertion. Meaningful only on
+    /// [`respond`]'s side (it selects [`pairing_pin_notice`]'s wording);
+    /// always `false` from [`accept`], which has no invite of its own to
+    /// consult.
+    pub pinned_by_invite: bool,
 }
 
 /// Pull this connection's RFC 5705 exported keying material under
@@ -269,7 +307,8 @@ pub async fn accept(
             }
             reject_control_chars(&accepted.device_name, "PairingAccepted.device_name")?;
             Ok(PairingSuccess {
-                peer_device_name: accepted.device_name,
+                pinned_name: accepted.device_name,
+                pinned_by_invite: false,
             })
         }
         Some(control_message::Body::Response(wire::Response {
@@ -284,17 +323,22 @@ pub async fn accept(
 }
 
 /// The self-asserted-name clause of the pairing-succeeded notice (ADR-0017
-/// 결정 3, `:30-32`). Before `--as` lands, a responder pins the
-/// initiator under whatever `device_name` it claimed for itself, and this
-/// notice exists so the operator running `qsh serve` sees that fact rather
-/// than discovering it later from `trust.toml`.
-///
-/// **This constant (and its two siblings below) stops being true once
-/// `--as` lets the operator pin under a name of their own choosing** —
-/// whoever lands `--as` revises it, moving the verbatim doc/README tests
-/// added alongside it to that commit too.
+/// 결정 3, `:30-32`). Selected when the redeemed invite carried no
+/// `--as`: the responder pins the peer under whatever `device_name` it
+/// claimed for itself, and this notice exists so the operator running
+/// `qsh serve` sees that fact rather than discovering it later from
+/// `trust.toml`. Deliberately never says the peer "asked for itself" any
+/// more — once `--as` exists, self-assertion is a fact about *this*
+/// exchange, not a property the peer's own claim carries on its own; see
+/// [`PAIRING_PINNED_INVITE_ASSIGNED`] for the other branch.
 pub const PAIRING_PINNED_SELF_ASSERTED: &str =
-    "pinned a new peer under the name it asked for itself:";
+    "pinned a new peer under the name it sent for itself because the invite carried no --as:";
+
+/// [`pairing_pin_notice`]'s other branch: selected when the redeemed
+/// invite's `assigned_name` (`qsh pair invite --as`) is what got pinned,
+/// not the peer's self-reported name (ADR-0012 결정 6).
+pub const PAIRING_PINNED_INVITE_ASSIGNED: &str =
+    "pinned a new peer under the name the invite assigned with --as:";
 
 /// [`pairing_pin_notice`]'s impact+next-command clause when no `[[acl]]`
 /// row names the newly-pinned principal yet: it can authenticate, but
@@ -325,22 +369,27 @@ pub const PAIRING_ACL_ROW_PRESENT: &str = "An `[[acl]]` row already names it, so
 /// is called; `acl_row_present` comes from
 /// [`crate::acl::PinnedPrincipalIndex::names_device`] against the `Policy`
 /// this process loaded at startup, never a fresh read of `acl.toml`.
-pub fn pairing_pin_notice(name: &str, acl_row_present: bool) -> String {
+pub fn pairing_pin_notice(name: &str, acl_row_present: bool, pinned_by_invite: bool) -> String {
+    let observation = if pinned_by_invite {
+        PAIRING_PINNED_INVITE_ASSIGNED
+    } else {
+        PAIRING_PINNED_SELF_ASSERTED
+    };
     let tail = if acl_row_present {
         PAIRING_ACL_ROW_PRESENT
     } else {
         PAIRING_ACL_ROW_ABSENT
     };
-    // `name` is the peer's self-asserted `device_name` — `wire::
-    // validate_device_name` rejects control/bidi/zero-width characters
-    // and anything over 64 bytes, but not spaces, quotes or shell
-    // metacharacters (`"Dave's MacBook Pro"` is a valid name, asserted as
-    // such by `reject_control_chars_allows_an_ordinary_device_name`
+    // `name` is the pinned name — self-asserted or invite-assigned —
+    // `wire::validate_device_name` rejects control/bidi/zero-width
+    // characters and anything over 64 bytes, but not spaces, quotes or
+    // shell metacharacters (`"Dave's MacBook Pro"` is a valid name,
+    // asserted as such by `reject_control_chars_allows_an_ordinary_device_name`
     // below). The principal is shell-quoted so the printed "next command"
     // stays the command it claims to be.
     let principal = shell_single_quoted(&format!("device:{name}"));
     format!(
-        "{PAIRING_PINNED_SELF_ASSERTED} \"{name}\". {tail} qsh acl check --principal {principal} --action session.open"
+        "{observation} \"{name}\". {tail} qsh acl check --principal {principal} --action session.open"
     )
 }
 
@@ -367,9 +416,7 @@ fn shell_single_quoted(text: &str) -> String {
 /// it is unambiguously additive on its own, not a change to either
 /// exempted axis.
 ///
-/// **Whoever lands the `qsh trust invite` → `qsh pair invite` rename must
-/// also revise the next-command clause here.**
-pub const PAIRING_INVITE_REPLAY_NOTICE: &str = "an invite code was presented again after it had already been redeemed. Nothing was pinned and the peer got SESSION_CONFLICT; an invite is single-use by design, so this is not a fault on this host. Mint a fresh one with `qsh trust invite` if that peer still needs to pair.";
+pub const PAIRING_INVITE_REPLAY_NOTICE: &str = "an invite code was presented again after it had already been redeemed. Nothing was pinned and the peer got SESSION_CONFLICT; an invite is single-use by design, so this is not a fault on this host. Mint a fresh one with `qsh pair invite` if that peer still needs to pair.";
 
 /// The responder's side (`qsh serve`, once `pairing_open()` admitted this
 /// connection). Accept the peer-opened control stream, read one
@@ -431,13 +478,45 @@ pub async fn respond(
         }
     };
 
-    let outcome = store.redeem(&ekm, &client_proof, std::time::SystemTime::now(), || {
-        try_pin(&proof_msg.device_name)
-    })?;
+    // Resolved inside the closure, once `redeem` has already confirmed the
+    // matching invite's stored `assigned_name` (if any) is itself valid —
+    // captured here rather than returned through `RedeemOutcome` because
+    // the whole point of `on_matched`'s placement (`docs/design/
+    // protocol.md` §15.6) is that the pin decision happens *before* the
+    // invite is marked consumed.
+    let mut pin_name = String::new();
+    let mut pinned_by_invite = false;
+    let outcome = store.redeem(
+        &ekm,
+        &client_proof,
+        std::time::SystemTime::now(),
+        |assigned_name| {
+            pinned_by_invite = assigned_name.is_some();
+            let candidate = assigned_name.unwrap_or(proof_msg.device_name.as_str());
+            // The wire guard above only ran `wire::validate_device_name` on
+            // the self-asserted name (no `/` check) — the effective name gets
+            // the full `validate_peer_label` rule right before it is ever
+            // handed to `try_pin` (`crate::trust::validate_peer_label`'s own
+            // doc). A self-asserted name that fails here declines through the
+            // same non-distinguishing `Rejected` -> `PinCollision` path a
+            // fingerprint collision does; `qsh`-generated `device_id`s never
+            // contain `/`, so this changes nothing for them.
+            if crate::trust::validate_peer_label(candidate).is_err() {
+                return false;
+            }
+            pin_name = candidate.to_string();
+            try_pin(candidate)
+        },
+    )?;
     let server_proof = match outcome {
         RedeemOutcome::Accepted { server_proof } => server_proof,
         RedeemOutcome::Rejected => {
             let err = PairingError::PinCollision;
+            drain_rejection(&mut ctl, &err).await;
+            return Err(err);
+        }
+        RedeemOutcome::InvalidAssignedName => {
+            let err = PairingError::InvalidAssignedName;
             drain_rejection(&mut ctl, &err).await;
             return Err(err);
         }
@@ -473,7 +552,8 @@ pub async fn respond(
     }
 
     Ok(PairingSuccess {
-        peer_device_name: proof_msg.device_name,
+        pinned_name: pin_name,
+        pinned_by_invite,
     })
 }
 

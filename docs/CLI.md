@@ -83,6 +83,7 @@ trust.add
 trust.add_ca
 trust.list
 trust.remove
+trust.rename
 trust.invite
 trust.accept
 cert.init
@@ -94,7 +95,7 @@ capabilities.get
 version.get
 ```
 
-`session.attach`는 value operation이 아니라 stream operation이다 (§7.1 참고). CLI subcommand 표기(`qsh hosts`, `qsh session open` 등)와 이 dotted 이름은 서로 다른 계층이며, envelope의 `command` field와 audit record는 항상 이 dotted 이름을 사용한다.
+`session.attach`는 value operation이 아니라 stream operation이다 (§7.1 참고). CLI subcommand 표기(`qsh hosts`, `qsh session open` 등)와 이 dotted 이름은 서로 다른 계층이며, envelope의 `command` field와 audit record는 항상 이 dotted 이름을 사용한다. 이 층 분리의 한 사례로, `qsh trust invite`/`qsh trust accept`가 `qsh pair invite`/`qsh pair accept`로 개명된 뒤에도 dotted 이름 `trust.invite`/`trust.accept`는 그대로다(§6.11, ADR-0012 결정 9).
 
 dotted 이름은 CLI subcommand token을 기계적으로 옮긴 것이다(`cert.init` ↔ `qsh cert init`, `host.get` ↔ `qsh host get`). clap이 렌더링하는 다중 단어 subcommand token은 kebab-case(`add-ca`)이지만, `-`는 모든 `acl.toml` action과 모든 `Op::as_str` 값이 쓰는 `[a-z._]` 어휘 밖이다. 단어 경계를 유지하면서 이 어휘에 들어맞는 유일한 표기는 snake_case이고, 이는 JSON contract가 이미 쓰는 관례(`cert_pem`, `added_at`, `key_store`)와도 같다. `trust.add_ca`(CLI 표기 `qsh trust add-ca`)가 `trust.addca`가 아닌 이유이며, 이후 `trust.rename`·`service.*` 같은 다중 단어 subcommand도 같은 규칙을 따른다.
 
@@ -122,6 +123,8 @@ ACL action은 인가(authorization) 어휘로, operation 이름과는 별개 차
 | `host.list`, `host.get`, `identity.init`, `identity.export`, `trust.*`, `cert.init`, `cert.issue`, `doctor.run`, `acl.check`, `schema.get`, `capabilities.get`, `version.get` | 인가 불요 — local operation으로 원격 peer의 ACL 평가 대상이 아님 |
 
 `forward.socks`는 action 어휘에 예약되어 있지만 어떤 operation도 이 action으로 인가하지 않는다 — `-D`가 실제로 구현된 뒤에도 마찬가지다(위 행, ADR-0019 decision 14). 향후 예약: streaming file copy → `file.read`/`file.write`.
+
+위 표의 "인가 불요"는 원격 peer의 ACL 평가 대상이 아니라는 뜻이지, 이 머신 상태에 부작용이 없다는 뜻이 아니다 — `trust.rename`이 그 예다: 원격 peer를 인가하는 행위가 아니므로 이 표에 없지만, 실행되고 나면 `acl.toml`의 `[[acl]]` 행이 어떤 principal을 매치하는지 자체가 바뀐다(§6.11).
 
 역방향 host 등록은 operation이 아니라 **연결 수립 시점의 검사**다 — 위 표는 operation→ACL action 매핑이고 `qsh listen`/`qsh serve --to`(구 표기 `qsh reverse`, §6.13)는 §2.4가 명시하듯 operation이 아닌 장기 실행 모드이므로 표에 행을 만들지 않는다. `qsh serve --to`(target)가 `qsh listen`(controller)에 dial해 보내는 `Hello.reverse`(protocol.md §9·§11)를 controller가 인증서로 인증한 뒤, 그 principal에 ACL action `host.reverse`를 검사한다 — 통과해야만 registry에 등록된다(default deny, PRD §9).
 
@@ -677,7 +680,7 @@ qsh trust remove <name> --json
 
 `trust.add`는 fingerprint를 명시하면 연결 없이 peer를 pin한다(provisioning 친화). 이때 `--address`는 선택이며 생략하면 `address`는 빈 문자열로 기록된다 — 단, `qsh exec <name>`의 host→주소 해석(§6.1, §6.8)은 address가 있는 pin만 이 store 쪽 후보로 삼으므로 명령을 보낼 host는 address와 함께 pin하거나 `hosts.toml`에 주소를 적어 둔다(inbound 전용 peer, 즉 "이 장비에 접속해 올 client"는 fingerprint만으로 충분하다). fingerprint 없이 연결해서 확인하는 방식은 human mode에서만 prompt를 열며 `--json` mode에서는 §2.1 규칙에 따라 prompt 대신 `TRUST_REQUIRED` 오류에 `details.observed_fingerprint`와 `details.address`를 담아 반환한다 — 호출자는 그 값을 검증한 뒤 `--fingerprint`로 재호출한다.
 
-`--address`에 포트를 적지 않으면 4433을 채워 저장한다 — `qsh serve`/`qsh listen`의 bind 기본값과 같은 포트 하나다(ADR-0014). 포트를 채운 경우에만 stderr 한 줄이 나가며 envelope에는 이 사실이 들어가지 않는다. 그 문면은 정확히 "assuming port 4433: the peer address names no port, so this command uses port 4433 everywhere that address goes. Re-run with an explicit `host:port` to use a different port."다(`qsh_core::trust::ADDRESS_PORT_ASSUMED_NOTICE`, `trust add`와 `trust accept` 양쪽에서 나온다). `--address`를 아예 생략한 경우는 지금처럼 빈 문자열이고 포트를 채우지 않는다.
+`--address`에 포트를 적지 않으면 4433을 채워 저장한다 — `qsh serve`/`qsh listen`의 bind 기본값과 같은 포트 하나다(ADR-0014). 포트를 채운 경우에만 stderr 한 줄이 나가며 envelope에는 이 사실이 들어가지 않는다. 그 문면은 정확히 "assuming port 4433: the peer address names no port, so this command uses port 4433 everywhere that address goes. Re-run with an explicit `host:port` to use a different port."다(`qsh_core::trust::ADDRESS_PORT_ASSUMED_NOTICE`, `trust add`와 `pair accept` 양쪽에서 나온다). `--address`를 아예 생략한 경우는 지금처럼 빈 문자열이고 포트를 채우지 않는다.
 
 세 명령 모두 통일된 pinned peer 객체를 사용한다:
 
@@ -803,16 +806,22 @@ qsh trust add-ca <name> --cert-file <path> --json
 }
 ```
 
-초대 코드의 상환 창구는 인바운드 `qsh serve`의 기동 경로에만 있다(ADR-0013). 그래서 `qsh listen`이나 `qsh serve --to`(§6.13)로 뜬 peer는 `trust invite`/`trust accept`로 pin할 수 없고, 그 peer는 이 인증서 파일 교환으로 pin한다.
+초대 코드의 상환 창구는 인바운드 `qsh serve`의 기동 경로에만 있다(ADR-0013). 그래서 `qsh listen`이나 `qsh serve --to`(§6.13)로 뜬 peer는 `pair invite`/`pair accept`로 pin할 수 없고, 그 peer는 이 인증서 파일 교환으로 pin한다.
 
 ```bash
-qsh trust invite --json
-qsh trust accept <address> <code> --json
-qsh trust accept <address> --code-stdin --json
-qsh trust accept <address>
+qsh pair invite --json
+qsh pair invite --as <name> --json
+qsh pair accept <address> <code> --json
+qsh pair accept <address> --code-stdin --json
+qsh pair accept <address> --as <name>
+qsh pair accept <address>
 ```
 
-`trust.invite`는 이 장치에서 10분 TTL짜리 1회용 invite code를 발급한다(ADR-0002, M7 Step 4). 160-bit CSPRNG secret을 Crockford Base32로 인코딩해 `xxxx-xxxx-xxxx-xxxx-xxxx-xxxx-xxxx-xxxx` 형태(소문자, 4자씩 8그룹)로 보여준다. code 자체에는 주소가 들어 있지 않다 — 이 장치에 닿을 `host:port`는 여전히 별도로, out-of-band 경로로 전달해야 한다. human mode는 그 자리에 무엇을 넣을지 고르라고 후보 목록을 덧붙이지만(아래), envelope에는 어떤 주소도 싣지 않는다 — `data`는 `code`·`expires_at`·`accept_command` 셋 그대로다.
+**명명 계층(ADR-0012 결정 3/4).** `qsh trust ...`는 이미 store에 있는 pin을 다루는 조작(`add`/`list`/`remove`/`rename`)이고, `qsh pair ...`는 pairing으로 **새** trust 항목을 만드는 조작(`invite`/`accept`)이다 — 이 층 분리 때문에 `trust invite`/`trust accept`는 개명됐다. 구 표기 `qsh trust invite`/`qsh trust accept`는 숨김 서브커맨드로 남아 있으며 경고 없이 v1 내내 그대로 동작한다 — `qsh trust --help`의 `Commands:` 목록에서만 빠질 뿐, `qsh trust invite --help`/`qsh trust accept --help`와 그 실행 자체는 이전과 완전히 동일하게 파싱되고 동작한다(`qsh serve --to`의 숨김 alias `qsh reverse`가 §6.13에서 따르는 것과 같은 패턴). 구 표기가 v1 내내 그대로 파싱되고 동작하는 만큼, 이 문서와 코드 주석 곳곳의 예시가 `qsh trust invite`/`qsh trust accept`와 `qsh pair invite`/`qsh pair accept` 중 어느 쪽을 쓰든 둘 다 유효하다 — 남은 구 표기 예시는 놓친 것이 아니라 의도적으로 방치한 잔여물이다.
+
+`trust.invite`는 이 장치에서 10분 TTL짜리 1회용 invite code를 발급한다(ADR-0002, M7 Step 4). 160-bit CSPRNG secret을 Crockford Base32로 인코딩해 `xxxx-xxxx-xxxx-xxxx-xxxx-xxxx-xxxx-xxxx` 형태(소문자, 4자씩 8그룹)로 보여준다. code 자체에는 주소가 들어 있지 않다 — 이 장치에 닿을 `host:port`는 여전히 별도로, out-of-band 경로로 전달해야 한다. human mode는 그 자리에 무엇을 넣을지 고르라고 후보 목록을 덧붙이지만(아래), envelope에는 어떤 주소도 싣지 않는다 — `data`는 `code`·`expires_at`·`accept_command`·`assigned_name` 넷이다.
+
+`--as <name>`(`qsh pair invite --as`, ADR-0012 결정 6)은 redeem할 상대의 trust-store 이름을 invite 발급 시점에 미리 정한다 — 이 이름은 이 invite의 `invites.toml` 레코드에 함께 저장되고, redeem 시점에 상대가 자칭하는 이름을 무시하고 이 이름으로 pin된다. `assigned_name`은 `TrustInviteData`의 optional field로, `--as`를 준 경우에만 나타나고(`skip_serializing_if`, additive) 생략 시 자칭 이름이 그대로 pin되는 기존 동작과 같다. 이름은 §6.11 이 문단들이 pin 이름 전반에 적용하는 것과 같은 검증(`docs/design/protocol.md` §15.5의 `validate_device_name` 표에 `/` 금지를 더한 것)을 통과해야 하며, 실패하면 그 자리에서 `INVALID_ARGUMENT`이고 invite 자체가 발급되지 않는다. 저장된 `assigned_name`이 (수동 편집 등으로) 그 검증을 나중에 통과하지 못하게 되면 redeem은 자칭 이름으로 조용히 되돌아가지 않고 `SESSION_CONFLICT`로 거부된다 — invite는 소비되지 않는다.
 
 ```json
 {
@@ -823,24 +832,26 @@ qsh trust accept <address>
   "data": {
     "code": "abcd-efgh-jkmn-pqrs-tvwx-yz23-4567-89ab",
     "expires_at": "2026-08-31T00:10:00Z",
-    "accept_command": "qsh trust accept <address> abcd-efgh-jkmn-pqrs-tvwx-yz23-4567-89ab"
+    "accept_command": "qsh pair accept <address> abcd-efgh-jkmn-pqrs-tvwx-yz23-4567-89ab"
   }
 }
 ```
 
 human mode는 `accept_command`를 화면에 그대로 찍는다. operator는 `<address>` 자리만 실제 주소로 바꿔 상대에게 전달하면 된다 — 그게 이 필드의 유일한 용도다.
 
-human mode는 `accept_command` 아래에 이 host가 스스로 관측한 후보 주소를 덧붙인다 — `<address>` 자리에 넣을 값을 고르는 재료다. 관측은 커널에 길을 묻는 것 하나뿐이다: 문서용 예약 주소(RFC 5737 `192.0.2.1`, RFC 3849 `2001:db8::1`)를 목적지로 UDP 소켓을 `connect`하고 커널이 고른 소스 주소를 읽는다 — IP 패밀리(v4/v6)당 최대 하나이지, 이 host가 가진 다른 인터페이스 주소(두 번째 NIC, Tailscale/WireGuard 같은 overlay 포함)까지 나열하는 것은 아니다. 전송은 하지 않으므로 와이어로 나가는 바이트는 0이고, 그래서 기다릴 것도 없다. 붙는 포트는 이 host의 `[serve].bind`가 명시한 값이고, 이 명령이 그 값을 읽을 수 없으면(미설정이거나, `config.toml` 읽기·파싱이 실패했거나, bind spec의 포트 부분이 `u16`으로 파싱되지 않는 경우 — 이 세 갈래 모두) 4433이다. `config.toml` 파싱 실패는 이 경로에서 별도 오류나 경고 없이 조용히 4433으로 접힌다. 실행 중인 `qsh serve --bind`가 그 포트를 덮어썼는지, 그리고 `[serve].bind`가 loopback처럼 이 host 자신을 이미 좁혀 놨는지는 이 명령이 알 수 있는 사실이 아니다 — 가령 `[serve].bind`가 `127.0.0.1:4433`이면 여기 찍힐 수 있는 LAN 주소를 실제 서버는 받지 않는다. loopback·unspecified 주소와, zone index 없이는 붙여 넣을 수 없는 IPv6 link-local(`fe80::/10`)은 후보에서 뺀다. 찍히는 IPv6 후보가 이 host가 RFC 8981 privacy extension으로 하루 안팎마다 스스로 회전시키는 임시 주소일 수 있다는 것도 이 관측은 모른다 — `trust accept`는 그 순간 쓰인 주소를 영구적으로 pin하므로, 이 줄을 나중에 복사해 쓰면 이미 낡은 주소일 수 있다. 머리글 문면은 정확히 "Default-route source address per IP family, not every interface -- port is `[serve].bind`'s, or 4433 when it gives none this command can read, never a running `qsh serve --bind`. Not a reachability check: a NAT or firewall can still block any of these for the peer:"다. 커널이 어느 축에서도 소스 주소를 답하지 않거나, 답한 것이 전부 위 규칙에 걸리면 목록 대신 정확히 "No candidate: the kernel named no source address, or only ones this line can't offer (loopback, unspecified, or an unprintable link-local) -- not "this device has no address". Invite still valid; fill `<address>` by hand. Check routing with `ip route`/`route -n`."가 나간다. 인터페이스 열거(`getifaddrs` 계열) 폴백은 없다.
+human mode는 `accept_command` 아래에 이 host가 스스로 관측한 후보 주소를 덧붙인다 — `<address>` 자리에 넣을 값을 고르는 재료다. 관측은 커널에 길을 묻는 것 하나뿐이다: 문서용 예약 주소(RFC 5737 `192.0.2.1`, RFC 3849 `2001:db8::1`)를 목적지로 UDP 소켓을 `connect`하고 커널이 고른 소스 주소를 읽는다 — IP 패밀리(v4/v6)당 최대 하나이지, 이 host가 가진 다른 인터페이스 주소(두 번째 NIC, Tailscale/WireGuard 같은 overlay 포함)까지 나열하는 것은 아니다. 전송은 하지 않으므로 와이어로 나가는 바이트는 0이고, 그래서 기다릴 것도 없다. 붙는 포트는 이 host의 `[serve].bind`가 명시한 값이고, 이 명령이 그 값을 읽을 수 없으면(미설정이거나, `config.toml` 읽기·파싱이 실패했거나, bind spec의 포트 부분이 `u16`으로 파싱되지 않는 경우 — 이 세 갈래 모두) 4433이다. `config.toml` 파싱 실패는 이 경로에서 별도 오류나 경고 없이 조용히 4433으로 접힌다. 실행 중인 `qsh serve --bind`가 그 포트를 덮어썼는지, 그리고 `[serve].bind`가 loopback처럼 이 host 자신을 이미 좁혀 놨는지는 이 명령이 알 수 있는 사실이 아니다 — 가령 `[serve].bind`가 `127.0.0.1:4433`이면 여기 찍힐 수 있는 LAN 주소를 실제 서버는 받지 않는다. loopback·unspecified 주소와, zone index 없이는 붙여 넣을 수 없는 IPv6 link-local(`fe80::/10`)은 후보에서 뺀다. 찍히는 IPv6 후보가 이 host가 RFC 8981 privacy extension으로 하루 안팎마다 스스로 회전시키는 임시 주소일 수 있다는 것도 이 관측은 모른다 — `pair accept`는 그 순간 쓰인 주소를 영구적으로 pin하므로, 이 줄을 나중에 복사해 쓰면 이미 낡은 주소일 수 있다. 머리글 문면은 정확히 "Default-route source address per IP family, not every interface -- port is `[serve].bind`'s, or 4433 when it gives none this command can read, never a running `qsh serve --bind`. Not a reachability check: a NAT or firewall can still block any of these for the peer:"다. 커널이 어느 축에서도 소스 주소를 답하지 않거나, 답한 것이 전부 위 규칙에 걸리면 목록 대신 정확히 "No candidate: the kernel named no source address, or only ones this line can't offer (loopback, unspecified, or an unprintable link-local) -- not "this device has no address". Invite still valid; fill `<address>` by hand. Check routing with `ip route`/`route -n`."가 나간다. 인터페이스 열거(`getifaddrs` 계열) 폴백은 없다.
 
 `--json`/`--jsonl`에서는 이 질의를 아예 하지 않는다 — 후보는 human stdout 전용 채널이고, machine mode의 stdout에는 envelope 한 줄 외에 아무것도 나가지 않는다(§2.2). 이 목록은 도달성 주장이 아니다: NAT나 방화벽 뒤에서 상대가 실제로 닿을 수 있는지는 이 host가 볼 수 없는 사실이고, 그래서 머리글이 그것을 명시적으로 부정한다.
 
 `trust.accept <address> <code>`는 `address`로 dial해 `code`가 가리키는 invite를 redeem한다. `address`도 포트를 생략하면 4433으로 읽고, 채운 경우 같은 `assuming port 4433` 한 줄이 stderr로 나간다. pin에 저장되는 주소는 그 정규화된 값, 즉 방금 dial에 성공한 그 문자열이다. 인증의 근거는 TLS identity가 아니라 secret 소유 증명이다: 양쪽은 TLS exporter(RFC 5705 `export_keying_material`)로 채널에 묶인 값을 뽑고, 그 위에 도메인을 분리한 두 개의 BLAKE3 keyed-hash 증명(initiator→responder, responder→initiator)을 constant-time으로 주고받는다. 상대 쪽 증명이 검증되기 전에는 어느 쪽도 pin하지 않는다 — 메시지가 도착했다는 사실만으로 pin하는 경로는 없다.
 
-`code`를 주는 경로는 셋이다. 명령줄 위치 인자, `--code-stdin`(표준입력을 끝까지 읽는다), 그리고 셋 다 없을 때 human mode에서 열리는 프롬프트다. 프롬프트는 표준입력이 터미널일 때만 열리고 에코를 끄며 문면은 stderr로 나간다 — stdout에는 결과 envelope 외에 아무것도 나가지 않는다(§2.2). `--code-stdin`도 표준입력이 터미널이면 같은 방식으로 에코를 끈다 — 프롬프트를 기다리지 않고 바로 타이핑해도 코드가 화면에 남지 않는다. 세 경로 모두 읽은 값은 앞뒤 공백을 제거한 뒤 쓴다 — 위치 인자도 포함이라 `qsh trust accept <address> ' abcd-... '`처럼 앞뒤에 공백이 붙어도 그대로 통한다. code 문법 자체는 Crockford 심볼과 `-`만 허용하므로 `printf '%s\n' "$code" | qsh trust accept <address> --code-stdin`처럼 후행 개행이 붙은 입력은 제거하지 않으면 첫 시도부터 거부된다. 내부 공백은 제거하지 않는다 — 코드 중간의 공백은 여전히 오류다. 위치 인자와 `--code-stdin`을 함께 주는 것은 인자 사용 오류(exit 2, envelope 없음, §4)다. 코드가 셸 히스토리에 남는 것 자체는 재사용 위험이 아니다 — invite는 1회용이고 발급 10분 뒤 상환이 끝난다.
+`code`를 주는 경로는 셋이다. 명령줄 위치 인자, `--code-stdin`(표준입력을 끝까지 읽는다), 그리고 셋 다 없을 때 human mode에서 열리는 프롬프트다. 프롬프트는 표준입력이 터미널일 때만 열리고 에코를 끄며 문면은 stderr로 나간다 — stdout에는 결과 envelope 외에 아무것도 나가지 않는다(§2.2). `--code-stdin`도 표준입력이 터미널이면 같은 방식으로 에코를 끈다 — 프롬프트를 기다리지 않고 바로 타이핑해도 코드가 화면에 남지 않는다. 세 경로 모두 읽은 값은 앞뒤 공백을 제거한 뒤 쓴다 — 위치 인자도 포함이라 `qsh pair accept <address> ' abcd-... '`처럼 앞뒤에 공백이 붙어도 그대로 통한다. code 문법 자체는 Crockford 심볼과 `-`만 허용하므로 `printf '%s\n' "$code" | qsh pair accept <address> --code-stdin`처럼 후행 개행이 붙은 입력은 제거하지 않으면 첫 시도부터 거부된다. 내부 공백은 제거하지 않는다 — 코드 중간의 공백은 여전히 오류다. 위치 인자와 `--code-stdin`을 함께 주는 것은 인자 사용 오류(exit 2, envelope 없음, §4)다. 코드가 셸 히스토리에 남는 것 자체는 재사용 위험이 아니다 — invite는 1회용이고 발급 10분 뒤 상환이 끝난다.
+
+`--as <name>`(`qsh pair accept --as`, ADR-0012 결정 6)은 이 쪽에서 pin할 이름을 상대의 자칭 대신 직접 고른다 — invite 쪽 `--as`(위)와는 독립이다: 두 쪽 다 줄 수도, 한쪽만 줄 수도, 둘 다 생략할 수도 있으며 서로의 값에 관여하지 않는다. `TrustAcceptReq.as_name`으로 실려 가고, `trust.accept`는 `--fingerprint` 없는 `trust.add`와 마찬가지로 이 이름 자체도 `/`를 추가로 금지하는 검증(위 `--as` 문단과 같은 규칙)을 거친다 — 실패하면 dial하기 전에 `INVALID_ARGUMENT`다. 이름 충돌 판정(아래)도 실제로 pin되는 이 이름을 기준으로 한다 — 상대의 자칭 이름이 아니라. **`--as`를 생략한 human mode 호출은 pin 성공 뒤 stderr에 한 줄을 더 낸다**: pin된 자칭 이름과, `address`가 IP 리터럴이 아니라 호스트명을 담고 있으면 거기서 뽑은 제안 라벨(첫 DNS label, `qsh_core::trust::suggested_peer_label`)을 함께 알린다 — 이 관측은 host-local stderr 전용이며 `TrustAcceptData`나 어떤 JSON 줄에도 들어가지 않는다. `qsh pair invite`에는 이런 제안이 없다(주소가 없다).
 
 이 증명이 보장하는 것은 "상대가 invite secret을 안다"까지다 — 그 이상의 신원 주장은 아니다. secret은 전화나 채팅처럼 사람이 개입하는 경로로 전달되는 경우가 많으므로, 더 높은 확신이 필요하면 pairing이 끝난 뒤 `trust list`가 보여주는 fingerprint를 out-of-band로 상대와 사후 대조하는 것도 방법이다 — pairing 자체가 요구하는 단계는 아니고, 원하는 operator가 추가로 얹는 defense-in-depth다(`docs/design/protocol.md` §15.4).
 
-성공하면 두 장치가 같은 교환 안에서 서로를 pin한다. responder(`qsh serve`) 쪽은 그 사실을 자기 stderr에 한 줄 더 낸다 — envelope과는 무관한 host-local 채널이고(ADR-0017 결정 3), 그 자리에서 이 프로세스가 강제 중인 `acl.toml`에 상대 이름을 부르는 `[[acl]]` 행이 있는지까지 함께 알린다. 행이 없으면 문면은 정확히 "pinned a new peer under the name it asked for itself: \"<name>\". No `[[acl]]` row names it, so it can authenticate but every action is still denied. Add a row for it to acl.toml and restart this `qsh serve` before it takes effect, then re-check with: qsh acl check --principal 'device:<name>' --action session.open"다(`qsh_core::pairing::PAIRING_PINNED_SELF_ASSERTED` + `PAIRING_ACL_ROW_ABSENT`). 행이 이미 있으면 재시작 문장이 빠지고 뒷부분이 "An `[[acl]]` row already names it, so it inherits that row's grants exactly as written, including any you did not mean for this device. Confirm them with: qsh acl check --principal 'device:<name>' --action session.open"로 바뀐다(`PAIRING_ACL_ROW_PRESENT`) — 그 행 유무는 `qsh serve`가 기동 시 1회 읽은 정책 그대로를 판정 근거로 삼으므로, 기동 이후에 `acl.toml`을 편집했다면 재시작 전까지는 여전히 없는 것으로 보고한다.
+성공하면 두 장치가 같은 교환 안에서 서로를 pin한다. responder(`qsh serve`) 쪽은 그 사실을 자기 stderr에 한 줄 더 낸다 — envelope과는 무관한 host-local 채널이고(ADR-0017 결정 3), 그 자리에서 이 프로세스가 강제 중인 `acl.toml`에 상대 이름을 부르는 `[[acl]]` 행이 있는지까지 함께 알린다. 관측절은 어느 이름이 실제로 pin됐는지에 따라 갈린다: `--as` 없이 상대가 자칭한 이름 그대로 pin됐으면 정확히 "pinned a new peer under the name it sent for itself because the invite carried no --as:"(`PAIRING_PINNED_SELF_ASSERTED`), invite 쪽에서 `qsh pair invite --as`로 미리 지정해 둔 이름이 pin됐으면 "pinned a new peer under the name the invite assigned with --as:"(`PAIRING_PINNED_INVITE_ASSIGNED`)다. 이어지는 " \"<name>\". " 뒤로는 두 경우 모두 같은 두 갈래다: 행이 없으면 "No `[[acl]]` row names it, so it can authenticate but every action is still denied. Add a row for it to acl.toml and restart this `qsh serve` before it takes effect, then re-check with: qsh acl check --principal 'device:<name>' --action session.open"(`PAIRING_ACL_ROW_ABSENT`), 행이 이미 있으면 재시작 문장이 빠지고 "An `[[acl]]` row already names it, so it inherits that row's grants exactly as written, including any you did not mean for this device. Confirm them with: qsh acl check --principal 'device:<name>' --action session.open"(`PAIRING_ACL_ROW_PRESENT`) — 그 행 유무는 `qsh serve`가 기동 시 1회 읽은 정책 그대로를 판정 근거로 삼으므로, 기동 이후에 `acl.toml`을 편집했다면 재시작 전까지는 여전히 없는 것으로 보고한다.
 
 pin은 `trust.add`와 같은 경로(`TrustStore::add_peer`)를 타므로 `trust.accept`의 결과 모양도 `trust.add`와 같다 — 다만 `address`는 `trust.add`의 기본값(생략 시 빈 문자열)과 달리 방금 dial에 성공한 그 주소가 그대로 채워진다: pairing은 항상 실제 연결을 전제하므로 채울 주소가 없는 경우가 없고, 이걸 비워 두면 `qsh exec <name>`(§6.1, §6.8)이 곧바로 `HOST_NOT_FOUND`가 되어 ADR-0002가 노리는 "페어링 후 바로 접속" 경험이 깨진다:
 
@@ -862,7 +873,7 @@ pin은 `trust.add`와 같은 경로(`TrustStore::add_peer`)를 타므로 `trust.
 }
 ```
 
-invite는 한 번만 redeem된다 — 성공하는 순간 소비되고, **다른** 상대가 같은 code를 다시 쓰면 `SESSION_CONFLICT`다. TTL이 지난 code는 `TRUST_REQUIRED`, secret이 맞지 않는 code(오타, 아직 발급되지 않은 code 등 — 이미 소비된 code와는 다른 오류다)는 `AUTH_FAILED`로 거부한다. 이 재상환 거부의 원격 wire 문면(`SESSION_CONFLICT`)과 콘솔 tracing 로그는 ADR-0017 결정 4가 처방을 얹지 않기로 정한 두 채널이라 손대지 않는다 — 대신 `qsh serve`가 자기 stderr에 세 번째 줄을 더한다: 정확히 "an invite code was presented again after it had already been redeemed. Nothing was pinned and the peer got SESSION_CONFLICT; an invite is single-use by design, so this is not a fault on this host. Mint a fresh one with `qsh trust invite` if that peer still needs to pair."다(`qsh_core::pairing::PAIRING_INVITE_REPLAY_NOTICE`).
+invite는 한 번만 redeem된다 — 성공하는 순간 소비되고, **다른** 상대가 같은 code를 다시 쓰면 `SESSION_CONFLICT`다. TTL이 지난 code는 `TRUST_REQUIRED`, secret이 맞지 않는 code(오타, 아직 발급되지 않은 code 등 — 이미 소비된 code와는 다른 오류다)는 `AUTH_FAILED`로 거부한다. 이 재상환 거부의 원격 wire 문면(`SESSION_CONFLICT`)과 콘솔 tracing 로그는 ADR-0017 결정 4가 처방을 얹지 않기로 정한 두 채널이라 손대지 않는다 — 대신 `qsh serve`가 자기 stderr에 세 번째 줄을 더한다: 정확히 "an invite code was presented again after it had already been redeemed. Nothing was pinned and the peer got SESSION_CONFLICT; an invite is single-use by design, so this is not a fault on this host. Mint a fresh one with `qsh pair invite` if that peer still needs to pair."다(`qsh_core::pairing::PAIRING_INVITE_REPLAY_NOTICE`).
 
 **이미 pin된 상대가 재시도하는 경우는 이 "다시 쓰면 `SESSION_CONFLICT`"와 겉모습은 같지만 원인이 다르다.** 페어링에 성공한 바로 그 상대가 (예: accept 명령을 실수로 두 번 실행해서) 같은 code로 다시 접속을 시도하면, host는 이미 그 신원을 pin해 뒀으므로 TLS 단에서 pin 경로가 먼저 잡혀 이 연결은 애초에 invite/pairing 판정 자체에 닿지 못한다 — 대신 일반 handshake 경로가 이를 자리를 벗어난 메시지로 보고 `SESSION_CONFLICT`(`retryable: false`)로 명시적으로 거부한다. **이때는 새 invite를 발급받아도 소용없다** — code나 invite의 상태가 문제가 아니라 이 신원이 host에 이미 pin되어 있다는 사실 자체가 원인이므로, 복구하려면 host가 `trust remove`로 기존 pin을 먼저 지워야 한다(`docs/design/protocol.md` §15.6, README Known limitations).
 
@@ -870,9 +881,35 @@ pin 시점에 이름 충돌이 생기면 — 상대가 자칭하는 이름이 �
 
 상대가 자칭하는 `device_name`(양쪽 다 — initiator의 `PairingProof.device_name`, responder의 `PairingAccepted.device_name`)이 `docs/design/protocol.md` §15.5의 `validate_device_name` 표를 벗어나면 — 제어 문자(tab 포함, `char::is_control()`), bidi 제어(U+202A–U+202E, U+2066–U+2069, U+200E–U+200F), zero-width 문자(U+200B–U+200D, U+2060, U+FEFF), 또는 UTF-8 길이가 0바이트이거나 64바이트를 넘음 — 그 자리에서 `INVALID_ARGUMENT`로 거부한다 — 어느 쪽도 pin되지 않고, 거부된 값 자체는 로그에 남기지 않는다. `device_name`은 인증 입력이 아닌 자칭 label일 뿐이지만, human 렌더러가 `{name} ({fingerprint})`를 한 줄에 찍으므로 이스케이프 시퀀스나 bidi override가 그 fingerprint(바로 위 문단이 사후 대조를 권하는 값)를 가리거나 지우거나 표시 순서를 뒤집을 수 있다는 것이 이 거부의 이유다. homoglyph는 탐지하지 않는다 — fingerprint 병기가 방어선이다(`docs/design/protocol.md` §15.5).
 
-`qsh serve`로 이미 떠 있는 데몬은 재시작 없이 새로 발급된 invite를 인식한다 — `trust.remove`(바로 위 문단)가 따르는 것과 같은 content-based reload 원칙이 invite store에도 그대로 적용된다. 이 재로드는 `qsh trust invite`(CLI 프로세스)와 `qsh serve`(daemon)가 같은 `invites.toml`을 서로 다른 프로세스에서 잠금 없이 읽고 쓰는 형태라, 두 프로세스의 쓰기가 정확히 겹치는 좁은 창에서는 한쪽의 갱신이 다른 쪽에 곧바로 반영되지 않을 수 있다(예: 거의 동시에 발급된 두 invite 중 하나가 다음 redeem 조회에서 아직 보이지 않는 경우) — 이후 재시도나 다음 저장 시점에는 다시 수렴하므로 invite가 영구히 사라지지는 않지만, 완전한 파일 잠금은 아직 없다(Step 7 debt로 이월).
+`qsh serve`로 이미 떠 있는 데몬은 재시작 없이 새로 발급된 invite를 인식한다 — `trust.remove`(바로 위 문단)가 따르는 것과 같은 content-based reload 원칙이 invite store에도 그대로 적용된다. 이 재로드는 `qsh pair invite`(CLI 프로세스)와 `qsh serve`(daemon)가 같은 `invites.toml`을 서로 다른 프로세스에서 잠금 없이 읽고 쓰는 형태라, 두 프로세스의 쓰기가 정확히 겹치는 좁은 창에서는 한쪽의 갱신이 다른 쪽에 곧바로 반영되지 않을 수 있다(예: 거의 동시에 발급된 두 invite 중 하나가 다음 redeem 조회에서 아직 보이지 않는 경우) — 이후 재시도나 다음 저장 시점에는 다시 수렴하므로 invite가 영구히 사라지지는 않지만, 완전한 파일 잠금은 아직 없다(Step 7 debt로 이월).
 
 `--json`/`--jsonl` mode에서는 pairing도 interactive prompt를 열지 않는다(§2.1) — 잘못된 code나 인자 오류는 곧바로 오류 envelope로 반환된다. 그래서 machine mode에서 위치 인자도 `--code-stdin`도 없이 부르면 프롬프트 대신 `INVALID_ARGUMENT`다. `--code-stdin`을 줬더라도 표준입력이 터미널이면 machine mode에서는 마찬가지로 `INVALID_ARGUMENT`다 — 터미널 위에서 사람의 입력을 기다리는 것 자체가 §2.1이 금지하는 대기이기 때문이다; 표준입력이 파이프나 파일이면 이 제약과 무관하게 그대로 읽는다. 표준입력이 터미널이 아닌 human mode 호출(스크립트, cron)도 같은 이유로 `INVALID_ARGUMENT`다 — 열 수 있는 프롬프트가 없다. Windows 빌드에는 에코를 끄는 경로가 없어 터미널 프롬프트 대신 `UNSUPPORTED`를 내며 `--code-stdin`을 안내한다(client Windows는 P1, `docs/design/architecture.md` §8) — `--code-stdin` 자체는 이 플랫폼에서도 동작하지만, 터미널 입력이면 에코는 꺼지지 않는다.
+
+```bash
+qsh trust rename <old> <new> --json
+```
+
+`trust.rename`은 pin을 지우지 않고 이름만 바꾼다 — `fingerprint`·`address`·`added_at`은 그대로다. `qsh trust remove <old>` 다음 `qsh trust add <new> ...`로 흉내 내면 그 사이 짧게라도 pin이 아예 없는 창이 생기고 `added_at`도 새로 찍히므로, 이 둘과는 다른 별도 경로다. `new`는 위 `--as` 문단과 같은 라벨 검증(`/` 금지 포함)을 거치고, `old == new`도 `INVALID_ARGUMENT`다. `new`가 이미 다른 `[[peer]]`나 `[[ca]]` 이름과 겹치면 `SESSION_CONFLICT`(`retryable: false`)이고, `old`가 어떤 `[[peer]]`도 가리키지 않으면(`[[ca]]`만 있는 이름 포함) `HOST_NOT_FOUND`다 — `trust.toml` 자체를 읽을 수 없으면 다른 모든 trust 조작과 같은 `CONFIG_ERROR`다. `[[ca]]` 항목은 이 명령이 건드리지 않는다 — CA 라벨은 여전히 별도로 관리되고, `new`가 CA 이름과 겹치는 것은 위처럼 거부 사유가 될 뿐이다.
+
+`trust.remove`(위)와 같은 content-based reload 원칙이 여기도 적용된다 — 러닝 중인 `qsh serve`를 재시작할 필요 없이 다음 handshake부터 새 이름으로 인증된다. **다만 `acl.toml`은 이 재로드 대상이 아니다(`acl.toml`은 기동 시 1회만 읽는다, ADR-0012 결정 7)**: 옛 이름을 부르는 `[[acl]]` 행은 계속 그 이름으로 매치되고(그 이름은 더 이상 아무 pin도 가리키지 않으므로 사실상 죽은 행이 된다), 새 이름을 위한 행은 이 `qsh serve`를 재시작해 정책을 다시 읽어야 비로소 인가에 반영된다 — 재시작 전까지 새 이름의 principal은 인증은 되지만(pin은 이미 바뀌었으므로) 어떤 행도 없어 default-deny로 전부 거부된다. 이미 확립된 연결은 이 이름 변경의 영향을 받지 않는다 — `trust.remove`가 §6.11 위 문단에서 서술하는 것과 같은 이유로, 연결이 협상한 권한은 재연결 전까지 그대로다. `hosts.toml`에 옛 이름으로 적어 둔 주소 항목은 이 명령이 건드리지 않으므로 그 이름은 여전히 어떤 pin도 없이 주소만 해석된다 — 필요하면 운영자가 `qsh host`(§6.8)로 직접 정리한다. 성공 시 audit record 하나가 남는다 — `action: "trust.rename"`, `auth_path: "local"`(원격 peer 인증 없는 로컬 op이라는 뜻) — 이 field는 이 값 외에도 ACL 경로를 가리키는 `"pin"`/`"ca"`, pairing 레코드의 `"pairing"`, 신원이 아직 확정되지 않은 연결·요약 레코드의 `"-"`을 쓴다, `principal`이 옛 이름, `resource`가 새 이름이다(`docs/design/architecture.md` §6, ADR-0012 결정 7). 기록에 실패하면(예: audit 쓰기 자체가 fail-closed로 거부) 이름은 바뀌지 않는다 — audit이 실패했는데 조용히 이름만 바뀌는 경로는 없다.
+
+```json
+{
+  "schema": "qsh.cli/v1",
+  "request_id": "01K0EXAMPLE",
+  "command": "trust.rename",
+  "ok": true,
+  "data": {
+    "peer": {
+      "name": "personal-mac-2",
+      "fingerprint": "sha256:BASE64FINGERPRINT",
+      "address": "personal-mac.example.com:4433",
+      "added_at": "2026-08-17T00:00:00Z"
+    },
+    "old_name": "personal-mac"
+  }
+}
+```
 
 `doctor.run`의 전체 계약(§6.17, M7 Step 6)은 진단 코드 22종·envelope 모양·exit code 규칙을 담는다 — 이 절 밖에서는 더 설명하지 않는다.
 
@@ -997,6 +1034,10 @@ qsh serve --to <listener|host:port> [--name <name>]
   계속 바꿔 가며 거부당하는 flood는 같은 부피 상한 안에 더 많은 행을 채워 오래된 거부 레코드를
   예전보다 빨리 retention 밖으로 밀어낸다. 즉 이 조건에서 짧아지는 것은 감사 이력이 실제로 남는
   *기간*이지 디렉터리 총 바이트가 아니다.
+- **`qsh serve`/`qsh listen`만 이 audit.log를 쓰는 것은 아니다.** `qsh trust rename`(§6.11)은
+  로컬 CLI 프로세스에서 실행되면서도 `[audit].path`/`Paths::audit_log()`가 가리키는 바로 그
+  파일에 `action: "trust.rename"` 레코드 하나를 그 writer의 lock 아래 append하며, append에
+  실패하면 이름을 바꾸지 않고 fail closed한다.
 
 ### 6.13 장기 실행 모드: `qsh listen` / `qsh serve --to`
 
@@ -1026,11 +1067,11 @@ qsh serve --to <listener|host:port> [--name <name>]
 
   같은 상수를 `qsh listen` 시작 배너, `README.md`의 "Known limitations", 그리고 이 절이 함께 소비한다 — 문안 정본이 여러 벌 생기지 않는다. `qsh doctor`(§6.17)도 `code: "controller_unreachable"`을 그대로 소비한다.
 - `--bind`의 우선순위: CLI flag > `[listen].bind` > 기본값 `[::]:4433` — `qsh serve`(§6.12)와 **기본값이 같다**. 한 머신에서 두 역할을 겸하려면 명시적 `--bind`가 필요하고, 충돌은 조용한 오작동이 아니라 즉시·명시적 실패(stderr 진단 + exit `255`)다. 실패 문면의 관측절(`cannot listen on {bind}: {err}`) 뒤에 처방이 붙는다 — 정확히 "Nothing is being served. `qsh serve` and `qsh listen` both default to port 4433, so one machine running both needs an explicit bind for at least one of them. Re-run with `--bind <ip:port>` on a free port."다(`qsh_core::serve::BIND_UNAVAILABLE_REMEDY`, ADR-0014 결정 9). `qsh serve`(§6.12)의 같은 실패도 이 상수를 공유하므로 문안 정본은 여기 하나다.
-- **정책 파일 진단(M5).** `qsh serve`(§6.12)와 동일한 규율이다 — `qsh listen`/`qsh serve --to`(구 `qsh reverse`) 둘 다 시작 시 `acl.toml`을 1회 읽고, 없거나 파싱 불가면 리소스를 생성하지 않으며 그 상태에서 도달하는 모든 인가 판정은 항상 `deny`다(`docs/design/architecture.md` §6, `PLAN.md` M5 §4.1 #1). 운영자에게는 stderr에 파일 경로, `CONFIG_ERROR` 코드, 최소 정책 예시를 담은 진단을 한 번 출력하고(§6.12와 같은 평문 블록 — `StartupDiagnostic::render`, tracing JSON 라인이 아니다), 자동 생성은 하지 않는다. `qsh listen`은 controller로서 `host.reverse` 등록 요청을, `qsh serve --to`는 target으로서 그 연결 위에서 relay되는 세션 op을 각각 자기 자신의 `acl.toml`로 평가한다. `qsh serve`의 페어링 성공 시 pin 고지(§6.11)가 "행이 있나"를 묻는 근거도 여기 §6.13이 서술하는 것과 같은 시점 위험을 진다 — 정책은 프로세스 기동 시 1회만 읽히므로, 그 뒤에 `acl.toml`을 편집해도 재시작 전까지는 반영되지 않는다. 그 고지는 행이 없으면 정확히 "pinned a new peer under the name it asked for itself: \"<name>\". No `[[acl]]` row names it, so it can authenticate but every action is still denied. Add a row for it to acl.toml and restart this `qsh serve` before it takes effect, then re-check with: qsh acl check --principal 'device:<name>' --action session.open"다(`qsh_core::pairing::PAIRING_PINNED_SELF_ASSERTED` + `PAIRING_ACL_ROW_ABSENT`), 행이 이미 있으면 뒷부분이 "An `[[acl]]` row already names it, so it inherits that row's grants exactly as written, including any you did not mean for this device. Confirm them with: qsh acl check --principal 'device:<name>' --action session.open"로 바뀐다(`PAIRING_ACL_ROW_PRESENT`) — 문안 정본은 §6.11 하나이고 이 절은 그 상수를 재인용할 뿐이다. `qsh listen`/`qsh serve --to`는 pairing 교환 자체를 갖지 않으므로(트래픽은 항상 인바운드 `qsh serve`가 받는다) 이 고지가 여기서 발화하지는 않는다.
+- **정책 파일 진단(M5).** `qsh serve`(§6.12)와 동일한 규율이다 — `qsh listen`/`qsh serve --to`(구 `qsh reverse`) 둘 다 시작 시 `acl.toml`을 1회 읽고, 없거나 파싱 불가면 리소스를 생성하지 않으며 그 상태에서 도달하는 모든 인가 판정은 항상 `deny`다(`docs/design/architecture.md` §6, `PLAN.md` M5 §4.1 #1). 운영자에게는 stderr에 파일 경로, `CONFIG_ERROR` 코드, 최소 정책 예시를 담은 진단을 한 번 출력하고(§6.12와 같은 평문 블록 — `StartupDiagnostic::render`, tracing JSON 라인이 아니다), 자동 생성은 하지 않는다. `qsh listen`은 controller로서 `host.reverse` 등록 요청을, `qsh serve --to`는 target으로서 그 연결 위에서 relay되는 세션 op을 각각 자기 자신의 `acl.toml`로 평가한다. `qsh serve`의 페어링 성공 시 pin 고지(§6.11)가 "행이 있나"를 묻는 근거도 여기 §6.13이 서술하는 것과 같은 시점 위험을 진다 — 정책은 프로세스 기동 시 1회만 읽히므로, 그 뒤에 `acl.toml`을 편집해도 재시작 전까지는 반영되지 않는다. 그 고지의 관측절은 §6.11이 서술하듯 pin된 이름이 자칭인지 `--as`-지정인지에 따라 "pinned a new peer under the name it sent for itself because the invite carried no --as:"(`PAIRING_PINNED_SELF_ASSERTED`) 또는 "pinned a new peer under the name the invite assigned with --as:"(`PAIRING_PINNED_INVITE_ASSIGNED`)로 갈리고, 이어지는 " \"<name>\". " 뒤로는 행이 없으면 정확히 "No `[[acl]]` row names it, so it can authenticate but every action is still denied. Add a row for it to acl.toml and restart this `qsh serve` before it takes effect, then re-check with: qsh acl check --principal 'device:<name>' --action session.open"다(`PAIRING_ACL_ROW_ABSENT`), 행이 이미 있으면 뒷부분이 "An `[[acl]]` row already names it, so it inherits that row's grants exactly as written, including any you did not mean for this device. Confirm them with: qsh acl check --principal 'device:<name>' --action session.open"로 바뀐다(`PAIRING_ACL_ROW_PRESENT`) — 문안 정본은 §6.11 하나이고 이 절은 그 상수를 재인용할 뿐이다. `qsh listen`/`qsh serve --to`는 pairing 교환 자체를 갖지 않으므로(트래픽은 항상 인바운드 `qsh serve`가 받는다) 이 고지가 여기서 발화하지는 않는다.
 - 시작 시 실제로 bind된 주소와 등록 이벤트(`registered|denied|replaced|lost|expired|retry`)를 stderr에 구조화 진단(tracing target `qsh::reverse`, 한 줄 JSON, payload·토큰 field 없음)으로 출력한다 — stdout에는 §2.2 규칙에 따라 한 바이트도 쓰지 않는다. 이 진단은 `qsh.cli/v1`/`qsh.event/v1` 계약에 속하지 않는 열린 어휘다(issue #4 item 6). `denied`/`lost`/`retry`는 실패·유실 사유를 `cause` 필드(고정 8값 — `resolve`/`dial_timeout`/`refused`/`tls_rejected`/`registration_denied`/`peer_closed`/`path_dead`/`local`, 실패 지점에서 분류되며 주소·토큰·peer가 보낸 오류 본문은 절대 담지 않는다)로 함께 내고, `registered`/`replaced`/`expired`는 이 필드를 생략한다. controller 주소가 여러 개로 resolve되는 경우(issue #4 item 2) 한 번의 접속 시도는 최대 4개까지 순서대로 dial을 시도하며, 그중 전부가 실패했을 때의 `cause`와 그 실패까지 걸린 `since_registered_ms`는 마지막으로 시도한 주소 하나의 실패만을 서술한다 — 그 이전에 실패한 주소들은 이 진단 줄에 남지 않는다. 모든 레코드는 RFC3339 `at` 필드를 갖는다 — 초 단위 정밀도이고(`crate::config::now_rfc3339`), wall-clock 기록일 뿐 정렬 키가 아니다(같은 `lost`/`retry` 쌍처럼 짧은 간격으로 이어지는 레코드는 `at`이 같은 초로 겹칠 수 있으며, 순서가 필요하면 stderr에 실제로 쓰인 `qsh::reverse` 줄 순서를 봐야 한다). `retry`는 언제나 `fingerprint`를 생략하고(그 시점에는 아직 TLS 핸드셰이크가 없어 알 수 없다), `lost`와 그 직후의 `retry`는 그 등록이 살아 있던 기간을 `since_registered_ms`(ms)로 함께 내는 반면 등록이 성립한 적 없는 `retry`(가령 `dial_and_register` 자체가 실패한 경우)는 이 필드도 생략한다 — 어느 쪽이든 `null`이 아니라 키 자체가 없다.
 - `qsh serve --to <listener>`의 `<listener>`는 이름을 먼저, 주소를 다음으로 시도하는 2단계로 해석된다(ADR-0014 결정 7): 먼저 §6.8과 동일한 host→주소 해석(`hosts.toml` 우선, 없으면 `trust.toml`의 pinned peer)으로 trust store alias를 찾고, 그 이름이 없을 때만 리터럴을 정규화해(포트 없으면 4433 보충, §6.11) `trust.toml`의 pin 중 정규화된 주소가 일치하는 것을 찾는다 — 정확히 하나가 일치하면 그 peer의 이름이 controller key가 되고, 둘 이상이면 `INVALID_ARGUMENT`(first-wins 없음), 하나도 없으면 이름 조회 쪽의 오류(보통 `HOST_NOT_FOUND`)로 실패한다. 이름이 주소보다 항상 우선한다 — 주소처럼 생긴 이름으로 pin된 peer(`"192.0.2.10:4433"`)는 그 주소에 실제로 있는 다른 peer가 아니라 자기 자신으로 해석된다. 주소 해석으로 포트가 채워졌을 때만(§6.11과 동일한 `ADDRESS_PORT_ASSUMED_NOTICE`) stderr에 한 번 알린다. 등록에 성공하면 그 연결 위에서 host 역할로 동작하며, 서비스하는 세션은 `qsh serve`(인바운드)와 같은 broker·writer lease 규율을 그대로 따른다. **관찰 가능한 차이는 writer lease를 쥐는 connection이 상주 `qsh listen` 데몬이 유지하는 역방향 connection에 결합된다는 점이다** — 그 connection이 죽으면(재접속 루프가 새 connection을 세우기 전) lease는 forward 세션과 동일하게 자동 해제된다(architecture.md §3).
 - `qsh listen`/`qsh serve --to`(그리고 숨김 alias `qsh reverse`) 둘 다 Windows에서는 리소스를 생성하지 않고 `UNSUPPORTED` + exit `255`다 — localctl(UDS)과 host 역할(PTY)이 `cfg(unix)`이기 때문이다. `qsh serve --to`는 숨김 `qsh reverse` alias와 같은 경로(`run_reverse`)를 공유하므로 이 거부도 공유한다 — 인바운드 `qsh serve`는 이 거부를 갖지 않는다. `--to` 리터럴 자체의 대상 해석(`HOST_NOT_FOUND`/`INVALID_ARGUMENT`, §6.8과 같은 이름-그다음-주소 2단계)이 `run_reverse`에 닿기 전에 먼저 실패할 수도 있다. Windows의 `qsh hosts`는 forward host만 반환하며(데몬 개념 없음) 오류가 아니다.
-- **코드 pairing은 이 두 모드에 닿지 않는다(ADR-0013).** 초대 코드의 상환 창구(`SharedInviteStore`)는 인바운드 `qsh serve`의 기동 경로에만 배선돼 있어 `qsh listen`도 `qsh serve --to`도 열지 않는다. 따라서 `trust invite`/`trust accept`로는 controller도 target도 pin할 수 없고, 어느 방향이든 §6.11의 인증서 파일 교환(`qsh identity export` + `qsh trust add --cert-file`)이 그 경로다. 상환 창구를 `qsh listen`에도 열지는 ADR-0015로 예약돼 있다.
+- **코드 pairing은 이 두 모드에 닿지 않는다(ADR-0013).** 초대 코드의 상환 창구(`SharedInviteStore`)는 인바운드 `qsh serve`의 기동 경로에만 배선돼 있어 `qsh listen`도 `qsh serve --to`도 열지 않는다. 따라서 `pair invite`/`pair accept`로는 controller도 target도 pin할 수 없고, 어느 방향이든 §6.11의 인증서 파일 교환(`qsh identity export` + `qsh trust add --cert-file`)이 그 경로다. 상환 창구를 `qsh listen`에도 열지는 ADR-0015로 예약돼 있다.
 - 연결이 죽은 등록은 `state:"stale"`로 표시됐다가 `[listen].stale_retention`(기본 120s, `docs/design/protocol.md` §11-4)이 지나면 목록에서 제거된다.
 - **Controller 측 writer lease 결합 (M3 Step 6).** live 역방향 등록으로 뜨는 host를 향한 controller 쪽의 `qsh session ...`(value op 6종: open/get/list/read/write/resize/close)는 그 명령을 실행한 CLI 프로세스 자신의 QUIC connection이 아니라, 상주 `qsh listen` 데몬이 target과 유지하는 그 **하나의** reverse connection을 `LOCAL_CONTROL` conduit(`docs/design/protocol.md` §11-3)으로 relay해서 나간다. **대화형 attach(`qsh <name>`/`qsh attach <name>/<id>`)도 M3 Step 7부터 이 경로를 탄다.** `Ops::session_attach`는 route-aware해졌다(`Ops::connect`로 host route를 먼저 resolve하고, 그 결과가 live 역방향 등록이면 forward의 `connect_target`이 아니라 이 §의 `LOCAL_CONTROL` conduit으로 향한다); ticket을 실제로 redeem하는 data 스트림도 이제 `LOCAL_STREAM` conduit(위 conduit 모델 문단, `docs/design/protocol.md` §11-3)로 역방향에서 열린다 — 데몬은 그 conduit 위에서 `LocalHello`/`LocalHelloAck` 교환 뒤 wire `StreamHeader{SESSION_DATA, ticket}`를 받아 host의 QUIC connection 위에 새 bidi stream을 열고 그 뒤로는 순수 byte splice로만 동작한다(SessionFrame을 파싱하지도, payload를 로그하지도 않는다). 아래 lease 결합 규칙은 지금 이 value op·stream op 양쪽 모두에 참이다: 위 항목의 "writer lease를 쥐는 connection이 데몬의 reverse connection에 결합된다"는 target 쪽 서술의 controller 쪽 대응이다 — target이 실제로 보는 유일한 connection은 데몬의 것이므로, **writer lease는 데몬의 connection에 묶이지, lease를 요청한 CLI 프로세스 자체에는 묶이지 않는다.** 그 CLI 프로세스가 죽어도(터미널 종료, `Ctrl-C`, 비정상 종료) 데몬의 reverse connection이 살아 있는 한 lease는 자동 해제되지 않는다 — forward 세션(§5, architecture.md §3)의 "소유 connection이 죽으면 lease가 자동 해제"라는 기대가 reverse 경로에서는 CLI 프로세스 단위가 아니라 데몬 connection 단위로 적용된다는 뜻이다. **동시 attach 격리.** 이 lease를 실제로 쥐는지 판정하는 identity는 물리 connection(`ctx.connection_id()`)이 아니라 그 attach가 redeem한 단발성 ticket에서 유도된다(`WriterLease::take_owned`) — 그렇지 않으면 한 데몬을 거치는 모든 local CLI가 같은 물리 connection을 공유하는 탓에 서로 다른 두 attach가 같은 identity로 오인되어 조용히 lease를 공동 소유하고 (`no_steal`이 걸려 있어도) 서로의 keystroke를 같은 PTY에 섞어 넣는다. 반면 `no_steal`이 충돌 여부를 판단하는 기준은 여전히 **principal뿐**이다(architecture.md §3(b)). reverse 경로에서 한 데몬을 relay로 쓰는 모든 local CLI 프로세스는 — 어느 프로세스가 열었든 — 항상 그 데몬의 reverse connection과 같은 controller principal로 인증되므로, "타 principal이 lease를 쥐고 있다"는 `no_steal` 충돌의 전제 자체가 reverse 경로 안에서는 성립하지 않는다(`session.write`가 opener 결합 때문에 이미 이 규칙을 재현할 수 없는 것과 같은 이유, 바로 위 architecture.md §3(b) 인용). 즉 죽은 CLI가 남긴 lease는 자동 해제되지 않지만, 다음 attach는 대화형이든 `no_steal`을 쓰는 자동화든 관계없이 항상 그 lease를 이어받는다 — `SESSION_CONFLICT`는 이 reverse 시나리오에서는 발생하지 않는다.
 - **역방향 attach에는 아직 recovery/reconnect가 없다 (M3 Step 7).** Forward 경로의 attach는 connection이 끊겨도 (`docs/CLI.md` 이 절 밖의) 자동 재접속·resume 시도를 갖지만, `LOCAL_STREAM`/`LOCAL_CONTROL` conduit 위의 역방향 attach는 그 driver가 아직 없다 — 데몬의 reverse connection이나 conduit 자체가 죽으면 attach는 그 즉시 명확한 typed error로 끝난다(panic도, 무한 대기도 아니다). 세션 자체는 forward와 동일하게 살아남는다(broker가 쥐고 있고, connection 수명과 분리돼 있다 — architecture.md §3); 사용자가 다시 `qsh attach <name>/<id>`를 실행하면 데몬의 reverse connection이 살아 있는 한 정상적으로 재attach된다. 이 driver는 M3 Step 8에서 forward와 같은 `Reconnect` 추상 위에 통합될 예정이다.
@@ -1094,7 +1135,7 @@ qsh cert init --json
 qsh cert issue --json
 ```
 
-이 device를 자기 자신의 private CA로 만드는 두 명령이다([ADR-0008](adr/0008-private-ca-cert-issuance.md)). intermediate 없이 self-signed root 하나가 device leaf를 직접 서명하는 구조이며, `qsh trust add`/`trust accept`(§6.11)가 다루는 "각 device를 개별로 pin"하는 모델과는 별도의, 병행 가능한 신뢰 축이다 — 한 device가 어느 CA의 root를 신뢰하면 그 CA가 서명한 모든 device를 개별 pin 없이 신뢰한다.
+이 device를 자기 자신의 private CA로 만드는 두 명령이다([ADR-0008](adr/0008-private-ca-cert-issuance.md)). intermediate 없이 self-signed root 하나가 device leaf를 직접 서명하는 구조이며, `qsh trust add`/`pair accept`(§6.11)가 다루는 "각 device를 개별로 pin"하는 모델과는 별도의, 병행 가능한 신뢰 축이다 — 한 device가 어느 CA의 root를 신뢰하면 그 CA가 서명한 모든 device를 개별 pin 없이 신뢰한다.
 
 `cert.init`은 `<config_dir>/ca/`(0700)에 `ca.pem`(root 인증서)과 `ca.key`(PKCS#8 PEM private key, 0600)를 생성한다. `identity/`(§6.11의 device identity)와 의도적으로 분리된 디렉터리다 — 이 device가 *서명할 수 있는지*는 이 device *자신이 누구인지*와 다른 threat이기 때문이다. 이미 root가 있으면 새로 만들지 않고 기존 root를 `created: false`로 반환한다(멱등).
 

@@ -115,15 +115,26 @@ pub struct TrustAddCaData {
     pub updated: Option<bool>,
 }
 
-/// Request for `trust.invite` (ADR-0002, M7 Step 4). No fields today — kept
-/// as a struct for symmetry with every other typed request, so a future
-/// optional parameter (e.g. a non-default TTL) is additive, not a new op.
+/// Request for `trust.invite` (ADR-0002, M7 Step 4).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct TrustInviteReq {}
+pub struct TrustInviteReq {
+    /// Assign the redeeming peer's trust-store name up front (`qsh pair
+    /// invite --as`, ADR-0012 결정 6). Additive (`docs/CLI.md` §10): absent
+    /// on any envelope produced before this field existed, and its absence
+    /// means the redeeming peer's self-asserted name is pinned instead, as
+    /// it always was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub as_name: Option<String>,
+}
 
 /// Data payload of `trust.invite`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct TrustInviteData {
+    /// Echoes `TrustInviteReq.as_name` when the invite was minted with
+    /// `--as` (`docs/CLI.md` §6.11). Additive: absent, never present as
+    /// `null`, when no name was assigned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assigned_name: Option<String>,
     /// The one-time invite code, Crockford Base32, lowercase, hyphenated
     /// 4-char groups (`xxxx-xxxx-xxxx-xxxx-xxxx-xxxx-xxxx-xxxx`). Carries no
     /// address — give it to the other device's operator out of band
@@ -142,21 +153,48 @@ pub struct TrustInviteData {
     pub accept_command: String,
 }
 
+/// Request for `trust.rename`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TrustRenameReq {
+    /// The peer's current trust-store name.
+    pub old: String,
+    /// The name to rename it to.
+    pub new: String,
+}
+
+/// Data payload of `trust.rename`.
+///
+/// `peer` is the entry under its **new** name, so the caller can see that
+/// `fingerprint`/`address`/`added_at` did not move — only the name did.
+/// `old_name` echoes the argument, for audit-trail readability; there is no
+/// `renamed: bool` because a rename that did not error always renamed
+/// (`TrustStore::rename` cannot be idempotent the way `add_peer` is).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TrustRenameData {
+    /// The pin under its new name.
+    pub peer: TrustPeer,
+    /// The name it was renamed from.
+    pub old_name: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// The envelope's `data` object for `trust.invite` has exactly these
-    /// three keys, in alphabetical order — not declaration order. This
-    /// crate's `serde_json` is built without the `preserve_order` feature
-    /// (no `indexmap` in `Cargo.lock`), so `serde_json::Map` is a
-    /// `BTreeMap` and `to_value`/`from_slice::<Value>` both return keys
-    /// alphabetically. The checked-in fixture
+    /// three keys, in alphabetical order — not declaration order, when
+    /// `assigned_name` is absent. This crate's `serde_json` is built
+    /// without the `preserve_order` feature (no `indexmap` in
+    /// `Cargo.lock`), so `serde_json::Map` is a `BTreeMap` and
+    /// `to_value`/`from_slice::<Value>` both return keys alphabetically.
+    /// The checked-in fixture
     /// `crates/qsh-cli/tests/fixtures/cli-v1/trust.invite.json` already
-    /// reads `accept_command` → `code` → `expires_at` for the same reason.
+    /// reads `accept_command` → `code` → `expires_at` for the same reason,
+    /// and has no `assigned_name` key, so this case must stay true.
     #[test]
-    fn trust_invite_data_serializes_exactly_three_keys() {
+    fn trust_invite_data_omits_assigned_name_when_absent() {
         let value = serde_json::to_value(TrustInviteData {
+            assigned_name: None,
             code: "c".into(),
             expires_at: "e".into(),
             accept_command: "a".into(),
@@ -169,5 +207,29 @@ mod tests {
             .map(String::as_str)
             .collect();
         assert_eq!(keys, ["accept_command", "code", "expires_at"]);
+    }
+
+    /// The `--as` counterpart of the test above: with `assigned_name`
+    /// present the envelope carries exactly four keys, `assigned_name`
+    /// first alphabetically.
+    #[test]
+    fn trust_invite_data_includes_assigned_name_when_present() {
+        let value = serde_json::to_value(TrustInviteData {
+            assigned_name: Some("x".into()),
+            code: "c".into(),
+            expires_at: "e".into(),
+            accept_command: "a".into(),
+        })
+        .expect("TrustInviteData serializes");
+        let keys: Vec<&str> = value
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            ["accept_command", "assigned_name", "code", "expires_at"]
+        );
     }
 }

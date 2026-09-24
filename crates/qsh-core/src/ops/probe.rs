@@ -190,7 +190,7 @@ pub(super) fn classify_pairing_exchange_failure(err: crate::pairing::PairingErro
         } => OpError::new(code, message).with_retryable(retryable),
         E::NoMatch => OpError::new(ErrorCode::AuthFailed, err.to_string()).with_retryable(false),
         E::Expired => OpError::new(ErrorCode::TrustRequired, err.to_string()).with_retryable(false),
-        E::AlreadyConsumed | E::PinCollision => {
+        E::AlreadyConsumed | E::PinCollision | E::InvalidAssignedName => {
             OpError::new(ErrorCode::SessionConflict, err.to_string()).with_retryable(false)
         }
         E::InvalidDeviceName { .. } => {
