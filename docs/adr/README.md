@@ -18,7 +18,7 @@ QSH의 아키텍처/설계 결정을 기록한다. 각 ADR은 맥락, 결정, �
 | [0012](0012-human-surface-naming.md) | 사람용 표면의 이름 규약을 역할 어휘·`serve --to`·`pair --as`로 재정렬한다 | 승인됨 |
 | [0013](0013-cert-file-exchange.md) | 인증서 파일 교환을 프로비저닝 1급 경로로 승격한다(ADR-0002 개정) | 승인됨 |
 | [0014](0014-address-default-port.md) | peer 주소는 포트 생략 시 4433을 채우고 읽기·쓰기 양쪽에서 정규화하되 파일은 쓰지 않는다 | 승인됨 |
-| [0015](0015-listener-pairing.md) | listener 를 상대로 한 초대 코드 pairing | 예약됨 |
+| [0015](0015-listener-pairing.md) | listener를 상대로 한 초대 코드 pairing | 예약됨 |
 | [0016](0016-csr-issuance.md) | CA 서명 요청(CSR) 흐름 | 예약됨 |
 | [0017](0017-acl-toml-not-written.md) | `acl.toml`은 어떤 명령도 쓰지 않고 부담은 doctor 진단과 페어링 직후 고지로 옮긴다 | 승인됨 |
 | [0018](0018-tunnel-lifetime-bound-to-connection.md) | 터널 수명은 v1 내내 QUIC connection에 결합하고, forward-route live carrier와 `-R` 자동 재발행은 P1로 둔다 | 승인됨 |
@@ -28,3 +28,5 @@ QSH의 아키텍처/설계 결정을 기록한다. 각 ADR은 맥락, 결정, �
 | [0022](0022-reverse-health-surface.md) | 역방향 등록 health는 `Host.lost_at`과 `qsh::reverse` 진단 줄까지로 두고 push 계약 표면은 유예한다 | 제안됨 |
 | [0025](0025-acl-show-read-only.md) | writer 없이 ACL 가시성만 올린다. 읽기 전용 `qsh acl show`를 신설하고 `acl grant`/`acl revoke`는 기각한다 | 제안됨 |
 | [0026](0026-ssh-key-import-scope.md) | SSH 키 가져오기(`--import-ssh-key`)는 v1에 넣지 않고 P1 백로그에 둔다 | 제안됨 |
+
+0023(ADR-0018 결정 2·3을 개정하는 supervised tunnel mode)과 0024(`qsh setup`)는 번호만 예약돼 있고 파일은 아직 없다. 다음 새 번호는 0027이다.
