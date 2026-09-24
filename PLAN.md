@@ -116,6 +116,14 @@ jemalloc은 `cfg(all(target_os = "linux", target_env = "gnu"))`로 좁혔다. Ca
 
 **(c) 완료 판정:** 첫 M10 태그의 자산 전부에 대해 `gh attestation verify`가 통과하고 두 문서에 검증 절이 있다.
 
+**(a)-추기 — Step 6 착지 (2026-09-25, main 세션).** 커밋 `d7bede7` 하나다. 브랜치 커밋 `d8cf5bd`를 main 위로 rebase하면서 `docs/design/testing.md`의 "현재 상태" 한 줄이 충돌해 이 스텝의 attestation 문장과 앞서 오른 `long.yml` 문장이 같은 줄에 나란히 서도록 합쳤다. release job의 권한은 `contents: write`에 `id-token: write`와 `attestations: write`를 더한 정확히 셋이다. `Attest build provenance` 스텝(`actions/attest-build-provenance@v4`, `subject-path: 'dist/*'`)은 `Generate checksums` 뒤, `Determine prerelease flag` 앞에 선다. attest 글롭은 `gh release create`와 `gh release upload --clobber`의 글롭과 글자 그대로 같고 `SHA256SUMS`도 대상이다. §4.1 #6 확정. 문서는 README Install 절의 `gh attestation verify` 문단, scripts/README.md의 `--signer-workflow` 핀 문단, testing.md 한 문장이다. `scripts/install.sh`는 `gh` 의존을 늘리지 않으려고 손대지 않았다.
+
+리뷰는 opus 두 렌즈로 했고 변이 검증은 렌즈 A만 맡았다. 다섯 변이 중 로컬 검출기가 잡은 것은 action ref를 `@v99`로 바꾼 M5 하나뿐이다(`gh api`의 tag 조회가 404). 글롭을 `dist/*.tar.gz`로 좁힌 M1은 actionlint도 yaml 파싱도 통과하고 태그에서도 초록으로 지나가며 windows zip과 `SHA256SUMS`만 증명 없이 나간다. 권한 하나를 뺀 M2·M4는 태그에서 `Create release` 전에 크게 실패한다. 스텝을 `Create release` 뒤로 옮긴 M3은 정상 경로에서 구분이 안 된다. release job이 태그에서만 돌아 branch dispatch로는 어느 것도 예행이 안 되므로 판정은 첫 M10 태그로 미룬다. 그때 볼 것은 둘이다. 스텝 로그의 `Attestation created for 7 subjects`(아카이브 여섯과 `SHA256SUMS`)와 windows zip·`SHA256SUMS`에 대한 `gh attestation verify`.
+
+반영한 지적은 넷이다. README가 `--repo`만으로 "이 저장소의 `release.yml`이 만들었다"고 적은 과잉 주장을 "이 저장소의 워크플로"로 낮추고 `--signer-workflow` 핀은 scripts/README.md로 가리켰다. 워크플로 주석의 "signed darwin archives"는 현재형 거짓이라 뺐다. 이미 나간 태그 셋(`v0.1.0-alpha.1`·`v0.1.0-alpha.2`·`v0.2.0`)에는 attestation이 없으므로 두 문서 모두 "첫 태그부터"로 범위를 좁혔고 scripts/README.md가 installer의 의존을 셋으로 잘못 열거한 문장을 고쳤다. main 세션은 rebase 때 두 문서의 "after this step landed"를 "after the attestation step joined `release.yml`"로 바꿨다. 독자에게 "this step"은 없는 말이다. 남긴 nit 하나. attest 쪽 `dist/*`는 `@actions/glob`(하위 항목 포함, dotfile 포함)이고 업로드 쪽은 bash 글롭이라 매처가 다른데, `dist/`가 평평해 오늘은 갈리지 않는다. 첫 태그 판정 때 같이 본다.
+
+게이트는 actionlint, `shellcheck scripts/install.sh`, fmt, xtask 13건, yaml 파싱 전부 초록이고 문구를 바꾼 뒤 README 인용 테스트 36건도 초록이다. main의 CI run 36032710748 초록.
+
 ### Step 7 — 설치 문면 동기화와 man 패키징 (0.15ew)
 
 선행: Step 4(musl 자산 행), Step 5(서명 사실), Step 6(검증 절). §8 #4.
@@ -246,7 +254,7 @@ CI는 (a)가 적은 "크레이트별 네 스텝"이 아니라 `publish-dry-run` 
 | 3 | musl 툴체인 경로 | `musl-tools` 네이티브가 1순위, `cargo-zigbuild`는 차선. 교차 컴파일은 aws-lc-rs를 다시 어렵게 만든다 **확정(2026-09-25):** `musl-tools` 네이티브. aws-lc-sys 0.45.0의 프리제너레이트 바인딩 덕에 cmake·clang 없이 cc 경로로 빌드됐고 crt-static은 타깃 기본값이라 RUSTFLAGS도 없다. `cargo-zigbuild`는 쓰지 않았다. | Step 4 |
 | 4 | 서명 identity 문자열의 출처 | `APPLE_TEAM_ID` 시크릿으로 조립할지 identity 전체를 시크릿에 둘지 | Step 5 |
 | 5 | notarytool 자격 방식 | App Store Connect API key(`--key`). Apple ID + app-specific password는 회전 비용 때문에 배제 | Step 0·5 |
-| 6 | attestation 대상 범위 | `dist/*` 전 자산. `SHA256SUMS` 자체를 포함할지 | Step 6 |
+| 6 | attestation 대상 범위 | `dist/*` 전 자산. `SHA256SUMS` 자체를 포함할지 **확정(2026-09-25):** `dist/*` 전 자산, `SHA256SUMS` 포함(`d7bede7`). attest 글롭은 release 업로드 글롭과 글자 그대로 같아야 증명 없는 자산이 생기지 않는다. 실효 판정은 첫 M10 태그의 스텝 로그와 `gh attestation verify`로 한다. | Step 6 |
 | 7 | man 아카이브 안의 경로 접두 | `man/*.1`. formula의 `man1.install Dir["man/*.1"]`와 같은 문자열 | Step 7 |
 | 8 | 30분 회차의 자리 | `load.yml`에 `workflow_dispatch` 전용 job 추가 또는 `long.yml` 신설 | Step 9 |
 | 9 | 저속·역압 축의 보강 여부 | 기존 하네스가 값싸게 받으면 더하고, 아니면 잔여 위험으로 적는다 | Step 9 |
