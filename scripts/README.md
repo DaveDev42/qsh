@@ -29,8 +29,10 @@ unwritable `QSH_INSTALL_DIR` is an error, not a prompt to escalate.
 
 What the checksum proves is bounded. `SHA256SUMS` comes from the same
 release as the archive, so it catches a truncated or corrupted download, not
-a compromised release. It is an integrity check, not a signature. Signing
-and notarization are M10.
+a compromised release. It is an integrity check, not a signature. Whether
+the macOS binaries are Developer ID signed and notarized depends on
+whether the release was cut with Apple credentials configured
+(`docs/deploy/release-secrets.md`); the installer does not check.
 
 Provenance is a separate check, and the installer does not perform it.
 Starting with the first tag cut after the attestation step joined `release.yml`, every asset

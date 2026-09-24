@@ -115,7 +115,21 @@ The script picks the archive for your platform, verifies it against the
 release's `SHA256SUMS` before unpacking, and installs to `~/.local/bin`. It
 never calls `sudo`; if the target directory is not writable it says so and
 stops. That checksum is an integrity check against a bad download, not a
-signature: the binaries are neither signed nor notarized until M10.
+signature.
+
+On macOS the release workflow signs and notarizes the binaries when the
+release is cut with Apple credentials configured; no published release has
+been cut that way yet, so check what you actually have with
+`codesign -dv --verbose=4 $(which qsh)` (see
+[Known limitations](#known-limitations)). The notarization ticket is not
+stapled: `xcrun stapler` attaches a ticket to a `.app`, `.dmg` or `.pkg`,
+and qsh ships a bare executable inside a `.tar.gz`. Gatekeeper therefore
+confirms the notarization online, and a first run on a machine with no
+route to Apple is not guaranteed to be admitted. The installer above
+clears `com.apple.quarantine` after it installs (`scripts/install.sh`), so
+that path does not consult Gatekeeper at all; a manual download does, and
+`spctl -a -vvv -t execute $(which qsh)` shows the same verdict Gatekeeper
+would.
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -779,14 +793,21 @@ Some of these are MVP scope decisions, some are unfinished work.
 - macOS asks "Do you want the application “qsh” to accept incoming network
   connections?" the first time a given build dials out, though `-L` and
   `-D` listeners are both loopback-only, so neither triggers it. The
-  cause is qsh's QUIC client socket,
-  which binds the wildcard address (`0.0.0.0:0`/`[::]:0`,
-  `crates/qsh-transport/src/endpoint.rs`) on every dial because connection
-  migration across IP changes needs it; a release build is only ad-hoc
-  linker-signed, so macOS has no stable identity to remember an answer
-  against and asks again after every rebuild or reinstall. Developer ID
-  signing and notarization (M10) fix this; until then, sign the binary
-  yourself (`codesign -fs "<cert>" $(which qsh)`) or register it with
+  cause is qsh's QUIC client socket, which binds the wildcard address
+  (`0.0.0.0:0`/`[::]:0`, `crates/qsh-transport/src/endpoint.rs`) on every
+  dial because connection migration across IP changes needs it. A binary
+  carrying no stable code identity gives macOS nothing to remember an
+  answer against, so it asks again after every rebuild or reinstall.
+  The release workflow signs both macOS binaries with a Developer ID
+  certificate and submits them to Apple's notary service when the release
+  is cut on a repository that has the Apple credentials configured; where
+  it is not, the macOS binaries ship ad-hoc signed, the same way a local
+  `cargo build --release` produces them. Tell the two apart with
+  `codesign -dv --verbose=4 $(which qsh)`: a Developer ID build names an
+  `Authority=Developer ID Application` and a `TeamIdentifier`, an ad-hoc
+  one prints `Signature=adhoc` and `TeamIdentifier=not set`. For an
+  ad-hoc build, sign it yourself (`codesign -fs "<cert>" $(which qsh)`)
+  or register it with
   `/usr/libexec/ApplicationFirewall/socketfilterfw --add $(which qsh)
   --unblockapp $(which qsh)` (the tool is not on `PATH`).
 

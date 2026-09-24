@@ -23,6 +23,7 @@ QSH is a QUIC-based direct-connect remote shell (single Rust binary `qsh`) that 
 - `docs/design/threat-model.md` — threat model: assets, trust boundaries, entry points, threats → controls → pinned tests, residual risks
 - `docs/design/reexec-estimate.md` — costed estimate for graceful re-exec; the recorded decision is not in v1
 - `docs/deploy/service.md` — systemd/launchd unit examples (`qsh service install` itself is M9)
+- `docs/deploy/release-secrets.md` — names, issuance and rotation of the release workflow's secrets (never values)
 - `docs/man/` — generated man pages; regenerate with `cargo xtask man`, never hand-edit a `.1` file
 - `docs/campaigns/` — manual campaigns a person runs and records: `m2-mobility`, `m6-mcp`, `m7-stopwatch`, `m8-fuzz`, `m8-soak`, `m8-adversarial-load`, `m9-stopwatch`
 - `scripts/README.md` — installer and campaign harnesses under `scripts/`
