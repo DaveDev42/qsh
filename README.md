@@ -58,9 +58,15 @@ install`) is underway. What works end to end today:
   (`qsh cert init`/`qsh cert issue`) so a fleet trusts one CA root instead
   of pinning every device by hand, or exchanging certificate files
   directly (`qsh identity export`, `qsh trust add --cert-file`, `qsh
-  trust add-ca` for a foreign CA root — ADR-0013). `hosts.toml` layers
-  addresses and login names on top of whichever one pinned a peer. See
-  [First run](#first-run).
+  trust add-ca` for a foreign CA root — ADR-0013). A pinned peer's local
+  name can be changed later without re-pinning, with `qsh trust rename`.
+  `hosts.toml` layers addresses and login names on top of whichever one
+  pinned a peer. See [First run](#first-run).
+- `qsh service install|uninstall|status` writes and removes the platform
+  unit that keeps a listener running — a user LaunchAgent on macOS, a
+  systemd user unit on Linux — inferring the mode (`serve`, `listen`, or
+  `serve --to`) from `config.toml`. See
+  [docs/deploy/service.md](docs/deploy/service.md).
 - `qsh doctor` diagnoses one deployment — identity, ACL policy, audit log,
   trust store, clock, network reachability — as a single machine-readable
   report. `qsh schema --json` serves this build's JSON contract the same
@@ -168,7 +174,9 @@ even though the binary it installs is `qsh`.
 
 `scripts/README.md` covers the installer in more detail.
 
-Running qsh as a service: `qsh service install|uninstall|status` generates and manages the unit for you — see [docs/deploy/service.md](docs/deploy/service.md).
+Running qsh as a service: `qsh service install|uninstall|status` generates
+and manages the unit for you — see
+[docs/deploy/service.md](docs/deploy/service.md).
 
 Man pages for every subcommand are generated from the same `clap`
 definitions `--help` uses and live under [`docs/man/`](docs/man/)
@@ -181,9 +189,10 @@ for a subcommand.
 ## First run
 
 Six commands and one small policy file, two machines. This is the literal
-script `docs/campaigns/m7-stopwatch.md` times: two machines that have never
-run `qsh` before, nothing but this section open, stopwatch running from the
-first command.
+script `docs/campaigns/m9-stopwatch.md` times (and
+`docs/campaigns/m7-stopwatch.md` timed before the M9 surface landed): two
+machines that have never run `qsh` before, nothing but this section open,
+stopwatch running from the first command.
 
 ```bash
 # Host, the machine that will run the shell:
@@ -574,7 +583,7 @@ already taken on crates.io. The workspace stays `publish = false` until M10.
 | M0 | Decisions, workspace scaffold, CI | Done |
 | M1 | Walking skeleton (`init`/`serve`/`exec --json`, mTLS, JSON envelope) | Done |
 | M2 | Session broker, PTY, migration and resume | Done |
-| M3 | Reverse connections (`listen`/`reverse`/`attach`) | Done |
+| M3 | Reverse connections (`listen`/`serve --to`/`attach`) | Done |
 | M4 | Port forwarding (`-L`/`-R`) | Done |
 | M5 | ACL and audit | Done |
 | M6 | MCP adapter | Done (retired, ADR-0011) |
@@ -676,9 +685,18 @@ Some of these are MVP scope decisions, some are unfinished work.
 - `qsh trust rename` takes effect on the *next handshake* immediately, no
   restart needed, the same way `qsh trust remove` does — but `acl.toml`
   rows do not: they still match the pre-rename name until `qsh serve` is
-  restarted, since `acl.toml` has no hot reload at all (ADR-0012 결정 7).
+  restarted, since `acl.toml` has no hot reload at all (ADR-0012 decision 7).
   A renamed peer's next connection authenticates fine but can be denied
   every operation until the ACL rows catch up.
+- `qsh service status`/`qsh service uninstall` only ever look at the run
+  mode inferred from today's `config.toml` (`docs/CLI.md` §6.18) — a unit
+  installed under a previous mode (say, `config.toml` used to say
+  `listen` and now says `serve --to`) is invisible to both, and neither
+  reports nor removes it. The unit's recorded binary path also means
+  something different per platform: macOS keeps a Homebrew Cellar symlink
+  unresolved on purpose, so `brew upgrade` does not pin a stale path,
+  while Linux's `/proc/self/exe` has already resolved any symlink by the
+  time `qsh service install` reads it.
 - `qsh pair accept` pins both sides in one exchange, but the two pins are
   not atomic. The host's pin (and the invite's consumption) happens first,
   as part of the wire exchange; the client's own local pin happens after,

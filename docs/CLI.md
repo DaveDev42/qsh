@@ -1,6 +1,6 @@
 # QSH CLI and JSON Contract
 
-**상태:** Draft v0.10 (M3 Step 8 — 역방향 위 resume: §6.4 recovery 진단의 `registration_wait_ms`가 실제로 채워짐(정방향 `0`, 역방향은 재등록 대기 시간) — `recovery` 값 집합은 무변경, 필드는 M2 세 필드 뒤에 additive로 붙는다; v0.9 = M3 Step 7 — 대화형 attach(`qsh [user@]host`/`qsh attach`)가 역방향 등록 host를 향해서도 §6.13의 `LOCAL_CONTROL`/`LOCAL_STREAM` 경로를 타도록 landing — §6.13 갱신(더 이상 forward 전용이 아님, 그리고 역방향 leg에는 reconnect/recovery가 없다는 점 명시); v0.8 = M3 Step 1 — `Host`의 `state`/`device_id` 값 어휘 확정과 역방향 등록 ACL 매핑(§2.5·§5)·`host.list`/`host.get` 데이터 소스(§6.1)·recovery 진단의 `registration_wait_ms`(§6.4)·신규 §6.13 `qsh listen`/`qsh reverse` 계약 추가; v0.7 = M2 Step 7 — `session.attach`는 resume credential을 **반드시** 요구하며 그 실패는 항상 non-distinguishing `AUTH_FAILED`임을 §6.3·§6.4에 명문화; v0.6 = `session read --follow` 출력 형태와 `--wait` 하한 명문화, v0.5 = M2 계약 확정, v0.4 = M1 구현과 동기화)  
+**상태:** Draft v0.11 (M9 사람용 표면 — `qsh serve --to`(구 표기 `qsh reverse`, ADR-0012)·`qsh pair invite|accept --as`(구 `qsh trust invite/accept`)·`qsh identity export`/`trust add --cert-file`/`trust add-ca`(ADR-0013)·`trust rename`·`qsh service install|uninstall|status`(§6.18)·peer 주소의 포트 기본값 4433(ADR-0014)·`-D`(`tunnel.dynamic`, ADR-0019/0020)·doctor 22종(M9가 8종 추가 — 범위 (h)의 7종 + `host_pinned_without_address`)이 §2.4·§2.5·§6.1·§6.9·§6.11·§6.13·§6.17·§6.18에 반영됨. 기존 fixture 중 값-보유 golden `capabilities.json` 한 줄만 `dial-filter.v1` 추가로 재생성됐고(94ad639), wire는 `StreamHeader` 필드 5(`deny_host_local`) 하나가 capability 뒤에 additive로 붙었다 — 그 외 fixture·wire 무변경, 신규 op 7종 전부 additive; v0.10 = M3 Step 8 — 역방향 위 resume: §6.4 recovery 진단의 `registration_wait_ms`가 실제로 채워짐(정방향 `0`, 역방향은 재등록 대기 시간) — `recovery` 값 집합은 무변경, 필드는 M2 세 필드 뒤에 additive로 붙는다; v0.9 = M3 Step 7 — 대화형 attach(`qsh [user@]host`/`qsh attach`)가 역방향 등록 host를 향해서도 §6.13의 `LOCAL_CONTROL`/`LOCAL_STREAM` 경로를 타도록 landing — §6.13 갱신(더 이상 forward 전용이 아님, 그리고 역방향 leg에는 reconnect/recovery가 없다는 점 명시); v0.8 = M3 Step 1 — `Host`의 `state`/`device_id` 값 어휘 확정과 역방향 등록 ACL 매핑(§2.5·§5)·`host.list`/`host.get` 데이터 소스(§6.1)·recovery 진단의 `registration_wait_ms`(§6.4)·신규 §6.13 `qsh listen`/`qsh reverse` 계약 추가; v0.7 = M2 Step 7 — `session.attach`는 resume credential을 **반드시** 요구하며 그 실패는 항상 non-distinguishing `AUTH_FAILED`임을 §6.3·§6.4에 명문화; v0.6 = `session read --follow` 출력 형태와 `--wait` 하한 명문화, v0.5 = M2 계약 확정, v0.4 = M1 구현과 동기화)  
 **대상:** QSH MVP  
 **Canonical interface:** `qsh` CLI
 
@@ -1234,7 +1234,7 @@ qsh doctor [host] --json
 - `detail`: 무엇이 관측됐는지에 대한 사람이 읽을 수 있는 설명(해석된 경로, 관측된 만료 시각 등). 시크릿·PTY/명령 payload는 절대 담지 않는다(`CLAUDE.md`의 보안 기본값).
 - `remedy`: 실행 가능한 다음 행동 한 줄. 없으면 필드 자체가 생략된다(additive-optional, `CapabilitiesData.host`와 같은 규율).
 
-**22종 진단 코드** (재사용 5종·신설 17종 — `PLAN.md` M7 §4.1 #5가 확정한 잠금 어휘, `config_unknown_key`는 M8 Step 4b가, 나머지 M9 (h)가 8종을 더했다):
+**22종 진단 코드** (재사용 5종·신설 17종 — `PLAN.md` M7 §4.1 #5가 확정한 잠금 어휘, `config_unknown_key`는 M8 Step 4b가, 나머지 8종은 M9가 더했다 — 범위 (h)의 7종 + `host_pinned_without_address`):
 
 | `code` | `status` | 무엇을 점검하는가 |
 |---|---|---|
