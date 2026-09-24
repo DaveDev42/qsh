@@ -23,7 +23,7 @@ pin 경로에는 방향 입력이 없다. `crates/qsh-transport/src/tls.rs`의 `
 
    두 code 모두 예시 행은 `acl/load.rs`의 `minimal_policy_example`을 재사용한다. 다만 그 함수의 `EXAMPLE_ALLOW` 상수는 `exec.run`/`session.open`/`session.list`/`session.attach`/`session.control` 다섯뿐이고 `host.reverse`가 없어서, 결정 3이 요구하는 `listen` 역할 예시를 만들려면 역할별 allow 목록을 받도록 그 함수를 넓히는 작업이 구현 스텝에 들어간다. 새 표면이 같은 TOML을 다시 타이핑하면 저장소의 anti-drift 규율을 깬다.
 
-   두 code 모두 `crates/qsh-core/src/doctor.rs`의 닫힌 `EXPECTED_DOCTOR_CODES`와 `docs/CLI.md` §6.17 표에 동시에 추가해야 잠금 어휘 규율(`crates/qsh-core/tests/doctor_docs.rs`)을 지킨다. 각 code의 `status`(warn/error/info)는 이 ADR이 정하지 않는다. 구현 스텝에서 정한다. 이 잠금 목록 갱신 자체는 구현 스텝의 일이고 이 ADR은 그 신설 대상 두 개만 정한다.
+   두 code 모두 `crates/qsh-core/src/doctor.rs`의 닫힌 `EXPECTED_DOCTOR_CODES`와 `docs/CLI.md` §6.17 표에 동시에 추가해야 잠금 어휘 규율(`crates/qsh-core/tests/doctor_docs.rs`)을 지킨다. 각 code의 `status`는 구현에서 이렇게 정해졌다. `acl_principal_unmatched`는 error다. 이름이 특정된 실제 peer가 모든 요청에서 확실히 거부될 상태이므로 `peer_untrusted`와 같은 결과 등급이다. `acl_ca_auth_path_missing`은 warn이다. CA는 준비됐지만 아직 아무것도 그것에 의존한다고 증명되지 않은 잠재적 공백이기 때문이다(M9 구현, `963809e`). 이 잠금 목록 갱신 자체는 구현 스텝의 일이고 이 ADR은 그 신설 대상 두 개만 정한다.
 
    운영자가 이 finding을 보고 `acl.toml`에 행을 추가해도, `qsh serve`/`qsh listen`은 프로세스 시작 시 1회만 정책을 읽으므로 재시작 전까지 그 행은 반영되지 않는다. 반면 `qsh acl check`는 호출마다 파일을 다시 읽으므로(`crates/qsh-core/src/ops/acl.rs`) 재시작하지 않은 상태에서도 allow로 보일 수 있다. 두 진단의 remedy 문면에는 "행을 추가한 뒤 `serve`/`listen`을 재시작해야 반영된다"를 반드시 넣는다.
 
@@ -43,16 +43,17 @@ pin 경로에는 방향 입력이 없다. `crates/qsh-transport/src/tls.rs`의 `
 
 ## 결과
 
-- doctor 진단 코드는 `acl_principal_unmatched`와 `acl_ca_auth_path_missing` 두 개가 늘어난다. 같은 설계 문서(§5)가 함께 나열한 나머지 넷, 서비스 미등록(info), systemd linger 미설정(warn), macOS LaunchAgent가 로그인 세션 안에서만 산다는 한계(warn), `bindv6only`는 `acl.toml`과 무관하고 이 ADR이 정하지 않는다. 같은 설계의 doctor 스텝과 `qsh service` 스텝 소관이다. 최종 code 총수는 그 넷이 같은 구현 스텝에 들어가는지에 달렸다.
+- doctor 진단 코드는 `acl_principal_unmatched`와 `acl_ca_auth_path_missing` 두 개가 늘어난다. 함께 나열됐던 나머지 넷도 같은 마일스톤에 함께 착지했고, `acl.toml`과 무관해 이 ADR이 정하지 않는다는 판단은 그대로다 — `service_not_registered`(info), `systemd_linger_disabled`(warn), `launchagent_session_scoped`(warn), `bindv6only_blocks_ipv4`(warn). 앞의 셋은 이 절이 예고한 status 그대로 착지했고, status를 예고하지 않은 `bindv6only_blocks_ipv4`는 warn이다. 이 여섯에 `host_pinned_without_address`와 `config_serve_to_conflict`(ADR-0012 결정 5)가 더해져 `EXPECTED_DOCTOR_CODES`의 최종 총수는 22종이다(M9 구현, `963809e`·`699af37`).
 - 새 code마다 다음이 같은 커밋에서 함께 움직여야 한다(`crates/qsh-core/tests/doctor_docs.rs`).
   - `crates/qsh-core/src/doctor.rs`의 `DiagnosticId` variant 2개, 대응하는 `Diagnostic` 상수(`code`/`message`/`remedy`), 모듈 문서의 "N variants, one per `docs/CLI.md` §6.17 finding code" 산문.
   - `crates/qsh-core/src/ops/doctor.rs`의 검출기. 결정 2가 정의한 매칭 로직을 실제로 도는 자리다.
   - `docs/CLI.md` §6.17 표에 새 code를 이름으로 추가(`cli_md_names_every_frozen_doctor_code`가 표가 모든 동결 code를 담는지 강제한다).
-  - `docs/CLI.md` §6.11(현재 L752 "진단 코드 14종")과 §6.17(현재 L1038 "14종 진단 코드") 두 곳의 산문 숫자를 `EXPECTED_DOCTOR_CODES.len()`과 같게 갱신(`doctor_code_counts_named_in_prose`/`cli_md_prose_doctor_code_count_matches_expected_len`). 표만 고치면 이 테스트가 붉어진다.
+  - `docs/CLI.md` §6.11과 §6.17 두 곳의 산문 숫자를 `EXPECTED_DOCTOR_CODES.len()`과 같게 갱신(`doctor_code_counts_named_in_prose`/`cli_md_prose_doctor_code_count_matches_expected_len`). 표만 고치면 이 테스트가 붉어진다. 두 자리는 지금 22종이다.
 - 바뀌지 않는 것: `qsh-cli`의 `render::human::print_doctor`는 순수 렌더러라 변경이 없다. `crates/qsh-cli/tests/fixtures/cli-v1/`에는 `doctor.run` 픽스처가 없어 append-only 규칙에 걸리는 항목이 없다. `docs/PRD.md`와 `README.md`가 축자 인용하는 것은 `CONTROLLER_UNREACHABLE`뿐이라 이 두 code와 무관하다.
 - 페어링 고지 문면은 `docs/CLI.md` §6.11과 §6.13(역할별 예시 행)에 반영이 필요하다.
 - `docs/adr/README.md`의 색인 표에 0017 행을 추가한다.
 - `qsh.cli/v1` envelope과 wire 프로토콜에는 아무 변화가 없다. 새 doctor code는 기존 finding 모델에 추가되는 것뿐이고(additive), 페어링 고지는 stderr 텍스트다.
+- M9 구현이 이 ADR이 미뤄 둔 값을 채웠다. 결정 2·결과의 해당 문장은 2026-09-24에 그 구현(`963809e`·`699af37`)에 맞춰 제자리에서 개정했고 옛 문장은 이 파일에 남기지 않는다(ADR-0013 결과의 관례). 원문은 개정 커밋의 diff가 보존한다.
 
 ## 대안
 
