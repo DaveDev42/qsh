@@ -66,6 +66,7 @@ pub struct Sandbox {
     _dir: TempDir,
     config: PathBuf,
     state: PathBuf,
+    home: PathBuf,
 }
 
 impl Sandbox {
@@ -74,12 +75,15 @@ impl Sandbox {
         let dir = tempfile::tempdir().expect("tempdir");
         let config = dir.path().join("config");
         let state = dir.path().join("state");
+        let home = dir.path().join("home");
         std::fs::create_dir_all(&config).expect("create config dir");
         std::fs::create_dir_all(&state).expect("create state dir");
+        std::fs::create_dir_all(&home).expect("create home dir");
         Self {
             _dir: dir,
             config,
             state,
+            home,
         }
     }
 
@@ -100,6 +104,16 @@ impl Sandbox {
         &self.state
     }
 
+    /// This sandbox's `HOME` (also exported as `USERPROFILE` for the
+    /// windows-gnu leg) — a tempdir, never the developer's or CI runner's
+    /// real home. `qsh service install|uninstall|status` resolves
+    /// `config::home_dir()` for its unit paths, and without this a
+    /// sandboxed test would write into the real
+    /// `~/Library/LaunchAgents` / `~/.config/systemd/user`.
+    pub fn home_dir(&self) -> &Path {
+        &self.home
+    }
+
     /// A `qsh` [`Command`] with the environment scrubbed of anything that
     /// could redirect it at the developer's real configuration.
     pub fn command(&self, args: &[&str]) -> Command {
@@ -117,6 +131,8 @@ impl Sandbox {
             .args(args)
             .env("QSH_CONFIG_DIR", &self.config)
             .env("QSH_STATE_DIR", &self.state)
+            .env("HOME", &self.home)
+            .env("USERPROFILE", &self.home)
             .env_remove("XDG_CONFIG_HOME")
             .env_remove("XDG_STATE_HOME")
             // `host.list`'s reverse source scans `Paths::runtime_dir()` for
