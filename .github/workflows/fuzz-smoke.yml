@@ -56,6 +56,40 @@ jobs:
         with:
           toolchain: nightly
           cache-directories: fuzz/target
+      # `fuzz/Cargo.lock` is its own lock; the workspace-root `deny` job
+      # (`ci.yml`) never points at it, so advisories in this graph went
+      # unscanned by CI until this step. Advisories only: licenses and
+      # bans stay off because this crate is not a shipped artifact
+      # (`docs/ROADMAP.md` M10 decision record, Q7).
+      #
+      # Prebuilt binary rather than EmbarkStudios/cargo-deny-action, for
+      # the reason `ci.yml`'s `deny` job records: that action's docker
+      # image floats independently of its tag and broke against
+      # `rust-toolchain.toml`'s pin.
+      #
+      # Runs from the repo root, so it picks up the root `deny.toml`
+      # (`[advisories]`: the rustsec db url and `yanked = "deny"`); the
+      # `[licenses]`/`[bans]`/`[sources]` sections of that file are not
+      # consulted by `check advisories`. Placed before the cargo-fuzz
+      # install because that step builds cargo-fuzz from source.
+      #
+      # `--locked` makes this step verify the committed
+      # `fuzz/Cargo.lock` itself rather than a graph `cargo metadata`
+      # re-resolves on the fly; it also turns the "lock goes stale after
+      # a workspace version bump" risk (`fuzz/README.md`'s Cargo.lock
+      # scope section) into a visible failure here instead of a silent
+      # in-memory fixup.
+      #
+      # A green run here does not stay green on its own: the RUSTSEC
+      # database can publish a new advisory against an unchanged lock, so
+      # a run that was green yesterday can go red today with no diff to
+      # blame. The remedy is a lock bump in a commit of its own, not a
+      # workflow change.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - name: Advisories for the fuzz lock
+        run: cargo deny --locked --manifest-path fuzz/Cargo.toml check advisories
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
       # A fixed run count, not a time limit, per the task's own "CI must
