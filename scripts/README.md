@@ -25,11 +25,10 @@ nothing installed: no entry, a duplicate entry, a mismatch, a tarball whose
 `qsh` member is missing or is a symlink. The binary lands via a temp file in
 the destination directory followed by a rename, so an interrupted run never
 leaves a half-written `qsh` on your `PATH`, and `sudo` is never invoked. An
-unwritable `QSH_INSTALL_DIR` is an error, not a prompt to escalate. Starting
-with the first tag cut after the man pages joined the release archive, the
-archive also carries them under `man/`; the installer extracts only `qsh`
-and leaves them behind, and Homebrew is the install path that puts them on
-a `MANPATH`.
+unwritable `QSH_INSTALL_DIR` is an error, not a prompt to escalate. The
+archive also carries the man pages under `man/` for tags after `v0.2.0`;
+the installer extracts only `qsh` and leaves them behind, and Homebrew is
+the install path that puts them on a `MANPATH`.
 
 What the checksum proves is bounded. `SHA256SUMS` comes from the same
 release as the archive, so it catches a truncated or corrupted download, not
@@ -39,9 +38,9 @@ whether the release was cut with Apple credentials configured
 (`docs/deploy/release-secrets.md`); the installer does not check.
 
 Provenance is a separate check, and the installer does not perform it.
-Starting with the first tag cut after the attestation step joined `release.yml`, every asset
-`release.yml` publishes, `SHA256SUMS` included, gets a build provenance
-attestation from the same workflow run, which the GitHub CLI verifies:
+Every asset `release.yml` publishes for a tag after `v0.2.0`, `SHA256SUMS`
+included, gets a build provenance attestation from the same workflow run,
+which the GitHub CLI verifies:
 
 ```bash
 gh attestation verify qsh-<tag>-<target>.tar.gz --repo DaveDev42/qsh
