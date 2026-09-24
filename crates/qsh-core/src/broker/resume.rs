@@ -317,8 +317,8 @@ impl ResumeRegistry {
         self.lock().remove(id);
     }
 
-    /// Drop every credential whose TTL has lapsed. Called by the same
-    /// reaper pass that closes expired sessions.
+    /// Drop every credential whose TTL has lapsed. Not on the reaper path:
+    /// [`super::Broker::reap_once`] calls [`Self::sync_expiry`] instead.
     pub fn purge_expired(&self) {
         let now = self.clock.now();
         self.lock().retain(|_, e| e.expires_at > now);
