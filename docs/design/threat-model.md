@@ -4,7 +4,7 @@
 
 ## 0. 지위와 범위
 
-이 문서는 M8 Step 7이 wire freeze 문면([protocol.md](protocol.md) §16)과 함께 내는 산출물이고, `docs/PRD.md:311`이 요구하는 "공개 beta 전 protocol과 key lifecycle의 독립 보안 review"(SC7)에 넘길 리뷰어 입력이다. 기준 트리는 M8 Step 7 시점이며, 인용한 `파일:줄`은 그 트리에서 확인한 값이다.
+이 문서는 M8 Step 7이 wire freeze 문면([protocol.md](protocol.md) §16)과 함께 내는 산출물이고, `docs/PRD.md` §15가 요구하는 "공개 beta 전 protocol과 key lifecycle의 독립 보안 review"(SC7)에 넘길 리뷰어 입력이다. 기준 트리는 M8 Step 7 시점이며, 인용한 `파일:줄`은 그 트리에서 확인한 값이다.
 
 **이 문서가 canonical인 것은 §4의 위협 → 통제 → 근거 → 핀 테스트 대응표 하나다.** 통제 자체의 설계 근거는 여전히 ADR과 protocol.md·architecture.md에 있고, 어느 테스트가 어느 계층을 갚는지는 testing.md에 있다. 그 셋을 가로질러 "이 위협을 무엇이 막고, 그것이 깨지면 무슨 테스트가 빨개지는가"를 한 곳에 모은 표가 여기 말고는 없다.
 

@@ -1261,7 +1261,7 @@ qsh doctor [host] --json
 | `host_pinned_without_address` | warn | `host_list`가 아는 이름(trust pin 또는 `hosts.toml` 항목)에 두 출처 어디서도 주소가 없고 현재 유지 중인 reverse 등록(live·stale 불문)도 없음 — `--address` 없이 `--fingerprint`만으로 pin해 아직 phone-home하지 않은 순정 reverse 대상은 정상적인 일시 상태이므로 error가 아니라 warn이다. 그 이름의 reverse 등록이 하나라도 있으면(live든 stale이든) 뜨지 않는다 |
 | `config_serve_to_conflict` | error | `[serve].to`와 구 `[reverse].controller`가 둘 다 설정돼 있고 값이 다름 — 그 상태에서 `qsh serve`/`qsh service install`은 `CONFIG_ERROR`로 fail closed한다(ADR-0012 결정 5). doctor는 exit `0`을 유지한 채 finding으로만 알린다. 두 값이 같으면 통과이므로 뜨지 않는다 |
 
-**`acl_ca_auth_path_missing` 문안.** 이 진단의 정본 문안은 `qsh_core::doctor::ACL_CA_AUTH_PATH_MISSING`(`crates/qsh-core/src/doctor.rs`, ADR-0017 결정 2)이고, 그 `message`/`remedy` 두 필드는 각각 다음과 같다 — 실제 렌더되는 `detail`은 이 `message` 뒤에 `minimal example:` 블록을 덧붙인 값이다(`crates/qsh-core/src/ops/doctor.rs`의 `doctor_acl_findings`):
+**`acl_ca_auth_path_missing` 문안.** 이 진단의 정본 문안은 `qsh_core::doctor::ACL_CA_AUTH_PATH_MISSING`(`crates/qsh-core/src/doctor.rs`, ADR-0017 결정 2)이고, 그 `message`/`remedy` 두 필드는 각각 다음과 같다. 실제 렌더되는 `detail`은 이 `message` 뒤에 `minimal example:` 블록을 덧붙인 값이다(`crates/qsh-core/src/ops/doctor.rs`의 `doctor_acl_findings`):
 
   > trust.toml has a CA root, but no acl.toml row sets auth_path = "ca". Any peer authenticating via that CA is denied (default-deny) until one does.
   >
