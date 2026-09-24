@@ -14,6 +14,7 @@ QSH is a QUIC-based direct-connect remote shell (single Rust binary `qsh`) that 
 ## Document map
 
 - `PLAN.md` — execution plan for the current milestone; the file's title names the milestone. Replaced wholesale when a milestone closes; the superseded plan moves to `docs/history/`.
+- `RELEASE-NOTES.md` — one section per release tag, what each tag ships, what is signed and what is not
 - `docs/PRD.md` — product requirements (binding)
 - `docs/CLI.md` — CLI / JSON contract (binding)
 - `docs/ROADMAP.md` — milestones M0–M10 with scope and acceptance criteria
@@ -82,7 +83,7 @@ If a change requires putting logic in `qsh-cli` to make something work, that's a
 
 ## Conventions
 
-- Language: English in `README.md`, `CLAUDE.md`, `scripts/README.md`, `fuzz/README.md`, and all code comments; Korean in `docs/**`, `PLAN.md`, `scripts/stopwatch/README.md`, and commit messages (`type(scope): 요약 — 상세`).
+- Language: English in `README.md`, `CLAUDE.md`, `RELEASE-NOTES.md`, `scripts/README.md`, `fuzz/README.md`, and all code comments; Korean in `docs/**`, `PLAN.md`, `scripts/stopwatch/README.md`, and commit messages (`type(scope): 요약 — 상세`).
 - Cite durable anchors only: an ADR, a `docs/design/*` or `docs/campaigns/*` section, `docs/CLI.md` §N, a test name, or a commit hash. Never a `PLAN.md` step number (steps are renumbered when a milestone rolls) and never a session scratchpad file (`BRIEF-*`, `REVIEW-*`, `ARBITRATION-*`, `PROGRESS-*`), none of which exist in this repository.
 - Once a source file passes roughly 800 lines, its inline `#[cfg(test)]` module moves to a sibling `tests.rs` reached by `mod tests;`; `crates/qsh-core/src/pty/` is the pattern to copy.
 - `PLAN.md` and `docs/ROADMAP.md` are edited by the main session only.
