@@ -53,12 +53,14 @@ install`) is underway. What works end to end today:
   scripts. The built-in `qsh mcp` stdio server was retired in M8 Step 6
   (see [ADR-0011](docs/adr/0011-remove-mcp-adapter.md)); run a remote
   stdio MCP server through `qsh exec host -- <server>` instead.
-- Three ways to pin a peer: trust-on-first-connect, `qsh trust
-  invite`/`qsh trust accept` pairing with a one-time code, or a private CA
+- Four ways to pin a peer: trust-on-first-connect, `qsh trust
+  invite`/`qsh trust accept` pairing with a one-time code, a private CA
   (`qsh cert init`/`qsh cert issue`) so a fleet trusts one CA root instead
-  of pinning every device by hand. `hosts.toml` layers addresses and login
-  names on top of whichever one pinned a peer. See [First
-  run](#first-run).
+  of pinning every device by hand, or exchanging certificate files
+  directly (`qsh identity export`, `qsh trust add --cert-file`, `qsh
+  trust add-ca` for a foreign CA root — ADR-0013). `hosts.toml` layers
+  addresses and login names on top of whichever one pinned a peer. See
+  [First run](#first-run).
 - `qsh doctor` diagnoses one deployment — identity, ACL policy, audit log,
   trust store, clock, network reachability — as a single machine-readable
   report. `qsh schema --json` serves this build's JSON contract the same
@@ -260,6 +262,24 @@ after pairing, same as they would after any other first connection. It
 works once and expires in ten minutes, and a running `qsh serve` recognizes
 a freshly minted invite without a restart, the same way it picks up `trust
 remove` (`docs/CLI.md` §6.11).
+
+A fourth way skips both fingerprint-typing and pairing codes: exchange
+certificate files directly (ADR-0013). Only an inbound `qsh serve` opens
+the invite-redemption window, so nothing can pair *to* a `qsh listen` or
+`qsh serve --to` peer by code; a certificate file is how that peer gets
+pinned.
+
+```bash
+qsh identity export > box.pem                     # on box
+scp box.pem laptop:                                # however the file travels
+qsh trust add box --cert-file box.pem --json       # on laptop
+```
+
+`qsh identity export` never prints a private key, only the certificate
+that `qsh trust add --cert-file` reads back into a fingerprint pin
+(`qsh trust add-ca` does the same for a foreign CA root). See
+`docs/CLI.md` §6.11 for the full contract, including piping it straight
+over SSH with `--cert-file -`.
 
 From here, `qsh hosts` lists what this machine can reach, `qsh sessions
 box` lists what's alive on the host, and the [Quick
@@ -677,6 +697,11 @@ Some of these are MVP scope decisions, some are unfinished work.
   address that means nothing off this machine, gets no candidates at all,
   since there is no interface-enumeration fallback. The operator still
   picks the address and relays it out of band (`docs/CLI.md` §6.11).
+- A listener is not a code-pairing peer: only an inbound `qsh serve`
+  redeems invite codes, so `qsh trust invite`/`qsh trust accept` cannot
+  pin a `qsh listen` or `qsh serve --to` peer. Pin that peer by
+  certificate file instead (`qsh identity export`, `qsh trust add
+  --cert-file`, `docs/CLI.md` §6.11, §6.13).
 - `exec.run` output is capped at 64 MiB. The whole of stdout plus stderr
   comes back in one envelope, and anything beyond the cap is
   `RESOURCE_EXHAUSTED`. Streaming output is a session feature: use

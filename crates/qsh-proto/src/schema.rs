@@ -9,10 +9,11 @@ use schemars::{Schema, schema_for};
 
 use crate::types::{
     AclCheckData, CapabilitiesData, CertInitData, CertIssueData, CliEnvelope, DoctorData,
-    DynamicTunnel, ExecRunData, Host, HostListData, IdentityInitData, SchemaData, Session,
-    SessionCloseData, SessionListData, SessionOpenData, SessionReadData, SessionResizeData,
-    SessionWriteData, TrustAcceptData, TrustAddData, TrustInviteData, TrustListData,
-    TrustRemoveData, TunnelCloseData, TunnelListData, TunnelOpenData, VersionData,
+    DynamicTunnel, ExecRunData, Host, HostListData, IdentityExportData, IdentityInitData,
+    SchemaData, Session, SessionCloseData, SessionListData, SessionOpenData, SessionReadData,
+    SessionResizeData, SessionWriteData, TrustAcceptData, TrustAddCaData, TrustAddData,
+    TrustInviteData, TrustListData, TrustRemoveData, TunnelCloseData, TunnelListData,
+    TunnelOpenData, VersionData,
 };
 
 /// Every `docs/CLI.md` §2.4 dotted command name [`cli_v1_data_schema`] has
@@ -29,6 +30,7 @@ pub const CLI_V1_SCHEMA_COMMANDS: &[&str] = &[
     "exec.run",
     "host.get",
     "host.list",
+    "identity.export",
     "identity.init",
     "schema.get",
     "session.close",
@@ -40,6 +42,7 @@ pub const CLI_V1_SCHEMA_COMMANDS: &[&str] = &[
     "session.write",
     "trust.accept",
     "trust.add",
+    "trust.add_ca",
     "trust.invite",
     "trust.list",
     "trust.remove",
@@ -70,6 +73,7 @@ pub fn cli_v1_data_schema(command: &str) -> Option<Schema> {
         "exec.run" => schema_for!(ExecRunData),
         "host.get" => schema_for!(Host),
         "host.list" => schema_for!(HostListData),
+        "identity.export" => schema_for!(IdentityExportData),
         "identity.init" => schema_for!(IdentityInitData),
         "schema.get" => schema_for!(SchemaData),
         "session.close" => schema_for!(SessionCloseData),
@@ -81,6 +85,7 @@ pub fn cli_v1_data_schema(command: &str) -> Option<Schema> {
         "session.write" => schema_for!(SessionWriteData),
         "trust.accept" => schema_for!(TrustAcceptData),
         "trust.add" => schema_for!(TrustAddData),
+        "trust.add_ca" => schema_for!(TrustAddCaData),
         "trust.invite" => schema_for!(TrustInviteData),
         "trust.list" => schema_for!(TrustListData),
         "trust.remove" => schema_for!(TrustRemoveData),

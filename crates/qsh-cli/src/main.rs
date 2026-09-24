@@ -47,26 +47,28 @@ use std::time::SystemTime;
 use clap::{CommandFactory as _, Parser};
 use qsh_core::{
     AclCheckOp, CapabilitiesOp, CertInitOp, CertIssueOp, Config, DoctorOp, ExecRunOp, ExecStdin,
-    HostGetOp, HostListOp, IdentityInitOp, InviteCodeSource, OpError, Operation, Ops, SchemaOp,
-    SessionAttachOp, SessionCloseOp, SessionGetOp, SessionListOp, SessionOpenOp, SessionReadOp,
-    SessionResizeOp, SessionWriteOp, TrustAcceptOp, TrustAddOp, TrustInviteOp, TrustListOp,
-    TrustRemoveOp, TunnelCloseOp, TunnelDynamicOp, TunnelListOp, TunnelOpenOp, VersionOp,
-    normalize_invite_code, parse_dynamic_forwards, resolve_invite_code_source,
+    HostGetOp, HostListOp, IdentityExportOp, IdentityInitOp, InviteCodeSource, OpError, Operation,
+    Ops, SchemaOp, SessionAttachOp, SessionCloseOp, SessionGetOp, SessionListOp, SessionOpenOp,
+    SessionReadOp, SessionResizeOp, SessionWriteOp, TrustAcceptOp, TrustAddCaOp, TrustAddOp,
+    TrustInviteOp, TrustListOp, TrustRemoveOp, TunnelCloseOp, TunnelDynamicOp, TunnelListOp,
+    TunnelOpenOp, VersionOp, cert_file_fingerprint_conflict, normalize_invite_code,
+    parse_dynamic_forwards, read_cert_file_arg, resolve_invite_code_source,
     trust::{ADDRESS_PORT_ASSUMED_NOTICE, normalize_peer_address},
 };
 use qsh_proto::{
     AclCheckReq, CapabilitiesReq, CertInitReq, CertIssueReq, DoctorReq, ErrorCode, ExecRunReq,
-    HostGetReq, IdentityInitReq, SessionCloseReq, SessionGetReq, SessionListReq, SessionOpenReq,
-    SessionReadReq, SessionResizeReq, SessionWriteReq, TrustAcceptReq, TrustAddReq, TrustInviteReq,
-    TunnelCloseReq, TunnelDynamicReq, TunnelListReq, TunnelOpenReq,
+    HostGetReq, IdentityExportReq, IdentityInitReq, SessionCloseReq, SessionGetReq, SessionListReq,
+    SessionOpenReq, SessionReadReq, SessionResizeReq, SessionWriteReq, TrustAcceptReq,
+    TrustAddCaReq, TrustAddReq, TrustInviteReq, TunnelCloseReq, TunnelDynamicReq, TunnelListReq,
+    TunnelOpenReq,
 };
 use serde::Serialize;
 use tracing_subscriber::EnvFilter;
 
 use cli::{
     AclCmd, AttachArgs, CertCmd, Cli, Command, DEFAULT_ESCAPE_CHAR, EscapeChar, ExecArgs, HostCmd,
-    SessionCmd, SessionReadArgs, SessionWriteArgs, TrustAddArgs, TrustCmd, TunnelCmd,
-    TunnelOpenArgs,
+    IdentityCmd, SessionCmd, SessionReadArgs, SessionWriteArgs, TrustAddArgs, TrustAddCaArgs,
+    TrustCmd, TunnelCmd, TunnelOpenArgs,
 };
 use render::{human, json, json::Envelope};
 
@@ -383,7 +385,16 @@ fn dispatch(cli: &Cli, ops: Ops) -> i32 {
             }),
             human::print_init,
         ),
+        Command::Identity(IdentityCmd::Export(args)) => finish(
+            cli,
+            IdentityExportOp::COMMAND,
+            ops.identity_export(IdentityExportReq {
+                out: args.out.clone(),
+            }),
+            human::print_identity_export,
+        ),
         Command::Trust(TrustCmd::Add(args)) => run_trust_add(cli, &ops, args),
+        Command::Trust(TrustCmd::AddCa(args)) => run_trust_add_ca(cli, &ops, args),
         Command::Trust(TrustCmd::List) => finish(
             cli,
             TrustListOp::COMMAND,
@@ -1268,10 +1279,28 @@ fn run_trust_add(cli: &Cli, ops: &Ops, args: &TrustAddArgs) -> i32 {
         stderr_note!("{ADDRESS_PORT_ASSUMED_NOTICE}");
     }
 
+    // The conflict check itself also lives in `Ops::trust_add` (the
+    // contract-level backstop), but it must run here too, before
+    // `read_cert_arg`: reading first would block forever on an unwritten
+    // `--cert-file -` stdin, or report a file-read error, instead of ever
+    // telling the operator the two flags don't mix (`docs/CLI.md` §6.11).
+    if args.cert_file.is_some() && args.fingerprint.is_some() {
+        return report_error(cli, TrustAddOp::COMMAND, &cert_file_fingerprint_conflict());
+    }
+
+    let cert_pem = match args.cert_file.as_deref() {
+        Some(path) => match read_cert_arg(path) {
+            Ok(text) => Some(text),
+            Err(err) => return report_error(cli, TrustAddOp::COMMAND, &err),
+        },
+        None => None,
+    };
+
     let request = |fingerprint: Option<String>| TrustAddReq {
         name: args.name.clone(),
         address: args.address.clone(),
         fingerprint,
+        cert_pem: cert_pem.clone(),
     };
 
     let mut result = ops.trust_add(request(args.fingerprint.clone()));
@@ -1293,6 +1322,50 @@ fn run_trust_add(cli: &Cli, ops: &Ops, args: &TrustAddArgs) -> i32 {
     }
 
     finish(cli, TrustAddOp::COMMAND, result, human::print_trust_add)
+}
+
+/// `qsh trust add-ca` — register a foreign CA root supplied as a
+/// certificate file (`docs/CLI.md` §6.11, ADR-0013). Never interactive:
+/// unlike `trust add`, there is no fingerprint to observe or confirm.
+fn run_trust_add_ca(cli: &Cli, ops: &Ops, args: &TrustAddCaArgs) -> i32 {
+    let cert_pem = match read_cert_arg(&args.cert_file) {
+        Ok(text) => text,
+        Err(err) => return report_error(cli, TrustAddCaOp::COMMAND, &err),
+    };
+
+    let result = ops.trust_add_ca(TrustAddCaReq {
+        name: args.name.clone(),
+        cert_pem,
+    });
+
+    finish(
+        cli,
+        TrustAddCaOp::COMMAND,
+        result,
+        human::print_trust_add_ca,
+    )
+}
+
+/// Read a `--cert-file` argument: `-` reads standard input to end of
+/// input (never assuming a POSIX `/dev/stdin` path, so this works
+/// unchanged on Windows); any other value is a real path, delegated to
+/// [`read_cert_file_arg`] so the missing/unreadable-path error text lives
+/// in `qsh-core` (`docs/CLI.md` §6.11). Neither branch echoes any byte it
+/// reads back in an error message.
+fn read_cert_arg(path: &str) -> Result<String, OpError> {
+    if path == "-" {
+        let mut text = String::new();
+        io::stdin().read_to_string(&mut text).map_err(|err| {
+            OpError::new(
+                ErrorCode::InvalidArgument,
+                format!("failed to read standard input: {err}"),
+            )
+            .with_retryable(false)
+        })?;
+        Ok(text)
+    } else {
+        read_cert_file_arg(path)
+    }
 }
 
 /// Outcome of the interactive pin confirmation.
@@ -1572,7 +1645,9 @@ fn command_name(cli: &Cli) -> &'static str {
         Command::Capabilities { .. } => CapabilitiesOp::COMMAND,
         Command::Doctor { .. } => DoctorOp::COMMAND,
         Command::Init { .. } => IdentityInitOp::COMMAND,
+        Command::Identity(IdentityCmd::Export(_)) => IdentityExportOp::COMMAND,
         Command::Trust(TrustCmd::Add(_)) => TrustAddOp::COMMAND,
+        Command::Trust(TrustCmd::AddCa(_)) => TrustAddCaOp::COMMAND,
         Command::Trust(TrustCmd::List) => TrustListOp::COMMAND,
         Command::Trust(TrustCmd::Remove { .. }) => TrustRemoveOp::COMMAND,
         Command::Trust(TrustCmd::Invite) => TrustInviteOp::COMMAND,

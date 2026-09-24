@@ -78,7 +78,9 @@ tunnel.dynamic
 tunnel.close
 tunnel.list
 identity.init
+identity.export
 trust.add
+trust.add_ca
 trust.list
 trust.remove
 trust.invite
@@ -93,6 +95,8 @@ version.get
 ```
 
 `session.attach`는 value operation이 아니라 stream operation이다 (§7.1 참고). CLI subcommand 표기(`qsh hosts`, `qsh session open` 등)와 이 dotted 이름은 서로 다른 계층이며, envelope의 `command` field와 audit record는 항상 이 dotted 이름을 사용한다.
+
+dotted 이름은 CLI subcommand token을 기계적으로 옮긴 것이다(`cert.init` ↔ `qsh cert init`, `host.get` ↔ `qsh host get`). clap이 렌더링하는 다중 단어 subcommand token은 kebab-case(`add-ca`)이지만, `-`는 모든 `acl.toml` action과 모든 `Op::as_str` 값이 쓰는 `[a-z._]` 어휘 밖이다. 단어 경계를 유지하면서 이 어휘에 들어맞는 유일한 표기는 snake_case이고, 이는 JSON contract가 이미 쓰는 관례(`cert_pem`, `added_at`, `key_store`)와도 같다. `trust.add_ca`(CLI 표기 `qsh trust add-ca`)가 `trust.addca`가 아닌 이유이며, 이후 `trust.rename`·`service.*` 같은 다중 단어 subcommand도 같은 규칙을 따른다.
 
 `acl.check`(§6.15, M5)는 원격 peer가 요청하는 operation이 아니라 **이 머신 자신의** `acl.toml`을 로컬에서 조회하는 op이다 — §2.5의 "인가 불요" 행이 다른 local-only operation들과 함께 명시한다.
 
@@ -115,7 +119,7 @@ ACL action은 인가(authorization) 어휘로, operation 이름과는 별개 차
 | `tunnel.open` (remote forward) | `forward.remote` |
 | `tunnel.dynamic` (`-D`, SOCKS5) | `forward.local` — 새 grant가 아니라 `-L`과 같은 action의 재사용이다. `forward.socks`는 이 인가에 관여하지 않는다(ADR-0019 decision 14, §6.9의 `DYNAMIC_FORWARD_ACL_NOTE` 참고) |
 | `tunnel.close`, `tunnel.list` | 해당 tunnel의 소유 peer이면 허용 (`forward.*` 부여로 충분) — remote forward(`-R`)의 `tunnel.close`는 이 로컬-머신 축(§6.13·§6.14, `docs/design/protocol.md` §11-3)과 별개로, host 쪽 `forward.remote` principal 소유권 검사를 하나 더 거친다(M5 Step 5, §6.9 아래 문단). `-L`/`-D`의 `tunnel.close`에는 이 host 쪽 검사가 없다 — 로컬 listener를 닫는 것뿐인 순수 local operation이다 |
-| `host.list`, `host.get`, `identity.init`, `trust.*`, `cert.init`, `cert.issue`, `doctor.run`, `acl.check`, `schema.get`, `capabilities.get`, `version.get` | 인가 불요 — local operation으로 원격 peer의 ACL 평가 대상이 아님 |
+| `host.list`, `host.get`, `identity.init`, `identity.export`, `trust.*`, `cert.init`, `cert.issue`, `doctor.run`, `acl.check`, `schema.get`, `capabilities.get`, `version.get` | 인가 불요 — local operation으로 원격 peer의 ACL 평가 대상이 아님 |
 
 `forward.socks`는 action 어휘에 예약되어 있지만 어떤 operation도 이 action으로 인가하지 않는다 — `-D`가 실제로 구현된 뒤에도 마찬가지다(위 행, ADR-0019 decision 14). 향후 예약: streaming file copy → `file.read`/`file.write`.
 
@@ -645,6 +649,27 @@ qsh init --key-store file --json
 `identity.init`의 실패 경로는 전용 오류 코드를 두지 않고 일반 `ErrorCode` 어휘(§3.3)를 따른다 — 예: keystore 쓰기 실패는 `INTERNAL`(`retryable: false`)로 보고한다.
 
 ```bash
+qsh identity export --json
+qsh identity export --out device.pem --json
+```
+
+`identity.export`는 이 장치의 인증서를 PEM으로 반환한다 — 어떤 명령도 개인키를 인자로도 결과로도 다루지 않으며(ADR-0013), 이 명령도 예외가 아니다: `device.pem`(정확히 하나의 `CERTIFICATE` 블록)만 읽고 `device.key`나 key store에는 손대지 않는다. `--out` 없이 부르면 `data.cert_pem`에 그 파일 텍스트가 그대로 담기고, human mode는 그 PEM을 stdout에 그대로 찍는다 — 그 외에는 아무것도 찍지 않으므로 `qsh identity export | ssh box 'qsh trust add laptop --cert-file -'`처럼 파이프할 수 있다. `--out <path>`를 주면 그 경로에 파일로 쓰고 `data.path`에 그 경로가 담기며, human/`--json`/`--jsonl` 어느 모드든 이때는 PEM 자체가 stdout에 나가지 않는다. 이미 있는 경로를 가리키면 덮어쓰지 않고 `INVALID_ARGUMENT`다. `qsh init`을 먼저 하지 않고 부르면 `CONFIG_ERROR`(문면 정확히 "no local identity; run `qsh init` first")다.
+
+```json
+{
+  "schema": "qsh.cli/v1",
+  "request_id": "01K0EXAMPLE",
+  "command": "identity.export",
+  "ok": true,
+  "data": {
+    "name": "device_01K0EXAMPLE",
+    "fingerprint": "sha256:BASE64FINGERPRINT",
+    "cert_pem": "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----\n"
+  }
+}
+```
+
+```bash
 qsh trust add <name> --address <host[:port]> --fingerprint sha256:... --json
 qsh trust list --json
 qsh trust remove <name> --json
@@ -751,7 +776,34 @@ qsh trust remove <name> --json
 
 존재하지 않는 이름을 제거하는 것도 오류가 아니라 멱등이다 — `ok: true`에 `data.removed: false`를 반환한다.
 
-**`trust.remove`의 유효 범위(M7 Step 2, 감사 ①, DoD 4):** 제거는 즉시 적용되지만, 무엇에 즉시 적용되는지가 핵심이다. 러닝 중인 `qsh serve`를 **재시작할 필요 없이** 그 다음 handshake부터 거부가 적용된다 — host는 `trust.toml`을 매 handshake마다 다시 읽어 내용을 대조하므로(파일 바이트 비교가 유일한 판정자다 — `mtime`은 판정에 쓰이지 않고 진단 기록으로만 남으므로, 1–2초 해상도의 파일시스템이라도 내용이 다르면 재로드가 일어난다; 프로세스 시작 시 1회만 읽는 `acl.toml`과는 다르다) `trust remove` 직후의 새 연결 시도는 즉시 `AUTH_FAILED`로 거부된다. 반대로 **이미 확립된 연결**은 이 제거의 영향을 받지 않는다 — 그 peer는 연결의 협상된 권한 전체를 유지한다: 이미 열어 둔 세션뿐 아니라, `qsh serve` 시작 시 로드된 ACL 허용 범위 안에서 새 세션·터널·forward를 여는 능력까지, 연결이 끊기고 다시 handshake해야 하는 시점까지 그대로 유지된다(README "Known limitations" 동일 문면). 살아 있는 연결의 즉시 강제 종료는 P1이다(`docs/ROADMAP.md` §3).
+**`trust.remove`의 유효 범위(M7 Step 2, 감사 ①, DoD 4):** `trust remove <name>`은 같은 이름의 `[[peer]]` pin뿐 아니라 `[[ca]]` 루트도 지운다(ADR-0013 결정 5 — `trust add-ca`의 이름 충돌을 푸는 유일한 경로). 둘 다 있으면 둘 다 지운다. 제거는 즉시 적용되지만, 무엇에 즉시 적용되는지가 핵심이다. 러닝 중인 `qsh serve`를 **재시작할 필요 없이** 그 다음 handshake부터 거부가 적용된다 — host는 `trust.toml`을 매 handshake마다 다시 읽어 내용을 대조하므로(파일 바이트 비교가 유일한 판정자다 — `mtime`은 판정에 쓰이지 않고 진단 기록으로만 남으므로, 1–2초 해상도의 파일시스템이라도 내용이 다르면 재로드가 일어난다; 프로세스 시작 시 1회만 읽는 `acl.toml`과는 다르다) `trust remove` 직후의 새 연결 시도는 즉시 `AUTH_FAILED`로 거부된다. 반대로 **이미 확립된 연결**은 이 제거의 영향을 받지 않는다 — 그 peer는 연결의 협상된 권한 전체를 유지한다: 이미 열어 둔 세션뿐 아니라, `qsh serve` 시작 시 로드된 ACL 허용 범위 안에서 새 세션·터널·forward를 여는 능력까지, 연결이 끊기고 다시 handshake해야 하는 시점까지 그대로 유지된다(README "Known limitations" 동일 문면). 살아 있는 연결의 즉시 강제 종료는 P1이다(`docs/ROADMAP.md` §3).
+
+```bash
+qsh trust add <name> --cert-file <path> --json
+qsh identity export | qsh trust add <name> --cert-file - --json
+qsh trust add-ca <name> --cert-file <path> --json
+```
+
+`trust add --cert-file`은 `--fingerprint`의 대안이다(ADR-0013) — `qsh identity export`가 낸, 정확히 하나의 `CERTIFICATE` 블록을 담은 PEM을 읽어 그 인증서에서 fingerprint를 직접 계산해 pin한다. `--fingerprint`와 함께 주면 `INVALID_ARGUMENT`다. `-`를 주면 표준입력 끝까지 읽는다. 블록이 0개거나 2개 이상(체인·번들)이거나, `CERTIFICATE`가 아닌 블록(개인키 포함)이 하나라도 섞여 있거나, base64가 깨졌거나, X.509로 파싱되지 않으면 모두 `INVALID_ARGUMENT`이고 메시지에는 입력 바이트가 전혀 담기지 않는다(`details`는 항상 `null`). 유효기간은 검사하지 않는다 — 실제 handshake가 만료를 걸러낸다. `--cert-file`이 가리키는 경로가 없거나 읽을 수 없어도 `INVALID_ARGUMENT`다 — 이 장비 자신의 config 문제가 아니라 인자 오류이기 때문이다. 이렇게 pin된 결과의 모양은 `--fingerprint`로 pin했을 때와 완전히 같다(`trust.add`의 결과 자체가 바뀌지 않는다) — 이름 충돌 시의 조용한 no-op을 포함한 §6.11 위 문단의 규칙이 그대로 적용된다.
+
+`trust add-ca <name> --cert-file <path|->`는 외부(다른 장비의) private CA 루트를 등록한다 — `qsh cert issue`가 이 장비 자신의 CA를 재등록할 때 쓰는 갱신-덮어쓰기 경로(§6.16)와 달리 **append-only**다: 같은 이름에 이미 다른 인증서가 등록되어 있으면 `INVALID_ARGUMENT`로 거부하고(먼저 `qsh trust remove <name>`을 하라고 메시지가 안내한다), 같은 인증서면 조용한 no-op(`created: false, updated: false`)이다. PEM 검증 규칙은 `trust add --cert-file`과 같지만, fingerprint는 구조 검증을 위해서만 계산되고 버려진다 — CA 루트에는 이 장비가 인가할 principal이 없기 때문이다. `trust add-ca`는 구조만 검증한다 — `CERTIFICATE` 블록이 정확히 하나이고 X.509로 파싱되는지만 확인하며, `basicConstraints`의 CA 여부나 자기서명 여부는 검사하지 않는다. 따라서 leaf 인증서를 실수로 등록하면 principal 이름 결정권이 그 leaf의 키 보유자에게 그대로 넘어가므로, 등록하려는 파일이 실제 CA 루트인지는 운영자가 직접 확인해야 한다(ADR-0013 결정 5).
+
+```json
+{
+  "schema": "qsh.cli/v1",
+  "request_id": "01K0EXAMPLE",
+  "command": "trust.add_ca",
+  "ok": true,
+  "data": {
+    "name": "partner-ca",
+    "cert_pem": "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----\n",
+    "created": true,
+    "updated": false
+  }
+}
+```
+
+초대 코드의 상환 창구는 인바운드 `qsh serve`의 기동 경로에만 있다(ADR-0013). 그래서 `qsh listen`이나 `qsh serve --to`(§6.13)로 뜬 peer는 `trust invite`/`trust accept`로 pin할 수 없고, 그 peer는 이 인증서 파일 교환으로 pin한다.
 
 ```bash
 qsh trust invite --json
@@ -978,6 +1030,7 @@ qsh serve --to <listener|host:port> [--name <name>]
 - 시작 시 실제로 bind된 주소와 등록 이벤트(`registered|denied|replaced|lost|expired|retry`)를 stderr에 구조화 진단(tracing target `qsh::reverse`, 한 줄 JSON, payload·토큰 field 없음)으로 출력한다 — stdout에는 §2.2 규칙에 따라 한 바이트도 쓰지 않는다. 이 진단은 `qsh.cli/v1`/`qsh.event/v1` 계약에 속하지 않는 열린 어휘다(issue #4 item 6). `denied`/`lost`/`retry`는 실패·유실 사유를 `cause` 필드(고정 8값 — `resolve`/`dial_timeout`/`refused`/`tls_rejected`/`registration_denied`/`peer_closed`/`path_dead`/`local`, 실패 지점에서 분류되며 주소·토큰·peer가 보낸 오류 본문은 절대 담지 않는다)로 함께 내고, `registered`/`replaced`/`expired`는 이 필드를 생략한다. controller 주소가 여러 개로 resolve되는 경우(issue #4 item 2) 한 번의 접속 시도는 최대 4개까지 순서대로 dial을 시도하며, 그중 전부가 실패했을 때의 `cause`와 그 실패까지 걸린 `since_registered_ms`는 마지막으로 시도한 주소 하나의 실패만을 서술한다 — 그 이전에 실패한 주소들은 이 진단 줄에 남지 않는다. 모든 레코드는 RFC3339 `at` 필드를 갖는다 — 초 단위 정밀도이고(`crate::config::now_rfc3339`), wall-clock 기록일 뿐 정렬 키가 아니다(같은 `lost`/`retry` 쌍처럼 짧은 간격으로 이어지는 레코드는 `at`이 같은 초로 겹칠 수 있으며, 순서가 필요하면 stderr에 실제로 쓰인 `qsh::reverse` 줄 순서를 봐야 한다). `retry`는 언제나 `fingerprint`를 생략하고(그 시점에는 아직 TLS 핸드셰이크가 없어 알 수 없다), `lost`와 그 직후의 `retry`는 그 등록이 살아 있던 기간을 `since_registered_ms`(ms)로 함께 내는 반면 등록이 성립한 적 없는 `retry`(가령 `dial_and_register` 자체가 실패한 경우)는 이 필드도 생략한다 — 어느 쪽이든 `null`이 아니라 키 자체가 없다.
 - `qsh serve --to <listener>`의 `<listener>`는 이름을 먼저, 주소를 다음으로 시도하는 2단계로 해석된다(ADR-0014 결정 7): 먼저 §6.8과 동일한 host→주소 해석(`hosts.toml` 우선, 없으면 `trust.toml`의 pinned peer)으로 trust store alias를 찾고, 그 이름이 없을 때만 리터럴을 정규화해(포트 없으면 4433 보충, §6.11) `trust.toml`의 pin 중 정규화된 주소가 일치하는 것을 찾는다 — 정확히 하나가 일치하면 그 peer의 이름이 controller key가 되고, 둘 이상이면 `INVALID_ARGUMENT`(first-wins 없음), 하나도 없으면 이름 조회 쪽의 오류(보통 `HOST_NOT_FOUND`)로 실패한다. 이름이 주소보다 항상 우선한다 — 주소처럼 생긴 이름으로 pin된 peer(`"192.0.2.10:4433"`)는 그 주소에 실제로 있는 다른 peer가 아니라 자기 자신으로 해석된다. 주소 해석으로 포트가 채워졌을 때만(§6.11과 동일한 `ADDRESS_PORT_ASSUMED_NOTICE`) stderr에 한 번 알린다. 등록에 성공하면 그 연결 위에서 host 역할로 동작하며, 서비스하는 세션은 `qsh serve`(인바운드)와 같은 broker·writer lease 규율을 그대로 따른다. **관찰 가능한 차이는 writer lease를 쥐는 connection이 상주 `qsh listen` 데몬이 유지하는 역방향 connection에 결합된다는 점이다** — 그 connection이 죽으면(재접속 루프가 새 connection을 세우기 전) lease는 forward 세션과 동일하게 자동 해제된다(architecture.md §3).
 - `qsh listen`/`qsh serve --to`(그리고 숨김 alias `qsh reverse`) 둘 다 Windows에서는 리소스를 생성하지 않고 `UNSUPPORTED` + exit `255`다 — localctl(UDS)과 host 역할(PTY)이 `cfg(unix)`이기 때문이다. `qsh serve --to`는 숨김 `qsh reverse` alias와 같은 경로(`run_reverse`)를 공유하므로 이 거부도 공유한다 — 인바운드 `qsh serve`는 이 거부를 갖지 않는다. `--to` 리터럴 자체의 대상 해석(`HOST_NOT_FOUND`/`INVALID_ARGUMENT`, §6.8과 같은 이름-그다음-주소 2단계)이 `run_reverse`에 닿기 전에 먼저 실패할 수도 있다. Windows의 `qsh hosts`는 forward host만 반환하며(데몬 개념 없음) 오류가 아니다.
+- **코드 pairing은 이 두 모드에 닿지 않는다(ADR-0013).** 초대 코드의 상환 창구(`SharedInviteStore`)는 인바운드 `qsh serve`의 기동 경로에만 배선돼 있어 `qsh listen`도 `qsh serve --to`도 열지 않는다. 따라서 `trust invite`/`trust accept`로는 controller도 target도 pin할 수 없고, 어느 방향이든 §6.11의 인증서 파일 교환(`qsh identity export` + `qsh trust add --cert-file`)이 그 경로다. 상환 창구를 `qsh listen`에도 열지는 ADR-0015로 예약돼 있다.
 - 연결이 죽은 등록은 `state:"stale"`로 표시됐다가 `[listen].stale_retention`(기본 120s, `docs/design/protocol.md` §11-4)이 지나면 목록에서 제거된다.
 - **Controller 측 writer lease 결합 (M3 Step 6).** live 역방향 등록으로 뜨는 host를 향한 controller 쪽의 `qsh session ...`(value op 6종: open/get/list/read/write/resize/close)는 그 명령을 실행한 CLI 프로세스 자신의 QUIC connection이 아니라, 상주 `qsh listen` 데몬이 target과 유지하는 그 **하나의** reverse connection을 `LOCAL_CONTROL` conduit(`docs/design/protocol.md` §11-3)으로 relay해서 나간다. **대화형 attach(`qsh <name>`/`qsh attach <name>/<id>`)도 M3 Step 7부터 이 경로를 탄다.** `Ops::session_attach`는 route-aware해졌다(`Ops::connect`로 host route를 먼저 resolve하고, 그 결과가 live 역방향 등록이면 forward의 `connect_target`이 아니라 이 §의 `LOCAL_CONTROL` conduit으로 향한다); ticket을 실제로 redeem하는 data 스트림도 이제 `LOCAL_STREAM` conduit(위 conduit 모델 문단, `docs/design/protocol.md` §11-3)로 역방향에서 열린다 — 데몬은 그 conduit 위에서 `LocalHello`/`LocalHelloAck` 교환 뒤 wire `StreamHeader{SESSION_DATA, ticket}`를 받아 host의 QUIC connection 위에 새 bidi stream을 열고 그 뒤로는 순수 byte splice로만 동작한다(SessionFrame을 파싱하지도, payload를 로그하지도 않는다). 아래 lease 결합 규칙은 지금 이 value op·stream op 양쪽 모두에 참이다: 위 항목의 "writer lease를 쥐는 connection이 데몬의 reverse connection에 결합된다"는 target 쪽 서술의 controller 쪽 대응이다 — target이 실제로 보는 유일한 connection은 데몬의 것이므로, **writer lease는 데몬의 connection에 묶이지, lease를 요청한 CLI 프로세스 자체에는 묶이지 않는다.** 그 CLI 프로세스가 죽어도(터미널 종료, `Ctrl-C`, 비정상 종료) 데몬의 reverse connection이 살아 있는 한 lease는 자동 해제되지 않는다 — forward 세션(§5, architecture.md §3)의 "소유 connection이 죽으면 lease가 자동 해제"라는 기대가 reverse 경로에서는 CLI 프로세스 단위가 아니라 데몬 connection 단위로 적용된다는 뜻이다. **동시 attach 격리.** 이 lease를 실제로 쥐는지 판정하는 identity는 물리 connection(`ctx.connection_id()`)이 아니라 그 attach가 redeem한 단발성 ticket에서 유도된다(`WriterLease::take_owned`) — 그렇지 않으면 한 데몬을 거치는 모든 local CLI가 같은 물리 connection을 공유하는 탓에 서로 다른 두 attach가 같은 identity로 오인되어 조용히 lease를 공동 소유하고 (`no_steal`이 걸려 있어도) 서로의 keystroke를 같은 PTY에 섞어 넣는다. 반면 `no_steal`이 충돌 여부를 판단하는 기준은 여전히 **principal뿐**이다(architecture.md §3(b)). reverse 경로에서 한 데몬을 relay로 쓰는 모든 local CLI 프로세스는 — 어느 프로세스가 열었든 — 항상 그 데몬의 reverse connection과 같은 controller principal로 인증되므로, "타 principal이 lease를 쥐고 있다"는 `no_steal` 충돌의 전제 자체가 reverse 경로 안에서는 성립하지 않는다(`session.write`가 opener 결합 때문에 이미 이 규칙을 재현할 수 없는 것과 같은 이유, 바로 위 architecture.md §3(b) 인용). 즉 죽은 CLI가 남긴 lease는 자동 해제되지 않지만, 다음 attach는 대화형이든 `no_steal`을 쓰는 자동화든 관계없이 항상 그 lease를 이어받는다 — `SESSION_CONFLICT`는 이 reverse 시나리오에서는 발생하지 않는다.
 - **역방향 attach에는 아직 recovery/reconnect가 없다 (M3 Step 7).** Forward 경로의 attach는 connection이 끊겨도 (`docs/CLI.md` 이 절 밖의) 자동 재접속·resume 시도를 갖지만, `LOCAL_STREAM`/`LOCAL_CONTROL` conduit 위의 역방향 attach는 그 driver가 아직 없다 — 데몬의 reverse connection이나 conduit 자체가 죽으면 attach는 그 즉시 명확한 typed error로 끝난다(panic도, 무한 대기도 아니다). 세션 자체는 forward와 동일하게 살아남는다(broker가 쥐고 있고, connection 수명과 분리돼 있다 — architecture.md §3); 사용자가 다시 `qsh attach <name>/<id>`를 실행하면 데몬의 reverse connection이 살아 있는 한 정상적으로 재attach된다. 이 driver는 M3 Step 8에서 forward와 같은 `Reconnect` 추상 위에 통합될 예정이다.

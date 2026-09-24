@@ -5,8 +5,9 @@
 //! asks for `--key-store file`, so the suite never touches the developer's
 //! real config directory or the OS credential store.
 
+use std::io::Write as _;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 use qsh_core::Fingerprint;
 use serde_json::Value;
@@ -69,6 +70,59 @@ impl Sandbox {
         let (code, value) = self.json(&["init", "--json", "--key-store", "file"]);
         assert_eq!(code, 0, "init failed: {value}");
         value
+    }
+
+    /// Like `qsh`, but feeds `input` on the child's stdin instead of
+    /// leaving it inherited — for the `--cert-file -` path.
+    fn qsh_with_stdin(&self, args: &[&str], input: &[u8]) -> Output {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_qsh"))
+            .args(args)
+            .env("QSH_CONFIG_DIR", &self.config)
+            .env("QSH_STATE_DIR", &self.state)
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove("XDG_STATE_HOME")
+            .env_remove("QSH_LOG")
+            .env_remove("RUST_LOG")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("failed to spawn qsh");
+        child
+            .stdin
+            .take()
+            .expect("stdin pipe")
+            .write_all(input)
+            .expect("write stdin");
+        child.wait_with_output().expect("wait for qsh")
+    }
+
+    /// `json`'s stdin-feeding twin, for `--json`-mode `-` cases.
+    fn json_with_stdin(&self, args: &[&str], input: &[u8]) -> (i32, Value) {
+        let output = self.qsh_with_stdin(args, input);
+        let stdout = String::from_utf8(output.stdout).expect("stdout must be utf-8");
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "expected exactly one JSON line for {args:?}, got {stdout:?}"
+        );
+        let value: Value = serde_json::from_str(lines[0])
+            .unwrap_or_else(|e| panic!("stdout is not JSON for {args:?}: {e}: {stdout:?}"));
+        assert_eq!(value["schema"], "qsh.cli/v1");
+        assert!(value["request_id"].as_str().is_some());
+        (output.status.code().expect("exit code"), value)
+    }
+
+    /// `qsh identity export --json`'s `data.cert_pem`, for feeding into a
+    /// second sandbox's `trust add --cert-file -`.
+    fn exported_cert_pem(&self) -> String {
+        let (code, exported) = self.json(&["identity", "export", "--json"]);
+        assert_eq!(code, 0, "{exported}");
+        exported["data"]["cert_pem"]
+            .as_str()
+            .expect("data.cert_pem")
+            .to_string()
     }
 }
 
@@ -513,4 +567,329 @@ fn json_mode_never_prompts_and_keeps_stdout_pure() {
     );
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("qsh:"), "{stderr:?}");
+}
+
+// --- ADR-0013: `trust add --cert-file` / `trust add-ca` /
+// `identity export` negative table, CLI/exit-code face. Pure-core coverage
+// of the same rows lives in `crates/qsh-core/src/ops/tests.rs`; this file
+// only re-proves each row's exit code and JSON envelope through a real
+// subprocess, plus the `-` (stdin) path that only exists at this layer.
+
+#[test]
+fn identity_export_is_a_config_error_before_qsh_init() {
+    let sandbox = Sandbox::new();
+    let (code, value) = sandbox.json(&["identity", "export", "--json"]);
+    assert_eq!(code, 255);
+    assert_eq!(value["error"]["code"], "CONFIG_ERROR");
+    assert!(
+        value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("qsh init"),
+        "{value}"
+    );
+}
+
+#[test]
+fn identity_export_refuses_to_clobber_an_existing_out_file() {
+    let sandbox = Sandbox::new();
+    sandbox.init();
+    let out_path = sandbox.config.join("exported.pem");
+    std::fs::write(&out_path, "not a cert\n").expect("seed a pre-existing file");
+
+    let (code, value) = sandbox.json(&[
+        "identity",
+        "export",
+        "--out",
+        out_path.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(code, 255, "{value}");
+    assert_ne!(value["error"]["code"], "OK");
+    assert_eq!(
+        std::fs::read_to_string(&out_path).unwrap(),
+        "not a cert\n",
+        "a refused clobber must leave the existing file untouched"
+    );
+}
+
+#[test]
+fn trust_add_cert_file_rejects_a_chain_of_two_certificates() {
+    let exporter_a = Sandbox::new();
+    exporter_a.init();
+    let exporter_b = Sandbox::new();
+    exporter_b.init();
+    let chain = format!(
+        "{}{}",
+        exporter_a.exported_cert_pem(),
+        exporter_b.exported_cert_pem()
+    );
+
+    let sandbox = Sandbox::new();
+    sandbox.init();
+    let (code, value) = sandbox.json_with_stdin(
+        &["trust", "add", "peer-a", "--cert-file", "-", "--json"],
+        chain.as_bytes(),
+    );
+    assert_eq!(code, 255, "{value}");
+    assert_eq!(value["error"]["code"], "INVALID_ARGUMENT");
+    assert!(
+        !value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("BEGIN"),
+        "the error message must never echo input bytes: {value}"
+    );
+    assert!(value["error"]["details"].is_null(), "{value}");
+}
+
+#[test]
+fn trust_add_cert_file_rejects_a_bundle_carrying_a_private_key_and_echoes_no_input() {
+    let ca_owner = Sandbox::new();
+    ca_owner.init();
+    let (code, ca_init) = ca_owner.json(&["cert", "init", "--json"]);
+    assert_eq!(code, 0, "{ca_init}");
+    let ca_pem =
+        std::fs::read_to_string(ca_owner.config.join("ca").join("ca.pem")).expect("read ca.pem");
+    let ca_key =
+        std::fs::read_to_string(ca_owner.config.join("ca").join("ca.key")).expect("read ca.key");
+    let bundle = format!("{ca_pem}{ca_key}");
+
+    let sandbox = Sandbox::new();
+    sandbox.init();
+    let (code, value) = sandbox.json_with_stdin(
+        &["trust", "add", "peer-a", "--cert-file", "-", "--json"],
+        bundle.as_bytes(),
+    );
+    assert_eq!(code, 255, "{value}");
+    assert_eq!(value["error"]["code"], "INVALID_ARGUMENT");
+    assert!(
+        !value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("PRIVATE KEY"),
+        "the error message must never echo input bytes: {value}"
+    );
+    assert!(value["error"]["details"].is_null(), "{value}");
+}
+
+#[test]
+fn trust_add_cert_file_is_a_silent_no_op_when_the_name_holds_a_different_fingerprint() {
+    let exporter = Sandbox::new();
+    exporter.init();
+    let cert_pem = exporter.exported_cert_pem();
+
+    let sandbox = Sandbox::new();
+    sandbox.init();
+    sandbox.qsh(&[
+        "trust",
+        "add",
+        "peer-a",
+        "--fingerprint",
+        FINGERPRINT,
+        "--json",
+    ]);
+
+    let (code, value) = sandbox.json_with_stdin(
+        &["trust", "add", "peer-a", "--cert-file", "-", "--json"],
+        cert_pem.as_bytes(),
+    );
+    assert_eq!(code, 0, "{value}");
+    assert_eq!(value["data"]["created"], false);
+    assert_eq!(value["data"]["updated"], false);
+    assert_eq!(
+        value["data"]["peer"]["fingerprint"], FINGERPRINT,
+        "a name collision under a different fingerprint is a silent no-op, not a re-bind"
+    );
+
+    let (_, listed) = sandbox.json(&["trust", "list", "--json"]);
+    assert_eq!(
+        listed["data"]["peers"][0]["fingerprint"], FINGERPRINT,
+        "the pre-existing pin must be untouched by the no-op re-add"
+    );
+}
+
+#[test]
+fn trust_add_rejects_cert_file_together_with_fingerprint() {
+    let exporter = Sandbox::new();
+    exporter.init();
+    let cert_pem = exporter.exported_cert_pem();
+
+    let sandbox = Sandbox::new();
+    sandbox.init();
+    let (code, value) = sandbox.json_with_stdin(
+        &[
+            "trust",
+            "add",
+            "peer-a",
+            "--cert-file",
+            "-",
+            "--fingerprint",
+            FINGERPRINT,
+            "--json",
+        ],
+        cert_pem.as_bytes(),
+    );
+    assert_eq!(code, 255, "{value}");
+    assert_eq!(value["error"]["code"], "INVALID_ARGUMENT");
+}
+
+/// The conflict must be reported *before* `--cert-file` is ever read
+/// (`docs/CLI.md` §6.11): a nonexistent path proves the ordering, since a
+/// read-first implementation would instead report the file-read error.
+#[test]
+fn trust_add_rejects_cert_file_together_with_fingerprint_before_reading_the_path() {
+    let sandbox = Sandbox::new();
+    sandbox.init();
+    let (code, value) = sandbox.json(&[
+        "trust",
+        "add",
+        "peer-a",
+        "--cert-file",
+        "/no/such/cert.pem",
+        "--fingerprint",
+        FINGERPRINT,
+        "--json",
+    ]);
+    assert_eq!(code, 255, "{value}");
+    assert_eq!(value["error"]["code"], "INVALID_ARGUMENT");
+    assert!(
+        value["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("mutually exclusive"),
+        "expected the conflict message, not a file-read error: {value}"
+    );
+}
+
+#[test]
+fn trust_add_ca_is_idempotent_for_an_identical_pem() {
+    let ca_owner = Sandbox::new();
+    ca_owner.init();
+    ca_owner.qsh(&["cert", "init", "--json"]);
+    let ca_pem =
+        std::fs::read_to_string(ca_owner.config.join("ca").join("ca.pem")).expect("read ca.pem");
+
+    let sandbox = Sandbox::new();
+    sandbox.init();
+    let (code, first) = sandbox.json_with_stdin(
+        &[
+            "trust",
+            "add-ca",
+            "foreign-ca",
+            "--cert-file",
+            "-",
+            "--json",
+        ],
+        ca_pem.as_bytes(),
+    );
+    assert_eq!(code, 0, "{first}");
+    assert_eq!(first["data"]["created"], true);
+
+    let (code, second) = sandbox.json_with_stdin(
+        &[
+            "trust",
+            "add-ca",
+            "foreign-ca",
+            "--cert-file",
+            "-",
+            "--json",
+        ],
+        ca_pem.as_bytes(),
+    );
+    assert_eq!(code, 0, "{second}");
+    assert_eq!(second["data"]["created"], false);
+}
+
+#[test]
+fn trust_add_ca_rejects_a_second_pem_under_an_existing_name() {
+    let ca_owner_a = Sandbox::new();
+    ca_owner_a.init();
+    ca_owner_a.qsh(&["cert", "init", "--json"]);
+    let ca_pem_a = std::fs::read_to_string(ca_owner_a.config.join("ca").join("ca.pem"))
+        .expect("read ca.pem a");
+
+    let ca_owner_b = Sandbox::new();
+    ca_owner_b.init();
+    ca_owner_b.qsh(&["cert", "init", "--json"]);
+    let ca_pem_b = std::fs::read_to_string(ca_owner_b.config.join("ca").join("ca.pem"))
+        .expect("read ca.pem b");
+
+    let sandbox = Sandbox::new();
+    sandbox.init();
+    let (code, first) = sandbox.json_with_stdin(
+        &[
+            "trust",
+            "add-ca",
+            "foreign-ca",
+            "--cert-file",
+            "-",
+            "--json",
+        ],
+        ca_pem_a.as_bytes(),
+    );
+    assert_eq!(code, 0, "{first}");
+
+    let (code, second) = sandbox.json_with_stdin(
+        &[
+            "trust",
+            "add-ca",
+            "foreign-ca",
+            "--cert-file",
+            "-",
+            "--json",
+        ],
+        ca_pem_b.as_bytes(),
+    );
+    assert_eq!(code, 255, "{second}");
+    assert_eq!(second["error"]["code"], "INVALID_ARGUMENT");
+}
+
+/// The recovery path `add_ca_append_only`'s own error message and
+/// `docs/CLI.md` §6.11 both promise (ADR-0013 결정 5): a name collision
+/// is `INVALID_ARGUMENT`, but `trust remove <name>` unpins the CA root
+/// so a second, different PEM can then be registered under that name.
+#[test]
+fn trust_add_ca_collision_is_recoverable_with_trust_remove() {
+    let ca_owner_a = Sandbox::new();
+    ca_owner_a.init();
+    ca_owner_a.qsh(&["cert", "init", "--json"]);
+    let ca_pem_a = std::fs::read_to_string(ca_owner_a.config.join("ca").join("ca.pem"))
+        .expect("read ca.pem a");
+
+    let ca_owner_b = Sandbox::new();
+    ca_owner_b.init();
+    ca_owner_b.qsh(&["cert", "init", "--json"]);
+    let ca_pem_b = std::fs::read_to_string(ca_owner_b.config.join("ca").join("ca.pem"))
+        .expect("read ca.pem b");
+
+    let sandbox = Sandbox::new();
+    sandbox.init();
+    let (code, first) = sandbox.json_with_stdin(
+        &["trust", "add-ca", "x", "--cert-file", "-", "--json"],
+        ca_pem_a.as_bytes(),
+    );
+    assert_eq!(code, 0, "{first}");
+    assert_eq!(first["data"]["created"], true);
+
+    let (code, collision) = sandbox.json_with_stdin(
+        &["trust", "add-ca", "x", "--cert-file", "-", "--json"],
+        ca_pem_b.as_bytes(),
+    );
+    assert_eq!(code, 255, "{collision}");
+    assert_eq!(collision["error"]["code"], "INVALID_ARGUMENT");
+
+    let (code, removed) = sandbox.json(&["trust", "remove", "x", "--json"]);
+    assert_eq!(code, 0, "{removed}");
+    assert_eq!(
+        removed["data"],
+        serde_json::json!({"name": "x", "removed": true})
+    );
+
+    let (code, second) = sandbox.json_with_stdin(
+        &["trust", "add-ca", "x", "--cert-file", "-", "--json"],
+        ca_pem_b.as_bytes(),
+    );
+    assert_eq!(code, 0, "{second}");
+    assert_eq!(second["data"]["created"], true);
 }

@@ -77,7 +77,7 @@ qsh trust add <peer>
 qsh serve
 ```
 
-`qsh init`은 device identity를 생성하고 private key를 OS credential store에 보관한다. Peer 신뢰는 fingerprint 확인, 일회용 pairing code 또는 private CA로 설정한다.
+`qsh init`은 device identity를 생성하고 private key를 OS credential store에 보관한다. Peer 신뢰는 fingerprint 확인, 일회용 pairing code, private CA, 또는 인증서 파일 교환(`qsh identity export`로 낸 PEM을 `qsh trust add --cert-file`로 pin, 외부 CA 루트는 `qsh trust add-ca`)으로 설정한다(ADR-0013) — 어느 경로든 개인키는 이 장비 밖으로 나가지 않는다.
 
 ### 정방향 접속
 
@@ -248,6 +248,7 @@ qsh hosts                       호스트 조회
 qsh sessions [host]             세션 조회
 qsh attach <session-ref>        세션 attach
 qsh tunnel ...                  터널 관리
+qsh identity export             이 장치 인증서를 PEM으로 출력
 qsh trust ...                   신뢰 관리
 qsh cert ...                    인증서 관리
 qsh acl ...                     ACL 관리와 검사

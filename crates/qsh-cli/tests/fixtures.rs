@@ -101,12 +101,15 @@ const RETIRED_PRODUCERS: &[(&str, &str)] = &[(
 const REQUIRED_FIXTURES: &[&str] = &[
     "version.json",
     "capabilities.json",
+    "identity.export.json",
     "identity.init.created.json",
     "identity.init.existing.json",
     "cert.init.json",
     "cert.issue.json",
+    "trust.add.cert_file.json",
     "trust.add.json",
     "trust.add.updated.json",
+    "trust.add_ca.json",
     "trust.list.json",
     "trust.remove.json",
     "trust.remove.absent.json",
@@ -524,6 +527,74 @@ fn golden_trust_accept_fixture() {
     let (code, accepted) = client.json(&["trust", "accept", serve.addr(), invite_code, "--json"]);
     assert_eq!(code, 0, "{accepted}");
     check("trust.accept.json", accepted);
+}
+
+/// The certificate-file exchange path (`docs/CLI.md` §6.11, ADR-0013):
+/// `identity export`, `trust add --cert-file`, and
+/// `trust add-ca`. Its own three sandboxes, never `golden_local_fixtures`'
+/// — a fresh pinned peer there would perturb `host.list.json`/
+/// `host.get.json`, and it already carries a `[[ca]]` named `local` from
+/// `cert issue`.
+#[test]
+fn golden_cert_file_exchange_fixtures() {
+    let exporter = Sandbox::initialized();
+    let (code, exported) = exporter.json(&["identity", "export", "--json"]);
+    assert_eq!(code, 0, "{exported}");
+    let cert_pem = exported["data"]["cert_pem"]
+        .as_str()
+        .expect("data.cert_pem")
+        .to_string();
+    check("identity.export.json", exported);
+
+    // `--cert-file -`: the PEM arrives on stdin, exactly as
+    // `qsh identity export | ssh box 'qsh trust add … --cert-file -'`
+    // pipes it in practice.
+    let pinner = Sandbox::initialized();
+    let (code, added) = pinner.json_with_stdin(
+        &[
+            "trust",
+            "add",
+            "exported-peer",
+            "--cert-file",
+            "-",
+            "--json",
+        ],
+        cert_pem.as_bytes(),
+    );
+    assert_eq!(code, 0, "{added}");
+    assert_eq!(added["data"]["created"], true, "{added}");
+    // The one property this path produces that `--fingerprint` doesn't
+    // (a client-only pin, no `--address`) would otherwise be invisible in
+    // the golden file: `normalize` masks `address` unconditionally, so
+    // assert it here instead, before the mask erases it.
+    assert_eq!(added["data"]["peer"]["address"], "", "{added}");
+    check("trust.add.cert_file.json", added);
+
+    // `trust add-ca`'s foreign root: `cert init`'s own CA certificate
+    // (`crates/qsh-core/src/ca.rs`'s `CA_CERT_FILE`, `<config_dir>/ca/
+    // ca.pem`) is already a lone-`CERTIFICATE`-block PEM file, so no
+    // second key pair needs generating here.
+    let ca_owner = Sandbox::initialized();
+    let (code, ca_init) = ca_owner.json(&["cert", "init", "--json"]);
+    assert_eq!(code, 0, "{ca_init}");
+    let ca_pem = std::fs::read_to_string(ca_owner.config_dir().join("ca").join("ca.pem"))
+        .expect("read ca.pem");
+
+    let ca_registrar = Sandbox::initialized();
+    let (code, ca_added) = ca_registrar.json_with_stdin(
+        &[
+            "trust",
+            "add-ca",
+            "foreign-ca",
+            "--cert-file",
+            "-",
+            "--json",
+        ],
+        ca_pem.as_bytes(),
+    );
+    assert_eq!(code, 0, "{ca_added}");
+    assert_eq!(ca_added["data"]["created"], true, "{ca_added}");
+    check("trust.add_ca.json", ca_added);
 }
 
 /// The dial-timeout path. Split out because it is the one scenario that

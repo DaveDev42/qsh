@@ -43,6 +43,10 @@ impl Ops {
             ));
         }
 
+        if req.cert_pem.is_some() && req.fingerprint.is_some() {
+            return Err(cert_file_fingerprint_conflict());
+        }
+
         // ADR-0014 결정 3: op 진입점에서 한 번. 아래 세 사용처(probe dial,
         // TRUST_REQUIRED details.address, add_peer) 전부 이 값을 쓴다.
         let address = req
@@ -50,30 +54,38 @@ impl Ops {
             .as_deref()
             .map(|address| crate::trust::normalize_peer_address(address).address);
 
-        let fingerprint = match req.fingerprint.as_deref() {
-            Some(text) => text
-                .parse::<Fingerprint>()
-                .map_err(|err| OpError::new(ErrorCode::InvalidArgument, err.to_string()))?,
-            None => {
-                let Some(address) = address.as_deref() else {
+        let fingerprint = if let Some(cert_pem) = req.cert_pem.as_deref() {
+            // ADR-0013 결정 4/5: 구조 검증(라벨 multiset·단일 블록·X.509
+            // 파싱)까지 마친 값만 fingerprint로 쓴다.
+            let (_der, fingerprint) =
+                crate::identity::pem::single_certificate(cert_pem).map_err(cert_pem_op_error)?;
+            fingerprint
+        } else {
+            match req.fingerprint.as_deref() {
+                Some(text) => text
+                    .parse::<Fingerprint>()
+                    .map_err(|err| OpError::new(ErrorCode::InvalidArgument, err.to_string()))?,
+                None => {
+                    let Some(address) = address.as_deref() else {
+                        return Err(OpError::new(
+                            ErrorCode::InvalidArgument,
+                            "--address is required to observe a fingerprint",
+                        ));
+                    };
+                    let observed = self.probe_fingerprint(address)?;
                     return Err(OpError::new(
-                        ErrorCode::InvalidArgument,
-                        "--address is required to observe a fingerprint",
-                    ));
-                };
-                let observed = self.probe_fingerprint(address)?;
-                return Err(OpError::new(
-                    ErrorCode::TrustRequired,
-                    format!(
-                        "peer {address} is not trusted; verify the fingerprint and re-run with \
-                         --fingerprint"
-                    ),
-                )
-                .with_retryable(false)
-                .with_details(serde_json::json!({
-                    "observed_fingerprint": observed.to_string(),
-                    "address": address,
-                })));
+                        ErrorCode::TrustRequired,
+                        format!(
+                            "peer {address} is not trusted; verify the fingerprint and re-run with \
+                             --fingerprint"
+                        ),
+                    )
+                    .with_retryable(false)
+                    .with_details(serde_json::json!({
+                        "observed_fingerprint": observed.to_string(),
+                        "address": address,
+                    })));
+                }
             }
         };
 
@@ -111,6 +123,43 @@ impl Ops {
                     ..peer.clone()
                 })
                 .collect(),
+        })
+    }
+
+    /// `trust.add_ca` — register a foreign CA root supplied by an operator
+    /// as PEM text (`qsh trust add-ca`, ADR-0013 결정 3/4/5).
+    ///
+    /// Append-only, unlike [`TrustStore::add_ca`]'s local-re-init path
+    /// (`qsh cert issue`): an existing `name` under a *different*
+    /// `cert_pem` is refused (`INVALID_ARGUMENT`) rather than overwritten.
+    /// The fingerprint `single_certificate` derives is computed only to
+    /// validate the PEM's X.509 structure and is then discarded — a CA
+    /// root has no principal of its own.
+    pub fn trust_add_ca(&self, req: TrustAddCaReq) -> Result<TrustAddCaData, OpError> {
+        let name = req.name.trim().to_string();
+        if name.is_empty() {
+            return Err(OpError::new(
+                ErrorCode::InvalidArgument,
+                "CA name must not be empty",
+            ));
+        }
+        let (_der, _fingerprint) =
+            crate::identity::pem::single_certificate(&req.cert_pem).map_err(cert_pem_op_error)?;
+
+        let path = self.paths.trust_file();
+        // Whole load→mutate→save under lock — same discipline as every
+        // other trust-store write (`TrustStore::lock`'s own doc).
+        let _lock = TrustStore::lock(&path)?;
+        let mut store = TrustStore::load(&path)?;
+        let (entry, created, updated) = store.add_ca_append_only(&name, req.cert_pem)?;
+        if created {
+            store.save(&path)?;
+        }
+        Ok(TrustAddCaData {
+            name: entry.name,
+            cert_pem: entry.cert_pem,
+            created,
+            updated: Some(updated),
         })
     }
 
@@ -329,4 +378,43 @@ impl Ops {
             updated: (!created).then_some(updated),
         })
     }
+}
+
+/// Map a [`crate::identity::pem::CertPemError`] to the `INVALID_ARGUMENT`
+/// [`OpError`] both `trust add --cert-file` and `trust add-ca` report for
+/// it (ADR-0013 결정 4): `details` stays `Value::Null` and the message is
+/// one of `CertPemError`'s own fixed strings — never an input byte.
+fn cert_pem_op_error(err: crate::identity::pem::CertPemError) -> OpError {
+    OpError::new(ErrorCode::InvalidArgument, err.to_string()).with_retryable(false)
+}
+
+/// The `--cert-file`/`--fingerprint` mutual-exclusion error `trust add`
+/// reports (`docs/CLI.md` §6.11, ADR-0013). Exposed so the CLI can raise
+/// it *before* reading `--cert-file` — a real path or, for `-`, standard
+/// input — instead of after: reading first would otherwise block on an
+/// unwritten stdin, or surface a file-read error, ahead of ever telling
+/// the operator the two flags don't mix.
+pub fn cert_file_fingerprint_conflict() -> OpError {
+    OpError::new(
+        ErrorCode::InvalidArgument,
+        "--cert-file and --fingerprint are mutually exclusive",
+    )
+    .with_retryable(false)
+}
+
+/// Read PEM text from a real `--cert-file <path>` argument (`docs/CLI.md`
+/// §6.11, ADR-0013). The CLI reads `-` (standard input) itself — this is
+/// only the real-path case, called with the path exactly as the operator
+/// gave it. A missing or unreadable path names a bad *argument*, not this
+/// machine's own config tree, so it is `INVALID_ARGUMENT`
+/// (`docs/CLI.md` §6.11), never `CONFIG_ERROR`; the
+/// message names the path only, never any byte the file might contain.
+pub fn read_cert_file_arg(path: &str) -> Result<String, OpError> {
+    std::fs::read_to_string(path).map_err(|err| {
+        OpError::new(
+            ErrorCode::InvalidArgument,
+            format!("failed to read {path}: {err}"),
+        )
+        .with_retryable(false)
+    })
 }

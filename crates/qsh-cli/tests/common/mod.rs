@@ -194,6 +194,16 @@ impl Sandbox {
         (exit_code(&output), value)
     }
 
+    /// Like [`json`](Self::json), but feeds `input` on stdin first
+    /// (`--cert-file -`'s JSON-mode case, ADR-0013): [`json`](Self::json)
+    /// runs through [`qsh`](Self::qsh), which sets `stdin(Stdio::null())`,
+    /// so a command that reads standard input needs this instead.
+    pub fn json_with_stdin(&self, args: &[&str], input: &[u8]) -> (i32, Value) {
+        let output = self.qsh_with_stdin(args, input);
+        let value = sole_envelope(&output.stdout, args);
+        (exit_code(&output), value)
+    }
+
     /// `qsh init --key-store file --json`, asserted to succeed.
     pub fn init(&self) -> Value {
         let (code, value) = self.json(&["init", "--json", "--key-store", "file"]);

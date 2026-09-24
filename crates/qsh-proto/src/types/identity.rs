@@ -92,3 +92,36 @@ pub struct IdentityInitData {
     /// existed (idempotent).
     pub created: bool,
 }
+
+// ---------------------------------------------------------------------------
+// identity.export (`docs/CLI.md` §6.11, ADR-0013)
+// ---------------------------------------------------------------------------
+
+/// Request for `identity.export`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+pub struct IdentityExportReq {
+    /// Write the certificate to this path instead of returning it inline.
+    /// Refuses to overwrite an existing file (`INVALID_ARGUMENT`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub out: Option<String>,
+}
+
+/// Data payload of `identity.export` (`docs/CLI.md` §6.11, ADR-0013
+/// 결과: no command ever takes or emits this device's private key —
+/// this op reads only `identity::read_identity`, never the key store).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct IdentityExportData {
+    /// This device's identifier (the same value `identity.init` reports
+    /// as `device_id`).
+    pub name: String,
+    /// SPKI SHA-256 fingerprint of the exported certificate.
+    pub fingerprint: String,
+    /// The certificate, PEM-encoded, byte-identical to `device.pem` on
+    /// disk. Present only when `--out` was not given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cert_pem: Option<String>,
+    /// The path the certificate was written to, exactly as the operator
+    /// gave it (not canonicalized). Present only when `--out` was given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}

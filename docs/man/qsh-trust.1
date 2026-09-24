@@ -31,6 +31,9 @@ Print version
 qsh\-trust\-add(1)
 Pin a peer by name
 .TP
+qsh\-trust\-add\-ca(1)
+Register a foreign CA root supplied as a certificate file (`docs/CLI.md` §6.11, ADR\-0013). Append\-only: an existing name under a different certificate is refused rather than overwritten
+.TP
 qsh\-trust\-list(1)
 List pinned peers
 .TP

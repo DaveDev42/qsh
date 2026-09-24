@@ -433,6 +433,13 @@ impl TrustStore {
     /// as [`TrustStore::add_peer`], keyed on `name` instead of
     /// fingerprint since a CA root has no principal of its own.
     ///
+    /// **Scope:** this in-place-overwrite-on-mismatch behavior is only
+    /// ever reached from `qsh cert issue`'s *local* re-init of a CA it
+    /// already owns under that name — never from an operator-supplied
+    /// root (`trust add-ca`, ADR-0013 결정 5), which instead goes through
+    /// [`TrustStore::add_ca_append_only`] and refuses a name collision
+    /// rather than overwrite it.
+    ///
     /// Returns `(entry, created, updated)`:
     /// - **New name:** `created = true`, `updated = false`.
     /// - **Existing name, identical `cert_pem`:** a pure no-op —
@@ -457,11 +464,55 @@ impl TrustStore {
         (entry, true, false)
     }
 
-    /// Remove the pin named `name`. `false` if there was none (idempotent).
+    /// Register an *operator-supplied* CA root (`qsh trust add-ca`,
+    /// ADR-0013 결정 5) — append-only, unlike [`TrustStore::add_ca`]'s
+    /// local-reinit overwrite semantics: a name collision with a
+    /// *different* `cert_pem` is refused rather than silently replacing
+    /// a trust anchor an operator may not have intended to change.
+    ///
+    /// Returns `(entry, created, updated)` on success:
+    /// - **New name:** `created = true`, `updated = false`.
+    /// - **Existing name, identical `cert_pem`:** a pure no-op —
+    ///   `created = false`, `updated = false` (idempotent re-registration).
+    /// - **Existing name, a different `cert_pem`:** `Err(OpError)`,
+    ///   `INVALID_ARGUMENT`, naming only the CA's `name` — never either
+    ///   PEM's bytes; the message tells the operator to `trust remove`
+    ///   the old entry first if replacing it is actually intended.
+    pub fn add_ca_append_only(
+        &mut self,
+        name: &str,
+        cert_pem: String,
+    ) -> Result<(CaEntry, bool, bool), OpError> {
+        if let Some(existing) = self.cas.iter().find(|ca| ca.name == name) {
+            if existing.cert_pem == cert_pem {
+                return Ok((existing.clone(), false, false));
+            }
+            return Err(OpError::new(
+                ErrorCode::InvalidArgument,
+                format!(
+                    "CA root {name:?} is already registered under a different certificate; \
+                     remove it with `qsh trust remove {name}` first"
+                ),
+            )
+            .with_retryable(false));
+        }
+        Ok(self.add_ca(name.to_string(), cert_pem))
+    }
+
+    /// Remove the peer pin and/or the CA root named `name`. This is the
+    /// only way to replace an operator-registered root (ADR-0013 결정 5):
+    /// [`TrustStore::add_ca_append_only`] refuses a name collision and
+    /// tells the operator to `trust remove` the old entry first. If both
+    /// a pin and a CA root share `name`, both are dropped — erring
+    /// fail-closed, since removal only ever narrows trust, never widens
+    /// it. Returns `true` if either list shrank, `false` if there was
+    /// neither (idempotent).
     pub fn remove(&mut self, name: &str) -> bool {
-        let before = self.peers.len();
+        let peers_before = self.peers.len();
         self.peers.retain(|p| p.name != name);
-        self.peers.len() != before
+        let cas_before = self.cas.len();
+        self.cas.retain(|ca| ca.name != name);
+        self.peers.len() != peers_before || self.cas.len() != cas_before
     }
 
     /// Pins as `(fingerprint, principal)` pairs. Entries whose fingerprint
