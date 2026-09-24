@@ -458,6 +458,8 @@ qsh sessions workshop
 qsh workshop -L 8080:localhost:3000
 ```
 
+A peer address with no port defaults to 4433: `controller` and `controller:4433` resolve the same way, and an IPv6 literal needs brackets once a port follows it, as in `[::1]:4433`.
+
 `qsh serve --to` keeps reconnecting with backoff, so the target comes back
 on its own after the link drops. `--name` only takes effect when the
 controller has no trust-store alias for that peer and its
@@ -487,7 +489,7 @@ time-boxed exception is `qsh pair invite`/`qsh pair accept`: while a
 freshly minted invite is live, an otherwise-unpinned certificate is admitted
 into a dedicated pairing exchange that can do nothing but verify possession
 of the invite's secret and, on success, pin — it never reaches a session,
-tunnel, or listener path (`docs/design/protocol.md` §15).
+tunnel, or listener path (`docs/design/protocol.md` §15). The pinning side names the peer explicitly with `--as <name>` on `pair invite`/`pair accept`; without it, the peer's own self-reported name is used.
 
 Authorization is `acl.toml`: a small, principal-scoped rule file at
 `<config_dir>/acl.toml`. It is default-deny — a host with no `acl.toml`,
