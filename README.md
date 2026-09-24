@@ -38,8 +38,9 @@ install`) is underway. What works end to end today:
   reattach later with `qsh attach`, and resume across a connection that
   dropped or moved to a different address.
 - Reverse connections, so a host behind NAT dials out to a controller
-  (`qsh listen` / `qsh reverse`) and you attach to it through that
-  controller. The target reconnects with backoff when the link dies.
+  (`qsh listen` / `qsh serve --to`, formerly `qsh reverse`) and you attach
+  to it through that controller. The target reconnects with backoff when
+  the link dies.
 - `-L` and `-R` port forwards, over forward connections and over reverse
   ones, plus the standalone `qsh tunnel open`/`qsh tunnels`/
   `qsh tunnel close` machine-mode commands. `-D` (SOCKS5 dynamic
@@ -406,25 +407,35 @@ resolver. Destinations on the host's loopback or link-local ranges get
 
 When the host cannot accept inbound packets, invert the dial. The
 controller listens; the target dials out and then serves that connection as
-a host.
+a host. The controller plays both listener and client roles; the target is
+the host machine (ADR-0012).
+
+Two axes decide the four commands (ADR-0012 decision 1):
+
+| | accepts inbound | dials out |
+|---|---|---|
+| gives up a shell (host) | `qsh serve` | `qsh serve --to` |
+| gets a shell (client) | `qsh listen` | `qsh <name>`, `qsh exec` |
 
 ```bash
 # On the controller, which needs a reachable UDP address:
 qsh listen --bind 0.0.0.0:4433
 
 # On the target, behind NAT, using the controller's trust-store alias:
-qsh reverse controller --offered-name workshop
+qsh serve --to controller --name workshop
 
 # From the controller, as usual:
 qsh sessions workshop
 qsh workshop -L 8080:localhost:3000
 ```
 
-`qsh reverse` keeps reconnecting with backoff, so the target comes back on
-its own after the link drops. `--offered-name` only takes effect when the
+`qsh serve --to` keeps reconnecting with backoff, so the target comes back
+on its own after the link drops. `--name` only takes effect when the
 controller has no trust-store alias for that peer and its
 `[listen].allow_advertised_names` is set; otherwise the controller names the
-peer from its own trust store.
+peer from its own trust store. The former `qsh reverse controller
+--offered-name workshop` spelling still works, silently, as a hidden
+alias — no deprecation warning, no scheduled removal.
 
 ### MCP server (retired, ADR-0011)
 
@@ -472,7 +483,7 @@ refusal a remote peer sees is the same opaque
 `PERMISSION_DENIED` message, whether it came from a missing rule, a
 policy file that failed to load, or an audit-write failure.
 
-The policy loads once, when `qsh serve`/`qsh listen`/`qsh reverse` starts
+The policy loads once, when `qsh serve`/`qsh listen`/`qsh serve --to` starts
 — there is no hot reload, so an edit to `acl.toml` only takes effect on
 the next restart. If the file is missing or invalid at startup, the
 process still comes up (it still answers, it just denies everything) and
@@ -564,7 +575,7 @@ Per-milestone scope, in/out boundaries and acceptance criteria live in
 Some of these are MVP scope decisions, some are unfinished work.
 
 - Sessions die with the listener process. A session lives only as long as
-  the `qsh serve` or `qsh reverse` process that opened it, so restarting the
+  the `qsh serve` or `qsh serve --to` process that opened it, so restarting the
   listener is the end of every detached session on it, not a resume point. A
   clean SIGTERM does drain: no new `session.open`, `session.attach` or
   `exec.run` is admitted from the signal onward, and every live session runs
@@ -606,9 +617,9 @@ Some of these are MVP scope decisions, some are unfinished work.
 
   > Nothing is being served. `qsh serve` and `qsh listen` both default to port 4433, so one machine running both needs an explicit bind for at least one of them. Re-run with `--bind <ip:port>` on a free port.
 - `acl.toml` has no hot reload: an edit only takes effect the next time
-  `qsh serve`/`qsh listen`/`qsh reverse` starts, and qsh never creates or
+  `qsh serve`/`qsh listen`/`qsh serve --to` starts, and qsh never creates or
   edits the file for you. See [Security posture](#security-posture).
-- The audit log is fail-closed: `qsh serve`/`qsh reverse` deny an
+- The audit log is fail-closed: `qsh serve`/`qsh serve --to` deny an
   otherwise-allowed `session.open`, `session.attach`, session write,
   `exec.run`, or `host.reverse` registration rather than let it through
   with no durable audit record —
@@ -678,7 +689,7 @@ Some of these are MVP scope decisions, some are unfinished work.
   trust store alone, and an entry there for a name with no matching pin
   dials an address nobody has vouched for.
 - Windows is P1 for the client and P2 for the host. PTY code is gated
-  `#[cfg(unix)]`, and so is reverse mode: `qsh listen` and `qsh reverse`
+  `#[cfg(unix)]`, and so is reverse mode: `qsh listen` and `qsh serve --to`
   return `UNSUPPORTED` there rather than running. A tunnel over a reverse
   connection needs that same daemon and inherits the restriction.
   `qsh tunnel open --dynamic` is cross-platform like `--local`/`--remote`;

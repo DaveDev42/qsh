@@ -36,6 +36,20 @@ enum Outcome {
     Succeeds(i32),
     /// The operation failed: exit 255, `ok:false` and this `error.code`.
     Fails(&'static str),
+    /// Exit 255, this code named in the stderr line — but, unlike
+    /// `Fails`, **no `qsh.cli/v1` envelope at all, in either output
+    /// mode**: `qsh serve`/`qsh listen`/`qsh reverse` are long-running
+    /// setup modes (`long_running_setup_mode`) whose every failure path
+    /// goes through `report_long_running_setup_error`, never
+    /// `report_error` — `--json` changes nothing for them (`docs/CLI.md`
+    /// §2.2/§6.12/§6.13, ROADMAP M9 (b)). This variant is for
+    /// the subset of those failures that *do* run to completion (a
+    /// synchronous input-validation refusal like `--to`/`--bind`
+    /// together) rather than retrying forever, which is why
+    /// `qsh_reverse_registration_refusal_retries_forever_and_never_writes_stdout`
+    /// below stays a separate assertion instead of a row using this
+    /// variant.
+    RefusedWithoutEnvelope(&'static str),
 }
 
 /// One row of the matrix.
@@ -539,6 +553,18 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
             args: &["tunnel", "close", "01K0NOSUCHTUNNEL"],
             outcome: Outcome::Succeeds(0),
         },
+        Case {
+            // ROADMAP M9 (b): `--to` and `--bind` together is `INVALID_ARGUMENT`
+            // (`qsh_core::serve::resolve_serve_mode`, step 1) — but
+            // `qsh serve` is a long-running setup mode
+            // (`long_running_setup_mode`), so this refusal never becomes a
+            // `qsh.cli/v1` envelope even under `--json`
+            // (`RefusedWithoutEnvelope`'s own doc).
+            name: "serve: --to and --bind together is refused with no envelope",
+            sandbox: &fleet.client,
+            args: &["serve", "--to", "box", "--bind", "127.0.0.1:0"],
+            outcome: Outcome::RefusedWithoutEnvelope("INVALID_ARGUMENT"),
+        },
     ];
 
     #[cfg(unix)]
@@ -678,6 +704,25 @@ fn check(case: &Case<'_>) {
                 stderr.contains(&format!("({code})")),
                 "{name}: human stderr must name the error code, was {stderr:?}"
             );
+        }
+        Outcome::RefusedWithoutEnvelope(code) => {
+            assert_eq!(json_code, EXIT_RUNTIME_FAILURE, "{name}");
+            // Unlike `Fails`, `--json` produces no envelope at all here —
+            // both modes write the same stderr line and zero stdout.
+            assert!(
+                json.stdout.is_empty(),
+                "{name}: a long-running setup mode must write no stdout even \
+                 under --json, was {:?}",
+                String::from_utf8_lossy(&json.stdout)
+            );
+            assert!(human.stdout.is_empty(), "{name}");
+            for (label, output) in [("json", &json), ("human", &human)] {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                assert!(
+                    stderr.contains(&format!("({code})")),
+                    "{name} ({label}): stderr must name the error code, was {stderr:?}"
+                );
+            }
         }
     }
 }
@@ -894,6 +939,18 @@ struct CapturedReverse {
 #[cfg(unix)]
 impl CapturedReverse {
     fn start(sandbox: &Sandbox, controller: &str) -> Self {
+        Self::start_with(sandbox, &["-v", "reverse", controller])
+    }
+
+    /// Like [`start`](Self::start), with the full argv — the ROADMAP M9 (b)
+    /// `qsh serve --to` spelling reaches this same harness through this
+    /// entry point, since both spellings converge on the same
+    /// `run_reverse` call (`main.rs`'s own doc on `run_serve`, pinned by
+    /// `crates/qsh-cli/src/cli/tests.rs`'s
+    /// `serve_to_and_reverse_converge_on_the_same_controller_and_offered_name`)
+    /// and this harness's whole point is inspecting the stderr that call
+    /// writes.
+    fn start_with(sandbox: &Sandbox, args: &[&str]) -> Self {
         // Incremental line reads, not `read_to_end` — the whole point of
         // this struct is inspecting output *while the process is still
         // running*, and `read_to_end` would block on the pipe until the
@@ -901,7 +958,7 @@ impl CapturedReverse {
         // deliberately never does on its own.
         use std::io::BufRead as _;
         let mut child = sandbox
-            .command(&["-v", "reverse", controller])
+            .command(args)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -1044,4 +1101,116 @@ fn qsh_reverse_registration_refusal_retries_forever_and_never_writes_stdout() {
 
     reverse.shut_down();
     drop(listen);
+}
+
+/// ROADMAP M9 (b): `qsh serve --to <controller>` writes its
+/// stderr under the `qsh serve:` prefix, never `qsh reverse:` — the one
+/// difference between the two spellings once they reach `run_reverse`
+/// (`main.rs`'s own doc). Same refused-registration rig as
+/// `qsh_reverse_registration_refusal_retries_forever_and_never_writes_stdout`
+/// above, spelled with `--to` instead of the hidden alias.
+#[cfg(unix)]
+#[test]
+fn qsh_serve_to_registration_refusal_uses_the_serve_stderr_prefix_not_reverse() {
+    let controller = Sandbox::initialized();
+    let target = Sandbox::initialized();
+    let controller_fp = controller.fingerprint();
+    // Deliberately no `controller.trust_add` for the target's fingerprint
+    // — every attempt is refused.
+    let listen = ListenGuard::start(&controller);
+    target.trust_add("hub", Some(listen.addr()), &controller_fp);
+
+    let reverse = CapturedReverse::start_with(&target, &["-v", "serve", "--to", "hub"]);
+
+    poll_until(
+        "a refused registration attempt and a retry event to be logged",
+        std::time::Duration::from_secs(15),
+        || {
+            let stderr_bytes = reverse.stderr_so_far();
+            let stderr = String::from_utf8_lossy(&stderr_bytes);
+            (stderr.contains("AUTH_FAILED") && stderr.contains("\"event\":\"retry\"")).then_some(())
+        },
+    );
+
+    let stderr_bytes = reverse.stderr_so_far();
+    let stderr = String::from_utf8_lossy(&stderr_bytes);
+    assert!(
+        stderr.contains("qsh serve:"),
+        "qsh serve --to must prefix its stderr with \"qsh serve:\": {stderr:?}"
+    );
+    assert!(
+        !stderr.contains("qsh reverse:"),
+        "qsh serve --to must never fall back to the \"qsh reverse:\" prefix: {stderr:?}"
+    );
+    assert!(
+        reverse.stdout_so_far().is_empty(),
+        "qsh serve --to must never write to stdout, refused or not: {:?}",
+        String::from_utf8_lossy(&reverse.stdout_so_far())
+    );
+
+    reverse.shut_down();
+    drop(listen);
+}
+
+/// The `ADDRESS_PORT_ASSUMED_NOTICE` emission site in
+/// `run_serve` (`main.rs`) had no test of its own — deleting the three
+/// lines `if resolved.port_filled { stderr_note!("{ADDRESS_PORT_ASSUMED_NOTICE}"); }`
+/// left the whole suite green. Same idiom as `init_trust.rs`'s
+/// `trust_add_with_a_port_less_address_notes_the_assumed_port_once_and_pins_it`,
+/// run against the two `resolve_serve_target` branches instead of `trust
+/// add`: the address branch notes the assumed port exactly once, the
+/// name branch never does. No real controller is needed on either
+/// side — the notice, when it fires, does so before `run_reverse`'s dial
+/// loop starts, so a real refused-or-unreachable dial (the same
+/// `"event":"retry"` line the sibling tests above poll for) is enough to
+/// prove the process is actually running and has had a chance to print
+/// it.
+#[cfg(unix)]
+#[test]
+fn qsh_serve_to_emits_the_port_assumed_notice_only_on_the_address_branch() {
+    const PEER_FINGERPRINT: &str = "sha256:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+
+    // Address branch: pinned by address only, no alias — `--to
+    // 127.0.0.1` normalizes to the default port 4433 (ADR-0014 결정 5)
+    // and matches this pin, so `port_filled` is true.
+    let address_target = Sandbox::initialized();
+    address_target.trust_add("hub", Some("127.0.0.1"), PEER_FINGERPRINT);
+    let address_run =
+        CapturedReverse::start_with(&address_target, &["-v", "serve", "--to", "127.0.0.1"]);
+    poll_until(
+        "the assumed-port notice to be printed",
+        std::time::Duration::from_secs(15),
+        || {
+            let stderr = String::from_utf8_lossy(&address_run.stderr_so_far()).into_owned();
+            stderr.contains("assuming port 4433").then_some(())
+        },
+    );
+    let address_stderr = String::from_utf8_lossy(&address_run.stderr_so_far()).into_owned();
+    assert_eq!(
+        address_stderr.matches("assuming port 4433").count(),
+        1,
+        "the address branch must note the assumed port exactly once, even across retries: \
+         {address_stderr:?}"
+    );
+    address_run.shut_down();
+
+    // Name branch: pinned by alias, so `--to hub` resolves at step 1 —
+    // nothing is normalized, so no notice, ever.
+    let name_target = Sandbox::initialized();
+    name_target.trust_add("hub", Some("127.0.0.1:4433"), PEER_FINGERPRINT);
+    let name_run = CapturedReverse::start_with(&name_target, &["-v", "serve", "--to", "hub"]);
+    poll_until(
+        "a retry event to be logged",
+        std::time::Duration::from_secs(15),
+        || {
+            let stderr = String::from_utf8_lossy(&name_run.stderr_so_far()).into_owned();
+            stderr.contains("\"event\":\"retry\"").then_some(())
+        },
+    );
+    let name_stderr = String::from_utf8_lossy(&name_run.stderr_so_far()).into_owned();
+    assert!(
+        !name_stderr.contains("assuming port"),
+        "the name branch must never note an assumed port: {name_stderr:?}"
+    );
+    name_run.shut_down();
 }

@@ -96,7 +96,7 @@ qsh dave@personal-mac
 qsh listen
 
 # Target
-qsh reverse controller.example.com
+qsh serve --to controller.example.com
 
 # Controller
 qsh <name>                      # 새 세션
@@ -243,7 +243,7 @@ qsh [user@]host                 대화형 셸
 qsh exec host -- command        비대화형 실행
 qsh serve                       target listener
 qsh listen                      reverse listener
-qsh reverse controller          역방향 연결
+qsh serve --to controller       역방향 연결(구 qsh reverse, 숨김 alias로 남음)
 qsh hosts                       호스트 조회
 qsh sessions [host]             세션 조회
 qsh attach <session-ref>        세션 attach

@@ -300,19 +300,53 @@ pub enum Command {
         host: Option<String>,
     },
 
-    /// Run the host: accept connections from pinned peers. Foreground only;
-    /// the bound address is printed to stderr.
+    /// Run the host: accept connections from pinned peers, or (with
+    /// `--to`) dial out and register as a reverse target instead
+    /// (`docs/CLI.md` §6.12/§6.13, ADR-0012 decision 2/4). Foreground
+    /// only; the bound address, or the dial/registration events, go to
+    /// stderr.
     Serve {
+        // Precedent for not using a clap `value_parser`/`conflicts_with`
+        // here: `crate::serve::resolve_serve_mode` decides the
+        // outbound-vs-inbound choice in `qsh-core`, not clap — same shape
+        // as this struct's `-L` doc a few lines up.
         /// Listen address (`ip:port`). Overrides `[serve].bind` in
-        /// `config.toml`; defaults to `[::]:4433`.
+        /// `config.toml`; defaults to `[::]:4433`. Mutually exclusive with
+        /// `--to` — both given is `INVALID_ARGUMENT` (exit `255`, not a
+        /// clap usage error).
         #[arg(long, value_name = "IP:PORT")]
         bind: Option<String>,
+
+        /// Dial this controller and register as a reverse target instead
+        /// of listening inbound — the same role `qsh reverse <controller>`
+        /// plays, reached under its new name (ADR-0012 decision 2/4). A
+        /// trust-store alias, same as `qsh reverse`'s positional, or a
+        /// bare `host[:port]` address that resolves against pinned peers
+        /// by normalized address when no name matches (ADR-0014 decision
+        /// 7). Wins over `[serve].to` and the legacy
+        /// `[reverse].controller` config keys, which are not read at all
+        /// when this is given. The former `qsh reverse <controller>`
+        /// spelling still works as a hidden alias — no deprecation
+        /// warning, no scheduled removal.
+        #[arg(long, value_name = "LISTENER|HOST:PORT")]
+        to: Option<String>,
+
+        /// Name to register under when `--to` is given. Only takes effect
+        /// when the controller has no trust-store alias for this peer and
+        /// its `[listen].allow_advertised_names` is set; otherwise the
+        /// controller assigns the name from its own trust store, ignoring
+        /// this (same rule as `qsh reverse --offered-name`). Given without
+        /// `--to` is `INVALID_ARGUMENT` — a name is only meaningful
+        /// outbound, so this fails closed rather than silently ignoring
+        /// it.
+        #[arg(long, value_name = "NAME")]
+        name: Option<String>,
     },
 
     /// Run the reverse-mode controller: accept dial-in registrations from
-    /// `qsh reverse` and serve them as hosts (`docs/CLI.md` §6.13).
-    /// Foreground only; the bound address and registration events go to
-    /// stderr.
+    /// `qsh serve --to` (the hidden `qsh reverse` alias dials the same
+    /// way) and serve them as hosts (`docs/CLI.md` §6.13). Foreground
+    /// only; the bound address and registration events go to stderr.
     Listen {
         /// Listen address (`ip:port`). Overrides `[listen].bind` in
         /// `config.toml`; defaults to `[::]:4433` — the same default as
@@ -337,6 +371,14 @@ pub enum Command {
     /// and keep it registered, redialing with backoff when the link drops
     /// (`docs/CLI.md` §6.13). On success this process serves the connection
     /// as a host, the same broker/writer-lease discipline as `qsh serve`.
+    ///
+    /// Hidden from `qsh --help`'s `Commands:` block (ADR-0012 decision 2/4):
+    /// `qsh serve --to <controller>` is the spelling documented from this
+    /// rename on (ROADMAP M9 (b)). This form still parses and still works, silently, with
+    /// no deprecation warning — `hide` only removes it from the parent's
+    /// listing, not from the CLI (`qsh reverse --help` still renders this
+    /// subcommand's own help in full).
+    #[command(hide = true)]
     Reverse {
         /// Trust-store alias of the controller to dial (`qsh trust list`).
         controller: String,

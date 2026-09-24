@@ -152,7 +152,7 @@ fn cli_md_names_every_quota_reject_action() {
     // §6.8's exec-run request), so a whole-file `.contains` would still
     // pass even if §6.12's own quota-reject sentence were deleted.
     const SECTION_HEADING: &str = "### 6.12 장기 실행 모드: `qsh serve`";
-    const NEXT_HEADING: &str = "### 6.13 장기 실행 모드: `qsh listen` / `qsh reverse`";
+    const NEXT_HEADING: &str = "### 6.13 장기 실행 모드: `qsh listen` / `qsh serve --to`";
     let start = cli_md
         .find(SECTION_HEADING)
         .unwrap_or_else(|| panic!("docs/CLI.md must contain the heading {SECTION_HEADING:?}"));
@@ -390,7 +390,7 @@ fn cli_md_names_the_audit_volume_bound_and_its_defaults() {
     let cli_md = read_doc("docs/CLI.md");
 
     const SECTION_HEADING: &str = "### 6.12 장기 실행 모드: `qsh serve`";
-    const NEXT_HEADING: &str = "### 6.13 장기 실행 모드: `qsh listen` / `qsh reverse`";
+    const NEXT_HEADING: &str = "### 6.13 장기 실행 모드: `qsh listen` / `qsh serve --to`";
     let start = cli_md
         .find(SECTION_HEADING)
         .unwrap_or_else(|| panic!("docs/CLI.md must contain the heading {SECTION_HEADING:?}"));
@@ -465,7 +465,7 @@ fn cli_md_and_architecture_md_name_the_audit_window_principal_cap_and_row_bound(
     let architecture_md = read_doc("docs/design/architecture.md");
 
     const SECTION_HEADING: &str = "### 6.12 장기 실행 모드: `qsh serve`";
-    const NEXT_HEADING: &str = "### 6.13 장기 실행 모드: `qsh listen` / `qsh reverse`";
+    const NEXT_HEADING: &str = "### 6.13 장기 실행 모드: `qsh listen` / `qsh serve --to`";
     let start = cli_md
         .find(SECTION_HEADING)
         .unwrap_or_else(|| panic!("docs/CLI.md must contain the heading {SECTION_HEADING:?}"));

@@ -100,18 +100,15 @@ qsh\-sessions(1)
 List sessions on one pinned host, or on every pinned host
 .TP
 qsh\-serve(1)
-Run the host: accept connections from pinned peers. Foreground only; the bound address is printed to stderr
+Run the host: accept connections from pinned peers, or (with `\-\-to`) dial out and register as a reverse target instead (`docs/CLI.md` §6.12/§6.13, ADR\-0012 decision 2/4). Foreground only; the bound address, or the dial/registration events, go to stderr
 .TP
 qsh\-listen(1)
-Run the reverse\-mode controller: accept dial\-in registrations from `qsh reverse` and serve them as hosts (`docs/CLI.md` §6.13). Foreground only; the bound address and registration events go to stderr
+Run the reverse\-mode controller: accept dial\-in registrations from `qsh serve \-\-to` (the hidden `qsh reverse` alias dials the same way) and serve them as hosts (`docs/CLI.md` §6.13). Foreground only; the bound address and registration events go to stderr
 .TP
 qsh\-tunnel(1)
 Manage tunnels (`docs/CLI.md` §6.9)
 .TP
 qsh\-tunnels(1)
 List every tunnel this machine\*(Aqs resident `qsh listen` daemon(s) currently hold (`docs/CLI.md` §6.9, `tunnel.list`). Never dials. A forward\-route tunnel opened by a standalone `qsh tunnel open` process is not visible here — it has no resident holder to be listed by (`Ops::tunnel_list`\*(Aqs own doc)
-.TP
-qsh\-reverse(1)
-Dial `<controller>` and register this device as a reverse target, and keep it registered, redialing with backoff when the link drops (`docs/CLI.md` §6.13). On success this process serves the connection as a host, the same broker/writer\-lease discipline as `qsh serve`
 .SH VERSION
 v0.2.0

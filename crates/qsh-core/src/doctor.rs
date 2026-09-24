@@ -28,7 +28,7 @@ pub mod probe;
 /// `doctor.run`'s contract keys off of; this enum is the in-process
 /// convenience on top of it).
 ///
-/// 21 variants, one per `docs/CLI.md` §6.17 finding code — a closed,
+/// 22 variants, one per `docs/CLI.md` §6.17 finding code — a closed,
 /// additive-only set (`PLAN.md` M7 §4.1 #5): [`EXPECTED_DOCTOR_CODES`] and
 /// this enum's own `tests` module keep the two in lockstep, so a variant
 /// added without updating the frozen list (or vice versa) fails CI rather
@@ -36,7 +36,9 @@ pub mod probe;
 /// `ServiceNotRegistered`/`SystemdLingerDisabled`/
 /// `LaunchagentSessionScoped`/`Bindv6onlyBlocksIpv4`/
 /// `AclPrincipalUnmatched`/`AclCaAuthPathMissing`/
-/// `HostPinnedWithoutAddress` — landed 14 → 21.
+/// `HostPinnedWithoutAddress` — landed 14 → 21; ROADMAP M9 (h)'s
+/// `ConfigServeToConflict` (`qsh serve --to` rename, ADR-0012 결정 5) is
+/// M9 (h)'s eighth, 21 → 22.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiagnosticId {
     ControllerUnreachable,
@@ -60,6 +62,7 @@ pub enum DiagnosticId {
     AclPrincipalUnmatched,
     AclCaAuthPathMissing,
     HostPinnedWithoutAddress,
+    ConfigServeToConflict,
 }
 
 impl DiagnosticId {
@@ -95,6 +98,7 @@ impl DiagnosticId {
             DiagnosticId::AclPrincipalUnmatched => ACL_PRINCIPAL_UNMATCHED.code,
             DiagnosticId::AclCaAuthPathMissing => ACL_CA_AUTH_PATH_MISSING.code,
             DiagnosticId::HostPinnedWithoutAddress => HOST_PINNED_WITHOUT_ADDRESS.code,
+            DiagnosticId::ConfigServeToConflict => CONFIG_SERVE_TO_CONFLICT.code,
         }
     }
 }
@@ -115,6 +119,7 @@ pub const EXPECTED_DOCTOR_CODES: &[&str] = &[
     "cert_expired",
     "cert_expiring_soon",
     "clock_skew",
+    "config_serve_to_conflict",
     "config_unknown_key",
     "controller_unreachable",
     "host_pinned_without_address",
@@ -309,6 +314,29 @@ pub const CONFIG_UNKNOWN_KEY: Diagnostic = Diagnostic {
     remedy: "Check the key path the finding's detail names for a typo against docs/CLI.md's config.toml layout, or remove it if it is leftover from an older build.",
 };
 
+/// `docs/ROADMAP.md` M9 (h), `docs/CLI.md` §6.17, `PLAN.md`/ADR-0012 결정 5
+/// (ROADMAP M9 (b), `qsh serve --to` rename): `[serve].to` and the legacy
+/// `[reverse].controller` are both set and name different values
+/// (`crate::serve::config_serve_to_conflict`). `error`, not `warn` like
+/// [`CONFIG_UNKNOWN_KEY`]'s shape: `config_unknown_key` is `warn` for a
+/// reason its own doc gives — the file still parses *and the binary still
+/// runs correctly* under its defaults. Here it does not: `qsh serve`/`qsh
+/// service install` fail closed with `CONFIG_ERROR` the moment this
+/// disagreement is present (`crate::serve::config_outbound_target`), the
+/// same "certain, not latent" consequence class as `acl_policy_missing`/
+/// `acl_policy_invalid` ([`DiagnosticId::AclPolicyMissing`]/
+/// [`DiagnosticId::AclPolicyInvalid`]), both `error`. `qsh doctor` itself
+/// never fails on this (or anything) — `doctor.run` stays exit `0` and
+/// reports it as a finding, same as every other code here. Two values
+/// agreeing is not a conflict at all — `[serve].to` silently wins and no
+/// finding fires.
+pub const CONFIG_SERVE_TO_CONFLICT: Diagnostic = Diagnostic {
+    id: DiagnosticId::ConfigServeToConflict,
+    code: "config_serve_to_conflict",
+    message: "[serve].to and the legacy [reverse].controller are both set in config.toml and name different targets. qsh serve and qsh service install fail closed with CONFIG_ERROR while this disagreement stands.",
+    remedy: "Delete one of the two keys, keep [serve].to, then restart qsh serve — config.toml is only read once at start.",
+};
+
 /// `docs/CLI.md` §6.17, `PLAN.md` M7 Step 2's confirmed `trust remove`
 /// semantics (README "Known limitations", `docs/CLI.md` §6.11): an `info`
 /// notice, not a problem — it surfaces whenever `trust.toml` has at least
@@ -324,8 +352,9 @@ pub const TRUST_REMOVE_SCOPE: Diagnostic = Diagnostic {
 
 /// `docs/ROADMAP.md` M9 (h), `docs/CLI.md` §6.17: no platform service unit
 /// is registered for this machine's inferred run mode (`serve`/`listen`/
-/// `reverse`, precedence `[listen]` present > old `[reverse].controller`
-/// set > `serve`) — `crate::ops::doctor`'s own
+/// `reverse`, precedence `[listen]` present > `[serve].to` set > legacy
+/// `[reverse].controller` set > `serve` — ROADMAP M9 (h) added the `[serve].to`
+/// tier) — `crate::ops::doctor`'s own
 /// mode inference, not a new config field. `info`, not `warn`/`error`:
 /// running in the foreground is a completely normal way to use `qsh`
 /// (an interactive session, a one-off), not a misconfiguration — this
@@ -555,16 +584,29 @@ mod tests {
         );
     }
 
+    /// ROADMAP M9 (b)'s `qsh serve --to` rename adds an eighth M9 (h) code —
+    /// same mutation-catching rationale as
+    /// `m9_h_batch_diagnostic_consts_have_the_stable_snake_case_codes`
+    /// above.
+    #[test]
+    fn config_serve_to_conflict_has_the_stable_snake_case_code() {
+        assert_eq!(
+            CONFIG_SERVE_TO_CONFLICT.id,
+            DiagnosticId::ConfigServeToConflict
+        );
+        assert_eq!(CONFIG_SERVE_TO_CONFLICT.code, "config_serve_to_conflict");
+    }
+
     /// `PLAN.md` M7 §4.1 #5's "code 안정성 fixture": every [`DiagnosticId`]
     /// variant, exhaustively hand-listed (a variant added here without a
     /// matching addition to [`EXPECTED_DOCTOR_CODES`], or vice versa, is
     /// exactly the drift this test exists to catch), must map to a unique
-    /// code and the frozen set must be exactly those 21 codes — no more, no
+    /// code and the frozen set must be exactly those 22 codes — no more, no
     /// fewer. Mirrors `qsh_proto::schema`'s
     /// `cli_v1_schema_commands_is_sorted_and_deduplicated` precedent.
     #[test]
     fn expected_doctor_codes_matches_every_diagnostic_id_variant_exactly() {
-        const ALL: [DiagnosticId; 21] = [
+        const ALL: [DiagnosticId; 22] = [
             DiagnosticId::ControllerUnreachable,
             DiagnosticId::AuditPathUnwritable,
             DiagnosticId::AclPolicyMissing,
@@ -586,6 +628,7 @@ mod tests {
             DiagnosticId::AclPrincipalUnmatched,
             DiagnosticId::AclCaAuthPathMissing,
             DiagnosticId::HostPinnedWithoutAddress,
+            DiagnosticId::ConfigServeToConflict,
         ];
         let mut codes: Vec<&str> = ALL.iter().map(|id| id.code()).collect();
         codes.sort_unstable();

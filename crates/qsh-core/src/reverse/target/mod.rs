@@ -296,7 +296,16 @@ async fn run_reverse_unix(
         let (dialed, ctl, peer_hello) = match attempt {
             Ok(v) => v,
             Err((err, cause)) => {
-                tracing::warn!(controller, %err, cause = cause.as_str(), "qsh reverse: registration attempt failed");
+                // No hardcoded `"qsh reverse: "`/`"qsh serve: "` prefix in
+                // this message (ROADMAP M9 (b)): this event fires identically
+                // whichever CLI spelling reached [`run_reverse`], and
+                // `qsh-core` holds no stderr I/O of its own
+                // (`docs/design/architecture.md` §1) — a caller that wants
+                // a mode-specific prefix on this line adds it in its own
+                // `tracing_subscriber` fmt layer, the same way `main.rs`
+                // already prefixes the `on_notice`/`on_unreachable` hooks
+                // below.
+                tracing::warn!(controller, %err, cause = cause.as_str(), "registration attempt failed");
                 // Gated to the FIRST failed connection attempt of a fresh
                 // process, before any registration has ever succeeded.
                 // `dial_and_register` does now classify DNS failures,
@@ -380,10 +389,13 @@ async fn run_reverse_unix(
             since_registered_ms: None,
         }
         .emit();
+        // Same ROADMAP M9 (b) rationale as the `registration attempt failed`
+        // warn above: no hardcoded CLI-spelling prefix in a `qsh-core`
+        // message.
         tracing::info!(
             controller,
             offered_name,
-            "qsh reverse: registered, serving this connection as a host"
+            "registered, serving this connection as a host"
         );
 
         let ctx = ConnCtx {
@@ -524,7 +536,8 @@ async fn run_reverse_unix(
                         Ok(Err(err)) => err.to_string(),
                         Err(join_err) => format!("serve_control task failed: {join_err}"),
                     };
-                    tracing::info!(controller, %detail, "qsh reverse: connection to the controller ended");
+                    // Same ROADMAP M9 (b) rationale as the two messages above.
+                    tracing::info!(controller, %detail, "connection to the controller ended");
                     loss_cause = classify_target_connection_loss(&joined);
                     break 'serve;
                 }

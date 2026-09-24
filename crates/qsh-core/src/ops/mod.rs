@@ -18,7 +18,7 @@ use qsh_transport::{DialError, Dialer, Fingerprint, StaticTrust};
 use crate::config::{Config, Paths, now_rfc3339};
 use crate::hosts::HostsFile;
 use crate::identity::LoadedIdentity;
-use crate::trust::{SharedTrustStore, TrustStore};
+use crate::trust::{SharedTrustStore, TrustStore, normalize_peer_address};
 
 pub mod acl;
 pub mod cert;
@@ -59,6 +59,25 @@ pub(crate) struct PeerTarget {
     pub address: String,
     /// SNI value for the dial (see [`server_name_for`]).
     pub server_name: String,
+}
+
+/// [`Ops::resolve_serve_target`]'s result: the controller key
+/// `run_reverse`/`run_reverse_observed` take, plus whether resolving it
+/// filled in the default port (ADR-0014 결정 5/7, ROADMAP M9 (b)) — the one
+/// input that makes printing [`crate::trust::ADDRESS_PORT_ASSUMED_NOTICE`]
+/// correct.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServeTarget {
+    /// The trust-store alias to pass to `run_reverse`/
+    /// `run_reverse_observed` — either the literal unchanged (name lookup
+    /// resolved it) or the name of the one pinned peer whose address
+    /// matched (address lookup resolved it).
+    pub controller: String,
+    /// `true` only when address lookup resolved this and the literal
+    /// itself named no port (`crate::trust::normalize_peer_address`
+    /// filled one in). Always `false` on the name-lookup branch — name
+    /// lookup normalizes nothing.
+    pub port_filled: bool,
 }
 
 /// Where `Ops::connect`/`connect_target` (`crate::ops::session`) actually
@@ -685,6 +704,95 @@ impl Ops {
                 host: host.to_string(),
                 socket,
             })),
+        }
+    }
+
+    /// Resolve a `qsh serve --to` literal (or the same value from
+    /// `[serve].to`/the legacy `[reverse].controller`) into the controller
+    /// key `run_reverse`/`run_reverse_observed` take, applying the same
+    /// two-step resolution to every outbound target regardless of source
+    /// (ADR-0014 결정 7, ROADMAP M9 (b)). Strict order, name before address:
+    ///
+    /// 1. **Name first.** `resolve_peer_address` — `hosts.toml` layered
+    ///    over `trust.toml`'s own pin, the exact lookup `qsh <host>`/`qsh
+    ///    exec` use. Resolves ⇒ the literal is already the controller key;
+    ///    nothing is normalized, so [`ServeTarget::port_filled`] is
+    ///    `false`. The hidden `qsh reverse <controller>` keeps passing its
+    ///    own literal through this same path unchanged, so both spellings
+    ///    converge on identical behavior here.
+    /// 2. **Address second**, only on a name-lookup miss.
+    ///    [`normalize_peer_address`] the literal, then
+    ///    [`TrustStore::find_by_address`] for a pin whose own address
+    ///    matches it. Exactly one match ⇒ that peer's name becomes the
+    ///    controller key. Two or more ⇒ [`ErrorCode::InvalidArgument`] —
+    ///    no first-wins, ADR-0014 결정 7 requires the ambiguity to be
+    ///    reported, not silently resolved. Zero ⇒ [`ErrorCode::HostNotFound`]
+    ///    always, even when step 1's own error was `INVALID_ARGUMENT` (the
+    ///    `HOST:PORT`/`[HOST]:PORT` shape `--to` advertises fails
+    ///    `qsh_proto::wire::valid_host_name` at step 1 and would otherwise
+    ///    surface as "not a valid host alias", which both misnames the
+    ///    fault and collides with the ambiguity refusal above) — no blind
+    ///    dial, no new pin is ever created here.
+    ///
+    /// Name always beats address (the order above, not merely "checked
+    /// first"): a peer literally named like an address (ADR-0014 결정 7's
+    /// own `"192.0.2.10:4433"` example) resolves to *itself*, never to
+    /// whoever happens to sit at that address. Authorization is
+    /// unaffected regardless of which step resolves this — `lookup_pin` is
+    /// fingerprint-keyed across the whole trust store at the TLS layer,
+    /// not scoped to whatever this method returns; this is routing, not
+    /// authorization.
+    pub fn resolve_serve_target(&self, literal: &str) -> Result<ServeTarget, OpError> {
+        let trust = self.open_trust()?;
+        let snapshot = trust.snapshot();
+        let hosts = HostsFile::load(&self.paths.hosts_file())?;
+        match resolve_peer_address(&snapshot, &hosts, literal) {
+            Ok(_) => Ok(ServeTarget {
+                controller: literal.to_string(),
+                port_filled: false,
+            }),
+            Err(name_not_found) => {
+                let normalized = normalize_peer_address(literal);
+                let mut matches = snapshot.find_by_address(&normalized.address);
+                match (matches.next(), matches.next()) {
+                    (Some(peer), None) => Ok(ServeTarget {
+                        controller: peer.name.clone(),
+                        port_filled: normalized.port_filled,
+                    }),
+                    (Some(_), Some(_)) => Err(OpError::new(
+                        ErrorCode::InvalidArgument,
+                        format!(
+                            "{literal:?} matches more than one pinned peer by address; name \
+                             the alias instead of the address."
+                        ),
+                    )),
+                    // Zero address matches is a `HOST_NOT_FOUND`
+                    // regardless of *why* step 1 missed. Re-raising
+                    // `name_not_found` verbatim is only correct when step
+                    // 1 itself produced `HOST_NOT_FOUND` (a name that
+                    // parses as an alias but isn't pinned); for the
+                    // `HOST:PORT`/`[HOST]:PORT` shape `--to`'s own
+                    // `value_name` advertises, step 1 fails
+                    // `qsh_proto::wire::valid_host_name` (no `:` in its
+                    // alphabet) and returns `INVALID_ARGUMENT` ("is not a
+                    // valid host alias") instead — which would tell the
+                    // operator their address is malformed when the real
+                    // fault is that no pin matches it, and would collide
+                    // with the ambiguity refusal above so a caller can't
+                    // tell "matches nothing" from "matches two".
+                    (None, _) if name_not_found.code == ErrorCode::HostNotFound => {
+                        Err(name_not_found)
+                    }
+                    (None, _) => Err(OpError::new(
+                        ErrorCode::HostNotFound,
+                        format!(
+                            "{literal:?} does not match any pinned alias or address; pin it \
+                             with `qsh trust add <alias> --address {literal} --fingerprint \
+                             sha256:...`, or name it by its pinned alias instead"
+                        ),
+                    )),
+                }
+            }
         }
     }
 }
