@@ -168,6 +168,14 @@ Linux 확인은 `dave-windows-wsl`에서 `920a344`로 했다. clippy·doc·docte
 
 **(c) 완료 판정:** PRD §13 두 항목이 각각 테스트 이름 또는 dispatch run id로 인용 가능하고, `docs/ROADMAP.md` M10 수용 기준의 M8 이관 행이 그 인용을 담는다.
 
+**(a)-추기 — Step 9 착지 (2026-09-25, main 세션).** 커밋 `c2cb64e` 하나다. `crates/qsh-cli/tests/reverse_blackout.rs`에 `a_real_30_minute_blackout_is_resumed_within_the_ttl`을 더했고 `QSH_ACCEPTANCE_LONG`으로 막으며 길이는 `QSH_BLACKOUT_SECS`(미설정 1800)가 정한다. 60초 함수와 그 상수는 손대지 않았다. `.config/nextest.toml`에 `[profile.long]`, `.github/workflows/long.yml`에 `workflow_dispatch` 전용 `blackout` job이 섰고 로그는 `blackout-log` 아티팩트로 올라간다. 판정의 뼈대는 브리프대로다. 출고 기본값의 attach는 1800초를 버티지 못한다. 재등록 대기 60초에 시도 셋, 거기에 QUIC idle 45초를 더한 232초 언저리에서 포기하므로 attach의 생존이 아니라 차단이 걷힌 뒤 같은 `session_ref`로 다시 붙어 보존된 ring을 받는지를 본다. 차단 전 표지의 replay, Gap 0건, 재부착 뒤 표지의 왕복, 자격증명 회전(바이트 비교만, 값은 찍지 않는다)을 단언한다. 느린 스트림 항목은 `tunnel_echo_under_load.rs`의 `tunnel_saturated_pty_echo_p95_under_measured_rtt_plus_10ms`에 귀속했고 저속 역압 축은 잔여 위험으로 남겼다. §4.1 #8·#9 확정.
+
+리뷰는 opus 두 렌즈였고 변이 검증은 렌즈 A만 맡았다. knob 50초는 통과, 5초는 단언 ①에서 `IDLE_TIMEOUT`을 이름으로 부르며 실패했다. `[serve].resume_ttl`을 10초로 줄이면 재부착이 `no_resume_token`으로 죽고 migration 단언을 뒤집으면 실패하며 migration을 켜도 요약 줄이 한 글자도 안 바뀐다(역방향 leg에서 migration은 불활성). 렌즈 A가 고른 탐침 하나가 값졌다. 차단 뒤 attach 대상을 같은 host의 다른 실제 세션으로 바꾸자 `BEFORE1` replay에서 죽었다. replay 단언이 살아남은 세션과 새 세션을 정말로 가른다는 뜻이다. 렌즈 B의 major 넷을 반영했다. `long.yml`이 "60초 control이 먼저"라고 적었지만 nextest는 이름순이라 30분 회차가 먼저 돌았고 스텝을 둘로 쪼개 `-E 'test(...)'`로 하나씩 고정했다. 단언 ②를 `DEFAULT_RESUME_TTL_SECS` 상수 대신 하네스가 실제로 쓰는 `target_config.serve.resume_ttl()`과 비교하게 바꿨다. `exhaustion_budget()`에 `MAX_IDLE_TIMEOUT` 45초가 빠져 187초로 잡혀 있던 것을 232초로 고쳤다. 테스트 doc 주석의 스크랩패드 인용 하나를 지속 앵커로 바꿨다. minor로는 재등록 대기 여유를 넓혔고 요약 줄의 세 값을 하드코딩에서 관측값으로 바꿨으며 파싱 안 되는 `QSH_BLACKOUT_SECS`는 조용히 1800으로 떨어지지 않고 panic한다. 렌즈 B의 "24시간 대 1시간 TTL" 지적은 기각했다. 인용한 `reverse.rs:974`는 이 테스트가 쓰지 않는 `ReversePairHarness`의 값이다.
+
+게이트 여덟은 첫 회에 초록이었다. nextest는 이 테스트를 skip이 아니라 빠른 pass로 센다(60초 회차와 같은 런타임 가드 관례). rebase는 `docs/design/testing.md`의 "현재 상태" 한 줄에서 충돌했고 첫 시도는 resolver의 assert가 실패했는데도 `;` 체인이 이어져 충돌 마커가 든 커밋을 만들었다. `&&`로 고쳐 amend한 것이 `c2cb64e`다. main의 push run 36032611572는 몇 분 뒤 오른 `d7bede7`가 concurrency group으로 취소했고 그 상위 집합인 run 36032710748이 초록이다. Linux 확인은 `dave-windows-wsl`에서 main `e29e56b`로 했다. clippy 초록, nextest 2002건 중 2000 통과(39 flaky), 실패 둘은 `exit_codes_and_error_codes_are_identical_in_both_output_modes`와 `pairing_connection_quota_rejection_records_the_real_peer_addr`인데 둘 다 10초 connect 타임아웃 무늬이고 베이스 `331dee6`에서도 단독 회차가 같은 비율로 붉어 이 스텝의 회귀가 아니다. 50초 회차는 WSL에서도 초록이다.
+
+dispatch는 둘이다. 배선 확인 run 36032667096(180초)은 control 60초가 `successful_time_to_recovery_ms=994`, 본 회차가 `blackout=180s records=3 resumed_records=0 reattach=ok replayed_before_marker=true after_marker=true credential_rotated=true gaps=0`으로 초록이었다. 180초는 232초 예산 안이라 단언 ③의 strict 가지는 이 run이 아니라 1800초 회차 run 36033815282가 처음 밟는다. 그 run이 `docs/ROADMAP.md` M8 이관 항목 둘의 판정 근거로 적혔다.
+
 ### Step 10 — 클린 VM 스모크 캠페인 (문서 0.15ew + 사람 회차)
 
 선행: 문서 사전 정의는 Step 5의 판정 정의에 맞춰 쓰므로 Step 5와 같이 움직이고, 회차는 Step 4·5·7이 다 얹힌 태그를 기다린다. Step 0의 클린 VM 다섯.
@@ -249,7 +257,7 @@ CI는 (a)가 적은 "크레이트별 네 스텝"이 아니라 `publish-dry-run` 
 - **crates.io publish의 불가역성.** yank는 되지만 삭제는 안 되고 이름은 영구 점유된다. Step 11의 dry-run과 publish 실행 사이에 Step 10 PASS를 끼운다.
 - **SC7이 열린 채로는 beta를 선언할 수 없다.** PRD §15가 "공개 beta 전에 protocol과 key lifecycle의 독립 보안 review를 완료한다"고 적고 M8 DoD 4가 다섯 마일스톤 연속 이월이다. Step 12는 그래서 릴리스 문서만 만든다.
 - **줄 번호 인용 오차가 또 있을 수 있다.** M8 이관 항목의 PRD 인용이 처음부터 세 행 어긋나 있던 것이 발견돼 커밋 `5daee3d`가 고쳤다. 같은 부류를 Step 13의 선행 감사가 전수로 본다.
-- **느린 스트림 축의 미커버 부분.** Step 9 ②가 귀속시키는 테스트는 포화(고속) 축만 덮는다. 저속·역압 축이 남으면 잔여 위험으로 적고 P1로 넘긴다.
+- **느린 스트림 축의 미커버 부분.** Step 9 ②가 귀속시키는 테스트는 포화(고속) 축만 덮는다. 저속·역압 축이 남으면 잔여 위험으로 적고 P1로 넘긴다. **확정(2026-09-25):** 저속·역압 축은 이번에 더하지 않고 잔여 위험으로 남긴다. `tunnel_saturated_pty_echo_p95_under_measured_rtt_plus_10ms`가 덮는 것은 포화 축이고, 느리게 읽는 터널 피어가 flow control에 바이트를 세워 두는 축을 지금 막고 있는 것은 테스트가 아니라 `TUNNEL_STREAM_RECEIVE_WINDOW`(2 MiB)와 `CONNECTION_RECEIVE_WINDOW`(8 MiB)의 비율이다. 멈춘 터널 스트림 하나는 연결 창의 4분의 1까지만 쥐므로 한 스트림짜리 변형은 값싸지만 이미 상수가 보장하는 것을 다시 말할 뿐이고, 넷이 동시에 멈추면 창을 다 쥐는 쪽이 실제 질문인데 그 변형은 붉을 수 있어 이 크기의 스텝이 받을 수 없다. P1로 넘긴다.
 
 ### 4.1 구현 중 확정할 값 (해당 step (a)에 근거와 함께 추기)
 
@@ -262,8 +270,8 @@ CI는 (a)가 적은 "크레이트별 네 스텝"이 아니라 `publish-dry-run` 
 | 5 | notarytool 자격 방식 | App Store Connect API key(`--key`). Apple ID + app-specific password는 회전 비용 때문에 배제 **확정(2026-09-25):** App Store Connect API key 셋(`APPLE_API_KEY_ID`·`APPLE_API_ISSUER_ID`·`APPLE_API_PRIVATE_KEY`)을 `--key`·`--key-id`·`--issuer`로 넘긴다(`c61111b`). `--keychain-profile`은 기각. 시크릿 등록과 `notarytool` 왕복 실측은 사람 몫이고 실측 전까지 `--timeout 30m`이 남는다. | Step 0·5 |
 | 6 | attestation 대상 범위 | `dist/*` 전 자산. `SHA256SUMS` 자체를 포함할지 **확정(2026-09-25):** `dist/*` 전 자산, `SHA256SUMS` 포함(`d7bede7`). attest 글롭은 release 업로드 글롭과 글자 그대로 같아야 증명 없는 자산이 생기지 않는다. 실효 판정은 첫 M10 태그의 스텝 로그와 `gh attestation verify`로 한다. | Step 6 |
 | 7 | man 아카이브 안의 경로 접두 | `man/*.1`. formula의 `man1.install Dir["man/*.1"]`와 같은 문자열 | Step 7 |
-| 8 | 30분 회차의 자리 | `load.yml`에 `workflow_dispatch` 전용 job 추가 또는 `long.yml` 신설 | Step 9 |
-| 9 | 저속·역압 축의 보강 여부 | 기존 하네스가 값싸게 받으면 더하고, 아니면 잔여 위험으로 적는다 | Step 9 |
+| 8 | 30분 회차의 자리 | `load.yml`에 `workflow_dispatch` 전용 job 추가 또는 `long.yml` 신설 **확정(2026-09-25):** `long.yml` 신설. `load.yml`은 `cancel-in-progress`라 30분 회차가 뒤따르는 push에 끊기고, `.config/nextest.toml`의 `[profile.long]`과 같이 별도 파일이 맞다. | Step 9 |
+| 9 | 저속·역압 축의 보강 여부 | 기존 하네스가 값싸게 받으면 더하고, 아니면 잔여 위험으로 적는다 **확정(2026-09-25):** 더하지 않는다. 근거는 §4의 잔여 위험 문단. | Step 9 |
 | 10 | 캠페인 회차 수와 구형 glibc 이미지 | 네 플랫폼 각 1회 + musl 1회가 하한. 이미지 후보는 CentOS 7 또는 Debian 10 계열 | Step 10 |
 | 11 | publish 대상 크레이트 집합 | proto·transport·core·cli 넷. testkit·xtask는 `publish = false` 유지 **확정(2026-09-25):** 초안대로 넷(`faf10bd`). CI 게이트는 크레이트별 dry-run이 아니라 `--workspace` dry-run 한 번에 publish 집합 고정 스텝을 더한 `publish-dry-run` 잡이다. 단독 dry-run은 첫 publish 전에 레지스트리에 없는 의존 때문에 초록이 될 수 없어서다. 공개 tarball의 test 타깃은 미발행 `qsh-testkit`을 요구해 tarball만으로 컴파일되지 않으며 `exclude`는 넣지 않았다. 마감 감사에서 다시 본다. | Step 11 |
 | 12 | 릴리스 노트의 자리 | GitHub Release 본문인지 `docs/` 아래 파일인지 | Step 12 |
