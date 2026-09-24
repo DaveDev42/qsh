@@ -15,9 +15,13 @@ One binary (`qsh`) is both ends: it serves, and it connects.
 
 ## Status
 
-Version 0.2.0. **Not for production use**: the M10 release gates
-(codesign, notarization, a static musl build, SLSA provenance, and a
-release-profile functional smoke test) are still open.
+Version 0.2.0. **Not for production use**. The independent review of the
+protocol and key lifecycle that [docs/PRD.md](docs/PRD.md) §15 requires
+has not been contracted, and the wire-format freeze waits on that same
+decision. The campaigns a person runs by hand are still open too: the
+clean-VM install campaign (`docs/campaigns/m10-clean-vm.md`), the two
+connect-time stopwatch rounds, and the real-device mobility round. The
+fuzz, soak and adversarial-load campaigns are closed.
 
 M0 through M6 are done. M7 (trust UX, host profiles, `doctor`) has landed
 its features; what is left is the stopwatch campaign in
@@ -32,7 +36,12 @@ review. The freeze draft takes effect once the operator decides on that
 review. M9 (the human-facing surface: naming, pairing, `qsh service
 install`) has landed its features; the SC1 stopwatch re-measurement in
 `docs/campaigns/m9-stopwatch.md` is still open, and it depends on the M7
-baseline above. M10 (release) is underway. What works end to end today:
+baseline above. M10 (release) has landed its workflow: a static musl
+build, build-provenance attestation on every asset, man pages inside the
+unix archive, a Developer ID signing and notarization path that runs when
+the Apple credentials are configured, and a release-profile functional
+smoke on every build leg. What is left is the clean-VM campaign named
+above. What works end to end today:
 
 - `qsh exec host -- cmd`, in human mode or as a single `qsh.cli/v1` JSON
   envelope with the remote exit code, stdout and stderr.
@@ -138,9 +147,9 @@ would.
 | `QSH_REPO` | `DaveDev42/qsh` | `owner/repo` to install from, for forks and testing |
 | `QSH_LIBC` | `gnu` | Linux only. `musl` picks the static x86_64 build for old-glibc distributions |
 
-Release assets carry a build provenance attestation starting with the first
-tag cut after the attestation step joined `release.yml`. With the GitHub CLI you can check one before
-you unpack it:
+Every release asset cut after `v0.2.0` carries a build provenance
+attestation, `SHA256SUMS` included. With the GitHub CLI you can check one
+before you unpack it:
 
 ```bash
 gh attestation verify qsh-<tag>-<target>.tar.gz --repo DaveDev42/qsh
@@ -154,6 +163,9 @@ that to `release.yml` specifically). It says nothing about whether the code
 in that commit is correct or safe to run. Running it is up to you: the
 installer does not call `gh`, and nothing here replaces the `SHA256SUMS`
 check it already does.
+
+What each release ships, what is signed and what is not, and how to check
+any of it is in [RELEASE-NOTES.md](RELEASE-NOTES.md).
 
 ### Manual download
 
@@ -180,10 +192,11 @@ brew install DaveDev42/tap/qsh
 ```
 
 Apple silicon only for now — the formula tracks the `aarch64-apple-darwin`
-release tarball. The Homebrew version is the release tag without its
-leading `v`; there is no separate versioning scheme. Starting with the
-first tag cut after the man pages joined the release archive, this is the
-one install path that puts them on your `MANPATH`.
+release tarball, which also decides the signing status you get here: it is
+whatever that one asset carries. The Homebrew version is the release tag
+without its leading `v`; there is no separate versioning scheme. For tags
+after `v0.2.0` this is the one install path that puts the man pages on
+your `MANPATH`.
 
 ### From source
 
@@ -202,10 +215,12 @@ repository:
 cargo install --locked --git https://github.com/DaveDev42/qsh qsh-cli
 ```
 
-There is no `cargo install qsh-cli` from crates.io yet: the workspace is
-`publish = false` until M10, so `--git` (or `--path` against a local clone)
-is the only `cargo install` route today. The package name `qsh-cli` is
-unclaimed and reserved for that release; the shorter name `qsh` is not —
+There is no `cargo install qsh-cli` from crates.io yet: the four contract
+crates are cleared to publish and CI dry-runs the publish on every push to
+`main` and every pull request, but nothing has been pushed to the
+registry, so `--git` (or `--path` against a local clone) is the only
+`cargo install` route today. The package name `qsh-cli` is unclaimed and
+reserved for that release; the shorter name `qsh` is not —
 it belongs to an unrelated project — which is why the crate is `qsh-cli`
 even though the binary it installs is `qsh`.
 
@@ -219,14 +234,13 @@ Man pages for every subcommand are generated from the same `clap`
 definitions `--help` uses and live under [`docs/man/`](docs/man/)
 (`cargo xtask man` regenerates them; `docs/design/testing.md` covers the
 test that keeps them from drifting). Homebrew installs them; the curl
-installer does not. Starting with the first tag cut after the man pages
-joined the release archive, a Homebrew install puts `man qsh` and
-`man qsh-trust-add` on your `MANPATH` with no further setup. From the
-installer or a manual download of a `.tar.gz` asset, the pages ride along
-in the `man/` directory inside the archive (the Windows `.zip` does not
-carry them) but nothing puts them on a `MANPATH`, so point `man` at a page
-directly: `man ./docs/man/qsh.1`, or `man ./man/qsh-trust-add.1` from an
-unpacked archive.
+installer does not. For tags after `v0.2.0`, a Homebrew install puts
+`man qsh` and `man qsh-trust-add` on your `MANPATH` with no further
+setup. From the installer or a manual download of a `.tar.gz` asset, the
+pages ride along in the `man/` directory inside the archive (the Windows
+`.zip` does not carry them) but nothing puts them on a `MANPATH`, so
+point `man` at a page directly: `man ./docs/man/qsh.1`, or
+`man ./man/qsh-trust-add.1` from an unpacked archive.
 
 ## First run
 
@@ -618,7 +632,9 @@ qsh-cli (bin `qsh`)  →  qsh-core  →  qsh-transport  →  qsh-proto
 `cargo run -p xtask -- arch`, and a violation fails CI.
 
 The binary is `qsh`; the Cargo package is `qsh-cli`, because `qsh` was
-already taken on crates.io. The workspace stays `publish = false` until M10.
+already taken on crates.io ([ADR-0006](docs/adr/0006-product-name-and-crate-name.md)).
+The four contract crates are cleared to publish; nothing has been pushed
+to the registry yet.
 
 ## Roadmap
 
@@ -634,11 +650,13 @@ already taken on crates.io. The workspace stays `publish = false` until M10.
 | M7 | Trust UX, host profiles, `doctor` | Features done; stopwatch campaign open |
 | M8 | Hardening (fuzz, soak, real-device mobility campaign) | Code done; mobility campaign, wire freeze and security review open |
 | M9 | Human-facing surface (naming, pairing, service install) | Features done; stopwatch campaign open |
-| M10 | Release (installers, Homebrew, notarization) | In progress |
+| M10 | Release (installers, Homebrew, notarization, musl, provenance) | Pipeline done; clean-VM campaign open |
 
-The Homebrew tap (`DaveDev42/tap`) and the release workflow's auto-bump job
-already exist as a skeleton; the rest of M10's scope is in progress — see
-[docs/ROADMAP.md](docs/ROADMAP.md) for the full list.
+The Homebrew tap (`DaveDev42/tap`) and the release workflow's auto-bump
+job are wired and have run once, on `v0.2.0`. What M10 still owes is a
+person's work: the clean-VM install campaign, and the first push to
+crates.io once that campaign passes — see
+[docs/ROADMAP.md](docs/ROADMAP.md) for the full acceptance criteria.
 
 Per-milestone scope, in/out boundaries and acceptance criteria live in
 [docs/ROADMAP.md](docs/ROADMAP.md).
@@ -806,15 +824,21 @@ Some of these are MVP scope decisions, some are unfinished work.
   carrying no stable code identity gives macOS nothing to remember an
   answer against, so it asks again after every rebuild or reinstall.
   The release workflow signs both macOS binaries with a Developer ID
-  certificate and submits them to Apple's notary service when the release
-  is cut on a repository that has the Apple credentials configured; where
-  it is not, the macOS binaries ship ad-hoc signed, the same way a local
-  `cargo build --release` produces them. Tell the two apart with
+  certificate, under the hardened runtime and with a trusted timestamp,
+  and submits them to Apple's notary service, but only when the release
+  is cut on a repository that has all six Apple credentials configured;
+  where they are not, the macOS binaries ship ad-hoc signed, the same way
+  a local `cargo build --release` produces them. No published release has
+  been cut with those credentials yet, so assume ad-hoc until you have
+  checked. Tell the two apart with
   `codesign -dv --verbose=4 $(which qsh)`: a Developer ID build names an
   `Authority=Developer ID Application` and a `TeamIdentifier`, an ad-hoc
-  one prints `Signature=adhoc` and `TeamIdentifier=not set`. For an
-  ad-hoc build, sign it yourself (`codesign -fs "<cert>" $(which qsh)`)
-  or register it with
+  one prints `Signature=adhoc` and `TeamIdentifier=not set`. Notarization
+  is confirmed online rather than stapled, so a signed build's first run
+  on a machine with no route to Apple is still not guaranteed; `spctl -a
+  -vvv -t execute $(which qsh)` reports the verdict Gatekeeper would
+  reach. For an ad-hoc build, sign it yourself
+  (`codesign -fs "<cert>" $(which qsh)`) or register it with
   `/usr/libexec/ApplicationFirewall/socketfilterfw --add $(which qsh)
   --unblockapp $(which qsh)` (the tool is not on `PATH`).
 
