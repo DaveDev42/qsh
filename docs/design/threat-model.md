@@ -32,7 +32,7 @@
 | device 개인키 | `identity/device.key`(0600, PKCS#8 PEM) 또는 OS keyring | `architecture.md:75-76`; `crates/qsh-core/src/identity/mod.rs:8-9` |
 | CA 루트 개인키 | `config_dir/ca/ca.key`(0600, 파일 전용) | `docs/adr/0008-private-ca-cert-issuance.md:24` |
 | `trust.toml` | pinned peer(이름+fingerprint)와 private CA 목록 | `architecture.md:77,102` |
-| `invites.toml` | 0600. `mac_key`(invite secret의 BLAKE3)와 생성 시각 | `protocol.md:425` |
+| `invites.toml` | 0600. `mac_key`(invite secret의 BLAKE3)와 생성 시각 | `protocol.md` §15.7 |
 | `acl.toml` | 정책. qsh는 이 파일을 절대 쓰지 않는다 | `architecture.md:103`; `docs/adr/0017-acl-toml-not-written.md:18` |
 | resume token | `resume.json`(0600, flock + tmp·rename 원자 교체), 메모리에서는 `Zeroizing<[u8;32]>` | `architecture.md:105`; `docs/adr/0007-session-ref-and-resume-token-custody.md:16` |
 | 세션 PTY와 child 프로세스 | broker `SessionActor`가 소유. child는 항상 `qsh serve`를 실행한 OS 계정 | `architecture.md:46,69` |
@@ -46,13 +46,13 @@ ReplayRing은 자산이면서 그 자체가 통제다. PTY 평문 output이 프�
 
 | 주체 | 권한 | 경계를 세우는 것 |
 |---|---|---|
-| pin된 원격 peer(`AuthPath::Pin`) | 자기 principal에 걸린 `acl.toml` 행이 허용하는 action | SPKI SHA-256 pin 일치(`protocol.md:33`) |
-| CA 발급 peer(`AuthPath::Ca`) | 같음. principal은 leaf의 SAN URI에서만 온다 | private CA 체인 검증(`protocol.md:34`), `auth_path` 키로 정책 행 분리(`architecture.md:84`) |
-| 페어링 중인 미지 peer(`Principal::Pairing`) | 없음 — `Hello`에도 dispatch에도 ACL에도 닿지 못한다 | `pairing_open()`이 참인 창(살아 있는 invite ≤ 20분) 안에서만 TLS를 통과하고(`protocol.md:360`), 그 뒤로는 §15.2의 우회 경로만 탄다(`protocol.md:364`) |
-| 그 외 미지 peer | 없음 | 검증 코어의 3번 경로: 무조건 거부(`protocol.md:35`) |
+| pin된 원격 peer(`AuthPath::Pin`) | 자기 principal에 걸린 `acl.toml` 행이 허용하는 action | SPKI SHA-256 pin 일치(`protocol.md` §3) |
+| CA 발급 peer(`AuthPath::Ca`) | 같음. principal은 leaf의 SAN URI에서만 온다 | private CA 체인 검증(`protocol.md` §3), `auth_path` 키로 정책 행 분리(`architecture.md:84`) |
+| 페어링 중인 미지 peer(`Principal::Pairing`) | 없음 — `Hello`에도 dispatch에도 ACL에도 닿지 못한다 | `pairing_open()`이 참인 창(살아 있는 invite ≤ 20분) 안에서만 TLS를 통과하고(`protocol.md` §15.1), 그 뒤로는 §15.2의 우회 경로만 탄다(`protocol.md` §15.2) |
+| 그 외 미지 peer | 없음 | 검증 코어의 3번 경로: 무조건 거부(`protocol.md` §3) |
 | 같은 uid의 로컬 호출자(localctl) | 데몬이 들고 있는 것을 조회·조작 | same-uid peer credential. **인가 계층이 아니다** — 그 프로세스는 이미 device 개인키를 읽을 수 있는 uid다 |
 | 같은 호스트의 다른 사용자 | localctl UDS와 로컬 상태 파일에는 없음. `-L`/`-D`가 여는 loopback TCP listener에는 있다 — 그 principal의 `forward.local` 권한 전체(`-D`는 host가 닿는 모든 목적지) | localctl UDS·상태 파일: 파일 권한(0600/0700) + accept 시 euid 검사. loopback TCP listener: 없음 — TCP 포트는 파일 권한도 euid 검사도 거치지 않고 같은 머신의 어떤 uid에서도 그냥 connect된다(ADR-0019 결정, §7 h16) |
-| 네트워크 관찰자·능동 공격자 | 없음 | QUIC/TLS 1.3 양방향 인증(`protocol.md:39`), 0-RTT 전면 금지(`protocol.md:26`) |
+| 네트워크 관찰자·능동 공격자 | 없음 | QUIC/TLS 1.3 양방향 인증(`protocol.md` §3), 0-RTT 전면 금지(`protocol.md` §2) |
 | 에이전트(`--json` 호출자) | 그 CLI를 실행한 사용자와 같다 | 별도 경계가 아니다 — `Ops` 파사드를 통과할 뿐이고, JSON 모드는 권한이 아니라 출력 형식이다 |
 
 경계는 셋이다. (1) 네트워크 ↔ `qsh serve` 프로세스: TLS 검증 코어가 유일한 통과점이고, 검증된 principal 없이는 어떤 스트림도 application 계층에 닿지 않는다. (2) principal ↔ 리소스: `Server::dispatch`(`crates/qsh-core/src/server/mod.rs:782`)가 단일 choke point이고 네 인가 지점이 그 아래에 있다(`server/mod.rs:906,931,1018`, `crates/qsh-core/src/reverse/admit.rs:78`). (3) 로컬 파일 시스템 ↔ 프로세스: 권한 비트 하나가 전부다.
@@ -81,15 +81,15 @@ STRIDE를 이 저장소의 증거 구조에 맞춰 일곱 범주로 쓴다: A �
 
 | # | 위협 | 통제 | 근거 | 핀 테스트 | 잔여 위험 |
 |---|---|---|---|---|---|
-| A1 | 피어 신원 위장(pin 경로) | SPKI SHA-256 pin 양방향 검증 | `protocol.md:31-35` | `crates/qsh-transport/tests/handshake_matrix.rs:309` case02, `:341` case03. 양성 기준선은 `:273` `case01_pin_pin_both_valid_ok` | — |
+| A1 | 피어 신원 위장(pin 경로) | SPKI SHA-256 pin 양방향 검증 | `protocol.md` §3 | `crates/qsh-transport/tests/handshake_matrix.rs:309` case02, `:341` case03. 양성 기준선은 `:273` `case01_pin_pin_both_valid_ok` | — |
 | A2 | 피어 신원 위장(CA 경로) | private CA 체인 검증, SAN URI 없는 leaf는 거부 | ADR-0008 | `handshake_matrix.rs:519` case10, `:543` case11, `:628` case14. 양성 대조군 `:483` `case09_ca_mode_both_ways_ok` | CA revocation 메커니즘 자체가 없다 → §7 h4 |
 | A3 | pin/CA 모드 혼동 | 신뢰 저장소 종류별로 검증 경로 분리 | ADR-0008 결정 6 | `handshake_matrix.rs:573` case12, `:605` case13. 혼합 구성이 정상 동작함을 고정하는 양성 대조군 `:653` `case15_mixed_pin_client_ca_server_ok` | — |
-| A4 | 인증서 미제시 | 상호 인증 필수(`client_auth_mandatory`) | `protocol.md:39` | `handshake_matrix.rs:733` case16 | — |
-| A5 | 만료·미도래 인증서 | leaf `not_before`/`not_after`를 두 경로 모두에서 검사 | `protocol.md:37` | `handshake_matrix.rs:363` case04, `:390` case05, `:411` case06 | 로컬 시계에 의존한다 → §8. 장기 device cert에서 유효기간은 유일한 revocation 레버다 |
+| A4 | 인증서 미제시 | 상호 인증 필수(`client_auth_mandatory`) | `protocol.md` §3 | `handshake_matrix.rs:733` case16 | — |
+| A5 | 만료·미도래 인증서 | leaf `not_before`/`not_after`를 두 경로 모두에서 검사 | `protocol.md` §3 | `handshake_matrix.rs:363` case04, `:390` case05, `:411` case06 | 로컬 시계에 의존한다 → §8. 장기 device cert에서 유효기간은 유일한 revocation 레버다 |
 | A6 | ALPN 위장으로 application 상태에 진입 | `no_application_protocol` alert로 principal 생성 전에 종료 | `protocol.md` §4 | `handshake_matrix.rs:938` case18, `:1015` 대조군 | 서버측 거울 케이스는 의도적으로 쓰지 않았다 |
-| A7 | pairing이 pin/CA를 다운그레이드 | pairing 경로는 pin·CA가 **둘 다** 실패한 뒤에만 평가된다 | `protocol.md:360` | `handshake_matrix.rs:803` case17, `:840` case17b | 이미 pin된 상대의 재페어링은 아예 불가 → §7 h7 |
+| A7 | pairing이 pin/CA를 다운그레이드 | pairing 경로는 pin·CA가 **둘 다** 실패한 뒤에만 평가된다 | `protocol.md` §15.1 | `handshake_matrix.rs:803` case17, `:840` case17b | 이미 pin된 상대의 재페어링은 아예 불가 → §7 h7 |
 | A8 | resume token 탈취 후 다른 장비에서 attach | 토큰이 opener peer의 SPKI에 결합된다 | ADR-0007:16 | `crates/qsh-testkit/tests/resume_loopback.rs:500` `a_stolen_credential_is_useless_to_a_different_peer`, `:561` | — |
-| A9 | 0-RTT early data replay로 부수효과 있는 control message 재전송 | 0-RTT 전면 금지 + 세션 티켓 미발급. client `enable_early_data = false` / `Resumption::disabled()`, server `max_early_data_size = 0` / `send_tls13_tickets = 0` / `NoServerSessionStorage` — 모든 연결이 full mutual auth를 다시 돈다 | `protocol.md:16,26`; `crates/qsh-transport/src/endpoint.rs:511-512`(client), `:527-529`(server) | `endpoint.rs:1242` `tls_configs_disable_0_rtt_and_session_resumption` — 실제 `ClientConfig`/`ServerConfig`에서 세 필드를 직접 읽고 resumption·session storage는 `Debug` 문자열로 단언한다. 간접 증거는 `crates/qsh-transport/tests/loopback.rs:391` | — (M8 Step 7 이전에는 다섯 상수 중 하나를 되돌려도 깨지는 테스트가 없었다 → §5 g5) |
+| A9 | 0-RTT early data replay로 부수효과 있는 control message 재전송 | 0-RTT 전면 금지 + 세션 티켓 미발급. client `enable_early_data = false` / `Resumption::disabled()`, server `max_early_data_size = 0` / `send_tls13_tickets = 0` / `NoServerSessionStorage` — 모든 연결이 full mutual auth를 다시 돈다 | `protocol.md` §1, §2; `crates/qsh-transport/src/endpoint.rs:511-512`(client), `:527-529`(server) | `endpoint.rs:1242` `tls_configs_disable_0_rtt_and_session_resumption` — 실제 `ClientConfig`/`ServerConfig`에서 세 필드를 직접 읽고 resumption·session storage는 `Debug` 문자열로 단언한다. 간접 증거는 `crates/qsh-transport/tests/loopback.rs:391` | — (M8 Step 7 이전에는 다섯 상수 중 하나를 되돌려도 깨지는 테스트가 없었다 → §5 g5) |
 
 `exec`, `session.write`, tunnel open은 전부 부수효과가 있다. A9가 다른 행과 성격이 다른 이유가 그것이다 — 재전송이 곧 재실행이므로, replay 가능성을 남기는 대신 성능을 포기했다.
 
@@ -104,7 +104,7 @@ STRIDE를 이 저장소의 증거 구조에 맞춰 일곱 범주로 쓴다: A �
 | B5 | wildcard(`forward.*`)로 `forward.socks`까지 부여됐다고 착각 | 항상-deny action 게이트가 wildcard 매칭보다 먼저 — `forward.*`가 `forward.socks`에도 매칭되지만 그 action은 설계상 항상 deny라 추가로 여는 것이 없다(ADR-0019 결정 6). 실제로 `forward.*`가 여는 것은 `forward.local`(host가 닿는 모든 목적지로의 egress, `-D` egress 포함, ADR-0019 결과 "`forward.local` 부여는 egress 부여")과 `forward.remote`(host 쪽 listener 등록) 둘이다 — `forward.socks`만 게이트에 걸려 아무것도 더하지 않는다 | `architecture.md:85`; ADR-0019 결정 6 | `acl_check_equivalence.rs:273` `row_always_denied_action_overrides_an_explicit_allow_rule` | — |
 | B6 | quota 포화를 인가 우회 신호로 이용 | ACL 판정이 quota 예약보다 항상 먼저 | — | `crates/qsh-testkit/tests/quota.rs:457` `saturated_quota_still_answers_permission_denied_to_an_unauthorized_principal_end_to_end` | — |
 | B7 | 정책 엔진 자체의 커버리지 구멍 | 무작위 정책×요청을 naive oracle과 대조 | testing.md L2 | `crates/qsh-core/src/acl/policy.rs:765` `decide_agrees_with_naive_coverage_oracle`(proptest) | — |
-| B8 | trust store가 비어 있는 상태에서 우발적 허용 | 빈 trust store는 전면 거부. 검증 코어의 1·2번 경로가 모두 실패하면 3번(거부)이라 별도 분기가 필요 없는 구조다 | `protocol.md:31-35` | `handshake_matrix.rs:438` `case07_client_trust_store_empty_local_rejected`, `:463` `case08_server_trust_store_empty_remote_rejected` | — |
+| B8 | trust store가 비어 있는 상태에서 우발적 허용 | 빈 trust store는 전면 거부. 검증 코어의 1·2번 경로가 모두 실패하면 3번(거부)이라 별도 분기가 필요 없는 구조다 | `protocol.md` §3 | `handshake_matrix.rs:438` `case07_client_trust_store_empty_local_rejected`, `:463` `case08_server_trust_store_empty_remote_rejected` | — |
 | B9 | 같은 호스트의 다른 로컬 사용자가 localctl UDS로 데몬의 세션·터널을 조작 | accept 직후 euid 일치 검사(`SO_PEERCRED`/`getpeereid`), 프레임을 하나도 읽기 전 | `crates/qsh-core/src/localctl/daemon.rs:1460,1805`; `crates/qsh-core/src/localctl/mod.rs:13-17` | `daemon.rs:1935` `peer_is_authorized_only_when_the_uid_matches`, `:1950` `same_euid_peer_is_authorized_via_the_real_peer_cred_syscall`, `:2255` `an_unauthorized_peer_is_closed_before_any_frame_is_read_or_answered`(셋 중 판정 자체를 고정하는 것은 `:1935`뿐이다 — `:2255`는 거부 판정을 `Ok(false)`로 주입해 그 뒤의 "프레임을 읽지 않고 닫는다"만 고정한다) | 같은 uid의 프로세스는 이미 device 개인키를 읽을 수 있어 이 게이트가 지키는 것은 uid 경계뿐(§2) |
 
 B8은 B4의 TLS 계층 평행 위협이다. 설치 직후·설정 소실·잘못된 config 경로로 pin도 CA도 없이 뜬 노드가 아무나 받아들이면, ACL이 아무리 옳아도 그 앞에서 이미 졌다. B9는 원격 peer가 아니라 같은 머신의 다른 사용자를 상대로 같은 모양의 게이트를 세운다.
@@ -132,7 +132,7 @@ C10의 coalescing이 없으면 1바이트씩 echo하는 PTY가 entry 하나당 �
 |---|---|---|---|---|---|
 | D1 | resume token이 로그나 JSON으로 샘 | 토큰은 클라이언트 로컬 custody. wire·JSON 어디에도 노출하지 않는다 | ADR-0007:16 | `crates/qsh-testkit/tests/resume_secrecy.rs:69` `a_resume_credential_never_reaches_a_log_line_or_the_json_contract`, `:211`; `crates/qsh-cli/tests/fixtures.rs:977` `no_fixture_carries_a_resume_token` | — |
 | D2 | 시크릿이 `{:?}`로 새어 나감 | `Zeroizing` + 수동 `Debug` 구현 | `architecture.md:76` | `crates/qsh-core/src/resume.rs:709` `secrets_redact_themselves`; `crates/qsh-core/src/broker/resume.rs:481` `the_secret_types_redact_themselves` | rustls로 넘어간 키 사본은 이 규율 밖이다 → §7 h13 |
-| D3 | invite raw secret이 디스크에 잔존 | `mac_key`만 저장하고 raw secret은 쓰지 않는다 | `protocol.md:425` | `crates/qsh-core/src/trust/pairing.rs:975` `on_disk_record_never_contains_the_raw_secret` | `mac_key`는 이 invite에 대해 raw secret과 **동등한 verifier**다(`protocol.md:427`) — 실제 방어선은 해시가 아니라 0600 하나 |
+| D3 | invite raw secret이 디스크에 잔존 | `mac_key`만 저장하고 raw secret은 쓰지 않는다 | `protocol.md` §15.7 | `crates/qsh-core/src/trust/pairing.rs:975` `on_disk_record_never_contains_the_raw_secret` | `mac_key`는 이 invite에 대해 raw secret과 **동등한 verifier**다(`protocol.md` §15.7) — 실제 방어선은 해시가 아니라 0600 하나 |
 | D4 | 파일 권한이 넓어짐 | 생성 시점에 0600/0700 강제 | `architecture.md:104-106` | `trust/pairing.rs:838` `saved_store_is_private`(`mode & 0o777 == 0o600` 직접 단언); `crates/qsh-cli/tests/localctl_perms.rs:162` | 생성 이후 다른 프로세스·백업·sync가 넓히는 것은 막지 못한다 → §8 |
 | D5 | machine-mode stdout 오염 | 진단·로그·진행 표시는 stderr만 | CLAUDE.md 계약 안정성 규칙; `docs/CLI.md` §6.12 | `crates/qsh-cli/tests/jsonl_purity.rs:54,131,205,298,324,358` | — |
 | D6 | 페어링 확인 줄의 시각적 위장 | `validate_device_name`이 제어문자·bidi override/isolate·zero-width를 거부 | `protocol.md` §15.5; `crates/qsh-proto/src/wire.rs:393` | `wire.rs:1875` `validate_device_name_boundary_table`; `crates/qsh-core/src/pairing.rs:479,519` | homoglyph는 의도적 미검사 → §7 h9 |
@@ -144,14 +144,14 @@ D7은 테스트로 지킬 수 있는 성질이 아니라 코드가 없어서 성
 
 | # | 위협 | 통제 | 근거 | 핀 테스트 | 잔여 위험 |
 |---|---|---|---|---|---|
-| E1 | resume 오프셋 어긋남·입력 중복 적용 | 정확 오프셋 stitch + 입력 exactly-once | `protocol.md:286-290` | `resume_loopback.rs:171,282,290,301,384,392,404,478,484` | — |
+| E1 | resume 오프셋 어긋남·입력 중복 적용 | 정확 오프셋 stitch + 입력 exactly-once | `protocol.md` §10 | `resume_loopback.rs:171,282,290,301,384,392,404,478,484` | — |
 | E2 | writer lease 탈취 | `session.write`는 `no_steal: true` 고정 | `architecture.md:56` | `resume_loopback.rs:637` `no_steal_conflicts_with_a_foreign_lease_and_spends_no_credential` | 세션 open 직후 lease 공백 창이 있다 — 다른 principal이 먼저 write하면 lease를 가져가고 opener가 `SESSION_CONFLICT`를 맞는, 문서화된 트레이드오프 |
 | E3 | ring 오프셋 산술 오류 | gap 정확 보고 | testing.md L2 | `ring.rs:977` `read_matches_naive_vec_oracle`(proptest) | — |
 | E4 | reverse 등록 generation 재사용 | 롤백된 generation의 재발행 금지 | — | `crates/qsh-core/src/reverse/registry.rs:1102` `generation_is_never_repeated_across_any_replace_stale_remove_sequence`(proptest) | — |
 | E5 | localctl request-id 교차 응답 | mux 오라클 대조 | — | `crates/qsh-core/src/localctl/mux.rs:575` `interleaved_reused_peer_ids_never_cross`(proptest) | — |
 | E6 | 재접속 backoff 폭주 | 단조 증가 + cap | — | `crates/qsh-core/src/reverse/target/tests.rs:193` `backoff_sequence_is_monotone_nondecreasing_until_the_cap`(proptest) | — |
 | E7 | 터널 재경로 중 바이트 손실 | QUIC path migration을 투명하게 통과 | ADR-0018:14 | `crates/qsh-testkit/tests/tunnel_chaos.rs:149,299,781` | connection 자체가 끊기면 터널은 재생되지 않는다 — v1의 명시적 비대칭 → §7 h11 |
-| E8 | overflow로 인한 output 손실을 조용히 숨김 | overflow는 절대 숨기지 않는다. `available_from` 이전을 가리키는 커서는 먼저 `Gap`을 받고 그다음 데이터를 받는다 | ADR-0004:10,18,33 — "`session.gap` event가 buffer overflow의 유일하고 명시적인 신호여야 하며, 이를 숨기는 어떤 fallback도 있어서는 안 된다"; `protocol.md:289` | `ring.rs:877` `forced_control_loss_is_signalled_by_a_gap_never_hidden`, `:639` | 손실 자체는 §7 h15. 이 행이 지키는 것은 "숨기지 않는다"는 성질이다 |
+| E8 | overflow로 인한 output 손실을 조용히 숨김 | overflow는 절대 숨기지 않는다. `available_from` 이전을 가리키는 커서는 먼저 `Gap`을 받고 그다음 데이터를 받는다 | ADR-0004:10,18,33 — "`session.gap` event가 buffer overflow의 유일하고 명시적인 신호여야 하며, 이를 숨기는 어떤 fallback도 있어서는 안 된다"; `protocol.md` §10 | `ring.rs:877` `forced_control_loss_is_signalled_by_a_gap_never_hidden`, `:639` | 손실 자체는 §7 h15. 이 행이 지키는 것은 "숨기지 않는다"는 성질이다 |
 
 E8이 무결성 범주에 있는 이유: 응용이 "끊긴 출력"과 "완전한 출력"을 구별하지 못하는 것이 실질적 무결성 침해이기 때문이다. 손실을 없애는 것보다 손실을 정직하게 알리는 것이 이 프로토콜의 계약이다.
 
@@ -171,7 +171,7 @@ F2의 정확도가 이 범주에서 가장 중요하다. "audit에 payload를 �
 | # | 위협 | 통제 | 근거 | 핀 테스트 | 잔여 위험 |
 |---|---|---|---|---|---|
 | G1 | garbage flood로 데몬 사망 | admission 게이트 | ADR-0009 | `admission.rs:374` `host_survives_garbage_initial_flood`, `:194` | — |
-| G2 | 종료 시 좀비·고아 프로세스 | SIGTERM drain | ADR-0003; `README.md:510-522` | `crates/qsh-cli/tests/serve_sigterm_drain.rs:157` `sigterm_drains_the_session_and_leaves_no_orphan` | best-effort다. 재시작은 그 프로세스의 모든 detached 세션의 끝 → §7 h12 |
+| G2 | 종료 시 좀비·고아 프로세스 | SIGTERM drain | ADR-0003; `README.md` "Known limitations" | `crates/qsh-cli/tests/serve_sigterm_drain.rs:157` `sigterm_drains_the_session_and_leaves_no_orphan` | best-effort다. 재시작은 그 프로세스의 모든 detached 세션의 끝 → §7 h12 |
 | G3 | 나쁜 UDS 피어 하나가 데몬을 죽임 | bounded close | 구현 — 설계 문서 서술은 §6 r3이 흡수한다 | `localctl_perms.rs:194` `a_garbage_peer_is_refused_with_a_bounded_close_and_the_daemon_keeps_serving` | — |
 | G4 | stale socket 때문에 데몬 발견 실패 | 거부되는 소켓은 unlink하고 다음으로 | `architecture.md:109` | `localctl_perms.rs:247` `discovery_unlinks_a_stale_socket_ahead_of_the_real_daemon_and_still_finds_it` | — |
 
@@ -182,7 +182,7 @@ M8 Step 7 착수 시점에 다섯 개를 열어 두고 조사했다. 넷은 닫�
 | # | 통제 | 판정 | 근거 |
 |---|---|---|---|
 | g1 | `MAX_INFLIGHT_PER_CONDUIT`(64) 초과 시 거부 | **닫힘 — 기존 테스트가 이미 정확히 이 시나리오를 친다.** 새 테스트는 만들지 않았다 | `crates/qsh-core/src/localctl/mux.rs:433` `cap_exhausted_on_one_conduit_does_not_affect_another`가 한 conduit의 in-flight를 `MAX_INFLIGHT_PER_CONDUIT`까지 채운 뒤 `map_outbound`가 `Err(Exhausted)`를 반환함을 확인한다. hub-wide 캡(`listen.rs:2730`)과는 다른 축이다 |
-| g2 | `trust remove` 후 기존 연결의 동작(`README.md:563-572`) | **닫힘 — 기존 테스트 있음** | `crates/qsh-cli/tests/trust_lifecycle_live.rs:118` `an_established_connection_survives_the_hosts_trust_remove`가 실제 QUIC 연결로 `trust remove` 뒤에도 같은 PTY 세션의 write/read가 계속됨을 확인한다. 이 테스트가 고정하는 것은 통제가 아니라 §7 h5의 한계 자체다 |
+| g2 | `trust remove` 후 기존 연결의 동작(`README.md` "Known limitations") | **닫힘 — 기존 테스트 있음** | `crates/qsh-cli/tests/trust_lifecycle_live.rs:118` `an_established_connection_survives_the_hosts_trust_remove`가 실제 QUIC 연결로 `trust remove` 뒤에도 같은 PTY 세션의 write/read가 계속됨을 확인한다. 이 테스트가 고정하는 것은 통제가 아니라 §7 h5의 한계 자체다 |
 | g3 | `session.control`의 `close`가 scope 예외라는 것(`architecture.md:86`) | **닫힘 — 기존 테스트가 양성 방향으로 고정한다** | `crates/qsh-testkit/tests/session_loopback.rs:891` `session_close_is_exempt_from_scope_owned_while_write_and_resize_are_not`가 `scope = "owned"` 규칙 아래에서 `close`는 비-owner에게 허용되고 `write`/`resize`는 거부됨을 같은 테스트에서 대조한다 |
 | g4 | doctor `acl_principal_unmatched` / `acl_ca_auth_path_missing` | **열림 — M9 소유.** M8 시점의 잔여 위험으로 남긴다 | ADR-0017 결정 2(`:21-22`)가 이 둘을 요구하고, `docs/ROADMAP.md:118` M9 범위 (h) "doctor 진단 7종 추가"가 소유한다. 저장소에 아직 구현이 없다. 실무적 영향: `trust.toml`에 pin은 됐지만 `acl.toml`에 대응 행이 없는 peer가 조용히 전면 거부 상태로 남고, 운영자는 `serve` 시작 시 stderr 고지에만 의존한다(ADR-0017:36이 이 채널이 상시 데몬에서는 보이지 않는다고 적는다) |
 | g5 | 0-RTT 금지 다섯 상수의 회귀 탐지 | **닫힘 — M8 Step 7이 유닛을 추가했다** | `crates/qsh-transport/src/endpoint.rs:1242` `tls_configs_disable_0_rtt_and_session_resumption`. 이전에는 `loopback.rs:395-403`이 "0-RTT를 구조적으로 도달 불가하게 만들어 단언할 API 표면이 남지 않았다"고 기록한 상태였고, 다섯 상수 중 하나를 되돌려도 깨지는 테스트가 없었다. 새 유닛은 config 객체를 직접 읽어 그 상태를 끝낸다 |
@@ -215,12 +215,12 @@ M8 Step 7 착수 시점에 다섯 개를 열어 두고 조사했다. 넷은 닫�
 | h6 | `qsh pair accept`(구 표기 `qsh trust accept`)의 양쪽 pin이 원자적이지 않다. 호스트 쪽 pin과 invite 소비가 먼저 일어나고 클라이언트 로컬 pin이 나중이라, 그 사이 로컬 이름 충돌이 나면 invite는 이미 소비된 채 남는다 | README "Known limitations"; `protocol.md` §15.6 |
 | h7 | 이미 pin된 상대의 재페어링이 불가능하다. 새 invite로도 풀리지 않고 복구 경로는 호스트의 `trust remove` 뿐이다 | README "Known limitations"; `protocol.md` §15.6 |
 | h8 | 역방향 conduit에 pairing evaluator가 붙어 있지 않다. 사전 pin/CA로만 신뢰를 세우고, 그것이 손상됐을 때의 복구 절차 문서가 없다 | `protocol.md` §15.8; ADR-0015 미정 |
-| h9 | homoglyph 미탐지. 서로 다른 코드 포인트가 같은 글리프로 렌더되는 이름을 `validate_device_name`이 잡지 않는다 | `protocol.md:409`; `crates/qsh-proto/src/wire.rs:385-392`. 실제 방어선은 fingerprint 병기 대조 |
-| h10 | `acl.toml` hot reload 없음. 편집은 다음 `serve`/`listen`/`reverse` 시작부터 적용된다 | `README.md:539-541`; ADR-0017 |
-| h11 | 터널에는 replay ring이 없다. connection 손실 시 in-flight TCP 연결은 재생되지 않고 깨끗이 끊긴다 | ADR-0018:14; `README.md:523-538` |
-| h12 | 세션이 리스너 프로세스 수명에 결합된다. 재시작은 그 위 모든 detached 세션의 끝이다 | ADR-0003; `README.md:510-522` |
+| h9 | homoglyph 미탐지. 서로 다른 코드 포인트가 같은 글리프로 렌더되는 이름을 `validate_device_name`이 잡지 않는다 | `protocol.md` §15.5; `crates/qsh-proto/src/wire.rs:385-392`. 실제 방어선은 fingerprint 병기 대조 |
+| h10 | `acl.toml` hot reload 없음. 편집은 다음 `serve`/`listen`/`reverse` 시작부터 적용된다 | `README.md` "Known limitations"; ADR-0017 |
+| h11 | 터널에는 replay ring이 없다. connection 손실 시 in-flight TCP 연결은 재생되지 않고 깨끗이 끊긴다 | ADR-0018:14; `README.md` "Known limitations" |
+| h12 | 세션이 리스너 프로세스 수명에 결합된다. 재시작은 그 위 모든 detached 세션의 끝이다 | ADR-0003; `README.md` "Known limitations" |
 | h13 | rustls 내부로 넘어간 키 사본이 `Zeroizing` 밖에 있다. `LocalIdentity.key_pkcs8_der`까지가 규율의 경계이고, rustls-pki-types 1.15.1에 `impl Drop`이 없다 | M8 Step 6이 명시적으로 수용한 잔여(코드 주석에 기록, 업스트림 이슈는 열지 않았다) |
-| h14 | 이미 redeem된 invite도 20분 retention 창 안에서는 TLS 게이트가 계속 열려 있다. 실제 거부는 그다음 단인 redeem 판정에서 난다 | `protocol.md:429`. 이 관찰이 뚫는 것은 없다 — redeem 판정 자체가 매번 지켜진다 |
+| h14 | 이미 redeem된 invite도 20분 retention 창 안에서는 TLS 게이트가 계속 열려 있다. 실제 거부는 그다음 단인 redeem 판정에서 난다 | `protocol.md` §15.7. 이 관찰이 뚫는 것은 없다 — redeem 판정 자체가 매번 지켜진다 |
 | h15 | 세션 replay는 기본 8 MiB까지다. 그보다 오래 끊겼다가 돌아오면 그 구간은 gap event로 통보될 뿐 복구 수단이 없다. disk spool이 없으므로 늘리는 유일한 방법은 `[serve].replay_bytes`이고, 그건 리스너 메모리를 직접 늘린다 | ADR-0004:14,18,20,27,34; 기본값 `crates/qsh-core/src/config.rs:539`. h11과는 다른 항목이다 — 이쪽은 세션 output 이력의 **크기 상한** 문제다 |
 | h16 | `-D`가 인가하는 것은 `forward.local` 하나뿐이고, 이미 그 principal이 갖고 있던 grant다. `-D`는 그 egress를 SOCKS 클라이언트가 쓰기 쉬운 형태로 옮길 뿐, 새 권한을 만들지 않는다 — 다만 host가 닿는 모든 목적지로 무제한 egress라는 위험 자체는 `-D` 이전부터 있었다 | ADR-0019:149(R1); Q1 목적지 ACL 문법이 나오면 완화 후보 |
 | h17 | `-L`/`-D`가 여는 loopback TCP listener는 같은 머신의 다른 uid도 그냥 connect할 수 있다 — localctl UDS와 달리 파일 권한도 accept 시 euid 검사도 거치지 않는다. `-D`는 목적지가 고정되지 않아 피해 범위가 `-L`보다 넓다(그 principal이 닿는 모든 곳). 정방향·역방향 두 route 모두 같다 — 역방향은 daemon을 거쳐 relay될 뿐 이 listener 자체의 신뢰 경계를 바꾸지 않는다. 처방은 다중 사용자 머신에서 `-D`를 쓰지 않는 것 | ADR-0019:150(R2); ADR-0020:42("새 신뢰 경계는 없다"); listener별 자격증명(RFC 1929)은 P2 후보. §2의 "같은 호스트의 다른 사용자" 행이 이 예외를 반영한다 |
@@ -238,22 +238,22 @@ h16–h22는 ADR-0019의 R1–R7이다(그 ADR 자신이 "잔여 위험은 §7�
 
 qsh가 지키지 않고 운영자에게 맡긴 것들이다.
 
-- **시계 동기.** cert 유효기간(`protocol.md:37`), invite TTL 10분과 retention 20분(`protocol.md:405`), resume TTL이 전부 로컬 시계에 의존한다. NTP를 요구하는 명시적 문장은 어느 문서에도 없다. A5가 지적하듯 장기 device cert에서 유효기간은 유일한 revocation 레버이므로, 시계가 크게 어긋난 호스트는 만료된 cert를 받아들일 수 있다.
-- **파일 권한 유지.** 생성 시점의 0600/0700은 qsh가 강제하지만(D4), 그 이후 다른 프로세스·백업·잘못 설정된 sync가 넓히는 것은 막지 못한다. `invites.toml`이 특히 민감하다 — `mac_key`가 raw secret과 동등한 verifier라서(D3), 이 파일이 새면 TTL이 남은 invite는 그것만으로 완결된다(`protocol.md:427`).
-- **네트워크 도달성.** 역방향 모드는 target에서 controller로 가는 직접 UDP 경로를 요구한다. relay·NAT traversal·discovery를 qsh는 제공하지 않는다(`README.md:608-613`; PRD §12).
+- **시계 동기.** cert 유효기간(`protocol.md` §3), invite TTL 10분과 retention 20분(`protocol.md` §15.5), resume TTL이 전부 로컬 시계에 의존한다. NTP를 요구하는 명시적 문장은 어느 문서에도 없다. A5가 지적하듯 장기 device cert에서 유효기간은 유일한 revocation 레버이므로, 시계가 크게 어긋난 호스트는 만료된 cert를 받아들일 수 있다.
+- **파일 권한 유지.** 생성 시점의 0600/0700은 qsh가 강제하지만(D4), 그 이후 다른 프로세스·백업·잘못 설정된 sync가 넓히는 것은 막지 못한다. `invites.toml`이 특히 민감하다 — `mac_key`가 raw secret과 동등한 verifier라서(D3), 이 파일이 새면 TTL이 남은 invite는 그것만으로 완결된다(`protocol.md` §15.7).
+- **네트워크 도달성.** 역방향 모드는 target에서 controller로 가는 직접 UDP 경로를 요구한다. relay·NAT traversal·discovery를 qsh는 제공하지 않는다(`README.md` "Known limitations"; PRD §12).
 - **CA 키 복제 관행.** h3이 닫힐 때까지 여러 장비 서명은 `ca.key` 복제로만 가능하다. 그 사본 하나하나가 발급 권한 그 자체다(ADR-0016:10).
 - **`acl.toml` 재시작 규율.** h10에 따라 정책 편집은 재시작해야 반영된다. 편집했는데 반영이 안 된 상태를 "정책이 느슨한 채로 돌고 있는 창"으로 인식해야 한다.
 - **replay 여유 조정.** `[serve].replay_bytes` 기본 8 MiB가 자기 워크로드에 충분한지는 운영자가 판단한다. ADR-0004:20이 "전형적 텍스트 터미널 output 기준 수십 초~수 분 분량"이라고 추정한 값이다.
 
 ## 9. 명시적 비목표
 
-- **relay·NAT traversal.** 제품 경계 밖이다(`README.md:615-620`; PRD §14).
+- **relay·NAT traversal.** 제품 경계 밖이다(`README.md` "Known limitations"; PRD §14).
 - **user switching.** child는 항상 `qsh serve`를 실행한 OS 계정으로 spawn하고, `SessionOpen`의 `user` hint가 다르면 spawn 없이 `UNSUPPORTED`다(`architecture.md:69`). qsh는 OS 사용자 경계를 대신하지 않는다.
 - **세션 안 활동의 통제.** ACL은 요청 종류를 판정하고, 그 뒤 셸에서 벌어지는 일은 OS의 소관이다.
 - **PTY 내용의 감사.** F2가 구조적으로 보장하는 비목표다 — 감사 레코드에 payload를 담을 필드가 없다.
-- **homoglyph 판정.** 표 기반 confusable 검사를 커스텀 crate 없이 정확히 구현하기 어렵고, 이 자리에서 실제 방어선 노릇을 하는 것은 fingerprint 병기다(`protocol.md:409`).
+- **homoglyph 판정.** 표 기반 confusable 검사를 커스텀 crate 없이 정확히 구현하기 어렵고, 이 자리에서 실제 방어선 노릇을 하는 것은 fingerprint 병기다(`protocol.md` §15.5).
 - **TOFU.** h1의 방향 축이 먼저 정리되기 전에는 채택하지 않는다(ADR-0017:60).
-- **web PKI.** root를 어떤 경로로도 로드하지 않는다(`protocol.md:35`).
+- **web PKI.** root를 어떤 경로로도 로드하지 않는다(`protocol.md` §3).
 
 ## 10. 유지 규율
 
