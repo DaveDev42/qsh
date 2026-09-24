@@ -7,7 +7,7 @@
 
 `qsh trust invite`는 초대를 발급하는 쪽이 셸을 내주는 쪽, 즉 `qsh serve`를 띄우는 host라고 전제한다. `crates/qsh-core/src/trust/pairing.rs`의 `SharedInviteStore::redeem`은 들어오는 연결의 증명을 검증해 신뢰를 등재하는 흐름이고, 이 상환은 인바운드 QUIC 연결을 받는 프로세스 안에서만 일어난다.
 
-새 M9 표면(DECISIONS.md Q2)에서 `qsh serve --to <listener>`는 셸을 내주는 쪽(host)이 셸을 얻는 쪽인 client 머신(listener)으로 나가는 outbound 연결을 여는 역방향 구도를 만든다. listener는 `qsh listen`으로 인바운드를 받는 쪽이다. 이 구도에서 target(셸을 내주는 쪽, `serve --to`를 부르는 쪽)이 listener를 처음 신뢰하려면 오늘은 코드 pairing이 아니라 파일 교환을 쓴다. listener에서 `qsh identity export`, target에서 `qsh trust add --cert-file`(ADR-0013이 이 경로를 정했고 M9에서 출고됐다).
+새 M9 표면(2026-09-09의 결정 기록(저장소 밖) Q2)에서 `qsh serve --to <listener>`는 셸을 내주는 쪽(host)이 셸을 얻는 쪽인 client 머신(listener)으로 나가는 outbound 연결을 여는 역방향 구도를 만든다. listener는 `qsh listen`으로 인바운드를 받는 쪽이다. 이 구도에서 target(셸을 내주는 쪽, `serve --to`를 부르는 쪽)이 listener를 처음 신뢰하려면 오늘은 코드 pairing이 아니라 파일 교환을 쓴다. listener에서 `qsh identity export`, target에서 `qsh trust add --cert-file`(ADR-0013이 이 경로를 정했고 M9에서 출고됐다).
 
 코드 pairing이 listener 상대로 안 되는 이유는 상환 주체가 host 프로세스로 고정돼 있어서다. listener는 `qsh listen`을 실행하지 `qsh serve`를 실행하지 않으므로 `trust invite`가 여는 상환 창구를 가질 방법이 현재 없다. 이 ADR은 그 창구를 listener 쪽에도 열지, 연다면 어떤 모양일지를 정하기 위한 자리다.
 
