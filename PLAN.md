@@ -60,6 +60,8 @@ M10은 저장소 밖 자격에 묶인 첫 마일스톤이다. Apple 계정과 �
 
 **(c) 완료 판정:** `cargo build --release -p qsh-cli` 뒤 `QSH_SMOKE_STRICT=1 QSH_SMOKE_BIN=$(pwd)/target/release/qsh cargo nextest run -p qsh-cli --test release_smoke`가 green이고, `QSH_SMOKE_BIN` 없이 같은 명령이 패닉 문구를 내며 실패한다. 네 축이 로그에 순서대로 찍힌다.
 
+**(a)-추기 — Step 2 착지 (2026-09-24, main 세션).** 커밋 `152dd78`. seam은 `Sandbox`가 `bin: PathBuf`를 들고 `Sandbox::with_bin`·`Fleet::start_with_bin`이 그 경로로 host와 client 둘을 세우는 모양이다. `Sandbox::command`·`ServeGuard::spawn`·`Fleet::start_with`·`Fleet::rogue`가 하드와이어 대신 그 필드를 읽고 기존 시그니처는 하나도 바뀌지 않았다. 양방향 pin은 `Fleet`이 이미 쓰던 `trust add --fingerprint` 경로를 그대로 탄다. (a)가 열어 둔 `identity export` + `--cert-file` 선택지는 `init_trust.rs`가 따로 덮고 있어 여기서 다시 잇지 않았다. 새 파일 `crates/qsh-cli/tests/release_smoke.rs`의 unix 테스트 `release_smoke_covers_init_trust_exec_pty_detach_and_reattach`가 네 축을 잇고 `#[cfg(not(unix))]` 쌍둥이 `release_smoke_covers_init_trust_and_exec_on_a_platform_without_a_pty_client`는 exec까지만 돈다. PTY 클라이언트는 `tui_expect.rs`의 `Client`를 잘라 복사했다. `expectrl`을 `tests/common`으로 끌어올리면 `mod common;`을 선언한 모든 테스트 바이너리가 그 의존을 떠안기 때문이다. 재부착 뒤 마커는 detach 전 것과 다른 값으로 왕복시켜 replay만으로 통과하는 길을 막았고 replay 자체는 단언하지 않는다(브리프 질문 2의 결정). `smoke_bin()`은 어느 바이너리를 구동했는지 stderr에 한 줄 남긴다. 리뷰 두 렌즈의 소견 가운데 `docs/design/testing.md`의 조작적 정의 문장 누락, 표 행의 계획 스텝 번호 인용, `with_bin` doc의 틀린 앵커, 모듈 doc의 과장("every test binary"), 테스트 이름의 `resume` 오용은 고쳤다. `initialized_with_bin`의 미사용은 doc 한 줄로 밝힌 채 남겼다. 검증: 게이트 8종 초록, nextest `1983 passed / 4 skipped`(baseline 1982에 새 테스트 1), release 바이너리 STRICT 실행 초록, mutation 3건 전건 CAUGHT(STRICT에 BIN 부재 → 변수명을 지목하는 패닉, `main.rs`의 exec exit code를 0으로 고정 → `7` 단언 실패, `tui/unix.rs`의 재부착 `session_ref` 훼손 → 재부착 마커 EOF). `docs/design/testing.md`는 L6 끝 문단 하나와 환경변수 표 행 하나를 얻었다. Linux 검증(WSL 박스, 같은 커밋): rustdoc·clippy 초록, `-p qsh-cli` nextest 285 passed(loopback 10초 타임아웃 flaky 10건은 재시도 통과), release 빌드 뒤 STRICT 스모크 PASS. CI run 36008333318(CI)·36008333337(fuzz-smoke)·36008333321(load) 전부 초록.
+
 ### Step 3 — CI에 release 스모크 배선 (0.20ew)
 
 선행: Step 2(하네스가 있어야 배선할 것이 생긴다).
@@ -208,7 +210,7 @@ M10은 저장소 밖 자격에 묶인 첫 마일스톤이다. Apple 계정과 �
 
 | # | 질문 | 초안 | 확정 시점 |
 |---|---|---|---|
-| 1 | 스모크 env 변수 이름 | `QSH_SMOKE_BIN`·`QSH_SMOKE_STRICT`. 적대적 부하 하네스의 `QSH_LOAD_BIN`·`QSH_LOAD_STRICT` 관례를 그대로 따른다 | Step 2 |
+| 1 | 스모크 env 변수 이름 | `QSH_SMOKE_BIN`·`QSH_SMOKE_STRICT`. 적대적 부하 하네스의 `QSH_LOAD_BIN`·`QSH_LOAD_STRICT` 관례를 그대로 따른다. **확정(2026-09-24):** 초안대로(`152dd78`). `docs/design/testing.md`의 환경변수 표에 행이 올랐다 | Step 2 |
 | 2 | musl에서 jemalloc의 처분 | 먼저 그대로 빌드해 보고, 안 서면 `target_env = "gnu"`로 좁히고 testing.md L9에 30MB 미주장 문장 | Step 4 |
 | 3 | musl 툴체인 경로 | `musl-tools` 네이티브가 1순위, `cargo-zigbuild`는 차선. 교차 컴파일은 aws-lc-rs를 다시 어렵게 만든다 | Step 4 |
 | 4 | 서명 identity 문자열의 출처 | `APPLE_TEAM_ID` 시크릿으로 조립할지 identity 전체를 시크릿에 둘지 | Step 5 |
@@ -220,7 +222,7 @@ M10은 저장소 밖 자격에 묶인 첫 마일스톤이다. Apple 계정과 �
 | 10 | 캠페인 회차 수와 구형 glibc 이미지 | 네 플랫폼 각 1회 + musl 1회가 하한. 이미지 후보는 CentOS 7 또는 Debian 10 계열 | Step 10 |
 | 11 | publish 대상 크레이트 집합 | proto·transport·core·cli 넷. testkit·xtask는 `publish = false` 유지 | Step 11 |
 | 12 | 릴리스 노트의 자리 | GitHub Release 본문인지 `docs/` 아래 파일인지 | Step 12 |
-| 13 | 스모크의 양방향 pin 경로 | `identity export` + `trust add --cert-file`이 1순위(릴리스 바이너리 하나로 파일만 주고받으면 된다), `trust add --fingerprint`는 fingerprint를 어디서 관측할지가 한 단계 더 붙어 차선 | Step 2 |
+| 13 | 스모크의 양방향 pin 경로 | `identity export` + `trust add --cert-file`이 1순위(릴리스 바이너리 하나로 파일만 주고받으면 된다), `trust add --fingerprint`는 fingerprint를 어디서 관측할지가 한 단계 더 붙어 차선. **확정(2026-09-24):** `trust add --fingerprint`다. `Fleet::start_with_bin`이 기존 `Fleet::start_with`의 pin 순서를 그대로 물려받아 fingerprint는 `init --json` 출력에서 이미 손에 있고, `identity export` + `--cert-file` 경로는 `init_trust.rs`가 따로 덮는다(`152dd78`) | Step 2 |
 
 ## 5. 완료 절차
 
