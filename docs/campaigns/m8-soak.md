@@ -524,7 +524,7 @@ Windows Store 자동 다운로드 정책 키(`HKLM\SOFTWARE\Policies\Microsoft\W
 태그 대상 트리. 이 회차의 관측은 8c4f319까지만 보증한다. 그 뒤 main에
 얹힌 커밋(M9 `-D` 계열, f331cd0의 PTY 홈 폴백, 테스트 타임아웃 보고)은
 server·tunnel 경로를 바꾼다. 2026-09-21 사용자 결정으로 `v0.1.0-alpha.3`은
-찍지 않고 `-D`가 오른 main에 `v0.2.0`을 찍는다(`PLAN.md` §7). `-D` 포함
+찍지 않고 `-D`가 오른 main에 `v0.2.0`을 찍는다(`docs/history/m9-plan.md` §7). `-D` 포함
 트리의 24h soak은 run #7로 릴리스 뒤에 돌린다.
 
 ## 9. 재사용
