@@ -86,3 +86,31 @@ test-threads = 1
 success-output = "final"
 fail-fast = false
 slow-timeout = { period = "3600s" }
+
+# `long.yml`'s 30-minute blackout round
+# (`a_real_30_minute_blackout_is_resumed_within_the_ttl`,
+# `crates/qsh-cli/tests/reverse_blackout.rs`), the release-gate evidence for
+# `docs/PRD.md` §13's "30분 단절 후에도 TTL 내 세션 복구" row. Two departures
+# from `[profile.default]`:
+# - `slow-timeout`'s `period` is an hour and `terminate-after` is omitted —
+#   the same shape, and the same confirmed reasoning, as `[profile.soak]`
+#   above: a test that is *meant* to spend 1800s of wall clock must not be
+#   killed by the deadlock guard at 180s (60s x 3). The env gate
+#   (`QSH_ACCEPTANCE_LONG`) is what keeps this test skipped under every
+#   other profile, so no other profile needs the exemption.
+# - `test-threads = 1`: `long.yml` runs the 60s round as its own control in
+#   a separate step ahead of this one (its own header comment says why a
+#   single invocation covering both tests would not run them in that
+#   order), so at most one of the two ever executes under this profile at
+#   once from that workflow — but a developer invoking `--profile long`
+#   directly on the whole file still benefits from the same guarantee this
+#   setting gives `[profile.load]`: the 60s round asserts a wall-clock
+#   budget with 5s of slack (`SCHEDULING_SLACK`), and letting it burn the
+#   same runner in parallel with anything else is exactly the
+#   oracle-independent flakiness `test-threads = 1` exists to avoid.
+# `success-output = "final"` for the same reason `[profile.load]` sets it:
+# the round's own `eprintln!`-ed summary is the record the run id cites.
+[profile.long]
+test-threads = 1
+success-output = "final"
+slow-timeout = { period = "3600s" }
