@@ -129,15 +129,27 @@ impl PairingHarness {
     /// so these tests stay focused on the wire exchange and
     /// `Server::serve_pairing_connection`, not the CLI-facing op).
     pub fn invite_at(&self, created_at: SystemTime) -> [u8; INVITE_SECRET_LEN] {
-        let secret = generate_secret();
-        let mut store = InviteStore::load(&self.invites_path).expect("load invites");
-        store.add(secret.as_slice(), created_at);
-        store.save(&self.invites_path).expect("save invites");
-        *secret
+        self.invite_with_assigned_name_at(created_at, None)
     }
 
     pub fn invite(&self) -> [u8; INVITE_SECRET_LEN] {
         self.invite_at(SystemTime::now())
+    }
+
+    /// [`Self::invite_at`], but pinning an `--as`-style assigned name up
+    /// front (`docs/CLI.md` §6.11, ADR-0012 결정 6) — for tests exercising
+    /// `qsh pair invite --as`'s redemption-time effect without going
+    /// through `Ops`.
+    pub fn invite_with_assigned_name_at(
+        &self,
+        created_at: SystemTime,
+        assigned_name: Option<String>,
+    ) -> [u8; INVITE_SECRET_LEN] {
+        let secret = generate_secret();
+        let mut store = InviteStore::load(&self.invites_path).expect("load invites");
+        store.add(secret.as_slice(), created_at, assigned_name);
+        store.save(&self.invites_path).expect("save invites");
+        *secret
     }
 
     pub fn trust_snapshot(&self) -> TrustStore {

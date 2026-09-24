@@ -210,6 +210,27 @@ fn command_name_reports_a_mode_token_for_both_spellings() {
     assert_eq!(command_name(&cli), REVERSE_MODE);
 }
 
+/// ROADMAP M9 DoD 4 (ADR-0012 결정 3/4): all four spellings of invite/accept
+/// reach the same `qsh.cli/v1` op name through [`command_name`] — the
+/// dispatch-layer half of the parse-layer convergence pinned in
+/// `cli::tests::pair_invite_and_trust_invite_converge_on_the_same_parse`
+/// and its accept counterpart.
+#[test]
+fn pair_and_trust_invite_accept_spellings_converge_on_the_same_op_name() {
+    let cli = Cli::try_parse_from(["qsh", "pair", "invite"]).unwrap();
+    assert_eq!(command_name(&cli), TrustInviteOp::COMMAND);
+    let cli = Cli::try_parse_from(["qsh", "trust", "invite"]).unwrap();
+    assert_eq!(command_name(&cli), TrustInviteOp::COMMAND);
+
+    let cli = Cli::try_parse_from(["qsh", "pair", "accept", "box", "code"]).unwrap();
+    assert_eq!(command_name(&cli), TrustAcceptOp::COMMAND);
+    let cli = Cli::try_parse_from(["qsh", "trust", "accept", "box", "code"]).unwrap();
+    assert_eq!(command_name(&cli), TrustAcceptOp::COMMAND);
+
+    let cli = Cli::try_parse_from(["qsh", "trust", "rename", "old", "new"]).unwrap();
+    assert_eq!(command_name(&cli), TrustRenameOp::COMMAND);
+}
+
 #[test]
 fn remote_exit_code_passes_through_except_255() {
     assert_eq!(remote_exit_code_to_process_exit(0), 0);
@@ -237,8 +258,9 @@ fn finish_never_calls_the_human_closure_in_machine_mode() {
     let data = qsh_proto::TrustInviteData {
         code: "abcd-efgh-jkmn-pqrs-tvwx-yz23-4567-89ab".to_string(),
         expires_at: "2026-08-31T00:10:00Z".to_string(),
-        accept_command: "qsh trust accept <address> abcd-efgh-jkmn-pqrs-tvwx-yz23-4567-89ab"
+        accept_command: "qsh pair accept <address> abcd-efgh-jkmn-pqrs-tvwx-yz23-4567-89ab"
             .to_string(),
+        assigned_name: None,
     };
     let exit = finish(&cli, TrustInviteOp::COMMAND, Ok(data), |_data| {
         called.set(true);

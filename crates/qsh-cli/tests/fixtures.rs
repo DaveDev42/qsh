@@ -114,7 +114,9 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "trust.remove.json",
     "trust.remove.absent.json",
     "trust.invite.json",
+    "trust.invite.assigned_name.json",
     "trust.accept.json",
+    "trust.rename.json",
     "host.list.json",
     "host.get.json",
     "host.list.with_hosts_toml.json",
@@ -527,6 +529,40 @@ fn golden_trust_accept_fixture() {
     let (code, accepted) = client.json(&["trust", "accept", serve.addr(), invite_code, "--json"]);
     assert_eq!(code, 0, "{accepted}");
     check("trust.accept.json", accepted);
+}
+
+/// Name-authority fixtures (ADR-0012 결정 3/4/6, `docs/CLI.md` §6.11):
+/// `qsh pair invite --as` assigning the redeeming peer's name up front, and
+/// `qsh trust rename` moving an existing pin to a new name without
+/// unpinning it. Own sandboxes — neither perturbs `golden_local_fixtures`'
+/// or `golden_cert_file_exchange_fixtures`'s stores, and neither needs a
+/// live `qsh serve` (invite minting and rename are both local-store ops).
+#[test]
+fn golden_name_authority_fixtures() {
+    let inviter = Sandbox::initialized();
+    let (code, invited) = inviter.json(&["pair", "invite", "--as", "assigned-peer", "--json"]);
+    assert_eq!(code, 0, "{invited}");
+    // `assigned_name` is the one deterministic, test-chosen field on this
+    // envelope — unlike `code`/`expires_at`/`accept_command`, `normalize`
+    // does not mask it, so assert it verbatim before the fixture check
+    // (which would otherwise silently accept a masked mismatch).
+    assert_eq!(
+        invited["data"]["assigned_name"], "assigned-peer",
+        "{invited}"
+    );
+    check("trust.invite.assigned_name.json", invited);
+
+    let renamer = Sandbox::initialized();
+    renamer.trust_add(
+        "old-name",
+        Some("personal-mac.example.com:4433"),
+        SAMPLE_FINGERPRINT,
+    );
+    let (code, renamed) = renamer.json(&["trust", "rename", "old-name", "new-name", "--json"]);
+    assert_eq!(code, 0, "{renamed}");
+    assert_eq!(renamed["data"]["old_name"], "old-name", "{renamed}");
+    assert_eq!(renamed["data"]["peer"]["name"], "new-name", "{renamed}");
+    check("trust.rename.json", renamed);
 }
 
 /// The certificate-file exchange path (`docs/CLI.md` §6.11, ADR-0013):

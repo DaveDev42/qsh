@@ -50,25 +50,25 @@ use qsh_core::{
     HostGetOp, HostListOp, IdentityExportOp, IdentityInitOp, InviteCodeSource, OpError, Operation,
     Ops, SchemaOp, SessionAttachOp, SessionCloseOp, SessionGetOp, SessionListOp, SessionOpenOp,
     SessionReadOp, SessionResizeOp, SessionWriteOp, TrustAcceptOp, TrustAddCaOp, TrustAddOp,
-    TrustInviteOp, TrustListOp, TrustRemoveOp, TunnelCloseOp, TunnelDynamicOp, TunnelListOp,
-    TunnelOpenOp, VersionOp, cert_file_fingerprint_conflict, normalize_invite_code,
+    TrustInviteOp, TrustListOp, TrustRemoveOp, TrustRenameOp, TunnelCloseOp, TunnelDynamicOp,
+    TunnelListOp, TunnelOpenOp, VersionOp, cert_file_fingerprint_conflict, normalize_invite_code,
     parse_dynamic_forwards, read_cert_file_arg, resolve_invite_code_source,
-    trust::{ADDRESS_PORT_ASSUMED_NOTICE, normalize_peer_address},
+    trust::{ADDRESS_PORT_ASSUMED_NOTICE, normalize_peer_address, suggested_peer_label},
 };
 use qsh_proto::{
     AclCheckReq, CapabilitiesReq, CertInitReq, CertIssueReq, DoctorReq, ErrorCode, ExecRunReq,
     HostGetReq, IdentityExportReq, IdentityInitReq, SessionCloseReq, SessionGetReq, SessionListReq,
     SessionOpenReq, SessionReadReq, SessionResizeReq, SessionWriteReq, TrustAcceptReq,
-    TrustAddCaReq, TrustAddReq, TrustInviteReq, TunnelCloseReq, TunnelDynamicReq, TunnelListReq,
-    TunnelOpenReq,
+    TrustAddCaReq, TrustAddReq, TrustInviteReq, TrustRenameReq, TunnelCloseReq, TunnelDynamicReq,
+    TunnelListReq, TunnelOpenReq,
 };
 use serde::Serialize;
 use tracing_subscriber::EnvFilter;
 
 use cli::{
     AclCmd, AttachArgs, CertCmd, Cli, Command, DEFAULT_ESCAPE_CHAR, EscapeChar, ExecArgs, HostCmd,
-    IdentityCmd, SessionCmd, SessionReadArgs, SessionWriteArgs, TrustAddArgs, TrustAddCaArgs,
-    TrustCmd, TunnelCmd, TunnelOpenArgs,
+    IdentityCmd, PairCmd, SessionCmd, SessionReadArgs, SessionWriteArgs, TrustAddArgs,
+    TrustAddCaArgs, TrustCmd, TunnelCmd, TunnelOpenArgs,
 };
 use render::{human, json, json::Envelope};
 
@@ -407,31 +407,40 @@ fn dispatch(cli: &Cli, ops: Ops) -> i32 {
             ops.trust_remove(name),
             human::print_trust_remove,
         ),
-        Command::Trust(TrustCmd::Invite) => finish(
-            cli,
-            TrustInviteOp::COMMAND,
-            ops.trust_invite(TrustInviteReq {}),
-            // `ops.invite_address_advice()` must stay inline, as the
-            // second argument `print_trust_invite` is called with, rather
-            // than hoisted into a `let` above this closure: `finish` never
-            // calls this closure in machine mode, so keeping the call
-            // inside it is what keeps `--json`/`--jsonl` from making the
-            // route query at all (`docs/CLI.md` §2.2). Neither
-            // `finish_never_calls_the_human_closure_in_machine_mode` below
-            // nor the jsonl-purity regression can see a hoist here — both
-            // stay green either way, since a discarded observation prints
-            // nothing in either shape (adversarial review). The guard that
-            // does see it is
-            // `trust_invite_json_mode_makes_no_route_query_while_human_mode_does`
-            // below, which drives this arm and reads the route query's own
-            // call counter.
-            |data| human::print_trust_invite(data, &ops.invite_address_advice()),
-        ),
+        // `qsh pair invite` and its hidden pre-rename spelling `qsh trust
+        // invite` (ADR-0012 결정 3/4) funnel into the same helper, so the
+        // two dotted-name spellings can never drift apart in behavior.
+        Command::Trust(TrustCmd::Invite { as_name }) => {
+            run_trust_invite(cli, &ops, as_name.clone())
+        }
+        Command::Pair(PairCmd::Invite { as_name }) => run_trust_invite(cli, &ops, as_name.clone()),
         Command::Trust(TrustCmd::Accept {
             address,
             code,
             code_stdin,
-        }) => run_trust_accept(cli, &ops, address, code.clone(), *code_stdin),
+            as_name,
+        }) => run_trust_accept(
+            cli,
+            &ops,
+            address,
+            code.clone(),
+            *code_stdin,
+            as_name.clone(),
+        ),
+        Command::Pair(PairCmd::Accept {
+            address,
+            code,
+            code_stdin,
+            as_name,
+        }) => run_trust_accept(
+            cli,
+            &ops,
+            address,
+            code.clone(),
+            *code_stdin,
+            as_name.clone(),
+        ),
+        Command::Trust(TrustCmd::Rename { old, new }) => run_trust_rename(cli, &ops, old, new),
         Command::Cert(CertCmd::Init) => finish(
             cli,
             CertInitOp::COMMAND,
@@ -1416,8 +1425,8 @@ fn prompt_for_pin(name: &str, err: &OpError) -> Prompt {
     }
 }
 
-/// `qsh trust accept` — the code may come from argv, from stdin, or from a
-/// no-echo terminal prompt.
+/// `qsh pair accept` (and the hidden `qsh trust accept`) — the code may
+/// come from argv, from stdin, or from a no-echo terminal prompt.
 ///
 /// Which of the three, and whether to refuse instead, is `qsh-core`'s call
 /// ([`resolve_invite_code_source`], `docs/ROADMAP.md` M9 (j)); this
@@ -1433,6 +1442,7 @@ fn run_trust_accept(
     address: &str,
     code: Option<String>,
     code_stdin: bool,
+    as_name: Option<String>,
 ) -> i32 {
     if normalize_peer_address(address).port_filled {
         stderr_note!("{ADDRESS_PORT_ASSUMED_NOTICE}");
@@ -1442,13 +1452,65 @@ fn run_trust_accept(
         ops.trust_accept(TrustAcceptReq {
             address: address.to_string(),
             code,
+            as_name: as_name.clone(),
         })
     });
+    // `--as` omitted: print the pinned self-asserted name and (address
+    // permitting) a suggested label, same layer split
+    // `print_trust_invite`'s `advice` parameter uses — the qsh-core call
+    // (`suggested_peer_label`) stays in this closure, in `qsh-cli`'s own
+    // dispatch layer, never inside `human`'s rendering code
+    // (`docs/CLI.md` §6.11, ADR-0012 결정 6).
+    finish(cli, TrustAcceptOp::COMMAND, result, |data| {
+        human::print_trust_accept(data)?;
+        if as_name.is_none() {
+            human::print_trust_accept_suggested_name(
+                &data.peer.name,
+                suggested_peer_label(address).as_deref(),
+            )?;
+        }
+        Ok(())
+    })
+}
+
+/// `qsh pair invite` and its hidden pre-rename spelling `qsh trust invite`
+/// (ADR-0012 결정 3/4) — one function, so the two dotted-name spellings
+/// can never drift apart in behavior.
+fn run_trust_invite(cli: &Cli, ops: &Ops, as_name: Option<String>) -> i32 {
     finish(
         cli,
-        TrustAcceptOp::COMMAND,
-        result,
-        human::print_trust_accept,
+        TrustInviteOp::COMMAND,
+        ops.trust_invite(TrustInviteReq { as_name }),
+        // `ops.invite_address_advice()` must stay inline, as the second
+        // argument `print_trust_invite` is called with, rather than
+        // hoisted into a `let` above this closure: `finish` never calls
+        // this closure in machine mode, so keeping the call inside it is
+        // what keeps `--json`/`--jsonl` from making the route query at
+        // all (`docs/CLI.md` §2.2). Neither
+        // `finish_never_calls_the_human_closure_in_machine_mode` below nor
+        // the jsonl-purity regression can see a hoist here — both stay
+        // green either way, since a discarded observation prints nothing
+        // in either shape (adversarial review). The guard that does see
+        // it is
+        // `trust_invite_json_mode_makes_no_route_query_while_human_mode_does`
+        // below, which drives this arm and reads the route query's own
+        // call counter.
+        |data| human::print_trust_invite(data, &ops.invite_address_advice()),
+    )
+}
+
+/// `qsh trust rename <old> <new>` (`docs/CLI.md` §6.11). No `qsh pair`
+/// spelling — renaming an already-pinned peer is store manipulation, not
+/// the creation of a new trust entry by pairing (ADR-0012 결정 3).
+fn run_trust_rename(cli: &Cli, ops: &Ops, old: &str, new: &str) -> i32 {
+    finish(
+        cli,
+        TrustRenameOp::COMMAND,
+        ops.trust_rename(TrustRenameReq {
+            old: old.to_string(),
+            new: new.to_string(),
+        }),
+        human::print_trust_rename,
     )
 }
 
@@ -1650,8 +1712,11 @@ fn command_name(cli: &Cli) -> &'static str {
         Command::Trust(TrustCmd::AddCa(_)) => TrustAddCaOp::COMMAND,
         Command::Trust(TrustCmd::List) => TrustListOp::COMMAND,
         Command::Trust(TrustCmd::Remove { .. }) => TrustRemoveOp::COMMAND,
-        Command::Trust(TrustCmd::Invite) => TrustInviteOp::COMMAND,
+        Command::Trust(TrustCmd::Invite { .. }) => TrustInviteOp::COMMAND,
         Command::Trust(TrustCmd::Accept { .. }) => TrustAcceptOp::COMMAND,
+        Command::Trust(TrustCmd::Rename { .. }) => TrustRenameOp::COMMAND,
+        Command::Pair(PairCmd::Invite { .. }) => TrustInviteOp::COMMAND,
+        Command::Pair(PairCmd::Accept { .. }) => TrustAcceptOp::COMMAND,
         Command::Cert(CertCmd::Init) => CertInitOp::COMMAND,
         Command::Cert(CertCmd::Issue) => CertIssueOp::COMMAND,
         Command::Hosts => HostListOp::COMMAND,

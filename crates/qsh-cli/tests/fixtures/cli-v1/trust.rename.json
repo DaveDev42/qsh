@@ -1,0 +1,15 @@
+{
+  "command": "trust.rename",
+  "data": {
+    "old_name": "old-name",
+    "peer": {
+      "added_at": "<timestamp>",
+      "address": "<address>",
+      "fingerprint": "<fingerprint>",
+      "name": "new-name"
+    }
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

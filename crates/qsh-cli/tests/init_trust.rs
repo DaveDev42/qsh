@@ -316,7 +316,7 @@ fn trust_invite_human_mode_prints_exactly_one_of_the_two_address_wordings() {
         "human mode must print exactly one of the two address wordings: {stdout:?}"
     );
     assert!(
-        stdout.contains("qsh trust accept <address> "),
+        stdout.contains("qsh pair accept <address> "),
         "the `<address>` placeholder survives the candidate block: {stdout:?}"
     );
     // Nothing pins that a printed candidate is *this host's* address

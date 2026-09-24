@@ -261,6 +261,14 @@ pub enum Command {
     #[command(subcommand)]
     Trust(TrustCmd),
 
+    /// Pair with another device: mint an invite on one side, redeem it on
+    /// the other (ADR-0002, ADR-0012 decision 3, `docs/CLI.md` §6.11). This is
+    /// the documented spelling for creating a new trust entry by pairing;
+    /// `trust …` stays the vocabulary for manipulating entries that already
+    /// exist.
+    #[command(subcommand)]
+    Pair(PairCmd),
+
     /// Manage the private CA (`docs/adr/0008-private-ca-cert-issuance.md`).
     #[command(subcommand)]
     Cert(CertCmd),
@@ -603,18 +611,31 @@ pub enum TrustCmd {
         name: String,
     },
     /// Mint a one-time invite code for another device to pair with this one
-    /// (ADR-0002, `docs/CLI.md` §6.11). Human mode also lists the source
-    /// addresses this host's own routing table picks, as candidates for the
-    /// `<address>` placeholder in the printed `qsh trust accept` line — a
-    /// routing observation, never a reachability check, and the operator
-    /// still relays the chosen one out of band. `--json`/`--jsonl` makes no
-    /// such observation and the envelope carries no address.
-    Invite,
+    /// (ADR-0002, `docs/CLI.md` §6.11).
+    ///
+    /// Kept for v1 as the pre-rename spelling of `qsh pair invite`; hidden
+    /// from `qsh trust --help`'s listing but still parses and still works,
+    /// silently, with no deprecation warning (`qsh trust invite --help`
+    /// still renders this subcommand's own help in full).
+    #[command(hide = true)]
+    Invite {
+        /// Assign the redeeming peer's trust-store name up front, instead
+        /// of letting it self-assert one at pairing time (`docs/CLI.md`
+        /// §6.11, ADR-0012 decision 6).
+        #[arg(long = "as", value_name = "NAME")]
+        as_name: Option<String>,
+    },
     /// Dial `address`, redeem `code` against its invite, and — on a
     /// successful mutual proof — pin the peer exactly as `trust add` would
     /// (ADR-0002, `docs/CLI.md` §6.11).
+    ///
+    /// Kept for v1 as the pre-rename spelling of `qsh pair accept`; hidden
+    /// from `qsh trust --help`'s listing but still parses and still works,
+    /// silently, with no deprecation warning (`qsh trust accept --help`
+    /// still renders this subcommand's own help in full).
+    #[command(hide = true)]
     Accept {
-        /// `host:port` of the device that printed `code` via `trust invite`.
+        /// `host:port` of the device that printed `code` via `pair invite`.
         /// With no `:port`, port 4433 is assumed.
         address: String,
         /// The invite code, as printed (case-insensitive, hyphens ignored).
@@ -626,7 +647,7 @@ pub enum TrustCmd {
         /// A fingerprint is a public value, so `trust add --fingerprint` left
         /// in shell history is not a risk. A code left in history has no
         /// reuse value either: an invite is single-use and stops being
-        /// redeemable 10 minutes after `trust invite` mints it.
+        /// redeemable 10 minutes after `pair invite` mints it.
         code: Option<String>,
         /// Read the invite code from standard input, to end of input,
         /// ignoring leading and trailing whitespace. Use this instead of the
@@ -638,6 +659,79 @@ pub enum TrustCmd {
         /// machine mode.
         #[arg(long, conflicts_with = "code")]
         code_stdin: bool,
+        /// Pin the redeemed peer under this name instead of its self-
+        /// asserted one (`docs/CLI.md` §6.11, ADR-0012 decision 6).
+        #[arg(long = "as", value_name = "NAME")]
+        as_name: Option<String>,
+    },
+    /// Rename a pinned peer (`docs/CLI.md` §6.11). Takes effect at the next
+    /// handshake with no restart required. `acl.toml` is not reloaded: until
+    /// `qsh serve`/`qsh listen` restarts with a row for the new name, the
+    /// renamed peer matches no row and is denied (default-deny); rows naming
+    /// the old principal no longer apply to it.
+    Rename {
+        /// The peer's current trust-store name.
+        old: String,
+        /// The name to rename it to.
+        new: String,
+    },
+}
+
+/// `qsh pair …` subcommands — creating a new trust entry by pairing
+/// (`docs/CLI.md` §6.11, ADR-0012 decision 3). The pre-rename spellings
+/// (`qsh trust invite`/`qsh trust accept`) are kept, hidden, as strict
+/// equivalents.
+#[derive(Debug, Subcommand)]
+pub enum PairCmd {
+    /// Mint a one-time invite code for another device to pair with this one
+    /// (ADR-0002, `docs/CLI.md` §6.11). Human mode also lists the source
+    /// addresses this host's own routing table picks, as candidates for the
+    /// `<address>` placeholder in the printed `qsh pair accept` line — a
+    /// routing observation, never a reachability check, and the operator
+    /// still relays the chosen one out of band. `--json`/`--jsonl` makes no
+    /// such observation and the envelope carries no address.
+    Invite {
+        /// Assign the redeeming peer's trust-store name up front, instead
+        /// of letting it self-assert one at pairing time (`docs/CLI.md`
+        /// §6.11, ADR-0012 decision 6).
+        #[arg(long = "as", value_name = "NAME")]
+        as_name: Option<String>,
+    },
+    /// Dial `address`, redeem `code` against its invite, and — on a
+    /// successful mutual proof — pin the peer exactly as `trust add` would
+    /// (ADR-0002, `docs/CLI.md` §6.11).
+    Accept {
+        /// `host:port` of the device that printed `code` via `pair invite`.
+        /// With no `:port`, port 4433 is assumed.
+        address: String,
+        /// The invite code, as printed (case-insensitive, hyphens ignored).
+        ///
+        /// Optional. With no code here and no `--code-stdin`, a terminal is
+        /// prompted for it with echo off, and `--json`/`--jsonl` returns
+        /// INVALID_ARGUMENT instead of prompting.
+        ///
+        /// A fingerprint is a public value, so `trust add --fingerprint` left
+        /// in shell history is not a risk. A code left in history has no
+        /// reuse value either: an invite is single-use and stops being
+        /// redeemable 10 minutes after `pair invite` mints it.
+        code: Option<String>,
+        /// Read the invite code from standard input, to end of input,
+        /// ignoring leading and trailing whitespace. Use this instead of the
+        /// positional code to keep it out of shell history.
+        ///
+        /// If standard input is a terminal, echo is suppressed the same way
+        /// it is for the prompt, and `--json`/`--jsonl` still refuses
+        /// rather than waiting on it: pipe or redirect the code in for
+        /// machine mode.
+        #[arg(long, conflicts_with = "code")]
+        code_stdin: bool,
+        /// Pin the redeemed peer under this name instead of its self-
+        /// asserted one (`docs/CLI.md` §6.11, ADR-0012 decision 6). When
+        /// omitted in human mode, the pinned self-asserted name is printed
+        /// after the pin succeeds, along with a suggested label derived
+        /// from `address` when it has a hostname (never for an IP literal).
+        #[arg(long = "as", value_name = "NAME")]
+        as_name: Option<String>,
     },
 }
 

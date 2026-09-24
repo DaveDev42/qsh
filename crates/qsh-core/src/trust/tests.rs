@@ -761,3 +761,141 @@ fn remove_drops_a_ca_root_by_name_and_leaves_other_entries_alone() {
 
     assert!(!store.remove("x"));
 }
+
+/// [`TrustStore::rename`] moves only the name — `fingerprint`, `address`
+/// and `added_at` stay exactly what they were (`docs/CLI.md` §6.11). Also
+/// pins that it is not implemented as `remove` + `add_peer`: that shape
+/// would reset `added_at` to the re-add time.
+#[test]
+fn rename_preserves_added_at_fingerprint_and_address() {
+    let mut store = TrustStore::default();
+    store.add_peer(
+        "mac",
+        Some("mac.example:4433".into()),
+        fp(b"mac"),
+        "2026-08-17T00:00:00Z".into(),
+    );
+    let before = store.find("mac").unwrap().clone();
+
+    let renamed = store.rename("mac", "macbook").unwrap();
+    assert_eq!(renamed.name, "macbook");
+    assert_eq!(renamed.fingerprint, before.fingerprint);
+    assert_eq!(renamed.address, before.address);
+    assert_eq!(renamed.added_at, before.added_at);
+
+    assert!(store.find("mac").is_none(), "the old name must be gone");
+    assert_eq!(store.find("macbook").unwrap(), &renamed);
+    assert_eq!(
+        store.peers().len(),
+        1,
+        "rename must not create a second row"
+    );
+}
+
+#[test]
+fn rename_of_an_absent_peer_name_is_old_missing() {
+    let mut store = TrustStore::default();
+    store.add_peer("mac", None, fp(b"mac"), "2026-08-17T00:00:00Z".into());
+
+    assert_eq!(
+        store.rename("nope", "new-name"),
+        Err(RenameError::OldMissing)
+    );
+    // A name that exists only as a CA root does not count as a peer either.
+    store.add_ca("root", pem::encode(pem::CERTIFICATE, b"root"));
+    assert_eq!(
+        store.rename("root", "new-name"),
+        Err(RenameError::OldMissing)
+    );
+}
+
+#[test]
+fn rename_onto_an_existing_peer_name_is_new_taken() {
+    let mut store = TrustStore::default();
+    store.add_peer("mac", None, fp(b"mac"), "2026-08-17T00:00:00Z".into());
+    store.add_peer("pi", None, fp(b"pi"), "2026-08-17T00:00:00Z".into());
+
+    assert_eq!(store.rename("mac", "pi"), Err(RenameError::NewTaken));
+    // Neither entry moved.
+    assert!(store.find("mac").is_some());
+    assert!(store.find("pi").is_some());
+}
+
+/// `new` colliding with a `[[ca]]` label is refused too — peers and CA
+/// roots share one name space for collision purposes, exactly as
+/// [`TrustStore::remove`] already treats them (mutation #10).
+#[test]
+fn rename_onto_an_existing_ca_label_is_refused() {
+    let mut store = TrustStore::default();
+    store.add_peer("mac", None, fp(b"mac"), "2026-08-17T00:00:00Z".into());
+    store.add_ca("root", pem::encode(pem::CERTIFICATE, b"root"));
+
+    assert_eq!(store.rename("mac", "root"), Err(RenameError::NewTaken));
+    assert!(store.find("mac").is_some(), "the peer must not have moved");
+}
+
+/// The one shared label-shape rule (ADR-0012 결정 6): the same set of
+/// inputs must be rejected everywhere it is called — `--as` on `pair
+/// invite`/`pair accept` and `trust rename`'s `new`.
+#[test]
+fn validate_peer_label_rejects_the_same_set_reject_control_chars_does_plus_the_segment_rule() {
+    assert!(validate_peer_label("mac").is_ok());
+    assert!(validate_peer_label("mac-book_2").is_ok());
+
+    assert!(validate_peer_label("").is_err(), "empty");
+    assert!(
+        validate_peer_label(&"a".repeat(65)).is_err(),
+        "over the 64-byte boundary"
+    );
+    assert!(
+        validate_peer_label("bad\tname").is_err(),
+        "control character"
+    );
+    assert!(
+        validate_peer_label("bad\u{202e}name").is_err(),
+        "bidi control"
+    );
+    assert!(
+        validate_peer_label("bad\u{200b}name").is_err(),
+        "zero-width"
+    );
+    assert!(
+        validate_peer_label("a/b").is_err(),
+        "'/' is qsh-core's own extra rule, on top of \
+         qsh_proto::wire::validate_device_name"
+    );
+}
+
+/// The failure message never echoes the label itself — only which rule it
+/// broke (`crate::ops::trust::validate_peer_label_arg`'s doc).
+#[test]
+fn validate_peer_label_error_display_never_echoes_the_input() {
+    let secret_looking = "tok3n-do-not-log\tme";
+    let err = validate_peer_label(secret_looking).unwrap_err();
+    assert!(
+        !err.to_string().contains(secret_looking),
+        "PeerLabelError::Display must not echo the offending bytes: {err}"
+    );
+}
+
+#[test]
+fn suggested_peer_label_takes_the_first_dns_label_and_skips_ip_literals() {
+    assert_eq!(
+        suggested_peer_label("mac.example.com:4433"),
+        Some("mac".to_string())
+    );
+    assert_eq!(
+        suggested_peer_label("mac.example.com"),
+        Some("mac".to_string())
+    );
+    assert_eq!(
+        suggested_peer_label("192.168.1.5:4433"),
+        None,
+        "an IPv4 literal has no useful suggested label"
+    );
+    assert_eq!(
+        suggested_peer_label("[::1]:4433"),
+        None,
+        "an IPv6 literal has no useful suggested label"
+    );
+}

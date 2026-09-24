@@ -1,0 +1,36 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH qsh-trust-rename 1  "rename 0.2.0" 
+.SH NAME
+qsh\-trust\-rename \- Rename a pinned peer (`docs/CLI.md` §6.11). Takes effect at the next handshake with no restart required. `acl.toml` is not reloaded: until `qsh serve`/`qsh listen` restarts with a row for the new name, the renamed peer matches no row and is denied (default\-deny); rows naming the old principal no longer apply to it
+.SH SYNOPSIS
+\fBqsh trust rename\fR [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fIOLD\fR> <\fINEW\fR> 
+.SH DESCRIPTION
+Rename a pinned peer (`docs/CLI.md` §6.11). Takes effect at the next handshake with no restart required. `acl.toml` is not reloaded: until `qsh serve`/`qsh listen` restarts with a row for the new name, the renamed peer matches no row and is denied (default\-deny); rows naming the old principal no longer apply to it
+.SH OPTIONS
+.TP
+\fB\-\-json\fR
+Emit a single `qsh.cli/v1` JSON envelope on stdout instead of human\-readable text
+.TP
+\fB\-\-jsonl\fR
+Emit newline\-delimited JSON on stdout (reserved for streaming commands; non\-streaming commands emit a single line, same as `\-\-json`)
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Increase diagnostic verbosity on stderr (`\-v` info, `\-vv` debug, `\-vvv` trace). Never affects stdout (`docs/CLI.md` §2.2)
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Suppress diagnostic output on stderr
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.TP
+\fB\-V\fR, \fB\-\-version\fR
+Print version
+.TP
+<\fIOLD\fR>
+The peer\*(Aqs current trust\-store name
+.TP
+<\fINEW\fR>
+The name to rename it to
+.SH VERSION
+v0.2.0

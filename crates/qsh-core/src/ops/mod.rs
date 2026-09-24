@@ -12,10 +12,11 @@ use qsh_proto::{
     BuildInfo, ErrorCode, IdentityExportData, IdentityExportReq, IdentityInitData, IdentityInitReq,
     KeyStoreMode, SchemaData, TrustAcceptData, TrustAcceptReq, TrustAddCaData, TrustAddCaReq,
     TrustAddData, TrustAddReq, TrustInviteData, TrustInviteReq, TrustListData, TrustPeer,
-    TrustRemoveData, VersionData,
+    TrustRemoveData, TrustRenameData, TrustRenameReq, VersionData,
 };
-use qsh_transport::{DialError, Dialer, Fingerprint, StaticTrust};
+use qsh_transport::{DialError, Dialer, Fingerprint, Principal, StaticTrust};
 
+use crate::audit::{AuditRecord, AuditSink, FileAuditSink};
 use crate::config::{Config, Paths, now_rfc3339};
 use crate::hosts::HostsFile;
 use crate::identity::LoadedIdentity;
@@ -423,6 +424,13 @@ impl Operation for TrustRemoveOp {
     const COMMAND: &'static str = "trust.remove";
 }
 
+/// The `trust.rename` operation (`docs/CLI.md` §6.11).
+pub struct TrustRenameOp;
+
+impl Operation for TrustRenameOp {
+    const COMMAND: &'static str = "trust.rename";
+}
+
 /// Façade over every typed operation. This is the *only* entry point
 /// frontends (`qsh-cli`'s human/JSON renderers, and any long-running
 /// external process, e.g. an agent tool) are allowed to call into
@@ -430,7 +438,7 @@ impl Operation for TrustRemoveOp {
 ///
 /// One `Ops` is bound to one pair of config/state directories, so a test —
 /// or a `QSH_CONFIG_DIR` override — redirects the whole tree at once.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Ops {
     paths: Paths,
     recovery: session::RecoveryConfig,
@@ -473,6 +481,30 @@ pub struct Ops {
     /// then asks the *same* pool for another one (`tokio::net::lookup_host`)
     /// — two independent runtimes keep the two demands on separate pools.
     connect_runtime: Arc<OnceLock<Arc<SharedRuntime>>>,
+    /// Injected audit sink for local ops that must be fail-closed on it
+    /// (`trust.rename` is the first — `docs/CLI.md` §6.11, ADR-0012 결정
+    /// 7). `None` (the default every real caller gets from [`Ops::new`])
+    /// means "build a [`crate::audit::FileAuditSink`] at op time on the
+    /// daemon's own `audit.log` path" — see [`Self::with_audit_sink`] and
+    /// `trust_rename`'s own doc. Tests inject a
+    /// [`crate::audit::MemoryAuditSink`] here the same way
+    /// [`Self::with_recovery`] lets them override [`session::RecoveryConfig`].
+    audit: Option<Arc<dyn crate::audit::AuditSink>>,
+}
+
+impl std::fmt::Debug for Ops {
+    /// Hand-rolled because `dyn AuditSink` (the injected `audit` field)
+    /// carries no `Debug` impl of its own — every other field still prints
+    /// exactly as `#[derive(Debug)]` would have.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Ops")
+            .field("paths", &self.paths)
+            .field("recovery", &self.recovery)
+            .field("tunnel_holds", &self.tunnel_holds)
+            .field("connect_runtime", &self.connect_runtime)
+            .field("audit", &self.audit.is_some())
+            .finish()
+    }
 }
 
 /// A [`tokio::runtime::Runtime`] whose `Drop` never blocks where blocking
@@ -565,7 +597,21 @@ impl Ops {
             recovery: session::RecoveryConfig::default(),
             tunnel_holds: tunnel::new_tunnel_hold_registry(),
             connect_runtime: Arc::new(OnceLock::new()),
+            audit: None,
         }
+    }
+
+    /// Inject the audit sink `trust_rename` (and any future fail-closed
+    /// local op) appends its one record through, mirroring
+    /// [`Self::with_recovery`]'s shape. Tests pass a
+    /// [`crate::audit::MemoryAuditSink`] here; every real caller leaves
+    /// this unset and gets a fresh [`crate::audit::FileAuditSink`] built
+    /// at op time on the daemon's own `audit.log` path (`trust_rename`'s
+    /// own doc).
+    #[must_use]
+    pub fn with_audit_sink(mut self, audit: Arc<dyn crate::audit::AuditSink>) -> Self {
+        self.audit = Some(audit);
+        self
     }
 
     /// The shared dial runtime, building it on first use.

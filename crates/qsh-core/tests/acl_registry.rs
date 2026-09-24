@@ -274,6 +274,7 @@ mod section_2_5 {
                 "trust.add_ca",
                 "trust.list",
                 "trust.remove",
+                "trust.rename",
                 "trust.invite",
                 "trust.accept",
             ];

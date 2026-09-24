@@ -40,10 +40,7 @@ List pinned peers
 qsh\-trust\-remove(1)
 Remove a pinned peer. Idempotent
 .TP
-qsh\-trust\-invite(1)
-Mint a one\-time invite code for another device to pair with this one (ADR\-0002, `docs/CLI.md` §6.11). Human mode also lists the source addresses this host\*(Aqs own routing table picks, as candidates for the `<address>` placeholder in the printed `qsh trust accept` line — a routing observation, never a reachability check, and the operator still relays the chosen one out of band. `\-\-json`/`\-\-jsonl` makes no such observation and the envelope carries no address
-.TP
-qsh\-trust\-accept(1)
-Dial `address`, redeem `code` against its invite, and — on a successful mutual proof — pin the peer exactly as `trust add` would (ADR\-0002, `docs/CLI.md` §6.11)
+qsh\-trust\-rename(1)
+Rename a pinned peer (`docs/CLI.md` §6.11). Takes effect at the next handshake with no restart required. `acl.toml` is not reloaded: until `qsh serve`/`qsh listen` restarts with a row for the new name, the renamed peer matches no row and is denied (default\-deny); rows naming the old principal no longer apply to it
 .SH VERSION
 v0.2.0

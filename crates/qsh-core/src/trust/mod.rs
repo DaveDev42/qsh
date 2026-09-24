@@ -184,6 +184,67 @@ pub(crate) fn split_port(address: &str) -> Option<(&str, &str)> {
     }
 }
 
+/// Why [`validate_peer_label`] rejected a label — never echoes the
+/// offending bytes (`docs/design/protocol.md` §15.5's "the value never
+/// appears in a log line" rule extends here too, since this validator
+/// gates a peer-chosen wire name on one of its two paths).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum PeerLabelError {
+    /// Empty, over 64 bytes, or contains a control/bidi/zero-width
+    /// character — [`qsh_proto::wire::validate_device_name`]'s own table.
+    #[error("not a valid device name: {0}")]
+    DeviceName(#[from] qsh_proto::wire::DeviceNameError),
+    /// Contains `/` — the one character
+    /// `qsh_transport::identity::valid_segment` forbids beyond emptiness
+    /// (private to that crate; `qsh-cli` may not depend on
+    /// `qsh-transport` at all, `docs/design/architecture.md` §1, so this
+    /// crosses the boundary as its own rule rather than exposing that
+    /// function). Pinned equivalent to it by
+    /// `validate_peer_label_rejects_the_same_set_reject_control_chars_does_plus_the_segment_rule`
+    /// (`trust/tests.rs`).
+    #[error("must not contain '/'")]
+    Segment,
+}
+
+/// The one label-shape rule shared by every place a human or a peer names
+/// a trust-store principal (ADR-0012 결정 6): `--as` on `qsh pair
+/// invite`/`qsh pair accept`, `assigned_name` re-validated at redemption
+/// time, and `trust rename`'s `new`. Delegates the character-class checks
+/// to [`qsh_proto::wire::validate_device_name`] and then rejects `/`, the
+/// one extra rule a trust-store name must clear before it becomes a
+/// `Principal::Device` (`qsh_transport::identity`'s SAN-construction
+/// segment rule).
+///
+/// `Ops` maps a failure here to `INVALID_ARGUMENT`; the wire path
+/// (`crate::pairing`) maps it onto its own `PairingError` shape instead —
+/// two error types over one rule, never two definitions of the rule
+/// itself.
+pub fn validate_peer_label(label: &str) -> Result<(), PeerLabelError> {
+    qsh_proto::wire::validate_device_name(label)?;
+    if label.contains('/') {
+        return Err(PeerLabelError::Segment);
+    }
+    Ok(())
+}
+
+/// The suggested trust-store label `qsh pair accept`/`qsh trust accept`
+/// prints in human mode when `--as` is omitted (ADR-0012 결정 6: "제안일
+/// 뿐 자동으로 이름에 적용하지 않는다") — the first DNS label of the
+/// ADR-0014-normalized address, or `None` for an IPv4/IPv6 literal (a
+/// digit string, or the first colon-separated group of a bare IPv6
+/// address, is not a useful suggested name). Host/stderr-only: never enters
+/// [`qsh_proto::TrustAcceptData`] or any JSON line.
+pub fn suggested_peer_label(address: &str) -> Option<String> {
+    let normalized = normalize_peer_address(address).address;
+    let host = split_port(&normalized).map_or(normalized.as_str(), |(host, _)| host);
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return None;
+    }
+    let label = host.split('.').next()?;
+    (!label.is_empty()).then(|| label.to_string())
+}
+
 /// A private CA root the verifier accepts chains against.
 ///
 /// Written by `qsh cert issue` (`docs/adr/0008-private-ca-cert-issuance.md`,
@@ -213,6 +274,16 @@ struct TrustFile {
 pub struct TrustStore {
     peers: Vec<TrustPeer>,
     cas: Vec<CaEntry>,
+}
+
+/// Why [`TrustStore::rename`] refused (`docs/CLI.md` §6.11).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenameError {
+    /// `old` names no `[[peer]]` entry (a `[[ca]]`-only name counts as
+    /// missing too — rename operates on peers, `docs/CLI.md` §6.11).
+    OldMissing,
+    /// `new` already names a `[[peer]]` or a `[[ca]]` entry.
+    NewTaken,
 }
 
 impl TrustStore {
@@ -513,6 +584,36 @@ impl TrustStore {
         let cas_before = self.cas.len();
         self.cas.retain(|ca| ca.name != name);
         self.peers.len() != peers_before || self.cas.len() != cas_before
+    }
+
+    /// Rename a pinned peer (`qsh trust rename <old> <new>`, `docs/CLI.md`
+    /// §6.11). Pure — no I/O, no locking, shaped like [`Self::remove`];
+    /// `Ops::trust_rename` does the full `lock` → `load` → `rename` →
+    /// audit → `save` cycle. `fingerprint`/`address`/`added_at` are
+    /// unchanged: only the name moves. Not implemented as `remove` +
+    /// `add_peer`, which would lose `added_at`, briefly leave the store
+    /// with neither name, and let `add_peer`'s silent-no-op branch swallow
+    /// a collision.
+    ///
+    /// `[[peer]]` only — `old` naming only a `[[ca]]` entry is
+    /// [`RenameError::OldMissing`], and `new` colliding with *either* a
+    /// `[[peer]]` **or** a `[[ca]]` label is [`RenameError::NewTaken`]
+    /// (the two lists share one name space here exactly as [`Self::remove`]
+    /// treats them: renaming a peer onto a CA label would make a later
+    /// `trust remove <new>` silently take out both).
+    pub fn rename(&mut self, old: &str, new: &str) -> Result<TrustPeer, RenameError> {
+        let taken =
+            self.peers.iter().any(|p| p.name == new) || self.cas.iter().any(|c| c.name == new);
+        if taken {
+            return Err(RenameError::NewTaken);
+        }
+        let index = self
+            .peers
+            .iter()
+            .position(|p| p.name == old)
+            .ok_or(RenameError::OldMissing)?;
+        self.peers[index].name = new.to_string();
+        Ok(self.peers[index].clone())
     }
 
     /// Pins as `(fingerprint, principal)` pairs. Entries whose fingerprint

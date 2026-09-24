@@ -46,7 +46,7 @@ use qsh_core::ops::host::{pinned_without_address_host_not_found, unconfigured_ho
 use qsh_core::ops::tunnel::DYNAMIC_FORWARD_REVERSE_CAPABILITY_UNSUPPORTED_MESSAGE;
 use qsh_core::pairing::{
     PAIRING_ACL_ROW_ABSENT, PAIRING_ACL_ROW_PRESENT, PAIRING_INVITE_REPLAY_NOTICE,
-    PAIRING_PINNED_SELF_ASSERTED, PairingError, pairing_pin_notice,
+    PAIRING_PINNED_INVITE_ASSIGNED, PAIRING_PINNED_SELF_ASSERTED, PairingError, pairing_pin_notice,
 };
 use qsh_core::serve::{BIND_UNAVAILABLE_REMEDY, bind_unavailable};
 use qsh_core::trust::ADDRESS_PORT_ASSUMED_NOTICE;
@@ -114,12 +114,38 @@ fn readme_known_limitations_quotes_the_bind_unavailable_remedy_verbatim() {
     );
 }
 
+/// The mechanical form of ADR-0012 decision 6 ("이름 결정권은 pin하는
+/// 쪽이 갖는다", `docs/CLI.md` §6.11's `--as` paragraphs): none of the
+/// four pairing pin-notice constants may still carry the phrase the
+/// pre-`--as` wording used to justify a name being self-asserted.
+/// `PAIRING_PINNED_INVITE_ASSIGNED` in particular must read as a fact
+/// about the invite, never a leftover claim that the peer asked for its
+/// own name.
+#[test]
+fn no_pairing_pin_notice_constant_still_says_asked_for_itself() {
+    for (name, constant) in [
+        ("PAIRING_PINNED_SELF_ASSERTED", PAIRING_PINNED_SELF_ASSERTED),
+        (
+            "PAIRING_PINNED_INVITE_ASSIGNED",
+            PAIRING_PINNED_INVITE_ASSIGNED,
+        ),
+        ("PAIRING_ACL_ROW_ABSENT", PAIRING_ACL_ROW_ABSENT),
+        ("PAIRING_ACL_ROW_PRESENT", PAIRING_ACL_ROW_PRESENT),
+    ] {
+        assert!(
+            !constant.contains("asked for itself"),
+            "{name} must not say a peer \"asked for itself\": {constant:?}"
+        );
+    }
+}
+
 #[test]
 fn cli_md_section_6_11_quotes_the_pairing_pin_notice_constants_verbatim() {
     let cli_md = read_doc("docs/CLI.md");
     let section = heading_section_slice(&cli_md, "### 6.11 Identity와 trust");
     for fragment in [
         PAIRING_PINNED_SELF_ASSERTED,
+        PAIRING_PINNED_INVITE_ASSIGNED,
         PAIRING_ACL_ROW_ABSENT,
         PAIRING_ACL_ROW_PRESENT,
     ] {
@@ -139,6 +165,7 @@ fn cli_md_section_6_13_quotes_the_pairing_pin_notice_constants_verbatim() {
     );
     for fragment in [
         PAIRING_PINNED_SELF_ASSERTED,
+        PAIRING_PINNED_INVITE_ASSIGNED,
         PAIRING_ACL_ROW_ABSENT,
         PAIRING_ACL_ROW_PRESENT,
     ] {
@@ -233,8 +260,9 @@ fn three_part_rows() -> Vec<ThreePartRow> {
     );
     let bind_message = bind_unavailable(&bind, &err).message;
 
-    let pairing_notice_row_absent = pairing_pin_notice("probe-device", false);
-    let pairing_notice_row_present = pairing_pin_notice("probe-device", true);
+    let pairing_notice_row_absent = pairing_pin_notice("probe-device", false, false);
+    let pairing_notice_row_present = pairing_pin_notice("probe-device", true, false);
+    let pairing_notice_invite_assigned = pairing_pin_notice("probe-device", false, true);
 
     vec![
         ThreePartRow {
@@ -268,7 +296,8 @@ fn three_part_rows() -> Vec<ThreePartRow> {
             label: "T3",
             observation: ThreePartSlot::new(
                 PAIRING_PINNED_SELF_ASSERTED,
-                "pinned a new peer under the name it asked for itself:",
+                "pinned a new peer under the name it sent for itself because the invite \
+                 carried no --as:",
             ),
             impact: ThreePartSlot::new(
                 PAIRING_ACL_ROW_ABSENT,
@@ -287,7 +316,8 @@ fn three_part_rows() -> Vec<ThreePartRow> {
             label: "T3-present",
             observation: ThreePartSlot::new(
                 PAIRING_PINNED_SELF_ASSERTED,
-                "pinned a new peer under the name it asked for itself:",
+                "pinned a new peer under the name it sent for itself because the invite \
+                 carried no --as:",
             ),
             impact: ThreePartSlot::new(
                 PAIRING_ACL_ROW_PRESENT,
@@ -307,6 +337,30 @@ fn three_part_rows() -> Vec<ThreePartRow> {
             ),
         },
         ThreePartRow {
+            label: "T3-invite-assigned",
+            // Same wording family as T3 (the `pairing_pin_notice`
+            // "observation, [[acl]] presence, next command" shape), just
+            // the `--as`-assigned branch (`PAIRING_PINNED_INVITE_ASSIGNED`)
+            // instead of the self-asserted one — kept as a distinct row
+            // because it is the branch `docs/CLI.md` §6.11's `--as`
+            // paragraphs describe as never saying the peer asked for its
+            // own name, not folded into T3 itself, so a mutation
+            // collapsing the two branches back onto one wording goes red
+            // here.
+            observation: ThreePartSlot::new(
+                PAIRING_PINNED_INVITE_ASSIGNED,
+                "pinned a new peer under the name the invite assigned with --as:",
+            ),
+            impact: ThreePartSlot::new(
+                PAIRING_ACL_ROW_ABSENT,
+                "it can authenticate but every action is still denied",
+            ),
+            next_command: ThreePartSlot::new(
+                pairing_notice_invite_assigned,
+                "qsh acl check --principal 'device:probe-device' --action session.open",
+            ),
+        },
+        ThreePartRow {
             label: "T4",
             observation: ThreePartSlot::new(
                 PAIRING_INVITE_REPLAY_NOTICE,
@@ -318,7 +372,7 @@ fn three_part_rows() -> Vec<ThreePartRow> {
             ),
             next_command: ThreePartSlot::new(
                 PAIRING_INVITE_REPLAY_NOTICE,
-                "Mint a fresh one with `qsh trust invite`",
+                "Mint a fresh one with `qsh pair invite`",
             ),
         },
         ThreePartRow {
@@ -387,13 +441,17 @@ fn three_part_rows() -> Vec<ThreePartRow> {
 
 #[test]
 fn each_failure_wording_has_observation_impact_and_next_command() {
-    // Eight rows for seven topics: T3 gets two (absent/present `[[acl]]`
-    // row branches).
+    // Nine rows for seven topics: T3 gets three — the self-asserted
+    // branch's absent/present `[[acl]]` row split, plus the invite-
+    // assigned branch (`PAIRING_PINNED_INVITE_ASSIGNED`). The two
+    // observation branches share one wording family (both are
+    // `pairing_pin_notice`'s "observation, [[acl]] presence, next
+    // command" shape) and are counted as one topic here rather than two.
     let rows = three_part_rows();
     assert_eq!(
         rows.len(),
-        8,
-        "this table covers T1-T7 (T3 split into its absent/present rows)"
+        9,
+        "this table covers T1-T7 (T3 split into its absent/present/invite-assigned rows)"
     );
     for row in &rows {
         row.observation.assert_holds(row.label, "observation");

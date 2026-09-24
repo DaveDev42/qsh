@@ -180,6 +180,91 @@ impl Ops {
         })
     }
 
+    /// `trust.rename` — rename a pinned peer without unpinning it
+    /// (`docs/CLI.md` §6.11, ADR-0012 결정 7). No ACL surface: this is a
+    /// local operator op against the operator's own `trust.toml`, not an
+    /// authorization decision, so `acl::Action` gains no variant for it
+    /// (`AuditRecord::local_op`'s own doc).
+    ///
+    /// `new` is validated first (§4's `validate_peer_label`), then `old !=
+    /// new` — both `INVALID_ARGUMENT`, before the store is even opened.
+    /// The remaining cycle is `TrustStore::lock` → `load` → `rename` →
+    /// **audit record** → `save`, all under the one lock: a crash between
+    /// `rename` and `save` is invisible (the in-memory mutation is
+    /// discarded with the process), but a crash between the audit write
+    /// and `save` must never happen with the audit record durable and the
+    /// rename lost — hence audit *before* save, matching `AuditRecord::
+    /// local_op`'s "no record, no rename" contract. Lock order: `trust.
+    /// toml.lock` first (already held for the whole call), then whatever
+    /// lock `sink.record` takes internally ([`FileAuditSink`]'s own
+    /// `Mutex`) — never the other way around, so this can never deadlock
+    /// against a concurrent audit write started from elsewhere.
+    ///
+    /// Errors: `new` failing [`crate::trust::validate_peer_label`] or `old
+    /// == new` is `INVALID_ARGUMENT`; `old` naming no pinned peer is
+    /// `HOST_NOT_FOUND`; `new` colliding with an existing peer or CA label
+    /// is `SESSION_CONFLICT` (`retryable: false` — retrying with the same
+    /// arguments can never succeed); an unreadable `trust.toml` or
+    /// `config.toml` is `CONFIG_ERROR`; a failed audit write is
+    /// `INTERNAL` (`retryable: true`) and leaves `trust.toml` untouched.
+    pub fn trust_rename(&self, req: TrustRenameReq) -> Result<TrustRenameData, OpError> {
+        let new = validate_peer_label_arg(&req.new)?;
+        if req.old == new {
+            return Err(
+                OpError::new(ErrorCode::InvalidArgument, "old and new names must differ")
+                    .with_retryable(false),
+            );
+        }
+
+        let path = self.paths.trust_file();
+        // Whole load→mutate→audit→save under lock — same discipline as
+        // every other trust-store write (`TrustStore::lock`'s own doc),
+        // extended here to cover the audit write too (this fn's own doc).
+        let _lock = TrustStore::lock(&path)?;
+        let mut store = TrustStore::load(&path)?;
+        let peer = store.rename(&req.old, &new).map_err(|err| match err {
+            crate::trust::RenameError::OldMissing => OpError::new(
+                ErrorCode::HostNotFound,
+                format!("{:?} is not a pinned peer", req.old),
+            )
+            .with_retryable(false),
+            crate::trust::RenameError::NewTaken => OpError::new(
+                ErrorCode::SessionConflict,
+                format!(
+                    "{new:?} already names a pinned peer or a CA root; \
+                     remove or rename that entry first"
+                ),
+            )
+            .with_retryable(false),
+        })?;
+
+        let record = AuditRecord::local_op(
+            "trust.rename",
+            Principal::Device(req.old.clone()).to_string(),
+            Principal::Device(new.clone()).to_string(),
+        );
+        let sink: Arc<dyn AuditSink> = match &self.audit {
+            Some(sink) => Arc::clone(sink),
+            None => Arc::new(FileAuditSink::new(
+                Config::load(&self.paths)?.audit.path(&self.paths),
+            )),
+        };
+        sink.record(&record).map_err(|err| {
+            OpError::new(
+                ErrorCode::Internal,
+                format!("audit record could not be written; trust.toml left unchanged: {err}"),
+            )
+            .with_retryable(true)
+        })?;
+
+        store.save(&path)?;
+
+        Ok(TrustRenameData {
+            peer,
+            old_name: req.old,
+        })
+    }
+
     /// `trust.invite` — mint a one-time pairing invite (ADR-0002, `PLAN.md`
     /// M7 Step 4).
     ///
@@ -192,7 +277,12 @@ impl Ops {
     /// reload, invariant #6). `accept_command` is the exact command line to
     /// hand the other party — the code alone carries no address (`PLAN.md`
     /// M7 §4.1 #7), so this is the only place that pairing is complete.
-    pub fn trust_invite(&self, _req: TrustInviteReq) -> Result<TrustInviteData, OpError> {
+    pub fn trust_invite(&self, req: TrustInviteReq) -> Result<TrustInviteData, OpError> {
+        let assigned_name = req
+            .as_name
+            .map(|name| validate_peer_label_arg(&name))
+            .transpose()?;
+
         let secret = crate::trust::pairing::generate_secret();
         let now = std::time::SystemTime::now();
         let path = self.paths.invites_file();
@@ -203,12 +293,13 @@ impl Ops {
         let _lock = crate::trust::pairing::InviteStore::lock(&path)?;
         let mut store = crate::trust::pairing::InviteStore::load(&path)?;
         store.prune(now);
-        let (_created_at, expires_at) = store.add(secret.as_slice(), now);
+        let (_created_at, expires_at) = store.add(secret.as_slice(), now, assigned_name.clone());
         store.save(&path)?;
 
         let code = qsh_proto::pairing::encode_invite_code(&secret);
         Ok(TrustInviteData {
-            accept_command: format!("qsh trust accept <address> {code}"),
+            assigned_name,
+            accept_command: format!("qsh pair accept <address> {code}"),
             code,
             expires_at,
         })
@@ -282,6 +373,13 @@ impl Ops {
     /// **Runtime caveat:** loads the identity synchronously — call it
     /// outside a tokio runtime (see [`Self::load_identity`]).
     pub fn trust_accept(&self, req: TrustAcceptReq) -> Result<TrustAcceptData, OpError> {
+        // Validated before any dial (fail fast, ADR-0012 결정 6) — a bad
+        // `--as` must never spend a network round trip first.
+        let as_name = req
+            .as_name
+            .map(|name| validate_peer_label_arg(&name))
+            .transpose()?;
+
         let secret = qsh_proto::pairing::parse_invite_code(&req.code).map_err(|err| {
             OpError::new(ErrorCode::InvalidArgument, err.to_string()).with_retryable(false)
         })?;
@@ -345,6 +443,22 @@ impl Ops {
         // rewrite, never a network wait.
         let _lock = TrustStore::lock(&path)?;
         let mut store = TrustStore::load(&path)?;
+        // The effective name: `--as` when given, else the responder's own
+        // self-reported name (ADR-0012 결정 6) — used at both the pin site
+        // and in the collision message below, never the self-asserted
+        // value alone once `--as` overrides it. Re-validated here even
+        // when it is the self-asserted name (already checked pre-dial
+        // when it came from `--as`): the wire-level guard
+        // (`crate::pairing::accept`'s `reject_control_chars`) only ran
+        // `validate_device_name`, not the `/` rule, so this is the one
+        // place a self-asserted name with `/` is caught — fail-closed,
+        // same `INVALID_ARGUMENT` outcome the wire path's own
+        // `InvalidDeviceName` mapping produces, and changes nothing for
+        // qsh-generated `device_id`s.
+        let effective_name = match as_name {
+            Some(name) => name,
+            None => validate_peer_label_arg(&success.pinned_name)?,
+        };
         // Report F-6: pin with the address this exchange just dialed
         // successfully (`req.address`, the same meaning `trust add
         // --address` gives it) rather than `None` — otherwise `qsh exec
@@ -353,7 +467,7 @@ impl Ops {
         // dial-address candidate), directly undercutting ADR-0002's SC1
         // (5-minute pairing to first connection).
         let (peer, created, updated) = store.add_peer(
-            success.peer_device_name.clone(),
+            effective_name.clone(),
             Some(address.clone()),
             observed_fp,
             now_rfc3339(),
@@ -362,9 +476,8 @@ impl Ops {
             return Err(OpError::new(
                 ErrorCode::SessionConflict,
                 format!(
-                    "paired with {}, but {:?} is already pinned locally under a different \
-                     identity; rename or remove the conflicting entry and retry",
-                    address, success.peer_device_name
+                    "paired with {address}, but {effective_name:?} is already pinned locally \
+                     under a different identity; rename or remove the conflicting entry and retry"
                 ),
             )
             .with_retryable(false));
@@ -378,6 +491,19 @@ impl Ops {
             updated: (!created).then_some(updated),
         })
     }
+}
+
+/// Validate an operator-supplied trust-store label (`--as` on `pair
+/// invite`/`pair accept`, `trust rename`'s `new`) against the one shared
+/// rule (`crate::trust::validate_peer_label`, ADR-0012 결정 6), mapping a
+/// failure to `INVALID_ARGUMENT`. Never echoes `label` itself — only which
+/// rule it broke (`crate::trust::PeerLabelError`'s own `Display`).
+fn validate_peer_label_arg(label: &str) -> Result<String, OpError> {
+    crate::trust::validate_peer_label(label)
+        .map(|()| label.to_string())
+        .map_err(|err| {
+            OpError::new(ErrorCode::InvalidArgument, err.to_string()).with_retryable(false)
+        })
 }
 
 /// Map a [`crate::identity::pem::CertPemError`] to the `INVALID_ARGUMENT`

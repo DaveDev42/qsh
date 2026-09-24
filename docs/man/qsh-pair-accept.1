@@ -1,10 +1,10 @@
 .ie \n(.g .ds Aq \(aq
 .el .ds Aq '
-.TH qsh-trust-accept 1  "accept 0.2.0" 
+.TH qsh-pair-accept 1  "accept 0.2.0" 
 .SH NAME
-qsh\-trust\-accept \- Dial `address`, redeem `code` against its invite, and — on a successful mutual proof — pin the peer exactly as `trust add` would (ADR\-0002, `docs/CLI.md` §6.11)
+qsh\-pair\-accept \- Dial `address`, redeem `code` against its invite, and — on a successful mutual proof — pin the peer exactly as `trust add` would (ADR\-0002, `docs/CLI.md` §6.11)
 .SH SYNOPSIS
-\fBqsh trust accept\fR [\fB\-\-code\-stdin\fR] [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fIADDRESS\fR> [\fICODE\fR] 
+\fBqsh pair accept\fR [\fB\-\-code\-stdin\fR] [\fB\-\-json\fR] [\fB\-\-as\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fIADDRESS\fR> [\fICODE\fR] 
 .SH DESCRIPTION
 Dial `address`, redeem `code` against its invite, and — on a successful mutual proof — pin the peer exactly as `trust add` would (ADR\-0002, `docs/CLI.md` §6.11)
 .SH OPTIONS
@@ -16,6 +16,9 @@ If standard input is a terminal, echo is suppressed the same way it is for the p
 .TP
 \fB\-\-json\fR
 Emit a single `qsh.cli/v1` JSON envelope on stdout instead of human\-readable text
+.TP
+\fB\-\-as\fR \fI<NAME>\fR
+Pin the redeemed peer under this name instead of its self\- asserted one (`docs/CLI.md` §6.11, ADR\-0012 decision 6). When omitted in human mode, the pinned self\-asserted name is printed after the pin succeeds, along with a suggested label derived from `address` when it has a hostname (never for an IP literal)
 .TP
 \fB\-\-jsonl\fR
 Emit newline\-delimited JSON on stdout (reserved for streaming commands; non\-streaming commands emit a single line, same as `\-\-json`)
@@ -33,13 +36,13 @@ Print help (see a summary with \*(Aq\-h\*(Aq)
 Print version
 .TP
 <\fIADDRESS\fR>
-`host:port` of the device that printed `code` via `trust invite`. With no `:port`, port 4433 is assumed
+`host:port` of the device that printed `code` via `pair invite`. With no `:port`, port 4433 is assumed
 .TP
 [\fICODE\fR]
 The invite code, as printed (case\-insensitive, hyphens ignored).
 
 Optional. With no code here and no `\-\-code\-stdin`, a terminal is prompted for it with echo off, and `\-\-json`/`\-\-jsonl` returns INVALID_ARGUMENT instead of prompting.
 
-A fingerprint is a public value, so `trust add \-\-fingerprint` left in shell history is not a risk. A code left in history has no reuse value either: an invite is single\-use and stops being redeemable 10 minutes after `trust invite` mints it.
+A fingerprint is a public value, so `trust add \-\-fingerprint` left in shell history is not a risk. A code left in history has no reuse value either: an invite is single\-use and stops being redeemable 10 minutes after `pair invite` mints it.
 .SH VERSION
 v0.2.0
