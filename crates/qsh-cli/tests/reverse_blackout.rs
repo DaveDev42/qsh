@@ -35,6 +35,21 @@
 //! multi-attempt recovery actually produces rather than copied verbatim;
 //! see the doc comment on the test function itself for why.
 //!
+//! **A second, longer round lives in this same file.**
+//! [`a_real_30_minute_blackout_is_resumed_within_the_ttl`] is the
+//! release-gate evidence for `docs/PRD.md` §13's "30분 단절 후에도 TTL 내
+//! 세션 복구" row, gated behind its own `QSH_ACCEPTANCE_LONG` (never
+//! `QSH_ACCEPTANCE_SLOW` — that gate is on `ci.yml`'s PR-required
+//! `acceptance` job) and run to completion only by
+//! `.github/workflows/long.yml`'s `workflow_dispatch` job. It reuses this
+//! file's harness plumbing but asserts a different thing: not that the
+//! pre-existing attach survives the whole outage (the shipped
+//! `RecoveryConfig::default()` cannot make it do that over 1800 s — see
+//! that function's own doc), but that the *session* is still there, inside
+//! its resume TTL, once a fresh `session.attach` is made. The "Step 8의
+//! 60초 수용 게이트만 벽시계를 쓰며" wall-clock exception above therefore
+//! covers both rounds in this file, not only the 60-second one.
+//!
 //! `#![cfg(unix)]`: localctl (UDS) and PTY sessions are both unix-only,
 //! same gating as every other localctl/reverse test in the tree.
 #![cfg(unix)]
@@ -155,22 +170,31 @@ fn fast_backoff() -> Config {
 }
 
 // ---------------------------------------------------------------------------
-// QSH_ACCEPTANCE_SLOW gate — mirrors `tui_expect.rs`'s own
-// `QSH_ACCEPTANCE_STRICT`/`skip` convention, simplified to a single binary
-// switch: there is exactly one item behind it (this file), not a set of
+// QSH_ACCEPTANCE_SLOW / QSH_ACCEPTANCE_LONG gates — mirror `tui_expect.rs`'s
+// own `QSH_ACCEPTANCE_STRICT`/`skip` convention, simplified to a single
+// binary switch per gate: there is exactly one item behind each (the 60 s
+// function below, and the 30-minute one further down), not a set of
 // per-binary items to enumerate.
 // ---------------------------------------------------------------------------
 
-/// Whether this run asked for the slow acceptance set. Unset, empty, or
-/// `"0"` all mean "no" — the same "off" vocabulary
-/// `tui_expect.rs::required_by_strict` uses for `QSH_ACCEPTANCE_STRICT`.
-fn slow_acceptance_requested() -> bool {
-    let Some(value) = std::env::var_os("QSH_ACCEPTANCE_SLOW") else {
+/// Whether `name` is set to something other than unset, empty, or `"0"` —
+/// the same "off" vocabulary `tui_expect.rs::required_by_strict` uses for
+/// `QSH_ACCEPTANCE_STRICT` and `tunnel_echo_under_load.rs::env_flag` uses
+/// for its own acceptance gates. Shared by [`slow_acceptance_requested`]
+/// and [`long_acceptance_requested`] so the two gates cannot drift into
+/// different "on" spellings.
+fn env_on(name: &str) -> bool {
+    let Some(value) = std::env::var_os(name) else {
         return false;
     };
     let value = value.to_string_lossy().to_lowercase();
-    let value = value.trim();
+    let value = value.trim().to_string();
     !(value.is_empty() || value == "0")
+}
+
+/// Whether this run asked for the slow acceptance set.
+fn slow_acceptance_requested() -> bool {
+    env_on("QSH_ACCEPTANCE_SLOW")
 }
 
 /// Announce the skip loudly enough to find in a CI log — `tui_expect.rs`'s
@@ -183,6 +207,100 @@ fn skip() {
         "SKIP: the 60-second reverse blackout gate requires QSH_ACCEPTANCE_SLOW=1 (unset on \
          this run) — `.github/workflows/ci.yml`'s acceptance job sets it"
     );
+}
+
+/// Whether this run asked for the long (30-minute) acceptance round.
+/// Deliberately *not* `QSH_ACCEPTANCE_SLOW`: that variable is set by
+/// `.github/workflows/ci.yml`'s `acceptance` job, which is on `ci-ok`'s
+/// `needs` list, and a 30-minute round has no business on the PR-required
+/// path (`docs/design/testing.md`'s CI discipline: absolute numbers and
+/// long wall clocks belong in a non-blocking job).
+fn long_acceptance_requested() -> bool {
+    env_on("QSH_ACCEPTANCE_LONG")
+}
+
+/// Announce the skip for the long round — the `QSH_ACCEPTANCE_LONG` twin
+/// of [`skip`]. Only `.github/workflows/long.yml`'s `workflow_dispatch`
+/// job ever sets the gate, so this is what a plain `cargo nextest run
+/// --workspace` (or the 60-second `acceptance` job above) prints instead
+/// of spending half an hour.
+fn skip_long() {
+    eprintln!(
+        "SKIP: the 30-minute reverse blackout gate requires QSH_ACCEPTANCE_LONG=1 (unset on \
+         this run) — `.github/workflows/long.yml`'s workflow_dispatch job sets it"
+    );
+}
+
+/// `docs/PRD.md` §13's "30분 단절 후에도 TTL 내 세션 복구" — the literal
+/// 30 minutes, in seconds.
+const LONG_BLACKOUT_DEFAULT_SECS: u64 = 1_800;
+
+/// Length of the long round's blackout. `QSH_BLACKOUT_SECS` overrides it
+/// so the wiring can be smoked in a minute instead of half an hour, and so
+/// `long.yml`'s dispatch input can shorten a dry run; unset means the PRD
+/// row's own 1800 s. Values at or below `IDLE_TIMEOUT` are refused rather
+/// than silently accepted — a "blackout" the QUIC connection can sit
+/// through proves nothing about resume — by the test function's own
+/// assertion ① below, not by this function, which only ever parses.
+///
+/// A value that is *set but not a plain non-negative integer* panics
+/// rather than silently falling back to [`LONG_BLACKOUT_DEFAULT_SECS`] —
+/// `long.yml`'s `blackout_secs` dispatch input is free text, and a typo
+/// there (`"30m"`, `"1,800"`) should not quietly turn an intended smoke
+/// run into the full 1800 s round.
+fn long_blackout() -> Duration {
+    let secs = match std::env::var("QSH_BLACKOUT_SECS") {
+        Err(std::env::VarError::NotPresent) => LONG_BLACKOUT_DEFAULT_SECS,
+        Err(err) => panic!("QSH_BLACKOUT_SECS is set but not readable ({err})"),
+        Ok(raw) => raw.trim().parse::<u64>().unwrap_or_else(|err| {
+            panic!(
+                "QSH_BLACKOUT_SECS={raw:?} is set but is not a plain number of seconds ({err}) \
+                 — fix the dispatch input rather than let this silently fall back to the \
+                 {LONG_BLACKOUT_DEFAULT_SECS}s default"
+            )
+        }),
+    };
+    Duration::from_secs(secs)
+}
+
+/// Total wall-clock budget the shipped `RecoveryConfig::default()` gives a
+/// single live attach to recover **on its own**, from the moment the
+/// blackout starts. Two parts:
+///
+/// - detection: on the reverse leg [`spawn_watchdog`] never fires (there is
+///   no `Connection` this attach owns alone to probe — `RecoveryLink`'s own
+///   doc, `crates/qsh-core/src/ops/session/drive.rs`), so the leg's death
+///   is only ever discovered when `read_leg`'s stream read itself errors —
+///   which, under a total blackout, is quinn's own [`IDLE_TIMEOUT`] closing
+///   the connection, not an instant signal at the moment the wire goes
+///   silent;
+/// - recovery: `attempts` sequential windows of `registration_wait +
+///   REDIAL_DEADLINE` each, plus the (short, fixed) inter-attempt backoff
+///   (`RecoveryConfig::backoff`, private to `ops/session.rs`: 0, 200 ms,
+///   then 800 ms per further attempt — pinned here to `attempts == 3`;
+///   revisit the two literal millisecond terms below if the shipped
+///   default ever changes attempt count).
+///
+/// `docs/PRD.md` §13's literal 1800 s default blackout is close to 8x this
+/// combined budget (`qsh_proto::local::LOCAL_WAIT_MAX`,
+/// `RecoveryConfig::default()`'s `attempts`, `REDIAL_DEADLINE`, and
+/// `qsh_transport::endpoint::MAX_IDLE_TIMEOUT`), so the pre-existing attach
+/// in [`a_real_30_minute_blackout_is_resumed_within_the_ttl`] is guaranteed
+/// to exhaust it there; a short `QSH_BLACKOUT_SECS` smoke value can
+/// legitimately fall *inside* this budget instead, in which case that same
+/// attach recovers on its own — exactly
+/// [`a_real_60_second_blackout_survives_and_resumes_the_same_session`]'s
+/// own mechanism, not a defect in the long round. The long test's own
+/// assertion ③ is only meaningful, and only checked strictly, above this
+/// budget.
+fn exhaustion_budget() -> Duration {
+    let cfg = RecoveryConfig::default();
+    let per_attempt = cfg.registration_wait + REDIAL_DEADLINE;
+    let attempts = cfg.attempts.max(1);
+    IDLE_TIMEOUT
+        + per_attempt.saturating_mul(attempts)
+        + Duration::from_millis(200)
+        + Duration::from_millis(800)
 }
 
 // ---------------------------------------------------------------------------
@@ -716,6 +834,368 @@ async fn a_real_60_second_blackout_survives_and_resumes_the_same_session() {
              budget={budget:?}",
             records.len(),
             last.time_to_recovery_ms
+        );
+
+        localctl.shutdown().await;
+        let _ = shutdown_tx.send(());
+    };
+
+    let ((), result) = tokio::join!(scenario, run_fut);
+    result.unwrap_or_else(|err| {
+        panic!(
+            "shutdown must resolve run_target_through_chaos cleanly even after a real blackout: \
+             {err:?} — {ctx}"
+        )
+    });
+
+    harness.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// the 30-minute round (`docs/PRD.md` §13 — "30분 단절 후에도 TTL 내 세션
+// 복구"), gated behind `QSH_ACCEPTANCE_LONG` rather than the round above's
+// `QSH_ACCEPTANCE_SLOW`.
+// ---------------------------------------------------------------------------
+
+/// Read the resume-credential store's current file bytes, for a
+/// before/after comparison only — never parsed, never printed. `CLAUDE.md`
+/// forbids logging key material; this function hands the caller raw bytes
+/// to `==`-compare, and [`a_real_30_minute_blackout_is_resumed_within_the_ttl`]
+/// is the only caller, which does exactly that and nothing else with them.
+fn resume_bytes(ops: &Ops) -> Option<Vec<u8>> {
+    std::fs::read(qsh_core::resume::ResumeStore::new(ops.paths()).path()).ok()
+}
+
+/// `docs/PRD.md` §13's "30분 단절 후에도 TTL 내 세션 복구" row, gated
+/// behind [`long_acceptance_requested`] (`QSH_ACCEPTANCE_LONG`) rather
+/// than the round above's `QSH_ACCEPTANCE_SLOW` — that variable is on
+/// `ci.yml`'s `acceptance` job, which `ci-ok` requires on every PR, and a
+/// 30-minute round has no business there. `.github/workflows/long.yml`'s
+/// `workflow_dispatch` job is the only place this runs to completion at
+/// the PRD row's own 1800 s; a developer's box (and every other CI job)
+/// skips it.
+///
+/// The 60-second scenario above cannot simply be replayed at 30x the
+/// length. The shipped `RecoveryConfig::default()` gives a single live
+/// attach only [`exhaustion_budget`] (~232 s) before it gives up and ends
+/// with a typed error (`crates/qsh-core/src/ops/session/tests.rs`'s
+/// `reverse_leg_link_death_with_recovery_exhausted_ends_the_attach_with_a_typed_error_never_a_panic_or_hang`
+/// pins that contract) — nowhere near the PRD row's literal 1800 s. So
+/// this test does not expect the *same* attach to survive the whole
+/// outage; it expects what the PRD row actually promises — the *session*
+/// to still be there, inside its resume TTL, once someone reattaches:
+///
+/// 1. Open a shell through a live reverse registration, read `BEFORE1`
+///    (identical setup to the 60-second scenario above).
+/// 2. Blackhole the wire for [`long_blackout`] (default 1800 s,
+///    `QSH_BLACKOUT_SECS` overrides it for a wiring smoke run).
+/// 3. The pre-existing attach is left alone — not detached, not polled
+///    for further events. Its own background recovery loop
+///    (`drive_attach`, `crates/qsh-core/src/ops/session.rs`) either
+///    exhausts the shipped budget (the real 1800 s case) or, for a short
+///    `QSH_BLACKOUT_SECS` smoke value inside [`exhaustion_budget`],
+///    recovers on its own — exactly
+///    [`a_real_60_second_blackout_survives_and_resumes_the_same_session`]'s
+///    own mechanism. Either way that is an observation, not something
+///    this scenario forces; assertion ③ below is checked strictly only
+///    above that budget.
+/// 4. Once the target has re-registered (`generation` advances past
+///    baseline), open a **fresh** `session.attach` on the same
+///    `session_ref` — the assertion this test exists to make.
+/// 5. The fresh attach must replay `BEFORE1` with zero `Gap`s (the ring
+///    survived the outage), and a freshly typed `AFTER1` must round-trip
+///    (the shell is alive, not a husk).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_real_30_minute_blackout_is_resumed_within_the_ttl() {
+    if !long_acceptance_requested() {
+        skip_long();
+        return;
+    }
+    // ① the blackout must outlast IDLE_TIMEOUT, or the QUIC connection is
+    // only maybe dead by the time it lifts — same reasoning as the
+    // 60-second round's own assertion, restated against the long knob.
+    assert!(
+        long_blackout() > IDLE_TIMEOUT,
+        "the PRD row's own reasoning requires the blackout ({:?}) to exceed IDLE_TIMEOUT \
+         ({IDLE_TIMEOUT:?}) so the QUIC connection is guaranteed dead, not merely likely dead \
+         — QSH_BLACKOUT_SECS must be set above {}",
+        long_blackout(),
+        IDLE_TIMEOUT.as_secs()
+    );
+    // Built before assertion ② so that assertion can compare against the
+    // resume TTL this scenario's own target broker actually runs with
+    // (`BrokerConfig::from_serve`, `crates/qsh-core/src/serve.rs`'s
+    // `host_runtime`), not a bare constant that only happens to agree with
+    // it today because `fast_backoff()` leaves `[serve]` at its defaults.
+    let target_config = fast_backoff();
+    // ② the blackout must stay inside the resume TTL, or this is no
+    // longer testing "TTL 내" at all.
+    let resume_ttl = target_config.serve.resume_ttl();
+    assert!(
+        long_blackout() < resume_ttl,
+        "the blackout ({:?}) must stay under the resume TTL the target broker is actually \
+         configured with ({resume_ttl:?}) — otherwise the session itself may already have been \
+         reaped before the reattach below",
+        long_blackout()
+    );
+    capture_recovery_records();
+
+    let target = make_identity();
+    let harness =
+        ReverseHarness::start_with(Arc::new(AllowAllPinned), false, pin(&target, HOST_ALIAS)).await;
+
+    let chaos = ChaosProxy::start(harness.addr, ChaosPolicy::seeded(0x1800_ACC0))
+        .await
+        .expect("bind chaos proxy in front of the controller");
+    let ctx = format!(
+        "chaos seed={:#x} front={} controller={}",
+        chaos.seed(),
+        chaos.addr(),
+        harness.addr
+    );
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+
+    let run_fut = harness.run_target_through_chaos(
+        &target,
+        "device-id",
+        "controller",
+        None,
+        &target_config,
+        &chaos,
+        |_runtime| {},
+        async {
+            let _ = shutdown_rx.await;
+        },
+    );
+
+    let scenario = async {
+        let first = wait_for(Duration::from_secs(20), || {
+            harness.listen.registry().get(HOST_ALIAS)
+        })
+        .await;
+        let baseline_generation = first.generation;
+
+        let (_ops_dir, ops, _cli_fp) = fresh_ops().await;
+        let localctl = harness.attach_localctl(ops.paths()).await;
+        let ops = ops.with_recovery(RecoveryConfig {
+            // Same reasoning as the 60-second scenario's identical
+            // struct-update: migration does not exist on this leg
+            // (`docs/design/protocol.md` §11-4), and every other field
+            // stays the shipped default (`attempts: 3`,
+            // `registration_wait: LOCAL_WAIT_MAX`) — this scenario
+            // measures the shipped budget, not a config the product
+            // never ships.
+            migration: false,
+            ..RecoveryConfig::default()
+        });
+
+        let (blackout_tx, blackout_rx) = tokio::sync::oneshot::channel::<()>();
+        let (started_tx, started_rx) = std::sync::mpsc::channel::<Instant>();
+        let (reattach_ready_tx, reattach_ready_rx) = std::sync::mpsc::channel::<()>();
+        let ctx_thread = ctx.clone();
+
+        let scenario_handle = tokio::task::spawn_blocking(move || {
+            let session_ref = open_shell(&ops);
+            let mut stream1 = attach(&ops, &session_ref);
+            let mut seen1 = Delivered::default();
+
+            stream1
+                .write(b"printf 'BEFORE%s\\n' 1\n".to_vec())
+                .expect("write");
+            read_until(&mut stream1, &mut seen1, "BEFORE1", &ctx_thread);
+
+            // ---- signal the async side: start the real blackout now.
+            blackout_tx.send(()).ok();
+            let started = started_rx
+                .recv()
+                .expect("the async side must report when the blackout started");
+
+            // The pre-existing attach is deliberately left alone from
+            // here on (step 3 in this function's own doc): `stream1` is
+            // kept alive — not dropped, not explicitly detached — so its
+            // background recovery loop keeps running exactly as it would
+            // for a real interactive session nobody is looking at. It is
+            // simply never read from again; whatever `records_for` shows
+            // for it later is an observation, not a forced outcome.
+            let _stream1 = stream1;
+
+            reattach_ready_rx
+                .recv()
+                .expect("the async side must report the target's re-registration");
+
+            // ---- the fresh attach: the assertion this test exists to
+            // make. `session_attach` always takes the stored resume
+            // token and, on success, persists a fresh successor
+            // (`ops/session.rs`'s `session_attach`), so a bytes snapshot
+            // just before and just after brackets the rotation.
+            let before_bytes = resume_bytes(&ops);
+            let mut stream2 = attach(&ops, &session_ref);
+            let mut seen2 = Delivered::default();
+            read_until(&mut stream2, &mut seen2, "BEFORE1", &ctx_thread);
+            stream2
+                .write(b"printf 'AFTER%s\\n' 1\n".to_vec())
+                .expect("write");
+            read_until(&mut stream2, &mut seen2, "AFTER1", &ctx_thread);
+            let elapsed = started.elapsed();
+            let after_bytes = resume_bytes(&ops);
+
+            let records = records_for(&session_ref);
+            stream2.close();
+            (
+                session_ref,
+                seen2,
+                elapsed,
+                records,
+                before_bytes,
+                after_bytes,
+            )
+        });
+
+        blackout_rx
+            .await
+            .expect("the blocking scenario must reach BEFORE1 before the blackout starts");
+        let started = Instant::now();
+        chaos.blackhole(long_blackout()).await;
+        started_tx.send(started).ok();
+
+        // Own deadline: the mandatory blackout itself, plus one worst-case
+        // dial attempt in flight when it lifts, the 2 s resume ceiling,
+        // and generous scheduling slack — the same shape as the
+        // 60-second round's `recovery_budget`, sized for this round's own
+        // (knob-controlled) blackout instead of the fixed 60 s constant.
+        // Wider than a single `DIAL_TIMEOUT`/`SCHEDULING_SLACK` on both
+        // budgets below: this round runs once, on a 2-vCPU hosted runner,
+        // and a miss costs a full re-dispatch of the whole round rather
+        // than a quick local rerun — worth the extra headroom against the
+        // job's own 60-minute ceiling (`long.yml`'s `timeout-minutes`).
+        let deadline = long_blackout() + DIAL_TIMEOUT * 2 + REDIAL_DEADLINE + SCHEDULING_SLACK * 8;
+        let (after, joined) = tokio::time::timeout(deadline, async {
+            // ⑤ wait for the target's re-registration — the event that
+            // means the outage is over and a fresh attach can succeed.
+            let after = wait_for(
+                long_blackout() + DIAL_TIMEOUT * 2 + SCHEDULING_SLACK * 4,
+                || {
+                    let e = harness.listen.registry().get(HOST_ALIAS)?;
+                    (e.generation > baseline_generation).then_some(e)
+                },
+            )
+            .await;
+            reattach_ready_tx.send(()).ok();
+            let joined = scenario_handle.await;
+            (after, joined)
+        })
+        .await
+        .unwrap_or_else(|_| panic!("blackout scenario did not finish within {deadline:?}"));
+
+        assert!(
+            after.generation > baseline_generation,
+            "generation must advance past {baseline_generation} — {ctx}"
+        );
+
+        let (session_ref, seen, elapsed, records, before_bytes, after_bytes) =
+            joined.unwrap_or_else(|panic| std::panic::resume_unwind(panic.into_panic()));
+
+        // ⑥ the fresh attach targeted the same session_ref — literally
+        // the same `String` reused for both attaches above, plus a shape
+        // sanity check identical to the 60-second round's own.
+        assert!(
+            session_ref.starts_with(&format!("{HOST_ALIAS}/")),
+            "unexpected session_ref shape: {session_ref} — {ctx}"
+        );
+
+        // ⑦ the ring survived the outage: BEFORE1 replayed, zero gaps.
+        seen.assert_tiles_the_stream(&ctx);
+        assert!(
+            seen.text.contains("BEFORE1"),
+            "the fresh attach's replay never delivered BEFORE1 — saw {:?} — {ctx}",
+            seen.text
+        );
+        // ⑧ AFTER1 round-tripped on the fresh attach (a hang or a
+        // `Closed`/`Exit` before it arrived would already have panicked
+        // inside `read_until` above).
+        assert!(
+            seen.text.contains("AFTER1"),
+            "the fresh attach never delivered AFTER1 — saw {:?} — {ctx}",
+            seen.text
+        );
+
+        // ⑨ never recovered early: the blackout must have actually been
+        // total for its full duration.
+        assert!(
+            elapsed >= long_blackout(),
+            "recovery took only {elapsed:?}, under the mandatory {:?} blackout — the path must \
+             not have been fully blocked — {}",
+            long_blackout(),
+            chaos.detail()
+        );
+
+        // ③ the pre-existing attach's own fate — see `exhaustion_budget`'s
+        // doc for why this is only checked strictly above that budget.
+        let budget = exhaustion_budget();
+        let resumed_count = records.iter().filter(|r| r.recovery == "resumed").count();
+        let failed_count = records.iter().filter(|r| r.recovery == "failed").count();
+        if long_blackout() > budget {
+            assert!(
+                failed_count >= 1,
+                "blackout ({:?}) exceeds the shipped recovery budget ({budget:?}) — the \
+                 pre-existing attach should have exhausted every attempt, but no \"failed\" \
+                 record was seen: {records:?} — {}",
+                long_blackout(),
+                chaos.detail()
+            );
+            assert_eq!(
+                resumed_count,
+                0,
+                "blackout ({:?}) exceeds the shipped recovery budget ({budget:?}) — the \
+                 pre-existing attach must not have resumed itself, or the outage was not total \
+                 for the whole blackout: {records:?} — {}",
+                long_blackout(),
+                chaos.detail()
+            );
+        } else {
+            eprintln!(
+                "reverse_blackout_long: note blackout={:?} is inside the shipped recovery \
+                 budget {budget:?} — the pre-existing attach may have recovered on its own \
+                 (resumed={resumed_count} failed={failed_count}); assertion (3) (forced \
+                 exhaustion) is only exercised above that budget",
+                long_blackout()
+            );
+        }
+
+        // ④ migration does not exist on the reverse leg
+        // (`docs/design/protocol.md` §11-4) — true regardless of budget.
+        assert!(
+            records.iter().all(|r| r.recovery != "migrated"),
+            "migration does not exist on the reverse leg (protocol.md §11-4) — {records:?} — {}",
+            chaos.detail()
+        );
+
+        // Credential rotation: guaranteed by `session_attach`'s own
+        // contract (this function's doc), so asserted rather than merely
+        // observed. Bytes only — never the token itself.
+        let rotated = before_bytes != after_bytes;
+        assert!(
+            rotated,
+            "the fresh attach must have rewritten resume.json (a new successor token is \
+             persisted on every successful session.attach) — bytes were identical before and \
+             after — {ctx}"
+        );
+
+        // Computed from `seen`/`rotated` rather than hardcoded — every
+        // field below has already gated an assertion above, so this line
+        // reports what was actually observed, not a claim true only by
+        // construction.
+        let replayed_before_marker = seen.text.contains("BEFORE1");
+        let after_marker = seen.text.contains("AFTER1");
+        let gaps = seen.gaps.len();
+        eprintln!(
+            "reverse_blackout_long: blackout={:?} elapsed={elapsed:?} records={} \
+             resumed_records={resumed_count} reattach=ok \
+             replayed_before_marker={replayed_before_marker} after_marker={after_marker} \
+             credential_rotated={rotated} gaps={gaps}",
+            long_blackout(),
+            records.len()
         );
 
         localctl.shutdown().await;

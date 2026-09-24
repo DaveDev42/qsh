@@ -1,0 +1,101 @@
+name: long
+
+# The 30-minute blackout round: the release-gate evidence for
+# `docs/PRD.md` §13's "30분 단절 후에도 TTL 내 세션 복구" row, which
+# `docs/ROADMAP.md` M10's acceptance criteria carry over from M8 precisely
+# because it is 30x the 60-second gate the `acceptance` job already runs
+# and therefore cannot live on the PR-required path.
+#
+# `workflow_dispatch` only — no `push`, no schedule. `docs/design/
+# testing.md`'s CI discipline puts long wall clocks in a non-blocking job,
+# and this one is not even that: it is a round a person calls once, whose
+# run id is then cited in `docs/ROADMAP.md` M10 as the judgment. A schedule
+# would burn half an hour of runner time per night for a row that only
+# needs to be judged when the resume path changes.
+#
+# Kept out of `load.yml` for a concrete reason on top of that one: that
+# workflow's concurrency group is keyed on `github.ref` with
+# `cancel-in-progress: true`, so a 30-minute dispatch on `main` would be
+# cancelled by the next push to `main`. This workflow never cancels a run
+# in flight.
+#
+# The job also runs the 60-second round (`QSH_ACCEPTANCE_SLOW`) as its own
+# control, in its own step, before the dispatched long round: nextest lists
+# tests within a binary in name order (`a_real_30_minute_...` sorts before
+# `a_real_60_second_...`), so a single invocation of both would run the
+# 30-minute round first and defeat the whole point of a fast-failing
+# control — the two are split into separate steps, each filtered with
+# `-E 'test(...)'` to exactly one test, specifically so the 60-second one
+# runs, and can fail, first: if the reverse harness is broken, that is
+# under two minutes of signal instead of thirty.
+
+on:
+  workflow_dispatch:
+    inputs:
+      blackout_secs:
+        description: "Blackout length in seconds (1800 is the PRD §13 row's own 30 minutes; shorter values smoke the wiring)"
+        required: false
+        default: "1800"
+
+concurrency:
+  group: long-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: short
+
+jobs:
+  blackout:
+    name: blackout
+    runs-on: ubuntu-24.04
+    # The dispatched blackout (up to 1800s) + the 60-second control round
+    # ahead of it + a cold debug build of the `qsh-cli` test tree. Measured
+    # on a warm local box the 60s round alone is ~64s of test after ~50s of
+    # cold compile; budgeted here as ~1 minute for the control round on top
+    # of the build, plus this round's own deadline overhead
+    # (blackout + ~1 minute, `reverse_blackout.rs`'s `deadline`), leaving
+    # roughly 25 minutes of headroom under the 60-minute ceiling without
+    # letting a runaway eat the runner's 6-hour default.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+      # Split into two steps, deliberately, so the 60s control round runs
+      # (and can fail) before the dispatched long round rather than after
+      # it — see this file's header comment for why a single invocation of
+      # both tests would not do that.
+      - name: Blackout round — 60s control
+        run: |
+          set -o pipefail
+          cargo nextest run --profile long -p qsh-cli --test reverse_blackout \
+            -E 'test(a_real_60_second_blackout_survives_and_resumes_the_same_session)' \
+            2>&1 | tee "${{ runner.temp }}/blackout.log"
+        env:
+          QSH_ACCEPTANCE_SLOW: 1
+      - name: Blackout round — dispatched long round
+        run: |
+          set -o pipefail
+          cargo nextest run --profile long -p qsh-cli --test reverse_blackout \
+            -E 'test(a_real_30_minute_blackout_is_resumed_within_the_ttl)' \
+            2>&1 | tee -a "${{ runner.temp }}/blackout.log"
+        env:
+          QSH_ACCEPTANCE_LONG: 1
+          QSH_BLACKOUT_SECS: ${{ inputs.blackout_secs }}
+      # The run id is what `docs/ROADMAP.md` M10 cites, and GitHub's own job
+      # logs age out; the two summary lines the rounds print are the record,
+      # so they are kept as an artifact too — one file, both steps appended
+      # to it in order.
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: blackout-log
+          path: ${{ runner.temp }}/blackout.log
+          if-no-files-found: warn

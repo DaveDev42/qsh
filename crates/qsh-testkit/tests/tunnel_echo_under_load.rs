@@ -109,6 +109,31 @@
 //! doc comment and `docs/design/protocol.md` §12 for the window-side half
 //! of this record.
 //!
+//! **`docs/PRD.md` §13's slow-stream row, and which half of it this
+//! covers.** Two §13 rows rest on this file. The threshold below is a
+//! direct measurement of the first — "PTY 처리 오버헤드 p95: 네트워크 RTT
+//! 외 10ms 미만" — and this test is also the named judgment for the second,
+//! "느린 파일·터널 stream이 PTY stream을 block하지 않아야 함", which
+//! `docs/ROADMAP.md` M10's acceptance criteria carry over from M8 for want
+//! of a file-transfer surface in v1. A `-L` tunnel is the only v1 surface
+//! that can put sustained bulk on the same connection as a PTY, so the
+//! band-stream substitute that carry-over item asks for is this harness,
+//! not a new one: `FloodServer` saturating the forward host→client is what
+//! makes the host's own send scheduler arbitrate `PRIORITY_TUNNEL` against
+//! `PRIORITY_SESSION_DATA` (see "Saturation direction" above).
+//!
+//! **The axis this does not cover** is the literal reading of 느린: a
+//! tunnel peer that reads *slowly*, parking bytes in flow control instead
+//! of consuming them at line rate. Saturation and starvation are different
+//! failure modes, and this file only ever exercises the first. What bounds
+//! the second today is a constant relationship rather than a test —
+//! `qsh_transport::endpoint::TUNNEL_STREAM_RECEIVE_WINDOW` (2 MiB) is a
+//! quarter of `CONNECTION_RECEIVE_WINDOW` (8 MiB), so one stalled tunnel
+//! stream cannot empty the connection-wide window out from under the
+//! session stream, while four simultaneously stalled ones could. That gap
+//! is carried as residual risk, not covered here;
+//! `docs/design/testing.md` L9/L10 records it.
+//!
 //! Gated identically to `tunnel_throughput.rs`
 //! (`QSH_ACCEPTANCE_SLOW`/`QSH_ACCEPTANCE_STRICT`), but with a single
 //! threshold rather than a strict/smoke split: `PLAN.md` §4.2's draft
