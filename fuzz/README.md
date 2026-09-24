@@ -58,10 +58,10 @@ toolchain's `cargo` (verify with `cargo --version`).
 
 `fuzz/Cargo.lock` is its own lock, separate from the workspace root's. The
 workspace-root `deny` job (`ci.yml`) never points at it, so `fuzz-smoke.yml`
-runs `cargo deny --manifest-path fuzz/Cargo.toml check advisories` on pushes
-to `main` and on every pull request instead. Advisories only: license terms
-and bans in this lock stay unscanned, because this crate is not a shipped
-artifact.
+runs `cargo deny --locked --manifest-path fuzz/Cargo.toml check advisories`
+on pushes to `main` and on every pull request instead. Advisories only:
+license terms and bans in this lock stay unscanned, because this crate is
+not a shipped artifact.
 Note that any cargo command run against `fuzz/Cargo.toml` rewrites the
 path-dependency versions in this lock, so a release that bumps the
 workspace version leaves it stale until someone commits the refresh.
