@@ -50,6 +50,8 @@ M10은 저장소 밖 자격에 묶인 첫 마일스톤이다. Apple 계정과 �
 
 **(c) 완료 판정:** `grep -nE 'docs/PRD\.md:[0-9]' docs/ROADMAP.md PLAN.md`가 0건. `ls docs/history/`가 m2부터 m9까지 여덟 파일. `docs/ROADMAP.md`에 태그 정책 문장 한 줄이 존재하고 M10 크기 줄이 2.6ew.
 
+**(a)-추기 — Step 1 착지 (2026-09-24, main 세션).** 커밋 셋이다. `b9a621b`가 ①②③을 담고, `2473c88`이 ④를, `6efaf05`가 §6 viii의 reexec 추기를 담는다. ① `docs/history/m9-plan.md`는 서두 한 문단 뒤에 M9판 원문을 그대로 두었고 §1 체크박스는 DoD 2~7이 `[x]`, DoD 1만 `[ ]`다. ② `docs/ROADMAP.md`의 현재 위치는 M10, M9 헤더는 `🔄 기능 완료 (2026-09-24) · DoD 1 잔여`이고 마감 노트 불릿 하나가 DoD 2~7의 근거와 마감 절차 두 번의 수치, CI run 둘을 든다. M10 절에는 크기 2.6ew와 그 사유 한 줄, 결정 기록 Q1~Q8, 태그 정책 한 줄, M8 이관 항목의 §13 문장 앵커가 들어갔다. 계획에 없던 편집이 하나 있다. 문서 머리의 총 크기 줄이 M9의 SOCKS 추가분과 M10 갱신분을 더하지 않은 채 28~29ew로 남아 있어 31.5~32ew로 다시 적었다. ③ `README.md`는 Status 산문, Roadmap 표의 M9·M10 행, tap 문단의 시제를 고쳤다. ④ M2~M6 다섯은 각각 교체 커밋의 부모 `f5cd30a`·`e823ba1`·`4994e42`·`9d61b13`·`2f5d21a`에서 `git show`로 꺼냈고 서두는 m7·m8과 같은 H1 `# M<N> 계획 — <제목> (감사 기록)`과 이관 문단 하나다. (c)의 판정 셋은 모두 선다. `docs/PRD.md:<줄>` 꼴 인용은 ROADMAP과 PLAN에 0건, `docs/history/`는 m2부터 m9까지 여덟 파일, 태그 정책 문장과 2.6ew 크기 줄이 ROADMAP에 있다. 이 계획 본문은 humanize light 경로로 문장 셋만 손봤고 헤딩·표·식별자·수치는 바이트 동일하다. 검증: 문서만 바뀐 트리에서 nextest `1983 passed / 4 skipped`. CI run 36010207826(CI)·36010207979(fuzz-smoke)·36010208029(load) 전부 초록.
+
 ### Step 2 — release 프로파일 기능 스모크 하네스 (0.25ew)
 
 선행: 없음. Step 1과 병렬로 열 수 있다.
