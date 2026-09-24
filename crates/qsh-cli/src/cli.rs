@@ -10,7 +10,7 @@ use qsh_proto::{EnvVar, KeyStoreMode};
 #[command(
     name = "qsh",
     version,
-    about,
+    about = "QSH: a QUIC-based direct-connect remote shell",
     propagate_version = true,
     arg_required_else_help = true
 )]
