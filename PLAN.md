@@ -228,6 +228,10 @@ CI는 (a)가 적은 "크레이트별 네 스텝"이 아니라 `publish-dry-run` 
 
 **(c) 완료 판정:** 마감 공통 절차 2의 README 동기화 불일치 0이고, README에 "beta" 선언 문장이 0건이며, Status의 유보 사유가 SC7과 사람 캠페인만 남는다.
 
+**(a)-추기 — Step 12 착지 (2026-09-25, main 세션).** 커밋 `c7a4a9e`가 저장소 루트에 `RELEASE-NOTES.md`를 세우고 README의 Status·Roadmap 행·Known limitations·설치 안내를 M10 사실로 맞췄으며 CLAUDE.md 문서 지도와 Conventions 영어 목록에 그 파일을 더했다. 브리프의 열린 질문 다섯은 이렇게 답했다. 릴리스 노트의 자리는 GitHub Release 본문도 `docs/` 아래도 아닌 루트의 영어 파일이고 태그마다 `## <tag>` 절을 쌓는다. GitHub Release 본문은 `--generate-notes` 그대로 두고 `release.yml`은 손대지 않았으며 CHANGELOG는 만들지 않는다. README Roadmap 표의 M10 행은 이번에 `Pipeline done; clean-VM campaign open`으로 한 번 고치고 마감이 다시 본다. README에 DoD·SC 번호를 들이지 않았고 유보 사유는 PRD §15의 독립 리뷰 미계약과 열린 사람 캠페인 둘이다. "첫 M10 태그가 아직 없다"는 세 자리(Install의 기존 문장, Known limitations, 릴리스 노트 서두)에만 있다. 노트는 태그 전에 체크인했다. (a)가 README의 자인이라고 적은 "a release build is only ad-hoc linker-signed"는 `cf24287`이 이미 걷어 남아 있지 않았고, (b)의 "두 테스트"는 실제로 `readme_` 접두 테스트 여섯이다. `publish = false until M10` 두 문장은 `faf10bd` 뒤로 거짓이라 함께 걷었다.
+
+리뷰는 opus 두 렌즈였고 변이 다섯은 렌즈 A만 맡아 잡는 grep 전부를 확인했다. 렌즈 A는 major 없이 열둘을 냈다. 설치기가 quarantine을 떼므로 Gatekeeper에 닿지 않는다는 단정을 best effort로 눅였고, 30분 blackout 회차의 서술을 실측(연결을 들고 있던 attach는 살아남지 않고 세션이 살아남는다)에 맞췄으며, CI가 모든 푸시에 돈다는 문장을 main 푸시와 PR로 좁혔다. 렌즈 B는 major 셋을 냈다. 릴리스 노트가 네 플랫폼 모두 세 경로라고 적은 것은 Homebrew가 Apple silicon뿐이라 거짓이었고, Status에 M10 태그 없음이 네 번째 자리로 들어가 결정을 어겼으며, 커밋 본문 초안이 522자였다. 셋 다 고쳤다(본문 467자). 게이트는 fmt, `readme_` 여섯, 축자 게이트 서른다섯, xtask 열셋이 green이고 README의 em dash는 35 그대로, 릴리스 노트는 0, beta는 두 파일 모두 0건이다. **§4.1 #12 확정.** 마감이 다시 볼 자리 셋: README Roadmap 표의 M10 셀, Install 절의 "no published release has been cut that way yet", 릴리스 노트의 `<tag>` 자리표시자.
+
 ### Step 13 — 마감 (마감 공통 절차, 크기 내역 밖)
 
 선행: Step 1~12 전부와 §1 DoD 판정.
@@ -288,7 +292,7 @@ CI는 (a)가 적은 "크레이트별 네 스텝"이 아니라 `publish-dry-run` 
 | 9 | 저속·역압 축의 보강 여부 | 기존 하네스가 값싸게 받으면 더하고, 아니면 잔여 위험으로 적는다 **확정(2026-09-25):** 더하지 않는다. 근거는 §4의 잔여 위험 문단. | Step 9 |
 | 10 | 캠페인 회차 수와 구형 glibc 이미지 | 네 플랫폼 각 1회 + musl 1회가 하한. 이미지 후보는 CentOS 7 또는 Debian 10 계열 **확정(2026-09-25):** 네 플랫폼 각 1회 + musl 1회(`18f29f0`). 구형 glibc 이미지는 Debian 10(glibc 2.28)이 기본, CentOS 7(glibc 2.17)이 대안이며 같은 이미지에서 gnu 자산은 동적 링커가 거부해야 한다. | Step 10 |
 | 11 | publish 대상 크레이트 집합 | proto·transport·core·cli 넷. testkit·xtask는 `publish = false` 유지 **확정(2026-09-25):** 초안대로 넷(`faf10bd`). CI 게이트는 크레이트별 dry-run이 아니라 `--workspace` dry-run 한 번에 publish 집합 고정 스텝을 더한 `publish-dry-run` 잡이다. 단독 dry-run은 첫 publish 전에 레지스트리에 없는 의존 때문에 초록이 될 수 없어서다. 공개 tarball의 test 타깃은 미발행 `qsh-testkit`을 요구해 tarball만으로 컴파일되지 않으며 `exclude`는 넣지 않았다. 마감 감사에서 다시 본다. | Step 11 |
-| 12 | 릴리스 노트의 자리 | GitHub Release 본문인지 `docs/` 아래 파일인지 | Step 12 |
+| 12 | 릴리스 노트의 자리 | GitHub Release 본문인지 `docs/` 아래 파일인지 **확정(2026-09-25):** 둘 다 아니다. 저장소 루트의 영어 파일 `RELEASE-NOTES.md`에 태그마다 `## <tag>` 절을 쌓는다(`c7a4a9e`). GitHub Release 본문은 `--generate-notes` 그대로 두고 CHANGELOG는 만들지 않는다. | Step 12 |
 | 13 | 스모크의 양방향 pin 경로 | `identity export` + `trust add --cert-file`이 1순위(릴리스 바이너리 하나로 파일만 주고받으면 된다), `trust add --fingerprint`는 fingerprint를 어디서 관측할지가 한 단계 더 붙어 차선. **확정(2026-09-24):** `trust add --fingerprint`다. `Fleet::start_with_bin`이 기존 `Fleet::start_with`의 pin 순서를 그대로 물려받아 fingerprint는 `init --json` 출력에서 이미 손에 있고, `identity export` + `--cert-file` 경로는 `init_trust.rs`가 따로 덮는다(`152dd78`) | Step 2 |
 
 ## 5. 완료 절차
