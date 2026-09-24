@@ -20,7 +20,7 @@
 # What the checksum does and does not prove: SHA256SUMS is fetched from the
 # same release as the archive, so it catches a truncated or corrupted
 # download, not a compromised release. It is an integrity check, not a
-# signature. Signed and notarized artifacts are M9.
+# signature. Signed and notarized artifacts are M10.
 #
 # Archive naming is a contract with .github/workflows/release.yml:
 # qsh-<tag>-<target>.tar.gz (.zip on Windows), with a SHA256SUMS file
@@ -213,7 +213,7 @@ writable directory, or fix its permissions yourself — this installer never use
 
     # curl does not set com.apple.quarantine, but a proxy or a
     # download-then-run detour can. Clearing it is best effort; the binary
-    # is not signed or notarized until M9, so macOS may still object.
+    # is not signed or notarized until M10, so macOS may still object.
     if [ "$(uname -s)" = "Darwin" ] && command -v xattr >/dev/null 2>&1; then
         xattr -d com.apple.quarantine "${QSH_INSTALL_DIR}/qsh" 2>/dev/null || true
     fi
