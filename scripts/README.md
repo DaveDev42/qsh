@@ -32,6 +32,20 @@ release as the archive, so it catches a truncated or corrupted download, not
 a compromised release. It is an integrity check, not a signature. Signing
 and notarization are M10.
 
+Provenance is a separate check, and the installer does not perform it.
+Starting with the first tag cut after the attestation step joined `release.yml`, every asset
+`release.yml` publishes, `SHA256SUMS` included, gets a build provenance
+attestation from the same workflow run, which the GitHub CLI verifies:
+
+```bash
+gh attestation verify qsh-<tag>-<target>.tar.gz --repo DaveDev42/qsh
+```
+
+Add `--signer-workflow DaveDev42/qsh/.github/workflows/release.yml` to also
+pin which workflow signed it, rather than trusting any workflow in the repo.
+The installer stays free of a `gh` dependency on purpose: every required
+tool is one more way for an install to fail.
+
 Archive naming (`qsh-<tag>-<target>.tar.gz`, `.zip` on Windows) and the
 `SHA256SUMS` file are produced by `.github/workflows/release.yml`. That
 naming is a contract between the two files; changing one means changing the
