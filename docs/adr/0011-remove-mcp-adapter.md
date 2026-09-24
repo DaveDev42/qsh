@@ -27,6 +27,7 @@ M6는 `qsh mcp`를 stdio MCP 서버로 넣었다(ROADMAP M6, CLI.md §8, PRD의 
 - 바뀌는 문서: PRD(61·68·154·237~255·273·289·352행 부근), CLI.md §8과 §6.4·§7의 MCP 언급, ROADMAP M6 마감 노트와 M10 범위, `docs/design/architecture.md`의 어댑터 절, `docs/design/testing.md`의 golden 규율 예시, ADR-0007의 MCP 언급(사실 서술이라 각주로 처리), README, CLAUDE.md의 MCP 규칙 두 줄과 문서 지도, `docs/campaigns/m6-mcp.md`(역사로 유지, 머리에 철회 주석).
 - qsh-core의 `resume.rs`, `ops/mod.rs`, `ops/tunnel.rs`에 있는 `qsh mcp` 언급 주석은 "장기 실행 외부 프로세스" 서술로 바꾼다. 동작 변경은 없다.
 - 폴링 read마다 새 프로세스와 새 QUIC 연결이 든다. `--wait` 상한이 60 s라 빈도는 낮고 내장 어댑터가 한 연결을 재사용하던 이점은 여기서 잃는다.
+- **추기 (2026-09-25, M10 마감):** 결정 5가 M10으로 미룬 `-W` 검토를 기각으로 닫는다. 조건은 "`qsh exec`와 `-L`로 부족한 사용례가 나올 때"였고 그 사용례가 관측되지 않았다. M9·M10 두 마일스톤 동안 저장소의 `-W`·ProxyCommand 언급은 이 검토 의무 자신을 서술하는 문장뿐이고(ROADMAP M10 검토 항목, ADR-0019 Q8), 2026-09-24 이슈 처리가 낸 제안 ADR 넷(0021·0022·0025·0026) 어디에도 이 요구가 없다. 그 사이 M9가 SOCKS `-D`를 착지시켜(ADR-0019·0020) 원격 TCP로 stdio를 잇는 대표 사용례가 SOCKS 경유로 열렸으므로 `-W`를 요구할 이유는 오히려 줄었다. `qsh exec`의 pipe stdin 전달과 `-L`이 오늘 덮는 범위를 넘는 요구가 실제로 관측되면 그때 신규 ADR로 연다. 이 추기는 결정 5를 뒤집지 않고 그 안의 검토 의무만 종결한다.
 
 ## 대안
 
