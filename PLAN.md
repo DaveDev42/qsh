@@ -136,6 +136,14 @@ jemalloc은 `cfg(all(target_os = "linux", target_env = "gnu"))`로 좁혔다. Ca
 
 **(c) 완료 판정:** `grep -nE '[A-Za-z0-9_/.-]+\.md:[0-9]+' docs/design/threat-model.md`의 건수가 이 스텝 전(HEAD 21d3507 실측 24건)보다 늘지 않고, 여섯 명령 이름이 §3과 §4 양쪽에서 잡히며, §0에 M10 유예 문장이 0건이다. 기존 24건까지 이 스텝에서 손볼지는 (a)에서 정한다.
 
+**(a)-추기 — Step 8 착지 (2026-09-25, main 세션).** 커밋 둘이다. `381b42c` fix(core,cli)와 `7119c91` docs(design). 브랜치에서는 `6d77ac5`·`920a344`였고 main 위로 rebase하며 해시만 바뀌었다. `docs/design/threat-model.md` §3에 여섯 명령이 여섯 행으로, §4에 열아홉 행(A10~A13, B10~B13, C11, D8~D12, E9~E11, F5, G5)으로 처음 올랐다. §0의 M10 유예 문장은 걷었고 문서 내 줄 번호 인용은 24건에서 23건으로 줄었다. (a)가 "핀이 없는 위협은 §5에 적는다"고 했지만 이 문서에서 §5는 통제는 있는데 핀 테스트가 없는 갭이고 잔여 위험은 §7이다. 그래서 둘로 갈라 §5에 g6·g7, §7에 h23~h27을 열었다.
+
+브리프가 잔여 후보로 세운 일곱 중 둘은 문서에 남기지 않고 코드로 닫았다. `trust add-ca`는 이름을 trim 후 빈 문자열만 보고 `trust add`가 쓰는 라벨 검증을 건너뛰었고, `--cert-file`과 stdin의 인증서 입력은 상한 없이 통째로 버퍼링됐다. `381b42c`가 add-ca를 `trust rename`과 같은 공유 검증기 `validate_peer_label_arg`에 태우고 `CERT_PEM_MAX`(64 KiB)를 `qsh_core::ops`에 둬 `trust_add`·`trust_add_ca`·`read_cert_file_arg`·CLI stdin 경로가 모두 `take(cap+1)`로 읽어 초과를 파싱 전에 `INVALID_ARGUMENT`로 거부한다. 새 테스트 일곱, `docs/CLI.md` §6.11 갱신. 근거는 ADR-0013 결정 4. 두 건은 §4 C11·D12 행이 됐다.
+
+리뷰는 opus 두 렌즈로 했고 변이 검증은 렌즈 A만 맡았다. 변이 넷 중 둘이 초록으로 남았다. 파일 리더의 `take()`를 떼도(M3), `trust_add`의 크기 검사를 지워도(M4) 테스트가 붉지 않았다. 픽서가 `read_cert_file_arg_never_waits_past_the_cap_for_eof`(FIFO의 writer가 닫지 않는데 상한에서 돌아오는지)와 `trust_add_rejects_an_oversized_cert_pem`을 더해 둘 다 붉게 만들었다. 블로커는 검증기를 바꾸면서 `.trim()`이 빠져 공백만인 이름이 통과하던 회귀였다. `validate_peer_label_arg(req.name.trim())`으로 되돌리고 `"   "`를 나쁜 이름 표에 넣었다. 렌즈 B는 같은 브랜치의 코드 커밋이 `ops/tests.rs`에 68줄을 끼워 넣어 D8·D11·g7의 줄 번호 인용이 어긋난 것과 §7 문장이 브리프와 브랜치를 앵커로 삼은 것을 잡았다. 인용은 다시 재고 앵커는 테스트 이름과 커밋으로 바꿨다.
+
+Linux 확인은 `dave-windows-wsl`에서 `920a344`로 했다. clippy·doc·doctest 초록, nextest 2001건 중 2000 통과(33 flaky, 전부 첫 connect 10초 타임아웃 무늬), 1건 실패는 `admission_rejection_audit_is_aggregated`다. `expected Refused at cap=0, got Err(Timeout(3s))`로 붉는데 이 스텝의 베이스 `168e00c`에서도 단독 12/12 붉고 CI의 네이티브 러너에서는 초록이라 이 스텝의 회귀가 아니다. cap=0 거절은 응답 한 발이라 WSL2 loopback이 그 한 발을 흘리면 재전송 없이 타임아웃이 된다. §4의 WSL2 항목에 한 문장 보탰다. main의 CI run 36024776552 초록.
+
 ### Step 9 — PRD §13 두 항목의 릴리스 게이트 판정 (0.15ew)
 
 선행: 없음. dispatch 1회의 벽시계 30분만 확보하면 된다.
@@ -219,7 +227,7 @@ CI는 (a)가 적은 "크레이트별 네 스텝"이 아니라 `publish-dry-run` 
 - **notarization 리드타임이 가장 큰 단일 일정 리스크다.** `docs/ROADMAP.md` §4 리스크 5가 "M8 중 시작"을 대응으로 적었는데 두 마일스톤이 지나도록 시작 기록이 없다. Apple Developer Program 승인 자체가 수일에서 수주다. Step 0이 늦으면 Step 5와 Step 10의 DoD 2 축이 통째로 밀리고 그것만으로 M10이 닫히지 않는다.
 - **Gatekeeper와 단일 바이너리의 구조적 불일치.** `stapler`는 `.app`/`.dmg`/`.pkg`에만 티켓을 붙인다. tar.gz 안의 맨 실행 파일은 공증은 되지만 스테이플이 안 되므로 오프라인 머신의 `spctl` 판정이 미검증이다. curl 경로는 quarantine 속성을 떼므로 무증상일 가능성이 높지만, DoD 2 문면이 "차단하지 않음"이라 판정 방법 자체를 Step 10 캠페인 문서가 먼저 정의해야 한다.
 - **musl과 aws-lc-rs.** 워크스페이스는 rustls·quinn·rcgen 셋 모두 aws-lc-rs backend로 고정돼 있다. C/asm 빌드라 musl 타깃에서 cmake·clang·musl 헤더가 필요하고 `-C target-feature=+crt-static`와의 조합이 가장 깨지기 쉽다. 선행 신호가 하나 있다 — `ci.yml`의 주석이 cargo-deny-action 도커 이미지가 musl 툴체인을 못 찾아 깨졌던 이력을 적는다.
-- **WSL2 loopback의 첫 connect 10초 타임아웃.** `dave-windows-wsl`에서 release 스모크를 열두 번씩 돌리면 gnu 9/12, musl 10/12만 통과하고 나머지는 `no response from 127.0.0.1:<port> within 10s`(`CONNECTION_FAILED`)로 붉는다. 네이티브 ubuntu 러너와 macOS에서는 0건이라 WSL2 환경 특성으로 보지만 원인은 미상이다. WSL 검증 결과를 읽을 때 이 비율을 감안하고, 네이티브 Linux에서 같은 문구가 나오면 그때 별도로 판다.
+- **WSL2 loopback의 첫 connect 10초 타임아웃.** `dave-windows-wsl`에서 release 스모크를 열두 번씩 돌리면 gnu 9/12, musl 10/12만 통과하고 나머지는 `no response from 127.0.0.1:<port> within 10s`(`CONNECTION_FAILED`)로 붉는다. 네이티브 ubuntu 러너와 macOS에서는 0건이라 WSL2 환경 특성으로 보지만 원인은 미상이다. WSL 검증 결과를 읽을 때 이 비율을 감안하고, 네이티브 Linux에서 같은 문구가 나오면 그때 별도로 판다. `admission_rejection_audit_is_aggregated`도 같은 환경에서 붉는다(`expected Refused at cap=0, got Err(Timeout(3s))`, `168e00c`와 `920a344` 양쪽 단독 12/12). cap=0 거절은 응답 한 발이라 loopback이 흘리면 재전송 없이 타임아웃이다. 네이티브 러너에서는 초록이다.
 - **musl과 jemalloc의 RSS 특성.** 빌드가 서더라도 그 의존이 붙은 사유(glibc arena high-water)가 musl에는 해당하지 않아 idle RSS 모양이 gnu와 달라진다. soak과 적대적 부하 판정은 gnu 바이너리 기준이고, musl 바이너리에 30MB bound를 그대로 주장하면 안 된다.
 - **release 프로파일 테스트가 태그 벽시계를 늘린다.** `cargo build --release` 뒤 테스트 크레이트를 다시 컴파일하므로 leg당 수 분이 붙는다. 매트릭스 leg은 병렬이라 증가분은 leg 합이 아니라 가장 느린 leg 하나 몫이지만, 첫 dispatch run에서 실제 증가를 재서 §4.1에 적는다.
 - **provenance 검증의 실효성.** Sigstore 공개 로그에 기록은 남지만 검증에 `gh` 또는 `cosign`이 필요하다. 검증을 선택 경로로 두는 대가로 "대부분의 사용자는 검증하지 않는다"가 남는다.
