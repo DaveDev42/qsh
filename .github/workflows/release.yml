@@ -42,11 +42,52 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           target: ${{ matrix.target }}
+      # The functional smoke below is a nextest run, same entry point as
+      # every other test in this repo (`CLAUDE.md`'s command set, and
+      # `docs/design/testing.md`'s "cargo-nextest 필수" rule). Installed
+      # before the build so a broken install fails in seconds instead of
+      # after a ten-minute release compile.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
       - run: cargo build --release -p qsh-cli --target ${{ matrix.target }}
 
-      - name: Smoke test
+      # `version --json` proves only that the binary starts. What ships is
+      # judged by the functional smoke in the next step (`docs/ROADMAP.md`
+      # M10 acceptance criteria, 2026-08-21 audit revision, which defines
+      # "동작" as the functional smoke rather than `version --json`). This
+      # line stays because it is free and separates "the binary does not
+      # run on this runner" from "a session axis broke".
+      - name: Binary starts
         shell: bash
         run: ./target/${{ matrix.target }}/release/qsh${{ matrix.ext }} version --json
+
+      # The release-profile functional smoke
+      # (`crates/qsh-cli/tests/release_smoke.rs`, `docs/design/testing.md`
+      # L6's M10 paragraph). `QSH_SMOKE_BIN` is an absolute path to the
+      # binary this leg just built; the harness rejects a path that is not
+      # a file (and, on unix, not executable) instead of failing deep
+      # inside a spawn. `QSH_SMOKE_STRICT=1` removes the debug fallback, so
+      # a leg whose env wiring broke fails rather than certifying the
+      # nextest-built debug binary.
+      #
+      # Unix legs run init -> mutual trust -> `exec --json` -> pty shell ->
+      # `~d` detach -> `qsh attach`; the Windows leg compiles the
+      # `#[cfg(not(unix))]` twin, which stops after `exec --json` (no pty
+      # client off unix).
+      #
+      # No `--target`: the harness is a host tool and its dev artifacts
+      # land in `target/debug/`, never in the `target/<triple>/release/`
+      # tree the packaging steps below read. `--success-output final` is
+      # what puts the harness's `release_smoke: driving <path>` line into
+      # this log on a green run (nextest captures a passing test's output
+      # otherwise).
+      - name: Release smoke (functional)
+        run: cargo nextest run -p qsh-cli --test release_smoke --success-output final
+        env:
+          QSH_SMOKE_STRICT: 1
+          QSH_SMOKE_BIN: ${{ github.workspace }}/target/${{ matrix.target }}/release/qsh${{ matrix.ext }}
+          RUST_BACKTRACE: short
 
       # Archive naming (qsh-<tag>-<target>.tar.gz / .zip) is a contract with
       # scripts/install.sh — keep the two in sync if you change this.
@@ -81,6 +122,9 @@ jobs:
     runs-on: ubuntu-24.04
     # Only cut a GitHub Release on an actual tag push; workflow_dispatch
     # runs (e.g. against a branch) build and smoke-test only.
+    # `github.ref_name` becomes the artifact name (`build` job's `ASSET`
+    # above), and `upload-artifact` rejects a name containing `/` — dispatch
+    # from a branch whose name has no slash.
     if: startsWith(github.ref, 'refs/tags/')
     permissions:
       contents: write

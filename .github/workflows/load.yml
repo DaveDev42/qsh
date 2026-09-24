@@ -92,6 +92,21 @@ jobs:
           echo "nproc: $(nproc)"
           echo "net.core.rmem_max: $(cat /proc/sys/net/core/rmem_max)"
       - run: cargo build --release -p qsh-cli
+      # The same release binary this job already built, driven through the
+      # functional smoke (`crates/qsh-cli/tests/release_smoke.rs`,
+      # `docs/design/testing.md` L6's M10 paragraph). The release *binary*
+      # is reused for free, but this step still compiles the dev-profile
+      # `qsh-cli` test tree (including the `cfg(unix)` dev-dependencies)
+      # for the first time in this job, so the 40-minute budget above now
+      # covers two compiles, not one. It runs before T2 so a functionally
+      # broken binary is diagnosed as that instead of as a load-bound
+      # violation. `QSH_SMOKE_STRICT=1` keeps a missing `QSH_SMOKE_BIN`
+      # from quietly certifying the debug binary, same discipline as
+      # `QSH_LOAD_STRICT` below.
+      - run: cargo nextest run -p qsh-cli --test release_smoke --success-output final
+        env:
+          QSH_SMOKE_STRICT: 1
+          QSH_SMOKE_BIN: ${{ github.workspace }}/target/release/qsh
       - run: cargo nextest run --profile load -p qsh-cli --test adversarial_load --no-fail-fast
         env:
           QSH_LOAD_STRICT: 1
