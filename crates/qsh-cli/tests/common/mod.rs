@@ -67,11 +67,28 @@ pub struct Sandbox {
     config: PathBuf,
     state: PathBuf,
     home: PathBuf,
+    bin: PathBuf,
 }
 
 impl Sandbox {
-    /// A fresh, empty sandbox (no identity yet).
+    /// A fresh, empty sandbox (no identity yet), driving the nextest-built
+    /// `CARGO_BIN_EXE_qsh` — the same default every caller got before
+    /// [`with_bin`](Self::with_bin) existed.
     pub fn new() -> Self {
+        Self::new_with_bin(PathBuf::from(env!("CARGO_BIN_EXE_qsh")))
+    }
+
+    /// Like [`new`](Self::new), but every [`command`](Self::command) this
+    /// sandbox builds runs `bin` instead of `CARGO_BIN_EXE_qsh` — the seam
+    /// `release_smoke.rs` uses to drive an arbitrary `qsh` binary
+    /// (`docs/design/testing.md`'s "CI 규율" section, the
+    /// `QSH_SMOKE_BIN`/`QSH_SMOKE_STRICT` row of its test-gate env table)
+    /// through the same helpers as every other test.
+    pub fn with_bin(bin: &Path) -> Self {
+        Self::new_with_bin(bin.to_path_buf())
+    }
+
+    fn new_with_bin(bin: PathBuf) -> Self {
         let dir = tempfile::tempdir().expect("tempdir");
         let config = dir.path().join("config");
         let state = dir.path().join("state");
@@ -84,12 +101,25 @@ impl Sandbox {
             config,
             state,
             home,
+            bin,
         }
     }
 
     /// A sandbox that already ran `qsh init --key-store file`.
     pub fn initialized() -> Self {
         let sandbox = Self::new();
+        sandbox.init();
+        sandbox
+    }
+
+    /// Like [`initialized`](Self::initialized), against an explicit
+    /// binary — the [`with_bin`](Self::with_bin)/[`initialized`](Self::initialized)
+    /// pairing. No caller in this crate needs it yet (`Fleet::start_with_bin`
+    /// composes [`with_bin`](Self::with_bin) with its own init/trust
+    /// sequence instead); it stays as the documented counterpart to
+    /// [`with_bin`](Self::with_bin) for a future single-sandbox smoke test.
+    pub fn initialized_with_bin(bin: &Path) -> Self {
+        let sandbox = Self::with_bin(bin);
         sandbox.init();
         sandbox
     }
@@ -114,10 +144,16 @@ impl Sandbox {
         &self.home
     }
 
+    /// The binary this sandbox's [`command`](Self::command) runs —
+    /// `CARGO_BIN_EXE_qsh` unless built via [`with_bin`](Self::with_bin).
+    pub fn bin(&self) -> &Path {
+        &self.bin
+    }
+
     /// A `qsh` [`Command`] with the environment scrubbed of anything that
     /// could redirect it at the developer's real configuration.
     pub fn command(&self, args: &[&str]) -> Command {
-        self.command_with_bin(Path::new(env!("CARGO_BIN_EXE_qsh")), args)
+        self.command_with_bin(&self.bin, args)
     }
 
     /// Like [`command`](Self::command), but against an explicit binary
@@ -467,7 +503,7 @@ impl ServeGuard {
     }
 
     fn spawn(host: &Sandbox, extra: &[&str]) -> Self {
-        Self::spawn_with_bin(host, Path::new(env!("CARGO_BIN_EXE_qsh")), extra, None)
+        Self::spawn_with_bin(host, host.bin(), extra, None)
     }
 
     fn spawn_with_bin(host: &Sandbox, bin: &Path, extra: &[&str], log: Option<&str>) -> Self {
@@ -693,8 +729,16 @@ impl Fleet {
 
     /// Like [`start`](Self::start), passing `extra` arguments to `qsh serve`.
     pub fn start_with(extra: &[&str]) -> Self {
-        let host = Sandbox::new();
-        let client = Sandbox::new();
+        Self::start_with_bin(Path::new(env!("CARGO_BIN_EXE_qsh")), extra)
+    }
+
+    /// Like [`start_with`](Self::start_with), but both the host and the
+    /// client drive `bin` instead of `CARGO_BIN_EXE_qsh` — the seam
+    /// `release_smoke.rs` uses to run the whole init/trust/serve dance
+    /// against an arbitrary `qsh` binary.
+    pub fn start_with_bin(bin: &Path, extra: &[&str]) -> Self {
+        let host = Sandbox::with_bin(bin);
+        let client = Sandbox::with_bin(bin);
         let host_fingerprint = host.fingerprint();
         let client_fingerprint = client.fingerprint();
 
@@ -719,7 +763,7 @@ impl Fleet {
     /// A third identity that pins the host but is *not* pinned by it — the
     /// untrusted peer of M1's second acceptance criterion.
     pub fn rogue(&self) -> Sandbox {
-        let rogue = Sandbox::new();
+        let rogue = Sandbox::with_bin(self.client.bin());
         rogue.init();
         rogue.trust_add(HOST_ALIAS, Some(self.addr()), &self.host_fingerprint);
         rogue
