@@ -124,6 +124,23 @@ signature: the binaries are neither signed nor notarized until M10.
 | `QSH_REPO` | `DaveDev42/qsh` | `owner/repo` to install from, for forks and testing |
 | `QSH_LIBC` | `gnu` | Linux only. `musl` picks the static x86_64 build for old-glibc distributions |
 
+Release assets carry a build provenance attestation starting with the first
+tag cut after the attestation step joined `release.yml`. With the GitHub CLI you can check one before
+you unpack it:
+
+```bash
+gh attestation verify qsh-<tag>-<target>.tar.gz --repo DaveDev42/qsh
+```
+
+`SHA256SUMS` is attested the same way, so the file you check the archives
+against can itself be checked. What the attestation establishes is narrow:
+this exact file was produced by a workflow in this repository, on a
+GitHub-hosted runner, from a named commit (see scripts/README.md for pinning
+that to `release.yml` specifically). It says nothing about whether the code
+in that commit is correct or safe to run. Running it is up to you: the
+installer does not call `gh`, and nothing here replaces the `SHA256SUMS`
+check it already does.
+
 ### Manual download
 
 To download by hand, take the asset matching your platform, check it against
