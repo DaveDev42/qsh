@@ -27,20 +27,29 @@ tokio.workspace = true
 [target.'cfg(unix)'.dependencies]
 nix = { workspace = true, features = ["term", "ioctl", "signal"] }
 
-# jemalloc as the global allocator for the `qsh` serve/listener on Linux, so
-# freed pages return to the OS at idle via background purge threads. glibc pins
-# the arena high-water instead — a 24h/100-session soak surfaced ~183 MiB
-# retained idle RSS. Linux-only on purpose: the retention is glibc-specific
-# (macOS's own allocator releases idle pages readily), and jemalloc's
-# background_thread is unsupported on macOS — enabling it there prints a
-# "<jemalloc>: option background_thread currently supports pthread only" line
-# to stderr, which breaks the single-stderr-line CLI contract (docs/CLI.md).
+# jemalloc as the global allocator for the `qsh` serve/listener on glibc
+# Linux, so freed pages return to the OS at idle via background purge
+# threads. glibc pins the arena high-water instead — a 24h/100-session soak
+# surfaced ~183 MiB retained idle RSS. glibc-Linux-only on purpose: the
+# retention is glibc-specific (macOS's own allocator releases idle pages
+# readily), and jemalloc's background_thread is unsupported on macOS —
+# enabling it there prints a "<jemalloc>: option background_thread
+# currently supports pthread only" line to stderr, which breaks the
+# single-stderr-line CLI contract (docs/CLI.md §2.2).
 # The allocator's fixed floor is pinned by malloc_conf in main.rs (narenas):
 # jemalloc's default arena count follows the *detected* CPU count, which on a
 # CI/container host is the host's, not the cgroup's — dozens of arenas whose
-# metadata alone overran the PRD 30 MiB idle bound (docs/PRD.md:286). macOS
-# and Windows (client, P1) use the system allocator.
-[target.'cfg(target_os = "linux")'.dependencies]
+# metadata alone overran the PRD 30 MiB idle bound (docs/PRD.md:286).
+# Narrowed to glibc: `tikv-jemalloc-sys` lists musl in its own
+# `NO_BG_THREAD_TARGETS` (src/env.rs) and warns at build time that
+# `background_threads_runtime_support` is unsupported there, while still
+# configuring `background_thread:true`; `tikv-jemallocator`'s platform table
+# has no musl row either. The retention this dependency exists for is
+# glibc-arena-specific, so a musl build takes the system allocator rather
+# than carry an allocator whose one feature the vendor does not support on
+# that target. musl, macOS and Windows (client, P1) use the system
+# allocator.
+[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
 tikv-jemallocator = { version = "0.7", features = ["background_threads"] }
 
 [dev-dependencies]
