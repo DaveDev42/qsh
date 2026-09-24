@@ -1,5 +1,7 @@
 //! `trust.*` operations and the shared trust store: add, list, remove, invite, accept.
 
+use std::fs::File;
+use std::io::Read;
 use std::net::IpAddr;
 
 use super::*;
@@ -55,6 +57,7 @@ impl Ops {
             .map(|address| crate::trust::normalize_peer_address(address).address);
 
         let fingerprint = if let Some(cert_pem) = req.cert_pem.as_deref() {
+            check_cert_pem_size(cert_pem)?;
             // ADR-0013 결정 4/5: 구조 검증(라벨 multiset·단일 블록·X.509
             // 파싱)까지 마친 값만 fingerprint로 쓴다.
             let (_der, fingerprint) =
@@ -135,14 +138,22 @@ impl Ops {
     /// The fingerprint `single_certificate` derives is computed only to
     /// validate the PEM's X.509 structure and is then discarded — a CA
     /// root has no principal of its own.
+    ///
+    /// `name` is trimmed (matching `trust_add`'s own `req.name.trim()`)
+    /// and then validated against the same shared rule `trust_rename`'s
+    /// `new` uses (`crate::trust::validate_peer_label`, ADR-0012 결정 6)
+    /// — a CA label is not a principal, but it is still echoed back by
+    /// this command's own human renderer and by a later `trust rename`
+    /// collision message, so it gets the same character-class discipline
+    /// as every other trust-store label. Trimming first, rather than
+    /// handing the raw argument straight to the shared validator, keeps
+    /// a whitespace-only or whitespace-padded name rejected/normalized
+    /// the same way it was before this validator existed — the shared
+    /// rule alone accepts plain U+0020, since a space is none of
+    /// `validate_device_name`'s four rejected classes.
     pub fn trust_add_ca(&self, req: TrustAddCaReq) -> Result<TrustAddCaData, OpError> {
-        let name = req.name.trim().to_string();
-        if name.is_empty() {
-            return Err(OpError::new(
-                ErrorCode::InvalidArgument,
-                "CA name must not be empty",
-            ));
-        }
+        let name = validate_peer_label_arg(req.name.trim())?;
+        check_cert_pem_size(&req.cert_pem)?;
         let (_der, _fingerprint) =
             crate::identity::pem::single_certificate(&req.cert_pem).map_err(cert_pem_op_error)?;
 
@@ -506,6 +517,25 @@ fn validate_peer_label_arg(label: &str) -> Result<String, OpError> {
         })
 }
 
+/// Reject a certificate PEM larger than [`CERT_PEM_MAX`] before it is ever
+/// handed to [`crate::identity::pem::single_certificate`] (`trust add
+/// --cert-file`, `trust add-ca`) — the one size check shared by both ops
+/// entry points and by [`read_cert_file_arg`], whatever the `cert_pem`
+/// string's source (a real file, standard input, or a direct API call), so
+/// an oversized input is always this one explicit `INVALID_ARGUMENT`
+/// rather than a capped-but-truncated read failing X.509 parsing instead.
+/// Never echoes `cert_pem` itself, only the limit.
+fn check_cert_pem_size(cert_pem: &str) -> Result<(), OpError> {
+    if cert_pem.len() > CERT_PEM_MAX {
+        return Err(OpError::new(
+            ErrorCode::InvalidArgument,
+            format!("certificate input exceeds {CERT_PEM_MAX} bytes"),
+        )
+        .with_retryable(false));
+    }
+    Ok(())
+}
+
 /// Map a [`crate::identity::pem::CertPemError`] to the `INVALID_ARGUMENT`
 /// [`OpError`] both `trust add --cert-file` and `trust add-ca` report for
 /// it (ADR-0013 결정 4): `details` stays `Value::Null` and the message is
@@ -535,12 +565,26 @@ pub fn cert_file_fingerprint_conflict() -> OpError {
 /// machine's own config tree, so it is `INVALID_ARGUMENT`
 /// (`docs/CLI.md` §6.11), never `CONFIG_ERROR`; the
 /// message names the path only, never any byte the file might contain.
+///
+/// The read itself is capped at `take(CERT_PEM_MAX + 1)` — the same
+/// `INVITE_CODE_STDIN_MAX` precedent `--code-stdin` uses — so an oversized
+/// file is never buffered in full; the same size check `trust_add`/
+/// `trust_add_ca` run on the string they receive is then run here too,
+/// rather than letting a silently truncated PEM fail X.509 parsing
+/// instead.
 pub fn read_cert_file_arg(path: &str) -> Result<String, OpError> {
-    std::fs::read_to_string(path).map_err(|err| {
+    let read_failure = |err: std::io::Error| {
         OpError::new(
             ErrorCode::InvalidArgument,
             format!("failed to read {path}: {err}"),
         )
         .with_retryable(false)
-    })
+    };
+    let file = File::open(path).map_err(read_failure)?;
+    let mut text = String::new();
+    file.take(CERT_PEM_MAX as u64 + 1)
+        .read_to_string(&mut text)
+        .map_err(read_failure)?;
+    check_cert_pem_size(&text)?;
+    Ok(text)
 }

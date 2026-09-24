@@ -282,6 +282,15 @@ pub const INVITE_CODE_PROMPT: &str = "Invite code: ";
 /// of [`SESSION_WRITE_MAX`] the same way.
 pub const INVITE_CODE_STDIN_MAX: usize = 1024;
 
+/// Upper bound on the bytes read for a `--cert-file` PEM, whether the
+/// source is a real path or `-` (standard input). 64 KiB: a single PEM
+/// `CERTIFICATE` block is a few KiB, and `docs/CLI.md` §6.11 and
+/// ADR-0013 결정 4 accept exactly one such block, so anything near this
+/// cap is not a certificate. Both readers use it as `take(cap + 1)`
+/// (`INVITE_CODE_STDIN_MAX`'s own precedent above) so nothing is buffered
+/// unbounded before the size is checked.
+pub const CERT_PEM_MAX: usize = 64 * 1024;
+
 /// Where `trust accept` is to get its invite code from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InviteCodeSource {

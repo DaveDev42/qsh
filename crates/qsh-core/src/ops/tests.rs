@@ -2130,6 +2130,198 @@ fn trust_add_ca_rejects_a_second_pem_under_an_existing_name() {
     assert!(err.message.contains("trust remove"));
 }
 
+/// `trust add-ca`'s `name` now goes through the same shared validator
+/// `trust rename`'s `new` uses (`crate::trust::validate_peer_label`,
+/// ADR-0012 결정 6) instead of a bare trim/empty check — a bidi override
+/// or zero-width character is `INVALID_ARGUMENT` the same way it already
+/// is for `trust rename`'s `new` (`trust_rename_rejects_a_bad_new_label`,
+/// this file), and no rejected attempt writes anything to `trust.toml`.
+/// `"   "` (whitespace-only) is in this table because the shared
+/// validator alone would accept it — a plain U+0020 is none of
+/// `validate_device_name`'s four rejected classes — so `trust_add_ca`
+/// trims before validating, the same way `trust_add` trims `req.name`
+/// (`ops/trust.rs`'s own doc on `trust_add_ca`). Without that trim this
+/// row is the regression: `trust add-ca "   "` would succeed and store a
+/// CA whose name is indistinguishable on screen from an empty one.
+#[test]
+fn trust_add_ca_rejects_a_bad_name() {
+    let (_guard, ops) = temp_ops();
+    let cert_pem = a_valid_cert_pem();
+
+    for bad in ["", "   ", "bad\u{200b}name", "bad\u{202e}name"] {
+        let err = ops
+            .trust_add_ca(TrustAddCaReq {
+                name: bad.into(),
+                cert_pem: cert_pem.clone(),
+            })
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidArgument, "label {bad:?}");
+    }
+
+    assert!(
+        !ops.paths.trust_file().exists(),
+        "no rejected name may create trust.toml"
+    );
+}
+
+/// The other half of the trim fix above: surrounding whitespace is
+/// stripped, not merely tolerated, so `" partner-ca "` and `"partner-ca"`
+/// land as the exact same stored name rather than becoming two CA rows
+/// that render identically in `trust list`.
+#[test]
+fn trust_add_ca_trims_surrounding_whitespace_from_the_name() {
+    let (_guard, ops) = temp_ops();
+    let cert_pem = a_valid_cert_pem();
+
+    let data = ops
+        .trust_add_ca(TrustAddCaReq {
+            name: "  partner-ca  ".into(),
+            cert_pem,
+        })
+        .unwrap();
+    assert_eq!(data.name, "partner-ca");
+}
+
+/// h23: an oversized `cert_pem` is `INVALID_ARGUMENT` before it ever
+/// reaches X.509 parsing, and the message names the limit rather than
+/// echoing any input byte.
+#[test]
+fn trust_add_ca_rejects_an_oversized_cert_pem() {
+    let (_guard, ops) = temp_ops();
+    let oversized = "x".repeat(CERT_PEM_MAX + 1);
+
+    let err = ops
+        .trust_add_ca(TrustAddCaReq {
+            name: "partner-ca".into(),
+            cert_pem: oversized,
+        })
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::InvalidArgument);
+    assert!(
+        err.message.contains(&CERT_PEM_MAX.to_string()),
+        "message must name the limit: {:?}",
+        err.message
+    );
+}
+
+/// h23, file-reader side: [`read_cert_file_arg`] caps its own read at
+/// `CERT_PEM_MAX + 1` bytes, so an oversized `--cert-file` path is this
+/// same explicit size error rather than a silently truncated PEM that
+/// then fails X.509 parsing with a confusing message.
+#[test]
+fn read_cert_file_arg_rejects_an_oversized_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("huge.pem");
+    std::fs::write(&path, "x".repeat(CERT_PEM_MAX + 1)).unwrap();
+
+    let err = read_cert_file_arg(path.to_str().unwrap()).unwrap_err();
+    assert_eq!(err.code, ErrorCode::InvalidArgument);
+    assert!(
+        err.message.contains(&CERT_PEM_MAX.to_string()),
+        "message must name the limit, not a PEM-parse failure: {:?}",
+        err.message
+    );
+}
+
+/// C11's other half: `trust add --cert-file`'s own `cert_pem` (not just
+/// `trust add-ca`'s) is bounded by [`check_cert_pem_size`] too
+/// (`ops/trust.rs`'s `trust_add`, before the `--fingerprint`/`--cert-file`
+/// branch runs `single_certificate`). Without this row, deleting that one
+/// `check_cert_pem_size(cert_pem)?` line leaves the whole `qsh-core` suite
+/// green — the size cap on this entry point had no pin at all.
+#[test]
+fn trust_add_rejects_an_oversized_cert_pem() {
+    let (_guard, ops) = temp_ops();
+    let oversized = "x".repeat(CERT_PEM_MAX + 1);
+
+    let err = ops
+        .trust_add(TrustAddReq {
+            name: "peer-a".into(),
+            address: None,
+            fingerprint: None,
+            cert_pem: Some(oversized),
+        })
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::InvalidArgument);
+    assert!(
+        err.message.contains(&CERT_PEM_MAX.to_string()),
+        "message must name the limit: {:?}",
+        err.message
+    );
+    assert!(
+        !ops.paths.trust_file().exists(),
+        "a rejected cert_pem must not create trust.toml"
+    );
+}
+
+/// C11's real claim, pinned directly: [`read_cert_file_arg`] never waits
+/// for end-of-file once it has `CERT_PEM_MAX + 1` bytes. A plain
+/// oversized file (`read_cert_file_arg_rejects_an_oversized_file`, above)
+/// cannot tell this apart from a version with the `.take()` cap removed —
+/// an ordinary file always ends, so an unbounded `read_to_string` over it
+/// still finishes and still gets rejected by `check_cert_pem_size`
+/// afterwards. A FIFO whose writer never sends EOF does distinguish them:
+/// with the cap in place the read returns as soon as the cap's worth of
+/// bytes has arrived; without it, `read_to_string` blocks forever waiting
+/// for more data that never comes, and this test's `recv_timeout` turns
+/// that hang into a clean failure instead of an indefinite one.
+#[cfg(unix)]
+#[test]
+fn read_cert_file_arg_never_waits_past_the_cap_for_eof() {
+    use std::ffi::CString;
+    use std::io::Write;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let dir = tempfile::tempdir().unwrap();
+    let fifo_path = dir.path().join("cert.fifo");
+    let c_path = CString::new(fifo_path.to_str().unwrap()).expect("path has no NUL");
+    // SAFETY: `c_path` is a valid, NUL-terminated C string for the
+    // lifetime of this call, and `mkfifo` only creates a filesystem node
+    // at that path — no memory is shared with the kernel beyond the read
+    // of that string.
+    let rc = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
+    assert_eq!(rc, 0, "mkfifo failed: {}", std::io::Error::last_os_error());
+
+    // The writer opens for write only once a reader has opened for read
+    // (FIFO open blocks on both ends until the peer end is present), so
+    // this ordering does not race with the read thread below. It writes
+    // exactly the cap's worth of bytes and then parks — deliberately
+    // never dropping its write handle, so the FIFO never sees EOF.
+    let writer_path = fifo_path.clone();
+    let writer = std::thread::spawn(move || {
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&writer_path)
+            .expect("open fifo for write");
+        let payload = vec![b'x'; CERT_PEM_MAX + 1];
+        f.write_all(&payload).expect("write fifo payload");
+        f.flush().expect("flush fifo payload");
+        std::thread::park_timeout(Duration::from_secs(30));
+    });
+
+    let (tx, rx) = mpsc::channel();
+    let read_path = fifo_path.to_str().unwrap().to_string();
+    std::thread::spawn(move || {
+        let _ = tx.send(read_cert_file_arg(&read_path));
+    });
+
+    let result = rx.recv_timeout(Duration::from_secs(10)).expect(
+        "read_cert_file_arg must return once it has CERT_PEM_MAX + 1 bytes, without waiting \
+         for an EOF this FIFO's writer deliberately never sends — a hang here means the \
+         `.take()` cap on the file reader was removed",
+    );
+    let err = result.unwrap_err();
+    assert_eq!(err.code, ErrorCode::InvalidArgument);
+    assert!(
+        err.message.contains(&CERT_PEM_MAX.to_string()),
+        "message must name the limit: {:?}",
+        err.message
+    );
+
+    writer.thread().unpark();
+}
+
 /// The recovery path `add_ca_append_only`'s own error message promises
 /// (ADR-0013 결정 5): a name collision is `INVALID_ARGUMENT`, but
 /// `trust.remove` unpins the CA root by name so a second, different PEM
