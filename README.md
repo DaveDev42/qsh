@@ -30,7 +30,9 @@ the wire-format freeze draft and the threat model. Two M8 items are still
 open: the real-device mobility campaign and the independent security
 review. The freeze draft takes effect once the operator decides on that
 review. M9 (the human-facing surface: naming, pairing, `qsh service
-install`) is underway. What works end to end today:
+install`) has landed its features; the SC1 stopwatch re-measurement in
+`docs/campaigns/m9-stopwatch.md` is still open, and it depends on the M7
+baseline above. M10 (release) is underway. What works end to end today:
 
 - `qsh exec host -- cmd`, in human mode or as a single `qsh.cli/v1` JSON
   envelope with the remote exit code, stdout and stderr.
@@ -591,12 +593,12 @@ already taken on crates.io. The workspace stays `publish = false` until M10.
 | M6 | MCP adapter | Done (retired, ADR-0011) |
 | M7 | Trust UX, host profiles, `doctor` | Features done; stopwatch campaign open |
 | M8 | Hardening (fuzz, soak, real-device mobility campaign) | Code done; mobility campaign, wire freeze and security review open |
-| M9 | Human-facing surface (naming, pairing, service install) | In progress |
-| M10 | Release (installers, Homebrew, notarization) | Planned |
+| M9 | Human-facing surface (naming, pairing, service install) | Features done; stopwatch campaign open |
+| M10 | Release (installers, Homebrew, notarization) | In progress |
 
 The Homebrew tap (`DaveDev42/tap`) and the release workflow's auto-bump job
-already exist as a skeleton ahead of M10; the rest of M10's scope is still
-Planned — see [docs/ROADMAP.md](docs/ROADMAP.md) for the full list.
+already exist as a skeleton; the rest of M10's scope is in progress — see
+[docs/ROADMAP.md](docs/ROADMAP.md) for the full list.
 
 Per-milestone scope, in/out boundaries and acceptance criteria live in
 [docs/ROADMAP.md](docs/ROADMAP.md).
