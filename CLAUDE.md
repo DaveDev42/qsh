@@ -6,14 +6,14 @@ QSH is a QUIC-based direct-connect remote shell (single Rust binary `qsh`) that 
 
 ## Session onboarding
 
-1. Open `docs/ROADMAP.md` and read the `현재 위치` line at the top. It names the current milestone, which can be ahead of earlier milestones still waiting on campaigns a person runs. The current milestone's acceptance criteria are the definition of done — build to them, not past them.
-2. Open `PLAN.md` — the execution plan for the current milestone (ordered PR-sized steps with per-step tests and completion criteria). It is a living doc: when a milestone is done, it is fully replaced by the next milestone's plan.
+1. Open `docs/ROADMAP.md` and read the `현재 위치` line at the top. It names the current milestone, or says that none is open and which human-owned items remain. A current milestone can be ahead of earlier milestones still waiting on campaigns a person runs. The current milestone's acceptance criteria are the definition of done — build to them, not past them.
+2. Open `PLAN.md` — the execution plan for the current milestone (ordered PR-sized steps with per-step tests and completion criteria). It is a living doc: when a milestone is done, it is fully replaced by the next milestone's plan. If it is a placeholder, the open human-owned items in its §0 are the live state.
 3. Before implementing, read the matching sections of `docs/design/protocol.md` (wire protocol), `docs/design/architecture.md` (crates, modules, key mechanisms), `docs/design/testing.md` (which tests the milestone owes), and the `docs/CLI.md` contract for any command you touch.
 4. Features deferred to P1/P2 stay deferred: reserved flags parse and return `UNSUPPORTED`; do not implement them early. Only an accepted ADR moves one into the current milestone, as ADR-0019 did for `-D`.
 
 ## Document map
 
-- `PLAN.md` — execution plan for the current milestone; the file's title names the milestone. Replaced wholesale when a milestone closes; the superseded plan moves to `docs/history/`.
+- `PLAN.md` — execution plan for the current milestone, or a placeholder when no milestone is open; the file's title says which. Replaced wholesale when a milestone closes; the superseded plan moves to `docs/history/`.
 - `RELEASE-NOTES.md` — one section per release tag, what each tag ships, what is signed and what is not
 - `docs/PRD.md` — product requirements (binding)
 - `docs/CLI.md` — CLI / JSON contract (binding)
