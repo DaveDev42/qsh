@@ -398,21 +398,74 @@ jobs:
           fi
 
       # Archive naming (qsh-<tag>-<target>.tar.gz / .zip) is a contract with
-      # scripts/install.sh — keep the two in sync if you change this.
+      # scripts/install.sh — keep the two in sync if you change this. The
+      # unix archive holds the binary plus `docs/man/`'s pages under `man/`
+      # (docs/ROADMAP.md M10 결정 기록 Q4): the Homebrew formula installs
+      # them with `man1.install Dir["man/*.1"]`, and install.sh extracts
+      # `qsh` by name and ignores the rest. The windows zip is unchanged.
       #
       # Must run after `Sign the binary` / `Verify the signature` /
       # `Notarize` above: nothing in this job re-extracts the archive to
       # confirm the tar holds the signed, notarized bytes, so if this step
       # ever moves earlier the chain above would keep passing while
-      # certifying a binary the archive no longer contains.
+      # certifying a binary the archive no longer contains. The staging
+      # copy below is a plain `cp`, which carries the Mach-O signature with
+      # the bytes -- a code signature lives in an LC_CODE_SIGNATURE load
+      # command inside the file, not in metadata a copy could drop.
       - name: Package archive (unix)
         if: runner.os != 'Windows'
         shell: bash
+        env:
+          # Apple's tar has historically stored a file's extended
+          # attributes as an AppleDouble `._` member unless copyfile is
+          # off. Measured: this runner's binary carries
+          # com.apple.provenance and bsdtar emits no sidecar either way,
+          # and the published v0.2.0 archives hold one member -- this is
+          # the belt to that braces. GNU tar ignores the variable, so one
+          # line covers every unix leg.
+          COPYFILE_DISABLE: 1
         run: |
           set -euo pipefail
+          # Member order is fixed by the shell's glob expansion below, not
+          # by tar, which is why bsdtar and GNU tar produce the same listing
+          # (measured). C collation is what makes that expansion identical
+          # on both runners.
+          export LC_ALL=C
           asset="qsh-${{ github.ref_name }}-${{ matrix.target }}.tar.gz"
-          tar czf "$asset" -C "target/${{ matrix.target }}/release" qsh
+          staging="${RUNNER_TEMP}/pkg"
+          rm -rf "$staging"
+          mkdir -p "$staging/man"
+          cp "target/${{ matrix.target }}/release/qsh" "$staging/qsh"
+          # An empty docs/man/ would leave the glob unexpanded and fail the
+          # `cp` under `set -e`, which is the right failure: a release with
+          # no man pages is a packaging bug, not something to ship quietly.
+          cp docs/man/*.1 "$staging/man/"
+          cmp "$staging/qsh" "target/${{ matrix.target }}/release/qsh"
+          # A single `-C` per tar: bsdtar chains a second `-C` relative to
+          # the first and fails outright (measured), and passing the `man`
+          # directory instead of the glob would store a directory entry in
+          # readdir order.
+          ( cd "$staging" && tar czf "${GITHUB_WORKSPACE}/${asset}" qsh man/*.1 )
           echo "ASSET=$asset" >> "$GITHUB_ENV"
+          # Evidence for this step's completion criterion, in the job log:
+          # under C collation `man/qsh.1` is always the last member.
+          echo "archive members: $(tar tzf "$asset" | wc -l | tr -d ' ')"
+          tar tzf "$asset" | sed -n '1p;$p'
+          unexpected="$(tar tzf "$asset" | grep -v -e '^qsh$' -e '^man/[^/]*\.1$' || true)"
+          if [ -n "$unexpected" ]; then
+            flat="$(printf '%s' "$unexpected" | tr '\n' ' ')"
+            echo "::error title=Archive contents::${asset} holds members that are neither the binary nor a man page: ${flat}"
+            exit 1
+          fi
+          # The guard above is one-sided (it rejects strangers, it does not
+          # require the pages), so also pin the page count to docs/man/:
+          # an archive that quietly lost `man/*.1` must red the step too.
+          pages="$(tar tzf "$asset" | grep -c '^man/[^/]*\.1$' || true)"
+          expected="$(set -- docs/man/*.1 && echo "$#")"
+          if [ "$pages" != "$expected" ]; then
+            echo "::error title=Archive contents::${asset} holds ${pages} man pages but docs/man/ has ${expected}"
+            exit 1
+          fi
 
       - name: Package archive (windows)
         if: runner.os == 'Windows'
