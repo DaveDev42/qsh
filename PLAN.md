@@ -86,6 +86,16 @@ M10은 저장소 밖 자격에 묶인 첫 마일스톤이다. Apple 계정과 �
 
 **(c) 완료 판정:** dispatch run에서 musl leg green, musl 자산 하나가 아티팩트로 올라오고 스모크 통과, `ldd` 출력이 run 로그에 남는다. aws-lc-rs가 musl에서 막히면 이 스텝을 닫지 않고 §8 #3으로 올린다 — `ring` backend 전환은 wire와 무관한 빌드 변경이지만 M8이 얼린 것을 되짚는 인상이 있어 ADR을 먼저 쓴다.
 
+**(a)-추기 — Step 4 착지 (2026-09-25, main 세션).** 커밋 `168e00c` 하나다. 브랜치에서는 `f8d650c`였고 main 위로 rebase하면서 해시만 바뀌었다(트리 차이는 PLAN.md뿐). release.yml 매트릭스에 `x86_64-unknown-linux-musl` leg을 ubuntu-24.04 네이티브로 더했고(`musl: true` 키), `Install the musl C toolchain` 스텝은 `musl-tools`만 깐다. (a)가 예상한 cmake·clang·`RUSTFLAGS=-C target-feature=+crt-static` 셋은 모두 불필요했다. aws-lc-sys 0.45.0이 이 트리플의 프리제너레이트 바인딩을 실어 cc 경로로 빌드되고 crt-static은 musl 타깃의 기본값이다. 정적 링크 증거는 `Static-link evidence (musl)` 스텝이 남긴다. `set -euo pipefail` 아래 `file`과 `ldd` 출력을 로그에 찍고 `readelf -d`에 DT_NEEDED 항목이 하나라도 있으면 붉힌다. (b)가 적은 `ldd`의 "not a dynamic executable"은 정적 non-PIE의 문구고 이 빌드는 static-PIE라 "statically linked"가 나오므로, 두 경우에 다 성립하는 DT_NEEDED 부재를 단언으로 삼았다.
+
+jemalloc은 `cfg(all(target_os = "linux", target_env = "gnu"))`로 좁혔다. Cargo.toml의 의존 블록과 main.rs의 `#[global_allocator]`·`_rjem_malloc_conf` 둘 다다. 빌드 자체는 musl에서도 섰지만 `tikv-jemalloc-sys`가 musl을 자기 `NO_BG_THREAD_TARGETS`에 올려 두고 build 경고만 낸 채 `background_thread:true`를 그대로 설정하는 상태였다. 이 의존이 붙은 이유인 background purge가 musl에서는 무력하니 붙일 근거가 없다. `cargo tree -p qsh-cli --target x86_64-unknown-linux-gnu`는 전후 동일(`tikv-jemallocator v0.7.0`, `tikv-jemalloc-sys v0.7.1+5.3.1`)이고 musl 타깃에서는 0줄이다. testing.md에 "M10 — musl 바이너리의 RSS 주장 범위" 문단을 더해 PRD §13의 idle 30 MB를 gnu 바이너리에만 주장한다고 적었다. `scripts/install.sh`는 `QSH_LIBC` 옵트인을 받는다. 기본 `gnu`, `musl`만 허용, 그 외 값은 `die`, aarch64와 musl의 조합은 자산이 없다고 거부한다. README와 scripts/README의 환경변수 표와 수동 다운로드 표에 행이 하나씩 늘었다.
+
+검증은 WSL(`dave-windows-wsl`)에서 두 번 쟀다. 먼저 `331dee6`(jemalloc이 musl에도 붙은 상태)로 musl 빌드가 서는지 봤다. 1m06s, static-pie, DT_NEEDED 0, 24,674,856 B, STRICT 스모크 PASS. 그다음 `f8d650c`로 다시 빌드해 24,107,288 B(jemalloc이 빠져 567,568 B 감소), DT_NEEDED 0, gnu 빌드와 clippy green, gnu 스모크 PASS를 확인했다. musl STRICT 스모크는 첫 회차에 `no response from 127.0.0.1:<port> within 10s`(`CONNECTION_FAILED`)로 붉어 열두 번씩 다시 돌렸더니 musl 10/12, gnu 9/12로 libc와 무관한 동률이었다. 같은 문구의 첫 connect 10초 타임아웃은 커밋 `152dd78`의 WSL 검증 때 gnu debug 테스트 285건 중 10건에서도 나왔다. WSL2 loopback의 특성이지 musl 회귀가 아니다. 네이티브 ubuntu 러너에서는 0건이다. §4에 잔여 위험으로 적는다.
+
+판정은 dispatch run 36020104160(브랜치 `m10-step4`, 커밋 `f8d650c`)로 했다. build 여섯 leg 전부 초록이고 musl leg 로그에 `Static-link evidence (musl)`의 `file`·`ldd`·readelf 결과와 `release_smoke: driving …/x86_64-unknown-linux-musl/release/qsh`, `release_smoke_covers_init_trust_exec_pty_detach_and_reattach ... ok`가 남았다. leg 벽시계는 gnu x86_64 4:25, musl 6:19, aarch64 5:02, windows 6:01, darwin arm64 7:20, darwin x86_64 15:08. 업로드된 아티팩트 크기(GitHub API의 `size_in_bytes`)는 gnu x86_64 8,249,080, gnu aarch64 8,333,599, musl 8,393,063, darwin arm64 6,098,860, darwin x86_64 6,398,208, windows 4,668,967 바이트다. main에 올린 `168e00c`로도 release.yml을 한 번 더 dispatch했다(run 36022180833, 여섯 leg 전부 초록).
+
+리뷰는 opus 두 렌즈로 했고 커밋 전에 반영했다. readelf 스텝이 `set -uo pipefail`이라 readelf 자체가 실패하면 통과하던 fail-open을 `set -euo pipefail`과 출력 캡처로 닫았고 주석의 과잉 주장 둘(crt-static 관련, Cargo.toml의 미검증 stderr 계약 문장)을 사실로 좁혔다. 남긴 것은 `QSH_LIBC`가 macOS에서 조용히 무시된다는 지적 하나다. 표에 Linux 전용 변수라고 적혀 있어 그대로 둔다. §4.1 #2·#3 확정.
+
 ### Step 5 — macOS codesign + notarization (0.40ew)
 
 선행: Step 0의 Apple 자격 둘. §8 #2.
@@ -201,6 +211,7 @@ M10은 저장소 밖 자격에 묶인 첫 마일스톤이다. Apple 계정과 �
 - **notarization 리드타임이 가장 큰 단일 일정 리스크다.** `docs/ROADMAP.md` §4 리스크 5가 "M8 중 시작"을 대응으로 적었는데 두 마일스톤이 지나도록 시작 기록이 없다. Apple Developer Program 승인 자체가 수일에서 수주다. Step 0이 늦으면 Step 5와 Step 10의 DoD 2 축이 통째로 밀리고 그것만으로 M10이 닫히지 않는다.
 - **Gatekeeper와 단일 바이너리의 구조적 불일치.** `stapler`는 `.app`/`.dmg`/`.pkg`에만 티켓을 붙인다. tar.gz 안의 맨 실행 파일은 공증은 되지만 스테이플이 안 되므로 오프라인 머신의 `spctl` 판정이 미검증이다. curl 경로는 quarantine 속성을 떼므로 무증상일 가능성이 높지만, DoD 2 문면이 "차단하지 않음"이라 판정 방법 자체를 Step 10 캠페인 문서가 먼저 정의해야 한다.
 - **musl과 aws-lc-rs.** 워크스페이스는 rustls·quinn·rcgen 셋 모두 aws-lc-rs backend로 고정돼 있다. C/asm 빌드라 musl 타깃에서 cmake·clang·musl 헤더가 필요하고 `-C target-feature=+crt-static`와의 조합이 가장 깨지기 쉽다. 선행 신호가 하나 있다 — `ci.yml`의 주석이 cargo-deny-action 도커 이미지가 musl 툴체인을 못 찾아 깨졌던 이력을 적는다.
+- **WSL2 loopback의 첫 connect 10초 타임아웃.** `dave-windows-wsl`에서 release 스모크를 열두 번씩 돌리면 gnu 9/12, musl 10/12만 통과하고 나머지는 `no response from 127.0.0.1:<port> within 10s`(`CONNECTION_FAILED`)로 붉는다. 네이티브 ubuntu 러너와 macOS에서는 0건이라 WSL2 환경 특성으로 보지만 원인은 미상이다. WSL 검증 결과를 읽을 때 이 비율을 감안하고, 네이티브 Linux에서 같은 문구가 나오면 그때 별도로 판다.
 - **musl과 jemalloc의 RSS 특성.** 빌드가 서더라도 그 의존이 붙은 사유(glibc arena high-water)가 musl에는 해당하지 않아 idle RSS 모양이 gnu와 달라진다. soak과 적대적 부하 판정은 gnu 바이너리 기준이고, musl 바이너리에 30MB bound를 그대로 주장하면 안 된다.
 - **release 프로파일 테스트가 태그 벽시계를 늘린다.** `cargo build --release` 뒤 테스트 크레이트를 다시 컴파일하므로 leg당 수 분이 붙는다. 매트릭스 leg은 병렬이라 증가분은 leg 합이 아니라 가장 느린 leg 하나 몫이지만, 첫 dispatch run에서 실제 증가를 재서 §4.1에 적는다.
 - **provenance 검증의 실효성.** Sigstore 공개 로그에 기록은 남지만 검증에 `gh` 또는 `cosign`이 필요하다. 검증을 선택 경로로 두는 대가로 "대부분의 사용자는 검증하지 않는다"가 남는다.
@@ -215,8 +226,8 @@ M10은 저장소 밖 자격에 묶인 첫 마일스톤이다. Apple 계정과 �
 | # | 질문 | 초안 | 확정 시점 |
 |---|---|---|---|
 | 1 | 스모크 env 변수 이름 | `QSH_SMOKE_BIN`·`QSH_SMOKE_STRICT`. 적대적 부하 하네스의 `QSH_LOAD_BIN`·`QSH_LOAD_STRICT` 관례를 그대로 따른다. **확정(2026-09-24):** 초안대로(`152dd78`). `docs/design/testing.md`의 환경변수 표에 행이 올랐다 | Step 2 |
-| 2 | musl에서 jemalloc의 처분 | 먼저 그대로 빌드해 보고, 안 서면 `target_env = "gnu"`로 좁히고 testing.md L9에 30MB 미주장 문장 | Step 4 |
-| 3 | musl 툴체인 경로 | `musl-tools` 네이티브가 1순위, `cargo-zigbuild`는 차선. 교차 컴파일은 aws-lc-rs를 다시 어렵게 만든다 | Step 4 |
+| 2 | musl에서 jemalloc의 처분 | 먼저 그대로 빌드해 보고, 안 서면 `target_env = "gnu"`로 좁히고 testing.md L9에 30MB 미주장 문장 **확정(2026-09-25):** `target_env = "gnu"`로 좁혔다. 빌드는 musl에서도 섰지만 `tikv-jemalloc-sys`가 musl을 `NO_BG_THREAD_TARGETS`에 두어 background purge가 무력한 채 경고만 내므로 붙일 근거가 없었다. gnu 의존 그래프는 전후 동일, musl 타깃 0줄. testing.md의 "M10 — musl 바이너리의 RSS 주장 범위" 문단이 30 MB 미주장 문장이다. | Step 4 |
+| 3 | musl 툴체인 경로 | `musl-tools` 네이티브가 1순위, `cargo-zigbuild`는 차선. 교차 컴파일은 aws-lc-rs를 다시 어렵게 만든다 **확정(2026-09-25):** `musl-tools` 네이티브. aws-lc-sys 0.45.0의 프리제너레이트 바인딩 덕에 cmake·clang 없이 cc 경로로 빌드됐고 crt-static은 타깃 기본값이라 RUSTFLAGS도 없다. `cargo-zigbuild`는 쓰지 않았다. | Step 4 |
 | 4 | 서명 identity 문자열의 출처 | `APPLE_TEAM_ID` 시크릿으로 조립할지 identity 전체를 시크릿에 둘지 | Step 5 |
 | 5 | notarytool 자격 방식 | App Store Connect API key(`--key`). Apple ID + app-specific password는 회전 비용 때문에 배제 | Step 0·5 |
 | 6 | attestation 대상 범위 | `dist/*` 전 자산. `SHA256SUMS` 자체를 포함할지 | Step 6 |
