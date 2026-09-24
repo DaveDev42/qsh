@@ -5,10 +5,10 @@
 mod render;
 mod tui;
 
-// jemalloc global allocator (Linux only) — see crates/qsh-cli/Cargo.toml for
-// why. On Linux the serve/listener returns freed pages to the OS at idle via
-// jemalloc's background purge threads instead of pinning glibc's arena
-// high-water. macOS and Windows use the system allocator.
+// jemalloc global allocator (glibc Linux only) — see crates/qsh-cli/Cargo.toml
+// for why. On glibc Linux the serve/listener returns freed pages to the OS at
+// idle via jemalloc's background purge threads instead of pinning glibc's
+// arena high-water. musl, macOS and Windows use the system allocator.
 //
 // `malloc_conf` pins the fixed floor so it fits the PRD 30 MiB idle bound
 // (docs/PRD.md:286). `narenas:1` caps arena count at one: jemalloc otherwise
@@ -24,11 +24,11 @@ mod tui;
 // to jemalloc's `malloc_conf`; jemalloc reads it as a `char *`, so the `&[u8]`
 // slice's data pointer (its first word) is what it sees — hence a NUL
 // terminator and a reference, not an array.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 #[allow(non_upper_case_globals)]
 #[unsafe(export_name = "_rjem_malloc_conf")]
 pub static malloc_conf: &[u8] =

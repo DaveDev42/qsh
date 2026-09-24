@@ -32,6 +32,13 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
+          # Static Linux build for old-glibc distributions
+          # (`docs/ROADMAP.md` M10 acceptance criteria, third sentence).
+          # Native x86_64 runner, not a cross build: crossing would put
+          # aws-lc-sys back on a toolchain hunt it does not need here.
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            musl: true
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             ext: .exe
@@ -50,7 +57,37 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: nextest
+      # musl-gcc only. aws-lc-sys 0.45.0 ships pregenerated bindings for this
+      # triple, so its build script takes the cc path and never reaches the
+      # cmake builder; nothing here needs cmake, clang or bindgen. If that
+      # ever changes the build fails loudly with the builder it chose in the
+      # log, which is more useful than pre-installing cmake and never knowing.
+      - name: Install the musl C toolchain
+        if: matrix.musl
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
       - run: cargo build --release -p qsh-cli --target ${{ matrix.target }}
+
+      # crt-static is the target default; the readelf step is the guard.
+      # Pins the static-link precondition for the third M10 acceptance
+      # sentence (`docs/ROADMAP.md` M10 acceptance criteria); the run on an
+      # old-glibc distribution is a separate clean-VM campaign. `ldd` alone
+      # is not an assertion: on a static non-PIE it prints "not a dynamic
+      # executable" and exits non-zero, on a static PIE it prints
+      # "statically linked" and exits 0. DT_NEEDED is the invariant that
+      # holds either way.
+      - name: Static-link evidence (musl)
+        if: matrix.musl
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="target/${{ matrix.target }}/release/qsh"
+          file "$bin"
+          ldd "$bin" 2>&1 || true
+          dyn_out="$(readelf -d "$bin")"
+          if printf '%s' "$dyn_out" | grep -q NEEDED; then
+            echo "::error::${bin} has DT_NEEDED entries; it is not statically linked"
+            exit 1
+          fi
 
       # `version --json` proves only that the binary starts. What ships is
       # judged by the functional smoke in the next step (`docs/ROADMAP.md`

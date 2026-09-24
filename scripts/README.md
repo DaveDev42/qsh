@@ -3,9 +3,9 @@
 ## install.sh
 
 POSIX-sh installer for a prebuilt `qsh` release archive. No Rust toolchain
-needed. Supports macOS (arm64, x86_64) and Linux (x86_64, aarch64); on
-Windows it prints a pointer to the manual `.zip` download instead of
-attempting an install.
+needed. Supports macOS (arm64, x86_64) and Linux (x86_64 and aarch64 against
+glibc, x86_64 against musl); on Windows it prints a pointer to the manual
+`.zip` download instead of attempting an install.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/DaveDev42/qsh/main/scripts/install.sh | sh
@@ -16,6 +16,7 @@ curl -fsSL https://raw.githubusercontent.com/DaveDev42/qsh/main/scripts/install.
 | `QSH_VERSION` | latest release | Release tag to install, e.g. `v0.1.0-alpha.1` |
 | `QSH_INSTALL_DIR` | `$HOME/.local/bin` | Where the `qsh` binary is installed |
 | `QSH_REPO` | `DaveDev42/qsh` | `owner/repo` to install from (forks, testing) |
+| `QSH_LIBC` | `gnu` | Linux only. `musl` picks the static x86_64 build for old-glibc distributions |
 
 The script downloads the release archive and that release's `SHA256SUMS`,
 requires exactly one 64-character hex entry for the archive it fetched, and

@@ -99,11 +99,11 @@ http://internal-service/`.
 
 ## Install
 
-Prebuilt binaries for macOS (arm64, x86_64), Linux (x86_64,
-aarch64) and Windows (x86_64) are attached to each [GitHub
-release](https://github.com/DaveDev42/qsh/releases). The one-line installer
-below covers macOS and Linux; on Windows take the `.zip` (see [Manual
-download](#manual-download)).
+Prebuilt binaries for macOS (arm64, x86_64), Linux (x86_64 and aarch64
+against glibc, x86_64 against musl) and Windows (x86_64) are attached to
+each [GitHub release](https://github.com/DaveDev42/qsh/releases). The
+one-line installer below covers macOS and Linux; on Windows take the
+`.zip` (see [Manual download](#manual-download)).
 
 One line installs the latest:
 
@@ -122,6 +122,7 @@ signature: the binaries are neither signed nor notarized until M10.
 | `QSH_VERSION` | latest release | Release tag to install, e.g. `v0.1.0-alpha.1` |
 | `QSH_INSTALL_DIR` | `$HOME/.local/bin` | Where the `qsh` binary lands (created if missing) |
 | `QSH_REPO` | `DaveDev42/qsh` | `owner/repo` to install from, for forks and testing |
+| `QSH_LIBC` | `gnu` | Linux only. `musl` picks the static x86_64 build for old-glibc distributions |
 
 ### Manual download
 
@@ -134,6 +135,7 @@ To download by hand, take the asset matching your platform, check it against
 | macOS, Intel | `qsh-<tag>-x86_64-apple-darwin.tar.gz` |
 | Linux x86_64 | `qsh-<tag>-x86_64-unknown-linux-gnu.tar.gz` |
 | Linux aarch64 | `qsh-<tag>-aarch64-unknown-linux-gnu.tar.gz` |
+| Linux x86_64, static (musl) | `qsh-<tag>-x86_64-unknown-linux-musl.tar.gz` |
 | Windows x86_64 | `qsh-<tag>-x86_64-pc-windows-msvc.zip` |
 
 The installer has no Windows path. Take the `.zip` from the releases page.

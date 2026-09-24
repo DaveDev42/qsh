@@ -13,6 +13,12 @@
 #                     Defaults to "$HOME/.local/bin". Created if missing.
 #   QSH_REPO         "owner/repo" to install from. Defaults to
 #                     "DaveDev42/qsh". Mainly for forks/testing.
+#   QSH_LIBC         Linux only: "gnu" (default) or "musl". The musl asset is
+#                     a static binary for distributions whose glibc is older
+#                     than the gnu build needs. Opt-in, never auto-detected:
+#                     a glibc system runs the musl binary fine, so guessing
+#                     would quietly move people off the tested artifact.
+#                     x86_64 only.
 #
 # This script never invokes sudo. If QSH_INSTALL_DIR is not writable, it
 # fails with a message rather than escalating privileges on your behalf.
@@ -59,9 +65,19 @@ detect_target() {
             esac
             ;;
         Linux)
+            case "${QSH_LIBC:-gnu}" in
+                gnu) libc="gnu" ;;
+                musl) libc="musl" ;;
+                *) die "QSH_LIBC must be 'gnu' or 'musl'" ;;
+            esac
             case "$arch" in
-                x86_64 | amd64) echo "x86_64-unknown-linux-gnu" ;;
-                aarch64 | arm64) echo "aarch64-unknown-linux-gnu" ;;
+                x86_64 | amd64) echo "x86_64-unknown-linux-${libc}" ;;
+                aarch64 | arm64)
+                    [ "$libc" = gnu ] ||
+                        die "no aarch64 musl asset is published; unset QSH_LIBC \
+to install the glibc build"
+                    echo "aarch64-unknown-linux-gnu"
+                    ;;
                 *) die "unsupported Linux architecture: $arch" ;;
             esac
             ;;
