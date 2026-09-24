@@ -194,6 +194,12 @@ dispatch는 둘이다. 배선 확인 run 36032667096(180초)은 control 60초가
 
 **(c) 완료 판정:** 네 플랫폼 전부 PASS와 구형 glibc musl 회차 1건 PASS가 회차 표에 기록되고, 각 행에 바이너리 sha256과 설치 경로가 있다.
 
+**(a)-추기 — Step 10 착지 (2026-09-25, main 세션).** 커밋 `18f29f0`이 `docs/campaigns/m10-clean-vm.md`를 신설하고 CLAUDE.md 문서 지도와 `docs/design/testing.md`의 Gatekeeper 불릿이 그 파일을 가리키게 했다. 회차 표는 비어 있고 사람이 채운다. 브리프의 열린 질문 다섯은 이렇게 답했다. 회차 다섯은 네 플랫폼 각 하나와 구형 glibc 이미지의 musl 하나이고 Windows 회차는 없다. 구형 이미지는 Debian 10(glibc 2.28)이 기본, CentOS 7(glibc 2.17)이 대안이며 같은 이미지에서 gnu 자산은 동적 링커가 거부해야 한다. `man qsh`는 brew 절의 관측 항목이지 요건이 아니다. tap bump의 `continue-on-error`는 사실만 적었다. (a)의 "ldd가 not a dynamic executable을 낸다"는 정적 PIE 실측(`168e00c`)과 어긋나서 문서는 `statically linked`와 `not a dynamic executable` 둘 다 PASS로 센다.
+
+리뷰는 opus 두 렌즈였고 변이 검증은 렌즈 A만 맡았다. major는 중복 하나를 빼고 다섯이었다. §9가 수동 다운로드만으로 DoD 1을 닫게 열려 있던 것, macOS arm64 회차가 한 행으로는 닫히지 않는 것(같은 VM에서 brew를 먼저 밟으면 Gatekeeper 평가 캐시가 남아 DoD 2 판정이 오염된다), 구형 glibc의 curl 경로에 `QSH_LIBC=musl`이 없던 것, §10이 표에 없는 "대상 태그 열"을 인용한 것, `--key-store` 인용이 `docs/CLI.md` §6.2로 잘못 간 것(둘 다 §6.11)이다. 고침으로 회차 표는 `회차` 열이 붙어 열한 개가 됐고 macOS arm64는 스냅숏 둘(수동 다운로드로 DoD 2, 새 스냅숏에서 brew)로 돈다. 브리프가 열 개를 못박았던 터라 워크플로 게이트가 여기서 멈췄고 main 세션이 열한 개를 채택했다. 요건 여섯은 요건이지 열 수가 아니다. main 세션이 둘을 더 고쳤다. 렌즈 B의 §6.4 지적(마커에 빈 따옴표를 끼워 터미널 에코만으로는 통과하지 못하게, `release_smoke` 테스트와 같은 형태)이 fixer에서 빠져 있었고 macOS x86_64 회차의 순서(수동 다운로드 먼저, curl 나중) 문장이 없었다.
+
+humanize는 opus monolith 한 번이었다. 문장 터치율 4.8%(18/373), 문자 변경률 0.3%이고 펜스 18·백틱 스팬 240·숫자 318·표 행 22·헤딩 28·줄 수 378은 바이트 단위로 같았다. 게이트는 xtask 13건 세 번 green이었고 문서 전용 변경이라 CI가 나머지를 덮는다. **§4.1 #10 확정.** DoD 1·2·3의 판정은 회차 표가 채워질 때 사람이 한다.
+
 ### Step 11 — crates.io publish gate 해제 (0.20ew)
 
 선행: dry-run은 없음, publish 실행은 Step 10 PASS와 Step 0의 토큰. §8 #8.
@@ -280,7 +286,7 @@ CI는 (a)가 적은 "크레이트별 네 스텝"이 아니라 `publish-dry-run` 
 | 7 | man 아카이브 안의 경로 접두 | `man/*.1`. formula의 `man1.install Dir["man/*.1"]`와 같은 문자열 **확정(2026-09-25):** `man/*.1` 평평한 배치(`b38ed80`). formula에는 `man1.install Dir["man/*.1"]` 한 줄을 넣었다(tap 커밋 `0407d57`). 첫 M10 태그 전의 0.2.0 설치는 `Dir`이 비어 `opoo` 경고 한 줄만 남기고 성공한다. | Step 7 |
 | 8 | 30분 회차의 자리 | `load.yml`에 `workflow_dispatch` 전용 job 추가 또는 `long.yml` 신설 **확정(2026-09-25):** `long.yml` 신설. `load.yml`은 `cancel-in-progress`라 30분 회차가 뒤따르는 push에 끊기고, `.config/nextest.toml`의 `[profile.long]`과 같이 별도 파일이 맞다. | Step 9 |
 | 9 | 저속·역압 축의 보강 여부 | 기존 하네스가 값싸게 받으면 더하고, 아니면 잔여 위험으로 적는다 **확정(2026-09-25):** 더하지 않는다. 근거는 §4의 잔여 위험 문단. | Step 9 |
-| 10 | 캠페인 회차 수와 구형 glibc 이미지 | 네 플랫폼 각 1회 + musl 1회가 하한. 이미지 후보는 CentOS 7 또는 Debian 10 계열 | Step 10 |
+| 10 | 캠페인 회차 수와 구형 glibc 이미지 | 네 플랫폼 각 1회 + musl 1회가 하한. 이미지 후보는 CentOS 7 또는 Debian 10 계열 **확정(2026-09-25):** 네 플랫폼 각 1회 + musl 1회(`18f29f0`). 구형 glibc 이미지는 Debian 10(glibc 2.28)이 기본, CentOS 7(glibc 2.17)이 대안이며 같은 이미지에서 gnu 자산은 동적 링커가 거부해야 한다. | Step 10 |
 | 11 | publish 대상 크레이트 집합 | proto·transport·core·cli 넷. testkit·xtask는 `publish = false` 유지 **확정(2026-09-25):** 초안대로 넷(`faf10bd`). CI 게이트는 크레이트별 dry-run이 아니라 `--workspace` dry-run 한 번에 publish 집합 고정 스텝을 더한 `publish-dry-run` 잡이다. 단독 dry-run은 첫 publish 전에 레지스트리에 없는 의존 때문에 초록이 될 수 없어서다. 공개 tarball의 test 타깃은 미발행 `qsh-testkit`을 요구해 tarball만으로 컴파일되지 않으며 `exclude`는 넣지 않았다. 마감 감사에서 다시 본다. | Step 11 |
 | 12 | 릴리스 노트의 자리 | GitHub Release 본문인지 `docs/` 아래 파일인지 | Step 12 |
 | 13 | 스모크의 양방향 pin 경로 | `identity export` + `trust add --cert-file`이 1순위(릴리스 바이너리 하나로 파일만 주고받으면 된다), `trust add --fingerprint`는 fingerprint를 어디서 관측할지가 한 단계 더 붙어 차선. **확정(2026-09-24):** `trust add --fingerprint`다. `Fleet::start_with_bin`이 기존 `Fleet::start_with`의 pin 순서를 그대로 물려받아 fingerprint는 `init --json` 출력에서 이미 손에 있고, `identity export` + `--cert-file` 경로는 `init_trust.rs`가 따로 덮는다(`152dd78`) | Step 2 |
