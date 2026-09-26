@@ -651,9 +651,10 @@ to the registry yet.
 | M8 | Hardening (fuzz, soak, real-device mobility campaign) | Code done; mobility campaign, wire freeze and security review open |
 | M9 | Human-facing surface (naming, pairing, service install) | Features done; stopwatch campaign open |
 | M10 | Release (installers, Homebrew, notarization, musl, provenance) | Pipeline done; clean-VM campaign open |
+| M11–M19 | P1, starting with issue follow-ups and ACL visibility (M11); the rest is in `docs/ROADMAP.md` §5 | M11 in progress |
 
 The Homebrew tap (`DaveDev42/tap`) and the release workflow's auto-bump
-job are wired and have run once, on `v0.2.0`. What M10 still owes is a
+job are wired and have run on `v0.2.0` and `v0.3.0`. What M10 still owes is a
 person's work: the clean-VM install campaign, and the first push to
 crates.io once that campaign passes — see
 [docs/ROADMAP.md](docs/ROADMAP.md) for the full acceptance criteria.
