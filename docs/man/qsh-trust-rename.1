@@ -1,6 +1,6 @@
 .ie \n(.g .ds Aq \(aq
 .el .ds Aq '
-.TH qsh-trust-rename 1  "rename 0.2.0" 
+.TH qsh-trust-rename 1  "rename 0.3.0" 
 .SH NAME
 qsh\-trust\-rename \- Rename a pinned peer (`docs/CLI.md` §6.11). Takes effect at the next handshake with no restart required. `acl.toml` is not reloaded: until `qsh serve`/`qsh listen` restarts with a row for the new name, the renamed peer matches no row and is denied (default\-deny); rows naming the old principal no longer apply to it
 .SH SYNOPSIS
@@ -33,4 +33,4 @@ The peer\*(Aqs current trust\-store name
 <\fINEW\fR>
 The name to rename it to
 .SH VERSION
-v0.2.0
+v0.3.0

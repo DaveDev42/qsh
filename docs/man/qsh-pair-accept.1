@@ -1,6 +1,6 @@
 .ie \n(.g .ds Aq \(aq
 .el .ds Aq '
-.TH qsh-pair-accept 1  "accept 0.2.0" 
+.TH qsh-pair-accept 1  "accept 0.3.0" 
 .SH NAME
 qsh\-pair\-accept \- Dial `address`, redeem `code` against its invite, and — on a successful mutual proof — pin the peer exactly as `trust add` would (ADR\-0002, `docs/CLI.md` §6.11)
 .SH SYNOPSIS
@@ -45,4 +45,4 @@ Optional. With no code here and no `\-\-code\-stdin`, a terminal is prompted for
 
 A fingerprint is a public value, so `trust add \-\-fingerprint` left in shell history is not a risk. A code left in history has no reuse value either: an invite is single\-use and stops being redeemable 10 minutes after `pair invite` mints it.
 .SH VERSION
-v0.2.0
+v0.3.0
