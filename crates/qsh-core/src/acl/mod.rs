@@ -62,6 +62,37 @@ pub use load::{
 // itself calls for `acl_policy_missing`/`acl_policy_invalid`.
 pub(crate) use load::{ca_policy_example_row, policy_example_rows};
 pub use policy::{ActionPattern, Policy, Rule, Scope, Verdict};
+
+// Expands to the literal restart-notice string below. A `macro_rules!`
+// rather than a plain `&str` fn/const alias so `crate::doctor`'s two
+// `&'static str` `remedy` fields — which must stay `concat!`-able at
+// compile time — can splice it in directly:
+// `concat!("…, then ", crate::acl::acl_restart_notice!())`. Private by
+// default (module-scoped macro namespace); the `pub(crate) use` below is
+// what makes `crate::acl::acl_restart_notice!()` resolvable by path from
+// `doctor.rs`, the same re-export idiom every other item in this file
+// uses (`policy::…`, `load::…`) — no `#[macro_export]`, since nothing
+// outside this crate calls it.
+macro_rules! acl_restart_notice {
+    () => {
+        "restart serve/listen — acl.toml is only read once at process start."
+    };
+}
+pub(crate) use acl_restart_notice;
+
+/// The verbatim restart notice every ACL doctor remedy that requires a
+/// restart ends with (ADR-0017 결정 2: `acl.toml` loads once at process
+/// start, there is no hot reload) — the same `acl_restart_notice!()`
+/// expansion as [`crate::doctor::ACL_PRINCIPAL_UNMATCHED`]'s and
+/// [`crate::doctor::ACL_CA_AUTH_PATH_MISSING`]'s `remedy` tails (those two
+/// use the macro directly, via `concat!`, since a `remedy` is
+/// `&'static str` and this constant is not itself a literal). `qsh acl
+/// show`'s human renderer (`docs/CLI.md` §6.19, ADR-0025 결정 6) is meant
+/// to print this constant as its own standalone line, and M12's `qsh
+/// setup` (ADR-0024 결정 4) a fourth consumer — both read from this one
+/// constant rather than retyping the wording, so the surfaces can never
+/// drift apart.
+pub const ACL_RESTART_NOTICE: &str = acl_restart_notice!();
 pub use registry::{
     ALWAYS_DENIED_NO_OP, DENY_SEAMS, DenySeam, OP_REGISTRY, Op, OpSpec, ResourceKind, SeamKind,
 };

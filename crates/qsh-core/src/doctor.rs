@@ -431,37 +431,54 @@ pub const BINDV6ONLY_BLOCKS_IPV4: Diagnostic = Diagnostic {
     remedy: "Bind an explicit IPv4 address for IPv4 reachability (--bind 0.0.0.0:4433), or run separate listeners, or confirm this OS's IPv6 dual-stack default matches intent.",
 };
 
-/// `docs/adr/0017-acl-toml-not-written.md` 결정 2 (`:20-26`): the code
-/// string itself is fixed by that ADR (`:21`'s matching rule, reused
-/// verbatim by [`crate::acl::PinnedPrincipalIndex`]) — a `trust.toml`
-/// pin that no pin-path `acl.toml` row (`device:<name>` or
-/// `fp:sha256:<fingerprint>`, explicit or defaulted `auth_path = "pin"`)
-/// matches. `error`, not `warn`: the same shape
-/// [`PEER_UNTRUSTED`] already reasons through — a named, real peer that
-/// is *certain* to be denied every request, not a latent gap.
+/// `docs/adr/0017-acl-toml-not-written.md` 결정 2: the code string
+/// itself is fixed by that ADR (its matching rule, reused verbatim by
+/// [`crate::acl::PinnedPrincipalIndex`]) — a `trust.toml` pin that no
+/// pin-path `acl.toml` row (`device:<name>` or `fp:sha256:<fingerprint>`,
+/// explicit or defaulted `auth_path = "pin"`) matches. `error`, not
+/// `warn`: the same shape [`PEER_UNTRUSTED`] already reasons through — a
+/// named, real peer that is *certain* to be denied every request, not a
+/// latent gap.
+///
+/// `remedy`'s tail is [`crate::acl::ACL_RESTART_NOTICE`]'s wording
+/// (`crate::acl::acl_restart_notice!()`), not a second, retyped copy of
+/// the same restart wording — `docs/CLI.md` §6.17 quotes this field
+/// verbatim, and the byte layout is unchanged from before that
+/// extraction.
 pub const ACL_PRINCIPAL_UNMATCHED: Diagnostic = Diagnostic {
     id: DiagnosticId::AclPrincipalUnmatched,
     code: "acl_principal_unmatched",
     message: "trust.toml pins a peer that no acl.toml row with auth_path \"pin\" matches — neither its device:<name> principal nor its fp:sha256:<fingerprint> principal. Every request from this peer is denied (default-deny) until a matching row exists.",
-    remedy: "Add a matching [[acl]] row (ADR-0017), then restart serve/listen — acl.toml is only read once at process start.",
+    remedy: concat!(
+        "Add a matching [[acl]] row (ADR-0017), then ",
+        crate::acl::acl_restart_notice!()
+    ),
 };
 
-/// `docs/adr/0017-acl-toml-not-written.md` 결정 2 (`:20-26`): the code
-/// string is fixed by that ADR — `trust.toml` has at least one `[[ca]]`
-/// entry, but no `acl.toml` row anywhere sets `auth_path = "ca"`. File-
-/// wide by design ("peer 단위가 아니라 파일 전체 수준의 거친 검사", the ADR's
-/// own words): a CA-authenticated principal is still `device:<id>`-
-/// shaped and cannot be pre-enumerated (`docs/CLI.md` §6.16), so this
-/// check names the gap, never a specific peer. `warn`, not `error`:
-/// unlike [`ACL_PRINCIPAL_UNMATCHED`]'s named,
-/// certain-to-fail peer, this is "a CA is provisioned but nothing is
-/// proven to rely on it yet" — closer to [`CONFIG_UNKNOWN_KEY`]'s
-/// latent-gap shape than to [`PEER_UNTRUSTED`]'s certain failure.
+/// `docs/adr/0017-acl-toml-not-written.md` 결정 2: the code string is
+/// fixed by that ADR — `trust.toml` has at least one `[[ca]]` entry, but
+/// no `acl.toml` row anywhere sets `auth_path = "ca"`. File-wide by
+/// design ("peer 단위가 아니라 파일 전체 수준의 거친 검사", the ADR's own
+/// words): a CA-authenticated principal is still `device:<id>`-shaped
+/// and cannot be pre-enumerated (`docs/CLI.md` §6.16), so this check
+/// names the gap, never a specific peer. `warn`, not `error`: unlike
+/// [`ACL_PRINCIPAL_UNMATCHED`]'s named, certain-to-fail peer, this is "a
+/// CA is provisioned but nothing is proven to rely on it yet" — closer
+/// to [`CONFIG_UNKNOWN_KEY`]'s latent-gap shape than to
+/// [`PEER_UNTRUSTED`]'s certain failure.
+///
+/// `remedy`'s tail is [`crate::acl::ACL_RESTART_NOTICE`]'s wording
+/// (`crate::acl::acl_restart_notice!()`) — see
+/// [`ACL_PRINCIPAL_UNMATCHED`]'s doc for why this is an extraction, not a
+/// wording change; `docs/CLI.md` §6.17 quotes this field verbatim too.
 pub const ACL_CA_AUTH_PATH_MISSING: Diagnostic = Diagnostic {
     id: DiagnosticId::AclCaAuthPathMissing,
     code: "acl_ca_auth_path_missing",
     message: "trust.toml has a CA root, but no acl.toml row sets auth_path = \"ca\". Any peer authenticating via that CA is denied (default-deny) until one does.",
-    remedy: "Add an [[acl]] row with auth_path = \"ca\" (ADR-0017), then restart serve/listen — acl.toml is only read once at process start.",
+    remedy: concat!(
+        "Add an [[acl]] row with auth_path = \"ca\" (ADR-0017), then ",
+        crate::acl::acl_restart_notice!()
+    ),
 };
 
 /// `docs/ROADMAP.md` M9 (h) (added to the batch in commit `fab8563`), `docs/CLI.md` §6.17: a
@@ -668,6 +685,24 @@ mod tests {
         assert_eq!(
             DiagnosticId::AclPolicyInvalid.code(),
             crate::acl::ACL_POLICY_INVALID_CODE
+        );
+    }
+
+    #[test]
+    fn acl_restart_notice_is_the_verbatim_tail_of_both_acl_diagnostic_remedies() {
+        // Deliberately does not retype the notice's own wording — that
+        // literal exists exactly once in the whole crate, inside
+        // `crate::acl::acl_restart_notice!()`'s definition. Both
+        // assertions below reference the constant instead, so a wording
+        // edit still only ever touches that one place.
+        let notice = crate::acl::ACL_RESTART_NOTICE;
+        assert_eq!(
+            ACL_PRINCIPAL_UNMATCHED.remedy,
+            format!("Add a matching [[acl]] row (ADR-0017), then {notice}")
+        );
+        assert_eq!(
+            ACL_CA_AUTH_PATH_MISSING.remedy,
+            format!("Add an [[acl]] row with auth_path = \"ca\" (ADR-0017), then {notice}")
         );
     }
 
