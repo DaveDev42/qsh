@@ -1,6 +1,6 @@
 # M10 클린 VM 스모크 캠페인 (DoD 1·2·3)
 
-상태: 기준 확정, 회차 미실행.
+상태: 기준 확정. 태그 `v0.3.0`으로 §2.2 표의 Linux 플랫폼 셋(3·4·5번)을 §8의 회차 1·2·3으로 돌아 셋 다 PASS했고 macOS 둘(§2.2 표의 1·2번)은 아직 돌지 않았다. `v0.3.0`은 Apple 시크릿 없이 찍힌 태그라 §2.1에 따라 DoD 2를 판정하지 않는다. 그래서 이 태그로는 캠페인이 PASS로 닫히지 않고, 서명·공증이 붙은 다음 태그에서 다섯 회차를 다시 돈다.
 
 ## 1. 목적과 지위
 
@@ -335,11 +335,9 @@ qsh version --json
 
 | 회차 | 날짜(UTC) | 플랫폼/이미지 | 설치 경로 | 바이너리 sha256 | DoD 2 | DoD 3 | 스모크 네 축 | brew 버전 일치 | 결과 | 기록자 |
 |---|---|---|---|---|---|---|---|---|---|---|
-| | | | | | | | | | | |
-| | | | | | | | | | | |
-| | | | | | | | | | | |
-| | | | | | | | | | | |
-| | | | | | | | | | | |
+| 1 | 2026-09-26 | Ubuntu 24.04 x86_64 (컨테이너, Dave-Windows-WSL dockerd) | curl | 43cd8ed3a884c83ef456a32c9422069234cde9c515e0a68b9d1b8e9a1852231f | 해당 없음 | 해당 없음 | PASS | 해당 없음 | PASS | Claude(에이전트) |
+| 2 | 2026-09-26 | Debian 10 x86_64 (컨테이너, Dave-Windows-WSL dockerd), `ldd (Debian GLIBC 2.28-10+deb10u3) 2.28` | curl (`QSH_LIBC=musl`) | 3a339bdd818a1d8b1804874773403fa3955ceba3978a49fd3337adfd818ce5f0 | 해당 없음 | PASS | PASS | 해당 없음 | PASS | Claude(에이전트) |
+| 3 | 2026-09-26 | Ubuntu 24.04 aarch64 (lima VM, Dave-MBP16) | curl | bb8c2e9e74e4592505e9d4cc909b2a912cf683f38f16a997f3b6b3cfc5d4458f | 해당 없음 | 해당 없음 | PASS | 해당 없음 | PASS | Claude(에이전트) |
 
 열 채우는 법.
 
@@ -350,6 +348,14 @@ qsh version --json
 - **DoD 2 / DoD 3 / 스모크 네 축**: `PASS`, `FAIL`, `해당 없음` 셋 중 하나. **brew 버전 일치**: `<설치된 버전> = <태그>` 또는 `불일치: …` 또는 `해당 없음`. **결과**: 요건 1·2(바이너리 sha256, 설치 경로)가 비어 있지 않고 요건 3~6 중 `해당 없음`이 아닌 항목이 전부 PASS일 때만 `PASS`. **기록자**: 회차를 실제로 돌린 사람.
 
 행마다 비고를 붙인다. 비고는 표 아래에 회차 번호를 머리에 단 문단으로 이어 적는다. 비고에 들어가는 것: 대상 태그와 그 태그가 가리키는 커밋, release run id, `spctl` 출력 원문, `codesign -dv` 출력의 `Authority`·`TeamIdentifier`·`flags` 행, `notarytool status=` 줄, `ldd` 출력 원문, `man qsh` 관측, 막힌 지점의 원문 에러.
+
+**회차 1·2·3 공통.** 세 회차는 2026-09-26 같은 날 병렬로 돌았고, 번호는 축 4의 세션이 만들어진 순서다. 셋 다 대상 태그 `v0.3.0` → `891c407`, release run 36254706923이다. 기록자 열은 회차를 돌린 사람을 적게 돼 있지만 세 회차 모두 에이전트(Claude)가 돌렸다. 회차 1·2는 VM이 아니라 이미지에서 막 띄운 컨테이너다. §2.3의 조건은 컨테이너에서도 그대로 확인할 수 있어서 회차로 셌다. 이 두 판단은 캠페인을 닫을 때 사람이 다시 볼 항목이다. 네 축은 모두 §6.0의 export를 건 tmux 창 둘에서 loopback으로 밟았고 `init`마다 `--key-store file`을 붙였다. 접속할 때마다 stderr에 `qsh: the writer lease moved to device:laptop`이 떴지만 판정 문자열과는 관계없었다.
+
+**회차 1.** 대상 태그 `v0.3.0` → `891c407`. Dave-Windows-WSL의 dockerd에서 `ubuntu:24.04` 이미지로 새로 띄운 컨테이너이고, `curl ca-certificates tmux procps` 넷만 더 설치했다. 시작 전에 `which -a qsh`가 0건이었고 `~/.config/qsh`와 `~/.local/state/qsh`는 없었다. 설치는 README의 `curl -fsSL https://raw.githubusercontent.com/DaveDev42/qsh/main/scripts/install.sh | sh`를 환경변수 없이 실행했다. 설치 스크립트가 찍은 진행 출력은 로그에 잡히지 않았으므로 설치 성공은 설치 뒤 상태로 판단했다. `qsh --version`이 `qsh 0.3.0`, `qsh version --json`의 `.data.build.commit`이 `891c407e80863507cb3fea975fec1fe83c248e51`이고 실행 파일은 스크립트 기본 위치인 `/root/.local/bin/qsh`에 있었다. 수동 다운로드는 밟지 않았고 아카이브 해시를 따로 대조하지도 않았다. `ldd`는 gnu 빌드대로 `libgcc_s.so.1`, `libm.so.6`, `libc.so.6`에 동적 링크돼 있었다. DoD 3과는 관계없다. 끝나고 컨테이너를 `docker rm -f`로 지웠다.
+
+**회차 2.** 대상 태그 `v0.3.0` → `891c407`. 같은 dockerd에서 `debian:10`으로 새로 띄운 컨테이너다. Debian 10은 지원이 끝난 배포판이라 `sources.list`를 `archive.debian.org`로 바꿨다. `procps`가 끌어오는 `libtinfo6`·`libncurses6`·`libncursesw6`가 이미지의 `+deb10u5`와 보관소의 `+deb10u2` 사이에서 어긋나서 이 셋은 `+deb10u2`로 내려서 설치했다. qsh를 설치하기 전 준비 단계의 일이다. 대조로 `QSH_LIBC` 없이 같은 설치를 먼저 돌리자 gnu 바이너리는 `` version `GLIBC_2.29' not found ``부터 `GLIBC_2.39`까지 여덟 줄을 내고 exit 1로 거부됐다(§2.2). 이 대조용 바이너리를 지운 뒤 `QSH_LIBC=musl`을 export하고 같은 한 줄로 설치했다. 스크립트는 `detected target: x86_64-unknown-linux-musl`을 찍고 `SHA256SUMS`로 아카이브를 대조한 뒤 `/root/.local/bin/qsh`에 설치했다. `qsh --version`은 `qsh 0.3.0`, `.data.build.commit`은 `891c407e80863507cb3fea975fec1fe83c248e51`이었다. DoD 3의 근거는 셋이다. `ldd`가 `statically linked`를 냈고, `readelf -d`에 `NEEDED` 행이 없었고(`readelf`는 `binutils`를 더 설치해서 돌렸다), 네 축이 이 musl 바이너리로 통과했다. 끝나고 컨테이너를 지웠다.
+
+**회차 3.** 대상 태그 `v0.3.0` → `891c407`. Dave-MBP16에서 lima(VZ)로 띄운 `template:ubuntu-24.04` VM이고, 호스트 디렉터리는 마운트하지 않았다(`--mount-none`). `curl`·`ca-certificates`·`tmux`는 이미지에 이미 있었다. 시작 전에 `which -a qsh`가 0건이었다. `QSH_VERSION=v0.3.0`을 주고 같은 curl 한 줄로 설치했다. 스크립트는 `detected target: aarch64-unknown-linux-gnu`을 찍고 `SHA256SUMS` 대조를 통과한 뒤 `~/.local/bin/qsh`에 설치했다. `qsh --version`은 `qsh 0.3.0`, `.data.build.commit`은 `891c407e80863507cb3fea975fec1fe83c248e51`이었다. 수동 다운로드는 밟지 않았다. 끝나고 `limactl delete -f`로 VM을 지웠다.
 
 ## 9. 판정 규칙
 
