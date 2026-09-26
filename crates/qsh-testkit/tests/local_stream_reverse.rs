@@ -26,7 +26,12 @@
 //!   splice as an unhurried, bounded end of conduit — never a hang. The
 //!   daemon itself never inspects `ticket` at all (module docs' "grants no
 //!   new authority"): this is proof that a *forged* ticket is rejected
-//!   *somewhere* downstream, promptly, not proof of exactly where.
+//!   *somewhere* downstream, promptly, not proof of exactly where;
+//! - an `EXEC_DATA` conduit a client abandons before ever sending
+//!   `StdinEof` still kills the command it started, rather than leaving
+//!   it running as a silent orphan — the client-initiated direction the
+//!   `SESSION_DATA` proof above does not attempt, and `EXEC_DATA`'s own
+//!   `reset_on_uds_eof` rule exists for.
 //!
 //! What this file deliberately does **not** attempt: proving that closing
 //! the client's own `LOCAL_STREAM` conduit *alone* ends the target's data
@@ -61,9 +66,10 @@ use qsh_core::server::TICKET_LEN;
 use qsh_core::{Paths, Principal};
 use qsh_proto::ErrorCode;
 use qsh_proto::local::{
-    LOCAL_HELLO_VERSION, LocalHello, LocalResponse, LocalStreamKind, local_response,
+    LOCAL_HELLO_VERSION, LocalClaimGranted, LocalHello, LocalResponse, LocalStreamKind,
+    local_response,
 };
-use qsh_proto::wire::{self, control_message, response, session_frame};
+use qsh_proto::wire::{self, control_message, exec_frame, response, session_frame};
 use qsh_testkit::loopback::{TestIdentity, make_identity};
 use qsh_testkit::reverse::ReverseHarness;
 use qsh_transport::StaticTrust;
@@ -212,6 +218,42 @@ async fn open_session(ctl: &mut LocalConduit<UnixStream>, request_id: u64) -> wi
         })) => opened,
         other => panic!("expected SessionOpened, got {other:?}"),
     }
+}
+
+/// [`open_session`]'s `exec` twin: mint a real `EXEC_DATA` ticket over
+/// `LOCAL_CONTROL`, running `argv` — exactly the control leg issue #5's
+/// relay-layer fix leaves unchanged (`qsh exec`'s own routing over this
+/// conduit, `resolve_exec_route` in `crates/qsh-core/src/ops/exec.rs`, is
+/// exercised at the `Ops` layer instead, not here).
+async fn open_exec_argv(
+    ctl: &mut LocalConduit<UnixStream>,
+    request_id: u64,
+    argv: Vec<String>,
+) -> wire::ExecStarted {
+    send_control(
+        ctl,
+        request_id,
+        control_message::Body::ExecStart(wire::ExecStart {
+            argv,
+            env: Default::default(),
+            timeout_ms: 0,
+        }),
+    )
+    .await;
+    let reply = recv_control_response(ctl).await;
+    assert_eq!(reply.request_id, request_id);
+    match reply.body {
+        Some(control_message::Body::Response(wire::Response {
+            body: Some(response::Body::ExecStarted(started)),
+            ..
+        })) => started,
+        other => panic!("expected ExecStarted, got {other:?}"),
+    }
+}
+
+/// [`open_exec_argv`] with the harness's default probe command (`cat`).
+async fn open_exec(ctl: &mut LocalConduit<UnixStream>, request_id: u64) -> wire::ExecStarted {
+    open_exec_argv(ctl, request_id, vec!["cat".to_string()]).await
 }
 
 fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
@@ -426,17 +468,24 @@ async fn a_forged_ticket_on_local_stream_is_rejected_promptly_never_a_hang() {
     harness.shutdown().await;
 }
 
-/// A `LOCAL_STREAM` conduit's first post-ack frame must be a `SESSION_DATA`
-/// `StreamHeader` (HARD RULES: "a non-`SESSION_DATA` or missing header ->
-/// `LocalError` `INVALID_ARGUMENT`, nothing opened on QUIC") — the real,
-/// end-to-end version of `crate::localctl::daemon`'s own unit test
-/// `only_a_session_data_header_passes_the_local_stream_shape_check`, which
-/// only exercises `is_session_data_header` as a pure function against a
+/// A `LOCAL_STREAM` conduit's first post-ack frame must be one of the
+/// relayable kinds (`SESSION_DATA`, `TCP_CONNECT`, `TCP_ACCEPTED`,
+/// `EXEC_DATA` — HARD RULES: "a non-SESSION_DATA/TCP_CONNECT/TCP_ACCEPTED/
+/// EXEC_DATA or missing header -> LocalError INVALID_ARGUMENT, nothing
+/// opened on QUIC") — the real, end-to-end version of
+/// `crate::localctl::daemon`'s own unit test
+/// `local_stream_relay_kind_accepts_exactly_the_documented_kinds`, which
+/// only exercises `local_stream_relay_kind` as a pure function against a
 /// synthetic `StreamHeader` and proves nothing about the real conduit path
 /// (adversarial review finding: mutating away the guard in `serve_stream`
-/// leaves every existing test green). This drives the actual daemon.
+/// leaves every existing test green). This drives the actual daemon. The
+/// probe is an unrelayable kind value (`99`, this build recognizes none of
+/// them) rather than `EXEC_DATA` — issue #5 made `EXEC_DATA`
+/// relayable, so it now belongs to
+/// `an_exec_data_header_on_local_stream_is_acked_and_relayed_to_a_real_child`
+/// below instead.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_non_session_data_header_on_local_stream_is_invalid_argument_nothing_opened_on_quic() {
+async fn an_unrelayable_stream_header_on_local_stream_is_invalid_argument_nothing_opened_on_quic() {
     let target = make_identity();
     let harness =
         ReverseHarness::start_with(Arc::new(AllowAllPinned), false, pin(&target, "widget")).await;
@@ -452,11 +501,18 @@ async fn a_non_session_data_header_on_local_stream_is_invalid_argument_nothing_o
         harness.wait_control_hub("widget").await;
 
         let mut data = connect_stream(&localctl.socket_path, "widget").await;
-        // `EXEC_DATA`, not `SESSION_DATA` — the one shape `LOCAL_STREAM`
-        // must refuse before ever touching QUIC.
-        data.send(&wire::StreamHeader::exec_data(vec![0xBBu8; TICKET_LEN]))
-            .await
-            .expect("send StreamHeader");
+        // An unknown `StreamKind` value — `stream_kind()` returns `None`
+        // for it (`local_stream_relay_kind`'s own doc), the one shape
+        // `LOCAL_STREAM` must refuse before ever touching QUIC.
+        data.send(&wire::StreamHeader {
+            kind: 99,
+            ticket: vec![0xBBu8; TICKET_LEN],
+            host: String::new(),
+            port: 0,
+            deny_host_local: false,
+        })
+        .await
+        .expect("send StreamHeader");
 
         let response: LocalResponse = tokio::time::timeout(TIMEOUT, data.recv())
             .await
@@ -473,6 +529,231 @@ async fn a_non_session_data_header_on_local_stream_is_invalid_argument_nothing_o
             }
             other => panic!("expected a LocalError{{INVALID_ARGUMENT}}, got {other:?}"),
         }
+
+        let _ = shutdown_tx.send(());
+    };
+
+    let (result, ()) = tokio::join!(run_fut, test_fut);
+    result.expect("run_target must exit cleanly on shutdown");
+    localctl.shutdown().await;
+    harness.shutdown().await;
+}
+
+/// Issue #5's central L3 proof: an `EXEC_DATA` ticket minted by a
+/// real `exec.run` over `LOCAL_CONTROL`, redeemed on a fresh `LOCAL_STREAM`
+/// conduit, actually relays to a real spawned child on the target and back
+/// — modeled on
+/// [`local_stream_splices_session_data_to_a_real_pty_and_relays_exit_cleanly`]
+/// above, `EXEC_DATA` in place of `SESSION_DATA`. `EXEC_DATA` takes an
+/// explicit `LocalClaimGranted` ack before the splice
+/// (`daemon::LocalStreamRelay::OpenBidiAndSplice`'s `ack_before_splice`
+/// doc) rather than `SESSION_DATA`'s silence-on-success, asserted here
+/// against the real daemon; its `PRIORITY_EXEC_DATA` send priority is
+/// pinned separately by
+/// `crate::localctl::daemon`'s own
+/// `local_stream_relay_kind_accepts_exactly_the_documented_kinds`.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_exec_data_header_on_local_stream_is_acked_and_relayed_to_a_real_child() {
+    let target = make_identity();
+    let harness =
+        ReverseHarness::start_with(Arc::new(AllowAllPinned), false, pin(&target, "widget")).await;
+    let (_dir, paths) = fresh_paths();
+    let localctl = harness.attach_localctl(&paths).await;
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let run_fut = harness.run_target(&target, "device-id", "controller", None, async {
+        let _ = shutdown_rx.await;
+    });
+
+    let test_fut = async {
+        harness.wait_control_hub("widget").await;
+
+        let mut ctl = connect_control(&localctl.socket_path, "widget").await;
+        let started = open_exec(&mut ctl, 1).await;
+
+        let mut data = connect_stream(&localctl.socket_path, "widget").await;
+        data.send(&wire::StreamHeader::exec_data(started.ticket))
+            .await
+            .expect("send StreamHeader");
+
+        // `EXEC_DATA` alone gets an explicit ack before any raw byte flows
+        // (`ack_before_splice`'s own doc) — `SESSION_DATA`'s equivalent
+        // test above never reads one, since that kind stays silent on
+        // success.
+        let ack: LocalResponse = data
+            .recv()
+            .await
+            .expect("recv the EXEC_DATA ack")
+            .expect("conduit stays open for it");
+        assert!(
+            matches!(
+                ack.body,
+                Some(local_response::Body::ClaimGranted(LocalClaimGranted {}))
+            ),
+            "expected LocalClaimGranted, got {:?}",
+            ack.body
+        );
+
+        let marker = b"QSHEXECMARK";
+        data.send(&wire::ExecFrame::stdin(marker.to_vec()))
+            .await
+            .expect("send Stdin");
+        data.send(&wire::ExecFrame::stdin_eof())
+            .await
+            .expect("send StdinEof");
+
+        // `cat` echoes stdin to stdout verbatim, then exits 0 once its
+        // stdin reaches EOF.
+        let mut stdout = Vec::new();
+        let exit = tokio::time::timeout(TIMEOUT, async {
+            loop {
+                match data
+                    .recv::<wire::ExecFrame>()
+                    .await
+                    .expect("recv ExecFrame")
+                    .expect("stream ended before ExecExit arrived")
+                    .body
+                {
+                    Some(exec_frame::Body::Stdout(chunk)) => stdout.extend_from_slice(&chunk.data),
+                    Some(exec_frame::Body::ExecExit(exit)) => return exit,
+                    Some(_) => continue,
+                    None => panic!("ExecFrame with no body set"),
+                }
+            }
+        })
+        .await
+        .expect("cat must exit within the deadline");
+        assert!(
+            contains_subslice(&stdout, marker),
+            "the echoed stdin must reach the client through the splice: {stdout:?}"
+        );
+        assert_eq!(exit.exit_code, 0, "cat must exit cleanly on stdin EOF");
+
+        // Past `ExecExit` the target has nothing more to send — same
+        // clean-end contract `SESSION_DATA`'s own test proves above.
+        let after_exit = tokio::time::timeout(TIMEOUT, data.recv::<wire::ExecFrame>())
+            .await
+            .expect("the conduit ends promptly once the target has nothing more to send")
+            .expect("a clean end, not a framing error");
+        assert!(
+            after_exit.is_none(),
+            "expected the conduit to end cleanly after ExecExit, got another frame: {after_exit:?}"
+        );
+
+        let _ = shutdown_tx.send(());
+    };
+
+    let (result, ()) = tokio::join!(run_fut, test_fut);
+    result.expect("run_target must exit cleanly on shutdown");
+    localctl.shutdown().await;
+    harness.shutdown().await;
+}
+
+/// The `EXEC_DATA` UDS-EOF -> QUIC reset rule
+/// (`crate::localctl::daemon`'s `local_stream_relay_kind`'s
+/// `reset_on_uds_eof`), end to end against a real daemon and a real
+/// spawned child: a client that abandons its `LOCAL_STREAM` conduit
+/// before ever sending `StdinEof` — a dropped or killed CLI process,
+/// never a clean stdin close — must still make the host notice the peer
+/// is gone and kill the command, or a silent remote command runs on as an
+/// orphan (`crate::exec::run_exec`'s own doc: a clean stream end alone
+/// has no stdin-EOF meaning to it, only the in-band `StdinEof` frame
+/// does). `local_stream_relay_kind_accepts_exactly_the_documented_kinds`
+/// (`crate::localctl::daemon`) only pins the flag as a pure function;
+/// this drives the real `pump_uds_to_quic` branch it selects.
+///
+/// The output-cap kill path (`Session::exec`'s `recv_half.abort`) is a
+/// `qsh-core` client-level concern with no wire-level shape of its own to
+/// drive here; it belongs with `qsh exec`'s own routing (`resolve_exec_route`
+/// / `Ops::exec_run` in `crates/qsh-core/src/ops/exec.rs`, issue #5), which
+/// gives `qsh exec` a reverse route to call it through.
+#[tokio::test(flavor = "multi_thread")]
+async fn exec_client_drop_over_reverse_kills_a_silent_remote_command() {
+    let target = make_identity();
+    let harness =
+        ReverseHarness::start_with(Arc::new(AllowAllPinned), false, pin(&target, "widget")).await;
+    let (dir, paths) = fresh_paths();
+    let localctl = harness.attach_localctl(&paths).await;
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let run_fut = harness.run_target(&target, "device-id", "controller", None, async {
+        let _ = shutdown_rx.await;
+    });
+
+    let test_fut = async {
+        harness.wait_control_hub("widget").await;
+
+        let mut ctl = connect_control(&localctl.socket_path, "widget").await;
+        // `exec sleep 60` replaces the shell in place, so the pid this
+        // records is the very process that must be gone by the end of
+        // this test.
+        let marker = dir.path().join("execpid");
+        let started = open_exec_argv(
+            &mut ctl,
+            1,
+            vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                format!("echo $$ > {} ; exec sleep 60", marker.display()),
+            ],
+        )
+        .await;
+
+        let mut data = connect_stream(&localctl.socket_path, "widget").await;
+        data.send(&wire::StreamHeader::exec_data(started.ticket))
+            .await
+            .expect("send StreamHeader");
+        let ack: LocalResponse = data
+            .recv()
+            .await
+            .expect("recv the EXEC_DATA ack")
+            .expect("conduit stays open for it");
+        assert!(
+            matches!(
+                ack.body,
+                Some(local_response::Body::ClaimGranted(LocalClaimGranted {}))
+            ),
+            "expected LocalClaimGranted, got {:?}",
+            ack.body
+        );
+
+        let pid = tokio::time::timeout(TIMEOUT, async {
+            loop {
+                if let Ok(contents) = std::fs::read_to_string(&marker)
+                    && let Ok(pid) = contents.trim().parse::<u32>()
+                {
+                    return pid;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the child must record its own pid within the deadline");
+
+        // Abandon the conduit outright — never `Stdin`, never `StdinEof` —
+        // exactly what a dropped or killed CLI process leaves behind. The
+        // daemon's UDS read sees a clean EOF with no `StdinEof` ever
+        // having gone out; `reset_on_uds_eof` must turn that into a QUIC
+        // reset rather than a finish, which the target's `run_exec` reads
+        // as the peer going away and kills the child.
+        drop(data);
+
+        tokio::time::timeout(TIMEOUT, async {
+            loop {
+                let alive = tokio::process::Command::new("kill")
+                    .args(["-0", &pid.to_string()])
+                    .status()
+                    .await
+                    .expect("run kill -0")
+                    .success();
+                if !alive {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("pid {pid} must be gone within {TIMEOUT:?}"));
 
         let _ = shutdown_tx.send(());
     };

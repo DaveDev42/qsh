@@ -1,0 +1,16 @@
+{
+  "command": "exec.run",
+  "error": {
+    "code": "HOST_NOT_FOUND",
+    "details": {
+      "lost_ago_ms": 0,
+      "reason": "reverse_registration_stale",
+      "retry_after_ms": 30000
+    },
+    "message": "host \"stale-only-exec-host\" has a reverse registration on this machine but it is currently disconnected; it is expected to re-register — retry in a moment or once `qsh reverse` reconnects on that host",
+    "retryable": true
+  },
+  "ok": false,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

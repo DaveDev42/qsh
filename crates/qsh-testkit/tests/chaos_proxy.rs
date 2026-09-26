@@ -134,6 +134,7 @@ async fn a_fault_free_proxy_is_transparent() {
                 timeout: None,
             },
             None,
+            None,
         )
         .await
         .unwrap_or_else(|err| panic!("exec: {err:?} — {ctx}"));
@@ -185,6 +186,7 @@ async fn exec_is_byte_identical_under_loss_delay_reorder_and_duplication() {
                 timeout: None,
             },
             Some(stdin),
+            None,
         ),
     )
     .await

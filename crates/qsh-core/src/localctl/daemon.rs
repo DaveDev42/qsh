@@ -25,7 +25,7 @@
 //!   |---|---|---|
 //!   | `LOCAL_ADMIN` | `LocalctlDaemon::serve_admin` | one `LocalAdminRequest` (`HostList` / `TunnelList` / `TunnelClose`, M4 Step 5 PR 5b) → one `LocalResponse`, from [`Listen::registry`]'s current snapshot or [`Listen::hubs_snapshot`]'s live forwards, stale entries included, never dialing anything. No `LocalHelloAck` — its fields describe a specific registered host and `LOCAL_ADMIN` names none. |
 //!   | `LOCAL_CONTROL` (`M3 Step 6`) | `LocalctlDaemon::serve_control` | `LocalHelloAck`, then a long-lived `qsh.wire.v1` `ControlMessage` relay for `hello.host`'s live [`ControlHub`](crate::reverse::listen::ControlHub) — one conduit per attached CLI process, for as long as it runs. |
-//!   | `LOCAL_STREAM` (`M3 Step 7`) | `LocalctlDaemon::serve_stream` | `LocalHelloAck`, then exactly one wire `StreamHeader{SESSION_DATA, ticket}` frame, then a raw byte-level splice onto a fresh QUIC bidi stream on `hello.host`'s live connection — the daemon never parses anything past that header (module docs' own "grants no new authority": it neither redeems nor inspects the ticket, the target does). |
+//!   | `LOCAL_STREAM` (`M3 Step 7`) | `LocalctlDaemon::serve_stream` | `LocalHelloAck`, then exactly one wire `StreamHeader` frame — `SESSION_DATA`, `EXEC_DATA` (issue #5), `TCP_CONNECT` or `TCP_ACCEPTED` — then a raw byte-level splice onto a fresh QUIC bidi stream on `hello.host`'s live connection; for `EXEC_DATA` only, a `LocalResponse{ClaimGranted}` ack is written first, once `open_bi` has actually succeeded (`docs/design/protocol.md` §11-3's EXEC_DATA ack leg) — the daemon never parses anything past the header (module docs' own "grants no new authority": it neither redeems nor inspects the ticket, the target does). |
 //!
 //!   An unspecified/unrecognized `LocalHello.kind` answers
 //!   `INVALID_ARGUMENT`. None of the three paths ever calls
@@ -919,19 +919,20 @@ impl LocalctlDaemon {
         hub.unregister_conduit(conduit_id);
     }
 
-    /// `LOCAL_STREAM` (`M3 Step 7`): after the same `HOST_NOT_FOUND`/
-    /// `LocalHelloAck` handshake [`Self::serve_control`] uses (including
-    /// its `wait_ms`/`known_generation` wait, `PLAN.md` M3 Step 8 — the
+    /// `LOCAL_STREAM` (`M3 Step 7`, `EXEC_DATA` relay added by issue #5):
+    /// after the same `HOST_NOT_FOUND`/`LocalHelloAck`
+    /// handshake [`Self::serve_control`] uses (including its
+    /// `wait_ms`/`known_generation` wait, `PLAN.md` M3 Step 8 — the
     /// data-conduit half of `LocalReconnect`'s new leg), read exactly one
-    /// wire `StreamHeader{SESSION_DATA, ticket}` frame, open a fresh QUIC
-    /// bidi stream on `host`'s live connection at
-    /// [`wire::PRIORITY_SESSION_DATA`], forward the header verbatim, and
-    /// become a raw byte-level pump both ways
+    /// wire `StreamHeader` frame ([`local_stream_relay_kind`] decides
+    /// which kinds are relayable at all), open a fresh QUIC bidi stream on
+    /// `host`'s live connection at that kind's own send priority, forward
+    /// the header verbatim, and become a raw byte-level pump both ways
     /// (`docs/design/protocol.md` §11-3, §12). Never parses a
-    /// `SessionFrame`, never redeems or inspects `ticket` — that is the
-    /// target's job; a forged or expired ticket is the target's reset,
-    /// relayed to the CLI exactly as any other QUIC-side termination
-    /// would be (module docs' kind table).
+    /// `SessionFrame`/`ExecFrame`, never redeems or inspects `ticket` —
+    /// that is the target's job; a forged or expired ticket is the
+    /// target's reset, relayed to the CLI exactly as any other QUIC-side
+    /// termination would be (module docs' kind table).
     async fn serve_stream(
         &self,
         host: &str,
@@ -1023,60 +1024,69 @@ impl LocalctlDaemon {
             Err(_) => return,
         };
 
-        // `M4 Step 5`: `LOCAL_STREAM` now carries three header kinds, not
-        // just `SESSION_DATA` — `docs/design/protocol.md` §11-3's
-        // "터널 conduit은 새 LocalStreamKind를 얻지 않는다": `TCP_CONNECT`
-        // takes the exact same open-a-fresh-QUIC-bidi-and-splice path as
-        // `SESSION_DATA` below (this daemon never distinguishes a session
-        // byte from a tunnel byte — both are opaque past the header), and
-        // `TCP_ACCEPTED` is different in kind, not degree — no `open_bi`
-        // at all, because the QUIC stream it splices onto already exists
-        // (the target opened it; `Listen::run_tunnel_accept_loop`
-        // accepted it) — so it is handled by
-        // [`Self::serve_tcp_accepted`] and returns before any of the
-        // `open_bi` machinery below ever runs.
-        let is_tunnel_connect = match header.stream_kind() {
-            Some(wire::StreamKind::SessionData) => false,
-            Some(wire::StreamKind::TcpConnect) => true,
-            Some(wire::StreamKind::TcpAccepted) => {
-                // What is left of the *one* `deadline` budget after
-                // `connection_for_wait` above (and the header read just
-                // above this match) already spent part of it —
-                // `wait_start`'s own doc on why handing `serve_tcp_accepted`
-                // a second full `deadline` here would let its parked claim
-                // outlive the CLI's own timeout. Saturating: a slow
-                // handshake that already ate the whole budget hands the
-                // claim `Duration::ZERO`, which still runs
-                // `claim_tcp_accepted`'s first, pre-`await` check (an
-                // already-queued arrival is still granted at once) but
-                // never actually parks.
-                self.serve_tcp_accepted(
-                    &hub,
-                    &header,
-                    deadline.saturating_sub(wait_start.elapsed()),
-                    conduit,
-                )
-                .await;
-                return;
-            }
-            _ => {
-                // Nothing opened on QUIC — the whole point of checking
-                // the kind before `open_bi` (HARD RULES: "a non-
-                // SESSION_DATA/TCP_CONNECT/TCP_ACCEPTED or missing header
-                // -> LocalError INVALID_ARGUMENT, nothing opened on
-                // QUIC").
-                let _ = conduit
-                    .send(&LocalResponse {
-                        body: Some(local_response::Body::Error(LocalError::from_code(
-                            ErrorCode::InvalidArgument,
-                            "LOCAL_STREAM's first frame must be a SESSION_DATA, TCP_CONNECT, or \
-                             TCP_ACCEPTED StreamHeader",
-                        ))),
-                    })
+        // `M4 Step 5` added `TCP_CONNECT`/`TCP_ACCEPTED` alongside
+        // `SESSION_DATA`; issue #5 adds `EXEC_DATA` the same way
+        // — `docs/design/protocol.md` §11-3's "터널 conduit은 새
+        // LocalStreamKind를 얻지 않는다" applies to it too. `TCP_ACCEPTED`
+        // is different in kind, not degree — no `open_bi` at all, because
+        // the QUIC stream it splices onto already exists (the target
+        // opened it; `Listen::run_tunnel_accept_loop` accepted it) — so it
+        // is handled by [`Self::serve_tcp_accepted`] and returns before any
+        // of the `open_bi` machinery below ever runs. Every other
+        // relayable kind takes the exact same open-a-fresh-QUIC-bidi-and-
+        // splice path (this daemon never distinguishes a session byte from
+        // a tunnel or exec byte — all three are opaque past the header);
+        // [`local_stream_relay_kind`] is the one place that decides which
+        // kinds are relayable at all and how, so a mutation here cannot
+        // silently diverge from what this function's own unit tests
+        // assert (`local_stream_relay_kind`'s own doc).
+        let (priority, tunnel_permit, reset_on_uds_eof, ack_before_splice) =
+            match local_stream_relay_kind(&header) {
+                Some(LocalStreamRelay::ClaimTcpAccepted) => {
+                    // What is left of the *one* `deadline` budget after
+                    // `connection_for_wait` above (and the header read just
+                    // above this match) already spent part of it —
+                    // `wait_start`'s own doc on why handing `serve_tcp_accepted`
+                    // a second full `deadline` here would let its parked claim
+                    // outlive the CLI's own timeout. Saturating: a slow
+                    // handshake that already ate the whole budget hands the
+                    // claim `Duration::ZERO`, which still runs
+                    // `claim_tcp_accepted`'s first, pre-`await` check (an
+                    // already-queued arrival is still granted at once) but
+                    // never actually parks.
+                    self.serve_tcp_accepted(
+                        &hub,
+                        &header,
+                        deadline.saturating_sub(wait_start.elapsed()),
+                        conduit,
+                    )
                     .await;
-                return;
-            }
-        };
+                    return;
+                }
+                Some(LocalStreamRelay::OpenBidiAndSplice {
+                    priority,
+                    tunnel_permit,
+                    reset_on_uds_eof,
+                    ack_before_splice,
+                }) => (priority, tunnel_permit, reset_on_uds_eof, ack_before_splice),
+                None => {
+                    // Nothing opened on QUIC — the whole point of checking
+                    // the kind before `open_bi` (HARD RULES: "a non-
+                    // SESSION_DATA/TCP_CONNECT/TCP_ACCEPTED/EXEC_DATA or
+                    // missing header -> LocalError INVALID_ARGUMENT, nothing
+                    // opened on QUIC").
+                    let _ = conduit
+                        .send(&LocalResponse {
+                            body: Some(local_response::Body::Error(LocalError::from_code(
+                                ErrorCode::InvalidArgument,
+                                "LOCAL_STREAM's first frame must be a SESSION_DATA, TCP_CONNECT, \
+                             TCP_ACCEPTED, or EXEC_DATA StreamHeader",
+                            ))),
+                        })
+                        .await;
+                    return;
+                }
+            };
 
         // The local conduit's own cap (`CONTROL_FRAME_MAX`, 256 KiB) is
         // wider than the QUIC data stream's (`DATA_FRAME_MAX`, 64 KiB) —
@@ -1102,11 +1112,14 @@ impl LocalctlDaemon {
         // reverse connection, so it draws from the same
         // `MAX_TUNNEL_STREAMS_PER_HUB` pool `TCP_ACCEPTED` streams do
         // (`ControlHub::try_acquire_tunnel_permit`'s own doc) — never for
-        // `SESSION_DATA`, which this cap does not bound. Held for the
-        // whole splice, released only when this function returns (the
-        // binding lives to the end of scope, past the `tokio::join!`
-        // below).
-        let _tunnel_permit = if is_tunnel_connect {
+        // `SESSION_DATA` or `EXEC_DATA` (issue #5), neither of which this
+        // cap bounds: exec concurrency is already limited by the target's
+        // own `[serve].max_exec_per_principal` and ticket budget, and the
+        // conduit itself by the `LOCAL_STREAM` permit acquired before this
+        // task was spawned. Held for the whole splice, released only when
+        // this function returns (the binding lives to the end of scope,
+        // past the `tokio::join!` below).
+        let _tunnel_permit = if tunnel_permit {
             match hub.try_acquire_tunnel_permit() {
                 Some(permit) => Some(permit),
                 None => {
@@ -1173,17 +1186,45 @@ impl LocalctlDaemon {
                 return;
             }
         };
+
+        // `EXEC_DATA` only (`ack_before_splice`'s own doc): a raw
+        // `LocalResponse{ClaimGranted}` frame, written the same way the
+        // error paths above write their sentinel byte — `conduit`'s own
+        // framing is already gone (`into_raw` above), so this is a manual
+        // `encode_frame`, not `conduit.send`. Written only now, after
+        // `open_bi` has actually succeeded, so a failure to open the QUIC
+        // stream still reaches the CLI as the sentinel-byte error above,
+        // never a spurious success ack first.
+        let mut uds = uds;
+        if ack_before_splice {
+            let ack_bytes = match qsh_proto::local::encode_local(&LocalResponse {
+                body: Some(local_response::Body::ClaimGranted(LocalClaimGranted {})),
+            }) {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    tracing::warn!(
+                        %err,
+                        "localctl: LOCAL_STREAM failed to encode its own EXEC_DATA ack"
+                    );
+                    let _ =
+                        quic_send.reset(quinn::VarInt::from_u32(RESET_CODE_LOCAL_CONDUIT_FAILED));
+                    return;
+                }
+            };
+            if uds.write_all(&ack_bytes).await.is_err() {
+                return;
+            }
+        }
         // `PLAN.md` M4 Step 5 (a): a relayed `TCP_CONNECT` rides at
         // `PRIORITY_TUNNEL`, same as a direct-connect tunnel stream
         // (`crate::tunnel::open_stream`) — a saturated tunnel must not
         // outrank session data in this daemon's own send queue either
-        // (`docs/design/protocol.md` §12). Only `SESSION_DATA` keeps the
-        // session-data priority this call already applied before Step 5.
-        let _ = quic_send.set_priority(if is_tunnel_connect {
-            wire::PRIORITY_TUNNEL
-        } else {
-            wire::PRIORITY_SESSION_DATA
-        });
+        // (`docs/design/protocol.md` §12). `SESSION_DATA` keeps the
+        // session-data priority this call already applied before Step 5,
+        // and `EXEC_DATA` (issue #5) rides at `PRIORITY_EXEC_DATA` — all
+        // three come straight from [`local_stream_relay_kind`], never
+        // re-derived here.
+        let _ = quic_send.set_priority(priority);
 
         // Re-framed from the raw payload bytes already validated above —
         // never re-encoded from the decoded `header` struct (this
@@ -1206,7 +1247,7 @@ impl LocalctlDaemon {
 
         let (uds_read, uds_write) = uds.into_split();
 
-        if is_tunnel_connect {
+        if tunnel_permit {
             // `TCP_CONNECT`'s post-handshake body is unframed tunnel
             // payload, not `SessionFrame`s — `tunnel_splice_uds_quic`'s
             // own doc on why it cannot reuse `pump_uds_to_quic`/
@@ -1240,7 +1281,13 @@ impl LocalctlDaemon {
         let (uds_gone_tx, uds_gone_rx) = tokio::sync::oneshot::channel();
         let (quic_gone_tx, quic_gone_rx) = tokio::sync::oneshot::channel();
         tokio::join!(
-            pump_uds_to_quic(uds_read, quic_send, uds_gone_tx, quic_gone_rx),
+            pump_uds_to_quic(
+                uds_read,
+                quic_send,
+                reset_on_uds_eof,
+                uds_gone_tx,
+                quic_gone_rx
+            ),
             pump_quic_to_uds(quic_recv, uds_write, quic_gone_tx, uds_gone_rx),
         );
     }
@@ -1476,6 +1523,16 @@ impl LocalctlDaemon {
 /// write failure (the target reset or stopped this stream from its own
 /// end) simply ends this direction on its own.
 ///
+/// `reset_on_uds_eof` overrides the clean-EOF case to a reset instead of a
+/// finish — `EXEC_DATA` only (`local_stream_relay_kind`'s own doc): a
+/// clean `EXEC_DATA` stream close has no meaning to the host's `run_exec`
+/// (its stdin-EOF signal is the in-band `StdinEof` `ExecFrame`, not the
+/// stream ending), so a client that drops the conduit — Ctrl-C, a
+/// deadline, a crash — without ever sending `StdinEof` must still make
+/// the host notice the peer is gone, or a silent remote command runs on
+/// as an orphan. `SESSION_DATA`/`TCP_CONNECT` keep the plain finish: a
+/// clean session/tunnel close is a real clean close there.
+///
 /// Either way `done_tx` fires once this leg is done, and `cancel_rx` is
 /// raced against every read so the *sibling* leg ending first — the
 /// local CLI conduit going away entirely, or the target ending its own
@@ -1485,6 +1542,7 @@ impl LocalctlDaemon {
 async fn pump_uds_to_quic(
     mut uds_read: tokio::net::unix::OwnedReadHalf,
     mut quic_send: quinn::SendStream,
+    reset_on_uds_eof: bool,
     done_tx: tokio::sync::oneshot::Sender<()>,
     mut cancel_rx: tokio::sync::oneshot::Receiver<()>,
 ) {
@@ -1506,7 +1564,11 @@ async fn pump_uds_to_quic(
             }
             r = uds_read.read(&mut buf) => match r {
                 Ok(0) => {
-                    let _ = quic_send.finish();
+                    if reset_on_uds_eof {
+                        let _ = quic_send.reset(quinn::VarInt::from_u32(RESET_CODE_LOCAL_PEER_GONE));
+                    } else {
+                        let _ = quic_send.finish();
+                    }
                     let _ = done_tx.send(());
                     return;
                 }
@@ -1783,17 +1845,84 @@ fn clamp_wait(wait_ms: u32) -> std::time::Duration {
     std::time::Duration::from_millis(u64::from(wait_ms)).min(LOCAL_WAIT_MAX)
 }
 
-/// Whether `header` is `LOCAL_STREAM`'s original (pre-M4) shape —
-/// `SESSION_DATA` — kept as a small, unit-testable check on
-/// `wire::StreamHeader::stream_kind()`'s classification even though
-/// `LocalctlDaemon::serve_stream` itself now inlines the full three-way
-/// `SESSION_DATA`/`TCP_CONNECT`/`TCP_ACCEPTED` match directly (`PLAN.md`
-/// M4 Step 5 (a)) rather than calling out to this helper. Test-only: the
-/// production classification lives in `serve_stream`'s own match, not
-/// here.
-#[cfg(test)]
-fn is_session_data_header(header: &wire::StreamHeader) -> bool {
-    header.stream_kind() == Some(wire::StreamKind::SessionData)
+/// What [`LocalctlDaemon::serve_stream`] does with a relayable
+/// `LOCAL_STREAM` header — never re-derived at the call site, so this is
+/// the *only* place that decides which `StreamKind`s are relayable and
+/// how (an earlier version of this file had a test-only
+/// `is_session_data_header` twin that only *mirrored* `serve_stream`'s own
+/// inline match rather than driving it — an adversarial-review finding
+/// (`docs/design/testing.md`): mutating the production match away left
+/// every unit test on that twin green).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocalStreamRelay {
+    /// Open a fresh QUIC bidi stream and become a raw byte-level pump both
+    /// ways, at `priority`.
+    OpenBidiAndSplice {
+        /// The QUIC send stream's priority (`docs/design/protocol.md`
+        /// §12).
+        priority: i32,
+        /// Whether this splice draws from the shared
+        /// `MAX_TUNNEL_STREAMS_PER_HUB` pool (`TCP_CONNECT` only).
+        tunnel_permit: bool,
+        /// Whether a clean UDS EOF resets the QUIC send side instead of
+        /// finishing it (`EXEC_DATA` only — `pump_uds_to_quic`'s own doc).
+        reset_on_uds_eof: bool,
+        /// Whether this kind gets an explicit `LocalClaimGranted` framed
+        /// ack once `open_bi` succeeds, before any raw byte flows
+        /// (`EXEC_DATA` only). `SESSION_DATA`/`TCP_CONNECT` stay silent on
+        /// success exactly as before issue #5 — both predate any
+        /// cross-version daemon/CLI skew concern, so there is nothing new
+        /// for a caller to fail to decide between success and a slow
+        /// failure (`LocalClaimGranted`'s own doc on why `TCP_ACCEPTED`
+        /// needs this: "a granted claim onto an idle connection cannot be
+        /// told apart from a slow failure by silence"). `EXEC_DATA` is the
+        /// one kind new enough that an *old* daemon might not recognize it
+        /// at all — without this ack, its `INVALID_ARGUMENT` rejection
+        /// would race `serve_stream`'s own `into_raw` and be read as
+        /// prefetched raw bytes instead of a framed `LocalResponse`, never
+        /// surfacing as a decodable error to the CLI
+        /// (`map_local_stream_open_error`'s own doc, `client::mod`'s
+        /// `exec_data_rejected_by_an_old_daemon_names_the_stale_qsh_listen`).
+        ack_before_splice: bool,
+    },
+    /// Claim an already-open QUIC stream the target opened
+    /// (`LocalctlDaemon::serve_tcp_accepted`'s own path) instead of
+    /// opening one — `TCP_ACCEPTED` only.
+    ClaimTcpAccepted,
+}
+
+/// Classify a `LOCAL_STREAM` header into what [`LocalctlDaemon::serve_stream`]
+/// does with it, or `None` for every kind that must be refused with
+/// `INVALID_ARGUMENT` before anything is opened on QUIC (HARD RULES: "a
+/// non-SESSION_DATA/TCP_CONNECT/TCP_ACCEPTED/EXEC_DATA or missing header ->
+/// LocalError INVALID_ARGUMENT, nothing opened on QUIC"). `SESSION_DATA`
+/// and `TCP_CONNECT`/`TCP_ACCEPTED` predate `EXEC_DATA`, which issue #5
+/// adds here — the target-side ACL choke point and ticket
+/// machinery are unchanged either way (`docs/design/protocol.md` §11-3:
+/// "registration grants reachability, never authority").
+fn local_stream_relay_kind(header: &wire::StreamHeader) -> Option<LocalStreamRelay> {
+    match header.stream_kind() {
+        Some(wire::StreamKind::SessionData) => Some(LocalStreamRelay::OpenBidiAndSplice {
+            priority: wire::PRIORITY_SESSION_DATA,
+            tunnel_permit: false,
+            reset_on_uds_eof: false,
+            ack_before_splice: false,
+        }),
+        Some(wire::StreamKind::TcpConnect) => Some(LocalStreamRelay::OpenBidiAndSplice {
+            priority: wire::PRIORITY_TUNNEL,
+            tunnel_permit: true,
+            reset_on_uds_eof: false,
+            ack_before_splice: false,
+        }),
+        Some(wire::StreamKind::ExecData) => Some(LocalStreamRelay::OpenBidiAndSplice {
+            priority: wire::PRIORITY_EXEC_DATA,
+            tunnel_permit: false,
+            reset_on_uds_eof: true,
+            ack_before_splice: true,
+        }),
+        Some(wire::StreamKind::TcpAccepted) => Some(LocalStreamRelay::ClaimTcpAccepted),
+        Some(wire::StreamKind::Unspecified) | None => None,
+    }
 }
 
 /// The pure comparison [`LocalctlDaemon::authorized_peer`] reduces to, once
@@ -2232,36 +2361,90 @@ mod tests {
         task.await.unwrap();
     }
 
-    /// [`serve_stream`](LocalctlDaemon::serve_stream)'s header-shape check
-    /// reduces to this pure comparison, split out for the same reason
-    /// [`peer_is_authorized`] is split out from [`LocalctlDaemon::authorized_peer`]:
-    /// reaching the check itself through a real conduit requires a *live*
-    /// registered QUIC connection (`Listen::connection_for` — `HOST_NOT_FOUND`
-    /// comes first otherwise), which this crate's own unit tests cannot
-    /// stand up without the machinery `crates/qsh-testkit`'s `ReverseHarness`
-    /// exists for; that harness's `local_stream_reverse.rs` test proves
-    /// the full end-to-end contract ("bad header -> `INVALID_ARGUMENT`,
-    /// nothing opened on QUIC") against a genuine connection, while this
-    /// pins the decision that governs it in isolation.
+    /// [`serve_stream`](LocalctlDaemon::serve_stream)'s header-shape
+    /// decision reduces entirely to [`local_stream_relay_kind`] — the
+    /// *same* function `serve_stream` itself calls, not a hand-mirrored
+    /// twin (an earlier version of this test drove a test-only
+    /// `is_session_data_header` that only mirrored `serve_stream`'s own
+    /// inline match; an adversarial-review finding showed mutating the
+    /// production match away left that twin's test green). A table over
+    /// every `StreamKind` this build knows, plus one it does not, so an
+    /// unlisted kind cannot silently start being accepted or a listed one
+    /// silently start being refused. `crates/qsh-testkit`'s
+    /// `local_stream_reverse.rs` proves the full end-to-end contract
+    /// against a genuine connection; this pins the decision in isolation.
     #[test]
-    fn only_a_session_data_header_passes_the_local_stream_shape_check() {
-        assert!(is_session_data_header(&wire::StreamHeader::session_data(
-            vec![1, 2, 3]
-        )));
-        assert!(!is_session_data_header(&wire::StreamHeader::exec_data(
-            vec![1, 2, 3]
-        )));
+    fn local_stream_relay_kind_accepts_exactly_the_documented_kinds() {
+        assert_eq!(
+            local_stream_relay_kind(&wire::StreamHeader::session_data(vec![1, 2, 3])),
+            Some(LocalStreamRelay::OpenBidiAndSplice {
+                priority: wire::PRIORITY_SESSION_DATA,
+                tunnel_permit: false,
+                reset_on_uds_eof: false,
+                ack_before_splice: false,
+            }),
+        );
+        assert_eq!(
+            local_stream_relay_kind(&wire::StreamHeader::exec_data(vec![1, 2, 3])),
+            Some(LocalStreamRelay::OpenBidiAndSplice {
+                priority: wire::PRIORITY_EXEC_DATA,
+                tunnel_permit: false,
+                reset_on_uds_eof: true,
+                ack_before_splice: true,
+            }),
+            "EXEC_DATA must relay at PRIORITY_EXEC_DATA, take no tunnel permit, reset (not \
+             finish) the QUIC send side on a clean UDS EOF, and get an explicit ack before the \
+             splice (issue #5)",
+        );
+        assert_eq!(
+            local_stream_relay_kind(&wire::StreamHeader {
+                kind: wire::StreamKind::TcpConnect as i32,
+                ticket: Vec::new(),
+                host: "widget".to_string(),
+                port: 22,
+                deny_host_local: false,
+            }),
+            Some(LocalStreamRelay::OpenBidiAndSplice {
+                priority: wire::PRIORITY_TUNNEL,
+                tunnel_permit: true,
+                reset_on_uds_eof: false,
+                ack_before_splice: false,
+            }),
+        );
+        assert_eq!(
+            local_stream_relay_kind(&wire::StreamHeader {
+                kind: wire::StreamKind::TcpAccepted as i32,
+                ticket: Vec::new(),
+                host: String::new(),
+                port: 0,
+                deny_host_local: false,
+            }),
+            Some(LocalStreamRelay::ClaimTcpAccepted),
+        );
+        assert_eq!(
+            local_stream_relay_kind(&wire::StreamHeader {
+                kind: wire::StreamKind::Unspecified as i32,
+                ticket: Vec::new(),
+                host: String::new(),
+                port: 0,
+                deny_host_local: false,
+            }),
+            None,
+        );
         // A kind value this build does not recognize at all — `stream_kind()`
-        // returns `None`, which must be rejected exactly like a
-        // recognized-but-wrong kind, never treated as acceptable by
-        // default.
-        assert!(!is_session_data_header(&wire::StreamHeader {
-            kind: 99,
-            ticket: Vec::new(),
-            host: String::new(),
-            port: 0,
-            deny_host_local: false,
-        }));
+        // returns `None` (`StreamKind::try_from` fails), which must be
+        // rejected exactly like a recognized-but-wrong kind, never treated
+        // as acceptable by default.
+        assert_eq!(
+            local_stream_relay_kind(&wire::StreamHeader {
+                kind: 99,
+                ticket: Vec::new(),
+                host: String::new(),
+                port: 0,
+                deny_host_local: false,
+            }),
+            None,
+        );
     }
 
     // ---- the peer-credential gate must actually stop the conduit

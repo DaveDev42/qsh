@@ -145,10 +145,16 @@ pub(crate) fn op_error_to_client_error(err: OpError) -> ClientError {
 ///
 /// Always constructible (`Default`, inert — nothing to kill) so callers on
 /// the forward route or on non-unix builds never need an `Option` wrapper
-/// around this type; only [`Self::new`] (unix-only — the socket it wraps
+/// around this type; only `Self::new` (unix-only — the socket it wraps
 /// does not exist elsewhere) produces a live one.
+///
+/// `pub`, not `pub(crate)`: [`crate::client::Session::exec`]'s `kill_tx`
+/// out-parameter (issue #5's reverse route) hands one to callers outside
+/// this crate, so the type it names must be nameable there too — only the
+/// struct and [`Self::kill`] need that reach; `Self::new` stays
+/// `pub(crate)` since only this crate ever constructs a live one.
 #[derive(Clone, Default)]
-pub(crate) struct DataKillSwitch {
+pub struct DataKillSwitch {
     #[cfg(unix)]
     socket: Option<std::sync::Arc<tokio::net::UnixStream>>,
 }
@@ -173,7 +179,7 @@ impl DataKillSwitch {
     /// there, and this is called unconditionally by
     /// [`crate::ops::session::AttachHandle::detach`] regardless of which
     /// route an attach rides.
-    pub(crate) fn kill(&self) {
+    pub fn kill(&self) {
         #[cfg(unix)]
         if let Some(socket) = &self.socket {
             use std::os::fd::AsRawFd as _;
@@ -284,6 +290,27 @@ impl DataRecv {
             DataRecv::Quic(recv) => Ok(recv.recv::<M>().await?),
             #[cfg(unix)]
             DataRecv::Local(recv) => recv.recv::<M>().await.map_err(op_error_to_client_error),
+        }
+    }
+
+    /// Stop receiving further data on this conduit — e.g. a client that
+    /// refuses to keep buffering output past a cap
+    /// ([`crate::client::EXEC_OUTPUT_MAX`]). The forward route resets the
+    /// QUIC receive stream with `code`, a real `STOP_SENDING` the peer
+    /// notices; the reverse `LOCAL_STREAM` carrier has no per-stream reset
+    /// of its own, so it shuts the *whole* conduit down through `kill`
+    /// instead — the daemon's own EXEC_DATA UDS-EOF rule then resets the
+    /// QUIC send side to the peer on this carrier's behalf
+    /// (`crate::localctl::daemon`'s `local_stream_relay_kind`). `kill` is a
+    /// no-op on the forward route ([`DataKillSwitch::kill`]'s own doc), so
+    /// this never double-signals there.
+    pub(crate) fn abort(&mut self, code: u32, kill: &DataKillSwitch) {
+        #[cfg(not(unix))]
+        let _ = kill;
+        match self {
+            DataRecv::Quic(recv) => recv.stop(code),
+            #[cfg(unix)]
+            DataRecv::Local(_) => kill.kill(),
         }
     }
 

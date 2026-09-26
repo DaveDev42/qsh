@@ -125,6 +125,8 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "error.HOST_NOT_FOUND.reverse_stale.json",
     "error.HOST_NOT_FOUND.unconfigured.json",
     "error.HOST_NOT_FOUND.pinned_no_address.json",
+    "error.HOST_NOT_FOUND.exec_pinned_no_address.json",
+    "error.HOST_NOT_FOUND.exec_reverse_stale.json",
     "exec.run.json",
     "exec.run.signal.json",
     "error.INVALID_ARGUMENT.json",
@@ -959,6 +961,80 @@ fn golden_host_not_found_split_fixtures() {
     assert_eq!(pinned["error"]["code"], "HOST_NOT_FOUND", "{pinned}");
     assert_eq!(pinned["error"]["retryable"], false, "{pinned}");
     check("error.HOST_NOT_FOUND.pinned_no_address.json", pinned);
+}
+
+/// Issue #5: `qsh exec` shares `host.get`/attach's routing
+/// (`Ops::resolve_host_route_with`) instead of the old forward-only
+/// `resolve_peer`, so both of `resolve_route`'s addressless branches now
+/// answer through `exec` too, with the identical wording
+/// `golden_reverse_stale_fixtures`/`golden_host_not_found_split_fixtures`
+/// above already pin for `host get` — this test reaches the same two
+/// branches through `exec` instead, to prove its routing produces that
+/// same wording rather than the exec-specific "is not in the trust store"
+/// text kept only for the wholly-unconfigured branch (unchanged,
+/// `error.HOST_NOT_FOUND.json`, `qsh exec nowhere`).
+#[cfg(unix)]
+#[test]
+fn golden_exec_reverse_fixtures() {
+    // A client-only pin (`trust add` with no `--address`) and no reverse
+    // registration at all — `exec`'s own version of
+    // `golden_host_not_found_split_fixtures`'s "phone" case above.
+    let pinned_sandbox = Sandbox::initialized();
+    let fingerprint = pinned_sandbox.fingerprint();
+    pinned_sandbox.trust_add("tablet", None, &fingerprint);
+    let (code, pinned) = pinned_sandbox.json(&["exec", "tablet", "--json", "--", "true"]);
+    assert_eq!(code, 255, "{pinned}");
+    assert_eq!(pinned["error"]["code"], "HOST_NOT_FOUND", "{pinned}");
+    assert_eq!(pinned["error"]["retryable"], false, "{pinned}");
+    check("error.HOST_NOT_FOUND.exec_pinned_no_address.json", pinned);
+
+    // A real `qsh listen`/`qsh reverse` pair, registered then severed so
+    // the registration goes stale — `exec`'s own version of
+    // `golden_reverse_stale_fixtures` above.
+    const NAME: &str = "stale-only-exec-host";
+    let listen_sandbox = Sandbox::initialized();
+    let target_sandbox = Sandbox::initialized();
+    let listen_fp = listen_sandbox.fingerprint();
+    let target_fp = target_sandbox.fingerprint();
+    listen_sandbox.trust_add(NAME, None, &target_fp);
+
+    let listen = ListenGuard::start(&listen_sandbox);
+    target_sandbox.trust_add("hub", Some(listen.addr()), &listen_fp);
+    let reverse = ReverseGuard::start(&target_sandbox, "hub");
+
+    poll_until(
+        "the reverse registration to appear",
+        std::time::Duration::from_secs(10),
+        || {
+            hosts_array(&listen_sandbox)
+                .into_iter()
+                .find(|h| h["name"] == NAME && h["connection_mode"] == "reverse")
+        },
+    );
+
+    reverse.shut_down();
+
+    poll_until(
+        "the reverse registration to go stale",
+        std::time::Duration::from_secs(10),
+        || {
+            hosts_array(&listen_sandbox)
+                .into_iter()
+                .find(|h| h["name"] == NAME && h["state"] == "stale")
+        },
+    );
+
+    let (code, not_found) = listen_sandbox.json(&["exec", NAME, "--json", "--", "true"]);
+    assert_eq!(code, 255, "{not_found}");
+    assert_eq!(not_found["error"]["code"], "HOST_NOT_FOUND", "{not_found}");
+    assert_eq!(not_found["error"]["retryable"], true, "{not_found}");
+    assert_eq!(
+        not_found["error"]["details"]["reason"], "reverse_registration_stale",
+        "{not_found}"
+    );
+    check("error.HOST_NOT_FOUND.exec_reverse_stale.json", not_found);
+
+    drop(listen);
 }
 
 /// Everything that needs a live peer on the other end.

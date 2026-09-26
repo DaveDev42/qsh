@@ -11,8 +11,19 @@ carries the parts that do not change commit to commit.
 
 ## `<tag>`
 
-First release cut after the M10 release pipeline landed. Nothing about
-the protocol or the CLI contract changed in it.
+First release cut after the M10 release pipeline landed. It also carries
+the fix for issue #5. `qsh exec <host>` used to look only at the forward
+address book, so a host reachable through a live reverse registration
+held by `qsh listen` failed with `CONNECTION_FAILED` against a stale
+forward address. It now follows the same routing priority as `host get`
+and attach (`docs/CLI.md` §6.1, §6.8). `docs/CLI.md` moves to v0.13 for
+this one delta (§6.1, §6.8, §6.13).
+
+The wire format does not change, but the controller's `qsh listen` has
+to run this build or a newer one, because its resident daemon now relays
+the `EXEC_DATA` stream (`docs/design/protocol.md` §11). An older
+`qsh listen` rejects that stream with `INVALID_ARGUMENT`, and `qsh exec`
+from this build reports it as a stale `qsh listen` to restart or upgrade.
 
 ### What is in the archives
 

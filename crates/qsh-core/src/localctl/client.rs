@@ -392,13 +392,13 @@ impl ControlConduit {
 /// could usefully vary about *how* it is sent, only *what* it says. The
 /// daemon answers a well-formed `SESSION_DATA`/`TCP_CONNECT` header with
 /// silence (it moves straight to the raw splice, `serve_stream`'s own
-/// doc), so this function does not wait for anything after sending it —
-/// matching `client::Session::open_attach_stream`'s forward-route sibling,
-/// which likewise never waits for a target-side ack of the header it
-/// writes. (`TCP_ACCEPTED` is the one kind that *is* answered — always,
-/// with exactly one frame; see [`open_stream_with_wait`].) Convenience
-/// wrapper over [`open_stream_with_wait`] for every caller that has
-/// nothing to wait on (`SESSION_DATA`, `TCP_CONNECT`).
+/// doc), so this function does not wait for anything after sending one of
+/// those two — matching `client::Session::open_attach_stream`'s
+/// forward-route sibling, which likewise never waits for a target-side ack
+/// of the header it writes. (`TCP_ACCEPTED` and `EXEC_DATA` are answered
+/// always, with exactly one frame; see [`open_stream_with_wait`].)
+/// Convenience wrapper over [`open_stream_with_wait`] for every caller that
+/// has nothing to wait on (`SESSION_DATA`, `TCP_CONNECT`).
 pub(crate) async fn open_stream(
     socket_path: &Path,
     host: &str,
@@ -513,19 +513,23 @@ async fn open_stream_over_inner(
     };
     conduit.send(header).await?;
 
-    // `TCP_ACCEPTED` is the one header kind the daemon answers at all
-    // after this point, and it always answers: exactly one framed
-    // `LocalResponse` — `LocalClaimGranted` if the claim was granted, a
+    // `TCP_ACCEPTED` and `EXEC_DATA` are the two header kinds the daemon
+    // answers at all after this point, and each always answers: exactly
+    // one framed `LocalResponse` — `LocalClaimGranted` on success, a
     // `LocalError` otherwise, with a timeout being one of those errors
     // rather than silence (`docs/design/protocol.md` §11-3's
     // "TCP_ACCEPTED claim leg의 요청/응답",
-    // `crate::localctl::daemon::LocalctlDaemon::serve_tcp_accepted`).
-    // So this reads a fixed *one* frame and then switches to raw. It
-    // never inspects byte content to decide whether something is a frame
-    // (any byte sequence can be read as a length prefix, so that question
-    // is not decidable) and never reads silence as success (a granted
-    // claim onto an idle connection and a slow failure are the same
-    // silence). The wait itself needs no budget of its own: the daemon's
+    // `crate::localctl::daemon::LocalctlDaemon::serve_tcp_accepted`;
+    // issue #5's `local_stream_relay_kind`'s own doc on
+    // `ack_before_splice` for why `EXEC_DATA` needed the same treatment —
+    // it is new enough that an *old* daemon's rejection of it must be
+    // decidable from a new daemon's silent success). So this reads a fixed
+    // *one* frame and then switches to raw. It never inspects byte content
+    // to decide whether something is a frame (any byte sequence can be
+    // read as a length prefix, so that question is not decidable) and
+    // never reads silence as success (a granted claim onto an idle
+    // connection and a slow failure are the same silence). The wait
+    // itself needs no budget of its own for `TCP_ACCEPTED`: the daemon's
     // *total* wait across connecting and claiming is capped at the very
     // `wait_ms` this conduit sent — `crate::localctl::daemon::serve_stream`
     // splits that one budget between `connection_for_wait` and the parked
@@ -535,15 +539,21 @@ async fn open_stream_over_inner(
     // could steal an arrival meant for a later retry) — and
     // `open_stream_over_with_wait`'s `wait_ms + PROBE_TIMEOUT` wrapper
     // already bounds a daemon that hangs instead of answering that
-    // budget.
+    // budget. `EXEC_DATA`'s ack has no comparable park: the daemon sends
+    // it the instant its own `open_bi` resolves, so the same
+    // `PROBE_TIMEOUT` wrapper bounds it just as tightly with `wait_ms`
+    // left at its usual `0`.
     //
     // Every other kind (`SESSION_DATA`, `TCP_CONNECT`) is answered with
     // silence unconditionally and reads nothing here.
-    if header.stream_kind() == Some(wire::StreamKind::TcpAccepted) {
+    if matches!(
+        header.stream_kind(),
+        Some(wire::StreamKind::TcpAccepted) | Some(wire::StreamKind::ExecData)
+    ) {
         let claim: LocalResponse = conduit.recv().await?.ok_or_else(|| {
             OpError::new(
                 ErrorCode::ConnectionFailed,
-                "localctl: daemon closed the conduit without answering the TCP_ACCEPTED claim",
+                "localctl: daemon closed the conduit without answering the LOCAL_STREAM header",
             )
         })?;
         match claim.body {
@@ -552,18 +562,23 @@ async fn open_stream_over_inner(
             _ => {
                 return Err(OpError::new(
                     ErrorCode::ConnectionFailed,
-                    "localctl: TCP_ACCEPTED claim answered with an unexpected framed response",
+                    "localctl: LOCAL_STREAM header answered with an unexpected framed response",
                 ));
             }
         }
     }
 
     // From here on this conduit never speaks framed `qsh.local.v1` again —
-    // `into_raw` hands back the still-open stream plus whatever bytes of
-    // the peer's first `SessionFrame` the last `read()` already swallowed
-    // alongside the header (`LocalConduit::into_raw`'s own doc; the daemon
-    // sends nothing back on success, so any such bytes can only be the
-    // CLI's *own* next write racing this same read, not a reply).
+    // `into_raw` hands back the still-open stream plus whatever bytes past
+    // the last framed message the last `read()` already swallowed
+    // (`LocalConduit::into_raw`'s own doc). For `SESSION_DATA`/
+    // `TCP_CONNECT`, which the daemon answers with silence, that residue
+    // can only be the CLI's *own* next write racing this same read, not a
+    // reply. For an ack'd kind (`TCP_ACCEPTED`, `EXEC_DATA`) the daemon's
+    // ack was already read above, so any residue here is instead the
+    // peer's first relayed frames pipelined right behind it — still
+    // decoded once from this same return value, never re-parsed from the
+    // raw stream.
     let (stream, prefetched) = conduit.into_raw();
     // One `Arc` shared by both halves plus [`DataHandshake::socket`] (a
     // third clone a caller can keep for a synchronous, any-thread

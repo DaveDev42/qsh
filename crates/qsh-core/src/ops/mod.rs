@@ -1076,27 +1076,27 @@ pub(crate) fn resolve_peer_address(
     // via `qsh exec nowhere`) — kept byte-identical to the pre-M7-Step-3
     // wording even though the remedy it names (`qsh trust add`) is now
     // only one of two ways to fix this (the other being a `hosts.toml`
-    // entry); fixtures are append-only, this is not an editable one. The
-    // fixture's own input (`"nowhere"`) has no `@`, so [`host::hint_alias`]
-    // is a no-op for it and the fixture stays byte-identical; the strip
-    // only changes behavior for `qsh exec <user>@<host> -- ...`
-    // (`ExecArgs.host`, `docs/CLI.md` §6.9, a raw positional that — like
-    // `qsh host get` — bypasses `parse_target`'s own `user@` split), which
-    // used to echo the `user@` hint into this same un-runnable `qsh trust
-    // add` shape `Ops::resolve_host_route` had (`PLAN.md` §3 Step 6,
-    // lens-2 finding).
+    // entry); fixtures are append-only, this is not an editable one. Since
+    // issue #5, `qsh exec` itself reaches this same wording through its
+    // own `resolve_exec_route`/`resolve_host_route_with` path rather than
+    // through this function — both pass the same
+    // [`host::not_in_trust_store_host_not_found`] constructor, so the
+    // fixture stays byte-identical either way; this function now serves
+    // `Ops::resolve_peer` (forward attach and capabilities), `qsh serve
+    // --to` and `qsh doctor`. The fixture's own input (`"nowhere"`) has no
+    // `@`, so [`host::hint_alias`] is a no-op for it and the fixture stays
+    // byte-identical; the strip only changes behavior for `qsh exec
+    // <user>@<host> -- ...` (`ExecArgs.host`, `docs/CLI.md` §6.9, a raw
+    // positional that — like `qsh host get` — bypasses `parse_target`'s
+    // own `user@` split), which used to echo the `user@` hint into this
+    // same un-runnable `qsh trust add` shape `Ops::resolve_host_route` had
+    // (`docs/design/architecture.md` §1's `Ops` façade extension pattern).
     // `PLAN.md` M9 §6 행 i: the lookup key is trimmed independently of
     // `hint_alias`'s remedy-message stripping below.
     let key = host::lookup_name(host);
     let entry = host::resolve_forward(trust.find(key), hosts.find(key), hosts_has_any).ok_or_else(
         || match host::hint_alias(host) {
-            host::HintAlias::Valid(alias) => OpError::new(
-                ErrorCode::HostNotFound,
-                format!(
-                    "host {alias:?} is not in the trust store; pin it with `qsh trust add \
-                     {alias} --address <host:port> --fingerprint sha256:...`"
-                ),
-            ),
+            host::HintAlias::Valid(alias) => host::not_in_trust_store_host_not_found(alias),
             host::HintAlias::Empty => host::empty_host_name_error(),
             host::HintAlias::Invalid(alias) => host::invalid_host_alias_error(alias),
         },

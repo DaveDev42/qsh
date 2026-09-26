@@ -550,7 +550,7 @@ async fn exec_run_against_a_missing_binary_still_releases_the_permit_end_to_end(
     let mut s = h.session().await;
 
     let missing = s
-        .exec(&exec_spec(&["/nonexistent/qsh-no-such-binary"]), None)
+        .exec(&exec_spec(&["/nonexistent/qsh-no-such-binary"]), None, None)
         .await
         .expect("exec.run completes over the wire even when the child never spawns");
     assert_eq!(
@@ -561,7 +561,7 @@ async fn exec_run_against_a_missing_binary_still_releases_the_permit_end_to_end(
     // The permit the first exec held must already be gone — otherwise
     // this second exec.run, same connection, same principal, cap 1, would
     // be refused RESOURCE_EXHAUSTED.
-    let admitted = s.exec(&exec_spec(&["true"]), None).await.unwrap();
+    let admitted = s.exec(&exec_spec(&["true"]), None, None).await.unwrap();
     assert_eq!(admitted.exit_code, 0);
 
     h.shutdown().await;
@@ -652,7 +652,7 @@ async fn a_running_child_holds_its_exec_permit_until_it_exits() {
 
     // The child has exited: the permit is free again, and a third
     // exec.run succeeds.
-    let admitted = s2.exec(&exec_spec(&["true"]), None).await.unwrap();
+    let admitted = s2.exec(&exec_spec(&["true"]), None, None).await.unwrap();
     assert_eq!(admitted.exit_code, 0);
 
     h.shutdown().await;
