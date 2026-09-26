@@ -1,6 +1,6 @@
 .ie \n(.g .ds Aq \(aq
 .el .ds Aq '
-.TH qsh-identity 1  "identity 0.2.0" 
+.TH qsh-identity 1  "identity 0.3.0" 
 .SH NAME
 qsh\-identity \- Manage this device\*(Aqs own identity (`docs/CLI.md` §6.11)
 .SH SYNOPSIS
@@ -31,4 +31,4 @@ Print version
 qsh\-identity\-export(1)
 Print this device\*(Aqs certificate as PEM, never its private key (`docs/CLI.md` §6.11, ADR\-0013). Without `\-\-out`, the PEM is the only thing this command writes to stdout, so it pipes directly into `qsh trust add \-\-cert\-file \-` on another host
 .SH VERSION
-v0.2.0
+v0.3.0

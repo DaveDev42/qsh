@@ -2012,7 +2012,7 @@ dependencies = [
 
 [[package]]
 name = "qsh-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64 0.22.1",
  "clap",
@@ -2035,7 +2035,7 @@ dependencies = [
 
 [[package]]
 name = "qsh-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64 0.22.1",
  "blake3",
@@ -2067,7 +2067,7 @@ dependencies = [
 
 [[package]]
 name = "qsh-proto"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "proptest",
  "prost",
@@ -2081,7 +2081,7 @@ dependencies = [
 
 [[package]]
 name = "qsh-testkit"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64 0.22.1",
  "qsh-core",
@@ -2101,7 +2101,7 @@ dependencies = [
 
 [[package]]
 name = "qsh-transport"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64 0.22.1",
  "prost",
@@ -3575,7 +3575,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",

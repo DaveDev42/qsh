@@ -1,6 +1,6 @@
 .ie \n(.g .ds Aq \(aq
 .el .ds Aq '
-.TH qsh-pair 1  "pair 0.2.0" 
+.TH qsh-pair 1  "pair 0.3.0" 
 .SH NAME
 qsh\-pair \- Pair with another device: mint an invite on one side, redeem it on the other (ADR\-0002, ADR\-0012 decision 3, `docs/CLI.md` §6.11). This is the documented spelling for creating a new trust entry by pairing; `trust …` stays the vocabulary for manipulating entries that already exist
 .SH SYNOPSIS
@@ -34,4 +34,4 @@ Mint a one\-time invite code for another device to pair with this one (ADR\-0002
 qsh\-pair\-accept(1)
 Dial `address`, redeem `code` against its invite, and — on a successful mutual proof — pin the peer exactly as `trust add` would (ADR\-0002, `docs/CLI.md` §6.11)
 .SH VERSION
-v0.2.0
+v0.3.0

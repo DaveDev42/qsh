@@ -2,14 +2,14 @@
 
 One section per release tag, newest first. Each section says what the tag
 ships, which parts of it are signed, how to check any of that yourself,
-and what is still unproven. The heading `<tag>` below is a placeholder:
-the commit that bumps the version for a tag replaces it with that tag's
-name.
+and what is still unproven. A section whose heading reads `<tag>` is a
+placeholder for the next tag; the commit that bumps the version replaces
+it with that tag's name.
 
 The GitHub Release page for a tag carries the commit list; this file
 carries the parts that do not change commit to commit.
 
-## `<tag>`
+## `v0.3.0`
 
 First release cut after the M10 release pipeline landed. It also carries
 the fix for issue #5. `qsh exec <host>` used to look only at the forward
@@ -31,12 +31,12 @@ Six assets plus a `SHA256SUMS` file:
 
 | Platform | Asset |
 |---|---|
-| macOS, Apple silicon | `qsh-<tag>-aarch64-apple-darwin.tar.gz` |
-| macOS, Intel | `qsh-<tag>-x86_64-apple-darwin.tar.gz` |
-| Linux x86_64 (glibc) | `qsh-<tag>-x86_64-unknown-linux-gnu.tar.gz` |
-| Linux aarch64 (glibc) | `qsh-<tag>-aarch64-unknown-linux-gnu.tar.gz` |
-| Linux x86_64 (static, musl) | `qsh-<tag>-x86_64-unknown-linux-musl.tar.gz` |
-| Windows x86_64 | `qsh-<tag>-x86_64-pc-windows-msvc.zip` |
+| macOS, Apple silicon | `qsh-v0.3.0-aarch64-apple-darwin.tar.gz` |
+| macOS, Intel | `qsh-v0.3.0-x86_64-apple-darwin.tar.gz` |
+| Linux x86_64 (glibc) | `qsh-v0.3.0-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux aarch64 (glibc) | `qsh-v0.3.0-aarch64-unknown-linux-gnu.tar.gz` |
+| Linux x86_64 (static, musl) | `qsh-v0.3.0-x86_64-unknown-linux-musl.tar.gz` |
+| Windows x86_64 | `qsh-v0.3.0-x86_64-pc-windows-msvc.zip` |
 
 Each `.tar.gz` holds the `qsh` binary and the generated man pages under
 `man/`. The Windows `.zip` holds the binary alone.
@@ -73,7 +73,7 @@ provenance attestation produced by the same workflow run that built it.
 With the GitHub CLI:
 
 ```bash
-gh attestation verify qsh-<tag>-x86_64-unknown-linux-gnu.tar.gz --repo DaveDev42/qsh
+gh attestation verify qsh-v0.3.0-x86_64-unknown-linux-gnu.tar.gz --repo DaveDev42/qsh
 ```
 
 Add `--signer-workflow DaveDev42/qsh/.github/workflows/release.yml` to
@@ -102,7 +102,9 @@ download, not a compromised release. A checksum is not a signature.
   `cargo build --release` produces; a partial set of credentials is
   treated as a misconfiguration and fails the tag outright.
   For this tag, `Check for Apple signing secrets` in the release run
-  log says which case applied.
+  log says which case applied. v0.3.0 is cut without the Apple
+  credentials configured, so both macOS binaries in this release are
+  ad-hoc signed, not notarized.
 - **Nothing is stapled.** `xcrun stapler` attaches a ticket to a `.app`,
   `.dmg` or `.pkg`, and qsh ships a bare executable inside a `.tar.gz`.
   Gatekeeper confirms the notarization online instead, so a first run on

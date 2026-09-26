@@ -15,7 +15,7 @@ One binary (`qsh`) is both ends: it serves, and it connects.
 
 ## Status
 
-Version 0.2.0. **Not for production use**. The independent review of the
+Version 0.3.0. **Not for production use**. The independent review of the
 protocol and key lifecycle that [docs/PRD.md](docs/PRD.md) §15 requires
 has not been contracted, and the wire-format freeze waits on that same
 decision. The campaigns a person runs by hand are still open too: the

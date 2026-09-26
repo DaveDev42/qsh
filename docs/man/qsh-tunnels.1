@@ -1,6 +1,6 @@
 .ie \n(.g .ds Aq \(aq
 .el .ds Aq '
-.TH qsh-tunnels 1  "tunnels 0.2.0" 
+.TH qsh-tunnels 1  "tunnels 0.3.0" 
 .SH NAME
 qsh\-tunnels \- List every tunnel this machine\*(Aqs resident `qsh listen` daemon(s) currently hold (`docs/CLI.md` §6.9, `tunnel.list`). Never dials. A forward\-route tunnel opened by a standalone `qsh tunnel open` process is not visible here — it has no resident holder to be listed by (`Ops::tunnel_list`\*(Aqs own doc)
 .SH SYNOPSIS
@@ -27,4 +27,4 @@ Print help
 \fB\-V\fR, \fB\-\-version\fR
 Print version
 .SH VERSION
-v0.2.0
+v0.3.0
