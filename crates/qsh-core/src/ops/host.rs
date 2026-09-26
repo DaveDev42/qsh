@@ -614,6 +614,30 @@ fn stale_host_not_found(
     }))
 }
 
+/// `HOST_NOT_FOUND` for a name neither `hosts.toml`, `trust.toml` nor the
+/// reverse registry knows about at all — `qsh exec`'s own frozen legacy
+/// text (issue #5), extracted verbatim from what
+/// `crate::ops::resolve_peer_address`'s `ok_or_else` used to build
+/// inline. `error.HOST_NOT_FOUND.json` (`qsh exec nowhere`,
+/// `crates/qsh-cli/tests/fixtures.rs`) compares this message byte for
+/// byte, so it is kept exactly as it read before issue #5 gave `exec`
+/// [`Ops::resolve_host_route`]'s own routing (fixtures are append-only —
+/// `CLAUDE.md`) — even though [`unconfigured_host_not_found`] below says
+/// the same thing at more length for every *other* caller of that
+/// routing. `exec`'s call site passes this function in as the "wholly
+/// unconfigured" branch constructor (see that method's own doc) instead
+/// of switching to the newer wording, which would have broken the pinned
+/// fixture.
+pub fn not_in_trust_store_host_not_found(display_name: &str) -> OpError {
+    OpError::new(
+        ErrorCode::HostNotFound,
+        format!(
+            "host {display_name:?} is not in the trust store; pin it with `qsh trust add \
+             {display_name} --address <host:port> --fingerprint sha256:...`"
+        ),
+    )
+}
+
 /// `HOST_NOT_FOUND` for a name `resolve_route` cannot place anywhere at
 /// all — branch (i) of issue #3 item b2's three-way split. Until this
 /// split the same OR-ed message covered this case and branch (iii)
@@ -622,8 +646,10 @@ fn stale_host_not_found(
 /// wording, two causes, and a third reading — DDNS failure — it can never
 /// actually be, since `resolve_route` never resolves DNS). Message text
 /// is not contract (`docs/CLI.md` §3.2); `error.HOST_NOT_FOUND.json`
-/// pins a different call site's text (`qsh exec` routing,
-/// `Ops::resolve_peer_address`), left untouched by this split.
+/// pins a different call site's text (`qsh exec`'s
+/// [`not_in_trust_store_host_not_found`], the constructor it passes to
+/// `Ops::resolve_host_route_with` instead of this one), left untouched
+/// by this split.
 ///
 /// `qsh pair accept` is not offered as an alternative next command: no
 /// such verb exists in this tree (`crates/qsh-cli/src/cli.rs`'s
@@ -681,7 +707,7 @@ pub fn pinned_without_address_host_not_found(display_name: &str) -> OpError {
 /// through to `HOST_NOT_FOUND`, non-retryable, exactly like before —
 /// only the wording, decided on `display_name` instead of `key` so it
 /// cannot assert a falsehood about the name it names.
-fn user_prefix_not_accepted_host_not_found(display_name: &str) -> OpError {
+pub fn user_prefix_not_accepted_host_not_found(display_name: &str) -> OpError {
     OpError::new(
         ErrorCode::HostNotFound,
         format!(
@@ -705,6 +731,16 @@ fn user_prefix_not_accepted_host_not_found(display_name: &str) -> OpError {
 /// than read here, keeping this function itself I/O-free and directly
 /// testable against a fixed clock (`docs/design/testing.md` L2) — the
 /// same discipline the rest of this module's pure helpers follow.
+///
+/// `unconfigured` is the constructor for the one branch two callers
+/// disagree on wording for (issue #5): [`Ops::resolve_host_route`] passes
+/// [`unconfigured_host_not_found`], `qsh exec`'s
+/// [`Ops::resolve_host_route_with`] passes
+/// [`not_in_trust_store_host_not_found`] instead, to keep
+/// `error.HOST_NOT_FOUND.json`'s frozen text byte-identical. Every other
+/// branch (live reverse, forward, two-daemon conflict, stale, pinned-
+/// without-address, `user@`-prefixed) is unchanged by which constructor
+/// is passed — those wordings are shared by every caller.
 fn resolve_route(
     reverse: &[ReverseHostEntry],
     store: &TrustStore,
@@ -712,6 +748,7 @@ fn resolve_route(
     name: &str,
     now: SystemTime,
     retry_after_ms: u64,
+    unconfigured: fn(&str) -> OpError,
 ) -> Result<HostRoute, OpError> {
     if name.trim().is_empty() {
         // An empty/whitespace-only name is an argument defect, not a
@@ -764,13 +801,13 @@ fn resolve_route(
     }
 
     // Reuses `resolve_forward` — the single existing "layer hosts.toml over
-    // the trust pin" rule `ops::resolve_peer_address` (`qsh exec`'s own
-    // routing) also calls — rather than re-implementing the merge inline a
-    // second time. [`forward_hosts`] above applies the identical rule
-    // across every name for listing; keeping both on `resolve_forward`'s
-    // definition is what keeps listing and routing from growing divergent
-    // rules (the same discipline the pre-M7-Step-3 code already followed
-    // for `TrustStore::resolve_host`).
+    // the trust pin" rule `ops::resolve_peer_address` (`Ops::resolve_peer`,
+    // `qsh serve --to` and `qsh doctor`'s own routing) also calls — rather
+    // than re-implementing the merge inline a second time. [`forward_hosts`]
+    // above applies the identical rule across every name for listing;
+    // keeping both on `resolve_forward`'s definition is what keeps listing
+    // and routing from growing divergent rules (the same discipline the
+    // pre-M7-Step-3 code already followed for `TrustStore::resolve_host`).
     let hosts_has_any = !hosts.entries().is_empty();
     if let Some(entry) = resolve_forward(store.find(key), hosts.find(key), hosts_has_any) {
         return Ok(HostRoute::Forward {
@@ -883,7 +920,7 @@ fn resolve_route(
     Err(if known {
         pinned_without_address_host_not_found(display_name)
     } else {
-        unconfigured_host_not_found(display_name)
+        unconfigured(display_name)
     })
 }
 
@@ -960,6 +997,24 @@ impl Ops {
     /// async variant of the reverse-source lookup; this is a Step 6 wiring
     /// concern, not a PR 5b defect (adversarial review finding).
     pub fn resolve_host_route(&self, name: &str) -> Result<HostRoute, OpError> {
+        self.resolve_host_route_with(name, unconfigured_host_not_found)
+    }
+
+    /// [`Self::resolve_host_route`], with the "wholly unconfigured" branch's
+    /// constructor chosen by the caller instead of fixed at
+    /// [`unconfigured_host_not_found`] — `qsh exec`'s own routing
+    /// (`crate::ops::exec::ExecRunOp`, issue #5) passes
+    /// [`not_in_trust_store_host_not_found`] here, to keep
+    /// `error.HOST_NOT_FOUND.json`'s pinned text byte-identical, while
+    /// every other branch of the decision (live reverse, forward,
+    /// two-daemon conflict, stale, pinned-without-address, `user@`-prefixed)
+    /// is exactly [`Self::resolve_host_route`]'s own rule — see
+    /// [`resolve_route`]'s own doc on the one parameter this adds.
+    pub(crate) fn resolve_host_route_with(
+        &self,
+        name: &str,
+        unconfigured: fn(&str) -> OpError,
+    ) -> Result<HostRoute, OpError> {
         let reverse = self.reverse_host_entries();
         let store = TrustStore::load(&self.paths.trust_file())?;
         let hosts = HostsFile::load(&self.paths.hosts_file())?;
@@ -970,6 +1025,7 @@ impl Ops {
             name,
             SystemTime::now(),
             self.stale_retry_after_ms(),
+            unconfigured,
         )
     }
 
@@ -1003,6 +1059,7 @@ impl Ops {
             name,
             SystemTime::now(),
             self.stale_retry_after_ms(),
+            unconfigured_host_not_found,
         )
     }
 

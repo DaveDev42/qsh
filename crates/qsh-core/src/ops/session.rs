@@ -58,9 +58,15 @@ use context::{
 use drive::drive_attach;
 use link::{ConnectedLink, Link};
 use pump::{attach_event_json, pump_attach_control, pump_attach_input};
-use reader::{dial_peer, forget_if_closed};
 #[cfg(unix)]
-use reader::{dial_reverse, dial_reverse_wait};
+use reader::dial_reverse_wait;
+use reader::{dial_peer, forget_if_closed};
+// Wider than `session`'s own use of it needs (`pub(super)` would do for
+// every call site in this module): `crate::ops::exec::exec_async_reverse`
+// (issue #5) is the one caller outside this module, so this re-export is
+// `pub(in crate::ops)` rather than plain `use`.
+#[cfg(unix)]
+pub(in crate::ops) use reader::dial_reverse;
 use reconnect::{DialReconnect, LocalReconnect};
 #[cfg(any(unix, test))]
 use recovery::abandoned;

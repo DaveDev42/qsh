@@ -544,7 +544,9 @@ impl Ops {
             // An explicit `--host`/positional target: an unknown name is a
             // hard error, the same precedent `resolve_peer_address`'s own
             // `HOST_NOT_FOUND` wording sets for every other host-targeting
-            // op (`qsh exec`, `qsh capabilities <host>`) — the caller named
+            // op (`qsh capabilities <host>`; `qsh exec` now reaches the
+            // same wording through its own `resolve_exec_route` instead,
+            // `host::not_in_trust_store_host_not_found`) — the caller named
             // a specific peer, so a typo fails loudly rather than
             // silently turning into an "unreachable" finding.
             let (address, _server_name) = resolve_peer_address(&trust, &hosts, host)?;

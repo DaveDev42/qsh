@@ -28,7 +28,15 @@ fn resolve(
     hosts: &HostsFile,
     name: &str,
 ) -> Result<HostRoute, OpError> {
-    resolve_route(reverse, store, hosts, name, TEST_NOW, TEST_RETRY_AFTER_MS)
+    resolve_route(
+        reverse,
+        store,
+        hosts,
+        name,
+        TEST_NOW,
+        TEST_RETRY_AFTER_MS,
+        unconfigured_host_not_found,
+    )
 }
 
 fn reverse_entry(pid: u32, name: &str, state: &str, fingerprint: &str) -> ReverseHostEntry {
@@ -684,6 +692,40 @@ fn routing_two_live_daemons_is_invalid_argument_with_pids() {
     assert_eq!(err.details["pids"], serde_json::json!([100, 200]));
 }
 
+/// Issue #5's own inherited-behavior claim, pinned at the seam that
+/// actually decides it: the two-live-daemon conflict is the "many" branch
+/// of `resolve_route`'s live match, which returns before ever consulting
+/// `unconfigured` (`resolve_route`'s own doc on that parameter) — so
+/// `qsh exec`'s routing (`Ops::resolve_host_route_with`, which passes
+/// `not_in_trust_store_host_not_found` instead of
+/// `unconfigured_host_not_found`) must get the identical
+/// `InvalidArgument`/`pids` result `host.get`/attach do
+/// (`routing_two_live_daemons_is_invalid_argument_with_pids` above), not a
+/// different one. A regression that made the "many" branch consult
+/// `unconfigured` at all — or made it depend in any way on which
+/// constructor was passed — would change this result; today's code
+/// cannot, which is exactly what this pins.
+#[test]
+fn routing_two_live_daemons_is_invalid_argument_regardless_of_the_unconfigured_constructor() {
+    let store = TrustStore::default();
+    let reverse = vec![
+        reverse_entry(200, "mac", "reachable", FP_A),
+        reverse_entry(100, "mac", "reachable", FP_B),
+    ];
+    let err = resolve_route(
+        &reverse,
+        &store,
+        &no_hosts(),
+        "mac",
+        TEST_NOW,
+        TEST_RETRY_AFTER_MS,
+        not_in_trust_store_host_not_found,
+    )
+    .unwrap_err();
+    assert_eq!(err.code, ErrorCode::InvalidArgument);
+    assert_eq!(err.details["pids"], serde_json::json!([100, 200]));
+}
+
 #[test]
 fn routing_ignores_a_stale_duplicate_and_uses_the_live_one() {
     let store = TrustStore::default();
@@ -840,7 +882,16 @@ fn stale_route_reports_lost_ago_ms_from_the_supplied_now() {
         "2026-01-01T00:00:00Z",
     )];
     let now = parse_rfc3339("2026-01-01T00:00:07Z").expect("parses");
-    let err = resolve_route(&reverse, &store, &no_hosts(), "phone", now, 30_000).unwrap_err();
+    let err = resolve_route(
+        &reverse,
+        &store,
+        &no_hosts(),
+        "phone",
+        now,
+        30_000,
+        unconfigured_host_not_found,
+    )
+    .unwrap_err();
     assert_eq!(err.details["lost_ago_ms"], serde_json::json!(7_000));
 }
 
@@ -878,7 +929,16 @@ fn stale_route_picks_the_smallest_pid_deterministically_when_two_daemons_both_ho
         stale_reverse_entry(100, "phone", FP_B, "2026-01-01T00:00:00Z"),
     ];
     let now = parse_rfc3339("2026-01-01T00:00:20Z").expect("parses");
-    let err = resolve_route(&reverse, &store, &no_hosts(), "phone", now, 30_000).unwrap_err();
+    let err = resolve_route(
+        &reverse,
+        &store,
+        &no_hosts(),
+        "phone",
+        now,
+        30_000,
+        unconfigured_host_not_found,
+    )
+    .unwrap_err();
     assert_eq!(
         err.details["lost_ago_ms"],
         serde_json::json!(20_000),
@@ -892,7 +952,16 @@ fn stale_route_picks_the_smallest_pid_deterministically_when_two_daemons_both_ho
         stale_reverse_entry(100, "phone", FP_B, "2026-01-01T00:00:00Z"),
         stale_reverse_entry(200, "phone", FP_A, "2026-01-01T00:00:10Z"),
     ];
-    let err2 = resolve_route(&reversed, &store, &no_hosts(), "phone", now, 30_000).unwrap_err();
+    let err2 = resolve_route(
+        &reversed,
+        &store,
+        &no_hosts(),
+        "phone",
+        now,
+        30_000,
+        unconfigured_host_not_found,
+    )
+    .unwrap_err();
     assert_eq!(err2.details["lost_ago_ms"], serde_json::json!(20_000));
 }
 
@@ -905,7 +974,16 @@ fn stale_route_propagates_the_caller_supplied_retry_after_ms() {
         FP_A,
         "2026-01-01T00:00:00Z",
     )];
-    let err = resolve_route(&reverse, &store, &no_hosts(), "phone", TEST_NOW, 12_345).unwrap_err();
+    let err = resolve_route(
+        &reverse,
+        &store,
+        &no_hosts(),
+        "phone",
+        TEST_NOW,
+        12_345,
+        unconfigured_host_not_found,
+    )
+    .unwrap_err();
     assert_eq!(err.details["retry_after_ms"], serde_json::json!(12_345));
 }
 

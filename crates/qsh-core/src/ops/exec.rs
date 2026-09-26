@@ -1,6 +1,7 @@
 //! `exec.run` — client side of the walking skeleton (`docs/CLI.md` §6.8):
-//! resolve host through the trust store, dial with mutual TLS, negotiate,
-//! run, and assemble the `ExecRunData` payload.
+//! resolve `host` the same route-aware way `host.get`/attach do (issue #5:
+//! a live reverse registration wins over a forward pin), dial or relay,
+//! negotiate, run, and assemble the `ExecRunData` payload.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,7 +14,9 @@ use qsh_transport::{ConnectionError, DialError, Dialer, StreamError};
 
 use crate::client::{ClientError, Session};
 use crate::exec::ExecSpec;
-use crate::ops::{OpError, Operation, Ops, PeerTarget};
+use crate::identity::LoadedIdentity;
+use crate::ops::host::{self, HostRoute};
+use crate::ops::{LocalRoute, OpError, Operation, Ops, PeerRoute, PeerTarget, server_name_for};
 
 /// The `exec.run` operation.
 pub struct ExecRunOp;
@@ -45,12 +48,24 @@ pub enum ExecStdin {
 }
 
 impl Ops {
-    /// Run a command on a pinned host and collect its output.
+    /// Run a command on `req.host` and collect its output — route-aware
+    /// since issue #5: a live reverse registration held by this machine's
+    /// `qsh listen` daemon wins over a forward (`hosts.toml`/trust-store)
+    /// pin, the same [`Ops::resolve_host_route`] priority `host.get` and
+    /// attach already apply (`docs/CLI.md` §6.1).
     ///
     /// Blocking: runs on `Ops`' shared dial runtime
     /// (`Ops::connect_runtime`) so frontends stay synchronous. The
-    /// identity is loaded before entering the runtime (platform key
-    /// stores must not be touched from within one).
+    /// identity is loaded **before** routing, not just before entering the
+    /// runtime: `qsh exec` on an uninitialized device must fail
+    /// `CONFIG_ERROR`, never `HOST_NOT_FOUND`, for an unconfigured name —
+    /// the frozen `error.CONFIG_ERROR.json` fixture and
+    /// `exit_code_matrix.rs`'s "exec: no device identity" row both pin
+    /// this order (a platform key store must not be touched from within
+    /// a runtime either way, which is the other reason this happens
+    /// up front). The forward branch below reuses this one loaded
+    /// identity to build its `PeerTarget` rather than loading it a
+    /// second time through `Ops::resolve_peer`.
     pub fn exec_run(&self, req: ExecRunReq, stdin: ExecStdin) -> Result<ExecRunOutput, OpError> {
         if req.argv.is_empty() {
             return Err(OpError::new(
@@ -58,12 +73,12 @@ impl Ops {
                 "exec requires a command after `--`",
             ));
         }
-        let PeerTarget {
-            identity,
-            trust,
-            address,
-            server_name,
-        } = self.resolve_peer(&req.host)?;
+        let identity = self.load_identity()?.ok_or_else(|| {
+            OpError::new(
+                ErrorCode::ConfigError,
+                "no device identity; run `qsh init` first",
+            )
+        })?;
 
         let spec = ExecSpec {
             argv: req.argv.clone(),
@@ -74,27 +89,79 @@ impl Ops {
                 .collect(),
             timeout: req.timeout_ms.map(Duration::from_millis),
         };
-        let device_name = identity.identity.device_id.clone();
-        let dialer = Dialer::new(
-            identity.local,
-            trust as Arc<dyn qsh_transport::TrustEvaluator>,
-        );
+        let timeout = req.timeout_ms.map(Duration::from_millis);
+
         // Shared with every other dial op (`ops/mod.rs::connect_runtime`,
         // `PLAN.md` M7 Step 7-2 carryover (ii)) instead of a fresh
         // `Builder::new_multi_thread()` per call — one exec after another
         // (or an exec alongside a live pull) no longer pays for a second
         // multi-thread runtime it never needed.
         let runtime = self.connect_runtime()?;
-        let timeout = req.timeout_ms.map(Duration::from_millis);
-        runtime.block_on(exec_async(
-            &dialer,
-            &address,
-            &server_name,
-            &device_name,
-            &spec,
-            stdin,
-            timeout,
-        ))
+        match self.resolve_exec_route(&req.host, identity)? {
+            PeerRoute::Forward(target) => {
+                let device_name = target.identity.identity.device_id.clone();
+                let dialer = Dialer::new(
+                    target.identity.local,
+                    target.trust as Arc<dyn qsh_transport::TrustEvaluator>,
+                );
+                runtime.block_on(exec_async(
+                    &dialer,
+                    &target.address,
+                    &target.server_name,
+                    &device_name,
+                    &spec,
+                    stdin,
+                    timeout,
+                ))
+            }
+            #[cfg(unix)]
+            PeerRoute::Reverse(route) => {
+                runtime.block_on(exec_async_reverse(&route, &spec, stdin, timeout))
+            }
+            // Windows twin of `Ops::connect_reverse` (`ops/session.rs`):
+            // `Ops::resolve_host_route` never actually produces
+            // `HostRoute::Reverse` there (`host::reverse_host_entries_async`
+            // always returns empty), so this is unreachable in practice —
+            // kept only so the match compiles on every platform.
+            #[cfg(not(unix))]
+            PeerRoute::Reverse(_route) => Err(OpError::new(
+                ErrorCode::Unsupported,
+                "reverse routing (localctl) is not available on this platform",
+            )),
+        }
+    }
+
+    /// [`Ops::resolve_route`] (`ops/mod.rs`), specialized for `exec_run`:
+    /// same routing decision (`Ops::resolve_host_route`'s live-reverse-
+    /// first priority), but built from an **already-loaded** `identity`
+    /// instead of calling [`Ops::resolve_peer`] a second time on the
+    /// forward branch (which would reload it, touching the platform key
+    /// store twice for one call) — and with `host::not_in_trust_store_host_not_found`
+    /// as the "wholly unconfigured" branch's wording, `qsh exec`'s own
+    /// frozen legacy text (`error.HOST_NOT_FOUND.json`), rather than
+    /// [`Ops::resolve_host_route`]'s newer, longer wording every other
+    /// caller of that routing gets.
+    fn resolve_exec_route(
+        &self,
+        host: &str,
+        identity: LoadedIdentity,
+    ) -> Result<PeerRoute, OpError> {
+        match self.resolve_host_route_with(host, host::not_in_trust_store_host_not_found)? {
+            HostRoute::Forward { address, .. } => {
+                let trust = self.open_trust()?;
+                let server_name = server_name_for(&address);
+                Ok(PeerRoute::Forward(PeerTarget {
+                    identity,
+                    trust,
+                    address,
+                    server_name,
+                }))
+            }
+            HostRoute::Reverse { socket, .. } => Ok(PeerRoute::Reverse(LocalRoute {
+                host: host.to_string(),
+                socket,
+            })),
+        }
     }
 }
 
@@ -195,7 +262,13 @@ async fn exec_async_resolving(
     let run = async {
         match Session::negotiate(dialed.connection, device_name).await {
             Ok(mut session) => {
-                let result = session.exec(spec, stdin_reader).await;
+                // No kill-switch out-param on the forward route: a timeout
+                // here is handled below by closing the whole `connection`
+                // instead (unlike the reverse route, this connection is
+                // this one exec's alone, and closing it reaches through to
+                // its stdin-pump task's held stream regardless of which
+                // task currently owns it).
+                let result = session.exec(spec, stdin_reader, None).await;
                 session.close();
                 result
             }
@@ -218,6 +291,89 @@ async fn exec_async_resolving(
     connection.close(0, b"done");
     drop(connection);
     endpoint.wait_idle().await;
+    let result = result?;
+    if result.timed_out {
+        // The host enforced the same deadline first and told us so.
+        return Err(timed_out());
+    }
+    let data = ExecRunData {
+        stdout_b64: BASE64.encode(&result.stdout),
+        stderr_b64: BASE64.encode(&result.stderr),
+        remote_exit_code: result.exit_code,
+        signal: result.signal,
+        duration_ms: u64::try_from(result.duration.as_millis()).unwrap_or(u64::MAX),
+    };
+    Ok(ExecRunOutput {
+        data,
+        stdout: result.stdout,
+        stderr: result.stderr,
+    })
+}
+
+/// [`exec_async`]'s reverse-route twin (issue #5): relay through this
+/// machine's resident `qsh listen` daemon instead of dialing the peer
+/// directly, under the same single `--timeout` deadline `exec_async`
+/// itself uses for resolve+dial+negotiate+run. `dial_reverse` opens a
+/// fresh `LOCAL_CONTROL` conduit to `route`'s daemon/host (the same one
+/// `Ops::connect_reverse` uses, `ops/session.rs`), and `Session::exec`
+/// then relays `EXEC_DATA` over a fresh `LOCAL_STREAM` conduit to the
+/// same daemon (`Session::open_data_link`, issue #5's daemon `EXEC_DATA`
+/// relay, `crate::localctl::daemon::local_stream_relay_kind`).
+///
+/// Unlike the forward route, there is no QUIC `Connection` here for a
+/// timeout to force-close: the CLI process is not itself a QUIC endpoint
+/// on the reverse route. `exec`'s `kill_tx` out-parameter is exactly the
+/// substitute — a [`crate::client::link::DataKillSwitch`] shuts the
+/// `LOCAL_STREAM` conduit's raw fd down at the OS level the instant the
+/// deadline hits, regardless of which task (`Session::exec`'s own stdin
+/// pump, `crate::client::pump_stdin`, moves the send half into a detached
+/// `tokio::spawn`) currently holds the async wrapper around it — dropping
+/// the cancelled `run` future alone would not reach that fd promptly. The
+/// daemon's own EXEC_DATA UDS-EOF→reset rule then resets the target's
+/// stream, and the host kills the command, exactly like the forward
+/// route's `connection.close(0, b"timeout")` does over QUIC.
+#[cfg(unix)]
+async fn exec_async_reverse(
+    route: &LocalRoute,
+    spec: &ExecSpec,
+    stdin: ExecStdin,
+    timeout: Option<Duration>,
+) -> Result<ExecRunOutput, OpError> {
+    let deadline = timeout.map(|t| tokio::time::Instant::now() + t);
+    let timed_out = || timeout_error(timeout.unwrap_or_default());
+
+    let mut session = match until(deadline, crate::ops::session::dial_reverse(route)).await {
+        Some(dialed) => dialed?.0,
+        None => return Err(timed_out()),
+    };
+
+    let stdin_reader: Option<Box<dyn tokio::io::AsyncRead + Send + Unpin>> = match stdin {
+        ExecStdin::Closed => None,
+        ExecStdin::Inherit => Some(Box::new(tokio::io::stdin())),
+    };
+
+    let (kill_tx, kill_rx) = tokio::sync::oneshot::channel();
+    let result = match until(deadline, session.exec(spec, stdin_reader, Some(kill_tx))).await {
+        Some(result) => result.map_err(map_client_error),
+        None => {
+            // Deadline hit mid-flight: shut the data conduit down right
+            // now (see this function's own doc on why dropping `run`
+            // alone would not) so the host notices and kills the command
+            // rather than running on as a silent orphan. `kill_rx` closes
+            // with no value when the deadline hit before the data link
+            // even opened (still inside `exec_start`'s control round
+            // trip) — nothing was relaying yet, so there is nothing to
+            // kill.
+            if let Ok(kill) = kill_rx.await {
+                kill.kill();
+            }
+            Err(timed_out())
+        }
+    };
+    // Idempotent-in-effect (a no-op `ControlLink::Local::finish`, then
+    // drop): covers the exec-failed path too, and there is no connection
+    // to `wait_idle` on for this route (this function's own doc).
+    session.close();
     let result = result?;
     if result.timed_out {
         // The host enforced the same deadline first and told us so.
@@ -606,5 +762,174 @@ mod tests {
         assert_eq!(err.code, ErrorCode::Timeout);
         assert!(err.retryable);
         assert_eq!(err.details["timeout_ms"], 1500);
+    }
+
+    /// Issue #5's routing change (`resolve_exec_route`/
+    /// `resolve_host_route_with`) moved where `exec_run` learns a name has
+    /// no configuration at all, at the exact seam that decides it:
+    /// `exec_run` must answer `CONFIG_ERROR` before it ever routes, even
+    /// for a name that is configured nowhere at all — proving the order is
+    /// "identity, then routing" rather than "routing, then identity for
+    /// whichever branch happens to need it". A device that never ran `qsh
+    /// init` has no identity to build either the forward `PeerTarget` or
+    /// the reverse `LocalRoute` with, and the frozen `error.CONFIG_ERROR.json`
+    /// fixture (`qsh exec HOST_ALIAS`, `crates/qsh-cli/tests/fixtures.rs`)
+    /// and `exit_code_matrix.rs`'s "exec: no device identity" row both pin
+    /// this same order for a *configured* name; this pins it independently
+    /// for one that is not, so a regression that moved identity-loading
+    /// behind `resolve_host_route_with` (which would answer `HOST_NOT_FOUND`
+    /// for this name well before any identity check) cannot hide behind
+    /// "only the configured-name fixture is checked".
+    #[test]
+    fn exec_run_answers_config_error_before_routing_even_for_an_unconfigured_name() {
+        let (_dir, ops) = temp_ops(); // never `identity_init`'d.
+        let err = ops
+            .exec_run(
+                ExecRunReq {
+                    host: "nowhere-at-all".into(),
+                    argv: vec!["true".into()],
+                    env: vec![],
+                    timeout_ms: None,
+                },
+                ExecStdin::Closed,
+            )
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::ConfigError, "{err:?}");
+    }
+
+    /// `resolve_exec_route`'s "wholly unconfigured" branch must keep
+    /// `qsh exec`'s own frozen legacy wording
+    /// (`host::not_in_trust_store_host_not_found`, extracted verbatim from
+    /// the pre-issue-#5 `resolve_peer_address` this replaces) rather than
+    /// the longer, newer wording `Ops::resolve_host_route` gives every
+    /// other caller (`host::unconfigured_host_not_found`) — the
+    /// append-only `error.HOST_NOT_FOUND.json` fixture (`qsh exec nowhere`)
+    /// compares this message byte for byte.
+    #[test]
+    fn exec_host_not_found_keeps_the_frozen_text_for_a_wholly_unconfigured_name() {
+        let (_dir, ops) = temp_ops();
+        ops.identity_init(IdentityInitReq {
+            key_store: Some(KeyStoreMode::File),
+        })
+        .unwrap();
+        let identity = ops.load_identity().unwrap().expect("just initialized");
+
+        // `PeerRoute` (the `Ok` side) has no `Debug` impl, so this matches
+        // by hand rather than `.unwrap_err()`.
+        let err = match ops.resolve_exec_route("nowhere", identity) {
+            Err(err) => err,
+            Ok(_) => panic!("an unconfigured name must not route anywhere"),
+        };
+        assert_eq!(err.code, ErrorCode::HostNotFound);
+        assert_eq!(
+            err.message,
+            host::not_in_trust_store_host_not_found("nowhere").message,
+            "exec's own frozen wording must be used, not resolve_host_route's newer one"
+        );
+    }
+
+    /// The other exec-specific branch `resolve_exec_route` must get right:
+    /// a trust-store pin with no address and no reverse registration is
+    /// `pinned_without_address_host_not_found` — the truthful wording
+    /// issue #5 gives every caller of `Ops::resolve_host_route`'s shared
+    /// routing, replacing the pre-#5 `resolve_peer_address`'s false "is
+    /// not in the trust store" for this exact shape (the host *is* pinned;
+    /// see issue #5's reverse-only counterpart,
+    /// `exec_run_reaches_a_reverse_only_host_pinned_without_address` in
+    /// `crates/qsh-testkit/tests/reverse_exec.rs`).
+    #[test]
+    fn exec_host_not_found_names_a_pinned_host_without_address_truthfully() {
+        let (_dir, ops) = temp_ops();
+        ops.identity_init(IdentityInitReq {
+            key_store: Some(KeyStoreMode::File),
+        })
+        .unwrap();
+        let identity = ops.load_identity().unwrap().expect("just initialized");
+        let fingerprint = qsh_transport::Fingerprint::of_spki_der(b"exec-pinned-no-address-peer");
+        ops.trust_add(TrustAddReq {
+            name: "phone".into(),
+            address: None,
+            fingerprint: Some(fingerprint.to_string()),
+            cert_pem: None,
+        })
+        .unwrap();
+
+        let err = match ops.resolve_exec_route("phone", identity) {
+            Err(err) => err,
+            Ok(_) => panic!("a pinned-but-addressless host must not route anywhere"),
+        };
+        assert_eq!(err.code, ErrorCode::HostNotFound);
+        assert_eq!(
+            err.message,
+            host::pinned_without_address_host_not_found("phone").message,
+            "a pinned-but-addressless host must not be told it is unpinned"
+        );
+    }
+
+    /// The `user@`-prefix branch, exercised through `exec_run`'s own
+    /// `resolve_exec_route` rather than the shared `host::resolve_route`
+    /// unit tests (`ops/host/tests.rs`) — this file's module doc in
+    /// `qsh-testkit/tests/reverse_exec.rs` used to claim this split was
+    /// unit tested against `Ops::resolve_exec_route` when no such test
+    /// existed. `"dave@phone"` with `phone` pinned must give the same
+    /// `user_prefix_not_accepted_host_not_found` wording every other
+    /// caller of `Ops::resolve_host_route`'s routing gets — that branch
+    /// is shared, unlike the "wholly unconfigured" wording above.
+    #[test]
+    fn exec_host_not_found_names_a_pinned_alias_behind_a_user_prefix() {
+        let (_dir, ops) = temp_ops();
+        ops.identity_init(IdentityInitReq {
+            key_store: Some(KeyStoreMode::File),
+        })
+        .unwrap();
+        let identity = ops.load_identity().unwrap().expect("just initialized");
+        let fingerprint = qsh_transport::Fingerprint::of_spki_der(b"exec-user-prefix-peer");
+        ops.trust_add(TrustAddReq {
+            name: "phone".into(),
+            address: None,
+            fingerprint: Some(fingerprint.to_string()),
+            cert_pem: None,
+        })
+        .unwrap();
+
+        let err = match ops.resolve_exec_route("dave@phone", identity) {
+            Err(err) => err,
+            Ok(_) => panic!("a user@-prefixed positional must not route anywhere"),
+        };
+        assert_eq!(err.code, ErrorCode::HostNotFound);
+        assert_eq!(
+            err.message,
+            host::user_prefix_not_accepted_host_not_found("phone").message,
+            "a configured alias behind a user@ prefix must name the prefix problem, not \
+             pretend the alias itself is unconfigured"
+        );
+    }
+
+    /// The `user@`-prefix branch's other side: `"dave@nowhere"` where
+    /// `nowhere` is configured nowhere at all still falls through to
+    /// exec's own frozen legacy text (same wording as the bare-alias case
+    /// above), because the prefix check only fires once `display_name` is
+    /// found in the trust store or `hosts.toml` (`host::resolve_route`'s
+    /// own doc) — an unconfigured name behind a prefix is exactly as
+    /// unconfigured as one without it.
+    #[test]
+    fn exec_host_not_found_keeps_the_frozen_text_for_a_user_prefixed_unconfigured_name() {
+        let (_dir, ops) = temp_ops();
+        ops.identity_init(IdentityInitReq {
+            key_store: Some(KeyStoreMode::File),
+        })
+        .unwrap();
+        let identity = ops.load_identity().unwrap().expect("just initialized");
+
+        let err = match ops.resolve_exec_route("dave@nowhere", identity) {
+            Err(err) => err,
+            Ok(_) => panic!("a user@-prefixed unconfigured name must not route anywhere"),
+        };
+        assert_eq!(err.code, ErrorCode::HostNotFound);
+        assert_eq!(
+            err.message,
+            host::not_in_trust_store_host_not_found("nowhere").message,
+            "an unconfigured name behind a user@ prefix keeps exec's frozen bare-alias wording"
+        );
     }
 }

@@ -47,8 +47,13 @@ pub(super) async fn dial_peer(
 /// connection this process does not itself hold; `generation` seeds
 /// [`AttachContext`]'s reverse-route baseline that Step 8's
 /// `LocalReconnect` waits past.
+///
+/// `pub(in crate::ops)` rather than `pub(super)`: `crate::ops::exec`'s
+/// reverse route (issue #5) dials this directly under its own `--timeout`
+/// deadline, the same way `session.rs` re-exports it (`ops/session.rs`'s
+/// `pub(in crate::ops) use reader::dial_reverse` doc explains why).
 #[cfg(unix)]
-pub(super) async fn dial_reverse(
+pub(in crate::ops) async fn dial_reverse(
     route: &LocalRoute,
 ) -> Result<(Session, Option<String>, u64), OpError> {
     dial_reverse_wait(route, 0, None).await
