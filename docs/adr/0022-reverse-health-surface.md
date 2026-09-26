@@ -1,7 +1,7 @@
 # ADR-0022: 역방향 등록 health는 `Host.lost_at`과 `qsh::reverse` 진단 줄까지로 두고, push 계약 표면은 필요가 관측된 뒤에 `qsh.event/v1`에 additive로 연다
 
 날짜: 2026-09-24
-상태: 제안됨
+상태: 승인됨 (2026-09-26 사용자 확정)
 
 개정 관계: 대체하는 ADR은 없다. `docs/CLI.md` §5의 `Host` 타입과 §6.1을 §10의 additive 규율 안에서 넓히는 것이 전부다. 터널 쪽 판단은 ADR-0018을 재확인한다.
 

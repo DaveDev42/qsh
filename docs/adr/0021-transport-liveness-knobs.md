@@ -1,7 +1,7 @@
 # ADR-0021: keep-alive만 `[transport]` 설정으로 열고 idle timeout 45초는 고정 상수로 남긴다. `PathWatchConfig`의 세 값은 `[recovery]`로 내린다
 
 날짜: 2026-09-24
-상태: 제안됨
+상태: 승인됨 (2026-09-26 사용자 확정)
 
 개정 관계: `docs/design/protocol.md` §1 요약표와 §2를 개정한다. §10이 이미 적어 둔 "세 값 모두 상수가 아니라 설정(`RecoveryConfig`)이다"는 개정 대상이 아니라 이행 대상이다. 기존 ADR은 하나도 대체하지 않는다. 두 타이머를 다룬 ADR은 오늘 없다.
 
