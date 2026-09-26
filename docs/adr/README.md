@@ -26,10 +26,12 @@ QSH의 아키텍처/설계 결정을 기록한다. 각 ADR은 맥락, 결정, �
 | [0020](0020-socks-reverse-route.md) | 역방향 route에서도 `-D`를 켠다(ADR-0019 결정 10 개정) | 승인됨 |
 | [0021](0021-transport-liveness-knobs.md) | keep-alive만 `[transport]` 설정으로 열고 idle timeout 45초는 고정 상수로 남긴다. `PathWatchConfig`의 세 값은 `[recovery]`로 내린다 | 승인됨 |
 | [0022](0022-reverse-health-surface.md) | 역방향 등록 health는 `Host.lost_at`과 `qsh::reverse` 진단 줄까지로 두고, push 계약 표면은 필요가 관측된 뒤에 `qsh.event/v1`에 additive로 연다 | 승인됨 |
+| [0023](0023-tunnel-supervise.md) | `qsh tunnel open --supervise`로 연결 유실 뒤 터널을 스스로 재수립한다(ADR-0018 결정 2·3 개정, 결정 1 유지) | 제안됨 |
+| [0024](0024-setup-orchestrator.md) | `qsh setup`은 기존 op을 정해진 순서로 부르는 오케스트레이터다. `acl.toml`은 쓰지 않고 자동 신뢰는 없다 | 제안됨 |
 | [0025](0025-acl-show-read-only.md) | writer 없이 ACL 가시성만 올린다. 읽기 전용 `qsh acl show`를 신설하고 `acl grant`/`acl revoke`는 기각한다 | 승인됨 |
 | [0026](0026-ssh-key-import-scope.md) | SSH 키 가져오기(`--import-ssh-key`)는 v1에 넣지 않는다. P1으로 미루고 착수할 때의 모양만 지금 고정한다 | 승인됨 |
 
-0023(ADR-0018 결정 2·3을 개정하는 supervised tunnel mode)과 0024(`qsh setup`)는 번호만 예약돼 있고 파일은 아직 없다. P1 계획(`docs/ROADMAP.md` §5)이 0027~0035를 예약했으므로 예약 밖의 다음 새 번호는 0036이다. 조건부로 서는 ADR은 설 때 그 번호부터 쓴다.
+P1 계획(`docs/ROADMAP.md` §5)이 0027~0035를 예약했으므로 예약 밖의 다음 새 번호는 0036이다. 조건부로 서는 ADR은 설 때 그 번호부터 쓴다.
 
 - 0027 `doctor --fail-on`의 exit 규칙(M13)
 - 0028 TCP/TLS fallback(M14)
