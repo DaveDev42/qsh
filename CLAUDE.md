@@ -17,7 +17,7 @@ QSH is a QUIC-based direct-connect remote shell (single Rust binary `qsh`) that 
 - `RELEASE-NOTES.md` — one section per release tag, what each tag ships, what is signed and what is not
 - `docs/PRD.md` — product requirements (binding)
 - `docs/CLI.md` — CLI / JSON contract (binding)
-- `docs/ROADMAP.md` — milestones M0–M10 with scope and acceptance criteria
+- `docs/ROADMAP.md` — milestones M0–M10 (P0) and M11–M19 (P1) with scope and acceptance criteria
 - `docs/design/protocol.md` — wire protocol design (frames, streams, resume, reverse)
 - `docs/design/architecture.md` — crate/module design and key mechanisms
 - `docs/design/testing.md` — per-layer test strategy and CI discipline
