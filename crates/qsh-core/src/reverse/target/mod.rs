@@ -456,7 +456,7 @@ async fn run_reverse_unix(
         let mut quota_flush = tokio::time::interval(crate::admission::AUDIT_AGGREGATION_WINDOW);
         quota_flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         // Why this connection ended, for the `lost`/`retry` pair below
-        // (issue #4 item 6, `docs/CLI.md` §6.13 bullet at :952). Deferred
+        // (issue #4 item 6, `docs/CLI.md` §6.13's `cause` bullet). Deferred
         // init, no `mut`: the two arms below that `break 'serve` each
         // assign this exactly once, first — the only way to reach the
         // read after the loop.
@@ -745,7 +745,7 @@ fn classify_dial_error(err: &qsh_transport::DialError) -> ReconnectCause {
 /// `ExpectedHello`, `VersionMismatch`, a stream error with no underlying
 /// `ConnectionError`; `Rejected`/`AlreadyPaired` are responder-only and
 /// unreachable from this initiator call, per that enum's own doc) is a
-/// protocol-shaped anomaly this fixed eight-value vocabulary has no
+/// protocol-shaped anomaly this fixed nine-value vocabulary has no
 /// sharper bucket for, so it falls to `local`.
 #[cfg(any(unix, test))]
 fn classify_hello_error(err: &crate::handshake::HelloError) -> ReconnectCause {
@@ -911,7 +911,7 @@ struct ReconnectEvent<'a> {
     /// Fixed vocabulary ([`crate::reverse::ReconnectCause`]), present only
     /// on `"lost"` and the `"retry"` that follows it, and on a `"retry"`
     /// from a failed dial/register attempt — absent, never null, on
-    /// `"registered"` (`docs/CLI.md` §6.13 bullet at :952, issue #4 item
+    /// `"registered"` (`docs/CLI.md` §6.13's `cause` bullet, issue #4 item
     /// 6).
     #[serde(skip_serializing_if = "Option::is_none")]
     cause: Option<&'static str>,

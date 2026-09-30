@@ -987,8 +987,8 @@ pub const TARGET: &str = "qsh::reverse";
 /// §6). Built with `serde_json`, never hand-formatted (`docs/CLI.md`
 /// §6.13) — the same shape `reverse/target.rs`'s `ReconnectEvent` already
 /// uses. This whole line is an open diagnostic vocabulary, not
-/// `qsh.cli/v1` — additive fields here are free (`docs/CLI.md` §6.13
-/// bullet at :952, issue #4 item 6).
+/// `qsh.cli/v1` — additive fields here are free (`docs/CLI.md` §6.13's
+/// `cause` bullet, issue #4 item 6).
 #[derive(serde::Serialize)]
 struct RegistrationEvent<'a> {
     event: &'static str,
@@ -1000,7 +1000,8 @@ struct RegistrationEvent<'a> {
     generation: Option<u64>,
     /// Fixed vocabulary ([`super::ReconnectCause`]), present only on
     /// `"denied"` (always `registration_denied`) and `"lost"`
-    /// (`peer_closed`/`path_dead`/`local`, `super::classify_connection_error`'s
+    /// (`peer_closed`/`path_dead`/`idle_timeout`/`local`,
+    /// `super::classify_connection_error`'s
     /// judgment) — absent, never null, on every other event.
     #[serde(skip_serializing_if = "Option::is_none")]
     cause: Option<&'static str>,
