@@ -78,6 +78,19 @@ dedicated Linux host. `summarize.py` (stdlib only) reads the CSV that
 non-zero on a violation. Neither script runs in CI; `load.yml` runs the
 same scenario in its short mode instead.
 
+## stress/
+
+`run.sh <nextest-filterset> [rounds]` saturates every logical CPU with
+`yes >/dev/null` busy loops and runs `cargo nextest run --workspace
+--no-fail-fast -E '<filterset>'` for `rounds` rounds (default 50). The first
+red round prints its number and the failing test names and exits 1; a green
+run ends with `N/N passed under load`. The busy loops are reaped by an
+`EXIT` trap. Set `QSH_ACCEPTANCE_SLOW=1` to include the wall-clock tests. It
+runs on macOS and Linux and is not part of the PR gate: shared runners
+reproduce load poorly and 50 rounds take tens of minutes. A new
+timing-sensitive test must be green for 50 consecutive rounds here before it
+lands (`docs/design/testing.md`, CI discipline).
+
 ## stopwatch/
 
 A container pair that builds a never-configured machine for each round of

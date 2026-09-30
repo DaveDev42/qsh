@@ -151,6 +151,7 @@ ACL glob 평가기는 fuzz보다 property test가 적합하다(위 L2 "정책 �
 - 모든 테스트는 port 0 바인딩, 테스트별 고유 tempdir.
 - `sleep()` 금지 — `tokio::time::pause()` 또는 이벤트 통지 + `timeout`. T2의 RSS/fd 안정화(`crates/qsh-cli/tests/common/mod.rs`)는 폴링을 `tokio::time::sleep`으로 한다 — 고정 대기가 아니라 200ms 간격 *조건* 폴링(연속 3회 상대 변동 1% 미만을 안정으로 본다)이라는 점에서 이 규율이 금지하는 고정 대기와는 다르지만, 벽시계를 쓴다는 사실 자체는 남는다(4c 적대 검토 A13).
 - Chaos는 seeded, 실패 시 seed를 단언 메시지에 출력.
+- 타이밍 민감 테스트는 착지 전에 `scripts/stress/run.sh`로 CPU 부하 아래 50회 연속 초록이어야 한다. 근거는 `8fd4602`다. 유휴 머신에서는 초록이던 역방향 reset 관찰 경합이 부하 아래에서 80회 중 16회 실패했다. 이 반복은 공유 runner에서 재현성이 낮고 수십 분이 걸려 PR 게이트에는 넣지 않는다.
 - `Swatinem/rust-cache`, concurrency group으로 구식 run 취소.
 - GHA macOS runner는 UDP 소켓 버퍼 기본값이 작다 — `SO_RCVBUF`를 명시 설정하거나 throughput 수치 저하를 예상할 것.
 - clippy는 **모든 타깃에서** 실행 — Linux 전용 clippy는 `cfg(target_os = "macos")` 블록 전체를 놓친다. 이 프로젝트처럼 플랫폼 분기가 많으면 실질적 구멍이다. Windows도 포함: 지원 플랫폼은 아니지만 `cfg(unix)`/`cfg(not(unix))` 분기가 계속 컴파일되는지는 CI만이 보증한다.
