@@ -1893,6 +1893,43 @@ fn doctor_acl_findings_reports_acl_principal_unmatched_for_an_unmatched_pin() {
     assert!(finding.detail.contains("mac"), "{finding:?}");
 }
 
+/// Two names pin one fingerprint and only the second has an `[[acl]]` row.
+/// The detector checks each name and the fingerprint row separately, so it
+/// flags the first name (the one inbound `lookup_pin` resolves to) and stays
+/// silent about the second, which does have a row. This is the count
+/// behavior the README "One machine, two aliases" section relies on.
+#[test]
+fn acl_principal_unmatched_flags_the_first_alias_when_only_the_second_has_a_row() {
+    let (_guard, ops) = temp_ops();
+    init_identity(&ops);
+    crate::config::ensure_private_dir(&ops.paths().config_dir).unwrap();
+    std::fs::write(
+        ops.paths().acl_file(),
+        "[[acl]]\nprincipal = \"device:mac-lan\"\nallow = [\"exec.run\"]\n",
+    )
+    .unwrap();
+    let shared_fingerprint = qsh_transport::Fingerprint::of_spki_der(b"mac").to_string();
+    for name in ["mac", "mac-lan"] {
+        ops.trust_add(TrustAddReq {
+            name: name.into(),
+            address: None,
+            fingerprint: Some(shared_fingerprint.clone()),
+            cert_pem: None,
+        })
+        .unwrap();
+    }
+
+    let findings: Vec<_> = ops
+        .doctor_acl_findings("serve")
+        .unwrap()
+        .into_iter()
+        .filter(|f| f.code == "acl_principal_unmatched")
+        .collect();
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert!(findings[0].detail.contains("device:mac\""), "{findings:?}");
+    assert!(!findings[0].detail.contains("mac-lan"), "{findings:?}");
+}
+
 /// `detail` (not `remedy` — `docs/CLI.md` §6.17's "실행 가능한 다음 행동 한
 /// 줄" keeps `remedy` to one line) carries a real copy-pasteable `[[acl]]`
 /// row naming this machine's actual unmatched peer, role-aware:

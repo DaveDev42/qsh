@@ -524,6 +524,43 @@ peer from its own trust store. The former `qsh reverse controller
 --offered-name workshop` spelling still works, silently, as a hidden
 alias — no deprecation warning, no scheduled removal.
 
+<!-- Behavior below is pinned by: lookup_pin_returns_the_first_name_pinned_for_a_shared_fingerprint,
+     lookup_pin_follows_a_reordered_trust_toml_without_a_restart (qsh-core trust tests),
+     an_acl_row_on_the_second_alias_denies_inbound_until_trust_toml_is_reordered (qsh-cli/tests/trust_alias_order.rs),
+     acl_principal_unmatched_flags_the_first_alias_when_only_the_second_has_a_row (qsh-core doctor tests).
+     A proper fix (per-direction pins) is docs/ROADMAP.md M16 (a). -->
+#### One machine, two aliases
+
+One machine can be reachable two ways: directly at an address for `qsh serve`,
+and through `qsh serve --to` from behind NAT. You may want a trust-store
+name for each, both pinning the same fingerprint (for example `workshop-lan`
+with an address, and `workshop` for the reverse registration). qsh accepts
+that, but the two names are not equal. When a peer authenticates, qsh looks
+its fingerprint up in `trust.toml` and takes the first entry in file order.
+That name is the principal every inbound `[[acl]]` row is matched against;
+the second name never becomes one.
+
+So write `[[acl]]` rows for the name that comes first in `trust.toml`, and
+treat the second name as an outbound dial alias only. A row written for the
+second name is not matched on inbound requests, which are then denied by
+default. `qsh doctor` counts each name separately, so in that layout it
+flags the first name (`acl_principal_unmatched`) and stays quiet about the
+second. `trust.toml` is re-read on every handshake, so reordering the two
+entries changes the principal immediately, without a restart; `acl.toml`
+still needs the restart. Splitting the aliases by direction is planned work
+(`docs/ROADMAP.md` M16), not something to rely on today.
+
+#### Riding out a long outage
+
+A controller keeps a registration whose connection died as `stale` for
+`[listen].stale_retention` before it drops it from `qsh hosts` (default 120
+seconds). If your targets can be offline longer than that and you want the
+controller to keep the name across the gap, raise it in `config.toml`. It
+must stay above `[reverse].backoff_max_ms` times 3 (default 30000 ms, so
+above 90 s), or the controller refuses to start with a config error. The
+limit on how many addresses a single reconnect attempt tries is in
+`docs/CLI.md` §6.13.
+
 ### MCP server (retired, ADR-0011)
 
 The built-in `qsh mcp` stdio server, a twelve-tool adapter over the same
