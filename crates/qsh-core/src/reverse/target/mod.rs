@@ -84,7 +84,7 @@ use rand::SeedableRng;
 #[cfg(unix)]
 use crate::broker::PeerFingerprint;
 #[cfg(unix)]
-use crate::client::pathwatch::{PathWatch, PathWatchConfig, watch_path};
+use crate::client::pathwatch::{PathWatch, watch_path};
 #[cfg(any(unix, test))]
 use crate::config::BackoffLimits;
 use crate::config::{Config, Paths};
@@ -420,7 +420,7 @@ async fn run_reverse_unix(
         // death on it — `watch.dead()` below is what turns that into a
         // reconnect instead of `serve_control` sitting parked forever on a
         // read that will never complete.
-        let watch = PathWatch::new(PathWatchConfig::default());
+        let watch = PathWatch::new(super::path_watch_config());
         let probes = Arc::new(tokio::sync::Notify::new());
         let watchdog = tokio::spawn(watch_path(conn.clone(), watch.clone(), probes.clone()));
 

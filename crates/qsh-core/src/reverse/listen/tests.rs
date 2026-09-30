@@ -2815,3 +2815,44 @@ async fn unregister_conduit_wakes_the_claims_parked_on_the_forwards_it_sweeps() 
     drop(late_permits);
     drop(inboxes);
 }
+
+/// `docs/design/testing.md` L4, wall-clock: the controller's `lost` line
+/// reports quinn's idle-timeout expiry as `idle_timeout` (ADR-0022 결정
+/// 5·6), not `path_dead`. The controller emits no `retry` line (`Listen`
+/// only registers; `ReconnectCause` type doc). Same cut relay and raised
+/// `PathWatch` floors as
+/// `run_target_lost_and_retry_lines_report_a_quinn_idle_timeout_as_idle_timeout`
+/// in `reverse/target/tests.rs`, and gated the same way on
+/// `QSH_ACCEPTANCE_SLOW`.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn controller_lost_line_reports_a_quinn_idle_timeout_as_idle_timeout() {
+    use crate::reverse::test_harness as harness;
+
+    if !harness::slow_tests_enabled() {
+        eprintln!("skipped: needs QSH_ACCEPTANCE_SLOW=1 (waits out quinn's 45 s idle timeout)");
+        return;
+    }
+    let name = "widget-idle-timeout-controller";
+    let rig = harness::Rig::start("controller-idle-timeout-controller", name).await;
+    harness::wait_for_line(name, "registered").await;
+
+    let cut_at = std::time::Instant::now();
+    rig.cut();
+    let lost = harness::wait_for_line(name, "lost").await;
+    let waited = cut_at.elapsed();
+
+    assert_eq!(lost["cause"], "idle_timeout", "{lost}");
+    assert!(
+        waited >= Duration::from_secs(30),
+        "the connection ended after only {waited:?}; something other than the idle timeout \
+         ended it"
+    );
+    assert!(
+        harness::lines(name, "lost")
+            .iter()
+            .all(|line| line["cause"] != "path_dead"),
+        "no controller `lost` line may report path_dead for a pure idle timeout"
+    );
+    rig.shutdown().await;
+}
