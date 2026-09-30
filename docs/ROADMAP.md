@@ -2,7 +2,7 @@
 
 **상태:** 확정 (구현과 어긋나는 내용을 발견하면 이 문서를 먼저 갱신한다)
 **작성일:** 2026-08-17 · **개정:** 2026-08-21 — 프로덕션 준비도 감사(HEAD `1d5d1b0`) 반영: M3/M5/M7/M8/M9 범위·수용 기준 증보, "마일스톤 마감 공통 절차" 신설. 새 마일스톤은 만들지 않았다 — 감사가 찾은 갭 전부를 기존 마일스톤에 명시 귀속시킨 것이 이 개정의 전부다. · **개정 2:** 2026-09-09 — 사람용 CLI 설계(design.html, 2026-09-08) 확정 결정 반영: 신규 `M9 — 사람용 표면`(4.3ew)을 M8과 구 M9 사이에 신설하고, 구 `M9 — 릴리스`는 `M10 — 릴리스`로 번호만 옮긴다. notarization 리드타임이 CLI 설계 일정을 막지 않게 하려는 결정(ADR-0012~0017, DECISIONS.md Q1). · **개정 3:** 2026-09-19 — 사용자 결정으로 SOCKS `-D`를 P1에서 M9 범위로 당긴다(ADR-0019).
-**현재 위치:** P1을 열었다(2026-09-26 사용자 결정). 첫 마일스톤 M11(이슈 후속과 ACL 가시성)은 2026-09-30 닫혔다(마감 노트는 §5 M11 절). 현재 마일스톤은 M12(supervised tunnel, `qsh setup`)이고 실행 계획은 `PLAN.md`다. ADR-0023·0024는 2026-09-30 승인됐다(`6e6ee7f`). P1 마일스톤 아홉(M11~M19)은 §5에 있고, P1이 새로 만드는 사람 몫은 §5.5에 모은다. P0 MVP 완료 선언은 아직이다. M10까지의 에이전트 몫은 전부 착지했고 사람 회차 일곱이 닫힐 때 선언한다. 열린 일곱은 M10 DoD 1·2·3(`docs/campaigns/m10-clean-vm.md` 회차 표), M7 DoD 1(SC1 baseline 3회, `docs/campaigns/m7-stopwatch.md`, 예행 1회만 끝났다), M8 DoD 3(실기기 mobility ≥60회, `docs/campaigns/m2-mobility.md`), M8 DoD 4(wire freeze 발효와 독립 검증 계약, SC7), M9 DoD 1(SC1 재측정 3회, `docs/campaigns/m9-stopwatch.md`, M7 DoD 1에 종속)이다. 일곱은 P1과 별개로 `PLAN.md`가 사람 몫으로 계속 추적한다. 이 중 M8 DoD 3은 M18의 착수 조건이고, M9 DoD 1은 M12 (b)가 사전 고정하는 `qsh setup` 캠페인의 비교 기준이다. M8 DoD 1·2·5는 닫혔다(`docs/campaigns/m8-fuzz.md`, `docs/campaigns/m8-soak.md` run #6 PASS, `docs/campaigns/m8-adversarial-load.md`). M2~M11판 계획은 `docs/history/`에 열 파일로 있다.
+**현재 위치:** P1을 열었다(2026-09-26 사용자 결정). M11(이슈 후속과 ACL 가시성)은 2026-09-30, M12(supervised tunnel, `qsh setup`)는 2026-10-01 닫혔다(마감 노트는 §5 각 절). 현재 마일스톤은 M13(측정·배포 기반)이고 실행 계획은 `PLAN.md`다. M13의 ADR 셋(ADR-0027, ADR-0036, 필요할 때만 서는 splice ADR)은 `제안됨`으로 올라가고 승인은 사용자가 정한다. P1 마일스톤 아홉(M11~M19)은 §5에 있고, P1이 새로 만드는 사람 몫은 §5.5에 모은다. P0 MVP 완료 선언은 아직이다. M10까지의 에이전트 몫은 전부 착지했고 사람 회차 일곱이 닫힐 때 선언한다. 열린 일곱은 M10 DoD 1·2·3(`docs/campaigns/m10-clean-vm.md` 회차 표), M7 DoD 1(SC1 baseline 3회, `docs/campaigns/m7-stopwatch.md`, 예행 1회만 끝났다), M8 DoD 3(실기기 mobility ≥60회, `docs/campaigns/m2-mobility.md`), M8 DoD 4(wire freeze 발효와 독립 검증 계약, SC7), M9 DoD 1(SC1 재측정 3회, `docs/campaigns/m9-stopwatch.md`, M7 DoD 1에 종속)이다. 일곱은 P1과 별개로 `PLAN.md`가 사람 몫으로 계속 추적한다. 이 중 M8 DoD 3은 M18의 착수 조건이고, M9 DoD 1은 M12 (b)가 사전 고정하는 `qsh setup` 캠페인의 비교 기준이다. M8 DoD 1·2·5는 닫혔다(`docs/campaigns/m8-fuzz.md`, `docs/campaigns/m8-soak.md` run #6 PASS, `docs/campaigns/m8-adversarial-load.md`). M2~M12판 계획은 `docs/history/`에 열한 파일로 있다.
 
 이 문서는 P0 MVP(M0~M10)와 P1(M11~M19)의 canonical 마일스톤 기록이다. P2(`docs/PRD.md` §7 P2 목록)는 이 문서가 다루지 않는다. 각 마일스톤의 "수용 기준"이 곧 그 마일스톤의 **완료 정의(Definition of Done)** 다 — 수용 기준을 통과하는 테스트/시연 없이는 마일스톤을 닫지 않는다. SC 번호는 PRD §15 성공 기준의 순번이다 (SC1: 신규 두 장비 5분 내 연결, SC2: 한 명령 접속, SC3: 네트워크 전환 ≥95% 유지/resume, SC4: resume 가능한 단절에서 output 무손실, SC5: client crash가 remote PTY를 죽이지 않음, SC6: 모든 privileged op의 ACL 추적성, SC7: 공개 beta 전 독립 보안 리뷰).
 
@@ -230,7 +230,7 @@ P1은 2026-09-26 사용자 결정으로 열었다. 같은 날 ADR-0021·0022·00
   - Q4 `acl show`의 우선순위. ADR-0025 결정 7은 배치를 "M10 이후 또는 P1"로 두었다. 2026-09-26 사용자 지시("전부 다 진행")가 P1을 열어 그 배치를 정한다.
   - Q5 identity가 이미 있는 장비에서 `--import-ssh-key`는 성공 응답(`created: false`)이 아니라 오류다. 성공으로 돌려주면 운영자는 SSH 키를 들여왔다고 믿고 옛 fingerprint로 계속 쓰게 되어 ADR-0026 결정 3이 막으려던 원인 없는 default-deny가 생긴다.
 
-### M12 — 이슈 설계 ADR 구현(supervised tunnel, `qsh setup`)
+### M12 — 이슈 설계 ADR 구현(supervised tunnel, `qsh setup`) ✅ 완료 (2026-10-01)
 
 - **범위:** 이슈 #4 항목 5b, 이슈 #6(절전·망 전환 뒤 터널 복구), 이슈 #4의 2026-09-30 코멘트, 이슈 #3의 온보딩 흐름. 두 설계는 2026-09-26에 제안 ADR로 나왔고, ADR-0023은 2026-09-30 이슈 #6과 이슈 #4 코멘트를 반영해 결정 17~25를 더한 뒤 ADR-0024와 함께 같은 날 승인됐다(`6e6ee7f`). 이 마일스톤은 승인 뒤의 구현이다.
   - (a) supervised tunnel mode(ADR-0023). 기본 동작을 바꾸지 않고 standalone `qsh tunnel open`의 `--supervise <ms>`로 켜는 모드다(결정 1). 터널을 연 프로세스가 연결 유실 뒤 로컬 listener를 쥔 채 스스로 재수립한다. ADR-0018과의 관계는 이렇다. ADR-0023은 ADR-0018 결정 2·3을 켠 터널에 한해 개정하고 결정 1은 유지한다. wire 위의 터널 객체(`forward_id`, 스트림마다의 splice)는 여전히 connection 수명에 묶이고, 켠 터널이 하는 일은 결정 1이 처방한 "새 `tunnel.open`"을 프로세스가 스스로 하는 것이다. 재수립은 매번 처음부터 인가를 거치고, 진행 중이던 TCP 연결은 옛 connection이 살아나는 경우 밖에서는 살리지 않는다. wire, `.proto`, fixture, capability 문자열은 바뀌지 않는다(결정 13·15).
@@ -258,6 +258,7 @@ P1은 2026-09-26 사용자 결정으로 열었다. 같은 날 ADR-0021·0022·00
   - Q2 두 설계를 한 마일스톤에 묶는 이유. 둘 다 같은 날 나온 이슈발 제안 ADR이었고 같은 날(2026-09-30) 승인됐다. 코드가 겹치지 않으므로 (a) 둘째 단위가 막히면 (b)의 SHA 고정부터 먼저 열 수 있다.
   - Q3 supervised tunnel은 기본 동작을 바꾸지 않는 쪽으로 승인됐다(ADR-0023 결정 1, 대안 절). 기존 트랩 테스트는 고치지 않고 초록으로 남는다. 대신 결정 17~24가 범위를 넓혀 크기를 다시 매겼다(5.1~6.1ew).
   - Q4 안정성. 새 타이밍 민감 테스트는 부하 아래 50회 반복으로 착지를 판정한다. 정확한 벽시계 상한은 주입 시계 층에서 고정하고, 실제 소켓을 쓰는 통합 테스트는 경로 구별과 넉넉한 상한을 단언한다. ADR-0023 결과 절이 테스트 이름과 모양을 제안으로 두었으므로 결정 문면은 그대로 지켜진다.
+- **마감 노트 (2026-10-01):** DoD 전건 충족. (a) 첫 단위는 `7206ee0`~`ab05a27`, 둘째 단위는 `10d14cf`, `f328958`, `51d76ae`로 착지했고 `51d76ae`가 결정 24의 `UNSUPPORTED` 분기와 그 테스트를 지웠다. DoD 대조에서 비던 핀(trust remove 뒤 재수립 거부, 권한을 뺀 peer의 `-R` 재발행 `PERMISSION_DENIED`와 audit deny 한 줄, 켜지 않은 요청의 직렬화 바이트 동일, setup 뒤 `acl.toml` 불변)은 `8a9be5e`와 `ed905e8`이 채웠다. `git diff --stat 6ee63c3..ed905e8 -- crates/qsh-proto/proto`는 비어 있고 fixture 변경은 (b)가 더한 `setup.run` 파일 넷뿐이다. (b) 순서는 `6ee63c3` → `1a7798d`(m9 캠페인 파일 하나) → `e0a25a2`로 성립한다. 마감 절차 1·2는 `e948c4d`, `f353a09`. CI run 36762190646(`ed905e8`, acceptance job의 50초 blackhole 테스트 포함), load 36762190837, fuzz-smoke 36762190529가 초록이다. 안정성: Dave-Windows-WSL(Linux 6.18 WSL2, 논리 CPU 8, `yes` 부하 8개)에서 `unshare -Urn` 네임스페이스 안에 `QSH_ACCEPTANCE_SLOW=1`로 돌렸다. `51d76ae` 트리의 M12 타이밍 민감 테스트 134개가 `50/50 passed under load`(3150초)였고, 그 뒤 `8a9be5e`·`ed905e8`이 더한 테스트와 setup 테스트 16개가 `ed905e8` 트리에서 `50/50 passed under load`(159초)였다. 이 호스트가 네임스페이스 밖 루프백 UDP 60000~60999를 떨어뜨려서 테스트는 네임스페이스 안에서 돌렸다. 고정한 테스트 하나를 고쳤다. `local_forward_primitive_over_reverse_survives_a_registration_drop_and_self_heals_per_connection`은 DoD (a2)가 "고치지 않고 초록"을 요구했지만 부하 아래 reset 관찰 경합이 드러나 `26cc30d`가 대기 조건을 registry `Live`에서 control hub 게시로 바꿨다. 단언은 그대로다. 사람 몫 둘(`p1-supervise-wake` 회차 넷, `p1-setup-stopwatch` 3회)은 §5.5로 넘어가고 둘 다 해당 단위가 담긴 태그를 기다린다. 태그는 찍지 않았다(M12 계획 §7, 유지보수자 결정).
 
 ### M13 — 측정·배포 기반
 
@@ -451,8 +452,8 @@ P1은 2026-09-26 사용자 결정으로 열었다. 같은 날 ADR-0021·0022·00
 
 | 항목 | 사전 고정 문서 | 만드는 마일스톤 | 선행 |
 |---|---|---|---|
-| `qsh setup` 경로 SC1 스톱워치 3회 | `docs/campaigns/p1-setup-stopwatch.md` | M12 (b) | 같은 날 같은 진행자의 m9 3회. M9 DoD 1 공식 회차가 그날 있으면 재사용(ADR-0024 결정 12) |
-| supervised tunnel 절전·망 전환 회차 넷 | `docs/campaigns/p1-supervise-wake.md` | M12 (a) 첫 단위 | 첫 단위가 담긴 태그. 넷째 회차(`serve --to` 재등록과 hub의 supervised reverse route)는 둘째 단위가 담긴 태그(ADR-0023 결과 절) |
+| `qsh setup` 경로 SC1 스톱워치 3회 | `docs/campaigns/p1-setup-stopwatch.md`(사전 고정 `43da2fb`, 회차 미실행) | M12 (b) | 같은 날 같은 진행자의 m9 3회. M9 DoD 1 공식 회차가 그날 있으면 재사용(ADR-0024 결정 12) |
+| supervised tunnel 절전·망 전환 회차 넷 | `docs/campaigns/p1-supervise-wake.md`(사전 고정 `ab05a27`, 회차 미실행) | M12 (a) 첫 단위 | 첫 단위가 담긴 태그. 넷째 회차(`serve --to` 재등록과 hub의 supervised reverse route)는 둘째 단위가 담긴 태그(ADR-0023 결과 절) |
 | `cause` 분포 관측 기록 | 이슈 #4 코멘트 또는 캠페인 문서 | M11 (a) 빌드 | M13 (k)의 착수 조건 |
 | `aarch64-unknown-linux-musl` 구형 glibc 판정 | M13 (c)의 새 캠페인 문서 | M13 (c) | aarch64 musl 자산이 붙은 태그 |
 | 새 파서 fuzz 타깃의 누적 72시간 | `docs/campaigns/m8-fuzz.md` 형식 | M11 (c) SSH 키 파서, M14 mux codec, M15의 새 decode 타깃 | 공개 beta 전(`docs/design/protocol.md` §13) |
