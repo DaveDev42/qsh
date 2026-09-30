@@ -452,24 +452,93 @@ pub(crate) async fn open_stream_over_with_wait(
     header: &wire::StreamHeader,
     wait_ms: u32,
 ) -> Result<DataHandshake, OpError> {
+    open_stream_over_expecting(stream, host, header, wait_ms, None)
+        .await
+        .map_err(StreamOpenError::into_op_error)
+}
+
+/// The peer a `LOCAL_STREAM` conduit must land on, as a supervised tunnel
+/// confirmed it on its `LOCAL_CONTROL` leg (ADR-0023 decision 7-5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExpectedPeer {
+    /// `LocalHelloAck.peer_fingerprint` the control leg recorded.
+    pub fingerprint: String,
+    /// `LocalHelloAck.generation` the control leg recorded.
+    pub generation: u64,
+}
+
+/// Why a [`open_stream_expecting`] handshake did not produce a conduit.
+#[derive(Debug)]
+pub(crate) enum StreamOpenError {
+    /// The handshake failed the way any [`open_stream`] does.
+    Op(OpError),
+    /// The daemon's `LocalHelloAck` named a different registration than
+    /// the [`ExpectedPeer`]. Nothing was sent after the hello: the daemon
+    /// opens no stream toward the target until it has the header, so no
+    /// byte reached whoever registered under the name now.
+    PeerChanged,
+}
+
+impl From<OpError> for StreamOpenError {
+    fn from(err: OpError) -> Self {
+        Self::Op(err)
+    }
+}
+
+impl StreamOpenError {
+    /// The [`OpError`] form, for callers that do not tell the two apart.
+    /// A changed peer is an `AUTH_FAILED`, fail-closed.
+    fn into_op_error(self) -> OpError {
+        match self {
+            Self::Op(err) => err,
+            Self::PeerChanged => OpError::new(
+                ErrorCode::AuthFailed,
+                "the registration behind this host is no longer the one the tunnel was opened to",
+            ),
+        }
+    }
+}
+
+/// [`open_stream_with_wait`] with ADR-0023 decision 7-5's check: the
+/// `LocalHelloAck` is compared with `expect` before the `StreamHeader` is
+/// sent. On a mismatch the conduit is dropped with the header unsent.
+pub(crate) async fn open_stream_expecting(
+    socket_path: &Path,
+    host: &str,
+    header: &wire::StreamHeader,
+    expect: &ExpectedPeer,
+) -> Result<DataHandshake, StreamOpenError> {
+    let stream = UnixStream::connect(socket_path)
+        .await
+        .map_err(|err| io_error("connect", socket_path, &err))?;
+    open_stream_over_expecting(stream, host, header, 0, Some(expect)).await
+}
+
+async fn open_stream_over_expecting(
+    stream: UnixStream,
+    host: &str,
+    header: &wire::StreamHeader,
+    wait_ms: u32,
+    expect: Option<&ExpectedPeer>,
+) -> Result<DataHandshake, StreamOpenError> {
     match tokio::time::timeout(
         // A long claim wait is a *deliberately* long-parked read, not a
         // hung conduit — the handshake timeout must cover it, or a real
         // `wait_ms` claim would be torn down by the probe timeout meant
         // for an unresponsive daemon.
         Duration::from_millis(u64::from(wait_ms)) + PROBE_TIMEOUT,
-        open_stream_over_inner(stream, host, header, wait_ms),
+        open_stream_over_inner(stream, host, header, wait_ms, expect),
     )
     .await
     {
         Ok(result) => result,
-        Err(_elapsed) => Err(OpError::new(
+        Err(_elapsed) => Err(StreamOpenError::Op(OpError::new(
             ErrorCode::ConnectionFailed,
             format!(
                 "localctl: daemon accepted the LOCAL_STREAM conduit but never answered within \
                  {PROBE_TIMEOUT:?}"
             ),
-        )),
+        ))),
     }
 }
 
@@ -478,7 +547,8 @@ async fn open_stream_over_inner(
     host: &str,
     header: &wire::StreamHeader,
     wait_ms: u32,
-) -> Result<DataHandshake, OpError> {
+    expect: Option<&ExpectedPeer>,
+) -> Result<DataHandshake, StreamOpenError> {
     let mut conduit = LocalConduit::new(stream);
     conduit
         .send(&LocalHello {
@@ -502,15 +572,26 @@ async fn open_stream_over_inner(
     })?;
     let ack = match response.body {
         Some(local_response::Body::HelloAck(ack)) => ack,
-        Some(local_response::Body::Error(err)) => return Err(remote_error(err)),
+        Some(local_response::Body::Error(err)) => return Err(remote_error(err).into()),
         _ => {
             return Err(OpError::new(
                 ErrorCode::ConnectionFailed,
                 "localctl: daemon answered the LOCAL_STREAM LocalHello with an unexpected \
                  response",
-            ));
+            )
+            .into());
         }
     };
+    // ADR-0023 decision 7-5: the registration this conduit landed on must be
+    // the one the tunnel was confirmed against, and the check sits between
+    // the ack and the header on purpose. The daemon opens nothing toward the
+    // target before it has the header, so a mismatch here costs the new
+    // registration's device no byte.
+    if let Some(expect) = expect
+        && (ack.peer_fingerprint != expect.fingerprint || ack.generation != expect.generation)
+    {
+        return Err(StreamOpenError::PeerChanged);
+    }
     conduit.send(header).await?;
 
     // `TCP_ACCEPTED` and `EXEC_DATA` are the two header kinds the daemon
@@ -558,12 +639,13 @@ async fn open_stream_over_inner(
         })?;
         match claim.body {
             Some(local_response::Body::ClaimGranted(_)) => {}
-            Some(local_response::Body::Error(err)) => return Err(remote_error(err)),
+            Some(local_response::Body::Error(err)) => return Err(remote_error(err).into()),
             _ => {
                 return Err(OpError::new(
                     ErrorCode::ConnectionFailed,
                     "localctl: LOCAL_STREAM header answered with an unexpected framed response",
-                ));
+                )
+                .into());
             }
         }
     }

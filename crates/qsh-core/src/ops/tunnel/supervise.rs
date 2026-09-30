@@ -1,9 +1,15 @@
-//! The forward-route supervisor of a `--supervise` tunnel (ADR-0023).
+//! The supervisor of a `--supervise` tunnel (ADR-0023).
 //!
 //! One task per tunnel, living inside the process that opened it
 //! (decision 3). It owns the control stream of the current connection, a
 //! `PathWatch` over it, and the `watch` channel the `-L`/`-D` accept loops
 //! read their carrier from. It never touches the listener or the tunnel id.
+//!
+//! Two routes share the loop below and differ in what "the carrier" is. The
+//! forward route (this file) re-dials a QUIC connection to the address the
+//! first open resolved. The reverse route ([`reverse`]) asks this machine's
+//! `qsh listen` daemon again and never dials anything, so a forward pin of
+//! the same name is never a candidate (decisions 4 and 22).
 //!
 //! ```text
 //!   monitor ── path dead / control stream gone ──▶ Disconnected ──▶ attempt
@@ -45,6 +51,11 @@ use crate::tunnel::supervise::backoff::{Backoff, Pacer, Waited};
 use crate::tunnel::supervise::budget::Budget;
 use crate::tunnel::supervise::classify::{Disposition, Source, classify};
 
+#[cfg(unix)]
+mod reverse;
+#[cfg(unix)]
+pub(super) use reverse::ReverseRoute;
+
 /// The channel ends a supervised forward is built around. Created before
 /// the listener so the accept loop can be handed its [`CarrierView`], and
 /// consumed by [`spawn`] once the forward's `tunnel_id` is known.
@@ -53,27 +64,31 @@ pub(super) struct Wiring {
     tx: watch::Sender<CarrierState>,
     watch: PathWatch,
     denied_rx: mpsc::UnboundedReceiver<Arc<ForwardCarrier>>,
+    changed_rx: mpsc::UnboundedReceiver<Arc<ForwardCarrier>>,
     initial: Arc<ForwardCarrier>,
     /// The supervisor's end of the accept-hold gate, when there is one.
     hold: Option<HoldSignal>,
 }
 
 impl Wiring {
-    /// Wire a supervised forward over `connection`, the one the first open
+    /// Wire a supervised forward over `initial`, the carrier the first open
     /// succeeded on. `accept_hold` is `--accept-hold` (decision 19): how
     /// long a connection that arrives while disconnected may be kept.
     pub(super) fn new(
-        connection: qsh_transport::Connection,
+        initial: ForwardCarrier,
         recovery: &RecoveryConfig,
         accept_hold: Option<Duration>,
     ) -> Self {
-        let initial = Arc::new(ForwardCarrier::Quic(connection));
+        let initial = Arc::new(initial);
         let (tx, rx) = watch::channel(CarrierState::Live(Arc::clone(&initial)));
         let watch = PathWatch::new(recovery.watch);
         let (denied_tx, denied_rx) = mpsc::unbounded_channel();
+        let (changed_tx, changed_rx) = mpsc::unbounded_channel();
         let hook_watch = watch.clone();
         let activity: ActivityHook = Arc::new(move || hook_watch.activity());
-        let mut view = CarrierView::watching(rx, Some(activity)).with_denied(denied_tx);
+        let mut view = CarrierView::watching(rx, Some(activity))
+            .with_denied(denied_tx)
+            .with_changed(changed_tx);
         let hold = accept_hold.map(|window| {
             let (gate, signal) = hold_gate(window);
             view = view.clone().with_hold(gate);
@@ -84,6 +99,7 @@ impl Wiring {
             tx,
             watch,
             denied_rx,
+            changed_rx,
             initial,
             hold,
         }
@@ -97,12 +113,8 @@ impl Wiring {
 
 /// Everything else the supervisor needs, all fixed at the first open.
 pub(super) struct Params {
-    /// The resolved peer; re-dialed as is, never re-resolved from
-    /// `hosts.toml` (decision 4).
-    pub(super) target: PeerTarget,
-    /// Shared with the tunnel's `Connected`, so closing the tunnel closes
-    /// the current pair.
-    pub(super) link: Link,
+    /// How the carrier is found again.
+    pub(super) route: Route,
     /// The peer fingerprint the first open verified (decision 7-2).
     pub(super) fingerprint: String,
     /// Whether the tunnel relies on `dial-filter.v1` (`-D`, decision 7-3).
@@ -113,6 +125,31 @@ pub(super) struct Params {
     /// `"local"` or `"dynamic"`.
     pub(super) mode: &'static str,
     pub(super) recovery: RecoveryConfig,
+}
+
+/// How a lost carrier is found again (decision 4).
+pub(super) enum Route {
+    Forward {
+        /// The resolved peer; re-dialed as is, never re-resolved from
+        /// `hosts.toml`.
+        target: PeerTarget,
+        /// Shared with the tunnel's `Connected`, so closing the tunnel
+        /// closes the current pair.
+        link: Link,
+    },
+    /// This machine's `qsh listen` daemon, asked again.
+    #[cfg(unix)]
+    Reverse(reverse::ReverseRoute),
+}
+
+impl Route {
+    fn label(&self) -> &'static str {
+        match self {
+            Route::Forward { .. } => "forward",
+            #[cfg(unix)]
+            Route::Reverse(_) => "reverse",
+        }
+    }
 }
 
 /// A running supervisor. Dropping it stops the supervision and releases
@@ -156,6 +193,9 @@ struct Line<'a> {
     tunnel_id: &'a str,
     mode: &'static str,
     route: &'static str,
+    /// The host alias, on the reverse route only (decision 12).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    host: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     cause: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -166,6 +206,9 @@ struct Line<'a> {
     outage_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     slept_ms: Option<u64>,
+    /// The registration generation a reverse carrier was confirmed at.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    generation: Option<u64>,
 }
 
 fn millis(d: Duration) -> u64 {
@@ -175,8 +218,9 @@ fn millis(d: Duration) -> u64 {
 /// Why a monitored carrier stopped being one.
 enum Ended {
     /// The path died or the connection closed; `cause` is the diagnostic
-    /// vocabulary word.
-    Lost(&'static str),
+    /// vocabulary word, absent when the loss does not say (a
+    /// `LOCAL_CONTROL` end, decision 12).
+    Lost(Option<&'static str>),
     /// The tunnel ends, without a retry.
     Fatal(OpError),
 }
@@ -204,13 +248,27 @@ impl AttemptError {
             cause: None,
         }
     }
+
+    /// Asking this machine's own daemon failed.
+    #[cfg(unix)]
+    fn daemon(op: OpError) -> Self {
+        Self {
+            op,
+            source: Source::LocalDaemon,
+            cause: None,
+        }
+    }
 }
 
 /// What a successful attempt produced.
-struct Established {
-    endpoint: qsh_transport::Endpoint,
-    connection: qsh_transport::Connection,
-    session: Session,
+enum Established {
+    Forward {
+        endpoint: qsh_transport::Endpoint,
+        connection: qsh_transport::Connection,
+        session: Session,
+    },
+    #[cfg(unix)]
+    Reverse(reverse::ReverseEstablished),
 }
 
 struct AbortOnDrop(tokio::task::JoinHandle<()>);
@@ -226,6 +284,10 @@ struct Supervisor {
     tx: watch::Sender<CarrierState>,
     watch: PathWatch,
     denied_rx: mpsc::UnboundedReceiver<Arc<ForwardCarrier>>,
+    /// Carriers whose registration turned out to have changed (decision
+    /// 7-5). Read by the reverse monitor only.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    changed_rx: mpsc::UnboundedReceiver<Arc<ForwardCarrier>>,
     current: Arc<ForwardCarrier>,
     /// How many times the carrier has been replaced. Peer denials only end
     /// the tunnel once this is nonzero: a tunnel that never lost its first
@@ -247,6 +309,7 @@ impl Supervisor {
             tx,
             watch,
             denied_rx,
+            changed_rx,
             initial,
             hold,
         } = wiring;
@@ -258,6 +321,7 @@ impl Supervisor {
             tx,
             watch,
             denied_rx,
+            changed_rx,
             current: initial,
             generation: 0,
             pacer,
@@ -280,12 +344,23 @@ impl Supervisor {
             at: crate::config::now_rfc3339(),
             tunnel_id: &self.params.tunnel_id,
             mode: self.params.mode,
-            route: "forward",
+            route: self.params.route.label(),
+            host: self.route_host(),
             cause: None,
             attempt: None,
             code: None,
             outage_ms: None,
             slept_ms: None,
+            generation: None,
+        }
+    }
+
+    /// The host alias a reverse route's lines carry.
+    fn route_host(&self) -> Option<&str> {
+        match &self.params.route {
+            Route::Forward { .. } => None,
+            #[cfg(unix)]
+            Route::Reverse(route) => Some(route.alias.as_str()),
         }
     }
 
@@ -316,7 +391,7 @@ impl Supervisor {
                     self.hold_attempting();
                     let _ = self.tx.send(CarrierState::Disconnected);
                     let mut line = self.line("lost");
-                    line.cause = Some(cause);
+                    line.cause = cause;
                     Self::emit(&line);
                     match self.reestablish().await {
                         Ok(next) => session = next,
@@ -340,6 +415,24 @@ impl Supervisor {
 
     /// Watch the current carrier until it is lost, or until a fatal answer.
     async fn monitor(&mut self, session: Session) -> Ended {
+        let link = match &self.params.route {
+            Route::Forward { link, .. } => link.clone(),
+            #[cfg(unix)]
+            Route::Reverse(_) => return self.monitor_reverse(session).await,
+        };
+        self.monitor_forward(session, link).await
+    }
+
+    /// A peer `PERMISSION_DENIED` ends a tunnel that has already been
+    /// re-established (decision 9); a first-connection denial behaves as it
+    /// does without `--supervise`.
+    fn denial_ends_the_tunnel(&self, denied: &Arc<ForwardCarrier>) -> bool {
+        self.generation > 0 && Arc::ptr_eq(denied, &self.current)
+    }
+
+    /// [`Self::monitor`] on the forward route: a `PathWatch` over the
+    /// control stream of the current connection.
+    async fn monitor_forward(&mut self, session: Session, link: Link) -> Ended {
         enum Step {
             /// The watchdog declared the path dead.
             Dead,
@@ -348,7 +441,7 @@ impl Supervisor {
             /// Nothing to act on; look again.
             Again,
         }
-        let connection = self.params.link.connection();
+        let connection = link.connection();
         let probes = Arc::new(Notify::new());
         self.watch.revive();
         let mut pump = tokio::spawn(control_pump(
@@ -378,7 +471,7 @@ impl Supervisor {
                     } => {
                         match denied {
                             Some(carrier) => {
-                                if self.generation > 0 && Arc::ptr_eq(&carrier, &self.current) {
+                                if self.denial_ends_the_tunnel(&carrier) {
                                     return Ended::Fatal(permission_denied());
                                 }
                             }
@@ -401,7 +494,7 @@ impl Supervisor {
             drop(dog);
             match step {
                 Step::Dead => {
-                    if self.try_migrate(&probes).await {
+                    if self.try_migrate(&link, &probes).await {
                         continue;
                     }
                     // Kept answering on its own so an old connection that
@@ -411,21 +504,21 @@ impl Supervisor {
                 }
                 Step::PumpGone | Step::Again => {}
             }
-            return Ended::Lost(cause_of(&connection));
+            return Ended::Lost(Some(cause_of(&connection)));
         }
     }
 
     /// Decision 4: after a death verdict, one cheap try to keep the same
     /// connection alive by moving to a new local socket.
-    async fn try_migrate(&mut self, probes: &Arc<Notify>) -> bool {
+    async fn try_migrate(&mut self, link: &Link, probes: &Arc<Notify>) -> bool {
         if !self.params.recovery.migration {
             return false;
         }
-        let endpoint = self.params.link.endpoint();
+        let endpoint = link.endpoint();
         if PathBinder::rebind(&endpoint).is_err() {
             return false;
         }
-        let rtt = self.params.link.connection().quinn().stats().path.rtt;
+        let rtt = link.connection().quinn().stats().path.rtt;
         if probe_alive(&self.watch, probes, rtt).await {
             self.watch.revive();
             true
@@ -499,17 +592,32 @@ impl Supervisor {
         }
     }
 
-    /// Swap the new pair in and open the gate (decision 5).
+    /// Swap the new carrier in and open the gate (decision 5).
     fn install(&mut self, next: Established) -> Session {
-        let Established {
-            endpoint,
-            connection,
-            session,
-        } = next;
-        // The old pair is dropped, not closed: connections a splice still
-        // rides keep working until they end on their own.
-        let _old = self.params.link.replace(endpoint, connection.clone());
-        let carrier = Arc::new(ForwardCarrier::Quic(connection));
+        #[cfg_attr(not(unix), allow(unused_mut))]
+        let mut generation = None;
+        #[cfg_attr(not(unix), allow(irrefutable_let_patterns))]
+        let (carrier, session) = match next {
+            Established::Forward {
+                endpoint,
+                connection,
+                session,
+            } => {
+                if let Route::Forward { link, .. } = &self.params.route {
+                    // The old pair is dropped, not closed: connections a
+                    // splice still rides keep working until they end on
+                    // their own.
+                    let _old = link.replace(endpoint, connection.clone());
+                }
+                (ForwardCarrier::Quic(connection), session)
+            }
+            #[cfg(unix)]
+            Established::Reverse(next) => {
+                generation = Some(next.generation);
+                self.install_reverse(next)
+            }
+        };
+        let carrier = Arc::new(carrier);
         self.current = Arc::clone(&carrier);
         self.generation = self.generation.saturating_add(1);
         self.budget.reestablished(Instant::now());
@@ -519,51 +627,67 @@ impl Supervisor {
         }
         let mut line = self.line("reestablished");
         line.outage_ms = Some(self.outage_ms());
+        line.generation = generation;
         Self::emit(&line);
         session
     }
 
-    /// One dial plus the two identity checks, bounded by [`REDIAL_DEADLINE`].
+    /// One attempt to get a verified carrier back.
     async fn attempt(&self) -> Result<Established, AttemptError> {
-        let next = match tokio::time::timeout(REDIAL_DEADLINE, dial(&self.params.target)).await {
-            Ok(result) => result?,
-            Err(_) => {
-                return Err(AttemptError::dial(
-                    OpError::new(
-                        ErrorCode::ConnectionFailed,
-                        "no response from the peer within the redial deadline",
-                    ),
-                    ReconnectCause::DialTimeout,
-                ));
-            }
-        };
-        let seen = next.connection.peer_fingerprint().map(|fp| fp.to_string());
+        match &self.params.route {
+            Route::Forward { target, .. } => self.attempt_forward(target).await,
+            #[cfg(unix)]
+            Route::Reverse(route) => self.attempt_reverse(route).await,
+        }
+    }
+
+    /// One dial plus the two identity checks, bounded by [`REDIAL_DEADLINE`].
+    async fn attempt_forward(&self, target: &PeerTarget) -> Result<Established, AttemptError> {
+        let (endpoint, connection, session) =
+            match tokio::time::timeout(REDIAL_DEADLINE, dial(target)).await {
+                Ok(result) => result?,
+                Err(_) => {
+                    return Err(AttemptError::dial(
+                        OpError::new(
+                            ErrorCode::ConnectionFailed,
+                            "no response from the peer within the redial deadline",
+                        ),
+                        ReconnectCause::DialTimeout,
+                    ));
+                }
+            };
+        let seen = connection.peer_fingerprint().map(|fp| fp.to_string());
         if seen.as_deref() != Some(self.params.fingerprint.as_str()) {
-            next.connection.close(0, b"peer changed");
+            connection.close(0, b"peer changed");
             return Err(AttemptError::check(OpError::new(
                 ErrorCode::AuthFailed,
                 "the peer at this address is no longer the one the tunnel was opened to",
             )));
         }
         if self.params.require_dial_filter
-            && !next
-                .session
+            && !session
                 .capabilities
                 .iter()
                 .any(|c| c == wire::CAP_DIAL_FILTER_V1)
         {
-            next.connection.close(0, b"capability");
+            connection.close(0, b"capability");
             return Err(AttemptError::check(
                 super::dynamic_forward_capability_unsupported(),
             ));
         }
-        Ok(next)
+        Ok(Established::Forward {
+            endpoint,
+            connection,
+            session,
+        })
     }
 }
 
 /// Dial and negotiate. The same steps as `dial_peer`, keeping the failure's
 /// kind so the retry line can name it (decision 12).
-async fn dial(target: &PeerTarget) -> Result<Established, AttemptError> {
+async fn dial(
+    target: &PeerTarget,
+) -> Result<(qsh_transport::Endpoint, qsh_transport::Connection, Session), AttemptError> {
     let device_name = target.identity.identity.device_id.clone();
     let dialer = qsh_transport::Dialer::new(
         target.identity.local.clone(),
@@ -583,11 +707,7 @@ async fn dial(target: &PeerTarget) -> Result<Established, AttemptError> {
     let endpoint = dialed.endpoint.clone();
     let connection = dialed.connection.clone();
     match Session::negotiate(dialed.connection, &device_name).await {
-        Ok(session) => Ok(Established {
-            endpoint,
-            connection,
-            session,
-        }),
+        Ok(session) => Ok((endpoint, connection, session)),
         Err(err) => {
             connection.close(0, b"done");
             Err(AttemptError {

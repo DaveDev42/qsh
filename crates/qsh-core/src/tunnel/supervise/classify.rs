@@ -20,8 +20,8 @@ pub(crate) enum Source {
     LocalDial,
     /// This machine asking its own `qsh listen` daemon (reverse route).
     #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "the reverse route supervisor uses it")
+        not(any(test, unix)),
+        allow(dead_code, reason = "only the unix reverse supervisor uses it")
     )]
     LocalDaemon,
     /// The supervisor's own checks on a fresh carrier (fingerprint match,

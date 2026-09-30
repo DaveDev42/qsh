@@ -206,6 +206,24 @@ impl crate::client::wake::WallClock for FakeClock {
 /// `(when, "supervise" kind, cause)` of every supervise line, in order.
 type Seen = Vec<(std::time::Instant, String, Option<String>)>;
 
+/// Every supervise line, whole.
+fn full_lines() -> &'static std::sync::Mutex<Vec<serde_json::Value>> {
+    static LINES: std::sync::OnceLock<std::sync::Mutex<Vec<serde_json::Value>>> =
+        std::sync::OnceLock::new();
+    LINES.get_or_init(Default::default)
+}
+
+#[cfg(unix)]
+fn lines_of(kind: &str) -> Vec<serde_json::Value> {
+    full_lines()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .filter(|line| line["supervise"] == kind)
+        .cloned()
+        .collect()
+}
+
 fn seen() -> &'static std::sync::Mutex<Seen> {
     static SEEN: std::sync::OnceLock<std::sync::Mutex<Seen>> = std::sync::OnceLock::new();
     SEEN.get_or_init(Default::default)
@@ -233,6 +251,10 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for TimedCapture {
         let mut message = Message(String::new());
         event.record(&mut message);
         if let Ok(line) = serde_json::from_str::<serde_json::Value>(&message.0) {
+            full_lines()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(line.clone());
             seen().lock().unwrap_or_else(|e| e.into_inner()).push((
                 std::time::Instant::now(),
                 line["supervise"].as_str().unwrap_or_default().to_string(),
@@ -537,4 +559,316 @@ fn accept_hold_a_connect_outlasting_the_window_gets_rep_01_and_no_stream() {
     // be a request by now.
     assert_eq!(tunnel.peer.requests.load(Ordering::SeqCst), 0);
     drop(second);
+}
+
+// ---- the reverse route against a scripted daemon (ADR-0023 decisions 7-2, 7-5, 12) ----
+//
+// A real daemon ends the `LOCAL_CONTROL` conduit the moment a registration
+// changes, and the supervisor reads that as a loss before any accept can see
+// the new identity. The per-accept check and the wake line are therefore
+// driven against a daemon that does exactly what the test scripts.
+
+#[cfg(unix)]
+const FP_A: &str = "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+#[cfg(unix)]
+const FP_B: &str = "sha256:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=";
+
+#[cfg(unix)]
+/// A localctl daemon that answers `LocalHostList`, `LOCAL_CONTROL` and
+/// `LOCAL_STREAM` from switches the test flips.
+struct ScriptedDaemon {
+    runtime: tokio::runtime::Runtime,
+    /// The fingerprint a `LOCAL_CONTROL` ack and the host list report.
+    control_fingerprint: Arc<std::sync::Mutex<String>>,
+    /// The fingerprint a `LOCAL_STREAM` ack reports.
+    stream_fingerprint: Arc<std::sync::Mutex<String>>,
+    /// When unset, the host list is empty and `LOCAL_CONTROL` is refused
+    /// `HOST_NOT_FOUND`, as for a name no daemon holds.
+    registered: Arc<AtomicBool>,
+    /// `LOCAL_STREAM` conduits opened, and the `StreamHeader`s that reached
+    /// the daemon on them.
+    stream_opens: Arc<AtomicUsize>,
+    stream_headers: Arc<AtomicUsize>,
+    /// Bumped to close every live `LOCAL_CONTROL` conduit.
+    drop_controls: tokio::sync::watch::Sender<u64>,
+}
+
+#[cfg(unix)]
+impl ScriptedDaemon {
+    fn start(runtime_dir: &std::path::Path) -> Self {
+        use crate::localctl::frame::LocalConduit;
+        use qsh_proto::local::{
+            LocalAdminRequest, LocalError, LocalHello, LocalHelloAck, LocalHost,
+            LocalHostListResult, LocalResponse, LocalStreamKind, local_admin_request,
+            local_response,
+        };
+
+        std::fs::create_dir_all(runtime_dir).unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let control_fingerprint = Arc::new(std::sync::Mutex::new(FP_A.to_string()));
+        let stream_fingerprint = Arc::new(std::sync::Mutex::new(FP_A.to_string()));
+        let registered = Arc::new(AtomicBool::new(true));
+        let stream_opens = Arc::new(AtomicUsize::new(0));
+        let stream_headers = Arc::new(AtomicUsize::new(0));
+        let (drop_controls, _) = tokio::sync::watch::channel(0u64);
+        let socket = runtime_dir.join(format!("{}.sock", std::process::id()));
+        let listener = {
+            let _guard = runtime.enter();
+            let std_listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+            std_listener.set_nonblocking(true).unwrap();
+            tokio::net::UnixListener::from_std(std_listener).unwrap()
+        };
+        let daemon = Self {
+            runtime,
+            control_fingerprint: Arc::clone(&control_fingerprint),
+            stream_fingerprint: Arc::clone(&stream_fingerprint),
+            registered: Arc::clone(&registered),
+            stream_opens: Arc::clone(&stream_opens),
+            stream_headers: Arc::clone(&stream_headers),
+            drop_controls: drop_controls.clone(),
+        };
+        daemon.runtime.spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let control_fingerprint = Arc::clone(&control_fingerprint);
+                let stream_fingerprint = Arc::clone(&stream_fingerprint);
+                let registered = Arc::clone(&registered);
+                let stream_opens = Arc::clone(&stream_opens);
+                let stream_headers = Arc::clone(&stream_headers);
+                let mut dropped = drop_controls.subscribe();
+                tokio::spawn(async move {
+                    let mut conduit = LocalConduit::new(stream);
+                    let Ok(Some(hello)) = conduit.recv::<LocalHello>().await else {
+                        return;
+                    };
+                    let ack = |fingerprint: &Arc<std::sync::Mutex<String>>| LocalResponse {
+                        body: Some(local_response::Body::HelloAck(LocalHelloAck {
+                            host: hello.host.clone(),
+                            peer_fingerprint: fingerprint.lock().unwrap().clone(),
+                            generation: 1,
+                            capabilities: vec![wire::CAP_DIAL_FILTER_V1.to_string()],
+                        })),
+                    };
+                    let not_found = || LocalResponse {
+                        body: Some(local_response::Body::Error(LocalError {
+                            code: "HOST_NOT_FOUND".to_string(),
+                            message: "not registered".to_string(),
+                        })),
+                    };
+                    match hello.kind {
+                        k if k == LocalStreamKind::LocalAdmin as i32 => {
+                            let Ok(Some(LocalAdminRequest {
+                                body: Some(local_admin_request::Body::HostList(_)),
+                            })) = conduit.recv::<LocalAdminRequest>().await
+                            else {
+                                return;
+                            };
+                            let hosts = if registered.load(Ordering::SeqCst) {
+                                vec![LocalHost {
+                                    name: "phone".to_string(),
+                                    address: "203.0.113.5:51820".to_string(),
+                                    state: "reachable".to_string(),
+                                    fingerprint: control_fingerprint.lock().unwrap().clone(),
+                                    capabilities: vec![wire::CAP_DIAL_FILTER_V1.to_string()],
+                                    generation: 1,
+                                    registered_at: "2026-09-30T00:00:00Z".to_string(),
+                                    lost_at: None,
+                                }]
+                            } else {
+                                Vec::new()
+                            };
+                            let _ = conduit
+                                .send(&LocalResponse {
+                                    body: Some(local_response::Body::HostListResult(
+                                        LocalHostListResult { hosts },
+                                    )),
+                                })
+                                .await;
+                        }
+                        k if k == LocalStreamKind::LocalControl as i32 => {
+                            if !registered.load(Ordering::SeqCst) {
+                                let _ = conduit.send(&not_found()).await;
+                                return;
+                            }
+                            if conduit.send(&ack(&control_fingerprint)).await.is_err() {
+                                return;
+                            }
+                            // Hold the conduit until the test drops it.
+                            let _ = dropped.changed().await;
+                        }
+                        k if k == LocalStreamKind::LocalStream as i32 => {
+                            stream_opens.fetch_add(1, Ordering::SeqCst);
+                            if conduit.send(&ack(&stream_fingerprint)).await.is_err() {
+                                return;
+                            }
+                            if let Ok(Ok(Some(_))) = tokio::time::timeout(
+                                Duration::from_millis(500),
+                                conduit.recv_payload(),
+                            )
+                            .await
+                            {
+                                stream_headers.fetch_add(1, Ordering::SeqCst);
+                            }
+                        }
+                        _ => {}
+                    }
+                });
+            }
+        });
+        daemon
+    }
+
+    fn drop_control_conduits(&self) {
+        self.drop_controls.send_modify(|n| *n += 1);
+    }
+}
+
+#[cfg(unix)]
+fn reverse_ops(dir: &std::path::Path) -> Ops {
+    let ops = Ops::new(
+        Paths::new(dir.join("config"), dir.join("state")).with_runtime_dir(dir.join("run")),
+    );
+    crate::trust::TrustStore::default()
+        .save(&ops.paths().trust_file())
+        .unwrap();
+    ops
+}
+
+#[cfg(unix)]
+fn open_reverse_local(ops: &Ops) -> crate::ops::TunnelHold {
+    ops.tunnel_open(qsh_proto::TunnelOpenReq {
+        host: "phone".to_string(),
+        mode: "local".to_string(),
+        bind: None,
+        listen_port: u32::from(free_port()),
+        forward_host: "127.0.0.1".to_string(),
+        forward_port: 9,
+        wait_ms: None,
+        supervise_ms: Some(60_000),
+        accept_hold_ms: None,
+    })
+    .expect("the supervised open over the scripted daemon")
+}
+
+#[cfg(unix)]
+fn capture_supervise_lines() {
+    use tracing_subscriber::layer::SubscriberExt as _;
+    tracing::subscriber::set_global_default(
+        tracing_subscriber::registry().with(
+            <TimedCapture as tracing_subscriber::Layer<_>>::with_filter(
+                TimedCapture,
+                tracing_subscriber::filter::Targets::new()
+                    .with_target(crate::tunnel::supervise::TARGET, tracing::Level::INFO),
+            ),
+        ),
+    )
+    .expect("no other global tracing subscriber in this test process");
+}
+
+#[cfg(unix)]
+/// Decisions 6, 7-2 and 7-5. The registration behind the host name changes
+/// to another device while the tunnel's `LOCAL_CONTROL` conduit is still
+/// open. The next accept's `LocalHelloAck` names the other device, so the
+/// `StreamHeader` is never sent; the supervisor then asks again, sees the
+/// other fingerprint on the control leg too, and ends the tunnel with
+/// `AUTH_FAILED`.
+#[test]
+fn supervised_reverse_local_sends_no_byte_to_a_device_that_reregistered_under_the_same_name_with_another_fingerprint()
+ {
+    capture_supervise_lines();
+    let dir = tempfile::tempdir().unwrap();
+    let ops = reverse_ops(dir.path());
+    let daemon = ScriptedDaemon::start(&ops.paths().runtime_dir());
+    let hold = open_reverse_local(&ops);
+    let bind: std::net::SocketAddr = hold.tunnel().bind.parse().unwrap();
+    let (ended_tx, ended_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = ended_tx.send(hold.hold());
+    });
+
+    // Another device takes the name: new connections see it from now on,
+    // and so does the next time the supervisor asks.
+    *daemon.stream_fingerprint.lock().unwrap() = FP_B.to_string();
+    *daemon.control_fingerprint.lock().unwrap() = FP_B.to_string();
+    let _client = std::net::TcpStream::connect(bind).expect("the listener is bound");
+
+    let err = ended_rx
+        .recv_timeout(Duration::from_secs(30))
+        .expect("the supervisor ends the tunnel");
+    assert_eq!(err.code, ErrorCode::AuthFailed, "{err:?}");
+    assert!(
+        daemon.stream_opens.load(Ordering::SeqCst) >= 1,
+        "the accept must have reached the daemon's ack for the check to be tested"
+    );
+    assert_eq!(
+        daemon.stream_headers.load(Ordering::SeqCst),
+        0,
+        "no StreamHeader may reach a registration other than the confirmed one"
+    );
+    let gave_up = lines_of("gave_up");
+    assert_eq!(gave_up.len(), 1, "{gave_up:?}");
+    assert_eq!(gave_up[0]["code"], "AUTH_FAILED");
+    assert_eq!(gave_up[0]["route"], "reverse");
+    assert_eq!(gave_up[0]["host"], "phone");
+}
+
+#[cfg(unix)]
+/// Decision 17 and 12 on the reverse route: a wake during the outage is
+/// logged with the time slept, and the outage the next `reestablished`
+/// reports does not include that time.
+#[test]
+fn supervise_wake_line_reports_slept_ms_and_outage_ms_excludes_it() {
+    use crate::client::wake::{WakeDetector, install_process_detector_for_test};
+
+    let clock = Arc::new(FakeClock(std::sync::atomic::AtomicU64::new(0)));
+    install_process_detector_for_test(WakeDetector::new(clock.clone()));
+    capture_supervise_lines();
+    let dir = tempfile::tempdir().unwrap();
+    let ops = reverse_ops(dir.path());
+    let daemon = ScriptedDaemon::start(&ops.paths().runtime_dir());
+    let hold = open_reverse_local(&ops);
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let runner = std::thread::spawn(move || {
+        let _ = hold.hold_until(async move {
+            let _ = stopped.await;
+        });
+    });
+
+    // The registration goes; the supervisor starts asking and getting
+    // `HOST_NOT_FOUND`.
+    daemon.registered.store(false, Ordering::SeqCst);
+    daemon.drop_control_conduits();
+    wait_for(|| !lines_of("lost").is_empty(), "the `lost` line");
+    wait_for(|| !lines_of("retry").is_empty(), "a retry");
+
+    // The machine sleeps ten seconds (the wall clock jumps, the monotonic
+    // one does not) and wakes; then the registration is back.
+    clock.0.fetch_add(10_000, Ordering::SeqCst);
+    wait_for(|| !lines_of("wake").is_empty(), "the `wake` line");
+    daemon.registered.store(true, Ordering::SeqCst);
+    wait_for(
+        || !lines_of("reestablished").is_empty(),
+        "the `reestablished` line",
+    );
+
+    let wake = &lines_of("wake")[0];
+    assert_eq!(wake["route"], "reverse");
+    assert_eq!(wake["host"], "phone");
+    let slept = wake["slept_ms"].as_u64().expect("slept_ms");
+    assert!(
+        (9_000..=11_000).contains(&slept),
+        "slept_ms {slept} should be about the injected ten seconds"
+    );
+    let outage = lines_of("reestablished")[0]["outage_ms"]
+        .as_u64()
+        .expect("outage_ms");
+    assert!(
+        outage < slept,
+        "outage_ms {outage} must not include the {slept} ms slept"
+    );
+    let _ = stop.send(());
+    runner.join().unwrap();
 }

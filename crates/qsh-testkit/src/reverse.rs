@@ -661,8 +661,17 @@ impl ReverseHarness {
     /// two to ever meet.
     #[cfg(unix)]
     pub async fn attach_localctl(&self, paths: &Paths) -> LocalctlHandle {
+        self.attach_localctl_as(paths, std::process::id()).await
+    }
+
+    /// [`Self::attach_localctl`] under a caller-chosen pid, so a test can
+    /// stand up a second "daemon" (a `qsh listen` restart binds a new
+    /// `<pid>.sock`) next to, or after, the first. `pid` names the socket
+    /// file only and must belong to a live process, because discovery
+    /// unlinks the socket of a verifiably dead one.
+    #[cfg(unix)]
+    pub async fn attach_localctl_as(&self, paths: &Paths, pid: u32) -> LocalctlHandle {
         use qsh_core::localctl::daemon::{LocalctlDaemon, LocalctlListener};
-        let pid = std::process::id();
         let bound = LocalctlListener::bind(paths, pid).expect("bind localctl socket");
         let socket_path = bound.socket_path.clone();
         let daemon = LocalctlDaemon::new(self.listen.clone());

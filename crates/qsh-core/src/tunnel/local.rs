@@ -50,7 +50,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinSet;
 
 use crate::client::ClientError;
-use crate::client::link::DataLink;
+use crate::client::link::{DataKillSwitch, DataLink, DataRecv, DataSend};
 use crate::tunnel::carrier::{Admit, CarrierView, Ticket};
 use crate::tunnel::dial::DialPolicy;
 #[cfg(unix)]
@@ -98,6 +98,12 @@ pub(crate) enum ForwardCarrier {
         socket: std::path::PathBuf,
         /// The registered host name to relay to.
         host: String,
+        /// The registration a supervised tunnel confirmed on its
+        /// `LOCAL_CONTROL` leg (ADR-0023 decision 7-5). When set, every
+        /// `LOCAL_STREAM` conduit's `LocalHelloAck` is compared with it
+        /// before the `StreamHeader` is sent. `None` for an unsupervised
+        /// tunnel, whose behavior is unchanged.
+        expect: Option<crate::localctl::client::ExpectedPeer>,
     },
 }
 
@@ -108,7 +114,7 @@ impl ForwardCarrier {
         match self {
             ForwardCarrier::Quic(conn) => DataLink::Quic(conn),
             #[cfg(unix)]
-            ForwardCarrier::Local { socket, host } => DataLink::Local {
+            ForwardCarrier::Local { socket, host, .. } => DataLink::Local {
                 socket: socket.as_path(),
                 host: host.as_str(),
             },
@@ -200,6 +206,13 @@ pub(crate) enum ForwardConnError {
     /// produces this.
     #[error("the tunnel's connection is down")]
     CarrierDisconnected,
+    /// The registration behind the host name is no longer the one a
+    /// supervised reverse-route tunnel confirmed (ADR-0023 decision 7-5).
+    /// The accept is refused like a disconnected carrier and nothing was
+    /// sent toward the new registration's device.
+    #[error("the registration behind this host changed")]
+    #[cfg_attr(not(unix), allow(dead_code))]
+    PeerChanged,
     /// The byte pipe itself broke mid-transfer.
     #[error(transparent)]
     Splice(#[from] SpliceError),
@@ -453,6 +466,7 @@ impl LocalForwardHandle {
             ForwardCarrier::Local {
                 socket: socket_path,
                 host,
+                expect: None,
             },
         )
         .await
@@ -620,8 +634,7 @@ pub(crate) async fn open_tunnel(
         port: u32::from(port),
         deny_host_local: policy.deny_host_local,
     };
-    let link = carrier.link();
-    let opened_stream = crate::tunnel::open_stream(&link, &header).await;
+    let opened_stream = open_carrier_stream(carrier, &header).await;
     drop(turn);
     let (send, mut recv, kill) = opened_stream?;
 
@@ -680,6 +693,38 @@ pub(crate) async fn open_tunnel(
             })
         }
     }
+}
+
+/// Open the tunnel stream on `carrier`. A reverse carrier that carries an
+/// [`crate::localctl::client::ExpectedPeer`] checks the daemon's ack before
+/// the header goes out (ADR-0023 decision 7-5); every other carrier opens
+/// as it always did.
+async fn open_carrier_stream(
+    carrier: &ForwardCarrier,
+    header: &StreamHeader,
+) -> Result<(DataSend, DataRecv, DataKillSwitch), ForwardConnError> {
+    #[cfg(unix)]
+    if let ForwardCarrier::Local {
+        socket,
+        host,
+        expect: Some(expect),
+    } = carrier
+    {
+        use crate::localctl::client::{StreamOpenError, open_stream_expecting};
+        return match open_stream_expecting(socket, host, header, expect).await {
+            Ok(handshake) => Ok((
+                DataSend::Local(handshake.send),
+                DataRecv::Local(handshake.recv),
+                DataKillSwitch::new(handshake.socket.clone()),
+            )),
+            Err(StreamOpenError::PeerChanged) => Err(ForwardConnError::PeerChanged),
+            Err(StreamOpenError::Op(err)) => Err(ForwardConnError::Link(
+                crate::client::link::op_error_to_client_error(err),
+            )),
+        };
+    }
+    let link = carrier.link();
+    Ok(crate::tunnel::open_stream(&link, header).await?)
 }
 
 /// Splice `tcp` against `opened`'s raw carrier until both directions end —
@@ -743,16 +788,26 @@ async fn forward_connection(
     splice_opened(tcp, opened).await
 }
 
-/// Tell a supervisor when the peer answered `PERMISSION_DENIED`.
+/// Tell a supervisor when the peer answered `PERMISSION_DENIED`, or when
+/// the registration behind a reverse carrier changed.
 pub(crate) fn note_denial(
     view: &CarrierView,
     carrier: &Arc<ForwardCarrier>,
     err: &ForwardConnError,
 ) {
-    if let ForwardConnError::Refused { code, .. } = err
-        && code == "PERMISSION_DENIED"
-    {
-        view.note_permission_denied(carrier);
+    match err {
+        // The host-local dial filter answers with the same code as an ACL
+        // deny (ADR-0019 decision 3), but it judges one destination, not the
+        // peer's policy: it must not end a supervised tunnel. Only the
+        // message tells the two apart.
+        ForwardConnError::Refused { code, message }
+            if code == "PERMISSION_DENIED"
+                && message.as_str() != crate::tunnel::dial::FILTERED_MESSAGE =>
+        {
+            view.note_permission_denied(carrier);
+        }
+        ForwardConnError::PeerChanged => view.note_peer_changed(carrier),
+        _ => {}
     }
 }
 

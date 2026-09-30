@@ -518,6 +518,7 @@ impl DynamicForwardHandle {
         let carrier = Arc::new(ForwardCarrier::Local {
             socket: socket_path,
             host,
+            expect: None,
         });
         Ok(Self {
             tunnel_id: ulid::Ulid::new().to_string(),
@@ -799,7 +800,8 @@ fn rep_for_forward_conn_error(err: &ForwardConnError) -> Rep {
         ForwardConnError::Link(_)
         | ForwardConnError::NoConnectResult
         | ForwardConnError::CarrierNotRaw
-        | ForwardConnError::CarrierDisconnected => Rep::GeneralFailure,
+        | ForwardConnError::CarrierDisconnected
+        | ForwardConnError::PeerChanged => Rep::GeneralFailure,
         ForwardConnError::Splice(_) => Rep::GeneralFailure,
     }
 }

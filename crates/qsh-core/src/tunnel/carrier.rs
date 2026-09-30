@@ -54,6 +54,9 @@ pub(crate) struct CarrierView {
     activity: Option<ActivityHook>,
     /// Told which carrier a peer answered `PERMISSION_DENIED` on.
     denied: Option<mpsc::UnboundedSender<Arc<ForwardCarrier>>>,
+    /// Told which carrier turned out to sit on another registration than
+    /// the one it was confirmed against (ADR-0023 decision 7-5).
+    changed: Option<mpsc::UnboundedSender<Arc<ForwardCarrier>>>,
     /// Present only for a tunnel opened with `--accept-hold`.
     hold: Option<HoldGate>,
 }
@@ -68,6 +71,7 @@ impl CarrierView {
             rx,
             activity: None,
             denied: None,
+            changed: None,
             hold: None,
         }
     }
@@ -81,6 +85,7 @@ impl CarrierView {
             rx,
             activity,
             denied: None,
+            changed: None,
             hold: None,
         }
     }
@@ -99,6 +104,22 @@ impl CarrierView {
     pub(crate) fn with_denied(mut self, tx: mpsc::UnboundedSender<Arc<ForwardCarrier>>) -> Self {
         self.denied = Some(tx);
         self
+    }
+
+    /// Report reverse-route identity mismatches to a supervisor (ADR-0023
+    /// decision 7-5: the registration behind the host name is no longer the
+    /// confirmed one, so the supervisor treats the carrier as lost).
+    pub(crate) fn with_changed(mut self, tx: mpsc::UnboundedSender<Arc<ForwardCarrier>>) -> Self {
+        self.changed = Some(tx);
+        self
+    }
+
+    /// A `LOCAL_STREAM` conduit on `carrier` was answered by a registration
+    /// other than the one `carrier` was confirmed against.
+    pub(crate) fn note_peer_changed(&self, carrier: &Arc<ForwardCarrier>) {
+        if let Some(tx) = &self.changed {
+            let _ = tx.send(Arc::clone(carrier));
+        }
     }
 
     /// The peer refused a `TCP_CONNECT` on `carrier` with
