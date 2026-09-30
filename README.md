@@ -870,7 +870,10 @@ Some of these are MVP scope decisions, some are unfinished work.
   has to handshake again. This applies to an already-running `qsh serve`
   with no restart: the host re-reads `trust.toml` on every handshake, so
   the very next connection attempt from the removed peer is rejected
-  immediately (`docs/CLI.md` §6.11). Force-closing a peer's
+  immediately (`docs/CLI.md` §6.11). A tunnel opened with `--supervise`
+  that is running on such a connection keeps running as well; only its
+  next re-establishment meets the rejected handshake, after which it retries
+  within its budget and gives up. Force-closing a peer's
   already-established connection on removal is P1.
 - `qsh trust rename` takes effect on the *next handshake* immediately, no
   restart needed, the same way `qsh trust remove` does — but `acl.toml`
