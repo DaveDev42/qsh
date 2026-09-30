@@ -1,9 +1,11 @@
 use super::*;
 
+use crate::client::wake::WakeEvent;
 use crate::config::ReverseConfig;
 use proptest::prelude::*;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
+use tokio::sync::watch;
 
 #[test]
 fn offered_name_precedence_flag_then_config_then_device_id() {
@@ -334,9 +336,14 @@ async fn after_reaching_the_cap_the_loop_waits_the_full_default_thirty_seconds()
 
     let shutdown = std::future::pending::<()>();
     tokio::pin!(shutdown);
+    let (_wake_tx, mut wake_rx) = watch::channel(WakeEvent::default());
     let start = tokio::time::Instant::now();
-    let completed = wait_backoff(delay, &mut shutdown).await;
-    assert!(completed, "the delay must elapse, not be short-circuited");
+    let completed = wait_backoff(delay, &mut shutdown, &mut wake_rx).await;
+    assert_eq!(
+        completed,
+        BackoffWait::Elapsed,
+        "the delay must elapse, not be short-circuited"
+    );
     assert_eq!(
         tokio::time::Instant::now() - start,
         Duration::from_millis(30_000),
@@ -353,14 +360,173 @@ async fn shutdown_interrupts_a_backoff_wait_immediately() {
     };
     tokio::pin!(shutdown);
 
+    let (_wake_tx, mut wake_rx) = watch::channel(WakeEvent::default());
     let start = tokio::time::Instant::now();
-    let completed = wait_backoff(Duration::from_secs(30), &mut shutdown).await;
-    assert!(!completed, "shutdown must win the race, not the sleep");
+    let completed = wait_backoff(Duration::from_secs(30), &mut shutdown, &mut wake_rx).await;
+    assert_eq!(
+        completed,
+        BackoffWait::Shutdown,
+        "shutdown must win the race, not the sleep"
+    );
     assert_eq!(
         tokio::time::Instant::now() - start,
         Duration::ZERO,
         "must not wait any part of the delay once shutdown has already fired",
     );
+}
+
+// ------------------------------------------------------------------
+// wake: the second backoff reset point (ADR-0023 decision 20). Paused
+// clock, jitter 0 unless the test is about jitter, fixed seeds.
+// ------------------------------------------------------------------
+
+fn wake_event(slept_ms: u64) -> WakeEvent {
+    WakeEvent { seq: 1, slept_ms }
+}
+
+/// A wake restarts the sequence at `backoff_initial_ms` and cuts the wait
+/// that is in progress, exactly at the moment it arrives.
+#[tokio::test(start_paused = true)]
+async fn target_backoff_restarts_from_backoff_initial_on_wake_and_cuts_the_pending_delay() {
+    let mut backoff = Backoff::new(limits(500, 30_000, 0), StdRng::seed_from_u64(3));
+    let mut delay = Duration::ZERO;
+    for _ in 0..5 {
+        delay = backoff.next_delay();
+    }
+    assert_eq!(
+        delay,
+        Duration::from_millis(8_000),
+        "climbing before the wake"
+    );
+
+    let (wake_tx, mut wake_rx) = watch::channel(WakeEvent::default());
+    let shutdown = std::future::pending::<()>();
+    tokio::pin!(shutdown);
+    let start = tokio::time::Instant::now();
+    let waiting = wait_backoff(Duration::from_secs(30), &mut shutdown, &mut wake_rx);
+    tokio::pin!(waiting);
+    // Not resolved by the passage of 4 s alone.
+    tokio::select! {
+        _ = &mut waiting => panic!("a 30 s wait must not end at 4 s"),
+        () = tokio::time::sleep(Duration::from_secs(4)) => {}
+    }
+    wake_tx.send(wake_event(9_000)).unwrap();
+    let waited = waiting.await;
+    assert_eq!(waited, BackoffWait::Woken(wake_event(9_000)));
+    assert_eq!(
+        tokio::time::Instant::now() - start,
+        Duration::from_secs(4),
+        "the wake must cut the wait at once, not let any more of it run"
+    );
+
+    backoff.wake(tokio::time::Instant::now());
+    assert_eq!(
+        backoff.next_delay(),
+        Duration::from_millis(500),
+        "the sequence restarts from backoff_initial_ms"
+    );
+}
+
+/// A wake that landed while no wait was in progress (a dial was running) is
+/// applied at the next wait, which then ends at once.
+#[tokio::test(start_paused = true)]
+async fn target_backoff_wait_returns_at_once_for_a_wake_that_arrived_earlier() {
+    let (wake_tx, mut wake_rx) = watch::channel(WakeEvent::default());
+    wake_tx.send(wake_event(5_000)).unwrap();
+    let shutdown = std::future::pending::<()>();
+    tokio::pin!(shutdown);
+    let start = tokio::time::Instant::now();
+    let waited = wait_backoff(Duration::from_secs(30), &mut shutdown, &mut wake_rx).await;
+    assert_eq!(waited, BackoffWait::Woken(wake_event(5_000)));
+    assert_eq!(tokio::time::Instant::now() - start, Duration::ZERO);
+}
+
+/// The window never lifts a delay above a configured `backoff_max_ms` that is
+/// below two seconds, jitter included.
+#[tokio::test(start_paused = true)]
+async fn target_fast_window_never_exceeds_a_configured_backoff_max_below_two_seconds() {
+    for seed in 0..32 {
+        let mut backoff = Backoff::new(limits(100, 800, 50), StdRng::seed_from_u64(seed));
+        backoff.wake(tokio::time::Instant::now());
+        for _ in 0..12 {
+            let delay = backoff.next_delay();
+            assert!(
+                delay <= Duration::from_millis(800),
+                "seed {seed}: {delay:?} exceeds backoff_max_ms inside the window"
+            );
+        }
+    }
+    // Initial above two seconds: the cap follows the initial value.
+    let mut backoff = Backoff::new(limits(5_000, 60_000, 0), StdRng::seed_from_u64(1));
+    backoff.wake(tokio::time::Instant::now());
+    assert_eq!(backoff.next_delay(), Duration::from_millis(5_000));
+    assert_eq!(backoff.next_delay(), Duration::from_millis(5_000));
+}
+
+/// Only a wake opens the window. A loss, a run of failures and a successful
+/// registration's `reset()` all leave the ordinary sequence alone; a wake
+/// caps it at two seconds for 60 s on the monotonic clock, after which the
+/// doubling resumes where it left off.
+#[tokio::test(start_paused = true)]
+async fn target_fast_window_opens_on_wake_only_not_on_loss() {
+    let mut backoff = Backoff::new(limits(500, 30_000, 0), StdRng::seed_from_u64(9));
+    let observed: Vec<u64> = (0..7)
+        .map(|_| backoff.next_delay().as_millis() as u64)
+        .collect();
+    assert_eq!(
+        observed,
+        vec![500, 1_000, 2_000, 4_000, 8_000, 16_000, 30_000],
+        "failures alone climb past two seconds"
+    );
+    backoff.reset();
+    assert_eq!(backoff.next_delay(), Duration::from_millis(500));
+    assert_eq!(backoff.next_delay(), Duration::from_millis(1_000));
+    assert_eq!(backoff.next_delay(), Duration::from_millis(2_000));
+    assert_eq!(
+        backoff.next_delay(),
+        Duration::from_millis(4_000),
+        "a registration's reset() opens no window"
+    );
+
+    backoff.wake(tokio::time::Instant::now());
+    for _ in 0..4 {
+        assert!(backoff.next_delay() <= Duration::from_secs(2));
+    }
+    tokio::time::advance(Duration::from_secs(59)).await;
+    assert!(
+        backoff.next_delay() <= Duration::from_secs(2),
+        "still inside the 60 s window"
+    );
+    tokio::time::advance(Duration::from_secs(2)).await;
+    assert_eq!(
+        backoff.next_delay(),
+        Duration::from_millis(4_000),
+        "the window closed; the doubling resumes from 2 s"
+    );
+}
+
+/// `wake` lines carry `slept_ms` and no other optional field.
+#[test]
+fn reconnect_event_wake_line_carries_slept_ms_and_at() {
+    let wake = ReconnectEvent {
+        event: "wake",
+        host: "personal-mac",
+        fingerprint: None,
+        delay_ms: None,
+        cause: None,
+        at: "2026-01-01T00:00:03Z".to_string(),
+        since_registered_ms: None,
+        slept_ms: Some(9_000),
+    };
+    let parsed: serde_json::Value =
+        serde_json::from_str(&serde_json::to_string(&wake).unwrap()).unwrap();
+    assert_eq!(parsed["event"], "wake");
+    assert_eq!(parsed["slept_ms"], 9_000);
+    assert_eq!(parsed["at"], "2026-01-01T00:00:03Z");
+    for absent in ["fingerprint", "delay_ms", "cause", "since_registered_ms"] {
+        assert!(parsed.get(absent).is_none(), "{absent} must be absent");
+    }
+    wake.emit();
 }
 
 // ------------------------------------------------------------------
@@ -377,6 +543,7 @@ fn reconnect_event_json_line_has_the_documented_field_set() {
         cause: Some("dial_timeout"),
         at: "2026-01-01T00:00:00Z".to_string(),
         since_registered_ms: None,
+        slept_ms: None,
     };
     let parsed: serde_json::Value =
         serde_json::from_str(&serde_json::to_string(&retry).unwrap()).unwrap();
@@ -399,6 +566,7 @@ fn reconnect_event_json_line_has_the_documented_field_set() {
         cause: None,
         at: "2026-01-01T00:00:01Z".to_string(),
         since_registered_ms: None,
+        slept_ms: None,
     };
     let parsed: serde_json::Value =
         serde_json::from_str(&serde_json::to_string(&registered).unwrap()).unwrap();
@@ -437,6 +605,7 @@ fn reconnect_event_json_line_covers_the_lost_retry_pair_with_since_registered_ms
         cause: Some("peer_closed"),
         at: "2026-01-01T00:00:02Z".to_string(),
         since_registered_ms: Some(4_200),
+        slept_ms: None,
     };
     let parsed: serde_json::Value =
         serde_json::from_str(&serde_json::to_string(&lost).unwrap()).unwrap();
@@ -452,6 +621,7 @@ fn reconnect_event_json_line_covers_the_lost_retry_pair_with_since_registered_ms
         cause: Some("peer_closed"),
         at: "2026-01-01T00:00:02Z".to_string(),
         since_registered_ms: Some(4_200),
+        slept_ms: None,
     };
     let parsed: serde_json::Value =
         serde_json::from_str(&serde_json::to_string(&retry).unwrap()).unwrap();
@@ -477,6 +647,7 @@ fn reconnect_event_at_field_parses_as_rfc3339() {
         cause: Some("local"),
         at: at.clone(),
         since_registered_ms: None,
+        slept_ms: None,
     };
     let parsed: serde_json::Value =
         serde_json::from_str(&serde_json::to_string(&retry).unwrap()).unwrap();
@@ -814,5 +985,60 @@ async fn run_target_lost_and_retry_lines_report_a_quinn_idle_timeout_as_idle_tim
             "no `{event}` line may report path_dead for a pure idle timeout"
         );
     }
+    rig.shutdown().await;
+}
+
+/// ADR-0023 decision 20, over real sockets: a wake ends a pending backoff
+/// wait and the target re-registers at once. `backoff_initial_ms` is 20 s and
+/// nothing else would end the wait, so a second `registered` line within the
+/// (generous) 12 s bound can only come from the wake. A wake while registered
+/// leaves the healthy connection alone and only says so on the `wake` line.
+/// The tight bounds live in the paused-clock `target_*` tests above.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn serve_to_target_probes_and_redials_at_once_after_an_injected_wake() {
+    use crate::reverse::test_harness as harness;
+
+    let alias = "controller-wake-redial-target";
+    let rig = harness::Rig::start_with(
+        alias,
+        "widget-wake-redial-target",
+        harness::TargetOptions {
+            backoff_initial_ms: 20_000,
+            backoff_max_ms: 30_000,
+            path_watch: crate::client::pathwatch::PathWatchConfig::default(),
+        },
+    )
+    .await;
+    harness::wait_for_line(alias, "registered").await;
+
+    // A wake while registered: judged, answered, nothing lost.
+    rig.inject_wake(7_000);
+    let first_wake = harness::wait_for_nth_line(alias, "wake", 1, Duration::from_secs(10)).await;
+    assert_eq!(first_wake["slept_ms"], 7_000, "{first_wake}");
+    assert!(first_wake.get("delay_ms").is_none(), "{first_wake}");
+    assert!(
+        harness::lines(alias, "lost").is_empty(),
+        "a wake over a healthy path must not end the registration"
+    );
+
+    // Cut the path: the watchdog ends the registration and the target sits in
+    // its (20 s) backoff wait.
+    rig.cut();
+    let lost = harness::wait_for_line(alias, "lost").await;
+    assert_eq!(lost["cause"], "path_dead", "{lost}");
+    let retry = harness::wait_for_line(alias, "retry").await;
+    assert_eq!(retry["delay_ms"], 20_000, "{retry}");
+
+    // Path back, then the wake: the wait is cut and the target re-registers
+    // long before the 20 s would have passed.
+    rig.restore();
+    let woke_at = std::time::Instant::now();
+    rig.inject_wake(9_000);
+    let second_wake = harness::wait_for_nth_line(alias, "wake", 2, Duration::from_secs(12)).await;
+    assert_eq!(second_wake["slept_ms"], 9_000, "{second_wake}");
+    harness::wait_for_nth_line(alias, "registered", 2, Duration::from_secs(12)).await;
+    println!("re-registered {:?} after the wake", woke_at.elapsed());
+
     rig.shutdown().await;
 }

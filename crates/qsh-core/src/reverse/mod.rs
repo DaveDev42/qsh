@@ -46,6 +46,27 @@ pub(crate) fn path_watch_config() -> crate::client::pathwatch::PathWatchConfig {
     crate::client::pathwatch::PathWatchConfig::default()
 }
 
+/// The wake signal the target's reconnect loop listens to
+/// (`target::run_reverse_unix`). Production always gets the process-wide
+/// detector's subscription. Under `#[cfg(test)]` only, a test can wrap the
+/// target future in [`TEST_WAKE`]`.scope(..)` to inject wakes by hand.
+#[cfg(unix)]
+pub(crate) fn wake_subscription() -> tokio::sync::watch::Receiver<crate::client::wake::WakeEvent> {
+    #[cfg(test)]
+    if let Ok(mut rx) = TEST_WAKE.try_with(|rx| rx.clone()) {
+        rx.mark_unchanged();
+        return rx;
+    }
+    crate::client::wake::subscribe()
+}
+
+#[cfg(all(test, unix))]
+tokio::task_local! {
+    /// Test-only override read by [`wake_subscription`]. A task-local, not a
+    /// process global, so it only reaches the future it scopes.
+    pub(crate) static TEST_WAKE: tokio::sync::watch::Receiver<crate::client::wake::WakeEvent>;
+}
+
 #[cfg(all(test, unix))]
 tokio::task_local! {
     /// Test-only override read by [`path_watch_config`]. A task-local, not
