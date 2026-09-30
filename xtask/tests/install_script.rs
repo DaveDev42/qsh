@@ -112,7 +112,7 @@ impl Fixture {
     fn write_stubs(&self) {
         // The installer runs with `PATH` set to this directory alone, so a
         // `gh` or `curl` installed on the machine running the tests can never
-        // leak in. Only the tools the installer needs are linked through.
+        // leak in. Only the tools the installer needs are passed through.
         for tool in [
             "awk",
             "basename",
@@ -131,7 +131,13 @@ impl Fixture {
             for dir in ["/usr/bin", "/bin"] {
                 let real = Path::new(dir).join(tool);
                 if real.exists() {
-                    std::os::unix::fs::symlink(&real, self.stubs().join(tool)).unwrap();
+                    // A wrapper, not a symlink: macOS ships `shasum` as a
+                    // perl stub that resolves its versioned script from its
+                    // own path, and fails when reached through a link.
+                    write_executable(
+                        &self.stubs().join(tool),
+                        &format!("#!/bin/sh\nexec {} \"$@\"\n", real.display()),
+                    );
                     break;
                 }
             }
