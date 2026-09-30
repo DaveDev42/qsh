@@ -489,7 +489,7 @@ pub const ACL_CA_AUTH_PATH_MISSING: Diagnostic = Diagnostic {
 /// in the action vocabulary and always-denied (`Action::is_always_denied`,
 /// evaluated before any rule — `crate::acl::policy` module doc's step ①)
 /// so that a `-D` (`tunnel.dynamic`) CONNECT is authorized the same way
-/// `-L` is, as [`Action::ForwardLocal`]
+/// `-L` is, as [`crate::acl::Action::ForwardLocal`]
 /// ([`crate::ops::tunnel::DYNAMIC_FORWARD_ACL_NOTE`] says so verbatim). An `[[acl]]` row whose `allow` names `forward.socks`
 /// therefore authorizes nothing on its own: it can never fire (gate ①
 /// runs first), and the row's apparent intent — "let this principal use
