@@ -28,7 +28,7 @@ pub mod probe;
 /// `doctor.run`'s contract keys off of; this enum is the in-process
 /// convenience on top of it).
 ///
-/// 22 variants, one per `docs/CLI.md` §6.17 finding code — a closed,
+/// 23 variants, one per `docs/CLI.md` §6.17 finding code — a closed,
 /// additive-only set (`PLAN.md` M7 §4.1 #5): [`EXPECTED_DOCTOR_CODES`] and
 /// this enum's own `tests` module keep the two in lockstep, so a variant
 /// added without updating the frozen list (or vice versa) fails CI rather
@@ -38,7 +38,8 @@ pub mod probe;
 /// `AclPrincipalUnmatched`/`AclCaAuthPathMissing`/
 /// `HostPinnedWithoutAddress` — landed 14 → 21; ROADMAP M9 (h)'s
 /// `ConfigServeToConflict` (`qsh serve --to` rename, ADR-0012 결정 5) is
-/// M9 (h)'s eighth, 21 → 22.
+/// M9 (h)'s eighth, 21 → 22. `AclForwardSocksIneffective` (ADR-0019 결정
+/// 6·14, 결과 절 R6's doctor follow-up) is the twenty-third, 22 → 23.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiagnosticId {
     ControllerUnreachable,
@@ -63,6 +64,7 @@ pub enum DiagnosticId {
     AclCaAuthPathMissing,
     HostPinnedWithoutAddress,
     ConfigServeToConflict,
+    AclForwardSocksIneffective,
 }
 
 impl DiagnosticId {
@@ -99,6 +101,7 @@ impl DiagnosticId {
             DiagnosticId::AclCaAuthPathMissing => ACL_CA_AUTH_PATH_MISSING.code,
             DiagnosticId::HostPinnedWithoutAddress => HOST_PINNED_WITHOUT_ADDRESS.code,
             DiagnosticId::ConfigServeToConflict => CONFIG_SERVE_TO_CONFLICT.code,
+            DiagnosticId::AclForwardSocksIneffective => ACL_FORWARD_SOCKS_INEFFECTIVE.code,
         }
     }
 }
@@ -111,6 +114,7 @@ impl DiagnosticId {
 /// meaning needs a new code, not a repurposed one).
 pub const EXPECTED_DOCTOR_CODES: &[&str] = &[
     "acl_ca_auth_path_missing",
+    "acl_forward_socks_ineffective",
     "acl_policy_invalid",
     "acl_policy_missing",
     "acl_principal_unmatched",
@@ -481,6 +485,46 @@ pub const ACL_CA_AUTH_PATH_MISSING: Diagnostic = Diagnostic {
     ),
 };
 
+/// ADR-0019 결정 6·14, 결과 절 R6's doctor follow-up: `forward.socks` stays
+/// in the action vocabulary and always-denied (`Action::is_always_denied`,
+/// evaluated before any rule — `crate::acl::policy` module doc's step ①)
+/// so that a `-D` (`tunnel.dynamic`) CONNECT is authorized the same way
+/// `-L` is, as [`Action::ForwardLocal`]
+/// ([`crate::ops::tunnel::DYNAMIC_FORWARD_ACL_NOTE`] says so verbatim). An `[[acl]]` row whose `allow` names `forward.socks`
+/// therefore authorizes nothing on its own: it can never fire (gate ①
+/// runs first), and the row's apparent intent — "let this principal use
+/// `-D`" — only actually holds if some row for the *same* principal string
+/// and `auth_path` also grants `forward.local`, exact or via a
+/// `forward.*` family wildcard. `warn`, not `error`
+/// ([`ACL_PRINCIPAL_UNMATCHED`]'s shape): the row's other `allow` entries,
+/// if any, still work, and only the operator's `-D` intent is silently a
+/// no-op — one notch below a peer being certain to lose every request.
+///
+/// Detection (`crate::acl::PinnedPrincipalIndex::from_policy`) is keyed
+/// on the literal (principal string, `auth_path`) pair, the same
+/// granularity `crate::acl::PinnedPrincipalIndex::names_device`/
+/// `names_fingerprint` already use — not on "peer" in any richer sense. A
+/// peer split across a
+/// `device:<name>` row carrying `forward.socks` and a separate
+/// `fp:sha256:<fingerprint>` row for the same physical peer carrying
+/// `forward.local` still fires this finding, because the two rows never
+/// share a principal string. This limitation is spelled out in `message`
+/// itself (surfaced verbatim in `detail`) rather than only in this doc
+/// comment, and in `docs/CLI.md` §6.17's table row.
+///
+/// `remedy`'s tail is [`crate::acl::ACL_RESTART_NOTICE`]'s wording — see
+/// [`ACL_PRINCIPAL_UNMATCHED`]'s doc for why this is an extraction, not a
+/// wording change.
+pub const ACL_FORWARD_SOCKS_INEFFECTIVE: Diagnostic = Diagnostic {
+    id: DiagnosticId::AclForwardSocksIneffective,
+    code: "acl_forward_socks_ineffective",
+    message: "This row's allow names forward.socks, but forward.socks is always denied (ADR-0019) and -D is instead authorized per CONNECT as forward.local. No row for the same principal string and auth_path also grants forward.local, so this row authorizes nothing for -D. Detection matches on the literal principal string: splitting one peer across a device:<name> row and an fp:sha256:<fingerprint> row still flags this row even when the other row grants forward.local.",
+    remedy: concat!(
+        "Add \"forward.local\" to that row's allow; -D is authorized per CONNECT as forward.local and forward.socks alone grants nothing (ADR-0019), then ",
+        crate::acl::acl_restart_notice!()
+    ),
+};
+
 /// `docs/ROADMAP.md` M9 (h) (added to the batch in commit `fab8563`), `docs/CLI.md` §6.17: a
 /// name `Ops::host_list`'s forward ∪ reverse merge already knows about
 /// (a trust-store pin or a `hosts.toml` entry) has no routable address
@@ -614,16 +658,31 @@ mod tests {
         assert_eq!(CONFIG_SERVE_TO_CONFLICT.code, "config_serve_to_conflict");
     }
 
+    /// ADR-0019 결과 절 R6's doctor follow-up — same mutation-catching
+    /// rationale as `config_serve_to_conflict_has_the_stable_snake_case_code`
+    /// above.
+    #[test]
+    fn acl_forward_socks_ineffective_has_the_stable_snake_case_code() {
+        assert_eq!(
+            ACL_FORWARD_SOCKS_INEFFECTIVE.id,
+            DiagnosticId::AclForwardSocksIneffective
+        );
+        assert_eq!(
+            ACL_FORWARD_SOCKS_INEFFECTIVE.code,
+            "acl_forward_socks_ineffective"
+        );
+    }
+
     /// `PLAN.md` M7 §4.1 #5's "code 안정성 fixture": every [`DiagnosticId`]
     /// variant, exhaustively hand-listed (a variant added here without a
     /// matching addition to [`EXPECTED_DOCTOR_CODES`], or vice versa, is
     /// exactly the drift this test exists to catch), must map to a unique
-    /// code and the frozen set must be exactly those 22 codes — no more, no
+    /// code and the frozen set must be exactly those 23 codes — no more, no
     /// fewer. Mirrors `qsh_proto::schema`'s
     /// `cli_v1_schema_commands_is_sorted_and_deduplicated` precedent.
     #[test]
     fn expected_doctor_codes_matches_every_diagnostic_id_variant_exactly() {
-        const ALL: [DiagnosticId; 22] = [
+        const ALL: [DiagnosticId; 23] = [
             DiagnosticId::ControllerUnreachable,
             DiagnosticId::AuditPathUnwritable,
             DiagnosticId::AclPolicyMissing,
@@ -646,6 +705,7 @@ mod tests {
             DiagnosticId::AclCaAuthPathMissing,
             DiagnosticId::HostPinnedWithoutAddress,
             DiagnosticId::ConfigServeToConflict,
+            DiagnosticId::AclForwardSocksIneffective,
         ];
         let mut codes: Vec<&str> = ALL.iter().map(|id| id.code()).collect();
         codes.sort_unstable();

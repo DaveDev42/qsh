@@ -27,14 +27,15 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use qsh_proto::{DoctorData, DoctorFinding, DoctorReq, ErrorCode, KeyStoreKind};
+use qsh_transport::AuthPath;
 
 use crate::acl::{Role, ca_policy_example_row, load_or_deny_with_index, policy_example_rows};
 use crate::config::Config;
 use crate::doctor::probe::{self, UdpProbeOutcome};
 use crate::doctor::{
-    ACL_CA_AUTH_PATH_MISSING, ACL_PRINCIPAL_UNMATCHED, CERT_EXPIRED, CERT_EXPIRING_SOON,
-    CLOCK_SKEW, CONFIG_SERVE_TO_CONFLICT, CONFIG_UNKNOWN_KEY, PEER_UNTRUSTED, QSH_PATH_SHADOWED,
-    TRUST_REMOVE_SCOPE, probe_audit_path_writable,
+    ACL_CA_AUTH_PATH_MISSING, ACL_FORWARD_SOCKS_INEFFECTIVE, ACL_PRINCIPAL_UNMATCHED, CERT_EXPIRED,
+    CERT_EXPIRING_SOON, CLOCK_SKEW, CONFIG_SERVE_TO_CONFLICT, CONFIG_UNKNOWN_KEY, PEER_UNTRUSTED,
+    QSH_PATH_SHADOWED, TRUST_REMOVE_SCOPE, probe_audit_path_writable,
 };
 use crate::hosts::HostsFile;
 use crate::identity::{
@@ -262,8 +263,9 @@ impl Ops {
 
     /// `acl_policy_missing`/`acl_policy_invalid` (design brief rows
     /// #10/#11), plus ROADMAP M9 (h)'s `acl_principal_unmatched`/
-    /// `acl_ca_auth_path_missing` (ADR-0017 결정 2) — one
-    /// `acl.toml` read for all four codes via [`load_or_deny_with_index`]
+    /// `acl_ca_auth_path_missing` (ADR-0017 결정 2), plus
+    /// `acl_forward_socks_ineffective` (ADR-0019 결과 절 R6) — one
+    /// `acl.toml` read for all five codes via [`load_or_deny_with_index`]
     /// (the exact same detection `qsh serve`/`qsh listen`'s own startup
     /// banner runs, plus the [`crate::acl::PinnedPrincipalIndex`] extracted
     /// from the same load), discarding the throwaway
@@ -345,6 +347,24 @@ impl Ops {
                 code: diag.code.to_string(),
                 status: "warn".to_string(),
                 detail: format!("{}\nminimal example:\n{example}", diag.message),
+                remedy: Some(diag.remedy.to_string()),
+            });
+        }
+
+        // `acl_forward_socks_ineffective` (ADR-0019 결정 6·14, 결과 절 R6):
+        // `detail` carries only the row's array index and `auth_path` — F1
+        // discipline (`crate::acl::load`'s own doc), never the principal
+        // string a row names.
+        for (row_index, auth_path) in index.forward_socks_ineffective_rows() {
+            let diag = &ACL_FORWARD_SOCKS_INEFFECTIVE;
+            out.push(DoctorFinding {
+                code: diag.code.to_string(),
+                status: "warn".to_string(),
+                detail: format!(
+                    "{} (row: {row_index}, auth_path: {})",
+                    diag.message,
+                    auth_path_str(*auth_path)
+                ),
                 remedy: Some(diag.remedy.to_string()),
             });
         }
@@ -694,6 +714,21 @@ pub(crate) fn infer_run_mode(config: &Config) -> &'static str {
         "reverse"
     } else {
         "serve"
+    }
+}
+
+/// [`AuthPath`] → `"pin"`/`"ca"`, the same rendering `crate::audit`'s and
+/// `crate::ops::acl`'s own private `auth_path_str` helpers use —
+/// `acl_forward_socks_ineffective`'s `detail` names the row's `auth_path`
+/// but never its principal string (F1 discipline, `crate::acl::load`'s own
+/// doc). [`AuthPath::Pairing`] never reaches a loaded [`crate::acl::Policy`]
+/// rule (`crate::acl::load`'s parser only ever produces `Pin`/`Ca`), but the
+/// match stays exhaustive since `AuthPath` is a shared transport type.
+fn auth_path_str(auth_path: AuthPath) -> &'static str {
+    match auth_path {
+        AuthPath::Pin => "pin",
+        AuthPath::Ca => "ca",
+        AuthPath::Pairing => "pairing",
     }
 }
 

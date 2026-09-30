@@ -2215,6 +2215,107 @@ fn doctor_wires_the_acl_principal_and_ca_findings_into_the_full_report() {
 }
 
 // -----------------------------------------------------------------
+// acl_forward_socks_ineffective (ADR-0019 결정 6·14, 결과 절 R6). Index-unit
+// coverage of the matching rule itself lives in
+// `crate::acl::load::tests::pinned_principal_index_lists_forward_socks_rows_not_covered_by_forward_local_for_the_same_principal_and_auth_path`;
+// these four exercise the doctor-side wiring, `detail`/`remedy` shape and
+// F1 discipline (no principal string echoed).
+// -----------------------------------------------------------------
+
+#[test]
+fn acl_forward_socks_ineffective_flags_a_row_whose_allow_names_forward_socks_without_forward_local()
+{
+    let (_guard, ops) = temp_ops();
+    init_identity(&ops);
+    crate::config::ensure_private_dir(&ops.paths().config_dir).unwrap();
+    std::fs::write(
+        ops.paths().acl_file(),
+        "[[acl]]\nprincipal = \"device:mac\"\nallow = [\"forward.socks\"]\n",
+    )
+    .unwrap();
+
+    let findings = ops.doctor_acl_findings("serve").unwrap();
+    let finding = findings
+        .iter()
+        .find(|f| f.code == "acl_forward_socks_ineffective")
+        .expect("acl_forward_socks_ineffective finding");
+    assert_eq!(finding.status, "warn");
+    assert!(finding.detail.contains("row: 0"), "{finding:?}");
+    assert!(finding.detail.contains("auth_path: pin"), "{finding:?}");
+    assert!(
+        !finding.detail.contains("device:mac"),
+        "detail must not echo the principal string (F1 discipline): {finding:?}"
+    );
+}
+
+#[test]
+fn acl_forward_socks_ineffective_is_silent_when_the_same_row_also_covers_forward_local() {
+    let (_guard, ops) = temp_ops();
+    init_identity(&ops);
+    crate::config::ensure_private_dir(&ops.paths().config_dir).unwrap();
+    std::fs::write(
+        ops.paths().acl_file(),
+        "[[acl]]\nprincipal = \"device:mac\"\nallow = [\"forward.socks\", \"forward.local\"]\n",
+    )
+    .unwrap();
+
+    let findings = ops.doctor_acl_findings("serve").unwrap();
+    assert!(
+        findings
+            .iter()
+            .all(|f| f.code != "acl_forward_socks_ineffective"),
+        "{findings:?}"
+    );
+}
+
+#[test]
+fn acl_forward_socks_ineffective_is_silent_when_another_row_for_the_same_principal_grants_forward_local()
+ {
+    let (_guard, ops) = temp_ops();
+    init_identity(&ops);
+    crate::config::ensure_private_dir(&ops.paths().config_dir).unwrap();
+    std::fs::write(
+        ops.paths().acl_file(),
+        "[[acl]]\nprincipal = \"device:mac\"\nallow = [\"forward.socks\"]\n\n\
+         [[acl]]\nprincipal = \"device:mac\"\nallow = [\"forward.local\"]\n",
+    )
+    .unwrap();
+
+    let findings = ops.doctor_acl_findings("serve").unwrap();
+    assert!(
+        findings
+            .iter()
+            .all(|f| f.code != "acl_forward_socks_ineffective"),
+        "{findings:?}"
+    );
+}
+
+#[test]
+fn acl_forward_socks_ineffective_remedy_ends_with_the_acl_restart_notice() {
+    let (_guard, ops) = temp_ops();
+    init_identity(&ops);
+    crate::config::ensure_private_dir(&ops.paths().config_dir).unwrap();
+    std::fs::write(
+        ops.paths().acl_file(),
+        "[[acl]]\nprincipal = \"device:mac\"\nallow = [\"forward.socks\"]\n",
+    )
+    .unwrap();
+
+    let finding = ops
+        .doctor_acl_findings("serve")
+        .unwrap()
+        .into_iter()
+        .find(|f| f.code == "acl_forward_socks_ineffective")
+        .expect("acl_forward_socks_ineffective finding");
+    let remedy = finding.remedy.expect("remedy must be present");
+    assert!(
+        remedy.ends_with(crate::acl::ACL_RESTART_NOTICE),
+        "{remedy:?}"
+    );
+    assert_eq!(remedy, ACL_FORWARD_SOCKS_INEFFECTIVE.remedy);
+}
+
+// -----------------------------------------------------------------
 // host_pinned_without_address — pure-function coverage lives in
 // `crate::ops::host::tests` (`host_pinned_without_address_*`); this is
 // only the doctor-side wiring.

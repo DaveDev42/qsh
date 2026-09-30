@@ -392,10 +392,35 @@ pub struct PinnedPrincipalIndex {
     /// check, not a per-principal one, so this is a bare bool rather than
     /// a second name set.
     has_ca_auth_path: bool,
+    /// `(array index, auth_path)` of every row whose `allow` names
+    /// `forward.socks` exactly and for whose (principal string, `auth_path`)
+    /// pair no row in the policy — this one included — also grants
+    /// `forward.local` (exact or via a `forward.*` family wildcard).
+    /// `acl_forward_socks_ineffective` (ADR-0019 결정 6·14, 결과 절 R6):
+    /// `forward.socks` is always-denied, so such a row authorizes nothing
+    /// for `-D` on its own. See
+    /// [`crate::doctor::ACL_FORWARD_SOCKS_INEFFECTIVE`]'s doc for the
+    /// literal-principal-string matching limitation this implies.
+    forward_socks_ineffective_rows: Vec<(u32, AuthPath)>,
 }
 
 impl PinnedPrincipalIndex {
     fn from_policy(policy: &Policy) -> Self {
+        // Every (principal string, auth_path) pair that *some* row in the
+        // policy grants `forward.local` for — same row or a different one,
+        // it makes no difference here; `acl_forward_socks_ineffective`
+        // only cares whether any row at all covers it for that pair.
+        let grants_forward_local: std::collections::HashSet<(&str, AuthPath)> = policy
+            .rules
+            .iter()
+            .filter(|rule| {
+                rule.allow
+                    .iter()
+                    .any(|pattern| pattern.matches(Action::ForwardLocal))
+            })
+            .map(|rule| (rule.principal.as_str(), rule.auth_path))
+            .collect();
+
         Self {
             pin_principals: policy
                 .rules
@@ -407,6 +432,20 @@ impl PinnedPrincipalIndex {
                 .rules
                 .iter()
                 .any(|rule| rule.auth_path == AuthPath::Ca),
+            forward_socks_ineffective_rows: policy
+                .rules
+                .iter()
+                .enumerate()
+                .filter(|(_, rule)| {
+                    rule.allow.iter().any(|pattern| {
+                        matches!(pattern, ActionPattern::Exact(Action::ForwardSocks))
+                    })
+                })
+                .filter(|(_, rule)| {
+                    !grants_forward_local.contains(&(rule.principal.as_str(), rule.auth_path))
+                })
+                .map(|(index, rule)| (index as u32, rule.auth_path))
+                .collect(),
         }
     }
 
@@ -439,6 +478,14 @@ impl PinnedPrincipalIndex {
     /// `acl_ca_auth_path_missing` (ADR-0017 결정 2).
     pub fn has_ca_auth_path(&self) -> bool {
         self.has_ca_auth_path
+    }
+
+    /// `(array index, auth_path)` of every row `acl_forward_socks_ineffective`
+    /// (ADR-0019 결과 절 R6) flags — see this type's own field doc for the
+    /// matching rule. Never the row's principal string (F1 discipline:
+    /// `crate::ops::doctor`'s finding `detail` must not echo it).
+    pub fn forward_socks_ineffective_rows(&self) -> &[(u32, AuthPath)] {
+        &self.forward_socks_ineffective_rows
     }
 }
 
