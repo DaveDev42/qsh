@@ -67,6 +67,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 #[cfg(any(unix, test))]
+use tokio::sync::watch;
+#[cfg(any(unix, test))]
+use tokio::time::Instant;
+
+#[cfg(any(unix, test))]
 use qsh_proto::wire;
 #[cfg(any(unix, test))]
 use qsh_transport::{Dialed, Dialer, FramedStream, TrustEvaluator};
@@ -84,7 +89,9 @@ use rand::SeedableRng;
 #[cfg(unix)]
 use crate::broker::PeerFingerprint;
 #[cfg(unix)]
-use crate::client::pathwatch::{PathWatch, watch_path};
+use crate::client::pathwatch::{PathWatch, watch_path_with_wake};
+#[cfg(any(unix, test))]
+use crate::client::wake::WakeEvent;
 #[cfg(any(unix, test))]
 use crate::config::BackoffLimits;
 use crate::config::{Config, Paths};
@@ -267,6 +274,10 @@ async fn run_reverse_unix(
     // from the *tests* seeding a `StdRng` explicitly, never from what
     // production seeds itself with.
     let mut backoff = Backoff::new(backoff_limits, rand::rngs::StdRng::from_os_rng());
+    // The process-wide wake signal (ADR-0023 decision 17), subscribed once
+    // for the whole loop: it cuts a pending backoff wait, restarts the
+    // backoff, and reaches every connection's `PathWatch` below.
+    let mut wake_rx = super::wake_subscription();
     tokio::pin!(shutdown);
 
     // `Option` rather than a bare `FnOnce()` in scope: the loop below can
@@ -340,11 +351,16 @@ async fn run_reverse_unix(
                     // A fresh dial/register failure never had a
                     // registration to time (issue #4 item 6).
                     since_registered_ms: None,
+                    slept_ms: None,
                 }
                 .emit();
-                if !wait_backoff(delay, &mut shutdown).await {
-                    runtime.server.drain().await;
-                    return Ok(());
+                match wait_backoff(delay, &mut shutdown, &mut wake_rx).await {
+                    BackoffWait::Shutdown => {
+                        runtime.server.drain().await;
+                        return Ok(());
+                    }
+                    BackoffWait::Woken(event) => note_wake(&mut backoff, controller, event),
+                    BackoffWait::Elapsed => {}
                 }
                 continue;
             }
@@ -387,6 +403,7 @@ async fn run_reverse_unix(
             cause: None,
             at: crate::config::now_rfc3339(),
             since_registered_ms: None,
+            slept_ms: None,
         }
         .emit();
         // Same ROADMAP M9 (b) rationale as the `registration attempt failed`
@@ -422,7 +439,15 @@ async fn run_reverse_unix(
         // read that will never complete.
         let watch = PathWatch::new(super::path_watch_config());
         let probes = Arc::new(tokio::sync::Notify::new());
-        let watchdog = tokio::spawn(watch_path(conn.clone(), watch.clone(), probes.clone()));
+        let mut path_wake = wake_rx.clone();
+        // A wake that landed while dialing predates this connection.
+        path_wake.mark_unchanged();
+        let watchdog = tokio::spawn(watch_path_with_wake(
+            conn.clone(),
+            watch.clone(),
+            probes.clone(),
+            path_wake,
+        ));
 
         // `serve_control` is `tokio::spawn`ed rather than raced directly
         // against `shutdown`/`watch.dead()` below, on purpose: it is the
@@ -544,6 +569,12 @@ async fn run_reverse_unix(
                 _ = quota_flush.tick() => {
                     runtime.server.quota_housekeeping();
                 }
+                // The machine slept while registered: `PathWatch` judges the
+                // path on its own copy of the signal; this copy restarts the
+                // backoff so the `retry` that follows a loss is short.
+                event = next_wake(&mut wake_rx) => {
+                    note_wake(&mut backoff, controller, event);
+                }
             }
         }
         watchdog.abort();
@@ -575,6 +606,7 @@ async fn run_reverse_unix(
             cause: Some(loss_cause.as_str()),
             at: lost_at,
             since_registered_ms,
+            slept_ms: None,
         }
         .emit();
 
@@ -587,13 +619,37 @@ async fn run_reverse_unix(
             cause: Some(loss_cause.as_str()),
             at: crate::config::now_rfc3339(),
             since_registered_ms,
+            slept_ms: None,
         }
         .emit();
-        if !wait_backoff(delay, &mut shutdown).await {
-            runtime.server.drain().await;
-            return Ok(());
+        match wait_backoff(delay, &mut shutdown, &mut wake_rx).await {
+            BackoffWait::Shutdown => {
+                runtime.server.drain().await;
+                return Ok(());
+            }
+            BackoffWait::Woken(event) => note_wake(&mut backoff, controller, event),
+            BackoffWait::Elapsed => {}
         }
     }
+}
+
+/// A wake reached the target (ADR-0023 decision 20): restart its backoff at
+/// `backoff_initial_ms`, open the 60 s fast window, and say so on the
+/// `qsh::reverse` line.
+#[cfg(unix)]
+fn note_wake<R: rand::RngCore>(backoff: &mut Backoff<R>, controller: &str, event: WakeEvent) {
+    backoff.wake(Instant::now());
+    ReconnectEvent {
+        event: "wake",
+        host: controller,
+        fingerprint: None,
+        delay_ms: None,
+        cause: None,
+        at: crate::config::now_rfc3339(),
+        since_registered_ms: None,
+        slept_ms: Some(event.slept_ms),
+    }
+    .emit();
 }
 
 /// One dial+register attempt: resolve `controller`'s address fresh (it may
@@ -799,22 +855,59 @@ fn classify_target_connection_loss(
     }
 }
 
-/// Sleep out one backoff delay, unless `shutdown` resolves first. Its own
-/// function (rather than inlined into the reconnect loop) so `docs/design/
-/// testing.md` L2's "no CPU burn … after reaching the cap the loop waits
-/// ~30s between attempts" is testable under `tokio::time::pause()` without
-/// a real dial. `true` means the delay elapsed in full; `false` means
-/// `shutdown` won the race and the caller must stop retrying.
+/// How one backoff wait ended.
+#[cfg(any(unix, test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BackoffWait {
+    /// The delay elapsed in full.
+    Elapsed,
+    /// `shutdown` resolved first; the caller must stop retrying.
+    Shutdown,
+    /// A wake cut the wait short (or was already pending): the caller
+    /// restarts the backoff and dials at once.
+    Woken(WakeEvent),
+}
+
+/// The next wake on `rx`, or never if the detector side is gone (only an
+/// injected sender can be). `changed()` returns at once for a wake that
+/// landed while nobody was waiting, and is cancel-safe.
+#[cfg(any(unix, test))]
+async fn next_wake(rx: &mut watch::Receiver<WakeEvent>) -> WakeEvent {
+    match rx.changed().await {
+        Ok(()) => *rx.borrow_and_update(),
+        Err(_) => std::future::pending().await,
+    }
+}
+
+/// Sleep out one backoff delay, unless `shutdown` resolves or a wake arrives
+/// first (ADR-0023 decision 20). Its own function (rather than inlined into
+/// the reconnect loop) so `docs/design/testing.md` L2's "no CPU burn … after
+/// reaching the cap the loop waits ~30s between attempts" is testable under
+/// `tokio::time::pause()` without a real dial. `shutdown` wins over a wake
+/// that is already pending.
 #[cfg(any(unix, test))]
 async fn wait_backoff(
     delay: Duration,
     shutdown: &mut (impl std::future::Future<Output = ()> + Unpin),
-) -> bool {
+    wake: &mut watch::Receiver<WakeEvent>,
+) -> BackoffWait {
     tokio::select! {
-        _ = &mut *shutdown => false,
-        _ = tokio::time::sleep(delay) => true,
+        biased;
+        _ = &mut *shutdown => BackoffWait::Shutdown,
+        event = next_wake(wake) => BackoffWait::Woken(event),
+        _ = tokio::time::sleep(delay) => BackoffWait::Elapsed,
     }
 }
+
+/// How long after a wake the fast cap applies (ADR-0023 decision 20),
+/// measured on the monotonic clock.
+#[cfg(any(unix, test))]
+const WAKE_FAST_WINDOW: Duration = Duration::from_secs(60);
+
+/// The delay ceiling inside the fast window, before it is lowered to a
+/// smaller configured `backoff_max_ms`.
+#[cfg(any(unix, test))]
+const WAKE_FAST_CAP: Duration = Duration::from_secs(2);
 
 /// Exponential backoff with jitter between reconnect attempts
 /// (`docs/design/protocol.md` §11-4): starts at `limits.initial`, doubles
@@ -823,6 +916,13 @@ async fn wait_backoff(
 /// successful registration). The multiplier is fixed at 2 — not a config
 /// knob; `docs/CLI.md`/`protocol.md` §11-4 name only initial/max/jitter as
 /// tunable.
+///
+/// [`Backoff::wake`] is the second reset point (ADR-0023 decision 20): it
+/// restarts the sequence at `initial` and opens a [`WAKE_FAST_WINDOW`] during
+/// which no delay, jitter included, exceeds `max(initial, 2 s)`, or
+/// `limits.max` when that is smaller. Only a wake opens the window, never a
+/// loss. The window clamps the sequence itself, so when it closes the
+/// doubling resumes from where it was.
 ///
 /// Generic over the RNG so `docs/design/testing.md` L2's property tests can
 /// inject a seeded `rand::rngs::StdRng` for a fully deterministic sequence;
@@ -835,6 +935,8 @@ struct Backoff<R> {
     /// first call (or right after a [`Backoff::reset`]) — either way the
     /// next call starts the sequence at `limits.initial`.
     current: Option<Duration>,
+    /// Until when the wake fast cap applies, if a window is open.
+    window_until: Option<Instant>,
     rng: R,
 }
 
@@ -848,23 +950,45 @@ impl<R: rand::RngCore> Backoff<R> {
         Self {
             limits,
             current: None,
+            window_until: None,
             rng,
         }
     }
 
     fn next_delay(&mut self) -> Duration {
-        let raw = match self.current {
+        self.next_delay_at(Instant::now())
+    }
+
+    /// [`Self::next_delay`] with the monotonic time supplied, for the fast
+    /// window.
+    fn next_delay_at(&mut self, now: Instant) -> Duration {
+        let cap = self
+            .window_until
+            .filter(|until| now < *until)
+            .map(|_| self.limits.initial.max(WAKE_FAST_CAP).min(self.limits.max));
+        let mut raw = match self.current {
             None => self.limits.initial,
             Some(prev) => prev.saturating_mul(Self::MULTIPLIER).min(self.limits.max),
         };
+        if let Some(cap) = cap {
+            raw = raw.min(cap);
+        }
         self.current = Some(raw);
-        jitter(raw, self.limits.jitter_pct, &mut self.rng)
+        let delay = jitter(raw, self.limits.jitter_pct, &mut self.rng);
+        cap.map_or(delay, |cap| delay.min(cap))
     }
 
     /// A successful registration: the next failure starts the sequence
     /// over from `initial` again.
     fn reset(&mut self) {
         self.current = None;
+    }
+
+    /// The machine woke: restart the sequence at `initial` and open the
+    /// fast window.
+    fn wake(&mut self, now: Instant) {
+        self.reset();
+        self.window_until = Some(now + WAKE_FAST_WINDOW);
     }
 }
 
@@ -886,7 +1010,7 @@ fn jitter(delay: Duration, jitter_pct: u8, rng: &mut impl rand::RngCore) -> Dura
 /// One `registered`/`lost`/`retry` line from the target's own point of view
 /// — the same tracing target and one-line-JSON discipline as
 /// `reverse::listen::RegistrationEvent` (`docs/CLI.md` §6.13's documented
-/// vocabulary: `registered|denied|replaced|lost|expired|retry`; `denied`/
+/// vocabulary: `registered|denied|replaced|lost|expired|retry|wake`; `denied`/
 /// `replaced`/`expired` are controller-only observations and never appear
 /// here). A separate, target-owned type rather than reusing
 /// `RegistrationEvent` itself: the two sides observe different things at
@@ -924,6 +1048,10 @@ struct ReconnectEvent<'a> {
     /// to time.
     #[serde(skip_serializing_if = "Option::is_none")]
     since_registered_ms: Option<u64>,
+    /// Milliseconds the machine slept, only on `"wake"` (ADR-0023 decision
+    /// 20); absent, never null, everywhere else.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    slept_ms: Option<u64>,
 }
 
 #[cfg(any(unix, test))]
@@ -943,6 +1071,7 @@ impl ReconnectEvent<'_> {
             cause = self.cause,
             at = %self.at,
             since_registered_ms = self.since_registered_ms,
+            slept_ms = self.slept_ms,
             "{}",
             line
         );

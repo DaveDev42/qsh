@@ -24,13 +24,14 @@ use std::time::Duration;
 use qsh_proto::KeyStoreKind;
 use qsh_transport::{CertificateDer, Fingerprint, Listener, LocalIdentity, Principal, StaticTrust};
 use tokio::net::UdpSocket;
-use tokio::sync::{Notify, oneshot};
+use tokio::sync::{Notify, oneshot, watch};
 use tokio::task::JoinHandle;
 
 use crate::acl::AllowAllPinned;
 use crate::audit::MemoryAuditSink;
 use crate::broker::{Clock, SystemClock};
 use crate::client::pathwatch::PathWatchConfig;
+use crate::client::wake::WakeEvent;
 use crate::config::{Config, Paths, ReverseConfig};
 use crate::identity::{Identity, LoadedIdentity};
 use crate::reverse::listen::{Listen, STALE_SWEEP_TICK, TARGET};
@@ -153,6 +154,29 @@ pub(super) async fn wait_for_line(host: &str, event: &str) -> serde_json::Value 
     .unwrap_or_else(|_| panic!("no `{event}` line for `{host}` within {WAIT:?}"))
 }
 
+/// Like [`wait_for_line`], but waits until at least `n` lines exist for
+/// `host`/`event` and returns the `n`th (1-based), bounded by `within`.
+pub(super) async fn wait_for_nth_line(
+    host: &str,
+    event: &str,
+    n: usize,
+    within: Duration,
+) -> serde_json::Value {
+    tokio::time::timeout(within, async {
+        loop {
+            let notified = CAPTURED_SIGNAL.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if let Some(line) = lines(host, event).into_iter().nth(n - 1) {
+                return line;
+            }
+            notified.await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("no {n}th `{event}` line for `{host}` within {within:?}"))
+}
+
 // ---------------------------------------------------------------------------
 // UDP relay with a cut switch.
 // ---------------------------------------------------------------------------
@@ -230,6 +254,11 @@ impl UdpRelay {
     pub(super) fn cut(&self) {
         self.cut.store(true, Ordering::SeqCst);
     }
+
+    /// Forward again after a [`Self::cut`].
+    pub(super) fn restore(&self) {
+        self.cut.store(false, Ordering::SeqCst);
+    }
 }
 
 impl Drop for UdpRelay {
@@ -284,8 +313,31 @@ fn loaded_identity(test: &TestIdentity, device_id: &str) -> LoadedIdentity {
 // The rig.
 // ---------------------------------------------------------------------------
 
+/// The target-side knobs [`Rig::start_with`] varies. [`Default`] is what
+/// [`Rig::start`] uses: a short backoff and the raised `PathWatch` floor.
+pub(super) struct TargetOptions {
+    /// `[reverse].backoff_initial_ms`.
+    pub(super) backoff_initial_ms: u64,
+    /// `[reverse].backoff_max_ms`.
+    pub(super) backoff_max_ms: u64,
+    /// The target's `PathWatch` config.
+    pub(super) path_watch: PathWatchConfig,
+}
+
+impl Default for TargetOptions {
+    fn default() -> Self {
+        Self {
+            backoff_initial_ms: 50,
+            backoff_max_ms: 200,
+            path_watch: slow_path_watch(),
+        }
+    }
+}
+
 /// A controller and a target wired through a cuttable [`UdpRelay`].
 pub(super) struct Rig {
+    /// Injects wakes into the target's reconnect loop.
+    wake_tx: watch::Sender<WakeEvent>,
     relay: UdpRelay,
     controller_shutdown: Option<oneshot::Sender<()>>,
     target_shutdown: Option<oneshot::Sender<()>>,
@@ -304,6 +356,17 @@ impl Rig {
     /// `host = controller_alias`; the controller's carry
     /// `host = target_name`.
     pub(super) async fn start(controller_alias: &str, target_name: &str) -> Self {
+        Self::start_with(controller_alias, target_name, TargetOptions::default()).await
+    }
+
+    /// [`Self::start`] with caller-chosen target knobs. The target listens
+    /// to this rig's injected wake signal ([`Self::inject_wake`]) instead of
+    /// the process-wide detector.
+    pub(super) async fn start_with(
+        controller_alias: &str,
+        target_name: &str,
+        options: TargetOptions,
+    ) -> Self {
         capture_reverse_events();
         let controller = make_identity();
         let target = make_identity();
@@ -373,8 +436,8 @@ impl Rig {
         // own bound is [`WAIT`].
         let config = Config {
             reverse: ReverseConfig {
-                backoff_initial_ms: Some(50),
-                backoff_max_ms: Some(200),
+                backoff_initial_ms: Some(options.backoff_initial_ms),
+                backoff_max_ms: Some(options.backoff_max_ms),
                 backoff_jitter_pct: Some(0),
                 ..Default::default()
             },
@@ -384,9 +447,10 @@ impl Rig {
         let controller_alias = controller_alias.to_string();
         let target_name = target_name.to_string();
         let (target_shutdown, target_rx) = oneshot::channel::<()>();
+        let (wake_tx, wake_rx) = watch::channel(WakeEvent::default());
         let target_task = tokio::spawn(crate::reverse::TEST_PATH_WATCH_CONFIG.scope(
-            slow_path_watch(),
-            async move {
+            options.path_watch,
+            crate::reverse::TEST_WAKE.scope(wake_rx, async move {
                 // `dir` lives as long as the target runs.
                 let _dir = dir;
                 let _ = run_reverse_observed(
@@ -402,10 +466,11 @@ impl Rig {
                     },
                 )
                 .await;
-            },
+            }),
         ));
 
         Self {
+            wake_tx,
             relay,
             controller_shutdown: Some(controller_shutdown),
             target_shutdown: Some(target_shutdown),
@@ -419,6 +484,20 @@ impl Rig {
     /// Cut the relay: from now on both ends see only silence.
     pub(super) fn cut(&self) {
         self.relay.cut();
+    }
+
+    /// Undo [`Self::cut`]: datagrams flow again.
+    pub(super) fn restore(&self) {
+        self.relay.restore();
+    }
+
+    /// Tell the target's reconnect loop the machine just woke from
+    /// `slept_ms` of sleep.
+    pub(super) fn inject_wake(&self, slept_ms: u64) {
+        self.wake_tx.send_modify(|event| {
+            event.seq += 1;
+            event.slept_ms = slept_ms;
+        });
     }
 
     /// Stop the target, then the controller, and wait for both.
