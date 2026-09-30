@@ -24,6 +24,7 @@ use qsh_proto::{ErrorCode, IdentityInitData, KeyStoreKind, KeyStoreMode};
 use qsh_transport::{CertificateDer, Fingerprint, LocalIdentity};
 use serde::{Deserialize, Serialize};
 
+pub(crate) use import::ed25519_spki_der;
 pub use import::{
     IMPORT_SSH_KEY_IDENTITY_EXISTS, SSH_KEY_FILE_MAX, ssh_fingerprint, ssh_fingerprint_of_ed25519,
 };

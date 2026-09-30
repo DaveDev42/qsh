@@ -233,3 +233,71 @@ mod tests {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// trust.ssh_preview (`docs/CLI.md` §6.11, ADR-0026 결정 4)
+// ---------------------------------------------------------------------------
+
+/// Request for `trust.ssh_preview`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TrustSshPreviewReq {
+    /// Path of an OpenSSH `authorized_keys` file. Read by `qsh-core`; the
+    /// path is never echoed back in the data.
+    pub path: String,
+}
+
+/// How one `authorized_keys` line classified.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SshPreviewStatus {
+    /// A plain `ssh-ed25519` line with no options.
+    Ok,
+    /// A well-formed line of another key type (RSA, ECDSA, security key).
+    UnsupportedKeyType,
+    /// An `ssh-ed25519` line with an options prefix (`command=`, `from=`,
+    /// `no-pty`, ...). The options cannot be expressed in `acl.toml`, so no
+    /// pin command or ACL row is offered.
+    RestrictedOptions,
+    /// The line does not parse. Its bytes are never reported.
+    Malformed,
+}
+
+/// One classified `authorized_keys` line.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SshPreviewEntry {
+    /// 1-based line number in the file.
+    pub line: u32,
+    /// How the line classified.
+    pub status: SshPreviewStatus,
+    /// OpenSSH fingerprint (`SHA256:` + unpadded base64) of the key, for an
+    /// Ed25519 line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_fingerprint: Option<String>,
+    /// The qsh fingerprint (`sha256:BASE64`, SPKI SHA-256) this key gets
+    /// when the other device imports it with `qsh init --import-ssh-key`.
+    /// A prediction from the public key alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qsh_fingerprint: Option<String>,
+    /// The name this fingerprint is already pinned under in `trust.toml`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub already_pinned_as: Option<String>,
+    /// The line's trailing comment, control characters replaced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+    /// A `qsh trust add <name> --fingerprint ...` command to paste, `ok`
+    /// lines only. `<name>` is a placeholder the operator must replace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trust_command: Option<String>,
+    /// A starter `[[acl]]` row to paste into `acl.toml`, `ok` lines only.
+    /// Its `device:<name>` is a placeholder that must match the pin name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acl_row: Option<String>,
+}
+
+/// Data payload of `trust.ssh_preview`. The operation writes nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TrustSshPreviewData {
+    /// One entry per key line, in file order; blank and `#` lines produce
+    /// none.
+    pub entries: Vec<SshPreviewEntry>,
+}

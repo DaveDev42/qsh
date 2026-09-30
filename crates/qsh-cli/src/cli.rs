@@ -706,6 +706,20 @@ pub enum TrustCmd {
         /// The name to rename it to.
         new: String,
     },
+    /// Preview the pins and `[[acl]]` rows an OpenSSH `authorized_keys`
+    /// file would need (`docs/CLI.md` §6.11, ADR-0026). Read-only: nothing
+    /// is pinned and neither `trust.toml` nor `acl.toml` is written.
+    ///
+    /// Each Ed25519 line gets its SSH fingerprint, the qsh fingerprint it
+    /// would have if the other device imports the same key with
+    /// `qsh init --import-ssh-key`, and a `qsh trust add <name>` command and
+    /// `[[acl]]` row with `<name>` left for you to choose. Lines with
+    /// options, other key types and malformed lines get no command.
+    SshPreview {
+        /// Path of the `authorized_keys` file. Standard input (`-`) is not
+        /// accepted.
+        path: String,
+    },
 }
 
 /// `qsh pair …` subcommands — creating a new trust entry by pairing

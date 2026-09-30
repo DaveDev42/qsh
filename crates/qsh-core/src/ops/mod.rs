@@ -12,7 +12,8 @@ use qsh_proto::{
     BuildInfo, ErrorCode, IdentityExportData, IdentityExportReq, IdentityInitData, IdentityInitReq,
     KeyStoreMode, SchemaData, TrustAcceptData, TrustAcceptReq, TrustAddCaData, TrustAddCaReq,
     TrustAddData, TrustAddReq, TrustInviteData, TrustInviteReq, TrustListData, TrustPeer,
-    TrustRemoveData, TrustRenameData, TrustRenameReq, VersionData,
+    TrustRemoveData, TrustRenameData, TrustRenameReq, TrustSshPreviewData, TrustSshPreviewReq,
+    VersionData,
 };
 use qsh_transport::{DialError, Dialer, Fingerprint, Principal, StaticTrust};
 
@@ -439,6 +440,13 @@ pub struct TrustRenameOp;
 
 impl Operation for TrustRenameOp {
     const COMMAND: &'static str = "trust.rename";
+}
+
+/// The `trust.ssh_preview` operation (`docs/CLI.md` §6.11, ADR-0026 결정 4).
+pub struct TrustSshPreviewOp;
+
+impl Operation for TrustSshPreviewOp {
+    const COMMAND: &'static str = "trust.ssh_preview";
 }
 
 /// The `service.install` operation (`docs/CLI.md` §6.18).

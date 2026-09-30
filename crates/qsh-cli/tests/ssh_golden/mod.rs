@@ -23,6 +23,10 @@ pub const GOLDEN_SSH_FINGERPRINT: &str = "SHA256:XxSbKVKvD1gyArwLk6oM3TZnt9rZogn
 /// The golden key's `authorized_keys` / `.pub` line.
 pub const GOLDEN_PUB_LINE: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMWCPbBHRAb8h2VRK0kRKRPxKLJBjfut3uGK6Ix/VLI/ qsh-test-only";
 
+/// A well-formed `ssh-rsa` authorized_keys line (the blob is only the key
+/// type string; the classifier never looks further for other key types).
+pub const RSA_PUB_LINE: &str = "ssh-rsa AAAAB3NzaC1yc2E= rsa-key";
+
 /// The ASN.1 prefix of an Ed25519 SubjectPublicKeyInfo; the 32-byte public
 /// key follows it directly.
 const ED25519_SPKI_PREFIX: [u8; 12] = [

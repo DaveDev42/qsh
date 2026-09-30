@@ -96,6 +96,7 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "identity.init.created.json",
     "identity.init.existing.json",
     "identity.init.imported_ssh_key.json",
+    "trust.ssh_preview.json",
     "error.UNSUPPORTED.ssh_key_encrypted.json",
     "error.UNSUPPORTED.ssh_key_type.json",
     "error.INVALID_ARGUMENT.ssh_key_malformed.json",
@@ -215,6 +216,33 @@ fn skip_while_regenerating() -> bool {
 // ---------------------------------------------------------------------------
 // Golden fixtures produced by real runs
 // ---------------------------------------------------------------------------
+
+/// `qsh trust ssh-preview` (ADR-0026 결정 4): one file exercising every
+/// entry status. The golden key makes both fingerprints deterministic, so
+/// nothing but `request_id` is masked.
+#[test]
+fn golden_trust_ssh_preview_fixture() {
+    let sandbox = Sandbox::new();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let file = format!(
+        "# operators\n\n{}\ncommand=\"/bin/true\",no-pty {}\n{}\nnot a key line\n",
+        ssh_golden::GOLDEN_PUB_LINE,
+        ssh_golden::GOLDEN_PUB_LINE,
+        ssh_golden::RSA_PUB_LINE,
+    );
+    ssh_golden::write(dir.path(), "authorized_keys", file.as_bytes());
+    let args = ["trust", "ssh-preview", "authorized_keys", "--json"];
+    let output = sandbox
+        .command(&args)
+        .current_dir(dir.path())
+        .stdin(Stdio::null())
+        .output()
+        .expect("run qsh");
+    assert_eq!(exit_code(&output), 0);
+    let value = sole_envelope(&output.stdout, &args);
+    assert_eq!(value["data"]["entries"].as_array().map(Vec::len), Some(4));
+    check("trust.ssh_preview.json", value);
+}
 
 /// `qsh init --import-ssh-key` (ADR-0026): the success envelope and the four
 /// refusals. Each fixture gets its own sandbox, run with the key directory

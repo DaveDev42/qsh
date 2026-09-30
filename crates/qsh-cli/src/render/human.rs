@@ -14,7 +14,8 @@ use qsh_proto::{
     ServiceInstallData, ServiceStatusData, ServiceUninstallData, Session, SessionCloseData,
     SessionEvent, SessionListData, SessionOpenData, SessionResizeData, SessionWriteData,
     TrustAcceptData, TrustAddCaData, TrustAddData, TrustInviteData, TrustListData, TrustPeer,
-    TrustRemoveData, TrustRenameData, Tunnel, TunnelCloseData, TunnelListData, VersionData,
+    TrustRemoveData, TrustRenameData, TrustSshPreviewData, Tunnel, TunnelCloseData, TunnelListData,
+    VersionData,
 };
 
 use crate::stderr_note;
@@ -311,6 +312,66 @@ pub fn print_trust_rename(data: &TrustRenameData) -> io::Result<()> {
         stdout,
         "any acl.toml rows for either name need a restart to take effect"
     )
+}
+
+/// Print `qsh trust ssh-preview` (`docs/CLI.md` §6.11, ADR-0026). One
+/// block per key line, then the two cautions the data cannot carry: the
+/// `<name>` placeholder appears in two places and both must change to the
+/// same name, and the predicted qsh fingerprint only holds if the other
+/// device imports this very key with `qsh init --import-ssh-key`. Nothing is
+/// written anywhere.
+pub fn print_trust_ssh_preview(data: &TrustSshPreviewData) -> io::Result<()> {
+    use qsh_proto::SshPreviewStatus;
+
+    let mut stdout = io::stdout().lock();
+    if data.entries.is_empty() {
+        return writeln!(stdout, "no key lines found");
+    }
+    let mut any_ok = false;
+    for entry in &data.entries {
+        let status = match entry.status {
+            SshPreviewStatus::Ok => "ok",
+            SshPreviewStatus::UnsupportedKeyType => "unsupported key type (only ssh-ed25519)",
+            SshPreviewStatus::RestrictedOptions => {
+                "has options (command=, from=, ...); not previewed as a pin"
+            }
+            SshPreviewStatus::Malformed => "malformed",
+        };
+        writeln!(stdout, "line {}: {status}", entry.line)?;
+        if let Some(comment) = &entry.comment {
+            writeln!(stdout, "  comment:         {}", sanitize(comment))?;
+        }
+        if let Some(fingerprint) = &entry.ssh_fingerprint {
+            writeln!(stdout, "  ssh fingerprint: {}", sanitize(fingerprint))?;
+        }
+        if let Some(fingerprint) = &entry.qsh_fingerprint {
+            writeln!(stdout, "  qsh fingerprint: {}", sanitize(fingerprint))?;
+        }
+        if let Some(name) = &entry.already_pinned_as {
+            writeln!(stdout, "  already pinned as {}", sanitize(name))?;
+        }
+        if let Some(command) = &entry.trust_command {
+            any_ok = true;
+            writeln!(stdout, "  pin:  {}", sanitize(command))?;
+        }
+        if let Some(row) = &entry.acl_row {
+            writeln!(stdout, "  acl.toml:")?;
+            for line in row.lines() {
+                writeln!(stdout, "    {}", sanitize(line))?;
+            }
+        }
+    }
+    if any_ok {
+        writeln!(
+            stdout,
+            "replace <name> with the same name in the pin command and in the acl.toml row"
+        )?;
+        writeln!(
+            stdout,
+            "the qsh fingerprint is right only if that device imports the same key with `qsh init --import-ssh-key`"
+        )?;
+    }
+    Ok(())
 }
 
 /// `qsh pair accept`/`qsh trust accept` with no `--as`: on **stderr**,

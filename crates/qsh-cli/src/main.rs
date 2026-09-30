@@ -51,8 +51,8 @@ use qsh_core::{
     Operation, Ops, SchemaOp, ServiceInstallOp, ServiceStatusOp, ServiceUninstallOp,
     SessionAttachOp, SessionCloseOp, SessionGetOp, SessionListOp, SessionOpenOp, SessionReadOp,
     SessionResizeOp, SessionWriteOp, TrustAcceptOp, TrustAddCaOp, TrustAddOp, TrustInviteOp,
-    TrustListOp, TrustRemoveOp, TrustRenameOp, TunnelCloseOp, TunnelDynamicOp, TunnelListOp,
-    TunnelOpenOp, VersionOp, cert_file_fingerprint_conflict, normalize_invite_code,
+    TrustListOp, TrustRemoveOp, TrustRenameOp, TrustSshPreviewOp, TunnelCloseOp, TunnelDynamicOp,
+    TunnelListOp, TunnelOpenOp, VersionOp, cert_file_fingerprint_conflict, normalize_invite_code,
     parse_dynamic_forwards, read_cert_file_arg, resolve_invite_code_source,
     trust::{ADDRESS_PORT_ASSUMED_NOTICE, normalize_peer_address, suggested_peer_label},
 };
@@ -60,8 +60,8 @@ use qsh_proto::{
     AclCheckReq, AclShowReq, CapabilitiesReq, CertInitReq, CertIssueReq, DoctorReq, ErrorCode,
     ExecRunReq, HostGetReq, IdentityExportReq, IdentityInitReq, SessionCloseReq, SessionGetReq,
     SessionListReq, SessionOpenReq, SessionReadReq, SessionResizeReq, SessionWriteReq,
-    TrustAcceptReq, TrustAddCaReq, TrustAddReq, TrustInviteReq, TrustRenameReq, TunnelCloseReq,
-    TunnelDynamicReq, TunnelListReq, TunnelOpenReq,
+    TrustAcceptReq, TrustAddCaReq, TrustAddReq, TrustInviteReq, TrustRenameReq, TrustSshPreviewReq,
+    TunnelCloseReq, TunnelDynamicReq, TunnelListReq, TunnelOpenReq,
 };
 use serde::Serialize;
 use tracing_subscriber::EnvFilter;
@@ -446,6 +446,12 @@ fn dispatch(cli: &Cli, ops: Ops) -> i32 {
             as_name.clone(),
         ),
         Command::Trust(TrustCmd::Rename { old, new }) => run_trust_rename(cli, &ops, old, new),
+        Command::Trust(TrustCmd::SshPreview { path }) => finish(
+            cli,
+            TrustSshPreviewOp::COMMAND,
+            ops.trust_ssh_preview(TrustSshPreviewReq { path: path.clone() }),
+            human::print_trust_ssh_preview,
+        ),
         Command::Cert(CertCmd::Init) => finish(
             cli,
             CertInitOp::COMMAND,
@@ -1756,6 +1762,7 @@ fn command_name(cli: &Cli) -> &'static str {
         Command::Trust(TrustCmd::Invite { .. }) => TrustInviteOp::COMMAND,
         Command::Trust(TrustCmd::Accept { .. }) => TrustAcceptOp::COMMAND,
         Command::Trust(TrustCmd::Rename { .. }) => TrustRenameOp::COMMAND,
+        Command::Trust(TrustCmd::SshPreview { .. }) => TrustSshPreviewOp::COMMAND,
         Command::Pair(PairCmd::Invite { .. }) => TrustInviteOp::COMMAND,
         Command::Pair(PairCmd::Accept { .. }) => TrustAcceptOp::COMMAND,
         Command::Cert(CertCmd::Init) => CertInitOp::COMMAND,
