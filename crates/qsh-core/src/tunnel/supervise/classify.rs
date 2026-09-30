@@ -19,6 +19,10 @@ pub(crate) enum Source {
     /// This machine dialing a forward-route peer.
     LocalDial,
     /// This machine asking its own `qsh listen` daemon (reverse route).
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "the reverse route supervisor uses it")
+    )]
     LocalDaemon,
     /// The supervisor's own checks on a fresh carrier (fingerprint match,
     /// capability presence).
@@ -26,6 +30,10 @@ pub(crate) enum Source {
     /// The peer answered a request with an error.
     Peer,
     /// The local listener failed fatally.
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "the listener's own end is handled by the holder")
+    )]
     LocalListener,
 }
 

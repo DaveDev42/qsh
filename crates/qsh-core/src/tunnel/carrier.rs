@@ -17,12 +17,11 @@
 
 use std::sync::Arc;
 
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 
 use crate::tunnel::local::ForwardCarrier;
 
 /// What a forward can open tunnel streams on right now.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) enum CarrierState {
     /// A carrier that is believed alive.
     Live(Arc<ForwardCarrier>),
@@ -39,6 +38,8 @@ pub(crate) type ActivityHook = Arc<dyn Fn() + Send + Sync>;
 pub(crate) struct CarrierView {
     rx: watch::Receiver<CarrierState>,
     activity: Option<ActivityHook>,
+    /// Told which carrier a peer answered `PERMISSION_DENIED` on.
+    denied: Option<mpsc::UnboundedSender<Arc<ForwardCarrier>>>,
 }
 
 impl CarrierView {
@@ -47,16 +48,40 @@ impl CarrierView {
     /// stays readable.
     pub(crate) fn fixed(carrier: Arc<ForwardCarrier>) -> Self {
         let (_tx, rx) = watch::channel(CarrierState::Live(carrier));
-        Self { rx, activity: None }
+        Self {
+            rx,
+            activity: None,
+            denied: None,
+        }
     }
 
     /// A view over a channel a supervisor writes to.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn watching(
         rx: watch::Receiver<CarrierState>,
         activity: Option<ActivityHook>,
     ) -> Self {
-        Self { rx, activity }
+        Self {
+            rx,
+            activity,
+            denied: None,
+        }
+    }
+
+    /// Report peer `PERMISSION_DENIED` answers to a supervisor (ADR-0023
+    /// decision 9: the peer's policy only changes with a restart, so the
+    /// supervisor ends the tunnel rather than let every connection be
+    /// refused forever).
+    pub(crate) fn with_denied(mut self, tx: mpsc::UnboundedSender<Arc<ForwardCarrier>>) -> Self {
+        self.denied = Some(tx);
+        self
+    }
+
+    /// The peer refused a `TCP_CONNECT` on `carrier` with
+    /// `PERMISSION_DENIED`.
+    pub(crate) fn note_permission_denied(&self, carrier: &Arc<ForwardCarrier>) {
+        if let Some(tx) = &self.denied {
+            let _ = tx.send(Arc::clone(carrier));
+        }
     }
 
     /// The carrier to open a stream on now, or `None` while disconnected.

@@ -464,14 +464,29 @@ impl DynamicForwardHandle {
         listen_port: u16,
         connection: qsh_transport::Connection,
     ) -> Result<Self, LocalForwardError> {
+        let carrier = Arc::new(ForwardCarrier::Quic(connection));
+        Self::start_supervised(bind, listen_port, CarrierView::fixed(carrier)).await
+    }
+
+    /// Start on a carrier a supervisor swaps under the running listener
+    /// (ADR-0023 decision 5).
+    pub(crate) async fn start_supervised(
+        bind: Option<&str>,
+        listen_port: u16,
+        view: CarrierView,
+    ) -> Result<Self, LocalForwardError> {
         let forward = DynamicForward::bind(bind, listen_port).await?;
         let bind_addr = forward.local_addr();
-        let carrier = Arc::new(ForwardCarrier::Quic(connection));
         Ok(Self {
             tunnel_id: ulid::Ulid::new().to_string(),
             bind: bind_addr,
-            task: tokio::spawn(forward.run(carrier)),
+            task: tokio::spawn(forward.run(view)),
         })
+    }
+
+    /// The `tunnel_id` this forward reports.
+    pub(crate) fn tunnel_id(&self) -> &str {
+        &self.tunnel_id
     }
 
     /// [`Self::start`]'s reverse-route sibling, `-D` over a reverse route
@@ -914,6 +929,7 @@ async fn handle_connection(mut tcp: TcpStream, carrier: CarrierView, limits: Arc
             }
         }
         Err(err) => {
+            crate::tunnel::local::note_denial(&carrier, &current, &err);
             let rep = rep_for_forward_conn_error(&err);
             send_rep_and_close(tcp, rep).await;
         }

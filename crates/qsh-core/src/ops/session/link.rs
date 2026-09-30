@@ -76,7 +76,7 @@ pub(super) enum ConnectedLink {
 /// keep reaching the live one. So the pair lives behind one shared cell
 /// that the recovery swaps, rather than being copied out at construction.
 #[derive(Clone, Debug)]
-pub(super) struct Link {
+pub(crate) struct Link {
     inner: Arc<std::sync::Mutex<(qsh_transport::Endpoint, qsh_transport::Connection)>>,
 }
 
@@ -97,17 +97,17 @@ impl Link {
             .clone()
     }
 
-    pub(super) fn connection(&self) -> qsh_transport::Connection {
+    pub(crate) fn connection(&self) -> qsh_transport::Connection {
         self.get().1
     }
 
-    pub(super) fn endpoint(&self) -> qsh_transport::Endpoint {
+    pub(crate) fn endpoint(&self) -> qsh_transport::Endpoint {
         self.get().0
     }
 
     /// Install a new pair, returning the one it replaced so the caller can
     /// tear it down.
-    pub(super) fn replace(
+    pub(crate) fn replace(
         &self,
         endpoint: qsh_transport::Endpoint,
         connection: qsh_transport::Connection,
@@ -209,8 +209,19 @@ impl Connected {
 
     /// Take the negotiated session out, leaving the connection and runtime
     /// in place (the attach driver owns the session for its lifetime).
-    pub(super) fn take_session(&mut self) -> Option<Session> {
+    pub(crate) fn take_session(&mut self) -> Option<Session> {
         self.session.take()
+    }
+
+    /// The forward route's swappable endpoint/connection pair, shared with
+    /// this `Connected`: a supervisor that replaces the pair
+    /// ([`Link::replace`]) keeps [`Self::close`] and [`Self::wait_dead`]
+    /// pointed at the live one. `None` on the reverse route.
+    pub(crate) fn forward_link(&self) -> Option<Link> {
+        match &self.link {
+            ConnectedLink::Forward(link) => Some(link.clone()),
+            ConnectedLink::Reverse { .. } => None,
+        }
     }
 
     /// `sha256:…` fingerprint of the peer this connection verified — the
@@ -223,7 +234,7 @@ impl Connected {
     /// registration, which is the ADR-0007 presentation-condition input on
     /// that leg since the CLI process is not itself a TLS endpoint on the
     /// underlying connection (`PLAN.md` M3 Step 6).
-    pub(super) fn peer_fingerprint(&self) -> Option<String> {
+    pub(crate) fn peer_fingerprint(&self) -> Option<String> {
         match &self.link {
             ConnectedLink::Forward(link) => link
                 .connection()

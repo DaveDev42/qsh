@@ -48,11 +48,15 @@ use qsh_proto::{
     TunnelListData, TunnelListReq, TunnelOpenReq,
 };
 
+use crate::ops::PeerTarget;
 use crate::ops::host;
-use crate::ops::session::Connected;
+use crate::ops::session::{Connected, RecoveryConfig};
 use crate::ops::{OpError, Operation, Ops};
 use crate::tunnel::remote::RemoteForwardAcceptor;
 use crate::tunnel::{DynamicForwardHandle, LocalForwardError, LocalForwardHandle};
+
+mod supervise;
+use supervise::SuperviseTask;
 
 /// One [`Ops::tunnel_open_and_hold`] registration's close signal
 /// (`PLAN.md` M6 Step 2+3 검증 라운드 판정 ②/F2). The payload is a reply
@@ -406,6 +410,10 @@ pub struct TunnelHold {
     /// the exact bug M4 §4.1 flags as a hazard `TunnelHold` must not
     /// reintroduce).
     forward: ForwardResource,
+    /// The supervisor of a `--supervise` tunnel (ADR-0023). Before `conn`
+    /// for the same reason as `forward`: it holds tasks on `conn`'s
+    /// runtime and must go while that runtime still exists.
+    supervisor: Option<SuperviseTask>,
     conn: Connected,
     tunnel: TunnelDto,
 }
@@ -414,7 +422,20 @@ pub struct TunnelHold {
 /// [`TunnelHold::hold_until_closed`] race against their own close signal
 /// (the latter only) — factored out so the two methods cannot drift on
 /// what "the tunnel ended on its own" means.
-async fn wait_for_end(forward: &mut ForwardResource, conn: &mut Connected) -> OpError {
+async fn wait_for_end(
+    forward: &mut ForwardResource,
+    supervisor: &mut Option<SuperviseTask>,
+    conn: &mut Connected,
+) -> OpError {
+    // What ends the tunnel besides its own listener failing: the connection
+    // dying for an unsupervised tunnel, and only the supervisor giving up
+    // for a supervised one (a lost connection is the supervisor's to mend).
+    let carrier_end = async {
+        match supervisor {
+            Some(supervisor) => supervisor.finished().await,
+            None => conn.wait_dead().await,
+        }
+    };
     match forward {
         ForwardResource::Local(local) => {
             tokio::select! {
@@ -422,17 +443,17 @@ async fn wait_for_end(forward: &mut ForwardResource, conn: &mut Connected) -> Op
                     ErrorCode::ConnectionFailed,
                     format!("the local forward's listener failed: {err}"),
                 ),
-                err = conn.wait_dead() => err,
+                err = carrier_end => err,
             }
         }
-        ForwardResource::Remote { .. } => conn.wait_dead().await,
+        ForwardResource::Remote { .. } => carrier_end.await,
         ForwardResource::Dynamic(dynamic) => {
             tokio::select! {
                 err = dynamic.wait() => OpError::new(
                     ErrorCode::ConnectionFailed,
                     format!("the dynamic forward's listener failed: {err}"),
                 ),
-                err = conn.wait_dead() => err,
+                err = carrier_end => err,
             }
         }
     }
@@ -496,11 +517,44 @@ impl TunnelHold {
         let handle = self.conn.runtime().handle().clone();
         let err = {
             let forward = &mut self.forward;
+            let supervisor = &mut self.supervisor;
             let conn = &mut self.conn;
-            handle.block_on(wait_for_end(forward, conn))
+            handle.block_on(wait_for_end(forward, supervisor, conn))
         };
         self.close();
         err
+    }
+
+    /// The runtime this tunnel runs on. A frontend that must be ready for a
+    /// signal before it prints anything registers its handlers under
+    /// `handle.enter()`, then hands the wait to [`Self::hold_until`].
+    pub fn runtime_handle(&self) -> tokio::runtime::Handle {
+        self.conn.runtime().handle().clone()
+    }
+
+    /// [`Self::hold`] that also returns when `shutdown` resolves: `None`
+    /// then, a deliberate end that is not a failure (ADR-0023 decision 11:
+    /// a supervised tunnel ends with exit `0` on SIGINT/SIGTERM); `Some`
+    /// is the error that ended the tunnel on its own. The tunnel is torn
+    /// down either way.
+    pub fn hold_until(
+        mut self,
+        shutdown: impl std::future::Future<Output = ()>,
+    ) -> Option<OpError> {
+        let handle = self.conn.runtime().handle().clone();
+        let outcome = {
+            let forward = &mut self.forward;
+            let supervisor = &mut self.supervisor;
+            let conn = &mut self.conn;
+            handle.block_on(async move {
+                tokio::select! {
+                    err = wait_for_end(forward, supervisor, conn) => Some(err),
+                    () = shutdown => None,
+                }
+            })
+        };
+        self.close();
+        outcome
     }
 
     /// Like [`Self::hold`], but also returns early — a deliberate close,
@@ -536,10 +590,11 @@ impl TunnelHold {
         let handle = self.conn.runtime().handle().clone();
         let outcome = {
             let forward = &mut self.forward;
+            let supervisor = &mut self.supervisor;
             let conn = &mut self.conn;
             handle.block_on(async move {
                 tokio::select! {
-                    err = wait_for_end(forward, conn) => Outcome::Died(err),
+                    err = wait_for_end(forward, supervisor, conn) => Outcome::Died(err),
                     Ok(ack_tx) = close_rx => Outcome::Closed(ack_tx),
                 }
             })
@@ -576,6 +631,7 @@ impl TunnelHold {
         // Field order does this already; spelled out so the sequence is
         // not an accident of declaration order in a later edit.
         drop(self.forward);
+        drop(self.supervisor.take());
         self.conn.close();
     }
 }
@@ -610,11 +666,48 @@ impl Ops {
         )?;
         let wait_budget_ms = wait_budget_ms(req.wait_ms)?;
         let wait_budget_ms = self.cap_wait_budget_to_stale_retention(wait_budget_ms);
-        let conn = self.connect_with_wait(&req.host, wait_budget_ms)?;
+        let (conn, target) = self.connect_with_wait(&req.host, wait_budget_ms)?;
+        let supervision = self.supervision(req.supervise_ms, target, &conn)?;
         match conn.connection() {
-            Some(connection) => Self::tunnel_open_forward(conn, connection, &spec, &req.host),
+            Some(connection) => {
+                Self::tunnel_open_forward(conn, connection, &spec, &req.host, supervision)
+            }
             None => Self::tunnel_open_reverse(conn, &spec, &req.host),
         }
+    }
+
+    /// The supervision inputs of a `--supervise` open, once the route is
+    /// known. `Ok(None)` for an unsupervised tunnel. The reverse route
+    /// (`target` is `None`) is refused here, after the connect, because the
+    /// route is only known by then (ADR-0023 decision 24).
+    fn supervision(
+        &self,
+        supervise_ms: Option<u32>,
+        target: Option<PeerTarget>,
+        conn: &Connected,
+    ) -> Result<Option<Supervision>, OpError> {
+        let ms = supervise_ms.unwrap_or(0);
+        if ms == 0 {
+            return Ok(None);
+        }
+        let Some(target) = target else {
+            return Err(OpError::new(
+                ErrorCode::Unsupported,
+                "--supervise is not yet supported on the reverse route",
+            ));
+        };
+        let Some(fingerprint) = conn.peer_fingerprint() else {
+            return Err(OpError::new(
+                ErrorCode::AuthFailed,
+                "the peer's identity is unknown, so the tunnel cannot be supervised",
+            ));
+        };
+        Ok(Some(Supervision {
+            target,
+            fingerprint,
+            total: Duration::from_millis(u64::from(ms)),
+            recovery: self.recovery,
+        }))
     }
 
     /// [`Self::connect`], retried while — and only while — it keeps
@@ -635,8 +728,14 @@ impl Ops {
     /// (`docs/design/testing.md` L2) — the real-daemon case (registration
     /// actually coming back mid-wait) is
     /// `crates/qsh-testkit/tests/reverse_tunnel.rs`'s job.
-    fn connect_with_wait(&self, host: &str, wait_budget_ms: u64) -> Result<Connected, OpError> {
-        retry_while_stale(wait_budget_ms, WAIT_POLL_INTERVAL, || self.connect(host))
+    fn connect_with_wait(
+        &self,
+        host: &str,
+        wait_budget_ms: u64,
+    ) -> Result<(Connected, Option<PeerTarget>), OpError> {
+        retry_while_stale(wait_budget_ms, WAIT_POLL_INTERVAL, || {
+            self.connect_keeping_target(host)
+        })
     }
 
     /// Cap a wait budget at this machine's own effective
@@ -679,8 +778,13 @@ impl Ops {
         connection: qsh_transport::Connection,
         spec: &ForwardSpec,
         host: &str,
+        supervision: Option<Supervision>,
     ) -> Result<TunnelHold, OpError> {
         match spec.direction {
+            ForwardDirection::Local if supervision.is_some() => {
+                let supervision = supervision.expect("guarded by the match arm");
+                Self::supervised_local(conn, connection, spec, host, supervision)
+            }
             ForwardDirection::Local => {
                 let forward = match conn
                     .runtime()
@@ -695,6 +799,7 @@ impl Ops {
                 let tunnel = forward.tunnel(host);
                 Ok(TunnelHold {
                     conn,
+                    supervisor: None,
                     forward: ForwardResource::Local(forward),
                     tunnel: TunnelDto::Forward(tunnel),
                 })
@@ -715,6 +820,7 @@ impl Ops {
                 let tunnel = remote_tunnel_dto(spec, &opened, host);
                 Ok(TunnelHold {
                     conn,
+                    supervisor: None,
                     forward: ForwardResource::Remote {
                         acceptor,
                         forward_id: opened.forward_id,
@@ -776,6 +882,7 @@ impl Ops {
                 let tunnel = forward.tunnel(host);
                 Ok(TunnelHold {
                     conn,
+                    supervisor: None,
                     forward: ForwardResource::Local(forward),
                     tunnel: TunnelDto::Forward(tunnel),
                 })
@@ -813,6 +920,7 @@ impl Ops {
                 let tunnel = remote_tunnel_dto(spec, &opened, host);
                 Ok(TunnelHold {
                     conn,
+                    supervisor: None,
                     forward: ForwardResource::Remote {
                         acceptor,
                         forward_id: opened.forward_id,
@@ -940,8 +1048,21 @@ impl Ops {
         crate::tunnel::local::loopback_bind_addr(req.bind.as_deref(), listen_port, "-D")
             .map_err(map_local_forward_error)?;
         check_supervise(req.supervise_ms, req.accept_hold_ms, SuperviseMode::Dynamic)?;
-        let conn = self.connect(&req.host)?;
-        Self::tunnel_dynamic_with_connected(conn, req.bind.as_deref(), listen_port, &req.host)
+        let (conn, target) = self.connect_keeping_target(&req.host)?;
+        let supervision = match self.supervision(req.supervise_ms, target, &conn) {
+            Ok(supervision) => supervision,
+            Err(err) => {
+                conn.close();
+                return Err(err);
+            }
+        };
+        Self::tunnel_dynamic_with_connected(
+            conn,
+            req.bind.as_deref(),
+            listen_port,
+            &req.host,
+            supervision,
+        )
     }
 
     /// The post-connect half of [`Self::tunnel_dynamic`], split out as a
@@ -955,6 +1076,7 @@ impl Ops {
         bind: Option<&str>,
         listen_port: u16,
         host: &str,
+        supervision: Option<Supervision>,
     ) -> Result<TunnelHold, OpError> {
         let is_reverse = conn.connection().is_none();
         if let Err(err) = require_dial_filter_capability(conn.capabilities(), is_reverse) {
@@ -963,7 +1085,7 @@ impl Ops {
         }
         match conn.connection() {
             Some(connection) => {
-                Self::tunnel_dynamic_forward(conn, connection, bind, listen_port, host)
+                Self::tunnel_dynamic_forward(conn, connection, bind, listen_port, host, supervision)
             }
             None => Self::tunnel_dynamic_reverse(conn, bind, listen_port, host),
         }
@@ -978,7 +1100,18 @@ impl Ops {
         bind: Option<&str>,
         listen_port: u16,
         host: &str,
+        supervision: Option<Supervision>,
     ) -> Result<TunnelHold, OpError> {
+        if let Some(supervision) = supervision {
+            return Self::supervised_dynamic(
+                conn,
+                connection,
+                bind,
+                listen_port,
+                host,
+                supervision,
+            );
+        }
         let forward = match conn.runtime().block_on(DynamicForwardHandle::start(
             bind,
             listen_port,
@@ -993,6 +1126,7 @@ impl Ops {
         let tunnel = forward.dynamic_tunnel(host);
         Ok(TunnelHold {
             conn,
+            supervisor: None,
             forward: ForwardResource::Dynamic(forward),
             tunnel: TunnelDto::Dynamic(tunnel),
         })
@@ -1041,6 +1175,7 @@ impl Ops {
         let tunnel = forward.dynamic_tunnel(host);
         Ok(TunnelHold {
             conn,
+            supervisor: None,
             forward: ForwardResource::Dynamic(forward),
             tunnel: TunnelDto::Dynamic(tunnel),
         })
@@ -1284,6 +1419,136 @@ impl Ops {
     }
 }
 
+/// What a supervised forward-route open carries over from the first
+/// connection (ADR-0023 decisions 4 and 7).
+struct Supervision {
+    /// The peer as resolved for the first open; re-dialed as is.
+    target: PeerTarget,
+    /// The fingerprint the first open verified.
+    fingerprint: String,
+    /// The disconnection budget.
+    total: Duration,
+    recovery: RecoveryConfig,
+}
+
+impl Ops {
+    /// `-L` with `--supervise`: the listener reads its carrier from a
+    /// channel the supervisor writes (decision 3).
+    fn supervised_local(
+        mut conn: Connected,
+        connection: qsh_transport::Connection,
+        spec: &ForwardSpec,
+        host: &str,
+        supervision: Supervision,
+    ) -> Result<TunnelHold, OpError> {
+        let (session, link) = match Self::supervision_parts(&mut conn) {
+            Ok(parts) => parts,
+            Err(err) => {
+                conn.close();
+                return Err(err);
+            }
+        };
+        let started = conn.runtime().block_on(async {
+            let wiring = supervise::Wiring::new(connection, &supervision.recovery);
+            let forward = LocalForwardHandle::start_supervised(spec, wiring.view()).await?;
+            let task = supervise::spawn(
+                wiring,
+                supervise::Params {
+                    target: supervision.target,
+                    link,
+                    fingerprint: supervision.fingerprint,
+                    require_dial_filter: false,
+                    total: supervision.total,
+                    tunnel_id: forward.tunnel_id().to_string(),
+                    mode: "local",
+                    recovery: supervision.recovery,
+                },
+                session,
+            );
+            Ok::<_, LocalForwardError>((forward, task))
+        });
+        match started {
+            Ok((forward, task)) => {
+                let tunnel = forward.tunnel(host);
+                Ok(TunnelHold {
+                    conn,
+                    supervisor: Some(task),
+                    forward: ForwardResource::Local(forward),
+                    tunnel: TunnelDto::Forward(tunnel),
+                })
+            }
+            Err(err) => {
+                conn.close();
+                Err(map_local_forward_error(err))
+            }
+        }
+    }
+
+    /// `-D` with `--supervise`; see [`Self::supervised_local`].
+    fn supervised_dynamic(
+        mut conn: Connected,
+        connection: qsh_transport::Connection,
+        bind: Option<&str>,
+        listen_port: u16,
+        host: &str,
+        supervision: Supervision,
+    ) -> Result<TunnelHold, OpError> {
+        let (session, link) = match Self::supervision_parts(&mut conn) {
+            Ok(parts) => parts,
+            Err(err) => {
+                conn.close();
+                return Err(err);
+            }
+        };
+        let started = conn.runtime().block_on(async {
+            let wiring = supervise::Wiring::new(connection, &supervision.recovery);
+            let forward =
+                DynamicForwardHandle::start_supervised(bind, listen_port, wiring.view()).await?;
+            let task = supervise::spawn(
+                wiring,
+                supervise::Params {
+                    target: supervision.target,
+                    link,
+                    fingerprint: supervision.fingerprint,
+                    require_dial_filter: true,
+                    total: supervision.total,
+                    tunnel_id: forward.tunnel_id().to_string(),
+                    mode: "dynamic",
+                    recovery: supervision.recovery,
+                },
+                session,
+            );
+            Ok::<_, LocalForwardError>((forward, task))
+        });
+        match started {
+            Ok((forward, task)) => {
+                let tunnel = forward.dynamic_tunnel(host);
+                Ok(TunnelHold {
+                    conn,
+                    supervisor: Some(task),
+                    forward: ForwardResource::Dynamic(forward),
+                    tunnel: TunnelDto::Dynamic(tunnel),
+                })
+            }
+            Err(err) => {
+                conn.close();
+                Err(map_local_forward_error(err))
+            }
+        }
+    }
+
+    /// The control stream and the swappable connection pair a supervisor
+    /// takes over from a forward-route `Connected`.
+    fn supervision_parts(
+        conn: &mut Connected,
+    ) -> Result<(crate::client::Session, crate::ops::session::Link), OpError> {
+        let internal = || OpError::new(ErrorCode::Internal, "the connection is not supervisable");
+        let link = conn.forward_link().ok_or_else(internal)?;
+        let session = conn.take_session().ok_or_else(internal)?;
+        Ok((session, link))
+    }
+}
+
 /// Map a daemon-reported [`qsh_proto::local::LocalTunnel`] to the JSON
 /// [`Tunnel`] DTO `tunnel.list` returns — a plain field-for-field copy;
 /// `host` is already filled in by the daemon
@@ -1425,15 +1690,22 @@ enum SuperviseRoute {
 }
 
 /// The support table of ADR-0023 decision 24: which `(route, mode,
-/// accept_hold)` combinations a supervised tunnel does today. Every row is
-/// `false` until the supervisor lands; later steps flip rows on, and the
-/// last one deletes this function together with its `UNSUPPORTED` branch.
+/// accept_hold)` combinations a supervised tunnel does today. Later steps
+/// flip more rows on, and the last one deletes this function together with
+/// its `UNSUPPORTED` branch.
 const fn supervise_supported(
-    _route: SuperviseRoute,
-    _mode: SuperviseMode,
-    _accept_hold: bool,
+    route: SuperviseRoute,
+    mode: SuperviseMode,
+    accept_hold: bool,
 ) -> bool {
-    false
+    matches!(
+        (route, mode, accept_hold),
+        (
+            SuperviseRoute::Forward,
+            SuperviseMode::Local | SuperviseMode::Dynamic,
+            false
+        )
+    )
 }
 
 /// Validate `supervise_ms` and `accept_hold_ms` before any connection or

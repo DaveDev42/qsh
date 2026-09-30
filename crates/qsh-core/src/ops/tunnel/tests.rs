@@ -347,7 +347,7 @@ fn tunnel_dynamic_without_dial_filter_capability_is_unsupported_and_binds_nothin
     let session = crate::client::Session::from_control(client.clone(), ctl, hello);
     let conn = Connected::for_test_forward(runtime, endpoint, client, session);
 
-    let err = match Ops::tunnel_dynamic_with_connected(conn, None, 0, "box") {
+    let err = match Ops::tunnel_dynamic_with_connected(conn, None, 0, "box", None) {
         Err(err) => err,
         Ok(_) => panic!("-D must never bind without the peer's dial-filter.v1 capability"),
     };
@@ -426,7 +426,7 @@ fn tunnel_dynamic_over_reverse_without_dial_filter_capability_is_unsupported_and
         "target".to_string(),
     );
 
-    let err = match Ops::tunnel_dynamic_with_connected(conn, None, 0, "target") {
+    let err = match Ops::tunnel_dynamic_with_connected(conn, None, 0, "target", None) {
         Err(err) => err,
         Ok(_) => panic!("-D over reverse must never bind without dial-filter.v1"),
     };
@@ -477,7 +477,7 @@ fn tunnel_dynamic_and_hold_close_frees_the_socks_listener_port() {
     // Ephemeral port (`listen_port: 0`): the OS picks one, so a
     // successful re-bind after close is real proof the listener is
     // gone, not just that the request named a fixed, always-free port.
-    let hold = Ops::tunnel_dynamic_with_connected(conn, None, 0, "box")
+    let hold = Ops::tunnel_dynamic_with_connected(conn, None, 0, "box", None)
         .expect("a peer advertising dial-filter.v1 must be allowed to bind");
     let tunnel = hold.dynamic_tunnel().clone();
     let bound_port = u16::try_from(
@@ -644,9 +644,10 @@ fn accept_hold_without_supervise_or_above_two_thousand_or_on_remote_is_invalid_a
 }
 
 /// ADR-0023 decision 24's table: every `(mode, accept_hold)` row that the
-/// support table marks unsupported is `UNSUPPORTED` before connecting. In
-/// this step no row is supported; later steps flip rows and shrink the
-/// expected set with them.
+/// support table marks unsupported is `UNSUPPORTED` before connecting, and a
+/// supported row gets past the gate (the failure is the missing host). The
+/// expectation is derived from `supervise_supported`, so flipping a row
+/// needs no edit here.
 #[test]
 fn supervise_on_an_unsupported_route_or_mode_is_unsupported_before_connecting() {
     let dir = tempfile::tempdir().unwrap();
