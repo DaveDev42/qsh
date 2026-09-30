@@ -795,8 +795,7 @@ Some of these are MVP scope decisions, some are unfinished work.
 - `--supervise <ms>` keeps a forward-route `-L` or `-D` tunnel alive across
   a lost connection, and it is narrower than it sounds. It does not cover
   `-R`, and it does not cover a tunnel over a reverse route: both still
-  answer `UNSUPPORTED`. `--accept-hold` is not implemented yet. A supervised
-  tunnel re-dials the address it resolved when it was opened and never
+  answer `UNSUPPORTED`. A supervised tunnel re-dials the address it resolved when it was opened and never
   looks the host up again, so a peer that moved to a new address is not
   followed. TCP connections that were spliced when the connection died are
   not resumed. They end, the same as without the flag, and only new

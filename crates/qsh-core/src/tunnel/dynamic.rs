@@ -67,7 +67,7 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio::time::Instant as TokioInstant;
 
-use crate::tunnel::carrier::CarrierView;
+use crate::tunnel::carrier::{Admit, CarrierView};
 use crate::tunnel::dial::DialPolicy;
 use crate::tunnel::local::{
     ACCEPT_BACKOFF, AcceptDisposition, ForwardCarrier, ForwardConnError, LocalForwardError,
@@ -877,11 +877,24 @@ async fn handle_connection(mut tcp: TcpStream, carrier: CarrierView, limits: Arc
     drop(_handshake_permit);
 
     // While the tunnel's connection is down the SOCKS client is answered
-    // `REP 0x01` at once and no slot or token is spent (ADR-0023 decision 5).
-    if carrier.current().is_none() {
-        send_rep_and_close(tcp, Rep::GeneralFailure).await;
-        return;
-    }
+    // `REP 0x01` at once and no slot or token is spent (ADR-0023 decision 5),
+    // unless the tunnel keeps it for a moment (`--accept-hold`, decision 19):
+    // then nothing is sent for it until the carrier is live again, and a
+    // hold that ends first is answered the same way.
+    let turn = match carrier.admit() {
+        Admit::Live(_) => None,
+        Admit::Held(held) => match held.wait(&carrier).await {
+            Some((_, turn)) => Some(turn),
+            None => {
+                send_rep_and_close(tcp, Rep::GeneralFailure).await;
+                return;
+            }
+        },
+        Admit::Refused => {
+            send_rep_and_close(tcp, Rep::GeneralFailure).await;
+            return;
+        }
+    };
 
     let Some(_connection_slot) = limits.reserve_connection_slot() else {
         send_rep_and_close(tcp, Rep::GeneralFailure).await;
@@ -912,7 +925,7 @@ async fn handle_connection(mut tcp: TcpStream, carrier: CarrierView, limits: Arc
         return;
     };
     let opened = tokio::select! {
-        opened = open_tunnel(&current, &request.host, request.port, policy) => opened,
+        opened = open_tunnel(&current, &request.host, request.port, policy, turn) => opened,
         () = carrier.left(&current) => Err(ForwardConnError::CarrierDisconnected),
     };
     match opened {

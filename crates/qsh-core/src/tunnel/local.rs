@@ -51,7 +51,7 @@ use tokio::task::JoinSet;
 
 use crate::client::ClientError;
 use crate::client::link::DataLink;
-use crate::tunnel::carrier::CarrierView;
+use crate::tunnel::carrier::{Admit, CarrierView, Ticket};
 use crate::tunnel::dial::DialPolicy;
 #[cfg(unix)]
 use crate::tunnel::splice::splice_tcp_uds;
@@ -315,8 +315,11 @@ impl LocalForward {
                     // The carrier is read here, per accept, so a swap by a
                     // supervisor is seen by the very next connection. While
                     // disconnected the connection is refused at once with an
-                    // RST, never queued (ADR-0023 decision 5).
-                    let Some(current) = carrier.current() else {
+                    // RST, never queued (ADR-0023 decision 5), unless the
+                    // tunnel keeps it for a moment (`--accept-hold`,
+                    // decision 19). The hold is taken here, in accept order.
+                    let admitted = carrier.admit();
+                    if matches!(admitted, Admit::Refused) {
                         tracing::debug!(
                             host = self.host,
                             port = self.host_port,
@@ -325,12 +328,29 @@ impl LocalForward {
                         );
                         let _ = abort_local(tcp, ForwardConnError::CarrierDisconnected);
                         continue;
-                    };
+                    }
                     let view = carrier.clone();
                     let host = self.host.clone();
                     let host_port = self.host_port;
                     tasks.spawn(async move {
-                        match forward_connection(tcp, &current, &view, &host, host_port).await {
+                        let (current, turn) = match admitted {
+                            Admit::Live(current) => (current, None),
+                            Admit::Held(held) => match held.wait(&view).await {
+                                Some((current, turn)) => (current, Some(turn)),
+                                None => {
+                                    tracing::debug!(
+                                        host,
+                                        port = host_port,
+                                        %peer,
+                                        "qsh::tunnel: refused, the hold ended with the connection still down"
+                                    );
+                                    let _ = abort_local(tcp, ForwardConnError::CarrierDisconnected);
+                                    return;
+                                }
+                            },
+                            Admit::Refused => return,
+                        };
+                        match forward_connection(tcp, &current, &view, &host, host_port, turn).await {
                             Ok(stats) => tracing::debug!(
                                 host,
                                 port = host_port,
@@ -580,11 +600,16 @@ pub(crate) enum OpenedTunnel {
 /// (ADR-0019 decision 3) — `-L` always passes
 /// [`DialPolicy::default`]-equivalent `false` (operator-chosen destination,
 /// not attacker-steered content behind a proxy), `-D` always passes `true`.
+///
+/// `turn` is set for a connection that was held (`--accept-hold`): it is
+/// dropped as soon as the stream is open and its request written, which is
+/// what sends the held connections' requests in the order they were taken.
 pub(crate) async fn open_tunnel(
     carrier: &ForwardCarrier,
     host: &str,
     port: u16,
     policy: DialPolicy,
+    turn: Option<Ticket>,
 ) -> Result<OpenedTunnel, ForwardConnError> {
     let header = StreamHeader {
         kind: StreamKind::TcpConnect as i32,
@@ -596,7 +621,9 @@ pub(crate) async fn open_tunnel(
         deny_host_local: policy.deny_host_local,
     };
     let link = carrier.link();
-    let (send, mut recv, kill) = crate::tunnel::open_stream(&link, &header).await?;
+    let opened_stream = crate::tunnel::open_stream(&link, &header).await;
+    drop(turn);
+    let (send, mut recv, kill) = opened_stream?;
 
     let result: ConnectResult = match recv.recv().await {
         Ok(Some(result)) => result,
@@ -691,6 +718,7 @@ async fn forward_connection(
     view: &CarrierView,
     host: &str,
     port: u16,
+    turn: Option<Ticket>,
 ) -> Result<SpliceStats, ForwardConnError> {
     // `-L`'s destination is operator-chosen, not attacker-steered content
     // behind a proxy (ADR-0019's threat model) — unfiltered, today's
@@ -702,7 +730,7 @@ async fn forward_connection(
     // been left is refused here the same way; once `open_tunnel` returns
     // `Ok` the splice below is never interrupted by a carrier switch.
     let opened = tokio::select! {
-        opened = open_tunnel(carrier, host, port, policy) => opened,
+        opened = open_tunnel(carrier, host, port, policy, turn) => opened,
         () = view.left(carrier) => Err(ForwardConnError::CarrierDisconnected),
     };
     let opened = match opened {

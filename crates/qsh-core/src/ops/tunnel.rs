@@ -667,7 +667,7 @@ impl Ops {
         let wait_budget_ms = wait_budget_ms(req.wait_ms)?;
         let wait_budget_ms = self.cap_wait_budget_to_stale_retention(wait_budget_ms);
         let (conn, target) = self.connect_with_wait(&req.host, wait_budget_ms)?;
-        let supervision = self.supervision(req.supervise_ms, target, &conn)?;
+        let supervision = self.supervision(req.supervise_ms, req.accept_hold_ms, target, &conn)?;
         match conn.connection() {
             Some(connection) => {
                 Self::tunnel_open_forward(conn, connection, &spec, &req.host, supervision)
@@ -683,6 +683,7 @@ impl Ops {
     fn supervision(
         &self,
         supervise_ms: Option<u32>,
+        accept_hold_ms: Option<u32>,
         target: Option<PeerTarget>,
         conn: &Connected,
     ) -> Result<Option<Supervision>, OpError> {
@@ -706,6 +707,9 @@ impl Ops {
             target,
             fingerprint,
             total: Duration::from_millis(u64::from(ms)),
+            accept_hold: accept_hold_ms
+                .filter(|hold| *hold != 0)
+                .map(|hold| Duration::from_millis(u64::from(hold))),
             recovery: self.recovery,
         }))
     }
@@ -1049,13 +1053,14 @@ impl Ops {
             .map_err(map_local_forward_error)?;
         check_supervise(req.supervise_ms, req.accept_hold_ms, SuperviseMode::Dynamic)?;
         let (conn, target) = self.connect_keeping_target(&req.host)?;
-        let supervision = match self.supervision(req.supervise_ms, target, &conn) {
-            Ok(supervision) => supervision,
-            Err(err) => {
-                conn.close();
-                return Err(err);
-            }
-        };
+        let supervision =
+            match self.supervision(req.supervise_ms, req.accept_hold_ms, target, &conn) {
+                Ok(supervision) => supervision,
+                Err(err) => {
+                    conn.close();
+                    return Err(err);
+                }
+            };
         Self::tunnel_dynamic_with_connected(
             conn,
             req.bind.as_deref(),
@@ -1428,6 +1433,9 @@ struct Supervision {
     fingerprint: String,
     /// The disconnection budget.
     total: Duration,
+    /// `--accept-hold`: how long a connection that arrives while
+    /// disconnected may be kept (decision 19). `None` refuses at once.
+    accept_hold: Option<Duration>,
     recovery: RecoveryConfig,
 }
 
@@ -1449,7 +1457,8 @@ impl Ops {
             }
         };
         let started = conn.runtime().block_on(async {
-            let wiring = supervise::Wiring::new(connection, &supervision.recovery);
+            let wiring =
+                supervise::Wiring::new(connection, &supervision.recovery, supervision.accept_hold);
             let forward = LocalForwardHandle::start_supervised(spec, wiring.view()).await?;
             let task = supervise::spawn(
                 wiring,
@@ -1501,7 +1510,8 @@ impl Ops {
             }
         };
         let started = conn.runtime().block_on(async {
-            let wiring = supervise::Wiring::new(connection, &supervision.recovery);
+            let wiring =
+                supervise::Wiring::new(connection, &supervision.recovery, supervision.accept_hold);
             let forward =
                 DynamicForwardHandle::start_supervised(bind, listen_port, wiring.view()).await?;
             let task = supervise::spawn(
@@ -1703,7 +1713,7 @@ const fn supervise_supported(
         (
             SuperviseRoute::Forward,
             SuperviseMode::Local | SuperviseMode::Dynamic,
-            false
+            _
         )
     )
 }

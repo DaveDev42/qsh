@@ -639,3 +639,208 @@ async fn every_accepted_connection_notes_activity_even_while_disconnected() {
     drop(tx);
     runner.abort();
 }
+
+// ---- --accept-hold (ADR-0023 decision 19) -----------------------------
+
+use crate::tunnel::carrier::{HELD_MAX, hold_gate};
+
+/// Poll `cond` until it holds. The state waited for is the gate's own
+/// count of held connections, not a guess at how long the accept loop
+/// takes.
+async fn wait_until(mut cond: impl FnMut() -> bool) {
+    for _ in 0..1_000 {
+        if cond() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("the awaited state never came");
+}
+
+/// A held connection sends nothing while the carrier is down, and rides the
+/// new carrier as soon as it is confirmed. Making the accept arm refuse
+/// unconditionally turns this red at the first `wait_until`.
+#[tokio::test]
+async fn accept_hold_dispatches_a_held_connect_once_the_carrier_is_confirmed() {
+    let (client_b, host_b) = loopback_pair().await;
+    let (tx, rx) = tokio::sync::watch::channel(CarrierState::Disconnected);
+    let (gate, signal) = hold_gate(Duration::from_secs(30));
+    signal.attempting();
+    let forward = LocalForward::bind(&ephemeral_spec()).await.unwrap();
+    let addr = forward.local_addr();
+    let runner = tokio::spawn(forward.run(CarrierView::watching(rx, None).with_hold(gate.clone())));
+
+    let mut tcp = TcpStream::connect(addr).await.unwrap();
+    tcp.write_all(b"held").await.unwrap();
+    tcp.shutdown().await.unwrap();
+    wait_until(|| gate.held() == 1).await;
+    assert!(
+        tokio::time::timeout(Duration::ZERO, host_b.accept_bi())
+            .await
+            .is_err(),
+        "nothing is sent for a held connection"
+    );
+
+    tx.send(CarrierState::Live(Arc::new(ForwardCarrier::Quic(client_b))))
+        .unwrap();
+    let host = tokio::spawn(fake_host(host_b.clone(), true, b""));
+    let mut got = Vec::new();
+    tokio::time::timeout(Duration::from_secs(10), tcp.read_to_end(&mut got))
+        .await
+        .expect("the held connection must be dispatched")
+        .unwrap();
+    assert_eq!(got, b"held");
+    host.await.unwrap();
+    assert_eq!(gate.held(), 0, "the slot is free again");
+    runner.abort();
+    drop(host_b);
+}
+
+/// A hold that ends first is refused with an RST, and neither the carrier
+/// that went down nor the one that later comes up ever sees a stream for it.
+#[tokio::test]
+async fn accept_hold_rejects_at_the_deadline_without_sending_a_byte_to_any_carrier() {
+    const WINDOW: Duration = Duration::from_millis(400);
+    let (client_a, host_a) = loopback_pair().await;
+    let (client_b, host_b) = loopback_pair().await;
+    let keep_a = Arc::new(ForwardCarrier::Quic(client_a));
+    let (tx, rx) = tokio::sync::watch::channel(CarrierState::Live(Arc::clone(&keep_a)));
+    let (gate, signal) = hold_gate(WINDOW);
+    let forward = LocalForward::bind(&ephemeral_spec()).await.unwrap();
+    let addr = forward.local_addr();
+    let runner = tokio::spawn(forward.run(CarrierView::watching(rx, None).with_hold(gate.clone())));
+
+    signal.attempting();
+    tx.send(CarrierState::Disconnected).unwrap();
+    let started = std::time::Instant::now();
+    assert_refused_without_payload(addr).await;
+    // Timers never fire early and the deadline is set after the connect
+    // began, so the refusal cannot come sooner than the window.
+    assert!(started.elapsed() >= WINDOW, "{:?}", started.elapsed());
+    assert_eq!(gate.held(), 0);
+
+    for host in [&host_a, &host_b] {
+        assert!(
+            tokio::time::timeout(Duration::ZERO, host.accept_bi())
+                .await
+                .is_err(),
+            "no stream may exist for a connection that was never dispatched"
+        );
+    }
+    tx.send(CarrierState::Live(Arc::new(ForwardCarrier::Quic(client_b))))
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::ZERO, host_b.accept_bi())
+            .await
+            .is_err(),
+        "the expired connection is not sent on the carrier that comes later"
+    );
+    runner.abort();
+    drop((host_a, host_b, keep_a));
+}
+
+/// While the next attempt is further off than the window, a connection is
+/// refused at once even though the gate exists.
+#[tokio::test]
+async fn accept_hold_local_is_not_used_during_a_backoff_wait_longer_than_the_hold() {
+    let (tx, rx) = tokio::sync::watch::channel(CarrierState::Disconnected);
+    let (gate, signal) = hold_gate(Duration::from_secs(30));
+    signal.next_in(Duration::from_secs(60));
+    let forward = LocalForward::bind(&ephemeral_spec()).await.unwrap();
+    let addr = forward.local_addr();
+    let runner = tokio::spawn(forward.run(CarrierView::watching(rx, None).with_hold(gate.clone())));
+
+    // Well inside the 30 s window, so a held connection would not be
+    // refused yet.
+    assert_refused_without_payload(addr).await;
+    assert_eq!(gate.held(), 0);
+    drop(tx);
+    runner.abort();
+}
+
+/// The sixty-fifth connection is reset at once while the first sixty-four
+/// stay held.
+#[tokio::test]
+async fn accept_hold_local_refuses_the_connection_past_the_cap_at_once() {
+    let (tx, rx) = tokio::sync::watch::channel(CarrierState::Disconnected);
+    let (gate, signal) = hold_gate(Duration::from_secs(60));
+    signal.attempting();
+    let forward = LocalForward::bind(&ephemeral_spec()).await.unwrap();
+    let addr = forward.local_addr();
+    let runner = tokio::spawn(forward.run(CarrierView::watching(rx, None).with_hold(gate.clone())));
+
+    let mut held = Vec::new();
+    for n in 0..HELD_MAX {
+        held.push(TcpStream::connect(addr).await.unwrap());
+        wait_until(|| gate.held() == n + 1).await;
+    }
+    assert_refused_without_payload(addr).await;
+    assert_eq!(gate.held(), HELD_MAX, "the first 64 are still held");
+    drop((tx, held));
+    runner.abort();
+}
+
+/// Connections held in one order reach the peer in that order.
+#[tokio::test]
+async fn accept_hold_local_dispatches_in_accept_order() {
+    const CLIENTS: usize = 6;
+    let (client_b, host_b) = loopback_pair().await;
+    let (tx, rx) = tokio::sync::watch::channel(CarrierState::Disconnected);
+    let (gate, signal) = hold_gate(Duration::from_secs(30));
+    signal.attempting();
+    let forward = LocalForward::bind(&ephemeral_spec()).await.unwrap();
+    let addr = forward.local_addr();
+    let runner = tokio::spawn(forward.run(CarrierView::watching(rx, None).with_hold(gate.clone())));
+
+    // The peer numbers streams in the order they arrive and answers each
+    // with its own number.
+    let host = tokio::spawn(async move {
+        for k in 0..CLIENTS {
+            let (send, recv) = host_b.accept_bi().await.unwrap();
+            tokio::spawn(async move {
+                let mut framed = qsh_transport::FramedStream::data(send, recv);
+                let _header: StreamHeader = framed.recv.recv().await.unwrap().expect("header");
+                framed
+                    .send
+                    .send(&ConnectResult {
+                        ok: true,
+                        code: String::new(),
+                        message: String::new(),
+                    })
+                    .await
+                    .unwrap();
+                let (send, recv) = framed.split();
+                let mut raw_send = send.into_raw();
+                let (mut raw_recv, _residue) = recv.into_raw();
+                raw_send.write_all(&[k as u8]).await.unwrap();
+                raw_send.finish().unwrap();
+                let mut buf = [0u8; 8];
+                while let Ok(Some(_)) = raw_recv.read(&mut buf).await {}
+            });
+        }
+        host_b
+    });
+
+    let mut readers = Vec::new();
+    for n in 0..CLIENTS {
+        let mut tcp = TcpStream::connect(addr).await.unwrap();
+        wait_until(|| gate.held() == n + 1).await;
+        readers.push(tokio::spawn(async move {
+            let mut one = [0u8; 1];
+            tokio::time::timeout(Duration::from_secs(10), tcp.read_exact(&mut one))
+                .await
+                .expect("the held connection must be answered")
+                .unwrap();
+            one[0]
+        }));
+    }
+    tx.send(CarrierState::Live(Arc::new(ForwardCarrier::Quic(client_b))))
+        .unwrap();
+    let mut got = Vec::new();
+    for reader in readers {
+        got.push(reader.await.unwrap());
+    }
+    assert_eq!(got, (0..CLIENTS as u8).collect::<Vec<_>>());
+    let _host_b = host.await.unwrap();
+    runner.abort();
+}

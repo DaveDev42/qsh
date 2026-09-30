@@ -1257,3 +1257,151 @@ async fn a_dynamic_connect_awaiting_connect_result_is_refused_when_the_carrier_i
     runner.abort();
     host.abort();
 }
+
+// ---- --accept-hold (ADR-0023 decision 19) -----------------------------
+
+use crate::tunnel::carrier::hold_gate;
+
+async fn wait_until_held(gate: &crate::tunnel::carrier::HoldGate, n: usize) {
+    for _ in 0..1_000 {
+        if gate.held() == n {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("{n} connections were never held");
+}
+
+/// A held `CONNECT` is not answered and sends nothing until the carrier is
+/// confirmed, then completes on it.
+#[tokio::test]
+async fn accept_hold_dynamic_completes_a_held_connect_on_the_confirmed_carrier() {
+    let forward = generous_forward().await;
+    let addr = forward.local_addr();
+    let (client_conn, host_conn) = loopback_pair().await;
+    let opened = Arc::new(AtomicUsize::new(0));
+    let record = Arc::new(Mutex::new(FakeHostRecord::default()));
+    tokio::spawn(run_fake_host(
+        host_conn.clone(),
+        Arc::clone(&record),
+        Arc::clone(&opened),
+        |_| ok_result(),
+    ));
+    let (tx, rx) = tokio::sync::watch::channel(CarrierState::Disconnected);
+    let (gate, signal) = hold_gate(Duration::from_secs(30));
+    signal.attempting();
+    let runner = tokio::spawn(forward.run(CarrierView::watching(rx, None).with_hold(gate.clone())));
+
+    let mut tcp = TcpStream::connect(addr).await.unwrap();
+    greet_no_auth(&mut tcp).await;
+    tcp.write_all(&connect_request_bytes("example.test", 80))
+        .await
+        .unwrap();
+    wait_until_held(&gate, 1).await;
+    assert_eq!(opened.load(Ordering::SeqCst), 0, "nothing sent while held");
+    assert!(still_open(&tcp), "and no reply either");
+
+    tx.send(CarrierState::Live(Arc::new(ForwardCarrier::Quic(
+        client_conn,
+    ))))
+    .unwrap();
+    let rep = tokio::time::timeout(Duration::from_secs(10), read_rep(&mut tcp))
+        .await
+        .expect("the held CONNECT must be answered");
+    assert_eq!(rep[1], Rep::Succeeded.code());
+    assert_eq!(opened.load(Ordering::SeqCst), 1);
+    runner.abort();
+    drop((tcp, host_conn));
+}
+
+/// A hold that ends first is answered `REP 0x01` after the whole window,
+/// and no stream is ever opened for it.
+#[tokio::test]
+async fn accept_hold_dynamic_rejects_at_the_deadline_with_rep_01_and_opens_no_stream() {
+    const WINDOW: Duration = Duration::from_millis(400);
+    let forward = generous_forward().await;
+    let addr = forward.local_addr();
+    let (client_conn, host_conn) = loopback_pair().await;
+    let opened = Arc::new(AtomicUsize::new(0));
+    tokio::spawn(run_fake_host(
+        host_conn.clone(),
+        Arc::new(Mutex::new(FakeHostRecord::default())),
+        Arc::clone(&opened),
+        |_| ok_result(),
+    ));
+    let (tx, rx) = tokio::sync::watch::channel(CarrierState::Disconnected);
+    let (gate, signal) = hold_gate(WINDOW);
+    signal.attempting();
+    let runner = tokio::spawn(forward.run(CarrierView::watching(rx, None).with_hold(gate.clone())));
+
+    let started = std::time::Instant::now();
+    let mut tcp = TcpStream::connect(addr).await.unwrap();
+    greet_no_auth(&mut tcp).await;
+    tcp.write_all(&connect_request_bytes("example.test", 80))
+        .await
+        .unwrap();
+    let rep = tokio::time::timeout(Duration::from_secs(10), read_rep(&mut tcp))
+        .await
+        .expect("the refusal must arrive");
+    assert_eq!(rep[1], Rep::GeneralFailure.code());
+    assert!(started.elapsed() >= WINDOW, "{:?}", started.elapsed());
+    assert_eq!(opened.load(Ordering::SeqCst), 0);
+    assert_eq!(gate.held(), 0);
+    drop((tx, client_conn));
+    runner.abort();
+}
+
+/// Held `CONNECT`s reach the peer in the order they were taken.
+#[tokio::test]
+async fn accept_hold_dynamic_dispatches_in_accept_order() {
+    const CLIENTS: usize = 5;
+    let forward = generous_forward().await;
+    let addr = forward.local_addr();
+    let (client_conn, host_conn) = loopback_pair().await;
+    let hosts = Arc::new(Mutex::new(Vec::<String>::new()));
+    let host_task = tokio::spawn({
+        let hosts = Arc::clone(&hosts);
+        async move {
+            while let Ok((send, recv)) = host_conn.accept_bi().await {
+                let mut framed = qsh_transport::FramedStream::data(send, recv);
+                let header: StreamHeader = framed.recv.recv().await.unwrap().expect("header");
+                hosts.lock().unwrap().push(header.host);
+                framed.send.send(&ok_result()).await.unwrap();
+                tokio::spawn(async move {
+                    let (send, recv) = framed.split();
+                    let _keep = (send.into_raw(), recv.into_raw());
+                    std::future::pending::<()>().await;
+                });
+            }
+        }
+    });
+    let (tx, rx) = tokio::sync::watch::channel(CarrierState::Disconnected);
+    let (gate, signal) = hold_gate(Duration::from_secs(30));
+    signal.attempting();
+    let runner = tokio::spawn(forward.run(CarrierView::watching(rx, None).with_hold(gate.clone())));
+
+    let mut clients = Vec::new();
+    for n in 0..CLIENTS {
+        let mut tcp = TcpStream::connect(addr).await.unwrap();
+        greet_no_auth(&mut tcp).await;
+        tcp.write_all(&connect_request_bytes(&format!("h{n}.test"), 80))
+            .await
+            .unwrap();
+        wait_until_held(&gate, n + 1).await;
+        clients.push(tcp);
+    }
+    tx.send(CarrierState::Live(Arc::new(ForwardCarrier::Quic(
+        client_conn,
+    ))))
+    .unwrap();
+    for tcp in &mut clients {
+        let rep = tokio::time::timeout(Duration::from_secs(10), read_rep(tcp))
+            .await
+            .expect("every held CONNECT must be answered");
+        assert_eq!(rep[1], Rep::Succeeded.code());
+    }
+    let expected: Vec<String> = (0..CLIENTS).map(|n| format!("h{n}.test")).collect();
+    assert_eq!(*hosts.lock().unwrap(), expected);
+    runner.abort();
+    host_task.abort();
+}

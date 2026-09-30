@@ -38,7 +38,7 @@ use crate::ops::exec::{map_client_error, map_dial_error};
 use crate::ops::session::{Link, RecoveryConfig, probe_alive};
 use crate::ops::{OpError, PeerTarget};
 use crate::reverse::{ReconnectCause, classify_connection_error};
-use crate::tunnel::carrier::{ActivityHook, CarrierState, CarrierView};
+use crate::tunnel::carrier::{ActivityHook, CarrierState, CarrierView, HoldSignal, hold_gate};
 use crate::tunnel::local::ForwardCarrier;
 use crate::tunnel::supervise::TARGET;
 use crate::tunnel::supervise::backoff::{Backoff, Pacer, Waited};
@@ -54,25 +54,38 @@ pub(super) struct Wiring {
     watch: PathWatch,
     denied_rx: mpsc::UnboundedReceiver<Arc<ForwardCarrier>>,
     initial: Arc<ForwardCarrier>,
+    /// The supervisor's end of the accept-hold gate, when there is one.
+    hold: Option<HoldSignal>,
 }
 
 impl Wiring {
     /// Wire a supervised forward over `connection`, the one the first open
-    /// succeeded on.
-    pub(super) fn new(connection: qsh_transport::Connection, recovery: &RecoveryConfig) -> Self {
+    /// succeeded on. `accept_hold` is `--accept-hold` (decision 19): how
+    /// long a connection that arrives while disconnected may be kept.
+    pub(super) fn new(
+        connection: qsh_transport::Connection,
+        recovery: &RecoveryConfig,
+        accept_hold: Option<Duration>,
+    ) -> Self {
         let initial = Arc::new(ForwardCarrier::Quic(connection));
         let (tx, rx) = watch::channel(CarrierState::Live(Arc::clone(&initial)));
         let watch = PathWatch::new(recovery.watch);
         let (denied_tx, denied_rx) = mpsc::unbounded_channel();
         let hook_watch = watch.clone();
         let activity: ActivityHook = Arc::new(move || hook_watch.activity());
-        let view = CarrierView::watching(rx, Some(activity)).with_denied(denied_tx);
+        let mut view = CarrierView::watching(rx, Some(activity)).with_denied(denied_tx);
+        let hold = accept_hold.map(|window| {
+            let (gate, signal) = hold_gate(window);
+            view = view.clone().with_hold(gate);
+            signal
+        });
         Self {
             view,
             tx,
             watch,
             denied_rx,
             initial,
+            hold,
         }
     }
 
@@ -223,6 +236,8 @@ struct Supervisor {
     /// Control pumps of superseded connections, kept so an old connection
     /// that comes back keeps being answered. Aborted with the supervisor.
     old_pumps: Vec<AbortOnDrop>,
+    /// Tells the accept-hold gate when an attempt runs or starts next.
+    hold: Option<HoldSignal>,
 }
 
 impl Supervisor {
@@ -233,6 +248,7 @@ impl Supervisor {
             watch,
             denied_rx,
             initial,
+            hold,
         } = wiring;
         let backoff = Backoff::new(StdRng::from_rng(&mut rand::rng()));
         let pacer = Pacer::new(backoff, wake::subscribe());
@@ -247,6 +263,14 @@ impl Supervisor {
             pacer,
             budget,
             old_pumps: Vec::new(),
+            hold,
+        }
+    }
+
+    /// An attempt is running or about to (accept-hold, decision 19).
+    fn hold_attempting(&self) {
+        if let Some(hold) = &self.hold {
+            hold.attempting();
         }
     }
 
@@ -286,7 +310,10 @@ impl Supervisor {
                     }
                     self.pacer.backoff_mut().lost(now);
                     // Before anything slow: new connections are refused, not
-                    // queued, from this instant (decision 5).
+                    // queued, from this instant (decision 5). An accept-hold
+                    // window opens with it, and first, so that no connection
+                    // sees "down" without also seeing an attempt coming.
+                    self.hold_attempting();
                     let _ = self.tx.send(CarrierState::Disconnected);
                     let mut line = self.line("lost");
                     line.cause = Some(cause);
@@ -428,6 +455,7 @@ impl Supervisor {
             }
             self.budget.note_attempt();
             attempt += 1;
+            self.hold_attempting();
             match self.attempt().await {
                 Ok(next) => return Ok(self.install(next)),
                 Err(err) => {
@@ -448,8 +476,13 @@ impl Supervisor {
                 }
             }
             let remaining = self.budget.remaining(Instant::now());
+            let hold = self.hold.as_ref();
             let waited = tokio::select! {
-                waited = self.pacer.wait() => waited,
+                waited = self.pacer.wait_planned(|delay| {
+                    if let Some(hold) = hold {
+                        hold.next_in(delay);
+                    }
+                }) => waited,
                 () = tokio::time::sleep(remaining) => {
                     return Err(last.unwrap_or_else(|| {
                         OpError::new(
@@ -481,6 +514,9 @@ impl Supervisor {
         self.generation = self.generation.saturating_add(1);
         self.budget.reestablished(Instant::now());
         let _ = self.tx.send(CarrierState::Live(carrier));
+        if let Some(hold) = &self.hold {
+            hold.idle();
+        }
         let mut line = self.line("reestablished");
         line.outage_ms = Some(self.outage_ms());
         Self::emit(&line);
