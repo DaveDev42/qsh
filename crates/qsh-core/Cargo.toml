@@ -88,3 +88,7 @@ rustls.workspace = true
 # the test-util feature; only pulled in for tests (`docs/design/testing.md`
 # L2: no `sleep()`, deterministic time).
 tokio = { workspace = true, features = ["test-util"] }
+# The in-crate reverse-mode harness (`reverse/test_harness.rs`) captures the
+# `qsh::reverse` diagnostic lines through a tracing layer. Test-only, already
+# the workspace-pinned version `qsh-cli` and `qsh-testkit` use.
+tracing-subscriber.workspace = true

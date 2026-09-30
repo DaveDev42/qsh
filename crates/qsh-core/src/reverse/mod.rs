@@ -24,6 +24,35 @@ pub mod listen;
 pub mod registry;
 pub mod target;
 
+#[cfg(all(test, unix))]
+mod test_harness;
+
+/// The [`PathWatchConfig`] the target's registered-session watchdog uses
+/// (`target::run_reverse_unix`). Production always gets
+/// [`PathWatchConfig::default`]. Under `#[cfg(test)]` only, a test can wrap
+/// the target future in [`TEST_PATH_WATCH_CONFIG`]`.scope(..)` to raise the
+/// judgment floor (`min_dead_after`) above quinn's 45 s idle timeout, so the
+/// idle timeout, not `PathWatch`, is what ends a silent connection. This is
+/// compiled out of every non-test build, so it is not the `[recovery]`
+/// config surface ADR-0021 결정 4 keeps closed, and it is deliberately not a
+/// cargo feature (workspace feature unification could switch it on in the
+/// shipped binary).
+#[cfg(unix)]
+pub(crate) fn path_watch_config() -> crate::client::pathwatch::PathWatchConfig {
+    #[cfg(test)]
+    if let Ok(config) = TEST_PATH_WATCH_CONFIG.try_with(|config| *config) {
+        return config;
+    }
+    crate::client::pathwatch::PathWatchConfig::default()
+}
+
+#[cfg(all(test, unix))]
+tokio::task_local! {
+    /// Test-only override read by [`path_watch_config`]. A task-local, not
+    /// a process global, so it only reaches the future it scopes.
+    pub(crate) static TEST_PATH_WATCH_CONFIG: crate::client::pathwatch::PathWatchConfig;
+}
+
 /// Fixed vocabulary for the `cause` field on the `lost`/`retry` (target
 /// `ReconnectEvent`) and `lost`/`denied` (controller `RegistrationEvent`)
 /// stderr diagnostic lines (`docs/CLI.md` §6.13's `cause` bullet, issue #4

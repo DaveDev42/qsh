@@ -473,6 +473,9 @@ pub struct Listen {
     /// [`crate::quota::Quotas::reserve_connection`], same host→principal
     /// order) even when both run in the same `qsh listen` process.
     quotas: Arc<crate::quota::Quotas>,
+    /// Test-only override for [`Self::path_watch_config`].
+    #[cfg(test)]
+    test_path_watch: std::sync::Mutex<Option<PathWatchConfig>>,
 }
 
 impl std::fmt::Debug for Listen {
@@ -634,7 +637,39 @@ impl Listen {
             sweep_tick,
             admission,
             quotas,
+            #[cfg(test)]
+            test_path_watch: std::sync::Mutex::new(None),
         })
+    }
+
+    /// The [`PathWatchConfig`] each registered connection's liveness watch
+    /// uses (`Self::drive_registered_session`). Production always gets
+    /// [`PathWatchConfig::default`]; under `#[cfg(test)]` only,
+    /// [`Self::set_test_path_watch`] can raise `min_dead_after` above
+    /// quinn's 45 s idle timeout (the controller-side twin of
+    /// [`super::path_watch_config`], same rationale). Not a task-local
+    /// like that one, because registered connections are driven from tasks
+    /// the accept loop spawns, which do not inherit a scoped override.
+    fn path_watch_config(&self) -> PathWatchConfig {
+        #[cfg(test)]
+        if let Some(config) = *self
+            .test_path_watch
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+        {
+            return config;
+        }
+        PathWatchConfig::default()
+    }
+
+    /// Test-only: replace the liveness-watch config for every connection
+    /// registered from now on (see [`Self::path_watch_config`]).
+    #[cfg(all(test, unix))]
+    pub(crate) fn set_test_path_watch(&self, config: PathWatchConfig) {
+        *self
+            .test_path_watch
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(config);
     }
 
     /// The reverse-registration table — read-only from outside this

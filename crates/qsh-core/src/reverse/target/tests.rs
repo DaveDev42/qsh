@@ -766,3 +766,53 @@ async fn classify_target_connection_loss_maps_a_task_panic_to_local() {
         ReconnectCause::Local
     );
 }
+
+/// `docs/design/testing.md` L4, wall-clock: the target's `lost`/`retry`
+/// lines report quinn's own idle-timeout expiry as `idle_timeout` (ADR-0022
+/// 결정 5·6), not `path_dead`. A relay between target and controller is cut
+/// so both ends see pure silence, and both `PathWatch` floors are raised
+/// above the 45 s idle timeout (`crate::reverse::path_watch_config`), so
+/// `PathWatch` cannot win the race that
+/// `crates/qsh-testkit/tests/reverse_lost_cause_and_since_registered_ms.rs`'s
+/// `run_target_lost_and_retry_lines_report_a_silent_path_as_path_dead`
+/// pins for a real path. Runs only under `QSH_ACCEPTANCE_SLOW`
+/// (`.github/workflows/ci.yml` acceptance job).
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn run_target_lost_and_retry_lines_report_a_quinn_idle_timeout_as_idle_timeout() {
+    use crate::reverse::test_harness as harness;
+
+    if !harness::slow_tests_enabled() {
+        eprintln!("skipped: needs QSH_ACCEPTANCE_SLOW=1 (waits out quinn's 45 s idle timeout)");
+        return;
+    }
+    // Both names are unique to this test, so the process-global line
+    // capture cannot mix in another test's lines.
+    let alias = "controller-idle-timeout-target";
+    let rig = harness::Rig::start(alias, "widget-idle-timeout-target").await;
+    harness::wait_for_line(alias, "registered").await;
+
+    let cut_at = std::time::Instant::now();
+    rig.cut();
+    let lost = harness::wait_for_line(alias, "lost").await;
+    let waited = cut_at.elapsed();
+    let retry = harness::wait_for_line(alias, "retry").await;
+
+    assert_eq!(lost["cause"], "idle_timeout", "{lost}");
+    assert_eq!(retry["cause"], "idle_timeout", "{retry}");
+    // Roughly the 45 s idle timeout, not `PathWatch`'s ~1 s default.
+    assert!(
+        waited >= Duration::from_secs(30),
+        "the connection ended after only {waited:?}; something other than the idle timeout \
+         ended it"
+    );
+    for event in ["lost", "retry"] {
+        assert!(
+            harness::lines(alias, event)
+                .iter()
+                .all(|line| line["cause"] != "path_dead"),
+            "no `{event}` line may report path_dead for a pure idle timeout"
+        );
+    }
+    rig.shutdown().await;
+}

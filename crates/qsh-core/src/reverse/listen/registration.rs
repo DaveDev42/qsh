@@ -397,7 +397,7 @@ impl Listen {
         // every arm that can `break` assigns this exactly once, first —
         // the only way to reach the read after the loop.
         let loss_cause;
-        let watch = PathWatch::new(PathWatchConfig::default());
+        let watch = PathWatch::new(self.path_watch_config());
         let probes = Arc::new(tokio::sync::Notify::new());
         let watchdog = tokio::spawn(watch_path(
             session.connection().clone(),
