@@ -118,6 +118,7 @@ impl Fixture {
             "basename",
             "chmod",
             "cp",
+            "dirname",
             "gzip",
             "mkdir",
             "mktemp",
@@ -201,6 +202,30 @@ exit 64
             .lines()
             .map(str::to_string)
             .collect()
+    }
+
+    /// Adds a regular file under `stage` and lists it as an archive member.
+    fn add_member(&mut self, name: &str, body: &str) {
+        let path = self.stage.join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, body).unwrap();
+        self.members.push(name.to_string());
+    }
+
+    /// Adds a symlink member pointing at `target`.
+    fn add_symlink(&mut self, name: &str, target: &Path) {
+        let path = self.stage.join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(target, &path).unwrap();
+        self.members.push(name.to_string());
+    }
+
+    /// Puts a `manpath` stand-in on `PATH` that prints `dirs`.
+    fn with_manpath(&self, dirs: &str) {
+        write_executable(
+            &self.stubs().join("manpath"),
+            &format!("#!/bin/sh\necho '{dirs}'\n"),
+        );
     }
 
     fn pack(&self) {
@@ -544,4 +569,160 @@ fn install_never_skips_the_checksum_without_the_explicit_flag() {
         );
         assert!(!fx.installed_qsh().exists());
     }
+}
+
+fn man_dir_of(fx: &Fixture) -> PathBuf {
+    fx.root.path().join("manroot/man1")
+}
+
+/// Names of the entries in `dir`, sorted; empty when it does not exist.
+fn listing(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .map(|rd| {
+            rd.map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+#[test]
+fn install_places_every_man_page_under_qsh_man_dir() {
+    let mut fx = Fixture::new("x86_64-unknown-linux-gnu");
+    fx.add_member("man/qsh.1", ".TH QSH 1\n");
+    fx.add_member("man/qsh-trust-add.1", ".TH QSH-TRUST-ADD 1\n");
+    fx.publish();
+    let dir = man_dir_of(&fx);
+    let out = fx.run(&[("QSH_MAN_DIR", dir.to_str().unwrap())]);
+    assert_ok(&out);
+    assert_installed(&fx);
+    // Every page, no temporary leftovers, and the archive's bytes.
+    assert_eq!(listing(&dir), vec!["qsh-trust-add.1", "qsh.1"]);
+    assert_eq!(
+        fs::read_to_string(dir.join("qsh.1")).unwrap(),
+        ".TH QSH 1\n"
+    );
+    assert_eq!(
+        fs::metadata(dir.join("qsh.1"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o644
+    );
+}
+
+#[test]
+fn install_defaults_the_man_dir_to_xdg_data_home_then_home() {
+    let mut fx = Fixture::new("x86_64-unknown-linux-gnu");
+    fx.add_member("man/qsh.1", ".TH QSH 1\n");
+    fx.publish();
+    let out = fx.run(&[]);
+    assert_ok(&out);
+    assert_eq!(
+        listing(&fx.home().join(".local/share/man/man1")),
+        vec!["qsh.1"]
+    );
+
+    let xdg = fx.root.path().join("xdg");
+    let out = fx.run(&[("XDG_DATA_HOME", xdg.to_str().unwrap())]);
+    assert_ok(&out);
+    assert_eq!(listing(&xdg.join("man/man1")), vec!["qsh.1"]);
+}
+
+#[test]
+fn install_skips_man_pages_with_qsh_no_man() {
+    let mut fx = Fixture::new("x86_64-unknown-linux-gnu");
+    fx.add_member("man/qsh.1", ".TH QSH 1\n");
+    fx.publish();
+    let dir = man_dir_of(&fx);
+    let out = fx.run(&[("QSH_MAN_DIR", dir.to_str().unwrap()), ("QSH_NO_MAN", "1")]);
+    assert_ok(&out);
+    assert_installed(&fx);
+    assert!(!dir.exists(), "QSH_NO_MAN=1 must not touch the man dir");
+    assert!(!fx.home().join(".local").exists());
+}
+
+#[test]
+fn install_rejects_a_man_member_outside_man_or_a_symlink() {
+    let mut fx = Fixture::new("x86_64-unknown-linux-gnu");
+    fx.add_member("man/qsh.1", ".TH QSH 1\n");
+    fx.add_member("man/nested/deep.1", "nested\n");
+    fx.add_member("man/README", "not a page\n");
+    fx.add_member("other/outside.1", "outside\n");
+    let secret = fx.root.path().join("secret");
+    fs::write(&secret, "do not copy\n").unwrap();
+    fx.add_symlink("man/link.1", &secret);
+    fx.publish();
+    let dir = man_dir_of(&fx);
+    let out = fx.run(&[("QSH_MAN_DIR", dir.to_str().unwrap())]);
+    assert_ok(&out);
+    assert_installed(&fx);
+    assert_eq!(listing(&dir), vec!["qsh.1"]);
+    let err = stderr(&out);
+    for rejected in ["man/nested/deep.1", "man/README", "other/outside.1"] {
+        assert!(err.contains(&format!("'{rejected}'")), "{rejected}: {err}");
+    }
+    assert!(err.contains("man/link.1"), "{err}");
+    assert!(!err.contains("do not copy"));
+}
+
+#[test]
+fn install_keeps_the_binary_when_man_installation_fails() {
+    let mut fx = Fixture::new("x86_64-unknown-linux-gnu");
+    fx.add_member("man/qsh.1", ".TH QSH 1\n");
+    fx.publish();
+    // A regular file where the man directory's parent should be.
+    let blocker = fx.root.path().join("blocker");
+    fs::write(&blocker, "file\n").unwrap();
+    let dir = blocker.join("man1");
+    let out = fx.run(&[("QSH_MAN_DIR", dir.to_str().unwrap())]);
+    assert_ok(&out);
+    assert_installed(&fx);
+    assert!(
+        stderr(&out).contains("man pages were not installed"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn install_tolerates_an_archive_without_man_pages() {
+    let fx = Fixture::new("x86_64-unknown-linux-gnu");
+    fx.publish();
+    let dir = man_dir_of(&fx);
+    let out = fx.run(&[("QSH_MAN_DIR", dir.to_str().unwrap())]);
+    assert_ok(&out);
+    assert_installed(&fx);
+    assert!(!dir.exists());
+    let err = stderr(&out).to_lowercase();
+    assert!(
+        !err.contains("man page") && !err.contains("manpath"),
+        "{err}"
+    );
+}
+
+#[test]
+fn install_notes_a_man_dir_that_manpath_does_not_list() {
+    let mut fx = Fixture::new("x86_64-unknown-linux-gnu");
+    fx.add_member("man/qsh.1", ".TH QSH 1\n");
+    fx.publish();
+    let dir = man_dir_of(&fx);
+    let root = dir.parent().unwrap().to_str().unwrap().to_string();
+
+    // No `manpath` at all: say how to add the directory.
+    let out = fx.run(&[("QSH_MAN_DIR", dir.to_str().unwrap())]);
+    assert_ok(&out);
+    assert!(
+        stderr(&out).contains("may not be on your MANPATH"),
+        "{}",
+        stderr(&out)
+    );
+
+    // `manpath` already lists the parent directory: stay quiet.
+    fx.with_manpath(&format!("/usr/share/man:{root}"));
+    let out = fx.run(&[("QSH_MAN_DIR", dir.to_str().unwrap())]);
+    assert_ok(&out);
+    assert!(!stderr(&out).contains("MANPATH"), "{}", stderr(&out));
 }

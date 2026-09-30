@@ -28,6 +28,15 @@
 #                     only way past either check. Nothing then vouches that
 #                     the archive is the one the release published.
 #
+#   QSH_MAN_DIR     Directory the man pages from the archive's `man/` go
+#                     into. Defaults to "${XDG_DATA_HOME:-$HOME/.local/share}/
+#                     man/man1". Created if missing.
+#   QSH_NO_MAN       Set to exactly "1" to skip the man pages.
+#
+# Man pages are best effort: a problem with them prints a warning and never
+# undoes the binary install. Archives cut before the pages shipped have no
+# `man/` and are installed without a word about it.
+#
 # This script never invokes sudo. If QSH_INSTALL_DIR is not writable, it
 # fails with a message rather than escalating privileges on your behalf.
 #
@@ -57,6 +66,10 @@ QSH_REPO="${QSH_REPO:-DaveDev42/qsh}"
 
 log() {
     printf '%s\n' "$*" >&2
+}
+
+warn() {
+    log "warning: $*"
 }
 
 die() {
@@ -156,6 +169,104 @@ and re-run this script."
         die "provenance verification failed for $(basename "$1") — refusing to install"
 }
 
+# Installs the archive's `man/<name>.1` pages. Only members shaped exactly
+# like that are extracted, and they are extracted by name; anything else
+# (nested paths, other extensions, names outside `man/`) is reported and left
+# in the archive. A member that comes out as anything but a regular file,
+# which is what a symlink member does, is skipped. Each page is copied to a
+# temporary name in the destination and renamed into place, like the binary.
+# Returns non-zero when the pages as a whole could not be installed; the
+# caller turns that into a warning and keeps the binary.
+install_man_pages() {
+    archive="$1"
+    if [ -n "${QSH_MAN_DIR:-}" ]; then
+        man_dir="$QSH_MAN_DIR"
+    elif [ -n "${XDG_DATA_HOME:-}" ]; then
+        man_dir="${XDG_DATA_HOME}/man/man1"
+    elif [ -n "${HOME:-}" ]; then
+        man_dir="${HOME}/.local/share/man/man1"
+    else
+        warn "neither QSH_MAN_DIR nor HOME is set; set QSH_MAN_DIR to install man pages"
+        return 1
+    fi
+
+    members="$(tar tzf "$archive" 2>/dev/null)" || {
+        warn "could not list the archive to look for man pages"
+        return 1
+    }
+    page_re='^man/[A-Za-z0-9][A-Za-z0-9._-]*\.1$'
+    pages="$(printf '%s\n' "$members" | awk -v re="$page_re" '$0 ~ re')"
+    odd="$(printf '%s\n' "$members" |
+        awk -v re="$page_re" '$0 != "" && $0 != "qsh" && $0 != "man/" && $0 !~ re')"
+
+    if [ -n "$odd" ]; then
+        printf '%s\n' "$odd" | while IFS= read -r member; do
+            warn "not installing archive member '${member}': not a man/<name>.1 page"
+        done
+    fi
+    # An archive from before the pages shipped: nothing to do, nothing to say.
+    [ -n "$pages" ] || return 0
+
+    set --
+    for member in $pages; do
+        set -- "$@" "$member"
+    done
+    tar xzf "$archive" -C "$workdir" "$@" || {
+        warn "could not extract the man pages from the archive"
+        return 1
+    }
+
+    if [ -e "$man_dir" ] && [ ! -d "$man_dir" ]; then
+        warn "${man_dir} exists and is not a directory"
+        return 1
+    fi
+    mkdir -p "$man_dir" || {
+        warn "failed to create ${man_dir}"
+        return 1
+    }
+    if [ ! -w "$man_dir" ]; then
+        warn "${man_dir} is not writable; set QSH_MAN_DIR to a writable directory"
+        return 1
+    fi
+
+    count=0
+    for member in $pages; do
+        name="${member#man/}"
+        src="${workdir}/${member}"
+        if [ -L "$src" ] || [ ! -f "$src" ]; then
+            warn "not installing ${member}: it is not a regular file in the archive"
+            continue
+        fi
+        if [ -d "${man_dir}/${name}" ]; then
+            warn "not installing ${name}: ${man_dir}/${name} is a directory"
+            continue
+        fi
+        man_staged="${man_dir}/.${name}.install.$$"
+        if cp "$src" "$man_staged" && chmod 0644 "$man_staged" &&
+            mv -f "$man_staged" "${man_dir}/${name}"; then
+            count=$((count + 1))
+        else
+            warn "failed to install ${name} into ${man_dir}"
+            rm -f "$man_staged"
+        fi
+        man_staged=""
+    done
+    log "installed ${count} man page(s) to ${man_dir}"
+
+    # Whether `man` finds them depends on the platform: man-db maps
+    # ~/.local/bin to ~/.local/share/man on its own, macOS does not. Ask
+    # `manpath` when there is one; without it, say how to add the directory.
+    man_root="$(dirname "$man_dir")"
+    case ":$(manpath 2>/dev/null):" in
+        *":${man_root}:"*) ;;
+        *)
+            log ""
+            log "note: ${man_root} may not be on your MANPATH. Add it, e.g.:"
+            log "  export MANPATH=\"${man_root}:\${MANPATH:-}\""
+            ;;
+    esac
+}
+
 main() {
     need_cmd uname
     need_cmd curl
@@ -202,7 +313,8 @@ to the directory the binary should go in"
     # a temp file into the destination directory, that too — so an
     # interrupted run leaves nothing behind and never a half-written binary
     # at the final path.
-    trap 'rm -rf "$workdir"; if [ -n "$staged" ]; then rm -f "$staged"; fi' EXIT
+    man_staged=""
+    trap 'rm -rf "$workdir"; if [ -n "$staged" ]; then rm -f "$staged"; fi; if [ -n "$man_staged" ]; then rm -f "$man_staged"; fi' EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
 
@@ -264,8 +376,8 @@ QSH_LIBC to install the glibc build"
     verify_provenance "${workdir}/${asset}"
 
     # Extract the `qsh` member by name -- the archive also carries the man
-    # pages under `man/`, which this installer does not install -- so a
-    # surprise path in the tarball cannot write outside the scratch dir.
+    # pages under `man/`, which install_man_pages extracts the same way --
+    # so a surprise path in the tarball cannot write outside the scratch dir.
     log "unpacking"
     tar xzf "${workdir}/${asset}" -C "$workdir" qsh ||
         die "${asset} did not contain a 'qsh' binary at the archive root"
@@ -305,6 +417,11 @@ writable directory, or fix its permissions yourself — this installer never use
     fi
 
     log "installed qsh ${version} to ${QSH_INSTALL_DIR}/qsh"
+
+    if [ "${QSH_NO_MAN:-}" != "1" ]; then
+        install_man_pages "${workdir}/${asset}" ||
+            warn "man pages were not installed; the qsh binary is installed regardless"
+    fi
 
     case ":$PATH:" in
         *":${QSH_INSTALL_DIR}:"*) ;;

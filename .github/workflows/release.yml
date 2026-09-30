@@ -412,7 +412,8 @@ jobs:
       # unix archive holds the binary plus `docs/man/`'s pages under `man/`
       # (docs/ROADMAP.md M10 결정 기록 Q4): the Homebrew formula installs
       # them with `man1.install Dir["man/*.1"]`, and install.sh extracts
-      # `qsh` by name and ignores the rest. The windows zip is unchanged.
+      # `qsh` and each `man/<name>.1` by name (best effort for the pages)
+      # and ignores anything else. The windows zip is unchanged.
       #
       # Must run after `Sign the binary` / `Verify the signature` /
       # `Notarize` above: nothing in this job re-extracts the archive to

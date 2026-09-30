@@ -163,6 +163,8 @@ would.
 | `QSH_INSTALL_DIR` | `$HOME/.local/bin` | Where the `qsh` binary lands (created if missing) |
 | `QSH_REPO` | `DaveDev42/qsh` | `owner/repo` to install from, for forks and testing |
 | `QSH_LIBC` | `gnu` | Linux only. `musl` picks the static build (x86_64 or aarch64) for old-glibc distributions |
+| `QSH_MAN_DIR` | `~/.local/share/man/man1` | Where the man pages from the archive are installed |
+| `QSH_NO_MAN` | unset | Set to `1` to skip the man pages |
 | `QSH_INSECURE_SKIP_VERIFY` | unset | Set to exactly `1` to skip both the `SHA256SUMS` check and the provenance check. Prints a warning |
 
 Every release asset cut after `v0.2.0` carries a build provenance
@@ -263,13 +265,15 @@ and manages the unit for you — see
 Man pages for every subcommand are generated from the same `clap`
 definitions `--help` uses and live under [`docs/man/`](docs/man/)
 (`cargo xtask man` regenerates them; `docs/design/testing.md` covers the
-test that keeps them from drifting). Homebrew installs them; the curl
-installer does not. For tags after `v0.2.0`, a Homebrew install puts
-`man qsh` and `man qsh-trust-add` on your `MANPATH` with no further
-setup. From the installer or a manual download of a `.tar.gz` asset, the
-pages ride along in the `man/` directory inside the archive (the Windows
-`.zip` does not carry them) but nothing puts them on a `MANPATH`, so
-point `man` at a page directly: `man ./docs/man/qsh.1`, or
+test that keeps them from drifting). For tags after `v0.2.0`, a Homebrew
+install puts `man qsh` and `man qsh-trust-add` on your `MANPATH` with no
+further setup. The curl installer copies the pages from the archive's
+`man/` directory to `~/.local/share/man/man1` (`QSH_MAN_DIR` overrides it,
+`QSH_NO_MAN=1` skips them) and prints an `export MANPATH=...` line when
+that directory is not on the search path. A failure there is a warning and
+never undoes the binary install. From a manual download of a `.tar.gz`
+asset (the Windows `.zip` does not carry the pages) nothing puts them on a
+`MANPATH`, so point `man` at a page directly: `man ./docs/man/qsh.1`, or
 `man ./man/qsh-trust-add.1` from an unpacked archive.
 
 ## First run
