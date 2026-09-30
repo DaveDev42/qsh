@@ -8,7 +8,7 @@
 
 이 캠페인은 M10 DoD 3의 분모를 바꾸지 않는다. DoD 3은 `x86_64-unknown-linux-musl` 한정이고 `docs/campaigns/m10-clean-vm.md`는 이 문서가 생겨도 한 바이트도 바뀌지 않는다. 이 문서의 회차 기록이 곧 M13 (c)의 사람 몫 판정이다.
 
-CI가 이미 하는 일은 `release.yml`의 `build` job이 새 leg에서 세 가지를 보는 것이다. 빌드, `Static-link evidence (musl)` 스텝, `Release smoke (functional)` 스텝(`QSH_SMOKE_STRICT=1`). 이 캠페인은 GitHub Release에 붙어 나간 자산을 아무것도 설치된 적 없는 구형 glibc arm64 머신에 설치 스크립트로 받아 같은 네 축을 손으로 다시 밟는다. 러너에는 최신 glibc와 toolchain이 있고 대상 머신에는 없다. 그 차이가 정적 링크 주장이 맞는지 드러내는 자리다.
+CI에서는 이미 `release.yml`의 `build` job이 새 leg에서 세 가지를 본다. 빌드, `Static-link evidence (musl)` 스텝, `Release smoke (functional)` 스텝(`QSH_SMOKE_STRICT=1`). 이 캠페인은 GitHub Release에 붙어 나간 자산을 아무것도 설치된 적 없는 구형 glibc arm64 머신에 설치 스크립트로 받아, 정적 링크 증거와 기능 스모크 네 축(§5)을 손으로 다시 밟는다. 러너에는 최신 glibc와 toolchain이 있고 대상 머신에는 없다. 그 차이가 정적 링크 주장이 맞는지 드러내는 자리다.
 
 ## 2. 선행 조건
 
@@ -94,7 +94,7 @@ FAIL이 나오면 원인을 분류한다.
 | 회차 | 날짜(UTC) | 플랫폼/이미지 | 설치 경로 | 바이너리 sha256 | 정적 링크 | 스모크 네 축 | gnu 거부 | 결과 | 기록자 |
 |---|---|---|---|---|---|---|---|---|---|
 
-열 채우는 법은 `docs/campaigns/m10-clean-vm.md` §8과 같다. `정적 링크`, `스모크 네 축`, `gnu 거부`는 `PASS`나 `FAIL` 중 하나이고, `결과`는 세 열이 모두 PASS이고 sha256과 설치 경로가 비어 있지 않을 때만 `PASS`다. 행마다 비고 문단을 표 아래에 회차 번호를 머리에 달아 잇는다. 비고에 들어가는 것은 대상 태그와 그 태그가 가리키는 커밋, release run id, gnu 자산이 요구한 glibc 최고 버전, `ldd --version` 첫 줄, `ldd`와 `file` 출력 원문, gnu 자산을 실행했을 때 동적 링커의 거부 문구, 막힌 지점의 원문 에러다.
+열 채우는 법은 `docs/campaigns/m10-clean-vm.md` §8과 같다. `정적 링크`, `스모크 네 축`, `gnu 거부`는 `PASS`나 `FAIL` 중 하나이고, `결과`는 세 열이 모두 PASS이고 sha256과 설치 경로가 비어 있지 않을 때만 `PASS`다. 행마다 비고 문단을 표 아래에 회차 번호를 머리에 달아 잇는다. 비고에는 대상 태그와 그 태그가 가리키는 커밋, release run id, gnu 자산이 요구한 glibc 최고 버전, `ldd --version` 첫 줄, `ldd`와 `file` 출력 원문, gnu 자산을 실행했을 때 동적 링커의 거부 문구, 막힌 지점의 원문 에러를 적는다.
 
 ## 관련 문서
 
