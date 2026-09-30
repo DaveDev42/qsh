@@ -116,6 +116,9 @@ pub struct PathState {
     last_activity: Instant,
     last_probe: Option<Instant>,
     unanswered: u32,
+    /// Set by a wake: the next verdict probes at once, whatever the silence
+    /// so far, instead of waiting out a cadence beat.
+    probe_now: bool,
 }
 
 impl PathState {
@@ -127,6 +130,7 @@ impl PathState {
             last_activity: now,
             last_probe: None,
             unanswered: 0,
+            probe_now: false,
         }
     }
 
@@ -156,6 +160,20 @@ impl PathState {
     /// waiting, so the fast cadence applies.
     pub fn observe_activity(&mut self, now: Instant) {
         self.last_activity = now;
+    }
+
+    /// The machine slept and woke (`super::wake`, ADR-0023 decision 17).
+    /// Everything known about the path is stale, so this counts as activity
+    /// (somebody is about to look, hence the fast cadence) and orders a
+    /// probe on the very next verdict.
+    ///
+    /// The silence clock is left alone on purpose: it is measured on the
+    /// monotonic clock from the last inbound byte before the sleep, so the
+    /// strikes and `dead_after` that follow are not shortened or lengthened
+    /// by how long the machine slept.
+    pub fn observe_wake(&mut self, now: Instant) {
+        self.last_activity = now;
+        self.probe_now = true;
     }
 
     /// Probes sent since the last inbound byte.
@@ -191,7 +209,7 @@ impl PathState {
         let since_probe = self
             .last_probe
             .map_or(Duration::MAX, |at| now.saturating_duration_since(at));
-        if silence >= cadence && since_probe >= cadence {
+        if std::mem::take(&mut self.probe_now) || (silence >= cadence && since_probe >= cadence) {
             self.last_probe = Some(now);
             self.unanswered += 1;
             return Verdict::Probe;
@@ -299,9 +317,20 @@ impl PathWatch {
         self.state().observe_inbound(Instant::now());
     }
 
-    /// Report local activity (input, resize) — somebody is waiting.
+    /// Report local activity (input, resize, an accepted local connection)
+    /// — somebody is waiting.
     pub fn activity(&self) {
         self.observe(|state, now| state.observe_activity(now));
+    }
+
+    /// Report that the machine woke from sleep. See
+    /// [`PathState::observe_wake`]. [`watch_path`] calls this itself when
+    /// the process wake detector fires and judges immediately afterwards.
+    pub fn wake(&self) {
+        // Not through `observe`: the caller judges right away, so waking a
+        // sleeping watchdog through the cadence-change `Notify` as well
+        // would only leave a stale permit behind.
+        self.state().observe_wake(Instant::now());
     }
 
     /// Apply one observation, waking a watchdog that is sleeping out an
@@ -471,6 +500,25 @@ pub async fn watch_path<S: ProbeSource>(
     watch: PathWatch,
     probes: std::sync::Arc<tokio::sync::Notify>,
 ) {
+    watch_path_with_wake(source, watch, probes, super::wake::subscribe()).await;
+}
+
+/// [`watch_path`] with the wake signal supplied, so a test can inject one
+/// without touching the process-wide detector.
+///
+/// A wake is judged at once rather than after the next beat: the watchdog
+/// records it (activity plus an immediate probe, `PathState::observe_wake`)
+/// and falls straight through to the verdict. With no answer, three probes at
+/// the fast cadence and `dead_after(rtt)` of silence later the path is
+/// declared dead: `WAKE_TICK + dead_after(rtt)` after the machine woke at the
+/// outside (ADR-0023 decision 17).
+pub(crate) async fn watch_path_with_wake<S: ProbeSource>(
+    source: S,
+    watch: PathWatch,
+    probes: std::sync::Arc<tokio::sync::Notify>,
+    mut wake_rx: tokio::sync::watch::Receiver<super::wake::WakeEvent>,
+) {
+    let mut wake_closed = false;
     loop {
         // Re-read every round rather than arming a fixed ticker: the beat
         // *is* the power budget, and an attach nobody is using must not
@@ -491,6 +539,29 @@ pub async fn watch_path<S: ProbeSource>(
             // measured at the fast cadence.
             () = watch.woken() => continue,
             () = tokio::time::sleep(period) => {}
+            // The machine slept. `changed()` is cancel-safe and the
+            // receiver keeps the value, so a wake that lands while the
+            // verdict below is running is seen on the next round.
+            woke = async {
+                if wake_closed {
+                    std::future::pending().await
+                } else {
+                    wake_rx.changed().await
+                }
+            } => {
+                if woke.is_err() {
+                    // Detector gone (only possible with an injected
+                    // sender): nothing more will ever arrive, so stop
+                    // polling it rather than spin.
+                    wake_closed = true;
+                    continue;
+                }
+                tracing::debug!(
+                    slept_ms = wake_rx.borrow_and_update().slept_ms,
+                    "machine woke from sleep; judging the path now"
+                );
+                watch.wake();
+            }
         }
         let rtt = source.rtt();
         match watch.verdict(rtt) {
@@ -513,285 +584,4 @@ pub async fn watch_path<S: ProbeSource>(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn cfg() -> PathWatchConfig {
-        PathWatchConfig::default()
-    }
-
-    const LAN: Duration = Duration::from_millis(1);
-
-    #[test]
-    fn a_talking_host_is_never_probed() {
-        let cfg = cfg();
-        let t0 = Instant::now();
-        let mut state = PathState::new(t0);
-        // Output every 100 ms: never silent for a whole probe interval.
-        for step in 1..40u32 {
-            let now = t0 + Duration::from_millis(100) * step;
-            state.observe_inbound(now);
-            assert_eq!(state.verdict(now, LAN, &cfg), Verdict::Healthy);
-        }
-        assert_eq!(state.unanswered(), 0);
-    }
-
-    #[test]
-    fn silence_earns_probes_and_then_a_verdict() {
-        let cfg = cfg();
-        let t0 = Instant::now();
-        let mut state = PathState::new(t0);
-        let at = |ms: u64| t0 + Duration::from_millis(ms);
-
-        assert_eq!(state.verdict(at(100), LAN, &cfg), Verdict::Healthy);
-        assert_eq!(state.verdict(at(250), LAN, &cfg), Verdict::Probe);
-        assert_eq!(state.verdict(at(400), LAN, &cfg), Verdict::Healthy);
-        assert_eq!(state.verdict(at(500), LAN, &cfg), Verdict::Probe);
-        assert_eq!(state.verdict(at(750), LAN, &cfg), Verdict::Probe);
-        assert_eq!(state.unanswered(), 3);
-        // Three strikes, but the silence floor is not reached yet.
-        assert_eq!(state.verdict(at(999), LAN, &cfg), Verdict::Healthy);
-        assert_eq!(state.verdict(at(1_000), LAN, &cfg), Verdict::Dead);
-    }
-
-    /// The whole point of the exercise: detection lands far inside the 2 s
-    /// the recovery itself is allowed, and nowhere near the 45 s idle
-    /// timeout that must never be the mechanism.
-    #[test]
-    fn detection_is_far_inside_the_recovery_budget() {
-        let cfg = cfg();
-        let t0 = Instant::now();
-        let mut state = PathState::new(t0);
-        let mut declared = None;
-        for ms in 1..=45_000u64 {
-            let now = t0 + Duration::from_millis(ms);
-            if state.verdict(now, LAN, &cfg) == Verdict::Dead {
-                declared = Some(ms);
-                break;
-            }
-        }
-        let ms = declared.expect("a silent path must be declared dead");
-        assert!(
-            ms <= 1_500,
-            "detection took {ms} ms; the 2 s recovery budget starts *after* this"
-        );
-        assert!(
-            ms < 45_000,
-            "detection must not be quinn's idle timeout in disguise"
-        );
-    }
-
-    /// A single lost datagram on an otherwise live path must not be a
-    /// verdict: the answer that arrives clears the strikes.
-    #[test]
-    fn one_answer_clears_the_strikes() {
-        let cfg = cfg();
-        let t0 = Instant::now();
-        let mut state = PathState::new(t0);
-        let at = |ms: u64| t0 + Duration::from_millis(ms);
-        assert_eq!(state.verdict(at(250), LAN, &cfg), Verdict::Probe);
-        assert_eq!(state.verdict(at(500), LAN, &cfg), Verdict::Probe);
-        state.observe_inbound(at(600));
-        assert_eq!(state.unanswered(), 0);
-        assert_eq!(state.verdict(at(1_200), LAN, &cfg), Verdict::Probe);
-        assert_eq!(state.verdict(at(1_300), LAN, &cfg), Verdict::Healthy);
-    }
-
-    /// A slow path is judged on its own RTT, not on a number picked for a
-    /// LAN: eight round trips of silence, not one second.
-    #[test]
-    fn a_slow_path_gets_a_deadline_of_its_own() {
-        let cfg = cfg();
-        let rtt = Duration::from_millis(400); // 8 × 400 ms = 3.2 s
-        let t0 = Instant::now();
-        let mut state = PathState::new(t0);
-        let at = |ms: u64| t0 + Duration::from_millis(ms);
-        for ms in [250, 500, 750, 1_000, 1_250] {
-            state.verdict(at(ms), rtt, &cfg);
-        }
-        assert!(state.unanswered() >= cfg.strikes);
-        assert_ne!(
-            state.verdict(at(2_000), rtt, &cfg),
-            Verdict::Dead,
-            "a 400 ms path is not dead after 2 s of silence"
-        );
-        assert_eq!(state.verdict(at(3_200), rtt, &cfg), Verdict::Dead);
-    }
-
-    /// An attach nobody is using drops to the slow cadence — and typing
-    /// puts it straight back on the fast one, because that is the moment a
-    /// user starts caring.
-    #[test]
-    fn an_idle_attach_probes_slowly_until_the_user_types() {
-        let cfg = cfg();
-        let t0 = Instant::now();
-        let mut state = PathState::new(t0);
-        let at = |secs: u64| t0 + Duration::from_secs(secs);
-
-        // Past the active window: probes are 5 s apart, not 250 ms, and no
-        // amount of slow probing declares death — the silence floor is met
-        // but the strikes only accrue one per 5 s.
-        assert_eq!(state.verdict(at(16), LAN, &cfg), Verdict::Probe);
-        assert_eq!(state.verdict(at(18), LAN, &cfg), Verdict::Healthy);
-        assert_eq!(state.verdict(at(20), LAN, &cfg), Verdict::Healthy);
-        assert_eq!(state.verdict(at(21), LAN, &cfg), Verdict::Probe);
-        assert_eq!(state.verdict(at(23), LAN, &cfg), Verdict::Healthy);
-
-        // The user types: the cadence is fast again, so the verdict lands a
-        // quarter-second later rather than five seconds later. The strikes
-        // banked while idle still count — the path was already suspect.
-        state.observe_activity(at(26));
-        assert_eq!(state.verdict(at(26), LAN, &cfg), Verdict::Probe);
-        assert_eq!(state.unanswered(), cfg.strikes);
-        assert_eq!(
-            state.verdict(at(26) + cfg.probe_interval, LAN, &cfg),
-            Verdict::Dead
-        );
-    }
-
-    /// The regression the two-cadence design existed only on paper
-    /// without: a *healthy* idle path — one where the host answers every
-    /// probe — has to fall to the slow beat. The obvious version of
-    /// "inbound traffic means the attach is in use" made every answer
-    /// re-arm the active window, so a live silent session probed four
-    /// times a second for as long as it was open.
-    #[test]
-    fn a_healthy_idle_path_falls_to_the_slow_cadence() {
-        let cfg = cfg();
-        let t0 = Instant::now();
-        let mut state = PathState::new(t0);
-        let mut probes_in_the_last_minute = 0u32;
-        // A live host: every probe is answered a millisecond later.
-        for ms in 1..=60_000u64 {
-            let now = t0 + Duration::from_millis(ms);
-            match state.verdict(now, LAN, &cfg) {
-                Verdict::Probe => {
-                    probes_in_the_last_minute += 1;
-                    state.observe_inbound(now + Duration::from_millis(1));
-                }
-                Verdict::Dead => panic!("an answered path must never be declared dead"),
-                Verdict::Healthy => {}
-            }
-        }
-        assert_eq!(
-            state.cadence(t0 + Duration::from_secs(60), &cfg),
-            cfg.idle_probe_interval,
-            "a `Pong` is the watchdog answering itself; it must not count as somebody waiting"
-        );
-        // 15 s of fast cadence, then 45 s of slow: ~60 + ~9, nowhere near
-        // the ~240 a permanently-active window would produce.
-        assert!(
-            probes_in_the_last_minute < 100,
-            "an idle-but-live attach probed {probes_in_the_last_minute} times in a minute"
-        );
-        // …and a keystroke puts it straight back on the fast beat.
-        let back = t0 + Duration::from_secs(60);
-        state.observe_activity(back);
-        assert_eq!(state.cadence(back, &cfg), cfg.probe_interval);
-    }
-
-    /// Session traffic *is* activity, so a session that is printing stays
-    /// on the fast cadence — that is the one the user is watching.
-    #[test]
-    fn session_traffic_keeps_the_fast_cadence() {
-        let cfg = cfg();
-        let t0 = Instant::now();
-        let mut state = PathState::new(t0);
-        let at = t0 + Duration::from_secs(30);
-        state.observe_traffic(at);
-        assert_eq!(state.cadence(at, &cfg), cfg.probe_interval);
-    }
-
-    #[tokio::test]
-    async fn a_migration_probe_cannot_miss_the_answer_it_asked_for() {
-        let watch = PathWatch::new(cfg());
-        // Subscribed *before* the question, which is the whole point: the
-        // answer below lands before anything awaits, and must still be
-        // seen.
-        let mut signal = watch.inbound_signal();
-        watch.inbound();
-        tokio::time::timeout(Duration::from_secs(5), signal.changed())
-            .await
-            .expect("an answer that beat the waiter must not be lost")
-            .expect("the sender outlives the receiver");
-    }
-
-    #[tokio::test]
-    async fn a_stalled_consumer_is_not_a_dead_path() {
-        let watch = PathWatch::new(cfg());
-        let guard = watch.stalled();
-        // However long the frontend parks us, no strike is banked: the
-        // watchdog cannot see inbound traffic it is not reading.
-        for _ in 0..100 {
-            assert_eq!(watch.verdict(LAN), Verdict::Healthy);
-        }
-        assert!(!watch.is_dead());
-        drop(guard);
-        assert_eq!(watch.verdict(LAN), Verdict::Healthy);
-    }
-
-    #[tokio::test]
-    async fn death_is_observable_before_and_after_it_is_declared() {
-        let watch = PathWatch::new(cfg());
-        let waiting = watch.clone();
-        let task = tokio::spawn(async move { waiting.dead().await });
-        watch.declare_dead();
-        assert!(watch.is_dead());
-        tokio::time::timeout(Duration::from_secs(5), task)
-            .await
-            .expect("a declared death must wake its waiters")
-            .expect("join");
-        // Already dead: resolves immediately, and stays idempotent.
-        watch.declare_dead();
-        tokio::time::timeout(Duration::from_secs(5), watch.dead())
-            .await
-            .expect("an already-dead path resolves at once");
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_healthy_path_never_resolves_dead() {
-        let watch = PathWatch::new(cfg());
-        assert!(
-            tokio::time::timeout(Duration::from_secs(600), watch.dead())
-                .await
-                .is_err(),
-            "a path nobody declared dead must not resolve"
-        );
-    }
-
-    /// A stub that never closes and reports a fixed RTT — stands in for
-    /// whatever a host-role prober will wrap ([`server::ControlPinger`]'s
-    /// module doc, M3 Step 4). Exists to prove [`watch_path`] is generic
-    /// over [`ProbeSource`] in fact, not just in the trait's shape: a type
-    /// with no `qsh_transport::Connection` inside it can still drive the
-    /// exact same watchdog policy.
-    #[derive(Clone)]
-    struct NeverCloses;
-
-    impl ProbeSource for NeverCloses {
-        async fn closed(&self) {
-            std::future::pending::<()>().await
-        }
-
-        fn rtt(&self) -> Duration {
-            LAN
-        }
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn watch_path_is_generic_over_the_probe_source() {
-        let watch = PathWatch::new(cfg());
-        let probes = Arc::new(tokio::sync::Notify::new());
-        let watchdog = tokio::spawn(watch_path(NeverCloses, watch.clone(), probes));
-        // No answer ever arrives, so silence alone must reach a verdict —
-        // exactly the policy `silence_earns_probes_and_then_a_verdict`
-        // already covers for `PathState` directly; this proves the same
-        // outcome survives going through the generic `watch_path` task.
-        tokio::time::timeout(Duration::from_secs(5), watch.dead())
-            .await
-            .expect("an unanswered stub path must be declared dead");
-        watchdog
-            .await
-            .expect("watch_path must return once it declares death");
-    }
-}
+mod tests;
