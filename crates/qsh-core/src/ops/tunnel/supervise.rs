@@ -51,8 +51,10 @@ use crate::tunnel::supervise::backoff::{Backoff, Pacer, Waited};
 use crate::tunnel::supervise::budget::Budget;
 use crate::tunnel::supervise::classify::{Disposition, Source, classify};
 
+mod remote;
 #[cfg(unix)]
 mod reverse;
+pub(super) use remote::{RemoteHandle, RemoteTunnel};
 #[cfg(unix)]
 pub(super) use reverse::ReverseRoute;
 
@@ -155,19 +157,27 @@ impl Route {
 /// A running supervisor. Dropping it stops the supervision and releases
 /// everything the task holds.
 pub(super) struct SuperviseTask {
-    handle: tokio::task::JoinHandle<OpError>,
+    handle: tokio::task::JoinHandle<SuperviseEnd>,
+}
+
+/// How a supervised tunnel ended.
+pub(super) enum SuperviseEnd {
+    /// The budget ran out or an error that retrying cannot mend.
+    Failed(OpError),
+    /// An operator closed the registration (decision 14): a deliberate end.
+    Closed,
 }
 
 impl SuperviseTask {
-    /// Resolves with the error that ended the tunnel. Never resolves while
-    /// the tunnel is being kept alive.
-    pub(super) async fn finished(&mut self) -> OpError {
+    /// Resolves with how the tunnel ended. Never resolves while the tunnel
+    /// is being kept alive.
+    pub(super) async fn finished(&mut self) -> SuperviseEnd {
         match (&mut self.handle).await {
-            Ok(err) => err,
-            Err(err) => OpError::new(
+            Ok(end) => end,
+            Err(err) => SuperviseEnd::Failed(OpError::new(
                 ErrorCode::Internal,
                 format!("the tunnel supervisor stopped unexpectedly: {err}"),
-            ),
+            )),
         }
     }
 }
@@ -179,8 +189,15 @@ impl Drop for SuperviseTask {
 }
 
 /// Start supervising. Must run inside the tunnel's runtime.
-pub(super) fn spawn(wiring: Wiring, params: Params, session: Session) -> SuperviseTask {
-    let handle = tokio::spawn(Supervisor::new(wiring, params).run(session));
+pub(super) fn spawn(
+    wiring: Wiring,
+    params: Params,
+    session: Session,
+    remote: Option<RemoteTunnel>,
+) -> SuperviseTask {
+    let mut supervisor = Supervisor::new(wiring, params);
+    supervisor.remote = remote;
+    let handle = tokio::spawn(supervisor.run(session));
     SuperviseTask { handle }
 }
 
@@ -209,6 +226,9 @@ struct Line<'a> {
     /// The registration generation a reverse carrier was confirmed at.
     #[serde(skip_serializing_if = "Option::is_none")]
     generation: Option<u64>,
+    /// The id a `-R` tunnel had before it was re-opened (decision 13).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    previous_tunnel_id: Option<&'a str>,
 }
 
 fn millis(d: Duration) -> u64 {
@@ -223,6 +243,10 @@ enum Ended {
     Lost(Option<&'static str>),
     /// The tunnel ends, without a retry.
     Fatal(OpError),
+    /// An operator closed the tunnel (decision 14). Only the reverse route
+    /// can tell, and that route is unix-only.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    Closed,
 }
 
 /// One failed re-establishment attempt.
@@ -271,6 +295,17 @@ enum Established {
     Reverse(reverse::ReverseEstablished),
 }
 
+impl Established {
+    /// The new carrier's control stream.
+    fn session_mut(&mut self) -> &mut Session {
+        match self {
+            Established::Forward { session, .. } => session,
+            #[cfg(unix)]
+            Established::Reverse(next) => &mut next.session,
+        }
+    }
+}
+
 struct AbortOnDrop(tokio::task::JoinHandle<()>);
 
 impl Drop for AbortOnDrop {
@@ -300,6 +335,8 @@ struct Supervisor {
     old_pumps: Vec<AbortOnDrop>,
     /// Tells the accept-hold gate when an attempt runs or starts next.
     hold: Option<HoldSignal>,
+    /// The registration a `-R` tunnel keeps on the peer.
+    remote: Option<RemoteTunnel>,
 }
 
 impl Supervisor {
@@ -328,6 +365,7 @@ impl Supervisor {
             budget,
             old_pumps: Vec::new(),
             hold,
+            remote: None,
         }
     }
 
@@ -352,6 +390,7 @@ impl Supervisor {
             outage_ms: None,
             slept_ms: None,
             generation: None,
+            previous_tunnel_id: None,
         }
     }
 
@@ -373,11 +412,19 @@ impl Supervisor {
         millis(self.budget.outage(Instant::now()))
     }
 
-    async fn run(mut self, first: Session) -> OpError {
+    async fn run(mut self, first: Session) -> SuperviseEnd {
         let mut session = first;
         loop {
-            match self.monitor(session).await {
-                Ended::Fatal(err) => return self.give_up(err),
+            let ended = self.monitor(session).await;
+            if let Some(remote) = &self.remote {
+                remote.clear_pump();
+            }
+            match ended {
+                Ended::Fatal(err) => return SuperviseEnd::Failed(self.give_up(err)),
+                Ended::Closed => {
+                    Self::emit(&self.line("closed"));
+                    return SuperviseEnd::Closed;
+                }
                 Ended::Lost(cause) => {
                     let now = Instant::now();
                     if self.budget.lost(now) {
@@ -395,7 +442,7 @@ impl Supervisor {
                     Self::emit(&line);
                     match self.reestablish().await {
                         Ok(next) => session = next,
-                        Err(err) => return self.give_up(err),
+                        Err(err) => return SuperviseEnd::Failed(self.give_up(err)),
                     }
                 }
             }
@@ -448,6 +495,7 @@ impl Supervisor {
             session,
             self.watch.clone(),
             Arc::clone(&probes),
+            self.remote.as_mut().map(RemoteTunnel::pump_channel),
         ));
         let mut wake_log = wake::subscribe();
         let mut denied_open = true;
@@ -549,8 +597,18 @@ impl Supervisor {
             self.budget.note_attempt();
             attempt += 1;
             self.hold_attempting();
-            match self.attempt().await {
-                Ok(next) => return Ok(self.install(next)),
+            let attempted = match self.attempt().await {
+                Ok(mut next) => match self.reissue(&mut next).await {
+                    Ok(reissued) => Ok((next, reissued)),
+                    Err(err) => {
+                        Self::discard(next);
+                        Err(err)
+                    }
+                },
+                Err(err) => Err(err),
+            };
+            match attempted {
+                Ok((next, reissued)) => return Ok(self.install(next, reissued)),
                 Err(err) => {
                     if classify(err.source, &err.op.code, err.op.retryable) == Disposition::Stop {
                         return Err(err.op);
@@ -593,7 +651,7 @@ impl Supervisor {
     }
 
     /// Swap the new carrier in and open the gate (decision 5).
-    fn install(&mut self, next: Established) -> Session {
+    fn install(&mut self, next: Established, reissued: Option<remote::Reissued>) -> Session {
         #[cfg_attr(not(unix), allow(unused_mut))]
         let mut generation = None;
         #[cfg_attr(not(unix), allow(irrefutable_let_patterns))]
@@ -625,11 +683,23 @@ impl Supervisor {
         if let Some(hold) = &self.hold {
             hold.idle();
         }
+        let previous = reissued.and_then(|reissued| self.adopt(reissued));
         let mut line = self.line("reestablished");
         line.outage_ms = Some(self.outage_ms());
         line.generation = generation;
+        line.previous_tunnel_id = previous.as_deref();
         Self::emit(&line);
         session
+    }
+
+    /// A carrier that was dialed but could not be used: close it so the
+    /// peer does not keep a connection nobody reads.
+    fn discard(next: Established) {
+        match next {
+            Established::Forward { connection, .. } => connection.close(0, b"done"),
+            #[cfg(unix)]
+            Established::Reverse(_) => {}
+        }
     }
 
     /// One attempt to get a verified carrier back.
@@ -756,7 +826,15 @@ fn permission_denied() -> OpError {
 
 /// Sole owner of one connection's control stream: sends the liveness pings
 /// the watchdog asks for and feeds every answer to it.
-async fn control_pump(mut session: Session, watch: PathWatch, probes: Arc<Notify>) {
+///
+/// A `-R` tunnel's pump also carries the holder's parting `RemoteForwardClose`
+/// (decision 11): only the owner of the stream can send on it.
+async fn control_pump(
+    mut session: Session,
+    watch: PathWatch,
+    probes: Arc<Notify>,
+    mut cmds: Option<mpsc::UnboundedReceiver<remote::PumpCmd>>,
+) {
     loop {
         tokio::select! {
             biased;
@@ -765,6 +843,18 @@ async fn control_pump(mut session: Session, watch: PathWatch, probes: Arc<Notify
                     return;
                 }
             }
+            cmd = async {
+                match &mut cmds {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => match cmd {
+                Some(remote::PumpCmd::Close { forward_id, done }) => {
+                    let _ = session.rfwd_close(wire::RemoteForwardClose { forward_id }).await;
+                    let _ = done.send(());
+                }
+                None => cmds = None,
+            },
             message = session.next_control() => match message {
                 Ok(Some(ControlIn::Pong)) => watch.inbound(),
                 Ok(Some(ControlIn::Ping { request_id })) => {

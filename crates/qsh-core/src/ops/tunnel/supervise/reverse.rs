@@ -17,11 +17,12 @@ use qsh_proto::wire;
 use tokio::time::Instant;
 
 use super::{
-    AbortOnDrop, AttemptError, Ended, Established, Supervisor, control_pump, permission_denied,
+    AbortOnDrop, AttemptError, Ended, Established, Route, Supervisor, control_pump,
+    permission_denied,
 };
 use crate::client::Session;
 use crate::client::wake;
-use crate::localctl::client::{ExpectedPeer, open_control};
+use crate::localctl::client::{ExpectedPeer, admin_host_list, admin_tunnel_list, open_control};
 use crate::ops::OpError;
 use crate::tunnel::local::ForwardCarrier;
 
@@ -46,6 +47,17 @@ pub(in crate::ops::tunnel) struct ReverseEstablished {
     pub(super) generation: u64,
 }
 
+/// What a claim that came back at once says about the tunnel (decision 14).
+enum Verdict {
+    /// The registration is the one the tunnel confirmed and only its
+    /// forward is gone: someone ran `qsh tunnel close`.
+    OperatorClosed,
+    /// The host is stale, gone or registered anew: a loss like any other.
+    RegistrationChanged,
+    /// The daemon could not say, or still lists the forward.
+    Unknown,
+}
+
 /// The `wait_ms` of a re-establishment: what is left of the budget, never
 /// more than the daemon honors (decision 7-1).
 fn wait_ms(remaining: Duration) -> u32 {
@@ -62,6 +74,7 @@ impl Supervisor {
             session,
             self.watch.clone(),
             probes,
+            self.remote.as_mut().map(super::RemoteTunnel::pump_channel),
         )));
         let mut wake_log = wake::subscribe();
         let mut denied_open = true;
@@ -99,6 +112,28 @@ impl Supervisor {
                     }
                     None => changed_open = false,
                 },
+                vanished = async {
+                    match self.remote.as_mut() {
+                        Some(remote) => remote.vanished().await,
+                        None => std::future::pending().await,
+                    }
+                } => match vanished {
+                    Some(forward_id) => {
+                        let current = self.remote.as_ref().map(|r| r.forward_id() == forward_id);
+                        if current == Some(true) && !pump.0.is_finished() {
+                            match self.read_operator_close().await {
+                                Verdict::OperatorClosed => return Ended::Closed,
+                                Verdict::RegistrationChanged => return Ended::Lost(None),
+                                Verdict::Unknown => {}
+                            }
+                        }
+                    }
+                    None => {
+                        if let Some(remote) = self.remote.as_mut() {
+                            remote.stop_watching_vanished();
+                        }
+                    }
+                },
                 changed = wake_log.changed() => {
                     if changed.is_ok() {
                         let event = *wake_log.borrow_and_update();
@@ -106,6 +141,39 @@ impl Supervisor {
                     }
                 }
             }
+        }
+    }
+
+    /// Decision 14: ask the daemon whether the registration this tunnel
+    /// confirmed is still the live one and still lists the tunnel. One
+    /// `LocalHostList` and one `LocalTunnelList`, no more.
+    async fn read_operator_close(&self) -> Verdict {
+        let Route::Reverse(route) = &self.params.route else {
+            return Verdict::Unknown;
+        };
+        let Some(remote) = &self.remote else {
+            return Verdict::Unknown;
+        };
+        let Ok(hosts) = admin_host_list(&route.socket).await else {
+            return Verdict::Unknown;
+        };
+        let name = crate::ops::host::lookup_name(&route.host);
+        let still_registered = hosts.iter().any(|host| {
+            host.name == name && host.state == "reachable" && host.generation == route.generation
+        });
+        if !still_registered {
+            return Verdict::RegistrationChanged;
+        }
+        let Ok(tunnels) = admin_tunnel_list(&route.socket).await else {
+            return Verdict::Unknown;
+        };
+        if tunnels
+            .iter()
+            .any(|tunnel| tunnel.tunnel_id == remote.forward_id())
+        {
+            Verdict::Unknown
+        } else {
+            Verdict::OperatorClosed
         }
     }
 

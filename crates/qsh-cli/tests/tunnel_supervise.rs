@@ -579,3 +579,89 @@ fn supervised_forward_peer_restarted_without_forward_local_ends_permission_denie
         .collect();
     assert_eq!(denies.len(), 1, "one deny, no retry storm: {denies:?}");
 }
+
+// ---------------------------------------------------------------------------
+// -R (decisions 7-4, 8, 13)
+// ---------------------------------------------------------------------------
+
+fn remote_req(forward_port: u16, supervise_ms: u32) -> TunnelOpenReq {
+    TunnelOpenReq {
+        mode: "remote".to_string(),
+        ..local_req(forward_port, supervise_ms)
+    }
+}
+
+/// The `reestablished` line whose `previous_tunnel_id` is `previous`. A
+/// `-R` tunnel's lines are keyed by the id the peer currently knows it by
+/// (decision 13), so the line after a re-issue carries the new one.
+fn reestablished_after(previous: &str) -> Value {
+    poll_until("the `reestablished` line", WAIT, || {
+        captured()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .find(|line| {
+                line["supervise"] == "reestablished" && line["previous_tunnel_id"] == previous
+            })
+            .cloned()
+    })
+}
+
+#[test]
+fn supervised_forward_remote_reissues_before_the_peer_idle_timeout_and_regains_the_same_port() {
+    let rig = Rig::start();
+    let echo = start_echo();
+    let hold = rig
+        .ops()
+        .tunnel_open(remote_req(echo, BUDGET_MS))
+        .expect("open the supervised -R tunnel");
+    let first = hold.tunnel().tunnel_id.clone();
+    let port = u16::try_from(hold.tunnel().actual_port.expect("bound port")).unwrap();
+    round_trip(port, b"before");
+
+    // The path dies under the connection; the peer has not noticed yet, so
+    // its listener still holds the port when the new connection asks.
+    rig.sever();
+    let line = reestablished_after(&first);
+    round_trip(port, b"after");
+
+    assert_eq!(line["mode"], "remote");
+    assert_eq!(line["route"], "forward");
+    assert_ne!(line["tunnel_id"], first.as_str(), "{line}");
+    // The envelope the holder printed keeps the first id.
+    assert_eq!(hold.tunnel().tunnel_id, first);
+    assert_eq!(hold.tunnel().actual_port, Some(u32::from(port)));
+    hold.close();
+}
+
+#[test]
+fn supervised_remote_ends_when_another_principal_took_the_port_during_the_outage() {
+    let mut rig = Rig::start();
+    let echo = start_echo();
+    let hold = rig
+        .ops()
+        .tunnel_open(remote_req(echo, BUDGET_MS))
+        .expect("open the supervised -R tunnel");
+    let first = hold.tunnel().tunnel_id.clone();
+    let port = u16::try_from(hold.tunnel().actual_port.expect("bound port")).unwrap();
+    round_trip(port, b"before");
+
+    // The host goes away, which frees the port, and someone else binds it
+    // before the host comes back.
+    rig.kill_serve();
+    wait_for(&first, "lost", 1);
+    let squatter = TcpListener::bind(("127.0.0.1", port)).expect("the port is free again");
+    rig.restart_serve();
+
+    let err = hold.hold();
+    drop(squatter);
+    assert_eq!(err.code, ErrorCode::ConnectionFailed, "{err:?}");
+    assert!(
+        captured()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .any(|line| line["supervise"] == "gave_up" && line["tunnel_id"] == first.as_str()),
+        "the supervisor reports that it gave up"
+    );
+}

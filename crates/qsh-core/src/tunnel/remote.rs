@@ -670,6 +670,12 @@ enum AcceptDispatch {
         /// including this instance's own retries after a claimed splice
         /// ends, must keep presenting the same bytes.
         claim_token: Vec<u8>,
+        /// Told the `forward_id` of a claim loop whose attempt came back
+        /// at once, before it could have waited out its budget: the daemon
+        /// no longer lists that forward. A supervised tunnel reads this as
+        /// the cue to ask whether an operator closed it (ADR-0023
+        /// decision 14).
+        vanished: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     },
 }
 
@@ -708,6 +714,18 @@ impl RemoteForwardAcceptor {
     /// one shared loop).
     #[cfg(unix)]
     pub async fn spawn_reverse(socket_path: std::path::PathBuf, host: String) -> Self {
+        Self::spawn_reverse_watching(socket_path, host, None).await
+    }
+
+    /// [`Self::spawn_reverse`] that also reports, on `vanished`, each time
+    /// a claim loop's attempt returns at once (`AcceptDispatch::Local`'s
+    /// `vanished`).
+    #[cfg(unix)]
+    pub(crate) async fn spawn_reverse_watching(
+        socket_path: std::path::PathBuf,
+        host: String,
+        vanished: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    ) -> Self {
         Self {
             table: Arc::new(Mutex::new(HashMap::new())),
             dispatch: AcceptDispatch::Local {
@@ -723,6 +741,7 @@ impl RemoteForwardAcceptor {
                 // anywhere), it is simply a convenient source of a fresh
                 // random byte string.
                 claim_token: ulid::Ulid::new().to_string().into_bytes(),
+                vanished,
             },
         }
     }
@@ -766,6 +785,7 @@ impl RemoteForwardAcceptor {
             host: daemon_host,
             claims,
             claim_token,
+            vanished,
         } = &self.dispatch
         {
             let mut claims = claims.lock().unwrap_or_else(|e| e.into_inner());
@@ -777,6 +797,7 @@ impl RemoteForwardAcceptor {
                     claim_token.clone(),
                     host,
                     port,
+                    vanished.clone(),
                 ))
             });
         }
@@ -1311,6 +1332,7 @@ async fn claim_remote_forward_reverse(
     claim_token: Vec<u8>,
     host: String,
     port: u16,
+    vanished: Option<tokio::sync::mpsc::UnboundedSender<String>>,
 ) {
     let header = StreamHeader {
         kind: StreamKind::TcpAccepted as i32,
@@ -1347,6 +1369,11 @@ async fn claim_remote_forward_reverse(
                         spawn_claim_attempt(socket.clone(), daemon_host.clone(), header.clone())
                     }
                     Ok(Err(err)) => {
+                        if let (Some(vanished), ClientError::Remote { code: qsh_proto::ErrorCode::Timeout, .. }) =
+                            (&vanished, &err)
+                        {
+                            let _ = vanished.send(forward_id.clone());
+                        }
                         tracing::warn!(
                             forward_id,
                             %err,

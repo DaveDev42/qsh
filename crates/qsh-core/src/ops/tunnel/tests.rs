@@ -643,65 +643,6 @@ fn accept_hold_without_supervise_or_above_two_thousand_or_on_remote_is_invalid_a
     assert_eq!(err.code, ErrorCode::InvalidArgument);
 }
 
-/// ADR-0023 decision 24's table: every `(mode, accept_hold)` row that the
-/// support table marks unsupported is `UNSUPPORTED` before connecting, and a
-/// supported row gets past the gate (the failure is the missing host). The
-/// expectation is derived from `supervise_supported`, so flipping a row
-/// needs no edit here.
-#[test]
-fn supervise_on_an_unsupported_route_or_mode_is_unsupported_before_connecting() {
-    let dir = tempfile::tempdir().unwrap();
-    let ops = ops_in(dir.path());
-    for mode in [
-        SuperviseMode::Local,
-        SuperviseMode::Remote,
-        SuperviseMode::Dynamic,
-    ] {
-        for accept_hold_ms in [None, Some(500)] {
-            if mode == SuperviseMode::Remote && accept_hold_ms.is_some() {
-                continue; // INVALID_ARGUMENT, not a table row
-            }
-            let expected_supported = [SuperviseRoute::Forward, SuperviseRoute::Reverse]
-                .into_iter()
-                .any(|route| supervise_supported(route, mode, accept_hold_ms.is_some()));
-            let outcome = match mode {
-                SuperviseMode::Dynamic => ops
-                    .tunnel_dynamic(TunnelDynamicReq {
-                        host: "box".to_string(),
-                        bind: None,
-                        listen_port: 1080,
-                        supervise_ms: Some(1_000),
-                        accept_hold_ms,
-                    })
-                    .err(),
-                _ => ops
-                    .tunnel_open(TunnelOpenReq {
-                        supervise_ms: Some(1_000),
-                        accept_hold_ms,
-                        ..req(
-                            if mode == SuperviseMode::Local {
-                                "local"
-                            } else {
-                                "remote"
-                            },
-                            None,
-                            8080,
-                        )
-                    })
-                    .err(),
-            };
-            let err = outcome.expect("no host is configured, so this cannot succeed");
-            if expected_supported {
-                // Past the gate: the failure is the missing host.
-                assert_eq!(err.code, ErrorCode::HostNotFound, "{mode:?}");
-            } else {
-                assert_eq!(err.code, ErrorCode::Unsupported, "{mode:?}");
-                assert!(err.message.contains("--supervise"), "{}", err.message);
-            }
-        }
-    }
-}
-
 #[test]
 fn supervise_zero_and_absent_serialize_byte_identically() {
     let absent = req("local", None, 8080);

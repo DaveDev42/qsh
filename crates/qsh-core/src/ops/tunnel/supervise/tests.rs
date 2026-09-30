@@ -36,7 +36,87 @@ struct ScriptedPeer {
     incoming: Arc<AtomicUsize>,
     /// Streams the client opened after the handshake, across connections.
     requests: Arc<AtomicUsize>,
+    /// What the peer says to `RemoteForwardOpen` and `RemoteForwardClose`.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    rfwd: Arc<RfwdScript>,
     accepted: tokio::sync::mpsc::UnboundedReceiver<Connection>,
+}
+
+/// The scripted peer's side of `-R`: what it was asked and how it answers.
+#[derive(Default)]
+struct RfwdScript {
+    /// Every `RemoteForwardOpen`, in order.
+    opens: std::sync::Mutex<Vec<wire::RemoteForwardOpen>>,
+    /// Every `RemoteForwardClose.forward_id`, in order.
+    closes: std::sync::Mutex<Vec<String>>,
+    /// The next this-many opens that ask for a concrete port fail with
+    /// `CONNECTION_FAILED`, as a bind that races a listener still closing.
+    bind_failures: AtomicUsize,
+    /// While set, an open that asks for a concrete port is refused
+    /// `PERMISSION_DENIED` (a policy that allows only port zero).
+    deny_concrete_port: AtomicBool,
+    /// Forward ids issued so far.
+    issued: AtomicUsize,
+}
+
+impl RfwdScript {
+    fn answer(&self, id: u64, body: &control_message::Body) -> Option<ControlMessage> {
+        use wire::response;
+        match body {
+            control_message::Body::RfwdOpen(open) => {
+                self.opens.lock().unwrap().push(open.clone());
+                let refuse = |code, what: &str| {
+                    Some(ControlMessage::error(
+                        id,
+                        wire::Error::from_code(code, what),
+                    ))
+                };
+                // The very first open is the tunnel's own; the switches
+                // below only concern what comes after a loss.
+                let first = self.issued.load(Ordering::SeqCst) == 0;
+                if !first && open.bind_port != 0 && self.deny_concrete_port.load(Ordering::SeqCst) {
+                    return refuse(ErrorCode::PermissionDenied, "policy");
+                }
+                if !first
+                    && open.bind_port != 0
+                    && self
+                        .bind_failures
+                        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                        .is_ok()
+                {
+                    return refuse(ErrorCode::ConnectionFailed, "address in use");
+                }
+                let n = self.issued.fetch_add(1, Ordering::SeqCst) + 1;
+                Some(ControlMessage::response(
+                    id,
+                    response::Body::RfwdOpened(wire::RemoteForwardOpened {
+                        forward_id: format!("fwd-{n}"),
+                        // The first answer is a port the peer chose, not the one
+                        // asked for, like a request for an ephemeral port.
+                        actual_port: if first { 43_210 } else { open.bind_port },
+                    }),
+                ))
+            }
+            control_message::Body::RfwdClose(close) => {
+                self.closes.lock().unwrap().push(close.forward_id.clone());
+                // Only the latest id is live on this peer; any other is
+                // what a peer that lost its registrations says.
+                let live = format!("fwd-{}", self.issued.load(Ordering::SeqCst));
+                if close.forward_id == live {
+                    Some(ControlMessage::new(
+                        id,
+                        control_message::Body::Response(wire::Response { body: None }),
+                    ))
+                } else {
+                    Some(ControlMessage::error(
+                        id,
+                        wire::Error::from_code(ErrorCode::InvalidArgument, "no such forward_id"),
+                    ))
+                }
+            }
+            _ => None,
+        }
+    }
 }
 
 async fn scripted_peer() -> ScriptedPeer {
@@ -53,6 +133,7 @@ async fn scripted_peer() -> ScriptedPeer {
     let stall = Arc::new(AtomicBool::new(false));
     let incoming_count = Arc::new(AtomicUsize::new(0));
     let requests = Arc::new(AtomicUsize::new(0));
+    let rfwd = Arc::new(RfwdScript::default());
     let (tx, accepted) = tokio::sync::mpsc::unbounded_channel();
     tokio::spawn({
         let strip = Arc::clone(&strip);
@@ -60,6 +141,7 @@ async fn scripted_peer() -> ScriptedPeer {
         let stall = Arc::clone(&stall);
         let incoming_count = Arc::clone(&incoming_count);
         let requests = Arc::clone(&requests);
+        let rfwd = Arc::clone(&rfwd);
         async move {
             while let Some(incoming) = listener.accept().await {
                 incoming_count.fetch_add(1, Ordering::SeqCst);
@@ -72,6 +154,7 @@ async fn scripted_peer() -> ScriptedPeer {
                 let offer_dial_filter = !strip.load(Ordering::SeqCst);
                 let requests = Arc::clone(&requests);
                 let mute = Arc::clone(&mute);
+                let rfwd = Arc::clone(&rfwd);
                 let tx = tx.clone();
                 tokio::spawn(async move {
                     let hello = move |_peer: &Hello| {
@@ -93,16 +176,21 @@ async fn scripted_peer() -> ScriptedPeer {
                     };
                     tokio::spawn(async move {
                         while let Ok(Some(msg)) = ctl.recv.recv::<ControlMessage>().await {
-                            if !matches!(msg.body, Some(control_message::Body::Ping(_)))
-                                || mute.load(Ordering::SeqCst)
+                            let reply = match &msg.body {
+                                Some(control_message::Body::Ping(_))
+                                    if !mute.load(Ordering::SeqCst) =>
+                                {
+                                    Some(ControlMessage::new(
+                                        msg.request_id,
+                                        control_message::Body::Pong(wire::Pong {}),
+                                    ))
+                                }
+                                Some(body) => rfwd.answer(msg.request_id, body),
+                                None => None,
+                            };
+                            if let Some(reply) = reply
+                                && ctl.send.send(&reply).await.is_err()
                             {
-                                continue;
-                            }
-                            let pong = ControlMessage::new(
-                                msg.request_id,
-                                control_message::Body::Pong(wire::Pong {}),
-                            );
-                            if ctl.send.send(&pong).await.is_err() {
                                 return;
                             }
                         }
@@ -124,6 +212,7 @@ async fn scripted_peer() -> ScriptedPeer {
         stall,
         incoming: incoming_count,
         requests,
+        rfwd,
         accepted,
     }
 }
@@ -384,6 +473,10 @@ fn supervised_forward_carrier_is_declared_lost_within_two_seconds_of_an_injected
     assert_eq!(lost.1.as_deref(), Some("path_dead"));
     drop(hold);
 }
+
+// The capture helpers it reads the supervise lines with are unix-only.
+#[cfg(unix)]
+mod remote;
 
 // ---- --accept-hold (ADR-0023 decision 19) ------------------------------
 
