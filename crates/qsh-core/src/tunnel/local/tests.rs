@@ -434,3 +434,208 @@ async fn refused_connection_closes_the_local_socket_and_the_forward_keeps_servin
     runner.abort();
     drop(host_conn);
 }
+
+// ---- the carrier watch (ADR-0023 decisions 3 and 5) ------------------
+
+use crate::tunnel::carrier::{CarrierState, CarrierView};
+
+/// A connection that ended without carrying a payload byte: an RST or a
+/// bare EOF on read, or an RST that surfaced already at `connect`. Same
+/// tolerance as `refused_connection_closes_the_local_socket_and_the_forward_keeps_serving`
+/// (the RST can beat `connect` itself on macOS).
+async fn assert_refused_without_payload(addr: SocketAddr) {
+    match TcpStream::connect(addr).await {
+        Ok(mut tcp) => {
+            let mut got = Vec::new();
+            match tokio::time::timeout(Duration::from_secs(10), tcp.read_to_end(&mut got))
+                .await
+                .expect("the refusal must arrive, not hang")
+            {
+                Ok(_) => assert!(got.is_empty(), "a refused connection must carry no payload"),
+                Err(err) => assert_eq!(err.kind(), io::ErrorKind::ConnectionReset),
+            }
+        }
+        Err(e)
+            if matches!(
+                e.kind(),
+                io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted
+            ) => {}
+        Err(e) => panic!("connect to the local forward: {e}"),
+    }
+}
+
+/// While the carrier is `Disconnected` an accepted connection is reset at
+/// once and no tunnel stream is opened. Removing the `current()` check in
+/// the accept arm makes this red: the connection would try a stream on a
+/// carrier that is not there (or hang).
+#[tokio::test]
+async fn local_forward_rejects_with_rst_while_the_carrier_is_disconnected() {
+    let (client_conn, host_conn) = loopback_pair().await;
+    let (tx, rx) = tokio::sync::watch::channel(CarrierState::Disconnected);
+    let forward = LocalForward::bind(&ephemeral_spec()).await.unwrap();
+    let addr = forward.local_addr();
+    let runner = tokio::spawn(forward.run(CarrierView::watching(rx, None)));
+
+    assert_refused_without_payload(addr).await;
+    // The refusal happened before any stream was opened: nothing is
+    // waiting on the peer's side. One poll is enough, the accept arm
+    // decides synchronously, so a stream would already be queued.
+    assert!(
+        tokio::time::timeout(Duration::ZERO, host_conn.accept_bi())
+            .await
+            .is_err(),
+        "no tunnel stream may be opened while disconnected"
+    );
+    drop((tx, client_conn));
+    runner.abort();
+}
+
+/// The carrier is read per accept: a value swapped in after the forward
+/// started is what the next connection rides, and a `Disconnected` window
+/// in between refuses instead of queuing.
+#[tokio::test]
+async fn accept_reads_the_carrier_current_at_accept_time() {
+    let (conn_a, host_a) = loopback_pair().await;
+    let (conn_b, host_b) = loopback_pair().await;
+    let carrier_a = Arc::new(ForwardCarrier::Quic(conn_a));
+    let carrier_b = Arc::new(ForwardCarrier::Quic(conn_b));
+    // Keep A's client end alive after the swap: dropping the last handle
+    // would close the connection and make `accept_bi` below return at once.
+    let keep_a = Arc::clone(&carrier_a);
+    let (tx, rx) = tokio::sync::watch::channel(CarrierState::Live(carrier_a));
+    let forward = LocalForward::bind(&ephemeral_spec()).await.unwrap();
+    let addr = forward.local_addr();
+    let runner = tokio::spawn(forward.run(CarrierView::watching(rx, None)));
+
+    // First connection rides A.
+    let host = tokio::spawn(fake_host(host_a.clone(), true, b""));
+    let mut tcp = TcpStream::connect(addr).await.unwrap();
+    tcp.write_all(b"one").await.unwrap();
+    tcp.shutdown().await.unwrap();
+    let mut got = Vec::new();
+    tcp.read_to_end(&mut got).await.unwrap();
+    assert_eq!(got, b"one");
+    host.await.unwrap();
+
+    // Down: refused. Then back up on B: the next connection rides B, and
+    // only B's peer sees a stream.
+    tx.send(CarrierState::Disconnected).unwrap();
+    assert_refused_without_payload(addr).await;
+    tx.send(CarrierState::Live(carrier_b)).unwrap();
+    let host = tokio::spawn(fake_host(host_b.clone(), true, b""));
+    let mut tcp = TcpStream::connect(addr).await.unwrap();
+    tcp.write_all(b"two").await.unwrap();
+    tcp.shutdown().await.unwrap();
+    let mut got = Vec::new();
+    tcp.read_to_end(&mut got).await.unwrap();
+    assert_eq!(got, b"two");
+    tokio::time::timeout(Duration::from_secs(10), host)
+        .await
+        .expect("connection two must reach B's peer")
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::ZERO, host_a.accept_bi())
+            .await
+            .is_err(),
+        "A must not have seen a second stream"
+    );
+    runner.abort();
+    drop((host_a, host_b, keep_a));
+}
+
+/// A splice past `ConnectResult{ok:true}` is not touched when the
+/// carrier switches to `Disconnected`: bytes keep flowing both ways.
+#[tokio::test]
+async fn a_splice_in_progress_survives_a_carrier_switch_to_disconnected() {
+    let (client_conn, host_conn) = loopback_pair().await;
+    let (tx, rx) = tokio::sync::watch::channel(CarrierState::Live(Arc::new(ForwardCarrier::Quic(
+        client_conn,
+    ))));
+    let host = tokio::spawn(fake_host(host_conn.clone(), true, b""));
+    let forward = LocalForward::bind(&ephemeral_spec()).await.unwrap();
+    let addr = forward.local_addr();
+    let runner = tokio::spawn(forward.run(CarrierView::watching(rx, None)));
+
+    let mut tcp = TcpStream::connect(addr).await.unwrap();
+    tcp.write_all(b"a").await.unwrap();
+    let mut one = [0u8; 1];
+    tcp.read_exact(&mut one).await.unwrap();
+    assert_eq!(&one, b"a", "the splice is up before the switch");
+
+    tx.send(CarrierState::Disconnected).unwrap();
+
+    tcp.write_all(b"b").await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), tcp.read_exact(&mut one))
+        .await
+        .expect("the spliced connection must keep flowing")
+        .unwrap();
+    assert_eq!(&one, b"b");
+    tcp.shutdown().await.unwrap();
+    let mut rest = Vec::new();
+    tcp.read_to_end(&mut rest).await.unwrap();
+    assert!(rest.is_empty());
+    host.await.unwrap();
+    runner.abort();
+    drop(host_conn);
+}
+
+/// A connection still waiting for `ConnectResult` when its carrier is
+/// left is reset in place, not left hanging on the dead connection.
+/// Removing the `left()` arm from `forward_connection` makes this red:
+/// the peer never answers, so the read would hang until the timeout.
+#[tokio::test]
+async fn a_handshake_awaiting_connect_result_on_the_old_carrier_is_rejected_on_disconnect() {
+    let (client_conn, host_conn) = loopback_pair().await;
+    let (tx, rx) = tokio::sync::watch::channel(CarrierState::Live(Arc::new(ForwardCarrier::Quic(
+        client_conn,
+    ))));
+    // A peer that reads the header and then never answers.
+    let (got_header_tx, got_header_rx) = tokio::sync::oneshot::channel();
+    let host = tokio::spawn(async move {
+        let (send, recv) = host_conn.accept_bi().await.unwrap();
+        let mut framed = qsh_transport::FramedStream::data(send, recv);
+        let _header: StreamHeader = framed.recv.recv().await.unwrap().expect("header");
+        let _ = got_header_tx.send(());
+        std::future::pending::<()>().await;
+        drop(framed);
+    });
+    let forward = LocalForward::bind(&ephemeral_spec()).await.unwrap();
+    let addr = forward.local_addr();
+    let runner = tokio::spawn(forward.run(CarrierView::watching(rx, None)));
+
+    let mut tcp = TcpStream::connect(addr).await.unwrap();
+    got_header_rx.await.unwrap();
+    tx.send(CarrierState::Disconnected).unwrap();
+
+    let mut got = Vec::new();
+    match tokio::time::timeout(Duration::from_secs(10), tcp.read_to_end(&mut got))
+        .await
+        .expect("the waiting handshake must be refused, not left hanging")
+    {
+        Ok(_) => assert!(got.is_empty()),
+        Err(err) => assert_eq!(err.kind(), io::ErrorKind::ConnectionReset),
+    }
+    runner.abort();
+    host.abort();
+}
+
+/// The activity hook fires once per accepted connection, refused ones
+/// included: a supervisor learns the forward is in use even while down.
+#[tokio::test]
+async fn every_accepted_connection_notes_activity_even_while_disconnected() {
+    let (tx, rx) = tokio::sync::watch::channel(CarrierState::Disconnected);
+    let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let hook_seen = Arc::clone(&seen);
+    let hook: crate::tunnel::carrier::ActivityHook = Arc::new(move || {
+        hook_seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    });
+    let forward = LocalForward::bind(&ephemeral_spec()).await.unwrap();
+    let addr = forward.local_addr();
+    let runner = tokio::spawn(forward.run(CarrierView::watching(rx, Some(hook))));
+
+    assert_refused_without_payload(addr).await;
+    assert_refused_without_payload(addr).await;
+    assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 2);
+    drop(tx);
+    runner.abort();
+}

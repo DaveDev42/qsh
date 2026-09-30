@@ -39,6 +39,7 @@ pub use dynamic::DynamicForwardHandle;
 pub use local::{LocalForwardError, LocalForwardHandle};
 pub use remote::{REMOTE_FORWARD_LOOPBACK_ONLY_MESSAGE, RemoteForwardAcceptor};
 
+pub(crate) mod carrier;
 pub(crate) mod dial;
 pub(crate) mod dynamic;
 pub(crate) mod local;
