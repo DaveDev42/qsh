@@ -688,6 +688,79 @@ fn tunnel_open_req_wait_ms_is_additive_optional() {
     assert_eq!(back, waited);
 }
 
+/// M12 DoD (a): an unsupervised tunnel request is byte-identical to one
+/// built before `supervise_ms` and `accept_hold_ms` existed. Both fields
+/// are omitted from the wire when `None`, on `tunnel.open` and on
+/// `tunnel.dynamic`, and a request without the keys still parses to `None`.
+#[test]
+fn unsupervised_tunnel_requests_serialize_without_the_supervise_fields() {
+    let open = TunnelOpenReq {
+        host: "personal-mac".into(),
+        mode: "local".into(),
+        bind: None,
+        listen_port: 8080,
+        forward_host: "localhost".into(),
+        forward_port: 3000,
+        wait_ms: None,
+        supervise_ms: None,
+        accept_hold_ms: None,
+    };
+    assert_eq!(
+        serde_json::to_value(&open).unwrap(),
+        serde_json::json!({
+            "host": "personal-mac",
+            "mode": "local",
+            "listen_port": 8080,
+            "forward_host": "localhost",
+            "forward_port": 3000
+        })
+    );
+    let dynamic = TunnelDynamicReq {
+        host: "personal-mac".into(),
+        bind: None,
+        listen_port: 1080,
+        supervise_ms: None,
+        accept_hold_ms: None,
+    };
+    assert_eq!(
+        serde_json::to_value(&dynamic).unwrap(),
+        serde_json::json!({
+            "host": "personal-mac",
+            "listen_port": 1080
+        })
+    );
+
+    let old_open: TunnelOpenReq = serde_json::from_value(serde_json::json!({
+        "host": "personal-mac",
+        "mode": "local",
+        "listen_port": 8080,
+        "forward_host": "localhost",
+        "forward_port": 3000
+    }))
+    .unwrap();
+    assert_eq!(old_open, open);
+    let old_dynamic: TunnelDynamicReq = serde_json::from_value(serde_json::json!({
+        "host": "personal-mac",
+        "listen_port": 1080
+    }))
+    .unwrap();
+    assert_eq!(old_dynamic, dynamic);
+
+    // Set, they are plain numbers and round-trip.
+    let supervised = TunnelOpenReq {
+        supervise_ms: Some(90_000),
+        accept_hold_ms: Some(500),
+        ..open
+    };
+    let json = serde_json::to_value(&supervised).unwrap();
+    assert_eq!(json["supervise_ms"], 90_000);
+    assert_eq!(json["accept_hold_ms"], 500);
+    assert_eq!(
+        serde_json::from_value::<TunnelOpenReq>(json).unwrap(),
+        supervised
+    );
+}
+
 #[test]
 fn tunnel_open_data_is_a_tunnel() {
     // TunnelOpenData is a type alias, not a distinct struct — the data

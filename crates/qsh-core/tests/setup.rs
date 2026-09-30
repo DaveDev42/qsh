@@ -12,9 +12,15 @@ use qsh_proto::{
     SetupStatus, SetupStep, SetupStepId, TrustAddReq, TrustInviteReq,
 };
 
+/// Every test builds its fixtures through this. When a test ends (pass or
+/// not reached by a panic), [`Drop`] checks that `acl.toml` is exactly what
+/// the test itself put there, or still absent: ADR-0024 says no branch of
+/// any role writes the file, so every branch test doubles as that proof.
 struct Sandbox {
     dir: tempfile::TempDir,
     ops: Ops,
+    /// The bytes the test wrote to `acl.toml` itself, if it did.
+    planted_acl: std::cell::RefCell<Option<Vec<u8>>>,
 }
 
 impl Sandbox {
@@ -32,7 +38,15 @@ impl Sandbox {
         Self {
             ops: Ops::new(paths),
             dir,
+            planted_acl: std::cell::RefCell::new(None),
         }
+    }
+
+    /// Put `bytes` in `acl.toml` as the test's own fixture; setup must leave
+    /// exactly these bytes behind.
+    fn put_acl(&self, bytes: impl AsRef<[u8]>) {
+        std::fs::write(self.acl_path(), bytes.as_ref()).unwrap();
+        *self.planted_acl.borrow_mut() = Some(bytes.as_ref().to_vec());
     }
 
     fn config_dir(&self) -> PathBuf {
@@ -76,6 +90,20 @@ impl Sandbox {
         let mut out = BTreeMap::new();
         walk(root, &mut out);
         out
+    }
+}
+
+impl Drop for Sandbox {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            return;
+        }
+        let now = std::fs::read(self.acl_path()).ok();
+        assert_eq!(
+            now,
+            *self.planted_acl.borrow(),
+            "a setup branch created or changed acl.toml"
+        );
     }
 }
 
@@ -173,7 +201,7 @@ fn setup_never_writes_acl_toml_in_any_role() {
         // An acl.toml before: the same bytes after.
         let before =
             b"# hand written\n[[acl]]\nprincipal = \"device:someone\"\nallow = [\"exec.run\"]\n";
-        std::fs::write(sandbox.acl_path(), before).unwrap();
+        sandbox.put_acl(before);
         sandbox.ops.setup_run(&request, &sandbox.env()).unwrap();
         assert_eq!(
             std::fs::read(sandbox.acl_path()).unwrap(),
@@ -211,7 +239,7 @@ fn setup_printed_rows_pasted_verbatim_make_acl_check_allow_every_intended_action
         } else {
             assert!(!rows.contains("forward.local"), "{rows}");
         }
-        std::fs::write(sandbox.acl_path(), &rows).unwrap();
+        sandbox.put_acl(&rows);
         let plan = sandbox.ops.setup_plan(&request, &sandbox.env()).unwrap();
         assert_eq!(
             step_of(&plan, SetupStepId::Acl).status,
@@ -239,7 +267,7 @@ fn setup_acl_step_appends_the_acl_restart_notice_byte_for_byte() {
         .unwrap()
         .acl_rows
         .unwrap();
-    std::fs::write(sandbox.acl_path(), rows).unwrap();
+    sandbox.put_acl(rows);
     let plan = sandbox.ops.setup_plan(&request, &sandbox.env()).unwrap();
     let acl = step_of(&plan, SetupStepId::Acl);
     assert_eq!(acl.status, SetupStatus::Already);
@@ -259,7 +287,7 @@ fn setup_invite_always_carries_assigned_name() {
         .unwrap()
         .acl_rows
         .unwrap();
-    std::fs::write(sandbox.acl_path(), rows).unwrap();
+    sandbox.put_acl(rows);
 
     let data = sandbox.ops.setup_run(&request, &sandbox.env()).unwrap();
     let invite = step_of(&data, SetupStepId::Invite);
@@ -287,7 +315,7 @@ fn setup_acl_step_pending_while_unassigned_invite_is_live() {
         .unwrap()
         .acl_rows
         .unwrap();
-    std::fs::write(sandbox.acl_path(), rows).unwrap();
+    sandbox.put_acl(rows);
     // Someone minted an invite outside `qsh setup`, without --as.
     sandbox.ops.trust_invite(TrustInviteReq::default()).unwrap();
 
@@ -444,7 +472,7 @@ fn setup_rerun_after_completion_changes_no_file() {
         .unwrap()
         .acl_rows
         .unwrap();
-    std::fs::write(sandbox.acl_path(), rows).unwrap();
+    sandbox.put_acl(rows);
 
     let first = sandbox.ops.setup_run(&request, &sandbox.env()).unwrap();
     assert!(
@@ -492,7 +520,7 @@ fn setup_service_unsupported_is_skipped() {
         .unwrap()
         .acl_rows
         .unwrap();
-    std::fs::write(sandbox.acl_path(), rows).unwrap();
+    sandbox.put_acl(rows);
     let data = sandbox.ops.setup_run(&request, &sandbox.env()).unwrap();
     let service = step_of(&data, SetupStepId::Service);
     if cfg!(any(target_os = "macos", target_os = "linux")) {
