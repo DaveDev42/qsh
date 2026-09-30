@@ -5,6 +5,9 @@
 //! asks for `--key-store file`, so the suite never touches the developer's
 //! real config directory or the OS credential store.
 
+mod ssh_golden;
+
+use std::collections::BTreeMap;
 use std::io::Write as _;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
@@ -923,4 +926,281 @@ fn trust_add_ca_collision_is_recoverable_with_trust_remove() {
     );
     assert_eq!(code, 0, "{second}");
     assert_eq!(second["data"]["created"], true);
+}
+
+// ---------------------------------------------------------------------------
+// `qsh init --import-ssh-key` (ADR-0026)
+// ---------------------------------------------------------------------------
+
+/// Every regular file under `dir` (relative path -> bytes).
+fn snapshot(dir: &Path) -> BTreeMap<String, Vec<u8>> {
+    fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<String, Vec<u8>>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                walk(root, &path, out);
+            } else {
+                let rel = path.strip_prefix(root).unwrap().display().to_string();
+                out.insert(rel, std::fs::read(&path).unwrap());
+            }
+        }
+    }
+    let mut out = BTreeMap::new();
+    walk(dir, dir, &mut out);
+    out
+}
+
+/// A sandbox plus a scratch directory holding key files.
+fn import_fixture() -> (Sandbox, TempDir) {
+    (Sandbox::new(), tempfile::tempdir().expect("tempdir"))
+}
+
+fn golden_key_path(dir: &TempDir) -> String {
+    ssh_golden::write(dir.path(), "id_ed25519", &ssh_golden::golden_key_file())
+        .display()
+        .to_string()
+}
+
+#[test]
+fn init_import_ssh_key_fingerprint_is_the_spki_sha256_of_the_issued_leaf() {
+    let (sandbox, keys) = import_fixture();
+    let key = golden_key_path(&keys);
+
+    let (code, value) = sandbox.json(&[
+        "init",
+        "--json",
+        "--key-store",
+        "file",
+        "--import-ssh-key",
+        &key,
+    ]);
+    assert_eq!(code, 0, "{value}");
+    assert_eq!(value["data"]["created"], true);
+
+    // Predicted from the public key alone (fixed SPKI prefix + 32 bytes),
+    // reported by init, and recomputed from the issued certificate by
+    // `identity export`: all one value.
+    let predicted = ssh_golden::golden_qsh_fingerprint();
+    assert_eq!(value["data"]["fingerprint"], predicted.as_str());
+    let (code, exported) = sandbox.json(&["identity", "export", "--json"]);
+    assert_eq!(code, 0, "{exported}");
+    assert_eq!(exported["data"]["fingerprint"], predicted.as_str());
+}
+
+#[test]
+fn init_import_ssh_key_prints_qsh_and_ssh_fingerprints_side_by_side() {
+    let (sandbox, keys) = import_fixture();
+    let key = golden_key_path(&keys);
+
+    let output = sandbox.qsh(&["init", "--key-store", "file", "--import-ssh-key", &key]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let qsh_line = format!("qsh fingerprint: {}", ssh_golden::golden_qsh_fingerprint());
+    let ssh_line = format!("ssh fingerprint: {}", ssh_golden::GOLDEN_SSH_FINGERPRINT);
+    assert!(stdout.contains(&qsh_line), "{stdout:?}");
+    assert!(stdout.contains(&ssh_line), "{stdout:?}");
+    let qsh_at = stdout.find(&qsh_line).unwrap();
+    let ssh_at = stdout.find(&ssh_line).unwrap();
+    assert_eq!(
+        stdout[qsh_at..ssh_at].matches('\n').count(),
+        1,
+        "the two fingerprints must be adjacent lines: {stdout:?}"
+    );
+
+    // JSON carries both too, and a plain `init` never grows the field.
+    let (other, keys) = import_fixture();
+    let key = golden_key_path(&keys);
+    let (code, value) = other.json(&[
+        "init",
+        "--json",
+        "--key-store",
+        "file",
+        "--import-ssh-key",
+        &key,
+    ]);
+    assert_eq!(code, 0, "{value}");
+    assert_eq!(
+        value["data"]["ssh_fingerprint"],
+        ssh_golden::GOLDEN_SSH_FINGERPRINT
+    );
+    assert!(
+        Sandbox::new().init()["data"]
+            .get("ssh_fingerprint")
+            .is_none()
+    );
+}
+
+#[test]
+fn init_import_ssh_key_on_an_existing_identity_is_invalid_argument_and_preserves_every_byte() {
+    let (sandbox, keys) = import_fixture();
+    sandbox.init();
+    let key = golden_key_path(&keys);
+    let before = snapshot(&sandbox.config);
+    assert!(!before.is_empty());
+
+    for json in [true, false] {
+        let mut args = vec![
+            "init",
+            "--key-store",
+            "file",
+            "--import-ssh-key",
+            key.as_str(),
+        ];
+        if json {
+            args.push("--json");
+        }
+        let output = sandbox.qsh(&args);
+        assert_eq!(output.status.code(), Some(255));
+        if json {
+            let value: Value =
+                serde_json::from_str(String::from_utf8(output.stdout).unwrap().trim()).unwrap();
+            assert_eq!(value["error"]["code"], "INVALID_ARGUMENT");
+            assert_eq!(
+                value["error"]["message"],
+                qsh_core::identity::IMPORT_SSH_KEY_IDENTITY_EXISTS
+            );
+        }
+    }
+    assert_eq!(snapshot(&sandbox.config), before);
+}
+
+#[test]
+fn init_import_ssh_key_checks_for_an_existing_identity_before_opening_the_key_file() {
+    let sandbox = Sandbox::new();
+    sandbox.init();
+    let (code, value) = sandbox.json(&[
+        "init",
+        "--json",
+        "--key-store",
+        "file",
+        "--import-ssh-key",
+        "/nonexistent/qsh-test/no-such-key",
+    ]);
+    assert_eq!(code, 255);
+    assert_eq!(value["error"]["code"], "INVALID_ARGUMENT");
+    assert_eq!(
+        value["error"]["message"],
+        qsh_core::identity::IMPORT_SSH_KEY_IDENTITY_EXISTS,
+        "the identity-exists error must win over the unreadable key path"
+    );
+}
+
+#[test]
+fn init_import_ssh_key_rejections_leave_no_identity_files() {
+    let (sandbox, keys) = import_fixture();
+    let encrypted = ssh_golden::write(keys.path(), "encrypted", &ssh_golden::encrypted_key_file());
+    let rsa = ssh_golden::write(keys.path(), "rsa", &ssh_golden::rsa_key_file());
+    let malformed = ssh_golden::write(keys.path(), "garbage", b"not a key at all");
+    let oversized = ssh_golden::write(keys.path(), "big", &vec![b'A'; 64 * 1024]);
+    let missing = keys.path().join("missing");
+
+    let cases: [(&Path, &str, &str); 5] = [
+        (&encrypted, "UNSUPPORTED", "encrypted"),
+        (&rsa, "UNSUPPORTED", "key_type"),
+        (&malformed, "INVALID_ARGUMENT", "malformed"),
+        (&oversized, "INVALID_ARGUMENT", "too_large"),
+        (&missing, "INVALID_ARGUMENT", "unreadable"),
+    ];
+    for (path, code, reason) in cases {
+        let path = path.display().to_string();
+        let (exit, value) = sandbox.json(&[
+            "init",
+            "--json",
+            "--key-store",
+            "file",
+            "--import-ssh-key",
+            &path,
+        ]);
+        assert_eq!(exit, 255, "{value}");
+        assert_eq!(value["error"]["code"], code, "{path}: {value}");
+        assert_eq!(value["error"]["details"]["reason"], reason, "{path}");
+        assert!(
+            snapshot(&sandbox.config).is_empty(),
+            "a rejected import must leave no file behind"
+        );
+        assert!(
+            !sandbox.config.join("identity").exists(),
+            "a rejected import must not even create identity/"
+        );
+    }
+}
+
+#[test]
+fn init_import_ssh_key_leaves_trust_toml_and_acl_toml_byte_identical() {
+    let (sandbox, keys) = import_fixture();
+    let key = golden_key_path(&keys);
+    let trust = b"# operator trust file\n".to_vec();
+    let acl = b"# operator acl file\n".to_vec();
+    std::fs::write(sandbox.config.join("trust.toml"), &trust).unwrap();
+    std::fs::write(sandbox.config.join("acl.toml"), &acl).unwrap();
+
+    let (code, value) = sandbox.json(&[
+        "init",
+        "--json",
+        "--key-store",
+        "file",
+        "--import-ssh-key",
+        &key,
+    ]);
+    assert_eq!(code, 0, "{value}");
+    assert_eq!(
+        std::fs::read(sandbox.config.join("trust.toml")).unwrap(),
+        trust
+    );
+    assert_eq!(std::fs::read(sandbox.config.join("acl.toml")).unwrap(), acl);
+
+    // With none present, none is created: no auto-pin, no ACL writer.
+    let (bare, keys) = import_fixture();
+    let key = golden_key_path(&keys);
+    let (code, value) = bare.json(&[
+        "init",
+        "--json",
+        "--key-store",
+        "file",
+        "--import-ssh-key",
+        &key,
+    ]);
+    assert_eq!(code, 0, "{value}");
+    assert!(!bare.config.join("trust.toml").exists());
+    assert!(!bare.config.join("acl.toml").exists());
+}
+
+#[test]
+fn init_import_ssh_key_malformed_input_bytes_appear_in_neither_message_details_nor_logs() {
+    use base64::Engine as _;
+
+    let (sandbox, keys) = import_fixture();
+    let marker = "QSHLEAKMARKER0123456789";
+    let marker_b64 = base64::engine::general_purpose::STANDARD.encode(marker);
+    let files = [
+        ssh_golden::malformed_key_file_with(marker.as_bytes()),
+        marker.repeat(4).into_bytes(),
+    ];
+    for (i, bytes) in files.iter().enumerate() {
+        let path = ssh_golden::write(keys.path(), &format!("k{i}"), bytes)
+            .display()
+            .to_string();
+        for json in [true, false] {
+            let mut args = vec!["-vv", "init", "--key-store", "file"];
+            if json {
+                args.push("--json");
+            }
+            args.extend_from_slice(&["--import-ssh-key", &path]);
+            let output = sandbox.qsh(&args);
+            assert_eq!(output.status.code(), Some(255));
+            let all = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(!all.contains(marker), "input bytes leaked: {all}");
+            assert!(
+                !all.contains(&marker_b64[..12]),
+                "input bytes leaked: {all}"
+            );
+        }
+    }
 }

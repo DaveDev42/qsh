@@ -4,7 +4,7 @@
 .SH NAME
 qsh\-init \- Create this device\*(Aqs identity (keypair + self\-signed certificate). Idempotent: re\-running reports the existing identity
 .SH SYNOPSIS
-\fBqsh init\fR [\fB\-\-json\fR] [\fB\-\-key\-store\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] 
+\fBqsh init\fR [\fB\-\-json\fR] [\fB\-\-key\-store\fR] [\fB\-\-import\-ssh\-key\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] 
 .SH DESCRIPTION
 Create this device\*(Aqs identity (keypair + self\-signed certificate). Idempotent: re\-running reports the existing identity
 .SH OPTIONS
@@ -14,6 +14,9 @@ Emit a single `qsh.cli/v1` JSON envelope on stdout instead of human\-readable te
 .TP
 \fB\-\-key\-store\fR \fI<MODE>\fR
 Where to keep the private key: `auto` (platform store, falling back to a 0600 file), `platform` or `file`. Defaults to `config.toml`\*(Aqs `[identity].key_store`, then `auto`
+.TP
+\fB\-\-import\-ssh\-key\fR \fI<PATH>\fR
+Use this plaintext OpenSSH Ed25519 private key as the device key instead of generating one (ADR\-0026). Only valid before an identity exists; prints the qsh and the SSH fingerprint side by side. Nothing is pinned and `acl.toml` is never written
 .TP
 \fB\-\-jsonl\fR
 Emit newline\-delimited JSON on stdout (reserved for streaming commands; non\-streaming commands emit a single line, same as `\-\-json`)

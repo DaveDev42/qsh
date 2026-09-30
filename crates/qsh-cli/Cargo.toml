@@ -59,6 +59,8 @@ tikv-jemallocator = { version = "0.7", features = ["background_threads"] }
 
 [dev-dependencies]
 tempfile.workspace = true
+# Test-only: armor the synthesized OpenSSH key files (`tests/ssh_golden`).
+base64.workspace = true
 jsonschema.workspace = true
 qsh-testkit.workspace = true
 # Test-only, direct transport-level types two integration-test files need

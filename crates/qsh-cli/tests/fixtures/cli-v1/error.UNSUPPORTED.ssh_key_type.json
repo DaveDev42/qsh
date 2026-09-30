@@ -1,0 +1,14 @@
+{
+  "command": "identity.init",
+  "error": {
+    "code": "UNSUPPORTED",
+    "details": {
+      "reason": "key_type"
+    },
+    "message": "id_rsa is not an ssh-ed25519 key; --import-ssh-key only reads Ed25519 keys",
+    "retryable": false
+  },
+  "ok": false,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

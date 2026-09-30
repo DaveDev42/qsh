@@ -10,6 +10,7 @@ fn temp_ops() -> (tempfile::TempDir, Ops) {
 fn file_mode() -> IdentityInitReq {
     IdentityInitReq {
         key_store: Some(KeyStoreMode::File),
+        ..Default::default()
     }
 }
 
@@ -211,9 +212,7 @@ fn identity_init_takes_the_key_store_from_config_when_unset() {
         "[identity]\nkey_store = \"file\"\n",
     )
     .unwrap();
-    let data = ops
-        .identity_init(IdentityInitReq { key_store: None })
-        .unwrap();
+    let data = ops.identity_init(IdentityInitReq::default()).unwrap();
     assert_eq!(data.key_store, KeyStoreKind::File);
 }
 

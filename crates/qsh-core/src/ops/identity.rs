@@ -24,7 +24,10 @@ impl Ops {
                 .key_store
                 .unwrap_or(KeyStoreMode::Auto),
         };
-        crate::identity::init(&self.paths, mode)
+        match req.import_ssh_key.as_deref() {
+            Some(path) => crate::identity::init_importing(&self.paths, mode, path),
+            None => crate::identity::init(&self.paths, mode),
+        }
     }
 
     /// This device's identity plus its private key, or `None` before

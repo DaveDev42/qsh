@@ -1,0 +1,14 @@
+{
+  "command": "identity.init",
+  "error": {
+    "code": "UNSUPPORTED",
+    "details": {
+      "reason": "encrypted"
+    },
+    "message": "encrypted is passphrase protected; --import-ssh-key only reads unencrypted Ed25519 keys",
+    "retryable": false
+  },
+  "ok": false,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

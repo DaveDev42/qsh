@@ -219,3 +219,80 @@ fn promote_to_ca_issued_recovers_from_an_interrupted_record_write() {
     assert_eq!(final_read.issued_by_ca.as_deref(), Some("fake_ca_fp"));
     assert_eq!(final_read.cert_der, leaf_der);
 }
+
+// ---------------------------------------------------------------------------
+// `--import-ssh-key` (ADR-0026)
+// ---------------------------------------------------------------------------
+
+const GOLDEN_HEX: &str = include_str!("../../../qsh-proto/testdata/openssh/ed25519_golden.hex");
+const GOLDEN_SEED_HEX: &str = "e0a3d490ac207b6a613ef0d9ece980a23fc4fae80a11d6e8bb87836df909f6f0";
+const GOLDEN_PUBLIC_HEX: &str = "c5823db0474406fc8765512b49112913f128b2418dfbaddee18ae88c7f54b23f";
+/// `ssh-keygen -lf` output for the golden key.
+const GOLDEN_SSH_FINGERPRINT: &str = "SHA256:XxSbKVKvD1gyArwLk6oM3TZnt9rZogny7tQgxWR2bek";
+
+fn unhex(s: &str) -> Vec<u8> {
+    let digits: Vec<u8> = s
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .flat_map(|l| l.bytes())
+        .filter(|b| !b.is_ascii_whitespace())
+        .collect();
+    digits
+        .chunks(2)
+        .map(|p| u8::from_str_radix(std::str::from_utf8(p).unwrap(), 16).unwrap())
+        .collect()
+}
+
+#[test]
+fn ssh_fingerprint_matches_ssh_keygen_output_for_the_golden_vector() {
+    let public: [u8; 32] = unhex(GOLDEN_PUBLIC_HEX).try_into().unwrap();
+    assert_eq!(ssh_fingerprint_of_ed25519(&public), GOLDEN_SSH_FINGERPRINT);
+}
+
+#[test]
+fn pkcs8_v2_assembled_from_the_golden_seed_is_accepted_by_rcgen() {
+    let seed: [u8; 32] = unhex(GOLDEN_SEED_HEX).try_into().unwrap();
+    let public: [u8; 32] = unhex(GOLDEN_PUBLIC_HEX).try_into().unwrap();
+    let der = import::pkcs8_v2_ed25519(&seed, &public);
+    assert_eq!(der.len(), 2 + 0x51);
+    let key = rcgen::KeyPair::try_from(der.as_slice()).expect("rcgen accepts the assembled DER");
+    // The seed derives exactly the public key the file carries.
+    assert_eq!(rcgen::PublicKeyData::der_bytes(&key), &public[..]);
+}
+
+#[test]
+fn init_importing_issues_a_leaf_over_the_imported_key_and_stores_it() {
+    let (_guard, paths) = temp_paths();
+    let key_dir = tempfile::tempdir().unwrap();
+    let key_path = key_dir.path().join("id_ed25519");
+    std::fs::write(&key_path, unhex(GOLDEN_HEX)).unwrap();
+
+    let data = init_importing(&paths, KeyStoreMode::File, key_path.to_str().unwrap()).unwrap();
+    assert!(data.created);
+    assert_eq!(
+        data.ssh_fingerprint.as_deref(),
+        Some(GOLDEN_SSH_FINGERPRINT)
+    );
+
+    let mut spki = vec![
+        0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+    ];
+    spki.extend_from_slice(&unhex(GOLDEN_PUBLIC_HEX));
+    assert_eq!(
+        data.fingerprint,
+        Fingerprint::of_spki_der(&spki).to_string()
+    );
+
+    // The stored key is the imported one: a loaded identity signs for the
+    // same SPKI.
+    let loaded = load(&paths).unwrap().expect("identity");
+    assert_eq!(loaded.identity.fingerprint.to_string(), data.fingerprint);
+    let pair = rcgen::KeyPair::try_from(loaded.local.key_pkcs8_der.as_slice()).unwrap();
+    assert_eq!(
+        Fingerprint::of_spki_der(&rcgen::PublicKeyData::subject_public_key_info(&pair)).to_string(),
+        data.fingerprint
+    );
+
+    // The source key file is never modified.
+    assert_eq!(std::fs::read(&key_path).unwrap(), unhex(GOLDEN_HEX));
+}

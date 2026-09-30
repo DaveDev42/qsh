@@ -122,7 +122,15 @@ fn render_doctor_lines(data: &DoctorData) -> Vec<String> {
 pub fn print_init(data: &IdentityInitData) -> io::Result<()> {
     let mut stdout = io::stdout().lock();
     writeln!(stdout, "device_id:   {}", data.device_id)?;
-    writeln!(stdout, "fingerprint: {}", data.fingerprint)?;
+    if let Some(ssh_fingerprint) = &data.ssh_fingerprint {
+        // Two different values for one key (ADR-0026 결정 3): name both so
+        // the operator never pastes the ssh-keygen one into trust.toml or
+        // acl.toml.
+        writeln!(stdout, "qsh fingerprint: {}", data.fingerprint)?;
+        writeln!(stdout, "ssh fingerprint: {}", ssh_fingerprint)?;
+    } else {
+        writeln!(stdout, "fingerprint: {}", data.fingerprint)?;
+    }
     writeln!(stdout, "key_store:   {}", data.key_store.as_str())?;
     writeln!(stdout, "config_dir:  {}", data.config_dir)?;
     writeln!(

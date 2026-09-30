@@ -75,6 +75,12 @@ pub struct IdentityInitReq {
     /// or `auto`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_store: Option<KeyStoreMode>,
+    /// Path of a plaintext OpenSSH Ed25519 private key to use as this
+    /// device's key instead of generating one (ADR-0026). Only honored
+    /// when no identity exists yet. The file is read by `qsh-core`; the key
+    /// bytes never travel through this contract type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub import_ssh_key: Option<String>,
 }
 
 /// Data payload of `identity.init` (`docs/CLI.md` §6.11).
@@ -91,6 +97,13 @@ pub struct IdentityInitData {
     /// `true` if this call created the identity, `false` if it already
     /// existed (idempotent).
     pub created: bool,
+    /// OpenSSH fingerprint (`SHA256:` + unpadded base64, the string
+    /// `ssh-keygen -lf` prints) of the imported key. Present only when the
+    /// identity was created with `--import-ssh-key`; it is a different
+    /// value from [`fingerprint`](Self::fingerprint) for the same key
+    /// (ADR-0026 결정 3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_fingerprint: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

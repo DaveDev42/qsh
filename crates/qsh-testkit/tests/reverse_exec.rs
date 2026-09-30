@@ -99,6 +99,7 @@ async fn fresh_ops() -> (tempfile::TempDir, Ops) {
     blocking(&ops, |ops| {
         ops.identity_init(IdentityInitReq {
             key_store: Some(KeyStoreMode::File),
+            ..Default::default()
         })
     })
     .await
