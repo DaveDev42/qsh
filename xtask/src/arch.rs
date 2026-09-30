@@ -229,6 +229,29 @@ const INVITE_ADDRESS_REASON: &str = "trust/invite_address holds a human-channel-
      ban is one input to keeping the type out of a qsh.cli/v1 envelope, not a crate-wide guarantee by itself \
      (docs/CLI.md §10 compatibility policy)";
 
+/// `qsh setup`'s planning module writes nothing and dials nothing of its
+/// own (ADR-0024 결정 3). Its only writes are the ones the existing `Ops`
+/// methods it calls already perform, so it must not name `acl.toml`'s path,
+/// any file-writing primitive, the trust store's `save`, or the fingerprint
+/// probe that would turn `trust.add` into trust-on-first-use. Directory-
+/// scoped so a sibling added later is covered too; the `tests.rs` files
+/// under it are scanned as well, so they build fixtures through helpers
+/// that live outside this directory.
+const SETUP_DIR: &str = "crates/qsh-core/src/setup";
+const SETUP_REASON: &str = "crates/qsh-core/src/setup/ orchestrates existing ops and never writes acl.toml, config.toml \
+     or hosts.toml, nor probes a peer for a fingerprint to pin (ADR-0024 결정 3, 6); its only writes are the ones the \
+     Ops methods it calls already perform";
+const SETUP_TOKEN_SET: [&str; 8] = [
+    "acl_file",
+    "fs::write",
+    "File::create",
+    "OpenOptions",
+    "write_private_file",
+    "write_atomically",
+    ".save(",
+    "probe_fingerprint",
+];
+
 fn module_bans() -> Vec<ModuleBan> {
     let mut bans: Vec<ModuleBan> = BROKER_TOKEN_SET
         .into_iter()
@@ -270,6 +293,14 @@ fn module_bans() -> Vec<ModuleBan> {
             scope: Scope::Dir(INVITE_ADDRESS_DIR),
             forbidden,
             reason: INVITE_ROUTE_REASON,
+        });
+    }
+
+    for forbidden in SETUP_TOKEN_SET {
+        bans.push(ModuleBan {
+            scope: Scope::Dir(SETUP_DIR),
+            forbidden,
+            reason: SETUP_REASON,
         });
     }
 
@@ -370,8 +401,8 @@ fn repo_relative_display(path: &Path) -> String {
 /// sufficient for this lint: this assumption — no string literal embeds `//`
 /// before a banned token, and no block comments (`/* … */`) are used — has
 /// been re-verified for every scope this lint currently scans (`BROKER_DIR`,
-/// the `localctl` files, `REGISTRY_FILE`, `CLI_SRC_DIR`, `INVITE_ADDRESS_DIR`
-/// and `INVITE_ADDRESS_FILE`). **Adding a new scanned scope requires
+/// the `localctl` files, `REGISTRY_FILE`, `CLI_SRC_DIR`, `INVITE_ADDRESS_DIR`,
+/// `INVITE_ADDRESS_FILE` and `SETUP_DIR`). **Adding a new scanned scope requires
 /// re-checking this assumption against that scope's actual source** before
 /// trusting this naive strip on it.
 fn strip_line_comment(line: &str) -> &str {
@@ -561,14 +592,14 @@ mod tests {
     /// once — not once per token bound to it (the ban targets must exist
     /// once their consumers land: `BROKER_DIR`, the two `localctl` files,
     /// `REGISTRY_FILE`, `CLI_SRC_DIR`, `INVITE_ADDRESS_FILE`, and the
-    /// `INVITE_ADDRESS_DIR` directory that two separate bans share — a
-    /// shared target is still one entry in `reported_missing`, not two).
+    /// `SETUP_DIR` directory, and the `INVITE_ADDRESS_DIR` directory that two
+    /// separate bans share — a shared target is still one entry in `reported_missing`, not two).
     #[test]
     fn module_ban_flags_each_missing_target_exactly_once() {
         let root = tempfile::tempdir().unwrap();
         let mut violations = Vec::new();
         check_module_bans(root.path(), &mut violations).unwrap();
-        assert_eq!(violations.len(), 7, "{violations:?}");
+        assert_eq!(violations.len(), 8, "{violations:?}");
         assert!(
             violations.iter().all(|v| v.contains("does not exist")),
             "{violations:?}"
@@ -687,6 +718,101 @@ mod tests {
             parent_hits.is_empty(),
             "invite_address.rs's own clean content must not be flagged: {violations:?}"
         );
+    }
+
+    /// `crates/qsh-core/src/setup/` bans all eight write and probe tokens by
+    /// directory, so a nested module or a later sibling is covered, and a
+    /// `tests.rs` under it is scanned like any other file. The `//` comment
+    /// strip is naive, so this is also where that assumption was re-checked
+    /// for the new scope: no line in the scope embeds `//` in a string
+    /// before a banned token (a URL in a string literal would hide one).
+    #[test]
+    fn module_ban_flags_every_forbidden_token_under_setup_including_nested_directories() {
+        let root = tempfile::tempdir().unwrap();
+        let setup = root.path().join("crates/qsh-core/src/setup");
+        let nested = setup.join("plan/deep");
+        fs::create_dir_all(&nested).unwrap();
+        let tokens = [
+            "acl_file",
+            "fs::write",
+            "File::create",
+            "OpenOptions",
+            "write_private_file",
+            "write_atomically",
+            ".save(",
+            "probe_fingerprint",
+        ];
+        // One token per line, alternating between the directory itself and a
+        // nested directory two levels down.
+        let mut top = String::new();
+        let mut deep = String::new();
+        for (i, token) in tokens.iter().enumerate() {
+            let line = format!("fn f{i}() {{ let _ = {token}; }}\n");
+            if i % 2 == 0 {
+                top.push_str(&line);
+            } else {
+                deep.push_str(&line);
+            }
+        }
+        fs::write(setup.join("mod.rs"), top).unwrap();
+        fs::write(nested.join("inner.rs"), deep).unwrap();
+        fs::write(setup.join("tests.rs"), "fn t() { let _ = fs::write; }\n").unwrap();
+
+        let mut violations = Vec::new();
+        check_module_bans(root.path(), &mut violations).unwrap();
+        let setup_hits: Vec<_> = violations
+            .iter()
+            .filter(|v| v.contains("src/setup/"))
+            .collect();
+        for token in tokens {
+            assert!(
+                setup_hits
+                    .iter()
+                    .any(|v| v.contains(&format!("names `{token}`"))),
+                "{token} was not flagged: {violations:?}"
+            );
+        }
+        assert!(
+            setup_hits.iter().any(|v| v.contains("setup/mod.rs:")),
+            "{violations:?}"
+        );
+        assert!(
+            setup_hits
+                .iter()
+                .any(|v| v.contains("setup/plan/deep/inner.rs:")),
+            "{violations:?}"
+        );
+        assert!(
+            setup_hits.iter().any(|v| v.contains("setup/tests.rs:")),
+            "{violations:?}"
+        );
+        // Nothing under `setup/` trips any other scope's ban.
+        assert_eq!(setup_hits.len(), 9, "{setup_hits:?}");
+    }
+
+    /// Prose and doc comments under `setup/` may name the banned tokens, the
+    /// way the module's own docs name `write_private_file` when they explain
+    /// the ban; only code trips it.
+    #[test]
+    fn module_ban_ignores_forbidden_tokens_in_setup_comments() {
+        let root = tempfile::tempdir().unwrap();
+        let setup = root.path().join("crates/qsh-core/src/setup");
+        fs::create_dir_all(&setup).unwrap();
+        fs::write(
+            setup.join("mod.rs"),
+            "//! never calls write_private_file or probe_fingerprint, and never opens acl_file.\n\
+             /// no fs::write, File::create, OpenOptions or write_atomically here.\n\
+             pub fn ok() {} // and no .save( either\n",
+        )
+        .unwrap();
+
+        let mut violations = Vec::new();
+        check_module_bans(root.path(), &mut violations).unwrap();
+        let hits: Vec<_> = violations
+            .iter()
+            .filter(|v| v.contains("src/setup/"))
+            .collect();
+        assert!(hits.is_empty(), "{violations:?}");
     }
 
     /// The directory-qualified filter the test above uses only means what it

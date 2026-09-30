@@ -40,7 +40,7 @@ use crate::ops::OpError;
 
 pub mod invite_address;
 pub mod pairing;
-pub use pairing::SharedInviteStore;
+pub use pairing::{LiveInviteCounts, SharedInviteStore, live_invite_counts};
 
 /// The one line an operator gets when a peer address named no port and
 /// 4433 was assumed (ADR-0014 결정 5). stderr only, on the write paths

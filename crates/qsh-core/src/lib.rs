@@ -46,6 +46,7 @@ pub mod reverse;
 pub mod serve;
 pub mod server;
 pub mod session_stream;
+pub mod setup;
 pub mod telemetry;
 pub mod trust;
 pub mod tunnel;

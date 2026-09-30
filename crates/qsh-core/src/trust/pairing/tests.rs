@@ -453,3 +453,63 @@ fn concurrent_full_rmw_cycles_do_not_lose_each_others_invites() {
     let final_store = InviteStore::load(&path).unwrap();
     assert_eq!(final_store.records.len(), 8, "a concurrent invite was lost");
 }
+
+#[test]
+fn live_unassigned_invite_count_never_exposes_mac_key() {
+    let now = SystemTime::now();
+    let mut store = InviteStore::default();
+    store.add(&secret(3), now, None);
+    store.add(&secret(4), now, Some("laptop".to_string()));
+    let mac_keys: Vec<String> = store.records.iter().map(|r| r.mac_key.clone()).collect();
+
+    let counts = store.live_counts(now);
+    assert_eq!(counts.unassigned, 1);
+    assert_eq!(counts.assigned_to("laptop"), 1);
+    assert_eq!(counts.assigned_to("other"), 0);
+
+    let shown = format!("{counts:?}");
+    for mac_key in &mac_keys {
+        assert!(!shown.contains(mac_key), "Debug leaked a mac_key: {shown}");
+    }
+    // The type has no field that could hold one: names and counts only.
+    let LiveInviteCounts {
+        unassigned: _,
+        assigned,
+    } = counts;
+    assert_eq!(assigned.keys().collect::<Vec<_>>(), ["laptop"]);
+}
+
+#[test]
+fn live_invite_count_excludes_expired_and_redeemed_invites() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("invites.toml");
+    let now = SystemTime::now();
+
+    let mut store = InviteStore::default();
+    store.add(&secret(1), now, Some("live".to_string()));
+    store.add(&secret(2), now - INVITE_TTL - Duration::from_secs(1), None);
+    store.add(&secret(3), now, Some("used".to_string()));
+    store.records[2].consumed_at = Some(rfc3339_at(now));
+    store.save(&path).unwrap();
+
+    let counts = live_invite_counts(&path, now).unwrap();
+    assert_eq!(counts.unassigned, 0, "the expired invite must not count");
+    assert_eq!(counts.assigned_to("live"), 1);
+    assert_eq!(
+        counts.assigned_to("used"),
+        0,
+        "a redeemed invite must not count"
+    );
+
+    // The same file read after the live one ages out counts nothing.
+    let later = now + INVITE_TTL + Duration::from_secs(1);
+    assert_eq!(
+        live_invite_counts(&path, later).unwrap(),
+        LiveInviteCounts::default()
+    );
+    // A missing file is an empty store.
+    assert_eq!(
+        live_invite_counts(&dir.path().join("none.toml"), now).unwrap(),
+        LiveInviteCounts::default()
+    );
+}

@@ -19,6 +19,7 @@ mod exec;
 mod identity;
 mod service;
 mod session;
+mod setup;
 mod trust;
 mod tunnel;
 
@@ -29,6 +30,7 @@ pub use exec::*;
 pub use identity::*;
 pub use service::*;
 pub use session::*;
+pub use setup::*;
 pub use trust::*;
 pub use tunnel::*;
 
