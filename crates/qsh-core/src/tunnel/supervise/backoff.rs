@@ -150,13 +150,22 @@ impl<R: rand::RngCore> Pacer<R> {
     }
 
     /// Wait out the gap after a failed attempt.
+    #[cfg(test)]
     pub(crate) async fn wait(&mut self) -> Waited {
+        self.wait_planned(|_| {}).await
+    }
+
+    /// [`Self::wait`], telling `planned` how long the gap is as soon as it is
+    /// drawn (`--accept-hold` needs to know when the next attempt starts).
+    /// Not called when a wake makes the attempt immediate.
+    pub(crate) async fn wait_planned(&mut self, planned: impl FnOnce(Duration)) -> Waited {
         let now = Instant::now();
         // A wake that arrived while the attempt was running.
         if self.wake.has_changed().unwrap_or(false) {
             return self.woken(now);
         }
         let step = self.backoff.next_step(now);
+        planned(step.delay);
         let sleep = tokio::time::sleep(step.delay);
         tokio::pin!(sleep);
         tokio::select! {

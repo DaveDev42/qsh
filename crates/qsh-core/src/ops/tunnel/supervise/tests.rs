@@ -29,6 +29,11 @@ struct ScriptedPeer {
     strip: Arc<AtomicBool>,
     /// While set, liveness `Ping`s on the control stream go unanswered.
     mute: Arc<AtomicBool>,
+    /// While set, an incoming connection's handshake is not completed, so a
+    /// dial to this peer stays in flight.
+    stall: Arc<AtomicBool>,
+    /// Connection attempts that reached the listener, handshake done or not.
+    incoming: Arc<AtomicUsize>,
     /// Streams the client opened after the handshake, across connections.
     requests: Arc<AtomicUsize>,
     accepted: tokio::sync::mpsc::UnboundedReceiver<Connection>,
@@ -45,14 +50,22 @@ async fn scripted_peer() -> ScriptedPeer {
     let addr = listener.local_addr().unwrap();
     let strip = Arc::new(AtomicBool::new(false));
     let mute = Arc::new(AtomicBool::new(false));
+    let stall = Arc::new(AtomicBool::new(false));
+    let incoming_count = Arc::new(AtomicUsize::new(0));
     let requests = Arc::new(AtomicUsize::new(0));
     let (tx, accepted) = tokio::sync::mpsc::unbounded_channel();
     tokio::spawn({
         let strip = Arc::clone(&strip);
         let mute = Arc::clone(&mute);
+        let stall = Arc::clone(&stall);
+        let incoming_count = Arc::clone(&incoming_count);
         let requests = Arc::clone(&requests);
         async move {
             while let Some(incoming) = listener.accept().await {
+                incoming_count.fetch_add(1, Ordering::SeqCst);
+                while stall.load(Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
                 let Ok(conn) = incoming.accept().await else {
                     continue;
                 };
@@ -108,6 +121,8 @@ async fn scripted_peer() -> ScriptedPeer {
         fingerprint: fingerprint.to_string(),
         strip,
         mute,
+        stall,
+        incoming: incoming_count,
         requests,
         accepted,
     }
@@ -346,4 +361,180 @@ fn supervised_forward_carrier_is_declared_lost_within_two_seconds_of_an_injected
     assert!(delay <= Duration::from_secs(10), "took {delay:?}");
     assert_eq!(lost.1.as_deref(), Some("path_dead"));
     drop(hold);
+}
+
+// ---- --accept-hold (ADR-0023 decision 19) ------------------------------
+
+/// Everything an accept-hold test needs: a supervised `-D` tunnel over a
+/// scripted peer that can be told to stall its next handshake, running in
+/// its own thread until `stop` is sent.
+struct HeldTunnel {
+    peer: ScriptedPeer,
+    peer_runtime: tokio::runtime::Runtime,
+    port: u16,
+    first: Connection,
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
+    runner: Option<std::thread::JoinHandle<()>>,
+    _dir: tempfile::TempDir,
+}
+
+impl Drop for HeldTunnel {
+    fn drop(&mut self) {
+        self.peer.stall.store(false, Ordering::SeqCst);
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(runner) = self.runner.take() {
+            let _ = runner.join();
+        }
+    }
+}
+
+fn held_tunnel(accept_hold_ms: u32) -> HeldTunnel {
+    let dir = tempfile::tempdir().unwrap();
+    let ops = Ops::new(Paths::new(
+        dir.path().join("config"),
+        dir.path().join("state"),
+    ));
+    ops.identity_init(IdentityInitReq {
+        key_store: Some(KeyStoreMode::File),
+        ..Default::default()
+    })
+    .unwrap();
+    let peer_runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let mut peer = peer_runtime.block_on(scripted_peer());
+    ops.trust_add(TrustAddReq {
+        name: "box".into(),
+        address: Some(peer.addr.to_string()),
+        fingerprint: Some(peer.fingerprint.clone()),
+        cert_pem: None,
+    })
+    .unwrap();
+    let port = free_port();
+    let hold = ops
+        .tunnel_dynamic(TunnelDynamicReq {
+            host: "box".into(),
+            bind: None,
+            listen_port: u32::from(port),
+            supervise_ms: Some(60_000),
+            accept_hold_ms: Some(accept_hold_ms),
+        })
+        .expect("the first open binds");
+    let first = peer_runtime
+        .block_on(async {
+            tokio::time::timeout(Duration::from_secs(30), peer.accepted.recv()).await
+        })
+        .expect("the first connection was accepted")
+        .expect("the channel is open");
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let runner = std::thread::spawn(move || {
+        let _ = hold.hold_until(async move {
+            let _ = stopped.await;
+        });
+    });
+    HeldTunnel {
+        peer,
+        peer_runtime,
+        port,
+        first,
+        stop: Some(stop),
+        runner: Some(runner),
+        _dir: dir,
+    }
+}
+
+/// A SOCKS5 client that has greeted and sent a `CONNECT`, and is now
+/// waiting for the reply.
+fn socks_connect(port: u16) -> std::net::TcpStream {
+    use std::io::{Read, Write};
+    let mut tcp = std::net::TcpStream::connect(("127.0.0.1", port)).expect("the listener is bound");
+    tcp.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+    tcp.write_all(&[0x05, 0x01, 0x00]).unwrap();
+    let mut select = [0u8; 2];
+    tcp.read_exact(&mut select).unwrap();
+    assert_eq!(select, [0x05, 0x00]);
+    let host = b"example.test";
+    let mut request = vec![0x05, 0x01, 0x00, 0x03, host.len() as u8];
+    request.extend_from_slice(host);
+    request.extend_from_slice(&80u16.to_be_bytes());
+    tcp.write_all(&request).unwrap();
+    tcp
+}
+
+fn wait_for(mut cond: impl FnMut() -> bool, what: &str) {
+    for _ in 0..1_500 {
+        if cond() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!("never happened: {what}");
+}
+
+/// Lose the first connection and wait until the supervisor's redial is at the
+/// peer's door (stalled there), which is when its hold window is open.
+fn lose_first_and_wait_for_the_redial(tunnel: &HeldTunnel) {
+    let before = tunnel.peer.incoming.load(Ordering::SeqCst);
+    tunnel.peer.stall.store(true, Ordering::SeqCst);
+    tunnel.first.close(0, b"restart");
+    wait_for(
+        || tunnel.peer.incoming.load(Ordering::SeqCst) > before,
+        "the redial reaching the peer",
+    );
+}
+
+/// A `CONNECT` that arrives while the redial is in flight is kept, sends
+/// nothing, and goes out on the new connection once the peer has answered.
+/// The wall-clock sleep only gives the listener time to take the `CONNECT`
+/// into its hold; the window is 2 s and the stall is released well inside it.
+#[test]
+fn accept_hold_a_connect_during_a_redial_rides_the_new_connection() {
+    let tunnel = held_tunnel(2_000);
+    lose_first_and_wait_for_the_redial(&tunnel);
+    let _tcp = socks_connect(tunnel.port);
+    std::thread::sleep(Duration::from_millis(150));
+    assert_eq!(
+        tunnel.peer.requests.load(Ordering::SeqCst),
+        0,
+        "nothing is sent while the redial is in flight"
+    );
+    tunnel.peer.stall.store(false, Ordering::SeqCst);
+    wait_for(
+        || tunnel.peer.requests.load(Ordering::SeqCst) == 1,
+        "the held CONNECT reaching the new connection",
+    );
+}
+
+/// The same connection, with the peer stalled past the window, is answered
+/// `REP 0x01` and never sent anywhere, not even on the connection that comes
+/// up afterwards.
+#[test]
+fn accept_hold_a_connect_outlasting_the_window_gets_rep_01_and_no_stream() {
+    use std::io::Read;
+    let mut tunnel = held_tunnel(300);
+    lose_first_and_wait_for_the_redial(&tunnel);
+    let started = std::time::Instant::now();
+    let mut tcp = socks_connect(tunnel.port);
+    let mut rep = [0u8; 10];
+    tcp.read_exact(&mut rep).unwrap();
+    assert_eq!(rep[1], 0x01);
+    assert!(started.elapsed() >= Duration::from_millis(300));
+    assert_eq!(tunnel.peer.requests.load(Ordering::SeqCst), 0);
+
+    tunnel.peer.stall.store(false, Ordering::SeqCst);
+    let second = tunnel
+        .peer_runtime
+        .block_on(async {
+            tokio::time::timeout(Duration::from_secs(30), tunnel.peer.accepted.recv()).await
+        })
+        .expect("the tunnel re-established")
+        .expect("the channel is open");
+    // Its control stream is up; had the expired CONNECT been kept, it would
+    // be a request by now.
+    assert_eq!(tunnel.peer.requests.load(Ordering::SeqCst), 0);
+    drop(second);
 }

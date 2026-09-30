@@ -563,7 +563,8 @@ pub struct TunnelOpenArgs {
 
     /// While a supervised tunnel is disconnected, hold each local accept
     /// for up to this many milliseconds instead of refusing it at once
-    /// (ADR-0023 decision 13). `0` (the default) refuses at once. Needs a
+    /// (ADR-0023 decision 19), sending nothing for it until the tunnel's
+    /// connection is back. `0` (the default) refuses at once. Needs a
     /// nonzero `--supervise`; bound `0..=2000`; not valid with `--remote`.
     /// Full semantics: `docs/CLI.md` §6.9.
     #[arg(long, value_name = "MS", default_value_t = 0)]
