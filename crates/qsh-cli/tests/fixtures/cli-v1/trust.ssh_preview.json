@@ -1,0 +1,34 @@
+{
+  "command": "trust.ssh_preview",
+  "data": {
+    "entries": [
+      {
+        "acl_row": "[[acl]]\nprincipal = \"device:<name>\"\nallow = [\"exec.run\", \"session.open\", \"session.list\", \"session.attach\", \"session.control\"]\n",
+        "comment": "qsh-test-only",
+        "line": 3,
+        "qsh_fingerprint": "sha256:znm9yTwujCjCnYE3mzQNCE+HghsR/BQJUcBWuDlBNac=",
+        "ssh_fingerprint": "SHA256:XxSbKVKvD1gyArwLk6oM3TZnt9rZogny7tQgxWR2bek",
+        "status": "ok",
+        "trust_command": "qsh trust add <name> --fingerprint sha256:znm9yTwujCjCnYE3mzQNCE+HghsR/BQJUcBWuDlBNac="
+      },
+      {
+        "comment": "qsh-test-only",
+        "line": 4,
+        "qsh_fingerprint": "sha256:znm9yTwujCjCnYE3mzQNCE+HghsR/BQJUcBWuDlBNac=",
+        "ssh_fingerprint": "SHA256:XxSbKVKvD1gyArwLk6oM3TZnt9rZogny7tQgxWR2bek",
+        "status": "restricted_options"
+      },
+      {
+        "line": 5,
+        "status": "unsupported_key_type"
+      },
+      {
+        "line": 6,
+        "status": "malformed"
+      }
+    ]
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

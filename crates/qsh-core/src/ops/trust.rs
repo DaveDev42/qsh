@@ -588,3 +588,119 @@ pub fn read_cert_file_arg(path: &str) -> Result<String, OpError> {
     check_cert_pem_size(&text)?;
     Ok(text)
 }
+
+/// Largest `authorized_keys` file `trust.ssh_preview` reads (ADR-0026). The
+/// read takes one byte more than this to tell "exactly at the cap" from
+/// "over it" without buffering an oversized file.
+pub const AUTHORIZED_KEYS_MAX: usize = 1024 * 1024;
+
+impl Ops {
+    /// `trust.ssh_preview` — classify every key line of an OpenSSH
+    /// `authorized_keys` file and print what pin and `[[acl]]` row each
+    /// would need (`docs/CLI.md` §6.11, ADR-0026 결정 4).
+    ///
+    /// Read-only and local: no ACL evaluation, no network, and no write to
+    /// `trust.toml` or `acl.toml` (ADR-0017 결정 1 and 5). The qsh
+    /// fingerprint of each key is *predicted* from the public key, and is
+    /// only right if the other device imports the same key with
+    /// `qsh init --import-ssh-key`. A `malformed` line reports its number
+    /// and status only, never its bytes, and the file path is not echoed in
+    /// the data.
+    pub fn trust_ssh_preview(
+        &self,
+        req: TrustSshPreviewReq,
+    ) -> Result<TrustSshPreviewData, OpError> {
+        use qsh_proto::openssh::{AuthorizedKeysEntry, parse_authorized_keys};
+        use qsh_proto::wire::sanitize_peer_text;
+        use qsh_proto::{SshPreviewEntry, SshPreviewStatus};
+
+        let bytes = read_authorized_keys(&req.path)?;
+        let store = TrustStore::load(&self.paths.trust_file())?;
+        let pinned_as = |fingerprint: &str| {
+            store
+                .peers()
+                .iter()
+                .find(|peer| peer.fingerprint == fingerprint)
+                .map(|peer| peer.name.clone())
+        };
+
+        let mut entries = Vec::new();
+        for parsed in parse_authorized_keys(&bytes) {
+            let line = u32::try_from(parsed.line).unwrap_or(u32::MAX);
+            let bare = |status| SshPreviewEntry {
+                line,
+                status,
+                ssh_fingerprint: None,
+                qsh_fingerprint: None,
+                already_pinned_as: None,
+                comment: None,
+                trust_command: None,
+                acl_row: None,
+            };
+            entries.push(match parsed.entry {
+                AuthorizedKeysEntry::Malformed => bare(SshPreviewStatus::Malformed),
+                AuthorizedKeysEntry::OtherKeyType { .. } => {
+                    bare(SshPreviewStatus::UnsupportedKeyType)
+                }
+                AuthorizedKeysEntry::Ed25519 {
+                    public_key,
+                    restricted,
+                    comment,
+                } => {
+                    let qsh_fingerprint =
+                        Fingerprint::of_spki_der(&crate::identity::ed25519_spki_der(&public_key))
+                            .to_string();
+                    let comment = sanitize_peer_text(comment);
+                    let mut entry = SshPreviewEntry {
+                        ssh_fingerprint: Some(crate::identity::ssh_fingerprint_of_ed25519(
+                            &public_key,
+                        )),
+                        already_pinned_as: pinned_as(&qsh_fingerprint),
+                        comment: (!comment.is_empty()).then_some(comment),
+                        ..bare(SshPreviewStatus::RestrictedOptions)
+                    };
+                    if !restricted {
+                        entry.status = SshPreviewStatus::Ok;
+                        // `<name>` stays a placeholder: authorized_keys
+                        // carries no principal name (ADR-0026 결정 4).
+                        entry.trust_command = Some(format!(
+                            "qsh trust add <name> --fingerprint {qsh_fingerprint}"
+                        ));
+                        entry.acl_row = Some(crate::acl::policy_example_rows(
+                            &[],
+                            crate::acl::Role::Serve,
+                        ));
+                    }
+                    entry.qsh_fingerprint = Some(qsh_fingerprint);
+                    entry
+                }
+            });
+        }
+        Ok(TrustSshPreviewData { entries })
+    }
+}
+
+/// Read `path` up to [`AUTHORIZED_KEYS_MAX`] bytes. The failure text names
+/// the path the operator gave and the I/O reason, never file content.
+fn read_authorized_keys(path: &str) -> Result<Vec<u8>, OpError> {
+    let refuse = |reason: &str, message: String| {
+        OpError::new(ErrorCode::InvalidArgument, message)
+            .with_retryable(false)
+            .with_details(serde_json::json!({ "reason": reason }))
+    };
+    let shown = qsh_proto::wire::sanitize_peer_text(path);
+    let unreadable =
+        |err: std::io::Error| refuse("unreadable", format!("failed to read {shown}: {err}"));
+    let file = File::open(path).map_err(unreadable)?;
+    let mut bytes = Vec::new();
+    file.take(AUTHORIZED_KEYS_MAX as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(unreadable)?;
+    if bytes.len() > AUTHORIZED_KEYS_MAX {
+        return Err(refuse(
+            "too_large",
+            format!("{shown} is larger than {AUTHORIZED_KEYS_MAX} bytes"),
+        ));
+    }
+    Ok(bytes)
+}

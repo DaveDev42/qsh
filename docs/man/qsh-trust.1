@@ -42,5 +42,8 @@ Remove a pinned peer. Idempotent
 .TP
 qsh\-trust\-rename(1)
 Rename a pinned peer (`docs/CLI.md` §6.11). Takes effect at the next handshake with no restart required. `acl.toml` is not reloaded: until `qsh serve`/`qsh listen` restarts with a row for the new name, the renamed peer matches no row and is denied (default\-deny); rows naming the old principal no longer apply to it
+.TP
+qsh\-trust\-ssh\-preview(1)
+Preview the pins and `[[acl]]` rows an OpenSSH `authorized_keys` file would need (`docs/CLI.md` §6.11, ADR\-0026). Read\-only: nothing is pinned and neither `trust.toml` nor `acl.toml` is written
 .SH VERSION
 v0.3.0

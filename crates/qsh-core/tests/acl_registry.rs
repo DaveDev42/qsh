@@ -276,6 +276,7 @@ mod section_2_5 {
                 "trust.list",
                 "trust.remove",
                 "trust.rename",
+                "trust.ssh_preview",
                 "trust.invite",
                 "trust.accept",
             ];

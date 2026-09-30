@@ -1,7 +1,6 @@
 # QSH CLI and JSON Contract
 
-**상태:** Draft v0.15 (M11 — `qsh init --import-ssh-key <path>`(ADR-0026, §6.11): `IdentityInitReq.import_ssh_key`와 `IdentityInitData.ssh_fingerprint`는 둘 다 additive optional이라 플래그 없는 `init`의 출력과 기존 `identity.init.*` fixture는 한 바이트도 바뀌지 않는다. additive golden fixture 5개(`identity.init.imported_ssh_key.json`, `error.UNSUPPORTED.ssh_key_encrypted.json`, `error.UNSUPPORTED.ssh_key_type.json`, `error.INVALID_ARGUMENT.ssh_key_malformed.json`, `error.INVALID_ARGUMENT.ssh_key_identity_exists.json`) 추가; v0.14 = 신규 op `acl.show`(`qsh acl show`, §6.19, ADR-0025)가 붙었다. 이 머신의 `acl.toml`을 읽기 전용으로 요약하는 로컬 op이고, §2.4 목록·§2.5 인가 불요 행·새 §6.19만 바뀐다. `qsh.cli/v1`에는 데이터 타입 하나가 additive로 더해지고 golden fixture 2개(`acl.show.json`, `acl.show.no_policy.json`)가 추가됐으며 기존 fixture와 wire는 무변경; v0.13 = issue #5 — `qsh exec`가 이름 해석을 forward 주소록에만 묶어 뒀던 결함을 고쳐 §6.1 라우팅 우선순위(host.get·attach와 동일: 라이브 역방향 등록이 forward pin보다 우선)를 그대로 공유하게 됨 — 전에는 살아 있는 역방향 host를 향한 `qsh exec`가 죽은 forward 주소만 보고 `CONNECTION_FAILED`로 오판했다. §6.1·§6.8(exec/attach/session open의 공유 라우팅과 `qsh serve --to`의 forward-only 2단계 해석을 분리해 서술)·§6.13(exec의 `LOCAL_CONTROL`/`LOCAL_STREAM` conduit 사용과 UDS-EOF→reset 규칙 추가) 갱신. 신규 op·필드 없음, additive golden fixture 2개(`error.HOST_NOT_FOUND.exec_pinned_no_address.json`, `error.HOST_NOT_FOUND.exec_reverse_stale.json`) 추가 — 그 외 기존 fixture 전부 무변경; v0.12 = M10 릴리스 — 신규 op 0, fixture 무변경, wire 무변경. 계약 델타는 §6.11 하나다: `trust add --cert-file`과 `trust add-ca`의 인증서 입력이 `CERT_PEM_MAX`(64 KiB) 상한까지만 읽히고 초과는 파싱 전에 `INVALID_ARGUMENT`이며, `trust add-ca`의 `<name>`은 `trust rename`의 `new`와 같은 라벨 검증을 trim 후 거친다(라벨 검증은 ADR-0012 결정 6; `CERT_PEM_MAX` 상한 자체는 ADR-0013 결정 4·5가 아니라 구현 커밋 `381b42c`가 둔 값이다). M10이 낸 나머지는 배포·패키징 축이라 이 문서 밖이다; v0.11 = M9 사람용 표면 — `qsh serve --to`(구 표기 `qsh reverse`, ADR-0012)·`qsh pair invite|accept --as`(구 `qsh trust invite/accept`)·`qsh identity export`/`trust add --cert-file`/`trust add-ca`(ADR-0013)·`trust rename`·`qsh service install|uninstall|status`(§6.18)·peer 주소의 포트 기본값 4433(ADR-0014)·`-D`(`tunnel.dynamic`, ADR-0019/0020)·doctor 22종(M9가 8종 추가 — 범위 (h)의 7종 + `host_pinned_without_address`)이 §2.4·§2.5·§6.1·§6.9·§6.11·§6.12·§6.13·§6.17·§6.18·§10에 반영됨. 기존 fixture 중 값-보유 golden `capabilities.json` 한 줄만 `dial-filter.v1` 추가로 재생성됐고(94ad639), wire는 `StreamHeader` 필드 5(`deny_host_local`) 하나가 capability 뒤에 additive로 붙었다 — 그 외 fixture·wire 무변경, 신규 op 7종 전부 additive; v0.10 = M3 Step 8 — 역방향 위 resume: §6.4 recovery 진단의 `registration_wait_ms`가 실제로 채워짐(정방향 `0`, 역방향은 재등록 대기 시간) — `recovery` 값 집합은 무변경, 필드는 M2 세 필드 뒤에 additive로 붙는다; v0.9 = M3 Step 7 — 대화형 attach(`qsh [user@]host`/`qsh attach`)가 역방향 등록 host를 향해서도 §6.13의 `LOCAL_CONTROL`/`LOCAL_STREAM` 경로를 타도록 landing — §6.13 갱신(더 이상 forward 전용이 아님, 그리고 역방향 leg에는 reconnect/recovery가 없다는 점 명시); v0.8 = M3 Step 1 — `Host`의 `state`/`device_id` 값 어휘 확정과 역방향 등록 ACL 매핑(§2.5·§5)·`host.list`/`host.get` 데이터 소스(§6.1)·recovery 진단의 `registration_wait_ms`(§6.4)·신규 §6.13 `qsh listen`/`qsh reverse` 계약 추가; v0.7 = M2 Step 7 — `session.attach`는 resume credential을 **반드시** 요구하며 그 실패는 항상 non-distinguishing `AUTH_FAILED`임을 §6.3·§6.4에 명문화; v0.6 = `session read --follow` 출력 형태와 `--wait` 하한 명문화, v0.5 = M2 계약 확정, v0.4 = M1 구현과 동기화)  
-**대상:** QSH MVP  
+**상태:** Draft v0.15 (M11 — `qsh init --import-ssh-key <path>`(ADR-0026, §6.11): `IdentityInitReq.import_ssh_key`와 `IdentityInitData.ssh_fingerprint`는 둘 다 additive optional이라 플래그 없는 `init`의 출력과 기존 `identity.init.*` fixture는 한 바이트도 바뀌지 않는다. additive golden fixture 5개(`identity.init.imported_ssh_key.json`, `error.UNSUPPORTED.ssh_key_encrypted.json`, `error.UNSUPPORTED.ssh_key_type.json`, `error.INVALID_ARGUMENT.ssh_key_malformed.json`, `error.INVALID_ARGUMENT.ssh_key_identity_exists.json`) 추가. 같은 M11의 `qsh trust ssh-preview <path>`(op `trust.ssh_preview`, §2.4·§6.11, ADR-0026 결정 4)는 신규 op 1개이고 additive golden fixture 1개(`trust.ssh_preview.json`)를 더한다; v0.14 = 신규 op `acl.show`(`qsh acl show`, §6.19, ADR-0025)가 붙었다. 이 머신의 `acl.toml`을 읽기 전용으로 요약하는 로컬 op이고, §2.4 목록·§2.5 인가 불요 행·새 §6.19만 바뀐다. `qsh.cli/v1`에는 데이터 타입 하나가 additive로 더해지고 golden fixture 2개(`acl.show.json`, `acl.show.no_policy.json`)가 추가됐으며 기존 fixture와 wire는 무변경; v0.13 = issue #5 — `qsh exec`가 이름 해석을 forward 주소록에만 묶어 뒀던 결함을 고쳐 §6.1 라우팅 우선순위(host.get·attach와 동일: 라이브 역방향 등록이 forward pin보다 우선)를 그대로 공유하게 됨 — 전에는 살아 있는 역방향 host를 향한 `qsh exec`가 죽은 forward 주소만 보고 `CONNECTION_FAILED`로 오판했다. §6.1·§6.8(exec/attach/session open의 공유 라우팅과 `qsh serve --to`의 forward-only 2단계 해석을 분리해 서술)·§6.13(exec의 `LOCAL_CONTROL`/`LOCAL_STREAM` conduit 사용과 UDS-EOF→reset 규칙 추가) 갱신. 신규 op·필드 없음, additive golden fixture 2개(`error.HOST_NOT_FOUND.exec_pinned_no_address.json`, `error.HOST_NOT_FOUND.exec_reverse_stale.json`) 추가 — 그 외 기존 fixture 전부 무변경; v0.12 = M10 릴리스 — 신규 op 0, fixture 무변경, wire 무변경. 계약 델타는 §6.11 하나다: `trust add --cert-file`과 `trust add-ca`의 인증서 입력이 `CERT_PEM_MAX`(64 KiB) 상한까지만 읽히고 초과는 파싱 전에 `INVALID_ARGUMENT`이며, `trust add-ca`의 `<name>`은 `trust rename`의 `new`와 같은 라벨 검증을 trim 후 거친다(라벨 검증은 ADR-0012 결정 6; `CERT_PEM_MAX` 상한 자체는 ADR-0013 결정 4·5가 아니라 구현 커밋 `381b42c`가 둔 값이다). M10이 낸 나머지는 배포·패키징 축이라 이 문서 밖이다; v0.11 = M9 사람용 표면 — `qsh serve --to`(구 표기 `qsh reverse`, ADR-0012)·`qsh pair invite|accept --as`(구 `qsh trust invite/accept`)·`qsh identity export`/`trust add --cert-file`/`trust add-ca`(ADR-0013)·`trust rename`·`qsh service install|uninstall|status`(§6.18)·peer 주소의 포트 기본값 4433(ADR-0014)·`-D`(`tunnel.dynamic`, ADR-0019/0020)·doctor 22종(M9가 8종 추가 — 범위 (h)의 7종 + `host_pinned_without_address`)이 §2.4·§2.5·§6.1·§6.9·§6.11·§6.12·§6.13·§6.17·§6.18·§10에 반영됨. 기존 fixture 중 값-보유 golden `capabilities.json` 한 줄만 `dial-filter.v1` 추가로 재생성됐고(94ad639), wire는 `StreamHeader` 필드 5(`deny_host_local`) 하나가 capability 뒤에 additive로 붙었다 — 그 외 fixture·wire 무변경, 신규 op 7종 전부 additive; v0.10 = M3 Step 8 — 역방향 위 resume: §6.4 recovery 진단의 `registration_wait_ms`가 실제로 채워짐(정방향 `0`, 역방향은 재등록 대기 시간) — `recovery` 값 집합은 무변경, 필드는 M2 세 필드 뒤에 additive로 붙는다; v0.9 = M3 Step 7 — 대화형 attach(`qsh [user@]host`/`qsh attach`)가 역방향 등록 host를 향해서도 §6.13의 `LOCAL_CONTROL`/`LOCAL_STREAM` 경로를 타도록 landing — §6.13 갱신(더 이상 forward 전용이 아님, 그리고 역방향 leg에는 reconnect/recovery가 없다는 점 명시); v0.8 = M3 Step 1 — `Host`의 `state`/`device_id` 값 어휘 확정과 역방향 등록 ACL 매핑(§2.5·§5)·`host.list`/`host.get` 데이터 소스(§6.1)·recovery 진단의 `registration_wait_ms`(§6.4)·신규 §6.13 `qsh listen`/`qsh reverse` 계약 추가; v0.7 = M2 Step 7 — `session.attach`는 resume credential을 **반드시** 요구하며 그 실패는 항상 non-distinguishing `AUTH_FAILED`임을 §6.3·§6.4에 명문화; v0.6 = `session read --follow` 출력 형태와 `--wait` 하한 명문화, v0.5 = M2 계약 확정, v0.4 = M1 구현과 동기화)  
 **Canonical interface:** `qsh` CLI
 
 ## 1. 목적
@@ -84,6 +83,7 @@ trust.add_ca
 trust.list
 trust.remove
 trust.rename
+trust.ssh_preview
 trust.invite
 trust.accept
 cert.init
@@ -927,6 +927,52 @@ qsh trust rename <old> <new> --json
       "added_at": "2026-08-17T00:00:00Z"
     },
     "old_name": "personal-mac"
+  }
+}
+```
+
+```bash
+qsh trust ssh-preview ~/.ssh/authorized_keys --json
+```
+
+`trust.ssh_preview`(ADR-0026 결정 4)는 OpenSSH `authorized_keys` 파일을 읽어 "이 키들을 qsh에서 쓰려면 어떤 pin과 어떤 `[[acl]]` 행이 필요한가"를 보여 준다. 인가 불요 local op이고 아무것도 쓰지 않는다. 자동으로 pin하지 않고(ADR-0017 결정 5) `acl.toml`도 쓰지 않으며(ADR-0017 결정 1), `authorized_keys`에는 principal 이름이 없으므로 이름은 사람이 고른다. 표준입력(`-`)은 받지 않는다. 파일은 1 MiB(`AUTHORIZED_KEYS_MAX`)까지만 읽고 넘으면 `INVALID_ARGUMENT`(`details.reason`은 `too_large`, 열 수 없으면 `unreadable`)다. `data`에는 파일 경로를 싣지 않는다.
+
+`data.entries`는 빈 줄과 `#` 줄을 뺀 줄마다 하나씩, 파일 순서대로 나온다.
+
+| 필드 | 뜻 |
+|---|---|
+| `line` | 1부터 세는 줄 번호 |
+| `status` | `ok`(옵션 없는 `ssh-ed25519`), `unsupported_key_type`(RSA·ECDSA·보안 키 등 다른 형식), `restricted_options`(`command=`·`from=`·`no-pty` 같은 옵션이 붙은 `ssh-ed25519`), `malformed`(파싱 실패) |
+| `ssh_fingerprint` | Ed25519 줄의 `SHA256:…`(`ssh-keygen -lf`와 같은 문자열) |
+| `qsh_fingerprint` | 상대가 같은 키를 `qsh init --import-ssh-key`로 들였을 때 갖게 될 `sha256:BASE64`. 공개키만으로 정해지는 예측값이다(Ed25519 SPKI DER은 고정 접두와 32바이트 공개키) |
+| `already_pinned_as` | 같은 fingerprint가 이미 `trust.toml`에 있으면 그 이름 |
+| `comment` | 줄 끝 comment. 제어 문자는 대체 문자로 바뀐다 |
+| `trust_command` | `ok` 줄만. `qsh trust add <name> --fingerprint sha256:…` |
+| `acl_row` | `ok` 줄만. `[[acl]]` 행 초안. `doctor`와 같은 생성기라 `allow` 목록과 `device:<name>` 자리표시자가 같다 |
+
+`malformed` 줄은 줄 번호와 상태만 싣고 그 줄의 바이트는 어디에도 싣지 않는다. `unsupported_key_type` 줄도 fingerprint를 싣지 않는다. `restricted_options` 줄은 두 fingerprint까지만 싣고 `trust_command`와 `acl_row`는 내지 않는다. options가 거는 제한을 qsh ACL로 옮길 수 없으니, 그 줄에서 넓게 여는 쪽으로 틀리지 않게 하려는 것이다.
+
+`<name>`은 자리표시자다. `trust_command`와 `acl_row` 두 곳에서 같은 이름으로 바꿔야 한다. 고치지 않은 `acl_row`를 그대로 붙이면 `acl.toml`은 로드되지만(로더는 principal의 접두와 비지 않은 나머지만 본다) 실제 이름으로 pin한 어떤 principal과도 매치되지 않아 요청은 default-deny로 거부되고, `qsh doctor`가 그 pin에 `acl_principal_unmatched`를 낸다. 고치지 않은 `trust_command`까지 붙이면 그 키는 문자 그대로 `<name>`이라는 이름으로 pin되고 초안 행을 받는다. 결과는 운영자가 이름을 골랐을 때보다 넓지 않다. 여러 `ok` 줄을 고치지 않고 붙이면 두 번째부터의 `trust add`는 이름이 같고 fingerprint가 달라 no-op이다. 셸에 붙일 때 `<`·`>`가 리다이렉션으로 해석될 수 있으니 `<name>`을 먼저 바꿔야 한다. human mode는 이 두 가지, 곧 두 곳의 `<name>`을 같은 이름으로 바꿔야 한다는 것과 예측 fingerprint는 상대가 같은 키를 `qsh init --import-ssh-key`로 들였을 때만 맞는다는 것을 출력 끝에 적는다.
+
+```json
+{
+  "schema": "qsh.cli/v1",
+  "request_id": "01K0EXAMPLE",
+  "command": "trust.ssh_preview",
+  "ok": true,
+  "data": {
+    "entries": [
+      {
+        "line": 1,
+        "status": "ok",
+        "ssh_fingerprint": "SHA256:XxSbKVKvD1gyArwLk6oM3TZnt9rZogny7tQgxWR2bek",
+        "qsh_fingerprint": "sha256:BASE64FINGERPRINT",
+        "comment": "laptop",
+        "trust_command": "qsh trust add <name> --fingerprint sha256:BASE64FINGERPRINT",
+        "acl_row": "[[acl]]\nprincipal = \"device:<name>\"\nallow = [\"exec.run\", \"session.open\", \"session.list\", \"session.attach\", \"session.control\"]\n"
+      },
+      { "line": 2, "status": "malformed" }
+    ]
   }
 }
 ```

@@ -407,6 +407,13 @@ const OP_FACES: &[OpFace] = &[
         man_file: "qsh-trust-rename.1",
     },
     OpFace {
+        op: "trust.ssh_preview",
+        marker: "TrustSshPreviewOp",
+        renderer: "print_trust_ssh_preview",
+        cli_spelling: "qsh trust ssh-preview",
+        man_file: "qsh-trust-ssh-preview.1",
+    },
+    OpFace {
         op: "tunnel.close",
         marker: "TunnelCloseOp",
         renderer: "print_tunnel_close",

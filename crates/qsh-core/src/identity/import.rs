@@ -56,6 +56,19 @@ pub fn ssh_fingerprint_of_ed25519(public: &[u8; 32]) -> String {
     ssh_fingerprint(&ed25519_wire_blob(public))
 }
 
+/// The DER of an Ed25519 `SubjectPublicKeyInfo`: the fixed algorithm prefix
+/// followed by the 32-byte public key. This is what a leaf certificate over
+/// the key carries, so its SHA-256 is the qsh fingerprint.
+pub(crate) fn ed25519_spki_der(public: &[u8; 32]) -> [u8; 44] {
+    const PREFIX: [u8; 12] = [
+        0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+    ];
+    let mut der = [0u8; 44];
+    der[..12].copy_from_slice(&PREFIX);
+    der[12..].copy_from_slice(public);
+    der
+}
+
 /// Assemble the RFC 8410 `OneAsymmetricKey` (PKCS#8 v2) DER of an Ed25519
 /// key: version 1, algorithm `1.3.101.112`, the seed as `CurvePrivateKey`
 /// and the public key in the `[1]` field. v2 carries the public key so the
