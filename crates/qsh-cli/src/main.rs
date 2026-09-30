@@ -1212,6 +1212,8 @@ fn run_serve_inbound(ops: &Ops, config: &Config, bind: SocketAddr) -> i32 {
             .map_err(|err| OpError::new(ErrorCode::Internal, format!("runtime: {err}")))?;
         let device_id = identity.identity.device_id.clone();
         let fingerprint = identity.identity.fingerprint.to_string();
+        // Registered before the `listening` line can be written.
+        let shutdown = arm_shutdown_signal(&runtime);
         runtime.block_on(qsh_core::serve::run_serve(
             ops.paths(),
             config,
@@ -1239,7 +1241,7 @@ fn run_serve_inbound(ops: &Ops, config: &Config, bind: SocketAddr) -> i32 {
             // (`docs/design/architecture.md` §1), same precedent as the
             // `policy_diagnostic` closure just above.
             |notice| stderr_note!("qsh serve: {notice}"),
-            shutdown_signal(),
+            shutdown,
         ))
     })();
     match result {
@@ -1302,6 +1304,8 @@ fn run_listen(ops: &Ops, bind: Option<&str>) -> i32 {
             .enable_all()
             .build()
             .map_err(|err| OpError::new(ErrorCode::Internal, format!("runtime: {err}")))?;
+        // Registered before the `listening` line can be written.
+        let shutdown = arm_shutdown_signal(&runtime);
         runtime.block_on(qsh_core::reverse::listen::run_listen(
             ops.paths(),
             &config,
@@ -1334,7 +1338,7 @@ fn run_listen(ops: &Ops, bind: Option<&str>) -> i32 {
             |rendered| {
                 stderr_note!("qsh listen: {rendered}");
             },
-            shutdown_signal(),
+            shutdown,
         ))
     })();
     match result {

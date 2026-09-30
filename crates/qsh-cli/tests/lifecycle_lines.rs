@@ -420,3 +420,57 @@ fn serve_to_emits_listening_and_shutting_down_lifecycle_lines() {
     check_shape(&lines, &[port.to_string().as_str(), "127.0.0.1"]);
     assert!(stdout.lock().unwrap_or_else(|e| e.into_inner()).is_empty());
 }
+
+/// Spawn `qsh <args>`, wait for its `listening` record, SIGTERM it at once
+/// and return the exit code and stderr.
+fn sigterm_after_listening(args: &[&str]) -> (i32, Vec<String>) {
+    let sandbox = Sandbox::initialized();
+    let mut child = sandbox
+        .command(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn qsh");
+    let stderr = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::new(Mutex::new(Vec::new()));
+    let mut readers = vec![
+        collect(child.stdout.take().expect("stdout pipe"), sink),
+        collect(
+            child.stderr.take().expect("stderr pipe"),
+            Arc::clone(&stderr),
+        ),
+    ];
+    poll_until("the listening record", Duration::from_secs(30), || {
+        stderr
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .any(|l| l.starts_with("{\"lifecycle\":\"listening\""))
+            .then_some(())
+    });
+    let _ = kill(Pid::from_raw(child.id() as i32), Signal::SIGTERM);
+    let code = wait_exit(&mut child, &mut readers, "qsh");
+    let lines = stderr.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    (code, lines)
+}
+
+#[test]
+fn serve_and_listen_exit_cleanly_on_a_sigterm_sent_right_after_the_listening_record() {
+    for (args, process) in [
+        (&["serve", "--bind", "127.0.0.1:0"][..], "serve"),
+        (&["listen", "--bind", "127.0.0.1:0"][..], "listen"),
+    ] {
+        let (code, lines) = sigterm_after_listening(args);
+        assert_eq!(
+            code, 0,
+            "{process} died instead of shutting down: {lines:?}"
+        );
+        let parsed = lifecycle_lines(&lines);
+        assert_eq!(
+            parsed.last().map(|l| l["lifecycle"].clone()),
+            Some("shutting_down".into())
+        );
+        assert!(parsed.iter().all(|l| l["process"] == process), "{lines:?}");
+    }
+}
