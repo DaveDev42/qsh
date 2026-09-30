@@ -39,6 +39,16 @@ jobs:
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-musl
             musl: true
+          # aarch64 twin of the static build above, for old-glibc arm64
+          # distributions. A native arm runner, not a cross build, for the
+          # same reason as the x86_64 leg. aws-lc-sys 0.45.0 (Cargo.lock)
+          # ships src/aarch64_unknown_linux_musl_crypto.rs next to the
+          # x86_64 one, so the `musl-tools` recipe below applies unchanged.
+          # That is a source-tree observation; whether the leg builds is
+          # settled by the first dispatch run (PLAN risk "aws-lc-sys").
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            musl: true
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             ext: .exe
@@ -525,6 +535,40 @@ jobs:
       - name: Generate checksums
         working-directory: dist
         run: sha256sum -- * > SHA256SUMS
+
+      # A build matrix row that is dropped or renamed would publish a
+      # release that is quietly missing a platform: every remaining leg
+      # stays green. This list is the published asset set and must match the
+      # `build` matrix above; `scripts/install.sh` builds the same names.
+      - name: Check every target is published
+        working-directory: dist
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for target in \
+            aarch64-apple-darwin \
+            x86_64-apple-darwin \
+            x86_64-unknown-linux-gnu \
+            aarch64-unknown-linux-gnu \
+            x86_64-unknown-linux-musl \
+            aarch64-unknown-linux-musl \
+            x86_64-pc-windows-msvc; do
+            case "$target" in
+              *-windows-*) asset="qsh-${TAG}-${target}.zip" ;;
+              *) asset="qsh-${TAG}-${target}.tar.gz" ;;
+            esac
+            if [ ! -f "$asset" ]; then
+              echo "::error title=Missing asset::${asset} is not in dist/"
+              missing=1
+            fi
+            if ! awk -v f="$asset" '$2 == f { found = 1 } END { exit !found }' SHA256SUMS; then
+              echo "::error title=Missing checksum::SHA256SUMS has no line for ${asset}"
+              missing=1
+            fi
+          done
+          exit "$missing"
 
       # Build provenance for every published asset (`docs/ROADMAP.md` M10
       # scope, "SLSA provenance"). The action hashes what `download-artifact`
