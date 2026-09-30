@@ -47,6 +47,10 @@ struct ScriptedPeer {
 struct RfwdScript {
     /// Every `RemoteForwardOpen`, in order.
     opens: std::sync::Mutex<Vec<wire::RemoteForwardOpen>>,
+    /// For each entry of `opens`, the ordinal of the connection it arrived
+    /// on. Each supervise attempt dials a new connection, so this attributes
+    /// an open to its attempt without reading a count against a moving clock.
+    open_conns: std::sync::Mutex<Vec<usize>>,
     /// Every `RemoteForwardClose.forward_id`, in order.
     closes: std::sync::Mutex<Vec<String>>,
     /// The next this-many opens that ask for a concrete port fail with
@@ -60,10 +64,11 @@ struct RfwdScript {
 }
 
 impl RfwdScript {
-    fn answer(&self, id: u64, body: &control_message::Body) -> Option<ControlMessage> {
+    fn answer(&self, conn: usize, id: u64, body: &control_message::Body) -> Option<ControlMessage> {
         use wire::response;
         match body {
             control_message::Body::RfwdOpen(open) => {
+                self.open_conns.lock().unwrap().push(conn);
                 self.opens.lock().unwrap().push(open.clone());
                 let refuse = |code, what: &str| {
                     Some(ControlMessage::error(
@@ -144,7 +149,7 @@ async fn scripted_peer() -> ScriptedPeer {
         let rfwd = Arc::clone(&rfwd);
         async move {
             while let Some(incoming) = listener.accept().await {
-                incoming_count.fetch_add(1, Ordering::SeqCst);
+                let conn_ordinal = incoming_count.fetch_add(1, Ordering::SeqCst);
                 while stall.load(Ordering::SeqCst) {
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
@@ -185,7 +190,7 @@ async fn scripted_peer() -> ScriptedPeer {
                                         control_message::Body::Pong(wire::Pong {}),
                                     ))
                                 }
-                                Some(body) => rfwd.answer(msg.request_id, body),
+                                Some(body) => rfwd.answer(conn_ordinal, msg.request_id, body),
                                 None => None,
                             };
                             if let Some(reply) = reply

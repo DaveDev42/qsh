@@ -142,10 +142,24 @@ fn supervised_remote_reissue_survives_a_delayed_listener_drop_via_bounded_open_r
 fn supervised_remote_reissue_sends_at_most_three_open_retries_per_attempt() {
     let mut rig = open_remote(1_000);
     rig.lose_the_connection();
-    // The first attempt fails and is reported before the next one starts.
+    // The first attempt fails and is reported; the next one may already be
+    // dialing, so the count is read per connection, not in total.
     wait_until(|| !lines_of("retry").is_empty(), "the first `retry` line");
-    // One open for the tunnel itself, then 1 + 3 in the failed attempt.
-    assert_eq!(rig.peer.rfwd.opens.lock().unwrap().len(), 5);
+    let per_conn = {
+        let conns = rig.peer.rfwd.open_conns.lock().unwrap();
+        let mut per_conn = std::collections::BTreeMap::<usize, usize>::new();
+        for conn in conns.iter() {
+            *per_conn.entry(*conn).or_default() += 1;
+        }
+        per_conn
+    };
+    let counts: Vec<usize> = per_conn.values().copied().collect();
+    // The tunnel's own open is alone on the first connection.
+    assert_eq!(counts[0], 1, "{per_conn:?}");
+    // The failed attempt: 1 + 3 on its connection, exactly.
+    assert_eq!(counts[1], 4, "{per_conn:?}");
+    // No attempt, including one already under way, sends more than that.
+    assert!(counts.iter().all(|n| *n <= 4), "{per_conn:?}");
     rig.peer.rfwd.bind_failures.store(0, Ordering::SeqCst);
     assert!(rig.stop().is_none());
 }
