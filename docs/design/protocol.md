@@ -354,7 +354,9 @@ message ExecFrame {
 
 **7. `parse_socks5`(ADR-0019).** `crates/qsh-proto/src/socks5.rs`의 sans-IO SOCKS5 codec(greeting·request 파서, method-select·reply 인코더)을 흔든다 — 항목 3의 로컬 입력 파서들과 같은 이유(신뢰 불가 **로컬** 입력)로 이 표면에 있지만, 커밋 `d87e76b`가 착륙시킨 위 16종에도 DoD 1의 분모(파서 16종, `docs/campaigns/m8-fuzz.md` §2)에도 들지 않는 이후 추가다. 불변식: panic 없음, `consumed <= input.len()`, 유효 메시지의 엄격한 접두는 항상 `Incomplete`다.
 
-corpus는 `fuzz/corpus/`에 체크인한다. **18종 중 `broker_ops`는 이미 모든 플랫폼에서 유닛 테스트로 상시 재생된다**(위 `broker_ops_corpus.rs`, 발견된 크래시의 회귀 고정) — 나머지 파서 타깃 17종에 대해 "유닛 테스트 상시 재생"은 아직 이 문서의 선언일 뿐 별도 회귀 하네스로 구현되지 않았다(현재는 `fuzz-smoke.yml`의 짧은 결정적 `-runs=<N>` 스모크가 그 자리를 대신한다 — `fuzz/README.md` "CI"). CI에서 PR마다 fuzz 빌드 게이트 + nightly smoke fuzz, 공개 beta 전 타깃당 누적 72시간(파서 16종, DoD 1) + OSS-Fuzz 제출. 캠페인 기록은 [`docs/campaigns/m8-fuzz.md`](../campaigns/m8-fuzz.md), 상세는 [testing.md](testing.md).
+**8. `parse_openssh_key`(ADR-0026).** `crates/qsh-proto/src/openssh/`의 손으로 쓴 OpenSSH 키 파서를 흔든다. `qsh init --import-ssh-key`가 읽는 개인키 파일과 `authorized_keys` 미리보기가 읽는 공개키 목록이 대상이다. 항목 7과 같은 이유(신뢰 불가 **로컬** 입력)로 이 표면에 있고, 항목 7과 마찬가지로 DoD 1의 분모(파서 16종)에 들지 않는 이후 추가다. 첫 입력 바이트가 봉투 해제, 이진 `openssh-key-v1` 본문, `authorized_keys` 줄 분류 중 하나를 고른다. 불변식: panic 없음, 받아들인 키의 공개키 wire blob이 온전함, 줄 번호가 입력 줄 수 안에서 단조 증가함. 길이 접두가 남은 입력보다 크면 할당 전에 거절하므로 입력 크기로 할당이 정해진다.
+
+corpus는 `fuzz/corpus/`에 체크인한다. **19종 중 `broker_ops`는 이미 모든 플랫폼에서 유닛 테스트로 상시 재생된다**(위 `broker_ops_corpus.rs`, 발견된 크래시의 회귀 고정) — 나머지 파서 타깃 18종에 대해 "유닛 테스트 상시 재생"은 아직 이 문서의 선언일 뿐 별도 회귀 하네스로 구현되지 않았다(현재는 `fuzz-smoke.yml`의 짧은 결정적 `-runs=<N>` 스모크가 그 자리를 대신한다 — `fuzz/README.md` "CI"). CI에서 PR마다 fuzz 빌드 게이트 + nightly smoke fuzz, 공개 beta 전 타깃당 누적 72시간(파서 16종, DoD 1) + OSS-Fuzz 제출. 캠페인 기록은 [`docs/campaigns/m8-fuzz.md`](../campaigns/m8-fuzz.md), 상세는 [testing.md](testing.md).
 
 ## 14. P1 TCP fallback을 위한 제약 (지금 지켜야 할 것)
 

@@ -3,10 +3,10 @@
 `crates/qsh-proto` is the project's designated fuzz surface (`CLAUDE.md`,
 `crates/qsh-proto/src/lib.rs`) — it is the sans-IO contract layer every
 attacker-controlled byte stream and CLI-adjacent string runs through before
-anything else touches it. This crate holds seventeen `cargo-fuzz` parser
+anything else touches it. This crate holds eighteen `cargo-fuzz` parser
 harnesses over that surface, plus two string parsers in `qsh-transport`
 (`Fingerprint`/`Principal`) that are reached from the same untrusted-input
-paths (trust store files, ACL principal text). An eighteenth, stateful
+paths (trust store files, ACL principal text). A nineteenth, stateful
 target — `broker_ops` — drives `qsh-core`'s session broker state machine
 (append/read/lease/resume/attach/tick/reap) against a model oracle instead
 of decoding a single message; see "The `broker_ops` state machine target"
@@ -87,6 +87,7 @@ Run from `fuzz/`:
 | `parse_invite_code` | `crates/qsh-proto/src/pairing.rs` | `parse_invite_code` — Crockford Base32 invite-code decode (case-fold, hyphen-agnostic, `i`/`l`/`o` remap, `u` rejected), reached from `qsh trust accept`. Transitively exercises the private per-`char` `decode_symbol` over the full Unicode domain. |
 | `parse_forward_spec` | `wire.rs` | `parse_forward_spec` — the `-L`/`-R` forward-spec grammar (`[bind:]listen_port:host:host_port`, IPv6 bracket tokenizing). Local-CLI-origin text, included because it's part of qsh-proto's sans-IO parser surface. |
 | `parse_socks5` | `crates/qsh-proto/src/socks5.rs` | `parse_greeting`/`parse_request` — the SOCKS5 sans-IO codec `-D` drives against its loopback listener (ADR-0019). Local-CLI-adjacent input like `parse_forward_spec`, not a `qsh`-to-`qsh` wire message. Checks no panic, `consumed <= input.len()`, and that every strict prefix of a valid message parses as `Incomplete`. |
+| `parse_openssh_key` | `crates/qsh-proto/src/openssh/` | The hand-written OpenSSH key parsers behind `qsh init --import-ssh-key` and the `authorized_keys` preview (ADR-0026). The first input byte picks the layer: PEM envelope decode, binary `openssh-key-v1` body, or the `authorized_keys` line classifier. Checks no panic, well-formed wire blob for every accepted key, and line numbers that stay inside the input. Local-file input like `parse_forward_spec`. |
 | `fingerprint_principal` | `crates/qsh-transport/src/identity.rs` | `Fingerprint::from_str` and `Principal::from_str`, selected by a leading byte. Fingerprint text is reached from `trust.toml` on disk and `qsh trust add`; Principal text from `qsh acl check --principal` (and composes `Fingerprint::from_str` for its `fp:` branch). |
 | `json_request_types` | `crates/qsh-proto/src/types.rs` | `serde_json::from_slice` into 12 of the `qsh_proto::types` request types an agent hands in as `--json` payload on qsh's JSON CLI surface (ADR-0011), selected by a leading byte. |
 | `broker_ops` | `crates/qsh-core/src/broker/` | **Stateful**, not a single-message decode: a fixed byte-format op sequence (append/read/lease/resume/attach/detach/tick/reap, 19 opcodes) driven against `qsh-core`'s public broker API and checked against a `ModelSession` oracle every op — sequence/gap/byte-identity, writer lease `Acquired`/`Conflict`/steal semantics, resume issue/verify/rotate, and TTL/reap. See "The `broker_ops` state machine target" below. |
@@ -229,6 +230,11 @@ tests and fixtures — not random bytes — per target:
   command, an unsupported `ATYP`, a nonzero `RSV`, and the `127.1`
   inet_aton-style domain rejection — one seed per case named in
   `socks5.rs`'s own test module.
+- `parse_openssh_key`: the golden Ed25519 key's binary `openssh-key-v1`
+  body (layer byte `1`, no PEM header line, so the corpus holds nothing a
+  secret scanner would flag), a mixed `authorized_keys` file (layer byte
+  `2`: comment and blank lines, CRLF, a quoted-options prefix, an RSA line,
+  a bad-base64 line), a plain `authorized_keys` line, and the empty input.
 - `fingerprint_principal`: valid and case-variant fingerprints, wrong
   base64 length, a multi-byte character straight after the `sha256:`
   prefix, and all four `Principal` shapes (`device:`/`user:`/`fp:`/
@@ -274,7 +280,7 @@ guaranteed-valid encodings, not hand-typed hex.
 
 ## The `broker_ops` state machine target
 
-Unlike the seventeen parser targets, `broker_ops` doesn't decode one message
+Unlike the eighteen parser targets, `broker_ops` doesn't decode one message
 — it replays a byte-encoded sequence of ops (append, read, take/drop a
 writer lease, issue/verify/rotate a resume token, attach/detach, advance a
 clock, reap) against `qsh-core`'s public broker API and checks the result

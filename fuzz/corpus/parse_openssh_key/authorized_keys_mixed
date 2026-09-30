@@ -1,0 +1,5 @@
+# c
+
+command="a b",no-pty ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMWCPbBHRAb8h2VRK0kRKRPxKLJBjfut3uGK6Ix/VLI/ qsh-test-only
+ssh-rsa AAAAB3NzaC1yc2E= x
+ssh-ed25519 !!

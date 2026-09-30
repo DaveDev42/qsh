@@ -18,6 +18,10 @@
 //!   `docs/design/protocol.md` §11-3).
 //! - [`pairing`]: the invite-code display encoding (Crockford Base32) for
 //!   one-time pairing (ADR-0002, `docs/design/protocol.md` §15).
+//! - [`openssh`]: the hand-written OpenSSH key parsers behind
+//!   `qsh init --import-ssh-key` and the `authorized_keys` preview
+//!   (ADR-0026). Plaintext Ed25519 only; sans-IO, total over arbitrary
+//!   bytes, and the private seed lives in `Zeroizing`.
 //! - [`socks5`]: the SOCKS5 sans-IO codec `-D` (dynamic port forwarding)
 //!   drives against its loopback listener (ADR-0019). A local-input
 //!   parser like [`wire::parse_forward_spec`], not a `qsh` peer-to-peer
@@ -32,6 +36,7 @@ pub mod error;
 pub mod event;
 pub mod frame;
 pub mod local;
+pub mod openssh;
 pub mod pairing;
 pub mod schema;
 pub mod socks5;
