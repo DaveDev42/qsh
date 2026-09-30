@@ -93,6 +93,16 @@ impl Budget {
             .saturating_sub(self.spent.saturating_add(running))
     }
 
+    /// Disconnected time spent in the current outage so far (the figure the
+    /// `outage_ms` diagnostic reports).
+    pub(crate) fn outage(&self, now: Instant) -> Duration {
+        let running = match self.state {
+            State::Down(since) => now.saturating_duration_since(since),
+            State::Up(_) => Duration::ZERO,
+        };
+        self.spent.saturating_add(running)
+    }
+
     /// Whether the supervisor must give up rather than plan another
     /// attempt.
     pub(crate) fn exhausted(&self, now: Instant) -> bool {

@@ -152,7 +152,11 @@ pub(super) async fn recover_attach(
 /// The `Ping` goes out through the control pump, which owns the stream;
 /// the answer is whatever the watchdog next sees as inbound traffic, which
 /// may be the `Pong`, a session event, or a frame of output.
-async fn probe_alive(watch: &PathWatch, probes: &Arc<tokio::sync::Notify>, rtt: Duration) -> bool {
+pub(crate) async fn probe_alive(
+    watch: &PathWatch,
+    probes: &Arc<tokio::sync::Notify>,
+    rtt: Duration,
+) -> bool {
     // Subscribed **before** the question is asked. The answer can land on
     // a runtime worker before this task is polled again, and a
     // notification edge issued in that window is delivered to nobody — a

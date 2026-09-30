@@ -45,7 +45,7 @@ pub(crate) mod dynamic;
 pub(crate) mod local;
 pub(crate) mod remote;
 pub(crate) mod splice;
-pub(crate) mod supervise;
+pub mod supervise;
 #[cfg(test)]
 pub(crate) mod testutil;
 

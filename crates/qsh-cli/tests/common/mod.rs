@@ -506,9 +506,27 @@ impl ServeGuard {
         Self::spawn_with_bin(host, host.bin(), extra, None)
     }
 
+    /// Like [`start`](Self::start), but bound to an explicit `bind` instead
+    /// of an ephemeral port — how a test restarts a host on the address it
+    /// had, the way a supervised tunnel's peer comes back.
+    pub fn start_at(host: &Sandbox, bind: &str) -> Self {
+        plant_allow_all_acl(host);
+        Self::spawn_bound(host, host.bin(), &[], None, bind)
+    }
+
     fn spawn_with_bin(host: &Sandbox, bin: &Path, extra: &[&str], log: Option<&str>) -> Self {
+        Self::spawn_bound(host, bin, extra, log, "127.0.0.1:0")
+    }
+
+    fn spawn_bound(
+        host: &Sandbox,
+        bin: &Path,
+        extra: &[&str],
+        log: Option<&str>,
+        bind: &str,
+    ) -> Self {
         let mut args: Vec<&str> = extra.to_vec();
-        args.extend_from_slice(&["serve", "--bind", "127.0.0.1:0"]);
+        args.extend_from_slice(&["serve", "--bind", bind]);
         let mut command = host.command_with_bin(bin, &args);
         if let Some(log) = log {
             command.env("QSH_LOG", log).env("NO_COLOR", "1");
@@ -704,6 +722,27 @@ impl Drop for ServeGuard {
     }
 }
 
+/// A loopback `ip:port` whose port is free right now and lies below every
+/// OS's ephemeral range (macOS starts at 49152, Linux at 32768).
+///
+/// A test that restarts a host on the address it had needs this: with an
+/// ephemeral port, one of the client's re-dial sockets can be handed exactly
+/// that port while the host is down, and the restart then fails to bind.
+pub fn steady_bind() -> String {
+    use std::net::UdpSocket;
+    let seed = u64::from(std::process::id()).wrapping_mul(2_654_435_761)
+        ^ std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::from(d.subsec_nanos()));
+    let mut port = 20_000 + (seed % 10_000) as u16;
+    loop {
+        if UdpSocket::bind(("127.0.0.1", port)).is_ok() {
+            return format!("127.0.0.1:{port}");
+        }
+        port = 20_000 + (port - 20_000 + 1) % 10_000;
+    }
+}
+
 /// A host running `qsh serve` plus a client that is pinned by it and pins
 /// it back — the minimal two-identity setup M1's acceptance criteria
 /// describe.
@@ -737,13 +776,33 @@ impl Fleet {
     /// `release_smoke.rs` uses to run the whole init/trust/serve dance
     /// against an arbitrary `qsh` binary.
     pub fn start_with_bin(bin: &Path, extra: &[&str]) -> Self {
+        Self::start_inner(bin, extra, None)
+    }
+
+    /// Like [`start`](Self::start), but the host binds a port outside every
+    /// OS's ephemeral range ([`steady_bind`]) instead of `:0`. For a test
+    /// that kills the host and starts it again on the same address: an
+    /// ephemeral port can be taken by one of the client's own re-dial
+    /// sockets in between.
+    pub fn start_steady() -> Self {
+        Self::start_inner(
+            Path::new(env!("CARGO_BIN_EXE_qsh")),
+            &[],
+            Some(steady_bind()),
+        )
+    }
+
+    fn start_inner(bin: &Path, extra: &[&str], bind: Option<String>) -> Self {
         let host = Sandbox::with_bin(bin);
         let client = Sandbox::with_bin(bin);
         let host_fingerprint = host.fingerprint();
         let client_fingerprint = client.fingerprint();
 
         host.trust_add(CLIENT_ALIAS, None, &client_fingerprint);
-        let serve = ServeGuard::start_with(&host, extra);
+        let serve = match bind {
+            Some(bind) => ServeGuard::start_at(&host, &bind),
+            None => ServeGuard::start_with(&host, extra),
+        };
         client.trust_add(HOST_ALIAS, Some(serve.addr()), &host_fingerprint);
 
         Self {

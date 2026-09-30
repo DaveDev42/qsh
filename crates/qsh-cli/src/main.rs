@@ -199,6 +199,11 @@ fn init_tracing(cli: &Cli) {
     // same `human` filter/formatter that this constant now special-cases).
     let reverse_target = qsh_core::reverse::listen::TARGET;
     let reverse_default = format!("{default},{reverse_target}=info");
+    // Target `qsh::tunnel::supervise`. `--supervise`'s `lost`/`retry`/`reestablished`/`gave_up`/`wake` lines
+    // (`docs/CLI.md` §6.14, ADR-0023 decision 12) follow the same promise:
+    // one-line JSON, visible at default verbosity, off under `--quiet`.
+    let supervise_target = qsh_core::tunnel::supervise::TARGET;
+    let supervise_default = format!("{default},{supervise_target}=info");
     let human = tracing_subscriber::fmt::layer()
         .with_writer(|| LossyStderr)
         .with_target(false)
@@ -206,6 +211,7 @@ fn init_tracing(cli: &Cli) {
         .with_filter(tracing_subscriber::filter::filter_fn(|meta| {
             meta.target() != qsh_core::telemetry::TARGET
                 && meta.target() != qsh_core::reverse::listen::TARGET
+                && meta.target() != qsh_core::tunnel::supervise::TARGET
         }));
     let recovery_enabled = !cli.quiet;
     let recovery = RecoveryLayer(StderrLines)
@@ -219,10 +225,17 @@ fn init_tracing(cli: &Cli) {
         .with_filter(tracing_subscriber::filter::filter_fn(move |meta| {
             reverse_enabled && meta.target() == reverse_target
         }));
+    let supervise_enabled = !cli.quiet;
+    let supervise = RecoveryLayer(StderrLines)
+        .with_filter(env_filter(spec, &supervise_default))
+        .with_filter(tracing_subscriber::filter::filter_fn(move |meta| {
+            supervise_enabled && meta.target() == supervise_target
+        }));
     tracing_subscriber::registry()
         .with(human)
         .with(recovery)
         .with(reverse)
+        .with(supervise)
         .init();
 }
 
@@ -932,6 +945,7 @@ fn run_tunnel_open(cli: &Cli, ops: &Ops, args: &TunnelOpenArgs) -> i32 {
         Ok(hold) => hold,
         Err(err) => return report_error(cli, TunnelOpenOp::COMMAND, &err),
     };
+    let shutdown = arm_supervised_shutdown(&hold, args.supervise);
     let rendered = if cli.wants_json() {
         match serde_json::to_value(hold.tunnel()) {
             Ok(value) => emit(Envelope::success(TunnelOpenOp::COMMAND, value).print()),
@@ -953,11 +967,7 @@ fn run_tunnel_open(cli: &Cli, ops: &Ops, args: &TunnelOpenArgs) -> i32 {
         return EXIT_IO_FAILURE;
     }
     stderr_note!("qsh tunnel open: holding; press Ctrl-C to close");
-    let err = hold.hold();
-    if let Err(io_err) = human::print_error(&err) {
-        stderr_note!("qsh tunnel open: failed to write output: {io_err}");
-    }
-    EXIT_RUNTIME_FAILURE
+    hold_tunnel(hold, shutdown)
 }
 
 /// [`run_tunnel_open`]'s `--dynamic` branch (`tunnel.dynamic`, ADR-0019
@@ -998,6 +1008,7 @@ fn run_tunnel_open_dynamic(cli: &Cli, ops: &Ops, args: &TunnelOpenArgs) -> i32 {
         Ok(hold) => hold,
         Err(err) => return report_error(cli, TunnelDynamicOp::COMMAND, &err),
     };
+    let shutdown = arm_supervised_shutdown(&hold, args.supervise);
     let rendered = if cli.wants_json() {
         match serde_json::to_value(hold.dynamic_tunnel()) {
             Ok(value) => emit(Envelope::success(TunnelDynamicOp::COMMAND, value).print()),
@@ -1019,11 +1030,92 @@ fn run_tunnel_open_dynamic(cli: &Cli, ops: &Ops, args: &TunnelOpenArgs) -> i32 {
         return EXIT_IO_FAILURE;
     }
     stderr_note!("qsh tunnel open: holding; press Ctrl-C to close");
-    let err = hold.hold();
-    if let Err(io_err) = human::print_error(&err) {
-        stderr_note!("qsh tunnel open: failed to write output: {io_err}");
+    hold_tunnel(hold, shutdown)
+}
+
+/// SIGINT and SIGTERM, registered on the tunnel's own runtime.
+///
+/// Registered *before* the envelope is printed: a caller that reads the
+/// envelope and signals at once must find the handler already in place,
+/// or the default disposition kills the process with a signal status
+/// instead of the clean exit `0` (`docs/CLI.md` §6.14).
+struct TunnelShutdown {
+    #[cfg(unix)]
+    interrupt: tokio::signal::unix::Signal,
+    #[cfg(unix)]
+    terminate: tokio::signal::unix::Signal,
+}
+
+impl TunnelShutdown {
+    fn arm(handle: &tokio::runtime::Handle) -> Option<Self> {
+        let _guard = handle.enter();
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{SignalKind, signal};
+            let interrupt = signal(SignalKind::interrupt()).ok()?;
+            let terminate = signal(SignalKind::terminate()).ok()?;
+            Some(Self {
+                interrupt,
+                terminate,
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            Some(Self {})
+        }
     }
-    EXIT_RUNTIME_FAILURE
+
+    async fn wait(self) {
+        #[cfg(unix)]
+        {
+            let Self {
+                mut interrupt,
+                mut terminate,
+            } = self;
+            tokio::select! {
+                _ = interrupt.recv() => {}
+                _ = terminate.recv() => {}
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = tokio::signal::ctrl_c().await;
+        }
+    }
+}
+
+/// Only a `--supervise` tunnel gets a signal handler; an unsupervised one
+/// keeps the default disposition (ADR-0023 decision 11).
+fn arm_supervised_shutdown(
+    hold: &qsh_core::TunnelHold,
+    supervise_ms: u32,
+) -> Option<TunnelShutdown> {
+    if supervise_ms == 0 {
+        return None;
+    }
+    TunnelShutdown::arm(&hold.runtime_handle())
+}
+
+/// Block on a tunnel and turn its end into an exit status: the error that
+/// ended it on stderr and `255`, or, for a supervised tunnel told to stop,
+/// a quiet `0`.
+fn hold_tunnel(hold: qsh_core::TunnelHold, shutdown: Option<TunnelShutdown>) -> i32 {
+    let ended = match shutdown {
+        Some(shutdown) => hold.hold_until(shutdown.wait()),
+        None => Some(hold.hold()),
+    };
+    match ended {
+        Some(err) => {
+            if let Err(io_err) = human::print_error(&err) {
+                stderr_note!("qsh tunnel open: failed to write output: {io_err}");
+            }
+            EXIT_RUNTIME_FAILURE
+        }
+        None => {
+            stderr_note!("qsh tunnel open: shutting down");
+            0
+        }
+    }
 }
 
 /// `qsh serve` — long-running host mode, inbound or outbound

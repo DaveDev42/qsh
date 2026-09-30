@@ -173,6 +173,13 @@ impl<R: rand::RngCore> Pacer<R> {
         Waited::Elapsed(step)
     }
 
+    /// The gap schedule underneath, for the caller's own transitions (a
+    /// loss opens the fast window, a refusal closes it, a stable carrier
+    /// resets the position).
+    pub(crate) fn backoff_mut(&mut self) -> &mut Backoff<R> {
+        &mut self.backoff
+    }
+
     fn woken(&mut self, now: Instant) -> Waited {
         let event = *self.wake.borrow_and_update();
         self.backoff.wake(now);

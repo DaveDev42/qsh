@@ -792,6 +792,15 @@ Some of these are MVP scope decisions, some are unfinished work.
   case from a drop-and-resume: switching networks without losing the
   connection outright (Wi-Fi to tethering, a changed IP) carries an open
   tunnel through transparently, the same as it does a session.
+- `--supervise <ms>` keeps a forward-route `-L` or `-D` tunnel alive across
+  a lost connection, and it is narrower than it sounds. It does not cover
+  `-R`, and it does not cover a tunnel over a reverse route: both still
+  answer `UNSUPPORTED`. `--accept-hold` is not implemented yet. A supervised
+  tunnel re-dials the address it resolved when it was opened and never
+  looks the host up again, so a peer that moved to a new address is not
+  followed. TCP connections that were spliced when the connection died are
+  not resumed. They end, the same as without the flag, and only new
+  connections ride the re-established one.
 - `qsh serve` and `qsh listen` share one default port. Both bind `[::]:4433`
   unless told otherwise, so a machine taking both roles needs an explicit
   `--bind` (or `[serve].bind`/`[listen].bind`) for at least one of them. The

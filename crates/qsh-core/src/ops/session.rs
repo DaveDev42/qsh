@@ -48,15 +48,16 @@ mod reconnect;
 mod recovery;
 
 pub use attach::{AttachHandle, DetachFlush, SessionAttachOp, SessionAttachStream};
-pub(crate) use link::Connected;
+pub(crate) use link::{Connected, Link};
 pub use reader::SessionReader;
+pub(crate) use recovery::probe_alive;
 
 use attach::{AttachCommand, AttachStop, RenewalSchedule};
 use context::{
     AbortOnDrop, AttachContext, LegEnd, LegPumps, Pump, RecoveryLink, ReverseKill, ReverseRoute,
 };
 use drive::drive_attach;
-use link::{ConnectedLink, Link};
+use link::ConnectedLink;
 use pump::{attach_event_json, pump_attach_control, pump_attach_input};
 #[cfg(unix)]
 use reader::dial_reverse_wait;
@@ -1150,6 +1151,25 @@ impl Ops {
             PeerRoute::Reverse(route) => {
                 self.connect_reverse(&route).map(|(conn, _generation)| conn)
             }
+        }
+    }
+
+    /// [`connect`](Self::connect), also handing back the resolved
+    /// [`PeerTarget`] when the route is the forward one. A supervised
+    /// tunnel re-dials that same target after a loss instead of resolving
+    /// the host again (ADR-0023 decision 4).
+    pub(crate) fn connect_keeping_target(
+        &self,
+        host: &str,
+    ) -> Result<(Connected, Option<PeerTarget>), OpError> {
+        match self.resolve_route(host)? {
+            PeerRoute::Forward(target) => {
+                let conn = self.connect_target(&target)?;
+                Ok((conn, Some(target)))
+            }
+            PeerRoute::Reverse(route) => self
+                .connect_reverse(&route)
+                .map(|(conn, _generation)| (conn, None)),
         }
     }
 

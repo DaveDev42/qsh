@@ -442,17 +442,37 @@ impl LocalForwardHandle {
         spec: &ForwardSpec,
         carrier: ForwardCarrier,
     ) -> Result<Self, LocalForwardError> {
+        Self::start_with_view(spec, CarrierView::fixed(Arc::new(carrier))).await
+    }
+
+    /// Start on a carrier a supervisor swaps under the running listener
+    /// (ADR-0023 decision 5).
+    pub(crate) async fn start_supervised(
+        spec: &ForwardSpec,
+        view: CarrierView,
+    ) -> Result<Self, LocalForwardError> {
+        Self::start_with_view(spec, view).await
+    }
+
+    async fn start_with_view(
+        spec: &ForwardSpec,
+        view: CarrierView,
+    ) -> Result<Self, LocalForwardError> {
         let forward = LocalForward::bind(spec).await?;
         let bind = forward.local_addr();
         let (host, host_port) = forward.destination();
         let forward_to = (host.to_string(), host_port);
-        let carrier = Arc::new(carrier);
         Ok(Self {
             tunnel_id: ulid::Ulid::new().to_string(),
             bind,
             forward_to,
-            task: tokio::spawn(forward.run(carrier)),
+            task: tokio::spawn(forward.run(view)),
         })
+    }
+
+    /// The `tunnel_id` this forward reports.
+    pub(crate) fn tunnel_id(&self) -> &str {
+        &self.tunnel_id
     }
 
     /// The address actually bound — with a `0` listen port, the one the
@@ -687,9 +707,25 @@ async fn forward_connection(
     };
     let opened = match opened {
         Ok(opened) => opened,
-        Err(err) => return Err(abort_local(tcp, err)),
+        Err(err) => {
+            note_denial(view, carrier, &err);
+            return Err(abort_local(tcp, err));
+        }
     };
     splice_opened(tcp, opened).await
+}
+
+/// Tell a supervisor when the peer answered `PERMISSION_DENIED`.
+pub(crate) fn note_denial(
+    view: &CarrierView,
+    carrier: &Arc<ForwardCarrier>,
+    err: &ForwardConnError,
+) {
+    if let ForwardConnError::Refused { code, .. } = err
+        && code == "PERMISSION_DENIED"
+    {
+        view.note_permission_denied(carrier);
+    }
 }
 
 /// End an accepted local connection the way a *failed* tunnel must end it,
