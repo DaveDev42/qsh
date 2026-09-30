@@ -567,6 +567,38 @@ async fn exec_run_against_a_missing_binary_still_releases_the_permit_end_to_end(
     h.shutdown().await;
 }
 
+/// Regression for the CI flake of the test above: the permit used to be
+/// dropped only after `run_exec` returned, i.e. after `ExecExit` had been
+/// sent, so a client that immediately issued the next `exec.run` could be
+/// refused `RESOURCE_EXHAUSTED`. `run_exec` now drops the permit before it
+/// sends `ExecExit`. Looping the back-to-back scenario over both the spawn
+/// failure and the normal exit path makes a reintroduced race show up
+/// reliably instead of once in a few dozen CI runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn exec_permit_is_released_before_the_result_is_observable() {
+    let h = LoopbackHarness::start_with_quotas(QuotaLimits {
+        max_exec_per_principal: 1,
+        ..QuotaLimits::default()
+    })
+    .await;
+    let mut s = h.session().await;
+
+    for i in 0..100 {
+        let missing = s
+            .exec(&exec_spec(&["/nonexistent/qsh-no-such-binary"]), None, None)
+            .await
+            .unwrap_or_else(|e| panic!("spawn-failure exec {i} refused: {e:?}"));
+        assert_eq!(missing.exit_code, 127);
+        let ok = s
+            .exec(&exec_spec(&["true"]), None, None)
+            .await
+            .unwrap_or_else(|e| panic!("normal exec {i} refused: {e:?}"));
+        assert_eq!(ok.exit_code, 0);
+    }
+
+    h.shutdown().await;
+}
+
 /// The `ExecPermit` must stay alive for as long as the *child* does, not
 /// merely until the exec ticket is redeemed. Both end-to-end exec quota
 /// tests above saturate the cap with either an unredeemed ticket or an
