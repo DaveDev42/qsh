@@ -416,6 +416,51 @@ impl InviteStore {
     }
 }
 
+/// How many redeemable invites are outstanding, counted by assigned name
+/// (ADR-0024 결정 5). It carries no `mac_key` and nothing derived from it, so
+/// a caller cannot use it to redeem or test a code.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LiveInviteCounts {
+    /// Live invites minted without `--as`: whoever redeems one gets pinned
+    /// under a name of their own choosing.
+    pub unassigned: u32,
+    /// Live invites by the name `--as` assigned to the redeemer.
+    pub assigned: std::collections::BTreeMap<String, u32>,
+}
+
+impl LiveInviteCounts {
+    /// Live invites that assign `name`.
+    pub fn assigned_to(&self, name: &str) -> u32 {
+        self.assigned.get(name).copied().unwrap_or(0)
+    }
+}
+
+impl InviteStore {
+    /// Count the invites redeemable at `now`: unconsumed and younger than
+    /// [`INVITE_TTL`]. A record whose `mac_key` or `created_at` does not
+    /// parse can never be redeemed and is not counted.
+    pub fn live_counts(&self, now: SystemTime) -> LiveInviteCounts {
+        let mut counts = LiveInviteCounts::default();
+        for (_, record) in self.parsed() {
+            if !record.redeemable(now) {
+                continue;
+            }
+            match record.assigned_name {
+                Some(name) => *counts.assigned.entry(name).or_insert(0) += 1,
+                None => counts.unassigned += 1,
+            }
+        }
+        counts
+    }
+}
+
+/// Read `path` and count its live invites (see [`InviteStore::live_counts`]).
+/// Read-only: takes no lock and never writes, because every writer replaces
+/// the file atomically.
+pub fn live_invite_counts(path: &Path, now: SystemTime) -> Result<LiveInviteCounts, OpError> {
+    Ok(InviteStore::load(path)?.live_counts(now))
+}
+
 /// The outcome of a redemption attempt (`crate::pairing`'s wire exchange is
 /// the only caller). Deliberately distinguishing — unlike a resume-token
 /// redemption (`broker::resume::ResumeDenied`, single indistinguishable
