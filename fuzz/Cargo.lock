@@ -1520,6 +1520,7 @@ dependencies = [
 name = "qsh-proto"
 version = "0.3.0"
 dependencies = [
+ "base64 0.22.1",
  "prost",
  "prost-build",
  "protox",
@@ -1527,6 +1528,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+ "zeroize",
 ]
 
 [[package]]

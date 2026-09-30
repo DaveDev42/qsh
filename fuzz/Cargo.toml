@@ -151,3 +151,10 @@ path = "fuzz_targets/broker_ops.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "parse_openssh_key"
+path = "fuzz_targets/parse_openssh_key.rs"
+test = false
+doc = false
+bench = false
