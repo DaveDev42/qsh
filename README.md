@@ -376,6 +376,47 @@ a different already-pinned peer (mTLS still blocks an unpinned address).
 `qsh hosts --json` reveals such a redirect through `"source": "hosts"`
 (`docs/CLI.md` §5).
 
+## Guided setup (`qsh setup`)
+
+`qsh setup` walks one machine through the commands that "First run" types
+by hand. It calls the existing operations in a fixed order (`qsh init`, the
+pairing or `trust add` step, `qsh doctor`) and adds no new capability, so
+the manual path above keeps working. One line per role:
+
+```bash
+qsh setup host --peer laptop                  # host: init, issue an invite named "laptop"
+qsh setup host --to box --address host.example.com:4433 --peer-cert box.pem
+                                              # host behind NAT, for `qsh serve --to box`
+qsh setup client box --address host.example.com:4433 <code>
+                                              # client: redeem the host's invite code
+qsh setup listener --peer controller --peer-cert controller.pem
+                                              # controller side, for `qsh listen`
+```
+
+`--peer-cert <path|->` takes the certificate file the other side made with
+`qsh identity export`; the client role accepts either that or an invite
+code. Add `--service` to write a service unit file, and `--forward` on a
+host role to include `forward.local` in the printed rule. Without a
+terminal, or with `--json`, setup asks nothing and fails with
+`INVALID_ARGUMENT` if an input is missing. The exact flags are in
+[docs/CLI.md](docs/CLI.md) §6.20.
+
+Setup never writes `acl.toml`. It prints the `[[acl]]` rows this role needs,
+checks with `qsh acl check` whether the file already allows them, and stops
+with the step marked `pending` until you have saved the rows yourself and
+run `qsh setup` again. The same holds for `config.toml` and `hosts.toml`.
+Setup also does not start `qsh serve` or `qsh listen` and does not enable
+the service unit.
+
+There is no automatic trust. A peer is pinned only from an invite code or a
+certificate file you hand over, never from a fingerprint setup observed on
+the wire. Because `acl.toml` is read once at process start, setup ends the
+ACL step with this notice:
+
+```
+restart serve/listen — acl.toml is only read once at process start.
+```
+
 ## Quick start
 
 Everything below assumes the two machines from [First run](#first-run):
@@ -710,6 +751,12 @@ Per-milestone scope, in/out boundaries and acceptance criteria live in
 
 Some of these are MVP scope decisions, some are unfinished work.
 
+- `qsh setup client` reports `complete: false` on a machine that has no
+  `acl.toml`, even when every step succeeded. Its `doctor` step raises
+  `acl_policy_missing` as an error, `overall` becomes `error`, and
+  `complete` requires that it is not (ADR-0024 decision 9). Put an
+  `acl.toml` on the client, or read the `doctor` step's findings and ignore
+  this one.
 - Sessions die with the listener process. A session lives only as long as
   the `qsh serve` or `qsh serve --to` process that opened it, so restarting the
   listener is the end of every detached session on it, not a resume point. A
