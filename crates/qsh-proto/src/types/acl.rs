@@ -92,6 +92,68 @@ pub struct AclPolicyRef {
     pub loaded: bool,
 }
 
+// ---------------------------------------------------------------------------
+// acl.show (`docs/CLI.md` §6.19, ADR-0025). Local like `acl.check`: it reads
+// this host's own `acl.toml` and is never dispatched to a remote peer (a
+// remote-visible policy summary would be a capability-enumeration oracle,
+// and a set-valued one is a more efficient oracle than `acl.check`'s single
+// triple). The data carries structure only; the "unowned-resource ceiling"
+// and "restart required" notices are prose the human renderer prints and
+// `docs/CLI.md` §6.19 states as contract sentences, so this type never
+// freezes their wording into `qsh.cli/v1`.
+// ---------------------------------------------------------------------------
+
+/// Request for `acl.show` (`qsh acl show`, `docs/CLI.md` §6.19).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AclShowReq {
+    /// Principal string to summarize — `device:<name>` | `user:<name>` |
+    /// `fp:sha256:<base64>` (`docs/PRD.md` §9).
+    pub principal: String,
+    /// Auth path to assume the principal authenticated over — open string,
+    /// same discipline as [`AclCheckReq::auth_path`]. `None` evaluates as
+    /// `"pin"` and sets [`AclShowData::auth_path_defaulted`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_path: Option<String>,
+}
+
+/// One `[[acl]]` row that matches the requested principal and auth path
+/// (`docs/CLI.md` §6.19).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AclMatchingRule {
+    /// The row's array index in `acl.toml`, the same value
+    /// [`AclCheckData::rule`] carries.
+    pub index: u32,
+    /// The row's `allow` patterns exactly as written (`"exec.run"`,
+    /// `"forward.*"`).
+    pub allow: Vec<String>,
+    /// The row's `auth_path` (`"pin"` when the file omitted it).
+    pub auth_path: String,
+    /// The row's `scope`: open string, `"owned"` | `"any"`.
+    pub scope: String,
+}
+
+/// Data payload of `acl.show` (`docs/CLI.md` §6.19).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AclShowData {
+    /// Echoes [`AclShowReq::principal`].
+    pub principal: String,
+    /// The auth path actually evaluated (`"pin"` when the request omitted
+    /// it).
+    pub auth_path: String,
+    /// `true` when the request omitted `auth_path` and `"pin"` was filled
+    /// in (ADR-0025 decision 5).
+    pub auth_path_defaulted: bool,
+    /// Which policy file this summary was computed from. `loaded: false`
+    /// (missing, unparseable, or unreadable file) means empty results.
+    pub policy: AclPolicyRef,
+    /// Rows matching the principal and auth path, in file order.
+    pub matching_rules: Vec<AclMatchingRule>,
+    /// Actions the policy allows for an unowned resource, in vocabulary
+    /// order. A ceiling for owned resources. Never contains the
+    /// always-denied actions.
+    pub effective_actions: Vec<String>,
+}
+
 /// Request for `capabilities.get` (`docs/CLI.md` §6.10, `qsh capabilities
 /// [host]`). No `host`: this build's own advertised capability set. With a
 /// `host`: the capabilities negotiated with that pinned peer's `Hello`

@@ -11,16 +11,20 @@
 //! `crate::server::Server::authorize` (via `impl Authorizer for Policy`)
 //! calls — `Policy::decide` is `pub(crate)`, so there is no way to build a
 //! second, explaining-only judgment from outside this crate (`policy.rs`'s
-//! own doc on that method spells out the two-call-site invariant this
+//! own doc on that method spells out the three-call-site invariant this
 //! relies on). No remote round trip, no re-implementation of `Policy::
 //! decide`'s matching logic.
 
 use std::str::FromStr;
 
-use qsh_proto::{AclCheckData, AclCheckReq, AclPolicyRef, ErrorCode};
+use qsh_proto::{
+    AclCheckData, AclCheckReq, AclMatchingRule, AclPolicyRef, AclShowData, AclShowReq, ErrorCode,
+};
 use qsh_transport::{AuthPath, Principal};
 
-use crate::acl::{Action, Decision, PolicyLoad, PolicySource, ResourceRef, opener_key};
+use crate::acl::{
+    Action, ActionPattern, Decision, PolicyLoad, PolicySource, ResourceRef, Scope, opener_key,
+};
 use crate::ops::{OpError, Operation, Ops};
 
 /// The `acl.check` operation (`qsh acl check`).
@@ -28,6 +32,13 @@ pub struct AclCheckOp;
 
 impl Operation for AclCheckOp {
     const COMMAND: &'static str = "acl.check";
+}
+
+/// The `acl.show` operation (`qsh acl show`, `docs/CLI.md` §6.19).
+pub struct AclShowOp;
+
+impl Operation for AclShowOp {
+    const COMMAND: &'static str = "acl.show";
 }
 
 /// `"pin"`/`"ca"` → [`AuthPath`], the same two-word grammar `acl.toml`'s own
@@ -166,6 +177,83 @@ impl Ops {
             policy,
             owner: req.owner,
             owner_auth_path: owner_ap.map(auth_path_str).map(str::to_string),
+        })
+    }
+
+    /// `acl.show` (`qsh acl show`, `docs/CLI.md` §6.19, ADR-0025). Local,
+    /// authorization-free (§2.5) - summarizes what this machine's own
+    /// `acl.toml` grants one principal, without a network round trip and
+    /// without writing anything.
+    ///
+    /// The effective set comes from `crate::acl::Policy::effective_actions`,
+    /// which runs the production `decide` once per action on an unowned
+    /// resource, and the matching rows from `Policy::matching_rules`, which
+    /// shares `decide`'s step 2 and 3 helpers. A missing, unparseable or
+    /// unreadable `acl.toml` is `PolicyLoad::Missing`/`Invalid`: both give
+    /// `loaded: false` with empty results and echo no rule content.
+    /// A malformed principal or an `auth_path` other than `pin`/`ca` is
+    /// `INVALID_ARGUMENT`, like `acl.check`.
+    pub fn acl_show(&self, req: AclShowReq) -> Result<AclShowData, OpError> {
+        let principal = parse_principal(&req.principal)?;
+        let (auth_path, auth_path_defaulted) = match req.auth_path.as_deref() {
+            Some(s) => (parse_auth_path(s)?, false),
+            None => (AuthPath::Pin, true),
+        };
+
+        let path = self.paths.acl_file().display().to_string();
+        let (policy_ref, matching_rules, effective_actions) = match PolicySource::load(&self.paths)
+        {
+            PolicyLoad::Loaded(policy) => {
+                let rules = u32::try_from(policy.rules.len()).expect(
+                    "rule count fits u32: crate::acl::load bounds rule count far below u32::MAX",
+                );
+                let matching = policy
+                    .matching_rules(&principal, auth_path)
+                    .into_iter()
+                    .map(|(index, rule)| AclMatchingRule {
+                        index,
+                        allow: rule.allow.iter().map(ActionPattern::render).collect(),
+                        auth_path: auth_path_str(rule.auth_path).to_string(),
+                        scope: match rule.scope {
+                            Scope::Owned => "owned",
+                            Scope::Any => "any",
+                        }
+                        .to_string(),
+                    })
+                    .collect();
+                let effective = policy
+                    .effective_actions(&principal, auth_path)
+                    .into_iter()
+                    .map(|a| a.as_str().to_string())
+                    .collect();
+                (
+                    AclPolicyRef {
+                        path,
+                        rules,
+                        loaded: true,
+                    },
+                    matching,
+                    effective,
+                )
+            }
+            PolicyLoad::Missing | PolicyLoad::Invalid(_) => (
+                AclPolicyRef {
+                    path,
+                    rules: 0,
+                    loaded: false,
+                },
+                Vec::new(),
+                Vec::new(),
+            ),
+        };
+
+        Ok(AclShowData {
+            principal: principal.to_string(),
+            auth_path: auth_path_str(auth_path).to_string(),
+            auth_path_defaulted,
+            policy: policy_ref,
+            matching_rules,
+            effective_actions,
         })
     }
 }

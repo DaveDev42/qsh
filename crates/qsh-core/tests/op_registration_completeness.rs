@@ -211,6 +211,13 @@ const OP_FACES: &[OpFace] = &[
         man_file: "qsh-acl-check.1",
     },
     OpFace {
+        op: "acl.show",
+        marker: "AclShowOp",
+        renderer: "print_acl_show",
+        cli_spelling: "qsh acl show",
+        man_file: "qsh-acl-show.1",
+    },
+    OpFace {
         op: "capabilities.get",
         marker: "CapabilitiesOp",
         renderer: "print_capabilities",

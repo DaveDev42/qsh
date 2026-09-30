@@ -30,5 +30,8 @@ Print version
 .TP
 qsh\-acl\-check(1)
 Evaluate this machine\*(Aqs own `acl.toml` against a hypothetical request, using the exact same evaluator `qsh serve`/`qsh listen`/ `qsh reverse` enforce with — a reliable prediction of what enforcement would decide, without a restart. Local only: never reaches a remote peer (`docs/CLI.md` §6.15)
+.TP
+qsh\-acl\-show(1)
+Summarize what this machine\*(Aqs own `acl.toml` grants one principal: the matching `[[acl]]` rows and the effective action set for an unowned resource, computed with the same evaluator enforcement uses. Read\-only and local only: never writes `acl.toml`, never reaches a remote peer (`docs/CLI.md` §6.19)
 .SH VERSION
 v0.3.0

@@ -9,12 +9,12 @@ use std::io::{self, Write};
 use qsh_core::trust::invite_address::InviteAddressAdvice;
 use qsh_core::{ExecRunOutput, OpError, SessionReadOutput};
 use qsh_proto::{
-    AclCheckData, CapabilitiesData, CertInitData, CertIssueData, DoctorData, DynamicTunnel, Host,
-    HostListData, IdentityExportData, IdentityInitData, SchemaData, ServiceInstallData,
-    ServiceStatusData, ServiceUninstallData, Session, SessionCloseData, SessionEvent,
-    SessionListData, SessionOpenData, SessionResizeData, SessionWriteData, TrustAcceptData,
-    TrustAddCaData, TrustAddData, TrustInviteData, TrustListData, TrustPeer, TrustRemoveData,
-    TrustRenameData, Tunnel, TunnelCloseData, TunnelListData, VersionData,
+    AclCheckData, AclShowData, CapabilitiesData, CertInitData, CertIssueData, DoctorData,
+    DynamicTunnel, Host, HostListData, IdentityExportData, IdentityInitData, SchemaData,
+    ServiceInstallData, ServiceStatusData, ServiceUninstallData, Session, SessionCloseData,
+    SessionEvent, SessionListData, SessionOpenData, SessionResizeData, SessionWriteData,
+    TrustAcceptData, TrustAddCaData, TrustAddData, TrustInviteData, TrustListData, TrustPeer,
+    TrustRemoveData, TrustRenameData, Tunnel, TunnelCloseData, TunnelListData, VersionData,
 };
 
 use crate::stderr_note;
@@ -489,6 +489,63 @@ pub fn print_acl_check(data: &AclCheckData) -> io::Result<()> {
     let mut stdout = io::stdout().lock();
     writeln!(stdout, "{line}")?;
     stderr_note!("qsh: acl.toml path: {}", sanitize(&data.policy.path));
+    Ok(())
+}
+
+/// Print `qsh acl show`'s summary (`docs/CLI.md` §6.19): the matching rows,
+/// the effective action set, then notice lines. Zero authorization logic
+/// here; everything is already decided by `Ops::acl_show`. The notices are
+/// prose that is deliberately absent from the JSON (ADR-0025 decisions 2, 5
+/// and 6): the pin default (only when `--auth-path` was omitted), the
+/// unowned-resource ceiling, and the shared `ACL_RESTART_NOTICE` printed as
+/// its own line, byte for byte.
+pub fn print_acl_show(data: &AclShowData) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    writeln!(
+        stdout,
+        "principal: {} (auth_path: {})",
+        sanitize(&data.principal),
+        sanitize(&data.auth_path)
+    )?;
+    if !data.policy.loaded {
+        writeln!(stdout, "no policy loaded ({})", sanitize(&data.policy.path))?;
+    } else if data.matching_rules.is_empty() {
+        writeln!(
+            stdout,
+            "matching rules: none (policy loaded, {} rules)",
+            data.policy.rules
+        )?;
+    } else {
+        writeln!(stdout, "matching rules:")?;
+        for rule in &data.matching_rules {
+            let allow: Vec<String> = rule.allow.iter().map(|a| sanitize(a)).collect();
+            writeln!(
+                stdout,
+                "  [{}] allow: {} (auth_path: {}, scope: {})",
+                rule.index,
+                allow.join(", "),
+                sanitize(&rule.auth_path),
+                sanitize(&rule.scope)
+            )?;
+        }
+    }
+    if data.effective_actions.is_empty() {
+        writeln!(stdout, "effective actions: none")?;
+    } else {
+        let actions: Vec<String> = data.effective_actions.iter().map(|a| sanitize(a)).collect();
+        writeln!(stdout, "effective actions: {}", actions.join(", "))?;
+    }
+    if data.auth_path_defaulted {
+        writeln!(
+            stdout,
+            "note: --auth-path was omitted, so \"pin\" was evaluated; a row without auth_path also means \"pin\" and never matches a CA-authenticated peer (pass --auth-path ca)."
+        )?;
+    }
+    writeln!(
+        stdout,
+        "note: the effective set assumes an unowned resource; for an owned resource (scope = \"owned\") it is an upper bound."
+    )?;
+    writeln!(stdout, "{}", qsh_core::acl::ACL_RESTART_NOTICE)?;
     Ok(())
 }
 

@@ -1,6 +1,6 @@
 # QSH CLI and JSON Contract
 
-**상태:** Draft v0.13 (issue #5 — `qsh exec`가 이름 해석을 forward 주소록에만 묶어 뒀던 결함을 고쳐 §6.1 라우팅 우선순위(host.get·attach와 동일: 라이브 역방향 등록이 forward pin보다 우선)를 그대로 공유하게 됨 — 전에는 살아 있는 역방향 host를 향한 `qsh exec`가 죽은 forward 주소만 보고 `CONNECTION_FAILED`로 오판했다. §6.1·§6.8(exec/attach/session open의 공유 라우팅과 `qsh serve --to`의 forward-only 2단계 해석을 분리해 서술)·§6.13(exec의 `LOCAL_CONTROL`/`LOCAL_STREAM` conduit 사용과 UDS-EOF→reset 규칙 추가) 갱신. 신규 op·필드 없음, additive golden fixture 2개(`error.HOST_NOT_FOUND.exec_pinned_no_address.json`, `error.HOST_NOT_FOUND.exec_reverse_stale.json`) 추가 — 그 외 기존 fixture 전부 무변경; v0.12 = M10 릴리스 — 신규 op 0, fixture 무변경, wire 무변경. 계약 델타는 §6.11 하나다: `trust add --cert-file`과 `trust add-ca`의 인증서 입력이 `CERT_PEM_MAX`(64 KiB) 상한까지만 읽히고 초과는 파싱 전에 `INVALID_ARGUMENT`이며, `trust add-ca`의 `<name>`은 `trust rename`의 `new`와 같은 라벨 검증을 trim 후 거친다(라벨 검증은 ADR-0012 결정 6; `CERT_PEM_MAX` 상한 자체는 ADR-0013 결정 4·5가 아니라 구현 커밋 `381b42c`가 둔 값이다). M10이 낸 나머지는 배포·패키징 축이라 이 문서 밖이다; v0.11 = M9 사람용 표면 — `qsh serve --to`(구 표기 `qsh reverse`, ADR-0012)·`qsh pair invite|accept --as`(구 `qsh trust invite/accept`)·`qsh identity export`/`trust add --cert-file`/`trust add-ca`(ADR-0013)·`trust rename`·`qsh service install|uninstall|status`(§6.18)·peer 주소의 포트 기본값 4433(ADR-0014)·`-D`(`tunnel.dynamic`, ADR-0019/0020)·doctor 22종(M9가 8종 추가 — 범위 (h)의 7종 + `host_pinned_without_address`)이 §2.4·§2.5·§6.1·§6.9·§6.11·§6.12·§6.13·§6.17·§6.18·§10에 반영됨. 기존 fixture 중 값-보유 golden `capabilities.json` 한 줄만 `dial-filter.v1` 추가로 재생성됐고(94ad639), wire는 `StreamHeader` 필드 5(`deny_host_local`) 하나가 capability 뒤에 additive로 붙었다 — 그 외 fixture·wire 무변경, 신규 op 7종 전부 additive; v0.10 = M3 Step 8 — 역방향 위 resume: §6.4 recovery 진단의 `registration_wait_ms`가 실제로 채워짐(정방향 `0`, 역방향은 재등록 대기 시간) — `recovery` 값 집합은 무변경, 필드는 M2 세 필드 뒤에 additive로 붙는다; v0.9 = M3 Step 7 — 대화형 attach(`qsh [user@]host`/`qsh attach`)가 역방향 등록 host를 향해서도 §6.13의 `LOCAL_CONTROL`/`LOCAL_STREAM` 경로를 타도록 landing — §6.13 갱신(더 이상 forward 전용이 아님, 그리고 역방향 leg에는 reconnect/recovery가 없다는 점 명시); v0.8 = M3 Step 1 — `Host`의 `state`/`device_id` 값 어휘 확정과 역방향 등록 ACL 매핑(§2.5·§5)·`host.list`/`host.get` 데이터 소스(§6.1)·recovery 진단의 `registration_wait_ms`(§6.4)·신규 §6.13 `qsh listen`/`qsh reverse` 계약 추가; v0.7 = M2 Step 7 — `session.attach`는 resume credential을 **반드시** 요구하며 그 실패는 항상 non-distinguishing `AUTH_FAILED`임을 §6.3·§6.4에 명문화; v0.6 = `session read --follow` 출력 형태와 `--wait` 하한 명문화, v0.5 = M2 계약 확정, v0.4 = M1 구현과 동기화)  
+**상태:** Draft v0.14 (M11 — 신규 op `acl.show`(`qsh acl show`, §6.19, ADR-0025)가 붙었다. 이 머신의 `acl.toml`을 읽기 전용으로 요약하는 로컬 op이고, §2.4 목록·§2.5 인가 불요 행·새 §6.19만 바뀐다. `qsh.cli/v1`에는 데이터 타입 하나가 additive로 더해지고 golden fixture 2개(`acl.show.json`, `acl.show.no_policy.json`)가 추가됐으며 기존 fixture와 wire는 무변경; v0.13 = issue #5 — `qsh exec`가 이름 해석을 forward 주소록에만 묶어 뒀던 결함을 고쳐 §6.1 라우팅 우선순위(host.get·attach와 동일: 라이브 역방향 등록이 forward pin보다 우선)를 그대로 공유하게 됨 — 전에는 살아 있는 역방향 host를 향한 `qsh exec`가 죽은 forward 주소만 보고 `CONNECTION_FAILED`로 오판했다. §6.1·§6.8(exec/attach/session open의 공유 라우팅과 `qsh serve --to`의 forward-only 2단계 해석을 분리해 서술)·§6.13(exec의 `LOCAL_CONTROL`/`LOCAL_STREAM` conduit 사용과 UDS-EOF→reset 규칙 추가) 갱신. 신규 op·필드 없음, additive golden fixture 2개(`error.HOST_NOT_FOUND.exec_pinned_no_address.json`, `error.HOST_NOT_FOUND.exec_reverse_stale.json`) 추가 — 그 외 기존 fixture 전부 무변경; v0.12 = M10 릴리스 — 신규 op 0, fixture 무변경, wire 무변경. 계약 델타는 §6.11 하나다: `trust add --cert-file`과 `trust add-ca`의 인증서 입력이 `CERT_PEM_MAX`(64 KiB) 상한까지만 읽히고 초과는 파싱 전에 `INVALID_ARGUMENT`이며, `trust add-ca`의 `<name>`은 `trust rename`의 `new`와 같은 라벨 검증을 trim 후 거친다(라벨 검증은 ADR-0012 결정 6; `CERT_PEM_MAX` 상한 자체는 ADR-0013 결정 4·5가 아니라 구현 커밋 `381b42c`가 둔 값이다). M10이 낸 나머지는 배포·패키징 축이라 이 문서 밖이다; v0.11 = M9 사람용 표면 — `qsh serve --to`(구 표기 `qsh reverse`, ADR-0012)·`qsh pair invite|accept --as`(구 `qsh trust invite/accept`)·`qsh identity export`/`trust add --cert-file`/`trust add-ca`(ADR-0013)·`trust rename`·`qsh service install|uninstall|status`(§6.18)·peer 주소의 포트 기본값 4433(ADR-0014)·`-D`(`tunnel.dynamic`, ADR-0019/0020)·doctor 22종(M9가 8종 추가 — 범위 (h)의 7종 + `host_pinned_without_address`)이 §2.4·§2.5·§6.1·§6.9·§6.11·§6.12·§6.13·§6.17·§6.18·§10에 반영됨. 기존 fixture 중 값-보유 golden `capabilities.json` 한 줄만 `dial-filter.v1` 추가로 재생성됐고(94ad639), wire는 `StreamHeader` 필드 5(`deny_host_local`) 하나가 capability 뒤에 additive로 붙었다 — 그 외 fixture·wire 무변경, 신규 op 7종 전부 additive; v0.10 = M3 Step 8 — 역방향 위 resume: §6.4 recovery 진단의 `registration_wait_ms`가 실제로 채워짐(정방향 `0`, 역방향은 재등록 대기 시간) — `recovery` 값 집합은 무변경, 필드는 M2 세 필드 뒤에 additive로 붙는다; v0.9 = M3 Step 7 — 대화형 attach(`qsh [user@]host`/`qsh attach`)가 역방향 등록 host를 향해서도 §6.13의 `LOCAL_CONTROL`/`LOCAL_STREAM` 경로를 타도록 landing — §6.13 갱신(더 이상 forward 전용이 아님, 그리고 역방향 leg에는 reconnect/recovery가 없다는 점 명시); v0.8 = M3 Step 1 — `Host`의 `state`/`device_id` 값 어휘 확정과 역방향 등록 ACL 매핑(§2.5·§5)·`host.list`/`host.get` 데이터 소스(§6.1)·recovery 진단의 `registration_wait_ms`(§6.4)·신규 §6.13 `qsh listen`/`qsh reverse` 계약 추가; v0.7 = M2 Step 7 — `session.attach`는 resume credential을 **반드시** 요구하며 그 실패는 항상 non-distinguishing `AUTH_FAILED`임을 §6.3·§6.4에 명문화; v0.6 = `session read --follow` 출력 형태와 `--wait` 하한 명문화, v0.5 = M2 계약 확정, v0.4 = M1 구현과 동기화)  
 **대상:** QSH MVP  
 **Canonical interface:** `qsh` CLI
 
@@ -93,6 +93,7 @@ service.install
 service.uninstall
 service.status
 acl.check
+acl.show
 schema.get
 capabilities.get
 version.get
@@ -102,7 +103,7 @@ version.get
 
 dotted 이름은 CLI subcommand token을 기계적으로 옮긴 것이다(`cert.init` ↔ `qsh cert init`, `host.get` ↔ `qsh host get`). clap이 렌더링하는 다중 단어 subcommand token은 kebab-case(`add-ca`)이지만, `-`는 모든 `acl.toml` action과 모든 `Op::as_str` 값이 쓰는 `[a-z._]` 어휘 밖이다. 단어 경계를 유지하면서 이 어휘에 들어맞는 유일한 표기는 snake_case이고, 이는 JSON contract가 이미 쓰는 관례(`cert_pem`, `added_at`, `key_store`)와도 같다. `trust.add_ca`(CLI 표기 `qsh trust add-ca`)가 `trust.addca`가 아닌 이유이며, 이후 `trust.rename`·`service.*` 같은 다중 단어 subcommand도 같은 규칙을 따른다.
 
-`acl.check`(§6.15, M5)는 원격 peer가 요청하는 operation이 아니라 **이 머신 자신의** `acl.toml`을 로컬에서 조회하는 op이다 — §2.5의 "인가 불요" 행이 다른 local-only operation들과 함께 명시한다.
+`acl.check`(§6.15, M5)와 `acl.show`(§6.19, M11)는 원격 peer가 요청하는 operation이 아니라 **이 머신 자신의** `acl.toml`을 로컬에서 조회하는 op이다 — §2.5의 "인가 불요" 행이 다른 local-only operation들과 함께 명시한다.
 
 `qsh serve`, `qsh listen`, `qsh serve --to`(구 표기 `qsh reverse`, §6.13)는 operation이 아니라 장기 실행 모드(long-running mode)다. 단일 요청/응답 계약이 없으며 이 목록에 포함되지 않는다.
 
@@ -123,7 +124,7 @@ ACL action은 인가(authorization) 어휘로, operation 이름과는 별개 차
 | `tunnel.open` (remote forward) | `forward.remote` |
 | `tunnel.dynamic` (`-D`, SOCKS5) | `forward.local` — 새 grant가 아니라 `-L`과 같은 action의 재사용이다. `forward.socks`는 이 인가에 관여하지 않는다(ADR-0019 decision 14, §6.9의 `DYNAMIC_FORWARD_ACL_NOTE` 참고) |
 | `tunnel.close`, `tunnel.list` | 해당 tunnel의 소유 peer이면 허용 (`forward.*` 부여로 충분) — remote forward(`-R`)의 `tunnel.close`는 이 로컬-머신 축(§6.13·§6.14, `docs/design/protocol.md` §11-3)과 별개로, host 쪽 `forward.remote` principal 소유권 검사를 하나 더 거친다(M5 Step 5, §6.9 아래 문단). `-L`/`-D`의 `tunnel.close`에는 이 host 쪽 검사가 없다 — 로컬 listener를 닫는 것뿐인 순수 local operation이다 |
-| `host.list`, `host.get`, `identity.init`, `identity.export`, `trust.*`, `cert.init`, `cert.issue`, `doctor.run`, `acl.check`, `schema.get`, `capabilities.get`, `version.get`, `service.install`, `service.uninstall`, `service.status` | 인가 불요 — local operation으로 원격 peer의 ACL 평가 대상이 아님 |
+| `host.list`, `host.get`, `identity.init`, `identity.export`, `trust.*`, `cert.init`, `cert.issue`, `doctor.run`, `acl.check`, `acl.show`, `schema.get`, `capabilities.get`, `version.get`, `service.install`, `service.uninstall`, `service.status` | 인가 불요 — local operation으로 원격 peer의 ACL 평가 대상이 아님 |
 
 `forward.socks`는 action 어휘에 예약되어 있지만 어떤 operation도 이 action으로 인가하지 않는다 — `-D`가 실제로 구현된 뒤에도 마찬가지다(위 행, ADR-0019 decision 14). 향후 예약: streaming file copy → `file.read`/`file.write`.
 
@@ -1372,6 +1373,56 @@ Cellar 경로가 바뀌는 등) 뒤 `qsh service install`을 다시 실행하면
 것은 그 foreground 프로세스를 대신 실행해 주는 서비스 유닛이지, qsh 자신의
 데몬화가 아니다 — qsh 바이너리 자체는 이 경로에서도 재실행·백그라운드 전환을
 전혀 하지 않는다.
+
+### 6.19 `qsh acl show` (M11)
+
+```bash
+qsh acl show --principal <principal> [--auth-path pin|ca] --json
+```
+
+한 principal에 대해 이 머신의 `acl.toml`이 무엇을 허용하는지 한 번에 요약한다([ADR-0025](adr/0025-acl-show-read-only.md)). `acl check`가 (principal, action, resource) 삼중 하나에 답한다면 `acl show`는 "이 principal이 지금 무엇을 할 수 있는가"에 답한다. `--resource`와 `--owner` 축은 없다. 그 질문은 `acl check`(§6.15)가 이미 답한다.
+
+- `--principal <principal>` (필수): `device:<name>` | `user:<name>` | `fp:sha256:<base64>`. 이 어휘 밖의 모양은 `INVALID_ARGUMENT`다.
+- `--auth-path <pin|ca>` (선택): principal이 인증했다고 가정할 auth path. 생략하면 `"pin"`으로 평가하고 `auth_path_defaulted`가 `true`다. `pin`·`ca` 밖의 값은 `INVALID_ARGUMENT`다.
+
+`acl.show`는 §2.4·§2.5가 명시하듯 **로컬 operation**이다. 원격 peer가 요청할 수 없고 wire 메시지도 만들지 않는다. 원격에서 남의 정책을 열람할 수 있으면 그것이 곧 capability 열거 oracle이 되고, 집합을 통째로 돌려주는 `acl show`는 `acl check`보다 oracle로서 효율이 높기 때문이다(ADR-0025 결정 4). 읽기 전용이며 `acl.toml`을 쓰지 않고 자동 생성하지도 않는다(ADR-0017 결정 1). 호출마다 파일을 다시 읽는다.
+
+`data`는 `AclShowData`(`crates/qsh-proto/src/types/acl.rs`)다:
+
+```json
+{
+  "schema": "qsh.cli/v1",
+  "request_id": "01K0EXAMPLE",
+  "command": "acl.show",
+  "ok": true,
+  "data": {
+    "principal": "device:laptop",
+    "auth_path": "pin",
+    "auth_path_defaulted": true,
+    "policy": {
+      "path": "/Users/dave/.config/qsh/acl.toml",
+      "rules": 2,
+      "loaded": true
+    },
+    "matching_rules": [
+      { "index": 0, "allow": ["forward.*", "session.open"], "auth_path": "pin", "scope": "owned" },
+      { "index": 1, "allow": ["exec.run"], "auth_path": "pin", "scope": "any" }
+    ],
+    "effective_actions": ["exec.run", "session.open", "forward.local", "forward.remote"]
+  }
+}
+```
+
+- `matching_rules`는 principal 정확 일치와 `auth_path` 일치(평가 순서 ②)를 통과하고 action 패턴이 어휘의 어떤 action이든 덮는(③) 행을 파일 순서로 담는다. 행마다 `index`(`acl.toml`의 배열 index, `acl check`의 `rule`과 같은 값), `allow`(패턴을 적힌 그대로. `exec.run` 같은 exact와 `forward.*` 같은 family 둘 다), `auth_path`(적지 않은 행은 `"pin"`), `scope`(`"owned"` | `"any"`, 열린 문자열)를 낸다. 매칭 판정은 `decide`와 같은 helper를 쓰고 두 번째 구현이 없다.
+- `effective_actions`는 `Action::ALL` 11종마다 enforcement가 쓰는 평가기(`Policy::decide`)를 소유자 없는 리소스로 불러 allow가 난 action만 어휘 순서로 모은 것이다. 그래서 `acl check`가 같은 정책 아래 action마다 내는 판정과 어긋나지 않는다.
+- 항상-deny action(`forward.socks`, `file.read`, `file.write`)은 어떤 행이 적어도(`forward.*`, `file.*` 같은 family 패턴 포함) 이 집합에 나오지 않는다. 평가기가 규칙보다 먼저 막기 때문이다. 그런 행은 `matching_rules`에는 나타난다.
+- 소유자 없는 리소스를 가정한 집합이므로, `scope = "owned"` 행은 소유된 리소스(열린 세션 등)에서 이 집합의 부분집합만 허용한다. 소유된 리소스에 대해 이 집합은 **상한**이다. 이 사실은 산문이라 JSON에 싣지 않고 human 출력과 이 문장이 맡는다.
+- `auth_path`를 적지 않은 `[[acl]]` 행은 `"pin"`을 받아 CA로 인증한 peer에게 매칭되지 않는다. `--auth-path`를 생략하면 `"pin"`으로 평가한다는 사실과 함께 human 출력이 고지하고, JSON에서는 `auth_path_defaulted: true`가 같은 사실을 구조로 싣는다(ADR-0025 결정 5).
+- `acl.toml`은 프로세스 시작 시 한 번만 읽힌다. 이 명령은 호출마다 파일을 읽으므로 방금 고친 행도 보이지만 돌고 있는 `qsh serve`/`qsh listen`은 아직 모른다. human 출력은 이 사실을 `ACL_RESTART_NOTICE` 상수(`restart serve/listen — acl.toml is only read once at process start.`)를 바이트 그대로 한 줄로 찍어 알린다. 같은 상수를 doctor의 `acl_principal_unmatched`·`acl_ca_auth_path_missing` remedy가 꼬리로 쓴다(ADR-0025 결정 6). 이 문장은 산문이라 JSON에 싣지 않는다. 싣으면 append-only fixture가 문면을 `qsh.cli/v1`로 얼린다.
+
+`policy.loaded: false`는 `acl.toml`이 없거나, 파싱에 실패했거나, 권한 때문에 읽지 못한 상태를 구별 없이 나타낸다. 이 상태에서 `matching_rules`와 `effective_actions`는 빈 배열이고 규칙 내용은 한 줄도 나오지 않는다. `acl show`는 이 상태를 오류로 만들지 않는다. 조회는 성공했고(`ok: true`, exit `0`) 조회된 사실이 "정책 없음"일 뿐이다. 파싱 실패의 상세는 §6.12·§6.13의 시작 진단이 정본이다. 그리고 enforcement에는 이 평가기 위에 fail-closed 층이 하나 더 있어서(§6.15) `effective_actions`에 든 action이 운영 상태에 따라 실제로는 거부될 수 있다. 반대 방향, 즉 이 명령이 빼먹은 action이 실제로 허용되는 일은 없다.
+
+`--principal`이나 `--auth-path`가 잘못된 모양이 아닌 한 `acl.show` 자체는 실패하지 않는다(exit `0`, §4). human mode 출력은 principal 한 줄, 매칭 행 목록(또는 "no policy loaded"), 실효 action 한 줄, 그 뒤 고지 줄들이다.
 
 ## 7. Human interactive mode
 
