@@ -394,6 +394,22 @@ pub fn launchagent_session_scoped_finding(mode: &str) -> DoctorFinding {
     }
 }
 
+/// `service_restart_drops_sessions`'s finding. Info, and only for a mode
+/// that hosts sessions: `listen` is a controller and keeps none, so this
+/// returns `None` for it.
+pub fn service_restart_drops_sessions_finding(mode: &str) -> Option<DoctorFinding> {
+    if mode == "listen" {
+        return None;
+    }
+    let diag = &super::SERVICE_RESTART_DROPS_SESSIONS;
+    Some(DoctorFinding {
+        code: diag.code.to_string(),
+        status: "info".to_string(),
+        detail: format!("{} (mode: {mode})", diag.message),
+        remedy: Some(diag.remedy.to_string()),
+    })
+}
+
 /// The outcome of probing `/var/lib/systemd/linger/$USER` for
 /// [`super::SYSTEMD_LINGER_DISABLED`]. Three states, not two — `Unknown` for an
 /// unreadable probe (a sandboxed CI account) is

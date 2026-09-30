@@ -788,7 +788,11 @@ Some of these are MVP scope decisions, some are unfinished work.
   this one.
 - Sessions die with the listener process. A session lives only as long as
   the `qsh serve` or `qsh serve --to` process that opened it, so restarting the
-  listener is the end of every detached session on it, not a resume point. A
+  listener is the end of every detached session on it, not a resume point.
+  `qsh serve` and `qsh serve --to` say so in one stderr line at startup (not
+  under `--quiet`), a SIGTERM drain logs a `drained` lifecycle line with the
+  session counts, and `qsh doctor` reports `service_restart_drops_sessions`
+  (info) when a service unit is registered. A
   clean SIGTERM does drain: no new `session.open`, `session.attach` or
   `exec.run` is admitted from the signal onward, and every live session runs
   its normal close procedure. That drain is best effort rather than a

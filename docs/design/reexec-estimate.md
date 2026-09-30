@@ -58,6 +58,8 @@ M8 구현은 0. seam 보강도 M8에서 하지 않는다 — H5가 요구하는 
 
 **추기 (2026-09-24).** M9 계획은 H1·H1b·H2 셋 다 배치하지 않았고 착지한 것은 H0 고지뿐이다(`docs/deploy/service.md`의 재시작 고지, 이 문서와 같은 커밋에서 반영). M10은 릴리스 게이트(코드사인·notarization·musl·SLSA provenance·release 프로파일 기능 스모크)에 예산이 묶여 있어 H1·H1b·H2 셋 다 P1로 재기록한다. 위 배치 문단이 적은 M9·M10 배치는 그 시점의 계획이었고 이 추기가 집행 결과로 덮는다.
 
+**추기 (2026-10-01).** M13이 H1을 착지시켰다. drain 요약 줄(`qsh::lifecycle`의 `drained`), doctor 진단 `service_restart_drops_sessions`, 기동 배너 세 가지다. doctor 진단은 세션을 호스팅하는 `serve`와 `reverse` mode에만 뜨고 세션이 없는 `listen` controller에는 뜨지 않는다.
+
 ## §5 보안 비용
 
 상태를 옮기는 통로 자체의 권한 모델은 §2가 무엇을 옮기는지는 정리해도 어떤 통로로 옮기는지는 정하지 않는다. 통로마다 값이 다르다.

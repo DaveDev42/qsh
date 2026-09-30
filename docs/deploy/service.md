@@ -344,7 +344,9 @@ asked for one, also ends every detached session on that listener. A
 session lives only as long as the `serve` or `listen`/`serve --to` process
 that opened it, so a service-manager restart is not a resume point (README,
 Known limitations). Detach before restarting only if you are fine losing
-the shell.
+the shell. `qsh doctor` reports this as `service_restart_drops_sessions`
+(info) whenever a unit is registered for `serve` or `reverse`, and
+`qsh sessions` lists what a restart would end.
 
 The unit's `ExecStart`/`ProgramArguments` line is the whole invocation.
 qsh itself never re-execs, backgrounds, or reparents; it stays in the

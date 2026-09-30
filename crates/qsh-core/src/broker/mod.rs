@@ -418,6 +418,17 @@ impl SourceFactory for EchoPipeFactory {
 /// Buffer size of each [`EchoPipeFactory`] pipe.
 const ECHO_PIPE_BUFFER: usize = 64 * 1024;
 
+/// How many sessions are live right now and how many of those have no
+/// consumer attached. Counts only: no ids, no names, no content, so the
+/// drain summary line can carry it (`docs/CLI.md` §6.12).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LiveCounts {
+    /// Sessions whose `Closed` entry has not been appended yet.
+    pub live: usize,
+    /// The subset of [`Self::live`] with no attached consumer.
+    pub detached: usize,
+}
+
 /// The in-process session broker.
 ///
 /// The registry is a single mutex (architecture.md §3: "단일 lock, 저경합");
@@ -768,6 +779,20 @@ impl Broker {
         Ok(handle.info().last_sequence)
     }
 
+    /// A snapshot of the live sessions, taken under the registry lock.
+    /// The SIGTERM drain summary reads it before and after the drain.
+    pub fn live_counts(&self) -> LiveCounts {
+        let registry = self.lock();
+        let mut counts = LiveCounts::default();
+        for handle in registry.values().filter(|h| h.closed_at().is_none()) {
+            counts.live += 1;
+            if !handle.is_attached() {
+                counts.detached += 1;
+            }
+        }
+        counts
+    }
+
     /// Close every live session through the same procedure as
     /// [`Broker::close`] — signal escalation, `session.closed{reason}`
     /// emission, resume-credential forgetting — concurrently, so the host's
@@ -1073,6 +1098,10 @@ pub trait SessionBackend: Send + Sync {
     /// created concurrently is not covered.
     fn drain(&self, reason: CloseReason) -> BoxFuture<'_, ()>;
 
+    /// How many sessions are live now and how many of them are detached.
+    /// `Server::drain` reads it around the drain for its summary line.
+    fn live_counts(&self) -> LiveCounts;
+
     /// The resume TTL an unattached session lives for (`[serve].resume_ttl`)
     /// — what the host reports as `SessionOpened.expires_at`.
     fn resume_ttl(&self) -> Duration;
@@ -1266,6 +1295,10 @@ impl SessionBackend for Broker {
 
     fn drain(&self, reason: CloseReason) -> BoxFuture<'_, ()> {
         Box::pin(Broker::close_all(self, reason))
+    }
+
+    fn live_counts(&self) -> LiveCounts {
+        Broker::live_counts(self)
     }
 
     fn resume_ttl(&self) -> Duration {

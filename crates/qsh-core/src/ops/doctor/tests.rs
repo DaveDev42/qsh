@@ -1626,6 +1626,107 @@ fn doctor_service_registration_findings_is_silent_on_service_not_registered_once
     );
 }
 
+/// Registers a stub unit for `mode` under a fresh tempdir home, the way the
+/// neighbouring registration tests do.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn home_with_unit(mode: &str) -> tempfile::TempDir {
+    let home = tempfile::tempdir().unwrap();
+    #[cfg(target_os = "macos")]
+    let unit_path = probe::macos_launchagent_path(home.path(), mode);
+    #[cfg(target_os = "linux")]
+    let unit_path = probe::linux_systemd_user_unit_path(home.path(), mode);
+    std::fs::create_dir_all(unit_path.parent().unwrap()).unwrap();
+    std::fs::write(&unit_path, b"stub").unwrap();
+    home
+}
+
+/// M13 H1: the restart notice rides the registered-unit branch only. With no
+/// unit file only `service_not_registered` speaks, and a `listen` controller
+/// (no sessions of its own) never gets the notice.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn service_restart_drops_sessions_appears_only_when_a_unit_is_registered() {
+    let keystore = crate::identity::MemoryKeyStore::new();
+    let (_guard, ops) = healthy_ops();
+
+    let bare = tempfile::tempdir().unwrap();
+    let env = DoctorEnvironment {
+        home_dir: Some(bare.path()),
+        username: Some("m13-h1-test-account"),
+        ..minimal_env(&keystore)
+    };
+    for mode in ["serve", "reverse", "listen"] {
+        let findings = ops.doctor_service_registration_findings(mode, &env);
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.code != "service_restart_drops_sessions"),
+            "no unit registered ({mode}): {findings:?}"
+        );
+    }
+
+    for mode in ["serve", "reverse"] {
+        let home = home_with_unit(mode);
+        let env = DoctorEnvironment {
+            home_dir: Some(home.path()),
+            username: Some("m13-h1-test-account"),
+            ..minimal_env(&keystore)
+        };
+        let findings = ops.doctor_service_registration_findings(mode, &env);
+        assert_eq!(
+            findings
+                .iter()
+                .filter(|f| f.code == "service_restart_drops_sessions")
+                .count(),
+            1,
+            "registered unit ({mode}): {findings:?}"
+        );
+        assert!(
+            findings.iter().all(|f| f.code != "service_not_registered"),
+            "{findings:?}"
+        );
+    }
+
+    let home = home_with_unit("listen");
+    let env = DoctorEnvironment {
+        home_dir: Some(home.path()),
+        username: Some("m13-h1-test-account"),
+        ..minimal_env(&keystore)
+    };
+    let findings = ops.doctor_service_registration_findings("listen", &env);
+    assert!(
+        findings
+            .iter()
+            .all(|f| f.code != "service_restart_drops_sessions"),
+        "a listen controller hosts no sessions: {findings:?}"
+    );
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn service_restart_drops_sessions_is_info_and_carries_a_remedy() {
+    let keystore = crate::identity::MemoryKeyStore::new();
+    let (_guard, ops) = healthy_ops();
+    let home = home_with_unit("serve");
+    let env = DoctorEnvironment {
+        home_dir: Some(home.path()),
+        username: Some("m13-h1-test-account"),
+        ..minimal_env(&keystore)
+    };
+    let findings = ops.doctor_service_registration_findings("serve", &env);
+    let finding = findings
+        .iter()
+        .find(|f| f.code == "service_restart_drops_sessions")
+        .unwrap_or_else(|| panic!("missing finding: {findings:?}"));
+    assert_eq!(finding.status, "info");
+    assert!(finding.detail.contains("detached session"), "{finding:?}");
+    let remedy = finding.remedy.as_deref().expect("a remedy");
+    assert!(
+        remedy.contains("`qsh sessions`") && remedy.contains("docs/deploy/service.md"),
+        "{remedy}"
+    );
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn doctor_service_registration_findings_reports_launchagent_session_scoped_once_registered() {

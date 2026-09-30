@@ -57,16 +57,41 @@ impl Server {
     /// connection this host had already accepted. Idempotent — a second
     /// call finds nothing left to close.
     pub async fn drain(&self) {
+        self.drain_as(crate::lifecycle::Process::Serve).await;
+    }
+
+    /// [`Server::drain`] with the process kind the `qsh::lifecycle`
+    /// `drained` line is attributed to (`serve` or `serve_to`). The line
+    /// carries counts only: sessions closed, how many of those were
+    /// detached, and whether [`DRAIN_TIMEOUT`] cut the drain short.
+    pub async fn drain_as(&self, process: crate::lifecycle::Process) {
         self.draining.store(true, Ordering::Release);
-        if tokio::time::timeout(DRAIN_TIMEOUT, self.sessions.drain(CloseReason::Closed))
-            .await
-            .is_err()
-        {
+        // Snapshot after the flag is set: nothing new is admitted from here
+        // on, so the count is the set of sessions this drain has to close.
+        let before = self.sessions.live_counts();
+        let timed_out =
+            tokio::time::timeout(DRAIN_TIMEOUT, self.sessions.drain(CloseReason::Closed))
+                .await
+                .is_err();
+        if timed_out {
             tracing::warn!(
                 timeout_secs = DRAIN_TIMEOUT.as_secs(),
                 "qsh serve drain: timed out waiting for every session to close; exiting anyway"
             );
         }
+        let after = self.sessions.live_counts();
+        let sessions_closed = before.live.saturating_sub(after.live);
+        crate::lifecycle::drained(
+            process,
+            crate::lifecycle::DrainSummary {
+                sessions_closed,
+                detached_closed: before
+                    .detached
+                    .saturating_sub(after.detached)
+                    .min(sessions_closed),
+                timed_out,
+            },
+        );
         // See [`DRAIN_FLUSH_GRACE`]: every session is closed in the broker
         // at this point, but delivering that to an attached consumer is a
         // separate hop this call has not waited for.

@@ -37,6 +37,7 @@ pub enum Process {
 enum Event {
     Listening,
     ShuttingDown,
+    Drained,
     TunnelOpened,
     TunnelEnded,
 }
@@ -59,6 +60,12 @@ struct Line<'a> {
     at: String,
     process: Process,
     #[serde(skip_serializing_if = "Option::is_none")]
+    sessions_closed: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detached_closed: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timed_out: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     tunnel_id: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     mode: Option<&'a str>,
@@ -75,6 +82,9 @@ fn line(event: Event, process: Process) -> Line<'static> {
         lifecycle: event,
         at: crate::config::now_rfc3339(),
         process,
+        sessions_closed: None,
+        detached_closed: None,
+        timed_out: None,
         tunnel_id: None,
         mode: None,
         supervise: None,
@@ -99,6 +109,35 @@ pub fn listening(process: Process) {
 pub fn shutting_down(process: Process) {
     emit(&line(Event::ShuttingDown, process));
 }
+
+/// What a SIGTERM drain did, in counts only: no session id, command, PTY
+/// content or address (`docs/CLI.md` §6.12).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DrainSummary {
+    /// Sessions that were live when the drain started and are closed now.
+    pub sessions_closed: usize,
+    /// The subset of [`Self::sessions_closed`] that had no attached consumer.
+    pub detached_closed: usize,
+    /// The drain hit `DRAIN_TIMEOUT` and gave up on the rest.
+    pub timed_out: bool,
+}
+
+/// The drain finished (or gave up). Emitted by `Server::drain`, before the
+/// process exits, so a restart leaves a record of what it erased.
+pub fn drained(process: Process, summary: DrainSummary) {
+    let mut record = line(Event::Drained, process);
+    record.sessions_closed = Some(summary.sessions_closed);
+    record.detached_closed = Some(summary.detached_closed);
+    record.timed_out = Some(summary.timed_out);
+    emit(&record);
+}
+
+/// The one human line `qsh serve` and `qsh serve --to` print after their
+/// listening lines (without the `qsh serve: ` style prefix, which the caller
+/// adds): sessions live inside this process, so a restart erases every
+/// detached one. `qsh-cli` prints it unless `--quiet`.
+pub const RESTART_BANNER: &str =
+    "sessions live inside this process; a restart drops every detached session";
 
 /// A tunnel is open and the envelope has been reported.
 pub fn tunnel_opened(tunnel: TunnelFacts<'_>) {
@@ -135,6 +174,25 @@ mod tests {
         assert!(json.contains(r#""process":"serve_to""#), "{json}");
         assert!(
             !json.contains("tunnel_id") && !json.contains("cause"),
+            "{json}"
+        );
+    }
+
+    #[test]
+    fn a_drained_line_carries_counts_and_the_timeout_verdict_only() {
+        let mut record = line(Event::Drained, Process::Serve);
+        record.sessions_closed = Some(3);
+        record.detached_closed = Some(2);
+        record.timed_out = Some(false);
+        let json = serde_json::to_string(&record).unwrap();
+        assert!(
+            json.starts_with(r#"{"lifecycle":"drained","at":""#),
+            "{json}"
+        );
+        assert!(
+            json.ends_with(
+                r#""process":"serve","sessions_closed":3,"detached_closed":2,"timed_out":false}"#
+            ),
             "{json}"
         );
     }
