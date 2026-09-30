@@ -17,6 +17,8 @@ curl -fsSL https://raw.githubusercontent.com/DaveDev42/qsh/main/scripts/install.
 | `QSH_INSTALL_DIR` | `$HOME/.local/bin` | Where the `qsh` binary is installed |
 | `QSH_REPO` | `DaveDev42/qsh` | `owner/repo` to install from (forks, testing) |
 | `QSH_LIBC` | `gnu` | Linux only. `musl` picks the static build (x86_64 or aarch64) for old-glibc distributions. On aarch64 the installer reads the tag's `SHA256SUMS` first and stops with a message if the tag predates the aarch64 musl asset |
+| `QSH_MAN_DIR` | `${XDG_DATA_HOME:-$HOME/.local/share}/man/man1` | Where the archive's man pages are installed (created if missing) |
+| `QSH_NO_MAN` | unset | Exactly `1` skips the man pages |
 | `QSH_INSECURE_SKIP_VERIFY` | unset | Exactly `1` skips the checksum and the provenance check, with a warning |
 
 The script downloads the release archive and that release's `SHA256SUMS`,
@@ -27,9 +29,17 @@ nothing installed: no entry, a duplicate entry, a mismatch, a tarball whose
 the destination directory followed by a rename, so an interrupted run never
 leaves a half-written `qsh` on your `PATH`, and `sudo` is never invoked. An
 unwritable `QSH_INSTALL_DIR` is an error, not a prompt to escalate. The
-archive also carries the man pages under `man/` for tags after `v0.2.0`;
-the installer extracts only `qsh` and leaves them behind, and Homebrew is
-the install path that puts them on a `MANPATH`.
+archive also carries the man pages under `man/` for tags after `v0.2.0`.
+The installer copies every `man/<name>.1` member to `QSH_MAN_DIR` the same
+way (temp name, then rename). A member whose name is not exactly
+`man/<name>.1`, or that is a symlink, is reported and skipped. Man pages are
+best effort: a failure prints a warning and leaves the installed binary in
+place, an archive without `man/` is installed without comment, and
+`QSH_NO_MAN=1` skips them. After installing, the script asks `manpath`
+whether the man directory's parent is on the search path and prints an
+`export MANPATH=...` line if it is not or if `manpath` is missing.
+man-db finds `~/.local/share/man` by itself when `~/.local/bin` is on
+`PATH`; macOS does not.
 
 What the checksum proves is bounded. `SHA256SUMS` comes from the same
 release as the archive, so it catches a truncated or corrupted download, not
