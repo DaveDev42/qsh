@@ -2008,14 +2008,6 @@ async fn local_forward_primitive_over_reverse_survives_a_registration_drop_and_s
     // produce, and this must fail on that regression rather than accept
     // it (review finding: the previous form of this assertion treated an
     // empty graceful read as equivalent to a reset).
-    let mut broken =
-        tokio::time::timeout(TIMEOUT, tokio::net::TcpStream::connect(handle.local_addr()))
-            .await
-            .expect("connect must not hang")
-            .expect("the listener must stay bound through the outage");
-    let write_result = broken.write_all(b"during the outage").await;
-    let mut buf = Vec::new();
-    let read_result = tokio::time::timeout(TIMEOUT, broken.read_to_end(&mut buf)).await;
     let is_reset_kind = |kind: std::io::ErrorKind| {
         matches!(
             kind,
@@ -2024,16 +2016,36 @@ async fn local_forward_primitive_over_reverse_survives_a_registration_drop_and_s
                 | std::io::ErrorKind::ConnectionAborted
         )
     };
-    let write_was_reset = write_result
-        .as_ref()
-        .err()
-        .is_some_and(|err| is_reset_kind(err.kind()));
-    let read_was_reset = matches!(&read_result, Ok(Err(err)) if is_reset_kind(err.kind()));
-    assert!(
-        write_was_reset || read_was_reset,
-        "a connection accepted during the outage must be reset (RST) by the OS, not merely \
-         closed gracefully or hung: write={write_result:?} read={read_result:?} buf={buf:?}"
-    );
+    // The daemon accepts and aborts immediately, so under load the RST can
+    // land before the client's non-blocking `connect` has reported
+    // completion; macOS then surfaces it as the connect result itself
+    // (`ECONNRESET` from `SO_ERROR`). That is the same reset outcome, just
+    // observed one call earlier. Only a reset kind counts: `ConnectionRefused`
+    // (listener gone) or any other error still fails the test.
+    let connected =
+        tokio::time::timeout(TIMEOUT, tokio::net::TcpStream::connect(handle.local_addr()))
+            .await
+            .expect("connect must not hang");
+    match connected {
+        Err(err) => assert!(
+            is_reset_kind(err.kind()),
+            "the listener must stay bound through the outage and reset the connection: {err:?}"
+        ),
+        Ok(mut broken) => {
+            let write_result = broken.write_all(b"during the outage").await;
+            let mut buf = Vec::new();
+            let read_result = tokio::time::timeout(TIMEOUT, broken.read_to_end(&mut buf)).await;
+            let write_was_reset = write_result
+                .as_ref()
+                .err()
+                .is_some_and(|err| is_reset_kind(err.kind()));
+            let read_was_reset = matches!(&read_result, Ok(Err(err)) if is_reset_kind(err.kind()));
+            assert!(
+                write_was_reset || read_was_reset,
+                "a connection accepted during the outage must be reset (RST) by the OS, not                  merely closed gracefully or hung: write={write_result:?} read={read_result:?}                  buf={buf:?}"
+            );
+        }
+    }
 
     // Second registration, same fingerprint, same name: `Registry::admit`
     // re-admits a `Stale` entry under the same fingerprint and flips it
