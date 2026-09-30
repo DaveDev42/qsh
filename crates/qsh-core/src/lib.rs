@@ -30,6 +30,7 @@ pub(crate) mod fsutil;
 pub mod handshake;
 pub mod hosts;
 pub mod identity;
+pub mod lifecycle;
 // localctl (UDS IPC to this machine's resident `qsh listen` daemon) has no
 // meaning on Windows — no daemon, no socket, no peer credential concept —
 // so the whole module tree compiles out there rather than growing internal

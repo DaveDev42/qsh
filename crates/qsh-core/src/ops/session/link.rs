@@ -215,7 +215,7 @@ impl Connected {
 
     /// The forward route's swappable endpoint/connection pair, shared with
     /// this `Connected`: a supervisor that replaces the pair
-    /// ([`Link::replace`]) keeps [`Self::close`] and [`Self::wait_dead`]
+    /// ([`Link::replace`]) keeps [`Self::close`] and [`Self::wait_dead_with_cause`]
     /// pointed at the live one. `None` on the reverse route.
     pub(crate) fn forward_link(&self) -> Option<Link> {
         match &self.link {
@@ -314,37 +314,53 @@ impl Connected {
     /// this bare value-op connection) is simply discarded and the loop
     /// keeps waiting — the same "nothing here to answer" posture every
     /// other bare value-op `Connected` already has, forward or reverse.
-    pub(crate) async fn wait_dead(&mut self) -> OpError {
+    ///
+    /// Returns the error plus the `cause` word for the close when the
+    /// connection itself says (forward route only; `qsh::lifecycle`).
+    pub(crate) async fn wait_dead_with_cause(&mut self) -> (OpError, Option<&'static str>) {
         match &self.link {
             ConnectedLink::Forward(link) => {
                 let err = link.connection().closed().await;
-                OpError::new(
-                    ErrorCode::ConnectionFailed,
-                    format!("the connection carrying this tunnel closed: {err}"),
+                let cause = crate::reverse::classify_connection_error(&err).as_str();
+                (
+                    OpError::new(
+                        ErrorCode::ConnectionFailed,
+                        format!("the connection carrying this tunnel closed: {err}"),
+                    ),
+                    Some(cause),
                 )
             }
             ConnectedLink::Reverse { .. } => {
                 let Some(session) = self.session.as_mut() else {
-                    return OpError::new(
-                        ErrorCode::ConnectionFailed,
-                        "the reverse connection carrying this tunnel is already closed",
+                    return (
+                        OpError::new(
+                            ErrorCode::ConnectionFailed,
+                            "the reverse connection carrying this tunnel is already closed",
+                        ),
+                        None,
                     );
                 };
                 loop {
                     match session.next_control().await {
                         Ok(None) => {
-                            return OpError::new(
-                                ErrorCode::ConnectionFailed,
-                                "the reverse connection carrying this tunnel closed",
+                            return (
+                                OpError::new(
+                                    ErrorCode::ConnectionFailed,
+                                    "the reverse connection carrying this tunnel closed",
+                                ),
+                                None,
                             );
                         }
                         Ok(Some(_)) => continue,
                         Err(err) => {
-                            return OpError::new(
-                                ErrorCode::ConnectionFailed,
-                                format!(
-                                    "the reverse connection carrying this tunnel failed: {err}"
+                            return (
+                                OpError::new(
+                                    ErrorCode::ConnectionFailed,
+                                    format!(
+                                        "the reverse connection carrying this tunnel failed: {err}"
+                                    ),
                                 ),
+                                None,
                             );
                         }
                     }

@@ -418,6 +418,32 @@ pub struct TunnelHold {
     tunnel: TunnelDto,
 }
 
+/// Owned copy of what a `qsh::lifecycle` tunnel record carries, so the
+/// hold methods can keep it while they borrow the tunnel's fields.
+struct LifecycleIds {
+    tunnel_id: String,
+    mode: String,
+    supervise: bool,
+}
+
+impl LifecycleIds {
+    fn facts(&self) -> crate::lifecycle::TunnelFacts<'_> {
+        crate::lifecycle::TunnelFacts {
+            tunnel_id: &self.tunnel_id,
+            mode: &self.mode,
+            supervise: self.supervise,
+        }
+    }
+
+    fn opened(&self) {
+        crate::lifecycle::tunnel_opened(self.facts());
+    }
+
+    fn ended(&self, err: &OpError, cause: Option<&str>) {
+        crate::lifecycle::tunnel_ended(self.facts(), err.code.as_str(), cause);
+    }
+}
+
 /// The natural-end wait both [`TunnelHold::hold`] and
 /// [`TunnelHold::hold_until_closed`] race against their own close signal
 /// (the latter only) — factored out so the two methods cannot drift on
@@ -426,33 +452,33 @@ async fn wait_for_end(
     forward: &mut ForwardResource,
     supervisor: &mut Option<SuperviseTask>,
     conn: &mut Connected,
-) -> OpError {
+) -> (OpError, Option<&'static str>) {
     // What ends the tunnel besides its own listener failing: the connection
     // dying for an unsupervised tunnel, and only the supervisor giving up
     // for a supervised one (a lost connection is the supervisor's to mend).
     let carrier_end = async {
         match supervisor {
-            Some(supervisor) => supervisor.finished().await,
-            None => conn.wait_dead().await,
+            Some(supervisor) => (supervisor.finished().await, None),
+            None => conn.wait_dead_with_cause().await,
         }
     };
     match forward {
         ForwardResource::Local(local) => {
             tokio::select! {
-                err = local.wait() => OpError::new(
+                err = local.wait() => (OpError::new(
                     ErrorCode::ConnectionFailed,
                     format!("the local forward's listener failed: {err}"),
-                ),
+                ), None),
                 err = carrier_end => err,
             }
         }
         ForwardResource::Remote { .. } => carrier_end.await,
         ForwardResource::Dynamic(dynamic) => {
             tokio::select! {
-                err = dynamic.wait() => OpError::new(
+                err = dynamic.wait() => (OpError::new(
                     ErrorCode::ConnectionFailed,
                     format!("the dynamic forward's listener failed: {err}"),
-                ),
+                ), None),
                 err = carrier_end => err,
             }
         }
@@ -488,6 +514,26 @@ impl TunnelHold {
         }
     }
 
+    /// The facts a `qsh::lifecycle` record about this tunnel carries.
+    fn lifecycle_ids(&self) -> LifecycleIds {
+        let (tunnel_id, mode) = match &self.tunnel {
+            TunnelDto::Forward(t) => (t.tunnel_id.clone(), t.mode.clone()),
+            TunnelDto::Dynamic(t) => (t.tunnel_id.clone(), t.mode.clone()),
+        };
+        LifecycleIds {
+            tunnel_id,
+            mode,
+            supervise: self.supervisor.is_some(),
+        }
+    }
+
+    /// Emit the `tunnel_opened` lifecycle record (ADR-0023 decision 21).
+    /// The frontend calls this once the envelope is out and flushed, right
+    /// where it writes its own "holding" line.
+    pub fn announce_opened(&self) {
+        self.lifecycle_ids().opened();
+    }
+
     /// Block until this tunnel is over, and say why.
     ///
     /// Two things end it (`docs/CLI.md` §6.14: "그 프로세스가 끝나거나 …
@@ -505,22 +551,24 @@ impl TunnelHold {
     /// logged structurally and accepting continues.
     ///
     /// "The connection carrying the tunnel closing" is [`Connected::
-    /// wait_dead`] on *either* route (`PLAN.md` M4 Step 5 PR 5b) —
+    /// wait_dead_with_cause`] on *either* route (`PLAN.md` M4 Step 5 PR 5b) —
     /// forward route: the QUIC connection's own close future, exactly as
     /// before; reverse route: the `LOCAL_CONTROL` conduit's own clean-end/
     /// error, which is this side's only way to learn the reverse
     /// registration died. The runtime handle is taken up front (rather
     /// than borrowing `self.conn.runtime()` for the duration) because the
-    /// async block below also needs `&mut self.conn` for `wait_dead`, and
+    /// async block below also needs `&mut self.conn` for `wait_dead_with_cause`, and
     /// the two borrows cannot coexist.
     pub fn hold(mut self) -> OpError {
         let handle = self.conn.runtime().handle().clone();
-        let err = {
+        let ids = self.lifecycle_ids();
+        let (err, cause) = {
             let forward = &mut self.forward;
             let supervisor = &mut self.supervisor;
             let conn = &mut self.conn;
             handle.block_on(wait_for_end(forward, supervisor, conn))
         };
+        ids.ended(&err, cause);
         self.close();
         err
     }
@@ -542,19 +590,23 @@ impl TunnelHold {
         shutdown: impl std::future::Future<Output = ()>,
     ) -> Option<OpError> {
         let handle = self.conn.runtime().handle().clone();
+        let ids = self.lifecycle_ids();
         let outcome = {
             let forward = &mut self.forward;
             let supervisor = &mut self.supervisor;
             let conn = &mut self.conn;
             handle.block_on(async move {
                 tokio::select! {
-                    err = wait_for_end(forward, supervisor, conn) => Some(err),
+                    ended = wait_for_end(forward, supervisor, conn) => Some(ended),
                     () = shutdown => None,
                 }
             })
         };
+        if let Some((err, cause)) = &outcome {
+            ids.ended(err, *cause);
+        }
         self.close();
-        outcome
+        outcome.map(|(err, _)| err)
     }
 
     /// Like [`Self::hold`], but also returns early — a deliberate close,
@@ -594,7 +646,7 @@ impl TunnelHold {
             let conn = &mut self.conn;
             handle.block_on(async move {
                 tokio::select! {
-                    err = wait_for_end(forward, supervisor, conn) => Outcome::Died(err),
+                    (err, _) = wait_for_end(forward, supervisor, conn) => Outcome::Died(err),
                     Ok(ack_tx) = close_rx => Outcome::Closed(ack_tx),
                 }
             })
