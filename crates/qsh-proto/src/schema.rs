@@ -8,13 +8,13 @@
 use schemars::{Schema, schema_for};
 
 use crate::types::{
-    AclCheckData, CapabilitiesData, CertInitData, CertIssueData, CliEnvelope, DoctorData,
-    DynamicTunnel, ExecRunData, Host, HostListData, IdentityExportData, IdentityInitData,
-    SchemaData, ServiceInstallData, ServiceStatusData, ServiceUninstallData, Session,
-    SessionCloseData, SessionListData, SessionOpenData, SessionReadData, SessionResizeData,
-    SessionWriteData, TrustAcceptData, TrustAddCaData, TrustAddData, TrustInviteData,
-    TrustListData, TrustRemoveData, TrustRenameData, TunnelCloseData, TunnelListData,
-    TunnelOpenData, VersionData,
+    AclCheckData, AclShowData, CapabilitiesData, CertInitData, CertIssueData, CliEnvelope,
+    DoctorData, DynamicTunnel, ExecRunData, Host, HostListData, IdentityExportData,
+    IdentityInitData, SchemaData, ServiceInstallData, ServiceStatusData, ServiceUninstallData,
+    Session, SessionCloseData, SessionListData, SessionOpenData, SessionReadData,
+    SessionResizeData, SessionWriteData, TrustAcceptData, TrustAddCaData, TrustAddData,
+    TrustInviteData, TrustListData, TrustRemoveData, TrustRenameData, TunnelCloseData,
+    TunnelListData, TunnelOpenData, VersionData,
 };
 
 /// Every `docs/CLI.md` §2.4 dotted command name [`cli_v1_data_schema`] has
@@ -24,6 +24,7 @@ use crate::types::{
 /// from the match.
 pub const CLI_V1_SCHEMA_COMMANDS: &[&str] = &[
     "acl.check",
+    "acl.show",
     "capabilities.get",
     "cert.init",
     "cert.issue",
@@ -71,6 +72,7 @@ pub const CLI_V1_SCHEMA_COMMANDS: &[&str] = &[
 pub fn cli_v1_data_schema(command: &str) -> Option<Schema> {
     Some(match command {
         "acl.check" => schema_for!(AclCheckData),
+        "acl.show" => schema_for!(AclShowData),
         "capabilities.get" => schema_for!(CapabilitiesData),
         "cert.init" => schema_for!(CertInitData),
         "cert.issue" => schema_for!(CertIssueData),

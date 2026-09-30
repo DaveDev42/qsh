@@ -4,10 +4,14 @@
 //! `Server::authorize`/`authorize_owned` (`crates/qsh-core/src/server/
 //! mod.rs`) call the exact same `pub(crate) fn decide`
 //! (`crates/qsh-core/src/acl/policy.rs`) — that narrowing is DoD 1's
-//! *structural* half (only `impl Authorizer for Policy::check` and
-//! `Ops::acl_check` remain as call sites, both inside `qsh-core`; a second,
-//! explaining-only evaluator has nowhere left to live without showing up
-//! next to them in a workspace-wide grep). This file is the *table* half
+//! *structural* half (exactly three call sites remain: `impl Authorizer for
+//! Policy::check`, `Ops::acl_check` and `Policy::effective_actions`, which
+//! `acl show` uses, all inside `qsh-core`; a second, explaining-only
+//! evaluator has nowhere left to live without showing up next to them in
+//! `grep -rn 'policy\.decide(\|self\.decide(' crates/qsh-core/src/acl
+//! crates/qsh-core/src/ops --exclude=tests.rs`, which prints three lines;
+//! a workspace-wide grep would also count the unrelated `Admission::decide`
+//! calls). This file is the *table* half
 //! `docs/ROADMAP.md` M5's own wording asks for: for each row, (i) `qsh acl
 //! check --json`'s `decision`/`rule`, (ii) a real op's outcome (success vs.
 //! `PERMISSION_DENIED`) against a `qsh serve` host running the identical
@@ -48,8 +52,8 @@ use std::str::FromStr;
 
 use common::{CLIENT_ALIAS, CLIENT_PRINCIPAL, HOST_ALIAS, Sandbox, ServeGuard, wait_for_audit};
 use qsh_core::acl::{
-    Action as CoreAction, Authorizer, PERMISSION_DENIED_MESSAGE, PolicyLoad, PolicySource,
-    ResourceRef,
+    ACL_RESTART_NOTICE, Action as CoreAction, Authorizer, PERMISSION_DENIED_MESSAGE, PolicyLoad,
+    PolicySource, ResourceRef,
 };
 use qsh_core::{Paths, Principal};
 // F5 (`PLAN.md` M5 Step 7 adversarial ⑥): `Principal` comes from `qsh-core`
@@ -75,6 +79,68 @@ fn write_acl_toml(host: &Sandbox, contents: &str) {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&acl_path, std::fs::Permissions::from_mode(0o600));
     }
+}
+
+/// One shared policy table: every `row_*` test below reads its `acl.toml`
+/// from here, and the `acl show` agreement test walks the whole table.
+/// `{P}` stands for [`CLIENT_PRINCIPAL`]. `principals` lists whom the
+/// agreement test evaluates for each row (the two-principal row names its
+/// own).
+struct TableRow {
+    name: &'static str,
+    toml: &'static str,
+    principals: &'static [&'static str],
+}
+
+const OWNER_RIVAL_PRINCIPALS: &[&str] = &["device:owner-device", "device:rival-device"];
+
+const POLICY_TABLE: &[TableRow] = &[
+    TableRow {
+        name: "exact",
+        toml: "[[acl]]\nprincipal = \"{P}\"\nallow = [\"exec.run\"]\n",
+        principals: &[CLIENT_PRINCIPAL],
+    },
+    TableRow {
+        name: "wildcard",
+        toml: "[[acl]]\nprincipal = \"{P}\"\nallow = [\"session.*\"]\n",
+        principals: &[CLIENT_PRINCIPAL],
+    },
+    TableRow {
+        name: "always_denied",
+        toml: "[[acl]]\nprincipal = \"{P}\"\nallow = [\"forward.socks\"]\n",
+        principals: &[CLIENT_PRINCIPAL],
+    },
+    TableRow {
+        name: "auth_path_ca",
+        toml: "[[acl]]\nprincipal = \"{P}\"\nauth_path = \"ca\"\nallow = [\"exec.run\"]\n",
+        principals: &[CLIENT_PRINCIPAL],
+    },
+    TableRow {
+        name: "owner_and_rival",
+        toml: "[[acl]]\nprincipal = \"device:owner-device\"\nallow = [\"session.open\", \"session.control\"]\n\n\
+               [[acl]]\nprincipal = \"device:rival-device\"\nallow = [\"session.control\"]\n",
+        principals: OWNER_RIVAL_PRINCIPALS,
+    },
+    TableRow {
+        name: "family_wildcards",
+        toml: "[[acl]]\nprincipal = \"{P}\"\nallow = [\"forward.*\", \"file.*\"]\n",
+        principals: &[CLIENT_PRINCIPAL],
+    },
+    TableRow {
+        name: "mixed_rows_scope_any",
+        toml: "[[acl]]\nprincipal = \"{P}\"\nallow = [\"exec.run\"]\n\n\
+               [[acl]]\nprincipal = \"{P}\"\nauth_path = \"ca\"\nscope = \"any\"\nallow = [\"session.*\", \"host.reverse\"]\n",
+        principals: &[CLIENT_PRINCIPAL],
+    },
+];
+
+/// The `acl.toml` text of the table row called `name`.
+fn table_toml(name: &str) -> String {
+    let row = POLICY_TABLE
+        .iter()
+        .find(|row| row.name == name)
+        .unwrap_or_else(|| panic!("no policy table row named {name}"));
+    row.toml.replace("{P}", CLIENT_PRINCIPAL)
 }
 
 /// Run `qsh acl check --json` against `host`'s own `acl.toml` and return the
@@ -122,10 +188,7 @@ fn row_allow_exact_match() {
     let host_fp = host.fingerprint();
     let client_fp = client.fingerprint();
     host.trust_add(CLIENT_ALIAS, None, &client_fp);
-    write_acl_toml(
-        &host,
-        &format!("[[acl]]\nprincipal = \"{CLIENT_PRINCIPAL}\"\nallow = [\"exec.run\"]\n"),
-    );
+    write_acl_toml(&host, &table_toml("exact"));
     let serve = ServeGuard::start(&host);
     client.trust_add(HOST_ALIAS, Some(serve.addr()), &host_fp);
 
@@ -183,10 +246,7 @@ fn row_deny_no_matching_rule() {
     let host_fp = host.fingerprint();
     let client_fp = client.fingerprint();
     host.trust_add(CLIENT_ALIAS, None, &client_fp);
-    write_acl_toml(
-        &host,
-        &format!("[[acl]]\nprincipal = \"{CLIENT_PRINCIPAL}\"\nallow = [\"exec.run\"]\n"),
-    );
+    write_acl_toml(&host, &table_toml("exact"));
     let serve = ServeGuard::start(&host);
     client.trust_add(HOST_ALIAS, Some(serve.addr()), &host_fp);
 
@@ -226,10 +286,7 @@ fn row_wildcard_match() {
     let host_fp = host.fingerprint();
     let client_fp = client.fingerprint();
     host.trust_add(CLIENT_ALIAS, None, &client_fp);
-    write_acl_toml(
-        &host,
-        &format!("[[acl]]\nprincipal = \"{CLIENT_PRINCIPAL}\"\nallow = [\"session.*\"]\n"),
-    );
+    write_acl_toml(&host, &table_toml("wildcard"));
     let serve = ServeGuard::start(&host);
     client.trust_add(HOST_ALIAS, Some(serve.addr()), &host_fp);
 
@@ -276,10 +333,7 @@ fn row_wildcard_match() {
 #[test]
 fn row_always_denied_action_overrides_an_explicit_allow_rule() {
     let host = Sandbox::new();
-    write_acl_toml(
-        &host,
-        &format!("[[acl]]\nprincipal = \"{CLIENT_PRINCIPAL}\"\nallow = [\"forward.socks\"]\n"),
-    );
+    write_acl_toml(&host, &table_toml("always_denied"));
 
     let data = acl_check(
         &host,
@@ -321,12 +375,7 @@ fn row_auth_path_mismatch() {
     let host_fp = host.fingerprint();
     let client_fp = client.fingerprint();
     host.trust_add(CLIENT_ALIAS, None, &client_fp);
-    write_acl_toml(
-        &host,
-        &format!(
-            "[[acl]]\nprincipal = \"{CLIENT_PRINCIPAL}\"\nauth_path = \"ca\"\nallow = [\"exec.run\"]\n"
-        ),
-    );
+    write_acl_toml(&host, &table_toml("auth_path_ca"));
     let serve = ServeGuard::start(&host);
     client.trust_add(HOST_ALIAS, Some(serve.addr()), &host_fp);
 
@@ -392,9 +441,6 @@ fn row_auth_path_mismatch() {
 /// `#[cfg(unix)]`.
 #[cfg(unix)]
 fn owned_session_fixture() -> (Sandbox, Sandbox, Sandbox, ServeGuard, String, String) {
-    const OWNER_PRINCIPAL: &str = "device:owner-device";
-    const RIVAL_PRINCIPAL: &str = "device:rival-device";
-
     let host = Sandbox::new();
     let owner = Sandbox::new();
     let rival = Sandbox::new();
@@ -403,13 +449,7 @@ fn owned_session_fixture() -> (Sandbox, Sandbox, Sandbox, ServeGuard, String, St
     let rival_fp = rival.fingerprint();
     host.trust_add("owner-device", None, &owner_fp);
     host.trust_add("rival-device", None, &rival_fp);
-    write_acl_toml(
-        &host,
-        &format!(
-            "[[acl]]\nprincipal = \"{OWNER_PRINCIPAL}\"\nallow = [\"session.open\", \"session.control\"]\n\n\
-             [[acl]]\nprincipal = \"{RIVAL_PRINCIPAL}\"\nallow = [\"session.control\"]\n"
-        ),
-    );
+    write_acl_toml(&host, &table_toml("owner_and_rival"));
     let serve = ServeGuard::start(&host);
     owner.trust_add(HOST_ALIAS, Some(serve.addr()), &host_fp);
     rival.trust_add(HOST_ALIAS, Some(serve.addr()), &host_fp);
@@ -645,10 +685,7 @@ fn row_policy_file_invalid() {
 fn acl_check_does_not_modify_acl_toml() {
     let host = Sandbox::new();
     let acl_path = host.config_dir().join("acl.toml");
-    write_acl_toml(
-        &host,
-        &format!("[[acl]]\nprincipal = \"{CLIENT_PRINCIPAL}\"\nallow = [\"exec.run\"]\n"),
-    );
+    write_acl_toml(&host, &table_toml("exact"));
     let before_content = std::fs::read_to_string(&acl_path).expect("read acl.toml");
     let before_mtime = std::fs::metadata(&acl_path)
         .expect("stat acl.toml")
@@ -694,31 +731,7 @@ fn acl_check_does_not_modify_acl_toml() {
 /// renamed variant.
 #[test]
 fn acl_check_never_appears_as_a_control_message_wire_variant() {
-    #[allow(dead_code)]
-    fn assert_every_variant_is_accounted_for(body: qsh_proto::wire::control_message::Body) {
-        use qsh_proto::wire::control_message::Body;
-        match body {
-            Body::Hello(_) => {}
-            Body::Response(_) => {}
-            Body::SessionOpen(_) => {}
-            Body::SessionAttach(_) => {}
-            Body::SessionList(_) => {}
-            Body::SessionGet(_) => {}
-            Body::SessionResize(_) => {}
-            Body::SessionClose(_) => {}
-            Body::SessionRead(_) => {}
-            Body::SessionWrite(_) => {}
-            Body::ExecStart(_) => {}
-            Body::RfwdOpen(_) => {}
-            Body::RfwdClose(_) => {}
-            Body::Ping(_) => {}
-            Body::Pong(_) => {}
-            Body::SessionEvent(_) => {}
-            Body::PairingProof(_) => {}
-            Body::PairingAccepted(_) => {}
-        }
-    }
-    // The function above never runs — its only job is to fail to compile
+    // The helper at the bottom of this file never runs — its only job is to fail to compile
     // the instant the oneof gains (or loses) a variant this match does not
     // name. This assertion just proves the test itself is not vacuous.
     let source = std::fs::read_to_string(concat!(
@@ -729,5 +742,312 @@ fn acl_check_never_appears_as_a_control_message_wire_variant() {
     assert!(
         !source.to_lowercase().contains("aclcheck") && !source.to_lowercase().contains("acl_check"),
         "the wire proto must never gain an acl.check message"
+    );
+}
+
+/// Compile-time anchor shared by the `acl.check` and `acl.show` wire
+/// tests: an exhaustive match with no `_` arm on the prost-generated oneof.
+#[allow(dead_code)]
+fn assert_every_variant_is_accounted_for(body: qsh_proto::wire::control_message::Body) {
+    use qsh_proto::wire::control_message::Body;
+    match body {
+        Body::Hello(_) => {}
+        Body::Response(_) => {}
+        Body::SessionOpen(_) => {}
+        Body::SessionAttach(_) => {}
+        Body::SessionList(_) => {}
+        Body::SessionGet(_) => {}
+        Body::SessionResize(_) => {}
+        Body::SessionClose(_) => {}
+        Body::SessionRead(_) => {}
+        Body::SessionWrite(_) => {}
+        Body::ExecStart(_) => {}
+        Body::RfwdOpen(_) => {}
+        Body::RfwdClose(_) => {}
+        Body::Ping(_) => {}
+        Body::Pong(_) => {}
+        Body::SessionEvent(_) => {}
+        Body::PairingProof(_) => {}
+        Body::PairingAccepted(_) => {}
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `acl show` (`docs/CLI.md` §6.19, ADR-0025)
+// ---------------------------------------------------------------------------
+
+/// Run `qsh acl show --json` and return the envelope's `data` object.
+fn acl_show(host: &Sandbox, principal: &str, auth_path: Option<&str>) -> Value {
+    let mut args = vec!["acl", "show", "--principal", principal];
+    if let Some(a) = auth_path {
+        args.push("--auth-path");
+        args.push(a);
+    }
+    args.push("--json");
+    let (code, value) = host.json(&args);
+    assert_eq!(code, 0, "acl show itself must not fail: {value}");
+    value["data"].clone()
+}
+
+fn effective(data: &Value) -> Vec<String> {
+    data["effective_actions"]
+        .as_array()
+        .expect("effective_actions array")
+        .iter()
+        .map(|v| v.as_str().expect("action string").to_string())
+        .collect()
+}
+
+/// Three-way discipline (ADR-0025 decision 3): for every shared table row,
+/// principal and auth path, membership in `acl show`'s effective set equals
+/// `acl check`'s verdict for each of the 11 actions on an unowned resource.
+#[test]
+fn acl_show_effective_set_agrees_with_acl_check_for_every_action_in_every_table_row() {
+    for row in POLICY_TABLE {
+        let host = Sandbox::new();
+        write_acl_toml(&host, &table_toml(row.name));
+        for principal in row.principals {
+            for auth_path in ["pin", "ca"] {
+                let shown = effective(&acl_show(&host, principal, Some(auth_path)));
+                for action in CoreAction::ALL {
+                    let checked = acl_check(
+                        &host,
+                        principal,
+                        action.as_str(),
+                        None,
+                        Some(auth_path),
+                        None,
+                        None,
+                    );
+                    let allowed = checked["decision"] == "allow";
+                    assert_eq!(
+                        shown.iter().any(|a| a == action.as_str()),
+                        allowed,
+                        "row {} principal {principal} auth_path {auth_path} action {}: \
+                         show {shown:?} vs check {checked}",
+                        row.name,
+                        action.as_str()
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn acl_show_reports_an_empty_set_and_no_policy_for_a_missing_or_invalid_acl_toml() {
+    let missing = Sandbox::new();
+    let data = acl_show(&missing, CLIENT_PRINCIPAL, None);
+    assert_eq!(data["policy"]["loaded"], false, "{data}");
+    assert_eq!(data["policy"]["rules"], 0, "{data}");
+    assert!(effective(&data).is_empty(), "{data}");
+    assert_eq!(data["matching_rules"], serde_json::json!([]), "{data}");
+
+    let invalid = Sandbox::new();
+    write_acl_toml(&invalid, "not toml {{{");
+    let data = acl_show(&invalid, CLIENT_PRINCIPAL, None);
+    assert_eq!(data["policy"]["loaded"], false, "{data}");
+    assert!(effective(&data).is_empty(), "{data}");
+    assert_eq!(data["matching_rules"], serde_json::json!([]), "{data}");
+}
+
+/// A permission-unreadable `acl.toml` folds into the same "no policy" state
+/// (`PolicySource::load_path` maps a read error to `Invalid`) and leaks no
+/// rule content.
+#[test]
+#[cfg(unix)]
+fn acl_show_on_an_unreadable_acl_toml_reports_no_policy_and_no_rule_content() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let host = Sandbox::new();
+    write_acl_toml(
+        &host,
+        "[[acl]]\nprincipal = \"device:laptop\"\nallow = [\"host.reverse\"]\n",
+    );
+    let acl_path = host.config_dir().join("acl.toml");
+    std::fs::set_permissions(&acl_path, std::fs::Permissions::from_mode(0o000)).expect("chmod 000");
+    if std::fs::read(&acl_path).is_ok() {
+        // Running as root: permission bits do not apply, nothing to test.
+        return;
+    }
+    let (code, value) = host.json(&["acl", "show", "--principal", CLIENT_PRINCIPAL, "--json"]);
+    // Restore before asserting so the sandbox can be cleaned up.
+    let _ = std::fs::set_permissions(&acl_path, std::fs::Permissions::from_mode(0o600));
+    assert_eq!(code, 0, "{value}");
+    let data = &value["data"];
+    assert_eq!(data["policy"]["loaded"], false, "{value}");
+    assert!(effective(data).is_empty(), "{value}");
+    assert_eq!(data["matching_rules"], serde_json::json!([]), "{value}");
+    assert!(
+        !value.to_string().contains("host.reverse"),
+        "no rule content may appear: {value}"
+    );
+}
+
+#[test]
+fn acl_show_distinguishes_a_loaded_policy_with_no_matching_row_from_no_policy() {
+    let host = Sandbox::new();
+    write_acl_toml(&host, &table_toml("exact"));
+    let data = acl_show(&host, "device:somebody-else", None);
+    assert_eq!(data["policy"]["loaded"], true, "{data}");
+    assert_eq!(data["policy"]["rules"], 1, "{data}");
+    assert!(effective(&data).is_empty(), "{data}");
+    assert_eq!(data["matching_rules"], serde_json::json!([]), "{data}");
+}
+
+#[test]
+fn acl_show_never_lists_always_denied_actions_even_under_family_patterns() {
+    let host = Sandbox::new();
+    write_acl_toml(&host, &table_toml("family_wildcards"));
+    let data = acl_show(&host, CLIENT_PRINCIPAL, None);
+    let set = effective(&data);
+    assert_eq!(set, ["forward.local", "forward.remote"], "{data}");
+    for denied in ["forward.socks", "file.read", "file.write"] {
+        assert!(!set.iter().any(|a| a == denied), "{denied} in {data}");
+    }
+    // The row is still reported as matching, with its patterns as written.
+    assert_eq!(
+        data["matching_rules"],
+        serde_json::json!([{
+            "index": 0,
+            "allow": ["forward.*", "file.*"],
+            "auth_path": "pin",
+            "scope": "owned"
+        }]),
+        "{data}"
+    );
+}
+
+#[test]
+fn acl_show_evaluates_the_ca_auth_path_when_asked() {
+    let host = Sandbox::new();
+    write_acl_toml(&host, &table_toml("auth_path_ca"));
+
+    let defaulted = acl_show(&host, CLIENT_PRINCIPAL, None);
+    assert_eq!(defaulted["auth_path"], "pin", "{defaulted}");
+    assert!(effective(&defaulted).is_empty(), "{defaulted}");
+    assert_eq!(defaulted["matching_rules"], serde_json::json!([]));
+
+    let ca = acl_show(&host, CLIENT_PRINCIPAL, Some("ca"));
+    assert_eq!(ca["auth_path"], "ca", "{ca}");
+    assert_eq!(ca["auth_path_defaulted"], false, "{ca}");
+    assert_eq!(effective(&ca), ["exec.run"], "{ca}");
+    assert_eq!(ca["matching_rules"][0]["auth_path"], "ca", "{ca}");
+}
+
+#[test]
+fn acl_show_rejects_a_malformed_principal_or_auth_path_as_invalid_argument() {
+    let host = Sandbox::new();
+    write_acl_toml(&host, &table_toml("exact"));
+    for args in [
+        &["acl", "show", "--principal", "nobody", "--json"][..],
+        &[
+            "acl",
+            "show",
+            "--principal",
+            CLIENT_PRINCIPAL,
+            "--auth-path",
+            "pairing",
+            "--json",
+        ][..],
+    ] {
+        let (code, value) = host.json(args);
+        assert_eq!(code, 255, "{value}");
+        assert_eq!(value["error"]["code"], "INVALID_ARGUMENT", "{value}");
+    }
+}
+
+#[test]
+fn acl_show_does_not_modify_acl_toml() {
+    let host = Sandbox::new();
+    let acl_path = host.config_dir().join("acl.toml");
+    write_acl_toml(&host, &table_toml("exact"));
+    let before_content = std::fs::read_to_string(&acl_path).expect("read acl.toml");
+    let before_mtime = std::fs::metadata(&acl_path)
+        .expect("stat acl.toml")
+        .modified()
+        .expect("mtime");
+
+    let _ = acl_show(&host, CLIENT_PRINCIPAL, None);
+
+    let after_content = std::fs::read_to_string(&acl_path).expect("read acl.toml");
+    let after_mtime = std::fs::metadata(&acl_path)
+        .expect("stat acl.toml")
+        .modified()
+        .expect("mtime");
+    assert_eq!(before_content, after_content);
+    assert_eq!(before_mtime, after_mtime);
+}
+
+/// Twin of [`acl_check_never_appears_as_a_control_message_wire_variant`]:
+/// `acl.show` is local only (ADR-0025 decision 4). The compile-time anchor
+/// is the shared exhaustive match above; the proto text check is the same
+/// non-vacuity assertion.
+#[test]
+fn acl_show_never_appears_as_a_control_message_wire_variant() {
+    let source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../qsh-proto/proto/qsh/wire/v1.proto"
+    ))
+    .expect("read v1.proto");
+    let lower = source.to_lowercase();
+    assert!(
+        !lower.contains("aclshow") && !lower.contains("acl_show"),
+        "the wire proto must never gain an acl.show message"
+    );
+}
+
+/// L6: with `--auth-path` omitted the human output carries the pin-default
+/// notice and the JSON says `auth_path_defaulted: true`; naming the path
+/// removes both.
+#[test]
+fn acl_show_notes_the_pin_default_when_auth_path_is_omitted() {
+    let host = Sandbox::new();
+    write_acl_toml(&host, &table_toml("exact"));
+
+    let output = host.qsh(&["acl", "show", "--principal", CLIENT_PRINCIPAL]);
+    assert_eq!(common::exit_code(&output), 0);
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    assert!(
+        stdout.contains("--auth-path was omitted, so \"pin\" was evaluated"),
+        "{stdout}"
+    );
+
+    let explicit = host.qsh(&[
+        "acl",
+        "show",
+        "--principal",
+        CLIENT_PRINCIPAL,
+        "--auth-path",
+        "pin",
+    ]);
+    let stdout = String::from_utf8(explicit.stdout).expect("utf8 stdout");
+    assert!(!stdout.contains("--auth-path was omitted"), "{stdout}");
+
+    let data = acl_show(&host, CLIENT_PRINCIPAL, None);
+    assert_eq!(data["auth_path_defaulted"], true, "{data}");
+    assert_eq!(data["auth_path"], "pin", "{data}");
+    let data = acl_show(&host, CLIENT_PRINCIPAL, Some("pin"));
+    assert_eq!(data["auth_path_defaulted"], false, "{data}");
+}
+
+/// L6: the human output prints `ACL_RESTART_NOTICE` as its own line, byte
+/// for byte, and the JSON carries no notice prose.
+#[test]
+fn acl_show_human_output_carries_the_acl_restart_notice_byte_for_byte() {
+    let host = Sandbox::new();
+    write_acl_toml(&host, &table_toml("exact"));
+    let output = host.qsh(&["acl", "show", "--principal", CLIENT_PRINCIPAL]);
+    assert_eq!(common::exit_code(&output), 0);
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    assert!(
+        stdout.lines().any(|line| line == ACL_RESTART_NOTICE),
+        "{stdout}"
+    );
+
+    let (_, value) = host.json(&["acl", "show", "--principal", CLIENT_PRINCIPAL, "--json"]);
+    assert!(
+        !value.to_string().contains(ACL_RESTART_NOTICE),
+        "the restart notice is prose and stays out of the JSON: {value}"
     );
 }

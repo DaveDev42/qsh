@@ -154,6 +154,8 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "error.PERMISSION_DENIED.json",
     "acl.check.allow.json",
     "acl.check.deny.json",
+    "acl.show.json",
+    "acl.show.no_policy.json",
     "error.RESOURCE_EXHAUSTED.json",
     "service.install.json",
     "service.status.json",
@@ -398,6 +400,42 @@ fn golden_local_fixtures() {
     assert_eq!(code, 0, "{deny}");
     assert_eq!(deny["data"]["decision"], "deny", "{deny}");
     check("acl.check.deny.json", deny);
+}
+
+/// `acl show` (`docs/CLI.md` §6.19, ADR-0025): local, needs no identity, so
+/// it gets its own sandbox like `acl check` above. One policy with a
+/// wildcard row and an exact row for `device:laptop` (so `matching_rules`
+/// carries two rows and the effective set shows the always-denied gate at
+/// work), and a second sandbox with no `acl.toml` for the no-policy shape.
+#[test]
+fn golden_acl_show_fixtures() {
+    let loaded = Sandbox::new();
+    std::fs::write(
+        loaded.config_dir().join("acl.toml"),
+        "[[acl]]\nprincipal = \"device:laptop\"\nallow = [\"forward.*\", \"session.open\"]\n\n\
+         [[acl]]\nprincipal = \"device:laptop\"\nscope = \"any\"\nallow = [\"exec.run\"]\n",
+    )
+    .expect("write acl.toml fixture policy");
+    let (code, show) = loaded.json(&["acl", "show", "--principal", "device:laptop", "--json"]);
+    assert_eq!(code, 0, "{show}");
+    assert_eq!(show["data"]["policy"]["loaded"], true, "{show}");
+    assert_eq!(
+        show["data"]["effective_actions"],
+        serde_json::json!([
+            "exec.run",
+            "session.open",
+            "forward.local",
+            "forward.remote"
+        ]),
+        "{show}"
+    );
+    check("acl.show.json", show);
+
+    let none = Sandbox::new();
+    let (code, no_policy) = none.json(&["acl", "show", "--principal", "device:laptop", "--json"]);
+    assert_eq!(code, 0, "{no_policy}");
+    assert_eq!(no_policy["data"]["policy"]["loaded"], false, "{no_policy}");
+    check("acl.show.no_policy.json", no_policy);
 }
 
 /// `host.list`/`host.get`'s two new additive fields, `source` and `user`

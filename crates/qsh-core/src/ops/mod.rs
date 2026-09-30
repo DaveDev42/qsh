@@ -35,7 +35,7 @@ mod identity;
 mod probe;
 mod trust;
 
-pub use acl::AclCheckOp;
+pub use acl::{AclCheckOp, AclShowOp};
 pub use cert::{CertInitOp, CertIssueOp};
 pub use doctor::DoctorOp;
 pub use exec::{ExecRunOp, ExecRunOutput, ExecStdin};

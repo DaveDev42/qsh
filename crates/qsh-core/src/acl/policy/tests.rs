@@ -572,3 +572,128 @@ proptest! {
         prop_assert_eq!(verdict.decision, Decision::Deny);
     }
 }
+
+proptest! {
+    /// `acl show`'s effective set (ADR-0025 decision 3) equals an
+    /// independent model that never calls `decide`: the union of the
+    /// `allow` patterns of every row whose principal and `auth_path` match,
+    /// expanded over `Action::ALL`, minus the literal always-denied trio.
+    /// The resource is unowned, so `scope` is ignored.
+    #[test]
+    fn effective_actions_equals_an_independent_model_over_arbitrary_policies(
+        policy in arb_policy(),
+        principal in arb_principal(),
+        auth_path in arb_auth_path(),
+    ) {
+        let principal_str = principal.to_string();
+        let model: Vec<Action> = Action::ALL
+            .into_iter()
+            .filter(|action| {
+                !matches!(
+                    action,
+                    Action::ForwardSocks | Action::FileRead | Action::FileWrite
+                )
+            })
+            .filter(|action| {
+                policy.rules.iter().any(|rule| {
+                    rule.principal == principal_str
+                        && rule.auth_path == auth_path
+                        && rule.allow.iter().any(|p| expand(p).contains(action))
+                })
+            })
+            .collect();
+        prop_assert_eq!(policy.effective_actions(&principal, auth_path), model);
+    }
+}
+
+/// Every action the effective set allows names, through `Verdict.rule`, a
+/// row that `matching_rules` also lists. Table-based, so a regression that
+/// made `effective_actions` and `matching_rules` disagree fails here even
+/// if both stay equal to `decide`.
+#[test]
+fn effective_actions_every_allowed_action_names_a_rule_index_in_matching_rules() {
+    let principal = Principal::User("dave".into());
+    let policies = [
+        Policy {
+            rules: vec![
+                rule(
+                    "user:dave",
+                    AuthPath::Ca,
+                    vec![ActionPattern::Exact(Action::ExecRun)],
+                ),
+                rule(
+                    "user:dave",
+                    AuthPath::Pin,
+                    vec![ActionPattern::Prefix(session_prefix())],
+                ),
+                rule(
+                    "user:bob",
+                    AuthPath::Pin,
+                    vec![ActionPattern::Exact(Action::ExecRun)],
+                ),
+                rule(
+                    "user:dave",
+                    AuthPath::Pin,
+                    vec![
+                        ActionPattern::Prefix(family_prefix(Action::ForwardLocal)),
+                        ActionPattern::Exact(Action::FileRead),
+                    ],
+                ),
+            ],
+        },
+        Policy { rules: vec![] },
+        Policy {
+            rules: vec![rule(
+                "user:dave",
+                AuthPath::Pin,
+                vec![ActionPattern::Exact(Action::ForwardSocks)],
+            )],
+        },
+    ];
+    for policy in &policies {
+        for auth_path in [AuthPath::Pin, AuthPath::Ca] {
+            let matching: Vec<u32> = policy
+                .matching_rules(&principal, auth_path)
+                .into_iter()
+                .map(|(index, _)| index)
+                .collect();
+            for action in policy.effective_actions(&principal, auth_path) {
+                let verdict =
+                    policy.decide(&principal, auth_path, action, ResourceRef::unowned(""));
+                let index = verdict.rule.expect("an allowed action names its rule");
+                assert!(
+                    matching.contains(&index),
+                    "{action} allowed by rule {index}, missing from {matching:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn matching_rules_lists_rows_in_file_order_and_renders_patterns_as_written() {
+    let principal = Principal::User("dave".into());
+    let policy = Policy {
+        rules: vec![
+            rule(
+                "user:bob",
+                AuthPath::Pin,
+                vec![ActionPattern::Exact(Action::ExecRun)],
+            ),
+            rule(
+                "user:dave",
+                AuthPath::Pin,
+                vec![
+                    ActionPattern::Exact(Action::ExecRun),
+                    ActionPattern::Prefix(family_prefix(Action::ForwardLocal)),
+                ],
+            ),
+        ],
+    };
+    let rows = policy.matching_rules(&principal, AuthPath::Pin);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, 1);
+    let rendered: Vec<String> = rows[0].1.allow.iter().map(ActionPattern::render).collect();
+    assert_eq!(rendered, ["exec.run", "forward.*"]);
+    assert!(policy.matching_rules(&principal, AuthPath::Ca).is_empty());
+}

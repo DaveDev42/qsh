@@ -1,0 +1,41 @@
+{
+  "command": "acl.show",
+  "data": {
+    "auth_path": "pin",
+    "auth_path_defaulted": true,
+    "effective_actions": [
+      "exec.run",
+      "session.open",
+      "forward.local",
+      "forward.remote"
+    ],
+    "matching_rules": [
+      {
+        "allow": [
+          "forward.*",
+          "session.open"
+        ],
+        "auth_path": "pin",
+        "index": 0,
+        "scope": "owned"
+      },
+      {
+        "allow": [
+          "exec.run"
+        ],
+        "auth_path": "pin",
+        "index": 1,
+        "scope": "any"
+      }
+    ],
+    "policy": {
+      "loaded": true,
+      "path": "<path>",
+      "rules": 2
+    },
+    "principal": "device:laptop"
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

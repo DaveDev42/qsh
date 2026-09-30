@@ -92,6 +92,16 @@ impl ActionPattern {
             ActionPattern::Prefix(prefix) => action.as_str().starts_with(prefix.as_str()),
         }
     }
+
+    /// The pattern as written in `acl.toml`: `"exec.run"` for an exact
+    /// entry, `"forward.*"` for a family wildcard. Used by `acl show` to
+    /// echo a row's `allow` list verbatim (ADR-0025 decision 2).
+    pub fn render(&self) -> String {
+        match *self {
+            ActionPattern::Exact(a) => a.as_str().to_string(),
+            ActionPattern::Prefix(prefix) => format!("{}*", prefix.as_str()),
+        }
+    }
 }
 
 /// Whether a `scope`-bearing rule applies to any instance of a resource or
@@ -191,17 +201,20 @@ impl Policy {
     /// this is the **only** evaluator, and the only way to make that a
     /// compiler-enforced fact rather than a code-review claim is to make it
     /// impossible for any second evaluator to exist outside this crate.
-    /// With this narrowed, the entire workspace has exactly two call sites
-    /// of `Policy::decide`: [`Authorizer for Policy`](Policy)'s own `check`
-    /// (production enforcement, `crate::server::Server::authorize` and
-    /// siblings, via `Arc<dyn Authorizer>`) and `crate::ops::acl::Ops::
-    /// acl_check` — both inside `qsh-core`, both calling this one method. A
-    /// second, explaining-only evaluator would have to either reimplement
-    /// this method's body (visibly duplicated logic, not a second call to
-    /// this one) or live inside `qsh-core` too, where it would show up
-    /// next to these two in a workspace-wide `grep -rn '\.decide(\|Policy::decide'`
-    /// — the mechanical check `PLAN.md` §4's "acl check와 enforcement의
-    /// 분기" risk item asks for.
+    /// With this narrowed, the entire workspace has exactly three call
+    /// sites of `Policy::decide`: [`Authorizer for Policy`](Policy)'s own
+    /// `check` (production enforcement, `crate::server::Server::authorize`
+    /// and siblings, via `Arc<dyn Authorizer>`), `crate::ops::acl::Ops::
+    /// acl_check`, and [`Policy::effective_actions`] (`acl show`,
+    /// ADR-0025 decision 3) - all inside `qsh-core`, all calling this one
+    /// method. A second, explaining-only evaluator would have to either
+    /// reimplement this method's body (visibly duplicated logic, not a
+    /// call to this one) or live inside `qsh-core` too, where it would show
+    /// up next to these three. The mechanical check is `grep -rn
+    /// 'policy\.decide(\|self\.decide(' crates/qsh-core/src/acl
+    /// crates/qsh-core/src/ops --exclude=tests.rs`, which prints exactly
+    /// three lines. (A workspace-wide `grep '\.decide('` would also count
+    /// the two unrelated `Admission::decide` calls, so it is scoped.)
     pub(crate) fn decide(
         &self,
         principal: &Principal,
@@ -220,11 +233,11 @@ impl Policy {
         let principal_str = principal.to_string();
         for (index, rule) in self.rules.iter().enumerate() {
             // ② Principal exact match + auth_path match.
-            if rule.principal != principal_str || rule.auth_path != auth_path {
+            if !rule_selects(rule, &principal_str, auth_path) {
                 continue;
             }
             // ③ Action pattern match (exact or trailing-`.*`).
-            if !rule.allow.iter().any(|pattern| pattern.matches(action)) {
+            if !rule_covers(rule, action) {
                 continue;
             }
             // ④ `scope` judgment — see this method's own doc. `Scope::Any`
@@ -251,6 +264,68 @@ impl Policy {
             rule: None,
         }
     }
+}
+
+impl Policy {
+    /// Every action the policy allows `principal` (authenticated via
+    /// `auth_path`) on an unowned resource, in [`Action::ALL`] order
+    /// (`acl show`, ADR-0025 decision 3). Runs [`Policy::decide`] once per
+    /// action rather than re-deriving the answer from the rules, so the
+    /// always-deny gate and every future evaluation step apply here
+    /// automatically. Because `scope = "owned"` only filters when a
+    /// resource has an owner, this set is a ceiling for owned resources.
+    pub(crate) fn effective_actions(
+        &self,
+        principal: &Principal,
+        auth_path: AuthPath,
+    ) -> Vec<Action> {
+        Action::ALL
+            .into_iter()
+            .filter(|&action| {
+                self.decide(principal, auth_path, action, ResourceRef::unowned(""))
+                    .is_allow()
+            })
+            .collect()
+    }
+
+    /// Rows that pass evaluation step 2 for `principal`/`auth_path` and
+    /// step 3 for at least one action in [`Action::ALL`], paired with
+    /// their array index, in file order. Shares [`rule_selects`] and
+    /// [`rule_covers`] with [`Policy::decide`]; there is no second matcher.
+    /// A row whose only patterns name always-denied actions still appears
+    /// here (it matches), while [`Policy::effective_actions`] correctly
+    /// omits those actions.
+    pub(crate) fn matching_rules(
+        &self,
+        principal: &Principal,
+        auth_path: AuthPath,
+    ) -> Vec<(u32, &Rule)> {
+        let principal_str = principal.to_string();
+        self.rules
+            .iter()
+            .enumerate()
+            .filter(|(_, rule)| {
+                rule_selects(rule, &principal_str, auth_path)
+                    && Action::ALL.into_iter().any(|a| rule_covers(rule, a))
+            })
+            .map(|(index, rule)| {
+                let index = u32::try_from(index).expect(
+                    "rule index fits u32: crate::acl::load bounds rule count far below u32::MAX",
+                );
+                (index, rule)
+            })
+            .collect()
+    }
+}
+
+/// Evaluation step 2: principal exact match and `auth_path` match.
+fn rule_selects(rule: &Rule, principal: &str, auth_path: AuthPath) -> bool {
+    rule.principal == principal && rule.auth_path == auth_path
+}
+
+/// Evaluation step 3: some `allow` pattern covers `action`.
+fn rule_covers(rule: &Rule, action: Action) -> bool {
+    rule.allow.iter().any(|pattern| pattern.matches(action))
 }
 
 impl Authorizer for Policy {

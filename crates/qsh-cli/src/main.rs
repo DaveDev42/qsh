@@ -46,22 +46,22 @@ use std::time::SystemTime;
 
 use clap::{CommandFactory as _, Parser};
 use qsh_core::{
-    AclCheckOp, CapabilitiesOp, CertInitOp, CertIssueOp, Config, DoctorOp, ExecRunOp, ExecStdin,
-    HostGetOp, HostListOp, IdentityExportOp, IdentityInitOp, InviteCodeSource, OpError, Operation,
-    Ops, SchemaOp, ServiceInstallOp, ServiceStatusOp, ServiceUninstallOp, SessionAttachOp,
-    SessionCloseOp, SessionGetOp, SessionListOp, SessionOpenOp, SessionReadOp, SessionResizeOp,
-    SessionWriteOp, TrustAcceptOp, TrustAddCaOp, TrustAddOp, TrustInviteOp, TrustListOp,
-    TrustRemoveOp, TrustRenameOp, TunnelCloseOp, TunnelDynamicOp, TunnelListOp, TunnelOpenOp,
-    VersionOp, cert_file_fingerprint_conflict, normalize_invite_code, parse_dynamic_forwards,
-    read_cert_file_arg, resolve_invite_code_source,
+    AclCheckOp, AclShowOp, CapabilitiesOp, CertInitOp, CertIssueOp, Config, DoctorOp, ExecRunOp,
+    ExecStdin, HostGetOp, HostListOp, IdentityExportOp, IdentityInitOp, InviteCodeSource, OpError,
+    Operation, Ops, SchemaOp, ServiceInstallOp, ServiceStatusOp, ServiceUninstallOp,
+    SessionAttachOp, SessionCloseOp, SessionGetOp, SessionListOp, SessionOpenOp, SessionReadOp,
+    SessionResizeOp, SessionWriteOp, TrustAcceptOp, TrustAddCaOp, TrustAddOp, TrustInviteOp,
+    TrustListOp, TrustRemoveOp, TrustRenameOp, TunnelCloseOp, TunnelDynamicOp, TunnelListOp,
+    TunnelOpenOp, VersionOp, cert_file_fingerprint_conflict, normalize_invite_code,
+    parse_dynamic_forwards, read_cert_file_arg, resolve_invite_code_source,
     trust::{ADDRESS_PORT_ASSUMED_NOTICE, normalize_peer_address, suggested_peer_label},
 };
 use qsh_proto::{
-    AclCheckReq, CapabilitiesReq, CertInitReq, CertIssueReq, DoctorReq, ErrorCode, ExecRunReq,
-    HostGetReq, IdentityExportReq, IdentityInitReq, SessionCloseReq, SessionGetReq, SessionListReq,
-    SessionOpenReq, SessionReadReq, SessionResizeReq, SessionWriteReq, TrustAcceptReq,
-    TrustAddCaReq, TrustAddReq, TrustInviteReq, TrustRenameReq, TunnelCloseReq, TunnelDynamicReq,
-    TunnelListReq, TunnelOpenReq,
+    AclCheckReq, AclShowReq, CapabilitiesReq, CertInitReq, CertIssueReq, DoctorReq, ErrorCode,
+    ExecRunReq, HostGetReq, IdentityExportReq, IdentityInitReq, SessionCloseReq, SessionGetReq,
+    SessionListReq, SessionOpenReq, SessionReadReq, SessionResizeReq, SessionWriteReq,
+    TrustAcceptReq, TrustAddCaReq, TrustAddReq, TrustInviteReq, TrustRenameReq, TunnelCloseReq,
+    TunnelDynamicReq, TunnelListReq, TunnelOpenReq,
 };
 use serde::Serialize;
 use tracing_subscriber::EnvFilter;
@@ -478,6 +478,15 @@ fn dispatch(cli: &Cli, ops: Ops) -> i32 {
                 owner_auth_path: args.owner_auth_path.clone(),
             }),
             human::print_acl_check,
+        ),
+        Command::Acl(AclCmd::Show(args)) => finish(
+            cli,
+            AclShowOp::COMMAND,
+            ops.acl_show(AclShowReq {
+                principal: args.principal.clone(),
+                auth_path: args.auth_path.clone(),
+            }),
+            human::print_acl_show,
         ),
         Command::Exec(args) => run_exec(cli, &ops, args),
         Command::Attach(AttachArgs {
@@ -1750,6 +1759,7 @@ fn command_name(cli: &Cli) -> &'static str {
         Command::Hosts => HostListOp::COMMAND,
         Command::Host(HostCmd::Get { .. }) => HostGetOp::COMMAND,
         Command::Acl(AclCmd::Check(_)) => AclCheckOp::COMMAND,
+        Command::Acl(AclCmd::Show(_)) => AclShowOp::COMMAND,
         Command::Exec(_) => ExecRunOp::COMMAND,
         Command::Attach(_) => SessionAttachOp::COMMAND,
         Command::Session(SessionCmd::Open(_)) => SessionOpenOp::COMMAND,

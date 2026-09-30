@@ -1,0 +1,36 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH qsh-acl-show 1  "show 0.3.0" 
+.SH NAME
+qsh\-acl\-show \- Summarize what this machine\*(Aqs own `acl.toml` grants one principal: the matching `[[acl]]` rows and the effective action set for an unowned resource, computed with the same evaluator enforcement uses. Read\-only and local only: never writes `acl.toml`, never reaches a remote peer (`docs/CLI.md` §6.19)
+.SH SYNOPSIS
+\fBqsh acl show\fR [\fB\-\-json\fR] [\fB\-\-auth\-path\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fB\-\-principal\fR> 
+.SH DESCRIPTION
+Summarize what this machine\*(Aqs own `acl.toml` grants one principal: the matching `[[acl]]` rows and the effective action set for an unowned resource, computed with the same evaluator enforcement uses. Read\-only and local only: never writes `acl.toml`, never reaches a remote peer (`docs/CLI.md` §6.19)
+.SH OPTIONS
+.TP
+\fB\-\-json\fR
+Emit a single `qsh.cli/v1` JSON envelope on stdout instead of human\-readable text
+.TP
+\fB\-\-principal\fR \fI<PRINCIPAL>\fR
+Principal string to summarize: `device:<name>` | `user:<name>` | `fp:sha256:<base64>` (`docs/PRD.md` §9). A shape outside this vocabulary is `INVALID_ARGUMENT`
+.TP
+\fB\-\-auth\-path\fR \fI<pin|ca>\fR
+Auth path the principal is assumed to have authenticated over. Omit to use `acl.toml`\*(Aqs own default (`"pin"`)
+.TP
+\fB\-\-jsonl\fR
+Emit newline\-delimited JSON on stdout (reserved for streaming commands; non\-streaming commands emit a single line, same as `\-\-json`)
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Increase diagnostic verbosity on stderr (`\-v` info, `\-vv` debug, `\-vvv` trace). Never affects stdout (`docs/CLI.md` §2.2)
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Suppress diagnostic output on stderr
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.TP
+\fB\-V\fR, \fB\-\-version\fR
+Print version
+.SH VERSION
+v0.3.0

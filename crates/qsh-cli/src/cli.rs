@@ -769,6 +769,13 @@ pub enum AclCmd {
     /// enforcement would decide, without a restart.
     /// Local only: never reaches a remote peer (`docs/CLI.md` §6.15).
     Check(AclCheckArgs),
+
+    /// Summarize what this machine's own `acl.toml` grants one principal:
+    /// the matching `[[acl]]` rows and the effective action set for an
+    /// unowned resource, computed with the same evaluator enforcement uses.
+    /// Read-only and local only: never writes `acl.toml`, never reaches a
+    /// remote peer (`docs/CLI.md` §6.19).
+    Show(AclShowArgs),
 }
 
 /// Arguments of `qsh acl check` (`docs/CLI.md` §6.15).
@@ -808,6 +815,23 @@ pub struct AclCheckArgs {
     /// clap usage error (exit `2`), not a silently-ignored no-op.
     #[arg(long = "owner-auth-path", value_name = "pin|ca", requires = "owner")]
     pub owner_auth_path: Option<String>,
+}
+
+/// Arguments of `qsh acl show` (`docs/CLI.md` §6.19). There is no
+/// `--resource` or `--owner` axis; `acl check` answers those questions
+/// (ADR-0025 decision 2).
+#[derive(Debug, Args)]
+pub struct AclShowArgs {
+    /// Principal string to summarize: `device:<name>` | `user:<name>` |
+    /// `fp:sha256:<base64>` (`docs/PRD.md` §9). A shape outside this
+    /// vocabulary is `INVALID_ARGUMENT`.
+    #[arg(long, value_name = "PRINCIPAL")]
+    pub principal: String,
+
+    /// Auth path the principal is assumed to have authenticated over.
+    /// Omit to use `acl.toml`'s own default (`"pin"`).
+    #[arg(long = "auth-path", value_name = "pin|ca")]
+    pub auth_path: Option<String>,
 }
 
 /// `qsh host …` subcommands (`docs/CLI.md` §6.1).

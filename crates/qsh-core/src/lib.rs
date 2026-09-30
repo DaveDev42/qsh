@@ -60,12 +60,12 @@ pub use ops::service::{
     SERVICE_UNSUPPORTED_PLATFORM, render_launchd_plist, render_systemd_unit,
 };
 pub use ops::{
-    AclCheckOp, AttachHandle, CapabilitiesOp, CertInitOp, CertIssueOp, DetachFlush, DoctorOp,
-    ExecRunOp, ExecRunOutput, ExecStdin, HostGetOp, HostListOp, HostRoute, INVITE_CODE_PROMPT,
-    INVITE_CODE_STDIN_MAX, IdentityExportOp, IdentityInitOp, InviteCodeSource, OpError, Operation,
-    Ops, RecoveryConfig, SchemaOp, ServiceInstallOp, ServiceStatusOp, ServiceUninstallOp,
-    SessionAttachOp, SessionAttachStream, SessionCloseOp, SessionGetOp, SessionListOp,
-    SessionOpenOp, SessionReadOp, SessionReadOutput, SessionReader, SessionResizeOp,
+    AclCheckOp, AclShowOp, AttachHandle, CapabilitiesOp, CertInitOp, CertIssueOp, DetachFlush,
+    DoctorOp, ExecRunOp, ExecRunOutput, ExecStdin, HostGetOp, HostListOp, HostRoute,
+    INVITE_CODE_PROMPT, INVITE_CODE_STDIN_MAX, IdentityExportOp, IdentityInitOp, InviteCodeSource,
+    OpError, Operation, Ops, RecoveryConfig, SchemaOp, ServiceInstallOp, ServiceStatusOp,
+    ServiceUninstallOp, SessionAttachOp, SessionAttachStream, SessionCloseOp, SessionGetOp,
+    SessionListOp, SessionOpenOp, SessionReadOp, SessionReadOutput, SessionReader, SessionResizeOp,
     SessionWriteOp, TrustAcceptOp, TrustAddCaOp, TrustAddOp, TrustInviteOp, TrustListOp,
     TrustRemoveOp, TrustRenameOp, TunnelCloseOp, TunnelDynamicOp, TunnelHold, TunnelListOp,
     TunnelOpenOp, VersionOp, cert_file_fingerprint_conflict, normalize_invite_code,
