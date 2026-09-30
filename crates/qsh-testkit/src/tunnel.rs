@@ -512,6 +512,65 @@ impl TunnelHarness {
         Ok(got)
     }
 
+    /// Whether `kind` is the OS reporting a reset (RST) connection: the
+    /// shape `abort_local`'s zero-linger close produces.
+    /// `ConnectionRefused` is deliberately not one: it means the listener
+    /// is gone.
+    pub fn is_reset_kind(kind: io::ErrorKind) -> bool {
+        matches!(
+            kind,
+            io::ErrorKind::ConnectionReset
+                | io::ErrorKind::BrokenPipe
+                | io::ErrorKind::ConnectionAborted
+        )
+    }
+
+    /// Connect to a bound forward whose peer aborts every connection and
+    /// require that the OS reports the reset, at whichever call sees it
+    /// first.
+    ///
+    /// The daemon accepts and aborts immediately, so under load the RST can
+    /// land before `connect` reports completion (macOS then returns
+    /// `ECONNRESET` from `connect` itself), or after the write, or only at
+    /// the read. Each of those is the same outcome. A graceful close (FIN),
+    /// a hang past `bound`, `ConnectionRefused` (listener gone) and any
+    /// other error all fail.
+    ///
+    /// Deliberately makes no `peer_addr`/`set_nodelay` call: on a socket
+    /// that is already reset those fail with `ENOTCONN`/`EINVAL`, which
+    /// would hide the reset behind an unrelated error.
+    pub async fn assert_connection_reset(
+        addr: SocketAddr,
+        payload: &[u8],
+        bound: std::time::Duration,
+    ) {
+        let connected = tokio::time::timeout(bound, TcpStream::connect(addr))
+            .await
+            .expect("connect must not hang");
+        let mut sock = match connected {
+            Ok(sock) => sock,
+            Err(err) if Self::is_reset_kind(err.kind()) => return,
+            Err(err) => panic!(
+                "the listener must stay bound and reset the connection, not fail differently \
+                 at connect: {err:?}"
+            ),
+        };
+        match sock.write_all(payload).await {
+            Ok(()) => {}
+            Err(err) if Self::is_reset_kind(err.kind()) => return,
+            Err(err) => panic!("write to a reset-bound listener failed differently: {err:?}"),
+        }
+        let mut buf = Vec::new();
+        match tokio::time::timeout(bound, sock.read_to_end(&mut buf)).await {
+            Ok(Err(err)) if Self::is_reset_kind(err.kind()) => {}
+            other => panic!(
+                "a connection accepted by a listener with nothing to relay to must be reset \
+                 (RST) by the OS, not merely closed gracefully or hung: read={other:?} \
+                 buf={buf:?}"
+            ),
+        }
+    }
+
     /// Stop the host and drain it.
     pub async fn shutdown(self) {
         self.host.shutdown().await;
