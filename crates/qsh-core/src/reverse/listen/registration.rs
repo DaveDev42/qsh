@@ -393,7 +393,7 @@ impl Listen {
         // the eventual `"lost"` line's `since_registered_ms`.
         let registered_at = std::time::Instant::now();
         // Why the loop below eventually breaks (issue #4 item 6,
-        // `docs/CLI.md` §6.13 bullet at :952). Deferred init, no `mut`:
+        // `docs/CLI.md` §6.13's `cause` bullet). Deferred init, no `mut`:
         // every arm that can `break` assigns this exactly once, first —
         // the only way to reach the read after the loop.
         let loss_cause;
@@ -884,7 +884,7 @@ impl Listen {
 
 /// Classify a [`ClientError`] from [`Listen::drive_registered_session`]'s
 /// own `session.next_control_message()` read into [`crate::reverse::ReconnectCause`]'s
-/// `peer_closed`/`path_dead`/`local` slice (issue #4 item 6) — the same
+/// `peer_closed`/`path_dead`/`idle_timeout`/`local` slice (issue #4 item 6) — the same
 /// judgment [`crate::reverse::classify_connection_error`] already applies to a raw
 /// `ConnectionError`, reached through whichever of `ClientError`'s two
 /// variants actually carries one on this client role's control stream.
@@ -911,47 +911,4 @@ fn classify_client_error(err: &ClientError) -> crate::reverse::ReconnectCause {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Mutation coverage for `classify_client_error`'s own three-way split
-    /// (issue #4 item 6): a real `ClientError` of each documented shape
-    /// classifies as the one `classify_client_error`'s doc comment claims.
-    #[test]
-    fn classify_client_error_maps_the_documented_vocabulary() {
-        // `Connection(ApplicationClosed)` with an ordinary close code (not
-        // `CLOSE_CODE_PATH_DEAD`) — a real, clean peer close.
-        let closed = ClientError::Connection(qsh_transport::ConnectionError::ApplicationClosed(
-            quinn::ApplicationClose {
-                error_code: quinn::VarInt::from_u32(0),
-                reason: bytes::Bytes::new(),
-            },
-        ));
-        assert_eq!(
-            classify_client_error(&closed),
-            crate::reverse::ReconnectCause::PeerClosed
-        );
-
-        // `Connection(TimedOut)` — quinn's own idle-timeout judgment on an
-        // otherwise-silent path, the same condition `PathWatch` exists to
-        // detect sooner.
-        let timed_out = ClientError::Connection(qsh_transport::ConnectionError::TimedOut);
-        assert_eq!(
-            classify_client_error(&timed_out),
-            crate::reverse::ReconnectCause::PathDead
-        );
-
-        // Everything else — a peer-sent wire `Error` reply, here — is
-        // `local`: none of it is a peer-initiated clean close or a
-        // PathWatch-class idle judgment.
-        let remote = ClientError::Remote {
-            code: qsh_proto::ErrorCode::PermissionDenied,
-            message: "denied".to_string(),
-            retryable: false,
-        };
-        assert_eq!(
-            classify_client_error(&remote),
-            crate::reverse::ReconnectCause::Local
-        );
-    }
-}
+mod tests;

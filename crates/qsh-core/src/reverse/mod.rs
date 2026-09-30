@@ -26,8 +26,8 @@ pub mod target;
 
 /// Fixed vocabulary for the `cause` field on the `lost`/`retry` (target
 /// `ReconnectEvent`) and `lost`/`denied` (controller `RegistrationEvent`)
-/// stderr diagnostic lines (`docs/CLI.md` §6.13 bullet at :952, issue #4
-/// item 6). Exactly these eight — never an address, token, or
+/// stderr diagnostic lines (`docs/CLI.md` §6.13's `cause` bullet, issue #4
+/// item 6). Exactly these nine — never an address, token, or
 /// peer-supplied error body (`target::ReconnectEvent`/
 /// `listen::RegistrationEvent`'s own `emit` never format one in). Both
 /// `Debug`, `PartialEq` for tests to assert the exact classification
@@ -57,16 +57,38 @@ pub(crate) enum ReconnectCause {
     RegistrationDenied,
     /// The peer closed an already-established connection cleanly.
     PeerClosed,
-    /// `PathWatch` declared the path dead, or the QUIC idle timeout fired
-    /// on an established connection.
+    /// `PathWatch` declared the path dead on this side, or the peer closed
+    /// the connection with [`CLOSE_CODE_PATH_DEAD`] because its own
+    /// `PathWatch` did.
     PathDead,
+    /// The QUIC idle timeout (`ConnectionError::TimedOut`) expired on an
+    /// established connection. Distinct from [`Self::PathDead`]: no
+    /// `PathWatch` verdict and no path-dead close frame was involved.
+    IdleTimeout,
     /// Anything originating on this side: a shutdown signal, or a local
     /// I/O error.
     Local,
 }
 
 impl ReconnectCause {
-    /// The exact static string emitted on the wire (never derived from
+    /// Every variant, for the documentation cross-check in this module's
+    /// tests. Test-only: no production code enumerates the vocabulary, so
+    /// a non-test definition would be dead code on the Windows lib build.
+    #[cfg(test)]
+    pub(crate) const ALL: [Self; 9] = [
+        Self::Resolve,
+        Self::DialTimeout,
+        Self::Refused,
+        Self::TlsRejected,
+        Self::RegistrationDenied,
+        Self::PeerClosed,
+        Self::PathDead,
+        Self::IdleTimeout,
+        Self::Local,
+    ];
+
+    /// The exact static string emitted on the `qsh::reverse` stderr
+    /// diagnostic line (never derived from
     /// `Debug` — this is the frozen vocabulary, `Debug`'s spelling is free
     /// to drift with the variant names).
     pub(crate) fn as_str(self) -> &'static str {
@@ -78,6 +100,7 @@ impl ReconnectCause {
             Self::RegistrationDenied => "registration_denied",
             Self::PeerClosed => "peer_closed",
             Self::PathDead => "path_dead",
+            Self::IdleTimeout => "idle_timeout",
             Self::Local => "local",
         }
     }
@@ -95,9 +118,9 @@ impl ReconnectCause {
 const CLOSE_CODE_PATH_DEAD: u32 = 0x1004;
 
 /// Classify a QUIC connection's death into [`ReconnectCause`]'s
-/// `peer_closed`/`path_dead`/`local` slice — the part of the vocabulary
-/// that applies once a connection was already established (dial-time
-/// failures go through `target`'s own `classify_dial_error`/
+/// `peer_closed`/`path_dead`/`idle_timeout`/`local` slice — the part of the
+/// vocabulary that applies once a connection was already established
+/// (dial-time failures go through `target`'s own `classify_dial_error`/
 /// `classify_hello_error` instead, which report `resolve`/`dial_timeout`/
 /// `refused`/`tls_rejected`/`registration_denied`). `ApplicationClosed`
 /// carries the close code the peer sent: when it is
@@ -105,14 +128,17 @@ const CLOSE_CODE_PATH_DEAD: u32 = 0x1004;
 /// before this side's did (the common asymmetric-loss/mobility case, the
 /// whole reason `PathWatch` exists), and that is `path_dead`, not a
 /// "clean, intentional end" `peer_closed` would otherwise imply; any other
-/// code is a real clean close. `TimedOut` is quinn's idle-timeout
-/// judgment on an otherwise-silent path, the same condition `PathWatch`
-/// exists to detect sooner, so it gets the same `path_dead` cause.
-/// Everything else — `LocallyClosed` (this side closed it, so `local` by
-/// definition), `ConnectionClosed`, `Reset`, `VersionMismatch`,
-/// `TransportError`, `CidsExhausted` — has no sharper bucket in this
-/// fixed eight-value vocabulary, so it falls to `local` as the catch-all
-/// "nothing peer-initiated or PathWatch-judged about this" bucket.
+/// code is a real clean close. `TimedOut` is quinn's idle-timeout expiry
+/// on an otherwise-silent path. It is `idle_timeout`, not `path_dead`
+/// (ADR-0022 결정 5·6): no `PathWatch` verdict and no path-dead close frame
+/// was involved, and on a live reverse path `PathWatch` declares death
+/// long before the 45 s idle timeout can expire, so the two causes tell an
+/// operator different things. Everything else — `LocallyClosed` (this side
+/// closed it, so `local` by definition), `ConnectionClosed`, `Reset`,
+/// `VersionMismatch`, `TransportError`, `CidsExhausted` — has no sharper
+/// bucket in this fixed nine-value vocabulary, so it falls to `local` as
+/// the catch-all "nothing peer-initiated or PathWatch-judged about this"
+/// bucket.
 pub(crate) fn classify_connection_error(err: &qsh_transport::ConnectionError) -> ReconnectCause {
     use qsh_transport::ConnectionError;
     match err {
@@ -122,7 +148,75 @@ pub(crate) fn classify_connection_error(err: &qsh_transport::ConnectionError) ->
             ReconnectCause::PathDead
         }
         ConnectionError::ApplicationClosed(_) => ReconnectCause::PeerClosed,
-        ConnectionError::TimedOut => ReconnectCause::PathDead,
+        ConnectionError::TimedOut => ReconnectCause::IdleTimeout,
         _ => ReconnectCause::Local,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn application_closed(code: u32) -> qsh_transport::ConnectionError {
+        qsh_transport::ConnectionError::ApplicationClosed(quinn::ApplicationClose {
+            error_code: quinn::VarInt::from_u32(code),
+            reason: bytes::Bytes::new(),
+        })
+    }
+
+    /// The three-way split of an established connection's death
+    /// (ADR-0022 결정 5·6): quinn's idle timeout, the path-dead close code,
+    /// and every other application close.
+    #[test]
+    fn classify_connection_error_separates_idle_timeout_from_path_dead_and_peer_closed() {
+        assert_eq!(
+            classify_connection_error(&qsh_transport::ConnectionError::TimedOut),
+            ReconnectCause::IdleTimeout
+        );
+        assert_eq!(
+            classify_connection_error(&application_closed(CLOSE_CODE_PATH_DEAD)),
+            ReconnectCause::PathDead
+        );
+        assert_eq!(
+            classify_connection_error(&application_closed(0)),
+            ReconnectCause::PeerClosed
+        );
+        assert_eq!(
+            classify_connection_error(&qsh_transport::ConnectionError::LocallyClosed),
+            ReconnectCause::Local
+        );
+    }
+
+    /// The `cause` value list in `docs/CLI.md` §6.13 and
+    /// [`ReconnectCause::ALL`] name the same set, in both directions.
+    #[test]
+    fn reconnect_cause_vocabulary_matches_cli_md_section_6_13() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/CLI.md");
+        let cli_md = std::fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
+        let bullet = cli_md
+            .lines()
+            .find(|line| line.contains("`cause` 필드(고정 "))
+            .expect("§6.13 must carry the `cause` field bullet");
+        let start = bullet.find("`cause` 필드(").expect("marker") + "`cause` 필드(".len();
+        let list = &bullet[start..];
+        // The value list runs up to and including the last value, `local`.
+        let list = &list[..list.find("`local`").expect("end of the value list") + "`local`".len()];
+        let documented: std::collections::BTreeSet<&str> = list
+            .split('`')
+            .enumerate()
+            .filter_map(|(i, part)| (i % 2 == 1).then_some(part))
+            .collect();
+        let coded: std::collections::BTreeSet<&str> =
+            ReconnectCause::ALL.iter().map(|c| c.as_str()).collect();
+        assert_eq!(coded.len(), ReconnectCause::ALL.len(), "duplicate as_str");
+        assert_eq!(
+            documented, coded,
+            "docs/CLI.md §6.13's `cause` list and ReconnectCause::ALL must name the same values"
+        );
+        assert!(
+            list.starts_with(&format!("고정 {}값", coded.len())),
+            "the documented count must match: {list}"
+        );
     }
 }

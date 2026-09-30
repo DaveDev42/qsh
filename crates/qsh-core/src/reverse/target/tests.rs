@@ -727,15 +727,16 @@ fn classify_target_connection_loss_maps_a_clean_end_of_stream_to_peer_closed() {
 fn classify_target_connection_loss_maps_a_connection_error_via_the_shared_judgment() {
     use crate::server::ConnError;
 
-    // `ConnectionError::TimedOut` — quinn's own idle-timeout judgment
-    // on an established connection — is `path_dead`, the same as a
-    // real `PathWatch` death (`classify_connection_error`'s own doc).
+    // `ConnectionError::TimedOut` — quinn's own idle-timeout expiry on an
+    // established connection — is `idle_timeout`, distinct from a
+    // `PathWatch` death's `path_dead` (`classify_connection_error`'s own
+    // doc, ADR-0022 결정 5·6).
     let timed_out: Result<Result<(), ConnError>, tokio::task::JoinError> = Ok(Err(
         ConnError::Connection(qsh_transport::ConnectionError::TimedOut),
     ));
     assert_eq!(
         classify_target_connection_loss(&timed_out),
-        ReconnectCause::PathDead
+        ReconnectCause::IdleTimeout
     );
 
     // `ConnectionError::LocallyClosed` — this side closed the
