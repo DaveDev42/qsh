@@ -12,9 +12,9 @@ use crate::types::{
     DoctorData, DynamicTunnel, ExecRunData, Host, HostListData, IdentityExportData,
     IdentityInitData, SchemaData, ServiceInstallData, ServiceStatusData, ServiceUninstallData,
     Session, SessionCloseData, SessionListData, SessionOpenData, SessionReadData,
-    SessionResizeData, SessionWriteData, TrustAcceptData, TrustAddCaData, TrustAddData,
-    TrustInviteData, TrustListData, TrustRemoveData, TrustRenameData, TrustSshPreviewData,
-    TunnelCloseData, TunnelListData, TunnelOpenData, VersionData,
+    SessionResizeData, SessionWriteData, SetupRunData, TrustAcceptData, TrustAddCaData,
+    TrustAddData, TrustInviteData, TrustListData, TrustRemoveData, TrustRenameData,
+    TrustSshPreviewData, TunnelCloseData, TunnelListData, TunnelOpenData, VersionData,
 };
 
 /// Every `docs/CLI.md` §2.4 dotted command name [`cli_v1_data_schema`] has
@@ -45,6 +45,7 @@ pub const CLI_V1_SCHEMA_COMMANDS: &[&str] = &[
     "session.read",
     "session.resize",
     "session.write",
+    "setup.run",
     "trust.accept",
     "trust.add",
     "trust.add_ca",
@@ -94,6 +95,7 @@ pub fn cli_v1_data_schema(command: &str) -> Option<Schema> {
         "session.read" => schema_for!(SessionReadData),
         "session.resize" => schema_for!(SessionResizeData),
         "session.write" => schema_for!(SessionWriteData),
+        "setup.run" => schema_for!(SetupRunData),
         "trust.accept" => schema_for!(TrustAcceptData),
         "trust.add" => schema_for!(TrustAddData),
         "trust.add_ca" => schema_for!(TrustAddCaData),

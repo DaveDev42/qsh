@@ -30,6 +30,7 @@ pub mod exec;
 pub mod host;
 pub mod service;
 pub mod session;
+pub mod setup;
 pub mod tunnel;
 
 mod identity;
@@ -50,7 +51,7 @@ pub use session::{
 pub use trust::{cert_file_fingerprint_conflict, read_cert_file_arg};
 pub(crate) use trust::{cert_pem_op_error, check_cert_pem_size, validate_peer_label_arg};
 
-pub use crate::setup::SetupRunOp;
+pub use setup::SetupRunOp;
 pub use tunnel::{
     TunnelCloseOp, TunnelDynamicOp, TunnelHold, TunnelListOp, TunnelOpenOp, parse_dynamic_forwards,
     parse_local_forwards, parse_remote_forwards,

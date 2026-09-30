@@ -257,6 +257,7 @@ qsh <command> --json            machine-readable result
 qsh schema --json               지원 schema와 capability 조회
 qsh doctor                      연결·인증·정책 진단
 qsh service install|uninstall|status  플랫폼 서비스 유닛 관리(launchd·systemd user)
+qsh setup host|client|listener  이 머신을 한 역할로 세우는 오케스트레이터(`acl.toml`은 쓰지 않고 넣을 행을 인쇄, 자동 신뢰 없음, `docs/CLI.md` §6.20)
 ```
 
 SSH 사용자에게 익숙한 `-L`, `-R`, `-D`, `-t`, `-T`, `-v`는 의미가 충돌하지 않는 범위에서 유지한다. `-D`(SOCKS5 dynamic forwarding)는 client 쪽 loopback listener가 SOCKS5 CONNECT마다 host에 `TCP_CONNECT` 스트림을 하나씩 열고, host는 그 스트림을 `forward.local`로 인가한다(ADR-0019).

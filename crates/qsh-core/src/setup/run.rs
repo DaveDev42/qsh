@@ -303,12 +303,9 @@ impl Ops {
         let name = pin_name(req);
         match id {
             SetupStepId::Identity => "qsh init".to_string(),
-            SetupStepId::ModeConfig => {
-                format!(
-                    "edit {}",
-                    self.paths().config_dir.join("config.toml").display()
-                )
-            }
+            // Relative on purpose: the location is a machine fact the
+            // human renderer prints, and a fixture must not embed it.
+            SetupStepId::ModeConfig => "edit config.toml".to_string(),
             SetupStepId::Acl => {
                 let first = required_actions(req).first().copied().unwrap_or("exec.run");
                 format!("qsh acl check --principal device:{name} --action {first}")
@@ -435,10 +432,6 @@ impl Ops {
             })?);
         }
         let loaded = results.first().is_some_and(|r| r.policy.loaded);
-        let path = results
-            .first()
-            .map(|r| r.policy.path.clone())
-            .unwrap_or_default();
         let denied: Vec<&str> = results
             .iter()
             .filter(|r| r.decision != "allow")
@@ -447,14 +440,13 @@ impl Ops {
 
         let mut problems: Vec<String> = Vec::new();
         if !loaded {
-            problems.push(format!(
-                "no usable acl.toml at {path}: every request is denied until it exists and \
-                 parses. Save the rows in `acl_rows` there."
+            problems.push(String::from(
+                "no usable acl.toml: every request is denied until it exists and parses. \
+                 Save the rows in `acl_rows` there (`policy.path` in the result names the file).",
             ));
         } else if !denied.is_empty() {
             problems.push(format!(
-                "acl.toml at {path} does not allow {principal} to: {}. Add the rows in \
-                 `acl_rows`.",
+                "acl.toml does not allow {principal} to: {}. Add the rows in `acl_rows`.",
                 denied.join(", ")
             ));
         }
@@ -863,17 +855,9 @@ fn assemble(req: &SetupRunReq, steps: Vec<SetupStep>) -> SetupRunData {
     let mut next: Vec<String> = Vec::new();
     for s in steps.iter().filter(|s| s.status == SetupStatus::Pending) {
         if s.id == SetupStepId::Acl {
-            let path = s
-                .result
-                .as_ref()
-                .and_then(|r| r.get(0))
-                .and_then(|r| r.get("policy"))
-                .and_then(|p| p.get("path"))
-                .and_then(Value::as_str)
-                .unwrap_or("acl.toml");
-            next.push(format!(
-                "save the rows in `acl_rows` to {path}, then run `qsh setup` again"
-            ));
+            next.push(
+                "save the rows in `acl_rows` to acl.toml, then run `qsh setup` again".to_string(),
+            );
         } else {
             next.push(s.command.clone());
         }

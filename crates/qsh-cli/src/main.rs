@@ -50,26 +50,27 @@ use qsh_core::{
     ExecStdin, HostGetOp, HostListOp, IdentityExportOp, IdentityInitOp, InviteCodeSource, OpError,
     Operation, Ops, SchemaOp, ServiceInstallOp, ServiceStatusOp, ServiceUninstallOp,
     SessionAttachOp, SessionCloseOp, SessionGetOp, SessionListOp, SessionOpenOp, SessionReadOp,
-    SessionResizeOp, SessionWriteOp, TrustAcceptOp, TrustAddCaOp, TrustAddOp, TrustInviteOp,
-    TrustListOp, TrustRemoveOp, TrustRenameOp, TrustSshPreviewOp, TunnelCloseOp, TunnelDynamicOp,
-    TunnelListOp, TunnelOpenOp, VersionOp, cert_file_fingerprint_conflict, normalize_invite_code,
-    parse_dynamic_forwards, read_cert_file_arg, resolve_invite_code_source,
+    SessionResizeOp, SessionWriteOp, SetupEnv, SetupRunOp, TrustAcceptOp, TrustAddCaOp, TrustAddOp,
+    TrustInviteOp, TrustListOp, TrustRemoveOp, TrustRenameOp, TrustSshPreviewOp, TunnelCloseOp,
+    TunnelDynamicOp, TunnelListOp, TunnelOpenOp, VersionOp, cert_file_fingerprint_conflict,
+    normalize_invite_code, parse_dynamic_forwards, read_cert_file_arg, resolve_invite_code_source,
     trust::{ADDRESS_PORT_ASSUMED_NOTICE, normalize_peer_address, suggested_peer_label},
 };
 use qsh_proto::{
     AclCheckReq, AclShowReq, CapabilitiesReq, CertInitReq, CertIssueReq, DoctorReq, ErrorCode,
     ExecRunReq, HostGetReq, IdentityExportReq, IdentityInitReq, SessionCloseReq, SessionGetReq,
-    SessionListReq, SessionOpenReq, SessionReadReq, SessionResizeReq, SessionWriteReq,
-    TrustAcceptReq, TrustAddCaReq, TrustAddReq, TrustInviteReq, TrustRenameReq, TrustSshPreviewReq,
-    TunnelCloseReq, TunnelDynamicReq, TunnelListReq, TunnelOpenReq,
+    SessionListReq, SessionOpenReq, SessionReadReq, SessionResizeReq, SessionWriteReq, SetupRole,
+    SetupRunReq, SetupStatus, SetupStepId, TrustAcceptReq, TrustAddCaReq, TrustAddReq,
+    TrustInviteReq, TrustRenameReq, TrustSshPreviewReq, TunnelCloseReq, TunnelDynamicReq,
+    TunnelListReq, TunnelOpenReq,
 };
 use serde::Serialize;
 use tracing_subscriber::EnvFilter;
 
 use cli::{
     AclCmd, AttachArgs, CertCmd, Cli, Command, DEFAULT_ESCAPE_CHAR, EscapeChar, ExecArgs, HostCmd,
-    IdentityCmd, PairCmd, ServiceCmd, SessionCmd, SessionReadArgs, SessionWriteArgs, TrustAddArgs,
-    TrustAddCaArgs, TrustCmd, TunnelCmd, TunnelOpenArgs,
+    IdentityCmd, PairCmd, ServiceCmd, SessionCmd, SessionReadArgs, SessionWriteArgs, SetupCmd,
+    TrustAddArgs, TrustAddCaArgs, TrustCmd, TunnelCmd, TunnelOpenArgs,
 };
 use render::{human, json, json::Envelope};
 
@@ -464,6 +465,7 @@ fn dispatch(cli: &Cli, ops: Ops) -> i32 {
             ops.cert_issue(CertIssueReq {}),
             human::print_cert_issue,
         ),
+        Command::Setup { role } => run_setup(cli, &ops, role),
         Command::Hosts => finish(
             cli,
             HostListOp::COMMAND,
@@ -1520,6 +1522,200 @@ fn run_trust_accept(
     })
 }
 
+/// The flags one `qsh setup` role line carried, before any prompt fills a
+/// gap (`docs/CLI.md` §6.20).
+struct SetupArgs {
+    role: Option<SetupRole>,
+    name: Option<String>,
+    address: Option<String>,
+    peer_cert: Option<String>,
+    code: Option<String>,
+    code_stdin: bool,
+    forward: bool,
+    service: bool,
+}
+
+fn setup_args(cmd: &Option<SetupCmd>) -> SetupArgs {
+    let mut args = SetupArgs {
+        role: None,
+        name: None,
+        address: None,
+        peer_cert: None,
+        code: None,
+        code_stdin: false,
+        forward: false,
+        service: false,
+    };
+    match cmd {
+        None => {}
+        Some(SetupCmd::Host {
+            peer,
+            to,
+            address,
+            peer_cert,
+            forward,
+            service,
+        }) => {
+            args.role = Some(if to.is_some() {
+                SetupRole::HostTo
+            } else {
+                SetupRole::Host
+            });
+            args.name = to.clone().or_else(|| peer.clone());
+            args.address = address.clone();
+            args.peer_cert = peer_cert.clone();
+            args.forward = *forward;
+            args.service = *service;
+        }
+        Some(SetupCmd::Client {
+            name,
+            address,
+            code,
+            code_stdin,
+            peer_cert,
+        }) => {
+            args.role = Some(SetupRole::Client);
+            args.name = name.clone();
+            args.address = address.clone();
+            args.code = code.clone();
+            args.code_stdin = *code_stdin;
+            args.peer_cert = peer_cert.clone();
+        }
+        Some(SetupCmd::Listener {
+            peer,
+            peer_cert,
+            service,
+        }) => {
+            args.role = Some(SetupRole::Listener);
+            args.name = peer.clone();
+            args.peer_cert = peer_cert.clone();
+            args.service = *service;
+        }
+    }
+    args
+}
+
+/// Ask one question on stderr and read one line from stdin. `None` on end
+/// of input or a read failure. Only called when [`run_setup`] decided the
+/// session is interactive.
+fn setup_ask(question: &str) -> Option<String> {
+    stderr_note!("{question}");
+    let mut line = String::new();
+    match io::stdin().read_line(&mut line) {
+        Ok(0) | Err(_) => None,
+        Ok(_) => Some(line.trim().to_string()),
+    }
+}
+
+fn setup_prompt_role() -> Option<SetupRole> {
+    let answer = setup_ask("qsh setup: role? [host / client / listener]")?;
+    match answer.to_ascii_lowercase().as_str() {
+        "host" | "h" => Some(SetupRole::Host),
+        "client" | "c" => Some(SetupRole::Client),
+        "listener" | "l" => Some(SetupRole::Listener),
+        _ => None,
+    }
+}
+
+/// `qsh setup` (`docs/CLI.md` §6.20, ADR-0024 결정 7). This function only
+/// collects inputs and calls `Ops::setup_run`; every decision about what a
+/// step needs lives in `qsh-core`. Prompts are opened only on an
+/// interactive terminal in human mode; anything missing otherwise is left
+/// out of the request and comes back as INVALID_ARGUMENT.
+fn run_setup(cli: &Cli, ops: &Ops, cmd: &Option<SetupCmd>) -> i32 {
+    let args = setup_args(cmd);
+    let cert_from_stdin = args.peer_cert.as_deref() == Some("-");
+    let interactive = !cli.wants_json() && io::stdin().is_terminal() && !cert_from_stdin;
+    let machine = cli.wants_json();
+    let command = SetupRunOp::COMMAND;
+
+    let role = match args.role {
+        Some(role) => role,
+        None => match interactive.then(setup_prompt_role).flatten() {
+            Some(role) => role,
+            None => {
+                return report_error(
+                    cli,
+                    command,
+                    &OpError::new(
+                        ErrorCode::InvalidArgument,
+                        "qsh setup needs a role: host, client or listener",
+                    )
+                    .with_retryable(false),
+                );
+            }
+        },
+    };
+
+    let mut name = args.name;
+    if name.is_none() && interactive {
+        let question = match role {
+            SetupRole::HostTo => "qsh setup: reverse-listener alias (--to)?",
+            SetupRole::Client => "qsh setup: name to pin the host under?",
+            _ => "qsh setup: the peer's trust-store name (--peer)?",
+        };
+        name = setup_ask(question).filter(|n| !n.is_empty());
+    }
+
+    let peer_cert_pem = match args.peer_cert.as_deref().map(read_cert_arg).transpose() {
+        Ok(pem) => pem,
+        Err(err) => return report_error(cli, command, &err),
+    };
+
+    let mut code = None;
+    if role == SetupRole::Client
+        && peer_cert_pem.is_none()
+        && (args.code.is_some() || args.code_stdin || interactive)
+    {
+        match invite_code(args.code, args.code_stdin, machine) {
+            Ok(c) => code = Some(c),
+            Err(err) => return report_error(cli, command, &err),
+        }
+    }
+
+    let mut service = args.service;
+    if !service && interactive && role != SetupRole::Client {
+        service = setup_ask("qsh setup: also write the service unit file? [y/N]")
+            .is_some_and(|a| matches!(a.to_ascii_lowercase().as_str(), "y" | "yes"));
+    }
+
+    let req = SetupRunReq {
+        role,
+        name,
+        address: args.address,
+        peer_cert_pem,
+        code,
+        forward: args.forward,
+        service,
+    };
+
+    loop {
+        let result = ops.setup_run(&req, &SetupEnv::real());
+        let acl_pending = interactive
+            && result.as_ref().is_ok_and(|data| {
+                data.steps
+                    .iter()
+                    .any(|s| s.id == SetupStepId::Acl && s.status == SetupStatus::Pending)
+            });
+        if !acl_pending {
+            return finish(cli, command, result, human::print_setup_run);
+        }
+        if let Ok(data) = &result
+            && let Err(err) = human::print_setup_run(data)
+        {
+            stderr_note!("qsh: failed to write output: {err}");
+            return EXIT_IO_FAILURE;
+        }
+        let answer = setup_ask(
+            "qsh setup: save the rows above to acl.toml, then press Enter to check again (q to stop)",
+        );
+        match answer {
+            Some(a) if !a.eq_ignore_ascii_case("q") => continue,
+            _ => return 0,
+        }
+    }
+}
+
 /// `qsh pair invite` and its hidden pre-rename spelling `qsh trust invite`
 /// (ADR-0012 결정 3/4) — one function, so the two dotted-name spellings
 /// can never drift apart in behavior.
@@ -1767,6 +1963,7 @@ fn command_name(cli: &Cli) -> &'static str {
         Command::Pair(PairCmd::Accept { .. }) => TrustAcceptOp::COMMAND,
         Command::Cert(CertCmd::Init) => CertInitOp::COMMAND,
         Command::Cert(CertCmd::Issue) => CertIssueOp::COMMAND,
+        Command::Setup { .. } => SetupRunOp::COMMAND,
         Command::Hosts => HostListOp::COMMAND,
         Command::Host(HostCmd::Get { .. }) => HostGetOp::COMMAND,
         Command::Acl(AclCmd::Check(_)) => AclCheckOp::COMMAND,

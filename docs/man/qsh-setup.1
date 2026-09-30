@@ -1,0 +1,40 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH qsh-setup 1  "setup 0.3.0" 
+.SH NAME
+qsh\-setup \- Set this machine up for one role, step by step, using only the commands you could run yourself (ADR\-0024, `docs/CLI.md` §6.20). Prints the `[[acl]]` rows to add and never writes `acl.toml`; never starts `qsh serve`, `qsh listen` or a session
+.SH SYNOPSIS
+\fBqsh setup\fR [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] [\fIsubcommands\fR]
+.SH DESCRIPTION
+Set this machine up for one role, step by step, using only the commands you could run yourself (ADR\-0024, `docs/CLI.md` §6.20). Prints the `[[acl]]` rows to add and never writes `acl.toml`; never starts `qsh serve`, `qsh listen` or a session
+.SH OPTIONS
+.TP
+\fB\-\-json\fR
+Emit a single `qsh.cli/v1` JSON envelope on stdout instead of human\-readable text
+.TP
+\fB\-\-jsonl\fR
+Emit newline\-delimited JSON on stdout (reserved for streaming commands; non\-streaming commands emit a single line, same as `\-\-json`)
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Increase diagnostic verbosity on stderr (`\-v` info, `\-vv` debug, `\-vvv` trace). Never affects stdout (`docs/CLI.md` §2.2)
+.TP
+\fB\-q\fR, \fB\-\-quiet\fR
+Suppress diagnostic output on stderr
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.TP
+\fB\-V\fR, \fB\-\-version\fR
+Print version
+.SH SUBCOMMANDS
+.TP
+qsh\-setup\-host(1)
+This machine runs `qsh serve` (`\-\-peer`) or `qsh serve \-\-to` (`\-\-to` with `\-\-address`)
+.TP
+qsh\-setup\-client(1)
+This machine connects to a host with `qsh <name>`
+.TP
+qsh\-setup\-listener(1)
+This machine runs `qsh listen` for a reverse peer
+.SH VERSION
+v0.3.0

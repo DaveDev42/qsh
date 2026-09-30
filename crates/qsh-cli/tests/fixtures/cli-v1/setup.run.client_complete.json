@@ -1,0 +1,50 @@
+{
+  "command": "setup.run",
+  "data": {
+    "complete": true,
+    "next": [
+      "qsh laptop"
+    ],
+    "role": "client",
+    "steps": [
+      {
+        "command": "qsh init",
+        "id": "identity",
+        "result": {
+          "config_dir": "<config_dir>",
+          "created": true,
+          "device_id": "<device_id>",
+          "fingerprint": "<fingerprint>",
+          "key_store": "file"
+        },
+        "status": "done"
+      },
+      {
+        "command": "qsh trust add laptop --cert-file <peer.pem> --address host.example:4433",
+        "id": "pin_cert",
+        "result": {
+          "created": true,
+          "peer": {
+            "added_at": "<timestamp>",
+            "address": "<address>",
+            "fingerprint": "<fingerprint>",
+            "name": "laptop"
+          }
+        },
+        "status": "done"
+      },
+      {
+        "command": "qsh doctor",
+        "detail": "overall: <overall>",
+        "id": "doctor",
+        "result": {
+          "overall": "<overall>"
+        },
+        "status": "done"
+      }
+    ]
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}

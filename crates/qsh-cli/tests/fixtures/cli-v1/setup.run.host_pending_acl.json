@@ -1,0 +1,114 @@
+{
+  "command": "setup.run",
+  "data": {
+    "acl_rows": "[[acl]]\nprincipal = \"device:laptop\"\nallow = [\"exec.run\", \"session.open\", \"session.list\", \"session.attach\", \"session.control\"]\n",
+    "complete": false,
+    "next": [
+      "save the rows in `acl_rows` to acl.toml, then run `qsh setup` again"
+    ],
+    "role": "host",
+    "steps": [
+      {
+        "command": "qsh init",
+        "id": "identity",
+        "result": {
+          "config_dir": "<config_dir>",
+          "created": true,
+          "device_id": "<device_id>",
+          "fingerprint": "<fingerprint>",
+          "key_store": "file"
+        },
+        "status": "done"
+      },
+      {
+        "command": "edit config.toml",
+        "id": "mode_config",
+        "status": "already"
+      },
+      {
+        "command": "qsh acl check --principal device:laptop --action exec.run",
+        "detail": "no usable acl.toml: every request is denied until it exists and parses. Save the rows in `acl_rows` there (`policy.path` in the result names the file).",
+        "id": "acl",
+        "result": [
+          {
+            "action": "exec.run",
+            "auth_path": "pin",
+            "decision": "deny",
+            "policy": {
+              "loaded": false,
+              "path": "<path>",
+              "rules": 0
+            },
+            "principal": "device:laptop"
+          },
+          {
+            "action": "session.open",
+            "auth_path": "pin",
+            "decision": "deny",
+            "policy": {
+              "loaded": false,
+              "path": "<path>",
+              "rules": 0
+            },
+            "principal": "device:laptop"
+          },
+          {
+            "action": "session.list",
+            "auth_path": "pin",
+            "decision": "deny",
+            "policy": {
+              "loaded": false,
+              "path": "<path>",
+              "rules": 0
+            },
+            "principal": "device:laptop"
+          },
+          {
+            "action": "session.attach",
+            "auth_path": "pin",
+            "decision": "deny",
+            "policy": {
+              "loaded": false,
+              "path": "<path>",
+              "rules": 0
+            },
+            "principal": "device:laptop"
+          },
+          {
+            "action": "session.control",
+            "auth_path": "pin",
+            "decision": "deny",
+            "policy": {
+              "loaded": false,
+              "path": "<path>",
+              "rules": 0
+            },
+            "principal": "device:laptop"
+          }
+        ],
+        "status": "pending"
+      },
+      {
+        "command": "qsh service install",
+        "detail": "waiting on an earlier step that is still pending",
+        "id": "service",
+        "status": "blocked"
+      },
+      {
+        "command": "qsh pair invite --as laptop",
+        "detail": "waiting on an earlier step that is still pending",
+        "id": "invite",
+        "status": "blocked"
+      },
+      {
+        "command": "qsh doctor",
+        "detail": "waiting on an earlier step that is still pending",
+        "id": "doctor",
+        "status": "blocked"
+      }
+    ]
+  },
+  "ok": true,
+  "request_id": "<request_id>",
+  "schema": "qsh.cli/v1"
+}
