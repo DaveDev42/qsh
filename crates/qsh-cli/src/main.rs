@@ -204,6 +204,12 @@ fn init_tracing(cli: &Cli) {
     // one-line JSON, visible at default verbosity, off under `--quiet`.
     let supervise_target = qsh_core::tunnel::supervise::TARGET;
     let supervise_default = format!("{default},{supervise_target}=info");
+    // Target `qsh::lifecycle` (`listening`/`shutting_down`/`tunnel_opened`/
+    // `tunnel_ended`, `docs/CLI.md` §6.12-§6.14, ADR-0023 decision 21): the
+    // same promise again, one-line JSON at default verbosity, off under
+    // `--quiet`, next to human lines whose bytes stay as they were.
+    let lifecycle_target = qsh_core::lifecycle::TARGET;
+    let lifecycle_default = format!("{default},{lifecycle_target}=info");
     let human = tracing_subscriber::fmt::layer()
         .with_writer(|| LossyStderr)
         .with_target(false)
@@ -212,6 +218,7 @@ fn init_tracing(cli: &Cli) {
             meta.target() != qsh_core::telemetry::TARGET
                 && meta.target() != qsh_core::reverse::listen::TARGET
                 && meta.target() != qsh_core::tunnel::supervise::TARGET
+                && meta.target() != qsh_core::lifecycle::TARGET
         }));
     let recovery_enabled = !cli.quiet;
     let recovery = RecoveryLayer(StderrLines)
@@ -231,11 +238,18 @@ fn init_tracing(cli: &Cli) {
         .with_filter(tracing_subscriber::filter::filter_fn(move |meta| {
             supervise_enabled && meta.target() == supervise_target
         }));
+    let lifecycle_enabled = !cli.quiet;
+    let lifecycle = RecoveryLayer(StderrLines)
+        .with_filter(env_filter(spec, &lifecycle_default))
+        .with_filter(tracing_subscriber::filter::filter_fn(move |meta| {
+            lifecycle_enabled && meta.target() == lifecycle_target
+        }));
     tracing_subscriber::registry()
         .with(human)
         .with(recovery)
         .with(reverse)
         .with(supervise)
+        .with(lifecycle)
         .init();
 }
 
@@ -966,6 +980,7 @@ fn run_tunnel_open(cli: &Cli, ops: &Ops, args: &TunnelOpenArgs) -> i32 {
         stderr_note!("qsh: failed to write output: {err}");
         return EXIT_IO_FAILURE;
     }
+    hold.announce_opened();
     stderr_note!("qsh tunnel open: holding; press Ctrl-C to close");
     hold_tunnel(hold, shutdown)
 }
@@ -1029,6 +1044,7 @@ fn run_tunnel_open_dynamic(cli: &Cli, ops: &Ops, args: &TunnelOpenArgs) -> i32 {
         stderr_note!("qsh: failed to write output: {err}");
         return EXIT_IO_FAILURE;
     }
+    hold.announce_opened();
     stderr_note!("qsh tunnel open: holding; press Ctrl-C to close");
     hold_tunnel(hold, shutdown)
 }
@@ -1113,6 +1129,7 @@ fn hold_tunnel(hold: qsh_core::TunnelHold, shutdown: Option<TunnelShutdown>) -> 
         }
         None => {
             stderr_note!("qsh tunnel open: shutting down");
+            qsh_core::lifecycle::shutting_down(qsh_core::lifecycle::Process::Tunnel);
             0
         }
     }
@@ -1202,6 +1219,7 @@ fn run_serve_inbound(ops: &Ops, config: &Config, bind: SocketAddr) -> i32 {
             bind,
             |addr| {
                 stderr_note!("qsh serve: listening on {addr}");
+                qsh_core::lifecycle::listening(qsh_core::lifecycle::Process::Serve);
                 stderr_note!("qsh serve: identity {device_id} fingerprint {fingerprint}");
             },
             // `PLAN.md` M5 Step 6: `acl.toml` policy loads once, here, at
@@ -1227,6 +1245,7 @@ fn run_serve_inbound(ops: &Ops, config: &Config, bind: SocketAddr) -> i32 {
     match result {
         Ok(()) => {
             stderr_note!("qsh serve: shutting down");
+            qsh_core::lifecycle::shutting_down(qsh_core::lifecycle::Process::Serve);
             0
         }
         Err(err) => report_long_running_setup_error(SERVE_MODE, &err),
@@ -1290,6 +1309,7 @@ fn run_listen(ops: &Ops, bind: Option<&str>) -> i32 {
             bind,
             |addr| {
                 stderr_note!("qsh listen: listening on {addr}");
+                qsh_core::lifecycle::listening(qsh_core::lifecycle::Process::Listen);
                 // `docs/CLI.md` §6.13's "Controller reachability 요구":
                 // reverse only makes the *target* reachable through NAT —
                 // this controller must still be dialable at `addr` by
@@ -1320,6 +1340,7 @@ fn run_listen(ops: &Ops, bind: Option<&str>) -> i32 {
     match result {
         Ok(()) => {
             stderr_note!("qsh listen: shutting down");
+            qsh_core::lifecycle::shutting_down(qsh_core::lifecycle::Process::Listen);
             0
         }
         Err(err) => report_long_running_setup_error(LISTEN_MODE, &err),
@@ -1353,6 +1374,10 @@ fn run_reverse(ops: &Ops, mode: &'static str, controller: &str, offered_name: Op
             .enable_all()
             .build()
             .map_err(|err| OpError::new(ErrorCode::Internal, format!("runtime: {err}")))?;
+        // Registered now, not on the future's first poll: the `listening`
+        // lifecycle record fires from `on_runtime`, and a supervisor that
+        // signals the process on seeing it must find the handlers in place.
+        let shutdown = arm_shutdown_signal(&runtime);
         runtime.block_on(qsh_core::reverse::target::run_reverse_observed(
             ops.paths(),
             &config,
@@ -1368,6 +1393,9 @@ fn run_reverse(ops: &Ops, mode: &'static str, controller: &str, offered_name: Op
                 if let Some(diag) = &runtime.policy_diagnostic {
                     stderr_note!("qsh {mode}: {}", diag.render());
                 }
+                // A target has no `listening` line of its own; this is the
+                // moment its runtime is up and the first dial starts.
+                qsh_core::lifecycle::listening(qsh_core::lifecycle::Process::ServeTo);
             },
             // `qsh_core::doctor::CONTROLLER_UNREACHABLE` fires at most
             // once per process (`run_reverse_observed`'s own docs — the
@@ -1380,16 +1408,42 @@ fn run_reverse(ops: &Ops, mode: &'static str, controller: &str, offered_name: Op
                 stderr_note!("qsh {mode}: {}", diag.message);
                 stderr_note!("qsh {mode}: {}", diag.remedy);
             },
-            shutdown_signal(),
+            shutdown,
         ))
     })();
     match result {
         Ok(()) => {
             stderr_note!("qsh {mode}: shutting down");
+            qsh_core::lifecycle::shutting_down(qsh_core::lifecycle::Process::ServeTo);
             0
         }
         Err(err) => report_long_running_setup_error(mode, &err),
     }
+}
+
+/// [`shutdown_signal`] with the Unix handlers registered on `runtime` at
+/// call time instead of at the first poll.
+fn arm_shutdown_signal(
+    runtime: &tokio::runtime::Runtime,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let _guard = runtime.enter();
+        if let (Ok(mut interrupt), Ok(mut terminate)) = (
+            signal(SignalKind::interrupt()),
+            signal(SignalKind::terminate()),
+        ) {
+            return Box::pin(async move {
+                tokio::select! {
+                    _ = interrupt.recv() => {}
+                    _ = terminate.recv() => {}
+                }
+            });
+        }
+    }
+    let _ = runtime;
+    Box::pin(shutdown_signal())
 }
 
 /// Resolves on SIGINT (Ctrl-C) or, on Unix, SIGTERM.

@@ -2053,7 +2053,7 @@ async fn local_forward_primitive_over_reverse_survives_a_registration_drop_and_s
 /// tunnel open -L` process takes, not `LocalForwardHandle` directly.
 /// `-L` over a reverse route does NOT survive a registration drop at this
 /// level: `TunnelHold::hold` (`crates/qsh-core/src/ops/tunnel.rs`) races
-/// the listener against `Connected::wait_dead` on the `LOCAL_CONTROL`
+/// the listener against `Connected::wait_dead_with_cause` on the `LOCAL_CONTROL`
 /// conduit, so the moment the registration goes stale and the daemon
 /// ends that conduit, `hold()` returns `CONNECTION_FAILED` — exactly the
 /// same "the process holding a tunnel dies when its connection dies"
