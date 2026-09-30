@@ -38,6 +38,7 @@ pub mod loopback;
 pub mod net_probe;
 pub mod pair;
 pub mod pairing;
+pub mod perf;
 pub mod procstat;
 pub mod raw_quic;
 pub mod reverse;

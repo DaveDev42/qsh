@@ -56,7 +56,7 @@ Nextest gives each test its own process; PTY/termios and other global-state test
 - `crates/qsh-core` — ALL business logic: typed `Ops` facade, session broker, ACL choke point, identity/trust.
 - `crates/qsh-cli` (package `qsh-cli`, binary `qsh`) — thin frontends only: clap, human/JSON/JSONL renderers, interactive TUI.
 - `crates/qsh-testkit` — test harness.
-- `xtask` — arch-lint and the man-page generator (`cargo xtask arch|man`)
+- `xtask` — arch-lint, the man-page generator, and the nightly perf judge (`cargo xtask arch|man|perf-judge`)
 
 ## Hard architecture rules (docs/design/architecture.md §1, enforced by xtask arch)
 

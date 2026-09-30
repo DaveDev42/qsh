@@ -3,6 +3,7 @@
 
 mod arch;
 mod man;
+mod perf;
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -35,13 +36,28 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
+        Some("perf-judge") => match perf::run(args) {
+            Ok(verdict) => {
+                println!("{verdict}");
+                if verdict.is_red() {
+                    ExitCode::FAILURE
+                } else {
+                    ExitCode::SUCCESS
+                }
+            }
+            Err(err) => {
+                eprintln!("xtask perf-judge: {err:#}");
+                // Exit 2 keeps a judge failure apart from a red verdict (1).
+                ExitCode::from(2)
+            }
+        },
         Some(other) => {
             eprintln!("xtask: unknown subcommand '{other}'");
-            eprintln!("usage: cargo xtask arch|man");
+            eprintln!("usage: cargo xtask arch|man|perf-judge");
             ExitCode::FAILURE
         }
         None => {
-            eprintln!("usage: cargo xtask arch|man");
+            eprintln!("usage: cargo xtask arch|man|perf-judge");
             ExitCode::FAILURE
         }
     }

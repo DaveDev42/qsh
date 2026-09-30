@@ -11,6 +11,9 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 toml.workspace = true
+# `cargo xtask perf-judge` reads and writes the perf.jsonl points.
+serde.workspace = true
+serde_json.workspace = true
 clap.workspace = true
 # `cargo xtask man` (docs/man/ generator) — MIT OR Apache-2.0, allowed by
 # deny.toml's [licenses].allow. Used by exactly this one crate, so declared

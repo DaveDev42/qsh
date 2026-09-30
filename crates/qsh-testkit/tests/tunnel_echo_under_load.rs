@@ -152,6 +152,7 @@ use qsh_core::client::AttachEvent;
 use qsh_core::tunnel::LocalForwardHandle;
 use qsh_proto::wire;
 use qsh_testkit::loopback::LoopbackHarness;
+use qsh_testkit::perf;
 use qsh_testkit::tunnel::{FloodServer, ephemeral_local_spec};
 use tokio::io::AsyncReadExt as _;
 use tokio::net::TcpStream;
@@ -286,7 +287,13 @@ async fn tunnel_saturated_pty_echo_p95_under_measured_rtt_plus_10ms() {
         return;
     }
 
-    let h = LoopbackHarness::start().await;
+    // `QSH_PERF_INJECT_DELAY_MS` (nightly perf job only, `perf.rs`): put a
+    // fixed one-way delay on the loopback path through the chaos proxy.
+    let inject_ms = perf::inject_delay_ms();
+    let h = match perf::inject_policy(inject_ms) {
+        Some(policy) => LoopbackHarness::start_chaotic(policy).await,
+        None => LoopbackHarness::start().await,
+    };
     let mut session = h.session().await;
     let connection = session.connection().clone();
 
@@ -334,6 +341,7 @@ async fn tunnel_saturated_pty_echo_p95_under_measured_rtt_plus_10ms() {
 
     let mut margins_ms = Vec::new();
     let mut clamped_zero = 0usize;
+    let mut rtts_ms = Vec::new();
     let deadline = Instant::now() + MEASUREMENT_DURATION;
     let mut next_round: u32 = 0;
     while Instant::now() < deadline {
@@ -374,6 +382,7 @@ async fn tunnel_saturated_pty_echo_p95_under_measured_rtt_plus_10ms() {
         );
 
         let rtt = connection.quinn().stats().path.rtt;
+        rtts_ms.push(rtt.as_secs_f64() * 1000.0);
         let elapsed = recv_at.saturating_duration_since(send_at);
         let margin = match elapsed.checked_sub(rtt) {
             Some(margin) => margin,
@@ -411,6 +420,21 @@ async fn tunnel_saturated_pty_echo_p95_under_measured_rtt_plus_10ms() {
     // DoD 4's acceptance-job log is the record of the criterion
     // (`PLAN.md` M4 Step 7 (d)) — print on success too, not just failure.
     eprintln!("tunnel_saturated_pty_echo_p95_under_measured_rtt_plus_10ms: {report}");
+    // `QSH_PERF_OUT`: one line for the nightly trend, written before any
+    // assertion so a red run is still recorded. No-op when unset. `rtt_ms`
+    // is the median of the per-round live RTT estimates.
+    perf::record(&serde_json::json!({
+        "test": "tunnel_echo_under_load",
+        "echo_p95_ms": p95,
+        "rtt_ms": percentile(rtts_ms, 0.5),
+        "inject_delay_ms": inject_ms,
+    }));
+    if inject_ms > 0 {
+        // A deliberately slowed run is judged by `cargo xtask perf-judge`
+        // against the trend, not by the absolute gates.
+        eprintln!("injected delay {inject_ms}ms: p95 and sample-count gates not applied");
+        return;
+    }
     assert!(
         rounds >= MIN_SAMPLES,
         "M4 DoD 4 harness fault: only {rounds} echo rounds fit in {MEASUREMENT_DURATION:?} (need \
