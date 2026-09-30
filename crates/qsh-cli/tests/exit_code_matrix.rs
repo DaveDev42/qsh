@@ -443,6 +443,32 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
             outcome: Outcome::Usage,
         },
         Case {
+            // `docs/CLI.md` §6.20, ADR-0024 decision 2: an invite code and
+            // `--peer-cert` are two different pin means, so giving both is
+            // a clap usage error, not an `INVALID_ARGUMENT` op error.
+            name: "setup client: code and --peer-cert together",
+            sandbox: &fleet.client,
+            args: &[
+                "setup",
+                "client",
+                "laptop",
+                "abcd-efgh-jkmn-pqrs-tvwx-yz23-4567-89ab",
+                "--peer-cert",
+                "peer.pem",
+            ],
+            outcome: Outcome::Usage,
+        },
+        Case {
+            // ADR-0024 decision 7: a missing required input is not a clap
+            // error. No role given in machine mode, and in human mode the
+            // matrix runs without a terminal, so both are
+            // `INVALID_ARGUMENT` before any step runs.
+            name: "setup: no role",
+            sandbox: &fleet.client,
+            args: &["setup"],
+            outcome: Outcome::Fails("INVALID_ARGUMENT"),
+        },
+        Case {
             // `PLAN.md` M5 Step 7 (c): a name outside `Action::ALL`'s
             // vocabulary is `INVALID_ARGUMENT` in both output modes — the
             // deliberate deviation from the Step 7 draft's literal "exit

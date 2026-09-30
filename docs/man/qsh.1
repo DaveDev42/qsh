@@ -87,6 +87,9 @@ Manage the private CA (`docs/adr/0008\-private\-ca\-cert\-issuance.md`)
 qsh\-acl(1)
 Inspect the ACL policy (`docs/CLI.md` §6.15)
 .TP
+qsh\-setup(1)
+Set this machine up for one role, step by step, using only the commands you could run yourself (ADR\-0024, `docs/CLI.md` §6.20). Prints the `[[acl]]` rows to add and never writes `acl.toml`; never starts `qsh serve`, `qsh listen` or a session
+.TP
 qsh\-hosts(1)
 List every host visible to this machine: trust\-store\-pinned forward hosts and this machine\*(Aqs live reverse registrations, together (`docs/CLI.md` §6.1). Never dials
 .TP

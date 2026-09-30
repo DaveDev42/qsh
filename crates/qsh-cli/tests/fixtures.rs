@@ -157,6 +157,10 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "service.install.json",
     "service.status.json",
     "service.uninstall.json",
+    "setup.run.host_pending_acl.json",
+    "setup.run.client_complete.json",
+    "setup.run.listener_pending_acl.json",
+    "error.INVALID_ARGUMENT.setup_missing_input.json",
 ];
 
 // ---------------------------------------------------------------------------
@@ -541,6 +545,107 @@ fn golden_acl_show_fixtures() {
     assert_eq!(code, 0, "{no_policy}");
     assert_eq!(no_policy["data"]["policy"]["loaded"], false, "{no_policy}");
     check("acl.show.no_policy.json", no_policy);
+}
+
+/// `setup run` (`docs/CLI.md` §6.20, ADR-0024): three roles and the input
+/// error. Every sandbox pins its key store to `file` in `config.toml`, so
+/// the run never reaches the OS keychain. Step commands carry no absolute
+/// path (the acl.toml path is only in `steps[acl].result[].policy.path`,
+/// which `normalize` masks), so the fixtures are deterministic.
+#[test]
+fn golden_setup_run_fixtures() {
+    let peer = Sandbox::initialized();
+    let (code, exported) = peer.json(&["identity", "export", "--json"]);
+    assert_eq!(code, 0, "{exported}");
+    let cert_pem = exported["data"]["cert_pem"]
+        .as_str()
+        .expect("identity export carries cert_pem")
+        .to_string();
+
+    let with_config = |extra: &str| {
+        let sandbox = Sandbox::new();
+        std::fs::write(
+            sandbox.config_dir().join("config.toml"),
+            format!("[identity]\nkey_store = \"file\"\n{extra}"),
+        )
+        .expect("write config.toml");
+        std::fs::write(sandbox.home_dir().join("peer.pem"), &cert_pem).expect("write peer cert");
+        sandbox
+    };
+
+    let host = with_config("");
+    let (code, host_run) = host.json(&["setup", "host", "--peer", "laptop", "--json"]);
+    assert_eq!(code, 0, "{host_run}");
+    assert_eq!(host_run["data"]["complete"], false, "{host_run}");
+    check("setup.run.host_pending_acl.json", host_run);
+
+    let listener = with_config("[listen]\nbind = \"[::]:4433\"\n");
+    let cert_path = listener.home_dir().join("peer.pem");
+    let (code, listener_run) = listener.json(&[
+        "setup",
+        "listener",
+        "--peer",
+        "macmini",
+        "--peer-cert",
+        cert_path.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{listener_run}");
+    assert_eq!(listener_run["data"]["complete"], false, "{listener_run}");
+    check("setup.run.listener_pending_acl.json", listener_run);
+
+    let client = with_config("");
+    // A doctor `overall` of "error" would keep `complete` false, and a
+    // missing `acl.toml` is one such error on any machine, so the client
+    // carries a policy.
+    std::fs::write(
+        client.config_dir().join("acl.toml"),
+        "[[acl]]\nprincipal = \"device:laptop\"\nallow = [\"exec.run\"]\n",
+    )
+    .expect("write acl.toml");
+    let cert_path = client.home_dir().join("peer.pem");
+    let (code, mut client_run) = client.json(&[
+        "setup",
+        "client",
+        "laptop",
+        "--address",
+        "host.example:4433",
+        "--peer-cert",
+        cert_path.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{client_run}");
+    assert_eq!(client_run["data"]["complete"], true, "{client_run}");
+    // The doctor step's `result` is the whole `doctor.run` data: findings
+    // carry PATH and temp-dir text that differ per machine, and their shape
+    // is pinned by the `doctor.run` fixture. Even `overall` (warn on a
+    // machine with a shadowing `qsh` on PATH, info elsewhere) is masked.
+    for step in client_run["data"]["steps"].as_array_mut().unwrap() {
+        if step["id"] == "doctor" {
+            step["detail"] = serde_json::json!("overall: <overall>");
+            step["result"] = serde_json::json!({ "overall": "<overall>" });
+        }
+    }
+    check("setup.run.client_complete.json", client_run);
+
+    let missing = with_config("");
+    let (code, missing_run) = missing.json(&[
+        "setup",
+        "client",
+        "laptop",
+        "--address",
+        "host.example:4433",
+        "--json",
+    ]);
+    assert_eq!(code, 255, "{missing_run}");
+    assert_eq!(
+        missing_run["error"]["code"], "INVALID_ARGUMENT",
+        "{missing_run}"
+    );
+    check(
+        "error.INVALID_ARGUMENT.setup_missing_input.json",
+        missing_run,
+    );
 }
 
 /// `host.list`/`host.get`'s two new additive fields, `source` and `user`

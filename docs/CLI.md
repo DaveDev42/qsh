@@ -1,6 +1,6 @@
 # QSH CLI and JSON Contract
 
-**상태:** Draft v0.16 (M11 doctor 진단 1종 — `acl_forward_socks_ineffective`(warn)가 더해져 doctor 23종이 됐다. `forward.socks`는 어떤 op도 인가하지 않으므로(ADR-0019 결정 6) `allow`에 그것만 적은 `[[acl]]` 행은 `-D`를 허락하지 못하고, 이 진단이 그 행을 짚는다(ADR-0019 결과 절 R6). §6.11·§6.17 계수와 §6.17 표가 바뀐다. 또 `qsh::reverse` 진단 줄의 `cause` 어휘가 8값에서 9값이 됐다(§6.13): quinn의 QUIC idle timeout 만료가 `path_dead`에서 갈라져 `idle_timeout`이 된다. 이 줄은 `qsh.cli/v1` 계약 밖의 열린 어휘라서(ADR-0022 결정 5) 신규 op·필드 없음, fixture·wire 무변경; v0.15 (M11 — `qsh init --import-ssh-key <path>`(ADR-0026, §6.11): `IdentityInitReq.import_ssh_key`와 `IdentityInitData.ssh_fingerprint`는 둘 다 additive optional이라 플래그 없는 `init`의 출력과 기존 `identity.init.*` fixture는 한 바이트도 바뀌지 않는다. additive golden fixture 5개(`identity.init.imported_ssh_key.json`, `error.UNSUPPORTED.ssh_key_encrypted.json`, `error.UNSUPPORTED.ssh_key_type.json`, `error.INVALID_ARGUMENT.ssh_key_malformed.json`, `error.INVALID_ARGUMENT.ssh_key_identity_exists.json`) 추가. 같은 M11의 `qsh trust ssh-preview <path>`(op `trust.ssh_preview`, §2.4·§6.11, ADR-0026 결정 4)는 신규 op 1개이고 additive golden fixture 1개(`trust.ssh_preview.json`)를 더한다; v0.14 = 신규 op `acl.show`(`qsh acl show`, §6.19, ADR-0025)가 붙었다. 이 머신의 `acl.toml`을 읽기 전용으로 요약하는 로컬 op이고, §2.4 목록·§2.5 인가 불요 행·새 §6.19만 바뀐다. `qsh.cli/v1`에는 데이터 타입 하나가 additive로 더해지고 golden fixture 2개(`acl.show.json`, `acl.show.no_policy.json`)가 추가됐으며 기존 fixture와 wire는 무변경; v0.13 = issue #5 — `qsh exec`가 이름 해석을 forward 주소록에만 묶어 뒀던 결함을 고쳐 §6.1 라우팅 우선순위(host.get·attach와 동일: 라이브 역방향 등록이 forward pin보다 우선)를 그대로 공유하게 됨 — 전에는 살아 있는 역방향 host를 향한 `qsh exec`가 죽은 forward 주소만 보고 `CONNECTION_FAILED`로 오판했다. §6.1·§6.8(exec/attach/session open의 공유 라우팅과 `qsh serve --to`의 forward-only 2단계 해석을 분리해 서술)·§6.13(exec의 `LOCAL_CONTROL`/`LOCAL_STREAM` conduit 사용과 UDS-EOF→reset 규칙 추가) 갱신. 신규 op·필드 없음, additive golden fixture 2개(`error.HOST_NOT_FOUND.exec_pinned_no_address.json`, `error.HOST_NOT_FOUND.exec_reverse_stale.json`) 추가 — 그 외 기존 fixture 전부 무변경; v0.12 = M10 릴리스 — 신규 op 0, fixture 무변경, wire 무변경. 계약 델타는 §6.11 하나다: `trust add --cert-file`과 `trust add-ca`의 인증서 입력이 `CERT_PEM_MAX`(64 KiB) 상한까지만 읽히고 초과는 파싱 전에 `INVALID_ARGUMENT`이며, `trust add-ca`의 `<name>`은 `trust rename`의 `new`와 같은 라벨 검증을 trim 후 거친다(라벨 검증은 ADR-0012 결정 6; `CERT_PEM_MAX` 상한 자체는 ADR-0013 결정 4·5가 아니라 구현 커밋 `381b42c`가 둔 값이다). M10이 낸 나머지는 배포·패키징 축이라 이 문서 밖이다; v0.11 = M9 사람용 표면 — `qsh serve --to`(구 표기 `qsh reverse`, ADR-0012)·`qsh pair invite|accept --as`(구 `qsh trust invite/accept`)·`qsh identity export`/`trust add --cert-file`/`trust add-ca`(ADR-0013)·`trust rename`·`qsh service install|uninstall|status`(§6.18)·peer 주소의 포트 기본값 4433(ADR-0014)·`-D`(`tunnel.dynamic`, ADR-0019/0020)·doctor 22종(M9가 8종 추가 — 범위 (h)의 7종 + `host_pinned_without_address`)이 §2.4·§2.5·§6.1·§6.9·§6.11·§6.12·§6.13·§6.17·§6.18·§10에 반영됨. 기존 fixture 중 값-보유 golden `capabilities.json` 한 줄만 `dial-filter.v1` 추가로 재생성됐고(94ad639), wire는 `StreamHeader` 필드 5(`deny_host_local`) 하나가 capability 뒤에 additive로 붙었다 — 그 외 fixture·wire 무변경, 신규 op 7종 전부 additive; v0.10 = M3 Step 8 — 역방향 위 resume: §6.4 recovery 진단의 `registration_wait_ms`가 실제로 채워짐(정방향 `0`, 역방향은 재등록 대기 시간) — `recovery` 값 집합은 무변경, 필드는 M2 세 필드 뒤에 additive로 붙는다; v0.9 = M3 Step 7 — 대화형 attach(`qsh [user@]host`/`qsh attach`)가 역방향 등록 host를 향해서도 §6.13의 `LOCAL_CONTROL`/`LOCAL_STREAM` 경로를 타도록 landing — §6.13 갱신(더 이상 forward 전용이 아님, 그리고 역방향 leg에는 reconnect/recovery가 없다는 점 명시); v0.8 = M3 Step 1 — `Host`의 `state`/`device_id` 값 어휘 확정과 역방향 등록 ACL 매핑(§2.5·§5)·`host.list`/`host.get` 데이터 소스(§6.1)·recovery 진단의 `registration_wait_ms`(§6.4)·신규 §6.13 `qsh listen`/`qsh reverse` 계약 추가; v0.7 = M2 Step 7 — `session.attach`는 resume credential을 **반드시** 요구하며 그 실패는 항상 non-distinguishing `AUTH_FAILED`임을 §6.3·§6.4에 명문화; v0.6 = `session read --follow` 출력 형태와 `--wait` 하한 명문화, v0.5 = M2 계약 확정, v0.4 = M1 구현과 동기화)  
+**상태:** Draft v0.17 (M12 신규 op `setup.run`(`qsh setup`, §6.20, ADR-0024)이 붙었다. 기존 op을 정해진 순서로 부르는 로컬 오케스트레이터이고 `acl.toml`은 쓰지 않는다. §2.4 목록, §2.5 인가 불요 행, 새 §6.20만 바뀐다. `qsh.cli/v1`에는 데이터 타입이 additive로 더해지고 golden fixture 4개(`setup.run.host_pending_acl.json`, `setup.run.client_complete.json`, `setup.run.listener_pending_acl.json`, `error.INVALID_ARGUMENT.setup_missing_input.json`)가 추가됐으며 기존 fixture와 wire는 무변경; v0.16 (M11 doctor 진단 1종 — `acl_forward_socks_ineffective`(warn)가 더해져 doctor 23종이 됐다. `forward.socks`는 어떤 op도 인가하지 않으므로(ADR-0019 결정 6) `allow`에 그것만 적은 `[[acl]]` 행은 `-D`를 허락하지 못하고, 이 진단이 그 행을 짚는다(ADR-0019 결과 절 R6). §6.11·§6.17 계수와 §6.17 표가 바뀐다. 또 `qsh::reverse` 진단 줄의 `cause` 어휘가 8값에서 9값이 됐다(§6.13): quinn의 QUIC idle timeout 만료가 `path_dead`에서 갈라져 `idle_timeout`이 된다. 이 줄은 `qsh.cli/v1` 계약 밖의 열린 어휘라서(ADR-0022 결정 5) 신규 op·필드 없음, fixture·wire 무변경; v0.15 (M11 — `qsh init --import-ssh-key <path>`(ADR-0026, §6.11): `IdentityInitReq.import_ssh_key`와 `IdentityInitData.ssh_fingerprint`는 둘 다 additive optional이라 플래그 없는 `init`의 출력과 기존 `identity.init.*` fixture는 한 바이트도 바뀌지 않는다. additive golden fixture 5개(`identity.init.imported_ssh_key.json`, `error.UNSUPPORTED.ssh_key_encrypted.json`, `error.UNSUPPORTED.ssh_key_type.json`, `error.INVALID_ARGUMENT.ssh_key_malformed.json`, `error.INVALID_ARGUMENT.ssh_key_identity_exists.json`) 추가. 같은 M11의 `qsh trust ssh-preview <path>`(op `trust.ssh_preview`, §2.4·§6.11, ADR-0026 결정 4)는 신규 op 1개이고 additive golden fixture 1개(`trust.ssh_preview.json`)를 더한다; v0.14 = 신규 op `acl.show`(`qsh acl show`, §6.19, ADR-0025)가 붙었다. 이 머신의 `acl.toml`을 읽기 전용으로 요약하는 로컬 op이고, §2.4 목록·§2.5 인가 불요 행·새 §6.19만 바뀐다. `qsh.cli/v1`에는 데이터 타입 하나가 additive로 더해지고 golden fixture 2개(`acl.show.json`, `acl.show.no_policy.json`)가 추가됐으며 기존 fixture와 wire는 무변경; v0.13 = issue #5 — `qsh exec`가 이름 해석을 forward 주소록에만 묶어 뒀던 결함을 고쳐 §6.1 라우팅 우선순위(host.get·attach와 동일: 라이브 역방향 등록이 forward pin보다 우선)를 그대로 공유하게 됨 — 전에는 살아 있는 역방향 host를 향한 `qsh exec`가 죽은 forward 주소만 보고 `CONNECTION_FAILED`로 오판했다. §6.1·§6.8(exec/attach/session open의 공유 라우팅과 `qsh serve --to`의 forward-only 2단계 해석을 분리해 서술)·§6.13(exec의 `LOCAL_CONTROL`/`LOCAL_STREAM` conduit 사용과 UDS-EOF→reset 규칙 추가) 갱신. 신규 op·필드 없음, additive golden fixture 2개(`error.HOST_NOT_FOUND.exec_pinned_no_address.json`, `error.HOST_NOT_FOUND.exec_reverse_stale.json`) 추가 — 그 외 기존 fixture 전부 무변경; v0.12 = M10 릴리스 — 신규 op 0, fixture 무변경, wire 무변경. 계약 델타는 §6.11 하나다: `trust add --cert-file`과 `trust add-ca`의 인증서 입력이 `CERT_PEM_MAX`(64 KiB) 상한까지만 읽히고 초과는 파싱 전에 `INVALID_ARGUMENT`이며, `trust add-ca`의 `<name>`은 `trust rename`의 `new`와 같은 라벨 검증을 trim 후 거친다(라벨 검증은 ADR-0012 결정 6; `CERT_PEM_MAX` 상한 자체는 ADR-0013 결정 4·5가 아니라 구현 커밋 `381b42c`가 둔 값이다). M10이 낸 나머지는 배포·패키징 축이라 이 문서 밖이다; v0.11 = M9 사람용 표면 — `qsh serve --to`(구 표기 `qsh reverse`, ADR-0012)·`qsh pair invite|accept --as`(구 `qsh trust invite/accept`)·`qsh identity export`/`trust add --cert-file`/`trust add-ca`(ADR-0013)·`trust rename`·`qsh service install|uninstall|status`(§6.18)·peer 주소의 포트 기본값 4433(ADR-0014)·`-D`(`tunnel.dynamic`, ADR-0019/0020)·doctor 22종(M9가 8종 추가 — 범위 (h)의 7종 + `host_pinned_without_address`)이 §2.4·§2.5·§6.1·§6.9·§6.11·§6.12·§6.13·§6.17·§6.18·§10에 반영됨. 기존 fixture 중 값-보유 golden `capabilities.json` 한 줄만 `dial-filter.v1` 추가로 재생성됐고(94ad639), wire는 `StreamHeader` 필드 5(`deny_host_local`) 하나가 capability 뒤에 additive로 붙었다 — 그 외 fixture·wire 무변경, 신규 op 7종 전부 additive; v0.10 = M3 Step 8 — 역방향 위 resume: §6.4 recovery 진단의 `registration_wait_ms`가 실제로 채워짐(정방향 `0`, 역방향은 재등록 대기 시간) — `recovery` 값 집합은 무변경, 필드는 M2 세 필드 뒤에 additive로 붙는다; v0.9 = M3 Step 7 — 대화형 attach(`qsh [user@]host`/`qsh attach`)가 역방향 등록 host를 향해서도 §6.13의 `LOCAL_CONTROL`/`LOCAL_STREAM` 경로를 타도록 landing — §6.13 갱신(더 이상 forward 전용이 아님, 그리고 역방향 leg에는 reconnect/recovery가 없다는 점 명시); v0.8 = M3 Step 1 — `Host`의 `state`/`device_id` 값 어휘 확정과 역방향 등록 ACL 매핑(§2.5·§5)·`host.list`/`host.get` 데이터 소스(§6.1)·recovery 진단의 `registration_wait_ms`(§6.4)·신규 §6.13 `qsh listen`/`qsh reverse` 계약 추가; v0.7 = M2 Step 7 — `session.attach`는 resume credential을 **반드시** 요구하며 그 실패는 항상 non-distinguishing `AUTH_FAILED`임을 §6.3·§6.4에 명문화; v0.6 = `session read --follow` 출력 형태와 `--wait` 하한 명문화, v0.5 = M2 계약 확정, v0.4 = M1 구현과 동기화)  
 **대상:** QSH MVP  
 **Canonical interface:** `qsh` CLI
 
@@ -93,6 +93,7 @@ doctor.run
 service.install
 service.uninstall
 service.status
+setup.run
 acl.check
 acl.show
 schema.get
@@ -104,7 +105,7 @@ version.get
 
 dotted 이름은 CLI subcommand token을 기계적으로 옮긴 것이다(`cert.init` ↔ `qsh cert init`, `host.get` ↔ `qsh host get`). clap이 렌더링하는 다중 단어 subcommand token은 kebab-case(`add-ca`)이지만, `-`는 모든 `acl.toml` action과 모든 `Op::as_str` 값이 쓰는 `[a-z._]` 어휘 밖이다. 단어 경계를 유지하면서 이 어휘에 들어맞는 유일한 표기는 snake_case이고, 이는 JSON contract가 이미 쓰는 관례(`cert_pem`, `added_at`, `key_store`)와도 같다. `trust.add_ca`(CLI 표기 `qsh trust add-ca`)가 `trust.addca`가 아닌 이유이며, 이후 `trust.rename`·`service.*` 같은 다중 단어 subcommand도 같은 규칙을 따른다.
 
-`acl.check`(§6.15, M5)와 `acl.show`(§6.19, M11)는 원격 peer가 요청하는 operation이 아니라 **이 머신 자신의** `acl.toml`을 로컬에서 조회하는 op이다 — §2.5의 "인가 불요" 행이 다른 local-only operation들과 함께 명시한다.
+`acl.check`(§6.15, M5)와 `acl.show`(§6.19, M11)는 원격 peer가 요청하는 operation이 아니라 **이 머신 자신의** `acl.toml`을 로컬에서 조회하는 op이다 — §2.5의 "인가 불요" 행이 다른 local-only operation들과 함께 명시한다. `setup.run`(§6.20, M12)도 같은 종류의 로컬 op이다. 기존 op을 순서대로 부르는 오케스트레이터이고 원격 peer가 요청할 수 없으며 wire 메시지도 없다.
 
 `qsh serve`, `qsh listen`, `qsh serve --to`(구 표기 `qsh reverse`, §6.13)는 operation이 아니라 장기 실행 모드(long-running mode)다. 단일 요청/응답 계약이 없으며 이 목록에 포함되지 않는다.
 
@@ -125,7 +126,7 @@ ACL action은 인가(authorization) 어휘로, operation 이름과는 별개 차
 | `tunnel.open` (remote forward) | `forward.remote` |
 | `tunnel.dynamic` (`-D`, SOCKS5) | `forward.local` — 새 grant가 아니라 `-L`과 같은 action의 재사용이다. `forward.socks`는 이 인가에 관여하지 않는다(ADR-0019 decision 14, §6.9의 `DYNAMIC_FORWARD_ACL_NOTE` 참고) |
 | `tunnel.close`, `tunnel.list` | 해당 tunnel의 소유 peer이면 허용 (`forward.*` 부여로 충분) — remote forward(`-R`)의 `tunnel.close`는 이 로컬-머신 축(§6.13·§6.14, `docs/design/protocol.md` §11-3)과 별개로, host 쪽 `forward.remote` principal 소유권 검사를 하나 더 거친다(M5 Step 5, §6.9 아래 문단). `-L`/`-D`의 `tunnel.close`에는 이 host 쪽 검사가 없다 — 로컬 listener를 닫는 것뿐인 순수 local operation이다 |
-| `host.list`, `host.get`, `identity.init`, `identity.export`, `trust.*`, `cert.init`, `cert.issue`, `doctor.run`, `acl.check`, `acl.show`, `schema.get`, `capabilities.get`, `version.get`, `service.install`, `service.uninstall`, `service.status` | 인가 불요 — local operation으로 원격 peer의 ACL 평가 대상이 아님 |
+| `host.list`, `host.get`, `identity.init`, `identity.export`, `trust.*`, `cert.init`, `cert.issue`, `doctor.run`, `acl.check`, `acl.show`, `schema.get`, `capabilities.get`, `version.get`, `service.install`, `service.uninstall`, `service.status`, `setup.run` | 인가 불요 — local operation으로 원격 peer의 ACL 평가 대상이 아님 |
 
 `forward.socks`는 action 어휘에 예약되어 있지만 어떤 operation도 이 action으로 인가하지 않는다 — `-D`가 실제로 구현된 뒤에도 마찬가지다(위 행, ADR-0019 decision 14). 향후 예약: streaming file copy → `file.read`/`file.write`.
 
@@ -1487,6 +1488,76 @@ qsh acl show --principal <principal> [--auth-path pin|ca] --json
 `policy.loaded: false`는 `acl.toml`이 없거나, 파싱에 실패했거나, 권한 때문에 읽지 못한 상태를 구별 없이 나타낸다. 이 상태에서 `matching_rules`와 `effective_actions`는 빈 배열이고 규칙 내용은 한 줄도 나오지 않는다. `acl show`는 이 상태를 오류로 만들지 않는다. 조회는 성공했고(`ok: true`, exit `0`) 조회된 사실이 "정책 없음"일 뿐이다. 파싱 실패의 상세는 §6.12·§6.13의 시작 진단이 정본이다. 그리고 enforcement에는 이 평가기 위에 fail-closed 층이 하나 더 있어서(§6.15) `effective_actions`에 든 action이 운영 상태에 따라 실제로는 거부될 수 있다. 반대 방향, 즉 이 명령이 빼먹은 action이 실제로 허용되는 일은 없다.
 
 `--principal`이나 `--auth-path`가 잘못된 모양이 아닌 한 `acl.show` 자체는 실패하지 않는다(exit `0`, §4). human mode 출력은 principal 한 줄, 매칭 행 목록(또는 "no policy loaded"), 실효 action 한 줄, 그 뒤 고지 줄들이다.
+
+### 6.20 `qsh setup` (M12)
+
+```bash
+qsh setup host --peer <name> [--peer-cert <path|->] [--forward] [--service] --json
+qsh setup host --to <alias> --address <addr> --peer-cert <path|-> [--forward] [--service] --json
+qsh setup client <name> --address <addr> [<code> | --code-stdin | --peer-cert <path|->] --json
+qsh setup listener --peer <name> --peer-cert <path|-> [--service] --json
+```
+
+이 머신을 한 역할로 세운다([ADR-0024](adr/0024-setup-orchestrator.md)). 기존 op을 정해진 순서로 부르는 오케스트레이터이고 새 능력은 없다. 상태를 바꾸는 호출은 `identity.init`, `trust.invite`, `trust.accept`, `trust.add`, `service.install`뿐이며 그 밖에 `doctor.run`을 부른다. `acl.toml`, `config.toml`, `hosts.toml`은 쓰지 않는다. 넣을 `[[acl]]` 행을 인쇄하고 `acl.check`로 확인할 뿐이다. 자동 신뢰는 없어서 pin의 근거는 초대 코드와 인증서 파일 둘뿐이다. `qsh serve`, `qsh listen`, 대화형 세션은 띄우지 않고 서비스 유닛도 활성화하지 않는다(§6.18). §2.5의 "인가 불요" local operation이며 원격 peer가 요청할 수 없고 wire 메시지도 없다.
+
+`setup`은 `qsh <name>`의 host 별칭으로도 읽힐 수 있다. 이 서브커맨드가 그 별칭보다 먼저 잡히므로 `setup`이라는 이름의 host에는 `qsh attach setup` 같은 명시 형태로 닿는다.
+
+**역할.**
+
+| 호출 | `role` | 대응 모드 | pin 수단 | `acl.toml` 행의 allow |
+|---|---|---|---|---|
+| `setup host --peer <name>` | `host` | `qsh serve` | 초대(`--as <name>` 고정) 또는 `--peer-cert` | `serve` 목록(`exec.run`, `session.*`) |
+| `setup host --to <alias> --address <addr> --peer-cert` | `host_to` | `qsh serve --to <alias>` | `--peer-cert` + 주소 | `serve` 목록 |
+| `setup client <name> --address <addr>` | `client` | `qsh <name>` | 초대 코드 또는 `--peer-cert` + 주소 | 없음 |
+| `setup listener --peer <name> --peer-cert` | `listener` | `qsh listen` | `--peer-cert` | `host.reverse` |
+
+`--forward`는 `host`와 `host_to`에서만 받고 allow 목록에 `forward.local`을 더한다. `--service`는 `host`, `host_to`, `listener`에서만 받는다. 코드와 `--peer-cert`를 함께 주거나, 위치 코드와 `--code-stdin`을 함께 주거나, `--peer`와 `--to`를 함께 주거나, 역할에 없는 플래그를 주면 clap 인자 사용 오류로 exit `2`다.
+
+**단계 id 어휘.** 닫힌 목록이고 추가만 허용한다.
+
+| id | 하는 일 |
+|---|---|
+| `identity` | 이 장치의 신원을 만든다(`identity.init`, 멱등) |
+| `mode_config` | `config.toml`이 역할에 맞는 실행 모드를 고르는지 읽어서 확인한다 |
+| `acl` | `acl.toml`이 의도한 action을 허용하는지 `acl.check`로 확인한다. 읽기 전용 |
+| `pin_cert` | 인증서 파일로 상대를 pin한다(`trust.add`, 항상 `cert_pem`을 채운다) |
+| `pair` | 초대 코드를 상환해 상대를 pin한다(`trust.accept`) |
+| `invite` | pin 이름을 고정한 초대를 발급한다(`trust.invite --as <name>`) |
+| `service` | 서비스 유닛 파일을 쓴다(`service.install`). `--service`가 있을 때만 |
+| `doctor` | 진단을 돌린다(`doctor.run`) |
+
+**단계 순서.** `host`는 `identity`, `mode_config`, `acl`, `service`, `invite`(또는 `pin_cert`), `doctor`. `host_to`는 `identity`, `pin_cert`, `mode_config`, `acl`, `service`, `doctor`. `client`는 `identity`, `pair`(또는 `pin_cert`), `doctor`. `listener`는 `identity`, `pin_cert`, `mode_config`, `acl`, `service`, `doctor`. `mode_config`와 `acl`은 읽기만 하므로 앞 단계가 `pending`이어도 평가한다.
+
+**단계 상태 어휘.** 닫힌 목록이고 추가만 허용한다.
+
+| status | 뜻 |
+|---|---|
+| `done` | 이번 실행에서 실행했거나 이번에 충족됐다 |
+| `already` | 이미 충족돼 실행하지 않았다 |
+| `pending` | 사람이 할 일이 남았다(`detail`에 적는다) |
+| `blocked` | 앞 단계가 `pending`이라 실행하지 않았다 |
+| `skipped` | 플래그로 제외했거나 이 플랫폼이 지원하지 않는다 |
+
+`data`는 `SetupRunData`(`crates/qsh-proto/src/types/setup.rs`)다.
+
+```json
+{
+  "role": "host",
+  "complete": false,
+  "steps": [
+    { "id": "identity", "status": "already", "command": "qsh init" },
+    { "id": "acl", "status": "pending", "command": "edit acl.toml", "detail": "...", "result": [ { "...": "acl.check data, action 순서" } ] }
+  ],
+  "acl_rows": "[[acl]]\nprincipal = \"device:laptop\"\n...",
+  "next": ["save the rows in `acl_rows` to acl.toml, then run `qsh setup` again"]
+}
+```
+
+`steps[].command`는 그 단계와 같은 일을 하는 단독 명령이라 `qsh setup` 없이도 손으로 따라 할 수 있다. `steps[].result`는 그 단계가 부른 op의 `data`를 그대로 담는다. `invite`는 `trust.invite`의 `data`(초대 코드 포함)이고 `acl`은 action 순서를 따른 `acl.check` `data` 배열이다. 초대 코드는 `host`의 `invite` 단계 `result`에만 나가고 키 재료는 어느 출력에도 나가지 않는다. `acl` 단계가 충족일 때마다 `detail`에 재시작 고지(`ACL_RESTART_NOTICE`)가 붙는다. `qsh setup`은 떠 있는 `serve`를 알 수 없기 때문이다. `host`에서는 만료되지 않은 `assigned_name` 없는 초대가 살아 있으면 `acl` 단계를 충족으로 보지 않고 `detail`이 10분 TTL을 적는다. `complete`는 `pending`·`blocked`가 없고 doctor의 `overall`이 `"error"`가 아닐 때만 `true`다. `host`에서 그것은 상대가 연결했다는 뜻이 아니다.
+
+**입력과 프롬프트.** `--json`/`--jsonl`은 프롬프트를 열지 않는다. 첫 단계 전에 필수 입력의 존재, 이름 규칙, 주소 형식, `--peer-cert`의 PEM 구조와 코드 형식을 모두 검사하고, 하나라도 빠졌거나 틀리면 아무것도 쓰지 않고 `INVALID_ARGUMENT`(exit `255`)다. 이 규칙은 human mode에서 표준입력이 터미널이 아니거나 `--peer-cert -`가 표준입력을 쓸 때도 같다. human mode는 터미널이면 빠진 입력을 stderr 프롬프트로 묻는다. 묻는 것은 역할, pin 이름, 초대 코드(에코 없음), `acl.toml` 저장 확인(저장 뒤 Enter로 다시 확인), `--service`가 없을 때의 서비스 유닛 설치 여부(기본 아니오) 다섯뿐이다. 주소와 인증서 경로는 플래그로만 받는다.
+
+**exit.** 부른 op이 하나도 실패하지 않았으면 `0`이고, `pending` 단계가 남아 있어도 `0`이며 `complete: false`가 그 사실을 담는다. 부른 op이 실패하면 `255`와 오류 envelope이고 `code`와 `retryable`은 그 op의 값 그대로다. `error.details.step`이 실패한 단계 id를, `error.details.steps`가 그때까지의 단계 id와 상태만 담는다(`result` 없음). service op의 `UNSUPPORTED`는 오류가 아니라 `service` 단계 `skipped`다. 이미 끝난 단계는 되돌리지 않고 같은 명령을 다시 부르면 이어서 진행한다. 쓰는 단계가 모두 `already`나 `skipped`인 재실행은 어떤 파일도 바꾸지 않는다. 예외는 상환 전 `host` 재실행으로, 새 초대를 발급한다. clap 인자 사용 오류는 `2`다.
 
 ## 7. Human interactive mode
 

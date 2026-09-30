@@ -283,6 +283,15 @@ pub enum Command {
     #[command(subcommand)]
     Acl(AclCmd),
 
+    /// Set this machine up for one role, step by step, using only the
+    /// commands you could run yourself (ADR-0024, `docs/CLI.md` §6.20).
+    /// Prints the `[[acl]]` rows to add and never writes `acl.toml`; never
+    /// starts `qsh serve`, `qsh listen` or a session.
+    Setup {
+        #[command(subcommand)]
+        role: Option<SetupCmd>,
+    },
+
     /// List every host visible to this machine: trust-store-pinned forward
     /// hosts and this machine's live reverse registrations, together
     /// (`docs/CLI.md` §6.1). Never dials.
@@ -777,6 +786,72 @@ pub enum PairCmd {
         /// from `address` when it has a hostname (never for an IP literal).
         #[arg(long = "as", value_name = "NAME")]
         as_name: Option<String>,
+    },
+}
+
+/// `qsh setup <role>` (`docs/CLI.md` §6.20, ADR-0024 decision 2). Each role
+/// defines only the flags that apply to it, so a flag on the wrong role is a
+/// clap usage error (exit `2`). A missing required input is not a clap
+/// error: it is `INVALID_ARGUMENT` (exit `255`) from the operation, or a
+/// prompt in human mode on a terminal.
+#[derive(Debug, Subcommand)]
+pub enum SetupCmd {
+    /// This machine runs `qsh serve` (`--peer`) or `qsh serve --to`
+    /// (`--to` with `--address`).
+    Host {
+        /// The peer's trust-store name; also the `device:<name>` principal
+        /// of the printed `[[acl]]` rows.
+        #[arg(long, value_name = "NAME", conflicts_with = "to")]
+        peer: Option<String>,
+        /// Serve one reverse-listener alias instead (`qsh serve --to`).
+        #[arg(long, value_name = "ALIAS")]
+        to: Option<String>,
+        /// `host:port` recorded on the pin (with `--to`).
+        #[arg(long, value_name = "ADDR")]
+        address: Option<String>,
+        /// Pin the peer from its certificate file (`-` reads standard
+        /// input) instead of minting an invite.
+        #[arg(long, value_name = "PATH")]
+        peer_cert: Option<String>,
+        /// Also require `forward.local` in the printed `[[acl]]` rows.
+        #[arg(long)]
+        forward: bool,
+        /// Also write the service unit file.
+        #[arg(long)]
+        service: bool,
+    },
+    /// This machine connects to a host with `qsh <name>`.
+    Client {
+        /// The name to pin the host under.
+        name: Option<String>,
+        /// `host:port` of the host.
+        #[arg(long, value_name = "ADDR")]
+        address: Option<String>,
+        /// The invite code the host printed. With no code, no
+        /// `--code-stdin` and no `--peer-cert`, a terminal is prompted
+        /// with echo off.
+        #[arg(conflicts_with_all = ["code_stdin", "peer_cert"])]
+        code: Option<String>,
+        /// Read the invite code from standard input.
+        #[arg(long, conflicts_with = "peer_cert")]
+        code_stdin: bool,
+        /// Pin the host from its certificate file (`-` reads standard
+        /// input) instead of redeeming an invite.
+        #[arg(long, value_name = "PATH")]
+        peer_cert: Option<String>,
+    },
+    /// This machine runs `qsh listen` for a reverse peer.
+    Listener {
+        /// The peer's trust-store name.
+        #[arg(long, value_name = "NAME")]
+        peer: Option<String>,
+        /// Pin the peer from its certificate file (`-` reads standard
+        /// input).
+        #[arg(long, value_name = "PATH")]
+        peer_cert: Option<String>,
+        /// Also write the service unit file.
+        #[arg(long)]
+        service: bool,
     },
 }
 

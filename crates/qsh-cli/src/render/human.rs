@@ -12,10 +12,10 @@ use qsh_proto::{
     AclCheckData, AclShowData, CapabilitiesData, CertInitData, CertIssueData, DoctorData,
     DynamicTunnel, Host, HostListData, IdentityExportData, IdentityInitData, SchemaData,
     ServiceInstallData, ServiceStatusData, ServiceUninstallData, Session, SessionCloseData,
-    SessionEvent, SessionListData, SessionOpenData, SessionResizeData, SessionWriteData,
-    TrustAcceptData, TrustAddCaData, TrustAddData, TrustInviteData, TrustListData, TrustPeer,
-    TrustRemoveData, TrustRenameData, TrustSshPreviewData, Tunnel, TunnelCloseData, TunnelListData,
-    VersionData,
+    SessionEvent, SessionListData, SessionOpenData, SessionResizeData, SessionWriteData, SetupRole,
+    SetupRunData, SetupStatus, SetupStepId, TrustAcceptData, TrustAddCaData, TrustAddData,
+    TrustInviteData, TrustListData, TrustPeer, TrustRemoveData, TrustRenameData,
+    TrustSshPreviewData, Tunnel, TunnelCloseData, TunnelListData, VersionData,
 };
 
 use crate::stderr_note;
@@ -1028,3 +1028,95 @@ pub fn print_service_status(data: &ServiceStatusData) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests;
+
+/// Print `qsh setup`'s plan or result (`docs/CLI.md` §6.20): one line per
+/// step, then the `[[acl]]` rows to save and the commands to run next. Zero
+/// decision logic here; `Ops::setup_run` already decided every status. The
+/// invite line carries the code because it is the one place the operation
+/// hands it out, exactly as `qsh pair invite` prints it.
+pub fn print_setup_run(data: &SetupRunData) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    writeln!(stdout, "role: {}", setup_role_name(data.role))?;
+    for step in &data.steps {
+        writeln!(
+            stdout,
+            "  {:<10} {:<8} {}",
+            setup_step_name(step.id),
+            setup_status_name(step.status),
+            sanitize(&step.command)
+        )?;
+        if let Some(detail) = &step.detail {
+            writeln!(stdout, "             {}", sanitize(detail))?;
+        }
+        if step.id == SetupStepId::Invite
+            && let Some(command) = step
+                .result
+                .as_ref()
+                .and_then(|r| r.get("accept_command"))
+                .and_then(|v| v.as_str())
+        {
+            writeln!(
+                stdout,
+                "             run on the other device: {}",
+                sanitize(command)
+            )?;
+        }
+    }
+    if let Some(rows) = &data.acl_rows {
+        let path = data
+            .steps
+            .iter()
+            .find(|s| s.id == SetupStepId::Acl)
+            .and_then(|s| s.result.as_ref())
+            .and_then(|r| r.pointer("/0/policy/path"))
+            .and_then(|v| v.as_str());
+        match path {
+            Some(path) => writeln!(stdout, "acl rows (save to {}):", sanitize(path))?,
+            None => writeln!(stdout, "acl rows:")?,
+        }
+        for line in rows.lines() {
+            writeln!(stdout, "  {}", sanitize(line))?;
+        }
+    }
+    if data.complete {
+        writeln!(stdout, "complete: nothing left to do on this machine")?;
+    } else {
+        writeln!(stdout, "not complete yet")?;
+    }
+    for command in &data.next {
+        writeln!(stdout, "next: {}", sanitize(command))?;
+    }
+    Ok(())
+}
+
+fn setup_role_name(role: SetupRole) -> &'static str {
+    match role {
+        SetupRole::Host => "host",
+        SetupRole::HostTo => "host_to",
+        SetupRole::Client => "client",
+        SetupRole::Listener => "listener",
+    }
+}
+
+fn setup_step_name(id: SetupStepId) -> &'static str {
+    match id {
+        SetupStepId::Identity => "identity",
+        SetupStepId::ModeConfig => "mode_config",
+        SetupStepId::Acl => "acl",
+        SetupStepId::PinCert => "pin_cert",
+        SetupStepId::Pair => "pair",
+        SetupStepId::Invite => "invite",
+        SetupStepId::Service => "service",
+        SetupStepId::Doctor => "doctor",
+    }
+}
+
+fn setup_status_name(status: SetupStatus) -> &'static str {
+    match status {
+        SetupStatus::Done => "done",
+        SetupStatus::Already => "already",
+        SetupStatus::Pending => "pending",
+        SetupStatus::Blocked => "blocked",
+        SetupStatus::Skipped => "skipped",
+    }
+}

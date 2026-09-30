@@ -358,6 +358,13 @@ const OP_FACES: &[OpFace] = &[
         man_file: "qsh-session-write.1",
     },
     OpFace {
+        op: "setup.run",
+        marker: "SetupRunOp",
+        renderer: "print_setup_run",
+        cli_spelling: "qsh setup",
+        man_file: "qsh-setup.1",
+    },
+    OpFace {
         op: "trust.accept",
         marker: "TrustAcceptOp",
         renderer: "print_trust_accept",
