@@ -72,6 +72,7 @@ impl Fixture {
         fs::create_dir_all(&stage).unwrap();
         fs::create_dir_all(root.path().join("bin")).unwrap();
         fs::create_dir_all(root.path().join("home")).unwrap();
+        fs::create_dir_all(root.path().join("tmp")).unwrap();
         write_executable(&stage.join("qsh"), "#!/bin/sh\necho fake-qsh \"$@\"\n");
         let fx = Self {
             root,
@@ -109,6 +110,31 @@ impl Fixture {
     }
 
     fn write_stubs(&self) {
+        // The installer runs with `PATH` set to this directory alone, so a
+        // `gh` or `curl` installed on the machine running the tests can never
+        // leak in. Only the tools the installer needs are linked through.
+        for tool in [
+            "awk",
+            "basename",
+            "chmod",
+            "cp",
+            "gzip",
+            "mkdir",
+            "mktemp",
+            "mv",
+            "rm",
+            "sha256sum",
+            "shasum",
+            "tar",
+        ] {
+            for dir in ["/usr/bin", "/bin"] {
+                let real = Path::new(dir).join(tool);
+                if real.exists() {
+                    std::os::unix::fs::symlink(&real, self.stubs().join(tool)).unwrap();
+                    break;
+                }
+            }
+        }
         // Serves `$FAKE_RELEASE/<basename of the URL>` to `-o <file>`, logs
         // every URL, and exits 22 (curl's `-f` HTTP error) for unknown files.
         write_executable(
@@ -140,6 +166,41 @@ case "$1" in
 esac
 "#,
         );
+    }
+
+    /// Puts a `gh` stand-in on `PATH`. `gh auth status` exits `auth_rc` and
+    /// `gh attestation verify` exits `verify_rc`. Every `attestation`
+    /// invocation appends its arguments, and whether the binary was already
+    /// installed at that moment, to `gh.log`.
+    fn with_gh(&self, auth_rc: i32, verify_rc: i32) {
+        write_executable(
+            &self.stubs().join("gh"),
+            &format!(
+                r#"#!/bin/sh
+case "$1" in
+    auth) exit {auth_rc} ;;
+    attestation)
+        if [ -e "$QSH_INSTALL_DIR/qsh" ]; then installed=yes; else installed=no; fi
+        printf 'installed=%s args=%s\n' "$installed" "$*" >> "$FAKE_GH_LOG"
+        exit {verify_rc} ;;
+esac
+exit 64
+"#
+            ),
+        );
+    }
+
+    fn gh_log_path(&self) -> PathBuf {
+        self.root.path().join("gh.log")
+    }
+
+    /// Lines the `gh` stand-in logged for `attestation` calls.
+    fn gh_calls(&self) -> Vec<String> {
+        fs::read_to_string(self.gh_log_path())
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
     }
 
     fn pack(&self) {
@@ -195,15 +256,17 @@ esac
 
     fn command(&self, extra_env: &[(&str, &str)]) -> Command {
         let (s, m) = self.uname();
-        let mut cmd = Command::new("sh");
+        let mut cmd = Command::new("/bin/sh");
         cmd.arg(install_script())
             .env_clear()
-            .env("PATH", format!("{}:/usr/bin:/bin", self.stubs().display()))
+            .env("PATH", self.stubs())
             .env("HOME", self.home())
+            .env("TMPDIR", self.root.path().join("tmp"))
             .env("QSH_VERSION", TAG)
             .env("QSH_INSTALL_DIR", self.install_dir())
             .env("FAKE_RELEASE", &self.release)
             .env("FAKE_LOG", self.log_path())
+            .env("FAKE_GH_LOG", self.gh_log_path())
             .env("FAKE_UNAME_S", s)
             .env("FAKE_UNAME_M", m);
         for (k, v) in extra_env {
@@ -365,4 +428,120 @@ fn install_refuses_a_checksum_mismatch() {
         stderr(&out)
     );
     assert!(!fx.installed_qsh().exists());
+}
+
+fn tamper_sums(fx: &Fixture) {
+    fs::write(
+        fx.release.join("SHA256SUMS"),
+        format!("{}  {}\n", "0".repeat(64), fx.asset()),
+    )
+    .unwrap();
+}
+
+#[test]
+fn install_verifies_provenance_with_gh_when_available() {
+    let fx = Fixture::new("x86_64-unknown-linux-gnu");
+    fx.publish();
+    fx.with_gh(0, 0);
+    let out = fx.run(&[]);
+    assert_ok(&out);
+    assert_installed(&fx);
+    let calls = fx.gh_calls();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    let call = &calls[0];
+    // Verified before anything is installed, against the archive that was
+    // downloaded, for this repository.
+    assert!(
+        call.starts_with("installed=no args=attestation verify "),
+        "{call}"
+    );
+    assert!(call.contains(&fx.asset()), "{call}");
+    assert!(call.ends_with(" --repo DaveDev42/qsh"), "{call}");
+    assert!(!stderr(&out).contains("provenance not verified"));
+}
+
+#[test]
+fn install_refuses_when_provenance_verification_fails() {
+    let fx = Fixture::new("x86_64-unknown-linux-gnu");
+    fx.publish();
+    fx.with_gh(0, 1);
+    let out = fx.run(&[]);
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("provenance verification failed"),
+        "{}",
+        stderr(&out)
+    );
+    assert_eq!(fx.gh_calls().len(), 1);
+    assert!(!fx.installed_qsh().exists());
+}
+
+#[test]
+fn install_warns_and_continues_with_checksum_only_when_gh_is_absent() {
+    let fx = Fixture::new("x86_64-unknown-linux-gnu");
+    fx.publish();
+    let out = fx.run(&[]);
+    assert_ok(&out);
+    assert_installed(&fx);
+    assert!(
+        stderr(&out).contains("provenance not verified"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn install_treats_an_unauthenticated_gh_as_absent() {
+    let fx = Fixture::new("x86_64-unknown-linux-gnu");
+    fx.publish();
+    // Verification would fail if it were attempted.
+    fx.with_gh(1, 1);
+    let out = fx.run(&[]);
+    assert_ok(&out);
+    assert_installed(&fx);
+    assert!(stderr(&out).contains("provenance not verified"));
+    assert!(fx.gh_calls().is_empty());
+}
+
+#[test]
+fn install_skip_verify_flag_skips_both_and_warns() {
+    let fx = Fixture::new("x86_64-unknown-linux-gnu");
+    fx.pack();
+    // A checksum that cannot match and a verifier that would fail: only the
+    // flag gets past them.
+    tamper_sums(&fx);
+    fx.with_gh(0, 1);
+    let out = fx.run(&[("QSH_INSECURE_SKIP_VERIFY", "1")]);
+    assert_ok(&out);
+    assert_installed(&fx);
+    let err = stderr(&out);
+    assert!(err.contains("QSH_INSECURE_SKIP_VERIFY=1"), "{err}");
+    assert!(err.contains("SHA256SUMS check"), "{err}");
+    assert!(err.contains("provenance check"), "{err}");
+    assert!(fx.gh_calls().is_empty());
+    assert!(
+        !fx.requests().iter().any(|u| u.ends_with("/SHA256SUMS")),
+        "{:?}",
+        fx.requests()
+    );
+}
+
+#[test]
+fn install_never_skips_the_checksum_without_the_explicit_flag() {
+    for flag in [None, Some("0"), Some("true"), Some("")] {
+        let fx = Fixture::new("x86_64-unknown-linux-gnu");
+        fx.pack();
+        tamper_sums(&fx);
+        let env: Vec<(&str, &str)> = flag
+            .map(|v| vec![("QSH_INSECURE_SKIP_VERIFY", v)])
+            .unwrap_or_default();
+        let out = fx.run(&env);
+        assert!(!out.status.success(), "flag {flag:?} skipped the checksum");
+        assert!(
+            stderr(&out).contains("checksum mismatch"),
+            "{}",
+            stderr(&out)
+        );
+        assert!(!fx.installed_qsh().exists());
+    }
 }
