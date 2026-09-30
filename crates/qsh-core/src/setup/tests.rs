@@ -81,3 +81,100 @@ fn setup_vocabularies_serialize_as_the_closed_snake_case_lists() {
     assert_eq!(serde_json::to_value(SetupRole::HostTo).unwrap(), "host_to");
     let _: SetupStepId = serde_json::from_value("mode_config".into()).unwrap();
 }
+
+fn temp_ops() -> (tempfile::TempDir, crate::ops::Ops) {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = crate::config::Paths::new(dir.path().join("config"), dir.path().join("state"));
+    (dir, crate::ops::Ops::new(paths))
+}
+
+fn pin_by_fingerprint(ops: &crate::ops::Ops, name: &str, fingerprint: &str) {
+    ops.trust_add(qsh_proto::TrustAddReq {
+        name: name.to_string(),
+        address: None,
+        fingerprint: Some(fingerprint.to_string()),
+        cert_pem: None,
+    })
+    .unwrap();
+}
+
+#[test]
+fn setup_pair_pending_on_duplicate_fingerprint() {
+    let (_guard, ops) = temp_ops();
+    let fingerprint = qsh_transport::Fingerprint::of_spki_der(b"the host").to_string();
+    pin_by_fingerprint(&ops, "macmini", &fingerprint);
+    // `trust.accept` then pinned the same host as "macmini-ctl" too.
+    pin_by_fingerprint(&ops, "macmini-ctl", &fingerprint);
+
+    let outcome = ops.setup_pair_after_accept("macmini-ctl", &fingerprint);
+    assert_eq!(outcome.status, SetupStatus::Pending);
+    let detail = outcome.detail.unwrap();
+    assert!(detail.contains("macmini"), "{detail}");
+    // The person's earlier pin is left alone.
+    assert_eq!(ops.trust_list().unwrap().peers.len(), 2);
+
+    let other = qsh_transport::Fingerprint::of_spki_der(b"another host").to_string();
+    pin_by_fingerprint(&ops, "box", &other);
+    let clean = ops.setup_pair_after_accept("box", &other);
+    assert_eq!(clean.status, SetupStatus::Done);
+}
+
+#[test]
+fn setup_rejects_bad_input_before_any_write() {
+    let (guard, ops) = temp_ops();
+    let env = SetupEnv {
+        now: std::time::SystemTime::now(),
+        home: Some(guard.path().join("home")),
+    };
+    let base = qsh_proto::SetupRunReq {
+        role: SetupRole::Client,
+        name: Some("box".to_string()),
+        address: Some("box.local:4433".to_string()),
+        peer_cert_pem: None,
+        code: None,
+        forward: false,
+        service: false,
+    };
+    let bad = [
+        // Neither pin method.
+        base.clone(),
+        // Both pin methods.
+        qsh_proto::SetupRunReq {
+            code: Some("x".to_string()),
+            peer_cert_pem: Some("y".to_string()),
+            ..base.clone()
+        },
+        // A name that is not a valid label.
+        qsh_proto::SetupRunReq {
+            name: Some("has space".to_string()),
+            code: Some("x".to_string()),
+            ..base.clone()
+        },
+        // A certificate that is not one.
+        qsh_proto::SetupRunReq {
+            peer_cert_pem: Some("not a pem".to_string()),
+            ..base.clone()
+        },
+        // A flag that does not apply to the role.
+        qsh_proto::SetupRunReq {
+            service: true,
+            peer_cert_pem: Some("not a pem".to_string()),
+            ..base.clone()
+        },
+        // No name at all.
+        qsh_proto::SetupRunReq { name: None, ..base },
+    ];
+    for request in bad {
+        let err = ops.setup_run(&request, &env).unwrap_err();
+        assert_eq!(
+            err.code,
+            qsh_proto::ErrorCode::InvalidArgument,
+            "{request:?}"
+        );
+        assert!(err.details.is_null(), "validation runs before any step");
+    }
+    assert!(
+        std::fs::read_dir(guard.path()).unwrap().next().is_none(),
+        "a rejected request created files"
+    );
+}

@@ -60,7 +60,9 @@ pub use load::{
 // findings build their own `detail` example rows from these, the same
 // generators `minimal_policy_example` (used only inside `acl::load` now)
 // itself calls for `acl_policy_missing`/`acl_policy_invalid`.
-pub(crate) use load::{ca_policy_example_row, policy_example_rows};
+pub(crate) use load::{
+    ca_policy_example_row, example_allow_actions, policy_example_rows, policy_example_rows_with,
+};
 pub use policy::{ActionPattern, Policy, Rule, Scope, Verdict};
 
 // Expands to the literal restart-notice string below. A `macro_rules!`

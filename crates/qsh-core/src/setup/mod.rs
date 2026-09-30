@@ -13,6 +13,19 @@
 
 use qsh_proto::{SetupRole, SetupStepId};
 
+use crate::ops::Operation;
+
+mod run;
+
+pub use run::SetupEnv;
+
+/// The `setup.run` operation (`qsh setup`, `docs/CLI.md` §6.20).
+pub struct SetupRunOp;
+
+impl Operation for SetupRunOp {
+    const COMMAND: &'static str = "setup.run";
+}
+
 /// The steps `role` runs, in run order (ADR-0024 결정 8).
 ///
 /// `with_cert` says the pin comes from a certificate file (`--peer-cert`)

@@ -509,7 +509,7 @@ impl Ops {
 /// rule (`crate::trust::validate_peer_label`, ADR-0012 결정 6), mapping a
 /// failure to `INVALID_ARGUMENT`. Never echoes `label` itself — only which
 /// rule it broke (`crate::trust::PeerLabelError`'s own `Display`).
-fn validate_peer_label_arg(label: &str) -> Result<String, OpError> {
+pub(crate) fn validate_peer_label_arg(label: &str) -> Result<String, OpError> {
     crate::trust::validate_peer_label(label)
         .map(|()| label.to_string())
         .map_err(|err| {
@@ -525,7 +525,7 @@ fn validate_peer_label_arg(label: &str) -> Result<String, OpError> {
 /// an oversized input is always this one explicit `INVALID_ARGUMENT`
 /// rather than a capped-but-truncated read failing X.509 parsing instead.
 /// Never echoes `cert_pem` itself, only the limit.
-fn check_cert_pem_size(cert_pem: &str) -> Result<(), OpError> {
+pub(crate) fn check_cert_pem_size(cert_pem: &str) -> Result<(), OpError> {
     if cert_pem.len() > CERT_PEM_MAX {
         return Err(OpError::new(
             ErrorCode::InvalidArgument,
@@ -540,7 +540,7 @@ fn check_cert_pem_size(cert_pem: &str) -> Result<(), OpError> {
 /// [`OpError`] both `trust add --cert-file` and `trust add-ca` report for
 /// it (ADR-0013 결정 4): `details` stays `Value::Null` and the message is
 /// one of `CertPemError`'s own fixed strings — never an input byte.
-fn cert_pem_op_error(err: crate::identity::pem::CertPemError) -> OpError {
+pub(crate) fn cert_pem_op_error(err: crate::identity::pem::CertPemError) -> OpError {
     OpError::new(ErrorCode::InvalidArgument, err.to_string()).with_retryable(false)
 }
 
