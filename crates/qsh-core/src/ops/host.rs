@@ -443,6 +443,86 @@ fn is_live(entry: &ReverseHostEntry) -> bool {
     entry.local.state == "reachable"
 }
 
+/// Which daemon socket a supervised reverse-route tunnel asks again after
+/// losing its registration (ADR-0023 decisions 4 and 7-1). This is the
+/// reverse half of [`resolve_route`] and nothing else: it never looks at
+/// `trust.toml` or `hosts.toml`, so a forward pin of the same name is never
+/// a candidate (decision 22).
+///
+/// - a live registration wins; two daemons holding the name live is
+///   `INVALID_ARGUMENT`, as in routing, and ends the tunnel;
+/// - else a stale one, preferring `previous` (the daemon that held the
+///   route before), which is where the daemon's own wait for a newer
+///   generation happens;
+/// - else the name is on no daemon: `HOST_NOT_FOUND`, retried by the
+///   caller. The registration was swept after `stale_retention`, or has
+///   not come back yet;
+/// - no daemon at all is `CONNECTION_FAILED`, also retried: a restarting
+///   `qsh listen` binds a new socket.
+#[cfg(unix)]
+pub(crate) fn pick_reverse_socket(
+    daemons: &[crate::localctl::client::DaemonHostList],
+    name: &str,
+    previous: &std::path::Path,
+) -> Result<PathBuf, OpError> {
+    let key = lookup_name(name);
+    if daemons.is_empty() {
+        return Err(OpError::new(
+            ErrorCode::ConnectionFailed,
+            "no qsh listen daemon is running on this machine",
+        ));
+    }
+    let named: Vec<(&crate::localctl::client::DaemonHostList, &LocalHost)> = daemons
+        .iter()
+        .flat_map(|daemon| daemon.hosts.iter().map(move |host| (daemon, host)))
+        .filter(|(_, host)| host.name == key)
+        .collect();
+    let live: Vec<_> = named
+        .iter()
+        .filter(|(_, host)| host.state == "reachable")
+        .collect();
+    match live.as_slice() {
+        [] => {}
+        [(daemon, _)] => return Ok(daemon.socket.clone()),
+        many => {
+            let mut pids: Vec<u32> = many.iter().map(|(daemon, _)| daemon.pid).collect();
+            pids.sort_unstable();
+            pids.dedup();
+            return Err(OpError::new(
+                ErrorCode::InvalidArgument,
+                format!(
+                    "host {name:?} is registered live by more than one qsh listen daemon on \
+                     this machine (pids {pids:?}); routing refuses to guess which one to use"
+                ),
+            )
+            .with_details(serde_json::json!({ "pids": pids })));
+        }
+    }
+    if let Some((daemon, _)) = named
+        .iter()
+        .find(|(daemon, _)| daemon.socket.as_path() == previous)
+        .or_else(|| named.first())
+    {
+        return Ok(daemon.socket.clone());
+    }
+    Err(OpError::new(
+        ErrorCode::HostNotFound,
+        format!("no qsh listen daemon on this machine lists host {name:?} right now"),
+    )
+    .with_retryable(true))
+}
+
+/// [`pick_reverse_socket`] over the daemons found under `runtime_dir`.
+#[cfg(unix)]
+pub(crate) async fn find_reverse_socket(
+    runtime_dir: &std::path::Path,
+    name: &str,
+    previous: &std::path::Path,
+) -> Result<PathBuf, OpError> {
+    let daemons = crate::localctl::client::admin_host_list_all(runtime_dir).await;
+    pick_reverse_socket(&daemons, name, previous)
+}
+
 /// `ErrorCode::InvalidArgument` for an empty/whitespace-only (or, after
 /// [`hint_alias`] strips a `user@` prefix, empty-after-stripping) host
 /// name. One error value, every empty-alias call site in [`resolve_route`]

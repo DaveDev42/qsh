@@ -1154,22 +1154,23 @@ impl Ops {
         }
     }
 
-    /// [`connect`](Self::connect), also handing back the resolved
-    /// [`PeerTarget`] when the route is the forward one. A supervised
-    /// tunnel re-dials that same target after a loss instead of resolving
-    /// the host again (ADR-0023 decision 4).
+    /// [`connect`](Self::connect), also handing back what a supervised
+    /// tunnel needs to mend the route later: the resolved [`PeerTarget`] on
+    /// the forward route, re-dialed as is instead of resolving the host
+    /// again (ADR-0023 decision 4), and the registration `generation` on
+    /// the reverse route (decision 7-1).
     pub(crate) fn connect_keeping_target(
         &self,
         host: &str,
-    ) -> Result<(Connected, Option<PeerTarget>), OpError> {
+    ) -> Result<(Connected, RouteSeed), OpError> {
         match self.resolve_route(host)? {
             PeerRoute::Forward(target) => {
                 let conn = self.connect_target(&target)?;
-                Ok((conn, Some(target)))
+                Ok((conn, RouteSeed::Forward(Box::new(target))))
             }
             PeerRoute::Reverse(route) => self
                 .connect_reverse(&route)
-                .map(|(conn, _generation)| (conn, None)),
+                .map(|(conn, generation)| (conn, RouteSeed::Reverse { generation })),
         }
     }
 
@@ -1232,6 +1233,20 @@ impl Ops {
             "reverse routing (localctl) is not available on this platform",
         ))
     }
+}
+
+/// What the first open of a supervised tunnel learned about its route
+/// (see [`Ops::connect_keeping_target`]).
+pub(crate) enum RouteSeed {
+    /// Forward route: the peer as resolved, re-dialed as is.
+    Forward(Box<PeerTarget>),
+    /// Reverse route: the generation of the registration the first open
+    /// rode. The daemon socket and host name are on the `Connected`.
+    Reverse {
+        // Read only by the unix-only reverse supervisor.
+        #[cfg_attr(not(unix), allow(dead_code))]
+        generation: u64,
+    },
 }
 
 #[cfg(test)]
