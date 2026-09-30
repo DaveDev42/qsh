@@ -77,6 +77,21 @@ pub struct TunnelOpenReq {
     /// `qsh-core`'s `Ops::tunnel_open`, not here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait_ms: Option<u32>,
+    /// Supervise budget in milliseconds (`docs/CLI.md` §6.9's
+    /// `--supervise`, ADR-0023 decision 1): how long the tunnel may stay
+    /// disconnected in total before it gives up. Additive-optional: absent
+    /// or `0` means the tunnel ends with its connection, byte-identical to
+    /// every request built before this field existed. Bound `0..=86_400_000`,
+    /// enforced in `qsh-core`'s `Ops`, not here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervise_ms: Option<u32>,
+    /// How long, in milliseconds, a local accept is held while a
+    /// supervised tunnel is disconnected instead of being refused at once
+    /// (`docs/CLI.md` §6.9's `--accept-hold`, ADR-0023 decision 13).
+    /// Additive-optional; needs a nonzero `supervise_ms`, refused on
+    /// `"remote"` mode. Bound `0..=2_000`, enforced in `qsh-core`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accept_hold_ms: Option<u32>,
 }
 
 /// Data payload of a successful `tunnel.open`: the opened tunnel, exactly
@@ -139,6 +154,14 @@ pub struct TunnelDynamicReq {
     pub bind: Option<String>,
     /// The port to bind the SOCKS5 listener on.
     pub listen_port: u32,
+    /// Supervise budget in milliseconds — same meaning and bound as
+    /// [`TunnelOpenReq::supervise_ms`] (ADR-0023 decision 1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervise_ms: Option<u32>,
+    /// Accept-hold window in milliseconds — same meaning and bound as
+    /// [`TunnelOpenReq::accept_hold_ms`] (ADR-0023 decision 13).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accept_hold_ms: Option<u32>,
 }
 
 /// Data payload of a successful `tunnel.dynamic`: the opened `-D` listener

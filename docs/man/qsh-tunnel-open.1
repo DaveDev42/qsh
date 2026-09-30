@@ -4,7 +4,7 @@
 .SH NAME
 qsh\-tunnel\-open \- Open a tunnel to a pinned host and hold it open
 .SH SYNOPSIS
-\fBqsh tunnel open\fR [\fB\-\-json\fR] [\fB\-L\fR|\fB\-\-local\fR] [\fB\-\-jsonl\fR] [\fB\-R\fR|\fB\-\-remote\fR] [\fB\-D\fR|\fB\-\-dynamic\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-wait\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fIHOST\fR> 
+\fBqsh tunnel open\fR [\fB\-\-json\fR] [\fB\-L\fR|\fB\-\-local\fR] [\fB\-\-jsonl\fR] [\fB\-R\fR|\fB\-\-remote\fR] [\fB\-D\fR|\fB\-\-dynamic\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-\-wait\fR] [\fB\-\-supervise\fR] [\fB\-\-accept\-hold\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fIHOST\fR> 
 .SH DESCRIPTION
 Open a tunnel to a pinned host and hold it open.
 .PP
@@ -38,6 +38,12 @@ Suppress diagnostic output on stderr
 .TP
 \fB\-\-wait\fR \fI<MS>\fR [default: 0]
 Milliseconds to keep retrying the initial route resolution while it answers the reverse\-registration\-stale branch. `0` (the default) is one attempt, unchanged from before this flag existed. Applies to `\-\-local`/`\-\-remote` only — combining it with `\-\-dynamic` is a clap usage error. Bound `0..=600000`; above it is `INVALID_ARGUMENT`. Full semantics: `docs/CLI.md` §6.9
+.TP
+\fB\-\-supervise\fR \fI<MS>\fR [default: 0]
+Keep the tunnel across connection loss: re\-establish it, for up to this many milliseconds of total disconnected time, instead of ending with the connection (ADR\-0023). `0` (the default) is today\*(Aqs behavior. Bound `0..=86400000`; above it is `INVALID_ARGUMENT`. Standalone `tunnel open` only; the interactive form has no such flag. Full semantics: `docs/CLI.md` §6.9
+.TP
+\fB\-\-accept\-hold\fR \fI<MS>\fR [default: 0]
+While a supervised tunnel is disconnected, hold each local accept for up to this many milliseconds instead of refusing it at once (ADR\-0023 decision 13). `0` (the default) refuses at once. Needs a nonzero `\-\-supervise`; bound `0..=2000`; not valid with `\-\-remote`. Full semantics: `docs/CLI.md` §6.9
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help (see a summary with \*(Aq\-h\*(Aq)

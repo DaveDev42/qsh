@@ -551,6 +551,23 @@ pub struct TunnelOpenArgs {
         conflicts_with = "dynamic"
     )]
     pub wait: u32,
+
+    /// Keep the tunnel across connection loss: re-establish it, for up to
+    /// this many milliseconds of total disconnected time, instead of ending
+    /// with the connection (ADR-0023). `0` (the default) is today's
+    /// behavior. Bound `0..=86400000`; above it is `INVALID_ARGUMENT`.
+    /// Standalone `tunnel open` only; the interactive form has no such
+    /// flag. Full semantics: `docs/CLI.md` §6.9.
+    #[arg(long, value_name = "MS", default_value_t = 0)]
+    pub supervise: u32,
+
+    /// While a supervised tunnel is disconnected, hold each local accept
+    /// for up to this many milliseconds instead of refusing it at once
+    /// (ADR-0023 decision 13). `0` (the default) refuses at once. Needs a
+    /// nonzero `--supervise`; bound `0..=2000`; not valid with `--remote`.
+    /// Full semantics: `docs/CLI.md` §6.9.
+    #[arg(long, value_name = "MS", default_value_t = 0)]
+    pub accept_hold: u32,
 }
 
 /// Arguments of `qsh exec`.

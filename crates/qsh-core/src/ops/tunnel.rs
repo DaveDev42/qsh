@@ -600,6 +600,14 @@ impl Ops {
     /// identical to every call before this field existed.
     pub fn tunnel_open(&self, req: TunnelOpenReq) -> Result<TunnelHold, OpError> {
         let spec = spec_from_request(&req)?;
+        check_supervise(
+            req.supervise_ms,
+            req.accept_hold_ms,
+            match spec.direction {
+                ForwardDirection::Local => SuperviseMode::Local,
+                ForwardDirection::Remote => SuperviseMode::Remote,
+            },
+        )?;
         let wait_budget_ms = wait_budget_ms(req.wait_ms)?;
         let wait_budget_ms = self.cap_wait_budget_to_stale_retention(wait_budget_ms);
         let conn = self.connect_with_wait(&req.host, wait_budget_ms)?;
@@ -865,6 +873,7 @@ impl Ops {
     /// no tunnel registry" (this module's own top doc), not something an
     /// in-process table can fix across a process boundary.
     pub fn tunnel_open_and_hold(&self, req: TunnelOpenReq) -> Result<Tunnel, OpError> {
+        reject_supervise_for_and_hold(req.supervise_ms)?;
         let hold = self.tunnel_open(req)?;
         let tunnel = hold.tunnel().clone();
         self.register_hold(hold, tunnel.tunnel_id.clone());
@@ -930,6 +939,7 @@ impl Ops {
         let listen_port = port(req.listen_port, "listen_port")?;
         crate::tunnel::local::loopback_bind_addr(req.bind.as_deref(), listen_port, "-D")
             .map_err(map_local_forward_error)?;
+        check_supervise(req.supervise_ms, req.accept_hold_ms, SuperviseMode::Dynamic)?;
         let conn = self.connect(&req.host)?;
         Self::tunnel_dynamic_with_connected(conn, req.bind.as_deref(), listen_port, &req.host)
     }
@@ -1057,6 +1067,7 @@ impl Ops {
     /// (this module's own top doc), so a same-process `tunnel.close` can
     /// tear a `-D` listener down too, not only a `-L`/`-R` one.
     pub fn tunnel_dynamic_and_hold(&self, req: TunnelDynamicReq) -> Result<DynamicTunnel, OpError> {
+        reject_supervise_for_and_hold(req.supervise_ms)?;
         let hold = self.tunnel_dynamic(req)?;
         let tunnel = hold.dynamic_tunnel().clone();
         self.register_hold(hold, tunnel.tunnel_id.clone());
@@ -1386,6 +1397,112 @@ fn wait_budget_ms(wait_ms: Option<u32>) -> Result<u64, OpError> {
             format!("tunnel wait_ms {ms} is outside 0..={WAIT_MS_MAX}"),
         )),
     }
+}
+
+/// Upper bound on `supervise_ms` (`docs/CLI.md` §6.9's `--supervise`,
+/// ADR-0023 decision 1): one day of total disconnected time.
+const SUPERVISE_MS_MAX: u32 = 86_400_000;
+
+/// Upper bound on `accept_hold_ms` (`docs/CLI.md` §6.9's `--accept-hold`,
+/// ADR-0023 decision 13).
+const ACCEPT_HOLD_MS_MAX: u32 = 2_000;
+
+/// Which forward shape a supervise request is for. Only the tunnel mode
+/// matters to validation and to [`supervise_supported`]; the route is a
+/// second axis of that table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SuperviseMode {
+    Local,
+    Remote,
+    Dynamic,
+}
+
+/// Which route carries a supervised tunnel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SuperviseRoute {
+    Forward,
+    Reverse,
+}
+
+/// The support table of ADR-0023 decision 24: which `(route, mode,
+/// accept_hold)` combinations a supervised tunnel does today. Every row is
+/// `false` until the supervisor lands; later steps flip rows on, and the
+/// last one deletes this function together with its `UNSUPPORTED` branch.
+const fn supervise_supported(
+    _route: SuperviseRoute,
+    _mode: SuperviseMode,
+    _accept_hold: bool,
+) -> bool {
+    false
+}
+
+/// Validate `supervise_ms` and `accept_hold_ms` before any connection or
+/// bind exists (ADR-0023 decisions 1, 13, 24). Order: ranges, then the
+/// combinations that make no sense (`INVALID_ARGUMENT`), then
+/// `UNSUPPORTED` for a valid request whose shape is not built yet.
+///
+/// The route is not resolved this early, so `UNSUPPORTED` is decided on
+/// the most permissive route: a shape unsupported on both routes is
+/// refused here, and one supported on only one is left to the caller.
+fn check_supervise(
+    supervise_ms: Option<u32>,
+    accept_hold_ms: Option<u32>,
+    mode: SuperviseMode,
+) -> Result<(), OpError> {
+    let supervise = supervise_ms.unwrap_or(0);
+    let hold = accept_hold_ms.unwrap_or(0);
+    if supervise > SUPERVISE_MS_MAX {
+        return Err(OpError::new(
+            ErrorCode::InvalidArgument,
+            format!("tunnel supervise_ms {supervise} is outside 0..={SUPERVISE_MS_MAX}"),
+        ));
+    }
+    if hold > ACCEPT_HOLD_MS_MAX {
+        return Err(OpError::new(
+            ErrorCode::InvalidArgument,
+            format!("tunnel accept_hold_ms {hold} is outside 0..={ACCEPT_HOLD_MS_MAX}"),
+        ));
+    }
+    if hold != 0 && supervise == 0 {
+        return Err(OpError::new(
+            ErrorCode::InvalidArgument,
+            "tunnel accept_hold_ms needs a nonzero supervise_ms",
+        ));
+    }
+    if hold != 0 && mode == SuperviseMode::Remote {
+        return Err(OpError::new(
+            ErrorCode::InvalidArgument,
+            "tunnel accept_hold_ms does not apply to a remote forward",
+        ));
+    }
+    if supervise == 0 {
+        return Ok(());
+    }
+    let supported = [SuperviseRoute::Forward, SuperviseRoute::Reverse]
+        .into_iter()
+        .any(|route| supervise_supported(route, mode, hold != 0));
+    if supported {
+        Ok(())
+    } else {
+        Err(OpError::new(
+            ErrorCode::Unsupported,
+            "--supervise is not yet supported on the reverse route or with --remote",
+        ))
+    }
+}
+
+/// `tunnel_open_and_hold`/`tunnel_dynamic_and_hold` serve long-running
+/// hosts that own their own lifecycle; a supervised tunnel is a CLI
+/// foreground behavior, so a nonzero `supervise_ms` is refused before
+/// anything connects (ADR-0023 decision 1).
+fn reject_supervise_for_and_hold(supervise_ms: Option<u32>) -> Result<(), OpError> {
+    if supervise_ms.unwrap_or(0) != 0 {
+        return Err(OpError::new(
+            ErrorCode::InvalidArgument,
+            "supervise_ms is not accepted by the hold-in-process tunnel calls",
+        ));
+    }
+    Ok(())
 }
 
 /// Whether `err` is exactly the PR-C stale-registration branch
