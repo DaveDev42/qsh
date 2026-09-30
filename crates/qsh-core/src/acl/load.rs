@@ -563,7 +563,26 @@ fn example_allow_list(role: Role) -> &'static str {
 /// so `detail` shows a row for the peer the finding is actually about,
 /// not the whole trust store.
 pub(crate) fn policy_example_rows(names: &[&str], role: Role) -> String {
-    let example_allow = example_allow_list(role);
+    policy_example_rows_with(names, role, &[])
+}
+
+/// The actions [`policy_example_rows`] puts in `role`'s `allow` list, in the
+/// order the row prints them. `qsh setup` checks each of these with
+/// `acl.check`, so the printed rows and the verification cannot drift apart.
+pub(crate) fn example_allow_actions(role: Role) -> Vec<&'static str> {
+    example_allow_list(role)
+        .trim_matches(|c| c == '[' || c == ']')
+        .split(", ")
+        .map(|quoted| quoted.trim_matches('"'))
+        .collect()
+}
+
+/// [`policy_example_rows`] with `extra` actions appended to the `allow` list
+/// (ADR-0024 결정 4: `qsh setup --forward` adds `forward.local` this way,
+/// without a new [`Role`] variant). `extra` empty is byte-identical to
+/// [`policy_example_rows`].
+pub(crate) fn policy_example_rows_with(names: &[&str], role: Role, extra: &[&str]) -> String {
+    let example_allow = allow_list_with(role, extra);
     if names.is_empty() {
         return format!("[[acl]]\nprincipal = \"device:<name>\"\nallow = {example_allow}\n");
     }
@@ -574,6 +593,19 @@ pub(crate) fn policy_example_rows(names: &[&str], role: Role) -> String {
         ));
     }
     out
+}
+
+fn allow_list_with(role: Role, extra: &[&str]) -> String {
+    let base = example_allow_list(role);
+    if extra.is_empty() {
+        return base.to_string();
+    }
+    let mut list = base.trim_end_matches(']').to_string();
+    for action in extra {
+        list.push_str(&format!(", \"{action}\""));
+    }
+    list.push(']');
+    list
 }
 
 /// The `auth_path = "ca"` counterpart to [`policy_example_rows`] —

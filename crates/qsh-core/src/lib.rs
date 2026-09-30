@@ -67,12 +67,13 @@ pub use ops::{
     OpError, Operation, Ops, RecoveryConfig, SchemaOp, ServiceInstallOp, ServiceStatusOp,
     ServiceUninstallOp, SessionAttachOp, SessionAttachStream, SessionCloseOp, SessionGetOp,
     SessionListOp, SessionOpenOp, SessionReadOp, SessionReadOutput, SessionReader, SessionResizeOp,
-    SessionWriteOp, TrustAcceptOp, TrustAddCaOp, TrustAddOp, TrustInviteOp, TrustListOp,
-    TrustRemoveOp, TrustRenameOp, TrustSshPreviewOp, TunnelCloseOp, TunnelDynamicOp, TunnelHold,
-    TunnelListOp, TunnelOpenOp, VersionOp, cert_file_fingerprint_conflict, normalize_invite_code,
-    parse_dynamic_forwards, parse_local_forwards, parse_remote_forwards, read_cert_file_arg,
-    resolve_invite_code_source,
+    SessionWriteOp, SetupRunOp, TrustAcceptOp, TrustAddCaOp, TrustAddOp, TrustInviteOp,
+    TrustListOp, TrustRemoveOp, TrustRenameOp, TrustSshPreviewOp, TunnelCloseOp, TunnelDynamicOp,
+    TunnelHold, TunnelListOp, TunnelOpenOp, VersionOp, cert_file_fingerprint_conflict,
+    normalize_invite_code, parse_dynamic_forwards, parse_local_forwards, parse_remote_forwards,
+    read_cert_file_arg, resolve_invite_code_source,
 };
+pub use setup::SetupEnv;
 pub use trust::{SharedTrustStore, TrustStore};
 
 // Certificate-derived identity types belong to the transport layer, but they
