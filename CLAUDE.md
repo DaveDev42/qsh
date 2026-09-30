@@ -2,7 +2,7 @@
 
 QSH is a QUIC-based direct-connect remote shell (single Rust binary `qsh`) that decouples PTY session lifetime from QUIC connection lifetime, so the same shell survives IP changes, sleep, and network switches without a relay server.
 
-`docs/PRD.md` and `docs/CLI.md` are the binding contract for behavior, wire format, and JSON envelope shape. `docs/adr/` holds architecture decision records (ADRs). **Read the relevant PRD/CLI.md section and any related ADR before proposing a change to protocol, wire format, or JSON contract** — do not re-litigate a decision that already has an accepted ADR; propose a new ADR instead if you believe it's wrong.
+`docs/PRD.md` and `docs/CLI.md` are the binding contract for behavior, wire format, and JSON envelope shape. `docs/adr/` holds architecture decision records (ADRs). Read the relevant PRD/CLI.md section and any related ADR before proposing a change to protocol, wire format, or JSON contract, and do not re-litigate a decision that already has an accepted ADR; propose a new ADR instead if you believe it's wrong.
 
 ## Session onboarding
 
