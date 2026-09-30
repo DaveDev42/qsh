@@ -22,16 +22,29 @@
 #                     leg existed has no such asset; on aarch64 the installer
 #                     checks that tag's SHA256SUMS first and says so.
 #
+#   QSH_INSECURE_SKIP_VERIFY
+#                    Set to exactly "1" to skip BOTH the SHA256SUMS check and
+#                     the provenance check. It prints a warning and is the
+#                     only way past either check. Nothing then vouches that
+#                     the archive is the one the release published.
+#
 # This script never invokes sudo. If QSH_INSTALL_DIR is not writable, it
 # fails with a message rather than escalating privileges on your behalf.
 #
-# What the checksum does and does not prove: SHA256SUMS is fetched from the
-# same release as the archive, so it catches a truncated or corrupted
-# download, not a compromised release. It is an integrity check, not a
-# signature. Whether the macOS binaries are Developer ID signed and
-# notarized depends on whether the release was cut with Apple credentials
-# configured (docs/deploy/release-secrets.md); this installer does not
-# check either way.
+# What the checks do and do not prove. SHA256SUMS is fetched from the same
+# release as the archive, so it catches a truncated or corrupted download,
+# not a compromised release. It is an integrity check, not a signature.
+# Provenance is the stronger claim: when the GitHub CLI is installed and
+# logged in, the installer runs `gh attestation verify` on the archive,
+# which shows the file was produced by this repository's release.yml run
+# from a named commit. It does not show that the commit is correct or safe
+# to run. The installer fails closed on provenance: a failed verification
+# installs nothing. Without a usable GitHub CLI (missing, or not logged in)
+# it cannot verify, says "provenance not verified" on stderr, and installs
+# on the checksum alone. Whether the macOS binaries are Developer ID signed
+# and notarized depends on whether the release was cut with Apple
+# credentials configured (docs/deploy/release-secrets.md); this installer
+# does not check either way.
 #
 # Archive naming is a contract with .github/workflows/release.yml:
 # qsh-<tag>-<target>.tar.gz (.zip on Windows), with a SHA256SUMS file
@@ -119,6 +132,30 @@ QSH_VERSION to pick a tag explicitly."
     echo "$tag"
 }
 
+# Checks the archive's build provenance with the GitHub CLI. Fail closed when
+# `gh` can run the check and the check fails; degrade to a warning only when
+# `gh` cannot run it at all (not installed, or not logged in).
+verify_provenance() {
+    [ -z "$skip_verify" ] || return 0
+
+    if ! command -v gh >/dev/null 2>&1; then
+        log "warning: provenance not verified: 'gh' (GitHub CLI) is not installed. \
+Installing on the SHA256SUMS check alone. To verify, install gh, run \
+'gh auth login', and re-run this script."
+        return 0
+    fi
+    if ! gh auth status >/dev/null 2>&1; then
+        log "warning: provenance not verified: 'gh' is not logged in. \
+Installing on the SHA256SUMS check alone. To verify, run 'gh auth login' \
+and re-run this script."
+        return 0
+    fi
+
+    log "verifying provenance"
+    gh attestation verify "$1" --repo "$QSH_REPO" >&2 ||
+        die "provenance verification failed for $(basename "$1") — refusing to install"
+}
+
 main() {
     need_cmd uname
     need_cmd curl
@@ -169,6 +206,14 @@ to the directory the binary should go in"
     trap 'exit 130' INT
     trap 'exit 143' TERM
 
+    skip_verify=""
+    if [ "${QSH_INSECURE_SKIP_VERIFY:-}" = "1" ]; then
+        skip_verify=1
+        log "warning: QSH_INSECURE_SKIP_VERIFY=1 is set: skipping BOTH the \
+SHA256SUMS check and the provenance check. Nothing vouches that this archive \
+is the one ${QSH_REPO} published."
+    fi
+
     sums_fetched=""
     if [ "$target" = "aarch64-unknown-linux-musl" ]; then
         # Tags cut before the aarch64 musl leg existed carry no such asset.
@@ -189,30 +234,34 @@ QSH_LIBC to install the glibc build"
     curl -fsSL -o "${workdir}/${asset}" "$archive_url" ||
         die "failed to download ${archive_url} (does that version/target exist?)"
 
-    if [ -z "$sums_fetched" ]; then
+    if [ -z "$sums_fetched" ] && [ -z "$skip_verify" ]; then
         log "downloading ${sums_url}"
         curl -fsSL -o "${workdir}/SHA256SUMS" "$sums_url" ||
             die "failed to download SHA256SUMS from ${sums_url}"
     fi
 
-    # Fail closed: no entry, more than one entry, or anything that is not a
-    # single 64-char hex digest aborts before the archive is unpacked. The
-    # filename is matched as a whole field rather than as a regex, so the
-    # dots in the asset name cannot match some other archive's line.
-    log "verifying checksum"
-    want="$(awk -v f="$asset" '$2 == f { print $1 }' "${workdir}/SHA256SUMS")" ||
-        die "failed to read SHA256SUMS"
-    case "$want" in
-        "") die "SHA256SUMS has no entry for ${asset} — refusing to install" ;;
-        *[!0-9a-fA-F]*) die "SHA256SUMS entry for ${asset} is not a single hex digest — refusing to install" ;;
-    esac
-    [ "${#want}" -eq 64 ] ||
-        die "SHA256SUMS entry for ${asset} is ${#want} chars, expected 64 — refusing to install"
+    if [ -z "$skip_verify" ]; then
+        # Fail closed: no entry, more than one entry, or anything that is not a
+        # single 64-char hex digest aborts before the archive is unpacked. The
+        # filename is matched as a whole field rather than as a regex, so the
+        # dots in the asset name cannot match some other archive's line.
+        log "verifying checksum"
+        want="$(awk -v f="$asset" '$2 == f { print $1 }' "${workdir}/SHA256SUMS")" ||
+            die "failed to read SHA256SUMS"
+        case "$want" in
+            "") die "SHA256SUMS has no entry for ${asset} — refusing to install" ;;
+            *[!0-9a-fA-F]*) die "SHA256SUMS entry for ${asset} is not a single hex digest — refusing to install" ;;
+        esac
+        [ "${#want}" -eq 64 ] ||
+            die "SHA256SUMS entry for ${asset} is ${#want} chars, expected 64 — refusing to install"
 
-    got="$($sha256_cmd "${workdir}/${asset}" | awk '{ print $1 }')" ||
-        die "failed to hash ${asset}"
-    [ "$want" = "$got" ] ||
-        die "checksum mismatch for ${asset}: expected ${want}, got ${got} — refusing to install"
+        got="$($sha256_cmd "${workdir}/${asset}" | awk '{ print $1 }')" ||
+            die "failed to hash ${asset}"
+        [ "$want" = "$got" ] ||
+            die "checksum mismatch for ${asset}: expected ${want}, got ${got} — refusing to install"
+    fi
+
+    verify_provenance "${workdir}/${asset}"
 
     # Extract the `qsh` member by name -- the archive also carries the man
     # pages under `man/`, which this installer does not install -- so a

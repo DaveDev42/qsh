@@ -17,6 +17,7 @@ curl -fsSL https://raw.githubusercontent.com/DaveDev42/qsh/main/scripts/install.
 | `QSH_INSTALL_DIR` | `$HOME/.local/bin` | Where the `qsh` binary is installed |
 | `QSH_REPO` | `DaveDev42/qsh` | `owner/repo` to install from (forks, testing) |
 | `QSH_LIBC` | `gnu` | Linux only. `musl` picks the static build (x86_64 or aarch64) for old-glibc distributions. On aarch64 the installer reads the tag's `SHA256SUMS` first and stops with a message if the tag predates the aarch64 musl asset |
+| `QSH_INSECURE_SKIP_VERIFY` | unset | Exactly `1` skips the checksum and the provenance check, with a warning |
 
 The script downloads the release archive and that release's `SHA256SUMS`,
 requires exactly one 64-character hex entry for the archive it fetched, and
@@ -37,19 +38,36 @@ the macOS binaries are Developer ID signed and notarized depends on
 whether the release was cut with Apple credentials configured
 (`docs/deploy/release-secrets.md`); the installer does not check.
 
-Provenance is a separate check, and the installer does not perform it.
-Every asset `release.yml` publishes for a tag after `v0.2.0`, `SHA256SUMS`
-included, gets a build provenance attestation from the same workflow run,
-which the GitHub CLI verifies:
+Provenance is a separate check. Every asset `release.yml` publishes for a
+tag after `v0.2.0`, `SHA256SUMS` included, gets a build provenance
+attestation from the same workflow run, which the GitHub CLI verifies:
 
 ```bash
 gh attestation verify qsh-<tag>-<target>.tar.gz --repo DaveDev42/qsh
 ```
 
-Add `--signer-workflow DaveDev42/qsh/.github/workflows/release.yml` to also
-pin which workflow signed it, rather than trusting any workflow in the repo.
-The installer stays free of a `gh` dependency on purpose: every required
-tool is one more way for an install to fail.
+The installer runs exactly that command on the downloaded archive, after
+the checksum and before unpacking. It fails closed where it can verify and
+says so where it cannot:
+
+- `gh` installed and logged in (`gh auth status` succeeds): the archive must
+  verify. A failed verification installs nothing.
+- `gh` missing, or installed but not logged in: the installer prints
+  `provenance not verified` on stderr and installs on the `SHA256SUMS` check
+  alone.
+- `QSH_INSECURE_SKIP_VERIFY=1` (exactly `1`; any other value is ignored):
+  skips both the checksum and the provenance check and prints a warning. It
+  is the only way past either check.
+
+Tags up to `v0.2.0` have no attestation, so with `gh` logged in the
+installer refuses them. Use the flag for those, or log `gh` out.
+
+What provenance shows is narrow: the file was produced by this repository's
+`release.yml` run from a named commit. It says nothing about whether the
+code at that commit is correct or safe to run. To pin the signing workflow
+when verifying by hand, add
+`--signer-workflow DaveDev42/qsh/.github/workflows/release.yml`; the
+installer does not pass it.
 
 Archive naming (`qsh-<tag>-<target>.tar.gz`, `.zip` on Windows) and the
 `SHA256SUMS` file are produced by `.github/workflows/release.yml`. That

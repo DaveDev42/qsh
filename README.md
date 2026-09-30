@@ -140,7 +140,8 @@ The script picks the archive for your platform, verifies it against the
 release's `SHA256SUMS` before unpacking, and installs to `~/.local/bin`. It
 never calls `sudo`; if the target directory is not writable it says so and
 stops. That checksum is an integrity check against a bad download, not a
-signature.
+signature. When the GitHub CLI is installed and logged in, the script also
+verifies the archive's build provenance (see below).
 
 On macOS the release workflow signs and notarizes the binaries when the
 release is cut with Apple credentials configured; no published release has
@@ -162,6 +163,7 @@ would.
 | `QSH_INSTALL_DIR` | `$HOME/.local/bin` | Where the `qsh` binary lands (created if missing) |
 | `QSH_REPO` | `DaveDev42/qsh` | `owner/repo` to install from, for forks and testing |
 | `QSH_LIBC` | `gnu` | Linux only. `musl` picks the static build (x86_64 or aarch64) for old-glibc distributions |
+| `QSH_INSECURE_SKIP_VERIFY` | unset | Set to exactly `1` to skip both the `SHA256SUMS` check and the provenance check. Prints a warning |
 
 Every release asset cut after `v0.2.0` carries a build provenance
 attestation, `SHA256SUMS` included. With the GitHub CLI you can check one
@@ -176,9 +178,21 @@ against can itself be checked. What the attestation establishes is narrow:
 this exact file was produced by a workflow in this repository, on a
 GitHub-hosted runner, from a named commit (see scripts/README.md for pinning
 that to `release.yml` specifically). It says nothing about whether the code
-in that commit is correct or safe to run. Running it is up to you: the
-installer does not call `gh`, and nothing here replaces the `SHA256SUMS`
-check it already does.
+in that commit is correct or safe to run. Running it is up to you.
+
+The installer runs that `gh attestation verify` itself, after the
+`SHA256SUMS` check and before it unpacks anything. There are three paths:
+
+- `gh` is installed and logged in: the archive must verify. A failed
+  verification installs nothing.
+- `gh` is missing or not logged in: the installer cannot verify, prints
+  `provenance not verified` on stderr, and installs on the `SHA256SUMS`
+  check alone.
+- `QSH_INSECURE_SKIP_VERIFY=1`: both checks are skipped, with a warning.
+  This is the only way past either check.
+
+Releases cut up to `v0.2.0` have no attestation, so with `gh` logged in the
+installer refuses them; use the flag for those, or log `gh` out.
 
 What each release ships, what is signed and what is not, and how to check
 any of it is in [RELEASE-NOTES.md](RELEASE-NOTES.md).
