@@ -608,6 +608,7 @@ mod tests {
         let (_dir, ops) = temp_ops();
         ops.identity_init(IdentityInitReq {
             key_store: Some(KeyStoreMode::File),
+            ..Default::default()
         })
         .unwrap();
         let fingerprint = qsh_transport::Fingerprint::of_spki_der(b"exec-run-shared-runtime-peer");
@@ -810,6 +811,7 @@ mod tests {
         let (_dir, ops) = temp_ops();
         ops.identity_init(IdentityInitReq {
             key_store: Some(KeyStoreMode::File),
+            ..Default::default()
         })
         .unwrap();
         let identity = ops.load_identity().unwrap().expect("just initialized");
@@ -842,6 +844,7 @@ mod tests {
         let (_dir, ops) = temp_ops();
         ops.identity_init(IdentityInitReq {
             key_store: Some(KeyStoreMode::File),
+            ..Default::default()
         })
         .unwrap();
         let identity = ops.load_identity().unwrap().expect("just initialized");
@@ -880,6 +883,7 @@ mod tests {
         let (_dir, ops) = temp_ops();
         ops.identity_init(IdentityInitReq {
             key_store: Some(KeyStoreMode::File),
+            ..Default::default()
         })
         .unwrap();
         let identity = ops.load_identity().unwrap().expect("just initialized");
@@ -917,6 +921,7 @@ mod tests {
         let (_dir, ops) = temp_ops();
         ops.identity_init(IdentityInitReq {
             key_store: Some(KeyStoreMode::File),
+            ..Default::default()
         })
         .unwrap();
         let identity = ops.load_identity().unwrap().expect("just initialized");

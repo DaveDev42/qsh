@@ -21,6 +21,7 @@
 //! needing a follow-up edit.
 
 mod common;
+mod ssh_golden;
 
 use common::{CLIENT_ALIAS, Fleet, HOST_ALIAS, Sandbox, ServeGuard, exit_code, sole_envelope};
 #[cfg(unix)]
@@ -240,6 +241,35 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
         cert_chain_path_str.as_str(),
     ];
 
+    // ADR-0026: key files for the `init --import-ssh-key` refusal rows,
+    // synthesized at run time (no real key, no PEM text in the repository).
+    let ssh_key_dir = tempfile::tempdir().expect("tempdir");
+    let ssh_encrypted = ssh_golden::write(
+        ssh_key_dir.path(),
+        "encrypted",
+        &ssh_golden::encrypted_key_file(),
+    );
+    let ssh_rsa = ssh_golden::write(ssh_key_dir.path(), "rsa", &ssh_golden::rsa_key_file());
+    let ssh_garbage = ssh_golden::write(ssh_key_dir.path(), "garbage", b"not a key\n");
+    let ssh_encrypted = ssh_encrypted.to_str().unwrap().to_string();
+    let ssh_rsa = ssh_rsa.to_str().unwrap().to_string();
+    let ssh_garbage = ssh_garbage.to_str().unwrap().to_string();
+    let import_encrypted_args = [
+        "init",
+        "--key-store",
+        "file",
+        "--import-ssh-key",
+        &ssh_encrypted,
+    ];
+    let import_rsa_args = ["init", "--key-store", "file", "--import-ssh-key", &ssh_rsa];
+    let import_garbage_args = [
+        "init",
+        "--key-store",
+        "file",
+        "--import-ssh-key",
+        &ssh_garbage,
+    ];
+
     // `mut` is only needed for the `#[cfg(unix)] cases.push(..)` below —
     // unused (and clippy-denied) on the Windows leg, where that push is
     // compiled out entirely.
@@ -337,6 +367,32 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
             sandbox: &uninitialized,
             args: &["identity", "export"],
             outcome: Outcome::Fails("CONFIG_ERROR"),
+        },
+        Case {
+            name: "init --import-ssh-key: passphrase-protected key",
+            sandbox: &uninitialized,
+            args: &import_encrypted_args,
+            outcome: Outcome::Fails("UNSUPPORTED"),
+        },
+        Case {
+            name: "init --import-ssh-key: non-Ed25519 key",
+            sandbox: &uninitialized,
+            args: &import_rsa_args,
+            outcome: Outcome::Fails("UNSUPPORTED"),
+        },
+        Case {
+            name: "init --import-ssh-key: malformed key file",
+            sandbox: &uninitialized,
+            args: &import_garbage_args,
+            outcome: Outcome::Fails("INVALID_ARGUMENT"),
+        },
+        Case {
+            // The identity-exists refusal (ADR-0026) needs no valid key
+            // file: the existence check runs before the file is opened.
+            name: "init --import-ssh-key: identity already exists",
+            sandbox: &fleet.client,
+            args: &import_garbage_args,
+            outcome: Outcome::Fails("INVALID_ARGUMENT"),
         },
         Case {
             name: "trust add: malformed fingerprint",

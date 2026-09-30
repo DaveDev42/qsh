@@ -251,6 +251,12 @@ pub enum Command {
         /// `config.toml`'s `[identity].key_store`, then `auto`.
         #[arg(long, value_name = "MODE", value_parser = parse_key_store_mode)]
         key_store: Option<KeyStoreMode>,
+        /// Use this plaintext OpenSSH Ed25519 private key as the device
+        /// key instead of generating one (ADR-0026). Only valid before an
+        /// identity exists; prints the qsh and the SSH fingerprint side by
+        /// side. Nothing is pinned and `acl.toml` is never written.
+        #[arg(long, value_name = "PATH")]
+        import_ssh_key: Option<String>,
     },
 
     /// Manage this device's own identity (`docs/CLI.md` §6.11).

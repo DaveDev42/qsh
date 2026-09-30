@@ -378,11 +378,15 @@ fn dispatch(cli: &Cli, ops: Ops) -> i32 {
             ops.doctor(DoctorReq { host: host.clone() }, SystemTime::now()),
             human::print_doctor,
         ),
-        Command::Init { key_store } => finish(
+        Command::Init {
+            key_store,
+            import_ssh_key,
+        } => finish(
             cli,
             IdentityInitOp::COMMAND,
             ops.identity_init(IdentityInitReq {
                 key_store: *key_store,
+                import_ssh_key: import_ssh_key.clone(),
             }),
             human::print_init,
         ),

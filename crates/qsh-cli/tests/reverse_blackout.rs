@@ -490,6 +490,7 @@ async fn fresh_ops() -> (tempfile::TempDir, Ops, Fingerprint) {
         move || {
             ops.identity_init(IdentityInitReq {
                 key_store: Some(KeyStoreMode::File),
+                ..Default::default()
             })
         }
     })

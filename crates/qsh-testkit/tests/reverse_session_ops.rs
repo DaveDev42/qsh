@@ -84,6 +84,7 @@ async fn fresh_ops() -> (tempfile::TempDir, Ops, Fingerprint) {
     let data = blocking(&ops, |ops| {
         ops.identity_init(IdentityInitReq {
             key_store: Some(KeyStoreMode::File),
+            ..Default::default()
         })
     })
     .await

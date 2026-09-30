@@ -37,6 +37,10 @@ tracing.workspace = true
 tokio.workspace = true
 rcgen.workspace = true
 zeroize.workspace = true
+# SHA-256 of the OpenSSH wire public key blob for the SSH fingerprint
+# `qsh init --import-ssh-key` prints (ADR-0026); already resolved via
+# `qsh-transport`.
+sha2.workspace = true
 base64.workspace = true
 bytes.workspace = true
 time.workspace = true

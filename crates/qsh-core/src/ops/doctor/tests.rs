@@ -18,6 +18,7 @@ fn temp_ops() -> (tempfile::TempDir, Ops) {
 fn init_identity(ops: &Ops) {
     ops.identity_init(IdentityInitReq {
         key_store: Some(KeyStoreMode::File),
+        ..Default::default()
     })
     .unwrap();
 }

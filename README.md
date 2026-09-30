@@ -842,6 +842,16 @@ Some of these are MVP scope decisions, some are unfinished work.
   (`codesign -fs "<cert>" $(which qsh)`) or register it with
   `/usr/libexec/ApplicationFirewall/socketfilterfw --add $(which qsh)
   --unblockapp $(which qsh)` (the tool is not on `PATH`).
+- `qsh init --import-ssh-key <path>` makes an existing OpenSSH Ed25519 key
+  the device key, so SSH and qsh then share one key and its lifetime: if
+  either side leaks it, both are exposed. qsh has no key rotation or
+  revocation yet, so the only recovery is removing `identity/` from the
+  config directory, running `qsh init` again and re-pinning on every peer
+  ([ADR-0026](docs/adr/0026-ssh-key-import-scope.md)). Only unencrypted
+  Ed25519 keys are read; passphrase-protected keys, RSA and ECDSA are
+  refused. The command prints two different fingerprints for the same key
+  (qsh's SPKI hash and the `ssh-keygen -lf` hash); only the qsh one goes
+  into `trust.toml` or `acl.toml`.
 
 ## Product boundary
 

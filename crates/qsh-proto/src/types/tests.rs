@@ -77,8 +77,10 @@ fn identity_init_data_matches_documented_shape() {
         key_store: KeyStoreKind::Platform,
         config_dir: "/Users/dave/.config/qsh".into(),
         created: true,
+        ssh_fingerprint: None,
     };
     let json = serde_json::to_value(&data).unwrap();
+    assert!(json.get("ssh_fingerprint").is_none());
     assert_eq!(json["key_store"], "platform");
     assert_eq!(json["created"], true);
     assert_eq!(json["fingerprint"], "sha256:BASE64FINGERPRINT");

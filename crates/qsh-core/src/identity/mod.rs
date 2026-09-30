@@ -13,6 +13,7 @@
 //! its store: a crash in the middle therefore never leaves behind an
 //! identity record whose key is missing.
 
+mod import;
 pub mod keystore;
 pub(crate) mod pem;
 
@@ -23,6 +24,9 @@ use qsh_proto::{ErrorCode, IdentityInitData, KeyStoreKind, KeyStoreMode};
 use qsh_transport::{CertificateDer, Fingerprint, LocalIdentity};
 use serde::{Deserialize, Serialize};
 
+pub use import::{
+    IMPORT_SSH_KEY_IDENTITY_EXISTS, SSH_KEY_FILE_MAX, ssh_fingerprint, ssh_fingerprint_of_ed25519,
+};
 pub use keystore::{
     FileKeyStore, KEYRING_SERVICE, KeyStore, KeyStoreError, MemoryKeyStore, PlatformKeyStore,
 };
@@ -120,6 +124,44 @@ struct IdentityFile {
 /// credential store; call it outside an async context or from
 /// `spawn_blocking`.
 pub fn init(paths: &Paths, mode: KeyStoreMode) -> Result<IdentityInitData, OpError> {
+    init_inner(paths, mode, None)
+}
+
+/// [`init`], but the device key is the plaintext OpenSSH Ed25519 key at
+/// `key_path` instead of a freshly generated one (ADR-0026).
+///
+/// An existing identity is refused with `INVALID_ARGUMENT` **before** the
+/// key file is opened, so the refusal path never reads private key bytes.
+/// Every rejection happens before any file or directory is created.
+pub fn init_importing(
+    paths: &Paths,
+    mode: KeyStoreMode,
+    key_path: &str,
+) -> Result<IdentityInitData, OpError> {
+    init_inner(paths, mode, Some(key_path))
+}
+
+fn identity_exists_error() -> OpError {
+    OpError::new(ErrorCode::InvalidArgument, IMPORT_SSH_KEY_IDENTITY_EXISTS)
+        .with_retryable(false)
+        .with_details(serde_json::json!({ "reason": "identity_exists" }))
+}
+
+fn init_inner(
+    paths: &Paths,
+    mode: KeyStoreMode,
+    import_path: Option<&str>,
+) -> Result<IdentityInitData, OpError> {
+    let imported = match import_path {
+        Some(key_path) => {
+            if read_identity(paths)?.is_some() {
+                return Err(identity_exists_error());
+            }
+            Some((key_path, import::load_ssh_key(key_path)?))
+        }
+        None => None,
+    };
+
     ensure_private_dir(&paths.config_dir)?;
     crate::fsutil::sweep_stale_temp_files(&paths.config_dir);
     let config_dir = canonical_config_dir(paths);
@@ -128,17 +170,24 @@ pub fn init(paths: &Paths, mode: KeyStoreMode) -> Result<IdentityInitData, OpErr
     crate::fsutil::sweep_stale_temp_files(&identity_dir);
 
     if let Some(existing) = read_identity(paths)? {
+        if imported.is_some() {
+            return Err(identity_exists_error());
+        }
         return Ok(IdentityInitData {
             device_id: existing.device_id,
             fingerprint: existing.fingerprint.to_string(),
             key_store: existing.key_store,
             config_dir,
             created: false,
+            ssh_fingerprint: None,
         });
     }
 
     let device_id = format!("device_{}", ulid::Ulid::new());
-    let generated = generate(&device_id)?;
+    let generated = generate(
+        &device_id,
+        imported.as_ref().map(|(path, key)| (*path, key)),
+    )?;
     let store = store_key(paths, &device_id, mode, &generated.key_pkcs8_der)?;
 
     write_private_file(&identity_dir.join(CERT_FILE), generated.cert_pem.as_bytes())?;
@@ -167,6 +216,7 @@ pub fn init(paths: &Paths, mode: KeyStoreMode) -> Result<IdentityInitData, OpErr
         key_store: store,
         config_dir,
         created: true,
+        ssh_fingerprint: imported.map(|(_, key)| key.ssh_fingerprint),
     })
 }
 
@@ -431,7 +481,14 @@ struct Generated {
 
 /// Generate an Ed25519 keypair and a 10-year self-signed device
 /// certificate with `CN=<device_id>` and SAN URI `qsh://device/<device_id>`.
-fn generate(device_id: &str) -> Result<Generated, OpError> {
+///
+/// With `imported`, the keypair is the imported OpenSSH key instead of a
+/// generated one; everything after that (subject, SAN, validity, SPKI
+/// fingerprint) is identical.
+fn generate(
+    device_id: &str,
+    imported: Option<(&str, &import::ImportedKey)>,
+) -> Result<Generated, OpError> {
     use rcgen::{
         CertificateParams, DistinguishedName, DnType, IsCa, KeyPair, PublicKeyData as _, SanType,
     };
@@ -441,8 +498,19 @@ fn generate(device_id: &str) -> Result<Generated, OpError> {
         OpError::new(ErrorCode::Internal, format!("{what}: {err}")).with_retryable(false)
     };
 
-    let key = KeyPair::generate_for(&rcgen::PKCS_ED25519)
-        .map_err(|err| internal("failed to generate an Ed25519 keypair", err))?;
+    let key = match imported {
+        None => KeyPair::generate_for(&rcgen::PKCS_ED25519)
+            .map_err(|err| internal("failed to generate an Ed25519 keypair", err))?,
+        Some((path, imported)) => {
+            let key = KeyPair::try_from(imported.pkcs8_der.as_slice())
+                .map_err(|err| internal("failed to load the imported Ed25519 key", err))?;
+            // The file's public half must be what the seed derives.
+            if key.public_key_raw() != imported.public.as_slice() {
+                return Err(import::seed_public_mismatch(path));
+            }
+            key
+        }
+    };
 
     let mut params = CertificateParams::default();
     let mut dn = DistinguishedName::new();

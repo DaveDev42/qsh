@@ -34,7 +34,7 @@ fn schema_and_capabilities_parse_per_cli_md() {
 fn key_store_flag_parses_and_rejects_unknown_modes() {
     let cli = Cli::try_parse_from(["qsh", "init", "--key-store", "file"]).unwrap();
     match cli.command.unwrap() {
-        Command::Init { key_store } => assert_eq!(key_store, Some(KeyStoreMode::File)),
+        Command::Init { key_store, .. } => assert_eq!(key_store, Some(KeyStoreMode::File)),
         other => panic!("expected init, got {other:?}"),
     }
     assert!(Cli::try_parse_from(["qsh", "init", "--key-store", "keychain"]).is_err());

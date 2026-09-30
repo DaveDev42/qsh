@@ -26,6 +26,7 @@
 //! (below) is the mechanical proof of that, not just a doc claim.
 
 mod common;
+mod ssh_golden;
 
 use std::collections::BTreeSet;
 use std::io::BufRead as _;
@@ -33,7 +34,7 @@ use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::Stdio;
 
-use common::{CLIENT_ALIAS, Fleet, HOST_ALIAS, Sandbox, ServeGuard};
+use common::{CLIENT_ALIAS, Fleet, HOST_ALIAS, Sandbox, ServeGuard, exit_code, sole_envelope};
 #[cfg(unix)]
 use common::{ListenGuard, ReverseGuard, hosts_array, poll_until};
 use qsh_proto::ErrorCode;
@@ -72,16 +73,6 @@ const DEFERRED: &[(&str, &str)] = &[
     ),
     ("REMOTE_ERROR", "no deterministic producer"),
     ("INTERNAL", "no deterministic producer"),
-    (
-        "UNSUPPORTED",
-        "no same-build deterministic producer left (ADR-0020 decision 4: \
-         `-D` now works on both routes when both peers negotiate \
-         `dial-filter.v1`). The refusal only reappears against an \
-         other-build peer (no common wire minor, or a qsh listen daemon \
-         started before this upgrade with no `dial-filter.v1` capability) \
-         or on a Windows-only path, neither of which this harness can \
-         force deterministically",
-    ),
 ];
 
 /// Fixture files whose producing test code is gone, but which stay on
@@ -104,6 +95,11 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "identity.export.json",
     "identity.init.created.json",
     "identity.init.existing.json",
+    "identity.init.imported_ssh_key.json",
+    "error.UNSUPPORTED.ssh_key_encrypted.json",
+    "error.UNSUPPORTED.ssh_key_type.json",
+    "error.INVALID_ARGUMENT.ssh_key_malformed.json",
+    "error.INVALID_ARGUMENT.ssh_key_identity_exists.json",
     "cert.init.json",
     "cert.issue.json",
     "trust.add.cert_file.json",
@@ -219,6 +215,87 @@ fn skip_while_regenerating() -> bool {
 // ---------------------------------------------------------------------------
 // Golden fixtures produced by real runs
 // ---------------------------------------------------------------------------
+
+/// `qsh init --import-ssh-key` (ADR-0026): the success envelope and the four
+/// refusals. Each fixture gets its own sandbox, run with the key directory
+/// as the working directory and a relative key path, so the path inside an
+/// error message is deterministic.
+#[test]
+fn golden_identity_init_import_ssh_key_fixtures() {
+    fn run_import(sandbox: &Sandbox, key_dir: &std::path::Path, key: &str) -> (i32, Value) {
+        let args = [
+            "init",
+            "--json",
+            "--key-store",
+            "file",
+            "--import-ssh-key",
+            key,
+        ];
+        let output = sandbox
+            .command(&args)
+            .current_dir(key_dir)
+            .stdin(Stdio::null())
+            .output()
+            .expect("run qsh");
+        (exit_code(&output), sole_envelope(&output.stdout, &args))
+    }
+
+    // The imported identity. `fingerprint` is masked by `normalize`; the
+    // fixture keeps `ssh_fingerprint` verbatim because the golden key makes
+    // it deterministic.
+    let sandbox = Sandbox::new();
+    let keys = tempfile::tempdir().expect("tempdir");
+    ssh_golden::write(keys.path(), "id_ed25519", &ssh_golden::golden_key_file());
+    let (code, imported) = run_import(&sandbox, keys.path(), "id_ed25519");
+    assert_eq!(code, 0, "{imported}");
+    assert_eq!(
+        imported["data"]["ssh_fingerprint"],
+        ssh_golden::GOLDEN_SSH_FINGERPRINT
+    );
+    check("identity.init.imported_ssh_key.json", imported);
+
+    // A second import over the now-existing identity.
+    let (code, exists) = run_import(&sandbox, keys.path(), "id_ed25519");
+    assert_eq!(code, 255, "{exists}");
+    assert_eq!(
+        exists["error"]["message"],
+        qsh_core::identity::IMPORT_SSH_KEY_IDENTITY_EXISTS
+    );
+    check(
+        "error.INVALID_ARGUMENT.ssh_key_identity_exists.json",
+        exists,
+    );
+
+    let refusals: [(&str, Vec<u8>, &str, &str); 3] = [
+        (
+            "encrypted",
+            ssh_golden::encrypted_key_file(),
+            "UNSUPPORTED",
+            "error.UNSUPPORTED.ssh_key_encrypted.json",
+        ),
+        (
+            "id_rsa",
+            ssh_golden::rsa_key_file(),
+            "UNSUPPORTED",
+            "error.UNSUPPORTED.ssh_key_type.json",
+        ),
+        (
+            "not_a_key",
+            b"this is not an OpenSSH key\n".to_vec(),
+            "INVALID_ARGUMENT",
+            "error.INVALID_ARGUMENT.ssh_key_malformed.json",
+        ),
+    ];
+    for (name, bytes, expected_code, fixture) in refusals {
+        let sandbox = Sandbox::new();
+        let keys = tempfile::tempdir().expect("tempdir");
+        ssh_golden::write(keys.path(), name, &bytes);
+        let (code, refused) = run_import(&sandbox, keys.path(), name);
+        assert_eq!(code, 255, "{refused}");
+        assert_eq!(refused["error"]["code"], expected_code, "{refused}");
+        check(fixture, refused);
+    }
+}
 
 /// Everything that needs neither a peer nor a network round trip.
 #[test]
