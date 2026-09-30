@@ -2,7 +2,7 @@
 
 **상태:** 확정 (구현과 어긋나는 내용을 발견하면 이 문서를 먼저 갱신한다)
 **작성일:** 2026-08-17 · **개정:** 2026-08-21 — 프로덕션 준비도 감사(HEAD `1d5d1b0`) 반영: M3/M5/M7/M8/M9 범위·수용 기준 증보, "마일스톤 마감 공통 절차" 신설. 새 마일스톤은 만들지 않았다 — 감사가 찾은 갭 전부를 기존 마일스톤에 명시 귀속시킨 것이 이 개정의 전부다. · **개정 2:** 2026-09-09 — 사람용 CLI 설계(design.html, 2026-09-08) 확정 결정 반영: 신규 `M9 — 사람용 표면`(4.3ew)을 M8과 구 M9 사이에 신설하고, 구 `M9 — 릴리스`는 `M10 — 릴리스`로 번호만 옮긴다. notarization 리드타임이 CLI 설계 일정을 막지 않게 하려는 결정(ADR-0012~0017, DECISIONS.md Q1). · **개정 3:** 2026-09-19 — 사용자 결정으로 SOCKS `-D`를 P1에서 M9 범위로 당긴다(ADR-0019).
-**현재 위치:** P1을 열었다(2026-09-26 사용자 결정). 첫 마일스톤은 M11(이슈 후속과 ACL 가시성)이고 실행 계획은 `PLAN.md`다. P1 마일스톤 아홉(M11~M19)은 §5에 있고, P1이 새로 만드는 사람 몫은 §5.5에 모은다. P0 MVP 완료 선언은 아직이다. M10까지의 에이전트 몫은 전부 착지했고 사람 회차 일곱이 닫힐 때 선언한다. 열린 일곱은 M10 DoD 1·2·3(`docs/campaigns/m10-clean-vm.md` 회차 표), M7 DoD 1(SC1 baseline 3회, `docs/campaigns/m7-stopwatch.md`, 예행 1회만 끝났다), M8 DoD 3(실기기 mobility ≥60회, `docs/campaigns/m2-mobility.md`), M8 DoD 4(wire freeze 발효와 독립 검증 계약, SC7), M9 DoD 1(SC1 재측정 3회, `docs/campaigns/m9-stopwatch.md`, M7 DoD 1에 종속)이다. 일곱은 P1과 별개로 `PLAN.md`가 사람 몫으로 계속 추적한다. 이 중 M8 DoD 3은 M18의 착수 조건이고, M9 DoD 1은 M12 (b)가 사전 고정하는 `qsh setup` 캠페인의 비교 기준이다. M8 DoD 1·2·5는 닫혔다(`docs/campaigns/m8-fuzz.md`, `docs/campaigns/m8-soak.md` run #6 PASS, `docs/campaigns/m8-adversarial-load.md`). M2~M10판 계획은 `docs/history/`에 아홉 파일로 있다.
+**현재 위치:** P1을 열었다(2026-09-26 사용자 결정). 첫 마일스톤 M11(이슈 후속과 ACL 가시성)은 2026-09-30 닫혔다(마감 노트는 §5 M11 절). 현재 마일스톤은 M12(supervised tunnel, `qsh setup`)이고 실행 계획은 `PLAN.md`다. ADR-0023·0024는 2026-09-30 승인됐다(`6e6ee7f`). P1 마일스톤 아홉(M11~M19)은 §5에 있고, P1이 새로 만드는 사람 몫은 §5.5에 모은다. P0 MVP 완료 선언은 아직이다. M10까지의 에이전트 몫은 전부 착지했고 사람 회차 일곱이 닫힐 때 선언한다. 열린 일곱은 M10 DoD 1·2·3(`docs/campaigns/m10-clean-vm.md` 회차 표), M7 DoD 1(SC1 baseline 3회, `docs/campaigns/m7-stopwatch.md`, 예행 1회만 끝났다), M8 DoD 3(실기기 mobility ≥60회, `docs/campaigns/m2-mobility.md`), M8 DoD 4(wire freeze 발효와 독립 검증 계약, SC7), M9 DoD 1(SC1 재측정 3회, `docs/campaigns/m9-stopwatch.md`, M7 DoD 1에 종속)이다. 일곱은 P1과 별개로 `PLAN.md`가 사람 몫으로 계속 추적한다. 이 중 M8 DoD 3은 M18의 착수 조건이고, M9 DoD 1은 M12 (b)가 사전 고정하는 `qsh setup` 캠페인의 비교 기준이다. M8 DoD 1·2·5는 닫혔다(`docs/campaigns/m8-fuzz.md`, `docs/campaigns/m8-soak.md` run #6 PASS, `docs/campaigns/m8-adversarial-load.md`). M2~M11판 계획은 `docs/history/`에 열 파일로 있다.
 
 이 문서는 P0 MVP(M0~M10)와 P1(M11~M19)의 canonical 마일스톤 기록이다. P2(`docs/PRD.md` §7 P2 목록)는 이 문서가 다루지 않는다. 각 마일스톤의 "수용 기준"이 곧 그 마일스톤의 **완료 정의(Definition of Done)** 다 — 수용 기준을 통과하는 테스트/시연 없이는 마일스톤을 닫지 않는다. SC 번호는 PRD §15 성공 기준의 순번이다 (SC1: 신규 두 장비 5분 내 연결, SC2: 한 명령 접속, SC3: 네트워크 전환 ≥95% 유지/resume, SC4: resume 가능한 단절에서 output 무손실, SC5: client crash가 remote PTY를 죽이지 않음, SC6: 모든 privileged op의 ACL 추적성, SC7: 공개 beta 전 독립 보안 리뷰).
 
@@ -10,7 +10,7 @@
 
 총 크기: 약 31.5–32 engineer-weeks (1인 기준) — 기존 24.5ew에 신규 M9(사람용 표면, 4.3ew)를 더한 28.8ew에, 2026-09-19에 M9로 당긴 SOCKS `-D` 1.6~2.0ew(추정)와 2026-09-24 M10 갱신분(1.5 → 2.6ew)을 더한 값.
 
-P1 총 크기: 약 29~48ew(1인 기준, 추정)에 ADR이 서야 산정할 수 있는 항목 다섯(M16의 구현 셋, M17 (d)의 구현, M18의 보안 가산분)이 더해진다. 내역은 §5.2.
+P1 총 크기: 약 31~49ew(1인 기준, 추정)에 ADR이 서야 산정할 수 있는 항목 다섯(M16의 구현 셋, M17 (d)의 구현, M18의 보안 가산분)이 더해진다. 내역은 §5.2.
 
 ## 1. 시퀀싱 원칙
 
@@ -178,7 +178,7 @@ P1 총 크기: 약 29~48ew(1인 기준, 추정)에 ADR이 서야 산정할 수 �
 | Multi-attach read-only (P2) | broker에서 거의 공짜로 나옴 — 그래서 위험 | **관찰자(observer) 개념 자체를 만들지 않는다.** writer lease는 P0 필수, 두 번째 attach 정책은 lease 규칙만 따름 |
 | Local echo prediction (P2) | mosh 대비 지연 불평 | P0는 실제 PTY 지연을 측정·공개해 데이터로 대화 (§13의 10ms 예산) |
 | Relay (§14, 별도 제품) | "작은 relay 하나면" | P0 의무는 세션 identity와 transport 분리뿐(resume이 이미 강제). **`--relay` flag는 stub조차 없음** |
-| Forward-route live carrier·`-R` 자동 재발행 (M8 소유 → [ADR-0018](adr/0018-tunnel-lifetime-bound-to-connection.md)로 종결) | 터널이 recovery 후에도 신규 연결을 서비스하길 기대 | 연결 손실→resume에서 터널 스트림은 깨끗이 종료된다는 현행 의미론을 M4가 테스트로 고정(`tunnel_chaos.rs`의 개정 강제 트랩)했고 README Known limitations가 고지한다. M4 마감 노트가 M5 입력으로 이관, M5가 범위 밖 판정 후 여기 등재(PLAN.md M5판 §3 (v)). **M8 Step 6(2026-09-09)이 ADR-0018로 확정: v1 터널 수명은 connection에 결합, live carrier는 구현하지 않으며 `-R` 자동 재발행은 P1(freeze는 additive 확장을 막지 않는다).** → M12. ADR-0023이 ADR-0018 결정 2·3을 명시적으로 켠 터널에 한해 개정하고 결정 1은 유지한다 |
+| Forward-route live carrier·`-R` 자동 재발행 (M8 소유 → [ADR-0018](adr/0018-tunnel-lifetime-bound-to-connection.md)로 종결) | 터널이 recovery 후에도 신규 연결을 서비스하길 기대 | 연결 손실→resume에서 터널 스트림은 깨끗이 종료된다는 현행 의미론을 M4가 테스트로 고정(`tunnel_chaos.rs`의 개정 강제 트랩)했고 README Known limitations가 고지한다. M4 마감 노트가 M5 입력으로 이관, M5가 범위 밖 판정 후 여기 등재(PLAN.md M5판 §3 (v)). **M8 Step 6(2026-09-09)이 ADR-0018로 확정: v1 터널 수명은 connection에 결합, live carrier는 구현하지 않으며 `-R` 자동 재발행은 P1(freeze는 additive 확장을 막지 않는다).** → M12. ADR-0023(2026-09-30 승인)이 ADR-0018 결정 2·3을 명시적으로 켠 터널(`--supervise`)에 한해 개정하고 결정 1은 유지한다. 결정 24에 따라 forward route의 `-L`/`-D`가 먼저 착지하고 reverse route와 `-R`이 뒤따른다. 두 단위가 모두 착지해야 이 행이 닫힌다 |
 | Cert rotation UX (P1) | 만료 | P0: 만료 30일 전 doctor 경고만. → M16 |
 | Service 설치 (P1 → M9 범위로 승격, 2026-09-07; 2026-09-09 마일스톤 분리 후에도 신설 M9 소속) | 상시 실행 요구 | M8까지는 unit 예시 문서(`docs/deploy/service.md`, M8 Step 6)만 제공하고 `qsh service install`은 신설 M9(사람용 표면) 범위 항목대로 구현한다 |
 | **메타 가드레일** | — | `qsh capabilities --json` == fixture 테스트: 새 capability는 fixture diff로만 추가 가능 (리뷰 가능한 산출물). + ErrorCode 전수 도달성 테스트: 존재하지만 만들 수 없는 코드 금지 |
@@ -199,14 +199,14 @@ P1은 2026-09-26 사용자 결정으로 열었다. 같은 날 ADR-0021·0022·00
 
 ### 5.1 P1 시퀀싱 원칙
 
-1. 이슈가 남긴 승인 ADR을 먼저 구현하고, 이슈가 남긴 제안 ADR을 그다음에 둔다. 이슈 #3·#4의 항목은 ADR-0021·0022·0025·0026(승인)과 ADR-0023·0024(제안)로 모양이 거의 정해졌다. 모양이 정해진 일을 먼저 끝내야 뒤의 설계 라운드가 그 결과를 입력으로 쓴다. M11은 승인 ADR만 다루고 M12는 제안 ADR 둘을 다룬다.
+1. 이슈가 남긴 승인 ADR을 먼저 구현하고, 이슈가 남긴 제안 ADR을 그다음에 둔다. 이슈 #3·#4의 항목은 ADR-0021·0022·0025·0026(승인)과 ADR-0023·0024(제안)로 모양이 거의 정해졌다. 모양이 정해진 일을 먼저 끝내야 뒤의 설계 라운드가 그 결과를 입력으로 쓴다. M11은 승인 ADR만 다루고 M12는 제안으로 나왔던 ADR 둘을 다룬다. 둘은 M12를 열기 전인 2026-09-30 승인됐다(`6e6ee7f`).
 2. 계약·wire를 건드리는 항목은 ADR 승인 전에 구현 스텝을 열지 않는다. 아홉 마일스톤 중 일곱(M12, M14~M19)이 제안 ADR이나 새 ADR의 승인을 착수 조건으로 삼는다. M11과 M13은 승인 없이 열린다. 다만 M13 (b)가 흐름 제어 설계 변경을 부르면 그 항목만 ADR을 기다리고, M13 (d)는 ADR-0027을 기다린다. P1 일정은 사용자 승인이 가장 크게 좌우한다. 승인이 늦는 마일스톤은 기다리게 두고 순서상 다음 마일스톤을 먼저 연다.
 3. 측정 도구를 기능보다 먼저 세운다. 느린 스트림의 저속·역압 축과 야간 성능 추세(M13)가 TCP fallback(M14)과 파일 복사(M15)보다 앞선다. 두 기능 모두 PTY 우선순위 보장(`tunnel_saturated_pty_echo_p95_under_measured_rtt_plus_10ms`가 지키는 것)을 흔들 수 있고 흔들렸는지를 재는 도구가 먼저 있어야 한다.
 4. transport 추상을 세운 뒤 TCP를 붙이고, 파일 복사는 그 뒤에 둔다. `qsh-transport`의 `Transport`/`StreamMux` 추상이 TCP fallback의 선행 정리다. 파일 복사는 두 transport 위에서 한 번에 검증되도록 TCP 뒤에 둔다.
 5. 신뢰의 방향을 정한 뒤 pairing을 넓힌다. pin 방향 축(ADR-0017 결정 5가 미룬 후속 ADR)이 listener pairing(ADR-0015)의 결정 하나를 좌우한다. `qsh setup`(M12)은 오늘 있는 pairing 경로만 조립하고, M16이 새 경로를 열면 ADR-0024 결정 2의 역할 표에 행을 더하는 식으로 뒤따른다.
 6. 사람 회차는 마일스톤 DoD에 넣지 않는다. DoD는 캠페인 문서가 사전 고정돼 커밋되는 데까지다. 회차 기록은 §5.5에 모으고 P1 완료를 선언할 때의 조건으로 둔다. P0의 M7~M10은 회차를 DoD에 넣었기 때문에 "기능 완료 · DoD 잔여"로 멈춰 있다. 사람 회차를 착수 조건으로 거는 마일스톤은 M18 하나다(M8 DoD 3). 조건이 닫히지 않았으면 M18을 건너 M19를 먼저 열고, 건너뛴 사실을 이 절에 날짜와 함께 적는다.
 
-### M11 — 이슈 후속과 ACL 가시성
+### M11 — 이슈 후속과 ACL 가시성 ✅ 완료 (2026-09-30)
 
 - **범위:** 이슈 #3·#4가 남긴 항목 중 승인 ADR로 모양이 정해졌거나 새 결정 없이 끝낼 수 있는 것. 이 마일스톤에는 사용자 승인을 기다리는 항목이 없다.
   - (a) `cause` 어휘 분리(ADR-0021 결정 7의 선행 조건). `classify_connection_error`(`crates/qsh-core/src/reverse/mod.rs`)는 quinn idle timeout(`ConnectionError::TimedOut`)을 상대가 보낸 `CLOSE_CODE_PATH_DEAD`와 같은 `path_dead`로 적고, 자기 쪽 `PathWatch` 판정(`reverse/target/mod.rs`, `reverse/listen/registration.rs`)도 `path_dead`를 낸다. 함수의 doc comment가 이 합침을 의도로 적고 있어서 결정 7이 요구하는 "어느 타이머로 죽었는가"를 현장 로그로 가를 수 없다. `TimedOut`에 새 값 `idle_timeout`을 주고 `PathWatch` 판정은 `path_dead`에 남긴다. `qsh::reverse` 줄은 계약이 아니므로(ADR-0022 결정 5, `docs/CLI.md` §6.13) `qsh.cli/v1`·fixture·wire는 바뀌지 않는다. §6.13의 "고정 8값" 문장과 함수 doc의 "fixed eight-value vocabulary"는 같은 커밋에서 9값으로 고친다. 통합 테스트에는 제약이 하나 있다. 역방향 두 자리는 `PathWatchConfig::default()`를 박고 있어 약 1초 안에 판정하고(ADR-0021 맥락 절), idle timeout은 45초 고정이다(ADR-0021 결정 2). `#[cfg(test)]` 전용 주입으로 두 자리의 `PathWatchConfig`에서 `min_dead_after`를 idle 45초보다 크게 둔다. `cfg(test)` 코드는 바이너리에 들어가지 않으므로 ADR-0021 결정 4의 config 개방이 아니고, 모듈 doc에 그렇게 적는다. 약 50초짜리 crate 내부 테스트를 `QSH_ACCEPTANCE_SLOW` 아래 `ci.yml` acceptance job에서 돌리고, 대안은 `load.yml`이다.
@@ -232,25 +232,32 @@ P1은 2026-09-26 사용자 결정으로 열었다. 같은 날 ADR-0021·0022·00
 
 ### M12 — 이슈 설계 ADR 구현(supervised tunnel, `qsh setup`)
 
-- **범위:** 이슈 #4 항목 5b와 이슈 #3의 온보딩 흐름. 두 설계는 2026-09-26에 제안 ADR로 나왔고 이 마일스톤은 승인 뒤의 구현이다.
-  - (a) supervised tunnel mode(ADR-0023). 산정 전제는 기본 동작을 바꾸지 않고 명시적으로 켜는 모드(opt-in)다. ADR-0023 초안은 터널을 연 프로세스가 연결 유실 뒤 로컬 listener를 쥔 채 스스로 재수립하는 모양을 고른다. ADR-0018과의 관계는 이렇다. ADR-0023은 ADR-0018 결정 2·3을 켠 터널에 한해 개정하고 결정 1은 유지한다. wire 위의 터널 객체(`forward_id`, 스트림마다의 splice)는 여전히 connection 수명에 묶이고, 켠 터널이 하는 일은 결정 1이 처방한 "새 `tunnel.open`"을 프로세스가 스스로 하는 것이다. ADR-0018 제목과 결정 1의 "v1 내내"가 wire 위 터널 객체의 수명을 가리킨다는 해석은 ADR-0023 맥락 절이 한 문장으로 적는다. `docs/adr/README.md`의 0023 행 설명("ADR-0018 결정 2·3을 개정")은 이 관계와 맞으므로 그대로 둔다. 재수립은 매번 처음부터 인가를 거치고, 진행 중이던 TCP 연결은 살리지 않는다.
-  - (b) `qsh setup`(ADR-0024). 초안의 모양은 새 판정 로직이 없는 오케스트레이터다. dotted op 이름은 `setup.run`이고 인가 불요 local op이며, 상태를 바꾸는 호출은 기존 `Ops` 메서드 `identity_init`, `trust_invite`, `trust_accept`, `trust_add`, `service_install`과 audit 경로를 점검하는 `doctor`뿐이고, 읽기는 `trust_list`, `acl_check`, `service_status`, `Ops::config()`와 ADR-0024가 신설하는 초대 읽기 도우미 하나다. `acl.toml`은 쓰지 않고 넣을 행을 인쇄한다(ADR-0017 결정 1). machine mode에서는 그 행이 envelope의 문자열 필드 `acl_rows`로 나가고 stdout은 순수 JSON이다. 자동 신뢰는 없다(ADR-0017 결정 5). `--json`/`--jsonl`에서 프롬프트를 열지 않고 빠진 입력은 쓰기 전에 `INVALID_ARGUMENT`다(ADR-0024 결정 7, `docs/CLI.md` §6.11과 같은 규율). SC1 측정은 착수 조건이 아니라 사후 판정이다(ADR-0024 결정 12).
-- **착수 조건:** (a)는 ADR-0023 승인, (b)는 ADR-0024 승인. 둘 다 승인 전이면 M13을 먼저 연다(§5.1 원칙 2). 하나만 승인됐으면 그 항목을 진행하고 다른 하나는 승인될 때 이어서 하거나 다음 마일스톤으로 이월해 이 절에 적는다.
-- **명시적 out:** supervision을 기본값으로 켜는 것, `forward_id` 재claim 같은 wire 필드(ADR-0023 초안은 쓰지 않는다), 진행 중 TCP 연결의 생존, 서비스 유닛 활성화(M17 (a)), `acl.toml`을 쓰는 어떤 동작, 관측한 fingerprint를 y/n으로 확인받아 pin하는 경로(ADR-0024 결정 6), 새 pairing 경로(M16).
+- **범위:** 이슈 #4 항목 5b, 이슈 #6(절전·망 전환 뒤 터널 복구), 이슈 #4의 2026-09-30 코멘트, 이슈 #3의 온보딩 흐름. 두 설계는 2026-09-26에 제안 ADR로 나왔고, ADR-0023은 2026-09-30 이슈 #6과 이슈 #4 코멘트를 반영해 결정 17~25를 더한 뒤 ADR-0024와 함께 같은 날 승인됐다(`6e6ee7f`). 이 마일스톤은 승인 뒤의 구현이다.
+  - (a) supervised tunnel mode(ADR-0023). 기본 동작을 바꾸지 않고 standalone `qsh tunnel open`의 `--supervise <ms>`로 켜는 모드다(결정 1). 터널을 연 프로세스가 연결 유실 뒤 로컬 listener를 쥔 채 스스로 재수립한다. ADR-0018과의 관계는 이렇다. ADR-0023은 ADR-0018 결정 2·3을 켠 터널에 한해 개정하고 결정 1은 유지한다. wire 위의 터널 객체(`forward_id`, 스트림마다의 splice)는 여전히 connection 수명에 묶이고, 켠 터널이 하는 일은 결정 1이 처방한 "새 `tunnel.open`"을 프로세스가 스스로 하는 것이다. 재수립은 매번 처음부터 인가를 거치고, 진행 중이던 TCP 연결은 옛 connection이 살아나는 경우 밖에서는 살리지 않는다. wire, `.proto`, fixture, capability 문자열은 바뀌지 않는다(결정 13·15).
+    - 두 단위로 나눠 착지한다(결정 24). 첫 단위는 forward route의 `--local`과 `--dynamic`이다(결정 1~6, 7-1~7-3, 8~13, 17~21). 이 단위만 착지한 트리에서 reverse route나 `--remote`의 `--supervise`는 연결 전에 `UNSUPPORTED`다. 둘째 단위는 reverse route 전부와 forward route `--remote`다(결정 7-4, 7-5, 14, 16, 22). (a)는 두 단위가 모두 착지해야 닫힌다.
+    - 첫 단위에 이슈 #6 요청이 더한 것. 프로세스 하나에 하나인 wake 감지기(결정 17. 1초 tick, 벽시계와 단조 시계 차이 3초 문턱, 모든 `PathWatch`와 두 backoff가 소비), 유실과 wake마다 여는 60초 빠른 창과 2초 상한(결정 10·18), `--accept-hold <ms>`(결정 19, 0~2000, `-L`/`-D` 한정, 64개 상한), 모든 holder와 데몬의 `qsh::lifecycle` 수명 줄(결정 21. 사람용 줄은 바이트 단위로 같음), `qsh serve --to` target backoff의 wake reset(결정 20).
+    - 둘째 단위의 경계. supervised reverse route는 재수립 동안 같은 이름의 forward pin을 dial하지 않는다(결정 22). `docs/CLI.md` §6.1의 우선순위와 pin의 "reverse 전용" 표시는 M16 (a)의 ADR-0030이나 새 ADR로 넘긴다. peer의 `RemoteForwardClose` 응답 시점 수정(결정 16)이 `-R` close-then-open(결정 7-4)의 선행이다.
+  - (b) `qsh setup`(ADR-0024). 새 판정 로직이 없는 오케스트레이터다. dotted op 이름은 `setup.run`이고 인가 불요 local op이며, 상태를 바꾸는 호출은 기존 `Ops` 메서드 `identity_init`, `trust_invite`, `trust_accept`, `trust_add`, `service_install`과 audit 경로를 점검하는 `doctor`뿐이고, 읽기는 `trust_list`, `acl_check`, `service_status`, `Ops::config()`와 ADR-0024가 신설하는 초대 읽기 도우미 하나다. `acl.toml`은 쓰지 않고 넣을 행을 인쇄한다(ADR-0017 결정 1). machine mode에서는 그 행이 envelope의 문자열 필드 `acl_rows`로 나가고 stdout은 순수 JSON이다. 자동 신뢰는 없다(ADR-0017 결정 5). `--json`/`--jsonl`에서 프롬프트를 열지 않고 빠진 입력은 쓰기 전에 `INVALID_ARGUMENT`다(ADR-0024 결정 7, `docs/CLI.md` §6.11과 같은 규율). SC1 측정은 착수 조건이 아니라 사후 판정이다(ADR-0024 결정 12).
+- **착수 조건:** 충족. ADR-0023과 ADR-0024가 2026-09-30 `승인됨`이다(`6e6ee7f`). M11이 닫혔다. (b)의 첫 코드 커밋은 `docs/campaigns/m9-stopwatch.md` §8의 SHA 고정 커밋 바로 뒤에만 온다(ADR-0024 결정 12).
+- **명시적 out:** supervision을 기본값으로 켜는 것과 기본 모드 터널의 wake 감지, 대화형 form의 `--supervise`, `forward_id` 재claim 같은 wire 필드(ADR-0023 결정 15), 진행 중 TCP 연결의 생존, 플랫폼 절전 통지와 interface·route 관측(ADR-0023 결정 17·18), `docs/CLI.md` §6.1 우선순위 변경(ADR-0023 결정 22), 호스트를 넘는 복구 타임라인(ADR-0023 결정 23), ADR-0021 결정 1·4의 구현(M13 (k), ADR-0023 결정 25), 서비스 유닛 활성화(M17 (a)), `acl.toml`을 쓰는 어떤 동작, 관측한 fingerprint를 y/n으로 확인받아 pin하는 경로(ADR-0024 결정 6), 새 pairing 경로(M16), README "First run" 절의 개편(M7·M9 캠페인의 측정 대상).
 - **수용 기준 (DoD):**
-  - (a) ADR-0023이 `승인됨`이고 개정 관계 절이 ADR-0018 결정 1을 유지 항목으로 이름 짓는다. 켜지 않은 터널에서 `a_dead_connection_ends_the_tunnel_cleanly_while_the_pty_session_resumes`와 `tunnel_open_local_over_reverse_ends_when_the_registration_drops`가 고치지 않은 채 초록이다. 켠 터널은 chaos `sever()` 뒤에도 로컬 listener가 살아 있고, 재수립 뒤 들어온 새 TCP 연결이 목적지에 닿는다.
+  - (a) ADR-0023이 `승인됨`이고 개정 관계 절이 ADR-0018 결정 1을 유지 항목으로 이름 짓는다(충족, `6e6ee7f`). 켜지 않은 터널에서 `a_dead_connection_ends_the_tunnel_cleanly_while_the_pty_session_resumes`, `tunnel_open_local_over_reverse_ends_when_the_registration_drops`, `local_forward_primitive_over_reverse_survives_a_registration_drop_and_self_heals_per_connection`, `tunnel_open_wait_returns_the_same_stale_error_once_the_budget_expires`, `jsonl_purity.rs`의 기존 테스트가 고치지 않은 채 초록이고, 켜지 않은 호출의 stdout·JSON·동작은 바이트 단위로 같으며 stderr에 `qsh::lifecycle` 줄만 더해진다. 켠 터널은 chaos `sever()` 뒤에도 로컬 listener가 살아 있고, 재수립 뒤 들어온 새 TCP 연결이 목적지에 닿는다.
+  - (a) 이슈 #6의 두 수용 테스트. 주입한 wake 뒤 idle cadence의 supervised forward carrier가 유실로 선언되고(`supervised_forward_carrier_is_declared_lost_within_two_seconds_of_an_injected_wake`), `qsh serve --to` target이 곧바로 probe하고 재dial한다(`serve_to_target_probes_and_redials_at_once_after_an_injected_wake`). 켠 `-D`는 50초 blackhole 동안 listener가 bind된 채 connection refused를 한 번도 내지 않고, 걷힌 뒤 새 CONNECT가 빠른 창 안에서 성공한다(`supervised_dynamic_listener_stays_bound_through_a_50_second_blackhole_and_connects_after_it`, `QSH_ACCEPTANCE_SLOW` 아래 `ci.yml` acceptance job). 결정 17의 `WAKE_TICK + dead_after(rtt)` 상한과 결정 10의 `FAST_CAP`은 주입 시계 단위 테스트가 정확히 고정한다. `--accept-hold`, `qsh::lifecycle`, target의 wake reset은 ADR-0023 결과 절이 이름 붙인 테스트로 고정된다.
+  - (a) 첫 단위만 착지한 트리에서 reverse route나 `--remote`의 `--supervise`는 연결 전에 `UNSUPPORTED`이고, 둘째 단위가 그 분기와 테스트를 지운다(결정 24). supervised reverse route는 registration이 stale이거나 걷힌 동안 forward pin을 한 번도 dial하지 않는다(`supervised_reverse_route_local_never_dials_a_forward_pin_while_the_registration_is_stale_or_swept`).
   - (a) 재수립마다 admission, mTLS, `forward.local`/`forward.remote` 인가를 다시 거친다. 그 권한을 뺀 `acl.toml`로 재시작한 peer에 대해서는 재수립이 `PERMISSION_DENIED`로 끝나고 peer audit에 deny가 남는다. 재수립 전에 `trust remove`된 peer로는 handshake가 거부된다.
   - (a) 재수립이 다른 principal의 자원을 닫거나 넘겨받는 경로가 없다. `RemoteForwardClose`는 `authorize_owned`(`crates/qsh-core/src/server/reverse.rs`)를 거치므로 `Scope::Owned` 행 아래에서 다른 principal이 보낸 close는 `PERMISSION_DENIED`이고 그 listener가 남는다는 것을 테스트가 고정한다. purge된 connection의 `forward_id`를 닫는 경계 사례는 "no such forward_id"로 끝난다. 유실 구간에 다른 principal이 같은 포트를 먼저 bind하면 켠 터널은 그 포트를 되찾으려 하지 않고 끝난다. reverse route에서 같은 이름으로 다른 fingerprint가 재등록하면 재확인 전의 accept가 한 바이트도 relay되지 않고 터널이 끝난다. `docs/design/threat-model.md` §4 A·B에 재dial 시 peer 치환과 재발행 소유 행이 이 테스트 이름과 함께 오른다. `scope = "any"` 행을 가진 principal은 오늘도 남의 forward를 닫을 수 있으므로 켠 터널이 새 권한을 만들지 않는다는 점도 같은 행에 적는다.
   - (a) `trust remove` 뒤에도 이미 살아 있는 연결 위의 켠 터널은 계속 돈다(`TrustRemoveScope` remedy가 적는 현행 범위). 이 사실과, 끊김 순간 진행 중이던 TCP 연결은 살리지 못한다는 사실이 `docs/CLI.md` §6.9·§6.14와 README Known limitations에 적힌다. 기존 연결의 강제 종료는 M16 (d)가 다룬다.
-  - (a) ADR-0023 초안은 wire를 바꾸지 않는다. 최종 ADR이 wire 필드를 더한다면 capability로 보호되고, decode 경로가 기존 fuzz 타깃에 걸리며, freeze 발효 전이면 `docs/design/protocol.md` §16.1 목록을 같은 커밋에서 고친다.
+  - (a) 승인된 ADR-0023은 wire를 바꾸지 않는다. M12 첫 커밋부터 마감까지 `crates/qsh-proto/proto/`와 `crates/qsh-cli/tests/fixtures/` 가운데 (a)가 낸 diff가 0이다. ADR-0023 결과 절이 적은 문서(`docs/CLI.md` §6.9·§6.12·§6.13·§6.14, `docs/design/protocol.md` §2·§10·§11-4·§16.4, `docs/design/testing.md` L4 두 행, `docs/design/architecture.md` §2, `docs/design/threat-model.md` §4 A·B·C, README Known limitations 여섯 한계, `docs/deploy/service.md` 예시)가 해당 코드와 같은 커밋에서 바뀐다. 캠페인 문서 `docs/campaigns/p1-supervise-wake.md`가 사전 고정돼 커밋된다. 회차는 §5.5의 사람 몫이다.
   - (b) ADR-0024가 `승인됨`이다. 네 역할의 모든 분기 테스트가 끝난 뒤 `acl.toml`이 없거나 실행 전과 바이트 단위로 같다. `setup.run`이 원격 op을 새로 만들지 않음을 op registry 테스트가 확인한다. 인쇄된 행을 그대로 파일에 넣으면 `qsh acl check`가 의도한 action을 allow로 판정한다. machine mode의 stdout은 envelope 한 줄이고 프롬프트가 열리지 않으며 입력이 빠지면 어떤 파일도 생기기 전에 `INVALID_ARGUMENT`다. 재시작 고지는 M11 (b)의 상수와 바이트 단위로 같다. `crates/qsh-core/src/setup/`이 `cargo xtask arch`의 디렉터리 범위 금지 대상에 오르고 자기 테스트가 있다. 등록 완전성, fixture 등재, `docs/CLI.md` §2.4·§2.5·신설 절, man 재생성을 갖춘다.
-  - (b) `qsh setup`의 첫 코드 커밋보다 먼저, 그 커밋의 부모 SHA가 `docs/campaigns/m9-stopwatch.md` §8의 m9 재측정 칸 "qsh 커밋 SHA"에 고정된다(ADR-0024 결정 12). README의 `qsh setup` 절은 그 고정 뒤에 붙는다. `qsh setup` 경로로 SC1 스톱워치 3회를 재는 캠페인 문서(`docs/campaigns/p1-setup-stopwatch.md`)가 사전 고정돼 커밋된다. 회차는 §5.5의 사람 몫이고 이 DoD에 들지 않는다. PASS가 기록되기 전에는 이슈 #3 완료 기준 첫 줄이 충족됐다고 적지 않는다.
+  - (b) `qsh setup`의 첫 코드 커밋보다 먼저, 측정 대상 트리의 SHA가 `docs/campaigns/m9-stopwatch.md` §8의 m9 재측정 칸 "qsh 커밋 SHA"에 고정된다(ADR-0024 결정 12). 한 커밋은 자기 SHA를 담을 수 없으므로 고정 커밋의 부모 SHA를 적고, 고정 커밋은 그 부모에 캠페인 파일 하나만 더하며, `qsh setup`의 첫 코드 커밋은 고정 커밋의 직계 자식이다. 셋이 함께 "첫 코드 커밋의 부모와 같은 바이너리·README"를 보장한다. README의 `qsh setup` 절은 그 고정 뒤에 붙는다. `qsh setup` 경로로 SC1 스톱워치 3회를 재는 캠페인 문서(`docs/campaigns/p1-setup-stopwatch.md`)가 사전 고정돼 커밋된다. 회차는 §5.5의 사람 몫이고 이 DoD에 들지 않는다. PASS가 기록되기 전에는 이슈 #3 완료 기준 첫 줄이 충족됐다고 적지 않는다.
+  - 안정성. M12가 더한 타이밍 민감 테스트는 시계를 주입하고 관찰 가능한 상태를 기다리며, 전부가 CPU 부하 아래 50회 연속 초록이다(`scripts/stress/run.sh`, `docs/design/testing.md` CI 규율). 근거는 부하 아래 16/80 실패했던 `8fd4602`다.
   - 마일스톤 마감 공통 절차(§2) 1·2.
-- **크기:** 3.8~5.3ew. (a) ADR 마무리 0.2 + 구현 1.5~2.5(ADR-0019 SOCKS `-D` 1.6~2.0ew 유추) + 소유·재확인 테스트와 threat model 0.2~0.3 / (b) ADR 마무리 0.1 + 구현 1.6~2.0(ADR-0024 결과 절의 내역) / 마감 0.2.
-- **결정 기록 (초안, M12를 열 때 확정):**
-  - Q1 `qsh setup`은 SC1 재측정을 기다리지 않는다. ADR-0024 결정 12가 측정을 사후 판정으로 옮기고 M9 재측정의 대상 트리를 SHA로 고정하기 때문이다. 사용자가 결정 12 없이 ADR-0024를 승인하면 (b)는 M9 DoD 1 기록을 착수 조건으로 갖고, 기다리는 동안 다음 마일스톤을 먼저 연다.
-  - Q2 두 설계를 한 마일스톤에 묶는 이유. 둘 다 같은 날 나온 이슈발 제안 ADR이고 승인 시점이 비슷하다. 묶으면 M11이 승인과 무관하게 닫힌다.
-  - Q3 supervised tunnel이 기본 동작을 바꾸는 쪽으로 결정되면 기존 트랩 테스트의 개정이 그 결정의 시행 지점이 되고 크기를 다시 매긴다.
+- **크기:** 5.1~6.1ew. (a) 3.3~3.8(ADR-0023 결과 절의 내역. 첫 단위 2.45~2.85, 둘째 단위 0.85~0.95. 2026-09-30 결정 17~24가 wake 감지기, 빠른 창, accept 유지, `qsh::lifecycle`, target wake reset, 두 단위 분리를 더해 옛 초안 산정 1.9~3.0을 넘었다) / (b) 1.55~1.95(ADR-0024 결과 절의 1.6~2.0에서 M11이 끝낸 재시작 상수 추출 0.05를 뺀다) / 부하 반복 하네스 0.05~0.1 / 마감 0.2. ADR 마무리 몫은 2026-09-30 승인으로 소진됐다.
+- **결정 기록 (2026-09-30 확정, main 세션이 사용자 지시 "github issue들도 확인해서 이것들의 반영도 모두 진행해줘"에 따라 정함):**
+  - Q1 `qsh setup`은 SC1 재측정을 기다리지 않는다. ADR-0024가 결정 12를 품은 채 승인됐으므로 측정은 사후 판정이고, M9 재측정의 대상 트리는 SHA로 고정된다. SHA 고정의 자기 참조 문제는 DoD (b) 둘째 항목의 세 사실로 푼다.
+  - Q2 두 설계를 한 마일스톤에 묶는 이유. 둘 다 같은 날 나온 이슈발 제안 ADR이었고 같은 날(2026-09-30) 승인됐다. 코드가 겹치지 않으므로 (a) 둘째 단위가 막히면 (b)의 SHA 고정부터 먼저 열 수 있다.
+  - Q3 supervised tunnel은 기본 동작을 바꾸지 않는 쪽으로 승인됐다(ADR-0023 결정 1, 대안 절). 기존 트랩 테스트는 고치지 않고 초록으로 남는다. 대신 결정 17~24가 범위를 넓혀 크기를 다시 매겼다(5.1~6.1ew).
+  - Q4 안정성. 새 타이밍 민감 테스트는 부하 아래 50회 반복으로 착지를 판정한다. 정확한 벽시계 상한은 주입 시계 층에서 고정하고, 실제 소켓을 쓰는 통합 테스트는 경로 구별과 넉넉한 상한을 단언한다. ADR-0023 결과 절이 테스트 이름과 모양을 제안으로 두었으므로 결정 문면은 그대로 지켜진다.
 
 ### M13 — 측정·배포 기반
 
@@ -396,7 +403,7 @@ P1은 2026-09-26 사용자 결정으로 열었다. 같은 날 ADR-0021·0022·00
 | 마일스톤 | 크기(ew) | 착수 조건 |
 |---|---|---|
 | M11 이슈 후속과 ACL 가시성 | 2.8~4.1 | 없음 |
-| M12 이슈 설계 ADR 구현 | 3.8~5.3 | ADR-0023, ADR-0024 승인(항목별) |
+| M12 이슈 설계 ADR 구현 | 5.1~6.1 | 충족(ADR-0023·0024 2026-09-30 승인) |
 | M13 측정·배포 기반 | 3.1~6.1 | 없음. (d)는 ADR-0027, (k)는 `cause` 관측 기록 |
 | M14 TCP/TLS fallback | 4.3~6.9 | ADR-0028 승인((c)부터) |
 | M15 스트리밍 파일 복사 | 2.7~4.0 | ADR-0029 승인, M13 (b) |
@@ -404,7 +411,7 @@ P1은 2026-09-26 사용자 결정으로 열었다. 같은 날 ADR-0021·0022·00
 | M17 운영 표면 | 1.3~2.5 + 미산정 하나 | ADR-0032·0033 승인(항목별), M12 (b)의 SHA 고정 |
 | M18 세션 거처 | 4.4~8.6 + 미산정 하나 | M8 DoD 3 기록, ADR-0034 승인 |
 | M19 Windows client | 4.7~7.0 | ADR-0035 승인 |
-| 합 | 약 29~48 + 미산정 다섯 | |
+| 합 | 약 31~49 + 미산정 다섯 | |
 
 ### 5.3 P1 밖으로 보낸다
 
@@ -445,6 +452,7 @@ P1은 2026-09-26 사용자 결정으로 열었다. 같은 날 ADR-0021·0022·00
 | 항목 | 사전 고정 문서 | 만드는 마일스톤 | 선행 |
 |---|---|---|---|
 | `qsh setup` 경로 SC1 스톱워치 3회 | `docs/campaigns/p1-setup-stopwatch.md` | M12 (b) | 같은 날 같은 진행자의 m9 3회. M9 DoD 1 공식 회차가 그날 있으면 재사용(ADR-0024 결정 12) |
+| supervised tunnel 절전·망 전환 회차 넷 | `docs/campaigns/p1-supervise-wake.md` | M12 (a) 첫 단위 | 첫 단위가 담긴 태그. 넷째 회차(`serve --to` 재등록과 hub의 supervised reverse route)는 둘째 단위가 담긴 태그(ADR-0023 결과 절) |
 | `cause` 분포 관측 기록 | 이슈 #4 코멘트 또는 캠페인 문서 | M11 (a) 빌드 | M13 (k)의 착수 조건 |
 | `aarch64-unknown-linux-musl` 구형 glibc 판정 | M13 (c)의 새 캠페인 문서 | M13 (c) | aarch64 musl 자산이 붙은 태그 |
 | 새 파서 fuzz 타깃의 누적 72시간 | `docs/campaigns/m8-fuzz.md` 형식 | M11 (c) SSH 키 파서, M14 mux codec, M15의 새 decode 타깃 | 공개 beta 전(`docs/design/protocol.md` §13) |
