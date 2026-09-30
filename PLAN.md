@@ -1,441 +1,418 @@
-# PLAN.md — M12: supervised tunnel과 `qsh setup`
+# PLAN.md — M13: 측정·배포 기반
 
-P1의 둘째 마일스톤인 M12의 실행 계획이다. M11 마감 커밋이 M11 계획을 `docs/history/m11-plan.md`로 옮겼고, 이 문서가 그 자리를 전면 교체한다. 구속 근거는 다음과 같다. `docs/ROADMAP.md` §5의 M12 절(범위 (a)·(b), 착수 조건, 명시적 out, 수용 기준, 크기, 결정 기록 Q1~Q4), 같은 문서 §5.1 시퀀싱 원칙과 §5.5 P1 사람 몫, 마일스톤 마감 공통 절차(같은 문서 §2), ADR-0023 결정 1~25와 이슈 요청 대응 절과 결과 절, ADR-0024 결정 1~12와 결과 절, ADR-0018 결정 1~4, ADR-0019 결정 3·6·11, ADR-0021 결정 2·4·7, ADR-0022 결정 3·5·7, ADR-0017 결정 1·3·5, ADR-0012 결정 1·6·8, ADR-0013 결정 4·8, ADR-0015(예약), ADR-0025 결정 6, `docs/CLI.md` §2.2·§2.4·§2.5·§4·§6.1·§6.9·§6.11~§6.14·§6.18·§6.19, `docs/design/protocol.md` §2·§10·§11-3·§11-4·§16.4, `docs/design/architecture.md` §2, `docs/design/testing.md` L2·L4·L6과 CI 규율, `docs/design/threat-model.md` §3·§4 A·B·C·§7·§10, `docs/campaigns/m9-stopwatch.md` §8. 이 계획과 `docs/ROADMAP.md`의 편집은 main 세션 전용이다.
+P1의 셋째 마일스톤인 M13의 실행 계획이다. M12 마감 커밋이 M12 계획을 `docs/history/m12-plan.md`로 옮겼고, 이 문서가 그 자리를 전면 교체한다. 구속 근거는 `docs/ROADMAP.md` §5의 M13 절(범위 (a)~(k), 착수 조건, 명시적 out, 수용 기준, 크기), 같은 문서 §5.1 시퀀싱 원칙(특히 원칙 2·3·6), §5.4 일정 리스크 1·3, §5.5 P1 사람 몫, 마일스톤 마감 공통 절차(같은 문서 §2), ADR-0021 결정 1~7과 결과 절, ADR-0023 결정 12·17·25, ADR-0003, ADR-0004, ADR-0007, ADR-0018 결정 1, `docs/design/reexec-estimate.md` §3의 H1·H1b 행과 §4·§5, `docs/CLI.md` §2.2·§4·§6.3·§6.4·§6.11·§6.12·§6.13·§6.17, `docs/design/protocol.md` §1·§2·§10·§11-4·§12·§16.2·§16.4, `docs/design/architecture.md` §7, `docs/design/testing.md` L4·L6·L9/L10과 CI 규율, `docs/design/threat-model.md` §4 C·D·G·§7, `docs/campaigns/m10-clean-vm.md`(수정 금지 대상으로만)이다. 이 계획과 `docs/ROADMAP.md`의 편집은 main 세션 전용이다.
 
-M12에는 사용자 승인을 기다리는 항목이 없다. ADR-0023과 ADR-0024는 2026-09-30 사용자 지시("github issue들도 확인해서 이것들의 반영도 모두 진행해줘")로 함께 승인됐다(`6e6ee7f`). ADR-0023은 같은 날 이슈 #6과 이슈 #4의 2026-09-30 코멘트를 반영해 결정 17~25를 더했고, 결정 24가 M12 (a)를 두 단위로 나눈다. 첫 단위는 forward route의 `--local`과 `--dynamic`이고 둘째 단위는 reverse route 전부와 `--remote`다. 이 계획은 그 순서를 그대로 따르고, 두 단위 뒤에 ADR-0024의 `qsh setup`을 둔다. M11이 만든 것 가운데 셋을 M12가 가져다 쓴다. `ACL_RESTART_NOTICE`(M11 Step 2, `d0df06c`)는 ADR-0024 결정 4가, `cause` 어휘의 `idle_timeout`(M11 Step 5a)은 ADR-0023 결정 12가, crate 내부 역방향 하네스 `crates/qsh-core/src/reverse/test_harness.rs`(M11 Step 5b)는 이 계획의 target wake 테스트가 쓴다.
+M13은 마일스톤 자체의 착수 조건이 없다(ROADMAP M13 착수 조건). 다만 항목 셋이 사용자 승인을 기다린다. (d)는 ADR-0027, (f)는 이 계획이 새로 세우는 ADR-0036(stateless reset key의 보관과 읽기 실패 동작), (b)는 하네스가 붉게 나오고 고칠 길이 설계 변경일 때 서는 splice ADR(번호는 §0.5)이다. 세 ADR은 모두 `제안됨`으로 올리고 승인은 사용자가 정한다. 이 계획은 어느 승인도 가정하지 않으므로 승인을 기다리는 동안 승인이 필요 없는 스텝을 먼저 연다. (k)는 사람이 남기는 `cause` 관측 기록이 착수 조건이고, 기록이 없으면 M13을 막지 않는다(§0.6).
 
-인용 규율은 M11판과 같다. `docs/` 아래 문서는 줄 번호로 가리키지 않는다. 절 이름, DoD 문장, ADR 번호와 결정·결과 라벨, 테스트 이름, 커밋 해시, 이슈 번호가 앵커다. 코드 위치는 파일 경로와 심볼 이름으로 가리키고, `path:line`을 쓸 때는 그 값이 origin `8fd4602` 트리 실측임을 같은 문장에 적는다. 옛 계획의 스텝 번호는 새로 인용하지 않는다.
+인용 규율은 M12판과 같다. `docs/` 아래 문서는 줄 번호가 아니라 절 이름, DoD 문장, ADR 번호와 결정·결과 라벨, 테스트 이름, 커밋 해시, 이슈 번호를 앵커로 가리킨다. 코드 위치는 파일 경로와 심볼 이름으로 가리키고, `path:line`을 쓸 때는 그 값이 origin `ed905e8` 트리 실측임을 같은 문장에 적는다. 옛 계획의 스텝 번호는 새로 인용하지 않는다.
 
 ## 0. 착수 조건
 
 ### 0.1 P0에서 열린 채 넘어온 사람 몫 일곱
 
-일곱 중 어느 것도 M12의 코드 스텝을 막지 않는다. M11 계획 §0.1의 목록을 M11 마감 시점 상태 그대로 옮긴다. 마감 커밋이 그 사이 닫힌 항목을 표시했으면 그 표시를 따른다.
+일곱 중 어느 것도 M13의 코드 스텝을 막지 않는다. M12 계획 §0.1의 목록을 M12 마감 시점 상태 그대로 옮기되, 마감 커밋이 그 사이 닫힌 항목을 표시했으면 그 표시를 따른다.
 
 - [ ] **M10 DoD 1 — 클린 네 플랫폼 설치와 기능 스모크.** 기준은 `docs/campaigns/m10-clean-vm.md`. v0.3.0 Linux 세 회차 PASS(`69a6414`), macOS 둘이 남았다. 소유: 사람.
-- [ ] **M10 DoD 2 — Gatekeeper가 notarized 바이너리를 차단하지 않음.** 선행: Apple 시크릿 여섯 등록과 서명·공증이 붙은 첫 태그. 소유: 사람(등록·회차).
-- [ ] **M10 DoD 3 — musl static 바이너리가 구형 glibc 배포판에서 실행.** 소유: 사람.
+- [ ] **M10 DoD 2 — Gatekeeper가 notarized 바이너리를 차단하지 않음.** 선행: Apple 시크릿 여섯 등록과 서명·공증이 붙은 첫 태그. 등록(`gh secret set`)과 태그는 사람이 한다. 소유: 사람.
+- [ ] **M10 DoD 3 — musl static 바이너리가 구형 glibc 배포판에서 실행.** `x86_64-unknown-linux-musl` 한정이다. M13 (c)의 aarch64 자산은 이 항목의 분모를 바꾸지 않는다. 소유: 사람.
 - [ ] **M7 DoD 1 — SC1 스톱워치 baseline 3회.** 기준은 `docs/campaigns/m7-stopwatch.md`. 소유: 사람.
-- [ ] **M8 DoD 3 — 실기기 mobility 60회 이상.** 기준은 `docs/campaigns/m2-mobility.md`. 소유: 사람.
+- [ ] **M8 DoD 3 — 실기기 mobility 60회 이상.** 기준은 `docs/campaigns/m2-mobility.md`. M18의 착수 조건이다. 소유: 사람.
 - [ ] **M8 DoD 4 — wire freeze 발효와 독립 검증 계약(SC7).** 소유: 운영자.
-- [ ] **M9 DoD 1 — SC1 스톱워치 재측정 3회.** 기준은 `docs/campaigns/m9-stopwatch.md`. M7 DoD 1에 종속. 측정 대상 트리는 Step 16이 SHA로 고정한다(ADR-0024 결정 12). 소유: 사람.
+- [ ] **M9 DoD 1 — SC1 스톱워치 재측정 3회.** 기준은 `docs/campaigns/m9-stopwatch.md`. M7 DoD 1에 종속. 측정 대상 트리는 M12가 `docs/campaigns/m9-stopwatch.md` §8에 SHA로 고정했다(ADR-0024 결정 12). 소유: 사람.
 
-M7 DoD 1과 M9 DoD 1은 README "First run" 절과 플래그 없는 `qsh init`의 흐름을 잰다. 그래서 M12는 README "First run" 절을 Step 16의 SHA 고정 전에도 뒤에도 고치지 않는다. 고정 뒤에는 새 `qsh setup` 절을 따로 더한다(ADR-0024 결과 절).
+README "First run" 절은 M7·M9 캠페인의 측정 대상이라 M13이 고치지 않는다. (h)·(i)가 설치 경로 문면을 바꾸므로 README의 설치 절은 고치지만 "First run" 절 안의 변경은 0줄이어야 한다(§4 리스크 "README 설치 절과 캠페인 대상").
 
 ### 0.2 M11에서 넘어온 사람 몫 둘 (`docs/ROADMAP.md` §5.5)
 
-M12 DoD가 아니다. 상태는 §5.5 표의 기존 행에 적혀 있다.
-
-- [ ] **`cause` 분포 관측 기록.** M13 (k)의 착수 조건이다. ADR-0023 결정 25가 적듯 이슈 #6의 holder 오류 계수와 0.3.0 hub의 `cause=path_dead` 58건은 이 기록을 대신하지 못한다. 소유: 사람.
+- [ ] **`cause` 분포 관측 기록.** M13 (k)의 착수 조건이다. M11 (a)가 담긴 빌드로 현장에서 `lost`/`retry` 줄을 모아, 그 `cause` 분포를 사람이 이슈 #4 코멘트나 캠페인 문서에 적어야 한다. ADR-0023 결정 25가 적듯 이슈 #6의 holder 오류 계수와 0.3.0 hub의 `cause=path_dead` 58건은 이 기록을 대신하지 못한다. 소유: 사람.
 - [ ] **`parse_openssh_key` fuzz 타깃의 누적 72 fuzz-hours.** 기록 자리는 `docs/campaigns/m8-fuzz.md`. 소유: 사람.
 
-### 0.3 M12가 새로 만드는 사람 몫 둘 (`docs/ROADMAP.md` §5.5)
+### 0.3 M12에서 넘어온 사람 몫 둘 (`docs/ROADMAP.md` §5.5)
 
-둘 다 M12 DoD가 아니다. DoD는 캠페인 문서가 사전 고정돼 커밋되는 데까지다(§5.1 원칙 6). 회차를 돌리는 것은 사람 몫이다.
+M12는 이 계획 시점에 닫혔다(`docs/ROADMAP.md` M12 마감 노트). 에이전트 몫은 전부 착지했고, 아래 두 캠페인의 회차는 사람 몫으로 남는다. 둘 다 M13 DoD가 아니다.
 
-- [ ] **`p1-supervise-wake` 회차 넷.** 기준은 Step 12가 사전 고정하는 `docs/campaigns/p1-supervise-wake.md`(ADR-0023 결과 절의 캠페인 항목). 이슈 #6 토폴로지(macOS 노트북, 전체 터널 VPN, hub `qsh serve`·`qsh listen`)에서 뚜껑 10분 닫기, 뚜껑 20초 닫기, 깨어 있는 동안 VPN underlay 전환, 노트북 `qsh serve --to`의 깨어남 뒤 재등록과 hub 쪽 supervised reverse route `--local`을 잰다. 넷째 회차는 둘째 단위(Step 14) 착지 뒤에만 돌 수 있다. 소유: 사람.
-- [ ] **`p1-setup-stopwatch` 3회.** 기준은 Step 20이 사전 고정하는 `docs/campaigns/p1-setup-stopwatch.md`(ADR-0024 결정 12). 비교 세트는 같은 날 같은 진행자의 m9 3회이고, M9 DoD 1 공식 회차가 그날이면 재사용한다. PASS가 기록되기 전에는 이슈 #3 완료 기준 첫 줄이 충족됐다고 적지 않는다. 소유: 사람.
+- [ ] **`p1-supervise-wake` 회차 넷.** 기준은 `docs/campaigns/p1-supervise-wake.md`. 넷째 회차(`serve --to` 재등록과 hub의 supervised reverse route)는 ADR-0023 둘째 단위가 담긴 태그에서만 돈다. 소유: 사람.
+- [ ] **`p1-setup-stopwatch` 3회.** 기준은 `docs/campaigns/p1-setup-stopwatch.md`(ADR-0024 결정 12). 비교 세트는 같은 날 같은 진행자의 m9 3회다. PASS가 기록되기 전에는 이슈 #3 완료 기준 첫 줄이 충족됐다고 적지 않는다. 소유: 사람.
 
-### 0.4 착수 조건
+### 0.4 M13이 새로 만드는 사람 몫 (`docs/ROADMAP.md` §5.5)
 
-충족됐다. ADR-0023과 ADR-0024가 2026-09-30 `승인됨`이고(`6e6ee7f`) M11이 닫혔다(`docs/ROADMAP.md` M11 마감 노트). Step 1이 이 계획을 저장소에 들인 뒤 Step 2~21을 연다. (b)의 첫 코드 커밋(Step 17)은 Step 16의 SHA 고정 뒤에만 온다.
+DoD는 캠페인 문서가 사전 고정돼 커밋되는 데까지다(§5.1 원칙 6). 아래 회차와 GitHub 조작은 사람이 한다. 에이전트는 `gh secret set`, `gh workflow run`, 태그 push, 저장소 설정 변경을 어떤 스텝에서도 하지 않는다. 에이전트는 사람이 돌린 run의 로그를 읽어(`gh run view`) run id와 판정을 기록한다.
 
-## 1. DoD 체크리스트 (ROADMAP M12)
+- [ ] **`aarch64-unknown-linux-musl` 구형 glibc 판정.** 기준은 Step 8이 사전 고정하는 `docs/campaigns/p1-aarch64-musl.md`. 선행은 aarch64 musl 자산이 붙은 태그다. 소유: 사람.
+- [ ] **(c) 새 leg의 첫 release run.** 유지보수자가 `release.yml`을 `workflow_dispatch`로 한 번 돌려 새 leg의 빌드와 `release_smoke_covers_init_trust_exec_pty_detach_and_reattach`(`QSH_SMOKE_STRICT=1`)를 초록으로 보인다. `SHA256SUMS`와 provenance attestation은 태그 push에서만 만들어지므로(`release.yml`의 release job은 태그 ref 한정) 그 판정은 첫 태그 run이 근거다(§7, §8 #4). 소유: 사람(실행), 에이전트(기록).
+- [ ] **(a) 인위적 지연 회차.** 유지보수자가 Step 7의 `perf.yml`을 `workflow_dispatch`로 `inject_delay_ms`를 주어 한 번 돌리고, 그 run이 임계로 붉어지는지 본다. 소유: 사람(실행), 에이전트(run id 기록).
 
-- [ ] **DoD (a1) — supervised tunnel 첫 단위: forward route `-L`/`-D`.** `--supervise`와 `--accept-hold`가 forward route의 `--local`/`--dynamic`에서 ADR-0023 결정 1~6, 7-1~7-3, 8~13, 17~21대로 동작한다. 켜지 않은 호출은 stdout·JSON·동작이 바이트 단위로 같고 stderr에 `qsh::lifecycle` 줄만 더해진다. `a_dead_connection_ends_the_tunnel_cleanly_while_the_pty_session_resumes`와 `jsonl_purity.rs`의 기존 테스트가 고치지 않고 초록이다. 켠 `-D`는 50초 blackhole 동안 listener가 bind된 채 connection refused를 한 번도 내지 않고, 걷힌 뒤 새 CONNECT가 빠른 창 안에서 성공한다. 주입한 wake 뒤 유실 선언과 target 재dial이 곧바로 일어난다. 이 단위만 착지한 트리에서 reverse route나 `--remote`의 `--supervise`는 연결 전에 `UNSUPPORTED`다. 근거: Step 3~12. 소유: 에이전트.
-- [ ] **DoD (a2) — supervised tunnel 둘째 단위: reverse route와 `-R`.** 결정 7-4, 7-5, 14, 16, 22가 착지하고 결정 24의 `UNSUPPORTED` 분기와 그 테스트가 지워진다. reverse route로 연 supervised 터널은 forward pin을 한 번도 dial하지 않는다. 다른 fingerprint로 재등록한 장비로 한 바이트도 relay되지 않는다. `-R`은 close-then-open으로 같은 포트를 다시 얻고, `Scope::Owned` 아래 다른 principal의 close는 `PERMISSION_DENIED`로 남는다. `tunnel_open_local_over_reverse_ends_when_the_registration_drops`, `local_forward_primitive_over_reverse_survives_a_registration_drop_and_self_heals_per_connection`, `tunnel_open_wait_returns_the_same_stale_error_once_the_budget_expires`가 고치지 않고 초록이다. 근거: Step 13~15. 소유: 에이전트.
-- [ ] **DoD (a) 공통 — 문서와 wire.** `docs/CLI.md` §6.9·§6.12·§6.13·§6.14, `docs/design/protocol.md` §2·§10·§11-4·§16.4, `docs/design/testing.md` L4, `docs/design/architecture.md` §2, `docs/design/threat-model.md` §4 A·B·C, README Known limitations, `docs/deploy/service.md`가 ADR-0023 결과 절대로 바뀐다. `git diff` 기준 `crates/qsh-proto/proto/`와 `crates/qsh-cli/tests/fixtures/`의 변경이 0이다. `p1-supervise-wake.md`가 사전 고정돼 커밋된다. 근거: 각 스텝 (a)의 문서 목록, Step 12. 소유: 에이전트.
-- [ ] **DoD (b) — `qsh setup`.** 네 역할의 모든 분기 테스트 뒤 `acl.toml`이 없거나 실행 전과 바이트 단위로 같다. `setup.run`이 원격 op을 만들지 않는다. 인쇄된 행을 그대로 넣으면 `qsh acl check`가 의도한 action을 allow로 판정한다. machine mode stdout은 envelope 한 줄이고 프롬프트가 없으며 빠진 입력은 파일이 생기기 전에 `INVALID_ARGUMENT`다. 재시작 고지는 `ACL_RESTART_NOTICE`와 바이트 단위로 같다. `crates/qsh-core/src/setup/`이 `cargo xtask arch`의 디렉터리 범위 금지 대상이고 자기 테스트가 있다. 등록 완전성, fixture 등재, `docs/CLI.md` §2.4·§2.5·§6.20, `docs/PRD.md` §11, man 재생성을 갖춘다. 근거: Step 17~20. 소유: 에이전트.
-- [ ] **DoD (b) 순서 — m9 재측정 SHA 고정.** Step 17의 부모 커밋이 Step 16이고, Step 16이 `docs/campaigns/m9-stopwatch.md` §8에 적은 SHA와 Step 17의 부모 사이 차이가 그 캠페인 파일 하나뿐이다(§8 #1). README `qsh setup` 절은 그 뒤에 붙는다. `p1-setup-stopwatch.md`가 사전 고정돼 커밋된다. 근거: Step 16, Step 20. 소유: 에이전트.
-- [ ] **DoD 안정성 — 새 타이밍 민감 테스트의 부하 반복.** 이 마일스톤이 더한 타이밍 민감 테스트 전부가 Step 2의 하네스로 CPU 부하 아래 50회 연속 초록이다. 근거: Step 2, Step 21. 소유: 에이전트.
-- [ ] **DoD 마감 — 마감 공통 절차 1·2.** 구속 문서 태그를 대조하고 README를 동기화한다. 근거: Step 21. 소유: 에이전트.
+### 0.5 승인 게이트
+
+아래 스텝은 해당 ADR이 `승인됨`이 된 뒤에만 연다. 승인 전에는 초안 스텝(Step 3·4·5)까지만 착지한다. 승인이 늦으면 M13은 그 항목만 열어 둔 채 기다리고, main 세션은 §5.1 원칙 2대로 순서상 다음 마일스톤의 ADR 없는 스텝을 연다.
+
+| 항목 | ADR | 초안 스텝 | 막히는 스텝 | 근거 |
+|---|---|---|---|---|
+| (d) `qsh doctor --fail-on` | ADR-0027(ROADMAP이 예약) | Step 4 | Step 15 | ROADMAP M13 착수 조건, DoD (d) |
+| (f) stateless reset key | ADR-0036(새 번호) | Step 5 | Step 16 | ROADMAP DoD (f)의 "읽기 실패 시 동작을 골라 커밋에 적는다", §8 #2 |
+| (b) splice 설계 변경 | ADR-0037(조건부, 새 번호) | Step 3 | Step 14 | ROADMAP M13 착수 조건, DoD (b) 끝 문장, §5.4 리스크 3 |
+
+ADR 번호는 `docs/adr/README.md`의 예약 규칙을 따른다. 0027~0035는 P1 계획이 예약했고 0027이 (d)의 자리임을 README의 예약 목록이 적는다. 예약 밖의 다음 새 번호는 0036이다. 조건부 ADR은 "설 때 그 번호부터 쓴다"는 규칙대로 초안을 올리는 순서로 번호를 받는다. 이 계획은 Step 5의 (f) ADR이 Step 3의 판정보다 먼저 서거나 같은 날 서도록 두므로 (f)가 0036, (b)의 splice ADR이 서면 0037을 받을 것으로 적는다. 순서가 뒤집히면 먼저 올리는 쪽이 0036이고, 그 커밋이 이 표와 README의 "다음 새 번호" 문장을 같이 고친다.
+
+### 0.6 (k)의 관측 게이트
+
+(k)는 §0.2의 관측 기록이 있어야 연다. 기록이 오면 Step 17을 ADR-0021 결정 7의 분기대로 여는데 `idle_timeout`이 관측되면 결정 1과 결정 4를, 기록이 있는데 `idle_timeout`이 한 번도 없으면 결정 1만 구현한다. M13 마감까지 기록이 없으면 (k)는 M13을 막지 않는다. 그때 Step 18이 `docs/ROADMAP.md` M13 절에 "관측 기록 없음"과 이월 대상 마일스톤을 적는다(ROADMAP M13 착수 조건, §8 #6).
+
+### 0.7 착수 조건
+
+M12가 닫혔고 M13 자체에는 선행 조건이 없으므로 충족됐다. Step 1이 이 계획을 저장소에 들인 뒤 Step 2~13을 연다. Step 14·15·16은 §0.5의 승인, Step 17은 §0.6의 기록을 기다린다.
+
+## 1. DoD 체크리스트 (ROADMAP M13)
+
+- [ ] **DoD (a) — 야간 성능 추세.** 저장소, 보존 기간, 회귀 판정 임계(직전 N회 중앙값 대비 변화율)가 `docs/design/testing.md` CI 규율 절에 적힌다. 예약 실행이 회차마다 데이터 점을 하나씩 더한다(연속 두 회차의 점을 저장소에서 확인). 인위적 지연을 주입한 회차 하나가 그 임계로 job을 붉게 만든 것을 run id로 기록한다(실행은 §0.4의 사람 몫). 이 job은 PR 게이트가 아니고 `ci-ok`의 `needs`에 없다. 근거: Step 6·7. 소유: 에이전트(기록), 사람(지연 회차 실행).
+- [ ] **DoD (b) — 느린 스트림의 저속·역압 축.** 소비자가 읽지 않는 터널 스트림 넷 이상이 동시에 정체한 상태에서 PTY echo p95가 M4 예산(측정 RTT + 10ms) 안에 있고 PTY 출력이 계속 진행함을 새 testkit 테스트가 단언하고, 이 테스트가 `ci.yml` acceptance job에서 strict로 돈다. 수정 뒤에도 M8 DoD 2의 세션당 buffer 상한(8 MB)과 `tunnel_throughput_meets_raw_quinn_ratio`의 비율(≥80%)이 고치지 않은 기준으로 초록이다. 수정이 설계 선택이면 그 ADR이 `승인됨`이다. 근거: Step 2·3·14. 소유: 에이전트(구현), 사용자(ADR 승인).
+- [ ] **DoD (c) — `aarch64-unknown-linux-musl` 자산.** `release.yml`이 네이티브 arm 러너에서 이 자산을 만들고 그 leg에서 `release_smoke_covers_init_trust_exec_pty_detach_and_reattach`가 `QSH_SMOKE_STRICT=1`로 초록이다. 자산이 `SHA256SUMS`와 provenance attestation에 들어간다. 설치 스크립트는 aarch64에서 `QSH_LIBC=musl`일 때 대상 태그의 `SHA256SUMS`에 그 자산이 있으면 고르고 없으면 지금처럼 끝나며, 기본값(`gnu`)의 선택이 바뀌지 않음을 설치 스크립트 테스트가 고정한다. 구형 glibc 판정은 새 캠페인 문서에 사전 고정되고 `docs/campaigns/m10-clean-vm.md`는 diff 0이다. 근거: Step 8, §0.4의 release run 기록. 소유: 에이전트, 사람(release run·태그).
+- [ ] **DoD (d) — `qsh doctor --fail-on`.** ADR-0027이 `승인됨`이다. `--fail-on`을 주지 않으면 exit code와 stdout이 오늘과 바이트 단위로 같다. 주면 임계 이상 finding이 있을 때 ADR-0027이 정한 값으로 끝나고, envelope의 `ok` 값과 exit의 관계가 `docs/CLI.md` §4·§6.17에 적힌다. §6.17의 "`--fail-on` 플래그는 아직 없다" 문단이 교체되고 man 페이지가 재생성된다. JSON 모양이 바뀌면 새 fixture를 등재하고 기존 fixture는 그대로다. 근거: Step 4·15. 소유: 에이전트, 사용자(ADR 승인).
+- [ ] **DoD (e) — graceful re-exec H1.** SIGTERM drain이 닫은 세션 수를 payload 없는 구조적 로그 한 줄로 남긴다. 새 doctor 진단이 `EXPECTED_DOCTOR_CODES`에 24번째로 오르고, `docs/CLI.md` §6.11·§6.17과 `crates/qsh-core/src/doctor.rs` 모듈 doc의 개수 산문이 같은 커밋에서 바뀐다. 근거: Step 13. 소유: 에이전트.
+- [ ] **DoD (f) — H1b stateless reset key 고정.** testkit에서 `qsh serve`를 재시작하면 attach 중이던 클라이언트가 재시작 뒤 첫 패킷에 stateless reset을 받아 `REDIAL_DEADLINE`(2초) 안에 단절을 확정하고, 45초 idle timeout을 기다리지 않은 채 세션 소실을 `docs/design/protocol.md` §10-2의 비구별성 규칙과 `docs/CLI.md` §6.3·§6.4의 현행 attach 실패 코드로 보고한다. reset key 파일은 0600이다. 읽을 수 없거나 형식이 틀린 파일을 만나면 조용히 새 키를 만들지 않고 ADR-0036이 정한 동작을 한다. reset key는 로그와 audit 어디에도 나오지 않는다. `docs/design/threat-model.md` §4 D·G에 키 유출 행이 오른다. wire diff 0. 근거: Step 5·16. 소유: 에이전트, 사용자(ADR 승인).
+- [ ] **DoD (g)~(j) — 배포 결정 넷.** 각 결정이 커밋에 남는다. (g)는 `publish-dry-run`, (h)·(i)는 설치 스크립트 테스트와 `scripts/README.md`·README 문면, (j)는 핀 테스트 또는 기각 기록이 근거다. 근거: Step 9·10·11·12. 소유: 에이전트.
+- [ ] **DoD (k) — ADR-0021 결정 1·4(관측 게이트).** 구현했다면 새 설정 값의 검증이 `ReverseConfig::backoff`와 같은 fail-closed `CONFIG_ERROR` 패턴이고 설정이 없을 때 동작이 오늘과 같다. ADR-0021 결정 6의 문서 자리가 같은 커밋에서 바뀐다. `[recovery]` 상한은 세 `detection_budget`에서 역산하고, 세 테스트와 `a_real_60_second_blackout_survives_and_resumes_the_same_session`이 고치지 않은 예산으로 초록이다. 구현하지 않았다면 관측 기록 부재와 이월 대상이 ROADMAP M13 절에 적힌다. 근거: Step 17 또는 Step 18. 소유: 에이전트, 사람(관측 기록).
+- [ ] **DoD 마감 — 마감 공통 절차 1·2.** 구속 문서 태그를 대조하고 README를 동기화한다. 근거: Step 18. 소유: 에이전트.
+- [ ] **계획 규율 — 새 타이밍 민감 테스트의 부하 반복.** ROADMAP M13 DoD에는 없는 줄이다. M12가 세운 규율(`docs/design/testing.md` CI 규율)을 따라 M13이 더한 타이밍 민감 테스트 전부가 `scripts/stress/run.sh`로 CPU 부하 아래 50회 연속 초록이다. Step 1이 ROADMAP M13 DoD에 이 줄을 더할지는 §8 #7이 정한다. 근거: 각 스텝 (c), Step 18. 소유: 에이전트.
 
 ## 2. 실행 단계 (PR 단위)
 
-스텝 번호는 이 문서 안에서만 쓰는 참조다. 크기 내역은 각 스텝 옆에 적는다. Step 2~21의 합은 5.1~6.1ew이고 Step 1이 `docs/ROADMAP.md` M12 크기 줄을 같은 값으로 고친다. 내역은 안정성 하네스 0.05~0.1, (a) 3.3~3.8(첫 단위 2.45~2.85, 둘째 단위 0.85~0.95), (b) 1.55~1.95, 마감 0.2다. (a)는 ADR-0023 결과 절의 3.3~3.8ew를 그대로 나눈 값이다. (b)는 ADR-0024 결과 절의 1.6~2.0ew에서 M11 Step 2가 이미 끝낸 재시작 상수 추출 몫 0.05를 뺀 값이다. Step 1은 크기 내역 밖이다.
+스텝 번호는 이 문서 안에서만 쓰는 참조다. Step 2~18의 합은 3.05~6.05ew이고 ROADMAP M13 크기 줄(3.1~6.1ew, 0.1 단위 반올림)과 같다. 항목별 내역은 ROADMAP 크기 줄을 그대로 나눴다. (a) 0.5~0.8(저장소 0.2, job과 임계 0.3~0.6), (b) 0.5~2.0(하네스 0.5, 판정과 ADR 0~0.2, 수정 0~1.3), (c) 0.2~0.3, (d) 0.35~0.55(ADR 0.1, 구현 0.25~0.45), (e) 0.25, (f) 0.3~0.45(ADR 0.05~0.1, 구현 0.25~0.35), (g) 0.1~0.2, (h) 0.2~0.3, (i) 0.1~0.2, (j) 0.1~0.3, (k) 0.35~0.5, 마감 0.1~0.2. (k)를 이월하면 하한은 2.7ew로 내려간다. (f)의 ADR 몫은 ROADMAP의 (f) 크기 안에서 떼었다. Step 1은 크기 내역 밖이다.
 
-순서는 과제가 정한 대로다. 첫 단위는 wake 감지기(Step 3), 빠른 창과 예산(Step 4), 요청 필드(Step 5), forward `-L`/`-D`의 supervise(Step 6~8), accept 유지(Step 9), `qsh::lifecycle`(Step 10), `serve --to` wake reset(Step 11), 첫 단위 운영 문서와 캠페인(Step 12)이다. 둘째 단위는 peer close 응답 시점 수정(Step 13), reverse route `-L`/`-D`(Step 14), `-R` 재발행(Step 15)이다. 그 뒤 ADR-0024의 SHA 고정(Step 16), `qsh setup` 세 스텝(Step 17~19), README와 캠페인(Step 20), 마감(Step 21)이다. 의존은 이렇다. Step 4·6은 Step 3에, Step 7은 Step 4·5·6에, Step 8·9는 Step 7에, Step 10은 없음(Step 7 뒤에 두는 것은 `tunnel_*` 줄의 `supervise` 필드를 한 번에 채우기 위해서다), Step 11은 Step 3에, Step 14는 Step 7·13에, Step 15는 Step 13·14에, Step 17은 Step 16에, Step 18은 Step 17에, Step 19는 Step 18에, Step 20은 Step 16·19에 기댄다. Step 13은 첫 단위와 독립이라 먼저 착지해도 된다.
+순서는 위험을 먼저 드러내도록 짰으므로 첫 코드 스텝이 (b) 하네스(Step 2)다. 하네스는 붉을 가능성이 크고 붉으면 splice 설계 변경과 ADR 승인이 M15 착수를 민다(§5.4 리스크 3). 그래서 하네스 판정(Step 3)과 두 ADR 초안(Step 4·5)을 맨 앞에 두어 승인 대기 시간을 나머지 스텝 뒤에 숨긴다. 그다음은 승인이 필요 없는 스텝으로, 측정 도구인 (a)(Step 6·7)를 기능성 배포 항목보다 먼저 두고(§5.1 원칙 3), 설치 경로 셋((c) Step 8, (h) Step 9, (i) Step 10)은 Step 8이 세우는 설치 스크립트 테스트 하네스를 함께 쓰므로 연달아 둔다. (g)·(j)·(e)가 뒤를 잇는다. 승인이 필요한 구현 셋(Step 14·15·16)과 관측 게이트 (k)(Step 17)는 뒤에 두되, 승인이 나는 날 바로 열 수 있다. Step 18이 마감이다.
 
-규율은 앞 마일스톤 그대로이고 M12에서 몇 가지를 덧붙인다.
+Step 3은 Step 2에, Step 7은 Step 6에, Step 9·10은 Step 8의 하네스에, Step 14는 Step 3의 ADR 승인에, Step 15는 Step 4의 승인에, Step 16은 Step 5의 승인에, Step 17은 §0.6의 기록에 기댄다. Step 11·12·13은 독립이다. Step 16과 Step 17은 같은 설정 로더(`crates/qsh-core/src/config.rs`)를 만질 수 있으므로 둘이 겹치면 Step 17을 먼저 착지한다(§4.1 #12).
 
-- 각 스텝은 일곱 게이트(`cargo fmt --all --check`, clippy `-D warnings`, `cargo nextest run --workspace`, `cargo test --workspace --doc`, `RUSTDOCFLAGS=-D warnings cargo doc`, `cargo xtask arch`, `cargo deny check`)가 초록인 채로 착지한다. clippy와 test는 `ci.yml`에서 Windows 다리도 돈다. unix 전용 경로에만 쓰이는 새 항목은 `#[cfg_attr(not(any(unix, test)), allow(dead_code))]` 선례를, 테스트만 쓰는 항목은 `#[cfg(test)]`를 따른다. reverse route 경로는 unix 전용이다.
-- 계약 문서 델타는 그 표면을 바꾼 스텝의 같은 커밋에 싣는다(ADR-0023 결과 절 "문서는 같은 커밋에서 고친다"). `docs/CLI.md` 상태 헤더의 v0.15 항목은 CLI.md를 처음 고치는 스텝(Step 5)이 열고 뒤 스텝이 덧붙인다. clap 트리가 바뀌는 스텝은 같은 커밋에서 `cargo xtask man`을 돌려 `docs/man/` diff를 싣는다.
-- ADR-0023 쪽 스텝은 fixture, `.proto`(`qsh.local.v1` 포함), capability 문자열, `ErrorCode`를 바꾸지 않는다. 스텝마다 `git diff --stat -- crates/qsh-cli/tests/fixtures crates/qsh-proto/proto`가 비어 있음을 완료 판정에 둔다. ADR-0024 쪽 fixture는 추가만 하고, 새 fixture마다 실제 바이너리로 그 결과를 재현하는 `golden_*` 생산 테스트를 같은 커밋에 둔다.
-- 판정 로직은 `qsh-core`의 `Ops`와 그 아래 모듈에 두고 `qsh-cli`에는 clap 정의, 렌더러, 신호 handler 배선만 더한다. `acl.toml`을 쓰는 코드 경로는 어느 스텝에도 생기지 않는다(ADR-0017 결정 1).
-- 손대는 소스 파일이 800줄을 넘으면 인라인 테스트를 같은 커밋에서 형제 `tests.rs`로 옮긴다. `crates/qsh-core/src/client/pathwatch.rs`는 origin `8fd4602`에서 797줄이고 인라인 테스트가 들어 있어 Step 3이 옮긴다. 새 모듈이 800줄을 넘을 것이 분명하면 처음부터 디렉터리 모듈과 `tests.rs`로 만든다.
-- 테스트 스위트는 고정 대기 `sleep()`을 쓰지 않는다(`docs/design/testing.md` L2, CI 규율). M12는 여기에 안정성 규율을 더하는데, 새 타이밍 민감 테스트는 다음 셋을 모두 지킨다.
-  - 시계는 주입한다. 순수 로직(wake 감지기, backoff, 예산, `PathState`)은 `tokio::time::pause()`와 주입한 벽시계·RNG로 돌리고 벽시계를 실제로 기다리지 않는다.
-  - 기다림은 관찰 가능한 상태로 한다. 통합 테스트는 carrier 상태의 `watch` 채널, 테스트 관찰자 채널, 캡처한 진단 줄을 기다리고 넉넉한 `timeout`으로 묶는다. "N초 뒤에는 이렇게 됐을 것이다"를 고정 대기로 쓰지 않는다.
-  - 벽시계 상한은 결정 경로를 가르는 데만 쓴다. 상한을 문자 그대로 단언해야 하는 값(ADR-0023 결정 17의 `WAKE_TICK + dead_after(rtt)`, 결정 10의 `FAST_CAP`)은 주입 시계 층에서 정확히 단언하고, 실제 소켓을 쓰는 통합 층은 "다른 경로였다면 걸렸을 시간보다 훨씬 짧다"와 순서를 단언한다(§4.1 #9).
-- 새 타이밍 민감 테스트는 그 스텝의 완료 판정에서 Step 2 하네스로 CPU 부하 아래 50회 연속 초록이어야 착지한다. Step 21이 마일스톤 전체 목록으로 다시 돌린다.
+규율은 앞 마일스톤 그대로이고 M13에서 몇 가지를 덧붙인다.
+
+- 각 스텝은 일곱 게이트(`cargo fmt --all --check`, clippy `-D warnings`, `cargo nextest run --workspace`, `cargo test --workspace --doc`, `RUSTDOCFLAGS=-D warnings cargo doc`, `cargo xtask arch`, `cargo deny check`)가 초록인 채로 착지한다. clippy와 test는 `ci.yml`에서 Windows 다리도 돈다. 설치 스크립트 테스트처럼 POSIX 셸이 필요한 테스트는 `#[cfg(unix)]`로 가른다.
+- 계약 문서 델타는 그 표면을 바꾼 스텝의 같은 커밋에 싣는다. `docs/CLI.md` 상태 헤더의 v0.19 항목은 CLI.md를 처음 고치는 스텝이 열고 뒤 스텝이 덧붙인다. clap 트리가 바뀌는 스텝은 같은 커밋에서 `cargo xtask man`을 돌려 `docs/man/` diff를 싣는다.
+- 판정 로직은 `qsh-core`에 두고 `qsh-cli`에는 clap 정의, 렌더러, exit 매핑만 둔다. `qsh-transport`는 설정 파일과 키 파일 경로를 모른다. keep-alive 값과 reset key 바이트는 `qsh-core`가 읽어 인자로 넘긴다(아키텍처 규칙, `docs/design/architecture.md` §1).
+- `.proto`, capability 문자열, `ErrorCode`는 바꾸지 않는다. 스텝마다 `git diff --stat -- crates/qsh-proto/proto`가 비어 있음을 완료 판정에 둔다. fixture는 추가만 하고, 새 fixture마다 실제 바이너리로 재현하는 `golden_*` 생산 테스트를 같은 커밋에 둔다. (b)의 수정이 새 스트림 reset 코드를 부르면 그 판단은 ADR-0037이 `docs/design/protocol.md` §16.2·§16.4에 비추어 내린다.
+- 손대는 소스 파일이 800줄을 넘으면 인라인 테스트를 같은 커밋에서 형제 `tests.rs`로 옮긴다. `crates/qsh-core/src/tunnel/splice.rs`와 `crates/qsh-transport/src/endpoint.rs`는 origin `ed905e8`에서 각각 인라인 테스트를 가진 큰 파일이므로 Step 14·16이 손댈 때 줄 수를 먼저 확인한다.
+- 안정성 규율은 M12와 같다. 새 타이밍 민감 테스트는 시계를 주입하고, 관찰 가능한 상태(`watch` 채널, 캡처한 진단 줄, quinn `Connection::stats()`의 프레임 계수)를 넉넉한 `timeout`으로 기다리며, 고정 대기 `sleep()`을 쓰지 않는다. 정확한 상한은 주입 시계 층에서 단언하고 실제 소켓 층은 경로 구별과 넉넉한 상한을 단언한다. 그 스텝의 완료 판정에서 `scripts/stress/run.sh`로 CPU 부하 아래 50회 연속 초록이어야 착지한다. 예외는 지연 자체를 재는 perf 게이트 단언(echo p95, throughput 비율) 하나다. 이 단언은 CPU 포화가 측정 대상을 바꾸므로 부하 반복 대상이 아니고 대신 부하 없이 50회 연속 초록을 기록한다(§8 #5). 같은 테스트 파일 안에서도 진행 여부 단언과 지연 단언은 다른 테스트 함수로 나눠 앞의 것은 부하 반복에 넣는다.
 - 벽시계를 실제로 기다리는 테스트는 `QSH_ACCEPTANCE_SLOW`로 가르고 `docs/design/testing.md`의 벽시계 예외 목록에 이름을 올린다.
 
-### Step 1 — M12 계획 교체와 ROADMAP 갱신 (main 세션, 크기 내역 밖)
+### Step 1 — M13 계획 교체와 ROADMAP 갱신 (main 세션, 크기 내역 밖)
 
-근거: `docs/ROADMAP.md` M11 마감 노트, ADR-0023 결과 절의 ROADMAP 항목, ADR-0024 결과 절. 선행: M11 마감. M12의 첫 커밋이다.
+근거: `docs/ROADMAP.md` M12 마감 노트, ROADMAP M13 절. 선행: M12 마감. M13의 첫 커밋이다.
 
-**(a) 범위:** ① `PLAN.md`가 이 문서다(M11 마감 커밋이 옮기지 않았으면 이 커밋이 M11 계획을 `docs/history/m11-plan.md`로 옮긴다). ② `docs/ROADMAP.md`를 고친다. "현재 위치" 줄을 M12로, M12 절의 범위 (a)·착수 조건·명시적 out·수용 기준·크기·결정 기록을 두 ADR의 승인 문면과 ADR-0023 결정 17~24에 맞춘다. §3 가드레일 표의 "Forward-route live carrier·`-R` 자동 재발행" 행 끝 문장을 두 단위 순서로 고친다. §5.2 표의 M12 행과 머리의 P1 총 크기 줄을 새 크기로 고친다. §5.5 표에 `p1-supervise-wake` 행을 더한다. 문안은 main 세션이 가진 편집안 그대로다. ③ README Roadmap 표의 P1 행을 "M12 진행 중"으로 고친다.
+**(a) 범위:** ① `PLAN.md`가 이 문서다(M12 마감 커밋이 옮기지 않았으면 이 커밋이 M12 계획을 `docs/history/m12-plan.md`로 옮긴다). ② `docs/ROADMAP.md`를 고친다. "현재 위치" 줄을 M13으로 옮긴다. §5.1 원칙 2의 "M13 (b)는 …, M13 (d)는 ADR-0027을 기다린다" 문장과 M13 착수 조건, §5.2 표 M13 행의 착수 조건 칸에 (f)의 ADR-0036을 더한다(§8 #2). §5.4 리스크 1의 ADR 개수에 ADR-0036을 더한다. §8 #7이 정하면 M13 DoD에 안정성 줄을 더한다. §5.5 표의 `aarch64-unknown-linux-musl` 행 "사전 고정 문서" 칸에 `docs/campaigns/p1-aarch64-musl.md`를 적는다. ③ README Roadmap 표의 P1 행을 "M13 진행 중"으로 고친다.
 
 **(b) 테스트·게이트:** 문서 변경이라 새 게이트가 없다. README 축자 게이트가 걸린 자리는 건드리지 않는다. 일곱 게이트 초록.
 
-**(c) 완료 판정:** `PLAN.md` 첫 줄이 이 문서의 제목이다. "현재 위치"가 M12를 가리킨다. `grep -n '초안, M12를 열 때 확정' docs/ROADMAP.md` 0건, `grep -n 'p1-supervise-wake' docs/ROADMAP.md` 1건 이상, `grep -n '3.8~5.3' docs/ROADMAP.md` 0건.
+**(c) 완료 판정:** `PLAN.md` 첫 줄이 이 문서의 제목이다. "현재 위치"가 M13을 가리킨다. `grep -n 'ADR-0036' docs/ROADMAP.md`가 M13 착수 조건과 §5.2 표에서 각 1건 이상이다.
 
-### Step 2 — 부하 반복 하네스 (0.05~0.1ew)
+### Step 2 — (b) 느린 스트림 역압 하네스 (0.5ew)
 
-근거: §2의 안정성 규율, `docs/design/testing.md` CI 규율. 선행: 없음. 첫 단위의 모든 스텝이 이 하네스로 완료를 판정한다.
+근거: ROADMAP M13 범위 (b)와 DoD (b), `docs/design/testing.md` L9/L10의 "덮는 축은 포화(고속) 하나다" 문단, `docs/design/protocol.md` §12, PRD §13의 "느린 파일·터널 stream이 PTY stream을 block하지 않아야 함". 선행: 없음. M13의 첫 코드 스텝이다.
 
-**(a) 범위:** `scripts/stress/run.sh`를 더한다. 인자는 nextest filterset 하나와 반복 수(기본 50)다. 스크립트는 논리 CPU 수만큼 바쁜 루프 프로세스를 띄워 CPU를 포화시키고(§4.1 #8), `cargo nextest run --workspace --no-fail-fast -E '<filterset>'`을 반복 수만큼 돌린다. nextest가 반복 실행 옵션을 제공하면 그것을 쓰고, 없으면 셸 반복으로 대신한다. 한 번이라도 붉으면 그 회차 번호와 실패 테스트 이름을 찍고 exit `1`이다. 끝에는 "N/N passed under load"를 한 줄 찍는다. 부하 프로세스는 `trap`으로 반드시 거둔다. `QSH_ACCEPTANCE_SLOW=1`을 넘기면 벽시계 테스트도 돈다. macOS와 Linux에서 돈다.
+**(a) 범위:** 새 testkit 테스트 파일 `crates/qsh-testkit/tests/tunnel_stalled_streams.rs`를 만든다. `tunnel_echo_under_load.rs`의 하네스 모양(같은 연결 위의 PTY 세션과 `-L` 포워드, 측정 RTT, `percentile`)을 따르되 흐름 방향과 소비자가 다르다. 호스트 쪽 목적지 서버 N개가 연결마다 끝없이 쓰고, 클라이언트 쪽 로컬 소비자는 TCP 연결을 연 뒤 한 바이트도 읽지 않는다. 로컬 소켓의 `SO_RCVBUF`는 작게 잡아 커널 버퍼가 곧 차게 한다. 그러면 클라이언트 splice가 QUIC 수신 스트림을 더 읽지 못하고, 스트림마다 `TUNNEL_STREAM_RECEIVE_WINDOW`(2 MiB)가 차며, N이 넷이면 `CONNECTION_RECEIVE_WINDOW`(8 MiB)가 소진된다(ROADMAP M13 범위 (b)의 가설).
 
-`scripts/README.md`에 절 하나를 더하고, `docs/design/testing.md` CI 규율에 "타이밍 민감 테스트는 착지 전에 `scripts/stress/run.sh`로 CPU 부하 아래 50회 연속 초록이어야 한다" 한 항목을 넣는다. 근거로 `8fd4602`(부하 아래 16/80 실패하던 역방향 reset 관찰 경합)를 적는다. PR 게이트에는 넣지 않는다. 부하 반복은 공유 runner에서 재현성이 낮고 수십 분이 걸리기 때문이다.
+정체 성립은 시간이 아니라 관찰 가능한 상태로 기다린다. 클라이언트 쪽 `Connection::stats()`에서 호스트가 보낸 `DATA_BLOCKED` 프레임 수(연결 수준)가 0보다 커지거나, 스트림 N개 모두에서 `STREAM_DATA_BLOCKED`가 관찰될 때를 정체로 본다(§4.1 #1). 그 뒤 PTY 쪽을 재는데 진행 단언은 PTY에 한 줄씩 순번을 찍는 프로세스를 돌리고 정체 이후 순번이 계속 늘어나는지를 넉넉한 `timeout` 안에서 본다. 지연 단언은 정체 상태에서 echo 표본을 모아 p95를 `측정 RTT + 10ms`와 비교한다.
 
-**(b) 테스트·게이트:** 스크립트 자체의 게이트는 없다. 착지 커밋 본문에 기존 테스트 하나(`run_target_lost_and_retry_lines_report_a_silent_path_as_path_dead`)를 이 하네스로 50회 돌린 결과 줄을 적어 동작을 보인다.
+게이트는 기존 perf 테스트와 같은 규칙이다. `QSH_ACCEPTANCE_STRICT`가 없으면 측정값과 정체 관찰을 출력만 하고 초록으로 끝나고 있으면 단언한다. 예상 결과가 붉음이라 필수 경로를 붉게 만들 수 없으므로 이 스텝은 `ci.yml` acceptance job에 테스트를 넣지 않는다. 배선은 수정이 착지하는 Step 14(또는 하네스가 초록이면 Step 3)가 한다. 모듈 doc에 가설, 정체 관찰 기준, 넷이라는 수의 근거(8 MiB ÷ 2 MiB), 셋일 때는 막히지 않아야 한다는 경계 조건을 적는다.
 
-**(c) 완료 판정:** `scripts/stress/run.sh 'test(/no_such_test/)' 1`이 "0 tests" 경고와 함께 exit `0`, 일부러 실패하는 filterset이면 exit `1`이고 부하 프로세스가 남지 않는다(`pgrep` 0건). 일곱 게이트 초록.
+**(b) 테스트·게이트:** testkit(strict 게이트, 수 초). `pty_output_keeps_progressing_while_four_unread_tunnel_streams_stall`(진행 단언, 표 기반으로 N=4와 N=8 두 행), `pty_echo_p95_stays_within_measured_rtt_plus_10ms_while_four_unread_tunnel_streams_stall`(지연 단언), `pty_output_keeps_progressing_with_three_unread_tunnel_streams`(경계 조건. 창 합이 6 MiB라 연결 창이 남으므로 지금도 초록이어야 한다), `stalled_stream_harness_observes_data_blocked_before_measuring`(정체 관찰이 실제로 일어났음을 단언해, 정체가 안 생겨서 초록인 경우를 막는다). 기존 `tunnel_saturated_pty_echo_p95_under_measured_rtt_plus_10ms`와 `tunnel_throughput_meets_raw_quinn_ratio` 초록.
 
----
+**(c) 완료 판정:** 네 테스트가 기본 실행(strict 없음)에서 초록이다. 로컬에서 `QSH_ACCEPTANCE_STRICT=1`로 돌린 결과(어느 테스트가 붉고 어떤 값이 나왔는지, `DATA_BLOCKED` 계수)를 커밋 본문에 적는다. 경계 조건 테스트와 정체 관찰 테스트가 strict에서 초록이고 부하 아래 50회 연속 초록이다. 지연 단언은 §2 규율의 예외다. `git diff --stat -- crates/qsh-proto/proto crates/qsh-core/src crates/qsh-transport/src`가 비어 있다(하네스는 제품 코드를 건드리지 않는다).
 
-첫 단위(ADR-0023 결정 24): forward route의 `--local`과 `--dynamic`. 결정 1~6, 7-1~7-3, 8~13, 17~21.
+### Step 3 — (b) 판정 기록과 splice ADR 초안 (0~0.2ew, 조건부)
 
-### Step 3 — wake 감지기와 `PathWatch` 배선 (0.25~0.3ew)
+근거: ROADMAP M13 착수 조건과 DoD (b) 끝 문장, §5.4 리스크 3의 "설계 변경이 필요하다고 판정되면 그날 ADR 초안을 올린다". 선행: Step 2.
 
-근거 ADR: ADR-0023 결정 17, 결정 4(wake는 활동이고 즉시 probe), 결정 21과 무관. 선행: 없음.
+**(a) 범위:** Step 2의 strict 결과로 세 갈래 중 하나를 고른다.
 
-**(a) 범위:** `qsh-core`에 프로세스마다 하나인 wake 감지기를 둔다(모듈 자리 §4.1 #1). `WAKE_TICK` 1초마다 벽시계(`SystemTime`)와 단조 시계(`Instant`)를 함께 읽고, 직전 tick 이후 벽시계 증가량에서 단조 증가량을 뺀 값이 `WAKE_SKEW` 3초 이상이면 wake로 판정하고 그 차를 `slept_ms`로 알린다. 벽시계가 뒤로 가면 wake가 아니다. 두 상수는 설정으로 열지 않는다(ADR-0021 결정 4의 규율, ADR-0023 개정 관계 절). 알림은 구독자마다 놓치지 않는 `tokio::sync::watch`(값은 wake 순번과 `slept_ms`)로 낸다. 벽시계 원천은 트레이트로 주입하고 제품 코드는 `SystemTime::now`를, 테스트는 손으로 움직이는 가짜 시계를 쓴다. tick 타이머는 tokio 시계라 `tokio::time::pause()` 아래에서 결정적이다. 감지기는 처음 구독될 때 한 번 뜨고 패킷을 보내지 않는다.
+- 초록(가설이 틀림). 연결 창이 소진되지 않거나 소진돼도 PTY가 진행한다. 그 이유(quinn의 credit 반환 시점 등)를 `docs/design/testing.md` L9/L10의 "덮는 축은 포화(고속) 하나다" 문단에 실측으로 적고, 잔여 위험 문장을 "측정됨"으로 바꾼다. Step 2의 테스트를 `ci.yml` acceptance job에 strict로 넣고 `CLAUDE.md` Commands 절의 acceptance 목록과 `docs/design/testing.md` 게이트 환경변수 표에 이름을 더한다. (b)는 이 스텝으로 닫히고 Step 14는 0ew다.
+- 붉음, 설계 변경 불필요. 상수 조정은 ROADMAP 범위 (b)가 이미 기각했으므로(8 MiB는 M8 DoD 2 상한, 스트림 창 축소는 `docs/design/protocol.md` §12가 기각한 128 KiB 사례) 이 갈래는 splice 안의 결함(예: 읽기 중단 조건의 버그)일 때만 성립한다. 그 판단 근거를 커밋 본문에 적고 Step 14를 ADR 없이 연다.
+- 붉음, 설계 변경 필요. 예상 갈래다. `docs/adr/0037-*.md`(번호는 §0.5)를 `제안됨`으로 올린다. 초안은 적어도 다음 후보를 한 표로 비교한다. (가) 수신 스트림을 앱 쪽 유계 버퍼로 비우고 그 버퍼가 차면 그 스트림만 `STOP_SENDING`/reset한다(ROADMAP 범위 (b)가 예로 든 안). (나) 연결 단위로 정체 바이트 합을 세어 문턱(예: 연결 창의 절반)을 넘으면 가장 오래 정체한 터널 스트림부터 끊는다. (다) 동시 터널 스트림 수에 상한을 두어 창 합이 연결 창을 넘지 못하게 한다. 비교 축은 세션당 buffer 8 MB 상한 준수, `tunnel_throughput_meets_raw_quinn_ratio` 비율, 느린 소비자에게 보이는 의미(끊김이 RST로 보이는지), 새 reset 코드가 `docs/design/protocol.md` §16.2의 상호운용 계약 표에 새 행이 되는지, `docs/design/threat-model.md` §4 C의 새 행이다. `docs/adr/README.md` 표에 행을 더하고 "다음 새 번호" 문장을 고친다.
 
-`PathWatch`(`crates/qsh-core/src/client/pathwatch.rs`)가 wake 구독을 받는다. wake가 오면 `PathState::observe_activity`로 활동을 기록하고 잠든 watchdog을 기존 `wake` Notify로 깨워 곧바로 판정한다. 침묵은 잠들기 전 마지막 수신부터 단조 시계로 재므로, 깨어난 뒤 빠른 cadence probe 3번과 `dead_after(rtt)` 가운데 긴 쪽이 지나면 사망이 선언된다. 소비자는 대화형 attach의 recovery, `qsh serve --to` target의 `PathWatch`(`crates/qsh-core/src/reverse/target/mod.rs`), `qsh listen` 등록의 `PathWatch`(`crates/qsh-core/src/reverse/listen/registration.rs`)다. supervised forward 터널과 두 backoff는 뒤 스텝이 붙인다. recovery의 분류와 결과 어휘는 바뀌지 않는다. `PathWatch::new`의 시그니처를 바꾸면 호출 지점 셋을 같은 커밋에서 고치고, 두 역방향 자리의 `#[cfg(test)]` `PathWatchConfig` 주입(M11 Step 5b)은 그대로 둔다.
+**(b) 테스트·게이트:** 문서 변경(초록 갈래는 CI 배선 포함). 일곱 게이트 초록. 초록 갈래는 acceptance job이 한 번 이상 초록.
 
-`pathwatch.rs`는 797줄이라 이 스텝에서 800줄을 넘기므로 같은 커밋에서 인라인 테스트를 `crates/qsh-core/src/client/pathwatch/tests.rs`로 옮긴다. `xtask/src/arch.rs`의 경로 금지 목록에 이 경로는 없다.
+**(c) 완료 판정:** 고른 갈래와 근거가 커밋 본문에 있다. 셋째 갈래면 ADR 파일이 `상태: 제안됨`이고 README 표에 같은 상태로 있다. ADR이 `승인됨`으로 바뀌는 것은 사용자 결정이고 이 스텝의 완료 조건이 아니다.
 
-문서를 같은 커밋에서 고친다. `docs/design/protocol.md` §2의 "절전 복귀 시 클라이언트는 monotonic clock 점프/PTO 실패로 죽은 연결을 즉시 버리고" 문장을 결정 17의 기전(벽시계와 단조 시계의 차이, 1초 tick, 3초 문턱, 깨어난 뒤 약 2초 안의 유실 선언)으로 고친다. §10 "Path 사망 감지" 목록에 wake 항목 하나를 넣는다. 둘 다 wire 밖의 서술이다. `docs/design/architecture.md` §2나 §3의 `PathWatch` 서술이 있으면 한 구절을 더한다.
+### Step 4 — ADR-0027 초안: `doctor --fail-on`의 exit 규칙 (0.1ew)
 
-**(b) 테스트·게이트:** 단위(결정 17, 시계 주입). `wake_detector_reports_a_wall_clock_jump_the_monotonic_clock_did_not_see`(벽시계 60초, 단조 0초 → `slept_ms` 60000), `wake_detector_ignores_divergence_below_three_seconds`, `wake_detector_ignores_a_backward_wall_clock_step`, `wake_detector_delivers_every_wake_to_a_subscriber_that_was_busy`(`watch` 순번이 건너뛰지 않음). 단위(결정 4·17, `pathwatch/tests.rs`). `path_state_probes_at_once_and_uses_the_fast_cadence_after_a_wake`(idle cadence에서 wake 뒤 첫 판정이 `Probe`이고 3 strike 뒤 `Dead`까지 250ms cadence), `path_state_treats_a_local_accept_as_activity`, `path_watch_declares_dead_within_wake_tick_plus_dead_after_of_a_wake`(paused 시계에서 주입한 wake부터 `dead()`가 풀리기까지 `WAKE_TICK + dead_after(rtt)` 이하, §4.1 #9). 기존 `pathwatch` 테스트와 `detection_budget`을 쓰는 recovery 테스트가 고치지 않고 초록.
+근거: ROADMAP M13 범위 (d), `docs/CLI.md` §4·§6.17, `docs/adr/README.md` 예약 목록. 선행: 없음.
 
-**(c) 완료 판정:** 위 테스트 초록. 새 테스트 전부가 `scripts/stress/run.sh`로 50회 연속 초록. `grep -n 'monotonic clock 점프' docs/design/protocol.md` 0건. `git diff --stat -- crates/qsh-cli/tests/fixtures crates/qsh-proto/proto`가 비어 있다.
-
-### Step 4 — supervise 빠른 창, 예산, 오류 분류 (0.4~0.45ew)
-
-근거 ADR: ADR-0023 결정 9, 10, 18, 결정 17(wake 소비). 선행: Step 3.
-
-**(a) 범위:** supervisor가 쓸 순수 로직 셋을 네트워크 없이 만든다. 자리는 supervisor 모듈(§4.1 #2)이다.
-
-- backoff. 첫 시도는 유실 감지 즉시, 그 뒤 500ms에서 2배씩 늘리고 full jitter를 준다. 유실 감지와 wake마다 `FAST_WINDOW` 60초 창을 새로 열고, 창 안에서는 간격이 `FAST_CAP` 2000ms를 넘지 않는다. 창이 끝나면 그 자리에서 2배씩 이어 늘려 30000ms에서 멈춘다. wake는 위치를 처음으로 되돌리고 진행 중인 대기를 끊어 즉시 한 번 시도하게 하고 창을 새로 연다. 다만 진행 중인 시도는 끊지 않는다. `refused`로 끝난 시도는 그 자리에서 창을 닫는다. 네 상수는 `[reverse]`를 읽지 않는 고정 상수다. RNG는 주입한다(target `Backoff`의 선례).
-- 예산. "끊김" 시간의 합을 단조 시계로 재고 살아 있던 시간은 더하지 않는다. 재수립된 터널이 30초 이상 살아야 그 유실이 끝난 것으로 치고, 그 전에 다시 죽으면 누적 예산과 창 밖 backoff 위치를 이어 쓴다. 절전 시간은 예산을 쓰지 않고, 절전이 예산보다 길어도 깨어난 뒤 한 번은 시도한다. 예산이 떨어지면 마지막 시도의 오류로 끝낸다.
-- 오류 분류. 결정 9의 표 하나를 `(출처, ErrorCode, retryable) → {Retry, Stop}` 함수로 옮긴다. 표에 없는 조합과 `Unknown(_)`은 `Stop`이다. 예외 둘(7-4의 close 직후 bind 경합 재시도, "no such forward_id"를 성공으로 읽기)은 둘째 단위가 쓰지만 분류 함수의 입력 모양은 이 스텝에서 정한다.
-
-이 셋은 `pub(crate)`이고 아직 호출자가 없으므로 Windows lib 빌드의 dead_code를 피하도록 cfg 가드를 단다.
-
-**(b) 테스트·게이트:** 단위(결정 10·18, paused 시계, 고정 seed). `supervise_backoff_caps_at_two_seconds_inside_the_fast_window_then_doubles_to_thirty`, `supervise_backoff_restarts_and_reopens_the_fast_window_on_wake`, `supervise_backoff_closes_the_fast_window_on_refused`, `supervise_backoff_wake_cuts_a_pending_wait_but_not_an_attempt_in_flight`. 단위(결정 10 예산). `supervise_budget_counts_only_disconnected_time_and_carries_over_inside_the_thirty_second_stability_window`(`--supervise 5000`, 3초 끊김, 재수립, 20초 뒤 재유실이면 남은 예산 2초), `supervise_budget_refills_after_thirty_seconds_alive`, `supervise_budget_excludes_slept_time_and_still_attempts_once_after_a_wake_longer_than_the_budget`. 단위(결정 9). `supervise_error_classification_covers_every_source_and_error_code`(출처마다 `ErrorCode`의 모든 변형과 `Unknown(_)`을 돌려 표와 대조). proptest `supervise_backoff_never_exceeds_thirty_seconds_and_never_exceeds_two_inside_a_window`.
-
-**(c) 완료 판정:** 위 테스트 초록. 새 테스트 전부가 부하 아래 50회 연속 초록. mutation 하나(`FAST_CAP` 적용을 빼기)가 첫 테스트와 proptest를 붉힌다.
-
-### Step 5 — 요청 필드, CLI 플래그, 검증 (0.15ew)
-
-근거 ADR: ADR-0023 결정 1, 2, 13, 19의 검증 문장, 24. 선행: 없음(Step 7이 이 스텝의 `UNSUPPORTED`를 좁힌다).
-
-**(a) 범위:** `TunnelOpenReq`와 `TunnelDynamicReq`(`crates/qsh-proto`)에 `supervise_ms`와 `accept_hold_ms`(둘 다 optional u32, `#[serde(default, skip_serializing_if = "Option::is_none")]`)를 더한다. `wait_ms`(`c9113cc`)와 같은 모양이다. standalone `qsh tunnel open`의 clap 정의에 `--supervise <ms>`와 `--accept-hold <ms>`를 넣는다. 대화형 form에는 두지 않는다.
-
-검증은 `Ops`가 연결이나 bind 전에 한다. `supervise_ms`가 `0..=86400000` 밖이면 `INVALID_ARGUMENT`다. `accept_hold_ms`가 `0..=2000` 밖이거나, `supervise_ms`가 0인데 0이 아니거나, `--remote`에 주면 `INVALID_ARGUMENT`다. `Ops::tunnel_open_and_hold`와 `Ops::tunnel_dynamic_and_hold`는 `supervise_ms`가 0이 아니면 `INVALID_ARGUMENT`다. 이 검증을 통과한 0이 아닌 `supervise_ms`와 `accept_hold_ms`는 이 스텝에서 모두 연결 전에 `UNSUPPORTED`다. 예약된 옵션이 `UNSUPPORTED`를 돌려준다는 기존 규율을 따른 것이고 결정 24가 같은 규율을 적는다. 생략하거나 0이면 요청·응답·동작이 바이트 단위로 같다.
-
-`docs/CLI.md` §6.9에 두 옵션 문단을 넣고(값 범위, 기본값, 검증 순서, 현재 `UNSUPPORTED` 범위), 상태 헤더에 v0.15 항목을 연다. `cargo xtask man`으로 `qsh-tunnel-open.1`의 diff를 낸다.
-
-**(b) 테스트·게이트:** 단위(`crates/qsh-core/src/ops/tunnel/tests.rs`). `supervise_out_of_range_is_invalid_argument_before_any_listener_exists`, `tunnel_open_and_hold_with_supervise_is_invalid_argument_before_connecting`, `accept_hold_without_supervise_or_above_two_thousand_or_on_remote_is_invalid_argument_before_bind`, `supervise_on_an_unsupported_route_or_mode_is_unsupported_before_connecting`(결정 24. 표 기반이고 이 스텝에서는 모든 route·mode 행이 `UNSUPPORTED`, Step 7·9·14·15가 행을 줄이고 Step 15가 지운다), `supervise_zero_and_absent_serialize_byte_identically`. 기존 `wait_ms` 테스트와 `checked_in_man_pages_match_the_generator` 초록.
-
-**(c) 완료 판정:** 위 테스트 초록. `git diff --stat -- crates/qsh-cli/tests/fixtures crates/qsh-proto/proto`가 비어 있다(`TunnelOpenReq`는 `crates/qsh-proto/src/types`에 있고 `.proto`가 아니며 schema·fixture에 나타나지 않는다, 결정 13).
-
-### Step 6 — carrier `watch` 교체와 "끊김" 거절 (0.25~0.3ew)
-
-근거 ADR: ADR-0023 결정 3, 5, 6. 선행: 없음(Step 7이 이 구조 위에 감독을 얹는다).
-
-**(a) 범위:** `-L`의 accept 루프(`crates/qsh-core/src/tunnel/local.rs`)와 `-D`의 accept 루프(`crates/qsh-core/src/tunnel/dynamic.rs`)가 시작 시 한 번 받던 `ForwardCarrier` 스냅숏 대신 accept마다 `watch` 채널에서 현재 carrier를 읽게 바꾼다. 채널 값은 "살아 있음(carrier, 확인된 peer fingerprint)"과 "끊김" 둘이다. 기본 모드는 값이 "살아 있음" 하나로 끝까지 가므로 동작이 같다. "끊김"일 때 들어온 연결은 대기열에 넣지 않고 즉시 거절한다. `-L`은 accept 뒤 `abort_local`(`SO_LINGER 0`, RST), `-D`는 SOCKS CONNECT에 REP `0x01`을 보내고 `shutdown(Write)` 뒤 닫는다(`docs/CLI.md` §6.9 REP 표의 "로컬: 스트림 열기 실패" 행). 옛 carrier 위에서 `ConnectResult`를 기다리던 handshake는 그 자리에서 같은 방식으로 거절하고, `ConnectResult{ok:true}`를 지나 splice 중이던 연결은 건드리지 않는다. accept마다 활동을 알리는 훅(결정 4의 `observe_activity`)을 이 자리에 두고 Step 7이 연결한다. `local.rs`는 이미 `local/tests.rs`를 쓰므로 800줄 규칙에 새로 걸리지 않는다.
-
-**(b) 테스트·게이트:** 단위(`tunnel/local/tests.rs`, `tunnel/dynamic/tests.rs`). `local_forward_rejects_with_rst_while_the_carrier_is_disconnected`, `dynamic_forward_replies_rep_01_while_the_carrier_is_disconnected`, `a_splice_in_progress_survives_a_carrier_switch_to_disconnected`, `a_handshake_awaiting_connect_result_on_the_old_carrier_is_rejected_on_disconnect`, `accept_reads_the_carrier_current_at_accept_time`. 기다림은 carrier `watch` 값과 accept 이벤트로 한다. 기존 `tunnel_chaos.rs`의 `a_dead_connection_ends_the_tunnel_cleanly_while_the_pty_session_resumes`, `dynamic_forward.rs`, `socks_curl`, `tunnel_throughput`, `tunnel_echo_under_load` 초록.
-
-**(c) 완료 판정:** 위 테스트 초록과 부하 아래 50회 연속 초록. 기본 모드 테스트 diff 0. `grep -n 'a forward has to be restarted across a recovery' crates/qsh-core/src/tunnel/local.rs`가 0건이고 그 doc이 `watch` carrier를 설명한다.
-
-### Step 7 — forward route supervisor (0.6~0.7ew)
-
-근거 ADR: ADR-0023 결정 2, 3, 4(forward), 5, 7-1~7-3, 8, 9, 10, 11, 12, 15, 24. 선행: Step 3·4·5·6.
-
-**(a) 범위:** `TunnelHold::hold`(`crates/qsh-core/src/ops/tunnel.rs`) 경로에 supervisor를 붙인다. 새 daemon은 없다. forward route의 `--local`과 `--dynamic`에서 `supervise_ms`가 0이 아니면 최초 open이 성공한 뒤 감독을 시작한다. 최초 open 실패는 지금 봉투로 끝나고 재시도하지 않는다(결정 2).
-
-감지. supervised 터널의 control 스트림에 `PathWatch`를 붙인다. 설정은 `RecoveryConfig.watch`이고(`crates/qsh-core/src/ops/session.rs`), Step 3의 wake 구독과 Step 6의 accept 활동 훅을 연결한다. 사망 판정 뒤 `RecoveryConfig.migration`이 켜져 있으면 `Endpoint::rebind()` migration을 먼저 시도하고 connection이 살아나면 아무것도 하지 않는다. 기본 모드에는 `PathWatch`도 wake 구독도 붙이지 않는다. 유실은 현재 carrier의 죽음뿐이고 남겨 둔 옛 connection이 나중에 닫히는 것은 유실이 아니다.
-
-재수립. 사망 판정 즉시 carrier를 "끊김"으로 바꾼다. 시도마다 최초 open에서 해석한 주소로 다시 dial하고 `REDIAL_DEADLINE`(2초)으로 묶으며 `hosts.toml`은 다시 읽지 않는다. 새 carrier의 TLS peer fingerprint가 최초 값과 다르면 요청 없이 `AUTH_FAILED`로 끝낸다(7-2). 최초 open이 확인한 capability(`-D`는 `dial-filter.v1`)가 없으면 `UNSUPPORTED`로 끝낸다(7-3). 통과하면 carrier를 확인된 신원과 함께 "살아 있음"으로 바꾼다. `-L`/`-D`는 control 메시지를 보내지 않는다. 새 dial은 admission과 mTLS를 다시 거치고 `TCP_CONNECT`는 스트림마다 `forward.local`로 판정된다(결정 8). 옛 connection은 마지막 splice가 끝날 때 close code `0`으로 닫는다. 재dial 경로는 세션의 `DialReconnect`와 dial 절차만 공유하고 `recover_attach`는 쓰지 않는다(결정 3). 분류·간격·예산은 Step 4를 그대로 쓴다.
-
-끝. 예산이 떨어지거나 `Stop`이면 stderr에 `gave_up` 줄을 쓰고 이어 `human::print_error`로 오류를 낸 뒤 listener를 놓고 exit `255`로 끝난다. stdout에는 최초 봉투 뒤로 한 바이트도 더하지 않는다. supervised 모드에서만 `qsh serve`/`qsh listen`의 `shutdown_signal()`과 같은 SIGINT·SIGTERM handler를 두고, 받으면 감독을 멈추고 listener를 놓고 exit `0`으로 끝난다. 신호 handler 배선만 `crates/qsh-cli/src/main.rs`의 `run_tunnel_open`·`run_tunnel_open_dynamic`에 두고 판단은 `qsh-core`에 둔다. 기본 모드의 신호 동작은 바꾸지 않는다.
-
-진단. tracing target `qsh::tunnel::supervise`의 한 줄 JSON을 낸다. 첫 키 `supervise`, 값 `lost`·`retry`·`reestablished`·`gave_up`·`wake`(이 스텝), `closed`(Step 15). 모든 줄에 `at`, `tunnel_id`, `mode`, `route`(이 스텝은 `forward`)가 붙는다. `lost`·`retry`에 `cause`(결정 12의 대응. connection 종료는 `classify_connection_error`를 그대로 부르고, quinn idle timeout은 M11 (a) 뒤라 `idle_timeout`, 원인을 모르면 키 생략), `retry`에 `attempt`·`code`·`outage_ms`, `reestablished`와 `gave_up`에 `outage_ms`, `wake`에 `slept_ms`를 싣는다. 주소, 토큰, payload, peer 오류 본문은 싣지 않는다. `init_tracing`(`crates/qsh-cli/src/main.rs`)에 `qsh::reverse`와 같은 전용 layer와 `{default},qsh::tunnel::supervise=info` 필터를 더하고, human layer의 제외 목록에 이 target을 넣는다. `--quiet`에서만 꺼지며 명시한 `QSH_LOG`/`RUST_LOG`가 있으면 그 값을 따른다. target 상수는 `qsh-core`에 공개 상수로 둔다.
-
-`supervise_on_an_unsupported_route_or_mode_is_unsupported_before_connecting`의 표에서 forward `-L`/`-D` 행을 뺀다(accept 유지 0이 아닌 값은 Step 9까지 `UNSUPPORTED`로 남는다).
-
-문서를 같은 커밋에서 고친다. `docs/CLI.md` §6.14 첫 문단 끝에 "`--supervise` 예외는 아래 문단" 한 구절, 그 아래 "supervised 예외" 문단(결정 5, 6, 11과 forward route 한정 문장)을 더하고 §6.9 옵션 문단의 `UNSUPPORTED` 범위를 좁힌다. §6.14와 §6.9에 `trust remove` 뒤에도 살아 있는 연결 위의 켠 터널이 계속 돈다는 사실(`TrustRemoveScope` remedy의 현행 범위)을 적는다. `docs/design/architecture.md` §2에 "supervisor는 `Ops` 안, 터널을 연 프로세스에 있다" 한 줄을 넣는다. `docs/design/threat-model.md` §4 A에 재연결 시 peer 치환(통제 결정 6·7-2, 핀 테스트 이름), §4 B에 재발행의 인가 재사용(통제 결정 8), §4 C에 재시도 소음·옛 connection 누적·빠른 창의 재dial 빈도(통제 결정 9·10의 `refused` 창 닫기, peer의 연결 quota) 행을 더한다. README Known limitations에는 forward 몫 셋(진행 중인 TCP 연결은 옛 connection이 살아날 때만 산다, 최초 open 실패는 감독하지 않는다, wake 감지는 Windows에서 확인되지 않았다)을 적는다.
-
-**(b) 테스트·게이트:** crate 내부 통합(`crates/qsh-core/src/ops/tunnel/tests.rs` 또는 supervisor 모듈 `tests.rs`, loopback 서버, 수 초). `supervised_local_keeps_its_port_and_tunnel_id_across_two_reestablishments`(결정 3·5), `supervised_local_splice_survives_a_short_blackhole_and_new_accepts_ride_the_new_connection`(결정 4·5. 같은 조건의 기본 모드 터널과 진행 중 연결의 생존이 같음을 함께 단언), `supervised_local_accept_during_disconnect_gets_rst_once_the_carrier_is_disconnected`와 `supervised_dynamic_connect_during_disconnect_gets_rep_01`(결정 5·6. 관찰 채널로 "끊김"을 기다린 뒤 accept하고 즉시 거절을 단언. 기본 `PathWatchConfig`로 "끊김"까지 걸린 시간은 10초 상한으로만 단언하고 기록한다, §4.1 #9), `supervised_forward_redial_to_a_different_fingerprint_ends_with_auth_failed_and_sends_no_request`(7-2), `supervised_dynamic_redial_to_a_peer_without_dial_filter_ends_unsupported`(7-3), `supervised_forward_peer_restarted_without_forward_local_ends_permission_denied_with_one_audit_deny`(결정 8·9. peer audit에 거부 줄 하나, listener 해제), `supervised_forward_initial_open_failure_is_not_retried`(결정 2), `supervised_budget_exhaustion_emits_gave_up_then_the_error_then_exit_255`(결정 11), `supervised_sigterm_during_an_outage_releases_the_listener_and_exits_zero`(결정 11, `crates/qsh-cli/tests/`의 서브프로세스). L6(`crates/qsh-cli/tests/`). `supervised_stdout_stays_one_envelope_across_two_reestablishments`(`jsonl_purity.rs`의 `a_tunnel_in_progress_keeps_stdout_pure_json_while_qsh_tunnel_diagnostics_land_on_stderr`와 같은 모양), `supervise_lost_and_gave_up_lines_are_visible_at_default_verbosity_and_silent_under_quiet`, `supervise_lines_never_carry_an_address_or_token_field`. 기존 트랩 `a_dead_connection_ends_the_tunnel_cleanly_while_the_pty_session_resumes`와 `jsonl_purity.rs` 초록.
-
-**(c) 완료 판정:** 위 테스트 초록과 부하 아래 50회 연속 초록. mutation 둘(7-2 fingerprint 대조 제거, 끊김 동안의 즉시 거절 제거)이 각각 대응 테스트를 붉힌다. fixture·`.proto` diff 0. `grep -n 'qsh::tunnel::supervise' docs/CLI.md crates/qsh-cli/src/main.rs`가 각 1건 이상.
-
-### Step 8 — supervise 수용 테스트와 CI 배선 (0.2~0.25ew)
-
-근거 ADR: ADR-0023 결정 4, 5, 10, 17과 결과 절의 2026-09-30 테스트 목록, 이슈 요청 대응 #6-2. 선행: Step 7.
-
-**(a) 범위:** 결과 절이 이름 붙인 두 테스트를 세운다. 하나는 crate 내부 통합 `supervised_forward_carrier_is_declared_lost_within_two_seconds_of_an_injected_wake`다. idle cadence에 들어간 supervised `-D`의 서버를 CONNECTION_CLOSE 없이 사라지게 하고(quinn idle 타이머는 45초가 남음), 주입한 wake 뒤 `lost`(`cause: path_dead`)가 나오는지 본다. 주입은 Step 3의 가짜 벽시계를 `#[cfg(test)]`로 프로세스 감지기에 꽂는 방식이며 바이너리에 들어가지 않는다(M11 (a)와 같은 규율). 벽시계 상한 단언은 §4.1 #9의 층 나눔을 따른다. 정확한 상한 `WAKE_TICK + min_dead_after + 500ms`는 Step 3의 `path_watch_declares_dead_within_wake_tick_plus_dead_after_of_a_wake`가 주입 시계로 고정하고, 이 통합 테스트는 `lost`가 quinn idle(45초)보다 훨씬 이른 10초 안에 `path_dead`로 나오며 wake 이전에는 나오지 않았음을 단언하고 실측 지연을 기록한다.
-
-다른 하나는 testkit 수용 테스트 `supervised_dynamic_listener_stays_bound_through_a_50_second_blackhole_and_connects_after_it`(`crates/qsh-testkit/tests/`, chaos proxy)다. 45초를 넘는 blackhole이라 peer는 idle timeout으로 connection을 걷는다. blackhole 동안 1초 간격 탐침이 로컬 포트에 붙어 한 번도 connection refused가 아님(REP `0x01`이나 RST)을 단언한다. 탐침 간격은 고정 대기가 아니라 조건 탐침이다. blackhole을 걷은 뒤에는 다음 시도의 예정 간격을 supervisor 관찰 채널로 보고 그 값이 `FAST_CAP` 이하임을 단언하고, SOCKS CONNECT 성공은 `FAST_CAP + REDIAL_DEADLINE`에 여유를 더한 `timeout` 안으로 단언한다(§4.1 #9). SIGSTOP이나 blackhole은 단조 시계를 멈추지 않으므로 이 테스트는 wake 경로를 부르지 않는다. `QSH_ACCEPTANCE_SLOW`가 없으면 skip 줄을 찍고 끝난다.
-
-CI와 문서를 같은 커밋에서 고친다. `.github/workflows/ci.yml` acceptance job에 `reverse_blackout` 스텝과 같은 모양으로 이 testkit 테스트를 `QSH_ACCEPTANCE_SLOW: 1` 아래 한 스텝으로 더하고 strict로 둔다. `CLAUDE.md` Commands 절의 acceptance job 테스트 목록에 이 이름을 적는다. `docs/design/testing.md` L4 표에 "주입한 wake" 행과 "45초를 넘는 blackhole 뒤 supervised listener" 행을 더하고, `sleep()` 금지 문단의 의도적 벽시계 예외 목록과 `QSH_ACCEPTANCE_SLOW` 표 행에 이 테스트를 넣는다.
-
-**(b) 테스트·게이트:** 위 두 테스트. Step 7의 테스트와 `reverse_blackout` 초록.
-
-**(c) 완료 판정:** testkit 테스트가 `QSH_ACCEPTANCE_SLOW=1` 아래 CI acceptance job에서 한 번 이상 초록. 두 테스트가 부하 아래 50회 연속 초록(느린 테스트는 약 50분이 든다). mutation 하나(결정 5의 listener 유지를 빼고 유실 때 listener를 놓기)가 testkit 테스트를 붉힌다. `grep -n 'supervised_dynamic_listener_stays_bound' CLAUDE.md .github/workflows/ci.yml docs/design/testing.md`가 각 1건 이상.
-
-### Step 9 — accept 유지 `--accept-hold` (0.2ew)
-
-근거 ADR: ADR-0023 결정 6(예외), 19. 선행: Step 7.
-
-**(a) 범위:** 켠 터널은 "끊김" 동안 accept한 연결을 곧바로 거절하지 않고 최대 `accept_hold_ms` 동안 쥔다. 조건은 재수립 시도가 진행 중이거나 다음 시도가 그 기한 안에 시작되는 경우다. 창 밖의 긴 backoff 대기 중에 들어온 연결은 쥐지 않고 결정 6대로 즉시 거절한다. 쥐는 동안 바이트를 어느 carrier로도 보내지 않는다. `-L`은 소켓을 읽지 않고 두고, `-D`는 SOCKS 인사와 CONNECT 요청을 로컬에서 읽은 뒤 `TCP_CONNECT`를 보내기 전에 멈춘다. carrier가 7-2·7-3을 통과해 "살아 있음"이 되면 accept 순서대로 새 carrier에 싣고, 기한이 먼저 오면 결정 6 방식으로 거절한다. 동시에 쥐는 연결은 터널당 64개까지이고 넘치면 즉시 거절한다. 기한 타이머는 tokio 시계다.
-
-`supervise_on_an_unsupported_route_or_mode_is_unsupported_before_connecting` 표에서 forward `accept_hold_ms` 행을 뺀다. `docs/CLI.md` §6.9 옵션 문단과 §6.14 supervised 예외 문단에 결정 19를 적는다. `docs/design/threat-model.md` §4 C에 쥔 accept의 파일 기술자 행(통제 2초·64개 상한)을 더한다.
-
-**(b) 테스트·게이트:** 단위와 crate 내부 통합(paused 시계 가능한 것은 paused로). `accept_hold_zero_keeps_the_immediate_rejection_of_decision_6`, `accept_hold_dispatches_a_held_connect_once_the_carrier_is_confirmed`, `accept_hold_rejects_at_the_deadline_without_sending_a_byte_to_any_carrier`, `accept_hold_rejects_past_sixty_four_held_connections`, `accept_hold_is_not_used_during_a_backoff_wait_longer_than_the_hold`, `accept_hold_preserves_accept_order_on_dispatch`. Step 5의 `accept_hold_without_supervise_or_above_two_thousand_or_on_remote_is_invalid_argument_before_bind` 초록.
-
-**(c) 완료 판정:** 위 테스트 초록과 부하 아래 50회 연속 초록. "쥔 동안 carrier로 가는 바이트 0"을 carrier 쪽 카운터로 단언한다.
-
-### Step 10 — `qsh::lifecycle` 수명 줄 (0.15~0.2ew)
-
-근거 ADR: ADR-0023 결정 21, 결정 1의 유일한 예외. 선행: Step 7(`supervise` 필드의 값이 참이 되는 자리).
-
-**(a) 범위:** tracing target `qsh::lifecycle`의 한 줄 JSON을 더한다. 첫 키 `lifecycle`, 값 `listening`·`shutting_down`·`tunnel_opened`·`tunnel_ended`. 모든 줄에 `at`(RFC3339 초 단위, `crate::config::now_rfc3339`)과 `process`(`serve`·`listen`·`serve_to`·`tunnel`)가 붙는다. `tunnel_*`은 `tunnel_id`·`mode`·`supervise`(bool), `tunnel_ended`는 `code`와 알 수 있으면 `cause`를 싣는다. 주소, bind 주소, 토큰, 오류 본문은 싣지 않는다. 사람용 줄 `qsh serve: listening on {addr}`, `qsh listen: listening on {addr}`, `… shutting down`, `the connection carrying this tunnel closed: …`의 바이트는 그대로다. `--supervise`와 무관하게 모든 holder와 두 데몬, `serve --to`에 붙는다. 이벤트를 내는 판단은 `qsh-core`에 두고, `main.rs`는 이미 사람용 줄을 쓰는 자리에서 `qsh-core`가 준 함수를 부르기만 한다. `init_tracing`에 전용 layer와 `{default},qsh::lifecycle=info` 필터, human layer 제외를 더한다.
-
-`docs/CLI.md` §6.12와 §6.13에 `qsh::lifecycle` 문단을 더한다(열린 어휘, stdout에 쓰지 않음, §2.2).
-
-**(b) 테스트·게이트:** L6(`crates/qsh-cli/tests/`). `serve_and_listen_listening_lines_are_byte_identical_and_a_lifecycle_line_carries_at`, `a_default_mode_tunnel_end_emits_a_lifecycle_line_with_code_and_no_address`, `quiet_suppresses_lifecycle_lines`, `serve_to_emits_listening_and_shutting_down_lifecycle_lines`. `LISTENING_PREFIX`·`LISTEN_LISTENING_PREFIX`를 쓰는 기존 하네스와 `jsonl_purity.rs` 초록.
-
-**(c) 완료 판정:** 위 테스트 초록과 부하 아래 50회 연속 초록. `crates/qsh-cli/tests/common/mod.rs`의 두 접두 상수 diff 0.
-
-### Step 11 — `qsh serve --to` wake reset과 `qsh::reverse` `wake` 줄 (0.15~0.2ew)
-
-근거 ADR: ADR-0023 결정 17, 20, ADR-0022 결정 5. 선행: Step 3.
-
-**(a) 범위:** target의 `Backoff`(`crates/qsh-core/src/reverse/target/mod.rs`)에 wake라는 두 번째 reset 지점을 더한다. wake가 오면 `reset()`해 `backoff_initial_ms`부터 다시 세고, 진행 중인 `wait_backoff` 대기를 끊어 즉시 재dial한다. `wait_backoff`의 `select!`에는 wake 구독 arm을 넣는다. wake 뒤 60초 동안 지연은 `max(backoff_initial_ms, 2000)`을 넘지 않고, 설정한 `backoff_max_ms`가 그보다 작으면 그 값이 이긴다. 60초는 단조 시계로 잰다. 창은 wake에만 열고 유실마다 열지 않는다. `[reverse]` 키와 기본값은 그대로이고 옵션도 없다. `qsh::reverse` 줄에 `event=wake`(`slept_ms`, `at`)를 더한다. target의 `PathWatch`는 Step 3으로 이미 wake 뒤 곧바로 판정한다. `target/mod.rs`는 이미 `target/tests.rs`를 쓴다.
-
-`docs/CLI.md` §6.13의 이벤트 목록(`registered|denied|replaced|lost|expired|retry`)에 `wake`를, target의 wake 뒤 backoff 규칙을 더한다. `docs/design/protocol.md` §11-4의 backoff 문장에 "wake 뒤 초기값으로 되돌리고 60초 동안 2초 상한"을 더한다.
-
-**(b) 테스트·게이트:** 단위(paused 시계, 고정 seed, `target/tests.rs`). `target_backoff_restarts_from_backoff_initial_on_wake_and_cuts_the_pending_delay`, `target_fast_window_never_exceeds_a_configured_backoff_max_below_two_seconds`, `target_fast_window_opens_on_wake_only_not_on_loss`. crate 내부 통합(M11의 `reverse/test_harness.rs`, 주입 wake). `serve_to_target_probes_and_redials_at_once_after_an_injected_wake`. 기존 proptest `backoff_sequence_is_monotone_nondecreasing_until_the_cap`과 `reset_returns_the_sequence_to_initial`, M11의 `quinn_idle_timeout_as_idle_timeout` 두 테스트 초록.
-
-**(c) 완료 판정:** 위 테스트 초록과 부하 아래 50회 연속 초록. `docs/CLI.md` §6.13 이벤트 목록에 `wake`가 있다. `[reverse]` 설정 키 diff 0.
-
-### Step 12 — 첫 단위 운영 문서와 `p1-supervise-wake` 캠페인 사전 고정 (0.1ew)
-
-근거 ADR: ADR-0023 결과 절(캠페인 항목, `docs/deploy/service.md`), §5.1 원칙 6. 선행: Step 7~11.
-
-**(a) 범위:** `docs/campaigns/p1-supervise-wake.md`를 사전 고정해 커밋한다. 결과 절의 회차 넷, 재현 절차(`pmset relative wake <s>` 뒤 `pmset sleepnow`, Linux는 `rtcwake -m mem -s <s>`), 망 복귀 시각(VPN 너머 hub로 200ms마다 보내는 ping의 첫 응답), 판정 셋(1초 주기 탐침의 connection refused 0회, 망 복귀 뒤 새 SOCKS CONNECT 성공 시각의 회차 안 중앙값 2초 이하·최댓값 4초 이하, 끊김 시간이 `lost`·`wake`·`reestablished` 줄만으로 계산됨), 기록 표를 적는다. 넷째 회차는 둘째 단위(Step 14) 착지 뒤 트리에서만 돈다고 적는다. 형식은 `docs/campaigns/m9-stopwatch.md`를 따른다. `docs/deploy/service.md`에 launchd·systemd 배치 예시(`--supervise`와 service manager 재시작을 함께 쓰는 모양)를 더한다. `CLAUDE.md` 문서 지도의 `docs/campaigns/` 목록에는 `p1-supervise-wake`를 넣는다. main 세션은 이 착지 뒤 이슈 #6에 결정 24의 순서와 대응표로 답한다(DoD 밖).
+**(a) 범위:** `docs/adr/0027-doctor-fail-on-exit.md`를 `제안됨`으로 올린다. 결정 절 초안에서 `--fail-on <warn|error>`는 additive 플래그다. 임계 이상의 `status`를 가진 finding이 하나라도 있으면 envelope은 `ok: true`와 findings를 오늘 그대로 내고 exit만 새 값 `1`로 바꾼다. `1`은 §4 일반 명령 표에 비어 있는 값이고, `255`("연결, 인증, 정책 등 QSH runtime 실패")와 섞이지 않으며, 검사 도구가 "문제를 찾았다"를 알리는 관례 값이다. `info`는 임계로 받지 않는다(구조적 고지라 CI 게이트로 쓰면 늘 붉다). doctor 자신이 조회를 시작하지 못하는 경우(`Err`, exit `255`)는 `--fail-on`과 무관하게 지금과 같다. 출력 모드에 따라 exit 의미가 달라지지 않는다(§4 마지막 문단). JSON 모양은 바꾸지 않는 것이 초안이고, 대안 절에 `data.fail_on` echo 필드를 두는 안과 exit `255`를 쓰는 안(ROADMAP 범위 (d)가 짚은 신호 불일치로 기각)을 적는다. 결과 절에는 `docs/CLI.md` §4 표의 새 행, §6.17 문단 교체, `exit_code_matrix.rs` 행, man 재생성을 적는다. `docs/adr/README.md` 표에 행을 더한다.
 
 **(b) 테스트·게이트:** 문서 변경. 일곱 게이트 초록.
 
-**(c) 완료 판정:** 캠페인 파일이 있고 판정 기준이 ADR-0023 결과 절의 숫자와 같다. `grep -c 'p1-supervise-wake' CLAUDE.md` 1.
+**(c) 완료 판정:** ADR 파일이 `상태: 제안됨`이고 README 표에 같은 상태로 있다. 결정 절이 exit 값 하나, 임계 어휘, `ok`와 exit의 관계를 각각 한 문장으로 적는다.
 
----
+### Step 5 — ADR-0036 초안: stateless reset key의 보관과 읽기 실패 동작 (0.05~0.1ew)
 
-둘째 단위(ADR-0023 결정 24): reverse route(`--local`, `--dynamic`, `--remote`)와 forward route `--remote`. 결정 7-4, 7-5, 14, 16, 22.
+근거: ROADMAP M13 범위 (f)와 DoD (f), `docs/design/reexec-estimate.md` §3 H1b 행("키 보관 위치 결정 1건")·§5, ADR-0007(비밀 custody 규율). 선행: 없음.
 
-### Step 13 — peer `RemoteForwardClose` 응답 시점 수정 (0.1ew)
+**(a) 범위:** `docs/adr/0036-stateless-reset-key.md`를 `제안됨`으로 올리고 결정 절에 아래 초안을 적는다.
 
-근거 ADR: ADR-0023 결정 16. 선행: 없음.
+- 쓰는 프로세스는 서버 endpoint를 여는 `qsh serve`와 `qsh listen`이다. `qsh serve --to` target과 클라이언트는 쓰지 않는다(재시작한 쪽이 서버일 때만 옛 연결의 패킷을 받는다).
+- 키는 32바이트 OS 난수이고 config 디렉터리의 `stateless_reset.key`에 둔다(§4.1 #8). `identity/` 아래에 두지 않는 이유는 `identity/`를 치우는 복구 경로(ADR-0026 거절 문면)가 이 키까지 지울 까닭이 없기 때문이다. 재시작 때마다 blocking 로드가 늘고(`docs/design/reexec-estimate.md` §1) 이 키의 가치가 device 키보다 낮으므로 플랫폼 키스토어는 쓰지 않는다.
+- 없으면 처음 기동 때 `O_CREAT|O_EXCL`, 모드 0600으로 만든다. 권한이 0600보다 넓으면 기동 진단을 낸다.
+- 읽을 수 없거나 형식이 틀린 파일을 만나면 조용히 새 키를 만들거나 덮어쓰지 않는다. 초안은 이번 기동에만 쓰는 임시 키로 뜨고 stderr 기동 진단 한 줄(경로와 오류 종류만, 키 바이트 없음)을 내는 쪽이다. 근거는 `acl.toml`이 없어도 프로세스가 뜨고 답한다는 규칙(`docs/CLI.md` §6.12)과 같은 결이다. 이 키는 감지 지연을 줄이는 최적화라서, 읽기 실패로 기동을 거절하면 `Restart=always` 유닛이 재시작 루프에 빠진다. 기동 거절(`CONFIG_ERROR`)은 대안 절에 적고 기각 사유를 붙인다.
+- reset key는 로그, audit, 진단 `detail`, JSON 어디에도 나오지 않는다. 회전 명령은 두지 않는다. 파일을 지우면 다음 기동이 새 키를 만든다.
+- 결과 절. `qsh-transport`의 `EndpointConfig`가 `default()` 대신 주입된 키로 만들어진다. wire 변경 0, RFC 9000 §10.3 준수. `docs/CLI.md` §6.12·§6.13의 기동 진단 문단, `docs/design/threat-model.md` §4 D(키 유출로 off-path 연결 절단)와 §4 G(재시작 뒤 감지 지연 개선) 행, `docs/deploy/service.md`의 재시작 고지 문단.
 
-**(a) 범위:** `Server::handle_rfwd_close`(`crates/qsh-core/src/server/reverse.rs`)가 abort한 forward task가 실제로 끝나 listener가 drop된 뒤에 성공 응답을 보내게 고친다. `entry.task.abort()` 뒤 그 `JoinHandle`을 기다린다(cancel 결과는 무시). wire와 응답 모양은 바뀌지 않는다. 기다림에는 상한을 두고(§4.1 #6), 상한을 넘으면 지금처럼 응답한다. `Server::purge_connection` 경로는 건드리지 않는다.
-
-**(b) 테스트·게이트:** crate 내부(`crates/qsh-core/src/server/tests.rs`). `rfwd_close_success_means_the_port_can_be_bound_immediately`(close 응답 직후 같은 포트 bind 성공을 반복 100회 단언), `rfwd_close_by_another_principal_under_owned_scope_is_permission_denied_and_the_listener_stays`(ROADMAP M12 DoD (a)의 `authorize_owned` 문장), `rfwd_close_of_a_purged_forward_id_is_no_such_forward_id`. 기존 `purge_connection_removes_and_aborts_this_connections_remote_forwards` 초록.
-
-**(c) 완료 판정:** 위 테스트 초록과 부하 아래 50회 연속 초록. `.proto` diff 0.
-
-### Step 14 — reverse route supervisor: `-L`과 `-D` (0.35~0.4ew)
-
-근거 ADR: ADR-0023 결정 2, 4(reverse), 6, 7-1, 7-2, 7-5, 9, 12, 22. 선행: Step 7, Step 13.
-
-**(a) 범위:** reverse route로 연 supervised `-L`/`-D`를 켠다. 유실 신호는 `LOCAL_CONTROL` conduit 종료, 7-5의 accept별 신원 불일치, 데몬 socket 연결 실패다. migration은 없다. 재수립은 시도마다 이 머신의 `qsh listen` 데몬 socket만 다시 찾는다. §6.1 우선순위 전체를 다시 타지 않으므로 같은 이름의 forward pin을 한 번도 dial하지 않는다(결정 4 셋째 항목, 22). 탐색 함수는 `resolve_route`의 reverse 쪽 절반을 떼어 쓰고 forward 분기를 호출하지 않는다. socket이 직전과 같으면 `LocalHello.known_generation`에 마지막 확인 generation을 싣고, 바뀌었으면(데몬 재시작) 싣지 않고 7-2에 기댄다. `LocalHello.wait_ms`는 남은 예산과 `LOCAL_WAIT_MAX`(60초) 중 작은 값이다. `LocalHelloAck.peer_fingerprint`가 최초 값과 다르면 `AUTH_FAILED`로 끝낸다. `HOST_NOT_FOUND`는 stale·미설정 둘 다 재시도하고 `TIMEOUT`·`CONNECTION_FAILED`도 재시도한다(결정 9 표). 예산은 `stale_retention`으로 깎지 않는다.
-
-accept마다 여는 `LOCAL_STREAM` conduit의 `LocalHelloAck`(`peer_fingerprint`, `generation`)를 carrier의 확인된 신원과 대조한 뒤에만 `StreamHeader`를 보낸다. 다르면 그 accept를 결정 6대로 거절하고 carrier를 "끊김"으로 바꾼 뒤 1단계부터 다시 한다. 이를 위해 `localctl::client`의 `DataHandshake`를 ack 확인과 header 전송 사이에서 나눈다. `crates/qsh-core/src/localctl/client.rs`는 `xtask arch`의 정확한 파일 금지 대상이므로 파일을 디렉터리로 바꾸지 않고 안에서만 고친다. `qsh.local.v1`은 바뀌지 않는다. 진단 줄은 `route: "reverse"`와 `host`(별칭 이름), `reestablished`의 `generation`을 싣는다.
-
-`supervise_on_an_unsupported_route_or_mode_is_unsupported_before_connecting` 표에서 reverse `-L`/`-D` 행을 뺀다. `docs/CLI.md` §6.14 supervised 예외 문단에 reverse route 문장(forward pin을 보지 않음, accept별 대조)을, README Known limitations에 "최초 open의 route는 §6.1을 따르므로 reverse 전용 host는 pin에 주소를 두지 않아야 reverse route로 열린다(결정 22)"를 더한다. `docs/design/threat-model.md` §4 A의 peer 치환 행에는 reverse 통제(결정 7-5)와 핀 테스트 이름을 적는다. §6.1은 고치지 않는다.
-
-**(b) 테스트·게이트:** testkit(`ReverseHarness`, `crates/qsh-testkit/tests/`). `supervised_reverse_local_reestablishes_after_the_target_reregisters`, `supervised_reverse_local_reestablishes_after_a_listen_daemon_restart`, `supervised_reverse_local_reestablishes_after_a_gap_longer_than_stale_retention`(7-1. `stale_retention`을 테스트 설정으로 짧게 둔다), `supervised_reverse_local_sends_no_byte_to_a_device_that_reregistered_under_the_same_name_with_another_fingerprint`(결정 6·7-2·7-5. 그 장비 쪽 accept 카운터 0과 supervisor 종료), `supervised_reverse_route_local_never_dials_a_forward_pin_while_the_registration_is_stale_or_swept`(결정 22. blackhole 주소의 forward pin을 두고 pin 주소로 가는 dial 0회와 `reestablished`), `supervised_reverse_dynamic_reestablishes_and_keeps_the_host_local_filter`, `supervised_with_wait_still_caps_the_initial_wait_to_stale_retention`(결정 2), `supervise_lines_on_reverse_route_carry_host_and_a_generation_that_matches_the_registered_line`(결정 12·23), `supervise_wake_line_reports_slept_ms_and_outage_ms_excludes_it`. 기다림은 `qsh::reverse`·`qsh::tunnel::supervise` 줄과 하네스 이벤트로 한다. 기존 `tunnel_open_local_over_reverse_ends_when_the_registration_drops`, `local_forward_primitive_over_reverse_survives_a_registration_drop_and_self_heals_per_connection`, `tunnel_open_wait_returns_the_same_stale_error_once_the_budget_expires`, `resolve_route_reverse_prefers_the_live_daemon_over_a_forward_pin`, `dash_d_over_reverse_filters_loopback_and_the_target_sees_no_accept` 초록.
-
-**(c) 완료 판정:** 위 테스트 초록과 부하 아래 50회 연속 초록. mutation 하나(7-5의 ack 대조 제거)가 fingerprint 치환 테스트를 붉힌다. `git diff --stat -- crates/qsh-proto/proto`가 비어 있다.
-
-### Step 15 — `-R` close-then-open과 운영자 닫기 (0.4~0.45ew)
-
-근거 ADR: ADR-0023 결정 7-4, 9(예외 둘), 11(`-R` 종료), 13, 14, 15, 24. 선행: Step 13, Step 14.
-
-**(a) 범위:** forward route와 reverse route의 supervised `--remote`를 켠다. 새 carrier 위에서 먼저 `RemoteForwardClose{직전 forward_id}`를 보내고, 성공과 "no such forward_id"(`INVALID_ARGUMENT`)를 둘 다 옛 forward가 없어졌다는 뜻으로 읽는다. 이어 `RemoteForwardOpen`을 `bind_host`·`forward_host`·`forward_port`는 최초 요청 그대로, `bind_port`는 최초 `actual_port`로 보낸다. `claim_token`은 새로 만든다. 같은 시도 안에서 close가 성공했거나 "no such"였는데 open이 bind 실패 `CONNECTION_FAILED`를 받으면 200ms 간격으로 3번까지 open만 다시 보내고, 그래도 실패하면 끝낸다(구버전 peer 대응). 그 간격 타이머는 tokio 시계다. 재발행은 peer choke point에서 `forward.remote` 판정, loopback 강제, quota 예약을 지금처럼 밟는다. `reestablished` 줄에는 `previous_tunnel_id`를 싣되 봉투의 `tunnel_id`는 최초 값 그대로다.
-
-운영자 닫기(결정 14). reverse route의 `-R`에서 claim 시도가 대기 없이 곧바로 돌아왔는데 `LOCAL_CONTROL`이 살아 있으면 `LOCAL_ADMIN`의 `LocalHostList`와 `LocalTunnelList`를 한 번씩 조회한다. host가 확인된 generation 그대로 `reachable`이고 현재 `forward_id`만 없으면 운영자 닫기로 보고 `closed` 줄을 낸 뒤 listener 없이 exit `0`으로 끝난다. 등록이 바뀌었거나 사라졌으면 유실로 본다. SIGTERM 때 살아 있는 carrier가 있으면 best-effort `RemoteForwardClose`를 보내되 1초를 넘겨 기다리지 않는다.
-
-`supervise_on_an_unsupported_route_or_mode_is_unsupported_before_connecting`을 지운다(결정 24, 결과 절 "둘째 단위가 이 테스트를 지운다"). `docs/CLI.md` §6.9와 §6.14에 `-R` 문장(재발행마다 `tunnel_id`가 바뀜, 현재 값은 `reestablished` 줄과 reverse route의 `qsh tunnels`, 결정 14의 닫기 규칙, 최초 `tunnel_id`로 닫으면 `closed: false`), README Known limitations에 `-R` 몫 둘(포트를 지킬 수 없으면 끝남, 재발행마다 `tunnel_id`가 바뀜)을 더한다. `docs/design/protocol.md` §16.4의 ADR-0018 결정 3 항목에 "ADR-0023은 이 길을 쓰지 않았다" 한 줄을 적는다. `docs/design/threat-model.md` §4 B에 재발행 소유 행(통제 `authorize_owned`, 결정 8, 핀 테스트 이름, `scope = "any"` 행을 가진 principal은 오늘도 남의 forward를 닫을 수 있으므로 켠 터널이 새 권한을 만들지 않는다는 문장)을 넣는다.
-
-**(b) 테스트·게이트:** testkit과 crate 내부 통합. `supervised_forward_remote_reissues_before_the_peer_idle_timeout_and_regains_the_same_port`(7-4), `supervised_remote_reissue_survives_a_delayed_listener_drop_via_bounded_open_retries`(test binder로 listener drop을 늦춰 경합을 만든다), `supervised_ephemeral_remote_reissue_is_permission_denied_when_the_policy_allows_only_port_zero`, `supervised_remote_ends_when_another_principal_took_the_port_during_the_outage`(ROADMAP DoD 문장), `supervised_remote_reestablished_line_carries_a_new_tunnel_id_and_previous_tunnel_id_and_qsh_tunnels_shows_the_new_one`(결정 13), `supervised_reverse_remote_closed_by_qsh_tunnel_close_emits_closed_and_exits_zero_without_reopening`(결정 14), `supervised_reverse_remote_registration_loss_is_not_read_as_an_operator_close`, `supervised_remote_sigterm_sends_a_best_effort_close_the_peer_receives`(결정 11), `supervised_reverse_remote_reissues_after_the_target_reregisters`(7-1). 기존 `tunnel_open_local_over_reverse_ends_when_the_registration_drops`, `admin_close_forward_removes_the_registration_and_notifies_the_target_exactly_once` 초록.
-
-**(c) 완료 판정:** 위 테스트 초록과 부하 아래 50회 연속 초록. `grep -rn 'supervise_on_an_unsupported_route_or_mode' crates/` 0건. `git diff --stat -- crates/qsh-cli/tests/fixtures crates/qsh-proto/proto`가 첫 단위 시작부터 누적으로 비어 있다. main 세션은 이 착지 뒤 이슈 #4 코멘트 질문 1·2·3에 supervised 몫과 결정 22가 넘기는 몫, 주소 없는 pin 우회로를 나눠 답한다(DoD 밖).
-
----
-
-ADR-0024 `qsh setup`.
-
-### Step 16 — m9 재측정 대상 트리 SHA 고정 (0.05ew)
-
-근거 ADR: ADR-0024 결정 12, 결과 절(README는 SHA 고정 뒤), `docs/ROADMAP.md` M12 수용 기준 (b) 둘째 항목. 선행: Step 15(또는 (a)가 끝나지 않았어도 (b)를 먼저 시작할 때는 그 시점 main). 이 스텝 다음 커밋이 Step 17이어야 한다.
-
-**(a) 범위:** `docs/campaigns/m9-stopwatch.md` §8 표의 m9 재측정 열 제목 "현재 바이너리"를 "고정 트리"로 바꾸고 "qsh 커밋 SHA" 칸에 이 커밋의 부모 SHA(착지 직전 origin main의 HEAD, 아래 B)를 적는다. 같은 절에 한 문단을 더한다. 측정 대상은 B 트리의 바이너리와 README "First run" 절이다. B와 이 커밋(P)의 차이는 이 캠페인 파일 하나뿐이므로 두 트리의 바이너리와 README는 같다. `qsh setup`의 첫 코드 커밋은 P의 직계 자식이다. §7이 README나 제품 수정을 요구하면 B에 그 수정만 얹은 트리를 새 대상으로 삼고 그 SHA를 §8에 적는다(ADR-0024 결정 12). M7·M9 캠페인의 §5 기준은 그대로다.
-
-B와 P 사이를 한 커밋으로 두는 이유는 ADR 문면 "첫 코드 커밋의 부모"를 문자 그대로 한 커밋 안에 적을 수 없기 때문이다. P는 자기 SHA를 담을 수 없다. 그래서 "B를 적고, P는 B에 캠페인 파일만 더한 커밋이고, Step 17의 부모는 P다"라는 세 사실로 같은 보장을 만든다(§8 #1). main 세션은 P와 Step 17 사이에 다른 커밋이 끼지 않도록 두 커밋을 연달아 착지시킨다. 다른 에이전트의 커밋이 끼면 Step 17을 P 위에 다시 올리지 않고, 끼어든 커밋이 `crates/`, `README.md`, `docs/CLI.md`를 건드리지 않았음을 Step 17 커밋 본문에 `git diff --stat P <Step 17 부모>`로 입증한다.
+이 ADR이 서면 그것으로 ROADMAP DoD (f)의 "골라 커밋에 적는다"가 채워진다. ROADMAP은 이 결정을 ADR 없이 커밋 기록으로 둘 수 있게 적었지만, 이 계획은 결정이 기동 계약(`docs/CLI.md` §6.12)과 비밀 보관 규율에 닿으므로 ADR로 올린다(§8 #2).
 
 **(b) 테스트·게이트:** 문서 변경. 일곱 게이트 초록.
 
-**(c) 완료 판정:** `git diff --name-only B P`가 `docs/campaigns/m9-stopwatch.md` 한 줄. §8의 SHA 칸이 B다. `grep -n '현재 바이너리' docs/campaigns/m9-stopwatch.md`의 §8 표 머리 0건.
+**(c) 완료 판정:** ADR 파일이 `상태: 제안됨`이고 README 표에 같은 상태로 있으며 "다음 새 번호" 문장이 갱신됐다. 결정 절이 파일 위치, 권한, 읽기 실패 동작, 로그 금지를 각각 한 문장으로 적는다.
 
-### Step 17 — `setup.run` 계약 타입, 초대 읽기 도우미, arch 금지 (0.3~0.35ew)
+### Step 6 — (a) 성능 추세 저장소와 판정 임계 (0.2ew)
 
-근거 ADR: ADR-0024 결정 1, 3, 5, 8, 9. 선행: Step 16. `qsh setup`의 첫 코드 커밋이다.
+근거: ROADMAP M13 범위 (a)의 "쌓을 저장소를 먼저 정한다", `docs/design/testing.md` L9/L10의 "절대 throughput 추세는 여전히 nightly". 선행: 없음.
 
-**(a) 범위:** `crates/qsh-proto`에 `SetupRunReq`, `SetupRunData`(`role`, `complete`, `steps`, `acl_rows` 선택, `next`), `SetupStep`(`id`, `status`, `command`, `detail` 선택, `result` 선택)을 더한다. 단계 id(`identity`·`mode_config`·`acl`·`pin_cert`·`pair`·`invite`·`service`·`doctor`)와 상태(`done`·`already`·`pending`·`blocked`·`skipped`)는 닫힌 목록이고 추가만 허용한다. `result`는 부른 op의 `data`를 그대로 담는 열린 JSON이다.
+**(a) 범위:** 후보를 비교하고 하나를 고른다. (1) 같은 저장소의 orphan 브랜치 `perf-data`에 회차마다 JSON 한 줄을 덧붙이는 안. (2) Actions artifact. 보존 상한(최대 90일)이 있고 회차 사이를 잇는 조회가 API 호출이다. (3) gh-pages와 외부 벤치마크 action. 새 서드파티 action이 브랜치에 쓰는 권한을 갖는다. (4) 외부 저장소. 새 시크릿이 필요해 사람 몫이 늘어난다. 초안은 (1)이다(§4.1 #3). 보존은 최근 365점, 판정은 직전 7점 중앙값 대비 throughput 20% 이상 하락 또는 echo p95 50% 이상 상승이면 붉음, 점이 7개 미만이면 판정 없이 기록만 한다(§4.1 #4). `docs/design/testing.md` CI 규율 절에 저장소, 보존, 임계, "PR 게이트가 아니다", 판정기 위치를 한 항목으로 적는다. 같은 절의 "절대 throughput 추세는 여전히 nightly" 문장이 가리킬 job 이름을 적는다.
 
-`qsh-core`에 초대 읽기 도우미를 신설한다. 만료되지 않은 미상환 초대 수를 `assigned_name`별로만 돌려주고 `mac_key`는 노출하지 않는다(결정 5). 자리는 invite store 옆이다.
+**(b) 테스트·게이트:** 문서 변경. 일곱 게이트 초록.
 
-`crates/qsh-core/src/setup/` 디렉터리 모듈의 뼈대(`mod.rs`, `tests.rs`)를 만들고 `xtask/src/arch.rs`에 디렉터리 범위 금지를 더한다. 금지 토큰은 `acl_file`, `fs::write`, `File::create`, `OpenOptions`, `write_private_file`, `write_atomically`, `.save(`, `probe_fingerprint` 여덟이다. 자기 테스트는 `broker/` 중첩 디렉터리 자기 테스트의 형식을 따라 더하고, 그 파일이 경고한 `//` 주석 제거 방식을 새 범위에서 다시 확인한다. `CLAUDE.md`의 "`xtask arch`'s module bans are path-scoped" 문장에 `crates/qsh-core/src/setup/`을 넣는다.
+**(c) 완료 판정:** `docs/design/testing.md` CI 규율 절에 저장소·보존·임계가 숫자로 있다. 고르지 않은 후보와 사유가 커밋 본문에 있다.
 
-**(b) 테스트·게이트:** xtask 자기 테스트 `module_ban_flags_every_forbidden_token_under_setup_including_nested_directories`와 `module_ban_ignores_forbidden_tokens_in_setup_comments`. 단위 `live_unassigned_invite_count_never_exposes_mac_key`, `live_invite_count_excludes_expired_and_redeemed_invites`. `cargo xtask arch` 초록.
+### Step 7 — (a) 야간 perf job과 판정기 (0.3~0.6ew)
 
-**(c) 완료 판정:** 위 테스트 초록. 이 커밋의 부모가 Step 16(P)이거나 §16 (a)의 예외 증거가 커밋 본문에 있다. `grep -n 'setup/' xtask/src/arch.rs` 1건 이상.
+근거: ROADMAP M13 DoD (a). 선행: Step 6.
 
-### Step 18 — `Ops::setup_plan`과 `Ops::setup_step`: 네 역할 (0.6~0.7ew)
+**(a) 범위:** 판정기를 `xtask`에 둔다(`cargo xtask perf-judge`, 모듈 `xtask/src/perf.rs`). 입력은 기록 파일과 이번 회차의 점 하나이고, 출력은 판정 한 줄과 exit(`0` 초록, `1` 붉음)이다. 기록 자르기(보존 365점)도 여기서 한다. `xtask`는 게시되지 않는 워크스페이스 멤버라 판정 로직의 단위 테스트가 `cargo nextest run --workspace`에 들어간다.
 
-근거 ADR: ADR-0024 결정 1~10, ADR-0017 결정 1·3·5, ADR-0012 결정 1·6, ADR-0013 결정 4, ADR-0014 결정 7, ADR-0019 결정 6, ADR-0025 결정 6. 선행: Step 17.
+측정은 기존 두 테스트를 재사용한다. `tunnel_throughput_meets_raw_quinn_ratio`와 `tunnel_saturated_pty_echo_p95_under_measured_rtt_plus_10ms`가 `QSH_PERF_OUT=<path>`를 받으면 절대 throughput(MB/s), raw-quinn 기준값, echo p95(ms), 측정 RTT를 JSON 한 줄로 그 파일에 덧붙인다. 설정되지 않으면 동작이 지금과 같다. 인위적 지연은 `QSH_PERF_INJECT_DELAY_MS`로 testkit 하네스의 루프백 경로에만 넣는다. 제품 바이너리에는 이 훅이 없다(§4.1 #5).
 
-**(a) 범위:** `crates/qsh-core/src/setup/`에 판단 로직 전부를 둔다. 읽기 전용 `Ops::setup_plan`이 현재 상태에서 단계 목록과 상태를 계산하고, `Ops::setup_step`이 단계 하나를 기존 `Ops` 메서드(`identity_init`, `trust_invite`, `trust_accept`, `trust_add`, `service_install`, `doctor`)로 실행한다. 읽기는 `trust_list`, `acl_check`, `service_status`, `Ops::config()`, Step 17의 초대 도우미뿐이다.
+`.github/workflows/perf.yml`을 새로 만든다. 트리거는 `schedule`(매일 한 번)과 `workflow_dispatch`(입력 `inject_delay_ms`, 기본 0)뿐이고 `pull_request`와 `push`는 없다. job은 `perf-data` 브랜치를 가져오고(없으면 orphan으로 만든다), 두 테스트를 `QSH_PERF_OUT`과 함께 돌리고, `cargo xtask perf-judge`로 판정한 뒤 점을 덧붙여 push한다. 판정이 붉어도 점은 기록한다. 권한은 그 job에만 `contents: write`를 주고 워크플로 기본은 `contents: read`다. 점에는 커밋 SHA, runner 이름, 주입 지연 값을 싣고 주입 회차의 점은 `injected: true`로 표시해 다음 회차의 중앙값 계산에서 뺀다. `ci.yml`의 `ci-ok`는 이 워크플로를 모른다. `docs/design/testing.md` 게이트 환경변수 표에 `QSH_PERF_OUT`과 `QSH_PERF_INJECT_DELAY_MS` 행을 더한다.
 
-역할 표(결정 2)와 단계 순서(결정 8)를 그대로 옮긴다. `host`는 `identity → mode_config → acl → service → invite(또는 pin_cert) → doctor`, `host --to`는 `identity → pin_cert → mode_config → acl → service → doctor`, `client`는 `identity → pair(또는 pin_cert) → doctor`, `listener`는 `identity → pin_cert → mode_config → acl → service → doctor`. `mode_config`와 `acl`은 읽기만 하므로 앞 단계가 `pending`이어도 평가한다.
+**(b) 테스트·게이트:** 단위(`xtask/src/perf.rs` 또는 `xtask/src/perf/tests.rs`). `perf_judge_is_green_within_the_threshold_of_the_last_seven_median`, `perf_judge_is_red_when_throughput_drops_past_twenty_percent`, `perf_judge_is_red_when_echo_p95_rises_past_fifty_percent`, `perf_judge_records_without_judging_until_seven_points_exist`, `perf_judge_excludes_injected_points_from_the_median`, `perf_history_trims_to_the_retention_bound`. testkit. `perf_out_appends_one_json_line_per_run_and_changes_nothing_when_unset`. 기존 `tunnel_throughput_meets_raw_quinn_ratio`와 `tunnel_saturated_pty_echo_p95_under_measured_rtt_plus_10ms`가 `QSH_PERF_OUT` 없이 바이트 단위로 같은 게이트를 유지한다. `actionlint`가 도는 자리가 있으면 새 워크플로도 통과한다.
 
-ACL 단계(결정 4·5). 행은 `policy_example_rows`로 만들고 principal은 `device:<name>`이다. host 두 역할의 `--forward`는 allow 목록에 `forward.local` 하나를 더하고 `Role`에 variant를 더하지 않는다. 검증은 action마다 `acl_check`(`--auth-path pin`)이고 전부 allow면 충족이다. `policy.loaded: false`나 deny가 하나라도 있으면 `pending`이고 `detail`에 거부 action을 적는다. 충족일 때마다 `ACL_RESTART_NOTICE`를 붙인다. `host`에서는 만료되지 않고 `assigned_name`이 없는 미상환 초대가 하나라도 있으면 충족이 아니고 `detail`에 TTL(10분)을 적는다. `qsh setup`이 발급하는 초대는 항상 `--as <name>`을 단다.
+**(c) 완료 판정:** 위 테스트 초록. 판정기 테스트는 시간 의존이 없어 부하 반복 대상이 아니다. 머지 뒤 예약 실행 두 회차가 `perf-data`에 점을 하나씩 더했음을 에이전트가 브랜치를 읽어 확인하고 run id 둘을 ROADMAP M13 마감 노트 초안에 적는다. §0.4의 지연 회차는 유지보수자가 돌리고, 에이전트가 그 run id와 붉은 판정 줄을 기록한다. `git diff --stat -- .github/workflows/ci.yml`이 비어 있다.
 
-신뢰(결정 3·6). `TrustAddReq`는 항상 `cert_pem`을 채운다. `--peer-cert`는 쓰기 전에 fingerprint를 계산해, 같은 이름이 다른 fingerprint로 있거나 같은 fingerprint가 다른 이름으로 있으면 `trust_add`를 부르지 않고 `pending`이다. `pair`는 이름이 이미 있으면 다이얼하지 않고 `already`, `trust_accept` 뒤 같은 fingerprint가 다른 이름에도 있으면 `pending`이다.
+### Step 8 — (c) `aarch64-unknown-linux-musl` leg, 설치 스크립트 분기, 설치 스크립트 테스트 하네스, 캠페인 사전 고정 (0.2~0.3ew)
 
-재실행(결정 8). 쓰는 단계가 모두 `already`나 `skipped`면 config 디렉터리와 유닛 경로의 어떤 파일도 바꾸지 않는다. 상환 전 `host` 재실행만 새 코드를 발급하고 `detail`에 살아 있는 같은 이름 코드 수를 적는다. exit·오류 규칙(결정 10). op 실패는 그 op의 `code`·`retryable` 그대로이고 `details.step`, `details.steps`(id와 상태만, `result` 없음)를 additive로 더한다. service op의 `UNSUPPORTED`는 `skipped`다. `SetupRunOp`(`impl Operation`, `COMMAND = "setup.run"`)을 두고 `ops/mod.rs`·`lib.rs`가 재수출한다.
+근거: ROADMAP M13 범위 (c)와 DoD (c), M10 결정 기록 Q3, `docs/design/testing.md` L9/L10의 "M10 — musl 바이너리의 RSS 주장 범위" 문단. 선행: 없음.
 
-**(b) 테스트·게이트:** `crates/qsh-core/src/setup/tests.rs`와 `crates/qsh-core/tests/`. ADR-0024 결과 절의 이름을 그대로 쓴다. `setup_never_writes_acl_toml_in_any_role`(네 역할, `acl.toml` 있음·없음, 존재와 바이트 동일), `setup_rerun_after_completion_changes_no_file`, `setup_invite_always_carries_assigned_name`, `setup_acl_step_pending_while_unassigned_invite_is_live`, `setup_refuses_second_name_for_pinned_fingerprint`, `setup_pin_cert_pending_on_fingerprint_mismatch`, `setup_pair_pending_on_duplicate_fingerprint`, `setup_trust_add_always_carries_cert_pem`, `setup_mode_config_pending_on_wrong_run_mode`(`[serve].to`가 `--to`와 다른 경우 포함). 더하는 것. `setup_printed_rows_pasted_verbatim_make_acl_check_allow_every_intended_action`(네 역할과 `--forward`), `setup_acl_step_appends_the_acl_restart_notice_byte_for_byte`, `setup_op_failure_keeps_code_and_retryable_and_adds_step_ids_without_results`, `setup_service_unsupported_is_skipped`. 기존 `minimal_policy_example_fills_in_actual_pinned_peer_names`와 doctor 두 remedy 테스트(`acl_restart_notice_is_the_verbatim_tail_of_both_acl_diagnostic_remedies`) 초록. 파일 시스템 샌드박스는 테스트마다 따로 두고 시간 의존 경로(초대 만료)는 주입 시계로 돈다.
+**(a) 범위:** `release.yml` build 매트릭스에 `os: ubuntu-24.04-arm`, `target: aarch64-unknown-linux-musl`, `musl: true` 행을 더한다. x86_64 musl 레시피(`musl-tools` 설치, 정적 링크 증거 스텝, `release_smoke`)가 `matrix.musl` 조건으로 이미 붙어 있으므로 새 스텝은 없다. 행 주석에 "네이티브 arm 러너, cross 빌드 아님"과 aws-lc-sys의 aarch64 musl 경로 확인 결과를 적는다(§4 리스크). `SHA256SUMS`와 attestation은 release job의 `dist/*` glob이 이미 모든 자산을 덮으므로 바꾸지 않는다. 대신 release job에 매트릭스 target마다 자산이 `dist/`에 있고 `SHA256SUMS`에 한 줄씩 있는지 확인하는 스텝 하나를 더해, 새 leg가 조용히 빠지는 경우를 붉게 만든다.
 
-**(c) 완료 판정:** 위 테스트 초록과 초대 만료 테스트의 부하 아래 50회 연속 초록. `cargo xtask arch` 초록(금지 토큰 0). `git grep -n 'probe_fingerprint' crates/qsh-core/src/setup` 0건.
+`scripts/install.sh`는 aarch64에서 `QSH_LIBC=musl`일 때만 바뀐다. 지금은 target 판정 단계에서 "no aarch64 musl asset is published"로 끝난다. 바뀐 뒤에는 target을 `aarch64-unknown-linux-musl`로 정하고, 대상 태그의 `SHA256SUMS`를 먼저 받아 그 자산 줄이 있으면 설치를 이어가고, 없으면 지금과 같은 뜻의 메시지("no aarch64 musl asset is published for <tag>; unset QSH_LIBC to install the glibc build")로 끝난다. 기본값 `gnu`와 x86_64 경로의 다운로드 순서는 바꾸지 않는다(§4.1 #6). 머리 주석의 "x86_64 only" 문장을 고친다.
 
-### Step 19 — `qsh setup` CLI, fixture, 계약 문서 (0.5~0.6ew)
+설치 스크립트 테스트 하네스를 세운다. 자리는 게시되지 않는 `xtask`다(§4.1 #7). 테스트는 임시 디렉터리에 가짜 릴리스(작은 셸 스크립트를 `qsh`로 담은 tar.gz, `man/*.1`, `SHA256SUMS`)를 만들고, PATH 앞에 `curl`·`uname`·`gh` 대역 셸 스크립트를 둔 채 `sh scripts/install.sh`를 돌린다. `curl` 대역은 URL을 가짜 릴리스 파일로 대응시키고, 요청 URL을 로그 파일에 남겨 테스트가 어느 자산을 골랐는지 단언한다. 네트워크에 닿지 않는다. `#[cfg(unix)]`다.
 
-근거 ADR: ADR-0024 결정 2, 7, 9, 10, 11과 결과 절. 선행: Step 18.
+`docs/campaigns/p1-aarch64-musl.md`를 사전 고정해 커밋한다. 형식은 `docs/campaigns/m10-clean-vm.md` §5("DoD 3의 조작적 정의: musl static")와 §8~§11을 계승한다. 대상 배포판(자산의 요구 glibc보다 오래된 aarch64 배포판 하나 이상), 설치 경로(`QSH_LIBC=musl`로 설치 스크립트 실행), 기능 스모크 네 축, 판정 규칙, 기록 표를 적는다. `docs/campaigns/m10-clean-vm.md`는 한 바이트도 고치지 않는다. `CLAUDE.md` 문서 지도의 캠페인 목록과 `scripts/README.md`의 설치 스크립트 절(`QSH_LIBC` 설명)을 고친다.
 
-**(a) 범위:** clap에 `qsh setup <role>`과 역할별 인자(`--peer`, `--peer-cert <path|->`, `--to`, `--address`, 위치 인자 `<code>`, `--code-stdin`, `--forward`, `--service`)를 더한다. 코드와 `--peer-cert`를 함께 주거나, `--forward`·`--service`를 해당하지 않는 역할에 주거나, 위치 코드와 `--code-stdin`을 함께 주면 exit `2`다. 렌더러 `print_setup_run`은 단계 표, 인쇄할 `acl_rows`, `next`를 찍는다. human mode 프롬프트는 다섯(역할, pin 이름, 에코 없는 초대 코드, `acl.toml` 저장 확인, 서비스 설치 여부 기본 아니오)뿐이고 stderr로 묻는다. 표준입력이 터미널이 아니거나 `--peer-cert -`면 프롬프트를 열지 않고 빠진 입력은 `INVALID_ARGUMENT`다. machine mode는 envelope 하나를 내고 프롬프트가 없다. 첫 단계 전에 입력 전부를 검증하고 틀리면 아무것도 쓰지 않는다. `qsh serve`·`qsh listen`·대화형 세션을 띄우지 않는다. 판단은 모두 Step 18의 `Ops`가 하고 CLI는 계획이 요구한 입력만 받아 다음 단계를 부른다.
+**(b) 테스트·게이트:** 설치 스크립트 테스트(`xtask/tests/install_script.rs`). `install_defaults_to_gnu_on_x86_64_and_aarch64_linux`, `install_picks_x86_64_musl_when_qsh_libc_is_musl`, `install_picks_aarch64_musl_when_the_tag_publishes_it`, `install_aarch64_musl_ends_as_today_when_the_tag_lacks_the_asset`, `install_rejects_an_unknown_qsh_libc`, `install_refuses_a_checksum_mismatch`. 기존 `release_smoke_covers_init_trust_exec_pty_detach_and_reattach` 초록.
 
-계약 델타를 같은 커밋에 싣는다. `docs/CLI.md` §2.4 목록, §2.5 "인가 불요" 행에 `setup.run`, 새 §6.20 "`qsh setup`"(역할 표, 단계 id·상태 어휘 표, exit 규칙, `setup`이라는 host 별칭이 이 서브커맨드에 가려진다는 사실). 번호는 M11의 §6.19 `acl show` 다음이다(ADR-0024 결과 절). 상태 헤더 v0.15 항목에 덧붙인다. `docs/PRD.md` §11 명령 체계 표에 `qsh setup` 행을 넣는다. fixture `setup.run.host_pending_acl.json`, `setup.run.client_complete.json`, `setup.run.listener_pending_acl.json`, `error.INVALID_ARGUMENT.setup_missing_input.json`을 더하고 `REQUIRED_FIXTURES`에 등재하고 생산 테스트 `golden_setup_run_fixtures`를 둔다(비결정 값은 §4.1 #7). `CLI_V1_SCHEMA_COMMANDS`, `cli_v1_data_schema` arm, `crates/qsh-core/tests/op_registration_completeness.rs`의 `OP_FACES` 행(`op: "setup.run"`, `marker: "SetupRunOp"`, `renderer: "print_setup_run"`, `cli_spelling: "qsh setup"`, `man_file: "qsh-setup.1"`), `crates/qsh-core/tests/acl_registry.rs`의 인가 불요 목록. `cargo xtask man`으로 `docs/man/qsh-setup.1`을 만든다. `docs/design/threat-model.md` §3 진입점 표에 local-only 행, §7에 잔여 위험 둘(사람이 `qsh setup` 밖에서 `--as` 없는 초대를 TTL 안에 발급하는 경우, `host` 역할 상환 뒤 생긴 fingerprint 중복은 responder 고지로만 드러남)과 핀 테스트 이름.
+**(c) 완료 판정:** 위 테스트 초록. `git diff --stat -- docs/campaigns/m10-clean-vm.md`가 비어 있다. 머지 뒤 §0.4의 dispatch run에서 새 leg의 빌드, 정적 링크 증거, `release_smoke`(`QSH_SMOKE_STRICT=1`)가 초록이고 에이전트가 run id를 기록한다. `SHA256SUMS`와 attestation 포함은 첫 태그 run에서 확인한다(§8 #4).
 
-**(b) 테스트·게이트:** L6(`crates/qsh-cli/tests/setup.rs` 신설). `setup_machine_mode_rejects_missing_input_before_any_write`(stdout envelope 한 줄, 파일 0개), `setup_machine_mode_never_opens_a_prompt`(stdin을 닫은 채 `--json`), `setup_output_never_carries_key_material`(네 역할의 stdout·stderr·오류 envelope. 초대 코드는 `host`의 `invite` 단계 `result`에만), `setup_usage_conflicts_exit_2`, `setup_human_mode_without_a_tty_treats_missing_input_as_invalid_argument`, `setup_step_vocabulary_matches_cli_md`(`crates/qsh-core/tests/doctor_docs.rs`의 잠금 어휘 규율), `setup_run_never_appears_as_a_control_message_wire_variant`. `crates/qsh-cli/tests/exit_code_matrix.rs`에 새 행. fixture 생산 `golden_setup_run_fixtures`. 등록 게이트 `layer_2_every_schema_command_has_all_six_faces`, `section_2_4_fence_matches_every_implemented_operation_bidirectionally`, `every_implemented_operation_has_a_schema_or_a_documented_exclusion`, `registry_matches_cli_md_section_2_5_bidirectionally`, `checked_in_man_pages_match_the_generator`, `every_error_code_is_covered_by_a_fixture_or_explicitly_deferred` 초록.
+### Step 9 — (h) 설치 스크립트의 provenance 검증 (0.2~0.3ew)
 
-**(c) 완료 판정:** 위 테스트 초록. `git diff --stat -- crates/qsh-cli/tests/fixtures`가 새 파일 넷만 보인다. `capabilities.json` diff 0. `grep -n '6.20' docs/CLI.md` 1건 이상.
+근거: ROADMAP M13 범위 (h)와 DoD (g)~(j), `release.yml`의 "Attest build provenance" 스텝 주석(`gh attestation verify <asset> --repo`). 선행: Step 8의 하네스.
 
-### Step 20 — README `qsh setup` 절과 `p1-setup-stopwatch` 캠페인 사전 고정 (0.1~0.25ew)
+**(a) 범위:** `scripts/install.sh`가 체크섬 검증 뒤 provenance를 검증한다. 동작은 fail closed 쪽이다.
 
-근거 ADR: ADR-0024 결정 12와 결과 절. 선행: Step 16(SHA 고정), Step 19.
+- `gh`가 있고 인증된 상태면 `gh attestation verify <asset> --repo "$QSH_REPO"`를 부르고, 실패하면 설치하지 않고 끝난다.
+- 검증 도구가 없거나 쓸 수 없으면(`gh` 없음, 미인증) `SHA256SUMS` 검증까지 하고 "provenance not verified" 경고를 stderr에 낸 뒤 설치한다(§4.1 #9가 미인증을 "도구 없음"으로 볼지 정한다).
+- 둘 다 건너뛰는 것은 명시 플래그 `QSH_INSECURE_SKIP_VERIFY=1`로만 한다. 이 플래그는 경고를 내고, 체크섬도 건너뛴다는 사실을 문면에 적는다.
 
-**(a) 범위:** README에 `qsh setup` 절을 새로 더한다. "First run" 절은 한 바이트도 고치지 않는다. m9 측정 대상은 Step 16의 고정 트리이고 그 절은 여전히 수동 경로의 정본이다. 새 절은 네 역할의 한 줄 예시, `acl.toml`은 쓰지 않고 행을 인쇄한다는 것, 자동 신뢰가 없다는 것, 재시작 고지를 적는다. `docs/campaigns/p1-setup-stopwatch.md`를 사전 고정해 커밋한다. 형식은 `m9-stopwatch.md` §3~§8을 계승하고 자동 신뢰 배제(§7)를 포함한다. 피실험자 지시 한 줄, 대상 문서 없음, 타이머 종료는 첫 원격 프롬프트, 합격은 3회 전부 300초 이내이고 중앙값이 같은 날 같은 진행자의 m9 3회 중앙값보다 짧을 것, 단계 기록표의 사람 구간과 기계 구간 분리. `CLAUDE.md` 문서 지도의 캠페인 목록에 `p1-setup-stopwatch`를 더한다.
+머리 주석의 "What the checksum does and does not prove" 문단을 provenance가 증명하는 것(자산이 이 저장소의 `release.yml` run에서 만들어졌다)과 증명하지 않는 것으로 고친다. `scripts/README.md`와 README 설치 절에 세 경로를 적는다. README "First run" 절은 건드리지 않는다.
 
-**(b) 테스트·게이트:** README 축자 게이트(`readme_quotes_the_controller_unreachable_diagnostic_verbatim`, `readme_quotes_the_acl_startup_diagnostic_wording_verbatim`, `readme_quotes_the_dynamic_forward_acl_note_verbatim`) 초록. 기존 `identity.init.created.json`·`identity.init.existing.json` golden 초록.
+**(b) 테스트·게이트:** 설치 스크립트 테스트. `install_verifies_provenance_with_gh_when_available`(`gh` 대역이 받은 인자를 단언), `install_refuses_when_provenance_verification_fails`, `install_warns_and_continues_with_checksum_only_when_gh_is_absent`, `install_skip_verify_flag_skips_both_and_warns`, `install_never_skips_the_checksum_without_the_explicit_flag`. Step 8의 테스트 초록.
 
-**(c) 완료 판정:** `git diff <Step 16의 B> -- README.md`에서 "First run" 절 안의 변경이 0줄이다. 캠페인 파일의 합격 기준이 ADR-0024 결정 12와 같다. `grep -c 'p1-setup-stopwatch' CLAUDE.md` 1.
+**(c) 완료 판정:** 위 테스트 초록. 결정(fail closed의 범위와 플래그 이름)이 커밋 본문에 있다. `git diff <Step 8 머지 커밋> -- README.md`에서 "First run" 절 안의 변경이 0줄이다.
 
-### Step 21 — 마감 (0.2ew)
+### Step 10 — (i) curl 설치 경로의 man 페이지 설치 (0.1~0.2ew)
 
-근거: 마일스톤 마감 공통 절차(`docs/ROADMAP.md` §2) 1·2, §2의 안정성 규율. 선행: Step 2~20.
+근거: ROADMAP M13 범위 (i), `release.yml`의 아카이브 구성 스텝(unix 아카이브가 `man/*.1`을 담는다), `scripts/install.sh`의 "which this installer does not install" 주석. 선행: Step 8의 하네스.
 
-**(a) 범위:** 부하 반복. 이 마일스톤이 더한 타이밍 민감 테스트 전부(§4.1 #8의 filterset으로, Step 3·4·6·7·8·9·10·11·13·14·15·18의 테스트 이름을 한 filterset으로 묶은 것)를 `scripts/stress/run.sh`로 `QSH_ACCEPTANCE_SLOW=1`과 함께 50회 돌리고 "50/50 passed under load" 줄과 호스트 사양(OS, 논리 CPU 수)을 마감 노트에 적는다. 한 번이라도 붉으면 그 테스트를 고치고 50회를 처음부터 다시 돈다.
+**(a) 범위:** 설치 스크립트가 아카이브의 `man/*.1`을 `QSH_MAN_DIR`(기본 `$HOME/.local/share/man/man1`, §4.1 #10)에 설치한다. 추출은 지금처럼 이름으로 하고, 이름이 `man/<name>.1` 꼴이 아니거나 심볼릭 링크인 항목은 거절한다. 바이너리처럼 임시 이름으로 복사한 뒤 rename한다. man 설치 실패는 바이너리 설치를 되돌리지 않고 경고로 끝낸다. `QSH_NO_MAN=1`이면 건너뛴다. 설치 뒤 `MANPATH`에 그 디렉터리가 잡히지 않는 플랫폼이면 안내 한 줄을 낸다. 아카이브에 man 페이지가 없으면(옛 태그) 조용히 건너뛴다. `release.yml`의 아카이브 스텝 주석("install.sh extracts only the binary")을 같은 커밋에서 고치고 `scripts/README.md`와 README 설치 절도 고친다.
 
-절차 1. 구속 문서 태그를 대조한다. `docs/CLI.md` v0.15 항목이 M12 델타(§6.9 두 옵션, §6.12·§6.13 `qsh::lifecycle`, §6.13 `wake` 이벤트와 target backoff 규칙, §6.14 supervised 예외, §2.4·§2.5·§6.20 `setup.run`)를 빠짐없이 적는지 본다. `docs/design/protocol.md` §2·§10·§11-4·§16.4, `docs/design/testing.md`(L4 두 행, 벽시계 예외, CI 규율의 부하 반복 항목), `docs/design/architecture.md` §2, `docs/design/threat-model.md` §3·§4 A·B·C·§7, `docs/PRD.md` §11, ADR-0023·0024의 결과 절 문서 목록 전수를 대조한다. §6.1이 무변경임을 확인한다. 절차 2. README를 동기화한다. 대상은 Status, Roadmap 표의 M12 행, Known limitations의 ADR-0023 여섯 한계, `qsh setup` 절이고 "First run" 절은 무변경이다. `docs/ROADMAP.md` M12 절에 마감 노트를 적고, §5.5 표 두 행의 상태를 갱신한다. 이 `PLAN.md`를 `docs/history/m12-plan.md`로 옮기고 다음 마일스톤 계획(M13)으로 교체한다.
+**(b) 테스트·게이트:** 설치 스크립트 테스트. `install_places_every_man_page_under_qsh_man_dir`, `install_skips_man_pages_with_qsh_no_man`, `install_rejects_a_man_member_outside_man_or_a_symlink`, `install_keeps_the_binary_when_man_installation_fails`, `install_tolerates_an_archive_without_man_pages`. Step 8·9의 테스트 초록.
+
+**(c) 완료 판정:** 위 테스트 초록. 결정(기본 디렉터리, 끄는 플래그, 실패 처리)이 커밋 본문에 있다. README "First run" 절 diff 0.
+
+### Step 11 — (g) 공개 크레이트 tarball의 test 타깃 `exclude` 정책 (0.1~0.2ew)
+
+근거: ROADMAP M13 범위 (g), `docs/design/testing.md` "M10 — crates.io publish gate" 문단. 선행: 없음.
+
+**(a) 범위:** 공개 넷(`qsh-proto`, `qsh-transport`, `qsh-core`, `qsh-cli`)의 tarball에 `tests/`를 넣을지 정한다. 초안은 넣지 않는 쪽이다. 공개 매니페스트는 버전 없는 path dev-dependency(`qsh-testkit`)를 떨어뜨리므로(루트 `Cargo.toml` 주석의 실측) 통합 테스트 대부분이 tarball에서 컴파일되지 않고, `qsh-cli`의 fixture와 `ssh_golden`은 tarball 크기만 늘린다. 네 `Cargo.toml`에 `exclude = ["tests/"]`를 더하고, 루트 `Cargo.toml`의 게시 정책 주석에 이유를 적는다. `ci.yml`의 `publish-dry-run` job에 크레이트마다 `cargo package --list`의 결과에 `tests/`가 없음을 확인하는 스텝을 더한다. 인라인 `#[cfg(test)]`와 `tests.rs` 형제 모듈은 `src/` 아래라 영향이 없다는 점을 주석에 적는다.
+
+**(b) 테스트·게이트:** `publish-dry-run` job 초록(새 스텝 포함). 일곱 게이트 초록.
+
+**(c) 완료 판정:** `publish-dry-run`이 PR에서 초록이고 새 스텝이 `tests/` 부재를 단언한다. 결정과 기각한 대안(tarball에 두고 `cargo test`가 깨지는 것을 받아들이기)이 커밋 본문에 있다.
+
+### Step 12 — (j) `docs/CLI.md` 상태 헤더의 기계 핀 또는 기각 (0.1~0.3ew)
+
+근거: ROADMAP M13 범위 (j)의 "무엇을 고정할지부터 정하고, 0.3ew 안에 정하지 못하면 기각으로 기록한다". 선행: 없음.
+
+**(a) 범위:** 상태 헤더는 한 줄짜리 변경 기록이라 사람이 손으로 맞춘다. 고정할 수 있는 불변식 후보를 먼저 적고 하나를 고른다. 초안은 "헤더가 인용하는 `§N`과 `§N.M`이 모두 이 문서의 실제 절 제목으로 있다"와 "헤더 첫 버전 표기(`Draft v0.N`)가 헤더 안의 가장 큰 버전 번호다" 둘이다. 둘 다 코드 없이 문서만 읽는 테스트라 `crates/qsh-core/tests/doctor_docs.rs`의 문서 대조 테스트 옆에 둔다(§4.1 #11). 0.3ew 안에 쓸모 있는 불변식을 고르지 못하면 기각하고, 기각 사유를 `docs/CLI.md` 상태 헤더가 아니라 이 스텝의 커밋 본문과 ROADMAP M13 마감 노트에 적는다.
+
+**(b) 테스트·게이트:** 핀을 고르면 `cli_md_status_header_cites_only_sections_that_exist`, `cli_md_status_header_leads_with_its_newest_version`. mutation 하나(헤더에 없는 절 번호 하나를 넣기)가 첫 테스트를 붉힌다. 기각이면 테스트 없음.
+
+**(c) 완료 판정:** 핀 테스트 초록 또는 기각 기록. 스텝에 쓴 시간이 0.3ew를 넘지 않았다.
+
+### Step 13 — (e) graceful re-exec H1: drain 요약, doctor 진단 1종, 배너 (0.25ew)
+
+근거: ROADMAP M13 범위 (e)와 DoD (e), `docs/design/reexec-estimate.md` §3 H1 행과 §7 H1 행, `docs/deploy/service.md`의 재시작 고지(H0). 선행: 없음.
+
+**(a) 범위:** drain 요약, doctor 진단, 배너를 더한다.
+
+- drain 요약. `Server::drain`(`crates/qsh-core/src/server/mod.rs`)이 끝날 때 `qsh::lifecycle` target에 한 줄을 낸다. 값은 `drained`이고, 닫은 세션 수 `sessions_closed`, 그중 detach 상태였던 수 `detached_closed`, `DRAIN_TIMEOUT`에 걸렸는지 `timed_out`을 싣는다. 세션 id, 명령, PTY 내용, 주소는 싣지 않는다(§4.1 #13). `docs/CLI.md` §6.12의 `qsh::lifecycle` 문단에 값을 더한다(열린 어휘).
+- doctor 진단. 이 머신에 해당 run mode의 서비스 유닛이 등록돼 있으면 "서비스 매니저의 재시작은 detach된 세션을 전부 지운다"를 알리는 info 진단을 낸다. 유닛 검출은 `service_not_registered`가 쓰는 두 갈래(LaunchAgent, systemd user unit)를 재사용한다. code 초안은 `service_restart_drops_sessions`, remedy는 `docs/deploy/service.md`의 해당 절과 README Known limitations를 가리킨다. `EXPECTED_DOCTOR_CODES`가 23종에서 24종이 되고 같은 커밋에서 `docs/CLI.md` §6.11의 "진단 코드 N종", §6.17의 "N종 진단 코드"와 표, `crates/qsh-core/src/doctor.rs` 모듈 doc의 "23 variants"가 바뀐다.
+- 배너. `qsh serve`와 `qsh listen`의 기동 stderr에 "세션은 이 프로세스 안에 산다. 재시작하면 detach된 세션이 사라진다"는 한 줄을 사람용 줄로 낸다. `qsh serve: listening on {addr}` 줄의 바이트와 `LISTENING_PREFIX`·`LISTEN_LISTENING_PREFIX`를 쓰는 하네스는 바뀌지 않도록 그 줄 뒤에 둔다. `--quiet`이면 내지 않는다. 문면 상수는 `qsh-core`에 둔다.
+
+**(b) 테스트·게이트:** L6(`crates/qsh-cli/tests/serve_sigterm_drain.rs`, `lifecycle_lines.rs`). `sigterm_drain_emits_one_drained_lifecycle_line_with_the_closed_session_count`, `drained_line_carries_no_session_id_address_or_payload`, `serve_startup_banner_states_that_a_restart_drops_detached_sessions`, `quiet_suppresses_the_restart_banner`. 단위(`crates/qsh-core/src/ops/doctor/tests.rs`). `service_restart_drops_sessions_appears_only_when_a_unit_is_registered`, `service_restart_drops_sessions_is_info_and_carries_a_remedy`. 개수 게이트 `expected_doctor_codes_matches_every_diagnostic_id_variant_exactly`, `cli_md_prose_doctor_code_count_matches_expected_len`. 기존 `serve_and_listen_listening_lines_are_byte_identical_and_a_lifecycle_line_carries_at`, `jsonl_purity.rs` 초록.
+
+**(c) 완료 판정:** 위 테스트 초록. drain 줄 테스트는 SIGTERM 뒤 캡처한 stderr 줄을 기다리므로 부하 아래 50회 연속 초록. `grep -n '24' docs/CLI.md`로 §6.11·§6.17의 개수 산문이 바뀐 것을 확인한다. fixture diff 0.
+
+### Step 14 — (b) splice 수정 (0~1.3ew, ADR-0037 승인 뒤. Step 3의 둘째 갈래면 ADR 없이)
+
+근거: ROADMAP M13 DoD (b), 승인된 ADR-0037의 결정 절. 선행: Step 2, Step 3, ADR 승인.
+
+**(a) 범위:** 승인된 설계를 `crates/qsh-core/src/tunnel/splice.rs`(필요하면 `tunnel/local.rs`, `tunnel/dynamic.rs`, `tunnel/remote.rs`)에 구현한다. 계획 시점의 제약은 셋이다. `CONNECTION_RECEIVE_WINDOW`(8 MiB)와 `TUNNEL_STREAM_RECEIVE_WINDOW`(2 MiB)의 값은 바꾸지 않는다. 앱 쪽 버퍼를 새로 두면 그 합이 세션당 buffer 상한(M8 DoD 2) 안에 있다는 것을 상수 관계와 테스트로 보인다. 느린 소비자의 연결을 끊는 설계라면 그 끊김이 로컬 앱에 RST로 보여 "스트림이 정상 종료됐다"로 오인되지 않게 한다(`SpliceGuard`의 기존 규율).
+
+Step 2의 테스트를 `ci.yml` acceptance job에 `QSH_ACCEPTANCE_STRICT` 아래 한 스텝으로 넣는다. `CLAUDE.md` Commands 절의 acceptance 목록, `docs/design/testing.md` 게이트 환경변수 표와 L9/L10의 "덮는 축은 포화(고속) 하나다" 문단(이제 두 축을 덮는다), `docs/design/protocol.md` §12의 backpressure 서술, `crates/qsh-transport/src/endpoint.rs`의 두 창 상수 doc(창 관계가 더는 PTY 기아의 유일한 방어가 아님), `docs/design/threat-model.md` §4 C(느린 소비자로 PTY를 굶기는 위협과 통제, 핀 테스트 이름)를 같은 커밋에서 고친다. ADR이 새 reset 코드를 정했으면 `docs/design/protocol.md` §16.2 표에 행을 더한다.
+
+**(b) 테스트·게이트:** Step 2의 네 테스트가 strict에서 초록. 단위(`crates/qsh-core/src/tunnel/splice/tests.rs` 또는 기존 테스트 모듈, ADR이 고른 설계에 맞춰 이름 확정). 초안은 `splice_stops_only_the_stalled_stream_when_its_app_buffer_fills`, `a_stalled_stream_stop_leaves_other_tunnel_streams_and_the_pty_untouched`, `a_stopped_stalled_stream_reaches_the_local_app_as_a_reset_not_a_clean_end`, `tunnel_app_buffers_per_connection_stay_within_the_session_buffer_ceiling`. 고치지 않은 기준으로 `tunnel_throughput_meets_raw_quinn_ratio`, `tunnel_saturated_pty_echo_p95_under_measured_rtt_plus_10ms`, `transport_config_sets_connection_receive_window`, `tunnel_stream_receive_window_never_regresses_below_quinns_own_default`, `socks_curl`, `a_dead_connection_ends_the_tunnel_cleanly_while_the_pty_session_resumes`, `load.yml`의 soak·adversarial load 초록.
+
+**(c) 완료 판정:** 위 테스트 초록. 진행 단언과 단위 테스트는 부하 아래 50회 연속 초록, 지연 단언은 부하 없이 50회 연속 초록(§8 #5). acceptance job이 새 스텝을 포함해 한 번 이상 초록. mutation 하나(새 방어를 끄기)가 `pty_output_keeps_progressing_while_four_unread_tunnel_streams_stall`을 붉힌다. `git diff --stat -- crates/qsh-proto/proto`가 비어 있다.
+
+### Step 15 — (d) `qsh doctor --fail-on` 구현 (0.25~0.45ew, ADR-0027 승인 뒤)
+
+근거: ROADMAP M13 DoD (d), 승인된 ADR-0027. 선행: Step 4와 승인.
+
+**(a) 범위:** 임계 비교는 `qsh-core`에 둔다(`DoctorData`의 finding 중 임계 이상 `status`가 있는지 답하는 함수 하나). `qsh-cli`는 clap에 `--fail-on <warn|error>`를 더하고, 그 함수의 답에 따라 ADR-0027이 정한 exit 값으로 끝나며, 렌더러 출력은 바꾸지 않는다. 임계 어휘 밖의 값은 clap이 exit `2`로 거절한다. `docs/CLI.md` §4 표에 ADR-0027의 행을 더하고, §6.17의 "exit code는 항상 `0`이다" 문단에 `--fail-on` 예외를, "`--fail-on` 플래그는 아직 없다" 문단을 새 동작 설명으로 교체한다. 상태 헤더 v0.19 항목에 덧붙인다. `cargo xtask man`으로 `qsh-doctor.1`을 다시 만든다. JSON 모양은 ADR이 바꾸지 않으면 fixture를 더하지 않는다.
+
+**(b) 테스트·게이트:** L6(`crates/qsh-cli/tests/`). `doctor_without_fail_on_keeps_exit_zero_and_byte_identical_stdout`, `doctor_fail_on_warn_exits_one_when_a_warn_or_error_finding_exists`, `doctor_fail_on_error_ignores_warn_findings`, `doctor_fail_on_keeps_the_envelope_ok_true_and_every_finding`, `doctor_fail_on_rejects_info_and_unknown_severities_with_exit_2`, `doctor_fail_on_does_not_change_the_255_of_a_doctor_that_cannot_start`. `crates/qsh-cli/tests/exit_code_matrix.rs`에 새 행. 단위(`qsh-core`). `doctor_threshold_matches_the_overall_severity_order`. 기존 doctor fixture, `checked_in_man_pages_match_the_generator`, `layer_2_every_schema_command_has_all_six_faces` 초록.
+
+**(c) 완료 판정:** 위 테스트 초록. `git diff --stat -- crates/qsh-cli/tests/fixtures`가 비어 있다(ADR이 JSON을 바꾸면 새 파일만). `grep -n 'fail-on' docs/CLI.md`가 §4와 §6.17에서 각 1건 이상이고 "아직 없다" 문장은 0건.
+
+### Step 16 — (f) H1b stateless reset key 구현 (0.25~0.35ew, ADR-0036 승인 뒤)
+
+근거: ROADMAP M13 DoD (f), 승인된 ADR-0036, `docs/design/reexec-estimate.md` §3 H1b 행. 선행: Step 5와 승인.
+
+**(a) 범위:** `qsh-core`가 ADR-0036이 정한 자리에서 키를 읽거나 만들고, 읽기 실패는 ADR이 정한 동작을 따른다. `qsh-transport`의 서버 endpoint 생성 함수가 키 바이트를 인자로 받아 `quinn::EndpointConfig::new`에 HMAC 키로 넘긴다. 클라이언트 endpoint와 테스트용 raw quinn 경로(`crates/qsh-testkit/src/raw_quic.rs`)는 `default()`를 유지한다. 키 버퍼는 `Zeroizing`에 둔다(`crates/qsh-core/src/resume.rs`의 토큰 위생과 같은 규율). 기동 진단의 문면 상수는 `qsh-core`에 둔다.
+
+클라이언트가 reset을 받으면 quinn이 `ConnectionError::Reset`으로 연결을 닫는다. recovery는 그 뒤 재dial하고, 새 서버에 세션이 없으므로 현행 attach 실패 코드로 끝난다. recovery의 분류 어휘는 바꾸지 않는다(ROADMAP 범위 (f)의 "감지 지연이지 recovery 분류가 아니다"). `classify_connection_error`(`crates/qsh-core/src/reverse/mod.rs`)가 `Reset`을 지금처럼 `local`로 적을지는 §8 #3이 정한다.
+
+문서를 같은 커밋에서 고친다. `docs/CLI.md` §6.12·§6.13(키 파일과 기동 진단), `docs/design/threat-model.md` §4 D·G, `docs/deploy/service.md`의 재시작 고지(재시작 뒤 클라이언트가 곧바로 단절을 안다), `docs/design/protocol.md` §10의 재시작 감지 서술, README Known limitations의 해당 문장, `docs/design/reexec-estimate.md` 추기 한 줄(H1b 착지 커밋). 상태 헤더 v0.19 항목에 덧붙인다.
+
+**(b) 테스트·게이트:** testkit(`crates/qsh-testkit/tests/serve_restart_reset.rs`). `restarted_serve_resets_an_attached_client_within_the_redial_deadline_and_reports_the_session_lost`(재시작 뒤 첫 패킷부터 단절 확정까지를 관찰 채널로 재고, 45초 idle보다 훨씬 이른 `REDIAL_DEADLINE` 안임을 단언. 오류 코드는 §6.3·§6.4의 현행 attach 실패 코드), `a_serve_restarted_with_a_new_key_leaves_detection_to_path_watch`(대조군. 키 파일을 지우고 재시작하면 reset이 오지 않는다). 단위(`qsh-core`). `reset_key_file_is_created_once_with_mode_0600_and_reused_across_restarts`, `reset_key_file_with_wider_permissions_emits_a_startup_diagnostic`, `unreadable_or_malformed_reset_key_is_never_silently_replaced`(파일 바이트가 전후 같음, ADR이 정한 경로의 동작), `reset_key_never_appears_in_logs_audit_or_diagnostics`. 단위(`qsh-transport`). `server_endpoint_uses_the_injected_reset_key`. 기존 `keep_alive_and_idle_timeout_are_configured_and_ping_pong_roundtrips`, `resume_secrecy.rs`, `serve_sigterm_drain.rs` 초록.
+
+**(c) 완료 판정:** 위 테스트 초록. testkit 테스트는 부하 아래 50회 연속 초록(재시작한 서버가 같은 UDP 포트를 다시 잡는 경합이 여기서 드러난다, §4). mutation 하나(`EndpointConfig::default()`로 되돌리기)가 첫 testkit 테스트를 붉힌다. `git diff --stat -- crates/qsh-proto/proto crates/qsh-cli/tests/fixtures`가 비어 있다.
+
+### Step 17 — (k) ADR-0021 결정 1(과 4) 구현 (0.35~0.5ew, 관측 기록 뒤. 기록이 없으면 0ew)
+
+근거: ADR-0021 결정 1·4·6·7과 결과 절, ROADMAP M13 범위 (k)와 DoD (k), ADR-0023 결정 25. 선행: §0.2의 관측 기록.
+
+**(a) 범위:** 관측 기록을 먼저 읽고 결정 7의 분기를 커밋 본문에 적는다(기록의 위치와 `cause` 값별 계수). 결정 1은 `[transport].keep_alive_ms`(기본 15000, `1000..=20000`)를 연다. `qsh-core`의 `Config`가 읽고 검증하며 범위 밖이면 clamp하지 않고 `CONFIG_ERROR`(`retryable: false`)로 기동을 거절한다(`ReverseConfig::backoff` 선례). 값은 `qsh-transport`의 transport config 생성 함수에 인자로 넘어가고 `KEEP_ALIVE_INTERVAL`은 기본값 상수로 남는다. `MAX_IDLE_TIMEOUT`은 건드리지 않는다(결정 2). 결정 4까지 가는 분기면 `[recovery].probe_interval_ms`, `min_dead_after_ms`, `strikes`를 열고, 범위 상한은 `crates/qsh-cli/tests/reverse_blackout.rs`, `crates/qsh-cli/tests/attach_recovery.rs`, `crates/qsh-testkit/tests/reverse_resume_chaos.rs`의 `detection_budget`에서 역산한다. 세 값은 대화형 recovery, 두 역방향 자리, supervised 터널의 `PathWatch`에 모두 들어간다. M11 (a)가 두 역방향 자리에 둔 `#[cfg(test)]` `PathWatchConfig` 주입은 그대로 둔다. 나머지 세 필드는 열지 않는다.
+
+결정 6의 문서 자리를 같은 커밋에서 고친다. `docs/design/protocol.md` §1 요약표의 keep-alive/idle 행, §2 산문, §11-4 항목 4, `docs/design/architecture.md` §7의 `config.toml` 키 나열, `docs/CLI.md`의 설정 키 서술(상태 헤더 v0.19에 덧붙임). `config_unknown_key`는 `Config`의 필드로 따라오므로 손댈 목록이 없다(결정 6).
+
+**(b) 테스트·게이트:** 단위(`crates/qsh-core/src/config.rs`의 테스트 모듈). `transport_keep_alive_ms_outside_1000_to_20000_is_config_error_without_clamping`, `absent_transport_section_keeps_the_fifteen_second_keep_alive`, `keep_alive_ms_reaches_the_quinn_transport_config`. 결정 4 분기면 `recovery_values_beyond_the_detection_budget_bound_are_config_error`, `absent_recovery_section_keeps_todays_path_watch_config_byte_identically`, `recovery_section_reaches_attach_reverse_and_supervised_path_watch`. 고치지 않은 예산으로 세 `detection_budget` 테스트, `a_real_60_second_blackout_survives_and_resumes_the_same_session`(`QSH_ACCEPTANCE_SLOW`), `keep_alive_and_idle_timeout_are_configured_and_ping_pong_roundtrips`, `doctor_config_unknown_key_findings` 계열 초록.
+
+**(c) 완료 판정:** 위 테스트 초록. 설정 검증 테스트는 시간 의존이 없다. 설정이 없을 때 `PathWatchConfig`와 transport config의 `Debug` 출력이 오늘과 같다. `git diff --stat -- crates/qsh-proto/proto`가 비어 있다. 기록이 없어 이 스텝을 열지 않으면 Step 18이 이월을 적는다.
+
+### Step 18 — 마감 (0.1~0.2ew)
+
+근거: 마일스톤 마감 공통 절차(`docs/ROADMAP.md` §2) 1·2, §2의 안정성 규율. 선행: Step 2~17(열지 않은 조건부 스텝은 그 사실의 기록).
+
+**(a) 범위:** 부하 반복. M13이 더한 타이밍 민감 테스트 전부(Step 2의 진행·경계·정체 관찰 테스트, Step 13의 drain 줄 테스트, Step 14의 진행 단언과 splice 단위, Step 16의 testkit 테스트)를 한 filterset(`scripts/stress/m13.filter`, §4.1 #2)으로 묶어 `scripts/stress/run.sh`로 `QSH_ACCEPTANCE_SLOW=1`과 함께 50회 돌리고, "50/50 passed under load" 줄과 호스트 사양(OS, 논리 CPU 수)을 마감 노트에 적는다. 지연 단언 테스트(Step 2·14)는 부하 없이 50회 돌린 결과를 따로 적는다. 한 번이라도 붉으면 그 테스트를 고치고 50회를 처음부터 다시 돈다.
+
+절차 1. 구속 문서 태그를 대조한다. `docs/CLI.md` v0.19 항목이 M13 델타(§4 새 exit 행, §6.11·§6.17의 진단 개수와 `--fail-on`, §6.12의 `drained`·배너·reset key, §6.13, 설정 키)를 빠짐없이 적는지 본다. `docs/design/protocol.md` §1·§2·§10·§11-4·§12(·§16.2), `docs/design/testing.md`(CI 규율의 perf 항목, 게이트 환경변수 표, L9/L10), `docs/design/architecture.md` §7, `docs/design/threat-model.md` §4 C·D·G, `docs/deploy/service.md`, `docs/design/reexec-estimate.md` 추기, ADR-0021·0027·0036·(0037)의 결과 절 문서 목록 전수를 대조한다. `docs/campaigns/m10-clean-vm.md` diff 0을 확인한다. 절차 2. README를 동기화한다. 대상은 Status, Roadmap 표의 M13 행, 설치 절(provenance, man, aarch64 musl), Known limitations(재시작 고지, reset key), "First run" 절 무변경이다.
+
+`docs/ROADMAP.md` M13 절에 마감 노트를 적는다. (k)를 열지 않았으면 "관측 기록 없음"과 이월 대상 마일스톤을 적는다(§8 #6). (j)를 기각했으면 그 기록을 적는다. §5.5 표의 aarch64 musl 행 상태를 갱신한다. 이 `PLAN.md`를 `docs/history/m13-plan.md`로 옮기고 다음 계획으로 교체한다. M14의 ADR-0028이 승인되지 않았으면 다음 계획은 사람 몫만 추적하는 자리표시자다(`CLAUDE.md` Session onboarding 2).
 
 **(b) 테스트·게이트:** 일곱 게이트와 CI acceptance job 초록. 부하 반복 50/50.
 
-**(c) 완료 판정:** §1의 DoD가 근거 커밋과 함께 `[x]`다. `docs/history/m12-plan.md`가 있다. `git diff --stat <M12 Step 1>..HEAD -- crates/qsh-proto/proto`가 비어 있다.
+**(c) 완료 판정:** §1의 DoD가 근거 커밋과 run id와 함께 `[x]`다. `docs/history/m13-plan.md`가 있다. `git diff --stat <M13 Step 1>..HEAD -- crates/qsh-proto/proto docs/campaigns/m10-clean-vm.md`가 비어 있다.
 
 ## 3. 명시적 non-goals
 
-- supervision을 기본값으로 켜는 것, 기본 모드 터널의 wake 감지와 `PathWatch`. ADR-0023 결정 1, 17, 대안 절.
-- 대화형 form(`qsh [user@]host -L/-R/-D`)의 `--supervise`. ADR-0023 대안 절.
-- `forward_id` 재claim(`reclaim`) wire 필드, `LocalHello`의 새 필드, 데몬의 자발적 `RemoteForwardOpen`. ADR-0023 결정 7-5, 15, 대안 절.
-- 진행 중 TCP 연결의 생존(옛 connection이 살아나는 경우 밖), 최초 open 실패의 감독. ADR-0023 결정 2, 5.
-- 플랫폼 절전 통지(IOKit, logind)와 interface·route 변화 관측. ADR-0023 결정 17, 18.
-- §6.1 route 우선순위 변경과 pin의 "reverse 전용" 표시. ADR-0023 결정 22가 ADR-0030(M16 (a)) 또는 새 ADR로 넘겼다.
-- 호스트를 넘는 복구 타임라인, `qsh.event/v1`의 supervise·lifecycle event. ADR-0023 결정 12, 23, ADR-0022 결정 3의 트리거 전.
-- ADR-0021 결정 1·4의 구현과 `[recovery]` 개방. M13 (k)이고 §0.2의 관측 기록이 선행이다(ADR-0023 결정 25).
-- `qsh setup`이 `acl.toml`·`config.toml`·`hosts.toml`을 쓰는 것, 관측 fingerprint의 y/n pin, `serve`·`listen`을 띄우는 것, 서비스 유닛 활성화, `acl show` 의존, SSH 키 가져오기. ADR-0024 결정 3, 6, 11.
-- `qsh listen`의 초대 상환 창구. ADR-0015(예약).
-- README "First run" 절의 개편. M7·M9 캠페인의 측정 대상이다(ADR-0024 결정 12).
+- H2(인스턴스 식별값), H4(execve 제자리 handoff), H5(supervisor 분리). M18이다. H3(소켓만 넘기는 handoff)은 `docs/design/reexec-estimate.md` §4가 기각했다.
+- 재시작 뒤 세션을 살리는 것. H1b는 감지 지연만 줄이고 세션은 여전히 죽는다(`docs/design/reexec-estimate.md` §3 H1b 행 "잃는 것" 칸).
+- 흐름 제어 상수(`TUNNEL_STREAM_RECEIVE_WINDOW`, `CONNECTION_RECEIVE_WINDOW`)의 값 조정으로 (b)를 푸는 것. ROADMAP M13 범위 (b)가 기각했다.
+- idle timeout 45초의 개방, `PathWatchConfig`의 나머지 세 필드 개방. ADR-0021 결정 2·4.
+- 야간 perf job을 PR 게이트나 `ci-ok`의 `needs`에 넣는 것. 새 시크릿이 필요한 외부 저장소.
+- `QSH_LIBC` 기본값 변경과 musl 자동 감지. `scripts/install.sh` 머리 주석과 ROADMAP M13 범위 (c).
+- `docs/campaigns/m10-clean-vm.md`의 수정, `.pkg` 배포 형식. ROADMAP M13 명시적 out.
+- `doctor --fail-on`이 finding 출력을 거르는 것. 임계는 exit만 바꾼다(ADR-0027 초안).
+- reset key 회전 명령과 키스토어 보관. ADR-0036 초안.
+- Windows 설치 스크립트, Windows 서버의 reset key 권한 모델. Windows host는 P2다.
+- 에이전트가 하는 `gh secret set`, `gh workflow run`, 태그 push, 저장소 설정 변경. 전부 사람 몫이다(§0.4).
+- `qsh.event/v1`의 새 type. ADR-0022 결정 3의 관측 트리거 전이다.
 - P2 항목 전부.
 
 ## 4. 리스크와 감시 항목
 
-- **타이밍 테스트의 부하 민감성.** supervisor 통합 테스트는 실제 QUIC와 소켓을 쓴다. `8fd4602`가 드러낸 것처럼 부하 아래에서 RST와 connect 완료의 순서가 바뀌는 식의 경합이 새 테스트에도 생길 수 있다. 대응은 §2의 세 규율(시계 주입, 관찰 가능한 상태 대기, 벽시계 상한의 층 나눔)과 스텝마다의 50회 부하 반복이다. 부하 반복이 스텝 크기에 0.02~0.05ew씩 얹힌다.
-- **ADR 테스트 문면과 층 나눔의 차이.** ADR-0023 결과 절은 `supervised_forward_carrier_is_declared_lost_within_two_seconds_of_an_injected_wake`가 `WAKE_TICK + min_dead_after + 500ms`를, 50초 blackhole 테스트가 "`FAST_CAP` 2초와 handshake 1회 안에 성공"을 단언한다고 적는다. 이 계획은 정확한 상한을 주입 시계 층에서 고정하고 통합 층은 경로 구별과 넉넉한 상한을 단언한다(§4.1 #9). 결과 절이 "이름은 제안이고 대응 결정은 doc에 적는다"고 하므로 결정 문면은 지켜지지만, 통합 층의 숫자가 느슨해지는 것은 ADR 결과 절의 문장과 다르다. 다르게 할 경우 Step 8 커밋 본문과 테스트 doc에 근거를 적는다(§8 #2).
-- **50초 blackhole 테스트의 CI 시간.** acceptance job에 한 몫이 는다. nextest가 병렬로 돌리므로 `reverse_blackout`과 M11의 idle timeout 테스트와 겹쳐 늘어나는 것은 가장 긴 하나만큼이다. 문제가 되면 `load.yml`로 옮기고 `docs/design/testing.md`에 적는다.
-- **`TunnelHold`와 supervisor의 drop 순서.** `TunnelHold`는 필드 선언 순서가 runtime drop 순서를 정한다(`forward`가 `conn`보다 먼저). carrier 교체로 connection이 여럿이 되면 옛 connection을 쥐는 자리와 drop 순서를 다시 적어야 한다. Step 7 (a)의 doc과 `supervised_local_splice_survives_a_short_blackhole_and_new_accepts_ride_the_new_connection`이 감시한다.
-- **`localctl/client.rs`의 handshake 분리.** arch의 정확한 파일 금지 대상이라 파일을 옮기면 `cargo xtask arch`가 붉다. Step 14는 파일 안에서만 나눈다.
-- **SHA 고정과 동시 커밋.** 다른 에이전트가 main에 커밋하는 동안 Step 16과 Step 17 사이에 커밋이 끼면 "부모"의 문자 그대로의 뜻이 깨진다. 대응은 Step 16 (a)의 연달아 착지와 예외 증거다.
-- **`qsh setup` 테스트의 플랫폼 차이.** `service` 단계는 macOS LaunchAgent, Linux systemd user unit, 그 밖은 `skipped`다. CI에서 실제 서비스 매니저를 부르지 않도록 기존 `service` 테스트의 유닛 경로 주입 선례를 따른다.
-- **Windows 다리.** reverse route와 wake 감지기의 Windows 전제(ADR-0023 결정 17)가 확인되지 않았다. 감지기는 Windows에서도 빌드되고 발화하지 않을 수 있다. 새 unix 전용 코드와 테스트는 cfg 가드 없이는 Windows clippy·test에서 붉다.
+- **(b)가 붉고 ADR 승인이 늦는 경우.** 예상 갈래다. M15의 착수 조건이 M13 (b)이므로 승인 지연이 M15를 그만큼 민다(§5.4 리스크 3). 대응은 하네스와 ADR 초안을 맨 앞(Step 2·3)에 두고, 승인을 기다리는 동안 M13의 나머지와 M14의 ADR 없는 스텝을 여는 것이다. 수정 크기의 상단 1.3ew는 ADR이 (나)안처럼 연결 단위 계수를 고르면 넘을 수 있다. 그때는 Step 14 착수 전에 다시 매겨 이 절에 적는다.
+- **(b) 하네스가 정체를 못 만드는 경우.** 로컬 소켓 버퍼가 커서 splice가 계속 읽거나, quinn이 credit을 예상과 다른 시점에 돌려주면 "정체가 안 생겨서 초록"이 된다. `stalled_stream_harness_observes_data_blocked_before_measuring`이 이 경우를 붉게 만든다. 플랫폼마다 `SO_RCVBUF` 하한이 달라 macOS runner에서 정체까지 걸리는 시간이 길어질 수 있다.
+- **perf 게이트와 부하 반복의 충돌.** CPU 포화 아래에서 echo p95가 10ms를 넘는 것은 측정 대상의 변화이지 경합이 아니다. §2 규율이 지연 단언을 부하 반복에서 빼고 부하 없는 50회로 대신한다(§8 #5).
+- **야간 perf의 잡음.** 공유 runner의 편차가 20%·50% 임계를 넘으면 거짓 붉음이 습관이 된다(`docs/design/testing.md`의 "공유 runner의 flake가 무시 습관을 만든다"). 대응은 중앙값 기준, 7점 미만 무판정, 주입 회차 제외다. 붉음이 잦으면 임계를 올리는 결정을 testing.md에 기록한다.
+- **`perf-data` 브랜치 쓰기.** 워크플로가 브랜치에 push하려면 그 job에 `contents: write`가 필요하고, 브랜치 보호 규칙이 모든 브랜치에 걸려 있으면 push가 막힌다. 보호 규칙 확인과 변경은 사람 몫이다. 막히면 Step 6의 후보 (2)로 물러나고 그 사실을 testing.md에 적는다.
+- **aws-lc-sys의 aarch64 musl 빌드.** `release.yml` 주석은 x86_64 musl에 미리 생성된 바인딩이 있다고만 적는다. aarch64 musl에서 cmake·bindgen 경로를 타면 leg이 붉다. M10 결정 기록 Q3의 대응(ADR 선행)을 따른다. 이 판정은 사람이 돌리는 dispatch run에서만 나오므로 Step 8 머지와 판정 사이에 시차가 있다.
+- **설치 스크립트 대역의 충실도.** `curl`·`gh` 대역은 실제 도구의 오류 문면과 exit 값을 흉내 낼 뿐이다. `gh attestation verify`의 실제 출력과 인증 요구는 첫 태그 뒤 사람이 한 번 확인한다(§8 #4의 태그 권고와 같은 때).
+- **README 설치 절과 캠페인 대상.** (h)·(i)는 README 설치 절을 고친다. M7·M9 캠페인이 재는 "First run" 절과 설치 절의 경계가 흐리면 측정 대상이 바뀐다. Step 9·10의 완료 판정이 "First run" 절 diff 0을 확인한다.
+- **stateless reset 테스트의 포트 재사용.** 재시작한 `qsh serve`가 같은 UDP 포트를 다시 잡아야 reset이 성립한다. `SO_REUSEADDR`를 쓰지 않으므로 닫힌 직후 다른 테스트가 그 포트를 잡을 수 있다. 부하 반복에서 드러나면 재시작을 같은 소켓 주소로 재시도하는 테스트 도우미를 두고, 재시도 횟수를 테스트 출력에 남긴다.
+- **(k)의 `[recovery]`와 supervised 터널.** `PathWatchConfig`가 ADR-0023의 supervisor와 wake 감지 상한(`WAKE_TICK + dead_after(rtt)`)에도 들어가므로, 값을 넓히면 M12 테스트의 주입 시계 상한이 설정에 따라 달라진다. 범위 상한을 `detection_budget`에서 역산하면 M12의 상한 단언도 그 안에 들어가는지 Step 17이 확인한다.
+- **(k)가 끝내 열리지 않는 경우.** 관측 기록은 사람 몫이라 M13 안에 오지 않을 수 있다. §0.6과 §8 #6대로 이월한다.
+- **`exclude = ["tests/"]`와 cargo 경고.** 테스트 타깃이 tarball에 없으면 cargo가 게시 매니페스트에서 그 타깃을 빼며 경고를 낸다. `publish-dry-run`이 경고를 오류로 다루지 않는지 Step 11에서 확인한다.
+- **Windows 다리.** 설치 스크립트 테스트와 reset key 권한 테스트는 unix 전용이라 cfg 가드 없이는 Windows clippy·test에서 붉다.
 
 ### 4.1 구현 중 확정할 값 (해당 step (a)에 근거와 함께 추기)
 
 | # | 질문 | 초안 | 확정 시점 |
 |---|---|---|---|
-| 1 | wake 감지기의 자리와 공유 방식 | `crate::client::wake`(`WakeDetector`, `WAKE_TICK`, `WAKE_SKEW`, 벽시계 트레이트). 프로세스 하나에 하나를 `OnceLock`으로 두고 첫 구독 때 뜬다. 테스트는 `#[cfg(test)]` 설치 함수로 가짜 벽시계를 꽂는다 | Step 3 |
-| 2 | supervisor 모듈 자리 | `crates/qsh-core/src/tunnel/supervise/`(디렉터리 모듈, `tests.rs`). `TunnelHold`가 부른다. target 상수 `qsh_core::tunnel::supervise::TARGET = "qsh::tunnel::supervise"` | Step 4 |
-| 3 | supervise 관찰 채널 | carrier `watch`와 별개로 `#[cfg(test)]` 관찰자에 `SuperviseEvent`(lost, retry{attempt, planned_delay}, reestablished, gave_up)를 보낸다. `run_reverse_observed`의 선례. 통합 테스트는 이것과 캡처한 진단 줄을 기다린다 | Step 7 |
-| 4 | `qsh::lifecycle` 상수와 자리 | `qsh_core::lifecycle`(`TARGET = "qsh::lifecycle"`, 이벤트 함수 넷). `main.rs`는 사람용 줄 옆에서 부르기만 한다 | Step 10 |
-| 5 | `supervise` 신호 handler | `shutdown_signal()`을 `qsh-cli`에서 재사용하고 결과를 `qsh-core`의 취소 토큰으로 넘긴다. 기본 모드에는 달지 않는다 | Step 7 |
-| 6 | `handle_rfwd_close`의 대기 상한 | task join 대기 1초. 넘으면 지금처럼 응답하고 `warn` 한 줄. 7-4의 client 쪽 재시도가 나머지를 덮는다 | Step 13 |
-| 7 | `setup.run` fixture의 비결정 값 | 기존 `normalize` arm(`fingerprint`·`device_id`·`config_dir`·`path`)에 초대 코드를 가리는 arm 하나(`code`)가 필요한지 Step 19에서 확인한다. 필요하면 `invite` 단계 `result` 안의 `code`만 가린다. 단계의 `command` 문자열은 샌드박스 상대 경로로 결정적으로 만든다 | Step 19 |
-| 8 | 부하 도구와 filterset | 부하는 논리 CPU 수만큼의 `yes > /dev/null` 프로세스(외부 의존 없음, macOS·Linux 공통). `stress-ng`가 있으면 `--cpu 0`을 쓴다. 반복은 nextest의 반복 실행 옵션이 있으면 그것, 없으면 셸 반복. filterset은 M12 테스트 이름 접두(`wake_detector_`, `path_state_`, `path_watch_`, `supervise`, `supervised_`, `accept_hold_`, `target_backoff_`, `target_fast_window_`, `serve_to_target_`, `rfwd_close_`, `lifecycle`, `setup_` 중 시간 의존 테스트)를 묶은 한 식으로 `scripts/stress/m12.filter`에 둔다. 50회는 로컬 개발 머신에서 돈다 | Step 2, Step 21 |
-| 9 | 벽시계 상한의 층 나눔 | 정확한 상한(`WAKE_TICK + dead_after(rtt)`, `FAST_CAP`, accept 유지 기한, 64개)은 paused tokio 시계와 주입 벽시계로 단언한다. 실제 소켓 통합 테스트는 (i) 경로 구별(예: wake 경로의 `lost`가 45초 idle보다 훨씬 이른 10초 안에 `path_dead`로 남), (ii) 관찰 채널의 예정 간격(`planned_delay ≤ FAST_CAP`), (iii) 넉넉한 `timeout`(단언 대상 값의 5배 이상)으로 쓰고 실측값을 테스트 출력에 남긴다 | Step 3, 7, 8 |
-| 10 | 첫 단위 동안의 `UNSUPPORTED` 문면 | 기존 예약 옵션의 `UNSUPPORTED` 문면 선례를 따르고 "`--supervise` is not yet supported on the reverse route or with --remote" 꼴. 문면은 fixture로 얼리지 않는다(Step 15가 지운다) | Step 5 |
-| 11 | `setup` host 별칭 가림의 안내 | `docs/CLI.md` §6.20에 한 문장, `qsh setup --help` 머리 한 줄. 새 doctor 진단은 만들지 않는다(ADR-0024 결정 1) | Step 19 |
+| 1 | (b) 정체의 관찰 기준 | 클라이언트 쪽 `Connection::stats()`의 수신 `DATA_BLOCKED` 계수가 0보다 크거나 N개 스트림 전부에서 `STREAM_DATA_BLOCKED` 관찰. quinn 0.11 stats가 이 계수를 주지 않으면 호스트 쪽 목적지 서버의 누적 쓰기 바이트가 N × 2 MiB에 닿는 것을 대신 쓴다 | Step 2 |
+| 2 | M13 부하 filterset | 테스트 이름 접두(`pty_output_keeps_progressing_`, `stalled_stream_harness_`, `sigterm_drain_emits_`, `drained_line_`, `splice_stops_`, `a_stalled_stream_`, `restarted_serve_resets_`, `a_serve_restarted_`)를 묶은 한 식을 `scripts/stress/m13.filter`에 둔다. 지연 단언은 별도 식 | Step 2, Step 18 |
+| 3 | perf 저장소 | orphan 브랜치 `perf-data`의 `perf.jsonl`. 점 하나에 `at`, `sha`, `runner`, `throughput_mbps`, `raw_quinn_mbps`, `echo_p95_ms`, `rtt_ms`, `injected` | Step 6 |
+| 4 | perf 임계와 보존 | 직전 7점(주입 제외) 중앙값 대비 throughput −20% 이하 또는 echo p95 +50% 이상이면 붉음. 7점 미만 무판정. 보존 365점 | Step 6 |
+| 5 | 인위적 지연의 자리 | `QSH_PERF_INJECT_DELAY_MS`를 testkit 하네스가 읽어 루프백 relay에 고정 지연을 넣는다. `qsh-core`와 바이너리에는 훅이 없다 | Step 7 |
+| 6 | aarch64 musl 분기의 다운로드 순서 | 이 분기만 `SHA256SUMS`를 먼저 받아 자산 줄을 확인한다. 나머지 경로의 순서와 문면은 그대로 | Step 8 |
+| 7 | 설치 스크립트 테스트의 자리 | `xtask/tests/install_script.rs`. 게시되지 않는 크레이트라 (g)의 tarball 정책과 얽히지 않는다. 가짜 릴리스와 PATH 대역은 테스트마다 고유 tempdir | Step 8 |
+| 8 | reset key 파일 자리 | config 디렉터리 바로 아래 `stateless_reset.key`(32바이트 원시값). ADR-0036이 확정한다 | Step 5, Step 16 |
+| 9 | 미인증 `gh`의 취급 | `gh auth status`가 실패하면 "도구 없음"과 같게 보고 경고 뒤 체크섬만으로 설치. `gh attestation verify`가 인증 없이 도는 것이 확인되면 이 분기를 없앤다 | Step 9 |
+| 10 | man 설치 기본 디렉터리 | `${XDG_DATA_HOME:-$HOME/.local/share}/man/man1`, 끄는 플래그 `QSH_NO_MAN=1`, 덮는 변수 `QSH_MAN_DIR` | Step 10 |
+| 11 | (j) 핀 테스트의 자리 | `crates/qsh-core/tests/doctor_docs.rs` 옆의 새 파일 `crates/qsh-core/tests/cli_md_header.rs`. 문서만 읽는다 | Step 12 |
+| 12 | Step 16·17의 설정 로더 충돌 | 둘 다 `crates/qsh-core/src/config.rs`를 만질 수 있다. 겹치면 Step 17을 먼저 착지하고 Step 16이 그 위에 얹는다 | Step 16·17 |
+| 13 | drain 요약 줄의 필드 | `qsh::lifecycle`의 `drained`, 필드 `at`, `process`, `sessions_closed`, `detached_closed`, `timed_out`. 세션 id는 싣지 않는다 | Step 13 |
+| 14 | H1 doctor code 이름 | `service_restart_drops_sessions`(info). 잠금 어휘라 착지 뒤에는 바꿀 수 없다 | Step 13 |
 
 ## 5. 완료 절차
 
-1. §1 DoD 전건을 실제 테스트와 CI run으로 확인한다. 체크박스는 근거가 초록일 때만 채운다.
-2. 부하 반복 50/50을 기록한다(Step 21).
-3. 구속 문서 태그를 대조한다. 대상은 Step 21 (a)가 열거한 자리 전수다.
-4. README를 동기화한다. Status, Roadmap 표, Known limitations 여섯, `qsh setup` 절, "First run" 절 무변경.
-5. `docs/design/testing.md`의 M12 반영을 확인한다. L4 두 행, 벽시계 예외 목록, CI 규율의 부하 반복 항목.
-6. `docs/ROADMAP.md` "현재 위치"와 M12 절을 갱신하고 마감 노트를 적는다.
-7. §0.1 일곱과 §0.2 둘의 상태를 승계한다.
-8. §0.3 둘은 §5.5 표의 행에 상태만 갱신한다.
-9. 이 `PLAN.md`를 `docs/history/m12-plan.md`로 옮기고 M13 계획으로 교체한다.
+1. §1 DoD 전건을 실제 테스트와 CI run으로 확인한다. 체크박스는 근거가 초록일 때만 채운다. 사람이 돌린 run은 run id로 근거를 삼는다.
+2. 부하 반복 50/50과 지연 단언의 부하 없는 50/50을 기록한다(Step 18).
+3. 구속 문서 태그를 대조한다. 대상은 Step 18 (a)가 열거한 자리 전수다.
+4. README를 동기화한다. Status, Roadmap 표, 설치 절, Known limitations, "First run" 절 무변경.
+5. `docs/design/testing.md`의 M13 반영을 확인한다. CI 규율의 perf 항목, 게이트 환경변수 표의 새 행, L9/L10의 역압 축 문단.
+6. `docs/ROADMAP.md` "현재 위치"와 M13 절을 갱신하고 마감 노트를 적는다. (k) 이월과 (j) 기각 여부를 포함한다.
+7. §0.1 일곱, §0.2 둘, §0.3 둘의 상태를 승계한다.
+8. §0.4의 aarch64 musl 캠페인은 §5.5 표의 행에 상태만 갱신한다.
+9. 이 `PLAN.md`를 `docs/history/m13-plan.md`로 옮기고 다음 계획으로 교체한다.
 
 ## 6. 이월 항목
 
-| # | 항목 | M12 처분 |
+| # | 항목 | M13 처분 |
 |---|---|---|
-| i | 이슈 #4 항목 5b(supervised tunnel) | Step 3~15 |
-| ii | 이슈 #6 요청 1~6 | Step 3~12(대응표는 ADR-0023 이슈 요청 대응 절) |
-| iii | 이슈 #4 2026-09-30 코멘트 질문 1~3 | Step 14·15와 Step 7·10의 진단. §6.1과 pin 표시는 ADR-0030 또는 새 ADR |
-| iv | 이슈 #3 `qsh setup` | Step 16~20. 5분 기준은 §0.3의 캠페인 PASS로만 닫힌다 |
-| v | `docs/design/protocol.md` §2의 "monotonic clock 점프" 문장이 약속한, 코드에 없던 감지 | Step 3 |
-| vi | 옛 계획·ADR 줄 번호 인용 부채 | 새 인용을 만들지 않고 손대는 파일의 인용만 앵커로 바꾼다 |
+| i | `docs/design/testing.md` L9/L10의 "넷이 동시에 멈추면 … 실측된 적이 없다" 잔여 위험 | Step 2·3·14 |
+| ii | `docs/design/testing.md`의 "절대 throughput 추세는 여전히 nightly"가 가리키던, 실제로는 없던 nightly job | Step 6·7 |
+| iii | M10 결정 기록 Q3의 aarch64 musl | Step 8. 구형 glibc 판정은 §5.5 사람 몫 |
+| iv | `docs/CLI.md` §6.17의 "`--fail-on` 플래그는 아직 없다" | Step 4·15 |
+| v | `docs/design/reexec-estimate.md` 추기(2026-09-24)가 P1로 재기록한 H1·H1b | Step 13·16. H2는 M18 |
+| vi | `scripts/install.sh`의 "this installer does not check" provenance 문장과 "does not install" man 문장 | Step 9·10 |
+| vii | ADR-0021 결정 1·4 | Step 17. 관측 기록이 없으면 §8 #6의 이월 |
+| viii | 옛 계획·ADR 줄 번호 인용 부채 | 새 인용을 만들지 않고 손대는 파일의 인용만 앵커로 바꾼다. `docs/design/reexec-estimate.md`의 줄 번호 인용은 Step 16의 추기 한 줄 외에는 건드리지 않는다 |
 
 ## 7. 태그 정책
 
-- M12 마감에 태그는 필요 없다. DoD 어디에도 태그가 걸리지 않는다.
-- 권고 하나. Step 12가 착지한 뒤 태그를 하나 찍으면 `p1-supervise-wake` 셋째 회차까지를 배포 바이너리로 돌릴 수 있고, Step 15 뒤 태그로 넷째 회차를 돈다. `p1-setup-stopwatch`는 Step 20 뒤 태그가 필요하다. 찍을지는 유지보수자 결정이다.
-- 찍는다면 M10판 정책을 그대로 따른다. 찍은 태그는 옮기지 않고, 태그 push가 `release.yml`을 구동하며, 서명·공증이 없는 태그로는 M10 DoD 2를 판정하지 않는다.
+- M13 마감에 태그가 하나 필요하다. DoD (c)의 "자산이 `SHA256SUMS`와 provenance attestation에 들어간다"는 태그 push에서만 도는 release job이 근거이기 때문이다. 태그를 찍을지와 언제 찍을지는 유지보수자 결정이다(§8 #4).
+- 권고. Step 8·9·10이 모두 착지한 뒤 태그 하나를 찍으면 aarch64 musl 자산, provenance 검증, man 설치를 한 번에 실제 릴리스로 확인할 수 있고, `p1-aarch64-musl` 회차와 `p1-supervise-wake`·`p1-setup-stopwatch` 회차도 그 바이너리로 돌 수 있다.
+- 찍는다면 M10판 정책을 그대로 따른다. 찍은 태그는 옮기지 않고, 태그 push가 `release.yml`을 구동하며, 서명·공증이 없는 태그로는 M10 DoD 2를 판정하지 않는다. `RELEASE-NOTES.md`에 새 절을 더한다.
 
 ## 8. 열린 질문
 
-2026-09-30 사용자 지시에 따라 아래를 main 세션이 결정한다. 각 항목 끝의 **결정** 문장은 초안이고 Step 1 커밋에서 확정한다.
+각 항목 끝의 **결정** 문장은 초안이다. main 세션이 Step 1 커밋에서 확정하되, ADR 승인에 걸린 항목은 사용자가 정한다.
 
-1. **ADR-0024 결정 12의 "첫 코드 커밋의 부모".** 한 커밋은 자기 SHA를 담을 수 없으므로, SHA를 적는 커밋(P)이 그 SHA의 트리 자체가 될 수는 없다. **결정:** P의 부모 B를 적고, P는 B에 캠페인 파일 하나만 더한 커밋이며, Step 17의 부모는 P다. B와 Step 17의 부모는 바이너리와 README가 같으므로 결정 12의 보장이 성립한다. ROADMAP M12 수용 기준 (b)의 문장을 이 해석으로 고친다. ADR 문면은 바꾸지 않는다.
-2. **ADR-0023 결과 절의 벽시계 상한을 통합 층에서 느슨하게 단언하는 것.** 안정성 규율(부하 아래 50회)과 결과 절의 숫자가 부딪힌다. **결정:** 결과 절이 테스트 이름과 모양을 "제안"으로 두었으므로 정확한 상한은 주입 시계 층에서 고정하고 통합 층은 경로 구별로 단언한다(§4.1 #9). 결정 문면(17의 상한, 10의 `FAST_CAP`)은 그대로 지켜진다. ADR 추기는 하지 않고 Step 8 커밋 본문과 `docs/design/testing.md` L4 행에 근거를 적는다.
-3. **M12 크기의 변경.** ROADMAP의 3.8~5.3ew는 개정 전 초안 기준이다. **결정:** 5.1~6.1ew로 고친다. 내역은 ADR-0023 결과 절의 (a) 3.3~3.8, ADR-0024 결과 절에서 재시작 상수 몫 0.05를 뺀 (b) 1.55~1.95, 안정성 하네스 0.05~0.1, 마감 0.2다. P1 합은 약 31~49가 된다.
-4. **첫 단위만으로 (a)를 부분 마감할 것인가.** **결정:** 하지 않는다. ADR-0023 결정 24가 "두 단위가 모두 착지해야 닫힌다"고 적는다. 대신 §1의 DoD를 (a1)·(a2)로 나눠 진행을 보인다.
-5. **(b)를 (a) 둘째 단위보다 먼저 시작할 것인가.** 두 흐름은 코드가 겹치지 않는다. **결정:** 순서는 과제대로 (a) 뒤에 둔다. 다만 (a) 둘째 단위가 막히면 Step 16부터 먼저 열 수 있고, 그때 Step 16의 B는 그 시점 main이다.
-6. **`p1-supervise-wake`를 §5.5에 더하는 시점.** **결정:** Step 1이 행을 더한다(ADR-0023 결과 절의 ROADMAP 항목). 캠페인 파일은 Step 12에서 생긴다.
+1. **(b)의 splice ADR을 언제 올리는가.** §5.4 리스크 3은 "설계 변경이 필요하다고 판정되면 그날" 올리라고 한다. **결정:** Step 2 착지 당일 strict 결과로 Step 3의 갈래를 고르고, 셋째 갈래면 같은 날 ADR-0037을 `제안됨`으로 올린다. 승인은 사용자가 정하며 Step 14는 승인 전에 열지 않는다.
+2. **(f)의 읽기 실패 동작을 ADR로 올릴 것인가.** ROADMAP DoD (f)는 "골라 커밋에 적는다"고만 적어 ADR 없이도 닫을 수 있다. 그러나 선택지 하나(기동 거절)는 `docs/CLI.md` §6.12의 기동 계약을 바꾸고, 다른 하나(임시 키)는 비밀을 디스크에 두는 규율을 정한다. **결정:** ADR-0036으로 올리고 Step 16을 그 승인에 건다. Step 1이 ROADMAP §5.1 원칙 2, M13 착수 조건, §5.2 표에 이 게이트를 더한다. 사용자가 ADR 없이 커밋 기록으로 충분하다고 정하면 ADR-0036은 기각으로 닫고, Step 16은 초안의 임시 키 동작으로 연다.
+3. **stateless reset으로 닫힌 연결의 `cause`.** `classify_connection_error`는 `ConnectionError::Reset`을 지금 `local`로 적는다. H1b 뒤에는 `qsh serve` 재시작이 현장 로그에 `local`로 보여 (k)가 읽는 분포를 흐린다. **결정:** Step 16에서 `stateless_reset` 값 하나를 더하고 `docs/CLI.md` §6.13의 고정 값 개수 문장과 함수 doc을 같은 커밋에서 고친다. `qsh::reverse` 줄은 계약이 아니므로(ADR-0022 결정 5) fixture와 `qsh.cli/v1`은 바뀌지 않는다. 사용자가 범위 밖으로 보면 README Known limitations에 한 줄로 적고 넘긴다.
+4. **(c)의 `SHA256SUMS`·attestation 판정과 태그.** release job은 태그 ref에서만 돈다. **결정:** leg 빌드와 스모크는 유지보수자의 dispatch run으로 판정하고, `SHA256SUMS`와 attestation 포함은 M13 마감 전 첫 태그 run으로 판정한다. 마감 시점에 태그가 없으면 DoD (c)의 그 문장만 "태그 대기"로 남기고 main 세션이 M13을 닫을지 정한다. 에이전트는 태그를 찍지 않는다.
+5. **지연 단언의 부하 반복 면제.** CPU 포화는 echo p95를 바꾼다. **결정:** 지연 단언(echo p95, throughput 비율)은 부하 없이 50회 연속 초록을 기록하고, 같은 하네스의 진행·정체 관찰 단언은 부하 아래 50회를 지킨다. `docs/design/testing.md` CI 규율의 부하 반복 항목에 이 예외를 한 문장으로 더한다(Step 2 커밋).
+6. **(k) 이월 대상.** 관측 기록 없이 M13이 닫히면 (k)를 어디로 보내는가. **결정:** M17(운영 표면)로 보낸다. 설정 키와 운영 진단을 다루는 마일스톤이고 착수 조건에 사람 기록을 더해도 다른 항목이 막히지 않는다. 그보다 먼저 기록이 오면 그때 열린 마일스톤에 ROADMAP 개정으로 넣는다.
+7. **ROADMAP M13 DoD에 안정성 줄을 더할 것인가.** M12 DoD에는 있었고 M13 DoD에는 없다. **결정:** 더한다. 문면은 M12의 안정성 줄을 따르고 §8 #5의 예외를 한 구절로 붙인다. Step 1이 넣는다.
+8. **`doctor --fail-on`의 exit 값.** ADR-0027 초안은 `1`이다. **결정:** 사용자 승인 사항이라 이 계획은 정하지 않는다. Step 15의 테스트 이름에 들어간 `exits_one`은 승인된 값에 맞춰 바꾼다.
