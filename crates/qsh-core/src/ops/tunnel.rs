@@ -56,7 +56,7 @@ use crate::tunnel::remote::RemoteForwardAcceptor;
 use crate::tunnel::{DynamicForwardHandle, LocalForwardError, LocalForwardHandle};
 
 mod supervise;
-use supervise::SuperviseTask;
+use supervise::{SuperviseEnd, SuperviseTask};
 
 /// One [`Ops::tunnel_open_and_hold`] registration's close signal
 /// (`PLAN.md` M6 Step 2+3 검증 라운드 판정 ②/F2). The payload is a reply
@@ -378,6 +378,10 @@ enum ForwardResource {
     /// simply folded into `Local` is that the two hold structurally
     /// different DTOs (`TunnelDto`'s own doc).
     Dynamic(DynamicForwardHandle),
+    /// A supervised `-R` tunnel. The registration and the acceptor that
+    /// serves it belong to the supervisor, which replaces both each time it
+    /// re-opens the forward; the holder keeps only enough to say goodbye.
+    SupervisedRemote(supervise::RemoteHandle),
 }
 
 /// The envelope payload [`TunnelHold`] hands back — [`Tunnel`] for
@@ -452,35 +456,62 @@ async fn wait_for_end(
     forward: &mut ForwardResource,
     supervisor: &mut Option<SuperviseTask>,
     conn: &mut Connected,
-) -> (OpError, Option<&'static str>) {
+) -> Ending {
     // What ends the tunnel besides its own listener failing: the connection
     // dying for an unsupervised tunnel, and only the supervisor giving up
     // for a supervised one (a lost connection is the supervisor's to mend).
     let carrier_end = async {
         match supervisor {
-            Some(supervisor) => (supervisor.finished().await, None),
-            None => conn.wait_dead_with_cause().await,
+            Some(supervisor) => match supervisor.finished().await {
+                SuperviseEnd::Failed(err) => Ending::Failed(err, None),
+                SuperviseEnd::Closed => Ending::Closed,
+            },
+            None => {
+                let (err, cause) = conn.wait_dead_with_cause().await;
+                Ending::Failed(err, cause)
+            }
         }
     };
     match forward {
         ForwardResource::Local(local) => {
             tokio::select! {
-                err = local.wait() => (OpError::new(
+                err = local.wait() => Ending::Failed(OpError::new(
                     ErrorCode::ConnectionFailed,
                     format!("the local forward's listener failed: {err}"),
                 ), None),
-                err = carrier_end => err,
+                ended = carrier_end => ended,
             }
         }
-        ForwardResource::Remote { .. } => carrier_end.await,
+        ForwardResource::Remote { .. } | ForwardResource::SupervisedRemote(_) => carrier_end.await,
         ForwardResource::Dynamic(dynamic) => {
             tokio::select! {
-                err = dynamic.wait() => (OpError::new(
+                err = dynamic.wait() => Ending::Failed(OpError::new(
                     ErrorCode::ConnectionFailed,
                     format!("the dynamic forward's listener failed: {err}"),
                 ), None),
-                err = carrier_end => err,
+                ended = carrier_end => ended,
             }
+        }
+    }
+}
+
+/// How a held tunnel ended.
+enum Ending {
+    /// On its own, with this error and the diagnostic cause when known.
+    Failed(OpError, Option<&'static str>),
+    /// An operator closed it (ADR-0023 decision 14): a deliberate end.
+    Closed,
+}
+
+impl Ending {
+    /// The error form, for callers whose contract has no deliberate end.
+    fn into_error(self) -> OpError {
+        match self {
+            Ending::Failed(err, _) => err,
+            Ending::Closed => OpError::new(
+                ErrorCode::ConnectionFailed,
+                "the tunnel was closed by an operator",
+            ),
         }
     }
 }
@@ -562,15 +593,17 @@ impl TunnelHold {
     pub fn hold(mut self) -> OpError {
         let handle = self.conn.runtime().handle().clone();
         let ids = self.lifecycle_ids();
-        let (err, cause) = {
+        let ending = {
             let forward = &mut self.forward;
             let supervisor = &mut self.supervisor;
             let conn = &mut self.conn;
             handle.block_on(wait_for_end(forward, supervisor, conn))
         };
-        ids.ended(&err, cause);
+        if let Ending::Failed(err, cause) = &ending {
+            ids.ended(err, *cause);
+        }
         self.close();
-        err
+        ending.into_error()
     }
 
     /// The runtime this tunnel runs on. A frontend that must be ready for a
@@ -602,11 +635,14 @@ impl TunnelHold {
                 }
             })
         };
-        if let Some((err, cause)) = &outcome {
+        if let Some(Ending::Failed(err, cause)) = &outcome {
             ids.ended(err, *cause);
         }
         self.close();
-        outcome.map(|(err, _)| err)
+        match outcome {
+            Some(Ending::Failed(err, _)) => Some(err),
+            Some(Ending::Closed) | None => None,
+        }
     }
 
     /// Like [`Self::hold`], but also returns early — a deliberate close,
@@ -646,7 +682,7 @@ impl TunnelHold {
             let conn = &mut self.conn;
             handle.block_on(async move {
                 tokio::select! {
-                    (err, _) = wait_for_end(forward, supervisor, conn) => Outcome::Died(err),
+                    ended = wait_for_end(forward, supervisor, conn) => Outcome::Died(ended.into_error()),
                     Ok(ack_tx) = close_rx => Outcome::Closed(ack_tx),
                 }
             })
@@ -682,6 +718,12 @@ impl TunnelHold {
         }
         // Field order does this already; spelled out so the sequence is
         // not an accident of declaration order in a later edit.
+        if let ForwardResource::SupervisedRemote(handle) = &self.forward {
+            // Only a live carrier can be told anything, and the supervisor
+            // knows whether there is one (ADR-0023 decision 11).
+            let handle = handle.clone();
+            self.conn.runtime().block_on(handle.close_best_effort());
+        }
         drop(self.forward);
         drop(self.supervisor.take());
         self.conn.close();
@@ -726,11 +768,7 @@ impl Ops {
                     Self::supervised_local(conn, &spec, &req.host, supervision)
                 }
                 ForwardDirection::Remote => {
-                    conn.close();
-                    Err(OpError::new(
-                        ErrorCode::Unsupported,
-                        "--supervise is not yet supported with --remote",
-                    ))
+                    Self::supervised_remote(conn, &spec, &req.host, supervision)
                 }
             };
         }
@@ -1533,6 +1571,7 @@ impl Ops {
                     recovery,
                 },
                 parts.session,
+                None,
             );
             Ok::<_, LocalForwardError>((forward, task))
         });
@@ -1551,6 +1590,133 @@ impl Ops {
                 Err(map_local_forward_error(err))
             }
         }
+    }
+
+    /// `-R` with `--supervise`: the registration on the peer is what the
+    /// supervisor keeps, so it, not the holder, owns the acceptor
+    /// (ADR-0023 decisions 7-4 and 13).
+    fn supervised_remote(
+        mut conn: Connected,
+        spec: &ForwardSpec,
+        host: &str,
+        supervision: Supervision,
+    ) -> Result<TunnelHold, OpError> {
+        let Supervision {
+            seed,
+            runtime_dir,
+            fingerprint,
+            total,
+            accept_hold: _,
+            recovery,
+        } = supervision;
+        // The first open is the unsupervised one, step for step.
+        let (acceptor, open, opened, vanished) = match Self::open_remote(&mut conn, spec) {
+            Ok(opened) => opened,
+            Err(err) => {
+                conn.close();
+                return Err(err);
+            }
+        };
+        let parts = match Self::supervision_parts(&mut conn, seed, &runtime_dir, &fingerprint, host)
+        {
+            Ok(parts) => parts,
+            Err(err) => {
+                conn.close();
+                return Err(err);
+            }
+        };
+        let tunnel = remote_tunnel_dto(spec, &opened, host);
+        let (remote, handle) = supervise::RemoteTunnel::new(acceptor, open, &opened, vanished);
+        let task = conn.runtime().block_on(async {
+            let wiring = supervise::Wiring::new(parts.initial, &recovery, None);
+            supervise::spawn(
+                wiring,
+                supervise::Params {
+                    route: parts.route,
+                    fingerprint,
+                    require_dial_filter: false,
+                    total,
+                    tunnel_id: opened.forward_id.clone(),
+                    mode: "remote",
+                    recovery,
+                },
+                parts.session,
+                Some(remote),
+            )
+        });
+        Ok(TunnelHold {
+            conn,
+            supervisor: Some(task),
+            forward: ForwardResource::SupervisedRemote(handle),
+            tunnel: TunnelDto::Forward(tunnel),
+        })
+    }
+
+    /// The first `RemoteForwardOpen` of a supervised `-R` tunnel, on
+    /// whichever route `conn` rides. Returns the acceptor serving the new
+    /// registration, the request as sent, the peer's answer, and, on the
+    /// reverse route, the channel that reports forwards the daemon no
+    /// longer lists.
+    #[allow(clippy::type_complexity)]
+    fn open_remote(
+        conn: &mut Connected,
+        spec: &ForwardSpec,
+    ) -> Result<
+        (
+            RemoteForwardAcceptor,
+            wire::RemoteForwardOpen,
+            wire::RemoteForwardOpened,
+            Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
+        ),
+        OpError,
+    > {
+        #[cfg_attr(not(unix), allow(unused_mut))]
+        let mut open_req = remote_forward_open_from_spec(spec);
+        #[cfg_attr(not(unix), allow(unused_mut))]
+        let mut vanished = None;
+        let acceptor = match conn.connection() {
+            Some(connection) => conn
+                .runtime()
+                .block_on(RemoteForwardAcceptor::spawn(connection)),
+            None => {
+                #[cfg(unix)]
+                {
+                    let Some((socket, route_host)) = conn.reverse_route() else {
+                        return Err(OpError::new(
+                            ErrorCode::Internal,
+                            "reverse connection is missing its localctl route",
+                        ));
+                    };
+                    let (socket, route_host) = (socket.to_path_buf(), route_host.to_string());
+                    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+                    vanished = Some(rx);
+                    let acceptor =
+                        conn.runtime()
+                            .block_on(RemoteForwardAcceptor::spawn_reverse_watching(
+                                socket,
+                                route_host,
+                                Some(tx),
+                            ));
+                    open_req.claim_token = acceptor.claim_token().unwrap_or_default().to_vec();
+                    acceptor
+                }
+                #[cfg(not(unix))]
+                {
+                    return Err(OpError::new(
+                        ErrorCode::Unsupported,
+                        "reverse routing (localctl) is not available on this platform",
+                    ));
+                }
+            }
+        };
+        let sent = open_req.clone();
+        let opened = conn.run(move |s| Box::pin(s.rfwd_open(open_req)))?;
+        // The reverse route starts this id's claim loop with a bare
+        // `tokio::spawn`, which needs a runtime around it.
+        conn.runtime().block_on(async {
+            acceptor.register(opened.forward_id.clone(), spec.host.clone(), spec.host_port);
+        });
+        Ok((acceptor, sent, opened, vanished))
     }
 
     /// `-D` with `--supervise`; see [`Self::supervised_local`].
@@ -1593,6 +1759,7 @@ impl Ops {
                     recovery,
                 },
                 parts.session,
+                None,
             );
             Ok::<_, LocalForwardError>((forward, task))
         });
@@ -1792,9 +1959,7 @@ const SUPERVISE_MS_MAX: u32 = 86_400_000;
 /// ADR-0023 decision 13).
 const ACCEPT_HOLD_MS_MAX: u32 = 2_000;
 
-/// Which forward shape a supervise request is for. Only the tunnel mode
-/// matters to validation and to [`supervise_supported`]; the route is a
-/// second axis of that table.
+/// Which forward shape a supervise request is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SuperviseMode {
     Local,
@@ -1802,40 +1967,11 @@ enum SuperviseMode {
     Dynamic,
 }
 
-/// Which route carries a supervised tunnel.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SuperviseRoute {
-    Forward,
-    Reverse,
-}
-
-/// The support table of ADR-0023 decision 24: which `(route, mode,
-/// accept_hold)` combinations a supervised tunnel does today. Later steps
-/// flip more rows on, and the last one deletes this function together with
-/// its `UNSUPPORTED` branch.
-const fn supervise_supported(
-    route: SuperviseRoute,
-    mode: SuperviseMode,
-    accept_hold: bool,
-) -> bool {
-    matches!(
-        (route, mode, accept_hold),
-        (
-            SuperviseRoute::Forward | SuperviseRoute::Reverse,
-            SuperviseMode::Local | SuperviseMode::Dynamic,
-            _
-        )
-    )
-}
-
 /// Validate `supervise_ms` and `accept_hold_ms` before any connection or
-/// bind exists (ADR-0023 decisions 1, 13, 24). Order: ranges, then the
-/// combinations that make no sense (`INVALID_ARGUMENT`), then
-/// `UNSUPPORTED` for a valid request whose shape is not built yet.
-///
-/// The route is not resolved this early, so `UNSUPPORTED` is decided on
-/// the most permissive route: a shape unsupported on both routes is
-/// refused here, and one supported on only one is left to the caller.
+/// bind exists (ADR-0023 decisions 1 and 13). Order: ranges, then the
+/// combinations that make no sense (`INVALID_ARGUMENT`). Every mode on
+/// every route is supervisable, so nothing is `UNSUPPORTED` any more
+/// (decision 24).
 fn check_supervise(
     supervise_ms: Option<u32>,
     accept_hold_ms: Option<u32>,
@@ -1867,20 +2003,7 @@ fn check_supervise(
             "tunnel accept_hold_ms does not apply to a remote forward",
         ));
     }
-    if supervise == 0 {
-        return Ok(());
-    }
-    let supported = [SuperviseRoute::Forward, SuperviseRoute::Reverse]
-        .into_iter()
-        .any(|route| supervise_supported(route, mode, hold != 0));
-    if supported {
-        Ok(())
-    } else {
-        Err(OpError::new(
-            ErrorCode::Unsupported,
-            "--supervise is not yet supported on the reverse route or with --remote",
-        ))
-    }
+    Ok(())
 }
 
 /// `tunnel_open_and_hold`/`tunnel_dynamic_and_hold` serve long-running

@@ -787,16 +787,22 @@ Some of these are MVP scope decisions, some are unfinished work.
   than replaying it. An `-L` listener survives that if the process holding
   it is still alive, but the forward itself does not — a new connection
   into that listener after the reconnect gets a clean reset until you
-  restart the forward. An `-R` registration has to be reopened by hand; it
-  is never reissued automatically. QUIC path migration is a different
+  restart the forward. Without `--supervise`, an `-R` registration has to
+  be reopened by hand. QUIC path migration is a different
   case from a drop-and-resume: switching networks without losing the
   connection outright (Wi-Fi to tethering, a changed IP) carries an open
   tunnel through transparently, the same as it does a session.
-- `--supervise <ms>` keeps a `-L` or `-D` tunnel alive across a lost
+- `--supervise <ms>` keeps a `-L`, `-D` or `-R` tunnel alive across a lost
   connection, over a forward route or a reverse route, and it is narrower
-  than it sounds. It does not cover `-R`, which still answers `UNSUPPORTED`.
-  A supervised forward tunnel re-dials the address it resolved when it was
-  opened and never looks the host up again, so a peer that moved to a new
+  than it sounds. A supervised `-R` tunnel reissues its registration on the
+  new connection: it closes the old one and opens the same bind again. If
+  the port cannot be kept, because someone else took it while the tunnel was
+  down or the peer's policy no longer allows it, the tunnel ends instead of
+  moving to another port. Every reissue also gets a new `tunnel_id` from the
+  peer; the envelope printed at open keeps the first one, and the current
+  one is in the `reestablished` diagnostic line and in `qsh tunnels` on a
+  reverse route. A supervised forward tunnel re-dials the address it
+  resolved when it was opened and never looks the host up again, so a peer that moved to a new
   address is not followed. A supervised reverse tunnel asks the local
   daemon again and never looks at a forward pin of the same name. The first
   open picks its route by the usual rules, so a reverse-only host must not

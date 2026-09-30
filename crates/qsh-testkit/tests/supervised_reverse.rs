@@ -179,6 +179,9 @@ async fn rig(target: &TestIdentity, retention: Option<Duration>) -> Rig {
 enum Kind {
     Local,
     Dynamic,
+    /// `-R`: the listener is on the target, and the tunnel is known to the
+    /// daemon by the `forward_id` the target's server issued.
+    Remote,
 }
 
 /// A supervised tunnel held on its own thread until stopped.
@@ -204,10 +207,15 @@ async fn open(ops: &Ops, kind: Kind, echo_port: u16) -> Running {
     let (stop_tx, stop_rx) = oneshot::channel::<()>();
     let done = tokio::task::spawn_blocking(move || {
         let held = match kind {
-            Kind::Local => ops
+            Kind::Local | Kind::Remote => ops
                 .tunnel_open(TunnelOpenReq {
                     host: "widget".to_string(),
-                    mode: "local".to_string(),
+                    mode: if kind == Kind::Remote {
+                        "remote"
+                    } else {
+                        "local"
+                    }
+                    .to_string(),
                     bind: None,
                     listen_port: u32::from(free_port()),
                     forward_host: "127.0.0.1".to_string(),
@@ -263,7 +271,7 @@ async fn open(ops: &Ops, kind: Kind, echo_port: u16) -> Running {
 /// must answer with REP 0x02 (a disconnected listener answers 0x01).
 async fn probe_once(kind: Kind, bind: SocketAddr, spy: Option<SocketAddr>) -> bool {
     match kind {
-        Kind::Local => {
+        Kind::Local | Kind::Remote => {
             let payload = b"through the supervised reverse tunnel".to_vec();
             matches!(
                 tokio::time::timeout(
@@ -327,6 +335,22 @@ enum Gap {
 /// registration, bring it back per `gap`, and wait until the tunnel carries
 /// traffic again. Returns the stopped tunnel's id.
 async fn lose_and_regain(rig: &Rig, target: &TestIdentity, kind: Kind, gap: Gap) -> String {
+    lose_and_regain_then(rig, target, kind, gap, |running| async move { running }).await
+}
+
+/// [`lose_and_regain`] that hands the tunnel, carrying traffic again, to
+/// `then` before it is stopped.
+async fn lose_and_regain_then<F, Fut>(
+    rig: &Rig,
+    target: &TestIdentity,
+    kind: Kind,
+    gap: Gap,
+    then: F,
+) -> String
+where
+    F: FnOnce(Running) -> Fut,
+    Fut: std::future::Future<Output = Running>,
+{
     let spy_listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind the loopback spy");
     let spy = spy_listener.local_addr().expect("spy addr");
     let (s1_tx, s1_rx) = oneshot::channel::<()>();
@@ -385,6 +409,7 @@ async fn lose_and_regain(rig: &Rig, target: &TestIdentity, kind: Kind, gap: Gap)
                 "a host-local filter refusal ended the supervised tunnel"
             );
         }
+        let running = then(running).await;
         let tunnel_id = running.tunnel_id.clone();
         let ended = running.stop().await;
         assert!(
@@ -696,6 +721,152 @@ async fn supervise_lines_on_reverse_route_carry_host_and_a_generation_that_match
         Some(registered.generation),
         "the line names the generation the controller registered"
     );
+    rig.localctl.shutdown().await;
+    rig.harness.shutdown().await;
+}
+
+// ---- -R (decisions 7-1, 7-4, 13 and 14) -----------------------------------
+
+/// [`Ops::tunnel_list`] off the calling thread (it builds its own runtime).
+async fn tunnel_list(ops: &Ops) -> qsh_proto::TunnelListData {
+    let ops = ops.clone();
+    tokio::task::spawn_blocking(move || ops.tunnel_list(qsh_proto::TunnelListReq {}))
+        .await
+        .expect("spawn_blocking join")
+        .expect("tunnel.list")
+}
+
+/// [`Ops::tunnel_close`] off the calling thread.
+async fn tunnel_close(ops: &Ops, tunnel_id: &str) -> qsh_proto::TunnelCloseData {
+    let ops = ops.clone();
+    let tunnel_id = tunnel_id.to_string();
+    tokio::task::spawn_blocking(move || ops.tunnel_close(qsh_proto::TunnelCloseReq { tunnel_id }))
+        .await
+        .expect("spawn_blocking join")
+        .expect("tunnel.close")
+}
+
+/// Decision 7-1 with 7-4: the target registers again, the supervisor asks
+/// the daemon again, closes the old forward and opens the same bind on the
+/// new registration. The port the tunnel carries traffic on is the one it
+/// had, and no operator close is read into the loss.
+#[tokio::test(flavor = "multi_thread")]
+async fn supervised_reverse_remote_reissues_after_the_target_reregisters() {
+    init_capture();
+    let target = make_identity();
+    let rig = rig(&target, None).await;
+    lose_and_regain(&rig, &target, Kind::Remote, Gap::Stale).await;
+
+    let back = &lines_of("reestablished")[0];
+    assert_eq!(back["route"], "reverse");
+    assert_eq!(back["mode"], "remote");
+    assert!(back["previous_tunnel_id"].is_string(), "{back}");
+    assert!(lines_of("closed").is_empty(), "{:?}", lines_of("closed"));
+
+    rig.localctl.shutdown().await;
+    rig.harness.shutdown().await;
+}
+
+/// Decision 13: after a re-issue the tunnel has a new `forward_id`; the
+/// `reestablished` line names both, `qsh tunnels` shows the new one, and
+/// closing by the first one is the ordinary `closed: false`.
+#[tokio::test(flavor = "multi_thread")]
+async fn supervised_remote_reestablished_line_carries_a_new_tunnel_id_and_previous_tunnel_id_and_qsh_tunnels_shows_the_new_one()
+ {
+    init_capture();
+    let target = make_identity();
+    let rig = rig(&target, None).await;
+    let ops = rig.ops.clone();
+    let seen = Arc::new(Mutex::new(None));
+    let seen_in = Arc::clone(&seen);
+    let first = lose_and_regain_then(
+        &rig,
+        &target,
+        Kind::Remote,
+        Gap::Stale,
+        |running| async move {
+            let back = lines_of("reestablished")[0].clone();
+            let listed = tunnel_list(&ops).await;
+            let mut ids: Vec<String> = listed.tunnels.iter().map(|t| t.tunnel_id.clone()).collect();
+            ids.sort();
+            let stale_close = tunnel_close(&ops, &running.tunnel_id).await;
+            *seen_in.lock().unwrap() = Some((back, ids, stale_close));
+            running
+        },
+    )
+    .await;
+
+    let (back, ids, stale_close) = seen.lock().unwrap().take().expect("the inspection ran");
+    let new_id = back["tunnel_id"].as_str().expect("tunnel_id").to_string();
+    assert_eq!(back["previous_tunnel_id"], first.as_str(), "{back}");
+    assert_ne!(new_id, first);
+    assert_eq!(ids, vec![new_id], "`qsh tunnels` lists only the new id");
+    assert!(
+        !stale_close.closed,
+        "the first id no longer names anything: {stale_close:?}"
+    );
+
+    rig.localctl.shutdown().await;
+    rig.harness.shutdown().await;
+}
+
+/// Decision 14: `qsh tunnel close` on the daemon removes the forward while
+/// the registration stays. The claim loop's prompt answer plus the daemon's
+/// lists read as an operator close: one `closed` line, exit `0`, nothing
+/// re-opened.
+#[tokio::test(flavor = "multi_thread")]
+async fn supervised_reverse_remote_closed_by_qsh_tunnel_close_emits_closed_and_exits_zero_without_reopening()
+ {
+    init_capture();
+    let target = make_identity();
+    let rig = rig(&target, None).await;
+    let (stop_tx, stop_rx) = oneshot::channel::<()>();
+    let targets = rig
+        .harness
+        .run_target(&target, "device-id", "controller", None, async {
+            let _ = stop_rx.await;
+        });
+    let scenario = async {
+        rig.harness.wait_control_hub("widget").await;
+        let running = open(&rig.ops, Kind::Remote, rig.echo.port()).await;
+        probe_within(Kind::Remote, running.bind, None, "before the close").await;
+
+        let closed = tunnel_close(&rig.ops, &running.tunnel_id).await;
+        assert!(closed.closed, "{closed:?}");
+        let line = wait_line("closed").await;
+        assert_eq!(line["route"], "reverse");
+        assert_eq!(line["mode"], "remote");
+        let ended = tokio::time::timeout(TIMEOUT, running.done)
+            .await
+            .expect("the tunnel ends on its own")
+            .expect("the hold task joins");
+        assert!(ended.is_none(), "an operator close exits 0: {ended:?}");
+        assert!(lines_of("lost").is_empty(), "{:?}", lines_of("lost"));
+        assert!(lines_of("reestablished").is_empty());
+        assert!(tunnel_list(&rig.ops).await.tunnels.is_empty());
+        let _ = stop_tx.send(());
+    };
+    let (result, ()) = tokio::join!(targets, scenario);
+    result.expect("the registration ends cleanly");
+
+    rig.localctl.shutdown().await;
+    rig.harness.shutdown().await;
+}
+
+/// Decision 14, the other reading: a registration that went away, even for
+/// long enough to be swept, is a loss. The claim loop answers promptly in
+/// both cases, so the daemon's lists decide, and no `closed` line appears.
+#[tokio::test(flavor = "multi_thread")]
+async fn supervised_reverse_remote_registration_loss_is_not_read_as_an_operator_close() {
+    init_capture();
+    let target = make_identity();
+    let rig = rig(&target, Some(Duration::from_secs(1))).await;
+    lose_and_regain(&rig, &target, Kind::Remote, Gap::Swept).await;
+
+    assert!(lines_of("closed").is_empty(), "{:?}", lines_of("closed"));
+    assert!(!lines_of("lost").is_empty());
+    assert!(!lines_of("reestablished").is_empty());
+
     rig.localctl.shutdown().await;
     rig.harness.shutdown().await;
 }
