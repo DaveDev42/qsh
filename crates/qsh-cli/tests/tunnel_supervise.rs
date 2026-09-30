@@ -610,7 +610,12 @@ fn supervised_forward_peer_that_trust_removed_the_client_rejects_the_reestablish
     let id = hold.tunnel().tunnel_id.clone();
     let port = u16::try_from(hold.tunnel().actual_port.unwrap()).unwrap();
     round_trip(port, b"warm");
-    let served_before = forward_local_records(&rig);
+    // The audit record lands after the relay; wait for it so the count below
+    // is a settled baseline, not a race with the writer.
+    let served_before = poll_until("the warm-up's audit record", WAIT, || {
+        let n = forward_local_records(&rig);
+        (n >= 1).then_some(n)
+    });
 
     host_trust_remove_client(&rig);
     rig.sever();
