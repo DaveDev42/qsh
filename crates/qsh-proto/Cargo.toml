@@ -9,6 +9,9 @@ readme.workspace = true
 description = "Wire framing, JSON contract types and error codes for qsh, a QUIC-based direct-connect remote shell."
 keywords = ["quic", "remote-shell", "protocol", "protobuf", "ssh"]
 categories = ["network-programming", "encoding"]
+# Integration tests stay out of the tarball (see the publishing note in the
+# workspace root Cargo.toml). Anchored so `src/**/tests/` module dirs ship.
+exclude = ["/tests/"]
 
 [dependencies]
 serde.workspace = true

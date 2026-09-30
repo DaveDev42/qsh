@@ -9,6 +9,9 @@ readme.workspace = true
 description = "Session broker, ACL enforcement, identity and trust for qsh, a QUIC-based direct-connect remote shell."
 keywords = ["quic", "remote-shell", "pty", "session", "ssh"]
 categories = ["network-programming", "authentication"]
+# Integration tests stay out of the tarball (see the publishing note in the
+# workspace root Cargo.toml). Anchored so `src/**/tests/` module dirs ship.
+exclude = ["/tests/"]
 
 [dependencies]
 qsh-proto.workspace = true

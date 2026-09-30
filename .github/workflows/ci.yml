@@ -249,6 +249,20 @@ jobs:
           expected='qsh-cli qsh-core qsh-proto qsh-transport '
           test "$actual" = "$expected" \
             || { echo "publish set drifted: [$actual]"; exit 1; }
+      # Pins the `exclude` policy: no integration-test file may reach a
+      # tarball. `src/**/tests/` module dirs are expected and are not matched
+      # because only the crate-root `tests/` prefix is checked.
+      - name: No tarball carries a root tests/ directory
+        run: |
+          set -euo pipefail
+          for crate in qsh-proto qsh-transport qsh-core qsh-cli; do
+            files=$(cargo package --list --allow-dirty -p "$crate")
+            if echo "$files" | grep -q '^tests/'; then
+              echo "$crate tarball lists tests/:"; echo "$files" | grep '^tests/'; exit 1
+            fi
+            echo "$files" | grep -q '^src/' \
+              || { echo "$crate tarball lists no src/ files"; exit 1; }
+          done
       - run: cargo publish --dry-run --workspace
 
   # Single required check for branch protection: green iff every job above is.
