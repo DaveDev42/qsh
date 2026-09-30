@@ -580,6 +580,85 @@ fn supervised_forward_peer_restarted_without_forward_local_ends_permission_denie
     assert_eq!(denies.len(), 1, "one deny, no retry storm: {denies:?}");
 }
 
+/// `qsh trust remove` on the host, run against the host's own config: the
+/// host re-reads `trust.toml` on every handshake, so no restart is needed.
+fn host_trust_remove_client(rig: &Rig) {
+    let (code, value) = rig.host.json(&["trust", "remove", CLIENT_ALIAS, "--json"]);
+    assert_eq!(code, 0, "trust remove failed: {value}");
+}
+
+fn forward_local_records(rig: &Rig) -> usize {
+    rig.host
+        .audit_records()
+        .iter()
+        .filter(|record| record["action"] == "forward.local")
+        .count()
+}
+
+/// ADR-0023 decision 8 and `docs/CLI.md` §6.9: a removal applies from the
+/// peer's next handshake, so a re-establishment after it is rejected at the
+/// handshake. The supervisor keeps retrying inside its budget, never gets a
+/// carrier, and gives up.
+#[test]
+fn supervised_forward_peer_that_trust_removed_the_client_rejects_the_reestablishment_handshake() {
+    let rig = Rig::start();
+    let echo = start_echo();
+    let hold = rig
+        .ops()
+        .tunnel_open(local_req(echo, 4_000))
+        .expect("open the supervised tunnel");
+    let id = hold.tunnel().tunnel_id.clone();
+    let port = u16::try_from(hold.tunnel().actual_port.unwrap()).unwrap();
+    round_trip(port, b"warm");
+    let served_before = forward_local_records(&rig);
+
+    host_trust_remove_client(&rig);
+    rig.sever();
+    let err = hold.hold();
+
+    assert_eq!(err.code, ErrorCode::AuthFailed, "{err:?}");
+    assert_eq!(lines_of(&id, "gave_up").len(), 1);
+    assert_eq!(
+        lines_of(&id, "reestablished").len(),
+        0,
+        "a removed peer must never get a carrier back"
+    );
+    assert_eq!(
+        forward_local_records(&rig),
+        served_before,
+        "the host never authorized a request on the rejected connection"
+    );
+}
+
+/// The other half of the same fact (`docs/CLI.md` §6.9, §6.14, README Known
+/// limitations): removal does not touch a connection that is already up, so
+/// a supervised tunnel on it keeps relaying and never declares a loss.
+#[test]
+fn supervised_forward_tunnel_on_a_live_connection_keeps_running_after_trust_remove() {
+    let rig = Rig::start();
+    let echo = start_echo();
+    let hold = rig
+        .ops()
+        .tunnel_open(local_req(echo, BUDGET_MS))
+        .expect("open the supervised tunnel");
+    let id = hold.tunnel().tunnel_id.clone();
+    let port = u16::try_from(hold.tunnel().actual_port.unwrap()).unwrap();
+    round_trip(port, b"warm");
+
+    host_trust_remove_client(&rig);
+    // Fresh TCP connections keep riding the connection that was negotiated
+    // before the removal.
+    round_trip(port, b"after the removal");
+    round_trip(port, b"and again");
+
+    assert!(
+        lines_of(&id, "lost").is_empty(),
+        "trust remove must not look like a lost carrier: {:?}",
+        lines_of(&id, "lost")
+    );
+    hold.close();
+}
+
 // ---------------------------------------------------------------------------
 // -R (decisions 7-4, 8, 13)
 // ---------------------------------------------------------------------------
@@ -664,4 +743,66 @@ fn supervised_remote_ends_when_another_principal_took_the_port_during_the_outage
             .any(|line| line["supervise"] == "gave_up" && line["tunnel_id"] == first.as_str()),
         "the supervisor reports that it gave up"
     );
+}
+
+/// Rewrite the host's `acl.toml` without `forward.remote` and restart the
+/// host on its address.
+fn restart_without_forward_remote(rig: &mut Rig) {
+    rig.kill_serve();
+    let acl = rig.host.config_dir().join("acl.toml");
+    std::fs::remove_file(&acl).expect("remove the planted acl");
+    std::fs::write(
+        &acl,
+        format!(
+            "[[acl]]\nprincipal = \"device:{CLIENT_ALIAS}\"\nallow = [\"exec.run\", \
+             \"session.open\", \"session.list\", \"session.attach\", \"session.control\", \
+             \"forward.local\"]\n"
+        ),
+    )
+    .expect("write the narrowed acl");
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _ = std::fs::set_permissions(&acl, std::fs::Permissions::from_mode(0o600));
+    }
+    rig.restart_serve();
+}
+
+/// The `forward.remote` twin of the `forward.local` test above: the
+/// reissue goes through the peer's ordinary choke point on the new
+/// connection, so a peer that restarted with a narrower policy refuses it,
+/// the tunnel ends with `PERMISSION_DENIED`, and the peer's audit log holds
+/// the deny. No retry storm either.
+#[test]
+fn supervised_remote_peer_restarted_without_forward_remote_ends_permission_denied_with_one_audit_deny()
+ {
+    let mut rig = Rig::start();
+    let echo = start_echo();
+    let hold = rig
+        .ops()
+        .tunnel_open(remote_req(echo, BUDGET_MS))
+        .expect("open the supervised -R tunnel");
+    let first = hold.tunnel().tunnel_id.clone();
+    let port = u16::try_from(hold.tunnel().actual_port.expect("bound port")).unwrap();
+    round_trip(port, b"warm");
+
+    restart_without_forward_remote(&mut rig);
+    let err = hold.hold();
+
+    assert_eq!(err.code, ErrorCode::PermissionDenied, "{err:?}");
+    let gave_up: Vec<Value> = captured()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .filter(|line| line["supervise"] == "gave_up" && line["tunnel_id"] == first.as_str())
+        .cloned()
+        .collect();
+    assert_eq!(gave_up.len(), 1, "{gave_up:?}");
+    assert_eq!(gave_up[0]["code"], "PERMISSION_DENIED");
+    let denies: Vec<Value> = rig
+        .host
+        .audit_records()
+        .into_iter()
+        .filter(|record| record["action"] == "forward.remote" && record["decision"] == "deny")
+        .collect();
+    assert_eq!(denies.len(), 1, "one deny, no retry storm: {denies:?}");
 }
