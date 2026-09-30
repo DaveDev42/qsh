@@ -594,6 +594,10 @@ impl Ops {
         Ok(out)
     }
 
+    /// `service_restart_drops_sessions` (M13 H1) joins the registered-unit
+    /// branch: it fires for every mode that hosts sessions, beside the
+    /// platform finding below, reusing the same unit detection.
+    ///
     /// `service_not_registered`/`systemd_linger_disabled`/
     /// `launchagent_session_scoped` (ROADMAP M9 (h)) — one
     /// platform-unit-file existence read
@@ -623,6 +627,7 @@ impl Ops {
         let mut out = Vec::new();
         match probe::service_unit_registered(env.home_dir, mode) {
             Some(true) => {
+                out.extend(probe::service_restart_drops_sessions_finding(mode));
                 if cfg!(target_os = "macos") {
                     out.push(probe::launchagent_session_scoped_finding(mode));
                 }

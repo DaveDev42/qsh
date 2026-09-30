@@ -561,9 +561,13 @@ fn dispatch(cli: &Cli, ops: Ops) -> i32 {
             ops.tunnel_list(TunnelListReq {}),
             human::print_tunnels,
         ),
-        Command::Serve { bind, to, name } => {
-            run_serve(&ops, bind.as_deref(), to.as_deref(), name.as_deref())
-        }
+        Command::Serve { bind, to, name } => run_serve(
+            &ops,
+            bind.as_deref(),
+            to.as_deref(),
+            name.as_deref(),
+            cli.quiet,
+        ),
         Command::Listen { bind } => run_listen(&ops, bind.as_deref()),
         Command::Service(ServiceCmd::Install) => finish(
             cli,
@@ -586,7 +590,13 @@ fn dispatch(cli: &Cli, ops: Ops) -> i32 {
         Command::Reverse {
             controller,
             offered_name,
-        } => run_reverse(&ops, REVERSE_MODE, controller, offered_name.as_deref()),
+        } => run_reverse(
+            &ops,
+            REVERSE_MODE,
+            controller,
+            offered_name.as_deref(),
+            cli.quiet,
+        ),
     }
 }
 
@@ -1150,7 +1160,13 @@ fn hold_tunnel(hold: qsh_core::TunnelHold, shutdown: Option<TunnelShutdown>) -> 
 /// call, which is the roundtrip test's convergence point
 /// (`crates/qsh-cli/src/cli/tests.rs`'s
 /// `serve_to_and_reverse_converge_on_the_same_controller_and_offered_name`).
-fn run_serve(ops: &Ops, bind: Option<&str>, to: Option<&str>, name: Option<&str>) -> i32 {
+fn run_serve(
+    ops: &Ops,
+    bind: Option<&str>,
+    to: Option<&str>,
+    name: Option<&str>,
+    quiet: bool,
+) -> i32 {
     let config = match ops.config() {
         Ok(config) => config,
         Err(err) => return report_long_running_setup_error(SERVE_MODE, &err),
@@ -1160,7 +1176,7 @@ fn run_serve(ops: &Ops, bind: Option<&str>, to: Option<&str>, name: Option<&str>
         Err(err) => return report_long_running_setup_error(SERVE_MODE, &err),
     };
     match mode {
-        qsh_core::serve::ServeMode::Inbound(addr) => run_serve_inbound(ops, &config, addr),
+        qsh_core::serve::ServeMode::Inbound(addr) => run_serve_inbound(ops, &config, addr, quiet),
         qsh_core::serve::ServeMode::Outbound {
             target,
             offered_name,
@@ -1180,6 +1196,7 @@ fn run_serve(ops: &Ops, bind: Option<&str>, to: Option<&str>, name: Option<&str>
                 SERVE_MODE,
                 &resolved.controller,
                 offered_name.as_deref(),
+                quiet,
             )
         }
     }
@@ -1195,7 +1212,7 @@ fn run_serve(ops: &Ops, bind: Option<&str>, to: Option<&str>, name: Option<&str>
 /// re-resolve it, so a bad `[serve].bind` name is reported once, by the
 /// mode decision, not by the accept loop's own `resolve_bind` call
 /// disagreeing with it on a multi-address name.
-fn run_serve_inbound(ops: &Ops, config: &Config, bind: SocketAddr) -> i32 {
+fn run_serve_inbound(ops: &Ops, config: &Config, bind: SocketAddr, quiet: bool) -> i32 {
     let result = (|| -> Result<(), OpError> {
         // Identity is loaded synchronously, before any runtime exists: the
         // credential store may block (and prompt) — keep that off the
@@ -1223,6 +1240,11 @@ fn run_serve_inbound(ops: &Ops, config: &Config, bind: SocketAddr) -> i32 {
                 stderr_note!("qsh serve: listening on {addr}");
                 qsh_core::lifecycle::listening(qsh_core::lifecycle::Process::Serve);
                 stderr_note!("qsh serve: identity {device_id} fingerprint {fingerprint}");
+                // After every line a harness or parser reads, so their bytes
+                // and order stay as they were. `--quiet` means no diagnostics.
+                if !quiet {
+                    stderr_note!("qsh serve: {}", qsh_core::lifecycle::RESTART_BANNER);
+                }
             },
             // `PLAN.md` M5 Step 6: `acl.toml` policy loads once, here, at
             // startup — `qsh_core::acl::StartupDiagnostic::render` is the
@@ -1365,7 +1387,13 @@ fn run_listen(ops: &Ops, bind: Option<&str>) -> i32 {
 /// reached from the hidden `qsh reverse <controller>` alias directly — the
 /// only difference between the two spellings once they get here (M9 Step
 /// 5).
-fn run_reverse(ops: &Ops, mode: &'static str, controller: &str, offered_name: Option<&str>) -> i32 {
+fn run_reverse(
+    ops: &Ops,
+    mode: &'static str,
+    controller: &str,
+    offered_name: Option<&str>,
+    quiet: bool,
+) -> i32 {
     let result = (|| -> Result<(), OpError> {
         let config = ops.config()?;
         let identity = ops.load_identity()?.ok_or_else(|| {
@@ -1400,6 +1428,9 @@ fn run_reverse(ops: &Ops, mode: &'static str, controller: &str, offered_name: Op
                 // A target has no `listening` line of its own; this is the
                 // moment its runtime is up and the first dial starts.
                 qsh_core::lifecycle::listening(qsh_core::lifecycle::Process::ServeTo);
+                if !quiet {
+                    stderr_note!("qsh {mode}: {}", qsh_core::lifecycle::RESTART_BANNER);
+                }
             },
             // `qsh_core::doctor::CONTROLLER_UNREACHABLE` fires at most
             // once per process (`run_reverse_observed`'s own docs — the

@@ -28,7 +28,7 @@ pub mod probe;
 /// `doctor.run`'s contract keys off of; this enum is the in-process
 /// convenience on top of it).
 ///
-/// 23 variants, one per `docs/CLI.md` §6.17 finding code — a closed,
+/// 24 variants, one per `docs/CLI.md` §6.17 finding code — a closed,
 /// additive-only set (`PLAN.md` M7 §4.1 #5): [`EXPECTED_DOCTOR_CODES`] and
 /// this enum's own `tests` module keep the two in lockstep, so a variant
 /// added without updating the frozen list (or vice versa) fails CI rather
@@ -40,6 +40,8 @@ pub mod probe;
 /// `ConfigServeToConflict` (`qsh serve --to` rename, ADR-0012 결정 5) is
 /// M9 (h)'s eighth, 21 → 22. `AclForwardSocksIneffective` (ADR-0019 결정
 /// 6·14, 결과 절 R6's doctor follow-up) is the twenty-third, 22 → 23.
+/// `ServiceRestartDropsSessions` (M13 graceful re-exec H1,
+/// `docs/design/reexec-estimate.md`) is the twenty-fourth, 23 → 24.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiagnosticId {
     ControllerUnreachable,
@@ -65,6 +67,7 @@ pub enum DiagnosticId {
     HostPinnedWithoutAddress,
     ConfigServeToConflict,
     AclForwardSocksIneffective,
+    ServiceRestartDropsSessions,
 }
 
 impl DiagnosticId {
@@ -102,6 +105,7 @@ impl DiagnosticId {
             DiagnosticId::HostPinnedWithoutAddress => HOST_PINNED_WITHOUT_ADDRESS.code,
             DiagnosticId::ConfigServeToConflict => CONFIG_SERVE_TO_CONFLICT.code,
             DiagnosticId::AclForwardSocksIneffective => ACL_FORWARD_SOCKS_INEFFECTIVE.code,
+            DiagnosticId::ServiceRestartDropsSessions => SERVICE_RESTART_DROPS_SESSIONS.code,
         }
     }
 }
@@ -133,6 +137,7 @@ pub const EXPECTED_DOCTOR_CODES: &[&str] = &[
     "peer_untrusted",
     "qsh_path_shadowed",
     "service_not_registered",
+    "service_restart_drops_sessions",
     "systemd_linger_disabled",
     "trust_remove_scope",
     "udp_egress_blocked",
@@ -525,6 +530,21 @@ pub const ACL_FORWARD_SOCKS_INEFFECTIVE: Diagnostic = Diagnostic {
     ),
 };
 
+/// M13 graceful re-exec H1 (`docs/design/reexec-estimate.md`), info: a
+/// platform service unit is registered for a mode that hosts sessions
+/// (`serve` or `reverse`; a `listen` controller hosts none), so the service
+/// manager can restart the process at any time, and every restart ends all
+/// detached sessions because they live inside the process (ADR-0003). It
+/// states a structural fact, like [`LAUNCHAGENT_SESSION_SCOPED`], and is
+/// reachable only once [`SERVICE_NOT_REGISTERED`] did not fire. `remedy`
+/// names a command that shows what a restart would erase.
+pub const SERVICE_RESTART_DROPS_SESSIONS: Diagnostic = Diagnostic {
+    id: DiagnosticId::ServiceRestartDropsSessions,
+    code: "service_restart_drops_sessions",
+    message: "A service unit is registered for this machine's run mode. A restart by the service manager, whether after a crash, an upgrade or a reboot, ends every detached session on this host, because sessions live inside the serving process and are not handed to the next one.",
+    remedy: "Run `qsh sessions` to see what a restart would end, and close or finish those sessions before a planned restart. docs/deploy/service.md (Notes for both) and the README's Known limitations explain why.",
+};
+
 /// `docs/ROADMAP.md` M9 (h) (added to the batch in commit `fab8563`), `docs/CLI.md` §6.17: a
 /// name `Ops::host_list`'s forward ∪ reverse merge already knows about
 /// (a trust-store pin or a `hosts.toml` entry) has no routable address
@@ -673,16 +693,30 @@ mod tests {
         );
     }
 
+    /// M13 graceful re-exec H1 — same mutation-catching rationale as
+    /// `acl_forward_socks_ineffective_has_the_stable_snake_case_code`.
+    #[test]
+    fn service_restart_drops_sessions_has_the_stable_snake_case_code() {
+        assert_eq!(
+            SERVICE_RESTART_DROPS_SESSIONS.id,
+            DiagnosticId::ServiceRestartDropsSessions
+        );
+        assert_eq!(
+            SERVICE_RESTART_DROPS_SESSIONS.code,
+            "service_restart_drops_sessions"
+        );
+    }
+
     /// `PLAN.md` M7 §4.1 #5's "code 안정성 fixture": every [`DiagnosticId`]
     /// variant, exhaustively hand-listed (a variant added here without a
     /// matching addition to [`EXPECTED_DOCTOR_CODES`], or vice versa, is
     /// exactly the drift this test exists to catch), must map to a unique
-    /// code and the frozen set must be exactly those 23 codes — no more, no
+    /// code and the frozen set must be exactly those 24 codes — no more, no
     /// fewer. Mirrors `qsh_proto::schema`'s
     /// `cli_v1_schema_commands_is_sorted_and_deduplicated` precedent.
     #[test]
     fn expected_doctor_codes_matches_every_diagnostic_id_variant_exactly() {
-        const ALL: [DiagnosticId; 23] = [
+        const ALL: [DiagnosticId; 24] = [
             DiagnosticId::ControllerUnreachable,
             DiagnosticId::AuditPathUnwritable,
             DiagnosticId::AclPolicyMissing,
@@ -706,6 +740,7 @@ mod tests {
             DiagnosticId::HostPinnedWithoutAddress,
             DiagnosticId::ConfigServeToConflict,
             DiagnosticId::AclForwardSocksIneffective,
+            DiagnosticId::ServiceRestartDropsSessions,
         ];
         let mut codes: Vec<&str> = ALL.iter().map(|id| id.code()).collect();
         codes.sort_unstable();

@@ -298,7 +298,7 @@ async fn run_reverse_unix(
     loop {
         let attempt = tokio::select! {
             _ = &mut shutdown => {
-                runtime.server.drain().await;
+                runtime.server.drain_as(crate::lifecycle::Process::ServeTo).await;
                 return Ok(());
             }
             result = dial_and_register(&dialer, &trust, paths, controller, &local_hello) => result,
@@ -356,7 +356,10 @@ async fn run_reverse_unix(
                 .emit();
                 match wait_backoff(delay, &mut shutdown, &mut wake_rx).await {
                     BackoffWait::Shutdown => {
-                        runtime.server.drain().await;
+                        runtime
+                            .server
+                            .drain_as(crate::lifecycle::Process::ServeTo)
+                            .await;
                         return Ok(());
                     }
                     BackoffWait::Woken(event) => note_wake(&mut backoff, controller, event),
@@ -497,7 +500,7 @@ async fn run_reverse_unix(
                     // which. `serve_control` keeps running as its own task
                     // through this, so it can still deliver `session.closed`
                     // before the connection closes below.
-                    runtime.server.drain().await;
+                    runtime.server.drain_as(crate::lifecycle::Process::ServeTo).await;
                     conn.close(0, b"shutdown");
                     let _ = serve_control.await;
                     watchdog.abort();
@@ -624,7 +627,10 @@ async fn run_reverse_unix(
         .emit();
         match wait_backoff(delay, &mut shutdown, &mut wake_rx).await {
             BackoffWait::Shutdown => {
-                runtime.server.drain().await;
+                runtime
+                    .server
+                    .drain_as(crate::lifecycle::Process::ServeTo)
+                    .await;
                 return Ok(());
             }
             BackoffWait::Woken(event) => note_wake(&mut backoff, controller, event),

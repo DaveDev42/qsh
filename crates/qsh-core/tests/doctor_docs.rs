@@ -239,3 +239,15 @@ fn doctor_code_counts_named_in_prose(doc: &str) -> Vec<(usize, usize)> {
     }
     out
 }
+
+/// M13 H1: `docs/CLI.md` §6.12 quotes the startup restart banner verbatim,
+/// so a wording edit to [`qsh_core::lifecycle::RESTART_BANNER`] that is not
+/// mirrored in the contract fails here.
+#[test]
+fn cli_md_quotes_the_restart_banner_verbatim() {
+    let cli_md = read_doc("docs/CLI.md");
+    assert!(
+        cli_md.contains(qsh_core::lifecycle::RESTART_BANNER),
+        "docs/CLI.md §6.12 must quote lifecycle::RESTART_BANNER verbatim"
+    );
+}

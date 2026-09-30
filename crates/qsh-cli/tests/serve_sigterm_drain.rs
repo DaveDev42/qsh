@@ -237,3 +237,150 @@ fn sigterm_drains_the_session_and_leaves_no_orphan() {
         stream.close();
     });
 }
+
+/// Marker the first session's child prints, so the test can tell that no
+/// PTY content reaches the `drained` line.
+const SECRET: &str = "QSHDRAINSECRET-7f3a";
+
+/// What [`drain_two_sessions`] observed.
+struct DrainRun {
+    /// The drained `qsh serve`'s stderr lines.
+    stderr: Vec<String>,
+    /// Both session handles, attached one first.
+    session_refs: Vec<String>,
+    /// The address the serve bound.
+    addr: String,
+}
+
+/// Open two sessions on a real `qsh serve`, keep one attached and leave the
+/// other detached, then SIGTERM the serve and collect its stderr once it has
+/// exited.
+fn drain_two_sessions() -> DrainRun {
+    with_deadline("sigterm drain summary", || {
+        let mut fleet = Fleet::start();
+        let ops = ops_for(&fleet.client);
+        let open = |script: String| {
+            ops.session_open(SessionOpenReq {
+                host: HOST_ALIAS.to_string(),
+                argv: vec!["sh".to_string(), "-c".to_string(), script],
+                env: vec![EnvVar {
+                    name: "LANG".into(),
+                    value: "C".into(),
+                }],
+                term: Some("xterm-256color".into()),
+                cols: Some(80),
+                rows: Some(24),
+                user: None,
+            })
+            .expect("session.open")
+            .session_ref
+        };
+        let attached_ref = open(format!("printf '{SECRET}\\n'\nexec sleep 600\n"));
+        let detached_ref = open("exec sleep 600\n".to_string());
+
+        let mut stream = ops
+            .session_attach(
+                SessionAttachReq {
+                    session_ref: attached_ref.clone(),
+                    no_steal: false,
+                },
+                &[],
+            )
+            .expect("session.attach");
+        // The attach is live once the child's output has come through it.
+        let mut rendered = Vec::new();
+        while !String::from_utf8_lossy(&rendered).contains(SECRET) {
+            match stream.next_event() {
+                Some(Ok(SessionEvent::Output { data_b64, .. })) => {
+                    rendered.extend_from_slice(&decode(&data_b64));
+                }
+                Some(Ok(_)) => {}
+                other => panic!("attach stream ended before the marker: {other:?}"),
+            }
+        }
+
+        fleet.serve.signal(Signal::SIGTERM);
+        let status = fleet
+            .serve
+            .wait_timeout(DRAIN_BOUND)
+            .unwrap_or_else(|| panic!("qsh serve did not exit within {DRAIN_BOUND:?} of SIGTERM"));
+        assert!(status.success(), "qsh serve exited {status:?}, not 0");
+        let stderr = fleet.serve.captured().stderr;
+        stream.close();
+        DrainRun {
+            stderr,
+            session_refs: vec![attached_ref, detached_ref],
+            addr: fleet.addr().to_string(),
+        }
+    })
+}
+
+const DRAINED_PREFIX: &str = "{\"lifecycle\":\"drained\"";
+
+fn drained_lines(stderr: &[String]) -> Vec<&String> {
+    stderr
+        .iter()
+        .filter(|line| line.starts_with(DRAINED_PREFIX))
+        .collect()
+}
+
+/// M13 H1: the drain says what it erased. One attached and one detached
+/// session, then SIGTERM: exactly one `drained` line, counting both and
+/// naming the detached one, and it comes before the `shutting_down` record.
+#[test]
+fn sigterm_drain_emits_one_drained_lifecycle_line_with_the_closed_session_count() {
+    let run = drain_two_sessions();
+    let lines = drained_lines(&run.stderr);
+    assert_eq!(lines.len(), 1, "{:?}", run.stderr);
+    let value: serde_json::Value = serde_json::from_str(lines[0]).expect("a JSON line");
+    assert_eq!(value["process"], "serve", "{value}");
+    assert_eq!(value["sessions_closed"], 2, "{value}");
+    assert_eq!(value["detached_closed"], 1, "{value}");
+    assert_eq!(value["timed_out"], false, "{value}");
+    let drained_at = run
+        .stderr
+        .iter()
+        .position(|l| l.starts_with(DRAINED_PREFIX))
+        .unwrap();
+    let shutting_down_at = run
+        .stderr
+        .iter()
+        .position(|l| l.starts_with("{\"lifecycle\":\"shutting_down\""))
+        .unwrap_or_else(|| panic!("no shutting_down record: {:?}", run.stderr));
+    assert!(drained_at < shutting_down_at, "{:?}", run.stderr);
+}
+
+/// The `drained` line carries counts and a verdict, nothing that names a
+/// session, a command, PTY output or an address (`docs/CLI.md` §6.12).
+#[test]
+fn drained_line_carries_no_session_id_address_or_payload() {
+    let run = drain_two_sessions();
+    let lines = drained_lines(&run.stderr);
+    assert_eq!(lines.len(), 1, "{:?}", run.stderr);
+    let line = lines[0];
+    let value: serde_json::Value = serde_json::from_str(line).expect("a JSON line");
+    let mut keys: Vec<&str> = value
+        .as_object()
+        .expect("an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "at",
+            "detached_closed",
+            "lifecycle",
+            "process",
+            "sessions_closed",
+            "timed_out"
+        ],
+        "{line}"
+    );
+    let mut needles: Vec<&str> = run.session_refs.iter().map(String::as_str).collect();
+    needles.extend([SECRET, "sleep", "sh -c", run.addr.as_str(), "127.0.0.1"]);
+    for needle in needles {
+        assert!(!line.contains(needle), "`{needle}` leaked into: {line}");
+    }
+}

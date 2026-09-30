@@ -29,6 +29,9 @@ const ALLOWED_KEYS: &[&str] = &[
     "lifecycle",
     "at",
     "process",
+    "sessions_closed",
+    "detached_closed",
+    "timed_out",
     "tunnel_id",
     "mode",
     "supervise",
@@ -362,6 +365,62 @@ fn quiet_suppresses_lifecycle_lines() {
     );
 }
 
+/// The restart banner's human line, as `qsh serve` prints it.
+fn restart_banner_line() -> String {
+    format!("qsh serve: {}", qsh_core::lifecycle::RESTART_BANNER)
+}
+
+/// M13 H1: the startup says where sessions live. The banner comes after the
+/// `listening on` line and the identity line, so what a harness reads
+/// (`LISTENING_PREFIX`) and the order of the lines before it stay as they
+/// were.
+#[test]
+fn serve_startup_banner_states_that_a_restart_drops_detached_sessions() {
+    let host = Sandbox::initialized();
+    let serve = ServeGuard::start(&host);
+    let banner = restart_banner_line();
+    let lines = poll_until("the restart banner", Duration::from_secs(20), || {
+        let lines = serve.stderr_snapshot();
+        lines.contains(&banner).then_some(lines)
+    });
+    assert!(
+        banner.contains("detached session"),
+        "the banner says what a restart drops: {banner}"
+    );
+    let listening = position(&lines, |l| l.starts_with("qsh serve: listening on "));
+    let identity = position(&lines, |l| l.starts_with("qsh serve: identity "));
+    let banner_at = position(&lines, |l| l == banner);
+    assert!(
+        listening < identity && identity < banner_at,
+        "the banner goes after every line a harness reads: {lines:?}"
+    );
+    assert_eq!(
+        lines.iter().filter(|l| **l == banner).count(),
+        1,
+        "{lines:?}"
+    );
+}
+
+#[test]
+fn quiet_suppresses_the_restart_banner() {
+    let mut fleet = Fleet::start_with(&["-q"]);
+    stop_host(&mut fleet);
+    let serve = fleet.serve.captured();
+    assert!(
+        serve
+            .stderr
+            .iter()
+            .any(|l| l.starts_with("qsh serve: identity ")),
+        "the human startup lines are not diagnostics: {:?}",
+        serve.stderr
+    );
+    assert!(
+        !serve.stderr.contains(&restart_banner_line()),
+        "{:?}",
+        serve.stderr
+    );
+}
+
 #[test]
 fn serve_to_emits_listening_and_shutting_down_lifecycle_lines() {
     let sandbox = Sandbox::initialized();
@@ -406,9 +465,12 @@ fn serve_to_emits_listening_and_shutting_down_lifecycle_lines() {
 
     let lines = snapshot();
     let parsed = lifecycle_lines(&lines);
-    assert_eq!(parsed.len(), 2, "{lines:?}");
+    assert_eq!(parsed.len(), 3, "{lines:?}");
     assert_eq!(parsed[0]["lifecycle"], "listening");
-    assert_eq!(parsed[1]["lifecycle"], "shutting_down");
+    // A target hosts sessions, so its drain reports too (none were open).
+    assert_eq!(parsed[1]["lifecycle"], "drained");
+    assert_eq!(parsed[1]["sessions_closed"], 0, "{lines:?}");
+    assert_eq!(parsed[2]["lifecycle"], "shutting_down");
     assert!(parsed.iter().all(|line| line["process"] == "serve_to"));
     assert!(
         position(&lines, |l| l.starts_with("qsh ")

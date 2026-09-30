@@ -756,6 +756,12 @@ impl SessionHandle {
         self.shared.meta().state
     }
 
+    /// Whether at least one consumer is attached right now. `false` is the
+    /// "detached" state the resume TTL runs in.
+    pub fn is_attached(&self) -> bool {
+        self.shared.meta().attached > 0
+    }
+
     /// Whether a close has been accepted (escalation may still be running).
     pub fn is_closing(&self) -> bool {
         self.shared.meta().closing
