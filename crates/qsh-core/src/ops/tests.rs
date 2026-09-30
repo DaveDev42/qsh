@@ -1355,6 +1355,8 @@ fn tunnel_dynamic_non_loopback_bind_is_invalid_argument_before_connect() {
         host: "nowhere".into(),
         bind: Some("0.0.0.0".into()),
         listen_port: 1080,
+        supervise_ms: None,
+        accept_hold_ms: None,
     }) {
         Err(err) => err,
         Ok(_) => panic!("a non-loopback -D bind must never succeed"),

@@ -368,6 +368,8 @@ fn local_tunnel_open_args() -> TunnelOpenArgs {
         remote: None,
         dynamic: Vec::new(),
         wait: 0,
+        supervise: 0,
+        accept_hold: 0,
     }
 }
 
@@ -394,4 +396,21 @@ fn build_tunnel_open_request_wires_wait_into_wait_ms() {
         request.wait_ms, None,
         "the clap default (0) must map to None, not Some(0)"
     );
+}
+
+/// `--supervise`/`--accept-hold` reach the request as `Some`, and the clap
+/// default `0` maps to `None` so an unset flag leaves the request
+/// byte-identical to one built before the flags existed (ADR-0023).
+#[test]
+fn build_tunnel_open_request_wires_supervise_and_accept_hold() {
+    let mut args = local_tunnel_open_args();
+    args.supervise = 90_000;
+    args.accept_hold = 500;
+    let request = build_tunnel_open_request(&args).expect("valid -L spec");
+    assert_eq!(request.supervise_ms, Some(90_000));
+    assert_eq!(request.accept_hold_ms, Some(500));
+
+    let request = build_tunnel_open_request(&local_tunnel_open_args()).expect("valid -L spec");
+    assert_eq!(request.supervise_ms, None);
+    assert_eq!(request.accept_hold_ms, None);
 }

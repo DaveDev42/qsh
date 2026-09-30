@@ -627,6 +627,8 @@ fn tunnel_open_req_matches_documented_shape() {
         forward_host: "localhost".into(),
         forward_port: 3000,
         wait_ms: None,
+        supervise_ms: None,
+        accept_hold_ms: None,
     };
     let json = serde_json::to_value(&req).unwrap();
     assert_eq!(json["mode"], "remote");
@@ -654,6 +656,8 @@ fn tunnel_open_req_wait_ms_is_additive_optional() {
         forward_host: "localhost".into(),
         forward_port: 3000,
         wait_ms: None,
+        supervise_ms: None,
+        accept_hold_ms: None,
     };
     let json = serde_json::to_value(&base).unwrap();
     assert!(
@@ -784,6 +788,8 @@ fn tunnel_dynamic_req_matches_documented_shape() {
         host: "personal-mac".into(),
         bind: Some("127.0.0.1".into()),
         listen_port: 1080,
+        supervise_ms: None,
+        accept_hold_ms: None,
     };
     assert_eq!(
         serde_json::to_value(&req).unwrap(),

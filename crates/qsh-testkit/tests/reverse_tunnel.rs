@@ -1711,6 +1711,8 @@ async fn tunnel_list_and_close_manage_a_daemon_held_remote_forward() {
                     forward_host: "127.0.0.1".to_string(),
                     forward_port: u32::from(echo_port),
                     wait_ms: None,
+                    supervise_ms: None,
+                    accept_hold_ms: None,
                 })
                 .expect("tunnel_open --remote over reverse");
             let _ = tunnel_tx.send(hold.tunnel().clone());
@@ -1860,6 +1862,8 @@ async fn tunnel_open_remote_over_reverse_survives_a_thread_with_no_ambient_tokio
                     forward_host: "127.0.0.1".to_string(),
                     forward_port: u32::from(echo_port),
                     wait_ms: None,
+                    supervise_ms: None,
+                    accept_hold_ms: None,
                 })
                 .expect("tunnel_open --remote over reverse, off any Tokio runtime");
             let _ = tunnel_tx.send(hold.tunnel().clone());
@@ -2091,6 +2095,8 @@ async fn tunnel_open_local_over_reverse_ends_when_the_registration_drops() {
                     forward_host: "127.0.0.1".to_string(),
                     forward_port: u32::from(echo_port),
                     wait_ms: None,
+                    supervise_ms: None,
+                    accept_hold_ms: None,
                 })
                 .expect("tunnel_open --local over reverse");
             let _ = tunnel_tx.send(hold.tunnel().clone());
@@ -2178,6 +2184,8 @@ async fn tunnel_open_wait_returns_the_same_stale_error_once_the_budget_expires()
             forward_host: "127.0.0.1".to_string(),
             forward_port: 1,
             wait_ms: Some(300),
+            supervise_ms: None,
+            accept_hold_ms: None,
         })
     })
     .await
@@ -2263,6 +2271,8 @@ async fn tunnel_open_wait_succeeds_once_the_registration_comes_back_mid_wait() {
                 forward_host: "127.0.0.1".to_string(),
                 forward_port: u32::from(echo_port),
                 wait_ms: Some(10_000),
+                supervise_ms: None,
+                accept_hold_ms: None,
             })
             .expect("tunnel_open --wait must succeed once the registration is live again");
         let _ = tunnel_tx.send(hold.tunnel().clone());
@@ -2388,6 +2398,8 @@ async fn tunnel_open_wait_is_capped_by_stale_retention_and_never_outlives_the_sw
             forward_host: "127.0.0.1".to_string(),
             forward_port: 1,
             wait_ms: Some(5_000),
+            supervise_ms: None,
+            accept_hold_ms: None,
         })
     })
     .await

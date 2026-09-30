@@ -11,6 +11,8 @@ fn req(mode: &str, bind: Option<&str>, listen_port: u32) -> TunnelOpenReq {
         forward_host: "db.internal".to_string(),
         forward_port: 5432,
         wait_ms: None,
+        supervise_ms: None,
+        accept_hold_ms: None,
     }
 }
 
@@ -539,4 +541,180 @@ mod require_dial_filter_capability_tests {
         let err = require_dial_filter_capability(&[], false).expect_err("must refuse");
         assert_eq!(err.code, ErrorCode::Unsupported);
     }
+}
+
+fn ops_in(dir: &std::path::Path) -> Ops {
+    Ops::new(crate::config::Paths::new(
+        dir.join("config"),
+        dir.join("state"),
+    ))
+}
+
+/// A `supervise_ms` outside `0..=86_400_000` is `INVALID_ARGUMENT`, and it
+/// is decided before anything connects or binds: no host is configured in
+/// this `Ops`, so any later step would have failed with `HOST_NOT_FOUND`.
+#[test]
+fn supervise_out_of_range_is_invalid_argument_before_any_listener_exists() {
+    let dir = tempfile::tempdir().unwrap();
+    let ops = ops_in(dir.path());
+    let too_long = TunnelOpenReq {
+        supervise_ms: Some(SUPERVISE_MS_MAX + 1),
+        ..req("local", None, 8080)
+    };
+    let err = ops.tunnel_open(too_long).err().expect("must be refused");
+    assert_eq!(err.code, ErrorCode::InvalidArgument);
+    assert!(err.message.contains("supervise_ms"), "{}", err.message);
+
+    let dynamic = TunnelDynamicReq {
+        host: "box".to_string(),
+        bind: None,
+        listen_port: 1080,
+        supervise_ms: Some(SUPERVISE_MS_MAX + 1),
+        accept_hold_ms: None,
+    };
+    let err = ops.tunnel_dynamic(dynamic).err().expect("must be refused");
+    assert_eq!(err.code, ErrorCode::InvalidArgument);
+    assert!(err.message.contains("supervise_ms"), "{}", err.message);
+}
+
+#[test]
+fn tunnel_open_and_hold_with_supervise_is_invalid_argument_before_connecting() {
+    let dir = tempfile::tempdir().unwrap();
+    let ops = ops_in(dir.path());
+    let err = ops
+        .tunnel_open_and_hold(TunnelOpenReq {
+            supervise_ms: Some(1_000),
+            ..req("local", None, 8080)
+        })
+        .expect_err("must be refused");
+    assert_eq!(err.code, ErrorCode::InvalidArgument);
+    let err = ops
+        .tunnel_dynamic_and_hold(TunnelDynamicReq {
+            host: "box".to_string(),
+            bind: None,
+            listen_port: 1080,
+            supervise_ms: Some(1_000),
+            accept_hold_ms: None,
+        })
+        .expect_err("must be refused");
+    assert_eq!(err.code, ErrorCode::InvalidArgument);
+}
+
+#[test]
+fn accept_hold_without_supervise_or_above_two_thousand_or_on_remote_is_invalid_argument_before_bind()
+ {
+    let dir = tempfile::tempdir().unwrap();
+    let ops = ops_in(dir.path());
+    let cases = [
+        // without supervise
+        ("local", None, Some(500)),
+        // above the bound
+        ("local", Some(1_000), Some(ACCEPT_HOLD_MS_MAX + 1)),
+        // on --remote
+        ("remote", Some(1_000), Some(500)),
+    ];
+    for (mode, supervise_ms, accept_hold_ms) in cases {
+        let err = ops
+            .tunnel_open(TunnelOpenReq {
+                supervise_ms,
+                accept_hold_ms,
+                ..req(mode, None, 8080)
+            })
+            .err()
+            .expect("must be refused");
+        assert_eq!(
+            err.code,
+            ErrorCode::InvalidArgument,
+            "{mode} {supervise_ms:?} {accept_hold_ms:?}: {}",
+            err.message
+        );
+        assert!(err.message.contains("accept_hold_ms"), "{}", err.message);
+    }
+    let err = ops
+        .tunnel_dynamic(TunnelDynamicReq {
+            host: "box".to_string(),
+            bind: None,
+            listen_port: 1080,
+            supervise_ms: None,
+            accept_hold_ms: Some(500),
+        })
+        .err()
+        .expect("must be refused");
+    assert_eq!(err.code, ErrorCode::InvalidArgument);
+}
+
+/// ADR-0023 decision 24's table: every `(mode, accept_hold)` row that the
+/// support table marks unsupported is `UNSUPPORTED` before connecting. In
+/// this step no row is supported; later steps flip rows and shrink the
+/// expected set with them.
+#[test]
+fn supervise_on_an_unsupported_route_or_mode_is_unsupported_before_connecting() {
+    let dir = tempfile::tempdir().unwrap();
+    let ops = ops_in(dir.path());
+    for mode in [
+        SuperviseMode::Local,
+        SuperviseMode::Remote,
+        SuperviseMode::Dynamic,
+    ] {
+        for accept_hold_ms in [None, Some(500)] {
+            if mode == SuperviseMode::Remote && accept_hold_ms.is_some() {
+                continue; // INVALID_ARGUMENT, not a table row
+            }
+            let expected_supported = [SuperviseRoute::Forward, SuperviseRoute::Reverse]
+                .into_iter()
+                .any(|route| supervise_supported(route, mode, accept_hold_ms.is_some()));
+            let outcome = match mode {
+                SuperviseMode::Dynamic => ops
+                    .tunnel_dynamic(TunnelDynamicReq {
+                        host: "box".to_string(),
+                        bind: None,
+                        listen_port: 1080,
+                        supervise_ms: Some(1_000),
+                        accept_hold_ms,
+                    })
+                    .err(),
+                _ => ops
+                    .tunnel_open(TunnelOpenReq {
+                        supervise_ms: Some(1_000),
+                        accept_hold_ms,
+                        ..req(
+                            if mode == SuperviseMode::Local {
+                                "local"
+                            } else {
+                                "remote"
+                            },
+                            None,
+                            8080,
+                        )
+                    })
+                    .err(),
+            };
+            let err = outcome.expect("no host is configured, so this cannot succeed");
+            if expected_supported {
+                // Past the gate: the failure is the missing host.
+                assert_eq!(err.code, ErrorCode::HostNotFound, "{mode:?}");
+            } else {
+                assert_eq!(err.code, ErrorCode::Unsupported, "{mode:?}");
+                assert!(err.message.contains("--supervise"), "{}", err.message);
+            }
+        }
+    }
+}
+
+#[test]
+fn supervise_zero_and_absent_serialize_byte_identically() {
+    let absent = req("local", None, 8080);
+    let json = serde_json::to_value(&absent).unwrap();
+    assert!(json.get("supervise_ms").is_none(), "{json}");
+    assert!(json.get("accept_hold_ms").is_none(), "{json}");
+    // The CLI maps 0 to None, so "zero" and "absent" are the same value
+    // and the same bytes; a nonzero value is a plain number, never null.
+    let set = TunnelOpenReq {
+        supervise_ms: Some(5_000),
+        accept_hold_ms: Some(300),
+        ..absent
+    };
+    let json = serde_json::to_value(&set).unwrap();
+    assert_eq!(json["supervise_ms"], 5_000);
+    assert_eq!(json["accept_hold_ms"], 300);
 }

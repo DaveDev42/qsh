@@ -867,7 +867,17 @@ fn build_tunnel_open_request(args: &TunnelOpenArgs) -> Result<TunnelOpenReq, OpE
         } else {
             Some(args.wait)
         },
+        // Same `0` -> `None` rule as `wait_ms`: an absent flag keeps the
+        // request byte-identical. Range checks live in `qsh-core`.
+        supervise_ms: nonzero(args.supervise),
+        accept_hold_ms: nonzero(args.accept_hold),
     })
+}
+
+/// A CLI millisecond flag whose default `0` means "not given": `None`
+/// keeps the request byte-identical to one built before the flag existed.
+fn nonzero(ms: u32) -> Option<u32> {
+    (ms != 0).then_some(ms)
 }
 
 /// `qsh tunnel open <host> --local <spec>` — open one tunnel and hold it
@@ -981,6 +991,8 @@ fn run_tunnel_open_dynamic(cli: &Cli, ops: &Ops, args: &TunnelOpenArgs) -> i32 {
         host: args.host.clone(),
         bind: spec.bind.clone(),
         listen_port: u32::from(spec.listen_port),
+        supervise_ms: nonzero(args.supervise),
+        accept_hold_ms: nonzero(args.accept_hold),
     };
     let hold = match ops.tunnel_dynamic(request) {
         Ok(hold) => hold,
