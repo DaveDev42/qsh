@@ -182,8 +182,29 @@ async fn run(shared: Arc<Shared>, mut sense: WakeSense) {
     }
 }
 
+/// A detector a test plugs into the process-wide [`subscribe`], so code that
+/// subscribes on its own (the tunnel supervisor) sees a wake the test
+/// injects by moving a fake [`WallClock`]. Nextest gives each test its own
+/// process, so a set-once slot is enough.
+#[cfg(test)]
+static TEST_DETECTOR: OnceLock<WakeDetector> = OnceLock::new();
+
+/// Route the process-wide [`subscribe`] to `detector` for the rest of this
+/// test process.
+#[cfg(test)]
+pub(crate) fn install_process_detector_for_test(detector: WakeDetector) {
+    assert!(
+        TEST_DETECTOR.set(detector).is_ok(),
+        "a test detector is already installed in this process"
+    );
+}
+
 /// Subscribe to the process-wide detector.
 pub fn subscribe() -> watch::Receiver<WakeEvent> {
+    #[cfg(test)]
+    if let Some(detector) = TEST_DETECTOR.get() {
+        return detector.subscribe();
+    }
     static GLOBAL: OnceLock<WakeDetector> = OnceLock::new();
     GLOBAL
         .get_or_init(|| WakeDetector::new(Arc::new(SystemWallClock)))

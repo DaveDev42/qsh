@@ -165,6 +165,15 @@ jobs:
       - run: cargo nextest run -p qsh-core --lib -E 'test(/quinn_idle_timeout_as_idle_timeout/)'
         env:
           QSH_ACCEPTANCE_SLOW: 1
+      # ADR-0023: `supervised_dynamic_listener_stays_bound_through_a_50_second_blackhole_and_connects_after_it`.
+      # A supervised `-D` listener stays bound through a real 50-second
+      # blackhole and the first SOCKS `CONNECT` after it succeeds
+      # (`docs/design/testing.md` L4). Same `QSH_ACCEPTANCE_SLOW` gate as
+      # above. On a runner (`CI` set) a missing LAN address is a failure,
+      # not a skip (`net_probe::require_non_loopback_v4`).
+      - run: cargo nextest run -p qsh-testkit --test supervised_dynamic_blackhole
+        env:
+          QSH_ACCEPTANCE_SLOW: 1
       # M4 Step 7 DoD 3/4 (`PLAN.md` M4 Step 7 (d), `docs/design/testing.md`
       # L10): the same standing-gate shape as the two steps above, applied
       # to the tunnel perf DoDs instead of an interactive/timing one.
