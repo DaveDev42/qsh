@@ -385,7 +385,11 @@ impl Server {
             TicketPurpose::Exec(pending) => {
                 let exec_id = pending.exec_id.clone();
                 stream.send.set_priority(wire::PRIORITY_EXEC_DATA);
-                match run_exec(pending.spec, stream.send, stream.recv).await {
+                // The permit moves into `run_exec`, which drops it after the
+                // child is gone and before `ExecExit` is sent; leaving it in
+                // `pending` would release it only after the client already
+                // saw the result.
+                match run_exec(pending.spec, stream.send, stream.recv, pending.permit).await {
                     Ok(outcome) => tracing::info!(
                         principal = %ctx.principal,
                         %exec_id,

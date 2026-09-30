@@ -514,10 +514,12 @@ async fn exec_permit_moves_with_the_redeemed_ticket_and_releases_when_it_is_drop
         "redeeming a ticket must not itself free the slot"
     );
 
-    // What `serve_data_stream` does next — `run_exec(pending.spec,
-    // ..).await` — needs a real stream and is unreachable here; what it
-    // does *after* that call, on every outcome (child exit or spawn
-    // failure alike), is drop `pending`. That is what this reproduces.
+    // What `serve_data_stream` does next — `run_exec(pending.spec, ..,
+    // pending.permit).await` — needs a real stream and is unreachable
+    // here; `run_exec` drops the permit it was handed before it sends
+    // `ExecExit`, on every outcome. That drop is what this reproduces;
+    // the ordering itself is pinned end to end by the testkit test
+    // `exec_permit_is_released_before_the_result_is_observable`.
     drop(redeemed);
     assert_eq!(
         rig.quotas.exec_in_use(&opener),

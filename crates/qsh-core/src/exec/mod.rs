@@ -118,12 +118,21 @@ fn spawn_failure_code(err: &std::io::Error) -> i32 {
 
 /// Run `spec`, streaming its stdio over `(send, recv)`. Consumes the stream:
 /// on return the send side has been finished (or reset on error).
-pub async fn run_exec(
+///
+/// `guard` is a resource reservation tied to the exec's lifetime (the
+/// server passes the `ExecPermit`, `docs/adr/0010-resource-quotas.md`). It
+/// is dropped once the child is gone (or was never spawned) and strictly
+/// *before* the `ExecExit` frame is sent, so a client that has observed
+/// the result can never be refused by the quota the finished exec still
+/// held. On the error paths it drops when this function returns.
+pub async fn run_exec<G: Send>(
     spec: ExecSpec,
     mut send: FramedSend,
     mut recv: FramedRecv,
+    guard: G,
 ) -> Result<ExecOutcome, ExecError> {
     let Some((program, args)) = spec.argv.split_first() else {
+        drop(guard);
         send.send(&ExecFrame::stderr(b"qsh: empty argv\n".to_vec()))
             .await?;
         send.send(&ExecFrame::exec_exit(126, None)).await?;
@@ -161,6 +170,7 @@ pub async fn run_exec(
         let pinned = match crate::pty::pinned_identity_env() {
             Ok(pinned) => pinned,
             Err(err) => {
+                drop(guard);
                 let msg = format!("qsh: cannot resolve host account: {err}\n");
                 send.send(&ExecFrame::stderr(msg.into_bytes())).await?;
                 send.send(&ExecFrame::exec_exit(126, None)).await?;
@@ -200,6 +210,7 @@ pub async fn run_exec(
         Ok(child) => child,
         Err(err) => {
             let code = spawn_failure_code(&err);
+            drop(guard);
             let msg = format!("qsh: cannot execute {program:?}: {err}\n");
             send.send(&ExecFrame::stderr(msg.into_bytes())).await?;
             send.send(&ExecFrame::exec_exit(code, None)).await?;
@@ -402,6 +413,9 @@ pub async fn run_exec(
     let status = status.map_err(ExecError::Wait)?;
 
     let (exit_code, signal) = exit_status_parts(&status);
+    // The child is reaped: release the reservation before the result can
+    // reach the client (see the `guard` doc above).
+    drop(guard);
     if let Some(err) = write_err {
         send.reset(1);
         return Err(ExecError::Stream(err));

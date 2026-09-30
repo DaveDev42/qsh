@@ -281,11 +281,10 @@ pub struct PendingExec {
     /// [`Server::purge_connection`]) all drop it the same way an
     /// unredeemed ticket is dropped, and a *redeemed* ticket's
     /// [`TicketPurpose::Exec`] moves it into the data-stream task that
-    /// runs the child, so it releases when that task's `run_exec(..)` call
-    /// returns — child exit or spawn failure alike, since
-    /// [`crate::exec::run_exec`] reports a spawn failure as an `Ok`
-    /// outcome (shell-convention exit code) rather than an early `Err`
-    /// that would skip straight past the drop.
+    /// runs the child and hands the permit to [`crate::exec::run_exec`],
+    /// which drops it once the child is gone (or failed to spawn) and
+    /// before the `ExecExit` frame is sent, so the release is never
+    /// observable after the result.
     pub permit: crate::quota::ExecPermit,
 }
 
