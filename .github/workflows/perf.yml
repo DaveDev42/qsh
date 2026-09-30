@@ -1,0 +1,125 @@
+name: perf
+
+# Nightly perf trend (`docs/design/testing.md` CI 규율).
+# Runs the two acceptance perf tests with `QSH_PERF_OUT` so each appends one
+# JSON line, merges those into one data point, lets `cargo xtask perf-judge`
+# compare the point with the median of the last seven non-injected points, and
+# appends the point to `perf.jsonl` on the orphan branch `perf-data`. The point
+# is recorded even when the verdict is red.
+#
+# Kept apart from `ci.yml`: `ci-ok`'s `needs` does not include this workflow,
+# and there is no `pull_request` or `push` trigger, so it never gates a PR.
+#
+# `workflow_dispatch` takes `inject_delay_ms`. A value above zero makes the
+# testkit harness put that fixed one-way delay on its loopback path
+# (`QSH_PERF_INJECT_DELAY_MS`, crates/qsh-testkit/src/perf.rs). The point is
+# marked `injected` and excluded from later medians; the judge should turn the
+# job red.
+
+on:
+  schedule:
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+    inputs:
+      inject_delay_ms:
+        description: "Fixed one-way delay (ms) injected into the testkit loopback path; 0 means none"
+        required: false
+        default: "0"
+        type: string
+
+# One run at a time so two runs cannot race on the perf-data push.
+concurrency:
+  group: perf
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  perf:
+    name: perf
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    # Only this job may push; the workflow default stays read-only.
+    permissions:
+      contents: write
+    env:
+      INJECT_DELAY_MS: ${{ inputs.inject_delay_ms || '0' }}
+    steps:
+      # The runner context is not available in job-level env, so the scratch
+      # paths are exported from a step.
+      - name: Scratch paths
+        run: |
+          {
+            echo "PERF_OUT=$RUNNER_TEMP/perf-out.jsonl"
+            echo "PERF_POINT=$RUNNER_TEMP/point.json"
+            echo "PERF_DIR=$RUNNER_TEMP/perf-data"
+          } >> "$GITHUB_ENV"
+      - name: Validate the injected delay
+        run: |
+          if ! [[ "$INJECT_DELAY_MS" =~ ^[0-9]+$ ]]; then
+            echo "inject_delay_ms must be a non-negative integer, got '$INJECT_DELAY_MS'" >&2
+            exit 1
+          fi
+      - uses: actions/checkout@v6
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+      # Check out perf-data into a separate worktree, or start it as an orphan
+      # branch on the first run.
+      - name: Prepare the perf-data worktree
+        run: |
+          if git ls-remote --exit-code --heads origin perf-data >/dev/null; then
+            git fetch --depth=1 origin perf-data
+            git worktree add -B perf-data "$PERF_DIR" FETCH_HEAD
+          else
+            git worktree add --detach "$PERF_DIR"
+            git -C "$PERF_DIR" checkout --orphan perf-data
+            git -C "$PERF_DIR" rm -rfq --ignore-unmatch .
+          fi
+          touch "$PERF_DIR/perf.jsonl"
+      - name: Measure
+        run: |
+          rm -f "$PERF_OUT"
+          cargo nextest run -p qsh-testkit --test tunnel_throughput --test tunnel_echo_under_load --no-fail-fast --success-output final
+        env:
+          QSH_ACCEPTANCE_STRICT: 1
+          QSH_PERF_OUT: ${{ env.PERF_OUT }}
+          QSH_PERF_INJECT_DELAY_MS: ${{ env.INJECT_DELAY_MS }}
+      - name: Judge
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          jq -e -cs \
+            --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg sha "$GITHUB_SHA" \
+            --arg runner "$RUNNER_NAME" \
+            --argjson delay "$INJECT_DELAY_MS" '
+            (map(select(.test == "tunnel_throughput")) | last) as $t
+            | (map(select(.test == "tunnel_echo_under_load")) | last) as $e
+            | {at: $at, sha: $sha, runner: $runner,
+               throughput_mbps: $t.throughput_mbps, raw_quinn_mbps: $t.raw_quinn_mbps,
+               echo_p95_ms: $e.echo_p95_ms, rtt_ms: $e.rtt_ms,
+               injected: ($delay > 0), inject_delay_ms: $delay}
+            | select(.throughput_mbps != null and .echo_p95_ms != null)
+          ' "$PERF_OUT" > "$PERF_POINT"
+          cat "$PERF_POINT"
+          # Exit 1 is red; the history file is rewritten either way.
+          cargo xtask perf-judge --history "$PERF_DIR/perf.jsonl" --point "$PERF_POINT" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Push the point
+        if: ${{ !cancelled() }}
+        run: |
+          cd "$PERF_DIR"
+          git add perf.jsonl
+          if git diff --cached --quiet; then
+            echo "no new point to record"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -q -m "perf: ${GITHUB_SHA::12} (run ${GITHUB_RUN_ID})"
+          git push origin perf-data

@@ -3585,6 +3585,8 @@ dependencies = [
  "clap",
  "clap_mangen",
  "qsh-cli",
+ "serde",
+ "serde_json",
  "tempfile",
  "toml",
 ]

@@ -69,6 +69,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use qsh_testkit::loopback::{TestIdentity, make_identity};
+use qsh_testkit::perf;
 use qsh_testkit::tunnel::{DiscardServer, TunnelHarness};
 use qsh_transport::{Dialer, Endpoint, Listener, Principal, StaticTrust};
 use tokio::net::TcpStream;
@@ -270,7 +271,13 @@ async fn tunnel_throughput_meets_raw_quinn_ratio() {
     // this module's doc describes (review finding F6) needs both alive
     // across the whole loop, not just during their own trials.
     let raw_pair = raw_quinn_pair().await;
-    let harness = TunnelHarness::start().await;
+    // `QSH_PERF_INJECT_DELAY_MS` (nightly perf job only, `perf.rs`): delay the
+    // tunnel leg's loopback path. The raw-quinn pair stays undelayed.
+    let inject_ms = perf::inject_delay_ms();
+    let harness = match perf::inject_policy(inject_ms) {
+        Some(policy) => TunnelHarness::start_chaotic(policy).await,
+        None => TunnelHarness::start().await,
+    };
 
     let mut raw_bps = Vec::with_capacity(TRIALS);
     let mut tunnel_bps = Vec::with_capacity(TRIALS);
@@ -297,6 +304,20 @@ async fn tunnel_throughput_meets_raw_quinn_ratio() {
     // DoD 3's acceptance-job log is the record of the criterion
     // (`PLAN.md` M4 Step 7 (d)) — print on success too, not just failure.
     eprintln!("tunnel_throughput_meets_raw_quinn_ratio: {report}");
+    // `QSH_PERF_OUT`: one line for the nightly trend, written before any
+    // assertion so a red run is still recorded. No-op when unset.
+    perf::record(&serde_json::json!({
+        "test": "tunnel_throughput",
+        "throughput_mbps": tunnel_median / 1e6,
+        "raw_quinn_mbps": raw_median / 1e6,
+        "inject_delay_ms": inject_ms,
+    }));
+    if inject_ms > 0 {
+        // A deliberately slowed run is judged by `cargo xtask perf-judge`
+        // against the trend, not by the absolute ratio gate.
+        eprintln!("injected delay {inject_ms}ms: ratio gate not applied");
+        return;
+    }
     assert!(
         ratio >= required,
         "M4 DoD 3 (tunnel throughput ≥ raw-quinn × {required}) missed: {report}"
