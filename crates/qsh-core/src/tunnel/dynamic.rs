@@ -67,6 +67,7 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio::time::Instant as TokioInstant;
 
+use crate::tunnel::carrier::CarrierView;
 use crate::tunnel::dial::DialPolicy;
 use crate::tunnel::local::{
     ACCEPT_BACKOFF, AcceptDisposition, ForwardCarrier, ForwardConnError, LocalForwardError,
@@ -383,7 +384,8 @@ impl DynamicForward {
     /// [`crate::tunnel::local::LocalForward::run`], reusing its exact accept-
     /// error discipline ([`accept_disposition`]) so one bad `accept()` can
     /// no more take a `-D` listener down than it can a `-L` one.
-    pub(crate) async fn run(self, carrier: Arc<ForwardCarrier>) -> io::Error {
+    pub(crate) async fn run(self, carrier: impl Into<CarrierView>) -> io::Error {
+        let carrier: CarrierView = carrier.into();
         let mut tasks: JoinSet<()> = JoinSet::new();
         loop {
             tokio::select! {
@@ -411,7 +413,8 @@ impl DynamicForward {
                             AcceptDisposition::Fatal => return err,
                         },
                     };
-                    let carrier = Arc::clone(&carrier);
+                    carrier.note_activity();
+                    let carrier = carrier.clone();
                     let limits = Arc::clone(&self.limits);
                     tasks.spawn(async move {
                         handle_connection(tcp, carrier, limits).await;
@@ -780,7 +783,8 @@ fn rep_for_forward_conn_error(err: &ForwardConnError) -> Rep {
         }
         ForwardConnError::Link(_)
         | ForwardConnError::NoConnectResult
-        | ForwardConnError::CarrierNotRaw => Rep::GeneralFailure,
+        | ForwardConnError::CarrierNotRaw
+        | ForwardConnError::CarrierDisconnected => Rep::GeneralFailure,
         ForwardConnError::Splice(_) => Rep::GeneralFailure,
     }
 }
@@ -794,11 +798,7 @@ fn rep_for_forward_conn_error(err: &ForwardConnError) -> Rep {
 /// path through this function returns normally, logging at most (debug: the
 /// destination; warn: nothing from here, since nothing here is a resource
 /// shortage the operator needs to see, unlike `accept()` itself).
-async fn handle_connection(
-    mut tcp: TcpStream,
-    carrier: Arc<ForwardCarrier>,
-    limits: Arc<DynamicLimits>,
-) {
+async fn handle_connection(mut tcp: TcpStream, carrier: CarrierView, limits: Arc<DynamicLimits>) {
     // ADR-0019 decision 9: no slot -> close immediately, write nothing,
     // open nothing.
     let Ok(_handshake_permit) = Arc::clone(&limits.handshake_slots).try_acquire_owned() else {
@@ -861,6 +861,13 @@ async fn handle_connection(
     // limit, the dial itself).
     drop(_handshake_permit);
 
+    // While the tunnel's connection is down the SOCKS client is answered
+    // `REP 0x01` at once and no slot or token is spent (ADR-0023 decision 5).
+    if carrier.current().is_none() {
+        send_rep_and_close(tcp, Rep::GeneralFailure).await;
+        return;
+    }
+
     let Some(_connection_slot) = limits.reserve_connection_slot() else {
         send_rep_and_close(tcp, Rep::GeneralFailure).await;
         return;
@@ -882,7 +889,18 @@ async fn handle_connection(
     let policy = DialPolicy {
         deny_host_local: true,
     };
-    match open_tunnel(&carrier, &request.host, request.port, policy).await {
+    // Read again: the rate wait above can be long enough for the carrier to
+    // have been swapped or lost. A handshake still waiting for
+    // `ConnectResult` on a carrier that is then left gets `REP 0x01` too.
+    let Some(current) = carrier.current() else {
+        send_rep_and_close(tcp, Rep::GeneralFailure).await;
+        return;
+    };
+    let opened = tokio::select! {
+        opened = open_tunnel(&current, &request.host, request.port, policy) => opened,
+        () = carrier.left(&current) => Err(ForwardConnError::CarrierDisconnected),
+    };
+    match opened {
         Ok(opened) => {
             if tcp
                 .write_all(&socks5::encode_reply(Rep::Succeeded))

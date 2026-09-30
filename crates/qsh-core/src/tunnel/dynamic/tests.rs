@@ -1161,3 +1161,99 @@ async fn socks_loop_logs_no_destination_above_debug() {
         "the destination must never appear above debug: {dynamic_events:?}"
     );
 }
+
+// ---------------------------------------------------------------
+// the carrier watch (ADR-0023 decisions 3 and 5)
+// ---------------------------------------------------------------
+
+use crate::tunnel::carrier::CarrierState;
+
+/// While the carrier is `Disconnected` a `CONNECT` is answered `REP 0x01`
+/// right after the request is read, the socket closes normally, and no
+/// tunnel stream is opened. Removing the `current()` check before the slot
+/// reservation makes this red (the request would fall through to
+/// `open_tunnel` with no carrier).
+#[tokio::test]
+async fn dynamic_forward_replies_rep_01_while_the_carrier_is_disconnected() {
+    let forward = generous_forward().await;
+    let addr = forward.local_addr();
+    let (client_conn, host_conn) = loopback_pair().await;
+    let opened = Arc::new(AtomicUsize::new(0));
+    let record = Arc::new(Mutex::new(FakeHostRecord::default()));
+    tokio::spawn(run_fake_host(
+        host_conn.clone(),
+        Arc::clone(&record),
+        Arc::clone(&opened),
+        |_| ok_result(),
+    ));
+    let (tx, rx) = tokio::sync::watch::channel(CarrierState::Disconnected);
+    let runner = tokio::spawn(forward.run(CarrierView::watching(rx, None)));
+
+    let mut tcp = TcpStream::connect(addr).await.unwrap();
+    greet_no_auth(&mut tcp).await;
+    tcp.write_all(&connect_request_bytes("example.test", 80))
+        .await
+        .unwrap();
+    let rep = read_rep(&mut tcp).await;
+    assert_eq!(rep[1], Rep::GeneralFailure.code());
+    let mut trailing = [0u8; 1];
+    assert_eq!(
+        tcp.read(&mut trailing).await.unwrap(),
+        0,
+        "the REP must be followed by a clean FIN, not a reset"
+    );
+    assert_eq!(opened.load(Ordering::SeqCst), 0, "no stream while down");
+
+    // Back up: the same listener serves the next CONNECT.
+    tx.send(CarrierState::Live(Arc::new(ForwardCarrier::Quic(
+        client_conn,
+    ))))
+    .unwrap();
+    let mut tcp = TcpStream::connect(addr).await.unwrap();
+    greet_no_auth(&mut tcp).await;
+    tcp.write_all(&connect_request_bytes("example.test", 80))
+        .await
+        .unwrap();
+    let rep = read_rep(&mut tcp).await;
+    assert_eq!(rep[1], Rep::Succeeded.code());
+    assert_eq!(opened.load(Ordering::SeqCst), 1);
+
+    runner.abort();
+    drop((tcp, host_conn));
+}
+
+/// A `CONNECT` still waiting for `ConnectResult` when its carrier is left
+/// gets `REP 0x01` in place instead of hanging on the dead connection.
+#[tokio::test]
+async fn a_dynamic_connect_awaiting_connect_result_is_refused_when_the_carrier_is_left() {
+    let forward = generous_forward().await;
+    let addr = forward.local_addr();
+    let (client_conn, host_conn) = loopback_pair().await;
+    let (got_header_tx, got_header_rx) = tokio::sync::oneshot::channel();
+    let host = tokio::spawn(async move {
+        let (send, recv) = host_conn.accept_bi().await.unwrap();
+        let mut framed = qsh_transport::FramedStream::data(send, recv);
+        let _header: StreamHeader = framed.recv.recv().await.unwrap().expect("header");
+        let _ = got_header_tx.send(());
+        std::future::pending::<()>().await;
+        drop(framed);
+    });
+    let (tx, rx) = tokio::sync::watch::channel(CarrierState::Live(Arc::new(ForwardCarrier::Quic(
+        client_conn,
+    ))));
+    let runner = tokio::spawn(forward.run(CarrierView::watching(rx, None)));
+
+    let mut tcp = TcpStream::connect(addr).await.unwrap();
+    greet_no_auth(&mut tcp).await;
+    tcp.write_all(&connect_request_bytes("example.test", 80))
+        .await
+        .unwrap();
+    got_header_rx.await.unwrap();
+    tx.send(CarrierState::Disconnected).unwrap();
+    let rep = tokio::time::timeout(Duration::from_secs(10), read_rep(&mut tcp))
+        .await
+        .expect("the waiting CONNECT must be answered, not left hanging");
+    assert_eq!(rep[1], Rep::GeneralFailure.code());
+    runner.abort();
+    host.abort();
+}

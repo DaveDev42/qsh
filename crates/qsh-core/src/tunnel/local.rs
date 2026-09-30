@@ -51,6 +51,7 @@ use tokio::task::JoinSet;
 
 use crate::client::ClientError;
 use crate::client::link::DataLink;
+use crate::tunnel::carrier::CarrierView;
 use crate::tunnel::dial::DialPolicy;
 #[cfg(unix)]
 use crate::tunnel::splice::splice_tcp_uds;
@@ -69,14 +70,15 @@ pub(crate) enum ForwardCarrier {
     /// `qsh_transport::Connection` is itself a cheap handle, so this holds
     /// one rather than borrowing.
     ///
-    /// A **snapshot**, deliberately: it is the connection the forward was
-    /// started on, not a view of whichever connection the owning attach
-    /// currently holds. A forward-route recovery replaces the attach's
-    /// connection (`crate::ops::session`'s `Link::replace`), and streams
-    /// opened here after that point fail on the old one — a forward has to
-    /// be restarted across a recovery. Tunnel behavior under resume/chaos
-    /// is `PLAN.md` M4 Step 8's subject; nothing before it promises a
-    /// forward survives a reconnect.
+    /// The connection the forward was started on, not a view of whichever
+    /// connection the owning attach currently holds. A forward-route
+    /// recovery replaces the attach's connection (`crate::ops::session`'s
+    /// `Link::replace`), and streams opened on the old one after that point
+    /// fail. The accept loop reads its carrier from a
+    /// [`CarrierView`] at accept time: a default forward's view is fixed on
+    /// this connection, so it stays bound to it; a supervised tunnel
+    /// (ADR-0023) swaps the value under the running listener, so new
+    /// accepts ride the replacement connection.
     Quic(qsh_transport::Connection),
     /// This machine's resident `qsh listen` daemon socket plus the host
     /// name to relay to (reverse route) — see [`DataLink::Local`].
@@ -192,6 +194,12 @@ pub(crate) enum ForwardConnError {
     /// instead of panicking a live connection's task.
     #[error("this tunnel carrier cannot surrender a raw byte pipe")]
     CarrierNotRaw,
+    /// The forward's carrier is disconnected (ADR-0023 decision 5): either
+    /// it already was when the connection arrived, or it was left while this
+    /// connection waited for `ConnectResult`. Only a supervised tunnel ever
+    /// produces this.
+    #[error("the tunnel's connection is down")]
+    CarrierDisconnected,
     /// The byte pipe itself broke mid-transfer.
     #[error(transparent)]
     Splice(#[from] SpliceError),
@@ -271,7 +279,8 @@ impl LocalForward {
     /// Cancel-safe at every await: [`TcpListener::accept`] and
     /// [`JoinSet::join_next`] both are, so dropping this future mid-poll
     /// loses at most one not-yet-accepted connection.
-    pub(crate) async fn run(self, carrier: Arc<ForwardCarrier>) -> io::Error {
+    pub(crate) async fn run(self, carrier: impl Into<CarrierView>) -> io::Error {
+        let carrier: CarrierView = carrier.into();
         let mut tasks: JoinSet<()> = JoinSet::new();
         loop {
             tokio::select! {
@@ -302,11 +311,26 @@ impl LocalForward {
                             AcceptDisposition::Fatal => return err,
                         },
                     };
-                    let carrier = Arc::clone(&carrier);
+                    carrier.note_activity();
+                    // The carrier is read here, per accept, so a swap by a
+                    // supervisor is seen by the very next connection. While
+                    // disconnected the connection is refused at once with an
+                    // RST, never queued (ADR-0023 decision 5).
+                    let Some(current) = carrier.current() else {
+                        tracing::debug!(
+                            host = self.host,
+                            port = self.host_port,
+                            %peer,
+                            "qsh::tunnel: refused, the tunnel's connection is down"
+                        );
+                        let _ = abort_local(tcp, ForwardConnError::CarrierDisconnected);
+                        continue;
+                    };
+                    let view = carrier.clone();
                     let host = self.host.clone();
                     let host_port = self.host_port;
                     tasks.spawn(async move {
-                        match forward_connection(tcp, &carrier, &host, host_port).await {
+                        match forward_connection(tcp, &current, &view, &host, host_port).await {
                             Ok(stats) => tracing::debug!(
                                 host,
                                 port = host_port,
@@ -643,7 +667,8 @@ pub(crate) async fn splice_opened(
 /// [`abort_local`] discipline — behavior identical to before the split.
 async fn forward_connection(
     tcp: TcpStream,
-    carrier: &ForwardCarrier,
+    carrier: &Arc<ForwardCarrier>,
+    view: &CarrierView,
     host: &str,
     port: u16,
 ) -> Result<SpliceStats, ForwardConnError> {
@@ -653,7 +678,14 @@ async fn forward_connection(
     let policy = DialPolicy {
         deny_host_local: false,
     };
-    let opened = match open_tunnel(carrier, host, port, policy).await {
+    // A handshake still waiting for `ConnectResult` on a carrier that has
+    // been left is refused here the same way; once `open_tunnel` returns
+    // `Ok` the splice below is never interrupted by a carrier switch.
+    let opened = tokio::select! {
+        opened = open_tunnel(carrier, host, port, policy) => opened,
+        () = view.left(carrier) => Err(ForwardConnError::CarrierDisconnected),
+    };
+    let opened = match opened {
         Ok(opened) => opened,
         Err(err) => return Err(abort_local(tcp, err)),
     };
