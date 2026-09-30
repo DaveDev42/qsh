@@ -452,6 +452,65 @@ fn shared_store_reloads_when_the_file_mtime_moves() {
     assert_eq!(shared.snapshot().peers().len(), 2);
 }
 
+/// "One machine, two aliases" (README "Reverse connections"): when two
+/// `trust.toml` names share one fingerprint, `lookup_pin` returns the first
+/// one in file order, so an inbound `[[acl]]` row must be written for that
+/// name. The second name never becomes the principal.
+#[test]
+fn lookup_pin_returns_the_first_name_pinned_for_a_shared_fingerprint() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("trust.toml");
+
+    let mut store = TrustStore::default();
+    store.add_peer("first", None, fp(b"one"), "t".into());
+    store.add_peer("second", None, fp(b"one"), "t".into());
+    store.save(&path).unwrap();
+
+    let shared = SharedTrustStore::open(&path).unwrap();
+    assert_eq!(
+        shared.lookup_pin(&fp(b"one")),
+        Some(Principal::Device("first".into()))
+    );
+}
+
+/// The same alias pair as above, reordered on disk while the store is open:
+/// the next `lookup_pin` returns the other name with no restart, because
+/// `refresh` re-reads the file on every call.
+#[test]
+fn lookup_pin_follows_a_reordered_trust_toml_without_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("trust.toml");
+
+    let mut store = TrustStore::default();
+    store.add_peer("first", None, fp(b"one"), "t".into());
+    store.add_peer("second", None, fp(b"one"), "t".into());
+    store.save(&path).unwrap();
+
+    let shared = SharedTrustStore::open(&path).unwrap();
+    assert_eq!(
+        shared.lookup_pin(&fp(b"one")),
+        Some(Principal::Device("first".into()))
+    );
+
+    let mut reordered = TrustStore::default();
+    reordered.add_peer("second", None, fp(b"one"), "t".into());
+    reordered.add_peer("first", None, fp(b"one"), "t".into());
+    reordered.save(&path).unwrap();
+    let bumped = SystemTime::now() + std::time::Duration::from_secs(5);
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(bumped)
+        .unwrap();
+
+    assert_eq!(
+        shared.lookup_pin(&fp(b"one")),
+        Some(Principal::Device("second".into())),
+        "a reordered trust.toml must change the principal without a restart"
+    );
+}
+
 /// **`PLAN.md` M7 Step 2 P2-2, regression.** An mtime-only invalidator
 /// is fail-open on a coarse-granularity filesystem (HFS+, exFAT/FAT,
 /// some SMB/NFS mounts, 1-2s resolution): two edits landing in the same
