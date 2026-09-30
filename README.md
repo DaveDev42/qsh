@@ -48,7 +48,16 @@ OpenSSH Ed25519 key, `qsh doctor` gained `acl_forward_socks_ineffective`,
 and the reverse `cause` vocabulary now separates a QUIC idle timeout
 (`idle_timeout`) from `path_dead`. Two M11 items are field work for a
 person: observing the `cause` distribution on real links, and 72 fuzz-hours
-on the new OpenSSH key parser. What works end to end today:
+on the new OpenSSH key parser. M12 (supervised tunnels and `qsh setup`) has
+landed its features on main, with no release cut from them yet:
+`qsh tunnel open --supervise` re-establishes a `-L`, `-D` or `-R` tunnel
+after a lost connection, `--accept-hold` holds new connections during the
+gap, the `qsh::lifecycle` stderr lines mark process start and end, and
+`qsh setup` walks one machine through a role. The closing campaign items
+are for a person: the `p1-supervise-wake` rounds
+(`docs/campaigns/p1-supervise-wake.md`) and the `p1-setup-stopwatch`
+rounds (`docs/campaigns/p1-setup-stopwatch.md`). What works end to end
+today:
 
 - `qsh exec host -- cmd`, in human mode or as a single `qsh.cli/v1` JSON
   envelope with the remote exit code, stdout and stderr.
@@ -736,7 +745,9 @@ to the registry yet.
 | M8 | Hardening (fuzz, soak, real-device mobility campaign) | Code done; mobility campaign, wire freeze and security review open |
 | M9 | Human-facing surface (naming, pairing, service install) | Features done; stopwatch campaign open |
 | M10 | Release (installers, Homebrew, notarization, musl, provenance) | Pipeline done; clean-VM campaign open |
-| M11–M19 | P1, starting with issue follow-ups and ACL visibility (M11); the rest is in `docs/ROADMAP.md` §5 | Features done; `cause` observation and parser fuzz-hours open |
+| M11 | Issue follow-ups and ACL visibility (first P1 milestone) | Features done; `cause` observation and parser fuzz-hours open |
+| M12 | Supervised tunnels (`--supervise`, `--accept-hold`) and `qsh setup` | Features done on main, not yet in a release; the `p1-supervise-wake` and `p1-setup-stopwatch` campaign rounds are open (human-owned) |
+| M13–M19 | Rest of P1, in `docs/ROADMAP.md` §5 | Not started |
 
 The Homebrew tap (`DaveDev42/tap`) and the release workflow's auto-bump
 job are wired and have run on `v0.2.0` and `v0.3.0`. What M10 still owes is a
@@ -802,14 +813,21 @@ Some of these are MVP scope decisions, some are unfinished work.
   peer; the envelope printed at open keeps the first one, and the current
   one is in the `reestablished` diagnostic line and in `qsh tunnels` on a
   reverse route. A supervised forward tunnel re-dials the address it
-  resolved when it was opened and never looks the host up again, so a peer that moved to a new
-  address is not followed. A supervised reverse tunnel asks the local
-  daemon again and never looks at a forward pin of the same name. The first
-  open picks its route by the usual rules, so a reverse-only host must not
-  have an address in its pin if the tunnel is to open over the reverse
-  route. TCP connections that were spliced when the connection died are
-  not resumed. They end, the same as without the flag, and only new
-  connections ride the re-established one.
+  resolved when it was opened and never looks the host up again, so a peer
+  that moved to a new address is not followed. A supervised reverse tunnel
+  asks the local daemon again and never looks at a forward pin of the same
+  name. The first open picks its route by the usual rules, so a reverse-only
+  host must not have an address in its pin if the tunnel is to open over the
+  reverse route. The first open itself is not supervised: if it fails, the
+  command fails as it does without the flag, and a host that is not up yet
+  is a job for `--wait` or a service manager restart. A TCP connection
+  that was spliced when the connection died lives on only if the old
+  connection comes back, which only a forward route can do; otherwise it
+  ends, the same as without the flag, and only new connections ride the
+  re-established one. Sleep detection compares the wall clock with the
+  monotonic clock, and whether the monotonic clock stops during sleep on
+  Windows is unverified, so there it may never fire and a lost connection
+  is found by the ordinary dead-path detection alone.
 - `qsh serve` and `qsh listen` share one default port. Both bind `[::]:4433`
   unless told otherwise, so a machine taking both roles needs an explicit
   `--bind` (or `[serve].bind`/`[listen].bind`) for at least one of them. The
