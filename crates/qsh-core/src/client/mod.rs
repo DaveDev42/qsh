@@ -30,6 +30,7 @@ use crate::ops::OpError;
 pub mod link;
 pub mod pathwatch;
 pub mod reconnect;
+pub mod wake;
 
 use link::{ControlLink, DataKillSwitch, DataRecv, DataSend};
 
