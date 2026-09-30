@@ -1041,6 +1041,85 @@ fn pinned_principal_index_empty_names_no_device() {
     assert!(!PinnedPrincipalIndex::empty().names_device("anything"));
 }
 
+// `acl_forward_socks_ineffective` (ADR-0019 결정 6·14, 결과 절 R6):
+// `PinnedPrincipalIndex::forward_socks_ineffective_rows` (`crate::doctor::
+// ACL_FORWARD_SOCKS_INEFFECTIVE`'s detector). Every case below puts the
+// candidate row (an exact `forward.socks` grant) first, at array index 0,
+// and asserts only whether *that* row is flagged.
+#[test]
+fn pinned_principal_index_lists_forward_socks_rows_not_covered_by_forward_local_for_the_same_principal_and_auth_path()
+ {
+    struct Case {
+        name: &'static str,
+        acl: &'static str,
+        row0_flagged: bool,
+    }
+    let cases = [
+        Case {
+            name: "the same row's forward.local covers it",
+            acl: "[[acl]]\nprincipal = \"device:a\"\nallow = [\"forward.socks\", \"forward.local\"]\n",
+            row0_flagged: false,
+        },
+        Case {
+            name: "the same row's forward.* family wildcard covers it",
+            acl: "[[acl]]\nprincipal = \"device:a\"\nallow = [\"forward.socks\", \"forward.*\"]\n",
+            row0_flagged: false,
+        },
+        Case {
+            name: "a different row for the same principal and auth_path covers it",
+            acl: "[[acl]]\nprincipal = \"device:a\"\nallow = [\"forward.socks\"]\n\n\
+                  [[acl]]\nprincipal = \"device:a\"\nallow = [\"forward.local\"]\n",
+            row0_flagged: false,
+        },
+        Case {
+            name: "a pin row's forward.socks is not covered by a ca row's forward.local \
+                   (auth_path is part of the matching key, so the two never share it)",
+            acl: "[[acl]]\nprincipal = \"device:a\"\nallow = [\"forward.socks\"]\n\n\
+                  [[acl]]\nprincipal = \"device:a\"\nauth_path = \"ca\"\nallow = [\"forward.local\"]\n",
+            row0_flagged: true,
+        },
+        Case {
+            name: "a device:<name> row's forward.socks is still flagged when only a \
+                   fp:sha256:<fingerprint> row for the same peer grants forward.local \
+                   (matching is on the literal principal string, ACL_FORWARD_SOCKS_INEFFECTIVE's \
+                   own documented limitation)",
+            acl: "[[acl]]\nprincipal = \"device:a\"\nallow = [\"forward.socks\"]\n\n\
+                  [[acl]]\nprincipal = \"fp:sha256:AAAA\"\nallow = [\"forward.local\"]\n",
+            row0_flagged: true,
+        },
+    ];
+
+    for case in cases {
+        let dir = tempfile::tempdir().unwrap();
+        write_acl(dir.path(), case.acl);
+        let load = PolicySource::load(&paths_with(dir.path()));
+        let policy = load
+            .as_loaded()
+            .unwrap_or_else(|| panic!("{}: valid acl.toml must load", case.name));
+        let index = PinnedPrincipalIndex::from_policy(policy);
+        let row0 = index
+            .forward_socks_ineffective_rows()
+            .iter()
+            .find(|(row, _)| *row == 0);
+        assert_eq!(
+            row0.is_some(),
+            case.row0_flagged,
+            "{}: {:?}",
+            case.name,
+            index.forward_socks_ineffective_rows()
+        );
+        if case.row0_flagged {
+            assert_eq!(
+                row0.unwrap().1,
+                AuthPath::Pin,
+                "{}: row 0's own auth_path (defaulted to pin) must be reported, not the \
+                 covering row's",
+                case.name
+            );
+        }
+    }
+}
+
 #[test]
 fn load_or_deny_with_index_returns_the_empty_index_on_a_missing_or_invalid_policy() {
     // `DenyAll` is what is actually enforced in both cases, so no row —
