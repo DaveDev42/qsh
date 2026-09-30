@@ -98,4 +98,12 @@ qsh-core = { path = "crates/qsh-core", version = "0.3.0" }
 # Not published, so no version. cargo drops a versionless path dev-dependency
 # entirely from the published manifest (measured: the published qsh-cli
 # manifest has no qsh-testkit entry), so this line does not block qsh-cli.
+#
+# Publishing note: the four public crates set `exclude = ["/tests/"]`. Because
+# the line above is dropped from the published manifest, most integration tests
+# could not compile from an extracted tarball, and qsh-cli's fixtures and
+# `ssh_golden` would only add size. Inline `#[cfg(test)]` modules and sibling
+# `tests.rs` files live under `src/`, so they still ship. The leading slash
+# matters: an unanchored `tests/` would also drop the `src/**/tests/` module
+# directories and break the build.
 qsh-testkit = { path = "crates/qsh-testkit" }

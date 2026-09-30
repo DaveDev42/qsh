@@ -9,6 +9,9 @@ readme.workspace = true
 description = "A QUIC-based direct-connect remote shell whose sessions survive IP changes, sleep and network switches. Installs the qsh binary."
 keywords = ["quic", "remote-shell", "ssh", "terminal", "pty"]
 categories = ["command-line-utilities", "network-programming"]
+# Integration tests stay out of the tarball (see the publishing note in the
+# workspace root Cargo.toml). Anchored so `src/**/tests/` module dirs ship.
+exclude = ["/tests/"]
 
 [[bin]]
 name = "qsh"

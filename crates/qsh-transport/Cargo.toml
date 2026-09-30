@@ -9,6 +9,9 @@ readme.workspace = true
 description = "QUIC transport layer (quinn + rustls) for qsh, a QUIC-based direct-connect remote shell."
 keywords = ["quic", "remote-shell", "quinn", "rustls", "transport"]
 categories = ["network-programming", "asynchronous"]
+# Integration tests stay out of the tarball (see the publishing note in the
+# workspace root Cargo.toml). Anchored so `src/**/tests/` module dirs ship.
+exclude = ["/tests/"]
 
 [dependencies]
 qsh-proto.workspace = true
