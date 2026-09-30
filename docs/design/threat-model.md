@@ -17,6 +17,7 @@
 - 로컬 상태 파일(identity, trust, invites, resume, audit)과 그 권한.
 - localctl UDS(`qsh.local.v1`) — freeze 대상은 아니지만(protocol.md §16.3) 진입점으로는 이 문서 안에 있다.
 - M9가 신설한 사람용 표면 명령 여섯 — `pair invite|accept --as`, `identity export`, `trust add --cert-file`, `trust add-ca`, `trust rename`, `service install|uninstall|status`. 구현은 `db122f5`·`699af37`·`93e8b76`·`bd34c92`로 착지했고, 진입점은 §3, 위협은 §4, 핀이 없는 것은 §5와 §7에 있다. §5 g4는 닫혔다.
+- M11이 더한 로컬 표면 셋 — `qsh acl show`, `qsh init --import-ssh-key`, `qsh trust ssh-preview`. 진입점은 §3, 위협은 §4(A14·D13), 잔여 위험은 §7(h28·h29)에 있다.
 
 비범위:
 

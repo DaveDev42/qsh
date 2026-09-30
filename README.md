@@ -41,7 +41,14 @@ build, build-provenance attestation on every asset, man pages inside the
 unix archive, a Developer ID signing and notarization path that runs when
 the Apple credentials are configured, and a release-profile functional
 smoke on every build leg. What is left is the clean-VM campaign named
-above. What works end to end today:
+above. M11 (issue follow-ups and ACL visibility, the first P1 milestone)
+has landed its code: `qsh acl show` summarizes what `acl.toml` grants one
+principal, `qsh init --import-ssh-key` and `qsh trust ssh-preview` reuse an
+OpenSSH Ed25519 key, `qsh doctor` gained `acl_forward_socks_ineffective`,
+and the reverse `cause` vocabulary now separates a QUIC idle timeout
+(`idle_timeout`) from `path_dead`. Two M11 items are field work for a
+person: observing the `cause` distribution on real links, and 72 fuzz-hours
+on the new OpenSSH key parser. What works end to end today:
 
 - `qsh exec host -- cmd`, in human mode or as a single `qsh.cli/v1` JSON
   envelope with the remote exit code, stdout and stderr.
@@ -688,7 +695,7 @@ to the registry yet.
 | M8 | Hardening (fuzz, soak, real-device mobility campaign) | Code done; mobility campaign, wire freeze and security review open |
 | M9 | Human-facing surface (naming, pairing, service install) | Features done; stopwatch campaign open |
 | M10 | Release (installers, Homebrew, notarization, musl, provenance) | Pipeline done; clean-VM campaign open |
-| M11–M19 | P1, starting with issue follow-ups and ACL visibility (M11); the rest is in `docs/ROADMAP.md` §5 | M11 in progress |
+| M11–M19 | P1, starting with issue follow-ups and ACL visibility (M11); the rest is in `docs/ROADMAP.md` §5 | Features done; `cause` observation and parser fuzz-hours open |
 
 The Homebrew tap (`DaveDev42/tap`) and the release workflow's auto-bump
 job are wired and have run on `v0.2.0` and `v0.3.0`. What M10 still owes is a
