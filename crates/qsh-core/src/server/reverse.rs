@@ -2,6 +2,13 @@
 
 use super::*;
 
+/// How long [`Server::handle_rfwd_close`] waits for the aborted forward task
+/// to end (and so drop its listener) before it answers anyway. One second:
+/// an aborted accept loop ends within a scheduler tick, so this bound is hit
+/// only when the runtime is starved, and the client-side bind retry
+/// (ADR-0023 decision 7-4) covers that case.
+pub(super) const RFWD_CLOSE_JOIN_BOUND: std::time::Duration = std::time::Duration::from_secs(1);
+
 impl Server {
     // ------------------------------------------------------------------
     // remote forward (`-R`), M4 Step 4 — `RemoteForwardOpen`/`Close`
@@ -323,7 +330,7 @@ impl Server {
     /// `docs/CLI.md` §2.5's full owning-peer semantics for `tunnel.close`
     /// (as an `Ops` surface) are `PLAN.md` M4 Step 5 scope; this is the
     /// wire-level primitive that step builds on.
-    pub(super) fn handle_rfwd_close(
+    pub(super) async fn handle_rfwd_close(
         &self,
         ctx: &ConnCtx,
         request_id: u64,
@@ -375,7 +382,25 @@ impl Server {
             .remove(&req.forward_id);
         match removed {
             Some(entry) => {
-                entry.task.abort();
+                let RemoteForwardEntry { task, .. } = entry;
+                task.abort();
+                // The abort only schedules the cancel; the listener is
+                // dropped when the task actually ends. Answer success
+                // only after that, so a peer that re-binds the port right
+                // after the reply (ADR-0023 decision 16) does not race the
+                // old listener. Bounded (PLAN.md 4.1 #6): past the bound
+                // the reply goes out as before and the client-side
+                // retry covers the rest. The cancel result is ignored.
+                if tokio::time::timeout(RFWD_CLOSE_JOIN_BOUND, task)
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!(
+                        principal = %ctx.principal,
+                        forward_id = req.forward_id,
+                        "tunnel: remote forward task did not end within the close bound"
+                    );
+                }
                 tracing::info!(
                     principal = %ctx.principal,
                     forward_id = req.forward_id,

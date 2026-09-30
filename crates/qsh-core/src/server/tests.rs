@@ -4912,7 +4912,7 @@ async fn the_listener_permit_is_released_by_both_removal_sites() {
     let close = wire::RemoteForwardClose {
         forward_id: opened2.forward_id.clone(),
     };
-    let closed = rig.server.handle_rfwd_close(&ctx2, 4, &close);
+    let closed = rig.server.handle_rfwd_close(&ctx2, 4, &close).await;
     assert_eq!(error_code(&closed), None, "{closed:?}");
 
     let reply4 = rig.server.handle_rfwd_open(&ctx2, &host2, 5, &req).await;
@@ -5147,7 +5147,7 @@ async fn rfwd_open_end_to_end_streams_tcp_accepted_then_close_tears_down() {
     let close = wire::RemoteForwardClose {
         forward_id: opened.forward_id.clone(),
     };
-    let closed = rig.server.handle_rfwd_close(&ctx, 8, &close);
+    let closed = rig.server.handle_rfwd_close(&ctx, 8, &close).await;
     assert!(
         matches!(
             &closed.body,
@@ -5158,7 +5158,7 @@ async fn rfwd_open_end_to_end_streams_tcp_accepted_then_close_tears_down() {
         "RemoteForwardClose succeeds with a bare Response, no dedicated payload: {closed:?}"
     );
 
-    let again = rig.server.handle_rfwd_close(&ctx, 9, &close);
+    let again = rig.server.handle_rfwd_close(&ctx, 9, &close).await;
     assert_eq!(
         error_code(&again),
         Some(ErrorCode::InvalidArgument),
@@ -5199,7 +5199,7 @@ async fn rfwd_close_malformed_forward_id_is_invalid_argument_and_closes_nothing(
         let close = wire::RemoteForwardClose {
             forward_id: id.to_string(),
         };
-        let reply = rig.server.handle_rfwd_close(&ctx, 8, &close);
+        let reply = rig.server.handle_rfwd_close(&ctx, 8, &close).await;
         assert_eq!(
             error_code(&reply),
             Some(ErrorCode::InvalidArgument),
@@ -5211,7 +5211,7 @@ async fn rfwd_close_malformed_forward_id_is_invalid_argument_and_closes_nothing(
     let close = wire::RemoteForwardClose {
         forward_id: opened.forward_id.clone(),
     };
-    let closed = rig.server.handle_rfwd_close(&ctx, 9, &close);
+    let closed = rig.server.handle_rfwd_close(&ctx, 9, &close).await;
     assert!(
         matches!(
             &closed.body,
@@ -5281,6 +5281,145 @@ async fn dispatch_rfwd_close_unknown_forward_is_invalid_argument() {
     let reply = rig.server.dispatch(&ctx, &msg).await.unwrap();
 
     assert_eq!(error_code(&reply), Some(ErrorCode::InvalidArgument));
+}
+
+/// ADR-0023 decision 16: the success reply to `RemoteForwardClose` means the
+/// aborted forward task has ended and its listener is dropped, so a peer that
+/// re-binds the port right away (decision 7-4's close-then-open) never loses
+/// that race. Real sockets, so the assertion is the plain bind outcome, run
+/// 100 times.
+#[tokio::test]
+async fn rfwd_close_success_means_the_port_can_be_bound_immediately() {
+    let (client_conn, host_conn) = crate::tunnel::testutil::loopback_pair().await;
+    let rig = allow_rig();
+    let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
+
+    for round in 0..100u64 {
+        let req = rfwd_open("127.0.0.1", 0, "127.0.0.1", 9);
+        let reply = rig
+            .server
+            .handle_rfwd_open(&ctx, &host_conn, round * 2 + 1, &req)
+            .await;
+        let response::Body::RfwdOpened(opened) = response_body(&reply) else {
+            panic!("round {round}: expected RfwdOpened, got {reply:?}");
+        };
+        let port = u16::try_from(opened.actual_port).unwrap();
+        let close = wire::RemoteForwardClose {
+            forward_id: opened.forward_id.clone(),
+        };
+        let closed = rig
+            .server
+            .handle_rfwd_close(&ctx, round * 2 + 2, &close)
+            .await;
+        assert_eq!(error_code(&closed), None, "round {round}: {closed:?}");
+        let rebound = std::net::TcpListener::bind(("127.0.0.1", port));
+        assert!(
+            rebound.is_ok(),
+            "round {round}: port {port} was still held after the close reply: {:?}",
+            rebound.err()
+        );
+    }
+
+    drop(host_conn);
+    drop(client_conn);
+}
+
+/// The `authorize_owned` half of ROADMAP M12 DoD (a): under `scope = "owned"`
+/// another principal's close is `PERMISSION_DENIED`, and the wait added for
+/// decision 16 is never reached, so the listener stays bound and registered.
+#[tokio::test]
+async fn rfwd_close_by_another_principal_under_owned_scope_is_permission_denied_and_the_listener_stays()
+ {
+    use crate::acl::{ActionPattern, Op, Policy, Rule, Scope};
+    let row = |principal: &str| Rule {
+        principal: principal.to_string(),
+        auth_path: AuthPath::Pin,
+        allow: vec![
+            ActionPattern::Exact(Op::ForwardRemote.action()),
+            ActionPattern::Exact(Op::ForwardRemoteClose.action()),
+        ],
+        scope: Scope::Owned,
+    };
+    let policy = Policy {
+        rules: vec![row("device:laptop"), row("device:desktop")],
+    };
+    let (client_conn, host_conn) = crate::tunnel::testutil::loopback_pair().await;
+    let rig = rig(Arc::new(policy));
+    let owner = ctx(Principal::Device("laptop".into()), ALL_CAPS);
+    let other = ConnCtx {
+        conn_id: owner.conn_id + 1,
+        ..ctx(Principal::Device("desktop".into()), ALL_CAPS)
+    };
+
+    let req = rfwd_open("127.0.0.1", 0, "127.0.0.1", 9);
+    let reply = rig
+        .server
+        .handle_rfwd_open(&owner, &host_conn, 1, &req)
+        .await;
+    let response::Body::RfwdOpened(opened) = response_body(&reply) else {
+        panic!("expected RfwdOpened, got {reply:?}");
+    };
+    let port = u16::try_from(opened.actual_port).unwrap();
+    let close = wire::RemoteForwardClose {
+        forward_id: opened.forward_id.clone(),
+    };
+
+    let denied = rig.server.handle_rfwd_close(&other, 2, &close).await;
+    assert_eq!(
+        error_code(&denied),
+        Some(ErrorCode::PermissionDenied),
+        "{denied:?}"
+    );
+    assert!(
+        rig.server
+            .remote_forwards
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(&opened.forward_id),
+        "a denied close must leave the forward registered"
+    );
+    assert!(
+        std::net::TcpListener::bind(("127.0.0.1", port)).is_err(),
+        "a denied close must leave the listener bound"
+    );
+
+    let closed = rig.server.handle_rfwd_close(&owner, 3, &close).await;
+    assert_eq!(error_code(&closed), None, "{closed:?}");
+
+    drop(host_conn);
+    drop(client_conn);
+}
+
+/// A forward already removed by `purge_connection` (its connection died) is
+/// simply gone: a later close finds nothing and answers "no such forward_id".
+#[tokio::test]
+async fn rfwd_close_of_a_purged_forward_id_is_no_such_forward_id() {
+    let (client_conn, host_conn) = crate::tunnel::testutil::loopback_pair().await;
+    let rig = allow_rig();
+    let ctx = ctx(Principal::Device("laptop".into()), ALL_CAPS);
+
+    let req = rfwd_open("127.0.0.1", 0, "127.0.0.1", 9);
+    let reply = rig.server.handle_rfwd_open(&ctx, &host_conn, 1, &req).await;
+    let response::Body::RfwdOpened(opened) = response_body(&reply) else {
+        panic!("expected RfwdOpened, got {reply:?}");
+    };
+    rig.server.purge_connection(ctx.conn_id, ()).await;
+
+    let close = wire::RemoteForwardClose {
+        forward_id: opened.forward_id.clone(),
+    };
+    let reply = rig.server.handle_rfwd_close(&ctx, 2, &close).await;
+    assert_eq!(error_code(&reply), Some(ErrorCode::InvalidArgument));
+    let Some(control_message::Body::Response(wire::Response {
+        body: Some(response::Body::Error(e)),
+    })) = &reply.body
+    else {
+        panic!("expected an error body, got {reply:?}");
+    };
+    assert_eq!(e.message, "no such forward_id");
+
+    drop(host_conn);
+    drop(client_conn);
 }
 
 /// The connection-bound lifetime half of `PLAN.md` M4 Step 4 (b): a

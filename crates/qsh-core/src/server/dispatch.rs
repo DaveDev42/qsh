@@ -108,7 +108,7 @@ impl Server {
             // over a `Server::remote_forwards` lookup plus an abort — so it
             // is handled inline here like every other control op.
             Some(control_message::Body::RfwdClose(req)) => {
-                Some(self.handle_rfwd_close(ctx, request_id, req))
+                Some(self.handle_rfwd_close(ctx, request_id, req).await)
             }
             // No body this build understands. prost drops unknown fields,
             // so a reserved (25 `SessionSignal`) or future control number
