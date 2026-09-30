@@ -70,7 +70,7 @@ for round in $(seq "$ROUNDS"); do
         tail -n 40 "$LOG" >&2
         exit 1
     fi
-    if [ "$round" -eq 1 ] && grep -q "0 tests run" "$LOG"; then
+    if [ "$round" -eq 1 ] && grep -qE "(^|[^0-9])0 tests run" "$LOG"; then
         echo "stress: warning: filterset matched 0 tests" >&2
     fi
 done
