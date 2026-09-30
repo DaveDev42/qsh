@@ -250,6 +250,86 @@ then restart the distro (`wsl --shutdown` from Windows, then reopen it).
 Without this, `systemctl` fails with a socket-connect error and the unit
 above never starts.
 
+## Supervised tunnels
+
+`qsh tunnel open` holds its tunnel only as long as the foreground process lives (`docs/CLI.md` §6.14). With `--supervise <ms>` the process re-establishes a lost forward-route `--local` or `--dynamic` tunnel by itself, keeping the listener bound, and gives up with exit `255` once the total outage passes `<ms>` (`docs/CLI.md` §6.9, ADR-0023). The service manager covers what the supervisor deliberately does not: a first `open` that fails (nothing is supervised before the tunnel exists), an exhausted budget, and a crash. Together they leave no outer retry loop to write.
+
+`qsh service install` does not generate these units. It manages the `serve`, `listen`, and `serve --to` modes only, and no test compares the fences below against generated output. They are hand-written examples, so the path, the host alias `hub`, the port `1080`, and the budget are yours to change. The fences use `plist` and `systemd` tags on purpose, so they stay outside the byte-for-byte check on the `xml` and `ini` fences above.
+
+Both examples run `qsh tunnel open hub --dynamic 1080 --supervise 300000`. The budget is five minutes of total outage, not counting the time the machine was asleep. The tunnel process writes the `tunnel.open` envelope to stdout once and the `qsh::lifecycle` and `qsh::tunnel::supervise` lines to stderr, which the log paths below collect (`docs/CLI.md` §6.14).
+
+`~/Library/LaunchAgents/io.qsh.tunnel-hub.plist`:
+
+```plist
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>io.qsh.tunnel-hub</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/YOU/.local/bin/qsh</string>
+    <string>tunnel</string>
+    <string>open</string>
+    <string>hub</string>
+    <string>--dynamic</string>
+    <string>1080</string>
+    <string>--supervise</string>
+    <string>300000</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>15</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>/Users/YOU</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/Users/YOU/Library/Logs/qsh/tunnel-hub.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/YOU/Library/Logs/qsh/tunnel-hub.err.log</string>
+</dict>
+</plist>
+```
+
+`~/.config/systemd/user/qsh-tunnel-hub.service`:
+
+```systemd
+[Unit]
+Description=qsh tunnel open hub --dynamic 1080 --supervise
+
+[Service]
+ExecStart=/home/YOU/.local/bin/qsh tunnel open hub --dynamic 1080 --supervise 300000
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target
+```
+
+Load and enable them the same way as the units above, with the new label or unit name.
+
+What each side restarts:
+
+| Situation | Who acts | Result |
+|---|---|---|
+| Connection lost (sleep, VPN or underlay switch, peer restart) | the supervisor inside the process | Same listener, same `tunnel_id`; `lost`, `retry`, `reestablished` lines on stderr |
+| Total outage past `--supervise` | the process, then the service manager | `gave_up` line, exit `255`, a fresh `open` after `ThrottleInterval` or `RestartSec` |
+| First `open` fails (host unreachable, no ACL yet, reverse registration stale) | the service manager | Exit `255` and a retry. Add `--wait <ms>` for a stale reverse registration (`docs/CLI.md` §6.9) |
+| `SIGTERM` from `launchctl bootout` or `systemctl stop` | the supervisor | Listener released, exit `0` |
+
+A restart by the service manager opens a new tunnel, so every TCP connection that went through the old one is gone. Only the supervisor keeps a listener across a loss, and only for the forms `docs/CLI.md` §6.9 lists as supported. Any other form answers `UNSUPPORTED` with `--supervise` and relies on the service manager alone. `--supervise` does not retry a peer that rejects the pinned fingerprint or a policy that denies the request: both end the process with `AUTH_FAILED` or `PERMISSION_DENIED`, and the service manager then retries to the same result every few seconds. Fix the pin or `acl.toml` instead of widening the restart interval.
+
 ## Notes for both
 
 `Restart=always` (systemd) and `KeepAlive` (launchd) restart the process
