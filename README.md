@@ -125,7 +125,7 @@ http://internal-service/`.
 ## Install
 
 Prebuilt binaries for macOS (arm64, x86_64), Linux (x86_64 and aarch64
-against glibc, x86_64 against musl) and Windows (x86_64) are attached to
+against glibc, x86_64 and aarch64 against musl) and Windows (x86_64) are attached to
 each [GitHub release](https://github.com/DaveDev42/qsh/releases). The
 one-line installer below covers macOS and Linux; on Windows take the
 `.zip` (see [Manual download](#manual-download)).
@@ -161,7 +161,7 @@ would.
 | `QSH_VERSION` | latest release | Release tag to install, e.g. `v0.1.0-alpha.1` |
 | `QSH_INSTALL_DIR` | `$HOME/.local/bin` | Where the `qsh` binary lands (created if missing) |
 | `QSH_REPO` | `DaveDev42/qsh` | `owner/repo` to install from, for forks and testing |
-| `QSH_LIBC` | `gnu` | Linux only. `musl` picks the static x86_64 build for old-glibc distributions |
+| `QSH_LIBC` | `gnu` | Linux only. `musl` picks the static build (x86_64 or aarch64) for old-glibc distributions |
 
 Every release asset cut after `v0.2.0` carries a build provenance
 attestation, `SHA256SUMS` included. With the GitHub CLI you can check one

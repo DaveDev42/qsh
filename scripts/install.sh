@@ -18,7 +18,9 @@
 #                     than the gnu build needs. Opt-in, never auto-detected:
 #                     a glibc system runs the musl binary fine, so guessing
 #                     would quietly move people off the tested artifact.
-#                     x86_64 only.
+#                     x86_64 and aarch64. A tag cut before the aarch64 musl
+#                     leg existed has no such asset; on aarch64 the installer
+#                     checks that tag's SHA256SUMS first and says so.
 #
 # This script never invokes sudo. If QSH_INSTALL_DIR is not writable, it
 # fails with a message rather than escalating privileges on your behalf.
@@ -75,12 +77,7 @@ detect_target() {
             esac
             case "$arch" in
                 x86_64 | amd64) echo "x86_64-unknown-linux-${libc}" ;;
-                aarch64 | arm64)
-                    [ "$libc" = gnu ] ||
-                        die "no aarch64 musl asset is published; unset QSH_LIBC \
-to install the glibc build"
-                    echo "aarch64-unknown-linux-gnu"
-                    ;;
+                aarch64 | arm64) echo "aarch64-unknown-linux-${libc}" ;;
                 *) die "unsupported Linux architecture: $arch" ;;
             esac
             ;;
@@ -172,13 +169,31 @@ to the directory the binary should go in"
     trap 'exit 130' INT
     trap 'exit 143' TERM
 
+    sums_fetched=""
+    if [ "$target" = "aarch64-unknown-linux-musl" ]; then
+        # Tags cut before the aarch64 musl leg existed carry no such asset.
+        # This branch alone reads SHA256SUMS before the archive so that case
+        # ends with a message that names the fix instead of a bare 404. Every
+        # other target keeps the archive-first order below.
+        log "downloading ${sums_url}"
+        curl -fsSL -o "${workdir}/SHA256SUMS" "$sums_url" ||
+            die "failed to download SHA256SUMS from ${sums_url}"
+        sums_fetched=1
+        awk -v f="$asset" '$2 == f { found = 1 } END { exit !found }' \
+            "${workdir}/SHA256SUMS" ||
+            die "no aarch64 musl asset is published for ${version}; unset \
+QSH_LIBC to install the glibc build"
+    fi
+
     log "downloading ${archive_url}"
     curl -fsSL -o "${workdir}/${asset}" "$archive_url" ||
         die "failed to download ${archive_url} (does that version/target exist?)"
 
-    log "downloading ${sums_url}"
-    curl -fsSL -o "${workdir}/SHA256SUMS" "$sums_url" ||
-        die "failed to download SHA256SUMS from ${sums_url}"
+    if [ -z "$sums_fetched" ]; then
+        log "downloading ${sums_url}"
+        curl -fsSL -o "${workdir}/SHA256SUMS" "$sums_url" ||
+            die "failed to download SHA256SUMS from ${sums_url}"
+    fi
 
     # Fail closed: no entry, more than one entry, or anything that is not a
     # single 64-char hex digest aborts before the archive is unpacked. The
