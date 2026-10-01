@@ -698,6 +698,34 @@ impl Gate {
     fn validated_sketch_storage_pointers(&self) -> Vec<*const AtomicU32> {
         self.validated_sketch.storage_pointers()
     }
+
+    /// What the unvalidated sketch already holds against `peer` at `now`,
+    /// before `peer` sends anything: [`Gate::rate_exceeded`]'s estimate
+    /// without the event it would record. Nonzero only when every row's
+    /// column for `peer` collides with other sources' counts, the
+    /// count-min overestimate a test asserting an exact burst boundary
+    /// has to rule out first.
+    #[cfg(test)]
+    fn unvalidated_estimate_before(&self, peer: SocketAddr, now: Instant) -> u32 {
+        let key = SourceKey::from_addr(peer.ip());
+        let epoch_position =
+            now.saturating_duration_since(self.origin).as_secs_f64() / EPOCH.as_secs_f64();
+        let epoch_index = epoch_position as u64;
+        let fraction_into_epoch = epoch_position - epoch_index as f64;
+        self.sketch.advance_to(epoch_index);
+        let cur = (epoch_index % 2) as usize;
+        self.sketch
+            .rows
+            .iter()
+            .map(|row| {
+                let col = row.column(&key);
+                let current = row.gens[cur][col].load(Ordering::Relaxed);
+                let previous = row.gens[1 - cur][col].load(Ordering::Relaxed);
+                current.saturating_add((previous as f64 * (1.0 - fraction_into_epoch)) as u32)
+            })
+            .min()
+            .unwrap_or(0)
+    }
 }
 
 #[cfg(test)]
