@@ -309,6 +309,23 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
             outcome: Outcome::Succeeds(0),
         },
         Case {
+            // ADR-0027: a doctor that cannot start keeps exit 255 under
+            // `--fail-on`; the threshold is judged only after a
+            // successful run. The exit-1 rows need a known severity mix
+            // and live in `doctor_fail_on.rs`.
+            name: "doctor --fail-on warn, no identity",
+            sandbox: &uninitialized,
+            args: &["doctor", "--fail-on", "warn"],
+            outcome: Outcome::Fails("CONFIG_ERROR"),
+        },
+        Case {
+            // ADR-0027 decision 2: `info` is outside the vocabulary.
+            name: "doctor --fail-on info",
+            sandbox: &fleet.client,
+            args: &["doctor", "--fail-on", "info"],
+            outcome: Outcome::Usage,
+        },
+        Case {
             name: "init",
             sandbox: &fresh,
             args: &["init", "--key-store", "file"],

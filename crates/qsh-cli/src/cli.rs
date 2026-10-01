@@ -3,6 +3,7 @@
 //! dispatch on `qsh_core::Ops`.
 
 use clap::{ArgAction, Args, Parser, Subcommand};
+use qsh_core::DoctorThreshold;
 use qsh_proto::{EnvVar, KeyStoreMode};
 
 /// QSH: a QUIC-based direct-connect remote shell.
@@ -233,14 +234,18 @@ pub enum Command {
 
     /// Diagnose this deployment: identity, ACL policy, audit log, trust
     /// store, clock and (best-effort) network reachability
-    /// (`docs/CLI.md` §6.17). Always exits `0` on a successful run —
-    /// findings are reported as data, not exit status (`overall` field);
-    /// only doctor's own inability to run at all (e.g. no identity yet)
-    /// fails the command.
+    /// (`docs/CLI.md` §6.17). Exits `0` on a successful run — findings
+    /// are reported as data, not exit status (`overall` field) — unless
+    /// `--fail-on` is given (ADR-0027); only doctor's own inability to
+    /// run at all (e.g. no identity yet) fails the command.
     Doctor {
         /// Additional pinned host to probe connectivity for, beyond
         /// whatever `[reverse].controller` names.
         host: Option<String>,
+        /// Exit `1` when any finding is at or above this severity
+        /// (`warn` or `error`); the output is unchanged (ADR-0027).
+        #[arg(long, value_name = "SEVERITY", value_parser = parse_doctor_threshold)]
+        fail_on: Option<DoctorThreshold>,
     },
 
     /// Create this device's identity (keypair + self-signed certificate).
@@ -996,6 +1001,11 @@ pub struct TrustAddCaArgs {
     /// to read it from standard input.
     #[arg(long, value_name = "PEM|-")]
     pub cert_file: String,
+}
+
+/// clap value parser for `doctor --fail-on`.
+fn parse_doctor_threshold(value: &str) -> Result<DoctorThreshold, String> {
+    value.parse()
 }
 
 /// clap value parser for `--key-store`.

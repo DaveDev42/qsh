@@ -5,8 +5,9 @@
 //! dispatched to a remote peer.
 //!
 //! **Exit-code discipline** (`PLAN.md` M7 §4.1 #6, design brief §B): every
-//! finding is reported as *data*, never a nonzero exit — `finish()` always
-//! yields exit 0 for a successful `doctor.run`, mirroring `acl.check`'s own
+//! finding is reported as *data*, never a nonzero exit — `finish()` yields
+//! exit 0 for a successful `doctor.run` unless the caller opted into
+//! `--fail-on` (ADR-0027, see [`DoctorThreshold`]), mirroring `acl.check`'s own
 //! precedent (`docs/CLI.md` §6.15: "acl check 자체는 실패하지 않는다— deny나
 //! no-policy조차 exit 0"). [`Ops::doctor`] only returns `Err` (exit 255)
 //! for a precondition doctor cannot work around at all: no device identity
@@ -1101,6 +1102,42 @@ fn overall_status(findings: &[DoctorFinding]) -> String {
     } else {
         "ok".to_string()
     }
+}
+
+/// The `--fail-on` threshold vocabulary (ADR-0027): `warn` or `error`.
+/// `info` is deliberately absent, because `"info"` findings are standing
+/// notices and a gate that counted them would be red on most machines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DoctorThreshold {
+    /// Trips on any `"warn"` or `"error"` finding.
+    Warn,
+    /// Trips on any `"error"` finding.
+    Error,
+}
+
+impl std::str::FromStr for DoctorThreshold {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, String> {
+        match value {
+            "warn" => Ok(Self::Warn),
+            "error" => Ok(Self::Error),
+            other => Err(format!(
+                "invalid fail-on threshold {other:?}: expected `warn` or `error`"
+            )),
+        }
+    }
+}
+
+/// Whether any finding in `data` is at or above `threshold`, in the same
+/// `"error"` > `"warn"` order `overall_status` uses (ADR-0027 decision 2).
+/// Only called after a successful run; it never changes the report.
+#[must_use]
+pub fn meets_threshold(data: &DoctorData, threshold: DoctorThreshold) -> bool {
+    data.findings.iter().any(|f| match threshold {
+        DoctorThreshold::Warn => f.status == "warn" || f.status == "error",
+        DoctorThreshold::Error => f.status == "error",
+    })
 }
 
 #[cfg(test)]

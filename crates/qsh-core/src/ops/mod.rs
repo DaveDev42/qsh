@@ -39,7 +39,7 @@ mod trust;
 
 pub use acl::{AclCheckOp, AclShowOp};
 pub use cert::{CertInitOp, CertIssueOp};
-pub use doctor::DoctorOp;
+pub use doctor::{DoctorOp, DoctorThreshold, meets_threshold};
 pub use exec::{ExecRunOp, ExecRunOutput, ExecStdin};
 pub use host::{HostGetOp, HostListOp, HostRoute};
 pub use session::{

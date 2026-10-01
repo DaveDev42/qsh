@@ -204,6 +204,7 @@ INTERNAL
 | Code | 의미 |
 |---|---|
 | `0` | QSH operation 성공 |
+| `1` | `qsh doctor --fail-on`의 임계 이상 finding이 있음(operation 자체는 성공, §6.17) |
 | `2` | CLI syntax 또는 argument 오류 |
 | `255` | 연결, 인증, 정책 등 QSH runtime 실패 |
 
@@ -1281,7 +1282,7 @@ qsh doctor [host] --json
 
 `doctor.run`은 §2.4·§2.5가 이미 예약해 둔 대로 **로컬 operation**이다 — 원격 peer가 요청할 수 없고, 이 머신 자신의 identity·ACL 정책·audit 로그·trust store·시계·(best-effort) 네트워크 도달성을 조회해 하나의 report로 묶는다. 인자 없는 `qsh doctor`는 outbound controller(`[serve].to`, 없으면 구 `[reverse].controller`)가 설정돼 있으면 그 연결성만 점검하고, `qsh doctor <host>`는 그 pinned host를 추가로 점검한다 — `qsh capabilities [host]`(§6.10)와 같은 UX 형태다.
 
-**exit code는 항상 `0`이다 — finding은 data이지 실패가 아니다.** `qsh acl check`(§6.15, L845)의 선례를 그대로 확장한다: `deny`나 "정책 없음"조차 `acl check` 자체를 실패로 만들지 않듯, `doctor.run`도 아무리 심각한 finding이 나와도 조회 자체는 성공이다(`ok: true`). 건강도는 `data.overall`이 담는다. `doctor.run`이 `Err`(exit `255`)로 실패하는 경우는 doctor 자신이 조회를 시작할 조건조차 없을 때뿐이다 — 대표적으로 `qsh init`을 아직 실행하지 않아 device identity가 없는 경우, 또는 `config.toml`/`hosts.toml`/`trust.toml`이 파싱조차 되지 않는 경우(각 로더가 이미 `CONFIG_ERROR`로 잡는다 — doctor가 별도 code로 다시 잡지 않는다). output mode에 따라 이 규칙이 달라지지 않는다(§4).
+**`--fail-on`을 주지 않으면 exit code는 항상 `0`이다 — finding은 data이지 실패가 아니다.** `qsh acl check`(§6.15, L845)의 선례를 그대로 확장한다: `deny`나 "정책 없음"조차 `acl check` 자체를 실패로 만들지 않듯, `doctor.run`도 아무리 심각한 finding이 나와도 조회 자체는 성공이다(`ok: true`). 건강도는 `data.overall`이 담는다. `doctor.run`이 `Err`(exit `255`)로 실패하는 경우는 doctor 자신이 조회를 시작할 조건조차 없을 때뿐이다 — 대표적으로 `qsh init`을 아직 실행하지 않아 device identity가 없는 경우, 또는 `config.toml`/`hosts.toml`/`trust.toml`이 파싱조차 되지 않는 경우(각 로더가 이미 `CONFIG_ERROR`로 잡는다 — doctor가 별도 code로 다시 잡지 않는다). output mode에 따라 이 규칙이 달라지지 않는다(§4).
 
 `data`는 `DoctorData`(`crates/qsh-proto/src/types.rs`)다:
 
@@ -1357,7 +1358,7 @@ qsh doctor [host] --json
 
 **연결성 진단의 우선순위 규칙.** 한 probe 실패는 항상 code 하나만 낸다: probe 대상이 outbound controller(`[serve].to`, 없으면 구 `[reverse].controller`)면 결과와 무관하게 `controller_unreachable`이고, `host` 인자로 준 일반 대상이면 침묵 타임아웃은 `udp_egress_blocked`, OS의 즉시 거부(경로 없음)는 `no_route`다 — 세 code가 한 실패에 동시에 나오는 일은 없다.
 
-**`--fail-on` 플래그는 아직 없다.** severity 임계값 이상일 때 CI 게이트용 nonzero exit을 내는 옵션은 향후 additive 확장 후보이며, 지금은 구현하지 않는다 — 위 exit code 문단대로 지금은 findings의 존재와 무관하게 항상 `0`이다.
+**`--fail-on <warn|error>` (ADR-0027).** CI 게이트용 옵션이다. 주지 않으면 exit code와 stdout이 이 옵션이 생기기 전과 바이트 단위로 같다. 주면 조회가 성공한 뒤 `findings`에 임계 이상 `status`가 하나라도 있을 때만 exit `1`로 끝난다. `warn`은 `status`가 `"warn"`이나 `"error"`인 finding이 있을 때, `error`는 `"error"`인 finding이 있을 때 걸린다(순서는 `data.overall`과 같다). `"info"` finding은 `trust_remove_scope`처럼 상시 뜨는 고지라서 임계로 받지 않으며, `info`나 그 밖의 값은 clap이 exit `2`로 거절한다. envelope은 임계에 걸려도 그대로다: `ok: true`이고 `data.overall`과 `data.findings`를 모두 싣는다. 그래서 `ok: true`와 exit `1`의 조합은 정상이며, `ok: false`는 여전히 exit `255`와만 짝을 이룬다. doctor가 조회를 시작하지 못하는 경우(위 `Err`)는 `--fail-on`과 무관하게 exit `255`다. 따라서 `255`는 "판정할 수 없었다", `1`은 "판정했고 걸렸다"로 읽는다. human과 `--json`에서 같은 finding 집합이 같은 exit를 낸다(§4). JSON 모양은 바뀌지 않는다.
 
 ### 6.18 `qsh service` — 플랫폼 서비스 유닛 관리 (ROADMAP M9 (g))
 
