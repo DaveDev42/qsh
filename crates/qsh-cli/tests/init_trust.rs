@@ -91,12 +91,16 @@ impl Sandbox {
             .stderr(Stdio::piped())
             .spawn()
             .expect("failed to spawn qsh");
-        child
-            .stdin
-            .take()
-            .expect("stdin pipe")
-            .write_all(input)
-            .expect("write stdin");
+        // A child that rejects its arguments exits without reading stdin,
+        // so the write can race its exit and see `BrokenPipe`. That is not
+        // a test failure: the exit code and output asserted by the caller
+        // are what matter.
+        let write = child.stdin.take().expect("stdin pipe").write_all(input);
+        if let Err(e) = write
+            && e.kind() != std::io::ErrorKind::BrokenPipe
+        {
+            panic!("write stdin: {e}");
+        }
         child.wait_with_output().expect("wait for qsh")
     }
 
