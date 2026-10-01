@@ -1117,10 +1117,11 @@ pub(crate) fn resolve_peer_address(
     Ok((entry.address, server_name))
 }
 
-/// SNI value for a dial. The verifier ignores it entirely
-/// (`docs/design/protocol.md` §3), so this only needs to be a name rustls
-/// will accept; the host part of the address is the most useful one for
-/// packet captures.
+/// `ServerName` for a dial. rustls requires one, so the host part of the
+/// address is passed as verification plumbing, but it is not sent on the
+/// wire: the client disables SNI (`docs/adr/0040-ech-policy.md` decision 2,
+/// `docs/design/protocol.md` §3) and the verifier ignores the name anyway.
+/// It only needs to be a name rustls will accept.
 fn server_name_for(address: &str) -> String {
     let host = crate::trust::split_port(address).map_or(address, |(host, _)| host);
     let host = host.trim_start_matches('[').trim_end_matches(']');

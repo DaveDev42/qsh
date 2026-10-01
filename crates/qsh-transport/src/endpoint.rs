@@ -526,6 +526,11 @@ fn client_tls_config(
     // No 0-RTT, no session resumption (`protocol.md` §2).
     tls.enable_early_data = false;
     tls.resumption = rustls::client::Resumption::disabled();
+    // Never put the dialed hostname on the wire: the server verifies by
+    // pin and ignores SNI, so it would only leak the name to on-path
+    // observers (`docs/adr/0040-ech-policy.md` decision 2). rustls still
+    // takes a `ServerName` for verification plumbing.
+    tls.enable_sni = false;
     Ok(tls)
 }
 
@@ -1332,6 +1337,7 @@ mod tests {
             !client.enable_early_data,
             "client config must not enable 0-RTT early data"
         );
+        assert!(!client.enable_sni, "client must not send SNI (ADR-0040)");
         let resumption_debug = format!("{:?}", client.resumption);
         assert!(
             resumption_debug.contains("NoClientSessionStorage"),
