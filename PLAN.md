@@ -52,7 +52,7 @@ DoD는 캠페인 문서가 사전 고정돼 커밋되는 데까지다(§5.1 원�
 | (f) stateless reset key | ADR-0036(새 번호) | Step 5 | Step 16 | ROADMAP DoD (f)의 "읽기 실패 시 동작을 골라 커밋에 적는다", §8 #2 |
 | (b) splice 설계 변경 | ADR-0037(조건부, 새 번호) | Step 3 | Step 14 | ROADMAP M13 착수 조건, DoD (b) 끝 문장, §5.4 리스크 3 |
 
-2026-10-01에 사용자가 세 ADR과 ADR-0038(`setup client`의 `complete`, 이슈 #3)을 함께 승인했다. Step 14~16이 열리고, ADR-0038 구현은 Step 16 뒤의 추가 스텝으로 착지한다. ADR-0038은 `8c5515d`로 구현됐다(fixture `setup.run.client_complete_without_acl.json`).
+2026-10-01에 사용자가 세 ADR과 ADR-0038(`setup client`의 `complete`, 이슈 #3)을 함께 승인했다. Step 14~16이 열리고, ADR-0038 구현은 Step 16 뒤의 추가 스텝으로 착지한다. ADR-0038은 `8c5515d`로 구현됐다(fixture `setup.run.client_complete_without_acl.json`). 같은 날 이슈 #8·#9에 대한 ADR-0039(DoH, P2 후보)와 ADR-0040(ECH 보류)도 승인했다. M13에 들어오는 것은 ADR-0039 결정 2의 문서 변경과 ADR-0040 결정 2(hostname SNI를 보내지 않는다)뿐이고 DoD는 늘지 않는다.
 
 ADR 번호는 `docs/adr/README.md`의 예약 규칙을 따른다. 0027~0035는 P1 계획이 예약했고 0027이 (d)의 자리임을 README의 예약 목록이 적는다. 예약 밖의 다음 새 번호는 0036이다. 조건부 ADR은 "설 때 그 번호부터 쓴다"는 규칙대로 초안을 올리는 순서로 번호를 받는다. 이 계획은 Step 5의 (f) ADR이 Step 3의 판정보다 먼저 서거나 같은 날 서도록 두므로 (f)가 0036, (b)의 splice ADR이 서면 0037을 받을 것으로 적는다. 순서가 뒤집히면 먼저 올리는 쪽이 0036이고, 그 커밋이 이 표와 README의 "다음 새 번호" 문장을 같이 고친다.
 
