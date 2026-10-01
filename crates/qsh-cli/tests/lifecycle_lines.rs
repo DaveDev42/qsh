@@ -161,15 +161,23 @@ impl Holder {
             stderr,
             readers,
         };
-        // The "holding" line is written after the envelope, and after the
-        // `tunnel_opened` record when it is on.
-        poll_until("the holding line", Duration::from_secs(30), || {
-            holder
-                .stderr_lines()
-                .iter()
-                .any(|l| l.starts_with("qsh tunnel open: holding"))
+        // The "holding" line is written after the envelope is flushed, and
+        // after the `tunnel_opened` record when it is on. The two pipes are
+        // drained by separate reader threads, though, so the stderr thread
+        // can deliver "holding" before the stdout thread has pushed the
+        // envelope it already has in its pipe: wait for both.
+        poll_until(
+            "the envelope and the holding line",
+            Duration::from_secs(30),
+            || {
+                (!holder.stdout_lines().is_empty()
+                    && holder
+                        .stderr_lines()
+                        .iter()
+                        .any(|l| l.starts_with("qsh tunnel open: holding")))
                 .then_some(())
-        });
+            },
+        );
         holder
     }
 
