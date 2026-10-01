@@ -390,9 +390,18 @@ fn supervised_local_accept_during_disconnect_gets_rst_once_the_carrier_is_discon
 
     // The carrier is Disconnected from the instant `lost` is emitted: the
     // connection is accepted by the kernel and reset at once, never queued.
-    let mut stream = connect(port);
-    let mut buf = [0u8; 1];
-    let outcome = stream.read(&mut buf);
+    // The RST can reach this side before `connect` itself returns: the
+    // handshake completes in the kernel, the holder accepts and resets, and
+    // a client thread that has not been scheduled yet gets ECONNRESET from
+    // `connect` (observed on macOS under a loaded nextest run). That is the
+    // same reset, so it is checked the same way as one seen by `read`.
+    let outcome = TcpStream::connect(("127.0.0.1", port)).and_then(|mut stream| {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .expect("read timeout");
+        let mut buf = [0u8; 1];
+        stream.read(&mut buf)
+    });
     match outcome {
         Err(err) => assert_eq!(
             err.kind(),
