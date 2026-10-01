@@ -2497,3 +2497,46 @@ fn doctor_wires_the_host_pinned_without_address_finding_into_the_full_report() {
         "{finding:?}"
     );
 }
+
+/// ADR-0027: the threshold answers in the same order `overall` uses, and
+/// `info` findings never trip either threshold.
+#[test]
+fn doctor_threshold_matches_the_overall_severity_order() {
+    let finding = |status: &str| DoctorFinding {
+        code: "x".into(),
+        status: status.into(),
+        detail: "d".into(),
+        remedy: None,
+    };
+    let data = |statuses: &[&str]| {
+        let findings: Vec<DoctorFinding> = statuses.iter().map(|s| finding(s)).collect();
+        DoctorData {
+            overall: overall_status(&findings),
+            findings,
+        }
+    };
+    for (statuses, warn, error) in [
+        (&[][..], false, false),
+        (&["info"][..], false, false),
+        (&["info", "warn"][..], true, false),
+        (&["warn", "error"][..], true, true),
+        (&["error"][..], true, true),
+    ] {
+        let d = data(statuses);
+        assert_eq!(
+            meets_threshold(&d, DoctorThreshold::Warn),
+            warn,
+            "{statuses:?}"
+        );
+        assert_eq!(
+            meets_threshold(&d, DoctorThreshold::Error),
+            error,
+            "{statuses:?}"
+        );
+        // Consistency with `overall`: warn threshold <=> overall != ok.
+        assert_eq!(warn, d.overall != "ok");
+        assert_eq!(error, d.overall == "error");
+    }
+    assert!("info".parse::<DoctorThreshold>().is_err());
+    assert_eq!("warn".parse::<DoctorThreshold>(), Ok(DoctorThreshold::Warn));
+}

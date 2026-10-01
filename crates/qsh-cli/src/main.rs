@@ -103,6 +103,10 @@ const REVERSE_MODE: &str = "reverse";
 /// Usage error exit code (`docs/CLI.md` §4), matching clap's own.
 const EXIT_USAGE: i32 = 2;
 
+/// `qsh doctor --fail-on`: the run succeeded and a finding met the
+/// threshold (ADR-0027, `docs/CLI.md` §4). Used by that path only.
+const EXIT_FAIL_ON_THRESHOLD: i32 = 1;
+
 /// `eprintln!`, minus the abort: `eprintln!` panics the process when
 /// stderr is gone — EPIPE once whatever spawned us drops the pipe, a
 /// closed terminal, logrotate — and a long-lived `qsh listen`/`qsh serve`
@@ -400,12 +404,21 @@ fn dispatch(cli: &Cli, ops: Ops) -> i32 {
             ops.capabilities(CapabilitiesReq { host: host.clone() }),
             human::print_capabilities,
         ),
-        Command::Doctor { host } => finish(
-            cli,
-            DoctorOp::COMMAND,
-            ops.doctor(DoctorReq { host: host.clone() }, SystemTime::now()),
-            human::print_doctor,
-        ),
+        Command::Doctor { host, fail_on } => {
+            let result = ops.doctor(DoctorReq { host: host.clone() }, SystemTime::now());
+            // The verdict is taken from the successful report before it is
+            // rendered; a failed run keeps its 255 (ADR-0027 decision 5).
+            let tripped = match (fail_on, &result) {
+                (Some(threshold), Ok(data)) => qsh_core::meets_threshold(data, *threshold),
+                _ => false,
+            };
+            let code = finish(cli, DoctorOp::COMMAND, result, human::print_doctor);
+            if code == 0 && tripped {
+                EXIT_FAIL_ON_THRESHOLD
+            } else {
+                code
+            }
+        }
         Command::Init {
             key_store,
             import_ssh_key,

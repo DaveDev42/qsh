@@ -2,12 +2,15 @@
 .el .ds Aq '
 .TH qsh-doctor 1  "doctor 0.3.0" 
 .SH NAME
-qsh\-doctor \- Diagnose this deployment: identity, ACL policy, audit log, trust store, clock and (best\-effort) network reachability (`docs/CLI.md` §6.17). Always exits `0` on a successful run — findings are reported as data, not exit status (`overall` field); only doctor\*(Aqs own inability to run at all (e.g. no identity yet) fails the command
+qsh\-doctor \- Diagnose this deployment: identity, ACL policy, audit log, trust store, clock and (best\-effort) network reachability (`docs/CLI.md` §6.17). Exits `0` on a successful run — findings are reported as data, not exit status (`overall` field) — unless `\-\-fail\-on` is given (ADR\-0027); only doctor\*(Aqs own inability to run at all (e.g. no identity yet) fails the command
 .SH SYNOPSIS
-\fBqsh doctor\fR [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] [\fIHOST\fR] 
+\fBqsh doctor\fR [\fB\-\-fail\-on\fR] [\fB\-\-json\fR] [\fB\-\-jsonl\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-q\fR|\fB\-\-quiet\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] [\fIHOST\fR] 
 .SH DESCRIPTION
-Diagnose this deployment: identity, ACL policy, audit log, trust store, clock and (best\-effort) network reachability (`docs/CLI.md` §6.17). Always exits `0` on a successful run — findings are reported as data, not exit status (`overall` field); only doctor\*(Aqs own inability to run at all (e.g. no identity yet) fails the command
+Diagnose this deployment: identity, ACL policy, audit log, trust store, clock and (best\-effort) network reachability (`docs/CLI.md` §6.17). Exits `0` on a successful run — findings are reported as data, not exit status (`overall` field) — unless `\-\-fail\-on` is given (ADR\-0027); only doctor\*(Aqs own inability to run at all (e.g. no identity yet) fails the command
 .SH OPTIONS
+.TP
+\fB\-\-fail\-on\fR \fI<SEVERITY>\fR
+Exit `1` when any finding is at or above this severity (`warn` or `error`); the output is unchanged (ADR\-0027)
 .TP
 \fB\-\-json\fR
 Emit a single `qsh.cli/v1` JSON envelope on stdout instead of human\-readable text
