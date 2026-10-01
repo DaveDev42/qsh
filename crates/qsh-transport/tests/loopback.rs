@@ -446,3 +446,40 @@ async fn keep_alive_and_idle_timeout_are_configured_and_ping_pong_roundtrips() {
     dialed.connection.close(0, b"keep-alive case done");
     server.await.unwrap();
 }
+
+/// ADR-0040 decision 2: dialing by a hostname puts no SNI in the
+/// ClientHello, and pin verification still succeeds. quinn's rustls
+/// `HandshakeData` on the server side carries the ClientHello's
+/// `server_name()`.
+#[tokio::test]
+async fn client_hello_carries_no_sni_for_a_hostname_address() {
+    let (server_id, server_fp) = make_identity();
+    let (client_id, client_fp) = make_identity();
+    let server_trust = StaticTrust::empty().with_pin(client_fp, Principal::Device("laptop".into()));
+    let client_trust = StaticTrust::empty().with_pin(server_fp, Principal::Device("box".into()));
+
+    let listener = Listener::bind(loopback(), server_id, Arc::new(server_trust)).unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let incoming = listener.accept().await.expect("one connection");
+        let conn = incoming.accept().await.expect("handshake");
+        let data = conn
+            .quinn()
+            .handshake_data()
+            .expect("handshake data")
+            .downcast::<quinn::crypto::rustls::HandshakeData>()
+            .expect("rustls handshake data");
+        let sni = data.server_name.clone();
+        conn.close(0, b"done");
+        sni
+    });
+
+    let dialer = Dialer::new(client_id, Arc::new(client_trust));
+    let dialed = dialer.dial(addr, "localhost").await.expect("dial");
+    assert_eq!(
+        dialed.connection.principal(),
+        &Principal::Device("box".into())
+    );
+    let sni = server.await.unwrap();
+    assert_eq!(sni, None, "hostname must not appear as SNI");
+}

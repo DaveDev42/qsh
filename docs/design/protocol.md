@@ -34,7 +34,7 @@ client/server 양쪽 verifier가 **하나의 검증 코어**를 공유한다 (`q
 2. 아니면 **private CA 체인 검증**(rustls-webpki, 신뢰 root는 trust store의 CA만) 성공 시 → 허용, principal = leaf의 SAN URI(`qsh://user/dave`, `qsh://device/hermes`).
 3. 그 외 → 거부. **web PKI root는 어떤 경로로도 로드하지 않는다.**
 
-두 경로 모두에서 leaf 인증서의 **유효기간(not_before/not_after)을 검사**한다 — pin 일치라도 만료·미도래 인증서는 거부한다(M1 명확화: 장기 device cert에서 유효기간은 유일한 revocation 레버이며, 모호하면 fail closed). SNI/hostname은 검증에 쓰지 않는다(identity는 pin 또는 SAN principal이지 DNS 이름이 아니다).
+두 경로 모두에서 leaf 인증서의 **유효기간(not_before/not_after)을 검사**한다 — pin 일치라도 만료·미도래 인증서는 거부한다(M1 명확화: 장기 device cert에서 유효기간은 유일한 revocation 레버이며, 모호하면 fail closed). SNI/hostname은 검증에 쓰지 않는다(identity는 pin 또는 SAN principal이지 DNS 이름이 아니다). 클라이언트는 SNI를 아예 보내지 않는다(rustls `enable_sni = false`, ADR-0040 결정 2). 접속 대상 hostname이 ClientHello에 실리지 않으며, 서버도 SNI를 읽지 않는다.
 
 양방향 인증서 필수(`client_auth_mandatory`). 검증된 peer identity 없이는 어떤 스트림도 application 계층에 도달하지 않는다. principal은 연결 수립 시 1회 계산되어 연결에 부착되고, ACL은 이것만 사용한다 — **`Hello`의 `device_name` 등 wire 데이터에서 identity를 취하지 않는다.** TLS 1.3 전용(QUIC이 보장).
 
