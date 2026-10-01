@@ -1,7 +1,7 @@
 # ADR-0039: DNS-over-HTTPS 강제 모드는 P1에 넣지 않는다. P2 후보로 두고 착수할 때의 모양(해석 seam 하나, IP 리터럴 bootstrap, fail closed `doh-only`)만 지금 고정한다
 
 날짜: 2026-10-01
-상태: 제안됨
+상태: 승인됨 (2026-10-01 사용자 확정, P2 후보)
 
 개정 관계: 새 ADR이다. 다른 ADR을 개정하지 않는다. 착수하려면 `docs/PRD.md` §4("Provider agnostic")와 §12("QSH 밖에서 해결하는 것")의 문장, `docs/design/threat-model.md` §9의 "web PKI" 비목표를 먼저 고쳐야 한다(결정 1·7). 예약 번호(0027~0035) 밖의 새 번호다.
 

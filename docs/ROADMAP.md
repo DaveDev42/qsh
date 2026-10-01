@@ -433,6 +433,8 @@ P1은 2026-09-26 사용자 결정으로 열었다. 같은 날 ADR-0021·0022·00
 | `-W` | 기각했다(ADR-0011 결과 절 2026-09-25 추기) |
 | UDP forwarding | PRD P1 목록에 없다(M4 명시적 out) |
 | relay | PRD §14 별도 제품. §3 가드레일대로 `--relay` stub도 없다 |
+| DNS-over-HTTPS 강제 모드(이슈 #8) | ADR-0039가 P2 후보로 두었다. PRD §4·§12와 `docs/design/threat-model.md` §9의 web PKI 비목표를 먼저 고쳐야 연다. 그때까지는 IP 리터럴 주소가 DNS를 거치지 않는 우회다 |
+| ECH(이슈 #9) | ADR-0040 결정 3이 착수 조건을 정했다. rustls 정식 릴리스에 서버 쪽 ECH가 들어오고 quinn 0.11이 그 설정을 막지 않음을 테스트로 확인해야 연다. 2026-10-01 기준 rustls 0.23.45와 0.24.0-dev.1 모두 클라이언트 쪽만 있다. hostname SNI를 보내지 않는 결정 2는 M13에서 구현한다 |
 | P2 전부 | local echo prediction, read-only multi-attach, jump chaining, agent forwarding, Windows host, mobile client SDK(`docs/PRD.md` §7 P2) |
 | P0 사람 회차 일곱 | P0 완료 선언의 조건이고 `PLAN.md`가 사람 몫으로 추적한다. P1 마일스톤이 아니다. M8 DoD 3은 M18의 착수 조건으로, M9 DoD 1은 `qsh setup` 캠페인의 비교 기준으로만 인용한다 |
 
