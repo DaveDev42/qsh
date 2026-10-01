@@ -200,6 +200,18 @@ impl Rig {
         }
     }
 
+    /// SIGTERM the host and wait for it to exit. A clean exit drops its
+    /// audit sink, and the sink's `Drop` joins the writer thread once it has
+    /// written every record already queued.
+    fn stop_serve(&mut self) {
+        if let Some(mut serve) = self.serve.take() {
+            serve.signal(Signal::SIGTERM);
+            serve
+                .wait_timeout(Duration::from_secs(20))
+                .expect("the host exits on SIGTERM");
+        }
+    }
+
     /// Bring the same host (same identity, same policy) back on the address
     /// it had.
     fn restart_serve(&mut self) {
@@ -530,6 +542,26 @@ fn supervised_forward_redial_to_a_different_fingerprint_ends_with_auth_failed_an
     );
 }
 
+/// The host's `action` denies, once they are all on disk. The host queues
+/// an audit record before it answers, and a writer thread appends it later
+/// (the module doc of `qsh-core`'s `audit::writer`), so the denial can
+/// reach the client before its line is in the file. Wait for the first
+/// deny line, then stop the host so its writer drains whatever else is
+/// queued, and only then count: a retry storm still shows up as more than
+/// one.
+fn settled_denies(rig: &mut Rig, action: &str) -> Vec<Value> {
+    let is_deny = |record: &Value| record["action"] == action && record["decision"] == "deny";
+    poll_until("the host's audit deny line", WAIT, || {
+        rig.host.audit_records().iter().any(is_deny).then_some(())
+    });
+    rig.stop_serve();
+    rig.host
+        .audit_records()
+        .into_iter()
+        .filter(|record| is_deny(record))
+        .collect()
+}
+
 /// Rewrite the host's `acl.toml` without `forward.local` and restart the
 /// host on its address.
 fn restart_without_forward_local(rig: &mut Rig) {
@@ -580,12 +612,7 @@ fn supervised_forward_peer_restarted_without_forward_local_ends_permission_denie
     let err = hold.hold();
     poker.join().expect("poker thread");
     assert_eq!(err.code, ErrorCode::PermissionDenied, "{err:?}");
-    let denies: Vec<Value> = rig
-        .host
-        .audit_records()
-        .into_iter()
-        .filter(|record| record["action"] == "forward.local" && record["decision"] == "deny")
-        .collect();
+    let denies = settled_denies(&mut rig, "forward.local");
     assert_eq!(denies.len(), 1, "one deny, no retry storm: {denies:?}");
 }
 
@@ -812,11 +839,6 @@ fn supervised_remote_peer_restarted_without_forward_remote_ends_permission_denie
         .collect();
     assert_eq!(gave_up.len(), 1, "{gave_up:?}");
     assert_eq!(gave_up[0]["code"], "PERMISSION_DENIED");
-    let denies: Vec<Value> = rig
-        .host
-        .audit_records()
-        .into_iter()
-        .filter(|record| record["action"] == "forward.remote" && record["decision"] == "deny")
-        .collect();
+    let denies = settled_denies(&mut rig, "forward.remote");
     assert_eq!(denies.len(), 1, "one deny, no retry storm: {denies:?}");
 }
