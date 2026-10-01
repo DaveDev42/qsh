@@ -902,15 +902,56 @@ impl Ops {
     }
 }
 
+/// Upper bound on one resolve through [`resolve_all_with`], and so through
+/// [`resolve_all`] and [`resolve_one`]. `tokio::net::lookup_host` runs the
+/// platform's blocking `getaddrinfo` on the blocking pool with no deadline
+/// of its own, and a resolver that never answers (a VPN that captures DNS
+/// and drops the query, issue #8) would otherwise hold the caller for as
+/// long as `getaddrinfo` blocks: the `serve --to` reconnect loop with no
+/// packet and no `retry` line, or an attach, a `session` command, `exec`
+/// without `--timeout`, a probe or a pairing accept with nothing on
+/// screen. Expiry is an ordinary resolve failure (`CONNECTION_FAILED`).
+/// The abandoned `getaddrinfo` call keeps its blocking-pool thread until
+/// the OS returns; tokio cannot cancel it. Same value as the per-address
+/// dial bound, the choice `crate::tunnel::remote`'s bind-host resolve
+/// makes too.
+pub(crate) const RESOLVE_TIMEOUT: std::time::Duration =
+    qsh_transport::endpoint::DEFAULT_DIAL_TIMEOUT;
+
 /// Resolve `host:port` to every socket address the resolver returns, in
-/// resolver order. `pub(crate)` — the same three sites [`resolve_one`]
-/// used to serve directly (`crate::reverse::target::dial_and_register`,
-/// `crate::ops::exec::exec_async`, `crate::ops::session::reader::dial_peer`)
-/// now go through this instead, so a dual-stack host with an unreachable
-/// address ahead of a reachable one in DNS order is not permanently
-/// unreachable (issue #4 item 2) — a caller that tries only
-/// `resolve_one`'s first address never sees the rest.
+/// resolver order, bounded by [`RESOLVE_TIMEOUT`]. Every production caller
+/// that resolves a peer address goes through this or [`resolve_all_with`],
+/// so a dual-stack host with an unreachable address ahead of a reachable
+/// one in DNS order is not permanently unreachable (issue #4 item 2), and
+/// no caller waits on the resolver unbounded.
 pub(crate) async fn resolve_all(address: &str) -> Result<Vec<SocketAddr>, OpError> {
+    resolve_all_with(&SystemResolver, address).await
+}
+
+/// [`resolve_all`] through an injectable `resolver`, under the same
+/// [`RESOLVE_TIMEOUT`] bound. The seamed call sites
+/// (`crate::ops::exec::exec_async_resolving`,
+/// `crate::reverse::target::dial_and_register_resolving`) call this, so a
+/// test's stub resolver runs under exactly the bound production gets.
+pub(crate) async fn resolve_all_with(
+    resolver: &dyn AddressResolver,
+    address: &str,
+) -> Result<Vec<SocketAddr>, OpError> {
+    match tokio::time::timeout(RESOLVE_TIMEOUT, resolver.resolve_all(address)).await {
+        Ok(resolved) => resolved,
+        Err(_) => Err(OpError::new(
+            ErrorCode::ConnectionFailed,
+            format!(
+                "failed to resolve {address}: timed out after {}s",
+                RESOLVE_TIMEOUT.as_secs()
+            ),
+        )),
+    }
+}
+
+/// The unbounded system lookup behind [`SystemResolver`]. Callers reach it
+/// through [`resolve_all`]/[`resolve_all_with`], never directly.
+async fn lookup_all(address: &str) -> Result<Vec<SocketAddr>, OpError> {
     let addrs: Vec<SocketAddr> = tokio::net::lookup_host(address)
         .await
         .map_err(|err| {
@@ -956,17 +997,19 @@ pub(crate) type ResolveFuture<'a> = std::pin::Pin<
 /// route around) — a trait method with an explicit lifetime parameter
 /// can express that; a bare closure type cannot.
 pub(crate) trait AddressResolver: Send + Sync {
-    /// Resolve `host:port` the same way [`resolve_all`] does.
+    /// Resolve `host:port`, unbounded; [`resolve_all_with`] applies the
+    /// bound.
     fn resolve_all<'a>(&'a self, address: &'a str) -> ResolveFuture<'a>;
 }
 
-/// The real resolver: [`resolve_all`] itself. Production always uses
-/// this; only a test builds anything else.
+/// The real resolver: the system lookup, unbounded on its own (callers
+/// reach it through [`resolve_all_with`]). Production always uses this;
+/// only a test builds anything else.
 pub(crate) struct SystemResolver;
 
 impl AddressResolver for SystemResolver {
     fn resolve_all<'a>(&'a self, address: &'a str) -> ResolveFuture<'a> {
-        Box::pin(resolve_all(address))
+        Box::pin(lookup_all(address))
     }
 }
 

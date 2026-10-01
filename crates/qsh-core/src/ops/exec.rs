@@ -242,7 +242,7 @@ async fn exec_async_resolving(
     let deadline = timeout.map(|t| tokio::time::Instant::now() + t);
     let timed_out = || timeout_error(timeout.unwrap_or_default());
 
-    let addrs = until(deadline, resolver.resolve_all(address))
+    let addrs = until(deadline, crate::ops::resolve_all_with(resolver, address))
         .await
         .ok_or_else(timed_out)??;
     let dialed = until(
@@ -725,6 +725,59 @@ mod tests {
             "message must name both attempts, not just the first (i.e. exec_async_resolving \
              must not have been reverted to trying only `addrs[0]`): {}",
             err.message
+        );
+    }
+
+    /// `qsh exec` without `--timeout` has no deadline of its own, so before
+    /// [`crate::ops::RESOLVE_TIMEOUT`] a resolver that never answers (a VPN
+    /// swallowing DNS, issue #8) held it forever. It must now fail with
+    /// `CONNECTION_FAILED` after exactly that bound. Without the bound the
+    /// outer deadline below fires instead. Paused clock: the stub's future
+    /// is `pending`, so auto-advance reaches the first timer
+    /// deterministically.
+    #[tokio::test(start_paused = true)]
+    async fn exec_without_a_timeout_bounds_a_resolver_that_never_answers() {
+        let local = qsh_transport::LocalIdentity {
+            cert_chain: Vec::new(),
+            key_pkcs8_der: zeroize::Zeroizing::new(Vec::new()),
+        };
+        let dialer = Dialer::new(local, Arc::new(qsh_transport::StaticTrust::empty()));
+
+        struct SilentResolver;
+        impl crate::ops::AddressResolver for SilentResolver {
+            fn resolve_all<'a>(&'a self, _address: &'a str) -> crate::ops::ResolveFuture<'a> {
+                Box::pin(std::future::pending())
+            }
+        }
+
+        let spec = ExecSpec {
+            argv: vec!["true".into()],
+            env: vec![],
+            timeout: None,
+        };
+        let started = tokio::time::Instant::now();
+        let err = tokio::time::timeout(
+            crate::ops::RESOLVE_TIMEOUT * 3,
+            exec_async_resolving(
+                &dialer,
+                "controller.example:4433",
+                "widget",
+                "device",
+                &spec,
+                ExecStdin::Closed,
+                None,
+                &SilentResolver,
+            ),
+        )
+        .await
+        .expect("a resolver that never answers must not hold exec past RESOLVE_TIMEOUT")
+        .expect_err("a resolver that never answers cannot yield a result");
+
+        assert_eq!(started.elapsed(), crate::ops::RESOLVE_TIMEOUT);
+        assert_eq!(err.code, ErrorCode::ConnectionFailed);
+        assert_eq!(
+            err.message,
+            "failed to resolve controller.example:4433: timed out after 10s"
         );
     }
 

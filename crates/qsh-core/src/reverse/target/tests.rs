@@ -869,7 +869,7 @@ async fn dial_and_register_tries_every_resolved_address_not_only_the_first() {
 }
 
 /// A resolver that never answers (a VPN swallowing DNS, issue #8) must cost
-/// one attempt of exactly [`RESOLVE_TIMEOUT`], classified `resolve`, so the
+/// one attempt of exactly [`crate::ops::RESOLVE_TIMEOUT`], classified `resolve`, so the
 /// reconnect loop gets back to its `retry` line and backoff. Without the
 /// bound, `dial_and_register_resolving` waits on the resolver forever and
 /// the outer deadline below fires instead. Paused clock: the stub's future
@@ -909,7 +909,7 @@ async fn dial_and_register_bounds_a_resolver_that_never_answers() {
 
     let started = Instant::now();
     let attempt = tokio::time::timeout(
-        RESOLVE_TIMEOUT * 3,
+        crate::ops::RESOLVE_TIMEOUT * 3,
         dial_and_register_resolving(
             &dialer,
             &trust,
@@ -925,12 +925,12 @@ async fn dial_and_register_bounds_a_resolver_that_never_answers() {
         Ok(_) => panic!("a resolver that never answers cannot yield a registration"),
         Err(pair) => pair,
     };
-    assert_eq!(started.elapsed(), RESOLVE_TIMEOUT);
+    assert_eq!(started.elapsed(), crate::ops::RESOLVE_TIMEOUT);
     assert_eq!(cause, ReconnectCause::Resolve);
     assert_eq!(err.code, qsh_proto::ErrorCode::ConnectionFailed);
     assert!(
         err.message
-            .contains("timed out resolving controller.example:4433"),
+            .contains("failed to resolve controller.example:4433: timed out after 10s"),
         "{}",
         err.message
     );
