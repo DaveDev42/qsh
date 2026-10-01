@@ -950,6 +950,10 @@ Some of these are MVP scope decisions, some are unfinished work.
   `trust.toml`. It is a pure address book: identity still comes from the
   trust store alone, and an entry there for a name with no matching pin
   dials an address nobody has vouched for.
+- qsh resolves hostnames with the system resolver. To avoid DNS altogether
+  (for example behind an enterprise VPN that intercepts DNS), pin the peer
+  by IP literal, or turn on the OS's encrypted DNS settings. A built-in
+  forced DNS-over-HTTPS resolver is a P2 candidate (ADR-0039).
 - Windows is P1 for the client and P2 for the host. PTY code is gated
   `#[cfg(unix)]`, and so is reverse mode: `qsh listen` and `qsh serve --to`
   return `UNSUPPORTED` there rather than running. A tunnel over a reverse

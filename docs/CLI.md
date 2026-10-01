@@ -284,7 +284,7 @@ qsh host get personal-mac --json
 
 두 파일이 같은 주소를 포트 표기만 다르게 적었으면(`hosts.toml`이 `mac:4433`, `trust.toml`이 `mac`) 비교는 기본 포트를 채운 뒤에 하므로 `source`는 `both`다.
 
-`hosts.toml`의 주소는 op 시작 시점에 한 번 resolve된다 — session이 열려 있는 동안 파일을 고쳐도 그 session에는 반영되지 않는다. `attach`가 끊긴 연결을 자동으로 재접속할 때도 최초 attach 시점에 resolve된 주소를 계속 쓴다(재resolve 없음). 이는 매 handshake마다 내용을 다시 읽는 `trust.toml`과 대비된다(§6.11 `trust remove` 문단).
+`hosts.toml`의 주소는 op 시작 시점에 한 번 resolve된다 — session이 열려 있는 동안 파일을 고쳐도 그 session에는 반영되지 않는다. `attach`가 끊긴 연결을 자동으로 재접속할 때도 최초 attach 시점에 resolve된 주소를 계속 쓴다(재resolve 없음). 이는 매 handshake마다 내용을 다시 읽는 `trust.toml`과 대비된다(§6.11 `trust remove` 문단). 이름 해석은 시스템 resolver를 쓴다. 기업 VPN처럼 DNS를 가로채는 환경에서 DNS를 피하려면 peer 주소를 IP 리터럴로 pin하거나 OS의 암호화 DNS 설정을 켠다. DoH를 강제하는 내장 resolver는 P2 후보다(ADR-0039 결정 2).
 
 **`hosts.toml` 파일 계약.** `<config_dir>/hosts.toml`(`trust.toml`과 같은 디렉터리, architecture.md §7)에 다음 형식으로 둔다.
 
