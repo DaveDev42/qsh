@@ -1527,7 +1527,10 @@ impl LocalctlDaemon {
 /// ever coming from it) finishes the QUIC stream gracefully; a UDS read
 /// error resets it abruptly instead (HARD RULES: "UDS EOF -> QUIC finish;
 /// UDS error -> QUIC reset" — the daemon distinguishes only "no more
-/// data" from "something went wrong", never the data itself). A QUIC
+/// data" from "something went wrong", never the data itself). That finish
+/// does not cancel the sibling leg: the target may still owe an answer, so
+/// the sibling is told only once the CLI hangs up entirely
+/// ([`wait_for_conduit_hangup`]). A QUIC
 /// write failure (the target reset or stopped this stream from its own
 /// end) simply ends this direction on its own.
 ///
@@ -1576,6 +1579,19 @@ async fn pump_uds_to_quic(
                         let _ = quic_send.reset(quinn::VarInt::from_u32(RESET_CODE_LOCAL_PEER_GONE));
                     } else {
                         let _ = quic_send.finish();
+                        // A half-close is not a detach: the CLI shut only
+                        // its write side (`DataSendHalf::finish`) and is
+                        // still owed the target's answer to what it already
+                        // sent (trailing output, the `InputAck` a detach
+                        // flushes on). Cancelling the QUIC→UDS leg here
+                        // would discard that, so the sibling is only told
+                        // once the conduit is gone for good — the CLI hung
+                        // up entirely — or it ended on its own.
+                        tokio::select! {
+                            biased;
+                            _ = &mut cancel_rx => return,
+                            () = wait_for_conduit_hangup(uds_read.as_ref()) => {}
+                        }
                     }
                     let _ = done_tx.send(());
                     return;
@@ -1603,6 +1619,41 @@ async fn pump_uds_to_quic(
                 }
             },
         }
+    }
+}
+
+/// Resolves once the CLI has closed its end of `conduit` entirely (both
+/// directions), as opposed to merely half-closing its write side.
+///
+/// After a half-close the read half is at EOF for good, so reading cannot
+/// tell the two apart, and an idle target writes nothing whose failure
+/// would. The poller reports the write side as closed (`EPOLLHUP` /
+/// kqueue `EV_EOF` on the write filter) only when the peer is gone for
+/// good, never for a bare `shutdown(SHUT_WR)`. That readiness is watched on
+/// a `dup` of the socket with its own registration, so clearing it here
+/// cannot starve the sibling leg's writes on the shared one. This keeps the
+/// idle-detach release (`RESET_CODE_LOCAL_PEER_GONE`'s own doc) without
+/// cancelling a leg that is still owed data. If the watch cannot be set up
+/// it resolves at once, which is the old cancel-on-EOF behavior.
+async fn wait_for_conduit_hangup(conduit: &tokio::net::UnixStream) {
+    use std::os::fd::AsFd as _;
+    use tokio::io::Interest;
+    use tokio::io::unix::AsyncFd;
+
+    let Ok(fd) = conduit.as_fd().try_clone_to_owned() else {
+        return;
+    };
+    let Ok(watch) = AsyncFd::with_interest(fd, Interest::WRITABLE) else {
+        return;
+    };
+    loop {
+        let Ok(mut guard) = watch.ready(Interest::WRITABLE).await else {
+            return;
+        };
+        if guard.ready().is_write_closed() {
+            return;
+        }
+        guard.clear_ready();
     }
 }
 
@@ -2890,5 +2941,109 @@ mod tests {
         .await
         .expect("pumps and reader must finish");
         assert_eq!(got, b"EXITFRAME");
+    }
+
+    /// The CLI half-closes its write side (`DataSendHalf::finish`, what an
+    /// attach does once its stdin is done or a detach is flushing) and is
+    /// still owed whatever the target answers after it sees the FIN — a
+    /// trailing frame, the `InputAck` a detach waits for. The UDS EOF must
+    /// finish the QUIC send half only; it must not cancel the QUIC→UDS leg
+    /// while that answer is still on its way.
+    #[tokio::test]
+    async fn a_cli_half_close_does_not_discard_the_targets_trailing_answer() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let (client, server) = crate::tunnel::testutil::loopback_pair().await;
+        let (mut a_send, a_recv) = client.quinn().open_bi().await.unwrap();
+        a_send.write_all(b"hdr").await.unwrap();
+        let (mut b_send, mut b_recv) = server.quinn().accept_bi().await.unwrap();
+        let mut hdr = [0u8; 3];
+        b_recv.read_exact(&mut hdr).await.unwrap();
+        // Target: answers only once it has seen the CLI's FIN, i.e. strictly
+        // after the daemon has relayed the half-close.
+        let target = tokio::spawn(async move {
+            let rest = b_recv.read_to_end(1024).await.unwrap();
+            assert_eq!(rest, b"in");
+            b_send.write_all(b"TRAILING").await.unwrap();
+            b_send.finish().unwrap();
+            // Keep both halves alive until the stream is fully delivered.
+            let _ = b_send.stopped().await;
+        });
+
+        let (cli, daemon_uds) = tokio::net::UnixStream::pair().unwrap();
+        let (mut cli_read, mut cli_write) = cli.into_split();
+        cli_write.write_all(b"in").await.unwrap();
+        cli_write.shutdown().await.unwrap();
+        let (uds_read, uds_write) = daemon_uds.into_split();
+
+        let (uds_gone_tx, uds_gone_rx) = tokio::sync::oneshot::channel();
+        let (quic_gone_tx, quic_gone_rx) = tokio::sync::oneshot::channel();
+        let pumps = async {
+            tokio::join!(
+                pump_uds_to_quic(uds_read, a_send, false, uds_gone_tx, quic_gone_rx),
+                pump_quic_to_uds(a_recv, uds_write, quic_gone_tx, uds_gone_rx),
+            )
+        };
+        let reader = async {
+            let mut got = Vec::new();
+            cli_read.read_to_end(&mut got).await.unwrap();
+            got
+        };
+        let (_, got) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(pumps, reader)
+        })
+        .await
+        .expect("pumps and reader must finish");
+        assert_eq!(got, b"TRAILING");
+        target.await.unwrap();
+    }
+
+    /// The other side of the half-close rule: once the CLI half-closes and
+    /// then goes away entirely, a silent target must still be released
+    /// (`STOP_SENDING` on its stream), or every idle detach would pin a
+    /// conduit permit for ever.
+    #[tokio::test]
+    async fn a_cli_that_half_closes_and_then_hangs_up_still_releases_an_idle_target() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let (client, server) = crate::tunnel::testutil::loopback_pair().await;
+        let (mut a_send, a_recv) = client.quinn().open_bi().await.unwrap();
+        a_send.write_all(b"hdr").await.unwrap();
+        let (b_send, mut b_recv) = server.quinn().accept_bi().await.unwrap();
+        let mut hdr = [0u8; 3];
+        b_recv.read_exact(&mut hdr).await.unwrap();
+        // Target stays silent and keeps its send half open.
+
+        let (cli, daemon_uds) = tokio::net::UnixStream::pair().unwrap();
+        let (cli_read, mut cli_write) = cli.into_split();
+        cli_write.shutdown().await.unwrap();
+        let (uds_read, uds_write) = daemon_uds.into_split();
+
+        let (uds_gone_tx, uds_gone_rx) = tokio::sync::oneshot::channel();
+        let (quic_gone_tx, quic_gone_rx) = tokio::sync::oneshot::channel();
+        let pumps = async {
+            tokio::join!(
+                pump_uds_to_quic(uds_read, a_send, false, uds_gone_tx, quic_gone_rx),
+                pump_quic_to_uds(a_recv, uds_write, quic_gone_tx, uds_gone_rx),
+            )
+        };
+        let hang_up = async {
+            // The CLI process goes away: both halves closed.
+            drop(cli_read);
+            drop(cli_write);
+        };
+        tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(pumps, hang_up)
+        })
+        .await
+        .expect("a hung-up CLI must end both pumps");
+        let stopped = tokio::time::timeout(Duration::from_secs(10), b_send.stopped())
+            .await
+            .expect("the idle target must see STOP_SENDING")
+            .unwrap();
+        assert_eq!(
+            stopped,
+            Some(quinn::VarInt::from_u32(RESET_CODE_LOCAL_PEER_GONE))
+        );
     }
 }
