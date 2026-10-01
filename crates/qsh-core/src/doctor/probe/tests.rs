@@ -14,7 +14,9 @@ fn probe_reports_responded_when_the_target_replies() {
     let responder = UdpSocket::bind(("127.0.0.1", 0)).unwrap();
     let addr = responder.local_addr().unwrap();
     let handle = std::thread::spawn(move || {
-        let mut buf = [0u8; 64];
+        // Large enough for the 1200-byte probe: Windows drops an
+        // oversized datagram with WSAEMSGSIZE instead of truncating it.
+        let mut buf = [0u8; 2048];
         if let Ok((n, from)) = responder.recv_from(&mut buf) {
             let _ = responder.send_to(&buf[..n], from);
         }
