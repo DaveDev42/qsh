@@ -171,7 +171,7 @@ mod stalled {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
 
-    use tokio::net::{TcpListener, TcpSocket, TcpStream};
+    use tokio::net::{TcpSocket, TcpStream};
     use tokio::task::JoinHandle;
 
     use super::super::*;
@@ -210,7 +210,18 @@ mod stalled {
         ledger: &Arc<StallLedger>,
         app_rcvbuf: Option<u32>,
     ) -> Leg {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        // A capped consumer also gets a capped send buffer on the splice's
+        // side (accepted sockets inherit it from the listener), so the
+        // kernel holds only a few KiB before the splice's local write
+        // blocks for good. Left to autotune, a loopback send buffer can
+        // take megabytes, and filling them is a long window in which the
+        // stream is not stalled yet.
+        let listen_socket = TcpSocket::new_v4().unwrap();
+        if let Some(size) = app_rcvbuf {
+            listen_socket.set_send_buffer_size(size).unwrap();
+        }
+        listen_socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = listen_socket.listen(1).unwrap();
         let addr = listener.local_addr().unwrap();
         let socket = TcpSocket::new_v4().unwrap();
         if let Some(size) = app_rcvbuf {
@@ -335,14 +346,29 @@ mod stalled {
         let mut hello = [0u8; 5];
         pty_recv.read_exact(&mut hello).await.unwrap();
 
+        // "Older" means the older stall, which is what the ledger orders
+        // by: the time the stream's current local write began. Being inside
+        // a write is not enough to open the younger stream on, because a
+        // stream still filling its kernel buffers is inside one write after
+        // another; if the younger stream's last write began first, the
+        // ledger rightly stops the younger one and this test waits on the
+        // wrong splice. So wait until each stream has sat in one write for
+        // a whole stall age, the ledger's own definition of stalled. With
+        // the consumer never reading and both buffers capped, that write
+        // never returns.
+        let stall_age = fast(1).stall_age;
         let mut older = open_leg(&peer, &splicer, &ledger, Some(4 * 1024)).await;
-        until("the older stream blocks in its local write", || {
-            ledger.writing_since(older.id).is_some()
+        until("the older stream is stalled", || {
+            ledger
+                .writing_since(older.id)
+                .is_some_and(|since| since.elapsed() >= stall_age)
         })
         .await;
         let younger = open_leg(&peer, &splicer, &ledger, Some(4 * 1024)).await;
-        until("the younger stream blocks in its local write", || {
-            ledger.writing_since(younger.id).is_some()
+        until("the younger stream is stalled", || {
+            ledger
+                .writing_since(younger.id)
+                .is_some_and(|since| since.elapsed() >= stall_age)
         })
         .await;
 
