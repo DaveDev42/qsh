@@ -18,6 +18,14 @@
 //!   [`SPLICE_BUF_LEN`] buffer and does read → `write_all` → read, so a
 //!   slow reader stalls its own direction (QUIC flow control on one side,
 //!   TCP zero-window on the other) instead of growing memory here.
+//! - **A reader that stops for good does not get to stall the connection.**
+//!   The unread bytes a stalled direction leaves in its QUIC receive
+//!   stream also hold the connection's receive window, which the PTY's
+//!   stream shares. [`splice_tcp_quic`] therefore reports its receive
+//!   direction's local writes to the connection's
+//!   [`crate::tunnel::stall::StallLedger`], and stops the stream with
+//!   [`crate::tunnel::stall::RESET_CODE_TUNNEL_STALLED`] when the ledger
+//!   picks it (ADR-0037).
 //!
 //! **Half-close is the interesting part.** A forwarded protocol may legally
 //! shut down one direction and keep draining the other (`nc -N`, HTTP
@@ -34,6 +42,8 @@ use std::io;
 
 use quinn::{RecvStream, SendStream};
 use thiserror::Error;
+
+use crate::tunnel::stall::{RESET_CODE_TUNNEL_STALLED, StallWatch, StreamTrack};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -133,6 +143,56 @@ pub(crate) enum SpliceError {
     /// Reading the tunnel stream, or writing the local socket, failed.
     #[error("tunnel splice failed remote->local: {0}")]
     RemoteToLocal(#[source] io::Error),
+    /// The connection's stall ledger stopped this stream: its local
+    /// consumer had read nothing for too long while the connection's
+    /// receive window filled (ADR-0037).
+    #[error(
+        "tunnel stream stopped: its local reader stalled while the connection's receive window filled"
+    )]
+    Stalled,
+}
+
+/// What [`pump_probed`] reports to a stall ledger entry, if anything.
+#[derive(Clone, Copy)]
+pub(crate) enum Probe<'a> {
+    /// Nothing: a hop that never touches a QUIC receive window.
+    Off,
+    /// The send direction (local to QUIC): byte counts only.
+    Sent(&'a StreamTrack),
+    /// The receive direction (QUIC to local): byte counts, and the moment
+    /// each local write starts and returns, which is what the ledger
+    /// judges a stall by (ADR-0037 decision 1).
+    Received(&'a StreamTrack),
+}
+
+/// Write all of `bytes`, reporting to `probe`. The `Received` arm is
+/// `write_all` unrolled so each partial write counts as progress: a slow
+/// reader that accepts a few bytes at a time is never a stall.
+async fn write_probed<W>(to: &mut W, bytes: &[u8], probe: Probe<'_>) -> io::Result<()>
+where
+    W: AsyncWrite + Unpin + ?Sized,
+{
+    match probe {
+        Probe::Off => to.write_all(bytes).await,
+        Probe::Sent(track) => {
+            to.write_all(bytes).await?;
+            track.count_sent(bytes.len());
+            Ok(())
+        }
+        Probe::Received(track) => {
+            let mut rest = bytes;
+            while !rest.is_empty() {
+                track.enter_write();
+                let written = to.write(rest).await;
+                track.leave_write(*written.as_ref().unwrap_or(&0));
+                match written? {
+                    0 => return Err(io::ErrorKind::WriteZero.into()),
+                    n => rest = &rest[n..],
+                }
+            }
+            Ok(())
+        }
+    }
 }
 
 /// Copy one direction to EOF, then half-close the writer.
@@ -165,9 +225,26 @@ where
     R: AsyncRead + Unpin + ?Sized,
     W: AsyncWrite + Unpin + ?Sized,
 {
+    pump_probed(from, to, prefix, Probe::Off).await
+}
+
+/// [`pump`], reporting its writes to `probe` — the form every splice with
+/// a QUIC tunnel stream on one side uses, so the connection's
+/// [`crate::tunnel::stall::StallLedger`] sees the receive direction's
+/// progress. The read → write → read structure is unchanged.
+pub(crate) async fn pump_probed<R, W>(
+    from: &mut R,
+    to: &mut W,
+    prefix: &[u8],
+    probe: Probe<'_>,
+) -> io::Result<u64>
+where
+    R: AsyncRead + Unpin + ?Sized,
+    W: AsyncWrite + Unpin + ?Sized,
+{
     let mut copied = 0u64;
     if !prefix.is_empty() {
-        to.write_all(prefix).await?;
+        write_probed(to, prefix, probe).await?;
         copied += prefix.len() as u64;
     }
     let mut buf = vec![0u8; SPLICE_BUF_LEN];
@@ -177,7 +254,7 @@ where
         if n == 0 {
             break;
         }
-        to.write_all(&buf[..n]).await?;
+        write_probed(to, &buf[..n], probe).await?;
         copied += n as u64;
         // Send-side depth cap (`SEND_DEPTH_CAP_BYTES`'s own doc) — an
         // explicit yield every so often, not just whatever yield points
@@ -225,6 +302,10 @@ struct SpliceGuard {
     remote_recv: Option<RecvStream>,
     local_read: Option<OwnedReadHalf>,
     local_write: Option<OwnedWriteHalf>,
+    /// The QUIC reset/stop code `Drop` uses: [`RESET_CODE_TUNNEL_ABORT`]
+    /// unless the stall ledger stopped this stream, in which case
+    /// [`RESET_CODE_TUNNEL_STALLED`]. The teardown is the same either way.
+    code: u32,
 }
 
 impl SpliceGuard {
@@ -239,6 +320,7 @@ impl SpliceGuard {
             remote_recv: Some(remote_recv),
             local_read: Some(local_read),
             local_write: Some(local_write),
+            code: RESET_CODE_TUNNEL_ABORT,
         }
     }
 
@@ -269,8 +351,8 @@ impl Drop for SpliceGuard {
             self.remote_recv.take(),
             self.local_read.take(),
         ) {
-            let _ = send.reset(quinn::VarInt::from_u32(RESET_CODE_TUNNEL_ABORT));
-            let _ = recv.stop(quinn::VarInt::from_u32(RESET_CODE_TUNNEL_ABORT));
+            let _ = send.reset(quinn::VarInt::from_u32(self.code));
+            let _ = recv.stop(quinn::VarInt::from_u32(self.code));
             let _ = read.as_ref().set_zero_linger();
         }
         if let Some(write) = self.local_write.take() {
@@ -314,28 +396,39 @@ impl Drop for SpliceGuard {
 ///   truth. (Zero is the one `SO_LINGER` value that does not block on
 ///   close, which is why tokio exposes it separately from the deprecated
 ///   `set_linger`.)
+/// - **Stopped by the stall ledger:** `watch` is this splice's entry in
+///   its connection's [`crate::tunnel::stall::StallLedger`]. When the
+///   ledger picks this stream (its local reader has stalled and the
+///   connection's receive window is at risk, ADR-0037), the splice ends
+///   with [`SpliceError::Stalled`] and the same armed teardown as an
+///   error, only with [`RESET_CODE_TUNNEL_STALLED`] as the QUIC code. The
+///   local application sees an RST, never a clean end.
 pub(crate) async fn splice_tcp_quic(
     local: TcpStream,
     remote_send: SendStream,
     remote_recv: RecvStream,
     residue: Vec<u8>,
+    watch: StallWatch,
 ) -> Result<SpliceStats, SpliceError> {
     let (local_read, local_write) = local.into_split();
     let mut guard = SpliceGuard::new(remote_send, remote_recv, local_read, local_write);
+    let mut stalled = false;
 
     // Scoped so both futures — and the borrows of the guard's four
     // handles they hold — are dropped before `guard` is touched again
     // below, either to disarm it or to let it fall out of scope armed.
     let (up, down) = {
-        let up = pump(
+        let up = pump_probed(
             guard.local_read.as_mut().expect("armed"),
             guard.remote_send.as_mut().expect("armed"),
             &[],
+            Probe::Sent(watch.track()),
         );
-        let down = pump(
+        let down = pump_probed(
             guard.remote_recv.as_mut().expect("armed"),
             guard.local_write.as_mut().expect("armed"),
             &residue,
+            Probe::Received(watch.track()),
         );
         tokio::pin!(up, down);
 
@@ -345,7 +438,8 @@ pub(crate) async fn splice_tcp_quic(
             // The `if` guards keep an already-completed future from being
             // polled again; both branches' futures are cancel-safe to
             // leave pending across iterations because `select!` only drops
-            // the *poll*, never the pinned future itself.
+            // the *poll*, never the pinned future itself. `evicted` is
+            // cancel-safe too (`StallWatch::evicted`'s own doc).
             tokio::select! {
                 r = &mut up, if up_res.is_none() => {
                     let failed = r.is_err();
@@ -361,10 +455,21 @@ pub(crate) async fn splice_tcp_quic(
                         break;
                     }
                 }
+                () = watch.evicted() => {
+                    stalled = true;
+                    break;
+                }
             }
         }
         (up_res, down_res)
     };
+
+    if stalled {
+        // Truncated by the ledger: same armed teardown as an error, with
+        // the code that says why (ADR-0037 decision 6).
+        guard.code = RESET_CODE_TUNNEL_STALLED;
+        return Err(SpliceError::Stalled);
+    }
 
     match (up, down) {
         (Some(Ok(local_to_remote)), Some(Ok(remote_to_local))) => {
@@ -528,169 +633,4 @@ pub(crate) async fn splice_tcp_uds(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Half-close, the property the whole module exists for: EOF on one
-    /// direction shuts down only that direction's writer, and the opposite
-    /// direction keeps carrying bytes afterwards. Written against
-    /// [`tokio::io::duplex`] pipes so it tests `pump`'s own logic with no
-    /// QUIC connection in the way.
-    #[tokio::test]
-    async fn pump_half_closes_only_its_own_direction_at_eof() {
-        let (mut source, source_peer) = tokio::io::duplex(64);
-        let (mut sink, mut sink_peer) = tokio::io::duplex(64);
-
-        // The source ends after "early"; the pump must copy it and then
-        // shut its writer down.
-        let mut source_peer = source_peer;
-        tokio::spawn(async move {
-            source_peer.write_all(b"early").await.unwrap();
-            source_peer.shutdown().await.unwrap();
-        });
-
-        let copied = pump(&mut source, &mut sink, &[]).await.unwrap();
-        assert_eq!(copied, 5);
-
-        let mut got = Vec::new();
-        sink_peer.read_to_end(&mut got).await.unwrap();
-        assert_eq!(got, b"early", "sink saw the bytes then a clean EOF");
-    }
-
-    /// The handshake residue leads the stream: bytes handed to `pump` as a
-    /// prefix are written before anything read from the source, and are
-    /// counted. This is the transition
-    /// [`qsh_transport::FramedRecv::into_raw`] exists to make safe — a
-    /// splice that dropped or appended the residue would silently truncate
-    /// or reorder every tunnel whose peer pipelined its first payload
-    /// bytes behind the handshake frame.
-    #[tokio::test]
-    async fn pump_writes_handshake_residue_before_anything_it_reads() {
-        let (mut source, mut source_peer) = tokio::io::duplex(64);
-        let (mut sink, mut sink_peer) = tokio::io::duplex(64);
-
-        tokio::spawn(async move {
-            source_peer.write_all(b"-then-the-stream").await.unwrap();
-            source_peer.shutdown().await.unwrap();
-        });
-
-        let copied = pump(&mut source, &mut sink, b"residue").await.unwrap();
-        assert_eq!(copied, b"residue-then-the-stream".len() as u64);
-
-        let mut got = Vec::new();
-        sink_peer.read_to_end(&mut got).await.unwrap();
-        assert_eq!(got, b"residue-then-the-stream");
-    }
-
-    /// A pump whose writer dies reports the error rather than spinning or
-    /// swallowing it — the input to `splice_tcp_quic`'s reset-don't-close
-    /// teardown.
-    #[tokio::test]
-    async fn pump_reports_a_write_failure() {
-        let (mut source, mut source_peer) = tokio::io::duplex(64);
-        let (mut sink, sink_peer) = tokio::io::duplex(64);
-        drop(sink_peer);
-
-        tokio::spawn(async move {
-            let _ = source_peer.write_all(b"into the void").await;
-        });
-
-        let err = pump(&mut source, &mut sink, &[]).await.unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
-    }
-
-    /// The regression this stage exists for: `task.abort()` on whatever
-    /// task owns a call to [`splice_tcp_quic`] — exactly what
-    /// `RemoteForwardClose`, a purged connection, and `LocalForwardHandle`
-    /// drop all do to the task that (transitively, via a `JoinSet`) is
-    /// running a live splice — must never let either peer see a clean
-    /// end. Real TCP and real QUIC on both sides, so the assertions are
-    /// about what actually crosses the wire, not about which internal
-    /// function got called.
-    #[tokio::test]
-    async fn aborting_the_owning_task_mid_transfer_resets_both_peers_not_a_clean_eof() {
-        use tokio::net::{TcpListener, TcpStream};
-
-        // A live TCP pair: one half feeds `splice_tcp_quic` as `local`,
-        // the other stays here as an observer of what the peer sees.
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let connect_task = tokio::spawn(TcpStream::connect(addr));
-        let (accepted, _) = listener.accept().await.unwrap();
-        let mut tcp_observer = connect_task.await.unwrap().unwrap();
-
-        // A live QUIC bidi stream pair, same shape: one half feeds
-        // `splice_tcp_quic`, the other is this test's observer. The
-        // observer side writes first — proving the peer's `accept_bi`
-        // resolves and, once the splice starts, that "hello" is what
-        // actually proves real bytes crossed before the abort.
-        let (conn_a, conn_b) = crate::tunnel::testutil::loopback_pair().await;
-        let accept_fut = conn_b.accept_bi();
-        let open_fut = async {
-            let (mut send, recv) = conn_a.open_bi().await.unwrap();
-            send.write_all(b"hello").await.unwrap();
-            (send, recv)
-        };
-        let (accepted_pair, (quic_observer_send, mut quic_observer_recv)) =
-            tokio::join!(accept_fut, open_fut);
-        let (remote_send, remote_recv) = accepted_pair.unwrap();
-        // Keep the sender alive until the end of the test — dropping it
-        // early would itself end the QUIC stream and confound what the
-        // final assertion is checking.
-        let _quic_observer_send = quic_observer_send;
-
-        let task = tokio::spawn(splice_tcp_quic(
-            accepted,
-            remote_send,
-            remote_recv,
-            Vec::new(),
-        ));
-
-        // Down direction: the "hello" queued above must actually arrive
-        // at the TCP observer once the splice starts pumping — proof
-        // this is a real mid-transfer abort, not "abort before anything
-        // ever ran".
-        let mut down = [0u8; 5];
-        tcp_observer.read_exact(&mut down).await.unwrap();
-        assert_eq!(&down, b"hello");
-
-        // Up direction, same proof the other way.
-        tcp_observer.write_all(b"world").await.unwrap();
-        let mut up = [0u8; 5];
-        match quic_observer_recv.read(&mut up).await.unwrap() {
-            Some(5) => assert_eq!(&up, b"world"),
-            other => panic!("expected the up-direction payload, got {other:?}"),
-        }
-
-        // Now abort the task out from under the splice, exactly as
-        // `RemoteForwardClose`/`purge_connection`/`LocalForwardHandle`'s
-        // `Drop` do to their owning task.
-        task.abort();
-        let joined = task.await;
-        assert!(
-            joined.unwrap_err().is_cancelled(),
-            "the task must actually have been aborted, not merely finished"
-        );
-
-        // The TCP peer must see an abort, never `Ok(0)` — a clean EOF it
-        // cannot tell apart from "nothing more, but fine".
-        let mut buf = [0u8; 8];
-        match tcp_observer.read(&mut buf).await {
-            Ok(0) => {
-                panic!("TCP side saw a clean EOF from an aborted splice — truncation looks orderly")
-            }
-            Ok(n) => panic!("unexpected data after abort: {:?}", &buf[..n]),
-            Err(_) => {} // reset — the correct outcome; exact kind is platform-dependent
-        }
-
-        // The QUIC peer must see the stream reset, never a clean finish
-        // (`Ok(None)`).
-        match quic_observer_recv.read(&mut buf).await {
-            Ok(None) => panic!(
-                "QUIC side saw a clean finish from an aborted splice — truncation looks orderly"
-            ),
-            Ok(Some(n)) => panic!("unexpected data after abort: {:?}", &buf[..n]),
-            Err(_) => {} // reset — the correct outcome
-        }
-    }
-}
+mod tests;

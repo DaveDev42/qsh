@@ -56,6 +56,7 @@ use crate::tunnel::dial::DialPolicy;
 #[cfg(unix)]
 use crate::tunnel::splice::splice_tcp_uds;
 use crate::tunnel::splice::{SpliceError, SpliceStats, splice_tcp_quic};
+use crate::tunnel::stall::StallWatch;
 
 /// An owned carrier a [`LocalForward`] can keep opening tunnel streams on,
 /// for as long as it runs.
@@ -581,11 +582,14 @@ impl Drop for LocalForwardHandle {
 /// calls the two back to back with nothing in between, so its behavior is
 /// unchanged.
 pub(crate) enum OpenedTunnel {
-    /// Opened on [`ForwardCarrier::Quic`].
+    /// Opened on [`ForwardCarrier::Quic`]. `watch` is the stream's entry
+    /// in its connection's stall ledger (ADR-0037), registered here so the
+    /// splice that follows needs no connection handle of its own.
     Quic {
         send: SendStream,
         recv: RecvStream,
         residue: Vec<u8>,
+        watch: StallWatch,
     },
     /// Opened on [`ForwardCarrier::Local`].
     #[cfg(unix)]
@@ -667,7 +671,7 @@ pub(crate) async fn open_tunnel(
     // arm exists only as a defensive fallback (`ForwardConnError::
     // CarrierNotRaw`'s own doc), never a reachable outcome.
     match carrier {
-        ForwardCarrier::Quic(_) => {
+        ForwardCarrier::Quic(conn) => {
             let (Ok(send), Ok((recv, residue))) = (send.into_raw_quic(), recv.into_raw_quic())
             else {
                 kill.kill();
@@ -677,6 +681,7 @@ pub(crate) async fn open_tunnel(
                 send,
                 recv,
                 residue,
+                watch: StallWatch::on(conn.quinn(), format!("{host}:{port}")),
             })
         }
         #[cfg(unix)]
@@ -740,7 +745,8 @@ pub(crate) async fn splice_opened(
             send,
             recv,
             residue,
-        } => Ok(splice_tcp_quic(tcp, send, recv, residue).await?),
+            watch,
+        } => Ok(splice_tcp_quic(tcp, send, recv, residue, watch).await?),
         #[cfg(unix)]
         OpenedTunnel::Local {
             send,

@@ -194,6 +194,14 @@ jobs:
       - run: cargo nextest run -p qsh-testkit --test tunnel_echo_under_load
         env:
           QSH_ACCEPTANCE_STRICT: 1
+      # ADR-0037 (`docs/design/testing.md` L9/L10): the starvation axis next
+      # to the saturation one above. Tunnel consumers that never read must
+      # not stop PTY output or push PTY echo p95 past measured RTT + 10ms;
+      # `QSH_ACCEPTANCE_STRICT` turns the progress and latency assertions
+      # on (the harness-fault check asserts either way).
+      - run: cargo nextest run -p qsh-testkit --test tunnel_stalled_streams
+        env:
+          QSH_ACCEPTANCE_STRICT: 1
 
   arch:
     name: arch-lint

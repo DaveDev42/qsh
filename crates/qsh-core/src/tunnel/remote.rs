@@ -79,6 +79,7 @@ use crate::client::ClientError;
 use crate::client::link::DataLink;
 use crate::tunnel::dial::{SystemDialer, TunnelDialer};
 use crate::tunnel::splice::{SpliceError, splice_tcp_quic};
+use crate::tunnel::stall::StallWatch;
 
 // ---------------------------------------------------------------------
 // Bind-host resolution: resolve once, validate that answer, bind it.
@@ -411,7 +412,8 @@ async fn accept_one(
         reset_tcp(tcp);
         return Err(RemoteForwardConnError::CarrierNotRaw);
     };
-    Ok(splice_tcp_quic(tcp, raw_send, raw_recv, residue).await?)
+    let watch = StallWatch::on(conn.quinn(), String::from_utf8_lossy(forward_id));
+    Ok(splice_tcp_quic(tcp, raw_send, raw_recv, residue, watch).await?)
 }
 
 /// The forward-axis quota key for one `-R` listener: `rfwd:` plus the
@@ -900,8 +902,9 @@ async fn dispatch_remote_forwards(conn: qsh_transport::Connection, table: Remote
                     Err(_) => return,
                 };
                 let table = Arc::clone(&table);
+                let quinn_conn = conn.quinn().clone();
                 tasks.0.spawn(async move {
-                    handle_accepted_stream(send, recv, &table).await;
+                    handle_accepted_stream(send, recv, &table, &quinn_conn).await;
                 });
             }
             Some(joined) = tasks.0.join_next(), if !tasks.0.is_empty() => {
@@ -931,6 +934,7 @@ async fn handle_accepted_stream(
     send: quinn::SendStream,
     recv: quinn::RecvStream,
     table: &Mutex<HashMap<String, (String, u16)>>,
+    conn: &quinn::Connection,
 ) {
     let mut stream = qsh_transport::FramedStream::data(send, recv);
     let header: StreamHeader = match tokio::time::timeout(
@@ -1030,7 +1034,8 @@ async fn handle_accepted_stream(
     // the mirror-image `-L` leg.
     let (send, recv) = stream.split();
     let (raw_recv, residue) = recv.into_raw();
-    match splice_tcp_quic(tcp, send.into_raw(), raw_recv, residue).await {
+    let watch = StallWatch::on(conn, format!("{host}:{port}"));
+    match splice_tcp_quic(tcp, send.into_raw(), raw_recv, residue, watch).await {
         Ok(stats) => tracing::debug!(
             host,
             port,
