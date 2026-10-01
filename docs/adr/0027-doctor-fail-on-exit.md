@@ -1,7 +1,7 @@
 # ADR-0027: `qsh doctor --fail-on <warn|error>`는 임계 이상 finding이 있으면 envelope을 그대로 둔 채 exit만 `1`로 바꾼다
 
 날짜: 2026-10-01
-상태: 제안됨
+상태: 승인됨 (2026-10-01 사용자 확정)
 
 개정 관계: 새 ADR이다. `docs/adr/README.md`의 예약 목록이 P1 계획(`docs/ROADMAP.md` §5) 시점에 이 번호를 `doctor --fail-on`의 exit 규칙 자리로 잡아 두었고, 이 문서가 그 자리를 채운다. 계약 문서로는 `docs/CLI.md` §4의 일반 명령 exit 표에 행 하나를 더하고 §6.17의 두 문단을 고친다. 다른 ADR을 개정하지 않는다.
 
