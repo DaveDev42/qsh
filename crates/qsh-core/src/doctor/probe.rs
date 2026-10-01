@@ -166,7 +166,10 @@ pub fn probe_udp_egress(target: SocketAddr, timeout: Duration) -> UdpProbeOutcom
     if let Err(err) = socket.set_read_timeout(Some(timeout)) {
         return UdpProbeOutcome::Other(err.kind());
     }
-    let mut buf = [0u8; 512];
+    // Any reply counts, whatever its size. Windows fails `recv` with
+    // WSAEMSGSIZE when the datagram is larger than the buffer, so the
+    // buffer holds the largest possible UDP payload.
+    let mut buf = vec![0u8; 65_536];
     match socket.recv(&mut buf) {
         Ok(_) => UdpProbeOutcome::Responded,
         Err(err)
