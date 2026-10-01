@@ -155,7 +155,9 @@ pub(crate) enum SpliceError {
 /// What [`pump_probed`] reports to a stall ledger entry, if anything.
 #[derive(Clone, Copy)]
 pub(crate) enum Probe<'a> {
-    /// Nothing: a hop that never touches a QUIC receive window.
+    /// Nothing: a hop that never touches a QUIC receive window. Only the
+    /// unix-only UDS hops ([`pump`]) use it.
+    #[cfg_attr(not(unix), allow(dead_code))]
     Off,
     /// The send direction (local to QUIC): byte counts only.
     Sent(&'a StreamTrack),
@@ -220,6 +222,7 @@ where
 /// UDS<->QUIC hop instead of re-deriving it: tunnel payload is unframed
 /// past the handshake on *both* legs of that relay, not just the direct-
 /// connect one this module was first written for.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) async fn pump<R, W>(from: &mut R, to: &mut W, prefix: &[u8]) -> io::Result<u64>
 where
     R: AsyncRead + Unpin + ?Sized,
