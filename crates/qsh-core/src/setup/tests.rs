@@ -178,3 +178,89 @@ fn setup_rejects_bad_input_before_any_write() {
         "a rejected request created files"
     );
 }
+
+fn run_req(role: SetupRole) -> qsh_proto::SetupRunReq {
+    qsh_proto::SetupRunReq {
+        role,
+        name: Some("box".to_string()),
+        address: Some("box.local:4433".to_string()),
+        peer_cert_pem: Some("pem".to_string()),
+        code: None,
+        forward: false,
+        service: false,
+    }
+}
+
+fn done_steps_with_doctor(
+    role: SetupRole,
+    findings: serde_json::Value,
+) -> Vec<qsh_proto::SetupStep> {
+    step_order(role, true)
+        .into_iter()
+        .map(|id| qsh_proto::SetupStep {
+            id,
+            status: SetupStatus::Done,
+            command: format!("qsh {id:?}"),
+            detail: None,
+            result: (id == Doctor)
+                .then(|| serde_json::json!({ "overall": "error", "findings": findings })),
+        })
+        .collect()
+}
+
+#[test]
+fn setup_complete_exemption_applies_to_client_only() {
+    let only_acl_missing = serde_json::json!([
+        { "code": "acl_policy_missing", "status": "error", "detail": "d" },
+        { "code": "qsh_path_shadowed", "status": "warn", "detail": "d" },
+    ]);
+    for (role, expected) in [
+        (SetupRole::Client, true),
+        (SetupRole::Host, false),
+        (SetupRole::HostTo, false),
+        (SetupRole::Listener, false),
+    ] {
+        let steps = done_steps_with_doctor(role, only_acl_missing.clone());
+        let data = super::run::assemble(&run_req(role), steps);
+        assert_eq!(data.complete, expected, "{role:?}");
+    }
+
+    // Any other error still counts for the client, `acl_*` ones included.
+    for code in [
+        "acl_policy_invalid",
+        "acl_principal_unmatched",
+        "cert_expired",
+    ] {
+        let findings = serde_json::json!([
+            { "code": "acl_policy_missing", "status": "error", "detail": "d" },
+            { "code": code, "status": "error", "detail": "d" },
+        ]);
+        let steps = done_steps_with_doctor(SetupRole::Client, findings);
+        let data = super::run::assemble(&run_req(SetupRole::Client), steps);
+        assert!(!data.complete, "{code}");
+    }
+}
+
+#[test]
+fn setup_complete_exemptions_reference_doctor_codes() {
+    use crate::doctor::{DiagnosticId, EXPECTED_DOCTOR_CODES};
+    assert_eq!(
+        complete_exempt_codes(SetupRole::Client),
+        [DiagnosticId::AclPolicyMissing.code()],
+        "the client exempts acl_policy_missing and nothing else"
+    );
+    for role in [SetupRole::Host, SetupRole::HostTo, SetupRole::Listener] {
+        assert!(complete_exempt_codes(role).is_empty(), "{role:?}");
+    }
+    for role in [
+        SetupRole::Client,
+        SetupRole::Host,
+        SetupRole::HostTo,
+        SetupRole::Listener,
+    ] {
+        for code in complete_exempt_codes(role) {
+            assert!(EXPECTED_DOCTOR_CODES.contains(&code), "{code}");
+            assert_ne!(code, DiagnosticId::AclPolicyInvalid.code());
+        }
+    }
+}

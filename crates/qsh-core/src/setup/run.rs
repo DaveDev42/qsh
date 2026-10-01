@@ -15,7 +15,7 @@ use qsh_proto::{
 };
 use serde_json::{Value, json};
 
-use super::{is_read_only_step, step_order};
+use super::{complete_exempt_codes, is_read_only_step, step_order};
 use crate::acl::{ACL_RESTART_NOTICE, Role};
 use crate::ops::{OpError, Ops};
 
@@ -50,6 +50,15 @@ impl SetupEnv {
 enum Mode {
     Plan,
     Run,
+}
+
+fn role_str(role: SetupRole) -> &'static str {
+    match role {
+        SetupRole::Host => "host",
+        SetupRole::HostTo => "host_to",
+        SetupRole::Client => "client",
+        SetupRole::Listener => "listener",
+    }
 }
 
 fn id_str(id: SetupStepId) -> &'static str {
@@ -747,15 +756,52 @@ impl Ops {
             ));
         }
         let data = self.doctor(DoctorReq { host: None }, env.now)?;
-        let detail = format!("overall: {}", data.overall);
+        let mut detail = format!("overall: {}", data.overall);
+        let result = to_value(&data)?;
+        if let Some(code) = exempted_error_code(req.role, Some(&result)) {
+            detail.push_str(&format!(
+                " ({code} is not counted toward complete for the {} role)",
+                role_str(req.role)
+            ));
+        }
         Ok(step(
             SetupStepId::Doctor,
             SetupStatus::Done,
             command,
             Some(detail),
-            Some(to_value(&data)?),
+            Some(result),
         ))
     }
+}
+
+/// The `status: "error"` findings of a doctor step `result`, as `code`s.
+fn doctor_error_codes(result: Option<&Value>) -> Vec<&str> {
+    result
+        .and_then(|r| r.get("findings"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|f| f.get("status").and_then(Value::as_str) == Some("error"))
+        .map(|f| f.get("code").and_then(Value::as_str).unwrap_or_default())
+        .collect()
+}
+
+/// `true` when the doctor `result` has an `error` finding whose `code` is
+/// not on `role`'s exemption list (ADR-0038 결정 1).
+fn doctor_counted_errors(role: SetupRole, result: Option<&Value>) -> bool {
+    let exempt = complete_exempt_codes(role);
+    doctor_error_codes(result)
+        .iter()
+        .any(|code| !exempt.contains(code))
+}
+
+/// The first exempted code that actually fired as an `error` finding, for
+/// the doctor step `detail` (ADR-0038 결정 4).
+fn exempted_error_code(role: SetupRole, result: Option<&Value>) -> Option<&'static str> {
+    let fired = doctor_error_codes(result);
+    complete_exempt_codes(role)
+        .into_iter()
+        .find(|code| fired.contains(code))
 }
 
 /// The `pair` outcome once `trust.accept` succeeded: `pending` if the same
@@ -835,21 +881,16 @@ fn annotate(mut err: OpError, failed: SetupStepId, done: &[SetupStep]) -> OpErro
 }
 
 /// Roll the steps into `SetupRunData`: `acl_rows`, `next`, `complete`.
-fn assemble(req: &SetupRunReq, steps: Vec<SetupStep>) -> SetupRunData {
+pub(super) fn assemble(req: &SetupRunReq, steps: Vec<SetupStep>) -> SetupRunData {
     let name = pin_name(req);
     let has_acl = steps.iter().any(|s| s.id == SetupStepId::Acl);
     let acl_rows = has_acl.then(|| acl_rows_text(req, name));
     let any_open = steps
         .iter()
         .any(|s| matches!(s.status, SetupStatus::Pending | SetupStatus::Blocked));
-    let doctor_error = steps.iter().any(|s| {
-        s.id == SetupStepId::Doctor
-            && s.result
-                .as_ref()
-                .and_then(|r| r.get("overall"))
-                .and_then(Value::as_str)
-                == Some("error")
-    });
+    let doctor_error = steps
+        .iter()
+        .any(|s| s.id == SetupStepId::Doctor && doctor_counted_errors(req.role, s.result.as_ref()));
     let complete = !any_open && !doctor_error;
 
     let mut next: Vec<String> = Vec::new();

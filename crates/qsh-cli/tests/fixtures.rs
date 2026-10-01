@@ -159,6 +159,7 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "service.uninstall.json",
     "setup.run.host_pending_acl.json",
     "setup.run.client_complete.json",
+    "setup.run.client_complete_without_acl.json",
     "setup.run.listener_pending_acl.json",
     "error.INVALID_ARGUMENT.setup_missing_input.json",
 ];
@@ -627,6 +628,33 @@ fn golden_setup_run_fixtures() {
         }
     }
     check("setup.run.client_complete.json", client_run);
+
+    // The same client with no `acl.toml` at all (ADR-0038): `complete` is
+    // true and the doctor step still reports `overall: "error"`.
+    let bare = with_config("");
+    let cert_path = bare.home_dir().join("peer.pem");
+    let (code, mut bare_run) = bare.json(&[
+        "setup",
+        "client",
+        "laptop",
+        "--address",
+        "host.example:4433",
+        "--peer-cert",
+        cert_path.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{bare_run}");
+    assert_eq!(bare_run["data"]["complete"], true, "{bare_run}");
+    for step in bare_run["data"]["steps"].as_array_mut().unwrap() {
+        if step["id"] == "doctor" {
+            // `overall` is "error" on every machine here, so `detail` stays
+            // as the CLI rendered it; only the machine-specific findings
+            // are masked.
+            assert_eq!(step["result"]["overall"], "error", "{step}");
+            step["result"] = serde_json::json!({ "overall": "error" });
+        }
+    }
+    check("setup.run.client_complete_without_acl.json", bare_run);
 
     let missing = with_config("");
     let (code, missing_run) = missing.json(&[
