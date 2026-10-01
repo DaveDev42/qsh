@@ -783,6 +783,10 @@ Some of these are MVP scope decisions, some are unfinished work.
 - Sessions die with the listener process. A session lives only as long as
   the `qsh serve` or `qsh serve --to` process that opened it, so restarting the
   listener is the end of every detached session on it, not a resume point.
+  A client that was attached at the time learns this within one round trip,
+  not after the 45 s idle timeout, because the server keeps a stateless
+  reset key in `stateless_reset.key` in the config directory (ADR-0036);
+  the session is still gone.
   `qsh serve` and `qsh serve --to` say so in one stderr line at startup (not
   under `--quiet`), a SIGTERM drain logs a `drained` lifecycle line with the
   session counts, and `qsh doctor` reports `service_restart_drops_sessions`

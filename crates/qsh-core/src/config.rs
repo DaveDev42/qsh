@@ -184,6 +184,13 @@ impl Paths {
         self.state_dir.join("resume.json")
     }
 
+    /// `<config_dir>/stateless_reset.key` — the server endpoint's stateless
+    /// reset key (0600, 32 raw bytes, ADR-0036). Not under
+    /// [`Paths::identity_dir`]: replacing the identity must not touch it.
+    pub fn stateless_reset_key_file(&self) -> PathBuf {
+        self.config_dir.join(crate::reset_key::RESET_KEY_FILE_NAME)
+    }
+
     /// The lock file serialising cross-process read-modify-write of
     /// [`Paths::resume_file`] (ADR-0007 "원자성·durability·동시성").
     pub fn resume_lock_file(&self) -> PathBuf {

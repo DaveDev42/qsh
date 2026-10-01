@@ -8,7 +8,7 @@ use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 
 use qsh_proto::ErrorCode;
-use qsh_transport::{Listener, SetupError, TrustEvaluator};
+use qsh_transport::{SetupError, TrustEvaluator};
 
 use crate::acl::{Role, StartupDiagnostic, load_or_deny_with_index};
 use crate::audit::RotatingAuditSink;
@@ -140,7 +140,7 @@ pub fn bind_unavailable(bind: &SocketAddr, err: &dyn std::fmt::Display) -> OpErr
     )
 }
 
-/// [`Listener::bind`]'s actual failure type is [`SetupError`], which is
+/// [`qsh_transport::Listener::bind`]'s actual failure type is [`SetupError`], which is
 /// not only a port conflict: `SetupError::Tls`/`SetupError::Quic` fire
 /// before a socket is ever touched (a rejected identity cert, a rustls
 /// config quinn refuses), and re-running with a different `--bind` cannot
@@ -374,12 +374,21 @@ pub async fn run_serve(
     // obvious thing to look at. `bind_setup_error` only attaches that
     // remedy to an actual `SetupError::Bind` — a rejected TLS/QUIC config
     // gets the bare observation instead.
-    let listener = Listener::bind(
+    // The stateless reset key (ADR-0036) is read or created here, before
+    // the bind; an unusable key file never fails the start, it produces one
+    // diagnostic. `on_notice` is shared so the same sink also serves the
+    // pairing notices below.
+    let on_notice = Arc::new(on_notice);
+    let (listener, reset_key_diagnostic) = crate::reset_key::bind_listener(
+        paths,
         bind,
         identity.local,
         Arc::clone(&trust) as Arc<dyn TrustEvaluator>,
     )
     .map_err(|err| bind_setup_error(&bind, err))?;
+    if let Some(diagnostic) = &reset_key_diagnostic {
+        on_notice(diagnostic);
+    }
     let actual = listener.local_addr().map_err(|err| {
         OpError::new(
             ErrorCode::Internal,
@@ -389,7 +398,9 @@ pub async fn run_serve(
     let runtime = host_runtime(paths, config, identity.identity.device_id.clone());
     // Wired before `on_runtime`/`on_bound` so it is live for every
     // connection the accept loop below could ever admit.
-    runtime.server.set_notice_sink(on_notice);
+    runtime
+        .server
+        .set_notice_sink(move |notice: &str| on_notice(notice));
     // Same `trust`/`invites` pair the listener's own evaluator was built
     // from (report §B9/§B14) — `Server::serve_pairing_connection` pins
     // through `trust`'s path and redeems through `invites`.

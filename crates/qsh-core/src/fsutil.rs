@@ -131,6 +131,17 @@ pub(crate) fn write_atomically(path: &Path, contents: &[u8], durable: bool) -> i
     result
 }
 
+/// A fresh temp path next to `path`, in [`write_atomically`]'s naming
+/// pattern (so [`sweep_stale_temp_files`] can reclaim an orphan), for
+/// writers that install the file some way other than `rename`
+/// (`reset_key`'s `link(2)`).
+pub(crate) fn temp_path_for(path: &Path) -> std::path::PathBuf {
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path.file_name().unwrap_or_default();
+    let ticket = WRITE_TICKET.fetch_add(1, Ordering::Relaxed);
+    temp_path(dir, file_name, std::process::id(), ticket)
+}
+
 /// Build the exact temp-file name [`write_atomically`] writes to:
 /// `{file_name}.tmp{pid}-{ticket}` — the pattern predates this module
 /// (`PLAN.md` M7 Step 7-1) and stays byte-identical so nothing downstream

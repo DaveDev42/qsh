@@ -348,6 +348,18 @@ the shell. `qsh doctor` reports this as `service_restart_drops_sessions`
 (info) whenever a unit is registered for `serve` or `reverse`, and
 `qsh sessions` lists what a restart would end.
 
+A client that was attached when the listener restarted does not have to
+wait for the 45 s idle timeout to find out. `serve` and `listen` keep a
+stateless reset key in `stateless_reset.key` next to `config.toml`, so the
+restarted process answers the client's first packet with a QUIC stateless
+reset and the client knows the session is gone within one round trip
+(ADR-0036, `docs/CLI.md` §6.12). The session is still lost; only the
+detection is faster. This holds while the key file is intact. If it is
+unreadable or malformed, the process starts on a temporary key, prints one
+line to its log, and leaves the file as it was, so detection falls back to
+the slower path until you fix or delete the file. Deleting the file and
+restarting makes a new key, and that one restart is also slow to detect.
+
 The unit's `ExecStart`/`ProgramArguments` line is the whole invocation.
 qsh itself never re-execs, backgrounds, or reparents; it stays in the
 foreground for as long as the process lives, and the service manager owns

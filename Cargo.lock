@@ -2107,10 +2107,12 @@ dependencies = [
 name = "qsh-transport"
 version = "0.3.0"
 dependencies = [
+ "aws-lc-rs",
  "base64 0.22.1",
  "prost",
  "qsh-proto",
  "quinn",
+ "quinn-proto",
  "rcgen",
  "rustls",
  "rustls-webpki",
