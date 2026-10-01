@@ -1,5 +1,5 @@
 //! Platform-touching detectors for `doctor.run` (`docs/CLI.md` §6.17):
-//! raw UDP egress probing, `$PATH` scanning for a shadowing `qsh`
+//! QUIC version-negotiation UDP probing, `$PATH` scanning for a shadowing `qsh`
 //! executable, and a read-only platform-keystore reachability probe.
 //! Deliberately split out of `crate::doctor` (the parent module's own doc,
 //! `doctor.rs` L13-15's no-cfg rule): the parent stays pure text so it
@@ -28,10 +28,10 @@ use super::Diagnostic;
 // Connectivity: raw UDP egress probe + pure classification
 // ---------------------------------------------------------------------------
 
-/// What a raw UDP egress probe against one address observed. Never a QUIC
-/// handshake — just enough to tell "packets can leave and something comes
-/// back" from "silently dropped" from "actively refused" at the transport
-/// layer below QUIC.
+/// What a QUIC version-negotiation probe against one address observed.
+/// Never a QUIC handshake — just enough to tell "packets can leave and
+/// something comes back" from "silently dropped" from "actively refused"
+/// at the transport layer below QUIC.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UdpProbeOutcome {
     /// Something came back within the timeout. Does not have to be a
@@ -39,7 +39,8 @@ pub enum UdpProbeOutcome {
     /// "the round trip happened", which is all this probe claims.
     Responded,
     /// No response within the timeout — indistinguishable, at this layer,
-    /// from "nothing is listening" and "a firewall silently drops UDP".
+    /// from "nothing is listening" (a stale endpoint, no QUIC listener at
+    /// that address) and "a firewall silently drops UDP".
     /// Classified as [`crate::doctor::UDP_EGRESS_BLOCKED`] (or
     /// [`crate::doctor::CONTROLLER_UNREACHABLE`] for a controller target).
     TimedOut,
@@ -57,14 +58,93 @@ pub enum UdpProbeOutcome {
     Other(io::ErrorKind),
 }
 
-/// Send one deterministic, content-free datagram to `target` and wait up
-/// to `timeout` for anything at all to come back.
+/// Length in bytes of the destination and source connection IDs the probe
+/// uses (any length up to 20 is valid for a long header; 8 matches what
+/// common stacks pick).
+pub const PROBE_CID_LEN: usize = 8;
+
+/// Minimum UDP payload size of the probe datagram. RFC 9000 §5.2.2: a
+/// server MUST drop a packet with an unsupported version that is smaller
+/// than 1200 bytes, so the probe is padded up to exactly this size.
+pub const PROBE_DATAGRAM_LEN: usize = 1200;
+
+/// A reserved ("greased") QUIC version of the form `0x?a?a?a?a`
+/// (RFC 9000 §15). No implementation supports it, so a compliant server
+/// must answer with a Version Negotiation packet.
+pub const PROBE_UNSUPPORTED_VERSION: u32 = 0x1a2a_3a4a;
+
+/// Build the probe datagram: a QUIC long-header packet with an unsupported
+/// version, `dcid` and `scid` as connection IDs, zero-padded to
+/// [`PROBE_DATAGRAM_LEN`]. Sans-IO: no socket, no randomness.
+pub fn build_version_negotiation_probe(
+    dcid: &[u8; PROBE_CID_LEN],
+    scid: &[u8; PROBE_CID_LEN],
+) -> Vec<u8> {
+    let mut packet = Vec::with_capacity(PROBE_DATAGRAM_LEN);
+    // Long header (0x80) + fixed bit (0x40); the rest is unused for an
+    // unknown version.
+    packet.push(0xc0);
+    packet.extend_from_slice(&PROBE_UNSUPPORTED_VERSION.to_be_bytes());
+    packet.push(PROBE_CID_LEN as u8);
+    packet.extend_from_slice(dcid);
+    packet.push(PROBE_CID_LEN as u8);
+    packet.extend_from_slice(scid);
+    packet.resize(PROBE_DATAGRAM_LEN, 0);
+    packet
+}
+
+/// Whether `reply` is a Version Negotiation packet answering a probe built
+/// with `probe_scid`: long header, version field 0, destination CID equal
+/// to our source CID (RFC 9000 §17.2.1), and a non-empty list of 4-byte
+/// supported versions.
+pub fn is_version_negotiation_reply(reply: &[u8], probe_scid: &[u8; PROBE_CID_LEN]) -> bool {
+    let Some((&first, rest)) = reply.split_first() else {
+        return false;
+    };
+    if first & 0x80 == 0 || rest.len() < 4 || rest[..4] != [0, 0, 0, 0] {
+        return false;
+    }
+    let rest = &rest[4..];
+    let Some((&dcid_len, rest)) = rest.split_first() else {
+        return false;
+    };
+    let dcid_len = usize::from(dcid_len);
+    if rest.len() < dcid_len || &rest[..dcid_len] != probe_scid.as_slice() {
+        return false;
+    }
+    let rest = &rest[dcid_len..];
+    let Some((&scid_len, rest)) = rest.split_first() else {
+        return false;
+    };
+    let scid_len = usize::from(scid_len);
+    if rest.len() < scid_len {
+        return false;
+    }
+    let versions = &rest[scid_len..];
+    !versions.is_empty() && versions.len() % 4 == 0
+}
+
+/// Send one QUIC version-negotiation probe (see
+/// [`build_version_negotiation_probe`]) to `target` and wait up to
+/// `timeout` for anything at all to come back.
 ///
-/// Blocking, synchronous `std::net::UdpSocket` — deliberately not QUIC:
-/// `doctor.run` needs to tell a silent drop apart from an active refusal,
-/// which `qsh_transport::DialError` already collapses together (both can
-/// surface as a QUIC-layer timeout), so this probes strictly below that
-/// layer instead of reusing the transport's own dialer.
+/// Any RFC 9000 server answers the probe with a Version Negotiation packet
+/// without authenticating or creating a connection. quinn does this in
+/// `quinn_proto::Endpoint::handle` (`quinn-proto` `src/endpoint.rs`, the
+/// `PacketDecodeError::UnsupportedVersion` arm: "sending version
+/// negotiation"), provided the datagram is at least `MIN_INITIAL_SIZE`
+/// (1200) bytes. Silence therefore means either that UDP egress is
+/// blocked or that no QUIC listener is at that address (a stale endpoint).
+///
+/// Any reply counts as [`UdpProbeOutcome::Responded`], a Version
+/// Negotiation packet or not: the probe only claims that a round trip
+/// happened.
+///
+/// Blocking, synchronous `std::net::UdpSocket` — deliberately not a QUIC
+/// handshake: `doctor.run` needs to tell a silent drop apart from an active
+/// refusal, which `qsh_transport::DialError` already collapses together
+/// (both can surface as a QUIC-layer timeout), so this probes strictly
+/// below that layer instead of reusing the transport's own dialer.
 pub fn probe_udp_egress(target: SocketAddr, timeout: Duration) -> UdpProbeOutcome {
     let bind_addr: SocketAddr = if target.is_ipv6() {
         (std::net::Ipv6Addr::UNSPECIFIED, 0).into()
@@ -78,7 +158,9 @@ pub fn probe_udp_egress(target: SocketAddr, timeout: Duration) -> UdpProbeOutcom
     if let Err(err) = socket.connect(target) {
         return classify_io_error(&err);
     }
-    if let Err(err) = socket.send(b"qsh-doctor-probe") {
+    let dcid: [u8; PROBE_CID_LEN] = rand::random();
+    let scid: [u8; PROBE_CID_LEN] = rand::random();
+    if let Err(err) = socket.send(&build_version_negotiation_probe(&dcid, &scid)) {
         return classify_io_error(&err);
     }
     if let Err(err) = socket.set_read_timeout(Some(timeout)) {

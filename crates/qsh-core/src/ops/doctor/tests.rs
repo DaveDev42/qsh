@@ -1105,6 +1105,64 @@ fn doctor_probes_a_pinned_extra_host_and_classifies_a_black_hole_as_udp_egress_b
     drop(black_hole);
 }
 
+/// Regression for #7: the probe used to send a non-QUIC datagram that a QUIC
+/// server (correctly) ignores, so `doctor <host>` reported
+/// `udp_egress_blocked` against a healthy listener. A real quinn endpoint,
+/// the one `qsh serve` binds, must now produce no connectivity finding.
+#[test]
+fn doctor_probe_gets_a_version_negotiation_reply_from_a_live_qsh_listener() {
+    // `Ops::doctor` blocks on its own runtime, so the listener lives on a
+    // separate multi-thread runtime that keeps driving its endpoint.
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let (server_identity, _fp) = crate::tunnel::testutil::self_signed();
+    let listener = rt.block_on(async {
+        qsh_transport::Listener::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            server_identity,
+            std::sync::Arc::new(qsh_transport::StaticTrust::empty()),
+        )
+        .unwrap()
+    });
+    let addr = listener.local_addr().unwrap();
+
+    let (_guard, ops) = healthy_ops();
+    ops.trust_add(TrustAddReq {
+        name: "live".into(),
+        address: Some(addr.to_string()),
+        fingerprint: Some(qsh_transport::Fingerprint::of_spki_der(b"live").to_string()),
+        cert_pem: None,
+    })
+    .unwrap();
+
+    let data = ops
+        .doctor(
+            DoctorReq {
+                host: Some("live".to_string()),
+            },
+            SystemTime::now(),
+        )
+        .unwrap();
+    let connectivity: Vec<_> = data
+        .findings
+        .iter()
+        .filter(|f| {
+            matches!(
+                f.code.as_str(),
+                "udp_egress_blocked" | "no_route" | "controller_unreachable"
+            )
+        })
+        .collect();
+    assert!(
+        connectivity.is_empty(),
+        "a live listener must not yield a connectivity finding: {connectivity:?}"
+    );
+    drop(listener);
+}
+
 /// `no_route` — verify round P2-1, mutation `MC`
 /// (`probe_address`'s `Err(_) => UdpProbeOutcome::Unreachable` branch
 /// weakened to `TimedOut`). Rebuts design brief §C/§E-2's premise that

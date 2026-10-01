@@ -1328,7 +1328,7 @@ qsh doctor [host] --json
 | `code` | `status` | 무엇을 점검하는가 |
 |---|---|---|
 | `controller_unreachable` | error | outbound controller(`[serve].to`, 없으면 구 `[reverse].controller`)가 설정돼 있으면 그 dial이 실패 — reverse는 relay·NAT traversal이 없다(M3 out-of-scope, §6.13). 문면은 `qsh_core::doctor::CONTROLLER_UNREACHABLE`을 그대로 재사용한다(§6.13과 동일 정본) |
-| `udp_egress_blocked` | error | `host` 인자로 준 일반 대상으로의 raw UDP probe가 응답 없이 침묵 타임아웃 — 방화벽이 UDP를 막고 있을 가능성. QSH는 TCP fallback이 없다(P1, ADR-0005) |
+| `udp_egress_blocked` | error | `host` 인자로 준 일반 대상으로 보낸 QUIC version-negotiation probe(미지원 버전의 long-header 패킷, 1200바이트 이상)가 응답 없이 침묵 타임아웃 — 방화벽이 UDP를 막고 있거나, 그 주소에 QUIC listener가 없을 수 있다(오래된 endpoint). QSH는 TCP fallback이 없다(P1, ADR-0005) |
 | `no_route` | error | 일반 대상으로의 probe가 OS 레벨에서 즉시 거부됨(경로 자체가 없음) — 침묵 타임아웃(`udp_egress_blocked`)과 구분된다 |
 | `peer_untrusted` | error | `hosts.toml`이 이름을 알지만 `trust.toml`에 그 이름의 pin이 없음 — 그 이름으로 연결하면 `TRUST_REQUIRED`로 실패할 운명이다(정적 교차대조, 위양성 없음) |
 | `cert_expired` | error | device leaf(`identity/device.pem`) 또는 CA root(`ca/ca.pem`)의 `not_after`가 이미 지났음 — `detail`이 어느 쪽인지 밝힌다 |

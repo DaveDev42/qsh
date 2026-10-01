@@ -412,3 +412,116 @@ fn linger_finding_fires_only_when_disabled() {
     assert_eq!(finding.status, "warn");
     assert!(finding.detail.contains("serve"), "{finding:?}");
 }
+
+// -----------------------------------------------------------------
+// Version-negotiation probe: sans-IO build/parse (issue #7)
+// -----------------------------------------------------------------
+
+const TEST_DCID: [u8; PROBE_CID_LEN] = [1, 2, 3, 4, 5, 6, 7, 8];
+const TEST_SCID: [u8; PROBE_CID_LEN] = [9, 10, 11, 12, 13, 14, 15, 16];
+
+fn version_negotiation_reply(dcid_echo: &[u8], scid_echo: &[u8], versions: &[u32]) -> Vec<u8> {
+    let mut reply = vec![0xc5];
+    reply.extend_from_slice(&0u32.to_be_bytes());
+    reply.push(dcid_echo.len() as u8);
+    reply.extend_from_slice(dcid_echo);
+    reply.push(scid_echo.len() as u8);
+    reply.extend_from_slice(scid_echo);
+    for v in versions {
+        reply.extend_from_slice(&v.to_be_bytes());
+    }
+    reply
+}
+
+#[test]
+fn version_negotiation_probe_is_a_padded_long_header_with_a_reserved_version() {
+    let probe = build_version_negotiation_probe(&TEST_DCID, &TEST_SCID);
+    assert_eq!(probe.len(), PROBE_DATAGRAM_LEN);
+    assert!(probe[0] & 0x80 != 0, "long header bit");
+    let version = u32::from_be_bytes(probe[1..5].try_into().unwrap());
+    assert_eq!(version, PROBE_UNSUPPORTED_VERSION);
+    assert_eq!(
+        version & 0x0f0f_0f0f,
+        0x0a0a_0a0a,
+        "reserved 0x?a?a?a?a form"
+    );
+    assert_eq!(probe[5] as usize, PROBE_CID_LEN);
+    assert_eq!(&probe[6..14], &TEST_DCID);
+    assert_eq!(probe[14] as usize, PROBE_CID_LEN);
+    assert_eq!(&probe[15..23], &TEST_SCID);
+    assert!(probe[23..].iter().all(|b| *b == 0));
+}
+
+#[test]
+fn version_negotiation_reply_parser_accepts_an_echoing_reply() {
+    // A real server echoes our SCID as its DCID and our DCID as its SCID.
+    let reply = version_negotiation_reply(&TEST_SCID, &TEST_DCID, &[0x0a1a_2a3a, 1]);
+    assert!(is_version_negotiation_reply(&reply, &TEST_SCID));
+}
+
+#[test]
+fn version_negotiation_reply_parser_rejects_everything_else() {
+    let good = version_negotiation_reply(&TEST_SCID, &TEST_DCID, &[1]);
+    let wrong = version_negotiation_reply(&TEST_DCID, &TEST_SCID, &[1]);
+    assert!(!is_version_negotiation_reply(&wrong, &TEST_SCID));
+    let mut nonzero = good.clone();
+    nonzero[4] = 1;
+    assert!(!is_version_negotiation_reply(&nonzero, &TEST_SCID));
+    let mut short = good.clone();
+    short[0] &= 0x7f;
+    assert!(!is_version_negotiation_reply(&short, &TEST_SCID));
+    assert!(!is_version_negotiation_reply(
+        &version_negotiation_reply(&TEST_SCID, &TEST_DCID, &[]),
+        &TEST_SCID
+    ));
+    assert!(!is_version_negotiation_reply(
+        &good[..good.len() - 1],
+        &TEST_SCID
+    ));
+    assert!(!is_version_negotiation_reply(&good[..10], &TEST_SCID));
+    assert!(!is_version_negotiation_reply(&[], &TEST_SCID));
+    assert!(!is_version_negotiation_reply(
+        &build_version_negotiation_probe(&TEST_DCID, &TEST_SCID),
+        &TEST_SCID
+    ));
+}
+
+/// The #7 regression at the probe level: a live quinn endpoint (the same
+/// `Listener` `qsh serve` binds) answers the probe with a real Version
+/// Negotiation packet, and `probe_udp_egress` reports `Responded`.
+#[tokio::test]
+async fn probe_gets_a_version_negotiation_reply_from_a_live_quinn_listener() {
+    let (identity, _fp) = crate::tunnel::testutil::self_signed();
+    let listener = qsh_transport::Listener::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        identity,
+        std::sync::Arc::new(qsh_transport::StaticTrust::empty()),
+    )
+    .unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    // Raw exchange: the reply must parse as a VN packet echoing our CIDs.
+    let raw = tokio::task::spawn_blocking(move || {
+        let socket = UdpSocket::bind(("127.0.0.1", 0)).unwrap();
+        socket.connect(addr).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        socket
+            .send(&build_version_negotiation_probe(&TEST_DCID, &TEST_SCID))
+            .unwrap();
+        let mut buf = [0u8; 512];
+        let n = socket.recv(&mut buf).expect("VN reply from the listener");
+        is_version_negotiation_reply(&buf[..n], &TEST_SCID)
+    })
+    .await
+    .unwrap();
+    assert!(raw, "the listener's reply is a Version Negotiation packet");
+
+    let outcome =
+        tokio::task::spawn_blocking(move || probe_udp_egress(addr, Duration::from_secs(5)))
+            .await
+            .unwrap();
+    assert_eq!(outcome, UdpProbeOutcome::Responded);
+    drop(listener);
+}
