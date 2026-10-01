@@ -868,6 +868,74 @@ async fn dial_and_register_tries_every_resolved_address_not_only_the_first() {
     );
 }
 
+/// A resolver that never answers (a VPN swallowing DNS, issue #8) must cost
+/// one attempt of exactly [`RESOLVE_TIMEOUT`], classified `resolve`, so the
+/// reconnect loop gets back to its `retry` line and backoff. Without the
+/// bound, `dial_and_register_resolving` waits on the resolver forever and
+/// the outer deadline below fires instead. Paused clock: the stub's future
+/// is `pending`, so the only timers are the bound and the outer deadline,
+/// and auto-advance reaches whichever is first, deterministically.
+#[tokio::test(start_paused = true)]
+async fn dial_and_register_bounds_a_resolver_that_never_answers() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = Paths::new(dir.path().join("config"), dir.path().join("state"));
+    let mut trust = crate::trust::TrustStore::default();
+    trust.add_peer(
+        "widget",
+        Some("controller.example:4433".to_string()),
+        qsh_transport::Fingerprint::of_spki_der(&[]),
+        "2026-01-01T00:00:00Z".to_string(),
+    );
+    trust.save(&paths.trust_file()).expect("save trust.toml");
+    let trust = SharedTrustStore::open(paths.trust_file()).expect("open trust.toml");
+
+    let runtime = crate::serve::host_runtime(&paths, &Config::default(), "hermes");
+    let local_hello = runtime.server.local_hello(Some(wire::ReverseRegistration {
+        offered_name: "hermes".into(),
+        capabilities: Vec::new(),
+    }));
+    let local = qsh_transport::LocalIdentity {
+        cert_chain: Vec::new(),
+        key_pkcs8_der: zeroize::Zeroizing::new(Vec::new()),
+    };
+    let dialer = Dialer::new(local, trust.clone() as Arc<dyn TrustEvaluator>);
+
+    struct SilentResolver;
+    impl crate::ops::AddressResolver for SilentResolver {
+        fn resolve_all<'a>(&'a self, _address: &'a str) -> crate::ops::ResolveFuture<'a> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    let started = Instant::now();
+    let attempt = tokio::time::timeout(
+        RESOLVE_TIMEOUT * 3,
+        dial_and_register_resolving(
+            &dialer,
+            &trust,
+            &paths,
+            "widget",
+            &local_hello,
+            &SilentResolver,
+        ),
+    )
+    .await
+    .expect("a resolver that never answers must not hold the attempt past RESOLVE_TIMEOUT");
+    let (err, cause) = match attempt {
+        Ok(_) => panic!("a resolver that never answers cannot yield a registration"),
+        Err(pair) => pair,
+    };
+    assert_eq!(started.elapsed(), RESOLVE_TIMEOUT);
+    assert_eq!(cause, ReconnectCause::Resolve);
+    assert_eq!(err.code, qsh_proto::ErrorCode::ConnectionFailed);
+    assert!(
+        err.message
+            .contains("timed out resolving controller.example:4433"),
+        "{}",
+        err.message
+    );
+}
+
 #[test]
 fn classify_hello_error_maps_a_remote_rejection_to_registration_denied() {
     use crate::handshake::HelloError;

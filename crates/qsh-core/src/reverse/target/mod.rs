@@ -715,6 +715,21 @@ async fn dial_and_register(
     .await
 }
 
+/// Upper bound on one resolve of the controller's address inside
+/// [`dial_and_register_resolving`]. `tokio::net::lookup_host` runs the
+/// platform's blocking `getaddrinfo` on the blocking pool with no deadline
+/// of its own. A resolver that never answers (a VPN that intercepts DNS and
+/// drops the query, issue #8) would otherwise park the reconnect loop in
+/// `run_reverse_unix` inside one attempt for as long as `getaddrinfo`
+/// blocks: no packet reaches the controller, no `retry` line is emitted,
+/// and a wake cannot cut it. Expiry is a failed attempt like any other, so
+/// the loop logs it, backs off and resolves again. The abandoned
+/// `getaddrinfo` call keeps its blocking-pool thread until the OS returns;
+/// tokio cannot cancel it. The value matches the per-address dial bound,
+/// the same choice `crate::tunnel::remote`'s bind-host resolve makes.
+#[cfg(any(unix, test))]
+const RESOLVE_TIMEOUT: Duration = qsh_transport::endpoint::DEFAULT_DIAL_TIMEOUT;
+
 /// [`dial_and_register`], with the resolve step seamed out behind
 /// `resolver` — issue #4 item 2's stub-resolver seam
 /// ([`crate::ops::AddressResolver`], modeled on
@@ -739,10 +754,24 @@ async fn dial_and_register_resolving(
     let (address, server_name) =
         crate::ops::resolve_peer_address(&trust.snapshot(), &hosts, controller)
             .map_err(|err| (err, ReconnectCause::Local))?;
-    let addrs = resolver
-        .resolve_all(&address)
-        .await
-        .map_err(|err| (err, ReconnectCause::Resolve))?;
+    // Bounded: an unbounded resolve would hold this whole loop with no
+    // packet to the controller, no `retry` line and no backoff
+    // ([`RESOLVE_TIMEOUT`]'s own doc).
+    let addrs = match tokio::time::timeout(RESOLVE_TIMEOUT, resolver.resolve_all(&address)).await {
+        Ok(resolved) => resolved.map_err(|err| (err, ReconnectCause::Resolve))?,
+        Err(_) => {
+            return Err((
+                OpError::new(
+                    qsh_proto::ErrorCode::ConnectionFailed,
+                    format!(
+                        "timed out resolving {address} after {}s",
+                        RESOLVE_TIMEOUT.as_secs()
+                    ),
+                ),
+                ReconnectCause::Resolve,
+            ));
+        }
+    };
     let dialed = crate::ops::dial_first_reachable(&addrs, |addr| dialer.dial(addr, &server_name))
         .await
         .map_err(|(err, attempted)| {
