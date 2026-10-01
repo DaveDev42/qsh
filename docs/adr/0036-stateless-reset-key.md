@@ -67,3 +67,8 @@
 - `qsh.cli/v1` JSON, fixture, `ErrorCode`, doctor 진단 코드 수는 바뀌지 않는다. 읽기 실패를 doctor finding으로도 알릴지는 이 ADR의 범위 밖이고 필요해지면 새 진단 코드로 따로 더한다.
 - 재시작한 서버가 같은 UDP 포트를 다시 잡아야 reset이 클라이언트에 닿는다. 서버는 `SO_REUSEADDR`를 쓰지 않으므로(`docs/design/reexec-estimate.md` §1) 재시작 사이에 다른 프로세스가 그 포트를 잡으면 reset은 오지 않고 감지는 오늘처럼 늦는다. 이것은 잔여 위험으로 남긴다.
 - 이 ADR이 승인되면 `docs/ROADMAP.md` M13 DoD (f)의 "골라 커밋에 적는다"가 이 문서로 채워지고 H1b 구현이 열린다.
+
+## 추기 (구현, 213001f)
+
+- 재시작한 서버가 reset을 보내려면 클라이언트가 쓰던 connection ID를 자기 것으로 알아봐야 한다. quinn의 기본 connection ID 생성기는 프로세스마다 키를 새로 뽑으므로, 같은 reset key만으로는 재시작한 endpoint가 그 패킷을 모르는 ID로 버린다. 구현은 생성기 키를 reset key에서 HMAC-SHA256과 별도 라벨로 파생한다. 둘째 파일은 없고 wire는 그대로다.
+- 키 파일을 만들 수 없는 경우(설정 디렉터리가 없거나 쓸 수 없음)도 읽기 실패와 같이 다룬다. 이번 기동만 임시 키로 뜨고 같은 진단 한 줄을 낸다.
