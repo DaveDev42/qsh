@@ -383,14 +383,33 @@ async fn local_stream_splices_session_data_to_a_real_pty_and_relays_exit_cleanly
             "the Exit frame must reach the client before the stream ends"
         );
 
-        // Past `Exit` the target has nothing more to send — the daemon's
+        // Past `Exit` the target has no more output to send — the daemon's
         // QUIC->UDS leg relays that FIN as a clean end of this conduit,
         // exactly like `LocalConduit::recv`'s own "clean end of conduit"
-        // contract (HARD RULES: "QUIC FIN/reset -> UDS shutdown").
-        let after_exit = tokio::time::timeout(TIMEOUT, data.recv::<wire::SessionFrame>())
-            .await
-            .expect("the conduit ends promptly once the target has nothing more to send")
-            .expect("a clean end, not a framing error");
+        // contract (HARD RULES: "QUIC FIN/reset -> UDS shutdown"). A
+        // trailing `InputAck` is the one frame allowed in between:
+        // `session_stream`'s input pump and output pump feed the same
+        // writer queue independently, and `Exit` does not end the input
+        // side (protocol.md §9 makes only `ExecExit` the last frame of its
+        // stream; §10-5 acks every applied `Input`), so the ack for the
+        // echo command can land after `Exit` when the input pump is
+        // scheduled late.
+        let after_exit = tokio::time::timeout(TIMEOUT, async {
+            loop {
+                let frame = data
+                    .recv::<wire::SessionFrame>()
+                    .await
+                    .expect("a clean end, not a framing error");
+                match frame {
+                    Some(wire::SessionFrame {
+                        body: Some(session_frame::Body::InputAck(_)),
+                    }) => continue,
+                    other => return other,
+                }
+            }
+        })
+        .await
+        .expect("the conduit ends promptly once the target has nothing more to send");
         assert!(
             after_exit.is_none(),
             "expected the conduit to end cleanly after Exit, got another frame: {after_exit:?}"
