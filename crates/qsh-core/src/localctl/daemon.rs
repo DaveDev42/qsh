@@ -1056,6 +1056,7 @@ impl LocalctlDaemon {
                     // never actually parks.
                     self.serve_tcp_accepted(
                         &hub,
+                        &conn,
                         &header,
                         deadline.saturating_sub(wait_start.elapsed()),
                         conduit,
@@ -1255,6 +1256,10 @@ impl LocalctlDaemon {
             // prefetch were already flushed onto `quic_send` above, and
             // nothing has been read from the freshly opened `quic_recv`
             // yet, so both legs start with an empty prefix here.
+            let watch = crate::tunnel::stall::StallWatch::on(
+                conn.quinn(),
+                format!("{}:{}", header.host, header.port),
+            );
             tunnel_splice_uds_quic(
                 uds_read,
                 uds_write,
@@ -1262,6 +1267,7 @@ impl LocalctlDaemon {
                 quic_recv,
                 Vec::new(),
                 Vec::new(),
+                watch,
             )
             .await;
             return;
@@ -1338,6 +1344,7 @@ impl LocalctlDaemon {
     async fn serve_tcp_accepted(
         &self,
         hub: &Arc<crate::reverse::listen::ControlHub>,
+        conn: &qsh_transport::Connection,
         header: &wire::StreamHeader,
         deadline: std::time::Duration,
         mut conduit: LocalConduit<UnixStream>,
@@ -1495,8 +1502,9 @@ impl LocalctlDaemon {
         // time queued (`crate::reverse::listen::TunnelArrival`'s own
         // doc), so it stays alive across the `.await` below and drops
         // only once `tunnel_splice_uds_quic` returns.
+        let watch = crate::tunnel::stall::StallWatch::on(conn.quinn(), forward_id);
         tunnel_splice_uds_quic(
-            uds_read, uds_write, quic_send, quic_recv, prefetched, residue,
+            uds_read, uds_write, quic_send, quic_recv, prefetched, residue, watch,
         )
         .await;
     }
@@ -1711,6 +1719,10 @@ async fn pump_quic_to_uds(
 struct TunnelQuicGuard {
     send: Option<quinn::SendStream>,
     recv: Option<quinn::RecvStream>,
+    /// `crate::tunnel::splice::RESET_CODE_TUNNEL_ABORT`, or
+    /// `crate::tunnel::stall::RESET_CODE_TUNNEL_STALLED` once the
+    /// connection's stall ledger stopped this stream (ADR-0037).
+    code: u32,
 }
 
 impl TunnelQuicGuard {
@@ -1725,14 +1737,10 @@ impl TunnelQuicGuard {
 impl Drop for TunnelQuicGuard {
     fn drop(&mut self) {
         if let Some(mut send) = self.send.take() {
-            let _ = send.reset(quinn::VarInt::from_u32(
-                crate::tunnel::splice::RESET_CODE_TUNNEL_ABORT,
-            ));
+            let _ = send.reset(quinn::VarInt::from_u32(self.code));
         }
         if let Some(mut recv) = self.recv.take() {
-            let _ = recv.stop(quinn::VarInt::from_u32(
-                crate::tunnel::splice::RESET_CODE_TUNNEL_ABORT,
-            ));
+            let _ = recv.stop(quinn::VarInt::from_u32(self.code));
         }
     }
 }
@@ -1772,6 +1780,14 @@ impl Drop for TunnelQuicGuard {
 /// QUIC side with `crate::tunnel::splice::RESET_CODE_TUNNEL_ABORT` — the
 /// same code the direct-connect splice uses for an identical truncation —
 /// so the target never mistakes a lost connection for a clean end.
+///
+/// `watch` is this relay's entry in the connection's stall ledger
+/// (ADR-0037 decision 8): a CLI process that stops reading its UDS leaves
+/// unread bytes in the QUIC receive stream exactly as a stalled local TCP
+/// application does on the direct-connect leg. When the ledger picks this
+/// stream, the QUIC side is reset and stopped with
+/// `crate::tunnel::stall::RESET_CODE_TUNNEL_STALLED` and the UDS side is
+/// dropped, the same asymmetric teardown as an error here.
 async fn tunnel_splice_uds_quic(
     mut uds_read: tokio::net::unix::OwnedReadHalf,
     mut uds_write: tokio::net::unix::OwnedWriteHalf,
@@ -1779,25 +1795,32 @@ async fn tunnel_splice_uds_quic(
     quic_recv: quinn::RecvStream,
     up_prefix: Vec<u8>,
     down_prefix: Vec<u8>,
+    watch: crate::tunnel::stall::StallWatch,
 ) {
+    use crate::tunnel::splice::{Probe, pump_probed};
+
     let mut guard = TunnelQuicGuard {
         send: Some(quic_send),
         recv: Some(quic_recv),
+        code: crate::tunnel::splice::RESET_CODE_TUNNEL_ABORT,
     };
+    let mut stalled = false;
 
     // Scoped so both futures — and the borrows of the guard's two handles
     // they hold — are dropped before `guard` is touched again below,
     // mirroring `splice_tcp_quic`'s own structure exactly.
     let (up, down) = {
-        let up = crate::tunnel::splice::pump(
+        let up = pump_probed(
             &mut uds_read,
             guard.send.as_mut().expect("armed"),
             &up_prefix,
+            Probe::Sent(watch.track()),
         );
-        let down = crate::tunnel::splice::pump(
+        let down = pump_probed(
             guard.recv.as_mut().expect("armed"),
             &mut uds_write,
             &down_prefix,
+            Probe::Received(watch.track()),
         );
         tokio::pin!(up, down);
 
@@ -1819,12 +1842,18 @@ async fn tunnel_splice_uds_quic(
                         break;
                     }
                 }
+                () = watch.evicted() => {
+                    stalled = true;
+                    break;
+                }
             }
         }
         (up_res, down_res)
     };
 
-    if matches!(up, Some(Ok(_))) && matches!(down, Some(Ok(_))) {
+    if stalled {
+        guard.code = crate::tunnel::stall::RESET_CODE_TUNNEL_STALLED;
+    } else if matches!(up, Some(Ok(_))) && matches!(down, Some(Ok(_))) {
         // Clean end on both directions: nothing left to reset.
         guard.disarm();
     }

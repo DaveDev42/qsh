@@ -42,6 +42,7 @@ impl Server {
         ctx: &ConnCtx,
         mut stream: FramedStream,
         header: &StreamHeader,
+        conn: &Connection,
     ) {
         // Tunnel bytes must never outrank a PTY chunk in the local send
         // queue (`docs/design/protocol.md` §12). Set before anything is
@@ -114,7 +115,14 @@ impl Server {
         // connection loses its own first bytes.
         let (send, recv) = stream.split();
         let (raw_recv, residue) = recv.into_raw();
-        let outcome = splice_tcp_quic(upstream, send.into_raw(), raw_recv, residue).await;
+        // This connection's stall ledger (ADR-0037 decision 8): a peer
+        // destination that stops reading must not starve this host's own
+        // PTY input on the same connection.
+        let watch = crate::tunnel::stall::StallWatch::on(
+            conn.quinn(),
+            format!("{}:{}", header.host, header.port),
+        );
+        let outcome = splice_tcp_quic(upstream, send.into_raw(), raw_recv, residue, watch).await;
 
         // Structural only: destination and byte counts, never payload
         // (`PLAN.md` M4 §4 "터널 payload 로그 금지" — `SpliceStats` has no
@@ -363,7 +371,7 @@ impl Server {
         // [`Server::handle_tcp_connect`] for why the ACL check is inline
         // here instead of at the control-stream choke point.
         if header.stream_kind() == Some(StreamKind::TcpConnect) {
-            self.handle_tcp_connect(&ctx, stream, &header).await;
+            self.handle_tcp_connect(&ctx, stream, &header, &conn).await;
             return;
         }
         let kind = match header.stream_kind() {

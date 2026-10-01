@@ -3759,7 +3759,9 @@ async fn tcp_connect_allowed_splices_raw_bytes_both_ways() {
         let (send, recv) = host_handle.accept_bi().await.unwrap();
         let mut framed = FramedStream::data(send, recv);
         let header: StreamHeader = framed.recv.recv().await.unwrap().expect("header frame");
-        server.handle_tcp_connect(&ctx, framed, &header).await;
+        server
+            .handle_tcp_connect(&ctx, framed, &header, &host_handle)
+            .await;
     });
 
     let result: wire::ConnectResult = recv.recv().await.unwrap().expect("ConnectResult");
@@ -4211,7 +4213,9 @@ async fn a_quota_refusal_stops_the_receive_half_with_resource_exhausted() {
         let (send, recv) = host_handle.accept_bi().await.unwrap();
         let mut framed = FramedStream::data(send, recv);
         let header: StreamHeader = framed.recv.recv().await.unwrap().expect("header frame");
-        server.handle_tcp_connect(&ctx, framed, &header).await;
+        server
+            .handle_tcp_connect(&ctx, framed, &header, &host_handle)
+            .await;
     });
 
     let result: wire::ConnectResult = recv.recv().await.unwrap().expect("ConnectResult");

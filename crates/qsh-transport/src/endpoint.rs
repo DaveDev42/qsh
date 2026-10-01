@@ -85,6 +85,17 @@ pub const MAX_CONCURRENT_BIDI_STREAMS: u32 = 1024;
 /// tests), not just a passing perf number. 2 MiB is the value that
 /// landed: inside §12's sanctioned band, and above quinn's own default
 /// `STREAM_RWND` (1,250,000 bytes) rather than below it.
+///
+/// **Not the only defense against PTY starvation any more.** A tunnel
+/// stream whose local consumer never reads holds up to this much of
+/// [`CONNECTION_RECEIVE_WINDOW`], so four of them used to hold all of it
+/// and stop the same connection's PTY output
+/// (`crates/qsh-testkit/tests/tunnel_stalled_streams.rs`). The ratio of the
+/// two windows now sets a limit instead of being the defense:
+/// `qsh_core::tunnel::stall` stops the oldest stalled tunnel streams once
+/// more than `CONNECTION_RECEIVE_WINDOW / TUNNEL_STREAM_RECEIVE_WINDOW - 1`
+/// are stalled on one connection (ADR-0037). Changing either constant moves
+/// that limit with it.
 pub const TUNNEL_STREAM_RECEIVE_WINDOW: u32 = 2 * 1024 * 1024;
 
 /// Connection-wide flow-control ceiling (`quinn::TransportConfig::
@@ -110,6 +121,11 @@ pub const TUNNEL_STREAM_RECEIVE_WINDOW: u32 = 2 * 1024 * 1024;
 /// threshold would silently stop mattering here too — hence `min`, not a
 /// bare constant, so the relationship stays visible in code rather than
 /// only in this comment.
+///
+/// The window relation alone does not keep a starved connection's PTY
+/// flowing: unread bytes on stalled tunnel streams count against this
+/// window too, and [`TUNNEL_STREAM_RECEIVE_WINDOW`]'s doc names the
+/// `qsh-core` stall limit (ADR-0037) that now does.
 pub const CONNECTION_RECEIVE_WINDOW: u64 = const_min(
     TUNNEL_STREAM_RECEIVE_WINDOW as u64 * MAX_CONCURRENT_BIDI_STREAMS as u64,
     8 * 1024 * 1024,

@@ -12,9 +12,17 @@
 //! bytes: PTY output stops until a tunnel consumer reads. Three stalled
 //! streams hold 6 MiB and leave 2 MiB, so PTY output must keep flowing
 //! (the boundary test). Eight stalled streams are the same failure with
-//! margin. The progress and latency tests at N=4 are therefore expected to
-//! be red under `QSH_ACCEPTANCE_STRICT` until the fix lands; the boundary
-//! and observation tests must be green.
+//! margin. Commit `209e764` measured the progress and latency tests at N=4
+//! red under `QSH_ACCEPTANCE_STRICT`, which is the input ADR-0037 decided
+//! on.
+//!
+//! **The fix.** ADR-0037's per-connection stall ledger
+//! (`qsh_core::tunnel::stall`) stops the oldest stalled tunnel stream as
+//! soon as more than `CONNECTION_RECEIVE_WINDOW /
+//! TUNNEL_STREAM_RECEIVE_WINDOW - 1` (3) are stalled, or one is stalled
+//! while the peer reports `DATA_BLOCKED`. quinn returns a stopped stream's
+//! unread bytes to the connection's credit, so all four tests are green
+//! under `QSH_ACCEPTANCE_STRICT`, and the stalled consumers see an RST.
 //!
 //! **Shape.** Everything rides one QUIC connection. N host-side
 //! [`FloodServer`]s write forever; each is the destination of its own `-L`
@@ -40,8 +48,8 @@
 //! **Gating.** Like the other perf gates, without `QSH_ACCEPTANCE_STRICT`
 //! the tests print their measurements and pass; with it they assert. The
 //! observation test always asserts, since its only job is to catch a
-//! harness that measured nothing. This file is deliberately not wired into
-//! `ci.yml`: the expected result is red, and a required path cannot be red.
+//! harness that measured nothing. `ci.yml`'s `acceptance` job runs this
+//! file with `QSH_ACCEPTANCE_STRICT=1`, next to `tunnel_echo_under_load`.
 
 use std::net::SocketAddr;
 use std::sync::Arc;

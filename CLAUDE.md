@@ -41,7 +41,7 @@ QSH is a QUIC-based direct-connect remote shell (single Rust binary `qsh`) that 
 - `cargo xtask arch` (dependency-direction and module bans below; `cargo xtask` is an alias for `cargo run -p xtask --`, defined in `.cargo/config.toml`)
 - `cargo deny check`
 
-All seven must be green before a commit. `.github/workflows/ci.yml` runs the same set plus an interactive acceptance job (`tui_expect`, `reverse_blackout`, `quinn_idle_timeout_as_idle_timeout` (two `qsh-core` tests), `tunnel_throughput`, `tunnel_echo_under_load`, `socks_curl`, and `supervised_dynamic_listener_stays_bound_through_a_50_second_blackhole_and_connects_after_it` under `QSH_ACCEPTANCE_SLOW`), which is also required for merge.
+All seven must be green before a commit. `.github/workflows/ci.yml` runs the same set plus an interactive acceptance job (`tui_expect`, `reverse_blackout`, `quinn_idle_timeout_as_idle_timeout` (two `qsh-core` tests), `tunnel_throughput`, `tunnel_echo_under_load`, `tunnel_stalled_streams`, `socks_curl`, and `supervised_dynamic_listener_stays_bound_through_a_50_second_blackhole_and_connects_after_it` under `QSH_ACCEPTANCE_SLOW`), which is also required for merge.
 
 Nextest gives each test its own process; PTY/termios and other global-state tests corrupt each other under `cargo test`'s shared process, so `cargo test --workspace` has been red from baseline since M7 for that reason (`acl::load`, `localctl::daemon`). A red `cargo test` proves nothing; rerun under nextest.
 
