@@ -383,7 +383,19 @@ async fn gate_state_and_permits_survive_generation_rollovers_under_sustained_for
     // and two EPOCH rollovers later the same source is admitted
     // again, which only happens if `advance_to` actually resets its
     // counters rather than merely leaving old ones in place forever.
-    let noisy = addr(v4(203, 0, 113, 9), 1);
+    //
+    // The boundary is exact only for a source whose columns hold nothing
+    // yet. The flood's last generation (200 sources over 1024 columns) is
+    // still the blended previous epoch here, and each row's hasher is
+    // freshly seeded per process, so a fixed address lands on a forged
+    // count in all 4 rows about once in a thousand runs; its estimate is
+    // then one higher and attempt 20 is already throttled. That is the
+    // sketch's documented overestimate, not a fault of the rollover this
+    // part checks, so pick a source with nothing against it first.
+    let noisy = (1..=254)
+        .map(|d| addr(v4(203, 0, 113, d), 1))
+        .find(|peer| gate.unvalidated_estimate_before(*peer, gate.now()) == 0)
+        .expect("one of 254 sources has no forged count in some row");
     for i in 1..=20 {
         match gate.decide(noisy, false, gate.now()) {
             Decision::Retry => {}
