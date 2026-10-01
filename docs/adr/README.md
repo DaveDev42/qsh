@@ -34,8 +34,10 @@ QSH의 아키텍처/설계 결정을 기록한다. 각 ADR은 맥락, 결정, �
 | [0036](0036-stateless-reset-key.md) | stateless reset key는 config 디렉터리의 0600 파일 `stateless_reset.key`에 두고, 읽을 수 없거나 형식이 틀리면 파일을 건드리지 않은 채 이번 기동만 임시 키로 뜬다 | 승인됨 |
 | [0037](0037-stalled-tunnel-stream-eviction.md) | 연결 하나에서 정체한 터널 스트림이 연결 수신 창을 다 쓰기 전에 가장 오래 정체한 스트림부터 끊는다 | 승인됨 |
 | [0038](0038-setup-client-complete-without-acl.md) | `qsh setup client`의 `complete`는 doctor의 `acl_policy_missing` 하나를 세지 않는다(ADR-0024 결정 9 개정). doctor의 진단 등급과 host 쪽 역할의 판정은 그대로 둔다 | 승인됨 |
+| [0039](0039-forced-doh-resolver.md) | DNS-over-HTTPS 강제 모드는 P1에 넣지 않는다. P2 후보로 두고 착수할 때의 모양(해석 seam 하나, IP 리터럴 bootstrap, fail closed `doh-only`)만 지금 고정한다 | 제안됨 |
+| [0040](0040-ech-policy.md) | ECH는 기본으로 켜지 않는다. rustls에 서버 쪽 ECH가 생길 때까지 구현을 보류하고 `off`/`prefer`/`require` 정책의 모양만 고정한다. hostname SNI는 ECH와 별개로 보내지 않는 쪽을 권한다 | 제안됨 |
 
-P1 계획(`docs/ROADMAP.md` §5)이 0027~0035를 예약했고 예약 밖의 번호는 0036(stateless reset key), 0037(정체 터널 스트림), 0038(`setup client`의 `complete`)이 받았으므로 다음 새 번호는 0039다. 조건부로 서는 ADR은 설 때 그 번호부터 쓴다.
+P1 계획(`docs/ROADMAP.md` §5)이 0027~0035를 예약했고 예약 밖의 번호는 0036(stateless reset key), 0037(정체 터널 스트림), 0038(`setup client`의 `complete`), 0039(DoH 강제 모드), 0040(ECH 정책)이 받았으므로 다음 새 번호는 0041이다. 조건부로 서는 ADR은 설 때 그 번호부터 쓴다.
 
 - 0027 `doctor --fail-on`의 exit 규칙(M13). 위 표에 `승인됨`으로 올랐다
 - 0028 TCP/TLS fallback(M14)
