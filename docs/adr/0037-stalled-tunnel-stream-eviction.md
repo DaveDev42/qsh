@@ -1,7 +1,7 @@
 # ADR-0037: 연결 하나에서 정체한 터널 스트림이 연결 수신 창을 다 쓰기 전에 가장 오래 정체한 스트림부터 끊는다
 
 날짜: 2026-10-01
-상태: 제안됨
+상태: 승인됨 (2026-10-01 사용자 확정)
 
 개정 관계: 새 ADR이다. 다른 ADR을 개정하지 않는다. `CONNECTION_RECEIVE_WINDOW`(8 MiB, M8 DoD 2의 세션당 buffer 상한)와 `TUNNEL_STREAM_RECEIVE_WINDOW`(2 MiB, `docs/design/protocol.md` §12가 측정으로 확정한 값)는 그대로 두고, ADR-0010의 터널 스트림 quota 기본값도 건드리지 않는다. 느린 스트림 역압 하네스(`crates/qsh-testkit/tests/tunnel_stalled_streams.rs`, 커밋 `209e764`)의 strict 결과가 이 ADR의 입력이다.
 
