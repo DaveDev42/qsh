@@ -46,6 +46,16 @@ quinn = { version = "0.11", default-features = false, features = ["runtime-tokio
 rustls = { version = "0.23", default-features = false, features = ["std", "aws_lc_rs", "logging", "tls12"] }
 rustls-webpki = { version = "0.103", default-features = false, features = ["std", "aws-lc-rs"] }
 x509-parser = "0.18"
+# The HMAC key type `quinn::EndpointConfig::new` takes
+# (`qsh_transport::Listener::bind_with_reset_key`); already in the tree
+# through rustls/quinn, same lockfile entry.
+aws-lc-rs = "1"
+# `HashedConnectionIdGenerator::from_key`: quinn drops a short-header packet
+# whose connection ID its generator cannot validate, before any stateless
+# reset is considered, so the generator's key must survive a restart too
+# (`qsh_transport::Listener::bind_with_reset_key`). The exact crate `quinn`
+# already resolves to, same lockfile entry.
+quinn-proto = { version = "0.11", default-features = false }
 # UDP socket buffer tuning (`qsh_transport::endpoint::bind_udp_socket`,
 # used internally by both `Listener::bind` and `Dialer::dial`;
 # `docs/design/testing.md` CI 규율's GHA-macOS-small-`SO_RCVBUF` note) —

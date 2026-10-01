@@ -868,14 +868,75 @@ pub struct Listener {
     verifier: Arc<QshPeerVerifier>,
 }
 
+/// Length in bytes of the stateless reset key
+/// [`Listener::bind_with_reset_key`] takes (`docs/adr/0036-stateless-reset-key.md`
+/// decision 2).
+pub const RESET_KEY_LEN: usize = 32;
+
+/// The server endpoint's `quinn::EndpointConfig`: quinn's own default
+/// (a fresh random HMAC key per process) when `reset_key` is `None`, else
+/// the given key, so a restarted process derives the same stateless reset
+/// token for a connection ID the previous process issued (RFC 9000 §10.3,
+/// `docs/design/reexec-estimate.md` §3 H1b). The only construction site of
+/// a server `EndpointConfig`; the client endpoint and the testkit's raw
+/// quinn path keep `default()`.
+///
+/// The connection ID generator is keyed from the same secret. quinn drops a
+/// short-header packet whose destination ID its generator cannot validate
+/// *before* it considers a stateless reset, and the default generator draws
+/// a fresh key per process, so a restarted endpoint would silently discard
+/// every packet of a connection it issued IDs for and the reset key alone
+/// would change nothing. The generator key is a domain-separated HMAC
+/// output, so it reveals nothing about the reset key.
+fn server_endpoint_config(reset_key: Option<&[u8; RESET_KEY_LEN]>) -> quinn::EndpointConfig {
+    let Some(key) = reset_key else {
+        return quinn::EndpointConfig::default();
+    };
+    let hmac_key = aws_lc_rs::hmac::Key::new(aws_lc_rs::hmac::HMAC_SHA256, key);
+    let tag = aws_lc_rs::hmac::sign(&hmac_key, CID_KEY_LABEL);
+    let mut cid_key = [0u8; 8];
+    cid_key.copy_from_slice(&tag.as_ref()[..8]);
+    let cid_key = u64::from_le_bytes(cid_key);
+    let mut config = quinn::EndpointConfig::new(Arc::new(hmac_key));
+    config.cid_generator(move || {
+        Box::new(quinn_proto::HashedConnectionIdGenerator::from_key(cid_key))
+    });
+    config
+}
+
+/// Domain separation label for the connection ID generator key derived in
+/// [`server_endpoint_config`].
+const CID_KEY_LABEL: &[u8] = b"qsh stateless reset: connection id generator key v1";
+
 impl Listener {
-    /// Bind a server endpoint on `bind`.
+    /// Bind a server endpoint on `bind`. The stateless reset key is
+    /// quinn's per-process random one; production callers use
+    /// [`Self::bind_with_reset_key`].
     pub fn bind(
         bind: SocketAddr,
         identity: LocalIdentity,
         evaluator: Arc<dyn TrustEvaluator>,
     ) -> Result<Self, SetupError> {
-        Self::bind_inner(bind, identity, evaluator, transport_config())
+        Self::bind_inner(bind, identity, evaluator, transport_config(), None)
+    }
+
+    /// [`Self::bind`] with the stateless reset key injected
+    /// (`docs/adr/0036-stateless-reset-key.md`). This crate knows nothing
+    /// of where the key lives; `qsh-core` reads or creates it and passes
+    /// the bytes here.
+    pub fn bind_with_reset_key(
+        bind: SocketAddr,
+        identity: LocalIdentity,
+        evaluator: Arc<dyn TrustEvaluator>,
+        reset_key: &[u8; RESET_KEY_LEN],
+    ) -> Result<Self, SetupError> {
+        Self::bind_inner(
+            bind,
+            identity,
+            evaluator,
+            transport_config(),
+            Some(reset_key),
+        )
     }
 
     /// Test/benchmark-only escape hatch — see
@@ -887,7 +948,13 @@ impl Listener {
         identity: LocalIdentity,
         evaluator: Arc<dyn TrustEvaluator>,
     ) -> Result<Self, SetupError> {
-        Self::bind_inner(bind, identity, evaluator, quinn::TransportConfig::default())
+        Self::bind_inner(
+            bind,
+            identity,
+            evaluator,
+            quinn::TransportConfig::default(),
+            None,
+        )
     }
 
     fn bind_inner(
@@ -895,13 +962,14 @@ impl Listener {
         identity: LocalIdentity,
         evaluator: Arc<dyn TrustEvaluator>,
         transport: quinn::TransportConfig,
+        reset_key: Option<&[u8; RESET_KEY_LEN]>,
     ) -> Result<Self, SetupError> {
         let verifier = Arc::new(QshPeerVerifier::new(evaluator));
         let server_config = server_config(&identity, verifier.clone(), transport)?;
         let socket = bind_tuned_udp_socket(bind, false)
             .map_err(|source| SetupError::Bind { addr: bind, source })?;
         let endpoint = quinn::Endpoint::new(
-            quinn::EndpointConfig::default(),
+            server_endpoint_config(reset_key),
             Some(server_config),
             socket,
             Arc::new(quinn::TokioRuntime),

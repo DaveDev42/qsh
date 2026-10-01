@@ -176,19 +176,21 @@ pub fn resolve_bind(flag: Option<&str>, config: &Config) -> Result<SocketAddr, O
 /// runtime, exactly like [`crate::serve::run_serve`]. `on_bound` receives
 /// the actual bound address and fires immediately before the accept loop
 /// starts, not as soon as the listener is up, for the reason given on
-/// [`crate::serve::run_serve`]. `on_policy_diagnostic` fires at most once,
-/// before `on_bound` and therefore before the accept loop starts admitting
-/// registrations, and only when `acl.toml` did not produce a usable
-/// policy — with the already-rendered
-/// [`crate::acl::StartupDiagnostic::render`] text (`PLAN.md` M5 Step 6);
-/// `qsh-cli` prints it verbatim and holds no ACL logic of its own.
+/// [`crate::serve::run_serve`]. `on_policy_diagnostic` fires before
+/// `on_bound` and therefore before the accept loop starts admitting
+/// registrations. It fires at most once when `acl.toml` did not produce a
+/// usable policy — with the already-rendered
+/// [`crate::acl::StartupDiagnostic::render`] text (`PLAN.md` M5 Step 6) —
+/// and at most once when the stateless reset key file could not be used
+/// (`crate::reset_key`, ADR-0036). `qsh-cli` prints either verbatim and
+/// holds no ACL or key logic of its own.
 pub async fn run_listen(
     paths: &Paths,
     config: &Config,
     identity: LoadedIdentity,
     bind_flag: Option<&str>,
     on_bound: impl FnOnce(SocketAddr),
-    on_policy_diagnostic: impl FnOnce(&str),
+    on_policy_diagnostic: impl FnMut(&str),
     shutdown: impl std::future::Future<Output = ()>,
 ) -> Result<(), OpError> {
     // Twin cfg blocks as alternative tail expressions — the exact shape
@@ -242,7 +244,7 @@ async fn run_listen_unix(
     identity: LoadedIdentity,
     bind_flag: Option<&str>,
     on_bound: impl FnOnce(SocketAddr),
-    on_policy_diagnostic: impl FnOnce(&str),
+    mut on_policy_diagnostic: impl FnMut(&str),
     shutdown: impl std::future::Future<Output = ()>,
 ) -> Result<(), OpError> {
     let bind = resolve_bind(bind_flag, config)?;
@@ -273,10 +275,17 @@ async fn run_listen_unix(
     let trust = SharedTrustStore::open(paths.trust_file()).inspect_err(|_| {
         let _ = std::fs::remove_file(&localctl_socket_path);
     })?;
-    let listener = Listener::bind(bind, identity.local, trust).map_err(|err| {
-        let _ = std::fs::remove_file(&localctl_socket_path);
-        crate::serve::bind_setup_error(&bind, err)
-    })?;
+    // The stateless reset key (ADR-0036) is read or created before the
+    // bind; an unusable key file never fails the start, it yields one
+    // diagnostic, delivered through the same callback as the ACL one.
+    let (listener, reset_key_diagnostic) =
+        crate::reset_key::bind_listener(paths, bind, identity.local, trust).map_err(|err| {
+            let _ = std::fs::remove_file(&localctl_socket_path);
+            crate::serve::bind_setup_error(&bind, err)
+        })?;
+    if let Some(diagnostic) = &reset_key_diagnostic {
+        on_policy_diagnostic(diagnostic);
+    }
     let actual = listener.local_addr().map_err(|err| {
         let _ = std::fs::remove_file(&localctl_socket_path);
         OpError::new(
