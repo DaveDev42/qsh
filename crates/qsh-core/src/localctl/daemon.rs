@@ -1582,6 +1582,15 @@ async fn pump_uds_to_quic(
                 }
                 Ok(n) => {
                     if quic_send.write_all(&buf[..n]).await.is_err() {
+                        // The target stopped reading (an `EXEC_DATA` host
+                        // whose command already exited drops its recv half
+                        // right after `ExecExit`) — this direction is dead,
+                        // but the target's output may still sit unread in
+                        // the QUIC→UDS leg. Telling that leg to cancel here
+                        // would discard a pending `ExecExit`, so keep the
+                        // conduit open: discard what the CLI still writes
+                        // until it closes or the sibling leg ends.
+                        discard_until_gone(&mut uds_read, &mut cancel_rx).await;
                         let _ = done_tx.send(());
                         return;
                     }
@@ -1592,6 +1601,29 @@ async fn pump_uds_to_quic(
                     let _ = done_tx.send(());
                     return;
                 }
+            },
+        }
+    }
+}
+
+/// Keep reading and dropping the CLI's bytes after the QUIC send half
+/// died, until the CLI closes its write side (EOF or error) or the sibling
+/// QUIC→UDS leg ends (`cancel_rx`). The conduit's read side must not simply
+/// stop: the sibling leg may still be delivering the target's final frames.
+async fn discard_until_gone(
+    uds_read: &mut tokio::net::unix::OwnedReadHalf,
+    cancel_rx: &mut tokio::sync::oneshot::Receiver<()>,
+) {
+    use tokio::io::AsyncReadExt as _;
+
+    let mut buf = [0u8; 4096];
+    loop {
+        tokio::select! {
+            biased;
+            _ = &mut *cancel_rx => return,
+            r = uds_read.read(&mut buf) => match r {
+                Ok(0) | Err(_) => return,
+                Ok(_) => {}
             },
         }
     }
@@ -2804,5 +2836,59 @@ mod tests {
         let local = to_local_host(entry);
         assert_eq!(local.state, "reachable");
         assert_eq!(local.lost_at, None);
+    }
+
+    /// CI run 36800800530's flake (`reverse_exec`'s
+    /// `exec_run_prefers_a_live_reverse_registration_over_a_dead_forward_pin`,
+    /// "exec stream ended without ExecExit"): the target answers `ExecExit`
+    /// and stops reading the moment its command exits, so the CLI's late
+    /// `StdinEof` fails `pump_uds_to_quic`'s QUIC write. That failure must
+    /// not cancel `pump_quic_to_uds` while `ExecExit` still sits unread:
+    /// the CLI must still receive it, then a clean EOF.
+    #[tokio::test]
+    async fn a_dead_quic_send_leg_does_not_discard_the_targets_pending_final_frame() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let (client, server) = crate::tunnel::testutil::loopback_pair().await;
+        let (mut a_send, a_recv) = client.quinn().open_bi().await.unwrap();
+        a_send.write_all(b"hdr").await.unwrap();
+        let (mut b_send, mut b_recv) = server.quinn().accept_bi().await.unwrap();
+        let mut hdr = [0u8; 3];
+        b_recv.read_exact(&mut hdr).await.unwrap();
+        // Target: final frame out and finished, then the recv half goes away.
+        b_send.write_all(b"EXITFRAME").await.unwrap();
+        b_send.finish().unwrap();
+        b_recv.stop(quinn::VarInt::from_u32(0)).unwrap();
+        // The daemon side learns the send half is dead before its pumps run.
+        a_send.stopped().await.unwrap();
+
+        let (cli, daemon_uds) = tokio::net::UnixStream::pair().unwrap();
+        let (mut cli_read, mut cli_write) = cli.into_split();
+        cli_write.write_all(b"late StdinEof").await.unwrap();
+        let (uds_read, uds_write) = daemon_uds.into_split();
+        // Let the reactor mark the UDS readable, so the first poll of
+        // `pump_uds_to_quic` reads at once and hits the dead QUIC send leg
+        // while `EXITFRAME` is still unread (the CI interleaving).
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let (uds_gone_tx, uds_gone_rx) = tokio::sync::oneshot::channel();
+        let (quic_gone_tx, quic_gone_rx) = tokio::sync::oneshot::channel();
+        let pumps = async {
+            tokio::join!(
+                pump_uds_to_quic(uds_read, a_send, true, uds_gone_tx, quic_gone_rx),
+                pump_quic_to_uds(a_recv, uds_write, quic_gone_tx, uds_gone_rx),
+            )
+        };
+        let reader = async {
+            let mut got = Vec::new();
+            cli_read.read_to_end(&mut got).await.unwrap();
+            got
+        };
+        let (_, got) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(pumps, reader)
+        })
+        .await
+        .expect("pumps and reader must finish");
+        assert_eq!(got, b"EXITFRAME");
     }
 }
