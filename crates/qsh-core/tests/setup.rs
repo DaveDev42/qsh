@@ -571,3 +571,96 @@ fn setup_op_failure_keeps_code_and_retryable_and_adds_step_ids_without_results()
         assert_eq!(keys, ["id", "status"], "no result on an error step");
     }
 }
+
+/// The `status: "error"` finding codes in the doctor step's `result`.
+fn doctor_error_codes(data: &SetupRunData) -> Vec<String> {
+    step_of(data, SetupStepId::Doctor).result.as_ref().unwrap()["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["status"] == "error")
+        .map(|f| f["code"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn setup_client_completes_without_acl_toml() {
+    let sandbox = Sandbox::new();
+    let pem = peer_pem();
+    let data = sandbox
+        .ops
+        .setup_run(&client("box", &pem), &sandbox.env())
+        .unwrap();
+    assert_eq!(
+        step_of(&data, SetupStepId::PinCert).status,
+        SetupStatus::Done
+    );
+    assert!(data.complete, "{:?}", data.steps);
+    assert!(data.next.iter().any(|n| n == "qsh box"), "{:?}", data.next);
+    assert!(!sandbox.acl_path().exists());
+
+    // doctor's own output is untouched: the exemption is setup's alone.
+    let doctor = step_of(&data, SetupStepId::Doctor);
+    let result = doctor.result.as_ref().unwrap();
+    assert_eq!(result["overall"], "error");
+    assert_eq!(doctor_error_codes(&data), ["acl_policy_missing"]);
+    assert!(
+        doctor
+            .detail
+            .as_deref()
+            .unwrap()
+            .contains("acl_policy_missing is not counted toward complete for the client role"),
+        "{:?}",
+        doctor.detail
+    );
+}
+
+#[test]
+fn setup_client_incomplete_on_invalid_acl_toml() {
+    let sandbox = Sandbox::new();
+    let pem = peer_pem();
+    sandbox.put_acl("this is = [not valid");
+    let data = sandbox
+        .ops
+        .setup_run(&client("box", &pem), &sandbox.env())
+        .unwrap();
+    assert!(doctor_error_codes(&data).contains(&"acl_policy_invalid".to_string()));
+    assert!(!data.complete, "{:?}", data.steps);
+    assert!(data.next.is_empty(), "{:?}", data.next);
+}
+
+#[test]
+fn setup_client_incomplete_on_other_doctor_error() {
+    let sandbox = Sandbox::new();
+    let pem = peer_pem();
+    // Forty years on, the device leaf has expired.
+    let mut env = sandbox.env();
+    env.now += Duration::from_secs(40 * 365 * 24 * 3600);
+    let data = sandbox.ops.setup_run(&client("box", &pem), &env).unwrap();
+    let errors = doctor_error_codes(&data);
+    assert!(
+        errors.iter().any(|c| c != "acl_policy_missing"),
+        "{errors:?}"
+    );
+    assert!(!data.complete, "{errors:?}");
+}
+
+#[test]
+fn setup_host_roles_incomplete_without_acl_toml() {
+    let pem = peer_pem();
+    for request in [
+        host("laptop"),
+        host_to("macmini", &pem),
+        listener("ctl", &pem),
+    ] {
+        let sandbox = Sandbox::new();
+        if request.role == SetupRole::HostTo {
+            sandbox.write_config("[serve]\nto = \"macmini\"\n");
+        } else if request.role == SetupRole::Listener {
+            sandbox.write_config("[listen]\nbind = \"[::]:4433\"\n");
+        }
+        let data = sandbox.ops.setup_run(&request, &sandbox.env()).unwrap();
+        assert!(!data.complete, "{:?}: {:?}", request.role, data.steps);
+        assert!(!sandbox.acl_path().exists());
+    }
+}

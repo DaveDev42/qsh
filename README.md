@@ -780,12 +780,6 @@ Per-milestone scope, in/out boundaries and acceptance criteria live in
 
 Some of these are MVP scope decisions, some are unfinished work.
 
-- `qsh setup client` reports `complete: false` on a machine that has no
-  `acl.toml`, even when every step succeeded. Its `doctor` step raises
-  `acl_policy_missing` as an error, `overall` becomes `error`, and
-  `complete` requires that it is not (ADR-0024 decision 9). Put an
-  `acl.toml` on the client, or read the `doctor` step's findings and ignore
-  this one.
 - Sessions die with the listener process. A session lives only as long as
   the `qsh serve` or `qsh serve --to` process that opened it, so restarting the
   listener is the end of every detached session on it, not a resume point.

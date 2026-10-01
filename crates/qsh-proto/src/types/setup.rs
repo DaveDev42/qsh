@@ -122,9 +122,10 @@ pub struct SetupStep {
 pub struct SetupRunData {
     /// The role that ran.
     pub role: SetupRole,
-    /// `true` when no step is `pending` or `blocked` and the doctor's
-    /// `overall` is not `"error"`: `qsh setup` has nothing left to do on this
-    /// machine. For `host` it does not mean the peer connected.
+    /// `true` when no step is `pending` or `blocked` and the doctor has no
+    /// `error` finding (a `client` does not count `acl_policy_missing`,
+    /// ADR-0038): `qsh setup` has nothing left to do on this machine. For
+    /// `host` it does not mean the peer connected.
     pub complete: bool,
     /// The steps, in run order.
     pub steps: Vec<SetupStep>,

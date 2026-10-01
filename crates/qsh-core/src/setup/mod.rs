@@ -13,6 +13,8 @@
 
 use qsh_proto::{SetupRole, SetupStepId};
 
+use crate::doctor::DiagnosticId;
+
 mod run;
 
 pub use run::SetupEnv;
@@ -38,6 +40,20 @@ pub fn step_order(role: SetupRole, with_cert: bool) -> Vec<SetupStepId> {
         SetupRole::HostTo => vec![Identity, PinCert, ModeConfig, Acl, Service, Doctor],
         SetupRole::Client => vec![Identity, if with_cert { PinCert } else { Pair }, Doctor],
         SetupRole::Listener => vec![Identity, PinCert, ModeConfig, Acl, Service, Doctor],
+    }
+}
+
+/// The doctor `code`s whose `error` findings `complete` does not count for
+/// `role` (ADR-0038 결정 2). Closed: a new entry needs a new ADR. Only a
+/// `client` has one, because a machine that only dials has no use for
+/// `acl.toml`; the host-side roles stay locked by doctor as well as by the
+/// `acl` step. `acl_policy_invalid` and the other `acl_*` codes are never
+/// listed (ADR-0038 결정 3). Codes come from [`DiagnosticId::code`], never a
+/// retyped copy.
+pub(crate) fn complete_exempt_codes(role: SetupRole) -> Vec<&'static str> {
+    match role {
+        SetupRole::Client => vec![DiagnosticId::AclPolicyMissing.code()],
+        SetupRole::Host | SetupRole::HostTo | SetupRole::Listener => Vec::new(),
     }
 }
 
