@@ -9,6 +9,212 @@ it with that tag's name.
 The GitHub Release page for a tag carries the commit list; this file
 carries the parts that do not change commit to commit.
 
+## `v0.4.0`
+
+The first release with Developer ID signed, notarized macOS binaries, and
+the first to carry the P1 work: milestones M11 and M12 in full and most of
+M13. `docs/CLI.md` moves from v0.13 to v0.21; its status header lists
+each delta. Every contract change is additive. Existing golden fixtures
+are unchanged and the wire format is unchanged. A `v0.3.0` peer and a
+`v0.4.0` peer still talk to each other, but run the same build at both
+ends where you can: the controller's `qsh listen` relays streams for
+local clients, and the relay fixes below only take effect once it runs
+this build.
+
+### New commands and options
+
+- `qsh setup` runs the steps of one of four roles in a fixed order
+  (`docs/CLI.md` §6.20, ADR-0024). It calls the existing operations only
+  and never writes `acl.toml`. For the `client` role, a missing
+  `acl.toml` no longer stops it from reporting `complete` (ADR-0038).
+- `qsh tunnel open --supervise <ms>` keeps `-L`, `-D` and `-R` forwards
+  alive across reconnects: the local listener stays bound, the peer's
+  fingerprint is checked again, and a supervised `-R` is reissued on the
+  new connection. `--accept-hold <ms>` (at most 2000, needs
+  `--supervise`, `-L` and `-D` only) holds a connection accepted during
+  a disconnect for up to that long when a reconnect is under way or due
+  within that time, then sends it over the new connection in accept
+  order; otherwise the connection is refused at once, as before (§6.9,
+  §6.14, ADR-0023).
+- `qsh acl show --principal <principal>` summarizes, read-only, what
+  this machine's `acl.toml` allows that one principal (§6.19,
+  ADR-0025).
+- `qsh init --import-ssh-key <path>` uses an unencrypted Ed25519 OpenSSH
+  key as the device key, and `qsh trust ssh-preview <path>` prints the
+  pin commands and a draft ACL for each line of an `authorized_keys`
+  file (§6.11, ADR-0026).
+- `qsh doctor --fail-on <warn|error>` exits `1` when a finding at or
+  above that level is present. Without the option, exit code and stdout
+  are byte-for-byte what they were (§6.17, ADR-0027).
+- `qsh doctor` gains two findings. `acl_forward_socks_ineffective`
+  (warn) flags a `forward.socks` grant with no `forward.local` for the
+  same principal: `forward.socks` authorizes nothing by itself, and `-D`
+  is authorized per CONNECT as `forward.local`.
+  `service_restart_drops_sessions` (info) appears when a service unit
+  for `qsh serve` or `qsh serve --to` is registered, as a reminder that
+  a service-manager restart ends the sessions it holds.
+
+### Behavior changes
+
+- `serve`, `listen`, `serve --to` and `tunnel open` write a timestamped
+  `qsh::lifecycle` JSON line to stderr when they start serving and when
+  they stop or end (`--quiet` turns these off). On SIGTERM, `serve` and
+  `serve --to` also write a `drained` line saying how many sessions the
+  drain closed and whether the 60-second drain timed out (§6.12, §6.13,
+  §6.14).
+- The client notices a wake from sleep, probes the path at once, and
+  declares it lost within about two seconds. After a wake the
+  `serve --to` target resets its backoff (§6.13).
+- A QUIC idle timeout is reported as `cause=idle_timeout` on
+  `qsh::reverse` lines instead of `path_dead`.
+- A tunnel stream whose local side has not accepted a byte for over a
+  second counts as stalled. When more than three streams on one
+  connection are stalled, or the peer reports it is blocked on
+  connection credit while any stream is stalled, the oldest stalled
+  stream is reset. Before, four unread tunnel streams could use up the
+  whole connection receive window and freeze the session's terminal
+  output (ADR-0037).
+- Inbound `qsh serve` and `qsh listen` keep their stateless reset key
+  in `config_dir/stateless_reset.key` (mode 0600, created on first
+  start). After a restart, a client still attached to the old process
+  learns within about one round trip that the connection is gone,
+  instead of waiting out the 45-second idle timeout (ADR-0036).
+- The client no longer sends SNI in its TLS ClientHello (ADR-0040,
+  decision 2). Encrypted ClientHello is not implemented, because the
+  TLS library has no server-side support; DNS over HTTPS is not
+  implemented either (ADR-0039).
+
+### Fixes
+
+- `qsh doctor`'s UDP probe sent a datagram a healthy QUIC server
+  ignores, so working hosts were reported as `udp_egress_blocked`
+  (issue #7). The probe is now a padded QUIC packet with an unsupported
+  version, which a QUIC server answers with Version Negotiation, so a
+  healthy qsh listener no longer looks like blocked UDP.
+- Resolving a peer or controller name waits at most 10 seconds and then
+  fails with `CONNECTION_FAILED`. A resolver that never answered used to
+  hold `attach`, session commands, `exec` without `--timeout`,
+  `pair accept`, the fingerprint probe behind `trust add`, and the
+  `serve --to` reconnect loop indefinitely.
+- `qsh listen`'s local relay could drop the target's final `ExecExit` or
+  its last session replies when one direction closed first, so a local
+  client saw its command or session end without the closing frames.
+- The host returns an exec quota slot before it sends `ExecExit`, so a
+  new exec started right after the previous one's result no longer hits
+  the quota.
+- `RemoteForwardClose` now waits up to one second for the listener to
+  be released before it replies, so reopening the same bind right away
+  no longer races the old listener.
+- `serve` and `listen` register their signal handlers at startup, so a
+  `SIGTERM` sent right after the listening line stops them cleanly.
+
+### What is in the archives
+
+Seven assets plus a `SHA256SUMS` file. Linux aarch64 (static, musl) is
+new in this release.
+
+| Platform | Asset |
+|---|---|
+| macOS, Apple silicon | `qsh-v0.4.0-aarch64-apple-darwin.tar.gz` |
+| macOS, Intel | `qsh-v0.4.0-x86_64-apple-darwin.tar.gz` |
+| Linux x86_64 (glibc) | `qsh-v0.4.0-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux aarch64 (glibc) | `qsh-v0.4.0-aarch64-unknown-linux-gnu.tar.gz` |
+| Linux x86_64 (static, musl) | `qsh-v0.4.0-x86_64-unknown-linux-musl.tar.gz` |
+| Linux aarch64 (static, musl) | `qsh-v0.4.0-aarch64-unknown-linux-musl.tar.gz` |
+| Windows x86_64 | `qsh-v0.4.0-x86_64-pc-windows-msvc.zip` |
+
+Each `.tar.gz` holds the `qsh` binary and the generated man pages under
+`man/`. The Windows `.zip` holds the binary alone.
+
+### Three ways to install
+
+**Homebrew**, Apple silicon only. The formula points at the
+`aarch64-apple-darwin` tarball and puts the man pages on your `MANPATH`.
+
+```bash
+brew install DaveDev42/tap/qsh
+```
+
+**The installer script**, macOS and Linux. It picks the asset for your
+platform, checks it against the release's `SHA256SUMS`, and installs to
+`~/.local/bin` by default (`QSH_INSTALL_DIR` overrides it). It never
+calls `sudo`. Two changes since `v0.3.0`:
+
+- When the GitHub CLI is installed and logged in, the installer runs
+  `gh attestation verify` on the archive and installs nothing if that
+  fails. Without a usable `gh` it says "provenance not verified" on
+  stderr and installs on the checksum alone. `QSH_INSECURE_SKIP_VERIFY=1`
+  skips both checks, with a warning.
+- It installs the man pages to
+  `${XDG_DATA_HOME:-~/.local/share}/man/man1` (`QSH_MAN_DIR` overrides it, `QSH_NO_MAN=1` skips them). A problem
+  with the man pages prints a warning and leaves the binary installed.
+
+`QSH_LIBC=musl` selects the static Linux build, on x86_64 and now on
+aarch64.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/DaveDev42/qsh/main/scripts/install.sh | sh
+```
+
+**By hand.** Download the asset, check it against `SHA256SUMS`, put `qsh`
+on your `PATH`. Windows has no installer path, so this is the only one
+there.
+
+### Verifying provenance
+
+Every asset, `SHA256SUMS` included, has a build provenance attestation
+from the workflow run that built it:
+
+```bash
+gh attestation verify qsh-v0.4.0-x86_64-unknown-linux-gnu.tar.gz --repo DaveDev42/qsh
+```
+
+What that establishes is the same as for `v0.3.0` below: which workflow
+and commit produced the file, not whether the code is correct.
+
+### What is signed and what is not
+
+- **Both macOS binaries are signed and notarized.** This tag is cut
+  with all six Apple credentials configured. Each binary is signed with
+  the Developer ID Application certificate of team `MU784AJZSW` under the
+  hardened runtime with a trusted timestamp. The workflow fails the build
+  unless Apple's notary service returns `Accepted`. The signing
+  identity stays the same from release to release, so macOS sees each
+  upgrade as the same developer's binary. Earlier releases were ad-hoc
+  signed, and each new build looked like a different program to macOS.
+  Whether every permission prompt stays quiet across upgrades is not
+  something this release tests.
+- **Linux and Windows assets are not code-signed.** Provenance
+  attestation and the checksum file are what you get.
+- **Nothing is stapled.** qsh ships a bare executable inside a `.tar.gz`,
+  and a ticket cannot be stapled to one. Gatekeeper checks the
+  notarization online, so a first run on a machine with no route to
+  Apple is not guaranteed to be admitted.
+
+Check what you have:
+
+```bash
+codesign -dv --verbose=4 $(which qsh)   # Authority=Developer ID Application: ...
+spctl -a -vvv -t execute $(which qsh)   # the verdict Gatekeeper would reach
+```
+
+### Gates this build passed
+
+The seven gates from `CLAUDE.md` and the interactive acceptance job ran
+green on the tagged commit, and the release-profile functional smoke
+ran on every build leg, as for `v0.3.0`. Before the tag, the full
+workspace suite also ran 30 times in a row on Linux with every CPU kept
+busy by other processes, with no failures. The flaky tests that earlier
+runs of that loop surfaced were fixed first.
+
+### Not for production use
+
+Nothing here changes what the `v0.3.0` section says: the independent
+protocol and key-lifecycle review is not contracted, the wire format is
+not frozen, and the campaigns a person runs by hand are still open. The
+clean-machine install rounds for macOS can now be run against a signed
+release, which `v0.3.0` could not offer.
+
 ## `v0.3.0`
 
 First release cut after the M10 release pipeline landed. It also carries
