@@ -15,7 +15,7 @@ One binary (`qsh`) is both ends: it serves, and it connects.
 
 ## Status
 
-Version 0.3.0. **Not for production use**. The independent review of the
+Version 0.4.0. **Not for production use**. The independent review of the
 protocol and key lifecycle that [docs/PRD.md](docs/PRD.md) §15 requires
 has not been contracted, and the wire-format freeze waits on that same
 decision. The campaigns a person runs by hand are still open too: the
@@ -764,11 +764,12 @@ to the registry yet.
 | M9 | Human-facing surface (naming, pairing, service install) | Features done; stopwatch campaign open |
 | M10 | Release (installers, Homebrew, notarization, musl, provenance) | Pipeline done; clean-VM campaign open |
 | M11 | Issue follow-ups and ACL visibility (first P1 milestone) | Features done; `cause` observation and parser fuzz-hours open |
-| M12 | Supervised tunnels (`--supervise`, `--accept-hold`) and `qsh setup` | Features done on main, not yet in a release; the `p1-supervise-wake` and `p1-setup-stopwatch` campaign rounds are open (human-owned) |
-| M13–M19 | Rest of P1, in `docs/ROADMAP.md` §5 | Not started |
+| M12 | Supervised tunnels (`--supervise`, `--accept-hold`) and `qsh setup` | Features done, first shipped in `v0.4.0`; the `p1-supervise-wake` and `p1-setup-stopwatch` campaign rounds are open (human-owned) |
+| M13 | Measurement and release groundwork | In progress; most items shipped in `v0.4.0` |
+| M14–M19 | Rest of P1, in `docs/ROADMAP.md` §5 | Not started |
 
 The Homebrew tap (`DaveDev42/tap`) and the release workflow's auto-bump
-job are wired and have run on `v0.2.0` and `v0.3.0`. What M10 still owes is a
+job are wired and have run on `v0.2.0`, `v0.3.0` and `v0.4.0`. What M10 still owes is a
 person's work: the clean-VM install campaign, and the first push to
 crates.io once that campaign passes — see
 [docs/ROADMAP.md](docs/ROADMAP.md) for the full acceptance criteria.
