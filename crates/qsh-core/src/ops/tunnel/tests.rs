@@ -65,6 +65,39 @@ fn tunnel_open_rejects_an_out_of_range_wait_ms_before_ever_connecting() {
     assert!(err.message.contains("wait_ms"), "{}", err.message);
 }
 
+/// `[transport].keep_alive_ms` is read before `tunnel open`/`-D` dial
+/// anything (ADR-0021 decision 1): an out-of-range value is `CONFIG_ERROR`,
+/// not a clamp and not a `HOST_NOT_FOUND` from the unconfigured `box`.
+#[test]
+fn tunnel_open_and_dynamic_reject_an_out_of_range_keep_alive_before_ever_connecting() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = crate::config::Paths::new(dir.path().join("config"), dir.path().join("state"));
+    std::fs::create_dir_all(&paths.config_dir).unwrap();
+    std::fs::write(paths.config_file(), "[transport]\nkeep_alive_ms = 999\n").unwrap();
+    let ops = Ops::new(paths);
+
+    let err = match ops.tunnel_open(req("local", None, 8080)) {
+        Ok(_) => panic!("keep_alive_ms = 999 must be rejected"),
+        Err(err) => err,
+    };
+    assert_eq!(err.code, ErrorCode::ConfigError);
+    assert!(!err.retryable);
+    assert!(err.message.contains("keep_alive_ms"), "{}", err.message);
+
+    let dynamic = TunnelDynamicReq {
+        host: "box".to_string(),
+        bind: None,
+        listen_port: 1080,
+        supervise_ms: None,
+        accept_hold_ms: None,
+    };
+    let err = match ops.tunnel_dynamic(dynamic) {
+        Ok(_) => panic!("keep_alive_ms = 999 must be rejected"),
+        Err(err) => err,
+    };
+    assert_eq!(err.code, ErrorCode::ConfigError);
+}
+
 /// A retryable `HOST_NOT_FOUND` shaped exactly like
 /// `crate::ops::host::stale_host_not_found`'s output (that function is
 /// private to `ops::host`, so this rebuilds the same shape from its

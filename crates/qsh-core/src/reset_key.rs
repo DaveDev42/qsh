@@ -31,7 +31,9 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 
-use qsh_transport::{Listener, LocalIdentity, RESET_KEY_LEN, SetupError, TrustEvaluator};
+use qsh_transport::{
+    Listener, LocalIdentity, RESET_KEY_LEN, SetupError, TransportTuning, TrustEvaluator,
+};
 use rand::RngCore as _;
 use zeroize::Zeroizing;
 
@@ -104,9 +106,11 @@ pub fn bind_listener(
     bind: SocketAddr,
     identity: LocalIdentity,
     evaluator: Arc<dyn TrustEvaluator>,
+    tuning: TransportTuning,
 ) -> Result<(Listener, Option<String>), SetupError> {
     let loaded = load_or_create(&paths.stateless_reset_key_file());
-    let listener = Listener::bind_with_reset_key(bind, identity, evaluator, loaded.bytes())?;
+    let listener =
+        Listener::bind_with_reset_key(bind, identity, evaluator, loaded.bytes(), tuning)?;
     Ok((listener, loaded.diagnostic))
 }
 

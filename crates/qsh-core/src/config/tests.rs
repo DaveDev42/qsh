@@ -391,6 +391,96 @@ fn reverse_backoff_rejects_nonsense_rather_than_clamping() {
 }
 
 #[test]
+fn transport_keep_alive_ms_outside_1000_to_20000_is_config_error_without_clamping() {
+    // ADR-0021 decision 1: 1000..=20000, out of range is a startup error,
+    // never a clamp (the same shape as `ReverseConfig::backoff`).
+    for bad in [0, 999, 20_001, u64::MAX] {
+        let transport = TransportConfig {
+            keep_alive_ms: Some(bad),
+        };
+        let err = transport.keep_alive().unwrap_err();
+        assert_eq!(err.code, ErrorCode::ConfigError, "{bad}");
+        assert!(!err.retryable, "{bad}");
+        assert!(
+            err.message.contains(&format!(
+                "[transport].keep_alive_ms ({bad}) must be within 1000..=20000"
+            )),
+            "{}",
+            err.message
+        );
+        // The same value fails the whole-config validation too, which is
+        // what every daemon runs at startup.
+        let config = Config {
+            transport,
+            ..Config::default()
+        };
+        assert_eq!(config.liveness().unwrap_err().code, ErrorCode::ConfigError);
+    }
+    for ok in [1_000, 5_000, 20_000] {
+        let transport = TransportConfig {
+            keep_alive_ms: Some(ok),
+        };
+        assert_eq!(
+            transport.keep_alive().unwrap(),
+            std::time::Duration::from_millis(ok)
+        );
+    }
+}
+
+#[test]
+fn absent_transport_section_keeps_the_fifteen_second_keep_alive() {
+    use qsh_transport::TransportTuning;
+    use qsh_transport::endpoint::{KEEP_ALIVE_INTERVAL, transport_config_debug};
+
+    let config: Config = toml::from_str("").unwrap();
+    assert_eq!(config.transport, TransportConfig::default());
+    let liveness = config.liveness().unwrap();
+    assert_eq!(liveness.keep_alive, std::time::Duration::from_secs(15));
+    assert_eq!(liveness.keep_alive, KEEP_ALIVE_INTERVAL);
+    assert_eq!(liveness.tuning(), TransportTuning::default());
+
+    // The quinn config built from an absent section is byte-identical to
+    // the one built before the section existed (the compiled default), and
+    // an empty `[transport]` table changes nothing either.
+    let before = transport_config_debug(TransportTuning::default());
+    assert_eq!(transport_config_debug(liveness.tuning()), before);
+    assert!(
+        before.contains("keep_alive_interval: Some(15s)"),
+        "{before}"
+    );
+    let empty_table: Config = toml::from_str("[transport]\n").unwrap();
+    assert_eq!(
+        transport_config_debug(empty_table.liveness().unwrap().tuning()),
+        before
+    );
+}
+
+#[test]
+fn keep_alive_ms_reaches_the_quinn_transport_config() {
+    use qsh_transport::endpoint::{KEEP_ALIVE_INTERVAL, MAX_IDLE_TIMEOUT, transport_config_debug};
+
+    let config: Config = toml::from_str("[transport]\nkeep_alive_ms = 5000\n").unwrap();
+    let tuning = config.liveness().unwrap().tuning();
+    assert_eq!(tuning.keep_alive, std::time::Duration::from_secs(5));
+    let tuned = transport_config_debug(tuning);
+    assert!(tuned.contains("keep_alive_interval: Some(5s)"), "{tuned}");
+    // Only the keep-alive moved: the idle timeout stays the fixed 45 s
+    // (ADR-0021 decision 2) and every other field renders as before.
+    assert!(tuned.contains("max_idle_timeout: Some(45000)"), "{tuned}");
+    assert_eq!(MAX_IDLE_TIMEOUT, std::time::Duration::from_secs(45));
+    let default = transport_config_debug(qsh_transport::TransportTuning {
+        keep_alive: KEEP_ALIVE_INTERVAL,
+    });
+    assert_eq!(
+        tuned.replace(
+            "keep_alive_interval: Some(5s)",
+            "keep_alive_interval: Some(15s)"
+        ),
+        default
+    );
+}
+
+#[test]
 fn stale_retention_key_uses_the_documented_name_and_default() {
     // architecture.md §7 / CLI.md §6.13 / protocol.md §11-4 / PLAN Step
     // 4: `[listen].stale_retention`, default 120s, comfortably clearing

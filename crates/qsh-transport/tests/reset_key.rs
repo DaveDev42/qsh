@@ -58,7 +58,14 @@ impl Server {
                 .unwrap();
             let listener = {
                 let _guard = rt.enter();
-                Listener::bind_with_reset_key(bind, identity, Arc::new(trust), &key).unwrap()
+                Listener::bind_with_reset_key(
+                    bind,
+                    identity,
+                    Arc::new(trust),
+                    &key,
+                    qsh_transport::TransportTuning::default(),
+                )
+                .unwrap()
             };
             addr_tx.send(listener.local_addr().unwrap()).unwrap();
             rt.spawn(async move {

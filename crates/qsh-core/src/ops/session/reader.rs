@@ -4,15 +4,18 @@ use super::*;
 
 /// Dial a resolved peer and exchange `Hello`. The async half of
 /// [`Ops::connect`], split out because a recovery re-dials from inside a
-/// runtime that already exists.
+/// runtime that already exists. `tuning` is what the caller read from
+/// `[transport]`; a one-shot op passes [`TransportTuning::default`].
 pub(super) async fn dial_peer(
     target: &PeerTarget,
+    tuning: TransportTuning,
 ) -> Result<(qsh_transport::Endpoint, qsh_transport::Connection, Session), OpError> {
     let device_name = target.identity.identity.device_id.clone();
     let dialer = Dialer::new(
         target.identity.local.clone(),
         target.trust.clone() as Arc<dyn qsh_transport::TrustEvaluator>,
-    );
+    )
+    .with_tuning(tuning);
     let address = target.address.clone();
     let addrs = crate::ops::resolve_all(&address).await?;
     let dialed =

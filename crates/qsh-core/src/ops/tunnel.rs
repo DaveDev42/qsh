@@ -760,8 +760,10 @@ impl Ops {
         )?;
         let wait_budget_ms = wait_budget_ms(req.wait_ms)?;
         let wait_budget_ms = self.cap_wait_budget_to_stale_retention(wait_budget_ms);
-        let (conn, seed) = self.connect_with_wait(&req.host, wait_budget_ms)?;
-        let supervision = self.supervision(req.supervise_ms, req.accept_hold_ms, seed, &conn)?;
+        let liveness = self.liveness()?;
+        let (conn, seed) = self.connect_with_wait(&req.host, wait_budget_ms, liveness.tuning())?;
+        let supervision =
+            self.supervision(req.supervise_ms, req.accept_hold_ms, seed, &conn, &liveness)?;
         if let Some(supervision) = supervision {
             return match spec.direction {
                 ForwardDirection::Local => {
@@ -786,6 +788,7 @@ impl Ops {
         accept_hold_ms: Option<u32>,
         seed: RouteSeed,
         conn: &Connected,
+        liveness: &crate::config::Liveness,
     ) -> Result<Option<Supervision>, OpError> {
         let ms = supervise_ms.unwrap_or(0);
         if ms == 0 {
@@ -806,6 +809,7 @@ impl Ops {
                 .filter(|hold| *hold != 0)
                 .map(|hold| Duration::from_millis(u64::from(hold))),
             recovery: self.recovery,
+            tuning: liveness.tuning(),
         }))
     }
 
@@ -831,9 +835,10 @@ impl Ops {
         &self,
         host: &str,
         wait_budget_ms: u64,
+        tuning: qsh_transport::TransportTuning,
     ) -> Result<(Connected, RouteSeed), OpError> {
         retry_while_stale(wait_budget_ms, WAIT_POLL_INTERVAL, || {
-            self.connect_keeping_target(host)
+            self.connect_keeping_target(host, tuning)
         })
     }
 
@@ -1142,15 +1147,16 @@ impl Ops {
         crate::tunnel::local::loopback_bind_addr(req.bind.as_deref(), listen_port, "-D")
             .map_err(map_local_forward_error)?;
         check_supervise(req.supervise_ms, req.accept_hold_ms, SuperviseMode::Dynamic)?;
-        let (conn, seed) = self.connect_keeping_target(&req.host)?;
-        let supervision = match self.supervision(req.supervise_ms, req.accept_hold_ms, seed, &conn)
-        {
-            Ok(supervision) => supervision,
-            Err(err) => {
-                conn.close();
-                return Err(err);
-            }
-        };
+        let liveness = self.liveness()?;
+        let (conn, seed) = self.connect_keeping_target(&req.host, liveness.tuning())?;
+        let supervision =
+            match self.supervision(req.supervise_ms, req.accept_hold_ms, seed, &conn, &liveness) {
+                Ok(supervision) => supervision,
+                Err(err) => {
+                    conn.close();
+                    return Err(err);
+                }
+            };
         Self::tunnel_dynamic_with_connected(
             conn,
             req.bind.as_deref(),
@@ -1522,6 +1528,8 @@ struct Supervision {
     /// disconnected may be kept (decision 19). `None` refuses at once.
     accept_hold: Option<Duration>,
     recovery: RecoveryConfig,
+    /// `[transport]` as read before the first dial; a redial reuses it.
+    tuning: qsh_transport::TransportTuning,
 }
 
 /// The pieces a supervisor is started from, taken from a `Connected`.
@@ -1547,6 +1555,7 @@ impl Ops {
             total,
             accept_hold,
             recovery,
+            tuning,
         } = supervision;
         let parts = match Self::supervision_parts(&mut conn, seed, &runtime_dir, &fingerprint, host)
         {
@@ -1569,6 +1578,7 @@ impl Ops {
                     tunnel_id: forward.tunnel_id().to_string(),
                     mode: "local",
                     recovery,
+                    tuning,
                 },
                 parts.session,
                 None,
@@ -1608,6 +1618,7 @@ impl Ops {
             total,
             accept_hold: _,
             recovery,
+            tuning,
         } = supervision;
         // The first open is the unsupervised one, step for step.
         let (acceptor, open, opened, vanished) = match Self::open_remote(&mut conn, spec) {
@@ -1639,6 +1650,7 @@ impl Ops {
                     tunnel_id: opened.forward_id.clone(),
                     mode: "remote",
                     recovery,
+                    tuning,
                 },
                 parts.session,
                 Some(remote),
@@ -1734,6 +1746,7 @@ impl Ops {
             total,
             accept_hold,
             recovery,
+            tuning,
         } = supervision;
         let parts = match Self::supervision_parts(&mut conn, seed, &runtime_dir, &fingerprint, host)
         {
@@ -1757,6 +1770,7 @@ impl Ops {
                     tunnel_id: forward.tunnel_id().to_string(),
                     mode: "dynamic",
                     recovery,
+                    tuning,
                 },
                 parts.session,
                 None,

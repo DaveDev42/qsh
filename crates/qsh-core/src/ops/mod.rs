@@ -717,6 +717,15 @@ impl Ops {
         Config::load(&self.paths)
     }
 
+    /// The validated `[transport]` setting an attach or `tunnel open` dials
+    /// with. Read before any dial, so a malformed or out-of-range
+    /// `config.toml` fails these ops with `CONFIG_ERROR` rather than being
+    /// applied half-way (ADR-0021 decision 1: no clamping). One-shot ops
+    /// ([`Self::connect`]) keep the compiled default and never read it.
+    pub(crate) fn liveness(&self) -> Result<crate::config::Liveness, OpError> {
+        self.config()?.liveness()
+    }
+
     /// Report this build's version and the wire/CLI schemas it understands.
     ///
     /// `build.commit` (`docs/ROADMAP.md` M7 감사 개정 ③) is whatever

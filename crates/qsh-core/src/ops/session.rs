@@ -24,7 +24,7 @@ use qsh_proto::{
     SessionOpenData, SessionOpenReq, SessionReadData, SessionReadReq, SessionResizeData,
     SessionResizeReq, SessionWriteData, SessionWriteReq, UnreachableHost,
 };
-use qsh_transport::Dialer;
+use qsh_transport::{Dialer, TransportTuning};
 
 use crate::client::link::DataKillSwitch;
 use crate::client::pathwatch::{PathWatch, PathWatchConfig, watch_path};
@@ -712,6 +712,11 @@ impl Ops {
         remote_forward_specs: &[wire::ForwardSpec],
     ) -> Result<SessionAttachStream, OpError> {
         let r = parse_session_ref(&req.session_ref)?;
+        // `[transport]` is read here, before any route is resolved or a
+        // socket exists: a bad value is a `CONFIG_ERROR`, never clamped
+        // (ADR-0021 decision 1). The tuning rides along in `AttachContext`,
+        // so a recovery redial dials with the same keep-alive.
+        let liveness = self.liveness()?;
         let store = ResumeStore::new(&self.paths);
         // Route-aware (`PLAN.md` M3 Step 7): a live reverse registration
         // relays through this machine's `qsh listen` daemon, exactly like
@@ -725,7 +730,7 @@ impl Ops {
         // ever needs it back.
         let (mut conn, target, reverse_route) = match self.resolve_route(&r.host)? {
             PeerRoute::Forward(target) => {
-                let conn = self.connect_target(&target)?;
+                let conn = self.connect_target(&target, liveness.tuning())?;
                 (conn, Some(target), None)
             }
             PeerRoute::Reverse(route) => {
@@ -923,6 +928,7 @@ impl Ops {
             link: link.clone(),
             window: Arc::new(std::sync::Mutex::new(None)),
             recovery: self.recovery,
+            tuning: liveness.tuning(),
             finished: finished.clone(),
             applied_input,
             reverse_route,
@@ -1144,7 +1150,7 @@ impl Ops {
     /// its reverse leg).
     pub(crate) fn connect(&self, host: &str) -> Result<Connected, OpError> {
         match self.resolve_route(host)? {
-            PeerRoute::Forward(target) => self.connect_target(&target),
+            PeerRoute::Forward(target) => self.connect_target(&target, TransportTuning::default()),
             // Generation is only ever needed to seed a `session.attach`'s
             // recovery baseline (`Self::connect_reverse`'s own doc) — none
             // of this method's six value-op callers attach anything.
@@ -1159,13 +1165,18 @@ impl Ops {
     /// the forward route, re-dialed as is instead of resolving the host
     /// again (ADR-0023 decision 4), and the registration `generation` on
     /// the reverse route (decision 7-1).
+    ///
+    /// `tuning` is the `[transport]` setting the caller read: a supervised
+    /// or long-lived tunnel is the one place besides an attach that dials
+    /// with it, where [`connect`](Self::connect) keeps the compiled default.
     pub(crate) fn connect_keeping_target(
         &self,
         host: &str,
+        tuning: TransportTuning,
     ) -> Result<(Connected, RouteSeed), OpError> {
         match self.resolve_route(host)? {
             PeerRoute::Forward(target) => {
-                let conn = self.connect_target(&target)?;
+                let conn = self.connect_target(&target, tuning)?;
                 Ok((conn, RouteSeed::Forward(Box::new(target))))
             }
             PeerRoute::Reverse(route) => self
@@ -1180,9 +1191,13 @@ impl Ops {
     /// An attach resolves its peer once and keeps the result, because the
     /// resolution loads the device key — which must not happen inside a
     /// runtime — and a recovery re-dials from inside one.
-    fn connect_target(&self, target: &PeerTarget) -> Result<Connected, OpError> {
+    fn connect_target(
+        &self,
+        target: &PeerTarget,
+        tuning: TransportTuning,
+    ) -> Result<Connected, OpError> {
         let runtime = self.connect_runtime()?;
-        let (endpoint, connection, session) = runtime.block_on(dial_peer(target))?;
+        let (endpoint, connection, session) = runtime.block_on(dial_peer(target, tuning))?;
         Ok(Connected {
             runtime: Some(runtime),
             link: ConnectedLink::Forward(Link::new(endpoint, connection)),
