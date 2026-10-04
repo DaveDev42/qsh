@@ -314,6 +314,27 @@ async fn a_moving_datagram_counter_keeps_the_path_alive_without_control_replies(
 }
 
 #[tokio::test(start_paused = true)]
+async fn datagram_liveness_is_not_activity_so_the_idle_cadence_is_still_reached() {
+    let cfg = cfg();
+    let watch = PathWatch::new(cfg);
+    let source = CountingSource::default();
+    let probes = Arc::new(tokio::sync::Notify::new());
+    let watchdog = tokio::spawn(watch_path(source.clone(), watch.clone(), probes));
+    // Datagrams keep arriving (the transport's own ACKs, say) for well past
+    // the active window, and nobody types or prints anything.
+    for _ in 0..400 {
+        source.0.fetch_add(1, Ordering::Relaxed);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(!watch.is_dead());
+    assert!(
+        watch.state().is_idle(Instant::now(), &cfg),
+        "a moving datagram counter must not pin the fast cadence"
+    );
+    watchdog.abort();
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_frozen_datagram_counter_without_replies_is_dead_on_the_existing_schedule() {
     let watch = PathWatch::new(cfg());
     let source = CountingSource::default();

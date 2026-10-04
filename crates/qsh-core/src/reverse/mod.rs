@@ -25,7 +25,7 @@ pub mod registry;
 pub mod target;
 
 #[cfg(all(test, unix))]
-mod test_harness;
+pub(crate) mod test_harness;
 
 /// The [`PathWatchConfig`] the target's registered-session watchdog uses
 /// (`target::run_reverse_unix`). Production always gets

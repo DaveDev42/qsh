@@ -485,6 +485,10 @@ pub struct Listen {
     /// Test-only override for [`Self::path_watch_config`].
     #[cfg(test)]
     test_path_watch: std::sync::Mutex<Option<PathWatchConfig>>,
+    /// Test-only: while `true`, [`Self::drive_registered_session`] neither
+    /// reads nor writes its control stream (see [`Self::control_stalled`]).
+    #[cfg(test)]
+    test_control_stall: tokio::sync::watch::Sender<bool>,
 }
 
 impl std::fmt::Debug for Listen {
@@ -648,6 +652,8 @@ impl Listen {
             quotas,
             #[cfg(test)]
             test_path_watch: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            test_control_stall: tokio::sync::watch::Sender::new(false),
         })
     }
 
@@ -680,6 +686,43 @@ impl Listen {
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Some(config);
     }
+
+    /// Test-only: stop (`true`) or resume (`false`) every registered
+    /// connection's control loop. A stalled loop reads no control message
+    /// and answers no `Ping`, which is what a `Pong` stuck behind loss
+    /// recovery on the ordered control stream looks like from the peer,
+    /// while the QUIC connection underneath keeps running (issue #10).
+    #[cfg(all(test, unix))]
+    pub(crate) fn set_test_control_stall(&self, stalled: bool) {
+        self.test_control_stall.send_replace(stalled);
+    }
+
+    /// Resolves when a test has asked the control loop to stall. Never
+    /// resolves outside `#[cfg(test)]`.
+    #[cfg(test)]
+    async fn control_stall_requested(&self) {
+        let mut rx = self.test_control_stall.subscribe();
+        let _ = rx.wait_for(|stalled| *stalled).await;
+    }
+
+    #[cfg(not(test))]
+    async fn control_stall_requested(&self) {
+        std::future::pending::<()>().await;
+    }
+
+    /// Hold the control loop idle until the test resumes it or the path is
+    /// declared dead, so a stall cannot hide a verdict.
+    #[cfg(test)]
+    async fn control_stall_hold(&self, watch: &PathWatch) {
+        let mut rx = self.test_control_stall.subscribe();
+        tokio::select! {
+            _ = rx.wait_for(|stalled| !*stalled) => {}
+            () = watch.dead() => {}
+        }
+    }
+
+    #[cfg(not(test))]
+    async fn control_stall_hold(&self, _watch: &PathWatch) {}
 
     /// The reverse-registration table — read-only from outside this
     /// module; a test harness uses this instead of scraping stderr.

@@ -451,6 +451,14 @@ impl Listen {
                     };
                     break;
                 }
+                // Test-only (`Listen::set_test_control_stall`): never
+                // resolves in a production build. Runs after the death arm
+                // so a stall cannot hide a verdict, and holds the loop
+                // outside this `select!` so no other arm is polled.
+                () = self.control_stall_requested() => {
+                    self.control_stall_hold(&watch).await;
+                    continue;
+                }
                 () = probes.notified() => {
                     if let Err(err) = session.send_ping().await {
                         // A write failure surfaces the same `ClientError`
