@@ -312,6 +312,14 @@ async fn run_target_lost_and_retry_lines_report_peer_closed_with_since_registere
         .as_u64()
         .unwrap_or_else(|| panic!("`lost` must carry a numeric since_registered_ms: {lost}"));
     assert_at_is_rfc3339(lost);
+    // Issue #10 request 3: a close the peer announced is not this side's
+    // own ruling, so neither diagnostic field appears (absent, never null).
+    for key in ["srtt_ms", "silence_ms"] {
+        assert!(
+            lost.get(key).is_none(),
+            "a peer-closed `lost` must not carry {key}: {lost}"
+        );
+    }
     // No controller-side `lost` line for host "widget" here: the old
     // generation's `mark_stale` call is a no-op once the replace already
     // advanced it (`Registry::mark_stale_is_a_no_op_once_a_newer_registration_already_superseded_it`)
@@ -439,6 +447,105 @@ async fn run_target_lost_and_retry_lines_report_a_silent_path_as_path_dead() {
         assert_eq!(controller_lost["cause"], "path_dead");
         assert!(controller_lost["since_registered_ms"].as_u64().is_some());
         assert_at_is_rfc3339(controller_lost);
+    }
+
+    harness.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// Issue #10 request 3: `srtt_ms`/`silence_ms` on the side whose own watchdog
+// ruled the path dead.
+// ---------------------------------------------------------------------------
+
+/// Both ends watch the same registration, so a bidirectional sever is a race
+/// (the silent-path test's own doc): whichever watchdog rules first closes
+/// with `CLOSE_CODE_PATH_DEAD` and carries its measurements; the other side
+/// reads that close back and carries none. At least one of the two `lost`
+/// lines must therefore have both keys, any line that has them must show at
+/// least the default `min_dead_after` (1 s) of silence, and neither `retry`
+/// has them. The name carries the stress prefix because the outcome depends
+/// on which of two real-time watchdogs wins.
+#[tokio::test(flavor = "multi_thread")]
+async fn datagram_liveness_silent_path_lost_line_carries_srtt_ms_and_silence_ms_on_the_side_whose_watchdog_ruled()
+ {
+    capture_reverse_events();
+    let target = make_identity();
+    let harness =
+        ReverseHarness::start_with(Arc::new(AllowAllPinned), false, pin(&target, "widget")).await;
+    let chaos = ChaosProxy::start(harness.addr, ChaosPolicy::seeded(0xCA05F))
+        .await
+        .expect("bind chaos proxy in front of the controller");
+
+    let config = fast_backoff();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let run_fut = harness.run_target_through_chaos(
+        &target,
+        "device-id",
+        "controller-cause-diag",
+        None,
+        &config,
+        &chaos,
+        |_runtime| {},
+        async {
+            let _ = shutdown_rx.await;
+        },
+    );
+    let scenario = async {
+        wait_for(TIMEOUT, || harness.listen.registry().get("widget")).await;
+        wait_target_registered("controller-cause-diag").await;
+        chaos.sever().await;
+
+        let target_lost = wait_for(TIMEOUT, || {
+            let v = events_by_host_and_kind("controller-cause-diag", "lost");
+            (!v.is_empty()).then_some(v)
+        })
+        .await;
+        let target_retry = wait_for(TIMEOUT, || {
+            let v = events_by_host_and_kind("controller-cause-diag", "retry");
+            (!v.is_empty()).then_some(v)
+        })
+        .await;
+        let controller_lost = wait_for(TIMEOUT, || {
+            let v = events_by_host_and_kind("widget", "lost");
+            (!v.is_empty()).then_some(v)
+        })
+        .await;
+        let _ = shutdown_tx.send(());
+        (target_lost, target_retry, controller_lost)
+    };
+
+    let (result, (target_lost, target_retry, controller_lost)) = tokio::join!(run_fut, scenario);
+    result.expect("a clean shutdown must exit Ok even mid-flight after a sever");
+
+    let lines = [&target_lost[0], &controller_lost[0]];
+    for line in lines {
+        assert_eq!(line["cause"], "path_dead", "{line}");
+        let has = [line.get("srtt_ms"), line.get("silence_ms")];
+        assert!(
+            has.iter().all(Option::is_some) || has.iter().all(Option::is_none),
+            "the two fields come together or not at all: {line}"
+        );
+        if let Some(silence) = line.get("silence_ms") {
+            let silence = silence
+                .as_u64()
+                .unwrap_or_else(|| panic!("silence_ms must be an integer: {line}"));
+            assert!(
+                silence >= 1_000,
+                "a path_dead ruling needs the default min_dead_after of silence, got {silence} ms: {line}"
+            );
+            assert!(line["srtt_ms"].as_u64().is_some(), "{line}");
+        }
+    }
+    assert!(
+        lines.iter().any(|l| l.get("silence_ms").is_some()),
+        "one side's own watchdog ruled and must say so: {target_lost:?} / {controller_lost:?}"
+    );
+    for key in ["srtt_ms", "silence_ms"] {
+        assert!(
+            target_retry[0].get(key).is_none(),
+            "a retry never carries {key}: {}",
+            target_retry[0]
+        );
     }
 
     harness.shutdown().await;

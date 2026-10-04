@@ -98,6 +98,23 @@ impl PathWatchConfig {
     }
 }
 
+/// What the watchdog measured at the tick it ruled [`Verdict::Dead`]: the
+/// smoothed RTT it scaled the deadline by and how long the path had been
+/// silent. Diagnostic only; [`Verdict`] itself stays payload-free.
+///
+/// `silence` is counted from the last liveness evidence of any kind: a
+/// control or session message, or the tick at which the watchdog saw the
+/// connection's UDP receive counter advance ([`ProbeSource::rx_datagrams`]),
+/// whichever is later. The counter is only sampled per tick, so the figure is
+/// tick-granular and can understate the real silence by at most one cadence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeadVerdict {
+    /// Smoothed RTT at the verdict.
+    pub srtt: Duration,
+    /// Time since the watchdog last saw the path carry anything.
+    pub silence: Duration,
+}
+
 /// What the watchdog decided on one tick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
@@ -180,6 +197,13 @@ impl PathState {
         self.probe_now = true;
     }
 
+    /// How long the path has been silent as of `now`: the time since the
+    /// last liveness evidence: an inbound message, or a tick that saw the
+    /// UDP receive counter move.
+    pub fn silence(&self, now: Instant) -> Duration {
+        now.saturating_duration_since(self.last_inbound)
+    }
+
     /// Probes sent since the last inbound byte.
     pub fn unanswered(&self) -> u32 {
         self.unanswered
@@ -235,6 +259,11 @@ struct Inner {
     cfg: PathWatchConfig,
     state: std::sync::Mutex<PathState>,
     dead: AtomicBool,
+    /// What the watchdog measured when it ruled the path dead; `None` until
+    /// then, and again after [`PathWatch::revive`]. Stays `None` when the
+    /// death was declared some other way (`declare_dead` on a closed
+    /// connection), which is how a caller tells its own ruling apart.
+    dead_verdict: std::sync::Mutex<Option<DeadVerdict>>,
     /// How many pumps are currently parked on a full event queue. While
     /// this is non-zero the watchdog cannot see inbound traffic, so it
     /// refuses to judge.
@@ -264,6 +293,7 @@ impl PathWatch {
                 cfg,
                 state: std::sync::Mutex::new(PathState::new(Instant::now())),
                 dead: AtomicBool::new(false),
+                dead_verdict: std::sync::Mutex::new(None),
                 stalls: AtomicUsize::new(0),
                 notify: tokio::sync::Notify::new(),
                 inbound: tokio::sync::watch::Sender::new(0),
@@ -388,7 +418,30 @@ impl PathWatch {
             return Verdict::Healthy;
         }
         let cfg = self.inner.cfg;
-        self.state().verdict(Instant::now(), rtt, &cfg)
+        let now = Instant::now();
+        let mut state = self.state();
+        let verdict = state.verdict(now, rtt, &cfg);
+        if verdict == Verdict::Dead {
+            let silence = state.silence(now);
+            drop(state);
+            *self.dead_verdict_slot() = Some(DeadVerdict { srtt: rtt, silence });
+        }
+        verdict
+    }
+
+    fn dead_verdict_slot(&self) -> std::sync::MutexGuard<'_, Option<DeadVerdict>> {
+        self.inner
+            .dead_verdict
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// What this watch's own watchdog measured when it ruled the path dead,
+    /// or `None` if it never did (the path was never declared dead, or
+    /// something else declared it: a closed connection, a caller of
+    /// [`declare_dead`](Self::declare_dead)).
+    pub fn dead_verdict(&self) -> Option<DeadVerdict> {
+        *self.dead_verdict_slot()
     }
 
     /// Mark the path dead and wake everything waiting on it. Idempotent.
@@ -410,6 +463,7 @@ impl PathWatch {
     /// exists.
     pub fn revive(&self) {
         *self.state() = PathState::new(Instant::now());
+        *self.dead_verdict_slot() = None;
         self.inner.dead.store(false, Ordering::Release);
     }
 

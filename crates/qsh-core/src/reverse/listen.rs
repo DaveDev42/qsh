@@ -899,6 +899,8 @@ impl Listen {
                     cause: None,
                     at: crate::config::now_rfc3339(),
                     since_registered_ms: None,
+                    srtt_ms: None,
+                    silence_ms: None,
                 }
                 .emit();
             }
@@ -1099,6 +1101,17 @@ struct RegistrationEvent<'a> {
     /// event, including one that never had an ended registration to time.
     #[serde(skip_serializing_if = "Option::is_none")]
     since_registered_ms: Option<u64>,
+    /// Smoothed RTT (ms) at the verdict, only on a `"lost"` whose
+    /// `cause=path_dead` this process's own path watch ruled; absent, never
+    /// null, on every other line, including a `path_dead` the peer's close
+    /// code announced. Open diagnostic vocabulary (`docs/CLI.md` §6.13).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    srtt_ms: Option<u64>,
+    /// Milliseconds of silence the watch measured at that verdict. Counted
+    /// from the last liveness evidence (a control message, or the tick that
+    /// saw received UDP datagrams); same presence rule as `srtt_ms`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    silence_ms: Option<u64>,
 }
 
 impl RegistrationEvent<'_> {
@@ -1116,6 +1129,8 @@ impl RegistrationEvent<'_> {
             cause = self.cause,
             at = %self.at,
             since_registered_ms = self.since_registered_ms,
+            srtt_ms = self.srtt_ms,
+            silence_ms = self.silence_ms,
             "{}",
             line
         );
