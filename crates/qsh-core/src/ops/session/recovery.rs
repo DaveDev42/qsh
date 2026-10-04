@@ -225,7 +225,7 @@ async fn reattach(
         .target
         .as_ref()
         .expect("reattach only runs on the forward route, which always resolves a PeerTarget");
-    let (endpoint, connection, mut session) = dial_peer(target).await?;
+    let (endpoint, connection, mut session) = dial_peer(target, ctx.tuning).await?;
     let store = ResumeStore::new(&ctx.paths);
     let Some(peer) = connection.peer_fingerprint().map(|fp| fp.to_string()) else {
         connection.close(0, b"unverified");

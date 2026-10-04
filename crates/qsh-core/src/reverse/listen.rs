@@ -253,6 +253,7 @@ async fn run_listen_unix(
     // combination must fail closed at startup, not surface later as a
     // half-initialized controller.
     let stale_retention = config.stale_retention()?;
+    let liveness = config.liveness()?;
 
     // localctl (`PLAN.md` M3 Step 5 (a)): bind this process's UDS admin
     // socket before the QUIC listener, so a runtime directory whose
@@ -279,10 +280,11 @@ async fn run_listen_unix(
     // bind; an unusable key file never fails the start, it yields one
     // diagnostic, delivered through the same callback as the ACL one.
     let (listener, reset_key_diagnostic) =
-        crate::reset_key::bind_listener(paths, bind, identity.local, trust).map_err(|err| {
-            let _ = std::fs::remove_file(&localctl_socket_path);
-            crate::serve::bind_setup_error(&bind, err)
-        })?;
+        crate::reset_key::bind_listener(paths, bind, identity.local, trust, liveness.tuning())
+            .map_err(|err| {
+                let _ = std::fs::remove_file(&localctl_socket_path);
+                crate::serve::bind_setup_error(&bind, err)
+            })?;
     if let Some(diagnostic) = &reset_key_diagnostic {
         on_policy_diagnostic(diagnostic);
     }

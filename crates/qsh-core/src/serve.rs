@@ -356,6 +356,10 @@ pub async fn run_serve(
     on_notice: impl Fn(&str) + Send + Sync + 'static,
     shutdown: impl std::future::Future<Output = ()>,
 ) -> Result<(), OpError> {
+    // The liveness sections are validated before any resource exists: a
+    // nonsensical value is a `CONFIG_ERROR` at startup, never clamped
+    // (ADR-0021).
+    let liveness = config.liveness()?;
     let trust = SharedTrustStore::open(paths.trust_file())?;
     // ADR-0002 / M7 Step 4 (report §B12: forward-host, `qsh serve`, only —
     // deliberately wired here in `run_serve`, not in the `host_runtime`
@@ -384,6 +388,7 @@ pub async fn run_serve(
         bind,
         identity.local,
         Arc::clone(&trust) as Arc<dyn TrustEvaluator>,
+        liveness.tuning(),
     )
     .map_err(|err| bind_setup_error(&bind, err))?;
     if let Some(diagnostic) = &reset_key_diagnostic {

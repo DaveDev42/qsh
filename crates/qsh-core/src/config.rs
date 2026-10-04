@@ -446,6 +446,10 @@ pub struct Config {
     /// `acl.toml` file, not `config.toml` (same file/`Config` split
     /// `trust.toml` already has).
     pub audit: AuditConfig,
+    /// `[transport]` — the one connection-level liveness knob
+    /// (`keep_alive_ms`, `docs/adr/0021-transport-liveness-knobs.md`
+    /// decision 1).
+    pub transport: TransportConfig,
 }
 
 /// `[serve]` section.
@@ -1036,7 +1040,83 @@ impl ReverseConfig {
     }
 }
 
+/// `[transport]` section (`docs/adr/0021-transport-liveness-knobs.md`
+/// decision 1).
+///
+/// Read once at startup by every process that dials or listens; changing it
+/// needs a restart. Raise it on **both** ends of a link together: each end
+/// sends its own keep-alive, and the 45 s idle timeout it must stay well
+/// inside is fixed (decision 2).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TransportConfig {
+    /// Keep-alive interval in milliseconds. Unset ⇒
+    /// [`TransportConfig::DEFAULT_KEEP_ALIVE_MS`] (15 s). Outside
+    /// [`MIN_KEEP_ALIVE_MS`](TransportConfig::MIN_KEEP_ALIVE_MS)`..=`
+    /// [`MAX_KEEP_ALIVE_MS`](TransportConfig::MAX_KEEP_ALIVE_MS) is a
+    /// `CONFIG_ERROR`, never clamped.
+    pub keep_alive_ms: Option<u64>,
+}
+
+impl TransportConfig {
+    /// Default keep-alive: 15 s (`docs/design/protocol.md` §2).
+    pub const DEFAULT_KEEP_ALIVE_MS: u64 = 15_000;
+    /// Lower bound: the floor of what waking a radio for a keep-alive costs
+    /// (ADR-0021 decision 1).
+    pub const MIN_KEEP_ALIVE_MS: u64 = 1_000;
+    /// Upper bound: under half of the fixed 45 s idle timeout (22.5 s), so
+    /// that losing a single keep-alive PING cannot let the idle timeout
+    /// expire first and have the keep-alive setting kill the connection it
+    /// exists to keep (ADR-0021 decision 1).
+    pub const MAX_KEEP_ALIVE_MS: u64 = 20_000;
+
+    /// Defaulted and validated keep-alive. Fails closed (`CONFIG_ERROR`,
+    /// non-retryable) on a value outside the bounds, never clamping it.
+    pub fn keep_alive(&self) -> Result<std::time::Duration, OpError> {
+        let ms = self.keep_alive_ms.unwrap_or(Self::DEFAULT_KEEP_ALIVE_MS);
+        if !(Self::MIN_KEEP_ALIVE_MS..=Self::MAX_KEEP_ALIVE_MS).contains(&ms) {
+            return Err(OpError::new(
+                ErrorCode::ConfigError,
+                format!(
+                    "[transport].keep_alive_ms ({ms}) must be within {}..={}",
+                    Self::MIN_KEEP_ALIVE_MS,
+                    Self::MAX_KEEP_ALIVE_MS
+                ),
+            )
+            .with_retryable(false));
+        }
+        Ok(std::time::Duration::from_millis(ms))
+    }
+}
+
+/// The validated liveness settings every process that dials or listens
+/// reads at startup, before any resource exists ([`Config::liveness`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Liveness {
+    /// `[transport].keep_alive_ms`, validated.
+    pub keep_alive: std::time::Duration,
+}
+
+impl Liveness {
+    /// The transport tuning these settings describe.
+    pub fn tuning(&self) -> qsh_transport::TransportTuning {
+        qsh_transport::TransportTuning {
+            keep_alive: self.keep_alive,
+        }
+    }
+}
+
 impl Config {
+    /// Validate the liveness sections. Every daemon calls this at startup
+    /// whatever its role, so a bad value fails closed before any socket is
+    /// bound or connection dialed; an attach and `tunnel open` call it
+    /// before they dial.
+    pub fn liveness(&self) -> Result<Liveness, OpError> {
+        Ok(Liveness {
+            keep_alive: self.transport.keep_alive()?,
+        })
+    }
+
     /// Defaulted and validated `[listen].stale_retention`, checked against
     /// this same config's `[reverse].backoff_max_ms` — the one call site
     /// that wires [`ListenConfig::stale_retention`] to

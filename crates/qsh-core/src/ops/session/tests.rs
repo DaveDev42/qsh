@@ -346,6 +346,7 @@ async fn reverse_leg_link_death_with_recovery_disabled_ends_the_attach_with_a_ty
             enabled: false,
             ..RecoveryConfig::default()
         },
+        tuning: TransportTuning::default(),
         finished: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         applied_input,
         reverse_route: None,
@@ -490,6 +491,7 @@ async fn reverse_leg_link_death_with_recovery_exhausted_ends_the_attach_with_a_t
             registration_wait: Duration::from_millis(50),
             ..RecoveryConfig::default()
         },
+        tuning: TransportTuning::default(),
         finished: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         applied_input,
         reverse_route: Some(ReverseRoute {
@@ -600,6 +602,32 @@ fn a_different_hosts_toml_name_does_not_leak_its_user_hint() {
 
     let user = ops.resolve_user_hint("mac", None).unwrap();
     assert_eq!(user, None);
+}
+
+/// An attach reads `[transport]` before it resolves a route or opens a
+/// socket (ADR-0021 decision 1): out of range is `CONFIG_ERROR`.
+#[test]
+fn session_attach_rejects_an_out_of_range_keep_alive_before_resolving_the_host() {
+    let dir = tempfile::tempdir().unwrap();
+    let ops = user_hint_ops(dir.path());
+    std::fs::create_dir_all(&ops.paths().config_dir).unwrap();
+    std::fs::write(
+        ops.paths().config_file(),
+        "[transport]\nkeep_alive_ms = 20001\n",
+    )
+    .unwrap();
+    let err = match ops.session_attach(
+        SessionAttachReq {
+            session_ref: "nowhere/01ABC".to_string(),
+            no_steal: false,
+        },
+        &[],
+    ) {
+        Ok(_) => panic!("keep_alive_ms = 20001 must be rejected"),
+        Err(err) => err,
+    };
+    assert_eq!(err.code, ErrorCode::ConfigError);
+    assert!(!err.retryable);
 }
 
 #[test]

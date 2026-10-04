@@ -127,6 +127,8 @@ pub(super) struct Params {
     /// `"local"` or `"dynamic"`.
     pub(super) mode: &'static str,
     pub(super) recovery: RecoveryConfig,
+    /// `[transport]` as read at the first open; every redial uses it.
+    pub(super) tuning: qsh_transport::TransportTuning,
 }
 
 /// How a lost carrier is found again (decision 4).
@@ -714,7 +716,7 @@ impl Supervisor {
     /// One dial plus the two identity checks, bounded by [`REDIAL_DEADLINE`].
     async fn attempt_forward(&self, target: &PeerTarget) -> Result<Established, AttemptError> {
         let (endpoint, connection, session) =
-            match tokio::time::timeout(REDIAL_DEADLINE, dial(target)).await {
+            match tokio::time::timeout(REDIAL_DEADLINE, dial(target, self.params.tuning)).await {
                 Ok(result) => result?,
                 Err(_) => {
                     return Err(AttemptError::dial(
@@ -757,12 +759,14 @@ impl Supervisor {
 /// kind so the retry line can name it (decision 12).
 async fn dial(
     target: &PeerTarget,
+    tuning: qsh_transport::TransportTuning,
 ) -> Result<(qsh_transport::Endpoint, qsh_transport::Connection, Session), AttemptError> {
     let device_name = target.identity.identity.device_id.clone();
     let dialer = qsh_transport::Dialer::new(
         target.identity.local.clone(),
         target.trust.clone() as Arc<dyn qsh_transport::TrustEvaluator>,
-    );
+    )
+    .with_tuning(tuning);
     let address = target.address.clone();
     let addrs = crate::ops::resolve_all(&address)
         .await

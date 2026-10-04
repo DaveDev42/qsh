@@ -22,7 +22,9 @@ use zeroize::Zeroizing;
 use crate::identity::{Fingerprint, Principal};
 use crate::tls::{AuthPath, Observation, PeerRole, QshPeerVerifier, RejectReason, TrustEvaluator};
 
-/// Application-level keep-alive interval (`protocol.md` §2).
+/// Application-level keep-alive interval (`protocol.md` §2). The default
+/// of [`TransportTuning`]; `[transport].keep_alive_ms` in `config.toml`
+/// replaces it (`docs/adr/0021-transport-liveness-knobs.md` decision 1).
 pub const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(15);
 /// Max idle timeout before the connection is considered dead (`protocol.md` §2).
 pub const MAX_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
@@ -257,9 +259,30 @@ pub enum AcceptError {
     Closed,
 }
 
-fn transport_config() -> quinn::TransportConfig {
+/// The one connection-level knob an operator may turn: how often an idle
+/// connection sends a keep-alive (`docs/adr/0021-transport-liveness-knobs.md`
+/// decision 1). [`MAX_IDLE_TIMEOUT`] stays fixed (decision 2). This crate
+/// knows nothing about `config.toml`; `qsh-core` validates the configured
+/// value and passes it in. `Default` is [`KEEP_ALIVE_INTERVAL`], so a caller
+/// that never names a tuning keeps today's behavior byte for byte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransportTuning {
+    /// Keep-alive interval applied to every connection built from this
+    /// tuning.
+    pub keep_alive: Duration,
+}
+
+impl Default for TransportTuning {
+    fn default() -> Self {
+        Self {
+            keep_alive: KEEP_ALIVE_INTERVAL,
+        }
+    }
+}
+
+fn transport_config(tuning: TransportTuning) -> quinn::TransportConfig {
     let mut tc = quinn::TransportConfig::default();
-    tc.keep_alive_interval(Some(KEEP_ALIVE_INTERVAL));
+    tc.keep_alive_interval(Some(tuning.keep_alive));
     tc.max_idle_timeout(Some(
         MAX_IDLE_TIMEOUT
             .try_into()
@@ -284,6 +307,16 @@ fn transport_config() -> quinn::TransportConfig {
         quinn::VarInt::try_from(CONNECTION_RECEIVE_WINDOW).expect("8 MiB fits in a QUIC VarInt"),
     );
     tc
+}
+
+/// The `Debug` rendering of the `quinn::TransportConfig` that `tuning`
+/// produces. A test seam: `quinn::TransportConfig` has no public getters,
+/// so a caller in another crate (the `[transport].keep_alive_ms` tests in
+/// `qsh-core`) can only observe what reached quinn through its `Debug`
+/// output, exactly as this module's own tests do.
+#[doc(hidden)]
+pub fn transport_config_debug(tuning: TransportTuning) -> String {
+    format!("{:?}", transport_config(tuning))
 }
 
 /// Cap on `quinn::ServerConfig::max_incoming` — how many inbound connection
@@ -695,6 +728,7 @@ pub struct Dialer {
     identity: LocalIdentity,
     evaluator: Arc<dyn TrustEvaluator>,
     timeout: Duration,
+    tuning: TransportTuning,
 }
 
 impl Dialer {
@@ -704,7 +738,16 @@ impl Dialer {
             identity,
             evaluator,
             timeout: DEFAULT_DIAL_TIMEOUT,
+            tuning: TransportTuning::default(),
         }
+    }
+
+    /// Apply a [`TransportTuning`] to every connection this dialer makes.
+    /// [`Self::new`] keeps the compiled default.
+    #[must_use]
+    pub fn with_tuning(mut self, tuning: TransportTuning) -> Self {
+        self.tuning = tuning;
+        self
     }
 
     /// Override the dial timeout.
@@ -719,7 +762,8 @@ impl Dialer {
     /// principal attached, plus the endpoint (which must outlive the
     /// connection).
     pub async fn dial(&self, addr: SocketAddr, server_name: &str) -> Result<Dialed, DialError> {
-        self.dial_inner(addr, server_name, transport_config()).await
+        self.dial_inner(addr, server_name, transport_config(self.tuning))
+            .await
     }
 
     /// Test/benchmark-only escape hatch: identical to [`Self::dial`] —
@@ -938,24 +982,31 @@ impl Listener {
         identity: LocalIdentity,
         evaluator: Arc<dyn TrustEvaluator>,
     ) -> Result<Self, SetupError> {
-        Self::bind_inner(bind, identity, evaluator, transport_config(), None)
+        Self::bind_inner(
+            bind,
+            identity,
+            evaluator,
+            transport_config(TransportTuning::default()),
+            None,
+        )
     }
 
     /// [`Self::bind`] with the stateless reset key injected
     /// (`docs/adr/0036-stateless-reset-key.md`). This crate knows nothing
     /// of where the key lives; `qsh-core` reads or creates it and passes
-    /// the bytes here.
+    /// the bytes here. `tuning` is applied to every accepted connection.
     pub fn bind_with_reset_key(
         bind: SocketAddr,
         identity: LocalIdentity,
         evaluator: Arc<dyn TrustEvaluator>,
         reset_key: &[u8; RESET_KEY_LEN],
+        tuning: TransportTuning,
     ) -> Result<Self, SetupError> {
         Self::bind_inner(
             bind,
             identity,
             evaluator,
-            transport_config(),
+            transport_config(tuning),
             Some(reset_key),
         )
     }
@@ -1154,7 +1205,7 @@ mod tests {
     /// no-op'd would already show up there.
     #[test]
     fn transport_config_sets_send_fairness_and_tunnel_receive_window() {
-        let tc = transport_config();
+        let tc = transport_config(TransportTuning::default());
         let debug = format!("{tc:?}");
         assert!(
             debug.contains("send_fairness: true"),
@@ -1218,7 +1269,7 @@ mod tests {
     #[test]
     fn transport_config_sets_connection_receive_window() {
         const DOD2_SESSION_BUFFER_CEILING: u64 = 8 * 1024 * 1024;
-        let tc = transport_config();
+        let tc = transport_config(TransportTuning::default());
         let debug = format!("{tc:?}");
         assert!(
             debug.contains(&format!("receive_window: {CONNECTION_RECEIVE_WINDOW}")),
@@ -1262,7 +1313,12 @@ mod tests {
     fn server_config_sets_admission_bounds() {
         let identity = test_identity();
         let verifier = Arc::new(QshPeerVerifier::new(Arc::new(StaticTrust::empty())));
-        let built = server_config(&identity, verifier, transport_config()).expect("server config");
+        let built = server_config(
+            &identity,
+            verifier,
+            transport_config(TransportTuning::default()),
+        )
+        .expect("server config");
         let debug = format!("{built:?}");
         assert!(
             debug.contains(&format!("max_incoming: {MAX_INCOMING}")),

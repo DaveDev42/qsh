@@ -71,9 +71,14 @@ impl Host {
             let _guard = rt.enter();
             let trust =
                 StaticTrust::empty().with_pin(client_fp, Principal::Device("laptop".into()));
-            let (listener, diagnostic) =
-                qsh_core::reset_key::bind_listener(&paths, bind, identity, Arc::new(trust))
-                    .expect("bind the host listener");
+            let (listener, diagnostic) = qsh_core::reset_key::bind_listener(
+                &paths,
+                bind,
+                identity,
+                Arc::new(trust),
+                qsh_transport::TransportTuning::default(),
+            )
+            .expect("bind the host listener");
             ready_tx
                 .send((listener.local_addr().unwrap(), diagnostic))
                 .unwrap();

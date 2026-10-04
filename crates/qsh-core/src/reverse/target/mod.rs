@@ -237,6 +237,7 @@ async fn run_reverse_unix(
     // Fail closed on nonsense config before touching the network at all
     // (`ReverseConfig::backoff`'s own doc comment).
     let backoff_limits = config.reverse.backoff()?;
+    let liveness = config.liveness()?;
 
     // Identity (the caller's job, module docs) and the trust store are
     // both established exactly once, ahead of the loop below — never
@@ -247,7 +248,8 @@ async fn run_reverse_unix(
     // long-lived handle still picks up an operator's `qsh trust add`
     // without needing to be reopened.
     let trust = SharedTrustStore::open(paths.trust_file())?;
-    let dialer = Dialer::new(identity.local, trust.clone() as Arc<dyn TrustEvaluator>);
+    let dialer = Dialer::new(identity.local, trust.clone() as Arc<dyn TrustEvaluator>)
+        .with_tuning(liveness.tuning());
 
     // The broker — and every session it ever opens — outlives every
     // connection this loop dials (`docs/design/architecture.md` §3): built

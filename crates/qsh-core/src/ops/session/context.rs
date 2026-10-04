@@ -43,6 +43,10 @@ pub(super) struct AttachContext {
     /// a stale size until the user happens to resize again.
     pub(super) window: Arc<std::sync::Mutex<Option<(u16, u16)>>>,
     pub(super) recovery: RecoveryConfig,
+    /// `[transport]` as read when the attach was created, so a recovery
+    /// redial dials with the same keep-alive instead of re-reading
+    /// `config.toml` from inside a runtime.
+    pub(super) tuning: TransportTuning,
     /// Set once the frontend deliberately ended the attach, so a connection
     /// **we** closed is never mistaken for a path that died and recovered
     /// from.
