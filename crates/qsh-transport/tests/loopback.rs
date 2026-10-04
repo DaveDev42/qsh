@@ -494,6 +494,63 @@ async fn keep_alive_and_idle_timeout_are_configured_and_ping_pong_roundtrips() {
     server.await.unwrap();
 }
 
+/// `Connection::rx_frames` is the path-liveness signal the watchdog reads
+/// (`docs/design/protocol.md` §10): authenticated stream frames from the
+/// peer must move it on the receiving side.
+#[tokio::test]
+async fn rx_frames_moves_on_authenticated_stream_frames() {
+    let (dialed, server_conn, _server_endpoint) = connect_pinned_pair().await;
+
+    let server = tokio::spawn(async move {
+        let (send, recv) = server_conn.accept_bi().await.unwrap();
+        let mut ctl = FramedStream::control(send, recv);
+        // Opening the stream already delivered the first frame, so take the
+        // baseline after it and require the *second* message to move it.
+        let _: ControlMessage = ctl.recv.recv().await.unwrap().expect("first ping");
+        let before = server_conn.rx_frames();
+        let _: ControlMessage = ctl.recv.recv().await.unwrap().expect("second ping");
+        let after = server_conn.rx_frames();
+        assert!(
+            after > before,
+            "a received stream frame must move the counter ({before} -> {after})"
+        );
+        let _ = ctl.recv.recv::<ControlMessage>().await;
+    });
+
+    let (send, recv) = dialed.connection.open_bi().await.unwrap();
+    let mut ctl = FramedStream::control(send, recv);
+    ctl.send
+        .send(&ControlMessage::new(
+            1,
+            control_message::Body::Ping(Ping {}),
+        ))
+        .await
+        .unwrap();
+    // Let the first flight settle so the next send is its own packet.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let client_before = dialed.connection.rx_frames();
+    ctl.send
+        .send(&ControlMessage::new(
+            2,
+            control_message::Body::Ping(Ping {}),
+        ))
+        .await
+        .unwrap();
+    // The server's ACK of that stream data is a frame the client receives.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while dialed.connection.rx_frames() <= client_before {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the peer's ACK never moved rx_frames"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    ctl.send.finish().unwrap();
+    dialed.connection.close(0, b"rx_frames case done");
+    server.await.unwrap();
+}
+
 /// ADR-0040 decision 2: dialing by a hostname puts no SNI in the
 /// ClientHello, and pin verification still succeeds. quinn's rustls
 /// `HandshakeData` on the server side carries the ClientHello's

@@ -16,11 +16,25 @@
 //! bytes and needs no protocol change. What counts as an answer is
 //! deliberately loose: *any* inbound traffic — a `Pong`, a `SessionEvent`,
 //! a frame of session output — proves the path carries packets. A session
-//! that is busy printing therefore never probes at all. That includes
-//! traffic the control stream never sees: the watchdog also reads the
-//! connection's UDP receive counter ([`ProbeSource::rx_datagrams`]) each
-//! tick, so a `Pong` held up in ordered loss recovery on a lossy link does
-//! not outvote datagrams that are visibly arriving.
+//! that is busy printing therefore never probes at all.
+//!
+//! **An authenticated QUIC frame is an answer too.** A `Pong` rides the
+//! ordered control stream, so loss recovery on that one stream can hold it
+//! back while the peer's packets keep arriving (issue #10). The watchdog
+//! therefore also reads [`ProbeSource::rx_frames`] each tick and treats a
+//! counter that moved as inbound traffic. The counter is quinn's
+//! post-decryption frame count, so only a peer that can encrypt moves it.
+//!
+//! **A raw datagram is a hint, not an answer.** The connection's UDP
+//! receive counter ([`ProbeSource::rx_datagrams`]) counts packets before
+//! decryption, and anyone who knows the connection ID can forge those. It
+//! therefore never declares the path alive. When the death verdict is due
+//! and datagrams arrived recently without any authenticated frame, the
+//! watchdog grants **one** grace extension of
+//! [`PathWatchConfig::datagram_grace`] per dead-timer cycle; if no
+//! authenticated frame shows up inside it the path is dead. A spoofer can
+//! thus delay detection by that one grace and no more, and an authenticated
+//! frame restarts the cycle.
 //!
 //! **Two cadences, because a shell is idle most of its life.** Probing four
 //! times a second forever would wake a sleeping laptop's radio to learn
@@ -135,6 +149,18 @@ impl PathWatchConfig {
         self.probe_interval
     }
 
+    /// The one extension granted when the dead-path timer expires while raw
+    /// UDP datagrams were still arriving but no authenticated frame did
+    /// ([`ProbeSource::rx_datagrams`]): `probe_interval × strikes`, one
+    /// whole round of probes (750 ms by default, on the reverse default too).
+    /// Once per dead-timer cycle, and only an authenticated frame starts a
+    /// new cycle, so it is also the most a forger can delay a verdict.
+    /// Derived rather than a field, like [`Self::self_delay_threshold`], so
+    /// the `Debug` output the `[recovery]` knobs promise does not change.
+    pub fn datagram_grace(&self) -> Duration {
+        self.probe_interval.saturating_mul(self.strikes)
+    }
+
     /// The silence that means death on a path with this smoothed RTT.
     fn dead_after(&self, rtt: Duration) -> Duration {
         self.min_dead_after
@@ -146,11 +172,12 @@ impl PathWatchConfig {
 /// smoothed RTT it scaled the deadline by and how long the path had been
 /// silent. Diagnostic only; [`Verdict`] itself stays payload-free.
 ///
-/// `silence` is counted from the last liveness evidence of any kind: a
-/// control or session message, or the tick at which the watchdog saw the
-/// connection's UDP receive counter advance ([`ProbeSource::rx_datagrams`]),
-/// whichever is later. The counter is only sampled per tick, so the figure is
-/// tick-granular and can understate the real silence by at most one cadence.
+/// `silence` is counted from the last authenticated liveness evidence: a
+/// control or session message, or an authenticated QUIC frame counted by the
+/// transport ([`ProbeSource::rx_frames`], stamped at the previous tick),
+/// whichever is later. Raw datagrams ([`ProbeSource::rx_datagrams`]) do not
+/// reset it, so it includes any grace that was granted. The counter is only
+/// sampled per tick, so the figure is tick-granular.
 /// Time a late tick showed this process was not running is discounted from it
 /// ([`PathState::observe_tick`]), so it is the silence the watch actually
 /// observed, not wall time.
@@ -205,6 +232,13 @@ pub struct PathState {
     /// also clears `dead_after` by this much, because whatever arrived
     /// while this process was not running is still waiting to be read.
     pending_margin: Duration,
+    /// When a raw UDP datagram last arrived without being credited as an
+    /// authenticated frame. Cleared by any authenticated evidence.
+    last_datagram: Option<Instant>,
+    /// When this dead-timer cycle's one grace extension began. Set once the
+    /// verdict was due with a fresh datagram hint; cleared by any
+    /// authenticated evidence, which is what starts a new cycle.
+    grace_started: Option<Instant>,
 }
 
 impl PathState {
@@ -219,6 +253,8 @@ impl PathState {
             probe_now: false,
             max_tick_gap: Duration::ZERO,
             pending_margin: Duration::ZERO,
+            last_datagram: None,
+            grace_started: None,
         }
     }
 
@@ -233,9 +269,39 @@ impl PathState {
     pub fn observe_inbound(&mut self, now: Instant) {
         self.last_inbound = now;
         self.unanswered = 0;
+        self.new_cycle();
         // The tick lateness in a verdict describes the silence it ruled on,
         // so it starts over with every piece of evidence.
         self.max_tick_gap = Duration::ZERO;
+    }
+
+    /// The transport saw authenticated frames arrive from the peer at some
+    /// instant no later than `at`. Liveness only: it moves the silence clock
+    /// forward (never backward) and answers every outstanding probe, and it
+    /// is **not** activity, for the same reason [`observe_inbound`](Self::observe_inbound) is not.
+    ///
+    /// `at` is a lower bound on when the frames arrived, so the silence it
+    /// leaves behind can only be overstated, never understated.
+    pub fn observe_inbound_since(&mut self, at: Instant) {
+        self.last_inbound = self.last_inbound.max(at);
+        self.unanswered = 0;
+        self.new_cycle();
+    }
+
+    /// Authenticated evidence ends the dead-timer cycle: the datagram hint
+    /// and any grace already spent belong to the silence that just ended.
+    fn new_cycle(&mut self) {
+        self.last_datagram = None;
+        self.grace_started = None;
+    }
+
+    /// A raw UDP datagram arrived at `at` and no authenticated frame came
+    /// with it. A **hint** only: it does not touch the silence clock or the
+    /// strikes, so it cannot answer a probe or keep a path alive. It only
+    /// makes the death verdict eligible for the one grace extension
+    /// ([`Self::verdict`]).
+    pub fn observe_datagram(&mut self, at: Instant) {
+        self.last_datagram = Some(self.last_datagram.map_or(at, |prev| prev.max(at)));
     }
 
     /// Session traffic arrived — output, an event, a `Ping` the host sent
@@ -320,8 +386,8 @@ impl PathState {
     }
 
     /// How long the path has been silent as of `now`: the time since the
-    /// last liveness evidence: an inbound message, or a tick that saw the
-    /// UDP receive counter move.
+    /// last authenticated liveness evidence: an inbound message, or
+    /// authenticated frames the transport counted.
     pub fn silence(&self, now: Instant) -> Duration {
         now.saturating_duration_since(self.last_inbound)
     }
@@ -363,7 +429,22 @@ impl PathState {
         // Death needs both: enough unanswered probes that this is not one
         // lost datagram, and enough silence that it is not a slow path.
         if self.unanswered >= cfg.strikes && silence >= cfg.dead_after(rtt).saturating_add(margin) {
-            return Verdict::Dead;
+            // Raw datagrams are a hint, never proof: they buy one bounded
+            // grace per cycle, and only while they are recent. Once the
+            // grace is spent the verdict stands until an authenticated
+            // frame arrives, however many datagrams keep coming.
+            let grace = cfg.datagram_grace();
+            let hinted = self
+                .last_datagram
+                .is_some_and(|at| now.saturating_duration_since(at) <= grace);
+            match self.grace_started {
+                Some(started) if now.saturating_duration_since(started) >= grace => {
+                    return Verdict::Dead;
+                }
+                Some(_) => {}
+                None if hinted => self.grace_started = Some(now),
+                None => return Verdict::Dead,
+            }
         }
         let cadence = self.cadence(now, cfg);
         let since_probe = self
@@ -454,6 +535,18 @@ impl PathWatch {
         self.bump_inbound();
     }
 
+    /// Report that the transport received authenticated frames from the
+    /// peer at some instant no later than `at` (see
+    /// [`PathState::observe_inbound_since`]). Liveness only.
+    ///
+    /// Unlike [`inbound`](Self::inbound) this does not bump the inbound
+    /// counter: the migration probe waits for an application-level answer
+    /// ([`inbound_signal`](Self::inbound_signal)), and the transport's own
+    /// ACKs must not read as one.
+    pub(crate) fn transport_inbound(&self, at: Instant) {
+        self.state().observe_inbound_since(at);
+    }
+
     /// Report session traffic from the host: output, an event, a host
     /// `Ping`. Liveness *and* activity.
     pub fn traffic(&self) {
@@ -489,13 +582,13 @@ impl PathWatch {
         state.discard_pending_margin();
     }
 
-    /// The connection's UDP receive counter advanced. Liveness only: not
-    /// activity (it would pin the fast cadence, as a `Pong` would), and it
-    /// does not bump the inbound signal, because a migration probe asks
-    /// whether the *host answered*, not whether the transport ACKed
-    /// something.
-    fn datagrams_moved(&self) {
-        self.state().observe_inbound(Instant::now());
+    /// The connection's UDP receive counter advanced, with no authenticated
+    /// frame to show for it. A hint for the bounded grace
+    /// ([`PathState::observe_datagram`]), not liveness: it neither answers
+    /// probes nor moves the silence clock, and it does not bump the inbound
+    /// signal.
+    fn datagrams_seen(&self, at: Instant) {
+        self.state().observe_datagram(at);
     }
 
     /// Report local activity (input, resize, an accepted local connection)
@@ -694,15 +787,32 @@ pub trait ProbeSource: Send + Sync + 'static {
     /// Current smoothed RTT, used to scale `PathWatchConfig::dead_after`.
     fn rtt(&self) -> Duration;
 
-    /// Total UDP datagrams received on this connection so far. Any advance
-    /// proves the path carries packets towards us, even when the control
-    /// stream is stuck in ordered loss recovery (a lost `Pong` waits for a
-    /// retransmit, which on a lossy link can outlast the death budget while
-    /// datagrams keep arriving). [`watch_path`] counts an advance as
-    /// inbound traffic; a counter that stops moving leaves the verdict
-    /// schedule untouched. A source with no such counter must return a
-    /// constant, which falls back to control-stream liveness alone.
-    fn rx_datagrams(&self) -> u64;
+    /// A monotonic count of authenticated QUIC frames received from the
+    /// peer; only its *movement* is read. When it moves between two ticks
+    /// the path carried the peer's packets and the peer can encrypt: this is
+    /// the signal that declares the path alive, whether or not a `Pong`
+    /// made it through the ordered control stream
+    /// (`docs/design/protocol.md` §10).
+    ///
+    /// The default is a constant, which never moves: a source that cannot
+    /// say relies on control-stream traffic alone.
+    fn rx_frames(&self) -> u64 {
+        0
+    }
+
+    /// Total UDP datagrams received on this connection so far, counted
+    /// before decryption. Only a **hint**: anyone who knows the connection
+    /// ID can forge datagrams, so an advance here never proves liveness. It
+    /// only earns the dead-path timer one bounded grace extension per cycle
+    /// ([`PathWatchConfig::datagram_grace`]) when no authenticated frame
+    /// arrived, so a `Pong` and ACKs held up by loss recovery on a lossy
+    /// link are not ruled dead while packets are visibly landing, and a
+    /// spoofer can postpone the verdict by that bounded amount at most.
+    ///
+    /// The default is a constant, which never moves.
+    fn rx_datagrams(&self) -> u64 {
+        0
+    }
 }
 
 impl ProbeSource for qsh_transport::Connection {
@@ -717,8 +827,70 @@ impl ProbeSource for qsh_transport::Connection {
         self.quinn().stats().path.rtt
     }
 
+    fn rx_frames(&self) -> u64 {
+        qsh_transport::Connection::rx_frames(self)
+    }
+
     fn rx_datagrams(&self) -> u64 {
         self.quinn().stats().udp_rx.datagrams
+    }
+}
+
+/// Turns movement of [`ProbeSource::rx_frames`] into liveness and movement
+/// of [`ProbeSource::rx_datagrams`] into the grace hint.
+///
+/// A `Pong` rides the ordered control stream, so one packet lost on a busy
+/// connection holds every later control message behind loss recovery even
+/// while the peer's datagrams keep arriving (issue #10: a reverse
+/// registration carrying tunnel data was declared `path_dead` with packets
+/// still landing every 100-300 ms). The frame counter moves for any frame,
+/// on any stream or none, so it answers the watchdog's real question (does
+/// this path carry packets from the peer) without waiting behind that queue.
+///
+/// **The stamp is the previous sample, never now.** Frames counted between
+/// two samples arrived after the earlier sample was taken, so the earlier
+/// instant is a safe lower bound on their arrival. Stamping with the current
+/// tick instead would credit the path with up to one tick of liveness it may
+/// not have had and stretch the time a blackout takes to be noticed.
+///
+/// And the stamp is refreshed on **every** sample, whether or not the
+/// counter moved. A stamp left over from the last time it moved would make a
+/// path that was merely quiet for a while look as if it had been silent for
+/// that whole while, and with the strikes reset by the movement the death
+/// verdict could arrive before `min_dead_after` of real silence.
+struct RxLiveness {
+    frames: u64,
+    datagrams: u64,
+    sampled_at: Instant,
+}
+
+impl RxLiveness {
+    fn new<S: ProbeSource>(source: &S) -> Self {
+        // Time first, counters second: a frame counted by this read may have
+        // landed after the timestamp, which only makes the next stamp older.
+        let sampled_at = Instant::now();
+        Self {
+            frames: source.rx_frames(),
+            datagrams: source.rx_datagrams(),
+            sampled_at,
+        }
+    }
+
+    fn sample<S: ProbeSource>(&mut self, source: &S, watch: &PathWatch) {
+        let sampled_at = Instant::now();
+        let frames = source.rx_frames();
+        let datagrams = source.rx_datagrams();
+        if frames != self.frames {
+            // Authenticated: this alone is liveness.
+            watch.transport_inbound(self.sampled_at);
+        }
+        if datagrams != self.datagrams {
+            // Unauthenticated: a hint for the grace, nothing more.
+            watch.datagrams_seen(sampled_at);
+        }
+        self.frames = frames;
+        self.datagrams = datagrams;
+        self.sampled_at = sampled_at;
     }
 }
 
@@ -752,7 +924,7 @@ pub(crate) async fn watch_path_with_wake<S: ProbeSource>(
     mut wake_rx: tokio::sync::watch::Receiver<super::wake::WakeEvent>,
 ) {
     let mut wake_closed = false;
-    let mut last_rx = source.rx_datagrams();
+    let mut rx = RxLiveness::new(&source);
     loop {
         // Re-read every round rather than arming a fixed ticker: the beat
         // *is* the power budget, and an attach nobody is using must not
@@ -775,7 +947,10 @@ pub(crate) async fn watch_path_with_wake<S: ProbeSource>(
             // out a five-second beat. Re-time rather than finish it: "I
             // came back to my terminal" is the case that has to be
             // measured at the fast cadence.
-            () = watch.woken() => continue,
+            () = watch.woken() => {
+                rx.sample(&source, &watch);
+                continue;
+            }
             () = tokio::time::sleep(period) => timer_fired = true,
             // The machine slept. `changed()` is cancel-safe and the
             // receiver keeps the value, so a wake that lands while the
@@ -792,6 +967,7 @@ pub(crate) async fn watch_path_with_wake<S: ProbeSource>(
                     // sender): nothing more will ever arrive, so stop
                     // polling it rather than spin.
                     wake_closed = true;
+                    rx.sample(&source, &watch);
                     continue;
                 }
                 tracing::debug!(
@@ -813,15 +989,9 @@ pub(crate) async fn watch_path_with_wake<S: ProbeSource>(
                 );
             }
         }
-        // Any datagram since the last tick proves the path carries packets,
-        // whether or not a control-stream reply made it through ordered
-        // recovery. Read before judging so a moving counter never banks a
-        // strike.
-        let rx = source.rx_datagrams();
-        if rx != last_rx {
-            last_rx = rx;
-            watch.datagrams_moved();
-        }
+        // Before the verdict, so frames that arrived since the last tick
+        // answer outstanding probes first.
+        rx.sample(&source, &watch);
         let rtt = source.rtt();
         match watch.verdict(rtt) {
             Verdict::Healthy => {}
