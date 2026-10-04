@@ -74,6 +74,12 @@ tokio::task_local! {
     pub(crate) static TEST_PATH_WATCH_CONFIG: crate::client::pathwatch::PathWatchConfig;
 }
 
+/// A duration as whole milliseconds for a diagnostic line, saturating
+/// rather than wrapping.
+pub(crate) fn millis(d: std::time::Duration) -> u64 {
+    u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
+}
+
 /// Fixed vocabulary for the `cause` field on the `lost`/`retry` (target
 /// `ReconnectEvent`) and `lost`/`denied` (controller `RegistrationEvent`)
 /// stderr diagnostic lines (`docs/CLI.md` §6.13's `cause` bullet, issue #4

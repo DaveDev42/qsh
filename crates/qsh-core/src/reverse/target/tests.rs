@@ -516,6 +516,8 @@ fn reconnect_event_wake_line_carries_slept_ms_and_at() {
         cause: None,
         at: "2026-01-01T00:00:03Z".to_string(),
         since_registered_ms: None,
+        srtt_ms: None,
+        silence_ms: None,
         slept_ms: Some(9_000),
     };
     let parsed: serde_json::Value =
@@ -543,6 +545,8 @@ fn reconnect_event_json_line_has_the_documented_field_set() {
         cause: Some("dial_timeout"),
         at: "2026-01-01T00:00:00Z".to_string(),
         since_registered_ms: None,
+        srtt_ms: None,
+        silence_ms: None,
         slept_ms: None,
     };
     let parsed: serde_json::Value =
@@ -566,6 +570,8 @@ fn reconnect_event_json_line_has_the_documented_field_set() {
         cause: None,
         at: "2026-01-01T00:00:01Z".to_string(),
         since_registered_ms: None,
+        srtt_ms: None,
+        silence_ms: None,
         slept_ms: None,
     };
     let parsed: serde_json::Value =
@@ -605,6 +611,8 @@ fn reconnect_event_json_line_covers_the_lost_retry_pair_with_since_registered_ms
         cause: Some("peer_closed"),
         at: "2026-01-01T00:00:02Z".to_string(),
         since_registered_ms: Some(4_200),
+        srtt_ms: None,
+        silence_ms: None,
         slept_ms: None,
     };
     let parsed: serde_json::Value =
@@ -621,6 +629,8 @@ fn reconnect_event_json_line_covers_the_lost_retry_pair_with_since_registered_ms
         cause: Some("peer_closed"),
         at: "2026-01-01T00:00:02Z".to_string(),
         since_registered_ms: Some(4_200),
+        srtt_ms: None,
+        silence_ms: None,
         slept_ms: None,
     };
     let parsed: serde_json::Value =
@@ -647,6 +657,8 @@ fn reconnect_event_at_field_parses_as_rfc3339() {
         cause: Some("local"),
         at: at.clone(),
         since_registered_ms: None,
+        srtt_ms: None,
+        silence_ms: None,
         slept_ms: None,
     };
     let parsed: serde_json::Value =
@@ -1110,4 +1122,34 @@ async fn serve_to_target_probes_and_redials_at_once_after_an_injected_wake() {
     println!("re-registered {:?} after the wake", woke_at.elapsed());
 
     rig.shutdown().await;
+}
+
+/// Issue #10 request 3: `srtt_ms`/`silence_ms` are open-vocabulary fields
+/// that ride only on a `lost` this process's own watch ruled. Absent, never
+/// null, otherwise.
+#[test]
+fn reconnect_event_json_line_carries_srtt_and_silence_ms_only_when_present() {
+    let lost = |srtt_ms, silence_ms| ReconnectEvent {
+        event: "lost",
+        host: "personal-mac",
+        fingerprint: Some("sha256:abc"),
+        delay_ms: None,
+        cause: Some("path_dead"),
+        at: "2026-01-01T00:00:02Z".to_string(),
+        since_registered_ms: Some(4_200),
+        srtt_ms,
+        silence_ms,
+        slept_ms: None,
+    };
+    let ruled: serde_json::Value =
+        serde_json::from_str(&serde_json::to_string(&lost(Some(37), Some(1_250))).unwrap())
+            .unwrap();
+    assert_eq!(ruled["srtt_ms"], 37);
+    assert_eq!(ruled["silence_ms"], 1_250);
+
+    let announced: serde_json::Value =
+        serde_json::from_str(&serde_json::to_string(&lost(None, None)).unwrap()).unwrap();
+    assert!(announced.get("srtt_ms").is_none(), "absent, never null");
+    assert!(announced.get("silence_ms").is_none(), "absent, never null");
+    lost(Some(37), Some(1_250)).emit();
 }

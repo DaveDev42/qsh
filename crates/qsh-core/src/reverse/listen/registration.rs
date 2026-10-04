@@ -270,6 +270,8 @@ impl Listen {
                     cause: None,
                     at: crate::config::now_rfc3339(),
                     since_registered_ms: None,
+                    srtt_ms: None,
+                    silence_ms: None,
                 }
                 .emit();
                 *outcome_cell.lock().unwrap_or_else(|e| e.into_inner()) = Some(outcome);
@@ -287,6 +289,8 @@ impl Listen {
                     cause: Some(crate::reverse::ReconnectCause::RegistrationDenied.as_str()),
                     at: crate::config::now_rfc3339(),
                     since_registered_ms: None,
+                    srtt_ms: None,
+                    silence_ms: None,
                 }
                 .emit();
                 Err(wire::Error::new(err.code, err.message, err.retryable))
@@ -397,6 +401,10 @@ impl Listen {
         // every arm that can `break` assigns this exactly once, first —
         // the only way to reach the read after the loop.
         let loss_cause;
+        // What this process's own watchdog measured; set only when it ruled
+        // the path dead itself (no pre-existing close), and carried on the
+        // `lost` line alone.
+        let mut own_verdict: Option<crate::client::pathwatch::DeadVerdict> = None;
         let watch = PathWatch::new(self.path_watch_config());
         let probes = Arc::new(tokio::sync::Notify::new());
         let watchdog = tokio::spawn(watch_path(
@@ -447,7 +455,10 @@ impl Listen {
                     session.connection().close(CLOSE_CODE_PATH_DEAD, b"path unresponsive");
                     loss_cause = match pre_close_reason {
                         Some(err) => crate::reverse::classify_connection_error(&err),
-                        None => crate::reverse::ReconnectCause::PathDead,
+                        None => {
+                            own_verdict = watch.dead_verdict();
+                            crate::reverse::ReconnectCause::PathDead
+                        }
                     };
                     break;
                 }
@@ -592,6 +603,8 @@ impl Listen {
                 since_registered_ms: Some(
                     u64::try_from(registered_at.elapsed().as_millis()).unwrap_or(u64::MAX),
                 ),
+                srtt_ms: own_verdict.map(|v| crate::reverse::millis(v.srtt)),
+                silence_ms: own_verdict.map(|v| crate::reverse::millis(v.silence)),
             }
             .emit();
         }

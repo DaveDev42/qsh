@@ -535,3 +535,72 @@ async fn a_closed_wake_channel_does_not_spin_or_kill_the_watchdog() {
         .expect("silence alone must still reach a verdict");
     watchdog.await.expect("watchdog returns once it declares");
 }
+
+// Issue #10 request 3: the measurements behind a death verdict.
+
+#[tokio::test(start_paused = true)]
+async fn dead_verdict_records_the_rtt_and_silence_it_ruled_on() {
+    let cfg = cfg();
+    let watch = PathWatch::new(cfg);
+    assert_eq!(watch.dead_verdict(), None, "nothing ruled yet");
+    let (_tx, rx) = tokio::sync::watch::channel(WakeEvent::default());
+    let task = tokio::spawn(watch_path_with_wake(
+        NeverCloses,
+        watch.clone(),
+        Arc::new(tokio::sync::Notify::new()),
+        rx,
+    ));
+    tokio::time::timeout(Duration::from_secs(5), watch.dead())
+        .await
+        .expect("a silent path must be declared dead");
+    task.await.expect("the watchdog returns once it declares");
+
+    let verdict = watch
+        .dead_verdict()
+        .expect("the watchdog ruled, so it must have left its measurements");
+    assert_eq!(verdict.srtt, LAN);
+    assert!(
+        verdict.silence >= cfg.min_dead_after,
+        "ruled dead on {:?} of silence, inside the {:?} floor",
+        verdict.silence,
+        cfg.min_dead_after
+    );
+    assert!(
+        verdict.silence <= cfg.min_dead_after + cfg.probe_interval,
+        "silence {:?} overshoots the floor by more than one tick",
+        verdict.silence
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_death_declared_from_outside_leaves_no_verdict() {
+    let watch = PathWatch::new(cfg());
+    watch.declare_dead();
+    assert!(watch.is_dead());
+    assert_eq!(
+        watch.dead_verdict(),
+        None,
+        "a closed connection is not this watchdog's ruling"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn revive_clears_the_dead_verdict() {
+    let watch = PathWatch::new(cfg());
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    // Enough probes to earn a verdict: tick the policy by hand.
+    let mut ruled = false;
+    for _ in 0..20 {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        if watch.verdict(LAN) == Verdict::Dead {
+            ruled = true;
+            break;
+        }
+    }
+    assert!(ruled);
+    assert!(watch.dead_verdict().is_some());
+    watch.declare_dead();
+    watch.revive();
+    assert_eq!(watch.dead_verdict(), None);
+    assert!(!watch.is_dead());
+}

@@ -352,6 +352,8 @@ async fn run_reverse_unix(
                     // registration to time (issue #4 item 6).
                     since_registered_ms: None,
                     slept_ms: None,
+                    srtt_ms: None,
+                    silence_ms: None,
                 }
                 .emit();
                 match wait_backoff(delay, &mut shutdown, &mut wake_rx).await {
@@ -407,6 +409,8 @@ async fn run_reverse_unix(
             at: crate::config::now_rfc3339(),
             since_registered_ms: None,
             slept_ms: None,
+            srtt_ms: None,
+            silence_ms: None,
         }
         .emit();
         // Same ROADMAP M9 (b) rationale as the `registration attempt failed`
@@ -489,6 +493,10 @@ async fn run_reverse_unix(
         // assign this exactly once, first — the only way to reach the
         // read after the loop.
         let loss_cause;
+        // What this process's own watchdog measured, set only when it ruled
+        // the path dead itself (the `None` close-reason branch below); the
+        // `lost` line carries it and no other line does.
+        let mut own_verdict: Option<crate::client::pathwatch::DeadVerdict> = None;
         'serve: loop {
             tokio::select! {
                 _ = &mut shutdown => {
@@ -554,7 +562,10 @@ async fn run_reverse_unix(
                     let _ = (&mut serve_control).await;
                     loss_cause = match pre_close_reason {
                         Some(err) => super::classify_connection_error(&err),
-                        None => ReconnectCause::PathDead,
+                        None => {
+                            own_verdict = watch.dead_verdict();
+                            ReconnectCause::PathDead
+                        }
                     };
                     break 'serve;
                 }
@@ -610,6 +621,8 @@ async fn run_reverse_unix(
             at: lost_at,
             since_registered_ms,
             slept_ms: None,
+            srtt_ms: own_verdict.map(|v| super::millis(v.srtt)),
+            silence_ms: own_verdict.map(|v| super::millis(v.silence)),
         }
         .emit();
 
@@ -623,6 +636,8 @@ async fn run_reverse_unix(
             at: crate::config::now_rfc3339(),
             since_registered_ms,
             slept_ms: None,
+            srtt_ms: None,
+            silence_ms: None,
         }
         .emit();
         match wait_backoff(delay, &mut shutdown, &mut wake_rx).await {
@@ -654,6 +669,8 @@ fn note_wake<R: rand::RngCore>(backoff: &mut Backoff<R>, controller: &str, event
         at: crate::config::now_rfc3339(),
         since_registered_ms: None,
         slept_ms: Some(event.slept_ms),
+        srtt_ms: None,
+        silence_ms: None,
     }
     .emit();
 }
@@ -1060,6 +1077,18 @@ struct ReconnectEvent<'a> {
     /// 20); absent, never null, everywhere else.
     #[serde(skip_serializing_if = "Option::is_none")]
     slept_ms: Option<u64>,
+    /// Smoothed RTT (ms) at the verdict, only on a `"lost"` whose
+    /// `cause=path_dead` this process's own path watch ruled; absent, never
+    /// null, everywhere else (a `path_dead` the peer's close code announced,
+    /// every other cause, every other event, the `"retry"` that follows).
+    /// Open diagnostic vocabulary (`docs/CLI.md` §6.13).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    srtt_ms: Option<u64>,
+    /// Milliseconds of silence the watch measured at that verdict. Counted
+    /// from the last liveness evidence (a control message, or the tick that
+    /// saw received UDP datagrams); same presence rule as `srtt_ms`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    silence_ms: Option<u64>,
 }
 
 #[cfg(any(unix, test))]
@@ -1080,6 +1109,8 @@ impl ReconnectEvent<'_> {
             at = %self.at,
             since_registered_ms = self.since_registered_ms,
             slept_ms = self.slept_ms,
+            srtt_ms = self.srtt_ms,
+            silence_ms = self.silence_ms,
             "{}",
             line
         );
