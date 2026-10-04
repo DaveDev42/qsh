@@ -2958,3 +2958,30 @@ fn registration_event_json_line_carries_srtt_and_silence_ms_only_when_present() 
     assert!(announced.get("silence_ms").is_none(), "absent, never null");
     lost(Some(37), Some(1_250)).emit();
 }
+
+#[test]
+fn listen_path_watch_takes_the_recovery_section_and_set_test_path_watch_still_wins() {
+    use std::time::Duration;
+
+    // Nothing set: today's defaults.
+    let listen = test_listen();
+    assert_eq!(listen.path_watch_config(), PathWatchConfig::default());
+
+    // `run_listen_unix` stores the validated `[recovery]` section.
+    let configured: crate::config::Config = toml::from_str(
+        "[recovery]\nprobe_interval_ms = 100\nstrikes = 4\nmin_dead_after_ms = 900\n",
+    )
+    .unwrap();
+    let watch = configured.liveness().unwrap().watch;
+    assert_ne!(watch, PathWatchConfig::default());
+    listen.set_path_watch(watch);
+    assert_eq!(listen.path_watch_config(), watch);
+
+    // The test override keeps winning over the configured value.
+    let override_cfg = PathWatchConfig {
+        min_dead_after: Duration::from_secs(60),
+        ..PathWatchConfig::default()
+    };
+    listen.set_test_path_watch(override_cfg);
+    assert_eq!(listen.path_watch_config(), override_cfg);
+}

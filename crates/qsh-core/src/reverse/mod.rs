@@ -28,22 +28,26 @@ pub mod target;
 pub(crate) mod test_harness;
 
 /// The [`PathWatchConfig`] the target's registered-session watchdog uses
-/// (`target::run_reverse_unix`). Production always gets
-/// [`PathWatchConfig::default`]. Under `#[cfg(test)]` only, a test can wrap
-/// the target future in [`TEST_PATH_WATCH_CONFIG`]`.scope(..)` to raise the
-/// judgment floor (`min_dead_after`) above quinn's 45 s idle timeout, so the
-/// idle timeout, not `PathWatch`, is what ends a silent connection. This is
-/// compiled out of every non-test build, so it is not the `[recovery]`
-/// config surface ADR-0021 결정 4 keeps closed, and it is deliberately not a
-/// cargo feature (workspace feature unification could switch it on in the
-/// shipped binary).
+/// (`target::run_reverse_unix`). Production gets `configured`, which is the
+/// validated `[recovery]` section of this process's own `config.toml`
+/// (ADR-0021 decision 4; the defaults when the section is absent). Under
+/// `#[cfg(test)]` only, a test can wrap the target future in
+/// [`TEST_PATH_WATCH_CONFIG`]`.scope(..)` to raise the judgment floor
+/// (`min_dead_after`) above quinn's 45 s idle timeout, so the idle timeout,
+/// not `PathWatch`, is what ends a silent connection. The override is
+/// compiled out of every non-test build, which keeps it separate from the
+/// `[recovery]` config surface, and it is deliberately not a cargo feature
+/// (workspace feature unification could switch it on in the shipped
+/// binary).
 #[cfg(unix)]
-pub(crate) fn path_watch_config() -> crate::client::pathwatch::PathWatchConfig {
+pub(crate) fn path_watch_config(
+    configured: crate::client::pathwatch::PathWatchConfig,
+) -> crate::client::pathwatch::PathWatchConfig {
     #[cfg(test)]
     if let Ok(config) = TEST_PATH_WATCH_CONFIG.try_with(|config| *config) {
         return config;
     }
-    crate::client::pathwatch::PathWatchConfig::default()
+    configured
 }
 
 /// The wake signal the target's reconnect loop listens to

@@ -930,3 +930,48 @@ fn session_open_for_dynamic_without_dial_filter_capability_on_reverse_route_open
          could still reject the call"
     );
 }
+
+/// `[recovery]` reaches the watch an attach and a supervised tunnel run
+/// with (ADR-0021 decision 4), and an explicit `with_recovery` wins.
+#[test]
+fn attach_and_supervise_use_the_recovery_section_unless_with_recovery_overrides() {
+    use crate::client::pathwatch::PathWatchConfig;
+    use std::time::Duration;
+
+    let dir = tempfile::tempdir().unwrap();
+    let ops = user_hint_ops(dir.path());
+    // No config.toml: today's defaults, byte for byte.
+    let liveness = ops.liveness().unwrap();
+    assert_eq!(
+        format!("{:?}", ops.effective_recovery(&liveness)),
+        format!("{:?}", RecoveryConfig::default())
+    );
+
+    std::fs::create_dir_all(&ops.paths().config_dir).unwrap();
+    std::fs::write(
+        ops.paths().config_file(),
+        "[recovery]\nprobe_interval_ms = 100\nmin_dead_after_ms = 600\nstrikes = 5\n",
+    )
+    .unwrap();
+    let liveness = ops.liveness().unwrap();
+    let recovery = ops.effective_recovery(&liveness);
+    assert_eq!(recovery.watch.probe_interval, Duration::from_millis(100));
+    assert_eq!(recovery.watch.min_dead_after, Duration::from_millis(600));
+    assert_eq!(recovery.watch.strikes, 5);
+    // Everything that is not the watch stays as it was.
+    assert_eq!(recovery.attempts, RecoveryConfig::default().attempts);
+    assert_eq!(recovery.migration, RecoveryConfig::default().migration);
+
+    // An explicit override wins over the file.
+    let pinned = RecoveryConfig {
+        watch: PathWatchConfig {
+            strikes: 9,
+            ..PathWatchConfig::default()
+        },
+        migration: false,
+        ..RecoveryConfig::default()
+    };
+    let overridden = ops.clone().with_recovery(pinned);
+    let liveness = overridden.liveness().unwrap();
+    assert_eq!(overridden.effective_recovery(&liveness), pinned);
+}

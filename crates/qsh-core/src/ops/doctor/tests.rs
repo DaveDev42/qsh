@@ -2598,3 +2598,30 @@ fn doctor_threshold_matches_the_overall_severity_order() {
     assert!("info".parse::<DoctorThreshold>().is_err());
     assert_eq!("warn".parse::<DoctorThreshold>(), Ok(DoctorThreshold::Warn));
 }
+
+#[test]
+fn doctor_config_unknown_key_accepts_transport_and_recovery_and_flags_rtt_multiple() {
+    let (_guard, ops) = healthy_ops();
+    std::fs::write(
+        ops.paths().config_file(),
+        "[transport]\nkeep_alive_ms = 5000\n\n\
+         [recovery]\nprobe_interval_ms = 250\nmin_dead_after_ms = 1000\nstrikes = 3\n",
+    )
+    .unwrap();
+    assert!(config_unknown_key_findings(&ops).is_empty());
+
+    // The three closed knobs are not keys.
+    std::fs::write(
+        ops.paths().config_file(),
+        "[recovery]\nrtt_multiple = 4\nidle_probe_interval_ms = 1000\n",
+    )
+    .unwrap();
+    let findings = config_unknown_key_findings(&ops);
+    assert_eq!(findings.len(), 2, "{findings:?}");
+    for key in ["recovery.rtt_multiple", "recovery.idle_probe_interval_ms"] {
+        assert!(
+            findings.iter().any(|f| f.detail.contains(key)),
+            "{key}: {findings:?}"
+        );
+    }
+}
