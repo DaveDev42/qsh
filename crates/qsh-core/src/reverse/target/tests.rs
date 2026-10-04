@@ -1075,6 +1075,7 @@ async fn serve_to_target_probes_and_redials_at_once_after_an_injected_wake() {
             backoff_initial_ms: 20_000,
             backoff_max_ms: 30_000,
             path_watch: crate::client::pathwatch::PathWatchConfig::default(),
+            ..harness::TargetOptions::default()
         },
     )
     .await;

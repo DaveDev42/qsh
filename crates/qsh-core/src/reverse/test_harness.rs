@@ -183,14 +183,15 @@ pub(super) async fn wait_for_nth_line(
 
 /// A UDP relay in front of the controller. While not cut it forwards every
 /// datagram both ways; once [`Self::cut`], it drops everything.
-pub(super) struct UdpRelay {
-    addr: SocketAddr,
+pub(crate) struct UdpRelay {
+    /// The relay's own address: what a client dials instead of `upstream`.
+    pub(crate) addr: SocketAddr,
     cut: Arc<AtomicBool>,
     tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
 }
 
 impl UdpRelay {
-    async fn start(upstream: SocketAddr) -> Self {
+    pub(crate) async fn start(upstream: SocketAddr) -> Self {
         let front = Arc::new(
             UdpSocket::bind("127.0.0.1:0")
                 .await
@@ -251,7 +252,7 @@ impl UdpRelay {
     }
 
     /// Drop every datagram from now on, in both directions.
-    pub(super) fn cut(&self) {
+    pub(crate) fn cut(&self) {
         self.cut.store(true, Ordering::SeqCst);
     }
 
@@ -322,6 +323,9 @@ pub(super) struct TargetOptions {
     pub(super) backoff_max_ms: u64,
     /// The target's `PathWatch` config.
     pub(super) path_watch: PathWatchConfig,
+    /// The controller's `PathWatch` config for every registration it
+    /// drives ([`Listen::set_test_path_watch`]).
+    pub(super) controller_path_watch: PathWatchConfig,
 }
 
 impl Default for TargetOptions {
@@ -330,6 +334,7 @@ impl Default for TargetOptions {
             backoff_initial_ms: 50,
             backoff_max_ms: 200,
             path_watch: slow_path_watch(),
+            controller_path_watch: slow_path_watch(),
         }
     }
 }
@@ -393,7 +398,7 @@ impl Rig {
             Duration::from_secs(120),
             STALE_SWEEP_TICK,
         );
-        listen.set_test_path_watch(slow_path_watch());
+        listen.set_test_path_watch(options.controller_path_watch);
         let sweeper = tokio::spawn(Listen::run_stale_sweeper(Arc::downgrade(&listen)));
         let (controller_shutdown, controller_rx) = oneshot::channel::<()>();
         let controller_task = tokio::spawn(listen.clone().run(listener, async move {
@@ -479,6 +484,13 @@ impl Rig {
             _sweeper: sweeper,
             _listen: listen,
         }
+    }
+
+    /// Stall (`true`) or resume (`false`) the controller's control loop
+    /// ([`Listen::set_test_control_stall`]) while its QUIC connection keeps
+    /// running.
+    pub(super) fn stall_controller_control(&self, stalled: bool) {
+        self._listen.set_test_control_stall(stalled);
     }
 
     /// Cut the relay: from now on both ends see only silence.

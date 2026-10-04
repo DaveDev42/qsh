@@ -2856,3 +2856,68 @@ async fn controller_lost_line_reports_a_quinn_idle_timeout_as_idle_timeout() {
     );
     rig.shutdown().await;
 }
+
+/// Issue #10: a controller whose control stream stalls while the QUIC
+/// connection keeps carrying packets is not a dead path, on either end. The
+/// controller's loop stops reading and answering control
+/// ([`Listen::set_test_control_stall`]), so neither side gets a `Pong` for
+/// five detection budgets; the peers' own probe traffic and the ACKs for it
+/// are the only datagrams on the wire. Before the watchdog counted received
+/// datagrams both sides declared `path_dead` about one second in. Then the relay is cut and both
+/// ends must still report the real blackout within the budget plus slack:
+/// the signal removes the false positive, not the detector.
+///
+/// Wall-clock (about 15 s), real sockets, default `PathWatchConfig` on both
+/// ends. The `datagram_liveness_` prefix selects it for the load repeat in
+/// `scripts/stress/run.sh`.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn datagram_liveness_controller_control_stall_is_not_path_dead_but_a_sever_is() {
+    use crate::client::pathwatch::PathWatchConfig;
+    use crate::reverse::test_harness as harness;
+
+    // Names unique to this test: the line capture is process-global.
+    let alias = "controller-datagram-liveness-target";
+    let name = "widget-datagram-liveness";
+    let cfg = PathWatchConfig::default();
+    let budget = cfg.probe_interval * cfg.strikes + cfg.min_dead_after;
+    let slack = Duration::from_secs(5);
+
+    let rig = harness::Rig::start_with(
+        alias,
+        name,
+        harness::TargetOptions {
+            controller_path_watch: cfg,
+            path_watch: cfg,
+            ..harness::TargetOptions::default()
+        },
+    )
+    .await;
+    harness::wait_for_line(name, "registered").await;
+    harness::wait_for_line(alias, "registered").await;
+
+    rig.stall_controller_control(true);
+    tokio::time::sleep(budget * 5).await;
+    for host in [name, alias] {
+        assert!(
+            harness::lines(host, "lost").is_empty(),
+            "`{host}` declared the path lost while packets were still arriving: {:?}",
+            harness::lines(host, "lost")
+        );
+    }
+
+    // Now the path really dies. The stall stays on: the held loop must still
+    // notice a death.
+    let severed_at = std::time::Instant::now();
+    rig.cut();
+    let target_lost = harness::wait_for_line(alias, "lost").await;
+    let controller_lost = harness::wait_for_line(name, "lost").await;
+    let took = severed_at.elapsed();
+    assert_eq!(target_lost["cause"], "path_dead", "{target_lost}");
+    assert_eq!(controller_lost["cause"], "path_dead", "{controller_lost}");
+    assert!(
+        took <= budget + slack,
+        "a severed path took {took:?} to be reported; budget {budget:?} plus {slack:?} slack"
+    );
+    rig.shutdown().await;
+}
