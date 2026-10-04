@@ -485,6 +485,11 @@ impl Operation for ServiceStatusOp {
 pub struct Ops {
     paths: Paths,
     recovery: session::RecoveryConfig,
+    /// Whether [`Self::with_recovery`] was called. An explicit override
+    /// wins over the `[recovery]` section of `config.toml`
+    /// ([`Self::effective_recovery`]); otherwise the section's watch values
+    /// replace the default ones.
+    recovery_overridden: bool,
     /// Every tunnel this process is holding via [`Ops::tunnel_open_and_hold`]
     /// (`PLAN.md` M6 Step 2+3 검증 라운드 판정 ②/F2) — `Arc`-backed so every
     /// clone of this `Ops` shares the same table (`tunnel::TunnelHoldRegistry`'s
@@ -638,6 +643,7 @@ impl Ops {
         Self {
             paths,
             recovery: session::RecoveryConfig::default(),
+            recovery_overridden: false,
             tunnel_holds: tunnel::new_tunnel_hold_registry(),
             connect_runtime: Arc::new(OnceLock::new()),
             audit: None,
@@ -698,6 +704,7 @@ impl Ops {
     #[must_use]
     pub fn with_recovery(mut self, recovery: session::RecoveryConfig) -> Self {
         self.recovery = recovery;
+        self.recovery_overridden = true;
         self
     }
 
@@ -724,6 +731,24 @@ impl Ops {
     /// ([`Self::connect`]) keep the compiled default and never read it.
     pub(crate) fn liveness(&self) -> Result<crate::config::Liveness, OpError> {
         self.config()?.liveness()
+    }
+
+    /// The recovery settings an attach or supervised tunnel runs with: the
+    /// [`Self::with_recovery`] override when a caller gave one, otherwise
+    /// the defaults with the validated `[recovery]` watch values
+    /// (`liveness.watch`, ADR-0021 decision 4) applied.
+    pub(crate) fn effective_recovery(
+        &self,
+        liveness: &crate::config::Liveness,
+    ) -> session::RecoveryConfig {
+        if self.recovery_overridden {
+            self.recovery
+        } else {
+            session::RecoveryConfig {
+                watch: liveness.watch,
+                ..self.recovery
+            }
+        }
     }
 
     /// Report this build's version and the wire/CLI schemas it understands.

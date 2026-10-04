@@ -1153,3 +1153,28 @@ fn reconnect_event_json_line_carries_srtt_and_silence_ms_only_when_present() {
     assert!(announced.get("silence_ms").is_none(), "absent, never null");
     lost(Some(37), Some(1_250)).emit();
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn target_path_watch_takes_the_recovery_section_and_the_cfg_test_override_still_wins() {
+    use crate::client::pathwatch::PathWatchConfig;
+    use std::time::Duration;
+
+    let configured: Config =
+        toml::from_str("[recovery]\nprobe_interval_ms = 100\nmin_dead_after_ms = 700\n").unwrap();
+    let watch = configured.liveness().unwrap().watch;
+    assert_ne!(watch, PathWatchConfig::default());
+    // Production: the configured section is what `PathWatch::new` receives.
+    assert_eq!(crate::reverse::path_watch_config(watch), watch);
+    // The cfg(test) task-local override beats the configured value.
+    let override_cfg = PathWatchConfig {
+        min_dead_after: Duration::from_secs(60),
+        ..PathWatchConfig::default()
+    };
+    let seen = crate::reverse::TEST_PATH_WATCH_CONFIG
+        .scope(override_cfg, async {
+            crate::reverse::path_watch_config(watch)
+        })
+        .await;
+    assert_eq!(seen, override_cfg);
+}

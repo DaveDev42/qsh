@@ -808,7 +808,7 @@ impl Ops {
             accept_hold: accept_hold_ms
                 .filter(|hold| *hold != 0)
                 .map(|hold| Duration::from_millis(u64::from(hold))),
-            recovery: self.recovery,
+            recovery: self.effective_recovery(liveness),
             tuning: liveness.tuning(),
         }))
     }

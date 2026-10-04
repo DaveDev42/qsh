@@ -927,7 +927,7 @@ impl Ops {
             no_steal: req.no_steal,
             link: link.clone(),
             window: Arc::new(std::sync::Mutex::new(None)),
-            recovery: self.recovery,
+            recovery: self.effective_recovery(&liveness),
             tuning: liveness.tuning(),
             finished: finished.clone(),
             applied_input,

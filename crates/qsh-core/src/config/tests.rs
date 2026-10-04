@@ -480,6 +480,145 @@ fn keep_alive_ms_reaches_the_quinn_transport_config() {
     );
 }
 
+fn recovery(probe: Option<u64>, dead: Option<u64>, strikes: Option<u32>) -> RecoverySection {
+    RecoverySection {
+        probe_interval_ms: probe,
+        min_dead_after_ms: dead,
+        strikes,
+    }
+}
+
+#[test]
+fn recovery_keys_use_the_documented_names_and_defaults() {
+    use std::time::Duration;
+
+    let config: Config = toml::from_str(
+        "[recovery]\nprobe_interval_ms = 100\nmin_dead_after_ms = 800\nstrikes = 4\n",
+    )
+    .unwrap();
+    assert_eq!(config.recovery, recovery(Some(100), Some(800), Some(4)));
+    let watch = config.liveness().unwrap().watch;
+    assert_eq!(watch.probe_interval, Duration::from_millis(100));
+    assert_eq!(watch.min_dead_after, Duration::from_millis(800));
+    assert_eq!(watch.strikes, 4);
+    // The three closed knobs keep their defaults.
+    let defaults = PathWatchConfig::default();
+    assert_eq!(watch.idle_probe_interval, defaults.idle_probe_interval);
+    assert_eq!(watch.active_window, defaults.active_window);
+    assert_eq!(watch.rtt_multiple, defaults.rtt_multiple);
+    // A key left out falls back to its own default, not to a zero.
+    let partial: Config = toml::from_str("[recovery]\nstrikes = 2\n").unwrap();
+    let watch = partial.liveness().unwrap().watch;
+    assert_eq!(watch.probe_interval, defaults.probe_interval);
+    assert_eq!(watch.min_dead_after, defaults.min_dead_after);
+    assert_eq!(watch.strikes, 2);
+}
+
+#[test]
+fn recovery_values_beyond_the_detection_budget_bound_are_config_error() {
+    // P*S+D <= 2000, S >= 2, 50 <= P <= D (ADR-0021 decision 4), and an
+    // out-of-range value is a startup error, never a clamp.
+    let bad = [
+        // 2001 in total: 250*3 + 1251.
+        recovery(None, Some(1_251), None),
+        // One strike is not a verdict.
+        recovery(None, None, Some(1)),
+        recovery(None, None, Some(0)),
+        // Below the tick floor.
+        recovery(Some(49), Some(1_000), Some(3)),
+        recovery(Some(0), None, None),
+        // The probe cadence slower than the silence floor.
+        recovery(Some(600), Some(500), Some(2)),
+        // Each product that would wrap or blow the ceiling.
+        recovery(Some(u64::MAX), Some(u64::MAX), Some(u32::MAX)),
+        recovery(Some(667), Some(700), Some(2)),
+        recovery(None, None, Some(40)),
+    ];
+    for section in bad {
+        let err = section.path_watch().unwrap_err();
+        assert_eq!(err.code, ErrorCode::ConfigError, "{section:?}");
+        assert!(!err.retryable, "{section:?}");
+        assert!(err.message.contains("[recovery]"), "{}", err.message);
+        let config = Config {
+            recovery: section.clone(),
+            ..Config::default()
+        };
+        assert_eq!(
+            config.liveness().unwrap_err().code,
+            ErrorCode::ConfigError,
+            "{section:?}"
+        );
+    }
+    // Exactly 2000 passes, at the edges the bound implies.
+    for ok in [
+        recovery(Some(250), Some(1_250), Some(3)),
+        recovery(Some(50), Some(1_900), Some(2)),
+        recovery(Some(666), Some(668), Some(2)),
+        recovery(Some(50), Some(50), Some(39)),
+        recovery(Some(250), Some(1_000), Some(3)),
+    ] {
+        let watch = ok.path_watch().unwrap();
+        let budget = watch.probe_interval * watch.strikes + watch.min_dead_after;
+        assert!(
+            budget <= std::time::Duration::from_millis(RECOVERY_DETECTION_CEILING_MS),
+            "{ok:?}"
+        );
+    }
+}
+
+#[test]
+fn absent_recovery_section_keeps_todays_path_watch_config_byte_identically() {
+    let defaults = format!("{:?}", PathWatchConfig::default());
+    let absent: Config = toml::from_str("").unwrap();
+    assert_eq!(absent.recovery, RecoverySection::default());
+    assert_eq!(format!("{:?}", absent.liveness().unwrap().watch), defaults);
+    // An empty `[recovery]` table changes nothing either.
+    let empty: Config = toml::from_str("[recovery]\n").unwrap();
+    assert_eq!(format!("{:?}", empty.liveness().unwrap().watch), defaults);
+    // What an attach runs with when nothing overrides it.
+    assert_eq!(
+        format!("{:?}", crate::ops::RecoveryConfig::default().watch),
+        defaults
+    );
+    // The numbers the defaults must keep (ADR-0021 decision 4).
+    let watch = absent.liveness().unwrap().watch;
+    assert_eq!(watch.probe_interval, std::time::Duration::from_millis(250));
+    assert_eq!(watch.min_dead_after, std::time::Duration::from_secs(1));
+    assert_eq!(watch.strikes, 3);
+}
+
+#[test]
+fn recovery_section_reaches_attach_reverse_and_supervised_path_watch() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = Paths::new(dir.path().join("config"), dir.path().join("state"));
+    std::fs::create_dir_all(&paths.config_dir).unwrap();
+    std::fs::write(
+        paths.config_file(),
+        "[recovery]\nprobe_interval_ms = 100\nmin_dead_after_ms = 600\nstrikes = 5\n",
+    )
+    .unwrap();
+    let ops = crate::ops::Ops::new(paths);
+    let liveness = ops.liveness().unwrap();
+    let expected = ops.config().unwrap().recovery.path_watch().unwrap();
+    assert_eq!(liveness.watch, expected);
+    assert_ne!(liveness.watch, PathWatchConfig::default());
+
+    // Attach and supervised tunnels: `effective_recovery` feeds
+    // `AttachContext.recovery` and `Supervision.recovery`.
+    let recovery = ops.effective_recovery(&liveness);
+    assert_eq!(recovery.watch, expected);
+    assert_eq!(
+        crate::ops::RecoveryConfig {
+            watch: PathWatchConfig::default(),
+            ..recovery
+        },
+        crate::ops::RecoveryConfig::default()
+    );
+    // Reverse target: the configured value is what the watch is built from.
+    #[cfg(unix)]
+    assert_eq!(crate::reverse::path_watch_config(liveness.watch), expected);
+}
+
 #[test]
 fn stale_retention_key_uses_the_documented_name_and_default() {
     // architecture.md §7 / CLI.md §6.13 / protocol.md §11-4 / PLAN Step

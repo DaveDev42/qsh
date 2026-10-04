@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
+use crate::client::pathwatch::PathWatchConfig;
 use crate::ops::OpError;
 
 /// Resolved config and state directories for one QSH invocation.
@@ -450,6 +451,10 @@ pub struct Config {
     /// (`keep_alive_ms`, `docs/adr/0021-transport-liveness-knobs.md`
     /// decision 1).
     pub transport: TransportConfig,
+    /// `[recovery]` — the path watchdog's probe cadence, silence floor and
+    /// strike count (ADR-0021 decision 4). Named [`RecoverySection`]
+    /// because [`crate::RecoveryConfig`] is the attach-recovery struct.
+    pub recovery: RecoverySection,
 }
 
 /// `[serve]` section.
@@ -1089,12 +1094,118 @@ impl TransportConfig {
     }
 }
 
-/// The validated liveness settings every process that dials or listens
+/// Ceiling on the path watchdog's detection budget `P×S+D`, in
+/// milliseconds. It is the redial deadline an attach gets
+/// (`reconnect::REDIAL_DEADLINE`, 2 s) and the figure three tests pin the
+/// recovery against: `attach_recovery.rs`, `reverse_blackout.rs` and
+/// `reverse_resume_chaos.rs` each compute `detection_budget = P·S + D` from
+/// the watch config and hold the recovery to it
+/// (`docs/adr/0021-transport-liveness-knobs.md` decision 4).
+pub const RECOVERY_DETECTION_CEILING_MS: u64 = 2_000;
+
+/// `[recovery]` section (ADR-0021 decision 4).
+///
+/// Three of the watchdog's six knobs are open. `rtt_multiple` (8),
+/// `idle_probe_interval` and `active_window` stay closed: a key such as
+/// `[recovery].rtt_multiple` is reported by `qsh doctor` as
+/// `config_unknown_key` and otherwise ignored.
+///
+/// Each process reads its own `config.toml`, so the target
+/// (`qsh serve --to`/`qsh reverse`) and the controller (`qsh listen`) are
+/// tuned separately, and an attach or `tunnel open` follows the machine it
+/// runs on. A looser value on one end alone does not help: the other end
+/// still closes the connection with `CLOSE_CODE_PATH_DEAD` by its own
+/// watch. Raise both ends together.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RecoverySection {
+    /// Probe cadence while a path is active, in milliseconds. Unset ⇒ 250.
+    /// The watchdog's tick, so it is bounded below by
+    /// [`RecoverySection::MIN_PROBE_INTERVAL_MS`].
+    pub probe_interval_ms: Option<u64>,
+    /// Floor on the silence that declares a path dead, in milliseconds.
+    /// Unset ⇒ 1000.
+    pub min_dead_after_ms: Option<u64>,
+    /// Unanswered probes required before silence is a verdict. Unset ⇒ 3.
+    pub strikes: Option<u32>,
+}
+
+impl RecoverySection {
+    /// Lower bound on `probe_interval_ms`: the watchdog's tick floor.
+    pub const MIN_PROBE_INTERVAL_MS: u64 = 50;
+    /// Lower bound on `strikes`: more than one, so a single lost datagram
+    /// is never a verdict (`PathWatchConfig::strikes`).
+    pub const MIN_STRIKES: u32 = 2;
+
+    /// The watchdog config these keys describe, defaulted from
+    /// [`PathWatchConfig::default`] and validated. Fails closed
+    /// (`CONFIG_ERROR`, non-retryable) outside the bounds, never clamping:
+    ///
+    /// - `P×S+D ≤ ` [`RECOVERY_DETECTION_CEILING_MS`], computed with
+    ///   checked arithmetic so a huge value cannot wrap into range;
+    /// - `S ≥ 2`;
+    /// - `P ≥ 50`, the tick floor;
+    /// - `P ≤ D`, so that stamping a frame-liveness reset at the previous
+    ///   tick can never push detection past `P×S+D`.
+    pub fn path_watch(&self) -> Result<PathWatchConfig, OpError> {
+        let defaults = PathWatchConfig::default();
+        let probe_ms = self
+            .probe_interval_ms
+            .unwrap_or(defaults.probe_interval.as_millis() as u64);
+        let dead_ms = self
+            .min_dead_after_ms
+            .unwrap_or(defaults.min_dead_after.as_millis() as u64);
+        let strikes = self.strikes.unwrap_or(defaults.strikes);
+        if strikes < Self::MIN_STRIKES {
+            return Err(Self::config_error(format!(
+                "[recovery].strikes ({strikes}) must be >= {}",
+                Self::MIN_STRIKES
+            )));
+        }
+        if probe_ms < Self::MIN_PROBE_INTERVAL_MS {
+            return Err(Self::config_error(format!(
+                "[recovery].probe_interval_ms ({probe_ms}) must be >= {}",
+                Self::MIN_PROBE_INTERVAL_MS
+            )));
+        }
+        if probe_ms > dead_ms {
+            return Err(Self::config_error(format!(
+                "[recovery].probe_interval_ms ({probe_ms}) must be <= min_dead_after_ms ({dead_ms})"
+            )));
+        }
+        let budget = probe_ms
+            .checked_mul(u64::from(strikes))
+            .and_then(|silent| silent.checked_add(dead_ms));
+        match budget {
+            Some(ms) if ms <= RECOVERY_DETECTION_CEILING_MS => {}
+            _ => {
+                return Err(Self::config_error(format!(
+                    "[recovery] probe_interval_ms ({probe_ms}) x strikes ({strikes}) + \
+                     min_dead_after_ms ({dead_ms}) must be <= {RECOVERY_DETECTION_CEILING_MS} ms"
+                )));
+            }
+        }
+        Ok(PathWatchConfig {
+            probe_interval: std::time::Duration::from_millis(probe_ms),
+            min_dead_after: std::time::Duration::from_millis(dead_ms),
+            strikes,
+            ..defaults
+        })
+    }
+
+    fn config_error(message: impl Into<String>) -> OpError {
+        OpError::new(ErrorCode::ConfigError, message).with_retryable(false)
+    }
+}
+
+/// The two validated liveness settings every process that dials or listens
 /// reads at startup, before any resource exists ([`Config::liveness`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Liveness {
     /// `[transport].keep_alive_ms`, validated.
     pub keep_alive: std::time::Duration,
+    /// `[recovery]`, validated and merged over the defaults.
+    pub watch: PathWatchConfig,
 }
 
 impl Liveness {
@@ -1107,13 +1218,14 @@ impl Liveness {
 }
 
 impl Config {
-    /// Validate the liveness sections. Every daemon calls this at startup
+    /// Validate `[transport]` and `[recovery]` together. Every daemon calls this at startup
     /// whatever its role, so a bad value fails closed before any socket is
     /// bound or connection dialed; an attach and `tunnel open` call it
     /// before they dial.
     pub fn liveness(&self) -> Result<Liveness, OpError> {
         Ok(Liveness {
             keep_alive: self.transport.keep_alive()?,
+            watch: self.recovery.path_watch()?,
         })
     }
 

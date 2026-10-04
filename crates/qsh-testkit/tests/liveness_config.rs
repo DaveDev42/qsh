@@ -4,7 +4,7 @@
 //! (non-retryable), never a clamp.
 //!
 //! Each daemon entry point is handed a config whose `[transport]` is out of
-//! range and a shutdown future that never resolves: a daemon that skipped
+//! range (or whose `[recovery]` breaks the detection budget) and a shutdown future that never resolves: a daemon that skipped
 //! the validation would bind and wait, so the test's own timeout is what
 //! catches it.
 
@@ -13,7 +13,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use qsh_core::config::{Config, Paths, TransportConfig};
+use qsh_core::config::{Config, Paths, RecoverySection, TransportConfig};
 use qsh_core::reverse::listen::run_listen;
 use qsh_core::reverse::target::run_reverse;
 use qsh_core::serve::run_serve;
@@ -23,16 +23,49 @@ use qsh_testkit::reverse::loaded_identity;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-fn bad_configs() -> Vec<(&'static str, Config)> {
-    vec![(
-        "keep_alive_ms = 999",
+fn bad_recovery(label: &'static str, recovery: RecoverySection) -> (&'static str, Config) {
+    (
+        label,
         Config {
-            transport: TransportConfig {
-                keep_alive_ms: Some(999),
-            },
+            recovery,
             ..Config::default()
         },
-    )]
+    )
+}
+
+fn bad_configs() -> Vec<(&'static str, Config)> {
+    vec![
+        (
+            "keep_alive_ms = 999",
+            Config {
+                transport: TransportConfig {
+                    keep_alive_ms: Some(999),
+                },
+                ..Config::default()
+            },
+        ),
+        bad_recovery(
+            "min_dead_after_ms = 1251 (P*S+D = 2001)",
+            RecoverySection {
+                min_dead_after_ms: Some(1_251),
+                ..RecoverySection::default()
+            },
+        ),
+        bad_recovery(
+            "strikes = 1",
+            RecoverySection {
+                strikes: Some(1),
+                ..RecoverySection::default()
+            },
+        ),
+        bad_recovery(
+            "probe_interval_ms = 49",
+            RecoverySection {
+                probe_interval_ms: Some(49),
+                ..RecoverySection::default()
+            },
+        ),
+    ]
 }
 
 fn temp_paths(dir: &tempfile::TempDir) -> Paths {
