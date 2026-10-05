@@ -261,6 +261,78 @@ impl ProbeSource for NeverCloses {
     fn rtt(&self) -> Duration {
         LAN
     }
+
+    fn rx_datagrams(&self) -> u64 {
+        0
+    }
+}
+
+/// A stub whose receive counter is driven by the test, to model datagrams
+/// arriving while no control-stream reply does.
+#[derive(Clone, Default)]
+struct CountingSource(Arc<std::sync::atomic::AtomicU64>);
+
+impl ProbeSource for CountingSource {
+    async fn closed(&self) {
+        std::future::pending::<()>().await
+    }
+
+    fn rtt(&self) -> Duration {
+        LAN
+    }
+
+    fn rx_datagrams(&self) -> u64 {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_moving_datagram_counter_keeps_the_path_alive_without_control_replies() {
+    let watch = PathWatch::new(cfg());
+    let source = CountingSource::default();
+    let probes = Arc::new(tokio::sync::Notify::new());
+    let watchdog = tokio::spawn(watch_path(source.clone(), watch.clone(), probes));
+    // Ten times the death budget, with a datagram every 100 ms and no
+    // control reply at all.
+    for _ in 0..100 {
+        source.0.fetch_add(1, Ordering::Relaxed);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!watch.is_dead(), "datagrams are arriving; path is alive");
+    }
+    // Real death detection is unchanged: the counter stops, the verdict
+    // follows on the usual schedule (`dead_after` plus a probe beat).
+    let stopped = Instant::now();
+    tokio::time::timeout(Duration::from_secs(5), watch.dead())
+        .await
+        .expect("a frozen counter must still end in a verdict");
+    let took = stopped.elapsed();
+    assert!(
+        took <= watch.config().dead_after(LAN) + watch.config().probe_interval * 2,
+        "{took:?}"
+    );
+    watchdog.await.expect("watchdog returns once it declares");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_frozen_datagram_counter_without_replies_is_dead_on_the_existing_schedule() {
+    let watch = PathWatch::new(cfg());
+    let source = CountingSource::default();
+    source.0.store(42, Ordering::Relaxed);
+    let probes = Arc::new(tokio::sync::Notify::new());
+    let watchdog = tokio::spawn(watch_path(source, watch.clone(), probes));
+    let start = Instant::now();
+    tokio::time::timeout(Duration::from_secs(5), watch.dead())
+        .await
+        .expect("a frozen counter with no replies must be declared dead");
+    let took = start.elapsed();
+    // Same bound `silence_earns_probes_and_then_a_verdict` pins for
+    // `PathState`: three strikes at the fast cadence, 1 s floor.
+    assert!(took >= watch.config().dead_after(LAN), "{took:?}");
+    assert!(
+        took <= watch.config().dead_after(LAN) + watch.config().probe_interval,
+        "{took:?}"
+    );
+    watchdog.await.expect("watchdog returns once it declares");
 }
 
 #[tokio::test(start_paused = true)]

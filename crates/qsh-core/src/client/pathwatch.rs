@@ -16,7 +16,11 @@
 //! bytes and needs no protocol change. What counts as an answer is
 //! deliberately loose: *any* inbound traffic — a `Pong`, a `SessionEvent`,
 //! a frame of session output — proves the path carries packets. A session
-//! that is busy printing therefore never probes at all.
+//! that is busy printing therefore never probes at all. That includes
+//! traffic the control stream never sees: the watchdog also reads the
+//! connection's UDP receive counter ([`ProbeSource::rx_datagrams`]) each
+//! tick, so a `Pong` held up in ordered loss recovery on a lossy link does
+//! not outvote datagrams that are visibly arriving.
 //!
 //! **Two cadences, because a shell is idle most of its life.** Probing four
 //! times a second forever would wake a sleeping laptop's radio to learn
@@ -317,6 +321,15 @@ impl PathWatch {
         self.state().observe_inbound(Instant::now());
     }
 
+    /// The connection's UDP receive counter advanced. Liveness only: not
+    /// activity (it would pin the fast cadence, as a `Pong` would), and it
+    /// does not bump the inbound signal, because a migration probe asks
+    /// whether the *host answered*, not whether the transport ACKed
+    /// something.
+    fn datagrams_moved(&self) {
+        self.state().observe_inbound(Instant::now());
+    }
+
     /// Report local activity (input, resize, an accepted local connection)
     /// — somebody is waiting.
     pub fn activity(&self) {
@@ -474,6 +487,16 @@ pub trait ProbeSource: Send + Sync + 'static {
 
     /// Current smoothed RTT, used to scale `PathWatchConfig::dead_after`.
     fn rtt(&self) -> Duration;
+
+    /// Total UDP datagrams received on this connection so far. Any advance
+    /// proves the path carries packets towards us, even when the control
+    /// stream is stuck in ordered loss recovery (a lost `Pong` waits for a
+    /// retransmit, which on a lossy link can outlast the death budget while
+    /// datagrams keep arriving). [`watch_path`] counts an advance as
+    /// inbound traffic; a counter that stops moving leaves the verdict
+    /// schedule untouched. A source with no such counter must return a
+    /// constant, which falls back to control-stream liveness alone.
+    fn rx_datagrams(&self) -> u64;
 }
 
 impl ProbeSource for qsh_transport::Connection {
@@ -486,6 +509,10 @@ impl ProbeSource for qsh_transport::Connection {
 
     fn rtt(&self) -> Duration {
         self.quinn().stats().path.rtt
+    }
+
+    fn rx_datagrams(&self) -> u64 {
+        self.quinn().stats().udp_rx.datagrams
     }
 }
 
@@ -519,6 +546,7 @@ pub(crate) async fn watch_path_with_wake<S: ProbeSource>(
     mut wake_rx: tokio::sync::watch::Receiver<super::wake::WakeEvent>,
 ) {
     let mut wake_closed = false;
+    let mut last_rx = source.rx_datagrams();
     loop {
         // Re-read every round rather than arming a fixed ticker: the beat
         // *is* the power budget, and an attach nobody is using must not
@@ -562,6 +590,15 @@ pub(crate) async fn watch_path_with_wake<S: ProbeSource>(
                 );
                 watch.wake();
             }
+        }
+        // Any datagram since the last tick proves the path carries packets,
+        // whether or not a control-stream reply made it through ordered
+        // recovery. Read before judging so a moving counter never banks a
+        // strike.
+        let rx = source.rx_datagrams();
+        if rx != last_rx {
+            last_rx = rx;
+            watch.datagrams_moved();
         }
         let rtt = source.rtt();
         match watch.verdict(rtt) {
