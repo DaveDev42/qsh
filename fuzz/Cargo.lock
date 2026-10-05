@@ -1489,7 +1489,7 @@ dependencies = [
 
 [[package]]
 name = "qsh-core"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "base64 0.22.1",
  "blake3",
@@ -1519,7 +1519,7 @@ dependencies = [
 
 [[package]]
 name = "qsh-proto"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "base64 0.22.1",
  "prost",
@@ -1546,7 +1546,7 @@ dependencies = [
 
 [[package]]
 name = "qsh-transport"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "aws-lc-rs",
  "base64 0.22.1",

@@ -9,6 +9,36 @@ it with that tag's name.
 The GitHub Release page for a tag carries the commit list; this file
 carries the parts that do not change commit to commit.
 
+## `v0.4.1`
+
+A patch release with one fix. There is no wire or contract change, and
+`v0.4.0` peers interoperate with it.
+
+### Fix
+
+- `PathWatch` now also counts received UDP datagrams (quinn's
+  `udp_rx.datagrams`) as proof the path is alive. Before, a `Pong` stuck
+  in QUIC's ordered loss recovery on a lossy link could leave the watch
+  with no sign of life, and it reported a false `path_dead` while packets
+  were still arriving (DaveDev42/qsh#10, PR #12, commit 54ce47d).
+
+What this means in use:
+
+- The fix applies per end. On a reverse link (`qsh listen` with
+  `qsh serve --to`), upgrade both ends.
+- A real blackout is detected on the same schedule as before.
+- A reverse controller may now report `replaced` instead of `lost` when
+  the target dials back first, because the two ends no longer give up on
+  the old path at the same tick.
+
+### Assets and signing
+
+The same as `v0.4.0`: the same seven assets plus `SHA256SUMS`, the same
+install paths, the same provenance check, and the same Developer ID
+signing and notarization of both macOS binaries. See "What is in the
+archives" and "What is signed and what is not" under `v0.4.0` below,
+with `v0.4.1` in place of `v0.4.0` in the asset names.
+
 ## `v0.4.0`
 
 The first release with Developer ID signed, notarized macOS binaries, and
