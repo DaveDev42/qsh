@@ -3518,6 +3518,10 @@ impl ProbeSource for NeverCloses {
     fn rtt(&self) -> Duration {
         Duration::from_millis(1)
     }
+
+    fn rx_datagrams(&self) -> u64 {
+        0
+    }
 }
 
 #[tokio::test(start_paused = true)]

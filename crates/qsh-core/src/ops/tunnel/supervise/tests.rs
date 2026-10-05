@@ -27,8 +27,6 @@ struct ScriptedPeer {
     addr: std::net::SocketAddr,
     fingerprint: String,
     strip: Arc<AtomicBool>,
-    /// While set, liveness `Ping`s on the control stream go unanswered.
-    mute: Arc<AtomicBool>,
     /// While set, an incoming connection's handshake is not completed, so a
     /// dial to this peer stays in flight.
     stall: Arc<AtomicBool>,
@@ -134,7 +132,6 @@ async fn scripted_peer() -> ScriptedPeer {
     .expect("bind the scripted peer");
     let addr = listener.local_addr().unwrap();
     let strip = Arc::new(AtomicBool::new(false));
-    let mute = Arc::new(AtomicBool::new(false));
     let stall = Arc::new(AtomicBool::new(false));
     let incoming_count = Arc::new(AtomicUsize::new(0));
     let requests = Arc::new(AtomicUsize::new(0));
@@ -142,7 +139,6 @@ async fn scripted_peer() -> ScriptedPeer {
     let (tx, accepted) = tokio::sync::mpsc::unbounded_channel();
     tokio::spawn({
         let strip = Arc::clone(&strip);
-        let mute = Arc::clone(&mute);
         let stall = Arc::clone(&stall);
         let incoming_count = Arc::clone(&incoming_count);
         let requests = Arc::clone(&requests);
@@ -158,7 +154,6 @@ async fn scripted_peer() -> ScriptedPeer {
                 };
                 let offer_dial_filter = !strip.load(Ordering::SeqCst);
                 let requests = Arc::clone(&requests);
-                let mute = Arc::clone(&mute);
                 let rfwd = Arc::clone(&rfwd);
                 let tx = tx.clone();
                 tokio::spawn(async move {
@@ -182,14 +177,10 @@ async fn scripted_peer() -> ScriptedPeer {
                     tokio::spawn(async move {
                         while let Ok(Some(msg)) = ctl.recv.recv::<ControlMessage>().await {
                             let reply = match &msg.body {
-                                Some(control_message::Body::Ping(_))
-                                    if !mute.load(Ordering::SeqCst) =>
-                                {
-                                    Some(ControlMessage::new(
-                                        msg.request_id,
-                                        control_message::Body::Pong(wire::Pong {}),
-                                    ))
-                                }
+                                Some(control_message::Body::Ping(_)) => Some(ControlMessage::new(
+                                    msg.request_id,
+                                    control_message::Body::Pong(wire::Pong {}),
+                                )),
                                 Some(body) => rfwd.answer(conn_ordinal, msg.request_id, body),
                                 None => None,
                             };
@@ -213,7 +204,6 @@ async fn scripted_peer() -> ScriptedPeer {
         addr,
         fingerprint: fingerprint.to_string(),
         strip,
-        mute,
         stall,
         incoming: incoming_count,
         requests,
@@ -368,6 +358,70 @@ fn lost_lines() -> Vec<(std::time::Instant, Option<String>)> {
         .collect()
 }
 
+/// A UDP relay in front of a peer that can be cut. A dead path under the
+/// watchdog means no datagrams in either direction (`PathWatch` counts any
+/// received datagram, ACKs included, as liveness), so silencing only the
+/// peer's `Pong` replies no longer models one.
+struct CutRelay {
+    addr: std::net::SocketAddr,
+    cut: Arc<AtomicBool>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl CutRelay {
+    async fn start(upstream: std::net::SocketAddr) -> Self {
+        use std::collections::HashMap;
+        use tokio::net::UdpSocket;
+        let front = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let addr = front.local_addr().unwrap();
+        let cut = Arc::new(AtomicBool::new(false));
+        let task = tokio::spawn({
+            let cut = Arc::clone(&cut);
+            async move {
+                let mut legs: HashMap<std::net::SocketAddr, Arc<UdpSocket>> = HashMap::new();
+                let mut buf = vec![0u8; 65_536];
+                loop {
+                    let Ok((n, src)) = front.recv_from(&mut buf).await else {
+                        return;
+                    };
+                    if cut.load(Ordering::SeqCst) {
+                        continue;
+                    }
+                    let leg = match legs.get(&src) {
+                        Some(leg) => Arc::clone(leg),
+                        None => {
+                            let leg = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+                            leg.connect(upstream).await.unwrap();
+                            tokio::spawn({
+                                let (leg, front, cut) =
+                                    (Arc::clone(&leg), Arc::clone(&front), Arc::clone(&cut));
+                                async move {
+                                    let mut buf = vec![0u8; 65_536];
+                                    while let Ok(n) = leg.recv(&mut buf).await {
+                                        if !cut.load(Ordering::SeqCst) {
+                                            let _ = front.send_to(&buf[..n], src).await;
+                                        }
+                                    }
+                                }
+                            });
+                            legs.insert(src, Arc::clone(&leg));
+                            leg
+                        }
+                    };
+                    let _ = leg.send(&buf[..n]).await;
+                }
+            }
+        });
+        Self { addr, cut, task }
+    }
+}
+
+impl Drop for CutRelay {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
 /// ADR-0023 decision 17 end to end: a wake resets the supervisor's idea of
 /// the path, so a connection that went dead while the machine slept is
 /// declared lost within about two seconds of waking instead of after the
@@ -426,9 +480,10 @@ fn supervised_forward_carrier_is_declared_lost_within_two_seconds_of_an_injected
     .unwrap();
 
     let peer = runtime.block_on(scripted_peer());
+    let relay = runtime.block_on(CutRelay::start(peer.addr));
     ops.trust_add(TrustAddReq {
         name: "box".into(),
-        address: Some(peer.addr.to_string()),
+        address: Some(relay.addr.to_string()),
         fingerprint: Some(peer.fingerprint.clone()),
         cert_pem: None,
     })
@@ -446,8 +501,8 @@ fn supervised_forward_carrier_is_declared_lost_within_two_seconds_of_an_injected
     // Let the open's own traffic age out of the active window, so the
     // watchdog is on its idle cadence when the path dies.
     std::thread::sleep(Duration::from_secs(6));
-    // The path "dies" while nobody is probing: the peer stops answering.
-    peer.mute.store(true, Ordering::SeqCst);
+    // The path "dies" while nobody is probing: no datagram gets through.
+    relay.cut.store(true, Ordering::SeqCst);
     std::thread::sleep(Duration::from_secs(3));
     assert!(
         lost_lines().is_empty(),
