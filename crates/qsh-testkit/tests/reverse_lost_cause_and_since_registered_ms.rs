@@ -401,9 +401,21 @@ async fn run_target_lost_and_retry_lines_report_a_silent_path_as_path_dead() {
         // controller's own classification converges on `path_dead` too
         // (this test's own module doc), so it is deterministic to assert
         // here, unlike the target-side value in some other scenarios.
+        // `PathWatch` also counts received datagrams as liveness, so the two
+        // sides' verdicts can land up to a probe interval apart. When the
+        // target's wins and its re-dial reaches the controller first, the
+        // controller replaces the dead registration and reports `replaced`
+        // instead of a `lost` of its own; that is the other legal outcome of
+        // the race.
         let controller_lost = wait_for(TIMEOUT, || {
-            let v = events_by_host_and_kind("widget", "lost");
-            (!v.is_empty()).then_some(v)
+            let lost = events_by_host_and_kind("widget", "lost");
+            if !lost.is_empty() {
+                return Some(lost);
+            }
+            let replaced = events_by_host_and_kind("widget", "replaced");
+            // A `replaced` is only the second generation: the first
+            // `registered` was not one.
+            (!replaced.is_empty()).then_some(Vec::new())
         })
         .await;
         let _ = shutdown_tx.send(());
@@ -422,10 +434,12 @@ async fn run_target_lost_and_retry_lines_report_a_silent_path_as_path_dead() {
     assert!(lost["since_registered_ms"].as_u64().is_some());
     assert_eq!(retry[0]["cause"], "path_dead");
 
-    let controller_lost = &controller_lost[0];
-    assert_eq!(controller_lost["cause"], "path_dead");
-    assert!(controller_lost["since_registered_ms"].as_u64().is_some());
-    assert_at_is_rfc3339(controller_lost);
+    // An empty list means the controller saw the re-dial first (see above).
+    if let Some(controller_lost) = controller_lost.first() {
+        assert_eq!(controller_lost["cause"], "path_dead");
+        assert!(controller_lost["since_registered_ms"].as_u64().is_some());
+        assert_at_is_rfc3339(controller_lost);
+    }
 
     harness.shutdown().await;
 }
