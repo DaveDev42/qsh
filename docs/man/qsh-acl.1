@@ -1,6 +1,6 @@
 .ie \n(.g .ds Aq \(aq
 .el .ds Aq '
-.TH qsh-acl 1  "acl 0.4.0" 
+.TH qsh-acl 1  "acl 0.4.1" 
 .SH NAME
 qsh\-acl \- Inspect the ACL policy (`docs/CLI.md` §6.15)
 .SH SYNOPSIS
@@ -34,4 +34,4 @@ Evaluate this machine\*(Aqs own `acl.toml` against a hypothetical request, using
 qsh\-acl\-show(1)
 Summarize what this machine\*(Aqs own `acl.toml` grants one principal: the matching `[[acl]]` rows and the effective action set for an unowned resource, computed with the same evaluator enforcement uses. Read\-only and local only: never writes `acl.toml`, never reaches a remote peer (`docs/CLI.md` §6.19)
 .SH VERSION
-v0.4.0
+v0.4.1
