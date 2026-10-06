@@ -9,6 +9,87 @@ it with that tag's name.
 The GitHub Release page for a tag carries the commit list; this file
 carries the parts that do not change commit to commit.
 
+## `v0.4.2`
+
+Reverse registrations hold up better on lossy links and on overloaded
+hosts. This release finishes issues #10 and #11. It has no wire or
+`qsh.cli/v1` contract change, and `v0.4.x` peers interoperate with it.
+`docs/CLI.md` moves from v0.21 to v0.25.
+
+Upgrade both ends of a reverse link. Each end runs its own path watch,
+and an older build at either end keeps its 1-second detection and
+closes the connection first.
+
+### Reverse registrations ride out about 4 seconds of silence
+
+- The path watch on a reverse registration, on both the `qsh listen`
+  side and the `qsh serve --to` side, now declares the path dead after
+  about 4.25 to 4.5 seconds of silence instead of about 1 second
+  (`min_dead_after` 4250 ms, 3 strikes at 250 ms, ADR-0041). The longest
+  uplink loss bursts measured in #10 were 2.1 to 3.6 seconds, and a
+  registration now rides them out. A path that is really gone takes about
+  3.25 seconds longer to detect.
+- Interactive attach and supervised tunnels keep their 1-second budget.
+- Tunnel traffic carried over a registration now counts as use of the
+  registration. Before, a registration busy only with tunnel data fell
+  back to the idle probe cadence after 15 seconds and took about
+  20 seconds to notice a dead path. A registration with no traffic at all
+  still uses the idle cadence, and detection there takes about 20 to 25
+  seconds.
+
+### New `config.toml` keys
+
+All optional. Without them, behavior is the same as the defaults above.
+A value out of range stops startup with `CONFIG_ERROR`. Nothing is
+clamped.
+
+- `[transport].keep_alive_ms`: QUIC keep-alive interval, default 15000,
+  range 1000 to 20000 (ADR-0021).
+- `[recovery].probe_interval_ms`, `min_dead_after_ms`, `strikes`: the
+  path watch of interactive attach and supervised tunnels, default 250,
+  1000 and 3, with `probe_interval_ms × strikes + min_dead_after_ms` at
+  most 2000 (ADR-0021). `qsh serve` has no path watch of its own for
+  these connections, so only the client's values matter.
+- `[recovery].reverse_min_dead_after_ms`, `reverse_strikes`: the reverse
+  registration's watch, default 4250 and 3, with the same formula at most
+  5000 (ADR-0041). `probe_interval_ms` is shared. Each end reads its own
+  file, so the two ends can be tuned separately. The default sits at the
+  5000 ceiling, so raising one value means lowering another.
+
+### An overloaded host no longer reads its own stall as a dead path
+
+- When the path watch's own timer fires more than one probe interval
+  late, the process was not running, and that time is not counted as
+  silence on the path. That tick cannot declare the path dead (ADR-0042).
+  This covers the scheduler stalls in #11. A peer that is itself starved
+  still stops answering, so the healthy end can still cut a registration
+  once the silence passes its 5-second budget.
+- In `qsh serve --to`, when registrations keep ending within 60 seconds,
+  the redial delay doubles from the second such loss, up to 8 seconds.
+  A registration that lasts 60 seconds, or a wake from sleep, resets the
+  count. The usual backoff after failed dials is unchanged.
+
+### Diagnostics
+
+- A `qsh::reverse` `lost` line with `cause=path_dead`, when this
+  process's own watch made the call, now carries `srtt_ms`,
+  `silence_ms` (how long this end saw no sign of life) and
+  `tick_gap_ms` (how late this watch's worst tick fired). A stall of a
+  few seconds then reads differently from a path that went away, without
+  a packet capture.
+- `cause` is classified more precisely: a stateless reset is now
+  `peer_closed` and a `Hello` reply that never came is now
+  `dial_timeout`; both used to be `local`. `docs/CLI.md` §6.13 lists
+  every code path that still produces `cause=local`.
+
+### Assets and signing
+
+The same as `v0.4.0`: the same seven assets plus `SHA256SUMS`, the same
+install paths, the same provenance check, and the same Developer ID
+signing and notarization of both macOS binaries. See "What is in the
+archives" and "What is signed and what is not" under `v0.4.0` below,
+with `v0.4.2` in place of `v0.4.0` in the asset names.
+
 ## `v0.4.1`
 
 A patch release with one fix. There is no wire or contract change, and

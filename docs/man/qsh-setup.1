@@ -1,6 +1,6 @@
 .ie \n(.g .ds Aq \(aq
 .el .ds Aq '
-.TH qsh-setup 1  "setup 0.4.1" 
+.TH qsh-setup 1  "setup 0.4.2" 
 .SH NAME
 qsh\-setup \- Set this machine up for one role, step by step, using only the commands you could run yourself (ADR\-0024, `docs/CLI.md` §6.20). Prints the `[[acl]]` rows to add and never writes `acl.toml`; never starts `qsh serve`, `qsh listen` or a session
 .SH SYNOPSIS
@@ -37,4 +37,4 @@ This machine connects to a host with `qsh <name>`
 qsh\-setup\-listener(1)
 This machine runs `qsh listen` for a reverse peer
 .SH VERSION
-v0.4.1
+v0.4.2
