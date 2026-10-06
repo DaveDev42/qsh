@@ -1,7 +1,7 @@
 # ADR-0041: 역방향 등록 연결의 PathWatch 감지 예산을 대화형 attach의 2초 상한에서 분리하고 기본 창을 약 5초로 둔다
 
 날짜: 2026-10-05
-상태: 승인됨 (2026-10-06 사용자 확정, 이슈 #10·#11)
+상태: 승인됨 (2026-10-06 사용자 확정, 이슈 #10·#11). 결정 8은 구현 리뷰에서 더했다. 5초 예산이 활성 창 안에서만 성립한다는 사실과 그 보정이다
 
 개정 관계: ADR-0021을 개정한다. 대상은 두 자리다. 하나는 결과 절에서 `[recovery]` 세 값의 범위를 세 회귀 테스트(`attach_recovery.rs`·`reverse_blackout.rs`·`reverse_resume_chaos.rs`)의 `detection_budget` 상한 아래로 잡으라고 한 문장이다. 이 상한은 연결 종류별 둘(attach 2000ms, 역방향 등록 5000ms)이 된다. 다른 하나는 결정 4가 못박은 기본값(250ms·1초·3)과 "설정이 없으면 오늘과 바이트 단위로 같은 동작"이다. 이 두 문장은 대화형 attach와 supervised 터널에는 그대로 서고 역방향 등록 연결에는 서지 않는다. 역방향 등록의 기본 감지가 4.25초로 바뀐다. 결정 4의 나머지(세 값만 연다, 검증은 결정 1과 같은 fail-closed 규율)와 결정 7은 건드리지 않는다. `docs/design/protocol.md` §10의 `[recovery]` 서술과 §11-4 항목 4의 "양쪽 role에서 같은 정책을 재사용한다"가 이 ADR로 바뀌는 자리다. ADR-0023 결정 17(wake 뒤 감지)은 attach 기본값 기준 서술이라 그대로 선다. `docs/ROADMAP.md` M13 범위 (k)의 "설정이 없을 때 동작이 오늘과 같다"는 이제 역방향 등록에는 해당하지 않는다. 그 문구와 `PLAN.md` 배치는 메인 세션이 맞춘다.
 
@@ -48,6 +48,11 @@ GitHub 이슈 #10은 0.4.0을 양 끝에 올린 현장에서 역방향 등록이
 
 7. 새 기본이 현장에서 맞는지는 같은 토폴로지의 기록으로 본다. 판단에 쓰는 기록은 사람이 이슈 #10이나 캠페인 문서에 남긴 `lost`/`retry` 줄 분포다. 3.85초를 넘는 정체가 `path_dead`로 계속 나오면 그 호스트는 `reverse_*` 키로 푼다. 5000ms 상한을 넘기는 변경은 새 ADR로 연다.
 
+8. 5초 예산은 등록이 쓰이는 동안의 값이고, 터널 트래픽도 쓰임으로 센다. watch의 빠른 cadence(250ms)는 `active_window`(15초) 안에 활동이 있었을 때만 돈다. 활동으로 세는 것은 `Ping`/`Pong`이 아닌 control message였고, 터널 데이터는 control 스트림을 지나지 않으므로 터널만 바쁜 등록(이슈 #10의 토폴로지)은 등록 15초 뒤 idle beat(5초)로 떨어졌다. 이 상태에서 경로가 죽으면 `S+1` beat, 기본 20초 안팎(마지막 생존 증거가 beat 중간이었으면 최대 25초)에야 판정이 섰다. 결정은 둘이다.
+   - **터널 바이트를 활동으로 센다.** 모든 터널 splice(양 끝의 server·tunnel 코드와 localctl 중계 다리 모두)는 바이트를 옮길 때마다 연결의 `StreamTrack`에 보고한다. 그 보고에 연결 단위 hook을 걸어(`tunnel::stall::report_traffic`) 등록 연결의 `PathWatch::activity`를 부른다(`reverse::report_tunnel_traffic`). target(`run_reverse_unix`)과 controller(`drive_registered_session`) 둘 다 자기 watch를 만들 때 건다. liveness는 건드리지 않는다. 쓴 바이트는 경로가 산다는 증거가 아니고, 도착한 바이트는 datagram 카운터가 이미 센다. hook은 바이트 수도 내용도 받지 않는다.
+   - **두 구간의 감지 시간을 이렇게 적는다.** 활성 구간(15초 안에 control 활동이나 터널 바이트가 있었다)에서는 마지막 생존 증거 뒤 `min_dead_after`부터 한 tick(250ms) 더 지난 사이, 기본 4.25~4.5초에 판정이 서고 `P×S+D ≤ 5000ms`가 그 상한이다. 유휴 구간(15초 넘게 아무것도 나르지 않았다)에서는 probe가 idle beat(5초)로 나가 `(S+1)×5초`, 기본 20초 안팎이며 `P×S+D`는 적용되지 않는다. 터널 트래픽이 다시 흐르면 watchdog은 곧바로 빠른 cadence로 돌아온다. idle beat와 `active_window`는 닫힌 값이라 설정이 없다. 아무것도 나르지 않는 등록은 잃을 것이 적고 radio를 깨우지 않아야 하므로 이 느린 감지를 받아들이고, 45초 idle timeout이 그 위의 상한이다.
+   - 고정하는 테스트는 `reverse::target::tests::a_registration_carrying_only_tunnel_traffic_is_ruled_dead_within_the_active_budget`(두 끝의 감지 시간을 실제 소켓과 실제 splice로 잰다), `tunnel::stall::tests`의 `a_traffic_hook_*`·`a_traffic_guard_*`·`tunnel_bytes_hold_a_path_watch_on_the_fast_cadence`다.
+
 이 ADR은 이슈 #11의 나머지 요청을 결정하지 않는다. 자기 프로세스의 tick 간격이 벌어졌는지 보고 침묵 계산을 다시 시작하는 안(요청 2), `cause=local`의 문서화(요청 3), 빠른 `path_dead`가 반복될 때 재등록 사이의 backoff(요청 4)는 따로 다룬다.
 
 ## 근거
@@ -80,7 +85,7 @@ GitHub 이슈 #10은 0.4.0을 양 끝에 올린 현장에서 역방향 등록이
 - 구현은 `PathWatchConfig::reverse_default()`, `RecoverySection::reverse_path_watch()`, `Liveness::reverse_watch`, `REVERSE_DETECTION_CEILING_MS`다. 두 reverse watch(`reverse::target::run_reverse_unix`, `reverse::listen::Listen`)가 그 값을 읽고, 값을 주지 않은 `Listen`(테스트, 임베딩)의 기본도 같은 `reverse_default()`다.
 - 새 기본은 양 끝에 같은 빌드가 들어가야 효과가 있다. 상대가 이전 빌드면 상대의 1초 watch가 먼저 연결을 끊는다. 한쪽만 키로 느슨하게 한 배포도 같다. `docs/CLI.md` §6.12·§6.13에 이 문장을 적는다.
 - ADR-0021 결과 절의 상한 문장이 "연결 종류별 상한"으로 바뀐다. `crates/qsh-cli/tests/reverse_blackout.rs`와 `crates/qsh-testkit/tests/reverse_resume_chaos.rs`는 역방향 등록의 상한을 5000ms로 보고 실제 역방향 watch 설정에서 감지 예산을 계산한다. `crates/qsh-cli/tests/attach_recovery.rs`는 2000ms로 남는다.
-- 진짜로 죽은 등록이 `stale`로 표시되고 target이 재dial하기까지가 약 3.25초 늦어진다(1초에서 4.25초). 역방향 route 위의 attach가 재등록을 기다리기 시작하는 시점도 그만큼 늦다. 재등록 시점부터 resume 완료까지 2초라는 약속은 그대로다.
+- 진짜로 죽은 등록이 `stale`로 표시되고 target이 재dial하기까지가 약 3.25초 늦어진다(1초에서 4.25초). 이 수치는 등록이 쓰이는 동안의 것이다(결정 8). 15초 넘게 아무것도 나르지 않은 등록은 20초 안팎이다. 역방향 route 위의 attach가 재등록을 기다리기 시작하는 시점도 그만큼 늦다. 재등록 시점부터 resume 완료까지 2초라는 약속은 그대로다.
 - 설정이 없을 때의 `PathWatchConfig` Debug 출력은 attach 쪽이 오늘과 같다. 이 불변을 구현 테스트가 byte 단위로 고정한다. 역방향 등록의 기본은 새 값이고 그 값도 테스트가 고정한다.
 - `docs/ROADMAP.md`와 `PLAN.md`의 배치는 메인 세션이 정한다.
 - 잔여 위험은 셋이다. 느슨한 감지는 진짜로 죽은 등록의 `stale` 표시를 늦춘다. 새 기본은 상한에 닿아 있어서 한 키만 올리면 `CONFIG_ERROR`가 난다. 그리고 호스트 자체가 5초 넘게 멈추는 경우(이슈 #11)는 이 기본으로 풀리지 않는다. 복호화 전에 세는 datagram 카운터가 가짜 datagram으로 감지를 지연시킬 수 있는 위험(`docs/design/threat-model.md` §4 G7)은 창이 길어져도 달라지지 않는다.

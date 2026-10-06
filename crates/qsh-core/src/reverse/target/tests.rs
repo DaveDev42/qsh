@@ -1185,6 +1185,188 @@ async fn serve_to_target_probes_and_redials_at_once_after_an_injected_wake() {
     rig.shutdown().await;
 }
 
+/// A watch config whose regimes are far apart: probes every 100 ms while the
+/// registration is in use (`P×S+D` = 900 ms) and every 3 s once it has been
+/// quiet for 600 ms (three idle probes plus the judging tick, about 12 s).
+#[cfg(unix)]
+fn two_regime_path_watch() -> crate::client::pathwatch::PathWatchConfig {
+    crate::client::pathwatch::PathWatchConfig {
+        probe_interval: Duration::from_millis(100),
+        idle_probe_interval: Duration::from_secs(3),
+        active_window: Duration::from_millis(600),
+        min_dead_after: Duration::from_millis(600),
+        rtt_multiple: 8,
+        strikes: 3,
+    }
+}
+
+/// ADR-0041 decision 8, over real sockets and both ends: a registration that
+/// carries nothing but tunnel traffic (no control message other than the
+/// watch's own `Ping`/`Pong`) is *in use*, so it keeps the fast probe cadence
+/// past `active_window` and a blackhole is ruled dead inside the active
+/// budget on both the controller and the target. Before the traffic hook the
+/// same registration fell to the idle beat (3 s here, 5 s in production) and
+/// took about 12 s (20 s in production) to be ruled.
+///
+/// The controller opens a real `TCP_CONNECT` stream on the registration and
+/// splices it to a local socket with the production splice. The target serves
+/// it with the production server path and dials a loopback destination. Both
+/// applications keep writing through the cut, as a busy tunnel does, so each
+/// end's own byte counters are what holds its watch on the fast cadence.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_registration_carrying_only_tunnel_traffic_is_ruled_dead_within_the_active_budget() {
+    use crate::reverse::test_harness as harness;
+    use qsh_proto::wire::{self, StreamKind};
+    use qsh_transport::FramedStream;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    // Keeps one cadence of each regime far from the other, so the bound
+    // below separates them with a wide margin.
+    let watch_cfg = two_regime_path_watch();
+    let active_budget = watch_cfg.probe_interval * watch_cfg.strikes + watch_cfg.min_dead_after;
+    let idle_floor = watch_cfg.idle_probe_interval * watch_cfg.strikes;
+    let slack = Duration::from_secs(3);
+    assert!(
+        active_budget + slack < idle_floor,
+        "the regimes must be told apart"
+    );
+
+    let alias = "controller-tunnel-traffic-target";
+    let name = "widget-tunnel-traffic-target";
+    let rig = harness::Rig::start_with(
+        alias,
+        name,
+        harness::TargetOptions {
+            path_watch: watch_cfg,
+            controller_path_watch: watch_cfg,
+            ..harness::TargetOptions::default()
+        },
+    )
+    .await;
+    harness::wait_for_line(alias, "registered").await;
+    let conn = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(conn) = rig.controller_connection(name) {
+                return conn;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the controller holds the registration's connection");
+
+    // The destination the target dials: it talks on its own, every 50 ms,
+    // and discards whatever it is sent.
+    let destination = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let destination_port = destination.local_addr().unwrap().port();
+    let destination_task = tokio::spawn(async move {
+        let (sock, _) = destination.accept().await.unwrap();
+        let (mut rd, mut wr) = sock.into_split();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 1024];
+            while matches!(rd.read(&mut buf).await, Ok(n) if n > 0) {}
+        });
+        loop {
+            if wr.write_all(&[7u8; 512]).await.is_err() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    });
+
+    // Controller side of the tunnel: a real TCP_CONNECT stream, spliced to a
+    // local socket by the production splice.
+    let header = wire::StreamHeader {
+        kind: StreamKind::TcpConnect as i32,
+        ticket: Vec::new(),
+        host: "127.0.0.1".to_string(),
+        port: u32::from(destination_port),
+        deny_host_local: false,
+    };
+    let (send, recv) = conn.open_bi().await.unwrap();
+    let mut framed = FramedStream::data(send, recv);
+    framed.send.send(&header).await.unwrap();
+    let (send, mut recv) = framed.split();
+    let result: wire::ConnectResult = recv.recv().await.unwrap().expect("ConnectResult");
+    assert!(
+        result.ok,
+        "the target must allow and dial the tunnel: {result:?}"
+    );
+    let raw_send = send.into_raw();
+    let (raw_recv, residue) = recv.into_raw();
+    let app_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let app_addr = app_listener.local_addr().unwrap();
+    let (app, local) = tokio::join!(
+        async { tokio::net::TcpStream::connect(app_addr).await.unwrap() },
+        async { app_listener.accept().await.unwrap().0 },
+    );
+    let splice = tokio::spawn(crate::tunnel::splice::splice_tcp_quic(
+        local,
+        raw_send,
+        raw_recv,
+        residue,
+        crate::tunnel::stall::StallWatch::on(conn.quinn(), "tunnel-traffic-test"),
+    ));
+    // The controller's application: also talks on its own every 50 ms.
+    let (mut app_rd, mut app_wr) = app.into_split();
+    let app_task = tokio::spawn(async move {
+        tokio::spawn(async move {
+            let mut buf = [0u8; 1024];
+            while matches!(app_rd.read(&mut buf).await, Ok(n) if n > 0) {}
+        });
+        loop {
+            if app_wr.write_all(&[9u8; 512]).await.is_err() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    });
+
+    // Several active windows of tunnel-only traffic: the watch would have
+    // fallen to the idle beat by now if nothing counted the tunnel as use.
+    tokio::time::sleep(watch_cfg.active_window * 4).await;
+    assert!(
+        harness::lines(alias, "lost").is_empty() && harness::lines(name, "lost").is_empty(),
+        "a healthy registration carrying a tunnel must not be lost"
+    );
+
+    let cut_at = std::time::Instant::now();
+    rig.cut();
+    let ruled = |host: &'static str| async move {
+        let line = harness::wait_for_line(host, "lost").await;
+        (line, cut_at.elapsed())
+    };
+    let ((target_lost, target_after), (controller_lost, controller_after)) =
+        tokio::join!(ruled(alias), ruled(name));
+
+    for (side, line, after) in [
+        ("target", &target_lost, target_after),
+        ("controller", &controller_lost, controller_after),
+    ] {
+        assert_eq!(line["cause"], "path_dead", "{side}: {line}");
+        assert!(
+            after <= active_budget + slack,
+            "the {side} took {after:?} to rule a busy registration dead; the active budget \
+             is {active_budget:?}, the idle regime would take over {idle_floor:?}: {line}"
+        );
+        // Each side's own watch ruled (the cut keeps the other side's close
+        // from arriving), so the measurements ride on both lines.
+        let silence = line["silence_ms"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("{side} must carry its own measurement: {line}"));
+        assert!(
+            silence >= watch_cfg.min_dead_after.as_millis() as u64,
+            "{side}: {line}"
+        );
+    }
+
+    app_task.abort();
+    destination_task.abort();
+    splice.abort();
+    rig.shutdown().await;
+}
+
 /// Issue #10 request 3 and issue #11 request 2: `srtt_ms`/`silence_ms`/
 /// `tick_gap_ms` are open-vocabulary fields that ride only on a `lost` this process's own watch ruled. Absent, never
 /// null, otherwise.
