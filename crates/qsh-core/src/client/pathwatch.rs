@@ -161,10 +161,13 @@ pub struct DeadVerdict {
     /// Time since the watchdog last saw the path carry anything, less any
     /// time it was itself too late to see.
     pub silence: Duration,
-    /// The longest gap between two consecutive ticks of the watchdog since
-    /// it last saw the path carry anything. A healthy process reads about
-    /// one beat (250 ms by default); a figure of seconds says this process
-    /// was starved while the verdict's silence built up.
+    /// How late the watchdog's latest-running tick was, at its worst, since
+    /// it last saw the path carry anything: the gap between two consecutive
+    /// ticks less the beat the watchdog slept (`gap - expected`), so the
+    /// cadence itself (250 ms active, 5 s idle) never shows. A healthy
+    /// process reads a few milliseconds or zero, on either cadence; a figure
+    /// of seconds says this process was starved while the verdict's silence
+    /// built up. Surfaces as `tick_gap_ms` on the diagnostic line.
     pub tick_gap: Duration,
 }
 
@@ -193,7 +196,8 @@ pub struct PathState {
     /// Set by a wake: the next verdict probes at once, whatever the silence
     /// so far, instead of waiting out a cadence beat.
     probe_now: bool,
-    /// Longest tick gap seen since the last liveness evidence.
+    /// Greatest tick lateness (gap less the beat slept) seen since the last
+    /// liveness evidence.
     max_tick_gap: Duration,
     /// How late the tick about to be judged fired, when it fired a whole
     /// [`PathWatchConfig::probe_interval`] or more late. The verdict takes
@@ -229,8 +233,8 @@ impl PathState {
     pub fn observe_inbound(&mut self, now: Instant) {
         self.last_inbound = now;
         self.unanswered = 0;
-        // The tick gap in a verdict describes the silence it ruled on, so it
-        // starts over with every piece of evidence.
+        // The tick lateness in a verdict describes the silence it ruled on,
+        // so it starts over with every piece of evidence.
         self.max_tick_gap = Duration::ZERO;
     }
 
@@ -275,7 +279,9 @@ impl PathState {
     /// the silence clears `dead_after` by that lateness as well
     /// ([`Self::verdict`]); the next on-time tick judges as usual, by which
     /// time the datagrams that queued up while this process was away have
-    /// been read. The sample also feeds [`DeadVerdict::tick_gap`].
+    /// been read. The lateness of every tick, whether or not it clears the
+    /// threshold, feeds [`DeadVerdict::tick_gap`]; the raw gap does not,
+    /// because on the idle cadence a healthy gap is the 5 s beat itself.
     ///
     /// `probe_interval` is the threshold because it is the unit of a strike:
     /// a tick that late has lost a whole probe slot, so the strike count is
@@ -295,8 +301,8 @@ impl PathState {
         expected: Duration,
         cfg: &PathWatchConfig,
     ) -> Option<Duration> {
-        self.max_tick_gap = self.max_tick_gap.max(gap);
         let late = gap.saturating_sub(expected);
+        self.max_tick_gap = self.max_tick_gap.max(late);
         if late < cfg.self_delay_threshold() {
             return None;
         }
@@ -308,7 +314,7 @@ impl PathState {
         Some(late)
     }
 
-    /// The longest tick gap since the last liveness evidence.
+    /// The greatest tick lateness since the last liveness evidence.
     pub fn max_tick_gap(&self) -> Duration {
         self.max_tick_gap
     }
@@ -318,6 +324,12 @@ impl PathState {
     /// UDP receive counter move.
     pub fn silence(&self, now: Instant) -> Duration {
         now.saturating_duration_since(self.last_inbound)
+    }
+
+    /// Forget the margin a late tick banked for its own verdict
+    /// ([`Self::observe_tick`]).
+    fn discard_pending_margin(&mut self) {
+        self.pending_margin = Duration::ZERO;
     }
 
     /// Probes sent since the last inbound byte.
@@ -468,7 +480,13 @@ impl PathWatch {
     /// waiting for an answer must not read the watchdog's own unblocking
     /// as one.
     fn restart_silence_clock(&self) {
-        self.state().observe_inbound(Instant::now());
+        let mut state = self.state();
+        state.observe_inbound(Instant::now());
+        // A margin banked by a late tick belongs to the verdict that tick
+        // was about to give. Whoever restarts the clock has just made that
+        // verdict moot, and a stale margin would defer a later real death
+        // by one tick.
+        state.discard_pending_margin();
     }
 
     /// The connection's UDP receive counter advanced. Liveness only: not

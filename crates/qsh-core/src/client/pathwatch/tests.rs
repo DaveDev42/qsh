@@ -713,17 +713,19 @@ fn the_discounted_silence_never_runs_ahead_of_now() {
 }
 
 #[test]
-fn the_tick_gap_is_the_longest_since_the_last_evidence() {
+fn the_tick_gap_is_the_greatest_lateness_since_the_last_evidence() {
     let cfg = cfg();
     let t0 = Instant::now();
     let mut state = PathState::new(t0);
     let beat = cfg.probe_interval;
     let mut now = t0;
+    // On time, three beats' worth of gap for one beat slept, and a few
+    // milliseconds of noise: the figure is the worst lateness, not the gap.
     for gap in [beat, beat * 3, beat + Duration::from_millis(7)] {
         now += gap;
         state.observe_tick(now, gap, beat, &cfg);
     }
-    assert_eq!(state.max_tick_gap(), beat * 3);
+    assert_eq!(state.max_tick_gap(), beat * 2);
     // Evidence ends the window the figure describes.
     state.observe_inbound(now);
     assert_eq!(state.max_tick_gap(), Duration::ZERO);
@@ -795,8 +797,8 @@ async fn a_path_that_stays_silent_after_a_stall_is_still_declared_dead() {
     let verdict = watch.dead_verdict().expect("the watchdog ruled");
     assert_eq!(
         verdict.tick_gap,
-        Duration::from_secs(10),
-        "the diagnostic names the stall"
+        Duration::from_millis(9_750),
+        "the diagnostic names the stall (ten seconds for a 250 ms beat)"
     );
     assert!(
         verdict.silence < Duration::from_secs(2),
@@ -843,7 +845,7 @@ async fn a_watchdog_that_is_late_on_every_tick_still_reaches_a_verdict() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn an_on_time_watchdog_records_one_beat_as_its_tick_gap() {
+async fn an_on_time_watchdog_records_no_lateness_as_its_tick_gap() {
     let watch = PathWatch::new(cfg());
     let (_tx, rx) = tokio::sync::watch::channel(WakeEvent::default());
     let task = tokio::spawn(watch_path_with_wake(
@@ -856,5 +858,69 @@ async fn an_on_time_watchdog_records_one_beat_as_its_tick_gap() {
         .await
         .expect("a silent path must be declared dead");
     task.await.expect("the watchdog returns once it declares");
-    assert_eq!(watch.dead_verdict().unwrap().tick_gap, cfg().probe_interval);
+    assert_eq!(watch.dead_verdict().unwrap().tick_gap, Duration::ZERO);
+}
+
+/// On the idle cadence a healthy gap is the 5 s beat itself. The diagnostic
+/// must not read that as starvation: it reports lateness, and an on-time
+/// idle tick has none.
+#[tokio::test(start_paused = true)]
+async fn an_idle_watch_on_time_records_no_lateness_though_its_gaps_are_five_seconds() {
+    let cfg = PathWatchConfig {
+        // Nothing the idle probes can answer, so the path dies on schedule.
+        min_dead_after: Duration::from_secs(1),
+        active_window: Duration::ZERO,
+        ..cfg()
+    };
+    let watch = PathWatch::new(cfg);
+    let (_tx, rx) = tokio::sync::watch::channel(WakeEvent::default());
+    let task = tokio::spawn(watch_path_with_wake(
+        NeverCloses,
+        watch.clone(),
+        Arc::new(tokio::sync::Notify::new()),
+        rx,
+    ));
+    tokio::time::timeout(Duration::from_secs(60), watch.dead())
+        .await
+        .expect("a silent idle path must be declared dead");
+    task.await.expect("the watchdog returns once it declares");
+    let verdict = watch.dead_verdict().expect("the watchdog ruled");
+    assert!(
+        verdict.silence >= cfg.idle_probe_interval,
+        "the test ran on the idle beat: {:?}",
+        verdict.silence
+    );
+    assert_eq!(verdict.tick_gap, Duration::ZERO, "{verdict:?}");
+}
+
+/// A pump parked on a full queue makes the verdict Healthy without judging.
+/// The margin a late tick banked for that verdict goes with it: left behind
+/// it would be charged to the next verdict that can rule, deferring a real
+/// death by a tick.
+///
+/// With the shipped strike counts (`S >= 2`) the next verdict after a stall
+/// is always a probe, which spends the stale margin harmlessly; `strikes: 0`
+/// makes the very next verdict death-eligible so the leftover is observable.
+#[tokio::test(start_paused = true)]
+async fn a_stalled_verdict_does_not_leave_a_stale_margin_behind() {
+    let cfg = PathWatchConfig {
+        strikes: 0,
+        ..cfg()
+    };
+    let watch = PathWatch::new(cfg);
+    let guard = watch.stalled();
+    assert_eq!(
+        watch.ticked(Duration::from_secs(10), cfg.probe_interval),
+        Some(Duration::from_millis(9_750))
+    );
+    assert_eq!(watch.verdict(LAN), Verdict::Healthy, "stalled: no judgment");
+    drop(guard);
+    // The stall is over and the path is silent from here. A 9.75 s leftover
+    // margin would put this verdict out of reach.
+    tokio::time::advance(cfg.min_dead_after).await;
+    assert_eq!(
+        watch.verdict(LAN),
+        Verdict::Dead,
+        "a real death is not deferred by a margin nobody used"
+    );
 }
