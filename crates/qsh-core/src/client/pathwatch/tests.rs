@@ -267,10 +267,26 @@ impl ProbeSource for NeverCloses {
     }
 }
 
-/// A stub whose receive counter is driven by the test, to model datagrams
-/// arriving while no control-stream reply does.
+/// A stub whose receive counters are driven by the test. `frames` models
+/// authenticated QUIC frames (what a live peer produces), `datagrams` raw
+/// UDP datagrams (what a forger can produce too).
 #[derive(Clone, Default)]
-struct CountingSource(Arc<std::sync::atomic::AtomicU64>);
+struct CountingSource {
+    frames: Arc<std::sync::atomic::AtomicU64>,
+    datagrams: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl CountingSource {
+    fn frame(&self) {
+        self.frames.fetch_add(1, Ordering::Relaxed);
+        // A real frame arrives inside a datagram.
+        self.datagrams.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn forged_datagram(&self) {
+        self.datagrams.fetch_add(1, Ordering::Relaxed);
+    }
+}
 
 impl ProbeSource for CountingSource {
     async fn closed(&self) {
@@ -281,30 +297,39 @@ impl ProbeSource for CountingSource {
         LAN
     }
 
+    fn rx_frames(&self) -> u64 {
+        self.frames.load(Ordering::Relaxed)
+    }
+
     fn rx_datagrams(&self) -> u64 {
-        self.0.load(Ordering::Relaxed)
+        self.datagrams.load(Ordering::Relaxed)
     }
 }
 
+// Liveness is an authenticated frame; a raw datagram is only a hint that
+// buys one bounded grace (`docs/design/protocol.md` §10, threat-model G7).
+// The timing-sensitive tests share the `datagram_liveness_` prefix so one
+// filterset selects them for the load repeat in `scripts/stress/run.sh`.
+
 #[tokio::test(start_paused = true)]
-async fn a_moving_datagram_counter_keeps_the_path_alive_without_control_replies() {
+async fn datagram_liveness_moving_frames_keep_the_path_alive_without_control_replies() {
     let watch = PathWatch::new(cfg());
     let source = CountingSource::default();
     let probes = Arc::new(tokio::sync::Notify::new());
     let watchdog = tokio::spawn(watch_path(source.clone(), watch.clone(), probes));
-    // Ten times the death budget, with a datagram every 100 ms and no
-    // control reply at all.
+    // Ten times the death budget, with an authenticated frame every 100 ms
+    // and no control reply at all.
     for _ in 0..100 {
-        source.0.fetch_add(1, Ordering::Relaxed);
+        source.frame();
         tokio::time::sleep(Duration::from_millis(100)).await;
-        assert!(!watch.is_dead(), "datagrams are arriving; path is alive");
+        assert!(!watch.is_dead(), "frames are arriving; path is alive");
     }
-    // Real death detection is unchanged: the counter stops, the verdict
+    // Real death detection is unchanged: the frames stop, the verdict
     // follows on the usual schedule (`dead_after` plus a probe beat).
     let stopped = Instant::now();
     tokio::time::timeout(Duration::from_secs(5), watch.dead())
         .await
-        .expect("a frozen counter must still end in a verdict");
+        .expect("frozen counters must still end in a verdict");
     let took = stopped.elapsed();
     assert!(
         took <= watch.config().dead_after(LAN) + watch.config().probe_interval * 2,
@@ -314,37 +339,39 @@ async fn a_moving_datagram_counter_keeps_the_path_alive_without_control_replies(
 }
 
 #[tokio::test(start_paused = true)]
-async fn datagram_liveness_is_not_activity_so_the_idle_cadence_is_still_reached() {
+async fn datagram_liveness_frames_are_not_activity_so_the_idle_cadence_is_still_reached() {
     let cfg = cfg();
     let watch = PathWatch::new(cfg);
     let source = CountingSource::default();
     let probes = Arc::new(tokio::sync::Notify::new());
     let watchdog = tokio::spawn(watch_path(source.clone(), watch.clone(), probes));
-    // Datagrams keep arriving (the transport's own ACKs, say) for well past
-    // the active window, and nobody types or prints anything.
+    // Frames keep arriving (the transport's own ACKs, say) for well past the
+    // active window, and nobody types or prints anything.
     for _ in 0..400 {
-        source.0.fetch_add(1, Ordering::Relaxed);
+        source.frame();
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     assert!(!watch.is_dead());
     assert!(
         watch.state().is_idle(Instant::now(), &cfg),
-        "a moving datagram counter must not pin the fast cadence"
+        "a moving frame counter must not pin the fast cadence"
     );
     watchdog.abort();
 }
 
+/// (iii) No traffic at all: dead at the normal timeout, no grace.
 #[tokio::test(start_paused = true)]
-async fn a_frozen_datagram_counter_without_replies_is_dead_on_the_existing_schedule() {
+async fn datagram_liveness_no_traffic_is_dead_on_the_existing_schedule() {
     let watch = PathWatch::new(cfg());
     let source = CountingSource::default();
-    source.0.store(42, Ordering::Relaxed);
+    source.frames.store(7, Ordering::Relaxed);
+    source.datagrams.store(42, Ordering::Relaxed);
     let probes = Arc::new(tokio::sync::Notify::new());
     let watchdog = tokio::spawn(watch_path(source, watch.clone(), probes));
     let start = Instant::now();
     tokio::time::timeout(Duration::from_secs(5), watch.dead())
         .await
-        .expect("a frozen counter with no replies must be declared dead");
+        .expect("frozen counters with no replies must be declared dead");
     let took = start.elapsed();
     // Same bound `silence_earns_probes_and_then_a_verdict` pins for
     // `PathState`: three strikes at the fast cadence, 1 s floor.
@@ -354,6 +381,126 @@ async fn a_frozen_datagram_counter_without_replies_is_dead_on_the_existing_sched
         "{took:?}"
     );
     watchdog.await.expect("watchdog returns once it declares");
+}
+
+/// (ii) Datagrams with no authenticated frame never keep a path alive: the
+/// verdict is held back by the grace and then stands, however many
+/// datagrams keep coming.
+#[tokio::test(start_paused = true)]
+async fn datagram_liveness_datagrams_alone_earn_one_bounded_grace_then_the_path_is_dead() {
+    let cfg = cfg();
+    let watch = PathWatch::new(cfg);
+    let source = CountingSource::default();
+    let probes = Arc::new(tokio::sync::Notify::new());
+    let watchdog = tokio::spawn(watch_path(source.clone(), watch.clone(), probes));
+    let start = Instant::now();
+    let mut dead_at = None;
+    // A forged datagram every 50 ms, far past any bound.
+    for _ in 0..200 {
+        source.forged_datagram();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        if dead_at.is_none() && watch.is_dead() {
+            dead_at = Some(start.elapsed());
+        }
+    }
+    let dead_at = dead_at.expect("datagrams alone must not keep the path alive indefinitely");
+    // Held past the normal timeout (the grace was granted) ...
+    assert!(
+        dead_at > cfg.dead_after(LAN) + cfg.probe_interval,
+        "dead after {dead_at:?}: no grace was granted"
+    );
+    // ... but by no more than the bounded grace plus a tick of slack.
+    assert!(
+        dead_at <= cfg.dead_after(LAN) + cfg.datagram_grace() + cfg.probe_interval * 2,
+        "dead after {dead_at:?}: the grace was not bounded"
+    );
+    watchdog.await.expect("watchdog returns once it declares");
+}
+
+/// An authenticated frame inside the grace is liveness: the path lives and
+/// a later outage gets a fresh cycle.
+#[tokio::test(start_paused = true)]
+async fn datagram_liveness_a_frame_inside_the_grace_revives_the_path() {
+    let cfg = cfg();
+    let watch = PathWatch::new(cfg);
+    let source = CountingSource::default();
+    let probes = Arc::new(tokio::sync::Notify::new());
+    let watchdog = tokio::spawn(watch_path(source.clone(), watch.clone(), probes));
+    // Datagrams only, through the normal timeout and into the grace.
+    let until = cfg.dead_after(LAN) + cfg.probe_interval * 2;
+    let mut waited = Duration::ZERO;
+    while waited < until {
+        source.forged_datagram();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        waited += Duration::from_millis(50);
+    }
+    assert!(!watch.is_dead(), "still inside the grace");
+    // The peer proves itself.
+    source.frame();
+    // Less than the new cycle's own dead_after: the frame bought a fresh
+    // cycle, not immunity.
+    for _ in 0..16 {
+        source.forged_datagram();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!watch.is_dead(), "a frame arrived inside the grace");
+    }
+    watchdog.abort();
+}
+
+#[test]
+fn a_datagram_hint_grants_exactly_one_grace_per_cycle() {
+    let cfg = cfg();
+    let t0 = Instant::now();
+    let mut state = state_one_tick_from_death(t0);
+    let at = |ms: u64| t0 + Duration::from_millis(ms);
+    let grace = cfg.datagram_grace();
+    assert_eq!(grace, Duration::from_millis(750));
+
+    // The verdict is due at 1 s with a datagram seen just before: grace.
+    state.observe_datagram(at(990));
+    assert_ne!(state.verdict(at(1_000), LAN, &cfg), Verdict::Dead);
+    // Datagrams keep coming; the grace does not move.
+    state.observe_datagram(at(1_500));
+    assert_ne!(state.verdict(at(1_500), LAN, &cfg), Verdict::Dead);
+    assert_ne!(state.verdict(at(1_749), LAN, &cfg), Verdict::Dead);
+    state.observe_datagram(at(1_750));
+    assert_eq!(state.verdict(at(1_750), LAN, &cfg), Verdict::Dead);
+    // A datagram cannot touch silence or strikes.
+    assert!(state.unanswered() >= cfg.strikes);
+    assert!(state.silence(at(1_750)) >= Duration::from_millis(1_750));
+
+    // An authenticated frame starts a new cycle with a new grace.
+    state.observe_inbound_since(at(1_800));
+    assert_eq!(state.unanswered(), 0);
+    let mut dead = None;
+    for ms in (1_800..8_000).step_by(50) {
+        state.observe_datagram(at(ms));
+        if state.verdict(at(ms), LAN, &cfg) == Verdict::Dead {
+            dead = Some(ms - 1_800);
+            break;
+        }
+    }
+    let took = Duration::from_millis(dead.expect("the second cycle also ends dead"));
+    assert!(
+        took >= cfg.dead_after(LAN) + grace - cfg.probe_interval,
+        "{took:?}"
+    );
+    assert!(
+        took <= cfg.dead_after(LAN) + grace + cfg.probe_interval * 2,
+        "{took:?}"
+    );
+}
+
+#[test]
+fn a_stale_datagram_hint_grants_no_grace() {
+    let cfg = cfg();
+    let t0 = Instant::now();
+    let mut state = state_one_tick_from_death(t0);
+    // The only datagram came at t0; by the 1 s verdict it is older than the
+    // 750 ms grace window, so it is not evidence of anything current.
+    state.observe_datagram(t0);
+    let now = t0 + Duration::from_millis(1_000);
+    assert_eq!(state.verdict(now, LAN, &cfg), Verdict::Dead);
 }
 
 #[tokio::test(start_paused = true)]
