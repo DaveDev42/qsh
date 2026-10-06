@@ -193,3 +193,108 @@ async fn ledgers_are_shared_within_a_connection_and_separate_across_connections(
     assert!(Arc::ptr_eq(&l1, &l1_again));
     assert!(!Arc::ptr_eq(&l1, &l2));
 }
+
+/// A counter hook, and the streams of a ledger started for the test.
+fn counting_hook() -> (TrafficHook, Arc<std::sync::atomic::AtomicUsize>) {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = Arc::clone(&calls);
+    (
+        Arc::new(move || {
+            seen.fetch_add(1, Ordering::Relaxed);
+        }),
+        calls,
+    )
+}
+
+/// A connection's traffic hook hears both directions of every stream that
+/// starts after it is registered, a zero-byte report is not traffic, and a
+/// stream on another connection is not heard at all.
+#[tokio::test]
+async fn a_traffic_hook_hears_bytes_moving_in_either_direction_on_its_connection_only() {
+    let (hooked, _hooked_peer) = crate::tunnel::testutil::loopback_pair().await;
+    let (other, _other_peer) = crate::tunnel::testutil::loopback_pair().await;
+    let (hook, calls) = counting_hook();
+    let _guard = report_traffic(hooked.quinn(), hook);
+
+    let on_hooked = StallWatch::on(hooked.quinn(), "hooked");
+    let on_other = StallWatch::on(other.quinn(), "other");
+
+    on_hooked.track().count_sent(0);
+    on_hooked.track().leave_write(0);
+    assert_eq!(calls.load(Ordering::Relaxed), 0, "no bytes, no traffic");
+
+    on_hooked.track().count_sent(10);
+    assert_eq!(calls.load(Ordering::Relaxed), 1, "send direction");
+    on_hooked.track().enter_write();
+    on_hooked.track().leave_write(10);
+    assert_eq!(calls.load(Ordering::Relaxed), 2, "receive direction");
+
+    on_other.track().count_sent(10);
+    assert_eq!(calls.load(Ordering::Relaxed), 2, "another connection");
+}
+
+/// Dropping the guard stops the reporting for streams that start later. A
+/// second registration on the same connection replaces the first, and the
+/// first guard's drop leaves the replacement alone.
+#[tokio::test]
+async fn a_traffic_guard_removes_only_its_own_hook() {
+    let (conn, _peer) = crate::tunnel::testutil::loopback_pair().await;
+
+    let (first, first_calls) = counting_hook();
+    let first_guard = report_traffic(conn.quinn(), first);
+    let (second, second_calls) = counting_hook();
+    let second_guard = report_traffic(conn.quinn(), second);
+
+    drop(first_guard);
+    StallWatch::on(conn.quinn(), "after the first guard")
+        .track()
+        .count_sent(1);
+    assert_eq!(first_calls.load(Ordering::Relaxed), 0, "replaced");
+    assert_eq!(second_calls.load(Ordering::Relaxed), 1, "still installed");
+
+    drop(second_guard);
+    StallWatch::on(conn.quinn(), "after the second guard")
+        .track()
+        .count_sent(1);
+    assert_eq!(second_calls.load(Ordering::Relaxed), 1, "removed");
+    assert!(
+        lock(traffic_hooks())
+            .get(&conn.quinn().stable_id())
+            .is_none(),
+        "no entry is left behind for a connection id"
+    );
+}
+
+/// The reverse registration's wiring: tunnel bytes on the registration's
+/// connection count as activity for its path watch, and nothing else does.
+#[tokio::test(start_paused = true)]
+async fn tunnel_bytes_hold_a_path_watch_on_the_fast_cadence() {
+    use crate::client::pathwatch::{PathWatch, PathWatchConfig};
+
+    let (conn, _peer) = crate::tunnel::testutil::loopback_pair().await;
+    let cfg = PathWatchConfig::default();
+    let watch = PathWatch::new(cfg);
+    let _guard = crate::reverse::report_tunnel_traffic(&watch, &conn);
+    let tunnel = StallWatch::on(conn.quinn(), "tunnel");
+
+    // Well past the active window with nothing counted: idle.
+    tokio::time::advance(cfg.active_window + SECOND).await;
+    assert_eq!(watch.cadence(), cfg.idle_probe_interval);
+
+    // A chunk of tunnel bytes: in use again, at once.
+    tunnel.track().count_sent(512);
+    assert_eq!(watch.cadence(), cfg.probe_interval);
+    tokio::time::advance(cfg.active_window - SECOND).await;
+    tunnel.track().enter_write();
+    tunnel.track().leave_write(512);
+    tokio::time::advance(SECOND * 2).await;
+    assert_eq!(
+        watch.cadence(),
+        cfg.probe_interval,
+        "the receive direction renewed the window"
+    );
+
+    // And back to idle once the bytes stop.
+    tokio::time::advance(cfg.active_window).await;
+    assert_eq!(watch.cadence(), cfg.idle_probe_interval);
+}

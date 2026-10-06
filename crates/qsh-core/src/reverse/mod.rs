@@ -80,6 +80,37 @@ tokio::task_local! {
     pub(crate) static TEST_PATH_WATCH_CONFIG: crate::client::pathwatch::PathWatchConfig;
 }
 
+/// Count the tunnel traffic on a registration `conn` as use of the
+/// registration, for `watch`. Called by both ends right after they build the
+/// registration's [`crate::client::pathwatch::PathWatch`]; the returned guard
+/// stops the reporting when it drops, so hold it as long as the watch runs.
+///
+/// Without this the watch could not tell a registration that carries
+/// tunnels from one that carries nothing. Its fast cadence (250 ms probes,
+/// the `P×S+D` budget of ADR-0041) runs only while the registration is in
+/// use, and only control messages other than `Ping`/`Pong` said so
+/// (`server::ControlPinger::record`). Tunnel bytes ride their own QUIC
+/// streams and never touch the control stream, so a registration busy with
+/// nothing but tunnels, the topology of issue #10, fell to the idle beat
+/// (`PathWatchConfig::idle_probe_interval`, 5 s) after `active_window`
+/// (15 s) and took about 20 s to be ruled dead. Every tunnel splice on
+/// either end reports its byte counts to a `tunnel::stall::StreamTrack`
+/// (the localctl relay legs included), which is where the hook fires.
+///
+/// Only [`PathWatch::activity`](crate::client::pathwatch::PathWatch::activity):
+/// the cadence moves, liveness does not. Bytes written locally prove nothing
+/// about the path, and the datagram counter already counts what arrives.
+pub(crate) fn report_tunnel_traffic(
+    watch: &crate::client::pathwatch::PathWatch,
+    conn: &qsh_transport::Connection,
+) -> crate::tunnel::stall::TrafficGuard {
+    let watch = watch.clone();
+    crate::tunnel::stall::report_traffic(
+        conn.quinn(),
+        std::sync::Arc::new(move || watch.activity()),
+    )
+}
+
 /// A duration as whole milliseconds for a diagnostic line, saturating
 /// rather than wrapping.
 pub(crate) fn millis(d: std::time::Duration) -> u64 {

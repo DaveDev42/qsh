@@ -414,6 +414,10 @@ impl Listen {
             watch.clone(),
             probes.clone(),
         ));
+        // Tunnel traffic keeps the fast cadence
+        // (`crate::reverse::report_tunnel_traffic`); dropped with this
+        // registration's loop, like the watchdog.
+        let _tunnel_traffic = crate::reverse::report_tunnel_traffic(&watch, session.connection());
         // `PLAN.md` M4 Step 5 (a): the only kind of peer-initiated bidi
         // stream this connection legitimately carries is a `TCP_ACCEPTED`
         // the target opens for a `-R` this hub's own conduits registered

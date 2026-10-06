@@ -459,6 +459,8 @@ async fn run_reverse_unix(
             probes.clone(),
             path_wake,
         ));
+        // Tunnel traffic keeps the fast cadence (`report_tunnel_traffic`).
+        let _tunnel_traffic = super::report_tunnel_traffic(&watch, &conn);
 
         // `serve_control` is `tokio::spawn`ed rather than raced directly
         // against `shutdown`/`watch.dead()` below, on purpose: it is the

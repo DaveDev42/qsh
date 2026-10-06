@@ -493,6 +493,12 @@ impl Rig {
         self._listen.set_test_control_stall(stalled);
     }
 
+    /// The controller's live connection for the registration `name`, the
+    /// one a `LOCAL_STREAM` conduit would open tunnel streams on.
+    pub(super) fn controller_connection(&self, name: &str) -> Option<qsh_transport::Connection> {
+        self._listen.connection_for(name).map(|(conn, _hub)| conn)
+    }
+
     /// Cut the relay: from now on both ends see only silence.
     pub(super) fn cut(&self) {
         self.relay.cut();
