@@ -289,6 +289,7 @@ P1은 2026-09-26 사용자 결정으로 열었다. 같은 날 ADR-0021·0022·00
   - (k) 구현했다면 새 설정 값의 검증이 `ReverseConfig::backoff`와 같은 fail-closed `CONFIG_ERROR` 패턴이고, 설정이 없을 때 동작이 오늘과 같다(대화형 attach와 supervised 터널. 역방향 등록 연결의 기본은 ADR-0041이 4.25초로 바꿨다). ADR-0021 결정 6의 문서 자리(`docs/design/protocol.md` §1·§2·§11-4, `docs/design/architecture.md` §7, `docs/CLI.md`)가 같은 커밋에서 바뀐다. `[recovery]` 상한은 `crates/qsh-cli/tests/reverse_blackout.rs`·`crates/qsh-cli/tests/attach_recovery.rs`·`crates/qsh-testkit/tests/reverse_resume_chaos.rs`의 `detection_budget`에서 역산하고, 세 테스트와 `a_real_60_second_blackout_survives_and_resumes_the_same_session`이 고치지 않은 예산으로 초록이다.
   - 마일스톤 마감 공통 절차(§2) 1·2.
 - **크기:** 3.1~6.1ew. (a) 저장소 조사 0.2 + job과 임계 0.3~0.6 / (b) 0.5~2.0(하단은 하네스만, 상단은 splice 설계 변경과 ADR) / (c) 0.2~0.3(M10 결정 기록 Q3이 "값싸다"고 적은 복제와 새 캠페인 문서) / (d) ADR 0.1 + 0.25~0.45(22종 진단에 심각도 필터 하나와 exit 매핑) / (e) 0.25(`reexec-estimate.md` §3 표의 상한) / (f) 0.3~0.45(같은 표의 0.2~0.3에 키 파일 권한과 threat model) / (g) 0.1~0.2 / (h) 0.2~0.3 / (i) 0.1~0.2 / (j) 0.1~0.3 / (k) 0.35~0.5(ADR-0021 결과 절의 0.3~0.4에 문서 자리와 예산 테스트 대조) / 마감 0.1~0.2.
+- **마감 진행 (2026-10-06):** (b)~(k)와 마감 공통 절차 1·2, 부하 반복이 닫혔다. (c)의 근거는 `v0.4.2` release run 37402762387의 `aarch64-unknown-linux-musl` leg(strict 스모크 PASS)와 `SHA256SUMS`·provenance attestation이다. 부하 반복은 `scripts/stress/m13.filter` 69개가 부하 아래 50/50, 지연 단언 셋이 부하 없이 직렬로 50/50이다. 남은 것은 (a)의 인위적 지연 회차 하나다. `perf-data`의 주입 아닌 점이 7개 미만이면 판정기가 판정하지 않으므로(`docs/design/testing.md` CI 규율), 2026-10-06 현재 5점인 추세가 7점에 닿은 뒤(2026-10-08 예약 실행 이후) 유지보수자가 `perf.yml`을 `inject_delay_ms`와 함께 dispatch해야 job이 붉어질 수 있다. 그 run id가 기록되면 M13을 닫고 `PLAN.md`를 `docs/history/m13-plan.md`로 옮긴다.
 
 ### M14 — TCP/TLS fallback
 
@@ -458,7 +459,7 @@ P1은 2026-09-26 사용자 결정으로 열었다. 같은 날 ADR-0021·0022·00
 |---|---|---|---|
 | `qsh setup` 경로 SC1 스톱워치 3회 | `docs/campaigns/p1-setup-stopwatch.md`(사전 고정 `43da2fb`, 회차 미실행) | M12 (b) | 같은 날 같은 진행자의 m9 3회. M9 DoD 1 공식 회차가 그날 있으면 재사용(ADR-0024 결정 12) |
 | supervised tunnel 절전·망 전환 회차 넷 | `docs/campaigns/p1-supervise-wake.md`(사전 고정 `ab05a27`, 회차 미실행) | M12 (a) 첫 단위 | 첫 단위가 담긴 태그. 넷째 회차(`serve --to` 재등록과 hub의 supervised reverse route)는 둘째 단위가 담긴 태그(ADR-0023 결과 절) |
-| `cause` 분포 관측 기록 | 이슈 #4 코멘트 또는 캠페인 문서 | M11 (a) 빌드 | M13 (k)의 착수 조건 |
-| `aarch64-unknown-linux-musl` 구형 glibc 판정 | M13 (c)의 새 캠페인 문서 | M13 (c) | aarch64 musl 자산이 붙은 태그 |
+| `cause` 분포 관측 기록 | 이슈 #4 코멘트 또는 캠페인 문서. 실제 기록은 이슈 #10 본문과 2026-10-04T14:48Z 코멘트(기록됨, M13 (k) 착지) | M11 (a) 빌드 | M13 (k)의 착수 조건 |
+| `aarch64-unknown-linux-musl` 구형 glibc 판정 | `docs/campaigns/p1-aarch64-musl.md`(회차 미실행) | M13 (c) | aarch64 musl 자산이 붙은 태그. `v0.4.0`부터 붙어 충족됐다 |
 | 새 파서 fuzz 타깃의 누적 72시간 | `docs/campaigns/m8-fuzz.md` 형식 | M11 (c) SSH 키 파서, M14 mux codec, M15의 새 decode 타깃 | 공개 beta 전(`docs/design/protocol.md` §13) |
 | Windows 대화형 셸 확인 | M19의 캠페인 문서 | M19 | Windows 자산이 붙은 태그 |
