@@ -693,6 +693,61 @@ impl Connection {
         self.inner.close_reason()
     }
 
+    /// How many QUIC frames this connection has received **and
+    /// authenticated**, summed over every frame type quinn counts
+    /// (`quinn::FrameStats`, the `frame_rx` half of
+    /// `quinn::ConnectionStats`). Monotonic; the value means nothing on its
+    /// own, only its movement does.
+    ///
+    /// This is the path-liveness signal `qsh-core`'s watchdog reads
+    /// (`docs/design/protocol.md` §10): a counter that moved proves the
+    /// peer's packets are reaching us whether or not any application
+    /// message got through, which a `Pong` queued behind loss recovery on
+    /// the ordered control stream cannot.
+    ///
+    /// Deliberately **not** `udp_rx.datagrams`. quinn counts that before
+    /// decryption, so an on-path injector who knows the connection id could
+    /// keep a dead path looking alive until the idle timeout with junk
+    /// datagrams. `frame_rx` is recorded only after a packet has been
+    /// decrypted and authenticated (`docs/design/threat-model.md` §4).
+    ///
+    /// Every field is listed explicitly. `FrameStats` is
+    /// `#[non_exhaustive]`, so a frame type a future quinn adds is not
+    /// caught by the compiler: re-check this list on a quinn upgrade. The
+    /// loopback test `rx_frames_moves_on_authenticated_stream_frames` pins
+    /// that ordinary stream traffic moves the sum.
+    pub fn rx_frames(&self) -> u64 {
+        let f = self.inner.stats().frame_rx;
+        [
+            f.acks,
+            f.ack_frequency,
+            f.crypto,
+            f.connection_close,
+            f.data_blocked,
+            f.datagram,
+            u64::from(f.handshake_done),
+            f.immediate_ack,
+            f.max_data,
+            f.max_stream_data,
+            f.max_streams_bidi,
+            f.max_streams_uni,
+            f.new_connection_id,
+            f.new_token,
+            f.path_challenge,
+            f.path_response,
+            f.ping,
+            f.reset_stream,
+            f.retire_connection_id,
+            f.stream_data_blocked,
+            f.streams_blocked_bidi,
+            f.streams_blocked_uni,
+            f.stop_sending,
+            f.stream,
+        ]
+        .into_iter()
+        .fold(0u64, u64::saturating_add)
+    }
+
     /// The underlying quinn connection, for transport-level features not
     /// wrapped here (rebind, stats). Not for identity — use
     /// [`principal`](Self::principal).
