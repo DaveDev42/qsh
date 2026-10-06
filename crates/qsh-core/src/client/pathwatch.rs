@@ -155,7 +155,7 @@ impl PathWatchConfig {
     /// whole round of probes (750 ms by default, on the reverse default too).
     /// Once per dead-timer cycle, and only an authenticated frame starts a
     /// new cycle, so it is also the most a forger can delay a verdict.
-    /// Derived rather than a field, like [`Self::self_delay_threshold`], so
+    /// Derived rather than a field, like `self_delay_threshold`, so
     /// the `Debug` output the `[recovery]` knobs promise does not change.
     pub fn datagram_grace(&self) -> Duration {
         self.probe_interval.saturating_mul(self.strikes)
