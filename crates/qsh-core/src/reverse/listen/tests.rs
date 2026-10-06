@@ -2983,8 +2983,12 @@ fn listen_path_watch_takes_the_recovery_section_and_set_test_path_watch_still_wi
         PathWatchConfig::default()
     );
 
-    // `run_listen_unix` stores the validated reverse watch of `[recovery]`.
-    // The general `min_dead_after_ms`/`strikes` are not what it reads.
+    // The setter takes the validated reverse watch of `[recovery]` (the
+    // general `min_dead_after_ms`/`strikes` are not what `reverse_watch`
+    // carries). That `run_listen_unix` calls it with the configured value is
+    // covered end to end by `reverse::target::tests::
+    // configured_reverse_min_dead_after_ms_decides_when_each_end_rules_a_
+    // blackhole_dead`.
     let configured: crate::config::Config = toml::from_str(
         "[recovery]\nprobe_interval_ms = 100\nstrikes = 4\nmin_dead_after_ms = 900\n\
          reverse_strikes = 5\nreverse_min_dead_after_ms = 3000\n",

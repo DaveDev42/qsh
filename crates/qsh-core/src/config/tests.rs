@@ -802,11 +802,10 @@ fn recovery_section_reaches_attach_reverse_and_supervised_path_watch() {
         liveness.reverse_watch.min_dead_after,
         PathWatchConfig::reverse_default().min_dead_after
     );
-    #[cfg(unix)]
-    assert_eq!(
-        crate::reverse::path_watch_config(liveness.reverse_watch),
-        liveness.reverse_watch
-    );
+    // That `run_listen` and `run_reverse` hand this value to the watch they
+    // build is not assertable here; `reverse::target::tests::
+    // configured_reverse_min_dead_after_ms_decides_when_each_end_rules_a_
+    // blackhole_dead` drives both entry points from a `config.toml`.
 }
 
 #[test]
