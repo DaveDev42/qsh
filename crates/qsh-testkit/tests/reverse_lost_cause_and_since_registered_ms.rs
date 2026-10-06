@@ -544,13 +544,13 @@ async fn datagram_liveness_silent_path_lost_line_carries_srtt_ms_and_silence_ms_
                  got {silence} ms: {line}"
             );
             assert!(line["srtt_ms"].as_u64().is_some(), "{line}");
-            // Issue #11 request 2: the longest gap between this watch's
-            // ticks while the silence built up. A running process ticks
-            // every 250 ms; the figure can only be at least one beat.
-            let tick_gap = line["tick_gap_ms"]
-                .as_u64()
-                .unwrap_or_else(|| panic!("tick_gap_ms must be an integer: {line}"));
-            assert!(tick_gap >= 250, "tick_gap_ms below one beat: {line}");
+            // Issue #11 request 2: how late this watch's worst tick fired
+            // while the silence built up. Zero on a healthy process, so only
+            // the type is pinned; a bound would flake on a loaded runner.
+            assert!(
+                line["tick_gap_ms"].as_u64().is_some(),
+                "tick_gap_ms must be an integer: {line}"
+            );
         }
     }
     assert!(
