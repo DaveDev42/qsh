@@ -48,8 +48,8 @@ fn expect_hello_err(
 }
 
 /// Keep a raw, test-held `FramedStream` control connection answering the
-/// controller's own liveness `Ping`s (`PathWatchConfig::default()`'s
-/// `min_dead_after` is 1 s) so `Listen::drive_registered_session`'s
+/// controller's own liveness `Ping`s (`PathWatchConfig::reverse_default()`'s
+/// `min_dead_after` is 4.25 s) so `Listen::drive_registered_session`'s
 /// symmetric watchdog does not, correctly, judge an otherwise-silent test
 /// connection dead and tear it down out from under an assertion later in
 /// the same test (adversarial review finding — every test that holds a raw
@@ -374,7 +374,7 @@ async fn conflicting_fingerprint_under_a_live_name_is_invalid_argument() {
 
     let (dialed1, ctl1, _hello1) = harness.register(&first, "").await.expect("first registers");
     // The controller's symmetric watchdog starts ticking the moment this
-    // registers (`PathWatchConfig::default()`'s `min_dead_after` is 1 s) —
+    // registers (`PathWatchConfig::reverse_default()`'s `min_dead_after` is 4.25 s) —
     // keep answering its `Ping`s so a slow/contended run of this test
     // cannot let it judge this raw, otherwise-silent connection dead
     // before the assertions below run (adversarial review finding).
@@ -517,7 +517,7 @@ async fn two_concurrent_same_fingerprint_registrations_leave_exactly_one_live_co
     // "stuck at 0 live connections" failure below), and — Step 4's
     // symmetric liveness watchdog now runs on every registered connection
     // — its control stream must actually keep answering the controller's
-    // `Ping`s (`PathWatchConfig::default()`'s `min_dead_after` is 1s), or
+    // `Ping`s (`PathWatchConfig::reverse_default()`'s `min_dead_after` is 4.25 s), or
     // the controller will, correctly, judge this raw, otherwise-silent
     // test connection dead on its own and tear it down before the
     // assertions below ever run.
@@ -644,8 +644,8 @@ async fn two_concurrent_different_fingerprint_registrations_admit_exactly_one() 
         "exactly one entry, whichever principal actually won the race"
     );
     // Keep the winner's control stream answering `Ping`s — Step 4's
-    // symmetric watchdog (`PathWatchConfig::default()`'s `min_dead_after`
-    // is 1s) will otherwise, correctly, judge this raw, otherwise-silent
+    // symmetric watchdog (`PathWatchConfig::reverse_default()`'s
+    // `min_dead_after` is 4.25 s) will otherwise, correctly, judge this raw, otherwise-silent
     // test connection dead and tear it down before `wait_for` below
     // observes it (see the same-fingerprint race test above for the full
     // explanation).
@@ -679,7 +679,7 @@ async fn same_fingerprint_redial_replaces_and_closes_the_old_connection() {
     // Keep the first connection's control stream answering `Ping`s until
     // the redial below actually replaces it — otherwise the controller's
     // own symmetric watchdog can, correctly, declare it dead first
-    // (`PathWatchConfig::default()`'s `min_dead_after` is 1 s), closing it
+    // (`PathWatchConfig::reverse_default()`'s `min_dead_after` is 4.25 s), closing it
     // with an ordinary QUIC close rather than `CLOSE_CODE_REPLACED` and
     // failing the "4099" assertion below for a reason unrelated to what
     // this test checks (adversarial review finding).
@@ -763,7 +763,7 @@ async fn controller_refuses_session_open_but_answers_ping() {
 
     session.send_ping().await.expect("send ping");
     // The controller's own symmetric-probing watchdog
-    // (`PathWatchConfig::default()`'s 250 ms active cadence) can win the
+    // (`PathWatchConfig::reverse_default()`'s 250 ms active cadence) can win the
     // race and put its own `Ping` on the wire ahead of the `Pong` this
     // sends back — `drive_registered_session`'s `select!` is `biased`
     // towards its probe arm, so a pending probe is serviced before it

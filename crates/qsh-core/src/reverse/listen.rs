@@ -356,7 +356,7 @@ async fn run_listen_unix(
         admission,
         quotas,
     );
-    listen.set_path_watch(liveness.watch);
+    listen.set_path_watch(liveness.reverse_watch);
     tokio::spawn(Listen::run_stale_sweeper(Arc::downgrade(&listen)));
     tracing::info!(
         device_id = %identity.identity.device_id,
@@ -485,10 +485,12 @@ pub struct Listen {
     /// [`crate::quota::Quotas::reserve_connection`], same host→principal
     /// order) even when both run in the same `qsh listen` process.
     quotas: Arc<crate::quota::Quotas>,
-    /// The `[recovery]` section of this process's `config.toml`, validated
-    /// by `run_listen_unix` and set once before the accept loop starts
-    /// ([`Self::set_path_watch`]). Unset (every test and embedding that
-    /// builds a `Listen` directly) means [`PathWatchConfig::default`].
+    /// The reverse registration watch from the `[recovery]` section of this
+    /// process's `config.toml`, validated by `run_listen_unix` and set once
+    /// before the accept loop starts ([`Self::set_path_watch`]). Unset
+    /// (every test and embedding that builds a `Listen` directly) means
+    /// [`PathWatchConfig::reverse_default`], the same default `config.toml`
+    /// gives an absent section.
     path_watch: std::sync::OnceLock<PathWatchConfig>,
     /// Test-only override for [`Self::path_watch_config`].
     #[cfg(test)]
@@ -668,8 +670,9 @@ impl Listen {
 
     /// The [`PathWatchConfig`] each registered connection's liveness watch
     /// uses (`Self::drive_registered_session`). Production gets what
-    /// [`Self::set_path_watch`] stored, the validated `[recovery]` section
-    /// (the defaults when absent); under `#[cfg(test)]` only,
+    /// [`Self::set_path_watch`] stored, the validated reverse registration
+    /// watch of `[recovery]` (ADR-0041; [`PathWatchConfig::reverse_default`]
+    /// when absent); under `#[cfg(test)]` only,
     /// [`Self::set_test_path_watch`] can raise `min_dead_after` above
     /// quinn's 45 s idle timeout (the controller-side twin of
     /// [`super::path_watch_config`], same rationale). Not a task-local
@@ -684,11 +687,15 @@ impl Listen {
         {
             return config;
         }
-        self.path_watch.get().copied().unwrap_or_default()
+        self.path_watch
+            .get()
+            .copied()
+            .unwrap_or_else(PathWatchConfig::reverse_default)
     }
 
-    /// Store the validated `[recovery]` watch config every registered
-    /// connection's liveness watch uses (ADR-0021 decision 4). Called once
+    /// Store the validated reverse registration watch config every
+    /// registered connection's liveness watch uses (ADR-0021 decision 4,
+    /// ADR-0041). Called once
     /// by `run_listen_unix` before the accept loop; a second call is
     /// ignored.
     pub fn set_path_watch(&self, config: PathWatchConfig) {

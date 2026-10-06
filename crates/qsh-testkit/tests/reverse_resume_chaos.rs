@@ -96,6 +96,14 @@ const REDIAL_DEADLINE_MS: u64 = 2_000;
 /// outage it causes).
 const DETECTION_CEILING: Duration = Duration::from_millis(REDIAL_DEADLINE_MS);
 
+/// ADR-0041 decision 4: the reverse registration connection, unlike an
+/// attach, is held to a 5 s ceiling, because no one waits on it and its loss
+/// ends every reverse tunnel carried on it. A literal, not
+/// `qsh_core::config::REVERSE_DETECTION_CEILING_MS`, so a change to the
+/// contract fails this test instead of passing quietly. [`DETECTION_CEILING`]
+/// stays 2000 for the attach.
+const REVERSE_DETECTION_CEILING: Duration = Duration::from_millis(5_000);
+
 /// Room for everything the derived budget below does not model: a real
 /// localctl daemon relay, the shell's own round trip, and the chaos proxy
 /// in the middle — same order of magnitude as `attach_recovery.rs`'s own
@@ -104,9 +112,9 @@ const SCHEDULING_SLACK: Duration = Duration::from_secs(3);
 
 /// The longest the watchdog on either end of the severed connection may
 /// take to call the silent path dead — `attach_recovery.rs`'s own
-/// `detection_budget`, restated here because `docs/design/protocol.md`
-/// §11-4 reuses the identical detector (and identical default config) on
-/// both roles rather than inventing a reverse-specific one.
+/// `detection_budget`, restated here. `docs/design/protocol.md` §11-4 runs
+/// the identical detector on both roles of a registration; ADR-0041 gives
+/// that connection its own default config and its own ceiling.
 fn detection_budget(cfg: &PathWatchConfig) -> Duration {
     cfg.probe_interval * cfg.strikes + cfg.min_dead_after
 }
@@ -404,8 +412,9 @@ fn attach(ops: &Ops, session_ref: &str) -> SessionAttachStream {
 ///    migration does not exist on this leg), the budget inequality
 ///    `time_to_recovery_ms - registration_wait_ms <= 2000` as a real
 ///    assertion, and an independently measured wall clock inside a budget
-///    derived from `PathWatchConfig` + the target's own `backoff_max_ms` +
-///    2 s — itself under [`DETECTION_CEILING`].
+///    derived from the reverse registration's `PathWatchConfig` + the
+///    target's own `backoff_max_ms` + 2 s — the detection part itself under
+///    [`REVERSE_DETECTION_CEILING`].
 #[tokio::test(flavor = "multi_thread")]
 async fn a_severed_reverse_path_resumes_the_same_session_under_a_live_cli_attach() {
     capture_recovery_records();
@@ -571,11 +580,25 @@ async fn a_severed_reverse_path_resumes_the_same_session_under_a_live_cli_attach
             chaos.detail()
         );
 
-        let detection = detection_budget(&RecoveryConfig::default().watch);
+        // The attach detector keeps its 2 s ceiling; the registration's own
+        // detector (what the severed leg runs on, both ends) is held to
+        // the reverse ceiling.
+        let attach_detection = detection_budget(&RecoveryConfig::default().watch);
         assert!(
-            detection <= DETECTION_CEILING,
-            "the shipping detector needs {detection:?} to call a path dead, over the \
-             {DETECTION_CEILING:?} ceiling"
+            attach_detection <= DETECTION_CEILING,
+            "the shipping attach detector needs {attach_detection:?} to call a path dead, \
+             over the {DETECTION_CEILING:?} ceiling"
+        );
+        let detection = detection_budget(
+            &target_config
+                .liveness()
+                .expect("fast_backoff is within every liveness bound")
+                .reverse_watch,
+        );
+        assert!(
+            detection <= REVERSE_DETECTION_CEILING,
+            "the shipping reverse registration detector needs {detection:?} to call a path \
+             dead, over the {REVERSE_DETECTION_CEILING:?} ceiling"
         );
         let backoff_ceiling = Duration::from_millis(
             target_config

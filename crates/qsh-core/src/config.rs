@@ -1103,19 +1103,35 @@ impl TransportConfig {
 /// (`docs/adr/0021-transport-liveness-knobs.md` decision 4).
 pub const RECOVERY_DETECTION_CEILING_MS: u64 = 2_000;
 
-/// `[recovery]` section (ADR-0021 decision 4).
+/// Ceiling on the detection budget `P×S+D` of a reverse registration
+/// connection, in milliseconds (ADR-0041 decision 3). A registration has no
+/// one waiting on it and its loss takes every reverse tunnel with it, so it
+/// is allowed 5 s where an attach is allowed
+/// [`RECOVERY_DETECTION_CEILING_MS`]. `reverse_blackout.rs` and
+/// `reverse_resume_chaos.rs` pin their reverse recovery against this figure
+/// by their own copy of the number; `attach_recovery.rs` keeps 2000.
+pub const REVERSE_DETECTION_CEILING_MS: u64 = 5_000;
+
+/// `[recovery]` section (ADR-0021 decision 4, ADR-0041).
 ///
-/// Three of the watchdog's six knobs are open. `rtt_multiple` (8),
+/// Three of the watchdog's six knobs are open, plus a two-key override for
+/// the reverse registration connection. `rtt_multiple` (8),
 /// `idle_probe_interval` and `active_window` stay closed: a key such as
 /// `[recovery].rtt_multiple` is reported by `qsh doctor` as
 /// `config_unknown_key` and otherwise ignored.
 ///
-/// Each process reads its own `config.toml`, so the target
-/// (`qsh serve --to`/`qsh reverse`) and the controller (`qsh listen`) are
-/// tuned separately, and an attach or `tunnel open` follows the machine it
-/// runs on. A looser value on one end alone does not help: the other end
-/// still closes the connection with `CLOSE_CODE_PATH_DEAD` by its own
-/// watch. Raise both ends together.
+/// `min_dead_after_ms` and `strikes` govern the attach and the supervised
+/// tunnel. The reverse registration connection, watched from both the
+/// target (`qsh serve --to`/`qsh reverse`) and the controller (`qsh listen`),
+/// has its own default (4250 ms, 3 strikes) and its own keys
+/// `reverse_min_dead_after_ms` and `reverse_strikes`; it does not follow
+/// the general two. `probe_interval_ms` is the cadence of both kinds.
+///
+/// Each process reads its own `config.toml`, so the target and the
+/// controller are tuned separately, and an attach or `tunnel open` follows
+/// the machine it runs on. A looser value on one end alone does not help:
+/// the other end still closes the connection with `CLOSE_CODE_PATH_DEAD` by
+/// its own watch. Raise both ends together.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RecoverySection {
@@ -1124,10 +1140,22 @@ pub struct RecoverySection {
     /// [`RecoverySection::MIN_PROBE_INTERVAL_MS`].
     pub probe_interval_ms: Option<u64>,
     /// Floor on the silence that declares a path dead, in milliseconds.
-    /// Unset ⇒ 1000.
+    /// Unset ⇒ 1000. Attach and supervised tunnels only.
     pub min_dead_after_ms: Option<u64>,
     /// Unanswered probes required before silence is a verdict. Unset ⇒ 3.
+    /// Attach and supervised tunnels only.
     pub strikes: Option<u32>,
+    /// [`Self::min_dead_after_ms`] for the reverse registration connection.
+    /// Unset ⇒ 4250 ([`PathWatchConfig::reverse_default`]).
+    pub reverse_min_dead_after_ms: Option<u64>,
+    /// [`Self::strikes`] for the reverse registration connection. Unset ⇒ 3.
+    pub reverse_strikes: Option<u32>,
+}
+
+/// The key names a validated watch reports in its `CONFIG_ERROR`s.
+struct WatchKeys {
+    dead: &'static str,
+    strikes: &'static str,
 }
 
 impl RecoverySection {
@@ -1137,9 +1165,10 @@ impl RecoverySection {
     /// is never a verdict (`PathWatchConfig::strikes`).
     pub const MIN_STRIKES: u32 = 2;
 
-    /// The watchdog config these keys describe, defaulted from
-    /// [`PathWatchConfig::default`] and validated. Fails closed
-    /// (`CONFIG_ERROR`, non-retryable) outside the bounds, never clamping:
+    /// The attach and supervised-tunnel watchdog config these keys
+    /// describe, defaulted from [`PathWatchConfig::default`] and validated.
+    /// Fails closed (`CONFIG_ERROR`, non-retryable) outside the bounds,
+    /// never clamping:
     ///
     /// - `P×S+D ≤ ` [`RECOVERY_DETECTION_CEILING_MS`], computed with
     ///   checked arithmetic so a huge value cannot wrap into range;
@@ -1149,16 +1178,55 @@ impl RecoverySection {
     ///   tick can never push detection past `P×S+D`.
     pub fn path_watch(&self) -> Result<PathWatchConfig, OpError> {
         let defaults = PathWatchConfig::default();
-        let probe_ms = self
-            .probe_interval_ms
-            .unwrap_or(defaults.probe_interval.as_millis() as u64);
-        let dead_ms = self
-            .min_dead_after_ms
-            .unwrap_or(defaults.min_dead_after.as_millis() as u64);
-        let strikes = self.strikes.unwrap_or(defaults.strikes);
+        Self::validated(
+            defaults,
+            self.probe_interval_ms,
+            self.min_dead_after_ms,
+            self.strikes,
+            RECOVERY_DETECTION_CEILING_MS,
+            &WatchKeys {
+                dead: "min_dead_after_ms",
+                strikes: "strikes",
+            },
+        )
+    }
+
+    /// The watchdog config of a reverse registration connection
+    /// (ADR-0041): [`PathWatchConfig::reverse_default`] with the shared
+    /// `probe_interval_ms` and the `reverse_*` keys applied, under the same
+    /// bounds as [`Self::path_watch`] except that the ceiling is
+    /// [`REVERSE_DETECTION_CEILING_MS`]. The general `min_dead_after_ms`
+    /// and `strikes` do not reach it, so tightening them for attach never
+    /// tightens a registration by accident.
+    pub fn reverse_path_watch(&self) -> Result<PathWatchConfig, OpError> {
+        Self::validated(
+            PathWatchConfig::reverse_default(),
+            self.probe_interval_ms,
+            self.reverse_min_dead_after_ms,
+            self.reverse_strikes,
+            REVERSE_DETECTION_CEILING_MS,
+            &WatchKeys {
+                dead: "reverse_min_dead_after_ms",
+                strikes: "reverse_strikes",
+            },
+        )
+    }
+
+    fn validated(
+        defaults: PathWatchConfig,
+        probe: Option<u64>,
+        dead: Option<u64>,
+        strikes: Option<u32>,
+        ceiling_ms: u64,
+        keys: &WatchKeys,
+    ) -> Result<PathWatchConfig, OpError> {
+        let probe_ms = probe.unwrap_or(defaults.probe_interval.as_millis() as u64);
+        let dead_ms = dead.unwrap_or(defaults.min_dead_after.as_millis() as u64);
+        let strikes = strikes.unwrap_or(defaults.strikes);
+        let (dead_key, strikes_key) = (keys.dead, keys.strikes);
         if strikes < Self::MIN_STRIKES {
             return Err(Self::config_error(format!(
-                "[recovery].strikes ({strikes}) must be >= {}",
+                "[recovery].{strikes_key} ({strikes}) must be >= {}",
                 Self::MIN_STRIKES
             )));
         }
@@ -1170,18 +1238,18 @@ impl RecoverySection {
         }
         if probe_ms > dead_ms {
             return Err(Self::config_error(format!(
-                "[recovery].probe_interval_ms ({probe_ms}) must be <= min_dead_after_ms ({dead_ms})"
+                "[recovery].probe_interval_ms ({probe_ms}) must be <= {dead_key} ({dead_ms})"
             )));
         }
         let budget = probe_ms
             .checked_mul(u64::from(strikes))
             .and_then(|silent| silent.checked_add(dead_ms));
         match budget {
-            Some(ms) if ms <= RECOVERY_DETECTION_CEILING_MS => {}
+            Some(ms) if ms <= ceiling_ms => {}
             _ => {
                 return Err(Self::config_error(format!(
-                    "[recovery] probe_interval_ms ({probe_ms}) x strikes ({strikes}) + \
-                     min_dead_after_ms ({dead_ms}) must be <= {RECOVERY_DETECTION_CEILING_MS} ms"
+                    "[recovery] probe_interval_ms ({probe_ms}) x {strikes_key} ({strikes}) + \
+                     {dead_key} ({dead_ms}) must be <= {ceiling_ms} ms"
                 )));
             }
         }
@@ -1204,8 +1272,14 @@ impl RecoverySection {
 pub struct Liveness {
     /// `[transport].keep_alive_ms`, validated.
     pub keep_alive: std::time::Duration,
-    /// `[recovery]`, validated and merged over the defaults.
+    /// `[recovery]`, validated and merged over the defaults: what an attach
+    /// and a supervised tunnel watch with.
     pub watch: PathWatchConfig,
+    /// `[recovery]`'s reverse registration watch, validated and merged over
+    /// [`PathWatchConfig::reverse_default`] (ADR-0041). Both the target's
+    /// `serve --to` and the controller's `listen` build their registration
+    /// watch from it.
+    pub reverse_watch: PathWatchConfig,
 }
 
 impl Liveness {
@@ -1226,6 +1300,7 @@ impl Config {
         Ok(Liveness {
             keep_alive: self.transport.keep_alive()?,
             watch: self.recovery.path_watch()?,
+            reverse_watch: self.recovery.reverse_path_watch()?,
         })
     }
 

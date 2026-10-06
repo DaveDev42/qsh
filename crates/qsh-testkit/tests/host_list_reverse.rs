@@ -266,8 +266,8 @@ async fn host_get_on_an_unregistered_unpinned_name_is_host_not_found() {
 }
 
 /// Keep answering the daemon's own liveness `Ping`s while this test holds
-/// the raw registered connection past `PathWatchConfig::default()`'s
-/// `min_dead_after` (1 s) — the identical hazard (and fix) every raw
+/// the raw registered connection past `PathWatchConfig::reverse_default()`'s
+/// `min_dead_after` (4.25 s) — the identical hazard (and fix) every raw
 /// long-held registration in `reverse_loopback.rs` guards against.
 fn spawn_ping_keepalive(mut ctl: qsh_transport::FramedStream) -> tokio::task::JoinHandle<()> {
     use qsh_proto::wire::{self, ControlMessage, control_message};

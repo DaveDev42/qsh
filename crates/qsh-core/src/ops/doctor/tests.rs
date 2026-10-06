@@ -2605,10 +2605,21 @@ fn doctor_config_unknown_key_accepts_transport_and_recovery_and_flags_rtt_multip
     std::fs::write(
         ops.paths().config_file(),
         "[transport]\nkeep_alive_ms = 5000\n\n\
-         [recovery]\nprobe_interval_ms = 250\nmin_dead_after_ms = 1000\nstrikes = 3\n",
+         [recovery]\nprobe_interval_ms = 250\nmin_dead_after_ms = 1000\nstrikes = 3\n\
+         reverse_min_dead_after_ms = 4250\nreverse_strikes = 3\n",
     )
     .unwrap();
     assert!(config_unknown_key_findings(&ops).is_empty());
+
+    // A misspelled reverse key is flagged, not silently ignored.
+    std::fs::write(
+        ops.paths().config_file(),
+        "[recovery]\nreverse_min_dead_ms = 4250\n",
+    )
+    .unwrap();
+    let findings = config_unknown_key_findings(&ops);
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert!(findings[0].detail.contains("recovery.reverse_min_dead_ms"));
 
     // The three closed knobs are not keys.
     std::fs::write(

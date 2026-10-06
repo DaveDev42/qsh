@@ -2963,16 +2963,28 @@ fn registration_event_json_line_carries_srtt_and_silence_ms_only_when_present() 
 fn listen_path_watch_takes_the_recovery_section_and_set_test_path_watch_still_wins() {
     use std::time::Duration;
 
-    // Nothing set: today's defaults.
+    // Nothing set: the reverse registration default (ADR-0041), which is
+    // not the attach default.
     let listen = test_listen();
-    assert_eq!(listen.path_watch_config(), PathWatchConfig::default());
+    assert_eq!(
+        listen.path_watch_config(),
+        PathWatchConfig::reverse_default()
+    );
+    assert_ne!(
+        PathWatchConfig::reverse_default(),
+        PathWatchConfig::default()
+    );
 
-    // `run_listen_unix` stores the validated `[recovery]` section.
+    // `run_listen_unix` stores the validated reverse watch of `[recovery]`.
+    // The general `min_dead_after_ms`/`strikes` are not what it reads.
     let configured: crate::config::Config = toml::from_str(
-        "[recovery]\nprobe_interval_ms = 100\nstrikes = 4\nmin_dead_after_ms = 900\n",
+        "[recovery]\nprobe_interval_ms = 100\nstrikes = 4\nmin_dead_after_ms = 900\n\
+         reverse_strikes = 5\nreverse_min_dead_after_ms = 3000\n",
     )
     .unwrap();
-    let watch = configured.liveness().unwrap().watch;
+    let watch = configured.liveness().unwrap().reverse_watch;
+    assert_eq!(watch.strikes, 5);
+    assert_eq!(watch.min_dead_after, Duration::from_secs(3));
     assert_ne!(watch, PathWatchConfig::default());
     listen.set_path_watch(watch);
     assert_eq!(listen.path_watch_config(), watch);
