@@ -531,3 +531,172 @@ impl Rig {
         self._sweeper.abort();
     }
 }
+
+// ---------------------------------------------------------------------------
+// The configured rig: the production entry points, driven by `config.toml`.
+// ---------------------------------------------------------------------------
+
+/// A controller and a target started through the same entry points the
+/// binaries use, [`run_listen`](crate::reverse::listen::run_listen) and
+/// [`run_reverse_observed`], with each side's `config.toml` read from disk by
+/// [`Config::load`]. Nothing here uses `Listen::set_test_path_watch` or the
+/// target's test `PathWatch` override, so the death time of a blackholed
+/// registration is whatever the configured `[recovery]` and `[transport]`
+/// values made it. That is the only way a test can see that `run_listen_unix`
+/// and `run_reverse_unix` pass the validated values on to the watch they build.
+pub(super) struct ConfiguredRig {
+    relay: UdpRelay,
+    controller_shutdown: Option<oneshot::Sender<()>>,
+    target_shutdown: Option<oneshot::Sender<()>>,
+    controller_task: JoinHandle<()>,
+    target_task: JoinHandle<()>,
+    _dirs: [tempfile::TempDir; 2],
+}
+
+impl ConfiguredRig {
+    /// Start both ends. The controller pins the target under `target_name`
+    /// and the target pins the controller (through the relay) under
+    /// `controller_alias`, as in [`Rig::start_with`]. `controller_toml` and
+    /// `target_toml` are the two `config.toml` bodies.
+    pub(super) async fn start(
+        controller_alias: &str,
+        target_name: &str,
+        controller_toml: &str,
+        target_toml: &str,
+    ) -> Self {
+        capture_reverse_events();
+        let controller = make_identity();
+        let target = make_identity();
+
+        // Controller: its own config dir, trust store, ACL and config file.
+        let controller_dir = tempfile::tempdir().expect("tempdir");
+        let controller_paths = Paths::new(
+            controller_dir.path().join("config"),
+            controller_dir.path().join("state"),
+        )
+        .with_runtime_dir(controller_dir.path().join("run"));
+        std::fs::create_dir_all(&controller_paths.config_dir).expect("controller config dir");
+        let mut trust_store = TrustStore::default();
+        trust_store.add_peer(
+            target_name,
+            None,
+            target.fingerprint,
+            "2026-01-01T00:00:00Z".to_string(),
+        );
+        trust_store
+            .save(&controller_paths.trust_file())
+            .expect("save controller trust.toml");
+        write_private(
+            &controller_paths.acl_file(),
+            &format!("[[acl]]\nprincipal = \"device:{target_name}\"\nallow = [\"host.reverse\"]\n"),
+        );
+        std::fs::write(controller_paths.config_file(), controller_toml)
+            .expect("write controller config.toml");
+        let controller_config = Config::load(&controller_paths).expect("controller config");
+
+        let (bound_tx, bound_rx) = oneshot::channel::<SocketAddr>();
+        let (controller_shutdown, controller_rx) = oneshot::channel::<()>();
+        let controller_identity = loaded_identity(&controller, "controller-device");
+        let controller_task = tokio::spawn(async move {
+            let result = crate::reverse::listen::run_listen(
+                &controller_paths,
+                &controller_config,
+                controller_identity,
+                Some("127.0.0.1:0"),
+                move |addr| {
+                    let _ = bound_tx.send(addr);
+                },
+                |_diagnostic| {},
+                async move {
+                    let _ = controller_rx.await;
+                },
+            )
+            .await;
+            if let Err(err) = result {
+                panic!("run_listen failed: {err:?}");
+            }
+        });
+        let controller_addr = bound_rx.await.expect("the controller binds");
+        let relay = UdpRelay::start(controller_addr).await;
+
+        // Target: pins the controller at the relay's address.
+        let target_dir = tempfile::tempdir().expect("tempdir");
+        let target_paths = Paths::new(
+            target_dir.path().join("config"),
+            target_dir.path().join("state"),
+        );
+        std::fs::create_dir_all(&target_paths.config_dir).expect("target config dir");
+        let mut trust_store = TrustStore::default();
+        trust_store.add_peer(
+            controller_alias,
+            Some(relay.addr.to_string()),
+            controller.fingerprint,
+            "2026-01-01T00:00:00Z".to_string(),
+        );
+        trust_store
+            .save(&target_paths.trust_file())
+            .expect("save target trust.toml");
+        write_private(
+            &target_paths.acl_file(),
+            &format!(
+                "[[acl]]\nprincipal = \"device:{controller_alias}\"\nallow = [\"exec.run\", \
+                 \"session.open\", \"session.list\", \"session.attach\", \"session.control\", \
+                 \"host.reverse\", \"forward.local\", \"forward.remote\"]\n"
+            ),
+        );
+        std::fs::write(target_paths.config_file(), target_toml).expect("write target config.toml");
+        let target_config = Config::load(&target_paths).expect("target config");
+        let target_identity = loaded_identity(&target, "target-device");
+        let controller_alias = controller_alias.to_string();
+        let target_name = target_name.to_string();
+        let (target_shutdown, target_rx) = oneshot::channel::<()>();
+        let target_task = tokio::spawn(async move {
+            let _ = run_reverse_observed(
+                &target_paths,
+                &target_config,
+                target_identity,
+                &controller_alias,
+                Some(&target_name),
+                |_runtime| {},
+                || {},
+                async move {
+                    let _ = target_rx.await;
+                },
+            )
+            .await;
+        });
+
+        Self {
+            relay,
+            controller_shutdown: Some(controller_shutdown),
+            target_shutdown: Some(target_shutdown),
+            controller_task,
+            target_task,
+            _dirs: [controller_dir, target_dir],
+        }
+    }
+
+    /// Cut the relay: from now on both ends see only silence.
+    pub(super) fn cut(&self) {
+        self.relay.cut();
+    }
+
+    /// Stop the target, then the controller, and wait for both.
+    pub(super) async fn shutdown(mut self) {
+        if let Some(tx) = self.target_shutdown.take() {
+            let _ = tx.send(());
+        }
+        let _ = tokio::time::timeout(Duration::from_secs(10), &mut self.target_task).await;
+        if let Some(tx) = self.controller_shutdown.take() {
+            let _ = tx.send(());
+        }
+        let _ = tokio::time::timeout(Duration::from_secs(10), &mut self.controller_task).await;
+    }
+}
+
+/// Write `text` to `path` with mode 0600, the mode `acl.toml` must have.
+fn write_private(path: &std::path::Path, text: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(path, text).expect("write file");
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).expect("chmod file");
+}

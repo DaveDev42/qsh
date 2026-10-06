@@ -1367,6 +1367,78 @@ async fn a_registration_carrying_only_tunnel_traffic_is_ruled_dead_within_the_ac
     rig.shutdown().await;
 }
 
+/// ADR-0041 decision 5 and ADR-0021, through the production entry points.
+/// `run_listen` and `run_reverse_observed` read their `[recovery]` from an
+/// on-disk `config.toml` and a blackholed registration must be ruled dead
+/// when the *configured* `reverse_min_dead_after_ms` says so, not at the
+/// built-in 4250 ms. The two sides get different values (1500 ms on the
+/// controller, 2400 ms on the `serve --to` target) so neither can pass by
+/// reading the other's setting or a default.
+///
+/// No test override is installed on either end: a `run_listen_unix` or
+/// `run_reverse_unix` that dropped `liveness.reverse_watch` for the
+/// default would put the death at about 4.25 s and fail the upper bounds
+/// below.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn configured_reverse_min_dead_after_ms_decides_when_each_end_rules_a_blackhole_dead() {
+    use crate::reverse::test_harness as harness;
+
+    const CONTROLLER_DEAD_MS: u64 = 1_500;
+    const TARGET_DEAD_MS: u64 = 2_400;
+    // The detection budget adds P x S (300 ms) and one probe tick to the
+    // floor; a second of scheduling slack on top stays far below the
+    // default 4250 ms.
+    const SLACK_MS: u64 = 1_000;
+
+    let alias = "controller-configured-death";
+    let name = "widget-configured-death";
+    let controller_toml = format!(
+        "[recovery]\nprobe_interval_ms = 100\nreverse_min_dead_after_ms = {CONTROLLER_DEAD_MS}\n"
+    );
+    let target_toml = format!(
+        "[recovery]\nprobe_interval_ms = 100\nreverse_min_dead_after_ms = {TARGET_DEAD_MS}\n\
+         [reverse]\nbackoff_initial_ms = 50\nbackoff_max_ms = 200\nbackoff_jitter_pct = 0\n"
+    );
+    let rig = harness::ConfiguredRig::start(alias, name, &controller_toml, &target_toml).await;
+    harness::wait_for_line(alias, "registered").await;
+
+    let cut_at = std::time::Instant::now();
+    rig.cut();
+    let ruled = |host: &'static str| async move {
+        let line = harness::wait_for_line(host, "lost").await;
+        (line, cut_at.elapsed())
+    };
+    let ((target_lost, target_after), (controller_lost, controller_after)) =
+        tokio::join!(ruled(alias), ruled(name));
+
+    for (side, line, after, dead_ms) in [
+        (
+            "controller",
+            &controller_lost,
+            controller_after,
+            CONTROLLER_DEAD_MS,
+        ),
+        ("target", &target_lost, target_after, TARGET_DEAD_MS),
+    ] {
+        assert_eq!(line["cause"], "path_dead", "{side}: {line}");
+        let silence = line["silence_ms"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("{side} must carry its own measurement: {line}"));
+        assert!(
+            (dead_ms..=dead_ms + SLACK_MS).contains(&silence),
+            "{side}: silence {silence} ms is not within the configured {dead_ms} ms plus \
+             {SLACK_MS} ms: {line}"
+        );
+        assert!(
+            after < Duration::from_millis(dead_ms + 2 * SLACK_MS),
+            "{side} took {after:?} to rule the blackhole dead; configured {dead_ms} ms: {line}"
+        );
+    }
+
+    rig.shutdown().await;
+}
+
 /// Issue #10 request 3 and issue #11 request 2: `srtt_ms`/`silence_ms`/
 /// `tick_gap_ms` are open-vocabulary fields that ride only on a `lost` this process's own watch ruled. Absent, never
 /// null, otherwise.
@@ -1401,34 +1473,28 @@ fn reconnect_event_json_line_carries_srtt_silence_and_tick_gap_ms_only_when_pres
     lost(Some(37), Some(1_250), Some(260)).emit();
 }
 
+/// The cfg(test) task-local override is what lets the other tests in this
+/// file raise the watch floors, so its precedence over the configured value
+/// is pinned here. That the production entry points pass the *configured*
+/// value on is not asserted here (a comparison of the function's input with
+/// its output proves nothing about its callers):
+/// `configured_reverse_min_dead_after_ms_decides_when_each_end_rules_a_blackhole_dead`
+/// does, over a `config.toml` and a blackholed path.
 #[cfg(unix)]
 #[tokio::test]
-async fn target_path_watch_takes_the_recovery_section_and_the_cfg_test_override_still_wins() {
+async fn the_cfg_test_path_watch_override_beats_the_configured_value() {
     use crate::client::pathwatch::PathWatchConfig;
     use std::time::Duration;
 
-    let configured: Config = toml::from_str(
-        "[recovery]\nprobe_interval_ms = 100\nmin_dead_after_ms = 700\n\
-         reverse_min_dead_after_ms = 3000\n",
-    )
-    .unwrap();
-    let liveness = configured.liveness().unwrap();
-    let watch = liveness.reverse_watch;
-    assert_eq!(watch.min_dead_after, Duration::from_secs(3));
-    assert_ne!(watch, liveness.watch);
-    assert_ne!(watch, PathWatchConfig::default());
-    // No `[recovery]` at all: the reverse default, not the attach one.
-    assert_eq!(
-        Config::default().liveness().unwrap().reverse_watch,
-        PathWatchConfig::reverse_default()
-    );
-    // Production: the configured section is what `PathWatch::new` receives.
-    assert_eq!(crate::reverse::path_watch_config(watch), watch);
-    // The cfg(test) task-local override beats the configured value.
+    let configured: Config =
+        toml::from_str("[recovery]\nprobe_interval_ms = 100\nreverse_min_dead_after_ms = 3000\n")
+            .unwrap();
+    let watch = configured.liveness().unwrap().reverse_watch;
     let override_cfg = PathWatchConfig {
         min_dead_after: Duration::from_secs(60),
         ..PathWatchConfig::default()
     };
+    assert_ne!(override_cfg, watch);
     let seen = crate::reverse::TEST_PATH_WATCH_CONFIG
         .scope(override_cfg, async {
             crate::reverse::path_watch_config(watch)
