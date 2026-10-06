@@ -1104,7 +1104,7 @@ impl TransportConfig {
 pub const RECOVERY_DETECTION_CEILING_MS: u64 = 2_000;
 
 /// Ceiling on the detection budget `P×S+D` of a reverse registration
-/// connection, in milliseconds (ADR-0041 decision 3). A registration has no
+/// connection, in milliseconds (ADR-0041 decision 4). A registration has no
 /// one waiting on it and its loss takes every reverse tunnel with it, so it
 /// is allowed 5 s where an attach is allowed
 /// [`RECOVERY_DETECTION_CEILING_MS`]. `reverse_blackout.rs` and
@@ -1129,9 +1129,13 @@ pub const REVERSE_DETECTION_CEILING_MS: u64 = 5_000;
 ///
 /// Each process reads its own `config.toml`, so the target and the
 /// controller are tuned separately, and an attach or `tunnel open` follows
-/// the machine it runs on. A looser value on one end alone does not help:
-/// the other end still closes the connection with `CLOSE_CODE_PATH_DEAD` by
-/// its own watch. Raise both ends together.
+/// the machine it runs on. For the reverse registration a looser value on
+/// one end alone does not help: the other end still closes the connection
+/// with `CLOSE_CODE_PATH_DEAD` by its own watch, so raise both ends
+/// together. A forward `qsh serve` has no watch on the connections it
+/// accepts (only the dialing client watches them), so it validates
+/// `[recovery]` at startup and nothing more: an attach or supervised tunnel
+/// follows the client's values alone.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RecoverySection {

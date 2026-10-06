@@ -692,7 +692,7 @@ fn reverse_recovery_keys_use_the_documented_names_and_stay_apart_from_the_genera
 
 #[test]
 fn reverse_values_beyond_the_reverse_detection_budget_bound_are_config_error() {
-    // P*S+D <= 5000, S >= 2, 50 <= P <= D (ADR-0041 decision 3), and an
+    // P*S+D <= 5000, S >= 2, 50 <= P <= D (ADR-0041 decision 4), and an
     // out-of-range value is a startup error, never a clamp.
     let bad = [
         // 5001 in total: 250*3 + 4251.
