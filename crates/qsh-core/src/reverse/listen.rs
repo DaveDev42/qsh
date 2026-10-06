@@ -926,6 +926,7 @@ impl Listen {
                     since_registered_ms: None,
                     srtt_ms: None,
                     silence_ms: None,
+                    tick_gap_ms: None,
                 }
                 .emit();
             }
@@ -1137,6 +1138,13 @@ struct RegistrationEvent<'a> {
     /// saw received UDP datagrams); same presence rule as `srtt_ms`.
     #[serde(skip_serializing_if = "Option::is_none")]
     silence_ms: Option<u64>,
+    /// Longest gap (ms) between two ticks of this process's own path watch
+    /// since it last saw the path carry anything, only where `silence_ms`
+    /// is present. One beat (250 ms by default) means the process was
+    /// running normally while the silence built up; seconds mean it was
+    /// starved (ADR-0042). Same presence rule as `srtt_ms`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tick_gap_ms: Option<u64>,
 }
 
 impl RegistrationEvent<'_> {
@@ -1156,6 +1164,7 @@ impl RegistrationEvent<'_> {
             since_registered_ms = self.since_registered_ms,
             srtt_ms = self.srtt_ms,
             silence_ms = self.silence_ms,
+            tick_gap_ms = self.tick_gap_ms,
             "{}",
             line
         );

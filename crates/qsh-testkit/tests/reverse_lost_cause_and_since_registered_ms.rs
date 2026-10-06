@@ -318,7 +318,7 @@ async fn run_target_lost_and_retry_lines_report_peer_closed_with_since_registere
     assert_at_is_rfc3339(lost);
     // Issue #10 request 3: a close the peer announced is not this side's
     // own ruling, so neither diagnostic field appears (absent, never null).
-    for key in ["srtt_ms", "silence_ms"] {
+    for key in ["srtt_ms", "silence_ms", "tick_gap_ms"] {
         assert!(
             lost.get(key).is_none(),
             "a peer-closed `lost` must not carry {key}: {lost}"
@@ -525,10 +525,14 @@ async fn datagram_liveness_silent_path_lost_line_carries_srtt_ms_and_silence_ms_
     let lines = [&target_lost[0], &controller_lost[0]];
     for line in lines {
         assert_eq!(line["cause"], "path_dead", "{line}");
-        let has = [line.get("srtt_ms"), line.get("silence_ms")];
+        let has = [
+            line.get("srtt_ms"),
+            line.get("silence_ms"),
+            line.get("tick_gap_ms"),
+        ];
         assert!(
             has.iter().all(Option::is_some) || has.iter().all(Option::is_none),
-            "the two fields come together or not at all: {line}"
+            "the three fields come together or not at all: {line}"
         );
         if let Some(silence) = line.get("silence_ms") {
             let silence = silence
@@ -540,19 +544,105 @@ async fn datagram_liveness_silent_path_lost_line_carries_srtt_ms_and_silence_ms_
                  got {silence} ms: {line}"
             );
             assert!(line["srtt_ms"].as_u64().is_some(), "{line}");
+            // Issue #11 request 2: the longest gap between this watch's
+            // ticks while the silence built up. A running process ticks
+            // every 250 ms; the figure can only be at least one beat.
+            let tick_gap = line["tick_gap_ms"]
+                .as_u64()
+                .unwrap_or_else(|| panic!("tick_gap_ms must be an integer: {line}"));
+            assert!(tick_gap >= 250, "tick_gap_ms below one beat: {line}");
         }
     }
     assert!(
         lines.iter().any(|l| l.get("silence_ms").is_some()),
         "one side's own watchdog ruled and must say so: {target_lost:?} / {controller_lost:?}"
     );
-    for key in ["srtt_ms", "silence_ms"] {
+    for key in ["srtt_ms", "silence_ms", "tick_gap_ms"] {
         assert!(
             target_retry[0].get(key).is_none(),
             "a retry never carries {key}: {}",
             target_retry[0]
         );
     }
+
+    harness.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// Issue #11 request 4 (ADR-0042 decision 2): registrations that keep dying
+// young back the redial off, on the real reconnect loop.
+// ---------------------------------------------------------------------------
+
+/// The controller replaces the target's registration three times in a row,
+/// each one seconds after it was made, so each ends well before the stable
+/// threshold. The `retry` line after each loss reports the delay the loop
+/// actually waited: the ordinary first delay, then doubled, then doubled
+/// again. Jitter is off so the delays are exact.
+#[tokio::test(flavor = "multi_thread")]
+async fn consecutive_quick_losses_double_the_retry_delay_on_the_real_loop() {
+    capture_reverse_events();
+    let target = make_identity();
+    let harness =
+        ReverseHarness::start_with(Arc::new(AllowAllPinned), false, pin(&target, "widget")).await;
+
+    let config = Config {
+        reverse: ReverseConfig {
+            backoff_initial_ms: Some(100),
+            backoff_max_ms: Some(5_000),
+            backoff_jitter_pct: Some(0),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let host = "controller-quick-losses";
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let run_fut =
+        harness.run_target_with_config(&target, "device-id", host, None, &config, async {
+            let _ = shutdown_rx.await;
+        });
+    let force_fut = async {
+        // Held so each replaced connection stays a live object until the end.
+        let mut forcers = Vec::new();
+        for round in 1..=3usize {
+            // The target's `round`-th registration is up and the loop is
+            // serving it.
+            wait_for(TIMEOUT, || {
+                (events_by_host_and_kind(host, "registered").len() >= round).then_some(())
+            })
+            .await;
+            forcers.push(
+                harness
+                    .register(&target, "")
+                    .await
+                    .expect("same-fingerprint reconnect replaces"),
+            );
+            wait_for(TIMEOUT, || {
+                (events_by_host_and_kind(host, "retry").len() >= round).then_some(())
+            })
+            .await;
+        }
+        let retries = events_by_host_and_kind(host, "retry");
+        let _ = shutdown_tx.send(());
+        (retries, forcers)
+    };
+    let (result, (retries, _forcers)) = tokio::join!(run_fut, force_fut);
+    result.expect("a clean shutdown must exit Ok after repeated quick losses");
+
+    let delays: Vec<u64> = retries
+        .iter()
+        .take(3)
+        .map(|retry| {
+            assert_eq!(retry["cause"], "peer_closed", "{retry}");
+            assert!(
+                retry["since_registered_ms"].as_u64().unwrap_or(u64::MAX) < 60_000,
+                "every one of these registrations is a quick loss: {retry}"
+            );
+            retry["delay_ms"]
+                .as_u64()
+                .unwrap_or_else(|| panic!("`retry` carries delay_ms: {retry}"))
+        })
+        .collect();
+    assert_eq!(delays, vec![100, 200, 400], "{retries:?}");
 
     harness.shutdown().await;
 }

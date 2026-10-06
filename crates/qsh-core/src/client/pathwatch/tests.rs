@@ -604,3 +604,257 @@ async fn revive_clears_the_dead_verdict() {
     assert_eq!(watch.dead_verdict(), None);
     assert!(!watch.is_dead());
 }
+
+// Issue #11 request 2 (ADR-0042 decision 1): a watchdog that was itself
+// starved must not read its own absence as the path's silence.
+
+/// Three unanswered probes and 750 ms of silence on the default schedule:
+/// one tick short of a verdict.
+fn state_one_tick_from_death(t0: Instant) -> PathState {
+    let cfg = cfg();
+    let mut state = PathState::new(t0);
+    for ms in [250, 500, 750] {
+        let now = t0 + Duration::from_millis(ms);
+        assert_eq!(state.verdict(now, LAN, &cfg), Verdict::Probe);
+    }
+    assert_eq!(state.unanswered(), 3);
+    state
+}
+
+#[test]
+fn a_tick_less_than_a_probe_interval_late_is_not_a_self_delay() {
+    let cfg = cfg();
+    let t0 = Instant::now();
+    let mut state = state_one_tick_from_death(t0);
+    let now = t0 + Duration::from_millis(1_000);
+    // 249 ms late with a 250 ms probe interval: ordinary scheduling noise.
+    let gap = cfg.probe_interval + cfg.probe_interval - Duration::from_millis(1);
+    assert_eq!(state.observe_tick(now, gap, cfg.probe_interval, &cfg), None);
+    assert_eq!(
+        state.silence(now),
+        Duration::from_secs(1),
+        "silence untouched"
+    );
+    assert_eq!(
+        state.verdict(now, LAN, &cfg),
+        Verdict::Dead,
+        "noise below the threshold must not delay a real verdict"
+    );
+}
+
+#[test]
+fn a_tick_a_whole_probe_interval_late_is_a_self_delay() {
+    let cfg = cfg();
+    let t0 = Instant::now();
+    let mut state = state_one_tick_from_death(t0);
+    let now = t0 + Duration::from_millis(1_000);
+    let gap = cfg.probe_interval * 2;
+    assert_eq!(
+        state.observe_tick(now, gap, cfg.probe_interval, &cfg),
+        Some(cfg.probe_interval),
+        "exactly one probe interval late is the threshold"
+    );
+}
+
+#[test]
+fn a_late_tick_discounts_the_delay_and_cannot_rule_the_path_dead_on_itself() {
+    let cfg = cfg();
+    let t0 = Instant::now();
+    let mut state = state_one_tick_from_death(t0);
+    // The process was away for ten seconds: the next tick fires at 10.75 s
+    // having slept a 250 ms beat since 750 ms.
+    let now = t0 + Duration::from_millis(10_750);
+    let late = state.observe_tick(now, Duration::from_secs(10), cfg.probe_interval, &cfg);
+    assert_eq!(late, Some(Duration::from_millis(9_750)));
+    assert_eq!(
+        state.silence(now),
+        Duration::from_secs(1),
+        "only the silence this process was awake for counts"
+    );
+    // Three strikes and a full second of (observed) silence, and still no
+    // verdict: whatever arrived while we were away has not been read yet.
+    assert_eq!(state.verdict(now, LAN, &cfg), Verdict::Probe);
+    // The next tick is on time and nothing came: now it is a verdict.
+    let next = now + cfg.probe_interval;
+    assert_eq!(
+        state.observe_tick(next, cfg.probe_interval, cfg.probe_interval, &cfg),
+        None
+    );
+    assert_eq!(state.verdict(next, LAN, &cfg), Verdict::Dead);
+}
+
+#[test]
+fn evidence_read_after_a_late_tick_keeps_the_path_alive() {
+    let cfg = cfg();
+    let t0 = Instant::now();
+    let mut state = state_one_tick_from_death(t0);
+    let now = t0 + Duration::from_millis(10_750);
+    state.observe_tick(now, Duration::from_secs(10), cfg.probe_interval, &cfg);
+    assert_eq!(state.verdict(now, LAN, &cfg), Verdict::Probe);
+    // The queued-up answer is read between the two ticks.
+    state.observe_inbound(now + Duration::from_millis(10));
+    assert_eq!(state.unanswered(), 0);
+    let next = now + cfg.probe_interval;
+    state.observe_tick(next, cfg.probe_interval, cfg.probe_interval, &cfg);
+    assert_ne!(state.verdict(next, LAN, &cfg), Verdict::Dead);
+}
+
+#[test]
+fn the_discounted_silence_never_runs_ahead_of_now() {
+    let cfg = cfg();
+    let t0 = Instant::now();
+    let mut state = PathState::new(t0);
+    // Evidence arrived just before the late tick: shifting by the whole
+    // lateness would put the silence clock in the future.
+    let now = t0 + Duration::from_secs(10);
+    state.observe_inbound(now - Duration::from_millis(5));
+    state.observe_tick(now, Duration::from_secs(10), cfg.probe_interval, &cfg);
+    assert_eq!(state.silence(now), Duration::ZERO);
+}
+
+#[test]
+fn the_tick_gap_is_the_longest_since_the_last_evidence() {
+    let cfg = cfg();
+    let t0 = Instant::now();
+    let mut state = PathState::new(t0);
+    let beat = cfg.probe_interval;
+    let mut now = t0;
+    for gap in [beat, beat * 3, beat + Duration::from_millis(7)] {
+        now += gap;
+        state.observe_tick(now, gap, beat, &cfg);
+    }
+    assert_eq!(state.max_tick_gap(), beat * 3);
+    // Evidence ends the window the figure describes.
+    state.observe_inbound(now);
+    assert_eq!(state.max_tick_gap(), Duration::ZERO);
+}
+
+/// Let the watchdog task run whatever the clock just released.
+async fn settle() {
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+}
+
+/// A watchdog that has sent its third probe: silent for 750 ms, so one tick
+/// from a verdict on the default schedule.
+async fn running_watchdog_one_tick_from_death() -> (PathWatch, WakeTx, tokio::task::JoinHandle<()>)
+{
+    let watch = PathWatch::new(cfg());
+    let (tx, rx) = tokio::sync::watch::channel(WakeEvent::default());
+    let watchdog = tokio::spawn(watch_path_with_wake(
+        NeverCloses,
+        watch.clone(),
+        Arc::new(tokio::sync::Notify::new()),
+        rx,
+    ));
+    settle().await;
+    for _ in 0..3 {
+        tokio::time::advance(Duration::from_millis(250)).await;
+        settle().await;
+    }
+    assert!(!watch.is_dead());
+    (watch, tx, watchdog)
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_watchdog_that_was_starved_does_not_declare_the_path_dead_when_it_resumes() {
+    let (watch, _tx, watchdog) = running_watchdog_one_tick_from_death().await;
+    // The process is away for ten seconds; the timer fires the moment it
+    // is scheduled again. Before ADR-0042 this tick read ten seconds of
+    // silence and three strikes as a dead path.
+    tokio::time::advance(Duration::from_secs(10)).await;
+    settle().await;
+    assert!(!watch.is_dead(), "the tick that resumed us may not rule");
+    // What the host sent meanwhile is read before the next tick.
+    watch.inbound();
+    for _ in 0..3 {
+        tokio::time::advance(Duration::from_millis(250)).await;
+        settle().await;
+        assert!(!watch.is_dead(), "the answer proves the path");
+        watch.inbound();
+    }
+    watchdog.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_path_that_stays_silent_after_a_stall_is_still_declared_dead() {
+    let (watch, _tx, watchdog) = running_watchdog_one_tick_from_death().await;
+    tokio::time::advance(Duration::from_secs(10)).await;
+    settle().await;
+    assert!(!watch.is_dead());
+    let resumed = Instant::now();
+    tokio::time::timeout(Duration::from_secs(5), watch.dead())
+        .await
+        .expect("a path that stays silent is dead one on-time tick later");
+    assert!(
+        resumed.elapsed() <= cfg().probe_interval * 2,
+        "{:?}",
+        resumed.elapsed()
+    );
+    let verdict = watch.dead_verdict().expect("the watchdog ruled");
+    assert_eq!(
+        verdict.tick_gap,
+        Duration::from_secs(10),
+        "the diagnostic names the stall"
+    );
+    assert!(
+        verdict.silence < Duration::from_secs(2),
+        "silence counts what the watch observed, not the ten seconds it was away: {:?}",
+        verdict.silence
+    );
+    watchdog.await.expect("watchdog returns once it declares");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_watchdog_that_is_late_on_every_tick_still_reaches_a_verdict() {
+    let watch = PathWatch::new(cfg());
+    let (_tx, rx) = tokio::sync::watch::channel(WakeEvent::default());
+    let watchdog = tokio::spawn(watch_path_with_wake(
+        NeverCloses,
+        watch.clone(),
+        Arc::new(tokio::sync::Notify::new()),
+        rx,
+    ));
+    settle().await;
+    // Every beat of 250 ms takes 550 ms: 300 ms late each time, over the
+    // threshold. On time this path would be dead on the fourth tick.
+    let mut rounds = 0;
+    while !watch.is_dead() {
+        rounds += 1;
+        assert!(
+            rounds <= 10,
+            "a watch starved on every tick must still converge"
+        );
+        tokio::time::advance(Duration::from_millis(550)).await;
+        settle().await;
+        if rounds < 5 {
+            assert!(
+                !watch.is_dead(),
+                "round {rounds}: still inside the discount"
+            );
+        }
+    }
+    assert!(
+        rounds >= 5,
+        "the discount delayed the verdict ({rounds} rounds)"
+    );
+    watchdog.await.expect("watchdog returns once it declares");
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_on_time_watchdog_records_one_beat_as_its_tick_gap() {
+    let watch = PathWatch::new(cfg());
+    let (_tx, rx) = tokio::sync::watch::channel(WakeEvent::default());
+    let task = tokio::spawn(watch_path_with_wake(
+        NeverCloses,
+        watch.clone(),
+        Arc::new(tokio::sync::Notify::new()),
+        rx,
+    ));
+    tokio::time::timeout(Duration::from_secs(5), watch.dead())
+        .await
+        .expect("a silent path must be declared dead");
+    task.await.expect("the watchdog returns once it declares");
+    assert_eq!(watch.dead_verdict().unwrap().tick_gap, cfg().probe_interval);
+}

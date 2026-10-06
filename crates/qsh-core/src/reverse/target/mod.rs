@@ -356,6 +356,7 @@ async fn run_reverse_unix(
                     slept_ms: None,
                     srtt_ms: None,
                     silence_ms: None,
+                    tick_gap_ms: None,
                 }
                 .emit();
                 match wait_backoff(delay, &mut shutdown, &mut wake_rx).await {
@@ -413,6 +414,7 @@ async fn run_reverse_unix(
             slept_ms: None,
             srtt_ms: None,
             silence_ms: None,
+            tick_gap_ms: None,
         }
         .emit();
         // Same ROADMAP M9 (b) rationale as the `registration attempt failed`
@@ -579,7 +581,8 @@ async fn run_reverse_unix(
                     };
                     // Same ROADMAP M9 (b) rationale as the two messages above.
                     tracing::info!(controller, %detail, "connection to the controller ended");
-                    loss_cause = classify_target_connection_loss(&joined);
+                    loss_cause =
+                        classify_target_connection_loss(&joined, conn.close_reason().as_ref());
                     break 'serve;
                 }
                 _ = quota_flush.tick() => {
@@ -625,10 +628,14 @@ async fn run_reverse_unix(
             slept_ms: None,
             srtt_ms: own_verdict.map(|v| super::millis(v.srtt)),
             silence_ms: own_verdict.map(|v| super::millis(v.silence)),
+            tick_gap_ms: own_verdict.map(|v| super::millis(v.tick_gap)),
         }
         .emit();
 
-        let delay = backoff.next_delay();
+        // The delay depends on how long the registration lived: a run of
+        // quick losses backs the redial off instead of dialling straight
+        // back into the same conditions (ADR-0042 decision 2).
+        let delay = backoff.loss_delay(registered_at.elapsed());
         ReconnectEvent {
             event: "retry",
             host: controller,
@@ -640,6 +647,7 @@ async fn run_reverse_unix(
             slept_ms: None,
             srtt_ms: None,
             silence_ms: None,
+            tick_gap_ms: None,
         }
         .emit();
         match wait_backoff(delay, &mut shutdown, &mut wake_rx).await {
@@ -673,6 +681,7 @@ fn note_wake<R: rand::RngCore>(backoff: &mut Backoff<R>, controller: &str, event
         slept_ms: Some(event.slept_ms),
         srtt_ms: None,
         silence_ms: None,
+        tick_gap_ms: None,
     }
     .emit();
 }
@@ -824,17 +833,24 @@ fn classify_dial_error(err: &qsh_transport::DialError) -> ReconnectCause {
 /// or an unpinned peer past the version check — `dial_and_register`'s own
 /// module docs) — always `registration_denied`. `Connection`/a
 /// `ConnectionLost` stream error reuse [`crate::reverse::classify_connection_error`]'s
-/// judgment. Every other variant (`Timeout`, `ClosedBeforeHello`,
-/// `ExpectedHello`, `VersionMismatch`, a stream error with no underlying
-/// `ConnectionError`; `Rejected`/`AlreadyPaired` are responder-only and
-/// unreachable from this initiator call, per that enum's own doc) is a
-/// protocol-shaped anomaly this fixed nine-value vocabulary has no
-/// sharper bucket for, so it falls to `local`.
+/// judgment. `Timeout` is the `Hello` reply not arriving within
+/// `HELLO_TIMEOUT`, which is the dial not completing: `dial_timeout`, not
+/// `local` (issue #11 request 3 — under load this is the one a stalled host
+/// or controller produces, and nothing about it originates on this side).
+/// `ClosedBeforeHello` is the controller ending the control stream before
+/// it answered: `peer_closed`. Every other variant (`ExpectedHello`,
+/// `VersionMismatch`, a stream error with no underlying `ConnectionError`;
+/// `Rejected`/`AlreadyPaired` are responder-only and unreachable from this
+/// initiator call, per that enum's own doc) is a protocol-shaped anomaly
+/// this fixed nine-value vocabulary has no sharper bucket for, so it falls
+/// to `local`.
 #[cfg(any(unix, test))]
 fn classify_hello_error(err: &crate::handshake::HelloError) -> ReconnectCause {
     use crate::handshake::HelloError;
     match err {
         HelloError::Remote { .. } => ReconnectCause::RegistrationDenied,
+        HelloError::Timeout => ReconnectCause::DialTimeout,
+        HelloError::ClosedBeforeHello => ReconnectCause::PeerClosed,
         HelloError::Connection(e) => super::classify_connection_error(e),
         HelloError::Stream(qsh_transport::StreamError::Read(
             qsh_transport::ReadError::ConnectionLost(e),
@@ -854,23 +870,31 @@ fn classify_hello_error(err: &crate::handshake::HelloError) -> ReconnectCause {
 /// (that arm's own comment: `watch.dead()` resolves for an
 /// already-peer-closed connection just as readily as a genuinely silent
 /// one, so it cannot assume `path_dead` either). `Ok(Ok(()))` is
-/// `serve_control`'s own loop ending on a clean
-/// end-of-stream — the controller closed its send side — `peer_closed`.
-/// `Ok(Err(err))` extracts the underlying `ConnectionError` from
-/// [`crate::server::ConnError`] where one exists (`Connection`, or a
-/// `ConnectionLost` stream error) and reuses
-/// [`crate::reverse::classify_connection_error`]'s judgment; every other
-/// `ConnError` variant (a Hello-exchange error, unreachable here — the
-/// exchange already finished before `serve_control` ever ran) falls to
+/// `serve_control`'s own loop ending without an error, which it does for a
+/// clean end-of-stream (the controller closed its send side) *and* when
+/// `accept_bi` fails because the connection ended, whatever the reason.
+/// `close_reason` tells the two apart (issue #11 request 3): a connection
+/// that is closed is judged by [`crate::reverse::classify_connection_error`]
+/// like any other, so an idle timeout that surfaced through `accept_bi` is
+/// `idle_timeout`, not `peer_closed`; an open connection is a clean
+/// end-of-stream, `peer_closed`. `Ok(Err(err))` extracts the underlying
+/// `ConnectionError` from [`crate::server::ConnError`] where one exists
+/// (`Connection`, or a `ConnectionLost` stream error) and reuses the same
+/// judgment; every other `ConnError` variant (a Hello-exchange error,
+/// unreachable here — the exchange already finished before `serve_control`
+/// ever ran, or a stream error with no connection error under it) falls to
 /// `local`. `Err(_)` is `serve_control`'s task itself panicking/being
 /// aborted — `local`, a bug on this side, never a peer/path judgment.
 #[cfg(any(unix, test))]
 fn classify_target_connection_loss(
     joined: &Result<Result<(), crate::server::ConnError>, tokio::task::JoinError>,
+    close_reason: Option<&qsh_transport::ConnectionError>,
 ) -> ReconnectCause {
     use crate::server::ConnError;
     match joined {
-        Ok(Ok(())) => ReconnectCause::PeerClosed,
+        Ok(Ok(())) => {
+            close_reason.map_or(ReconnectCause::PeerClosed, super::classify_connection_error)
+        }
         Ok(Err(ConnError::Connection(e))) => super::classify_connection_error(e),
         Ok(Err(ConnError::Stream(qsh_transport::StreamError::Read(
             qsh_transport::ReadError::ConnectionLost(e),
@@ -936,6 +960,27 @@ const WAKE_FAST_WINDOW: Duration = Duration::from_secs(60);
 #[cfg(any(unix, test))]
 const WAKE_FAST_CAP: Duration = Duration::from_secs(2);
 
+/// A registration that lived at least this long before it ended counts as
+/// stable (ADR-0042 decision 2): the loss that ends it starts the redial
+/// sequence over. One that ends sooner is a quick loss. Sixty seconds is
+/// over ten times the 5 s a registration is allowed to look dead for
+/// (ADR-0041), so a connection that outlives it was carrying traffic under
+/// the conditions that are now failing, and the next loss is news rather
+/// than a continuation.
+#[cfg(any(unix, test))]
+const STABLE_REGISTRATION: Duration = Duration::from_secs(60);
+
+/// The ceiling on the redial delay that consecutive quick losses build up
+/// to, before it is lowered to a smaller configured `backoff_max_ms` or
+/// raised to a larger `backoff_initial_ms` (ADR-0042 decision 2). Eight
+/// seconds is the fourth doubling of the 500 ms default, a little over the
+/// 5 s detection window of a registration: enough to stop a stalled host
+/// from being dialled into at four attempts a second, and small enough that
+/// a real outage right after a flapping spell is still recovered within
+/// seconds of the network returning.
+#[cfg(any(unix, test))]
+const QUICK_LOSS_CAP: Duration = Duration::from_secs(8);
+
 /// Exponential backoff with jitter between reconnect attempts
 /// (`docs/design/protocol.md` §11-4): starts at `limits.initial`, doubles
 /// (capped at `limits.max`) on every subsequent [`Backoff::next_delay`]
@@ -951,6 +996,14 @@ const WAKE_FAST_CAP: Duration = Duration::from_secs(2);
 /// loss. The window clamps the sequence itself, so when it closes the
 /// doubling resumes from where it was.
 ///
+/// [`Backoff::loss_delay`] is the delay after an *established* registration
+/// ends (ADR-0042 decision 2). A registration that lived under
+/// [`STABLE_REGISTRATION`] is a quick loss, and consecutive quick losses
+/// double the delay before the redial, from `initial` for the first up to
+/// [`QUICK_LOSS_CAP`]. That count is kept apart from the dial-failure
+/// sequence above: a failed dial never extends it, and a registration that
+/// is accepted does not clear it (only a stable one or a wake does).
+///
 /// Generic over the RNG so `docs/design/testing.md` L2's property tests can
 /// inject a seeded `rand::rngs::StdRng` for a fully deterministic sequence;
 /// production uses `rand::rngs::StdRng::from_os_rng()` — `Send`, unlike
@@ -964,6 +1017,10 @@ struct Backoff<R> {
     current: Option<Duration>,
     /// Until when the wake fast cap applies, if a window is open.
     window_until: Option<Instant>,
+    /// Consecutive registrations that ended before [`STABLE_REGISTRATION`].
+    /// Cleared by a stable one and by a wake, never by an accepted
+    /// registration (which is what makes a flapping one visible).
+    quick_losses: u32,
     rng: R,
 }
 
@@ -978,6 +1035,7 @@ impl<R: rand::RngCore> Backoff<R> {
             limits,
             current: None,
             window_until: None,
+            quick_losses: 0,
             rng,
         }
     }
@@ -989,10 +1047,7 @@ impl<R: rand::RngCore> Backoff<R> {
     /// [`Self::next_delay`] with the monotonic time supplied, for the fast
     /// window.
     fn next_delay_at(&mut self, now: Instant) -> Duration {
-        let cap = self
-            .window_until
-            .filter(|until| now < *until)
-            .map(|_| self.limits.initial.max(WAKE_FAST_CAP).min(self.limits.max));
+        let cap = self.window_cap(now);
         let mut raw = match self.current {
             None => self.limits.initial,
             Some(prev) => prev.saturating_mul(Self::MULTIPLIER).min(self.limits.max),
@@ -1005,16 +1060,66 @@ impl<R: rand::RngCore> Backoff<R> {
         cap.map_or(delay, |cap| delay.min(cap))
     }
 
+    /// The wake fast cap, while its window is open at `now`.
+    fn window_cap(&self, now: Instant) -> Option<Duration> {
+        self.window_until
+            .filter(|until| now < *until)
+            .map(|_| self.limits.initial.max(WAKE_FAST_CAP).min(self.limits.max))
+    }
+
+    /// The delay before redialling after a registration that lived `lived`
+    /// ended on its own (ADR-0042 decision 2).
+    fn loss_delay(&mut self, lived: Duration) -> Duration {
+        self.loss_delay_at(lived, Instant::now())
+    }
+
+    /// [`Self::loss_delay`] with the monotonic time supplied, for the fast
+    /// window.
+    ///
+    /// A stable registration clears the quick-loss count and gets the
+    /// ordinary first delay. The first quick loss gets it too, so one
+    /// unlucky registration costs nothing extra. From the second
+    /// consecutive one the delay doubles per loss, up to [`QUICK_LOSS_CAP`]
+    /// (raised to `initial` and lowered to `limits.max` when those say
+    /// so). The wake window caps it like any other delay.
+    fn loss_delay_at(&mut self, lived: Duration, now: Instant) -> Duration {
+        if lived >= STABLE_REGISTRATION {
+            self.quick_losses = 0;
+            return self.next_delay_at(now);
+        }
+        self.quick_losses = self.quick_losses.saturating_add(1);
+        if self.quick_losses < 2 {
+            return self.next_delay_at(now);
+        }
+        let window_cap = self.window_cap(now);
+        let ceiling = self.limits.initial.max(QUICK_LOSS_CAP).min(self.limits.max);
+        // `quick_losses` is at least 2 here; the shift saturates far below
+        // overflow because the ceiling is reached within a few doublings.
+        let doublings = (self.quick_losses - 1).min(16);
+        let mut raw = self
+            .limits
+            .initial
+            .saturating_mul(Self::MULTIPLIER.saturating_pow(doublings))
+            .min(ceiling);
+        if let Some(cap) = window_cap {
+            raw = raw.min(cap);
+        }
+        let delay = jitter(raw, self.limits.jitter_pct, &mut self.rng);
+        window_cap.map_or(delay, |cap| delay.min(cap))
+    }
+
     /// A successful registration: the next failure starts the sequence
     /// over from `initial` again.
     fn reset(&mut self) {
         self.current = None;
     }
 
-    /// The machine woke: restart the sequence at `initial` and open the
-    /// fast window.
+    /// The machine woke: restart the sequence at `initial`, forget the quick
+    /// losses (they were measured against a path the sleep made stale) and
+    /// open the fast window.
     fn wake(&mut self, now: Instant) {
         self.reset();
+        self.quick_losses = 0;
         self.window_until = Some(now + WAKE_FAST_WINDOW);
     }
 }
@@ -1091,6 +1196,13 @@ struct ReconnectEvent<'a> {
     /// saw received UDP datagrams); same presence rule as `srtt_ms`.
     #[serde(skip_serializing_if = "Option::is_none")]
     silence_ms: Option<u64>,
+    /// Longest gap (ms) between two ticks of this process's own path watch
+    /// since it last saw the path carry anything, only where `silence_ms`
+    /// is present. One beat (250 ms by default) means the process was
+    /// running normally while the silence built up; seconds mean it was
+    /// starved (ADR-0042). Same presence rule as `srtt_ms`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tick_gap_ms: Option<u64>,
 }
 
 #[cfg(any(unix, test))]
@@ -1113,6 +1225,7 @@ impl ReconnectEvent<'_> {
             slept_ms = self.slept_ms,
             srtt_ms = self.srtt_ms,
             silence_ms = self.silence_ms,
+            tick_gap_ms = self.tick_gap_ms,
             "{}",
             line
         );

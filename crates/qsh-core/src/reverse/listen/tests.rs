@@ -43,6 +43,7 @@ fn registration_event_json_line_has_the_documented_field_set() {
         since_registered_ms: None,
         srtt_ms: None,
         silence_ms: None,
+        tick_gap_ms: None,
     })
     .unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&with_generation).unwrap();
@@ -66,6 +67,7 @@ fn registration_event_json_line_has_the_documented_field_set() {
         since_registered_ms: None,
         srtt_ms: None,
         silence_ms: None,
+        tick_gap_ms: None,
     })
     .unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&without_generation).unwrap();
@@ -91,6 +93,7 @@ fn registration_event_json_line_covers_the_expired_event() {
         since_registered_ms: None,
         srtt_ms: None,
         silence_ms: None,
+        tick_gap_ms: None,
     })
     .unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&line).unwrap();
@@ -117,6 +120,7 @@ fn registration_event_json_line_covers_the_lost_event_with_since_registered_ms()
         since_registered_ms: Some(1_234),
         srtt_ms: None,
         silence_ms: None,
+        tick_gap_ms: None,
     })
     .unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&line).unwrap();
@@ -2930,12 +2934,12 @@ async fn datagram_liveness_controller_control_stall_is_not_path_dead_but_a_sever
     rig.shutdown().await;
 }
 
-/// Issue #10 request 3: `srtt_ms`/`silence_ms` are open-vocabulary fields
-/// that ride only on a `lost` this process's own watch ruled. Absent, never
+/// Issue #10 request 3 and issue #11 request 2: `srtt_ms`/`silence_ms`/
+/// `tick_gap_ms` are open-vocabulary fields that ride only on a `lost` this process's own watch ruled. Absent, never
 /// null, otherwise.
 #[test]
-fn registration_event_json_line_carries_srtt_and_silence_ms_only_when_present() {
-    let lost = |srtt_ms, silence_ms| RegistrationEvent {
+fn registration_event_json_line_carries_srtt_silence_and_tick_gap_ms_only_when_present() {
+    let lost = |srtt_ms, silence_ms, tick_gap_ms| RegistrationEvent {
         event: "lost",
         host: "personal-mac",
         fingerprint: "sha256:abc",
@@ -2945,18 +2949,22 @@ fn registration_event_json_line_carries_srtt_and_silence_ms_only_when_present() 
         since_registered_ms: Some(1_234),
         srtt_ms,
         silence_ms,
+        tick_gap_ms,
     };
-    let ruled: serde_json::Value =
-        serde_json::from_str(&serde_json::to_string(&lost(Some(37), Some(1_250))).unwrap())
-            .unwrap();
+    let ruled: serde_json::Value = serde_json::from_str(
+        &serde_json::to_string(&lost(Some(37), Some(1_250), Some(260))).unwrap(),
+    )
+    .unwrap();
     assert_eq!(ruled["srtt_ms"], 37);
     assert_eq!(ruled["silence_ms"], 1_250);
+    assert_eq!(ruled["tick_gap_ms"], 260);
 
     let announced: serde_json::Value =
-        serde_json::from_str(&serde_json::to_string(&lost(None, None)).unwrap()).unwrap();
+        serde_json::from_str(&serde_json::to_string(&lost(None, None, None)).unwrap()).unwrap();
     assert!(announced.get("srtt_ms").is_none(), "absent, never null");
     assert!(announced.get("silence_ms").is_none(), "absent, never null");
-    lost(Some(37), Some(1_250)).emit();
+    assert!(announced.get("tick_gap_ms").is_none(), "absent, never null");
+    lost(Some(37), Some(1_250), Some(260)).emit();
 }
 
 #[test]
