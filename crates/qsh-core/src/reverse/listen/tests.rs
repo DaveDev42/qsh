@@ -2967,6 +2967,8 @@ fn registration_event_json_line_carries_srtt_silence_and_tick_gap_ms_only_when_p
     lost(Some(37), Some(1_250), Some(260)).emit();
 }
 
+// `set_test_path_watch` exists only on unix, like the other test hooks here.
+#[cfg(unix)]
 #[test]
 fn listen_path_watch_takes_the_recovery_section_and_set_test_path_watch_still_wins() {
     use std::time::Duration;
