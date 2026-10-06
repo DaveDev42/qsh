@@ -48,16 +48,24 @@ OpenSSH Ed25519 key, `qsh doctor` gained `acl_forward_socks_ineffective`,
 and the reverse `cause` vocabulary now separates a QUIC idle timeout
 (`idle_timeout`) from `path_dead`. Two M11 items are field work for a
 person: observing the `cause` distribution on real links, and 72 fuzz-hours
-on the new OpenSSH key parser. M12 (supervised tunnels and `qsh setup`) has
-landed its features on main, with no release cut from them yet:
+on the new OpenSSH key parser. M12 (supervised tunnels and `qsh setup`)
+first shipped in `v0.4.0`:
 `qsh tunnel open --supervise` re-establishes a `-L`, `-D` or `-R` tunnel
 after a lost connection, `--accept-hold` holds new connections during the
 gap, the `qsh::lifecycle` stderr lines mark process start and end, and
 `qsh setup` walks one machine through a role. The closing campaign items
 are for a person: the `p1-supervise-wake` rounds
 (`docs/campaigns/p1-supervise-wake.md`) and the `p1-setup-stopwatch`
-rounds (`docs/campaigns/p1-setup-stopwatch.md`). What works end to end
-today:
+rounds (`docs/campaigns/p1-setup-stopwatch.md`). M13 (measurement and
+release groundwork) shipped in `v0.4.0` through `v0.4.2`: a nightly
+performance trend job, closing stalled tunnel streams so a reader that
+stops reading cannot starve the PTY, `qsh doctor --fail-on`, a stateless
+reset key so a restarted server drops attached clients quickly, an
+`aarch64-unknown-linux-musl` release asset, `[transport].keep_alive_ms`,
+`[recovery]` path-watch settings, and a wider default detection window for
+reverse registrations. Two M13 items are for a person: the nightly job's
+injected-delay run and the old-glibc check of the aarch64 musl asset
+(`docs/campaigns/p1-aarch64-musl.md`). What works end to end today:
 
 - `qsh exec host -- cmd`, in human mode or as a single `qsh.cli/v1` JSON
   envelope with the remote exit code, stdout and stderr.
@@ -125,8 +133,8 @@ http://internal-service/`.
 ## Install
 
 Prebuilt binaries for macOS (arm64, x86_64), Linux (x86_64 and aarch64
-against glibc, x86_64 and aarch64 against musl) and Windows (x86_64) are attached to
-each [GitHub release](https://github.com/DaveDev42/qsh/releases). The
+against glibc, x86_64 and aarch64 against musl) and Windows (x86_64) are
+attached to each [GitHub release](https://github.com/DaveDev42/qsh/releases). The
 one-line installer below covers macOS and Linux; on Windows take the
 `.zip` (see [Manual download](#manual-download)).
 
@@ -765,7 +773,7 @@ to the registry yet.
 | M10 | Release (installers, Homebrew, notarization, musl, provenance) | Pipeline done; clean-VM campaign open |
 | M11 | Issue follow-ups and ACL visibility (first P1 milestone) | Features done; `cause` observation and parser fuzz-hours open |
 | M12 | Supervised tunnels (`--supervise`, `--accept-hold`) and `qsh setup` | Features done, first shipped in `v0.4.0`; the `p1-supervise-wake` and `p1-setup-stopwatch` campaign rounds are open (human-owned) |
-| M13 | Measurement and release groundwork | In progress; most items shipped in `v0.4.0` |
+| M13 | Measurement and release groundwork | Features done, shipped in `v0.4.0` through `v0.4.2`; the nightly perf injected-delay run and the aarch64 musl old-glibc check are open (human-owned) |
 | M14–M19 | Rest of P1, in `docs/ROADMAP.md` §5 | Not started |
 
 The Homebrew tap (`DaveDev42/tap`) and the release workflow's auto-bump
