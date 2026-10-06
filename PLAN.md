@@ -24,7 +24,7 @@ README "First run" 절은 M7·M9 캠페인의 측정 대상이라 M13이 고치�
 
 ### 0.2 M11에서 넘어온 사람 몫 둘 (`docs/ROADMAP.md` §5.5)
 
-- [ ] **`cause` 분포 관측 기록.** M13 (k)의 착수 조건이다. M11 (a)가 담긴 빌드로 현장에서 `lost`/`retry` 줄을 모아, 그 `cause` 분포를 사람이 이슈 #4 코멘트나 캠페인 문서에 적어야 한다. ADR-0023 결정 25가 적듯 이슈 #6의 holder 오류 계수와 0.3.0 hub의 `cause=path_dead` 58건은 이 기록을 대신하지 못한다. 소유: 사람.
+- [x] **`cause` 분포 관측 기록.** 이슈 #10 본문과 2026-10-04T14:48Z 코멘트가 이 기록이다(`idle_timeout` 0, `path_dead` 지배, ADR-0041 맥락 절). M13 (k)의 착수 조건이다. M11 (a)가 담긴 빌드로 현장에서 `lost`/`retry` 줄을 모아, 그 `cause` 분포를 사람이 이슈 #4 코멘트나 캠페인 문서에 적어야 한다. ADR-0023 결정 25가 적듯 이슈 #6의 holder 오류 계수와 0.3.0 hub의 `cause=path_dead` 58건은 이 기록을 대신하지 못한다. 소유: 사람.
 - [ ] **`parse_openssh_key` fuzz 타깃의 누적 72 fuzz-hours.** 기록 자리는 `docs/campaigns/m8-fuzz.md`. 소유: 사람.
 
 ### 0.3 M12에서 넘어온 사람 몫 둘 (`docs/ROADMAP.md` §5.5)
@@ -73,7 +73,7 @@ M12가 닫혔고 M13 자체에는 선행 조건이 없으므로 충족됐다. St
 - [x] **DoD (e) — graceful re-exec H1.** SIGTERM drain이 닫은 세션 수를 payload 없는 구조적 로그 한 줄로 남긴다. 새 doctor 진단이 `EXPECTED_DOCTOR_CODES`에 24번째로 오르고, `docs/CLI.md` §6.11·§6.17과 `crates/qsh-core/src/doctor.rs` 모듈 doc의 개수 산문이 같은 커밋에서 바뀐다. 근거: Step 13. 소유: 에이전트. 완료: `9442364`. drain·배너 테스트 넷은 부하 아래 50/50이고, CI 36781422270이 초록이다.
 - [x] **DoD (f) — H1b stateless reset key 고정.** testkit에서 `qsh serve`를 재시작하면 attach 중이던 클라이언트가 재시작 뒤 첫 패킷에 stateless reset을 받아 `REDIAL_DEADLINE`(2초) 안에 단절을 확정하고, 45초 idle timeout을 기다리지 않은 채 세션 소실을 `docs/design/protocol.md` §10-2의 비구별성 규칙과 `docs/CLI.md` §6.3·§6.4의 현행 attach 실패 코드로 보고한다. reset key 파일은 0600이다. 읽을 수 없거나 형식이 틀린 파일을 만나면 조용히 새 키를 만들지 않고 ADR-0036이 정한 동작을 한다. reset key는 로그와 audit 어디에도 나오지 않는다. `docs/design/threat-model.md` §4 D·G에 키 유출 행이 오른다. wire diff 0. 근거: Step 5·16. 소유: 에이전트, 사용자(ADR 승인). 완료: ADR-0036 승인(2026-10-01), 구현 `213001f`(`serve_restart_reset.rs`, threat-model D14·G6). CI 36800227378이 초록이다.
 - [x] **DoD (g)~(j) — 배포 결정 넷.** 각 결정이 커밋에 남는다. (g)는 `publish-dry-run`, (h)·(i)는 설치 스크립트 테스트와 `scripts/README.md`·README 문면, (j)는 핀 테스트 또는 기각 기록이 근거다. 근거: Step 9·10·11·12. 소유: 에이전트. 완료: (g) `fe01fc2`, (h) `b73ea88`, (i) `233ada0`, (j) `21844ca`는 기각하지 않고 핀으로 고정했다. (h)·(i)의 macOS 하네스 수정은 `f993d84`이고 CI 36781422270이 초록이다.
-- [ ] **DoD (k) — ADR-0021 결정 1·4(관측 게이트).** 구현했다면 새 설정 값의 검증이 `ReverseConfig::backoff`와 같은 fail-closed `CONFIG_ERROR` 패턴이고 설정이 없을 때 동작이 오늘과 같다. ADR-0021 결정 6의 문서 자리가 같은 커밋에서 바뀐다. `[recovery]` 상한은 세 `detection_budget`에서 역산하고, 세 테스트와 `a_real_60_second_blackout_survives_and_resumes_the_same_session`이 고치지 않은 예산으로 초록이다. 구현하지 않았다면 관측 기록 부재와 이월 대상이 ROADMAP M13 절에 적힌다. 근거: Step 17 또는 Step 18. 소유: 에이전트, 사람(관측 기록).
+- [x] **DoD (k) — ADR-0021 결정 1·4(관측 게이트).** 결정 1은 `18cd299`, 결정 4는 `cbf0564`. 역방향 등록 연결의 기본과 상한은 ADR-0041(`bf0d7e5`)이 따로 정하므로 "설정이 없을 때 오늘과 같다"는 attach와 supervised 터널에 대한 판정이다. 구현했다면 새 설정 값의 검증이 `ReverseConfig::backoff`와 같은 fail-closed `CONFIG_ERROR` 패턴이고 설정이 없을 때 동작이 오늘과 같다. ADR-0021 결정 6의 문서 자리가 같은 커밋에서 바뀐다. `[recovery]` 상한은 세 `detection_budget`에서 역산하고, 세 테스트와 `a_real_60_second_blackout_survives_and_resumes_the_same_session`이 고치지 않은 예산으로 초록이다. 구현하지 않았다면 관측 기록 부재와 이월 대상이 ROADMAP M13 절에 적힌다. 근거: Step 17 또는 Step 18. 소유: 에이전트, 사람(관측 기록).
 - [ ] **DoD 마감 — 마감 공통 절차 1·2.** 구속 문서 태그를 대조하고 README를 동기화한다. 근거: Step 18. 소유: 에이전트.
 - [ ] **계획 규율 — 새 타이밍 민감 테스트의 부하 반복.** ROADMAP M13 DoD에는 없는 줄이다. M12가 세운 규율(`docs/design/testing.md` CI 규율)을 따라 M13이 더한 타이밍 민감 테스트 전부가 `scripts/stress/run.sh`로 CPU 부하 아래 50회 연속 초록이다. Step 1이 ROADMAP M13 DoD에 이 줄을 더할지는 §8 #7이 정한다. 근거: 각 스텝 (c), Step 18. 소유: 에이전트.
 
@@ -301,6 +301,8 @@ Step 2의 테스트를 `ci.yml` acceptance job에 `QSH_ACCEPTANCE_STRICT` 아래
 ### Step 17 — (k) ADR-0021 결정 1(과 4) 구현 (0.35~0.5ew, 관측 기록 뒤. 기록이 없으면 0ew)
 
 근거: ADR-0021 결정 1·4·6·7과 결과 절, ROADMAP M13 범위 (k)와 DoD (k), ADR-0023 결정 25. 선행: §0.2의 관측 기록.
+
+**착지 (2026-10-06):** 결정 7 분기는 결정 1과 4 둘 다다(`cbf0564` 본문). 결정 1 `18cd299`, 결정 4 `cbf0564`, 역방향 등록 분리는 ADR-0041(`bf0d7e5`), 후속은 ADR-0042(`0d6e230`)와 ADR-0041 결정 8(`bfa7cc7`). `v0.4.2`에 실린다.
 
 **(a) 범위:** 관측 기록을 먼저 읽고 결정 7의 분기를 커밋 본문에 적는다(기록의 위치와 `cause` 값별 계수). 결정 1은 `[transport].keep_alive_ms`(기본 15000, `1000..=20000`)를 연다. `qsh-core`의 `Config`가 읽고 검증하며 범위 밖이면 clamp하지 않고 `CONFIG_ERROR`(`retryable: false`)로 기동을 거절한다(`ReverseConfig::backoff` 선례). 값은 `qsh-transport`의 transport config 생성 함수에 인자로 넘어가고 `KEEP_ALIVE_INTERVAL`은 기본값 상수로 남는다. `MAX_IDLE_TIMEOUT`은 건드리지 않는다(결정 2). 결정 4까지 가는 분기면 `[recovery].probe_interval_ms`, `min_dead_after_ms`, `strikes`를 열고, 범위 상한은 `crates/qsh-cli/tests/reverse_blackout.rs`, `crates/qsh-cli/tests/attach_recovery.rs`, `crates/qsh-testkit/tests/reverse_resume_chaos.rs`의 `detection_budget`에서 역산한다. 세 값은 대화형 recovery, 두 역방향 자리, supervised 터널의 `PathWatch`에 모두 들어간다. M11 (a)가 두 역방향 자리에 둔 `#[cfg(test)]` `PathWatchConfig` 주입은 그대로 둔다. 나머지 세 필드는 열지 않는다.
 
