@@ -103,7 +103,9 @@ pub(crate) enum ReconnectCause {
     /// non-test build; see the sibling `#[cfg_attr]`s below).
     #[cfg_attr(not(any(unix, test)), allow(dead_code))]
     Resolve,
-    /// The dial did not complete within the per-attempt timeout.
+    /// The dial did not complete within the per-attempt timeout, or the
+    /// controller's `Hello` reply after it did not arrive within
+    /// `HELLO_TIMEOUT` (issue #11 request 3).
     #[cfg_attr(not(any(unix, test)), allow(dead_code))]
     DialTimeout,
     /// Transport-level refusal or connect error (peer at capacity,
@@ -117,7 +119,8 @@ pub(crate) enum ReconnectCause {
     /// The controller's `host.reverse` ACL/registry choke point refused
     /// the registration.
     RegistrationDenied,
-    /// The peer closed an already-established connection cleanly.
+    /// The peer closed an already-established connection, or answered it with
+    /// a stateless reset because it no longer holds it.
     PeerClosed,
     /// `PathWatch` declared the path dead on this side, or the peer closed
     /// the connection with [`CLOSE_CODE_PATH_DEAD`] because its own
@@ -127,8 +130,10 @@ pub(crate) enum ReconnectCause {
     /// established connection. Distinct from [`Self::PathDead`]: no
     /// `PathWatch` verdict and no path-dead close frame was involved.
     IdleTimeout,
-    /// Anything originating on this side: a shutdown signal, or a local
-    /// I/O error.
+    /// Anything originating on this side, or ending in a way no other value
+    /// names. Never a timeout: those are [`Self::DialTimeout`],
+    /// [`Self::IdleTimeout`] and [`Self::PathDead`]. `docs/CLI.md` §6.13
+    /// lists every code path that produces it.
     Local,
 }
 
@@ -195,12 +200,17 @@ const CLOSE_CODE_PATH_DEAD: u32 = 0x1004;
 /// (ADR-0022 결정 5·6): no `PathWatch` verdict and no path-dead close frame
 /// was involved, and on a live reverse path `PathWatch` declares death
 /// long before the 45 s idle timeout can expire, so the two causes tell an
-/// operator different things. Everything else — `LocallyClosed` (this side
-/// closed it, so `local` by definition), `ConnectionClosed`, `Reset`,
-/// `VersionMismatch`, `TransportError`, `CidsExhausted` — has no sharper
-/// bucket in this fixed nine-value vocabulary, so it falls to `local` as
-/// the catch-all "nothing peer-initiated or PathWatch-judged about this"
-/// bucket.
+/// operator different things. `Reset` — a stateless reset, which only the
+/// peer's endpoint can send, for a connection it no longer holds — is
+/// `peer_closed` (issue #11 request 3: it used to fall to `local`, which
+/// read as a local decision when it was the peer dropping the connection,
+/// usually after its own `path_dead` close frame did not get through).
+/// Everything else — `LocallyClosed` (this side closed it, so `local` by
+/// definition), `ConnectionClosed`, `VersionMismatch`, `TransportError`,
+/// `CidsExhausted` — has no sharper bucket in this fixed nine-value
+/// vocabulary, so it falls to `local` as the catch-all "nothing
+/// peer-initiated or PathWatch-judged about this" bucket. `docs/CLI.md`
+/// §6.13 lists every code path that ends there.
 pub(crate) fn classify_connection_error(err: &qsh_transport::ConnectionError) -> ReconnectCause {
     use qsh_transport::ConnectionError;
     match err {
@@ -210,6 +220,11 @@ pub(crate) fn classify_connection_error(err: &qsh_transport::ConnectionError) ->
             ReconnectCause::PathDead
         }
         ConnectionError::ApplicationClosed(_) => ReconnectCause::PeerClosed,
+        // A stateless reset is a packet only the peer's endpoint can send,
+        // and it answers a connection the peer no longer has: typically one
+        // it already condemned (its own `path_dead` close was lost on the
+        // way, or it restarted). Nothing about it originates here.
+        ConnectionError::Reset => ReconnectCause::PeerClosed,
         ConnectionError::TimedOut => ReconnectCause::IdleTimeout,
         _ => ReconnectCause::Local,
     }
@@ -245,6 +260,26 @@ mod tests {
         );
         assert_eq!(
             classify_connection_error(&qsh_transport::ConnectionError::LocallyClosed),
+            ReconnectCause::Local
+        );
+    }
+
+    /// Issue #11 request 3: a stateless reset is the peer dropping a
+    /// connection, not a local decision. What stays `local` is what this
+    /// side closed itself or what the transport reports about a peer that
+    /// broke the protocol.
+    #[test]
+    fn classify_connection_error_reads_a_stateless_reset_as_the_peer_dropping_the_connection() {
+        assert_eq!(
+            classify_connection_error(&qsh_transport::ConnectionError::Reset),
+            ReconnectCause::PeerClosed
+        );
+        assert_eq!(
+            classify_connection_error(&qsh_transport::ConnectionError::CidsExhausted),
+            ReconnectCause::Local
+        );
+        assert_eq!(
+            classify_connection_error(&qsh_transport::ConnectionError::VersionMismatch),
             ReconnectCause::Local
         );
     }

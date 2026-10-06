@@ -42,6 +42,17 @@
 //! tunnel carried on it with no replay; it gets
 //! [`PathWatchConfig::reverse_default`] on both ends.
 //!
+//! **A starved watchdog is not a dead path either.** The watch measures the
+//! path with its own timer, so a process that was not scheduled (a host at
+//! load 50, a debugger, a `SIGSTOP`) reads its own absence as the path's
+//! silence. [`PathState::observe_tick`] compares each tick's actual gap with
+//! the beat it slept; a tick that fired a whole [`PathWatchConfig::probe_interval`]
+//! or more late discounts that lateness from the silence and cannot rule the
+//! path dead on that tick (ADR-0042 decision 1). This is the sibling of the
+//! wake detector (`super::wake`): that one fires when the monotonic clock
+//! *stopped* (the wall clock outran it), this one when the monotonic clock
+//! ran and the process did not.
+//!
 //! **A stalled consumer is not a dead path.** If the frontend stops
 //! draining events, the pumps park on a full queue and stop reading — which
 //! looks exactly like silence. Callers wrap those awaits in
@@ -115,6 +126,15 @@ impl PathWatchConfig {
         }
     }
 
+    /// How late a watchdog tick must fire before the lateness is blamed on
+    /// this process rather than the path (ADR-0042 decision 1): one probe
+    /// interval, the unit a strike is counted in. Derived rather than a
+    /// field so the struct, and the byte-identical `Debug` output the
+    /// `[recovery]` knobs promise, do not change.
+    fn self_delay_threshold(&self) -> Duration {
+        self.probe_interval
+    }
+
     /// The silence that means death on a path with this smoothed RTT.
     fn dead_after(&self, rtt: Duration) -> Duration {
         self.min_dead_after
@@ -131,12 +151,21 @@ impl PathWatchConfig {
 /// connection's UDP receive counter advance ([`ProbeSource::rx_datagrams`]),
 /// whichever is later. The counter is only sampled per tick, so the figure is
 /// tick-granular and can understate the real silence by at most one cadence.
+/// Time a late tick showed this process was not running is discounted from it
+/// ([`PathState::observe_tick`]), so it is the silence the watch actually
+/// observed, not wall time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeadVerdict {
     /// Smoothed RTT at the verdict.
     pub srtt: Duration,
-    /// Time since the watchdog last saw the path carry anything.
+    /// Time since the watchdog last saw the path carry anything, less any
+    /// time it was itself too late to see.
     pub silence: Duration,
+    /// The longest gap between two consecutive ticks of the watchdog since
+    /// it last saw the path carry anything. A healthy process reads about
+    /// one beat (250 ms by default); a figure of seconds says this process
+    /// was starved while the verdict's silence built up.
+    pub tick_gap: Duration,
 }
 
 /// What the watchdog decided on one tick.
@@ -164,6 +193,14 @@ pub struct PathState {
     /// Set by a wake: the next verdict probes at once, whatever the silence
     /// so far, instead of waiting out a cadence beat.
     probe_now: bool,
+    /// Longest tick gap seen since the last liveness evidence.
+    max_tick_gap: Duration,
+    /// How late the tick about to be judged fired, when it fired a whole
+    /// [`PathWatchConfig::probe_interval`] or more late. The verdict takes
+    /// it once: a path cannot be ruled dead on a tick unless its silence
+    /// also clears `dead_after` by this much, because whatever arrived
+    /// while this process was not running is still waiting to be read.
+    pending_margin: Duration,
 }
 
 impl PathState {
@@ -176,6 +213,8 @@ impl PathState {
             last_probe: None,
             unanswered: 0,
             probe_now: false,
+            max_tick_gap: Duration::ZERO,
+            pending_margin: Duration::ZERO,
         }
     }
 
@@ -190,6 +229,9 @@ impl PathState {
     pub fn observe_inbound(&mut self, now: Instant) {
         self.last_inbound = now;
         self.unanswered = 0;
+        // The tick gap in a verdict describes the silence it ruled on, so it
+        // starts over with every piece of evidence.
+        self.max_tick_gap = Duration::ZERO;
     }
 
     /// Session traffic arrived — output, an event, a `Ping` the host sent
@@ -219,6 +261,56 @@ impl PathState {
     pub fn observe_wake(&mut self, now: Instant) {
         self.last_activity = now;
         self.probe_now = true;
+    }
+
+    /// One watchdog tick fired `gap` after the previous one, having slept
+    /// `expected`. Returns how late it was when that was a self-delay.
+    ///
+    /// A tick that fires a whole [`PathWatchConfig::probe_interval`] or more
+    /// late means this process, not the path, was away: the host was
+    /// starved, or the runtime did not get to the timer. Silence counted
+    /// over that stretch says nothing about the path, so the lateness is
+    /// moved off the silence clock (`last_inbound` shifts forward by it,
+    /// never past `now`) and this tick may not rule the path dead unless
+    /// the silence clears `dead_after` by that lateness as well
+    /// ([`Self::verdict`]); the next on-time tick judges as usual, by which
+    /// time the datagrams that queued up while this process was away have
+    /// been read. The sample also feeds [`DeadVerdict::tick_gap`].
+    ///
+    /// `probe_interval` is the threshold because it is the unit of a strike:
+    /// a tick that late has lost a whole probe slot, so the strike count is
+    /// already distorted by as much as one strike. Anything shorter only
+    /// inflates the silence by less than the tick granularity it already
+    /// has. Silence the clock did not run through (a sleeping machine) is
+    /// the wake detector's, not this one's.
+    ///
+    /// Lateness is discounted, not forgiven: a path that really is dead is
+    /// still ruled dead once the *observed* silence reaches `dead_after`,
+    /// so a host that is starved on every tick delays the verdict in
+    /// proportion instead of disabling it.
+    pub fn observe_tick(
+        &mut self,
+        now: Instant,
+        gap: Duration,
+        expected: Duration,
+        cfg: &PathWatchConfig,
+    ) -> Option<Duration> {
+        self.max_tick_gap = self.max_tick_gap.max(gap);
+        let late = gap.saturating_sub(expected);
+        if late < cfg.self_delay_threshold() {
+            return None;
+        }
+        self.last_inbound = self
+            .last_inbound
+            .checked_add(late)
+            .map_or(now, |shifted| shifted.min(now));
+        self.pending_margin = late;
+        Some(late)
+    }
+
+    /// The longest tick gap since the last liveness evidence.
+    pub fn max_tick_gap(&self) -> Duration {
+        self.max_tick_gap
     }
 
     /// How long the path has been silent as of `now`: the time since the
@@ -252,9 +344,13 @@ impl PathState {
     /// Decide one tick, recording a probe if it orders one.
     pub fn verdict(&mut self, now: Instant, rtt: Duration, cfg: &PathWatchConfig) -> Verdict {
         let silence = now.saturating_duration_since(self.last_inbound);
+        // A tick that fired late rules only on silence that also clears the
+        // lateness ([`Self::observe_tick`]); taken here so it covers exactly
+        // this tick.
+        let margin = std::mem::take(&mut self.pending_margin);
         // Death needs both: enough unanswered probes that this is not one
         // lost datagram, and enough silence that it is not a slow path.
-        if self.unanswered >= cfg.strikes && silence >= cfg.dead_after(rtt) {
+        if self.unanswered >= cfg.strikes && silence >= cfg.dead_after(rtt).saturating_add(margin) {
             return Verdict::Dead;
         }
         let cadence = self.cadence(now, cfg);
@@ -400,6 +496,15 @@ impl PathWatch {
         self.state().observe_wake(Instant::now());
     }
 
+    /// One watchdog tick fired `gap` after the previous one, having slept
+    /// `expected`. See [`PathState::observe_tick`]; returns the lateness
+    /// when it was discounted.
+    fn ticked(&self, gap: Duration, expected: Duration) -> Option<Duration> {
+        let cfg = self.inner.cfg;
+        self.state()
+            .observe_tick(Instant::now(), gap, expected, &cfg)
+    }
+
     /// Apply one observation, waking a watchdog that is sleeping out an
     /// idle-length beat if this is what put the attach back in use.
     fn observe(&self, f: impl FnOnce(&mut PathState, Instant)) {
@@ -447,8 +552,13 @@ impl PathWatch {
         let verdict = state.verdict(now, rtt, &cfg);
         if verdict == Verdict::Dead {
             let silence = state.silence(now);
+            let tick_gap = state.max_tick_gap();
             drop(state);
-            *self.dead_verdict_slot() = Some(DeadVerdict { srtt: rtt, silence });
+            *self.dead_verdict_slot() = Some(DeadVerdict {
+                srtt: rtt,
+                silence,
+                tick_gap,
+            });
         }
         verdict
     }
@@ -631,6 +741,10 @@ pub(crate) async fn watch_path_with_wake<S: ProbeSource>(
         // wake this task four times a second to learn something nobody is
         // waiting to hear.
         let period = watch.cadence();
+        let slept_from = Instant::now();
+        // Only the timer arm is a tick whose gap means anything: the other
+        // arms re-time or end the round.
+        let mut timer_fired = false;
         tokio::select! {
             // The unambiguous case: QUIC itself gave up, or the peer
             // closed. No probing needed, and no reason to wait for a tick.
@@ -644,7 +758,7 @@ pub(crate) async fn watch_path_with_wake<S: ProbeSource>(
             // came back to my terminal" is the case that has to be
             // measured at the fast cadence.
             () = watch.woken() => continue,
-            () = tokio::time::sleep(period) => {}
+            () = tokio::time::sleep(period) => timer_fired = true,
             // The machine slept. `changed()` is cancel-safe and the
             // receiver keeps the value, so a wake that lands while the
             // verdict below is running is seen on the next round.
@@ -667,6 +781,18 @@ pub(crate) async fn watch_path_with_wake<S: ProbeSource>(
                     "machine woke from sleep; judging the path now"
                 );
                 watch.wake();
+            }
+        }
+        // A tick that fired much later than the beat it slept means this
+        // process was away, not the path: discount the lateness before
+        // anything is judged (`PathState::observe_tick`, ADR-0042).
+        if timer_fired {
+            let gap = slept_from.elapsed();
+            if let Some(late) = watch.ticked(gap, period) {
+                tracing::debug!(
+                    late_ms = late.as_millis() as u64,
+                    "watchdog tick fired late; discounting the delay from the silence"
+                );
             }
         }
         // Any datagram since the last tick proves the path carries packets,

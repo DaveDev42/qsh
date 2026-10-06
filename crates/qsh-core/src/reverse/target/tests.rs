@@ -518,6 +518,7 @@ fn reconnect_event_wake_line_carries_slept_ms_and_at() {
         since_registered_ms: None,
         srtt_ms: None,
         silence_ms: None,
+        tick_gap_ms: None,
         slept_ms: Some(9_000),
     };
     let parsed: serde_json::Value =
@@ -547,6 +548,7 @@ fn reconnect_event_json_line_has_the_documented_field_set() {
         since_registered_ms: None,
         srtt_ms: None,
         silence_ms: None,
+        tick_gap_ms: None,
         slept_ms: None,
     };
     let parsed: serde_json::Value =
@@ -572,6 +574,7 @@ fn reconnect_event_json_line_has_the_documented_field_set() {
         since_registered_ms: None,
         srtt_ms: None,
         silence_ms: None,
+        tick_gap_ms: None,
         slept_ms: None,
     };
     let parsed: serde_json::Value =
@@ -613,6 +616,7 @@ fn reconnect_event_json_line_covers_the_lost_retry_pair_with_since_registered_ms
         since_registered_ms: Some(4_200),
         srtt_ms: None,
         silence_ms: None,
+        tick_gap_ms: None,
         slept_ms: None,
     };
     let parsed: serde_json::Value =
@@ -631,6 +635,7 @@ fn reconnect_event_json_line_covers_the_lost_retry_pair_with_since_registered_ms
         since_registered_ms: Some(4_200),
         srtt_ms: None,
         silence_ms: None,
+        tick_gap_ms: None,
         slept_ms: None,
     };
     let parsed: serde_json::Value =
@@ -659,6 +664,7 @@ fn reconnect_event_at_field_parses_as_rfc3339() {
         since_registered_ms: None,
         srtt_ms: None,
         silence_ms: None,
+        tick_gap_ms: None,
         slept_ms: None,
     };
     let parsed: serde_json::Value =
@@ -964,12 +970,67 @@ fn classify_hello_error_maps_a_remote_rejection_to_registration_denied() {
     );
 }
 
+/// Issue #11 request 3: `serve_control` returns `Ok(())` both for a clean
+/// end of the control stream and when `accept_bi` fails because the
+/// connection ended, so the connection's own close reason decides. An idle
+/// timeout that surfaced through `accept_bi` is `idle_timeout`.
+#[test]
+fn classify_target_connection_loss_reads_the_close_reason_behind_an_ok_return() {
+    let ok: Result<Result<(), crate::server::ConnError>, tokio::task::JoinError> = Ok(Ok(()));
+    let timed_out = qsh_transport::ConnectionError::TimedOut;
+    assert_eq!(
+        classify_target_connection_loss(&ok, Some(&timed_out)),
+        ReconnectCause::IdleTimeout
+    );
+    let path_dead = qsh_transport::ConnectionError::ApplicationClosed(quinn::ApplicationClose {
+        error_code: quinn::VarInt::from_u32(0x1004),
+        reason: bytes::Bytes::new(),
+    });
+    assert_eq!(
+        classify_target_connection_loss(&ok, Some(&path_dead)),
+        ReconnectCause::PathDead
+    );
+    let clean = qsh_transport::ConnectionError::ApplicationClosed(quinn::ApplicationClose {
+        error_code: quinn::VarInt::from_u32(0),
+        reason: bytes::Bytes::new(),
+    });
+    assert_eq!(
+        classify_target_connection_loss(&ok, Some(&clean)),
+        ReconnectCause::PeerClosed
+    );
+}
+
+/// Issue #11 request 3: a `Hello` reply that never arrives is the dial not
+/// completing, which is what a stalled controller or a starved host
+/// produces. It was `local`.
+#[test]
+fn classify_hello_error_maps_a_hello_timeout_to_dial_timeout_not_local() {
+    use crate::handshake::HelloError;
+    assert_eq!(
+        classify_hello_error(&HelloError::Timeout),
+        ReconnectCause::DialTimeout
+    );
+    assert_eq!(
+        classify_hello_error(&HelloError::ClosedBeforeHello),
+        ReconnectCause::PeerClosed
+    );
+    // The protocol-shaped anomalies stay `local`.
+    assert_eq!(
+        classify_hello_error(&HelloError::ExpectedHello),
+        ReconnectCause::Local
+    );
+    assert_eq!(
+        classify_hello_error(&HelloError::VersionMismatch),
+        ReconnectCause::Local
+    );
+}
+
 #[test]
 fn classify_target_connection_loss_maps_a_clean_end_of_stream_to_peer_closed() {
     // `serve_control`'s own loop ending on a clean end-of-stream — the
     // controller closed its send side.
     assert_eq!(
-        classify_target_connection_loss(&Ok(Ok(()))),
+        classify_target_connection_loss(&Ok(Ok(())), None),
         ReconnectCause::PeerClosed
     );
 }
@@ -986,7 +1047,7 @@ fn classify_target_connection_loss_maps_a_connection_error_via_the_shared_judgme
         ConnError::Connection(qsh_transport::ConnectionError::TimedOut),
     ));
     assert_eq!(
-        classify_target_connection_loss(&timed_out),
+        classify_target_connection_loss(&timed_out, None),
         ReconnectCause::IdleTimeout
     );
 
@@ -996,7 +1057,7 @@ fn classify_target_connection_loss_maps_a_connection_error_via_the_shared_judgme
         ConnError::Connection(qsh_transport::ConnectionError::LocallyClosed),
     ));
     assert_eq!(
-        classify_target_connection_loss(&locally_closed),
+        classify_target_connection_loss(&locally_closed, None),
         ReconnectCause::Local
     );
 }
@@ -1013,7 +1074,7 @@ async fn classify_target_connection_loss_maps_a_task_panic_to_local() {
         Ok(_) => panic!("the spawned task was expected to panic"),
     };
     assert_eq!(
-        classify_target_connection_loss(&join_err),
+        classify_target_connection_loss(&join_err, None),
         ReconnectCause::Local
     );
 }
@@ -1124,12 +1185,12 @@ async fn serve_to_target_probes_and_redials_at_once_after_an_injected_wake() {
     rig.shutdown().await;
 }
 
-/// Issue #10 request 3: `srtt_ms`/`silence_ms` are open-vocabulary fields
-/// that ride only on a `lost` this process's own watch ruled. Absent, never
+/// Issue #10 request 3 and issue #11 request 2: `srtt_ms`/`silence_ms`/
+/// `tick_gap_ms` are open-vocabulary fields that ride only on a `lost` this process's own watch ruled. Absent, never
 /// null, otherwise.
 #[test]
-fn reconnect_event_json_line_carries_srtt_and_silence_ms_only_when_present() {
-    let lost = |srtt_ms, silence_ms| ReconnectEvent {
+fn reconnect_event_json_line_carries_srtt_silence_and_tick_gap_ms_only_when_present() {
+    let lost = |srtt_ms, silence_ms, tick_gap_ms| ReconnectEvent {
         event: "lost",
         host: "personal-mac",
         fingerprint: Some("sha256:abc"),
@@ -1139,19 +1200,23 @@ fn reconnect_event_json_line_carries_srtt_and_silence_ms_only_when_present() {
         since_registered_ms: Some(4_200),
         srtt_ms,
         silence_ms,
+        tick_gap_ms,
         slept_ms: None,
     };
-    let ruled: serde_json::Value =
-        serde_json::from_str(&serde_json::to_string(&lost(Some(37), Some(1_250))).unwrap())
-            .unwrap();
+    let ruled: serde_json::Value = serde_json::from_str(
+        &serde_json::to_string(&lost(Some(37), Some(1_250), Some(260))).unwrap(),
+    )
+    .unwrap();
     assert_eq!(ruled["srtt_ms"], 37);
     assert_eq!(ruled["silence_ms"], 1_250);
+    assert_eq!(ruled["tick_gap_ms"], 260);
 
     let announced: serde_json::Value =
-        serde_json::from_str(&serde_json::to_string(&lost(None, None)).unwrap()).unwrap();
+        serde_json::from_str(&serde_json::to_string(&lost(None, None, None)).unwrap()).unwrap();
     assert!(announced.get("srtt_ms").is_none(), "absent, never null");
     assert!(announced.get("silence_ms").is_none(), "absent, never null");
-    lost(Some(37), Some(1_250)).emit();
+    assert!(announced.get("tick_gap_ms").is_none(), "absent, never null");
+    lost(Some(37), Some(1_250), Some(260)).emit();
 }
 
 #[cfg(unix)]
@@ -1188,4 +1253,141 @@ async fn target_path_watch_takes_the_recovery_section_and_the_cfg_test_override_
         })
         .await;
     assert_eq!(seen, override_cfg);
+}
+
+// ------------------------------------------------------------------
+// Issue #11 request 4 (ADR-0042 decision 2): consecutive quick losses back
+// the redial off; a stable registration or a wake ends the streak.
+// ------------------------------------------------------------------
+
+fn quick() -> Duration {
+    Duration::from_secs(5)
+}
+
+fn stable() -> Duration {
+    STABLE_REGISTRATION
+}
+
+/// Mimic the reconnect loop: an accepted registration resets the dial
+/// sequence (`Backoff::reset`) before the loss that ends it asks for its
+/// delay.
+fn lose(backoff: &mut Backoff<StdRng>, lived: Duration) -> u64 {
+    backoff.reset();
+    backoff.loss_delay(lived).as_millis() as u64
+}
+
+#[test]
+fn a_single_quick_loss_redials_on_the_ordinary_first_delay() {
+    let mut backoff = Backoff::new(limits(500, 30_000, 0), StdRng::seed_from_u64(1));
+    assert_eq!(lose(&mut backoff, quick()), 500);
+}
+
+#[test]
+fn consecutive_quick_losses_double_the_redial_delay_up_to_the_cap() {
+    let mut backoff = Backoff::new(limits(500, 30_000, 0), StdRng::seed_from_u64(1));
+    let observed: Vec<u64> = (0..8).map(|_| lose(&mut backoff, quick())).collect();
+    assert_eq!(
+        observed,
+        vec![500, 1_000, 2_000, 4_000, 8_000, 8_000, 8_000, 8_000],
+        "doubling from the first delay, then the 8 s cap"
+    );
+}
+
+#[test]
+fn a_registration_that_lived_just_under_the_stable_threshold_is_still_a_quick_loss() {
+    let mut backoff = Backoff::new(limits(500, 30_000, 0), StdRng::seed_from_u64(1));
+    let almost = STABLE_REGISTRATION - Duration::from_millis(1);
+    assert_eq!(lose(&mut backoff, almost), 500);
+    assert_eq!(lose(&mut backoff, almost), 1_000);
+}
+
+#[test]
+fn a_stable_registration_ends_the_streak() {
+    let mut backoff = Backoff::new(limits(500, 30_000, 0), StdRng::seed_from_u64(1));
+    for _ in 0..4 {
+        lose(&mut backoff, quick());
+    }
+    assert_eq!(lose(&mut backoff, quick()), 8_000);
+    // A registration that held for a minute: the loss that ends it is news,
+    // not a continuation.
+    assert_eq!(lose(&mut backoff, stable()), 500);
+    assert_eq!(lose(&mut backoff, quick()), 500, "the streak starts over");
+    assert_eq!(lose(&mut backoff, quick()), 1_000);
+}
+
+#[test]
+fn a_genuine_outage_after_a_long_registration_is_not_slowed() {
+    // A registration up for sixteen hours dies, then the dial fails until the
+    // network returns: today's sequence, untouched by any quick-loss state.
+    let mut backoff = Backoff::new(limits(500, 30_000, 0), StdRng::seed_from_u64(1));
+    for _ in 0..6 {
+        lose(&mut backoff, quick());
+    }
+    backoff.reset();
+    let long = Duration::from_secs(16 * 3_600);
+    let observed: Vec<u64> = std::iter::once(backoff.loss_delay(long))
+        .chain((0..5).map(|_| backoff.next_delay()))
+        .map(|d| d.as_millis() as u64)
+        .collect();
+    assert_eq!(observed, vec![500, 1_000, 2_000, 4_000, 8_000, 16_000]);
+}
+
+#[test]
+fn dial_failures_neither_extend_nor_clear_the_streak() {
+    let mut backoff = Backoff::new(limits(500, 30_000, 0), StdRng::seed_from_u64(1));
+    assert_eq!(lose(&mut backoff, quick()), 500);
+    assert_eq!(lose(&mut backoff, quick()), 1_000);
+    // A redial that fails climbs the dial sequence from `initial`, as it
+    // always did, and does not look like a third quick loss...
+    assert_eq!(backoff.next_delay().as_millis(), 500);
+    assert_eq!(backoff.next_delay().as_millis(), 1_000);
+    // ...nor like a registration that survived: the next quick loss
+    // continues the streak.
+    assert_eq!(lose(&mut backoff, quick()), 2_000);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_wake_ends_the_streak_and_its_window_caps_the_next_losses() {
+    let mut backoff = Backoff::new(limits(500, 30_000, 0), StdRng::seed_from_u64(1));
+    for _ in 0..5 {
+        lose(&mut backoff, quick());
+    }
+    assert_eq!(lose(&mut backoff, quick()), 8_000);
+    backoff.wake(tokio::time::Instant::now());
+    // The streak starts over inside the fast window, which caps it at 2 s.
+    let observed: Vec<u64> = (0..5).map(|_| lose(&mut backoff, quick())).collect();
+    assert_eq!(observed, vec![500, 1_000, 2_000, 2_000, 2_000]);
+    tokio::time::advance(Duration::from_secs(61)).await;
+    assert_eq!(
+        lose(&mut backoff, quick()),
+        8_000,
+        "past the window the streak that kept counting reaches its own cap"
+    );
+}
+
+#[test]
+fn the_quick_loss_cap_follows_a_configured_max_and_initial() {
+    // A small `backoff_max_ms` bounds it.
+    let mut backoff = Backoff::new(limits(100, 1_500, 0), StdRng::seed_from_u64(1));
+    let observed: Vec<u64> = (0..7).map(|_| lose(&mut backoff, quick())).collect();
+    assert_eq!(observed, vec![100, 200, 400, 800, 1_500, 1_500, 1_500]);
+    // An `initial` above the 8 s cap is never lowered under itself.
+    let mut backoff = Backoff::new(limits(10_000, 60_000, 0), StdRng::seed_from_u64(1));
+    let observed: Vec<u64> = (0..3).map(|_| lose(&mut backoff, quick())).collect();
+    assert_eq!(observed, vec![10_000, 10_000, 10_000]);
+}
+
+#[test]
+fn jitter_applies_to_the_quick_loss_delay_and_stays_in_its_band() {
+    for seed in 0..64 {
+        let mut backoff = Backoff::new(limits(500, 30_000, 20), StdRng::seed_from_u64(seed));
+        for streak in 1..=8u32 {
+            let delay = lose(&mut backoff, quick());
+            let nominal = (500u64 << (streak - 1).min(16)).min(8_000);
+            assert!(
+                delay >= nominal * 80 / 100 && delay <= nominal * 120 / 100,
+                "seed {seed} streak {streak}: {delay} ms outside ±20% of {nominal} ms"
+            );
+        }
+    }
 }

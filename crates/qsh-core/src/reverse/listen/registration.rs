@@ -272,6 +272,7 @@ impl Listen {
                     since_registered_ms: None,
                     srtt_ms: None,
                     silence_ms: None,
+                    tick_gap_ms: None,
                 }
                 .emit();
                 *outcome_cell.lock().unwrap_or_else(|e| e.into_inner()) = Some(outcome);
@@ -291,6 +292,7 @@ impl Listen {
                     since_registered_ms: None,
                     srtt_ms: None,
                     silence_ms: None,
+                    tick_gap_ms: None,
                 }
                 .emit();
                 Err(wire::Error::new(err.code, err.message, err.retryable))
@@ -605,6 +607,7 @@ impl Listen {
                 ),
                 srtt_ms: own_verdict.map(|v| crate::reverse::millis(v.srtt)),
                 silence_ms: own_verdict.map(|v| crate::reverse::millis(v.silence)),
+                tick_gap_ms: own_verdict.map(|v| crate::reverse::millis(v.tick_gap)),
             }
             .emit();
         }
