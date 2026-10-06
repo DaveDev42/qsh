@@ -510,9 +510,16 @@ async fn datagram_liveness_silent_path_lost_line_carries_srtt_ms_and_silence_ms_
             (!v.is_empty()).then_some(v)
         })
         .await;
+        // As in the silent-path test above: when the target's verdict wins
+        // and its re-dial reaches the controller first, the controller
+        // reports `replaced` rather than a `lost` of its own.
         let controller_lost = wait_for(TIMEOUT, || {
-            let v = events_by_host_and_kind("widget", "lost");
-            (!v.is_empty()).then_some(v)
+            let lost = events_by_host_and_kind("widget", "lost");
+            if !lost.is_empty() {
+                return Some(lost);
+            }
+            let replaced = events_by_host_and_kind("widget", "replaced");
+            (!replaced.is_empty()).then_some(Vec::new())
         })
         .await;
         let _ = shutdown_tx.send(());
@@ -522,8 +529,11 @@ async fn datagram_liveness_silent_path_lost_line_carries_srtt_ms_and_silence_ms_
     let (result, (target_lost, target_retry, controller_lost)) = tokio::join!(run_fut, scenario);
     result.expect("a clean shutdown must exit Ok even mid-flight after a sever");
 
-    let lines = [&target_lost[0], &controller_lost[0]];
-    for line in lines {
+    // An empty controller list means it saw the re-dial first (see above).
+    let lines: Vec<&serde_json::Value> = std::iter::once(&target_lost[0])
+        .chain(controller_lost.first())
+        .collect();
+    for &line in &lines {
         assert_eq!(line["cause"], "path_dead", "{line}");
         let has = [
             line.get("srtt_ms"),
