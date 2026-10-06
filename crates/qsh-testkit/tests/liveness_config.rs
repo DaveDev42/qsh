@@ -4,8 +4,9 @@
 //! (non-retryable), never a clamp.
 //!
 //! Each daemon entry point is handed a config whose `[transport]` is out of
-//! range (or whose `[recovery]` breaks the detection budget) and a shutdown future that never resolves: a daemon that skipped
-//! the validation would bind and wait, so the test's own timeout is what
+//! range (or whose `[recovery]` breaks the detection budget, attach or
+//! reverse registration) and a shutdown future that never resolves: a
+//! daemon that skipped the validation would bind and wait, so the test's own timeout is what
 //! catches it.
 
 #![cfg(unix)]
@@ -55,6 +56,20 @@ fn bad_configs() -> Vec<(&'static str, Config)> {
             "strikes = 1",
             RecoverySection {
                 strikes: Some(1),
+                ..RecoverySection::default()
+            },
+        ),
+        bad_recovery(
+            "reverse_min_dead_after_ms = 4251 (P*S+D = 5001)",
+            RecoverySection {
+                reverse_min_dead_after_ms: Some(4_251),
+                ..RecoverySection::default()
+            },
+        ),
+        bad_recovery(
+            "reverse_strikes = 1",
+            RecoverySection {
+                reverse_strikes: Some(1),
                 ..RecoverySection::default()
             },
         ),

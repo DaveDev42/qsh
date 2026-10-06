@@ -31,7 +31,11 @@ use qsh_transport::{Principal, StaticTrust};
 /// Bound on every "this must have already happened" wait below. Generous
 /// slack around a real, event-driven in-process/loopback scenario — never
 /// a budget anyone should need in full (`docs/design/testing.md` L2).
-const TIMEOUT: Duration = Duration::from_secs(10);
+const TIMEOUT: Duration = Duration::from_secs(15);
+
+/// ADR-0041: the reverse registration default `min_dead_after`, restated as
+/// a literal so a change to it fails this test instead of passing quietly.
+const REVERSE_MIN_DEAD_AFTER_MS: u64 = 4_250;
 
 fn pin(identity: &TestIdentity, name: &str) -> StaticTrust {
     StaticTrust::empty().with_pin(identity.fingerprint, Principal::Device(name.to_string()))
@@ -349,9 +353,10 @@ async fn run_target_lost_and_retry_lines_report_peer_closed_with_since_registere
 
 /// `docs/design/protocol.md` §11-4's own watchdog also runs on the
 /// controller's side of the *same* registered session
-/// (`Listen::drive_registered_session`, identical `PathWatchConfig::
-/// default()`), so a fully bidirectional silent sever is a genuine race
-/// between the two sides' independent ~1 s detection budgets: if the
+/// (`Listen::drive_registered_session`, identical
+/// `PathWatchConfig::reverse_default()`), so a fully bidirectional silent
+/// sever is a genuine race between the two sides' independent ~4.25 s
+/// detection windows (ADR-0041): if the
 /// target's own watch wins, it reports `path_dead` directly; if the
 /// controller's wins first, it closes the connection with
 /// `CLOSE_CODE_PATH_DEAD`, and `classify_connection_error` reads that
@@ -462,7 +467,7 @@ async fn run_target_lost_and_retry_lines_report_a_silent_path_as_path_dead() {
 /// with `CLOSE_CODE_PATH_DEAD` and carries its measurements; the other side
 /// reads that close back and carries none. At least one of the two `lost`
 /// lines must therefore have both keys, any line that has them must show at
-/// least the default `min_dead_after` (1 s) of silence, and neither `retry`
+/// least the reverse default `min_dead_after` (4.25 s) of silence, and neither `retry`
 /// has them. The name carries the stress prefix because the outcome depends
 /// on which of two real-time watchdogs wins.
 #[tokio::test(flavor = "multi_thread")]
@@ -530,8 +535,9 @@ async fn datagram_liveness_silent_path_lost_line_carries_srtt_ms_and_silence_ms_
                 .as_u64()
                 .unwrap_or_else(|| panic!("silence_ms must be an integer: {line}"));
             assert!(
-                silence >= 1_000,
-                "a path_dead ruling needs the default min_dead_after of silence, got {silence} ms: {line}"
+                silence >= REVERSE_MIN_DEAD_AFTER_MS,
+                "a path_dead ruling needs the reverse default min_dead_after of silence, \
+                 got {silence} ms: {line}"
             );
             assert!(line["srtt_ms"].as_u64().is_some(), "{line}");
         }

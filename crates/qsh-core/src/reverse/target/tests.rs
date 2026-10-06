@@ -1051,7 +1051,7 @@ async fn run_target_lost_and_retry_lines_report_a_quinn_idle_timeout_as_idle_tim
 
     assert_eq!(lost["cause"], "idle_timeout", "{lost}");
     assert_eq!(retry["cause"], "idle_timeout", "{retry}");
-    // Roughly the 45 s idle timeout, not `PathWatch`'s ~1 s default.
+    // Roughly the 45 s idle timeout, not `PathWatch`'s 4.25 s reverse default.
     assert!(
         waited >= Duration::from_secs(30),
         "the connection ended after only {waited:?}; something other than the idle timeout \
@@ -1160,10 +1160,21 @@ async fn target_path_watch_takes_the_recovery_section_and_the_cfg_test_override_
     use crate::client::pathwatch::PathWatchConfig;
     use std::time::Duration;
 
-    let configured: Config =
-        toml::from_str("[recovery]\nprobe_interval_ms = 100\nmin_dead_after_ms = 700\n").unwrap();
-    let watch = configured.liveness().unwrap().watch;
+    let configured: Config = toml::from_str(
+        "[recovery]\nprobe_interval_ms = 100\nmin_dead_after_ms = 700\n\
+         reverse_min_dead_after_ms = 3000\n",
+    )
+    .unwrap();
+    let liveness = configured.liveness().unwrap();
+    let watch = liveness.reverse_watch;
+    assert_eq!(watch.min_dead_after, Duration::from_secs(3));
+    assert_ne!(watch, liveness.watch);
     assert_ne!(watch, PathWatchConfig::default());
+    // No `[recovery]` at all: the reverse default, not the attach one.
+    assert_eq!(
+        Config::default().liveness().unwrap().reverse_watch,
+        PathWatchConfig::reverse_default()
+    );
     // Production: the configured section is what `PathWatch::new` receives.
     assert_eq!(crate::reverse::path_watch_config(watch), watch);
     // The cfg(test) task-local override beats the configured value.

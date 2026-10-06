@@ -53,15 +53,16 @@ use qsh_testkit::{ChaosPolicy, ChaosProxy, TestIdentity, make_identity};
 use qsh_transport::{Principal, StaticTrust};
 
 /// Bound on the whole sever → detect → redial → re-register round trip.
-/// `docs/design/protocol.md` §10's default detection budget is ~1 s on a
-/// fresh path (`client::pathwatch::PathWatchConfig::default`'s own doc:
-/// "250 ms × 3 strikes puts detection at ~1 s") and the injected backoff
-/// below is tens of milliseconds, so this is generous slack around a
-/// sub-second scenario, not a budget anyone should need in full — a real
-/// event (`Registry::get`'s `generation`) is what actually ends the wait,
-/// never this deadline on the happy path (`docs/design/testing.md`: no
-/// `sleep()`-based synchronization; this is only the bounded backstop).
-const TIMEOUT: Duration = Duration::from_secs(10);
+/// A reverse registration is watched under its own default
+/// (`client::pathwatch::PathWatchConfig::reverse_default`, ADR-0041): 4.25 s
+/// of silence on a fresh path, so a bare sever is detected about 4.5 s in.
+/// The injected backoff below is tens of milliseconds. The bound therefore
+/// leaves a little over double the detection time as slack and is not a
+/// budget anyone should need in full — a real event (`Registry::get`'s
+/// `generation`) is what actually ends the wait, never this deadline on the
+/// happy path (`docs/design/testing.md`: no `sleep()`-based synchronization;
+/// this is only the bounded backstop).
+const TIMEOUT: Duration = Duration::from_secs(15);
 
 fn pin(identity: &TestIdentity, name: &str) -> StaticTrust {
     StaticTrust::empty().with_pin(identity.fingerprint, Principal::Device(name.to_string()))

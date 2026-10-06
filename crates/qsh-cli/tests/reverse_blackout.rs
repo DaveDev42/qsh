@@ -119,6 +119,14 @@ const REDIAL_DEADLINE_MS: u64 = 2_000;
 /// lockstep with the outage it causes.
 const DETECTION_CEILING: Duration = Duration::from_millis(REDIAL_DEADLINE_MS);
 
+/// ADR-0041 decision 4: the reverse registration connection is watched
+/// under its own, looser ceiling, because nobody is waiting on it and its
+/// loss takes every reverse tunnel with it. Restated here as a literal
+/// rather than read from `qsh_core::config::REVERSE_DETECTION_CEILING_MS`,
+/// so a change to the contract fails this test instead of passing quietly.
+/// The attach ceiling above stays 2000.
+const REVERSE_DETECTION_CEILING: Duration = Duration::from_millis(5_000);
+
 /// Room for everything a derived budget does not model — a real localctl
 /// daemon relay, the shell's own round trip, a real chaos proxy relay, and
 /// CI scheduling noise over a genuinely 60-second-plus test.
@@ -134,16 +142,25 @@ fn detection_budget(cfg: &PathWatchConfig) -> Duration {
 /// [`BLACKOUT`] itself, plus one worst-case [`DIAL_TIMEOUT`] for a redial
 /// attempt in flight when it lifts, plus detection, the target's own
 /// (fast-configured) backoff ceiling, the 2 s resume ceiling, and
-/// scheduling slack. A lower bound of exactly [`BLACKOUT`] is asserted
+/// scheduling slack. `detection` is the reverse registration's own budget
+/// ([`reverse_detection_budget`]), not the attach one. A lower bound of exactly [`BLACKOUT`] is asserted
 /// separately — this test does not pass by recovering early, which would
 /// mean the blackout was not actually total.
-fn recovery_budget(backoff_max: Duration) -> Duration {
-    BLACKOUT
-        + DIAL_TIMEOUT
-        + detection_budget(&PathWatchConfig::default())
-        + backoff_max
-        + REDIAL_DEADLINE
-        + SCHEDULING_SLACK
+/// The detection budget the reverse registration actually runs with on the
+/// target `config` describes: the `[recovery]` reverse watch that
+/// `qsh serve --to` builds its registration `PathWatch` from. The
+/// controller's `Listen` takes the same default.
+fn reverse_detection_budget(config: &Config) -> Duration {
+    detection_budget(
+        &config
+            .liveness()
+            .expect("the test config is within every liveness bound")
+            .reverse_watch,
+    )
+}
+
+fn recovery_budget(backoff_max: Duration, detection: Duration) -> Duration {
+    BLACKOUT + DIAL_TIMEOUT + detection + backoff_max + REDIAL_DEADLINE + SCHEDULING_SLACK
 }
 
 fn pin(identity: &TestIdentity, name: &str) -> StaticTrust {
@@ -802,26 +819,42 @@ async fn a_real_60_second_blackout_survives_and_resumes_the_same_session() {
             last.registration_wait_ms,
             chaos.detail()
         );
+        // The attach starts waiting for a re-registration only once the
+        // registration is judged dead, up to one reverse detection window
+        // (ADR-0041) after the blackhole goes up, and the registration
+        // cannot come back before the blackout lifts. So a wait that
+        // spanned the whole outage is at least `BLACKOUT` minus that
+        // window; asserting the bare `BLACKOUT` would pass only when the
+        // target happens to re-register that much late.
+        let detection = reverse_detection_budget(&target_config);
         let max_registration_wait_ms = records
             .iter()
             .map(|r| r.registration_wait_ms)
             .max()
             .unwrap_or(0);
+        let outage_floor = BLACKOUT.saturating_sub(detection);
         assert!(
-            max_registration_wait_ms >= u64::try_from(BLACKOUT.as_millis()).unwrap_or(u64::MAX),
-            "no attempt ever observed a registration wait reaching the mandatory {BLACKOUT:?} \
-             blackout (max seen: {max_registration_wait_ms} ms) — recovery must not have waited \
-             out the real outage — {records:?} — {}",
+            u128::from(max_registration_wait_ms) >= outage_floor.as_millis(),
+            "no attempt ever observed a registration wait reaching the {BLACKOUT:?} blackout \
+             less the {detection:?} detection window (max seen: {max_registration_wait_ms} ms) \
+             — recovery must not have waited out the real outage — {records:?} — {}",
             chaos.detail()
         );
 
-        let detection = detection_budget(&RecoveryConfig::default().watch);
+        // The attach detector keeps its 2 s ceiling; the registration's own
+        // detector is held to the reverse ceiling.
+        let attach_detection = detection_budget(&RecoveryConfig::default().watch);
         assert!(
-            detection <= DETECTION_CEILING,
-            "the shipping detector needs {detection:?} to call a path dead, over the \
-             {DETECTION_CEILING:?} ceiling"
+            attach_detection <= DETECTION_CEILING,
+            "the shipping attach detector needs {attach_detection:?} to call a path dead, \
+             over the {DETECTION_CEILING:?} ceiling"
         );
-        let budget = recovery_budget(backoff_max);
+        assert!(
+            detection <= REVERSE_DETECTION_CEILING,
+            "the shipping reverse registration detector needs {detection:?} to call a path \
+             dead, over the {REVERSE_DETECTION_CEILING:?} ceiling"
+        );
+        let budget = recovery_budget(backoff_max, detection);
         assert!(
             elapsed < budget,
             "reverse recovery took {elapsed:?} to turn back into a working shell after a real \

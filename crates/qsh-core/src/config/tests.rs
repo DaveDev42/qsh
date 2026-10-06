@@ -485,6 +485,20 @@ fn recovery(probe: Option<u64>, dead: Option<u64>, strikes: Option<u32>) -> Reco
         probe_interval_ms: probe,
         min_dead_after_ms: dead,
         strikes,
+        ..RecoverySection::default()
+    }
+}
+
+fn reverse_recovery(
+    probe: Option<u64>,
+    dead: Option<u64>,
+    strikes: Option<u32>,
+) -> RecoverySection {
+    RecoverySection {
+        probe_interval_ms: probe,
+        reverse_min_dead_after_ms: dead,
+        reverse_strikes: strikes,
+        ..RecoverySection::default()
     }
 }
 
@@ -588,6 +602,168 @@ fn absent_recovery_section_keeps_todays_path_watch_config_byte_identically() {
 }
 
 #[test]
+fn reverse_registration_default_rides_out_the_measured_bursts_inside_its_ceiling() {
+    use std::time::Duration;
+
+    // ADR-0041: a reverse registration tolerates about 5 s of silence by
+    // default, ADR-0021 decision 4's numbers stay for attach.
+    let absent: Config = toml::from_str("").unwrap();
+    let liveness = absent.liveness().unwrap();
+    let reverse = liveness.reverse_watch;
+    assert_eq!(reverse, PathWatchConfig::reverse_default());
+    assert_eq!(reverse.probe_interval, Duration::from_millis(250));
+    assert_eq!(reverse.min_dead_after, Duration::from_millis(4_250));
+    assert_eq!(reverse.strikes, 3);
+    // Only the silence floor differs from the attach default.
+    assert_eq!(
+        PathWatchConfig {
+            min_dead_after: PathWatchConfig::default().min_dead_after,
+            ..reverse
+        },
+        PathWatchConfig::default()
+    );
+    assert_eq!(liveness.watch, PathWatchConfig::default());
+
+    // The longest uplink loss burst issue #10 measured was 3.6 s, and the
+    // watchdog samples the datagram counter once per tick, so the silence
+    // it sees can exceed the burst by one cadence.
+    let longest_burst = Duration::from_millis(3_600);
+    assert!(reverse.min_dead_after >= longest_burst + reverse.probe_interval);
+    // The budget P*S+D is the 5 s ceiling, and over the attach ceiling,
+    // which is the point of the split.
+    let budget = reverse.probe_interval * reverse.strikes + reverse.min_dead_after;
+    assert_eq!(budget, Duration::from_millis(REVERSE_DETECTION_CEILING_MS));
+    assert!(budget > Duration::from_millis(RECOVERY_DETECTION_CEILING_MS));
+    assert_eq!(REVERSE_DETECTION_CEILING_MS, 5_000);
+}
+
+#[test]
+fn reverse_recovery_keys_use_the_documented_names_and_stay_apart_from_the_general_pair() {
+    use std::time::Duration;
+
+    let config: Config =
+        toml::from_str("[recovery]\nreverse_min_dead_after_ms = 3000\nreverse_strikes = 4\n")
+            .unwrap();
+    assert_eq!(
+        config.recovery,
+        reverse_recovery(None, Some(3_000), Some(4))
+    );
+    let liveness = config.liveness().unwrap();
+    assert_eq!(
+        liveness.reverse_watch.min_dead_after,
+        Duration::from_secs(3)
+    );
+    assert_eq!(liveness.reverse_watch.strikes, 4);
+    assert_eq!(
+        liveness.reverse_watch.probe_interval,
+        PathWatchConfig::default().probe_interval
+    );
+    // Attach does not move.
+    assert_eq!(liveness.watch, PathWatchConfig::default());
+
+    // The general pair does not reach the registration: tightening attach
+    // detection must not shrink the registration's default by accident.
+    let general: Config = toml::from_str(
+        "[recovery]\nmin_dead_after_ms = 600\nstrikes = 5\nprobe_interval_ms = 100\n",
+    )
+    .unwrap();
+    let liveness = general.liveness().unwrap();
+    assert_eq!(liveness.watch.min_dead_after, Duration::from_millis(600));
+    assert_eq!(
+        liveness.reverse_watch.min_dead_after,
+        Duration::from_millis(4_250)
+    );
+    assert_eq!(liveness.reverse_watch.strikes, 3);
+    // The cadence is shared by both kinds of connection.
+    assert_eq!(liveness.watch.probe_interval, Duration::from_millis(100));
+    assert_eq!(
+        liveness.reverse_watch.probe_interval,
+        Duration::from_millis(100)
+    );
+
+    // A reverse key can also be looser than the general pair is allowed to
+    // be, and tighter: each end sets what its own link needs.
+    for dead in [1_000_u64, 2_000, 4_500] {
+        let section = reverse_recovery(None, Some(dead), Some(2));
+        let watch = section.reverse_path_watch().unwrap();
+        assert_eq!(watch.min_dead_after, Duration::from_millis(dead));
+    }
+}
+
+#[test]
+fn reverse_values_beyond_the_reverse_detection_budget_bound_are_config_error() {
+    // P*S+D <= 5000, S >= 2, 50 <= P <= D (ADR-0041 decision 3), and an
+    // out-of-range value is a startup error, never a clamp.
+    let bad = [
+        // 5001 in total: 250*3 + 4251.
+        reverse_recovery(None, Some(4_251), None),
+        // Raising only the strikes pushes the default floor over the line.
+        reverse_recovery(None, None, Some(4)),
+        // Only the floor, over the line at the default strikes.
+        reverse_recovery(None, Some(4_500), None),
+        // One strike is not a verdict.
+        reverse_recovery(None, None, Some(1)),
+        reverse_recovery(None, None, Some(0)),
+        // The probe cadence slower than the silence floor.
+        reverse_recovery(Some(600), Some(500), Some(2)),
+        // Each product that would wrap or blow the ceiling.
+        reverse_recovery(Some(u64::MAX), Some(u64::MAX), Some(u32::MAX)),
+        reverse_recovery(Some(2_000), Some(2_500), Some(2)),
+        reverse_recovery(None, Some(u64::MAX), Some(2)),
+        reverse_recovery(Some(49), Some(4_000), Some(2)),
+    ];
+    for section in bad {
+        let err = section.reverse_path_watch().unwrap_err();
+        assert_eq!(err.code, ErrorCode::ConfigError, "{section:?}");
+        assert!(!err.retryable, "{section:?}");
+        assert!(err.message.contains("[recovery]"), "{}", err.message);
+        let config = Config {
+            recovery: section.clone(),
+            ..Config::default()
+        };
+        assert_eq!(
+            config.liveness().unwrap_err().code,
+            ErrorCode::ConfigError,
+            "{section:?}"
+        );
+    }
+    // The message names the key that was out of range.
+    let err = reverse_recovery(None, Some(4_251), None)
+        .reverse_path_watch()
+        .unwrap_err();
+    assert!(
+        err.message.contains("reverse_min_dead_after_ms") && err.message.contains("5000"),
+        "{}",
+        err.message
+    );
+    let err = reverse_recovery(None, None, Some(1))
+        .reverse_path_watch()
+        .unwrap_err();
+    assert!(err.message.contains("reverse_strikes"), "{}", err.message);
+
+    // Exactly 5000 passes, at the edges the bound implies.
+    for ok in [
+        reverse_recovery(Some(250), Some(4_250), Some(3)),
+        reverse_recovery(Some(250), Some(4_500), Some(2)),
+        reverse_recovery(Some(50), Some(4_900), Some(2)),
+        reverse_recovery(None, Some(4_000), Some(4)),
+        reverse_recovery(Some(50), Some(50), Some(99)),
+    ] {
+        let watch = ok.reverse_path_watch().unwrap();
+        let budget = watch.probe_interval * watch.strikes + watch.min_dead_after;
+        assert!(
+            budget <= std::time::Duration::from_millis(REVERSE_DETECTION_CEILING_MS),
+            "{ok:?}"
+        );
+    }
+
+    // The reverse ceiling does not loosen the attach one: the general keys
+    // are still held to 2000 ms.
+    assert!(recovery(None, Some(1_251), None).path_watch().is_err());
+    assert!(recovery(None, Some(4_000), None).path_watch().is_err());
+}
+
+#[test]
 fn recovery_section_reaches_attach_reverse_and_supervised_path_watch() {
     let dir = tempfile::tempdir().unwrap();
     let paths = Paths::new(dir.path().join("config"), dir.path().join("state"));
@@ -614,9 +790,23 @@ fn recovery_section_reaches_attach_reverse_and_supervised_path_watch() {
         },
         crate::ops::RecoveryConfig::default()
     );
-    // Reverse target: the configured value is what the watch is built from.
+    // Reverse target: the configured reverse value is what the watch is
+    // built from, and the general `min_dead_after_ms`/`strikes` above do
+    // not reach it (only the shared `probe_interval_ms` does).
+    assert_ne!(liveness.reverse_watch, liveness.watch);
+    assert_eq!(
+        liveness.reverse_watch.probe_interval,
+        std::time::Duration::from_millis(100)
+    );
+    assert_eq!(
+        liveness.reverse_watch.min_dead_after,
+        PathWatchConfig::reverse_default().min_dead_after
+    );
     #[cfg(unix)]
-    assert_eq!(crate::reverse::path_watch_config(liveness.watch), expected);
+    assert_eq!(
+        crate::reverse::path_watch_config(liveness.reverse_watch),
+        liveness.reverse_watch
+    );
 }
 
 #[test]

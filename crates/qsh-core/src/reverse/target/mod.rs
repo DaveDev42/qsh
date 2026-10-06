@@ -446,7 +446,7 @@ async fn run_reverse_unix(
         // death on it — `watch.dead()` below is what turns that into a
         // reconnect instead of `serve_control` sitting parked forever on a
         // read that will never complete.
-        let watch = PathWatch::new(super::path_watch_config(liveness.watch));
+        let watch = PathWatch::new(super::path_watch_config(liveness.reverse_watch));
         let probes = Arc::new(tokio::sync::Notify::new());
         let mut path_wake = wake_rx.clone();
         // A wake that landed while dialing predates this connection.

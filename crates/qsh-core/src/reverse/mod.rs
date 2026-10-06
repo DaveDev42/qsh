@@ -29,8 +29,10 @@ pub(crate) mod test_harness;
 
 /// The [`PathWatchConfig`] the target's registered-session watchdog uses
 /// (`target::run_reverse_unix`). Production gets `configured`, which is the
-/// validated `[recovery]` section of this process's own `config.toml`
-/// (ADR-0021 decision 4; the defaults when the section is absent). Under
+/// validated reverse registration watch of the `[recovery]` section in this
+/// process's own `config.toml` (ADR-0021 decision 4, ADR-0041;
+/// [`crate::client::pathwatch::PathWatchConfig::reverse_default`] when the
+/// section is absent). Under
 /// `#[cfg(test)]` only, a test can wrap the target future in
 /// [`TEST_PATH_WATCH_CONFIG`]`.scope(..)` to raise the judgment floor
 /// (`min_dead_after`) above quinn's 45 s idle timeout, so the idle timeout,

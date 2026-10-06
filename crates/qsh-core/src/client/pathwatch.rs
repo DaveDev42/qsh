@@ -38,6 +38,9 @@
 //! — the closest thing to the "PTO 실패" `protocol.md` §2 names. A false
 //! positive costs a re-dial and a replay, never correctness; that asymmetry
 //! is why the defaults lean towards declaring death rather than waiting.
+//! A reverse registration is the exception, because its loss ends every
+//! tunnel carried on it with no replay; it gets
+//! [`PathWatchConfig::reverse_default`] on both ends.
 //!
 //! **A stalled consumer is not a dead path.** If the frontend stops
 //! draining events, the pumps park on a full queue and stop reading — which
@@ -91,6 +94,27 @@ impl Default for PathWatchConfig {
 }
 
 impl PathWatchConfig {
+    /// The default for a reverse registration connection, on both ends of
+    /// it: the target's `qsh serve --to` watch and the controller's
+    /// `qsh listen` watch (ADR-0041).
+    ///
+    /// The probe cadence and strike count are [`Default::default`]'s; only
+    /// the silence floor moves, from 1 s to 4.25 s. An interactive attach
+    /// wants a dead path called within its 2 s redial budget. A registration
+    /// has no one waiting on it, and each loss drops every reverse tunnel
+    /// carried on it with no replay, so it is worth riding out the 2 to 4 s
+    /// uplink bursts a lossy Wi-Fi hop produces (the longest measured in
+    /// issue #10 was 3.6 s; the watchdog samples per tick, so it can see
+    /// up to one cadence more). `P×S+D` is then exactly 5 s, the
+    /// `REVERSE_DETECTION_CEILING_MS` that `config::RecoverySection`
+    /// enforces on every `[recovery]` override.
+    pub fn reverse_default() -> Self {
+        Self {
+            min_dead_after: Duration::from_millis(4_250),
+            ..Self::default()
+        }
+    }
+
     /// The silence that means death on a path with this smoothed RTT.
     fn dead_after(&self, rtt: Duration) -> Duration {
         self.min_dead_after
