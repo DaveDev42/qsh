@@ -70,7 +70,7 @@ tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "io-util", 
 
 # identity / crypto hygiene
 rcgen = { version = "0.14", default-features = false, features = ["pem", "aws_lc_rs"] }
-sha2 = "0.10"
+sha2 = "0.11"
 # Resume token custody (`docs/design/architecture.md` §8, protocol.md §10):
 # blake3 hashes the token the host stores, subtle compares it in constant
 # time, zeroize keeps the plaintext out of freed memory.
