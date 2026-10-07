@@ -93,7 +93,7 @@ impl Server {
                 .collect(),
             timeout: (req.timeout_ms > 0).then(|| Duration::from_millis(req.timeout_ms)),
         };
-        let exec_id = ulid::Ulid::new().to_string();
+        let exec_id = ulid::Ulid::generate().to_string();
         let ticket = self.issue_ticket(
             ctx.conn_id,
             TicketPurpose::Exec(PendingExec {

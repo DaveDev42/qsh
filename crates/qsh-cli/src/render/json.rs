@@ -22,7 +22,7 @@ impl Envelope {
     pub fn success(command: &'static str, data: serde_json::Value) -> Self {
         Self(CliEnvelope {
             schema: CLI_SCHEMA.to_string(),
-            request_id: ulid::Ulid::new().to_string(),
+            request_id: ulid::Ulid::generate().to_string(),
             command: command.to_string(),
             ok: true,
             data: Some(data),
@@ -34,7 +34,7 @@ impl Envelope {
     pub fn failure(command: &'static str, err: &OpError) -> Self {
         Self(CliEnvelope {
             schema: CLI_SCHEMA.to_string(),
-            request_id: ulid::Ulid::new().to_string(),
+            request_id: ulid::Ulid::generate().to_string(),
             command: command.to_string(),
             ok: false,
             data: None,

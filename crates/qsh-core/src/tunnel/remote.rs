@@ -742,7 +742,7 @@ impl RemoteForwardAcceptor {
                 // compared against or substituted for a `forward_id`
                 // anywhere), it is simply a convenient source of a fresh
                 // random byte string.
-                claim_token: ulid::Ulid::new().to_string().into_bytes(),
+                claim_token: ulid::Ulid::generate().to_string().into_bytes(),
                 vanished,
             },
         }

@@ -184,7 +184,7 @@ fn init_inner(
         });
     }
 
-    let device_id = format!("device_{}", ulid::Ulid::new());
+    let device_id = format!("device_{}", ulid::Ulid::generate());
     let generated = generate(
         &device_id,
         imported.as_ref().map(|(path, key)| (*path, key)),

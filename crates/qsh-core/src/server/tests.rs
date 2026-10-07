@@ -5242,7 +5242,7 @@ async fn rfwd_close_malformed_forward_id_is_invalid_argument_and_closes_nothing(
 #[test]
 fn minted_forward_ids_satisfy_the_wire_shape() {
     for _ in 0..64 {
-        let id = ulid::Ulid::new().to_string();
+        let id = ulid::Ulid::generate().to_string();
         assert!(
             wire::valid_forward_id(&id),
             "a minted forward_id must satisfy the wire shape: {id:?}"

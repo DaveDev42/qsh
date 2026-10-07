@@ -398,7 +398,7 @@ mod tests {
             eprintln!("set QSH_TEST_PLATFORM_KEYSTORE=1 to run this test");
             return;
         }
-        let account = format!("device_test_{}", ulid::Ulid::new());
+        let account = format!("device_test_{}", ulid::Ulid::generate());
         let store = PlatformKeyStore::new(account);
         assert_eq!(store.kind(), KeyStoreKind::Platform);
         assert!(store.load().unwrap().is_none());

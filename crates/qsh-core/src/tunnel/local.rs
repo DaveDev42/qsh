@@ -498,7 +498,7 @@ impl LocalForwardHandle {
         let (host, host_port) = forward.destination();
         let forward_to = (host.to_string(), host_port);
         Ok(Self {
-            tunnel_id: ulid::Ulid::new().to_string(),
+            tunnel_id: ulid::Ulid::generate().to_string(),
             bind,
             forward_to,
             task: tokio::spawn(forward.run(view)),

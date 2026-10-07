@@ -478,7 +478,7 @@ impl DynamicForwardHandle {
         let forward = DynamicForward::bind(bind, listen_port).await?;
         let bind_addr = forward.local_addr();
         Ok(Self {
-            tunnel_id: ulid::Ulid::new().to_string(),
+            tunnel_id: ulid::Ulid::generate().to_string(),
             bind: bind_addr,
             task: tokio::spawn(forward.run(view)),
         })
@@ -521,7 +521,7 @@ impl DynamicForwardHandle {
             expect: None,
         });
         Ok(Self {
-            tunnel_id: ulid::Ulid::new().to_string(),
+            tunnel_id: ulid::Ulid::generate().to_string(),
             bind: bind_addr,
             task: tokio::spawn(forward.run(carrier)),
         })
