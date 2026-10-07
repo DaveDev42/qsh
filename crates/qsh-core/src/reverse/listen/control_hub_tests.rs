@@ -219,7 +219,7 @@ fn rfwd_opened_response(forward_id: &str) -> wire::Response {
 }
 
 /// **Finding: a duplicate `forward_id` must not silently transfer
-/// ownership.** `forward_id` is target-minted (`ulid::Ulid::new()`)
+/// ownership.** `forward_id` is target-minted (`ulid::Ulid::generate()`)
 /// and practically unique, but this relay must not trust that: a
 /// second `RemoteForwardOpened` naming an id already registered to
 /// conduit A, answering a *different* request conduit B issued, must

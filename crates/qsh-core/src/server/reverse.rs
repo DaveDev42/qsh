@@ -228,7 +228,7 @@ impl Server {
             "tunnel: remote-forward listener bound"
         );
 
-        let forward_id = ulid::Ulid::new().to_string();
+        let forward_id = ulid::Ulid::generate().to_string();
         // Self-removal on a fatal accept error (M8 Step 3b) — factored
         // into `run_remote_forward_accept_loop` (this module's own free
         // fn, below, generic over the serve future) both so this spawn

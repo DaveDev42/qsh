@@ -1248,7 +1248,7 @@ impl ControlHub {
         //
         // **Duplicate `forward_id` is rejected, never adopted**
         // (adversarial review finding): `forward_id` is target-minted
-        // (`ulid::Ulid::new()`, `Server::handle_rfwd_open`) and
+        // (`ulid::Ulid::generate()`, `Server::handle_rfwd_open`) and
         // practically unique, but this relay must not *trust* that — a
         // second `RemoteForwardOpened` naming an id already present in
         // `forwards` would otherwise silently move ownership to
@@ -1611,7 +1611,7 @@ impl ControlHub {
     /// normally produce one.
     #[cfg(test)]
     pub(super) fn register_forward_for_test(&self, forward_id: &str, owner: ConduitId) -> Vec<u8> {
-        let token = ulid::Ulid::new().to_string().into_bytes();
+        let token = ulid::Ulid::generate().to_string().into_bytes();
         let mut state = self.lock();
         state.forwards.insert(
             forward_id.to_string(),
