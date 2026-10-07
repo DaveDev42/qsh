@@ -34,7 +34,7 @@ use std::sync::Arc;
 use qsh_transport::{
     Listener, LocalIdentity, RESET_KEY_LEN, SetupError, TransportTuning, TrustEvaluator,
 };
-use rand::RngCore as _;
+use rand::Rng as _;
 use zeroize::Zeroizing;
 
 use crate::config::Paths;

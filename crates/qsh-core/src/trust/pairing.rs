@@ -706,7 +706,7 @@ pub type InviteSecret = Zeroizing<[u8; qsh_proto::pairing::INVITE_SECRET_LEN]>;
 
 /// Mint a fresh 160-bit invite secret from the OS CSPRNG.
 pub fn generate_secret() -> InviteSecret {
-    use rand::RngCore as _;
+    use rand::Rng as _;
     let mut bytes = Zeroizing::new([0u8; qsh_proto::pairing::INVITE_SECRET_LEN]);
     rand::rng().fill_bytes(bytes.as_mut());
     bytes

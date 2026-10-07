@@ -75,7 +75,7 @@ use tokio::time::Instant;
 use qsh_proto::wire;
 #[cfg(any(unix, test))]
 use qsh_transport::{Dialed, Dialer, FramedStream, TrustEvaluator};
-// Only consumed by `run_reverse_unix`'s `StdRng::from_os_rng()` (below) —
+// Only consumed by `run_reverse_unix`'s `StdRng::try_from_rng(&mut SysRng)` (below) —
 // production's replacement for `rand::rng()`'s `!Send` `ThreadRng`
 // (adversarial review finding: it made `run_reverse`'s returned future
 // `!Send`, so `tokio::spawn`ing it failed to compile). `#[cfg(unix)]`
@@ -265,7 +265,7 @@ async fn run_reverse_unix(
         capabilities: Vec::new(),
     }));
 
-    // `StdRng::from_os_rng()`, not `rand::rng()`: `ThreadRng` wraps an
+    // `StdRng::try_from_rng(&mut SysRng)`, not `rand::rng()`: `ThreadRng` wraps an
     // `Rc`, making it (and therefore this whole function's returned
     // future) `!Send` — a compile error the moment any caller tries to
     // `tokio::spawn` this loop rather than `block_on` it (adversarial
@@ -275,7 +275,11 @@ async fn run_reverse_unix(
     // way — its determinism guarantee (`docs/design/testing.md` L2) comes
     // from the *tests* seeding a `StdRng` explicitly, never from what
     // production seeds itself with.
-    let mut backoff = Backoff::new(backoff_limits, rand::rngs::StdRng::from_os_rng());
+    let mut backoff = Backoff::new(
+        backoff_limits,
+        rand::rngs::StdRng::try_from_rng(&mut rand::rngs::SysRng)
+            .expect("the OS random source is unavailable"),
+    );
     // The process-wide wake signal (ADR-0023 decision 17), subscribed once
     // for the whole loop: it cuts a pending backoff wait, restarts the
     // backoff, and reaches every connection's `PathWatch` below.
@@ -670,7 +674,7 @@ async fn run_reverse_unix(
 /// `backoff_initial_ms`, open the 60 s fast window, and say so on the
 /// `qsh::reverse` line.
 #[cfg(unix)]
-fn note_wake<R: rand::RngCore>(backoff: &mut Backoff<R>, controller: &str, event: WakeEvent) {
+fn note_wake<R: rand::Rng>(backoff: &mut Backoff<R>, controller: &str, event: WakeEvent) {
     backoff.wake(Instant::now());
     ReconnectEvent {
         event: "wake",
@@ -1008,7 +1012,7 @@ const QUICK_LOSS_CAP: Duration = Duration::from_secs(8);
 ///
 /// Generic over the RNG so `docs/design/testing.md` L2's property tests can
 /// inject a seeded `rand::rngs::StdRng` for a fully deterministic sequence;
-/// production uses `rand::rngs::StdRng::from_os_rng()` — `Send`, unlike
+/// production uses `rand::rngs::StdRng::try_from_rng(&mut SysRng)` — `Send`, unlike
 /// `rand::rng()`'s `ThreadRng` (`run_reverse_unix`'s own doc comment).
 #[cfg(any(unix, test))]
 struct Backoff<R> {
@@ -1027,7 +1031,7 @@ struct Backoff<R> {
 }
 
 #[cfg(any(unix, test))]
-impl<R: rand::RngCore> Backoff<R> {
+impl<R: rand::Rng> Backoff<R> {
     /// The multiplier the un-jittered delay doubles by on each failure
     /// (`docs/design/protocol.md` §11-4 — fixed, not configurable).
     const MULTIPLIER: u32 = 2;
@@ -1130,13 +1134,13 @@ impl<R: rand::RngCore> Backoff<R> {
 /// `jitter_pct == 0` short-circuits to an exact, deterministic delay
 /// (and never touches `rng`).
 #[cfg(any(unix, test))]
-fn jitter(delay: Duration, jitter_pct: u8, rng: &mut impl rand::RngCore) -> Duration {
+fn jitter(delay: Duration, jitter_pct: u8, rng: &mut impl rand::Rng) -> Duration {
     if jitter_pct == 0 {
         return delay;
     }
     let millis = delay.as_millis() as i64;
     let pct = i64::from(jitter_pct);
-    let offset_pct = rand::Rng::random_range(rng, -pct..=pct);
+    let offset_pct = rand::RngExt::random_range(rng, -pct..=pct);
     let jittered = millis + (millis * offset_pct) / 100;
     Duration::from_millis(jittered.max(0) as u64)
 }

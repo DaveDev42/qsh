@@ -27,15 +27,18 @@ fn secs(n: u64) -> Duration {
 /// ceiling and a test can state exact waits without depending on a seed.
 struct MaxRng;
 
-impl rand::RngCore for MaxRng {
-    fn next_u32(&mut self) -> u32 {
-        u32::MAX
+impl rand::TryRng for MaxRng {
+    type Error = std::convert::Infallible;
+
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+        Ok(u32::MAX)
     }
-    fn next_u64(&mut self) -> u64 {
-        u64::MAX
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+        Ok(u64::MAX)
     }
-    fn fill_bytes(&mut self, dst: &mut [u8]) {
+    fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
         dst.fill(0xff);
+        Ok(())
     }
 }
 
@@ -46,7 +49,7 @@ fn seeded(seed: u64) -> Backoff<StdRng> {
 /// Step until `n` ceilings are collected, advancing the clock by each step's
 /// ceiling (the longest gap the draw allows) so the window arithmetic is
 /// exact whatever the jitter.
-fn ceilings<R: rand::RngCore>(b: &mut Backoff<R>, now: &mut Instant, n: usize) -> Vec<Duration> {
+fn ceilings<R: rand::Rng>(b: &mut Backoff<R>, now: &mut Instant, n: usize) -> Vec<Duration> {
     (0..n)
         .map(|_| {
             let step = b.next_step(*now);
