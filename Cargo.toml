@@ -88,7 +88,7 @@ portable-pty = "0.9"
 # (`docs/design/architecture.md` §8; unix-only, declared under
 # `[target.'cfg(unix)'.dependencies]` in qsh-cli). Direct termios +
 # TIOCGWINSZ; crossterm is deliberately not used.
-nix = { version = "0.30", default-features = false }
+nix = { version = "0.31", default-features = false }
 
 # diagnostics
 tracing = "0.1"
