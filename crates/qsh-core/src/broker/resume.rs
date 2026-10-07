@@ -23,7 +23,7 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use rand::RngCore as _;
+use rand::Rng as _;
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 

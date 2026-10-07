@@ -39,7 +39,7 @@ use qsh_proto::wire::{
 };
 use qsh_transport::endpoint::CLOSE_CODE_PROTOCOL;
 use qsh_transport::{AuthPath, Connection, FramedStream, Incoming, Listener, Principal};
-use rand::RngCore;
+use rand::Rng;
 use thiserror::Error;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;

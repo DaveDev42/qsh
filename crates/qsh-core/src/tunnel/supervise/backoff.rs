@@ -24,7 +24,7 @@
 
 use std::time::Duration;
 
-use rand::Rng;
+use rand::RngExt;
 use tokio::sync::watch;
 use tokio::time::Instant;
 
@@ -60,7 +60,7 @@ pub(crate) struct Backoff<R> {
     rng: R,
 }
 
-impl<R: rand::RngCore> Backoff<R> {
+impl<R: rand::Rng> Backoff<R> {
     pub(crate) fn new(rng: R) -> Self {
         Self {
             ceiling: None,
@@ -141,7 +141,7 @@ pub(crate) struct Pacer<R> {
     wake: watch::Receiver<WakeEvent>,
 }
 
-impl<R: rand::RngCore> Pacer<R> {
+impl<R: rand::Rng> Pacer<R> {
     /// `wake` should be a fresh subscription (its current value counts as
     /// already seen).
     pub(crate) fn new(backoff: Backoff<R>, mut wake: watch::Receiver<WakeEvent>) -> Self {
