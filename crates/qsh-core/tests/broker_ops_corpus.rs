@@ -233,7 +233,7 @@ fn seed_small_budget_gap_then_follow() -> Vec<u8> {
 
 /// ④ Pure control-entry overflow (no output ever pushed, so `end` stays 0
 /// throughout): once a control is force-evicted, a `ReadFollow` from the
-/// start must see a same-offset `Gap` (`ring.rs:439-455`) rather than a
+/// start must see a same-offset `Gap` (`ReplayStore::read`'s gap arm in `ring.rs`) rather than a
 /// silently skipped control id.
 fn seed_control_only_overflow_gap() -> Vec<u8> {
     let mut b = Vec::new();

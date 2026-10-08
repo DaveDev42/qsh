@@ -408,7 +408,7 @@ pub const INCOMING_BUFFER_SIZE: u64 = 64 * 1024;
 ///
 /// **What happens when this cap (or [`INCOMING_BUFFER_SIZE`]) is
 /// exceeded**, read from the vendored `quinn-proto-0.11.16` source
-/// (`~/.cargo/registry/src/*/quinn-proto-0.11.16/src/endpoint.rs:218-227`,
+/// (`~/.cargo/registry/src/*/quinn-proto-0.11.16/src/endpoint.rs`,
 /// `handle_first_packet`'s `RouteDatagramTo::Incoming` arm): quinn checks
 /// `incoming_buffer.total_bytes + datagram_len <= incoming_buffer_size`
 /// **and** `all_incoming_buffers_total_bytes + datagram_len <=

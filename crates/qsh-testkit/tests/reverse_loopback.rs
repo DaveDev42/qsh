@@ -896,8 +896,8 @@ async fn run_target_retries_forever_on_a_denied_registration_until_shutdown() {
 }
 
 /// The happy path end to end: `run_target` resolves `controller` through a
-/// real on-disk `trust.toml` (target.rs:71-72), dials, registers, and
-/// serves the connection as a host (`ConnCtx` built at target.rs:106-115)
+/// real on-disk `trust.toml` (`run_target`'s trust lookup), dials, registers, and
+/// serves the connection as a host (`ConnCtx` built inside `run_target`)
 /// — proven here by the registration actually showing up in the
 /// controller's registry — then exits `Ok(())` the moment `shutdown`
 /// resolves, without waiting for the connection to die.

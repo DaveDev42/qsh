@@ -78,7 +78,7 @@ fn skip() {
 /// A `qsh serve` release subprocess plus the sandbox it runs in, the unit
 /// every T2 scenario is built from (docs/campaigns/m8-adversarial-load.md §2,
 /// mirroring
-/// `fixtures.rs:575-604`'s `golden_resource_exhausted_fixture` hand-built
+/// `fixtures.rs`'s `golden_resource_exhausted_fixture` hand-built
 /// host).
 struct LoadFleet {
     host: Sandbox,
@@ -1807,7 +1807,7 @@ mod linux_only {
     // `session.attach` + `session.close` cycles after `chmod 500` kept
     // succeeding (audit rows kept accumulating past `max_bytes`) all
     // the way to `Server::MAX_PENDING_TICKETS_PER_CONN` (32,
-    // `server/mod.rs:159` — an unrelated hardcoded per-connection
+    // `server/mod.rs` — an unrelated hardcoded per-connection
     // ticket budget the loop exhausts well before any write ever
     // fails), never once hitting `PERMISSION_DENIED`. A construction
     // that actually reaches `degraded` would need to make the
@@ -1818,7 +1818,7 @@ mod linux_only {
     // The mandatory half of A17's judgment — the fail-closed contract
     // itself — is still pinned at the unit level by 4a's in-crate
     // `session_open_fails_closed_when_the_audit_sink_cannot_record_an_
-    // allow` (`crates/qsh-core/src/server/mod.rs:5661`), unaffected by
+    // allow` (`crates/qsh-core/src/server/tests.rs`), unaffected by
     // this scenario's removal. M8 Step 5 (d)'s second construction below
     // (`session_open_fails_closed_when_a_freshly_restarted_writer_cannot_
     // create_the_audit_log`) is the "fresh writer restart" case this

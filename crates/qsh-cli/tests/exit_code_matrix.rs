@@ -941,7 +941,7 @@ fn attach_on_an_unregistered_host_is_host_not_found_and_stdout_stays_empty() {
 // same reason as the attach test just above: the two output modes
 // disagree *on purpose*, and human mode itself has the same unix/Windows
 // split `attach_on_an_unregistered_host_is_host_not_found_and_stdout_
-// stays_empty` documents. `docs/CLI.md` §7 (~line 662) states that
+// stays_empty` documents. `docs/CLI.md` §7 states that
 // `--json`/`--jsonl` on either interactive form is refused with
 // `INVALID_ARGUMENT` **before a session is even opened**, because the
 // interactive form has no machine mode at all. `run_interactive`

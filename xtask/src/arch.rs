@@ -157,8 +157,7 @@ const BROKER_DIR: &str = "crates/qsh-core/src/broker";
 const BROKER_REASON: &str = "the SessionBackend seam must not name a transport type (ADR-0003); \
      keep the broker transport-free so a supervisor can implement it over IPC";
 
-/// The six-token set PLAN.md M3 Step 5(a) reuses verbatim from `BROKER_DIR`
-/// for `localctl`'s other transport-free surfaces.
+/// The six-token set reused verbatim from `BROKER_DIR` for `localctl`'s other transport-free surfaces.
 const BROKER_TOKEN_SET: [&str; 6] = [
     "qsh_transport",
     "quinn",
@@ -173,28 +172,27 @@ const BROKER_TOKEN_SET: [&str; 6] = [
 /// is the shared conduit codec underneath it and is bound by the same rule.
 /// `localctl/daemon.rs` is the bridge to QUIC and is deliberately *not*
 /// listed here — file scope, not the directory, is what lets it stay
-/// exempt (PLAN.md M3 Step 5(a)).
+/// exempt (`docs/design/architecture.md` §1).
 const LOCALCTL_FRAME_FILE: &str = "crates/qsh-core/src/localctl/frame.rs";
 const LOCALCTL_CLIENT_FILE: &str = "crates/qsh-core/src/localctl/client.rs";
 const LOCALCTL_TRANSPORT_REASON: &str = "localctl/{frame,client}.rs are pure UDS + qsh-proto framing on the CLI-process side; \
-     localctl/daemon.rs is the transport bridge and is deliberately exempt (PLAN.md M3 Step 5(a))";
+     localctl/daemon.rs is the transport bridge and is deliberately exempt (docs/design/architecture.md §1)";
 
-/// `reverse/registry.rs` holds `ReverseEntry` metadata only (Step 3 already
-/// narrowed it — the live `client::Session` stays in `reverse/listen.rs`),
+/// `reverse/registry.rs` holds `ReverseEntry` metadata only (already narrowed — the live `client::Session` stays in `reverse/listen.rs`),
 /// so it can carry the same six-token ban as the broker: `crate::client`
 /// staying clean here is the mechanical proof that a `ReverseEntry` never
 /// holds a live session.
 const REGISTRY_FILE: &str = "crates/qsh-core/src/reverse/registry.rs";
-const REGISTRY_REASON: &str = "reverse/registry.rs is metadata-only (Step 3); it must not hold a live client::Session or \
-     name a transport type — same token set as BROKER_DIR (PLAN.md M3 Step 5(a))";
+const REGISTRY_REASON: &str = "reverse/registry.rs is metadata-only; it must not hold a live client::Session or \
+     name a transport type — same token set as BROKER_DIR (docs/design/architecture.md §1)";
 
 /// `qsh-cli/src` never opens a UDS socket directly — it goes through
 /// `qsh-core`'s `localctl::client`. Scope is `src/` only, not the crate
 /// root: `crates/qsh-cli/tests/localctl_perms.rs` pokes UDS permissions
-/// directly and legitimately needs `UnixStream` (PLAN.md M3 Step 5(a)).
+/// directly and legitimately needs `UnixStream` (`docs/design/architecture.md` §1).
 const CLI_SRC_DIR: &str = "crates/qsh-cli/src";
 const CLI_SRC_REASON: &str = "qsh-cli talks to a daemon only through qsh-core's localctl client, never by opening a UDS \
-     socket itself (PLAN.md M3 Step 5(a)); crates/qsh-cli/tests is out of scope for this rule";
+     socket itself (docs/design/architecture.md §1); crates/qsh-cli/tests is out of scope for this rule";
 
 /// `trust/invite_address/route.rs` (and any future sibling under the same
 /// directory) asks the kernel which source address a route off this host
