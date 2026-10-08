@@ -63,6 +63,7 @@
 
 mod common;
 
+use qsh_testkit::net_probe::free_port;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, ToSocketAddrs};
 use std::path::{Path, PathBuf};
@@ -131,13 +132,6 @@ fn skip() {
 // ---------------------------------------------------------------------
 // Small local helpers
 // ---------------------------------------------------------------------
-
-/// A port nothing is listening on, released back to the kernel — same
-/// technique as `dynamic_forward.rs`'s/`tunnel_e2e.rs`'s own copies.
-fn free_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind to pick a free port");
-    listener.local_addr().expect("picked port").port()
-}
 
 /// [`qsh_testkit::net_probe::require_non_loopback_v4`] from synchronous
 /// test code. This file's checks are plain `#[test]`s driving real `qsh`

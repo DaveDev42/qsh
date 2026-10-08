@@ -9,6 +9,7 @@
 
 mod common;
 
+use qsh_testkit::net_probe::free_port;
 use std::io::{BufRead as _, BufReader};
 use std::net::TcpListener;
 use std::process::{Child, Stdio};
@@ -37,11 +38,6 @@ const ALLOWED_KEYS: &[&str] = &[
     "outage_ms",
     "slept_ms",
 ];
-
-fn free_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind to pick a free port");
-    listener.local_addr().expect("picked port").port()
-}
 
 /// A running `qsh tunnel open --local … --supervise` child with both output
 /// streams collected line by line.

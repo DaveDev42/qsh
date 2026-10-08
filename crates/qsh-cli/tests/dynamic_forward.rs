@@ -45,6 +45,7 @@
 
 mod common;
 
+use qsh_testkit::net_probe::free_port;
 use std::io::{Read as _, Write as _};
 use std::net::{TcpListener, TcpStream};
 #[cfg(unix)]
@@ -89,15 +90,6 @@ const TARGET_NAME: &str = "dash-d-target";
 /// The alias the target's own trust store uses for the controller.
 #[cfg(unix)]
 const CONTROLLER_ALIAS: &str = "hub";
-
-/// A port nothing is listening on, released back to the kernel so a
-/// successful re-bind after a refusal is proof nothing claimed it in
-/// between (same technique as `tunnel_e2e.rs`'s/`fixtures.rs`'s own
-/// copies).
-fn free_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind to pick a free port");
-    listener.local_addr().expect("picked port").port()
-}
 
 /// Speak just enough SOCKS5 to prove a listener really is one: the
 /// greeting (version 5, one method, no-auth) and the method-select reply
