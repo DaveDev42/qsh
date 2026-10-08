@@ -451,7 +451,7 @@ impl Ops {
         let Ok(text) = std::fs::read_to_string(&path) else {
             return Vec::new();
         };
-        let Ok(raw) = text.parse::<toml::Value>() else {
+        let Ok(raw) = text.parse::<toml::Table>().map(toml::Value::Table) else {
             return Vec::new();
         };
         let Ok(known) = toml::Value::try_from(config) else {
