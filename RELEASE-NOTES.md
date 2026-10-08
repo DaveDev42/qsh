@@ -9,6 +9,54 @@ it with that tag's name.
 The GitHub Release page for a tag carries the commit list; this file
 carries the parts that do not change commit to commit.
 
+## `v0.4.3`
+
+A maintenance release. It updates dependencies and closes milestone M13.
+It has no wire or `qsh.cli/v1` contract change, and `v0.4.x` peers
+interoperate with it in both directions. The defaults and the
+`config.toml` keys from `v0.4.2` are unchanged.
+
+### Dependencies
+
+- Lockfile refresh within semver for the workspace and `fuzz/`, including
+  `quinn-proto` 0.11.19, `quinn-udp` 0.5.16 and `tokio` 1.53.2.
+- Major bumps: `nix` 0.31, `sha2` 0.11, `base64` 0.23, `ulid` 3,
+  `rand` 0.10, `toml` 1.1, and `jsonschema` 0.58 (tests only). Session
+  and request ID strings, digest bytes and base64 output are unchanged.
+  Resume tokens and the stateless reset key still come from the
+  OS-seeded generator.
+- `toml` 1.1 implements TOML 1.1. Every file that parsed before parses
+  the same way. A few inputs that TOML 1.0 rejected are now accepted:
+  newlines and a trailing comma inside an inline table, the `\e` and
+  `\xHH` escapes, and times without seconds. That applies to
+  `config.toml`, `acl.toml`, `trust.toml` and `hosts.toml`. A file that
+  still does not parse keeps the old behavior: a broken `acl.toml` denies
+  every request, and a broken `config.toml` stops startup with
+  `CONFIG_ERROR`. The parser's message text in those errors may read
+  differently.
+- Still on the old versions: `keyring` stays on 3.6, because 4.x
+  redesigns how the secret store is chosen and needs a hands-on check
+  against a real Keychain and Secret Service. The Rust toolchain stays
+  on 1.98.1.
+
+### Internal
+
+- Test modules in source files over about 800 lines moved to sibling
+  `tests.rs` files. Test names and counts are unchanged.
+- Duplicated test helpers were merged, two stale `dead_code` allowances
+  were removed, and code comments now cite symbols instead of line
+  numbers.
+- CI moved to `actions/checkout` v7 and `setup-rust-toolchain` v2. The
+  release workflow keeps its existing action versions.
+
+### Assets and signing
+
+The same as `v0.4.0`: the same seven assets plus `SHA256SUMS`, the same
+install paths, the same provenance check, and the same Developer ID
+signing and notarization of both macOS binaries. See "What is in the
+archives" and "What is signed and what is not" under `v0.4.0` below,
+with `v0.4.3` in place of `v0.4.0` in the asset names.
+
 ## `v0.4.2`
 
 Reverse registrations hold up better on lossy links and on overloaded
