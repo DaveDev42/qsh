@@ -1,11 +1,6 @@
 use super::*;
+use crate::ops::test_support::temp_ops;
 use qsh_proto::{IdentityInitReq, KeyStoreMode, TrustAddReq};
-
-fn temp_ops() -> (tempfile::TempDir, Ops) {
-    let dir = tempfile::tempdir().unwrap();
-    let paths = crate::ops::Paths::new(dir.path().join("config"), dir.path().join("state"));
-    (dir, Ops::new(paths))
-}
 
 /// M7 Step 7-2 carryover (ii), `PLAN.md`: `exec_run` must dial on
 /// `Ops`' shared [`crate::ops::Ops::connect_runtime`], not build a

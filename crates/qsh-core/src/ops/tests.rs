@@ -1,11 +1,6 @@
 use super::*;
+use crate::ops::test_support::temp_ops;
 use qsh_proto::KeyStoreKind;
-
-fn temp_ops() -> (tempfile::TempDir, Ops) {
-    let dir = tempfile::tempdir().unwrap();
-    let paths = Paths::new(dir.path().join("config"), dir.path().join("state"));
-    (dir, Ops::new(paths))
-}
 
 fn file_mode() -> IdentityInitReq {
     IdentityInitReq {

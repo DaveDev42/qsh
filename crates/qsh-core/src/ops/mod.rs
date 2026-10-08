@@ -1210,6 +1210,9 @@ fn server_name_for(address: &str) -> String {
 }
 
 #[cfg(test)]
+pub(crate) mod test_support;
+
+#[cfg(test)]
 mod tests;
 
 use probe::{classify_pairing_dial_failure, classify_pairing_exchange_failure};

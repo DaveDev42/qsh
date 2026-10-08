@@ -2,6 +2,7 @@ use qsh_proto::SetupStepId::{Acl, Doctor, Identity, Invite, ModeConfig, Pair, Pi
 use qsh_proto::{SetupRole, SetupStatus, SetupStepId};
 
 use super::*;
+use crate::ops::test_support::temp_ops;
 
 #[test]
 fn setup_step_order_matches_adr_0024_for_each_role() {
@@ -80,12 +81,6 @@ fn setup_vocabularies_serialize_as_the_closed_snake_case_lists() {
     }
     assert_eq!(serde_json::to_value(SetupRole::HostTo).unwrap(), "host_to");
     let _: SetupStepId = serde_json::from_value("mode_config".into()).unwrap();
-}
-
-fn temp_ops() -> (tempfile::TempDir, crate::ops::Ops) {
-    let dir = tempfile::tempdir().unwrap();
-    let paths = crate::config::Paths::new(dir.path().join("config"), dir.path().join("state"));
-    (dir, crate::ops::Ops::new(paths))
 }
 
 fn pin_by_fingerprint(ops: &crate::ops::Ops, name: &str, fingerprint: &str) {
