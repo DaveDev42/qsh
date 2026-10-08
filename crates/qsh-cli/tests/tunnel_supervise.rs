@@ -29,6 +29,7 @@ use nix::sys::signal::Signal;
 use qsh_core::{Ops, Paths, RecoveryConfig};
 use qsh_proto::{ErrorCode, TunnelDynamicReq, TunnelOpenReq};
 use qsh_testkit::chaos::{ChaosPolicy, ChaosProxy};
+use qsh_testkit::net_probe::free_port;
 use serde_json::Value;
 use tracing_subscriber::layer::SubscriberExt as _;
 use tracing_subscriber::util::SubscriberInitExt as _;
@@ -233,13 +234,6 @@ fn start_echo() -> u16 {
         }
     });
     port
-}
-
-/// A port nothing listens on, released back to the kernel; the request
-/// wants a concrete one.
-fn free_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind to pick a free port");
-    listener.local_addr().expect("picked port").port()
 }
 
 fn local_req(forward_port: u16, supervise_ms: u32) -> TunnelOpenReq {

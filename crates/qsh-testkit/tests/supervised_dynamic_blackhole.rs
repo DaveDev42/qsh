@@ -29,6 +29,7 @@ use qsh_core::{Ops, Paths, Principal};
 use qsh_proto::{IdentityInitReq, KeyStoreMode, TrustAddReq, TunnelDynamicReq};
 use qsh_testkit::chaos::{ChaosPolicy, ChaosProxy};
 use qsh_testkit::loopback::{LoopbackHarness, make_identity};
+use qsh_testkit::net_probe::free_port;
 use qsh_testkit::net_probe::{self, Gap, LanEcho};
 use qsh_transport::{Fingerprint, StaticTrust};
 
@@ -56,14 +57,6 @@ fn slow_requested() -> bool {
     std::env::var_os("QSH_ACCEPTANCE_SLOW")
         .map(|v| v.to_string_lossy().trim().to_string())
         .is_some_and(|v| !v.is_empty() && v != "0")
-}
-
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .expect("bind to pick a free port")
-        .local_addr()
-        .expect("picked port")
-        .port()
 }
 
 /// One SOCKS5 `CONNECT` to `dest`, then an echo round trip. `Ok` only if

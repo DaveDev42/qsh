@@ -62,6 +62,7 @@ use qsh_proto::local::{
 };
 use qsh_proto::wire::{self, control_message, response};
 use qsh_testkit::loopback::{TestIdentity, make_identity};
+use qsh_testkit::net_probe::free_port;
 use qsh_testkit::reverse::{ReverseHarness, wait_for};
 use qsh_testkit::tunnel::{EchoServer, RemoteForwardBinding, TunnelHarness, ephemeral_local_spec};
 use qsh_transport::StaticTrust;
@@ -1609,20 +1610,6 @@ async fn a_claim_started_before_registration_gets_only_its_declared_wait_ms_not_
 // (v) `Ops::tunnel_list`/`Ops::tunnel_close` (`PLAN.md` M4 Step 5 PR 5b) —
 // qsh-level, against a real daemon-held `-R over reverse` forward.
 // ------------------------------------------------------------------
-
-/// Pick a free TCP port on loopback by binding `:0` and reading it back —
-/// same technique `crates/qsh-cli/tests/fixtures.rs`'s own `free_port`
-/// uses. `Ops::tunnel_open`'s `TunnelOpenReq::listen_port` must be
-/// `1..=65535` (`crate::ops::tunnel`'s own `port` helper) — unlike the raw
-/// wire `RemoteForwardOpen.bind_port`, which this file's other `-R`
-/// helpers ([`ReverseRemoteRoute::open`]) can and do send as `0` to ask
-/// the target for a kernel-assigned port, the `Ops`/CLI-facing grammar has
-/// no such request-a-free-port spelling (`docs/CLI.md` §6.9's `-R` grammar
-/// takes a concrete `rport`), so this test picks one itself instead.
-fn free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind to pick a free port");
-    listener.local_addr().expect("picked port").port()
-}
 
 /// [`Ops::tunnel_list`] off the calling thread — same
 /// `spawn_blocking` bridge `host_list_reverse.rs` uses for

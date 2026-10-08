@@ -39,6 +39,7 @@
 
 mod common;
 
+use qsh_testkit::net_probe::free_port;
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::process::{Child, Command, Stdio};
@@ -84,16 +85,6 @@ fn start_echo() -> SocketAddr {
         }
     });
     addr
-}
-
-/// A port nothing is listening on: bound and released, so the kernel is
-/// the one that says it was free. Inherently a small race — nothing else
-/// in this process claims it, and a stray claim would only turn the
-/// "refused" case into a passing round trip, i.e. a loud failure rather
-/// than a silent pass.
-fn free_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind to pick a free port");
-    listener.local_addr().expect("picked port").port()
 }
 
 /// `PAYLOAD_LEN` bytes that are not a repeat of any single buffer's worth,

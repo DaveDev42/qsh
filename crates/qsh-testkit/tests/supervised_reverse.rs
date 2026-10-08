@@ -25,6 +25,7 @@ use qsh_core::reverse::registry::EntryState;
 use qsh_core::{Ops, Paths, Principal};
 use qsh_proto::{IdentityInitReq, KeyStoreMode, TrustAddReq, TunnelDynamicReq, TunnelOpenReq};
 use qsh_testkit::loopback::{TestIdentity, make_identity};
+use qsh_testkit::net_probe::free_port;
 use qsh_testkit::reverse::{LocalctlHandle, ReverseHarness, wait_for};
 use qsh_testkit::tunnel::{EchoServer, TunnelHarness};
 use qsh_transport::StaticTrust;
@@ -119,14 +120,6 @@ async fn wait_line(kind: &str) -> serde_json::Value {
 
 fn pin(identity: &TestIdentity, name: &str) -> StaticTrust {
     StaticTrust::empty().with_pin(identity.fingerprint, Principal::Device(name.to_string()))
-}
-
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .expect("bind to pick a free port")
-        .local_addr()
-        .expect("picked port")
-        .port()
 }
 
 struct Rig {

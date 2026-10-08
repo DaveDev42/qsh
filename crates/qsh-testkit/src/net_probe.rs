@@ -210,3 +210,15 @@ pub async fn dead_port_on(ip: Ipv4Addr) -> io::Result<u16> {
     drop(listener);
     Ok(port)
 }
+
+/// A loopback TCP port nothing listens on, released back to the kernel.
+///
+/// Binds `127.0.0.1:0`, reads the assigned port and drops the listener. A
+/// forward request wants a concrete port (`docs/CLI.md` §6.9), and a later
+/// successful re-bind is the proof that nothing in the process claimed it in
+/// between. Inherently racy against other processes, which is acceptable for
+/// loopback test fixtures.
+pub fn free_port() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind to pick a free port");
+    listener.local_addr().expect("picked port").port()
+}
