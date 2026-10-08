@@ -63,8 +63,9 @@ stops reading cannot starve the PTY, `qsh doctor --fail-on`, a stateless
 reset key so a restarted server drops attached clients quickly, an
 `aarch64-unknown-linux-musl` release asset, `[transport].keep_alive_ms`,
 `[recovery]` path-watch settings, and a wider default detection window for
-reverse registrations. Two M13 items are for a person: the nightly job's
-injected-delay run and the old-glibc check of the aarch64 musl asset
+reverse registrations. M13 closed on 2026-10-08, when a run with an
+injected delay turned the nightly job red as designed. One M13 item is
+for a person: the old-glibc check of the aarch64 musl asset
 (`docs/campaigns/p1-aarch64-musl.md`). What works end to end today:
 
 - `qsh exec host -- cmd`, in human mode or as a single `qsh.cli/v1` JSON
@@ -773,7 +774,7 @@ to the registry yet.
 | M10 | Release (installers, Homebrew, notarization, musl, provenance) | Pipeline done; clean-VM campaign open |
 | M11 | Issue follow-ups and ACL visibility (first P1 milestone) | Features done; `cause` observation and parser fuzz-hours open |
 | M12 | Supervised tunnels (`--supervise`, `--accept-hold`) and `qsh setup` | Features done, first shipped in `v0.4.0`; the `p1-supervise-wake` and `p1-setup-stopwatch` campaign rounds are open (human-owned) |
-| M13 | Measurement and release groundwork | Features done, shipped in `v0.4.0` through `v0.4.2`; the nightly perf injected-delay run and the aarch64 musl old-glibc check are open (human-owned) |
+| M13 | Measurement and release groundwork | Done (2026-10-08); the aarch64 musl old-glibc check is open (human-owned) |
 | M14–M19 | Rest of P1, in `docs/ROADMAP.md` §5 | Not started |
 
 The Homebrew tap (`DaveDev42/tap`) and the release workflow's auto-bump
