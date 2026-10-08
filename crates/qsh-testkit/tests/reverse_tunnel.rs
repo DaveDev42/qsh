@@ -1807,7 +1807,7 @@ async fn tunnel_list_and_close_manage_a_daemon_held_remote_forward() {
 /// reproduces that exact shape with `std::thread::spawn` instead, which
 /// panicked with "there is no reactor running, must be called from the
 /// context of a Tokio 1.x runtime" at
-/// `crates/qsh-core/src/tunnel/remote.rs:668` before the fix wrapped the
+/// `crates/qsh-core/src/tunnel/remote.rs` before the fix wrapped the
 /// `register()` call in `conn.runtime().block_on(...)`.
 #[tokio::test(flavor = "multi_thread")]
 async fn tunnel_open_remote_over_reverse_survives_a_thread_with_no_ambient_tokio_runtime() {

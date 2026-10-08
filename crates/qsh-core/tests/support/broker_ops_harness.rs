@@ -40,11 +40,11 @@
 //! | 3 | `ReadAt` | `sess: u8, frac: u8, max: u16` | `after = end * frac / 255` (stateless offset cursor — at-least-once, never asserted duplicate-free); `max %= 4096`. |
 //! | 4 | `ReadBeyond` | `sess: u8, over: u8` | `after = end + 1 + over % 64` → must be `Err(CursorBeyondEnd{after, end})` exactly. |
 //! | 5 | `ReadFollow` | `sess: u8, max: u16` | reads from the slot's own persistent stateful cursor (`ModelSession::got`), advances it to `out.next`; `max %= 4096`. |
-//! | 6 | `TakeLease` | `sess: u8, principal: u8, owner: u8, physical: u8, flags: u8` | each identity byte `% 4`; `flags` bit0 = `no_steal`, bit1 = `take` (bit unset: `owner == physical`, the ordinary one-connection-is-one-asker path) vs `take_owned` (bit set: `owner`/`physical` independent, the reverse-route path, `lease.rs:114-132`). |
-//! | 7 | `DropConnection` | `conn: u8` | `conn %= 4`; `lease.release_connection(ConnectionId(conn))` on **every live slot** — `server/mod.rs:2321-2322`'s `purge_connection` releases the same connection's lease on every session it touches, not just one. |
+//! | 6 | `TakeLease` | `sess: u8, principal: u8, owner: u8, physical: u8, flags: u8` | each identity byte `% 4`; `flags` bit0 = `no_steal`, bit1 = `take` (bit unset: `owner == physical`, the ordinary one-connection-is-one-asker path) vs `take_owned` (bit set: `owner`/`physical` independent, the reverse-route path, `lease.rs`). |
+//! | 7 | `DropConnection` | `conn: u8` | `conn %= 4`; `lease.release_connection(ConnectionId(conn))` on **every live slot** — `server/mod.rs`'s `purge_connection` releases the same connection's lease on every session it touches, not just one. |
 //! | 8 | `Attach` | `sess: u8` | `model.attached += 1`. |
-//! | 9 | `Detach` | `sess: u8` | `model.attached = attached.saturating_sub(1)`; `attached == 0` ⇒ `ttl_base = now` (`session.rs:795-805`'s `AttachGuard::drop`). |
-//! | 10 | `SetExited` | `sess: u8` | `state = Exited`, `ttl_base = now` (`session.rs:1338-1345`'s `set_state_exited`). |
+//! | 9 | `Detach` | `sess: u8` | `model.attached = attached.saturating_sub(1)`; `attached == 0` ⇒ `ttl_base = now` (`session.rs`'s `AttachGuard::drop`). |
+//! | 10 | `SetExited` | `sess: u8` | `state = Exited`, `ttl_base = now` (`session.rs`'s `set_state_exited`). |
 //! | 11 | `SetClosing` | `sess: u8` | `closing = true`. |
 //! | 12 | `IssueResume` | `sess: u8, peer: u8, ttl: u16` | `registry.issue(id, PeerFingerprint::new([peer; 32]), 1 + ttl % 60000 ms)`. |
 //! | 13 | `VerifyResume` | `sess: u8, tokref: u8, peer: u8` | `tokref >> 6` selects which token bytes to present: 0 Live (the slot's current token, opaque bytes — see below; no live token in the slot ⇒ a `[0xAA; 32]` sentinel, denied by construction), 1 Spent (`model.spent[(tokref & 63) % spent.len()]` — always a real superseded generation: with nothing spent yet the op consumes its arguments and does nothing at all, since a stand-in would only re-ask what kinds 2 and 3 already ask), 2 Garbage (`[tokref & 63; 32]` — well-formed length, wrong content), 3 Truncated (`[tokref & 63; 5]` — wrong length entirely, still hashable). |
@@ -52,7 +52,7 @@
 //! | 15 | `ForgetResume` | `sess: u8` | `registry.forget(id)`, called twice to exercise idempotence. |
 //! | 16 | `TickSmall` | `ms: u8` | `clock.advance(1 + ms ms)` — 1..=256ms steps. |
 //! | 17 | `TickLarge` | `ms: u16` | `clock.advance(1 + ms ms)` — up to ~65.5s steps, the range that actually crosses `SESSION_TTL`. |
-//! | 18 | `Reap` | *(none)* | the registry half of one reaper pass, plus one call production never makes: `broker/mod.rs:830-891` builds a deadline map of *every* session in its registry (doomed ones included, `:837-838`) and calls `sync_expiry` (`:870`) once, then closes doomed sessions and `forget`s them (`:878`, `:885`); this harness additionally calls `purge_expired` right after `sync_expiry` so a credential's own expiry is judged on the spot instead of at the next `sync_expiry`. Per occupied slot, `TtlWindow::reap_reason` and `TtlWindow::deadline` (both real) are compared against [`predict_reap_reason`] and [`predict_deadline`] (both hand-written, neither of which calls `TtlWindow`); a slot whose predicted reason is `Some` is *doomed*. Only the slots that survive the pass go into the map, which is the shape a real pass takes once the session it is closing has already left the session registry — that is what drives `sync_expiry`'s `None` arm (`resume.rs:344`), where a credential keeps its own expiry and lives on only while `expires_at > now`, the same strict inequality `purge_expired` (`resume.rs:324`) and `verify`'s freshness bit (`resume.rs:260`) use. After the two real calls `registry.len()` must equal the model's count; then every doomed slot is `registry.forget`-ten and emptied (a reap closes the session before forgetting its credential) and `len()` is checked once more. The one observable divergence from production: a slot that escaped doom only because it is `closing` but whose TTL has elapsed is a survivor here, so its credential is re-anchored to a past deadline and purged on the spot; production keeps that entry until `forget` (unusable either way — `verify`'s freshness check, `resume.rs:260`). The model applies the same rule. |
+//! | 18 | `Reap` | *(none)* | the registry half of one reaper pass, plus one call production never makes: `broker/mod.rs` builds a deadline map of *every* session in its registry (doomed ones included, `:837-838`) and calls `sync_expiry` (`:870`) once, then closes doomed sessions and `forget`s them (`:878`, `:885`); this harness additionally calls `purge_expired` right after `sync_expiry` so a credential's own expiry is judged on the spot instead of at the next `sync_expiry`. Per occupied slot, `TtlWindow::reap_reason` and `TtlWindow::deadline` (both real) are compared against [`predict_reap_reason`] and [`predict_deadline`] (both hand-written, neither of which calls `TtlWindow`); a slot whose predicted reason is `Some` is *doomed*. Only the slots that survive the pass go into the map, which is the shape a real pass takes once the session it is closing has already left the session registry — that is what drives `sync_expiry`'s `None` arm (`resume.rs`), where a credential keeps its own expiry and lives on only while `expires_at > now`, the same strict inequality `purge_expired` (`resume.rs`) and `verify`'s freshness bit (`resume.rs`) use. After the two real calls `registry.len()` must equal the model's count; then every doomed slot is `registry.forget`-ten and emptied (a reap closes the session before forgetting its credential) and `len()` is checked once more. The one observable divergence from production: a slot that escaped doom only because it is `closing` but whose TTL has elapsed is a survivor here, so its credential is re-anchored to a past deadline and purged on the spot; production keeps that entry until `forget` (unusable either way — `verify`'s freshness check, `resume.rs`). The model applies the same rule. |
 //!
 //! `N_OPS` is 19 (opcodes 0..=18). Resume-token bytes are treated as
 //! opaque throughout: the harness stores whatever `ResumeToken::expose()`
@@ -90,14 +90,14 @@
 //!   the last id already delivered, so a gap can lose controls and never
 //!   replay or reorder them. `ReadAt`/`ReadBeyond` are offset cursors
 //!   (at-least-once) and are excluded from the ordering and contiguity
-//!   halves (`ring.rs:44-48`) — but not from the forgery half: every
+//!   halves (`ring.rs`) — but not from the forgery half: every
 //!   `(sequence, ctl_id)` a `ReadAt` surfaces must exist in `model.ctl`
 //!   too.
 //! - **`ctl_after`**: the cursor a read hands back never moves backwards,
 //!   covers every control id that read delivered, and — while nothing has
 //!   been evicted yet, so `model.ctl` still describes the ring's live
 //!   controls exactly — covers every control positioned before the offset
-//!   the read started from (`ring.rs:484-490`'s "already seen (or
+//!   the read started from (`ring.rs`'s "already seen (or
 //!   evicted-past)" tightening; without it a later read from an earlier
 //!   offset would surface those ids again, out of order).
 //! - **gap / byte-identity**: `requested_after < available_from` ⇒ the
@@ -105,19 +105,19 @@
 //!   what follows is `model.stream[available_from..]`'s prefix; otherwise
 //!   the bytes returned are `model.stream[after..]`'s prefix, byte for
 //!   byte. A control-only overflow is required to carry the same-offset
-//!   `Gap` `ring.rs:440-455` describes — enforced as a side effect of the
+//!   `Gap` `ring.rs` describes — enforced as a side effect of the
 //!   control-id contiguity check above (a silent id skip with no `Gap` in
 //!   between fails it).
 //! - **memory**: `entry_count() == 1 || retained() <= budget()` (the
 //!   `entry_count() == 1` escape hatch is for a budget so small the
-//!   just-appended entry alone exceeds it — `ring.rs:322-327` — eviction
+//!   just-appended entry alone exceeds it — `ring.rs` — eviction
 //!   never removes the entry it just added); `entry_count()` is bounded by
 //!   what can still be live rather than by the budget alone — every live
-//!   entry starts at or after `available_from` (`ring.rs:409-417`), so the
+//!   entry starts at or after `available_from` (`ring.rs`), so the
 //!   live output chunks come only from `Append`s whose own end ran past
 //!   `available_from`, at most `len.div_ceil(chunk_max)` chunks each
-//!   (`ring.rs:363-378`), and the live controls only from those pushed at
-//!   or after it (`ring.rs:348-357` drops the ones strictly behind);
+//!   (`ring.rs`), and the live controls only from those pushed at
+//!   or after it (`ring.rs` drops the ones strictly behind);
 //!   `chunk_max()` fixed at construction and equal to `(budget /
 //!   RING_CHUNK_DIVISOR).clamp(1, RING_CHUNK_MAX)`. `retained()` is the ring's own
 //!   self-reported charge — this file does not recompute it independently
@@ -125,13 +125,13 @@
 //! - **lease**: `holder()` matches the model; `is_held_by` is true for the
 //!   current owner connection and false for every other; `Conflict` fires
 //!   exactly when the model predicts `no_steal && holder.principal !=
-//!   asker` (`lease.rs:145-147`); a re-take on the holding connection is
+//!   asker` (`lease.rs`); a re-take on the holding connection is
 //!   `Acquired{displaced:None, changed:false}` regardless of principal
-//!   (`lease.rs:141-144`); every other successful take is
+//!   (`lease.rs`); every other successful take is
 //!   `Acquired{displaced:Some(old holder), changed:(old owner !=
-//!   new owner)}` (`lease.rs:148-158`); `DropConnection` releases exactly
+//!   new owner)}` (`lease.rs`); `DropConnection` releases exactly
 //!   the slots whose model `physical` equals the dropped connection and
-//!   leaves every other slot's lease untouched (`lease.rs:166-171`).
+//!   leaves every other slot's lease untouched (`lease.rs`).
 //! - **resume**: whatever the model calls "no entry, expired, wrong hash,
 //!   or wrong peer" is `Err(ResumeDenied)` on both `verify` and `rotate`,
 //!   never mutates `registry.len()`, and never disturbs the stored axis (a
@@ -348,7 +348,7 @@ fn presented_bytes(m: &ModelSession, kind: u8, idx_sel: u8) -> Vec<u8> {
 /// - the ordinary one, mandatory whenever `requested_after < available_from`:
 ///   `Gap{requested_after, available_from}` resyncing exactly to the ring's
 ///   `available_from()`;
-/// - the control-only-overflow one (`ring.rs:439-455`), only ever possible
+/// - the control-only-overflow one (`ring.rs`), only ever possible
 ///   once the caller is already at/after `available_from`: a *same-offset*
 ///   `Gap{requested_after, available_from: requested_after}` signalling a
 ///   lost control with no bytes lost at all.
@@ -386,7 +386,7 @@ fn check_read_bytes(
             assert_eq!(
                 *af, requested_after,
                 "a Gap while already at/after available_from must be the \
-                 same-offset control-overflow case (ring.rs:439-455)"
+                 same-offset control-overflow case (ring.rs)"
             );
         }
         pos = *af;
@@ -471,7 +471,7 @@ fn check_follow_controls(model: &mut ModelSession, out: &ReadOut, saw_gap: bool)
 /// Forgery half of the control oracle for the stateless readers: whatever
 /// `(sequence, ctl_id)` pairs a `ReadAt` surfaces must be pairs this model
 /// actually pushed. Ordering and contiguity stay out of scope for an
-/// offset cursor (`ring.rs:44-48`), invention never does.
+/// offset cursor (`ring.rs`), invention never does.
 fn check_control_provenance(model: &ModelSession, out: &ReadOut) {
     for ev in &out.events {
         if let ReplayEvent::Control {
@@ -501,7 +501,7 @@ fn all_entries_live(ring: &ReplayRing, model: &ModelSession) -> bool {
 /// a read hands back never moves backwards, always covers the ids that
 /// read delivered, and — while nothing has been evicted — always covers
 /// the ids positioned before the offset the read started from
-/// (`ring.rs:484-490`). Dropping that last tightening is invisible to a
+/// (`ring.rs`). Dropping that last tightening is invisible to a
 /// cursor that only ever moves forward, and shows up the moment a second
 /// reader starts from an earlier offset and is handed those ids again.
 fn check_ctl_after(
@@ -568,16 +568,16 @@ fn assert_ring_invariants(ring: &ReplayRing, model: &ModelSession, budget: usize
     );
     // Entry-count bound, derived from what can still be live rather than
     // from the budget. Every live entry starts at or after `available_from`
-    // (`ring.rs:409-417` reads it off the oldest retained output), so:
+    // (`ring.rs` reads it off the oldest retained output), so:
     //
     // - a live output chunk holds only bytes at or past `available_from`,
     //   hence the `Append` that created it ended past `available_from`;
     //   and one `Append` of `len` bytes creates at most
     //   `len.div_ceil(chunk_max)` chunks, since `append_output`
-    //   (`ring.rs:363-378`) tops up the tail chunk first and then takes
+    //   (`ring.rs`) tops up the tail chunk first and then takes
     //   `chunk_max` bytes at a time;
     // - a live control was pushed at or after `available_from`, because
-    //   eviction drops the ones strictly behind it (`ring.rs:348-357`)
+    //   eviction drops the ones strictly behind it (`ring.rs`)
     //   every time `available_from` moves.
     //
     // Both are upper bounds — nothing here claims an entry *is* live — so
@@ -872,7 +872,7 @@ pub fn run(input: &[u8]) {
                     outcome, predicted,
                     "TakeLease outcome diverged from the model"
                 );
-                // `lease.rs:140-144`'s first arm (`h.conn == owner`) returns
+                // `lease.rs`'s first arm (`h.conn == owner`) returns
                 // `Acquired { changed: false, .. }` *without* touching
                 // `self.holder` at all — a same-owner re-acquire is a pure
                 // no-op, including on `physical`, even when this call's
@@ -1148,7 +1148,7 @@ pub fn run(input: &[u8]) {
                 clock.advance(Duration::from_millis(1 + ms as u64));
             }
             18 => {
-                // Reap — the registry half of a reaper pass (`broker/mod.rs:830-891`):
+                // Reap — the registry half of a reaper pass (`broker/mod.rs`):
                 // judge, build the deadline map (survivors only — the shape
                 // of a pass whose doomed session already left the registry),
                 // `sync_expiry`, then `purge_expired` (harness-only, see the
@@ -1192,11 +1192,11 @@ pub fn run(input: &[u8]) {
                         continue;
                     }
                     let survives = if doomed[i] {
-                        // `resume.rs:344`: no deadline for this id, so the
+                        // `resume.rs`: no deadline for this id, so the
                         // credential keeps its own expiry and lives only
                         // while it is strictly ahead of `now` — the same
-                        // inequality `purge_expired` (`resume.rs:324`) and
-                        // `verify`'s freshness bit (`resume.rs:260`) use.
+                        // inequality `purge_expired` (`resume.rs`) and
+                        // `verify`'s freshness bit (`resume.rs`) use.
                         slot.model.expires_at > now
                     } else {
                         let deadline =

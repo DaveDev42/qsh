@@ -57,7 +57,7 @@ use qsh_core::acl::{
 };
 use qsh_core::{Paths, Principal};
 // F5 (`PLAN.md` M5 Step 7 adversarial ⑥): `Principal` comes from `qsh-core`
-// (re-exported at `qsh-core/src/lib.rs:61`), not `qsh_transport` — this is
+// (re-exported at `qsh-core/src/lib.rs`), not `qsh_transport` — this is
 // a `qsh-core` test suite, and `qsh-core` re-exports the type its own
 // public `Ops`/`acl` surface already traffics in. `qsh_transport` stays
 // imported only for `AuthPath`, which `qsh-core` does not re-export.
