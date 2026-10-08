@@ -431,8 +431,9 @@ fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
 /// (`qsh-*`) names it lists under `[dependencies]`.
 fn read_manifest(path: &Path) -> Result<(String, BTreeSet<String>)> {
     let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    let value: toml::Value = text
-        .parse()
+    let value = text
+        .parse::<toml::Table>()
+        .map(toml::Value::Table)
         .with_context(|| format!("parsing {}", path.display()))?;
 
     let name = value
