@@ -349,9 +349,8 @@ impl DataRecv {
 /// what opening *another* one needs (the live connection, or the daemon
 /// socket + host name), so more than one call site can open data streams
 /// the same way without each having to know both carriers' handshakes
-/// (`PLAN.md` M4 Step 2 — [`crate::tunnel::open_stream`] is the first such
-/// second call site; [`crate::client::Session::open_data_link`] predates
-/// this type and is left as its own inline forward/reverse match rather
+/// ([`crate::tunnel::open_stream`] is the first such second call site;
+/// [`crate::client::Session::open_data_link`] predates this type and is left as its own inline forward/reverse match rather
 /// than rebuilt on top of it, so this addition changes no observable
 /// session behavior).
 ///
@@ -359,11 +358,8 @@ impl DataRecv {
 /// `Transport`/`StreamMux` trait object — see [`ControlLink`]'s own doc for
 /// why that axis split is the house style here, not a trait.
 ///
-/// `#[allow(dead_code)]`-adjacent items below: nothing outside
-/// `crate::tunnel`'s own tests calls this yet — `PLAN.md` M4 Step 2 lands
-/// only the seam, Step 3/4 add the local/remote forward business logic
-/// that actually opens tunnel streams through it.
-#[allow(dead_code)]
+/// `crate::tunnel` opens its data streams through this seam; see
+/// `docs/design/architecture.md` for where the client-side carriers sit.
 pub(crate) enum DataLink<'a> {
     /// A live QUIC connection dialed straight to the peer (forward route).
     Quic(&'a Connection),
@@ -380,7 +376,6 @@ pub(crate) enum DataLink<'a> {
     },
 }
 
-#[allow(dead_code)]
 impl DataLink<'_> {
     /// Open a fresh data stream and send `header` as its first frame,
     /// applying quinn's per-stream `priority` (`docs/design/protocol.md`
