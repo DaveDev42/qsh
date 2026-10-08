@@ -1,13 +1,7 @@
 use super::*;
+use crate::ops::test_support::temp_ops;
 
-use crate::config::Paths;
 use crate::ops::doctor::infer_run_mode;
-
-fn temp_ops() -> (tempfile::TempDir, Ops) {
-    let dir = tempfile::tempdir().unwrap();
-    let paths = Paths::new(dir.path().join("config"), dir.path().join("state"));
-    (dir, Ops::new(paths))
-}
 
 fn temp_home() -> tempfile::TempDir {
     tempfile::tempdir().unwrap()
