@@ -80,14 +80,14 @@ pub(crate) enum ForwardCarrier {
     /// this connection, so it stays bound to it; a supervised tunnel
     /// (ADR-0023) swaps the value under the running listener, so new
     /// accepts ride the replacement connection.
-    Quic(qsh_transport::Connection),
+    Direct(qsh_transport::Connection),
     /// This machine's resident `qsh listen` daemon socket plus the host
     /// name to relay to (reverse route) — see [`DataLink::Local`].
     /// `-L over reverse`, `docs/history/m4-plan.md` Step 5 (a): each forwarded
     /// connection opens its own `TCP_CONNECT` over a fresh `LOCAL_STREAM`
     /// conduit, and past `ConnectResult{ok:true}` splices raw bytes with
     /// [`crate::tunnel::splice::splice_tcp_uds`] — the reverse carrier's
-    /// counterpart to [`ForwardCarrier::Quic`]'s `splice_tcp_quic`.
+    /// counterpart to [`ForwardCarrier::Direct`]'s `splice_tcp_quic`.
     ///
     /// Constructing and splicing over this variant is complete as of this
     /// stage (`docs/history/m4-plan.md` Step 5 (a)); wired up by every route-aware
@@ -113,7 +113,7 @@ impl ForwardCarrier {
     /// wants.
     fn link(&self) -> DataLink<'_> {
         match self {
-            ForwardCarrier::Quic(conn) => DataLink::Quic(conn),
+            ForwardCarrier::Direct(conn) => DataLink::Direct(conn),
             #[cfg(unix)]
             ForwardCarrier::Local { socket, host, .. } => DataLink::Local {
                 socket: socket.as_path(),
@@ -195,7 +195,7 @@ pub(crate) enum ForwardConnError {
     /// The carrier cannot surrender the raw byte pipe [`forward_connection`]
     /// expected for it. Not reachable in practice — `carrier`'s variant and
     /// `carrier.link()`'s variant always agree, so the matching
-    /// `into_raw_quic`/`into_raw_local` call always succeeds — but kept as
+    /// `into_raw_direct`/`into_raw_local` call always succeeds — but kept as
     /// a real, reported variant rather than `unreachable!()` so a future
     /// carrier this splice does not yet know how to pump fails loudly
     /// instead of panicking a live connection's task.
@@ -430,7 +430,7 @@ impl LocalForwardHandle {
     ///
     /// Must be called from inside a tokio runtime: the accept loop is
     /// spawned onto the current one, and the handle's [`Drop`] aborts it
-    /// there. `connection` is a snapshot — see `ForwardCarrier::Quic`.
+    /// there. `connection` is a snapshot — see `ForwardCarrier::Direct`.
     ///
     /// The listener exists only after this returns `Ok`: a refused bind
     /// (non-loopback, port in use) creates nothing.
@@ -438,7 +438,7 @@ impl LocalForwardHandle {
         spec: &ForwardSpec,
         connection: qsh_transport::Connection,
     ) -> Result<Self, LocalForwardError> {
-        Self::start_with_carrier(spec, ForwardCarrier::Quic(connection)).await
+        Self::start_with_carrier(spec, ForwardCarrier::Direct(connection)).await
     }
 
     /// [`Self::start`]'s reverse-route sibling, `-L over reverse`
@@ -582,10 +582,10 @@ impl Drop for LocalForwardHandle {
 /// calls the two back to back with nothing in between, so its behavior is
 /// unchanged.
 pub(crate) enum OpenedTunnel {
-    /// Opened on [`ForwardCarrier::Quic`]. `watch` is the stream's entry
+    /// Opened on [`ForwardCarrier::Direct`]. `watch` is the stream's entry
     /// in its connection's stall ledger (ADR-0037), registered here so the
     /// splice that follows needs no connection handle of its own.
-    Quic {
+    Direct {
         send: SendStream,
         recv: RecvStream,
         residue: Vec<u8>,
@@ -671,13 +671,13 @@ pub(crate) async fn open_tunnel(
     // arm exists only as a defensive fallback (`ForwardConnError::
     // CarrierNotRaw`'s own doc), never a reachable outcome.
     match carrier {
-        ForwardCarrier::Quic(conn) => {
-            let (Ok(send), Ok((recv, residue))) = (send.into_raw_quic(), recv.into_raw_quic())
+        ForwardCarrier::Direct(conn) => {
+            let (Ok(send), Ok((recv, residue))) = (send.into_raw_direct(), recv.into_raw_direct())
             else {
                 kill.kill();
                 return Err(ForwardConnError::CarrierNotRaw);
             };
-            Ok(OpenedTunnel::Quic {
+            Ok(OpenedTunnel::Direct {
                 send,
                 recv,
                 residue,
@@ -741,7 +741,7 @@ pub(crate) async fn splice_opened(
     opened: OpenedTunnel,
 ) -> Result<SpliceStats, ForwardConnError> {
     match opened {
-        OpenedTunnel::Quic {
+        OpenedTunnel::Direct {
             send,
             recv,
             residue,

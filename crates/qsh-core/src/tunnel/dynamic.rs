@@ -464,7 +464,7 @@ impl DynamicForwardHandle {
         listen_port: u16,
         connection: qsh_transport::Connection,
     ) -> Result<Self, LocalForwardError> {
-        let carrier = Arc::new(ForwardCarrier::Quic(connection));
+        let carrier = Arc::new(ForwardCarrier::Direct(connection));
         Self::start_supervised(bind, listen_port, CarrierView::fixed(carrier)).await
     }
 

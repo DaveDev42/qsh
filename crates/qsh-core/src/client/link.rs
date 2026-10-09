@@ -32,7 +32,7 @@ use qsh_proto::wire::{ControlMessage, StreamHeader};
 use qsh_transport::{Connection, FramedRecv, FramedSend, FramedStream};
 
 // `crate::localctl` is `#[cfg(unix)]`-only (`lib.rs`) — the `Local`
-// carrier this file adds exists only there; `Quic` (unchanged since M1)
+// carrier this file adds exists only there; `Direct` (unchanged since M1)
 // stays available on every platform. Windows leg trap (b): an ungated
 // import consumed only by unix-only code trips `unused_imports` under
 // Windows clippy.
@@ -50,8 +50,11 @@ use super::ClientError;
 /// registration (`docs/design/protocol.md` §11-3's "conn 이 아니라
 /// stream 이 대상" framing extended to a second carrier).
 pub(crate) enum ControlLink {
-    /// Dialed straight to the peer over QUIC (forward route).
-    Quic(FramedStream),
+    /// Dialed straight to the peer over whatever transport the connection
+    /// runs on (forward route). Named for the route, not the transport: the
+    /// TCP fallback of `docs/adr/0028-tcp-tls-fallback.md` rides the same
+    /// variant.
+    Direct(FramedStream),
     /// Relayed through this machine's `qsh listen` daemon over a
     /// `LOCAL_CONTROL` conduit (reverse route). `#[cfg(unix)]`: localctl
     /// (UDS) is unix-only (`crate::localctl`'s own gate in `lib.rs`) —
@@ -67,7 +70,7 @@ impl ControlLink {
     /// Encode + send one `ControlMessage`, whichever carrier this is.
     pub(crate) async fn send(&mut self, msg: &ControlMessage) -> Result<(), ClientError> {
         match self {
-            ControlLink::Quic(stream) => Ok(stream.send.send(msg).await?),
+            ControlLink::Direct(stream) => Ok(stream.send.send(msg).await?),
             #[cfg(unix)]
             ControlLink::Local(conduit) => {
                 conduit.send(msg).await.map_err(op_error_to_client_error)
@@ -83,7 +86,7 @@ impl ControlLink {
     /// connection's death — `docs/design/protocol.md` §11-3).
     pub(crate) async fn recv(&mut self) -> Result<Option<ControlMessage>, ClientError> {
         match self {
-            ControlLink::Quic(stream) => Ok(stream.recv.recv::<ControlMessage>().await?),
+            ControlLink::Direct(stream) => Ok(stream.recv.recv::<ControlMessage>().await?),
             #[cfg(unix)]
             ControlLink::Local(conduit) => conduit.recv().await.map_err(op_error_to_client_error),
         }
@@ -100,18 +103,18 @@ impl ControlLink {
     /// gives it.
     // Two bodies, not one `if let`: without the `Local` variant (Windows,
     // no `unix` cfg), `ControlLink` has exactly one variant, so `if let
-    // ControlLink::Quic(stream) = self` becomes an irrefutable pattern —
+    // ControlLink::Direct(stream) = self` becomes an irrefutable pattern —
     // `-D warnings` under Windows clippy (`irrefutable_let_patterns`).
     #[cfg(unix)]
     pub(crate) fn finish(&mut self) {
-        if let ControlLink::Quic(stream) = self {
+        if let ControlLink::Direct(stream) = self {
             let _ = stream.send.finish();
         }
     }
 
     #[cfg(not(unix))]
     pub(crate) fn finish(&mut self) {
-        let ControlLink::Quic(stream) = self;
+        let ControlLink::Direct(stream) = self;
         let _ = stream.send.finish();
     }
 }
@@ -203,8 +206,8 @@ impl DataKillSwitch {
 /// halves the same way [`qsh_transport::control::FramedStream`] already
 /// is (`crate::client::AttachWriter`/`AttachReader` hold one each).
 pub(crate) enum DataSend {
-    /// Dialed straight to the peer over QUIC (forward route).
-    Quic(FramedSend),
+    /// Dialed straight to the peer (forward route).
+    Direct(FramedSend),
     /// Relayed through this machine's `qsh listen` daemon over a
     /// `LOCAL_STREAM` conduit (reverse route). `#[cfg(unix)]`: see
     /// [`ControlLink::Local`]'s own doc — the same reasoning applies
@@ -217,7 +220,7 @@ impl DataSend {
     /// Encode + send one `SessionFrame`, whichever carrier this is.
     pub(crate) async fn send<M: Message>(&mut self, msg: &M) -> Result<(), ClientError> {
         match self {
-            DataSend::Quic(send) => Ok(send.send(msg).await?),
+            DataSend::Direct(send) => Ok(send.send(msg).await?),
             #[cfg(unix)]
             DataSend::Local(send) => send.send(msg).await.map_err(op_error_to_client_error),
         }
@@ -230,7 +233,7 @@ impl DataSend {
     /// [`ControlLink::finish`]'s identical choice).
     pub(crate) fn finish(&mut self) {
         match self {
-            DataSend::Quic(send) => {
+            DataSend::Direct(send) => {
                 let _ = send.finish();
             }
             #[cfg(unix)]
@@ -249,32 +252,32 @@ impl DataSend {
     /// (`crate::tunnel::splice::splice_tcp_uds`, `docs/history/m4-plan.md` Step 5 (a)).
     /// A caller that holds the wrong carrier gets its value back rather
     /// than a panic, so the stream stays alive to be torn down properly.
-    pub(crate) fn into_raw_quic(self) -> Result<qsh_transport::SendStream, Self> {
+    pub(crate) fn into_raw_direct(self) -> Result<qsh_transport::SendStream, Self> {
         match self {
-            DataSend::Quic(send) => Ok(send.into_raw()),
+            DataSend::Direct(send) => Ok(send.into_raw()),
             #[cfg(unix)]
             other @ DataSend::Local(_) => Err(other),
         }
     }
 
-    /// [`Self::into_raw_quic`]'s mirror for the reverse `LOCAL_STREAM`
+    /// [`Self::into_raw_direct`]'s mirror for the reverse `LOCAL_STREAM`
     /// carrier — surrenders the raw UDS byte writer
     /// [`crate::tunnel::splice::splice_tcp_uds`] pumps a tunnel's unframed
-    /// payload onto. `Err(self)` for the forward `Quic` carrier, same
-    /// reasoning as [`Self::into_raw_quic`]'s own doc, reversed.
+    /// payload onto. `Err(self)` for the forward `Direct` carrier, same
+    /// reasoning as [`Self::into_raw_direct`]'s own doc, reversed.
     #[cfg(unix)]
     pub(crate) fn into_raw_local(self) -> Result<crate::localctl::client::RawUdsWrite, Self> {
         match self {
             DataSend::Local(send) => Ok(send.into_raw()),
-            other @ DataSend::Quic(_) => Err(other),
+            other @ DataSend::Direct(_) => Err(other),
         }
     }
 }
 
 /// See [`DataSend`]'s own doc — this is its receive-half sibling.
 pub(crate) enum DataRecv {
-    /// Dialed straight to the peer over QUIC (forward route).
-    Quic(FramedRecv),
+    /// Dialed straight to the peer (forward route).
+    Direct(FramedRecv),
     /// Relayed through this machine's `qsh listen` daemon over a
     /// `LOCAL_STREAM` conduit (reverse route). `#[cfg(unix)]`: see
     /// [`ControlLink::Local`]'s own doc.
@@ -287,7 +290,7 @@ impl DataRecv {
     /// stream/conduit.
     pub(crate) async fn recv<M: Message + Default>(&mut self) -> Result<Option<M>, ClientError> {
         match self {
-            DataRecv::Quic(recv) => Ok(recv.recv::<M>().await?),
+            DataRecv::Direct(recv) => Ok(recv.recv::<M>().await?),
             #[cfg(unix)]
             DataRecv::Local(recv) => recv.recv::<M>().await.map_err(op_error_to_client_error),
         }
@@ -308,13 +311,13 @@ impl DataRecv {
         #[cfg(not(unix))]
         let _ = kill;
         match self {
-            DataRecv::Quic(recv) => recv.stop(code),
+            DataRecv::Direct(recv) => recv.stop(code),
             #[cfg(unix)]
             DataRecv::Local(_) => kill.kill(),
         }
     }
 
-    /// The receive-half sibling of [`DataSend::into_raw_quic`], returning
+    /// The receive-half sibling of [`DataSend::into_raw_direct`], returning
     /// the raw QUIC stream **and** the handshake residue behind it — bytes
     /// the peer pipelined after its last framed message, which
     /// [`qsh_transport::FramedRecv::into_raw`]'s own doc explains must be
@@ -322,15 +325,15 @@ impl DataRecv {
     ///
     /// `Err(self)` for the reverse `LOCAL_STREAM` carrier — its raw
     /// counterpart is [`Self::into_raw_local`].
-    pub(crate) fn into_raw_quic(self) -> Result<(qsh_transport::RecvStream, Vec<u8>), Self> {
+    pub(crate) fn into_raw_direct(self) -> Result<(qsh_transport::RecvStream, Vec<u8>), Self> {
         match self {
-            DataRecv::Quic(recv) => Ok(recv.into_raw()),
+            DataRecv::Direct(recv) => Ok(recv.into_raw()),
             #[cfg(unix)]
             other @ DataRecv::Local(_) => Err(other),
         }
     }
 
-    /// [`Self::into_raw_quic`]'s mirror for the reverse `LOCAL_STREAM`
+    /// [`Self::into_raw_direct`]'s mirror for the reverse `LOCAL_STREAM`
     /// carrier — see [`DataSend::into_raw_local`]'s own doc.
     #[cfg(unix)]
     pub(crate) fn into_raw_local(
@@ -338,7 +341,7 @@ impl DataRecv {
     ) -> Result<(crate::localctl::client::RawUdsRead, Vec<u8>), Self> {
         match self {
             DataRecv::Local(recv) => Ok(recv.into_raw()),
-            other @ DataRecv::Quic(_) => Err(other),
+            other @ DataRecv::Direct(_) => Err(other),
         }
     }
 }
@@ -361,8 +364,8 @@ impl DataRecv {
 /// `crate::tunnel` opens its data streams through this seam; see
 /// `docs/design/architecture.md` for where the client-side carriers sit.
 pub(crate) enum DataLink<'a> {
-    /// A live QUIC connection dialed straight to the peer (forward route).
-    Quic(&'a Connection),
+    /// A live connection dialed straight to the peer (forward route).
+    Direct(&'a Connection),
     /// This machine's resident `qsh listen` daemon socket, plus the host
     /// name it should relay the new `LOCAL_STREAM` conduit to (reverse
     /// route). `#[cfg(unix)]`: see [`ControlLink::Local`]'s own doc — the
@@ -410,10 +413,10 @@ impl DataLink<'_> {
     /// budget, to long-poll a `TCP_ACCEPTED{forward_id}` claim instead of
     /// busy-opening a fresh conduit per attempt
     /// (`crate::localctl::client::open_stream_with_wait`'s own doc). On the
-    /// forward `Quic` carrier `wait_ms` is accepted uniformly but has
+    /// forward `Direct` carrier `wait_ms` is accepted uniformly but has
     /// nothing to apply to — a fresh `open_bi()` never waits on anything.
     // `wait_ms` is read only by the `#[cfg(unix)]` `Local` arm below — the
-    // `Quic` arm never waits on anything (this doc comment's own "nothing
+    // `Direct` arm never waits on anything (this doc comment's own "nothing
     // to apply to"), so on Windows (no `Local` variant at all) the
     // parameter goes unused. Dead, not absent, on that platform — same
     // idiom as `HUB_WAIT_POLL` (`reverse/listen.rs`).
@@ -425,15 +428,15 @@ impl DataLink<'_> {
         wait_ms: u32,
     ) -> Result<(DataSend, DataRecv, DataKillSwitch), ClientError> {
         match self {
-            DataLink::Quic(conn) => {
+            DataLink::Direct(conn) => {
                 let (send, recv) = conn.open_bi().await?;
                 let mut data = FramedStream::data(send, recv);
                 data.send.set_priority(priority);
                 data.send.send(header).await?;
                 let (send, recv) = data.split();
                 Ok((
-                    DataSend::Quic(send),
-                    DataRecv::Quic(recv),
+                    DataSend::Direct(send),
+                    DataRecv::Direct(recv),
                     DataKillSwitch::default(),
                 ))
             }
@@ -471,7 +474,7 @@ mod tests {
     /// `ControlLink` sends and receives real `ControlMessage` frames
     /// through a live `LOCAL_CONTROL` conduit, exactly the same call
     /// shape `crate::client::Session::request` uses regardless of which
-    /// variant is underneath. The `Quic` variant's dispatch is exercised
+    /// variant is underneath. The `Direct` variant's dispatch is exercised
     /// by every pre-existing forward-path `client::Session` test in this
     /// crate (nothing about `ControlLink::send`/`recv` changes that
     /// behavior — see `crate::client::mod`'s `request`), so this test adds

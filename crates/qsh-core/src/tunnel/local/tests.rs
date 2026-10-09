@@ -362,7 +362,7 @@ async fn allowed_connection_splices_raw_bytes_and_delivers_handshake_residue_fir
 
     let forward = LocalForward::bind(&ephemeral_spec()).await.unwrap();
     let addr = forward.local_addr();
-    let runner = tokio::spawn(forward.run(Arc::new(ForwardCarrier::Quic(client_conn))));
+    let runner = tokio::spawn(forward.run(Arc::new(ForwardCarrier::Direct(client_conn))));
 
     let mut tcp = TcpStream::connect(addr).await.unwrap();
     tcp.write_all(b"ping").await.unwrap();
@@ -392,7 +392,7 @@ async fn refused_connection_closes_the_local_socket_and_the_forward_keeps_servin
 
     let forward = LocalForward::bind(&ephemeral_spec()).await.unwrap();
     let addr = forward.local_addr();
-    let runner = tokio::spawn(forward.run(Arc::new(ForwardCarrier::Quic(client_conn))));
+    let runner = tokio::spawn(forward.run(Arc::new(ForwardCarrier::Direct(client_conn))));
 
     // The refusal's RST can arrive before `connect` itself returns —
     // `abort_local`'s `set_zero_linger` above means the requester leg
@@ -497,8 +497,8 @@ async fn local_forward_rejects_with_rst_while_the_carrier_is_disconnected() {
 async fn accept_reads_the_carrier_current_at_accept_time() {
     let (conn_a, host_a) = loopback_pair().await;
     let (conn_b, host_b) = loopback_pair().await;
-    let carrier_a = Arc::new(ForwardCarrier::Quic(conn_a));
-    let carrier_b = Arc::new(ForwardCarrier::Quic(conn_b));
+    let carrier_a = Arc::new(ForwardCarrier::Direct(conn_a));
+    let carrier_b = Arc::new(ForwardCarrier::Direct(conn_b));
     // Keep A's client end alive after the swap: dropping the last handle
     // would close the connection and make `accept_bi` below return at once.
     let keep_a = Arc::clone(&carrier_a);
@@ -548,9 +548,9 @@ async fn accept_reads_the_carrier_current_at_accept_time() {
 #[tokio::test]
 async fn a_splice_in_progress_survives_a_carrier_switch_to_disconnected() {
     let (client_conn, host_conn) = loopback_pair().await;
-    let (tx, rx) = tokio::sync::watch::channel(CarrierState::Live(Arc::new(ForwardCarrier::Quic(
-        client_conn,
-    ))));
+    let (tx, rx) = tokio::sync::watch::channel(CarrierState::Live(Arc::new(
+        ForwardCarrier::Direct(client_conn),
+    )));
     let host = tokio::spawn(fake_host(host_conn.clone(), true, b""));
     let forward = LocalForward::bind(&ephemeral_spec()).await.unwrap();
     let addr = forward.local_addr();
@@ -586,9 +586,9 @@ async fn a_splice_in_progress_survives_a_carrier_switch_to_disconnected() {
 #[tokio::test]
 async fn a_handshake_awaiting_connect_result_on_the_old_carrier_is_rejected_on_disconnect() {
     let (client_conn, host_conn) = loopback_pair().await;
-    let (tx, rx) = tokio::sync::watch::channel(CarrierState::Live(Arc::new(ForwardCarrier::Quic(
-        client_conn,
-    ))));
+    let (tx, rx) = tokio::sync::watch::channel(CarrierState::Live(Arc::new(
+        ForwardCarrier::Direct(client_conn),
+    )));
     // A peer that reads the header and then never answers.
     let (got_header_tx, got_header_rx) = tokio::sync::oneshot::channel();
     let host = tokio::spawn(async move {
@@ -681,8 +681,10 @@ async fn accept_hold_dispatches_a_held_connect_once_the_carrier_is_confirmed() {
         "nothing is sent for a held connection"
     );
 
-    tx.send(CarrierState::Live(Arc::new(ForwardCarrier::Quic(client_b))))
-        .unwrap();
+    tx.send(CarrierState::Live(Arc::new(ForwardCarrier::Direct(
+        client_b,
+    ))))
+    .unwrap();
     let host = tokio::spawn(fake_host(host_b.clone(), true, b""));
     let mut got = Vec::new();
     tokio::time::timeout(Duration::from_secs(10), tcp.read_to_end(&mut got))
@@ -703,7 +705,7 @@ async fn accept_hold_rejects_at_the_deadline_without_sending_a_byte_to_any_carri
     const WINDOW: Duration = Duration::from_millis(400);
     let (client_a, host_a) = loopback_pair().await;
     let (client_b, host_b) = loopback_pair().await;
-    let keep_a = Arc::new(ForwardCarrier::Quic(client_a));
+    let keep_a = Arc::new(ForwardCarrier::Direct(client_a));
     let (tx, rx) = tokio::sync::watch::channel(CarrierState::Live(Arc::clone(&keep_a)));
     let (gate, signal) = hold_gate(WINDOW);
     let forward = LocalForward::bind(&ephemeral_spec()).await.unwrap();
@@ -727,8 +729,10 @@ async fn accept_hold_rejects_at_the_deadline_without_sending_a_byte_to_any_carri
             "no stream may exist for a connection that was never dispatched"
         );
     }
-    tx.send(CarrierState::Live(Arc::new(ForwardCarrier::Quic(client_b))))
-        .unwrap();
+    tx.send(CarrierState::Live(Arc::new(ForwardCarrier::Direct(
+        client_b,
+    ))))
+    .unwrap();
     assert!(
         tokio::time::timeout(Duration::ZERO, host_b.accept_bi())
             .await
@@ -834,8 +838,10 @@ async fn accept_hold_local_dispatches_in_accept_order() {
             one[0]
         }));
     }
-    tx.send(CarrierState::Live(Arc::new(ForwardCarrier::Quic(client_b))))
-        .unwrap();
+    tx.send(CarrierState::Live(Arc::new(ForwardCarrier::Direct(
+        client_b,
+    ))))
+    .unwrap();
     let mut got = Vec::new();
     for reader in readers {
         got.push(reader.await.unwrap());

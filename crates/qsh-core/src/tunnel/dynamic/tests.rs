@@ -38,7 +38,7 @@ struct FakeHostRecord {
 /// Mirrors `crate::tunnel::local::tests::fake_host`'s shape exactly, mainly
 /// because [`open_tunnel`] is the same function `-L`'s tests already drive
 /// this way — a "fake carrier" for `-D` is a fake *peer*, not a fake
-/// [`ForwardCarrier`], since [`ForwardCarrier::Quic`] always wraps a real
+/// [`ForwardCarrier`], since [`ForwardCarrier::Direct`] always wraps a real
 /// (loopback, in tests) QUIC connection.
 async fn run_fake_host(
     conn: qsh_transport::Connection,
@@ -172,7 +172,7 @@ async fn every_opened_stream_sets_deny_host_local() {
         Arc::clone(&opened),
         |_| ok_result(),
     ));
-    let runner = tokio::spawn(forward.run(Arc::new(ForwardCarrier::Quic(client_conn))));
+    let runner = tokio::spawn(forward.run(Arc::new(ForwardCarrier::Direct(client_conn))));
 
     let mut tcp = TcpStream::connect(addr).await.unwrap();
     greet_no_auth(&mut tcp).await;
@@ -214,7 +214,7 @@ async fn failure_rep_is_delivered_before_close() {
         Arc::clone(&opened),
         |_| err_result("CONNECTION_FAILED"),
     ));
-    let runner = tokio::spawn(forward.run(Arc::new(ForwardCarrier::Quic(client_conn))));
+    let runner = tokio::spawn(forward.run(Arc::new(ForwardCarrier::Direct(client_conn))));
 
     let mut tcp = TcpStream::connect(addr).await.unwrap();
     greet_no_auth(&mut tcp).await;
@@ -267,7 +267,7 @@ async fn request_bytes_after_connect_are_forwarded_not_dropped() {
         Arc::clone(&opened),
         |_| ok_result(),
     ));
-    let runner = tokio::spawn(forward.run(Arc::new(ForwardCarrier::Quic(client_conn))));
+    let runner = tokio::spawn(forward.run(Arc::new(ForwardCarrier::Direct(client_conn))));
 
     let mut tcp = TcpStream::connect(addr).await.unwrap();
     greet_no_auth(&mut tcp).await;
@@ -328,7 +328,7 @@ async fn handshake_and_payload_pipelined_in_one_write_are_forwarded_correctly() 
         Arc::clone(&opened),
         |_| ok_result(),
     ));
-    let runner = tokio::spawn(forward.run(Arc::new(ForwardCarrier::Quic(client_conn))));
+    let runner = tokio::spawn(forward.run(Arc::new(ForwardCarrier::Direct(client_conn))));
 
     let mut tcp = TcpStream::connect(addr).await.unwrap();
 
@@ -391,7 +391,7 @@ async fn rep_is_sent_only_after_connect_result() {
         framed.send.finish().unwrap();
         framed.send.stopped().await;
     });
-    let runner = tokio::spawn(forward.run(Arc::new(ForwardCarrier::Quic(client_conn))));
+    let runner = tokio::spawn(forward.run(Arc::new(ForwardCarrier::Direct(client_conn))));
 
     let mut tcp = TcpStream::connect(addr).await.unwrap();
     greet_no_auth(&mut tcp).await;
@@ -475,7 +475,7 @@ async fn silent_client_is_dropped_at_handshake_deadline_with_no_stream() {
         Arc::clone(&opened),
         |_| ok_result(),
     ));
-    let runner = tokio::spawn(forward.run(Arc::new(ForwardCarrier::Quic(client_conn))));
+    let runner = tokio::spawn(forward.run(Arc::new(ForwardCarrier::Direct(client_conn))));
 
     let tcp = TcpStream::connect(addr).await.unwrap();
     // Let the server actually accept and arm its deadline at ~t=0, before
@@ -532,7 +532,7 @@ async fn byte_at_a_time_greeting_still_hits_the_deadline() {
         Arc::clone(&opened),
         |_| ok_result(),
     ));
-    let runner = tokio::spawn(forward.run(Arc::new(ForwardCarrier::Quic(client_conn))));
+    let runner = tokio::spawn(forward.run(Arc::new(ForwardCarrier::Direct(client_conn))));
 
     let mut tcp = TcpStream::connect(addr).await.unwrap();
 
@@ -601,7 +601,7 @@ async fn handshake_slots_are_bounded_and_excess_is_closed_immediately() {
         Arc::clone(&opened),
         |_| ok_result(),
     ));
-    let runner = tokio::spawn(forward.run(Arc::new(ForwardCarrier::Quic(client_conn))));
+    let runner = tokio::spawn(forward.run(Arc::new(ForwardCarrier::Direct(client_conn))));
 
     // Two connections that never send a byte: each holds a handshake slot
     // for as long as this test needs it to.
@@ -664,7 +664,7 @@ async fn connection_cap_answers_rep_01_and_opens_no_stream() {
         Arc::clone(&opened),
         |_| ok_result(),
     ));
-    let runner = tokio::spawn(forward.run(Arc::new(ForwardCarrier::Quic(client_conn))));
+    let runner = tokio::spawn(forward.run(Arc::new(ForwardCarrier::Direct(client_conn))));
 
     // First CONNECT succeeds and is kept open, holding the one available
     // connection slot for the rest of the test.
@@ -747,7 +747,7 @@ async fn connect_over_rate_waits_for_a_token_within_the_handshake_deadline() {
         Arc::clone(&opened),
         |_| ok_result(),
     ));
-    let runner = tokio::spawn(forward.run(Arc::new(ForwardCarrier::Quic(client_conn))));
+    let runner = tokio::spawn(forward.run(Arc::new(ForwardCarrier::Direct(client_conn))));
 
     // First CONNECT consumes the sole token immediately.
     let mut first = TcpStream::connect(addr).await.unwrap();
@@ -824,7 +824,7 @@ async fn connect_over_rate_past_the_deadline_gets_rep_01_and_opens_no_stream() {
         Arc::clone(&opened),
         |_| ok_result(),
     ));
-    let runner = tokio::spawn(forward.run(Arc::new(ForwardCarrier::Quic(client_conn))));
+    let runner = tokio::spawn(forward.run(Arc::new(ForwardCarrier::Direct(client_conn))));
 
     let mut first = TcpStream::connect(addr).await.unwrap();
     greet_no_auth(&mut first).await;
@@ -906,7 +906,7 @@ async fn connect_over_rate_is_bounded_by_the_remaining_deadline_not_a_fresh_wind
         Arc::clone(&opened),
         |_| ok_result(),
     ));
-    let runner = tokio::spawn(forward.run(Arc::new(ForwardCarrier::Quic(client_conn))));
+    let runner = tokio::spawn(forward.run(Arc::new(ForwardCarrier::Direct(client_conn))));
 
     // First CONNECT drains the sole token immediately.
     let mut first = TcpStream::connect(addr).await.unwrap();
@@ -969,7 +969,7 @@ async fn bind_and_udp_associate_get_rep_07_and_open_no_stream() {
             Arc::clone(&opened),
             |_| ok_result(),
         ));
-        let runner = tokio::spawn(forward.run(Arc::new(ForwardCarrier::Quic(client_conn))));
+        let runner = tokio::spawn(forward.run(Arc::new(ForwardCarrier::Direct(client_conn))));
 
         let mut tcp = TcpStream::connect(addr).await.unwrap();
         greet_no_auth(&mut tcp).await;
@@ -1008,7 +1008,7 @@ async fn non_socks_first_byte_closes_with_zero_bytes_written_and_zero_streams() 
         Arc::clone(&opened),
         |_| ok_result(),
     ));
-    let runner = tokio::spawn(forward.run(Arc::new(ForwardCarrier::Quic(client_conn))));
+    let runner = tokio::spawn(forward.run(Arc::new(ForwardCarrier::Direct(client_conn))));
 
     let mut tcp = TcpStream::connect(addr).await.unwrap();
     tcp.write_all(b"GET / HTTP/1.1\r\n").await.unwrap();
@@ -1125,7 +1125,7 @@ async fn socks_loop_logs_no_destination_above_debug() {
         Arc::clone(&opened),
         |_| ok_result(),
     ));
-    let runner = tokio::spawn(forward.run(Arc::new(ForwardCarrier::Quic(client_conn))));
+    let runner = tokio::spawn(forward.run(Arc::new(ForwardCarrier::Direct(client_conn))));
 
     let mut tcp = TcpStream::connect(addr).await.unwrap();
     greet_no_auth(&mut tcp).await;
@@ -1205,7 +1205,7 @@ async fn dynamic_forward_replies_rep_01_while_the_carrier_is_disconnected() {
     assert_eq!(opened.load(Ordering::SeqCst), 0, "no stream while down");
 
     // Back up: the same listener serves the next CONNECT.
-    tx.send(CarrierState::Live(Arc::new(ForwardCarrier::Quic(
+    tx.send(CarrierState::Live(Arc::new(ForwardCarrier::Direct(
         client_conn,
     ))))
     .unwrap();
@@ -1238,9 +1238,9 @@ async fn a_dynamic_connect_awaiting_connect_result_is_refused_when_the_carrier_i
         std::future::pending::<()>().await;
         drop(framed);
     });
-    let (tx, rx) = tokio::sync::watch::channel(CarrierState::Live(Arc::new(ForwardCarrier::Quic(
-        client_conn,
-    ))));
+    let (tx, rx) = tokio::sync::watch::channel(CarrierState::Live(Arc::new(
+        ForwardCarrier::Direct(client_conn),
+    )));
     let runner = tokio::spawn(forward.run(CarrierView::watching(rx, None)));
 
     let mut tcp = TcpStream::connect(addr).await.unwrap();
@@ -1301,7 +1301,7 @@ async fn accept_hold_dynamic_completes_a_held_connect_on_the_confirmed_carrier()
     assert_eq!(opened.load(Ordering::SeqCst), 0, "nothing sent while held");
     assert!(still_open(&tcp), "and no reply either");
 
-    tx.send(CarrierState::Live(Arc::new(ForwardCarrier::Quic(
+    tx.send(CarrierState::Live(Arc::new(ForwardCarrier::Direct(
         client_conn,
     ))))
     .unwrap();
@@ -1390,7 +1390,7 @@ async fn accept_hold_dynamic_dispatches_in_accept_order() {
         wait_until_held(&gate, n + 1).await;
         clients.push(tcp);
     }
-    tx.send(CarrierState::Live(Arc::new(ForwardCarrier::Quic(
+    tx.send(CarrierState::Live(Arc::new(ForwardCarrier::Direct(
         client_conn,
     ))))
     .unwrap();

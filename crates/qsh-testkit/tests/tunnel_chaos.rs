@@ -56,7 +56,7 @@ const OP_DEADLINE: Duration = Duration::from_secs(30);
 const TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Sub-second bound on how promptly the post-resume probe's reset (the
-/// `ForwardCarrier::Quic` stale-carrier gap documented at that probe) must
+/// `ForwardCarrier::Direct` stale-carrier gap documented at that probe) must
 /// surface once the probe's connection is actually talking to the
 /// forward. Generous against the measured 23-85µs the reset itself takes
 /// under an unloaded run, but two orders of magnitude tighter than
@@ -493,7 +493,7 @@ async fn a_dead_connection_ends_the_tunnel_cleanly_while_the_pty_session_resumes
     // claim ("재연결 후 새 TCP 연결이 새 스트림을 연다" — a new TCP
     // connection after reconnect opens a new stream): it does not, today.
     //
-    // `LocalForwardHandle::start`'s own doc on `ForwardCarrier::Quic`
+    // `LocalForwardHandle::start`'s own doc on `ForwardCarrier::Direct`
     // (`crates/qsh-core/src/tunnel/local.rs`) says the carrier is a
     // **snapshot** of the connection the forward was started on, not a
     // view of whichever connection the owning attach currently holds — a
@@ -547,7 +547,7 @@ async fn a_dead_connection_ends_the_tunnel_cleanly_while_the_pty_session_resumes
     match round_trip {
         Ok(answer) if answer == b"post-resume" => panic!(
             "the post-resume connection completed a full, correct round trip \
-             (echoed {answer:?} back) — the `ForwardCarrier::Quic` snapshot \
+             (echoed {answer:?} back) — the `ForwardCarrier::Direct` snapshot \
              gap this test documents appears to be fixed; update this \
              assertion to require success instead — {ctx}"
         ),
