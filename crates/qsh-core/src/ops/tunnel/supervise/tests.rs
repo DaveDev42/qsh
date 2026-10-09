@@ -84,7 +84,7 @@ impl RfwdScript {
                     && open.bind_port != 0
                     && self
                         .bind_failures
-                        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                        .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
                         .is_ok()
                 {
                     return refuse(ErrorCode::ConnectionFailed, "address in use");
