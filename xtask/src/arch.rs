@@ -13,6 +13,13 @@
 //! allowed to depend on `qsh-transport`, so only a source-level check under
 //! `crates/qsh-core/src/broker/` can catch a regression (architecture.md
 //! §9-2 named this an "arch-lint 확장 후보").
+//!
+//! The QUIC stack is confined to `qsh-transport` the same two ways: the
+//! manifests of `qsh-core` and `qsh-cli` may not list `quinn`
+//! ([`FORBIDDEN_DEPS`]), and nothing under their `src/` may name a `quinn::`
+//! path or call the hidden `.quinn()` accessor ([`QUINN_TOKENS`]). That is
+//! what lets a second transport backend land behind `qsh_transport`'s
+//! neutral types (`docs/adr/0028-tcp-tls-fallback.md` decision 0).
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -56,6 +63,17 @@ fn matrix() -> Vec<(&'static str, Rule)> {
     ]
 }
 
+/// Third-party dependencies a workspace crate must not declare, by crate
+/// name. `qsh-core` and `qsh-cli` reach the QUIC stack only through
+/// `qsh-transport`'s neutral types, so a `quinn` entry in either manifest is
+/// a regression even before a `use` line appears.
+const FORBIDDEN_DEPS: [(&str, &str); 4] = [
+    ("qsh-core", "quinn"),
+    ("qsh-core", "quinn-proto"),
+    ("qsh-cli", "quinn"),
+    ("qsh-cli", "quinn-proto"),
+];
+
 /// Run the arch-lint check against `workspace_root/crates/*/Cargo.toml`.
 ///
 /// Returns `Err` (with every violation listed in the message) if any crate
@@ -79,6 +97,15 @@ pub fn run(workspace_root: &Path) -> Result<()> {
             continue;
         }
         let (name, deps) = read_manifest(&manifest_path)?;
+
+        let declared = read_declared_dependencies(&manifest_path)?;
+        for (crate_name, dep) in FORBIDDEN_DEPS {
+            if name == crate_name && declared.contains(dep) {
+                violations.push(format!(
+                    "{name} declares a dependency on `{dep}` — {QUINN_REASON}"
+                ));
+            }
+        }
 
         let Some((_, rule)) = matrix.iter().find(|(n, _)| *n == name) else {
             violations.push(format!(
@@ -250,6 +277,22 @@ const SETUP_TOKEN_SET: [&str; 8] = [
     "probe_fingerprint",
 ];
 
+/// `qsh-core` and `qsh-cli` never name the QUIC stack: every stream,
+/// connection, endpoint and error they touch is a `qsh_transport` neutral
+/// type, so a second transport backend needs no edit above `qsh-transport`
+/// (`docs/adr/0028-tcp-tls-fallback.md` decision 0). The ban covers the
+/// whole `src/` tree, `tests.rs` files included, with no per-file exemption;
+/// `localctl/daemon.rs` no longer needs one.
+///
+/// The tokens are the path form `quinn::` and the hidden accessor
+/// `.quinn(`, not the bare word: prose, test names that pin a documented
+/// behaviour (`..._a_quinn_idle_timeout_...`) and string literals say
+/// "quinn" legitimately.
+const CORE_SRC_DIR: &str = "crates/qsh-core/src";
+const QUINN_TOKENS: [&str; 2] = ["quinn::", ".quinn("];
+const QUINN_REASON: &str = "only qsh-transport may name the QUIC stack; qsh-core and qsh-cli go through qsh_transport's \
+     neutral Connection/SendStream/RecvStream/Endpoint and error types (docs/adr/0028-tcp-tls-fallback.md decision 0)";
+
 fn module_bans() -> Vec<ModuleBan> {
     let mut bans: Vec<ModuleBan> = BROKER_TOKEN_SET
         .into_iter()
@@ -315,6 +358,16 @@ fn module_bans() -> Vec<ModuleBan> {
         });
     }
 
+    for dir in [CORE_SRC_DIR, CLI_SRC_DIR] {
+        for forbidden in QUINN_TOKENS {
+            bans.push(ModuleBan {
+                scope: Scope::Dir(dir),
+                forbidden,
+                reason: QUINN_REASON,
+            });
+        }
+    }
+
     bans
 }
 
@@ -322,6 +375,11 @@ fn module_bans() -> Vec<ModuleBan> {
 /// occurrence.
 fn check_module_bans(workspace_root: &Path, violations: &mut Vec<String>) -> Result<()> {
     let mut reported_missing = std::collections::BTreeSet::new();
+    // Tokens already reported per (file, line). A narrower token that
+    // contains an already-reported one (`quinn::` after `quinn`) adds nothing
+    // for the same line, so it is not reported a second time.
+    let mut reported_on_line: std::collections::BTreeMap<(PathBuf, usize), Vec<&'static str>> =
+        std::collections::BTreeMap::new();
     for ban in module_bans() {
         let target = workspace_root.join(ban.scope.path());
         let files: Vec<PathBuf> = match ban.scope {
@@ -363,6 +421,11 @@ fn check_module_bans(workspace_root: &Path, violations: &mut Vec<String>) -> Res
             for (lineno, raw) in text.lines().enumerate() {
                 let code = strip_line_comment(raw);
                 if code.contains(ban.forbidden) {
+                    let seen = reported_on_line.entry((file.clone(), lineno)).or_default();
+                    if seen.iter().any(|t| ban.forbidden.contains(t)) {
+                        continue;
+                    }
+                    seen.push(ban.forbidden);
                     let rel = file.strip_prefix(workspace_root).unwrap_or(&file);
                     violations.push(format!(
                         "{}:{} names `{}` — {}",
@@ -376,6 +439,22 @@ fn check_module_bans(workspace_root: &Path, violations: &mut Vec<String>) -> Res
         }
     }
     Ok(())
+}
+
+/// Every dependency name a manifest declares, in `[dependencies]` and
+/// `[dev-dependencies]`, whether or not it is a workspace crate.
+fn read_declared_dependencies(path: &Path) -> Result<BTreeSet<String>> {
+    let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let value = text
+        .parse::<toml::Table>()
+        .with_context(|| format!("parsing {}", path.display()))?;
+    let mut names = BTreeSet::new();
+    for section in ["dependencies", "dev-dependencies"] {
+        if let Some(table) = value.get(section).and_then(|d| d.as_table()) {
+            names.extend(table.keys().cloned());
+        }
+    }
+    Ok(names)
 }
 
 /// A repo-relative path spelled with `/` on every platform.

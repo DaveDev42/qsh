@@ -63,7 +63,9 @@ Nextest gives each test its own process; PTY/termios and other global-state test
 - Allowed dependency matrix (exactly what `xtask arch` enforces): `qsh-proto` → nothing; `qsh-transport` → `qsh-proto`; `qsh-core` → `qsh-proto`, `qsh-transport`; `qsh-cli` → `qsh-core` and `qsh-proto` (contract types only — never `qsh-transport`); `qsh-testkit` → anything. Never backwards.
 - Renderers contain **zero** auth/ACL/session logic. They call only the typed `Ops` layer.
 - The built-in MCP adapter was retired in M8 Step 6 (ADR-0011); the agent-facing surface is the `qsh.cli/v1` JSON/JSONL CLI alone.
-- `xtask arch`'s module bans are path-scoped: `crates/qsh-core/src/broker/`, `crates/qsh-core/src/setup/` and `crates/qsh-cli/src/` by directory, `localctl/frame.rs`, `localctl/client.rs` and `reverse/registry.rs` by exact file. Flattening a scoped directory to a `.rs` file silently drops its ban, and turning a scoped file into a directory makes `cargo xtask arch` fail. Update `xtask/src/arch.rs` in the same commit as any such move.
+- `xtask arch`'s module bans are path-scoped: `crates/qsh-core/src/broker/`, `crates/qsh-core/src/setup/`, `crates/qsh-core/src/` (the `quinn::` and `.quinn(` tokens only) and `crates/qsh-cli/src/` by directory, `localctl/frame.rs`, `localctl/client.rs` and `reverse/registry.rs` by exact file. Flattening a scoped directory to a `.rs` file silently drops its ban, and turning a scoped file into a directory makes `cargo xtask arch` fail. Update `xtask/src/arch.rs` in the same commit as any such move.
+
+`qsh-core` and `qsh-cli` never name the QUIC stack: they use `qsh_transport`'s neutral `Connection`/`SendStream`/`RecvStream`/`Endpoint` and error types, and `xtask arch` rejects a `quinn` manifest entry in either crate.
 
 If a change requires putting logic in `qsh-cli` to make something work, that's a signal the logic belongs in `qsh-core`'s `Ops` facade instead — move it, don't work around arch-lint.
 

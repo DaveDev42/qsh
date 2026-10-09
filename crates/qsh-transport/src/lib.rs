@@ -10,6 +10,9 @@
 //!   no session tickets.
 //! - [`control`]: framed prost message I/O over transport streams.
 //! - [`stream`]: transport-neutral [`SendStream`]/[`RecvStream`].
+//! - `mux` and `quic` (private): the contract every backend implements
+//!   (`MuxConn`, `SendHalf`, `RecvHalf`) and the QUIC backend that does.
+//!   `tests/conformance.rs` holds each backend to the same behavior list.
 //! - [`error`]: transport-neutral error and code types
 //!   ([`ConnectionError`], [`ReadError`], [`WriteError`], [`StreamCode`]),
 //!   whose `Display` matches the QUIC stack's byte for byte.
@@ -19,9 +22,9 @@
 //! (`docs/design/protocol.md` §7, §14). The public surface names no quinn
 //! type but the hidden `Connection::quinn` test escape hatch
 //! (`docs/adr/0028-tcp-tls-fallback.md` decision 0): [`Connection`],
-//! [`Endpoint`], [`SendStream`] and [`RecvStream`] are facades over the QUIC
-//! backend today, and the P1 TCP fallback (ADR-0005) adds another backend
-//! behind the same surface.
+//! [`Endpoint`], [`SendStream`] and [`RecvStream`] are closed enums over the
+//! backends (QUIC today), and the P1 TCP fallback (ADR-0005) adds another
+//! backend behind the same surface.
 
 pub mod control;
 pub mod endpoint;

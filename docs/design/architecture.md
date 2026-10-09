@@ -14,10 +14,12 @@ xtask (arch-lint — workspace 멤버, 위 매트릭스를 빌드 실패로 강�
 
 허용 의존은 `xtask/src/arch.rs`의 매트릭스가 정본이다: `qsh-proto` → 없음, `qsh-transport` → {qsh-proto}, `qsh-core` → {qsh-proto, qsh-transport}, `qsh-cli` → {qsh-core, qsh-proto}(계약 타입 직접 사용 목적), `qsh-testkit` → 무제한.
 
+QUIC 스택은 `qsh-transport` 안에만 있다. `qsh-core`와 `qsh-cli`는 매니페스트에 `quinn`·`quinn-proto`를 둘 수 없고, `src/` 어디서도(`tests.rs` 포함) `quinn::` 경로나 숨겨진 `.quinn(` 접근자를 쓸 수 없다. 둘 다 `xtask arch`가 강제하며 `localctl/daemon.rs` 같은 예외는 없다. quinn을 계속 쓰는 곳은 `qsh-transport` 자신(백엔드 테스트 포함)과 `qsh-testkit`(raw QUIC 클라이언트, 처리량 기준선)뿐이다.
+
 | Crate | 책임 | 금지 사항 |
 |---|---|---|
 | `qsh-proto` | 계약 계층: frame codec(`frame.rs`), `ErrorCode`(`error.rs`), JSON 계약 타입(`types.rs` — `Tunnel`/`TunnelOpenReq`/…, M4부터), `qsh.event/v1` 이벤트(`event.rs`), prost wire 메시지(M1부터 `proto/qsh/wire/v1.proto`, M4부터 `RemoteForwardOpen`/`Opened`/`Close`·`ConnectResult`), forward-spec 파서(`wire.rs::parse_forward_spec`, M4부터), SOCKS5 codec(`socks5.rs` — `-D`가 loopback listener에서 받는 부분집합, sans-IO, ADR-0019 결정 7). sans-IO, async 없음 — fuzz 표면 | I/O, async, 상위 crate 의존 |
-| `qsh-transport` | quinn/rustls glue: endpoint 구성, ALPN, `QshPeerVerifier`, keep-alive/rebind, `Transport` trait 구현 | 세션·ACL·비즈니스 로직 |
+| `qsh-transport` | quinn/rustls glue: endpoint 구성, ALPN, `QshPeerVerifier`, keep-alive/rebind. 공개 표면은 백엔드 중립 파사드(`Connection`·`SendStream`·`RecvStream`·`Endpoint`와 오류·코드 타입)이고 닫힌 enum이라 generic·`dyn`이 qsh-core로 새지 않는다. 백엔드가 구현할 계약은 비공개 트레이트(`MuxConn`/`SendHalf`/`RecvHalf`)와 `tests/conformance.rs`의 행동 목록이 고정한다(ADR-0028 결정 0) | 세션·ACL·비즈니스 로직, 상위 crate에 quinn 타입 노출 |
 | `qsh-core` | 모든 비즈니스 로직: typed `Ops` façade, `server::dispatch`(ACL choke point), session broker, PTY, exec/tunnel(`tunnel/` 모듈, §3), identity/trust/pairing, ACL/audit, config, doctor, localctl | 렌더링, 프로토콜 프레임 파싱(qsh-proto 위임) |
 | `qsh-cli` | 패키지 `qsh-cli`, 바이너리 `qsh`. 얇은 frontend만: clap, human/JSON/JSONL 렌더러, interactive TUI(MCP adapter는 M8 Step 6에서 철회, ADR-0011) | 인증·ACL·세션 로직 일체 (CLI.md §11) |
 | `qsh-testkit` | 통합 하네스, chaos proxy, fixture 도구 ([testing.md](testing.md)) | — |

@@ -371,7 +371,7 @@ corpus는 `fuzz/corpus/`에 체크인한다. **19종 중 `broker_ops`는 이미 
 
 ADR-0005에 따라 P0 코드는 다음을 지킨다 — 이를 지키면 fallback은 wire 변경 없이 "TLS over TCP + 소형 스트림 mux" 추가로 끝난다:
 
-- 모든 프로토콜 코드는 `Transport`/`StreamMux` trait(open_bi/accept, ordered reliable bytes, 우선순위 힌트)에 대해 작성한다. quinn이 첫 구현일 뿐이다.
+- 모든 프로토콜 코드는 `qsh-transport`의 백엔드 중립 파사드(`Connection`/`SendStream`/`RecvStream`: open_bi/accept, ordered reliable bytes, 우선순위 힌트)에 대해 작성한다. 백엔드가 지켜야 할 행동은 `crates/qsh-transport/tests/conformance.rs`가 고정한다. quinn이 첫 백엔드일 뿐이다.
 - wire 구조는 QUIC 고유 개념(stream ID, datagram, transport parameter)에 의존하지 않는다. 스트림 정체성은 항상 in-band `StreamHeader`다.
 - `qsh doctor`는 P0부터 UDP reachability probe를 갖는다(차단 환경을 "미스터리"가 아닌 진단 가능한 상태로).
 

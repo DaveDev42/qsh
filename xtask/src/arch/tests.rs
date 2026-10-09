@@ -135,14 +135,15 @@ fn module_ban_recurses_into_subdirectories() {
 /// once — not once per token bound to it (the ban targets must exist
 /// once their consumers land: `BROKER_DIR`, the two `localctl` files,
 /// `REGISTRY_FILE`, `CLI_SRC_DIR`, `INVITE_ADDRESS_FILE`, and the
-/// `SETUP_DIR` directory, and the `INVITE_ADDRESS_DIR` directory that two
+/// `SETUP_DIR` directory, the `CORE_SRC_DIR` directory the `quinn` ban
+/// scopes, and the `INVITE_ADDRESS_DIR` directory that two
 /// separate bans share — a shared target is still one entry in `reported_missing`, not two).
 #[test]
 fn module_ban_flags_each_missing_target_exactly_once() {
     let root = tempfile::tempdir().unwrap();
     let mut violations = Vec::new();
     check_module_bans(root.path(), &mut violations).unwrap();
-    assert_eq!(violations.len(), 8, "{violations:?}");
+    assert_eq!(violations.len(), 9, "{violations:?}");
     assert!(
         violations.iter().all(|v| v.contains("does not exist")),
         "{violations:?}"
@@ -169,7 +170,9 @@ fn module_ban_flags_transport_in_localctl_frame_and_client_but_daemon_is_exempt(
     .unwrap();
     fs::write(
         localctl.join("daemon.rs"),
-        "use qsh_transport::Connection;\nuse quinn::Endpoint;\nuse rustls::ClientConfig;\n",
+        // No `quinn::` line: `daemon.rs` is exempt from the file-scoped
+        // localctl bans, but not from the `qsh-core/src` ban on `quinn::`.
+        "use qsh_transport::Connection;\nuse rustls::ClientConfig;\n",
     )
     .unwrap();
 
@@ -458,6 +461,101 @@ fn module_ban_flags_uds_apis_under_cli_src_but_tests_are_exempt() {
     assert!(
         test_hits.is_empty(),
         "crates/qsh-cli/tests is out of scope for this rule: {violations:?}"
+    );
+}
+
+/// `qsh-core/src` and `qsh-cli/src` may not name a `quinn::` path or call the
+/// hidden `.quinn()` accessor, in any file: nested modules, `tests.rs` and
+/// `localctl/daemon.rs` (no longer exempt) included. Prose, a test name that
+/// spells the word and a string literal are fine.
+#[test]
+fn module_ban_flags_quinn_paths_and_the_accessor_under_core_and_cli_src() {
+    let root = tempfile::tempdir().unwrap();
+    let core = root.path().join("crates/qsh-core/src");
+    let daemon_dir = core.join("localctl");
+    let cli_src = root.path().join("crates/qsh-cli/src");
+    fs::create_dir_all(&daemon_dir).unwrap();
+    fs::create_dir_all(&cli_src).unwrap();
+    fs::write(
+        daemon_dir.join("daemon.rs"),
+        "fn f(s: quinn::SendStream) { let _ = s; }\n",
+    )
+    .unwrap();
+    fs::write(
+        core.join("tests.rs"),
+        "fn t(c: &Connection) { let _ = c.quinn().stats(); }\n",
+    )
+    .unwrap();
+    fs::write(cli_src.join("render.rs"), "use quinn::VarInt;\n").unwrap();
+    fs::write(
+        core.join("fine.rs"),
+        "// quinn::SendStream is only mentioned in prose\n\
+         async fn a_quinn_idle_timeout_is_reported() { let _ = \"quinn's 45 s idle\"; }\n",
+    )
+    .unwrap();
+
+    let mut violations = Vec::new();
+    check_module_bans(root.path(), &mut violations).unwrap();
+    let quinn: Vec<_> = violations
+        .iter()
+        .filter(|v| v.contains("`quinn::`") || v.contains("`.quinn(`"))
+        .collect();
+    assert_eq!(quinn.len(), 3, "{violations:?}");
+    assert!(quinn.iter().any(|v| v.contains("localctl/daemon.rs:1")));
+    assert!(quinn.iter().any(|v| v.contains("qsh-core/src/tests.rs:1")));
+    assert!(quinn.iter().any(|v| v.contains("qsh-cli/src/render.rs:1")));
+    assert!(
+        !violations.iter().any(|v| v.contains("fine.rs")),
+        "{violations:?}"
+    );
+}
+
+/// A broker file that names `quinn::` is reported once, under the broader
+/// `quinn` ban, not a second time under the `quinn::` ban that also covers
+/// `qsh-core/src`.
+#[test]
+fn a_line_reported_under_a_broader_token_is_not_reported_again() {
+    let root = tempfile::tempdir().unwrap();
+    let broker = root.path().join("crates/qsh-core/src/broker");
+    fs::create_dir_all(&broker).unwrap();
+    fs::write(
+        broker.join("x.rs"),
+        "fn f() { let _ = quinn::Endpoint::client; }\n",
+    )
+    .unwrap();
+
+    let mut violations = Vec::new();
+    check_module_bans(root.path(), &mut violations).unwrap();
+    let hits: Vec<_> = violations.iter().filter(|v| v.contains("x.rs")).collect();
+    assert_eq!(hits.len(), 1, "{violations:?}");
+}
+
+/// A `quinn` entry in the `qsh-core` or `qsh-cli` manifest, runtime or dev,
+/// fails the lint even with no `use` line yet.
+#[test]
+fn run_flags_a_quinn_dependency_in_core_and_cli_manifests() {
+    let root = tempfile::tempdir().unwrap();
+    for (name, section) in [
+        ("qsh-core", "dependencies"),
+        ("qsh-cli", "dev-dependencies"),
+    ] {
+        let dir = root.path().join("crates").join(name);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("Cargo.toml"),
+            format!("[package]\nname = \"{name}\"\n\n[{section}]\nquinn = \"0.11\"\n"),
+        )
+        .unwrap();
+    }
+
+    let err = run(root.path()).unwrap_err().to_string();
+    assert!(
+        err.contains("qsh-core declares a dependency on `quinn`"),
+        "{err}"
+    );
+    assert!(
+        err.contains("qsh-cli declares a dependency on `quinn`"),
+        "{err}"
     );
 }
 
