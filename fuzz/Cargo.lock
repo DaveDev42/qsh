@@ -1415,7 +1415,6 @@ dependencies = [
  "prost",
  "qsh-proto",
  "qsh-transport",
- "quinn",
  "rand",
  "rcgen",
  "serde",
@@ -1466,6 +1465,7 @@ version = "0.4.3"
 dependencies = [
  "aws-lc-rs",
  "base64",
+ "bytes",
  "prost",
  "qsh-proto",
  "quinn",
