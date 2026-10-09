@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # switch-linux.sh — repeatable Wi-Fi <-> tethering switch driver for the M2
-# mobility campaign (PLAN.md Step 9, docs/campaigns/m2-mobility.md).
+# mobility campaign (docs/history/m2-plan.md Step 9, docs/campaigns/m2-mobility.md).
 #
 # Linux counterpart of switch-macos.sh, same contract: it only moves the link,
 # it measures nothing. The campaign numbers come from the qsh client's

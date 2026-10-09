@@ -43,12 +43,12 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
   RUST_BACKTRACE: short
-  # `VersionData.build.commit` (`docs/CLI.md` §6.10, `PLAN.md` M7 Step 1):
+  # `VersionData.build.commit` (`docs/CLI.md` §6.10, `docs/history/m7-plan.md` Step 1):
   # compiled in via `option_env!`, so every job that builds or tests the
   # workspace needs it in `env`, not just the ones that ship a binary —
   # `test`'s own build is what `fixtures.rs`'s `version.json` golden
   # fixture runs against. `qsh_testkit::fixtures::normalize` drops the
-  # `build` key before comparing (`PLAN.md` M7 Step 1 (a)-추기 ②), so this
+  # `build` key before comparing (`docs/history/m7-plan.md` Step 1 (a)-추기 ②), so this
   # is safe to set workflow-wide rather than threaded per job.
   QSH_BUILD_COMMIT: ${{ github.sha }}
 
@@ -106,7 +106,7 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
-  # The interactive acceptance set (`PLAN.md` M2 DoD 2) as a *standing*
+  # The interactive acceptance set (`docs/history/m2-plan.md` DoD 2) as a *standing*
   # gate. The suite skips an acceptance item whose binary is missing, which
   # is right for a developer's box and wrong for a job that is supposed to
   # keep the item from rotting — so this one installs what it needs and
@@ -115,7 +115,7 @@ jobs:
   #
   # `claude` is deliberately not in the list: it is not installable on a
   # hosted runner. The full five-binary set (`QSH_ACCEPTANCE_STRICT=1`) is
-  # what certifies the milestone, and PLAN.md records where that was run.
+  # what certifies the milestone, and the milestone close commit records where that was run.
   acceptance:
     name: acceptance (interactive shells)
     runs-on: ubuntu-24.04
@@ -146,7 +146,7 @@ jobs:
       - run: cargo nextest run -p qsh-cli --test socks_curl
         env:
           QSH_ACCEPTANCE_STRICT: curl
-      # The literal 60-second reverse-route blackout (`PLAN.md` M3 Step 8
+      # The literal 60-second reverse-route blackout (`docs/history/m3-plan.md` Step 8
       # (b)/(d), `docs/ROADMAP.md` M3 DoD 2). `QSH_ACCEPTANCE_SLOW` is what
       # keeps this out of the PR-gated unit suite (`docs/design/testing.md`'s
       # "no sleep()" discipline names this test as the one deliberate
@@ -174,7 +174,7 @@ jobs:
       - run: cargo nextest run -p qsh-testkit --test supervised_dynamic_blackhole
         env:
           QSH_ACCEPTANCE_SLOW: 1
-      # M4 Step 7 DoD 3/4 (`PLAN.md` M4 Step 7 (d), `docs/design/testing.md`
+      # M4 Step 7 DoD 3/4 (`docs/history/m4-plan.md` Step 7 (d), `docs/design/testing.md`
       # L10): the same standing-gate shape as the two steps above, applied
       # to the tunnel perf DoDs instead of an interactive/timing one.
       # `QSH_ACCEPTANCE_STRICT` is what asserts the literal DoD 3 ratio
