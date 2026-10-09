@@ -27,15 +27,17 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use crate::error::{
     ClosedStream, ReadError, ReadExactError, ReadToEndError, StoppedError, StreamCode, WriteError,
 };
+use crate::mux::{RecvHalf, SendHalf};
+use crate::quic::{QuicRecv, QuicSend};
 
 #[derive(Debug)]
 enum SendBackend {
-    Quic(quinn::SendStream),
+    Quic(QuicSend),
 }
 
 #[derive(Debug)]
 enum RecvBackend {
-    Quic(quinn::RecvStream),
+    Quic(QuicRecv),
 }
 
 /// The sending half of a bidirectional stream.
@@ -45,7 +47,7 @@ pub struct SendStream {
 }
 
 impl SendStream {
-    pub(crate) fn from_quic(stream: quinn::SendStream) -> Self {
+    pub(crate) fn from_quic(stream: QuicSend) -> Self {
         Self {
             inner: SendBackend::Quic(stream),
         }
@@ -54,14 +56,14 @@ impl SendStream {
     /// Write some of `buf`, returning how many bytes were accepted.
     pub async fn write(&mut self, buf: &[u8]) -> Result<usize, WriteError> {
         match &mut self.inner {
-            SendBackend::Quic(s) => Ok(s.write(buf).await?),
+            SendBackend::Quic(s) => s.write(buf).await,
         }
     }
 
     /// Write all of `buf`.
     pub async fn write_all(&mut self, buf: &[u8]) -> Result<(), WriteError> {
         match &mut self.inner {
-            SendBackend::Quic(s) => Ok(s.write_all(buf).await?),
+            SendBackend::Quic(s) => s.write_all(buf).await,
         }
     }
 
@@ -69,7 +71,7 @@ impl SendStream {
     /// with [`ClosedStream`].
     pub fn finish(&mut self) -> Result<(), ClosedStream> {
         match &mut self.inner {
-            SendBackend::Quic(s) => Ok(s.finish()?),
+            SendBackend::Quic(s) => s.finish(),
         }
     }
 
@@ -77,7 +79,7 @@ impl SendStream {
     /// not yet delivered.
     pub fn reset(&mut self, code: StreamCode) -> Result<(), ClosedStream> {
         match &mut self.inner {
-            SendBackend::Quic(s) => Ok(s.reset(code.to_varint())?),
+            SendBackend::Quic(s) => s.reset(code),
         }
     }
 
@@ -85,7 +87,7 @@ impl SendStream {
     /// `docs/design/protocol.md` §12).
     pub fn set_priority(&self, priority: i32) -> Result<(), ClosedStream> {
         match &self.inner {
-            SendBackend::Quic(s) => Ok(s.set_priority(priority)?),
+            SendBackend::Quic(s) => s.set_priority(priority),
         }
     }
 
@@ -93,7 +95,7 @@ impl SendStream {
     /// closed.
     pub fn priority(&self) -> Result<i32, ClosedStream> {
         match &self.inner {
-            SendBackend::Quic(s) => Ok(s.priority()?),
+            SendBackend::Quic(s) => s.priority(),
         }
     }
 
@@ -104,13 +106,8 @@ impl SendStream {
         &self,
     ) -> impl Future<Output = Result<Option<StreamCode>, StoppedError>> + Send + Sync + 'static
     {
-        let fut = match &self.inner {
+        match &self.inner {
             SendBackend::Quic(s) => s.stopped(),
-        };
-        async move {
-            fut.await
-                .map(|code| code.map(StreamCode::from))
-                .map_err(StoppedError::from)
         }
     }
 }
@@ -146,7 +143,7 @@ pub struct RecvStream {
 }
 
 impl RecvStream {
-    pub(crate) fn from_quic(stream: quinn::RecvStream) -> Self {
+    pub(crate) fn from_quic(stream: QuicRecv) -> Self {
         Self {
             inner: RecvBackend::Quic(stream),
         }
@@ -156,14 +153,14 @@ impl RecvStream {
     /// Cancel-safe.
     pub async fn read(&mut self, buf: &mut [u8]) -> Result<Option<usize>, ReadError> {
         match &mut self.inner {
-            RecvBackend::Quic(s) => Ok(s.read(buf).await?),
+            RecvBackend::Quic(s) => s.read(buf).await,
         }
     }
 
     /// Fill `buf` exactly. Not cancel-safe.
     pub async fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), ReadExactError> {
         match &mut self.inner {
-            RecvBackend::Quic(s) => Ok(s.read_exact(buf).await?),
+            RecvBackend::Quic(s) => s.read_exact(buf).await,
         }
     }
 
@@ -171,7 +168,7 @@ impl RecvStream {
     /// `size_limit` bytes. Not cancel-safe.
     pub async fn read_to_end(&mut self, size_limit: usize) -> Result<Vec<u8>, ReadToEndError> {
         match &mut self.inner {
-            RecvBackend::Quic(s) => Ok(s.read_to_end(size_limit).await?),
+            RecvBackend::Quic(s) => s.read_to_end(size_limit).await,
         }
     }
 
@@ -179,7 +176,7 @@ impl RecvStream {
     /// sending.
     pub fn stop(&mut self, code: StreamCode) -> Result<(), ClosedStream> {
         match &mut self.inner {
-            RecvBackend::Quic(s) => Ok(s.stop(code.to_varint())?),
+            RecvBackend::Quic(s) => s.stop(code),
         }
     }
 }

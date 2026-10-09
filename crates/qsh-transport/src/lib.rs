@@ -27,6 +27,8 @@ pub mod control;
 pub mod endpoint;
 pub mod error;
 pub mod identity;
+mod mux;
+mod quic;
 pub mod stream;
 pub mod tls;
 
@@ -40,6 +42,7 @@ pub use error::{
     ReadExactError, ReadToEndError, StoppedError, StreamCode, WriteError,
 };
 pub use identity::{Fingerprint, FingerprintParseError, Principal, PrincipalParseError};
+pub use mux::{TransportCaps, TransportKind};
 pub use stream::{RecvStream, SendStream};
 pub use tls::{
     AuthPath, Observation, PeerRole, QshPeerVerifier, RejectReason, StaticTrust, TrustEvaluator,
