@@ -204,6 +204,13 @@ impl ConnectionError {
         matches!(self, Self::Reset)
     }
 
+    /// The peer closed the connection explicitly, with any application code
+    /// (including one past `u32`, which [`application_code`](Self::application_code)
+    /// cannot represent).
+    pub fn is_application_closed(&self) -> bool {
+        matches!(self, Self::ApplicationClosed(_))
+    }
+
     /// The application code of the peer's explicit close, if that is how the
     /// connection ended. Codes past `u32` (only a foreign peer sends them)
     /// read as `None`.

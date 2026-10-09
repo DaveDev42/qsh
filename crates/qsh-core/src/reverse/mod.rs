@@ -240,21 +240,20 @@ const CLOSE_CODE_PATH_DEAD: u32 = 0x1004;
 /// peer-initiated or PathWatch-judged about this" bucket. `docs/CLI.md`
 /// §6.13 lists every code path that ends there.
 pub(crate) fn classify_connection_error(err: &qsh_transport::ConnectionError) -> ReconnectCause {
-    use qsh_transport::ConnectionError;
-    match err {
-        ConnectionError::ApplicationClosed(close)
-            if u64::from(close.error_code) == u64::from(CLOSE_CODE_PATH_DEAD) =>
-        {
-            ReconnectCause::PathDead
-        }
-        ConnectionError::ApplicationClosed(_) => ReconnectCause::PeerClosed,
+    if err.application_code() == Some(CLOSE_CODE_PATH_DEAD) {
+        ReconnectCause::PathDead
+    } else if err.is_application_closed() {
+        ReconnectCause::PeerClosed
+    } else if err.is_peer_reset() {
         // A stateless reset is a packet only the peer's endpoint can send,
         // and it answers a connection the peer no longer has: typically one
         // it already condemned (its own `path_dead` close was lost on the
         // way, or it restarted). Nothing about it originates here.
-        ConnectionError::Reset => ReconnectCause::PeerClosed,
-        ConnectionError::TimedOut => ReconnectCause::IdleTimeout,
-        _ => ReconnectCause::Local,
+        ReconnectCause::PeerClosed
+    } else if err.is_idle_timeout() {
+        ReconnectCause::IdleTimeout
+    } else {
+        ReconnectCause::Local
     }
 }
 
