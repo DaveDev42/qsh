@@ -9,7 +9,6 @@ use std::time::Duration;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use qsh_proto::{ErrorCode, ExecRunData, ExecRunReq};
-use qsh_transport::endpoint::is_crypto_failure;
 use qsh_transport::{ConnectionError, DialError, Dialer, StreamError};
 
 use crate::client::{ClientError, Session};
@@ -421,7 +420,7 @@ fn auth_failed(category: &str) -> OpError {
 pub(crate) fn map_dial_error(err: DialError, address: &str, attempted: usize) -> OpError {
     let reachability_class = match &err {
         DialError::Refused | DialError::Timeout(_) | DialError::Connect(_) => true,
-        DialError::Failed(inner) => !is_crypto_failure(inner),
+        DialError::Failed(inner) => !inner.is_crypto_failure(),
         DialError::LocalRejected { .. } | DialError::RemoteRejected | DialError::Setup(_) => false,
     };
     let mut op_err = map_dial_error_inner(err, address);
@@ -467,7 +466,7 @@ fn map_dial_error_inner(err: DialError, address: &str) -> OpError {
             format!("no response from {address} within {t:?}"),
         ),
         DialError::Failed(inner) => {
-            if is_crypto_failure(&inner) {
+            if inner.is_crypto_failure() {
                 auth_failed("remote_rejected")
             } else {
                 OpError::new(
@@ -487,7 +486,7 @@ fn map_dial_error_inner(err: DialError, address: &str) -> OpError {
 }
 
 fn connection_error_to_op(err: &ConnectionError) -> OpError {
-    if is_crypto_failure(err) {
+    if err.is_crypto_failure() {
         auth_failed("remote_rejected")
     } else {
         OpError::new(
@@ -551,14 +550,14 @@ pub fn map_client_error(err: ClientError) -> OpError {
         .with_details(serde_json::json!({ "limit_bytes": limit })),
         ClientError::Connection(inner) => connection_error_to_op(&inner),
         ClientError::Stream(inner) => match &inner {
-            StreamError::Read(quinn_read) => match quinn_read {
+            StreamError::Read(read) => match read {
                 qsh_transport::ReadError::ConnectionLost(c) => connection_error_to_op(c),
                 other => OpError::new(
                     ErrorCode::ConnectionFailed,
                     format!("stream read failed: {other}"),
                 ),
             },
-            StreamError::Write(quinn_write) => match quinn_write {
+            StreamError::Write(write) => match write {
                 qsh_transport::WriteError::ConnectionLost(c) => connection_error_to_op(c),
                 other => OpError::new(
                     ErrorCode::ConnectionFailed,

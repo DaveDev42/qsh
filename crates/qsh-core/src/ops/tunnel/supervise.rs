@@ -801,7 +801,7 @@ fn cause_of_dial_error(err: &qsh_transport::DialError) -> ReconnectCause {
         DialError::LocalRejected { .. } | DialError::RemoteRejected => ReconnectCause::TlsRejected,
         DialError::Refused | DialError::Connect(_) => ReconnectCause::Refused,
         DialError::Failed(inner) => {
-            if qsh_transport::endpoint::is_crypto_failure(inner) {
+            if inner.is_crypto_failure() {
                 ReconnectCause::TlsRejected
             } else {
                 ReconnectCause::Refused

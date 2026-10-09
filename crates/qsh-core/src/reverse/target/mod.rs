@@ -807,7 +807,7 @@ async fn dial_and_register_resolving(
 /// Classify a [`qsh_transport::DialError`] into [`ReconnectCause`]'s
 /// `resolve`-adjacent slice (issue #4 item 6).
 /// `DialError::Failed` mirrors `map_dial_error`'s own
-/// `is_crypto_failure` check exactly — the same quinn
+/// `is_crypto_failure` check exactly — the same
 /// `ConnectionError` that makes that function answer `AUTH_FAILED`
 /// instead of `CONNECTION_FAILED` is what makes this answer
 /// `tls_rejected` instead of `refused`, so the two classifications never
@@ -820,7 +820,7 @@ fn classify_dial_error(err: &qsh_transport::DialError) -> ReconnectCause {
         DialError::LocalRejected { .. } | DialError::RemoteRejected => ReconnectCause::TlsRejected,
         DialError::Refused | DialError::Connect(_) => ReconnectCause::Refused,
         DialError::Failed(inner) => {
-            if qsh_transport::endpoint::is_crypto_failure(inner) {
+            if inner.is_crypto_failure() {
                 ReconnectCause::TlsRejected
             } else {
                 ReconnectCause::Refused
