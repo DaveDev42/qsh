@@ -64,6 +64,8 @@ impl PairingHarness {
         let invites = SharedInviteStore::open(&invites_path).expect("open invites");
         trust.attach_pairing(Arc::clone(&invites));
 
+        crate::env_check::ensure_loopback_udp();
+
         let listener = Listener::bind(
             "127.0.0.1:0".parse().expect("addr"),
             host_identity.local.clone(),

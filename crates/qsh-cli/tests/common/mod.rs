@@ -529,6 +529,7 @@ impl ServeGuard {
         log: Option<&str>,
         bind: &str,
     ) -> Self {
+        qsh_testkit::env_check::ensure_loopback_udp();
         let mut args: Vec<&str> = extra.to_vec();
         args.extend_from_slice(&["serve", "--bind", bind]);
         let mut command = host.command_with_bin(bin, &args);

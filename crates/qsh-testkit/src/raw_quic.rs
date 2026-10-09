@@ -77,6 +77,7 @@ fn raw_client_config() -> quinn::ClientConfig {
 /// itself fails (a caller expecting several source addresses to bind should
 /// tolerate some failing rather than treat any single one as fatal).
 pub fn raw_source_endpoint(ip: Ipv4Addr) -> Option<quinn::Endpoint> {
+    crate::env_check::ensure_loopback_udp();
     let socket = qsh_transport::bind_tuned_udp_socket(SocketAddr::new(ip.into(), 0), true).ok()?;
     let mut endpoint = quinn::Endpoint::new(
         quinn::EndpointConfig::default(),

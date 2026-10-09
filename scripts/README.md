@@ -119,6 +119,19 @@ reproduce load poorly and 50 rounds take tens of minutes. A new
 timing-sensitive test must be green for 50 consecutive rounds here before it
 lands (`docs/design/testing.md`, CI discipline).
 
+## test/
+
+`nextest-ns.sh [nextest args]` runs the suite (default `--workspace`) inside
+`unshare -Urn` with `lo` brought up, plus a nested
+`unshare -U --map-user=<uid> --map-group=<gid>` so tests do not run as uid 0.
+Use it when the testkit's loopback-UDP self-check reports a host firewall rule
+dropping loopback UDP (nft tables are per network namespace). Needs
+`unshare` and `ip` (iproute2); Linux only.
+
+`short-tmpdir.sh` is the nextest setup script wired in
+`.config/nextest.toml`: when `$TMPDIR` is longer than 48 bytes it points the
+tests at `/tmp/qsh-t-<uid>`, so unix socket paths stay inside `sun_path`.
+
 ## stopwatch/
 
 A container pair that builds a never-configured machine for each round of

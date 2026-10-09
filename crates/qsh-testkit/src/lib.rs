@@ -24,6 +24,9 @@
 //!   convergence helper T2's `adversarial_load.rs` and M8 Step 5's
 //!   `soak.rs` both need (docs/campaigns/m8-soak.md §4, moved from
 //!   `crates/qsh-cli/tests/common/mod.rs`).
+//! - [`env_check`]: one-shot loopback-UDP self-check the QUIC harness
+//!   constructors run first, so a host firewall that drops loopback UDP
+//!   fails with one clear message instead of 10 s timeouts.
 //! - [`net_probe`]: non-loopback IPv4 route/hairpin discovery plus the
 //!   CI-aware skip-or-fail [`net_probe::Gap`] policy, shared by any suite
 //!   that needs a real off-loopback destination (`-D`'s
@@ -33,6 +36,7 @@
 //! This crate may depend on any workspace crate.
 
 pub mod chaos;
+pub mod env_check;
 pub mod fixtures;
 pub mod loopback;
 pub mod net_probe;
