@@ -31,6 +31,7 @@ QSH의 아키텍처/설계 결정을 기록한다. 각 ADR은 맥락, 결정, �
 | [0025](0025-acl-show-read-only.md) | writer 없이 ACL 가시성만 올린다. 읽기 전용 `qsh acl show`를 신설하고 `acl grant`/`acl revoke`는 기각한다 | 승인됨 |
 | [0026](0026-ssh-key-import-scope.md) | SSH 키 가져오기(`--import-ssh-key`)는 v1에 넣지 않는다. P1으로 미루고 착수할 때의 모양만 지금 고정한다 | 승인됨 |
 | [0027](0027-doctor-fail-on-exit.md) | `qsh doctor --fail-on <warn\|error>`는 임계 이상 finding이 있으면 envelope을 그대로 둔 채 exit만 `1`로 바꾼다 | 승인됨 |
+| [0028](0028-tcp-tls-fallback.md) | TCP/TLS fallback은 `[transport].mode` = `quic`(기본) \| `tcp` \| `auto`로 고르고, TCP listener는 `tcp_bind`가 있을 때만 bind한다. mux는 `qsh-proto`의 자체 sans-IO codec이고 `docs/design/protocol.md` §16.2의 새 행이다. TCP 연결은 항상 resume으로 복구한다. M14 (a)의 추상은 공개 enum facade와 비공개 계약 trait이다 | 제안됨 |
 | [0036](0036-stateless-reset-key.md) | stateless reset key는 config 디렉터리의 0600 파일 `stateless_reset.key`에 두고, 읽을 수 없거나 형식이 틀리면 파일을 건드리지 않은 채 이번 기동만 임시 키로 뜬다 | 승인됨 |
 | [0037](0037-stalled-tunnel-stream-eviction.md) | 연결 하나에서 정체한 터널 스트림이 연결 수신 창을 다 쓰기 전에 가장 오래 정체한 스트림부터 끊는다 | 승인됨 |
 | [0038](0038-setup-client-complete-without-acl.md) | `qsh setup client`의 `complete`는 doctor의 `acl_policy_missing` 하나를 세지 않는다(ADR-0024 결정 9 개정). doctor의 진단 등급과 host 쪽 역할의 판정은 그대로 둔다 | 승인됨 |
@@ -42,7 +43,7 @@ QSH의 아키텍처/설계 결정을 기록한다. 각 ADR은 맥락, 결정, �
 P1 계획(`docs/ROADMAP.md` §5)이 0027~0035를 예약했고 예약 밖의 번호는 0036(stateless reset key), 0037(정체 터널 스트림), 0038(`setup client`의 `complete`), 0039(DoH 강제 모드), 0040(ECH 정책), 0041(역방향 등록 감지 예산), 0042(감시 자기 지연과 빠른 유실 backoff)가 받았으므로 다음 새 번호는 0043이다. 조건부로 서는 ADR은 설 때 그 번호부터 쓴다.
 
 - 0027 `doctor --fail-on`의 exit 규칙(M13). 위 표에 `승인됨`으로 올랐다
-- 0028 TCP/TLS fallback(M14)
+- 0028 TCP/TLS fallback(M14). 위 표에 `제안됨`으로 올랐다
 - 0029 파일 복사(M15)
 - 0030 pin 방향(M16)
 - 0031 cert rotation·revocation(M16)
