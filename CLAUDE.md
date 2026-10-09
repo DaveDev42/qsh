@@ -84,6 +84,6 @@ If a change requires putting logic in `qsh-cli` to make something work, that's a
 ## Conventions
 
 - Language: English in `README.md`, `CLAUDE.md`, `RELEASE-NOTES.md`, `scripts/README.md`, `fuzz/README.md`, and all code comments; Korean in `docs/**`, `PLAN.md`, `scripts/stopwatch/README.md`, and commit messages (`type(scope): 요약 — 상세`).
-- Cite durable anchors only: an ADR, a `docs/design/*` or `docs/campaigns/*` section, `docs/CLI.md` §N, a test name, or a commit hash. Never a `PLAN.md` step number (steps are renumbered when a milestone rolls) and never a session scratchpad file (`BRIEF-*`, `REVIEW-*`, `ARBITRATION-*`, `PROGRESS-*`), none of which exist in this repository.
+- Cite durable anchors only: an ADR, a `docs/design/*` or `docs/campaigns/*` section, `docs/CLI.md` §N, a test name, a commit hash, or a step of a frozen plan under `docs/history/` (for example `docs/history/m3-plan.md` Step 5; those files never change). Never a `PLAN.md` step number (steps are renumbered when a milestone rolls) and never a session scratchpad file (`BRIEF-*`, `REVIEW-*`, `ARBITRATION-*`, `PROGRESS-*`), none of which exist in this repository.
 - Once a source file passes roughly 800 lines, its inline `#[cfg(test)]` module moves to a sibling `tests.rs` reached by `mod tests;`; `crates/qsh-core/src/pty/` is the pattern to copy.
 - `PLAN.md` and `docs/ROADMAP.md` are edited by the main session only.
