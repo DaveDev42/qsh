@@ -62,15 +62,22 @@ libc.workspace = true
 socket2.workspace = true
 
 # The OS credential store is only wired up on the platforms QSH supports as
-# hosts today (`docs/design/architecture.md` §5, §8: keyring 3.x pinned).
-# Linux uses the pure-Rust async Secret Service backend so no libdbus /
+# hosts today (`docs/design/architecture.md` §5, §8: keyring-core 1 plus one
+# store crate per platform). `keyring-core` is the trait layer only; the
+# store is picked per target and opened per operation in
+# `identity/keystore.rs`, never registered as keyring's global default store.
+# Linux uses the pure-Rust zbus Secret Service store with the `crypto-rust`
+# feature (the `openssl` feature is banned by `deny.toml`), so no libdbus /
 # system C dependency is needed; where neither table applies
 # (`PlatformKeyStore`) reports `Unavailable` and `auto` falls back to file.
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
+keyring-core = "1"
+
 [target.'cfg(target_os = "macos")'.dependencies]
-keyring = { version = "3", features = ["apple-native"] }
+apple-native-keyring-store = { version = "1", features = ["keychain"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-keyring = { version = "3", features = ["async-secret-service", "tokio", "crypto-rust"] }
+zbus-secret-service-keyring-store = { version = "1", features = ["crypto-rust"] }
 
 # POSIX PTY backend (`docs/design/architecture.md` §4): openpty + spawn with
 # setsid/controlling tty. The whole `pty` module is unix-only (`docs/ROADMAP.md`

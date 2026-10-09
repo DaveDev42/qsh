@@ -3,7 +3,7 @@
 //!
 //! | mode | store | notes |
 //! |---|---|---|
-//! | `platform` | [`PlatformKeyStore`] | keyring 3.x: macOS Keychain / Linux Secret Service |
+//! | `platform` | [`PlatformKeyStore`] | keyring-core 1.x with a per-platform store crate: macOS Keychain / Linux Secret Service |
 //! | `file` | [`FileKeyStore`] | `identity/device.key`, 0600 in a 0700 directory |
 //! | (tests) | [`MemoryKeyStore`] | process-local, never touches disk |
 //!
@@ -127,8 +127,12 @@ impl KeyStore for FileKeyStore {
 // ---------------------------------------------------------------------------
 
 /// The OS credential store (macOS Keychain, Linux Secret Service) via
-/// keyring 3.x, keyed by `("qsh", <device_id>)` so two config directories on
-/// one machine never collide.
+/// keyring-core 1.x plus `apple-native-keyring-store` (macOS) or
+/// `zbus-secret-service-keyring-store` (Linux), keyed by
+/// `("qsh", <device_id>)` so two config directories on one machine never
+/// collide. The stored format (service `qsh`, account `device_id`, Base64
+/// PKCS#8 DER) is the same one the keyring 3.x backends wrote, so an
+/// identity created by an older binary loads unchanged.
 ///
 /// The key is stored Base64-encoded because the credential stores this
 /// backend targets hold UTF-8 secrets.
@@ -137,6 +141,10 @@ impl KeyStore for FileKeyStore {
 /// executor, which must never run *on* a tokio worker (it would panic on a
 /// nested `block_on` or wedge the worker). Every operation therefore runs
 /// on a short-lived dedicated OS thread, so callers may be sync or async.
+/// The store handle is opened inside that thread for each operation and is
+/// never installed as keyring's process-global default store, so a store
+/// that comes up later (a D-Bus session that starts after the first
+/// attempt) is picked up by the next call.
 #[derive(Debug, Clone)]
 pub struct PlatformKeyStore {
     account: String,
@@ -163,16 +171,43 @@ mod platform_impl {
     /// Map a keyring failure onto our error taxonomy: only "the store
     /// itself is not reachable" becomes [`KeyStoreError::Unavailable`], the
     /// signal `auto` uses to fall back to a file.
-    pub(super) fn map_error(err: keyring::Error) -> KeyStoreError {
+    pub(super) fn map_error(err: keyring_core::Error) -> KeyStoreError {
         match err {
-            keyring::Error::PlatformFailure(inner) => KeyStoreError::Unavailable(inner.to_string()),
-            keyring::Error::NoStorageAccess(inner) => KeyStoreError::Unavailable(inner.to_string()),
+            keyring_core::Error::PlatformFailure(inner) => {
+                KeyStoreError::Unavailable(inner.to_string())
+            }
+            keyring_core::Error::NoStorageAccess(inner) => {
+                KeyStoreError::Unavailable(inner.to_string())
+            }
+            keyring_core::Error::NoDefaultStore => {
+                KeyStoreError::Unavailable("no default credential store".to_string())
+            }
             other => KeyStoreError::Other(other.to_string()),
         }
     }
 
-    pub(super) fn entry(store: &PlatformKeyStore) -> Result<keyring::Entry, KeyStoreError> {
-        keyring::Entry::new(super::KEYRING_SERVICE, &store.account).map_err(map_error)
+    /// Connect to the OS credential store. Built per operation and never
+    /// registered as keyring's process-global default store, so a store that
+    /// was unreachable once (no D-Bus session yet, locked keychain) is
+    /// retried by the next call instead of being remembered as failed.
+    #[cfg(target_os = "linux")]
+    fn open_store() -> keyring_core::Result<std::sync::Arc<keyring_core::api::CredentialStore>> {
+        let store: std::sync::Arc<keyring_core::api::CredentialStore> =
+            zbus_secret_service_keyring_store::Store::new()?;
+        Ok(store)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn open_store() -> keyring_core::Result<std::sync::Arc<keyring_core::api::CredentialStore>> {
+        let store: std::sync::Arc<keyring_core::api::CredentialStore> =
+            apple_native_keyring_store::keychain::Store::new()?;
+        Ok(store)
+    }
+
+    pub(super) fn entry(store: &PlatformKeyStore) -> Result<keyring_core::Entry, KeyStoreError> {
+        open_store()
+            .and_then(|s| s.build(super::KEYRING_SERVICE, &store.account, None))
+            .map_err(map_error)
     }
 
     /// Run `f` on a dedicated OS thread and wait for it. Isolates the
@@ -218,7 +253,7 @@ impl KeyStore for PlatformKeyStore {
             let entry = platform_impl::entry(self)?;
             let encoded = match entry.get_password() {
                 Ok(value) => Zeroizing::new(value),
-                Err(keyring::Error::NoEntry) => return Ok(None),
+                Err(keyring_core::Error::NoEntry) => return Ok(None),
                 Err(err) => return Err(platform_impl::map_error(err)),
             };
             let der = base64::engine::general_purpose::STANDARD
@@ -234,7 +269,7 @@ impl KeyStore for PlatformKeyStore {
         platform_impl::off_runtime(|| {
             let entry = platform_impl::entry(self)?;
             match entry.delete_credential() {
-                Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+                Ok(()) | Err(keyring_core::Error::NoEntry) => Ok(()),
                 Err(err) => Err(platform_impl::map_error(err)),
             }
         })
