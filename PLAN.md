@@ -1,6 +1,6 @@
-# PLAN.md — 자리표시자: M14 착수 대기 (ADR-0028 미작성)
+# PLAN.md — 자리표시자: M14 착수 대기 (ADR-0028 제안됨)
 
-M13(측정·배포 기반)은 2026-10-08 닫혔다(`docs/ROADMAP.md` M13 마감 노트). 그 계획은 `docs/history/m13-plan.md`로 옮겼다. 순서상 다음인 M14(TCP/TLS fallback)는 착수 ADR인 ADR-0028이 승인돼야 연다(`docs/ROADMAP.md` M14 착수 조건, §5.1 원칙 2). ADR-0028은 아직 초안도 없으므로 이 파일은 M13 마감 공통 절차(`docs/ROADMAP.md` §2)와 `CLAUDE.md` Session onboarding 2에 따라 사람 몫만 추적하는 자리표시자다. 에이전트가 승인 없이 열 수 있는 다음 일은 둘이다. ADR-0028 초안을 `제안됨`으로 올리는 것과, M14 착수 조건이 승인 전에 열어 두는 (a) `Transport`/`StreamMux` 추상(동작 변경 없는 리팩터)이다. 승인은 사용자가 정한다. 승인되면 이 파일을 M14 실행 계획으로 전면 교체한다.
+M13(측정·배포 기반)은 2026-10-08 닫혔다(`docs/ROADMAP.md` M13 마감 노트). 그 계획은 `docs/history/m13-plan.md`로 옮겼다. 순서상 다음인 M14(TCP/TLS fallback)는 착수 ADR인 ADR-0028이 승인돼야 연다(`docs/ROADMAP.md` M14 착수 조건, §5.1 원칙 2). ADR-0028은 2026-10-09 `제안됨`으로 올랐고 승인 전이므로 이 파일은 M13 마감 공통 절차(`docs/ROADMAP.md` §2)와 `CLAUDE.md` Session onboarding 2에 따라 사람 몫만 추적하는 자리표시자다. 에이전트가 승인 없이 열 수 있는 일은 M14 착수 조건이 승인 전에 열어 두는 (a) `Transport`/`StreamMux` 추상(동작 변경 없는 리팩터)이다. 모양은 ADR-0028 결정 0을 따른다. 승인은 사용자가 정한다. 승인되면 이 파일을 M14 실행 계획으로 전면 교체한다.
 
 ## 0. 열린 사람 몫
 
