@@ -8,9 +8,9 @@ M13(측정·배포 기반)은 2026-10-08 닫혔다(`docs/ROADMAP.md` M13 마감 
 
 ### 0.1 P0에서 열린 채 넘어온 일곱
 
-- [ ] **M10 DoD 1 — 클린 네 플랫폼 설치와 기능 스모크.** 기준은 `docs/campaigns/m10-clean-vm.md`. v0.3.0 Linux 세 회차 PASS(`69a6414`), macOS 둘이 남았다. 소유: 사람.
+- [ ] **M10 DoD 1 — 클린 네 플랫폼 설치와 기능 스모크.** 기준은 `docs/campaigns/m10-clean-vm.md`. v0.3.0 Linux 세 회차 PASS(`69a6414`)에 더해 v0.4.3 Ubuntu 24.04 x86_64 회차 4가 PASS다(2026-10-09, 에이전트). macOS arm64·x86_64 두 회차가 남았다. 둘 다 클린 macOS VM과 Gatekeeper 판정이 필요하다. 소유: 사람.
 - [ ] **M10 DoD 2 — Gatekeeper가 notarized 바이너리를 차단하지 않음.** 서명·공증이 붙은 태그는 `v0.4.0`부터 있다. 회차는 `docs/campaigns/m10-clean-vm.md`. 소유: 사람.
-- [ ] **M10 DoD 3 — musl static 바이너리가 구형 glibc 배포판에서 실행.** `x86_64-unknown-linux-musl` 한정. 소유: 사람.
+- [ ] **M10 DoD 3 — musl static 바이너리가 구형 glibc 배포판에서 실행.** `x86_64-unknown-linux-musl` 한정. 근거 행은 이미 있다. Debian 10(glibc 2.28) 회차 2(v0.3.0)와 회차 5(v0.4.3, 2026-10-09)가 `DoD 3 = PASS`다. 이 DoD는 캠페인 §9 판정과 함께 닫히므로 macOS 두 회차를 기다린다. 두 회차 모두 에이전트가 컨테이너에서 돌렸으니, 캠페인을 닫을 때 사람이 이것을 회차로 셀지 다시 본다(§8 회차 1·2·3 공통 비고). 소유: 사람.
 - [ ] **M7 DoD 1 — SC1 스톱워치 baseline 3회.** 기준은 `docs/campaigns/m7-stopwatch.md`. 소유: 사람.
 - [ ] **M8 DoD 3 — 실기기 mobility 60회 이상.** 기준은 `docs/campaigns/m2-mobility.md`. M18의 착수 조건. 소유: 사람.
 - [ ] **M8 DoD 4 — wire freeze 발효와 독립 검증 계약(SC7).** 소유: 운영자.
@@ -21,7 +21,7 @@ M13(측정·배포 기반)은 2026-10-08 닫혔다(`docs/ROADMAP.md` M13 마감 
 - [ ] **`parse_openssh_key` fuzz 타깃의 누적 72 fuzz-hours.** 기록 자리는 `docs/campaigns/m8-fuzz.md`. 출처 M11. 소유: 사람.
 - [ ] **`p1-supervise-wake` 회차 넷.** 기준은 `docs/campaigns/p1-supervise-wake.md`. 출처 M12. 소유: 사람.
 - [ ] **`p1-setup-stopwatch` 3회.** 기준은 `docs/campaigns/p1-setup-stopwatch.md`(ADR-0024 결정 12). 출처 M12. PASS가 기록되기 전에는 이슈 #3 완료 기준 첫 줄이 충족됐다고 적지 않는다. 소유: 사람.
-- [ ] **`aarch64-unknown-linux-musl` 구형 glibc 판정.** 기준은 `docs/campaigns/p1-aarch64-musl.md`. aarch64 musl 자산은 `v0.4.0`부터 붙는다. 출처 M13. 소유: 사람.
+- [x] **`aarch64-unknown-linux-musl` 구형 glibc 판정.** 기준은 `docs/campaigns/p1-aarch64-musl.md`. 2026-10-09 회차 1이 PASS다. v0.4.3, Debian 10 arm64(glibc 2.28), Dave-MBP16 colima의 네이티브 arm64 컨테이너에서 에이전트가 돌렸다. §6 판정 규칙을 채웠다. 컨테이너를 회차로 센 판단은 m10-clean-vm과 같고 사람이 다시 볼 항목이다. 출처 M13.
 
 ## 1. 마일스톤 밖에서 미룬 유지보수
 
