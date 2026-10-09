@@ -3,7 +3,7 @@
 //! (`docs/design/testing.md` L6, `docs/CLI.md` §10, §6.10). One function
 //! each side calls, so the fixture validator and the CLI surface cannot
 //! independently drift the way two hand-maintained tables would
-//! (`PLAN.md` M7 Step 1 (b)).
+//! (`docs/history/m7-plan.md` Step 1 (b)).
 
 use schemars::{Schema, schema_for};
 

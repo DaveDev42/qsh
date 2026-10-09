@@ -1,10 +1,10 @@
 //! The pure, single-threaded `LOCAL_CONTROL` multiplexer core
-//! (`docs/design/protocol.md` §11-3, `PLAN.md` M3 Step 6).
+//! (`docs/design/protocol.md` §11-3, `docs/history/m3-plan.md` Step 6).
 //!
 //! One `Listen`-side daemon holds exactly one live reverse QUIC connection
 //! per registered host and, on top of it, zero or more `LOCAL_CONTROL`
 //! conduits — one per attached CLI process. Every conduit mints its own
-//! `ControlMessage.request_id` space independently (`PLAN.md` M3 Step 6
+//! `ControlMessage.request_id` space independently (`docs/history/m3-plan.md` Step 6
 //! (a)), so two different CLI processes can legitimately send a request
 //! with the *same* `peer_request_id` at the same time. [`ControlMux`] is
 //! the table that keeps those spaces apart: it hands out a fresh,
@@ -59,7 +59,7 @@
 //!   lets the daemon recognize a `Ping` body before it would otherwise
 //!   call [`ControlMux::map_outbound`], because a `Ping` is answered
 //!   locally with a `Pong` and never forwarded onto the QUIC connection
-//!   (`PLAN.md` M3 Step 6 (a) — "liveness는 연결 소유자의 몫").
+//!   (`docs/history/m3-plan.md` Step 6 (a) — "liveness는 연결 소유자의 몫").
 //! - **Authorization.** This table only ever moves opaque ids and
 //!   [`crate::broker::SessionId`] values around; it never inspects a
 //!   request body, never calls `Authorizer::check`, and is not itself a
@@ -86,7 +86,7 @@ use crate::broker::SessionId;
 pub struct ConduitId(pub u64);
 
 /// Per-conduit in-flight cap. Deliberately the same magnitude as
-/// [`crate::server::MAX_INFLIGHT_REQUESTS_PER_CONN`] (`PLAN.md` M3 Step 6
+/// [`crate::server::MAX_INFLIGHT_REQUESTS_PER_CONN`] (`docs/history/m3-plan.md` Step 6
 /// (a): "conduit당 상한(`MAX_INFLIGHT_REQUESTS_PER_CONN`과 같은 64)") but
 /// kept as an independent constant — the two bound different things (one
 /// QUIC connection's inflight blocking requests vs. one local conduit's
@@ -261,7 +261,7 @@ impl ControlMux {
     /// Every currently-registered conduit, sorted. The daemon walks this
     /// (calling [`Self::unregister_conduit`] on each) when the underlying
     /// reverse QUIC connection dies, so "every conduit of that host ends
-    /// with a clear typed error" (`PLAN.md` M3 Step 6 (a)) has a concrete
+    /// with a clear typed error" (`docs/history/m3-plan.md` Step 6 (a)) has a concrete
     /// set to iterate.
     pub fn conduit_ids(&self) -> Vec<ConduitId> {
         let mut ids: Vec<ConduitId> = self.per_conduit.keys().copied().collect();
@@ -305,7 +305,7 @@ impl ControlMux {
     /// that is not attributed to any conduit at all — the daemon acting on
     /// its own authority rather than relaying on a specific conduit's
     /// behalf. `ControlHub::admin_close_forward`
-    /// (`PLAN.md` M4 Step 5 PR 5b) is the one caller: an admin-authorized
+    /// (`docs/history/m4-plan.md` Step 5 PR 5b) is the one caller: an admin-authorized
     /// `tunnel.close` sends `RemoteForwardClose` without waiting for or
     /// correlating the reply, so unlike [`Self::map_outbound`] this never
     /// touches `inflight`/`per_conduit` — whatever reply eventually comes
@@ -354,7 +354,7 @@ impl ControlMux {
     /// is broadcast to *every* registered conduit of this host regardless
     /// of subscription — `docs/CLI.md` §6.4's "모든 read 소비자에게
     /// broadcast" contract, mirrored here at the conduit granularity
-    /// (`PLAN.md` M3 Step 6 (a)). Every other event kind (and any event
+    /// (`docs/history/m3-plan.md` Step 6 (a)). Every other event kind (and any event
     /// for a `session_id` nobody subscribed to — including one no conduit
     /// on this host has ever heard of) goes only to that session's
     /// subscribers, which is an empty vec when there are none.

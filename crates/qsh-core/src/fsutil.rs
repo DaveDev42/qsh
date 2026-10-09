@@ -1,5 +1,5 @@
 //! Shared filesystem helpers for every private-file writer in this crate
-//! (`PLAN.md` M7 Step 7-2 carryover (iv)): one atomic-write implementation
+//! (`docs/history/m7-plan.md` Step 7-2 carryover (iv)): one atomic-write implementation
 //! instead of the pid+ticket temp-file dance living twice
 //! (`config::write_private_file_io` and `resume`'s durable session-file
 //! writer used to each hand-roll it), and the stale-temp-file sweep that
@@ -144,7 +144,7 @@ pub(crate) fn temp_path_for(path: &Path) -> std::path::PathBuf {
 
 /// Build the exact temp-file name [`write_atomically`] writes to:
 /// `{file_name}.tmp{pid}-{ticket}` — the pattern predates this module
-/// (`PLAN.md` M7 Step 7-1) and stays byte-identical so nothing downstream
+/// (`docs/history/m7-plan.md` Step 7-1) and stays byte-identical so nothing downstream
 /// (the crash-safety tests above, this module's own sweep) has to learn a
 /// second format.
 fn temp_path(dir: &Path, file_name: &std::ffi::OsStr, pid: u32, ticket: u64) -> std::path::PathBuf {

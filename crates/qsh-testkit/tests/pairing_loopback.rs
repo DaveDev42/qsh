@@ -1,4 +1,4 @@
-//! L3 loopback end-to-end: the pairing exchange (ADR-0002, `PLAN.md` M7
+//! L3 loopback end-to-end: the pairing exchange (ADR-0002, `docs/history/m7-plan.md`
 //! Step 4) — `qsh trust invite` → dial with `AcceptAnyForPairing` →
 //! `PairingProof`/`PairingAccepted` → bidirectional pin, all over a real
 //! QUIC connection through `Server::run`'s own accept loop (so these tests

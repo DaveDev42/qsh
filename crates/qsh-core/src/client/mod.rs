@@ -84,7 +84,7 @@ pub const EXEC_OUTPUT_MAX: usize = 64 * 1024 * 1024;
 
 /// Map [`crate::handshake::HelloError`] onto the initiator's pre-existing
 /// [`ClientError`] surface, preserving every message exactly as it read
-/// before the handshake exchange moved into `handshake.rs` (PLAN M3 Step 2
+/// before the handshake exchange moved into `handshake.rs` (docs/history/m3-plan.md Step 2
 /// (d) — zero observable behavior change). `pub` — Step 3's `qsh reverse`
 /// (`crate::reverse::target::run_reverse`) is another `handshake::initiate`
 /// caller and reuses this exact mapping (chained into
@@ -135,7 +135,7 @@ pub fn map_hello_error(err: crate::handshake::HelloError) -> ClientError {
 ///
 /// `conn` is `None` exactly when `Self::link` is
 /// `ControlLink::Local` (the reverse route,
-/// `PLAN.md` M3 Step 6): a CLI process relaying through its resident
+/// `docs/history/m3-plan.md` Step 6): a CLI process relaying through its resident
 /// daemon is not itself a QUIC endpoint on the underlying connection, so
 /// there is no [`Connection`] to hold. Every data stream this `Session`
 /// opens — [`Self::exec`]'s `EXEC_DATA` (issue #5) and
@@ -217,7 +217,7 @@ impl Session {
     /// Build a [`Session`] over a `LOCAL_CONTROL` conduit already past its
     /// `LocalHelloAck` (`crate::localctl::client::open_control`) — the
     /// reverse-route sibling of [`Self::from_control`]
-    /// (`docs/design/protocol.md` §11-3, `PLAN.md` M3 Step 6). There is no
+    /// (`docs/design/protocol.md` §11-3, `docs/history/m3-plan.md` Step 6). There is no
     /// `Hello` exchange on this leg (the daemon already negotiated one
     /// with the peer on the CLI process's behalf), so `capabilities` and
     /// `peer_device_name` come straight from the ack instead —
@@ -776,7 +776,7 @@ impl Session {
     }
 
     /// The data half: redeem `attached`'s ticket on a fresh
-    /// `SESSION_DATA` link (`PLAN.md` M3 Step 7: a QUIC stream on the
+    /// `SESSION_DATA` link (`docs/history/m3-plan.md` Step 7: a QUIC stream on the
     /// forward route, a `LOCAL_STREAM` conduit on the reverse route —
     /// `Self::open_data_link`).
     pub async fn open_attach_stream(
@@ -883,7 +883,7 @@ impl Session {
     /// Answer an inbound [`ControlIn::Request`] with `UNSUPPORTED` —
     /// creates no resource, same as every other refusal at this seam
     /// (`docs/design/protocol.md` §11-3). The forward client never has one
-    /// to answer in practice; `qsh listen` (`PLAN.md` M3 Step 3) is the
+    /// to answer in practice; `qsh listen` (`docs/history/m3-plan.md` Step 3) is the
     /// first real caller.
     pub async fn reject_unsupported(&mut self, request_id: u64) -> Result<(), ClientError> {
         self.link
@@ -990,7 +990,7 @@ pub enum ControlIn {
     ///
     /// Before M3 this variant was unreachable — a plain forward `qsh
     /// <host>`/`qsh exec` peer (the host) never sends a request back to
-    /// its client. `qsh listen` (`PLAN.md` Step 3) is the first real
+    /// its client. `qsh listen` (`docs/history/m3-plan.md` Step 3) is the first real
     /// producer: on a registered reverse connection the *controller* is
     /// the client role, and the peer (the target, now a host) can still
     /// legally attempt a request — `docs/design/protocol.md` §11-3:

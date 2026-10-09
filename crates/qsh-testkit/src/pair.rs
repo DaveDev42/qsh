@@ -1,5 +1,5 @@
 //! [`HostedPair`]: the connected-pair abstraction the mechanical proof of
-//! role-axis independence (`PLAN.md` M3 Step 3 PR 3b, `docs/design/
+//! role-axis independence (`docs/history/m3-plan.md` Step 3 PR 3b, `docs/design/
 //! testing.md` L3) is built on.
 //!
 //! `session_loopback.rs`/`attach_loopback.rs`/`resume_loopback.rs` were

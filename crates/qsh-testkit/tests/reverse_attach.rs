@@ -1,5 +1,5 @@
 //! L3 — `session.attach` driven for real over the `LOCAL_STREAM` splice
-//! (`PLAN.md` M3 Step 7, DoD 1): a real target (in-process broker,
+//! (`docs/history/m3-plan.md` Step 7, DoD 1): a real target (in-process broker,
 //! `qsh_testkit::reverse::ReverseHarness` controller, a real localctl
 //! daemon attached to it) and a real [`Ops`] on the "laptop" side —
 //! `reverse_session_ops.rs`'s own three-actor shape, extended past the
@@ -105,7 +105,7 @@ use tokio::net::UnixStream;
 /// order of magnitude as every other reverse testkit file's own `TIMEOUT`.
 const TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Bound on one scenario closure run through [`blocking`]. `PLAN.md`'s own
+/// Bound on one scenario closure run through [`blocking`]. `docs/history/m3-plan.md`'s own
 /// ceiling for this stage's tests ("each test < 20s"); generous slack
 /// under it since nothing here is a real PTY/shell round trip.
 const DEADLINE: Duration = Duration::from_secs(15);

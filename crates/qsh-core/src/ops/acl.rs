@@ -1,4 +1,4 @@
-//! `acl.check` (`docs/CLI.md` §6.15, `PLAN.md` M5 Step 7) — the local,
+//! `acl.check` (`docs/CLI.md` §6.15, `docs/history/m5-plan.md` Step 7) — the local,
 //! authorization-free operation that lets an operator ask "what would
 //! enforcement decide?" without waiting for a restart (§2.5's "인가 불요"
 //! row: `acl.check` never reaches a remote peer — a remote-visible policy
@@ -42,7 +42,7 @@ impl Operation for AclShowOp {
 }
 
 /// `"pin"`/`"ca"` → [`AuthPath`], the same two-word grammar `acl.toml`'s own
-/// `auth_path` key uses (`PLAN.md` M5 §4.1 #2). Not a `FromStr` impl on
+/// `auth_path` key uses (`docs/history/m5-plan.md` §4.1 #2). Not a `FromStr` impl on
 /// `qsh_transport::AuthPath` itself — this two-armed match has exactly one
 /// caller family (this module's `--auth-path`/`--owner-auth-path`), the
 /// same reason `crate::audit`'s own `auth_path_str` (the render direction)
@@ -89,11 +89,11 @@ impl Ops {
     /// `principal`/`action` outside the typed vocabulary is
     /// `INVALID_ARGUMENT` — what actions exist is discoverable via
     /// `--help`/`qsh schema`, so this rejection is not an information-
-    /// disclosure oracle (`PLAN.md` M5 Step 7 (a)). `resource` omitted
+    /// disclosure oracle (`docs/history/m5-plan.md` Step 7 (a)). `resource` omitted
     /// evaluates an unowned resource; `owner` given folds it (via the
     /// production [`opener_key`], never a second folding implementation)
     /// into an owned [`ResourceRef`] so `scope = "owned"` rows are
-    /// explainable too (`PLAN.md` M5 §4.2's `--owner` decision) — the
+    /// explainable too (`docs/history/m5-plan.md` §4.2's `--owner` decision) — the
     /// folded string's internal `{auth_path:?}` encoding never leaves this
     /// function; only the unfolded `owner`/`owner_auth_path` strings are
     /// echoed back.

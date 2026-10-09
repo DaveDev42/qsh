@@ -36,7 +36,7 @@ pub const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Bound on the wait, after writing a rejection error frame, for the peer to
 /// actually receive it before [`respond`] returns and its caller tears the
-/// connection down (`PLAN.md` M3 Step 3, "거부 error frame의 전달 보장").
+/// connection down (`docs/history/m3-plan.md` Step 3, "거부 error frame의 전달 보장").
 ///
 /// `serve_connection`-style callers used to call `conn.close()` immediately
 /// after `respond()` returned `Err`, which could beat the just-written frame
@@ -52,7 +52,7 @@ pub const REJECTION_DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
 /// `server::serve_connection` and `client::Session::negotiate` each map it
 /// onto their own pre-existing error type (`ConnError`, `ClientError`) so
 /// the observable message is byte-identical to before this type existed
-/// (PLAN M3 Step 2 (d)).
+/// (docs/history/m3-plan.md Step 2 (d)).
 #[derive(Debug, Error)]
 pub enum HelloError {
     /// The peer's `Hello`, or the reply to ours, did not arrive within

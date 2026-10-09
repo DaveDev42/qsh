@@ -107,7 +107,7 @@ fn service_restart_drops_sessions_has_the_stable_snake_case_code() {
     );
 }
 
-/// `PLAN.md` M7 §4.1 #5's "code 안정성 fixture": every [`DiagnosticId`]
+/// `docs/history/m7-plan.md` §4.1 #5's "code 안정성 fixture": every [`DiagnosticId`]
 /// variant, exhaustively hand-listed (a variant added here without a
 /// matching addition to [`EXPECTED_DOCTOR_CODES`], or vice versa, is
 /// exactly the drift this test exists to catch), must map to a unique

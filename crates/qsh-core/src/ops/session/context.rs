@@ -155,7 +155,7 @@ impl ReverseKill {
 
 /// What an attach's [`AttachContext::link`]/[`AttachHandle::link`] rides —
 /// the forward route's swappable [`Link`], or, on the reverse route
-/// (`PLAN.md` M3 Step 7), this attach's own `LOCAL_STREAM` hard-stop,
+/// (`docs/history/m3-plan.md` Step 7), this attach's own `LOCAL_STREAM` hard-stop,
 /// swappable since Step 8 ([`ReverseKill`]'s own doc).
 ///
 /// **Recovery on the reverse leg since Step 8** rides a different seam
@@ -173,7 +173,7 @@ impl ReverseKill {
 /// doc). `drive_attach`'s gate still reads `&ctx.link` to decide *which*
 /// [`Reconnect`] to build, but both branches now reach [`recover_attach`]
 /// when `ctx.recovery.enabled` — a link death that recovery cannot use
-/// (disabled, or `LocalReconnect` exhausted, `PLAN.md` M3 Step 8) still
+/// (disabled, or `LocalReconnect` exhausted, `docs/history/m3-plan.md` Step 8) still
 /// ends the attach with a typed error (`LegEnd::Broken`'s existing path),
 /// never a panic, an `unreachable!`, or a hang.
 #[derive(Clone)]

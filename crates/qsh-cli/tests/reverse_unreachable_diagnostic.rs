@@ -1,4 +1,4 @@
-//! `PLAN.md` M3 Step 9 (c): "도달 불가 controller를 향한 `qsh reverse`가 그
+//! `docs/history/m3-plan.md` Step 9 (c): "도달 불가 controller를 향한 `qsh reverse`가 그
 //! 항목을 stderr에 정확히 한 번 내고 stdout에는 아무것도 쓰지 않음
 //! (`docs/CLI.md` §2.2)." — a real `qsh reverse` child process, not an
 //! in-process call, so this also proves the CLI-level wiring

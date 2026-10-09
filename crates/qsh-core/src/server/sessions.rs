@@ -226,7 +226,7 @@ impl Server {
             rows,
             user: req.user.clone(),
         };
-        // The opener is recorded as this session's owner (`PLAN.md` Step
+        // The opener is recorded as this session's owner (`docs/history/m3-plan.md` Step
         // 3.5 PR②) — `session.write`/`session.resize` bind to it from here
         // on. `opener_key`, not `ctx.principal.to_string()` alone: see its
         // doc comment.
@@ -234,7 +234,7 @@ impl Server {
         let session_id = match self.sessions.open(&spec, &opener) {
             Ok(id) => id,
             // A session-count quota (`[serve].max_sessions`/
-            // `max_sessions_per_principal`, `PLAN.md` M8 Step 3) was
+            // `max_sessions_per_principal`, `docs/history/m8-plan.md` Step 3) was
             // already saturated when `Broker::open` reserved a slot for
             // this opener — reached strictly after the ACL `allow` above
             // was decided and audited, so this can never substitute for a
@@ -454,7 +454,7 @@ impl Server {
 
     /// The non-parking half of `session.write`: ACL `session.control` on
     /// the session id and ownership
-    /// ([`Server::authorize_session_control`], `PLAN.md` Step 3.5 PR②/M5
+    /// ([`Server::authorize_session_control`], `docs/history/m3-plan.md` Step 3.5 PR②/M5
     /// Step 5), then take the writer lease with `no_steal: true` fixed
     /// (below) regardless of what the ACL layer decided. Under the default
     /// `scope = "owned"` (M3's P0, still what `AllowAllPinned` and every
@@ -568,7 +568,7 @@ impl Server {
 
     /// `session.resize`: ACL `session.control` on the session id and the
     /// opener binding, combined
-    /// ([`Server::authorize_session_control`], `PLAN.md` Step 3.5 PR②).
+    /// ([`Server::authorize_session_control`], `docs/history/m3-plan.md` Step 3.5 PR②).
     pub(super) async fn handle_session_resize(
         &self,
         ctx: &ConnCtx,

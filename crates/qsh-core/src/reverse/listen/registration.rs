@@ -118,7 +118,7 @@ impl Listen {
                 // succeeded (`handshake::respond_on`'s `io.send_hello(..)`,
                 // after the callback returns `Ok`). Left alone, that would
                 // leave a `Live` registry entry with no connection behind
-                // it, forever (`PLAN.md` M3 Step 3 review). Roll it back —
+                // it, forever (`docs/history/m3-plan.md` Step 3 review). Roll it back —
                 // undoing exactly what `admit` did, nothing more.
                 if let Some(outcome) = outcome_cell.into_inner().unwrap_or_else(|e| e.into_inner())
                 {
@@ -304,7 +304,7 @@ impl Listen {
     /// whatever it replaced, then drive the connection as CLIENT role until
     /// it dies. Race-free regardless of what order two concurrent
     /// same-fingerprint registrations' calls to this method happen to run
-    /// in — [`ConnTable::publish`]'s doc comment (`PLAN.md` M3 Step 4 (4),
+    /// in — [`ConnTable::publish`]'s doc comment (`docs/history/m3-plan.md` Step 4 (4),
     /// fixing the KNOWN RACE PR 3b left here — see git blame for that
     /// comment's history).
     async fn finish_registration(
@@ -367,7 +367,7 @@ impl Listen {
     /// frame with `UNSUPPORTED`, creating nothing either way.
     ///
     /// **Step 4: the controller's own liveness watch.** This is the small
-    /// probe driver `PLAN.md` M3 Step 4 (b) calls for — reusing
+    /// probe driver `docs/history/m3-plan.md` Step 4 (b) calls for — reusing
     /// [`PathWatchConfig`]'s judgment policy unchanged, watching this
     /// connection through Stage A's role-agnostic `ProbeSource` blanket
     /// impl on [`Connection`]. Shaped exactly like `ops/session.rs`'s
@@ -418,7 +418,7 @@ impl Listen {
         // (`crate::reverse::report_tunnel_traffic`); dropped with this
         // registration's loop, like the watchdog.
         let _tunnel_traffic = crate::reverse::report_tunnel_traffic(&watch, session.connection());
-        // `PLAN.md` M4 Step 5 (a): the only kind of peer-initiated bidi
+        // `docs/history/m4-plan.md` Step 5 (a): the only kind of peer-initiated bidi
         // stream this connection legitimately carries is a `TCP_ACCEPTED`
         // the target opens for a `-R` this hub's own conduits registered
         // (module docs' kind table for every stream `serve_stream`
@@ -745,7 +745,7 @@ impl Listen {
     /// Accept every peer-initiated bidi stream on `conn` for as long as
     /// it lives — on a registered reverse connection that is, exactly,
     /// every `TCP_ACCEPTED` stream the target opens for one of this
-    /// hub's registered `forward_id`s (`PLAN.md` M4 Step 5 (a),
+    /// hub's registered `forward_id`s (`docs/history/m4-plan.md` Step 5 (a),
     /// `docs/design/protocol.md` §11-3's "-R(remote forward)이 역방향 위에서
     /// 도는 경로"). Ends on its own — no cancellation token needed — the
     /// moment `accept_bi` reports the connection is gone; the caller
@@ -811,12 +811,12 @@ impl Listen {
     /// same bound the direct-connect requester leg uses for the identical
     /// read), require `TCP_ACCEPTED` and a shape-valid `forward_id`
     /// ticket (`qsh_proto::wire::valid_forward_id` — checked **before**
-    /// the registry lookup, `PLAN.md` M4 Step 5 (a)), take a
+    /// the registry lookup, `docs/history/m4-plan.md` Step 5 (a)), take a
     /// [`MAX_TUNNEL_STREAMS_PER_HUB`] permit, then hand it to
     /// [`ControlHub::deliver_tcp_accepted`]. Every rejection path resets
     /// the stream and touches nothing else — no permit taken for a
     /// malformed header, no queue entry for an unregistered id, no partial
-    /// pipe ever started (`PLAN.md` M4 Step 5 (a)'s explicit requirement).
+    /// pipe ever started (`docs/history/m4-plan.md` Step 5 (a)'s explicit requirement).
     ///
     /// Never logs the ticket's bytes on a rejection, only its length — the
     /// same `qsh_proto::wire::sanitize_peer_text` discipline

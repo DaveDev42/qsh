@@ -1,4 +1,4 @@
-//! `PLAN.md` M3 Step 9 (c): the `qsh-core`-level half of the "exactly
+//! `docs/history/m3-plan.md` Step 9 (c): the `qsh-core`-level half of the "exactly
 //! once" test — asserts
 //! [`qsh_core::reverse::target::run_reverse_observed`]'s `on_unreachable`
 //! hook actually fires against a real failed dial, in-process, rather than

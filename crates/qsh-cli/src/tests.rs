@@ -132,7 +132,7 @@ fn a_reverse_registration_event_is_one_pure_json_line_at_default_verbosity() {
 /// [`report_long_running_setup_error`] (stderr only) rather than
 /// [`report_error`] (which prints a `qsh.cli/v1` envelope to stdout
 /// whenever `--json`/`--jsonl` was passed — `qsh serve` did exactly
-/// this until the PLAN.md Step 3.5 audit follow-up caught it). This
+/// this until the `docs/history/m3-plan.md` Step 3.5 audit follow-up caught it). This
 /// pins the routing decision itself; `report_long_running_setup_error`'s
 /// own body is `human::print_error` verbatim, already proven
 /// stderr-only.

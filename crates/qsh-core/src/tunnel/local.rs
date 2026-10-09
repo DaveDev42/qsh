@@ -1,5 +1,5 @@
 //! The requester side of a local forward, `-L [bind:]lport:host:hport`
-//! (`PLAN.md` M4 Step 3, `docs/CLI.md` §6.9, `docs/design/protocol.md` §7).
+//! (`docs/history/m4-plan.md` Step 3, `docs/CLI.md` §6.9, `docs/design/protocol.md` §7).
 //!
 //! One [`LocalForward`] owns one local TCP listener. Every connection
 //! accepted on it becomes one tunnel stream to the peer:
@@ -17,7 +17,7 @@
 //! byte pipe or a refusal it must clean up after. It is written to be
 //! boring for exactly that reason.
 //!
-//! **Loopback bind (`PLAN.md` M4 §4.1 #3).** The listener binds loopback,
+//! **Loopback bind (`docs/history/m4-plan.md` §4.1 #3).** The listener binds loopback,
 //! full stop: with no `bind:` prefix it defaults to `127.0.0.1`, and an
 //! explicit non-loopback `bind:` is refused rather than honored. A local
 //! forward's port speaks to the peer with *this* machine's credentials, so
@@ -29,7 +29,7 @@
 //! **Windows.** Nothing here is platform-specific — a TCP listener, a QUIC
 //! stream and a byte copy exist on every target — so unlike M4's host-side
 //! listener/relay legs this module is not `cfg(unix)`-gated and its tests
-//! run on the Windows leg too (`PLAN.md` "전 step 공통 계약 규율" ties the
+//! run on the Windows leg too (`docs/history/m4-plan.md` "전 step 공통 계약 규율" ties the
 //! client-side `-L` bind's platform reach to §4.1 #1's holder decision,
 //! which came out foreground-only, i.e. no daemon and so no unix-only
 //! dependency). Only the reverse `LOCAL_STREAM` carrier below is unix-only,
@@ -83,14 +83,14 @@ pub(crate) enum ForwardCarrier {
     Quic(qsh_transport::Connection),
     /// This machine's resident `qsh listen` daemon socket plus the host
     /// name to relay to (reverse route) — see [`DataLink::Local`].
-    /// `-L over reverse`, `PLAN.md` M4 Step 5 (a): each forwarded
+    /// `-L over reverse`, `docs/history/m4-plan.md` Step 5 (a): each forwarded
     /// connection opens its own `TCP_CONNECT` over a fresh `LOCAL_STREAM`
     /// conduit, and past `ConnectResult{ok:true}` splices raw bytes with
     /// [`crate::tunnel::splice::splice_tcp_uds`] — the reverse carrier's
     /// counterpart to [`ForwardCarrier::Quic`]'s `splice_tcp_quic`.
     ///
     /// Constructing and splicing over this variant is complete as of this
-    /// stage (`PLAN.md` M4 Step 5 (a)); wired up by every route-aware
+    /// stage (`docs/history/m4-plan.md` Step 5 (a)); wired up by every route-aware
     /// `Ops` entry point (`-L`/`-D`, standalone and interactive) since
     /// ADR-0020.
     #[cfg(unix)]
@@ -130,7 +130,7 @@ pub enum LocalForwardError {
     /// The spec's `bind:` is not a loopback address (this module's own doc
     /// on §4.1 #3). [`ErrorCode::InvalidArgument`], not `UNSUPPORTED`: the
     /// request violates a standing constraint on its shape, the same way a
-    /// non-loopback `-R` bind does (`PLAN.md` M4 §4.1 #5).
+    /// non-loopback `-R` bind does (`docs/history/m4-plan.md` §4.1 #5).
     #[error("{0}")]
     Bind(String),
     /// The loopback bind itself failed (port already in use, privileged
@@ -148,7 +148,7 @@ pub enum LocalForwardError {
 
 impl LocalForwardError {
     /// The `docs/CLI.md` §3.3 code this maps to. M4 introduces no new
-    /// [`ErrorCode`] (`PLAN.md` M4 §4.1 #9).
+    /// [`ErrorCode`] (`docs/history/m4-plan.md` §4.1 #9).
     pub fn code(&self) -> ErrorCode {
         match self {
             LocalForwardError::Bind(_) => ErrorCode::InvalidArgument,
@@ -225,7 +225,7 @@ pub(crate) enum ForwardConnError {
 /// Split from [`LocalForward::run`] so the caller learns the real bound
 /// port *before* the accept loop starts — `-L 0:host:port` is how tests
 /// (and `docs/design/testing.md`'s "port 0 bind" CI rule) avoid fixed
-/// ports, and `PLAN.md` M4 Step 3 (c) requires the L5 harness to
+/// ports, and `docs/history/m4-plan.md` Step 3 (c) requires the L5 harness to
 /// parameterize DoD 1's `8080` that way.
 #[derive(Debug)]
 pub(crate) struct LocalForward {
@@ -277,7 +277,7 @@ impl LocalForward {
     ///
     /// Returns only on a **fatal** listener error; otherwise it runs until
     /// the future is dropped, which is how the foreground `-L` holder ends
-    /// it (`PLAN.md` M4 §4.1 #1: the listener lives as long as the
+    /// it (`docs/history/m4-plan.md` §4.1 #1: the listener lives as long as the
     /// interactive session and dies with the process — no daemon, no
     /// `close` RPC). Dropping this future also aborts every in-flight
     /// connection task, because they live in a [`JoinSet`] this future
@@ -401,7 +401,7 @@ impl LocalForward {
 
 /// A bound, running local forward — the public face of `-L`.
 ///
-/// This is the whole tunnel lifecycle model M4 settled on (`PLAN.md` M4
+/// This is the whole tunnel lifecycle model M4 settled on (`docs/history/m4-plan.md`
 /// §4.1 #1, `docs/CLI.md` §6.14): a **foreground holder**, not a daemon
 /// and not a registry entry. There is no `close` RPC and nothing on the
 /// peer to release, because a local forward creates nothing on the peer
@@ -442,7 +442,7 @@ impl LocalForwardHandle {
     }
 
     /// [`Self::start`]'s reverse-route sibling, `-L over reverse`
-    /// (`PLAN.md` M4 Step 5 (a)): each connection accepted on this
+    /// (`docs/history/m4-plan.md` Step 5 (a)): each connection accepted on this
     /// forward's listener relays through `socket_path` (this machine's
     /// resident `qsh listen` daemon's UDS socket) to `host`'s live reverse
     /// registration, instead of dialing a QUIC connection directly. See
@@ -847,7 +847,7 @@ pub(crate) fn check_bind(spec: &ForwardSpec) -> Result<(), LocalForwardError> {
 }
 
 /// Resolve a `[bind:]` to the loopback socket address to bind, refusing
-/// anything that is not loopback (this module's own doc, `PLAN.md` M4 §4.1
+/// anything that is not loopback (this module's own doc, `docs/history/m4-plan.md` §4.1
 /// #3; ADR-0019 decision 9 reuses this verbatim for `-D`).
 ///
 /// Loopback-ness is decided by *address classification*
@@ -929,7 +929,7 @@ const ACCEPT_EXHAUSTION_ERRNOS: &[i32] = &[];
 /// `accept()` and treat them like `EAGAIN` by retrying." Without this set
 /// they fall through to [`AcceptDisposition::Fatal`], so one unreachable
 /// client could take the operator's whole `-L` forward down — exactly the
-/// failure mode the accept loop exists to prevent (`PLAN.md` M4 Step 3:
+/// failure mode the accept loop exists to prevent (`docs/history/m4-plan.md` Step 3:
 /// one failed connection must not abort the accept loop).
 ///
 /// Classified as [`AcceptDisposition::Backoff`] rather than `Retry`: the
@@ -956,14 +956,14 @@ const ACCEPT_PER_CONNECTION_ERRNOS: &[i32] = &[];
 
 /// What one failed `accept()` means for the forward as a whole.
 ///
-/// The distinction the `-L` contract rests on (`PLAN.md` M4 Step 3: one
+/// The distinction the `-L` contract rests on (`docs/history/m4-plan.md` Step 3: one
 /// failed connection must not abort the accept loop): almost every
 /// `accept()` error is about a single pending connection or a momentary
 /// shortage, and treating those as fatal would let any local client take
 /// the operator's whole forward down.
 ///
 /// `pub(crate)`: [`crate::tunnel::remote`]'s host-side accept loop
-/// (`PLAN.md` M4 Step 4) reuses this table verbatim rather than
+/// (`docs/history/m4-plan.md` Step 4) reuses this table verbatim rather than
 /// duplicating it — a `-R` listener owes the exact same liveness
 /// discipline as a `-L` listener, and there is only one place that logic
 /// should be able to drift.

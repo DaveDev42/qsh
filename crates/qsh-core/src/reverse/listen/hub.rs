@@ -4,7 +4,7 @@
 use super::*;
 
 // --------------------------------------------------------------------
-// LOCAL_CONTROL relay hub (`PLAN.md` M3 Step 6, `docs/design/protocol.md`
+// LOCAL_CONTROL relay hub (`docs/history/m3-plan.md` Step 6, `docs/design/protocol.md`
 // §11-3's "다중화 규칙" — `crates/qsh-core/src/localctl/mux.rs`, Stage A1,
 // is the pure state machine this wires up). `#[cfg(unix)]` throughout:
 // localctl has no meaning on Windows (this file's own module docs on
@@ -51,7 +51,7 @@ pub(super) const MAX_INFLIGHT_LONG_POLL_PER_HUB: usize = 16;
 /// target opens back (accepted by [`Listen::run_tunnel_accept_loop`]),
 /// summed across every `LOCAL_STREAM` conduit of every CLI process
 /// attached to this host — modelled directly on
-/// [`MAX_INFLIGHT_LONG_POLL_PER_HUB`]'s own reasoning (`PLAN.md` M4 Step
+/// [`MAX_INFLIGHT_LONG_POLL_PER_HUB`]'s own reasoning (`docs/history/m4-plan.md` Step
 /// 5 (a)): the tunnels of every CLI process on this host share the one
 /// physical reverse connection's `MAX_CONCURRENT_BIDI_STREAMS` budget
 /// (`crates/qsh-transport/src/endpoint.rs`), so a per-conduit cap alone
@@ -424,9 +424,9 @@ struct ForwardRegistration {
     /// Structural facts about this forward — never payload, exactly the
     /// kind of record `Server::authorize_and_bind_remote_forward`'s own
     /// audit line keeps host-side — kept so `LocalTunnelList`
-    /// (`PLAN.md` M4 Step 5 PR 5b) has something to build a
+    /// (`docs/history/m4-plan.md` Step 5 PR 5b) has something to build a
     /// [`qsh_proto::local::LocalTunnel`] from: the Step 4 residual
-    /// `PLAN.md` §4 records ("audit 기록이 '요청한 주소'지 '실제로 bind한
+    /// `docs/history/m4-plan.md` §4 records ("audit 기록이 '요청한 주소'지 '실제로 bind한
     /// 주소'가 아니다... `qsh tunnels`가 bind된 주소를 사용자에게 보여주기
     /// 시작하는 지점이라 같은 정보가 어차피 필요하다") lands here.
     meta: ForwardMeta,
@@ -469,10 +469,10 @@ struct ForwardMeta {
 /// [`ControlHub::list_forwards`]'s per-forward answer — a plain, owned
 /// copy of [`ForwardMeta`] plus the `forward_id` key it was stored under,
 /// so `crate::localctl::daemon`'s `LocalTunnelList` handling
-/// (`PLAN.md` M4 Step 5 PR 5b) has a named type to map into
+/// (`docs/history/m4-plan.md` Step 5 PR 5b) has a named type to map into
 /// [`qsh_proto::local::LocalTunnel`] rather than an anonymous tuple.
 ///
-/// **F3 residual, still open (`PLAN.md` M4 §4).** A forward past this
+/// **F3 residual, still open (`docs/history/m4-plan.md` §4).** A forward past this
 /// hub's per-conduit parked-claim share (`MAX_PARKED_CLAIMS_PER_CONDUIT`,
 /// `docs/design/protocol.md` §11-3's "이 pool은 나뉘어 있다" paragraph) —
 /// the "9th forward" scenario — registers exactly like a healthy one:
@@ -485,7 +485,7 @@ struct ForwardMeta {
 /// own `tracing::warn!` when a claim is refused for lack of a permit. This
 /// type has no room for a claim/liveness field without a wire change
 /// (`qsh/local/v1.proto`'s `LocalTunnel` would need a new field), so
-/// closing this gap for real is left to M5's quota work, per `PLAN.md`'s
+/// closing this gap for real is left to M5's quota work, per `docs/history/m4-plan.md` §4's
 /// own framing — this comment is that "still open, not silently dropped"
 /// record, not a fix.
 #[cfg(unix)]
@@ -656,7 +656,7 @@ pub(super) struct HubState {
     /// `wire::control_message::Body` is.
     long_poll_ids: HashSet<u64>,
     /// `forward_id -> its one [`ForwardRegistration`]` — the
-    /// safety-critical table `PLAN.md` M4 Step 5 (a) names: the *only*
+    /// safety-critical table `docs/history/m4-plan.md` Step 5 (a) names: the *only*
     /// place a `forward_id` is ever attributed to a conduit, populated by
     /// [`ControlHub::deliver_response`] the moment (not later) the
     /// matching `RemoteForwardOpened` comes back, and swept in full by
@@ -698,7 +698,7 @@ pub(super) struct HubState {
     /// token and the request's address fields are both facts about the
     /// same in-flight `RemoteForwardOpen`, read together by the same
     /// registration arm in [`ControlHub::deliver_response`]
-    /// (`PLAN.md` M4 Step 5 PR 5b — [`ForwardRegistration::meta`] is
+    /// (`docs/history/m4-plan.md` Step 5 PR 5b — [`ForwardRegistration::meta`] is
     /// built from the address half, [`ClaimSeat::seat`] from the token
     /// half) — splitting them across two maps would reopen exactly the
     /// divergence hazard that doc warns about, just for a second pair of
@@ -793,7 +793,7 @@ impl HubState {
 /// apart from any I/O behind [`Mutex`] so neither side ever holds it
 /// across an await.
 ///
-/// **Ownership/lock model** (module docs, `PLAN.md` M3 Step 6 deliverable
+/// **Ownership/lock model** (module docs, `docs/history/m3-plan.md` Step 6 deliverable
 /// 1): a conduit task registers itself, then only ever calls
 /// [`Self::send_request`]/[`Self::unregister_conduit`] — synchronous,
 /// non-blocking calls under this hub's own `state` mutex, never the
@@ -978,7 +978,7 @@ impl ControlHub {
     /// Tear down `conduit`: removes everything it owns from the
     /// multiplexer (in-flight requests, event subscriptions —
     /// `ControlMux::unregister_conduit`'s own contract), drops its inbox
-    /// sender, and — `PLAN.md` M4 Step 5 (a)'s misdelivery-prevention
+    /// sender, and — `docs/history/m4-plan.md` Step 5 (a)'s misdelivery-prevention
     /// requirement — removes **every** `forward_id` this conduit owns
     /// from `HubState::forwards` and resets every `TCP_ACCEPTED`
     /// stream still queued for one of them in `HubState::tunnel_queue`
@@ -1090,7 +1090,7 @@ impl ControlHub {
         // be a close racing its own `RemoteForwardOpened`, and the target
         // is the right place to answer for an id nobody here holds.
         //
-        // **F7 residual (`PLAN.md` M4 §4).** `HubSendError::NotOwner` vs.
+        // **F7 residual (`docs/history/m4-plan.md` §4).** `HubSendError::NotOwner` vs.
         // "unknown id, forwarded anyway" is, in principle, a `forward_id`
         // existence oracle for a same-uid caller that has to *guess* a
         // `forward_id` it does not already hold — flagged informational
@@ -1102,7 +1102,7 @@ impl ControlHub {
         // daemon for the list and read every live `forward_id` off it
         // outright, no guessing or `NotOwner`/timing inference required.
         // Nothing here needed to change; this comment is the "reviewed
-        // and still acceptable" record `PLAN.md` asked for.
+        // and still acceptable" record `docs/history/m4-plan.md` asked for.
         if let wire::control_message::Body::RfwdClose(close) = &body
             && state.forwards.contains_key(&close.forward_id)
             && !state.is_forward_owner(&close.forward_id, conduit)
@@ -1233,7 +1233,7 @@ impl ControlHub {
         if let Some(session_id) = subscribe_to {
             state.mux.subscribe(conduit, session_id);
         }
-        // Tunnel forward-id registry bookkeeping (`PLAN.md` M4 Step 5
+        // Tunnel forward-id registry bookkeeping (`docs/history/m4-plan.md` Step 5
         // (a)): registration happens *here*, under the same lock that
         // just resolved `conduit` from `daemon_request_id`, the instant
         // the target's `RemoteForwardOpened` answers the request this
@@ -1349,7 +1349,7 @@ impl ControlHub {
                          token; registering it as permanently unclaimable"
                     );
                 }
-                // Structural snapshot for `LocalTunnelList` (`PLAN.md` M4
+                // Structural snapshot for `LocalTunnelList` (`docs/history/m4-plan.md`
                 // Step 5 PR 5b, `ForwardMeta`'s own doc): `bind` is the
                 // address that actually exists — the request's
                 // `bind_host` (defaulted to loopback, same rule the
@@ -1509,7 +1509,7 @@ impl ControlHub {
     }
 
     // ----------------------------------------------------------------
-    // Tunnel relay (`PLAN.md` M4 Step 5, PR 5a). Both directions the
+    // Tunnel relay (`docs/history/m4-plan.md` Step 5, PR 5a). Both directions the
     // `LOCAL_STREAM` conduit carries (`docs/design/protocol.md` §11-3):
     // `TCP_CONNECT` (`crate::localctl::daemon::LocalctlDaemon::serve_stream`
     // opens the QUIC bidi itself, so it only needs a permit from
@@ -1565,7 +1565,7 @@ impl ControlHub {
 
     /// Only for tests: whether `forward_id` currently resolves to a live
     /// registration, and to which conduit — the adversarial cross-conduit
-    /// coverage this table exists for (`PLAN.md` M4 Step 5 (a)) needs to
+    /// coverage this table exists for (`docs/history/m4-plan.md` Step 5 (a)) needs to
     /// assert on ownership directly, not just on observable splice
     /// behavior.
     #[cfg(test)]
@@ -1592,7 +1592,7 @@ impl ControlHub {
     /// Only for tests: the total number of live `forward_id` registrations
     /// this hub currently holds, across every conduit — the precise
     /// "the registry is empty afterwards, not just that the happy path
-    /// still works" assertion a conduit-death sweep owes (`PLAN.md` M4
+    /// still works" assertion a conduit-death sweep owes (`docs/history/m4-plan.md`
     /// Step 5 (a)): checking each id individually proves only that the
     /// ids a test happened to think of are gone, never that nothing else
     /// was left behind.
@@ -1631,7 +1631,7 @@ impl ControlHub {
 
     /// Every forward this hub currently holds, as one [`ForwardSummary`]
     /// each — `crate::localctl::daemon`'s `LocalTunnelList`
-    /// handling (`PLAN.md` M4 Step 5 PR 5b) maps each into a
+    /// handling (`docs/history/m4-plan.md` Step 5 PR 5b) maps each into a
     /// [`qsh_proto::local::LocalTunnel`], filling `host` itself from the
     /// name this hub is registered under (the same "this table's own key
     /// is the alias" fact `to_local_host` already relies on for
@@ -1652,7 +1652,7 @@ impl ControlHub {
     }
 
     /// Close `forward_id` on this hub's **own authority** — the daemon's
-    /// `LOCAL_ADMIN` `tunnel.close` handling (`PLAN.md` M4 Step 5 PR 5b),
+    /// `LOCAL_ADMIN` `tunnel.close` handling (`docs/history/m4-plan.md` Step 5 PR 5b),
     /// deliberately a *different* path from [`Self::send_request`]'s
     /// `RfwdClose` relay, which is owner-conduit-gated
     /// (`docs/design/protocol.md` §11-3's "close도 소유 conduit만 할 수
@@ -1723,7 +1723,7 @@ impl ControlHub {
     /// own module doc on why the cap must be exact).
     ///
     /// **The one invariant this whole relay exists to hold**
-    /// (`PLAN.md` M4 Step 5 (a)): a `forward_id` this hub does not
+    /// (`docs/history/m4-plan.md` Step 5 (a)): a `forward_id` this hub does not
     /// currently recognize as registered — never opened, already closed,
     /// or its owning conduit already dead — is refused here,
     /// unconditionally, before the stream is queued for anyone. There is
@@ -1900,7 +1900,7 @@ impl ControlHub {
     /// `[A-Za-z0-9_-]{1,64}` by construction here (it matched a live
     /// registration to have been queued at all) and payload is never
     /// parsed, let alone logged, on this path — the same purity
-    /// `PLAN.md` M4 Step 5 (a) states for the whole relay.
+    /// `docs/history/m4-plan.md` Step 5 (a) states for the whole relay.
     ///
     /// **What it does not touch.** Only [`HubState::tunnel_queue`]
     /// entries, and only their expired *front* elements. The
@@ -1944,7 +1944,7 @@ impl ControlHub {
 
     /// Only for tests: how many permits this hub's tunnel-stream pool
     /// currently has free — the direct assertion the expiry path owes
-    /// (`PLAN.md` M4 Step 5 (a)'s hub cap): proving an expired arrival
+    /// (`docs/history/m4-plan.md` Step 5 (a)'s hub cap): proving an expired arrival
     /// released its permit needs the pool's own count, not merely that
     /// some later acquire happened to succeed.
     #[cfg(test)]
@@ -2021,7 +2021,7 @@ impl std::fmt::Debug for TunnelCloseTarget<'_> {
 }
 
 /// Pure decision function behind
-/// `LocalctlDaemon::serve_admin_tunnel_close` (`PLAN.md` M4 Step 5 PR
+/// `LocalctlDaemon::serve_admin_tunnel_close` (`docs/history/m4-plan.md` Step 5 PR
 /// 5b, `qsh tunnel close <id>`) — factored out here, next to
 /// [`ControlHub::list_forwards`]/[`ControlHub::admin_close_forward`], so
 /// it can be unit-tested with this module's own `test_hub`/

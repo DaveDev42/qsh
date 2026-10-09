@@ -1,4 +1,4 @@
-//! L3 loopback end-to-end for the `SESSION_DATA` attach stream (PLAN M2
+//! L3 loopback end-to-end for the `SESSION_DATA` attach stream (docs/history/m2-plan.md
 //! Step 5): `StreamHeader{SESSION_DATA, ticket}` → framed `SessionFrame`s
 //! over a real QUIC connection against a pipe-backed session
 //! (`docs/design/testing.md` §3). Zero PTY code.
@@ -11,7 +11,7 @@
 //! [`ReversePairHarness`] (reverse: the target dials the controller and
 //! *is* the host; the controller drives the attach stream as the
 //! client-role peer) — identical body, identical assertions, in both
-//! directions: the mechanical proof of role-axis independence `PLAN.md` M3
+//! directions: the mechanical proof of role-axis independence `docs/history/m3-plan.md`
 //! Step 3 PR 3b owes.
 
 use std::time::Duration;
@@ -318,7 +318,7 @@ async fn stale_consumer_gets_a_gap_and_the_source_reader_is_never_blocked_revers
     .await;
 }
 
-/// The live-defect regression (PLAN M2 Step 5): a child that stops draining
+/// The live-defect regression (docs/history/m2-plan.md Step 5): a child that stops draining
 /// its PTY/pipe input parks the session's writer task for ever. That must
 /// never park the *connection*: other control traffic keeps flowing, and
 /// when the connection dies the writer lease is still released.
@@ -773,7 +773,7 @@ async fn a_stolen_lease_demotes_the_attach_to_read_only_and_a_steal_back_resumes
 
     // A demoted attach's `Resize` is dropped on the floor too, same as its
     // `Input` — it must not still be able to mutate the live PTY out from
-    // under whoever actually holds the lease (PLAN.md Step 3.5 PR② review:
+    // under whoever actually holds the lease (docs/history/m3-plan.md Step 3.5 PR② review:
     // `SessionFrame::Resize` binds to the writer lease exactly like
     // `write_at`, not just `Input`).
     data.send

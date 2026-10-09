@@ -1,5 +1,5 @@
 //! Doc-prose == code-constant anti-drift gate for `qsh_core::quota`'s
-//! vocabulary (`PLAN.md` M8 Step 3, `docs/adr/0010-resource-quotas.md`) —
+//! vocabulary (`docs/history/m8-plan.md` Step 3, `docs/adr/0010-resource-quotas.md`) —
 //! `crates/qsh-core/tests/admission_docs.rs`'s pattern, restated for the
 //! quota module: before this, nothing cross-checked `docs/CLI.md` §6.12's
 //! quota prose (the category strings, the config key names, their
@@ -11,7 +11,7 @@
 //! Every assertion below reads the real constant/function rather than a
 //! literal, so a rename breaks this test instead of leaving a doc wrong.
 //! `QuotaKind::ALL` is iterated rather than named one variant at a time so
-//! a *new* `QuotaKind` (a future tunnel/connection quota, `PLAN.md` M8
+//! a *new* `QuotaKind` (a future tunnel/connection quota, `docs/history/m8-plan.md`
 //! Step 3's commit-split 3b) is caught by this test the moment it lands
 //! in `ALL`, before anyone remembers to hand-write a new assertion for
 //! it.

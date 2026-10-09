@@ -2,7 +2,7 @@ use super::*;
 use crate::ops::test_support::temp_ops;
 use qsh_proto::{IdentityInitReq, KeyStoreMode, TrustAddReq};
 
-/// M7 Step 7-2 carryover (ii), `PLAN.md`: `exec_run` must dial on
+/// `docs/history/m7-plan.md` Step 7-2 carryover (ii): `exec_run` must dial on
 /// `Ops`' shared [`crate::ops::Ops::connect_runtime`], not build a
 /// fresh `Builder::new_multi_thread()` per call — modeled on
 /// `ops/mod.rs`'s

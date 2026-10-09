@@ -1,6 +1,6 @@
 //! One test, one property: **the resume credential never leaves the two
 //! places it is allowed to be** — the wire, and the client's 0600
-//! `resume.json` (ADR-0007, PLAN M2 Step 7 (d)).
+//! `resume.json` (ADR-0007, docs/history/m2-plan.md Step 7 (d)).
 //!
 //! It lives in its own test binary on purpose. Proving "it is in none of
 //! the logs" means capturing *every* tracing event the host and the client
@@ -183,7 +183,7 @@ async fn a_resume_credential_never_reaches_a_log_line_or_the_json_contract() {
     );
 }
 
-/// **L6, extended to `qsh.local.v1` (`PLAN.md` M3 Step 5 (c)):** the same
+/// **L6, extended to `qsh.local.v1` (`docs/history/m3-plan.md` Step 5 (c)):** the same
 /// "never a place to put a credential" claim as the test above, applied to
 /// the localctl surface Step 5 introduces. `qsh.local.v1`'s message set
 /// (`crates/qsh-proto/proto/qsh/local/v1.proto`, fixed by Step 1) never

@@ -49,7 +49,7 @@ pub fn normalize(mut value: serde_json::Value) -> serde_json::Value {
             serde_json::Value::Object(map) => {
                 // `VersionData.build` (`docs/CLI.md` §6.10) is populated
                 // only when this binary was compiled with
-                // `QSH_BUILD_COMMIT` set — CI injects it (`PLAN.md` M7
+                // `QSH_BUILD_COMMIT` set — CI injects it (`docs/history/m7-plan.md`
                 // Step 1 (a)-추기 ②), a plain local `cargo build` does
                 // not. The checked-in `version.json` fixture was
                 // generated without it, so normalize has to make the
@@ -144,7 +144,7 @@ pub fn normalize(mut value: serde_json::Value) -> serde_json::Value {
                         // Output payload and cumulative offsets depend on
                         // what the host's session source printed (the
                         // headless echo stand-in today, a real shell after
-                        // PLAN M2 Step 4). Fixtures pin the *shape*, so
+                        // docs/history/m2-plan.md Step 4). Fixtures pin the *shape*, so
                         // these are masked the way `duration_ms` is —
                         // append-only fixtures must not need editing when
                         // the backend changes.
@@ -282,7 +282,7 @@ mod tests {
         assert_eq!(normalized["data"]["created"], true);
     }
 
-    /// `PLAN.md` M7 Step 1 (a)-추기 ②: the `build` key must vanish under
+    /// `docs/history/m7-plan.md` Step 1 (a)-추기 ②: the `build` key must vanish under
     /// `normalize`, whether or not it was present — a real binary built
     /// with `QSH_BUILD_COMMIT` set and one built without it must collapse
     /// to the same normalized shape, since the checked-in `version.json`
@@ -306,7 +306,7 @@ mod tests {
 
     /// Session payload and cumulative offsets depend on what the host's
     /// session source printed (the headless echo stand-in today, a real
-    /// shell after PLAN M2 Step 4), so they are masked like `duration_ms`:
+    /// shell after docs/history/m2-plan.md Step 4), so they are masked like `duration_ms`:
     /// append-only fixtures must not need editing when the backend changes.
     #[test]
     fn session_payload_and_offsets_are_masked() {

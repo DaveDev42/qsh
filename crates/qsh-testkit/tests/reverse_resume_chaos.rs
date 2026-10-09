@@ -1,4 +1,4 @@
-//! L4: the reverse-route recovery gate (`PLAN.md` M3 Step 8 (b)/(c)/(d),
+//! L4: the reverse-route recovery gate (`docs/history/m3-plan.md` Step 8 (b)/(c)/(d),
 //! `docs/design/testing.md` L4's "chaos is a PR gate", `docs/ROADMAP.md` M3
 //! DoD 2's "60초 차단" — this file is the PR-always-on half of that DoD;
 //! `crates/qsh-cli/tests/reverse_blackout.rs` is the other half).
@@ -18,7 +18,7 @@
 //! `crates/qsh-cli/src/main.rs` drives it, survives the same sever()
 //! transparently — the client is never told the path died, and the same
 //! `qsh::recovery` telemetry the forward route emits (`RecoveryConfig`,
-//! `PLAN.md` M2 Step 7) comes out the other side with the additive
+//! `docs/history/m2-plan.md` Step 7) comes out the other side with the additive
 //! `registration_wait_ms` field this step adds. This file is the reverse
 //! twin of `crates/qsh-cli/tests/attach_recovery.rs`, whose `Delivered`/
 //! `read_until`/budget-assertion shape it mirrors line for line where nothing
@@ -26,7 +26,7 @@
 //! resume logic", so nor is there new *test* logic where the old test logic
 //! already applies.
 //!
-//! **Why this file never asserts a literal backoff *count*.** `PLAN.md`'s
+//! **Why this file never asserts a literal backoff *count*.** `docs/history/m3-plan.md`'s
 //! own prose for this gate says to sever "long enough to burn detection and
 //! at least two backoffs". Read as a literal assertion on the target's own
 //! `client::reconnect`-style exponential backoff, that is not something
@@ -83,7 +83,7 @@ const DEADLINE: Duration = Duration::from_secs(90);
 /// what makes the registry resolve to it).
 const HOST_ALIAS: &str = "revhost";
 
-/// The contract bound from `docs/design/testing.md` L4 / `PLAN.md` Step 8
+/// The contract bound from `docs/design/testing.md` L4 / `docs/history/m3-plan.md` Step 8
 /// (c): "재등록 시점부터 resume 완료까지 2초". Restated here so a change to
 /// it fails this test rather than passing quietly — same discipline as
 /// `attach_recovery.rs`'s own `REDIAL_DEADLINE_MS`.
@@ -215,7 +215,7 @@ impl tracing::field::Visit for MessageOnly<'_> {
 }
 
 /// One parsed recovery record — the additive `registration_wait_ms`
-/// (`PLAN.md` Step 8 (b), `docs/CLI.md` §6.4) alongside the two fields
+/// (`docs/history/m3-plan.md` Step 8 (b), `docs/CLI.md` §6.4) alongside the two fields
 /// `attach_recovery.rs`'s own `RecoveryRecord` already reads.
 #[derive(Debug, Clone)]
 struct RecoveryRecord {
@@ -392,7 +392,7 @@ fn attach(ops: &Ops, session_ref: &str) -> SessionAttachStream {
 // the gate
 // ---------------------------------------------------------------------------
 
-/// The five pre-defined pass/fail criteria (`PLAN.md` Step 8 (i)):
+/// The five pre-defined pass/fail criteria (`docs/history/m3-plan.md` Step 8 (i)):
 ///
 /// ① the session stays alive through the blackout and output keeps
 ///    accumulating (proved here the same way `attach_recovery.rs` proves

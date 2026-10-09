@@ -1,5 +1,5 @@
 //! POSIX PTY backend for the session broker (`docs/design/architecture.md`
-//! §4, PLAN Step 4).
+//! §4, docs/history/m2-plan.md Step 4).
 //!
 //! `PtySource` is the production [`crate::broker::SessionSource`]: it opens a pty pair
 //! with `portable-pty` 0.9, spawns the child as a **session leader with the

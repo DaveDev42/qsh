@@ -1,4 +1,4 @@
-//! The pairing wire exchange (ADR-0002, `PLAN.md` M7 Step 4,
+//! The pairing wire exchange (ADR-0002, `docs/history/m7-plan.md` Step 4,
 //! `docs/design/protocol.md` §15).
 //!
 //! Two halves, mirroring `crate::handshake`'s initiate/respond split but

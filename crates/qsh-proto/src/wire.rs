@@ -63,7 +63,7 @@ pub const CAP_DIAL_FILTER_V1: &str = "dial-filter.v1";
 /// implemented stay in lockstep — a capability string is a promise about
 /// behaviour, and a peer that advertises resume and then cannot replay is
 /// worse than one that never claimed it. [`CAP_RESUME_V1`] joined the list
-/// with the resume implementation (PLAN M2 Step 7): the host redeems a
+/// with the resume implementation (docs/history/m2-plan.md Step 7): the host redeems a
 /// resume credential, replays from the requested offset (or opens with a
 /// `Gap`), and deduplicates retransmitted input. [`CAP_DIAL_FILTER_V1`]
 /// joined with the host-local dial filter (ADR-0019 decision 3): the
@@ -294,7 +294,7 @@ impl Error {
 /// (`docs/design/protocol.md` §9 — the same "check shape first" rule
 /// applied there to `session_id`). Lives in `qsh-proto`, not `qsh-core`,
 /// specifically so the M3 `host.reverse` ACL choke point can call it
-/// *before* authorization runs (`PLAN.md` M3 Step 1).
+/// *before* authorization runs (`docs/history/m3-plan.md` Step 1).
 pub fn valid_host_name(name: &str) -> bool {
     (1..=64).contains(&name.len())
         && name
@@ -309,7 +309,7 @@ pub fn valid_host_name(name: &str) -> bool {
 /// an opaque host-issued token, not a display name).
 ///
 /// Same "check shape before it becomes an ACL resource or audit field"
-/// discipline as [`valid_host_name`] (this fn's own doc, `PLAN.md` M4 §4.1):
+/// discipline as [`valid_host_name`] (this fn's own doc, `docs/history/m4-plan.md` §4.1):
 /// a `forward_id` a peer sends back is never trusted until it passes this
 /// check, so an oversized or oddly-charactered string a confused or hostile
 /// peer echoes back can never inflate an audit record.
@@ -470,7 +470,7 @@ pub enum ForwardDirection {
 /// A parsed `-L`/`-R` forward spec (`docs/CLI.md` §6.9, M4) — the result of
 /// [`parse_forward_spec`]. Shape-only: this type and its parser carry no
 /// policy (e.g. "remote binds must be loopback"); that is host-side ACL
-/// policy enforced later, not here (this struct's fields' own docs, `PLAN.md`
+/// policy enforced later, not here (this struct's fields' own docs, `docs/history/m4-plan.md`
 /// M4 §4.1 #5).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ForwardSpec {
@@ -601,7 +601,7 @@ fn parse_forward_port(raw: &str) -> Option<u16> {
 /// policy: a non-loopback `bind` parses `Ok` exactly like a loopback one,
 /// because whether a non-loopback `-R` bind is *allowed* is host-side ACL
 /// policy decided in a later milestone step, not something this parser can
-/// or should know (`PLAN.md` M4 §4.1 #5). The returned [`ForwardSpec`]'s
+/// or should know (`docs/history/m4-plan.md` §4.1 #5). The returned [`ForwardSpec`]'s
 /// `direction` is always [`ForwardDirection::Local`] — set it explicitly
 /// after parsing when the caller is handling `-R` (see that field's doc).
 ///

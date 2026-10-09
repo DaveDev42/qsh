@@ -1,5 +1,5 @@
 //! `trust remove`/`trust add` live semantics against a **running** `qsh
-//! serve` daemon, driven through the product path (`PLAN.md` M7 Step 2,
+//! serve` daemon, driven through the product path (`docs/history/m7-plan.md` Step 2,
 //! `docs/ROADMAP.md` M7 DoD 4).
 //!
 //! `SharedTrustStore` (`crates/qsh-core/src/trust/mod.rs`) re-reads
@@ -9,7 +9,7 @@
 //! handshake (`crates/qsh-transport/src/tls.rs`) — so a running daemon
 //! picks up a `trust remove`/`trust add` without a restart, *for new
 //! handshakes*. This file is the real-QUIC proof of that (E1,
-//! `PLAN.md` M7 Step 2 §A) plus the two behaviors decision A commits to:
+//! `docs/history/m7-plan.md` Step 2 §A) plus the two behaviors decision A commits to:
 //!
 //! - an **established** connection survives a `trust remove` of its own
 //!   principal — the same PTY-backed attach keeps writing and reading;
@@ -188,7 +188,7 @@ fn trust_remove_on_a_running_daemon_rejects_the_next_handshake_without_a_restart
     );
 }
 
-/// **`PLAN.md` M7 Step 2 P2-2, real-QUIC regression.** Same scenario as
+/// **`docs/history/m7-plan.md` Step 2 P2-2, real-QUIC regression.** Same scenario as
 /// [`trust_remove_on_a_running_daemon_rejects_the_next_handshake_without_a_restart`],
 /// except the host's `trust.toml` is pinned back to its pre-removal mtime
 /// right after the CLI rewrites it — simulating a coarse-granularity

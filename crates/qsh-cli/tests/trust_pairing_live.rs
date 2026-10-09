@@ -1,4 +1,4 @@
-//! `trust invite` / `trust accept` live pairing (ADR-0002, `PLAN.md` M7 Step
+//! `trust invite` / `trust accept` live pairing (ADR-0002, `docs/history/m7-plan.md` Step
 //! 4), driven through the product path against a **running** `qsh serve`
 //! daemon — the CLI-facing counterpart to the lower-level wire-protocol
 //! coverage in `qsh-testkit/tests/pairing_loopback.rs`.
@@ -417,7 +417,7 @@ fn trust_add_with_an_explicit_fingerprint_is_unaffected_by_pairing() {
     assert_eq!(peers[0]["fingerprint"], host_fp, "{listed}");
 }
 
-/// `PLAN.md` M9 Step 2, ADR-0013 decision 8: a code piped on stdin
+/// `docs/history/m9-plan.md` Step 2, ADR-0013 decision 8: a code piped on stdin
 /// redeems a real invite, same as the positional-argument path.
 #[test]
 fn trust_accept_reads_the_code_from_stdin_in_json_mode() {
@@ -438,7 +438,7 @@ fn trust_accept_reads_the_code_from_stdin_in_json_mode() {
     );
 }
 
-/// Trim regression 1 (`PLAN.md` M9 Step 2 (c)): a trailing newline, as a
+/// Trim regression 1 (`docs/history/m9-plan.md` Step 2 (c)): a trailing newline, as a
 /// real `printf '%s\n' "$code" | qsh trust accept … --code-stdin` pipeline
 /// would produce, must not be rejected.
 #[test]
@@ -455,7 +455,7 @@ fn trust_accept_from_stdin_tolerates_a_trailing_newline() {
     assert_eq!(envelope["data"]["created"], true, "{envelope}");
 }
 
-/// Trim regression 2 (`PLAN.md` M9 Step 2 (c)): surrounding spaces must
+/// Trim regression 2 (`docs/history/m9-plan.md` Step 2 (c)): surrounding spaces must
 /// not be rejected either.
 #[test]
 fn trust_accept_from_stdin_tolerates_surrounding_whitespace() {
@@ -506,7 +506,7 @@ fn trust_accept_with_no_code_in_json_mode_is_invalid_argument() {
     );
 }
 
-/// `PLAN.md` M9 Step 2 (d): `INVITE_CODE_STDIN_MAX` really bounds the
+/// `docs/history/m9-plan.md` Step 2 (d): `INVITE_CODE_STDIN_MAX` really bounds the
 /// read — a valid code preceded by more than the cap's worth of padding
 /// is truncated away entirely (nothing but padding survives into the
 /// buffer), not merely trimmed. Raising the constant, or reading stdin

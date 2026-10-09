@@ -99,7 +99,7 @@ fn classify_probe_failure(err: DialError, address: &str) -> OpError {
         )
         .with_retryable(false)
         .with_details(serde_json::json!({"category": "remote_rejected"})),
-        // `PLAN.md` M8 Step 2 — same `ErrorCode::ConnectionFailed` as
+        // `docs/history/m8-plan.md` Step 2 — same `ErrorCode::ConnectionFailed` as
         // `DialError::Failed` below, `qsh_transport::DialError::Refused`'s
         // own human message.
         DialError::Refused => {
@@ -146,7 +146,7 @@ pub(super) fn classify_pairing_dial_failure(err: DialError, address: &str) -> Op
             format!("{address} rejected this device's certificate"),
         )
         .with_retryable(false),
-        // `PLAN.md` M8 Step 2 — same as `classify_probe_failure`'s arm.
+        // `docs/history/m8-plan.md` Step 2 — same as `classify_probe_failure`'s arm.
         DialError::Refused => {
             OpError::new(ErrorCode::ConnectionFailed, DialError::Refused.to_string())
         }

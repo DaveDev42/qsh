@@ -463,7 +463,7 @@ fn format_trust_pin_line(verb: &str, peer: &TrustPeer) -> String {
 }
 
 /// `source`/`user` are `None` unless `hosts.toml` supplied them
-/// (`PLAN.md` M7 Step 3) — rendered as `-`, the same placeholder idiom
+/// (`docs/history/m7-plan.md` Step 3) — rendered as `-`, the same placeholder idiom
 /// used across `qsh`'s human tables for "not set", rather than an empty
 /// cell that would be indistinguishable from a column-width bug.
 fn host_field_or_dash(value: &Option<String>) -> &str {

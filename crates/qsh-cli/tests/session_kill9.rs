@@ -1,6 +1,6 @@
 //! **SC4/SC5** — the client dies the way clients actually die
 //! (`docs/PRD.md` §15 SC4·SC5, `docs/ROADMAP.md` M2 수용 기준 3,
-//! `PLAN.md` Step 8 (a)).
+//! `docs/history/m2-plan.md` Step 8 (a)).
 //!
 //! Every other resume test in the tree tears down a *path*: the client
 //! process stays alive and its driver notices. This one kills the client
@@ -11,7 +11,7 @@
 //!
 //! It therefore has to be a **real OS process**, which is why this file
 //! lives in `qsh-cli/tests/` rather than in `qsh-testkit/tests/` where
-//! `PLAN.md` Step 8 (b) first put it: `CARGO_BIN_EXE_qsh` — the only way
+//! `docs/history/m2-plan.md` Step 8 (b) first put it: `CARGO_BIN_EXE_qsh` — the only way
 //! to get a `qsh` binary to kill — exists only in the tests of the crate
 //! that builds it. `attach_recovery.rs` is here for the same reason.
 //!
@@ -60,7 +60,7 @@
 //! ## Which mechanism proves which half
 //!
 //! `SessionAttachReq` carries no resume offset — a user-initiated
-//! reattach deliberately replays the whole retained ring (`PLAN.md` Step 6
+//! reattach deliberately replays the whole retained ring (`docs/history/m2-plan.md` Step 6
 //! invariant, asserted here too). The offset-resume half of SC4 is
 //! therefore proven on the `session.read` cursor-pull (`docs/CLI.md`
 //! §6.4), which is the primitive a caller with an `L` actually has. The
@@ -186,7 +186,7 @@ const ALIVE_MARKER: &str = "QSHALIVE";
 /// The deterministic producer.
 ///
 /// Numbered markers make any byte offset in the stream nameable; the
-/// `yes` bursts between them are the high-throughput part `PLAN.md` Step 8
+/// `yes` bursts between them are the high-throughput part `docs/history/m2-plan.md` Step 8
 /// asks for. The `read` between the pid line and the loop is the gate that
 /// turns "the kill was mid-stream" from a race into a fact: no burst
 /// exists until a live client types [`GO_TOKEN`]. It ends in `exec cat`
@@ -798,7 +798,7 @@ fn a_sigkilled_client_loses_no_bytes_and_the_session_survives_it() {
     //
     // It replays from `0`, and that is the contract, not a shortcut:
     // `SessionAttachReq` carries no offset because a user-initiated
-    // reattach hands the terminal its scrollback back (`PLAN.md` Step 6
+    // reattach hands the terminal its scrollback back (`docs/history/m2-plan.md` Step 6
     // invariant; `Ops::session_attach` sends `last_output_seq: 0`). The
     // wire seam that resumes at a real `L` is the driver's reconnect path,
     // and `attach_recovery.rs` is where it is byte-checked — a process

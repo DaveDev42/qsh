@@ -313,7 +313,7 @@ async fn unpinned_principal_is_denied_under_interim_policy() {
 }
 
 /// The subject here is the *per-connection ticket budget*, which
-/// `PLAN.md` M8 Step 3 left untouched. It needs an exec quota well
+/// `docs/history/m8-plan.md` Step 3 left untouched. It needs an exec quota well
 /// clear of that budget to stay observable, because the two now share
 /// a numeric boundary: `MAX_PENDING_TICKETS_PER_CONN` and the default
 /// `[serve].max_exec_per_principal` are both 32, and an unredeemed
@@ -387,7 +387,7 @@ async fn exec_without_capability_is_unsupported_and_not_audited() {
     assert_eq!(rig.server.pending_tickets(), 0);
 }
 
-// ---- exec.run concurrency quota (`PLAN.md` M8 Step 3, `docs/adr/
+// ---- exec.run concurrency quota (`docs/history/m8-plan.md` Step 3, `docs/adr/
 // 0010-resource-quotas.md`, verdict arbitration item 5) --------------
 
 #[tokio::test]
@@ -1369,12 +1369,12 @@ async fn quota_rejection_still_leaves_the_acl_allow_audit_line() {
     );
 }
 
-/// `PLAN.md` M5 Step 3(c) "disk-full fail-closed": an
+/// `docs/history/m5-plan.md` Step 3(c) "disk-full fail-closed": an
 /// `AllowAllPinned`-eligible peer's `session.open` is denied — and no
 /// session is created — while the audit sink cannot durably record the
 /// allow, then succeeds once the sink recovers. Exercises
 /// `Server::authorize`, the first of the four fail-closed choke points
-/// (`PLAN.md` §1's "four authorization points").
+/// (the "four authorization points" of `docs/history/m3-plan.md`).
 #[tokio::test]
 async fn session_open_fails_closed_when_the_audit_sink_cannot_record_an_allow() {
     let clock = TestClock::new();
@@ -1861,7 +1861,7 @@ async fn denied_session_ops_create_nothing_and_do_not_disclose_existence() {
     let actions: std::collections::BTreeSet<&str> =
         recs.iter().map(|r| r.action.as_str()).collect();
     // The distinct actions among the 7 session ops, sourced from
-    // `OP_REGISTRY` (`PLAN.md` M5 Step 8) rather than named a second
+    // `OP_REGISTRY` (`docs/history/m5-plan.md` Step 8) rather than named a second
     // time as `Action` literals — a dedup set, since `session.write`/
     // `resize`/`close` all resolve to `Action::SessionControl`.
     let expected_actions: std::collections::BTreeSet<&str> = [
@@ -1896,7 +1896,7 @@ async fn every_session_op_passes_the_choke_point_with_the_mapped_action() {
             .unwrap();
         assert_eq!(error_code(&reply), None, "{name}: {reply:?}");
         // `Action`s sourced from `OP_REGISTRY` by dotted op name
-        // (`PLAN.md` M5 Step 8), not named a second time as literals —
+        // (`docs/history/m5-plan.md` Step 8), not named a second time as literals —
         // `resource` still depends on which sentinel/id shape each op
         // uses (`OpSpec::resource_kind` documents the shape; the
         // literal string is still the request's own, same as before).
@@ -2304,7 +2304,7 @@ async fn write_read_resize_get_list_close_roundtrip() {
     }
 }
 
-/// `PLAN.md` Step 3.5 PR②: `session.write` binds to the session's
+/// `docs/history/m3-plan.md` Step 3.5 PR②: `session.write` binds to the session's
 /// opener, so a foreign principal is refused by ownership before the
 /// lease is ever consulted — `SESSION_CONFLICT` from a genuinely
 /// foreign principal is no longer reachable through `session.write` at
@@ -3228,7 +3228,7 @@ fn replay_events_map_to_wire_and_oversize_output_is_split() {
 }
 
 // ------------------------------------------------------------------
-// ControlPinger (M3 Step 4 Stage A) — `PLAN.md` "L2 유닛 테스트" list:
+// ControlPinger (M3 Step 4 Stage A) — `docs/history/m3-plan.md` Step 4 "L2 유닛 테스트" list:
 // request_id monotonic per connection, timeout judgment on a paused
 // clock, unsolicited Pong dropped, correlation across interleaved
 // inbound traffic. No `sleep()` anywhere below.
@@ -3549,7 +3549,7 @@ async fn unanswered_probes_are_judged_dead_on_a_paused_clock() {
 
 // ---------------------------------------------------------------
 // `forward.local` — the inline ACL on a peer-opened `TCP_CONNECT`
-// stream (`PLAN.md` M4 Step 3, `docs/design/protocol.md` §7,
+// stream (`docs/history/m4-plan.md` Step 3, `docs/design/protocol.md` §7,
 // `docs/design/testing.md` L2).
 // ---------------------------------------------------------------
 
@@ -5430,7 +5430,7 @@ async fn rfwd_close_of_a_purged_forward_id_is_no_such_forward_id() {
     drop(client_conn);
 }
 
-/// The connection-bound lifetime half of `PLAN.md` M4 Step 4 (b): a
+/// The connection-bound lifetime half of `docs/history/m4-plan.md` Step 4 (b): a
 /// dead connection's remote forwards are aborted and forgotten by
 /// `purge_connection`, the same way its tickets and writer leases are
 /// — nothing keyed to a `conn_id` outlives that connection.

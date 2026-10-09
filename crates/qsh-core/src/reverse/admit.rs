@@ -1,7 +1,7 @@
 //! The `host.reverse` authorization choke point (`docs/design/protocol.md`
-//! §11-2, `PLAN.md` Step 3, PR 3a) — the "인가" half of Step 3's file list
+//! §11-2, `docs/history/m3-plan.md` Step 3, PR 3a) — the "인가" half of Step 3's file list
 //! that [`super::registry::Registry`] deliberately does not hold, so that
-//! file stays transport-free ahead of the `PLAN.md` Step 5 arch-lint (see
+//! file stays transport-free ahead of the `docs/history/m3-plan.md` Step 5 arch-lint (see
 //! `registry`'s module docs).
 //!
 //! [`admit`] is the whole authorization/insert pipeline as one pure-logic
@@ -433,7 +433,7 @@ mod tests {
 
     // ---- DenyAll: zero entries, zero connections, one audit deny line ----
     //
-    // This test only discharges the registry-entry third of PLAN.md Step
+    // This test only discharges the registry-entry third of `docs/history/m3-plan.md` Step
     // 3's "DenyAll 하에서 registry entry·연결·ticket이 하나도 생성되지 않음"
     // row (`f.registry.snapshot().is_empty()` below). The connection and
     // ticket thirds are structurally out of PR 3a's reach — `admit` never
@@ -466,8 +466,8 @@ mod tests {
         );
     }
 
-    // ---- disk-full fail-closed: `PLAN.md` M5 Step 3(c), the fourth of the
-    // "four authorization points" (`PLAN.md` §1) alongside `Server::
+    // ---- disk-full fail-closed: `docs/history/m5-plan.md` Step 3(c), the fourth of the
+    // "four authorization points" (named in `docs/history/m3-plan.md`) alongside `Server::
     // authorize`/`authorize_stream`/`authorize_session_control`. ----
 
     #[test]

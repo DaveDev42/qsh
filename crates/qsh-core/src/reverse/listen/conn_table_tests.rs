@@ -71,7 +71,7 @@ fn admit_order_continuation_order_ends_with_the_newest_generation_open() {
 
 #[test]
 fn reversed_continuation_order_still_ends_with_the_newest_generation_open() {
-    // This is the exact scenario `PLAN.md` M3 Step 4 (4) names: the
+    // This is the exact scenario `docs/history/m3-plan.md` Step 4 (4) names: the
     // higher-generation registration's `finish_registration` reaches
     // `publish` first. The old `(name, generation)`-keyed table leaked
     // generation 1's connection here; this table must not.

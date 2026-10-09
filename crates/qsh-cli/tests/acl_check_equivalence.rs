@@ -1,4 +1,4 @@
-//! `PLAN.md` M5 Step 7 — DoD 1's table-based equivalence proof.
+//! `docs/history/m5-plan.md` Step 7 — DoD 1's table-based equivalence proof.
 //!
 //! `Ops::acl_check` (`crates/qsh-core/src/ops/acl.rs`) and
 //! `Server::authorize`/`authorize_owned` (`crates/qsh-core/src/server/
@@ -20,12 +20,12 @@
 //! still call the same evaluator while the *audit write* diverged, which
 //! would make SC6 (`docs/design/testing.md`) false even with DoD 1 green.
 //!
-//! Required row kinds (`PLAN.md` M5 Step 7 (c)): allow / deny / wildcard
+//! Required row kinds (`docs/history/m5-plan.md` Step 7 (c)): allow / deny / wildcard
 //! match / always-denied action / `auth_path` mismatch / `scope = "owned"`
 //! owner and non-owner / policy file absent. The owner/non-owner pair is
 //! two separate `#[test]` rows below, for eight rows total — plus a ninth,
-//! `policy file invalid` (adversarial addition, not itself PLAN.md-
-//! required): `PolicySource::load` returns a distinct `PolicyLoad::Invalid`
+//! `policy file invalid` (adversarial addition, not itself
+//! plan-required): `PolicySource::load` returns a distinct `PolicyLoad::Invalid`
 //! for a present-but-corrupt `acl.toml`, and only `Missing` had a row
 //! before this, leaving that loader axis half-closed.
 //!
@@ -56,7 +56,7 @@ use qsh_core::acl::{
     PolicySource, ResourceRef,
 };
 use qsh_core::{Paths, Principal};
-// F5 (`PLAN.md` M5 Step 7 adversarial ⑥): `Principal` comes from `qsh-core`
+// F5 (`docs/history/m5-plan.md` Step 7 adversarial ⑥): `Principal` comes from `qsh-core`
 // (re-exported at `qsh-core/src/lib.rs`), not `qsh_transport` — this is
 // a `qsh-core` test suite, and `qsh-core` re-exports the type its own
 // public `Ops`/`acl` surface already traffics in. `qsh_transport` stays
@@ -65,7 +65,7 @@ use qsh_transport::AuthPath;
 use serde_json::Value;
 
 /// Write `contents` to `host`'s `acl.toml` and pin its permissions to
-/// owner-only (F7, `PLAN.md` M5 Step 7 adversarial ⑦) — one helper instead
+/// owner-only (F7, `docs/history/m5-plan.md` Step 7 adversarial ⑦) — one helper instead
 /// of repeating the chmod at every row's own write. `fs::write` inherits
 /// the process umask (0o664 under the common `022`/`002` umask), and a
 /// group-writable planted `acl.toml` would spuriously trip the group-/
@@ -217,7 +217,7 @@ fn row_allow_exact_match() {
     assert_eq!(data["decision"], record["decision"], "{data} vs {record}");
     assert_eq!(data["rule"], record["rule"], "{data} vs {record}");
 
-    // F1b (`PLAN.md` M5 Step 7 adversarial ①): the documented default for
+    // F1b (`docs/history/m5-plan.md` Step 7 adversarial ①): the documented default for
     // an omitted `--auth-path` is `"pin"` (`docs/CLI.md` §6.15) — before
     // this assertion, that default fold (`ops/acl.rs`'s `req.auth_path`
     // match) was mutation-unguarded: flipping its `None => AuthPath::Pin`
@@ -391,7 +391,7 @@ fn row_auth_path_mismatch() {
         .find(|r| r["action"] == "exec.run" && r["decision"] == "deny")
         .expect("exec.run deny record");
     assert_eq!(record["auth_path"], "pin", "{record}");
-    // F3 (`PLAN.md` M5 Step 7 adversarial ②): every other deny row in this
+    // F3 (`docs/history/m5-plan.md` Step 7 adversarial ②): every other deny row in this
     // file asserts `rule` on both compared legs; this audit leg was the one
     // gap where only the `acl check` leg was checked.
     assert!(record["rule"].is_null(), "{record}");
@@ -515,7 +515,7 @@ fn row_scope_owned_owner_is_allowed() {
     assert_eq!(data["decision"], record["decision"], "{data} vs {record}");
     assert_eq!(data["rule"], record["rule"], "{data} vs {record}");
 
-    // F1a (`PLAN.md` M5 Step 7 adversarial ①): the documented default for
+    // F1a (`docs/history/m5-plan.md` Step 7 adversarial ①): the documented default for
     // an omitted `--owner-auth-path` is `"pin"` (`docs/CLI.md` §6.15) — a
     // CA leaf must not silently inherit a pinned owner's identity just
     // because the caller left the flag off. Before this assertion, that
@@ -625,7 +625,7 @@ fn row_policy_file_absent() {
     assert_eq!(data["decision"], record["decision"], "{data} vs {record}");
 }
 
-/// Row (adversarial addition, `PLAN.md` M5 Step 7 adversarial ③): a
+/// Row (adversarial addition, `docs/history/m5-plan.md` Step 7 adversarial ③): a
 /// *present but corrupt* `acl.toml` — `PolicySource::load` returns
 /// `PolicyLoad::Invalid`, a distinct loader outcome from
 /// [`row_policy_file_absent`]'s `PolicyLoad::Missing`, but both fold into
@@ -679,7 +679,7 @@ fn row_policy_file_invalid() {
     assert_eq!(data["decision"], record["decision"], "{data} vs {record}");
 }
 
-/// Owed test (`PLAN.md` M5 Step 7 (c)): `qsh acl check` never mutates
+/// Owed test (`docs/history/m5-plan.md` Step 7 (c)): `qsh acl check` never mutates
 /// `acl.toml` — same content, same mtime, before and after a run.
 #[test]
 fn acl_check_does_not_modify_acl_toml() {
@@ -718,7 +718,7 @@ fn acl_check_does_not_modify_acl_toml() {
     );
 }
 
-/// Owed test (`PLAN.md` M5 Step 7 (c)): `acl.check` never reaches the wire
+/// Owed test (`docs/history/m5-plan.md` Step 7 (c)): `acl.check` never reaches the wire
 /// — it is a local operation only (`docs/CLI.md` §2.5's "인가 불요" row,
 /// ROADMAP M5 감사 개정 ③: a remote-visible policy query would itself be a
 /// capability-enumeration oracle).

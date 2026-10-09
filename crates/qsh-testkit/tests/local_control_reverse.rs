@@ -1,4 +1,4 @@
-//! L3 — the `LOCAL_CONTROL` relay end to end (`PLAN.md` M3 Step 6,
+//! L3 — the `LOCAL_CONTROL` relay end to end (`docs/history/m3-plan.md` Step 6,
 //! `docs/design/protocol.md` §11-3's "다중화 규칙"): a real
 //! [`qsh_testkit::reverse::ReverseHarness`] target, a real
 //! `crate::localctl::daemon::LocalctlDaemon` bound via

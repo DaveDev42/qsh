@@ -1,5 +1,5 @@
 //! **L5 real-process** — `qsh serve`'s SIGTERM graceful drain (`docs/CLI.md`
-//! §6.12 "(M2, ADR-0003)", `PLAN.md` Step 3.5 PR ①).
+//! §6.12 "(M2, ADR-0003)", `docs/history/m3-plan.md` Step 3.5 PR ①).
 //!
 //! The audit this step repays (`docs/ROADMAP.md` M2 사후 감사, 2026-08-21)
 //! found the opposite of this file's name: `qsh serve` killed by `SIGTERM`
@@ -149,7 +149,7 @@ fn read_closed_reason(stream: &mut SessionAttachStream) -> String {
     }
 }
 
-/// **PLAN.md Step 3.5 PR ①.** `SIGTERM` a real `qsh serve` with a live PTY
+/// **docs/history/m3-plan.md Step 3.5 PR ①.** `SIGTERM` a real `qsh serve` with a live PTY
 /// child and an attached consumer: the process exits `0`, the consumer sees
 /// `session.closed{reason:"closed"}`, and — the audit's own check — nothing
 /// answers for the child afterwards.

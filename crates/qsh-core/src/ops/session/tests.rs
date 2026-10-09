@@ -181,7 +181,7 @@ fn the_migration_probe_scales_with_the_path() {
 /// `Connected::peer_fingerprint` on the reverse leg must be exactly
 /// the value that leg's own `LOCAL_CONTROL` handshake reported —
 /// never re-derived from a QUIC connection this process does not
-/// itself hold (ADR-0007's presentation condition, `PLAN.md` M3
+/// itself hold (ADR-0007's presentation condition, `docs/history/m3-plan.md`
 /// Step 6). `dial_reverse` is what actually produces that value from
 /// a live `LocalHelloAck` (exercised end-to-end by
 /// `crate::client::link`'s and `crate::localctl::client`'s own
@@ -529,7 +529,7 @@ async fn reverse_leg_link_death_with_recovery_exhausted_ends_the_attach_with_a_t
     daemon.abort();
 }
 
-// ---- `Ops::resolve_user_hint` (`PLAN.md` M7 Step 3, `docs/CLI.md` §7)
+// ---- `Ops::resolve_user_hint` (`docs/history/m7-plan.md` Step 3, `docs/CLI.md` §7)
 // ----
 
 fn user_hint_ops(dir: &std::path::Path) -> Ops {

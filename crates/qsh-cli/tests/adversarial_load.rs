@@ -1,4 +1,4 @@
-//! T2 — the adversarial load harness (`PLAN.md` M8 Step 4c,
+//! T2 — the adversarial load harness (`docs/history/m8-plan.md` Step 4c,
 //! `docs/design/testing.md` L9/L10, `docs/ROADMAP.md` M8 DoD 5).
 //!
 //! Unlike the rest of `qsh-cli`'s integration suite, this file measures a
@@ -1824,7 +1824,7 @@ mod linux_only {
     // create_the_audit_log`) is the "fresh writer restart" case this
     // comment names — it does reach `degraded` at the e2e level.
 
-    /// Scenario 12c, second construction (`PLAN.md` M8 Step 5 (d)). The first
+    /// Scenario 12c, second construction (`docs/history/m8-plan.md` Step 5 (d)). The first
     /// construction (comment block directly above) locked the directory down *after*
     /// the writer already held an open fd on `audit.log` — POSIX
     /// permission checks happen at `open()`, not per-write, so it never

@@ -1,7 +1,7 @@
 //! L3 loopback end-to-end: the full `exec.run` spine in one process —
 //! pinned mTLS handshake → `Hello` → `ExecStart` → ACL + audit → ticket →
 //! `EXEC_DATA` stream → spawn → stdio → `ExecExit` (`docs/design/testing.md`
-//! §3, PLAN.md step 6).
+//! §3).
 
 use std::sync::Arc;
 use std::time::Duration;

@@ -1,4 +1,4 @@
-//! DoD 3 (M4 perf gate, `PLAN.md` M4 Step 7 (b), `docs/design/testing.md`
+//! DoD 3 (M4 perf gate, `docs/history/m4-plan.md` Step 7 (b), `docs/design/testing.md`
 //! L9/L10, `docs/design/protocol.md` §12, `docs/ROADMAP.md` M4 DoD 3,
 //! `docs/PRD.md` §13/§15): same process, same run — (i) a raw-quinn bidi
 //! stream transfers N bytes over a connection built with quinn's own
@@ -49,10 +49,10 @@
 //!
 //! Gated by `QSH_ACCEPTANCE_SLOW`/`QSH_ACCEPTANCE_STRICT`
 //! (`crates/qsh-cli/tests/reverse_blackout.rs`'s own gating idiom,
-//! `PLAN.md` §4.1 #7's "M3's 60초 blackout 선례"): skipped — zero cost —
+//! `docs/history/m4-plan.md` §4.1 #7's "M3's 60초 blackout 선례"): skipped — zero cost —
 //! in the ordinary PR unit suite when neither is set. Under
 //! `QSH_ACCEPTANCE_SLOW` alone this is a lenient smoke check (ratio ≥
-//! 0.5, `PLAN.md` §4.2's draft margin); under `QSH_ACCEPTANCE_STRICT` it
+//! 0.5, `docs/history/m4-plan.md` §4.2's draft margin); under `QSH_ACCEPTANCE_STRICT` it
 //! asserts the literal DoD (ratio ≥ 0.8). `.github/workflows/ci.yml`'s
 //! `acceptance` job sets `QSH_ACCEPTANCE_STRICT` on this test — that is
 //! the certifying tier; `QSH_ACCEPTANCE_SLOW` alone is a lenient local
@@ -88,12 +88,12 @@ const TRIAL_BYTES: usize = 48 * 1024 * 1024;
 /// randomness here to seed).
 const TRIALS: usize = 3;
 
-/// `PLAN.md` §4.2's draft margin, adopted as final by this step's own
+/// `docs/history/m4-plan.md` §4.2's draft margin, adopted as final by this step's own
 /// measurement (see the module's report for the numbers): the literal
 /// DoD 3 ratio, enforced under `QSH_ACCEPTANCE_STRICT`.
 const STRICT_RATIO: f64 = 0.80;
 
-/// `PLAN.md` §4.2's draft smoke margin: a much more lenient bound for a
+/// `docs/history/m4-plan.md` §4.2's draft smoke margin: a much more lenient bound for a
 /// developer running just `QSH_ACCEPTANCE_SLOW=1` locally, wide enough to
 /// absorb a slow/loaded laptop without being a no-op check.
 const SMOKE_RATIO: f64 = 0.50;
@@ -302,7 +302,7 @@ async fn tunnel_throughput_meets_raw_quinn_ratio() {
          TRIALS={TRIALS})"
     );
     // DoD 3's acceptance-job log is the record of the criterion
-    // (`PLAN.md` M4 Step 7 (d)) — print on success too, not just failure.
+    // (`docs/history/m4-plan.md` Step 7 (d)) — print on success too, not just failure.
     eprintln!("tunnel_throughput_meets_raw_quinn_ratio: {report}");
     // `QSH_PERF_OUT`: one line for the nightly trend, written before any
     // assertion so a red run is still recorded. No-op when unset.

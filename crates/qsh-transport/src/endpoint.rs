@@ -53,7 +53,7 @@ pub const MAX_CONCURRENT_BIDI_STREAMS: u32 = 1024;
 /// design choice:** `quinn_proto::TransportConfig` only exposes a single
 /// connection-wide [`quinn::TransportConfig::stream_receive_window`] —
 /// there is no per-stream-*kind* asymmetric window (PTY ~256 KiB vs.
-/// tunnel ~2-4 MiB, as `PLAN.md` M4 Step 2 and `protocol.md` §12
+/// tunnel ~2-4 MiB, as `docs/history/m4-plan.md` Step 2 and `protocol.md` §12
 /// originally drafted it). Every stream on the connection — PTY session
 /// data, exec, the replay ring's own stream, and tunnel/file — gets this
 /// same window; PTY protection instead comes from
@@ -103,7 +103,7 @@ pub const TUNNEL_STREAM_RECEIVE_WINDOW: u32 = 2 * 1024 * 1024;
 /// Connection-wide flow-control ceiling (`quinn::TransportConfig::
 /// receive_window`) — the total unacked data quinn will let a peer have
 /// buffered across *every* stream on one connection combined. Never set
-/// before M8 Step 2 (`PLAN.md` M8 Step 2, ROADMAP.md's admission audit
+/// before M8 Step 2 (`docs/history/m8-plan.md` Step 2, ROADMAP.md's admission audit
 /// sentence), so it sat at quinn's own default `VarInt::MAX` — no ceiling
 /// at all, one connection free to hold arbitrarily much unacked data in
 /// memory regardless of how many streams it opens.
@@ -224,7 +224,7 @@ pub enum DialError {
     RemoteRejected,
     /// The peer's `admission::Gate` refused us outright: we were already
     /// address-validated but lost the race for a handshake permit
-    /// (`PLAN.md` M8 Step 2, `docs/adr/0009-admission-defenses.md`) —
+    /// (`docs/history/m8-plan.md` Step 2, `docs/adr/0009-admission-defenses.md`) —
     /// `qsh_transport::Incoming::refuse` on the far end sends exactly one
     /// Initial-scoped `CONNECTION_CLOSE(CONNECTION_REFUSED = 0x2)`. Maps
     /// to the *same* `ErrorCode::ConnectionFailed`/`retryable: true` as
@@ -290,7 +290,7 @@ fn transport_config(tuning: TransportTuning) -> quinn::TransportConfig {
     ));
     tc.max_concurrent_bidi_streams(MAX_CONCURRENT_BIDI_STREAMS.into());
     // Tunnel/backpressure config (`docs/design/protocol.md` §12,
-    // `PLAN.md` M4 Step 2) — priority (queue order, applied per-stream at
+    // `docs/history/m4-plan.md` Step 2) — priority (queue order, applied per-stream at
     // the call site: `qsh_transport::control::FramedSend::set_priority`,
     // `qsh_proto::wire::PRIORITY_TUNNEL`) plus these three connection-level
     // knobs (queue depth), so a saturated tunnel cannot starve PTY chunks
@@ -347,7 +347,7 @@ pub const MAX_INCOMING: usize = 4096;
 /// e.g. retransmissions) before dropping further ones instead. Never set
 /// before M8 Step 2, so it sat at quinn's own default (10 MiB) — the
 /// design arbitration's own instruction was explicit: measure before
-/// picking a number, never guess blind (`PLAN.md` M8 Step 2's design
+/// picking a number, never guess blind (`docs/history/m8-plan.md` Step 2's design
 /// judgment table, row `incoming_buffer_size(_total)`).
 ///
 /// **Measured**, not guessed: `measure_incoming_buffered_bytes_during_delayed_accept`
@@ -366,7 +366,7 @@ pub const MAX_INCOMING: usize = 4096;
 /// quinn's 10 MiB default.
 ///
 /// That ~13.6x is headroom against **starving a legitimate handshake**,
-/// not an adversarial safety margin (`PLAN.md` M8 Step 2 verification
+/// not an adversarial safety margin (`docs/history/m8-plan.md` Step 2 verification
 /// round, H1/H2 — the earlier wording conflated the two). What actually
 /// bounds an *attacker's* per-`Incoming` buffering is the constant
 /// itself, full stop, regardless of the measured number: quinn silently
@@ -391,7 +391,7 @@ pub const INCOMING_BUFFER_SIZE: u64 = 64 * 1024;
 /// [`INCOMING_BUFFER_SIZE`] into an unbounded aggregate.
 ///
 /// **Set explicitly to 16 MiB** (`INCOMING_BUFFER_SIZE × 256`), not
-/// derived from [`MAX_INCOMING`] (`PLAN.md` M8 Step 2 verification round,
+/// derived from [`MAX_INCOMING`] (`docs/history/m8-plan.md` Step 2 verification round,
 /// P2-2). The original `const_min(INCOMING_BUFFER_SIZE * MAX_INCOMING,
 /// 100 MiB)` — 64 KiB × 4096 = 256 MiB, clamped to quinn's own prior
 /// default of 100 MiB — always evaluated to exactly that 100 MiB default,
@@ -587,7 +587,7 @@ fn server_tls_config(
 /// Build the `quinn::ServerConfig` [`Listener::bind_inner`] hands to
 /// `quinn::Endpoint::new` — TLS, the given `transport`, and the L0
 /// admission bounds ([`MAX_INCOMING`]/[`INCOMING_BUFFER_SIZE`]/
-/// [`INCOMING_BUFFER_SIZE_TOTAL`], `PLAN.md` M8 Step 2, `docs/adr/0009-
+/// [`INCOMING_BUFFER_SIZE_TOTAL`], `docs/history/m8-plan.md` Step 2, `docs/adr/0009-
 /// admission-defenses.md`) — never set before M8, so these sat at quinn's
 /// own defaults (65536 / 10 MiB / 100 MiB, `quinn-proto` `config/mod.rs`).
 /// This is L0 of the L0-L5 admission ordering: the cheap shed quinn
@@ -595,7 +595,7 @@ fn server_tls_config(
 /// all — `admission::Gate` (qsh-core) is L2-L3, one layer above, and only
 /// ever sees what gets past this.
 ///
-/// **The single construction site** (`PLAN.md` M8 Step 2 verification
+/// **The single construction site** (`docs/history/m8-plan.md` Step 2 verification
 /// round, P2-1): before this existed, the test that pinned these three
 /// bounds (`tests::server_config_sets_admission_bounds`) rebuilt its own
 /// copy of this same sequence of calls and asserted against *that* copy —
@@ -952,7 +952,7 @@ fn classify_dial_failure(err: quinn::ConnectionError, obs: Option<Observation>) 
 /// Whether a connection error is exactly quinn's own `CONNECTION_REFUSED`
 /// (transport error code `0x2`, RFC 9000 §20.1) closing an
 /// Initial-scoped connection — the signature `qsh_transport::Incoming::
-/// refuse` produces on the peer's side (`PLAN.md` M8 Step 2). Deliberately
+/// refuse` produces on the peer's side (`docs/history/m8-plan.md` Step 2). Deliberately
 /// narrower than [`is_crypto_failure`]'s whole `0x100..=0x1ff` band: `0x2`
 /// sits well outside that range, so the two checks never overlap.
 fn is_connection_refused(err: &quinn::ConnectionError) -> bool {
@@ -1147,7 +1147,7 @@ impl Incoming {
     /// Whether the sender of this attempt's Initial has already proved it
     /// can receive traffic at [`remote_address`](Self::remote_address) —
     /// i.e. this is the second Initial of a Retry round trip, carrying a
-    /// token quinn has checked against this exact address (`PLAN.md` M8
+    /// token quinn has checked against this exact address (`docs/history/m8-plan.md`
     /// Step 2, `docs/adr/0009-admission-defenses.md`). `admission::Gate`'s
     /// address-validation decision reads this: `false` ⇒ unconditionally
     /// [`retry`](Self::retry) (never [`accept`](Self::accept) an
@@ -1178,7 +1178,7 @@ impl Incoming {
     /// `RetryError::into_incoming` so a caller that mis-orders its checks
     /// gets its `Incoming` back rather than losing it.
     ///
-    /// `Self` in the `Err` arm is the shape the task's own spec (`PLAN.md`
+    /// `Self` in the `Err` arm is the shape the task's own spec (`docs/history/m8-plan.md`
     /// M8 Step 2) and quinn's own `Incoming::retry`/`RetryError` API both
     /// call for — accepted deliberately over boxing it away: this is a
     /// cold, per-*attempt* error path (never hot-path, never per-byte),

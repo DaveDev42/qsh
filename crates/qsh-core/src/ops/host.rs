@@ -3,7 +3,7 @@
 //! 평가 대상이 아님"; §5 `Host`; §6.1) — plus [`Ops::resolve_host_route`], the
 //! one function that also backs `host.get`'s single entry, the human
 //! renderer's "route that would be used", and (Step 6) `Ops::connect`'s
-//! path choice (`PLAN.md` M3 Step 5, PR 5b).
+//! path choice (`docs/history/m3-plan.md` Step 5, PR 5b).
 //!
 //! Two data sources, concatenated into `host.list`'s result but never
 //! merged by name (`docs/CLI.md` §6.1: "같은 이름이 forward pin과 reverse
@@ -73,11 +73,11 @@ pub(crate) struct ReverseHostEntry {
 /// The route `host.get`, the human renderer, and (Step 6) `Ops::connect`
 /// all resolve one host name to — decided in exactly one place
 /// ([`Ops::resolve_host_route`]) so list, single-entry and routing never
-/// grow their own, divergent rules (`PLAN.md` M3 Step 5).
+/// grow their own, divergent rules (`docs/history/m3-plan.md` Step 5).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostRoute {
     /// Dial directly — the address `hosts.toml`/the trust store pin
-    /// resolves to (`PLAN.md` M7 Step 3, `resolve_forward`).
+    /// resolves to (`docs/history/m7-plan.md` Step 3, `resolve_forward`).
     Forward {
         /// `host:port` to dial — `hosts.toml`'s address when it has this
         /// name, the trust store pin's address otherwise.
@@ -89,7 +89,7 @@ pub enum HostRoute {
         fingerprint: String,
         /// Which directory's *address* actually won — `"hosts"`/`"trust"`/
         /// `"both"` (`"both"` only when they agree — `resolve_forward`'s
-        /// own doc, `PLAN.md` Step 3 (a)-추기 ②) — or `None` when
+        /// own doc, `docs/history/m7-plan.md` Step 3 (a)-추기 ②) — or `None` when
         /// `hosts.toml` has no entries at all (preserves the pre-M7-Step-3
         /// `Host` shape exactly, `docs/CLI.md` §5).
         source: Option<String>,
@@ -121,7 +121,7 @@ pub enum HostRoute {
         /// hint purely from the host *name*, before routing ever decides
         /// forward vs. reverse, so a reverse route showing `user: None`
         /// while the hint is genuinely applied would be a display/
-        /// applied-value mismatch (`PLAN.md` Step 3 (a)-추기 ④, P3-5). `source`
+        /// applied-value mismatch (`docs/history/m7-plan.md` Step 3 (a)-추기 ④, P3-5). `source`
         /// stays `None`/omitted for a reverse route regardless (this
         /// struct's own field doc on the Forward arm) — `source` is an
         /// *address* concept and a reverse route's address never comes
@@ -181,7 +181,7 @@ impl HostRoute {
 }
 
 /// The resolved forward-route data for one host name, after layering
-/// `hosts.toml` over `trust.toml`'s pinned peers (`PLAN.md` M7 §4.1 #4,
+/// `hosts.toml` over `trust.toml`'s pinned peers (`docs/history/m7-plan.md` §4.1 #4,
 /// `crate::hosts` module doc): `hosts.toml`'s address wins when both name
 /// this host; the fingerprint always comes from `trust.toml` —
 /// `hosts.toml` never supplies identity, only ever an address/user hint.
@@ -199,7 +199,7 @@ pub(super) struct ForwardEntry {
 }
 
 /// Layer one name's `hosts.toml` entry over its `trust.toml` pin
-/// (`PLAN.md` M7 §4.1 #4). `None` means neither source has a routable
+/// (`docs/history/m7-plan.md` §4.1 #4). `None` means neither source has a routable
 /// address for this name.
 ///
 /// - **Address:** `hosts.toml`'s address when it has a non-empty one for
@@ -211,7 +211,7 @@ pub(super) struct ForwardEntry {
 /// - **Fingerprint:** always `trust_peer`'s, empty when no trust peer
 ///   shares this name — `hosts.toml` never asserts identity.
 /// - **`source`:** which directory's *address* actually won, redefined
-///   post-Step-3-verification (`PLAN.md` Step 3 (a)-추기 ②) away from "which
+///   post-Step-3-verification (`docs/history/m7-plan.md` Step 3 (a)-추기 ②) away from "which
 ///   directory names this host" — the original definition let `"both"`
 ///   mean "the two directories disagree on the address" exactly as often
 ///   as it meant "they agree", which hid the one thing an operator most
@@ -315,8 +315,8 @@ fn host_candidate_names<'a>(store: &'a TrustStore, hosts: &'a HostsFile) -> Vec<
 
 /// Pure mapping: every name either `hosts.toml` or a routable `trust.toml`
 /// pin knows about becomes one forward `Host` entry (`docs/CLI.md` §5,
-/// extended `PLAN.md` M7 Step 3 by [`resolve_forward`]). Split out from
-/// any I/O so the merge table (`PLAN.md` M3 Step 5 (c)) is testable
+/// extended `docs/history/m7-plan.md` Step 3 by [`resolve_forward`]). Split out from
+/// any I/O so the merge table (`docs/history/m3-plan.md` Step 5 (c)) is testable
 /// against hand-built [`TrustStore`]/[`HostsFile`] values, never real
 /// files.
 ///
@@ -387,7 +387,7 @@ pub(super) fn host_pinned_without_address(
 /// exact same lookup+filter [`crate::ops::session::Ops::resolve_user_hint`]
 /// applies (`docs/CLI.md` §7), reused here so a reverse-routed name's
 /// listed/displayed `user` matches what that choke point actually sends
-/// (`PLAN.md` Step 3 (a)-추기 ④, P3-5) — that helper resolves the hint from
+/// (`docs/history/m7-plan.md` Step 3 (a)-추기 ④, P3-5) — that helper resolves the hint from
 /// the host *name* alone, before routing ever decides forward vs. reverse,
 /// so this module's own reverse-`Host` builders have to do the identical
 /// lookup rather than hard-coding `None`.
@@ -526,15 +526,15 @@ pub(crate) async fn find_reverse_socket(
 /// `ErrorCode::InvalidArgument` for an empty/whitespace-only (or, after
 /// [`hint_alias`] strips a `user@` prefix, empty-after-stripping) host
 /// name. One error value, every empty-alias call site in [`resolve_route`]
-/// and `Ops::resolve_peer_address` (`PLAN.md` §3 Step 6 — same code, same
+/// and `Ops::resolve_peer_address` (`docs/history/m8-plan.md` Step 6 — same code, same
 /// wording, not just the same code) so neither can drift from the other.
 pub(crate) fn empty_host_name_error() -> OpError {
     OpError::new(ErrorCode::InvalidArgument, "host name must not be empty")
 }
 
 /// `ErrorCode::InvalidArgument` for a [`hint_alias`] result that is
-/// non-empty but still fails `qsh_proto::wire::valid_host_name` (`PLAN.md`
-/// §3 Step 7, Q10) — a name like `"dave@no where"` strips down to `"no
+/// non-empty but still fails `qsh_proto::wire::valid_host_name` (`docs/history/m8-plan.md`
+/// Step 7, Q10) — a name like `"dave@no where"` strips down to `"no
 /// where"`, which is neither empty (so [`empty_host_name_error`] would be
 /// the wrong wording) nor an alias `qsh trust add` could ever accept (so
 /// falling through to the `HOST_NOT_FOUND` remedy would suggest an
@@ -552,7 +552,7 @@ pub(crate) fn invalid_host_alias_error(alias: &str) -> OpError {
 }
 
 /// The three outcomes of [`hint_alias`] stripping and validating a `user@`
-/// hint off a host alias (`PLAN.md` §3 Step 7, Q10): nothing usable is
+/// hint off a host alias (`docs/history/m8-plan.md` Step 7, Q10): nothing usable is
 /// left ([`HintAlias::Empty`]), something is left but it is not a legal
 /// alias ([`HintAlias::Invalid`]), or it is ([`HintAlias::Valid`]). Kept as
 /// three explicit outcomes rather than folding `Invalid` back into `Empty`
@@ -579,7 +579,7 @@ pub(crate) enum HintAlias<'a> {
 /// ...`, `docs/CLI.md` §6.1/§6.9) and so can still carry one when they
 /// reach routing or `Ops::resolve_peer_address`'s remedy-message assembly.
 ///
-/// Splits on the *last* `@`, then **trims** the remainder (`PLAN.md` §3
+/// Splits on the *last* `@`, then **trims** the remainder (`docs/history/m8-plan.md`
 /// Step 7, Q10: a stray space survives an `@`-split unnoticed otherwise,
 /// e.g. `"dave@ nowhere"` -> `" nowhere"`, and a bare name with no `@` at
 /// all can carry the same leading/trailing whitespace, e.g. `" nowhere"`)
@@ -592,7 +592,7 @@ pub(crate) enum HintAlias<'a> {
 /// remedy at all. [`HintAlias::Invalid`] when it is non-empty but still not
 /// a legal alias (`"dave@no where"` -> `"no where"`, an internal space) —
 /// interpolating it verbatim would produce an un-runnable remedy just the
-/// same, but for a different reason than "empty" (`PLAN.md` §3 Step 6
+/// same, but for a different reason than "empty" (`docs/history/m8-plan.md` Step 6
 /// lens-2 findings; Step 7 extends the same discipline to this third
 /// case). Shared by [`resolve_route`] here and
 /// `Ops::resolve_peer_address` (`crate::ops::resolve_peer_address`) so the
@@ -609,7 +609,7 @@ pub(crate) enum HintAlias<'a> {
 /// `qsh [user@]host` form is the only shape that carries a user hint, and
 /// it is split at the CLI before routing ever sees it). Whitespace is the
 /// one difference that carries no meaning, so it is the one this trims
-/// (`PLAN.md` M9 §6 행 i).
+/// (`docs/history/m9-plan.md` §6 행 i).
 pub(crate) fn lookup_name(name: &str) -> &str {
     name.trim()
 }
@@ -802,7 +802,7 @@ pub fn user_prefix_not_accepted_host_not_found(display_name: &str) -> OpError {
 
 /// The pure decision [`Ops::resolve_host_route`] delegates to — see that
 /// method's doc for the rule. Split out from any I/O (daemon queries,
-/// trust-file load) so the routing table (`PLAN.md` M3 Step 5 (c)) is
+/// trust-file load) so the routing table (`docs/history/m3-plan.md` Step 5 (c)) is
 /// testable against hand-built sources, exactly like [`merge_hosts`]
 /// above.
 ///
@@ -840,7 +840,7 @@ fn resolve_route(
         // case, so this reuses it rather than inventing a new code.
         return Err(empty_host_name_error());
     }
-    // `PLAN.md` M9 §6 행 i: the lookup key is trimmed, independently of
+    // `docs/history/m9-plan.md` §6 행 i: the lookup key is trimmed, independently of
     // `hint_alias`'s remedy-message stripping below — live reverse and
     // forward must share the same key, or a stray space resolves one way
     // and not the other and silently flips §6.1's "live reverse first"
@@ -908,7 +908,7 @@ fn resolve_route(
     // into both the diagnostic and the `qsh trust add` remedy, and the
     // latter is not even parseable: alias names are `[A-Za-z0-9._-]`
     // (`qsh_proto::wire::valid_host_name`), which rejects `@`. Strip the
-    // same "last `@`" hint `parse_target` uses (`PLAN.md` §3 Step 6, M7
+    // same "last `@`" hint `parse_target` uses (`docs/history/m8-plan.md` Step 6, M7
     // carry-over v) via [`hint_alias`] so the message and remedy always
     // name a bare alias. `"dave@"`/`"@"` strip down to an empty alias,
     // which is the same argument defect the guard above rejects — fall
@@ -1049,7 +1049,7 @@ impl Ops {
 
     /// Resolve `name` to the peer this machine would actually reach it
     /// through — the one function `host.get`, the human renderer, and
-    /// (Step 6) `Ops::connect` all share (`PLAN.md` M3 Step 5).
+    /// (Step 6) `Ops::connect` all share (`docs/history/m3-plan.md` Step 5).
     ///
     /// Rule: a live reverse registration wins over a forward pin (a proven
     /// reachable path beats trust store's estimated address);
@@ -1112,7 +1112,7 @@ impl Ops {
     /// The async twin of [`Self::resolve_host_route`] — same decision
     /// (delegates to the same pure `resolve_route`), but never builds or
     /// blocks on its own runtime, so it is safe to call from *inside* one
-    /// that already exists (`PLAN.md` M3 Step 6's async seam).
+    /// that already exists (`docs/history/m3-plan.md` Step 6's async seam).
     ///
     /// `Ops::connect` (`crate::ops::session`) does **not** need this seam
     /// today: it calls the sync [`Self::resolve_host_route`] from

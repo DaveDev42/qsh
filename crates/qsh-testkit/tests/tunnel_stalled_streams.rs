@@ -33,7 +33,7 @@
 //! convention): a numbered-lines producer for the progress test, an echo
 //! loop for the latency test.
 //!
-//! **Stall observation criterion** (`PLAN.md` §4.1 #1). Time is never the
+//! **Stall observation criterion** (`docs/history/m4-plan.md` §4.1 #1). Time is never the
 //! criterion. The client's `Connection::stats().frame_rx` counts the
 //! frames the host sent. The stall is considered established when
 //! `data_blocked > 0` (the host ran out of connection-level credit), or

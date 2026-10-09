@@ -1,5 +1,5 @@
 //! `hosts.toml` — the host profile address book
-//! (`docs/design/architecture.md` §7, `PLAN.md` M7 Step 3):
+//! (`docs/design/architecture.md` §7, `docs/history/m7-plan.md` Step 3):
 //!
 //! ```toml
 //! [[host]]
@@ -17,7 +17,7 @@
 //! `Ops::resolve_peer`/`Ops::host_list`/`Ops::host_get`/`Ops::resolve_host_route`
 //! layer this over the trust store's pinned peers — hosts.toml's address
 //! wins when both name a host, trust remains the sole arbiter of *who* that
-//! address may turn out to be (`PLAN.md` M7 §4.1 #4). See `crate::ops::host`
+//! address may turn out to be (`docs/history/m7-plan.md` §4.1 #4). See `crate::ops::host`
 //! for the merge/priority logic that actually implements that decision;
 //! this module only loads and indexes the file.
 

@@ -18,7 +18,7 @@ qsh-proto.workspace = true
 qsh-transport.workspace = true
 # `quinn::SendStream`/`RecvStream` are named directly by `localctl/daemon.rs`
 # (`cfg(unix)`-only, `crate::localctl` mod declaration): the `LOCAL_STREAM`
-# splice (`PLAN.md` M3 Step 7) opens a raw QUIC bidi stream on a live
+# splice (`docs/history/m3-plan.md` Step 7) opens a raw QUIC bidi stream on a live
 # `qsh-transport::Connection` and pumps bytes on it without going through
 # `qsh-transport::FramedSend`/`FramedRecv` (those only speak framed
 # messages, not arbitrary raw bytes) — `daemon.rs` is arch-lint's

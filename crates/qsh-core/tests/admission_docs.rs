@@ -1,5 +1,5 @@
 //! Doc-prose == code-constant anti-drift gate for `qsh_core::admission`'s
-//! vocabulary (`PLAN.md` M8 Step 2 verification round, H3; extended M8
+//! vocabulary (`docs/history/m8-plan.md` Step 2 verification round, H3; extended M8
 //! Step 3 verdict arbitration item 11④ to `RejectReason::ALL` and to
 //! `docs/design/architecture.md`): before this, nothing cross-checked
 //! `docs/CLI.md` §6.12's admission prose — the category strings, the
@@ -127,7 +127,7 @@ fn cli_md_names_every_admission_config_key_and_its_default() {
     );
 }
 
-/// `PLAN.md` M8 Step 3 P2-3, verdict arbitration item 11④: the new
+/// `docs/history/m8-plan.md` Step 3 P2-3, verdict arbitration item 11④: the new
 /// validated-axis config key must be documented in *both* `docs/CLI.md`
 /// and `docs/design/architecture.md`, not just one — the two docs drifted
 /// apart is exactly the failure mode this whole file exists to catch.

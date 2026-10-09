@@ -23,7 +23,7 @@ impl Server {
     /// 1. shape-check the request (nothing created, no decision made);
     /// 2. [`Server::authorize`] — `Authorizer::check` + one [`AuditRecord`]
     ///    line for allow *and* deny alike, `Action::ForwardRemote` on
-    ///    `bind_host:bind_port` (`PLAN.md` M4 Step 4's choke point);
+    ///    `bind_host:bind_port` (`docs/history/m4-plan.md` Step 4's choke point);
     /// 3. **loopback enforcement** —
     ///    `crate::tunnel::remote::resolve_loopback_bind_addr`, which
     ///    resolves `bind_host` **once** and hands back the very address it
@@ -209,7 +209,7 @@ impl Server {
         };
         let actual_port = actual_addr.port();
 
-        // Structural record at bind success (`PLAN.md` §4.1's Step 4
+        // Structural record at bind success (`docs/history/m4-plan.md` §4.1's Step 4
         // adversarial-review carryover): the authorization record above
         // (`authorize_and_bind_remote_forward`'s step (2)) names the
         // *requested* `bind_host:bind_port` and has to — a kernel-assigned
@@ -249,7 +249,7 @@ impl Server {
         // Recorded under this connection's authenticated `(principal,
         // auth_path)`, not `ctx.conn_id` alone — the ACL ownership axis
         // `Server::handle_rfwd_close` checks (`Server::remote_forwards`'s
-        // own doc, `PLAN.md` M5 Step 5 (a)).
+        // own doc, `docs/history/m5-plan.md` Step 5 (a)).
         self.remote_forwards
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -287,7 +287,7 @@ impl Server {
     }
 
     /// `RemoteForwardClose`: the `Action::ForwardRemote` choke point
-    /// (`PLAN.md` M5 Step 5 (a)) over this `forward_id`'s registered
+    /// (`docs/history/m5-plan.md` Step 5 (a)) over this `forward_id`'s registered
     /// owner, then — only on a pass — abort and drop it.
     ///
     /// In order:
@@ -328,7 +328,7 @@ impl Server {
     ///    unknown `session_id` past their own ownership gate.
     ///
     /// `docs/CLI.md` §2.5's full owning-peer semantics for `tunnel.close`
-    /// (as an `Ops` surface) are `PLAN.md` M4 Step 5 scope; this is the
+    /// (as an `Ops` surface) are `docs/history/m4-plan.md` Step 5 scope; this is the
     /// wire-level primitive that step builds on.
     pub(super) async fn handle_rfwd_close(
         &self,
@@ -388,7 +388,7 @@ impl Server {
                 // dropped when the task actually ends. Answer success
                 // only after that, so a peer that re-binds the port right
                 // after the reply (ADR-0023 decision 16) does not race the
-                // old listener. Bounded (PLAN.md 4.1 #6): past the bound
+                // old listener. Bounded (`docs/history/m4-plan.md` §4.1 #6): past the bound
                 // the reply goes out as before and the client-side
                 // retry covers the rest. The cancel result is ignored.
                 if tokio::time::timeout(RFWD_CLOSE_JOIN_BOUND, task)

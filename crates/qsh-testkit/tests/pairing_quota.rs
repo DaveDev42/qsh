@@ -1,4 +1,4 @@
-//! Pairing-connection quota audit pins (`PLAN.md` M8 Step 4): the ninth
+//! Pairing-connection quota audit pins (`docs/history/m8-plan.md` Step 4): the ninth
 //! pre-identity (`Principal::Pairing`) connection against a host already
 //! holding [`MAX_CONCURRENT_PAIRING_CONNECTIONS`] slots is refused with an
 //! immediate [`CLOSE_CODE_RESOURCE_EXHAUSTED`] close — no stream accepted,

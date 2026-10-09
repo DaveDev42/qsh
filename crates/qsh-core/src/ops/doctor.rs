@@ -1,10 +1,10 @@
-//! `doctor.run` (`docs/CLI.md` §6.17, `PLAN.md` M7 Step 6) — orchestrates
+//! `doctor.run` (`docs/CLI.md` §6.17, `docs/history/m7-plan.md` Step 6) — orchestrates
 //! every diagnostic in [`crate::doctor`]/[`crate::doctor::probe`] into one
 //! report. Local, authorization-free operation (`docs/CLI.md` §2.5's "인가
 //! 불요" row), same discipline as `acl.check` ([`crate::ops::acl`]): never
 //! dispatched to a remote peer.
 //!
-//! **Exit-code discipline** (`PLAN.md` M7 §4.1 #6, design brief §B): every
+//! **Exit-code discipline** (`docs/history/m7-plan.md` §4.1 #6, design brief §B): every
 //! finding is reported as *data*, never a nonzero exit — `finish()` yields
 //! exit 0 for a successful `doctor.run` unless the caller opted into
 //! `--fail-on` (ADR-0027, see [`DoctorThreshold`]), mirroring `acl.check`'s own
@@ -419,7 +419,7 @@ impl Ops {
         Ok(clock_skew_finding(not_before, now_unix))
     }
 
-    /// `config_unknown_key` (`PLAN.md` M8 Step 4b, J10). Reads `config.toml`
+    /// `config_unknown_key` (`docs/history/m8-plan.md` Step 4b, J10). Reads `config.toml`
     /// a second time as a bare [`toml::Value`] (not through [`Config`]'s
     /// `#[serde(default)]` `Deserialize`, which silently drops anything it
     /// does not recognize — that silence is exactly what this finding
@@ -708,7 +708,7 @@ impl Ops {
 /// instead of silently falling through to `serve`); else `serve`, the
 /// default role for a bare `config.toml`. Both outbound keys map to the
 /// same `"reverse"` token — there is no separate token for `qsh serve
-/// --to` yet (a later milestone's job, `PLAN.md`). `config_serve_to_conflict`
+/// --to` yet (a later milestone's job). `config_serve_to_conflict`
 /// (`crate::doctor::CONFIG_SERVE_TO_CONFLICT`) is the only thing this
 /// deliberately leaves out: no diagnostic here for a config that sets more
 /// than one of these at once and disagrees, only a precedence rule —
