@@ -44,7 +44,7 @@ use qsh_proto::ErrorCode;
 use qsh_proto::wire::{self, Hello};
 use qsh_transport::{AcceptError, Connection, FramedStream, Incoming, Listener};
 #[cfg(unix)]
-use quinn::{RecvStream, SendStream};
+use qsh_transport::{RecvStream, SendStream};
 use tokio::sync::mpsc;
 #[cfg(unix)]
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};

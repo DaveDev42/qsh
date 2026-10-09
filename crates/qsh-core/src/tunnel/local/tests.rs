@@ -336,7 +336,7 @@ async fn fake_host(
     // Echo until the client half-closes, then half-close back.
     let mut buf = [0u8; 256];
     loop {
-        // `quinn::RecvStream` has its own inherent `read` returning
+        // `qsh_transport::RecvStream` has its own inherent `read` returning
         // `Option<usize>` (`None` == FIN), which shadows
         // `AsyncReadExt::read` here.
         match raw_recv.read(&mut buf).await.unwrap() {

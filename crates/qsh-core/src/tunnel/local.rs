@@ -44,7 +44,7 @@ use qsh_proto::wire::{
     ConnectResult, ForwardSpec, StreamHeader, StreamKind, format_host_port, sanitize_peer_text,
 };
 use qsh_proto::{ErrorCode, Tunnel};
-use quinn::{RecvStream, SendStream};
+use qsh_transport::{RecvStream, SendStream};
 use thiserror::Error;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinSet;

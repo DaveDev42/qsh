@@ -1543,10 +1543,10 @@ async fn unregister_conduit_sweeps_its_own_forwards_and_resets_queued_streams_bu
         .await
         .expect("the reset must be observed promptly, not hang");
     match read {
-        Err(quinn::ReadError::Reset(code)) => {
+        Err(qsh_transport::ReadError::Reset(code)) => {
             assert_eq!(
                 code,
-                quinn::VarInt::from_u32(RESET_CODE_TUNNEL_UNKNOWN_FORWARD),
+                qsh_transport::StreamCode::from_u32(RESET_CODE_TUNNEL_UNKNOWN_FORWARD),
                 "a swept forward's queued stream must reset with the documented code"
             );
         }
@@ -1616,10 +1616,10 @@ async fn unregister_conduit_leaves_zero_trace_of_a_conduit_that_owned_several_fo
             .await
             .expect("the reset must be observed promptly, not hang");
         match read {
-            Err(quinn::ReadError::Reset(code)) => {
+            Err(qsh_transport::ReadError::Reset(code)) => {
                 assert_eq!(
                     code,
-                    quinn::VarInt::from_u32(RESET_CODE_TUNNEL_UNKNOWN_FORWARD),
+                    qsh_transport::StreamCode::from_u32(RESET_CODE_TUNNEL_UNKNOWN_FORWARD),
                     "every swept forward's queued stream must reset with the documented code"
                 );
             }
@@ -1955,10 +1955,10 @@ async fn a_queued_arrival_nobody_claims_expires_resetting_its_stream_and_freeing
         .await
         .expect("the reset must be observed promptly, not hang");
     match read {
-        Err(quinn::ReadError::Reset(code)) => {
+        Err(qsh_transport::ReadError::Reset(code)) => {
             assert_eq!(
                 code,
-                quinn::VarInt::from_u32(RESET_CODE_TUNNEL_CLAIM_EXPIRED),
+                qsh_transport::StreamCode::from_u32(RESET_CODE_TUNNEL_CLAIM_EXPIRED),
                 "an expired arrival must reset visibly, with its own documented code — never \
                  drop clean, which would report a normal end for a connection nobody spliced"
             );
@@ -1992,7 +1992,7 @@ async fn a_queued_arrival_nobody_claims_expires_resetting_its_stream_and_freeing
 async fn open_fake_target_tcp_accepted(
     conn: &Connection,
     ticket: &[u8],
-) -> (quinn::SendStream, quinn::RecvStream) {
+) -> (qsh_transport::SendStream, qsh_transport::RecvStream) {
     let (send, recv) = conn.open_bi().await.unwrap();
     let mut framed = qsh_transport::FramedStream::data(send, recv);
     framed
@@ -2036,10 +2036,10 @@ async fn handle_tcp_accepted_stream_rejects_a_malformed_ticket_before_any_regist
         .await
         .expect("a malformed ticket must be rejected promptly, not hang");
     match read {
-        Err(quinn::ReadError::Reset(code)) => {
+        Err(qsh_transport::ReadError::Reset(code)) => {
             assert_eq!(
                 code,
-                quinn::VarInt::from_u32(RESET_CODE_TUNNEL_UNKNOWN_FORWARD)
+                qsh_transport::StreamCode::from_u32(RESET_CODE_TUNNEL_UNKNOWN_FORWARD)
             );
         }
         other => panic!("expected a stream reset, got {other:?}"),
@@ -2105,10 +2105,10 @@ async fn handle_tcp_accepted_stream_at_the_hub_cap_resets_rather_than_queues() {
         .await
         .expect("a hub-exhausted rejection must be prompt, not hang");
     match read {
-        Err(quinn::ReadError::Reset(code)) => {
+        Err(qsh_transport::ReadError::Reset(code)) => {
             assert_eq!(
                 code,
-                quinn::VarInt::from_u32(RESET_CODE_TUNNEL_HUB_EXHAUSTED)
+                qsh_transport::StreamCode::from_u32(RESET_CODE_TUNNEL_HUB_EXHAUSTED)
             );
         }
         other => panic!("expected a stream reset, got {other:?}"),

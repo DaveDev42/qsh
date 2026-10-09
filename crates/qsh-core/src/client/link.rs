@@ -249,7 +249,7 @@ impl DataSend {
     /// (`crate::tunnel::splice::splice_tcp_uds`, `docs/history/m4-plan.md` Step 5 (a)).
     /// A caller that holds the wrong carrier gets its value back rather
     /// than a panic, so the stream stays alive to be torn down properly.
-    pub(crate) fn into_raw_quic(self) -> Result<quinn::SendStream, Self> {
+    pub(crate) fn into_raw_quic(self) -> Result<qsh_transport::SendStream, Self> {
         match self {
             DataSend::Quic(send) => Ok(send.into_raw()),
             #[cfg(unix)]
@@ -322,7 +322,7 @@ impl DataRecv {
     ///
     /// `Err(self)` for the reverse `LOCAL_STREAM` carrier — its raw
     /// counterpart is [`Self::into_raw_local`].
-    pub(crate) fn into_raw_quic(self) -> Result<(quinn::RecvStream, Vec<u8>), Self> {
+    pub(crate) fn into_raw_quic(self) -> Result<(qsh_transport::RecvStream, Vec<u8>), Self> {
         match self {
             DataRecv::Quic(recv) => Ok(recv.into_raw()),
             #[cfg(unix)]

@@ -1,13 +1,15 @@
-//! Framed message I/O over QUIC streams: the frame layer from
-//! `qsh-proto::frame` on top of quinn `SendStream`/`RecvStream`, generic over
+//! Framed message I/O over transport streams: the frame layer from
+//! `qsh-proto::frame` on top of [`SendStream`]/[`RecvStream`], generic over
 //! any prost message. Used for the control stream (256 KiB cap) and for
 //! data streams such as `EXEC_DATA` (64 KiB cap).
 
 use prost::Message;
 use qsh_proto::frame::{CONTROL_FRAME_MAX, DATA_FRAME_MAX, FrameDecoder, FrameError};
 use qsh_proto::wire::{WireEncodeError, encode_framed};
-use quinn::{RecvStream, SendStream};
 use thiserror::Error;
+
+use crate::error::{ClosedStream, ReadError, StreamCode, WriteError};
+use crate::stream::{RecvStream, SendStream};
 
 /// Errors from framed stream I/O.
 #[derive(Debug, Error)]
@@ -28,15 +30,15 @@ pub enum StreamError {
         /// Bytes received past the last complete frame.
         buffered: usize,
     },
-    /// QUIC read failure (reset, connection lost, …).
+    /// Stream read failure (reset, connection lost, …).
     #[error("read: {0}")]
-    Read(#[from] quinn::ReadError),
-    /// QUIC write failure.
+    Read(#[from] ReadError),
+    /// Stream write failure.
     #[error("write: {0}")]
-    Write(#[from] quinn::WriteError),
+    Write(#[from] WriteError),
     /// Finishing the send side failed (already closed).
     #[error("close: {0}")]
-    Close(#[from] quinn::ClosedStream),
+    Close(#[from] ClosedStream),
 }
 
 /// Sending half of a framed stream.
@@ -77,20 +79,20 @@ impl FramedSend {
 
     /// Abruptly reset the stream with an application error code.
     pub fn reset(&mut self, code: u32) {
-        let _ = self.send.reset(quinn::VarInt::from_u32(code));
+        let _ = self.send.reset(StreamCode::from_u32(code));
     }
 
-    /// Set the QUIC send priority (`docs/design/protocol.md` §12).
+    /// Set the send priority (`docs/design/protocol.md` §12).
     pub fn set_priority(&self, priority: i32) {
         let _ = self.send.set_priority(priority);
     }
 
     /// Read back the priority [`set_priority`](Self::set_priority) most
     /// recently set — `Err` only once the stream has already closed
-    /// (`quinn::SendStream::priority`'s own contract). Test-only today
+    /// (`SendStream::priority`'s own contract). Test-only today
     /// (`crate::tunnel`'s `PRIORITY_TUNNEL` assertion, `docs/history/m4-plan.md` Step
     /// 2): production code never needs to read this back, only set it.
-    pub fn priority(&self) -> Result<i32, quinn::ClosedStream> {
+    pub fn priority(&self) -> Result<i32, ClosedStream> {
         self.send.priority()
     }
 
@@ -100,13 +102,13 @@ impl FramedSend {
     /// rejection error frame) a real chance to reach the peer before the
     /// caller tears down the connection (`docs/design/protocol.md` §11-2's
     /// delivery guarantee, `docs/history/m3-plan.md` Step 3). This method itself waits as
-    /// long as quinn does — callers bound it with their own timeout so a
+    /// long as the transport does — callers bound it with their own timeout so a
     /// peer that never acks can never wedge them here.
     pub async fn stopped(&self) {
         let _ = self.send.stopped().await;
     }
 
-    /// End this stream's framed phase and surrender the raw QUIC send
+    /// End this stream's framed phase and surrender the raw send
     /// stream underneath it.
     ///
     /// The one place a QSH stream deliberately stops being length-prefixed
@@ -174,16 +176,16 @@ impl FramedRecv {
 
     /// Stop reading and tell the peer we are not interested in more data.
     pub fn stop(&mut self, code: u32) {
-        let _ = self.recv.stop(quinn::VarInt::from_u32(code));
+        let _ = self.recv.stop(StreamCode::from_u32(code));
     }
 
-    /// End this stream's framed phase and surrender the raw QUIC receive
+    /// End this stream's framed phase and surrender the raw receive
     /// stream **plus every byte already read past the last complete
     /// frame**.
     ///
     /// The receive-half sibling of [`FramedSend::into_raw`], and the half
     /// where the transition is easy to get wrong: one `read()` off the
-    /// QUIC stream routinely returns more than the frame the caller asked
+    /// stream routinely returns more than the frame the caller asked
     /// for, so by the time [`recv`](Self::recv) has handed back a tunnel's
     /// `StreamHeader`/`ConnectResult` this decoder may already be holding
     /// the first bytes of the raw payload that followed it. Those bytes

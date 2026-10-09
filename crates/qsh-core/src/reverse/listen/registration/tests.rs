@@ -8,8 +8,8 @@ fn classify_client_error_maps_the_documented_vocabulary() {
     // `Connection(ApplicationClosed)` with an ordinary close code (not
     // `CLOSE_CODE_PATH_DEAD`) — a real, clean peer close.
     let closed = ClientError::Connection(qsh_transport::ConnectionError::ApplicationClosed(
-        quinn::ApplicationClose {
-            error_code: quinn::VarInt::from_u32(0),
+        qsh_transport::ApplicationClose {
+            error_code: qsh_transport::StreamCode::from_u32(0),
             reason: bytes::Bytes::new(),
         },
     ));

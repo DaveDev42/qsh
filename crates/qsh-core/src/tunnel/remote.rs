@@ -931,8 +931,8 @@ async fn dispatch_remote_forwards(conn: qsh_transport::Connection, table: Remote
 /// resetting the stream, not by a frame the peer would have to read to
 /// learn about it.
 async fn handle_accepted_stream(
-    send: quinn::SendStream,
-    recv: quinn::RecvStream,
+    send: qsh_transport::SendStream,
+    recv: qsh_transport::RecvStream,
     table: &Mutex<HashMap<String, (String, u16)>>,
     conn: &quinn::Connection,
 ) {

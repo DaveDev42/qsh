@@ -817,7 +817,7 @@ pub trait ProbeSource: Send + Sync + 'static {
 
 impl ProbeSource for qsh_transport::Connection {
     async fn closed(&self) {
-        // The specific `quinn::ConnectionError` is diagnostic-only here —
+        // The specific `qsh_transport::ConnectionError` is diagnostic-only here —
         // `watch_path`'s caller learns "dead", not "why", the same way a
         // silence-based verdict never learns why either.
         let _ = qsh_transport::Connection::closed(self).await;

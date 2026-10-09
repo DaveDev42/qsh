@@ -40,7 +40,7 @@ async fn dial_the_ninth_and_expect_resource_exhausted(host: &PairingHarness) -> 
         .port();
 
     match dialed.connection.closed().await {
-        quinn::ConnectionError::ApplicationClosed(close) => {
+        qsh_transport::ConnectionError::ApplicationClosed(close) => {
             assert_eq!(
                 u64::from(close.error_code),
                 u64::from(CLOSE_CODE_RESOURCE_EXHAUSTED),

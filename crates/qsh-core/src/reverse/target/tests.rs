@@ -717,24 +717,22 @@ fn classify_dial_error_maps_the_documented_vocabulary() {
     // packet went out; a transport-level refusal to even try, not a
     // TLS judgment.
     assert_eq!(
-        classify_dial_error(&DialError::Connect(quinn::ConnectError::EndpointStopping)),
+        classify_dial_error(&DialError::Connect(
+            qsh_transport::ConnectError::EndpointStopping
+        )),
         ReconnectCause::Refused
     );
     // `Failed` mirrors `is_crypto_failure` exactly: a crypto-class
     // close code (0x100..=0x1ff, a TLS alert) is `tls_rejected`...
     assert_eq!(
-        classify_dial_error(&DialError::Failed(
-            quinn::ConnectionError::ConnectionClosed(quinn::ConnectionClose {
-                error_code: quinn::TransportErrorCode::crypto(42),
-                frame_type: None,
-                reason: bytes::Bytes::new(),
-            })
-        )),
+        classify_dial_error(&DialError::Failed(qsh_transport::ConnectionError::crypto(
+            42
+        ))),
         ReconnectCause::TlsRejected
     );
     // ...and a non-crypto-class connection death is `refused`.
     assert_eq!(
-        classify_dial_error(&DialError::Failed(quinn::ConnectionError::Reset)),
+        classify_dial_error(&DialError::Failed(qsh_transport::ConnectionError::Reset)),
         ReconnectCause::Refused
     );
     // `Setup` — endpoint construction failed before any packet went
@@ -982,18 +980,20 @@ fn classify_target_connection_loss_reads_the_close_reason_behind_an_ok_return() 
         classify_target_connection_loss(&ok, Some(&timed_out)),
         ReconnectCause::IdleTimeout
     );
-    let path_dead = qsh_transport::ConnectionError::ApplicationClosed(quinn::ApplicationClose {
-        error_code: quinn::VarInt::from_u32(0x1004),
-        reason: bytes::Bytes::new(),
-    });
+    let path_dead =
+        qsh_transport::ConnectionError::ApplicationClosed(qsh_transport::ApplicationClose {
+            error_code: qsh_transport::StreamCode::from_u32(0x1004),
+            reason: bytes::Bytes::new(),
+        });
     assert_eq!(
         classify_target_connection_loss(&ok, Some(&path_dead)),
         ReconnectCause::PathDead
     );
-    let clean = qsh_transport::ConnectionError::ApplicationClosed(quinn::ApplicationClose {
-        error_code: quinn::VarInt::from_u32(0),
-        reason: bytes::Bytes::new(),
-    });
+    let clean =
+        qsh_transport::ConnectionError::ApplicationClosed(qsh_transport::ApplicationClose {
+            error_code: qsh_transport::StreamCode::from_u32(0),
+            reason: bytes::Bytes::new(),
+        });
     assert_eq!(
         classify_target_connection_loss(&ok, Some(&clean)),
         ReconnectCause::PeerClosed

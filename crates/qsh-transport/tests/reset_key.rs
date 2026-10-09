@@ -101,7 +101,7 @@ async fn client_sees_reset_after_restart(
     first_key: [u8; RESET_KEY_LEN],
     second_key: [u8; RESET_KEY_LEN],
     window: Duration,
-) -> Option<quinn::ConnectionError> {
+) -> Option<qsh_transport::ConnectionError> {
     let (server_id, server_fp) = make_identity();
     let (client_id, client_fp) = make_identity();
     let server_trust = || StaticTrust::empty().with_pin(client_fp, Principal::Device("c".into()));
@@ -140,7 +140,7 @@ async fn server_endpoint_uses_the_injected_reset_key() {
         .await
         .expect("a restarted server holding the same key resets the client within 2 s");
     assert!(
-        matches!(err, quinn::ConnectionError::Reset),
+        matches!(err, qsh_transport::ConnectionError::Reset),
         "expected a stateless reset, got {err:?}"
     );
 }

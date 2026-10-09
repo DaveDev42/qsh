@@ -768,7 +768,7 @@ async fn case16_no_client_certificate_handshake_fails() {
     match connecting.await {
         Err(err) => {
             assert!(
-                qsh_transport::endpoint::is_crypto_failure(&err),
+                qsh_transport::endpoint::is_crypto_failure(&err.clone().into()),
                 "expected a crypto-class failure, got {err:?}"
             );
         }
@@ -778,7 +778,7 @@ async fn case16_no_client_certificate_handshake_fails() {
             // that must die with a crypto-class error.
             let err = conn.closed().await;
             assert!(
-                qsh_transport::endpoint::is_crypto_failure(&err),
+                qsh_transport::endpoint::is_crypto_failure(&err.clone().into()),
                 "expected a crypto-class failure, got {err:?}"
             );
         }
