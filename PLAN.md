@@ -25,8 +25,12 @@ M13(측정·배포 기반)은 2026-10-08 닫혔다(`docs/ROADMAP.md` M13 마감 
 
 ## 1. 마일스톤 밖에서 미룬 유지보수
 
-2026-10-08 의존성 갱신(`9714cf6`~`ec68cb6`)이 일부러 남긴 셋이다. 어느 것도 마일스톤 DoD가 아니다.
+2026-10-08 의존성 갱신(`9714cf6`~`ec68cb6`)이 일부러 남긴 셋은 2026-10-09에 모두 착지했다. 남은 확인은 아래 두 줄이다.
 
-- `keyring` 3.6 → 4.x. 4.x는 기능 플래그와 기본 저장소 선택을 다시 설계했고 키 재료를 다룬다. 실제 Keychain과 Secret Service에서 손으로 확인해야 해서 CI만으로는 판정할 수 없다. 별도 변경으로 한다.
-- `release.yml`의 액션(`actions/checkout`, `actions/download-artifact` v7 → v8 등). 서명·공증·provenance는 태그 run으로만 확인된다. `download-artifact` v8은 digest 불일치를 기본으로 오류 처리하고 zip이 아닌 파일을 풀지 않으므로 태그 run 하나로 확인한 뒤 올린다.
-- Rust 툴체인 1.98.1 → 1.99.0(`rust-toolchain.toml`). 새 clippy lint를 `-D warnings`로 한 번 훑어야 한다.
+- [x] Rust 툴체인 1.98.1 → 1.99.0(`512e288`).
+- [x] `release.yml`의 액션(checkout v7, download-artifact v8, setup-rust-toolchain v2)과 태그 없이 게시 경로를 검증하는 dispatch 전용 job `verify-publish-path`(`1557f50`). 서명·공증·provenance는 다음 태그 run에서 확인한다.
+- [x] `keyring` 3.6 → `keyring-core` 1과 플랫폼 store crate(`08a6173`). Linux 실제 Secret Service에서 왕복과 옛·새 바이너리 교차 읽기를 확인했다. macOS Keychain 왕복은 Dave-MBP16이 오프라인이라 아직 못 했다. 다음 태그 전에 `docs/design/testing.md` L1의 수동 단계로 돌린다.
+
+## 2. 테스트 환경
+
+nextest의 간헐 실패는 동시성 문제가 아니었다. 호스트 nftables에 남아 있던 `inet dave_mosh` 표가 loopback UDP 60000~61000을 버렸고, ephemeral 범위(32768~60999)와 겹쳐서 bind(0) QUIC endpoint의 약 4%가 닿지 않았다. 호스트 쪽은 dave-environment `c6c5359c`가 표를 지워서 고쳤다. 저장소 쪽은 `414f1fd`가 막았다. loopback UDP 자가 점검이 같은 상황을 10초 타임아웃 대신 즉시 원인과 함께 실패시키고, `scripts/test/nextest-ns.sh`가 격리 네트워크 namespace에서 스위트를 돌리며, 긴 TMPDIR에서는 nextest setup script가 unix 소켓 경로를 줄인다(`docs/design/testing.md` CI 규율).
