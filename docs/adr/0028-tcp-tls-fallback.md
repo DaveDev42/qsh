@@ -19,12 +19,13 @@ ADR-0005는 TCP fallback을 P1으로 미루면서 두 가지만 정했다. wire 
 
 - 스트림: `SendStream`/`RecvStream`을 transport 중립 타입으로 새로 둔다. `write_all`, `finish`(half-close), `reset(u32)`, `stop(u32)`, `set_priority(i32)`, `stopped()`, `read` → `Option<usize>`와 tokio `AsyncRead`/`AsyncWrite`를 갖는다. drop 의미는 quinn을 따른다. `SendStream` drop은 정상 finish이고 `RecvStream` drop은 stop이다. splice guard가 이 의미에 기대므로 계약 테스트로 고정한다.
 - 오류: `ConnectionError`, `ReadError`, `WriteError`, `DialError`, `AcceptError`를 qsh 소유 enum으로 둔다. 분류 메서드 `is_crypto_failure()`, `is_idle_timeout()`, `is_reset()`, `application_code() -> Option<u32>`가 기존 매칭을 대신한다. QUIC backend의 `Display` 문자열은 지금의 quinn 문자열과 바이트 단위로 같아야 한다. CLI 메시지(`connection lost: {err}`)에 그대로 흐르기 때문이다.
-- 통계: `Connection::stats() -> ConnStats { rtt, rx_frames, peer_blocked_events, rx_raw_datagrams: Option<u64>, lost_packets: Option<u64> }`가 `.quinn().stats()` 호출을 모두 대신한다. `peer_blocked_events`는 QUIC의 `DATA_BLOCKED` 수신 수이고 TCP에서는 mux의 `BLOCKED` 프레임 수다(ADR-0037의 원장 신호).
+- 통계: `Connection::stats() -> ConnStats`와 `rtt()`, `rx_frames()`가 `.quinn().stats()` 호출을 모두 대신한다. `ConnStats`는 `rtt`, `rx_frames`, `peer_blocked_events`, `peer_stream_blocked_events`, `rx_raw_datagrams: Option<u64>`, `lost_packets: Option<u64>`를 싣는다. `peer_blocked_events`는 QUIC의 `DATA_BLOCKED` 수신 수이고 TCP에서는 mux의 `BLOCKED` 프레임 수다(ADR-0037의 원장 신호). `peer_stream_blocked_events`는 `STREAM_DATA_BLOCKED` 수로 `tunnel_stalled_streams`가 관측한다.
 - 연결 식별자: `Connection::stable_id`(quinn slab id)는 프로세스 전역 단조 증가 `ConnId`로 바꾼다. UDP와 TCP listener가 함께 있을 때도 quota·audit·lease·stall 레지스트리 키가 겹치지 않아야 한다.
 - 경로 이동: `Endpoint::rebind_ephemeral() -> io::Result<SocketAddr>`가 `client/reconnect.rs`의 rebind를 대신한다. TCP에서는 `Unsupported`를 돌려주고, `reconnect.rs`는 이미 rebind 실패를 resume으로 넘긴다.
 - 계약 trait(`MuxConn`, `SendHalf`, `RecvHalf`)은 `qsh-transport` 안에서 비공개다. 두 backend가 같은 적합성 스위트를 통과하는 것이 계약이다. `docs/design/testing.md` L4가 mock transport를 기각하므로 열린 trait 집합이 줄 이득은 없다.
 - `qsh-core`의 `Cargo.toml`에서 quinn 의존을 지우고, `cargo xtask arch`에 `crates/qsh-core/src`와 `crates/qsh-cli/src`의 `quinn` 토큰 금지(디렉터리 범위)를 더한다. 의존 행렬은 `qsh-*` crate만 보므로 이 금지가 따로 필요하다.
-- carrier enum의 `Quic` variant 이름(`ControlLink`, `DataLink`, `DataSend`, `DataRecv`, `ForwardCarrier`, `OpenedTunnel`)은 (a)에서 바꾸지 않는다. 테스트가 약 70곳에서 이 이름을 쓰고, 바꿀지는 (c)에서 TCP variant가 생길 때 정한다.
+- carrier enum의 `Quic` variant(`ControlLink`, `DataLink`, `DataSend`, `DataRecv`, `ForwardCarrier`, `OpenedTunnel`, `AcceptDispatch`)는 `Direct`로, `into_raw_quic`은 `into_raw_direct`로 바꾼다. 이 variant가 가르는 축은 transport가 아니라 직접 연결과 localctl 중계이므로, TCP가 같은 variant 아래에 들어간 뒤에 `Quic`이라는 이름은 틀린 말이 된다.
+- `Connection::quinn()`은 `#[doc(hidden)] pub`으로 남는다. `qsh-transport`의 백엔드 통합 테스트(`tests/loopback.rs`의 handshake data downcast, `tests/reset_key.rs`)가 별도 crate라서 부르기 때문이다. `qsh-core`와 `qsh-cli`의 호출은 `xtask arch`가 막는다.
 
 ### 결정 1. 선택 정책: `[transport].mode` = `quic`(기본) | `tcp` | `auto`
 
@@ -104,7 +105,15 @@ TCP에서 `keep_alive_ms` 동안 mux 프레임을 보내지 않았으면 `PING`�
 ## 결과
 
 - M14 (a)는 이 ADR의 승인 전에 착지할 수 있다(`docs/ROADMAP.md` M14 착수 조건). 결정 0이 그 모양이다. (c)는 승인 뒤에 연다.
-- DoD (a)의 "`qsh-core` 비테스트 코드에 `quinn::` 경로가 남지 않음"은 결정 0의 arch 금지로 강제한다. 남는 자리는 없다.
+- DoD (a)의 "`qsh-core` 비테스트 코드에 `quinn::` 경로가 남지 않음"은 결정 0의 arch 금지로 강제한다. `qsh-core`와 `qsh-cli`에 남는 자리는 없다. 워크스페이스에서 quinn을 계속 쓰는 곳은 셋이고 사유가 있다. `qsh-transport` 자신(QUIC 백엔드와 그 백엔드 테스트), `crates/qsh-testkit/src/raw_quic.rs`(Initial flood를 위조하는 비-qsh QUIC 클라이언트. 중립 API로는 손으로 만든 QUIC peer를 표현할 수 없다), `crates/qsh-testkit/tests/tunnel_throughput.rs`의 raw quinn 기준선(`tunnel_throughput_meets_raw_quinn_ratio`, M4 DoD 3의 비교 대상이 정의상 raw quinn이다)이다.
+- DoD (a)의 "테스트 파일은 import 경로와 타입 이름 외에는 고치지 않는다"에서 벗어난 편집이 있다. 모두 기계적인 접근자 교체이고 단언하는 값은 같다. 이 ADR을 승인할 때 함께 받아들일지 정한다.
+  - `.quinn().stats().path.rtt` → `.rtt()`: `crates/qsh-cli/tests/adversarial_load.rs`, `crates/qsh-testkit/tests/tunnel_echo_under_load.rs`, `crates/qsh-testkit/tests/tunnel_stalled_streams.rs`.
+  - `.quinn().stats().frame_rx.{data_blocked,stream_data_blocked}` → `.stats().{peer_blocked_events,peer_stream_blocked_events}`: `tunnel_stalled_streams.rs`.
+  - `.quinn().stats().path.lost_packets` → `.stats().lost_packets.unwrap_or_default()`: `crates/qsh-testkit/tests/chaos_proxy.rs`.
+  - `.quinn()` 호출 제거(facade가 같은 메서드를 가진다): `crates/qsh-testkit/tests/serve_restart_reset.rs`, `crates/qsh-core/src/localctl/daemon/tests.rs`, `crates/qsh-core/src/tunnel/{splice,stall}/tests.rs`.
+  - `is_crypto_failure(&err)` → `is_crypto_failure(&err.clone().into())`: `crates/qsh-transport/tests/handshake_matrix.rs`(백엔드 수준 테스트라 `err`가 아직 quinn 타입이다).
+  - `xtask/src/arch/tests.rs`: 디렉터리 범위 금지가 하나 늘어 누락 대상 수 단언이 8에서 9가 됐고, `daemon.rs` 예외를 보이던 fixture에서 `use quinn::Endpoint;` 줄을 뺐다.
+- 적합성 스위트(`crates/qsh-transport/tests/conformance.rs`)에서 얻은 사실 하나를 (c)에 넘긴다. quinn은 stream 자리를 window의 1/8 단위로 묶어 돌려주므로 stream 하나가 끝난 직후에도 `open_bi`가 막혀 있을 수 있다. TCP mux의 포화 테스트는 stream마다 자리가 바로 돌아온다고 가정하지 않는다.
 - wire: application protocol과 `.proto` v1은 바뀌지 않는다. `docs/design/protocol.md` §16.2에 mux 행이 하나 더해진다. freeze 발효 전이므로 §16.1 목록도 같은 커밋에서 갱신한다.
 - 계약: `qsh.cli/v1`에 additive `transport` 필드가 생기고 `capabilities.json` golden이 바뀐다. `hosts.toml`의 `transport` 키, `[transport].mode`, `[serve].tcp_bind`, `--transport`, `--tcp-bind`, 주소 scheme이 `docs/CLI.md`에 오른다.
 - threat model: §3에 TCP listener와 mux 파서 진입점, §4 C에 행, §7에 `auto` downgrade h행이 핀 테스트와 함께 오른다.
