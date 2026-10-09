@@ -22,8 +22,12 @@ use zeroize::Zeroizing;
 
 use crate::error::{ConnectError, ConnectionError, ExportError};
 use crate::identity::{Fingerprint, Principal};
+use crate::mux::{MuxConn, TransportCaps, TransportKind};
+use crate::quic::QuicConn;
 use crate::stream::{RecvStream, SendStream};
-use crate::tls::{AuthPath, Observation, PeerRole, QshPeerVerifier, RejectReason, TrustEvaluator};
+use crate::tls::{
+    AuthPath, Observation, PeerRole, QshPeerVerifier, RejectReason, TrustEvaluator, VerifiedPeer,
+};
 
 /// Application-level keep-alive interval (`protocol.md` §2). The default
 /// of [`TransportTuning`]; `[transport].keep_alive_ms` in `config.toml`
@@ -628,7 +632,7 @@ fn server_config(
 /// certificate-derived principal.
 #[derive(Clone, Debug)]
 pub struct Connection {
-    inner: quinn::Connection,
+    inner: ConnBackend,
     /// Process-global id minted when the connection is wrapped
     /// ([`Connection::stable_id`]).
     id: usize,
@@ -637,7 +641,44 @@ pub struct Connection {
     peer_fingerprint: Option<Fingerprint>,
 }
 
+/// The transports a [`Connection`] can run over. Every method that touches
+/// the wire goes through the [`MuxConn`] contract, so a backend that lacks
+/// one fails to compile.
+#[derive(Clone, Debug)]
+enum ConnBackend {
+    Quic(QuicConn),
+}
+
 impl Connection {
+    /// Wrap a handshaken quinn connection whose peer the verifier accepted.
+    fn from_quic(
+        conn: quinn::Connection,
+        chain: &[CertificateDer<'static>],
+        verified: VerifiedPeer,
+    ) -> Self {
+        Self {
+            peer_fingerprint: chain.first().and_then(|c| Fingerprint::of_cert_der(c).ok()),
+            inner: ConnBackend::Quic(QuicConn(conn)),
+            id: next_connection_id(),
+            principal: verified.principal,
+            auth_path: verified.auth_path,
+        }
+    }
+
+    /// Which transport the connection runs over.
+    pub fn transport_kind(&self) -> TransportKind {
+        match &self.inner {
+            ConnBackend::Quic(c) => c.kind(),
+        }
+    }
+
+    /// What the connection's transport can do.
+    pub fn caps(&self) -> TransportCaps {
+        match &self.inner {
+            ConnBackend::Quic(c) => c.caps(),
+        }
+    }
+
     /// The peer's authenticated principal (the ACL input).
     pub fn principal(&self) -> &Principal {
         &self.principal
@@ -663,7 +704,9 @@ impl Connection {
     /// Peer socket address (may change over the connection's life via
     /// migration; this is the current one).
     pub fn remote_address(&self) -> SocketAddr {
-        self.inner.remote_address()
+        match &self.inner {
+            ConnBackend::Quic(c) => c.remote_address(),
+        }
     }
 
     /// Id for logs, audit and the per-connection registries (quota, lease,
@@ -682,29 +725,43 @@ impl Connection {
 
     /// Open a bidirectional stream.
     pub async fn open_bi(&self) -> Result<(SendStream, RecvStream), ConnectionError> {
-        let (send, recv) = self.inner.open_bi().await?;
-        Ok((SendStream::from_quic(send), RecvStream::from_quic(recv)))
+        match &self.inner {
+            ConnBackend::Quic(c) => {
+                let (send, recv) = c.open_bi().await?;
+                Ok((SendStream::from_quic(send), RecvStream::from_quic(recv)))
+            }
+        }
     }
 
     /// Accept the next peer-initiated bidirectional stream.
     pub async fn accept_bi(&self) -> Result<(SendStream, RecvStream), ConnectionError> {
-        let (send, recv) = self.inner.accept_bi().await?;
-        Ok((SendStream::from_quic(send), RecvStream::from_quic(recv)))
+        match &self.inner {
+            ConnBackend::Quic(c) => {
+                let (send, recv) = c.accept_bi().await?;
+                Ok((SendStream::from_quic(send), RecvStream::from_quic(recv)))
+            }
+        }
     }
 
     /// Close with an application error code and reason. Idempotent.
     pub fn close(&self, code: u32, reason: &[u8]) {
-        self.inner.close(quinn::VarInt::from_u32(code), reason);
+        match &self.inner {
+            ConnBackend::Quic(c) => c.close(code, reason),
+        }
     }
 
     /// Resolves when the connection is closed (by either side).
     pub async fn closed(&self) -> ConnectionError {
-        self.inner.closed().await.into()
+        match &self.inner {
+            ConnBackend::Quic(c) => c.closed().await,
+        }
     }
 
     /// If the connection is already closed, why.
     pub fn close_reason(&self) -> Option<ConnectionError> {
-        self.inner.close_reason().map(ConnectionError::from)
+        match &self.inner {
+            ConnBackend::Quic(c) => c.close_reason(),
+        }
     }
 
     /// Convenience for [`ConnStats::rx_frames`].
@@ -720,14 +777,8 @@ impl Connection {
     /// A snapshot of the connection's transport counters. See [`ConnStats`]
     /// for what each field proves and what it does not.
     pub fn stats(&self) -> ConnStats {
-        let stats = self.inner.stats();
-        ConnStats {
-            rtt: stats.path.rtt,
-            rx_frames: fold_frames_rx(&stats.frame_rx),
-            peer_blocked_events: stats.frame_rx.data_blocked,
-            peer_stream_blocked_events: stats.frame_rx.stream_data_blocked,
-            rx_raw_datagrams: Some(stats.udp_rx.datagrams),
-            lost_packets: Some(stats.path.lost_packets),
+        match &self.inner {
+            ConnBackend::Quic(c) => c.stats(),
         }
     }
 
@@ -738,7 +789,9 @@ impl Connection {
     /// `cargo xtask arch` bars them from naming quinn at all.
     #[doc(hidden)]
     pub fn quinn(&self) -> &quinn::Connection {
-        &self.inner
+        match &self.inner {
+            ConnBackend::Quic(c) => &c.0,
+        }
     }
 
     /// RFC 5705 TLS exporter — the channel-binding primitive pairing uses
@@ -752,7 +805,9 @@ impl Connection {
         label: &[u8],
         context: &[u8],
     ) -> Result<(), ExportError> {
-        Ok(self.inner.export_keying_material(output, label, context)?)
+        match &self.inner {
+            ConnBackend::Quic(c) => c.export_keying_material(output, label, context),
+        }
     }
 }
 
@@ -875,44 +930,6 @@ pub struct ConnStats {
     /// Packets this side detected as lost; `None` for a backend that does
     /// not track it.
     pub lost_packets: Option<u64>,
-}
-
-/// Sum of every received frame counter quinn keeps.
-///
-/// Every field is listed explicitly. `FrameStats` is `#[non_exhaustive]`, so
-/// a frame type a future quinn adds is not caught by the compiler:
-/// re-check this list on a quinn upgrade. The loopback test
-/// `rx_frames_moves_on_authenticated_stream_frames` pins that ordinary
-/// stream traffic moves the sum.
-fn fold_frames_rx(f: &quinn::FrameStats) -> u64 {
-    [
-        f.acks,
-        f.ack_frequency,
-        f.crypto,
-        f.connection_close,
-        f.data_blocked,
-        f.datagram,
-        u64::from(f.handshake_done),
-        f.immediate_ack,
-        f.max_data,
-        f.max_stream_data,
-        f.max_streams_bidi,
-        f.max_streams_uni,
-        f.new_connection_id,
-        f.new_token,
-        f.path_challenge,
-        f.path_response,
-        f.ping,
-        f.reset_stream,
-        f.retire_connection_id,
-        f.stream_data_blocked,
-        f.streams_blocked_bidi,
-        f.streams_blocked_uni,
-        f.stop_sending,
-        f.stream,
-    ]
-    .into_iter()
-    .fold(0u64, u64::saturating_add)
 }
 
 fn peer_chain(conn: &quinn::Connection) -> Vec<CertificateDer<'static>> {
@@ -1041,13 +1058,7 @@ impl Dialer {
             }
         };
         Ok(Dialed {
-            connection: Connection {
-                peer_fingerprint: chain.first().and_then(|c| Fingerprint::of_cert_der(c).ok()),
-                inner: conn,
-                id: next_connection_id(),
-                principal: verified.principal,
-                auth_path: verified.auth_path,
-            },
+            connection: Connection::from_quic(conn, &chain, verified),
             endpoint: Endpoint::from_quic(endpoint),
             verifier,
         })
@@ -1351,13 +1362,7 @@ impl Incoming {
         let conn = self.incoming.await.map_err(ConnectionError::from)?;
         let chain = peer_chain(&conn);
         match self.verifier.verify_peer(&chain, PeerRole::Client) {
-            Ok(verified) => Ok(Connection {
-                peer_fingerprint: chain.first().and_then(|c| Fingerprint::of_cert_der(c).ok()),
-                inner: conn,
-                id: next_connection_id(),
-                principal: verified.principal,
-                auth_path: verified.auth_path,
-            }),
+            Ok(verified) => Ok(Connection::from_quic(conn, &chain, verified)),
             Err(reason) => {
                 conn.close(
                     quinn::VarInt::from_u32(CLOSE_CODE_UNVERIFIED_PEER),
