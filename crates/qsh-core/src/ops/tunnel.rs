@@ -1141,7 +1141,7 @@ impl Ops {
     ///    if absent, no fallback;
     /// 4. only then bind the SOCKS5 listener, opening each `CONNECT`
     ///    through the connected route's own carrier
-    ///    (`ForwardCarrier::Quic`/`Local`).
+    ///    (`ForwardCarrier::Direct`/`Local`).
     pub fn tunnel_dynamic(&self, req: TunnelDynamicReq) -> Result<TunnelHold, OpError> {
         let listen_port = port(req.listen_port, "listen_port")?;
         crate::tunnel::local::loopback_bind_addr(req.bind.as_deref(), listen_port, "-D")
@@ -1809,7 +1809,7 @@ impl Ops {
             RouteSeed::Forward(target) => {
                 let link = conn.forward_link().ok_or_else(internal)?;
                 let session = conn.take_session().ok_or_else(internal)?;
-                let initial = ForwardCarrier::Quic(link.connection());
+                let initial = ForwardCarrier::Direct(link.connection());
                 Ok(SupervisionParts {
                     session,
                     route: supervise::Route::Forward {

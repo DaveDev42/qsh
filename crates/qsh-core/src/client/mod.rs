@@ -203,7 +203,7 @@ impl Session {
     pub fn from_control(conn: Connection, ctl: FramedStream, peer_hello: Hello) -> Self {
         Self {
             conn: Some(conn),
-            link: ControlLink::Quic(ctl),
+            link: ControlLink::Direct(ctl),
             #[cfg(unix)]
             local: None,
             #[cfg(unix)]
@@ -283,8 +283,8 @@ impl Session {
             data.send.send(header).await?;
             let (send, recv) = data.split();
             return Ok((
-                DataSend::Quic(send),
-                DataRecv::Quic(recv),
+                DataSend::Direct(send),
+                DataRecv::Direct(recv),
                 DataKillSwitch::default(),
             ));
         }

@@ -764,7 +764,7 @@ impl DataSendHalf {
     /// (`crate::tunnel::splice::splice_tcp_uds`, `docs/history/m4-plan.md` Step 5 (a)) —
     /// the `Local` carrier's counterpart to
     /// [`qsh_transport::control::FramedSend::into_raw`], which the forward
-    /// `Quic` carrier surrenders instead.
+    /// `Direct` carrier surrenders instead.
     pub(crate) fn into_raw(self) -> RawUdsWrite {
         RawUdsWrite {
             socket: self.socket,
@@ -840,7 +840,7 @@ impl DataRecvHalf {
 /// Client → daemon raw byte writer, past a `LOCAL_STREAM` conduit's framed
 /// handshake — [`DataSendHalf::into_raw`]'s return type, and the `Local`
 /// carrier's counterpart to a raw `qsh_transport::SendStream`
-/// ([`DataSend::into_raw_quic`](crate::client::link::DataSend::into_raw_quic)).
+/// ([`DataSend::into_raw_direct`](crate::client::link::DataSend::into_raw_direct)).
 /// Backed by the same `Arc<UnixStream>` [`DataSendHalf`] held, so this is
 /// still just one of up to three live clones of one socket
 /// ([`open_stream_over_inner`]'s own doc) — dropping this one only drops

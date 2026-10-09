@@ -54,7 +54,7 @@ pub(crate) mod testutil;
 /// `StreamHeader{TCP_ACCEPTED}`) on `link`, sending `header` as its first
 /// frame and applying [`PRIORITY_TUNNEL`] (`docs/design/protocol.md` §12).
 ///
-/// Symmetric across [`DataLink::Quic`] (forward) and [`DataLink::Local`]
+/// Symmetric across [`DataLink::Direct`] (forward) and [`DataLink::Local`]
 /// (reverse) — both are just `link.open_stream(...)` here, same as they
 /// are for [`crate::client::Session`]'s `SESSION_DATA` stream. The
 /// returned pair is framed (able to carry [`qsh_proto::wire::ConnectResult`]
@@ -116,15 +116,15 @@ mod tests {
             port: 3000,
             deny_host_local: false,
         };
-        let link = DataLink::Quic(&client);
+        let link = DataLink::Direct(&client);
         let (mut send, _recv, _kill) = open_stream(&link, &header).await.unwrap();
 
         match &send {
-            DataSend::Quic(quic_send) => {
+            DataSend::Direct(quic_send) => {
                 assert_eq!(quic_send.priority().unwrap(), PRIORITY_TUNNEL);
             }
             #[cfg(unix)]
-            DataSend::Local(_) => unreachable!("loopback_pair only opens the forward Quic route"),
+            DataSend::Local(_) => unreachable!("loopback_pair only opens the forward Direct route"),
         }
 
         // Discriminating guard: `PRIORITY_TUNNEL == 0` coincides with
@@ -135,17 +135,17 @@ mod tests {
         // seam applies the priority it is handed rather than leaving the
         // stream at quinn's default.
         const SENTINEL_PRIORITY: i32 = 42;
-        let link2 = DataLink::Quic(&client);
+        let link2 = DataLink::Direct(&client);
         let (mut sentinel_send, _r, _k) =
             link2.open_stream(&header, SENTINEL_PRIORITY).await.unwrap();
         match &sentinel_send {
-            DataSend::Quic(s) => assert_eq!(
+            DataSend::Direct(s) => assert_eq!(
                 s.priority().unwrap(),
                 SENTINEL_PRIORITY,
                 "the seam must apply the priority it is passed, not quinn's default"
             ),
             #[cfg(unix)]
-            DataSend::Local(_) => unreachable!("forward Quic route only"),
+            DataSend::Local(_) => unreachable!("forward Direct route only"),
         }
         sentinel_send.finish();
 

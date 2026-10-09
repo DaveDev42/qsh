@@ -669,7 +669,7 @@ impl Supervisor {
                     // their own.
                     let _old = link.replace(endpoint, connection.clone());
                 }
-                (ForwardCarrier::Quic(connection), session)
+                (ForwardCarrier::Direct(connection), session)
             }
             #[cfg(unix)]
             Established::Reverse(next) => {

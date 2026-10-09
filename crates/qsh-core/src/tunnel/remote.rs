@@ -362,7 +362,7 @@ enum RemoteForwardConnError {
     /// The carrier cannot surrender a raw byte pipe: a remote forward over
     /// the reverse `LOCAL_STREAM` conduit, which is `docs/history/m4-plan.md` Step 5.
     /// Never reached in Step 4 — the only carrier this stage ever builds
-    /// is [`DataLink::Quic`] — kept as a real variant rather than
+    /// is [`DataLink::Direct`] — kept as a real variant rather than
     /// `unreachable!()` so a future carrier that is not yet raw-capable
     /// fails loudly instead of panicking a spliced connection's task.
     #[error("remote forwards over a reverse connection land in M4 Step 5")]
@@ -398,7 +398,7 @@ async fn accept_one(
         port: 0,
         deny_host_local: false,
     };
-    let link = DataLink::Quic(conn);
+    let link = DataLink::Direct(conn);
     let (send, recv, kill) = match crate::tunnel::open_stream(&link, &header).await {
         Ok(opened) => opened,
         Err(err) => {
@@ -406,7 +406,7 @@ async fn accept_one(
             return Err(err.into());
         }
     };
-    let (Ok(raw_send), Ok((raw_recv, residue))) = (send.into_raw_quic(), recv.into_raw_quic())
+    let (Ok(raw_send), Ok((raw_recv, residue))) = (send.into_raw_direct(), recv.into_raw_direct())
     else {
         kill.kill();
         reset_tcp(tcp);
@@ -450,7 +450,7 @@ fn remote_forward_quota_key(forward_id: &[u8]) -> String {
 /// Returns only when the listener itself dies fatally, or is dropped from
 /// outside (this future being aborted) — there is no other exit, matching
 /// `LocalForward::run`'s own contract. `conn` is a snapshot, the same
-/// `ForwardCarrier::Quic` caveat `crate::tunnel::local` documents: this
+/// `ForwardCarrier::Direct` caveat `crate::tunnel::local` documents: this
 /// forward does not survive a forward-route connection recovery
 /// (`docs/history/m4-plan.md` Step 8's subject).
 pub(crate) async fn serve_remote_forward(
@@ -651,7 +651,7 @@ pub struct RemoteForwardAcceptor {
 enum AcceptDispatch {
     /// Forward route: [`dispatch_remote_forwards`] already running against
     /// a live [`qsh_transport::Connection`], shared by every `-R` on it.
-    Quic { task: tokio::task::JoinHandle<()> },
+    Direct { task: tokio::task::JoinHandle<()> },
     /// Reverse route: this machine's resident daemon socket, plus one
     /// claim-loop task per currently-registered `forward_id`
     /// (`claim_remote_forward_reverse`).
@@ -701,7 +701,7 @@ impl RemoteForwardAcceptor {
         let task = tokio::spawn(dispatch_remote_forwards(conn, Arc::clone(&table)));
         Self {
             table,
-            dispatch: AcceptDispatch::Quic { task },
+            dispatch: AcceptDispatch::Direct { task },
         }
     }
 
@@ -750,7 +750,7 @@ impl RemoteForwardAcceptor {
 
     /// This instance's own claim token, reverse route only — the exact
     /// bytes `Self::spawn_reverse` minted, unchanged. `None` on the
-    /// forward route (`AcceptDispatch::Quic` has no claim token; a
+    /// forward route (`AcceptDispatch::Direct` has no claim token; a
     /// live QUIC connection makes the token's whole purpose moot, since
     /// nothing else can claim from it). A caller that opens a `-R over
     /// reverse` forward must call this **before** it sends
@@ -764,7 +764,7 @@ impl RemoteForwardAcceptor {
     /// echoes the token back for this side to read.
     pub fn claim_token(&self) -> Option<&[u8]> {
         match &self.dispatch {
-            AcceptDispatch::Quic { .. } => None,
+            AcceptDispatch::Direct { .. } => None,
             #[cfg(unix)]
             AcceptDispatch::Local { claim_token, .. } => Some(claim_token.as_slice()),
         }
@@ -860,7 +860,7 @@ impl Drop for RemoteForwardAcceptor {
         // TCP connection, so refusing to finish relaying it would abandon
         // a connection someone else already committed to.
         match &self.dispatch {
-            AcceptDispatch::Quic { task } => task.abort(),
+            AcceptDispatch::Direct { task } => task.abort(),
             #[cfg(unix)]
             AcceptDispatch::Local { claims, .. } => {
                 for (_, task) in claims.lock().unwrap_or_else(|e| e.into_inner()).drain() {

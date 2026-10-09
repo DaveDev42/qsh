@@ -145,7 +145,7 @@ async fn accept_hold_preserves_accept_order_on_dispatch() {
             drop(turn);
         }));
     }
-    tx.send(CarrierState::Live(Arc::new(ForwardCarrier::Quic(client))))
+    tx.send(CarrierState::Live(Arc::new(ForwardCarrier::Direct(client))))
         .unwrap();
     for waiter in waiters {
         waiter.await.unwrap();
@@ -185,7 +185,7 @@ async fn accept_hold_a_refused_connection_at_the_front_does_not_stall_the_queue(
     // second's at t = 3 s. The carrier comes back in between.
     tokio::time::advance(Duration::from_millis(1_500)).await;
     assert!(!first.await.unwrap(), "the first was held past its window");
-    tx.send(CarrierState::Live(Arc::new(ForwardCarrier::Quic(client))))
+    tx.send(CarrierState::Live(Arc::new(ForwardCarrier::Direct(client))))
         .unwrap();
     assert!(second.await.unwrap(), "the second is dispatched");
 }
