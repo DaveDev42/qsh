@@ -1,3 +1,6 @@
+# Setup scripts are an opt-in nextest feature; see [scripts.setup.short-tmpdir] below.
+experimental = ["setup-scripts"]
+
 # `cargo nextest run` configuration. Local defaults otherwise — this only
 # adds a bound so a genuine deadlock terminates instead of hanging CI up to
 # the job-level timeout (`docs/ROADMAP.md` 2026-08-21 audit A13).
@@ -114,3 +117,13 @@ slow-timeout = { period = "3600s" }
 test-threads = 1
 success-output = "final"
 slow-timeout = { period = "3600s" }
+
+# Keeps unix socket paths under sun_path (108 bytes) when $TMPDIR is long.
+# Unix only: Windows has no sun_path limit this suite hits.
+[scripts.setup.short-tmpdir]
+command = 'scripts/test/short-tmpdir.sh'
+
+[[profile.default.scripts]]
+platform = 'cfg(unix)'
+filter = 'all()'
+setup = 'short-tmpdir'

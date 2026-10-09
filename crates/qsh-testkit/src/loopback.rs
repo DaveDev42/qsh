@@ -328,6 +328,7 @@ impl LoopbackHarness {
         let client_pin = server_trust.lookup_pin(&client.fingerprint);
         let client_trust = StaticTrust::empty()
             .with_pin(server_identity.fingerprint, Principal::Device("box".into()));
+        crate::env_check::ensure_loopback_udp();
         let listener = Listener::bind(
             "127.0.0.1:0".parse().expect("addr"),
             server_identity.local.clone(),

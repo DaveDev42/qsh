@@ -156,6 +156,7 @@ ACL glob 평가기는 fuzz보다 property test가 적합하다(위 L2 "정책 �
 
 ## CI 규율
 
+- **환경 문제는 빠르고 분명하게 실패한다(재시도로 가리지 않는다):** 호스트 nftables 잔재(`udp dport 60000-61000 drop`, loopback 예외 없음)가 loopback UDP를 막아 `bind(0)` QUIC endpoint의 약 4.3%가 도달 불능이 되었고, 그 테스트들이 10초 타임아웃으로 죽으며 제품 flake처럼 보였다. 원인 규칙은 dave-environment c6c5359c가 제거했다. nextest `--retries`로 이런 실패를 덮지 않는다. 재시도는 원인 진단을 늦추고 환경 결함을 통과로 바꿔 버린다. 대신 `qsh-testkit`의 `env_check::ensure_loopback_udp`(프로세스당 한 번, 50ms 미만)가 하네스 생성자(`Listener::bind` 앞, `ServeGuard` spawn, raw endpoint)에서 ephemeral 범위와 60000-61000의 UDP 왕복을 확인하고, 막혔으면 막힌 포트와 예상 원인, 우회책을 담은 메시지로 즉시 panic한다. `qsh-core` 단위 테스트는 `qsh-testkit`에 의존할 수 없어(아키텍처 §1) 이 점검 밖이다. 우회책은 `scripts/test/nextest-ns.sh`로, `unshare -Urn`과 `lo` 기동, 안쪽 `unshare -U --map-user/--map-group`으로 전용 netns에서 비루트로 스위트를 돌린다(nft 테이블은 netns마다 별개). 같은 계열로 긴 `$TMPDIR`(약 100자 이상)는 unix socket 경로를 `sun_path` 108바이트 밖으로 밀어 약 120개 테스트를 `path must be shorter than SUN_LEN`으로 죽였다. `.config/nextest.toml`의 setup script `scripts/test/short-tmpdir.sh`가 `$TMPDIR`가 48바이트를 넘으면 `/tmp/qsh-t-<uid>`로 바꿔 준다.
 - 모든 테스트는 port 0 바인딩, 테스트별 고유 tempdir.
 - `sleep()` 금지 — `tokio::time::pause()` 또는 이벤트 통지 + `timeout`. T2의 RSS/fd 안정화(`crates/qsh-cli/tests/common/mod.rs`)는 폴링을 `tokio::time::sleep`으로 한다 — 고정 대기가 아니라 200ms 간격 *조건* 폴링(연속 3회 상대 변동 1% 미만을 안정으로 본다)이라는 점에서 이 규율이 금지하는 고정 대기와는 다르지만, 벽시계를 쓴다는 사실 자체는 남는다(4c 적대 검토 A13).
 - Chaos는 seeded, 실패 시 seed를 단언 메시지에 출력.

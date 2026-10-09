@@ -169,6 +169,7 @@ impl ReverseHarness {
         sweep_tick: Duration,
     ) -> Self {
         let controller = make_identity();
+        crate::env_check::ensure_loopback_udp();
         let listener = Listener::bind(
             "127.0.0.1:0".parse().expect("addr"),
             controller.local.clone(),
@@ -220,6 +221,7 @@ impl ReverseHarness {
         validated_rate_per_source: u32,
     ) -> Self {
         let controller = make_identity();
+        crate::env_check::ensure_loopback_udp();
         let listener = Listener::bind(
             "127.0.0.1:0".parse().expect("addr"),
             controller.local.clone(),
@@ -276,6 +278,7 @@ impl ReverseHarness {
         limits: qsh_core::quota::QuotaLimits,
     ) -> Self {
         let controller = make_identity();
+        crate::env_check::ensure_loopback_udp();
         let listener = Listener::bind(
             "127.0.0.1:0".parse().expect("addr"),
             controller.local.clone(),
@@ -955,6 +958,7 @@ impl ReversePairHarness {
         // ever dial in.
         let controller_trust =
             StaticTrust::empty().with_pin(target.fingerprint, Principal::Device("target".into()));
+        crate::env_check::ensure_loopback_udp();
         let listener = Listener::bind(
             "127.0.0.1:0".parse().expect("addr"),
             controller.local.clone(),
