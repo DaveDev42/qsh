@@ -1,6 +1,6 @@
 # PLAN.md — 자리표시자: M14 착수 대기 (ADR-0028 제안됨)
 
-M13(측정·배포 기반)은 2026-10-08 닫혔다(`docs/ROADMAP.md` M13 마감 노트). 그 계획은 `docs/history/m13-plan.md`로 옮겼다. 순서상 다음인 M14(TCP/TLS fallback)는 착수 ADR인 ADR-0028이 승인돼야 연다(`docs/ROADMAP.md` M14 착수 조건, §5.1 원칙 2). ADR-0028은 2026-10-09 `제안됨`으로 올랐고 승인 전이므로 이 파일은 M13 마감 공통 절차(`docs/ROADMAP.md` §2)와 `CLAUDE.md` Session onboarding 2에 따라 사람 몫만 추적하는 자리표시자다. 에이전트가 승인 없이 열 수 있는 일은 M14 착수 조건이 승인 전에 열어 두는 (a) `Transport`/`StreamMux` 추상(동작 변경 없는 리팩터)이다. 모양은 ADR-0028 결정 0을 따른다. 승인은 사용자가 정한다. 승인되면 이 파일을 M14 실행 계획으로 전면 교체한다.
+M13(측정·배포 기반)은 2026-10-08 닫혔다(`docs/ROADMAP.md` M13 마감 노트). 그 계획은 `docs/history/m13-plan.md`로 옮겼다. 순서상 다음인 M14(TCP/TLS fallback)는 착수 ADR인 ADR-0028이 승인돼야 연다(`docs/ROADMAP.md` M14 착수 조건, §5.1 원칙 2). ADR-0028은 2026-10-09 `제안됨`으로 올랐고 승인 전이므로 이 파일은 M13 마감 공통 절차(`docs/ROADMAP.md` §2)와 `CLAUDE.md` Session onboarding 2에 따라 사람 몫만 추적하는 자리표시자다. M14 착수 조건이 승인 전에 열어 둔 (a) `Transport`/`StreamMux` 추상은 2026-10-09 착지했다(`e5a62a5`~`7ca3947`, 모양은 ADR-0028 결정 0). `qsh-core`와 `qsh-cli`에 quinn 의존과 `quinn::` 경로가 없고 `cargo xtask arch`가 그것을 잠근다. 처리량 비율과 포화 터널 PTY echo p95는 기준선 범위 안이다. DoD (a)의 "테스트는 import 경로와 타입 이름만"에서 벗어난 접근자 교체 편집은 ADR-0028 결과 절에 목록으로 있고, 받아들일지는 승인 때 정한다. 에이전트가 승인 없이 할 수 있는 M14 일은 더 없다. 승인은 사용자가 정한다. 승인되면 이 파일을 M14 실행 계획으로 전면 교체한다.
 
 ## 0. 열린 사람 몫
 
