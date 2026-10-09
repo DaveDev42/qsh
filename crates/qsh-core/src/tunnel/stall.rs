@@ -240,7 +240,7 @@ pub(crate) struct StallLedger {
     /// state alive exactly as long as the splices registered here do —
     /// each of them already holds the connection through its own streams —
     /// so the ledger never outlives what it watches by more than that.
-    conn: quinn::Connection,
+    conn: qsh_transport::Connection,
     epoch: Instant,
     params: StallParams,
     state: Mutex<LedgerState>,
@@ -268,7 +268,7 @@ fn traffic_hooks() -> &'static TrafficHooks {
 /// Keyed by `stable_id` like the ledger registry. The guard removes the
 /// entry, so a hook never outlives the registration that owns it and the id
 /// of a closed connection is not left behind.
-pub(crate) fn report_traffic(conn: &quinn::Connection, hook: TrafficHook) -> TrafficGuard {
+pub(crate) fn report_traffic(conn: &qsh_transport::Connection, hook: TrafficHook) -> TrafficGuard {
     let id = conn.stable_id();
     let token = Arc::as_ptr(&hook).cast::<()>() as usize;
     lock(traffic_hooks()).insert(id, hook);
@@ -296,7 +296,7 @@ impl Drop for TrafficGuard {
     }
 }
 
-fn traffic_hook_for(conn: &quinn::Connection) -> Option<TrafficHook> {
+fn traffic_hook_for(conn: &qsh_transport::Connection) -> Option<TrafficHook> {
     lock(traffic_hooks()).get(&conn.stable_id()).cloned()
 }
 
@@ -313,7 +313,7 @@ impl StallLedger {
     /// The ledger of `conn`, created (and its evaluation task spawned) on
     /// first use. Keyed by `stable_id`: a live ledger holds `conn`, so its
     /// id cannot be reused by another connection while the entry upgrades.
-    pub(crate) fn for_connection(conn: &quinn::Connection) -> Arc<StallLedger> {
+    pub(crate) fn for_connection(conn: &qsh_transport::Connection) -> Arc<StallLedger> {
         let mut registry = lock(registry());
         registry.retain(|_, ledger| ledger.strong_count() > 0);
         if let Some(ledger) = registry.get(&conn.stable_id()).and_then(Weak::upgrade) {
@@ -326,7 +326,7 @@ impl StallLedger {
 
     /// A ledger outside the registry with its own parameters, evaluation
     /// task included.
-    pub(crate) fn start(conn: quinn::Connection, params: StallParams) -> Arc<StallLedger> {
+    pub(crate) fn start(conn: qsh_transport::Connection, params: StallParams) -> Arc<StallLedger> {
         let ledger = Self::new_unstarted(conn, params);
         tokio::spawn(evaluate_loop(
             Arc::downgrade(&ledger),
@@ -335,8 +335,8 @@ impl StallLedger {
         ledger
     }
 
-    fn new_unstarted(conn: quinn::Connection, params: StallParams) -> Arc<StallLedger> {
-        let last_data_blocked = conn.stats().frame_rx.data_blocked;
+    fn new_unstarted(conn: qsh_transport::Connection, params: StallParams) -> Arc<StallLedger> {
+        let last_data_blocked = conn.stats().peer_blocked_events;
         Arc::new(StallLedger {
             conn,
             epoch: Instant::now(),
@@ -377,7 +377,7 @@ impl StallLedger {
     /// One evaluation tick against the connection's live `DATA_BLOCKED`
     /// count: decide, then signal every chosen stream and log it.
     fn tick(&self, now: Instant) {
-        let data_blocked = self.conn.stats().frame_rx.data_blocked;
+        let data_blocked = self.conn.stats().peer_blocked_events;
         let evictions = self.decide(now, data_blocked);
         if evictions.is_empty() {
             return;
@@ -455,7 +455,7 @@ impl StallLedger {
 
     #[cfg(test)]
     pub(crate) fn unstarted_for_test(
-        conn: quinn::Connection,
+        conn: qsh_transport::Connection,
         params: StallParams,
     ) -> Arc<StallLedger> {
         Self::new_unstarted(conn, params)
@@ -510,7 +510,7 @@ pub(crate) struct StallWatch {
 
 impl StallWatch {
     /// A watch on `conn`'s production ledger.
-    pub(crate) fn on(conn: &quinn::Connection, label: impl Into<String>) -> StallWatch {
+    pub(crate) fn on(conn: &qsh_transport::Connection, label: impl Into<String>) -> StallWatch {
         StallLedger::for_connection(conn).watch(label)
     }
 

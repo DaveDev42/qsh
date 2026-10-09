@@ -105,10 +105,7 @@ pub(crate) fn report_tunnel_traffic(
     conn: &qsh_transport::Connection,
 ) -> crate::tunnel::stall::TrafficGuard {
     let watch = watch.clone();
-    crate::tunnel::stall::report_traffic(
-        conn.quinn(),
-        std::sync::Arc::new(move || watch.activity()),
-    )
+    crate::tunnel::stall::report_traffic(conn, std::sync::Arc::new(move || watch.activity()))
 }
 
 /// A duration as whole milliseconds for a diagnostic line, saturating

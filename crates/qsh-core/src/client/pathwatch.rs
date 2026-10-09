@@ -824,7 +824,7 @@ impl ProbeSource for qsh_transport::Connection {
     }
 
     fn rtt(&self) -> Duration {
-        self.quinn().stats().path.rtt
+        self.rtt()
     }
 
     fn rx_frames(&self) -> u64 {
@@ -832,7 +832,7 @@ impl ProbeSource for qsh_transport::Connection {
     }
 
     fn rx_datagrams(&self) -> u64 {
-        self.quinn().stats().udp_rx.datagrams
+        self.stats().rx_raw_datagrams.unwrap_or(0)
     }
 }
 

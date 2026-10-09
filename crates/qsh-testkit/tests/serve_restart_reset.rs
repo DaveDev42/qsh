@@ -222,7 +222,6 @@ async fn first_packet_then_wait(
     let (mut send, _recv) = attached
         .session
         .connection()
-        .quinn()
         .open_bi()
         .await
         .expect("open_bi on the doomed connection");

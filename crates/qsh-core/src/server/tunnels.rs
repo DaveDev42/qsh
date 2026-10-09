@@ -118,10 +118,8 @@ impl Server {
         // This connection's stall ledger (ADR-0037 decision 8): a peer
         // destination that stops reading must not starve this host's own
         // PTY input on the same connection.
-        let watch = crate::tunnel::stall::StallWatch::on(
-            conn.quinn(),
-            format!("{}:{}", header.host, header.port),
-        );
+        let watch =
+            crate::tunnel::stall::StallWatch::on(conn, format!("{}:{}", header.host, header.port));
         let outcome = splice_tcp_quic(upstream, send.into_raw(), raw_recv, residue, watch).await;
 
         // Structural only: destination and byte counts, never payload

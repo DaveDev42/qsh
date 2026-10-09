@@ -104,7 +104,7 @@ pub(super) async fn recover_attach(
                 // in which case `live_leg` is already forced `false`
                 // above — so `rtt.is_none()` short-circuits the `&&`
                 // below before `probe_alive` would ever need a value.
-                let rtt = link.map(|link| link.connection().quinn().stats().path.rtt);
+                let rtt = link.map(|link| link.connection().rtt());
                 async move {
                     match rtt {
                         Some(rtt) => live_leg && probe_alive(&watch, &probes, rtt).await,

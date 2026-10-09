@@ -113,7 +113,7 @@ async fn aborting_the_owning_task_mid_transfer_resets_both_peers_not_a_clean_eof
         remote_send,
         remote_recv,
         Vec::new(),
-        StallWatch::on(conn_b.quinn(), "test"),
+        StallWatch::on(&conn_b, "test"),
     ));
 
     // Down direction: the "hello" queued above must actually arrive
@@ -285,7 +285,7 @@ mod stalled {
     async fn a_stopped_stalled_stream_reaches_the_local_app_as_a_reset_not_a_clean_end() {
         let (peer, splicer) = crate::tunnel::testutil::loopback_pair().await;
         // A limit of zero: the first stall is already one too many.
-        let ledger = StallLedger::start(splicer.quinn().clone(), fast(0));
+        let ledger = StallLedger::start(splicer.clone(), fast(0));
         let mut leg = open_leg(&peer, &splicer, &ledger, Some(4 * 1024)).await;
 
         assert!(matches!(stopped(&mut leg).await, Err(SpliceError::Stalled)));
@@ -333,7 +333,7 @@ mod stalled {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_stalled_stream_stop_leaves_other_tunnel_streams_and_the_pty_untouched() {
         let (peer, splicer) = crate::tunnel::testutil::loopback_pair().await;
-        let ledger = StallLedger::start(splicer.quinn().clone(), fast(1));
+        let ledger = StallLedger::start(splicer.clone(), fast(1));
 
         // The PTY stand-in: a plain bidi stream, never in any ledger.
         let (pty_accepted, (mut pty_send, _pty_peer_recv)) =
@@ -439,7 +439,7 @@ mod stalled {
             stall_age: crate::tunnel::stall::STALL_AGE,
             ..fast(0)
         };
-        let ledger = StallLedger::start(splicer.quinn().clone(), params);
+        let ledger = StallLedger::start(splicer.clone(), params);
         let leg = open_leg(&peer, &splicer, &ledger, None).await;
 
         // 64 KiB every 2 ms, a few tens of MB/s at most: under
