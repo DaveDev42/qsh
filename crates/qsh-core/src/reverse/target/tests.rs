@@ -1306,7 +1306,7 @@ async fn a_registration_carrying_only_tunnel_traffic_is_ruled_dead_within_the_ac
         raw_send,
         raw_recv,
         residue,
-        crate::tunnel::stall::StallWatch::on(conn.quinn(), "tunnel-traffic-test"),
+        crate::tunnel::stall::StallWatch::on(&conn, "tunnel-traffic-test"),
     ));
     // The controller's application: also talks on its own every 50 ms.
     let (mut app_rd, mut app_wr) = app.into_split();

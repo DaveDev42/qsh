@@ -11,6 +11,7 @@
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
@@ -627,6 +628,9 @@ fn server_config(
 #[derive(Clone, Debug)]
 pub struct Connection {
     inner: quinn::Connection,
+    /// Process-global id minted when the connection is wrapped
+    /// ([`Connection::stable_id`]).
+    id: usize,
     principal: Principal,
     auth_path: AuthPath,
     peer_fingerprint: Option<Fingerprint>,
@@ -661,9 +665,18 @@ impl Connection {
         self.inner.remote_address()
     }
 
-    /// Stable id for logs/audit (`quinn::Connection::stable_id`).
+    /// Id for logs, audit and the per-connection registries (quota, lease,
+    /// stall ledger, traffic hooks).
+    ///
+    /// Process-global and monotonic, minted when the connection is wrapped
+    /// (`docs/adr/0028-tcp-tls-fallback.md` decision 0), so two connections
+    /// of one process never share an id even when they come from different
+    /// listeners or transports and an id is never reused after its
+    /// connection closes. (quinn's own `stable_id` is a per-endpoint slab
+    /// index: it repeats across endpoints and is recycled.) Only meaningful
+    /// as an opaque key; two reads of the same connection (or a clone) agree.
     pub fn stable_id(&self) -> usize {
-        self.inner.stable_id()
+        self.id
     }
 
     /// Open a bidirectional stream.
@@ -693,64 +706,36 @@ impl Connection {
         self.inner.close_reason().map(ConnectionError::from)
     }
 
-    /// How many QUIC frames this connection has received **and
-    /// authenticated**, summed over every frame type quinn counts
-    /// (`quinn::FrameStats`, the `frame_rx` half of
-    /// `quinn::ConnectionStats`). Monotonic; the value means nothing on its
-    /// own, only its movement does.
-    ///
-    /// This is the path-liveness signal `qsh-core`'s watchdog reads
-    /// (`docs/design/protocol.md` §10): a counter that moved proves the
-    /// peer's packets are reaching us whether or not any application
-    /// message got through, which a `Pong` queued behind loss recovery on
-    /// the ordered control stream cannot.
-    ///
-    /// Deliberately **not** `udp_rx.datagrams`. quinn counts that before
-    /// decryption, so an on-path injector who knows the connection id could
-    /// keep a dead path looking alive until the idle timeout with junk
-    /// datagrams. `frame_rx` is recorded only after a packet has been
-    /// decrypted and authenticated (`docs/design/threat-model.md` §4).
-    ///
-    /// Every field is listed explicitly. `FrameStats` is
-    /// `#[non_exhaustive]`, so a frame type a future quinn adds is not
-    /// caught by the compiler: re-check this list on a quinn upgrade. The
-    /// loopback test `rx_frames_moves_on_authenticated_stream_frames` pins
-    /// that ordinary stream traffic moves the sum.
+    /// Convenience for [`ConnStats::rx_frames`].
     pub fn rx_frames(&self) -> u64 {
-        let f = self.inner.stats().frame_rx;
-        [
-            f.acks,
-            f.ack_frequency,
-            f.crypto,
-            f.connection_close,
-            f.data_blocked,
-            f.datagram,
-            u64::from(f.handshake_done),
-            f.immediate_ack,
-            f.max_data,
-            f.max_stream_data,
-            f.max_streams_bidi,
-            f.max_streams_uni,
-            f.new_connection_id,
-            f.new_token,
-            f.path_challenge,
-            f.path_response,
-            f.ping,
-            f.reset_stream,
-            f.retire_connection_id,
-            f.stream_data_blocked,
-            f.streams_blocked_bidi,
-            f.streams_blocked_uni,
-            f.stop_sending,
-            f.stream,
-        ]
-        .into_iter()
-        .fold(0u64, u64::saturating_add)
+        self.stats().rx_frames
     }
 
-    /// The underlying quinn connection, for transport-level features not
-    /// wrapped here (rebind, stats). Not for identity — use
-    /// [`principal`](Self::principal).
+    /// The connection's current latency estimate (the QUIC path RTT).
+    pub fn rtt(&self) -> Duration {
+        self.stats().rtt
+    }
+
+    /// A snapshot of the connection's transport counters. See [`ConnStats`]
+    /// for what each field proves and what it does not.
+    pub fn stats(&self) -> ConnStats {
+        let stats = self.inner.stats();
+        ConnStats {
+            rtt: stats.path.rtt,
+            rx_frames: fold_frames_rx(&stats.frame_rx),
+            peer_blocked_events: stats.frame_rx.data_blocked,
+            peer_stream_blocked_events: stats.frame_rx.stream_data_blocked,
+            rx_raw_datagrams: Some(stats.udp_rx.datagrams),
+            lost_packets: Some(stats.path.lost_packets),
+        }
+    }
+
+    /// The underlying quinn connection: a QUIC-backend escape hatch for
+    /// `qsh-transport`'s own backend tests (handshake data, keep-alive ping
+    /// counters). Not part of the supported surface — `qsh-core` and
+    /// `qsh-cli` must go through the neutral methods on this type, and
+    /// `cargo xtask arch` bars them from naming quinn at all.
+    #[doc(hidden)]
     pub fn quinn(&self) -> &quinn::Connection {
         &self.inner
     }
@@ -768,6 +753,91 @@ impl Connection {
     ) -> Result<(), ExportError> {
         Ok(self.inner.export_keying_material(output, label, context)?)
     }
+}
+
+/// Source of [`Connection::stable_id`].
+fn next_connection_id() -> usize {
+    static NEXT: AtomicUsize = AtomicUsize::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Transport counters of one connection ([`Connection::stats`]).
+///
+/// What the callers read, and why each is here rather than a backend type:
+/// the path watchdog (`rtt`, `rx_frames`, `rx_raw_datagrams`), the tunnel
+/// stall ledger (`peer_blocked_events`, ADR-0037), and the chaos tests
+/// (`lost_packets`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ConnStats {
+    /// Current best estimate of the connection's round-trip time.
+    pub rtt: Duration,
+    /// How many frames this connection has received **and authenticated**,
+    /// summed over every frame type the backend counts. Monotonic; the value
+    /// means nothing on its own, only its movement does.
+    ///
+    /// This is the path-liveness signal `qsh-core`'s watchdog reads
+    /// (`docs/design/protocol.md` §10): a counter that moved proves the
+    /// peer's packets are reaching us whether or not any application
+    /// message got through, which a `Pong` queued behind loss recovery on
+    /// the ordered control stream cannot. Deliberately **not** the raw
+    /// datagram counter: that one is counted before decryption, so an
+    /// on-path injector who knows the connection id could keep a dead path
+    /// looking alive until the idle timeout with junk datagrams. This one
+    /// is recorded only after a packet has been decrypted and authenticated
+    /// (`docs/design/threat-model.md` §4).
+    pub rx_frames: u64,
+    /// How many times the peer told us it is blocked on connection-level
+    /// flow control (QUIC `DATA_BLOCKED`). The tunnel stall ledger's
+    /// "peer destination stopped reading" signal (ADR-0037).
+    pub peer_blocked_events: u64,
+    /// How many times the peer told us a single stream is blocked on
+    /// stream-level flow control (QUIC `STREAM_DATA_BLOCKED`).
+    pub peer_stream_blocked_events: u64,
+    /// Datagrams received on the socket, counted before decryption. Only a
+    /// **hint** (anyone who knows the connection id can forge them), and
+    /// `None` for a backend with no datagram layer.
+    pub rx_raw_datagrams: Option<u64>,
+    /// Packets this side detected as lost; `None` for a backend that does
+    /// not track it.
+    pub lost_packets: Option<u64>,
+}
+
+/// Sum of every received frame counter quinn keeps.
+///
+/// Every field is listed explicitly. `FrameStats` is `#[non_exhaustive]`, so
+/// a frame type a future quinn adds is not caught by the compiler:
+/// re-check this list on a quinn upgrade. The loopback test
+/// `rx_frames_moves_on_authenticated_stream_frames` pins that ordinary
+/// stream traffic moves the sum.
+fn fold_frames_rx(f: &quinn::FrameStats) -> u64 {
+    [
+        f.acks,
+        f.ack_frequency,
+        f.crypto,
+        f.connection_close,
+        f.data_blocked,
+        f.datagram,
+        u64::from(f.handshake_done),
+        f.immediate_ack,
+        f.max_data,
+        f.max_stream_data,
+        f.max_streams_bidi,
+        f.max_streams_uni,
+        f.new_connection_id,
+        f.new_token,
+        f.path_challenge,
+        f.path_response,
+        f.ping,
+        f.reset_stream,
+        f.retire_connection_id,
+        f.stream_data_blocked,
+        f.streams_blocked_bidi,
+        f.streams_blocked_uni,
+        f.stop_sending,
+        f.stream,
+    ]
+    .into_iter()
+    .fold(0u64, u64::saturating_add)
 }
 
 fn peer_chain(conn: &quinn::Connection) -> Vec<CertificateDer<'static>> {
@@ -899,6 +969,7 @@ impl Dialer {
             connection: Connection {
                 peer_fingerprint: chain.first().and_then(|c| Fingerprint::of_cert_der(c).ok()),
                 inner: conn,
+                id: next_connection_id(),
                 principal: verified.principal,
                 auth_path: verified.auth_path,
             },
@@ -1207,6 +1278,7 @@ impl Incoming {
             Ok(verified) => Ok(Connection {
                 peer_fingerprint: chain.first().and_then(|c| Fingerprint::of_cert_der(c).ok()),
                 inner: conn,
+                id: next_connection_id(),
                 principal: verified.principal,
                 auth_path: verified.auth_path,
             }),

@@ -194,14 +194,15 @@ async fn open_stall(connection: &qsh_transport::Connection, n: usize) -> Stall {
 async fn wait_for_stall(connection: &qsh_transport::Connection, n: usize) -> StallObservation {
     let started = Instant::now();
     loop {
-        let frames = connection.quinn().stats().frame_rx;
-        let established = frames.data_blocked > 0 || frames.stream_data_blocked >= n as u64;
+        let frames = connection.stats();
+        let established =
+            frames.peer_blocked_events > 0 || frames.peer_stream_blocked_events >= n as u64;
         let waited = started.elapsed();
         if established || waited >= STALL_TIMEOUT {
             return StallObservation {
                 established,
-                data_blocked: frames.data_blocked,
-                stream_data_blocked: frames.stream_data_blocked,
+                data_blocked: frames.peer_blocked_events,
+                stream_data_blocked: frames.peer_stream_blocked_events,
                 waited,
             };
         }
@@ -403,9 +404,9 @@ async fn stalled_stream_harness_observes_data_blocked_before_measuring() {
     let session = h.session().await;
     let connection = session.connection().clone();
 
-    let before = connection.quinn().stats().frame_rx;
+    let before = connection.stats();
     assert_eq!(
-        before.data_blocked, 0,
+        before.peer_blocked_events, 0,
         "the counter must start at zero, else it proves nothing"
     );
 
@@ -478,7 +479,7 @@ async fn pty_echo_p95_stays_within_measured_rtt_plus_10ms_while_four_unread_tunn
                 Ok(Ok(Some(_))) => continue,
             }
         };
-        let rtt = connection.quinn().stats().path.rtt;
+        let rtt = connection.rtt();
         let margin = recv_at
             .saturating_duration_since(send_at)
             .saturating_sub(rtt);

@@ -681,7 +681,7 @@ pub(crate) async fn open_tunnel(
                 send,
                 recv,
                 residue,
-                watch: StallWatch::on(conn.quinn(), format!("{host}:{port}")),
+                watch: StallWatch::on(conn, format!("{host}:{port}")),
             })
         }
         #[cfg(unix)]

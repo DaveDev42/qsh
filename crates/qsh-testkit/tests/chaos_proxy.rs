@@ -219,11 +219,11 @@ async fn exec_is_byte_identical_under_loss_delay_reorder_and_duplication() {
         stats.is_balanced(),
         "relay accounting broke: {stats:?} — {ctx}"
     );
-    let client_lost = s.connection().quinn().stats().path.lost_packets;
+    let client_lost = s.connection().stats().lost_packets.unwrap_or_default();
     let host_lost: u64 = h
         .server_connections()
         .iter()
-        .map(|c| c.quinn().stats().path.lost_packets)
+        .map(|c| c.stats().lost_packets.unwrap_or_default())
         .sum();
     assert!(
         client_lost + host_lost > 0,
@@ -341,11 +341,11 @@ async fn corrupted_datagrams_never_reach_application_data() {
     // fail to poison the payload, they were *rejected* — the sender saw
     // them as loss. Loss is counted by whichever endpoint sent the packet,
     // so both are consulted.
-    let client_lost = s.connection().quinn().stats().path.lost_packets;
+    let client_lost = s.connection().stats().lost_packets.unwrap_or_default();
     let host_lost: u64 = h
         .server_connections()
         .iter()
-        .map(|c| c.quinn().stats().path.lost_packets)
+        .map(|c| c.stats().lost_packets.unwrap_or_default())
         .sum();
     assert!(
         client_lost + host_lost > 0,

@@ -25,8 +25,8 @@ pub mod tls;
 
 pub use control::{FramedRecv, FramedSend, FramedStream, StreamError};
 pub use endpoint::{
-    AcceptError, Connection, DialError, Dialed, Dialer, Incoming, Listener, LocalIdentity,
-    RESET_KEY_LEN, SetupError, TransportTuning, bind_tuned_udp_socket,
+    AcceptError, ConnStats, Connection, DialError, Dialed, Dialer, Incoming, Listener,
+    LocalIdentity, RESET_KEY_LEN, SetupError, TransportTuning, bind_tuned_udp_socket,
 };
 pub use error::{
     ApplicationClose, ClosedStream, ConnectError, ConnectionError, ExportError, ReadError,

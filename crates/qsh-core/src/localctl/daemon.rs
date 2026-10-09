@@ -1260,7 +1260,7 @@ impl LocalctlDaemon {
             // nothing has been read from the freshly opened `quic_recv`
             // yet, so both legs start with an empty prefix here.
             let watch = crate::tunnel::stall::StallWatch::on(
-                conn.quinn(),
+                &conn,
                 format!("{}:{}", header.host, header.port),
             );
             tunnel_splice_uds_quic(
@@ -1509,7 +1509,7 @@ impl LocalctlDaemon {
         // time queued (`crate::reverse::listen::TunnelArrival`'s own
         // doc), so it stays alive across the `.await` below and drops
         // only once `tunnel_splice_uds_quic` returns.
-        let watch = crate::tunnel::stall::StallWatch::on(conn.quinn(), forward_id);
+        let watch = crate::tunnel::stall::StallWatch::on(conn, forward_id);
         tunnel_splice_uds_quic(
             uds_read, uds_write, quic_send, quic_recv, prefetched, residue, watch,
         )

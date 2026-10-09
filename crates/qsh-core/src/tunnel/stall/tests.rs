@@ -12,7 +12,7 @@ async fn ledger(
 ) {
     let (client, server) = crate::tunnel::testutil::loopback_pair().await;
     (
-        StallLedger::unstarted_for_test(client.quinn().clone(), params),
+        StallLedger::unstarted_for_test(client.clone(), params),
         (client, server),
     )
 }
@@ -187,9 +187,9 @@ async fn a_stopped_or_dropped_stream_is_no_longer_counted() {
 async fn ledgers_are_shared_within_a_connection_and_separate_across_connections() {
     let (c1, _s1) = crate::tunnel::testutil::loopback_pair().await;
     let (c2, _s2) = crate::tunnel::testutil::loopback_pair().await;
-    let l1 = StallLedger::for_connection(c1.quinn());
-    let l1_again = StallLedger::for_connection(c1.quinn());
-    let l2 = StallLedger::for_connection(c2.quinn());
+    let l1 = StallLedger::for_connection(&c1);
+    let l1_again = StallLedger::for_connection(&c1);
+    let l2 = StallLedger::for_connection(&c2);
     assert!(Arc::ptr_eq(&l1, &l1_again));
     assert!(!Arc::ptr_eq(&l1, &l2));
 }
@@ -214,10 +214,10 @@ async fn a_traffic_hook_hears_bytes_moving_in_either_direction_on_its_connection
     let (hooked, _hooked_peer) = crate::tunnel::testutil::loopback_pair().await;
     let (other, _other_peer) = crate::tunnel::testutil::loopback_pair().await;
     let (hook, calls) = counting_hook();
-    let _guard = report_traffic(hooked.quinn(), hook);
+    let _guard = report_traffic(&hooked, hook);
 
-    let on_hooked = StallWatch::on(hooked.quinn(), "hooked");
-    let on_other = StallWatch::on(other.quinn(), "other");
+    let on_hooked = StallWatch::on(&hooked, "hooked");
+    let on_other = StallWatch::on(&other, "other");
 
     on_hooked.track().count_sent(0);
     on_hooked.track().leave_write(0);
@@ -241,26 +241,24 @@ async fn a_traffic_guard_removes_only_its_own_hook() {
     let (conn, _peer) = crate::tunnel::testutil::loopback_pair().await;
 
     let (first, first_calls) = counting_hook();
-    let first_guard = report_traffic(conn.quinn(), first);
+    let first_guard = report_traffic(&conn, first);
     let (second, second_calls) = counting_hook();
-    let second_guard = report_traffic(conn.quinn(), second);
+    let second_guard = report_traffic(&conn, second);
 
     drop(first_guard);
-    StallWatch::on(conn.quinn(), "after the first guard")
+    StallWatch::on(&conn, "after the first guard")
         .track()
         .count_sent(1);
     assert_eq!(first_calls.load(Ordering::Relaxed), 0, "replaced");
     assert_eq!(second_calls.load(Ordering::Relaxed), 1, "still installed");
 
     drop(second_guard);
-    StallWatch::on(conn.quinn(), "after the second guard")
+    StallWatch::on(&conn, "after the second guard")
         .track()
         .count_sent(1);
     assert_eq!(second_calls.load(Ordering::Relaxed), 1, "removed");
     assert!(
-        lock(traffic_hooks())
-            .get(&conn.quinn().stable_id())
-            .is_none(),
+        lock(traffic_hooks()).get(&conn.stable_id()).is_none(),
         "no entry is left behind for a connection id"
     );
 }
@@ -275,7 +273,7 @@ async fn tunnel_bytes_hold_a_path_watch_on_the_fast_cadence() {
     let cfg = PathWatchConfig::default();
     let watch = PathWatch::new(cfg);
     let _guard = crate::reverse::report_tunnel_traffic(&watch, &conn);
-    let tunnel = StallWatch::on(conn.quinn(), "tunnel");
+    let tunnel = StallWatch::on(&conn, "tunnel");
 
     // Well past the active window with nothing counted: idle.
     tokio::time::advance(cfg.active_window + SECOND).await;

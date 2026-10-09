@@ -906,7 +906,7 @@ mod linux_only {
                     other => panic!("round {round}: unexpected attach event {other:?}"),
                 }
             };
-            let rtt = control.connection().quinn().stats().path.rtt;
+            let rtt = control.connection().rtt();
             let elapsed = recv_at.saturating_duration_since(send_at);
             elapsed.checked_sub(rtt).unwrap_or_default().as_secs_f64() * 1000.0
         }

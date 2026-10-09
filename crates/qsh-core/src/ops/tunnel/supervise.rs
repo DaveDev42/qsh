@@ -568,7 +568,7 @@ impl Supervisor {
         if PathBinder::rebind(&endpoint).is_err() {
             return false;
         }
-        let rtt = link.connection().quinn().stats().path.rtt;
+        let rtt = link.connection().rtt();
         if probe_alive(&self.watch, probes, rtt).await {
             self.watch.revive();
             true

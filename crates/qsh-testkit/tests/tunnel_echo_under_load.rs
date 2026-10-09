@@ -45,7 +45,7 @@
 //! `Output` event, stamps `recv_at` there, and computes
 //! `elapsed = recv_at − send_at` — a genuine full round trip (client→host
 //! input, host echo, host→client output), the same dimension as
-//! `connection.quinn().stats().path.rtt`. `margin = elapsed − rtt` is now
+//! `connection.rtt()`. `margin = elapsed − rtt` is now
 //! full-RTT-minus-full-RTT, dimensionally sound. A `checked_sub` (not
 //! `saturating_sub`) counts every round where the live RTT estimate
 //! (queried fresh each round, same as before) outran the round's own
@@ -381,7 +381,7 @@ async fn tunnel_saturated_pty_echo_p95_under_measured_rtt_plus_10ms() {
             "round {round}: echoed bytes must match what this round sent"
         );
 
-        let rtt = connection.quinn().stats().path.rtt;
+        let rtt = connection.rtt();
         rtts_ms.push(rtt.as_secs_f64() * 1000.0);
         let elapsed = recv_at.saturating_duration_since(send_at);
         let margin = match elapsed.checked_sub(rtt) {
