@@ -19,7 +19,9 @@ use socket2::{Domain, Protocol, Socket, Type};
 use thiserror::Error;
 use zeroize::Zeroizing;
 
+use crate::error::{ConnectError, ConnectionError, ExportError};
 use crate::identity::{Fingerprint, Principal};
+use crate::stream::{RecvStream, SendStream};
 use crate::tls::{AuthPath, Observation, PeerRole, QshPeerVerifier, RejectReason, TrustEvaluator};
 
 /// Application-level keep-alive interval (`protocol.md` §2). The default
@@ -207,7 +209,7 @@ pub enum DialError {
     Setup(#[from] SetupError),
     /// The address/server name was unusable.
     #[error("connect: {0}")]
-    Connect(#[from] quinn::ConnectError),
+    Connect(#[from] ConnectError),
     /// **We** rejected the peer's certificate (client-side verifier).
     #[error("peer certificate rejected locally ({reason:?})")]
     LocalRejected {
@@ -240,7 +242,7 @@ pub enum DialError {
     Timeout(Duration),
     /// Any other connection failure (unreachable, reset, idle…).
     #[error("connection failed: {0}")]
-    Failed(#[from] quinn::ConnectionError),
+    Failed(#[from] ConnectionError),
 }
 
 /// Errors accepting an inbound connection.
@@ -249,7 +251,7 @@ pub enum AcceptError {
     /// The handshake failed (typically: client cert rejected by the
     /// verifier, or no client cert at all).
     #[error("handshake failed: {0}")]
-    Handshake(#[from] quinn::ConnectionError),
+    Handshake(#[from] ConnectionError),
     /// Handshake completed but the peer principal could not be derived —
     /// the connection was closed. Should not happen (the verifier ran).
     #[error("peer principal could not be derived ({0:?}); connection closed")]
@@ -665,17 +667,15 @@ impl Connection {
     }
 
     /// Open a bidirectional stream.
-    pub async fn open_bi(
-        &self,
-    ) -> Result<(quinn::SendStream, quinn::RecvStream), quinn::ConnectionError> {
-        self.inner.open_bi().await
+    pub async fn open_bi(&self) -> Result<(SendStream, RecvStream), ConnectionError> {
+        let (send, recv) = self.inner.open_bi().await?;
+        Ok((SendStream::from_quic(send), RecvStream::from_quic(recv)))
     }
 
     /// Accept the next peer-initiated bidirectional stream.
-    pub async fn accept_bi(
-        &self,
-    ) -> Result<(quinn::SendStream, quinn::RecvStream), quinn::ConnectionError> {
-        self.inner.accept_bi().await
+    pub async fn accept_bi(&self) -> Result<(SendStream, RecvStream), ConnectionError> {
+        let (send, recv) = self.inner.accept_bi().await?;
+        Ok((SendStream::from_quic(send), RecvStream::from_quic(recv)))
     }
 
     /// Close with an application error code and reason. Idempotent.
@@ -684,13 +684,13 @@ impl Connection {
     }
 
     /// Resolves when the connection is closed (by either side).
-    pub async fn closed(&self) -> quinn::ConnectionError {
-        self.inner.closed().await
+    pub async fn closed(&self) -> ConnectionError {
+        self.inner.closed().await.into()
     }
 
     /// If the connection is already closed, why.
-    pub fn close_reason(&self) -> Option<quinn::ConnectionError> {
-        self.inner.close_reason()
+    pub fn close_reason(&self) -> Option<ConnectionError> {
+        self.inner.close_reason().map(ConnectionError::from)
     }
 
     /// How many QUIC frames this connection has received **and
@@ -765,8 +765,8 @@ impl Connection {
         output: &mut [u8],
         label: &[u8],
         context: &[u8],
-    ) -> Result<(), quinn::crypto::ExportKeyingMaterialError> {
-        self.inner.export_keying_material(output, label, context)
+    ) -> Result<(), ExportError> {
+        Ok(self.inner.export_keying_material(output, label, context)?)
     }
 }
 
@@ -871,7 +871,9 @@ impl Dialer {
         .map_err(|source| SetupError::Bind { addr: bind, source })?;
         endpoint.set_default_client_config(client_config);
 
-        let connecting = endpoint.connect(addr, server_name)?;
+        let connecting = endpoint
+            .connect(addr, server_name)
+            .map_err(ConnectError::from)?;
         let result = tokio::time::timeout(self.timeout, connecting).await;
         let conn = match result {
             Err(_) => return Err(DialError::Timeout(self.timeout)),
@@ -930,6 +932,7 @@ impl Dialed {
 /// Map a failed handshake to a [`DialError`], using the verifier's
 /// observation to tell "we rejected them" from "they rejected us".
 fn classify_dial_failure(err: quinn::ConnectionError, obs: Option<Observation>) -> DialError {
+    let err = ConnectionError::from(err);
     if let Some(Observation {
         fingerprint,
         outcome: Err(reason),
@@ -940,45 +943,21 @@ fn classify_dial_failure(err: quinn::ConnectionError, obs: Option<Observation>) 
             observed: fingerprint,
         };
     }
-    if is_crypto_failure(&err) {
+    if err.is_crypto_failure() {
         return DialError::RemoteRejected;
     }
-    if is_connection_refused(&err) {
+    if err.is_refused() {
         return DialError::Refused;
     }
     DialError::Failed(err)
 }
 
-/// Whether a connection error is exactly quinn's own `CONNECTION_REFUSED`
-/// (transport error code `0x2`, RFC 9000 §20.1) closing an
-/// Initial-scoped connection — the signature `qsh_transport::Incoming::
-/// refuse` produces on the peer's side (`docs/history/m8-plan.md` Step 2). Deliberately
-/// narrower than [`is_crypto_failure`]'s whole `0x100..=0x1ff` band: `0x2`
-/// sits well outside that range, so the two checks never overlap.
-fn is_connection_refused(err: &quinn::ConnectionError) -> bool {
-    match err {
-        quinn::ConnectionError::ConnectionClosed(cc) => {
-            let raw: u64 = cc.error_code.into();
-            raw == 0x2
-        }
-        _ => false,
-    }
-}
-
 /// Whether a connection error is a TLS/crypto-class failure — i.e. the peer
-/// (or we) aborted the handshake with a TLS alert. QUIC encodes TLS alerts
-/// as transport error codes `0x100 + alert` (RFC 9001 §4.8).
-pub fn is_crypto_failure(err: &quinn::ConnectionError) -> bool {
-    match err {
-        quinn::ConnectionError::TransportError(te) => is_crypto_code(te.code),
-        quinn::ConnectionError::ConnectionClosed(cc) => is_crypto_code(cc.error_code),
-        _ => false,
-    }
-}
-
-fn is_crypto_code(code: quinn::TransportErrorCode) -> bool {
-    let raw: u64 = code.into();
-    (0x100..=0x1ff).contains(&raw)
+/// (or we) aborted the handshake with a TLS alert. A free-function spelling
+/// of [`ConnectionError::is_crypto_failure`], kept for the classifiers that
+/// take it as a function value.
+pub fn is_crypto_failure(err: &ConnectionError) -> bool {
+    err.is_crypto_failure()
 }
 
 /// Server-side listener: accepts inbound connections, verifying clients
@@ -1222,7 +1201,7 @@ impl Incoming {
     /// (the verifier rejected it) — nothing above the transport ever sees
     /// such a peer.
     pub async fn accept(self) -> Result<Connection, AcceptError> {
-        let conn = self.incoming.await?;
+        let conn = self.incoming.await.map_err(ConnectionError::from)?;
         let chain = peer_chain(&conn);
         match self.verifier.verify_peer(&chain, PeerRole::Client) {
             Ok(verified) => Ok(Connection {

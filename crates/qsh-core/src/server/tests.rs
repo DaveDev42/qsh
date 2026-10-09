@@ -3781,7 +3781,7 @@ async fn tcp_connect_allowed_splices_raw_bytes_both_ways() {
         residue.is_empty(),
         "the host sends nothing behind ConnectResult"
     );
-    // `quinn::RecvStream` has its own inherent `read_to_end(limit)`,
+    // `qsh_transport::RecvStream` has its own inherent `read_to_end(limit)`,
     // which shadows `AsyncReadExt::read_to_end`.
     let got = raw_recv.read_to_end(4096).await.unwrap();
     assert_eq!(
@@ -4331,7 +4331,7 @@ async fn a_pairing_connection_past_its_fixed_cap_is_refused_without_naming_the_r
     // connection is simply closed out from under it.
     let close_err = client.closed().await;
     match close_err {
-        quinn::ConnectionError::ApplicationClosed(close) => {
+        qsh_transport::ConnectionError::ApplicationClosed(close) => {
             assert_eq!(
                 u64::from(close.error_code),
                 u64::from(CLOSE_CODE_RESOURCE_EXHAUSTED)

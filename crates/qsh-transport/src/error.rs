@@ -60,6 +60,12 @@ impl StreamCode {
     pub fn as_u32(self) -> Option<u32> {
         u32::try_from(self.0).ok()
     }
+
+    /// quinn's varint for this code. A value past the varint range (not
+    /// constructible from `u32`) clamps to the maximum.
+    pub(crate) fn to_varint(self) -> quinn::VarInt {
+        quinn::VarInt::from_u64(self.0).unwrap_or(quinn::VarInt::MAX)
+    }
 }
 
 impl From<u32> for StreamCode {
@@ -346,6 +352,46 @@ impl From<ReadError> for std::io::Error {
             ReadError::IllegalOrderedRead => ErrorKind::InvalidInput,
         };
         Self::new(kind, err)
+    }
+}
+
+/// A failed [`RecvStream::read_exact`](crate::RecvStream::read_exact).
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
+pub enum ReadExactError {
+    /// The stream finished before all bytes were read.
+    #[error("stream finished early ({0} bytes read)")]
+    FinishedEarly(usize),
+    /// A read error occurred.
+    #[error(transparent)]
+    ReadError(#[from] ReadError),
+}
+
+impl From<quinn::ReadExactError> for ReadExactError {
+    fn from(err: quinn::ReadExactError) -> Self {
+        match err {
+            quinn::ReadExactError::FinishedEarly(n) => Self::FinishedEarly(n),
+            quinn::ReadExactError::ReadError(e) => Self::ReadError(e.into()),
+        }
+    }
+}
+
+/// A failed [`RecvStream::read_to_end`](crate::RecvStream::read_to_end).
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
+pub enum ReadToEndError {
+    /// An error occurred during reading.
+    #[error("read error: {0}")]
+    Read(#[from] ReadError),
+    /// The stream is larger than the caller-supplied limit.
+    #[error("stream too long")]
+    TooLong,
+}
+
+impl From<quinn::ReadToEndError> for ReadToEndError {
+    fn from(err: quinn::ReadToEndError) -> Self {
+        match err {
+            quinn::ReadToEndError::Read(e) => Self::Read(e.into()),
+            quinn::ReadToEndError::TooLong => Self::TooLong,
+        }
     }
 }
 

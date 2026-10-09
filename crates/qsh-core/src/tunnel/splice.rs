@@ -40,7 +40,7 @@
 
 use std::io;
 
-use quinn::{RecvStream, SendStream};
+use qsh_transport::{RecvStream, SendStream};
 use thiserror::Error;
 
 use crate::tunnel::stall::{RESET_CODE_TUNNEL_STALLED, StallWatch, StreamTrack};
@@ -354,8 +354,8 @@ impl Drop for SpliceGuard {
             self.remote_recv.take(),
             self.local_read.take(),
         ) {
-            let _ = send.reset(quinn::VarInt::from_u32(self.code));
-            let _ = recv.stop(quinn::VarInt::from_u32(self.code));
+            let _ = send.reset(qsh_transport::StreamCode::from_u32(self.code));
+            let _ = recv.stop(qsh_transport::StreamCode::from_u32(self.code));
             let _ = read.as_ref().set_zero_linger();
         }
         if let Some(write) = self.local_write.take() {

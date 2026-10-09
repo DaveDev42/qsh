@@ -839,7 +839,7 @@ impl DataRecvHalf {
 
 /// Client → daemon raw byte writer, past a `LOCAL_STREAM` conduit's framed
 /// handshake — [`DataSendHalf::into_raw`]'s return type, and the `Local`
-/// carrier's counterpart to a raw `quinn::SendStream`
+/// carrier's counterpart to a raw `qsh_transport::SendStream`
 /// ([`DataSend::into_raw_quic`](crate::client::link::DataSend::into_raw_quic)).
 /// Backed by the same `Arc<UnixStream>` [`DataSendHalf`] held, so this is
 /// still just one of up to three live clones of one socket

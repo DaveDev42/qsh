@@ -200,8 +200,8 @@ mod stalled {
         id: u64,
         app: TcpStream,
         splice: JoinHandle<Result<SpliceStats, SpliceError>>,
-        flood: JoinHandle<quinn::WriteError>,
-        peer_recv: quinn::RecvStream,
+        flood: JoinHandle<qsh_transport::WriteError>,
+        peer_recv: qsh_transport::RecvStream,
     }
 
     async fn open_leg(
@@ -290,18 +290,18 @@ mod stalled {
 
         assert!(matches!(stopped(&mut leg).await, Err(SpliceError::Stalled)));
 
-        let code = quinn::VarInt::from_u32(RESET_CODE_TUNNEL_STALLED);
+        let code = qsh_transport::StreamCode::from_u32(RESET_CODE_TUNNEL_STALLED);
         let flood_err = tokio::time::timeout(GUARD, &mut leg.flood)
             .await
             .expect("the peer's writes ended")
             .unwrap();
-        assert_eq!(flood_err, quinn::WriteError::Stopped(code));
+        assert_eq!(flood_err, qsh_transport::WriteError::Stopped(code));
         let mut buf = [0u8; 64];
         match tokio::time::timeout(GUARD, leg.peer_recv.read(&mut buf))
             .await
             .expect("the peer's read ended")
         {
-            Err(quinn::ReadError::Reset(got)) => assert_eq!(got, code),
+            Err(qsh_transport::ReadError::Reset(got)) => assert_eq!(got, code),
             other => panic!("peer expected a reset with {code}, got {other:?}"),
         }
 

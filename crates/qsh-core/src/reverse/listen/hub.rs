@@ -252,8 +252,8 @@ impl TunnelArrival {
     /// to a stream that never started, not just one that was cut off
     /// mid-transfer).
     pub(super) fn reset(mut self, code: u32) {
-        let _ = self.send.reset(quinn::VarInt::from_u32(code));
-        let _ = self.recv.stop(quinn::VarInt::from_u32(code));
+        let _ = self.send.reset(qsh_transport::StreamCode::from_u32(code));
+        let _ = self.recv.stop(qsh_transport::StreamCode::from_u32(code));
     }
 
     /// Unpack for the claimant to splice — **including** the permit

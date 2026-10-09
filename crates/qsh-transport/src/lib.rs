@@ -20,6 +20,7 @@ pub mod control;
 pub mod endpoint;
 pub mod error;
 pub mod identity;
+pub mod stream;
 pub mod tls;
 
 pub use control::{FramedRecv, FramedSend, FramedStream, StreamError};
@@ -27,7 +28,12 @@ pub use endpoint::{
     AcceptError, Connection, DialError, Dialed, Dialer, Incoming, Listener, LocalIdentity,
     RESET_KEY_LEN, SetupError, TransportTuning, bind_tuned_udp_socket,
 };
+pub use error::{
+    ApplicationClose, ClosedStream, ConnectError, ConnectionError, ExportError, ReadError,
+    ReadExactError, ReadToEndError, StoppedError, StreamCode, WriteError,
+};
 pub use identity::{Fingerprint, FingerprintParseError, Principal, PrincipalParseError};
+pub use stream::{RecvStream, SendStream};
 pub use tls::{
     AuthPath, Observation, PeerRole, QshPeerVerifier, RejectReason, StaticTrust, TrustEvaluator,
     VerifiedPeer,
@@ -36,5 +42,5 @@ pub use tls::{
 // Re-export the certificate types callers need to build a `LocalIdentity`,
 // quinn's connection error, and the `Endpoint` a `Dialed` hands back, so
 // `qsh-core` never depends on rustls or quinn directly.
-pub use quinn::{ConnectionError, Endpoint, ReadError, WriteError};
+pub use quinn::Endpoint;
 pub use rustls::pki_types::CertificateDer;

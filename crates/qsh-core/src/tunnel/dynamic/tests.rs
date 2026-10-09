@@ -83,7 +83,7 @@ async fn run_fake_host(
             let mut buf = residue;
             let mut tmp = [0u8; 4096];
             loop {
-                // `quinn::RecvStream`'s own inherent `read` (`Option<usize>`,
+                // `qsh_transport::RecvStream`'s own inherent `read` (`Option<usize>`,
                 // `None` == FIN) shadows `AsyncReadExt::read` here — same
                 // shadowing note as `crate::tunnel::local::tests::fake_host`.
                 match raw_recv.read(&mut tmp).await {

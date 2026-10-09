@@ -266,8 +266,8 @@ mod tests {
     use super::*;
 
     fn application_closed(code: u32) -> qsh_transport::ConnectionError {
-        qsh_transport::ConnectionError::ApplicationClosed(quinn::ApplicationClose {
-            error_code: quinn::VarInt::from_u32(code),
+        qsh_transport::ConnectionError::ApplicationClosed(qsh_transport::ApplicationClose {
+            error_code: qsh_transport::StreamCode::from_u32(code),
             reason: bytes::Bytes::new(),
         })
     }

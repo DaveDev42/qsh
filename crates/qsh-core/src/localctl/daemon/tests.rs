@@ -805,15 +805,15 @@ async fn a_dead_quic_send_leg_does_not_discard_the_targets_pending_final_frame()
     use tokio::io::AsyncWriteExt as _;
 
     let (client, server) = crate::tunnel::testutil::loopback_pair().await;
-    let (mut a_send, a_recv) = client.quinn().open_bi().await.unwrap();
+    let (mut a_send, a_recv) = client.open_bi().await.unwrap();
     a_send.write_all(b"hdr").await.unwrap();
-    let (mut b_send, mut b_recv) = server.quinn().accept_bi().await.unwrap();
+    let (mut b_send, mut b_recv) = server.accept_bi().await.unwrap();
     let mut hdr = [0u8; 3];
     b_recv.read_exact(&mut hdr).await.unwrap();
     // Target: final frame out and finished, then the recv half goes away.
     b_send.write_all(b"EXITFRAME").await.unwrap();
     b_send.finish().unwrap();
-    b_recv.stop(quinn::VarInt::from_u32(0)).unwrap();
+    b_recv.stop(qsh_transport::StreamCode::from_u32(0)).unwrap();
     // The daemon side learns the send half is dead before its pumps run.
     a_send.stopped().await.unwrap();
 
@@ -858,9 +858,9 @@ async fn a_cli_half_close_does_not_discard_the_targets_trailing_answer() {
     use tokio::io::AsyncWriteExt as _;
 
     let (client, server) = crate::tunnel::testutil::loopback_pair().await;
-    let (mut a_send, a_recv) = client.quinn().open_bi().await.unwrap();
+    let (mut a_send, a_recv) = client.open_bi().await.unwrap();
     a_send.write_all(b"hdr").await.unwrap();
-    let (mut b_send, mut b_recv) = server.quinn().accept_bi().await.unwrap();
+    let (mut b_send, mut b_recv) = server.accept_bi().await.unwrap();
     let mut hdr = [0u8; 3];
     b_recv.read_exact(&mut hdr).await.unwrap();
     // Target: answers only once it has seen the CLI's FIN, i.e. strictly
@@ -911,9 +911,9 @@ async fn a_cli_that_half_closes_and_then_hangs_up_still_releases_an_idle_target(
     use tokio::io::AsyncWriteExt as _;
 
     let (client, server) = crate::tunnel::testutil::loopback_pair().await;
-    let (mut a_send, a_recv) = client.quinn().open_bi().await.unwrap();
+    let (mut a_send, a_recv) = client.open_bi().await.unwrap();
     a_send.write_all(b"hdr").await.unwrap();
-    let (b_send, mut b_recv) = server.quinn().accept_bi().await.unwrap();
+    let (b_send, mut b_recv) = server.accept_bi().await.unwrap();
     let mut hdr = [0u8; 3];
     b_recv.read_exact(&mut hdr).await.unwrap();
     // Target stays silent and keeps its send half open.
@@ -947,6 +947,8 @@ async fn a_cli_that_half_closes_and_then_hangs_up_still_releases_an_idle_target(
         .unwrap();
     assert_eq!(
         stopped,
-        Some(quinn::VarInt::from_u32(RESET_CODE_LOCAL_PEER_GONE))
+        Some(qsh_transport::StreamCode::from_u32(
+            RESET_CODE_LOCAL_PEER_GONE
+        ))
     );
 }

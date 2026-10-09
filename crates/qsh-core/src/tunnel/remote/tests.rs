@@ -387,7 +387,10 @@ async fn a_detached_claim_task_survives_losing_its_select_branch_every_time() {
 async fn open_fake_tcp_accepted(
     conn: &qsh_transport::Connection,
     forward_id: &[u8],
-) -> (quinn::SendStream, (quinn::RecvStream, Vec<u8>)) {
+) -> (
+    qsh_transport::SendStream,
+    (qsh_transport::RecvStream, Vec<u8>),
+) {
     let (send, recv) = conn.open_bi().await.unwrap();
     let mut framed = qsh_transport::FramedStream::data(send, recv);
     framed
@@ -714,7 +717,7 @@ const TEST_FORWARD_CAP: usize = 4;
 /// defeating the whole "N are alive at once" premise).
 async fn hold_every_incoming_stream(
     conn: qsh_transport::Connection,
-    held: Arc<Mutex<Vec<(quinn::SendStream, quinn::RecvStream)>>>,
+    held: Arc<Mutex<Vec<(qsh_transport::SendStream, qsh_transport::RecvStream)>>>,
 ) {
     loop {
         match conn.accept_bi().await {
@@ -732,7 +735,7 @@ async fn remote_forward_accept_past_the_per_forward_stream_cap_is_closed_before_
     use crate::quota::{QuotaLimits, Quotas};
 
     let (requester_conn, host_conn) = loopback_pair().await;
-    let held: Arc<Mutex<Vec<(quinn::SendStream, quinn::RecvStream)>>> =
+    let held: Arc<Mutex<Vec<(qsh_transport::SendStream, qsh_transport::RecvStream)>>> =
         Arc::new(Mutex::new(Vec::new()));
     let accept_task = tokio::spawn(hold_every_incoming_stream(
         requester_conn,
@@ -1004,7 +1007,7 @@ async fn remote_forward_accept_past_the_per_principal_stream_cap_is_refused_on_t
     const PRINCIPAL_CAP: usize = 2;
 
     let (requester_conn, host_conn) = loopback_pair().await;
-    let held: Arc<Mutex<Vec<(quinn::SendStream, quinn::RecvStream)>>> =
+    let held: Arc<Mutex<Vec<(qsh_transport::SendStream, qsh_transport::RecvStream)>>> =
         Arc::new(Mutex::new(Vec::new()));
     let accept_task = tokio::spawn(hold_every_incoming_stream(
         requester_conn,

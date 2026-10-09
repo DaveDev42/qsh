@@ -207,7 +207,7 @@ const MAX_CONCURRENT_LOCAL_CONTROL_CONDUITS: usize = 256;
 /// produce.
 const MAX_CONCURRENT_LOCAL_STREAM_CONDUITS: usize = 256;
 
-/// Bound on [`quinn::Connection::open_bi`] in [`LocalctlDaemon::serve_stream`]
+/// Bound on [`qsh_transport::Connection::open_bi`] in [`LocalctlDaemon::serve_stream`]
 /// — opening a stream on an already-established, healthy connection is
 /// normally near-instant; a wait this long only happens when the peer's
 /// own concurrent-stream limit is exhausted (`MAX_CONCURRENT_LOCAL_STREAM_CONDUITS`'s
@@ -1207,8 +1207,9 @@ impl LocalctlDaemon {
                         %err,
                         "localctl: LOCAL_STREAM failed to encode its own EXEC_DATA ack"
                     );
-                    let _ =
-                        quic_send.reset(quinn::VarInt::from_u32(RESET_CODE_LOCAL_CONDUIT_FAILED));
+                    let _ = quic_send.reset(qsh_transport::StreamCode::from_u32(
+                        RESET_CODE_LOCAL_CONDUIT_FAILED,
+                    ));
                     return;
                 }
             };
@@ -1235,7 +1236,9 @@ impl LocalctlDaemon {
             Ok(bytes) => bytes,
             Err(err) => {
                 tracing::warn!(%err, "localctl: LOCAL_STREAM failed to re-frame its own header");
-                let _ = quic_send.reset(quinn::VarInt::from_u32(RESET_CODE_LOCAL_CONDUIT_FAILED));
+                let _ = quic_send.reset(qsh_transport::StreamCode::from_u32(
+                    RESET_CODE_LOCAL_CONDUIT_FAILED,
+                ));
                 return;
             }
         };
@@ -1487,8 +1490,12 @@ impl LocalctlDaemon {
         {
             let mut quic_send = quic_send;
             let mut quic_recv = quic_recv;
-            let _ = quic_send.reset(quinn::VarInt::from_u32(RESET_CODE_LOCAL_PEER_GONE));
-            let _ = quic_recv.stop(quinn::VarInt::from_u32(RESET_CODE_LOCAL_PEER_GONE));
+            let _ = quic_send.reset(qsh_transport::StreamCode::from_u32(
+                RESET_CODE_LOCAL_PEER_GONE,
+            ));
+            let _ = quic_recv.stop(qsh_transport::StreamCode::from_u32(
+                RESET_CODE_LOCAL_PEER_GONE,
+            ));
             return;
         }
 
@@ -1552,7 +1559,7 @@ impl LocalctlDaemon {
 /// cross-leg cancellation; see `serve_stream`'s call site).
 async fn pump_uds_to_quic(
     mut uds_read: tokio::net::unix::OwnedReadHalf,
-    mut quic_send: quinn::SendStream,
+    mut quic_send: qsh_transport::SendStream,
     reset_on_uds_eof: bool,
     done_tx: tokio::sync::oneshot::Sender<()>,
     mut cancel_rx: tokio::sync::oneshot::Receiver<()>,
@@ -1570,13 +1577,13 @@ async fn pump_uds_to_quic(
                 // abandon it rather than wait for a UDS read that may
                 // never come (an idle CLI that is still attached but has
                 // typed nothing is exactly this case).
-                let _ = quic_send.reset(quinn::VarInt::from_u32(RESET_CODE_LOCAL_PEER_GONE));
+                let _ = quic_send.reset(qsh_transport::StreamCode::from_u32(RESET_CODE_LOCAL_PEER_GONE));
                 return;
             }
             r = uds_read.read(&mut buf) => match r {
                 Ok(0) => {
                     if reset_on_uds_eof {
-                        let _ = quic_send.reset(quinn::VarInt::from_u32(RESET_CODE_LOCAL_PEER_GONE));
+                        let _ = quic_send.reset(qsh_transport::StreamCode::from_u32(RESET_CODE_LOCAL_PEER_GONE));
                     } else {
                         let _ = quic_send.finish();
                         // A half-close is not a detach: the CLI shut only
@@ -1613,7 +1620,7 @@ async fn pump_uds_to_quic(
                 }
                 Err(_) => {
                     let _ =
-                        quic_send.reset(quinn::VarInt::from_u32(RESET_CODE_LOCAL_CONDUIT_FAILED));
+                        quic_send.reset(qsh_transport::StreamCode::from_u32(RESET_CODE_LOCAL_CONDUIT_FAILED));
                     let _ = done_tx.send(());
                     return;
                 }
@@ -1685,7 +1692,7 @@ async fn discard_until_gone(
 /// parsed.
 ///
 /// A clean QUIC FIN (`Ok(None)`) and a QUIC reset/connection failure
-/// (`Err`) surface through [`quinn::RecvStream`]'s own inherent `read`
+/// (`Err`) surface through [`qsh_transport::RecvStream`]'s own inherent `read`
 /// (not `AsyncReadExt`'s — it shadows the trait method) and both end this
 /// pump by shutting down the UDS write half (HARD RULES: "QUIC FIN/reset
 /// -> UDS shutdown"). They must not, however, become the same *observable
@@ -1722,7 +1729,7 @@ async fn discard_until_gone(
 /// first (the CLI detached) ends this one promptly too, instead of
 /// blocking on target output that may never come on an idle session.
 async fn pump_quic_to_uds(
-    mut quic_recv: quinn::RecvStream,
+    mut quic_recv: qsh_transport::RecvStream,
     mut uds_write: tokio::net::unix::OwnedWriteHalf,
     done_tx: tokio::sync::oneshot::Sender<()>,
     mut cancel_rx: tokio::sync::oneshot::Receiver<()>,
@@ -1741,7 +1748,7 @@ async fn pump_quic_to_uds(
                 // own output pump notice and release its session's
                 // attach token instead of holding it open indefinitely
                 // (`session_stream::write_frames`'s own doc).
-                let _ = quic_recv.stop(quinn::VarInt::from_u32(RESET_CODE_LOCAL_PEER_GONE));
+                let _ = quic_recv.stop(qsh_transport::StreamCode::from_u32(RESET_CODE_LOCAL_PEER_GONE));
                 let _ = done_tx.send(());
                 return;
             }
@@ -1800,8 +1807,8 @@ async fn pump_quic_to_uds(
 /// would, instead of a bare `SendStream`/`RecvStream` drop finishing it
 /// cleanly.
 struct TunnelQuicGuard {
-    send: Option<quinn::SendStream>,
-    recv: Option<quinn::RecvStream>,
+    send: Option<qsh_transport::SendStream>,
+    recv: Option<qsh_transport::RecvStream>,
     /// `crate::tunnel::splice::RESET_CODE_TUNNEL_ABORT`, or
     /// `crate::tunnel::stall::RESET_CODE_TUNNEL_STALLED` once the
     /// connection's stall ledger stopped this stream (ADR-0037).
@@ -1820,10 +1827,10 @@ impl TunnelQuicGuard {
 impl Drop for TunnelQuicGuard {
     fn drop(&mut self) {
         if let Some(mut send) = self.send.take() {
-            let _ = send.reset(quinn::VarInt::from_u32(self.code));
+            let _ = send.reset(qsh_transport::StreamCode::from_u32(self.code));
         }
         if let Some(mut recv) = self.recv.take() {
-            let _ = recv.stop(quinn::VarInt::from_u32(self.code));
+            let _ = recv.stop(qsh_transport::StreamCode::from_u32(self.code));
         }
     }
 }
@@ -1874,8 +1881,8 @@ impl Drop for TunnelQuicGuard {
 async fn tunnel_splice_uds_quic(
     mut uds_read: tokio::net::unix::OwnedReadHalf,
     mut uds_write: tokio::net::unix::OwnedWriteHalf,
-    quic_send: quinn::SendStream,
-    quic_recv: quinn::RecvStream,
+    quic_send: qsh_transport::SendStream,
+    quic_recv: qsh_transport::RecvStream,
     up_prefix: Vec<u8>,
     down_prefix: Vec<u8>,
     watch: crate::tunnel::stall::StallWatch,
