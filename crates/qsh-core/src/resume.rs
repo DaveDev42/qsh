@@ -458,7 +458,7 @@ fn parse_rfc3339(text: &str) -> Option<SystemTime> {
 /// `write_private_file` stops one step short of that, and a lost rotation
 /// is an orphaned session rather than a retry.
 fn write_durably(path: &Path, body: &[u8]) -> std::io::Result<()> {
-    // `PLAN.md` M7 Step 7-2 carryover (iv): the atomic-write mechanics
+    // `docs/history/m7-plan.md` Step 7-2 carryover (iv): the atomic-write mechanics
     // (temp file, ticketed name, fsync, rename) live once in
     // `crate::fsutil` now — this used to hand-roll a second copy with its
     // own `SEQ` ticket counter. `durable: true` is the one behavior this

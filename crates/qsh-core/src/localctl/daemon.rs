@@ -3,7 +3,7 @@
 //! indirectly, through [`crate::reverse::listen::Listen`]) that binds this
 //! `qsh listen` process's UDS socket, enforces the peer-credential trust
 //! boundary, and answers the `LOCAL_ADMIN` conduit
-//! (`docs/design/protocol.md` §11-3, `PLAN.md` M3 Step 5, PR 5a).
+//! (`docs/design/protocol.md` §11-3, `docs/history/m3-plan.md` Step 5, PR 5a).
 //!
 //! Two pieces:
 //!
@@ -76,7 +76,7 @@ impl LocalctlListener {
     ///    ([`ensure_private_dir`]) — **fails closed** (refuses to bind at
     ///    all) if that mode cannot be pinned, rather than binding into a
     ///    directory whose permissions this process does not actually
-    ///    control (`PLAN.md` M3 Step 5 (a)).
+    ///    control (`docs/history/m3-plan.md` Step 5 (a)).
     /// 2. Remove any leftover file at the exact socket path first — `bind`
     ///    fails with `AddrInUse` on an existing path, and a `<pid>.sock`
     ///    left over from a previous process that reused this pid (or that
@@ -355,7 +355,7 @@ impl LocalctlDaemon {
     /// Peer-credential-check, then dispatch on `LocalHello.kind`. Every
     /// return path here is a plain function return — nothing in this
     /// module ever panics on a malformed or unexpected peer message
-    /// (`PLAN.md` M3 Step 5: "never a panic or a hang").
+    /// (`docs/history/m3-plan.md` Step 5: "never a panic or a hang").
     async fn serve_conduit(
         self: Arc<Self>,
         stream: UnixStream,
@@ -483,7 +483,7 @@ impl LocalctlDaemon {
                 }
             },
             // `M3 Step 6`: the daemon's second localctl consumer — a
-            // control session for `hello.host` (module docs, `PLAN.md`
+            // control session for `hello.host` (module docs, `docs/history/m3-plan.md`
             // M3 Step 6's "localctl의 두 번째 소비자... 이것이 M3의 유일한
             // 신규 상태 기계"). Long-lived, so it gets its own pool
             // (`MAX_CONCURRENT_LOCAL_CONTROL_CONDUITS`) rather than the
@@ -555,8 +555,8 @@ impl LocalctlDaemon {
 
     /// `LOCAL_ADMIN`: read one [`LocalAdminRequest`] and answer with
     /// exactly one [`LocalResponse`] — `HostList`
-    /// ([`Self::serve_admin_host_list`], `PLAN.md` M3 Step 5) / `TunnelList`
-    /// ([`Self::serve_admin_tunnel_list`], `PLAN.md` M4 Step 5 PR 5b) /
+    /// ([`Self::serve_admin_host_list`], `docs/history/m3-plan.md` Step 5) / `TunnelList`
+    /// ([`Self::serve_admin_tunnel_list`], `docs/history/m4-plan.md` Step 5 PR 5b) /
     /// `TunnelClose` ([`Self::serve_admin_tunnel_close`], same PR). The
     /// request is read through the `LocalAdminRequest` envelope, not a bare
     /// top-level message (`qsh/local/v1.proto`'s own doc on that type: two
@@ -612,7 +612,7 @@ impl LocalctlDaemon {
             .await;
     }
 
-    /// `TunnelList` arm of [`Self::serve_admin`] (`PLAN.md` M4 Step 5 PR
+    /// `TunnelList` arm of [`Self::serve_admin`] (`docs/history/m4-plan.md` Step 5 PR
     /// 5b, `qsh tunnels`): every forward this controller currently holds,
     /// across every registered reverse host — structural fields only
     /// ([`crate::reverse::listen::hub::ForwardSummary`]'s own doc), never a
@@ -647,7 +647,7 @@ impl LocalctlDaemon {
             .await;
     }
 
-    /// `TunnelClose` arm of [`Self::serve_admin`] (`PLAN.md` M4 Step 5 PR
+    /// `TunnelClose` arm of [`Self::serve_admin`] (`docs/history/m4-plan.md` Step 5 PR
     /// 5b, `qsh tunnel close <id>`): search every registered reverse
     /// host's hub for `tunnel_id` and close it via
     /// [`ControlHub::admin_close_forward`](crate::reverse::listen::ControlHub::admin_close_forward)
@@ -708,10 +708,10 @@ impl LocalctlDaemon {
 
     /// `LOCAL_CONTROL`: relay `qsh.wire.v1` `ControlMessage`/`Response`
     /// between this conduit and `host`'s live reverse QUIC control stream
-    /// (`docs/design/protocol.md` §11-3, `PLAN.md` M3 Step 6). Resolves
+    /// (`docs/design/protocol.md` §11-3, `docs/history/m3-plan.md` Step 6). Resolves
     /// `host` in [`Listen::control_hub_wait`] first — live (and, when
     /// `wait_ms > 0`, a registration that arrives within the wait window —
-    /// `PLAN.md` M3 Step 8's daemon-side half of `LocalReconnect`) gets a
+    /// `docs/history/m3-plan.md` Step 8's daemon-side half of `LocalReconnect`) gets a
     /// `LocalHelloAck` and this conduit is registered with its
     /// [`crate::reverse::listen::ControlHub`]; nothing found by the
     /// deadline gets `HOST_NOT_FOUND` and nothing else. `known_generation`
@@ -852,7 +852,7 @@ impl LocalctlDaemon {
                                 // local clients of this daemon, not the
                                 // remote-peer authorization layer that
                                 // constant is reserved for (`docs/design/
-                                // protocol.md` §11-3, `PLAN.md` M5 Step 4
+                                // protocol.md` §11-3, `docs/history/m5-plan.md` Step 4
                                 // §4.2 — `crate::acl::
                                 // PERMISSION_DENIED_MESSAGE`'s own doc).
                                 let reply = wire::ControlMessage::new(
@@ -922,7 +922,7 @@ impl LocalctlDaemon {
     /// `LOCAL_STREAM` (`M3 Step 7`, `EXEC_DATA` relay added by issue #5):
     /// after the same `HOST_NOT_FOUND`/`LocalHelloAck`
     /// handshake [`Self::serve_control`] uses (including its
-    /// `wait_ms`/`known_generation` wait, `PLAN.md` M3 Step 8 — the
+    /// `wait_ms`/`known_generation` wait, `docs/history/m3-plan.md` Step 8 — the
     /// data-conduit half of `LocalReconnect`'s new leg), read exactly one
     /// wire `StreamHeader` frame ([`local_stream_relay_kind`] decides
     /// which kinds are relayable at all), open a fresh QUIC bidi stream on
@@ -1108,7 +1108,7 @@ impl LocalctlDaemon {
             return;
         }
 
-        // `PLAN.md` M4 Step 5 (a)'s hub cap: a `TCP_CONNECT` splice is
+        // `docs/history/m4-plan.md` Step 5 (a)'s hub cap: a `TCP_CONNECT` splice is
         // about to commit a fresh QUIC bidi stream on this host's shared
         // reverse connection, so it draws from the same
         // `MAX_TUNNEL_STREAMS_PER_HUB` pool `TCP_ACCEPTED` streams do
@@ -1216,7 +1216,7 @@ impl LocalctlDaemon {
                 return;
             }
         }
-        // `PLAN.md` M4 Step 5 (a): a relayed `TCP_CONNECT` rides at
+        // `docs/history/m4-plan.md` Step 5 (a): a relayed `TCP_CONNECT` rides at
         // `PRIORITY_TUNNEL`, same as a direct-connect tunnel stream
         // (`crate::tunnel::open_stream`) — a saturated tunnel must not
         // outrank session data in this daemon's own send queue either
@@ -1300,7 +1300,7 @@ impl LocalctlDaemon {
 
     /// `TCP_ACCEPTED`'s side of the `LOCAL_STREAM` conduit
     /// (`docs/design/protocol.md` §11-3's `-R over reverse` path,
-    /// `PLAN.md` M4 Step 5 (a)): the CLI names the `forward_id` it wants
+    /// `docs/history/m4-plan.md` Step 5 (a)): the CLI names the `forward_id` it wants
     /// to claim (`header.ticket`), this waits up to `deadline` — already
     /// [`serve_stream`](Self::serve_stream)'s original wait budget
     /// *minus* whatever `connection_for_wait` and the header read already
@@ -1320,7 +1320,7 @@ impl LocalctlDaemon {
     /// `forward_id` is shape-checked with `qsh_proto::wire::valid_forward_id`
     /// **before** the registry lookup — a malformed ticket never reaches
     /// `claim_tcp_accepted` at all, so it can never coincidentally match a
-    /// live registration by some later coercion (`PLAN.md` M4 Step 5 (a)'s
+    /// live registration by some later coercion (`docs/history/m4-plan.md` Step 5 (a)'s
     /// "shape-check before lookup" requirement, mirroring every other
     /// peer-ingress `forward_id` check in this tree).
     ///
@@ -1390,7 +1390,7 @@ impl LocalctlDaemon {
             }
         };
 
-        // `PLAN.md` M4 Step 5 adversarial-review finding: a parked claim
+        // `docs/history/m4-plan.md` Step 5 adversarial-review finding: a parked claim
         // holds this conduit's `MAX_CONCURRENT_LOCAL_STREAM_CONDUITS`
         // permit for its *entire* wait budget with nothing bounding how
         // many of *this hub's* claims can be parked at once — one CLI
@@ -1831,7 +1831,7 @@ impl Drop for TunnelQuicGuard {
 /// `LOCAL_STREAM`'s tunnel body (`TCP_CONNECT`'s post-handshake bytes,
 /// `TCP_ACCEPTED`'s whole body) — a raw, **unframed** byte splice between
 /// this conduit's UDS halves and the paired QUIC data stream halves,
-/// `PLAN.md` M4 Step 5 (a).
+/// `docs/history/m4-plan.md` Step 5 (a).
 ///
 /// This is deliberately *not* [`pump_uds_to_quic`]/[`pump_quic_to_uds`]
 /// above: that pair is `SESSION_DATA`-specific — it layers
@@ -2041,7 +2041,7 @@ fn local_stream_relay_kind(header: &wire::StreamHeader) -> Option<LocalStreamRel
 /// the OS-level lookup (`SO_PEERCRED`/`getpeereid`, via
 /// [`tokio::net::UnixStream::peer_cred`]) has produced a peer uid — split
 /// out so the "different euid is denied" rule is unit-testable without a
-/// second real OS user (`docs/design/testing.md` L2; `PLAN.md` M3 Step 5
+/// second real OS user (`docs/design/testing.md` L2; `docs/history/m3-plan.md` Step 5
 /// (c): "다른 euid의 connect 거부... 아니면... peer-cred 코드 경로를 단언").
 fn peer_is_authorized(peer_uid: u32, daemon_euid: u32) -> bool {
     peer_uid == daemon_euid

@@ -434,7 +434,7 @@ async fn run_reaper_uses_the_injected_clock_and_stops_with_the_broker() {
     within(reaper).await.unwrap();
 }
 
-// --- Session quotas (`PLAN.md` M8 Step 3, `docs/adr/0010-resource-
+// --- Session quotas (`docs/history/m8-plan.md` Step 3, `docs/adr/0010-resource-
 // quotas.md`, design §4.1). ---
 
 use crate::quota::{QuotaKind, QuotaLimits};

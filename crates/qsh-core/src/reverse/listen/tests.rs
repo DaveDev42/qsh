@@ -575,7 +575,7 @@ async fn listen_run_flushes_its_quota_audit_window_on_the_periodic_tick() {
 /// [`Listen::new`]'s own doc requires of every caller — so
 /// [`Listen::control_hub_wait`]'s poll loop advances only when a test
 /// calls [`crate::broker::TestClock::advance`], never on real wall
-/// time (`docs/design/testing.md` L2, `PLAN.md` M3 Step 8 (c)).
+/// time (`docs/design/testing.md` L2, `docs/history/m3-plan.md` Step 8 (c)).
 #[cfg(unix)]
 fn test_listen_with_clock(clock: Arc<crate::broker::TestClock>) -> Arc<Listen> {
     let registry = Registry::new(clock.clone(), false);
@@ -616,7 +616,7 @@ fn admit(listen: &Listen, name: &str) -> u64 {
 /// Publishes a bare [`ControlHub`] at `generation` under `name` —
 /// exactly what [`Listen::finish_registration`] does after a real
 /// `LOCAL_CONTROL` registration handshake, minus the handshake itself
-/// (`PLAN.md` M3 Step 8 (c)'s unit tests exercise
+/// (`docs/history/m3-plan.md` Step 8 (c)'s unit tests exercise
 /// [`Listen::control_hub_wait`] directly, not the daemon frame loop
 /// around it — that path is covered at L3 by
 /// `crates/qsh-testkit/tests/local_control_reverse.rs`).
@@ -636,7 +636,7 @@ fn publish_hub(listen: &Listen, name: &str, generation: u64) -> Arc<ControlHub> 
 
 /// **L2 — old generation never satisfies the wait.**
 ///
-/// `PLAN.md` M3 Step 8 (c): "옛 `generation`의 등록으로는 진행하지 않음".
+/// `docs/history/m3-plan.md` Step 8 (c): "옛 `generation`의 등록으로는 진행하지 않음".
 /// A hub is live under `name`, but still sitting at exactly the
 /// generation [`LocalReconnect`] already rode to death — the dead
 /// registration the recovery exists to wait *past*, not settle for.
@@ -695,7 +695,7 @@ async fn control_hub_wait_does_not_resolve_on_a_registration_still_at_the_known_
 
 /// **L2 — a within-window newer generation resolves the wait.**
 ///
-/// `PLAN.md` M3 Step 8 (c): "새 generation 등록을 기다렸다가... 대기하고".
+/// `docs/history/m3-plan.md` Step 8 (c): "새 generation 등록을 기다렸다가... 대기하고".
 /// The same scenario as the previous test, except a strictly newer
 /// generation registers before the deadline — [`LocalReconnect`]'s own
 /// production path, driven here without a real target re-dial or a
@@ -750,7 +750,7 @@ async fn control_hub_wait_resolves_once_a_strictly_newer_generation_registers() 
 
 /// **L2 — window-exceeded with no registration at all times out.**
 ///
-/// `PLAN.md` M3 Step 8 (b): "창이 지나면 `HOST_NOT_FOUND`". No hub is
+/// `docs/history/m3-plan.md` Step 8 (b): "창이 지나면 `HOST_NOT_FOUND`". No hub is
 /// ever published under `name` (the target never re-dials within the
 /// window) — [`Listen::control_hub_wait`] keeps polling, because the
 /// registry still knows the name (it went stale, not gone), and gives
@@ -860,7 +860,7 @@ async fn run_stale_sweeper_removes_a_retention_expired_entry() {
         .unwrap();
 }
 
-/// `PLAN.md` M3 Step 5 (a): the localctl socket this process bound must
+/// `docs/history/m3-plan.md` Step 5 (a): the localctl socket this process bound must
 /// not outlive it. Drives the real `run_listen`/`run_listen_unix` end
 /// to end — a genuine on-disk identity via `identity::init`/
 /// `identity::load` (`File` key-store mode, so nothing touches an OS
@@ -931,7 +931,7 @@ async fn run_listen_unix_unlinks_its_localctl_socket_on_shutdown() {
     );
 }
 
-/// `PLAN.md` M3 Step 5 (a): "unlinks the socket on every exit path", not
+/// `docs/history/m3-plan.md` Step 5 (a): "unlinks the socket on every exit path", not
 /// only the clean-shutdown one the previous test covers. Corrupts
 /// `trust.toml` so `SharedTrustStore::open` — the first fallible step
 /// *after* `LocalctlListener::bind` already created the socket file —
@@ -984,7 +984,7 @@ async fn run_listen_unix_unlinks_its_localctl_socket_when_startup_fails_after_bi
 /// refuses on every non-unix target before it ever touches its
 /// arguments (module docs on [`windows_unsupported`]), so the
 /// identity/paths/config below are throwaway. This is the positive
-/// Windows-leg assertion `PLAN.md` Step 3 (d) owes ("Windows leg의
+/// Windows-leg assertion `docs/history/m9-plan.md` Step 3 (d) owes ("Windows leg의
 /// nextest green … 나머지가 컴파일·통과") — a real `#[tokio::test]` that
 /// runs and passes on the Windows CI leg, not just an absence of a
 /// compile error there.
@@ -1021,7 +1021,7 @@ async fn run_listen_is_unsupported_on_non_unix() {
 }
 
 // ------------------------------------------------------------------
-// Tunnel relay registry (`PLAN.md` M4 Step 5, PR 5a). `PLAN.md`'s own
+// Tunnel relay registry (`docs/history/m4-plan.md` Step 5, PR 5a). that plan's own
 // framing: "the central risk of this PR is silent misdelivery" — a
 // `forward_id` resolving to the wrong conduit's splice is a security
 // incident, not a bug. These tests exercise
@@ -1042,7 +1042,7 @@ fn test_hub() -> Arc<ControlHub> {
 /// A `TCP_ACCEPTED` naming a `forward_id` this hub never registered —
 /// never opened, already closed, or its owner already dead — must be
 /// refused by [`ControlHub::deliver_tcp_accepted`] itself, before
-/// anything is queued: `PLAN.md`'s "an unknown ... forward_id causes
+/// anything is queued: `docs/history/m4-plan.md`'s "an unknown ... forward_id causes
 /// a stream reset and nothing else". The rejected [`TunnelArrival`]
 /// comes straight back to the caller (never silently dropped —
 /// [`ControlHub::deliver_tcp_accepted`]'s own doc on why a bare drop
@@ -1070,7 +1070,7 @@ async fn deliver_tcp_accepted_refuses_an_unregistered_forward_id_and_queues_noth
 }
 
 /// **The central proof this whole registry exists for**
-/// (`PLAN.md` M4 Step 5 (a)): a `forward_id` registered by one conduit
+/// (`docs/history/m4-plan.md` Step 5 (a)): a `forward_id` registered by one conduit
 /// never resolves to a different conduit's claim, even when a real
 /// arrival is sitting in the hub's queue for the *other* id at the
 /// exact moment of the claim. Two conduits, two distinct
@@ -1125,7 +1125,7 @@ async fn a_forward_id_never_resolves_to_a_different_conduits_registration() {
 }
 
 // ------------------------------------------------------------------
-// `LocalTunnelList`/`LocalTunnelClose` (`PLAN.md` M4 Step 5 PR 5b) —
+// `LocalTunnelList`/`LocalTunnelClose` (`docs/history/m4-plan.md` Step 5 PR 5b) —
 // `list_forwards`/`admin_close_forward`'s own registry-level behavior.
 // The full wire-level round trip through a real localctl daemon and
 // `Ops::tunnel_list`/`Ops::tunnel_close` is
@@ -1171,7 +1171,7 @@ async fn list_forwards_reports_only_structural_fields_never_the_claim_token() {
     }
 }
 
-/// [`ControlHub::admin_close_forward`] (`PLAN.md` M4 Step 5 PR 5b): the
+/// [`ControlHub::admin_close_forward`] (`docs/history/m4-plan.md` Step 5 PR 5b): the
 /// daemon's own-authority close path — the one `Ops::tunnel_close`
 /// drives over a `LOCAL_ADMIN` conduit, deliberately never the owning
 /// `LOCAL_CONTROL` conduit's own `RfwdClose` relay
@@ -1230,7 +1230,7 @@ async fn admin_close_forward_removes_the_registration_and_notifies_the_target_ex
 }
 
 /// **The adversarial byte-level edition of the proof above**
-/// (`PLAN.md` M4 Step 5 (a)'s own framing: misdelivery here is "a
+/// (`docs/history/m4-plan.md` Step 5 (a)'s own framing: misdelivery here is "a
 /// security incident, not a bug"). Two conduits, two `forward_id`s,
 /// two independent target connections, both queued and both claimed
 /// *concurrently* — and then every leg carries a payload that names
@@ -1496,7 +1496,7 @@ async fn a_token_not_seated_at_registration_is_refused_and_the_real_one_still_wo
 }
 
 /// [`ControlHub::unregister_conduit`]'s tunnel-registry sweep
-/// (`PLAN.md` M4 Step 5 (a)): every `forward_id` the dying conduit
+/// (`docs/history/m4-plan.md` Step 5 (a)): every `forward_id` the dying conduit
 /// owned is removed and every `TCP_ACCEPTED` stream still queued for
 /// one of them is reset — but a *different* conduit's own
 /// registration is untouched by that same call.
@@ -1558,7 +1558,7 @@ async fn unregister_conduit_sweeps_its_own_forwards_and_resets_queued_streams_bu
 /// *several* `forward_id`s (not just one) loses every one of them the
 /// instant it dies, and the registry is verifiably left with zero
 /// trace of it — not merely "the two ids this test happened to check
-/// are gone" (`PLAN.md` M4 Step 5 (a): "conduit death removes every
+/// are gone" (`docs/history/m4-plan.md` Step 5 (a): "conduit death removes every
 /// forward_id it owned"). [`ControlHub::forward_registry_len`] is
 /// the precise, exhaustive assertion; per-id [`ControlHub::forward_owner`]
 /// checks alone could pass even if the sweep leaked some other id
@@ -1629,7 +1629,7 @@ async fn unregister_conduit_leaves_zero_trace_of_a_conduit_that_owned_several_fo
 }
 
 /// [`MAX_TUNNEL_STREAMS_PER_HUB`] is exact, not advisory
-/// (`PLAN.md` M4 Step 5 (a)'s hub cap): the `(cap+1)`th
+/// (`docs/history/m4-plan.md` Step 5 (a)'s hub cap): the `(cap+1)`th
 /// [`ControlHub::try_acquire_tunnel_permit`] call is refused while
 /// every permit up to the cap is still held, and releasing one frees
 /// exactly one slot back.
@@ -1659,7 +1659,7 @@ async fn tunnel_permit_cap_is_exact_not_advisory() {
 /// The cap must refuse only the stream that overflows it — it must
 /// never corrupt or block delivery for streams already admitted, and
 /// once a slot frees, a *different* conduit's registered forward must
-/// be able to use it immediately (`PLAN.md` M4 Step 5 (a): exceeding
+/// be able to use it immediately (`docs/history/m4-plan.md` Step 5 (a): exceeding
 /// the cap "does not wedge the hub for other conduits").
 #[cfg(unix)]
 #[tokio::test]
@@ -2010,7 +2010,7 @@ async fn open_fake_target_tcp_accepted(
     (send.into_raw(), recv.into_raw().0)
 }
 
-/// `PLAN.md` M4 Step 5 (a): "shape-check with `wire::valid_forward_id`
+/// `docs/history/m4-plan.md` Step 5 (a): "shape-check with `wire::valid_forward_id`
 /// before the lookup". A `TCP_ACCEPTED` whose ticket fails that shape
 /// check must never reach [`ControlHub::deliver_tcp_accepted`] at
 /// all — proven here by registering `"not valid!"` (space and `!` are
@@ -2078,7 +2078,7 @@ async fn handle_tcp_accepted_stream_queues_a_registered_forward_id_for_its_condu
     );
 }
 
-/// `PLAN.md` M4 Step 5 (a)'s hub cap applies to the `TCP_ACCEPTED`
+/// `docs/history/m4-plan.md` Step 5 (a)'s hub cap applies to the `TCP_ACCEPTED`
 /// ingress path too, not just `TCP_CONNECT`: a `TCP_ACCEPTED` naming
 /// a real registered `forward_id` that arrives while this hub is
 /// already at [`MAX_TUNNEL_STREAMS_PER_HUB`] is reset with
@@ -2127,7 +2127,7 @@ async fn handle_tcp_accepted_stream_at_the_hub_cap_resets_rather_than_queues() {
 // test below is written from conduit B's side: B knows conduit A's
 // `forward_id` (leaked, guessed, or simply observed) and tries to be
 // delivered to, or to tear down, something that is not its own.
-// `PLAN.md` M4 Step 5 (a)'s framing applies verbatim — misdelivery
+// `docs/history/m4-plan.md` Step 5 (a)'s framing applies verbatim — misdelivery
 // here is a security incident, not a bug.
 // ------------------------------------------------------------------
 

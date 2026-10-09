@@ -1,5 +1,5 @@
 //! `qsh_proto::schema::CLI_V1_SCHEMA_COMMANDS` bidirectional completeness
-//! gate (`PLAN.md` M7 Step 1 검증 라운드 판정 P2-2, `docs/design/testing.md`
+//! gate (`docs/history/m7-plan.md` Step 1 검증 라운드 판정 P2-2, `docs/design/testing.md`
 //! L6).
 //!
 //! `crates/qsh-proto/src/schema.rs`'s own `every_registered_command_has_a_schema`
@@ -10,12 +10,12 @@
 //! `qsh schema --json` silently omits it and nothing fails
 //! (mutation-demonstrated: removing a row from `CLI_V1_SCHEMA_COMMANDS`
 //! passes every existing test in the crate). Concretely, this is the gap
-//! `PLAN.md` M7 Step 6 will walk into: the day `doctor.run` gets a real
+//! `docs/history/m7-plan.md` Step 6 will walk into: the day `doctor.run` gets a real
 //! `Operation` impl, forgetting to also add `"doctor.run"` to
 //! `CLI_V1_SCHEMA_COMMANDS` has no test that catches it — until this file.
 //!
 //! **Why a source scan instead of reusing `qsh_core::acl::OP_REGISTRY`**
-//! (`PLAN.md` M5 Step 8's own bidirectional set-equality precedent,
+//! (`docs/history/m5-plan.md` Step 8's own bidirectional set-equality precedent,
 //! `crates/qsh-core/tests/acl_registry.rs`): `OP_REGISTRY` enumerates only
 //! operations that need *authorization* (13 rows) — it deliberately
 //! excludes every local-only operation (`version.get`, `schema.get`,

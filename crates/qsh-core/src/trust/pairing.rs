@@ -1,4 +1,4 @@
-//! Open pairing invites (`<config_dir>/invites.toml`, ADR-0002, `PLAN.md`
+//! Open pairing invites (`<config_dir>/invites.toml`, ADR-0002, `docs/history/m7-plan.md`
 //! M7 Step 4, `docs/design/protocol.md` §15).
 //!
 //! `qsh trust invite` mints a 160-bit CSPRNG secret
@@ -42,7 +42,7 @@
 //! Reload-on-change follows exactly [`super::SharedTrustStore`]'s
 //! content-based (not mtime-based) precedent: a running `qsh serve` picks
 //! up a freshly written invite, or a just-consumed one, without a restart
-//! (`PLAN.md` M7 Step 2 P2-2, invariant #6 of this step's brief).
+//! (`docs/history/m7-plan.md` Step 2 P2-2, invariant #6 of this step's brief).
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -200,7 +200,7 @@ pub struct InviteStore {
 impl InviteStore {
     /// Acquire the cross-process advisory lock guarding `path`'s whole
     /// read-modify-write cycle — mirrors [`super::TrustStore::lock`]'s own
-    /// doc (`PLAN.md` M7 Step 7-1, narrowing report F-9's residual
+    /// doc (`docs/history/m7-plan.md` Step 7-1, narrowing report F-9's residual
     /// lost-update window rather than closing it). Every caller must
     /// acquire this before [`InviteStore::load`] and hold the returned
     /// guard until after [`InviteStore::save`] returns.
@@ -212,7 +212,7 @@ impl InviteStore {
     /// separate `qsh serve` processes racing the same invite secret can
     /// both decide "not yet consumed" and both redeem it (this diff's
     /// cache `RwLock` fully serializes that decision *within* one process,
-    /// which is the deployment this fixes — `PLAN.md` M7 Step 7-1 검증
+    /// which is the deployment this fixes — `docs/history/m7-plan.md` Step 7-1 검증
     /// 라운드 A4).
     ///
     /// **Lock order**: any `RwLock`/`Mutex` the caller already holds must
@@ -262,7 +262,7 @@ impl InviteStore {
 
     /// Write the store to `path` (0600, in a 0700 directory, atomically).
     ///
-    /// **Report F-9, closed by `PLAN.md` M7 Step 7-1.** Two different
+    /// **Report F-9, closed by `docs/history/m7-plan.md` Step 7-1.** Two different
     /// *processes* read-modify-write this same file: a `qsh trust invite`
     /// CLI process (`Ops::trust_invite`'s load→prune→add→save) and a
     /// running `qsh serve`'s own [`SharedInviteStore::redeem`]. Both now
@@ -545,7 +545,7 @@ impl SharedInviteStore {
 
     /// Re-read `invites.toml` if its content changed — see
     /// [`super::SharedTrustStore::refresh`]'s doc, same content-based
-    /// contract, same rationale (`PLAN.md` M7 Step 2 P2-2).
+    /// contract, same rationale (`docs/history/m7-plan.md` Step 2 P2-2).
     fn refresh(&self) {
         let raw = match read_raw(&self.path) {
             Ok(raw) => raw,

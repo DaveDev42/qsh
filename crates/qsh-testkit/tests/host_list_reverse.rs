@@ -1,7 +1,7 @@
 //! L3 — `Ops::host_list`/`host_get`/`resolve_host_route` driven directly
 //! (no CLI subprocess) over a real localctl daemon attached to
 //! [`qsh_testkit::reverse::ReverseHarness`] (`docs/design/testing.md` L3,
-//! `PLAN.md` M3 Step 5 (c): "`ReverseHarness` 위에서 `qsh hosts --json`이
+//! `docs/history/m3-plan.md` Step 5 (c): "`ReverseHarness` 위에서 `qsh hosts --json`이
 //! forward+reverse를 한 배열로 반환하고, 연결을 끊으면 그 항목이 `stale`로
 //! 바뀜" + "`qsh hosts`가 네트워크를 건드리지 않음").
 //!
@@ -230,7 +230,7 @@ async fn hosts_merge_forward_and_live_reverse_then_stale_after_severance() {
 #[tokio::test(flavor = "multi_thread")]
 async fn hosts_list_never_dials_and_returns_well_under_a_dial_timeout() {
     // No daemons at all — the "no daemons -> forward-only, not an error"
-    // path (`PLAN.md` M3 Step 5 (c)'s merge table), proven here under a
+    // path (`docs/history/m3-plan.md` Step 5 (c)'s merge table), proven here under a
     // hard wall-clock bound rather than only asserted structurally.
     let (_dir, ops) = ops_with_forward_pin("blackhole", "192.0.2.55:4433");
 

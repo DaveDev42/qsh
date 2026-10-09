@@ -87,7 +87,7 @@ pub fn decode_local<M: prost::Message + Default>(payload: &[u8]) -> Result<M, pr
 /// applies to `AttachMode`: unset/unknown never default to a meaningful
 /// variant). This function only classifies; turning the error into an
 /// actual `LocalError` envelope on a live socket is the daemon's job
-/// (PLAN M3 Step 5), not this sans-IO crate's.
+/// (docs/history/m3-plan.md Step 5), not this sans-IO crate's.
 pub fn classify_stream_kind(kind: i32) -> Result<LocalStreamKind, ErrorCode> {
     match LocalStreamKind::try_from(kind) {
         Ok(LocalStreamKind::LocalUnspecified) => Err(ErrorCode::InvalidArgument),

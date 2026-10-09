@@ -1,4 +1,4 @@
-//! L4: the reverse-mode chaos gate (`docs/design/testing.md` L4, `PLAN.md`
+//! L4: the reverse-mode chaos gate (`docs/design/testing.md` L4, `docs/history/m3-plan.md`
 //! M3 Step 4 (c)/(d)).
 //!
 //! `reverse_loopback.rs` already proves the reconnect loop survives a
@@ -70,7 +70,7 @@ fn pin(identity: &TestIdentity, name: &str) -> StaticTrust {
 
 /// A config-injected (never hardcoded) short `[reverse]` backoff — the
 /// scenario's own bound comes from [`TIMEOUT`] above, not from waiting out
-/// the 500 ms/30 s production defaults (`PLAN.md` Step 4 (c): "주입된 짧은
+/// the 500 ms/30 s production defaults (`docs/history/m3-plan.md` Step 4 (c): "주입된 짧은
 /// backoff로 수 초 내 완료").
 fn fast_backoff() -> Config {
     Config {

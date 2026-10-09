@@ -257,7 +257,7 @@ message ExecStarted {
 // requester is the dialing side on this leg, the reverse of `-L`).
 // Non-loopback `bind_host` is *shape*-valid (this message does not encode
 // policy); the host enforces loopback-only before binding
-// (`docs/PRD.md` §9, PLAN.md M4 §4.1 #5).
+// (`docs/PRD.md` §9, docs/history/m4-plan.md §4.1 #5).
 message RemoteForwardOpen {
   string bind_host = 1;
   uint32 bind_port = 2;

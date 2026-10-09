@@ -1,5 +1,5 @@
 //! The two concrete carriers a `Session`'s control channel can run over
-//! (`docs/design/protocol.md` §11-3, `PLAN.md` M3 Step 6): a QUIC control
+//! (`docs/design/protocol.md` §11-3, `docs/history/m3-plan.md` Step 6): a QUIC control
 //! stream dialed straight to the peer (the forward route, unchanged since
 //! M1), or a `LOCAL_CONTROL` conduit to this machine's resident `qsh
 //! listen` daemon, which relays to the peer over its live reverse
@@ -24,7 +24,7 @@
 //! half-close. Nothing here decides *when* to reconnect or *what* a
 //! session_open/get/list/read/write/resize/close request looks like —
 //! that stays entirely in `crate::ops::session`, unchanged by which
-//! variant is underneath (`PLAN.md` M3 Step 6's "Zero reverse-specific
+//! variant is underneath (`docs/history/m3-plan.md` Step 6's "Zero reverse-specific
 //! business logic" rule).
 
 use prost::Message;
@@ -131,7 +131,7 @@ pub(crate) fn op_error_to_client_error(err: OpError) -> ClientError {
 }
 
 /// A synchronous, any-thread "end this attach's data conduit right now"
-/// primitive for the reverse route (`PLAN.md` M3 Step 7) — the
+/// primitive for the reverse route (`docs/history/m3-plan.md` Step 7) — the
 /// `LOCAL_STREAM` UDS socket's counterpart to
 /// [`qsh_transport::Connection::close`]'s own nature: queues the teardown
 /// and returns immediately, needs no Tokio runtime, and unblocks a pending
@@ -246,7 +246,7 @@ impl DataSend {
     /// `Err(self)` — never a panic — for the reverse `LOCAL_STREAM`
     /// carrier, which has no single QUIC stream to surrender: its raw
     /// counterpart is [`Self::into_raw_local`] instead
-    /// (`crate::tunnel::splice::splice_tcp_uds`, `PLAN.md` M4 Step 5 (a)).
+    /// (`crate::tunnel::splice::splice_tcp_uds`, `docs/history/m4-plan.md` Step 5 (a)).
     /// A caller that holds the wrong carrier gets its value back rather
     /// than a panic, so the stream stays alive to be torn down properly.
     pub(crate) fn into_raw_quic(self) -> Result<quinn::SendStream, Self> {
@@ -390,7 +390,7 @@ impl DataLink<'_> {
     /// non-`SESSION_DATA` header before opening anything on QUIC. Giving
     /// the daemon a priority/kind-aware relay path (so a tunnel header
     /// routed over this carrier rides at `PRIORITY_TUNNEL` instead) is
-    /// `PLAN.md` M4 Step 5 PR 5a's job, not this seam's — this Step 2 seam
+    /// `docs/history/m4-plan.md` Step 5 PR 5a's job, not this seam's — this Step 2 seam
     /// only fixes the call shape so callers don't need to know which
     /// carrier they hold.
     pub(crate) async fn open_stream(
@@ -403,7 +403,7 @@ impl DataLink<'_> {
 
     /// [`Self::open_stream`], but with the reverse route's `LocalHello.wait_ms`
     /// threaded through rather than fixed at `0`. Every caller before
-    /// `PLAN.md` M4 Step 5 (a) had nothing to wait on (`open_stream`'s own
+    /// `docs/history/m4-plan.md` Step 5 (a) had nothing to wait on (`open_stream`'s own
     /// doc — a live registration or a fresh dial, never a queued arrival),
     /// so `open_stream` stays the zero-wait default; `crate::tunnel::remote`'s
     /// `-R over reverse` claim loop is the one caller that needs a real

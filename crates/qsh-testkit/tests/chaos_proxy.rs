@@ -1,4 +1,4 @@
-//! L4 chaos-proxy regression gate (`docs/design/testing.md` L4, PLAN M2
+//! L4 chaos-proxy regression gate (`docs/design/testing.md` L4, docs/history/m2-plan.md
 //! Step 8). Every test here dials the host through a seeded UDP chaos proxy
 //! and asserts an invariant that must hold *despite* the injected faults —
 //! never a packet trace, because only the fault decisions are seeded, not the
@@ -12,7 +12,7 @@
 //! leaves a re-dial able to reach the same, still-running session inside
 //! [`REDIAL_DEADLINE`].
 //!
-//! Not here (PLAN M2 Step 7/8): resume tokens, `session.attach` replay, the
+//! Not here (docs/history/m2-plan.md Step 7/8): resume tokens, `session.attach` replay, the
 //! client re-dial loop, the SC4 `kill -9` case. The harness is the point —
 //! those scenarios plug into it as `tests/resume_chaos.rs`.
 //!
@@ -479,7 +479,7 @@ async fn repath_migrates_the_connection_and_the_session_continues() {
 /// The old connection can never be recovered (no amount of retransmission
 /// reaches the host), a **re-dial** succeeds inside [`REDIAL_DEADLINE`], and
 /// the session outlived both. The client-side re-dial loop and `session.
-/// attach` replay are PLAN M2 Step 7; what is pinned here is that the
+/// attach` replay are docs/history/m2-plan.md Step 7; what is pinned here is that the
 /// harness can express the scenario and that the host end already holds up.
 #[tokio::test(flavor = "multi_thread")]
 async fn sever_kills_the_path_and_a_redial_finds_the_session_alive() {
@@ -637,7 +637,7 @@ async fn errors_and_audit_are_unchanged_by_the_network() {
 /// which drops it as an unknown connection id — a silent stall, not an
 /// error.
 ///
-/// This is the shape PLAN M2 Step 7 needs: after a `sever()` the host-side
+/// This is the shape docs/history/m2-plan.md Step 7 needs: after a `sever()` the host-side
 /// connection stays alive for the full 45 s idle timeout, so a re-dial that
 /// attaches (lease steal, or `no_steal` → `SESSION_CONFLICT`) is *two* live
 /// connections, and the harness has to be able to relay both.

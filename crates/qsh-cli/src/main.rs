@@ -936,7 +936,7 @@ fn nonzero(ms: u32) -> Option<u32> {
 /// Two-phase on purpose, and the only command shaped like this: the
 /// `Tunnel` envelope is emitted **once**, up front, exactly like any value
 /// operation — and then this process blocks, because the foreground
-/// process *is* the tunnel's holder (`PLAN.md` M4 §4.1 #1: no client
+/// process *is* the tunnel's holder (`docs/history/m4-plan.md` §4.1 #1: no client
 /// daemon). Consequences this function is careful about:
 ///
 /// - stdout is **flushed** before blocking. It is block-buffered when it
@@ -1259,7 +1259,7 @@ fn run_serve_inbound(ops: &Ops, config: &Config, bind: SocketAddr, quiet: bool) 
                     stderr_note!("qsh serve: {}", qsh_core::lifecycle::RESTART_BANNER);
                 }
             },
-            // `PLAN.md` M5 Step 6: `acl.toml` policy loads once, here, at
+            // `docs/history/m5-plan.md` Step 6: `acl.toml` policy loads once, here, at
             // startup — `qsh_core::acl::StartupDiagnostic::render` is the
             // single source of truth for the wording; this closure only
             // prints it, holding no ACL logic of its own (`CLAUDE.md`'s
@@ -1366,7 +1366,7 @@ fn run_listen(ops: &Ops, bind: Option<&str>) -> i32 {
                 stderr_note!("qsh listen: {}", diag.message);
                 stderr_note!("qsh listen: {}", diag.remedy);
             },
-            // `PLAN.md` M5 Step 6: fires at most once, only when `acl.toml`
+            // `docs/history/m5-plan.md` Step 6: fires at most once, only when `acl.toml`
             // did not produce a usable policy — `rendered` is already the
             // complete banner (`qsh_core::acl::StartupDiagnostic::render`);
             // this closure prints it verbatim, no ACL logic here.
@@ -1390,7 +1390,7 @@ fn run_listen(ops: &Ops, bind: Option<&str>) -> i32 {
 /// (`docs/CLI.md` §6.13). Not an operation: no envelope, nothing on stdout
 /// at all. Registers and reconnects forever with backoff whenever the
 /// connection to the controller dies (`docs/design/protocol.md` §11-4,
-/// `PLAN.md` M3 Step 4) — registration is this target's only reachability
+/// `docs/history/m3-plan.md` Step 4) — registration is this target's only reachability
 /// path, so it is never abandoned; a clean SIGINT/SIGTERM is the only way
 /// this returns.
 ///
@@ -1429,7 +1429,7 @@ fn run_reverse(
             identity,
             controller,
             offered_name,
-            // `PLAN.md` M5 Step 6: a reverse target is a host
+            // `docs/history/m5-plan.md` Step 6: a reverse target is a host
             // (`crate::serve::host_runtime`) — its own `acl.toml` gates the
             // sessions it serves the controller, loaded once here, not per
             // reconnect (`on_runtime` fires exactly once, before the first
@@ -1450,7 +1450,7 @@ fn run_reverse(
             // once-only guard lives in qsh-core, this closure only
             // renders it): the first failed dial/registration attempt,
             // never once per backoff retry (`docs/CLI.md` §6.13,
-            // `PLAN.md` M3 Step 9).
+            // `docs/history/m3-plan.md` Step 9).
             || {
                 let diag = qsh_core::doctor::CONTROLLER_UNREACHABLE;
                 stderr_note!("qsh {mode}: {}", diag.message);

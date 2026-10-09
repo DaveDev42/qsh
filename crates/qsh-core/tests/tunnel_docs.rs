@@ -1,7 +1,7 @@
 //! Doc-prose == code-constant anti-drift gate for tunnel wording
-//! (`PLAN.md` M4 Step 8 (c), L6 — the same discipline `doctor_docs.rs`
+//! (`docs/history/m4-plan.md` Step 8 (c), L6 — the same discipline `doctor_docs.rs`
 //! already applies to `qsh_core::doctor::CONTROLLER_UNREACHABLE`,
-//! `PLAN.md` M3 Step 9 (c)).
+//! `docs/history/m3-plan.md` Step 9 (c)).
 //!
 //! Two tunnel-facing wordings are quoted verbatim in `README.md` and
 //! `docs/CLI.md` §6.9 rather than paraphrased:
@@ -23,7 +23,7 @@
 //!
 //! Deliberately has no `#[cfg(unix)]` anywhere — both constants are pure
 //! data and every doc file this test reads is plain text, so this runs on
-//! the Windows CI leg too (`PLAN.md` M3 Step 9 (d)'s precedent).
+//! the Windows CI leg too (`docs/history/m3-plan.md` Step 9 (d)'s precedent).
 
 use qsh_core::ops::tunnel::DYNAMIC_FORWARD_ACL_NOTE;
 use qsh_core::tunnel::REMOTE_FORWARD_LOOPBACK_ONLY_MESSAGE;

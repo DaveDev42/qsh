@@ -1,9 +1,9 @@
 //! `qsh reverse <controller>` — the reverse-mode target (`docs/CLI.md`
-//! §6.13, `docs/design/protocol.md` §11-3/§11-4, `PLAN.md` Step 3 + Step 4).
+//! §6.13, `docs/design/protocol.md` §11-3/§11-4, `docs/history/m3-plan.md` Step 3 + Step 4).
 //!
 //! [`run_reverse`] resolves `<controller>` via the same `hosts.toml`-over-
 //! `trust.toml` address resolution `Ops::resolve_peer` uses for
-//! `qsh <host>`/`qsh exec` (`PLAN.md` M7 Step 3, §4.1 #4), dials it, and
+//! `qsh <host>`/`qsh exec` (`docs/history/m7-plan.md` Step 3, §4.1 #4), dials it, and
 //! runs
 //! [`crate::handshake::initiate`] with `Hello{reverse: Some(..)}`. From the
 //! wire's point of view this connection is now indistinguishable from one
@@ -49,7 +49,7 @@
 //! mid-redial, or mid-serve — is a clean exit: the host runtime drains
 //! exactly once and the process returns `Ok(())`. `identity` is loaded
 //! exactly once, by the caller, before any of this starts, and is never
-//! reloaded on a reconnect (`PLAN.md` Step 4 (a): the macOS Keychain watch
+//! reloaded on a reconnect (`docs/history/m3-plan.md` Step 4 (a): the macOS Keychain watch
 //! item this device's key may live behind must not be re-opened per dial).
 
 // Most of this import block is consumed only by the unix body (and this
@@ -156,7 +156,7 @@ pub async fn run_reverse(
 /// `on_runtime` as a no-op (it never needs the runtime handle — only a
 /// test that wants to observe session state *across* a reconnect does,
 /// `crates/qsh-testkit/tests/reverse_chaos.rs`) but wires `on_unreachable`
-/// up to a one-time stderr diagnostic (`PLAN.md` M3 Step 9, `docs/CLI.md`
+/// up to a one-time stderr diagnostic (`docs/history/m3-plan.md` Step 9, `docs/CLI.md`
 /// §6.13). `on_unreachable` fires at most once per call, the first time an
 /// attempt fails to dial/register (module docs, `run_reverse_unix`'s
 /// reconnect loop) — never once per backoff retry; a doctor-item render
@@ -291,7 +291,7 @@ async fn run_reverse_unix(
     // backoff retry, every future redial after a connection that once
     // succeeded later dies), but `on_unreachable` must fire at most once
     // per invocation, and only for a genuine first-attempt failure
-    // (`PLAN.md` M3 Step 9 — a `qsh reverse` process must not re-print the
+    // (`docs/history/m3-plan.md` Step 9 — a `qsh reverse` process must not re-print the
     // controller-reachability diagnostic on every retry, and must not
     // print it at all once the controller has proven reachable by
     // accepting a registration). `Option::take` turns the `FnOnce` into
@@ -330,7 +330,7 @@ async fn run_reverse_unix(
                 // `cause`s (issue #4 item 6, `cause` above) — but
                 // `on_unreachable` stays coarse on purpose: its job is the
                 // *blanket* "you may not be able to reach this controller
-                // at all" hint (`PLAN.md` M3 Step 9), which every one of
+                // at all" hint (`docs/history/m3-plan.md` Step 9), which every one of
                 // those causes equally warrants on a fresh process's first
                 // attempt, not a per-cause routing decision. The first
                 // attempt of a fresh `qsh reverse` process is the one
@@ -701,7 +701,7 @@ fn note_wake<R: rand::Rng>(backoff: &mut Backoff<R>, controller: &str, event: Wa
 /// Address resolution reloads `hosts.toml` fresh on every attempt (never
 /// cached across retries, unlike `trust`) via the same
 /// [`crate::ops::resolve_peer_address`] `qsh <host>`/`qsh exec` use
-/// (`PLAN.md` M7 Step 3, §4.1 #4: `hosts.toml` first, the trust store's
+/// (`docs/history/m7-plan.md` Step 3, §4.1 #4: `hosts.toml` first, the trust store's
 /// pin as fallback) — so an operator can repoint a controller's address by
 /// editing `hosts.toml` without restarting this process, the same way it
 /// already tolerates DNS/IP changes.

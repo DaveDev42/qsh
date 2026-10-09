@@ -2,7 +2,7 @@
 //! resident `qsh listen` daemon over a Unix domain socket
 //! (`$XDG_RUNTIME_DIR/qsh/<pid>.sock`, `docs/design/architecture.md` §7,
 //! `docs/design/protocol.md` §11-3, ADR-0003 결과 절 2026-08-18/19 추기).
-//! `PLAN.md` M3 Step 5 introduces this module tree, split into two PRs: 5a
+//! `docs/history/m3-plan.md` Step 5 introduces this module tree, split into two PRs: 5a
 //! (this transport/security layer) and 5b (`Ops::host_list`/`host_get`,
 //! `qsh hosts`, renderers — layered on top, not here).
 //!
@@ -37,7 +37,7 @@
 //! [`frame`] and [`client`] run in the *CLI process* and are **pure UDS
 //! and `qsh-proto` framing**: they must never name `qsh_transport`,
 //! `quinn` or `rustls` — mechanically enforced by `xtask/src/arch.rs`'s
-//! file-scoped `ModuleBan` for exactly these two files (`PLAN.md` M3 Step 5
+//! file-scoped `ModuleBan` for exactly these two files (`docs/history/m3-plan.md` Step 5
 //! names only `qsh_transport` for this pair; `quinn`/`rustls` are this
 //! project's own stricter superset, since a QUIC name reaching either file
 //! by any route is the same seam violation `qsh_transport` itself would
@@ -45,10 +45,10 @@
 //! that module additionally bans `crate::client`, `crate::Principal` and
 //! `crate::Fingerprint` (the full six tokens `BROKER_DIR`'s rule bans in
 //! `broker/`), because `ReverseEntry` must mechanically never hold a live
-//! `client::Session` (`PLAN.md` M3 Step 3). `frame`/`client` have no
+//! `client::Session` (`docs/history/m3-plan.md` Step 3). `frame`/`client` have no
 //! parallel invariant to protect with those extra three tokens — they
 //! never construct a `Session`/`Principal`/`Fingerprint` in the first
-//! place — so PLAN.md does not ask for them here and arch-lint does not
+//! place — so `docs/history/m3-plan.md` does not ask for them here and arch-lint does not
 //! enforce them here; do not assume they are covered by this seam. A CLI
 //! process has no business holding a QUIC connection regardless.
 //!
@@ -56,7 +56,7 @@
 //! indirectly, through [`crate::reverse::listen::Listen`]/`Registry`, which
 //! this PR does not itself add a fresh `qsh_transport` name to): it is the
 //! bridge that answers this machine's `LOCAL_ADMIN` conduit from the
-//! registry `qsh listen` already holds, and — from `PLAN.md` M3 Step 6
+//! registry `qsh listen` already holds, and — from `docs/history/m3-plan.md` Step 6
 //! onward — relays a `LOCAL_CONTROL` conduit's requests onto a live reverse
 //! QUIC connection and relays the answers back. Blurring that line would
 //! erode exactly the seam `docs/design/architecture.md` §9 risk 2 ("in-listener session vs
@@ -64,7 +64,7 @@
 //! supervisor needs `SessionBackend` (ADR-0003) and this IPC layer to
 //! already be proven transport-free.
 //!
-//! [`mux`] (`PLAN.md` M3 Step 6, Stage A1) is the pure `request_id`
+//! [`mux`] (`docs/history/m3-plan.md` Step 6, Stage A1) is the pure `request_id`
 //! remapping and event-routing table [`daemon`] drives once it starts
 //! multiplexing several `LOCAL_CONTROL` conduits onto one reverse QUIC
 //! connection — it names no transport type at all (not even indirectly)

@@ -34,7 +34,7 @@ fn stub_entry(name: &str, generation: u64) -> ReverseEntry {
     }
 }
 
-// ---- name resolution priority table (PLAN.md Step 3 (c)) ----
+// ---- name resolution priority table (docs/history/m13-plan.md Step 3 (c)) ----
 
 #[test]
 fn alias_present_wins_over_offered_name() {
@@ -364,7 +364,7 @@ fn admit_stores_a_fresh_entry_as_live() {
     );
 }
 
-// ---- stale transition (`PLAN.md` M3 Step 4) ----
+// ---- stale transition (`docs/history/m3-plan.md` Step 4) ----
 
 /// A `TestClock`-backed registry, for the deterministic stale/retention
 /// tests below (`docs/design/testing.md` L2 — no `sleep()`).
@@ -548,7 +548,7 @@ fn sweep_expired_only_removes_entries_actually_due_leaving_others() {
     assert!(r.get("recent").is_some(), "not due yet");
 }
 
-// ---- generation monotonicity across replace/stale/remove (`PLAN.md`
+// ---- generation monotonicity across replace/stale/remove (`docs/history/m3-plan.md`
 // M3 Step 4 (1): "the registry generation stays strictly monotonic
 // across replace/stale/remove") ----
 
@@ -604,7 +604,7 @@ fn generation_survives_a_rollback_and_keeps_advancing() {
 proptest! {
     /// Any sequence of admit / mark_stale-then-sweep / rollback
     /// operations on one name never produces a repeated `generation`
-    /// value across the whole history — the property `PLAN.md` M3 Step
+    /// value across the whole history — the property `docs/history/m3-plan.md` Step
     /// 4 (1) names explicitly. `docs/design/testing.md` L2 property
     /// test discipline.
     #[test]

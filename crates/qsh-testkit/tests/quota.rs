@@ -1,4 +1,4 @@
-//! Quota integration tests (`PLAN.md` M8 Step 3, `docs/adr/0010-resource-
+//! Quota integration tests (`docs/history/m8-plan.md` Step 3, `docs/adr/0010-resource-
 //! quotas.md`): `crate::quota` wired into a *real*, running
 //! `Server::run`/reverse-target accept loop over real loopback QUIC —
 //! `qsh-core::quota`'s own unit tests and `server::mod`'s inline tests pin
@@ -505,7 +505,7 @@ async fn saturated_quota_still_answers_permission_denied_to_an_unauthorized_prin
 
 /// The exec twin of I1: `max_exec_per_principal` end to end. A permit is
 /// held from ticket *issue*, not redemption (`crate::quota` module docs,
-/// `PLAN.md` M8 Step 3 verification round) — so a single unredeemed
+/// `docs/history/m8-plan.md` Step 3 verification round) — so a single unredeemed
 /// `exec.run` ticket alone saturates a cap of 1, and the very next
 /// `exec.run` on the same connection is refused before any child is ever
 /// spawned.
@@ -2157,7 +2157,7 @@ mod reverse_target_quota {
     }
 
     /// Proves the periodic quota-flush tick `reverse/target.rs`'s serve
-    /// loop now runs (`PLAN.md` M8 Step 3a S2 deviation 2), not just the
+    /// loop now runs (`docs/history/m8-plan.md` Step 3a S2 deviation 2), not just the
     /// lazy on-next-rejection flush `crate::quota::Quotas` also has: a
     /// burst of refusals opens the aggregation window, and — with no
     /// further rejection ever sent — the summary record still lands in

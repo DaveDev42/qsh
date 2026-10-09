@@ -1,5 +1,5 @@
 //! L3: remote forward (`-R`) over a forward QUIC connection, end to end in
-//! one process (`PLAN.md` M4 Step 4 (c), `docs/design/testing.md` L3).
+//! one process (`docs/history/m4-plan.md` Step 4 (c), `docs/design/testing.md` L3).
 //!
 //! `-R`'s two legs are host and requester, and `crates/qsh-core`'s own
 //! unit tests already cover each in isolation — `server::mod`'s
@@ -65,7 +65,7 @@ async fn a_remote_forward_round_trips_through_the_requesters_echo() {
     let audit = forward_remote(&h);
     assert_eq!(audit.len(), 1, "{audit:?}");
     assert_eq!(audit[0].decision, "allow");
-    // The choke point audits **before** binding (`PLAN.md` M4 §155's own
+    // The choke point audits **before** binding (`docs/history/m4-plan.md` §155's own
     // ordering), so it names what was actually requested and authorized —
     // `TunnelHarness::remote_forward` always asks for `bind_port: 0`, and
     // the kernel has not assigned a real port yet at authorize time. The
@@ -217,7 +217,7 @@ async fn abandoning_the_connection_closes_the_hosts_listener() {
     h.shutdown().await;
 }
 
-/// `RemoteForwardClose` is an ACL choke point since `PLAN.md` M5 Step 5,
+/// `RemoteForwardClose` is an ACL choke point since `docs/history/m5-plan.md` Step 5,
 /// not a bare connection-scoped lookup: a principal that did not open a
 /// forward is refused with the uniform `PERMISSION_DENIED`, the forward
 /// survives the refusal untouched, and the refusal is audited under
@@ -451,7 +451,7 @@ async fn remote_forward_close_is_indistinguishable_real_vs_fake_for_an_ungranted
 }
 
 /// `RemoteForwardClose`'s ownership axis is the *principal* that opened the
-/// forward, not the connection it rode in on (`PLAN.md` M5 Step 5 §4.2,
+/// forward, not the connection it rode in on (`docs/history/m5-plan.md` Step 5 §4.2,
 /// `docs/CLI.md` §2.5): the same principal reconnecting on a brand-new
 /// connection can still close its own forward — unlike
 /// `Server::purge_connection`'s `conn_id`-scoped teardown

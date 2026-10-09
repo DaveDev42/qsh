@@ -52,8 +52,8 @@ use crate::telemetry::{Recovery, RecoveryReport, RecoveryTimer};
 /// How long a recovery may take, measured from the moment the path is
 /// declared dead to the moment bytes flow again.
 ///
-/// Two seconds is the criterion `docs/design/testing.md` L4 and PLAN.md
-/// §Step 7 fix in advance so SC3 cannot be passed by accident: quinn's
+/// Two seconds is the criterion `docs/design/testing.md` L4 and
+/// `docs/history/m2-plan.md` Step 7 fix in advance so SC3 cannot be passed by accident: quinn's
 /// idle timeout is 45 s, so anything that waits for the connection to time
 /// out on its own is an order of magnitude outside this and is classified
 /// [`Recovery::Failed`].
@@ -211,7 +211,7 @@ pub trait Reconnect: Send + Sync {
     /// itself, so the whole attempt (redial + resume) is properly held to
     /// that 2 s budget and never overrides this.
     ///
-    /// The reverse route (`LocalReconnect`, `PLAN.md` M3 Step 8) *does*
+    /// The reverse route (`LocalReconnect`, `docs/history/m3-plan.md` Step 8) *does*
     /// override it: `RecoveryConfig::registration_wait`'s own doc is
     /// explicit that the 2 s budget covers only "the resume *after* a
     /// registration is observed" (`docs/design/protocol.md` §11-4's "재등록

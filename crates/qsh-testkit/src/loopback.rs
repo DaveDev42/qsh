@@ -202,7 +202,7 @@ impl LoopbackHarness {
     /// [`Self::start`], but with an explicit
     /// `(max_concurrent_handshakes, handshake_rate_per_source,
     /// validated_rate_per_source)` `crate::admission::Gate` instead of
-    /// `crate::config::ServeConfig`'s defaults (`PLAN.md` M8 Step 2, P2-3
+    /// `crate::config::ServeConfig`'s defaults (`docs/history/m8-plan.md` Step 2, P2-3
     /// wiring added Step 3) — the admission integration tests
     /// (`crates/qsh-testkit/tests/admission.rs`) use a small cap so they
     /// don't need hundreds of real connections to reach it.
@@ -231,7 +231,7 @@ impl LoopbackHarness {
 
     /// [`Self::start`], but with an explicit
     /// [`qsh_core::quota::QuotaLimits`] instead of
-    /// `crate::config::ServeConfig`'s defaults (`PLAN.md` M8 Step 3) — for
+    /// `crate::config::ServeConfig`'s defaults (`docs/history/m8-plan.md` Step 3) — for
     /// quota integration tests (`crates/qsh-testkit/tests/quota.rs`). The
     /// host also pins a second, distinct client identity under
     /// `device:phone` ([`Self::second_client`]/[`Self::second_dialer`]) so

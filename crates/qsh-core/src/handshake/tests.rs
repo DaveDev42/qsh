@@ -394,7 +394,7 @@ async fn version_mismatch_responder_sends_unsupported_no_hello() {
 /// overlap. The initiator's own guard catches this locally — no frame
 /// is sent, because there is no callback to send one from.
 ///
-/// This is the assertion PLAN M3 Step 2 (c) requires ("initiator가
+/// This is the assertion docs/history/m3-plan.md Step 2 (c) requires ("initiator가
 /// frame 전송 없이 종료"): it does not just check the returned
 /// `Err`, it proves zero bytes followed the initiator's own `Hello` by
 /// draining that one frame and then observing a clean EOF. Run inline

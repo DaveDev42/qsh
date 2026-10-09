@@ -342,7 +342,7 @@ impl Default for Sandbox {
     }
 }
 
-/// `PLAN.md` M5 Step 6: production flipped from "any pinned peer, any
+/// `docs/history/m5-plan.md` Step 6: production flipped from "any pinned peer, any
 /// action" ([`qsh_core::acl::AllowAllPinned`]) to default-deny — an
 /// `acl.toml`-backed policy, or `DenyAll` when none loads. Every real-
 /// binary fixture that used to get the old interim policy for free now
@@ -390,7 +390,7 @@ pub fn plant_allow_all_acl(sandbox: &Sandbox) {
         ));
     }
     std::fs::write(&acl_path, text).expect("write fixture acl.toml");
-    // F8 (`PLAN.md` M5 Step 6 PR 6a adversarial ④): `fs::write` inherits
+    // F8 (`docs/history/m5-plan.md` Step 6 PR 6a adversarial ④): `fs::write` inherits
     // the process umask (0o664 under the common `022`/`002` umask) — a
     // group-writable planted `acl.toml` would spuriously trip the F7
     // group-/world-writable warning on any runner with that umask. Pin it
@@ -471,7 +471,7 @@ impl ServeGuard {
 
     /// Like [`start_with`](Self::start_with), but never plants an
     /// `acl.toml` — for a test whose whole point is the default-deny
-    /// posture an absent policy produces (`PLAN.md` M5 Step 6's owed
+    /// posture an absent policy produces (`docs/history/m5-plan.md` Step 6's owed
     /// tests: no acl.toml at all, or a deliberately corrupt one the test
     /// writes itself before calling this).
     pub fn start_without_policy(host: &Sandbox, extra: &[&str]) -> Self {
@@ -876,7 +876,7 @@ const LISTEN_START_TIMEOUT: Duration = Duration::from_secs(10);
 pub struct ListenGuard {
     child: Child,
     addr: String,
-    /// Every stderr line the child has printed so far (F6, `PLAN.md` M5
+    /// Every stderr line the child has printed so far (F6, `docs/history/m5-plan.md`
     /// Step 6 PR 6a adversarial ④) — mirrors [`ServeGuard`]'s own retained
     /// stderr, which the pre-fix version of this guard discarded outright
     /// (`std::io::copy(.., &mut std::io::sink())`), leaving the
@@ -950,7 +950,7 @@ impl ListenGuard {
     }
 
     /// A snapshot of every stderr line the child has printed so far (F6,
-    /// `PLAN.md` M5 Step 6 PR 6a adversarial ④) — unlike
+    /// `docs/history/m5-plan.md` Step 6 PR 6a adversarial ④) — unlike
     /// [`ServeGuard::captured`]/[`ServeGuard::finish`], this does not stop
     /// or join the child: a caller asserts against a live controller
     /// (`ListenGuard` has no `finish`; [`Drop`] just kills it).
@@ -1317,7 +1317,7 @@ pub fn wait_for_audit(
     }
 }
 
-// --- T2 adversarial load measurement helpers (`PLAN.md` M8 Step 4c).
+// --- T2 adversarial load measurement helpers (`docs/history/m8-plan.md` Step 4c).
 // `qsh-cli`'s other integration-test binaries never call these, but this
 // module's blanket `#![allow(dead_code)]` at the top of the file already
 // covers that — no separate `#[allow(dead_code)]` is added here (4c 판정 참고).

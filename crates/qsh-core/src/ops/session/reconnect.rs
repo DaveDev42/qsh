@@ -85,7 +85,7 @@ impl Reconnect for DialReconnect {
     }
 }
 
-/// The reverse route's [`Reconnect`] (`PLAN.md` M3 Step 8,
+/// The reverse route's [`Reconnect`] (`docs/history/m3-plan.md` Step 8,
 /// `docs/design/protocol.md` §11-4's Reattach mapping): no dial of its own
 /// to make — [`RecoveryLink`]'s own doc explains why there is no
 /// `Connection` here to redial — instead it waits for *the target's own*
@@ -216,7 +216,7 @@ fn spawn_local_reattach(
 /// [`reattach`]'s reverse-route twin: wait for the target's re-registration
 /// instead of redialing, then redeem the resume credential, persist its
 /// successor, open the data stream and retransmit unacked input — exactly
-/// §10 Reattach steps 2–5, unchanged (`PLAN.md` M3 Step 8's "새 resume
+/// §10 Reattach steps 2–5, unchanged (`docs/history/m3-plan.md` Step 8's "새 resume
 /// 로직을 만들지 않는다").
 ///
 /// Only ever invoked through [`spawn_local_reattach`], on a

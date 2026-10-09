@@ -205,7 +205,7 @@ fn cli_md_section_6_11_quotes_the_invite_address_wordings_verbatim() {
 // ---------------------------------------------------------------------
 // 6.2 Three-part structure test: (label, observation, impact,
 // next-command) for T1-T6. Not a wording-plagiarism check — a structural
-// one (PLAN (c)): each slot must be non-empty and must actually occur
+// one (milestone plan (c)): each slot must be non-empty and must actually occur
 // inside the real wording that produces it.
 // ---------------------------------------------------------------------
 

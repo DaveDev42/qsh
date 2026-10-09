@@ -1,5 +1,5 @@
 //! M1's definition of done, exercised as real subprocesses over a real QUIC
-//! connection (`docs/ROADMAP.md` M1 "수용 기준", `PLAN.md` Step 7).
+//! connection (`docs/ROADMAP.md` M1 "수용 기준").
 //!
 //! Each test brings up its own [`Fleet`]: a `qsh serve` host, a client the
 //! host pins, and (where needed) a rogue identity the host does *not* pin.

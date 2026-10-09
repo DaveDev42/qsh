@@ -109,7 +109,7 @@ pub fn run(ops: &Ops, what: Attach, escape: Option<u8>) -> Result<i32, OpError> 
         let _ = human::print_forward_started(&tunnel);
     }
     // `-R` remote forwards: already opened above (all-or-nothing, same as
-    // `-L`'s bind above, `PLAN.md` M4 Step 4) — this just collects the
+    // `-L`'s bind above, `docs/history/m4-plan.md` Step 4) — this just collects the
     // DTOs to render.
     for tunnel in stream.take_remote_forward_tunnels() {
         let _ = human::print_forward_started(&tunnel);

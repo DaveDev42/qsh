@@ -1,4 +1,4 @@
-//! L5/L6 — the full DoD 1 acceptance scenario for `PLAN.md` M3 Step 7:
+//! L5/L6 — the full DoD 1 acceptance scenario for `docs/history/m3-plan.md` Step 7:
 //! three real OS processes, none of them fakes, proving "attach works
 //! behind NAT by construction":
 //!

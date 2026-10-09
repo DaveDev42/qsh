@@ -1,4 +1,4 @@
-//! Raw byte splice for tunnel streams (`PLAN.md` M4 Step 3;
+//! Raw byte splice for tunnel streams (`docs/history/m4-plan.md` Step 3;
 //! `docs/design/protocol.md` §5, §7).
 //!
 //! A tunnel stream is framed only for its handshake — `StreamHeader`, then
@@ -10,7 +10,7 @@
 //! - **It never parses a byte.** There is no protocol past the handshake to
 //!   parse; anything that looked at the payload would be inventing one.
 //! - **It never logs a byte.** `CLAUDE.md`'s "never log PTY/command
-//!   contents" has a tunnel edition (`PLAN.md` M4 §4 "터널 payload 로그
+//!   contents" has a tunnel edition (`docs/history/m4-plan.md` §4 "터널 payload 로그
 //!   금지"): tunnel diagnostics carry `host:port` and byte *counts*, and
 //!   have no field a payload byte could be put in even by accident —
 //!   [`SpliceStats`] is two `u64`s.
@@ -55,7 +55,7 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 /// Sized at 64 KiB to match [`qsh_proto::frame::DATA_FRAME_MAX`]: not a
 /// framing constraint (nothing here is framed) but the same order as the
 /// QUIC stream receive window, so a single `read` can drain a full window's
-/// worth without a syscall per chunk. `PLAN.md` M4 §4.2 lists tunnel window
+/// worth without a syscall per chunk. `docs/history/m4-plan.md` §4.2 lists tunnel window
 /// tuning as measure-then-fix in Step 7 — this constant is a starting
 /// point, not a contract.
 const SPLICE_BUF_LEN: usize = 64 * 1024;
@@ -216,7 +216,7 @@ where
 /// Generic over the halves rather than written against quinn/TCP directly
 /// so the half-close behavior above is unit-testable over
 /// [`tokio::io::duplex`] pipes, with no QUIC connection involved — and,
-/// `pub(crate)` (`PLAN.md` M4 Step 5 (a)), so
+/// `pub(crate)` (`docs/history/m4-plan.md` Step 5 (a)), so
 /// `crate::localctl::daemon`'s `LOCAL_STREAM` tunnel legs (`TCP_CONNECT`/
 /// `TCP_ACCEPTED`) can reuse this exact half-close discipline for their
 /// UDS<->QUIC hop instead of re-deriving it: tunnel payload is unframed
@@ -558,7 +558,7 @@ impl Drop for LocalTcpGuard {
 /// Splice a local TCP connection against a reverse `LOCAL_STREAM` conduit
 /// (`crate::localctl::client::RawUdsRead`/`RawUdsWrite`) until both
 /// directions end — the `-L over reverse` counterpart of
-/// [`splice_tcp_quic`] (`PLAN.md` M4 Step 5 (a)), reusing the exact same
+/// [`splice_tcp_quic`] (`docs/history/m4-plan.md` Step 5 (a)), reusing the exact same
 /// [`pump`] primitive and half-close discipline so a forwarded protocol
 /// that shuts down one direction and keeps draining the other behaves
 /// identically on either carrier.

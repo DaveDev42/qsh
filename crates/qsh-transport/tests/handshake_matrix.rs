@@ -1,5 +1,5 @@
 //! L1/L3: the handshake matrix (`docs/design/testing.md` L1,
-//! `docs/ROADMAP.md` M1 DoD item 3, `PLAN.md` Step 7) — 16 named
+//! `docs/ROADMAP.md` M1 DoD item 3) — 16 named
 //! (client cert, server cert, client trust store, server trust store)
 //! combinations, each run over a real loopback QUIC handshake
 //! (`Listener`/`Dialer`, in-process, `127.0.0.1:0`, no subprocess, no
@@ -35,12 +35,12 @@
 //! pin/CA would otherwise have accepted, so the table above (cases 1-16)
 //! is exercised unchanged with `pairing_open()` at its default `false`.
 //!
-//! **`PLAN.md` M3 Step 3 (c)'s "reverse dial, 비신뢰 target" row is
+//! **`docs/history/m3-plan.md` Step 3 (c)'s "reverse dial, 비신뢰 target" row is
 //! deliberately not case 17 here.** At this layer a `qsh listen` accepting
 //! an untrusted `qsh reverse` target is mechanically identical to cases
 //! 2/3/7/8 above (an untrusted peer's cert fails verification against the
 //! listener's trust store) — bind direction is irrelevant to `Listener`.
-//! What the PLAN row actually needs asserted is that this failure is
+//! What the plan row actually needs asserted is that this failure is
 //! recorded as a handshake-level deny (`AuditRecord::handshake_rejected`,
 //! `action == "connect"`) and *never* reaches a `host.reverse` audit line
 //! — a claim about `qsh_core::audit`, which this crate cannot depend on

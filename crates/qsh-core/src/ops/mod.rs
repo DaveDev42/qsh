@@ -91,7 +91,7 @@ pub struct ServeTarget {
 
 /// Where `Ops::connect`/`connect_target` (`crate::ops::session`) actually
 /// reach `host` through — the dial-time counterpart of
-/// [`host::HostRoute`], resolved by [`Ops::resolve_route`] (`PLAN.md` M3
+/// [`host::HostRoute`], resolved by [`Ops::resolve_route`] (`docs/history/m3-plan.md`
 /// Step 6). `HostRoute` is what `host.get`/the human renderer *display*;
 /// `PeerRoute` is what a connection is actually built over, carrying the
 /// identity/trust material `HostRoute` deliberately does not (routing and
@@ -113,7 +113,7 @@ pub(crate) enum PeerRoute {
 /// observed at resolution time — [`crate::ops::session::Connected::peer_fingerprint`]
 /// (the ADR-0007 presentation-condition input) must be the value *this*
 /// connection's own `LocalHelloAck` reports, not a possibly-stale one read
-/// moments earlier during routing (`docs/design/protocol.md` §11-3, `PLAN.md`
+/// moments earlier during routing (`docs/design/protocol.md` §11-3, `docs/history/m3-plan.md`
 /// M3 Step 6's "Connected::peer_fingerprint() on the reverse leg returns
 /// LocalHelloAck.peer_fingerprint" rule).
 pub(crate) struct LocalRoute {
@@ -258,14 +258,14 @@ impl Operation for TrustAddCaOp {
     const COMMAND: &'static str = "trust.add_ca";
 }
 
-/// The `trust.invite` operation (ADR-0002, `PLAN.md` M7 Step 4).
+/// The `trust.invite` operation (ADR-0002, `docs/history/m7-plan.md` Step 4).
 pub struct TrustInviteOp;
 
 impl Operation for TrustInviteOp {
     const COMMAND: &'static str = "trust.invite";
 }
 
-/// The `trust.accept` operation (ADR-0002, `PLAN.md` M7 Step 4).
+/// The `trust.accept` operation (ADR-0002, `docs/history/m7-plan.md` Step 4).
 pub struct TrustAcceptOp;
 
 impl Operation for TrustAcceptOp {
@@ -491,14 +491,14 @@ pub struct Ops {
     /// replace the default ones.
     recovery_overridden: bool,
     /// Every tunnel this process is holding via [`Ops::tunnel_open_and_hold`]
-    /// (`PLAN.md` M6 Step 2+3 검증 라운드 판정 ②/F2) — `Arc`-backed so every
+    /// (`docs/history/m6-plan.md` Step 2+3 검증 라운드 판정 ②/F2) — `Arc`-backed so every
     /// clone of this `Ops` shares the same table (`tunnel::TunnelHoldRegistry`'s
     /// own doc).
     tunnel_holds: tunnel::TunnelHoldRegistry,
     /// The Tokio runtime [`session::Connected::connect_target`]/
     /// [`session::Connected::connect_reverse`] dial and block on, shared
     /// across every clone of this `Ops` and every pull on it instead of
-    /// built-and-torn-down per call (`PLAN.md` M7 Step 7-2 ①: a single
+    /// built-and-torn-down per call (`docs/history/m7-plan.md` Step 7-2 ①: a single
     /// abandoned pull used to cost 11 threads — a whole `num_cpus`-sized
     /// `Builder::new_multi_thread()` plus a `lookup_host` blocking thread —
     /// on top of its own QUIC endpoint/socket; measured 11.05
@@ -757,7 +757,7 @@ impl Ops {
     /// `option_env!("QSH_BUILD_COMMIT")` captured when this binary was
     /// *compiled* — not read from the environment at call time — so a
     /// local build with no such variable set reports no `build` field at
-    /// all rather than a fabricated or empty one (`PLAN.md` M7 §4.1 #1).
+    /// all rather than a fabricated or empty one (`docs/history/m7-plan.md` §4.1 #1).
     pub fn version(&self) -> Result<VersionData, OpError> {
         Ok(VersionData {
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -795,7 +795,7 @@ impl Ops {
 
     /// Resolve `host` to a dial target: loads the identity (`CONFIG_ERROR`
     /// before `qsh init`) and resolves an address via `hosts.toml`
-    /// layered over the trust store's pinned peers (`PLAN.md` M7 Step 3,
+    /// layered over the trust store's pinned peers (`docs/history/m7-plan.md` Step 3,
     /// §4.1 #4 — `hosts.toml` first, trust-store pin as fallback;
     /// `HOST_NOT_FOUND` when neither source has one). Identity/trust is
     /// still decided solely by the trust store: this only changes where
@@ -825,7 +825,7 @@ impl Ops {
     /// [`Self::resolve_host_route`] already makes (live reverse
     /// registration beats a forward pin), turned into what
     /// `Ops::connect`/`connect_target` (`crate::ops::session`) need to
-    /// actually build a connection over either link (`PLAN.md` M3 Step 6).
+    /// actually build a connection over either link (`docs/history/m3-plan.md` Step 6).
     ///
     /// **Sync, and not callable from inside a running Tokio runtime** —
     /// same caveat as [`Self::resolve_peer`] (identity loads synchronously
@@ -1136,7 +1136,7 @@ where
 /// The `(address, server_name)` half of [`Ops::resolve_peer`] that touches
 /// no identity — split out so a caller that already holds its own
 /// [`LoadedIdentity`] can reuse the trust-store/`hosts.toml` lookup without
-/// a second synchronous identity load of its own. `qsh reverse` (`PLAN.md`
+/// a second synchronous identity load of its own. `qsh reverse` (`docs/history/m3-plan.md`
 /// M3 Step 3, `crate::reverse::target::run_reverse`/`dial_and_register`) is
 /// that caller: it loads identity once, outside any runtime, ahead of a
 /// reconnect loop that must not reopen the keystore per dial
@@ -1147,7 +1147,7 @@ where
 ///
 /// Address resolution: `hosts.toml` layered over `trust`'s pinned peers,
 /// via [`host::resolve_forward`] — the exact same decision
-/// [`Ops::host_list`]/[`Ops::resolve_host_route`] make (`PLAN.md` M7 Step
+/// [`Ops::host_list`]/[`Ops::resolve_host_route`] make (`docs/history/m7-plan.md` Step
 /// 3, §4.1 #4). Identity/trust is unaffected: the fingerprint a dial
 /// actually presents is still verified solely against `trust` at the TLS
 /// layer ([`qsh_transport::TrustEvaluator::lookup_pin`] is fingerprint-
@@ -1180,7 +1180,7 @@ pub(crate) fn resolve_peer_address(
     // own `user@` split), which used to echo the `user@` hint into this
     // same un-runnable `qsh trust add` shape `Ops::resolve_host_route` had
     // (`docs/design/architecture.md` §1's `Ops` façade extension pattern).
-    // `PLAN.md` M9 §6 행 i: the lookup key is trimmed independently of
+    // `docs/history/m9-plan.md` §6 행 i: the lookup key is trimmed independently of
     // `hint_alias`'s remedy-message stripping below.
     let key = host::lookup_name(host);
     let entry = host::resolve_forward(trust.find(key), hosts.find(key), hosts_has_any).ok_or_else(

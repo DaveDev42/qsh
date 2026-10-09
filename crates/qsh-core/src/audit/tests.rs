@@ -72,7 +72,7 @@ fn file_sink_appends_jsonl_with_private_perms() {
 }
 
 /// `FileAuditSink` is fail-closed too, not just `RotatingAuditSink`
-/// (`PLAN.md` M5 Step 3): a write it cannot perform is `Err`, never a
+/// (`docs/history/m5-plan.md` Step 3): a write it cannot perform is `Err`, never a
 /// swallowed `tracing::error!` with the call site none the wiser. Kept
 /// as the simplest-possible sink for callers that want one (tests)
 /// even though `reverse::listen`'s controller itself moved onto

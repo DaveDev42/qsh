@@ -46,7 +46,7 @@ pub(super) async fn dial_peer(
 /// Returns the ack's `peer_fingerprint` and `generation` alongside the
 /// session — [`Connected::peer_fingerprint`] on the reverse leg is exactly
 /// this `peer_fingerprint` value (`docs/adr/`'s ADR-0007 presentation
-/// condition, `PLAN.md` M3 Step 6), never re-derived from a QUIC
+/// condition, `docs/history/m3-plan.md` Step 6), never re-derived from a QUIC
 /// connection this process does not itself hold; `generation` seeds
 /// [`AttachContext`]'s reverse-route baseline that Step 8's
 /// `LocalReconnect` waits past.

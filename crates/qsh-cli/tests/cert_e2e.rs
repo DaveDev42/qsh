@@ -1,5 +1,5 @@
 //! `qsh cert` — private CA E2E
-//! (`docs/adr/0008-private-ca-cert-issuance.md`, `PLAN.md` M7 Step 5).
+//! (`docs/adr/0008-private-ca-cert-issuance.md`, `docs/history/m7-plan.md` Step 5).
 //!
 //! `crates/qsh-core/src/ca.rs`'s own unit tests cover the pure
 //! generation/idempotency logic; `crates/qsh-transport/tests/
@@ -167,11 +167,11 @@ fn ca_issued_client_authenticates_with_auth_path_ca_not_pin() {
     host_trust.add_ca("client-ca", ca_pem);
     host_trust.save(&host_trust_path).expect("save host trust");
 
-    // Default-deny (`PLAN.md` M5 Step 6): `plant_allow_all_acl` only
+    // Default-deny (`docs/history/m5-plan.md` Step 6): `plant_allow_all_acl` only
     // covers *pinned* principals, so a CA-only principal needs its own
     // `acl.toml`, written before `qsh serve` starts. A rule's `auth_path`
     // defaults to `Pin` when omitted (`acl::policy::Rule::auth_path`'s own
-    // doc, `PLAN.md` M5 §4.1 #2) — this rule must say `"ca"` explicitly,
+    // doc, `docs/history/m5-plan.md` §4.1 #2) — this rule must say `"ca"` explicitly,
     // or it would silently never match this CA-authenticated principal.
     write_acl_toml(
         &host,

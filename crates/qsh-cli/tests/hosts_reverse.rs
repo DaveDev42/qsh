@@ -1,5 +1,5 @@
 //! `qsh hosts`/`qsh host get` against a real, live reverse registration
-//! (`PLAN.md` M3 Step 5 (c), PR 5b's L3 debt: "L3 — `ReverseHarness` 위에서
+//! (`docs/history/m3-plan.md` Step 5 (c), PR 5b's L3 debt: "L3 — `ReverseHarness` 위에서
 //! `qsh hosts --json`이 forward+reverse를 한 배열로 반환하고, 연결을 끊으면
 //! 그 항목이 `"stale"`로 바뀜. `qsh hosts`가 네트워크를 건드리지 않음을
 //! 단언"). `localctl_perms.rs` already proves the localctl transport/
@@ -84,7 +84,7 @@ struct ListenGuard {
 
 impl ListenGuard {
     fn start(sandbox: &Sandbox) -> Self {
-        // `PLAN.md` M5 Step 6: `qsh listen` now default-denies `host.reverse`
+        // `docs/history/m5-plan.md` Step 6: `qsh listen` now default-denies `host.reverse`
         // registrations without an `acl.toml` of its own — this struct is
         // deliberately not `common::ListenGuard` (see this file's module
         // doc), so it does not get that guard's automatic planting for
@@ -293,7 +293,7 @@ fn forward_and_reverse_merge_into_two_entries_route_live_and_hosts_never_dials()
     );
 
     // The human table renders the same name once per `connection_mode` —
-    // two rows, not deduplicated (`PLAN.md` M3 Step 5 (a): "같은 이름의 두
+    // two rows, not deduplicated (`docs/history/m3-plan.md` Step 5 (a): "같은 이름의 두
     // 항목은 두 행으로 보인다").
     let human = listen_sandbox.qsh(&["hosts"]);
     assert_eq!(common::exit_code(&human), 0);
