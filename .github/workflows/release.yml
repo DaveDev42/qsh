@@ -45,7 +45,7 @@ jobs:
           # ships src/aarch64_unknown_linux_musl_crypto.rs next to the
           # x86_64 one, so the `musl-tools` recipe below applies unchanged.
           # That is a source-tree observation; whether the leg builds is
-          # settled by the first dispatch run (PLAN risk "aws-lc-sys").
+          # settled by the first dispatch run (`docs/history/m13-plan.md` §4, "aws-lc-sys의 aarch64 musl 빌드").
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
             musl: true
@@ -54,7 +54,7 @@ jobs:
             ext: .exe
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       # ── macOS codesign + notarization (docs/ROADMAP.md M10 범위, DoD 2) ──
       # Gated exactly the way the `homebrew-tap` job below gates on its
@@ -111,8 +111,9 @@ jobs:
             exit 1
           fi
           echo "::warning title=Partial Apple signing config::${msg} Skipping codesign and notarization."
-      # Honors rust-toolchain.toml (pinned channel).
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      # Honors rust-toolchain.toml (pinned channel). v2 denies warnings via
+      # CARGO_BUILD_WARNINGS instead of RUSTFLAGS.
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           target: ${{ matrix.target }}
       # The functional smoke below is a nextest run, same entry point as
@@ -528,7 +529,7 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
@@ -622,6 +623,80 @@ jobs:
               "${prerelease_flag[@]}"
           fi
 
+  # Dispatch-only dry run of the release job's publish path: same download,
+  # same SHA256SUMS, same completeness check, but no release, no attestation,
+  # no tap. `github.ref_name` is the branch name here, which is also what the
+  # `build` job used to name the assets.
+  verify-publish-path:
+    name: verify-publish-path
+    needs: build
+    runs-on: ubuntu-24.04
+    if: github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      # download-artifact v8 no longer unzips by default: a stray archive
+      # would sit in dist/ unextracted. Only the published asset kinds pass.
+      - name: Check dist contains only release assets
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          bad=0
+          for f in * .[!.]*; do
+            [ -e "$f" ] || continue
+            case "$f" in
+              *.tar.gz|*.zip) ;;
+              *)
+                echo "::error title=Unexpected file::${f} in dist/ is not a .tar.gz or .zip asset"
+                bad=1
+                ;;
+            esac
+          done
+          exit "$bad"
+
+      - name: Generate checksums
+        working-directory: dist
+        run: sha256sum -- * > SHA256SUMS
+
+      # A build matrix row that is dropped or renamed would publish a
+      # release that is quietly missing a platform: every remaining leg
+      # stays green. This list is the published asset set and must match the
+      # `build` matrix above; `scripts/install.sh` builds the same names.
+      - name: Check every target is published
+        working-directory: dist
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for target in \
+            aarch64-apple-darwin \
+            x86_64-apple-darwin \
+            x86_64-unknown-linux-gnu \
+            aarch64-unknown-linux-gnu \
+            x86_64-unknown-linux-musl \
+            aarch64-unknown-linux-musl \
+            x86_64-pc-windows-msvc; do
+            case "$target" in
+              *-windows-*) asset="qsh-${TAG}-${target}.zip" ;;
+              *) asset="qsh-${TAG}-${target}.tar.gz" ;;
+            esac
+            if [ ! -f "$asset" ]; then
+              echo "::error title=Missing asset::${asset} is not in dist/"
+              missing=1
+            fi
+            if ! awk -v f="$asset" '$2 == f { found = 1 } END { exit !found }' SHA256SUMS; then
+              echo "::error title=Missing checksum::SHA256SUMS has no line for ${asset}"
+              missing=1
+            fi
+          done
+          exit "$missing"
+
   homebrew-tap:
     name: homebrew-tap
     needs: release
@@ -652,7 +727,7 @@ jobs:
         id: tap
         if: steps.check.outputs.has-key == 'true'
         continue-on-error: true
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           repository: DaveDev42/homebrew-tap
           ref: main
