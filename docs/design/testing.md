@@ -24,6 +24,24 @@
 
 Keystore는 trait 뒤에: 유닛 테스트는 in-memory 구현, 플랫폼별로 게이트된 통합 테스트 각 1개 — macOS Keychain, Linux Secret Service, **headless Linux file fallback** (실전에서 가장 중요한 경로 — `qsh serve`는 headless 박스에 산다).
 
+**플랫폼 키스토어 릴리스 전 수동 단계.** keyring-core 1.x와 플랫폼별 store crate(`apple-native-keyring-store`, `zbus-secret-service-keyring-store`)는 CI가 실제 저장소를 못 만나므로 키스토어 코드나 이 의존성을 건드린 릴리스 전에 사람이 한 번 돌린다. 테스트는 `platform_store_round_trips`(`crates/qsh-core/src/identity/keystore.rs`)이고, `QSH_TEST_PLATFORM_KEYSTORE=1`과 `--run-ignored only`가 있어야 돈다. 계정은 `device_test_<ulid>`라 실제 `qsh` 항목을 건드리지 않고, 테스트가 끝에 자기 항목을 지운다.
+
+- macOS: 로그인된 데스크톱 세션(Keychain 잠금 해제)에서 `QSH_TEST_PLATFORM_KEYSTORE=1 cargo nextest run -p qsh-core --run-ignored only -E 'test(platform_store_round_trips)'`.
+- Linux: Secret Service 데몬이 있는 세션이 필요하다. 데스크톱이 없는 박스는 `gnome-keyring`과 `dbus`를 설치하고 일회용 세션 버스에 로그인 키링을 띄워 돌린다. 키링 비밀번호는 아무 값이나 되고, 데이터·런타임 디렉터리는 임시로 둔다.
+
+```sh
+export XDG_DATA_HOME=$(mktemp -d) XDG_RUNTIME_DIR=$(mktemp -d)
+dbus-run-session -- sh -c '
+  printf testpw | gnome-keyring-daemon --login --components=secrets >/dev/null
+  gnome-keyring-daemon --start --components=secrets >/dev/null
+  sleep 1
+  QSH_TEST_PLATFORM_KEYSTORE=1 cargo nextest run -p qsh-core \
+    --run-ignored only -E "test(platform_store_round_trips)"'
+```
+
+- 저장 형식 호환은 같은 세션 안에서 이전 릴리스 바이너리로 `QSH_CONFIG_DIR`을 격리해 `qsh init --key-store platform`을 한 뒤 새 바이너리의 `qsh doctor --json`과 `qsh init`이 같은 fingerprint를 보는지, 반대 방향도 같은지로 확인한다. 2026-10-09 keyring 3.6에서 옮길 때 이 왕복을 Linux에서 양방향으로 확인했다.
+- Secret Service가 없는 박스에서는 `auto`가 파일 저장소로 내려가고 `platform` 명시는 `Unavailable`로 실패해야 한다(옛 바이너리와 같은 동작).
+
 ## L2 — Session broker (순수 로직, 네트워크 없음)
 
 - **중심 property test:** 임의의 append/read(`--after` cursor) interleaving에서, gap 이벤트가 없는 한 반환된 바이트의 연결은 원본 stream의 해당 suffix와 **byte-identical** — SC4(무손실 resume)의 property 표현. naive Vec 모델을 oracle로 사용.

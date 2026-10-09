@@ -41,7 +41,7 @@ onto OSS-Fuzz requires:
   installs — confirm it's still there in whatever base-builder-rust
   version is current at submission time. Second suspect, introduced by
   `broker_ops`'s `qsh-core` dependency: Linux is unix, so `portable-pty`
-  (and `keyring`'s secret-service backend) really are built into
+  (and the zbus Secret Service keyring store) really are built into
   `base-builder-rust`'s image — both are pure Rust and should need no
   extra system package; confirm that in the first `build_fuzzers` run
   rather than assuming the `cfg` gates them out.
