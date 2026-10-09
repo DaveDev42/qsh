@@ -22,7 +22,7 @@ ticket 뒤에서 자식 프로세스를 무상한으로 fork시킬 수 있었다
 `session.open`/`exec.run`을 할 자격이 있는지는 답하지만 몇 개까지인지는 답하지 않는다. 인가와 용량은
 서로 다른 질문이고 M8 Step 2 이전까지 후자에 답하는 층이 아예 없었다.
 
-`PLAN.md` M8 Step 3은 이 갭에 대한 방어선 ③(세션·터널 quota)을 요구한다. 조사(132 fact)와 설계
+`docs/history/m8-plan.md` Step 3은 이 갭에 대한 방어선 ③(세션·터널 quota)을 요구한다. 조사(132 fact)와 설계
 제안(`scratchpad/step3-design.md`)을 opus 적대적 검토(`step3-critique.md`, P1 4·P2 10·P3 4)에 부친 뒤
 main 세션이 그 결과를 재판정했다(`scratchpad/plan-step3-verdict.md`). 구현은 3a(세션·exec quota +
 검증된 시도 rate + 문서·fixture)와 3b(터널·연결 quota)로 나누어 각각 Step 2와 같은 리듬으로 진행한다.
