@@ -172,7 +172,7 @@ async fn unpinned_client_is_rejected_by_server() {
 /// both ends of the now fully-handshaken connection. The tests below only
 /// care about framed I/O over an already-authenticated connection, not the
 /// handshake itself (covered above and in `handshake_matrix.rs`).
-async fn connect_pinned_pair() -> (qsh_transport::Dialed, Connection, quinn::Endpoint) {
+async fn connect_pinned_pair() -> (qsh_transport::Dialed, Connection, qsh_transport::Endpoint) {
     let (server_id, server_fp) = make_identity();
     let (client_id, client_fp) = make_identity();
     let server_trust = StaticTrust::empty().with_pin(client_fp, Principal::Device("laptop".into()));

@@ -188,9 +188,10 @@ pub enum SetupError {
     /// rustls rejected the configuration (bad key/cert…).
     #[error("tls config: {0}")]
     Tls(#[from] rustls::Error),
-    /// quinn rejected the rustls config (e.g. missing TLS 1.3).
+    /// The QUIC stack rejected the rustls config (e.g. no usable initial
+    /// cipher suite); the stack's own description.
     #[error("quic crypto config: {0}")]
-    Quic(#[from] quinn::crypto::rustls::NoInitialCipherSuite),
+    Quic(String),
     /// Socket bind failed.
     #[error("bind {addr}: {source}")]
     Bind {
@@ -613,7 +614,7 @@ fn server_config(
     transport: quinn::TransportConfig,
 ) -> Result<quinn::ServerConfig, SetupError> {
     let tls = server_tls_config(identity, verifier)?;
-    let quic = QuicServerConfig::try_from(tls)?;
+    let quic = QuicServerConfig::try_from(tls).map_err(|e| SetupError::Quic(e.to_string()))?;
     let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(quic));
     server_config.transport_config(Arc::new(transport));
     server_config
@@ -759,6 +760,80 @@ impl Connection {
 fn next_connection_id() -> usize {
     static NEXT: AtomicUsize = AtomicUsize::new(1);
     NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+#[derive(Clone, Debug)]
+enum EndpointBackend {
+    Quic(quinn::Endpoint),
+}
+
+/// The local socket a connection runs over: what a [`Dialed`] hands back and
+/// [`Listener::endpoint`] exposes.
+///
+/// A cheap `Clone` handle. It exposes only what callers do with an endpoint
+/// (read its address, wait for its connections to drain, move it to a fresh
+/// local path); the transport behind it is a closed enum, so a TCP backend
+/// is one more variant (`docs/adr/0028-tcp-tls-fallback.md` decision 0).
+#[derive(Clone, Debug)]
+pub struct Endpoint {
+    inner: EndpointBackend,
+}
+
+impl Endpoint {
+    pub(crate) fn from_quic(endpoint: quinn::Endpoint) -> Self {
+        Self {
+            inner: EndpointBackend::Quic(endpoint),
+        }
+    }
+
+    /// The local address the endpoint is bound to.
+    pub fn local_addr(&self) -> io::Result<SocketAddr> {
+        match &self.inner {
+            EndpointBackend::Quic(e) => e.local_addr(),
+        }
+    }
+
+    /// Resolves once every connection on the endpoint has fully closed and
+    /// drained. Call it after closing connections for a clean shutdown.
+    pub async fn wait_idle(&self) {
+        match &self.inner {
+            EndpointBackend::Quic(e) => e.wait_idle().await,
+        }
+    }
+
+    /// Close every connection on the endpoint with an application code and
+    /// refuse new ones. Idempotent.
+    pub fn close(&self, code: u32, reason: &[u8]) {
+        match &self.inner {
+            EndpointBackend::Quic(e) => e.close(quinn::VarInt::from_u32(code), reason),
+        }
+    }
+
+    /// Move the endpoint to a fresh local path so the peer sees a new
+    /// source: a new socket of the same address family, unspecified address,
+    /// ephemeral port. Returns the new local address.
+    ///
+    /// The point is a new local path, and letting the OS pick is what makes
+    /// this work when the old interface is already gone. The socket comes
+    /// from [`bind_tuned_udp_socket`] (not a plain `UdpSocket::bind`) so a
+    /// post-migration socket keeps the same OS buffer tuning and
+    /// dual-stack-v6 handling (`true`, mirroring [`Dialer::dial`]) the
+    /// original dial got; a bare bind would silently reset the connection to
+    /// whatever the OS grants by default. A backend with no migration
+    /// (TCP) returns [`io::ErrorKind::Unsupported`].
+    pub fn rebind_ephemeral(&self) -> io::Result<SocketAddr> {
+        match &self.inner {
+            EndpointBackend::Quic(e) => {
+                let bind: SocketAddr = match e.local_addr()? {
+                    SocketAddr::V4(_) => (Ipv4Addr::UNSPECIFIED, 0).into(),
+                    SocketAddr::V6(_) => (Ipv6Addr::UNSPECIFIED, 0).into(),
+                };
+                let socket = bind_tuned_udp_socket(bind, true)?;
+                e.rebind(socket)?;
+                e.local_addr()
+            }
+        }
+    }
 }
 
 /// Transport counters of one connection ([`Connection::stats`]).
@@ -920,7 +995,7 @@ impl Dialer {
     ) -> Result<Dialed, DialError> {
         let verifier = Arc::new(QshPeerVerifier::new(self.evaluator.clone()));
         let tls = client_tls_config(&self.identity, verifier.clone())?;
-        let quic = QuicClientConfig::try_from(tls).map_err(SetupError::from)?;
+        let quic = QuicClientConfig::try_from(tls).map_err(|e| SetupError::Quic(e.to_string()))?;
         let mut client_config = quinn::ClientConfig::new(Arc::new(quic));
         client_config.transport_config(Arc::new(transport));
 
@@ -973,7 +1048,7 @@ impl Dialer {
                 principal: verified.principal,
                 auth_path: verified.auth_path,
             },
-            endpoint,
+            endpoint: Endpoint::from_quic(endpoint),
             verifier,
         })
     }
@@ -987,8 +1062,8 @@ pub struct Dialed {
     pub connection: Connection,
     /// The client endpoint. Dropping it does **not** immediately close the
     /// connection, but callers should keep it for the connection's life and
-    /// call [`quinn::Endpoint::wait_idle`] on shutdown for a clean close.
-    pub endpoint: quinn::Endpoint,
+    /// call [`Endpoint::wait_idle`] on shutdown for a clean close.
+    pub endpoint: Endpoint,
     /// The per-dial verifier.
     pub verifier: Arc<QshPeerVerifier>,
 }
@@ -1176,9 +1251,10 @@ impl Listener {
         self.endpoint.close(quinn::VarInt::from_u32(code), reason);
     }
 
-    /// The underlying endpoint (e.g. for `wait_idle`).
-    pub fn endpoint(&self) -> &quinn::Endpoint {
-        &self.endpoint
+    /// A handle on the listener's endpoint (e.g. for `wait_idle`, or to keep
+    /// the socket alive past the listener).
+    pub fn endpoint(&self) -> Endpoint {
+        Endpoint::from_quic(self.endpoint.clone())
     }
 }
 
