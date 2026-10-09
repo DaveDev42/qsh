@@ -18,6 +18,7 @@
 
 pub mod control;
 pub mod endpoint;
+pub mod error;
 pub mod identity;
 pub mod tls;
 

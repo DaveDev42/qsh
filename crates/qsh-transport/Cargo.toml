@@ -21,6 +21,7 @@ rustls-webpki.workspace = true
 x509-parser.workspace = true
 aws-lc-rs.workspace = true
 quinn-proto.workspace = true
+bytes.workspace = true
 tokio.workspace = true
 prost.workspace = true
 sha2.workspace = true
