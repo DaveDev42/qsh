@@ -40,7 +40,7 @@
 use std::collections::VecDeque;
 use std::future::Future;
 use std::io;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::time::Duration;
 
@@ -123,22 +123,7 @@ pub trait PathBinder: Send + Sync {
 
 impl PathBinder for qsh_transport::Endpoint {
     fn rebind(&self) -> io::Result<SocketAddr> {
-        // Same family, unspecified address, ephemeral port: the point is a
-        // new local path, and letting the OS pick is what makes this work
-        // when the old interface is already gone.
-        let bind: SocketAddr = match self.local_addr()? {
-            SocketAddr::V4(_) => (Ipv4Addr::UNSPECIFIED, 0).into(),
-            SocketAddr::V6(_) => (Ipv6Addr::UNSPECIFIED, 0).into(),
-        };
-        // `bind_tuned_udp_socket` (not a plain `std::net::UdpSocket::bind`)
-        // so a post-migration socket keeps the same OS buffer tuning and
-        // dual-stack-v6 handling (`true`, mirroring `Dialer::dial`) the
-        // original dial got — otherwise a migration would silently reset
-        // the connection back to whatever the OS grants a bare bind by
-        // default.
-        let socket = qsh_transport::bind_tuned_udp_socket(bind, true)?;
-        qsh_transport::Endpoint::rebind(self, socket)?;
-        self.local_addr()
+        self.rebind_ephemeral()
     }
 }
 

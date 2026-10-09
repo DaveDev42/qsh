@@ -139,7 +139,7 @@ pub struct LoopbackHarness {
     /// `second_client` is set.
     pub second_dialer: Option<Dialer>,
     conns: Arc<Mutex<Vec<Connection>>>,
-    /// Every client-side [`quinn::Endpoint`] a harness dial method
+    /// Every client-side [`qsh_transport::Endpoint`] a harness dial method
     /// (`Self::dial`, `Self::second_dial`) has created. `Dialer::dial`
     /// mints a brand-new endpoint per call (`qsh_transport::endpoint::
     /// Dialer::dial_inner`) and hands it back inside `Dialed` for the
@@ -151,7 +151,7 @@ pub struct LoopbackHarness {
     /// holds its second-principal connection open across the whole test
     /// body, and nextest flagged the resulting undriven endpoint as a
     /// LEAK. `Self::shutdown` closes every endpoint stashed here.
-    client_endpoints: Arc<Mutex<Vec<quinn::Endpoint>>>,
+    client_endpoints: Arc<Mutex<Vec<qsh_transport::Endpoint>>>,
     task: tokio::task::JoinHandle<()>,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
 }
@@ -563,7 +563,7 @@ impl LoopbackHarness {
         let endpoints =
             std::mem::take(&mut *self.client_endpoints.lock().expect("client_endpoints lock"));
         for endpoint in endpoints {
-            endpoint.close(0u32.into(), b"");
+            endpoint.close(0u32, b"");
             let _ =
                 tokio::time::timeout(std::time::Duration::from_secs(2), endpoint.wait_idle()).await;
         }

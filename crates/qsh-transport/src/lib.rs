@@ -8,13 +8,20 @@
 //! - [`endpoint`]: [`Dialer`]/[`Listener`] producing verified
 //!   [`Connection`]s; ALPN `qsh/1`, keep-alive 15 s / idle 45 s, no 0-RTT,
 //!   no session tickets.
-//! - [`control`]: framed prost message I/O over QUIC streams.
+//! - [`control`]: framed prost message I/O over transport streams.
+//! - [`stream`]: transport-neutral [`SendStream`]/[`RecvStream`].
+//! - [`error`]: transport-neutral error and code types
+//!   ([`ConnectionError`], [`ReadError`], [`WriteError`], [`StreamCode`]),
+//!   whose `Display` matches the QUIC stack's byte for byte.
 //!
 //! Wire structure never depends on QUIC-specific concepts (stream IDs,
 //! datagrams): stream identity is always the in-band `StreamHeader`
-//! (`docs/design/protocol.md` §7, §14). quinn is the first `Transport`
-//! implementation; the P1 TCP fallback (ADR-0005) adds another behind the
-//! same [`Connection`]/framed-stream surface.
+//! (`docs/design/protocol.md` §7, §14). The public surface names no quinn
+//! type but the hidden `Connection::quinn` test escape hatch
+//! (`docs/adr/0028-tcp-tls-fallback.md` decision 0): [`Connection`],
+//! [`Endpoint`], [`SendStream`] and [`RecvStream`] are facades over the QUIC
+//! backend today, and the P1 TCP fallback (ADR-0005) adds another backend
+//! behind the same surface.
 
 pub mod control;
 pub mod endpoint;
@@ -25,7 +32,7 @@ pub mod tls;
 
 pub use control::{FramedRecv, FramedSend, FramedStream, StreamError};
 pub use endpoint::{
-    AcceptError, ConnStats, Connection, DialError, Dialed, Dialer, Incoming, Listener,
+    AcceptError, ConnStats, Connection, DialError, Dialed, Dialer, Endpoint, Incoming, Listener,
     LocalIdentity, RESET_KEY_LEN, SetupError, TransportTuning, bind_tuned_udp_socket,
 };
 pub use error::{
@@ -39,8 +46,6 @@ pub use tls::{
     VerifiedPeer,
 };
 
-// Re-export the certificate types callers need to build a `LocalIdentity`,
-// quinn's connection error, and the `Endpoint` a `Dialed` hands back, so
-// `qsh-core` never depends on rustls or quinn directly.
-pub use quinn::Endpoint;
+// Re-export the certificate type callers need to build a `LocalIdentity`, so
+// `qsh-core` never depends on rustls directly.
 pub use rustls::pki_types::CertificateDer;
