@@ -9,7 +9,7 @@ QSH 데몬(`qsh serve`, `qsh listen`)은 인터넷에 직접 노출되는 QUIC �
 
 이 상태에서 스푸핑된 출발지 하나가 보내는 QUIC Initial 패킷 하나는 서버에게 slab slot + 유도된 Initial 키 + 최대 10 MiB의 후속 버퍼를 강제할 수 있고 그 비용은 패킷 발신자가 실제로 그 주소에 존재하는지와 무관하다 — 왕복이 필요 없다. `receive_window`(연결 전체 unacked 상한)도 quinn 기본값 `VarInt::MAX`(무제한)로 남아 있었다. `docs/ROADMAP.md` M8 DoD 2는 이 감사 라인을 명시한다: 세션당 buffer ≤ 8 MB, accept 동시성 상한, source별 rate limit.
 
-`PLAN.md` M8 Step 2는 이 갭에 대한 방어선 ①②(주소 검증 + accept 상한)를 요구했다. 조사(44개 fact, file:line 검증)와 설계 제안(`scratchpad/step2-design.md`, 21k자)을 거쳐 이 ADR이 확정하는 결정에 이르렀다.
+`docs/history/m8-plan.md` Step 2는 이 갭에 대한 방어선 ①②(주소 검증 + accept 상한)를 요구했다. 조사(44개 fact, file:line 검증)와 설계 제안(`scratchpad/step2-design.md`, 21k자)을 거쳐 이 ADR이 확정하는 결정에 이르렀다.
 
 ## 결정
 

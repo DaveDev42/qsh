@@ -5,7 +5,7 @@
 
 ## 맥락
 
-M2(세션 broker + resume) 계획 중 두 가지 정의 공백이 드러났다(PLAN.md §4.1 질문 3·4).
+M2(세션 broker + resume) 계획 중 두 가지 정의 공백이 드러났다(`docs/history/m2-plan.md` §4.1 질문 3·4).
 
 1. `session_ref`의 조립 주체. architecture.md §2는 "서버 발급 opaque 값", CLI.md §5는 "CLI가 반환하는 opaque value"였고 예시는 `personal-mac/01K0SESSION`처럼 `<host-alias>/<session_id>` 형태다. 그런데 원격 호스트는 클라이언트가 자신을 어떤 alias(trust store/hosts.toml의 이름)로 부르는지 알 수 없으므로 서버가 이 값을 만들 수 없다.
 2. wire `SessionOpened`/`SessionAttached`는 `resume_token`(protocol.md §10, 32-byte CSPRNG, 매 attach마다 rotation)을 반환하지만 CLI.md §6.3의 `session.open` data는 `session_ref`/`initial_sequence`뿐이다. 기계 사용자(`--json`, MCP)가 재attach하려면 토큰을 JSON에 additive 필드로 노출해야 하는지, 아니면 클라이언트 상태에만 남기는지 정해야 했다.
