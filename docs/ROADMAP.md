@@ -461,6 +461,6 @@ P1은 2026-09-26 사용자 결정으로 열었다. 같은 날 ADR-0021·0022·00
 | `qsh setup` 경로 SC1 스톱워치 3회 | `docs/campaigns/p1-setup-stopwatch.md`(사전 고정 `43da2fb`, 회차 미실행) | M12 (b) | 같은 날 같은 진행자의 m9 3회. M9 DoD 1 공식 회차가 그날 있으면 재사용(ADR-0024 결정 12) |
 | supervised tunnel 절전·망 전환 회차 넷 | `docs/campaigns/p1-supervise-wake.md`(사전 고정 `ab05a27`, 회차 미실행) | M12 (a) 첫 단위 | 첫 단위가 담긴 태그. 넷째 회차(`serve --to` 재등록과 hub의 supervised reverse route)는 둘째 단위가 담긴 태그(ADR-0023 결과 절) |
 | `cause` 분포 관측 기록 | 이슈 #4 코멘트 또는 캠페인 문서. 실제 기록은 이슈 #10 본문과 2026-10-04T14:48Z 코멘트(기록됨, M13 (k) 착지) | M11 (a) 빌드 | M13 (k)의 착수 조건 |
-| `aarch64-unknown-linux-musl` 구형 glibc 판정 | `docs/campaigns/p1-aarch64-musl.md`(회차 미실행) | M13 (c) | aarch64 musl 자산이 붙은 태그. `v0.4.0`부터 붙어 충족됐다 |
+| `aarch64-unknown-linux-musl` 구형 glibc 판정 | `docs/campaigns/p1-aarch64-musl.md`(2026-10-09 회차 1 PASS, v0.4.3, 에이전트가 네이티브 arm64 컨테이너에서 실행) | M13 (c) | aarch64 musl 자산이 붙은 태그. `v0.4.0`부터 붙어 충족됐다 |
 | 새 파서 fuzz 타깃의 누적 72시간 | `docs/campaigns/m8-fuzz.md` 형식 | M11 (c) SSH 키 파서, M14 mux codec, M15의 새 decode 타깃 | 공개 beta 전(`docs/design/protocol.md` §13) |
 | Windows 대화형 셸 확인 | M19의 캠페인 문서 | M19 | Windows 자산이 붙은 태그 |

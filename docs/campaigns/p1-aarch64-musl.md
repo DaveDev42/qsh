@@ -93,8 +93,17 @@ FAIL이 나오면 원인을 분류한다.
 
 | 회차 | 날짜(UTC) | 플랫폼/이미지 | 설치 경로 | 바이너리 sha256 | 정적 링크 | 스모크 네 축 | gnu 거부 | 결과 | 기록자 |
 |---|---|---|---|---|---|---|---|---|---|
+| 1 | 2026-10-09 | Debian 10 aarch64 (컨테이너, Dave-MBP16 colima dockerd, 네이티브 arm64), `ldd (Debian GLIBC 2.28-10+deb10u3) 2.28` | curl (`QSH_LIBC=musl`) | f793ad1b9f52741860fc6e1bf81b44ff8d858d3bef3a8f810def25ad20fc6ee3 | PASS | PASS | PASS | PASS | Claude(에이전트) |
 
 열 채우는 법은 `docs/campaigns/m10-clean-vm.md` §8과 같다. `정적 링크`, `스모크 네 축`, `gnu 거부`는 `PASS`나 `FAIL` 중 하나이고, `결과`는 세 열이 모두 PASS이고 sha256과 설치 경로가 비어 있지 않을 때만 `PASS`다. 행마다 비고 문단을 표 아래에 회차 번호를 머리에 달아 잇는다. 비고에는 대상 태그와 그 태그가 가리키는 커밋, release run id, gnu 자산이 요구한 glibc 최고 버전, `ldd --version` 첫 줄, `ldd`와 `file` 출력 원문, gnu 자산을 실행했을 때 동적 링커의 거부 문구, 막힌 지점의 원문 에러를 적는다.
+
+**회차 1.** 대상 태그 `v0.4.3` → `f7ed074`(`f7ed07464f9e2db3cf1e96710c9662a4225b443b`), release run 37713234863. 기록자 열은 회차를 돌린 사람을 적게 돼 있지만 이 회차는 에이전트(Claude)가 돌렸다. `docs/campaigns/m10-clean-vm.md` 회차 1·2와 같이 VM이 아니라 이미지에서 막 띄운 컨테이너를 회차로 셌고, 캠페인을 닫을 때 사람이 다시 볼 항목이다. 환경은 Dave-MBP16의 colima dockerd에서 `--platform linux/arm64`로 띄운 `debian:10`이고 Apple silicon 위의 네이티브 arm64다(qemu 에뮬레이션이 아니다). `uname -m`은 `aarch64`, `ldd --version` 첫 줄은 `ldd (Debian GLIBC 2.28-10+deb10u3) 2.28`. `sources.list`를 `archive.debian.org`로 바꾸고 `curl ca-certificates tmux binutils file`을 더 설치했다. 시작 전 `which -a qsh` 0건, qsh 상태 디렉터리와 `QSH_*` 환경변수 없음.
+
+gnu 거부(§2.2): `QSH_LIBC` 없이 `QSH_VERSION=v0.4.3`으로 설치하자 스크립트가 `detected target: aarch64-unknown-linux-gnu`을 찍었다. 이 자산이 요구하는 glibc 최고 버전은 `objdump -T` 기준 `GLIBC_2.39`다. 실행하자 동적 링커가 `` /lib/aarch64-linux-gnu/libm.so.6: version `GLIBC_2.29' not found (required by /root/.local/bin/qsh) ``를 포함해 `GLIBC_2.29`·`2.30`·`2.32`·`2.33`·`2.34`·`2.38`·`2.39` 여덟 줄을 내고 exit 1로 거부했다. 대조용 바이너리와 man 페이지를 지웠다.
+
+설치와 정적 링크: `QSH_LIBC=musl QSH_VERSION=v0.4.3`으로 같은 curl 한 줄을 돌렸다. 스크립트는 `detected target: aarch64-unknown-linux-musl`, `verifying checksum`, `warning: provenance not verified: 'gh' (GitHub CLI) is not installed. Installing on the SHA256SUMS check alone.`, `installed qsh v0.4.3 to /root/.local/bin/qsh`, `installed 51 man page(s)`를 찍었다. `ldd`는 `not a dynamic executable`, `readelf -d`에 `NEEDED` 행 없음, `file`은 `ELF 64-bit LSB executable, ARM aarch64, version 1 (SYSV), statically linked`. `qsh --version`은 `qsh 0.4.3`, `.data.build.commit`은 `f7ed07464f9e2db3cf1e96710c9662a4225b443b`.
+
+스모크 네 축은 `docs/campaigns/m10-clean-vm.md` §6.0~§6.5를 tmux 창 둘에서 loopback으로 밟았다. 축 3의 `exec`는 exit 7과 stdout 한 줄의 순수 JSON을 냈고, 축 4는 `~d` 분리 뒤 `qsh attach`로 같은 세션에 붙어 `QSH-SMOKE-REATTACH-OK`를 받았다. 첫 시도는 회차 밖의 하네스 결함으로 버렸다. 스모크 드라이버의 fingerprint 정규식이 hex만 받아서 base64인 qsh fingerprint를 놓쳤다. 컨테이너를 새로 띄워 준비부터 다시 밟은 결과만 이 행에 적었다. 끝나고 컨테이너를 지웠다.
 
 ## 관련 문서
 
