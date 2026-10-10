@@ -1,7 +1,7 @@
 //! Transport-neutral error and code types.
 //!
 //! `qsh-transport`'s public surface names no quinn type
-//! (`docs/adr/0028-tcp-tls-fallback.md` decision 0): the errors a caller can
+//! (`docs/adr/0043-no-tcp-fallback.md` decision 3): the errors a caller can
 //! match are owned here, and the QUIC backend converts quinn's into them with
 //! the `From` impls below.
 //!

@@ -51,9 +51,7 @@ use super::ClientError;
 /// stream 이 대상" framing extended to a second carrier).
 pub(crate) enum ControlLink {
     /// Dialed straight to the peer over whatever transport the connection
-    /// runs on (forward route). Named for the route, not the transport: the
-    /// TCP fallback of `docs/adr/0028-tcp-tls-fallback.md` rides the same
-    /// variant.
+    /// runs on (forward route). Named for the route, not the transport.
     Direct(FramedStream),
     /// Relayed through this machine's `qsh listen` daemon over a
     /// `LOCAL_CONTROL` conduit (reverse route). `#[cfg(unix)]`: localctl

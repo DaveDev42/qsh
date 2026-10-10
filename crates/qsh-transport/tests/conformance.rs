@@ -1,5 +1,5 @@
-//! Transport conformance suite (`docs/adr/0028-tcp-tls-fallback.md`
-//! decision 0): the behavior every `qsh-transport` backend must show through
+//! Transport conformance suite (`docs/adr/0043-no-tcp-fallback.md`
+//! decision 3): the behavior every `qsh-transport` backend must show through
 //! the public [`Connection`] / [`SendStream`] / [`RecvStream`] facades.
 //!
 //! The behaviors are written once, in [`transport_conformance!`], and

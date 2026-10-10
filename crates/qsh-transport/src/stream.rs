@@ -1,9 +1,9 @@
-//! Transport-neutral byte streams (`docs/adr/0028-tcp-tls-fallback.md`
-//! decision 0).
+//! Transport-neutral byte streams (`docs/adr/0043-no-tcp-fallback.md`
+//! decision 3).
 //!
 //! [`SendStream`] and [`RecvStream`] are what [`Connection::open_bi`] and
 //! [`Connection::accept_bi`] hand out. Each is a closed enum over the
-//! backends (today only QUIC), so a TCP backend lands as one more variant
+//! backends (only QUIC), so another backend would be one more variant
 //! without a generic parameter or a vtable on the splice hot path.
 //!
 //! The drop semantics are quinn's, and callers rely on them (the tunnel

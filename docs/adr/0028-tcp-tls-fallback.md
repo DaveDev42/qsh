@@ -1,7 +1,7 @@
 # ADR-0028: TCP/TLS fallback은 명시 선택을 기본으로 하고 자체 sans-IO mux 위에서 항상 resume으로 복구한다
 
 날짜: 2026-10-09
-상태: 제안됨
+상태: 기각됨 (2026-10-11, ADR-0043). 결정 0의 transport facade만 ADR-0043 결정 3이 승인해 유지한다
 
 개정 관계: ADR-0005를 구체화한다. ADR-0005가 약속한 `Transport`/`StreamMux` trait은 결정 0의 모양(공개 enum facade와 비공개 계약 trait)으로 실현한다. ADR-0021 결정 1(`[transport].keep_alive_ms`)과 결정 2(45초 idle 상수)의 뜻을 TCP 경로로 넓힌다(결정 6). 다른 ADR의 결정은 바꾸지 않는다.
 

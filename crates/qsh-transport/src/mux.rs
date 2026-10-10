@@ -1,5 +1,5 @@
 //! The contract every transport backend implements
-//! (`docs/adr/0028-tcp-tls-fallback.md` decision 0).
+//! (`docs/adr/0043-no-tcp-fallback.md` decision 3).
 //!
 //! [`Connection`](crate::Connection), [`SendStream`](crate::SendStream) and
 //! [`RecvStream`](crate::RecvStream) are closed enums over the backends, and

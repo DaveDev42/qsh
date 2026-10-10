@@ -2,7 +2,7 @@
 
 **상태:** 설계 확정 (2026-08-17)
 **적용 범위:** 현재 구현된 `qsh/1` wire 전체
-**관련 문서:** [ADR-0001 custom QUIC](../adr/0001-custom-quic-protocol.md) · [ADR-0005 TCP fallback P1](../adr/0005-tcp-fallback-p1.md) · [CLI/JSON 계약](../CLI.md) · [아키텍처](architecture.md) · [테스트 전략](testing.md)
+**관련 문서:** [ADR-0001 custom QUIC](../adr/0001-custom-quic-protocol.md) · [ADR-0043 TCP fallback 없음](../adr/0043-no-tcp-fallback.md) · [CLI/JSON 계약](../CLI.md) · [아키텍처](architecture.md) · [테스트 전략](testing.md)
 
 > **규칙:** 구현이 이 문서와 어긋나게 되는 경우, 코드를 우회하지 말고 이 문서(필요 시 ADR)를 먼저 갱신한 뒤 구현한다. JSON envelope·오류 코드·sequence의 사용자 노출 계약은 [docs/CLI.md](../CLI.md)가 canonical이며 여기서는 중복 기술하지 않는다.
 
@@ -491,9 +491,9 @@ message ExecFrame {
 
 corpus는 `fuzz/corpus/`에 체크인한다. **19종 중 `broker_ops`는 모든 플랫폼에서 유닛 테스트로 상시 재생된다**(위 `broker_ops_corpus.rs`, 발견된 크래시의 회귀 고정). 나머지 파서 타깃 18종의 "유닛 테스트 상시 재생"은 아직 이 문서의 선언일 뿐 별도 회귀 하네스로 구현되지 않았다. 현재는 `fuzz-smoke.yml`의 짧은 결정적 `-runs=<N>` 스모크가 그 자리를 대신한다(`fuzz/README.md` "CI"). CI에서 PR마다 fuzz 빌드 게이트 + nightly smoke fuzz를 돌리고, 공개 beta 전에 타깃당 누적 72시간(파서 16종, DoD 1) + OSS-Fuzz 제출을 한다. 캠페인 기록은 [`docs/campaigns/m8-fuzz.md`](../campaigns/m8-fuzz.md), 상세는 [testing.md](testing.md).
 
-## 14. P1 TCP fallback을 위한 제약 (지금 지켜야 할 것)
+## 14. transport 중립 제약
 
-ADR-0005에 따라 P0 코드는 다음을 지킨다 — 이를 지키면 fallback은 wire 변경 없이 "TLS over TCP + 소형 스트림 mux" 추가로 끝난다:
+ADR-0005가 세우고 ADR-0043 결정 4가 TCP fallback 철회 뒤에도 유지한 제약이다. QSH의 transport는 QUIC 하나지만 wire와 프로토콜 코드는 QUIC 고유 개념에 기대지 않는다:
 
 - 모든 프로토콜 코드는 `qsh-transport`의 백엔드 중립 파사드(`Connection`/`SendStream`/`RecvStream`: open_bi/accept, ordered reliable bytes, 우선순위 힌트)에 대해 작성한다. 백엔드가 지켜야 할 행동은 `crates/qsh-transport/tests/conformance.rs`가 고정한다. quinn이 첫 백엔드일 뿐이다.
 - wire 구조는 QUIC 고유 개념(stream ID, datagram, transport parameter)에 의존하지 않는다. 스트림 정체성은 항상 in-band `StreamHeader`다.

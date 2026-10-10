@@ -19,7 +19,7 @@
 //! ([`FORBIDDEN_DEPS`]), and nothing under their `src/` may name a `quinn::`
 //! path or call the hidden `.quinn()` accessor ([`QUINN_TOKENS`]). That is
 //! what lets a second transport backend land behind `qsh_transport`'s
-//! neutral types (`docs/adr/0028-tcp-tls-fallback.md` decision 0).
+//! neutral types (`docs/adr/0043-no-tcp-fallback.md` decision 3).
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -280,7 +280,7 @@ const SETUP_TOKEN_SET: [&str; 8] = [
 /// `qsh-core` and `qsh-cli` never name the QUIC stack: every stream,
 /// connection, endpoint and error they touch is a `qsh_transport` neutral
 /// type, so a second transport backend needs no edit above `qsh-transport`
-/// (`docs/adr/0028-tcp-tls-fallback.md` decision 0). The ban covers the
+/// (`docs/adr/0043-no-tcp-fallback.md` decision 3). The ban covers the
 /// whole `src/` tree, `tests.rs` files included, with no per-file exemption;
 /// `localctl/daemon.rs` no longer needs one.
 ///
@@ -291,7 +291,7 @@ const SETUP_TOKEN_SET: [&str; 8] = [
 const CORE_SRC_DIR: &str = "crates/qsh-core/src";
 const QUINN_TOKENS: [&str; 2] = ["quinn::", ".quinn("];
 const QUINN_REASON: &str = "only qsh-transport may name the QUIC stack; qsh-core and qsh-cli go through qsh_transport's \
-     neutral Connection/SendStream/RecvStream/Endpoint and error types (docs/adr/0028-tcp-tls-fallback.md decision 0)";
+     neutral Connection/SendStream/RecvStream/Endpoint and error types (docs/adr/0043-no-tcp-fallback.md decision 3)";
 
 fn module_bans() -> Vec<ModuleBan> {
     let mut bans: Vec<ModuleBan> = BROKER_TOKEN_SET

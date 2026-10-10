@@ -149,7 +149,7 @@ M0부터 M10까지의 코드·계약·파이프라인 스텝 중 에이전트 �
 
 | 유예 기능 | 압력원 | 가드레일 |
 |---|---|---|
-| TCP/TLS fallback (P1) | doctor가 "UDP 차단"을 보고하는 순간 | transport 추상화는 P0에 있으나 TCP 코드는 0줄. doctor 메시지가 "P1 예정"을 명시(ADR-0005). → M14 |
+| TCP/TLS fallback (철회, ADR-0043) | doctor가 "UDP 차단"을 보고하는 순간 | 만들지 않는다. transport facade는 남지만 TCP 코드는 0줄이고, doctor 메시지와 README는 "예정"이 아니라 범위 밖이라고 적는다. 다시 열려면 ADR-0043을 개정하는 새 ADR |
 | SOCKS `-D` (M9로 승격, 2026-09-19, [ADR-0019](adr/0019-socks-dynamic-forward.md)) | 스펙 예시에 존재 | M9가 구현했다. `-D`는 CONNECT마다 `forward.local`로 인가된다. `forward.socks` action은 어휘에 남고 여전히 항상 deny다. 이 토큰을 적은 기존 `acl.toml`이 파싱 오류로 전부 거부 상태가 되지 않게 하려는 것이다 |
 | File copy (P1) | `file.read/write` action이 §9에 존재 | action만 정의, op 미등록, capabilities에 미광고. → M15 |
 | Windows (P1 client / P2 host) | 외부 기여 PR | PTY 코드에 `#![cfg(unix)]`. CI는 `windows-latest`에서 build/clippy/portable 테스트만 돌려 컴파일 회귀를 막는다. 지원 약속 아님. README Known limitations에 명시. → M19 / P2 |
@@ -178,8 +178,8 @@ P1은 2026-09-26 사용자 결정으로 열었다. §2의 "마일스톤 마감 �
 
 1. 이슈가 남긴 승인 ADR을 먼저 구현하고, 제안 ADR을 그다음에 둔다. 모양이 정해진 일을 먼저 끝내야 뒤의 설계 라운드가 그 결과를 입력으로 쓴다. (M11, M12로 소화했다.)
 2. 계약·wire를 건드리는 항목은 ADR 승인 전에 구현 스텝을 열지 않는다. 승인이 늦는 마일스톤은 기다리게 두고 순서상 다음 마일스톤을 먼저 연다.
-3. 측정 도구를 기능보다 먼저 세운다. 느린 스트림의 저속·역압 축과 야간 성능 추세(M13)가 TCP fallback(M14)과 파일 복사(M15)보다 앞선다. 두 기능 모두 PTY 우선순위 보장(`tunnel_saturated_pty_echo_p95_under_measured_rtt_plus_10ms`가 지키는 것)을 흔들 수 있고, 흔들렸는지를 재는 도구가 먼저 있어야 한다.
-4. transport 추상을 세운 뒤 TCP를 붙이고, 파일 복사는 그 뒤에 둔다. 파일 복사는 두 transport 위에서 한 번에 검증되도록 TCP 뒤에 둔다.
+3. 측정 도구를 기능보다 먼저 세운다. 느린 스트림의 저속·역압 축과 야간 성능 추세(M13)가 파일 복사(M15)보다 앞선다. 파일 복사는 PTY 우선순위 보장(`tunnel_saturated_pty_echo_p95_under_measured_rtt_plus_10ms`가 지키는 것)을 흔들 수 있고, 흔들렸는지를 재는 도구가 먼저 있어야 한다.
+4. (철회) transport 추상 뒤에 TCP를 붙이고 파일 복사를 두 transport에서 검증한다는 원칙이었다. ADR-0043이 TCP fallback을 철회해 파일 복사는 QUIC 하나에서 검증한다.
 5. 신뢰의 방향을 정한 뒤 pairing을 넓힌다. pin 방향 축(ADR-0017 결정 5가 미룬 후속 ADR)이 listener pairing(ADR-0015)의 결정 하나를 좌우한다. `qsh setup`은 오늘 있는 pairing 경로만 조립하고, M16이 새 경로를 열면 ADR-0024 결정 2의 역할 표에 행을 더하는 식으로 뒤따른다.
 6. 사람 회차는 마일스톤 DoD에 넣지 않는다. DoD는 캠페인 문서가 사전 고정돼 커밋되는 데까지다. 회차 기록은 §5.5에 모으고 P1 완료를 선언할 때의 조건으로 둔다. P0의 M7~M10은 회차를 DoD에 넣었기 때문에 "기능 완료 · DoD 잔여"로 멈춰 있다. 사람 회차를 착수 조건으로 거는 마일스톤은 M18 하나다(M8 DoD 3). 조건이 닫히지 않았으면 M18을 건너 M19를 먼저 열고, 건너뛴 사실을 이 절에 날짜와 함께 적는다.
 
@@ -208,24 +208,11 @@ P1은 2026-09-26 사용자 결정으로 열었다. §2의 "마일스톤 마감 �
 - **마감 노트 (2026-10-08):** 사람 몫 `p1-aarch64-musl` 회차는 §5.5에 있다. 같은 날 의존성을 갱신했다(`9714cf6`~`ec68cb6`). 800줄을 넘은 파일의 인라인 테스트 모듈을 sibling `tests.rs`로 옮겼다(`d28adba`~`4fcdc77`, 테스트 이름·개수 불변).
 - **크기:** 3.1~6.1ew
 
-### M14 — TCP/TLS fallback
+### M14 — TCP/TLS fallback ⛔ 철회 (2026-10-11)
 
-- **범위:** UDP가 막힌 망에서 같은 application protocol을 TLS-over-TCP 위에서 돌린다(ADR-0005).
-  - (a) `qsh-transport`의 `Transport`/`StreamMux` 추상. ADR-0005가 P0 산출물로 요구하고 M3부터 미이행으로 남은 trait이다(M3 계획, `2473c88`). 연결, `open_bi`/`accept_bi`, 순서 보장 바이트 스트림, 우선순위 힌트, 연결 오류 분류를 추상으로 세우고 quinn 구현을 그 뒤로 옮긴다. 오늘 `qsh-core`는 quinn 타입을 직접 쓴다. `reverse::classify_connection_error`가 `qsh_transport::ConnectionError`(quinn 재수출)를 매칭하고, `tunnel/splice.rs`·`tunnel/local.rs`·`reverse/listen.rs`가 `quinn::{RecvStream, SendStream}`을 가져오며, 테스트를 포함해 16개 파일에 `quinn::` 참조가 57곳 있다. 이 자리들을 transport 중립 타입으로 바꾼다. `ControlLink`/`DataLink`(`crates/qsh-core/src/client/link.rs`)는 축이 다른 enum이라 건드릴 이유가 생길 때만 다룬다. **착지 (2026-10-09):** `e5a62a5`~`7ca3947`, 모양은 ADR-0028 결정 0. `qsh-core`·`qsh-cli`에 quinn 의존과 `quinn::` 경로가 없고 `cargo xtask arch`가 잠근다. 처리량 비율과 포화 터널 PTY echo p95는 기준선 범위 안이다. DoD (a)의 "테스트는 import 경로와 타입 이름만"에서 벗어난 접근자 교체 편집은 ADR-0028 결과 절에 목록이 있고 받아들일지는 승인 때 정한다.
-  - (b) 착수 ADR(ADR-0028). ADR-0005는 "P1에 한다"와 "wire 변경 없이 TLS over TCP + 소형 mux"까지만 정했다. 남은 결정은 이렇다. transport 선택 정책(명시 옵션인지, UDP probe 실패 뒤 자동인지), TCP listener 포트와 bind(기본은 설정이나 플래그로 켤 때만 bind하고 기본 bind를 고른다면 그 이유와 threat model 행), mux 설계와 그것이 `docs/design/protocol.md` §16.2 상호운용 계약 표의 새 행이 되는지, connection migration이 없는 TCP의 recovery 경로(항상 resume), 선두 차단(head-of-line blocking) 아래에서 PTY 우선순위를 어디까지 약속하는지, `[transport].keep_alive_ms`(ADR-0021 결정 1)가 TCP 경로에서 무엇을 뜻하는지, 자동 전환을 고를 때의 강제 downgrade 처분.
-  - (c) 구현. client dial·host listener·mux, ADR-0009 admission 방어선과 ADR-0010 quota의 TCP 쪽 적용, capability 광고, doctor의 UDP 차단 진단 remedy(`crates/qsh-core/src/doctor.rs`의 "QSH has no TCP fallback (P1, ADR-0005)")를 실행 가능한 다음 명령으로 교체.
-  - (d) threat model. `docs/design/threat-model.md` §3 진입점과 §4 위협 표에 TCP listener와 mux 파서를 더한다.
-- **착수 조건:** (b)의 ADR 승인 전에는 (c)를 열지 않는다. (a)는 동작 변경 없는 리팩터라 승인 전에 열 수 있었고 착지했다. 현재 ADR-0028은 `제안됨`이다.
-- **명시적 out:** QUIC 없이 TCP만 쓰는 모드를 기본값으로 삼는 것, relay(PRD §14 별도 제품), ADR-0021 결정 1·4의 구현(M13 (k)).
-- **수용 기준 (DoD):**
-  - (a) 전환 커밋은 테스트 파일을 import 경로와 타입 이름 외에는 고치지 않고 전체 스위트가 초록이다. `qsh-core`의 비테스트 코드에 `quinn::` 경로가 남지 않거나, 남는 자리를 ADR-0028이 사유와 함께 목록으로 적는다. `cargo xtask arch`가 `qsh-transport`의 session·ACL 무지식 규칙을 계속 강제한다.
-  - (b) ADR-0028이 `승인됨`이다.
-  - (c) exec 왕복, PTY 세션 open/attach, `-L`/`-R`/`-D` 터널의 핵심 e2e가 두 transport 매트릭스에서 모두 초록이다. chaos 하네스가 UDP를 전부 버리는 상태에서 ADR이 정한 정책대로 TCP로 연결되고, 클라이언트 `kill -9` 뒤 reattach 결과가 기준 stream과 byte-identical이다(SC4의 TCP 판). 두 transport 위에서 application frame 바이트가 같음을 단언하는 테스트가 있다. `load.yml`의 적대적 부하 시나리오에 TCP handshake flood가 더해져 선언된 상한이 강제된다. 포화 터널 아래 PTY echo p95를 TCP 경로에서도 같은 하네스로 재고, ADR이 정한 예산 또는 "예산 없음"과 그 고지를 테스트와 README Known limitations에 고정한다. `capabilities.json` golden은 `QSH_UPDATE_FIXTURES=1`로 재생성하고 계약 변경과 같은 무게로 다룬다. doctor의 UDP 차단 remedy 문면이 축자 테스트로 고정된다.
-  - (c) TCP 경로의 client·server TLS 설정이 QUIC 경로와 같은 `QshPeerVerifier`(pin → CA → 거부), 0-RTT·ticket·resumption 금지(`docs/design/protocol.md` §16.2의 0-RTT 행), ALPN `qsh/1`을 쓴다는 것을 `crates/qsh-transport/tests/loopback.rs`와 같은 형식의 단언으로 고정한다.
-  - (c) mux codec은 `qsh-proto`의 sans-IO 모듈이고 fuzz 타깃이 하나 는다. `fuzz/README.md`와 `docs/design/protocol.md` §13의 개수 문장이 같은 커밋에서 바뀐다. 새 타깃의 누적 fuzz는 §5.5.
-  - (d) threat model의 새 행이 핀 테스트 이름을 갖는다. TCP listener가 기본으로 bind되지 않는다는 것(또는 ADR이 고른 기본 bind의 이유)이 행에 적힌다. 자동 전환을 골랐다면 UDP를 막는 on-path 공격자가 migration 없는 경로를 강제할 수 있다는 사실이 §7 잔여 위험에 오른다.
-  - 마일스톤 마감 공통 절차(§2) 1·2.
-- **크기:** 4.3~6.9ew. (a) 1.0~1.8(transport 추상 신설과 `qsh-core`의 quinn 직접 참조 16개 파일 이전, 착지) / (b) 0.3 / (c) 2.5~4.0(두 번째 transport 구현과 테스트 매트릭스 배증. ADR-0005 근거 문단의 서술을 M2~M3급 규모로 환산) + mux codec의 `qsh-proto` 배치와 fuzz 타깃 0.2~0.3 / (d) 0.2~0.3 / 마감 0.1~0.2.
+- **결정:** 2026-10-11 사용자 결정으로 TCP/TLS fallback을 만들지 않는다(ADR-0043). 착수 ADR이던 ADR-0028은 기각했다. migration 없는 경로, 선두 차단 아래 PTY 예산 없음, 두 배가 되는 테스트 매트릭스와 새 공격면이 "UDP가 막힌 망에서도 연결은 된다"는 값보다 크다고 봤다. UDP가 막힌 망은 범위 밖이고 README가 SSH·overlay 우회를 안내한다. 마일스톤 번호 M15~M19는 그대로 둔다.
+- **남긴 것:** (a) `qsh-transport`의 transport 중립 facade. 착지 2026-10-09, `e5a62a5`~`7ca3947`, 모양은 ADR-0028 결정 0. `qsh-core`·`qsh-cli`에 quinn 의존과 `quinn::` 경로가 없고 `cargo xtask arch`가 잠근다. 처리량 비율과 포화 터널 PTY echo p95는 기준선 범위 안이다. ADR-0043 결정 3이 이 경계를 유지하고, ADR-0028 결과 절이 적은 테스트 접근자 교체 편집을 받아들였다. doctor `udp_egress_blocked`의 message는 ADR-0043을 가리킨다.
+- **크기:** (a) 1.0~1.8ew 소진. 나머지 3.3~5.1ew는 P1 합에서 뺐다.
 
 ### M15 — 스트리밍 파일 복사
 
@@ -234,7 +221,7 @@ P1은 2026-09-26 사용자 결정으로 열었다. §2의 "마일스톤 마감 �
 - **착수 조건:** ADR-0029 승인. M13 (b)의 역압 하네스가 선 뒤(충족).
 - **명시적 out:** 디렉터리 동기화(rsync류), UDP forwarding, 원격 파일 브라우징.
 - **수용 기준 (DoD):**
-  - 큰 파일 왕복이 해시 기준으로 byte-identical이다. forward route와(ADR이 포함하면) reverse route, QUIC과 TCP 두 transport 모두에서다.
+  - 큰 파일 왕복이 해시 기준으로 byte-identical이다. forward route와(ADR이 포함하면) reverse route 모두에서다(transport는 QUIC 하나, ADR-0043).
   - 행이 없으면 deny다. 새 두 seam이 `DENY_SEAMS`에 행으로 오르고 `acl_uniformity.rs`가 문면 균일성을 단언한다. `acl_registry.rs`의 항상-deny 예외 목록에서 `file.read`/`file.write`가 빠지고 `forward.socks`만 남는다. `acl_check_equivalence.rs` 표에 두 action 행이 더해진다.
   - `allow = ["file.*"]` 행이 있어도 qsh 자신의 상태 경로에 대한 `file.read`/`file.write`가 `PERMISSION_DENIED`이고 파일 바이트가 그대로임을 핀 테스트가 단언한다. 적어도 `acl.toml`, `trust.toml`, identity 파일, audit 로그를 덮고, 그 경로를 가리키는 symlink와 `..`로 이탈하는 경로 두 우회도 같은 결과임을 단언한다.
   - 인가 전 자원 생성이 없다. deny된 `file.write` 뒤 목적지와 그 디렉터리에 새 파일·임시 파일이 없고 기존 파일은 바이트 단위로 같다.
@@ -326,13 +313,13 @@ P1은 2026-09-26 사용자 결정으로 열었다. §2의 "마일스톤 마감 �
 | M11 이슈 후속과 ACL 가시성 | 2.8~4.1 | 완료 |
 | M12 이슈 설계 ADR 구현 | 5.1~6.1 | 완료 |
 | M13 측정·배포 기반 | 3.1~6.1 | 완료 |
-| M14 TCP/TLS fallback | 4.3~6.9 | (a) 착지. ADR-0028 승인((c)부터) |
+| M14 TCP/TLS fallback | 1.0~1.8 | 철회(ADR-0043). (a)만 착지 |
 | M15 스트리밍 파일 복사 | 2.7~4.0 | ADR-0029 승인 (M13 (b)는 충족) |
 | M16 신뢰의 방향과 수명 | 2.4~3.5 + 재산정 셋 | ADR 넷(예약 둘 포함) 승인 |
 | M17 운영 표면 | 1.3~2.5 + 미산정 하나 | ADR-0032·0033 승인(항목별), M12 (b)의 SHA 고정 |
 | M18 세션 거처 | 4.4~8.6 + 미산정 하나 | M8 DoD 3 기록, ADR-0034 승인 |
 | M19 Windows client | 4.7~7.0 | ADR-0035 승인 |
-| 합 | 약 31~49 + 미산정 다섯 | |
+| 합 | 약 28~44 + 미산정 다섯 | |
 
 ### 5.3 P1 밖으로 보낸다
 
@@ -353,6 +340,7 @@ P1은 2026-09-26 사용자 결정으로 열었다. §2의 "마일스톤 마감 �
 | `-W` | 기각했다(ADR-0011 결과 절 2026-09-25 추기) |
 | UDP forwarding | PRD P1 목록에 없다(M4 명시적 out) |
 | relay | PRD §14 별도 제품. §3 가드레일대로 `--relay` stub도 없다 |
+| TCP/TLS fallback | ADR-0043이 철회했다(2026-10-11). M14 (a)의 transport facade만 남았다 |
 | DNS-over-HTTPS 강제 모드(이슈 #8) | ADR-0039가 P2 후보로 두었다. PRD §4·§12와 `docs/design/threat-model.md` §9의 web PKI 비목표를 먼저 고쳐야 연다. 그때까지는 IP 리터럴 주소가 DNS를 거치지 않는 우회다 |
 | ECH(이슈 #9) | ADR-0040 결정 3이 착수 조건을 정했다. rustls 정식 릴리스에 서버 쪽 ECH가 들어오고 quinn 0.11이 그 설정을 막지 않음을 테스트로 확인해야 연다. 2026-10-01 기준 rustls 0.23.45와 0.24.0-dev.1 모두 클라이언트 쪽만 있다. hostname SNI를 보내지 않는 결정 2는 M13에서 구현했다 |
 | P2 전부 | local echo prediction, read-only multi-attach, jump chaining, agent forwarding, Windows host, mobile client SDK(`docs/PRD.md` §7 P2) |
@@ -360,9 +348,9 @@ P1은 2026-09-26 사용자 결정으로 열었다. §2의 "마일스톤 마감 �
 
 ### 5.4 P1 일정 리스크
 
-1. **사용자 승인.** 승인이 필요한 ADR이 남아 있다. 제안 ADR 0028, 예약 ADR 둘의 결정 절(0015, 0016), 새 ADR 일곱(0029~0035), 조건부 하나(ADR-0014 결정 7 개정). 대응: 마일스톤마다 ADR 초안을 첫 스텝으로 두고, 승인을 기다리는 동안 순서상 다음 마일스톤의 ADR 없는 스텝을 연다.
-2. **SC7 범위가 P1 표면만큼 넓어진다.** M8 DoD 4의 독립 검증 계약이 아직 없는데 P1은 wire 필드(H2), 새 transport(M14), 새 op(M15)를 더한다. 대응: freeze 발효 전에는 `docs/design/protocol.md` §16.1 목록을, 발효 뒤에는 §16.4 규칙을 같은 커밋에서 지키고, threat model 행을 각 마일스톤 DoD에 넣었다.
-3. **TCP 경로의 PTY 우선순위.** 선두 차단 아래에서 M4 echo 예산이 성립하지 않을 가능성이 크다. 대응: ADR-0028이 예산을 먼저 정하고 README가 고지한다.
+1. **사용자 승인.** 승인이 필요한 ADR이 남아 있다. 예약 ADR 둘의 결정 절(0015, 0016), 새 ADR 일곱(0029~0035), 조건부 하나(ADR-0014 결정 7 개정). 대응: 마일스톤마다 ADR 초안을 첫 스텝으로 두고, 승인을 기다리는 동안 순서상 다음 마일스톤의 ADR 없는 스텝을 연다.
+2. **SC7 범위가 P1 표면만큼 넓어진다.** M8 DoD 4의 독립 검증 계약이 아직 없는데 P1은 wire 필드(H2), 새 op(M15)를 더한다. 대응: freeze 발효 전에는 `docs/design/protocol.md` §16.1 목록을, 발효 뒤에는 §16.4 규칙을 같은 커밋에서 지키고, threat model 행을 각 마일스톤 DoD에 넣었다.
+3. (해소) TCP 경로의 PTY 우선순위. ADR-0043이 TCP fallback을 철회해 위험이 사라졌다. 번호는 인용 때문에 남긴다.
 4. **M18의 echo 회귀와 IPC 보안.** H5는 대화형 echo가 로컬 IPC를 한 번 더 지나고 resume token custody(ADR-0007)와 부딪힐 수 있다. 대응: ADR-0034가 세 후보를 같은 표로 비교하고, 기존 echo 예산을 고치지 않는 것과 소켓 권한 모델을 DoD로 둔다.
 5. **Windows 산정 신뢰도.** 비교 표본이 없다. 대응: ADR-0035가 명령 집합을 좁히고, 첫 스텝 뒤 다시 매겨 이 절에 적는다.
 6. **P1 사람 몫이 쌓인다.** §5.5의 회차는 마일스톤을 막지 않지만 P1 완료 선언을 막는다. 대응: 캠페인 문서를 해당 마일스톤 DoD에서 사전 고정해 사람이 언제든 돌릴 수 있게 한다.
@@ -377,5 +365,5 @@ P1은 2026-09-26 사용자 결정으로 열었다. §2의 "마일스톤 마감 �
 | supervised tunnel 절전·망 전환 회차 넷 | `docs/campaigns/p1-supervise-wake.md`(사전 고정 `ab05a27`) | M12 (a) | 첫 단위가 담긴 태그. 넷째 회차(`serve --to` 재등록과 hub의 supervised reverse route)는 둘째 단위가 담긴 태그(ADR-0023 결과 절). 회차 미실행 |
 | `cause` 분포 관측 기록 | 이슈 #10 본문과 2026-10-04T14:48Z 코멘트 | M11 (a) 빌드 | 기록됨, M13 (k) 착지 |
 | `aarch64-unknown-linux-musl` 구형 glibc 판정 | `docs/campaigns/p1-aarch64-musl.md` | M13 (c) | PASS (2026-10-09 회차 1, v0.4.3, Debian 10 arm64 glibc 2.28, 에이전트가 네이티브 arm64 컨테이너에서 실행). 컨테이너를 회차로 센 판단은 m10-clean-vm과 같고 사람이 다시 볼 항목 |
-| 새 파서 fuzz 타깃의 누적 72시간 | `docs/campaigns/m8-fuzz.md` 형식 | M11 (c) SSH 키 파서, M14 mux codec, M15의 새 decode 타깃 | 공개 beta 전(`docs/design/protocol.md` §13). 열림 |
+| 새 파서 fuzz 타깃의 누적 72시간 | `docs/campaigns/m8-fuzz.md` 형식 | M11 (c) SSH 키 파서, M15의 새 decode 타깃 | 공개 beta 전(`docs/design/protocol.md` §13). 열림 |
 | Windows 대화형 셸 확인 | M19의 캠페인 문서 | M19 | Windows 자산이 붙은 태그 |

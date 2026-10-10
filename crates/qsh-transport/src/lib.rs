@@ -21,10 +21,10 @@
 //! datagrams): stream identity is always the in-band `StreamHeader`
 //! (`docs/design/protocol.md` §7, §14). The public surface names no quinn
 //! type but the hidden `Connection::quinn` test escape hatch
-//! (`docs/adr/0028-tcp-tls-fallback.md` decision 0): [`Connection`],
+//! (`docs/adr/0043-no-tcp-fallback.md` decision 3): [`Connection`],
 //! [`Endpoint`], [`SendStream`] and [`RecvStream`] are closed enums over the
-//! backends (QUIC today), and the P1 TCP fallback (ADR-0005) adds another
-//! backend behind the same surface.
+//! backends. QUIC is the only one: ADR-0043 withdrew the TCP fallback and
+//! kept this surface as the boundary that confines quinn to this crate.
 
 pub mod control;
 pub mod endpoint;

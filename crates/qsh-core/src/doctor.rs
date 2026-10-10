@@ -195,7 +195,7 @@ pub const AUDIT_PATH_UNWRITABLE: Diagnostic = Diagnostic {
 pub const UDP_EGRESS_BLOCKED: Diagnostic = Diagnostic {
     id: DiagnosticId::UdpEgressBlocked,
     code: "udp_egress_blocked",
-    message: "UDP egress for QSH's QUIC transport appears to be silently blocked: a probe packet left this machine but nothing answered before the timeout. QSH has no TCP fallback (P1, ADR-0005) — every QSH connection is QUIC over UDP, so this is a hard stop, not a slow path.",
+    message: "UDP egress for QSH's QUIC transport appears to be silently blocked: a probe packet left this machine but nothing answered before the timeout. QSH has no TCP fallback (ADR-0043) — every QSH connection is QUIC over UDP, so this is a hard stop, not a slow path.",
     remedy: "Open outbound UDP (default port 4433) on this machine's firewall. Until then, an existing overlay such as WireGuard or Tailscale is the only workaround.",
 };
 
