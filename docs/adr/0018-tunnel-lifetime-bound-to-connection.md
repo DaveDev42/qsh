@@ -7,14 +7,14 @@
 
 M4 Step 8이 확정한 resume 의미론은 두 갈래다. path migration(IP 변경, Wi-Fi↔테더링)은 connection이 살아 있으므로 터널을 투명하게 살려 보내고, connection 손실 뒤의 resume은 세션만 살리며 터널 스트림은 깨끗이 끝낸다(`docs/ROADMAP.md` M4 마감 노트). `crates/qsh-testkit/tests/tunnel_chaos.rs`의 `a_dead_connection_ends_the_tunnel_cleanly_while_the_pty_session_resumes`가 이 갈래를 테스트로 고정하고, `README.md` Known limitations와 `docs/CLI.md` §6.14 Holder lifetime이 사용자에게 같은 말을 한다.
 
-그 위에 두 요구가 남아 있었다. 하나는 **forward-route live carrier**로, `-L` listener를 쥔 CLI 프로세스가 resume에 성공하면 그 뒤 들어오는 새 TCP 연결을 새 connection으로 실어 나르자는 것이다. 다른 하나는 **`-R` 자동 재발행**으로, reverse route 위의 `-R`이 reverse connection과 함께 죽었을 때 데몬이 재등록 직후 `RemoteForwardOpen`을 다시 내자는 것이다. M4가 M5 입력으로 넘겼고 M5는 범위 밖으로 판정해 ROADMAP §3 표에 M8 소유로 올렸다. M7 이월 표의 ix, `docs/history/m8-plan.md` §5 표의 ix가 같은 항목이고, M8 Step 5 (a)는 "의미론 재설계라 새 ADR 선행"으로 Step 6에 이관했다. wire freeze(Step 7) 전에 결정해야 하는 이유는 `-R` 자동 재발행이 `RemoteForwardOpen`이 기존 `forward_id`를 받아들이는 새 wire 의미를 요구하기 때문이다(CLI.md §6.14 예외 문단).
+그 위에 두 요구가 남아 있었다. 하나는 **forward-route live carrier**로, `-L` listener를 쥔 CLI 프로세스가 resume에 성공하면 그 뒤 들어오는 새 TCP 연결을 새 connection으로 실어 나르자는 것이다. 다른 하나는 **`-R` 자동 재발행**으로, reverse route 위의 `-R`이 reverse connection과 함께 죽었을 때 데몬이 재등록 직후 `RemoteForwardOpen`을 다시 내자는 것이다. M4가 M5 입력으로 넘겼고 M5는 범위 밖으로 판정해 ROADMAP §3 표에 M8 소유로 올렸다. M7 이월 표의 ix, M8 계획 §5(`52639fc`) 표의 ix가 같은 항목이고, M8 Step 5 (a)는 "의미론 재설계라 새 ADR 선행"으로 Step 6에 이관했다. wire freeze(Step 7) 전에 결정해야 하는 이유는 `-R` 자동 재발행이 `RemoteForwardOpen`이 기존 `forward_id`를 받아들이는 새 wire 의미를 요구하기 때문이다(CLI.md §6.14 예외 문단).
 
 ## 결정
 
 1. **v1의 터널 수명은 지금 그대로 QUIC connection에 결합한다.** `-L` listener는 프로세스 수명, `-L` forward와 `-R` 등록은 그것을 실어 나른 connection 수명이다. connection 손실 뒤 resume은 세션만 복구하고 터널은 새 `tunnel.open`으로 다시 연다. `tunnel_chaos.rs`의 개정 강제 트랩은 v1 내내 유지한다.
 2. **forward-route live carrier는 구현하지 않는다.** `-L` listener를 쥔 프로세스는 resume 뒤에도 그 listener로 들어오는 새 연결에 reset을 돌려준다. 사용자 처방은 지금 README가 적은 대로 forward 재시작이다.
 3. **`-R` 자동 재발행은 P1 백로그로 옮긴다.** wire freeze에 `RemoteForwardOpen`의 `forward_id` 재수락 의미를 넣지 않는다. 필요해지면 v1 이후 additive 필드(예: `reclaim: bool`)로 넣을 수 있고, freeze가 그 길을 막지 않는다는 점만 protocol.md의 freeze 문면에 한 줄로 적는다.
-4. ROADMAP §3 표의 이 행과 `docs/history/m8-plan.md` §5 표의 ix는 이 ADR로 닫는다. protocol.md·README·CLI.md의 현행 서술은 이미 이 결정과 같으므로 개정하지 않는다.
+4. ROADMAP §3 표의 이 행과 M8 계획 §5(`52639fc`) 표의 ix는 이 ADR로 닫는다. protocol.md·README·CLI.md의 현행 서술은 이미 이 결정과 같으므로 개정하지 않는다.
 
 ## 결과
 

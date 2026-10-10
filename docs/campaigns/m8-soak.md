@@ -48,7 +48,7 @@ main이 Dave-Windows-WSL 단독 점유에서 돌린 24h 실측(이 워크플로 
    per-source 핸드셰이크 rate limiter에 걸려 예산 초과분 Initial이
    조용히 `Ignore`되고 클라이언트에는 "no response within 10s"만 보인다.
    제품 기본값 자체는 손대지 않는다 — 단일 소스가 제한당하는 건
-   프로덕션에서 의도된 동작이고(`docs/history/m8-plan.md` §3 Step 5), 이 상향은 신뢰된
+   프로덕션에서 의도된 동작이고(M8 계획 §3 Step 5(`52639fc`)), 이 상향은 신뢰된
    테스트 드라이버인 하네스 자신의 리스너 설정에만 적용된다.
 8. **loopback UDP가 ephemeral 범위 안에서 막혀 있지 않은지 확인한다.**
    `run.sh`가 시작 직후 `scripts/soak/preflight_udp.py`로
@@ -524,7 +524,7 @@ Windows Store 자동 다운로드 정책 키(`HKLM\SOFTWARE\Policies\Microsoft\W
 태그 대상 트리. 이 회차의 관측은 8c4f319까지만 보증한다. 그 뒤 main에
 얹힌 커밋(M9 `-D` 계열, f331cd0의 PTY 홈 폴백, 테스트 타임아웃 보고)은
 server·tunnel 경로를 바꾼다. 2026-09-21 사용자 결정으로 `v0.1.0-alpha.3`은
-찍지 않고 `-D`가 오른 main에 `v0.2.0`을 찍는다(`docs/history/m9-plan.md` §7). `-D` 포함
+찍지 않고 `-D`가 오른 main에 `v0.2.0`을 찍는다(M9 계획 §7(`b9a621b`)). `-D` 포함
 트리의 24h soak은 run #7로 릴리스 뒤에 돌린다.
 
 ## 9. 재사용
