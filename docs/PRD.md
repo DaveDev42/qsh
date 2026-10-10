@@ -157,13 +157,18 @@ qsh -D 1080 dave@server   # SOCKS5 dynamic forwarding (ADR-0019)
 
 ### P1 — 실사용 확장
 
-- UDP가 차단된 환경을 위한 TCP/TLS fallback
-- SOCKS5 dynamic forwarding — 2026-09-19 사용자 결정으로 v1(M9)에 넣는다(ADR-0019)
-- streaming file copy
-- 인증서 rotation과 revocation UX
-- Windows client
-- background service 설치 — ROADMAP M9 (g)로 당겨 `qsh service install|uninstall|status`(macOS user LaunchAgent / Linux systemd user unit, `docs/CLI.md` §6.18)를 v1에 넣는다. 자동 시작은 유닛의 `KeepAlive`/`Restart=always`까지이고, 로그인 세션 밖 상시 기동(systemd linger, macOS LaunchDaemon)은 v1 범위 밖이다. `qsh doctor`가 `systemd_linger_disabled`·`launchagent_session_scoped`로 그 한계를 알린다
-- 세션 및 audit 관리 개선
+마일스톤 배치는 `docs/ROADMAP.md` §5에 있다.
+
+- UDP가 차단된 환경을 위한 TCP/TLS fallback (M14, ADR-0028)
+- streaming file copy (M15)
+- 인증서 rotation과 revocation UX (M16 (d))
+- Windows client (M19)
+- 세션 및 audit 관리 개선 (M17 (d))
+
+처음 P1에 있었으나 v1(M9)로 당겨 출고한 항목:
+
+- SOCKS5 dynamic forwarding — 2026-09-19 사용자 결정(ADR-0019)
+- background service 설치 — ROADMAP M9 (g). `qsh service install|uninstall|status`(macOS user LaunchAgent / Linux systemd user unit, `docs/CLI.md` §6.18). 자동 시작은 유닛의 `KeepAlive`/`Restart=always`까지이고, 로그인 세션 밖 상시 기동(systemd linger, macOS LaunchDaemon)은 v1 범위 밖이다. `qsh doctor`가 `systemd_linger_disabled`·`launchagent_session_scoped`로 그 한계를 알린다
 
 ### P2 — 선택 기능
 
