@@ -208,10 +208,10 @@ impl Params {
 }
 
 /// The idle-listener bound every phase's `listener_rss_kib` sample is
-/// judged against (`docs/PRD.md:286`, `docs/campaigns/m8-soak.md` §3).
+/// judged against (`docs/PRD.md` §13, `docs/campaigns/m8-soak.md` §3).
 const IDLE_RSS_BOUND_KIB: u64 = 30 * 1024;
 
-/// Per-session buffer allowance (`docs/PRD.md:287`, `docs/campaigns/
+/// Per-session buffer allowance (`docs/PRD.md` §13, `docs/campaigns/
 /// m8-soak.md` §3).
 const PER_SESSION_BUFFER_KIB: u64 = 8 * 1024;
 
@@ -221,7 +221,7 @@ const PER_SESSION_BUFFER_KIB: u64 = 8 * 1024;
 const FD_GROWTH_ALLOWANCE: i64 = 2;
 
 /// Floor of the echo p95 bound — same formula T2's scenario 3 uses
-/// (`docs/design/testing.md:126`): `max(3 * ramp-phase baseline p95, this
+/// (`docs/design/testing.md` "Soak" section (T2 echo threshold)): `max(3 * ramp-phase baseline p95, this
 /// floor)`. A fixed absolute number is what a shared, contended CI runner
 /// cannot promise; this floor only kicks in when the same run's own
 /// baseline was already fast.
@@ -1189,7 +1189,7 @@ fn soak_session_load() {
     // window before steady begins, so the echo p95 bound (below) has a
     // same-run reference point instead of a fixed absolute number a shared
     // runner cannot promise — same reasoning as `adversarial_load.rs`'s T2
-    // baseline (`docs/design/testing.md:126`).
+    // baseline (`docs/design/testing.md` "Soak" section (T2 echo threshold)).
     let baseline_window = params.sample.max(Duration::from_secs(2));
     std::thread::sleep(baseline_window);
     let baseline_echo_p95_ms = p95(workers

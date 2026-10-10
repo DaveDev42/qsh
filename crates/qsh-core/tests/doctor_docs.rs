@@ -138,7 +138,7 @@ fn cli_md_names_every_frozen_doctor_code() {
 /// M8 Step 4c (docs/campaigns/m8-adversarial-load.md §3): the test above
 /// pins that every frozen *code* is named somewhere in
 /// `docs/CLI.md`, but nothing pinned the loose *count prose* — "진단 코드
-/// N종" at `docs/CLI.md:825` and "N종 진단 코드" at `:1127` — against
+/// N종" at `docs/CLI.md` §6.11 and "N종 진단 코드" in §6.17 — against
 /// `EXPECTED_DOCTOR_CODES.len()`. That drift actually happened once
 /// already: M8 Step 4b added a 14th code (`config_unknown_key`) and the
 /// table grew to 14 rows, but both prose mentions of the count stayed at
@@ -196,7 +196,7 @@ fn doctor_code_counts_named_in_prose(doc: &str) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
 
     // Pattern A: "진단 코드 " followed immediately by a digit run then "종"
-    // (`docs/CLI.md:825`: "...진단 코드 21종·envelope...").
+    // (`docs/CLI.md` §6.11: "...진단 코드 24종·envelope...").
     const PREFIX: &str = "진단 코드 ";
     let mut search_from = 0;
     while let Some(rel_idx) = doc[search_from..].find(PREFIX) {
@@ -217,7 +217,7 @@ fn doctor_code_counts_named_in_prose(doc: &str) -> Vec<(usize, usize)> {
     }
 
     // Pattern B: a digit run immediately followed by "종 진단 코드"
-    // (`docs/CLI.md:1127`: "**21종 진단 코드** (...)").
+    // (`docs/CLI.md` §6.17: "**24종 진단 코드** (...)").
     const SUFFIX: &str = "종 진단 코드";
     search_from = 0;
     while let Some(rel_idx) = doc[search_from..].find(SUFFIX) {

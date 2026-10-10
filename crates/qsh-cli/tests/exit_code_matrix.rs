@@ -433,7 +433,7 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
             // (non-a-terminal) too, so both modes must fall to the same
             // `INVALID_ARGUMENT` for "exit code does not depend on output
             // mode" (`docs/CLI.md` §4) to hold (M9 plan Step 2 (a) (b9a621b),
-            // ADR-0013 decision 8 at `docs/adr/0013-cert-file-exchange.md:29`).
+            // ADR-0013 decision 8).
             name: "trust accept: no code and no --code-stdin",
             sandbox: &fleet.client,
             args: &["trust", "accept", "127.0.0.1:1"],

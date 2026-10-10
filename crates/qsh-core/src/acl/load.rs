@@ -365,7 +365,7 @@ pub enum Role {
 
 /// The pin-path principal set this process is **enforcing**, named by an
 /// `[[acl]]` row whose `auth_path` is `"pin"` (including the omitted-
-/// default case) — `docs/adr/0017-acl-toml-not-written.md` 결정 2 (`:21`)'s
+/// default case) — `docs/adr/0017-acl-toml-not-written.md` 결정 2's
 /// matching rule, reused verbatim.
 ///
 /// This is the one thing [`crate::acl::Authorizer::check`] cannot answer:
@@ -377,7 +377,7 @@ pub enum Role {
 /// time would misreport a row added after this process started as
 /// "already applied" (`PolicySource::load` is process-start-once,
 /// `docs/design/architecture.md`'s security defaults) — the same startup-
-/// vs-runtime hazard 결정 2 (`:28`) already requires a restart clause for.
+/// vs-runtime hazard 결정 2 already requires a restart clause for.
 /// This index sidesteps both: it is extracted from the very [`Policy`]
 /// [`load_or_deny_with_index`] just loaded, before that `Policy` is erased
 /// into an `Arc<dyn Authorizer>`, and it lives for the process's lifetime.

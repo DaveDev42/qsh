@@ -107,8 +107,8 @@ pub(crate) const fn names_only_port(text: &str, port: u16) -> bool {
     found
 }
 
-/// Stderr remedy appended to a bind-failure report (ADR-0014 결정 9,
-/// `:57`) — `qsh serve` ([`run_serve`]) and `qsh listen`
+/// Stderr remedy appended to a bind-failure report (ADR-0014 결정 9)
+/// — `qsh serve` ([`run_serve`]) and `qsh listen`
 /// (`crate::reverse::listen`) both default to [`DEFAULT_PORT`], so one
 /// machine running both needs an explicit `--bind` for at least one of
 /// them. Observation (`cannot listen on {bind}: {err}`) is composed by

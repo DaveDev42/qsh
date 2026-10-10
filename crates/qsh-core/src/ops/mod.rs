@@ -273,7 +273,7 @@ impl Operation for TrustAcceptOp {
 }
 
 /// The invite-code prompt's wording, in `qsh-core` because the decision to
-/// prompt is `qsh-core`'s (`docs/ROADMAP.md:118` (j)) and the frontend only
+/// prompt is `qsh-core`'s (`docs/ROADMAP.md` M9 scope (j)) and the frontend only
 /// writes what it is handed.
 pub const INVITE_CODE_PROMPT: &str = "Invite code: ";
 
@@ -348,8 +348,7 @@ fn terminal_echo_unsupported(message: &'static str) -> OpError {
 }
 
 /// Decide where `trust accept`'s invite code comes from, or refuse
-/// (`docs/ROADMAP.md:118` (j), ADR-0013 decision 8,
-/// `docs/adr/0013-cert-file-exchange.md:29`).
+/// (`docs/ROADMAP.md` M9 scope (j), ADR-0013 decision 8).
 ///
 /// A free function, not an [`Ops`] method: it is pure (no [`Paths`], no
 /// filesystem, no network), so a `&self` method would wrongly suggest it

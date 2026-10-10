@@ -53,7 +53,7 @@ use super::{OpError, Operation, Ops, ServiceInstallOp, ServiceUninstallOp};
 /// supported manager.
 ///
 /// One constant for all three ops and every non-macOS/Linux target
-/// (`docs/ROADMAP.md:153`'s "P1 예정" convention) — `crates/qsh-core/src/
+/// (the "P1 예정" convention of `docs/ROADMAP.md` §3's TCP/TLS fallback row) — `crates/qsh-core/src/
 /// reverse/listen.rs`'s `windows_unsupported()` is `#[cfg(not(unix))]`,
 /// `pub(super)`-scoped to `reverse`, and has no "P1" in its wording, so it
 /// is neither reachable here nor the right text to reuse (recorded finding,
