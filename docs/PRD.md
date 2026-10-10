@@ -58,7 +58,7 @@ PTY 세션은 QUIC connection보다 오래 살아야 한다. 연결이 교체되
 
 ### 단일 바이너리
 
-`qsh` 하나가 client, listener, agent와 인증서 관리 역할을 수행한다(내장 MCP server는 M8 Step 6에서 철회, ADR-0011).
+`qsh` 하나가 client, listener, agent와 인증서 관리 역할을 수행한다(내장 MCP server는 철회, ADR-0011).
 
 ## 5. 주요 사용자
 
@@ -103,7 +103,7 @@ qsh <name>                      # 새 세션
 qsh attach <name>/<session_id>  # 재attach
 ```
 
-역방향 접속에도 target에서 controller까지 직접 연결 가능한 경로가 필요하다 — 이는 M3 이후에도 여전히 유효한 제약이다: 역방향은 NAT 뒤 target을 도달 가능하게 만들 뿐, controller 자신은 여전히 direct-reachable해야 한다. relay·NAT traversal·discovery는 P0의 명시적 범위 밖이다(ROADMAP.md M3). 이 제약의 정본 문안(`qsh-core::doctor::CONTROLLER_UNREACHABLE`, `docs/CLI.md` §6.13이 렌더 지점을 명시)은 다음과 같다:
+역방향 접속에도 target에서 controller까지 직접 연결 가능한 경로가 필요하다 — 이 제약은 지금도 유효하다: 역방향은 NAT 뒤 target을 도달 가능하게 만들 뿐, controller 자신은 여전히 direct-reachable해야 한다. relay·NAT traversal·discovery는 P0의 명시적 범위 밖이다(ROADMAP.md M3). 이 제약의 정본 문안(`qsh-core::doctor::CONTROLLER_UNREACHABLE`, `docs/CLI.md` §6.13이 렌더 지점을 명시)은 다음과 같다:
 
 > Reverse attach needs a directly reachable UDP path from the target to the controller. QSH provides no relay, NAT traversal, or discovery — that is out of scope for P0.
 >
@@ -234,7 +234,7 @@ qsh session read <session-ref> --after 42 --jsonl
 
 JSON schema는 version을 포함하고, stdout에는 결과만 출력한다. 진단 로그는 stderr로 분리한다. PTY bytes는 sequence와 함께 lossless encoding으로 전달한다.
 
-내장 MCP stdio adapter(`qsh mcp`)는 M8 Step 6에서 철회했다(ADR-0011) — 에이전트 연동은 위 JSON/JSONL CLI 하나로 통일하며, 상세 계약은 `docs/CLI.md`에서 정의한다. 원격 stdio MCP 서버가 필요하면 `qsh exec host -- <server>`로 그 프로세스를 실행한다.
+내장 MCP stdio adapter(`qsh mcp`)는 철회했다(ADR-0011) — 에이전트 연동은 위 JSON/JSONL CLI 하나로 통일하며, 상세 계약은 `docs/CLI.md`에서 정의한다. 원격 stdio MCP 서버가 필요하면 `qsh exec host -- <server>`로 그 프로세스를 실행한다.
 
 ## 11. 명령 체계
 
@@ -334,7 +334,7 @@ Relay는 payload와 endpoint private key를 볼 수 없어야 한다. 이를 위
 - QUIC과 TLS 1.3 상호 인증을 기본으로 한다.
 - PTY session lifetime을 transport lifetime과 분리한다.
 - JSON CLI를 canonical programmatic interface로 삼는다.
-- 내장 MCP adapter(`qsh mcp`)는 M8 Step 6에서 철회했다(ADR-0011) — 에이전트 연동은 JSON CLI 하나로 통일한다.
+- 내장 MCP adapter(`qsh mcp`)는 철회했다(ADR-0011) — 에이전트 연동은 JSON CLI 하나로 통일한다.
 - Relay는 향후 별도 self-hosted/managed 제품으로 개발한다.
 - Transport protocol은 HTTP/3가 아닌 custom QUIC application protocol(`qsh/1` ALPN)로 확정한다. QSH에는 HTTP semantics가 필요 없고, custom frame layer는 P1 TCP fallback과도 동일하게 동작한다.
 - Pairing 기본 UX는 일회용 invite code(TLS-exporter 기반 channel binding, 10분 TTL)로 하며, fingerprint 방식은 Ansible/cloud-init 등 스크립트 provisioning용 fallback으로 유지한다. QR pairing은 P1이다. `qsh pair accept`의 `code`는 M9에서 선택 인자가 됐다(ROADMAP M9 (j), ADR-0013 결정 8): TTY면 에코 없는 프롬프트로 받고, 파이프 입력은 `--code-stdin`으로 주며, `--json`/`--jsonl`에서는 프롬프트 없이 `INVALID_ARGUMENT`다. 계약은 `docs/CLI.md` §6.11.
