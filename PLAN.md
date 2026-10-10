@@ -1,19 +1,19 @@
 # PLAN.md — 자리표시자: M14 착수 대기 (ADR-0028 제안됨)
 
-M13(측정·배포 기반)은 2026-10-08 닫혔다(`docs/ROADMAP.md` M13 마감 노트). 그 계획은 `docs/history/m13-plan.md`로 옮겼다가 2026-10-10 지웠다. 원문은 `b70be6b`에 있다. 순서상 다음인 M14(TCP/TLS fallback)는 착수 ADR인 ADR-0028이 승인돼야 연다(`docs/ROADMAP.md` M14 착수 조건, §5.1 원칙 2). ADR-0028은 2026-10-09 `제안됨`으로 올랐고 승인 전이므로 이 파일은 M13 마감 공통 절차(`docs/ROADMAP.md` §2)와 `CLAUDE.md` Session onboarding 2에 따라 사람 몫만 추적하는 자리표시자다. M14 착수 조건이 승인 전에 열어 둔 (a) `Transport`/`StreamMux` 추상은 2026-10-09 착지했다(`e5a62a5`~`7ca3947`, 모양은 ADR-0028 결정 0). `qsh-core`와 `qsh-cli`에 quinn 의존과 `quinn::` 경로가 없고 `cargo xtask arch`가 그것을 잠근다. 처리량 비율과 포화 터널 PTY echo p95는 기준선 범위 안이다. DoD (a)의 "테스트는 import 경로와 타입 이름만"에서 벗어난 접근자 교체 편집은 ADR-0028 결과 절에 목록으로 있고, 받아들일지는 승인 때 정한다. 에이전트가 승인 없이 할 수 있는 M14 일은 더 없다. 승인은 사용자가 정한다. 승인되면 이 파일을 M14 실행 계획으로 전면 교체한다.
+M13(측정·배포 기반)은 2026-10-08 닫혔다(`docs/ROADMAP.md` M13 마감 노트). 순서상 다음인 M14(TCP/TLS fallback)는 착수 ADR인 ADR-0028이 승인돼야 연다(`docs/ROADMAP.md` M14 착수 조건, §5.1 원칙 2). ADR-0028은 2026-10-09 `제안됨`으로 올랐고 승인 전이므로, 이 파일은 `CLAUDE.md` Session onboarding 2에 따라 사람 몫만 추적하는 자리표시자다. M14 (a)의 `Transport`/`StreamMux` 추상은 승인 전에 열 수 있는 몫이라 2026-10-09 착지했다(`e5a62a5`~`7ca3947`, 모양은 ADR-0028 결정 0). 에이전트가 승인 없이 할 수 있는 M14 일은 더 없고 승인은 사용자가 정한다. 승인되면 이 파일을 M14 실행 계획으로 전면 교체한다.
 
 ## 0. 열린 사람 몫
 
-여기 적힌 항목은 이 파일이 다음 계획으로 바뀔 때 그대로 승계한다. 상태 표시는 M13 계획 §0의 마감 시점 상태를 옮긴 것이다.
+여기 적힌 항목은 이 파일이 다음 계획으로 바뀔 때 그대로 승계한다.
 
-### 0.1 P0에서 열린 채 넘어온 일곱
+### 0.1 P0에서 열린 일곱
 
-- [ ] **M10 DoD 1 — 클린 네 플랫폼 설치와 기능 스모크.** 기준은 `docs/campaigns/m10-clean-vm.md`. v0.3.0 Linux 세 회차 PASS(`69a6414`)에 더해 v0.4.3 Ubuntu 24.04 x86_64 회차 4가 PASS다(2026-10-09, 에이전트). macOS arm64·x86_64 두 회차가 남았다. 둘 다 클린 macOS VM과 Gatekeeper 판정이 필요하다. 소유: 사람.
-- [ ] **M10 DoD 2 — Gatekeeper가 notarized 바이너리를 차단하지 않음.** 서명·공증이 붙은 태그는 `v0.4.0`부터 있다. 회차는 `docs/campaigns/m10-clean-vm.md`. 소유: 사람.
-- [ ] **M10 DoD 3 — musl static 바이너리가 구형 glibc 배포판에서 실행.** `x86_64-unknown-linux-musl` 한정. 근거 행은 이미 있다. Debian 10(glibc 2.28) 회차 2(v0.3.0)와 회차 5(v0.4.3, 2026-10-09)가 `DoD 3 = PASS`다. 이 DoD는 캠페인 §9 판정과 함께 닫히므로 macOS 두 회차를 기다린다. 두 회차 모두 에이전트가 컨테이너에서 돌렸으니, 캠페인을 닫을 때 사람이 이것을 회차로 셀지 다시 본다(§8 회차 1·2·3 공통 비고). 소유: 사람.
-- [ ] **M7 DoD 1 — SC1 스톱워치 baseline 3회.** 기준은 `docs/campaigns/m7-stopwatch.md`. 소유: 사람.
+- [ ] **M10 DoD 1 — 클린 네 플랫폼 설치와 기능 스모크.** 기준은 `docs/campaigns/m10-clean-vm.md`. Linux 회차는 PASS(v0.3.0 세 회차 `69a6414`, v0.4.3 Ubuntu 24.04 x86_64 회차 4, 2026-10-09). macOS arm64·x86_64 두 회차가 남았고 둘 다 클린 macOS VM과 Gatekeeper 판정이 필요하다. 소유: 사람.
+- [ ] **M10 DoD 2 — Gatekeeper가 notarized 바이너리를 차단하지 않음.** 서명·공증 태그는 `v0.4.0`부터 있다. 회차는 `docs/campaigns/m10-clean-vm.md`. 소유: 사람.
+- [ ] **M10 DoD 3 — musl static 바이너리가 구형 glibc 배포판에서 실행.** `x86_64-unknown-linux-musl` 한정. Debian 10(glibc 2.28) 회차 2(v0.3.0)와 회차 5(v0.4.3, 2026-10-09)가 `DoD 3 = PASS`다. 캠페인 §9 판정과 함께 닫히므로 macOS 두 회차를 기다린다. 두 회차 모두 에이전트가 컨테이너에서 돌렸으니, 캠페인을 닫을 때 사람이 이것을 회차로 셀지 다시 본다. 소유: 사람.
+- [ ] **M7 DoD 1 — SC1 스톱워치 baseline 3회.** 기준은 `docs/campaigns/m7-stopwatch.md`(예행 1회만 끝남). 소유: 사람.
 - [ ] **M8 DoD 3 — 실기기 mobility 60회 이상.** 기준은 `docs/campaigns/m2-mobility.md`. M18의 착수 조건. 소유: 사람.
-- [ ] **M8 DoD 4 — wire freeze 발효와 독립 검증 계약(SC7).** 소유: 운영자.
+- [ ] **M8 DoD 4 — wire freeze 발효와 독립 검증 계약(SC7).** 저장소 밖 조직 액션. 소유: 운영자.
 - [ ] **M9 DoD 1 — SC1 스톱워치 재측정 3회.** 기준은 `docs/campaigns/m9-stopwatch.md`. M7 DoD 1에 종속. 소유: 사람.
 
 ### 0.2 P1 마일스톤이 만든 사람 몫 (`docs/ROADMAP.md` §5.5)
@@ -21,16 +21,13 @@ M13(측정·배포 기반)은 2026-10-08 닫혔다(`docs/ROADMAP.md` M13 마감 
 - [ ] **`parse_openssh_key` fuzz 타깃의 누적 72 fuzz-hours.** 기록 자리는 `docs/campaigns/m8-fuzz.md`. 출처 M11. 소유: 사람.
 - [ ] **`p1-supervise-wake` 회차 넷.** 기준은 `docs/campaigns/p1-supervise-wake.md`. 출처 M12. 소유: 사람.
 - [ ] **`p1-setup-stopwatch` 3회.** 기준은 `docs/campaigns/p1-setup-stopwatch.md`(ADR-0024 결정 12). 출처 M12. PASS가 기록되기 전에는 이슈 #3 완료 기준 첫 줄이 충족됐다고 적지 않는다. 소유: 사람.
-- [x] **`aarch64-unknown-linux-musl` 구형 glibc 판정.** 기준은 `docs/campaigns/p1-aarch64-musl.md`. 2026-10-09 회차 1이 PASS다. v0.4.3, Debian 10 arm64(glibc 2.28), Dave-MBP16 colima의 네이티브 arm64 컨테이너에서 에이전트가 돌렸다. §6 판정 규칙을 채웠다. 컨테이너를 회차로 센 판단은 m10-clean-vm과 같고 사람이 다시 볼 항목이다. 출처 M13.
+- [x] **`aarch64-unknown-linux-musl` 구형 glibc 판정.** 2026-10-09 회차 1 PASS(`docs/campaigns/p1-aarch64-musl.md`). 컨테이너를 회차로 센 판단은 m10-clean-vm과 같고 사람이 다시 볼 항목이다.
 
-## 1. 마일스톤 밖에서 미룬 유지보수
+## 1. 유지보수에서 남은 확인
 
-2026-10-08 의존성 갱신(`9714cf6`~`ec68cb6`)이 일부러 남긴 셋은 2026-10-09에 모두 착지했다. 남은 확인은 아래 두 줄이다.
-
-- [x] Rust 툴체인 1.98.1 → 1.99.0(`512e288`).
-- [x] `release.yml`의 액션(checkout v7, download-artifact v8, setup-rust-toolchain v2)과 태그 없이 게시 경로를 검증하는 dispatch 전용 job `verify-publish-path`(`1557f50`). 서명·공증·provenance는 다음 태그 run에서 확인한다.
-- [x] `keyring` 3.6 → `keyring-core` 1과 플랫폼 store crate(`08a6173`). Linux 실제 Secret Service에서 왕복과 옛·새 바이너리 교차 읽기를 확인했다. macOS Keychain 왕복은 Dave-MBP16이 오프라인이라 아직 못 했다. 다음 태그 전에 `docs/design/testing.md` L1의 수동 단계로 돌린다.
+- [ ] macOS Keychain 왕복. `keyring-core` 1과 플랫폼 store crate로 옮긴 변경(`08a6173`)의 Linux Secret Service 왕복은 확인했지만, macOS 쪽은 Dave-MBP16이 오프라인이라 못 했다. 다음 태그 전에 `docs/design/testing.md` L1의 수동 단계로 돌린다.
+- [ ] 다음 태그 run에서 `release.yml` 액션 갱신(`1557f50`) 뒤의 서명·공증·provenance를 확인한다.
 
 ## 2. 테스트 환경
 
-nextest의 간헐 실패는 동시성 문제가 아니었다. 호스트 nftables에 남아 있던 `inet dave_mosh` 표가 loopback UDP 60000~61000을 버렸고, ephemeral 범위(32768~60999)와 겹쳐서 bind(0) QUIC endpoint의 약 4%가 닿지 않았다. 호스트 쪽은 dave-environment `c6c5359c`가 표를 지워서 고쳤다. 저장소 쪽은 `414f1fd`가 막았다. loopback UDP 자가 점검이 같은 상황을 10초 타임아웃 대신 즉시 원인과 함께 실패시키고, `scripts/test/nextest-ns.sh`가 격리 네트워크 namespace에서 스위트를 돌리며, 긴 TMPDIR에서는 nextest setup script가 unix 소켓 경로를 줄인다(`docs/design/testing.md` CI 규율).
+nextest의 간헐 실패 원인은 호스트 nftables에 남은 `inet dave_mosh` 표였다. 이 표가 loopback UDP 60000~61000을 버려서 ephemeral 범위(32768~60999)와 겹쳤고 bind(0) QUIC endpoint의 약 4%가 닿지 않았다. 호스트는 dave-environment `c6c5359c`가 고쳤다. 저장소 쪽은 `414f1fd`가 막는다. loopback UDP 자가 점검이 같은 상황을 즉시 원인과 함께 실패시키고, `scripts/test/nextest-ns.sh`가 격리 네트워크 namespace에서 스위트를 돌리며, 긴 TMPDIR에서는 nextest setup script가 unix 소켓 경로를 줄인다(`docs/design/testing.md` CI 규율).
