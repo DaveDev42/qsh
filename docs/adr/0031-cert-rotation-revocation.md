@@ -159,9 +159,9 @@ rotation 문서를 파일로 건네게 한 이유는 ADR-0013이 파일 교환�
   - `trust.rotate.json`
   - `trust.list.revoked.json`
   - `error.AUTH_FAILED.revoked.json`
-- **man.** `cargo xtask man`으로 `qsh-identity-rotate.1`, `qsh-trust-revoke.1`, `qsh-trust-rotate.1`을 더한다. man 페이지는 51종에서 54종이 된다.
+- **man.** `cargo xtask man`으로 `qsh-identity-rotate.1`, `qsh-trust-revoke.1`, `qsh-trust-rotate.1`을 더한다. man 페이지가 세 개 늘어난다(`docs/man/`은 현재 51종이고, 같은 시기에 착륙하는 다른 ADR도 페이지를 더하므로 최종 수는 착륙 순서에 따른다).
 - **doctor.** 새 code는 없다. `trust_remove_scope`의 message, remedy, 노출 조건과 `cert_expired`/`cert_expiring_soon`의 remedy가 바뀐다. 셋 다 `docs/CLI.md` §6.17이 축자 인용하므로 같은 커밋에서 바뀌고, `cli_md_quotes_the_trust_remove_scope_diagnostic_verbatim`과 같은 형식의 테스트가 이를 지킨다. 만료 30일 전 경고(`cert_expiring_soon`, P0)의 검출 조건은 그대로다.
-- **fuzz.** rotation 문서 파서 타깃이 하나 늘어 19종에서 20종이 된다. `fuzz/README.md`와 `docs/design/protocol.md` §13의 개수 문장이 같은 커밋에서 바뀐다.
+- **fuzz.** rotation 문서 파서 타깃이 하나 늘어난다(현재 19종이고, ADR-0029도 타깃을 하나 더하므로 최종 수는 착륙 순서에 따른다). `fuzz/README.md`와 `docs/design/protocol.md` §13의 개수 문장이 같은 커밋에서 착륙 시점의 실제 수로 바뀐다.
 - **고정할 테스트.**
   - **rotation.**
     - rotation 뒤 `trust rotate`를 적용한 peer는 옛 leaf의 handshake를 거부(`revoked`)하고 새 leaf를 같은 principal로 수용한다. pin 경로와 CA 경로 각각이다.

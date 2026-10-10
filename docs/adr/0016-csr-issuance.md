@@ -17,7 +17,7 @@ CSR(Certificate Signing Request) 흐름은 이 문제의 통상적 해법이다.
 - 검증 쪽은 손댈 것이 없다. `QshPeerVerifier::verify_core`(`crates/qsh-transport/src/tls.rs`)는 `TrustEvaluator::ca_roots()`가 돌려준 모든 루트로 webpki 체인 검증을 하고, `principal_from_san`이 leaf의 `qsh://device/<seg>`에서 principal을 낸다. `docs/design/protocol.md` §16.2가 동결한 검증 코어(pin → CA → 거부)는 "누가 서명했는가"를 묻지 않으므로, 다른 장비의 CA가 서명한 leaf도 로컬 `cert issue`가 만든 leaf와 같은 경로를 탄다.
 - 발급 쪽 부품도 대부분 있다. `ca::issue_device_leaf`는 주어진 공개키 대신 장비 자신의 PKCS#8 키를 받지만 실제로 쓰는 것은 그 공개키와 `device_id`뿐이다. `identity::promote_to_ca_issued`는 `device.pem`과 `identity.toml`의 `issued_by_ca`를 교체하는 함수이고 키를 건드리지 않는다.
 - 모든 qsh CA 루트는 같은 subject DN(`CN=qsh private CA`, `ca::ca_issuer_params`)을 쓴다. 장비마다 `cert init`을 하면 subject가 같은 루트가 여럿 생긴다. 한 장비가 그런 루트 둘 이상을 `[[ca]]`에 등재했을 때의 체인 검증은 지금 어떤 테스트도 고정하지 않는다.
-- qsh가 만드는 device 키는 Ed25519 하나다(`qsh init`의 생성 경로, ADR-0026 결정 8의 가져오기 경로 모두).
+- qsh가 만드는 device 키는 Ed25519 하나다(`qsh init`의 생성 경로, ADR-0026 결정 2의 가져오기 경로 모두).
 - 파일 교환 관례는 ADR-0013이 고정했다. 입력은 `--cert-file <pem|->`(`-`는 표준입력), 출력은 `--out <path>`가 없으면 표준출력, `--json`/`--jsonl`에서는 PEM을 envelope 필드로 나르고 `--out`이면 경로만 남긴다. 이 경로의 신뢰 근거는 qsh가 아니라 전달 채널의 인증이다(ADR-0013 결정 6).
 
 ## 결정
@@ -110,7 +110,7 @@ CSR(Certificate Signing Request) 흐름은 이 문제의 통상적 해법이다.
 - `qsh-core`의 `ca` 모듈: `issue_device_leaf`를 공개키 입력 빌더로 쪼갠다. `validate_csr`(결정 3 (a)~(e))와 장부 읽기·쓰기(`ca/issued.toml`, `ca/.lock`)를 더한다. `cert issue`도 장부에 쓴다.
 - `qsh-core`의 `identity` 모듈: CSR 생성(`KeyStore`로 서명), 설치 검증(결정 7 (a)~(f))과 `promote_to_ca_issued` 재사용.
 - `qsh-core`의 `ops`: `identity.request`·`cert.sign`·`identity.install` 세 `Operation`. `qsh-cli`는 clap과 렌더러만 맡는다.
-- 의존성: CSR 파싱에 rcgen의 `x509-parser` feature를 켠다. 워크스페이스의 `x509-parser`(0.18, `qsh-transport`가 이미 씀)와 버전이 맞는지 `cargo deny check`로 확인하고, 맞지 않으면 `qsh-core`가 `x509-parser`를 직접 써서 파싱·서명 검증을 한다. `xtask arch` 규칙에는 걸리지 않는다.
+- 의존성: CSR 파싱에 rcgen의 `x509-parser` feature를 켠다. rcgen 0.14의 선택 의존 `x509-parser`는 워크스페이스의 `x509-parser`(0.18, `qsh-transport`가 이미 씀)와 같은 0.18이라 lockfile 항목이 하나로 유지되는지 `cargo deny check`로 확인하고, 갈라지면 `qsh-core`가 `x509-parser`를 직접 써서 파싱·서명 검증을 한다. `xtask arch` 규칙에는 걸리지 않는다.
 
 **고정할 테스트.**
 

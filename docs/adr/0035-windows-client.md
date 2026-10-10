@@ -3,7 +3,7 @@
 날짜: 2026-10-11
 상태: 제안됨
 
-개정 관계: 새 ADR이다. `docs/ROADMAP.md` §5.1 M19가 이 번호를 Windows client 착수 ADR로 예약했다. 다른 ADR의 결정을 뒤집지 않는다. ADR-0007(resume token custody)에는 "Windows에서 `resume.json`의 기밀성"이라는 빈칸을 채우는 구현을 더한다. ADR-0043(TCP fallback 철회)로 transport는 QUIC 하나이므로 Windows 방화벽·프록시 환경을 위한 우회 경로는 이 ADR의 범위가 아니다. 계약 문서로는 `docs/CLI.md` §4·§6.9·§6.13·§6.17·§7에 Windows 문장을 더하고 `docs/design/architecture.md` §7·§8, `docs/design/threat-model.md` §3·§4, README Known limitations와 `docs/ROADMAP.md` §3 가드레일 표의 Windows 행을 고친다.
+개정 관계: 새 ADR이다. `docs/ROADMAP.md` M19(§5)가 이 번호를 Windows client 착수 ADR로 예약했다. 다른 ADR의 결정을 뒤집지 않는다. ADR-0007(resume token custody)에는 "Windows에서 `resume.json`의 기밀성"이라는 빈칸을 채우는 구현을 더한다. ADR-0043(TCP fallback 철회)로 transport는 QUIC 하나이므로 Windows 방화벽·프록시 환경을 위한 우회 경로는 이 ADR의 범위가 아니다. 계약 문서로는 `docs/CLI.md` §4·§6.9·§6.13·§6.17·§7에 Windows 문장을 더하고 `docs/design/architecture.md` §7·§8, `docs/design/threat-model.md` §3·§4, README Known limitations와 `docs/ROADMAP.md` §3 가드레일 표의 Windows 행을 고친다.
 
 ## 맥락
 
@@ -12,10 +12,10 @@
 - `exec`, `trust`, `identity`, `tunnel open`(`-L`/`-R`/`-D`), `session` value op는 터미널이나 UDS에 기대지 않아 그대로 돈다. `release_smoke`의 `#[cfg(not(unix))]` 쌍둥이가 `init` → `trust` → `exec --json` 왕복까지 본다.
 - 대화형 attach(`tui::run`)는 `#[cfg(not(unix))]`에서 `UNSUPPORTED`다. raw 모드는 `nix` termios, 크기는 `TIOCGWINSZ`, resize는 `SIGWINCH`라서 `crates/qsh-cli/src/tui/term.rs`와 `tui/unix.rs`가 통째로 unix 전용이다. `docs/design/architecture.md` §8은 crossterm을 "TUI는 키를 파싱하지 않고 raw byte를 흘려야 한다"는 이유로 채택하지 않았고, 그 이유는 Windows에서도 그대로다.
 - localctl(UDS)은 `localctl/` 모듈 트리 전체가 Windows에서 컴파일되지 않는다. 그래서 `qsh listen`/`qsh serve --to`는 `UNSUPPORTED`(`docs/CLI.md` §6.13)이고, `qsh hosts`는 forward host만 낸다. 터널은 열린 프로세스에만 산다(`docs/CLI.md` §6.14).
-- 키·상태 파일의 권한이 없다. `ensure_private_dir_io`와 `write_private_file_io`는 `cfg(not(unix))`에서 `create_dir_all`과 일반 쓰기로 떨어져, 파일은 상위 디렉터리의 상속 ACL을 받는다. `crates/qsh-core/src/resume.rs` 모듈 doc은 이 상태를 적고 `resume.json`의 기밀성을 Windows client P1의 일부로 둔다.
+- 키·상태 파일의 권한이 없다. `ensure_private_dir_io`와 `write_private_file_io`는 `cfg(not(unix))`에서 `create_dir_all`과 모드 없는 임시 파일 + rename(`fsutil::write_atomically`)으로 떨어져, 파일은 상위 디렉터리의 상속 ACL을 받는다. `crates/qsh-core/src/resume.rs` 모듈 doc은 이 상태를 적고 `resume.json`의 기밀성을 Windows client P1의 일부로 둔다.
 - keystore는 Windows에서 stub이다. 모든 연산이 `KeyStoreError::Unavailable`을 내므로 `auto`는 파일 모드로 떨어진다(`identity/keystore.rs`). 파일 모드의 개인키는 위 상속 ACL에 놓인다.
 - 초대 코드를 터미널에서 받는 프롬프트는 에코 억제가 없어 `UNSUPPORTED`다(`NO_TERMINAL_ECHO_SUPPRESSION`).
-- Windows host(ConPTY 백엔드)는 PTY 코드가 `#![cfg(unix)]`라 없고 P2다. `qsh serve`는 Windows에서 뜨지만 PTY 세션을 열 수 없고 `exec`와 터널만 낸다.
+- Windows host(ConPTY 백엔드)는 PTY 백엔드(`pty/posix.rs`)가 `#[cfg(unix)]`이고 `pty::factory()`가 비unix에서 `UnsupportedFactory`를 돌려줘서 없고 P2다. `qsh serve`는 Windows에서 뜨지만 PTY 세션을 열 수 없고 `exec`와 터널만 낸다.
 
 `docs/ROADMAP.md` §5.4 위험 5는 비교 표본이 없는 Windows 산정을 "ADR이 명령 집합을 좁히고 첫 스텝 뒤 다시 매긴다"로 다루기로 했다. 이 ADR의 중심 결정은 좁히는 선이다. 설계를 가르는 사실은 셋이다.
 
@@ -28,16 +28,16 @@
 ### A. 명령 집합
 
 1. Windows client가 여는 명령은 다음이다. 전부 직접 연결(direct route)만 쓴다.
-   - `qsh init`, `qsh identity show|export`, `qsh trust add|add-ca|list|rename|remove`, `qsh trust ssh-preview`
+   - `qsh init`, `qsh identity export`, `qsh trust add|add-ca|list|rename|remove`, `qsh trust ssh-preview`
    - `qsh pair accept`(초대 코드는 인자 또는 `--code-stdin`의 파이프·파일 입력, 결정 11)
    - `qsh exec`
-   - `qsh session open|get|list|read|write|resize|close`와 대화형 `qsh [user@]host`, `qsh attach <session-ref>`(결정 5~8)
+   - `qsh session open|get|read|write|resize|close`, `qsh sessions`, `qsh tunnels`, `qsh tunnel close`와 대화형 `qsh [user@]host`, `qsh attach <session-ref>`(결정 5~8)
    - `qsh tunnel open --local|--remote|--dynamic`과 대화형 `-L`/`-R`/`-D`(터널을 연 프로세스가 holder인 모델 그대로)
    - `qsh doctor`, `qsh setup client`, `qsh acl check`, `qsh acl show`, `qsh hosts`, `qsh host`, `qsh schema|capabilities|version`
 2. 열지 않는 명령은 리소스를 만들기 전에 `UNSUPPORTED`와 exit `255`로 끝난다. 대상은 아래 명령이다.
    - `qsh listen`, `qsh serve --to`, 숨김 alias `qsh reverse`(오늘 동작 그대로)
    - `qsh service install|uninstall|status`(M9가 고정한 동작 그대로)
-   - `qsh pair invite`와 `qsh setup server|listen`(상환 창구를 여는 host 쪽 명령이라 host 역할과 함께 P2)
+   - `qsh pair invite`와 `qsh setup host|listener`(상환 창구를 여는 host 쪽 명령이라 host 역할과 함께 P2)
    - 인바운드 `qsh serve`는 Windows에서 막지 않는다. 오늘처럼 뜨되 PTY 세션 요청에는 `UNSUPPORTED`로 답하고 `exec`와 터널만 낸다. 지원 약속은 아니며 테스트 상대(`release_smoke`, 결정 13)로만 쓴다. README는 이 사실을 "host 역할은 P2이며 이 모양은 지원 범위가 아니다"로 적는다.
 3. 위 두 목록을 테스트가 고정한다. `crates/qsh-cli/tests/exit_code_matrix.rs`에 `cfg(windows)` 행을 더해 2번의 각 명령이 `UNSUPPORTED`/exit `255`로 끝나고 상태 디렉터리에 아무것도 만들지 않음을 단언한다. 열린 명령의 동작은 기존 테스트가 Windows leg에서 돈다. `cfg(unix)`로 빠져 있던 테스트 중 POSIX 신호·process-group이 아닌 이유로 빠진 것은 이 마일스톤에서 `cfg(windows)` 쌍둥이를 갖거나 빠진 이유를 주석으로 남긴다.
 
@@ -53,7 +53,7 @@
 
 9. 소유자 전용 DACL을 만드는 단일 모듈을 `qsh-core`(`fsutil` 하위)에 둔다. 만드는 쪽은 프로세스 토큰의 사용자 SID로 보호된(protected, 상속 차단) DACL 하나를 쓴다. 파일은 소유자 SID에 `FILE_ALL_ACCESS` ACE 하나, 디렉터리는 같은 SID에 `OBJECT_INHERIT | CONTAINER_INHERIT` ACE 하나다. 파일과 임시 파일은 `CreateFileW`의 `SECURITY_ATTRIBUTES`로 만드는 순간부터 이 DACL을 갖는다. 만든 뒤에 `icacls`로 고치지 않는다(생성과 설정 사이에 상속 ACL로 읽히는 구간이 생기고, 외부 프로세스·로캘에 기대게 된다). 기존 `ensure_private_dir_io`, `write_private_file_io`, resume 저장소의 임시 파일 생성이 `cfg(windows)` 분기에서 이 모듈을 부른다. 대상은 qsh가 Windows에서 쓰는 파일과 디렉터리 전부다. 곧 `identity/device.pem`·`device.key`(파일 모드), `trust.toml`, `config.toml`(쓰는 경우), `resume.json`과 그 `.tmp`·`.lock`, 그리고 config·state 디렉터리다.
 10. DACL을 적용하지 못하면 파일을 만들지 않고 fail closed한다. SID 조회 실패, ACL을 지원하지 않는 파일시스템(FAT/exFAT, 일부 네트워크 공유)이 이유다. 오류는 기존 `config_io_error`의 `CONFIG_ERROR`이고 메시지에 경로와 원인을 담는다. 이미 있는 파일이 옛 빌드의 상속 ACL로 만들어졌다면 다음 쓰기(임시 파일 + rename)가 소유자 전용 DACL로 바꿔 놓는다. 읽기 전용 경로는 열 때 ACL을 검사하지 않는다. unix가 `acl.toml` 외에는 읽을 때 모드를 검사하지 않는 것과 같다(README Known limitations의 "Windows ACL checking is out of scope"는 host의 `acl.toml` 이야기라 그대로다).
-11. 초대 코드를 터미널 프롬프트로 받는 경로는 Windows에서 `UNSUPPORTED`로 유지한다(`NO_TERMINAL_ECHO_SUPPRESSION`). `qsh pair accept <address> <code>`의 인자와 `--code-stdin`의 파이프·파일 입력은 연다. `--code-stdin`의 stdin이 콘솔이면 같은 `UNSUPPORTED`다. 콘솔 에코 억제는 결정 5의 모드 비트로 구현할 수 있지만 CI가 콘솔 stdin을 만들 수 없어 에코가 실제로 꺼졌는지 단언할 방법이 없다. 단언할 수 없는 비밀 입력 경로는 열지 않는다. 열지 말지는 에코 억제를 ConPTY로 검증하는 후속 결정으로 미룬다(대안 절).
+11. 초대 코드를 터미널 프롬프트로 받는 경로는 Windows에서 `UNSUPPORTED`로 유지한다(`NO_TERMINAL_ECHO_SUPPRESSION`). `qsh pair accept <address> <code>`의 인자와 `--code-stdin`의 파이프·파일 입력은 연다. `--code-stdin`의 stdin이 콘솔이면 같은 `UNSUPPORTED`다(오늘은 콘솔 stdin도 에코를 끄지 않은 채 받아들이므로 `docs/CLI.md` §6.11대로 이 결정이 새로 막는 동작이다). 콘솔 에코 억제는 결정 5의 모드 비트로 구현할 수 있지만 CI가 콘솔 stdin을 만들 수 없어 에코가 실제로 꺼졌는지 단언할 방법이 없다. 단언할 수 없는 비밀 입력 경로는 열지 않는다. 열지 말지는 에코 억제를 ConPTY로 검증하는 후속 결정으로 미룬다(대안 절).
 12. keystore는 Windows Credential Manager를 `platform` store로 붙인다. keyring-core 계열 store crate 하나를 `cfg(windows)` 의존으로 더하고, `auto`는 다른 OS와 같이 platform을 먼저 시도하고 `Unavailable`이면 파일 모드(결정 9의 DACL)로 떨어진다. store 호출은 다른 플랫폼과 같이 연산마다 열고 전역 기본 store를 등록하지 않는다. 개인키 blob은 Credential Manager의 크기 상한 안이다. 이 crate가 존재하지 않거나 `deny.toml`(license·advisory)을 못 넘으면 Windows `platform`은 지금처럼 `Unavailable`로 두고 `auto`가 파일 모드를 쓰도록 이 결정의 후반을 접는다. 이 판정은 첫 스텝에서 하고 접으면 이 ADR을 개정한다. 실제 store 왕복은 CI가 못 보므로 다른 플랫폼과 같이 릴리스 전 수동 단계다(`docs/design/testing.md` L1 「플랫폼 키스토어 릴리스 전 수동 단계」에 Windows 줄을 더한다).
 13. config·state 경로는 ssh 스타일 예측 가능성을 따른다(`docs/design/architecture.md` §7). Windows에서도 `%USERPROFILE%\.config\qsh`와 `%USERPROFILE%\.local\state\qsh`이고 `QSH_CONFIG_DIR`·`QSH_STATE_DIR`·`XDG_*` 우선순위는 그대로다(`Paths::from_env`의 `home_dir()`가 이미 플랫폼 홈을 고른다). `%APPDATA%`와 `%LOCALAPPDATA%`는 쓰지 않는다. runtime dir은 만들지 않는다(결정 14).
 
@@ -71,7 +71,7 @@
     - `release_smoke`의 `cfg(not(unix))` 쌍둥이를 넓힌다. 기존 `init` → `trust` → `exec --json`에 `doctor --json`과 `tunnel open --local`의 TCP echo 왕복을 더한다. 상대는 같은 바이너리의 인바운드 `qsh serve`다(결정 2). PTY·detach·attach 축은 Windows에 host가 없어 뺀다. 이 쌍둥이가 만든 파일에도 결정 9의 DACL 단언을 건다.
     - clippy는 이미 Windows를 돈다. `cargo xtask arch`의 의존 방향 규칙은 바뀌지 않는다(`windows-sys`는 `qsh-core`와 `qsh-cli`가 `cfg(windows)`로만 의존한다).
 18. 사람 캠페인 문서 `docs/campaigns/p1-windows-client.md`를 M19 구현 마지막 스텝 전에 사전 고정해 커밋한다. 회차는 Windows Terminal과 conhost 각각에서 Linux host와 macOS host로 붙어 (1) bash/zsh 입력과 한글·이모지 출력, (2) vim 전체 화면과 종료 뒤 화면 복원, (3) 창 크기 변경 전파, (4) `~d` detach 뒤 `qsh attach` resume, (5) 콘솔 창 닫기 뒤 세션 생존과 터미널 모드 복원, (6) `Ctrl-C` 전달, (7) 결정 15의 절전 회차를 본다. 합격 기준은 캠페인 문서가 정한다. 이 회차는 마일스톤을 막지 않고 P1 완료 선언을 막는다(`docs/ROADMAP.md` §5.5).
-19. 문서 개정은 `docs/design/threat-model.md` §3에 진입점 행("Windows 콘솔 입력", 로컬 사용자, VT 입력 바이트는 키 해석 없이 원격으로 가며 해석하는 쪽은 원격 PTY)을 더하고 §4 D(정보노출)에 DACL 통제와 결정 17의 핀 테스트를 올린다. `docs/design/architecture.md` §7에 Windows 경로 줄, §8에 `windows-sys` 행과 keystore 행의 Windows 항목을 고친다. `docs/CLI.md` §7의 "POSIX 터미널" 문장, README Known limitations와 `docs/ROADMAP.md` §3 Windows 행, `crates/qsh-core/src/resume.rs` 모듈 doc의 "inherited directory ACL" 문단을 새 범위에 맞춘다.
+19. 문서 개정은 `docs/design/threat-model.md` §3에 진입점 행("Windows 콘솔 입력", 로컬 사용자, VT 입력 바이트는 키 해석 없이 원격으로 가며 해석하는 쪽은 원격 PTY)을 더하고 §4 D(정보노출)에 DACL 통제와 결정 17의 핀 테스트를 올린다. `docs/design/architecture.md` §7에 Windows 경로 줄, §8에 `windows-sys` 행과 keystore 행의 Windows 항목을 고친다. `docs/CLI.md` §6.11·§6.12·§6.13·§6.14의 Windows 관련 문장과 §7에 새로 더할 Windows 지원 범위 문장, README Known limitations와 `docs/ROADMAP.md` §3 Windows 행, `crates/qsh-core/src/resume.rs` 모듈 doc의 "inherited directory ACL" 문단을 새 범위에 맞춘다.
 
 ## 근거
 
@@ -111,7 +111,7 @@ Credential Manager를 붙이는 것은 다른 OS와 같은 기본값(`auto` = pl
   - `release_smoke`의 `cfg(not(unix))` 쌍둥이 확장(결정 17).
   - unix 회귀: 터미널 trait 추출(결정 4) 뒤에도 `tui_expect`와 기존 attach 테스트가 그대로 초록이어야 한다.
 - `qsh.cli/v1`, `qsh.event/v1`, wire 프로토콜, `ErrorCode`, capability 문자열, `EXPECTED_DOCTOR_CODES`는 바뀌지 않는다. 새 fixture도 없다(fixture는 OS 공통이고 Windows 행은 위 매트릭스 테스트가 맡는다). doctor는 localctl·service·host 역할에 기대는 finding을 Windows에서 내지 않을 뿐 어휘를 늘리지 않는다. 이 부분이 현재 코드와 어긋나면 첫 스텝에서 드러나므로 그때 이 ADR을 개정한다.
-- 의존 추가: `windows-sys`(`qsh-core`, `qsh-cli`의 `cfg(windows)`), Windows keystore store crate 하나(결정 12), 개발 의존으로 `portable-pty`(`qsh-testkit`, Windows). `deny.toml` 통과가 조건이다. `cargo xtask arch`는 바뀌지 않는다.
+- 의존 추가: `windows-sys`(`qsh-core`, `qsh-cli`의 `cfg(windows)`), Windows keystore store crate 하나(결정 12), 개발 의존으로 `portable-pty`(`qsh-testkit`, Windows; 워크스페이스 의존으로는 이미 있고 `qsh-core`에서 unix 전용으로 쓴다). `deny.toml` 통과가 조건이다. `cargo xtask arch`는 바뀌지 않는다.
 - 문서 개정은 결정 19의 목록이 전부다. 새 `docs/campaigns/p1-windows-client.md`가 생긴다. `docs/man/`은 clap 트리가 안 바뀌므로 변하지 않는다.
-- 크기: `docs/ROADMAP.md` M19의 4.7~7.0ew를 4.3~6.9ew로 다시 매긴다. ADR 0.3 / 콘솔 모듈 1.0~1.6 / 터미널 trait 추출 0.5~0.8 / DACL 모듈과 fail closed 0.8~1.3 / keystore 0.2~0.5 / ConPTY probe를 포함한 테스트 0.8~1.2 / CI·release smoke 0.3~0.5 / 문서·threat model·캠페인 사전 고정 0.3~0.5 / 마감 0.1~0.2. 비교 표본이 없는 산정이라 신뢰도는 낮다. 첫 스텝은 가장 불확실한 콘솔 probe와 터미널 trait 추출이고, 그 뒤 이 절과 `docs/ROADMAP.md` §5.1·§5.4 위험 5를 다시 매긴다.
+- 크기: `docs/ROADMAP.md` M19의 4.7~7.0ew를 4.3~6.9ew로 다시 매긴다. ADR 0.3 / 콘솔 모듈 1.0~1.6 / 터미널 trait 추출 0.5~0.8 / DACL 모듈과 fail closed 0.8~1.3 / keystore 0.2~0.5 / ConPTY probe를 포함한 테스트 0.8~1.2 / CI·release smoke 0.3~0.5 / 문서·threat model·캠페인 사전 고정 0.3~0.5 / 마감 0.1~0.2. 비교 표본이 없는 산정이라 신뢰도는 낮다. 첫 스텝은 가장 불확실한 콘솔 probe와 터미널 trait 추출이고, 그 뒤 이 절과 `docs/ROADMAP.md` §5.2·§5.4 위험 5를 다시 매긴다.
 - 승인되면 `docs/ROADMAP.md` M19의 착수 조건이 풀린다(M18의 착수 조건이 닫히지 않았으면 M19를 먼저 연다는 조건은 그대로다).
