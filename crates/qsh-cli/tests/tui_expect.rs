@@ -7,7 +7,7 @@
 //! "the runner" share a filesystem — which is what lets the `vim` case
 //! assert on the *file* rather than on screen paint.
 //!
-//! ## The named acceptance set (`docs/ROADMAP.md` M2, `docs/history/m2-plan.md` Step 6)
+//! ## The named acceptance set (`docs/ROADMAP.md` M2, M2 plan Step 6 (2473c88))
 //!
 //! bash/zsh prompt round trip, `vim` open-edit-quit, `tmux` with resize
 //! propagation, and `claude` starting. Each one is skipped with a message
@@ -235,7 +235,7 @@ fn locate(binary: &str) -> Option<PathBuf> {
 ///
 /// * unset — nothing is required; every missing binary is a `SKIP:` line.
 /// * `1` / `all` — the whole acceptance set is required. This is the M2
-///   certification mode (`docs/history/m2-plan.md` DoD 2): a run that claims to certify
+///   certification mode (the M2 plan (2473c88) DoD 2): a run that claims to certify
 ///   the acceptance set must not pass by skipping half of it.
 /// * a comma-separated list — only those are required.
 ///
@@ -393,7 +393,7 @@ fn the_escape_help_lists_every_sequence() {
 }
 
 /// SIGWINCH → `session.resize` → the remote PTY, asserted with `stty size`
-/// (`docs/history/m2-plan.md` Step 6).
+/// (M2 plan Step 6 (2473c88)).
 #[test]
 fn a_local_resize_reaches_the_remote_pty() {
     let fleet = Fleet::start();
@@ -852,7 +852,7 @@ fn a_piped_stdin_forwards_everything_verbatim() {
     );
 }
 
-/// `docs/history/m9-plan.md` Step 2, ADR-0013 decision 8
+/// M9 plan Step 2 (b9a621b), ADR-0013 decision 8
 /// (`docs/adr/0013-cert-file-exchange.md:29`): `qsh trust accept`'s
 /// invite-code prompt genuinely suppresses echo on a real terminal, and
 /// machine mode refuses instead of opening it even when stdin *is* a

@@ -1,5 +1,5 @@
 //! `hosts.toml` CLI-boundary integration tests (`docs/CLI.md` §6.1's
-//! "`hosts.toml` 파일 계약", `docs/history/m7-plan.md` Step 3 (d) 완료 판정).
+//! "`hosts.toml` 파일 계약", M7 plan Step 3 (d) (69dd788) 완료 판정).
 //!
 //! `crates/qsh-core/src/ops/host.rs`'s `mod tests` already covers
 //! `resolve_forward`'s merge/priority rules exhaustively at the pure-

@@ -108,7 +108,7 @@ fn peer_is_authorized_only_when_the_uid_matches() {
 /// this same test process, so the peer uid this returns must equal
 /// this process's own euid, proving the accept-time check actually
 /// runs the OS lookup and not just [`peer_is_authorized`]'s pure logic
-/// (`docs/history/m3-plan.md` Step 5 (c): "peer-cred 코드 경로를 단언" — the same-euid
+/// (M3 plan Step 5 (c) (2473c88): "peer-cred 코드 경로를 단언" — the same-euid
 /// half of that requirement; a genuinely different euid is not
 /// obtainable without a second OS user, which CI does not provide).
 #[tokio::test]
@@ -539,7 +539,7 @@ async fn a_hello_with_a_version_this_daemon_does_not_speak_is_answered_unsupport
     task.await.unwrap();
 }
 
-// ---- bounded handshake wait (`docs/history/m3-plan.md` Step 5: "never a panic or
+// ---- bounded handshake wait (M3 plan Step 5 (2473c88): "never a panic or
 // a hang", `LOCAL_WAIT_MAX`'s own "no caller pins a daemon slot open
 // indefinitely" discipline applied to the handshake itself) ----
 

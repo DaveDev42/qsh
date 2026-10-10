@@ -134,7 +134,7 @@ fn config_file_is_parsed_and_unknown_keys_ignored() {
 
 #[test]
 fn serve_broker_keys_use_the_documented_names_and_defaults() {
-    // architecture.md §7 / docs/history/m9-plan.md Step 2: `[serve] replay_bytes ·
+    // architecture.md §7 / M9 plan Step 2 (b9a621b): `[serve] replay_bytes ·
     // resume_ttl · close_grace_ms`. Unknown keys are ignored, so a
     // misnamed key would silently fall back to the default — pin the
     // documented spellings.
@@ -158,7 +158,7 @@ fn serve_broker_keys_use_the_documented_names_and_defaults() {
 
 #[test]
 fn admission_keys_use_the_documented_names_and_defaults() {
-    // architecture.md §7 / CLI.md §6.12, docs/history/m8-plan.md Step 2:
+    // architecture.md §7 / CLI.md §6.12, M8 plan Step 2 (52639fc):
     // `[serve] max_concurrent_handshakes(64) · handshake_rate_per_source(10)`.
     let serve: ServeConfig =
         toml::from_str("max_concurrent_handshakes = 8\nhandshake_rate_per_source = 3\n").unwrap();
@@ -179,7 +179,7 @@ fn admission_keys_use_the_documented_names_and_defaults() {
 
 #[test]
 fn quota_keys_use_the_documented_names_and_defaults() {
-    // `crate::quota`, docs/history/m8-plan.md Step 3, docs/adr/0010-resource-
+    // `crate::quota`, M8 plan Step 3 (52639fc), docs/adr/0010-resource-
     // quotas.md: `[serve] max_sessions(256) ·
     // max_sessions_per_principal(32) · max_exec_per_principal(32) ·
     // validated_rate_per_source(10)`.
@@ -219,7 +219,7 @@ fn quota_keys_use_the_documented_names_and_defaults() {
 
 #[test]
 fn audit_keys_use_the_documented_names_and_defaults() {
-    // architecture.md §7 / §6, docs/history/m5-plan.md Step 1: `[audit] path ·
+    // architecture.md §7 / §6, M5 plan Step 1 (2473c88): `[audit] path ·
     // max_bytes(64 MiB) · retain(5) · queue_depth(1024)`, and no
     // `fail_closed` knob — that is fixed policy, not configurable.
     let audit: AuditConfig = toml::from_str(
@@ -281,7 +281,7 @@ fn audit_config_is_absent_by_default_and_ignores_unknown_keys() {
 
 #[test]
 fn listen_and_reverse_keys_use_the_documented_names_and_defaults() {
-    // architecture.md §7 / CLI.md §6.13 / docs/history/m9-plan.md Step 3 PR 3a:
+    // architecture.md §7 / CLI.md §6.13 / M9 plan Step 3 (b9a621b) PR 3a:
     // `[listen] bind · allow_advertised_names` and `[reverse]
     // controller · offered_name`. Pin the documented spellings and the
     // `allow_advertised_names = false` default (name-squatting
@@ -307,7 +307,7 @@ fn listen_and_reverse_keys_use_the_documented_names_and_defaults() {
 
 #[test]
 fn reverse_backoff_keys_use_the_documented_names_and_defaults() {
-    // architecture.md §7 / protocol.md §11-4 / docs/history/m9-plan.md Step 4:
+    // architecture.md §7 / protocol.md §11-4 / M9 plan Step 4 (b9a621b):
     // `[reverse] backoff_initial_ms(500) · backoff_max_ms(30000) ·
     // backoff_jitter_pct(±20)`.
     let defaults = ReverseConfig::default().backoff().unwrap();
@@ -810,7 +810,7 @@ fn recovery_section_reaches_attach_reverse_and_supervised_path_watch() {
 
 #[test]
 fn stale_retention_key_uses_the_documented_name_and_default() {
-    // architecture.md §7 / CLI.md §6.13 / protocol.md §11-4 / `docs/history/m3-plan.md` Step
+    // architecture.md §7 / CLI.md §6.13 / protocol.md §11-4 / the M3 plan (2473c88) Step
     // 4: `[listen].stale_retention`, default 120s, comfortably clearing
     // the default `[reverse].backoff_max_ms` (30s) × 3 floor (90s).
     let default_max = ReverseConfig::default().backoff().unwrap().max;

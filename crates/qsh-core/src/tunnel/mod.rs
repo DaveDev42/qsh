@@ -1,4 +1,4 @@
-//! Tunnel stream-open seam (`docs/history/m4-plan.md` Step 2; `docs/design/protocol.md`
+//! Tunnel stream-open seam (M4 plan Step 2 (2473c88); `docs/design/protocol.md`
 //! §7 "스트림 배치", §12 "우선순위와 backpressure"; `docs/design/architecture.md`
 //! §8's quinn selection rationale).
 //!
@@ -75,7 +75,7 @@ pub(crate) async fn open_stream(
 /// [`remote::RemoteForwardAcceptor`]'s `-R over reverse` claim loop,
 /// waiting on a `TCP_ACCEPTED{forward_id}` arrival
 /// (`crate::client::link::DataLink::open_stream_with_wait`'s own doc,
-/// `docs/history/m4-plan.md` Step 5 (a)).
+/// M4 plan Step 5 (a) (2473c88)).
 ///
 /// That one caller lives inside `remote::RemoteForwardAcceptor`'s
 /// `#[cfg(unix)]` reverse-claim dispatch (localctl is a Unix-domain

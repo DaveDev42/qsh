@@ -1,9 +1,9 @@
 //! L4 acceptance: the literal 60-second blackout `docs/ROADMAP.md` M3 DoD 2
-//! and `docs/history/m3-plan.md` Step 8 (a) promise — "60초 차단"/"60 s > 45 s idle
+//! and M3 plan Step 8 (a) (2473c88) promise — "60초 차단"/"60 s > 45 s idle
 //! timeout... target의 backoff 루프가 복구를 담당하며... `resume_ttl`(기본
 //! 24 h)에는 한참 못 미치므로 세션·credential 모두 살아 있어야 한다".
 //!
-//! `crates/qsh-testkit/tests/reverse_resume_chaos.rs` (`docs/history/m3-plan.md` Step 8
+//! `crates/qsh-testkit/tests/reverse_resume_chaos.rs` (M3 plan Step 8 (2473c88)
 //! (b)/(c)/(d)) is the PR-always-on half of this DoD, proving the same
 //! product path with an instantaneous `ChaosProxy::sever()` — a fresh
 //! redial after a plain sever succeeds first try, so that file never
@@ -30,7 +30,7 @@
 //! thing under test, not a stand-in for it.
 //!
 //! Asserts the same five pass/fail criteria `reverse_resume_chaos.rs` does
-//! (`docs/history/m3-plan.md` Step 8 (i)/(ii) both cite the identical five) — criterion ⑤
+//! (M3 plan Step 8 (i) (2473c88)/(ii) both cite the identical five) — criterion ⑤
 //! ("not a late idle-timeout fluke") is restated in the shape a real,
 //! multi-attempt recovery actually produces rather than copied verbatim;
 //! see the doc comment on the test function itself for why.
@@ -70,7 +70,7 @@ use qsh_transport::{Principal, StaticTrust};
 use tracing_subscriber::layer::SubscriberExt as _;
 use tracing_subscriber::util::SubscriberInitExt as _;
 
-/// The literal DoD number (`docs/ROADMAP.md` M3 DoD 2, `docs/history/m3-plan.md` Step 8
+/// The literal DoD number (`docs/ROADMAP.md` M3 DoD 2, M3 plan Step 8 (2473c88)
 /// (a)): longer than [`IDLE_TIMEOUT`] so the QUIC connection on both ends
 /// is guaranteed dead by the time it lifts, far short of `[serve].resume_ttl`
 /// (default 24 h) so the session and its resume credential must still be
@@ -107,7 +107,7 @@ const DEADLINE: Duration = Duration::from_secs(180);
 /// The name a live reverse registration for `target` resolves to.
 const HOST_ALIAS: &str = "revhost";
 
-/// `docs/design/testing.md` L4 / `docs/history/m3-plan.md` Step 8 (c): "재등록 시점부터
+/// `docs/design/testing.md` L4 / M3 plan Step 8 (c) (2473c88): "재등록 시점부터
 /// resume 완료까지 2초" — restated here, identical to
 /// `reverse_resume_chaos.rs`'s own copy, so a change to the contract fails
 /// this test instead of passing quietly.
@@ -559,7 +559,7 @@ fn attach(ops: &Ops, session_ref: &str) -> SessionAttachStream {
 // the gate
 // ---------------------------------------------------------------------------
 
-/// The five pre-defined pass/fail criteria (`docs/history/m3-plan.md` Step 8 (i), reused
+/// The five pre-defined pass/fail criteria (M3 plan Step 8 (i) (2473c88), reused
 /// by (ii) for this file): ① the session stays alive through the blackout
 /// and output keeps accumulating; ② re-registration is observed and
 /// `generation` increases; ③ `SessionAttach` for the same `session_id`

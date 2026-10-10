@@ -143,7 +143,7 @@ fn migration_probe_budget(rtt: Duration) -> Duration {
 /// plus enough slack for the task to be scheduled at all.
 const PUMP_STOP_GRACE: Duration = Duration::from_millis(50);
 
-/// How a live attach survives a dead path (`docs/history/m2-plan.md` Step 7 (a)).
+/// How a live attach survives a dead path (M2 plan Step 7 (a) (2473c88)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RecoveryConfig {
     /// How the path-death detector behaves.
@@ -168,7 +168,7 @@ pub struct RecoveryConfig {
     /// Whether to recover at all. Off makes a dead path end the attach the
     /// way it did before recovery existed.
     pub enabled: bool,
-    /// Reverse-route only (`LocalReconnect`, `docs/history/m3-plan.md` Step 8): the
+    /// Reverse-route only (`LocalReconnect`, M3 plan Step 8 (2473c88)): the
     /// ceiling on how long a single reconnect wait asks the daemon to
     /// block for a new-generation live registration
     /// (`LocalHello.wait_ms`, clamped again on the daemon side to
@@ -477,7 +477,7 @@ impl Ops {
     /// the caller — `user@host`/a long-running external process's (e.g. an
     /// agent tool) `user` argument — always wins;
     /// otherwise `hosts.toml`'s `user` entry for `host` fills in as a
-    /// default, if it set a non-empty one (`docs/history/m7-plan.md` Step 3, ssh_config
+    /// default, if it set a non-empty one (M7 plan Step 3 (69dd788), ssh_config
     /// `User`-directive-like: a per-name default a caller can still
     /// override on the command line).
     ///
@@ -689,7 +689,7 @@ impl Ops {
     /// durable **before** the stream is used, because it is
     /// single-generation: losing it orphans the session.
     ///
-    /// `remote_forward_specs` (`docs/history/m4-plan.md` Step 4's interactive `-R`) is
+    /// `remote_forward_specs` (M4 plan Step 4 (2473c88)'s interactive `-R`) is
     /// processed **inside** this call, before the attach driver is
     /// spawned — not left to a later method on the returned
     /// [`SessionAttachStream`] the way [`SessionAttachStream::
@@ -718,7 +718,7 @@ impl Ops {
         // so a recovery redial dials with the same keep-alive.
         let liveness = self.liveness()?;
         let store = ResumeStore::new(&self.paths);
-        // Route-aware (`docs/history/m3-plan.md` Step 7): a live reverse registration
+        // Route-aware (M3 plan Step 7 (2473c88)): a live reverse registration
         // relays through this machine's `qsh listen` daemon, exactly like
         // every other `Ops::connect` caller since Step 6 — this was the
         // one holdout still pinned to `resolve_peer`/`connect_target`
@@ -838,7 +838,7 @@ impl Ops {
         } else {
             // Same reverse-route refusal as `open_local_forwards`, and for
             // the same reason: this leg needs a raw QUIC connection of its
-            // own to spawn the `TCP_ACCEPTED` acceptor on (`docs/history/m4-plan.md`
+            // own to spawn the `TCP_ACCEPTED` acceptor on (the M4 plan (2473c88)
             // Step 5).
             let Some(connection) = conn.connection() else {
                 conn.close();
@@ -1140,7 +1140,7 @@ impl Ops {
     /// `session.attach`) sit on — they need many round trips on one
     /// connection, where a value op needs exactly one.
     ///
-    /// Routes via [`Ops::resolve_route`] (`docs/history/m3-plan.md` Step 6): a live
+    /// Routes via [`Ops::resolve_route`] (M3 plan Step 6 (2473c88)): a live
     /// reverse registration relays through this machine's `qsh listen`
     /// daemon ([`Self::connect_reverse`]); otherwise this is exactly the
     /// forward dial it always was, via [`Self::connect_target`]. Every
@@ -1207,7 +1207,7 @@ impl Ops {
 
     /// [`connect`](Self::connect)'s reverse-route branch: relay through
     /// this machine's resident `qsh listen` daemon over a `LOCAL_CONTROL`
-    /// conduit instead of dialing the peer directly (`docs/history/m3-plan.md` Step 6).
+    /// conduit instead of dialing the peer directly (M3 plan Step 6 (2473c88)).
     /// No identity load here — the CLI process presents no certificate of
     /// its own on this leg, the daemon already holds the live mTLS
     /// connection to the peer — so, unlike [`Self::connect_target`],

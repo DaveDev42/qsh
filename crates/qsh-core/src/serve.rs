@@ -432,7 +432,7 @@ pub async fn run_serve(
     // internally, so nothing of this function's own is keeping `Server`
     // alive once `.await` resolves; only `runtime.audit` survives.
     runtime.server.run(listener, shutdown).await;
-    // F2 (`docs/history/m5-plan.md` Step 3): `Server::run`'s accept loop detaches each
+    // F2 (M5 plan Step 3 (2473c88)): `Server::run`'s accept loop detaches each
     // connection's task (`tokio::spawn`, no `JoinSet`) and `drain()` only
     // waits for the broker's own sessions, not those tasks themselves — so
     // a straggler can still hold its own `Arc<Server>` clone (and thus,
@@ -450,7 +450,7 @@ pub async fn run_serve(
 /// control stream (`docs/design/architecture.md` §3, §6).
 ///
 /// [`host_runtime`] is the one place that assembles this — shared by `qsh
-/// serve` here and, from `docs/history/m3-plan.md` Step 3 PR 3b, `qsh reverse`: a reverse
+/// serve` here and, from M3 plan Step 3 (2473c88) PR 3b, `qsh reverse`: a reverse
 /// target *is* a host, just one that dialed out instead of accepting a
 /// connection, so it reuses the exact same broker/audit/authorizer
 /// construction rather than a second copy of it (`docs/CLI.md` §6.13: the
@@ -470,7 +470,7 @@ pub struct HostRuntime {
     /// (missing or invalid) — `server`'s authorizer is [`crate::acl::DenyAll`]
     /// in that case, and the caller (`qsh-cli`'s `run_serve`/`run_reverse`
     /// wrappers) must print [`StartupDiagnostic::render`]'s output to
-    /// stderr exactly once (`docs/history/m5-plan.md` Step 6). `None` when a real
+    /// stderr exactly once (M5 plan Step 6 (2473c88)). `None` when a real
     /// [`crate::acl::Policy`] loaded.
     pub policy_diagnostic: Option<StartupDiagnostic>,
 }
@@ -479,9 +479,9 @@ pub struct HostRuntime {
 /// the `acl.toml`-backed policy this process resolved at startup
 /// ([`load_or_deny_with_index`] — falls back to `DenyAll` plus a
 /// [`HostRuntime::policy_diagnostic`] on anything short of a clean load,
-/// `docs/history/m5-plan.md` Step 6; replaces the M1–M4 `AllowAllPinned` interim
+/// M5 plan Step 6 (2473c88); replaces the M1–M4 `AllowAllPinned` interim
 /// posture), the rotating, bounded-queue audit sink at `[audit]`'s
-/// configured path (`crate::audit::RotatingAuditSink`, `docs/history/m5-plan.md` Step
+/// configured path (`crate::audit::RotatingAuditSink`, the M5 plan (2473c88) Step
 /// 3), and the `Server` that ties them together under `device_id`.
 ///
 /// The broker outlives every connection (`docs/design/architecture.md`
@@ -491,7 +491,7 @@ pub struct HostRuntime {
 /// (Windows host is P2 — README limitations).
 ///
 /// Policy loads exactly once, here, at process start — never hot-reloaded
-/// (`docs/CLI.md` §6.12/§6.13, `docs/history/m5-plan.md` §4.1 #6): a reverse target
+/// (`docs/CLI.md` §6.12/§6.13, M5 plan §4.1 #6 (2473c88)): a reverse target
 /// calls this once per process too (`crate::reverse::target::run_reverse_unix`),
 /// not once per reconnect, for the same reason.
 pub fn host_runtime(paths: &Paths, config: &Config, device_id: impl Into<String>) -> HostRuntime {
@@ -517,7 +517,7 @@ pub fn host_runtime(paths: &Paths, config: &Config, device_id: impl Into<String>
     // `Server::serve_pairing_connection` at all.
     let (authorizer, policy_diagnostic, pinned_principals) =
         load_or_deny_with_index(paths, Role::Serve);
-    // `docs/history/m8-plan.md` Step 2: the same operator-configured admission bounds
+    // M8 plan Step 2 (52639fc): the same operator-configured admission bounds
     // for every host role this constructs (`qsh serve` and a reverse
     // target's own accept loop, `crate::reverse::target::run_reverse_unix`
     // — both are internet-exposed accept loops per the design's own audit
@@ -528,7 +528,7 @@ pub fn host_runtime(paths: &Paths, config: &Config, device_id: impl Into<String>
         config.serve.handshake_rate_per_source(),
         config.serve.validated_rate_per_source(),
     );
-    // `docs/history/m8-plan.md` Step 3: the same operator-configured `[serve]` quota
+    // M8 plan Step 3 (52639fc): the same operator-configured `[serve]` quota
     // limits the broker above already resolved via `BrokerConfig::
     // from_serve` (session-count axes), so the `Server`'s own quota
     // tracker (`exec.run` concurrency + every axis's audit-aggregation

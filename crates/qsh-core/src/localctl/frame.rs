@@ -2,7 +2,7 @@
 //! the transport-free analogue of `qsh-transport::control`'s framed QUIC
 //! stream helpers (`docs/design/protocol.md` §5, §11-3). Deliberately
 //! reimplemented rather than reused: this file must never import
-//! `qsh_transport` (`crate::localctl` module docs, `docs/history/m3-plan.md` Step 5).
+//! `qsh_transport` (`crate::localctl` module docs, M3 plan Step 5 (2473c88)).
 //!
 //! What *is* reused is the frame **parser** — exactly the discipline
 //! `docs/design/protocol.md` §11-3 requires ("§5와 동일한 frame layer"):
@@ -138,7 +138,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> LocalConduit<S> {
 }
 
 /// Wrap any localctl framing failure as [`ErrorCode::ConnectionFailed`] —
-/// the same code `docs/history/m3-plan.md`'s fixed vocabulary uses for "controller 도달
+/// the same code the M3 plan (2473c88)'s fixed vocabulary uses for "controller 도달
 /// 실패" (`docs/CLI.md` §3.3). A broken local IPC conduit to this
 /// machine's own daemon plays the same role for the CLI process that an
 /// unreachable controller plays for a reverse target, so it is classified

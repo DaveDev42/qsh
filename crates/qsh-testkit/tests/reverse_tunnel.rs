@@ -1,4 +1,4 @@
-//! L3 — the reverse-carrier tunnel data path end to end (`docs/history/m4-plan.md`
+//! L3 — the reverse-carrier tunnel data path end to end (the M4 plan (2473c88)
 //! Step 5 (a), `docs/design/protocol.md` §11-3): a real
 //! [`qsh_testkit::reverse::ReverseHarness`] target, a real localctl
 //! daemon bound via [`ReverseHarness::attach_localctl`], and the real
@@ -22,7 +22,7 @@
 //! independent of tunnel behavior" needs to mean.
 //!
 //! **What `-R over reverse` is actually novel about**
-//! (`docs/history/m4-plan.md`'s own framing): the target *dials* the controller, but once
+//! (The M4 plan (2473c88)'s own framing): the target *dials* the controller, but once
 //! registered it plays the *host* role for every op the controller sends
 //! it — including `RemoteForwardOpen`, which this file drives over a raw
 //! `LOCAL_CONTROL` conduit exactly like `local_stream_reverse.rs`'s own
@@ -187,7 +187,7 @@ impl LocalForwardCarrier for ReverseRoute<'_> {
     }
 }
 
-/// **The role-axis-independence proof for `-L`** (`docs/history/m4-plan.md` Step 5
+/// **The role-axis-independence proof for `-L`** (M4 plan Step 5 (2473c88)
 /// (a)): bind a local forward at `echo`'s address through whichever
 /// carrier the caller supplies, round-trip a payload through it, and
 /// assert it comes back byte-for-byte. Nothing here names "forward" or
@@ -365,7 +365,7 @@ impl ReverseRemoteRoute<'_> {
     /// [`RemoteForwardAcceptor::spawn_reverse`] claim loop — shared by
     /// [`RemoteForwardCarrier::open_remote_forward`] and the
     /// two-conduits proof below, which needs the same setup twice with
-    /// two independent `LOCAL_CONTROL` conduits (`docs/history/m4-plan.md` Step 5 (a):
+    /// two independent `LOCAL_CONTROL` conduits (M4 plan Step 5 (a) (2473c88):
     /// "one conduit registers, the other tries to claim" driven for real,
     /// not just at the registry level).
     async fn open(&self, forward_host: &str, forward_port: u16) -> ReverseRemoteBinding {
@@ -435,7 +435,7 @@ impl RemoteForwardCarrier for ReverseRemoteRoute<'_> {
     }
 }
 
-/// **The role-axis-independence proof for `-R`** (`docs/history/m4-plan.md` Step 5
+/// **The role-axis-independence proof for `-R`** (M4 plan Step 5 (2473c88)
 /// (a)): open a remote forward pointed at `echo` through whichever
 /// carrier the caller supplies, round-trip a payload through the address
 /// it bound, and assert it comes back byte-for-byte. Same split as
@@ -1257,7 +1257,7 @@ fn assert_resource_exhausted(answer: LocalResponse, elapsed: Duration, what: &st
 
 // ------------------------------------------------------------------
 // localctl `NotOwner` — a same-uid trust boundary, deliberately not
-// `crate::acl::PERMISSION_DENIED_MESSAGE` (`docs/history/m5-plan.md` Step 4 §4.2,
+// `crate::acl::PERMISSION_DENIED_MESSAGE` (M5 plan Step 4 §4.2 (2473c88),
 // `docs/design/protocol.md` §11-3's "close도 소유 conduit만 할 수 있다").
 // ------------------------------------------------------------------
 
@@ -1607,7 +1607,7 @@ async fn a_claim_started_before_registration_gets_only_its_declared_wait_ms_not_
 }
 
 // ------------------------------------------------------------------
-// (v) `Ops::tunnel_list`/`Ops::tunnel_close` (`docs/history/m4-plan.md` Step 5 PR 5b) —
+// (v) `Ops::tunnel_list`/`Ops::tunnel_close` (M4 plan Step 5 (2473c88) PR 5b) —
 // qsh-level, against a real daemon-held `-R over reverse` forward.
 // ------------------------------------------------------------------
 
@@ -1636,7 +1636,7 @@ async fn tunnel_close(
         .expect("spawn_blocking join")
 }
 
-/// The full owed PR 5b L3 scenario (`docs/history/m4-plan.md` Step 5 PR 5b (c)):
+/// The full owed PR 5b L3 scenario (M4 plan Step 5 (2473c88) PR 5b (c)):
 /// `Ops::tunnel_open --remote` over the reverse route registers a forward
 /// with the target's resident-daemon-adjacent hub; a *second*, independent
 /// `Ops::tunnel_list` call (not the one that opened it — the same

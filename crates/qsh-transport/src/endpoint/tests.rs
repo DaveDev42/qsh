@@ -3,7 +3,7 @@ use crate::tls::StaticTrust;
 
 /// (b) `send_fairness` and the tunnel-sized `stream_receive_window`
 /// are actually set on the `TransportConfig` every dial/listen builds
-/// (`docs/design/protocol.md` §12, `docs/history/m4-plan.md` Step 2) —
+/// (`docs/design/protocol.md` §12, M4 plan Step 2 (2473c88)) —
 /// `TransportConfig`'s congestion controller has no public getter
 /// (quinn-proto stores it as `Arc<dyn ControllerFactory>`, `Debug`
 /// explicitly excludes it — see [`TUNNEL_STREAM_RECEIVE_WINDOW`]'s own
@@ -61,7 +61,7 @@ fn tunnel_stream_receive_window_never_regresses_below_quinns_own_default() {
     );
 }
 
-/// `docs/history/m8-plan.md` Step 2 — pins [`CONNECTION_RECEIVE_WINDOW`] onto the
+/// M8 plan Step 2 (52639fc) — pins [`CONNECTION_RECEIVE_WINDOW`] onto the
 /// `TransportConfig` every dial/listen builds, the same way (b) above
 /// pins `stream_receive_window`, **and** (verification round P3-2)
 /// that the applied value stays within `docs/ROADMAP.md` M8 DoD 2's
@@ -104,7 +104,7 @@ fn transport_config_sets_connection_receive_window() {
     );
 }
 
-/// `docs/history/m8-plan.md` Step 2 — [`MAX_INCOMING`]/[`INCOMING_BUFFER_SIZE`]/
+/// M8 plan Step 2 (52639fc) — [`MAX_INCOMING`]/[`INCOMING_BUFFER_SIZE`]/
 /// [`INCOMING_BUFFER_SIZE_TOTAL`] are actually applied to the
 /// `ServerConfig` `Listener::bind` builds, not left at quinn's own
 /// defaults. `ServerConfig`'s `Debug` prints these three fields
@@ -286,7 +286,7 @@ fn test_pair() -> ((LocalIdentity, Fingerprint), (LocalIdentity, Fingerprint)) {
     (one(), one())
 }
 
-/// `docs/history/m8-plan.md` Step 2 design §8 — the first `Incoming` a real
+/// M8 plan Step 2 (52639fc) design §8 — the first `Incoming` a real
 /// `Dialer` produces has never proven it owns its source address:
 /// `remote_address_validated()` is `false` and `may_retry()` is
 /// `true`. Pins the predicate `admission::Gate::decide` reads.
@@ -316,7 +316,7 @@ async fn fresh_incoming_is_unvalidated() {
     dial_task.abort();
 }
 
-/// `docs/history/m8-plan.md` Step 2 design §8 — retrying the first `Incoming` of a
+/// M8 plan Step 2 (52639fc) design §8 — retrying the first `Incoming` of a
 /// dial forces a *second* Initial bearing quinn's Retry token; that
 /// second `Incoming` is address-validated, and completes a real mTLS
 /// handshake against qsh's own `Dialer`/`Listener`. Pins ① end to end:
@@ -355,7 +355,7 @@ async fn retry_forces_a_validated_second_incoming() {
     );
 }
 
-/// `docs/history/m8-plan.md` Step 2 design §8 — `retry()` on an already
+/// M8 plan Step 2 (52639fc) design §8 — `retry()` on an already
 /// address-validated `Incoming` errs (quinn's own contract) rather
 /// than silently retrying forever. Pins that `admission::Gate` can
 /// trust `retry()`'s `Err` to mean "this attempt is validated", not a
@@ -397,7 +397,7 @@ async fn retry_on_validated_incoming_errs() {
     dial_task.abort();
 }
 
-/// `docs/history/m8-plan.md` Step 2, design §3's risk #3 ("`incoming_buffer_size`
+/// M8 plan Step 2 (52639fc), design §3's risk #3 ("`incoming_buffer_size`
 /// tightened blind"): measures how many bytes quinn actually buffers
 /// for one unaccepted `Incoming` while a real client's dial sits
 /// waiting, so [`INCOMING_BUFFER_SIZE`] is set from a number, not a
@@ -491,7 +491,7 @@ async fn measure_incoming_buffered_bytes_during_delayed_accept() {
          {INCOMING_BUFFER_SIZE}, {}x measured)",
         INCOMING_BUFFER_SIZE.checked_div(measured).unwrap_or(0)
     );
-    // `docs/history/m8-plan.md` Step 2 verification round, H1/H2: this used to
+    // M8 plan Step 2 (52639fc) verification round, H1/H2: this used to
     // assert `measured * 8 <= INCOMING_BUFFER_SIZE` — an ≥8x headroom
     // check against the *specific* measured number, which is real-time
     // dependent (PTO retransmission count in a fixed 4 s window) and

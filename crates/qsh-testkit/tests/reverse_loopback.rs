@@ -1,5 +1,5 @@
 //! L3 loopback end-to-end for reverse mode (`docs/design/protocol.md` §11,
-//! `docs/CLI.md` §6.13, `docs/history/m3-plan.md` Step 3, PR 3b): a real `qsh listen`
+//! `docs/CLI.md` §6.13, M3 plan Step 3 (2473c88), PR 3b): a real `qsh listen`
 //! controller (`qsh_core::reverse::listen::Listen`) accepting real QUIC
 //! dial-ins from `qsh reverse` targets, over `qsh_testkit::reverse`'s
 //! [`ReverseHarness`].
@@ -7,7 +7,7 @@
 //! Every negative/deny/conflict-path test asserts the actual reply *frame*
 //! the peer received (`HelloError::Remote{code, ..}`), never just a
 //! `Result::is_err()` — that is the whole point of the rejection
-//! error-frame delivery fix this PR carries (`docs/history/m3-plan.md` Step 3, "거부 error
+//! error-frame delivery fix this PR carries (M3 plan Step 3 (2473c88), "거부 error
 //! frame의 전달 보장"; `crate::handshake::REJECTION_DRAIN_TIMEOUT`).
 
 use std::sync::{Arc, Mutex, OnceLock};
@@ -477,7 +477,7 @@ async fn a_dead_registration_transitions_to_stale_then_is_swept_after_retention(
     harness.shutdown().await;
 }
 
-/// The parallel-race debt `docs/history/m3-plan.md` Step 3.5 (c) assigned to this step
+/// The parallel-race debt M3 plan Step 3 (2473c88).5 (c) assigned to this step
 /// ("동시 등록 same/different fingerprint … Step 4가 재접속 루프와 함께
 /// 소유한다"), driven through the real `Listen`/`register_connection` path
 /// with genuinely concurrent connections (`tokio::join!`, not two
@@ -803,7 +803,7 @@ async fn controller_refuses_session_open_but_answers_ping() {
 // `docs/CLI.md` §6.13) — so on Windows these three would still compile but
 // observe the wrong error code/success shape (`Unsupported` instead of the
 // specific outcome each test proves). That is exactly the class of failure
-// `docs/history/m3-plan.md` Step 3's Windows CI audit calls out, and per-test gating
+// M3 plan Step 3 (2473c88)'s Windows CI audit calls out, and per-test gating
 // (not a whole-file `#![cfg(unix)]`) is the file's own established
 // pattern — the rest of this file (registration/deny/conflict/role-
 // discipline tests) drives the wire by hand and is genuinely platform
@@ -994,7 +994,7 @@ async fn run_target_reconnects_and_re_registers_when_the_controller_replaces_it(
 
 // ---------------------------------------------------------------------------
 // L1 matrix row — "reverse dial, untrusted target"
-// (`docs/history/m3-plan.md` Step 3 (c): the handshake-matrix table itself
+// (M3 plan Step 3 (c) (2473c88): the handshake-matrix table itself
 // (`crates/qsh-transport/tests/handshake_matrix.rs`) is deliberately
 // transport-only — it cannot depend on `qsh-core`'s `AuditRecord` at all
 // (`CLAUDE.md`'s dependency matrix: `qsh-transport` → `qsh-proto` only) —
@@ -1067,7 +1067,7 @@ async fn reverse_dial_untrusted_target_fails_handshake_before_registration() {
 // remote error frame
 // ---------------------------------------------------------------------------
 
-/// `docs/history/m3-plan.md` Step 2 (c) left this L3-owed: a raw-QUIC initiator that
+/// M3 plan Step 2 (c) (2473c88) left this L3-owed: a raw-QUIC initiator that
 /// advertises a wire minor version the responder does not support must
 /// actually *receive* the responder's `UNSUPPORTED` ("no common wire minor
 /// version") as a remote error frame — not merely observe its own local

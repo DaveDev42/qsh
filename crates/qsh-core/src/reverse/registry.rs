@@ -1,5 +1,5 @@
 //! The controller-side reverse-registration table (`docs/design/protocol.md`
-//! §11-2, `docs/history/m3-plan.md` Step 3, PR 3a).
+//! §11-2, M3 plan Step 3 (2473c88), PR 3a).
 //!
 //! [`Registry`] holds **metadata only**: `name → `[`ReverseEntry`]. It never
 //! names a live connection or a `client::Session` — the transport
@@ -7,14 +7,14 @@
 //! `reverse/listen.rs` connection table, keyed by `(name, generation)`.
 //! Folding a connection into this registry would make it transitively hold
 //! a `qsh_transport::Connection`, defeating the point of keeping
-//! registration bookkeeping separate from connection ownership (`docs/history/m3-plan.md`
+//! registration bookkeeping separate from connection ownership (the M3 plan (2473c88)
 //! Step 3 (b)).
 //!
 //! This file is also, deliberately, **transport-free**: it names no
 //! `qsh_transport` type at all (`fingerprint`/`principal` are stored in
 //! their canonical `Display` string forms, exactly the way
 //! `broker::resume::PeerFingerprint` and `audit::AuditRecord::principal`
-//! already do for the same reason). `docs/history/m3-plan.md` Step 5 commits to banning
+//! already do for the same reason). M3 plan Step 5 (2473c88) commits to banning
 //! `qsh_transport`/`quinn`/`rustls`/`crate::client`/`crate::Principal`/
 //! `crate::Fingerprint` in this exact file — the same six tokens
 //! `xtask/src/arch.rs`'s `BROKER_DIR` rule already bans in `broker/` — so

@@ -38,7 +38,7 @@ pub const CA_CERT_FILE: &str = "ca.pem";
 /// File name of the CA private key (PKCS#8 PEM).
 pub const CA_KEY_FILE: &str = "ca.key";
 /// Sidecar lock guarding [`init`]'s whole idempotency-check-plus-write
-/// critical section (`docs/history/m7-plan.md` Step 7-1 S4, carrying forward Step 5's
+/// critical section (M7 plan Step 7-1 (69dd788) S4, carrying forward Step 5's
 /// P3-4 observation): without it, two concurrent `qsh cert init` calls
 /// could interleave so that one writer's `ca.key` ends up paired with the
 /// other writer's `ca.pem` on disk.
@@ -423,7 +423,7 @@ mod tests {
     /// `ca.key`.
     ///
     /// The temp path now carries a writer-scoped ticket
-    /// (`crate::config::write_private_file_io`, `docs/history/m7-plan.md` Step 7-1),
+    /// (`crate::config::write_private_file_io`, M7 plan Step 7-1 (69dd788)),
     /// not just the pid, so the exact name isn't derivable from `pid`
     /// alone any more. `init` makes exactly two `write_private_file`
     /// calls in a fixed order (key, then cert), so
@@ -439,7 +439,7 @@ mod tests {
     /// `write_private_file_io` can steal the predicted ticket out from
     /// under this read, and the `panic!` below fires spuriously
     /// (reproduced 3/3 under `cargo test -p qsh-core --lib` run alongside
-    /// its siblings; `docs/history/m7-plan.md` Step 7-1 검증 라운드 A1). This is a
+    /// its siblings; M7 plan Step 7-1 (69dd788) 검증 라운드 A1). This is a
     /// known test-isolation limitation of this test, not of the
     /// production ticket/locking mechanism, which nextest — the actual CI
     /// and commit-gate runner — validates cleanly.

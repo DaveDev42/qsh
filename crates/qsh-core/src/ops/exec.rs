@@ -91,7 +91,7 @@ impl Ops {
         let timeout = req.timeout_ms.map(Duration::from_millis);
 
         // Shared with every other dial op (`ops/mod.rs::connect_runtime`,
-        // `docs/history/m7-plan.md` Step 7-2 carryover (ii)) instead of a fresh
+        // M7 plan Step 7-2 (69dd788) carryover (ii)) instead of a fresh
         // `Builder::new_multi_thread()` per call — one exec after another
         // (or an exec alongside a live pull) no longer pays for a second
         // multi-thread runtime it never needed.
@@ -433,7 +433,7 @@ pub(crate) fn map_dial_error(err: DialError, address: &str, attempted: usize) ->
 fn map_dial_error_inner(err: DialError, address: &str) -> OpError {
     match err {
         // `address` no longer implies a trust store pin for this host
-        // (`docs/history/m7-plan.md` Step 3 (a)-추기 ③): it can come from `hosts.toml`
+        // (M7 plan Step 3 (a)-추기 ③ (69dd788)): it can come from `hosts.toml`
         // alone, naming a host trust.toml has never heard of. So a
         // locally-rejected certificate here can be either a *mismatch*
         // (the peer answering doesn't match a pin that does exist) or a
@@ -446,7 +446,7 @@ fn map_dial_error_inner(err: DialError, address: &str) -> OpError {
             auth_failed(&format!("{reason:?}").to_lowercase())
         }
         DialError::RemoteRejected => auth_failed("remote_rejected"),
-        // `docs/history/m8-plan.md` Step 2: the peer's `admission::Gate` refused an
+        // M8 plan Step 2 (52639fc): the peer's `admission::Gate` refused an
         // already address-validated attempt at its concurrency cap.
         // *Same* `ErrorCode::ConnectionFailed`/`retryable: true` as
         // `DialError::Failed` below — only the human message differs

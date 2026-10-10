@@ -1,5 +1,5 @@
 //! L3 — headless `session.*` value ops driven through real [`Ops`], over
-//! both routes `Ops::connect` can now take (`docs/history/m3-plan.md` Step 6): a real
+//! both routes `Ops::connect` can now take (M3 plan Step 6 (2473c88)): a real
 //! target (owning the session broker), a real `qsh listen` controller
 //! (`qsh_testkit::reverse::ReverseHarness`) with a real localctl daemon
 //! attached, and a real `Ops` instance in-process on the "laptop" side of
@@ -247,7 +247,7 @@ fn open_req(host: &str) -> SessionOpenReq {
 /// `session.open -> get -> list -> read -> write -> resize -> close`, the
 /// full owed L3 chain, driven at `host` through `ops` — identical body run
 /// against both the forward and the reverse alias of the same target
-/// (`docs/history/m3-plan.md` Step 6 (c): "정방향과 같은 시나리오 함수"). Returns the
+/// (M3 plan Step 6 (c) (2473c88): "정방향과 같은 시나리오 함수"). Returns the
 /// bare session id (host-alias-independent) so a caller can look the same
 /// session up under a *different* alias afterward.
 async fn full_lifecycle_open_get_list_read_write_resize_close(ops: &Ops, host: &str) -> String {
@@ -349,7 +349,7 @@ async fn full_lifecycle_open_get_list_read_write_resize_close(ops: &Ops, host: &
 /// The milestone's central L3 proof: the identical `session.*` chain,
 /// through the identical `Ops`, succeeds whether `Ops::resolve_route`
 /// picks the forward pin or the live reverse registration — the routing
-/// split is invisible to the six value ops' bodies (`docs/history/m3-plan.md` Step 6:
+/// split is invisible to the six value ops' bodies (M3 plan Step 6 (2473c88):
 /// "결과: session_open/get/list/read/write/resize/close의 본문은 한 줄도
 /// 바뀌지 않는다").
 #[tokio::test(flavor = "multi_thread")]
@@ -396,7 +396,7 @@ async fn session_lifecycle_succeeds_over_both_forward_and_reverse_routes() {
     rig.shutdown().await;
 }
 
-/// `docs/history/m3-plan.md` Step 6's most important security test: a reverse
+/// M3 plan Step 6 (2473c88)'s most important security test: a reverse
 /// registration grants *reachability*, never *authority* — the target
 /// alone decides, against the controller's own authenticated principal
 /// (`docs/design/protocol.md` §11-3, this file's HARD RULES). A `Server`

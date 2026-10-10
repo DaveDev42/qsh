@@ -8,7 +8,7 @@ use super::*;
 /// race-freedom argument below is unit-testable without a real
 /// [`Connection`] (this module's tests use a small mock).
 ///
-/// **`docs/history/m3-plan.md` Step 4 (4) — the Step 3 race debt this fixes.** The old
+/// **M3 plan Step 4 (2473c88) (4) — the Step 3 race debt this fixes.** The old
 /// shape keyed `conns` by `(name, generation)` and published a new
 /// connection with a separate insert-then-remove sequence: insert
 /// `(name, new_generation)`, then — if [`Registry::admit`]'s
@@ -142,7 +142,7 @@ impl<T: Clone> ConnTable<T> {
     }
 
     /// Every current occupant, by name — [`Listen::hubs_snapshot`]'s own
-    /// use (`docs/history/m4-plan.md` Step 5 PR 5b's `LocalTunnelList`/admin
+    /// use (M4 plan Step 5 (2473c88) PR 5b's `LocalTunnelList`/admin
     /// `tunnel.close`): unlike [`Self::get`]/[`Self::get_matching`], which
     /// answer "the one host I already know the name of", these two admin
     /// requests carry no host at all and must consider every live

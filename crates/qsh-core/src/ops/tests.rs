@@ -17,7 +17,7 @@ fn version_reports_schemas_and_own_version() {
     assert_eq!(data.schemas, vec!["qsh.cli/v1", "qsh.event/v1"]);
 }
 
-/// `docs/history/m7-plan.md` Step 7-2 ①: the shared dial runtime must be **lazy** —
+/// M7 plan Step 7-2 (69dd788) ①: the shared dial runtime must be **lazy** —
 /// nothing may build it until a `connect*` call actually reaches
 /// [`Ops::connect_runtime`], or a purely local command (`qsh version`,
 /// tested here) would pay for a `num_cpus`-sized `multi_thread`
@@ -56,7 +56,7 @@ fn connect_runtime_is_lazy_until_first_connect_call() {
     );
 }
 
-/// The other half of `docs/history/m7-plan.md` Step 7-2 ①: once built, the runtime
+/// The other half of M7 plan Step 7-2 (69dd788) ①: once built, the runtime
 /// is **shared** — every `connect_runtime()` call on the same `Ops`
 /// (and on every clone of it, since `Ops::clone` only bumps the outer
 /// `Arc`'s refcount) returns a handle to the exact same
@@ -481,7 +481,7 @@ fn trust_accept_uses_the_normalized_address_for_the_dial_and_its_failure_message
     );
 }
 
-/// Regression for `docs/history/m7-plan.md` Step 7-1 검증 라운드 A2: `crate::trust`'s
+/// Regression for M7 plan Step 7-1 (69dd788) 검증 라운드 A2: `crate::trust`'s
 /// own concurrency regressions (`concurrent_full_rmw_cycles_do_not_lose_each_others_peers`
 /// et al.) call `TrustStore::lock`/`load`/`save` directly from test
 /// threads and never go through `Ops::trust_add` — so a future edit
@@ -1146,7 +1146,7 @@ fn server_name_strips_the_port_and_brackets() {
     assert_eq!(server_name_for("[::1]"), "::1");
 }
 
-// ---- `Ops::resolve_route` — `PeerRoute` selection (`docs/history/m3-plan.md`
+// ---- `Ops::resolve_route` — `PeerRoute` selection (the M3 plan (2473c88)
 // Step 6) ----
 //
 // `resolve_route` is a thin `HostRoute` -> `PeerRoute` mapping over
@@ -1496,7 +1496,7 @@ fn resolve_peer_address_strips_a_user_at_hint_from_the_host_not_found_remedy() {
     // positional that bypasses `parse_target`'s own `user@` split,
     // `docs/CLI.md` §6.9) used to echo the hint straight into this
     // function's `qsh trust add` remedy — the exact shape
-    // `Ops::resolve_host_route` had before `docs/history/m8-plan.md` Step 6 fixed
+    // `Ops::resolve_host_route` had before M8 plan Step 6 (52639fc) fixed
     // it. Pin both halves: no `@` survives in the message, and the
     // suggested alias itself is one `qsh trust add` would accept
     // (lens-2 finding).
@@ -1533,7 +1533,7 @@ fn resolve_peer_address_on_an_at_prefix_with_no_alias_left_is_invalid_argument()
 
 #[test]
 fn resolve_peer_address_trims_a_stray_space_left_by_an_at_split() {
-    // `docs/history/m8-plan.md` Step 7, Q10 — same trim `resolve_route` gets,
+    // M8 plan Step 7 (52639fc), Q10 — same trim `resolve_route` gets,
     // reused here via the shared `host::hint_alias`.
     let trust = TrustStore::default();
     let hosts = HostsFile::default();
@@ -1575,8 +1575,8 @@ fn resolve_peer_address_leaves_an_at_free_host_byte_identical() {
     );
 }
 
-/// `docs/history/m9-plan.md` Step 2 (c)'s 4 combinations, plus every other real
-/// branch the resolver answers (`docs/history/m9-plan.md` Step 2 (a), ADR-0013
+/// M9 plan Step 2 (c) (b9a621b)'s 4 combinations, plus every other real
+/// branch the resolver answers (M9 plan Step 2 (a) (b9a621b), ADR-0013
 /// decision 8 at `docs/adr/0013-cert-file-exchange.md:29`). Each error
 /// row pins the exact code *and* message, not merely
 /// `ErrorCode::InvalidArgument` — two different refusals sharing a
@@ -1777,7 +1777,7 @@ fn the_two_missing_code_rejections_have_distinct_messages() {
 }
 
 /// Trim rule: surrounding whitespace (including CRLF) removed, internal
-/// whitespace left alone (`docs/history/m9-plan.md` Step 2 (c)'s two trim inputs).
+/// whitespace left alone (M9 plan Step 2 (c) (b9a621b)'s two trim inputs).
 #[test]
 fn normalize_invite_code_trims_surrounding_whitespace_only() {
     let code = "abcd-efgh-jkmn-pqrs-tvwx-yz23-4567-89ab";

@@ -13,13 +13,13 @@
 //!   controller plus the raw dial primitives to play a `qsh reverse`
 //!   target's wire role, and [`reverse::ReversePairHarness`], the
 //!   role-swapped counterpart of [`loopback::LoopbackHarness`] used to
-//!   prove role-axis independence (`docs/history/m3-plan.md` Step 3, PR 3b).
+//!   prove role-axis independence (M3 plan Step 3 (2473c88), PR 3b).
 //! - [`pair`]: [`pair::HostedPair`], the trait that lets one scenario body
 //!   run unmodified against both harnesses above.
 //! - [`tunnel`]: in-process loopback **tunnel** harness (L3) — a
 //!   [`loopback::LoopbackHarness`] host plus a client `-L` listener plus a
 //!   local echo destination, so a forwarded byte's whole path is one
-//!   process (`docs/history/m4-plan.md` Step 3).
+//!   process (M4 plan Step 3 (2473c88)).
 //! - [`procstat`]: `/proc`-based RSS/fd readers and the poll-until-stable
 //!   convergence helper T2's `adversarial_load.rs` and M8 Step 5's
 //!   `soak.rs` both need (docs/campaigns/m8-soak.md §4, moved from

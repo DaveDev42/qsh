@@ -90,7 +90,7 @@ impl FramedSend {
     /// Read back the priority [`set_priority`](Self::set_priority) most
     /// recently set — `Err` only once the stream has already closed
     /// (`SendStream::priority`'s own contract). Test-only today
-    /// (`crate::tunnel`'s `PRIORITY_TUNNEL` assertion, `docs/history/m4-plan.md` Step
+    /// (`crate::tunnel`'s `PRIORITY_TUNNEL` assertion, the M4 plan (2473c88) Step
     /// 2): production code never needs to read this back, only set it.
     pub fn priority(&self) -> Result<i32, ClosedStream> {
         self.send.priority()
@@ -101,7 +101,7 @@ impl FramedSend {
     /// [`finish`](Self::finish) to give a just-written frame (typically a
     /// rejection error frame) a real chance to reach the peer before the
     /// caller tears down the connection (`docs/design/protocol.md` §11-2's
-    /// delivery guarantee, `docs/history/m3-plan.md` Step 3). This method itself waits as
+    /// delivery guarantee, M3 plan Step 3 (2473c88)). This method itself waits as
     /// long as the transport does — callers bound it with their own timeout so a
     /// peer that never acks can never wedge them here.
     pub async fn stopped(&self) {

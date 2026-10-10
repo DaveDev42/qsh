@@ -95,7 +95,7 @@ const FP_A: &str = "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 // pre-existing in this diff, not a change in behavior).
 const FP_B: &str = "sha256:u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7s=";
 
-// ---- merge table (`docs/history/m3-plan.md` Step 5 (c)) ----
+// ---- merge table (M3 plan Step 5 (c) (2473c88)) ----
 
 #[test]
 fn merge_forward_only() {
@@ -147,7 +147,7 @@ fn merge_with_no_daemons_is_forward_only_not_an_error() {
 
 #[test]
 fn merge_carries_the_hosts_toml_user_hint_onto_a_reverse_entry() {
-    // P3-5 (`docs/history/m9-plan.md` Step 3 (a)-추기 ④): `Ops::session_open`'s
+    // P3-5 (M9 plan Step 3 (a)-추기 ④ (b9a621b)): `Ops::session_open`'s
     // `resolve_user_hint` fills the default purely from the host
     // *name*, before routing ever decides forward vs. reverse — so a
     // reverse-routed name's listed `Host.user` must match, not show
@@ -211,7 +211,7 @@ fn forward_hosts_and_resolve_route_agree_on_routability() {
     assert_eq!(err.code, ErrorCode::HostNotFound);
 }
 
-// ---- hosts.toml priority/merge (`docs/history/m7-plan.md` Step 3, §4.1 #4) ----
+// ---- hosts.toml priority/merge (M7 plan Step 3 (69dd788), §4.1 #4) ----
 //
 // `resolve_forward` (via `forward_hosts`/`resolve_route`, its only two
 // callers) is the single place this decision is made; these tests pin
@@ -284,11 +284,11 @@ fn trust_only_name_reports_source_trust_once_hosts_toml_exists_at_all() {
 
 #[test]
 fn hosts_toml_address_wins_over_trust_toml_address_for_the_same_name() {
-    // The one decision `docs/history/m7-plan.md` §4.1 #4 names explicitly:
+    // The one decision M7 plan §4.1 #4 (69dd788) names explicitly:
     // hosts.toml's address wins; trust.toml's fingerprint is still the
     // one reported (hosts.toml never supplies identity). The two
     // addresses disagree here, so under the redefined `source`
-    // (`docs/history/m9-plan.md` Step 3 (a)-추기 ②: which side's *address* won, not
+    // (M9 plan Step 3 (a)-추기 ② (b9a621b): which side's *address* won, not
     // which sides merely *name* the host) this is exactly the
     // silent-redirect-to-a-different-pinned-peer shape `source` exists
     // to surface -> `"hosts"`, not `"both"`.
@@ -421,7 +421,7 @@ fn a_live_reverse_registration_address_is_never_normalized() {
     assert_eq!(merged[0].address, "203.0.113.5");
 }
 
-/// `docs/history/m9-plan.md` §6 행 i: surrounding whitespace in a lookup key is
+/// M9 plan §6 (b9a621b) 행 i: surrounding whitespace in a lookup key is
 /// trimmed and still finds the pin; a `user@` hint is a different kind
 /// of prefix and must keep failing closed.
 #[test]
@@ -509,7 +509,7 @@ fn hosts_toml_never_makes_an_addressless_client_only_pin_forward_routable_on_its
     }
 }
 
-// ---- routing table (`docs/history/m3-plan.md` Step 5 (c)) ----
+// ---- routing table (M3 plan Step 5 (c) (2473c88)) ----
 //
 // These call `resolve_route` (the pure function `Ops::resolve_host_route`
 // itself delegates to) directly against hand-built sources — the
@@ -577,7 +577,7 @@ fn host_not_found_message_never_leaks_a_user_at_prefix() {
     // `qsh host get <name>` (`docs/CLI.md` §6.1) takes a raw
     // positional — unlike the bare `qsh [user@]host` form, it does not
     // run `parse_target`'s `user@` split first, so a `user@host` typo
-    // can reach `resolve_route` unstripped (`docs/history/m8-plan.md` Step 6, M7
+    // can reach `resolve_route` unstripped (M8 plan Step 6 (52639fc), M7
     // carry-over v). The message must not echo the `@` back, and the
     // suggested `qsh trust add <name> --address ...` remedy must name
     // something `qsh trust add` itself would actually accept —
@@ -609,7 +609,7 @@ fn an_at_prefix_with_no_alias_left_is_invalid_argument_not_host_not_found() {
     // would produce `qsh trust add  --address ...` (two spaces, no
     // name: un-runnable). This must land on the exact same
     // `InvalidArgument`/message the empty-name guard above uses, not a
-    // new one (`docs/history/m8-plan.md` Step 6, lens-2 finding).
+    // new one (M8 plan Step 6 (52639fc), lens-2 finding).
     let store = TrustStore::default();
     for name in ["dave@", "@", "dave@ "] {
         let err = resolve(&[], &store, &no_hosts(), name).unwrap_err();
@@ -628,7 +628,7 @@ fn an_at_prefix_with_no_alias_left_is_invalid_argument_not_host_not_found() {
 
 #[test]
 fn routing_trims_a_stray_space_left_by_an_at_split_and_still_finds_host_not_found() {
-    // `docs/history/m8-plan.md` Step 7, Q10: `"dave@ nowhere"` splits on the last
+    // M8 plan Step 7 (52639fc), Q10: `"dave@ nowhere"` splits on the last
     // `@` to `" nowhere"` — the leading space must be trimmed before
     // the `HOST_NOT_FOUND` remedy names the alias, so the suggested
     // `qsh trust add` command is runnable and the message matches the
@@ -661,7 +661,7 @@ fn routing_trims_a_bare_name_with_no_at_sign_the_same_way() {
 
 #[test]
 fn routing_an_internal_space_left_after_stripping_is_invalid_argument_not_host_not_found() {
-    // `docs/history/m8-plan.md` Step 7, Q10: `"dave@no where"` strips to `"no
+    // M8 plan Step 7 (52639fc), Q10: `"dave@no where"` strips to `"no
     // where"` — non-empty, but not a legal `valid_host_name` alias (an
     // internal space). Falling through to `HOST_NOT_FOUND` would
     // suggest an un-runnable `qsh trust add "no where" --address ...`;
@@ -1443,7 +1443,7 @@ fn host_pinned_without_address_ignores_a_reverse_entry_for_a_different_name() {
     );
 }
 
-// ---- `resolve_host_route_async` (`docs/history/m3-plan.md` Step 6's async seam) ----
+// ---- `resolve_host_route_async` (M3 plan Step 6 (2473c88)'s async seam) ----
 //
 // `#[cfg(unix)]`: localctl (UDS, `tokio::net::UnixListener`) is
 // unix-only, same gate as `crate::localctl` itself (`lib.rs`) —

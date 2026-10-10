@@ -1,5 +1,5 @@
 //! `cert.init`/`cert.issue` — the private CA frontend
-//! (`docs/adr/0008-private-ca-cert-issuance.md`, `docs/history/m7-plan.md` Step 5).
+//! (`docs/adr/0008-private-ca-cert-issuance.md`, M7 plan Step 5 (69dd788)).
 //!
 //! Both operations are local-only: `cert.init` never touches the network,
 //! and `cert.issue` only ever promotes *this* device's own identity (ADR
@@ -104,7 +104,7 @@ impl Ops {
         let path = self.paths.trust_file();
         // Whole load→mutate→save under lock, not just the write — same
         // discipline as `Ops::trust_add`/`trust_remove`/`trust_accept`
-        // (`TrustStore::lock`'s own doc, `docs/history/m7-plan.md` Step 7-1). Acquired
+        // (`TrustStore::lock`'s own doc, M7 plan Step 7-1 (69dd788)). Acquired
         // only now, after the local crypto work above (no network I/O
         // under this lock).
         let _lock = TrustStore::lock(&path)?;

@@ -1,9 +1,9 @@
 //! The registry of every seam that can answer a remote peer with
-//! [`qsh_proto::ErrorCode::PermissionDenied`] (`docs/history/m5-plan.md` Step 4 DoD 4).
+//! [`qsh_proto::ErrorCode::PermissionDenied`] (M5 plan Step 4 (2473c88) DoD 4).
 //!
 //! This is not a test fixture that happens to live in `qsh-core` — it is
 //! the one table both this milestone's exhaustive uniformity test
-//! (`crates/qsh-testkit/tests/acl_uniformity.rs`) and `docs/history/m5-plan.md` Step 8's
+//! (`crates/qsh-testkit/tests/acl_uniformity.rs`) and M5 plan Step 8 (2473c88)'s
 //! SC6 op registry enumeration are meant to consume. Adding a new
 //! remote-facing deny seam (a new control-stream op, a new inline gate, a
 //! new registration-time check) without adding a row here is a defect:
@@ -147,7 +147,7 @@ pub const DENY_SEAMS: &[DenySeam] = &[
         action: Action::ForwardRemote,
         kind: SeamKind::ControlStreamOp,
     },
-    // `RemoteForwardClose`'s choke point (`docs/history/m5-plan.md` Step 5 closes what
+    // `RemoteForwardClose`'s choke point (M5 plan Step 5 (2473c88) closes what
     // used to be a gap here — see this module's own former exclusion
     // note, still in history). Named `"forward.remote.close"`, not
     // `"tunnel.close"`: `docs/CLI.md` §2.4's `tunnel.close` is an `Ops`-
@@ -156,7 +156,7 @@ pub const DENY_SEAMS: &[DenySeam] = &[
     // using it here would wrongly imply this row gates that too. It is
     // also not simply `"forward.remote"` again: that name is already
     // this array's `RfwdOpen` row, and both `RfwdOpen`/`RfwdClose` are
-    // checked against the very same `Action::ForwardRemote` (`docs/history/m5-plan.md`
+    // checked against the very same `Action::ForwardRemote` (the M5 plan (2473c88)
     // M5 Step 5 (a): ownership, not a new action, is what changes) — two
     // distinct wire ops sharing one `Action` need two distinct row names,
     // the same reason `session.write`/`session.resize`/`session.close`
@@ -194,7 +194,7 @@ pub const DENY_SEAMS: &[DenySeam] = &[
 ];
 
 // ---------------------------------------------------------------------
-// `docs/history/m5-plan.md` Step 8 (SC6): the op registry. Every privileged operation
+// M5 plan Step 8 (2473c88) (SC6): the op registry. Every privileged operation
 // this build authorizes, as one table `server::dispatch`'s handlers
 // consume for their `Action` instead of naming it a second time.
 // ---------------------------------------------------------------------
@@ -226,7 +226,7 @@ pub enum ResourceKind {
 
 /// Derives [`Op`], [`Op::ALL`], [`Op::as_str`], [`Op::spec`], and
 /// [`OP_REGISTRY`] from one list of rows given to a single invocation
-/// below — the actual mechanism behind `docs/history/m5-plan.md` Step 8's "표 두 벌
+/// below — the actual mechanism behind M5 plan Step 8 (2473c88)'s "표 두 벌
 /// 금지" (`(d)②`). Before this macro existed, the variant list, `ALL`,
 /// and `OP_REGISTRY` were three hand-typed arrays that nothing forced to
 /// agree on *membership*: a variant could be added to the enum and given
@@ -244,10 +244,10 @@ pub enum ResourceKind {
 macro_rules! declare_ops {
     ($( $(#[$m:meta])* $v:ident => ($name:literal, $act:expr, $rk:expr, $owned:expr) ),+ $(,)?) => {
         /// The typed key for every privileged operation this build
-        /// authorizes (`docs/history/m5-plan.md` Step 8, PRD §15 SC6) — replaces what
+        /// authorizes (M5 plan Step 8 (2473c88), PRD §15 SC6) — replaces what
         /// used to be a bare `&'static str` op name looked up at runtime
         /// by the now-deleted `action_of`. [`Op::spec`]'s match is
-        /// **the** table (`docs/history/m5-plan.md` Step 8's "표 두 벌 금지"):
+        /// **the** table (M5 plan Step 8 (2473c88)'s "표 두 벌 금지"):
         /// [`OP_REGISTRY`] is only that match's own const projection,
         /// never a second hand-maintained list, so a row cannot exist in
         /// one and not the other by construction.
@@ -279,7 +279,7 @@ macro_rules! declare_ops {
             /// **The one table.** Every other fact about an op — its
             /// dispatch [`Action`], its resource shape, whether
             /// `scope = "owned"` narrows it — is read off this match,
-            /// never named a second time (`docs/history/m5-plan.md` Step 8's "표 두
+            /// never named a second time (M5 plan Step 8 (2473c88)'s "표 두
             /// 벌 금지"; [`OP_REGISTRY`] is this match's own const
             /// projection, below). This match's exhaustiveness (no
             /// wildcard arm) is also why `action_of`'s old
@@ -301,7 +301,7 @@ macro_rules! declare_ops {
             }
         }
 
-        /// Every privileged operation this build authorizes (`docs/history/m5-plan.md`
+        /// Every privileged operation this build authorizes (the M5 plan (2473c88)
         /// M5 Step 8, PRD §15 SC6) — the const projection of the same
         /// `declare_ops!` invocation that derives [`Op`] and
         /// [`Op::ALL`], in that invocation's order. See [`OpSpec`]'s own
@@ -362,7 +362,7 @@ impl Op {
 /// coverage). `tests::op_registry_matches_deny_seams_by_name_and_action`
 /// (below) is the mechanical cross-check that keeps these two tables from
 /// ever being hand-maintained as independent sources of the same fact —
-/// `docs/history/m5-plan.md` Step 8's "표 두 벌 금지".
+/// M5 plan Step 8 (2473c88)'s "표 두 벌 금지".
 #[derive(Debug, Clone, Copy)]
 pub struct OpSpec {
     /// The op's key. [`Op::as_str`] gives the `docs/CLI.md` §2.4/§2.5
@@ -657,7 +657,7 @@ mod tests {
         assert!(!OP_REGISTRY.is_empty());
     }
 
-    /// Sanity floor `docs/history/m5-plan.md` Step 8 (c) names explicitly: an exclusion
+    /// Sanity floor M5 plan Step 8 (c) (2473c88) names explicitly: an exclusion
     /// list that grew to swallow the whole registry would be a silent way
     /// to defeat DoD 2's audit-completeness sweep (every excluded op is
     /// one this build never actually authorizes anything for).
@@ -692,7 +692,7 @@ mod tests {
         assert_eq!(excluded, always_denied);
     }
 
-    /// The "표 두 벌 금지" cross-check (`docs/history/m5-plan.md` Step 8 (c)): `OP_REGISTRY`
+    /// The "표 두 벌 금지" cross-check (M5 plan Step 8 (c) (2473c88)): `OP_REGISTRY`
     /// and `DENY_SEAMS` must name and authorize the exact same set of seams,
     /// minus the one internal-only row (`"session.attach@data-stream"`,
     /// [`OpSpec`]'s own doc explains why) that has no CLI.md-documented

@@ -11,7 +11,7 @@
 //! purpose: [`classify_connectivity`] is a pure function over an already-
 //! observed [`UdpProbeOutcome`], so the precedence rule between
 //! `controller_unreachable`/`udp_egress_blocked`/`no_route`
-//! (`docs/history/m7-plan.md` §4.1 #5) is unit-testable with synthetic inputs, with no
+//! (M7 plan §4.1 #5 (69dd788)) is unit-testable with synthetic inputs, with no
 //! real socket, no timing, and no flakiness — the same split
 //! `crate::ops::exec::map_dial_error` uses for `DialError` → `OpError`.
 
@@ -195,7 +195,7 @@ fn classify_io_error(err: &io::Error) -> UdpProbeOutcome {
 
 /// Turn one already-observed probe outcome into at most one
 /// [`DoctorFinding`] — the precedence rule `docs/CLI.md` §6.17 /
-/// `docs/history/m7-plan.md` §4.1 #5 locks: a `controller` target always classifies a
+/// M7 plan §4.1 #5 (69dd788) locks: a `controller` target always classifies a
 /// failure as `controller_unreachable`; any other target classifies a
 /// silent timeout as `udp_egress_blocked` and an active refusal as
 /// `no_route`. Exactly one code per failed probe, never two.
@@ -292,7 +292,7 @@ fn first_qsh_on_path(dirs: &[PathBuf]) -> Option<PathBuf> {
 /// canonicalize (missing/unreadable — this never guesses, only reports a
 /// mismatch it could actually confirm).
 ///
-/// Pure given its inputs (`docs/CLI.md` §6.17, `docs/history/m7-plan.md` §4.1 #5's
+/// Pure given its inputs (`docs/CLI.md` §6.17, M7 plan §4.1 #5 (69dd788)'s
 /// "순수함수 우선" discipline): `crate::ops::doctor` is the only caller that
 /// reads `std::env::current_exe()`/`std::env::split_paths` and hands the
 /// results in, which is what makes this testable with an injected temp

@@ -1,4 +1,4 @@
-//! `docs/history/m5-plan.md` Step 8 (SC6, DoD 2) — the three-layer enumeration owed on
+//! M5 plan Step 8 (2473c88) (SC6, DoD 2) — the three-layer enumeration owed on
 //! top of `crates/qsh-core/src/acl/registry.rs`'s `OP_REGISTRY`:
 //!
 //! 1. **L6 contract cross-check** ([`section_2_5::registry_matches_cli_md_section_2_5_bidirectionally`]):

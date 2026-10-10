@@ -1,6 +1,6 @@
 name: load
 
-# T2 — the adversarial-load harness (`docs/history/m8-plan.md` Step 4c,
+# T2 — the adversarial-load harness (M8 plan Step 4c (52639fc),
 # `docs/design/testing.md` L9/L10, `docs/ROADMAP.md` M8 DoD 5,
 # `crates/qsh-cli/tests/adversarial_load.rs`). Measures a **release**
 # `qsh serve` subprocess under fixed adversarial N (source flood, connection
@@ -57,7 +57,7 @@ jobs:
     # finished the pre-split 9-test shape in 20.8s
     # wall-clock; the split adds one more short flood (12b, a few seconds
     # to force rotation at a few-hundred-byte `max_bytes`) and one bounded
-    # retry loop — 12c's second construction (`docs/history/m8-plan.md` Step 5),
+    # retry loop — 12c's second construction (M8 plan Step 5 (52639fc)),
     # up to 50 `session.open` round trips 50ms apart (2.5s ceiling) polling
     # for the fail-closed `PERMISSION_DENIED` once a freshly restarted
     # writer cannot create `audit.log` — this workflow's

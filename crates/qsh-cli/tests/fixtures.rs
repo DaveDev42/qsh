@@ -17,7 +17,7 @@
 //!    milestone that will first produce it. The two lists must be
 //!    disjoint, so adding a fixture for a code forces removing it here.
 //!
-//! `qsh schema --json` (`docs/history/m7-plan.md` Step 1) serves exactly the schemas
+//! `qsh schema --json` (M7 plan Step 1 (69dd788)) serves exactly the schemas
 //! this file validates fixtures against — both sides call
 //! `qsh_proto::schema::{cli_v1_data_schema, cli_v1_envelope_schema}`
 //! (`data_schema` below is a thin wrapper over the former), so there is
@@ -341,7 +341,7 @@ fn golden_local_fixtures() {
 
     // `qsh capabilities` (no host): this build's own advertised set,
     // unprocessed (`docs/ROADMAP.md` M7 DoD 3's scope-creep tripwire,
-    // `docs/history/m7-plan.md` §4.1 #2). Unlike every other fixture in this function,
+    // M7 plan §4.1 #2 (69dd788)). Unlike every other fixture in this function,
     // this one is **not** append-only in the strict "never touches again"
     // sense — its whole purpose is to fail loudly the moment
     // `wire::LOCAL_CAPABILITIES` changes, the same "diff review required"
@@ -363,7 +363,7 @@ fn golden_local_fixtures() {
     check("identity.init.existing.json", existing);
 
     // `qsh cert init`/`qsh cert issue` (`docs/adr/0008-private-ca-cert-issuance.md`,
-    // `docs/history/m7-plan.md` Step 5): local-only, no peer — a private CA root, then
+    // M7 plan Step 5 (69dd788)): local-only, no peer — a private CA root, then
     // the promotion of this sandbox's own identity to CA-issued.
     // `device_id`/`fingerprint`/`config_dir` are all masked by
     // `fixtures::normalize` (fresh key material every run); `ca.name` is
@@ -393,7 +393,7 @@ fn golden_local_fixtures() {
     assert_eq!(code, 0, "{listed}");
     check("trust.list.json", listed);
 
-    // `trust invite` (ADR-0002, `docs/history/m7-plan.md` Step 4, `docs/CLI.md` §6.11) is
+    // `trust invite` (ADR-0002, M7 plan Step 4 (69dd788), `docs/CLI.md` §6.11) is
     // pure local generation — no dial, no peer — so it belongs here rather
     // than in `golden_remote_fixtures`. `code`/`expires_at`/`accept_command`
     // are all volatile (fresh 160-bit secret + creation time every run) and
@@ -468,7 +468,7 @@ fn golden_local_fixtures() {
     );
     check("error.INVALID_ARGUMENT.dynamic_bind.json", dynamic_bind);
 
-    // `acl check` (`docs/CLI.md` §6.15, `docs/history/m5-plan.md` Step 7) is local and
+    // `acl check` (`docs/CLI.md` §6.15, M5 plan Step 7 (2473c88)) is local and
     // needs no identity (`Ops::from_env` only resolves paths), so a fresh,
     // uninitialized sandbox works — it gets its own hand-written
     // `acl.toml`: one rule for `device:laptop` that allows `session.open`
@@ -677,13 +677,13 @@ fn golden_setup_run_fixtures() {
 }
 
 /// `host.list`/`host.get`'s two new additive fields, `source` and `user`
-/// (`docs/CLI.md` §5, `docs/history/m7-plan.md` Step 3): a `hosts.toml` alongside
+/// (`docs/CLI.md` §5, M7 plan Step 3 (69dd788)): a `hosts.toml` alongside
 /// `trust.toml` exercises all three `source` values in one sandbox —
 /// `"trust"` (pinned but absent from `hosts.toml`), `"hosts"` (named only
 /// by `hosts.toml`, so unroutable at the trust/TLS layer — same code for
 /// the "named by both, addresses disagree" case, since `source` reports
 /// which side's *address* won, not which side merely names the host,
-/// `docs/history/m7-plan.md` Step 3 (a)-추기 ②), and `"both"` (named by both, addresses
+/// M7 plan Step 3 (a)-추기 ② (69dd788)), and `"both"` (named by both, addresses
 /// *agree*). `hosts-wins` below exercises the disagreeing-address shape
 /// deliberately — it is the same shape the P2-0 redirect-detection fix
 /// depends on (`docs/CLI.md` §5's threat note), so this golden fixture
@@ -753,7 +753,7 @@ fn golden_host_fixtures_with_hosts_toml() {
 }
 
 /// `trust add` re-run for a name already pinned under the *same*
-/// fingerprint, but with a *new* `--address` (decision B, `docs/history/m7-plan.md` Step
+/// fingerprint, but with a *new* `--address` (decision B, the M7 plan (69dd788) Step
 /// 2, `docs/CLI.md` §6.11's address-refresh path): `data.created` stays
 /// `false`, and the new additive `data.updated` field is `true`. Its own
 /// sandbox — `golden_local_fixtures` reuses `personal-mac` at a fixed
@@ -792,7 +792,7 @@ fn golden_trust_add_update_fixture() {
     check("trust.add.updated.json", updated);
 }
 
-/// `trust accept` (ADR-0002, `docs/history/m7-plan.md` Step 4, `docs/CLI.md` §6.11): a
+/// `trust accept` (ADR-0002, M7 plan Step 4 (69dd788), `docs/CLI.md` §6.11): a
 /// live pairing round trip against a real `qsh serve`, redeemed with a real
 /// `qsh trust invite --json` code. Own host + client — never `Fleet::start`,
 /// which pre-pins both sides via `--fingerprint` and would defeat pairing's
@@ -1036,7 +1036,7 @@ fn golden_connection_failed_fixture() {
     check("error.CONNECTION_FAILED.json", value);
 }
 
-/// `PERMISSION_DENIED`'s first CLI-binary envelope producer (`docs/history/m5-plan.md`
+/// `PERMISSION_DENIED`'s first CLI-binary envelope producer (the M5 plan (2473c88)
 /// Step 6 PR 6b) — the former `DEFERRED` entry's own self-discharge
 /// condition: "the moment `Fleet`/an equivalent gains a way to run the real
 /// binary under a denying policy". `ServeGuard::start_without_policy`
@@ -1081,7 +1081,7 @@ fn golden_permission_denied_fixture() {
     check("error.PERMISSION_DENIED.json", denied);
 }
 
-/// `RESOURCE_EXHAUSTED`'s first CLI-binary envelope producer (`docs/history/m8-plan.md`
+/// `RESOURCE_EXHAUSTED`'s first CLI-binary envelope producer (the M8 plan (52639fc)
 /// Step 3, `docs/adr/0010-resource-quotas.md`) — the former `DEFERRED`
 /// entry's own listed producers (`EXEC_OUTPUT_MAX`, broker backpressure, a
 /// `LOCAL_CONTROL` conduit's in-flight cap) were each too expensive or too
@@ -1356,7 +1356,7 @@ fn golden_remote_fixtures() {
     check("error.TRUST_REQUIRED.json", trust_required);
 }
 
-/// `tunnel.open`/`tunnel.list`/`tunnel.close` (`docs/CLI.md` §6.9, `docs/history/m4-plan.md`
+/// `tunnel.open`/`tunnel.list`/`tunnel.close` (`docs/CLI.md` §6.9, the M4 plan (2473c88)
 /// M4 Step 5 PR 5b).
 ///
 /// `tunnel.open` needs a real peer (`Fleet`) — the `Tunnel` envelope it
@@ -1799,7 +1799,7 @@ fn every_fixture_payload_validates_against_its_command_schema() {
 /// The JSON Schema of the `data` payload of one command — a thin wrapper
 /// over [`qsh_proto::schema::cli_v1_data_schema`], the single source
 /// `Ops::schema` (`qsh schema --json`) also reads from
-/// (`crates/qsh-proto/src/schema.rs`, `docs/history/m7-plan.md` Step 1 (b)). Kept as a
+/// (`crates/qsh-proto/src/schema.rs`, M7 plan Step 1 (b) (69dd788)). Kept as a
 /// local `-> Option<Value>` helper only so every call site below stays
 /// unchanged.
 fn data_schema(command: &str) -> Option<Value> {
@@ -1890,7 +1890,7 @@ fn the_generated_schemas_actually_reject_wrong_shapes() {
 }
 
 // ---------------------------------------------------------------------------
-// `qsh schema --json` / `qsh capabilities [host]` (`docs/history/m7-plan.md` Step 1)
+// `qsh schema --json` / `qsh capabilities [host]` (M7 plan Step 1 (69dd788))
 // ---------------------------------------------------------------------------
 
 /// `qsh schema --json`'s own output has no checked-in golden fixture in
@@ -1898,7 +1898,7 @@ fn the_generated_schemas_actually_reject_wrong_shapes() {
 /// contract is pinned structurally instead: the binary's `data` must equal
 /// what calling `qsh_proto::schema` directly produces, command by command
 /// and for the envelope. That is the actual "one source" claim
-/// (`docs/design/testing.md` L6, `docs/history/m7-plan.md` Step 1 (b)) — not "the two
+/// (`docs/design/testing.md` L6, M7 plan Step 1 (b) (69dd788)) — not "the two
 /// happen to agree today" but "there is only one generator function and
 /// this command calls it".
 ///

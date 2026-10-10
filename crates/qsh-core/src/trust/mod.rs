@@ -21,7 +21,7 @@
 //! The pinned peers here are still the sole source of *identity* for every
 //! host — [`TrustStore::resolve_host`] is one input `crate::ops::host`'s
 //! `resolve_forward` layers `crate::hosts::HostsFile` over for `qsh exec
-//! <host>`'s host → address resolution (`docs/history/m7-plan.md` Step 3, §4.1 #4,
+//! <host>`'s host → address resolution (M7 plan Step 3 (69dd788), §4.1 #4,
 //! `docs/CLI.md` §6.8): `hosts.toml` may supply or override the *address*,
 //! but never the fingerprint — a peer's identity is decided here alone.
 
@@ -113,7 +113,7 @@ pub struct NormalizedAddress {
 /// port-less spec (ADR-0014 결정 8): a bind decides where this machine
 /// listens, and that is not a value to guess at.
 ///
-/// Port *range* is not this function's business either (`docs/history/m9-plan.md` §4.1
+/// Port *range* is not this function's business either (M9 plan §4.1 (b9a621b)
 /// #12): `"host:0"` and `"host:99999"` come back untouched and fail later,
 /// at dial time, exactly as they do today. The `1..=65535` rule belongs to
 /// the `-L`/`-R` spec grammar alone (`docs/CLI.md:482`,
@@ -248,7 +248,7 @@ pub fn suggested_peer_label(address: &str) -> Option<String> {
 /// A private CA root the verifier accepts chains against.
 ///
 /// Written by `qsh cert issue` (`docs/adr/0008-private-ca-cert-issuance.md`,
-/// `docs/history/m7-plan.md` Step 5) via [`TrustStore::add_ca`], and equally loadable
+/// M7 plan Step 5 (69dd788)) via [`TrustStore::add_ca`], and equally loadable
 /// from an operator-provisioned `trust.toml` that was never touched by
 /// `qsh cert` at all — this store only ever *evaluates* `[[ca]]` entries,
 /// it never assumes how one got here.
@@ -300,7 +300,7 @@ impl TrustStore {
     /// messages). Split out of [`TrustStore::load`] so
     /// [`SharedTrustStore::refresh`] can reuse it without re-reading a file
     /// it already has in hand — the content it just read *is* the
-    /// invalidation check (`docs/history/m7-plan.md` Step 2 P2-2), so by the time this
+    /// invalidation check (M7 plan Step 2 (69dd788) P2-2), so by the time this
     /// runs the bytes are already sitting in memory.
     fn parse(path: &Path, text: &str) -> Result<Self, OpError> {
         let file: TrustFile = toml::from_str(text).map_err(|err| {
@@ -317,7 +317,7 @@ impl TrustStore {
     }
 
     /// Acquire the cross-process advisory lock guarding `path`'s whole
-    /// read-modify-write cycle (`docs/history/m7-plan.md` Step 7-1). Every caller must
+    /// read-modify-write cycle (M7 plan Step 7-1 (69dd788)). Every caller must
     /// acquire this **before** [`TrustStore::load`] and hold the returned
     /// guard until after [`TrustStore::save`] — locking only around the
     /// write (the pre-Step-7-1 state) still lets two writers each load a
@@ -403,7 +403,7 @@ impl TrustStore {
 
     /// This store's own half of host → address resolution: only peers
     /// that actually carry a dial address resolve. `crate::ops::host`'s
-    /// `resolve_forward` (`docs/history/m7-plan.md` Step 3) is what layers
+    /// `resolve_forward` (M7 plan Step 3 (69dd788)) is what layers
     /// `hosts.toml` over this — callers that need the *actual* resolution
     /// `qsh exec <host>`/`qsh <host>` use should go through that, not
     /// this method directly, unless they deliberately want the
@@ -437,7 +437,7 @@ impl TrustStore {
         })
     }
 
-    /// Pin `name`, idempotently — with one deliberate exception (`docs/history/m7-plan.md`
+    /// Pin `name`, idempotently — with one deliberate exception (the M7 plan (69dd788)
     /// M7 Step 2 decision B): re-adding an already-pinned name under the
     /// *same* fingerprint but a *different* `address` overwrites the
     /// stored address in place (the M6 mobility campaign's backlog item —
@@ -656,7 +656,7 @@ struct Cached {
     /// on *every* refresh call. A filesystem with 1-2s mtime resolution
     /// (HFS+, exFAT/FAT, some SMB/NFS mounts) can otherwise leave a
     /// same-tick content change invisible to an mtime-only check
-    /// (`docs/history/m7-plan.md` Step 2 P2-2) — `trust.toml` is small enough that
+    /// (M7 plan Step 2 (69dd788) P2-2) — `trust.toml` is small enough that
     /// reading it in full on every handshake costs nothing next to the TLS
     /// handshake that triggers it.
     raw: Option<String>,
@@ -685,7 +685,7 @@ impl Cached {
 ///
 /// The file's full content is read and compared on every lookup, and the
 /// store is re-parsed whenever that content differs from the cached
-/// snapshot — not merely when `mtime` moves (`docs/history/m7-plan.md` Step 2 P2-2: an
+/// snapshot — not merely when `mtime` moves (M7 plan Step 2 (69dd788) P2-2: an
 /// mtime-only check is fail-open on a 1-2s-resolution filesystem, where two
 /// edits inside the same tick share an mtime). `trust.toml` is small, so
 /// this costs nothing next to the TLS handshake that triggers it. `qsh
@@ -701,7 +701,7 @@ pub struct SharedTrustStore {
     /// — never at `open()` time, because the pairing store is optional
     /// (only `qsh serve` wires one; a one-shot dial like `probe_fingerprint`
     /// never does) and because `Server::new`'s existing call sites must not
-    /// change shape (`docs/history/m7-plan.md` Step 4, same `OnceLock`-after-construction
+    /// change shape (M7 plan Step 4 (69dd788), same `OnceLock`-after-construction
     /// pattern `crate::server::Server` uses for its own pairing store).
     /// `pairing_open()` answers `false` whenever this is unset — identical
     /// to `TrustEvaluator::pairing_open`'s own default, so an evaluator that
@@ -740,7 +740,7 @@ impl SharedTrustStore {
 
     /// Wire an invite store into this trust view's
     /// [`TrustEvaluator::pairing_open`] answer (`qsh serve`'s startup path,
-    /// `docs/history/m7-plan.md` Step 4). A no-op past the first call — matching every
+    /// M7 plan Step 4 (69dd788)). A no-op past the first call — matching every
     /// other `OnceLock`-after-construction seam in this step (`Server`'s own
     /// pairing store): a `Server`/`SharedTrustStore` is built once per
     /// process, so "attach exactly once, right after construction" is the
@@ -763,7 +763,7 @@ impl SharedTrustStore {
     /// cached snapshot. Compared in full on every call — not gated on
     /// `mtime` — because `lookup_pin`/`ca_roots` call this on every TLS
     /// handshake and a coarse-granularity filesystem's mtime can miss a
-    /// same-tick edit (`docs/history/m7-plan.md` Step 2 P2-2). A read failure other
+    /// same-tick edit (M7 plan Step 2 (69dd788) P2-2). A read failure other
     /// than "file does not exist" (e.g. a permissions change) keeps the
     /// last good snapshot rather than un-trusting everyone; a missing file
     /// reloads as an empty store — fail-closed, mirroring

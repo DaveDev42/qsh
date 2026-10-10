@@ -45,7 +45,7 @@ jobs:
           # ships src/aarch64_unknown_linux_musl_crypto.rs next to the
           # x86_64 one, so the `musl-tools` recipe below applies unchanged.
           # That is a source-tree observation; whether the leg builds is
-          # settled by the first dispatch run (`docs/history/m13-plan.md` §4, "aws-lc-sys의 aarch64 musl 빌드").
+          # settled by the first dispatch run (M13 plan §4 (b70be6b), "aws-lc-sys의 aarch64 musl 빌드").
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
             musl: true

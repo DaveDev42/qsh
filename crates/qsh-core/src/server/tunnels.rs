@@ -8,7 +8,7 @@ impl Server {
     /// the bytes.
     ///
     /// **Why the ACL check is inline here and not at the control-stream
-    /// choke point** (`docs/design/protocol.md` §7, `docs/history/m4-plan.md` Step 3):
+    /// choke point** (`docs/design/protocol.md` §7, M4 plan Step 3 (2473c88)):
     /// every other data stream must first redeem a ticket that a control
     /// request already got authorized for, which is what makes "no resource
     /// before authorization" structural. `TCP_CONNECT` is §7's *sole*
@@ -123,7 +123,7 @@ impl Server {
         let outcome = splice_tcp_quic(upstream, send.into_raw(), raw_recv, residue, watch).await;
 
         // Structural only: destination and byte counts, never payload
-        // (`docs/history/m4-plan.md` §4 "터널 payload 로그 금지" — `SpliceStats` has no
+        // (M4 plan §4 (2473c88) "터널 payload 로그 금지" — `SpliceStats` has no
         // field a payload byte could hide in).
         match outcome {
             // `sent`/`received` are **this end's** view of the tunnel, the
@@ -439,7 +439,7 @@ impl Server {
                 // `acl::Op::SessionAttach.action()` lookup: this seam is
                 // `DENY_SEAMS`'s `"session.attach@data-stream"` row, which
                 // has no `OP_REGISTRY` entry of its own (`OpSpec`'s own
-                // doc, `docs/history/m5-plan.md` Step 8) — it shares the control-stream
+                // doc, M5 plan Step 8 (2473c88)) — it shares the control-stream
                 // `session.attach` op's `Action` but is a distinct wire
                 // path with no CLI.md-documented name to look up.
                 if !attach_authorized

@@ -100,7 +100,7 @@ fn explicit_acl_array_key_but_zero_entries_also_loads_with_all_deny() {
 
 #[test]
 fn a_rule_naming_an_always_denied_action_exactly_still_loads() {
-    // docs/history/m5-plan.md Step 2 (a): not a CONFIG_ERROR — `forward.socks` is a
+    // M5 plan Step 2 (a) (2473c88): not a CONFIG_ERROR — `forward.socks` is a
     // real action name, just one no policy can ever grant. The
     // operator warning is emitted via `tracing`, not asserted here
     // (no subscriber is installed in this unit test).
@@ -558,7 +558,7 @@ fn nonzero_rules_loaded_does_not_warn_about_zero_rules() {
 #[test]
 #[cfg(unix)]
 fn world_writable_acl_toml_loads_but_warns_once() {
-    // F7 (`docs/history/m5-plan.md` Step 6 PR 6a adversarial ④): table-driven over
+    // F7 (M5 plan Step 6 (2473c88) PR 6a adversarial ④): table-driven over
     // the mode matrix so the group-writable bit *alone* is pinned, not
     // just the world-writable case — a mutation narrowing the mask
     // from `& 0o022` to `& 0o002` (other-write only) would still catch
@@ -688,7 +688,7 @@ fn load_or_deny_on_missing_file_denies_and_names_the_missing_code() {
 
 #[test]
 fn load_or_deny_on_invalid_file_denies_and_carries_a_content_free_detail() {
-    // F3 (`docs/history/m5-plan.md` Step 6 PR 6a adversarial ①): table-driven over
+    // F3 (M5 plan Step 6 (2473c88) PR 6a adversarial ①): table-driven over
     // every distinct way `PolicySource::load_path` can produce
     // `PolicyLoad::Invalid`, not just the TOML-syntax shape this test
     // used to cover alone. `SENTINEL` sits inside a full raw source

@@ -1,4 +1,4 @@
-//! The recovery gate, driven through the product path (`docs/history/m2-plan.md` Step 7
+//! The recovery gate, driven through the product path (M2 plan Step 7 (2473c88)
 //! (a), `docs/ROADMAP.md` M2 수용 기준 4, `docs/design/testing.md` L4).
 //!
 //! Every other resume test in the tree builds its own re-dial by hand. This

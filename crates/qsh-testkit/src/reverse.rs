@@ -1,4 +1,4 @@
-//! In-process reverse-mode harness (`docs/design/testing.md` L3, `docs/history/m3-plan.md`
+//! In-process reverse-mode harness (`docs/design/testing.md` L3, the M3 plan (2473c88)
 //! Step 3, PR 3b): a `qsh listen` controller plus the raw dial primitives a
 //! test needs to play the `qsh reverse` target's wire role.
 //!
@@ -21,7 +21,7 @@
 //!   connection afterward. Every negative/deny/conflict-path assertion in
 //!   `reverse_loopback.rs` is built on this — it is what proves a rejection
 //!   arrived as a real error frame the peer received, not a bare connection
-//!   close (`docs/history/m3-plan.md` Step 3, "거부 error frame의 전달 보장"). It is also
+//!   close (M3 plan Step 3 (2473c88), "거부 error frame의 전달 보장"). It is also
 //!   the only way to exercise the "controller role discipline" scenarios:
 //!   nothing in Step 3's product code ever makes a real `qsh reverse`
 //!   process send a request *to* its controller (that is wire-legal per
@@ -207,7 +207,7 @@ impl ReverseHarness {
     /// [`Self::start`], but with an explicit
     /// `(max_concurrent_handshakes, handshake_rate_per_source)`
     /// `qsh_core::admission::Gate` instead of `crate::config::ServeConfig`'s
-    /// defaults (`docs/history/m8-plan.md` Step 2 verification round, P1-1) — mirrors
+    /// defaults (M8 plan Step 2 (52639fc) verification round, P1-1) — mirrors
     /// `crate::loopback::LoopbackHarness::start_with_admission` for the
     /// `Listen` arm. Before this existed, nothing could drive `Listen::run`'s
     /// real accept loop at a small enough cap/rate to reach admission's
@@ -348,7 +348,7 @@ impl ReverseHarness {
     ///
     /// `Err(HelloError::Remote{..})` is a real error frame the controller
     /// wrote and [`handshake::respond`]'s bounded drain already flushed —
-    /// never a bare connection close (`docs/history/m3-plan.md` Step 3, "거부 error
+    /// never a bare connection close (M3 plan Step 3 (2473c88), "거부 error
     /// frame의 전달 보장"). The returned [`Dialed`] must be kept alive for
     /// as long as the connection is used (its `endpoint` docs).
     pub async fn initiate(
@@ -400,7 +400,7 @@ impl ReverseHarness {
         trust
             .save(&paths.trust_file())
             .expect("save target trust.toml");
-        // `docs/history/m5-plan.md` Step 6: `run_reverse_observed` runs the *real*
+        // M5 plan Step 6 (2473c88): `run_reverse_observed` runs the *real*
         // `host_runtime`/`load_or_deny` production wiring, not a stub
         // authorizer — unlike this harness's controller side (`start_with`
         // takes `Arc<dyn Authorizer>` directly), the target side default-
@@ -418,7 +418,7 @@ impl ReverseHarness {
             ),
         )
         .expect("write target acl.toml");
-        // F8 (`docs/history/m5-plan.md` Step 6 PR 6a adversarial ④): `fs::write`
+        // F8 (M5 plan Step 6 (2473c88) PR 6a adversarial ④): `fs::write`
         // inherits the process umask — a group-writable planted
         // `acl.toml` would spuriously trip the F7 group-/world-writable
         // warning on any runner whose umask leaves the group-write bit
@@ -525,7 +525,7 @@ impl ReverseHarness {
     /// once, the first time an attempt to reach `controller_alias` fails —
     /// the same `on_unreachable` [`run_reverse_observed`] exposes, wired
     /// through so a test can assert `qsh-core`'s once-only guard directly
-    /// (`docs/history/m3-plan.md` Step 9's "exactly once" test) without spawning a real
+    /// (M3 plan Step 9 (2473c88)'s "exactly once" test) without spawning a real
     /// `qsh reverse` process.
     #[allow(clippy::too_many_arguments)]
     pub async fn run_target_observing_unreachable(
@@ -653,7 +653,7 @@ impl ReverseHarness {
     /// `run_listen_unix` does, except [`ReverseHarness`] is built by hand
     /// rather than through [`qsh_core::reverse::listen::run_listen`] (module
     /// docs), so nothing attaches a localctl socket unless a caller asks
-    /// for one here. `docs/history/m3-plan.md` Step 5 (c)'s owed L3 proof — `qsh
+    /// for one here. M3 plan Step 5 (c) (2473c88)'s owed L3 proof — `qsh
     /// hosts`/`host.get` merging forward + live reverse into one array,
     /// then flipping to `"stale"` once the connection dies — needs a real
     /// socket [`qsh_core::localctl::client::admin_host_list_all`] can
@@ -870,7 +870,7 @@ pub async fn wait_for_audit_records(
 // ==========================================================================
 // ReversePairHarness — the role-swapped counterpart of
 // `crate::loopback::LoopbackHarness`, for the mechanical proof of
-// role-axis independence (`docs/history/m3-plan.md` Step 3 PR 3b: "기존
+// role-axis independence (M3 plan Step 3 (2473c88) PR 3b: "기존
 // session_loopback·attach_loopback·resume_loopback 시나리오를 정방향/역방향
 // dial 두 방향으로 파라미터화").
 // ==========================================================================

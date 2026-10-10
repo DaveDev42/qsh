@@ -1,4 +1,4 @@
-//! `docs/history/m5-plan.md` Step 8 (SC6, DoD 2), continued from `crates/qsh-core/tests/
+//! M5 plan Step 8 (2473c88) (SC6, DoD 2), continued from `crates/qsh-core/tests/
 //! acl_registry.rs`: the three `qsh_core::acl::OP_REGISTRY` rows that file
 //! cannot drive with a bare `Server::dispatch` call —
 //! `"forward.local"`/`"forward.remote"`/`"host.reverse"` — because each
@@ -25,7 +25,7 @@
 //! real audit assertions (`forward_local`/`forward_remote` helpers in the
 //! first two, `deny_all_creates_no_registry_entry_no_connection_and_no_session`
 //! in the third). What this file adds is the **registry-consuming**
-//! re-statement `docs/history/m5-plan.md` Step 8 (c) asks for: driving each of these
+//! re-statement M5 plan Step 8 (c) (2473c88) asks for: driving each of these
 //! three rows once more, by name, straight off `OP_REGISTRY` — so a row
 //! renamed or removed here fails a *compile-adjacent* test (a hardcoded
 //! name in `TESTKIT_ONLY_OPS` that no longer matches the registry) instead

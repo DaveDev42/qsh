@@ -35,7 +35,7 @@
 //! pin/CA would otherwise have accepted, so the table above (cases 1-16)
 //! is exercised unchanged with `pairing_open()` at its default `false`.
 //!
-//! **`docs/history/m3-plan.md` Step 3 (c)'s "reverse dial, 비신뢰 target" row is
+//! **M3 plan Step 3 (c) (2473c88)'s "reverse dial, 비신뢰 target" row is
 //! deliberately not case 17 here.** At this layer a `qsh listen` accepting
 //! an untrusted `qsh reverse` target is mechanically identical to cases
 //! 2/3/7/8 above (an untrusted peer's cert fails verification against the

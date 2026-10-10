@@ -1,5 +1,5 @@
 //! **L2/L5 — localctl socket security and discovery, against a real `qsh
-//! listen` OS process** (`docs/history/m3-plan.md` Step 5, PR 5a completion criterion
+//! listen` OS process** (M3 plan Step 5 (2473c88), PR 5a completion criterion
 //! (i): "데몬↔CLI 프로세스 사이에서 registry가 IPC로 조회되고 권한·discovery
 //! 테스트가 green").
 //!
@@ -155,7 +155,7 @@ fn a_definitely_dead_pid() -> u32 {
 
 // ---------------------------------------------------------------------
 // Socket and runtime-directory permissions, asserted from outside the
-// daemon process (`docs/history/m3-plan.md` Step 5 (a): "디렉터리 0700 · 소켓 0600").
+// daemon process (M3 plan Step 5 (a) (2473c88): "디렉터리 0700 · 소켓 0600").
 // ---------------------------------------------------------------------
 
 #[test]
@@ -187,7 +187,7 @@ fn socket_is_0600_inside_a_0700_runtime_dir_seen_from_outside_the_daemon() {
 
 // ---------------------------------------------------------------------
 // A raw peer speaking garbage is refused without wedging the daemon
-// (`docs/history/m3-plan.md` Step 5 (c): "no panic or hang on malformed input").
+// (M3 plan Step 5 (c) (2473c88): "no panic or hang on malformed input").
 // ---------------------------------------------------------------------
 
 #[test]
@@ -308,7 +308,7 @@ fn discovery_unlinks_a_stale_socket_ahead_of_the_real_daemon_and_still_finds_it(
 // ---------------------------------------------------------------------
 // A real `LocalHostList` round trip between two OS processes: this test
 // binary's own process (the CLI-side client library) and a real, separately
-// scheduled `qsh listen` child (`docs/history/m3-plan.md` Step 5 (i)).
+// scheduled `qsh listen` child (M3 plan Step 5 (i) (2473c88)).
 // ---------------------------------------------------------------------
 
 #[test]
@@ -325,7 +325,7 @@ fn local_host_list_round_trips_between_two_real_os_processes() {
     // rather than only proving the empty-registry case, would mean
     // standing up a second real `qsh reverse` target with its own mutual
     // trust pinning against this daemon — a full reverse-registration e2e
-    // rig that `docs/history/m3-plan.md` explicitly assigns to Step 7 ("실프로세스 e2e"),
+    // rig that the M3 plan (2473c88) explicitly assigns to Step 7 ("실프로세스 e2e"),
     // not this PR. `daemon.rs`'s own
     // `local_host_list_returns_the_registrys_current_entries_including_stale`
     // already proves the registry-to-`LocalHost` mapping in-process; what

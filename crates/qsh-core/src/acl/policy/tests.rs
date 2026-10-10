@@ -31,7 +31,7 @@ fn family_prefix(action: Action) -> FamilyPrefix {
 
 #[test]
 fn always_deny_trio_denies_under_the_most_generous_policy_with_no_rule_index() {
-    // `docs/design/architecture.md` §6 / `docs/history/m5-plan.md` Step 2 (a): even
+    // `docs/design/architecture.md` §6 / M5 plan Step 2 (a) (2473c88): even
     // the most permissive policy an operator could write cannot grant
     // the always-denied trio (two P1-deferred, one undrivable by design —
     // ADR-0019 결정 6).
@@ -106,7 +106,7 @@ fn principal_match_is_exact_not_prefix_or_shape() {
 #[test]
 fn omitted_auth_path_defaults_to_pin_and_never_admits_ca() {
     // A rule that never named `auth_path` in `acl.toml` — the loader
-    // defaults it to `AuthPath::Pin` (`docs/history/m5-plan.md` §4.1 #2); this test
+    // defaults it to `AuthPath::Pin` (M5 plan §4.1 #2 (2473c88)); this test
     // pins that a `Rule` built that way can never admit a CA-asserted
     // peer, however broad `allow` is.
     let policy = Policy {
@@ -179,7 +179,7 @@ fn scope_owned_is_not_evaluated_when_the_resource_has_no_owner() {
     // `host.reverse`/`forward.local`) is never filtered by `scope`,
     // "owned" or "any" alike — this is the Step 2-era behavior
     // (`ResourceRef` then had no owner field to compare at all), still
-    // exactly correct now that `scope` is actually evaluated (`docs/history/m5-plan.md`
+    // exactly correct now that `scope` is actually evaluated (the M5 plan (2473c88)
     // M5 Step 5), since an absent owner can never fail an ownership
     // comparison.
     let dave = Principal::User("dave".into());
@@ -206,7 +206,7 @@ fn scope_owned_is_not_evaluated_when_the_resource_has_no_owner() {
     }
 }
 
-/// The headline `docs/history/m5-plan.md` Step 5 behavior: `scope = "owned"` (the
+/// The headline M5 plan Step 5 (2473c88) behavior: `scope = "owned"` (the
 /// default) denies a request whose principal is not the resource's
 /// recorded owner, even though principal/auth_path/action all matched.
 #[test]
@@ -264,7 +264,7 @@ fn scope_owned_allows_the_resources_own_owner() {
 /// `scope = "any"` is the explicit widening: it admits a resource owned
 /// by someone else entirely, and only an operator writing that value
 /// into `acl.toml` can turn it on — the default stays `"owned"`
-/// (`docs/history/m5-plan.md` §4.1 #3).
+/// (M5 plan §4.1 #3 (2473c88)).
 #[test]
 fn scope_any_admits_a_foreign_owner() {
     let dave = Principal::User("dave".into());
@@ -447,7 +447,7 @@ fn expand(pattern: &ActionPattern) -> Vec<Action> {
 
 /// Whether *some* rule in `policy` covers `(principal, auth_path,
 /// action, resource)`, independent of [`Policy::decide`]'s own
-/// matching logic — `resource`'s scope test (`docs/history/m5-plan.md` Step 5)
+/// matching logic — `resource`'s scope test (M5 plan Step 5 (2473c88))
 /// included, spelled out again here the same direct way `principal`/
 /// `auth_path` already were, rather than calling any of `decide`'s own
 /// helpers.
@@ -474,14 +474,14 @@ fn oracle_covers(
 }
 
 proptest! {
-    /// DoD 3 (`docs/history/m5-plan.md` Step 2, `docs/design/testing.md` L2/L8):
+    /// DoD 3 (M5 plan Step 2 (2473c88), `docs/design/testing.md` L2/L8):
     /// for an arbitrary policy and an arbitrary request, `Policy::
     /// decide`'s allow/deny agrees with an independent naive oracle —
     /// in particular, whenever the oracle finds no covering rule, the
     /// evaluator MUST deny. The always-deny trio is asserted to
     /// override any oracle coverage, since no rule can grant it.
     ///
-    /// `owner_kind` (`docs/history/m5-plan.md` Step 5) draws the resource into one
+    /// `owner_kind` (M5 plan Step 5 (2473c88)) draws the resource into one
     /// of the three shapes `decide`'s ④ actually distinguishes: no
     /// owner at all, this exact requester as owner, or some other
     /// principal as owner. The "other" owner is built from

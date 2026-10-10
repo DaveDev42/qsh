@@ -15,7 +15,7 @@
 //! `TunnelCloseData::closed` doc (`types.rs:~665`) says the same thing at
 //! the wire-type level. This file encodes that as the idempotent
 //! `Succeeds(0)` + `data.closed == false` row below, not a `Fails` row.
-//! `docs/history/m4-plan.md` Step 6(a)'s draft table once listed a failure row here
+//! M4 plan Step 6(a) (2473c88)'s draft table once listed a failure row here
 //! ("존재하지 않는 `tunnel close <id>` → 255/적절 코드"); that line has
 //! been amended in this same change to match the contract instead of
 //! needing a follow-up edit.
@@ -103,7 +103,7 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
     all_dead.init();
     all_dead.trust_add("deadport", Some("127.0.0.1:0"), &fleet.host_fingerprint);
 
-    // `docs/history/m5-plan.md` Step 6 PR 6b: `PERMISSION_DENIED`'s own row. A host
+    // M5 plan Step 6 (2473c88) PR 6b: `PERMISSION_DENIED`'s own row. A host
     // with no `acl.toml` at all (`ServeGuard::start_without_policy`,
     // `common/mod.rs`) loads `DenyAll` and refuses `forward.remote` at its
     // ACL gate before any reply goes out — the same shape `fixtures.rs`'s
@@ -118,7 +118,7 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
     let denied_serve = ServeGuard::start_without_policy(&denied_host, &[]);
     denied_client.trust_add(HOST_ALIAS, Some(denied_serve.addr()), &denied_host_fp);
 
-    // A real duplicate-name routing conflict (`docs/history/m3-plan.md` Step 7 DoD 1,
+    // A real duplicate-name routing conflict (M3 plan Step 7 (2473c88) DoD 1,
     // `Ops::host.host.get`'s `resolve_route`): the *same* controller
     // machine — one `QSH_CONFIG_DIR`/`QSH_STATE_DIR`, so one trust store
     // and one `runtime_dir` — runs **two** independent `qsh listen`
@@ -432,7 +432,7 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
             // runs this in human mode, whose stdin is `Stdio::null()`
             // (non-a-terminal) too, so both modes must fall to the same
             // `INVALID_ARGUMENT` for "exit code does not depend on output
-            // mode" (`docs/CLI.md` §4) to hold (`docs/history/m9-plan.md` Step 2 (a),
+            // mode" (`docs/CLI.md` §4) to hold (M9 plan Step 2 (a) (b9a621b),
             // ADR-0013 decision 8 at `docs/adr/0013-cert-file-exchange.md:29`).
             name: "trust accept: no code and no --code-stdin",
             sandbox: &fleet.client,
@@ -486,7 +486,7 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
             outcome: Outcome::Fails("INVALID_ARGUMENT"),
         },
         Case {
-            // `docs/history/m5-plan.md` Step 7 (c): a name outside `Action::ALL`'s
+            // M5 plan Step 7 (c) (2473c88): a name outside `Action::ALL`'s
             // vocabulary is `INVALID_ARGUMENT` in both output modes — the
             // deliberate deviation from the Step 7 draft's literal "exit
             // `2`" text is that this is an `OpError` (exit `255`, this
@@ -618,7 +618,7 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
             // `self.connect(&req.host)` — the same `HOST_NOT_FOUND`
             // resolution every other unpinned-host row in this table
             // exercises, just reached through `tunnel.open` instead
-            // (`docs/CLI.md` §6.9, `docs/history/m4-plan.md` Step 6).
+            // (`docs/CLI.md` §6.9, M4 plan Step 6 (2473c88)).
             name: "tunnel open: unresolved host",
             sandbox: &fleet.client,
             args: &[
@@ -651,7 +651,7 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
             outcome: Outcome::Fails("INVALID_ARGUMENT"),
         },
         Case {
-            // `docs/history/m5-plan.md` Step 6 PR 6b: `forward.remote`'s ACL gate
+            // M5 plan Step 6 (2473c88) PR 6b: `forward.remote`'s ACL gate
             // (`Server::authorize_and_bind_remote_forward`) runs *before*
             // the loopback-only check above and before any reply goes
             // out, so a denying host (`denied_host`/`denied_client`, no
@@ -678,7 +678,7 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
             // here either, for the same reason: included in this table
             // anyway because it is exactly the kind of envelope-producing
             // failure this matrix exists to pin (`docs/CLI.md` §6.9,
-            // `docs/history/m4-plan.md` Step 6, DoD 5).
+            // M4 plan Step 6 (2473c88), DoD 5).
             name: "tunnel open: --dynamic given twice is INVALID_ARGUMENT",
             sandbox: &fleet.client,
             args: &[
@@ -699,7 +699,7 @@ fn exit_codes_and_error_codes_are_identical_in_both_output_modes() {
             // nothing holds is `ok:true`/`data.closed:false`/exit `0`,
             // never an error (`qsh-core`'s `Ops::tunnel_close` never
             // returns `Err`). the Step 6 draft table in
-            // `docs/history/m4-plan.md` expected a failure row here;
+            // The M4 plan (2473c88) expected a failure row here;
             // `docs/CLI.md` wins the conflict (the contract docs are
             // binding over a plan) — see this file's module doc; the
             // plan's draft line was amended in the same change.
@@ -893,7 +893,7 @@ fn check(case: &Case<'_>) {
 // cannot satisfy (json mode never reaches host resolution to report
 // `HOST_NOT_FOUND` in the first place) — so this is its own human-mode-
 // only assertion, the same "separate assertion, not a matrix row" shape
-// `docs/history/m4-plan.md` already prescribes for the reverse-refusal/listen-conflict
+// The M4 plan (2473c88) already prescribes for the reverse-refusal/listen-conflict
 // cases below.
 // ---------------------------------------------------------------------
 
