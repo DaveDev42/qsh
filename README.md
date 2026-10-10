@@ -15,58 +15,16 @@ One binary (`qsh`) is both ends: it serves, and it connects.
 
 ## Status
 
-Version 0.4.3. **Not for production use**. The independent review of the
+Version 0.4.3. **Not for production use.** The independent review of the
 protocol and key lifecycle that [docs/PRD.md](docs/PRD.md) §15 requires
 has not been contracted, and the wire-format freeze waits on that same
-decision. The campaigns a person runs by hand are still open too: the
-clean-VM install campaign (`docs/campaigns/m10-clean-vm.md`), the two
-connect-time stopwatch rounds, and the real-device mobility round. The
-fuzz, soak and adversarial-load campaigns are closed.
+decision. Several campaigns that a person runs by hand are also still open:
+the clean-VM install campaign, the connect-time stopwatch rounds, and the
+real-device mobility round. [Roadmap](#roadmap) lists them by milestone;
+`docs/ROADMAP.md` has the acceptance criteria and
+[RELEASE-NOTES.md](RELEASE-NOTES.md) says what each tag ships.
 
-M0 through M6 are done. M7 (trust UX, host profiles, `doctor`) has landed
-its features; what is left is the stopwatch campaign in
-`docs/campaigns/m7-stopwatch.md`, which a person has to run. M8 (hardening)
-has landed its code and closed its 24-hour soak (`docs/campaigns/m8-soak.md`
-run #6, PASS): the admission and quota defenses, the adversarial-load gate
-(`docs/campaigns/m8-adversarial-load.md`), the fuzz campaign
-(`docs/campaigns/m8-fuzz.md`: 72 fuzz-hours per parser target, no crashes),
-the wire-format freeze draft and the threat model. Two M8 items are still
-open: the real-device mobility campaign and the independent security
-review. The freeze draft takes effect once the operator decides on that
-review. M9 (the human-facing surface: naming, pairing, `qsh service
-install`) has landed its features; the SC1 stopwatch re-measurement in
-`docs/campaigns/m9-stopwatch.md` is still open, and it depends on the M7
-baseline above. M10 (release) has landed its workflow: a static musl
-build, build-provenance attestation on every asset, man pages inside the
-unix archive, a Developer ID signing and notarization path that runs when
-the Apple credentials are configured, and a release-profile functional
-smoke on every build leg. What is left is the clean-VM campaign named
-above. M11 (issue follow-ups and ACL visibility, the first P1 milestone)
-has landed its code: `qsh acl show` summarizes what `acl.toml` grants one
-principal, `qsh init --import-ssh-key` and `qsh trust ssh-preview` reuse an
-OpenSSH Ed25519 key, `qsh doctor` gained `acl_forward_socks_ineffective`,
-and the reverse `cause` vocabulary now separates a QUIC idle timeout
-(`idle_timeout`) from `path_dead`. Two M11 items are field work for a
-person: observing the `cause` distribution on real links, and 72 fuzz-hours
-on the new OpenSSH key parser. M12 (supervised tunnels and `qsh setup`)
-first shipped in `v0.4.0`:
-`qsh tunnel open --supervise` re-establishes a `-L`, `-D` or `-R` tunnel
-after a lost connection, `--accept-hold` holds new connections during the
-gap, the `qsh::lifecycle` stderr lines mark process start and end, and
-`qsh setup` walks one machine through a role. The closing campaign items
-are for a person: the `p1-supervise-wake` rounds
-(`docs/campaigns/p1-supervise-wake.md`) and the `p1-setup-stopwatch`
-rounds (`docs/campaigns/p1-setup-stopwatch.md`). M13 (measurement and
-release groundwork) shipped in `v0.4.0` through `v0.4.2`: a nightly
-performance trend job, closing stalled tunnel streams so a reader that
-stops reading cannot starve the PTY, `qsh doctor --fail-on`, a stateless
-reset key so a restarted server drops attached clients quickly, an
-`aarch64-unknown-linux-musl` release asset, `[transport].keep_alive_ms`,
-`[recovery]` path-watch settings, and a wider default detection window for
-reverse registrations. M13 closed on 2026-10-08, when a run with an
-injected delay turned the nightly job red as designed. One M13 item is
-for a person: the old-glibc check of the aarch64 musl asset
-(`docs/campaigns/p1-aarch64-musl.md`). What works end to end today:
+What works end to end today:
 
 - `qsh exec host -- cmd`, in human mode or as a single `qsh.cli/v1` JSON
   envelope with the remote exit code, stdout and stderr.
@@ -74,62 +32,40 @@ for a person: the old-glibc check of the aarch64 musl asset
   reattach later with `qsh attach`, and resume across a connection that
   dropped or moved to a different address.
 - Reverse connections, so a host behind NAT dials out to a controller
-  (`qsh listen` / `qsh serve --to`, formerly `qsh reverse`) and you attach
-  to it through that controller. The target reconnects with backoff when
-  the link dies.
-- `-L` and `-R` port forwards, over forward connections and over reverse
-  ones, plus the standalone `qsh tunnel open`/`qsh tunnels`/
-  `qsh tunnel close` machine-mode commands. `-D` (SOCKS5 dynamic
-  forwarding) is a third mode on both the interactive and `tunnel open`
-  forms — see below.
+  (`qsh listen` / `qsh serve --to`) and you attach to it through that
+  controller. The target reconnects with backoff when the link dies.
+- `-L`, `-R` and `-D` (SOCKS5) forwards over forward and reverse
+  connections, plus the standalone `qsh tunnel open`/`qsh tunnels`/
+  `qsh tunnel close` machine-mode commands. `--supervise` re-establishes a
+  tunnel after a lost connection.
 - A default-deny ACL (`acl.toml`) and a fail-closed audit log gate every
   operation a remote peer requests. See [Security
   posture](#security-posture).
 - A stable `--json`/`--jsonl` CLI contract (`qsh.cli/v1`) for agents and
-  scripts. The built-in `qsh mcp` stdio server was retired in M8 Step 6
-  (see [ADR-0011](docs/adr/0011-remove-mcp-adapter.md)); run a remote
-  stdio MCP server through `qsh exec host -- <server>` instead.
-- Four ways to pin a peer: trust-on-first-connect, `qsh pair
-  invite`/`qsh pair accept` pairing with a one-time code, a private CA
-  (`qsh cert init`/`qsh cert issue`) so a fleet trusts one CA root instead
-  of pinning every device by hand, or exchanging certificate files
-  directly (`qsh identity export`, `qsh trust add --cert-file`, `qsh
-  trust add-ca` for a foreign CA root — ADR-0013). A pinned peer's local
-  name can be changed later without re-pinning, with `qsh trust rename`.
-  `hosts.toml` layers addresses and login names on top of whichever one
-  pinned a peer. See [First run](#first-run).
+  scripts. The built-in `qsh mcp` server was retired
+  ([ADR-0011](docs/adr/0011-remove-mcp-adapter.md)); run a remote stdio MCP
+  server through `qsh exec host -- <server>` instead.
+- Four ways to pin a peer: trust-on-first-connect, `qsh pair invite`/
+  `qsh pair accept` with a one-time code, a private CA (`qsh cert init`/
+  `qsh cert issue`) so a fleet trusts one root, or exchanging certificate
+  files (`qsh identity export`, `qsh trust add --cert-file`, `qsh trust
+  add-ca`). `qsh trust rename` changes a pinned peer's local name, and
+  `hosts.toml` layers addresses and login names on top. See
+  [First run](#first-run).
+- `qsh setup` walks one machine through a role; see [Guided
+  setup](#guided-setup-qsh-setup).
 - `qsh service install|uninstall|status` writes and removes the platform
-  unit that keeps a listener running — a user LaunchAgent on macOS, a
-  systemd user unit on Linux — inferring the mode (`serve`, `listen`, or
-  `serve --to`) from `config.toml`. See
-  [docs/deploy/service.md](docs/deploy/service.md).
-- `qsh doctor` diagnoses one deployment — identity, ACL policy, audit log,
-  trust store, clock, network reachability — as a single machine-readable
-  report. `qsh schema --json` serves this build's JSON contract the same
-  way, and `qsh capabilities` reports its supported capabilities, or, given
-  a pinned host, what was actually negotiated with that peer.
+  unit that keeps a listener running: a user LaunchAgent on macOS, a systemd
+  user unit on Linux. See [docs/deploy/service.md](docs/deploy/service.md).
+- `qsh doctor` diagnoses one deployment (identity, ACL policy, audit log,
+  trust store, clock, network reachability) as a machine-readable report.
+  `qsh schema --json` serves this build's JSON contract, and `qsh
+  capabilities` reports what the build supports or, given a pinned host, what
+  was negotiated with that peer.
 
-`-D` (SOCKS5 dynamic forwarding, [ADR-0019](docs/adr/0019-socks-dynamic-forward.md))
-opens a loopback-only SOCKS5 listener instead of a fixed destination:
-`qsh dave@host -D 1080` (repeatable, alongside the session) or
-`qsh tunnel open host --dynamic 1080` (one listener per call, mutually
-exclusive with `--local`/`--remote`). It is not a new grant:
+QSH needs UDP. There is no TCP fallback yet, so a network that blocks UDP
+cannot connect (see [Known limitations](#known-limitations)).
 
-> `-D` runs SOCKS5 on this machine and authorizes every CONNECT on the peer as `forward.local`; `forward.socks` is never consulted.
-
-so a peer already trusted with `forward.local` needs no extra
-configuration to use it — see [Security posture](#security-posture) for
-what that implies. It works over both forward and reverse routes
-([ADR-0020](docs/adr/0020-socks-reverse-route.md) decisions 1–3): a
-reverse route relays each CONNECT through this machine's resident
-`qsh listen` daemon, with the same host-local address filter a forward
-route enforces. It refuses before binding anything only when the
-connected route does not advertise the `dial-filter.v1` capability that
-lets the host filter out loopback/link-local/metadata addresses from a
-proxied CONNECT. Point applications
-at `socks5h://127.0.0.1:1080` (remote DNS), not `socks5://`, so a hostname
-does not leak to local resolution: `curl --socks5-hostname 127.0.0.1:1080
-http://internal-service/`.
 
 ## Install
 
@@ -148,23 +84,21 @@ curl -fsSL https://raw.githubusercontent.com/DaveDev42/qsh/main/scripts/install.
 The script picks the archive for your platform, verifies it against the
 release's `SHA256SUMS` before unpacking, and installs to `~/.local/bin`. It
 never calls `sudo`; if the target directory is not writable it says so and
-stops. That checksum is an integrity check against a bad download, not a
+stops. The checksum is an integrity check against a bad download, not a
 signature. When the GitHub CLI is installed and logged in, the script also
-verifies the archive's build provenance (see below).
+verifies the archive's build provenance (below).
 
-On macOS the release workflow signs and notarizes the binaries when the
-release is cut with Apple credentials configured; no published release has
-been cut that way yet, so check what you actually have with
-`codesign -dv --verbose=4 $(which qsh)` (see
-[Known limitations](#known-limitations)). The notarization ticket is not
-stapled: `xcrun stapler` attaches a ticket to a `.app`, `.dmg` or `.pkg`,
-and qsh ships a bare executable inside a `.tar.gz`. Gatekeeper therefore
-confirms the notarization online, and a first run on a machine with no
-route to Apple is not guaranteed to be admitted. The installer above
-clears `com.apple.quarantine` after it installs (`scripts/install.sh`), so
-that path does not consult Gatekeeper at all; a manual download does, and
-`spctl -a -vvv -t execute $(which qsh)` shows the same verdict Gatekeeper
-would.
+On macOS the release workflow signs and notarizes the binaries only when the
+release is cut with Apple credentials configured, and no published release
+has been cut that way yet. Check what you have with `codesign -dv
+--verbose=4 $(which qsh)`; [Known limitations](#known-limitations) explains
+how to read the result and what it means for the firewall prompt. The
+installer clears `com.apple.quarantine` after it installs (`scripts/install.sh`),
+so that path does not consult Gatekeeper. A manual download does, and
+`spctl -a -vvv -t execute $(which qsh)` shows its verdict. The notarization
+ticket is not stapled (`xcrun stapler` handles `.app`, `.dmg` and `.pkg`, and
+qsh ships a bare executable in a `.tar.gz`), so Gatekeeper confirms online and
+a first run with no route to Apple is not guaranteed to be admitted.
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -184,25 +118,22 @@ before you unpack it:
 gh attestation verify qsh-<tag>-<target>.tar.gz --repo DaveDev42/qsh
 ```
 
-`SHA256SUMS` is attested the same way, so the file you check the archives
-against can itself be checked. What the attestation establishes is narrow:
-this exact file was produced by a workflow in this repository, on a
-GitHub-hosted runner, from a named commit (see scripts/README.md for pinning
-that to `release.yml` specifically). It says nothing about whether the code
-in that commit is correct or safe to run. Running it is up to you.
+The attestation establishes that this exact file was produced by a workflow
+in this repository, on a GitHub-hosted runner, from a named commit
+(`scripts/README.md` shows how to pin it to `release.yml`). It says nothing
+about whether the code in that commit is correct or safe to run.
 
-The installer runs that `gh attestation verify` itself, after the
-`SHA256SUMS` check and before it unpacks anything. There are three paths:
+The installer runs that check itself, after the `SHA256SUMS` check and
+before it unpacks anything:
 
-- `gh` is installed and logged in: the archive must verify. A failed
+- `gh` installed and logged in: the archive must verify. A failed
   verification installs nothing.
-- `gh` is missing or not logged in: the installer cannot verify, prints
-  `provenance not verified` on stderr, and installs on the `SHA256SUMS`
-  check alone.
+- `gh` missing or not logged in: the installer prints `provenance not
+  verified` on stderr and installs on the `SHA256SUMS` check alone.
 - `QSH_INSECURE_SKIP_VERIFY=1`: both checks are skipped, with a warning.
   This is the only way past either check.
 
-Releases cut up to `v0.2.0` have no attestation, so with `gh` logged in the
+Releases up to `v0.2.0` have no attestation, so with `gh` logged in the
 installer refuses them; use the flag for those, or log `gh` out.
 
 What each release ships, what is signed and what is not, and how to check
@@ -220,11 +151,11 @@ To download by hand, take the asset matching your platform, check it against
 | Linux x86_64 | `qsh-<tag>-x86_64-unknown-linux-gnu.tar.gz` |
 | Linux aarch64 | `qsh-<tag>-aarch64-unknown-linux-gnu.tar.gz` |
 | Linux x86_64, static (musl) | `qsh-<tag>-x86_64-unknown-linux-musl.tar.gz` |
+| Linux aarch64, static (musl) | `qsh-<tag>-aarch64-unknown-linux-musl.tar.gz` |
 | Windows x86_64 | `qsh-<tag>-x86_64-pc-windows-msvc.zip` |
 
-The installer has no Windows path. Take the `.zip` from the releases page.
-Note the Windows caveat under [Known limitations](#known-limitations): the
-tree compiles and the portable tests run there, but nothing is promised.
+The installer has no Windows path; take the `.zip` from the releases page.
+See the Windows caveat under [Known limitations](#known-limitations).
 
 ### Homebrew (macOS)
 
@@ -232,12 +163,10 @@ tree compiles and the portable tests run there, but nothing is promised.
 brew install DaveDev42/tap/qsh
 ```
 
-Apple silicon only for now — the formula tracks the `aarch64-apple-darwin`
-release tarball, which also decides the signing status you get here: it is
-whatever that one asset carries. The Homebrew version is the release tag
-without its leading `v`; there is no separate versioning scheme. For tags
-after `v0.2.0` this is the one install path that puts the man pages on
-your `MANPATH`.
+Apple silicon only for now. The formula tracks the `aarch64-apple-darwin`
+release tarball, so the signing status is whatever that asset carries. The
+Homebrew version is the release tag without its leading `v`. For tags after
+`v0.2.0` this is the install path that puts the man pages on your `MANPATH`.
 
 ### From source
 
@@ -256,42 +185,35 @@ repository:
 cargo install --locked --git https://github.com/DaveDev42/qsh qsh-cli
 ```
 
-There is no `cargo install qsh-cli` from crates.io yet: the four contract
+There is no `cargo install qsh-cli` from crates.io yet. The four contract
 crates are cleared to publish and CI dry-runs the publish on every push to
-`main` and every pull request, but nothing has been pushed to the
-registry, so `--git` (or `--path` against a local clone) is the only
-`cargo install` route today. The package name `qsh-cli` is unclaimed and
-reserved for that release; the shorter name `qsh` is not —
-it belongs to an unrelated project — which is why the crate is `qsh-cli`
-even though the binary it installs is `qsh`.
+`main` and every pull request, but nothing has been pushed to the registry,
+so `--git` (or `--path` against a local clone) is the only `cargo install`
+route. The package name `qsh-cli` is reserved for that release. The shorter
+name `qsh` belongs to an unrelated project, which is why the crate is
+`qsh-cli` even though the binary it installs is `qsh`.
 
-`scripts/README.md` covers the installer in more detail.
-
-Running qsh as a service: `qsh service install|uninstall|status` generates
-and manages the unit for you — see
-[docs/deploy/service.md](docs/deploy/service.md).
+`scripts/README.md` covers the installer in more detail. To keep a listener
+running, see [docs/deploy/service.md](docs/deploy/service.md).
 
 Man pages for every subcommand are generated from the same `clap`
 definitions `--help` uses and live under [`docs/man/`](docs/man/)
 (`cargo xtask man` regenerates them; `docs/design/testing.md` covers the
-test that keeps them from drifting). For tags after `v0.2.0`, a Homebrew
-install puts `man qsh` and `man qsh-trust-add` on your `MANPATH` with no
-further setup. The curl installer copies the pages from the archive's
-`man/` directory to `~/.local/share/man/man1` (`QSH_MAN_DIR` overrides it,
-`QSH_NO_MAN=1` skips them) and prints an `export MANPATH=...` line when
-that directory is not on the search path. A failure there is a warning and
-never undoes the binary install. From a manual download of a `.tar.gz`
-asset (the Windows `.zip` does not carry the pages) nothing puts them on a
-`MANPATH`, so point `man` at a page directly: `man ./docs/man/qsh.1`, or
-`man ./man/qsh-trust-add.1` from an unpacked archive.
+test that keeps them from drifting). A Homebrew install (tags after
+`v0.2.0`) puts them on your `MANPATH`. The curl installer copies them from
+the archive's `man/` directory to `~/.local/share/man/man1` and prints an
+`export MANPATH=...` line when that directory is not on the search path; a
+failure there is a warning and never undoes the binary install. From a
+manual `.tar.gz` download (the Windows `.zip` has no pages) point `man` at a
+page directly: `man ./man/qsh-trust-add.1` from an unpacked archive, or
+`man ./docs/man/qsh.1` from a clone.
 
 ## First run
 
 Six commands and one small policy file, two machines. This is the literal
-script `docs/campaigns/m9-stopwatch.md` times (and
-`docs/campaigns/m7-stopwatch.md` timed before the M9 surface landed): two
-machines that have never run `qsh` before, nothing but this section open,
-stopwatch running from the first command.
+script that `docs/campaigns/m9-stopwatch.md` and `docs/campaigns/m7-stopwatch.md`
+time: two machines that have never run `qsh` before, nothing but this section
+open, stopwatch running from the first command.
 
 ```bash
 # Host, the machine that will run the shell:
@@ -339,14 +261,11 @@ selects; see [`user@`'s meaning](docs/CLI.md#7-human-interactive-mode)).
 
 Typing the fingerprint by hand is the part most likely to cost time. Drop
 `--fingerprint` from the client's `trust add` and it dials instead, prints
-the fingerprint it observed, and asks you to confirm. It's the same
-trust-on-first-connect flow SSH has for host keys, without needing the
-value copied over some other channel first.
+the fingerprint it observed, and asks you to confirm. This is the
+trust-on-first-connect flow SSH uses for host keys.
 
-There's a third way to get two devices trusting each other, next to typing a
-fingerprint and confirming one on first connect: pairing with a one-time
-code. One side prints it, the other redeems it, and both ends up pinned in
-the same exchange.
+A second way to pin is a one-time pairing code. One side prints it, the
+other redeems it, and both ends are pinned in the same exchange.
 
 ```bash
 # Host:
@@ -358,24 +277,20 @@ qsh pair invite --json
 qsh pair accept host.example.com:4433 abcd-efgh-jkmn-pqrs-tvwx-yz23-4567-89ab
 ```
 
-The code carries no address, just a secret — read it over the phone, paste
-it in a chat, whatever channel is at hand. Knowing it is what gets checked,
-over a TLS-exporter-bound exchange (`docs/design/protocol.md` §15); neither
-side needs the other's fingerprint ahead of time, since possession of the
-secret is the whole proof. That's a different claim from "no need to ever
-check a fingerprint" — the secret still travels over a human channel that
-can be mistyped or overheard, so anyone who wants more assurance than
-"whoever knew the code" can compare `trust list`'s fingerprint out of band
-after pairing, same as they would after any other first connection. It
-works once and expires in ten minutes, and a running `qsh serve` recognizes
-a freshly minted invite without a restart, the same way it picks up `trust
-remove` (`docs/CLI.md` §6.11).
+The code carries no address, just a secret, so any channel will do: read it
+over the phone, paste it in a chat. Possession of the secret is the proof,
+checked over a TLS-exporter-bound exchange (`docs/design/protocol.md` §15),
+so neither side needs the other's fingerprint ahead of time. The channel
+can still be mistyped or overheard; to be sure of more than "whoever knew
+the code", compare `trust list`'s fingerprint out of band after pairing, as
+after any first connection. A code works once and expires in ten minutes,
+and a running `qsh serve` recognizes a freshly minted invite without a
+restart, the same way it picks up `trust remove` (`docs/CLI.md` §6.11).
 
-A fourth way skips both fingerprint-typing and pairing codes: exchange
-certificate files directly (ADR-0013). Only an inbound `qsh serve` opens
-the invite-redemption window, so nothing can pair *to* a `qsh listen` or
-`qsh serve --to` peer by code; a certificate file is how that peer gets
-pinned.
+A third way is to exchange certificate files directly (ADR-0013). Only an
+inbound `qsh serve` opens the invite-redemption window, so nothing can pair
+*to* a `qsh listen` or `qsh serve --to` peer by code; a certificate file is
+how that peer gets pinned.
 
 ```bash
 qsh identity export > box.pem                     # on box
@@ -389,12 +304,11 @@ that `qsh trust add --cert-file` reads back into a fingerprint pin
 `docs/CLI.md` §6.11 for the full contract, including piping it straight
 over SSH with `--cert-file -`.
 
-From here, `qsh hosts` lists what this machine can reach, `qsh sessions
-box` lists what's alive on the host, and the [Quick
-start](#quick-start) section below covers detach/reattach, port
-forwards, and reverse connections. Once a name is pinned, an operator who
-wants to skip retyping `user@` or move an address without touching the
-trust store can add it to `hosts.toml` by hand, next to `trust.toml`:
+From here, `qsh hosts` lists what this machine can reach and `qsh sessions
+box` lists what is alive on the host. [Quick start](#quick-start) covers
+detach/reattach, port forwards and reverse connections. To skip retyping
+`user@` or to move an address without touching the trust store, add the
+name to `hosts.toml` by hand, next to `trust.toml`:
 
 ```toml
 # <config_dir>/hosts.toml: read by qsh, never written by it
@@ -406,11 +320,11 @@ user = "dave"
 
 `hosts.toml`'s address wins over `trust.toml`'s when a name is in both, and
 its `user` fills in when `user@` is left off. Identity is still
-`trust.toml`'s job alone; `hosts.toml` never supplies one. That split cuts
-both ways: write access to `hosts.toml` is the power to redirect a name to
-a different already-pinned peer (mTLS still blocks an unpinned address).
-`qsh hosts --json` reveals such a redirect through `"source": "hosts"`
-(`docs/CLI.md` §5).
+`trust.toml`'s job alone; `hosts.toml` never supplies one. Write access to
+`hosts.toml` is therefore the power to redirect a name to a different
+already-pinned peer (mTLS still blocks an unpinned address). `qsh hosts
+--json` reveals such a redirect through `"source": "hosts"` (`docs/CLI.md`
+§5).
 
 ## Guided setup (`qsh setup`)
 
@@ -543,9 +457,11 @@ dropped connection; it is not the same as what happens to a session.
 
 ### SOCKS proxy (`-D`)
 
-`-D` opens a SOCKS5 proxy on this machine. For every `CONNECT` a SOCKS
+`-D` ([ADR-0019](docs/adr/0019-socks-dynamic-forward.md)) opens a
+loopback-only SOCKS5 proxy on this machine. For every `CONNECT` a SOCKS
 client sends to it, the host dials whatever destination that `CONNECT`
-names:
+names. The flag is repeatable alongside a session; `tunnel open` takes one
+`--dynamic` listener per call, exclusive with `--local`/`--remote`:
 
 ```bash
 qsh box -D 1080                             # SOCKS5 on 127.0.0.1:1080, alongside the shell
@@ -553,19 +469,22 @@ qsh tunnel open box --dynamic 1080 --json   # the same listener with no shell at
 curl --socks5-hostname 127.0.0.1:1080 http://internal-service/
 ```
 
+It is not a new grant:
+
+> `-D` runs SOCKS5 on this machine and authorizes every CONNECT on the peer as `forward.local`; `forward.socks` is never consulted.
+
 Two things have to be true before the first `CONNECT` succeeds:
 
 - The host's `acl.toml` grants the client `forward.local` (or the
-  `forward.*` family). `-D` reuses the `-L` grant; the First run example
-  above only grants `session.*`, so add the action there. `-R` needs
-  `forward.remote` the same way.
-- Both ends run a build that negotiates `dial-filter.v1`, which is what
-  lets the host refuse loopback, link-local and metadata destinations. An
-  older peer is refused before anything binds. Over a reverse route the
-  resident `qsh listen` daemon relays the capability set it negotiated
-  with the target when that target registered; a daemon still running
-  from before this machine's own upgrade keeps relaying the old set, so
-  restart it.
+  `forward.*` family). The First run example only grants `session.*`, so add
+  the action there. `-R` needs `forward.remote` the same way.
+- Both ends run a build that negotiates `dial-filter.v1`, which lets the host
+  refuse loopback, link-local and metadata destinations. An older peer is
+  refused before anything binds. Over a reverse route
+  ([ADR-0020](docs/adr/0020-socks-reverse-route.md)) the resident `qsh listen`
+  daemon relays the capability set it negotiated with the target at
+  registration; a daemon still running from before this machine's upgrade
+  keeps relaying the old set, so restart it.
 
 Point applications at `socks5h://127.0.0.1:1080` so the host resolves the
 name; with plain `socks5://` it is resolved here and leaks to the local
@@ -604,9 +523,8 @@ A peer address with no port defaults to 4433: `controller` and `controller:4433`
 on its own after the link drops. `--name` only takes effect when the
 controller has no trust-store alias for that peer and its
 `[listen].allow_advertised_names` is set; otherwise the controller names the
-peer from its own trust store. The former `qsh reverse controller
---offered-name workshop` spelling still works, silently, as a hidden
-alias — no deprecation warning, no scheduled removal.
+peer from its own trust store. The older `qsh reverse controller
+--offered-name workshop` spelling still works as a hidden alias.
 
 <!-- Behavior below is pinned by: lookup_pin_returns_the_first_name_pinned_for_a_shared_fingerprint,
      lookup_pin_follows_a_reordered_trust_toml_without_a_restart (qsh-core trust tests),
@@ -645,17 +563,6 @@ above 90 s), or the controller refuses to start with a config error. The
 limit on how many addresses a single reconnect attempt tries is in
 `docs/CLI.md` §6.13.
 
-### MCP server (retired, ADR-0011)
-
-The built-in `qsh mcp` stdio server, a twelve-tool adapter over the same
-typed operation layer the CLI uses, was removed in M8 Step 6. Agents go
-through the `qsh.cli/v1` JSON/JSONL CLI instead: `session read
---wait`/`--follow` carries the same `next_after`/`next_ctl_after` long-poll
-cursor the old `read_session` tool did. To reach a remote stdio MCP server,
-run it as the remote command itself (`qsh exec host -- <server>`) and let
-qsh be the transport; see [ADR-0011](docs/adr/0011-remove-mcp-adapter.md),
-whose fixture stays checked in at `crates/qsh-cli/tests/fixtures/mcp/`.
-
 ## Security posture
 
 Every connection is QUIC with TLS 1.3 mutual authentication. Both ends
@@ -669,49 +576,50 @@ of the invite's secret and, on success, pin — it never reaches a session,
 tunnel, or listener path (`docs/design/protocol.md` §15). The pinning side names the peer explicitly with `--as <name>` on `pair invite`/`pair accept`; without it, the peer's own self-reported name is used.
 
 Authorization is `acl.toml`: a small, principal-scoped rule file at
-`<config_dir>/acl.toml`. It is default-deny — a host with no `acl.toml`,
-or one that fails to parse, denies every operation from every peer, full
-stop. There is no fallback to "any pinned peer gets everything" any more,
-and qsh never creates or edits the file for you; an operator writes it by
-hand. Each rule names a principal (`user:<name>`, `device:<name>`, or
-`fp:sha256:<fingerprint>`), the auth path it applies to (`pin`, the
-default when omitted, or `ca`), and the actions it grants — an exact name
-like `exec.run`, or a trailing-wildcard family like `session.*`. A peer
-that authenticates through a trusted CA (`[[ca]]` in `trust.toml`) gets
-exactly what a rule with an explicit `auth_path = "ca"` grants it; a rule
-that omits `auth_path` (the pin default) never matches a CA-authenticated
-peer, even when the principal string is identical. `file.read` and
-`file.write` are defined in the action vocabulary but always denied
-regardless of any rule — those operations are P1, unimplemented.
-`forward.socks` is defined too and always denied as well, but for a
-different reason: no operation is ever authorized through it, by design
-([ADR-0019](docs/adr/0019-socks-dynamic-forward.md)) — `-D` (SOCKS5
-dynamic forwarding, see above) reuses `forward.local` instead. Every
-refusal a remote peer sees is the same opaque
-`PERMISSION_DENIED` message, whether it came from a missing rule, a
-policy file that failed to load, or an audit-write failure.
+`<config_dir>/acl.toml`. It is default-deny. A host with no `acl.toml`, or
+one that fails to parse, denies every operation from every peer, and qsh
+never creates or edits the file for you; an operator writes it by hand. Each
+rule names a principal (`user:<name>`, `device:<name>`, or
+`fp:sha256:<fingerprint>`), the auth path it applies to (`pin`, the default
+when omitted, or `ca`), and the actions it grants: an exact name like
+`exec.run`, or a trailing-wildcard family like `session.*`. A peer that
+authenticates through a trusted CA (`[[ca]]` in `trust.toml`) gets exactly
+what a rule with an explicit `auth_path = "ca"` grants it; a rule that omits
+`auth_path` never matches a CA-authenticated peer, even when the principal
+string is identical.
 
-The policy loads once, when `qsh serve`/`qsh listen`/`qsh serve --to` starts
-— there is no hot reload, so an edit to `acl.toml` only takes effect on
-the next restart. If the file is missing or invalid at startup, the
-process still comes up (it still answers, it just denies everything) and
-prints a diagnostic to stderr exactly once: `no usable acl.toml policy`,
-`every request is denied until this is fixed`, the exact path it looked
-at, the `CONFIG_ERROR` code, a copy-pasteable minimal policy filled in
-with this machine's actual pinned peers, and
-`acl.toml is never auto-generated — create it by hand`, and finally
-`verify a fix before restarting: qsh acl check`. The diagnostic's
-`code` field tells the two causes apart: `acl_policy_missing` (no file)
-versus `acl_policy_invalid` (parse/validation failure). It never dumps
-raw source lines from the file; the only echo is a bounded (≤128-byte,
-single-line-escaped) grammar token from the offending rule (unknown
-action pattern / `auth_path` / scope). On unix, a group- or
-world-writable `acl.toml` also gets a one-time stderr warning rather than
-a refusal to load it: an operator locked out of their own host by a
-permissions slip has no way back in if loading it denied instead of
-warned. Windows ACL checking is out of scope. Pin only devices you would
-hand a shell to, and write down what you actually want each of them to
-be able to do.
+`file.read` and `file.write` are in the action vocabulary but always denied,
+because those operations are not implemented. `forward.socks` is also always
+denied, for a different reason: no operation is ever authorized through it
+([ADR-0019](docs/adr/0019-socks-dynamic-forward.md)); `-D` reuses
+`forward.local`. Every refusal a remote peer sees is the same opaque
+`PERMISSION_DENIED` message, whether it came from a missing rule, a policy
+file that failed to load, or an audit-write failure.
+
+The policy loads once, when `qsh serve`/`qsh listen`/`qsh serve --to`
+starts, so an edit to `acl.toml` only takes effect on the next restart. If
+the file is missing or invalid at startup, the process still comes up (it
+answers, and denies everything) and prints a diagnostic to stderr exactly
+once, made of:
+
+- `no usable acl.toml policy`
+- `every request is denied until this is fixed`
+- the exact path it looked at and the `CONFIG_ERROR` code
+- a copy-pasteable minimal policy filled in with this machine's pinned peers
+- `acl.toml is never auto-generated — create it by hand`
+- `verify a fix before restarting: qsh acl check`
+
+The diagnostic's `code` field tells the two causes apart: `acl_policy_missing`
+(no file) versus `acl_policy_invalid` (parse or validation failure). It
+never dumps raw source lines; the only echo is a bounded (at most 128 bytes,
+single-line-escaped) grammar token from the offending rule (unknown action
+pattern, `auth_path` or scope).
+
+On unix, a group- or world-writable `acl.toml` gets a one-time stderr
+warning instead of a refusal to load: an operator locked out of their own
+host by a permissions slip has no way back in. Windows ACL checking is out
+of scope. Pin only devices you would hand a shell to, and write down what
+you want each of them to be able to do.
 
 ## Documents
 
@@ -743,8 +651,7 @@ qsh-cli (bin `qsh`)  →  qsh-core  →  qsh-transport  →  qsh-proto
 - `qsh-core`: all business logic. Typed operation layer, session broker,
   PTY, ACL, identity and trust, config.
 - `qsh-cli`: thin frontend. Argument parsing, human/JSON/JSONL rendering,
-  and the interactive TUI. The built-in MCP adapter it once carried was
-  retired in M8 Step 6 (ADR-0011).
+  and the interactive TUI.
 - `qsh-testkit`: shared test harness with a loopback transport, a chaos
   proxy, and fixtures.
 
@@ -752,12 +659,13 @@ qsh-cli (bin `qsh`)  →  qsh-core  →  qsh-transport  →  qsh-proto
 `qsh-transport`. The full allowed-dependency matrix is enforced by
 `cargo run -p xtask -- arch`, and a violation fails CI.
 
-The binary is `qsh`; the Cargo package is `qsh-cli`, because `qsh` was
-already taken on crates.io ([ADR-0006](docs/adr/0006-product-name-and-crate-name.md)).
-The four contract crates are cleared to publish; nothing has been pushed
-to the registry yet.
+The binary is `qsh`; the Cargo package is `qsh-cli`
+([ADR-0006](docs/adr/0006-product-name-and-crate-name.md)).
 
 ## Roadmap
+
+One line per milestone; scope and acceptance criteria are in
+[docs/ROADMAP.md](docs/ROADMAP.md).
 
 | # | Milestone | Status |
 |---|---|---|
@@ -767,213 +675,180 @@ to the registry yet.
 | M3 | Reverse connections (`listen`/`serve --to`/`attach`) | Done |
 | M4 | Port forwarding (`-L`/`-R`) | Done |
 | M5 | ACL and audit | Done |
-| M6 | MCP adapter | Done (retired, ADR-0011) |
+| M6 | MCP adapter | Done, then retired (ADR-0011) |
 | M7 | Trust UX, host profiles, `doctor` | Features done; stopwatch campaign open |
-| M8 | Hardening (fuzz, soak, real-device mobility campaign) | Code done; mobility campaign, wire freeze and security review open |
-| M9 | Human-facing surface (naming, pairing, service install) | Features done; stopwatch campaign open |
+| M8 | Hardening (fuzz, soak, mobility) | Code done; mobility campaign, wire freeze and security review open |
+| M9 | Human-facing surface (naming, pairing, service install) | Features done; stopwatch re-measurement open |
 | M10 | Release (installers, Homebrew, notarization, musl, provenance) | Pipeline done; clean-VM campaign open |
-| M11 | Issue follow-ups and ACL visibility (first P1 milestone) | Features done; `cause` observation and parser fuzz-hours open |
-| M12 | Supervised tunnels (`--supervise`, `--accept-hold`) and `qsh setup` | Features done, first shipped in `v0.4.0`; the `p1-supervise-wake` and `p1-setup-stopwatch` campaign rounds are open (human-owned) |
-| M13 | Measurement and release groundwork | Done (2026-10-08); the aarch64 musl old-glibc check is open (human-owned) |
-| M14–M19 | Rest of P1, in `docs/ROADMAP.md` §5 | Not started |
+| M11 | Issue follow-ups and ACL visibility | Features done; field observation open |
+| M12 | Supervised tunnels and `qsh setup` | Done in `v0.4.0`; campaign rounds open |
+| M13 | Measurement and release groundwork | Done (2026-10-08); aarch64 musl old-glibc check open |
+| M14 | TCP/TLS fallback | Waiting on ADR-0028 (proposed); transport abstraction landed |
+| M15–M19 | Rest of P1 | Not started |
 
-The Homebrew tap (`DaveDev42/tap`) and the release workflow's auto-bump
-job are wired and have run on `v0.2.0`, `v0.3.0`, `v0.4.0`, `v0.4.1`, `v0.4.2` and `v0.4.3`. What M10 still owes is a
-person's work: the clean-VM install campaign, and the first push to
-crates.io once that campaign passes — see
-[docs/ROADMAP.md](docs/ROADMAP.md) for the full acceptance criteria.
-
-Per-milestone scope, in/out boundaries and acceptance criteria live in
-[docs/ROADMAP.md](docs/ROADMAP.md).
+The Homebrew tap (`DaveDev42/tap`) and the release workflow's auto-bump job
+have run on every tag since `v0.2.0`. The first crates.io push waits on the
+clean-VM campaign.
 
 ## Known limitations
 
 Some of these are MVP scope decisions, some are unfinished work.
 
+- No TCP fallback. QSH runs only over QUIC, which is UDP, so a network that
+  blocks or drops UDP (some corporate and hotel networks) cannot connect.
+  `qsh doctor` reports a blocked UDP egress. A TCP/TLS fallback is proposed
+  in [ADR-0028](docs/adr/0028-tcp-tls-fallback.md) and is not accepted or
+  built.
 - Sessions die with the listener process. A session lives only as long as
-  the `qsh serve` or `qsh serve --to` process that opened it, so restarting the
-  listener is the end of every detached session on it, not a resume point.
-  A client that was attached at the time learns this within one round trip,
-  not after the 45 s idle timeout, because the server keeps a stateless
-  reset key in `stateless_reset.key` in the config directory (ADR-0036);
-  the session is still gone.
-  `qsh serve` and `qsh serve --to` say so in one stderr line at startup (not
-  under `--quiet`), a SIGTERM drain logs a `drained` lifecycle line with the
-  session counts, and `qsh doctor` reports `service_restart_drops_sessions`
-  (info) when a service unit is registered. A
-  clean SIGTERM does drain: no new `session.open`, `session.attach` or
-  `exec.run` is admitted from the signal onward, and every live session runs
-  its normal close procedure. That drain is best effort rather than a
-  guarantee. Delivery of `session.closed` to an attached consumer is bounded
-  by a short flush window instead of awaited outright, and the whole drain
-  gives up after a generous but finite timeout, logging a warning rather
-  than hanging the process on one wedged session. Under a congested consumer
-  or a stuck child, a shell can still outlive the process. A separate
-  session supervisor is planned after MVP
-  ([ADR-0003](docs/adr/0003-sessions-in-listener.md)).
-- A tunnel does not resume the way a session does. `-L`, `-R` and `-D`
-  (SOCKS5 dynamic forwarding) all work over both forward and reverse
-  connections (ADR-0020 decisions 1–3, superseding ADR-0019 decision 10's
-  forward-only restriction): a `-D` listener over a reverse route relays
-  every `CONNECT` through this machine's resident `qsh listen` daemon to
-  the target's live registration, with the same host-local address filter
-  a forward-route `-D` enforces. Either route is refused before anything
-  binds if the connected peer never negotiated `dial-filter.v1`
-  (`qsh tunnels`/`qsh tunnel close` manage what a resident daemon holds).
-  There is still no UDP forwarding (`UDP ASSOCIATE` gets `REP 0x07`, the
-  same "unsupported command" reply BIND gets). Remote forwards bind loopback
-  only; a non-loopback `bind` is refused, ACL notwithstanding. What a
-  tunnel does not have is a session's replay ring: a connection that drops
-  and later resumes ends any in-flight tunnel TCP connection cleanly rather
-  than replaying it. An `-L` listener survives that if the process holding
-  it is still alive, but the forward itself does not — a new connection
-  into that listener after the reconnect gets a clean reset until you
-  restart the forward. Without `--supervise`, an `-R` registration has to
-  be reopened by hand. QUIC path migration is a different
-  case from a drop-and-resume: switching networks without losing the
-  connection outright (Wi-Fi to tethering, a changed IP) carries an open
-  tunnel through transparently, the same as it does a session.
+  the `qsh serve` or `qsh serve --to` process that opened it, so a restart
+  ends every detached session on it; it is not a resume point. A client that
+  was attached learns this within one round trip, not after the 45 s idle
+  timeout, because the server keeps a stateless reset key in
+  `stateless_reset.key` in the config directory (ADR-0036). `qsh serve` and
+  `qsh serve --to` say so in one stderr line at startup (not under
+  `--quiet`), and `qsh doctor` reports `service_restart_drops_sessions`
+  (info) when a service unit is registered. A clean SIGTERM drains: no new
+  `session.open`, `session.attach` or `exec.run` is admitted from the signal
+  onward, and every live session runs its normal close procedure, with a
+  `drained` lifecycle line carrying the session counts. The drain is best
+  effort. Delivery of `session.closed` to an attached consumer is bounded by
+  a short flush window, and the whole drain gives up after a finite timeout
+  with a warning, so under a congested consumer or a stuck child a shell can
+  still outlive the process. A separate session supervisor is planned after
+  MVP ([ADR-0003](docs/adr/0003-sessions-in-listener.md)).
+- A tunnel does not resume the way a session does. `-L`, `-R` and `-D` work
+  over both forward and reverse connections (ADR-0020 decisions 1–3); a `-D`
+  listener over a reverse route relays every `CONNECT` through this
+  machine's resident `qsh listen` daemon to the target's live registration,
+  with the same host-local address filter as a forward route. Either route
+  is refused before anything binds if the peer never negotiated
+  `dial-filter.v1`. `qsh tunnels`/`qsh tunnel close` manage what a resident
+  daemon holds. There is no UDP forwarding (`UDP ASSOCIATE` gets `REP 0x07`,
+  as BIND does), and remote forwards bind loopback only, ACL
+  notwithstanding. A tunnel has no replay ring: when a connection drops and
+  later resumes, any in-flight tunnel TCP connection ends cleanly instead of
+  being replayed. An `-L` listener survives if the process holding it is
+  alive, but a new connection into it after the reconnect gets a clean reset
+  until you restart the forward. Without `--supervise`, an `-R`
+  registration has to be reopened by hand. QUIC path migration is a
+  different case: switching networks without losing the connection (Wi-Fi to
+  tethering, a changed IP) carries an open tunnel through, as it does a
+  session.
 - `--supervise <ms>` keeps a `-L`, `-D` or `-R` tunnel alive across a lost
-  connection, over a forward route or a reverse route, and it is narrower
-  than it sounds. A supervised `-R` tunnel reissues its registration on the
-  new connection: it closes the old one and opens the same bind again. If
-  the port cannot be kept, because someone else took it while the tunnel was
-  down or the peer's policy no longer allows it, the tunnel ends instead of
-  moving to another port. Every reissue also gets a new `tunnel_id` from the
-  peer; the envelope printed at open keeps the first one, and the current
-  one is in the `reestablished` diagnostic line and in `qsh tunnels` on a
-  reverse route. A supervised forward tunnel re-dials the address it
-  resolved when it was opened and never looks the host up again, so a peer
-  that moved to a new address is not followed. A supervised reverse tunnel
-  asks the local daemon again and never looks at a forward pin of the same
-  name. The first open picks its route by the usual rules, so a reverse-only
-  host must not have an address in its pin if the tunnel is to open over the
-  reverse route. The first open itself is not supervised: if it fails, the
-  command fails as it does without the flag, and a host that is not up yet
-  is a job for `--wait` or a service manager restart. A TCP connection
-  that was spliced when the connection died lives on only if the old
-  connection comes back, which only a forward route can do; otherwise it
-  ends, the same as without the flag, and only new connections ride the
-  re-established one. Sleep detection compares the wall clock with the
-  monotonic clock, and whether the monotonic clock stops during sleep on
-  Windows is unverified, so there it may never fire and a lost connection
-  is found by the ordinary dead-path detection alone.
+  connection, over a forward or a reverse route, within limits. A supervised
+  `-R` tunnel closes the old registration and opens the same bind again on
+  the new connection; if the port cannot be kept (someone else took it, or
+  the peer's policy no longer allows it), the tunnel ends instead of moving
+  to another port. Each reissue gets a new `tunnel_id`: the envelope printed
+  at open keeps the first, and the current one is in the `reestablished`
+  diagnostic line and in `qsh tunnels` on a reverse route. A supervised
+  forward tunnel re-dials the address it resolved at open and never looks
+  the host up again, so a peer that moved is not followed. A supervised
+  reverse tunnel asks the local daemon again and never looks at a forward
+  pin of the same name; a reverse-only host must therefore have no address in
+  its pin if the first open is to take the reverse route. The first open is
+  not supervised: if it fails, the command fails as it does without the flag
+  (`--wait` or a service-manager restart covers a host that is not up yet).
+  A TCP connection that was spliced when the connection died lives on only
+  if the old connection comes back, which only a forward route can do;
+  otherwise it ends, and only new connections ride the re-established one.
+  Sleep detection compares the wall clock with the monotonic clock. Whether
+  the monotonic clock stops during sleep on Windows is unverified, so a lost
+  connection there may be found only by the ordinary dead-path detection.
 - `qsh serve` and `qsh listen` share one default port. Both bind `[::]:4433`
   unless told otherwise, so a machine taking both roles needs an explicit
   `--bind` (or `[serve].bind`/`[listen].bind`) for at least one of them. The
-  second one to start fails immediately with `CONFIG_ERROR` and exit `255`
-  rather than half-working, with this remedy on stderr, exactly:
+  second one to start fails immediately with `CONFIG_ERROR` and exit `255`,
+  with this remedy on stderr, exactly:
 
   > Nothing is being served. `qsh serve` and `qsh listen` both default to port 4433, so one machine running both needs an explicit bind for at least one of them. Re-run with `--bind <ip:port>` on a free port.
-- `acl.toml` has no hot reload: an edit only takes effect the next time
-  `qsh serve`/`qsh listen`/`qsh serve --to` starts, and qsh never creates or
-  edits the file for you. See [Security posture](#security-posture).
-- The audit log is fail-closed: `qsh serve`/`qsh serve --to` deny an
+- `acl.toml` has no hot reload: an edit takes effect the next time
+  `qsh serve`/`qsh listen`/`qsh serve --to` starts. See [Security
+  posture](#security-posture).
+- The audit log is fail-closed. `qsh serve`/`qsh serve --to` deny an
   otherwise-allowed `session.open`, `session.attach`, session write,
-  `exec.run`, or `host.reverse` registration rather than let it through
-  with no durable audit record —
-  a full disk, a permissions problem on the audit directory, or a writer
-  backlogged past its bounded queue all deny in the same way a policy
-  refusal does. There is no override; recording an authorization decision
-  is a precondition for granting it, not best-effort logging alongside it.
-  While the audit log is unwritable, every privileged operation is denied,
-  full stop — there is no degraded-but-serving mode. Recovery is automatic:
-  once the audit log is writable again, the writer's own background retry
-  clears the condition and operations start succeeding again on their own,
-  with no restart and no operator action needed. The audit record's
-  fields are structural by design: argv, PTY bytes, and key material never
-  appear in it. `audit.log_argv` is named in the design docs as a
-  sanctioned future exception; M5 does not implement it.
-- Quotas are fixed defaults for now. Concurrent sessions, `exec.run`
-  runs and connections are capped per listener and per principal, tunnel
-  streams per principal and per forward, remote forwards per principal,
-  and the admission gate caps concurrent handshakes and the per-source
-  rate (`[serve].max_sessions` and friends, `docs/CLI.md` §6.12). A key
-  set to `0` or left unset means the default, not unlimited, and there is
-  no switch that turns a cap off. The ACL engine itself never enforces
-  quotas.
-- `qsh trust remove` only affects future handshakes. A peer you removed
-  keeps the connection's entire negotiated authority — not just the
-  sessions it already had open, but the ability to open brand-new ones,
-  including new sessions, tunnels, and forwards within the ACL scope
-  loaded when `qsh serve` started — until that connection drops and it
-  has to handshake again. This applies to an already-running `qsh serve`
-  with no restart: the host re-reads `trust.toml` on every handshake, so
-  the very next connection attempt from the removed peer is rejected
-  immediately (`docs/CLI.md` §6.11). A tunnel opened with `--supervise`
-  that is running on such a connection keeps running as well; only its
-  next re-establishment meets the rejected handshake, after which it retries
-  within its budget and gives up. Force-closing a peer's
-  already-established connection on removal is P1.
-- `qsh trust rename` takes effect on the *next handshake* immediately, no
-  restart needed, the same way `qsh trust remove` does — but `acl.toml`
-  rows do not: they still match the pre-rename name until `qsh serve` is
-  restarted, since `acl.toml` has no hot reload at all (ADR-0012 decision 7).
-  A renamed peer's next connection authenticates fine but can be denied
-  every operation until the ACL rows catch up.
-- `qsh service status`/`qsh service uninstall` only ever look at the run
-  mode inferred from today's `config.toml` (`docs/CLI.md` §6.18) — a unit
-  installed under a previous mode (say, `config.toml` used to say
-  `listen` and now says `serve --to`) is invisible to both, and neither
-  reports nor removes it. The unit's recorded binary path also means
-  something different per platform: macOS keeps a Homebrew Cellar symlink
-  unresolved on purpose, so `brew upgrade` does not pin a stale path,
-  while Linux's `/proc/self/exe` has already resolved any symlink by the
-  time `qsh service install` reads it.
+  `exec.run` or `host.reverse` registration rather than let it through with
+  no durable audit record. A full disk, a permissions problem on the audit
+  directory, or a writer backlogged past its bounded queue all deny the way
+  a policy refusal does, with no override and no degraded-but-serving mode.
+  Recovery is automatic: once the audit log is writable again, the writer's
+  background retry clears the condition without a restart. Audit records are
+  structural; argv, PTY bytes and key material never appear in them.
+  `audit.log_argv` is named in the design docs as a sanctioned future
+  exception, and M5 does not implement it.
+- Quotas are fixed defaults. Concurrent sessions, `exec.run` runs and
+  connections are capped per listener and per principal, tunnel streams per
+  principal and per forward, remote forwards per principal, and the
+  admission gate caps concurrent handshakes and the per-source rate
+  (`[serve].max_sessions` and friends, `docs/CLI.md` §6.12). A key set to
+  `0` or left unset means the default, not unlimited, and no switch turns a
+  cap off. The ACL engine itself never enforces quotas.
+- `qsh trust remove` only affects future handshakes. A removed peer keeps
+  the connection's entire negotiated authority, including the ability to
+  open new sessions, tunnels and forwards within the ACL scope loaded at
+  startup, until that connection drops. The host re-reads `trust.toml` on
+  every handshake, so the next connection attempt from the removed peer is
+  rejected immediately, with no restart (`docs/CLI.md` §6.11). A tunnel with
+  `--supervise` on such a connection keeps running too; only its next
+  re-establishment meets the rejected handshake, after which it retries
+  within its budget and gives up. Force-closing an established connection on
+  removal is P1.
+- `qsh trust rename` also takes effect on the next handshake without a
+  restart, but `acl.toml` rows do not: they match the pre-rename name until
+  `qsh serve` is restarted (ADR-0012 decision 7). A renamed peer's next
+  connection authenticates but can be denied every operation until the ACL
+  rows catch up.
+- `qsh service status` and `qsh service uninstall` only look at the run mode
+  inferred from today's `config.toml` (`docs/CLI.md` §6.18). A unit
+  installed under a previous mode (say `listen`, with `config.toml` now
+  saying `serve --to`) is invisible to both. The unit's recorded binary path
+  differs per platform: macOS keeps a Homebrew Cellar symlink unresolved on
+  purpose, so `brew upgrade` does not pin a stale path, while Linux's
+  `/proc/self/exe` has already resolved any symlink.
 - `qsh pair accept` pins both sides in one exchange, but the two pins are
-  not atomic. The host's pin (and the invite's consumption) happens first,
-  as part of the wire exchange; the client's own local pin happens after,
-  entirely on its own. If the client hits a name collision in its own
-  trust store at that point, the invite is already spent, and the client
-  has to resolve the local collision and get a fresh invite rather than
-  the whole exchange rolling back. A collision on the host's side, during
-  the exchange itself, does roll back cleanly: the invite is left
+  not atomic. The host's pin and the invite's consumption happen first, in
+  the wire exchange; the client's local pin happens after. If the client then
+  hits a name collision in its own trust store, the invite is already spent:
+  resolve the collision and get a fresh invite. A collision on the host's
+  side, during the exchange, rolls back cleanly and leaves the invite
   redeemable (`docs/design/protocol.md` §15.6).
-- Retrying `qsh pair accept` against a peer the host already pinned
-  fails as a non-retryable `SESSION_CONFLICT`, and **a fresh invite does
-  not fix it** — the host's pin makes the ordinary mTLS path win before
-  the connection ever reaches invite/pairing logic again, so the invite's
-  own state is not the problem. Recovery is `qsh trust remove` on the
-  host, then a new `pair invite`/`pair accept` round
-  (`docs/design/protocol.md` §15.6, `docs/CLI.md` §6.11).
+- Retrying `qsh pair accept` against a peer the host already pinned fails as
+  a non-retryable `SESSION_CONFLICT`, and a fresh invite does not fix it: the
+  host's pin makes the ordinary mTLS path win before the connection reaches
+  pairing logic. Run `qsh trust remove` on the host, then a new `pair
+  invite`/`pair accept` round (`docs/design/protocol.md` §15.6, `docs/CLI.md`
+  §6.11).
 - `qsh pair invite` does not know this device's reachable address. Human
   mode suggests candidates by asking the kernel which source address a
-  packet leaving this host would carry, but that is a routing observation,
-  not a reachability check — behind NAT or a firewall none of them may work
-  — and a host with no default route, or one whose only answer is an
-  address that means nothing off this machine, gets no candidates at all,
-  since there is no interface-enumeration fallback. The operator still
-  picks the address and relays it out of band (`docs/CLI.md` §6.11).
-- A listener is not a code-pairing peer: only an inbound `qsh serve`
-  redeems invite codes, so `qsh pair invite`/`qsh pair accept` cannot
-  pin a `qsh listen` or `qsh serve --to` peer. Pin that peer by
-  certificate file instead (`qsh identity export`, `qsh trust add
-  --cert-file`, `docs/CLI.md` §6.11, §6.13).
-- `exec.run` output is capped at 64 MiB. The whole of stdout plus stderr
-  comes back in one envelope, and anything beyond the cap is
-  `RESOURCE_EXHAUSTED`. Streaming output is a session feature: use
-  `qsh session read` or an interactive session.
-- Host names resolve through `hosts.toml` first, falling back to the trust
-  store. `qsh hosts` and `qsh host` read both back. `hosts.toml` is
-  read-only from the CLI's side — nothing writes it for you, so `name =
-  "…" / address = "…" / user = "…"` entries are added by hand, next to
-  `trust.toml`. It is a pure address book: identity still comes from the
-  trust store alone, and an entry there for a name with no matching pin
-  dials an address nobody has vouched for.
+  packet leaving this host would carry. That is a routing observation, not a
+  reachability check: behind NAT or a firewall none of them may work, and a
+  host with no default route gets no candidates at all. The operator picks
+  the address and relays it out of band (`docs/CLI.md` §6.11).
+- A listener is not a code-pairing peer: only an inbound `qsh serve` redeems
+  invite codes, so `qsh pair invite`/`qsh pair accept` cannot pin a `qsh
+  listen` or `qsh serve --to` peer. Pin it by certificate file (`qsh
+  identity export`, `qsh trust add --cert-file`; `docs/CLI.md` §6.11,
+  §6.13).
+- `exec.run` output is capped at 64 MiB. Stdout plus stderr come back in one
+  envelope, and anything beyond the cap is `RESOURCE_EXHAUSTED`. Use `qsh
+  session read` or an interactive session for streaming output.
+- Host names resolve through `hosts.toml` first, then the trust store. `qsh
+  hosts` and `qsh host` read both. `hosts.toml` is read-only from the CLI's
+  side and is a pure address book: identity comes from the trust store
+  alone, and an entry for a name with no matching pin dials an address
+  nobody has vouched for.
 - qsh resolves hostnames with the system resolver. To avoid DNS altogether
-  (for example behind an enterprise VPN that intercepts DNS), pin the peer
-  by IP literal, or turn on the OS's encrypted DNS settings. A built-in
-  forced DNS-over-HTTPS resolver is a P2 candidate (ADR-0039).
+  (for example behind an enterprise VPN that intercepts DNS), pin the peer by
+  IP literal or turn on the OS's encrypted DNS settings. A built-in forced
+  DNS-over-HTTPS resolver is a P2 candidate (ADR-0039).
 - Windows is P1 for the client and P2 for the host. PTY code is gated
   `#[cfg(unix)]`, and so is reverse mode: `qsh listen` and `qsh serve --to`
-  return `UNSUPPORTED` there rather than running. A tunnel over a reverse
-  connection needs that same daemon and inherits the restriction.
-  `qsh tunnel open --dynamic` is cross-platform like `--local`/`--remote`;
-  the interactive `-D` spelling is not, since the interactive PTY driver
-  it rides is itself `#[cfg(unix)]`. CI builds, lints and runs
-  the portable test subset on `windows-latest` so the tree keeps compiling,
-  but POSIX-only behavior such as signal exits and process-group kill is
-  never exercised there.
+  return `UNSUPPORTED` there, and a tunnel over a reverse connection
+  inherits that. `qsh tunnel open --dynamic` is cross-platform like
+  `--local`/`--remote`; the interactive `-D` spelling is not, since the
+  interactive PTY driver it rides is `#[cfg(unix)]`. CI builds, lints and
+  runs the portable test subset on `windows-latest`, but POSIX-only behavior
+  such as signal exits and process-group kill is never exercised there.
 - Reverse mode needs a directly reachable path from the target to the
   controller:
 
@@ -981,36 +856,33 @@ Some of these are MVP scope decisions, some are unfinished work.
   >
   > Put the controller on a publicly routable address, a forwarded port, or an existing overlay such as WireGuard or Tailscale. If the controller itself is behind NAT, M3 has no answer for that.
 - macOS asks "Do you want the application “qsh” to accept incoming network
-  connections?" the first time a given build dials out, though `-L` and
-  `-D` listeners are both loopback-only, so neither triggers it. The
-  cause is qsh's QUIC client socket, which binds the wildcard address
-  (`0.0.0.0:0`/`[::]:0`, `crates/qsh-transport/src/endpoint.rs`) on every
-  dial because connection migration across IP changes needs it. A binary
-  carrying no stable code identity gives macOS nothing to remember an
-  answer against, so it asks again after every rebuild or reinstall.
-  The release workflow signs both macOS binaries with a Developer ID
-  certificate, under the hardened runtime and with a trusted timestamp,
-  and submits them to Apple's notary service, but only when the release
-  is cut on a repository that has all six Apple credentials configured;
-  where they are not, the macOS binaries ship ad-hoc signed, the same way
-  a local `cargo build --release` produces them. No published release has
-  been cut with those credentials yet, so assume ad-hoc until you have
-  checked. Tell the two apart with
-  `codesign -dv --verbose=4 $(which qsh)`: a Developer ID build names an
-  `Authority=Developer ID Application` and a `TeamIdentifier`, an ad-hoc
-  one prints `Signature=adhoc` and `TeamIdentifier=not set`. Notarization
-  is confirmed online rather than stapled, so a signed build's first run
-  on a machine with no route to Apple is still not guaranteed; `spctl -a
-  -vvv -t execute $(which qsh)` reports the verdict Gatekeeper would
-  reach. For an ad-hoc build, sign it yourself
-  (`codesign -fs "<cert>" $(which qsh)`) or register it with
+  connections?" the first time a given build dials out (`-L` and `-D`
+  listeners are loopback-only and do not trigger it). The cause is qsh's QUIC
+  client socket, which binds the wildcard address (`0.0.0.0:0`/`[::]:0`,
+  `crates/qsh-transport/src/endpoint.rs`) on every dial because connection
+  migration across IP changes needs it. A binary with no stable code
+  identity gives macOS nothing to remember an answer against, so it asks
+  again after every rebuild or reinstall. The release workflow signs both
+  macOS binaries with a Developer ID certificate (hardened runtime, trusted
+  timestamp) and submits them to Apple's notary service, but only when the
+  release is cut on a repository with all six Apple credentials configured.
+  Otherwise the binaries ship ad-hoc signed, as a local `cargo build
+  --release` produces them. No published release has been cut with those
+  credentials, so assume ad-hoc until you have checked. `codesign -dv
+  --verbose=4 $(which qsh)` tells them apart: a Developer ID build names an
+  `Authority=Developer ID Application` and a `TeamIdentifier`, an ad-hoc one
+  prints `Signature=adhoc` and `TeamIdentifier=not set`. Notarization is
+  confirmed online rather than stapled, so even a signed build's first run on
+  a machine with no route to Apple is not guaranteed; `spctl -a -vvv -t
+  execute $(which qsh)` reports Gatekeeper's verdict. For an ad-hoc build,
+  sign it yourself (`codesign -fs "<cert>" $(which qsh)`) or register it with
   `/usr/libexec/ApplicationFirewall/socketfilterfw --add $(which qsh)
   --unblockapp $(which qsh)` (the tool is not on `PATH`).
 - `qsh init --import-ssh-key <path>` makes an existing OpenSSH Ed25519 key
-  the device key, so SSH and qsh then share one key and its lifetime: if
-  either side leaks it, both are exposed. qsh has no key rotation or
-  revocation yet, so the only recovery is removing `identity/` from the
-  config directory, running `qsh init` again and re-pinning on every peer
+  the device key, so SSH and qsh share one key and its lifetime: if either
+  side leaks it, both are exposed. qsh has no key rotation or revocation
+  yet; the only recovery is removing `identity/` from the config directory,
+  running `qsh init` again and re-pinning on every peer
   ([ADR-0026](docs/adr/0026-ssh-key-import-scope.md)). Only unencrypted
   Ed25519 keys are read; passphrase-protected keys, RSA and ECDSA are
   refused. The command prints two different fingerprints for the same key
@@ -1021,7 +893,7 @@ Some of these are MVP scope decisions, some are unfinished work.
 
 QSH owns secure sessions, PTY lifecycle, reconnect, command execution and
 port forwarding. Getting a routable address to the host is somebody else's
-job, and stays that way: see the reverse-reachability entry under [Known
+job; see the reverse-reachability entry under [Known
 limitations](#known-limitations).
 
 ## Development
