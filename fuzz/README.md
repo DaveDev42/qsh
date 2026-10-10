@@ -1,31 +1,32 @@
 # qsh-proto and broker fuzz targets
 
 `crates/qsh-proto` is the project's designated fuzz surface (`CLAUDE.md`,
-`crates/qsh-proto/src/lib.rs`) — it is the sans-IO contract layer every
+`crates/qsh-proto/src/lib.rs`): the sans-IO contract layer that every
 attacker-controlled byte stream and CLI-adjacent string runs through before
-anything else touches it. This crate holds eighteen `cargo-fuzz` parser
-harnesses over that surface, plus two string parsers in `qsh-transport`
+anything else touches it. This crate holds nineteen `cargo-fuzz` targets.
+Eighteen are parser harnesses over that surface; one of them,
+`fingerprint_principal`, covers the two string parsers in `qsh-transport`
 (`Fingerprint`/`Principal`) that are reached from the same untrusted-input
-paths (trust store files, ACL principal text). A nineteenth, stateful
-target — `broker_ops` — drives `qsh-core`'s session broker state machine
+paths (trust store files, ACL principal text). The nineteenth, stateful
+target, `broker_ops`, drives `qsh-core`'s session broker state machine
 (append/read/lease/resume/attach/tick/reap) against a model oracle instead
 of decoding a single message; see "The `broker_ops` state machine target"
 below.
 
 ## Why this lives outside the workspace
 
-`rust-toolchain.toml` pins the whole `qsh` workspace to **stable 1.99.0**.
-`cargo-fuzz` requires **nightly** (it builds with `-Z sanitizer=address`
-and friends, which are `-Z` unstable-only flags). `fuzz/Cargo.toml` has its
+`rust-toolchain.toml` pins the whole `qsh` workspace to stable 1.99.0.
+`cargo-fuzz` requires nightly (it builds with `-Z sanitizer=address` and
+friends, which are `-Z` unstable-only flags). `fuzz/Cargo.toml` has its
 own empty `[workspace]` table and `fuzz/` is deliberately **not** listed in
 the root `Cargo.toml`'s `members`, so:
 
-- the six stable-toolchain gates (`cargo fmt`, `cargo clippy`, `cargo run -p
-  xtask -- arch`, `cargo deny check`, the Windows cross-checks, `cargo
-  nextest run --workspace`) never see this crate, and are unaffected by it —
-  though `cargo nextest run --workspace` does read `fuzz/corpus/broker_ops/`
-  as data (`broker_ops_corpus.rs` replays it), so the nightly toolchain
-  stays optional while that corpus directory does not;
+- the stable-toolchain gates (`cargo fmt`, `cargo clippy`, `cargo xtask
+  arch`, `cargo deny check`, the Windows cross-checks, `cargo nextest run
+  --workspace`) never see this crate and are unaffected by it. The one
+  link is data: `cargo nextest run --workspace` replays
+  `fuzz/corpus/broker_ops/` (`broker_ops_corpus.rs`), so the nightly
+  toolchain stays optional but that corpus directory does not;
 - `xtask arch` iterates workspace members only, so this crate (and its
   `qsh-proto`/`qsh-transport`/`qsh-core` path dependencies, added the
   ordinary way) is invisible to the dependency-direction lint;
@@ -39,11 +40,11 @@ rustup toolchain install nightly
 cargo install cargo-fuzz
 ```
 
-`cargo-fuzz` invokes `cargo` for the nightly toolchain itself, so if `cargo`
-on your `PATH` is pinned to something other than nightly's rustup shim (as
-it is on machines where `PATH` hardcodes a toolchain's `bin/` directory
-ahead of rustup's proxy), prepend the nightly toolchain's `bin/` directory
-explicitly rather than relying on `rustup run` / `cargo +nightly`:
+`cargo-fuzz` invokes `cargo` for the nightly toolchain itself. If `cargo` on
+your `PATH` is pinned to something other than nightly's rustup shim (as on
+machines where `PATH` hardcodes a toolchain's `bin/` directory ahead of
+rustup's proxy), prepend the nightly toolchain's `bin/` directory instead of
+relying on `rustup run` / `cargo +nightly`:
 
 ```sh
 export PATH="$(rustc +nightly --print sysroot 2>/dev/null || rustup which --toolchain nightly rustc | xargs dirname)":$PATH
@@ -68,7 +69,7 @@ workspace version leaves it stale until someone commits the refresh.
 
 ## Target list
 
-Run from `fuzz/`:
+Run from `fuzz/`. `cargo fuzz list` prints the same set.
 
 | target | file | covers |
 |---|---|---|
@@ -127,14 +128,15 @@ commit SHAs, and DoD 1 status. `fuzz/oss-fuzz/README.md` covers packaging
 these same targets for continuous OSS-Fuzz fuzzing (submission is a
 separate, human-driven step from the local runs this file describes).
 
-## The 72-hour accumulation (M8 DoD)
+## The 72-hour accumulation
 
-The M8 Definition of Done requires **≥72 cumulative fuzz-hours per target
-with zero crashes** — wall-clock time, not compressible, and counted **per
-target** (that's why the target list above is a fixed contract: don't fold
-targets together or split them apart without updating what "72 hours"
-means for the merged/split result). Run each target for its own 72+ hours,
-independently — they don't share a clock:
+The M8 Definition of Done required at least 72 cumulative fuzz-hours per
+parser target with zero crashes. Wall-clock time cannot be compressed, and
+it is counted per target, so do not fold targets together or split them
+apart without updating what "72 hours" means for the result. Parsers added
+after M8 (for example `parse_openssh_key`) owe their own 72 hours, recorded in
+`docs/campaigns/m8-fuzz.md`. Run each target for its own 72+ hours; they do
+not share a clock:
 
 ```sh
 cd fuzz
@@ -152,8 +154,8 @@ name list means a newly added *parser* target picks up its 72-hour run
 automatically — nothing to remember to update here when the target count
 changes. The `grep -v broker_ops` above is deliberate: `broker_ops` is the
 one stateful target and it is outside the DoD 1 "parser target" count
-(`docs/campaigns/m8-fuzz.md` §2 fixes the denominator at 16; §8 tracks
-`broker_ops` separately). Give it a budget on its own terms if you run one
+(`docs/campaigns/m8-fuzz.md` §2 fixes the M8 denominator at 16 parser
+targets, the count at that time; §8 tracks `broker_ops` separately). Give it a budget on its own terms if you run one
 — it's covered by the same `fuzz-smoke.yml` build-and-crash-check as every
 other target, and a dedicated long run is optional, recorded in
 `docs/campaigns/m8-fuzz.md` §8 rather than counted toward this section's
@@ -280,7 +282,7 @@ guaranteed-valid encodings, not hand-typed hex.
 
 ## The `broker_ops` state machine target
 
-Unlike the eighteen parser targets, `broker_ops` doesn't decode one message
+Unlike the parser targets, `broker_ops` doesn't decode one message
 — it replays a byte-encoded sequence of ops (append, read, take/drop a
 writer lease, issue/verify/rotate a resume token, attach/detach, advance a
 clock, reap) against `qsh-core`'s public broker API and checks the result
@@ -308,14 +310,10 @@ fail-closed shape of missing/expired/mismatched state
 
 ## CI
 
-`.github/workflows/fuzz-smoke.yml` runs a short, deterministic
-`-runs=<N>` smoke build-and-run of every target on every push/PR — a
-build-and-crash-check gate, not the 72-hour accumulation (which has no
-place in CI; it's a standing local/background job). It's a separate job
-from the existing `ci.yml` gates so a nightly-toolchain install or a slow
-fuzz build can never slow down or block the stable six-gate CI, and it's
-marked non-blocking (`continue-on-error: true`) for now: this is the
-harness's first day, the parser surface is large, and a red PR check on a
-brand-new nightly-only job before anyone has triaged what "normal" looks
-like here would train people to ignore it. Flip it to blocking once it's
-been green for a while.
+`.github/workflows/fuzz-smoke.yml` runs a short, deterministic `-runs=4096`
+smoke build-and-run of every target on every push to `main` and every pull
+request. It is a build-and-crash-check gate, not the 72-hour accumulation,
+which has no place in CI. It is a separate workflow from `ci.yml`, so a
+nightly-toolchain install or a slow fuzz build never slows the stable
+gates, and it sits outside `ci-ok`'s `needs`, so a red check here does not
+block a merge by itself. A failing target does fail the job.

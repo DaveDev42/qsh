@@ -3,9 +3,9 @@
 ## install.sh
 
 POSIX-sh installer for a prebuilt `qsh` release archive. No Rust toolchain
-needed. Supports macOS (arm64, x86_64) and Linux (x86_64 and aarch64 against
-glibc, x86_64 and aarch64 against musl); on Windows it prints a pointer to the manual
-`.zip` download instead of attempting an install.
+needed. Supports macOS (arm64, x86_64) and Linux (x86_64 and aarch64, against
+glibc or musl). On Windows it prints a pointer to the manual `.zip` download
+instead of installing.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/DaveDev42/qsh/main/scripts/install.sh | sh
@@ -24,8 +24,8 @@ curl -fsSL https://raw.githubusercontent.com/DaveDev42/qsh/main/scripts/install.
 The script downloads the release archive and that release's `SHA256SUMS`,
 requires exactly one 64-character hex entry for the archive it fetched, and
 compares digests before it unpacks anything. Any other outcome aborts with
-nothing installed: no entry, a duplicate entry, a mismatch, a tarball whose
-`qsh` member is missing or is a symlink. The binary lands via a temp file in
+nothing installed: no entry, a duplicate entry, a mismatch, or a tarball
+whose `qsh` member is missing or is a symlink. The binary lands via a temp file in
 the destination directory followed by a rename, so an interrupted run never
 leaves a half-written `qsh` on your `PATH`, and `sudo` is never invoked. An
 unwritable `QSH_INSTALL_DIR` is an error, not a prompt to escalate. The
@@ -93,17 +93,20 @@ are in [fuzz/README.md](../fuzz/README.md).
 
 ## mobility/
 
-Manual Wi-Fi to tethering mobility campaign scripts. See
+Manual Wi-Fi to tethering mobility campaign: `switch-linux.sh` and
+`switch-macos.sh` move the link, `summarize.py` tabulates the client's
+recovery diagnostics. See
 [docs/campaigns/m2-mobility.md](../docs/campaigns/m2-mobility.md).
 
 ## soak/
 
 `run.sh` drives the 24h/100-session soak scenario
 (`crates/qsh-cli/tests/soak.rs`) under nextest's `[profile.soak]` on a
-dedicated Linux host. `summarize.py` (stdlib only) reads the CSV that
+dedicated Linux host. `preflight_udp.py` checks beforehand that the host
+does not drop loopback UDP. `summarize.py` (stdlib only) reads the CSV that
 `run.sh` writes and judges it against the thresholds fixed in
 [docs/campaigns/m8-soak.md](../docs/campaigns/m8-soak.md) §3, exiting
-non-zero on a violation. Neither script runs in CI; `load.yml` runs the
+non-zero on a violation. None of these runs in CI; `load.yml` runs the
 same scenario in its short mode instead.
 
 ## stress/
@@ -117,7 +120,9 @@ run ends with `N/N passed under load`. The busy loops are reaped by an
 runs on macOS and Linux and is not part of the PR gate: shared runners
 reproduce load poorly and 50 rounds take tens of minutes. A new
 timing-sensitive test must be green for 50 consecutive rounds here before it
-lands (`docs/design/testing.md`, CI discipline).
+lands (`docs/design/testing.md`, CI discipline). `m13.filter` and
+`m13-latency.filter` are nextest filtersets for the M13 timing-sensitive
+tests.
 
 ## test/
 
@@ -136,7 +141,8 @@ tests at `/tmp/qsh-t-<uid>`, so unix socket paths stay inside `sun_path`.
 
 A container pair that builds a never-configured machine for each round of
 the SC1 stopwatch campaign and checks the campaign's preconditions before
-the timer starts. It measures nothing — the thing being timed is human
-time. See [docs/campaigns/m7-stopwatch.md](../docs/campaigns/m7-stopwatch.md),
+the timer starts. It measures nothing; the thing being timed is human time.
+See [docs/campaigns/m7-stopwatch.md](../docs/campaigns/m7-stopwatch.md),
 [docs/campaigns/m9-stopwatch.md](../docs/campaigns/m9-stopwatch.md), and
-stopwatch/README.md (Korean, like the campaign docs it serves).
+[stopwatch/README.md](stopwatch/README.md) (Korean, like the campaign docs
+it serves).

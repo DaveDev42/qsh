@@ -252,7 +252,7 @@ above never starts.
 
 ## Supervised tunnels
 
-`qsh tunnel open` holds its tunnel only as long as the foreground process lives (`docs/CLI.md` §6.14). With `--supervise <ms>` the process re-establishes a lost forward-route `--local` or `--dynamic` tunnel by itself, keeping the listener bound, and gives up with exit `255` once the total outage passes `<ms>` (`docs/CLI.md` §6.9, ADR-0023). The service manager covers what the supervisor deliberately does not: a first `open` that fails (nothing is supervised before the tunnel exists), an exhausted budget, and a crash. Together they leave no outer retry loop to write.
+`qsh tunnel open` holds its tunnel only as long as the foreground process lives (`docs/CLI.md` §6.14). With `--supervise <ms>` the process re-establishes a lost `--local`, `--dynamic` or `--remote` tunnel by itself, over a forward or a reverse route, and gives up with exit `255` once the total outage passes `<ms>` (`docs/CLI.md` §6.9, ADR-0023). A `--local` or `--dynamic` listener stays bound across the loss. The service manager covers what the supervisor deliberately does not: a first `open` that fails (nothing is supervised before the tunnel exists), an exhausted budget, and a crash. Together they leave no outer retry loop to write.
 
 `qsh service install` does not generate these units. It manages the `serve`, `listen`, and `serve --to` modes only, and no test compares the fences below against generated output. They are hand-written examples, so the path, the host alias `hub`, the port `1080`, and the budget are yours to change. The fences use `plist` and `systemd` tags on purpose, so they stay outside the byte-for-byte check on the `xml` and `ini` fences above.
 
@@ -323,7 +323,7 @@ What each side restarts:
 
 | Situation | Who acts | Result |
 |---|---|---|
-| Connection lost (sleep, VPN or underlay switch, peer restart) | the supervisor inside the process | Same listener, same `tunnel_id`; `lost`, `retry`, `reestablished` lines on stderr |
+| Connection lost (sleep, VPN or underlay switch, peer restart) | the supervisor inside the process | Same listener, same `tunnel_id` (a `--remote` tunnel gets a new one); `lost`, `retry`, `reestablished` lines on stderr |
 | Total outage past `--supervise` | the process, then the service manager | `gave_up` line, exit `255`, a fresh `open` after `ThrottleInterval` or `RestartSec` |
 | First `open` fails (host unreachable, no ACL yet, reverse registration stale) | the service manager | Exit `255` and a retry. Add `--wait <ms>` for a stale reverse registration (`docs/CLI.md` §6.9) |
 | `SIGTERM` from `launchctl bootout` or `systemctl stop` | the supervisor | Listener released, exit `0` |
@@ -366,10 +366,9 @@ foreground for as long as the process lives, and the service manager owns
 restart, logging redirection, and stop signals from outside.
 
 `qsh service install|uninstall|status` (`docs/CLI.md` §6.18) generates and
-registers, removes, and reports on the units above so you no longer have to
-write them by hand. `service install` never writes `acl.toml`
-(`docs/adr/0017-acl-toml-not-written.md` 결정 1) — you still need to grant the
-peer(s) you expect an action there once the unit is running. Hand-writing a
-unit from the fences above remains a working fallback: `qsh service install`
-only manages the platforms and paths this page documents, and it writes
-exactly these files, so the two paths never disagree.
+registers, removes, and reports on the units above. `service install` never
+writes `acl.toml` (`docs/adr/0017-acl-toml-not-written.md` 결정 1), so you
+still grant the peers you expect their actions there. Hand-writing a unit
+from the fences above is a working fallback: `qsh service install` manages
+only the platforms and paths this page documents and writes exactly these
+files, so the two paths never disagree.
