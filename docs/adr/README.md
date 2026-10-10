@@ -32,7 +32,7 @@ QSH의 아키텍처/설계 결정을 기록한다. 각 ADR은 맥락, 결정, �
 | [0026](0026-ssh-key-import-scope.md) | SSH 키 가져오기(`--import-ssh-key`)는 v1에 넣지 않는다. P1으로 미루고 착수할 때의 모양만 지금 고정한다 | 승인됨 |
 | [0027](0027-doctor-fail-on-exit.md) | `qsh doctor --fail-on <warn\|error>`는 임계 이상 finding이 있으면 envelope을 그대로 둔 채 exit만 `1`로 바꾼다 | 승인됨 |
 | [0028](0028-tcp-tls-fallback.md) | TCP/TLS fallback은 `[transport].mode` = `quic`(기본) \| `tcp` \| `auto`로 고르고, TCP listener는 `tcp_bind`가 있을 때만 bind한다. mux는 `qsh-proto`의 자체 sans-IO codec이고 `docs/design/protocol.md` §16.2의 새 행이다. TCP 연결은 항상 resume으로 복구한다. M14 (a)의 추상은 공개 enum facade와 비공개 계약 trait이다 | 기각됨 (0043) |
-| [0029](0029-file-copy.md) | `qsh file get`/`qsh file put`(op `file.read`/`file.write`)로 파일 하나를 QUIC 위에서 원자적으로 옮기고, qsh 자신의 config·state·runtime 경로는 symlink를 해석한 정규 경로 기준으로 ACL 행과 무관하게 항상 거부한다. 재개 없음, BLAKE3 검증, 역방향 route 지원 | 제안됨 |
+| [0029](0029-file-copy.md) | `qsh file get`/`qsh file put`(op `file.read`/`file.write`)로 파일 하나를 QUIC 위에서 원자적으로 옮긴다. 원격 경로는 그 action을 준 `[[acl]]` 행의 `paths`(정규 경로 기준 성분 단위 prefix, 없으면 파일 권한 없음) 아래로만 허용하고, qsh 자신의 config·state·runtime 경로는 `paths`와 무관하게 항상 거부한다. 재개 없음, BLAKE3 검증, 역방향 route 지원 | 제안됨 |
 | [0030](0030-pin-direction.md) | pin에 방향 축(`direction = "both" \| "outbound" \| "inbound"`)을 더하고 handshake 역할로 pin 조회를 거른다. 필드가 없는 pin은 오늘처럼 양방향이고, §16.2 검증 경로의 의미 변경이 아니라 로컬 trust 입력의 변경이다. TOFU는 열지 않는다 | 제안됨 |
 | [0031](0031-cert-rotation-revocation.md) | revocation은 이 장비의 `trust.toml` `[[revoked]]` 목록으로만 강제하고 전파하지 않는다. trust 변경 뒤 장기 실행 프로세스는 2초 안에 기존 연결을 재검증해 닫는다. 키 rotation은 옛 키가 서명한 rotation 문서를 파일로 건네고 `trust rotate`로 pin 교체와 옛 키 revoke를 한 번에 한다 | 제안됨 |
 | [0032](0032-service-manager-activation.md) | `qsh service`는 명시적 플래그가 있을 때만 서비스 매니저를 부르고, 이미 떠 있는 유닛은 재시작하지 않는다 | 제안됨 |
