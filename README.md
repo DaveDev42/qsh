@@ -1,71 +1,49 @@
 # QSH
 
 QSH is a remote shell that speaks QUIC and connects straight to the machine
-you name. No relay, no broker, no account.
+you name. No relay, no broker, no account. One binary, `qsh`, is both ends: it
+serves, and it connects.
 
-SSH ties a PTY session's lifetime to the lifetime of the connection carrying
-it, so an IP change, a laptop sleep, or a switch from Wi-Fi to tethering
-kills the shell. QSH separates the two. The shell keeps running on the host,
-and the client reconnects and resumes the same session instead of starting a
-new one. Every connection is a direct QUIC connection to a hostname or IP
-you supply, authenticated by TLS 1.3 mutual authentication against pinned
-certificates.
+## Why it exists
 
-One binary (`qsh`) is both ends: it serves, and it connects.
+SSH ties a shell's lifetime to the TCP connection carrying it. Change IP
+address, close the laptop lid, or move from Wi-Fi to tethering, and the
+connection dies and takes the shell with it.
 
-## Status
+QSH keeps the two lifetimes apart. The shell runs under the host's `qsh
+serve` process, and the client's connection is only a way to reach it. When
+the connection drops or the client's address changes, the client reconnects
+and resumes the same session, with the output it missed replayed, instead of
+starting a new shell. A change of network that QUIC can migrate across does
+not even interrupt the connection. Nothing sits in the middle: every
+connection is a direct QUIC connection to a hostname or IP you supply,
+authenticated by TLS 1.3 mutual authentication against certificates you have
+pinned.
 
-Version 0.4.3. **Not for production use.** The independent review of the
-protocol and key lifecycle that [docs/PRD.md](docs/PRD.md) §15 requires
-has not been contracted, and the wire-format freeze waits on that same
-decision. Several campaigns that a person runs by hand are also still open:
-the clean-VM install campaign, the connect-time stopwatch rounds, and the
-real-device mobility round. [Roadmap](#roadmap) lists them by milestone;
-`docs/ROADMAP.md` has the acceptance criteria and
-[RELEASE-NOTES.md](RELEASE-NOTES.md) says what each tag ships.
+Beyond the shell, the same connection carries one-shot commands (`qsh exec`),
+port forwards (`-L`, `-R`, and a SOCKS5 proxy with `-D`), reverse connections
+for hosts behind NAT, and a JSON CLI contract (`qsh.cli/v1`) for scripts and
+agents.
 
-What works end to end today:
+QSH needs UDP. There is no TCP fallback, by design, so a network that blocks
+UDP cannot connect (see [Known limitations](#known-limitations)).
 
-- `qsh exec host -- cmd`, in human mode or as a single `qsh.cli/v1` JSON
-  envelope with the remote exit code, stdout and stderr.
-- Interactive PTY sessions: open one with `qsh dave@host`, detach with `~d`,
-  reattach later with `qsh attach`, and resume across a connection that
-  dropped or moved to a different address.
-- Reverse connections, so a host behind NAT dials out to a controller
-  (`qsh listen` / `qsh serve --to`) and you attach to it through that
-  controller. The target reconnects with backoff when the link dies.
-- `-L`, `-R` and `-D` (SOCKS5) forwards over forward and reverse
-  connections, plus the standalone `qsh tunnel open`/`qsh tunnels`/
-  `qsh tunnel close` machine-mode commands. `--supervise` re-establishes a
-  tunnel after a lost connection.
-- A default-deny ACL (`acl.toml`) and a fail-closed audit log gate every
-  operation a remote peer requests. See [Security
-  posture](#security-posture).
-- A stable `--json`/`--jsonl` CLI contract (`qsh.cli/v1`) for agents and
-  scripts. The built-in `qsh mcp` server was retired
-  ([ADR-0011](docs/adr/0011-remove-mcp-adapter.md)); run a remote stdio MCP
-  server through `qsh exec host -- <server>` instead.
-- Four ways to pin a peer: trust-on-first-connect, `qsh pair invite`/
-  `qsh pair accept` with a one-time code, a private CA (`qsh cert init`/
-  `qsh cert issue`) so a fleet trusts one root, or exchanging certificate
-  files (`qsh identity export`, `qsh trust add --cert-file`, `qsh trust
-  add-ca`). `qsh trust rename` changes a pinned peer's local name, and
-  `hosts.toml` layers addresses and login names on top. See
-  [First run](#first-run).
-- `qsh setup` walks one machine through a role; see [Guided
-  setup](#guided-setup-qsh-setup).
-- `qsh service install|uninstall|status` writes and removes the platform
-  unit that keeps a listener running: a user LaunchAgent on macOS, a systemd
-  user unit on Linux. See [docs/deploy/service.md](docs/deploy/service.md).
-- `qsh doctor` diagnoses one deployment (identity, ACL policy, audit log,
-  trust store, clock, network reachability) as a machine-readable report.
-  `qsh schema --json` serves this build's JSON contract, and `qsh
-  capabilities` reports what the build supports or, given a pinned host, what
-  was negotiated with that peer.
+**Status.** Version 0.4.3, not for production use. The independent review of
+the protocol and key lifecycle that [docs/PRD.md](docs/PRD.md) §15 requires
+has not been contracted, and the wire-format freeze waits on that decision.
+Several campaigns that a person runs by hand are also still open; see
+[Project status](#project-status).
 
-QSH needs UDP. There is no TCP fallback yet, so a network that blocks UDP
-cannot connect (see [Known limitations](#known-limitations)).
+## Contents
 
+- [Install](#install): prebuilt binaries, Homebrew, or from source.
+- [First run](#first-run): pin two machines to each other and open a shell.
+- [Guided setup](#guided-setup-qsh-setup): the same steps, driven by `qsh setup`.
+- [Everyday use](#everyday-use): commands, detach and reattach, forwards, reverse connections.
+- [Automation](#automation): the JSON CLI for scripts and agents.
+- [Security posture](#security-posture): authentication, the ACL, the audit log.
+- [Known limitations](#known-limitations), including that QSH needs UDP.
+- [Project status](#project-status), [Documents](#documents), [Development](#development).
 
 ## Install
 
@@ -88,17 +66,12 @@ stops. The checksum is an integrity check against a bad download, not a
 signature. When the GitHub CLI is installed and logged in, the script also
 verifies the archive's build provenance (below).
 
-On macOS the release workflow signs and notarizes the binaries only when the
-release is cut with Apple credentials configured, and no published release
-has been cut that way yet. Check what you have with `codesign -dv
---verbose=4 $(which qsh)`; [Known limitations](#known-limitations) explains
-how to read the result and what it means for the firewall prompt. The
-installer clears `com.apple.quarantine` after it installs (`scripts/install.sh`),
-so that path does not consult Gatekeeper. A manual download does, and
-`spctl -a -vvv -t execute $(which qsh)` shows its verdict. The notarization
-ticket is not stapled (`xcrun stapler` handles `.app`, `.dmg` and `.pkg`, and
-qsh ships a bare executable in a `.tar.gz`), so Gatekeeper confirms online and
-a first run with no route to Apple is not guaranteed to be admitted.
+On macOS, a binary from the curl installer is ad-hoc signed unless the
+release was cut with Apple credentials, and no published release has been.
+[Known limitations](#known-limitations) explains how to check what you have
+and what it means for the firewall prompt. The installer clears
+`com.apple.quarantine` after it installs (`scripts/install.sh`), so that path
+does not consult Gatekeeper; a manual download does.
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -305,7 +278,7 @@ that `qsh trust add --cert-file` reads back into a fingerprint pin
 over SSH with `--cert-file -`.
 
 From here, `qsh hosts` lists what this machine can reach and `qsh sessions
-box` lists what is alive on the host. [Quick start](#quick-start) covers
+box` lists what is alive on the host. [Everyday use](#everyday-use) covers
 detach/reattach, port forwards and reverse connections. To skip retyping
 `user@` or to move an address without touching the trust store, add the
 name to `hosts.toml` by hand, next to `trust.toml`:
@@ -367,7 +340,7 @@ ACL step with this notice:
 restart serve/listen — acl.toml is only read once at process start.
 ```
 
-## Quick start
+## Everyday use
 
 Everything below assumes the two machines from [First run](#first-run):
 `box` is the host running `qsh serve`, `laptop` is the client, and each has
@@ -563,6 +536,45 @@ above 90 s), or the controller refuses to start with a config error. The
 limit on how many addresses a single reconnect attempt tries is in
 `docs/CLI.md` §6.13.
 
+## Automation
+
+Every command takes `--json` for one result envelope, or `--jsonl` for a
+stream of events from commands that run long. In either mode stdout carries
+only JSON, diagnostics go to stderr, and nothing prompts: a missing input
+fails with `INVALID_ARGUMENT`, and an unpinned peer fails with
+`TRUST_REQUIRED`.
+
+```bash
+qsh hosts --json
+qsh exec box --json -- uname -a
+```
+
+A success is `{"schema":"qsh.cli/v1","request_id":…,"command":"exec.run","ok":true,"data":{…}}`.
+A failure has `"ok":false` and an `error` object with `code`, `message`,
+`retryable` and `details`. Scripts should branch on `code` and `retryable`,
+never on `message`. Byte payloads are Base64, times are UTC RFC 3339, and
+durations are integer milliseconds.
+
+Exit codes are `0` for success, `2` for a usage error and `255` for a QSH
+runtime failure. `qsh exec` returns the remote command's own code instead
+(`0` to `254`; a remote `255` is clamped to `254`), and the JSON
+`remote_exit_code` always holds the true value. `qsh doctor --fail-on`
+returns `1` when it finds something at or above the threshold.
+
+The contract is additive-only. New optional fields can appear within
+`qsh.cli/v1` and `qsh.event/v1`, so a client must ignore fields it does not
+know; a removal or a type change would need a `/v2`. `qsh schema --json`
+serves the contract of the build you are running, and `qsh capabilities`
+reports what the build supports or, given a pinned host, what was
+negotiated with that peer. `qsh doctor --json` reports the state of a
+deployment (identity, ACL policy, audit log, trust store, clock, network
+reachability) in a form a monitor can read.
+
+The built-in `qsh mcp` server was retired ([ADR-0011](docs/adr/0011-remove-mcp-adapter.md)).
+To give an agent a remote stdio MCP server, run it through
+`qsh exec host -- <server>`. The full contract is in
+[docs/CLI.md](docs/CLI.md) §2 to §4 and §6.
+
 ## Security posture
 
 Every connection is QUIC with TLS 1.3 mutual authentication. Both ends
@@ -572,7 +584,7 @@ handshake, before a session, tunnel, or listener exists. The one narrow,
 time-boxed exception is `qsh pair invite`/`qsh pair accept`: while a
 freshly minted invite is live, an otherwise-unpinned certificate is admitted
 into a dedicated pairing exchange that can do nothing but verify possession
-of the invite's secret and, on success, pin — it never reaches a session,
+of the invite's secret and, on success, pin. It never reaches a session,
 tunnel, or listener path (`docs/design/protocol.md` §15). The pinning side names the peer explicitly with `--as <name>` on `pair invite`/`pair accept`; without it, the peer's own self-reported name is used.
 
 Authorization is `acl.toml`: a small, principal-scoped rule file at
@@ -621,84 +633,16 @@ host by a permissions slip has no way back in. Windows ACL checking is out
 of scope. Pin only devices you would hand a shell to, and write down what
 you want each of them to be able to do.
 
-## Documents
-
-- [Product Requirements](docs/PRD.md)
-- [CLI and JSON Contract](docs/CLI.md)
-- [Roadmap: milestones, scope and acceptance criteria](docs/ROADMAP.md)
-- [Wire Protocol Design](docs/design/protocol.md)
-- [Architecture Design](docs/design/architecture.md)
-- [Test Strategy](docs/design/testing.md)
-- [Threat Model](docs/design/threat-model.md)
-- [Architecture Decision Records](docs/adr/)
-
-`docs/PRD.md` and `docs/CLI.md` are binding: they define behavior, the wire
-format, and the JSON envelope shape. `qsh.cli/v1` and `qsh.event/v1` are
-additive-only.
-
-## Architecture
-
-```
-qsh-cli (bin `qsh`)  →  qsh-core  →  qsh-transport  →  qsh-proto
-        └─────────── contract types ───────────────────►
-```
-
-- `qsh-proto`: sans-IO wire contract, framing, types, events, error codes.
-  This is the fuzz surface (`fuzz/` also drives the `qsh-core` broker
-  state machine through `broker_ops`).
-- `qsh-transport`: QUIC glue over quinn and rustls. Owns the connection,
-  knows nothing about sessions or ACL.
-- `qsh-core`: all business logic. Typed operation layer, session broker,
-  PTY, ACL, identity and trust, config.
-- `qsh-cli`: thin frontend. Argument parsing, human/JSON/JSONL rendering,
-  and the interactive TUI.
-- `qsh-testkit`: shared test harness with a loopback transport, a chaos
-  proxy, and fixtures.
-
-`qsh-cli` depends on `qsh-proto` for contract types and never on
-`qsh-transport`. The full allowed-dependency matrix is enforced by
-`cargo run -p xtask -- arch`, and a violation fails CI.
-
-The binary is `qsh`; the Cargo package is `qsh-cli`
-([ADR-0006](docs/adr/0006-product-name-and-crate-name.md)).
-
-## Roadmap
-
-One line per milestone; scope and acceptance criteria are in
-[docs/ROADMAP.md](docs/ROADMAP.md).
-
-| # | Milestone | Status |
-|---|---|---|
-| M0 | Decisions, workspace scaffold, CI | Done |
-| M1 | Walking skeleton (`init`/`serve`/`exec --json`, mTLS, JSON envelope) | Done |
-| M2 | Session broker, PTY, migration and resume | Done |
-| M3 | Reverse connections (`listen`/`serve --to`/`attach`) | Done |
-| M4 | Port forwarding (`-L`/`-R`) | Done |
-| M5 | ACL and audit | Done |
-| M6 | MCP adapter | Done, then retired (ADR-0011) |
-| M7 | Trust UX, host profiles, `doctor` | Features done; stopwatch campaign open |
-| M8 | Hardening (fuzz, soak, mobility) | Code done; mobility campaign, wire freeze and security review open |
-| M9 | Human-facing surface (naming, pairing, service install) | Features done; stopwatch re-measurement open |
-| M10 | Release (installers, Homebrew, notarization, musl, provenance) | Pipeline done; clean-VM campaign open |
-| M11 | Issue follow-ups and ACL visibility | Features done; field observation open |
-| M12 | Supervised tunnels and `qsh setup` | Done in `v0.4.0`; campaign rounds open |
-| M13 | Measurement and release groundwork | Done (2026-10-08); aarch64 musl old-glibc check open |
-| M14 | TCP/TLS fallback | Waiting on ADR-0028 (proposed); transport abstraction landed |
-| M15–M19 | Rest of P1 | Not started |
-
-The Homebrew tap (`DaveDev42/tap`) and the release workflow's auto-bump job
-have run on every tag since `v0.2.0`. The first crates.io push waits on the
-clean-VM campaign.
-
 ## Known limitations
 
 Some of these are MVP scope decisions, some are unfinished work.
 
 - No TCP fallback. QSH runs only over QUIC, which is UDP, so a network that
   blocks or drops UDP (some corporate and hotel networks) cannot connect.
-  `qsh doctor` reports a blocked UDP egress. A TCP/TLS fallback is proposed
-  in [ADR-0028](docs/adr/0028-tcp-tls-fallback.md) and is not accepted or
-  built.
+  `qsh doctor` reports a blocked UDP egress. This is a scope decision, not
+  pending work ([ADR-0043](docs/adr/0043-no-tcp-fallback.md)): on such a
+  network use SSH, or run QSH inside an overlay such as WireGuard or
+  Tailscale that can carry UDP.
 - Sessions die with the listener process. A session lives only as long as
   the `qsh serve` or `qsh serve --to` process that opened it, so a restart
   ends every detached session on it; it is not a resume point. A client that
@@ -889,6 +833,79 @@ Some of these are MVP scope decisions, some are unfinished work.
   (qsh's SPKI hash and the `ssh-keygen -lf` hash); only the qsh one goes
   into `trust.toml` or `acl.toml`.
 
+## Project status
+
+Milestone by milestone, with scope and acceptance criteria in
+[docs/ROADMAP.md](docs/ROADMAP.md) and what each tag ships in
+[RELEASE-NOTES.md](RELEASE-NOTES.md). Four campaigns that a person runs by
+hand are still open: the clean-VM install campaign, the connect-time
+stopwatch rounds, the real-device mobility round, and the aarch64 musl
+old-glibc check.
+
+| # | Milestone | Status |
+|---|---|---|
+| M0 | Decisions, workspace scaffold, CI | Done |
+| M1 | Walking skeleton (`init`/`serve`/`exec --json`, mTLS, JSON envelope) | Done |
+| M2 | Session broker, PTY, migration and resume | Done |
+| M3 | Reverse connections (`listen`/`serve --to`/`attach`) | Done |
+| M4 | Port forwarding (`-L`/`-R`) | Done |
+| M5 | ACL and audit | Done |
+| M6 | MCP adapter | Done, then retired (ADR-0011) |
+| M7 | Trust UX, host profiles, `doctor` | Features done; stopwatch campaign open |
+| M8 | Hardening (fuzz, soak, mobility) | Code done; mobility campaign, wire freeze and security review open |
+| M9 | Human-facing surface (naming, pairing, service install) | Features done; stopwatch re-measurement open |
+| M10 | Release (installers, Homebrew, notarization, musl, provenance) | Pipeline done; clean-VM campaign open |
+| M11 | Issue follow-ups and ACL visibility | Features done; field observation open |
+| M12 | Supervised tunnels and `qsh setup` | Done in `v0.4.0`; campaign rounds open |
+| M13 | Measurement and release groundwork | Done (2026-10-08); aarch64 musl old-glibc check open |
+| M14 | TCP/TLS fallback | Withdrawn (ADR-0043); the transport abstraction stays |
+| M15–M19 | Rest of P1 | Design records drafted, awaiting approval; README rewrite (M17 b) done |
+
+The Homebrew tap (`DaveDev42/tap`) and the release workflow's auto-bump job
+have run on every tag since `v0.2.0`. The first crates.io push waits on the
+clean-VM campaign.
+
+## Documents
+
+- [Product Requirements](docs/PRD.md)
+- [CLI and JSON Contract](docs/CLI.md)
+- [Roadmap: milestones, scope and acceptance criteria](docs/ROADMAP.md)
+- [Wire Protocol Design](docs/design/protocol.md)
+- [Architecture Design](docs/design/architecture.md)
+- [Test Strategy](docs/design/testing.md)
+- [Threat Model](docs/design/threat-model.md)
+- [Architecture Decision Records](docs/adr/)
+
+`docs/PRD.md` and `docs/CLI.md` are binding: they define behavior, the wire
+format, and the JSON envelope shape. `qsh.cli/v1` and `qsh.event/v1` are
+additive-only.
+
+## Architecture
+
+```
+qsh-cli (bin `qsh`)  →  qsh-core  →  qsh-transport  →  qsh-proto
+        └─────────── contract types ───────────────────►
+```
+
+- `qsh-proto`: sans-IO wire contract, framing, types, events, error codes.
+  This is the fuzz surface (`fuzz/` also drives the `qsh-core` broker
+  state machine through `broker_ops`).
+- `qsh-transport`: QUIC glue over quinn and rustls. Owns the connection,
+  knows nothing about sessions or ACL.
+- `qsh-core`: all business logic. Typed operation layer, session broker,
+  PTY, ACL, identity and trust, config.
+- `qsh-cli`: thin frontend. Argument parsing, human/JSON/JSONL rendering,
+  and the interactive TUI.
+- `qsh-testkit`: shared test harness with a loopback transport, a chaos
+  proxy, and fixtures.
+
+`qsh-cli` depends on `qsh-proto` for contract types and never on
+`qsh-transport`. The full allowed-dependency matrix is enforced by
+`cargo run -p xtask -- arch`, and a violation fails CI.
+
+The binary is `qsh`; the Cargo package is `qsh-cli`
+([ADR-0006](docs/adr/0006-product-name-and-crate-name.md)).
+
 ## Product boundary
 
 QSH owns secure sessions, PTY lifecycle, reconnect, command execution and
@@ -913,4 +930,4 @@ explains which tests each layer owes.
 
 ## License
 
-MIT OR Apache-2.0 — see `LICENSE-MIT` and `LICENSE-APACHE`.
+MIT OR Apache-2.0, see `LICENSE-MIT` and `LICENSE-APACHE`.
