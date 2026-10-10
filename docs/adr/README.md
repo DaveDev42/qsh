@@ -40,10 +40,8 @@ QSH의 아키텍처/설계 결정을 기록한다. 각 ADR은 맥락, 결정, �
 | [0041](0041-reverse-registration-detection-budget.md) | 역방향 등록 연결의 PathWatch 감지 예산을 대화형 attach의 2초 상한에서 분리하고 기본 창을 약 5초로 둔다. attach 기본값은 그대로이고 역방향 등록은 `min_dead_after` 4250ms·`strikes` 3, 재정의 키 `reverse_min_dead_after_ms`·`reverse_strikes`, 상한 5초다(ADR-0021 결정 4의 기본값과 결과 절 상한을 역방향에 한해 개정) | 승인됨 |
 | [0042](0042-watch-self-delay-and-quick-loss-backoff.md) | PathWatch는 자기 tick의 지연을 침묵에서 덜어내고(`late >= probe_interval`이면 `last_inbound`를 앞으로 밀고 그 tick은 사망을 선언하지 못한다) 판정 줄에 `tick_gap_ms`를 싣는다. 역방향 target은 60초 안에 끝난 등록이 연속되면 재dial 지연을 두 번째부터 2배씩 8초까지 늘린다. `cause` 분류를 보정한다(`Reset`은 `peer_closed`, `Hello` 시간 초과는 `dial_timeout`). 설정 키·wire 변경 없음 | 승인됨 |
 
-P1 계획(`docs/ROADMAP.md` §5)이 0027~0035를 예약했고 예약 밖의 번호는 0036(stateless reset key), 0037(정체 터널 스트림), 0038(`setup client`의 `complete`), 0039(DoH 강제 모드), 0040(ECH 정책), 0041(역방향 등록 감지 예산), 0042(감시 자기 지연과 빠른 유실 backoff)가 받았으므로 다음 새 번호는 0043이다. 조건부로 서는 ADR은 설 때 그 번호부터 쓴다.
+P1 계획(`docs/ROADMAP.md` §5)이 0029~0035를 예약했다. 예약 밖의 번호는 0036(stateless reset key), 0037(정체 터널 스트림), 0038(`setup client`의 `complete`), 0039(DoH 강제 모드), 0040(ECH 정책), 0041(역방향 등록 감지 예산), 0042(감시 자기 지연과 빠른 유실 backoff)가 받았으므로 다음 새 번호는 0043이다. 조건부로 서는 ADR은 설 때 그 번호부터 쓴다.
 
-- 0027 `doctor --fail-on`의 exit 규칙(M13). 위 표에 `승인됨`으로 올랐다
-- 0028 TCP/TLS fallback(M14). 위 표에 `제안됨`으로 올랐다
 - 0029 파일 복사(M15)
 - 0030 pin 방향(M16)
 - 0031 cert rotation·revocation(M16)
