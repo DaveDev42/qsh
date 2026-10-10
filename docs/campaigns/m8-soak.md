@@ -114,9 +114,9 @@ main이 Dave-Windows-WSL 단독 점유에서 돌린 24h 실측(이 워크플로 
 | 세션 정지(SESSION_STALLED) | 한 세션의 write→echo 한 라운드가 `SESSION_ROUND_DEADLINE`(5s)을 넘기면 그 세션을 끊고 카운트한다. 카운트가 1 이상이면 위반 | soak.rs (assert) + summarize.py (19열 CSV의 `dead_sessions` 열, §4.1). 10열 CSV에는 이 열이 없어 summarize.py가 판단하지 않는다 |
 | dial 소진(DIAL_EXHAUSTED) | 사이클 교체 dial이 3회 시도를 다 쓰고도 실패한 횟수가 1 이상이면 위반. 회차는 멈추지 않고 drain까지 가서 CSV를 닫는다 | soak.rs (assert) + summarize.py (19열 CSV의 `dial_exhausted` 열, §4.1). 10열 CSV에서는 판단하지 않는다 |
 
-`docs/PRD.md:286`("Idle listener 메모리 30 MB 이하 **목표**")와
-`docs/ROADMAP.md:112`("Idle listener RSS ≤ 30 MB", DoD 2 본문)가 이 30 MiB의
-상류다. 세션당 8 MiB는 `docs/PRD.md:287`의 세션당 replay buffer 설정값에서
+`docs/PRD.md` §13("Idle listener 메모리 30 MB 이하 **목표**")와
+`docs/ROADMAP.md` M8 DoD 2("idle listener ≤30MB")가 이 30 MiB의
+상류다. 세션당 8 MiB는 `docs/PRD.md` §13의 세션당 replay buffer 설정값에서
 빌린 것이지 실측된 RSS 증분이 아니다 — `m8-adversarial-load.md` §3와 같은
 출처, 같은 유보.
 

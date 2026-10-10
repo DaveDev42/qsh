@@ -11,7 +11,7 @@ mod tui;
 // arena high-water. musl, macOS and Windows use the system allocator.
 //
 // `malloc_conf` pins the fixed floor so it fits the PRD 30 MiB idle bound
-// (docs/PRD.md:286). `narenas:1` caps arena count at one: jemalloc otherwise
+// (docs/PRD.md §13). `narenas:1` caps arena count at one: jemalloc otherwise
 // scales it to the *detected* CPU count, which on a CI/container host is the
 // host's, not the cgroup's — dozens of arenas whose metadata alone overran the
 // bound. One arena also holds the fixed floor as low as jemalloc goes, which

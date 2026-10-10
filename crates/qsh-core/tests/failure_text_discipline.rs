@@ -1,5 +1,5 @@
 //! The "observation, impact, next command" discipline for the repo's
-//! failure wordings (`docs/ROADMAP.md:123`'s eight-topic list; ADR-0017
+//! failure wordings (`docs/ROADMAP.md` M9 scope (i)'s eight-topic list; ADR-0017
 //! 결정 4's exemption axes; ADR-0014 결정 5/9's port/bind wordings).
 //!
 //! Scope: **T1-T7, seven topics**, plus a separate `HOST_NOT_FOUND(i)`/
@@ -487,7 +487,7 @@ fn t1_observation_slice_guards_the_assuming_port_substring() {
 const EXCLUDED: &[(&str, &str)] = &[
     (
         "원격으로 나가는 페어링 실패 문면",
-        "ADR-0017 결정 4 (`docs/adr/0017-acl-toml-not-written.md:38`): \
+        "ADR-0017 결정 4: \
          `PairingError::as_wire_error`(`crates/qsh-core/src/pairing.rs:176-187`) \
          의 매핑 — `NoMatch → AUTH_FAILED`, `Expired → TRUST_REQUIRED`, \
          `AlreadyConsumed`·`PinCollision → SESSION_CONFLICT` — 과 \

@@ -267,7 +267,7 @@ pub(super) fn resolve_forward(
     // doc, above) — the `(None, None)` arm is unreachable because the
     // `address` match above already returned `None` for that case.
     //
-    // 정규화 **후** 비교다(ADR-0014 결정 4 `:37`): `hosts.toml`이 `mac:4433`,
+    // 정규화 **후** 비교다(ADR-0014 결정 4): `hosts.toml`이 `mac:4433`,
     // `trust.toml`이 `mac`처럼 표기만 다르고 같은 주소를 가리키는 경우를
     // `"hosts"`(=redirect)로 보고하면 운영자에게 거짓 신호를 준다. 두 주소의
     // 비교는 기본 포트를 채운 뒤에 한다 — 포트 표기만 다른 같은 주소는

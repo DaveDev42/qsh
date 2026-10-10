@@ -1577,7 +1577,7 @@ fn resolve_peer_address_leaves_an_at_free_host_byte_identical() {
 
 /// M9 plan Step 2 (c) (b9a621b)'s 4 combinations, plus every other real
 /// branch the resolver answers (M9 plan Step 2 (a) (b9a621b), ADR-0013
-/// decision 8 at `docs/adr/0013-cert-file-exchange.md:29`). Each error
+/// decision 8). Each error
 /// row pins the exact code *and* message, not merely
 /// `ErrorCode::InvalidArgument` — two different refusals sharing a
 /// substring (both mention `--code-stdin`) would otherwise pass under

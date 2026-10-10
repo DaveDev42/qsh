@@ -992,7 +992,7 @@ fn ca_policy_example_row_names_no_specific_peer_and_sets_auth_path_ca() {
     assert!(!listen_example.contains("exec.run"), "{listen_example:?}");
 }
 
-// `PinnedPrincipalIndex` (ADR-0017 결정 2 `:21`'s matching
+// `PinnedPrincipalIndex` (ADR-0017 결정 2's matching
 // rule reused verbatim): the pairing-pin notice's "does an `[[acl]]` row
 // already name this principal" answer. Previously untested — a mutation
 // that deleted the `auth_path == AuthPath::Pin` filter left the whole

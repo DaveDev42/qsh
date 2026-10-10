@@ -410,7 +410,7 @@ pub const SYSTEMD_LINGER_DISABLED: Diagnostic = Diagnostic {
 /// ([`probe::service_unit_registered`]) — unconditional once true, the
 /// same "structural fact, not a misconfiguration" shape
 /// [`TRUST_REMOVE_SCOPE`] already has: a user LaunchAgent has no
-/// headless equivalent (`docs/deploy/service.md:94-98`), so an operator
+/// headless equivalent (`docs/deploy/service.md`, "launchd (macOS)" section), so an operator
 /// who registered one should always see this spelled out, not only once
 /// something goes wrong.
 pub const LAUNCHAGENT_SESSION_SCOPED: Diagnostic = Diagnostic {

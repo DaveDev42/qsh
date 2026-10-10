@@ -852,8 +852,7 @@ fn a_piped_stdin_forwards_everything_verbatim() {
     );
 }
 
-/// M9 plan Step 2 (b9a621b), ADR-0013 decision 8
-/// (`docs/adr/0013-cert-file-exchange.md:29`): `qsh trust accept`'s
+/// M9 plan Step 2 (b9a621b), ADR-0013 decision 8: `qsh trust accept`'s
 /// invite-code prompt genuinely suppresses echo on a real terminal, and
 /// machine mode refuses instead of opening it even when stdin *is* a
 /// terminal. Neither half is reachable from `trust_pairing_live.rs`'s

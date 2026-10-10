@@ -47,7 +47,7 @@ nix = { workspace = true, features = ["term", "ioctl", "signal"] }
 # The allocator's fixed floor is pinned by malloc_conf in main.rs (narenas):
 # jemalloc's default arena count follows the *detected* CPU count, which on a
 # CI/container host is the host's, not the cgroup's — dozens of arenas whose
-# metadata alone overran the PRD 30 MiB idle bound (docs/PRD.md:286).
+# metadata alone overran the PRD 30 MiB idle bound (docs/PRD.md §13).
 # Narrowed to glibc: `tikv-jemalloc-sys` lists musl in its own
 # `NO_BG_THREAD_TARGETS` (src/env.rs) and warns at build time that
 # `background_threads_runtime_support` is unsupported there, while still

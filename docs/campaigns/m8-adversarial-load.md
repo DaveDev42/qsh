@@ -15,7 +15,7 @@ load.yml이 고정한 N 이상에서 RSS·fd·echo p95 bound가 얼마나 여유
 두지 않는다는 것과 같은 이유다.
 
 M2 mobility 캠페인과 마찬가지로 이 문서는 **합격/불합격 게이트가 아니다** —
-실패 회차가 M8을 막지 않는다. DoD 5(`docs/ROADMAP.md:113`) 자체의 판정은
+실패 회차가 M8을 막지 않는다. DoD 5(`docs/ROADMAP.md` M8) 자체의 판정은
 main이 Dave-Windows-WSL에서 돌린 실측이
 닫으며, load.yml은 그 뒤로도 계속 도는 회귀 감시자다.
 
@@ -43,8 +43,8 @@ main이 Dave-Windows-WSL에서 돌린 실측이
 
 ## 3. 사전 정의된 합격/불합격 기준 (실행 전에 고정)
 
-`docs/PRD.md:286`("Idle listener 메모리: 30MB 이하 **목표**")와
-`docs/ROADMAP.md:112`("Idle listener RSS ≤ 30MB")가 이 수치의 상류다. PRD가
+`docs/PRD.md` §13("Idle listener 메모리: 30MB 이하 **목표**")와
+`docs/ROADMAP.md` M8 DoD 2("idle listener ≤30MB")가 이 수치의 상류다. PRD가
 "목표"라고 적은 것을 그대로 받아, 실패했을 때 코드가 아니라 임계 자체를
 의심할 여지를 열어 둔다.
 

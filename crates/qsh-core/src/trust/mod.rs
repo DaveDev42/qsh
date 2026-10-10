@@ -116,7 +116,7 @@ pub struct NormalizedAddress {
 /// Port *range* is not this function's business either (M9 plan §4.1 (b9a621b)
 /// #12): `"host:0"` and `"host:99999"` come back untouched and fail later,
 /// at dial time, exactly as they do today. The `1..=65535` rule belongs to
-/// the `-L`/`-R` spec grammar alone (`docs/CLI.md:482`,
+/// the `-L`/`-R` spec grammar alone (`docs/CLI.md` §6.9 "Spec grammar",
 /// `qsh_proto::wire::parse_forward_spec`).
 pub fn normalize_peer_address(address: &str) -> NormalizedAddress {
     let as_given = || NormalizedAddress {
