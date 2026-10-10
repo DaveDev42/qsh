@@ -13,7 +13,7 @@ QSH is a QUIC-based direct-connect remote shell (single Rust binary `qsh`) that 
 
 ## Document map
 
-- `PLAN.md` — execution plan for the current milestone, or a placeholder when no milestone is open; the file's title says which. Replaced wholesale when a milestone closes; the superseded plan moves to `docs/history/`.
+- `PLAN.md` — execution plan for the current milestone, or a placeholder when no milestone is open; the file's title says which. Replaced wholesale when a milestone closes; the superseded plan is deleted (git history keeps it) and the `docs/ROADMAP.md` closing note records the commit that last held it.
 - `RELEASE-NOTES.md` — one section per release tag, what each tag ships, what is signed and what is not
 - `docs/PRD.md` — product requirements (binding)
 - `docs/CLI.md` — CLI / JSON contract (binding)
@@ -26,7 +26,7 @@ QSH is a QUIC-based direct-connect remote shell (single Rust binary `qsh`) that 
 - `docs/deploy/service.md` — systemd/launchd unit examples (`qsh service install` itself is M9)
 - `docs/deploy/release-secrets.md` — names, issuance and rotation of the release workflow's secrets (never values)
 - `docs/man/` — generated man pages; regenerate with `cargo xtask man`, never hand-edit a `.1` file
-- `docs/campaigns/` — manual campaigns a person runs and records: `m2-mobility`, `m6-mcp`, `m7-stopwatch`, `m8-fuzz`, `m8-soak`, `m8-adversarial-load`, `m9-stopwatch`, `m10-clean-vm`, `p1-setup-stopwatch`, `p1-supervise-wake`, `p1-aarch64-musl`
+- `docs/campaigns/` — manual campaigns a person runs and records: `m2-mobility`, `m7-stopwatch`, `m8-fuzz`, `m8-soak`, `m8-adversarial-load`, `m9-stopwatch`, `m10-clean-vm`, `p1-setup-stopwatch`, `p1-supervise-wake`, `p1-aarch64-musl`
 - `scripts/README.md` — installer and campaign harnesses under `scripts/`
 - `fuzz/README.md` — the nineteen cargo-fuzz targets, why `fuzz/` sits outside the workspace, how to run a campaign
 - `docs/adr/` — architecture decision records, indexed with their status in `docs/adr/README.md`. Only an accepted (`승인됨`) ADR is settled; proposed (`제안됨`) and reserved (`예약됨`) ones are not.
@@ -86,6 +86,6 @@ If a change requires putting logic in `qsh-cli` to make something work, that's a
 ## Conventions
 
 - Language: English in `README.md`, `CLAUDE.md`, `RELEASE-NOTES.md`, `scripts/README.md`, `fuzz/README.md`, and all code comments; Korean in `docs/**`, `PLAN.md`, `scripts/stopwatch/README.md`, and commit messages (`type(scope): 요약 — 상세`).
-- Cite durable anchors only: an ADR, a `docs/design/*` or `docs/campaigns/*` section, `docs/CLI.md` §N, a test name, a commit hash, or a step of a frozen plan under `docs/history/` (for example `docs/history/m3-plan.md` Step 5; those files never change). Never a `PLAN.md` step number (steps are renumbered when a milestone rolls) and never a session scratchpad file (`BRIEF-*`, `REVIEW-*`, `ARBITRATION-*`, `PROGRESS-*`), none of which exist in this repository.
+- Cite durable anchors only: an ADR, a `docs/design/*` or `docs/campaigns/*` section, `docs/CLI.md` §N, a test name, or a commit hash. A step of a superseded plan is cited with the commit that held it, for example `M3 plan Step 5 (2473c88)`. Never a `PLAN.md` step number (steps are renumbered when a milestone rolls) and never a session scratchpad file (`BRIEF-*`, `REVIEW-*`, `ARBITRATION-*`, `PROGRESS-*`), none of which exist in this repository.
 - Once a source file passes roughly 800 lines, its inline `#[cfg(test)]` module moves to a sibling `tests.rs` reached by `mod tests;`; `crates/qsh-core/src/pty/` is the pattern to copy.
 - `PLAN.md` and `docs/ROADMAP.md` are edited by the main session only.
